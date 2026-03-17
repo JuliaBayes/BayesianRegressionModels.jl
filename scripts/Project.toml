@@ -1,9 +1,10 @@
 [deps]
 BayesianRegressionModels = "cdd3e328-398d-47a6-a87b-6047aaf4b4bc"
-CatalogServer = "a1b2c3d4-0000-0000-0000-000000000001"
 CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
+CatalogServer = "a1b2c3d4-0000-0000-0000-000000000001"
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
 FlexiChains = "4a37a8b9-6e57-4b92-8664-298d46e639f7"
 Oxygen = "df9a0d86-3283-4920-82dc-4555fc0d1d8b"
+Turing = "fce5fe82-541a-59a6-adf8-730c64b5f9a0"
 YAML = "ddb6d928-2868-570f-bddf-ab3f9cf99eb6"
