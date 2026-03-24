@@ -19,32 +19,32 @@ Gradient correctness is verified against brms/Stan as the reference.
 
 | Variant | Time | Allocs | vs Stan |
 |---|---|---|---|
-| julia6 (manual gemv) | 640 ns | 0 | 3.0x faster |
-| julia5 (5-arg mul!) | 670 ns | 0 | 2.8x faster |
-| julia7 (split, BLAS mul!) | 680 ns | 0 | 2.8x faster |
-| julia3 (BLAS mul!) | 700 ns | 0 | 2.7x faster |
-| julia1 (allocating Xc*b) | 1.8 μs | 2 | 1.0x |
-| **brms/Stan (glm fused)** | **1.9 μs** | **1** | **1.0x** |
-| stan (matvec + vec normal) | 2.9 μs | 1 | 0.66x |
-| turing2 (@addlogprob!) | 2.6 μs | 20 | 0.73x |
-| stan (loop + vec normal) | 3.1 μs | 1 | 0.61x |
-| julia2 (broadcasted row-dot) | 6.7 μs | 0 | 0.28x |
-| turing (loop ~) | 10 μs | 20 | 0.19x |
-| bambi/PyMC (pytensor) | 34 μs | 9 | 0.06x |
+| julia3 (BLAS mul!) | 823 ns | 0 | 3.0x faster |
+| julia5 (5-arg mul!) | 930 ns | 0 | 2.7x faster |
+| julia6 (manual gemv) | 943 ns | 0 | 2.6x faster |
+| julia7 (split, BLAS mul!) | 1.0 μs | 0 | 2.5x faster |
+| julia1 (allocating Xc*b) | 1.8 μs | 2 | 1.4x faster |
+| **brms/Stan (glm fused)** | **2.5 μs** | **1** | **1.0x** |
+| stan (matvec + vec normal) | 2.9 μs | 1 | 0.86x |
+| stan (loop + vec normal) | 3.1 μs | 1 | 0.81x |
+| turing2 (@addlogprob!) | 6.7 μs | 24 | 0.37x |
+| julia2 (broadcasted row-dot) | 6.7 μs | 0 | 0.37x |
+| turing (loop ~) | 13.5 μs | 20 | 0.19x |
+| bambi/PyMC (pytensor) | 34 μs | 9 | 0.07x |
 
 ### Gradient (log-density + gradient, correct results only)
 
 | Variant | Time | Allocs | vs Stan |
 |---|---|---|---|
-| **julia7 Enzyme split rev** | **3.3 μs** | **0** | **1.0x** |
-| **brms/Stan** | **3.4 μs** | **1** | **1.0x** |
-| julia5 Enzyme Dup rev | 3.9 μs | 0 | 0.87x |
-| julia3 Enzyme Dup rev | 4.0 μs | 0 | 0.85x |
-| julia7 Enzyme split fwd | 6.1 μs | 0 | 0.56x |
-| julia6 Enzyme Dup rev | 9.9 μs | 0 | 0.34x |
-| julia7 Mooncake rev | 10.8 μs | 1 | 0.31x |
-| julia3 Mooncake rev | 11.2 μs | 1 | 0.30x |
-| julia6 Mooncake rev | 65.6 μs | 0 | 0.05x |
+| **brms/Stan** | **4.2 μs** | **1** | **1.0x** |
+| julia7 Enzyme split rev | 4.6 μs | 0 | 0.91x |
+| julia3 Enzyme Dup rev | 4.8 μs | 0 | 0.88x |
+| julia5 Enzyme Dup rev | 5.1 μs | 0 | 0.82x |
+| julia7 Enzyme split fwd | 8.6 μs | 0 | 0.49x |
+| julia6 Enzyme Dup rev | 13.4 μs | 0 | 0.31x |
+| julia3 Mooncake rev | 15.7 μs | 1 | 0.27x |
+| julia7 Mooncake rev | 16.2 μs | 1 | 0.26x |
+| julia6 Mooncake rev | 91.4 μs | 0 | 0.05x |
 
 ## Implementations
 
@@ -81,8 +81,8 @@ All implement the same log-density as the brms-generated Stan model: centered pr
 
 ### Mooncake
 
-- **Reverse mode**: Correct gradients, ~11 μs on julia3/5/7. Automatically determines constness (uses `NoRData` for Y/Xc) but has higher per-call overhead than Enzyme's LLVM-level codegen.
-- **Forward mode**: Correct but extremely slow (milliseconds, 60-500k allocs).
+- **Reverse mode**: Correct gradients, ~15–16 μs on julia3/5/7. Automatically determines constness (uses `NoRData` for Y/Xc) but has higher per-call overhead than Enzyme's LLVM-level codegen.
+- **Forward mode**: Correct but extremely slow (milliseconds, 60k–500k allocs).
 - The split approach doesn't help Mooncake — it traces through the full closure graph regardless.
 
 ### ForwardDiff
@@ -97,7 +97,7 @@ Stan evaluates with autodiff-ready `var` types even for primal-only calls (`prop
 
 ### Why Stan's gradient is hard to beat
 
-Stan's `normal_id_glm_lpdf` has a hand-written adjoint that fuses primal and gradient into one pass, reusing intermediates. Gradient/primal ratio is 1.8x. Julia + Enzyme achieves 4.7x (whole-closure `Duplicated`) but matches Stan at 4.6x with fine-grained `Const`/`Duplicated` annotations.
+Stan's `normal_id_glm_lpdf` has a hand-written adjoint that fuses primal and gradient into one pass, reusing intermediates. Gradient/primal ratio is 1.7x. Julia + Enzyme achieves 5.8x (whole-closure `Duplicated`) and comes close at 4.6x with fine-grained `Const`/`Duplicated` annotations.
 
 ### Why broadcasted row-dots are slow
 
@@ -109,8 +109,8 @@ Stan's `normal_id_glm_lpdf` has a hand-written adjoint that fuses primal and gra
 |---|---|---|
 | Empty model | 0 μs | 0 |
 | Parameter management + transforms + priors | 1.0 μs | 18 |
-| + manual likelihood (`@addlogprob!`) | 2.6 μs | 20 |
-| + loop with 604 `~` tilde statements | 10 μs | 20 |
+| + manual likelihood (`@addlogprob!`) | 6.7 μs | 24 |
+| + loop with 604 `~` tilde statements | 13.5 μs | 20 |
 
 DynamicPPL v0.40 is already type-stable (`@code_warntype` shows concrete types). The overhead is inherent to its generality: parameter unpacking, bijector transforms, accumulator bookkeeping.
 

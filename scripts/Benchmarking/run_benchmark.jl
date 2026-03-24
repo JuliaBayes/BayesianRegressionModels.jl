@@ -132,6 +132,35 @@ let mode_name = "Enzyme split rev"
     end
 end
 
+# Enzyme split forward
+let mode_name = "Enzyme split fwd"
+    Kc = dimension(jp7)
+    seeds = [zeros(Kc) for _ in 1:Kc]
+    for i in 1:Kc; seeds[i][i] = 1.0; end
+    dmus = [zeros(length(jp7._mu)) for _ in 1:Kc]
+    try
+        result = Enzyme.autodiff(
+            Enzyme.Forward,
+            Enzyme.Const(jp7._logdensity_split),
+            Enzyme.BatchDuplicated(jp7._mu, ntuple(i -> dmus[i], Kc)),
+            Enzyme.BatchDuplicated(copy(q_test), ntuple(i -> seeds[i], Kc)),
+        )
+        grad = collect(values(result[1]))
+        maxdiff = maximum(abs.(grad .- ref_grad))
+        reldiff = maxdiff / max(maximum(abs.(ref_grad)), 1.0)
+        if reldiff > 1e-6
+            msg = @sprintf("max|Δ|=%.2e, rel=%.2e", maxdiff, reldiff)
+            @printf("  %-40s  WRONG (%s)\n", "gradient ($mode_name)", msg)
+            push!(errors, (label="gradient ($mode_name)", error=msg))
+        else
+            print_result("  gradient ($mode_name)", _benchmark_enzyme_split(jp7, :gradient; enzyme_mode=Enzyme.Forward))
+        end
+    catch e
+        @printf("  %-40s  FAILED\n", "gradient ($mode_name)")
+        push!(errors, (label="gradient ($mode_name)", error=sprint(showerror, e, catch_backtrace())))
+    end
+end
+
 # Also test Mooncake on julia7 for comparison
 for (ad, ad_name) in [(AutoMooncake(), "Mooncake rev")]
     err = try_benchmark("  gradient ($ad_name)", jp7, ad, ref_grad, q_test)
