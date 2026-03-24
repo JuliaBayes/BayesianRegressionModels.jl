@@ -1,0 +1,4 @@
+[deps]
+bambi = ""
+jax = ""
+pytensor = ""
