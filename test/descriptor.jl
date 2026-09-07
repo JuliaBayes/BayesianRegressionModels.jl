@@ -647,11 +647,15 @@ kernel_schedule(n; subject=collect(1:n)) = (;
                    startswith(string(o.name), "kernel_z"), d.outputs)
     @test byname[:sigma_a].role === :parameter
 
-    # The plate's transformed-parameter carriers and cell values all resolve to
-    # the plate DECLARATION, and each named value additionally carries its own
-    # logical identity. No compiler-owned suffix or descriptor order is parsed.
-    plate_outputs = [o for o in d.outputs
-                     if o.kind === :transformed_parameter && o.role === :group_block]
+    # The plate's group-block carriers — the transformed-parameter cell values
+    # AND the collected return — all resolve to the plate DECLARATION, and each
+    # named value additionally carries its own logical identity. No
+    # compiler-owned suffix or descriptor order is parsed. The carrier's Stan
+    # `kind` is a StanBlocks likelihood-reachability decision, not part of this
+    # contract: the cell values `mu`/`CL`/`V` feed the in-cell `~` and so land
+    # in transformed parameters, while the collected `loc` return feeds no
+    # likelihood and lands in generated quantities — so this does NOT pin kind.
+    plate_outputs = [o for o in d.outputs if o.role === :group_block]
     @test !isempty(plate_outputs)
     @test all(o -> o.declaration.target === :loc, plate_outputs)
     primary = brm_output(d, :loc)
@@ -893,9 +897,11 @@ qt_schedule(n) = (;
     @test published.segments == qt_ends
 
     # It is a PLATE member, resolved by the same rule as the collected return —
-    # not a name matched by prefix or picked by descriptor order.
-    plate_outputs = [o for o in d.outputs
-                     if o.kind === :transformed_parameter && o.role === :group_block]
+    # not a name matched by prefix or picked by descriptor order. The set is the
+    # plate declaration's `:group_block` carriers regardless of Stan block: the
+    # likelihood-reachable cell values land in transformed parameters, the
+    # predict-only collected return in generated quantities.
+    plate_outputs = [o for o in d.outputs if o.role === :group_block]
     @test published.name in (o.name for o in plate_outputs)
 
     # EVERY named cell value, not just one: the other local and the return.
@@ -941,19 +947,23 @@ qt_schedule(n) = (;
 
     # ...and it holds the value the author bound. The cell RETURNS `conc`, so
     # one program carries the same quantity through two independent carriers:
-    # the collected return and the named cell value. Distinct names (asserted,
-    # so an aliasing emitter fails here rather than passing vacuously),
-    # identical numbers.
+    # the collected return and the named cell value. They sit at DIFFERENT Stan
+    # stages: the returned `pk_loc` feeds no likelihood, so StanBlocks' activity
+    # analysis places it in generated quantities, while `conc` feeds the in-cell
+    # `yy ~ normal(conc, ...)` and stays a transformed parameter. Distinct names
+    # (asserted, so an aliasing emitter fails here rather than passing
+    # vacuously), identical numbers — reading both needs a tp+gq draw.
     @test ret.name !== conc.name
-    tp_names = StanBlocks.BridgeStan.param_names(
-        prob.model; include_tp=true, include_gq=false)
+    @test ret.kind === :generated_quantity
+    @test conc.kind === :transformed_parameter
     theta = 0.1 .* randn(n)
-    tp = StanBlocks.BridgeStan.param_constrain(
-        prob.model, theta; include_tp=true, include_gq=false)
-    @test tp[brm_output_coordinates(d, :pk_loc, tp_names)] ==
-          tp[brm_output_coordinates(d, :conc, tp_names)]
+    full = StanBlocks.BridgeStan.param_constrain(
+        prob.model, theta; include_tp=true, include_gq=true,
+        rng=StanBlocks.BridgeStan.StanRNG(prob.model, 1))
+    @test full[brm_output_coordinates(d, :pk_loc, constrained_names)] ==
+          full[brm_output_coordinates(d, :conc, constrained_names)]
     # The QT location is a real, distinct quantity in the same draw.
-    @test all(isfinite, tp[brm_output_coordinates(d, :qt_loc, tp_names)])
+    @test all(isfinite, full[brm_output_coordinates(d, :qt_loc, constrained_names)])
 
     # Replay keeps every cell value addressable on new subjects.
     replay_sched = qt_schedule(5)
