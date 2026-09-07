@@ -66,7 +66,15 @@ function main()
     Pkg.develop(PackageSpec[
         PackageSpec(path=path) for (_name, path) in sort!(collect(paths))
     ])
-    Pkg.instantiate()
+    # `Pkg.instantiate()` auto-precompiles the whole manifest in parallel, which
+    # self-deadlocks under Pkg 1.10 on Pathfinder 0.10.7's sibling Turing
+    # extensions (see test/README.md, "Pathfinder's Turing extension pair").
+    # Serialize just that pair first, then let the parallel pass reuse the cache.
+    Pkg.instantiate(; allow_autoprecomp=false)
+    withenv("JULIA_NUM_PRECOMPILE_TASKS" => "1") do
+        Pkg.precompile(["Pathfinder", "Turing"])
+    end
+    Pkg.precompile()
     return nothing
 end
 

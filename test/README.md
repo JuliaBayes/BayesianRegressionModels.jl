@@ -139,6 +139,30 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   satisfy them together. Developing StanBlocks by itself fails with `expected
   package BayesianRegressionModels to be registered`, while omitting a
   source-only direct dependency produces the same error for that dependency.
+- **Pathfinder's Turing extension pair is precompiled serially first.** Both
+  `bootstrap.jl` and `setup_env.jl` suppress the parallel auto-precompile that
+  `Pkg.instantiate()` performs, build `Pkg.precompile(["Pathfinder", "Turing"])`
+  once under `JULIA_NUM_PRECOMPILE_TASKS=1`, then run the ordinary parallel
+  `Pkg.precompile()`. This is not stylistic — it is the same class of Pkg 1.10
+  self-deadlock the `MutatingFunctions` pin note above avoids, for a pair we do
+  not control. Pathfinder 0.10.7 ships two sibling Turing extensions,
+  `PathfinderTuringExt` (triggers `AbstractMCMC`, `Accessors`, `DynamicPPL`,
+  `Turing`) and `PathfinderTuringFlexiChainsExt` (triggers `FlexiChains`,
+  `Turing`), and Turing 0.46 hard-depends on every one of those triggers. In a
+  parallel precompile each extension gets its own `--output-ji` worker; each
+  worker loads Turing, which loads the *other* extension's triggers, so each
+  worker then blocks on the pidfile the other worker's driver holds. Pkg 1.10
+  never forwards `loadable_exts` to the worker
+  (`Pkg/src/precompilation.jl:869-871`, the kwarg is commented out of the
+  `Base.compilecache` call), so nothing breaks the mutual wait and only the host
+  reaper clears it, ~25 min later. Julia 1.12's `Base.Precompilation` forwards
+  `loadable_exts`, so this is specific to 1.10 — this package's compat floor. One
+  serial build lands a `.ji` valid for both siblings (the `PathfinderTuringExt`
+  worker builds the FlexiChains sibling nested), after which the parallel pass
+  finds them cached and never spawns those workers. Both names are required
+  because Pkg 1.10 keeps an extension in a named precompile only when its full
+  trigger set is inside the named closure (`precompilation.jl:610`), and naming
+  `Turing` pulls in every trigger of both extensions.
 
 ## Why not `Pkg.test`
 

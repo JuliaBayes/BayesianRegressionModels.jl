@@ -94,7 +94,19 @@ Pkg.develop(PackageSpec[
 # Every remaining dependency comes from the registry, per the committed
 # `test/Project.toml` — the single source of truth for the dependency list and
 # source revisions. This script only materializes paths that cannot be committed.
-Pkg.instantiate()
+#
+# `Pkg.instantiate()` auto-precompiles the whole manifest IN PARALLEL, and under
+# Pkg 1.10 that parallel pass self-deadlocks on Pathfinder 0.10.7's two sibling
+# Turing extensions (see test/README.md, "Pathfinder's Turing extension pair").
+# So suppress the parallel auto-precompile, build just that pair serially first —
+# one serial build lands a `.ji` valid for both siblings — then run the ordinary
+# parallel pass, which finds them cached and never spawns the deadlocking workers.
+# Both names are required: Pkg 1.10 keeps an extension in a named precompile only
+# when its full trigger set is in the named closure, and Turing pulls them all in.
+Pkg.instantiate(; allow_autoprecomp=false)
+withenv("JULIA_NUM_PRECOMPILE_TASKS" => "1") do
+    Pkg.precompile(["Pathfinder", "Turing"])
+end
 Pkg.precompile()
 
 @info "Test environment ready" project = Base.active_project()
