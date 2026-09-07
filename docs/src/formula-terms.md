@@ -195,14 +195,19 @@ addresses. It is an explicit assumption that the effect repeats with that
 period; clock-time or dosing-phase evidence is what makes a 24-hour period on
 elapsed time readable as shared diurnal variation.
 
-```julia
-@brm df begin
-    y  ~ Normal(mu, sigma)
-    mu ~ 1 + hsgp(hours_since_dose; k=6, cov=:periodic, period=24.0)
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+periodic_time_model = (@brm begin
+    mu ~ 1 + hsgp(hours_since_dose; k=8, cov=:periodic, period=24.0)
     length_scale(:, hsgp(hours_since_dose)) ~ LogNormal(0, 0.5)
     sd(:, hsgp(hours_since_dose))           ~ Normal(0, 0.3)
     sigma ~ Exponential(1)
-end
+    y ~ Normal(mu, sigma)
+end)((;
+    hours_since_dose=[0.5, 1.0, 2.0, 4.0, 8.0, 12.0, 24.5, 48.0, 72.0, 168.0],
+    y=[0.2, 0.9, 1.1, 0.8, 0.4, -0.6, 0.3, 0.1, -0.2, 0.0],
+))
+""", :periodic_time_model; title="Periodic (24 h) time effect over hours since first dose")
 ```
 
 - `gp(x; cov=:periodic, period=…)` is the exact kernel, lowered to Stan's
