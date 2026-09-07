@@ -15,7 +15,9 @@ signature — the rest are covered by their docstrings on the [API](@ref) page.
 | `s(x)` | rank-10 penalized thin-plate regression spline | — |
 | `t2(x, z)` | two-margin tensor-product smooth | — |
 | `gp(x…; cov=:exp_quad, iso=true, jitter=1e-9)` | exact latent Gaussian process, noncentered Cholesky draw | — |
+| `gp(x; cov=:periodic, period, jitter=1e-9)` | exact latent GP under Stan's periodic kernel, one axis | — |
 | `hsgp(x…; k=20, c=1.5, iso=true, by=nothing, domain=nothing, orthogonal_to=nothing)` | Hilbert-space GP approximation over `prod(k)` basis functions | — |
+| `hsgp(x; k=20, cov=:periodic, period)` | periodic Hilbert-space basis: `k` harmonics, `2k` cosine/sine functions | — |
 | `ar(time; p=1)` | AR(p) noise process ordered by `time`; only `p=1` is emitted | — |
 | `dar(time; p=1)` | direct differenced-AR(1) trajectory with bounded persistence and scaled innovations | — |
 | `mo(c)`, `mo1(c)` | monotonic effect of an ordered factor via Dirichlet increments | — |
@@ -175,7 +177,91 @@ form documented under [Likelihoods](@ref).
 `gp` and `hsgp` are distinct terms with no compatibility alias. Both are direct
 predictor summands carrying their own latent draws and hyperparameters, so
 neither contributes a `beta_pop` coefficient. `jitter` belongs only to `gp`;
-`k`, `c` and `by` only to `hsgp`. Both currently support `cov=:exp_quad` only.
+`k`, `c` and `by` only to `hsgp`. Both support `cov=:exp_quad` (the default)
+and `cov=:periodic`; see [Periodic covariance](@ref) for the latter's contract.
+
+### Periodic covariance
+
+`cov=:periodic` selects Stan's periodic kernel
+
+```
+k(x, x') = σ² exp(−2 sin²(π |x − x'| / period) / ρ²)
+```
+
+over exactly one axis. `period` is a required numeric formula constant on the
+axis's own scale (hours, days, radians — whatever the column carries), and
+`rho` / `sigma` keep their meaning and their `length_scale(…)` / `sd(…)`
+addresses. It is an explicit assumption that the effect repeats with that
+period; clock-time or dosing-phase evidence is what makes a 24-hour period on
+elapsed time readable as shared diurnal variation.
+
+```julia
+@brm df begin
+    y  ~ Normal(mu, sigma)
+    mu ~ 1 + hsgp(hours_since_dose; k=6, cov=:periodic, period=24.0)
+    length_scale(:, hsgp(hours_since_dose)) ~ LogNormal(0, 0.5)
+    sd(:, hsgp(hours_since_dose))           ~ Normal(0, 0.3)
+    sigma ~ Exponential(1)
+end
+```
+
+- `gp(x; cov=:periodic, period=…)` is the exact kernel, lowered to Stan's
+  native `gp_periodic_cov` plus `jitter`.
+- `hsgp(x; k, cov=:periodic, period=…)` is the Hilbert-space approximation of
+  Riutort-Mayol et al. (2023): with `w0 = 2π / period` the basis is
+  `cos(j·w0·x)` and `sin(j·w0·x)` for `j = 1:k` — `2k` functions, emitted as
+  data `PHI_hsgp_<x>` — and each harmonic's spectral weight is
+  `σ·√(2·e^{−a}·I_j(a))` with `a = 1/ρ²`, computed inside Stan through
+  `log_modified_bessel_first_kind` so a small length scale cannot overflow.
+- **The term contains no constant.** The `j = 0` harmonic is excluded, so
+  every basis function has zero mean over a period and the term behaves like
+  a `0 +` term: a nonzero mean of the periodic function belongs to the
+  formula intercept (or whichever declared quantity owns it), never to this
+  term, and nothing is added to the consumer's intercept silently. Count
+  `2k` functions against a basis budget (16 for `k = 8`).
+- **Truncation is the only approximation, and it is measured.** The
+  `k`-harmonic expansion is exactly periodic but approximates the
+  exp-sine-squared kernel with a tail `σ²·2·e^{−a}·Σ_{j>k} I_j(a)` that
+  shrinks as `rho` grows. Dropped fraction of the (non-constant) variance:
+
+| `k` (harmonics) | basis functions | default floor on `rho` | Riutort-Mayol B.6 (`3.72/k`) | dropped variance fraction at `rho` = 0.3 / 0.47 / 0.6 / 0.8 / 1.0 / 1.5 |
+|---|---|---|---|---|
+| 4 | 8 | 1.931 | 0.930 | 2.0e-1 / 4.4e-2 / 1.3e-2 / 2.0e-3 / 4.1e-4 / 1.9e-5 |
+| 8 | 16 | 0.614 | 0.465 | 1.3e-2 / 2.4e-4 / 1.2e-5 / 2.2e-7 / 8.0e-9 / 1.5e-11 |
+| 16 | 32 | 0.278 | 0.233 | 3.1e-6 / 1.2e-10 / 1.5e-13 / 3.0e-17 / 3.0e-20 / 8.7e-26 |
+| 32 | 64 | 0.135 | 0.116 | 4.3e-17 / 1.8e-27 / 1.0e-33 / 2.2e-41 / 1.9e-47 / 1.3e-58 |
+
+  The default floor (next section) is the `rho` at which the `k`-th
+  harmonic's amplitude is 1/100 of the first's; it is stricter than the
+  paper's `k ≥ 3.72/rho` rule. At `k = 8` the maximum covariance error over a
+  full period is `9e-6·σ²` at the floor and `1e-2·σ²` at `rho = 0.3`, where
+  an explicit `length_scale` override would take you knowingly.
+- `rho` is **dimensionless**: it is the kernel's length scale on the unit
+  circle, in chord units (`2·sin(π·τ/period)` is the chord spanned by a lag
+  `τ`), never in the axis's own units — `rho ≈ 1` means features of roughly
+  one radian, i.e. `period/(2π)` on the axis. State `length_scale(…)` priors
+  in those units. The raw axis values go straight into the cosines and sines,
+  so a large elapsed time needs no consumer-side `mod(x, period)`.
+- The periodic basis needs **no boundary factor and no domain**: `c`,
+  `domain`, `orthogonal_to`, `by`, and `iso=false` are refused by name, and a
+  model-derived axis is not supported. Cosines and sines already have zero
+  mean over a period and are not collinear with a linear `x`.
+- `reprocess` rebuilds the cosine/sine columns from the new axis. Nothing here
+  is fitted, so `freeze_constants=true` and `false` are identical, a constant
+  prediction axis is valid, and rows far outside the training range are the
+  point rather than an extrapolation hazard.
+- [`brm_term_coordinates`](@ref) resolves `:length_scale`, `:sd`, and
+  `:basis_weights` exactly as for the exp-quad basis; `:basis_weights` has
+  `2k` coordinates, and [`term_draws`](@ref) zeroes all of them.
+- The validity floor below applies with the periodic weights substituted:
+  `rho_lower_hsgp_<x>` is the length scale at which `I_k(a)/I_1(a) = 100⁻²`,
+  a function of `k` alone.
+- **StanBlocks floor.** The weight helper calls Stan's
+  `log_modified_bessel_first_kind`, registered in StanBlocks from
+  `bec23bc3c52303ebde60a026af48c435e4c81330` (`devibe`, 2026-09-07). On an older
+  StanBlocks the periodic `hsgp` form fails at transpile with
+  `Could not find log_modified_bessel_first_kind …`; the exact
+  `gp(…; cov=:periodic)` form needs nothing new.
 
 ### Column transforms
 
@@ -476,6 +562,13 @@ mass at `k = 5`, 18.8 % at `k = 10` and 5.7 % at `k = 20`.
 Every `hsgp` term therefore declares `rho` with that floor as its lower bound.
 The density is unchanged — only the support moves. Exact `gp` has no basis
 truncation and is untouched.
+
+The rule behind the number is that the `k`-th basis function's spectral
+*amplitude* has fallen to 1/100 of the first's. A `cov=:periodic` term
+applies the same rule to its own weights, `q_j ∝ √(e^{−a} I_j(a))` with
+`a = 1/ρ²`: its floor is the length scale solving `I_k(a)/I_1(a) = 100⁻²`,
+found by bisection on the scaled Bessel functions. It depends on `k` only —
+there is no data-derived `L` — so every `reprocess` reproduces it exactly.
 
 The floor is emitted as **data** (`rho_lower_hsgp_<axes>`), not as a literal,
 because `L` comes from the covariate: `reprocess(sb, df2; freeze_constants=false)`
