@@ -231,6 +231,44 @@ ordinary half-standard-Normal scale prior. Random-effect R2D2 is SBBRMI-only;
 centered and stratified buckets remain unsupported, while non-centred
 `resample_groups` replay redraws only the standardised group coordinates and
 transports the fitted R2, simplex, reference scales, and correlation factor.
+
+Adding `include=` to the block-wide statement makes it the JOINT R2D2M2 budget:
+the block's one `R2` and one Dirichlet simplex also allocate population
+components of every linear predictor slicing the block —
+
+```julia
+@brm begin
+    sigma_pk ~ Exponential(1)
+    sigma_qt ~ Exponential(1)
+    log_CL  ~ 1 + wt + indication + (1 | p | subject)
+    qt_base ~ 1 + wt + indication + (1 | p | subject)
+
+    sd(:, p) ~ r2d2(mean_R2=0.5, prec_R2=2, concentration=1,
+                    reference_scale=sigma_pk,
+                    include=(:population, :contrasts))
+    sd(qt_base, p) ~ r2d2(reference_scale=sigma_qt)
+    cor(:, p) ~ LKJCholesky(2, 2)
+end
+```
+
+`:population` adds each predictor's non-intercept `beta_pop` columns,
+`:contrasts` its categorical treatment-contrast coefficients; `:ranef` names
+the margins, which are always allocated. A component of predictor `m` is scaled
+by `m`'s own margin reference: a margin keeps
+`tau[j] = reference_scale[m] * sqrt(phi[j] * R2 / (1 - R2))` and a coefficient
+or contrast takes
+`reference_scale[m] * sqrt(phi[k] * R2 / ((1 - R2) * Var(x_k)))`, the
+design-column variance adjustment of the whole-predictor form (a contrast's
+dummy variance is its level frequency's `p * (1 - p)`). Intercepts stay
+outside. With `include=`, `reference_scale=` is optional: an omitted margin
+reference is a sampled half-standard-normal, so the statement then allocates
+LATENT between-group variation rather than an observed-outcome R². Per-column
+`effect(lp, coef) ~ Normal(...)` and `effect(lp, categorical) ~ Normal(...)`
+statements inside the scope are refused, as is a scoped predictor that also
+carries `effect(lp, :) ~ r2d2(...)`; `include=` belongs on the block-wide
+statement only. The emitted carriers (`pop_<lp>_beta_pop`,
+`cat_<lp>_<col>_beta`, the block's derived `tau`) and every descriptor reader
+are unchanged.
 """
 function r2d2 end
 

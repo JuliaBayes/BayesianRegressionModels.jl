@@ -694,7 +694,22 @@ All of these fail loudly rather than silently sampling something else:
   centering (`centered_groups`), plain-group R2D2 resampling, stratified
   `gr(g, by=b)` groups, and `mm(...)` multi-membership terms remain unsupported.
 - A column that also carries its own `effect(lp, coef) ~ Normal(loc, scale)`
-  statement is dropped from the simplex and keeps that explicit prior.
+  statement is dropped from the simplex and keeps that explicit prior. The
+  default-layer spelling `effect(:, coef) ~ Normal(...)` excludes that column
+  in every predictor it reaches, exactly like the predictor-specific one; the
+  remaining columns and the random-effect residual are still decomposed.
+- Excluding **every** non-intercept column of an `r2d2`-scoped predictor this
+  way is refused. There is then nothing left to allocate, and the only
+  consistent emission would drop `R2`/`phi` and fix the random-effect scale at
+  the bare `tau_bsv` with no prior — a silently different model. Either keep at
+  least one column unaddressed, or move the decomposition onto the
+  random-effect scale with `sd(lp, ID) ~ r2d2(reference_scale=...)` (the
+  random-effect R2D2M2/ICC form below composes with per-column Normal priors;
+  a shared bucket is all-or-nothing, so switch the whole bucket). A predictor
+  with **no** non-intercept population column at all (`log_ka ~ 1 + (1 | p |
+  g)`, forced into an `r2d2` statement by the all-or-nothing rule) is the one
+  legitimate zero-share shape: nothing to explain, so the whole `tau_bsv` is
+  its random-effect scale.
 
 ## Random-effect R2D2M2 and per-margin ICC: `sd(...) ~ r2d2(...)`
 
@@ -771,6 +786,80 @@ constructions are required.
 Random-effect R2D2 is SBBRMI-only. It supports ordinary non-centred shared-ID
 blocks, `cor(:, ID)`, and `reprocess(...; resample_groups=[group])`. Centered,
 stratified, and multi-membership blocks fail loudly.
+
+## Joint R2D2M2 budget over coefficients, contrasts and random effects: `include=`
+
+When several linear predictors share one correlated block AND one covariate
+right-hand side, brms' R2D2M2 puts ONE global R² and ONE Dirichlet over the
+union of the population coefficients (continuous and categorical) and the
+random-effect variances. Spell that by adding `include=` to the block-wide
+statement:
+
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+joint_budget_r2d2 = (@brm begin
+    sigma_pk ~ Exponential(1)
+    sigma_qt ~ Exponential(1)
+
+    log_Vc  ~ 1 + wt + indication + (1 | p | subject)
+    log_k10 ~ 1 + wt + indication + (1 | p | subject)
+    qt_base ~ 1 + wt + indication + (1 | p | subject)
+
+    sd(:, p) ~ r2d2(mean_R2=0.5, prec_R2=2, concentration=1,
+                    reference_scale=sigma_pk,
+                    include=(:population, :contrasts))
+    sd(qt_base, p) ~ r2d2(reference_scale=sigma_qt)
+    cor(:, p) ~ LKJCholesky(3, 2)
+end)((;
+    subject=[1, 1, 2, 2, 3, 3],
+    wt=[-1.0, 0.5, 0.2, -0.3, 1.1, -0.6],
+    indication=[1, 2, 1, 2, 2, 1],
+))
+""", :joint_budget_r2d2; title="Joint R2D2M2 budget with include=")
+```
+
+`include=` names which population components of every predictor slicing
+`|p|` join the block's single R²/Dirichlet: `:population` is the non-intercept
+continuous `beta_pop` columns, `:contrasts` the categorical treatment-contrast
+coefficients (`cat_*` blocks), and `:ranef` the margins, which are always
+allocated and may be listed for readability. The simplex is ordered margins
+first, then each scoped predictor's population columns and contrast blocks in
+formula order. A component of predictor `m` is measured in `m`'s own margin
+reference — its `Intercept` margin, or its single margin — so a margin keeps
+
+```
+tau[j] = reference_scale[m] * sqrt(phi[j] * R2 / (1 - R2))
+```
+
+and a coefficient or contrast takes
+
+```
+beta_scale[k] = reference_scale[m] * sqrt(phi[k] * R2 / ((1 - R2) * Var(x_k)))
+```
+
+which keeps the whole-predictor form's design-column variance adjustment (a
+contrast's dummy column has variance `p * (1 - p)` for level frequency `p`).
+Intercepts stay outside and keep their ordinary or explicitly overridden prior.
+Per-margin `reference_scale` overrides work exactly as above; the example gives
+`qt_base`'s margin, coefficients, and contrast the QT residual scale.
+
+With `include=`, `reference_scale=` becomes optional. An omitted margin
+reference is a sampled half-standard-normal parameter, so the statement then
+allocates **latent** between-subject variation: nothing observed anchors the
+unit, `R2` is not an outcome R², and the sampled reference and `R2` are
+identified by the data only through their product `reference_scale² * R2 /
+(1 - R2)`. Prefer explicit references whenever a margin's scale is known.
+
+Under a joint budget a per-column `effect(lp, coef) ~ Normal(...)` or
+`effect(lp, categorical) ~ Normal(...)` statement inside the scope is refused:
+it would silently pull that coefficient out of the simplex. A scoped predictor
+may not also carry `effect(lp, :) ~ r2d2(...)`, and `include=` is accepted on
+the block-wide statement only — not on a per-margin override, not on the ICC
+form. `ranef_effect_priors` reports the joint statement with its `include`
+keyword. The emitted carriers keep their names (`pop_<lp>_beta_pop`,
+`cat_<lp>_<col>_beta`, the block's derived `tau`), so
+`brm_population_effect_coordinates`, `brm_ranef_sd_coordinates`, and
+`reprocess(...; resample_groups=[group])` are unchanged.
 
 ## Bounded scalar parameter priors
 
