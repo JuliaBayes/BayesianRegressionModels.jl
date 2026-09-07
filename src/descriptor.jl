@@ -1258,8 +1258,10 @@ _brm_term_coordinate_count(::typeof(hsgp), t, ::Val{:length_scale}, _plan, _outp
 _brm_term_coordinate_count(::typeof(hsgp), _t, ::Val{:sd}, _plan, _output) = 1
 function _brm_term_coordinate_count(::typeof(hsgp), t,
                                     ::Val{:basis_weights}, _plan, _output)
-    K, _ = _sb_hsgp_options(getkwargs(t), length(getargs(t)))
-    prod(K)
+    kw = getkwargs(t)
+    K, _ = _sb_hsgp_options(kw, length(getargs(t)))
+    # The periodic basis carries a cosine AND a sine column per harmonic.
+    _sb_gp_cov(kw, :hsgp) === :periodic ? 2 * only(K) : prod(K)
 end
 
 """

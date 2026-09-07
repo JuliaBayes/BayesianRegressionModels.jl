@@ -15,7 +15,9 @@ signature — the rest are covered by their docstrings on the [API](@ref) page.
 | `s(x)` | rank-10 penalized thin-plate regression spline | — |
 | `t2(x, z)` | two-margin tensor-product smooth | — |
 | `gp(x…; cov=:exp_quad, iso=true, jitter=1e-9)` | exact latent Gaussian process, noncentered Cholesky draw | — |
+| `gp(x; cov=:periodic, period, jitter=1e-9)` | exact latent GP under Stan's periodic kernel, one axis | — |
 | `hsgp(x…; k=20, c=1.5, iso=true, by=nothing, domain=nothing, orthogonal_to=nothing)` | Hilbert-space GP approximation over `prod(k)` basis functions | — |
+| `hsgp(x; k=20, cov=:periodic, period)` | periodic Hilbert-space basis: `k` harmonics, `2k` cosine/sine functions | — |
 | `ar(time; p=1)` | AR(p) noise process ordered by `time`; only `p=1` is emitted | — |
 | `dar(time; p=1)` | direct differenced-AR(1) trajectory with bounded persistence and scaled innovations | — |
 | `mo(c)`, `mo1(c)` | monotonic effect of an ordered factor via Dirichlet increments | — |
@@ -175,7 +177,91 @@ form documented under [Likelihoods](@ref).
 `gp` and `hsgp` are distinct terms with no compatibility alias. Both are direct
 predictor summands carrying their own latent draws and hyperparameters, so
 neither contributes a `beta_pop` coefficient. `jitter` belongs only to `gp`;
-`k`, `c` and `by` only to `hsgp`. Both currently support `cov=:exp_quad` only.
+`k`, `c` and `by` only to `hsgp`. Both support `cov=:exp_quad` (the default)
+and `cov=:periodic`; see [Periodic covariance](@ref) for the latter's contract.
+
+### Periodic covariance
+
+`cov=:periodic` selects Stan's periodic kernel
+
+```
+k(x, x') = σ² exp(−2 sin²(π |x − x'| / period) / ρ²)
+```
+
+over exactly one axis. `period` is a required numeric formula constant on the
+axis's own scale (hours, days, radians — whatever the column carries), and
+`rho` / `sigma` keep their meaning and their `length_scale(…)` / `sd(…)`
+addresses. It is an explicit assumption that the effect repeats with that
+period; clock-time or dosing-phase evidence is what makes a 24-hour period on
+elapsed time readable as shared diurnal variation.
+
+```julia
+@brm df begin
+    y  ~ Normal(mu, sigma)
+    mu ~ 1 + hsgp(hours_since_dose; k=6, cov=:periodic, period=24.0)
+    length_scale(:, hsgp(hours_since_dose)) ~ LogNormal(0, 0.5)
+    sd(:, hsgp(hours_since_dose))           ~ Normal(0, 0.3)
+    sigma ~ Exponential(1)
+end
+```
+
+- `gp(x; cov=:periodic, period=…)` is the exact kernel, lowered to Stan's
+  native `gp_periodic_cov` plus `jitter`.
+- `hsgp(x; k, cov=:periodic, period=…)` is the Hilbert-space approximation of
+  Riutort-Mayol et al. (2023): with `w0 = 2π / period` the basis is
+  `cos(j·w0·x)` and `sin(j·w0·x)` for `j = 1:k` — `2k` functions, emitted as
+  data `PHI_hsgp_<x>` — and each harmonic's spectral weight is
+  `σ·√(2·e^{−a}·I_j(a))` with `a = 1/ρ²`, computed inside Stan through
+  `log_modified_bessel_first_kind` so a small length scale cannot overflow.
+- **The term contains no constant.** The `j = 0` harmonic is excluded, so
+  every basis function has zero mean over a period and the term behaves like
+  a `0 +` term: a nonzero mean of the periodic function belongs to the
+  formula intercept (or whichever declared quantity owns it), never to this
+  term, and nothing is added to the consumer's intercept silently. Count
+  `2k` functions against a basis budget (16 for `k = 8`).
+- **Truncation is the only approximation, and it is measured.** The
+  `k`-harmonic expansion is exactly periodic but approximates the
+  exp-sine-squared kernel with a tail `σ²·2·e^{−a}·Σ_{j>k} I_j(a)` that
+  shrinks as `rho` grows. Dropped fraction of the (non-constant) variance:
+
+| `k` (harmonics) | basis functions | default floor on `rho` | Riutort-Mayol B.6 (`3.72/k`) | dropped variance fraction at `rho` = 0.3 / 0.47 / 0.6 / 0.8 / 1.0 / 1.5 |
+|---|---|---|---|---|
+| 4 | 8 | 1.931 | 0.930 | 2.0e-1 / 4.4e-2 / 1.3e-2 / 2.0e-3 / 4.1e-4 / 1.9e-5 |
+| 8 | 16 | 0.614 | 0.465 | 1.3e-2 / 2.4e-4 / 1.2e-5 / 2.2e-7 / 8.0e-9 / 1.5e-11 |
+| 16 | 32 | 0.278 | 0.233 | 3.1e-6 / 1.2e-10 / 1.5e-13 / 3.0e-17 / 3.0e-20 / 8.7e-26 |
+| 32 | 64 | 0.135 | 0.116 | 4.3e-17 / 1.8e-27 / 1.0e-33 / 2.2e-41 / 1.9e-47 / 1.3e-58 |
+
+  The default floor (next section) is the `rho` at which the `k`-th
+  harmonic's amplitude is 1/100 of the first's; it is stricter than the
+  paper's `k ≥ 3.72/rho` rule. At `k = 8` the maximum covariance error over a
+  full period is `9e-6·σ²` at the floor and `1e-2·σ²` at `rho = 0.3`, where
+  an explicit `length_scale` override would take you knowingly.
+- `rho` is **dimensionless**: it is the kernel's length scale on the unit
+  circle, in chord units (`2·sin(π·τ/period)` is the chord spanned by a lag
+  `τ`), never in the axis's own units — `rho ≈ 1` means features of roughly
+  one radian, i.e. `period/(2π)` on the axis. State `length_scale(…)` priors
+  in those units. The raw axis values go straight into the cosines and sines,
+  so a large elapsed time needs no consumer-side `mod(x, period)`.
+- The periodic basis needs **no boundary factor and no domain**: `c`,
+  `domain`, `orthogonal_to`, `by`, and `iso=false` are refused by name, and a
+  model-derived axis is not supported. Cosines and sines already have zero
+  mean over a period and are not collinear with a linear `x`.
+- `reprocess` rebuilds the cosine/sine columns from the new axis. Nothing here
+  is fitted, so `freeze_constants=true` and `false` are identical, a constant
+  prediction axis is valid, and rows far outside the training range are the
+  point rather than an extrapolation hazard.
+- [`brm_term_coordinates`](@ref) resolves `:length_scale`, `:sd`, and
+  `:basis_weights` exactly as for the exp-quad basis; `:basis_weights` has
+  `2k` coordinates, and [`term_draws`](@ref) zeroes all of them.
+- The validity floor below applies with the periodic weights substituted:
+  `rho_lower_hsgp_<x>` is the length scale at which `I_k(a)/I_1(a) = 100⁻²`,
+  a function of `k` alone.
+- **StanBlocks floor.** The weight helper calls Stan's
+  `log_modified_bessel_first_kind`, registered in StanBlocks from
+  `bec23bc3c52303ebde60a026af48c435e4c81330` (`devibe`, 2026-09-07). On an older
+  StanBlocks the periodic `hsgp` form fails at transpile with
+  `Could not find log_modified_bessel_first_kind …`; the exact
+  `gp(…; cov=:periodic)` form needs nothing new.
 
 ### Column transforms
 
@@ -477,6 +563,13 @@ Every `hsgp` term therefore declares `rho` with that floor as its lower bound.
 The density is unchanged — only the support moves. Exact `gp` has no basis
 truncation and is untouched.
 
+The rule behind the number is that the `k`-th basis function's spectral
+*amplitude* has fallen to 1/100 of the first's. A `cov=:periodic` term
+applies the same rule to its own weights, `q_j ∝ √(e^{−a} I_j(a))` with
+`a = 1/ρ²`: its floor is the length scale solving `I_k(a)/I_1(a) = 100⁻²`,
+found by bisection on the scaled Bessel functions. It depends on `k` only —
+there is no data-derived `L` — so every `reprocess` reproduces it exactly.
+
 The floor is emitted as **data** (`rho_lower_hsgp_<axes>`), not as a literal,
 because `L` comes from the covariate: `reprocess(sb, df2; freeze_constants=false)`
 re-derives it alongside `PHI` / `omega2` while the Stan source stays
@@ -693,6 +786,80 @@ constructions are required.
 Random-effect R2D2 is SBBRMI-only. It supports ordinary non-centred shared-ID
 blocks, `cor(:, ID)`, and `reprocess(...; resample_groups=[group])`. Centered,
 stratified, and multi-membership blocks fail loudly.
+
+## Joint R2D2M2 budget over coefficients, contrasts and random effects: `include=`
+
+When several linear predictors share one correlated block AND one covariate
+right-hand side, brms' R2D2M2 puts ONE global R² and ONE Dirichlet over the
+union of the population coefficients (continuous and categorical) and the
+random-effect variances. Spell that by adding `include=` to the block-wide
+statement:
+
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+joint_budget_r2d2 = (@brm begin
+    sigma_pk ~ Exponential(1)
+    sigma_qt ~ Exponential(1)
+
+    log_Vc  ~ 1 + wt + indication + (1 | p | subject)
+    log_k10 ~ 1 + wt + indication + (1 | p | subject)
+    qt_base ~ 1 + wt + indication + (1 | p | subject)
+
+    sd(:, p) ~ r2d2(mean_R2=0.5, prec_R2=2, concentration=1,
+                    reference_scale=sigma_pk,
+                    include=(:population, :contrasts))
+    sd(qt_base, p) ~ r2d2(reference_scale=sigma_qt)
+    cor(:, p) ~ LKJCholesky(3, 2)
+end)((;
+    subject=[1, 1, 2, 2, 3, 3],
+    wt=[-1.0, 0.5, 0.2, -0.3, 1.1, -0.6],
+    indication=[1, 2, 1, 2, 2, 1],
+))
+""", :joint_budget_r2d2; title="Joint R2D2M2 budget with include=")
+```
+
+`include=` names which population components of every predictor slicing
+`|p|` join the block's single R²/Dirichlet: `:population` is the non-intercept
+continuous `beta_pop` columns, `:contrasts` the categorical treatment-contrast
+coefficients (`cat_*` blocks), and `:ranef` the margins, which are always
+allocated and may be listed for readability. The simplex is ordered margins
+first, then each scoped predictor's population columns and contrast blocks in
+formula order. A component of predictor `m` is measured in `m`'s own margin
+reference — its `Intercept` margin, or its single margin — so a margin keeps
+
+```
+tau[j] = reference_scale[m] * sqrt(phi[j] * R2 / (1 - R2))
+```
+
+and a coefficient or contrast takes
+
+```
+beta_scale[k] = reference_scale[m] * sqrt(phi[k] * R2 / ((1 - R2) * Var(x_k)))
+```
+
+which keeps the whole-predictor form's design-column variance adjustment (a
+contrast's dummy column has variance `p * (1 - p)` for level frequency `p`).
+Intercepts stay outside and keep their ordinary or explicitly overridden prior.
+Per-margin `reference_scale` overrides work exactly as above; the example gives
+`qt_base`'s margin, coefficients, and contrast the QT residual scale.
+
+With `include=`, `reference_scale=` becomes optional. An omitted margin
+reference is a sampled half-standard-normal parameter, so the statement then
+allocates **latent** between-subject variation: nothing observed anchors the
+unit, `R2` is not an outcome R², and the sampled reference and `R2` are
+identified by the data only through their product `reference_scale² * R2 /
+(1 - R2)`. Prefer explicit references whenever a margin's scale is known.
+
+Under a joint budget a per-column `effect(lp, coef) ~ Normal(...)` or
+`effect(lp, categorical) ~ Normal(...)` statement inside the scope is refused:
+it would silently pull that coefficient out of the simplex. A scoped predictor
+may not also carry `effect(lp, :) ~ r2d2(...)`, and `include=` is accepted on
+the block-wide statement only — not on a per-margin override, not on the ICC
+form. `ranef_effect_priors` reports the joint statement with its `include`
+keyword. The emitted carriers keep their names (`pop_<lp>_beta_pop`,
+`cat_<lp>_<col>_beta`, the block's derived `tau`), so
+`brm_population_effect_coordinates`, `brm_ranef_sd_coordinates`, and
+`reprocess(...; resample_groups=[group])` are unchanged.
 
 ## Bounded scalar parameter priors
 

@@ -11,6 +11,7 @@ LogExpFunctions = "2ab3a3ac-af41-5b50-aa03-7779005ae688"
 MutatingFunctions = "8a4c2d94-4b3b-4f9e-be63-a3c0cd816e3a"
 OutputSignatures = "86cfaae4-1704-4c69-ba62-d919d81ae5f8"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
 StanBlocks = "2e771a56-c23a-4e0b-9282-20c2e37157e9"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
@@ -44,7 +45,10 @@ rev = "c317cc003fc41c2d933c27dc80799141eebd434e"
 
 [sources.StanBlocks]
 url = "https://github.com/nsiccha/StanBlocks.jl"
-rev = "66448dec6049b543d1dde745d7527b24fd01239e"
+# bec23bc3 (2026-09-07): registers the native `log_modified_bessel_first_kind`
+# builtin that the periodic `hsgp(x; cov=:periodic)` spectral weights call
+# (StanBlocks snag log-modified-bes-60f43dd8).
+rev = "bec23bc3c52303ebde60a026af48c435e4c81330"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
