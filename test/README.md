@@ -125,6 +125,11 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   the spliced term model before its keyword data are bound and fail on an
   unresolved `omega2`. StanBlocks is unregistered and both sides of this floor
   report version `0.1.5`, so verify the checkout SHA rather than its version.
+  `hsgp(x; cov=:periodic, period=…)` additionally needs StanBlocks
+  `bec23bc3c52303ebde60a026af48c435e4c81330` or later, which registers the
+  `log_modified_bessel_first_kind` builtin its spectral weights call (older
+  checkouts fail at transpile with `Could not find
+  log_modified_bessel_first_kind …`); `test/gp_hsgp_periodic.jl` is the gate.
 - **`Treebars` is here even though no test uses it.** It is an unregistered
   *transitive* dependency of WarmupHMC, which pins it with a `[sources]` entry —
   ignored on 1.10, same as above. Without a path the resolve fails outright with

@@ -1816,6 +1816,18 @@ end
 # `brm_hsgp_sqrt_spd` evaluates the separable d-dimensional squared-exponential
 # spectral density at every tensor-product HSGP frequency. `omega2[b, j]` is
 # the squared angular frequency for basis row b and predictor axis j.
+#
+# `brm_periodic_cov` / `brm_hsgp_periodic_sqrt_spd` are the `cov=:periodic`
+# siblings (Riutort-Mayol et al. 2023, "periodic kernel"). Stan's
+# `gp_periodic_cov` is k(x, x') = sigma^2 exp(-2 sin^2(pi |x - x'| / period) /
+# rho^2); with a = 1 / rho^2 and w0 = 2 pi / period its Fourier expansion is
+# sigma^2 exp(-a) [I_0(a) + 2 sum_j I_j(a) cos(j w0 (x - x'))], so the
+# Hilbert-space basis is cos(j w0 x) / sin(j w0 x) with spectral weight
+# q_j = sigma sqrt(2 exp(-a) I_j(a)) on BOTH the cosine and the sine column of
+# harmonic j (the constant I_0 harmonic is dropped -- the formula intercept
+# owns it). `harmonics[b]` is the harmonic index j of basis column b, computed
+# in log space through `log_modified_bessel_first_kind` so a small `rho`
+# (large `a`) cannot overflow exp(a).
 StanBlocks.@deffun begin
     @stanonly brm_gp_locations(X::matrix[n, d])::vector[n, d] = begin
         locations::vector[n, d]
@@ -1848,6 +1860,23 @@ StanBlocks.@deffun begin
                 exponent += rho[axis] * rho[axis] * omega2[b, axis]
             end
             rv[b] = scale * exp(-0.25 * exponent)
+        end
+        return rv
+    end
+
+    @stanonly brm_periodic_cov(X::matrix[n, 1], sigma::real, rho::real,
+                               period::real, jitter::real)::matrix[n, n] = begin
+        return add_diag(gp_periodic_cov(to_array_1d(col(X, 1)), sigma, rho, period),
+                        jitter)
+    end
+
+    @stanonly brm_hsgp_periodic_sqrt_spd(harmonics::vector[m], sigma::real,
+                                          rho::real)::vector[m] = begin
+        rv::vector[m]
+        a = 1. / (rho * rho)
+        base = log(sigma) + 0.5 * (log(2.) - a)
+        for b in 1:m
+            rv[b] = exp(base + 0.5 * log_modified_bessel_first_kind(harmonics[b], a))
         end
         return rv
     end
@@ -1924,6 +1953,17 @@ _sb_gp_aniso = StanBlocks.@slic begin
     return cholesky_decompose(K) * z
 end
 
+# Exact periodic GP (`gp(x; cov=:periodic, period=...)`): one axis, Stan's
+# native `gp_periodic_cov`. `period` is a formula constant bound as data.
+_sb_gp_periodic = StanBlocks.@slic begin
+    n_obs = dims(X)[1]
+    rho   ~ lognormal(0., 1.; lower=0.)
+    sigma ~ lognormal(0., 1.; lower=0.)
+    z     ~ std_normal(; n=n_obs)
+    K = brm_periodic_cov(X, sigma, rho, period, jitter)
+    return cholesky_decompose(K) * z
+end
+
 # Hilbert-space approximate GP (Riutort-Mayol et al. 2022). `PHI` and
 # `omega2` are tensor-product basis data precomputed by Julia. Isotropic and
 # anisotropic variants differ only in whether one or d log length scales are
@@ -1952,6 +1992,22 @@ _sb_hsgp_aniso = StanBlocks.@slic begin
     sigma    ~ lognormal(0., 1.; lower=0.)
     beta_raw ~ std_normal(; n=n_basis)
     sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma, rho)
+    return PHI * (sqrt_spd .* beta_raw)
+end
+
+# Periodic Hilbert-space basis (`hsgp(x; k, cov=:periodic, period=...)`).
+# `PHI` holds the `2k` cosine/sine columns precomputed by Julia and
+# `harmonics` the harmonic index of each column; there is no boundary factor
+# and no domain, so nothing here is data-derived except the axis itself. The
+# parameter names deliberately match `_sb_hsgp` (`rho_iso`, `sigma`,
+# `beta_raw`) so the term-prior addresses and descriptor roles are shared.
+# `rho_lower` is the periodic validity floor (`_sb_hsgp_periodic_rho_lower`).
+_sb_hsgp_periodic = StanBlocks.@slic begin
+    n_basis = dims(harmonics)[1]
+    rho_iso  ~ lognormal(0., 1.; lower=rho_lower)
+    sigma    ~ lognormal(0., 1.; lower=0.)
+    beta_raw ~ std_normal(; n=n_basis)
+    sqrt_spd = brm_hsgp_periodic_sqrt_spd(harmonics, sigma, rho_iso)
     return PHI * (sqrt_spd .* beta_raw)
 end
 
@@ -2150,20 +2206,44 @@ _sb_gp_iso(kw, label::Symbol) = begin
     iso
 end
 
+const _SB_GP_COVARIANCES = (:exp_quad, :periodic)
+
 _sb_gp_cov(kw, label::Symbol) = begin
     cov = get(kw, :cov, :exp_quad)
-    cov === :exp_quad || error(
-        "sbimpl: `$label(...; cov=...)` currently supports only `:exp_quad`, got $(repr(cov))")
+    cov in _SB_GP_COVARIANCES || error(
+        "sbimpl: `$label(...; cov=...)` supports " *
+        join(("`$(repr(c))`" for c in _SB_GP_COVARIANCES), " and ") *
+        ", got $(repr(cov))")
     cov
 end
 
+# `period` is the periodic kernel's formula constant: required with
+# `cov=:periodic`, meaningless (and refused) otherwise.
+function _sb_gp_period(kw, label::Symbol, cov::Symbol)
+    if cov !== :periodic
+        haskey(kw, :period) && error(
+            "sbimpl: `$label(...; period=...)` is meaningful only with " *
+            "`cov=:periodic` (got `cov=$(repr(cov))`)")
+        return nothing
+    end
+    haskey(kw, :period) || error(
+        "sbimpl: `$label(...; cov=:periodic)` requires a numeric `period=` " *
+        "formula constant (the kernel's period on the axis's own scale)")
+    period = kw[:period]
+    (period isa Real && !(period isa Bool) && isfinite(period) && period > 0) || error(
+        "sbimpl: `$label(...; period=...)` expects a finite positive numeric " *
+        "formula constant, got $(repr(period))")
+    Float64(period)
+end
+
 function _check_term_kwargs(::typeof(gp), kw)
-    allowed = (:cov, :iso, :jitter)
+    allowed = (:cov, :iso, :jitter, :period)
     unknown = filter(k -> k ∉ allowed, keys(kw))
     isempty(unknown) || error(
-        "gp: exact GP accepts only `cov`, `iso`, and `jitter`; unsupported keyword(s): $(join(unknown, ", ")). " *
+        "gp: exact GP accepts only `cov`, `iso`, `jitter`, and `period`; unsupported keyword(s): $(join(unknown, ", ")). " *
         "Use `hsgp(...; k=..., c=..., by=...)` for the Hilbert-space approximation.")
-    _sb_gp_cov(kw, :gp)
+    cov = _sb_gp_cov(kw, :gp)
+    _sb_gp_period(kw, :gp, cov)
     _sb_gp_iso(kw, :gp)
     jitter = get(kw, :jitter, 1e-9)
     jitter isa Real && isfinite(jitter) && jitter > 0 || error(
@@ -2172,13 +2252,14 @@ function _check_term_kwargs(::typeof(gp), kw)
 end
 
 function _check_term_kwargs(::typeof(hsgp), kw)
-    allowed = (:cov, :iso, :k, :c, :by, :domain, :orthogonal_to)
+    allowed = (:cov, :iso, :k, :c, :by, :domain, :orthogonal_to, :period)
     unknown = filter(k -> k ∉ allowed, keys(kw))
     isempty(unknown) || error(
         "hsgp: unsupported keyword(s): $(join(unknown, ", ")); " *
-        "supported keywords are `cov`, `iso`, `k`, `c`, `by`, `domain`, and " *
-        "`orthogonal_to`")
-    _sb_gp_cov(kw, :hsgp)
+        "supported keywords are `cov`, `iso`, `k`, `c`, `by`, `domain`, " *
+        "`orthogonal_to`, and `period`")
+    cov = _sb_gp_cov(kw, :hsgp)
+    _sb_gp_period(kw, :hsgp, cov)
     _sb_gp_iso(kw, :hsgp)
     nothing
 end
@@ -2304,6 +2385,70 @@ function _sb_apply_hsgp(fits::Tuple, axes::Tuple, K::Tuple)
         end
     end
     PHI, omega2
+end
+
+# Periodic Hilbert-space basis: `k` harmonics of the fundamental angular
+# frequency `2pi / period`, `2k` columns -- cosines first, then sines -- with
+# no centering, boundary factor, or domain. `harmonics` is the per-column
+# harmonic index the Stan-side spectral weight reads.
+function _sb_apply_hsgp_periodic(period::Real, raw::AbstractVector{<:Real},
+                                 K::Integer)
+    K >= 1 || error("hsgp: k must be >= 1 (got $K)")
+    period > 0 || error("hsgp: period must be positive (got $period)")
+    w0 = 2pi / period
+    PHI = Matrix{Float64}(undef, length(raw), 2K)
+    for j in 1:K, i in eachindex(raw)
+        angle = w0 * j * raw[i]
+        PHI[i, j] = cos(angle)
+        PHI[i, K + j] = sin(angle)
+    end
+    PHI
+end
+
+_sb_hsgp_periodic_harmonics(K::Integer) =
+    Float64[repeat(1:K, 2)...]
+
+# The periodic analogue of `_sb_hsgp_rho_lower`, by the SAME amplitude-ratio
+# rule: the exp-quad floor is the length scale at which the k-th basis
+# function's spectral amplitude (sqrt of the spectral density) has fallen to
+# 1/w of the first's -- `S(omega_k)/S(omega_1) = w^-2`, which is exactly what
+# `(4L/pi) sqrt(log(w)/(k^2-1))` solves. The periodic basis has amplitude
+# q_j = sigma sqrt(2 exp(-a) I_j(a)) with a = 1/rho^2, so the same rule reads
+# `I_k(a)/I_1(a) = w^-2`. That ratio is monotone in `a` and has no closed
+# form, so it is solved by bisection on the exponentially scaled Bessel
+# functions (`besselix`, which never overflows). Unlike exp-quad the floor
+# depends on `k` alone: there is no data-derived domain, so `reprocess` with
+# either `freeze_constants` reproduces it exactly. `k == 1` stays unbounded
+# for the same reason as the exp-quad case (no truncated harmonic to bound).
+function _sb_hsgp_periodic_rho_lower(K::Integer)
+    K > 1 || return 0.0
+    target = _SB_HSGP_WEIGHT_THRESHOLD^-2
+    ratio(loga) = let a = exp(loga)
+        SpecialFunctions.besselix(K, a) / SpecialFunctions.besselix(1, a) - target
+    end
+    # AMOS refuses |z| beyond ~1e8 (argument-reduction accuracy), and the
+    # solution sits at a ~ (k^2 - 1) / (2 log(w^2)) — far inside this bracket
+    # for any usable k.
+    lo, hi = log(1e-12), log(1e7)
+    ratio(lo) < 0 < ratio(hi) || error(
+        "hsgp: internal periodic validity-floor bracket failed for k=$K")
+    for _ in 1:200
+        mid = (lo + hi) / 2
+        ratio(mid) < 0 ? (lo = mid) : (hi = mid)
+    end
+    1 / sqrt(exp((lo + hi) / 2))
+end
+
+function _sb_hsgp_periodic_frozen_check(data, key, names, K::Integer,
+                                        period::Real)
+    frozen = _sb_frozen_preproc_entry(data, key, :hsgp, names)
+    isnothing(frozen) && return nothing
+    const_ = frozen.const_
+    (get(const_, :cov, :exp_quad) === :periodic && const_.K == K &&
+     const_.period == period) || error(
+        "sbimpl: resample replay: fitted periodic HSGP configuration for " *
+        "`$key` no longer matches the re-emitted formula")
+    nothing
 end
 
 function _sb_orthogonalize_hsgp_linear(PHI::AbstractMatrix,
@@ -3759,6 +3904,20 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         axes = _sb_gp_axes_from_df(df, e.raw_ref, :gp)
         new_data[key] = _sb_gp_matrix(axes)
         new_preproc[key] = PreprocEntry(:gp, e.const_, e.raw_ref, false)
+    elseif e.kind === :hsgp && get(e.const_, :cov, :exp_quad) === :periodic
+        axes = _sb_gp_axes_from_df(df, e.raw_ref, :hsgp)
+        length(axes) == 1 || error(
+            "sbimpl: reprocess: periodic `hsgp` expects exactly one axis")
+        K = e.const_.K
+        # Nothing here is fitted: the basis is a function of the formula
+        # constants (period, k) and the new axis alone, so `freeze_constants`
+        # cannot change it and the companion data reproduce byte-for-byte.
+        new_data[key] = _sb_apply_hsgp_periodic(e.const_.period, only(axes), K)
+        new_data[e.const_.harmonics_key] = _sb_hsgp_periodic_harmonics(K)
+        push!(handled, e.const_.harmonics_key)
+        new_data[e.const_.rho_lower_key] = _sb_hsgp_periodic_rho_lower(K)
+        push!(handled, e.const_.rho_lower_key)
+        new_preproc[key] = PreprocEntry(:hsgp, e.const_, e.raw_ref, false)
     elseif e.kind === :hsgp
         axes = _sb_gp_axes_from_df(df, e.raw_ref, :hsgp)
         K = e.const_.K
@@ -6537,6 +6696,8 @@ _sb_gp_submodel(::Val{:_sb_hsgp_by}) = _sb_hsgp_by
 _sb_gp_submodel(::Val{:_sb_hsgp_by_aniso}) = _sb_hsgp_by_aniso
 _sb_gp_submodel(::Val{:_sb_hsgp_latent}) = _sb_hsgp_latent
 _sb_gp_submodel(::Val{:_sb_hsgp_latent_orthogonal}) = _sb_hsgp_latent_orthogonal
+_sb_gp_submodel(::Val{:_sb_gp_periodic}) = _sb_gp_periodic
+_sb_gp_submodel(::Val{:_sb_hsgp_periodic}) = _sb_hsgp_periodic
 
 _sb_gp_rho_lhs(::Val{:_sb_gp}) = :rho
 _sb_gp_rho_lhs(::Val{:_sb_gp_aniso}) = :(rho :: vector[n_axes])
@@ -6546,6 +6707,8 @@ _sb_gp_rho_lhs(::Val{:_sb_hsgp_by}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_by_aniso}) = :(rho :: vector[n_axes])
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_latent}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_latent_orthogonal}) = :rho_iso
+_sb_gp_rho_lhs(::Val{:_sb_gp_periodic}) = :rho
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_periodic}) = :rho_iso
 
 function _sb_gp_prior_stmt(lhs, cfg)
     rhs = copy(cfg.rhs)
@@ -8819,9 +8982,23 @@ _sb_predictor_term!(stmts, data, ::typeof(gp), t; group_block_lookup=Dict(),
     col_name = Symbol(:gp_, suffix)
     data[X_name] = _sb_gp_matrix(axes)
     _sb_record_preproc!(data, X_name, PreprocEntry(:gp, nothing, names, false))
+    jitter = Float64(get(kw, :jitter, 1e-9))
+    cov = _sb_gp_cov(kw, :gp)
+    if cov === :periodic
+        length(names) == 1 || error(
+            "sbimpl: `gp(...; cov=:periodic)` supports exactly one axis, got " *
+            "$(length(names))")
+        _sb_gp_iso(kw, :gp) || error(
+            "sbimpl: `gp(...; cov=:periodic)` has one axis and one length " *
+            "scale; `iso=false` has no meaning here")
+        period = _sb_gp_period(kw, :gp, cov)
+        submodel = _sb_gp_submodel_expr(:_sb_gp_periodic, term_overrides, t)
+        push!(stmts, :($col_name ~ $submodel(;
+            X=$X_name, jitter=$jitter, period=$period)))
+        return col_name
+    end
     submodel = _sb_gp_submodel_expr(
         _sb_gp_iso(kw, :gp) ? :_sb_gp : :_sb_gp_aniso, term_overrides, t)
-    jitter = Float64(get(kw, :jitter, 1e-9))
     push!(stmts, :($col_name ~ $submodel(; X=$X_name, jitter=$jitter)))
     col_name
 end
@@ -8883,6 +9060,10 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     is_raw = all(raw_flags)
     n_axes = length(args)
     K, c = _sb_hsgp_options(kw, n_axes)
+    cov = _sb_gp_cov(kw, :hsgp)
+    period = _sb_gp_period(kw, :hsgp, cov)
+    cov === :periodic && return _sb_hsgp_periodic_term!(
+        stmts, data, t, names, raw, is_raw, K, kw, period, term_overrides)
     domain_fits = _sb_hsgp_domain_fits(kw, n_axes; required=!is_raw)
     orthogonal_to = _sb_hsgp_orthogonal_to(kw, n_axes)
     orthogonal_to === :linear && haskey(kw, :by) && error(
@@ -8991,10 +9172,59 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     col_name
 end
 
+# `hsgp(x; cov=:periodic, period=...)`: one raw axis, `2k` cosine/sine
+# columns, harmonic indices and the periodic validity floor as data. The
+# periodic basis has no boundary factor, domain or projection, and its grouped
+# spelling is not implemented, so every such keyword is refused by name rather
+# than silently ignored.
+function _sb_hsgp_periodic_term!(stmts, data, t, names, raw, is_raw, K, kw,
+                                 period, term_overrides)
+    n_axes = length(names)
+    n_axes == 1 || error(
+        "sbimpl: `hsgp(...; cov=:periodic)` supports exactly one axis, got $n_axes")
+    is_raw || error(
+        "sbimpl: `hsgp(...; cov=:periodic)` currently requires a raw-data axis; " *
+        "a model-derived periodic axis is not supported")
+    _sb_gp_iso(kw, :hsgp) || error(
+        "sbimpl: `hsgp(...; cov=:periodic)` has one axis and one length scale; " *
+        "`iso=false` has no meaning here")
+    for key in (:c, :domain, :orthogonal_to, :by)
+        haskey(kw, key) && error(
+            "sbimpl: `hsgp(...; cov=:periodic)` does not accept `$key=`: the " *
+            "periodic cosine/sine basis has no boundary factor and needs no " *
+            "domain, and its grouped/projected spellings are not implemented")
+    end
+    K1 = only(K)
+    x = only(names)
+    axis = collect(Float64, _sb_real_vec(:hsgp, x, only(raw)))
+    isempty(axis) && error("sbimpl: `hsgp($x)` cannot use an empty axis")
+    all(isfinite, axis) || error("sbimpl: `hsgp($x)` requires finite values")
+
+    PHI_name = Symbol(:PHI_hsgp_, x)
+    harmonics_name = Symbol(:harmonics_hsgp_, x)
+    rho_lower_name = Symbol(:rho_lower_hsgp_, x)
+    _sb_hsgp_periodic_frozen_check(data, PHI_name, names, K1, period)
+    data[PHI_name] = _sb_apply_hsgp_periodic(period, axis, K1)
+    data[harmonics_name] = _sb_hsgp_periodic_harmonics(K1)
+    data[rho_lower_name] = _sb_hsgp_periodic_rho_lower(K1)
+    _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp,
+        (; cov=:periodic, period, K=K1, iso=true,
+         harmonics_key=harmonics_name, rho_lower_key=rho_lower_name),
+        names, false))
+    col_name = Symbol(:hsgp_, x)
+    submodel = _sb_gp_submodel_expr(:_sb_hsgp_periodic, term_overrides, t)
+    push!(stmts, :($col_name ~ $submodel(; PHI=$PHI_name,
+        harmonics=$harmonics_name, rho_lower=$rho_lower_name)))
+    col_name
+end
+
 function _sb_term_group_block(::typeof(hsgp), call)
     kw = getkwargs(call)
     haskey(kw, :by) || return nothing
     _check_term_kwargs(hsgp, kw)
+    _sb_gp_cov(kw, :hsgp) === :periodic && error(
+        "sbimpl: `hsgp(...; cov=:periodic)` does not accept `by=`: the " *
+        "grouped periodic basis is not implemented")
     args = getargs(call)
     isempty(args) && error("sbimpl: `hsgp(x...; by=...)` expects at least one positional axis")
     names = Tuple(name(_sb_named_inner(:hsgp, a)) for a in args)
