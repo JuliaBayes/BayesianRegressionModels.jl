@@ -487,6 +487,31 @@ StanBlocks.@deffun begin
     end
 end
 
+# Sample variance of each treatment-contrast dummy column of a categorical
+# predictor, computed from its 1-based level index rather than from a
+# materialised design matrix -- `_sb_cat` never builds one (it indexes
+# `append_row(0., beta)[x]`). Level `l` in `2:n_levels` is the dummy
+# `1(x == l)`, whose sample variance is `m * (n - m) / (n * (n - 1))` for `m`
+# rows at that level -- exactly `variance(col(X, k))` had the dummy been a
+# design column, so a contrast and a continuous column enter one R2D2
+# simplex on the same explained-variance footing. Data-only, so it lands in
+# transformed data.
+StanBlocks.@deffun begin
+    brm_cat_variances(x::int[n], n_levels::int, n::int)::vector[n_levels - 1] = begin
+        rv = rep_vector(1., n_levels - 1)
+        for l in 2:n_levels
+            m = 0
+            for i in 1:n
+                if x[i] == l
+                    m = m + 1
+                end
+            end
+            rv[l - 1] = (m * (n - m)) / (n * (n - 1.))
+        end
+        rv
+    end
+end
+
 # Multi-membership gathers. Membership indices and weights are row-major flat
 # vectors: entries `(i-1)*n_memberships + m` describe observation `i`, member
 # slot `m`. Keeping indices flat avoids relying on a Stan array-of-int matrix
@@ -1816,6 +1841,18 @@ end
 # `brm_hsgp_sqrt_spd` evaluates the separable d-dimensional squared-exponential
 # spectral density at every tensor-product HSGP frequency. `omega2[b, j]` is
 # the squared angular frequency for basis row b and predictor axis j.
+#
+# `brm_periodic_cov` / `brm_hsgp_periodic_sqrt_spd` are the `cov=:periodic`
+# siblings (Riutort-Mayol et al. 2023, "periodic kernel"). Stan's
+# `gp_periodic_cov` is k(x, x') = sigma^2 exp(-2 sin^2(pi |x - x'| / period) /
+# rho^2); with a = 1 / rho^2 and w0 = 2 pi / period its Fourier expansion is
+# sigma^2 exp(-a) [I_0(a) + 2 sum_j I_j(a) cos(j w0 (x - x'))], so the
+# Hilbert-space basis is cos(j w0 x) / sin(j w0 x) with spectral weight
+# q_j = sigma sqrt(2 exp(-a) I_j(a)) on BOTH the cosine and the sine column of
+# harmonic j (the constant I_0 harmonic is dropped -- the formula intercept
+# owns it). `harmonics[b]` is the harmonic index j of basis column b, computed
+# in log space through `log_modified_bessel_first_kind` so a small `rho`
+# (large `a`) cannot overflow exp(a).
 StanBlocks.@deffun begin
     @stanonly brm_gp_locations(X::matrix[n, d])::vector[n, d] = begin
         locations::vector[n, d]
@@ -1848,6 +1885,23 @@ StanBlocks.@deffun begin
                 exponent += rho[axis] * rho[axis] * omega2[b, axis]
             end
             rv[b] = scale * exp(-0.25 * exponent)
+        end
+        return rv
+    end
+
+    @stanonly brm_periodic_cov(X::matrix[n, 1], sigma::real, rho::real,
+                               period::real, jitter::real)::matrix[n, n] = begin
+        return add_diag(gp_periodic_cov(to_array_1d(col(X, 1)), sigma, rho, period),
+                        jitter)
+    end
+
+    @stanonly brm_hsgp_periodic_sqrt_spd(harmonics::vector[m], sigma::real,
+                                          rho::real)::vector[m] = begin
+        rv::vector[m]
+        a = 1. / (rho * rho)
+        base = log(sigma) + 0.5 * (log(2.) - a)
+        for b in 1:m
+            rv[b] = exp(base + 0.5 * log_modified_bessel_first_kind(harmonics[b], a))
         end
         return rv
     end
@@ -1924,6 +1978,17 @@ _sb_gp_aniso = StanBlocks.@slic begin
     return cholesky_decompose(K) * z
 end
 
+# Exact periodic GP (`gp(x; cov=:periodic, period=...)`): one axis, Stan's
+# native `gp_periodic_cov`. `period` is a formula constant bound as data.
+_sb_gp_periodic = StanBlocks.@slic begin
+    n_obs = dims(X)[1]
+    rho   ~ lognormal(0., 1.; lower=0.)
+    sigma ~ lognormal(0., 1.; lower=0.)
+    z     ~ std_normal(; n=n_obs)
+    K = brm_periodic_cov(X, sigma, rho, period, jitter)
+    return cholesky_decompose(K) * z
+end
+
 # Hilbert-space approximate GP (Riutort-Mayol et al. 2022). `PHI` and
 # `omega2` are tensor-product basis data precomputed by Julia. Isotropic and
 # anisotropic variants differ only in whether one or d log length scales are
@@ -1952,6 +2017,22 @@ _sb_hsgp_aniso = StanBlocks.@slic begin
     sigma    ~ lognormal(0., 1.; lower=0.)
     beta_raw ~ std_normal(; n=n_basis)
     sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma, rho)
+    return PHI * (sqrt_spd .* beta_raw)
+end
+
+# Periodic Hilbert-space basis (`hsgp(x; k, cov=:periodic, period=...)`).
+# `PHI` holds the `2k` cosine/sine columns precomputed by Julia and
+# `harmonics` the harmonic index of each column; there is no boundary factor
+# and no domain, so nothing here is data-derived except the axis itself. The
+# parameter names deliberately match `_sb_hsgp` (`rho_iso`, `sigma`,
+# `beta_raw`) so the term-prior addresses and descriptor roles are shared.
+# `rho_lower` is the periodic validity floor (`_sb_hsgp_periodic_rho_lower`).
+_sb_hsgp_periodic = StanBlocks.@slic begin
+    n_basis = dims(harmonics)[1]
+    rho_iso  ~ lognormal(0., 1.; lower=rho_lower)
+    sigma    ~ lognormal(0., 1.; lower=0.)
+    beta_raw ~ std_normal(; n=n_basis)
+    sqrt_spd = brm_hsgp_periodic_sqrt_spd(harmonics, sigma, rho_iso)
     return PHI * (sqrt_spd .* beta_raw)
 end
 
@@ -2150,20 +2231,44 @@ _sb_gp_iso(kw, label::Symbol) = begin
     iso
 end
 
+const _SB_GP_COVARIANCES = (:exp_quad, :periodic)
+
 _sb_gp_cov(kw, label::Symbol) = begin
     cov = get(kw, :cov, :exp_quad)
-    cov === :exp_quad || error(
-        "sbimpl: `$label(...; cov=...)` currently supports only `:exp_quad`, got $(repr(cov))")
+    cov in _SB_GP_COVARIANCES || error(
+        "sbimpl: `$label(...; cov=...)` supports " *
+        join(("`$(repr(c))`" for c in _SB_GP_COVARIANCES), " and ") *
+        ", got $(repr(cov))")
     cov
 end
 
+# `period` is the periodic kernel's formula constant: required with
+# `cov=:periodic`, meaningless (and refused) otherwise.
+function _sb_gp_period(kw, label::Symbol, cov::Symbol)
+    if cov !== :periodic
+        haskey(kw, :period) && error(
+            "sbimpl: `$label(...; period=...)` is meaningful only with " *
+            "`cov=:periodic` (got `cov=$(repr(cov))`)")
+        return nothing
+    end
+    haskey(kw, :period) || error(
+        "sbimpl: `$label(...; cov=:periodic)` requires a numeric `period=` " *
+        "formula constant (the kernel's period on the axis's own scale)")
+    period = kw[:period]
+    (period isa Real && !(period isa Bool) && isfinite(period) && period > 0) || error(
+        "sbimpl: `$label(...; period=...)` expects a finite positive numeric " *
+        "formula constant, got $(repr(period))")
+    Float64(period)
+end
+
 function _check_term_kwargs(::typeof(gp), kw)
-    allowed = (:cov, :iso, :jitter)
+    allowed = (:cov, :iso, :jitter, :period)
     unknown = filter(k -> k ∉ allowed, keys(kw))
     isempty(unknown) || error(
-        "gp: exact GP accepts only `cov`, `iso`, and `jitter`; unsupported keyword(s): $(join(unknown, ", ")). " *
+        "gp: exact GP accepts only `cov`, `iso`, `jitter`, and `period`; unsupported keyword(s): $(join(unknown, ", ")). " *
         "Use `hsgp(...; k=..., c=..., by=...)` for the Hilbert-space approximation.")
-    _sb_gp_cov(kw, :gp)
+    cov = _sb_gp_cov(kw, :gp)
+    _sb_gp_period(kw, :gp, cov)
     _sb_gp_iso(kw, :gp)
     jitter = get(kw, :jitter, 1e-9)
     jitter isa Real && isfinite(jitter) && jitter > 0 || error(
@@ -2172,13 +2277,14 @@ function _check_term_kwargs(::typeof(gp), kw)
 end
 
 function _check_term_kwargs(::typeof(hsgp), kw)
-    allowed = (:cov, :iso, :k, :c, :by, :domain, :orthogonal_to)
+    allowed = (:cov, :iso, :k, :c, :by, :domain, :orthogonal_to, :period)
     unknown = filter(k -> k ∉ allowed, keys(kw))
     isempty(unknown) || error(
         "hsgp: unsupported keyword(s): $(join(unknown, ", ")); " *
-        "supported keywords are `cov`, `iso`, `k`, `c`, `by`, `domain`, and " *
-        "`orthogonal_to`")
-    _sb_gp_cov(kw, :hsgp)
+        "supported keywords are `cov`, `iso`, `k`, `c`, `by`, `domain`, " *
+        "`orthogonal_to`, and `period`")
+    cov = _sb_gp_cov(kw, :hsgp)
+    _sb_gp_period(kw, :hsgp, cov)
     _sb_gp_iso(kw, :hsgp)
     nothing
 end
@@ -2304,6 +2410,70 @@ function _sb_apply_hsgp(fits::Tuple, axes::Tuple, K::Tuple)
         end
     end
     PHI, omega2
+end
+
+# Periodic Hilbert-space basis: `k` harmonics of the fundamental angular
+# frequency `2pi / period`, `2k` columns -- cosines first, then sines -- with
+# no centering, boundary factor, or domain. `harmonics` is the per-column
+# harmonic index the Stan-side spectral weight reads.
+function _sb_apply_hsgp_periodic(period::Real, raw::AbstractVector{<:Real},
+                                 K::Integer)
+    K >= 1 || error("hsgp: k must be >= 1 (got $K)")
+    period > 0 || error("hsgp: period must be positive (got $period)")
+    w0 = 2pi / period
+    PHI = Matrix{Float64}(undef, length(raw), 2K)
+    for j in 1:K, i in eachindex(raw)
+        angle = w0 * j * raw[i]
+        PHI[i, j] = cos(angle)
+        PHI[i, K + j] = sin(angle)
+    end
+    PHI
+end
+
+_sb_hsgp_periodic_harmonics(K::Integer) =
+    Float64[repeat(1:K, 2)...]
+
+# The periodic analogue of `_sb_hsgp_rho_lower`, by the SAME amplitude-ratio
+# rule: the exp-quad floor is the length scale at which the k-th basis
+# function's spectral amplitude (sqrt of the spectral density) has fallen to
+# 1/w of the first's -- `S(omega_k)/S(omega_1) = w^-2`, which is exactly what
+# `(4L/pi) sqrt(log(w)/(k^2-1))` solves. The periodic basis has amplitude
+# q_j = sigma sqrt(2 exp(-a) I_j(a)) with a = 1/rho^2, so the same rule reads
+# `I_k(a)/I_1(a) = w^-2`. That ratio is monotone in `a` and has no closed
+# form, so it is solved by bisection on the exponentially scaled Bessel
+# functions (`besselix`, which never overflows). Unlike exp-quad the floor
+# depends on `k` alone: there is no data-derived domain, so `reprocess` with
+# either `freeze_constants` reproduces it exactly. `k == 1` stays unbounded
+# for the same reason as the exp-quad case (no truncated harmonic to bound).
+function _sb_hsgp_periodic_rho_lower(K::Integer)
+    K > 1 || return 0.0
+    target = _SB_HSGP_WEIGHT_THRESHOLD^-2
+    ratio(loga) = let a = exp(loga)
+        SpecialFunctions.besselix(K, a) / SpecialFunctions.besselix(1, a) - target
+    end
+    # AMOS refuses |z| beyond ~1e8 (argument-reduction accuracy), and the
+    # solution sits at a ~ (k^2 - 1) / (2 log(w^2)) — far inside this bracket
+    # for any usable k.
+    lo, hi = log(1e-12), log(1e7)
+    ratio(lo) < 0 < ratio(hi) || error(
+        "hsgp: internal periodic validity-floor bracket failed for k=$K")
+    for _ in 1:200
+        mid = (lo + hi) / 2
+        ratio(mid) < 0 ? (lo = mid) : (hi = mid)
+    end
+    1 / sqrt(exp((lo + hi) / 2))
+end
+
+function _sb_hsgp_periodic_frozen_check(data, key, names, K::Integer,
+                                        period::Real)
+    frozen = _sb_frozen_preproc_entry(data, key, :hsgp, names)
+    isnothing(frozen) && return nothing
+    const_ = frozen.const_
+    (get(const_, :cov, :exp_quad) === :periodic && const_.K == K &&
+     const_.period == period) || error(
+        "sbimpl: resample replay: fitted periodic HSGP configuration for " *
+        "`$key` no longer matches the re-emitted formula")
+    nothing
 end
 
 function _sb_orthogonalize_hsgp_linear(PHI::AbstractMatrix,
@@ -2880,7 +3050,8 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     # for per-sub-formula emission below.
     id_buckets = _sb_collect_id_buckets(brmi)
     ranef_effect_overrides = _sb_ranef_effect_overrides(brmi, id_buckets)
-    ranef_r2d2_overrides = _sb_ranef_r2d2_overrides(brmi, id_buckets)
+    ranef_r2d2_overrides = _sb_ranef_r2d2_overrides(brmi, id_buckets,
+                                                    effect_overrides)
     # A sampled observation/reference scale must be declared before the bucket
     # prepass consumes it.  Opted-in R2D2 models alone move those scalar priors
     # forward; the ordinary statement order stays byte-identical.
@@ -2929,9 +3100,14 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     # statement, so every other model's emission is untouched.
     r2d2_overrides = _sb_r2d2_overrides(brmi, id_buckets, effect_overrides)
     r2d2_names = _sb_emit_r2d2_params!(stmts, data, r2d2_overrides)
+    # Filled by the bucket prepass for a joint `sd(:, ID) ~ r2d2(...;
+    # include=...)` block: per scoped predictor, the global simplex positions
+    # of its population columns / contrast blocks and its margin reference.
+    # Empty for every other model.
+    r2d2_joint = Dict{Symbol,NamedTuple}()
     id_lookup = _sb_emit_id_buckets!(stmts, data, id_buckets;
         cv_groups, centered_groups, ranef_effect_overrides, r2d2_names,
-        ranef_r2d2_overrides)
+        ranef_r2d2_overrides, r2d2_joint)
     # Prepass 2.5: group-block terms. For each `mu ~ f(...)` where f has a
     # _sb_term_group_block declaration, allocate one ranef_correlated_draws
     # block per (f, group-column) pair. The lookup is threaded into _sb_emit!
@@ -2952,7 +3128,8 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
         obs_n = get(target_obs, key, nothing)
         _sb_emit!(stmts, data, key, parent(nc); id_lookup, obs_n, cv_groups,
                   centered_groups, group_block_lookup, effect_overrides,
-                  r2d2=(; overrides=r2d2_overrides, names=r2d2_names))
+                  r2d2=(; overrides=r2d2_overrides, names=r2d2_names,
+                          joint=r2d2_joint))
     end
     # Post-pass: fuse pure-population Gaussian likelihoods into Stan's
     # `normal_id_glm_lpdf`. Whole-model, because its decisive guard is
@@ -3759,6 +3936,20 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         axes = _sb_gp_axes_from_df(df, e.raw_ref, :gp)
         new_data[key] = _sb_gp_matrix(axes)
         new_preproc[key] = PreprocEntry(:gp, e.const_, e.raw_ref, false)
+    elseif e.kind === :hsgp && get(e.const_, :cov, :exp_quad) === :periodic
+        axes = _sb_gp_axes_from_df(df, e.raw_ref, :hsgp)
+        length(axes) == 1 || error(
+            "sbimpl: reprocess: periodic `hsgp` expects exactly one axis")
+        K = e.const_.K
+        # Nothing here is fitted: the basis is a function of the formula
+        # constants (period, k) and the new axis alone, so `freeze_constants`
+        # cannot change it and the companion data reproduce byte-for-byte.
+        new_data[key] = _sb_apply_hsgp_periodic(e.const_.period, only(axes), K)
+        new_data[e.const_.harmonics_key] = _sb_hsgp_periodic_harmonics(K)
+        push!(handled, e.const_.harmonics_key)
+        new_data[e.const_.rho_lower_key] = _sb_hsgp_periodic_rho_lower(K)
+        push!(handled, e.const_.rho_lower_key)
+        new_preproc[key] = PreprocEntry(:hsgp, e.const_, e.raw_ref, false)
     elseif e.kind === :hsgp
         axes = _sb_gp_axes_from_df(df, e.raw_ref, :hsgp)
         K = e.const_.K
@@ -5767,6 +5958,10 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     # they ride down to the emitter that owns the term's submodel call rather
     # than being resolved into a per-column vector the way `pop` is.
     term_overrides = _sb_term_effect_overrides(effect_overrides, brmi_key)
+    # A joint block-wide `sd(:, ID) ~ r2d2(...; include=...)` decomposition's
+    # claim on THIS predictor's population columns and contrast blocks
+    # (`_sb_ranef_r2d2_joint`); `nothing` for every unscoped predictor.
+    joint_spec = get(r2d2.joint, brmi_key, nothing)
 
     if !isempty(pop_terms)
         col_exprs = Any[]
@@ -5801,7 +5996,14 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
             push!(stmts, :($X_name = $(Expr(:call, :hcat, col_exprs...))))
             overrides = _sb_pop_effect_overrides(effect_overrides, brmi_key)
             r2d2_spec = get(r2d2.overrides, brmi_key, nothing)
-            if !isnothing(r2d2_spec) && r2d2_spec.n_shares > 0
+            if !isnothing(joint_spec) && joint_spec.n_shares > 0
+                # Joint block-wide budget: the same `_popefs_normal` emission
+                # as the whole-predictor form, indexing the block's ONE global
+                # simplex and scaled by this predictor's margin reference.
+                _sb_emit_r2d2_popefs!(stmts, data, brmi_key, X_name, pop_name,
+                                      length(col_exprs), joint_spec, joint_spec,
+                                      overrides; n_phi=joint_spec.n_phi)
+            elseif !isnothing(r2d2_spec) && r2d2_spec.n_shares > 0
                 _sb_emit_r2d2_popefs!(stmts, data, brmi_key, X_name, pop_name,
                                       length(col_exprs), r2d2_spec,
                                       r2d2.names[brmi_key], overrides)
@@ -5827,9 +6029,12 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     end
 
     cat_overrides = _sb_cat_effect_overrides(effect_overrides, brmi_key)
+    cat_r2d2 = isnothing(joint_spec) ? Dict{Symbol,NamedTuple}() :
+               joint_spec.cat_lookup
     for dt in direct_terms
         _sb_emit_direct!(stmts, data, target, dt, summands;
-                         group_block_lookup, cat_overrides, term_overrides)
+                         group_block_lookup, cat_overrides, cat_r2d2,
+                         term_overrides)
     end
 
     # A plain (un-`|ID|`'d) random effect under an `r2d2` decomposition IS the
@@ -6109,7 +6314,7 @@ function _sb_cat_entries(brmi::BRMI, lhs::Symbol)
     for t in _sb_terms(rhs)
         _sb_classify_term!(t, pop_terms, ran_terms, direct_terms)
     end
-    [(; address=name(t), emitted=_sb_cat_block_name(emitted_lp, name(t)))
+    [(; address=name(t), emitted=_sb_cat_block_name(emitted_lp, name(t)), term=t)
      for t in direct_terms
      if t isa NamedColumn && !isnothing(_sb_cat_levels(t))]
 end
@@ -6537,6 +6742,8 @@ _sb_gp_submodel(::Val{:_sb_hsgp_by}) = _sb_hsgp_by
 _sb_gp_submodel(::Val{:_sb_hsgp_by_aniso}) = _sb_hsgp_by_aniso
 _sb_gp_submodel(::Val{:_sb_hsgp_latent}) = _sb_hsgp_latent
 _sb_gp_submodel(::Val{:_sb_hsgp_latent_orthogonal}) = _sb_hsgp_latent_orthogonal
+_sb_gp_submodel(::Val{:_sb_gp_periodic}) = _sb_gp_periodic
+_sb_gp_submodel(::Val{:_sb_hsgp_periodic}) = _sb_hsgp_periodic
 
 _sb_gp_rho_lhs(::Val{:_sb_gp}) = :rho
 _sb_gp_rho_lhs(::Val{:_sb_gp_aniso}) = :(rho :: vector[n_axes])
@@ -6546,6 +6753,8 @@ _sb_gp_rho_lhs(::Val{:_sb_hsgp_by}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_by_aniso}) = :(rho :: vector[n_axes])
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_latent}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_latent_orthogonal}) = :rho_iso
+_sb_gp_rho_lhs(::Val{:_sb_gp_periodic}) = :rho
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_periodic}) = :rho_iso
 
 function _sb_gp_prior_stmt(lhs, cfg)
     rhs = copy(cfg.rhs)
@@ -6649,13 +6858,16 @@ _sb_cat_levels_vec(_v) = nothing
 # `cat_<lp>_<c> ~ _sb_cat(; x=<c>_idx, n_levels=<c>_n_levels)`.
 # `mo1(c)` reuses `_sb_mo`; smooths own their complete fixed + penalized bases.
 _sb_emit_direct!(stmts, data, target::Symbol, t::NamedColumn, summands;
-                 cat_overrides=Dict{Symbol,Any}(), kwargs...) = begin
+                 cat_overrides=Dict{Symbol,Any}(), cat_r2d2=Dict{Symbol,NamedTuple}(),
+                 kwargs...) = begin
     block = _sb_cat_block_name(target, name(t))
     _sb_emit_cat!(stmts, data, target, t, summands;
-                  prior=get(cat_overrides, block, nothing))
+                  prior=get(cat_overrides, block, nothing),
+                  r2d2=get(cat_r2d2, block, nothing))
 end
 function _sb_emit_direct!(stmts, data, target::Symbol, t::ExprColumn, summands;
                           group_block_lookup=Dict(), cat_overrides=Dict{Symbol,Any}(),
+                          cat_r2d2=Dict{Symbol,NamedTuple}(),
                           term_overrides=Dict{Symbol,Any}())
     f = getf(t)
     if f === gp || f === hsgp
@@ -6724,8 +6936,16 @@ _sb_emit_direct_expr!(_stmts, _data, _target::Symbol, f, _t, _summands; kwargs..
 # predictor). The `PreprocEntry(:factor)` provenance is recorded for every K, so
 # frozen reprocess / unseen-level fail-closed behaves identically at K == 1; and
 # an `effect(...)` prior on a K == 1 block simply has zero contrasts to apply to.
+#
+# `r2d2` is the joint block-wide decomposition's claim on this block (see
+# `_sb_ranef_r2d2_overrides`): the K-1 contrasts then take the R2D2M2 scale
+# `ref * sqrt(phi[j] * R2 / ((1 - R2) * Var(dummy_j)))` through the SAME
+# `_sb_cat_normal` sibling the explicit-Normal path selects, so the sampled
+# `cat_<lp>_<c>_beta` carrier and every descriptor/coordinate reader are
+# unchanged. The prepass has already refused an explicit `effect(lp, c)`
+# override on a decomposed block, so `prior` and `r2d2` never both arrive.
 function _sb_emit_cat!(stmts, data, target::Symbol, t::NamedColumn, summands;
-                       prior=nothing)
+                       prior=nothing, r2d2=nothing)
     backing = parent(t)
     n_levels, idx = _sb_level_index(parent(backing))
     col_name = _sb_cat_block_name(target, name(t))
@@ -6738,7 +6958,30 @@ function _sb_emit_cat!(stmts, data, target::Symbol, t::NamedColumn, summands;
     # (derived from raw_ref). Dimension-coupled (unseen level / changed count).
     _sb_record_preproc!(data, idx_name,
         PreprocEntry(:factor, _sb_fit_levels(parent(backing)), name(t), true))
-    if isnothing(prior)
+    if !isnothing(r2d2)
+        isnothing(prior) || error(
+            "sbimpl: internal r2d2 error: categorical block `$col_name` carries " *
+            "both a joint decomposition claim and an explicit contrast prior")
+        r2d2.n_contrasts == n_levels - 1 || error(
+            "sbimpl: internal r2d2 alignment error for `$col_name`: " *
+            "$(r2d2.n_contrasts) decomposed contrasts for $(n_levels - 1) " *
+            "emitted contrasts")
+        share_name = Symbol(col_name, :_r2d2_share_idx)
+        fall_name  = Symbol(col_name, :_r2d2_fallback)
+        varx_name  = Symbol(col_name, :_r2d2_varx)
+        scale_name = Symbol(col_name, :_r2d2_beta_scale)
+        data[share_name] = collect(r2d2.phi_start .+ (1:(n_levels - 1)))
+        data[fall_name]  = ones(Float64, n_levels - 1)
+        _sb_record_static!(data, share_name)
+        _sb_record_static!(data, fall_name)
+        push!(stmts, :($varx_name = brm_cat_variances(
+            $idx_name, $n_name, num_elements($idx_name))))
+        push!(stmts, :($scale_name = brm_r2d2_scale(
+            $share_name, $fall_name, $varx_name, $(r2d2.phi_name),
+            $(r2d2.r2_name), $(r2d2.tau_expr), $n_name - 1, $(r2d2.n_phi))))
+        push!(stmts, :($col_name ~ _sb_cat_normal(;
+            x=$idx_name, n_levels=$n_name, beta_loc=0.0, beta_scale=$scale_name)))
+    elseif isnothing(prior)
         push!(stmts, :($col_name ~ _sb_cat(; x=$idx_name, n_levels=$n_name)))
     else
         loc, scale = _sb_effect_normal_args(prior)
@@ -7386,10 +7629,15 @@ end
 # prior.  Unaddressed margins retain an independent half-standard-Normal scale.
 # Correlation remains a separate `cor(:, p) ~ LKJCholesky(K, eta)` prior.
 
-function _sb_ranef_r2d2_reference(spec, spelling)
-    haskey(spec.keywords, :reference_scale) || error(
-        "sbimpl: `$spelling ~ r2d2(...)` requires `reference_scale=`; " *
-        "use the observation/residual SD whose variance defines R²")
+function _sb_ranef_r2d2_reference(spec, spelling; required=true)
+    if !haskey(spec.keywords, :reference_scale)
+        # The joint latent form (`include=`) samples an omitted margin
+        # reference; the plain R2D2M2 form has no such fallback because its
+        # reference IS the observation scale the allocation is measured in.
+        required || return nothing
+        error("sbimpl: `$spelling ~ r2d2(...)` requires `reference_scale=`; " *
+              "use the observation/residual SD whose variance defines R²")
+    end
     value = _sb_effect_prior_arg(spec.keywords.reference_scale)
     if value isa Real
         isfinite(value) && value > 0 || error(
@@ -7404,18 +7652,63 @@ function _sb_ranef_r2d2_reference(spec, spelling)
     value
 end
 
-function _sb_ranef_r2d2_config(spec, spelling; override_only=false)
+# `include=` on the block-wide statement widens the block's ONE R²/Dirichlet
+# allocation to population components of every linear predictor slicing the
+# block (the joint R2D2M2 budget). Members: `:population` (non-intercept
+# `beta_pop` columns), `:contrasts` (categorical treatment-contrast
+# coefficients); `:ranef` names the margins, which are always allocated and may
+# be listed for readability only. Symbol keywords reach the backend as plain
+# Symbols and symbol tuples as Julia tuples (exactly like `hsgp(cov=:exp_quad)`
+# and `t2(basis=(:cr, :cr))`), so no parser change is involved.
+const _SB_R2D2_INCLUDE = (:population, :contrasts, :ranef)
+
+function _sb_ranef_r2d2_include(spec, spelling)
+    haskey(spec.keywords, :include) || return nothing
+    raw = spec.keywords.include
+    members = raw isa Symbol ? Symbol[raw] :
+        (raw isa Tuple || raw isa AbstractVector) && all(m -> m isa Symbol, raw) ?
+            Symbol[raw...] :
+        error("sbimpl: `$spelling ~ r2d2(include=...)` expects a Symbol or a " *
+              "tuple of Symbols drawn from $(join(_SB_R2D2_INCLUDE, ", ")), " *
+              "got $(repr(raw))")
+    isempty(members) && error(
+        "sbimpl: `$spelling ~ r2d2(include=...)` names no component; use " *
+        "$(join(_SB_R2D2_INCLUDE, ", "))")
+    for m in members
+        m in _SB_R2D2_INCLUDE || error(
+            "sbimpl: unknown `include=` member `$m` for `$spelling`; supported " *
+            "members are $(join(_SB_R2D2_INCLUDE, ", "))")
+    end
+    length(unique(members)) == length(members) || error(
+        "sbimpl: duplicate `include=` member for `$spelling`")
+    population = :population in members
+    contrasts = :contrasts in members
+    (population || contrasts) || error(
+        "sbimpl: `$spelling ~ r2d2(include=...)` names no population " *
+        "component; the block's margins are always allocated. Add " *
+        "`:population` and/or `:contrasts`, or drop `include=` for the plain " *
+        "R2D2M2 form.")
+    (; population, contrasts)
+end
+
+function _sb_ranef_r2d2_config(spec, spelling; override_only=false,
+                               block_wide=false)
     isempty(spec.arguments) || error(
         "sbimpl: `$spelling ~ r2d2(...)` takes keyword arguments only")
     known = (:R2, :mean_R2, :prec_R2, :alpha, :concentration,
-             :reference_scale)
+             :reference_scale, :include)
     for key in keys(spec.keywords)
         key in known || error(
             "sbimpl: unknown r2d2 keyword `$key` for `$spelling`; supported " *
             "keywords are $(join(known, ", "))")
     end
-    reference = _sb_ranef_r2d2_reference(spec, spelling)
+    include = _sb_ranef_r2d2_include(spec, spelling)
     if override_only
+        isnothing(include) || error(
+            "sbimpl: a margin-specific `$spelling ~ r2d2(...)` under a " *
+            "block-wide decomposition may override only `reference_scale`; " *
+            "`include=` belongs on the block-wide `sd(:, $(spec.id))` statement")
+        reference = _sb_ranef_r2d2_reference(spec, spelling)
         extras = [key for key in keys(spec.keywords)
                   if key !== :reference_scale]
         isempty(extras) || error(
@@ -7424,6 +7717,15 @@ function _sb_ranef_r2d2_config(spec, spelling; override_only=false)
             "the block owns one global R² and concentration")
         return (; reference)
     end
+    (isnothing(include) || block_wide) || error(
+        "sbimpl: `$spelling ~ r2d2(include=...)` is the joint block-wide " *
+        "budget and requires the block-wide address `sd(:, $(spec.id))`; a " *
+        "per-margin ICC statement decomposes nothing but its own margins")
+    # With `include=` an omitted margin reference is sampled (the allocation is
+    # of LATENT between-group variation, so no observation scale defines it);
+    # the plain R2D2M2 form keeps its mandatory observation reference.
+    reference = _sb_ranef_r2d2_reference(spec, spelling;
+                                         required=isnothing(include))
 
     has_beta = haskey(spec.keywords, :R2)
     has_moments = haskey(spec.keywords, :mean_R2) ||
@@ -7452,7 +7754,93 @@ function _sb_ranef_r2d2_config(spec, spelling; override_only=false)
     raw_alpha = get(spec.keywords, :alpha,
                     get(spec.keywords, :concentration, 1.0))
     alpha = _sb_r2d2_positive(raw_alpha, "concentration", spelling)
-    (; reference, r2_a, r2_b, alpha)
+    (; reference, r2_a, r2_b, alpha, include)
+end
+
+# Resolve the population components a joint block-wide decomposition claims:
+# for every linear predictor slicing `|id|`, its non-intercept `beta_pop`
+# columns (`:population`) and its categorical contrast blocks (`:contrasts`),
+# each assigned GLOBAL simplex positions after the block's margins. A
+# predictor's population components take the reference of its own margin --
+# its `Intercept` margin, or its single margin -- because a coefficient's
+# explained variance `beta^2 * Var(x)` and the margin's unexplained variance
+# live on that predictor's latent scale. Explicit per-column `effect(lp, coef)
+# ~ Normal(...)` and `effect(lp, categorical) ~ Normal(...)` statements inside
+# the scope are REFUSED: under one joint budget an override would silently
+# pull that coefficient out of the simplex (snag `sbimpl-r2d2-expl-33fca9c1`
+# is the whole-predictor form's silent version of exactly that), so the
+# statement has to say which prior it means. Intercepts stay outside and keep
+# their ordinary or explicitly overridden prior.
+function _sb_ranef_r2d2_joint(brmi::BRMI, id, margins, include, effect_overrides)
+    n_margins = length(margins)
+    lps = unique(Symbol[m.predictor for m in margins])
+    whole = Set{Symbol}(spec.predictor for spec in r2d2_priors(brmi)
+                        if !isnothing(spec.predictor))
+    predictors = OrderedCollections.OrderedDict{Symbol,NamedTuple}()
+    cursor = n_margins
+    for lp in lps
+        lp in whole && error(
+            "sbimpl: `sd(:, $id) ~ r2d2(...; include=...)` allocates the " *
+            "population coefficients of `$lp`, which already carry a " *
+            "whole-predictor `effect($lp, :) ~ r2d2(...)` decomposition; " *
+            "choose one variance allocation for `$lp`")
+        hits = findall(m -> m.predictor === lp, margins)
+        intercept = findfirst(i -> margins[i].coefficient === :Intercept, hits)
+        ref_index = !isnothing(intercept) ? hits[intercept] :
+            length(hits) == 1 ? only(hits) :
+            error("sbimpl: `sd(:, $id) ~ r2d2(...; include=...)` cannot pick a " *
+                  "reference margin for the population coefficients of `$lp`: " *
+                  "it contributes $(length(hits)) margins to `|$id|` and none " *
+                  "is its intercept")
+        labels = if _sb_is_prior_declaration(brmi, lp)
+            Symbol[]
+        else
+            resolved = try
+                popcoefnames(brmi, lp)
+            catch err
+                error("sbimpl: `sd(:, $id) ~ r2d2(...; include=...)` cannot " *
+                      "resolve the population columns of `$lp`: " *
+                      "$(sprint(showerror, err))")
+            end
+            isnothing(resolved) ? Symbol[] : resolved
+        end
+        share_idx = zeros(Int, length(labels))
+        n_shares = 0
+        if include.population
+            col_overrides = _sb_pop_effect_overrides(effect_overrides, lp)
+            for (i, label) in pairs(labels)
+                label === :Intercept && continue
+                isnothing(col_overrides) || isnothing(col_overrides[i]) || error(
+                    "sbimpl: `effect($lp, $label) ~ Normal(...)` conflicts with " *
+                    "the joint decomposition `sd(:, $id) ~ r2d2(...; include=...)`, " *
+                    "which owns every non-intercept population coefficient of " *
+                    "`$lp`; drop the override, or leave `$lp` out of `|$id|`")
+                cursor += 1
+                n_shares += 1
+                share_idx[i] = cursor
+            end
+        end
+        cats = NamedTuple[]
+        if include.contrasts
+            entries = _sb_cat_entries(brmi, lp)
+            cat_overrides = _sb_cat_effect_overrides(effect_overrides, lp)
+            for e in (isnothing(entries) ? NamedTuple[] : entries)
+                haskey(cat_overrides, e.emitted) && error(
+                    "sbimpl: `effect($lp, $(e.address)) ~ Normal(...)` conflicts " *
+                    "with the joint decomposition `sd(:, $id) ~ r2d2(...; " *
+                    "include=...)`, which owns the contrast coefficients of " *
+                    "`$lp`; drop the override, or leave `:contrasts` out of " *
+                    "`include=`")
+                n_levels, _ = _sb_level_index(_sb_cat_levels(e.term))
+                n_contrasts = n_levels - 1
+                push!(cats, (; emitted=e.emitted, address=e.address,
+                              n_contrasts, phi_start=cursor))
+                cursor += n_contrasts
+            end
+        end
+        predictors[lp] = (; labels, share_idx, n_shares, ref_index, cats)
+    end
+    (; predictors, n_extra=cursor - n_margins)
 end
 
 function _sb_ranef_r2d2_spelling(spec)
@@ -7460,7 +7848,8 @@ function _sb_ranef_r2d2_spelling(spec)
     (isnothing(spec.coefficient) ? "" : ", $(spec.coefficient)") * ")"
 end
 
-function _sb_ranef_r2d2_overrides(brmi::BRMI, id_buckets)
+function _sb_ranef_r2d2_overrides(brmi::BRMI, id_buckets,
+                                  effect_overrides=Dict{Symbol,Any}())
     all_specs = ranef_effect_priors(brmi)
     specs = [spec for spec in all_specs
              if spec.class === :sd && spec.family === r2d2]
@@ -7497,11 +7886,16 @@ function _sb_ranef_r2d2_overrides(brmi::BRMI, id_buckets)
         length(block_specs) <= 1 || error(
             "sbimpl: duplicate block-wide `sd(:, $id) ~ r2d2(...)` statements")
         groups = NamedTuple[]
+        joint = nothing
         if !isempty(block_specs)
             base_spec = only(block_specs)
             base = _sb_ranef_r2d2_config(
-                base_spec, _sb_ranef_r2d2_spelling(base_spec))
-            references = fill(base.reference, length(margins))
+                base_spec, _sb_ranef_r2d2_spelling(base_spec); block_wide=true)
+            # `Any` on purpose: a constant block reference (`Float64`) and a
+            # sampled per-margin override (`Symbol`) legitimately coexist, and
+            # under `include=` an omitted reference is `nothing` until the
+            # emitter samples it.
+            references = Any[base.reference for _ in margins]
             claims = Dict{Int,Int}()
             for spec in id_specs
                 spec === base_spec && continue
@@ -7523,9 +7917,14 @@ function _sb_ranef_r2d2_overrides(brmi::BRMI, id_buckets)
                     end
                 end
             end
+            if !isnothing(base.include)
+                joint = _sb_ranef_r2d2_joint(brmi, id, margins, base.include,
+                                             effect_overrides)
+            end
             push!(groups, (; indices=collect(eachindex(margins)), references,
                             r2_a=base.r2_a, r2_b=base.r2_b,
-                            alpha=base.alpha))
+                            alpha=base.alpha,
+                            n_extra=isnothing(joint) ? 0 : joint.n_extra))
         else
             claimed = Dict{Int,String}()
             for spec in id_specs
@@ -7542,36 +7941,72 @@ function _sb_ranef_r2d2_overrides(brmi::BRMI, id_buckets)
                     claimed[index] = spelling
                 end
                 push!(groups, (; indices=collect(indices),
-                                references=fill(config.reference,
-                                                length(indices)),
+                                references=Any[config.reference
+                                               for _ in indices],
                                 r2_a=config.r2_a, r2_b=config.r2_b,
-                                alpha=config.alpha))
+                                alpha=config.alpha, n_extra=0))
             end
         end
         references = unique(Symbol[ref for group in groups
                                    for ref in group.references
                                    if ref isa Symbol])
-        out[key] = (; margins, groups, references)
+        out[key] = (; margins, groups, references, joint)
     end
     out
 end
 
+# `joint_out` receives, per scoped linear predictor, the emission-ready claim
+# of a joint block-wide decomposition on that predictor's population columns
+# and contrast blocks (`_sb_ranef_r2d2_joint`). The per-target emitter reads
+# it through the threaded `r2d2.joint` bundle; the plain R2D2M2 form leaves it
+# empty, so every other predictor's emission is untouched.
 function _sb_emit_ranef_r2d2_tau!(stmts, data, bucket_name, n_terms,
-                                   decomposition)
+                                   decomposition;
+                                   joint_out=Dict{Symbol,NamedTuple}())
     tau = Any[nothing for _ in 1:n_terms]
+    joint = decomposition.joint
     for (group_index, group) in enumerate(decomposition.groups)
         stem = Symbol(bucket_name, :_r2d2_, group_index)
         r2_name = Symbol(stem, :_R2)
         phi_name = Symbol(stem, :_phi)
         alpha_name = Symbol(stem, :_alpha)
+        n_phi = length(group.indices) + group.n_extra
         push!(stmts, :($r2_name ~ beta($(group.r2_a), $(group.r2_b))))
-        data[alpha_name] = fill(group.alpha, length(group.indices))
+        data[alpha_name] = fill(group.alpha, n_phi)
         _sb_record_static!(data, alpha_name)
         push!(stmts, :($phi_name ~ dirichlet($alpha_name)))
+        refs = Any[]
         for (local_index, margin_index) in enumerate(group.indices)
             ref = group.references[local_index]
+            if isnothing(ref)
+                # Joint latent form with no reference for this margin: the
+                # margin's unexplained scale is a sampled half-standard-normal,
+                # the same honest default the whole-predictor form uses for an
+                # omitted `tau_bsv` (there is no observed response scale to
+                # anchor a latent predictor to).
+                ref = Symbol(stem, :_ref_, margin_index)
+                push!(stmts, :($ref ~ std_normal(; lower=0.)))
+            end
+            push!(refs, ref)
             tau[margin_index] = :($ref * sqrt(
                 ($phi_name[$local_index] * $r2_name) / (1. - $r2_name)))
+        end
+        isnothing(joint) && continue
+        for (lp, p) in joint.predictors
+            ref = refs[findfirst(==(p.ref_index), group.indices)]
+            # The shipped `brm_r2d2_scale` computes `sqrt(phi * R2 * tau^2 /
+            # varx)`; handing it `ref / sqrt(1 - R2)` as `tau` yields the
+            # R2D2M2 scale `ref * sqrt(phi * R2 / ((1 - R2) * varx))`, the
+            # exact population-column twin of the margin formula above.
+            tau_name = :($ref / sqrt(1. - $r2_name))
+            cat_lookup = Dict{Symbol,NamedTuple}(
+                c.emitted => (; phi_name, r2_name, tau_expr=tau_name,
+                                phi_start=c.phi_start,
+                                n_contrasts=c.n_contrasts, n_phi)
+                for c in p.cats)
+            joint_out[lp] = (; phi_name, r2_name, tau_name, labels=p.labels,
+                               share_idx=p.share_idx, n_shares=p.n_shares,
+                               n_phi, cat_lookup)
         end
     end
     # A partial per-margin ICC leaves every unaddressed margin on the ordinary
@@ -7823,7 +8258,8 @@ _sb_r2d2_resid_scale(nm) = isnothing(nm.r2_name) ? nm.tau_name :
 # means "no r2d2 statement in this formula", which every call site tests with
 # `haskey(r2d2.overrides, target)` before changing anything it emits.
 _sb_empty_r2d2() = (; overrides=Dict{Symbol,NamedTuple}(),
-                      names=Dict{Symbol,NamedTuple}())
+                      names=Dict{Symbol,NamedTuple}(),
+                      joint=Dict{Symbol,NamedTuple}())
 
 # Population half of an R2D2-scoped predictor. Every column keeps its position
 # in the same `beta_pop` vector the ordinary path emits -- only the SCALE
@@ -7831,8 +8267,18 @@ _sb_empty_r2d2() = (; overrides=Dict{Symbol,NamedTuple}(),
 # (the intercept; anything with its own `effect(lp, coef) ~ Normal(...)`) keep
 # their loc/scale in `beta_loc` / the `fallback` vector, so the two prior
 # surfaces compose in one emission instead of fighting over `beta_pop`.
+#
+# `n_phi` is the length of the simplex `share_idx` indexes into. For the
+# whole-predictor form that is the predictor's own share count; the joint
+# block-wide form (`sd(:, ID) ~ r2d2(...; include=...)`) hands in ONE global
+# simplex shared with the block's margins and the other scoped predictors, so
+# the count is the block's component total and `names.tau_name` is the
+# margin-reference expression `ref / sqrt(1 - R2)` that turns the shipped
+# `sqrt(phi * R2 * tau^2 / varx)` into the R2D2M2 scale
+# `ref * sqrt(phi * R2 / ((1 - R2) * varx))`.
 function _sb_emit_r2d2_popefs!(stmts, data, target, X_name, pop_name,
-                                n_cols, spec, names, overrides)
+                                n_cols, spec, names, overrides;
+                                n_phi=spec.n_shares)
     n_cols == length(spec.labels) || error(
         "sbimpl: internal r2d2 alignment error for `$target`: " *
         "$(length(spec.labels)) population labels for $n_cols design columns")
@@ -7867,7 +8313,7 @@ function _sb_emit_r2d2_popefs!(stmts, data, target, X_name, pop_name,
     push!(stmts, :($scale_name = brm_r2d2_scale(
         $share_name, $fall_name, $varx_name, $(names.phi_name),
         $(names.r2_name), $(names.tau_name),
-        dims($X_name)[2], $(spec.n_shares))))
+        dims($X_name)[2], $n_phi)))
     push!(stmts, :($pop_name ~ _popefs_normal(;
         X=$X_name, beta_loc=$loc_name, beta_scale=$scale_name)))
 end
@@ -8041,7 +8487,8 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
                               cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
                               ranef_effect_overrides=Dict{Tuple{Symbol,Any},NamedTuple}(),
                               r2d2_names=Dict{Symbol,NamedTuple}(),
-                              ranef_r2d2_overrides=Dict{Tuple{Symbol,Any},NamedTuple}())
+                              ranef_r2d2_overrides=Dict{Tuple{Symbol,Any},NamedTuple}(),
+                              r2d2_joint=Dict{Symbol,NamedTuple}())
     lookup = _sb_empty_id_lookup()
     for (k, bucket) in pairs(buckets)
         id_sym, _ = k
@@ -8079,7 +8526,8 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
                 "sbimpl: `|$id_sym|` carries both an R2D2-derived scale and a " *
                 "direct sampled SD prior; choose one scale prior")
             r2d2_tau = _sb_emit_ranef_r2d2_tau!(
-                stmts, data, bucket_name, n_terms_total, bucket_r2d2)
+                stmts, data, bucket_name, n_terms_total, bucket_r2d2;
+                joint_out=r2d2_joint)
         elseif !isempty(r2d2_names) &&
            all(m -> haskey(r2d2_names, m.predictor), margins)
             (!isnothing(ranef_effect) && ranef_effect.has_sd) && error(
@@ -8854,9 +9302,23 @@ _sb_predictor_term!(stmts, data, ::typeof(gp), t; group_block_lookup=Dict(),
     col_name = Symbol(:gp_, suffix)
     data[X_name] = _sb_gp_matrix(axes)
     _sb_record_preproc!(data, X_name, PreprocEntry(:gp, nothing, names, false))
+    jitter = Float64(get(kw, :jitter, 1e-9))
+    cov = _sb_gp_cov(kw, :gp)
+    if cov === :periodic
+        length(names) == 1 || error(
+            "sbimpl: `gp(...; cov=:periodic)` supports exactly one axis, got " *
+            "$(length(names))")
+        _sb_gp_iso(kw, :gp) || error(
+            "sbimpl: `gp(...; cov=:periodic)` has one axis and one length " *
+            "scale; `iso=false` has no meaning here")
+        period = _sb_gp_period(kw, :gp, cov)
+        submodel = _sb_gp_submodel_expr(:_sb_gp_periodic, term_overrides, t)
+        push!(stmts, :($col_name ~ $submodel(;
+            X=$X_name, jitter=$jitter, period=$period)))
+        return col_name
+    end
     submodel = _sb_gp_submodel_expr(
         _sb_gp_iso(kw, :gp) ? :_sb_gp : :_sb_gp_aniso, term_overrides, t)
-    jitter = Float64(get(kw, :jitter, 1e-9))
     push!(stmts, :($col_name ~ $submodel(; X=$X_name, jitter=$jitter)))
     col_name
 end
@@ -8918,6 +9380,10 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     is_raw = all(raw_flags)
     n_axes = length(args)
     K, c = _sb_hsgp_options(kw, n_axes)
+    cov = _sb_gp_cov(kw, :hsgp)
+    period = _sb_gp_period(kw, :hsgp, cov)
+    cov === :periodic && return _sb_hsgp_periodic_term!(
+        stmts, data, t, names, raw, is_raw, K, kw, period, term_overrides)
     domain_fits = _sb_hsgp_domain_fits(kw, n_axes; required=!is_raw)
     orthogonal_to = _sb_hsgp_orthogonal_to(kw, n_axes)
     orthogonal_to === :linear && haskey(kw, :by) && error(
@@ -9026,10 +9492,59 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     col_name
 end
 
+# `hsgp(x; cov=:periodic, period=...)`: one raw axis, `2k` cosine/sine
+# columns, harmonic indices and the periodic validity floor as data. The
+# periodic basis has no boundary factor, domain or projection, and its grouped
+# spelling is not implemented, so every such keyword is refused by name rather
+# than silently ignored.
+function _sb_hsgp_periodic_term!(stmts, data, t, names, raw, is_raw, K, kw,
+                                 period, term_overrides)
+    n_axes = length(names)
+    n_axes == 1 || error(
+        "sbimpl: `hsgp(...; cov=:periodic)` supports exactly one axis, got $n_axes")
+    is_raw || error(
+        "sbimpl: `hsgp(...; cov=:periodic)` currently requires a raw-data axis; " *
+        "a model-derived periodic axis is not supported")
+    _sb_gp_iso(kw, :hsgp) || error(
+        "sbimpl: `hsgp(...; cov=:periodic)` has one axis and one length scale; " *
+        "`iso=false` has no meaning here")
+    for key in (:c, :domain, :orthogonal_to, :by)
+        haskey(kw, key) && error(
+            "sbimpl: `hsgp(...; cov=:periodic)` does not accept `$key=`: the " *
+            "periodic cosine/sine basis has no boundary factor and needs no " *
+            "domain, and its grouped/projected spellings are not implemented")
+    end
+    K1 = only(K)
+    x = only(names)
+    axis = collect(Float64, _sb_real_vec(:hsgp, x, only(raw)))
+    isempty(axis) && error("sbimpl: `hsgp($x)` cannot use an empty axis")
+    all(isfinite, axis) || error("sbimpl: `hsgp($x)` requires finite values")
+
+    PHI_name = Symbol(:PHI_hsgp_, x)
+    harmonics_name = Symbol(:harmonics_hsgp_, x)
+    rho_lower_name = Symbol(:rho_lower_hsgp_, x)
+    _sb_hsgp_periodic_frozen_check(data, PHI_name, names, K1, period)
+    data[PHI_name] = _sb_apply_hsgp_periodic(period, axis, K1)
+    data[harmonics_name] = _sb_hsgp_periodic_harmonics(K1)
+    data[rho_lower_name] = _sb_hsgp_periodic_rho_lower(K1)
+    _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp,
+        (; cov=:periodic, period, K=K1, iso=true,
+         harmonics_key=harmonics_name, rho_lower_key=rho_lower_name),
+        names, false))
+    col_name = Symbol(:hsgp_, x)
+    submodel = _sb_gp_submodel_expr(:_sb_hsgp_periodic, term_overrides, t)
+    push!(stmts, :($col_name ~ $submodel(; PHI=$PHI_name,
+        harmonics=$harmonics_name, rho_lower=$rho_lower_name)))
+    col_name
+end
+
 function _sb_term_group_block(::typeof(hsgp), call)
     kw = getkwargs(call)
     haskey(kw, :by) || return nothing
     _check_term_kwargs(hsgp, kw)
+    _sb_gp_cov(kw, :hsgp) === :periodic && error(
+        "sbimpl: `hsgp(...; cov=:periodic)` does not accept `by=`: the " *
+        "grouped periodic basis is not implemented")
     args = getargs(call)
     isempty(args) && error("sbimpl: `hsgp(x...; by=...)` expects at least one positional axis")
     names = Tuple(name(_sb_named_inner(:hsgp, a)) for a in args)

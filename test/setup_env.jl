@@ -46,7 +46,7 @@ const PINS = [
     ("MutatingFunctions", "https://github.com/nsiccha/MutatingFunctions.jl.git", "4fc41b1c7b774133ceaacc4ff3c34c67b15b87b2"),  # main
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "121de3194f02044e00bac0d11019a93458ddb63a"),  # main
     ("TreeArrays",        "https://github.com/nsiccha/TreeArrays.jl.git",        "c317cc003fc41c2d933c27dc80799141eebd434e"),  # main
-    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "66448dec6049b543d1dde745d7527b24fd01239e"),  # devibe (prior-predictive fix: likelihood-free program lowers every parameter to a GQ _rng)
+    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "bec23bc3c52303ebde60a026af48c435e4c81330"),  # devibe (registers log_modified_bessel_first_kind for the periodic hsgp basis; contains 66448de, the prior-predictive fix)
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "8fa829b39d6f519deaf13cd03ee17e8df6b7b9c2"),  # dev
 ]
@@ -66,7 +66,15 @@ function main()
     Pkg.develop(PackageSpec[
         PackageSpec(path=path) for (_name, path) in sort!(collect(paths))
     ])
-    Pkg.instantiate()
+    # `Pkg.instantiate()` auto-precompiles the whole manifest in parallel, which
+    # self-deadlocks under Pkg 1.10 on Pathfinder 0.10.7's sibling Turing
+    # extensions (see test/README.md, "Pathfinder's Turing extension pair").
+    # Serialize just that pair first, then let the parallel pass reuse the cache.
+    Pkg.instantiate(; allow_autoprecomp=false)
+    withenv("JULIA_NUM_PRECOMPILE_TASKS" => "1") do
+        Pkg.precompile(["Pathfinder", "Turing"])
+    end
+    Pkg.precompile()
     return nothing
 end
 
