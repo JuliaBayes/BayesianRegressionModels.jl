@@ -257,6 +257,94 @@ end
     @test occursin("b_p_subject_L ~ lkj_corr_cholesky(2.0);", icc_code)
 end
 
+@testset "explicit per-column Normal priors compose with r2d2 -- until they exclude every column" begin
+    # Snag `sbimpl-r2d2-expl-33fca9c1` (reporter Bruno:brm). A population
+    # column with its own `effect(...) ~ Normal(...)` keeps that loc/scale and
+    # leaves the Dirichlet allocation; the REMAINING columns and the
+    # random-effect residual are still decomposed. The default-layer
+    # `effect(:, col)` spelling excludes the column in every predictor it
+    # reaches, exactly like the predictor-specific one.
+    partial_builder = @brm begin
+        log_CL ~ 1 + wt + age + (1 | p | subject)
+        log_V  ~ 1 + wt + age + (1 | p | subject)
+        effect(log_CL, :) ~ r2d2(R2=Beta(1, 1), tau_bsv=0.5)
+        effect(log_V, :)  ~ r2d2(R2=Beta(1, 1), tau_bsv=0.5)
+        effect(:, wt) ~ Normal(0.2, 0.1)
+        conc ~ Normal(exp(log_CL - log_V) * time, 1)
+    end
+    partial = SBBRMI(partial_builder(df); mod=@__MODULE__)
+    partial_code = BayesianRegressionModels.stan_code(partial)
+    @test StanBlocks.stan.transpiles(partial.model)
+    @test StanBlocks.stanc_check(partial_code; warn_pedantic=false).ok
+    # `wt` is excluded (share 0) and keeps its own loc/scale via the fallback
+    # vectors; `age` is the single remaining share in both predictors.
+    @test partial.data[:r2d2_log_CL_share_idx] == [0, 0, 1]
+    @test partial.data[:r2d2_log_V_share_idx] == [0, 0, 1]
+    @test partial.data[:r2d2_log_CL_fallback] == [1.0, 0.1, 1.0]
+    @test partial.data[:r2d2_log_CL_beta_loc] == [0.0, 0.2, 0.0]
+    @test partial.data[:r2d2_log_CL_alpha] == [1.0]
+    @test occursin("r2d2_log_CL_R2 ~ beta(1.0, 1.0);", partial_code)
+    @test occursin("r2d2_log_V_R2 ~ beta(1.0, 1.0);", partial_code)
+    @test occursin("r2d2_log_CL_phi ~ dirichlet(r2d2_log_CL_alpha);", partial_code)
+    @test occursin("r2d2_log_CL_beta_scale = brm_r2d2_scale(", partial_code)
+    @test occursin("sqrt(((1.0 - r2d2_log_CL_R2) * (r2d2_log_CL_tau_bsv ^ 2)))",
+                   partial_code)
+    @test occursin("sqrt(((1.0 - r2d2_log_V_R2) * (r2d2_log_V_tau_bsv ^ 2)))",
+                   partial_code)
+
+    # Excluding EVERY non-intercept column contradicts the decomposition: the
+    # pre-fix emission silently dropped `R2`/`phi` and pinned the shared block's
+    # scale to the DATA constant `tau_bsv` (transpiled and passed stanc). Now it
+    # fails closed, naming the excluded columns and both escapes.
+    all_excluded = @brm begin
+        log_CL ~ 1 + wt + age + (1 | p | subject)
+        log_V  ~ 1 + wt + (1 | p | subject)
+        effect(log_CL, :) ~ r2d2(R2=Beta(1, 1), tau_bsv=0.5)
+        effect(log_V, :)  ~ r2d2(R2=Beta(1, 1), tau_bsv=0.5)
+        effect(:, wt) ~ Normal(0, 0.1)
+        effect(log_CL, age) ~ Normal(0, 0.1)
+        conc ~ Normal(exp(log_CL - log_V) * time, 1)
+    end
+    @test_throws "nothing to allocate" SBBRMI(all_excluded(df); mod=@__MODULE__)
+    @test_throws "reference_scale" SBBRMI(all_excluded(df); mod=@__MODULE__)
+    # One fully-excluded predictor is enough, even when its bucket sibling still
+    # has a share.
+    one_excluded = @brm begin
+        log_CL ~ 1 + wt + age + (1 | p | subject)
+        log_V  ~ 1 + wt + (1 | p | subject)
+        effect(log_CL, :) ~ r2d2(R2=Beta(1, 1), tau_bsv=0.5)
+        effect(log_V, :)  ~ r2d2(R2=Beta(1, 1), tau_bsv=0.5)
+        effect(log_V, wt) ~ Normal(0, 0.1)
+        conc ~ Normal(exp(log_CL - log_V) * time, 1)
+    end
+    @test_throws "log_V" SBBRMI(one_excluded(df); mod=@__MODULE__)
+
+    # The genuinely covariate-free member stays the decided no-op (decision
+    # `1db6zkr`): a predictor with NO non-intercept population column has
+    # nothing to explain, so the whole `tau_bsv` is its random-effect scale and
+    # no `R2`/`phi` is emitted for it. The all-or-nothing bucket rule is what
+    # forces the `r2d2` statement onto it, so this shape must keep lowering.
+    covariate_free = @brm begin
+        log_CL ~ 1 + wt + (1 | p | subject)
+        log_ka ~ 1 + (1 | p | subject)
+        effect(log_CL, :) ~ r2d2(R2=Beta(1, 1), tau_bsv=0.5)
+        effect(log_ka, :) ~ r2d2(R2=Beta(1, 1), tau_bsv=0.25)
+        conc ~ Normal(exp(log_CL - log_ka) * time, 1)
+    end
+    noop = SBBRMI(covariate_free(df); mod=@__MODULE__)
+    noop_code = BayesianRegressionModels.stan_code(noop)
+    @test StanBlocks.stan.transpiles(noop.model)
+    @test StanBlocks.stanc_check(noop_code; warn_pedantic=false).ok
+    @test occursin("r2d2_log_CL_R2 ~ beta(1.0, 1.0);", noop_code)
+    @test !occursin("r2d2_log_ka_R2", noop_code)
+    @test !occursin("r2d2_log_ka_phi", noop_code)
+    @test noop.data[:r2d2_log_ka_tau_bsv] == 0.25
+    @test !haskey(noop.data, :r2d2_log_ka_share_idx)
+    @test occursin(r"b_p_subject_r2d2_tau = \[.*?r2d2_log_ka_tau_bsv\s*\]'"s, noop_code)
+    @test occursin("sqrt(((1.0 - r2d2_log_CL_R2) * (r2d2_log_CL_tau_bsv ^ 2)))",
+                   noop_code)
+end
+
 @testset "rejected shapes error loudly" begin
     # `:` is positional in every slot now, so `effect(:, eta)` parses — but an
     # r2d2 decomposition is whole-predictor by construction, so its address
