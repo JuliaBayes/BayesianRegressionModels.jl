@@ -7700,11 +7700,43 @@ function _sb_r2d2_overrides(brmi::BRMI, id_buckets, effect_overrides)
         col_overrides = _sb_pop_effect_overrides(effect_overrides, target)
         share_idx = zeros(Int, length(labels))
         n_shares = 0
+        excluded = Symbol[]
         for (i, label) in pairs(labels)
             label === :Intercept && continue
-            isnothing(col_overrides) || isnothing(col_overrides[i]) || continue
+            if !isnothing(col_overrides) && !isnothing(col_overrides[i])
+                push!(excluded, label)
+                continue
+            end
             n_shares += 1
             share_idx[i] = n_shares
+        end
+        # Zero shares is a legitimate no-op ONLY when the predictor has no
+        # non-intercept population column at all (`log_ka ~ 1 + (1 | p | g)`,
+        # forced into an `r2d2` statement by the all-or-nothing bucket rule,
+        # decision `1db6zkr`): nothing to explain, so the random effect keeps
+        # the whole `tau_bsv`. When columns EXIST and every one of them was
+        # excluded by its own `effect(...) ~ Normal(...)`, the two statements
+        # contradict each other -- the user configured a decomposition over
+        # columns and simultaneously removed every column from it. Emitting
+        # anyway would silently drop `R2`/`phi` and pin the random-effect scale
+        # to the bare `tau_bsv` constant with no prior (snag
+        # `sbimpl-r2d2-expl-33fca9c1`), so fail closed and name both escapes.
+        if n_shares == 0 && !isempty(excluded)
+            error(
+                "sbimpl: `effect($target, :) ~ r2d2(...)` has nothing to " *
+                "allocate: every non-intercept population column of `$target` " *
+                "($(join(excluded, ", "))) carries its own explicit " *
+                "`effect(...) ~ Normal(...)` statement, and an explicitly " *
+                "prioried column is excluded from the Dirichlet allocation. " *
+                "Emitting this model would drop `R2`/`phi` entirely and fix " *
+                "`$target`'s random-effect scale at the bare `tau_bsv` with no " *
+                "prior. Either drop those per-column Normal statements so the " *
+                "columns can be allocated, or move the decomposition to the " *
+                "random-effect scale with " *
+                "`sd($target, <ID>) ~ r2d2(reference_scale=...)` (the " *
+                "random-effect R2D2M2/ICC form composes with per-column Normal " *
+                "priors; a shared `|ID|` bucket is all-or-nothing, so switch " *
+                "the whole bucket).")
         end
         out[target] = (; labels, share_idx, n_shares, alpha, r2_a, r2_b, tau_bsv)
     end
@@ -7741,7 +7773,10 @@ end
 # bucket prepass because a bucket's derived `tau` references `R2` / `tau_bsv`.
 # Returns a name table keyed by predictor; `r2_name === nothing` marks the
 # degenerate no-covariate case, where there is nothing to allocate and the
-# random effect simply keeps the free total scale (decision `1db6zkr`).
+# random effect simply keeps the free total scale (decision `1db6zkr`). That
+# case is reachable ONLY for a predictor with no non-intercept population
+# column at all: `_sb_r2d2_overrides` refuses the other zero-share shape, where
+# columns exist but every one was excluded by its own `effect(...) ~ Normal`.
 function _sb_emit_r2d2_params!(stmts, data, r2d2_overrides)
     names = Dict{Symbol,NamedTuple}()
     for target in sort!(collect(keys(r2d2_overrides)))

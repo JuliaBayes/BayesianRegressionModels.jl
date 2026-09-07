@@ -601,7 +601,22 @@ All of these fail loudly rather than silently sampling something else:
   centering (`centered_groups`), plain-group R2D2 resampling, stratified
   `gr(g, by=b)` groups, and `mm(...)` multi-membership terms remain unsupported.
 - A column that also carries its own `effect(lp, coef) ~ Normal(loc, scale)`
-  statement is dropped from the simplex and keeps that explicit prior.
+  statement is dropped from the simplex and keeps that explicit prior. The
+  default-layer spelling `effect(:, coef) ~ Normal(...)` excludes that column
+  in every predictor it reaches, exactly like the predictor-specific one; the
+  remaining columns and the random-effect residual are still decomposed.
+- Excluding **every** non-intercept column of an `r2d2`-scoped predictor this
+  way is refused. There is then nothing left to allocate, and the only
+  consistent emission would drop `R2`/`phi` and fix the random-effect scale at
+  the bare `tau_bsv` with no prior — a silently different model. Either keep at
+  least one column unaddressed, or move the decomposition onto the
+  random-effect scale with `sd(lp, ID) ~ r2d2(reference_scale=...)` (the
+  random-effect R2D2M2/ICC form below composes with per-column Normal priors;
+  a shared bucket is all-or-nothing, so switch the whole bucket). A predictor
+  with **no** non-intercept population column at all (`log_ka ~ 1 + (1 | p |
+  g)`, forced into an `r2d2` statement by the all-or-nothing rule) is the one
+  legitimate zero-share shape: nothing to explain, so the whole `tau_bsv` is
+  its random-effect scale.
 
 ## Random-effect R2D2M2 and per-margin ICC: `sd(...) ~ r2d2(...)`
 
