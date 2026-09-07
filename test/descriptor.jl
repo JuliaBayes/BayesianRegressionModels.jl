@@ -647,11 +647,15 @@ kernel_schedule(n; subject=collect(1:n)) = (;
                    startswith(string(o.name), "kernel_z"), d.outputs)
     @test byname[:sigma_a].role === :parameter
 
-    # The plate's transformed-parameter carriers and cell values all resolve to
-    # the plate DECLARATION, and each named value additionally carries its own
-    # logical identity. No compiler-owned suffix or descriptor order is parsed.
-    plate_outputs = [o for o in d.outputs
-                     if o.kind === :transformed_parameter && o.role === :group_block]
+    # The plate's group-block carriers — the transformed-parameter cell values
+    # AND the collected return — all resolve to the plate DECLARATION, and each
+    # named value additionally carries its own logical identity. No
+    # compiler-owned suffix or descriptor order is parsed. The carrier's Stan
+    # `kind` is a StanBlocks likelihood-reachability decision, not part of this
+    # contract: the cell values `mu`/`CL`/`V` feed the in-cell `~` and so land
+    # in transformed parameters, while the collected `loc` return feeds no
+    # likelihood and lands in generated quantities — so this does NOT pin kind.
+    plate_outputs = [o for o in d.outputs if o.role === :group_block]
     @test !isempty(plate_outputs)
     @test all(o -> o.declaration.target === :loc, plate_outputs)
     primary = brm_output(d, :loc)
