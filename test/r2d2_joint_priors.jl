@@ -108,6 +108,18 @@ end
     @test occursin("cat_qt_base_indication_beta ~ normal(", code)
     @test !occursin("cat_log_Vc_indication_beta ~ std_normal", code)
 
+    # Descriptor lookup follows the categorical submodel's `beta` binding.
+    # In a fitted program the joint R2D2 block owns a transformed scale beside
+    # that sampled carrier, which must not affect categorical coordinates.
+    d = brm_descriptor(sb)
+    qt_names = ["cat_qt_base_indication_beta.1"]
+    qt_contrast = brm_population_effect_coordinates(
+        d, :qt_base, qt_names; coefficient=:indication)
+    @test qt_contrast.output.name === :cat_qt_base_indication_beta
+    scale = only(o for o in d.outputs
+                 if o.name === :cat_qt_base_indication_r2d2_beta_scale)
+    @test scale.kind === :transformed_parameter
+
     # The block's derived margins and free LKJ factor are the plain M2 ones.
     @test occursin("vector[3] b_p_subject_r2d2_tau = [", code)
     @test occursin("sigma_qt *", code)

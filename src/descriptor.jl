@@ -1458,13 +1458,17 @@ function _brm_categorical_effect_coordinates(d::BRMDescriptor,
         "terms; expected exactly one.")
     categorical = only(entries)
 
-    # The contrast vector is the block INTERNAL (`cat_<lp>_<col>_beta`, name !==
-    # target); the block RESULT (name === target) is the categorical term value.
-    # `name !== block` is load-bearing for a prior program, where the block
-    # result assignment is ALSO a generated quantity under the same target.
+    # `_sb_cat` and `_sb_cat_normal` both bind the contrast vector as `beta`.
+    # Compose that BRM-owned binding with the formula-derived block name, just
+    # as `brm_term_coordinates` composes a term's declared parameter binding
+    # with its owner. Selecting every declaration internal is too broad: an
+    # R2D2 categorical declaration also owns its derived scale, and future
+    # lowering may add further internals without changing the contrast carrier.
+    # This is a forward emitter rule, not parsing of a posterior name.
+    expected = Symbol(block, :_beta)
     idxs = _brm_carrier_indices(d.outputs,
                o -> !isnothing(o.declaration) && o.declaration.target === block &&
-                    o.name !== block)
+                    o.name === expected)
     length(idxs) == 1 || error(
         "brm_descriptor: categorical address `$coefficient` on logical " *
         "predictor `$logical` resolves to block `$block`, which owns " *
