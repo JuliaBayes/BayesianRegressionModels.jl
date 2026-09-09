@@ -44,6 +44,43 @@ _mk(name, kind) = BRM.BRMOutput(
     @test ci([_mk(:a, :parameter)], o -> o.name === :b) == Int[]
 end
 
+@testset "prior-only joint R2D2 categorical coordinates select beta, not scale" begin
+    # Inciting Bruno regime: with no observations, both the categorical beta
+    # and its joint-R2D2 derived scale move to generated quantities under the
+    # same declaration. Declaration ownership alone therefore finds two GQ
+    # internals; the public address must follow the categorical `beta` binding.
+    df = (;
+        weight=[-1.2, -0.5, 0.1, 0.8, 1.5, -0.3, 0.4, 1.1],
+        arm=[1, 2, 3, 1, 2, 3, 1, 2],
+        subject=[1, 1, 2, 2, 3, 3, 4, 4],
+    )
+    builder = @brm begin
+        log_CL ~ 1 + weight + factor(arm) + (1 | p | subject)
+        log_V  ~ 1 + weight + (1 | p | subject)
+        sd(:, p) ~ r2d2(reference_scale=1.0,
+                        include=(:population, :contrasts))
+        cor(:, p) ~ LKJCholesky(2, 2)
+    end
+    d = brm_descriptor(SBBRMI(builder(df); mod=_MOD))
+    block = :cat_log_CL_arm
+    owned = [o for o in d.outputs
+             if !isnothing(o.declaration) && o.declaration.target === block]
+    @test Set(o.name for o in owned) == Set((
+        :cat_log_CL_arm_beta,
+        :cat_log_CL_arm_r2d2_beta_scale,
+        :cat_log_CL_arm,
+    ))
+    @test all(o -> o.kind === :generated_quantity, owned)
+
+    names = ["cat_log_CL_arm_beta.1", "cat_log_CL_arm_beta.2"]
+    contrast = brm_population_effect_coordinates(
+        d, :log_CL, names; coefficient=:arm)
+    @test contrast.output.name === :cat_log_CL_arm_beta
+    @test contrast.coordinates == [1, 2]
+    @test contrast.reference_level == 1
+    @test contrast.nonreference_levels == [2, 3]
+end
+
 df = (;
     weight  = [-1.2, -0.5, 0.1, 0.8, 1.5, -0.3, 0.4, 1.1],
     arm     = [1, 2, 3, 1, 2, 3, 1, 2],
