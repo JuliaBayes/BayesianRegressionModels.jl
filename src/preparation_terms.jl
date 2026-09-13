@@ -26,31 +26,19 @@ _brm_prepared_term_key(term::ExprColumn) = Symbol(nameof(getf(term)), "(",
     join((value for value in (_brm_term_arg_name(arg) for arg in getargs(term))
           if !isnothing(value)), ","), ")")
 
-_brm_term_prior_rank(spec) = isnothing(spec.predictor) ? 0 : 1
-_brm_term_prior_matches(spec, key, target, class, component) =
-    spec.class === class && spec.term === key && spec.component === component &&
-    (isnothing(spec.predictor) || spec.predictor === target)
-_brm_term_prior_targets(spec, targets, has_term) = isnothing(spec.predictor) ?
-    Symbol[target for target in targets if has_term(target, spec.term)] :
-    (has_term(spec.predictor, spec.term) ? Symbol[spec.predictor] : Symbol[])
-
-function _brm_select_term_prior(specs, key, target, class, component=nothing)
-    candidates = filter(spec ->
-        _brm_term_prior_matches(spec, key, target, class, component), specs)
-    isempty(candidates) && return nothing
-    rank = maximum(_brm_term_prior_rank, candidates)
-    winners = filter(spec -> _brm_term_prior_rank(spec) == rank, candidates)
-    length(winners) == 1 || error(
-        "BRM term preparation: duplicate prior for `$key` in `$target`")
-    only(winners)
-end
-
 function _brm_term_prior_spec(term, target, context, class; component=nothing)
     brmi = hasproperty(context, :parent) ? context.parent :
            hasproperty(context, :brmi) ? context.brmi : nothing
     isnothing(brmi) && return nothing
     key = _brm_prepared_term_key(term)
-    _brm_select_term_prior(term_priors(brmi), key, target, class, component)
+    resolved = hasproperty(context, :term_priors) ? context.term_priors :
+               _brm_resolve_term_priors(brmi)
+    per_term = get(get(resolved, target, Dict()), key, Dict())
+    slots = filter(slot -> slot.class === class && slot.component === component,
+                   _brm_term_prior_slots(getf(term)))
+    isempty(slots) && return nothing
+    entry = get(per_term, only(slots).name, nothing)
+    isnothing(entry) ? nothing : entry.spec
 end
 
 _brm_term_prior_expression(term, target, context, class; component=nothing,
@@ -124,19 +112,10 @@ function _brm_prepare_term(term::ExprColumn{typeof(me)}, target::Symbol,
     _BRMPreparedTerm(me, source, state, (source,))
 end
 
-function _brm_simplex_alpha(term, target, context, n_levels)
-    prior = _brm_term_prior_expression(term, target, context, :term_simplex;
-        default=ExprColumn(Dirichlet, 1.0))
-    args = getargs(prior)
-    length(args) == 1 || error(
-        "BRM term preparation: monotonic simplex prior needs one concentration argument")
-    raw = only(args)
-    alpha = raw isa Real ? fill(Float64(raw), n_levels - 1) : collect(Float64, raw)
-    length(alpha) == n_levels - 1 || error(
-        "BRM term preparation: monotonic simplex prior has wrong dimension")
-    all(x -> isfinite(x) && x > 0, alpha) || error(
-        "BRM term preparation: monotonic simplex concentrations must be positive")
-    alpha
+_brm_simplex_alpha_metadata(_constructor, _prior) = nothing
+function _brm_simplex_alpha_metadata(::Type{<:Dirichlet}, prior)
+    alpha = only(getargs(prior))
+    alpha isa AbstractVector{<:Real} ? alpha : nothing
 end
 
 function _brm_prepare_monotonic(term, target, context)
@@ -147,9 +126,10 @@ function _brm_prepare_monotonic(term, target, context)
     source, raw = _brm_term_data(nameof(getf(term)), only(args), context)
     levels = _brm_fit_levels(raw)
     idx = _brm_apply_levels(levels, raw)
-    simplex_prior = _brm_term_prior_expression(term, target, context,
-        :term_simplex; default=ExprColumn(Dirichlet, 1.0))
-    alpha = _brm_simplex_alpha(term, target, context, length(levels))
+    simplex_prior = _brm_normalize_simplex_prior(_brm_term_prior_expression(
+        term, target, context, :term_simplex; default=ExprColumn(Dirichlet, 1.0)),
+        length(levels) - 1)
+    alpha = _brm_simplex_alpha_metadata(getf(simplex_prior), simplex_prior)
     _BRMPreparedTerm(getf(term), source,
         (; target, levels, idx, alpha, simplex_prior), (source,))
 end
@@ -253,7 +233,7 @@ function _brm_replay_term(training::_BRMPreparedTerm,
                           fresh::ExprColumn, context::_BRMBackendContext)
     getf(fresh) === training.callable || error(
         "BRM term replay: fitted `$(nameof(training.callable))` term changed callable")
-    _brm_replay_term(Val(nameof(training.callable)), training, fresh, context)
+    _brm_replay_term(training.callable, training, fresh, context)
 end
 
 function _brm_replay_term(training::_BRMPreparedTerm,
@@ -262,38 +242,10 @@ function _brm_replay_term(training::_BRMPreparedTerm,
         "BRM term replay: fitted term changed callable")
     training.source == fresh.source || error(
         "BRM term replay: fitted term source changed")
-    if training.callable === s
-        Xnull, Zpen = _brm_apply_spline(
-            training.state.fit, context.data[training.source])
-        state = merge(training.state, (; Xnull, Zpen))
-    elseif training.callable === t2
-        sx, sz = training.source
-        Xfixed, Zrr, Zrn, Znr = _brm_apply_t2(
-            training.state.fit, context.data[sx], context.data[sz])
-        state = merge(training.state, (; Xfixed, Zrr, Zrn, Znr))
-    elseif training.callable === me
-        state = merge(training.state,
-            (; x_obs=collect(Float64, context.data[training.source])))
-    elseif training.callable === mo || training.callable === mo1
-        state = merge(training.state,
-            (; idx=_brm_apply_levels(training.state.levels,
-                                     context.data[training.source])))
-    elseif training.callable === interval_censored
-        sx, su = training.source
-        state = merge(training.state, _brm_interval_predictor_plan(
-            context.data[sx], context.data[su], training.state.lower))
-    elseif training.callable === ar || training.callable === dar
-        state = merge(training.state,
-            (; time=_brm_replay_ar_time(context.data[training.source],
-                                        training.callable === dar)))
-    else
-        error("BRM term replay: unsupported prepared callable")
-    end
-    _BRMPreparedTerm(training.callable, training.source, state,
-                     training.dependencies)
+    _brm_replay_term(training.callable, training, fresh, context)
 end
 
-function _brm_replay_term(::Val{:s}, training, fresh, context)
+function _brm_replay_term(::typeof(s), training, fresh::ExprColumn, context)
     source, raw = _brm_term_data(:s, only(getargs(fresh)), context)
     source === training.source || error("BRM term replay: `s` source changed")
     Xnull, Zpen = _brm_apply_spline(training.state.fit, raw)
@@ -301,7 +253,14 @@ function _brm_replay_term(::Val{:s}, training, fresh, context)
         merge(training.state, (; Xnull, Zpen)), training.dependencies)
 end
 
-function _brm_replay_term(::Val{:t2}, training, fresh, context)
+function _brm_replay_term(::typeof(s), training, fresh::_BRMPreparedTerm, context)
+    Xnull, Zpen = _brm_apply_spline(
+        training.state.fit, context.data[training.source])
+    _BRMPreparedTerm(s, training.source,
+        merge(training.state, (; Xnull, Zpen)), training.dependencies)
+end
+
+function _brm_replay_term(::typeof(t2), training, fresh::ExprColumn, context)
     args = getargs(fresh)
     length(args) == 2 || error("BRM term replay: `t2` needs two margins")
     sx, x = _brm_term_data(:t2, args[1], context)
@@ -312,7 +271,16 @@ function _brm_replay_term(::Val{:t2}, training, fresh, context)
     _BRMPreparedTerm(t2, training.source, state, training.dependencies)
 end
 
-function _brm_replay_term(::Val{:me}, training, fresh, context)
+
+function _brm_replay_term(::typeof(t2), training, fresh::_BRMPreparedTerm, context)
+    sx, sz = training.source
+    Xfixed, Zrr, Zrn, Znr = _brm_apply_t2(
+        training.state.fit, context.data[sx], context.data[sz])
+    state = merge(training.state, (; Xfixed, Zrr, Zrn, Znr))
+    _BRMPreparedTerm(t2, training.source, state, training.dependencies)
+end
+
+function _brm_replay_term(::typeof(me), training, fresh::ExprColumn, context)
     args = getargs(fresh)
     length(args) == 2 || error("BRM term replay: `me` needs two arguments")
     source, raw = _brm_term_data(:me, args[1], context)
@@ -323,23 +291,50 @@ function _brm_replay_term(::Val{:me}, training, fresh, context)
     _BRMPreparedTerm(me, source, state, training.dependencies)
 end
 
-function _brm_replay_term(::Val{F}, training, fresh, context) where {F}
-    if F in (:ar, :dar)
-        source, raw = _brm_term_data(F, only(getargs(fresh)), context)
-        source === training.source || error("BRM term replay: AR source changed")
-        time = _brm_replay_ar_time(raw, F === :dar)
-        return _BRMPreparedTerm(training.callable, source,
-            merge(training.state, (; time)), training.dependencies)
-    end
-    F in (:mo, :mo1) || error("BRM term replay: unsupported fitted term `$F`")
-    source, raw = _brm_term_data(F, only(getargs(fresh)), context)
+
+function _brm_replay_term(::typeof(me), training, fresh::_BRMPreparedTerm, context)
+    state = merge(training.state,
+        (; x_obs=collect(Float64, context.data[training.source])))
+    _BRMPreparedTerm(me, training.source, state, training.dependencies)
+end
+
+function _brm_replay_monotonic(callable, training, fresh::ExprColumn, context)
+    source, raw = _brm_term_data(nameof(callable), only(getargs(fresh)), context)
     source === training.source || error("BRM term replay: monotonic source changed")
     idx = _brm_apply_levels(training.state.levels, raw)
-    _BRMPreparedTerm(training.callable, source,
+    _BRMPreparedTerm(callable, source,
+        merge(training.state, (; idx)), training.dependencies)
+end
+_brm_replay_term(callable::Union{typeof(mo),typeof(mo1)}, training,
+                 fresh::ExprColumn, context) =
+    _brm_replay_monotonic(callable, training, fresh, context)
+function _brm_replay_term(callable::Union{typeof(mo),typeof(mo1)}, training,
+                          fresh::_BRMPreparedTerm, context)
+    idx = _brm_apply_levels(training.state.levels,
+                            context.data[training.source])
+    _BRMPreparedTerm(callable, training.source,
         merge(training.state, (; idx)), training.dependencies)
 end
 
-function _brm_replay_term(::Val{:interval_censored}, training, fresh, context)
+function _brm_replay_ar(callable, training, fresh::ExprColumn, context)
+    source, raw = _brm_term_data(nameof(callable), only(getargs(fresh)), context)
+    source === training.source || error("BRM term replay: AR source changed")
+    time = _brm_replay_ar_time(raw, callable === dar)
+    _BRMPreparedTerm(callable, source,
+        merge(training.state, (; time)), training.dependencies)
+end
+_brm_replay_term(callable::Union{typeof(ar),typeof(dar)}, training,
+                 fresh::ExprColumn, context) =
+    _brm_replay_ar(callable, training, fresh, context)
+function _brm_replay_term(callable::Union{typeof(ar),typeof(dar)}, training,
+                          fresh::_BRMPreparedTerm, context)
+    time = _brm_replay_ar_time(context.data[training.source], callable === dar)
+    _BRMPreparedTerm(callable, training.source,
+        merge(training.state, (; time)), training.dependencies)
+end
+
+function _brm_replay_term(::typeof(interval_censored), training,
+                          fresh::ExprColumn, context)
     args, kw = getargs(fresh), getkwargs(fresh)
     source, x = _brm_term_data(:interval_censored, only(args), context)
     upper_source, upper = _brm_term_data(:interval_censored, kw.upper, context)
@@ -351,4 +346,18 @@ function _brm_replay_term(::Val{:interval_censored}, training, fresh, context)
     plan = _brm_interval_predictor_plan(x, upper, lower)
     _BRMPreparedTerm(interval_censored, training.source,
         merge(training.state, plan), training.dependencies)
+end
+
+
+function _brm_replay_term(::typeof(interval_censored), training,
+                          fresh::_BRMPreparedTerm, context)
+    sx, su = training.source
+    state = merge(training.state, _brm_interval_predictor_plan(
+        context.data[sx], context.data[su], training.state.lower))
+    _BRMPreparedTerm(interval_censored, training.source, state,
+                     training.dependencies)
+end
+
+function _brm_replay_term(callable, training, fresh, context)
+    error("BRM term replay: unsupported prepared callable `$(nameof(callable))`")
 end

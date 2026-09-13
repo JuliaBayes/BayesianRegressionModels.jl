@@ -23,6 +23,11 @@ gradient site easier.
 The focused preparation gates are `preparation_program.jl`,
 `preparation_replay.jl`, `preparation_assignments.jl`, and `backend_plan.jl`.
 The assignment gate checks dependency ordering and distinct response row axes.
+`preparation_replay.jl` compares the shared fitted transform contract across
+StanBlocks and Turing. Callable-specific frozen replay is covered by
+`turing_terms.jl`, `turing_gp.jl`, `turing_structured.jl`, and the corresponding
+StanBlocks term files; these tests guard callable-type dispatch, fitted spline
+and HSGP geometry, categorical/group levels, and backend-owned data bindings.
 `turing_generic.jl` exercises
 callable likelihoods and priors, while `turing_backend.jl` retains the existing
 grouping, conditioning, replay, prediction, and parameterization contracts.
@@ -40,6 +45,16 @@ model.
 `callable_priors.jl` checks distribution-factory shape registration and a
 complete-call Stan AST translation against the original Julia factory's
 density.
+`term_prior_semantics.jl` checks that both backends consume every resolved term
+prior address, reject unmatched or ambiguous addresses, and retain the exact
+density, RNG, support, dimension, keywords, and simplex transform of a custom
+multivariate simplex prior. `turing_descriptor.jl` checks the common
+`brm_descriptor`/`brm_output`/`brm_outputs` schema and Turing-backed execution;
+its descriptor intentionally has no Stan artifact or source highlights.
+`stanblocks_term_prior_semantics.jl` checks custom simplex densities through
+BridgeStan and prior-only RNG draws, alongside unchanged Dirichlet spellings.
+`turing_shared_assignments.jl` checks that shared group effects reach dependent
+assignments before their consumers are evaluated.
 
 `stanblocks_preservation_corpus.jl` compares fourteen representative models'
 emitted SLIC/Stan, prepared data, metadata, and frozen replay against an external
@@ -225,7 +240,7 @@ and no `[extras]`/`[targets]` in the root `Project.toml`:
   every supported Julia version, so carrying both would be two declarations of
   one dependency list.
 
-Six files are the reason this environment exists — they fail at their own
+Seven files are the reason this environment exists — they fail at their own
 `using` line under `julia --project=.`, before any BRM code runs:
 
 | file | needs beyond the root project |
@@ -233,6 +248,7 @@ Six files are the reason this environment exists — they fail at their own
 | `test/benchmark_turing_multi_membership.jl` | `BridgeStan`, `StanBlocks`, `Enzyme`, `DifferentiationInterface` |
 | `test/adaptive_centering_bridgestan.jl` | `WarmupHMC`, `Enzyme` |
 | `test/adaptive_centering_warmuphmc.jl` | `WarmupHMC`, `Enzyme`, `DifferentiationInterface` |
+| `test/turing_adaptive_centering_warmuphmc.jl` | `Turing`, `WarmupHMC`, `Enzyme`, `DifferentiationInterface` |
 | `test/native_ppl_backend_parity.jl` | `BridgeStan`, `StanBlocks`, `Enzyme`, `DifferentiationInterface` |
 | `test/native_ppl_warmuphmc.jl` | `WarmupHMC`, `Enzyme`, `DifferentiationInterface` |
 | `test/plate_stress.jl` | `BridgeStan` |

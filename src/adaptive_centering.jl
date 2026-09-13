@@ -391,10 +391,11 @@ end
 """
     adaptive_centering_problem(model, problem, ad_backend; kwargs...)
 
-Wrap a compiled BRM `problem` in WarmupHMC's strictly-online adaptive
-centering transform. This method is supplied by BRM's WarmupHMC
-extension when `WarmupHMC` is loaded; calling it without that optional package
-raises a normal `MethodError`.
+Wrap a BRM `problem` in WarmupHMC's strictly-online adaptive-centering
+transform. Compiled models use BRM's WarmupHMC extension. A `TuringBRMI` uses
+the separate joint Turing+WarmupHMC extension and, for now, accepts only the
+identity-link, fixed-scale Gaussian model with one default noncentered scalar
+random-intercept geometry documented by that method.
 """
 function adaptive_centering_problem end
 
@@ -409,7 +410,9 @@ end
 function adaptive_centering_problem(::TuringBRMI, _problem, _ad_backend;
                                     _kwargs...)
     error(
-        "Turing backend: WarmupHMC's compiled-Stan adaptive-centering " *
-        "reparametrizer does not apply to DynamicPPL models. Choose centered " *
-        "or non-centered group geometry when constructing `TuringBRMI`.")
+        "Turing backend: native online adaptive centering requires both " *
+        "Turing and WarmupHMC, a DynamicPPL.LogDensityFunction, " *
+        "and the supported fixed-scale Gaussian model with one default " *
+        "noncentered `(1 | group)` geometry. " *
+        "The compiled-Stan coordinate bridge does not apply to DynamicPPL models.")
 end
