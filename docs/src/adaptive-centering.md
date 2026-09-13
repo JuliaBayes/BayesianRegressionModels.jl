@@ -1,7 +1,7 @@
 ````@raw html
 ---
 title: Adaptive HSGP centering
-description: A reproducible heteroscedastic motorcycle case study comparing noncentered, centered, and pilot-selected HSGP coordinates in StanBlocks and Turing.
+description: A reproducible heteroscedastic motorcycle case study comparing fixed HSGP coordinates across StanBlocks and Turing, plus online adaptation of the compiled StanBlocks geometry.
 ---
 ````
 
@@ -113,12 +113,52 @@ The workflow here is intentionally two fits with three explicit steps:
 The pilot is therefore part of analysis design and must not be reused as
 posterior draws from the refit. WarmupHMC's online nonlinear adaptation is a
 different algorithm: it learns a transform inside warmup and returns draws in
-the target coordinates. BRM's current online bridge discovers ordinary scalar
-and correlated group-level blocks in compiled Stan models; it does not yet
-register HSGP basis weights, and its transform does not apply to DynamicPPL
-models. Consequently this reproduction uses only the offline selector. The
-three formula parameterizations—not an additional learned map—are what the
-comparison measures.
+the target coordinates. The six-fit comparison below deliberately remains the
+offline source reproduction; the three formula parameterizations—not an
+additional learned map—are what it measures.
+
+### Online centering on the compiled StanBlocks model
+
+BRM can now discover the two HSGP blocks from compiler-owned coordinate
+metadata and adapt every basis weight during StanBlocks warmup. The committed
+reproduction exposes the exact bounded showcase as
+`run_online_stanblocks`; its central public-API steps are:
+
+```julia
+data = prepared_data(; k=8)
+ncp_brmi = build_brmi(data, 8)
+stan = stan_density(ncp_brmi, "online-k8", mktempdir())
+online = adaptive_centering_problem(stan.sb, stan.density, ENZYME_BACKEND)
+fit = WarmupHMC.adaptive_warmup_mcmc(
+    Xoshiro(0x20260913), online;
+    n_draws=20,
+    n_evaluations=120,
+    stepsize_adaptation_limit=20,
+    max_tree_depth=7,
+    progress=nothing,
+    monitor_ess=false,
+)
+learned_c = [value.c for (_, value) in WarmupHMC.reparam_sources(online)]
+```
+
+At the documented fixed seed, the bounded run retained 20 draws with a
+120-evaluation warmup budget, reported zero divergences, and learned:
+
+| basis frequency | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| mean HSGP `c` | 0.7 | 0.6 | 0.8 | 0.8 | 0.5 | 0.9 | 0.9 | 0.6 |
+| log-scale HSGP `c` | 0.9 | 0.9 | 0.9 | 0.9 | 0.9 | 0.4 | 0.9 | 0.8 |
+
+This is a genuine online transform: candidate values are learned only from
+warmup frames, the transform and Jacobian preserve the original compiled
+target, and the retained draws are never recycled from an offline pilot. The
+nonzero values across all 16 cells demonstrate that adaptation traversed both
+same-axis HSGP blocks. This tiny run is still execution evidence rather than a
+convergence or efficiency study. The native Turing online bridge currently
+covers only its deliberately small
+ordinary random-intercept contract; native Turing HSGP parity remains a
+separate fail-closed extension rather than being routed through BridgeStan
+coordinate names.
 
 ## Bounded reproducibility artifact
 
@@ -173,3 +213,9 @@ squared-exponential HSGPs. It fails closed for periodic bases, latent/model-
 derived axes, `by`-specific weights, and `orthogonal_to` bases. Those variants
 need distinct verified transforms; BRM does not silently reinterpret them as
 the supported geometry.
+
+Online compiled-StanBlocks adaptation supports ungrouped, nonperiodic
+squared-exponential HSGPs. It fails before construction for grouped or
+periodic HSGPs, upper-bounded hyperparameter transforms, and models that mix
+ordinary random-effect cells with HSGP cells in one online plan. Native Turing
+HSGP adaptation is not yet claimed by this case study.

@@ -269,6 +269,44 @@ function write_tsv(path, rows)
     end
 end
 
+function run_online_stanblocks(;
+        k=parse(Int, get(ENV, "BRM_ADAPTIVE_K", "8")),
+        n_draws=parse(Int, get(ENV, "BRM_ADAPTIVE_DRAWS", "20")),
+        n_evaluations=parse(Int, get(ENV, "BRM_ADAPTIVE_EVALS", "120")),
+        seed=0x20260913,
+        output_dir=get(ENV, "BRM_ADAPTIVE_OUTPUT", mktempdir()))
+    mkpath(output_dir)
+    data = prepared_data(; k)
+    brmi = build_brmi(data, k)
+    stan = stan_density(brmi, "online-k$k", mktempdir())
+    online = adaptive_centering_problem(stan.sb, stan.density, ENZYME_BACKEND)
+    fit = WarmupHMC.adaptive_warmup_mcmc(
+        Xoshiro(seed), online;
+        n_draws,
+        n_evaluations,
+        stepsize_adaptation_limit=min(20, n_evaluations),
+        max_tree_depth=7,
+        progress=nothing,
+        monitor_ess=false,
+    )
+    learned = [value.c for (_, value) in WarmupHMC.reparam_sources(online)]
+    length(learned) == 2k || error(
+        "expected $k mean and $k log-scale HSGP cells, got $(length(learned))",
+    )
+    rows = [
+        (; predictor=i <= k ? "mu" : "log(sigma)",
+           basis=mod1(i, k), centeredness=learned[i])
+        for i in eachindex(learned)
+    ]
+    write_tsv(joinpath(output_dir, "online_centeredness.tsv"), rows)
+    println("online_basis_functions\t", k)
+    println("online_draws\t", size(fit.posterior_position, 2))
+    println("online_divergences\t", fit.n_divergent_samples)
+    println("online_centeredness\t", join(learned, ','))
+    println("output_dir\t", output_dir)
+    (; fit, learned, rows, stan, online, output_dir)
+end
+
 function posterior_curves(stan, fits, data, selected, k)
     names, draws = constrained_draws(stan, fits)
     index = Dict(names .=> eachindex(names))
@@ -435,7 +473,9 @@ function validate_backends(; k=parse(Int, get(ENV, "BRM_ADAPTIVE_K", "8")))
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
-    if get(ENV, "BRM_ADAPTIVE_RUNTIME", "0") == "1"
+    if get(ENV, "BRM_ADAPTIVE_ONLINE", "0") == "1"
+        run_online_stanblocks()
+    elseif get(ENV, "BRM_ADAPTIVE_RUNTIME", "0") == "1"
         run_reproduction()
     else
         validate_backends()
