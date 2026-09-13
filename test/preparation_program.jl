@@ -53,6 +53,20 @@ end
     @test only(model.observations).missing_response.missing_indices == [2]
 end
 
+@testset "joint observations retain declaration and data identities" begin
+    data = (; y1=[0.1, 0.2], y2=[0.3, 0.4])
+    brmi = (@brm begin
+        [y1, y2] ~ MvNormal([0.0, 0.0], [1.0, 1.0])
+    end)(data)
+    model = BRM._brm_prepare_model(brmi)
+    observation = only(model.observations)
+    declaration = only(op for op in model.program.operations
+                       if op.role === :observation)
+    @test observation.name === declaration.name
+    @test observation.name !== BRM._brm_observation_name(observation.lhs)
+    @test observation.response == [[0.1, 0.3], [0.2, 0.4]]
+end
+
 @testset "resolved prior dependencies order their owning sample sites" begin
     brmi = (@brm begin
         mu ~ 1 + x

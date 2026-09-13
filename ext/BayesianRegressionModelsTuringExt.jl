@@ -178,17 +178,14 @@ function _brm_prepared_ast(x::Tuple, callables)
     Expr(:tuple, map(value -> _brm_prepared_ast(value, callables), x)...)
 end
 
-_brm_has_row_ref(x) = false
-_brm_has_row_ref(x::BRM._BRMPreparedRef) = x.axis in (:observation, :observation_row)
-_brm_has_row_ref(x::BRM._BRMPreparedExpr) =
-    any(_brm_has_row_ref, x.args) || any(_brm_has_row_ref, values(x.kwargs))
+const _brm_has_row_ref = BRM._brm_has_row_ref
 
 function _brm_group_prior_ast(block, callables)
     Expr(:tuple, map(block.sd_prior) do prior
         if isnothing(prior)
             nothing
         else
-            prepared = BRM._brm_prepare_expr(prior)
+            prepared = BRM._brm_prepare_prior_expr(prior)
             prepared isa BRM._BRMPreparedExpr ?
                 _brm_turing_prior_ast(prepared, callables) :
                 _brm_prepared_ast(prepared, callables)
@@ -196,7 +193,7 @@ function _brm_group_prior_ast(block, callables)
     end...)
 end
 function _brm_prior_value_ast(value, callables)
-    prepared = BRM._brm_prepare_expr(value)
+    prepared = BRM._brm_prepare_prior_expr(value)
     prepared isa BRM._BRMPreparedExpr ?
         _brm_turing_prior_ast(prepared, callables) :
         _brm_prepared_ast(prepared, callables)

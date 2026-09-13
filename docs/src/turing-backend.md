@@ -90,6 +90,12 @@ Turing-backed pointwise likelihood, generated-quantity, prediction, and replay
 operations. Since this backend emits no Stan program, `descriptor.stan` is
 `nothing` and Stan source highlights are rejected.
 
+Descriptor operations return flat named tuples keyed by their declared output
+names. For example, the descriptor pointwise operation returns `y_loglik`, so
+its keys match `BRMOperation.outputs`. The lower-level `turing_*` helpers keep
+their response-aware containers (`y` for pointwise likelihoods and `responses`
+for multiple-response generated quantities).
+
 `turing_pointwise_loglikelihoods` returns response-named, row-aligned
 log-likelihood vectors; latent rows of a partly missing response remain
 `missing`. `turing_generated_quantities` evaluates the model's deterministic

@@ -116,17 +116,15 @@ function _brm_turing_outputs(plan, brmi, semantics)
             :named_tuple, (), (;), :posterior, nothing, :random_effect,
             nothing, first(group.key), nothing, nothing))
     end
-    if plan isa _TuringMultiResponsePlan
-        seen_assignments = Set{Symbol}()
-        for child in plan.plans, assignment in child.assignments
-            assignment.name in seen_assignments && continue
-            push!(seen_assignments, assignment.name)
-            rowwise = _brm_has_row_ref(assignment.expression)
-            push!(outputs, BRMOutput(assignment.name, :transformed_parameter,
-                rowwise ? :vector : :real, rowwise ? (:dynamic,) : (), (;),
-                :derived, nothing, :stan_derived, nothing, assignment.name,
-                nothing, nothing))
-        end
+    seen_assignments = Set{Symbol}()
+    for child in _brm_turing_response_plans(plan), assignment in child.assignments
+        assignment.name in seen_assignments && continue
+        push!(seen_assignments, assignment.name)
+        rowwise = _brm_has_row_ref(assignment.expression)
+        push!(outputs, BRMOutput(assignment.name, :transformed_parameter,
+            rowwise ? :vector : :real, rowwise ? (:dynamic,) : (), (;),
+            :derived, nothing, :stan_derived, nothing, assignment.name,
+            nothing, nothing))
     end
     seen_responses = Set{Symbol}()
     for child in _brm_turing_response_plans(plan)
@@ -156,20 +154,49 @@ function _brm_turing_inputs(backend::TuringBRMI)
           for name in sort!(collect(data_names)))
 end
 
+_brm_descriptor_select(value, names) =
+    (; (name => getproperty(value, name) for name in names)...)
+
+function _brm_descriptor_select_generated(value, names)
+    hasproperty(value, :responses) || return _brm_descriptor_select(value, names)
+    (; (name => begin
+            index = findfirst(response -> hasproperty(response, name), value.responses)
+            isnothing(index) && error("generated quantity $name was not returned")
+            getproperty(value.responses[index], name)
+        end for name in names)...)
+end
+
+function _brm_descriptor_pointwise(backend, parameters; kwargs...)
+    value = turing_pointwise_loglikelihoods(backend, parameters; kwargs...)
+    (; (Symbol(name, :_loglik) => getproperty(value, name)
+        for name in propertynames(value))...)
+end
+
 function _brm_turing_operations(backend::TuringBRMI, outputs, columns,
                                 descriptor_operations, descriptor_titles)
     predictive = Tuple(o.name for o in outputs if o.role === :posterior_predictive)
     pointwise = Tuple(o.name for o in outputs if o.role === :pointwise_loglik)
+    children = _brm_turing_response_plans(backend.plan)
+    returned = Set{Symbol}()
+    for child in children
+        union!(returned, (p.name for p in child.parameters))
+        union!(returned, (p.predictor.name for p in child.predictors))
+        union!(returned, (a.name for a in child.assignments))
+    end
+    generated = Tuple(o.name for o in outputs if o.name in returned &&
+                      o.role !== :posterior_predictive &&
+                      o.role !== :pointwise_loglik)
     BRMOperation[
         BRMOperation(:pointwise_loglik, "Compute pointwise log-likelihoods", (),
             pointwise, :brm,
             (_d, parameters; kwargs...) ->
-                turing_pointwise_loglikelihoods(backend, parameters; kwargs...)),
+                _brm_descriptor_pointwise(backend, parameters; kwargs...)),
         BRMOperation(:generated_quantities, "Compute generated quantities", (),
-            Tuple(o.name for o in outputs if o.generative in (:draw, :derived)),
+            generated,
             :brm,
-            (_d, parameters; kwargs...) ->
-                turing_generated_quantities(backend, parameters; kwargs...)),
+            (_d, parameters; kwargs...) -> _brm_descriptor_select_generated(
+                turing_generated_quantities(backend, parameters; kwargs...),
+                generated)),
         BRMOperation(:predict, "Draw posterior predictions", (), predictive, :brm,
             (_d, parameters; kwargs...) ->
                 turing_posterior_predictive(backend, parameters; kwargs...)),

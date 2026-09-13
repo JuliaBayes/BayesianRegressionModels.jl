@@ -10,7 +10,8 @@ const BRM = BayesianRegressionModels
     backend = TuringBRMI((@brm begin
         sigma ~ Exponential(2)
         mu ~ 1 + x
-        y ~ Normal(mu, sigma)
+        shifted = mu + 0.1
+        y ~ Normal(shifted, sigma)
     end)(data))
     descriptor = brm_descriptor(backend; name=:native)
     @test descriptor.stan === nothing
@@ -23,9 +24,16 @@ const BRM = BayesianRegressionModels
     @test brm_output(descriptor, :sigma).kind == :parameter
     params = (; beta_pop=[0.25, -0.5], sigma=0.8)
     pointwise = brm_execute(descriptor, :pointwise_loglik, params)
-    @test pointwise.y ≈ turing_pointwise_loglikelihoods(backend, params).y
+    @test pointwise.y_loglik ≈ turing_pointwise_loglikelihoods(backend, params).y
+    @test propertynames(pointwise) ==
+          brm_operation(descriptor, :pointwise_loglik).outputs
     generated = brm_execute(descriptor, :generated_quantities, params)
     @test generated.mu == backend.plan.design.matrix * params.beta_pop
+    @test generated.shifted == generated.mu .+ 0.1
+    @test Set(brm_operation(descriptor, :generated_quantities).outputs) ==
+          Set((:sigma, :mu, :shifted))
+    @test Set(propertynames(generated)) ==
+          Set(brm_operation(descriptor, :generated_quantities).outputs)
     predicted = brm_execute(descriptor, :predict, params; rng=Xoshiro(9))
     @test length(predicted.y) == length(data.y)
     replayed = brm_execute(descriptor, :reprocess,
@@ -59,6 +67,8 @@ end
           :transformed_parameter
     @test only(o for o in descriptor.outputs if o.name == :r2d2_mu).kind ==
           :parameter
+    @test Set(brm_operation(descriptor, :generated_quantities).outputs) ==
+          Set((:mu,))
 
     matrix_prior = TuringBRMI((@brm begin
         L_res ~ LKJCovarianceFactor(2)
@@ -78,7 +88,7 @@ end
     backend = TuringBRMI((@brm begin
         sigma ~ Exponential(2)
         mu ~ 1 + x
-        shifted = mu .+ 0.1
+        shifted = mu + 0.1
         y ~ Normal(shifted, sigma)
         log_rate ~ 1 + x
         count ~ Poisson(exp(log_rate))
@@ -91,6 +101,12 @@ end
     @test only(o for o in descriptor.outputs if o.name == :shifted).kind ==
           :transformed_parameter
     @test descriptor.stan === nothing
+    generated = brm_execute(descriptor, :generated_quantities,
+        (; sigma=0.8, beta_pop_mu=[0.1, 0.2], beta_pop_log_rate=[-0.3, 0.1]))
+    @test Set(propertynames(generated)) ==
+          Set(brm_operation(descriptor, :generated_quantities).outputs)
+    @test all(name -> any(o -> o.name == name, descriptor.outputs),
+              brm_operation(descriptor, :generated_quantities).outputs)
     @test_throws ErrorException brm_descriptor(backend; highlights=(:foo,))
 end
 

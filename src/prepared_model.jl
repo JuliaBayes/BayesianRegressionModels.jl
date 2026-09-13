@@ -22,6 +22,12 @@ struct _BRMPreparedExpr{F,A<:Tuple,K<:NamedTuple}
     kwargs::K
 end
 
+_brm_has_row_ref(x) = false
+_brm_has_row_ref(x::_BRMPreparedRef) =
+    x.axis in (:observation, :observation_row)
+_brm_has_row_ref(x::_BRMPreparedExpr) =
+    any(_brm_has_row_ref, x.args) || any(_brm_has_row_ref, values(x.kwargs))
+
 struct _BRMPreparedParameter{P,S}
     name::Symbol
     prior::P
@@ -137,8 +143,11 @@ function _brm_prepare_model(brmi::BRMI;
         end
         operation isa ExprColumn{typeof(~)} || continue
         lhs, rhs = getargs(operation, 2)
-        observation_name = _brm_observation_name(lhs)
-        if !isnothing(observation_name)
+        response_data_name = _brm_observation_name(lhs)
+        if !isnothing(response_data_name)
+            # An observation keeps its declaration identity. Joint outcomes
+            # have a separate synthetic carrier for their materialized data.
+            observation_name = key
             override = get(observation_overrides, observation_name, nothing)
             if !isnothing(override)
                 push!(observations, _BRMPreparedObservation(
@@ -148,7 +157,7 @@ function _brm_prepare_model(brmi::BRMI;
                 continue
             end
             prepared = _brm_prepare_expr(rhs, axes)
-            response = get(context.data, observation_name, nothing)
+            response = get(context.data, response_data_name, nothing)
             weight = isnothing(response) ? nothing :
                 _brm_observation_weight_plan(rhs, observation_name, response;
                     prefix="BRM preparation")
@@ -232,6 +241,14 @@ function _brm_prepare_expr(x, axes::AbstractDict{Symbol,Symbol})
 end
 
 _brm_prepare_expr(x; axes=Dict{Symbol,Symbol}()) = _brm_prepare_expr(x, axes)
+
+# A prior is constructed at its parameter site, outside observation loops.
+# Named data used by that call is a whole mathematical value, as are sampled
+# parameters and deterministic hyperparameters referenced by the prior.
+function _brm_prepare_prior_expr(expression)
+    references = _brm_operation_references!(Set{Symbol}(), expression)
+    _brm_prepare_expr(expression, Dict(name => :whole for name in references))
+end
 
 function _brm_prepare_call_expr(callable, expression, axes)
     args = map(arg -> _brm_prepare_expr(arg, axes), getargs(expression))
