@@ -240,11 +240,127 @@ function _adaptive_centering_reparametrizer(blocks)
     state, WarmupHMC.IndexedReparametrization(pairs)
 end
 
+# HSGP basis weights are conditionally independent given their spectral
+# scales, so they use a scalar zero-location frame.  Keep this state and its
+# callable distinct from `BRMAdaptiveCenteringState`: the latter's concrete
+# type parameter selects the exact K<=2 Enzyme reverse pass for ordinary random
+# effects, and HSGP support must not perturb that dispatch.
+mutable struct BRMHSGPAdaptiveCenteringState
+    blocks::Vector{BRM._HSGPAdaptiveCenteringBlock}
+    pair_blocks::Vector{Int}
+    pair_basis::Vector{Int}
+    sources::Vector{Float64}
+    effect_indices::BitSet
+end
+
+function BRMHSGPAdaptiveCenteringState(blocks)
+    pair_blocks = Int[]
+    pair_basis = Int[]
+    sources = Float64[]
+    for (bi, block) in enumerate(blocks), basis in eachindex(block.effects)
+        push!(pair_blocks, bi)
+        push!(pair_basis, basis)
+        push!(sources, block.target_c)
+    end
+    effect_indices = BitSet(Iterators.flatten(b.effects for b in blocks))
+    BRMHSGPAdaptiveCenteringState(
+        collect(blocks), pair_blocks, pair_basis, sources, effect_indices,
+    )
+end
+
+struct BRMHSGPAdaptiveCenteringArgument{KIND} <: Function
+    state::BRMHSGPAdaptiveCenteringState
+    pair_number::Int
+end
+
+function BRMHSGPAdaptiveCenteringArgument(state, pair_number, kind::Symbol)
+    kind in (:location, :log_scale) || error(
+        "unknown BRM HSGP adaptive-centering argument kind $kind",
+    )
+    BRMHSGPAdaptiveCenteringArgument{kind}(state, pair_number)
+end
+
+function _hsgp_pair_location(state, pair_number)
+    (state.pair_blocks[pair_number], state.pair_basis[pair_number])
+end
+
+function _hsgp_pair_index(state, pair_number)
+    bi, basis = _hsgp_pair_location(state, pair_number)
+    state.blocks[bi].effects[basis]
+end
+
+function (::BRMHSGPAdaptiveCenteringArgument{:location})(x)
+    zero(eltype(x))
+end
+
+function (arg::BRMHSGPAdaptiveCenteringArgument{:log_scale})(x)
+    bi, basis = _hsgp_pair_location(arg.state, arg.pair_number)
+    BRM._adaptive_hsgp_log_scale(x, arg.state.blocks[bi], basis)
+end
+
+function _sync_sources!(state::BRMHSGPAdaptiveCenteringState, ir)
+    length(ir.pairs) == length(state.sources) || throw(DimensionMismatch(
+        "BRM HSGP adaptive-centering plan has $(length(state.sources)) basis " *
+        "weights but the WarmupHMC reparametrizer has $(length(ir.pairs)) pairs",
+    ))
+    for (p, (idx, value)) in enumerate(ir.pairs)
+        expected = _hsgp_pair_index(state, p)
+        idx == expected || throw(ArgumentError(
+            "BRM HSGP adaptive-centering pair $p addresses raw coordinate $idx, " *
+            "but the model metadata requires $expected; pair ordering changed",
+        ))
+        state.sources[p] = Float64(value.source.c)
+    end
+    ir
+end
+
+function _prepare_frame(state::BRMHSGPAdaptiveCenteringState,
+                        ir, position, gradient)
+    _sync_sources!(state, ir)
+    T = promote_type(eltype(position), eltype(gradient), Float64)
+    n = length(state.sources)
+    source = T.(state.sources)
+    location = zeros(T, n)
+    scale = Vector{T}(undef, n)
+    innovation = Vector{T}(undef, n)
+    invariant_gradient = Vector{T}(undef, n)
+    for p in eachindex(state.sources)
+        bi, basis = _hsgp_pair_location(state, p)
+        block = state.blocks[bi]
+        idx = block.effects[basis]
+        s = exp(BRM._adaptive_hsgp_log_scale(position, block, basis))
+        c = source[p]
+        scale[p] = s
+        innovation[p] = position[idx] / s^c
+        invariant_gradient[p] = s^c * gradient[idx]
+    end
+    BRMAdaptiveCenteringFrame(
+        source, location, scale, innovation, invariant_gradient,
+    )
+end
+
+function _adaptive_hsgp_centering_reparametrizer(blocks)
+    state = BRMHSGPAdaptiveCenteringState(blocks)
+    pairs = [begin
+        bi, basis = _hsgp_pair_location(state, p)
+        block = state.blocks[bi]
+        target = WarmupHMC.PartiallyCentered(block.target_c)
+        source = WarmupHMC.PartiallyCentered(block.target_c)
+        location = BRMHSGPAdaptiveCenteringArgument(state, p, :location)
+        log_scale = BRMHSGPAdaptiveCenteringArgument(state, p, :log_scale)
+        block.effects[basis] => WarmupHMC.Reparametrization(
+            target, source, location, log_scale,
+        )
+    end for p in eachindex(state.sources)]
+    state, WarmupHMC.IndexedReparametrization(pairs)
+end
+
 """
     adaptive_centering_problem(model, problem, ad_backend; unc_names=nothing)
 
 Wrap a compiled BRM log-density in WarmupHMC's strictly-online adaptive
-centering for every ordinary scalar or correlated random-effect block.
+centering for every ordinary scalar or correlated random-effect block, or for
+every ungrouped squared-exponential HSGP basis weight.
 
 `model` is the `SBBRMI` or `GenerativePlan` that emitted `problem`. When
 `problem` is StanBlocks' `StanProblem`, unconstrained names are read from its
@@ -259,6 +375,12 @@ the transform applied to the model and its hyperparameter gradients remain
 exact. Literal endpoints are preserved: `c=0` is BRM's standardised draw and
 `c=1` is the model-scale correlated effect.
 
+For an HSGP, each basis weight is one scalar cell with zero location and
+per-basis scale `brm_hsgp_sqrt_spd(omega2, sigma, rho)[basis]`; `c=0` is the
+emitted `beta_raw`, while `c=1` is its literal spectral/model-scale
+coefficient. Grouped or periodic HSGPs and models mixing HSGP cells with
+ordinary random-effect cells fail before construction in this first contract.
+
 This changes coordinates, not the statistical model or its priors. Conditional
 on a block's `C = diag(tau) * L`, an intermediate source coordinate is Gaussian
 with covariance `A(c) * A(c)'` whenever the block innovation is standard normal;
@@ -267,11 +389,19 @@ the wrapped density and Jacobian still represent the original BRM prior exactly.
 function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=nothing)
     names = isnothing(unc_names) ? _problem_unc_names(problem) : unc_names
     blocks = BRM.adaptive_centering_blocks(model, names)
-    isempty(blocks) && error(
-        "BRM adaptive centering: this model has no supported ordinary " *
-        "random-effect blocks (ordinary K≥1 blocks are required).",
+    hsgp_blocks = BRM._adaptive_hsgp_centering_blocks(model, names)
+    !isempty(blocks) && !isempty(hsgp_blocks) && error(
+        "BRM adaptive centering: a single online plan cannot yet mix ordinary " *
+        "random-effect cells with HSGP basis-weight cells. Build a model with " *
+        "one supported adaptive geometry family for this first contract.",
     )
-    state, ir = _adaptive_centering_reparametrizer(blocks)
+    isempty(blocks) && isempty(hsgp_blocks) && error(
+        "BRM adaptive centering: this model has no supported ordinary " *
+        "random-effect blocks or ungrouped squared-exponential HSGPs.",
+    )
+    state, ir = isempty(hsgp_blocks) ?
+        _adaptive_centering_reparametrizer(blocks) :
+        _adaptive_hsgp_centering_reparametrizer(hsgp_blocks)
     plan = WarmupHMC.CandidateScoringPlan(
         (ir_, position, gradient) -> _prepare_frame(state, ir_, position, gradient),
         _score_candidate;
