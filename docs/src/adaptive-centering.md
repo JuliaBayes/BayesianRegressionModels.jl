@@ -113,7 +113,10 @@ The workflow here is intentionally two-stage:
 The pilot is therefore part of analysis design and must not be reused as
 posterior draws from the refit. WarmupHMC's online nonlinear adaptation is a
 different algorithm: it learns a transform inside warmup and returns draws in
-the target coordinates. The reproduction disables that online layer so the
+the target coordinates. BRM's current online bridge discovers ordinary scalar
+and correlated group-level blocks in compiled Stan models; it does not yet
+register HSGP basis weights, and its transform does not apply to DynamicPPL
+models. Consequently this reproduction uses only the offline selector. The
 three formula parameterizations—not an additional learned map—are what the
 comparison measures.
 
