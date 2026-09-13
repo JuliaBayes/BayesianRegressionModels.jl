@@ -5,14 +5,27 @@ using Distributions: ContinuousMultivariateDistribution,
                      ContinuousUnivariateDistribution,
                      DiscreteUnivariateDistribution, Exponential, LKJCholesky,
                      MvNormal, Normal, Poisson, censored, logcdf,
-                     product_distribution, truncated
-using LinearAlgebra: Diagonal, Symmetric
+                     mean, product_distribution, std, truncated
+using LinearAlgebra: Diagonal, Symmetric, cholesky, dot
 using LogExpFunctions: logistic, log1mexp
+using InverseFunctions
 import Distributions: logpdf
 import Random: AbstractRNG, default_rng, rand
 using Turing
+import Distributions
+import RuntimeGeneratedFunctions
+RuntimeGeneratedFunctions.init(@__MODULE__)
 
 const BRM = BayesianRegressionModels
+
+include("turing_terms.jl")
+include("turing_shapes.jl")
+include("turing_r2d2.jl")
+
+BRM._brm_turing_term_model(term, nobs, priors, _inputs) =
+    BRM._brm_turing_term_model(term, nobs, priors)
+include("turing_gp.jl")
+include("turing_structured.jl")
 
 struct _BRMGroupedMvNormal{D<:ContinuousMultivariateDistribution} <:
        ContinuousMultivariateDistribution
@@ -74,17 +87,15 @@ struct _BRMDiscreteIntervalEvidence{D,U} <:
     upper::U
 end
 
-struct _BRMContinuousObjectiveWeight{D,W} <:
-       ContinuousUnivariateDistribution
+struct _BRMObjectiveWeight{VF<:Distributions.VariateForm,
+                           VS<:Distributions.ValueSupport,
+                           D<:Distributions.Distribution{VF,VS},W} <:
+       Distributions.Distribution{VF,VS}
     base::D
     weight::W
 end
-
-struct _BRMDiscreteObjectiveWeight{D,W} <:
-       DiscreteUnivariateDistribution
-    base::D
-    weight::W
-end
+_BRMObjectiveWeight(base::Distributions.Distribution{VF,VS}, weight::W) where
+    {VF,VS,W} = _BRMObjectiveWeight{VF,VS,typeof(base),W}(base, weight)
 
 
 function _brm_interval_logmass(base, lower, upper)
@@ -101,12 +112,14 @@ logpdf(d::_BRMDiscreteIntervalEvidence, lower::Real) =
 rand(rng::AbstractRNG, d::_BRMContinuousIntervalEvidence) = rand(rng, d.base)
 rand(rng::AbstractRNG, d::_BRMDiscreteIntervalEvidence) = rand(rng, d.base)
 
-logpdf(d::_BRMContinuousObjectiveWeight, x::Real) =
+Base.length(d::_BRMObjectiveWeight) = length(d.base)
+Base.size(d::_BRMObjectiveWeight) = size(d.base)
+logpdf(d::_BRMObjectiveWeight{Distributions.Univariate}, x::Real) =
     d.weight * logpdf(d.base, x)
-logpdf(d::_BRMDiscreteObjectiveWeight, x::Real) =
+Distributions._logpdf(d::_BRMObjectiveWeight{Distributions.ArrayLikeVariate{N}},
+                      x::AbstractArray{<:Real,N}) where {N} =
     d.weight * logpdf(d.base, x)
-rand(rng::AbstractRNG, d::_BRMContinuousObjectiveWeight) = rand(rng, d.base)
-rand(rng::AbstractRNG, d::_BRMDiscreteObjectiveWeight) = rand(rng, d.base)
+rand(rng::AbstractRNG, d::_BRMObjectiveWeight) = rand(rng, d.base)
 
 _brm_interval_evidence(base::ContinuousUnivariateDistribution, upper) =
     _BRMContinuousIntervalEvidence(base, upper)
@@ -115,59 +128,568 @@ _brm_interval_evidence(base::DiscreteUnivariateDistribution, upper) =
 
 _brm_objective_observation(base, ::Nothing, _i) = base
 function _brm_objective_observation(
-        base::ContinuousUnivariateDistribution,
+        base::Distributions.Distribution,
         weight::BRM._BRMObservationWeightPlan, i)
     weight.kind === :analytic && return base
-    _BRMContinuousObjectiveWeight(base, weight.values[i])
-end
-function _brm_objective_observation(
-        base::DiscreteUnivariateDistribution,
-        weight::BRM._BRMObservationWeightPlan, i)
-    weight.kind === :analytic && return base
-    _BRMDiscreteObjectiveWeight(base, weight.values[i])
+    _BRMObjectiveWeight(base, weight.values[i])
 end
 
-_brm_analytic_scale(::Nothing, sigma, _i) = sigma
-_brm_analytic_scale(weight::BRM._BRMObservationWeightPlan, sigma, i) =
-    weight.kind === :analytic ? sigma / sqrt(weight.values[i]) : sigma
-
-_brm_normal_observation(::Nothing, weight, mu, sigma, i) =
-    _brm_objective_observation(
-        Normal(mu, _brm_analytic_scale(weight, sigma, i)), weight, i)
-function _brm_normal_observation(
-        modifier::BRM._BRMResponseModifierPlan, weight, mu, sigma, i)
-    lower = isnothing(modifier.lower) ? nothing :
-        BRM._brm_response_bound_at(modifier.lower, i)
-    upper = isnothing(modifier.upper) ? nothing :
-        BRM._brm_response_bound_at(modifier.upper, i)
-    base = Normal(mu, _brm_analytic_scale(weight, sigma, i))
-    observation = modifier.kind === :truncated ? truncated(base; lower, upper) :
-                  modifier.kind === :censored ? censored(base; lower, upper) :
-                  modifier.kind === :interval_censored ?
-                      _brm_interval_evidence(base, upper) :
-                  error("Turing backend: internal unsupported Normal response " *
-                        "modifier `$(modifier.kind)`")
-    _brm_objective_observation(observation, weight, i)
+function _brm_generic_observation(base, modifier, weight, i)
+    if !isnothing(weight) && weight.kind === :analytic
+        base isa Normal || error(
+            "Turing backend: analytic weights require a distribution with " *
+            "Normal location/scale semantics; got $(typeof(base))")
+        base = Normal(mean(base), std(base) / sqrt(weight.values[i]))
+    end
+    if !isnothing(modifier)
+        lower = isnothing(modifier.lower) ? nothing :
+            BRM._brm_response_bound_at(modifier.lower, i)
+        upper = isnothing(modifier.upper) ? nothing :
+            BRM._brm_response_bound_at(modifier.upper, i)
+        base = modifier.kind === :truncated ? truncated(base; lower, upper) :
+               modifier.kind === :censored ? censored(base; lower, upper) :
+               modifier.kind === :interval_censored ?
+                   _brm_interval_evidence(base, upper) :
+               error("Turing backend: response modifier `$(modifier.kind)` " *
+                     "has no executable Distributions.jl composition")
+    end
+    _brm_objective_observation(base, weight, i)
 end
 
-_brm_poisson_observation(::Nothing, weight, rate, i) =
-    _brm_objective_observation(Poisson(rate), weight, i)
-function _brm_poisson_observation(
-        modifier::BRM._BRMResponseModifierPlan, weight, rate, i)
-    lower = isnothing(modifier.lower) ? nothing :
-        BRM._brm_response_bound_at(modifier.lower, i)
-    upper = isnothing(modifier.upper) ? nothing :
-        BRM._brm_response_bound_at(modifier.upper, i)
-    base = Poisson(rate)
-    observation = modifier.kind === :truncated ? truncated(base; lower, upper) :
-                  modifier.kind === :censored ? censored(base; lower, upper) :
-                  modifier.kind === :interval_censored ?
-                      _brm_interval_evidence(base, upper) :
-                  error("Turing backend: internal unsupported Poisson response " *
-                        "modifier `$(modifier.kind)`")
-    _brm_objective_observation(observation, weight, i)
+function _brm_ast_call(callable, args, kwargs, callables)
+    push!(callables, callable)
+    f = :(callables[$(length(callables))])
+    positional = map(x -> _brm_prepared_ast(x, callables), args)
+    keywords = [Expr(:kw, key, _brm_prepared_ast(value, callables))
+                for (key, value) in pairs(kwargs)]
+    isempty(keywords) ? Expr(:call, f, positional...) :
+        Expr(:call, f, Expr(:parameters, keywords...), positional...)
 end
 
+_brm_prepared_ast(x, _callables) = QuoteNode(x)
+function _brm_prepared_ast(x::BRM._BRMPreparedRef, callables)
+    value = x.name
+    x.axis === :observation_row ? :(view($value, i, :)) :
+        x.axis === :observation ? :($value[i]) : value
+end
+_brm_prepared_ast(x::BRM._BRMPreparedExpr, callables) =
+    _brm_ast_call(x.callable, x.args, x.kwargs, callables)
+function _brm_prepared_ast(x::Tuple, callables)
+    Expr(:tuple, map(value -> _brm_prepared_ast(value, callables), x)...)
+end
+
+_brm_has_row_ref(x) = false
+_brm_has_row_ref(x::BRM._BRMPreparedRef) = x.axis in (:observation, :observation_row)
+_brm_has_row_ref(x::BRM._BRMPreparedExpr) =
+    any(_brm_has_row_ref, x.args) || any(_brm_has_row_ref, values(x.kwargs))
+
+function _brm_group_prior_ast(block, callables)
+    Expr(:tuple, map(block.sd_prior) do prior
+        if isnothing(prior)
+            nothing
+        else
+            prepared = BRM._brm_prepare_expr(prior)
+            prepared isa BRM._BRMPreparedExpr ?
+                _brm_turing_prior_ast(prepared, callables) :
+                _brm_prepared_ast(prepared, callables)
+        end
+    end...)
+end
+function _brm_prior_value_ast(value, callables)
+    prepared = BRM._brm_prepare_expr(value)
+    prepared isa BRM._BRMPreparedExpr ?
+        _brm_turing_prior_ast(prepared, callables) :
+        _brm_prepared_ast(prepared, callables)
+end
+_brm_prior_value_ast(values::Tuple, callables) =
+    Expr(:tuple, map(value -> _brm_prior_value_ast(value, callables), values)...)
+function _brm_term_priors_ast(term, callables)
+    expressions = BRM._brm_term_prior_expressions(term)
+    names = keys(expressions)
+    values = Expr(:tuple, map(value -> _brm_prior_value_ast(value, callables),
+                             Base.values(expressions))...)
+    :(NamedTuple{$(QuoteNode(names))}($values))
+end
+function _brm_term_inputs_ast(term)
+    names = Tuple(term.dependencies)
+    :(NamedTuple{$(QuoteNode(names))}($(Expr(:tuple, names...))))
+end
+
+function _brm_generic_model_ast(plan::BRM._TuringGenericPlan)
+    callables = Any[]
+    body = Expr(:block)
+    nodes = Dict{Symbol,Vector{Any}}()
+    for name in keys(plan.context.data)
+        name === plan.response_name && continue
+        push!(body.args, :($name = plan.context.data[$(QuoteNode(name))]))
+    end
+    predictor_values = Symbol[]
+    shared_groups = BRM._turing_shared_group_plans(plan.predictors)
+    shared_members = Set((member.component_index, member.block_index)
+        for shared in shared_groups for member in shared.members)
+    residual_scales = Dict{Int,Any}()
+    block_residual_scales = Dict{Tuple{Int,Int},Any}()
+    joint_mappings = Dict{Symbol,Tuple{Int,Int,Any}}()
+    for (joint_index, joint) in enumerate(plan.joint_r2d2)
+        for (mapping_index, mapping) in enumerate(joint.predictors)
+            joint_mappings[mapping.predictor] = (joint_index, mapping_index, joint)
+        end
+    end
+    for parameter in plan.parameters
+        prior = _brm_turing_parameter_ast(parameter, callables)
+        nodes[parameter.name] = Any[:($(parameter.name) ~ $prior)]
+    end
+    for assignment in plan.assignments
+        value = _brm_prepared_ast(assignment.expression, callables)
+        statement = _brm_has_row_ref(assignment.expression) ?
+            :($(assignment.name) = [$value for i in eachindex(y)]) :
+            :($(assignment.name) = $value)
+        nodes[assignment.name] = Any[statement]
+    end
+    for (index, component) in enumerate(plan.predictors)
+        beta = index == 1 ? :beta_pop : Symbol(:beta_pop_, component.predictor.name)
+        eta = Symbol(:eta_, component.predictor.name)
+        value = component.predictor.name
+        push!(predictor_values, value)
+        statements = get!(nodes, value, Any[])
+        prior_asts = map(component.priors) do prior
+            if isnothing(prior)
+                push!(callables, Normal)
+                :(callables[$(length(callables))](0, 1))
+            else
+                _brm_turing_prior_ast(BRM._brm_prepare_expr(prior), callables)
+            end
+        end
+        prior_vector = Expr(:vect, prior_asts...)
+        joint_mapping = get(joint_mappings, value, nothing)
+        if !isnothing(joint_mapping)
+            joint_index, mapping_index, joint = joint_mapping
+            site = Symbol(:r2d2_joint_, joint_index)
+            if mapping_index == 1
+                design_exprs = Any[]
+                coefficient_shares = Any[]
+                margin_shares = Any[]
+                fallback_exprs = Any[]
+                for mapping in joint.predictors
+                    mapped = plan.predictors[mapping.component_index]
+                    push!(design_exprs,
+                        :(plan.predictors[$(mapping.component_index)].design.matrix))
+                    push!(coefficient_shares, QuoteNode(mapping.coefficient_shares))
+                    push!(margin_shares, QuoteNode(mapping.margin_shares))
+                    mapped_priors = map(mapped.priors) do prior
+                        isnothing(prior) ? begin
+                            push!(callables, Normal)
+                            :(callables[$(length(callables))]())
+                        end : _brm_turing_prior_ast(
+                            BRM._brm_prepare_expr(prior), callables)
+                    end
+                    push!(fallback_exprs, Expr(:vect, mapped_priors...))
+                end
+                r2_prior = _brm_turing_prior_ast(
+                    BRM._brm_prepare_expr(joint.prior), callables)
+                reference = isnothing(joint.reference_scale) ? nothing :
+                    _brm_prepared_ast(
+                        BRM._brm_prepare_expr(joint.reference_scale), callables)
+                push!(statements, :($site ~ to_submodel(_brm_r2d2_joint(
+                    $(Expr(:tuple, design_exprs...)),
+                    $(Expr(:tuple, coefficient_shares...)),
+                    $(Expr(:tuple, margin_shares...)), $r2_prior,
+                    $(joint.alpha), $reference,
+                    $(Expr(:tuple, fallback_exprs...))))))
+            end
+            push!(statements, :($beta = $site.betas[$mapping_index]))
+            mapping = joint.predictors[mapping_index]
+            block_residual_scales[(index, mapping.block_index)] =
+                :($site.scales[$mapping_index])
+            residual_scale = nothing
+        elseif isnothing(component.r2d2)
+            push!(statements, :($beta ~ product_distribution($prior_vector)))
+            residual_scale = nothing
+        else
+            r2d2 = component.r2d2
+            r2_prior = _brm_turing_prior_ast(
+                BRM._brm_prepare_expr(r2d2.prior), callables)
+            total_scale = isnothing(r2d2.total_scale) ? nothing :
+                _brm_prepared_ast(BRM._brm_prepare_expr(r2d2.total_scale), callables)
+            site = Symbol(:r2d2_, value)
+            push!(statements, :($site ~ to_submodel(_brm_r2d2_population(
+                plan.predictors[$index].design.matrix,
+                $(QuoteNode(r2d2.share_indices)), $r2_prior,
+                $(r2d2.alpha), $total_scale, $prior_vector))))
+            push!(statements, :($beta = $site.beta))
+            residual_scale = :($site.residual_scale)
+        end
+        residual_scales[index] = residual_scale
+        push!(statements, :($eta = plan.predictors[$index].design.matrix * $beta +
+                                  plan.predictors[$index].design.fixed))
+        if !isempty(component.random_effects)
+            effect = Symbol(:group_effect_, index)
+            push!(statements, :($effect = zeros(length(plan.response))))
+            for group_index in eachindex(component.random_effects)
+                (index, group_index) in shared_members && continue
+                group = Symbol(:group_, index, :_, group_index)
+                group_scale = get(block_residual_scales, (index, group_index),
+                                  residual_scale)
+                priors = haskey(block_residual_scales, (index, group_index)) ?
+                    Expr(:tuple, fill(nothing,
+                        size(component.random_effects[group_index].matrix, 2))...) :
+                    _brm_group_prior_ast(
+                        component.random_effects[group_index], callables)
+                push!(statements, :($group ~ to_submodel(
+                    _brm_group_effect_model(
+                        plan.predictors[$index].random_effects[$group_index],
+                        $priors, $group_scale))))
+                push!(statements, :($effect = $effect + $group.effect))
+            end
+            push!(statements, :($eta = $eta + $effect))
+        end
+        for term_index in eachindex(component.terms)
+            term_site = Symbol(:term_, component.predictor.name, :_, term_index)
+            priors = _brm_term_priors_ast(component.terms[term_index], callables)
+            inputs = _brm_term_inputs_ast(component.terms[term_index])
+            push!(statements, :($term_site ~ to_submodel(
+                BRM._brm_turing_term_model(plan.predictors[$index].terms[$term_index],
+                    length(plan.response), $priors, $inputs))))
+            push!(statements, :($eta = $eta + $term_site.effect))
+        end
+        inverse_link = InverseFunctions.inverse(component.predictor.link_lhs_fn)
+        push!(callables, inverse_link)
+        push!(statements, :($value = (callables[$(length(callables))]).($eta)))
+    end
+    emitted = Set{Symbol}()
+    for name in plan.prepared.order
+        statements = get(nodes, name, nothing)
+        isnothing(statements) && continue
+        append!(body.args, statements)
+        push!(emitted, name)
+    end
+    for (name, statements) in nodes
+        name in emitted || append!(body.args, statements)
+    end
+    for (shared_index, shared) in enumerate(shared_groups)
+        site = Symbol(:shared_group_, shared_index)
+        block_exprs = [:(plan.predictors[$(member.component_index)].random_effects[
+            $(member.block_index)]) for member in shared.members]
+        blocks = Expr(:tuple, block_exprs...)
+        prior_exprs = Any[]
+        scale_exprs = Any[]
+        for (member, block) in zip(shared.members, shared.blocks)
+            scale_key = (member.component_index, member.block_index)
+            if haskey(block_residual_scales, scale_key)
+                append!(prior_exprs, fill(nothing, size(block.matrix, 2)))
+            else
+                append!(prior_exprs, map(block.sd_prior) do prior
+                    isnothing(prior) ? nothing :
+                        _brm_turing_prior_ast(BRM._brm_prepare_expr(prior), callables)
+                end)
+            end
+            push!(scale_exprs, get(block_residual_scales,
+                (member.component_index, member.block_index),
+                residual_scales[member.component_index]))
+        end
+        priors = Expr(:tuple, prior_exprs...)
+        scales = Expr(:tuple, scale_exprs...)
+        push!(body.args, :($site ~ to_submodel(
+            _brm_shared_group_effect_model($blocks, $priors, $scales))))
+        for (effect_index, member) in enumerate(shared.members)
+            eta = Symbol(:eta_, member.predictor)
+            value = member.predictor
+            component = plan.predictors[member.component_index]
+            inverse_link = InverseFunctions.inverse(component.predictor.link_lhs_fn)
+            push!(callables, inverse_link)
+            push!(body.args, :($eta = $eta + $site.effects[$effect_index]))
+            push!(body.args, :($value = (callables[$(length(callables))]).($eta)))
+        end
+    end
+    distribution = _brm_prepared_ast(plan.distribution, callables)
+    push!(body.args, quote
+        for i in eachindex(y)
+            y[i] ~ _brm_generic_observation(
+                $distribution, plan.response_modifier,
+                plan.observation_weight, i)
+        end
+    end)
+    parameter_values = Symbol[parameter.name for parameter in plan.parameters]
+    names = Tuple((predictor_values..., parameter_values...))
+    values = Expr(:tuple, predictor_values..., parameter_values...)
+    push!(body.args, :(merge(NamedTuple{$(QuoteNode(names))}($values),
+                             (; response=y))))
+    function_name = gensym(:brm_generic_model)
+    definition = :(Turing.@model function $function_name(plan, callables,
+                                                          group_models,
+                                                          term_models, y)
+        $body
+    end)
+    (; definition, function_name, callables=Tuple(callables))
+end
+
+const _BRM_GENERIC_MODEL_CACHE = Dict{Any,Tuple{Function,Expr}}()
+const _BRM_GENERIC_MODEL_CACHE_LOCK = ReentrantLock()
+
+function _brm_cached_generic_evaluator(lowered)
+    key = _brm_generic_structure_key(lowered.definition)
+    lock(_BRM_GENERIC_MODEL_CACHE_LOCK) do
+        get!(_BRM_GENERIC_MODEL_CACHE, key) do
+            (_brm_staged_turing_evaluator(lowered.definition), lowered.definition)
+        end
+    end
+end
+
+# Use DynamicPPL's own compiler for tilde/context semantics, then stage its
+# evaluator without adding a new Julia method at runtime. Ordinary compiled
+# callers and AD can call this body immediately, without a hot-loop world-age
+# barrier. Retain the original @model AST for introspection.
+function _brm_staged_turing_evaluator(definition)
+    compiled = Turing.DynamicPPL.model(
+        @__MODULE__, LineNumberNode(0), deepcopy(last(definition.args)), false)
+    evaluator = only(node for node in compiled.args if Meta.isexpr(node, :function))
+    RuntimeGeneratedFunctions.drop_expr(
+        RuntimeGeneratedFunctions.RuntimeGeneratedFunction(
+            @__MODULE__, @__MODULE__, evaluator))
+end
+
+function _brm_generic_multi_model_ast(multi::BRM._TuringMultiResponsePlan)
+    callables = Any[]
+    body = Expr(:block)
+    node_statements = Dict{Symbol,Vector{Any}}()
+    parameters = Dict{Symbol,Any}()
+    predictors = Dict{Symbol,Tuple{Int,Int,Any}}()
+    assignments = Dict{Symbol,Tuple{Int,Any}}()
+    data_sources = Dict{Symbol,Int}()
+    response_symbols = [Symbol(:y_, i) for i in eachindex(multi.plans)]
+    for (pi, plan) in enumerate(multi.plans)
+        foreach(key -> get!(data_sources, key, pi), keys(plan.context.data))
+        foreach(p -> get!(parameters, p.name, p), plan.parameters)
+        foreach(a -> get!(assignments, a.name, (pi, a)), plan.assignments)
+        for (ci, component) in enumerate(plan.predictors)
+            get!(predictors, component.predictor.name, (pi, ci, component))
+        end
+    end
+    for (name, pi) in data_sources
+        push!(body.args, :($name = multi.plans[$pi].context.data[$(QuoteNode(name))]))
+    end
+    predictor_entries = Tuple(values(predictors))
+    shared_groups = BRM._turing_shared_group_plans(
+        Tuple(entry[3] for entry in predictor_entries))
+    shared_members = Set((member.predictor, member.block_index)
+        for shared in shared_groups for member in shared.members)
+    residual_scales = Dict{Symbol,Any}()
+    block_residual_scales = Dict{Tuple{Symbol,Int},Any}()
+    joint_mappings = Dict{Symbol,Tuple{Int,Int,Any}}()
+    for (joint_index, joint) in enumerate(multi.joint_r2d2)
+        for (mapping_index, mapping) in enumerate(joint.predictors)
+            joint_mappings[mapping.predictor] = (joint_index, mapping_index, joint)
+        end
+    end
+    for parameter in values(parameters)
+        prior = _brm_turing_parameter_ast(parameter, callables)
+        node_statements[parameter.name] = Any[:($(parameter.name) ~ $prior)]
+    end
+    for (pi, assignment) in values(assignments)
+        value = _brm_prepared_ast(assignment.expression, callables)
+        statement = if _brm_has_row_ref(assignment.expression)
+            :($(assignment.name) = [$value for i in eachindex($(response_symbols[pi]))])
+        else
+            :($(assignment.name) = $value)
+        end
+        node_statements[assignment.name] = Any[statement]
+    end
+    logical = Symbol[]
+    for (name, (pi, ci, component)) in predictors
+        beta = length(predictors) == 1 ? :beta_pop : Symbol(:beta_pop_, name)
+        eta = Symbol(:eta_, name)
+        push!(logical, name)
+        prior_asts = map(component.priors) do prior
+            if isnothing(prior)
+                push!(callables, Normal)
+                :(callables[$(length(callables))](0, 1))
+            else
+                _brm_turing_prior_ast(BRM._brm_prepare_expr(prior), callables)
+            end
+        end
+        statements = get!(node_statements, name, Any[])
+        prior_vector = Expr(:vect, prior_asts...)
+        joint_mapping = get(joint_mappings, name, nothing)
+        if !isnothing(joint_mapping)
+            joint_index, mapping_index, joint = joint_mapping
+            site = Symbol(:r2d2_joint_, joint_index)
+            if mapping_index == 1
+                design_exprs = Any[]
+                coefficient_shares = Any[]
+                margin_shares = Any[]
+                fallback_exprs = Any[]
+                for mapping in joint.predictors
+                    mapped = multi.plans[mapping.plan_index].predictors[
+                        mapping.component_index]
+                    push!(design_exprs, :(multi.plans[$(mapping.plan_index)].predictors[
+                        $(mapping.component_index)].design.matrix))
+                    push!(coefficient_shares, QuoteNode(mapping.coefficient_shares))
+                    push!(margin_shares, QuoteNode(mapping.margin_shares))
+                    mapped_priors = map(mapped.priors) do prior
+                        isnothing(prior) ? begin
+                            push!(callables, Normal)
+                            :(callables[$(length(callables))]())
+                        end : _brm_turing_prior_ast(
+                            BRM._brm_prepare_expr(prior), callables)
+                    end
+                    push!(fallback_exprs, Expr(:vect, mapped_priors...))
+                end
+                r2_prior = _brm_turing_prior_ast(
+                    BRM._brm_prepare_expr(joint.prior), callables)
+                reference = isnothing(joint.reference_scale) ? nothing :
+                    _brm_prepared_ast(
+                        BRM._brm_prepare_expr(joint.reference_scale), callables)
+                push!(statements, :($site ~ to_submodel(_brm_r2d2_joint(
+                    $(Expr(:tuple, design_exprs...)),
+                    $(Expr(:tuple, coefficient_shares...)),
+                    $(Expr(:tuple, margin_shares...)), $r2_prior,
+                    $(joint.alpha), $reference,
+                    $(Expr(:tuple, fallback_exprs...))))))
+            end
+            push!(statements, :($beta = $site.betas[$mapping_index]))
+            mapping = joint.predictors[mapping_index]
+            block_residual_scales[(name, mapping.block_index)] =
+                :($site.scales[$mapping_index])
+            residual_scale = nothing
+        elseif isnothing(component.r2d2)
+            push!(statements, :($beta ~ product_distribution($prior_vector)))
+            residual_scale = nothing
+        else
+            r2d2 = component.r2d2
+            r2_prior = _brm_turing_prior_ast(
+                BRM._brm_prepare_expr(r2d2.prior), callables)
+            total_scale = isnothing(r2d2.total_scale) ? nothing :
+                _brm_prepared_ast(BRM._brm_prepare_expr(r2d2.total_scale), callables)
+            site = Symbol(:r2d2_, name)
+            push!(statements, :($site ~ to_submodel(_brm_r2d2_population(
+                multi.plans[$pi].predictors[$ci].design.matrix,
+                $(QuoteNode(r2d2.share_indices)), $r2_prior,
+                $(r2d2.alpha), $total_scale, $prior_vector))))
+            push!(statements, :($beta = $site.beta))
+            residual_scale = :($site.residual_scale)
+        end
+        residual_scales[name] = residual_scale
+        push!(statements, :($eta = multi.plans[$pi].predictors[$ci].design.matrix *
+            $beta + multi.plans[$pi].predictors[$ci].design.fixed))
+        for (gi, _) in enumerate(component.random_effects)
+            (name, gi) in shared_members && continue
+            group = Symbol(:group_, name, :_, gi)
+            group_scale = get(block_residual_scales, (name, gi), residual_scale)
+            priors = haskey(block_residual_scales, (name, gi)) ?
+                Expr(:tuple, fill(nothing,
+                    size(component.random_effects[gi].matrix, 2))...) :
+                _brm_group_prior_ast(component.random_effects[gi], callables)
+            push!(statements, :($group ~ to_submodel(_brm_group_effect_model(
+                multi.plans[$pi].predictors[$ci].random_effects[$gi], $priors,
+                $group_scale))))
+            push!(statements, :($eta = $eta + $group.effect))
+        end
+        for term_index in eachindex(component.terms)
+            term_site = Symbol(:term_, name, :_, term_index)
+            priors = _brm_term_priors_ast(component.terms[term_index], callables)
+            inputs = _brm_term_inputs_ast(component.terms[term_index])
+            push!(statements, :($term_site ~ to_submodel(
+                BRM._brm_turing_term_model(
+                    multi.plans[$pi].predictors[$ci].terms[$term_index],
+                    length(multi.plans[$pi].response), $priors, $inputs))))
+            push!(statements, :($eta = $eta + $term_site.effect))
+        end
+        inverse_link = InverseFunctions.inverse(component.predictor.link_lhs_fn)
+        push!(callables, inverse_link)
+        push!(statements, :($name = (callables[$(length(callables))]).($eta)))
+    end
+    emitted = Set{Symbol}()
+    for plan in multi.plans, name in plan.prepared.order
+        name in emitted && continue
+        statements = get(node_statements, name, nothing)
+        isnothing(statements) && continue
+        append!(body.args, statements)
+        push!(emitted, name)
+    end
+    for (name, statements) in node_statements
+        name in emitted || append!(body.args, statements)
+    end
+    for (shared_index, shared) in enumerate(shared_groups)
+        site = Symbol(:shared_group_, shared_index)
+        block_exprs = Any[]
+        prior_exprs = Any[]
+        scale_exprs = Any[]
+        for (member, block) in zip(shared.members, shared.blocks)
+            pi, ci, _ = predictor_entries[member.component_index]
+            push!(block_exprs, :(multi.plans[$pi].predictors[$ci].random_effects[
+                $(member.block_index)]))
+            scale_key = (member.predictor, member.block_index)
+            if haskey(block_residual_scales, scale_key)
+                append!(prior_exprs, fill(nothing, size(block.matrix, 2)))
+            else
+                append!(prior_exprs, map(block.sd_prior) do prior
+                    isnothing(prior) ? nothing :
+                        _brm_turing_prior_ast(BRM._brm_prepare_expr(prior), callables)
+                end)
+            end
+            push!(scale_exprs, get(block_residual_scales,
+                (member.predictor, member.block_index),
+                residual_scales[member.predictor]))
+        end
+        push!(body.args, :($site ~ to_submodel(_brm_shared_group_effect_model(
+            $(Expr(:tuple, block_exprs...)), $(Expr(:tuple, prior_exprs...)),
+            $(Expr(:tuple, scale_exprs...))))))
+        for (effect_index, member) in enumerate(shared.members)
+            eta = Symbol(:eta_, member.predictor)
+            pi, ci, component = predictor_entries[member.component_index]
+            inverse_link = InverseFunctions.inverse(component.predictor.link_lhs_fn)
+            push!(callables, inverse_link)
+            push!(body.args, :($eta = $eta + $site.effects[$effect_index]))
+            push!(body.args, :($(member.predictor) =
+                (callables[$(length(callables))]).($eta)))
+        end
+    end
+    value_names = Tuple((logical..., keys(parameters)..., keys(assignments)...))
+    value_expr = Expr(:tuple, value_names...)
+    returned = Any[]
+    for (pi, plan) in enumerate(multi.plans)
+        y = response_symbols[pi]
+        distribution = _brm_prepared_ast(plan.distribution, callables)
+        push!(body.args, quote
+            for i in eachindex($y)
+                $y[i] ~ _brm_generic_observation(
+                    $distribution, multi.plans[$pi].response_modifier,
+                    multi.plans[$pi].observation_weight, i)
+            end
+        end)
+        push!(returned, :(merge(
+            NamedTuple{$(QuoteNode(value_names))}($value_expr),
+            (; response=$y))))
+    end
+    push!(body.args, :(; responses=$(Expr(:tuple, returned...))))
+    function_name = gensym(:brm_generic_multi_model)
+    signature = Expr(:call, function_name, :multi, :callables,
+                     :group_models, :term_models, response_symbols...)
+    definition = Expr(:macrocall, GlobalRef(Turing, Symbol("@model")),
+                      LineNumberNode(0),
+                      Expr(:function, signature, body))
+    (; definition, function_name, callables=Tuple(callables))
+end
+
+function _brm_generic_structure_key(definition::Expr)
+    function_definition = last(definition.args)
+    signature, body = function_definition.args
+    # Every emitted literal and structural choice belongs to the cache key.
+    # Exclude only the fresh function name. Callable objects remain runtime
+    # tuple arguments, specialized by Julia, and need no name-based registry.
+    (repr(signature.args[2:end]), repr(body))
+end
+
+function BRM._brm_turing_model(plan::BRM._TuringGenericPlan)
+    lowered = _brm_generic_model_ast(plan)
+    evaluator, definition = _brm_cached_generic_evaluator(lowered)
+    group_models = ()
+    term_models = Tuple(component.terms for component in plan.predictors)
+    model = Turing.DynamicPPL.Model{false}(evaluator,
+        (; plan, callables=lowered.callables, group_models, term_models, y=plan.response))
+    plan.source_ast = definition
+    model
+end
 _random_effect_args(component) = isempty(component.random_effects) ?
     (0, zeros(0, 0), Int[], 0, 0) : let block = only(component.random_effects)
         intercept_index = something(
@@ -190,49 +712,12 @@ function _noncentered_group_coefficients(scales, z_flat, n_groups)
               reshape(z_flat, n_terms, n_groups))
 end
 
-_brm_group_scale_distribution(family, rate) = family == 0 ?
-    truncated(Normal(), 0.0, Inf) : family == 1 ? Exponential(inv(rate)) :
-    family == 2 ? truncated(Normal(0.0, rate), 0.0, Inf) :
-    error("Turing backend: internal unsupported random-effect SD prior family $family")
-_brm_group_scale_distributions(families, rates) =
-    [_brm_group_scale_distribution(families[i], rates[i])
-     for i in eachindex(families)]
-# Stan's positive-constrained Normal sampling statements omit the truncation
-# normalization that `truncated(Normal(), 0, Inf)` includes in Turing.
-_brm_group_scale_log_normalization(families) =
-    -count(family -> family == 0 || family == 2, families) * log(2.0)
-function _brm_group_scale_site_adjustment(scales, families, rates)
-    adjustment = zero(eltype(scales))
-    log_two = log(2.0)
-    log_sqrt_two_pi = 0.5 * log(2π)
-    for i in eachindex(scales)
-        if families[i] == 0
-            # The concrete sampling site below is half-Normal, while Stan's
-            # positive constraint evaluates the ordinary Normal kernel.
-            adjustment -= log_two
-        elseif families[i] == 1
-            # Replace that half-Normal density with Exponential(rate).
-            value = scales[i]
-            rate = rates[i]
-            adjustment += log(rate) - rate * value + 0.5 * value^2 +
-                          log_sqrt_two_pi - log_two
-        elseif families[i] == 2
-            # Replace the concrete half-standard-Normal site with Stan's
-            # positive-constrained Normal(0, scale) kernel. `rates` retains its
-            # historical field name but carries the Normal scale for family 2.
-            value = scales[i]
-            scale = rates[i]
-            adjustment += -log(scale) - 0.5 * (value / scale)^2 +
-                          0.5 * value^2 - log_two
-        else
-            error("Turing backend: internal unsupported random-effect SD " *
-                  "prior family $(families[i])")
-        end
-    end
-    adjustment
-end
+_brm_group_scale_distribution(prior) = _brm_constrained_kernel(
+    isnothing(prior) ? Normal() : prior; lower=0)
+_brm_group_scale_distributions(priors::Tuple) =
+    collect(map(_brm_group_scale_distribution, priors))
 _brm_has_group_prior_override(block) =
-    any(!iszero, block.sd_family) || block.lkj_eta != 1.0
+    any(!isnothing, block.sd_prior) || block.lkj_eta != 1.0
 _brm_has_group_prior_override(blocks::Tuple) =
     any(_brm_has_group_prior_override, blocks)
 _brm_has_group_geometry_override(block) =
@@ -278,10 +763,13 @@ _brm_stratified_centered_coefficients(values, n_terms, n_groups) =
 
 
 Turing.@model function _brm_stratified_group_frame(
-        n_terms, sd_family, sd_rate, lkj_eta)
+        n_terms, sd_priors, lkj_eta, residual_scale)
     L ~ LKJCholesky(n_terms, lkj_eta)
-    tau ~ product_distribution(
-        _brm_group_scale_distributions(sd_family, sd_rate))
+    tau = fill(residual_scale, n_terms)
+    if isnothing(residual_scale)
+        tau ~ product_distribution(
+            _brm_group_scale_distributions(sd_priors))
+    end
     factor = Diagonal(tau) * Matrix(L.L)
     (; L, tau, factor)
 end
@@ -297,8 +785,11 @@ end
 
 
 Turing.@model function _brm_random_intercept_effect_prior(
-        group_idx, n_groups, family, rate)
-    scale ~ _brm_group_scale_distribution(family, rate)
+        group_idx, n_groups, prior, residual_scale)
+    scale = residual_scale
+    if isnothing(residual_scale)
+        scale ~ _brm_group_scale_distribution(prior)
+    end
     z ~ product_distribution(fill(Normal(), n_groups))
     values = scale .* z
     effect = values[group_idx]
@@ -317,8 +808,11 @@ end
 
 
 Turing.@model function _brm_centered_random_intercept_effect_prior(
-        group_idx, n_groups, family, rate)
-    scale ~ _brm_group_scale_distribution(family, rate)
+        group_idx, n_groups, prior, residual_scale)
+    scale = residual_scale
+    if isnothing(residual_scale)
+        scale ~ _brm_group_scale_distribution(prior)
+    end
     values ~ _brm_centered_intercept_distribution(scale, n_groups)
     effect = values[group_idx]
     (; effect, scale, values)
@@ -326,13 +820,14 @@ end
 
 
 Turing.@model function _brm_correlated_group_effect(
-        Z, group_idx, n_groups, sd_family, sd_rate, lkj_eta)
+        Z, group_idx, n_groups, sd_priors, lkj_eta, residual_scale)
     n_terms = size(Z, 2)
     L ~ LKJCholesky(n_terms, lkj_eta)
-    tau ~ product_distribution(
-        _brm_group_scale_distributions(sd_family, sd_rate))
-    Turing.@addlogprob! (; logprior=
-        _brm_group_scale_log_normalization(sd_family))
+    tau = fill(residual_scale, n_terms)
+    if isnothing(residual_scale)
+        tau ~ product_distribution(
+            _brm_group_scale_distributions(sd_priors))
+    end
     z_flat ~ product_distribution(fill(Normal(), n_terms * n_groups))
     z = reshape(z_flat, n_terms, n_groups)
     coefficients = transpose(Diagonal(tau) * Matrix(L.L) * z)
@@ -377,10 +872,13 @@ function _brm_multi_membership_correlated(
 end
 
 Turing.@model function _brm_multi_membership_intercept_effect(
-        group_idx, weights, n_obs, n_memberships, n_groups)
-    log_scale ~ Normal()
+        group_idx, weights, n_obs, n_memberships, n_groups, sd_prior,
+        residual_scale)
+    scale = residual_scale
+    if isnothing(residual_scale)
+        scale ~ _brm_group_scale_distribution(sd_prior)
+    end
     z ~ product_distribution(fill(Normal(), n_groups))
-    scale = exp(log_scale)
     values = scale .* z
     effect = _brm_multi_membership_intercept(
         values, group_idx, weights, n_obs, n_memberships)
@@ -389,15 +887,13 @@ end
 
 Turing.@model function _brm_multi_membership_correlated_effect(
         Z, group_idx, weights, n_obs, n_memberships, n_groups,
-        sd_family, sd_rate, lkj_eta)
+        sd_priors, lkj_eta, residual_scale)
     n_terms = size(Z, 2)
     L ~ LKJCholesky(n_terms, lkj_eta)
-    tau ~ product_distribution(
-        fill(truncated(Normal(), 0.0, Inf), n_terms))
-    # Keep the sampling site concretely typed for Enzyme, then recover the
-    # backend-neutral marginal-SD prior semantics.
-    Turing.@addlogprob! (;
-        logprior=_brm_group_scale_site_adjustment(tau, sd_family, sd_rate))
+    tau = fill(residual_scale, n_terms)
+    if isnothing(residual_scale)
+        tau ~ product_distribution(_brm_group_scale_distributions(sd_priors))
+    end
     z_flat ~ product_distribution(fill(Normal(), n_terms * n_groups))
     z = reshape(z_flat, n_terms, n_groups)
     coefficients = transpose(Diagonal(tau) * Matrix(L.L) * z)
@@ -408,16 +904,13 @@ end
 
 
 Turing.@model function _brm_centered_correlated_group_effect(
-        Z, group_idx, n_groups, sd_family, sd_rate, lkj_eta)
+        Z, group_idx, n_groups, sd_priors, lkj_eta, residual_scale)
     n_terms = size(Z, 2)
     L ~ LKJCholesky(n_terms, lkj_eta)
-    tau ~ product_distribution(
-        fill(truncated(Normal(), 0.0, Inf), n_terms))
-    # A concrete sampling site keeps Enzyme's type analysis valid. Adjust its
-    # half-Normal density to the backend-neutral Normal/Exponential semantics.
-    Turing.@addlogprob! (;
-        logprior=_brm_group_scale_site_adjustment(
-            tau, sd_family, sd_rate))
+    tau = fill(residual_scale, n_terms)
+    if isnothing(residual_scale)
+        tau ~ product_distribution(_brm_group_scale_distributions(sd_priors))
+    end
     coefficients_flat ~ _brm_centered_coefficients_distribution(
         tau, L, n_groups)
     coefficients = transpose(reshape(coefficients_flat, n_terms, n_groups))
@@ -427,17 +920,19 @@ end
 
 
 Turing.@model function _brm_zero_correlation_group_effect(
-        Z, group_idx, n_groups, intercept_index)
+        Z, group_idx, n_groups, intercept_index, sd_priors, residual_scale)
     n_terms = size(Z, 2)
     n_slopes = n_terms - (intercept_index > 0)
-    intercept_scale = nothing
-    if intercept_index > 0
-        log_intercept_scale ~ Normal()
-        intercept_scale = exp(log_intercept_scale)
+    intercept_scale = residual_scale
+    if intercept_index > 0 && isnothing(residual_scale)
+        intercept_scale ~ _brm_group_scale_distribution(sd_priors[intercept_index])
     end
-    tau_slopes ~ product_distribution(
-        fill(truncated(Normal(), 0.0, Inf), n_slopes))
-    Turing.@addlogprob! (; logprior=-n_slopes * log(2.0))
+    tau_slopes = fill(residual_scale, n_slopes)
+    if isnothing(residual_scale)
+        tau_slopes ~ product_distribution(
+            [_brm_group_scale_distribution(sd_priors[i]) for i in eachindex(sd_priors)
+             if i != intercept_index])
+    end
     scales = _zero_correlation_scales(
         intercept_index, intercept_scale, tau_slopes)
     z_flat ~ product_distribution(fill(Normal(), n_terms * n_groups))
@@ -449,16 +944,19 @@ end
 
 
 Turing.@model function _brm_centered_zero_correlation_group_effect(
-        Z, group_idx, n_groups, intercept_index)
+        Z, group_idx, n_groups, intercept_index, sd_priors, residual_scale)
     n_terms = size(Z, 2)
     n_slopes = n_terms - (intercept_index > 0)
-    intercept_scale = nothing
-    if intercept_index > 0
-        log_intercept_scale ~ Normal()
-        intercept_scale = exp(log_intercept_scale)
+    intercept_scale = residual_scale
+    if intercept_index > 0 && isnothing(residual_scale)
+        intercept_scale ~ _brm_group_scale_distribution(sd_priors[intercept_index])
     end
-    tau_slopes ~ product_distribution(
-        fill(truncated(Normal(), 0.0, Inf), n_slopes))
+    tau_slopes = fill(residual_scale, n_slopes)
+    if isnothing(residual_scale)
+        tau_slopes ~ product_distribution(
+            [_brm_group_scale_distribution(sd_priors[i]) for i in eachindex(sd_priors)
+             if i != intercept_index])
+    end
     scales = _zero_correlation_scales(
         intercept_index, intercept_scale, tau_slopes)
     coefficients_flat ~ _brm_centered_diagonal_distribution(scales, n_groups)
@@ -469,11 +967,11 @@ end
 
 
 Turing.@model function _brm_stratified_group_effect(
-        Z, group_idx, n_groups, group_strata, n_strata, sd_family, sd_rate,
-        lkj_eta, centered)
+        Z, group_idx, n_groups, group_strata, n_strata, sd_priors,
+        lkj_eta, centered, residual_scale)
     n_terms = size(Z, 2)
     frame_model = _brm_stratified_group_frame(
-        n_terms, sd_family, sd_rate, lkj_eta)
+        n_terms, sd_priors, lkj_eta, residual_scale)
     strata = Vector{Any}(undef, n_strata)
     for stratum in 1:n_strata
         strata[stratum] ~ to_submodel(frame_model)
@@ -494,40 +992,38 @@ Turing.@model function _brm_stratified_group_effect(
 end
 
 
-function _brm_group_effect_model(block::BRM._BRMMultiMembershipPlan)
+function _brm_group_effect_model(block::BRM._BRMMultiMembershipPlan, sd_priors,
+                                 residual_scale=nothing)
     block.intercept_only && return _brm_multi_membership_intercept_effect(
         block.indices, block.weights, block.n_obs, block.n_memberships,
-        length(block.levels))
+        length(block.levels), only(sd_priors), residual_scale)
     _brm_multi_membership_correlated_effect(
         block.matrix, block.indices, block.weights, block.n_obs,
-        block.n_memberships, length(block.levels), block.sd_family,
-        block.sd_rate, block.lkj_eta)
+        block.n_memberships, length(block.levels), sd_priors,
+        block.lkj_eta, residual_scale)
 end
 
-function _brm_group_effect_model(block)
+function _brm_group_effect_model(block, sd_priors, residual_scale=nothing)
     if !isnothing(block.by)
         return _brm_stratified_group_effect(
             block.matrix, block.indices, length(block.levels),
-            block.group_strata, length(block.strata), block.sd_family,
-            block.sd_rate, block.lkj_eta, block.centered)
+            block.group_strata, length(block.strata), sd_priors,
+            block.lkj_eta, block.centered, residual_scale)
     end
     if block.intercept_only
-        if block.centered
-            if _brm_has_group_prior_override(block)
-                return _brm_centered_random_intercept_effect_prior(
-                    block.indices, length(block.levels), only(block.sd_family),
-                    only(block.sd_rate))
-            end
-            return _brm_centered_random_intercept_effect(
+        prior = only(sd_priors)
+        if isnothing(prior) && isnothing(residual_scale)
+            return (block.centered ? _brm_centered_random_intercept_effect :
+                                     _brm_random_intercept_effect)(
                 block.indices, length(block.levels))
         end
-        if _brm_has_group_prior_override(block)
-            return _brm_random_intercept_effect_prior(
-                block.indices, length(block.levels), only(block.sd_family),
-                only(block.sd_rate))
+        if block.centered
+            return _brm_centered_random_intercept_effect_prior(
+                block.indices, length(block.levels), prior,
+                residual_scale)
         end
-        return _brm_random_intercept_effect(
-            block.indices, length(block.levels))
+        return _brm_random_intercept_effect_prior(
+            block.indices, length(block.levels), prior, residual_scale)
     end
     if block.zero_correlation
         intercept_index = something(
@@ -535,12 +1031,13 @@ function _brm_group_effect_model(block)
         return (block.centered ?
             _brm_centered_zero_correlation_group_effect :
             _brm_zero_correlation_group_effect)(
-            block.matrix, block.indices, length(block.levels), intercept_index)
+            block.matrix, block.indices, length(block.levels), intercept_index,
+            sd_priors, residual_scale)
     end
     (block.centered ? _brm_centered_correlated_group_effect :
                       _brm_correlated_group_effect)(
-        block.matrix, block.indices, length(block.levels), block.sd_family,
-        block.sd_rate, block.lkj_eta)
+        block.matrix, block.indices, length(block.levels), sd_priors,
+        block.lkj_eta, residual_scale)
 end
 
 _brm_group_effect_models(component) =
@@ -549,63 +1046,136 @@ _brm_group_effect_models(blocks::Tuple) =
     Tuple(_brm_group_effect_model(block) for block in blocks)
 
 
+_brm_repeat_scale(::Tuple{}, ::Tuple{}) = ()
+function _brm_repeat_scale(blocks::Tuple, scales::Tuple)
+    n_terms = size(first(blocks).matrix, 2)
+    scale = first(scales)
+    head = if scale isa AbstractVector
+        length(scale) == n_terms || error(
+            "Turing backend: shared group scale has $(length(scale)) margins; " *
+            "expected $n_terms")
+        Tuple(scale)
+    else
+        ntuple(_ -> scale, n_terms)
+    end
+    (head..., _brm_repeat_scale(Base.tail(blocks), Base.tail(scales))...)
+end
+
+_brm_free_group_priors(::Tuple{}, ::Tuple{}) = ()
+function _brm_free_group_priors(priors::Tuple, residual_scales::Tuple)
+    tail = _brm_free_group_priors(Base.tail(priors), Base.tail(residual_scales))
+    isnothing(first(residual_scales)) ? (first(priors), tail...) : tail
+end
+
+_brm_shared_term_count(::Tuple{}) = 0
+_brm_shared_term_count(matrices::Tuple) =
+    size(first(matrices), 2) + _brm_shared_term_count(Base.tail(matrices))
+
+function _brm_shared_scales(tau, residual_scales)
+    isempty(tau) && return collect(residual_scales)
+    scales = similar(tau, length(residual_scales))
+    free = 1
+    for i in eachindex(residual_scales)
+        if isnothing(residual_scales[i])
+            scales[i] = tau[free]
+            free += 1
+        else
+            scales[i] = residual_scales[i]
+        end
+    end
+    scales
+end
+
+function _brm_shared_effect(matrix, coefficients, group_idx, first_column)
+    effect = Vector{eltype(coefficients)}(undef, size(matrix, 1))
+    for observation in axes(matrix, 1)
+        value = zero(eltype(effect))
+        for term in axes(matrix, 2)
+            value += matrix[observation, term] *
+                coefficients[group_idx[observation], first_column + term - 1]
+        end
+        effect[observation] = value
+    end
+    effect
+end
+
+
+_brm_shared_effects(::Tuple{}, ::Tuple{}, coefficients, first_column) = ()
+function _brm_shared_effects(matrices::Tuple, group_indices::Tuple, coefficients,
+                             first_column)
+    matrix = first(matrices)
+    effect = _brm_shared_effect(
+        matrix, coefficients, first(group_indices), first_column)
+    (effect, _brm_shared_effects(Base.tail(matrices), Base.tail(group_indices),
+                                 coefficients,
+                                 first_column + size(matrix, 2))...)
+end
+
+
 Turing.@model function _brm_shared_correlated_group_effect(
-        matrices, group_idx, n_groups, sd_family, sd_rate, lkj_eta)
-    length(matrices) == 2 || error(
-        "Turing backend: internal shared distributional group block must " *
-        "contain mean and precision matrices")
-    n_mean_terms = size(matrices[1], 2)
-    n_terms = n_mean_terms + size(matrices[2], 2)
+        matrices, group_indices, n_groups, sd_priors, lkj_eta, residual_scales)
+    n_terms = _brm_shared_term_count(matrices)
     L ~ LKJCholesky(n_terms, lkj_eta)
-    tau ~ product_distribution(
-        fill(truncated(Normal(), 0.0, Inf), n_terms))
-    # A concrete site keeps Enzyme type analysis valid even when the semantic
-    # priors mix defaults and Exponential overrides.
-    Turing.@addlogprob! (;
-        logprior=_brm_group_scale_site_adjustment(tau, sd_family, sd_rate))
+    free_priors = _brm_free_group_priors(sd_priors, residual_scales)
+    tau = Float64[]
+    if !isempty(free_priors)
+        tau ~ product_distribution(_brm_group_scale_distributions(free_priors))
+    end
+    scales = _brm_shared_scales(tau, residual_scales)
     z_flat ~ product_distribution(fill(Normal(), n_terms * n_groups))
     z = reshape(z_flat, n_terms, n_groups)
-    coefficients = transpose(Diagonal(tau) * Matrix(L.L) * z)
-    mean_coefficients = @view coefficients[:, 1:n_mean_terms]
-    precision_coefficients = @view coefficients[:, (n_mean_terms + 1):end]
-    effects = (
-        vec(sum(matrices[1] .* mean_coefficients[group_idx, :]; dims=2)),
-        vec(sum(matrices[2] .* precision_coefficients[group_idx, :]; dims=2)),
-    )
-    (; effects, L, tau, coefficients)
+    coefficients = transpose(Diagonal(scales) * Matrix(L.L) * z)
+    effects = _brm_shared_effects(matrices, group_indices, coefficients, 1)
+    (; effects, L, tau, scales, coefficients)
 end
 
 
 Turing.@model function _brm_centered_shared_correlated_group_effect(
-        matrices, group_idx, n_groups, sd_family, sd_rate, lkj_eta)
-    term_counts = Tuple(size(matrix, 2) for matrix in matrices)
-    n_terms = sum(term_counts)
+        matrices, group_indices, n_groups, sd_priors, lkj_eta, residual_scales)
+    n_terms = _brm_shared_term_count(matrices)
     L ~ LKJCholesky(n_terms, lkj_eta)
-    tau ~ product_distribution(
-        _brm_group_scale_distributions(sd_family, sd_rate))
-    coefficients_flat ~ _brm_centered_coefficients_distribution(
-        tau, L, n_groups)
-    coefficients = transpose(reshape(coefficients_flat, n_terms, n_groups))
-    effects = Vector{Any}(undef, length(matrices))
-    first_column = 1
-    for i in eachindex(matrices)
-        last_column = first_column + term_counts[i] - 1
-        block_coefficients = @view coefficients[:, first_column:last_column]
-        effects[i] = vec(sum(
-            matrices[i] .* block_coefficients[group_idx, :]; dims=2))
-        first_column = last_column + 1
+    free_priors = _brm_free_group_priors(sd_priors, residual_scales)
+    tau = Float64[]
+    if !isempty(free_priors)
+        tau ~ product_distribution(_brm_group_scale_distributions(free_priors))
     end
-    (; effects, L, tau, coefficients)
+    scales = _brm_shared_scales(tau, residual_scales)
+    coefficients_flat ~ _brm_centered_coefficients_distribution(
+        scales, L, n_groups)
+    coefficients = transpose(reshape(coefficients_flat, n_terms, n_groups))
+    effects = _brm_shared_effects(matrices, group_indices, coefficients, 1)
+    (; effects, L, tau, scales, coefficients)
+end
+
+
+function _brm_shared_group_effect_model(blocks::Tuple, sd_priors::Tuple,
+                                        residual_scales::Tuple)
+    isempty(blocks) && error(
+        "Turing backend: internal shared group must contain at least one block")
+    first_block = first(blocks)
+    matrices = map(block -> block.matrix, blocks)
+    group_indices = map(block -> block.indices, blocks)
+    margin_scales = _brm_repeat_scale(blocks, residual_scales)
+    if !isnothing(first_block.by)
+        return _brm_stratified_shared_group_effect(
+            matrices, group_indices, length(first_block.levels),
+            first_block.group_strata, length(first_block.strata), sd_priors,
+            first_block.lkj_eta, first_block.centered, margin_scales)
+    end
+    model = first_block.centered ?
+        _brm_centered_shared_correlated_group_effect :
+        _brm_shared_correlated_group_effect
+    model(matrices, group_indices, length(first_block.levels), sd_priors,
+          first_block.lkj_eta, margin_scales)
 end
 
 
 Turing.@model function _brm_stratified_shared_group_effect(
-        matrices, group_idx, n_groups, group_strata, n_strata, sd_family,
-        sd_rate, lkj_eta, centered)
-    term_counts = Tuple(size(matrix, 2) for matrix in matrices)
-    n_terms = sum(term_counts)
-    frame_model = _brm_stratified_group_frame(
-        n_terms, sd_family, sd_rate, lkj_eta)
+        matrices, group_indices, n_groups, group_strata, n_strata, sd_priors,
+        lkj_eta, centered, residual_scales)
+    n_terms = _brm_shared_term_count(matrices)
+    frame_model = _brm_shared_group_frame(
+        n_terms, sd_priors, lkj_eta, residual_scales)
     strata = Vector{Any}(undef, n_strata)
     for stratum in 1:n_strata
         strata[stratum] ~ to_submodel(frame_model)
@@ -621,1174 +1191,41 @@ Turing.@model function _brm_stratified_shared_group_effect(
         coefficients = _brm_stratified_noncentered_coefficients(
             strata, group_strata, z_flat, n_groups)
     end
-    effects = Vector{Any}(undef, length(matrices))
-    first_column = 1
-    for i in eachindex(matrices)
-        last_column = first_column + term_counts[i] - 1
-        block_coefficients = @view coefficients[:, first_column:last_column]
-        effects[i] = vec(sum(
-            matrices[i] .* block_coefficients[group_idx, :]; dims=2))
-        first_column = last_column + 1
-    end
+    effects = _brm_shared_effects(matrices, group_indices, coefficients, 1)
     (; effects, strata, coefficients)
 end
 
 
-function _brm_distributional_group_parts(plan)
-    precision_keys = Dict(
-        (block.id, block.group, block.by) => index
-        for (index, block) in enumerate(plan.precision.random_effects)
-        if !isnothing(block.id))
-    mean_shared = Set{Int}()
-    precision_shared = Set{Int}()
-    shared = Any[]
-    for (mean_index, mean_block) in enumerate(plan.mean.random_effects)
-        isnothing(mean_block.id) && continue
-        key = (mean_block.id, mean_block.group, mean_block.by)
-        haskey(precision_keys, key) || continue
-        precision_index = precision_keys[key]
-        precision_block = plan.precision.random_effects[precision_index]
-        mean_block.levels == precision_block.levels || error(
-            "Turing backend: shared random-effect ID `$(mean_block.id)` has " *
-            "incompatible fitted levels across distributional predictors")
-        mean_block.indices == precision_block.indices || error(
-            "Turing backend: shared random-effect ID `$(mean_block.id)` has " *
-            "incompatible group coordinates across distributional predictors")
-        mean_block.strata == precision_block.strata &&
-            mean_block.group_strata == precision_block.group_strata || error(
-            "Turing backend: shared random-effect ID `$(mean_block.id)` has " *
-            "incompatible stratified coordinates across distributional " *
-            "predictors")
-        mean_block.lkj_eta == precision_block.lkj_eta || error(
-            "Turing backend: shared random-effect ID `$(mean_block.id)` has " *
-            "incompatible correlation priors across distributional predictors")
-        mean_block.centered == precision_block.centered || error(
-            "Turing backend: shared random-effect ID `$(mean_block.id)` has " *
-            "incompatible centered parameterizations across distributional " *
-            "predictors")
-        push!(mean_shared, mean_index)
-        push!(precision_shared, precision_index)
-        sd_family = vcat(mean_block.sd_family, precision_block.sd_family)
-        sd_rate = vcat(mean_block.sd_rate, precision_block.sd_rate)
-        model = if !isnothing(mean_block.by)
-            _brm_stratified_shared_group_effect(
-                (mean_block.matrix, precision_block.matrix), mean_block.indices,
-                length(mean_block.levels), mean_block.group_strata,
-                length(mean_block.strata), sd_family, sd_rate,
-                mean_block.lkj_eta, mean_block.centered)
-        else
-            (mean_block.centered ?
-                _brm_centered_shared_correlated_group_effect :
-                _brm_shared_correlated_group_effect)(
-                (mean_block.matrix, precision_block.matrix), mean_block.indices,
-                length(mean_block.levels), sd_family, sd_rate,
-                mean_block.lkj_eta)
-        end
-        push!(shared, (; key, mean_block, precision_block, model))
+Turing.@model function _brm_shared_group_frame(
+        n_terms, sd_priors, lkj_eta, residual_scales)
+    L ~ LKJCholesky(n_terms, lkj_eta)
+    free_priors = _brm_free_group_priors(sd_priors, residual_scales)
+    tau = Float64[]
+    if !isempty(free_priors)
+        tau ~ product_distribution(_brm_group_scale_distributions(free_priors))
     end
-    mean_independent = Tuple(
-        block for (index, block) in enumerate(plan.mean.random_effects)
-        if index ∉ mean_shared)
-    precision_independent = Tuple(
-        block for (index, block) in enumerate(plan.precision.random_effects)
-        if index ∉ precision_shared)
-    (; mean_independent, precision_independent, shared=Tuple(shared))
+    scales = _brm_shared_scales(tau, residual_scales)
+    factor = Diagonal(scales) * Matrix(L.L)
+    (; L, tau, scales, factor)
 end
 
-
-Turing.@model function _brm_population_gaussian_multiple_groups(
-        X, fixed, group_models, y, beta_location, beta_scale, sigma_scale,
-        response_modifier, observation_weight)
-    beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
-    sigma ~ Exponential(sigma_scale)
-    groups = Vector{Any}(undef, length(group_models))
-    group_effect = zeros(length(y))
-    for i in eachindex(group_models)
-        groups[i] ~ to_submodel(group_models[i])
-        group_effect = group_effect + groups[i].effect
-    end
-    mu = X * beta_pop + fixed + group_effect
-    for i in eachindex(y)
-        y[i] ~ _brm_normal_observation(
-            response_modifier, observation_weight, mu[i], sigma, i)
-    end
-    (; mu, sigma, response=y, groups, group_effect)
-end
-
-
-Turing.@model function _brm_population_glm_multiple_groups(
-        family, X, fixed, group_models, trials, y, beta_location, beta_scale,
-        response_modifier, observation_weight)
-    beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
-    groups = Vector{Any}(undef, length(group_models))
-    group_effect = zeros(length(y))
-    for i in eachindex(group_models)
-        groups[i] ~ to_submodel(group_models[i])
-        group_effect = group_effect + groups[i].effect
-    end
-    eta = X * beta_pop + fixed + group_effect
-    rate = nothing
-    if family isa Val{:bernoulli_logit}
-        for i in eachindex(y)
-            y[i] ~ _brm_objective_observation(
-                BRM.BernoulliLogit(eta[i]), observation_weight, i)
-        end
-    elseif family isa Val{:binomial_logit}
-        for i in eachindex(y)
-            y[i] ~ _brm_objective_observation(
-                BRM.BinomialLogit(trials[i], eta[i]), observation_weight, i)
-        end
-    elseif family isa Val{:poisson_log}
-        rate = exp.(eta)
-        for i in eachindex(y)
-            y[i] ~ _brm_poisson_observation(
-                response_modifier, observation_weight, rate[i], i)
-        end
-    else
-        error("Turing backend: internal unsupported multiple-group family $family")
-    end
-    (; eta, rate, response=y, groups, group_effect)
-end
-
-Turing.@model function _brm_population_gaussian(
-    X, fixed, y, beta_location, beta_scale, sigma_scale, response_modifier,
-    observation_weight)
-    beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
-    sigma ~ Exponential(sigma_scale)
-    mu = X * beta_pop + fixed
-    for i in eachindex(y)
-        y[i] ~ _brm_normal_observation(
-            response_modifier, observation_weight, mu[i], sigma, i)
-    end
-    (; mu, sigma, response=y)
-end
-
-Turing.@model function _brm_population_gaussian_random_intercept(
-    X, fixed, group_idx, n_groups, y,
-    beta_location, beta_scale, sigma_scale, response_modifier,
-    observation_weight)
-    beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
-    sigma ~ Exponential(sigma_scale)
-    log_group_scale ~ Normal()
-    z_group ~ product_distribution(fill(Normal(), n_groups))
-    group_scale = exp(log_group_scale)
-    group_effect = group_scale .* z_group
-    mu = X * beta_pop + fixed + group_effect[group_idx]
-    for i in eachindex(y)
-        y[i] ~ _brm_normal_observation(
-            response_modifier, observation_weight, mu[i], sigma, i)
-    end
-    (; mu, sigma, response=y, group_scale, group_effect)
-end
-
-Turing.@model function _brm_population_gaussian_correlated_group(
-    X, fixed, Z, group_idx, n_groups, y,
-    beta_location, beta_scale, sigma_scale, response_modifier,
-    observation_weight)
-    beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
-    sigma ~ Exponential(sigma_scale)
-    n_terms = size(Z, 2)
-    L_group ~ LKJCholesky(n_terms, 1.0)
-    tau_group ~ product_distribution(
-        fill(truncated(Normal(), 0.0, Inf), n_terms))
-    z_group_flat ~ product_distribution(
-        fill(Normal(), n_terms * n_groups))
-    z_group = reshape(z_group_flat, n_terms, n_groups)
-    b_group = transpose(Diagonal(tau_group) * Matrix(L_group.L) * z_group)
-    group_effect = vec(sum(Z .* b_group[group_idx, :]; dims=2))
-    mu = X * beta_pop + fixed + group_effect
-    for i in eachindex(y)
-        y[i] ~ _brm_normal_observation(
-            response_modifier, observation_weight, mu[i], sigma, i)
-    end
-    (; mu, sigma, response=y, L_group, tau_group, b_group, group_effect)
-end
-
-Turing.@model function _brm_population_gaussian_zero_correlation_group(
-    X, fixed, Z, group_idx, n_groups, intercept_index, y,
-    beta_location, beta_scale, sigma_scale, response_modifier,
-    observation_weight)
-    beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
-    sigma ~ Exponential(sigma_scale)
-    n_terms = size(Z, 2)
-    n_slopes = n_terms - (intercept_index > 0)
-    group_intercept_scale = nothing
-    if intercept_index > 0
-        log_group_intercept_scale ~ Normal()
-        group_intercept_scale = exp(log_group_intercept_scale)
-    end
-    tau_group_slopes ~ product_distribution(
-        fill(truncated(Normal(), 0.0, Inf), n_slopes))
-    scales = if intercept_index == 0
-        tau_group_slopes
-    else
-        vcat(tau_group_slopes[1:(intercept_index - 1)],
-             [group_intercept_scale], tau_group_slopes[intercept_index:end])
-    end
-    z_group_flat ~ product_distribution(fill(Normal(), n_terms * n_groups))
-    z_group = reshape(z_group_flat, n_terms, n_groups)
-    b_group = transpose(reshape(scales, :, 1) .* z_group)
-    group_effect = vec(sum(Z .* b_group[group_idx, :]; dims=2))
-    mu = X * beta_pop + fixed + group_effect
-    for i in eachindex(y)
-        y[i] ~ _brm_normal_observation(
-            response_modifier, observation_weight, mu[i], sigma, i)
-    end
-    (; mu, sigma, response=y, group_intercept_scale, tau_group_slopes, scales,
-       b_group, group_effect)
-end
-
-Turing.@model function _brm_population_glm_correlated_group(
-    family, X, fixed, Z, group_idx, n_groups, trials, y,
-    beta_location, beta_scale, response_modifier, observation_weight)
-    beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
-    n_terms = size(Z, 2)
-    L_group ~ LKJCholesky(n_terms, 1.0)
-    tau_group ~ product_distribution(
-        fill(truncated(Normal(), 0.0, Inf), n_terms))
-    z_group_flat ~ product_distribution(
-        fill(Normal(), n_terms * n_groups))
-    z_group = reshape(z_group_flat, n_terms, n_groups)
-    b_group = transpose(Diagonal(tau_group) * Matrix(L_group.L) * z_group)
-    group_effect = vec(sum(Z .* b_group[group_idx, :]; dims=2))
-    eta = X * beta_pop + fixed + group_effect
-    rate = nothing
-    if family isa Val{:bernoulli_logit}
-        for i in eachindex(y)
-            y[i] ~ _brm_objective_observation(
-                BRM.BernoulliLogit(eta[i]), observation_weight, i)
-        end
-    elseif family isa Val{:binomial_logit}
-        for i in eachindex(y)
-            y[i] ~ _brm_objective_observation(
-                BRM.BinomialLogit(trials[i], eta[i]), observation_weight, i)
-        end
-    elseif family isa Val{:poisson_log}
-        rate = exp.(eta)
-        for i in eachindex(y)
-            y[i] ~ _brm_poisson_observation(
-                response_modifier, observation_weight, rate[i], i)
-        end
-    else
-        error("Turing backend: internal unsupported grouped GLM family $family")
-    end
-    (; eta, rate, response=y, L_group, tau_group, b_group, group_effect)
-end
-
-Turing.@model function _brm_population_glm_zero_correlation_group(
-    family, X, fixed, Z, group_idx, n_groups, intercept_index, trials, y,
-    beta_location, beta_scale, response_modifier, observation_weight)
-    beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
-    n_terms = size(Z, 2)
-    n_slopes = n_terms - (intercept_index > 0)
-    group_intercept_scale = nothing
-    if intercept_index > 0
-        log_group_intercept_scale ~ Normal()
-        group_intercept_scale = exp(log_group_intercept_scale)
-    end
-    tau_group_slopes ~ product_distribution(
-        fill(truncated(Normal(), 0.0, Inf), n_slopes))
-    scales = if intercept_index == 0
-        tau_group_slopes
-    else
-        vcat(tau_group_slopes[1:(intercept_index - 1)],
-             [group_intercept_scale], tau_group_slopes[intercept_index:end])
-    end
-    z_group_flat ~ product_distribution(fill(Normal(), n_terms * n_groups))
-    z_group = reshape(z_group_flat, n_terms, n_groups)
-    b_group = transpose(reshape(scales, :, 1) .* z_group)
-    group_effect = vec(sum(Z .* b_group[group_idx, :]; dims=2))
-    eta = X * beta_pop + fixed + group_effect
-    rate = nothing
-    if family isa Val{:bernoulli_logit}
-        for i in eachindex(y)
-            y[i] ~ _brm_objective_observation(
-                BRM.BernoulliLogit(eta[i]), observation_weight, i)
-        end
-    elseif family isa Val{:binomial_logit}
-        for i in eachindex(y)
-            y[i] ~ _brm_objective_observation(
-                BRM.BinomialLogit(trials[i], eta[i]), observation_weight, i)
-        end
-    elseif family isa Val{:poisson_log}
-        rate = exp.(eta)
-        for i in eachindex(y)
-            y[i] ~ _brm_poisson_observation(
-                response_modifier, observation_weight, rate[i], i)
-        end
-    else
-        error("Turing backend: internal unsupported zero-correlation GLM family $family")
-    end
-    (; eta, rate, response=y, group_intercept_scale, tau_group_slopes, scales,
-       b_group, group_effect)
-end
-
-Turing.@model function _brm_population_bernoulli_logit(
-    X, fixed, y, beta_location, beta_scale, observation_weight)
-    beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
-    eta = X * beta_pop + fixed
-    for i in eachindex(y)
-        y[i] ~ _brm_objective_observation(
-            BRM.BernoulliLogit(eta[i]), observation_weight, i)
-    end
-    (; eta, response=y)
-end
-
-Turing.@model function _brm_population_bernoulli_logit_random_intercept(
-    X, fixed, group_idx, n_groups, y, beta_location, beta_scale,
-    observation_weight)
-    beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
-    log_group_scale ~ Normal()
-    z_group ~ product_distribution(fill(Normal(), n_groups))
-    group_scale = exp(log_group_scale)
-    group_effect = group_scale .* z_group
-    eta = X * beta_pop + fixed + group_effect[group_idx]
-    for i in eachindex(y)
-        y[i] ~ _brm_objective_observation(
-            BRM.BernoulliLogit(eta[i]), observation_weight, i)
-    end
-    (; eta, response=y, group_scale, group_effect)
-end
-
-Turing.@model function _brm_population_binomial_logit(
-    X, fixed, trials, y, beta_location, beta_scale, observation_weight)
-    beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
-    eta = X * beta_pop + fixed
-    for i in eachindex(y)
-        y[i] ~ _brm_objective_observation(
-            BRM.BinomialLogit(trials[i], eta[i]), observation_weight, i)
-    end
-    (; eta, trials, response=y)
-end
-
-Turing.@model function _brm_population_binomial_logit_random_intercept(
-    X, fixed, group_idx, n_groups, trials, y, beta_location, beta_scale,
-    observation_weight)
-    beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
-    log_group_scale ~ Normal()
-    z_group ~ product_distribution(fill(Normal(), n_groups))
-    group_scale = exp(log_group_scale)
-    group_effect = group_scale .* z_group
-    eta = X * beta_pop + fixed + group_effect[group_idx]
-    for i in eachindex(y)
-        y[i] ~ _brm_objective_observation(
-            BRM.BinomialLogit(trials[i], eta[i]), observation_weight, i)
-    end
-    (; eta, trials, response=y, group_scale, group_effect)
-end
-
-Turing.@model function _brm_population_poisson_log(
-    X, fixed, y, beta_location, beta_scale, response_modifier,
-    observation_weight)
-    beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
-    log_rate = X * beta_pop + fixed
-    rate = exp.(log_rate)
-    for i in eachindex(y)
-        y[i] ~ _brm_poisson_observation(
-            response_modifier, observation_weight, rate[i], i)
-    end
-    (; log_rate, rate, response=y)
-end
-
-Turing.@model function _brm_population_poisson_log_random_intercept(
-    X, fixed, group_idx, n_groups, y, beta_location, beta_scale,
-    response_modifier, observation_weight)
-    beta_pop ~ product_distribution(Normal.(beta_location, beta_scale))
-    log_group_scale ~ Normal()
-    z_group ~ product_distribution(fill(Normal(), n_groups))
-    group_scale = exp(log_group_scale)
-    group_effect = group_scale .* z_group
-    log_rate = X * beta_pop + fixed + group_effect[group_idx]
-    rate = exp.(log_rate)
-    for i in eachindex(y)
-        y[i] ~ _brm_poisson_observation(
-            response_modifier, observation_weight, rate[i], i)
-    end
-    (; log_rate, rate, response=y, group_scale, group_effect)
-end
-
-Turing.@model function _brm_population_negative_binomial2(
-    X_mean, fixed_mean, X_precision, fixed_precision, y,
-    mean_beta_location, mean_beta_scale,
-    precision_beta_location, precision_beta_scale,
-    mean_group_kind, mean_Z,
-    mean_group_idx, n_mean_groups, mean_intercept_index,
-    precision_group_kind, precision_Z,
-    precision_group_idx, n_precision_groups, precision_intercept_index,
-    observation_weight)
-    beta_mean ~ product_distribution(
-        Normal.(mean_beta_location, mean_beta_scale))
-    beta_precision ~ product_distribution(
-        Normal.(precision_beta_location, precision_beta_scale))
-    mean_group_scale = nothing
-    L_mean_group = nothing
-    tau_mean_group = nothing
-    mean_group_intercept_scale = nothing
-    tau_mean_group_slopes = nothing
-    mean_group_scales = nothing
-    b_mean_group = nothing
-    mean_group_effect = zeros(length(y))
-    if mean_group_kind == 1
-        log_mean_group_scale ~ Normal()
-        z_mean_group ~ product_distribution(fill(Normal(), n_mean_groups))
-        mean_group_scale = exp(log_mean_group_scale)
-        mean_group_values = mean_group_scale .* z_mean_group
-        mean_group_effect = mean_group_values[mean_group_idx]
-    elseif mean_group_kind == 2
-        n_mean_terms = size(mean_Z, 2)
-        L_mean_group ~ LKJCholesky(n_mean_terms, 1.0)
-        tau_mean_group ~ product_distribution(
-            fill(truncated(Normal(), 0.0, Inf), n_mean_terms))
-        z_mean_group_flat ~ product_distribution(
-            fill(Normal(), n_mean_terms * n_mean_groups))
-        z_mean_group = reshape(
-            z_mean_group_flat, n_mean_terms, n_mean_groups)
-        b_mean_group = transpose(
-            Diagonal(tau_mean_group) * Matrix(L_mean_group.L) * z_mean_group)
-        mean_group_effect = vec(sum(
-            mean_Z .* b_mean_group[mean_group_idx, :]; dims=2))
-    elseif mean_group_kind == 3
-        n_mean_terms = size(mean_Z, 2)
-        n_mean_slopes = n_mean_terms - (mean_intercept_index > 0)
-        if mean_intercept_index > 0
-            log_mean_group_intercept_scale ~ Normal()
-            mean_group_intercept_scale = exp(log_mean_group_intercept_scale)
-        end
-        tau_mean_group_slopes ~ product_distribution(
-            fill(truncated(Normal(), 0.0, Inf), n_mean_slopes))
-        mean_group_scales = _zero_correlation_scales(
-            mean_intercept_index, mean_group_intercept_scale,
-            tau_mean_group_slopes)
-        z_mean_group_flat ~ product_distribution(
-            fill(Normal(), n_mean_terms * n_mean_groups))
-        b_mean_group = _noncentered_group_coefficients(
-            mean_group_scales, z_mean_group_flat, n_mean_groups)
-        mean_group_effect = vec(sum(
-            mean_Z .* b_mean_group[mean_group_idx, :]; dims=2))
-    end
-    precision_group_scale = nothing
-    L_precision_group = nothing
-    tau_precision_group = nothing
-    precision_group_intercept_scale = nothing
-    tau_precision_group_slopes = nothing
-    precision_group_scales = nothing
-    b_precision_group = nothing
-    precision_group_effect = zeros(length(y))
-    if precision_group_kind == 1
-        log_precision_group_scale ~ Normal()
-        z_precision_group ~ product_distribution(
-            fill(Normal(), n_precision_groups))
-        precision_group_scale = exp(log_precision_group_scale)
-        precision_group_values = precision_group_scale .* z_precision_group
-        precision_group_effect = precision_group_values[precision_group_idx]
-    elseif precision_group_kind == 2
-        n_precision_terms = size(precision_Z, 2)
-        L_precision_group ~ LKJCholesky(n_precision_terms, 1.0)
-        tau_precision_group ~ product_distribution(
-            fill(truncated(Normal(), 0.0, Inf), n_precision_terms))
-        z_precision_group_flat ~ product_distribution(
-            fill(Normal(), n_precision_terms * n_precision_groups))
-        z_precision_group = reshape(
-            z_precision_group_flat, n_precision_terms, n_precision_groups)
-        b_precision_group = transpose(
-            Diagonal(tau_precision_group) * Matrix(L_precision_group.L) *
-            z_precision_group)
-        precision_group_effect = vec(sum(
-            precision_Z .* b_precision_group[precision_group_idx, :]; dims=2))
-    elseif precision_group_kind == 3
-        n_precision_terms = size(precision_Z, 2)
-        n_precision_slopes = n_precision_terms - (precision_intercept_index > 0)
-        if precision_intercept_index > 0
-            log_precision_group_intercept_scale ~ Normal()
-            precision_group_intercept_scale = exp(
-                log_precision_group_intercept_scale)
-        end
-        tau_precision_group_slopes ~ product_distribution(
-            fill(truncated(Normal(), 0.0, Inf), n_precision_slopes))
-        precision_group_scales = _zero_correlation_scales(
-            precision_intercept_index, precision_group_intercept_scale,
-            tau_precision_group_slopes)
-        z_precision_group_flat ~ product_distribution(
-            fill(Normal(), n_precision_terms * n_precision_groups))
-        b_precision_group = _noncentered_group_coefficients(
-            precision_group_scales, z_precision_group_flat,
-            n_precision_groups)
-        precision_group_effect = vec(sum(
-            precision_Z .* b_precision_group[precision_group_idx, :]; dims=2))
-    end
-    log_mu = X_mean * beta_mean + fixed_mean + mean_group_effect
-    log_phi = X_precision * beta_precision + fixed_precision +
-              precision_group_effect
-    mu = exp.(log_mu)
-    phi = exp.(log_phi)
-    for i in eachindex(y)
-        y[i] ~ _brm_objective_observation(
-            BRM.NegativeBinomial2(mu[i], phi[i]), observation_weight, i)
-    end
-    (; log_mu, log_phi, mu, phi, response=y,
-       mean_group_scale, mean_group_effect,
-       L_mean_group, tau_mean_group, mean_group_intercept_scale,
-       tau_mean_group_slopes, mean_group_scales, b_mean_group,
-       precision_group_scale, precision_group_effect,
-       L_precision_group, tau_precision_group,
-       precision_group_intercept_scale, tau_precision_group_slopes,
-       precision_group_scales, b_precision_group)
-end
-
-Turing.@model function _brm_population_beta_binomial2(
-    X_mean, fixed_mean, X_precision, fixed_precision, trials, y,
-    mean_beta_location, mean_beta_scale,
-    precision_beta_location, precision_beta_scale,
-    mean_group_kind, mean_Z,
-    mean_group_idx, n_mean_groups, mean_intercept_index,
-    precision_group_kind, precision_Z,
-    precision_group_idx, n_precision_groups, precision_intercept_index,
-    observation_weight)
-    beta_mean ~ product_distribution(
-        Normal.(mean_beta_location, mean_beta_scale))
-    beta_precision ~ product_distribution(
-        Normal.(precision_beta_location, precision_beta_scale))
-    mean_group_scale = nothing
-    L_mean_group = nothing
-    tau_mean_group = nothing
-    mean_group_intercept_scale = nothing
-    tau_mean_group_slopes = nothing
-    mean_group_scales = nothing
-    b_mean_group = nothing
-    mean_group_effect = zeros(length(y))
-    if mean_group_kind == 1
-        log_mean_group_scale ~ Normal()
-        z_mean_group ~ product_distribution(fill(Normal(), n_mean_groups))
-        mean_group_scale = exp(log_mean_group_scale)
-        mean_group_values = mean_group_scale .* z_mean_group
-        mean_group_effect = mean_group_values[mean_group_idx]
-    elseif mean_group_kind == 2
-        n_mean_terms = size(mean_Z, 2)
-        L_mean_group ~ LKJCholesky(n_mean_terms, 1.0)
-        tau_mean_group ~ product_distribution(
-            fill(truncated(Normal(), 0.0, Inf), n_mean_terms))
-        z_mean_group_flat ~ product_distribution(
-            fill(Normal(), n_mean_terms * n_mean_groups))
-        z_mean_group = reshape(
-            z_mean_group_flat, n_mean_terms, n_mean_groups)
-        b_mean_group = transpose(
-            Diagonal(tau_mean_group) * Matrix(L_mean_group.L) * z_mean_group)
-        mean_group_effect = vec(sum(
-            mean_Z .* b_mean_group[mean_group_idx, :]; dims=2))
-    elseif mean_group_kind == 3
-        n_mean_terms = size(mean_Z, 2)
-        n_mean_slopes = n_mean_terms - (mean_intercept_index > 0)
-        if mean_intercept_index > 0
-            log_mean_group_intercept_scale ~ Normal()
-            mean_group_intercept_scale = exp(log_mean_group_intercept_scale)
-        end
-        tau_mean_group_slopes ~ product_distribution(
-            fill(truncated(Normal(), 0.0, Inf), n_mean_slopes))
-        mean_group_scales = _zero_correlation_scales(
-            mean_intercept_index, mean_group_intercept_scale,
-            tau_mean_group_slopes)
-        z_mean_group_flat ~ product_distribution(
-            fill(Normal(), n_mean_terms * n_mean_groups))
-        b_mean_group = _noncentered_group_coefficients(
-            mean_group_scales, z_mean_group_flat, n_mean_groups)
-        mean_group_effect = vec(sum(
-            mean_Z .* b_mean_group[mean_group_idx, :]; dims=2))
-    end
-    precision_group_scale = nothing
-    L_precision_group = nothing
-    tau_precision_group = nothing
-    precision_group_intercept_scale = nothing
-    tau_precision_group_slopes = nothing
-    precision_group_scales = nothing
-    b_precision_group = nothing
-    precision_group_effect = zeros(length(y))
-    if precision_group_kind == 1
-        log_precision_group_scale ~ Normal()
-        z_precision_group ~ product_distribution(
-            fill(Normal(), n_precision_groups))
-        precision_group_scale = exp(log_precision_group_scale)
-        precision_group_values = precision_group_scale .* z_precision_group
-        precision_group_effect = precision_group_values[precision_group_idx]
-    elseif precision_group_kind == 2
-        n_precision_terms = size(precision_Z, 2)
-        L_precision_group ~ LKJCholesky(n_precision_terms, 1.0)
-        tau_precision_group ~ product_distribution(
-            fill(truncated(Normal(), 0.0, Inf), n_precision_terms))
-        z_precision_group_flat ~ product_distribution(
-            fill(Normal(), n_precision_terms * n_precision_groups))
-        z_precision_group = reshape(
-            z_precision_group_flat, n_precision_terms, n_precision_groups)
-        b_precision_group = transpose(
-            Diagonal(tau_precision_group) * Matrix(L_precision_group.L) *
-            z_precision_group)
-        precision_group_effect = vec(sum(
-            precision_Z .* b_precision_group[precision_group_idx, :]; dims=2))
-    elseif precision_group_kind == 3
-        n_precision_terms = size(precision_Z, 2)
-        n_precision_slopes = n_precision_terms - (precision_intercept_index > 0)
-        if precision_intercept_index > 0
-            log_precision_group_intercept_scale ~ Normal()
-            precision_group_intercept_scale = exp(
-                log_precision_group_intercept_scale)
-        end
-        tau_precision_group_slopes ~ product_distribution(
-            fill(truncated(Normal(), 0.0, Inf), n_precision_slopes))
-        precision_group_scales = _zero_correlation_scales(
-            precision_intercept_index, precision_group_intercept_scale,
-            tau_precision_group_slopes)
-        z_precision_group_flat ~ product_distribution(
-            fill(Normal(), n_precision_terms * n_precision_groups))
-        b_precision_group = _noncentered_group_coefficients(
-            precision_group_scales, z_precision_group_flat,
-            n_precision_groups)
-        precision_group_effect = vec(sum(
-            precision_Z .* b_precision_group[precision_group_idx, :]; dims=2))
-    end
-    logit_mean = X_mean * beta_mean + fixed_mean + mean_group_effect
-    log_precision = X_precision * beta_precision + fixed_precision +
-                    precision_group_effect
-    mean = logistic.(logit_mean)
-    precision = exp.(log_precision)
-    for i in eachindex(y)
-        y[i] ~ _brm_objective_observation(
-            BRM.BetaBinomial2(trials[i], mean[i], precision[i]),
-            observation_weight, i)
-    end
-    (; logit_mean, log_precision, mean, precision, trials, response=y,
-       mean_group_scale, mean_group_effect,
-       L_mean_group, tau_mean_group, mean_group_intercept_scale,
-       tau_mean_group_slopes, mean_group_scales, b_mean_group,
-       precision_group_scale, precision_group_effect,
-       L_precision_group, tau_precision_group,
-       precision_group_intercept_scale, tau_precision_group_slopes,
-       precision_group_scales, b_precision_group)
-end
-
-
-Turing.@model function _brm_population_mean_precision_multiple_groups(
-        family, X_mean, fixed_mean, X_precision, fixed_precision,
-        mean_group_models, precision_group_models, shared_group_models,
-        trials, y,
-        mean_beta_location, mean_beta_scale,
-        precision_beta_location, precision_beta_scale, observation_weight)
-    beta_mean ~ product_distribution(
-        Normal.(mean_beta_location, mean_beta_scale))
-    beta_precision ~ product_distribution(
-        Normal.(precision_beta_location, precision_beta_scale))
-    mean_groups = Vector{Any}(undef, length(mean_group_models))
-    mean_group_effect = zeros(length(y))
-    for i in eachindex(mean_group_models)
-        mean_groups[i] ~ to_submodel(mean_group_models[i])
-        mean_group_effect = mean_group_effect + mean_groups[i].effect
-    end
-    precision_groups = Vector{Any}(undef, length(precision_group_models))
-    precision_group_effect = zeros(length(y))
-    for i in eachindex(precision_group_models)
-        precision_groups[i] ~ to_submodel(precision_group_models[i])
-        precision_group_effect =
-            precision_group_effect + precision_groups[i].effect
-    end
-    shared_groups = Vector{Any}(undef, length(shared_group_models))
-    for i in eachindex(shared_group_models)
-        shared_groups[i] ~ to_submodel(shared_group_models[i])
-        mean_group_effect = mean_group_effect + shared_groups[i].effects[1]
-        precision_group_effect =
-            precision_group_effect + shared_groups[i].effects[2]
-    end
-
-    mean_link = X_mean * beta_mean + fixed_mean + mean_group_effect
-    precision_link = X_precision * beta_precision + fixed_precision +
-                     precision_group_effect
-    mu = nothing
-    phi = nothing
-    mean = nothing
-    precision = nothing
-    if family isa Val{:negative_binomial2}
-        mu = exp.(mean_link)
-        phi = exp.(precision_link)
-        for i in eachindex(y)
-            y[i] ~ _brm_objective_observation(
-                BRM.NegativeBinomial2(mu[i], phi[i]), observation_weight, i)
-        end
-    elseif family isa Val{:beta_binomial2}
-        mean = logistic.(mean_link)
-        precision = exp.(precision_link)
-        for i in eachindex(y)
-            y[i] ~ _brm_objective_observation(
-                BRM.BetaBinomial2(trials[i], mean[i], precision[i]),
-                observation_weight, i)
-        end
-    else
-        error("Turing backend: internal unsupported multiple-group " *
-              "mean/precision family $family")
-    end
-    (; mean_link, precision_link, mu, phi, mean, precision, trials,
-       response=y, mean_groups, precision_groups,
-       shared_groups,
-       mean_group_effect, precision_group_effect)
-end
-
-Turing.@model function _brm_shared_normal_response(
-    mu, sigma, y, response_modifier, observation_weight)
-    for i in eachindex(y)
-        y[i] ~ _brm_normal_observation(
-            response_modifier, observation_weight, mu[i], sigma, i)
-    end
-    (; mu, sigma, response=y)
-end
-
-Turing.@model function _brm_shared_bernoulli_response(
-    eta, y, observation_weight)
-    for i in eachindex(y)
-        y[i] ~ _brm_objective_observation(
-            BRM.BernoulliLogit(eta[i]), observation_weight, i)
-    end
-    (; eta, response=y)
-end
-
-Turing.@model function _brm_shared_binomial_response(
-    eta, trials, y, observation_weight)
-    for i in eachindex(y)
-        y[i] ~ _brm_objective_observation(
-            BRM.BinomialLogit(trials[i], eta[i]), observation_weight, i)
-    end
-    (; eta, trials, response=y)
-end
-
-Turing.@model function _brm_shared_poisson_response(
-    rate, y, response_modifier, observation_weight)
-    for i in eachindex(y)
-        y[i] ~ _brm_poisson_observation(
-            response_modifier, observation_weight, rate[i], i)
-    end
-    (; log_rate=log.(rate), rate, response=y)
-end
-
-Turing.@model function _brm_shared_negative_binomial2_response(
-    mu, phi, y, observation_weight)
-    for i in eachindex(y)
-        y[i] ~ _brm_objective_observation(
-            BRM.NegativeBinomial2(mu[i], phi[i]), observation_weight, i)
-    end
-    (; mu, phi, response=y)
-end
-
-Turing.@model function _brm_shared_beta_binomial2_response(
-    mean, precision, trials, y, observation_weight)
-    for i in eachindex(y)
-        y[i] ~ _brm_objective_observation(
-            BRM.BetaBinomial2(trials[i], mean[i], precision[i]),
-            observation_weight, i)
-    end
-    (; mean, precision, trials, response=y)
-end
-
-
-_brm_shared_response_model(
-    plan::BRM._TuringPopulationPlan{Val{:normal_identity}}, owner) =
-    _brm_shared_normal_response(
-        owner.mu, owner.sigma, plan.response, plan.response_modifier,
-        plan.observation_weight)
-_brm_shared_response_model(
-    plan::BRM._TuringPopulationPlan{Val{:bernoulli_logit}}, owner) =
-    _brm_shared_bernoulli_response(
-        owner.eta, plan.response, plan.observation_weight)
-_brm_shared_response_model(
-    plan::BRM._TuringPopulationPlan{Val{:binomial_logit}}, owner) =
-    _brm_shared_binomial_response(
-        owner.eta, plan.family_args.trials, plan.response,
-        plan.observation_weight)
-_brm_shared_response_model(
-    plan::BRM._TuringPopulationPlan{Val{:poisson_log}}, owner) =
-    _brm_shared_poisson_response(
-        owner.rate, plan.response, plan.response_modifier,
-        plan.observation_weight)
-_brm_shared_response_model(
-    plan::BRM._TuringMeanPrecisionPlan{Val{:negative_binomial2}}, owner) =
-    _brm_shared_negative_binomial2_response(
-        owner.mu, owner.phi, plan.response, plan.observation_weight)
-_brm_shared_response_model(
-    plan::BRM._TuringMeanPrecisionPlan{Val{:beta_binomial2}}, owner) =
-    _brm_shared_beta_binomial2_response(
-        owner.mean, owner.precision, plan.family_args.trials, plan.response,
-        plan.observation_weight)
-
-
-Turing.@model function _brm_multi_response(models, plans, owners)
-    responses = Vector{Any}(undef, length(models))
-    for i in eachindex(models)
-        if owners[i] == i
-            responses[i] ~ to_submodel(models[i])
-        else
-            responses[i] ~ to_submodel(
-                _brm_shared_response_model(plans[i], responses[owners[i]]))
-        end
-    end
-    (; responses)
-end
 
 function BRM._brm_turing_model(plan::BRM._TuringMultiResponsePlan)
-    models = Tuple(BRM._brm_turing_model(child) for child in plan.plans)
-    _brm_multi_response(models, plan.plans, plan.owners)
-end
-
-function BRM._brm_turing_model(
-    plan::BRM._TuringPopulationPlan{Val{:normal_identity}})
-    if length(plan.random_effects) > 1 ||
-       _brm_has_group_geometry_override(plan.random_effects)
-        return _brm_population_gaussian_multiple_groups(
-            plan.design.matrix,
-            plan.design.fixed,
-            _brm_group_effect_models(plan),
-            plan.response,
-            plan.beta_location,
-            plan.beta_scale,
-            plan.scale_prior,
-            plan.response_modifier,
-            plan.observation_weight,
-        )
+    if all(child -> child isa BRM._TuringGenericPlan, plan.plans)
+        lowered = _brm_generic_multi_model_ast(plan)
+        evaluator, definition = _brm_cached_generic_evaluator(lowered)
+        responses = map(child -> child.response, plan.plans)
+        group_models = ()
+        term_models = Tuple(Tuple(component.terms for component in child.predictors)
+                            for child in plan.plans)
+        response_names = Tuple(Symbol(:y_, index) for index in eachindex(responses))
+        response_arguments = NamedTuple{response_names}(responses)
+        plan.source_ast = definition
+        return Turing.DynamicPPL.Model{false}(evaluator,
+            (; multi=plan, callables=lowered.callables, group_models, term_models,
+               response_arguments...))
     end
-    if !isempty(plan.random_effects)
-        block = only(plan.random_effects)
-        if block.zero_correlation && !block.intercept_only
-            intercept_index = something(
-                findfirst(column -> column.label === :Intercept, block.columns), 0)
-            return _brm_population_gaussian_zero_correlation_group(
-                plan.design.matrix,
-                plan.design.fixed,
-                block.matrix,
-                block.indices,
-                length(block.levels),
-                intercept_index,
-                plan.response,
-                plan.beta_location,
-                plan.beta_scale,
-                plan.scale_prior,
-                plan.response_modifier,
-                plan.observation_weight,
-            )
-        end
-        if !block.intercept_only
-            return _brm_population_gaussian_correlated_group(
-                plan.design.matrix,
-                plan.design.fixed,
-                block.matrix,
-                block.indices,
-                length(block.levels),
-                plan.response,
-                plan.beta_location,
-                plan.beta_scale,
-                plan.scale_prior,
-                plan.response_modifier,
-                plan.observation_weight,
-            )
-        end
-        return _brm_population_gaussian_random_intercept(
-            plan.design.matrix,
-            plan.design.fixed,
-            block.indices,
-            length(block.levels),
-            plan.response,
-            plan.beta_location,
-            plan.beta_scale,
-            plan.scale_prior,
-            plan.response_modifier,
-            plan.observation_weight,
-        )
-    end
-    _brm_population_gaussian(
-        plan.design.matrix,
-        plan.design.fixed,
-        plan.response,
-        plan.beta_location,
-        plan.beta_scale,
-        plan.scale_prior,
-        plan.response_modifier,
-        plan.observation_weight,
-    )
-end
-
-function BRM._brm_turing_model(
-    plan::BRM._TuringPopulationPlan{Val{:bernoulli_logit}})
-    if length(plan.random_effects) > 1 ||
-       _brm_has_group_geometry_override(plan.random_effects)
-        return _brm_population_glm_multiple_groups(
-            Val(:bernoulli_logit), plan.design.matrix, plan.design.fixed,
-            _brm_group_effect_models(plan), Int[], plan.response,
-            plan.beta_location, plan.beta_scale, nothing,
-            plan.observation_weight)
-    end
-    if !isempty(plan.random_effects)
-        block = only(plan.random_effects)
-        if block.zero_correlation && !block.intercept_only
-            intercept_index = something(
-                findfirst(column -> column.label === :Intercept, block.columns), 0)
-            return _brm_population_glm_zero_correlation_group(
-                Val(:bernoulli_logit), plan.design.matrix, plan.design.fixed,
-                block.matrix, block.indices, length(block.levels),
-                intercept_index, Int[], plan.response,
-                plan.beta_location, plan.beta_scale, nothing,
-                plan.observation_weight)
-        end
-        if !block.intercept_only
-            return _brm_population_glm_correlated_group(
-                Val(:bernoulli_logit),
-                plan.design.matrix,
-                plan.design.fixed,
-                block.matrix,
-                block.indices,
-                length(block.levels),
-                Int[],
-                plan.response,
-                plan.beta_location,
-                plan.beta_scale,
-                nothing,
-                plan.observation_weight,
-            )
-        end
-        return _brm_population_bernoulli_logit_random_intercept(
-            plan.design.matrix,
-            plan.design.fixed,
-            block.indices,
-            length(block.levels),
-            plan.response,
-            plan.beta_location,
-            plan.beta_scale,
-            plan.observation_weight,
-        )
-    end
-    _brm_population_bernoulli_logit(
-        plan.design.matrix,
-        plan.design.fixed,
-        plan.response,
-        plan.beta_location,
-        plan.beta_scale,
-        plan.observation_weight,
-    )
-end
-
-function BRM._brm_turing_model(
-    plan::BRM._TuringPopulationPlan{Val{:binomial_logit}})
-    if length(plan.random_effects) > 1 ||
-       _brm_has_group_geometry_override(plan.random_effects)
-        return _brm_population_glm_multiple_groups(
-            Val(:binomial_logit), plan.design.matrix, plan.design.fixed,
-            _brm_group_effect_models(plan), plan.family_args.trials,
-            plan.response, plan.beta_location, plan.beta_scale, nothing,
-            plan.observation_weight)
-    end
-    if !isempty(plan.random_effects)
-        block = only(plan.random_effects)
-        if block.zero_correlation && !block.intercept_only
-            intercept_index = something(
-                findfirst(column -> column.label === :Intercept, block.columns), 0)
-            return _brm_population_glm_zero_correlation_group(
-                Val(:binomial_logit), plan.design.matrix, plan.design.fixed,
-                block.matrix, block.indices, length(block.levels),
-                intercept_index, plan.family_args.trials, plan.response,
-                plan.beta_location, plan.beta_scale, nothing,
-                plan.observation_weight)
-        end
-        if !block.intercept_only
-            return _brm_population_glm_correlated_group(
-                Val(:binomial_logit),
-                plan.design.matrix,
-                plan.design.fixed,
-                block.matrix,
-                block.indices,
-                length(block.levels),
-                plan.family_args.trials,
-                plan.response,
-                plan.beta_location,
-                plan.beta_scale,
-                nothing,
-                plan.observation_weight,
-            )
-        end
-        return _brm_population_binomial_logit_random_intercept(
-            plan.design.matrix,
-            plan.design.fixed,
-            block.indices,
-            length(block.levels),
-            plan.family_args.trials,
-            plan.response,
-            plan.beta_location,
-            plan.beta_scale,
-            plan.observation_weight,
-        )
-    end
-    _brm_population_binomial_logit(
-        plan.design.matrix,
-        plan.design.fixed,
-        plan.family_args.trials,
-        plan.response,
-        plan.beta_location,
-        plan.beta_scale,
-        plan.observation_weight,
-    )
-end
-
-function BRM._brm_turing_model(
-    plan::BRM._TuringPopulationPlan{Val{:poisson_log}})
-    if length(plan.random_effects) > 1 ||
-       _brm_has_group_geometry_override(plan.random_effects)
-        return _brm_population_glm_multiple_groups(
-            Val(:poisson_log), plan.design.matrix, plan.design.fixed,
-            _brm_group_effect_models(plan), Int[], plan.response,
-            plan.beta_location, plan.beta_scale, plan.response_modifier,
-            plan.observation_weight)
-    end
-    if !isempty(plan.random_effects)
-        block = only(plan.random_effects)
-        if block.zero_correlation && !block.intercept_only
-            intercept_index = something(
-                findfirst(column -> column.label === :Intercept, block.columns), 0)
-            return _brm_population_glm_zero_correlation_group(
-                Val(:poisson_log), plan.design.matrix, plan.design.fixed,
-                block.matrix, block.indices, length(block.levels),
-                intercept_index, Int[], plan.response,
-                plan.beta_location, plan.beta_scale, plan.response_modifier,
-                plan.observation_weight)
-        end
-        if !block.intercept_only
-            return _brm_population_glm_correlated_group(
-                Val(:poisson_log),
-                plan.design.matrix,
-                plan.design.fixed,
-                block.matrix,
-                block.indices,
-                length(block.levels),
-                Int[],
-                plan.response,
-                plan.beta_location,
-                plan.beta_scale,
-                plan.response_modifier,
-                plan.observation_weight,
-            )
-        end
-        return _brm_population_poisson_log_random_intercept(
-            plan.design.matrix,
-            plan.design.fixed,
-            block.indices,
-            length(block.levels),
-            plan.response,
-            plan.beta_location,
-            plan.beta_scale,
-            plan.response_modifier,
-            plan.observation_weight,
-        )
-    end
-    _brm_population_poisson_log(
-        plan.design.matrix,
-        plan.design.fixed,
-        plan.response,
-        plan.beta_location,
-        plan.beta_scale,
-        plan.response_modifier,
-        plan.observation_weight,
-    )
-end
-
-
-function BRM._brm_turing_model(
-    plan::BRM._TuringMeanPrecisionPlan{Val{:negative_binomial2}})
-    group_parts = _brm_distributional_group_parts(plan)
-    if length(plan.mean.random_effects) > 1 ||
-       length(plan.precision.random_effects) > 1 ||
-       !isempty(group_parts.shared) ||
-       _brm_has_group_geometry_override(plan.mean.random_effects) ||
-       _brm_has_group_geometry_override(plan.precision.random_effects)
-        return _brm_population_mean_precision_multiple_groups(
-            Val(:negative_binomial2),
-            plan.mean.design.matrix, plan.mean.design.fixed,
-            plan.precision.design.matrix, plan.precision.design.fixed,
-            _brm_group_effect_models(group_parts.mean_independent),
-            _brm_group_effect_models(group_parts.precision_independent),
-            Tuple(group.model for group in group_parts.shared),
-            Int[], plan.response,
-            plan.mean.beta_location, plan.mean.beta_scale,
-            plan.precision.beta_location, plan.precision.beta_scale,
-            plan.observation_weight)
-    end
-    mean_group_kind, mean_Z, mean_group_idx, n_mean_groups,
-        mean_intercept_index =
-        _random_effect_args(plan.mean)
-    precision_group_kind, precision_Z, precision_group_idx,
-        n_precision_groups, precision_intercept_index =
-        _random_effect_args(plan.precision)
-    _brm_population_negative_binomial2(
-        plan.mean.design.matrix,
-        plan.mean.design.fixed,
-        plan.precision.design.matrix,
-        plan.precision.design.fixed,
-        plan.response,
-        plan.mean.beta_location,
-        plan.mean.beta_scale,
-        plan.precision.beta_location,
-        plan.precision.beta_scale,
-        mean_group_kind,
-        mean_Z,
-        mean_group_idx,
-        n_mean_groups,
-        mean_intercept_index,
-        precision_group_kind,
-        precision_Z,
-        precision_group_idx,
-        n_precision_groups,
-        precision_intercept_index,
-        plan.observation_weight,
-    )
-end
-
-function BRM._brm_turing_model(
-    plan::BRM._TuringMeanPrecisionPlan{Val{:beta_binomial2}})
-    group_parts = _brm_distributional_group_parts(plan)
-    if length(plan.mean.random_effects) > 1 ||
-       length(plan.precision.random_effects) > 1 ||
-       !isempty(group_parts.shared) ||
-       _brm_has_group_geometry_override(plan.mean.random_effects) ||
-       _brm_has_group_geometry_override(plan.precision.random_effects)
-        return _brm_population_mean_precision_multiple_groups(
-            Val(:beta_binomial2),
-            plan.mean.design.matrix, plan.mean.design.fixed,
-            plan.precision.design.matrix, plan.precision.design.fixed,
-            _brm_group_effect_models(group_parts.mean_independent),
-            _brm_group_effect_models(group_parts.precision_independent),
-            Tuple(group.model for group in group_parts.shared),
-            plan.family_args.trials,
-            plan.response, plan.mean.beta_location, plan.mean.beta_scale,
-            plan.precision.beta_location, plan.precision.beta_scale,
-            plan.observation_weight)
-    end
-    mean_group_kind, mean_Z, mean_group_idx, n_mean_groups,
-        mean_intercept_index =
-        _random_effect_args(plan.mean)
-    precision_group_kind, precision_Z, precision_group_idx,
-        n_precision_groups, precision_intercept_index =
-        _random_effect_args(plan.precision)
-    _brm_population_beta_binomial2(
-        plan.mean.design.matrix,
-        plan.mean.design.fixed,
-        plan.precision.design.matrix,
-        plan.precision.design.fixed,
-        plan.family_args.trials,
-        plan.response,
-        plan.mean.beta_location,
-        plan.mean.beta_scale,
-        plan.precision.beta_location,
-        plan.precision.beta_scale,
-        mean_group_kind,
-        mean_Z,
-        mean_group_idx,
-        n_mean_groups,
-        mean_intercept_index,
-        precision_group_kind,
-        precision_Z,
-        precision_group_idx,
-        n_precision_groups,
-        precision_intercept_index,
-        plan.observation_weight,
-    )
+    error("Turing backend: internal non-generic multi-response plan")
 end
 
 function _brm_group_keyword_set(value, keyword::Symbol)
@@ -1857,7 +1294,8 @@ function BRM.reprocess(
     prepared_data = freeze_constants ?
                     BRM._turing_replay_input(backend.plan, new_data) : new_data
     rebound = BRM._brm_rebind_brmi(backend.parent, prepared_data)
-    fresh = BRM._brm_turing_plan(rebound)
+    fresh = BRM._brm_turing_plan(
+        rebound; training=freeze_constants ? backend.plan : nothing)
     fresh = BRM._turing_center_groups(
         fresh, BRM._turing_centered_group_names(backend.plan))
     plan = freeze_constants ? BRM._turing_replay_plan(
@@ -1867,11 +1305,9 @@ function BRM.reprocess(
     BRM.TuringBRMI(rebound, plan, model, replay)
 end
 
-_brm_pointwise_indices(plan::BRM._TuringPopulationPlan) =
+_brm_pointwise_indices(plan::BRM._TuringGenericPlan) =
     isnothing(plan.missing_response) ? eachindex(plan.response) :
     plan.missing_response.observed_indices
-_brm_pointwise_indices(plan::BRM._TuringMeanPrecisionPlan) =
-    eachindex(plan.response)
 
 function _brm_typed_loglikelihoods(values)
     isempty(values) && return Float64[]
@@ -1935,7 +1371,8 @@ _brm_predictive_response_varnames(plan) =
     (Turing.DynamicPPL.@varname(y),)
 _brm_predictive_response_varnames(plan::BRM._TuringMultiResponsePlan) =
     ntuple(
-        i -> Turing.DynamicPPL.@varname(responses[i].y),
+        i -> Core.apply_type(
+            Turing.DynamicPPL.VarName, Symbol(:y_, i))(),
         length(plan.plans),
     )
 
@@ -2030,70 +1467,60 @@ end
 _brm_group_latent_name(block) = block.centered ?
     (block.intercept_only ? "values" : "coefficients_flat") :
     (block.intercept_only ? "z" : "z_flat")
-_brm_multiple_group_model(plan::BRM._TuringPopulationPlan) =
-    length(plan.random_effects) > 1 ||
-    _brm_has_group_geometry_override(plan.random_effects)
-function _brm_multiple_group_model(plan::BRM._TuringMeanPrecisionPlan)
-    parts = _brm_distributional_group_parts(plan)
-    length(plan.mean.random_effects) > 1 ||
-    length(plan.precision.random_effects) > 1 || !isempty(parts.shared) ||
-    _brm_has_group_geometry_override(plan.mean.random_effects) ||
-    _brm_has_group_geometry_override(plan.precision.random_effects)
-end
+_brm_multiple_group_model(plan::BRM._TuringGenericPlan) =
+    any(component -> !isempty(component.random_effects), plan.predictors)
 
-function _brm_resampled_latent_paths(
-        plan::BRM._TuringPopulationPlan, groups)
-    paths = String[]
-    if _brm_multiple_group_model(plan)
-        for (i, block) in enumerate(plan.random_effects)
+function _brm_resampled_latent_paths(plan::BRM._TuringGenericPlan, groups)
+    paths = Set{String}()
+    shared_groups = BRM._turing_shared_group_plans(plan.predictors)
+    shared_members = Set((member.component_index, member.block_index)
+        for shared in shared_groups for member in shared.members)
+    for (shared_index, shared) in enumerate(shared_groups)
+        any(block -> BRM._turing_block_is_resampled(block, groups),
+            shared.blocks) || continue
+        latent = first(shared.blocks).centered ? "coefficients_flat" : "z_flat"
+        push!(paths, "shared_group_$(shared_index).$latent")
+    end
+    for (component_index, component) in enumerate(plan.predictors)
+        for (block_index, block) in enumerate(component.random_effects)
+            (component_index, block_index) in shared_members && continue
             BRM._turing_block_is_resampled(block, groups) || continue
-            push!(paths, "groups[$i].$(_brm_group_latent_name(block))")
+            push!(paths, "group_$(component_index)_$(block_index)." *
+                         _brm_group_latent_name(block))
         end
-        return Set(paths)
-    end
-    for block in plan.random_effects
-        BRM._turing_block_is_resampled(block, groups) || continue
-        push!(paths, block.intercept_only ? "z_group" : "z_group_flat")
-    end
-    Set(paths)
-end
-
-function _brm_component_resampled_latent_paths!(
-        paths, component, groups, prefix::AbstractString)
-    for (i, block) in enumerate(component.random_effects)
-        BRM._turing_block_is_resampled(block, groups) || continue
-        push!(paths, "$prefix[$i].$(_brm_group_latent_name(block))")
     end
     paths
 end
 
-function _brm_resampled_latent_paths(
-        plan::BRM._TuringMeanPrecisionPlan, groups)
+function _brm_generic_multi_resampled_paths(plan, groups)
     paths = Set{String}()
-    if _brm_multiple_group_model(plan)
-        parts = _brm_distributional_group_parts(plan)
-        _brm_component_resampled_latent_paths!(
-            paths, (; random_effects=parts.mean_independent), groups,
-            "mean_groups")
-        _brm_component_resampled_latent_paths!(
-            paths, (; random_effects=parts.precision_independent), groups,
-            "precision_groups")
-        for (i, shared) in enumerate(parts.shared)
-            BRM._turing_block_is_resampled(shared.mean_block, groups) || continue
-            latent = shared.mean_block.centered ? "coefficients_flat" : "z_flat"
-            push!(paths, "shared_groups[$i].$latent")
+    components = Any[]
+    component_names = Set{Symbol}()
+    for child in plan.plans, component in child.predictors
+        component.predictor.name in component_names && continue
+        push!(component_names, component.predictor.name)
+        push!(components, component)
+    end
+    shared_groups = BRM._turing_shared_group_plans(Tuple(components))
+    shared_members = Set((member.predictor, member.block_index)
+        for shared in shared_groups for member in shared.members)
+    for (shared_index, shared) in enumerate(shared_groups)
+        any(block -> BRM._turing_block_is_resampled(block, groups),
+            shared.blocks) || continue
+        latent = first(shared.blocks).centered ? "coefficients_flat" : "z_flat"
+        push!(paths, "shared_group_$(shared_index).$latent")
+    end
+    seen = Set{Tuple{Symbol,Int}}()
+    for child in plan.plans, component in child.predictors
+        for (block_index, block) in enumerate(component.random_effects)
+            key = (component.predictor.name, block_index)
+            key in seen && continue
+            push!(seen, key)
+            key in shared_members && continue
+            BRM._turing_block_is_resampled(block, groups) || continue
+            push!(paths, "group_$(component.predictor.name)_$(block_index)." *
+                         _brm_group_latent_name(block))
         end
-        return paths
-    end
-    for block in plan.mean.random_effects
-        BRM._turing_block_is_resampled(block, groups) || continue
-        push!(paths, block.intercept_only ?
-              "z_mean_group" : "z_mean_group_flat")
-    end
-    for block in plan.precision.random_effects
-        BRM._turing_block_is_resampled(block, groups) || continue
-        push!(paths, block.intercept_only ?
-              "z_precision_group" : "z_precision_group_flat")
     end
     paths
 end
@@ -2112,24 +1539,52 @@ function _brm_without_parameter_paths(parameters, removed)
     end
     kept
 end
+function _brm_without_named_parameter_paths(parameters::NamedTuple, removed,
+                                             prefix::String)
+    kept_names = Symbol[]
+    kept_values = Any[]
+    for name in keys(parameters)
+        path = isempty(prefix) ? string(name) : prefix * "." * string(name)
+        path in removed && continue
+        value = getproperty(parameters, name)
+        if value isa NamedTuple
+            value = _brm_without_named_parameter_paths(value, removed, path)
+        elseif value isa Turing.DynamicPPL.VarNamedTuple
+            value = _brm_without_named_parameter_paths(value.data, removed, path)
+        end
+        push!(kept_names, name)
+        push!(kept_values, value)
+    end
+    NamedTuple{Tuple(kept_names)}(Tuple(kept_values))
+end
 
 function _brm_resampled_parameters(backend::BRM.TuringBRMI, parameters)
     groups = Set{Symbol}(backend.replay.resample_groups)
     isempty(groups) && return parameters
     if backend.plan isa BRM._TuringMultiResponsePlan
-        removed = Set{String}()
-        for i in eachindex(backend.plan.plans)
-            backend.plan.owners[i] == i || continue
-            for path in _brm_resampled_latent_paths(
-                    backend.plan.plans[i], groups)
-                push!(removed, "responses[$i].$path")
+        removed = all(child -> child isa BRM._TuringGenericPlan,
+                      backend.plan.plans) ?
+                  _brm_generic_multi_resampled_paths(backend.plan, groups) :
+                  Set{String}()
+        if isempty(removed) && !all(child -> child isa BRM._TuringGenericPlan,
+                                    backend.plan.plans)
+            for i in eachindex(backend.plan.plans)
+                backend.plan.owners[i] == i || continue
+                for path in _brm_resampled_latent_paths(
+                        backend.plan.plans[i], groups)
+                    push!(removed, "responses[$i].$path")
+                end
             end
         end
-        return _brm_without_parameter_paths(parameters, removed)
+        return parameters isa NamedTuple ?
+            _brm_without_named_parameter_paths(parameters, removed, "") :
+            _brm_without_parameter_paths(parameters, removed)
     end
-    if _brm_multiple_group_model(backend.plan)
+    if backend.plan isa BRM._TuringGenericPlan
         removed = _brm_resampled_latent_paths(backend.plan, groups)
-        return _brm_without_parameter_paths(parameters, removed)
+        return parameters isa NamedTuple ?
+            _brm_without_named_parameter_paths(parameters, removed, "") :
+            _brm_without_parameter_paths(parameters, removed)
     end
     parameters isa NamedTuple || error(
         "Turing backend: `resample_groups` posterior prediction currently " *
@@ -2143,6 +1598,9 @@ function _brm_resampled_parameter_names(backend::BRM.TuringBRMI)
     groups = Set{Symbol}(backend.replay.resample_groups)
     isempty(groups) && return Set{String}()
     if backend.plan isa BRM._TuringMultiResponsePlan
+        all(child -> child isa BRM._TuringGenericPlan,
+            backend.plan.plans) &&
+            return _brm_generic_multi_resampled_paths(backend.plan, groups)
         removed = Set{String}()
         for i in eachindex(backend.plan.plans)
             backend.plan.owners[i] == i || continue

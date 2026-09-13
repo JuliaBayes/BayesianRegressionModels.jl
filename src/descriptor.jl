@@ -306,7 +306,11 @@ end
 # The BRM meaning of a `:prior` declaration, from the family BRM emitted. These
 # are BRM's own submodel names (sbimpl.jl) — a closed set we own, not a guess
 # about user code.
-_brm_declaration_role(d::GenerativeDeclaration) = begin
+_brm_declaration_role(d::GenerativeDeclaration, bindings=nothing) = begin
+    if !isnothing(bindings)
+        binding = get(bindings, d.target, nothing)
+        isnothing(binding) || return binding.role
+    end
     d.role === :observation && return :observation
     # A non-empty `context` means the declaration lives INSIDE a plate cell —
     # a per-group parameter of a `kernel(...)` block, whatever its family.
@@ -373,10 +377,10 @@ _brm_plan_of(sb::SBBRMI) = generative_plan(sb)
 # Dict constructor.
 _brm_population_effect_entries(brmi) = [
     (; logical=l.name,
-       block=Symbol(:pop_, _sb_lp_emitted_name(l.name, l.link_lhs_fn)),
+       block=Symbol(:pop_, _brm_lp_emitted_name(l.name, l.link_lhs_fn)),
        link=l.link_lhs_fn)
     for l in linear_predictors(brmi)
-    if !_brm_is_joint_covariance_factor(brmi, l.name)
+    if !_brm_is_prior_declaration(brmi, l.name)
 ]
 
 function _brm_is_joint_covariance_factor(brmi, name::Symbol)
@@ -816,8 +820,8 @@ function brm_descriptor(plan_or_sb::Union{GenerativePlan,SBBRMI};
                         titles=Dict{Symbol,String}(),
                         highlights=())
     plan = _brm_plan_of(plan_or_sb)
-    stan = isnothing(name) ? StanBlocks.stan_descriptor(plan.model) :
-                             StanBlocks.stan_descriptor(plan.model; name)
+    stan = isnothing(name) ? Base.invokelatest(StanBlocks.stan_descriptor, plan.model) :
+                             Base.invokelatest(StanBlocks.stan_descriptor, plan.model; name)
     _brm_descriptor(plan, stan, operations, titles, highlights)
 end
 
@@ -940,7 +944,7 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
         role = if !isnothing(decl) && decl.role === :observation
             o.generative === :pointwise_loglik ? :pointwise_loglik : :posterior_predictive
         elseif !isnothing(decl)
-            _brm_declaration_role(decl)
+            _brm_declaration_role(decl, plan.bindings)
         elseif o.name in covariance_factors
             :parameter
         elseif o.name in lps
@@ -979,7 +983,7 @@ function _brm_reprocess_supported(plan, outputs)
     any(o -> o.role === :random_effect, outputs) || return true
 
     ranef_declarations = [d for d in plan.declarations
-                          if _brm_declaration_role(d) === :random_effect]
+                          if _brm_declaration_role(d, plan.bindings) === :random_effect]
     isempty(ranef_declarations) && return false
 
     all(ranef_declarations) do d

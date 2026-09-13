@@ -20,7 +20,23 @@ using StatsBase: AbstractWeights, AnalyticWeights, FrequencyWeights,
                  aweights, fweights, pweights, uweights, weights
 import CategoricalArrays as CA
 include("likelihood_distributions.jl")
+include("preparation_basis.jl")
+include("preparation_hsgp.jl")
+include("formula_markers.jl")
+include("formula_validation.jl")
+include("prepared_metadata.jl")
+include("preparation_replay.jl")
+include("preparation_numeric.jl")
 include("backend_plan.jl")
+include("preparation_program.jl")
+include("preparation_priors.jl")
+include("prepared_model.jl")
+include("preparation_kernel.jl")
+include("preparation_shapes.jl")
+include("preparation_responses.jl")
+include("preparation_terms.jl")
+include("preparation_gp.jl")
+include("preparation_structured.jl")
 include("turing_backend.jl")
 include("native_ppl.jl")
 include("vimpl.jl")
@@ -29,6 +45,7 @@ include("vimpl.jl")
 # so it can be compiled by BridgeStan / fit via Stan.
 using StanBlocks
 include("sbimpl.jl")
+include("sb_affine.jl")
 
 # BRMDescriptor — ONE authoritative executable semantic model descriptor.
 # Collapses the GenerativePlan (what BRM emitted), introspection.jl (the
@@ -98,6 +115,7 @@ export Data, MaybeData, maybedata
 export AbstractColumn, MissingColumn, DataColumn, NamedColumn,
        ExprColumn, LikelihoodColumn, MaterializedColumn
 export BRMI, VBRMI, SBBRMI, TuringBRMI, GenerativeDeclaration, GenerativePlan,
+       brm_distribution_type, turing_model_source,
        turing_pointwise_loglikelihoods, turing_predictive_model,
        turing_generated_quantities, turing_posterior_predictive
 export NativePPL

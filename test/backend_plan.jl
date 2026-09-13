@@ -63,7 +63,7 @@ end
 end
 
 
-@testset "Turing mean/precision plan reuses backend-neutral predictors" begin
+@testset "generic Turing plan reuses backend-neutral predictors" begin
     df = (;
         x=[-1.0, 0.5, 2.0], z=[0.0, 1.0, -0.5],
         trials=[4, 6, 5], y=[1, 4, 2])
@@ -74,12 +74,15 @@ end
     end)(df)
     plan = BRM._brm_turing_plan(brmi)
 
-    @test plan.family isa Val{:beta_binomial2}
-    @test plan.mean.predictor.link_lhs_fn === logit
-    @test plan.precision.predictor.link_lhs_fn === log
-    @test plan.mean.design.matrix == hcat(ones(3), df.x)
-    @test plan.precision.design.matrix == hcat(ones(3), df.z)
-    @test plan.family_args.trials == df.trials
+    mean = only(filter(p -> p.predictor.name === :mean, plan.predictors))
+    precision = only(filter(p -> p.predictor.name === :precision,
+                            plan.predictors))
+    @test mean.predictor.link_lhs_fn === logit
+    @test precision.predictor.link_lhs_fn === log
+    @test mean.design.matrix == hcat(ones(3), df.x)
+    @test precision.design.matrix == hcat(ones(3), df.z)
+    @test plan.distribution.callable === BRM.BetaBinomial2
+    @test plan.distribution.args[1] == BRM._BRMPreparedRef(:trials, :observation)
     @test plan.response == df.y
 end
 
@@ -502,9 +505,10 @@ end
     wrong_design = BRM._brm_simple_population_design(
         :mu, wrong_rhs, wrong_context.data, wrong_context.target_obs[:mu];
         required=true)
-    @test_throws "support only `Normal" begin
-        BRM._brm_simple_population_effect_overrides(wrong_family, wrong_design)
-    end
+    generic_priors = BRM._brm_simple_population_effect_overrides(
+        wrong_family, wrong_design)
+    @test isnothing(generic_priors[1])
+    @test getf(generic_priors[2]) === Cauchy
 end
 
 @testset "shared population design is narrow and loud" begin

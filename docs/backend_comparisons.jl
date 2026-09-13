@@ -132,52 +132,15 @@ function stan_emissions(brmi::BRM.BRMI, mod::Module; required::Bool=false)
     end
 end
 
-function model_macro_name(expression::Expr)
-    expression.head === :macrocall || return nothing
-    function_expression = findfirst(arg -> arg isa Expr && arg.head === :function,
-                                    expression.args)
-    isnothing(function_expression) && return nothing
-    signature = expression.args[function_expression].args[1]
-    signature isa Expr && signature.head === :call || return nothing
-    name = first(signature.args)
-    return name isa Symbol ? name : nothing
-end
-
-function collect_turing_models!(models::Dict{Symbol,String}, expression)
-    expression isa Expr || return models
-    name = model_macro_name(expression)
-    if !isnothing(name)
-        function_expression = only(arg for arg in expression.args
-                                   if arg isa Expr && arg.head === :function)
-        cleaned = deepcopy(function_expression)
-        Base.remove_linenums!(cleaned)
-        models[name] = "Turing.@model " *
-            sprint(io -> Base.show_unquoted(io, cleaned))
-    end
-    foreach(arg -> collect_turing_models!(models, arg), expression.args)
-    return models
-end
-
-function turing_model_sources()
-    extension = Base.get_extension(BRM, :BayesianRegressionModelsTuringExt)
-    isnothing(extension) && error(
-        "Turing extension did not load in the docs environment")
-    parsed = Meta.parseall(read(pathof(extension), String);
-                           filename=pathof(extension))
-    collect_turing_models!(Dict{Symbol,String}(), parsed)
-end
-
-const TURING_MODEL_SOURCES = turing_model_sources()
-
 function turing_emission(brmi::BRM.BRMI)
     try
         backend = Base.invokelatest(BRM.TuringBRMI, brmi)
-        model_name = nameof(backend.model.f)
-        source = get(TURING_MODEL_SOURCES, model_name, nothing)
-        isnothing(source) && error(
-            "selected Turing executor `$model_name` has no build-visible " *
-            "`Turing.@model` definition")
-        return strip(source, '\n')
+        source = Base.invokelatest(BRM.turing_model_source, backend)
+        isnothing(source) && error("Turing lowering did not retain its generated source")
+        programs = source isa Tuple ? source : (source,)
+        return join((sprint(io -> Base.show_unquoted(io,
+                     Base.remove_linenums!(deepcopy(program))))
+                     for program in programs), "\n\n")
     catch err
         return exception_text("Turing", err)
     end

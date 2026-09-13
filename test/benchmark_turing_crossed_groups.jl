@@ -89,12 +89,10 @@ const subject_log_scale = log(0.6)
 const item_log_scale = log(0.45)
 const subject_z = collect(range(-0.4, 0.4; length=SUBJECTS))
 const item_z = collect(range(0.3, -0.3; length=ITEMS))
-const params = Dict(
-    Turing.@varname(beta_pop) => beta,
-    Turing.@varname(groups[1].log_scale) => subject_log_scale,
-    Turing.@varname(groups[1].z) => subject_z,
-    Turing.@varname(groups[2].log_scale) => item_log_scale,
-    Turing.@varname(groups[2].z) => item_z,
+const params = (;
+    beta_pop=beta,
+    group_1_1=(; log_scale=subject_log_scale, z=subject_z),
+    group_1_2=(; log_scale=item_log_scale, z=item_z),
 )
 
 function stan_value(name)
@@ -117,10 +115,10 @@ end
 const turing_construction = with_logger(NullLogger()) do
     benchmark_call(
         () -> DP.LogDensityFunction(TuringBRMI(brmi).model);
-        warmup=10, samples=15, batch=5)
+        warmup=2, samples=5, batch=1)
 end
 const stan_lowering = benchmark_call(
-    () -> SBBRMI(brmi); warmup=10, samples=15, batch=5)
+    () -> SBBRMI(brmi); warmup=2, samples=5, batch=1)
 
 const backend = TuringBRMI(brmi)
 const turing = turing_density(backend, params)

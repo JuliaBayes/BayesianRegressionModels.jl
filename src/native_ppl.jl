@@ -853,92 +853,16 @@ end
 
 function _native_ppl_fit_mean(values::AbstractVector, name::Symbol,
                               transform::Symbol)
-    all(value -> value isa Real && isfinite(value), values) ||
-        throw(NativePPLCapabilityError(
-            :predictor_transform,
-            "`$transform($name)` requires finite real training values"))
-    isempty(values) && throw(NativePPLCapabilityError(
-        :predictor_transform,
-        "`$transform($name)` requires at least one training value"))
-    fitted_mean = float(first(values))
-    for (offset, value) in enumerate(Iterators.drop(values, 1))
-        count = offset + 1
-        # Dividing before subtracting avoids overflow for finite values near
-        # `floatmax`, including samples spanning both signs.
-        fitted_mean += float(value) / count - fitted_mean / count
-    end
-    isfinite(fitted_mean) || throw(NativePPLCapabilityError(
-        :predictor_transform,
-        "`$transform($name)` produced a non-finite fitted mean"))
-    fitted_mean
+    _brm_fit_mean_numeric(values, name, transform,
+        message -> NativePPLCapabilityError(:predictor_transform, message))
 end
 
 _native_ppl_fit_center(values::AbstractVector, name::Symbol) =
     _native_ppl_fit_mean(values, name, :center)
 
-@inline function _native_ppl_scaled_sumsq(
-    magnitude_scale, scaled_squares, deviation)
-    magnitude = abs(deviation)
-    iszero(magnitude) && return magnitude_scale, scaled_squares
-    if magnitude_scale < magnitude
-        ratio = magnitude_scale / magnitude
-        return magnitude, one(magnitude) + scaled_squares * ratio * ratio
-    end
-    ratio = magnitude / magnitude_scale
-    magnitude_scale, scaled_squares + ratio * ratio
-end
-
 function _native_ppl_fit_zscale(values::AbstractVector, name::Symbol)
-    length(values) >= 2 || throw(NativePPLCapabilityError(
-        :predictor_transform,
-        "`zscale($name)` requires at least two training values for sample SD"))
-    fitted_mean = _native_ppl_fit_mean(values, name, :zscale)
-
-    # Scaled sum-of-squares avoids the overflow and underflow of directly
-    # accumulating `(x - mean)^2`, while preserving corrected `n - 1`
-    # sample-standard-deviation semantics.
-    magnitude_scale = zero(fitted_mean)
-    scaled_squares = zero(fitted_mean)
-    restore_scale = one(fitted_mean)
-    centered_overflow = false
-    for value in values
-        deviation = float(value) - fitted_mean
-        if !isfinite(deviation)
-            centered_overflow = true
-            break
-        end
-        magnitude_scale, scaled_squares = _native_ppl_scaled_sumsq(
-            magnitude_scale, scaled_squares, deviation)
-    end
-    if centered_overflow
-        # A finite sample can have an overflowing `value - mean` even when its
-        # corrected sample SD is representable. Accumulate centered values in
-        # a dimensionless domain and restore the common magnitude only once.
-        value_scale = maximum(value -> abs(float(value)), values)
-        isfinite(value_scale) && value_scale > zero(value_scale) ||
-            throw(NativePPLCapabilityError(
-                :predictor_transform,
-                "`zscale($name)` could not scale its finite training values"))
-        normalized_mean = fitted_mean / value_scale
-        restore_scale = value_scale
-        magnitude_scale = zero(normalized_mean)
-        scaled_squares = zero(normalized_mean)
-        for value in values
-            deviation = float(value) / value_scale - normalized_mean
-            magnitude_scale, scaled_squares = _native_ppl_scaled_sumsq(
-                magnitude_scale, scaled_squares, deviation)
-        end
-    end
-    iszero(magnitude_scale) && throw(NativePPLCapabilityError(
-        :predictor_transform,
-        "`zscale($name)` requires nonzero sample variance"))
-    fitted_scale = (magnitude_scale *
-        sqrt(scaled_squares / (length(values) - 1))) * restore_scale
-    isfinite(fitted_scale) && fitted_scale > zero(fitted_scale) ||
-        throw(NativePPLCapabilityError(
-            :predictor_transform,
-            "`zscale($name)` produced a non-finite or zero sample SD"))
-    (; mean=fitted_mean, scale=fitted_scale)
+    _brm_fit_zscale_numeric(values, name,
+        message -> NativePPLCapabilityError(:predictor_transform, message))
 end
 
 function _native_ppl_validate_coefficient_prior(

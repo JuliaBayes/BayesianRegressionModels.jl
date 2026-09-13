@@ -291,7 +291,7 @@ end
     @test occursin("real<lower=0.5, upper=2.0> hsgp_x_by_g_rho_iso;", code)
     @test occursin("hsgp_x_by_g_rho_iso ~ uniform(0.5, 2.0);", code)
     # Distributions.Exponential takes a SCALE; Stan's exponential takes a rate.
-    @test occursin("hsgp_x_by_g_sigma ~ exponential(0.5);", code)
+    @test occursin("hsgp_x_by_g_sigma ~ exponential((1.0 ./ 2.0));", code)
     @test !occursin("lognormal", code)
     # Only the tensor-basis weights vary per group (decision `7p44fo`); the
     # configured hyperparameters stay shared.
@@ -304,8 +304,8 @@ end
 @testset "Julia constructors map onto Stan's parameterisation" begin
     df = gp_prior_df()
     cases = [
-        (:(Gamma(2.0, 0.5)), "gamma(2.0, 2.0)"),         # scale -> rate
-        (:(Exponential(4.0)), "exponential(0.25)"),      # scale -> rate
+        (:(Gamma(2.0, 0.5)), "gamma(2.0, (1.0 ./ 0.5))"), # scale -> rate
+        (:(Exponential(4.0)), "exponential((1.0 ./ 4.0))"), # scale -> rate
         (:(InverseGamma(5, 5)), "inv_gamma(5.0, 5.0)"),  # direct
         (:(LogNormal(0.0, 0.5)), "lognormal(0.0, 0.5)"), # direct
         (:(Normal(0, 2.0)), "normal(0.0, 2.0)"),         # half-normal at lower=0
@@ -375,17 +375,22 @@ end
     end)
 
     # Resolve-time refusals: the class reaches a term with no such parameter, or
-    # the family/bounds are not usable for a positive scale.
+    # explicit bounds are not usable for a positive scale.
+    generic = @brm df begin
+        y ~ Normal(mu, 1.)
+        mu ~ 1 + hsgp(x; k=5)
+        length_scale(:, hsgp(x)) ~ Beta(2, 2)
+    end
+    generic_code = code_of(generic)
+    @test occursin("real<lower=0.0, upper=1> hsgp_x_rho_iso;", generic_code)
+    @test occursin("hsgp_x_rho_iso ~ beta(2.0, 2.0);", generic_code)
+    @test transpiles_and_stanc(generic)
+
     cases = [
         ("has no length scale to configure", (@brm df begin
             y ~ Normal(mu, 1.)
             mu ~ 1 + s(x)
             length_scale(:, s(x)) ~ Uniform(0.5, 2.0)
-        end)),
-        ("supports `LogNormal`", (@brm df begin
-            y ~ Normal(mu, 1.)
-            mu ~ 1 + hsgp(x; k=5)
-            length_scale(:, hsgp(x)) ~ Beta(2, 2)
         end)),
         ("0 <= lower < upper", (@brm df begin
             y ~ Normal(mu, 1.)
@@ -396,11 +401,6 @@ end
             y ~ Normal(mu, 1.)
             mu ~ 1 + gp(x)
             length_scale(:, hsgp(x)) ~ Uniform(0.5, 2.0)
-        end)),
-        ("does not accept keywords", (@brm df begin
-            y ~ Normal(mu, 1.)
-            mu ~ 1 + hsgp(x; k=5)
-            length_scale(:, hsgp(x)) ~ Uniform(0.5, 2.0; lower=0.1)
         end)),
     ]
     for (fragment, m) in cases

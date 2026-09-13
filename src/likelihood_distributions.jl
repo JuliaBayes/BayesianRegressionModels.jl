@@ -39,8 +39,8 @@ vector with one value per non-terminal stage. The support is
 `1:(length(thresholds) + 1)`.
 
 Inside `@brm`, omit `thresholds`: for example,
-`y ~ Ordinal(Cumulative(), ProbitLink(), eta)`. The StanBlocks backend owns
-and estimates the thresholds. Formula-only keywords `discrimination=` and
+`y ~ Ordinal(Cumulative(), ProbitLink(), eta)`. BRM prepares the fitted outcome
+levels and threshold parameters. Formula-only keywords `discrimination=` and
 `per_threshold=` are documented in the likelihood guide.
 """
 struct Ordinal{S<:OrdinalStructure,L<:OrdinalLink,T<:Real,E} <:
@@ -60,8 +60,6 @@ _ordinal_eta_values(eta) = throw(ArgumentError(
 function Ordinal(structure::S, link::L, eta,
                  thresholds::AbstractVector{<:Real}, discrimination::Real;
                  check_args::Bool=true) where {S<:OrdinalStructure,L<:OrdinalLink}
-    isempty(thresholds) && throw(ArgumentError(
-        "Ordinal: at least one threshold is required"))
     raw_eta = _ordinal_eta_values(eta)
     T = promote_type(map(typeof, map(float,
         (raw_eta..., thresholds..., discrimination)))...)
@@ -118,6 +116,7 @@ _ordinal_stage_eta(eta::Real, _k) = eta
 _ordinal_stage_eta(eta::AbstractVector, k) = eta[k]
 
 function Distributions.probs(d::Ordinal{<:Cumulative})
+    isempty(d.thresholds) && return [one(partype(d))]
     cumulative = map(d.thresholds) do cut
         _ordinal_link_cdf(d.link, d.discrimination * (cut - d.eta))
     end
@@ -145,7 +144,8 @@ end
 function Distributions.logpdf(d::Ordinal{<:Cumulative}, k::Real)
     K = length(d.thresholds) + 1
     (!isinteger(k) || k < 1 || k > K) &&
-        return oftype(float(first(d.thresholds)), -Inf)
+        return oftype(d.discrimination, -Inf)
+    K == 1 && return zero(partype(d))
     i = Int(k)
     z(j) = d.discrimination * (d.thresholds[j] - d.eta)
     i == 1 && return _ordinal_link_logcdf(d.link, z(1))
@@ -159,7 +159,7 @@ end
 function Distributions.logpdf(d::Ordinal{<:StoppingRatio}, k::Real)
     K = length(d.thresholds) + 1
     (!isinteger(k) || k < 1 || k > K) &&
-        return oftype(float(first(d.thresholds)), -Inf)
+        return oftype(d.discrimination, -Inf)
     i = Int(k)
     rv = zero(partype(d))
     for j in 1:min(i, K - 1)
@@ -181,7 +181,7 @@ Ordered-logistic distribution with location `eta` and strictly increasing
 `cutpoints`.  The support is `1:(length(cutpoints) + 1)`.
 
 Inside `@brm`, `y ~ OrderedLogistic(eta)` remains the cumulative-link formula
-shorthand: sbimpl owns and estimates the cutpoints.  A standalone numeric
+shorthand: BRM prepares and estimates the cutpoints. A standalone numeric
 distribution must supply them explicitly.
 """
 struct OrderedLogistic{T<:Real} <: Distributions.DiscreteUnivariateDistribution
@@ -196,10 +196,9 @@ function OrderedLogistic(eta::Real, cutpoints::AbstractVector{<:Real};
                          check_args::Bool=true)
     values = promote(float(eta), map(float, cutpoints)...)
     eta_p = first(values)
-    cuts = collect(Base.tail(values))
+    cuts = collect(typeof(eta_p), Base.tail(values))
     Distributions.@check_args(OrderedLogistic,
         (eta_p, isfinite(eta_p), "eta must be finite"),
-        (cuts, !isempty(cuts), "at least one cutpoint is required"),
         (cuts, all(isfinite, cuts), "cutpoints must be finite"),
         (cuts, all(cuts[i] < cuts[i + 1] for i in 1:length(cuts)-1),
          "cutpoints must be strictly increasing"),
@@ -212,6 +211,7 @@ Distributions.partype(::OrderedLogistic{T}) where {T} = T
 Distributions.@distr_support OrderedLogistic 1 (length(d.cutpoints) + 1)
 
 function Distributions.probs(d::OrderedLogistic)
+    isempty(d.cutpoints) && return [one(partype(d))]
     cumulative = logistic.(d.cutpoints .- d.eta)
     [first(cumulative); diff(cumulative); one(eltype(cumulative)) - last(cumulative)]
 end
@@ -219,6 +219,7 @@ end
 function Distributions.logpdf(d::OrderedLogistic, k::Real)
     K = length(d.cutpoints) + 1
     (!isinteger(k) || k < 1 || k > K) && return oftype(float(d.eta), -Inf)
+    K == 1 && return zero(partype(d))
     i = Int(k)
     i == 1 && return loglogistic(first(d.cutpoints) - d.eta)
     i == K && return log1mlogistic(last(d.cutpoints) - d.eta)
@@ -250,8 +251,7 @@ struct CategoricalLogit{T<:Real} <: Distributions.DiscreteUnivariateDistribution
 end
 
 function CategoricalLogit(eta::Real...; check_args::Bool=true)
-    isempty(eta) && throw(ArgumentError(
-        "CategoricalLogit needs at least one non-reference logit"))
+    isempty(eta) && return CategoricalLogit{Float64}(Float64[])
     promoted = promote(map(float, eta)...)
     logits = collect(promoted)
     Distributions.@check_args(
@@ -282,7 +282,7 @@ end
 function Distributions.logpdf(d::CategoricalLogit, k::Real)
     K = Distributions.ncategories(d)
     (!isinteger(k) || k < 1 || k > K) &&
-        return oftype(float(first(d.nonreference_logits)), -Inf)
+        return oftype(zero(partype(d)), -Inf)
     logits = _categorical_logit_values(d)
     logits[Int(k)] - logsumexp(logits)
 end

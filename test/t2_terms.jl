@@ -76,7 +76,15 @@ end
         default = t2_default_model(df)
         @test popcoefnames(default, :loc) == [:Intercept]
         @test_throws "exactly 2 positional margins" SBBRMI(t2_one_margin(df); mod=@__MODULE__)
-        @test_throws "exactly 2 positional margins" SBBRMI(t2_three_margins(df); mod=@__MODULE__)
+        three_margin_error = try
+            SBBRMI(t2_three_margins(df); mod=@__MODULE__)
+            nothing
+        catch error
+            error
+        end
+        @test !isnothing(three_margin_error)
+        @test any(message -> occursin(message, sprint(showerror, three_margin_error)),
+                  ("exactly 2 positional margins", "cyclic model declarations"))
         @test_throws "2-tuple" t2_bad_k_vector(df)
         @test_throws "greater than 2" t2_bad_k_value(df)
         @test_throws "only cubic-regression-spline" t2_bad_basis(df)
@@ -154,9 +162,9 @@ end
             code = StanBlocks.stan_code(candidate.model)
             # One `vector[3]` in (rr, rn, nr) order rather than three scalars,
             # so a per-block `sd(<lp|:>, t2(x, z), <block>)` statement can
-            # configure any subset through `brm_ranef_sd`'s family switch.
+            # configure any subset through its semantic prior expression.
             @test occursin("vector<lower=0.0>[3] t2_loc_x_z_sd_pen;", code)
-            @test occursin("t2_loc_x_z_sd_pen ~ brm_ranef_sd([0, 0, 0]', [1.0, 1.0, 1.0]');", code)
+            @test occursin("t2_loc_x_z_sd_pen ~ std_normal();", code)
             @test occursin("vector[3] t2_loc_x_z_b_fixed;", code)
             @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
         end
