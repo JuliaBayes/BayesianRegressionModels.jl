@@ -777,7 +777,7 @@ end
     @test occursin("s[Jmis_y]", vcode)
 end
 
-@testset "Julia-native wrapper surface and capability gate" begin
+@testset "Julia-native wrapper surface and operation resolution" begin
     brmi = family_builder(df)
     rhs_for(target) = begin
         op = parent(getproperty(brmi.operations, target))
@@ -805,8 +805,11 @@ end
         eta ~ 1 + x
         y_bernoulli ~ censored(BernoulliLogit(eta); lower=0, upper=1)
     end
-    @test_throws "no generic CDF/CCDF composition capability" SBBRMI(
-        unsupported_builder(df); mod=@__MODULE__)
+    # Construction retains the requested composition. A missing native CDF is
+    # diagnosed when the producer resolves that operation, without a BRM family
+    # allowlist deciding which otherwise valid calls may reach it.
+    @test_throws Exception BRM.stan_code(SBBRMI(
+        unsupported_builder(df); mod=@__MODULE__))
 end
 
 @testset "wrapper bounds fail before Stan" begin

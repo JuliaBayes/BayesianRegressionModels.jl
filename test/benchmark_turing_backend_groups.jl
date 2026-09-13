@@ -88,11 +88,11 @@ function run_case(case, brmi, params, stan_position, project_gradients; N,
         benchmark_call(
             () -> DP.LogDensityFunction(TuringBRMI(
                 brmi; centered_groups).model);
-            warmup=10, samples=15, batch=5)
+            warmup=2, samples=5, batch=1)
     end
     stan_lowering = benchmark_call(
         () -> SBBRMI(brmi; centered_groups);
-        warmup=10, samples=15, batch=5)
+        warmup=2, samples=5, batch=1)
 
     backend = TuringBRMI(brmi; centered_groups)
     td = turing_density(backend, params)
@@ -234,12 +234,13 @@ end
 const centered_coefficients = transpose(
     Diagonal(correlated_tau) * correlated_L_matrix * reshape(z, 2, G))
 const centered_flat = vec(transpose(centered_coefficients))
-const centered_params = Dict(
-    Turing.@varname(beta_pop) => beta,
-    Turing.@varname(groups[1].L) =>
-        Cholesky(copy(correlated_L_matrix), 'L', 0),
-    Turing.@varname(groups[1].tau) => correlated_tau,
-    Turing.@varname(groups[1].coefficients_flat) => centered_flat,
+const centered_params = (;
+    beta_pop=beta,
+    group_1_1=(;
+        L=Cholesky(copy(correlated_L_matrix), 'L', 0),
+        tau=correlated_tau,
+        coefficients_flat=centered_flat,
+    ),
 )
 
 json_array(values) = "[" * join(string.(values), ",") * "]"
@@ -351,12 +352,14 @@ const shared_L = Cholesky(
     Matrix(cholesky(Symmetric(shared_correlation)).L), 'L', 0)
 const shared_tau = [0.4, 0.7, 0.25, 0.45]
 const shared_latent = collect(range(-0.6, 0.6; length=4G))
-const shared_params = Dict(
-    Turing.@varname(beta_mean) => shared_beta_mean,
-    Turing.@varname(beta_precision) => shared_beta_precision,
-    Turing.@varname(shared_groups[1].L) => shared_L,
-    Turing.@varname(shared_groups[1].tau) => shared_tau,
-    Turing.@varname(shared_groups[1].z_flat) => shared_latent,
+const shared_params = (;
+    beta_pop=shared_beta_mean,
+    beta_pop_phi=shared_beta_precision,
+    shared_group_1=(;
+        L=shared_L,
+        tau=shared_tau,
+        z_flat=shared_latent,
+    ),
 )
 
 function shared_stan_position(model, _names)

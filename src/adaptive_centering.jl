@@ -10,9 +10,11 @@ const _ADAPTIVE_CORRELATED_FAMILIES = Set((
     :ranef_correlated,
     :ranef_correlated_draws,
     :ranef_correlated_draws_effect,
+    :ranef_correlated_draws_generic,
     :ranef_correlated_centered,
     :ranef_correlated_draws_centered,
     :ranef_correlated_draws_centered_effect,
+    :ranef_correlated_draws_centered_generic,
 ))
 
 const _ADAPTIVE_INTERCEPT_FAMILIES = Set((

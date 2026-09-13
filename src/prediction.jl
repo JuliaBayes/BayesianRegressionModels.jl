@@ -97,6 +97,8 @@ const _RANEF_FAMILIES = Dict{Symbol,NamedTuple}(
     :ranef_intercept_draws     => (; z = :xi,     layout = :group,           noncentered = true,  tau = nothing),
     :ranef_correlated          => (; z = :z_flat, layout = :flat_term_group, noncentered = true,  tau = :tau),
     :ranef_correlated_draws    => (; z = :z_flat, layout = :flat_term_group, noncentered = true,  tau = :tau),
+    :ranef_correlated_draws_generic => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :tau),
+    :ranef_correlated_draws_centered_generic => (; z = :b_cols_bc, layout = :group_term, noncentered = false, tau = :tau),
     :ranef_correlated_draws_effect => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :tau),
     :ranef_intercept_r2d2      => (; z = :xi,     layout = :group,           noncentered = true,  tau = nothing),
     :ranef_correlated_r2d2     => (; z = :z_flat, layout = :flat_term_group, noncentered = true,  tau = :r2d2_tau),
@@ -254,7 +256,8 @@ function ranef_blocks(model)
     seen = Set{Symbol}()
     for d in plan.declarations
         d.role === :prior || continue
-        fam = d.family
+        binding = get(plan.bindings, d.target, nothing)
+        fam = isnothing(binding) || isnothing(binding.family) ? d.family : binding.family
         fam isa Symbol || continue
         spec = get(_RANEF_FAMILIES, fam, nothing)
         if isnothing(spec)

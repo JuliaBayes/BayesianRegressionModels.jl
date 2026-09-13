@@ -7,7 +7,7 @@ using Test
 using BayesianRegressionModels
 using StanBlocks
 using LogDensityProblems
-using Distributions: Cauchy, Dirichlet, Exponential, LKJCholesky, Normal
+using Distributions: Cauchy, Dirichlet, Exponential, LKJCholesky, Normal, Uniform
 
 const EFFECT_PRIOR_CACHE = joinpath(tempdir(), "brm-effect-priors")
 const EFFECT_PRIOR_RUNTIME = get(ENV, "BRM_EFFECT_RUNTIME", "1") != "0"
@@ -112,23 +112,23 @@ end
     @test first(findfirst("slope_prior_sd ~ exponential", code)) <
           first(findfirst("pop_mu_beta_pop ~ normal", code))
 
-    # Raw data columns remain forbidden as prior arguments.
+    # One scalar coefficient cannot consume a whole observation vector as its SD.
     data_arg = @brm df begin
         mu ~ 1 + x
         effect(mu, x) ~ Normal(0.0, y)
         y ~ Normal(mu, 1.0)
     end
-    @test_throws "backed by DataColumn" SBBRMI(data_arg; mod=@__MODULE__)
+    @test_throws "model-level prior references `y`" SBBRMI(data_arg; mod=@__MODULE__)
 
     # A vector-valued prior declaration has the same sampling-expression
-    # carrier, but is not a scalar parameter and must not cross this seam.
+    # carrier, but its whole value is not a scalar Normal scale.
     vector_arg = @brm df begin
         simplex_scale ~ Dirichlet([1.0, 1.0])
         mu ~ 1 + x
         effect(mu, x) ~ Normal(0.0, simplex_scale)
         y ~ Normal(mu, 1.0)
     end
-    @test_throws "prior args must be literals or already-declared scalar parameters" SBBRMI(
+    @test_throws "needs scalar location and scale" SBBRMI(
         vector_arg; mod=@__MODULE__)
 
     if EFFECT_PRIOR_RUNTIME
@@ -185,12 +185,68 @@ end
     end
     @test_throws "not a population coefficient" SBBRMI(excluded; mod=@__MODULE__)
 
-    unsupported = @brm df begin
+    generic = @brm df begin
         mu ~ 1 + x
         effect(mu, x) ~ Cauchy(0, 1)
         y ~ Normal(mu, 1)
     end
-    @test_throws "support only `Normal" SBBRMI(unsupported; mod=@__MODULE__)
+    generic_sb = SBBRMI(generic; mod=@__MODULE__)
+    generic_code = BayesianRegressionModels.stan_code(generic_sb)
+    @test occursin("cauchy_lpdf(x[2] | arg_3, arg_4)", generic_code)
+    @test StanBlocks.stanc_check(generic_code; warn_pedantic=false).ok
+    generic_output = only(o for o in brm_descriptor(generic_sb).outputs
+                          if o.name === :pop_mu_beta_pop)
+    @test generic_output.role === :population_effect
+    @test generic_output.labels == [:Intercept, :x]
+
+    bounded_vector = @brm df begin
+        mu ~ 1 + x
+        effect(mu, :) ~ Uniform(0.2, 0.8)
+        y ~ Normal(mu, 1)
+    end
+    bounded_vector_code = BayesianRegressionModels.stan_code(
+        SBBRMI(bounded_vector; mod=@__MODULE__))
+    @test occursin("vector<lower=0.2, upper=0.8>", bounded_vector_code)
+    @test occursin("uniform_lpdf(x[1] | arg_1, arg_2)", bounded_vector_code)
+    @test StanBlocks.stanc_check(bounded_vector_code; warn_pedantic=false).ok
+
+    heterogeneous_bounds = @brm df begin
+        mu ~ 1 + x
+        effect(mu, Intercept) ~ Uniform(0.2, 0.8)
+        effect(mu, x) ~ Uniform(0.3, 0.9)
+        y ~ Normal(mu, 1)
+    end
+    heterogeneous_code = BayesianRegressionModels.stan_code(
+        SBBRMI(heterogeneous_bounds; mod=@__MODULE__))
+    @test occursin("vector[pop_mu_n_covariates] pop_mu_beta_pop;", heterogeneous_code)
+    @test occursin("if((x[1] < 0.2))", heterogeneous_code)
+    @test occursin("if((x[2] > 0.9))", heterogeneous_code)
+    @test StanBlocks.stanc_check(heterogeneous_code; warn_pedantic=false).ok
+
+    prior_only = @brm df begin
+        mu ~ 1 + x
+        effect(mu, :) ~ Uniform(0.2, 0.8)
+        y ~ Normal(0, 1)
+    end
+    prior_only_sb = SBBRMI(prior_only; mod=@__MODULE__)
+    prior_only_code = BayesianRegressionModels.stan_code(prior_only_sb)
+    @test occursin(r"pop_mu_beta_pop = brm_vector_prior_[0-9a-f]+_vector_rng",
+                   prior_only_code)
+    if EFFECT_PRIOR_RUNTIME
+        problem = StanBlocks.stan_instantiate(
+            prior_only_sb.model;
+            path=joinpath(EFFECT_PRIOR_CACHE, string(hash(prior_only_code)) * ".stan"))
+        @test LogDensityProblems.dimension(problem) == 0
+        names = StanBlocks.BridgeStan.param_names(
+            problem.model; include_tp=true, include_gq=true)
+        draw = StanBlocks.BridgeStan.param_constrain(
+            problem.model, Float64[]; include_tp=true, include_gq=true,
+            rng=StanBlocks.BridgeStan.StanRNG(problem.model, 417))
+        beta = [v for (nm, v) in zip(names, draw)
+                if startswith(String(nm), "pop_mu_beta_pop.")]
+        @test length(beta) == 2
+        @test all(x -> 0.2 <= x <= 0.8, beta)
+    end
 end
 
 # The head-position grammar's refusals all fire in the PARSER, before any
@@ -422,7 +478,7 @@ end
     @test ranefcoefnames(linked, :p) ==
           [(predictor=:Vc, coefficient=:Intercept), (predictor=:Vc, coefficient=:x)]
     @test occursin("b_p_subject_L ~ lkj_corr_cholesky(2.0);", linked_code)
-    @test occursin("b_p_subject_tau ~ brm_ranef_sd(", linked_code)
+    @test occursin(r"b_p_subject_tau ~ brm_vector_prior_[0-9a-f]+\(", linked_code)
 
     # Same model with the quantity declared as an INERT name and the link undone
     # by hand: identical parameter block, so the posterior is the same fit.
@@ -632,13 +688,16 @@ end
     end
     @test_throws "equally specific" SBBRMI(tied; mod=@__MODULE__)
 
-    # Only `Normal` is supported here, same as the population surface.
-    wrong_family = @brm cat_df begin
+    generic_family = @brm cat_df begin
         mu ~ 1 + factor(g) + x
         effect(mu, g) ~ Cauchy(0, 1)
         y ~ Normal(mu, 1)
     end
-    @test_throws "support only `Normal" SBBRMI(wrong_family; mod=@__MODULE__)
+    generic_family_sb = SBBRMI(generic_family; mod=@__MODULE__)
+    generic_family_code = BayesianRegressionModels.stan_code(generic_family_sb)
+    @test count("cauchy_lpdf(x[", generic_family_code) == 2
+    @test occursin(r"cat_mu_g_beta ~ brm_vector_prior_[0-9a-f]+", generic_family_code)
+    @test StanBlocks.stanc_check(generic_family_code; warn_pedantic=false).ok
 
     # A configured contrast block and a configured `beta_pop` coexist.
     mixed = @brm cat_df begin
