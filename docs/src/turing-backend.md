@@ -81,6 +81,13 @@ multi-membership, stratified or shared-ID blocks, centered generated models,
 R2D2, and prepared terms such as HSGP. Adaptive subset/CV sizing controls also
 remain outside the native Turing contract.
 
+Raw, ungrouped squared-exponential HSGP weights separately support a fixed
+scalar or per-frequency `centeredness` in `[0,1]`. This is an offline
+pilot/refit coordinate choice shared with StanBlocks, not the online adaptive
+random-effect machinery described above. See the backend-neutral
+[adaptive HSGP case study](adaptive-centering.md) for the executable
+four-pane model and the density/gradient contract.
+
 Multiple and crossed grouping factors remain separate blocks. `gr(..., by=)`
 uses a separate scale/correlation frame per stratum. Matching `|ID|` terms in a
 distributional mean and precision predictor instead share one joint scale
@@ -157,7 +164,7 @@ not sufficient.
 | Missing responses | **Supported** | Missing rows use the same conditional family; only observed rows contribute pointwise likelihood |
 | Multiple responses | **Supported** | Shared declarations are sampled once and responses can have distinct row axes; incompatible group schemas fail explicitly |
 | Observation weights | **Supported subset** | Analytic Normal weights rescale sigma; frequency and power weights scale density while predictive draws retain the base distribution |
-| Advanced terms | **Supported subsets** | `s`, `t2`, `mo`/`mo1`, `me`, interval predictors, `ar`/`dar`, exact GP, HSGP, structured fields, and Julia-callable kernel/ragged terms |
+| Advanced terms | **Supported subsets** | `s`, `t2`, `mo`/`mo1`, `me`, interval predictors, `ar`/`dar`, exact GP, HSGP including fixed partial centering, structured fields, and Julia-callable kernel/ragged terms |
 | Outputs | **Supported subset** | Common semantic descriptor queries plus row-aligned pointwise likelihoods, deterministic returned quantities, one-draw posterior prediction, and chain-level Turing prediction; fitted response latents are excluded before regeneration; Stan highlights are unavailable |
 | Replay | **Supported subset** | Frozen preprocessing and existing-group coordinates replay on new rows; refitting constants and selective new-group resampling—including joint `|ID|` and stratified redraws—are explicit |
 

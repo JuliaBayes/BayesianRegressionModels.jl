@@ -17,6 +17,34 @@ _brm_hsgp_options(kw, n_axes::Int) = begin
     Tuple(Int(x) for x in K), Tuple(Float64(x) for x in c)
 end
 
+# Partial-centering coordinates are defined per tensor-product basis weight.
+# A scalar is convenient for the two endpoints while a vector lets a pilot fit
+# choose a different geometry for every spectral frequency.
+function _brm_hsgp_centeredness(kw, n_basis::Int)
+    raw = get(kw, :centeredness, 0.0)
+    if raw isa NamedColumn
+        backing = parent(raw)
+        backing isa DataColumn || error(
+            "hsgp: a named `centeredness` value must be backed by model data")
+        raw = parent(backing)
+    end
+    values = if raw isa Real && !(raw isa Bool)
+        fill(Float64(raw), n_basis)
+    elseif raw isa Tuple || raw isa AbstractVector
+        length(raw) == n_basis || error(
+            "hsgp: `centeredness` needs one value per basis weight " *
+            "($n_basis), got $(length(raw))")
+        all(x -> x isa Real && !(x isa Bool), raw) || error(
+            "hsgp: `centeredness` values must be real numbers")
+        Float64[raw...]
+    else
+        error("hsgp: `centeredness` expects a real scalar or vector, got $(typeof(raw))")
+    end
+    all(x -> isfinite(x) && 0 <= x <= 1, values) || error(
+        "hsgp: `centeredness` values must be finite and lie in [0, 1]")
+    values
+end
+
 # `domain` is the actual compact interval used by the HSGP eigenfunctions,
 # unlike `c`, which expands a domain inferred from raw training data. A latent
 # axis has no Julia-time values from which to infer that interval, so it must
