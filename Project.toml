@@ -31,6 +31,7 @@ WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 BayesianRegressionModelsDifferentiationInterfaceExt = "DifferentiationInterface"
 BayesianRegressionModelsTreeArraysExt = "TreeArrays"
 BayesianRegressionModelsTuringExt = "Turing"
+BayesianRegressionModelsTuringWarmupHMCExt = ["Turing", "WarmupHMC"]
 BayesianRegressionModelsWarmupHMCEnzymeExt = ["WarmupHMC", "Enzyme"]
 BayesianRegressionModelsWarmupHMCExt = "WarmupHMC"
 
