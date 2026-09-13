@@ -63,8 +63,23 @@ Group effects default to a noncentered parameterization: plain random intercepts
 use a positive scale and standard-normal latent values, correlated slopes use marginal scales
 plus an LKJ Cholesky factor, and `||` uses independent scales with no
 correlation variable. `centered_groups` selects the corresponding centered
-coefficient geometry for supported blocks; Stan-only adaptive/CV sizing controls
-remain loud construction errors.
+coefficient geometry for supported blocks. Online adaptive centering is
+available through
+`adaptive_centering_problem(backend, problem, ad_backend)` for one deliberately
+small native case: a single-response, identity-link
+`Normal(predictor, fixed_scale)` model with default population priors and one
+ordinary default-prior noncentered scalar `(1 | group)` block. `problem` must be
+the `DynamicPPL.LogDensityFunction` for that exact `backend.model`, constructed
+with `DynamicPPL.UnlinkAll()`. The adapter uses DynamicPPL's coordinate metadata
+for `beta_pop`, `group_1_1.log_scale`, and `group_1_1.z`, while `ad_backend`
+differentiates WarmupHMC's coordinate transform.
+
+Other adaptive geometries remain fail-closed. This includes multiple responses,
+free distribution parameters, assignments, missing or modified responses,
+observation weights, custom population or group-scale priors, slopes,
+multi-membership, stratified or shared-ID blocks, centered generated models,
+R2D2, and prepared terms such as HSGP. Adaptive subset/CV sizing controls also
+remain outside the native Turing contract.
 
 Multiple and crossed grouping factors remain separate blocks. `gr(..., by=)`
 uses a separate scale/correlation frame per stratum. Matching `|ID|` terms in a
@@ -73,7 +88,8 @@ vector, LKJ factor, and group draw; each predictor consumes its own coefficient
 slice from that covariance block. Addressed `sd(...)` and `cor(...)`
 declarations reuse the same backend-neutral prior resolver as StanBlocks.
 Weighted multi-membership intercepts and correlated slopes are supported with
-strict all-source replay and resampling. Adaptive geometry remains fail-closed.
+strict all-source replay and resampling. Adaptive geometry for these broader
+group structures remains fail-closed.
 
 Canonical link declarations are lowered once in BRM and reused by the Turing
 executor. Response modifiers likewise carry materialized bounds, interval
@@ -136,7 +152,7 @@ not sufficient.
 | Priors | **Supported** | Scalar callable priors, sampled hyperparameters, addressed coefficient/group/term priors, bounds, simplex and covariance factors, horseshoe and R2D2 geometry |
 | Scalar likelihoods | **Generic** | Retained callable constructors and arguments; canonical logit/log links preserve stable numerical forms |
 | Joint and ordinal responses | **Supported** | Vector-valued observations, Multinomial, covariance-factor joint normals, categorical logits, and typed ordinal structure/link composition |
-| Group effects | **Partial** | Plain intercepts, correlated and exact-zero-correlation slopes, multiple/crossed factors, distributional cross-predictor `|ID|` covariance, fitted transformed/categorical slopes, stratified `gr(by=)`, explicit centering, `sd`/`cor` prior overrides, and weighted multi-membership intercepts/correlated slopes with replay/resampling; adaptive geometry remains pending |
+| Group effects | **Partial** | Plain intercepts, correlated and exact-zero-correlation slopes, multiple/crossed factors, distributional cross-predictor `|ID|` covariance, fitted transformed/categorical slopes, stratified `gr(by=)`, explicit centering, `sd`/`cor` prior overrides, and weighted multi-membership intercepts/correlated slopes with replay/resampling; online adaptive centering supports only the single-response fixed-scale Gaussian default-prior random-intercept contract described above |
 | Response evidence | **Generic** | Truncated, censored, and interval evidence compose with the base distribution's required CDF/density operations |
 | Missing responses | **Supported** | Missing rows use the same conditional family; only observed rows contribute pointwise likelihood |
 | Multiple responses | **Supported** | Shared declarations are sampled once and responses can have distinct row axes; incompatible group schemas fail explicitly |
