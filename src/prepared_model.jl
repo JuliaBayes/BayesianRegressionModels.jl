@@ -85,7 +85,7 @@ end
 
 
 """
-    _brm_prepare_model(brmi; context=_brm_backend_context(brmi))
+    _brm_prepare_model(brmi; program=_brm_prepare_program(brmi))
 
 Prepare the backend-neutral ordered expression graph without deciding which
 operations a backend can execute. This intentionally retains exotic terms and
