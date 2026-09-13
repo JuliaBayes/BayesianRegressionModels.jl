@@ -82,12 +82,17 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
         cov === :periodic && error(
             "BRM term preparation: model-derived periodic hsgp is unsupported")
         K, c = _brm_hsgp_options(kw, 1)
+        centeredness = _brm_hsgp_centeredness(kw, prod(K))
+        any(!iszero, centeredness) && error(
+            "BRM term preparation: partial centering currently requires a " *
+            "raw-data HSGP axis")
         fits = _brm_hsgp_domain_fits(kw, 1; required=true)
         orthogonal = _brm_hsgp_orthogonal_to(kw, 1)
         center, L = only(fits)
         _, omega2 = _brm_apply_hsgp(fits, ([center],), K)
         source = name(only(latent_args))
-        state = (; target, latent=true, explicit_domain=true, axis_source=source, K, c, cov, iso,
+        state = (; target, latent=true, explicit_domain=true, axis_source=source,
+                 K, c, centeredness, cov, iso,
                  period=nothing, fits, center, L, omega2,
                  rho_lower=_brm_hsgp_rho_lower_data(fits, K, true),
                  orthogonal, by=nothing,
@@ -107,13 +112,24 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
         levels = _brm_fit_levels(raw)
         (; source, levels, idx=_brm_apply_levels(levels, raw))
     end
+    n_basis = cov === :periodic ? 2 * only(K) : prod(K)
+    centeredness = _brm_hsgp_centeredness(kw, n_basis)
+    if any(!iszero, centeredness)
+        cov === :exp_quad || error(
+            "BRM term preparation: partial centering currently supports the " *
+            "exp_quad HSGP spectrum")
+        isnothing(by_state) || error(
+            "BRM term preparation: partial centering is an ungrouped HSGP " *
+            "weight geometry and cannot be combined with `by=`")
+    end
     if cov === :periodic
         length(axes) == 1 && iso || error(
             "BRM term preparation: periodic hsgp requires one isotropic axis")
         isnothing(by_state) || error(
             "BRM term preparation: periodic hsgp does not support by")
         basis = _brm_hsgp_basis_state(axes, K, cov, iso, period)
-        state = (; target, latent=false, explicit_domain=false, K, c, cov, iso, period, basis..., by=by_state,
+        state = (; target, latent=false, explicit_domain=false, K, c, centeredness,
+                 cov, iso, period, basis..., by=by_state,
                  _brm_gp_priors(term, target, context)...)
     else
         domain_fits = _brm_hsgp_domain_fits(kw, length(axes))
@@ -121,7 +137,8 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
         orthogonal = _brm_hsgp_orthogonal_to(kw, length(axes))
         basis = _brm_hsgp_basis_state(axes, K, cov, iso, period;
                                       fits, orthogonal)
-        state = (; target, latent=false, explicit_domain=!isnothing(domain_fits), K, c, cov, iso, period, basis...,
+        state = (; target, latent=false, explicit_domain=!isnothing(domain_fits),
+                 K, c, centeredness, cov, iso, period, basis...,
                  orthogonal, by=by_state,
                  _brm_gp_priors(term, target, context)...)
     end

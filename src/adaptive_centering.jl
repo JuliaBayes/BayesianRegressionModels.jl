@@ -6,6 +6,86 @@
 # owns the online candidate accumulators and window lifecycle through the
 # optional extension method of `adaptive_centering_problem`.
 
+function _adaptive_log_sample_std(values)
+    n = length(values)
+    n >= 2 || error("HSGP centeredness selection needs at least two pilot draws")
+    mean_value = sum(values) / n
+    variance = sum(abs2(value - mean_value) for value in values) / (n - 1)
+    variance > 0 ? 0.5log(variance) : -Inf
+end
+
+"""
+    select_hsgp_centeredness(unit_weights, log_scales;
+                             candidates=0:0.1:1,
+                             underflow_log=log(floatmin(Float64)))
+
+Choose one fixed partial-centering exponent per HSGP basis weight from a pilot
+fit. Rows are pilot draws and columns are basis frequencies. `unit_weights`
+contains the noncentered standard-normal coordinates and `log_scales` contains
+the corresponding log spectral standard deviations.
+
+For candidate `c`, the loss is
+
+```
+log(std(unit_weights .* exp.(c .* log_scales))) - mean(c .* log_scales)
+```
+
+evaluated with a per-column exponent shift. A candidate is inadmissible when
+its centered coordinate scale would fall below `underflow_log`; importantly,
+the `c=0` endpoint is evaluated without multiplying by `log_scales`, so it
+remains valid even when a physical high-frequency scale is `-Inf`.
+
+The result is a named tuple with `centeredness`, the candidate `losses`, an
+`admissible` mask, and the normalized `candidates`. This is an offline
+pilot-then-refit rule. It does not update geometry during warmup.
+"""
+function select_hsgp_centeredness(unit_weights::AbstractMatrix,
+                                  log_scales::AbstractMatrix;
+                                  candidates=0:0.1:1,
+                                  underflow_log=log(floatmin(Float64)))
+    size(unit_weights) == size(log_scales) || throw(DimensionMismatch(
+        "unit_weights and log_scales must have the same draws × basis shape"))
+    size(unit_weights, 1) >= 2 || error(
+        "HSGP centeredness selection needs at least two pilot draws")
+    all(isfinite, unit_weights) || error(
+        "HSGP centeredness selection needs finite pilot unit weights")
+    underflow_log isa Real && isfinite(underflow_log) || error(
+        "underflow_log must be finite")
+    cs = Float64[candidates...]
+    !isempty(cs) || error("HSGP centeredness candidates cannot be empty")
+    all(c -> isfinite(c) && 0 <= c <= 1, cs) || error(
+        "HSGP centeredness candidates must lie in [0, 1]")
+
+    n_draws, n_basis = size(unit_weights)
+    losses = fill(Inf, length(cs), n_basis)
+    admissible = falses(length(cs), n_basis)
+    for b in 1:n_basis, (ci, c) in enumerate(cs)
+        centered_log_scale = if iszero(c)
+            zeros(Float64, n_draws)
+        else
+            c .* @view(log_scales[:, b])
+        end
+        all(isfinite, centered_log_scale) || continue
+        minimum(centered_log_scale) >= underflow_log || continue
+        offset = maximum(centered_log_scale)
+        transformed = @view(unit_weights[:, b]) .* exp.(centered_log_scale .- offset)
+        all(isfinite, transformed) || continue
+        losses[ci, b] = _adaptive_log_sample_std(transformed) + offset -
+                        sum(centered_log_scale) / n_draws
+        admissible[ci, b] = isfinite(losses[ci, b])
+    end
+    selected = Vector{Float64}(undef, n_basis)
+    selected_index = Vector{Int}(undef, n_basis)
+    for b in 1:n_basis
+        any(@view admissible[:, b]) || error(
+            "no numerically admissible centeredness candidate for basis weight $b")
+        selected_index[b] = argmin(@view losses[:, b])
+        selected[b] = cs[selected_index[b]]
+    end
+    (; centeredness=selected, selected_index, candidates=cs, losses, admissible,
+       underflow_log=Float64(underflow_log))
+end
+
 const _ADAPTIVE_CORRELATED_FAMILIES = Set((
     :ranef_correlated,
     :ranef_correlated_draws,

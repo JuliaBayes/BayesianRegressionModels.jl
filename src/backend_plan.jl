@@ -723,7 +723,8 @@ function _brm_replay_population_design(
     end
     fixed = zeros(Float64, n)
     foreach(term -> fixed .+= term.values, fixed_terms)
-    matrix = hcat((column.values for column in columns)...)
+    matrix = isempty(columns) ? zeros(Float64, n, 0) :
+        hcat((column.values for column in columns)...)
     _BRMPopulationDesign(
         training.target, Tuple(columns), matrix, training.row_source,
         Tuple(fixed_terms), fixed)
@@ -1610,7 +1611,7 @@ function _brm_population_design(target::Symbol, terms::Tuple,
         end
         append!(raw_columns, columns)
     end
-    isempty(raw_columns) && begin
+    isempty(raw_columns) && isnothing(row_source) && begin
         required && error("BRM backend lowering: predictor `$target` has no terms")
         return nothing
     end
@@ -1653,7 +1654,8 @@ function _brm_population_design(target::Symbol, terms::Tuple,
             column.label, column.effect_addresses, column.effect_block,
             column.source, values, column.preprocess)
     end
-    matrix = hcat((c.values for c in columns)...)
+    matrix = isempty(columns) ? zeros(Float64, n, 0) :
+        hcat((c.values for c in columns)...)
     fixed = zeros(Float64, n)
     for term in fixed_terms
         length(term.values) == n || error(

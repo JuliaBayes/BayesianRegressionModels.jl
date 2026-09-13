@@ -138,7 +138,7 @@ export parse!, _brm, stan_code, reprocess, restan_data, generative_plan
 export RanefBlock, ranef_blocks, ranef_coordinates,
        population_draws, transport_draws, term_draws, hsgp_population_curve
 export AdaptiveCenteringBlock, adaptive_centering_blocks,
-       adaptive_centering_problem
+       adaptive_centering_problem, select_hsgp_centeredness
 
 # Introspection -- model-shape questions answered without re-walking
 # the operations dict.
@@ -176,10 +176,14 @@ export popefs, _popefs_normal, _popefs_coefs, _popefs_normal_coefs,
        _sb_mo, _sb_cat, _sb_cat_normal, _sb_ar1, _sb_dar1, _sb_s, _sb_t2, _sb_me,
        _sb_interval_censored_predictor,
        _sb_gp, _sb_gp_aniso, _sb_hsgp, _sb_hsgp_aniso,
+       _sb_hsgp_partial, _sb_hsgp_partial_aniso,
        _sb_hsgp_by, _sb_hsgp_by_aniso,
        _sb_hsgp_latent, _sb_hsgp_latent_orthogonal,
        _sb_gp_periodic, _sb_hsgp_periodic,
-       brm_exp_quad_cov, brm_hsgp_sqrt_spd, brm_hsgp_basis_1d,
+       brm_exp_quad_cov, brm_hsgp_sqrt_spd, brm_hsgp_log_sqrt_spd,
+       brm_hsgp_scale_fraction, brm_hsgp_remaining_scale_fraction,
+       brm_hsgp_centered_log_scale, brm_hsgp_remaining_log_scale,
+       brm_hsgp_basis_1d,
        brm_hsgp_orthogonalize_linear,
        brm_periodic_cov, brm_hsgp_periodic_sqrt_spd,
        _sb_horseshoe, _sb_horseshoe_scaled,

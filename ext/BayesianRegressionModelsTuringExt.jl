@@ -302,6 +302,9 @@ function _brm_generic_model_ast(plan::BRM._TuringGenericPlan)
             block_residual_scales[(index, mapping.block_index)] =
                 :($site.scales[$mapping_index])
             residual_scale = nothing
+        elseif isempty(component.priors)
+            push!(statements, :($beta = Float64[]))
+            residual_scale = nothing
         elseif isnothing(component.r2d2)
             push!(statements, :($beta ~ product_distribution($prior_vector)))
             residual_scale = nothing
@@ -550,6 +553,9 @@ function _brm_generic_multi_model_ast(multi::BRM._TuringMultiResponsePlan)
             mapping = joint.predictors[mapping_index]
             block_residual_scales[(name, mapping.block_index)] =
                 :($site.scales[$mapping_index])
+            residual_scale = nothing
+        elseif isempty(component.priors)
+            push!(statements, :($beta = Float64[]))
             residual_scale = nothing
         elseif isnothing(component.r2d2)
             push!(statements, :($beta ~ product_distribution($prior_vector)))
