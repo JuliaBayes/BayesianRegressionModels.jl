@@ -24,6 +24,10 @@ end
         share ~ generic_simplex_prior(alpha; power=1.0)
         y ~ Normal(location, 1)
     end)(data))
+    # Globally named factories must stay in the generated AST. Routing them
+    # through the runtime callable tuple makes Enzyme abort while differentiating
+    # the corresponding DynamicPPL log-density function.
+    @test isempty(backend.model.args.callables)
     parameters = (; location=0.7, share=[0.2, 0.3, 0.5])
     expected = logpdf(Normal(0.25, 1.5), parameters.location) +
         logpdf(Dirichlet(data.alpha), parameters.share)
@@ -161,6 +165,7 @@ shifted_laplace(location, scale; shift=0) =
         y ~ shifted_laplace(location, width; shift=0.25)
     end)(data)
     backend = TuringBRMI(brmi)
+    @test isempty(backend.model.args.callables)
     parameters = (; beta_pop=[0.4, -0.2], width=0.7)
     location_values = backend.plan.design.matrix * parameters.beta_pop
     expected = sum(logpdf.(Normal(), parameters.beta_pop)) +
