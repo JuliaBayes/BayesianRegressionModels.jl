@@ -40,6 +40,16 @@ function _brm_hsgp_sqrt_spd(state, sigma, rho)
      for b in axes(state.omega2, 1)]
 end
 
+function _brm_hsgp_exp_quad_log_sqrt_spd(state, sigma, rhos)
+    log_scale = log(sigma) +
+        0.5sum(log(rhos[j]) + 0.5log(2pi) for j in eachindex(rhos))
+    [log_scale - 0.25sum(rhos .^ 2 .* state.omega2[b, :])
+     for b in axes(state.omega2, 1)]
+end
+
+_brm_hsgp_exp_quad_log_sqrt_spd(state, sigma, rho::Real) =
+    _brm_hsgp_exp_quad_log_sqrt_spd(state, sigma, [rho])
+
 function _brm_hsgp_log_sqrt_spd(state, sigma, rho)
     if state.cov === :periodic
         a = inv(rho^2)
@@ -47,11 +57,7 @@ function _brm_hsgp_log_sqrt_spd(state, sigma, rho)
                     log(BRM.SpecialFunctions.besselix(Int(j), a)))
                 for j in state.harmonics]
     end
-    rhos = rho isa Real ? fill(rho, size(state.omega2, 2)) : rho
-    log_scale = log(sigma) +
-        0.5sum(log(rhos[j]) + 0.5log(2pi) for j in eachindex(rhos))
-    [log_scale - 0.25sum(rhos .^ 2 .* state.omega2[b, :])
-     for b in axes(state.omega2, 1)]
+    _brm_hsgp_exp_quad_log_sqrt_spd(state, sigma, rho)
 end
 
 _brm_hsgp_centered_log_scale(log_scale, c) =
@@ -59,24 +65,49 @@ _brm_hsgp_centered_log_scale(log_scale, c) =
 _brm_hsgp_remaining_log_scale(log_scale, c) =
     isone(c) ? zero(log_scale) : (one(c) - c) * log_scale
 
-Turing.@model function _brm_turing_hsgp_partial_term(state)
-    rho ~ state.iso ? _brm_constrained_kernel(
-        _brm_term_distribution(state.rho_prior); lower=state.rho_lower) :
-        product_distribution([
+Turing.@model function _brm_turing_hsgp_partial_iso_term(state)
+    rho ~ _brm_constrained_kernel(
+        _brm_term_distribution(state.rho_prior); lower=state.rho_lower)
+    sigma ~ _brm_constrained_kernel(
+        _brm_term_distribution(state.sigma_prior); lower=0)
+    log_sqrt_spd = _brm_hsgp_exp_quad_log_sqrt_spd(state, sigma, rho)
+    centered_log_scale = [_brm_hsgp_centered_log_scale(log_sqrt_spd[b],
+                            state.centeredness[b]) for b in eachindex(log_sqrt_spd)]
+    log_floor = log(floatmin(Float64))
+    if !(all(isfinite, centered_log_scale) &&
+         minimum(centered_log_scale) >= log_floor)
+        Turing.@addlogprob! -Inf
+    end
+    safe_centered_log_scale = max.(centered_log_scale, log_floor)
+    beta_partial ~ product_distribution([
+        Normal(0, exp(safe_centered_log_scale[b]))
+        for b in eachindex(safe_centered_log_scale)])
+    remaining_log_scale = [_brm_hsgp_remaining_log_scale(log_sqrt_spd[b],
+                             state.centeredness[b]) for b in eachindex(log_sqrt_spd)]
+    weights = exp.(remaining_log_scale) .* beta_partial
+    effect = state.PHI * weights
+    (; effect, rho, sigma, beta_partial, log_sqrt_spd,
+       centeredness=state.centeredness, weights)
+end
+
+Turing.@model function _brm_turing_hsgp_partial_aniso_term(state)
+    rho ~ product_distribution([
         _brm_constrained_kernel(_brm_term_distribution(state.rho_prior);
                                 lower=state.rho_lower[j])
         for j in eachindex(state.rho_lower)])
     sigma ~ _brm_constrained_kernel(
         _brm_term_distribution(state.sigma_prior); lower=0)
-    log_sqrt_spd = _brm_hsgp_log_sqrt_spd(state, sigma, rho)
+    log_sqrt_spd = _brm_hsgp_exp_quad_log_sqrt_spd(state, sigma, rho)
     centered_log_scale = [_brm_hsgp_centered_log_scale(log_sqrt_spd[b],
                             state.centeredness[b]) for b in eachindex(log_sqrt_spd)]
     # A positive centeredness cannot represent a coordinate whose scale has
     # rounded to zero. Reject that geometry explicitly while keeping c=0 safe
     # even when the physical high-frequency weight itself underflows.
     log_floor = log(floatmin(Float64))
-    all(isfinite, centered_log_scale) && minimum(centered_log_scale) >= log_floor ||
+    if !(all(isfinite, centered_log_scale) &&
+         minimum(centered_log_scale) >= log_floor)
         Turing.@addlogprob! -Inf
+    end
     safe_centered_log_scale = max.(centered_log_scale, log_floor)
     beta_partial ~ product_distribution([
         Normal(0, exp(safe_centered_log_scale[b]))
@@ -154,7 +185,8 @@ end
 function BRM._brm_turing_term_model(
         term::BRM._BRMPreparedTerm{typeof(BRM.hsgp)}, nobs)
     model = any(!iszero, term.state.centeredness) ?
-        _brm_turing_hsgp_partial_term(term.state) :
+        (term.state.iso ? _brm_turing_hsgp_partial_iso_term(term.state) :
+                          _brm_turing_hsgp_partial_aniso_term(term.state)) :
         _brm_turing_hsgp_term(term.state)
     _brm_checked_term_model(term, nobs, model)
 end

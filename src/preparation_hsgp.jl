@@ -22,6 +22,12 @@ end
 # choose a different geometry for every spectral frequency.
 function _brm_hsgp_centeredness(kw, n_basis::Int)
     raw = get(kw, :centeredness, 0.0)
+    if raw isa NamedColumn
+        backing = parent(raw)
+        backing isa DataColumn || error(
+            "hsgp: a named `centeredness` value must be backed by model data")
+        raw = parent(backing)
+    end
     values = if raw isa Real && !(raw isa Bool)
         fill(Float64(raw), n_basis)
     elseif raw isa Tuple || raw isa AbstractVector
