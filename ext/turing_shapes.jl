@@ -2,6 +2,8 @@
 # unconstrained transform use the corresponding normalized bounded measure.
 # Explicit `truncated(...)` remains an ordinary normalized distribution call.
 using LinearAlgebra: Cholesky
+Turing.Bijectors.bijector(d::BRM._BRMSimplexPrior) =
+    Turing.Bijectors.bijector(Dirichlet(ones(length(d))))
 struct _BRMConstrainedKernel{D,L,U} <: ContinuousUnivariateDistribution
     base::D
     lower::L

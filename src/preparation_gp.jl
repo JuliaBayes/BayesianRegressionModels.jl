@@ -156,53 +156,15 @@ function _brm_replay_gp_axes(training, context, label)
     axes
 end
 
-function _brm_replay_term(training::_BRMPreparedTerm{typeof(gp)},
-                          fresh::ExprColumn, context::_BRMBackendContext)
-    axes = _brm_replay_gp_axes(training, context, :gp)
-    state = merge(training.state, (; X=_brm_gp_matrix(axes)))
-    _BRMPreparedTerm(gp, training.source, state, training.dependencies)
-end
-_brm_replay_term(training::_BRMPreparedTerm{typeof(gp)},
-                 fresh::_BRMPreparedTerm{typeof(gp)},
-                 context::_BRMBackendContext) =
-    _brm_replay_term(training, fresh, (; data=context.data))
-function _brm_replay_term(training::_BRMPreparedTerm{typeof(gp)},
-                          fresh::_BRMPreparedTerm{typeof(gp)}, context)
+function _brm_replay_term(::typeof(gp), training,
+                          fresh::Union{ExprColumn,_BRMPreparedTerm}, context)
     axes = _brm_replay_gp_axes(training, context, :gp)
     state = merge(training.state, (; X=_brm_gp_matrix(axes)))
     _BRMPreparedTerm(gp, training.source, state, training.dependencies)
 end
 
-function _brm_replay_term(training::_BRMPreparedTerm{typeof(hsgp)},
-                          fresh::ExprColumn, context::_BRMBackendContext)
-    get(training.state, :latent, false) && return _BRMPreparedTerm(
-        hsgp, training.source, training.state, training.dependencies)
-    axes = _brm_replay_gp_axes(training, context, :hsgp)
-    get(training.state, :explicit_domain, false) &&
-        _brm_check_hsgp_domain(training.state.fits, axes; prefix="BRM term replay")
-    state = if training.state.cov === :periodic
-        merge(training.state, (; axes,
-            PHI=_brm_apply_hsgp_periodic(training.state.period, only(axes),
-                                         only(training.state.K))))
-    else
-        PHI, omega2 = _brm_apply_hsgp(training.state.fits, axes, training.state.K)
-        get(training.state, :orthogonal, nothing) === :linear &&
-            (PHI = _brm_orthogonalize_hsgp_linear(PHI, only(axes)))
-        merge(training.state, (; axes, PHI, omega2))
-    end
-    if !isnothing(training.state.by)
-        by = training.state.by
-        idx = _brm_apply_levels(by.levels, context.data[by.source])
-        state = merge(state, (; by=merge(by, (; idx))))
-    end
-    _BRMPreparedTerm(hsgp, training.source, state, training.dependencies)
-end
-_brm_replay_term(training::_BRMPreparedTerm{typeof(hsgp)},
-                 fresh::_BRMPreparedTerm{typeof(hsgp)},
-                 context::_BRMBackendContext) =
-    _brm_replay_term(training, fresh, (; data=context.data))
-function _brm_replay_term(training::_BRMPreparedTerm{typeof(hsgp)},
-                          fresh::_BRMPreparedTerm{typeof(hsgp)}, context)
+function _brm_replay_term(::typeof(hsgp), training,
+                          fresh::Union{ExprColumn,_BRMPreparedTerm}, context)
     get(training.state, :latent, false) && return _BRMPreparedTerm(
         hsgp, training.source, training.state, training.dependencies)
     axes = _brm_replay_gp_axes(training, context, :hsgp)

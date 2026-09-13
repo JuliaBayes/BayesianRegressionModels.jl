@@ -15,6 +15,13 @@ Ordinary callable expressions are retained in the prepared graph and invoked by
 the generated backend program. Specialized geometry is selected by dispatch on
 a prepared term or response type.
 
+Both backends consume one ordered semantic source program for expression
+identities, dependencies, response evidence, and resolved prior addresses.
+Shared fit/apply helpers also define fitted transforms used by both paths. Each
+backend still prepares the geometry its executor requires: StanBlocks owns SLIC
+declarations, group prepasses, and named Stan data, while Turing builds
+population, term, and group geometry for DynamicPPL sample sites.
+
 The Turing emitter passes its generated body through DynamicPPL's own model
 compiler, then stores the evaluator as a `RuntimeGeneratedFunction`. This small
 compiler dependency makes a newly constructed model callable immediately from
@@ -67,6 +74,32 @@ previously unseen categorical or group levels fail with a diagnostic because
 the fitted model has no corresponding basis or parameter. Rebuilding rather
 than replaying is the operation that derives new fitted constants.
 
+Term replay dispatches on the callable object itself (`typeof(s)`, `typeof(gp)`,
+or an extension callable), rather than reconstructing a symbol with `nameof`.
+The same dispatch contract handles replay from a fresh expression and from an
+already prepared plan. This keeps extension methods open: a new term can own
+fitted state and replay it by defining a method for its callable type. The
+shared fit/apply operation produces transformed values and updated fitted state;
+StanBlocks retains responsibility for binding those values to emitter-specific
+data names.
+
+## Term priors and constrained geometry
+
+Term-prior statements are resolved once during backend-neutral preparation.
+The resolver matches predictor and term addresses, applies the same precedence
+rules for both backends, and rejects misspelled, unsupported, or ambiguous
+addresses before emission. Backends consume the resolved semantic slots instead
+of independently searching the formula.
+
+Simplex-valued term parameters preserve the configured multivariate prior. The
+Turing adapter supplies simplex constrained geometry through the ordinary
+simplex bijector while delegating density, support, and random generation to the
+original distribution. Consequently a custom continuous multivariate prior is
+not approximated as a Dirichlet merely to obtain a transform. It must have the
+declared simplex dimension and implement valid density, support, and sampling
+behavior. StanBlocks support remains conditional on having a corresponding Stan
+translation for that distribution call.
+
 ## Specialized terms
 
 The shared preparation layer currently covers population transformations,
@@ -93,6 +126,20 @@ distributions, multiple responses, observation modifiers, weights, missing-data
 plans, and the repository's typed ordinal and joint-response compositions.
 Special response shapes use dispatch and prepared shape metadata. They do not
 form a family admission list.
+
+Turing emits single- and multiple-response models through one response-graph
+emitter. It schedules shared parameters, assignments, predictors, group blocks,
+and observations once in dependency order, then attaches response-specific
+likelihood, evidence, weight, missing-row, and predictive operations. This is
+why a declaration shared by two responses is sampled once rather than copied
+into two generated model bodies.
+
+The descriptor adapter exposes this semantic plan through the same
+`brm_descriptor`, `brm_output`, `brm_outputs`, and `brm_execute` APIs used for
+Stan-backed descriptors. Turing descriptors report semantic parameters, linear
+predictors, posterior-predictive values, pointwise log likelihoods, and replay
+operations. Their `stan` field is `nothing`, and Stan source highlights are not
+available because no Stan program exists.
 
 SLIC bodies remain StanBlocks programs. The native backend does not interpret
 arbitrary SLIC syntax as Julia. A term that only defines a StanBlocks emission

@@ -41,7 +41,8 @@ Turing.@model function _brm_turing_me_term(state)
 end
 
 Turing.@model function _brm_turing_monotonic_term(state, scaled)
-    simplex_incr ~ Dirichlet(state.alpha)
+    simplex_incr ~ BRM._brm_simplex_prior(
+        _brm_term_distribution(state.simplex_prior), length(state.levels) - 1)
     contrast = cumsum(vcat(0.0, simplex_incr))[state.idx]
     if scaled
         beta ~ Normal()
@@ -178,9 +179,8 @@ BRM._brm_turing_term_model(term::BRM._BRMPreparedTerm{typeof(BRM.me)}, nobs,
 function BRM._brm_turing_term_model(
         term::BRM._BRMPreparedTerm{F}, nobs, priors) where {F<:Union{
             typeof(BRM.mo),typeof(BRM.mo1)}}
-    alpha = collect(Float64, Distributions.params(priors.simplex)[1])
     BRM._brm_turing_term_model(
-        _brm_term_with_priors(term, (; alpha)), nobs)
+        _brm_term_with_priors(term, (; simplex_prior=priors.simplex)), nobs)
 end
 BRM._brm_turing_term_model(
         term::BRM._BRMPreparedTerm{typeof(BRM.interval_censored)}, nobs,

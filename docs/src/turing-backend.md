@@ -34,6 +34,12 @@ An unsupported operation reports the missing capability. For example, a custom
 distribution may supply density evaluation but lack predictive RNG or a latent
 support transform; these are separate requirements.
 
+Single- and multiple-response models use one response-graph emitter. Shared
+parameters, assignments, predictors, and group blocks are scheduled once;
+response-specific likelihoods, evidence, weights, missing rows, and prediction
+are attached to that graph. A declaration used by several responses is sampled
+once in the generated model.
+
 ## Parameterization
 
 Population coefficients use the shared design matrix and labels, with Normal
@@ -44,12 +50,36 @@ Simplex, covariance-factor, horseshoe, and R2D2 declarations use their own
 parameter geometry. Declaration bounds retain the ordinary prior kernel;
 `truncated(distribution; ...)` includes its truncation normalizer.
 
+Term-prior addresses are resolved in core before either backend emits a model.
+Both backends therefore use the same matching, precedence, and rejection rules
+for `sd`, `ar`, `length_scale`, `simplex`, and `latent` term slots. A configured
+simplex prior retains its exact multivariate density and RNG in Turing while a
+simplex bijector supplies the constrained-to-unconstrained transform. Custom
+simplex priors must be continuous multivariate distributions of the fitted
+dimension and implement density, support, and sampling. Stan execution of the
+same custom callable additionally requires a Stan translation.
+
 Group effects default to a noncentered parameterization: plain random intercepts
 use a positive scale and standard-normal latent values, correlated slopes use marginal scales
 plus an LKJ Cholesky factor, and `||` uses independent scales with no
 correlation variable. `centered_groups` selects the corresponding centered
-coefficient geometry for supported blocks; Stan-only adaptive/CV sizing controls
-remain loud construction errors.
+coefficient geometry for supported blocks. Online adaptive centering is
+available through
+`adaptive_centering_problem(backend, problem, ad_backend)` for one deliberately
+small native case: a single-response, identity-link
+`Normal(predictor, fixed_scale)` model with default population priors and one
+ordinary default-prior noncentered scalar `(1 | group)` block. `problem` must be
+the `DynamicPPL.LogDensityFunction` for that exact `backend.model`, constructed
+with `DynamicPPL.UnlinkAll()`. The adapter uses DynamicPPL's coordinate metadata
+for `beta_pop`, `group_1_1.log_scale`, and `group_1_1.z`, while `ad_backend`
+differentiates WarmupHMC's coordinate transform.
+
+Other adaptive geometries remain fail-closed. This includes multiple responses,
+free distribution parameters, assignments, missing or modified responses,
+observation weights, custom population or group-scale priors, slopes,
+multi-membership, stratified or shared-ID blocks, centered generated models,
+R2D2, and prepared terms such as HSGP. Adaptive subset/CV sizing controls also
+remain outside the native Turing contract.
 
 Raw, ungrouped squared-exponential HSGP weights separately support a fixed
 scalar or per-frequency `centeredness` in `[0,1]`. This is an offline
@@ -65,7 +95,8 @@ vector, LKJ factor, and group draw; each predictor consumes its own coefficient
 slice from that covariance block. Addressed `sd(...)` and `cor(...)`
 declarations reuse the same backend-neutral prior resolver as StanBlocks.
 Weighted multi-membership intercepts and correlated slopes are supported with
-strict all-source replay and resampling. Adaptive geometry remains fail-closed.
+strict all-source replay and resampling. Adaptive geometry for these broader
+group structures remains fail-closed.
 
 Canonical link declarations are lowered once in BRM and reused by the Turing
 executor. Response modifiers likewise carry materialized bounds, interval
@@ -73,6 +104,20 @@ endpoints, and validation into the extension instead of being rediscovered from
 backend code.
 
 ## Outputs and replay
+
+`brm_descriptor(backend)` adapts a `TuringBRMI` to the common semantic
+descriptor API. `brm_output` and `brm_outputs` select parameters, linear
+predictors, posterior-predictive values, and pointwise log likelihoods by the
+same logical names and roles used for Stan descriptors. `brm_execute` provides
+Turing-backed pointwise likelihood, generated-quantity, prediction, and replay
+operations. Since this backend emits no Stan program, `descriptor.stan` is
+`nothing` and Stan source highlights are rejected.
+
+Descriptor operations return flat named tuples keyed by their declared output
+names. For example, the descriptor pointwise operation returns `y_loglik`, so
+its keys match `BRMOperation.outputs`. The lower-level `turing_*` helpers keep
+their response-aware containers (`y` for pointwise likelihoods and `responses`
+for multiple-response generated quantities).
 
 `turing_pointwise_loglikelihoods` returns response-named, row-aligned
 log-likelihood vectors; latent rows of a partly missing response remain
@@ -94,6 +139,12 @@ and regenerates only the named groups' standardized effects. For a shared
 `|ID|` block this redraw remains joint across its predictors. Unseen categorical
 levels still fail closed.
 
+Replay of prepared terms dispatches on the actual callable type. GP, HSGP,
+spline, ordered, autoregressive, and extension-defined terms use the same open
+dispatch path whether replay starts from formula expressions or prepared plans.
+Fitted state remains backend-neutral; each backend maps replayed values to its
+own data bindings or sample-site representation.
+
 ## Parity contract
 
 “Parity” means the same admitted BRMI has the same constrained prior and
@@ -108,13 +159,13 @@ not sufficient.
 | Priors | **Supported** | Scalar callable priors, sampled hyperparameters, addressed coefficient/group/term priors, bounds, simplex and covariance factors, horseshoe and R2D2 geometry |
 | Scalar likelihoods | **Generic** | Retained callable constructors and arguments; canonical logit/log links preserve stable numerical forms |
 | Joint and ordinal responses | **Supported** | Vector-valued observations, Multinomial, covariance-factor joint normals, categorical logits, and typed ordinal structure/link composition |
-| Group effects | **Partial** | Plain intercepts, correlated and exact-zero-correlation slopes, multiple/crossed factors, distributional cross-predictor `|ID|` covariance, fitted transformed/categorical slopes, stratified `gr(by=)`, explicit centering, `sd`/`cor` prior overrides, and weighted multi-membership intercepts/correlated slopes with replay/resampling; adaptive geometry remains pending |
+| Group effects | **Partial** | Plain intercepts, correlated and exact-zero-correlation slopes, multiple/crossed factors, distributional cross-predictor `|ID|` covariance, fitted transformed/categorical slopes, stratified `gr(by=)`, explicit centering, `sd`/`cor` prior overrides, and weighted multi-membership intercepts/correlated slopes with replay/resampling; online adaptive centering supports only the single-response fixed-scale Gaussian default-prior random-intercept contract described above |
 | Response evidence | **Generic** | Truncated, censored, and interval evidence compose with the base distribution's required CDF/density operations |
 | Missing responses | **Supported** | Missing rows use the same conditional family; only observed rows contribute pointwise likelihood |
 | Multiple responses | **Supported** | Shared declarations are sampled once and responses can have distinct row axes; incompatible group schemas fail explicitly |
 | Observation weights | **Supported subset** | Analytic Normal weights rescale sigma; frequency and power weights scale density while predictive draws retain the base distribution |
 | Advanced terms | **Supported subsets** | `s`, `t2`, `mo`/`mo1`, `me`, interval predictors, `ar`/`dar`, exact GP, HSGP including fixed partial centering, structured fields, and Julia-callable kernel/ragged terms |
-| Outputs | **Supported subset** | Row-aligned pointwise likelihoods, deterministic returned quantities, one-draw posterior prediction, and chain-level Turing prediction; fitted response latents are excluded before regeneration |
+| Outputs | **Supported subset** | Common semantic descriptor queries plus row-aligned pointwise likelihoods, deterministic returned quantities, one-draw posterior prediction, and chain-level Turing prediction; fitted response latents are excluded before regeneration; Stan highlights are unavailable |
 | Replay | **Supported subset** | Frozen preprocessing and existing-group coordinates replay on new rows; refitting constants and selective new-group resampling—including joint `|ID|` and stratified redraws—are explicit |
 
 The matrix is intentionally an overview. The build-generated examples and

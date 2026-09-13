@@ -36,9 +36,9 @@ _brm_prior_expression(x::ExprColumn) = _brm_prior_constructor(getf(x))
 
 function _brm_operation_role(op::ExprColumn{typeof(~)})
     lhs, rhs = getargs(op, 2)
-    isnothing(_observed_lhs_or_nothing(lhs)) || return :observation
+    isnothing(_brm_observation_name(lhs)) || return :observation
     lhs isa ExprColumn && getf(lhs) === effect && return :prior_modifier
-    _brm_prior_expression(rhs) ? :parameter : :predictor
+    lhs isa NamedColumn && _brm_prior_expression(rhs) ? :parameter : :predictor
 end
 _brm_operation_role(::ExprColumn{typeof(assign)}) = :assignment
 _brm_operation_role(_) = :extension
@@ -142,7 +142,12 @@ function _brm_prepare_program(brmi::BRMI; data=Dict{Symbol,Any}(),
             get!(context.target_obs, dependency, observation)
         end
     end
-    _BRMPreparedProgram(context, operations, order)
+    program = _BRMPreparedProgram(context, operations, order)
+    claims = Pair{Symbol,Tuple}[
+        target => Tuple(entry.spec.expression
+            for per_term in values(terms) for entry in values(per_term))
+        for (target, terms) in context.term_priors]
+    isempty(claims) ? program : _brm_with_prior_dependencies(program, claims)
 end
 
 function _brm_is_prior_declaration(brmi::BRMI, key::Symbol)
