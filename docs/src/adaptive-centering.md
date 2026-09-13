@@ -104,11 +104,11 @@ inadmissible, while the noncentered endpoint remains available.
 
 ## Offline pilot/refit versus online warmup adaptation
 
-The workflow here is intentionally two-stage:
+The workflow here is intentionally two fits with three explicit steps:
 
-1. sample a noncentered pilot;
-2. choose one fixed `c` for each mean and log-scale basis weight;
-3. put those two vectors in model data and refit from scratch.
+- sample a noncentered pilot;
+- choose one fixed `c` for each mean and log-scale basis weight;
+- put those two vectors in model data and refit from scratch.
 
 The pilot is therefore part of analysis design and must not be reused as
 posterior draws from the refit. WarmupHMC's online nonlinear adaptation is a
