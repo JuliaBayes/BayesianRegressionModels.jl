@@ -50,21 +50,23 @@ data rather than pasted generated code.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
-adaptive_motorcycle_model = (@brm begin
-    length_scale(mu, hsgp(x)) ~ LogNormal(0, 4)
-    sd(mu, hsgp(x)) ~ LogNormal(0, 4)
-    length_scale(sigma, hsgp(x)) ~ LogNormal(0, 4)
-    sd(sigma, hsgp(x)) ~ LogNormal(0, 4)
+function adaptive_motorcycle_model()
+    (@brm begin
+        length_scale(mu, hsgp(x)) ~ LogNormal(0, 4)
+        sd(mu, hsgp(x)) ~ LogNormal(0, 4)
+        length_scale(sigma, hsgp(x)) ~ LogNormal(0, 4)
+        sd(sigma, hsgp(x)) ~ LogNormal(0, 4)
 
-    mu ~ hsgp(x; k=8, domain=(-1.5, 1.5), centeredness=c_mu)
-    log(sigma) ~ hsgp(x; k=8, domain=(-1.5, 1.5), centeredness=c_sigma)
-    y ~ Normal(mu, sigma)
-end)((;
-    x=[-1.0, -0.72, -0.43, -0.14, 0.14, 0.43, 0.72, 1.0],
-    y=[0.0, -0.2, -1.1, -1.8, -0.5, 0.8, 0.3, 0.1],
-    c_mu=[0.0, 0.0, 0.18, 0.37, 0.61, 0.79, 0.92, 1.0],
-    c_sigma=[0.0, 0.07, 0.21, 0.46, 0.68, 0.84, 0.96, 1.0],
-))
+        mu ~ hsgp(x; k=8, domain=(-1.5, 1.5), centeredness=c_mu)
+        log(sigma) ~ hsgp(x; k=8, domain=(-1.5, 1.5), centeredness=c_sigma)
+        y ~ Normal(mu, sigma)
+    end)((;
+        x=[-1.0, -0.72, -0.43, -0.14, 0.14, 0.43, 0.72, 1.0],
+        y=[0.0, -0.2, -1.1, -1.8, -0.5, 0.8, 0.3, 0.1],
+        c_mu=[0.0, 0.0, 0.18, 0.37, 0.61, 0.79, 0.92, 1.0],
+        c_sigma=[0.0, 0.07, 0.21, 0.46, 0.68, 0.84, 0.96, 1.0],
+    ))
+end
 """, :adaptive_motorcycle_model;
     title="Heteroscedastic motorcycle HSGPs", require_stan=true)
 ```
