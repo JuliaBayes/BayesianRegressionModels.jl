@@ -178,6 +178,18 @@ const HSGP_BUILDER = @brm begin
     y ~ Normal(mu, exp(log_sigma))
 end
 
+const HSGP_SAME_AXIS_BUILDER = @brm begin
+    mu ~ 1 + hsgp(time; k=3)
+    log(sigma) ~ 1 + hsgp(time; k=2)
+    y ~ Normal(mu, sigma)
+end
+
+const HSGP_OWNER_ALIAS_BUILDER = @brm begin
+    mu ~ 1 + hsgp(log_sigma_time; k=3)
+    log(sigma) ~ 1 + hsgp(time; k=2)
+    y ~ Normal(mu, sigma)
+end
+
 const HSGP_TIME = collect(range(-1.0, 1.0; length=18))
 const HSGP_ONLINE_DATA = (;
     time=HSGP_TIME,
@@ -195,6 +207,24 @@ function hsgp_fake_unc_names()
     )
 end
 
+function hsgp_same_axis_fake_unc_names()
+    vcat(
+        ["hsgp_time_rho_iso", "hsgp_time_sigma"],
+        ["hsgp_time_beta_raw.$basis" for basis in 1:3],
+        ["hsgp_log_sigma_time_rho_iso", "hsgp_log_sigma_time_sigma"],
+        ["hsgp_log_sigma_time_beta_raw.$basis" for basis in 1:2],
+    )
+end
+
+function hsgp_owner_alias_fake_unc_names()
+    vcat(
+        ["hsgp_log_sigma_time_rho_iso", "hsgp_log_sigma_time_sigma"],
+        ["hsgp_log_sigma_time_beta_raw.$basis" for basis in 1:3],
+        ["hsgp_time_rho_iso", "hsgp_time_sigma"],
+        ["hsgp_time_beta_raw.$basis" for basis in 1:2],
+    )
+end
+
 function set_hsgp_sources!(state, ir, controls)
     length(controls) == length(ir.pairs) || throw(DimensionMismatch())
     ir.pairs .= map(ir.pairs, controls) do (idx, value), c
@@ -203,6 +233,46 @@ function set_hsgp_sources!(state, ir, controls)
         )
     end
     HSGP_AC_EXT._sync_sources!(state, ir)
+end
+
+@testset "same-axis HSGPs resolve target-scoped coordinates" begin
+    data = (; time=HSGP_ONLINE_DATA.time, y=HSGP_ONLINE_DATA.y)
+    sb = SBBRMI(HSGP_SAME_AXIS_BUILDER(data); mod=@__MODULE__)
+    names = hsgp_same_axis_fake_unc_names()
+    descriptor = brm_descriptor(sb)
+
+    mu_weights = brm_term_coordinates(
+        descriptor, :mu, names; term=:hsgp_time, parameter=:basis_weights)
+    sigma_weights = brm_term_coordinates(
+        descriptor, :sigma, names; term=:hsgp_time, parameter=:basis_weights)
+    @test mu_weights.output.name === :hsgp_time_beta_raw
+    @test sigma_weights.output.name === :hsgp_log_sigma_time_beta_raw
+    @test mu_weights.coordinates == [3, 4, 5]
+    @test sigma_weights.coordinates == [8, 9]
+
+    blocks = BRM._adaptive_hsgp_centering_blocks(sb, names)
+    @test length(blocks) == 2
+    @test getfield.(blocks, :logical) == [:mu, :sigma]
+    @test getfield.(blocks, :term) == [:hsgp_time, :hsgp_time]
+    @test blocks[1].effects == mu_weights.coordinates
+    @test blocks[2].effects == sigma_weights.coordinates
+    @test isempty(intersect(blocks[1].effects, blocks[2].effects))
+    @test blocks[1].omega2 == sb.data[:omega2_hsgp_time]
+    @test blocks[2].omega2 == sb.data[:omega2_hsgp_log_sigma_time]
+
+    alias_data = (;
+        time=HSGP_ONLINE_DATA.time,
+        log_sigma_time=HSGP_ONLINE_DATA.time_noise,
+        y=HSGP_ONLINE_DATA.y,
+    )
+    alias_sb = SBBRMI(HSGP_OWNER_ALIAS_BUILDER(alias_data); mod=@__MODULE__)
+    alias_names = hsgp_owner_alias_fake_unc_names()
+    alias_descriptor = brm_descriptor(alias_sb)
+    alias_sigma = brm_term_coordinates(
+        alias_descriptor, :sigma, alias_names;
+        term=:hsgp_time, parameter=:basis_weights)
+    @test alias_sigma.output.name === :hsgp_time_beta_raw
+    @test alias_sigma.coordinates == [8, 9]
 end
 
 function manual_hsgp_map(x, blocks, controls)
@@ -389,12 +459,13 @@ end
     @test gradient ≈ density_fd atol=3e-5 rtol=3e-5
 end
 
-@testset "two-HSGP BridgeStan density, gradient, and online warmup" begin
-    sb = SBBRMI(HSGP_BUILDER(HSGP_ONLINE_DATA); mod=@__MODULE__)
+@testset "same-axis two-HSGP BridgeStan density, gradient, and online warmup" begin
+    data = (; time=HSGP_ONLINE_DATA.time, y=HSGP_ONLINE_DATA.y)
+    sb = SBBRMI(HSGP_SAME_AXIS_BUILDER(data); mod=@__MODULE__)
     cache = joinpath(tempdir(), "brm-adaptive-hsgp-centering")
     mkpath(cache)
     problem = StanBlocks.stan_instantiate(
-        sb.model; path=joinpath(cache, "two_hsgp.stan"),
+        sb.model; path=joinpath(cache, "same_axis_two_hsgp.stan"),
     )
     unc_names = StanBlocks.BridgeStan.param_unc_names(problem.model)
     blocks = BRM._adaptive_hsgp_centering_blocks(sb, unc_names)

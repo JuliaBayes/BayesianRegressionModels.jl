@@ -6126,9 +6126,14 @@ function _sb_emit_direct!(stmts, data, target::Symbol, t::ExprColumn, summands;
                           cat_r2d2=Dict{Symbol,NamedTuple}(),
                           term_overrides=Dict{Symbol,Any}())
     f = getf(t)
-    if f === gp || f === hsgp
+    if f === gp
         push!(summands, _sb_predictor_term!(stmts, data, f, t;
                                             target, group_block_lookup, term_overrides))
+        return
+    elseif f === hsgp
+        push!(summands, _sb_predictor_term!(stmts, data, f, t;
+                                            target, group_block_lookup,
+                                            term_overrides))
         return
     end
     _sb_emit_direct_expr!(stmts, data, target, getf(t), t, summands; term_overrides)
@@ -8715,16 +8720,14 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     is_raw = all(raw_flags)
     n_axes = length(args)
     K, c = _sb_hsgp_options(kw, n_axes)
-    suffix, col_name = _sb_unique_structured_term_names(
-        stmts, :hsgp, join(string.(names), "_"), target)
     cov = _sb_gp_cov(kw, :hsgp)
-    centeredness = _brm_hsgp_centeredness(
-        kw, cov === :periodic ? 2 * only(K) : prod(K))
-    partial = any(!iszero, centeredness)
     period = _sb_gp_period(kw, :hsgp, cov)
     cov === :periodic && return _sb_hsgp_periodic_term!(
-        stmts, data, t, names, raw, is_raw, K, kw, period, term_overrides,
-        suffix, col_name)
+        stmts, data, t, names, raw, is_raw, K, kw, period, term_overrides)
+    suffix, col_name = _sb_unique_structured_term_names(
+        stmts, :hsgp, join(string.(names), "_"), target)
+    centeredness = _brm_hsgp_centeredness(kw, prod(K))
+    partial = any(!iszero, centeredness)
     domain_fits = _sb_hsgp_domain_fits(kw, n_axes; required=!is_raw)
     orthogonal_to = _sb_hsgp_orthogonal_to(kw, n_axes)
     !is_raw && partial && error(
@@ -8853,7 +8856,7 @@ end
 # spelling is not implemented, so every such keyword is refused by name rather
 # than silently ignored.
 function _sb_hsgp_periodic_term!(stmts, data, t, names, raw, is_raw, K, kw,
-                                 period, term_overrides, suffix, col_name)
+                                 period, term_overrides)
     n_axes = length(names)
     n_axes == 1 || error(
         "sbimpl: `hsgp(...; cov=:periodic)` supports exactly one axis, got $n_axes")
@@ -8877,9 +8880,9 @@ function _sb_hsgp_periodic_term!(stmts, data, t, names, raw, is_raw, K, kw,
     isempty(axis) && error("sbimpl: `hsgp($x)` cannot use an empty axis")
     all(isfinite, axis) || error("sbimpl: `hsgp($x)` requires finite values")
 
-    PHI_name = Symbol(:PHI_hsgp_, suffix)
-    harmonics_name = Symbol(:harmonics_hsgp_, suffix)
-    rho_lower_name = Symbol(:rho_lower_hsgp_, suffix)
+    PHI_name = Symbol(:PHI_hsgp_, x)
+    harmonics_name = Symbol(:harmonics_hsgp_, x)
+    rho_lower_name = Symbol(:rho_lower_hsgp_, x)
     _sb_hsgp_periodic_frozen_check(data, PHI_name, names, K1, period)
     basis = _brm_hsgp_basis_state(
         (axis,), (K1,), :periodic, true, period)
@@ -8890,6 +8893,7 @@ function _sb_hsgp_periodic_term!(stmts, data, t, names, raw, is_raw, K, kw,
         (; cov=:periodic, period, K=K1, iso=true,
          harmonics_key=harmonics_name, rho_lower_key=rho_lower_name),
         names, false))
+    col_name = Symbol(:hsgp_, x)
     submodel = _sb_gp_submodel_expr(:_sb_hsgp_periodic, term_overrides, t)
     push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
         submodel, term_overrides, t; PHI=PHI_name,
