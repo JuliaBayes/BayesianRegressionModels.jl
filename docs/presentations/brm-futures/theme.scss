@@ -479,6 +479,11 @@ $presentation-font-size-root: 34px;
 .main-end .lede { max-width: 25em; }
 .main-end .rule { margin-left: auto; margin-right: auto; width: 42%; }
 
+.boundary-slide .card {
+  font-size: 0.84em;
+  padding: 16px 18px;
+}
+
 .appendix-badge {
   background: var(--violet);
   border-radius: 999px;

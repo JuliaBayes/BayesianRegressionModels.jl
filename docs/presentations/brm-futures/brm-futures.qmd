@@ -542,7 +542,7 @@ These are compact explanatory excerpts, not verbatim generated output. The execu
 For StanBlocks, the public extension seams include predictor-term, likelihood-family, prior, submodel-RHS, sampling-LHS registration, and structured group-block hooks. For Turing, implement native term/submodel methods on the same prepared record. Ordinary callables should remain ordinary callables rather than growing an admission list.
 :::
 
-## Boundaries are a product feature
+## Boundaries are a product feature {.boundary-slide}
 
 <span class="appendix-badge">Collaborator appendix E</span>
 

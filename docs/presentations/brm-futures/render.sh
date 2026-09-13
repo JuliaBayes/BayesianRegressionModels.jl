@@ -8,6 +8,8 @@ html="$output_dir/brm-futures.html"
 pdf="$output_dir/brm-futures.pdf"
 
 command -v quarto >/dev/null
+command -v pdfinfo >/dev/null
+command -v rg >/dev/null
 chrome=$(command -v chrome-headless-shell || command -v google-chrome)
 mkdir -p "$output_dir"
 
@@ -31,3 +33,19 @@ mv "$deck_dir/brm-futures.html" "$html"
 
 test -s "$html"
 test -s "$pdf"
+
+slide_count=$(rg -c '^## ' "$deck_dir/brm-futures.qmd")
+notes_count=$(rg -c '^::: \{\.notes\}' "$deck_dir/brm-futures.qmd")
+pdf_pages=$(pdfinfo "$pdf" | awk '/^Pages:/ {print $2}')
+
+test "$slide_count" -eq 17
+test "$notes_count" -eq "$slide_count"
+test "$pdf_pages" -eq 18
+
+if rg -q '(src|href)="brm-futures_files/' "$html"; then
+  echo "render is not self-contained: brm-futures_files reference found" >&2
+  exit 1
+fi
+
+printf 'verified\tslides=%s\tnotes=%s\tpages=%s\tself_contained=yes\n' \
+  "$((slide_count + 1))" "$notes_count" "$pdf_pages"
