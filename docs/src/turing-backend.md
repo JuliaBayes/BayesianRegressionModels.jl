@@ -8,7 +8,7 @@ field.
 Executable models do not live on this backend-specific page. They are presented
 in the backend-neutral [BRM feature atlas](feature-atlas.md), where every example
 shows BRM authoring, the emitted StanBlocks model, generated Stan, and the
-selected Turing model through the same four-pane comparison.
+generated Turing model through the same four-pane comparison.
 
 ## Architecture
 
@@ -18,17 +18,34 @@ construct or inspect `SBBRMI`, `GenerativePlan`, a StanBlocks `SlicModel`, SLIC
 IR, or generated Stan. This boundary lets either backend become a weak
 dependency without changing BRM semantics.
 
-`TuringBRMI.plan` is the strict, backend-neutral semantic receipt;
-`TuringBRMI.model` is the executable Turing model. Unsupported surfaces fail
-during construction rather than being approximated silently. The feature atlas
-keeps that real construction error visible in the Turing pane.
+`TuringBRMI.plan` combines shared preparation with Turing sample-site geometry;
+`TuringBRMI.model` is the executable Turing model. Its generated body is available
+through `turing_model_source(backend)`. Ordinary callable distributions and
+their positional and keyword arguments survive lowering. Adding a likelihood
+does not require another model template or an entry in a family list.
+For a factory function used as a sampled declaration, define
+`brm_distribution_type(::typeof(my_prior)) = Normal` (or its distribution type)
+to describe the result shape while retaining the original callable.
+
+The extension generates a body at construction, passes it through DynamicPPL's
+model compiler, and stores an immediately callable evaluator. Density and
+gradient evaluation do not interpret formula ASTs or use `invokelatest`.
+An unsupported operation reports the missing capability. For example, a custom
+distribution may supply density evaluation but lack predictive RNG or a latent
+support transform; these are separate requirements.
 
 ## Parameterization
 
-Population coefficients use the shared design matrix, labels, and independent
-Normal priors. Gaussian scales use an explicit Exponential prior. Group effects
-default to a noncentered parameterization: plain random intercepts use a log
-scale and standard-normal latent values, correlated slopes use marginal scales
+Population coefficients use the shared design matrix and labels, with Normal
+defaults and arbitrary scalar priors selected through `effect(...)`. Sampled
+declarations preserve their names, distribution calls, and dependencies, so a
+scale can have a hierarchical prior and enter any later likelihood expression.
+Simplex, covariance-factor, horseshoe, and R2D2 declarations use their own
+parameter geometry. Declaration bounds retain the ordinary prior kernel;
+`truncated(distribution; ...)` includes its truncation normalizer.
+
+Group effects default to a noncentered parameterization: plain random intercepts
+use a positive scale and standard-normal latent values, correlated slopes use marginal scales
 plus an LKJ Cholesky factor, and `||` uses independent scales with no
 correlation variable. `centered_groups` selects the corresponding centered
 coefficient geometry for supported blocks; Stan-only adaptive/CV sizing controls
@@ -61,7 +78,8 @@ prediction.
 
 `reprocess(backend, new_data)` rebuilds the direct BRMI plan on new rows while
 reusing fitted centers, scales, categorical coordinates, interactions, offsets,
-and existing group coordinates. `freeze_constants=false` explicitly refits
+spline bases, HSGP domains and frequencies, and existing group coordinates.
+`freeze_constants=false` explicitly refits
 those preprocessing constants. Reusing existing groups is the fail-closed
 default. `resample_groups=:group` explicitly derives that grouping coordinate
 from `new_data`, keeps fitted population, scale, and correlation parameters,
@@ -79,21 +97,30 @@ not sufficient.
 | BRMI surface | Turing status | Current contract |
 | --- | --- | --- |
 | Backend boundary | **Supported** | Direct `BRMI` → backend-neutral plan → Turing extension; core loads without Turing |
-| Population design | **Partial** | Intercepts, raw and fitted numeric transforms, pure data expressions, offsets, treatment contrasts, and continuous/categorical interactions |
-| Population priors | **Partial** | Independent Normal defaults plus shared `effect(...)` specificity and addressing semantics |
-| Gaussian identity | **Supported** | Population and admitted grouped predictors with explicit Exponential scale prior |
-| Bernoulli/Binomial logit | **Supported** | Canonical linked declarations and explicit stable-logit families |
-| Poisson log | **Supported** | Canonical linked declarations, data offsets, and admitted grouped predictors |
-| NegativeBinomial2 | **Supported subset** | Shared mean/precision population plans, independent multiple grouping blocks, and a joint cross-predictor `|ID|` covariance block |
-| BetaBinomial2 | **Supported subset** | Shared mean/precision population plans, independent multiple grouping blocks, and a joint cross-predictor `|ID|` covariance block |
+| Population design | **Supported** | Intercepts, fitted numeric transforms, data expressions, offsets, contrasts, and interactions |
+| Priors | **Supported** | Scalar callable priors, sampled hyperparameters, addressed coefficient/group/term priors, bounds, simplex and covariance factors, horseshoe and R2D2 geometry |
+| Scalar likelihoods | **Generic** | Retained callable constructors and arguments; canonical logit/log links preserve stable numerical forms |
+| Joint and ordinal responses | **Supported** | Vector-valued observations, Multinomial, covariance-factor joint normals, categorical logits, and typed ordinal structure/link composition |
 | Group effects | **Partial** | Plain intercepts, correlated and exact-zero-correlation slopes, multiple/crossed factors, distributional cross-predictor `|ID|` covariance, fitted transformed/categorical slopes, stratified `gr(by=)`, explicit centering, `sd`/`cor` prior overrides, and weighted multi-membership intercepts/correlated slopes with replay/resampling; adaptive geometry remains pending |
-| Response evidence | **Partial** | Truncated, censored, and interval-censored Normal/Poisson observations; wider modifiers remain pending |
-| Missing responses | **Supported subset** | `mi(y) ~ Normal(mu, sigma)` imputes missing rows from the same conditional family and keeps observed rows in the likelihood |
-| Multiple responses | **Supported subset** | Independent blocks are namespaced; exactly compatible shared predictors/group blocks are sampled once and reused, while partial or incompatible overlaps fail closed |
+| Response evidence | **Generic** | Truncated, censored, and interval evidence compose with the base distribution's required CDF/density operations |
+| Missing responses | **Supported** | Missing rows use the same conditional family; only observed rows contribute pointwise likelihood |
+| Multiple responses | **Supported** | Shared declarations are sampled once and responses can have distinct row axes; incompatible group schemas fail explicitly |
 | Observation weights | **Supported subset** | Analytic Normal weights rescale sigma; frequency and power weights scale density while predictive draws retain the base distribution |
-| Advanced terms | **Pending** | Splines, `t2`, `mo`, `me`, GP/HSGP, and kernel/ragged models fail loudly |
+| Advanced terms | **Supported subsets** | `s`, `t2`, `mo`/`mo1`, `me`, interval predictors, `ar`/`dar`, exact GP, HSGP, structured fields, and Julia-callable kernel/ragged terms |
 | Outputs | **Supported subset** | Row-aligned pointwise likelihoods, deterministic returned quantities, one-draw posterior prediction, and chain-level Turing prediction; fitted response latents are excluded before regeneration |
 | Replay | **Supported subset** | Frozen preprocessing and existing-group coordinates replay on new rows; refitting constants and selective new-group resampling—including joint `|ID|` and stratified redraws—are explicit |
 
 The matrix is intentionally an overview. The build-generated examples and
 their current unsupported reasons are the executable source of truth.
+
+Periodic HSGP currently uses one isotropic, ungrouped input axis. Latent HSGP
+uses one nonperiodic, ungrouped axis with an explicit domain; fixed-input
+HSGP additionally supports anisotropic and group-specific bases. A custom term
+that supplies only a StanBlocks SLIC emitter keeps that Stan implementation and
+needs a native Julia effect or submodel method for Turing. The native backend
+does not interpret arbitrary SLIC bodies.
+
+Missing responses currently do not combine with observation weights or response
+modifiers. Analytic weights likewise do not combine with response modifiers;
+frequency and power weights can compose with them. These combinations fail
+explicitly during construction.

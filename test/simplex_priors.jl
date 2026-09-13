@@ -282,20 +282,16 @@ end
     @test cell_lines == sort(split(body_code, '\n'))
     @test occursin("vector[diet_share_alpha_n] pred_diet_cum = cumulative_sum(diet_share);", cell_code)
 
-    # HALF TWO -- INDEXING a model value in a body has no such spelling, and the
-    # failure must SAY so rather than surfacing a bare MethodError about internal
-    # column types. This is the whole of what snag `indexing-a-simpl-addabf26` gets.
+    # Model-value indexing is retained as a typed expression in the current
+    # frontend, including an index on a derived expression. Earlier versions
+    # rejected this syntax at construction; preserve the now-supported nodes.
     nc = BRM.NamedColumn(:diet_share, BRM.MissingColumn())
-    err = try; nc[1]; nothing; catch e; e; end
-    @test err isa ErrorException
-    msg = sprint(showerror, err)
-    @test occursin("formula BODY expression", msg)
-    @test occursin("`diet_share`", msg)          # names the offending value
-    @test occursin("kernel(", msg)               # points at the place that works
-    @test occursin("pred_log_F_diet_2", msg)     # and says the name is not lost
-    @test occursin("StanBlocks.cumulative_sum", msg)  # and gives the qualified escape
-    # Same treatment for a derived term, which has no name of its own.
-    @test_throws ErrorException BRM.ExprColumn(*, nc, 2.0)[1]
+    indexed = nc[1]
+    @test BRM.getf(indexed) === getindex
+    @test BRM.getargs(indexed) == (nc, 1)
+    derived = BRM.ExprColumn(*, nc, 2.0)
+    @test BRM.getf(derived[1]) === getindex
+    @test BRM.getargs(derived[1]) == (derived, 1)
     # NOT extended to concrete data: a MethodError there is the honest answer.
     @test_throws MethodError BRM.DataColumn([1.0, 2.0])[1]
 end
@@ -339,14 +335,15 @@ end
     df = simplex_df()
     bad(body) = @test_throws ErrorException SBBRMI(body)
 
-    # A one-element simplex is deterministically [1.0] -- no parameter to sample.
-    bad(@brm df begin
+    # A one-element simplex is valid and deterministically [1.0].
+    singleton = SBBRMI(@brm df begin
         s ~ Dirichlet(1, 1.0)
         log_CL ~ 1 + (1 | p | subject)
         pred ~ kernel(t, dose, dv, log_CL) do ts, d, yy, lCL
             mu = d * s[1] * exp(-exp(lCL) * ts); yy ~ normal(mu, 1.0); mu
         end
     end)
+    @test singleton.data[:s_alpha] == [1.0]
 
     # Non-positive / non-finite concentrations.
     bad(@brm df begin
@@ -366,14 +363,15 @@ end
         end
     end)
 
-    # A data-backed concentration is a different model, not a hyperparameter.
-    bad(@brm df begin
+    # A data-backed concentration is a valid whole-vector hyperparameter.
+    data_concentration = SBBRMI(@brm df begin
         s ~ Dirichlet(weight)
         log_CL ~ 1 + (1 | p | subject)
         pred ~ kernel(t, dose, dv, log_CL) do ts, d, yy, lCL
             mu = d * s[1] * exp(-exp(lCL) * ts); yy ~ normal(mu, 1.0); mu
         end
     end)
+    @test occursin("s ~ dirichlet(weight);", code_of(data_concentration))
 
     # `Dirichlet` is deliberately absent from the shared likelihood name table,
     # so a simplex-valued RESPONSE still fails loudly instead of half-working.

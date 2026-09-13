@@ -5,7 +5,7 @@ using Test
 using BayesianRegressionModels
 using StanBlocks
 using LogDensityProblems
-using Distributions: Normal
+using Distributions: Cauchy, Normal
 import StanBlocks.stan: transpiles
 
 const DAR_RUNTIME = get(ENV, "BRM_DAR_RUNTIME", "1") != "0"
@@ -22,6 +22,19 @@ function dar_model(df=dar_df())
 end
 
 stan(brmi) = StanBlocks.stan_code(SBBRMI(brmi; mod=@__MODULE__).model)
+
+@testset "dar persistence accepts an arbitrary translated scalar prior" begin
+    df = dar_df()
+    configured = @brm df begin
+        mu ~ 1 + dar(t)
+        ar(:, dar(t)) ~ Cauchy(0.5, 0.2)
+        y ~ Normal(mu, 1.0)
+    end
+    code = stan(configured)
+    @test occursin("real<lower=0.0, upper=1.0> dar_mu_t_beta", code)
+    @test occursin("dar_mu_t_beta ~ cauchy(0.5, 0.2)", code)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+end
 
 @testset "dar is a direct differenced-AR trajectory, unlike ar" begin
     df = dar_df()

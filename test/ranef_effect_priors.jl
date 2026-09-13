@@ -7,20 +7,10 @@ using Test
 using BayesianRegressionModels
 using StanBlocks
 using LogDensityProblems
-using Distributions: Cauchy, Exponential, LKJCholesky, Normal
+using Distributions: Cauchy, Exponential, LKJCholesky, LocationScale, Normal
 
 const RANEF_EFFECT_CACHE = joinpath(tempdir(), "brm-ranef-effect-priors")
 const RANEF_EFFECT_RUNTIME = get(ENV, "BRM_RANEF_EFFECT_RUNTIME", "1") != "0"
-
-# The emitted `brm_ranef_sd_lpdf` Stan function, from its signature to the
-# closing brace of its body (the emitter closes every function at column 0).
-function ranef_sd_function(code::AbstractString)
-    start = findfirst("real brm_ranef_sd_lpdf(", code)
-    isnothing(start) && error("brm_ranef_sd_lpdf is not in the emitted program")
-    stop = findnext("\n}", code, first(start))
-    isnothing(stop) && error("brm_ranef_sd_lpdf has no closing brace")
-    code[first(start):last(stop)]
-end
 
 df = (;
     x = [-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
@@ -73,30 +63,21 @@ end
     code = BayesianRegressionModels.stan_code(sb)
     @test StanBlocks.stan.transpiles(sb.model)
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
-    # The shared-|p| `sd(...)` path emits `brm_ranef_sd_lpdf` itself — a family
-    # switch inside a `for` loop — so pin that the function reaches the rendered
-    # program, not only its call site below. Its body is deliberately nested
-    # `if`/`else` (see the emitter comment in src/sbimpl.jl): as an `elseif`
-    # chain it overflowed the stack in `stan_code` on every StanBlocks before
-    # `86fce35`, which downstream pins may still predate.
-    @test occursin("real brm_ranef_sd_lpdf(", code)
-    @test !occursin("else if", ranef_sd_function(code))
+    # A shared bucket keeps one tau vector. Its generated family sums one
+    # concrete scalar kernel per margin and provides a matching sized RNG.
+    @test occursin(r"real brm_vector_prior_[0-9a-f]+_lpdf", code)
+    @test !occursin("brm_ranef_sd", code)
     @test occursin("b_p_subject_L ~ lkj_corr_cholesky(2.0);", code)
-    @test occursin(
-        "b_p_subject_tau ~ brm_ranef_sd([1, 1, 1, 1, 1, 1]', " *
-        "[1.5, 1.5, 3.0, 1.5, 5.0, 4.0]');",
-        code,
-    )
+    @test occursin(r"b_p_subject_tau ~ brm_vector_prior_[0-9a-f]+", code)
+    @test count("exponential_lpdf(x[", code) == 6
 
     plan = generative_plan(sb)
     decl = only(d for d in plan.declarations if d.target === :b_p_subject)
-    @test decl.family === :ranef_correlated_draws_effect
-    @test decl.keywords.sd_family == Expr(:vect, 1, 1, 1, 1, 1, 1)
-    @test decl.keywords.sd_rate == Expr(:vect, 1.5, 1.5, 3.0, 1.5, 5.0, 4.0)
+    @test decl.family isa StanBlocks.SlicModel
     @test decl.keywords.lkj_eta == 2.0
 
     block = only(ranef_blocks(sb))
-    @test block.family === :ranef_correlated_draws_effect
+    @test block.family === :ranef_correlated_draws_generic
     @test block.id === :p
     @test (block.n_terms, block.n_groups) == (6, 3)
     @test brm_descriptor(sb) isa BRMDescriptor
@@ -148,10 +129,7 @@ end
     partial = SBBRMI(partial_brmi; mod=@__MODULE__)
     partial_code = BayesianRegressionModels.stan_code(partial)
     @test StanBlocks.stanc_check(partial_code; warn_pedantic=false).ok
-    @test occursin(
-        "b_p_subject_tau ~ brm_ranef_sd([0, 0, 1]', [1.0, 1.0, 4.0]');",
-        partial_code,
-    )
+    @test occursin(r"b_p_subject_tau ~ brm_vector_prior_[0-9a-f]+", partial_code)
     partial_decl = only(d for d in generative_plan(partial).declarations
                         if d.target === :b_p_subject)
     @test partial_decl.keywords.lkj_eta == 1.0
@@ -160,7 +138,7 @@ end
     centered_code = BayesianRegressionModels.stan_code(centered)
     @test StanBlocks.stanc_check(centered_code; warn_pedantic=false).ok
     centered_block = only(ranef_blocks(centered))
-    @test centered_block.family === :ranef_correlated_draws_centered_effect
+    @test centered_block.family === :ranef_correlated_draws_centered_generic
     centered_unc_names = vcat(
         ["b_p_subject_L.$i" for i in 1:3],
         ["b_p_subject_tau.$i" for i in 1:3],
@@ -195,7 +173,7 @@ end
     @test StanBlocks.stanc_check(cv_code; warn_pedantic=false).ok
     cv_decl = only(d for d in generative_plan(cv).declarations
                    if d.target === :b_p_subject)
-    @test cv_decl.family === :ranef_correlated_draws_effect
+    @test cv_decl.family isa StanBlocks.SlicModel
     @test cv_decl.keywords.n_groups === :b_p_subject_n_g
 
     default_builder = @brm begin
@@ -224,8 +202,7 @@ end
     reusable = generative_plan(partial_builder, df; mod=@__MODULE__)
     rebuilt = generative_plan(reusable, new_df)
     rebuilt_decl = only(d for d in rebuilt.declarations if d.target === :b_p_subject)
-    @test rebuilt_decl.family === :ranef_correlated_draws_effect
-    @test rebuilt_decl.keywords.sd_rate == Expr(:vect, 1.0, 1.0, 4.0)
+    @test rebuilt_decl.family isa StanBlocks.SlicModel
 end
 
 @testset "ranef effect validation fails closed" begin
@@ -255,7 +232,7 @@ end
     end
     layered_code = BayesianRegressionModels.stan_code(
         SBBRMI(layered_resolution(df); mod=@__MODULE__))
-    @test occursin("b_p_subject_tau ~ brm_ranef_sd([1]', [0.5]');", layered_code)
+    @test occursin(r"b_p_subject_tau ~ brm_vector_prior_[0-9a-f]+", layered_code)
 
     unknown_margin = @brm begin
         eta ~ 1 + (1 | p | subject)
@@ -278,21 +255,83 @@ end
     end
     half_normal_sb = SBBRMI(half_normal_sd(df); mod=@__MODULE__)
     half_normal_code = BayesianRegressionModels.stan_code(half_normal_sb)
-    @test occursin("b_p_subject_tau ~ brm_ranef_sd([2]', [0.5]');",
-                   half_normal_code)
+    @test occursin(r"b_p_subject_tau ~ brm_vector_prior_[0-9a-f]+", half_normal_code)
     @test StanBlocks.stanc_check(half_normal_code; warn_pedantic=false).ok
     half_normal_decl = only(d for d in generative_plan(half_normal_sb).declarations
                             if d.target === :b_p_subject)
-    @test half_normal_decl.keywords.sd_family == Expr(:vect, 2)
-    @test half_normal_decl.keywords.sd_rate == Expr(:vect, 0.5)
+    @test half_normal_decl.family isa StanBlocks.SlicModel
 
     shifted_normal_sd = @brm begin
         eta ~ 1 + (1 | p | subject)
         sd(:, p) ~ Normal(0.1, 0.5)
         y ~ Normal(eta, 1)
     end
-    @test_throws "requires `location == 0`" SBBRMI(
-        shifted_normal_sd(df); mod=@__MODULE__)
+    shifted_code = BayesianRegressionModels.stan_code(
+        SBBRMI(shifted_normal_sd(df); mod=@__MODULE__))
+    @test occursin("vector<lower=0.0>[n_terms_p_subject] b_p_subject_tau;", shifted_code)
+    @test occursin("normal_lpdf(x[1] | arg_1, arg_2)", shifted_code)
+    @test StanBlocks.stanc_check(shifted_code; warn_pedantic=false).ok
+
+    affine_sd = @brm begin
+        eta ~ 1 + (1 | p | subject)
+        sd(:, p) ~ LocationScale(0.1, 0.5, Normal())
+        y ~ Normal(eta, 1)
+    end
+    affine_code = BayesianRegressionModels.stan_code(
+        SBBRMI(affine_sd(df); mod=@__MODULE__))
+    @test occursin("brm_affine_normal_lpdf(x[1] | arg_2, arg_3, arg_4, arg_5)",
+                   affine_code)
+    @test StanBlocks.stanc_check(affine_code; warn_pedantic=false).ok
+
+    cauchy_sd = @brm begin
+        eta ~ 1 + (1 | p | subject)
+        sd(:, p) ~ Cauchy(0, 1)
+        y ~ Normal(eta, 1)
+    end
+    cauchy_sb = SBBRMI(cauchy_sd(df); mod=@__MODULE__)
+    cauchy_code = BayesianRegressionModels.stan_code(cauchy_sb)
+    @test occursin("vector<lower=0.0>[n_terms_p_subject] b_p_subject_tau;", cauchy_code)
+    @test occursin("cauchy_lpdf(x[1] | arg_1, arg_2)", cauchy_code)
+    @test StanBlocks.stanc_check(cauchy_code; warn_pedantic=false).ok
+
+    sampled_scale_sd = @brm begin
+        log_scale ~ Normal(0, 1)
+        eta ~ 1 + (1 | p | subject)
+        sd(:, p) ~ Exponential(exp(log_scale))
+        y ~ Normal(eta, 1)
+    end
+    sampled_scale_sb = SBBRMI(sampled_scale_sd(df); mod=@__MODULE__)
+    sampled_scale_code = BayesianRegressionModels.stan_code(sampled_scale_sb)
+    @test occursin("log_scale ~ normal(0, 1);", sampled_scale_code)
+    @test occursin("exponential_lpdf(x[1] | arg_1)", sampled_scale_code)
+    @test first(findfirst("log_scale ~ normal", sampled_scale_code)) <
+          first(findfirst("b_p_subject_tau ~ brm_vector_prior", sampled_scale_code))
+    @test StanBlocks.stanc_check(sampled_scale_code; warn_pedantic=false).ok
+    if RANEF_EFFECT_RUNTIME
+        problem = StanBlocks.stan_instantiate(
+            sampled_scale_sb.model;
+            path=joinpath(RANEF_EFFECT_CACHE, string(hash(sampled_scale_code)) * ".stan"))
+        q = zeros(LogDensityProblems.dimension(problem))
+        lp, gradient = LogDensityProblems.logdensity_and_gradient(problem, q)
+        @test isfinite(lp)
+        @test all(isfinite, gradient)
+    end
+    cauchy_block = only(ranef_blocks(cauchy_sb))
+    @test cauchy_block.binding === :b_p_subject
+    @test cauchy_block.id === :p
+    @test (cauchy_block.n_terms, cauchy_block.n_groups) == (1, 3)
+    @test cauchy_block.noncentered
+    cauchy_outputs = Dict(o.name => o for o in brm_descriptor(cauchy_sb).outputs)
+    @test cauchy_outputs[:b_p_subject].role === :random_effect
+    cauchy_replayed = reprocess(cauchy_sb, merge(df, (; y=reverse(df.y))))
+    replayed_block = only(ranef_blocks(cauchy_replayed))
+    @test (replayed_block.binding, replayed_block.family, replayed_block.group,
+           replayed_block.id, replayed_block.n_terms, replayed_block.n_groups,
+           replayed_block.z, replayed_block.noncentered) ==
+          (cauchy_block.binding, cauchy_block.family, cauchy_block.group,
+           cauchy_block.id, cauchy_block.n_terms, cauchy_block.n_groups,
+           cauchy_block.z, cauchy_block.noncentered)
+    @test BayesianRegressionModels.stan_code(cauchy_replayed) == cauchy_code
 
     bad_cor_family = @brm begin
         eta ~ 1 + (1 | p | subject)
@@ -350,7 +389,9 @@ end
         (; predictor=:eta_Q, coefficient=:x),
     ]
     # Block default 1/2 on the intercept margin; BOTH `x` margins take 3.
-    @test occursin("[0.5, 3.0, 3.0]'", rates(brmi))
+    cross_code = rates(brmi)
+    @test count("exponential_lpdf(x[", cross_code) == 3
+    @test all(x -> occursin(string(x), cross_code), (0.5, 3.0))
 
     # A more specific address overrides the `:`-predictor one on its margin.
     refined = @brm begin
@@ -361,7 +402,9 @@ end
         sd(eta_Q, p, x) ~ Exponential(1 / 5)
         y ~ Normal(eta_Vc + eta_Q, 1)
     end
-    @test occursin("[0.5, 3.0, 5.0]'", rates(refined(df)))
+    refined_code = rates(refined(df))
+    @test count("exponential_lpdf(x[", refined_code) == 3
+    @test all(x -> occursin(string(x), refined_code), (0.5, 3.0, 5.0))
 
     # Two addresses of EQUAL specificity reaching one margin have no winner.
     tied = @brm begin
@@ -385,9 +428,8 @@ end
 
 # The observed-cQTc shape (Bruno:arv393, snag `ranef-sd-lpdf-el-a190739d`):
 # one intercept-only random effect in a NAMED bucket with an explicit
-# block-level sd prior. It reaches `brm_ranef_sd_lpdf` exactly like the
-# correlated multi-term block above, so it is the smallest model that pins the
-# emitted function.
+# block-level SD prior. It is the smallest model that pins the generated
+# whole-vector density/RNG family and the stable tau coordinate.
 @testset "single-term named bucket `(1 | ri | subject)` + `sd(:, ri)` emits" begin
     single = @brm begin
         eta ~ 1 + (1 | ri | subject)
@@ -398,8 +440,8 @@ end
     single_code = BayesianRegressionModels.stan_code(single_sb)
     @test StanBlocks.stan.transpiles(single_sb.model)
     @test StanBlocks.stanc_check(single_code; warn_pedantic=false).ok
-    @test occursin("real brm_ranef_sd_lpdf(", single_code)
-    @test !occursin("else if", ranef_sd_function(single_code))
-    @test occursin("b_ri_subject_tau ~ brm_ranef_sd([1]', [0.1]');", single_code)
+    @test occursin(r"real brm_vector_prior_[0-9a-f]+_lpdf", single_code)
+    @test !occursin("brm_ranef_sd", single_code)
+    @test occursin(r"b_ri_subject_tau ~ brm_vector_prior_[0-9a-f]+", single_code)
     @test brm_descriptor(single_sb) isa BRMDescriptor
 end

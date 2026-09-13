@@ -384,11 +384,6 @@ function _brm_observation_weight_plan(rhs, target::Symbol,
     distribution isa ExprColumn || error(
         "$prefix: first argument of `weighted` for response `$target` must be a " *
         "distribution call, got $(typeof(distribution))")
-    if !isempty(getkwargs(distribution))
-        getf(distribution) in (truncated, censored, interval_censored) || error(
-            "$prefix: weighted distribution `$target` does not currently support " *
-            "distribution constructor keywords")
-    end
     weight isa ExprColumn || error(
         "$prefix: second argument of `weighted` must be a StatsBase weight " *
         "constructor, got $(typeof(weight))")
@@ -624,37 +619,61 @@ struct _BRMPopulationDesign{C<:Tuple,M<:AbstractMatrix,T<:Tuple,V<:AbstractVecto
 end
 
 _brm_replay_expression(value::Number, _data) = value
-_brm_replay_expression(value::NamedColumn, data) = data[name(value)]
+_brm_replay_column(data, key) = data[key]
+_brm_replay_column(lookup::Function, key) = lookup(key)
+_brm_replay_expression(value::NamedColumn, data) = _brm_replay_column(data, name(value))
+function _brm_broadcast_data_call(f, args::Tuple, kwargs::NamedTuple)
+    isempty(kwargs) && return broadcast(f, args...)
+    nargs = length(args)
+    names = keys(kwargs)
+    broadcast(args..., values(kwargs)...) do values...
+        f(values[1:nargs]...; NamedTuple{names}(values[nargs+1:end])...)
+    end
+end
 function _brm_replay_expression(value::ExprColumn, data)
-    isempty(getkwargs(value)) || error(
-        "BRM replay: pure data expressions with keywords are unsupported")
-    broadcast(
+    _brm_broadcast_data_call(
         getf(value),
         map(argument -> _brm_replay_expression(argument, data),
-            getargs(value))...)
+            getargs(value)),
+        map(argument -> _brm_replay_expression(argument, data),
+            getkwargs(value)))
 end
 
-function _brm_replay_factor_column(column, data)
-    preprocess = column.preprocess
-    raw = data[column.source]
-    fitted_levels = collect(preprocess.const_.levels)
-    raw_values = raw isa CA.CategoricalVector ? let levels = CA.levels(raw)
-        [levels[code] for code in Int.(CA.levelcode.(raw))]
-    end : raw
-    lookup = Dict(level => index for (index, level) in pairs(fitted_levels))
-    unknown = unique([value for value in raw_values if !haskey(lookup, value)])
-    isempty(unknown) || error(
-        "BRM replay: categorical predictor `$(column.source)` contains unseen " *
-        "level(s) $(collect(unknown)); fitted levels are $fitted_levels")
-    indices = Int[lookup[value] for value in raw_values]
-    ref = preprocess.const_.ref
-    if ref != 1
-        indices = Int[index == ref ? 1 : index == 1 ? ref : index
-                      for index in indices]
+_brm_population_preproc_entry(preprocess::_BRMPopulationPreprocess) =
+    _BRMPreprocEntry(
+        preprocess.kind, preprocess.const_, preprocess.raw_ref,
+        preprocess.kind === :population_factor_dummy)
+
+_brm_population_replay_input(::Union{
+        Val{:zscale},Val{:standardize},Val{:center}},
+        column, preprocess, data, _cache) =
+    preprocess.raw_ref isa AbstractColumn ?
+        _brm_replay_expression(preprocess.raw_ref, data) : data[column.source]
+
+_brm_population_replay_input(::Val{:protect}, _column, preprocess, data, _cache) =
+    _brm_replay_expression(preprocess.raw_ref, data)
+
+_brm_population_replay_input(::Val{:population_factor_dummy},
+        column, _preprocess, data, _cache) = data[column.source]
+
+function _brm_population_replay_input(::Val{:interaction}, _column,
+                                      preprocess, data, cache)
+    for dependency in preprocess.dependencies
+        _brm_replay_population_column(dependency, data, cache)
     end
-    Float64[index == preprocess.const_.level ? 1.0 : 0.0
-            for index in indices]
+    left, right = preprocess.raw_ref
+    left_values = get(cache, left, get(data, left, nothing))
+    right_values = get(cache, right, get(data, right, nothing))
+    isnothing(left_values) && error(
+        "BRM replay: interaction input `$left` is unavailable")
+    isnothing(right_values) && error(
+        "BRM replay: interaction input `$right` is unavailable")
+    (left_values, right_values)
 end
+
+_brm_population_replay_input(::Val{Kind}, _column, _preprocess, _data,
+                             _cache) where {Kind} = error(
+    "BRM replay: unsupported population preprocessing kind `$(Kind)`")
 
 function _brm_replay_population_column(column, data, cache)
     haskey(cache, column.label) && return cache[column.label]
@@ -663,31 +682,14 @@ function _brm_replay_population_column(column, data, cache)
         nothing
     elseif isnothing(preprocess)
         collect(Float64, data[column.source])
-    elseif preprocess.kind === :zscale || preprocess.kind === :standardize
-        collect(Float64, _brm_apply_zscale(
-            preprocess.const_, data[column.source]))
-    elseif preprocess.kind === :center
-        collect(Float64, _brm_apply_center(
-            preprocess.const_, data[column.source]))
-    elseif preprocess.kind === :protect
-        collect(Float64, _brm_replay_expression(preprocess.raw_ref, data))
-    elseif preprocess.kind === :population_factor_dummy
-        _brm_replay_factor_column(column, data)
-    elseif preprocess.kind === :interaction
-        for dependency in preprocess.dependencies
-            _brm_replay_population_column(dependency, data, cache)
-        end
-        left, right = preprocess.raw_ref
-        left_values = get(cache, left, get(data, left, nothing))
-        right_values = get(cache, right, get(data, right, nothing))
-        isnothing(left_values) && error(
-            "BRM replay: interaction input `$left` is unavailable")
-        isnothing(right_values) && error(
-            "BRM replay: interaction input `$right` is unavailable")
-        collect(Float64, left_values .* right_values)
     else
-        error("BRM replay: unsupported population preprocessing kind " *
-              "`$(preprocess.kind)`")
+        kind = Val(preprocess.kind)
+        input = _brm_population_replay_input(
+            kind, column, preprocess, data, cache)
+        replay = _brm_replay_preprocess(
+            _brm_population_preproc_entry(preprocess), input;
+            freeze=true, prefix="BRM replay")
+        replay.values.primary
     end
     isnothing(values) || (cache[column.label] = values)
     values
@@ -860,6 +862,7 @@ end
 struct _BRMRandomEffectPlan{L<:AbstractVector,I<:AbstractVector{Int},
                             S<:AbstractVector,
                             C<:Tuple,M<:AbstractMatrix,
+                            SP<:AbstractVector,
                             SF<:AbstractVector{Int},SR<:AbstractVector{Float64}}
     predictor::Symbol
     id::Union{Nothing,Symbol}
@@ -875,6 +878,7 @@ struct _BRMRandomEffectPlan{L<:AbstractVector,I<:AbstractVector{Int},
     intercept_only::Bool
     zero_correlation::Bool
     centered::Bool
+    sd_prior::SP
     sd_family::SF
     sd_rate::SR
     lkj_eta::Float64
@@ -897,6 +901,7 @@ struct _BRMMultiMembershipPlan{L<:AbstractVector,I<:AbstractVector{Int},
     intercept_only::Bool
     zero_correlation::Bool
     centered::Bool
+    sd_prior::Vector{Any}
     sd_family::Vector{Int}
     sd_rate::Vector{Float64}
     lkj_eta::Float64
@@ -964,7 +969,8 @@ function _brm_replay_random_effect_plan(
         training.predictor, training.id, training.group, training.by,
         training.levels, training.strata, indices, stratum_indices,
         group_strata, Tuple(columns), matrix, training.intercept_only,
-        training.zero_correlation, training.centered, training.sd_family,
+        training.zero_correlation, training.centered, training.sd_prior,
+        training.sd_family,
         training.sd_rate, training.lkj_eta)
 end
 
@@ -993,7 +999,7 @@ function _brm_replay_random_effect_plan(
         training.predictor, nothing, training.group, nothing,
         training.levels, Any[], prepared.group_idx, Int[], Int[],
         Tuple(columns), matrix, training.intercept_only, false, false,
-        training.sd_family, training.sd_rate, training.lkj_eta,
+        training.sd_prior, training.sd_family, training.sd_rate, training.lkj_eta,
         training.groups, training.weight_sources, prepared.weights,
         prepared.n_obs, prepared.n_memberships, training.normalize)
 end
@@ -1231,7 +1237,8 @@ function _brm_simple_random_effect_plans(
             plans = (plans..., _BRMMultiMembershipPlan(
                 target, nothing, group, nothing, levels, Any[], indices,
                 Int[], Int[], Tuple(columns), matrix, intercept_only, false,
-                false, zeros(Int, n_terms), ones(Float64, n_terms), 1.0,
+                false, Any[nothing for _ in 1:n_terms], zeros(Int, n_terms),
+                ones(Float64, n_terms), 1.0,
                 groups, weight_sources, prepared_mm.weights,
                 prepared_mm.n_obs, prepared_mm.n_memberships, normalize))
         else
@@ -1239,7 +1246,8 @@ function _brm_simple_random_effect_plans(
                 target, id, group, by, levels, strata, indices,
                 stratum_indices, group_strata, Tuple(columns), matrix,
                 intercept_only, zero_correlation, false,
-                zeros(Int, n_terms), ones(Float64, n_terms), 1.0))
+                Any[nothing for _ in 1:n_terms], zeros(Int, n_terms),
+                ones(Float64, n_terms), 1.0))
         end
     end
     plans
@@ -1263,7 +1271,8 @@ function _brm_population_column(term::NamedColumn)
 end
 
 _brm_fit_zscale(v::AbstractVector{<:Real}) = let
-    fit = _native_ppl_fit_zscale(v, :predictor)
+    fit = _brm_fit_zscale_numeric(v, :predictor,
+        message -> ArgumentError("BRM preparation: $message"))
     (fit.mean, fit.scale)
 end
 _brm_apply_zscale(c::Tuple, v::AbstractVector{<:Real}) =
@@ -1277,6 +1286,7 @@ _brm_data_expression_sources!(sources, term::NamedColumn) = begin
 end
 _brm_data_expression_sources!(sources, term::ExprColumn) = begin
     foreach(arg -> _brm_data_expression_sources!(sources, arg), getargs(term))
+    foreach(arg -> _brm_data_expression_sources!(sources, arg), values(getkwargs(term)))
     sources
 end
 _brm_data_expression_sources!(sources, _term) = sources
@@ -1298,10 +1308,11 @@ _brm_materialize_data_expression(x::NamedColumn) = begin
 end
 function _brm_materialize_data_expression(x::ExprColumn)
     _brm_is_term_head(getf(x)) && return nothing
-    isempty(getkwargs(x)) || return nothing
     args = map(_brm_materialize_data_expression, getargs(x))
+    kwargs = map(_brm_materialize_data_expression, getkwargs(x))
     any(isnothing, args) && return nothing
-    broadcast(getf(x), args...)
+    any(isnothing, values(kwargs)) && return nothing
+    _brm_broadcast_data_call(getf(x), args, kwargs)
 end
 _brm_materialize_data_expression(_x) = nothing
 
@@ -1359,21 +1370,20 @@ function _brm_population_column(term::ExprColumn)
     args = getargs(term)
     length(args) == 1 || return nothing
     inner = only(args)
-    inner isa NamedColumn || return nothing
-    backing = parent(inner)
-    backing isa DataColumn || return nothing
-    raw = parent(backing)
+    raw = _brm_materialize_data_expression(inner)
     raw isa AbstractVector{<:Real} || return nothing
+    sources = _brm_data_expression_sources(inner)
+    isempty(sources) && return nothing
 
     values = collect(Float64, raw)
     const_ = kind === :center ? _brm_fit_center(values) :
                                _brm_fit_zscale(values)
     transformed = kind === :center ? _brm_apply_center(const_, values) :
                                      _brm_apply_zscale(const_, values)
-    label = Symbol(kind, :_, name(inner))
+    label = _brm_wrapper_col_name(kind, inner)
     preprocess = _BRMPopulationPreprocess(kind, const_, inner)
     (; label, effect_addresses=(label,), effect_block=label,
-       source=name(inner), values=transformed, preprocess)
+       source=first(sources), values=transformed, preprocess)
 end
 _brm_population_column(_term) = nothing
 
@@ -1400,6 +1410,8 @@ function _brm_population_fixed_term(term)
 end
 
 _brm_fit_levels(raw::CA.CategoricalVector) = CA.levels(raw)
+_brm_apply_levels(levels, raw::AbstractVector) =
+    _brm_apply_fitted_levels(levels, raw)
 _brm_level_index(raw::CA.CategoricalVector) =
     length(CA.levels(raw)), Int.(CA.levelcode.(raw))
 _brm_level_index(raw::AbstractVector) = begin
@@ -1561,9 +1573,21 @@ function _brm_simple_population_design(target::Symbol, rhs,
                                        data::AbstractDict,
                                        obs_name::Union{Nothing,Symbol};
                                        required::Bool=false)
+    _brm_population_design(target, Tuple(_brm_additive_terms(rhs)), data,
+                           obs_name; required)
+end
+
+# A backend may lower structured terms separately while sharing exactly the
+# same fitted population columns. Taking the selected terms explicitly avoids
+# treating a mixed formula as an unsupported population design.
+function _brm_population_design(target::Symbol, terms::Tuple,
+                                data::AbstractDict,
+                                obs_name::Union{Nothing,Symbol};
+                                required::Bool=false,
+                                row_source::Union{Nothing,Symbol}=nothing)
     raw_columns = Any[]
     fixed_terms = _BRMPopulationFixedTerm[]
-    for term in _brm_additive_terms(rhs)
+    for term in terms
         # Grouped terms have their own backend-neutral geometry. They are not
         # coefficient-bearing population columns and are planned separately.
         _brm_is_grouped_term(term) && continue
@@ -1594,7 +1618,9 @@ function _brm_simple_population_design(target::Symbol, rhs,
     concrete = filter(c -> !isnothing(c.source), raw_columns)
     row_sources = Symbol[c.source for c in concrete]
     append!(row_sources, (term.source for term in fixed_terms))
-    row_source = if isempty(concrete)
+    row_source = if !isnothing(row_source)
+        row_source
+    elseif isempty(concrete)
         if !isempty(row_sources)
             first(row_sources)
         elseif isnothing(obs_name)
@@ -1697,15 +1723,8 @@ _brm_effect_spelling(spec) =
 
 function _brm_validate_population_effect_spec(spec;
                                                prefix="BRM backend lowering")
-    T = _as_distribution_type(spec.family)
-    (!isnothing(T) && T <: Normal) || error(
-        "$prefix: population `effect(...)` overrides currently support only " *
-        "`Normal(location, scale)`; got `$(spec.family)`. Ordinary scalar " *
-        "parameter priors remain available for other supported families.")
-    isempty(spec.keywords) || error(
-        "$prefix: `effect(...) ~ Normal(...)` does not accept distribution " *
-        "keywords; put bounds on an explicitly declared scalar parameter instead")
-    _brm_normal_effect_args(spec.expression; prefix)
+    spec.expression isa ExprColumn || error(
+        "$prefix: population `effect(...)` RHS must be a callable prior expression")
     nothing
 end
 
@@ -1727,12 +1746,27 @@ function _brm_claim_effect_prior!(get_cell, set_cell!, spec, what;
     nothing
 end
 
+_brm_is_array_value(::AbstractArray) = true
+_brm_is_array_value(_) = false
+function _brm_is_array_value(value::NamedColumn)
+    backing = parent(value)
+    backing isa DataColumn && return parent(backing) isa AbstractArray
+    if backing isa ExprColumn{typeof(~)}
+        shape = _brm_distribution_shape(last(getargs(backing)))
+        return !isnothing(shape) && first(shape) !== Distributions.Univariate
+    end
+    false
+end
+
 function _brm_normal_effect_args(rhs::ExprColumn;
                                  prefix="BRM backend lowering")
     args = getargs(rhs)
     length(args) <= 2 || error(
         "$prefix: `effect(...) ~ Normal(...)` must lower to exactly location " *
         "and scale arguments, got $(length(args))")
+    any(_brm_is_array_value, args) && error(
+        "$prefix: each coefficient's Normal prior needs scalar location and scale; " *
+        "index or reduce an array-valued argument explicitly")
     isempty(args) && return (0.0, 1.0)
     length(args) == 1 && return (only(args), 1.0)
     args
@@ -1756,47 +1790,29 @@ _brm_numeric_constant(_x) = nothing
 
 function _brm_ranef_sd_prior(spec, spelling::AbstractString;
                              prefix="BRM backend lowering")
-    T = _as_distribution_type(spec.family)
-    if !isnothing(T) && T <: Exponential
-        isempty(spec.keywords) || error(
-            "$prefix: `$spelling ~ Exponential(...)` does not accept keywords")
-        length(spec.arguments) in (0, 1) || error(
-            "$prefix: `$spelling ~ Exponential` expects zero or one Julia scale argument")
-        scale = isempty(spec.arguments) ? 1.0 :
-                _brm_numeric_constant(only(spec.arguments))
-        isnothing(scale) && error(
-            "$prefix: `$spelling` scale must be a numeric formula constant")
-        isfinite(scale) && scale > 0 || error(
-            "$prefix: `$spelling` scale must be finite and strictly positive, got $scale")
-        # Distributions.Exponential uses scale; Stan's density uses rate.
-        return (; family=1, hyperparameter=1.0 / scale)
-    elseif !isnothing(T) && T <: Normal
-        isempty(spec.keywords) || error(
-            "$prefix: `$spelling ~ Normal(...)` does not accept keywords; " *
-            "the random-effect scale is already constrained to be positive")
-        length(spec.arguments) <= 2 || error(
-            "$prefix: `$spelling ~ Normal` expects zero, one, or two Julia arguments")
-        location = isempty(spec.arguments) ? 0.0 :
-                   _brm_numeric_constant(spec.arguments[1])
-        scale = length(spec.arguments) < 2 ? 1.0 :
-                _brm_numeric_constant(spec.arguments[2])
-        isnothing(location) && error(
-            "$prefix: `$spelling` Normal location must be a numeric formula constant")
-        location == 0 || error(
-            "$prefix: `$spelling ~ Normal(location, scale)` is a half-Normal " *
-            "prior on a positive random-effect scale and therefore requires " *
-            "`location == 0`; got $location")
-        isnothing(scale) && error(
-            "$prefix: `$spelling` Normal scale must be a numeric formula constant")
-        isfinite(scale) && scale > 0 || error(
-            "$prefix: `$spelling` Normal scale must be finite and strictly " *
-            "positive, got $scale")
-        return (; family=2, hyperparameter=scale)
+    spec.expression isa ExprColumn || error(
+        "$prefix: `$spelling` RHS must be a callable distribution expression")
+    spec.expression
+end
+
+# Temporary compatibility metadata for consumers which have not migrated to
+# `sd_prior`. Unknown families deliberately return `nothing`: semantic prior
+# resolution must remain open, and a legacy backend may then diagnose its own
+# missing lowering rather than constraining the common representation.
+function _brm_legacy_ranef_sd_prior(prior::ExprColumn)
+    T = _as_distribution_type(getf(prior))
+    args = getargs(prior)
+    if !isnothing(T) && T <: Exponential && length(args) in (0, 1)
+        scale = isempty(args) ? 1.0 : _brm_numeric_constant(only(args))
+        !isnothing(scale) && isfinite(scale) && scale > 0 &&
+            return (1, 1.0 / scale)
+    elseif !isnothing(T) && T <: Normal && length(args) <= 2
+        location = isempty(args) ? 0.0 : _brm_numeric_constant(args[1])
+        scale = length(args) < 2 ? 1.0 : _brm_numeric_constant(args[2])
+        !isnothing(location) && !isnothing(scale) && location == 0 &&
+            isfinite(scale) && scale > 0 && return (2, scale)
     end
-    error(
-        "$prefix: `$spelling` supports `Exponential(scale)` or the zero-centered " *
-        "half-Normal spelling `Normal(0, scale)`; got `$(spec.family)`. An " *
-        "unmentioned scale keeps the backend default half-standard-Normal prior.")
+    nothing
 end
 
 function _brm_ranef_lkj_eta(spec, n_terms::Int;
@@ -1881,7 +1897,7 @@ function _brm_resolve_ranef_effect_overrides(
             Dict{Symbol,Any}(
                 :margins => margins,
                 :sd_default => nothing,
-                :sd_overrides => Dict{Int,Tuple{Int,Float64,Int}}(),
+                :sd_overrides => Dict{Int,Tuple{ExprColumn,Int}}(),
                 :lkj_eta => nothing)
         end
         if spec.class === :cor
@@ -1902,10 +1918,10 @@ function _brm_resolve_ranef_effect_overrides(
         indices, rank = claim
         for index in indices
             held = get(state[:sd_overrides], index, nothing)
-            if isnothing(held) || rank > held[3]
+            if isnothing(held) || rank > held[2]
                 state[:sd_overrides][index] =
-                    (prior.family, prior.hyperparameter, rank)
-            elseif rank == held[3]
+                    (prior, rank)
+            elseif rank == held[2]
                 error("$prefix: two SD prior statements are equally specific " *
                       "and both set margin $(margins[index]) of `|$(spec.id)|`")
             end
@@ -1915,16 +1931,16 @@ function _brm_resolve_ranef_effect_overrides(
     for (key, state) in states
         margins = state[:margins]
         default_prior = state[:sd_default]
-        sd_family = fill(isnothing(default_prior) ? 0 : default_prior.family,
-                         length(margins))
-        sd_rate = fill(isnothing(default_prior) ? 1.0 :
-                       default_prior.hyperparameter,
-                       length(margins))
-        for (index, (family, hyperparameter, _)) in state[:sd_overrides]
-            sd_family[index] = family
-            sd_rate[index] = hyperparameter
+        sd_prior = Any[default_prior for _ in margins]
+        for (index, (prior, _)) in state[:sd_overrides]
+            sd_prior[index] = prior
         end
-        out[key] = (; sd_family, sd_rate,
+        legacy = map(sd_prior) do prior
+            isnothing(prior) ? (0, 1.0) : _brm_legacy_ranef_sd_prior(prior)
+        end
+        sd_family = Int[isnothing(x) ? -1 : first(x) for x in legacy]
+        sd_rate = Float64[isnothing(x) ? NaN : last(x) for x in legacy]
+        out[key] = (; sd_prior, sd_family, sd_rate,
                     has_sd=(!isnothing(default_prior) ||
                             !isempty(state[:sd_overrides])),
                     lkj_eta=isnothing(state[:lkj_eta]) ? 1.0 : state[:lkj_eta],
@@ -2044,7 +2060,6 @@ function _brm_population_effect_operation_keys(brmi::BRMI)
         address = getargs(lhs_e)
         length(address) == 2 || continue
         first(address) in _NON_EFFECT_CLASSES && continue
-        getf(rhs_e) === r2d2 && continue
         push!(out, key)
     end
     out

@@ -18,6 +18,45 @@ differentiates with Enzyme only — every gradient in this suite goes through
 so there is nothing here to work around; do not add it back to make a new
 gradient site easier.
 
+## Shared preparation and Turing lowering
+
+The focused preparation gates are `preparation_program.jl`,
+`preparation_replay.jl`, `preparation_assignments.jl`, and `backend_plan.jl`.
+The assignment gate checks dependency ordering and distinct response row axes.
+`turing_generic.jl` exercises
+callable likelihoods and priors, while `turing_backend.jl` retains the existing
+grouping, conditioning, replay, prediction, and parameterization contracts.
+`turing_world_age.jl` constructs and evaluates models inside compiled callers
+and checks that generated-model caching distinguishes prior literals.
+
+The `turing_terms.jl`, `turing_gp.jl`, `turing_structured.jl`,
+`turing_r2d2.jl`, and `turing_responses.jl` scripts exercise the corresponding
+native verticals. Prior support and density comparisons against BridgeStan live
+in `truncated_priors.jl`, `hierarchical_prior_bounds.jl`,
+`prior_expression_keywords.jl`, `term_prior_bounds.jl`, and
+`von_mises_prior.jl`. `backend_comparisons.jl` executes the documentation's
+four-pane helper, checks the emitted Stan, and scores the generated Turing
+model.
+`callable_priors.jl` checks distribution-factory shape registration and a
+complete-call Stan AST translation against the original Julia factory's
+density.
+
+`stanblocks_preservation_corpus.jl` compares fourteen representative models'
+emitted SLIC/Stan, prepared data, metadata, and frozen replay against an external
+baseline artifact. Capture the artifact on the implementation base, then use
+that same file when checking the refactor:
+
+```sh
+BRM_SB_PRESERVATION=write BRM_SB_PRESERVATION_FILE="$TMPDIR/brm-sb.bin" \
+  julia --project=test test/stanblocks_preservation_corpus.jl
+BRM_SB_PRESERVATION=check BRM_SB_PRESERVATION_FILE="$TMPDIR/brm-sb.bin" \
+  julia --project=test test/stanblocks_preservation_corpus.jl
+```
+
+The artifact is intentionally untracked. The comparison normalizes only the
+absolute test-source path embedded by StanBlocks; it retains model text and
+parameter identities.
+
 ## One-time bootstrap
 
 Seven packages have to enter resolution as **develop paths**, and absolute
@@ -130,6 +169,10 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   `log_modified_bessel_first_kind` builtin its spectral weights call (older
   checkouts fail at transpile with `Could not find
   log_modified_bessel_first_kind …`); `test/gp_hsgp_periodic.jl` is the gate.
+  Sampled values used only in another parameter's support additionally require
+  `67767349bb1e9b05a50fdd1c05e0a8cf878e43e5` or later (landed in
+  `e2b2fa952ebbd550016ff6cb85d11b0f4482aba1`). Earlier activity analysis drops
+  those dependencies; `test/hierarchical_prior_bounds.jl` exercises this case.
 - **`Treebars` is here even though no test uses it.** It is an unregistered
   *transitive* dependency of WarmupHMC, which pins it with a `[sources]` entry —
   ignored on 1.10, same as above. Without a path the resolve fails outright with

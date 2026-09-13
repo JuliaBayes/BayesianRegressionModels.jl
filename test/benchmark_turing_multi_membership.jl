@@ -94,11 +94,13 @@ const rho = 0.25
 const L_matrix = [1.0 0.0; rho sqrt(1 - rho^2)]
 const tau = [0.4, 0.7]
 const z = collect(range(-0.4, 0.4; length=2GROUPS))
-const parameters = Dict(
-    Turing.@varname(beta_pop) => beta,
-    Turing.@varname(groups[1].L) => Cholesky(copy(L_matrix), 'L', 0),
-    Turing.@varname(groups[1].tau) => tau,
-    Turing.@varname(groups[1].z_flat) => z,
+const parameters = (;
+    beta_pop=beta,
+    group_1_1=(;
+        L=Cholesky(copy(L_matrix), 'L', 0),
+        tau=tau,
+        z_flat=z,
+    ),
 )
 
 const block_name = "b_log_lambda_mm__g1__g2__w__w1__w2"
@@ -136,10 +138,10 @@ end
 const turing_construction = with_logger(NullLogger()) do
     benchmark_call(
         () -> DP.LogDensityFunction(TuringBRMI(brmi).model);
-        warmup=10, samples=15, batch=5)
+        warmup=2, samples=5, batch=1)
 end
 const stan_lowering = benchmark_call(
-    () -> SBBRMI(brmi); warmup=10, samples=15, batch=5)
+    () -> SBBRMI(brmi); warmup=2, samples=5, batch=1)
 
 const backend = TuringBRMI(brmi)
 const turing = turing_density(backend, parameters)

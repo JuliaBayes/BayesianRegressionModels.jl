@@ -30,7 +30,7 @@ using Test
 using BayesianRegressionModels
 using StanBlocks
 using LogDensityProblems
-using Distributions: Dirichlet, Exponential, Normal
+using Distributions: Cauchy, Dirichlet, Exponential, Normal
 
 const TERM_PRIOR_CACHE = joinpath(tempdir(), "brm-term-priors")
 const TERM_PRIOR_RUNTIME = get(ENV, "BRM_TERM_PRIOR_RUNTIME", "1") != "0"
@@ -45,11 +45,11 @@ term_df() = (;
     subject = repeat(1:8; inner=5),
 )
 
-code_of(brmi) = StanBlocks.stan_code(SBBRMI(brmi; mod=@__MODULE__).model)
+code_of(brmi) = BayesianRegressionModels.stan_code(SBBRMI(brmi; mod=@__MODULE__))
 transpiles_and_stanc(brmi) = begin
     sb = SBBRMI(brmi; mod=@__MODULE__)
     StanBlocks.stan.transpiles(sb.model) &&
-        StanBlocks.stanc_check(StanBlocks.stan_code(sb.model); warn_pedantic=false).ok
+        StanBlocks.stanc_check(BayesianRegressionModels.stan_code(sb); warn_pedantic=false).ok
 end
 
 # --------------------------------------------------------------------- default
@@ -79,8 +79,8 @@ end
     ]
     expected = Dict(
         # family 0 is the half-standard-normal; the rate is then unused.
-        :s   => "s_x_sd_pen ~ brm_ranef_sd([0]', [1.0]');",
-        :t2  => "t2_mu_x_z_sd_pen ~ brm_ranef_sd([0, 0, 0]', [1.0, 1.0, 1.0]');",
+        :s   => "s_x_sd_pen ~ std_normal();",
+        :t2  => "t2_mu_x_z_sd_pen ~ std_normal();",
         # `c` has four levels, so the increment simplex has three.
         :mo1 => "mo1_c_simplex_incr ~ dirichlet(rep_vector(1.0, 3));",
         :mo  => "mo_c_simplex_incr ~ dirichlet(rep_vector(1.0, 3));",
@@ -112,9 +112,21 @@ end
 
     code = code_of(m)
     # Distributions.Exponential is scale-parameterized, Stan's is rate: 1/2.
-    @test occursin("s_x_sd_pen ~ brm_ranef_sd([1]', [0.5]');", code)
+    @test occursin(r"s_x_sd_pen ~ brm_vector_prior_[0-9a-f]+", code)
     # The penalized coefficients stay standardized (decision `145tp0o`).
     @test occursin("s_x_b_pen_raw ~ std_normal();", code)
+    @test occursin("vector<lower=0.0>[1] s_x_sd_pen;", code)
+    @test transpiles_and_stanc(m)
+end
+
+@testset "smoothing scales accept an arbitrary translated scalar prior" begin
+    m = @brm term_df() begin
+        y ~ Normal(mu, 1.)
+        mu ~ 1 + s(x)
+        sd(:, s(x)) ~ Cauchy(0, 2)
+    end
+    code = code_of(m)
+    @test occursin("cauchy_lpdf(x[1] | arg_1, arg_2)", code)
     @test occursin("vector<lower=0.0>[1] s_x_sd_pen;", code)
     @test transpiles_and_stanc(m)
 end
@@ -134,8 +146,7 @@ end
 
     code = code_of(m)
     # (rr, rn, nr) is the sampled order; the unmentioned `rn` keeps family 0.
-    @test occursin("t2_mu_x_z_sd_pen ~ brm_ranef_sd([1, 0, 1]', " *
-                   "[$(1 / 3), 1.0, $(1 / 0.5)]');", code)
+    @test occursin(r"t2_mu_x_z_sd_pen ~ brm_vector_prior_[0-9a-f]+", code)
     @test occursin("vector<lower=0.0>[3] t2_mu_x_z_sd_pen;", code)
     @test transpiles_and_stanc(m)
 end
@@ -162,6 +173,18 @@ end
     @test occursin("mo_c_simplex_incr ~ dirichlet([1.0, 2.0, 3.0]');",
                    code_of(elementwise))
     @test transpiles_and_stanc(elementwise)
+
+    sampled = @brm term_df() begin
+        concentration ~ Exponential(1)
+        y ~ Normal(mu, 1.)
+        mu ~ 1 + mo(c)
+        simplex(mu, mo(c)) ~ Dirichlet(concentration)
+    end
+    sampled_code = code_of(sampled)
+    @test occursin("concentration ~ exponential", sampled_code)
+    @test occursin("mo_c_simplex_incr ~ dirichlet(rep_vector(concentration, 3));",
+                   sampled_code)
+    @test transpiles_and_stanc(sampled)
 end
 
 # --------------------------------------------------------------- measurement error
@@ -181,6 +204,18 @@ end
     # The observation likelihood is never configurable.
     @test occursin("xo ~ normal(me_xo_x_true, sd_xo);", code)
     @test transpiles_and_stanc(m)
+
+    bounded = @brm term_df() begin
+        center ~ Normal(0, 1)
+        y ~ Normal(mu, 1.)
+        mu ~ 1 + me(xo, 0.3)
+        latent(mu, me(xo)) ~ Cauchy(center, 1; lower=-0.5, upper=0.5)
+    end
+    bounded_code = code_of(bounded)
+    @test occursin("vector<lower=-0.5, upper=0.5>[num_elements(xo)] me_xo_x_true;",
+                   bounded_code)
+    @test occursin("me_xo_x_true ~ cauchy(center, 1);", bounded_code)
+    @test transpiles_and_stanc(bounded)
 end
 
 @testset "one me latent column is reused by population and random slopes" begin
@@ -221,8 +256,8 @@ end
     code = code_of(m)
     # mu takes the `:` default layer; nu's own statement is strictly more
     # specific and wins there.
-    @test occursin("t2_mu_x_z_sd_pen ~ brm_ranef_sd([1, 0, 0]', [0.5, 1.0, 1.0]');", code)
-    @test occursin("t2_nu_x_z_sd_pen ~ brm_ranef_sd([1, 0, 0]', [0.125, 1.0, 1.0]');", code)
+    @test occursin(r"t2_mu_x_z_sd_pen ~ brm_vector_prior_[0-9a-f]+", code)
+    @test occursin(r"t2_nu_x_z_sd_pen ~ brm_vector_prior_[0-9a-f]+", code)
     @test transpiles_and_stanc(m)
 end
 
@@ -234,7 +269,7 @@ end
         latent(mu, me(xo)) ~ Normal(0, 10)
     end
     code = code_of(m)
-    @test occursin("s_x_sd_pen ~ brm_ranef_sd([1]', [0.25]');", code)
+    @test occursin(r"s_x_sd_pen ~ brm_vector_prior_[0-9a-f]+", code)
     @test occursin("me_xo_x_true ~ normal(0, 10);", code)
     # Unaddressed, so untouched.
     @test occursin("mo_c_simplex_incr ~ dirichlet(rep_vector(1.0, 3));", code)
@@ -250,7 +285,6 @@ end
         "sd(mu, s(z)) ~ Exponential(2)"         => "matches no `s(z)` term in `mu`",
         "simplex(:, s(x)) ~ Dirichlet(2)"       => "`s` has no simplex to configure",
         "latent(:, s(x)) ~ Normal(0, 1)"        => "`s` has no latent covariate to configure",
-        "sd(:, s(x)) ~ Normal(0, 1)"            => "supports `Exponential(scale)`",
     ]
     for (stmt, fragment) in cases
         expr = Meta.parse("""
@@ -356,13 +390,15 @@ end
 @testset "BridgeStan finite density and gradient" begin
     if TERM_PRIOR_RUNTIME
         m = @brm term_df() begin
+            concentration ~ Exponential(1)
+            center ~ Normal(0, 1)
             y ~ Normal(mu, 1.)
             mu ~ 1 + s(x) + t2(x, z) + mo(c) + me(xo, 0.3) +
                  (1 + me(xo, 0.3) | p | subject)
             sd(:, s(x)) ~ Exponential(2)
             sd(:, t2(x, z), rr) ~ Exponential(3)
-            simplex(:, mo(c)) ~ Dirichlet(2)
-            latent(:, me(xo)) ~ Normal(0, 5)
+            simplex(:, mo(c)) ~ Dirichlet(concentration)
+            latent(:, me(xo)) ~ Cauchy(center, 1; lower=-5, upper=5)
         end
         sb = SBBRMI(m; mod=@__MODULE__)
         isdir(TERM_PRIOR_CACHE) || mkpath(TERM_PRIOR_CACHE)
