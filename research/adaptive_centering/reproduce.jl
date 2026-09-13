@@ -115,8 +115,22 @@ end
 function turing_density(brmi, seed)
     Random.seed!(seed)
     backend = TuringBRMI(brmi)
+    terms = only.(getproperty.(backend.plan.predictors, :terms))
+    function term_init(term)
+        state = term.state
+        weights = zeros(length(state.centeredness))
+        rho = max(1.0, state.rho_lower + 0.5)
+        any(!iszero, state.centeredness) ?
+            (; rho, sigma=1.0, beta_partial=weights) :
+            (; rho, sigma=1.0, beta_raw=weights)
+    end
+    initial_params = (;
+        term_mu_1=term_init(terms[1]),
+        term_sigma_1=term_init(terms[2]),
+    )
+    vi = DP.VarInfo(backend.model, DP.InitFromParams(initial_params), DP.LinkAll())
     ldf = DP.LogDensityFunction(
-        backend.model, DP.getlogjoint_internal, DP.LinkAll(); fix_transforms=true)
+        backend.model, DP.getlogjoint_internal, vi; fix_transforms=true)
     q = collect(DP.get_sample_input_vector(ldf))
     preparation = DI.prepare_gradient(
         turing_logdensity, ENZYME_BACKEND, q, DI.Constant(ldf))
@@ -217,7 +231,7 @@ end
 function constrained_draws(stan, fits)
     names = BS.param_names(stan.density.model)
     matrices = map(fits) do fit
-        reduce(hcat, (BS.param_constrain(stan.density.model, q)
+        reduce(hcat, (BS.param_constrain(stan.density.model, collect(q))
                       for q in eachcol(fit.posterior_position)))
     end
     names, reduce(hcat, matrices)
@@ -230,15 +244,15 @@ function pilot_centeredness(stan, fits, brmi, k)
     names, draws = constrained_draws(stan, fits)
     index = Dict(names .=> eachindex(names))
     turing = TuringBRMI(brmi)
-    predictors = Dict(p.name => only(p.terms) for p in turing.plan.predictors)
+    predictors = Dict(p.predictor.name => only(p.terms) for p in turing.plan.predictors)
     function selection(prefix, target)
-        unit = reduce(vcat, (
-            reshape(draws[index["$(prefix)_beta_raw.$j"], :], 1, :) for j in 1:k))
+        unit = reduce(hcat, (
+            draws[index["$(prefix)_beta_raw.$j"], :] for j in 1:k))
         rho = draws[index["$(prefix)_rho_iso"], :]
         sigma = draws[index["$(prefix)_sigma"], :]
         omega2 = vec(predictors[target].state.omega2)
-        logs = reduce(vcat, (
-            reshape(log_spectral_scale.(sigma, rho, omega2[j]), 1, :) for j in 1:k))
+        logs = reduce(hcat, (
+            log_spectral_scale.(sigma, rho, omega2[j]) for j in 1:k))
         select_hsgp_centeredness(unit, logs; candidates=0:0.01:1)
     end
     (; mu=selection("hsgp_x", :mu),
@@ -255,10 +269,91 @@ function write_tsv(path, rows)
     end
 end
 
-function run_reproduction(; k=parse(Int, get(ENV, "BRM_ADAPTIVE_K", "8")),
+function posterior_curves(stan, fits, data, selected, k)
+    names, draws = constrained_draws(stan, fits)
+    index = Dict(names .=> eachindex(names))
+    xgrid = collect(range(-1, 1; length=121))
+    xmin, xmax = extrema(data.times)
+    timegrid = xmin .+ (xgrid .+ 1) .* (xmax - xmin) ./ 2
+    phi = [sin(pi / (2L) * (x + L) * j) / sqrt(L)
+           for x in xgrid, j in 1:k]
+    function physical_weights(prefix, centeredness)
+        rho = draws[index["$(prefix)_rho_iso"], :]
+        sigma = draws[index["$(prefix)_sigma"], :]
+        coordinate = reduce(hcat, (
+            draws[index["$(prefix)_beta_partial.$j"], :] for j in 1:k))'
+        weights = similar(coordinate)
+        for sample in axes(coordinate, 2), basis in 1:k
+            log_scale = log_spectral_scale(
+                sigma[sample], rho[sample],
+                (basis * pi / (2L))^2)
+            weights[basis, sample] =
+                exp((1 - centeredness[basis]) * log_scale) *
+                coordinate[basis, sample]
+        end
+        weights
+    end
+    mu = data.y_scale .* (phi * physical_weights(
+        "hsgp_x", selected.mu.centeredness))
+    eta = phi * physical_weights(
+        "hsgp_log_sigma_x", selected.sigma.centeredness)
+    conditional_sd = data.y_scale .* exp.(eta)
+    rng = Xoshiro(0xbb67ae85)
+    predictive = mu .+ conditional_sd .* randn(rng, size(mu))
+    qrow(matrix, probability) =
+        [quantile(view(matrix, row, :), probability) for row in axes(matrix, 1)]
+    [
+        (; time=timegrid[i], mean_q05=qrow(mu, 0.05)[i],
+           mean_q50=qrow(mu, 0.50)[i], mean_q95=qrow(mu, 0.95)[i],
+           prediction_q05=qrow(predictive, 0.05)[i],
+           prediction_q95=qrow(predictive, 0.95)[i],
+           sigma_q50=qrow(conditional_sd, 0.50)[i])
+        for i in eachindex(timegrid)
+    ]
+end
+
+function write_curve_svg(path, curves, data)
+    width, height = 760, 430
+    left, right, top, bottom = 64, 22, 28, 54
+    xmin, xmax = extrema(data.times)
+    ymin = min(minimum(data.accel), minimum(r.prediction_q05 for r in curves))
+    ymax = max(maximum(data.accel), maximum(r.prediction_q95 for r in curves))
+    sx(x) = left + (x - xmin) / (xmax - xmin) * (width - left - right)
+    sy(y) = top + (ymax - y) / (ymax - ymin) * (height - top - bottom)
+    points(values) = join(("$(round(sx(r.time); digits=2)),$(round(sy(values(r)); digits=2))"
+                           for r in curves), " ")
+    predictive = points(r -> r.prediction_q05) * " " *
+        join(reverse(split(points(r -> r.prediction_q95))), " ")
+    mean_band = points(r -> r.mean_q05) * " " *
+        join(reverse(split(points(r -> r.mean_q95))), " ")
+    median = points(r -> r.mean_q50)
+    open(path, "w") do io
+        print(io, """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 $width $height" role="img" aria-labelledby="title desc">
+<title id="title">Adaptive HSGP motorcycle posterior</title>
+<desc id="desc">Observed accelerations, posterior mean interval, and posterior predictive interval from the pilot-selected partial centering fit.</desc>
+<rect width="$width" height="$height" fill="white"/>
+<line x1="$left" y1="$(height-bottom)" x2="$(width-right)" y2="$(height-bottom)" stroke="#3c3c43"/>
+<line x1="$left" y1="$top" x2="$left" y2="$(height-bottom)" stroke="#3c3c43"/>
+<polygon points="$predictive" fill="#4c78a8" opacity="0.14"/>
+<polygon points="$mean_band" fill="#4c78a8" opacity="0.34"/>
+<polyline points="$median" fill="none" stroke="#245e91" stroke-width="2.5"/>
+""")
+        for (x, y) in zip(data.times, data.accel)
+            print(io, "<circle cx=\"$(round(sx(x); digits=2))\" cy=\"$(round(sy(y); digits=2))\" r=\"2.2\" fill=\"#202127\" opacity=\"0.58\"/>\n")
+        end
+        print(io, """<text x="$(width/2)" y="$(height-12)" text-anchor="middle" font-family="sans-serif" font-size="14">milliseconds after impact</text>
+<text x="17" y="$(height/2)" text-anchor="middle" transform="rotate(-90 17 $(height/2))" font-family="sans-serif" font-size="14">acceleration (g)</text>
+<text x="$(left+10)" y="$(top+18)" font-family="sans-serif" font-size="12" fill="#245e91">median mean; 90% mean and predictive bands</text>
+</svg>
+""")
+    end
+end
+
+function run_reproduction(; k=parse(Int, get(ENV, "BRM_ADAPTIVE_K", "20")),
                           n_draws=parse(Int, get(ENV, "BRM_ADAPTIVE_DRAWS", "75")),
                           n_evaluations=parse(Int, get(ENV, "BRM_ADAPTIVE_EVALS", "350")),
                           n_chains=parse(Int, get(ENV, "BRM_ADAPTIVE_CHAINS", "4")),
+                          run_turing=get(ENV, "BRM_ADAPTIVE_TURING", "1") == "1",
                           output_dir=get(ENV, "BRM_ADAPTIVE_OUTPUT", mktempdir()))
     mkpath(output_dir)
     seeds = collect(0x6a09e667:(0x6a09e667 + n_chains - 1))
@@ -276,33 +371,48 @@ function run_reproduction(; k=parse(Int, get(ENV, "BRM_ADAPTIVE_K", "8")),
          c_sigma=selected.sigma.centeredness, partial=true),
     ]
     rows = NamedTuple[diagnostics("StanBlocks", "noncentered", stan_ncp)]
+    println("completed\t", last(rows)); flush(stdout)
     stan_adaptive = nothing
     adaptive_fit = nothing
     for geometry in geometries[2:end]
         geometry_data = prepared_data(; k, c_mu=geometry.c_mu, c_sigma=geometry.c_sigma)
         brmi = build_brmi(geometry_data, k; partial=true)
-        stan = stan_density(brmi, "$(geometry.name)-k$k", output_dir)
+        # Centeredness is data, so centered and selected-adaptive fits share one
+        # compiled partial-model artifact while constructing separate Stan models.
+        stan = stan_density(brmi, "partial-k$k", output_dir)
         sampled = sample_chains(seeds; n_draws, n_evaluations) do _
             stan.density, stan.q
         end
         push!(rows, diagnostics("StanBlocks", geometry.name, sampled))
+        println("completed\t", last(rows)); flush(stdout)
         if geometry.name == "adaptive"
             stan_adaptive, adaptive_fit = stan, sampled
         end
     end
-    for geometry in geometries
-        geometry_data = prepared_data(; k, c_mu=geometry.c_mu, c_sigma=geometry.c_sigma)
-        brmi = build_brmi(geometry_data, k; partial=geometry.partial)
-        sampled = sample_chains(seeds; n_draws, n_evaluations) do seed
-            td = turing_density(brmi, seed)
-            td.density, td.q
+    if run_turing
+        for geometry in geometries
+            geometry_data = prepared_data(; k, c_mu=geometry.c_mu, c_sigma=geometry.c_sigma)
+            brmi = build_brmi(geometry_data, k; partial=geometry.partial)
+            # Sampling is sequential and the density's gradient workspace is not
+            # retained between calls, so one Enzyme preparation is shared safely
+            # across chains. Chain randomness still comes only from the distinct
+            # Xoshiro instances in `sample_chains`.
+            td = turing_density(brmi, first(seeds))
+            sampled = sample_chains(seeds; n_draws, n_evaluations) do _
+                td.density, td.q
+            end
+            push!(rows, diagnostics("Turing", geometry.name, sampled))
+            println("completed\t", last(rows)); flush(stdout)
         end
-        push!(rows, diagnostics("Turing", geometry.name, sampled))
     end
     write_tsv(joinpath(output_dir, "diagnostics.tsv"), rows)
     write_tsv(joinpath(output_dir, "centeredness.tsv"), [
         (; basis=i, mean=selected.mu.centeredness[i],
            log_scale=selected.sigma.centeredness[i]) for i in 1:k])
+    curves = posterior_curves(
+        stan_adaptive, adaptive_fit.fits, data, selected, k)
+    write_tsv(joinpath(output_dir, "posterior_curves.tsv"), curves)
+    write_curve_svg(joinpath(output_dir, "posterior_curves.svg"), curves, data)
     println("source_revision\t", SOURCE_REVISION)
     println("data_revision\t", DATA_REVISION)
     println("data_sha256\t", DATA_SHA256)

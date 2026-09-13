@@ -47,11 +47,21 @@ BRM_ADAPTIVE_RUNTIME=1 BRM_ADAPTIVE_K=8 \
 ```
 
 Omit `BRM_ADAPTIVE_K` for the source-faithful 20-function basis. The bounded
-artifact reduces only the truncation count and Monte Carlo budget; model,
-data, priors, pilot rule, and fixed seeds are unchanged. Every run uses four
-independent `Xoshiro` chains. The output records maximum classical R-hat,
+artifact reduces the truncation count and Monte Carlo budget, uses one fixed
+warmup window, and starts from explicit finite physical values instead of the
+source run's Pathfinder initialization. Model, data, priors, pilot rule, and
+fixed seeds are unchanged. Every run uses four independent `Xoshiro` chains.
+The output records maximum classical R-hat,
 minimum initial-positive-sequence ESS, divergences, gradient evaluations, and
 wall time for all three geometries on each backend.
+
+The checked bounded result in `results/` does **not** converge. Centered and
+adaptive coordinates remove the noncentered run's divergences, but all maximum
+R-hat values exceed 2 and all minimum ESS values are about 2–3. Its curve and
+timing outputs are smoke-test evidence only, not a performance ranking or a
+scientific posterior. A substantive analysis should restore `k=20`, the
+ordinary adaptive warmup/Pathfinder path, many more draws, and convergence
+criteria chosen before looking at results.
 
 This is **offline pilot/refit adaptation**. It chooses a fixed formula/data
 geometry before the second fit. WarmupHMC's online nonlinear reparameterizer is
