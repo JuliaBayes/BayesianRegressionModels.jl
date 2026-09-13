@@ -369,6 +369,25 @@ end
 _brm_plan_of(plan::GenerativePlan) = plan
 _brm_plan_of(sb::SBBRMI) = generative_plan(sb)
 
+# Backend-neutral identity presented by every descriptor. Concrete adapters
+# add emitted coordinates, but the declaration remains the semantic source.
+_brm_descriptor_formula(brmi::BRMI) = sprint(show, brmi)
+function _brm_descriptor_semantics(brmi::BRMI)
+    program = _brm_prepare_program(brmi)
+    roles = Dict{Symbol,Symbol}()
+    for operation in program.operations
+        role = operation.role === :predictor ? :linear_predictor :
+               operation.role === :observation ? :observation :
+               operation.role === :parameter ? :parameter : operation.role
+        roles[operation.name] = role
+    end
+    # Raw dataframe schema only. Backend context may also contain synthetic
+    # dimensions and joint-response carriers; those remain backend inputs and
+    # must never become columns a replay form asks the user to provide.
+    (; program, roles,
+       columns=Tuple(sort!(collect(Symbol, data_columns(brmi)))))
+end
+
 # The formula-owned population address space. `block` is derived FORWARDS with
 # the same helper sbimpl uses to emit the design, so an inert `log_Vc` predictor
 # and a linked `log(Vc)` predictor never become indistinguishable through name
@@ -838,6 +857,7 @@ end
 
 function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
     brmi = plan.parent
+    semantics = _brm_descriptor_semantics(brmi)
     highlights = _brm_highlights(stan, highlight_specs)
 
     # --- the dataframe columns this declaration reads -----------------------
@@ -846,7 +866,7 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
     # DataColumn op, so it never appears there. The plan already knows every
     # response: an observation declaration's `data_source` IS its dataframe
     # column (including a plate-local alias, `kernel_y => dv`).
-    df_columns = Set{Symbol}(data_columns(brmi))
+    df_columns = Set{Symbol}(semantics.columns)
     for d in plan.declarations
         d.role === :observation && !isnothing(d.data_source) || continue
         entry = get(plan.preproc, d.data_source, nothing)
@@ -934,7 +954,8 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
     # matched no emitted block for a linked LHS, so the coefficient vector
     # silently lost its `labels` — the one thing a consumer mounts a descriptor
     # for — while the same model written with an inert `log_Vc` name kept them.
-    lps = Set{Symbol}(e.logical for e in population_effects)
+    lps = Set{Symbol}(name for (name, role) in semantics.roles
+                      if role === :linear_predictor)
     pop_lp = Dict{Symbol,Symbol}(e.block => e.logical for e in population_effects)
 
     # --- outputs ------------------------------------------------------------
@@ -970,7 +991,7 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
     ops = _brm_derive_operations(plan, stan, outputs, columns)
     ops = _brm_apply_overrides(ops, operations, titles)
 
-    BRMDescriptor(stan.id, stan.name, sprint(show, brmi), plan, stan, highlights,
+    BRMDescriptor(stan.id, stan.name, _brm_descriptor_formula(brmi), plan, stan, highlights,
                   Tuple(inputs), Tuple(outputs), Tuple(ops), columns,
                   Tuple(unpredictable))
 end

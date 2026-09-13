@@ -2,55 +2,46 @@
 # no dependency on Turing, DynamicPPL, StanBlocks, SBBRMI, or emitted SLIC. The
 # package extension supplies the executable model after Turing is loaded.
 
-mutable struct _TuringGenericPlan{C,G,P,S,A,E,Y,L,MR,RM,OW,RF,J}
-    context::C
+mutable struct _TuringGenericPlan{G,RF,J}
     prepared::G
-    predictors::P
-    parameters::S
-    assignments::A
-    distribution::E
-    response::Y
-    response_name::Symbol
-    lhs::L
-    missing_response::MR
-    response_modifier::RM
-    observation_weight::OW
     response_fit::RF
     joint_r2d2::J
     source_ast::Any
 end
 
+# Geometry enriches the common model; it does not create a second semantic
+# store beside it. Keep the internal construction shape used by replay adapters.
+function _TuringGenericPlan(context, prepared, predictors, parameters,
+        assignments, distribution, response, response_name, lhs,
+        missing_response, modifier, weight, response_fit, joint_r2d2, source_ast)
+    observation = _BRMPreparedObservation(response_name, lhs, distribution,
+        response, modifier, weight, missing_response)
+    model = _BRMPreparedModel(prepared.program, parameters, predictors,
+                               assignments, (observation,))
+    _TuringGenericPlan(model, response_fit, joint_r2d2, source_ast)
+end
+
 function Base.getproperty(plan::_TuringGenericPlan, field::Symbol)
-    field === :design && return only(getfield(plan, :predictors)).design
-    field === :predictor && return only(getfield(plan, :predictors)).predictor
-    field === :random_effects && return only(getfield(plan, :predictors)).random_effects
-    field === :beta_location && return only(getfield(plan, :predictors)).beta_location
-    field === :beta_scale && return only(getfield(plan, :predictors)).beta_scale
+    field in (:prepared, :response_fit, :joint_r2d2, :source_ast) && return getfield(plan, field)
+    prepared = getfield(plan, :prepared)
+    field in (:context, :predictors, :parameters, :assignments) && return getproperty(prepared, field)
+    field in (:design, :predictor, :random_effects, :beta_location, :beta_scale) &&
+        return getproperty(only(prepared.predictors), field)
+    observation = only(prepared.observations)
+    field === :response_name && return observation.name
+    field === :response_modifier && return observation.modifier
+    field === :observation_weight && return observation.weight
+    field in (:distribution, :response, :lhs, :missing_response) &&
+        return getproperty(observation, field)
     getfield(plan, field)
 end
+Base.propertynames(::_TuringGenericPlan, private::Bool=false) =
+    (:prepared, :response_fit, :joint_r2d2, :source_ast, :context, :predictors,
+     :parameters, :assignments, :distribution, :response, :response_name, :lhs,
+     :missing_response, :response_modifier, :observation_weight)
 
-struct _TuringPopulationComponent{P<:_BRMPopulationPredictor,
-                                  D<:_BRMPopulationDesign,
-                                  B<:AbstractVector,R<:Tuple}
-    predictor::P
-    design::D
-    beta_location::B
-    beta_scale::B
-    random_effects::R
-end
-
-struct _TuringGenericPredictor{C,P,T,R}
-    component::C
-    priors::P
-    terms::T
-    r2d2::R
-end
-_TuringGenericPredictor(component, priors, terms) =
-    _TuringGenericPredictor(component, priors, terms, nothing)
-function Base.getproperty(p::_TuringGenericPredictor, field::Symbol)
-    field in (:component, :priors, :terms, :r2d2) ? getfield(p, field) :
-        getproperty(getfield(p, :component), field)
-end
+const _TuringPopulationComponent = _BRMPopulationComponent
+const _TuringGenericPredictor = _BRMPreparedPredictorGeometry
 
 mutable struct _TuringMultiResponsePlan{N<:Tuple,P<:Tuple,O<:Tuple,J}
     responses::N
@@ -607,53 +598,8 @@ function _turing_materialize_response_modifier(
             support_kind, prefix="Turing backend")
 end
 
-function _turing_generic_predictor_component(
-        brmi::BRMI, context::_BRMBackendContext, predictor::Symbol;
-        available_predictors=(predictor,), training=nothing)
-    random_effects = _brm_simple_random_effect_plans(
-        brmi, predictor, context; required=true)
-    op = linear_predictor_op(brmi, predictor)
-    lhs, rhs = getargs(op, 2)
-    link_lhs_fn, name = _peel_lp_lhs(lhs)
-    raw_terms = _brm_additive_terms(rhs)
-    structured_terms = if isnothing(training)
-        Tuple(term for term in raw_terms if _brm_prepares_term(term))
-    else
-        Tuple(term for term in raw_terms if term isa ExprColumn &&
-            any(old -> old.callable === getf(term), training.terms))
-    end
-    prepared_terms = if isnothing(training)
-        Tuple(_brm_prepare_term(term, predictor, context)
-              for term in structured_terms)
-    else
-        length(structured_terms) == length(training.terms) || error(
-            "Turing replay: prepared term set changed for `$predictor`")
-        Tuple(_brm_replay_term(old, fresh, context)
-              for (old, fresh) in zip(training.terms, structured_terms))
-    end
-    ordinary_terms = Tuple(term for term in raw_terms
-                           if !(term in structured_terms))
-    row_source = isempty(prepared_terms) ? nothing : begin
-        source = first(prepared_terms).source
-        candidate = source isa Tuple ? first(source) : source
-        haskey(context.data, candidate) ? candidate :
-            get(context.target_obs, name, nothing)
-    end
-    design = _brm_population_design(
-        name, ordinary_terms, context.data, get(context.target_obs, name, nothing);
-        required=true, row_source)
-    predictor_plan = _BRMPopulationPredictor(
-        name, link_lhs_fn, _brm_lp_emitted_name(name, link_lhs_fn), design)
-    priors = _brm_simple_population_effect_overrides(
-        brmi, design; prefix="Turing backend", available_predictors)
-    isnothing(priors) && (priors = Any[nothing for _ in design.columns])
-    defaults = zeros(Float64, length(priors)), ones(Float64, length(priors))
-    component = _TuringPopulationComponent(
-        predictor_plan, design, defaults..., random_effects)
-    r2plan = _brm_whole_predictor_r2d2(
-        brmi, design, priors; prefix="Turing backend", available_predictors)
-    _TuringGenericPredictor(component, Tuple(priors), prepared_terms, r2plan)
-end
+_turing_generic_predictor_component(args...; kwargs...) =
+    _brm_prepare_predictor_geometry(args...; kwargs...)
 
 function _brm_turing_single_plan(brmi::BRMI, observation;
                                  additional_model_operations=(), training=nothing)
@@ -713,65 +659,10 @@ function _brm_turing_single_plan(brmi::BRMI, observation;
             response_modifier, observation, raw_response, context;
             support_kind)
     end
-    referenced = Set{Symbol}()
-    _turing_collect_model_references!(referenced, rhs)
-    operation_by_name = Dict(operation.name => operation
-                             for operation in program.operations)
-    changed = true
-    while changed
-        changed = false
-        for target in collect(referenced)
-            operation = get(operation_by_name, target, nothing)
-            isnothing(operation) && continue
-            before = length(referenced)
-            union!(referenced, operation.dependencies)
-            changed |= length(referenced) != before
-        end
-    end
-    predictor_names = Symbol[]
-    parameter_names = Symbol[first(pair) for pair in prepared_response.parameters]
-    priors = ExprColumn[last(pair) for pair in prepared_response.parameters]
-    raw_assignments = Pair{Symbol,Any}[]
-    for target in program.order
-        target in keys(context.data) && continue
-        prepared_operation = get(operation_by_name, target, nothing)
-        standalone_parameter = !isnothing(prepared_operation) &&
-            prepared_operation.role === :parameter &&
-            first(getargs(prepared_operation.expression)) isa NamedColumn
-        (target in referenced || standalone_parameter) || continue
-        isnothing(prepared_operation) && error(
-            "Turing backend: likelihood references `$target`, which has no declaration")
-        operation = prepared_operation.expression
-        if prepared_operation.role === :assignment
-            _brm_is_prior_declaration(brmi, target) && continue
-            push!(raw_assignments, target => last(getargs(operation)))
-            continue
-        end
-        operation isa ExprColumn{typeof(~)} || error(
-            "Turing backend: dependency `$target` is not an executable declaration")
-        lhs, declaration = getargs(operation, 2)
-        peeled = _peel_lp_lhs(lhs)
-        has_structured_term = !isnothing(peeled) &&
-            any(_brm_prepares_term, _brm_additive_terms(declaration))
-        population = if !isnothing(peeled) && last(peeled) === target
-            try
-                _brm_simple_population_predictor(
-                    brmi, target, context; required=true)
-            catch
-                nothing
-            end
-        end
-        if !isnothing(peeled) && last(peeled) === target &&
-           (has_structured_term || !isnothing(population))
-            push!(predictor_names, target)
-        elseif lhs isa NamedColumn && name(lhs) === target && declaration isa ExprColumn
-            push!(parameter_names, target)
-            push!(priors, declaration)
-        else
-            error("Turing backend: declaration for `$target` cannot be lowered " *
-                  "as a population predictor or scalar prior")
-        end
-    end
+    referenced = _brm_reachable_operations(program,
+        _brm_prepared_references(_brm_prepare_expr(rhs)))
+    predictor_names = Symbol[node.name for node in program.operations
+                             if node.role === :predictor && node.name in referenced]
     training_by_name = isnothing(training) ? Dict{Symbol,Any}() :
         Dict(component.predictor.name => component for component in training.predictors)
     components = Tuple(_turing_generic_predictor_component(
@@ -794,66 +685,31 @@ function _brm_turing_single_plan(brmi::BRMI, observation;
         push!(claims, component.predictor.name => Tuple(expressions))
     end
     program = _brm_with_prior_dependencies(program, claims)
-    operation_by_name = Dict(operation.name => operation
-                             for operation in program.operations)
-    referenced = Set{Symbol}()
-    _turing_collect_model_references!(referenced, rhs)
-    changed = true
-    while changed
-        changed = false
-        for target in collect(referenced)
-            operation = get(operation_by_name, target, nothing)
-            isnothing(operation) && continue
-            before = length(referenced)
-            union!(referenced, operation.dependencies)
-            changed |= length(referenced) != before
-        end
-    end
-    for target in program.order
-        target in referenced || continue
-        target in parameter_names && continue
-        target in predictor_names && continue
-        any(pair -> first(pair) === target, raw_assignments) && continue
-        operation = get(operation_by_name, target, nothing)
-        isnothing(operation) && continue
-        operation.role === :parameter || continue
-        lhs, prior = getargs(operation.expression, 2)
-        lhs isa NamedColumn || continue
-        push!(parameter_names, target)
-        push!(priors, prior)
-    end
+    referenced = _brm_reachable_operations(program,
+        _brm_prepared_references(_brm_prepare_expr(rhs)))
+    # The common model includes every explicit parameter declaration, including
+    # standalone priors and values referenced only by a term/group prior.
     n = length(raw_response)
     all(component -> size(component.design.matrix, 1) == n, components) ||
         error("Turing backend: response and predictor row counts differ")
-    axes = Dict{Symbol,Symbol}(key => :observation for key in keys(context.data))
-    foreach(key -> axes[key] = :observation, predictor_names)
-    foreach(zip(parameter_names, priors)) do (key, prior)
-        axes[key] = _brm_parameter_reference_axis(prior)
-    end
-    prior_axes = copy(axes)
-    foreach(key -> prior_axes[key] = :whole, keys(context.data))
-    prepared_rhs = _brm_prepare_expr(rhs, axes)
-    parameters = Tuple(_BRMPreparedParameter(
-        name, _brm_prepare_expr(prior, prior_axes), :distribution, true)
-        for (name, prior) in zip(parameter_names, priors))
-    prepared_assignments = Any[]
-    for (assignment_name, expression) in raw_assignments
-        prepared_expression = _brm_prepare_expr(expression, axes)
-        refs = _brm_prepared_references(prepared_expression)
-        axis = any(ref -> get(axes, ref, :scalar) === :observation, refs) ?
-               :observation : :scalar
-        axes[assignment_name] = axis
-        push!(prepared_assignments, _BRMPreparedAssignment(
-            assignment_name, prepared_expression, refs))
-    end
-    # Reprepare the observation after assignment axes have been inferred.
-    prepared_rhs = _brm_prepare_expr(rhs, axes)
-    assignments = Tuple(prepared_assignments)
+    prepared_model = _brm_prepare_model(brmi; program,
+        additional_parameters=prepared_response.parameters,
+        observation_overrides=Dict(observation.key =>
+            (; distribution=rhs, response=raw_response, modifier=response_modifier,
+               weight=observation_weight, missing_response)))
+    prepared_observation = only(node for node in prepared_model.observations
+                                if node.name === observation.key)
+    # A standalone sampled declaration still contributes its prior density.
+    # Retain deterministic values consumed only by those priors as well.
+    union!(referenced, _brm_reachable_operations(program,
+        Tuple(parameter.name for parameter in prepared_model.parameters)))
+    assignments = Tuple(node for node in prepared_model.assignments
+                        if node.name in referenced)
+    prepared_rhs = prepared_observation.distribution
     source_ast = (; operations=brmi.operations, observation=prepared_rhs)
-    prepared_model = _brm_prepare_model(brmi; program)
     joint_r2d2 = _brm_joint_r2d2_plans(brmi, components; prefix="Turing backend")
     _TuringGenericPlan(
-        context, prepared_model, components, parameters, assignments,
+        context, prepared_model, components, prepared_model.parameters, assignments,
         prepared_rhs, raw_response,
         observation.key, observation.lhs, missing_response, response_modifier,
         observation_weight, prepared_response.fit, joint_r2d2, source_ast)

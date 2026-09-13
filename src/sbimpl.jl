@@ -272,7 +272,7 @@ end
 # instead of selecting a second copy of it. Julia supplies `rep_vector(1., K-1)`
 # when the formula says nothing, which is the density the inline form had.
 _sb_mo = StanBlocks.@slic begin
-    simplex_incr ~ dirichlet(alpha)
+    simplex_incr :: simplex[dims(alpha)[1]] ~ dirichlet(alpha)
     return cumulative_sum(append_row(0., simplex_incr))[x]
 end
 
@@ -1467,7 +1467,7 @@ end
 # The three scales are one `vector[3]` in fixed (rr, rn, nr) order so a per-block
 # `sd(<lp|:>, t2(x, z), <block>)` statement can configure any subset of them
 # through their semantic prior expressions, leaving the rest half-standard-normal.
-# `_sb_t2_sd_index` owns the name -> index mapping.
+# `_SB_T2_BLOCKS` owns the component -> index order.
 _sb_t2_generic = StanBlocks.@slic begin
     n_rr = dims(Zrr)[2]
     n_rn = dims(Zrn)[2]
@@ -2533,15 +2533,16 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     # likelihood-decorator claims, and target -> observation row axes. Its
     # input `data` already carries the Stan preprocessing side-channel, which
     # the generic collector leaves untouched.
-    prepared = _brm_prepare_program(brmi; data)
+    prepared = _brm_prepare_model(brmi; program=_brm_prepare_program(brmi; data))
     context = prepared.context
+    nodes = Dict(node.name => node for node in _brm_prepared_nodes(prepared))
     prepass = context.prepass
-    effect_overrides = _sb_prior_overrides(brmi)
+    effect_overrides = _sb_prior_overrides(brmi; term_priors=context.term_priors)
     # Prepass 2: collect brms-style `|ID|` ranef buckets across all sub-formulas,
     # emit one shared ranef_correlated_draws per bucket, and build a lookup
     # `(brmi_key, (id_sym, group_key)) => (bucket_name, col_range, idx_name, suffix)`
     # for per-sub-formula emission below.
-    id_buckets = _sb_collect_id_buckets(brmi)
+    id_buckets = _sb_collect_id_buckets(context)
     ranef_effect_overrides = _sb_ranef_effect_overrides(brmi, id_buckets)
     ranef_r2d2_overrides = _sb_ranef_r2d2_overrides(brmi, id_buckets,
                                                     effect_overrides)
@@ -2596,11 +2597,11 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
             "$(join(sort!(collect(unresolved)), ", ")) must be backed by " *
             "supported sampled scalar priors")
     end
-    union!(early_prior_keys, _brm_prior_value_dependencies(prepared, prior_value_refs))
+    union!(early_prior_keys, _brm_prior_value_dependencies(prepared.program, prior_value_refs))
     for key in prepared.order
         key in early_prior_keys || continue
         nc = _as_named_column(brmi.operations[key])
-        _sb_emit!(stmts, data, key, parent(nc))
+        _sb_emit_prepared!(stmts, data, get(nodes, key, nothing), key, parent(nc))
     end
     # Prepass 2a: whole-predictor R2D2 decompositions. Resolved and emitted
     # BEFORE the bucket statement below, which consumes the derived residual
@@ -2633,7 +2634,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
         nc = _as_named_column(op)
         isnothing(nc) && error("sbimpl: top-level op `$key` is not a NamedColumn")
         obs_n = get(target_obs, key, nothing)
-        _sb_emit!(stmts, data, key, parent(nc); id_lookup, obs_n, cv_groups,
+        _sb_emit_prepared!(stmts, data, get(nodes, key, nothing), key, parent(nc); id_lookup, obs_n, cv_groups,
                   centered_groups, group_block_lookup, effect_overrides,
                   r2d2=(; overrides=r2d2_overrides, names=r2d2_names,
                           joint=r2d2_joint))
@@ -3261,47 +3262,35 @@ end
 # regenerated key(s) into `new_data`, the (possibly re-derived) record into
 # `new_preproc`, and marks every key it owns in `handled`.
 function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::PreprocEntry, df, freeze::Bool)
+    replay_and_bind = function(input, bindings::Pair...; prefix="sbimpl: reprocess")
+        replay = _brm_replay_preprocess(e, input; freeze, prefix)
+        for (value_name, data_key) in bindings
+            new_data[data_key] = getproperty(replay.values, value_name)
+            data_key === key || push!(handled, data_key)
+        end
+        new_preproc[key] = replay.entry
+        replay
+    end
     if e.kind === :static
         new_data[key] = deepcopy(e.const_)
         new_preproc[key] = e
-    elseif e.kind === :zscale || e.kind === :standardize
-        replay = _brm_replay_preprocess(
-            e, _sb_rematerialize_vec(e.raw_ref, df); freeze,
-            prefix="sbimpl: reprocess")
-        new_data[key] = replay.values.primary
-        new_preproc[key] = replay.entry
-    elseif e.kind === :center
-        replay = _brm_replay_preprocess(
-            e, _sb_rematerialize_vec(e.raw_ref, df); freeze,
-            prefix="sbimpl: reprocess")
-        new_data[key] = replay.values.primary
-        new_preproc[key] = replay.entry
-    elseif e.kind === :protect
-        replay = _brm_replay_preprocess(
-            e, _sb_rematerialize_vec(e.raw_ref, df); freeze,
-            prefix="sbimpl: reprocess")
-        new_data[key] = replay.values.primary
-        new_preproc[key] = replay.entry
+    elseif e.kind === :zscale || e.kind === :standardize ||
+           e.kind === :center || e.kind === :protect
+        replay_and_bind(_sb_rematerialize_vec(e.raw_ref, df), :primary => key)
     elseif e.kind === :interaction
         left_key, right_key = e.raw_ref
         haskey(new_data, left_key) || error(
             "sbimpl: reprocess: interaction `$key` is missing regenerated operand `$left_key`")
         haskey(new_data, right_key) || error(
             "sbimpl: reprocess: interaction `$key` is missing regenerated operand `$right_key`")
-        replay = _brm_replay_preprocess(
-            e, (new_data[left_key], new_data[right_key]); freeze,
-            prefix="sbimpl: reprocess: interaction `$key`")
-        new_data[key] = replay.values.primary
-        new_preproc[key] = replay.entry
+        replay_and_bind((new_data[left_key], new_data[right_key]), :primary => key;
+                        prefix="sbimpl: reprocess: interaction `$key`")
     elseif e.kind === :population_factor_dummy
         raw = _sb_df_column(df, e.raw_ref)
         raw isa AbstractVector || error(
             "sbimpl: reprocess: categorical population predictor " *
             "`$(e.raw_ref)` must be a vector, got $(typeof(raw))")
-        replay = _brm_replay_preprocess(
-            e, raw; freeze, prefix="sbimpl: reprocess")
-        new_data[key] = replay.values.primary
-        new_preproc[key] = replay.entry
+        replay_and_bind(raw, :primary => key)
     elseif e.kind === :group_index
         raw = _sb_df_column(df, e.raw_ref)
         raw isa AbstractVector || error(
@@ -3407,51 +3396,24 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         const_ = merge(e.const_, (; levels=prepared.levels))
         new_preproc[key] = PreprocEntry(:multi_membership, const_, e.raw_ref, true)
     elseif e.kind === :spline
-        replay = _brm_replay_preprocess(
-            e, _sb_df_column(df, e.raw_ref); freeze,
-            prefix="sbimpl: reprocess")
-        new_data[key] = replay.values.primary
-        new_data[e.const_.zpen_key] = replay.values.penalty
-        push!(handled, e.const_.zpen_key)
-        new_preproc[key] = replay.entry
+        replay_and_bind(_sb_df_column(df, e.raw_ref), :primary => key,
+                        :penalty => e.const_.zpen_key)
     elseif e.kind === :tensor_spline
         axes = _sb_gp_axes_from_df(df, e.raw_ref, :t2)
-        replay = _brm_replay_preprocess(
-            e, axes; freeze, prefix="sbimpl: reprocess")
-        new_data[key] = replay.values.primary
-        new_data[e.const_.zrr_key] = replay.values.rr
-        new_data[e.const_.zrn_key] = replay.values.rn
-        new_data[e.const_.znr_key] = replay.values.nr
-        push!(handled, e.const_.zrr_key)
-        push!(handled, e.const_.zrn_key)
-        push!(handled, e.const_.znr_key)
-        new_preproc[key] = replay.entry
+        replay_and_bind(axes, :primary => key, :rr => e.const_.zrr_key,
+                        :rn => e.const_.zrn_key, :nr => e.const_.znr_key)
     elseif e.kind === :gp
         axes = _sb_gp_axes_from_df(df, e.raw_ref, :gp)
-        replay = _brm_replay_preprocess(
-            e, axes; freeze, prefix="sbimpl: reprocess")
-        new_data[key] = replay.values.primary
-        new_preproc[key] = replay.entry
+        replay_and_bind(axes, :primary => key)
     elseif e.kind === :hsgp && get(e.const_, :cov, :exp_quad) === :periodic
         axes = _sb_gp_axes_from_df(df, e.raw_ref, :hsgp)
-        replay = _brm_replay_preprocess(
-            e, axes; freeze, prefix="sbimpl: reprocess")
-        new_data[key] = replay.values.primary
-        new_data[e.const_.harmonics_key] = replay.values.harmonics
-        push!(handled, e.const_.harmonics_key)
-        new_data[e.const_.rho_lower_key] = replay.values.rho_lower
-        push!(handled, e.const_.rho_lower_key)
-        new_preproc[key] = replay.entry
+        replay_and_bind(axes, :primary => key,
+                        :harmonics => e.const_.harmonics_key,
+                        :rho_lower => e.const_.rho_lower_key)
     elseif e.kind === :hsgp
         axes = _sb_gp_axes_from_df(df, e.raw_ref, :hsgp)
-        replay = _brm_replay_preprocess(
-            e, axes; freeze, prefix="sbimpl: reprocess")
-        new_data[key] = replay.values.primary
-        new_data[e.const_.omega2_key] = replay.values.omega2
-        push!(handled, e.const_.omega2_key)
-        new_data[e.const_.rho_lower_key] = replay.values.rho_lower
-        push!(handled, e.const_.rho_lower_key)
-        new_preproc[key] = replay.entry
+        replay_and_bind(axes, :primary => key, :omega2 => e.const_.omega2_key,
+                        :rho_lower => e.const_.rho_lower_key)
     elseif e.kind === :categorical_outcome
         v = _sb_df_column(df, e.raw_ref)
         fitted_levels = e.const_.levels
@@ -3698,6 +3660,23 @@ restan_data(sb::SBBRMI, new_df; freeze_constants::Bool=true,
         sb, new_df; freeze_constants, resample_groups).model)
 
 # ---- top-level op dispatch ---------------------------------------------------
+
+# Declaration roles come from the common semantic model. Keep the retained
+# source expression for Stan translation and extension hooks; its native
+# geometry, emitted names and optimized SLIC layout remain backend concerns.
+_sb_emit_prepared!(stmts, data, _node, key, source; kwargs...) =
+    _sb_emit!(stmts, data, key, source; kwargs...)
+function _sb_emit_prepared!(stmts, data, node::_BRMPreparedParameter, key, source; kwargs...)
+    _, rhs = getargs(source, 2)
+    callable = getf(rhs)
+    _sb_emit_vector_prior!(stmts, data, key, callable, rhs) && return
+    _sb_emit_prior!(stmts, key, callable, rhs) && return
+    error("sbimpl: sampled declaration `$key` has no Stan prior translation for `$callable`")
+end
+function _sb_emit_prepared!(stmts, data, node::_BRMPreparedAssignment, key, source; kwargs...)
+    _, rhs = getargs(source, 2)
+    push!(stmts, :($key = $(_sb_scalar_expr(rhs, data))))
+end
 
 _sb_emit!(stmts, data, key, op::ExprColumn; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2()) =
     _sb_emit_expr!(stmts, data, key, getf(op), op; id_lookup, obs_n, cv_groups, centered_groups, group_block_lookup, effect_overrides, r2d2)
@@ -4157,12 +4136,8 @@ function _brm_replay_structured_demo(training, context)
         merge(training.state, (; fields=Tuple(fields))), training.dependencies)
 end
 for demo in (sb_group_demo, sb_group_clamped_demo)
-    @eval _brm_replay_term(training::_BRMPreparedTerm{typeof($demo)},
-                           fresh::_BRMPreparedTerm{typeof($demo)},
-                           context::_BRMBackendContext) =
-        _brm_replay_structured_demo(training, context)
-    @eval _brm_replay_term(training::_BRMPreparedTerm{typeof($demo)},
-                           fresh::ExprColumn{typeof($demo)},
+    @eval _brm_replay_term(::typeof($demo), training,
+                           fresh::Union{_BRMPreparedTerm,ExprColumn},
                            context::_BRMBackendContext) =
         _brm_replay_structured_demo(training, context)
 end
@@ -4620,6 +4595,7 @@ function _sb_prior_arg(x::ExprColumn)
                            for (key, value) in pairs(getkwargs(x)))...))
     call
 end
+_sb_prior_arg(x::AbstractVector) = Expr(:vect, map(_sb_prior_arg, x)...)
 _sb_prior_arg(x) = error("sbimpl: unsupported prior-arg shape $(typeof(x))")
 
 # LHS backed by real data => this is a likelihood. Record the observed values
@@ -5646,193 +5622,44 @@ end
 # from surface syntax — that agreement IS the address resolution. Numeric and
 # keyword arguments are excluded on both sides, so `me(x, 0.5)` and `me(x)`
 # name one term.
-_sb_term_arg_name(x::NamedColumn) = name(x)
-_sb_term_arg_name(_x) = nothing
 _sb_term_key(t) = _brm_prepared_term_key(t)
+_sb_term_address_map(brmi::BRMI, lhs::Symbol) = _brm_term_address_map(brmi, lhs)
 
 # The three penalty blocks of a tensor smooth, in the order `_sb_t2` samples
 # them. Fixed here so the public component name and the vector index cannot
 # drift apart.
 const _SB_T2_BLOCKS = (:rr, :rn, :nr)
-_sb_t2_sd_index(c::Symbol) = findfirst(==(c), _SB_T2_BLOCKS)
 
-# term key -> the terms carrying it, for one linear predictor. Only terms that
-# own configurable parameters are listed; anything else is simply absent, so an
-# address naming it fails with "matches no term" rather than resolving to
-# something that has nothing to configure. The value is a VECTOR because two
-# spellings of one key in one predictor (`s(x) + s(x)`) make the address
-# ambiguous — the resolver reports that as its own error rather than silently
-# configuring whichever copy the walker reached first.
-const _SB_PRIOR_TERMS = (mo, mo1, me, interval_censored, s, t2, gp, hsgp, dar)
-function _sb_term_address_map(brmi::BRMI, lhs::Symbol)
-    out = Dict{Symbol,Vector{Any}}()
-    op = linear_predictor_op(brmi, lhs)
-    isnothing(op) && return out
-    for t in _sb_terms(getargs(op, 2)[2])
-        t isa ExprColumn || continue
-        any(f -> getf(t) === f, _SB_PRIOR_TERMS) || continue
-        push!(get!(() -> Any[], out, _sb_term_key(t)), t)
-    end
-    out
-end
+# Shared preparation resolves addresses, term geometry, slots, ambiguity, and
+# precedence.  sbimpl only converts each winning prior to its Stan emission
+# configuration.  Val dispatch keeps newly introduced slots fail-closed.
+_sb_term_prior_spelling(entry) = string(entry.spec.expression)
+_sb_term_slot_config(::Val{:sd}, entry) = (; prior=entry.spec.expression)
+_sb_term_slot_config(::Val{:sd_rr}, entry) = (; prior=entry.spec.expression)
+_sb_term_slot_config(::Val{:sd_rn}, entry) = (; prior=entry.spec.expression)
+_sb_term_slot_config(::Val{:sd_nr}, entry) = (; prior=entry.spec.expression)
+_sb_term_slot_config(::Val{:sigma}, entry) =
+    _sb_gp_scale_prior(entry.spec, _sb_term_prior_spelling(entry);
+        default=getf(entry.term) === dar ?
+            "`Normal(0, 0.2)` truncated to be positive" :
+            "`LogNormal(0, 1)` truncated to be positive")
+_sb_term_slot_config(::Val{:ar}, entry) =
+    _sb_dar_ar_prior(entry.spec, _sb_term_prior_spelling(entry))
+_sb_term_slot_config(::Val{:length_scale}, entry) =
+    _sb_gp_scale_prior(entry.spec, _sb_term_prior_spelling(entry))
+_sb_term_slot_config(::Val{:simplex}, entry) =
+    (; spec=entry.spec, prior=entry.spec.expression)
+_sb_term_slot_config(::Val{:latent}, entry) = (; prior=entry.spec.expression)
 
-_sb_term_spelling(spec) = begin
-    head = spec.class === :term_sd ? "sd" :
-           spec.class === :term_ar ? "ar" :
-           spec.class === :term_simplex ? "simplex" :
-           spec.class === :term_length_scale ? "length_scale" : "latent"
-    lp = isnothing(spec.predictor) ? ":" : string(spec.predictor)
-    comp = isnothing(spec.component) ? "" : ", $(spec.component)"
-    "$head($lp, $(spec.term)$comp)"
-end
-
-# One spec -> the emission-ready configuration for the term it reached, with
-# every class/term/component mismatch refused by name. Returns a pair so the
-# caller can key several statements onto ONE term (the three `t2` blocks) while
-# keeping precedence per addressed parameter rather than per term.
-function _sb_term_config(spec, t, spelling)
-    f = getf(t)
-    if spec.class === :term_sd
-        if f === s
-            isnothing(spec.component) || error(
-                "sbimpl: `$spelling` names a component, but `s(x)` has exactly " *
-                "one smoothing scale. Write `sd($(isnothing(spec.predictor) ? ":" : spec.predictor), $(spec.term))`.")
-            return (:sd, (; prior=_sb_ranef_sd_rate(spec, spelling)))
-        elseif f === t2
-            isnothing(spec.component) && error(
-                "sbimpl: `$spelling` is ambiguous — a tensor smooth has three " *
-                "independent smoothing scales. Name one of " *
-                join(("`$b`" for b in _SB_T2_BLOCKS), ", ") * ".")
-            isnothing(_sb_t2_sd_index(spec.component)) && error(
-                "sbimpl: `$spelling` names no penalty block of `$(spec.term)`; " *
-                "valid blocks are " * join(("`$b`" for b in _SB_T2_BLOCKS), ", ") * ".")
-            return (Symbol(:sd_, spec.component),
-                    (; prior=_sb_ranef_sd_rate(spec, spelling)))
-        elseif f === gp || f === hsgp || f === dar
-            # GP amplitude and differenced-AR innovation sigma are both positive
-            # model-scale standard deviations, so they share the general
-            # positive-scale family set.
-            isnothing(spec.component) || error(
-                "sbimpl: `$spelling` names a component, but `$(nameof(f))(...)` " *
-                "has exactly one scale parameter.")
-            cfg = f === dar ?
-                _sb_gp_scale_prior(spec, spelling;
-                    default="`Normal(0, 0.2)` truncated to be positive") :
-                _sb_gp_scale_prior(spec, spelling)
-            return (:sigma, cfg)
-        end
-        error("sbimpl: `$spelling` — `$(nameof(f))` has no scale to configure. " *
-              "`sd(...)` on a term applies to `s(x)`, `t2(x, z)`, `gp(x...)`, " *
-              "`hsgp(x...)`, and `dar(time)`.")
-    elseif spec.class === :term_ar
-        f === dar || error(
-            "sbimpl: `$spelling` — `$(nameof(f))` has no bounded persistence " *
-            "coefficient to configure. `ar(...)` on a term applies to `dar(time)`.")
-        isnothing(spec.component) || error("sbimpl: `$spelling` takes no component slot")
-        return (:ar, _sb_dar_ar_prior(spec, spelling))
-    elseif spec.class === :term_length_scale
-        (f === gp || f === hsgp) || error(
-            "sbimpl: `$spelling` — `$(nameof(f))` has no length scale to " *
-            "configure. `length_scale(...)` applies to `gp(x...)` and " *
-            "`hsgp(x...)`.")
-        isnothing(spec.component) || error("sbimpl: `$spelling` takes no component slot")
-        return (:length_scale, _sb_gp_scale_prior(spec, spelling))
-    elseif spec.class === :term_simplex
-        (f === mo || f === mo1) || error(
-            "sbimpl: `$spelling` — `$(nameof(f))` has no simplex to configure. " *
-            "`simplex(...)` applies to `mo(c)` and `mo1(c)`.")
-        isnothing(spec.component) || error("sbimpl: `$spelling` takes no component slot")
-        T = _as_distribution_type(spec.family)
-        (!isnothing(T) && T <: Dirichlet) || error(
-            "sbimpl: `$spelling` expects `Dirichlet(...)`; got `$(spec.family)`")
-        isempty(spec.keywords) || error(
-            "sbimpl: `$spelling ~ Dirichlet(...)` does not accept keywords")
-        return (:simplex, (; alpha=map(_sb_effect_prior_arg, spec.arguments)))
-    end
-    (f === me || f === interval_censored) || error(
-        "sbimpl: `$spelling` — `$(nameof(f))` has no latent covariate to " *
-        "configure. `latent(...)` applies to `me(x, sd)` and " *
-        "`interval_censored(x; upper=lloq)` predictor terms.")
-    isnothing(spec.component) || error("sbimpl: `$spelling` takes no component slot")
-    (:latent, (; prior=spec.expression))
-end
-
-# Resolve every term-parameter statement onto `lp -> term key -> config`.
-# Empty when the formula has none, so an unconfigured model never pays for the
-# walk and its emission is decided entirely by the Julia-side defaults.
-function _sb_term_prior_overrides(brmi::BRMI)
-    specs = term_priors(brmi)
-    isempty(specs) && return Dict{Symbol,Dict{Symbol,Any}}()
-
-    lp_names = Symbol[x.name for x in linear_predictors(brmi)]
-    # Same lazy/memoised discipline as the population and categorical paths: a
-    # predictor is walked only when a statement could reach it, and a shape
-    # that cannot be walked is skipped rather than made fatal for the model.
-    resolved = Dict{Symbol,Dict{Symbol,Vector{Any}}}()
-    map_of(lp::Symbol) = get!(resolved, lp) do
-        _sb_is_prior_declaration(brmi, lp) && return Dict{Symbol,Vector{Any}}()
-        try
-            _sb_term_address_map(brmi, lp)
-        catch
-            Dict{Symbol,Vector{Any}}()
-        end
-    end
-
-    # `:` in the predictor slot is the DEFAULT layer, exactly as everywhere
-    # else on this surface: rank 0, overridden by a named predictor at rank 1,
-    # and an exact tie is an error rather than a silent winner.
-    staged = Dict{Symbol,Dict{Symbol,Dict{Symbol,Any}}}()
-    for spec in specs
-        spelling = _sb_term_spelling(spec)
-        rank = _brm_term_prior_rank(spec)
-        targets = _brm_term_prior_targets(
-            spec, lp_names, (lp, key) -> haskey(map_of(lp), key))
-        if isempty(targets)
-            if isnothing(spec.predictor)
-                error(
-                "sbimpl: `$spelling` matches no `$(spec.term)` term in any " *
-                "linear predictor.")
-            else
-                error(
-                "sbimpl: `$spelling` matches no `$(spec.term)` term in `" *
-                "$(spec.predictor)`. Terms carrying configurable parameters " *
-                "there: " * (isempty(map_of(spec.predictor)) ? "(none)" :
-                join(("`$k`" for k in sort!(collect(keys(map_of(spec.predictor))), by=string)), ", ")) * ".")
-            end
-        end
-        for lp in targets
-            hits = map_of(lp)[spec.term]
-            length(hits) == 1 || error(
-                "sbimpl: `$spelling` is ambiguous — `$lp` carries $(length(hits)) " *
-                "terms spelled `$(spec.term)`, and a prior address cannot tell " *
-                "them apart. Give them distinguishable arguments, or drop the " *
-                "statement.")
-            slot, cfg = _sb_term_config(spec, only(hits), spelling)
-            cells = get!(staged, lp) do
-                Dict{Symbol,Dict{Symbol,Any}}()
-            end
-            per_term = get!(cells, spec.term) do
-                Dict{Symbol,Any}()
-            end
-            held = get(per_term, slot, nothing)
-            if isnothing(held) || rank > held.rank
-                per_term[slot] = (; cfg, rank, spelling)
-            elseif rank == held.rank
-                error("sbimpl: `$spelling` and `$(held.spelling)` are equally " *
-                      "specific and both set the same parameter of `$(spec.term)` " *
-                      "in `$lp`. Neither wins — make one of them more specific, " *
-                      "or drop it.")
-            end
-        end
-    end
-
-    out = Dict{Symbol,Dict{Symbol,Any}}()
-    for (lp, cells) in staged
-        out[lp] = Dict{Symbol,Any}(
-            k => Dict{Symbol,Any}(slot => held.cfg for (slot, held) in per_term)
-            for (k, per_term) in cells)
-    end
-    out
+function _sb_term_prior_overrides(brmi::BRMI;
+        resolved=_brm_resolve_term_priors(brmi; prefix="sbimpl"))
+    Dict{Symbol,Dict{Symbol,Any}}(
+        lp => Dict{Symbol,Any}(
+            key => Dict{Symbol,Any}(
+                slot => _sb_term_slot_config(Val(slot), entry)
+                for (slot, entry) in slots)
+            for (key, slots) in terms)
+        for (lp, terms) in resolved)
 end
 
 # ---- readers for the resolved term dict -------------------------------------
@@ -5900,24 +5727,49 @@ function _sb_positive_term_prior_stmt(name::Symbol, index::Int, prior)
     _sb_apply_positive_prior_bounds!(only(stmts), resolved)
 end
 
-# Dirichlet concentration for a `mo`/`mo1` term with `n_levels` levels, hence a
-# length `n_levels - 1` increment simplex. One argument is broadcast over the
-# whole simplex; `n_levels - 1` of them set it elementwise.
-function _sb_mo_alpha_expr(term_overrides, t, n_levels)
+# A monotonic term always keeps the historical `alpha` input because it sizes
+# the typed simplex declaration.  Shared preparation normalizes Dirichlet's
+# scalar/variadic shorthand to one vector-valued call; arbitrary simplex
+# distributions replace the density statement while inheriting that type.
+_sb_mo_concentration_expr(value::AbstractVector) =
+    Expr(:vect, map(_sb_effect_prior_arg, value)...)
+function _sb_mo_concentration_expr(value::ExprColumn)
+    getf(value) === fill || return _sb_effect_prior_arg(value)
+    concentration, n = getargs(value, 2)
+    Expr(:call, :rep_vector, _sb_effect_prior_arg(concentration), n)
+end
+_sb_mo_concentration_expr(value) = _sb_effect_prior_arg(value)
+
+function _sb_mo_prior_plan(term_overrides, t, n_levels)
     k = n_levels - 1
     cfg = _sb_term_cfg(term_overrides, t, :simplex)
-    isnothing(cfg) && return :(rep_vector(1., $k))
-    a = cfg.alpha
-    all(x -> !(x isa Real) || (isfinite(x) && x > 0), a) || error(
-        "sbimpl: `simplex(..., $(_sb_term_key(t))) ~ Dirichlet(...)` expects " *
-        "positive concentrations, got $(repr(a))")
-    emit(x) = x isa Real ? Float64(x) : x
-    length(a) == 1 && return :(rep_vector($(emit(only(a))), $k))
-    length(a) == k || error(
-        "sbimpl: `simplex(..., $(_sb_term_key(t))) ~ Dirichlet(...)` expects " *
-        "either one concentration or $k of them (one per increment of a " *
-        "$n_levels-level monotonic effect), got $(length(a)).")
-    Expr(:vect, map(emit, a)...)
+    default_alpha = :(rep_vector(1., $k))
+    isnothing(cfg) && return (; model=:_sb_mo, alpha=default_alpha)
+
+    prior = _brm_normalize_simplex_prior(cfg.spec.expression, k)
+    constructor = getf(prior)
+    T = _as_distribution_type(constructor)
+    if !isnothing(T) && T <: Dirichlet
+        isempty(getkwargs(prior)) || error("sbimpl: normalized Dirichlet simplex prior has keywords")
+        original_args = getargs(cfg.spec.expression)
+        alpha = if length(original_args) == 1 && only(original_args) isa Real
+            concentration = only(original_args)
+            concentration = concentration isa Real ? Float64(concentration) :
+                            _sb_effect_prior_arg(concentration)
+            Expr(:call, :rep_vector, concentration, k)
+        else
+            _sb_mo_concentration_expr(only(getargs(prior)))
+        end
+        return (; model=:_sb_mo, alpha)
+    end
+
+    args = map(_sb_effect_prior_arg, getargs(prior))
+    kwargs = map(_sb_effect_prior_arg, getkwargs(prior))
+    rhs = _sb_stan_distribution_call(constructor, args, kwargs)
+    refs = _sb_prior_references(prior)
+    rhs = _sb_bind_prior_references(rhs, refs)
+    (; model=Base.merge(_sb_mo, Expr(:call, :~, :simplex_incr, rhs)),
+       alpha=default_alpha)
 end
 
 # Location/scale of a latent-covariate term. The (0, 1) default preserves the
@@ -6115,9 +5967,10 @@ end
 # threading path — nine `_sb_emit!`/`_sb_sampling!` signatures deep — unchanged,
 # and lets a formula that configures ONLY a term parameter still reach
 # `_sb_linear_predictor!`.
-function _sb_prior_overrides(brmi::BRMI)
+function _sb_prior_overrides(brmi::BRMI;
+        term_priors=_brm_resolve_term_priors(brmi; prefix="sbimpl"))
     effects = _sb_effect_prior_overrides(brmi)
-    terms = _sb_term_prior_overrides(brmi)
+    terms = _sb_term_prior_overrides(brmi; resolved=term_priors)
     isempty(terms) && return effects
     out = Dict{Symbol,Any}()
     for lp in union(keys(effects), keys(terms))
@@ -6232,10 +6085,10 @@ function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(mo1), t, su
     end
     idx_name = Symbol(inner_name, :_idx)
     data[idx_name] = idx
-    alpha = _sb_mo_alpha_expr(term_overrides, t, n_levels)
+    prior = _sb_mo_prior_plan(term_overrides, t, n_levels)
     push!(stmts, Expr(:call, :~, col_name,
-        _sb_term_model_call(:_sb_mo, term_overrides, t;
-                            x=idx_name, alpha=alpha)))
+        _sb_term_model_call(prior.model, term_overrides, t;
+                            x=idx_name, alpha=prior.alpha)))
     push!(summands, col_name)
 end
 function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(s), t, summands;
@@ -6744,31 +6597,35 @@ end
 # (id_sym, group_key). Returns an OrderedDict keyed by bucket, carrying
 # `(group_desc, per_target::Vector{Pair{Symbol, Vector}})` in appearance order.
 # Non-ID'd ranef terms are left alone for the existing per-target emitter.
-function _sb_collect_id_buckets(brmi::BRMI)
+function _sb_collect_id_buckets(declarations)
     buckets = OrderedCollections.OrderedDict{Tuple{Symbol,Any}, Any}()
-    for (brmi_key, op_nc) in pairs(brmi.operations)
-        op = _as_expr_column(parent(op_nc)); isnothing(op) && continue
-        getf(op) === (~) || continue
-        _, rhs_raw = getargs(op, 2)
-        rhs = _as_expr_column(rhs_raw); isnothing(rhs) && continue
-        for t_raw in _sb_terms(rhs)
-            t = _as_expr_column(t_raw); isnothing(t) && continue
-            getf(t) === (|) || continue
-            id_sym, lhs, desc = _sb_ranef_parts(t)
-            id_sym === nothing && continue
-            k = (id_sym, _sb_group_key(desc))
-            if !haskey(buckets, k)
-                buckets[k] = (group_desc=desc, per_target=Pair{Symbol,Vector{Any}}[])
-            else
-                # Consistency check: same id must always pair with the same group.
-                _sb_group_desc_matches(buckets[k].group_desc, desc) ||
-                    error("sbimpl: `|$id_sym|` sees conflicting grouping factors ($(buckets[k].group_desc) vs $desc)")
-            end
-            push!(buckets[k].per_target, brmi_key => _sb_terms(lhs))
+    for declaration in declarations
+        declaration.uncorrelated && continue
+        id_sym = declaration.id
+        id_sym === nothing && continue
+        desc = declaration.descriptor
+        desc isa MultiMembershipTerm && error(
+            "sbimpl: `(e | ID | mm(...))` is not supported; `mm(...)` " *
+            "already defines one shared coefficient block across its " *
+            "membership columns")
+        k = (id_sym, _sb_group_key(desc))
+        if !haskey(buckets, k)
+            buckets[k] = (group_desc=desc, per_target=Pair{Symbol,Vector{Any}}[])
+        else
+            # Consistency check: same id must always pair with the same group.
+            _sb_group_desc_matches(buckets[k].group_desc, desc) ||
+                error("sbimpl: `|$id_sym|` sees conflicting grouping factors ($(buckets[k].group_desc) vs $desc)")
         end
+        push!(buckets[k].per_target,
+              declaration.predictor => collect(Any, declaration.effects))
     end
     buckets
 end
+
+_sb_collect_id_buckets(context::_BRMBackendContext) =
+    _sb_collect_id_buckets(context.group_declarations)
+_sb_collect_id_buckets(brmi::BRMI) =
+    _sb_collect_id_buckets(_brm_group_declarations(brmi))
 
 # Expand one collected `|ID|` bucket with the exact ranef-column emitter used
 # by Stan lowering. This is the single source of truth for public margin
@@ -8462,10 +8319,10 @@ _sb_predictor_term!(stmts, data, ::typeof(mo), t;
     end
     data[idx_name] = prepared.state.idx
     _sb_record_preproc!(data, idx_name, PreprocEntry(:mo, levels, inner_name, true))
-    alpha = _sb_mo_alpha_expr(term_overrides, t, n_levels)
+    prior = _sb_mo_prior_plan(term_overrides, t, n_levels)
     push!(stmts, Expr(:call, :~, col_name,
-        _sb_term_model_call(:_sb_mo, term_overrides, t;
-                            x=idx_name, alpha=alpha)))
+        _sb_term_model_call(prior.model, term_overrides, t;
+                            x=idx_name, alpha=prior.alpha)))
     col_name
 end
 # Measurement-error predictor `me(x_obs, sd_x)`: emit a submodel that allocates

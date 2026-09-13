@@ -34,6 +34,7 @@ include("prepared_model.jl")
 include("preparation_kernel.jl")
 include("preparation_shapes.jl")
 include("preparation_responses.jl")
+include("preparation_term_priors.jl")
 include("preparation_terms.jl")
 include("preparation_gp.jl")
 include("preparation_structured.jl")
@@ -54,6 +55,7 @@ include("sb_affine.jl")
 # derived operations, so a consumer mounts a declaration without keeping any
 # parallel registry of its own.
 include("descriptor.jl")
+include("turing_descriptor.jl")
 
 # Post-fit prediction modes — population-level ("no random effects") and
 # transported ("same draws, new covariates / new group levels") prediction.

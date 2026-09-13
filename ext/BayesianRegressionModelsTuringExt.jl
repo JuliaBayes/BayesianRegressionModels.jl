@@ -178,17 +178,14 @@ function _brm_prepared_ast(x::Tuple, callables)
     Expr(:tuple, map(value -> _brm_prepared_ast(value, callables), x)...)
 end
 
-_brm_has_row_ref(x) = false
-_brm_has_row_ref(x::BRM._BRMPreparedRef) = x.axis in (:observation, :observation_row)
-_brm_has_row_ref(x::BRM._BRMPreparedExpr) =
-    any(_brm_has_row_ref, x.args) || any(_brm_has_row_ref, values(x.kwargs))
+const _brm_has_row_ref = BRM._brm_has_row_ref
 
 function _brm_group_prior_ast(block, callables)
     Expr(:tuple, map(block.sd_prior) do prior
         if isnothing(prior)
             nothing
         else
-            prepared = BRM._brm_prepare_expr(prior)
+            prepared = BRM._brm_prepare_prior_expr(prior)
             prepared isa BRM._BRMPreparedExpr ?
                 _brm_turing_prior_ast(prepared, callables) :
                 _brm_prepared_ast(prepared, callables)
@@ -196,7 +193,7 @@ function _brm_group_prior_ast(block, callables)
     end...)
 end
 function _brm_prior_value_ast(value, callables)
-    prepared = BRM._brm_prepare_expr(value)
+    prepared = BRM._brm_prepare_prior_expr(value)
     prepared isa BRM._BRMPreparedExpr ?
         _brm_turing_prior_ast(prepared, callables) :
         _brm_prepared_ast(prepared, callables)
@@ -216,211 +213,8 @@ function _brm_term_inputs_ast(term)
 end
 
 function _brm_generic_model_ast(plan::BRM._TuringGenericPlan)
-    callables = Any[]
-    body = Expr(:block)
-    nodes = Dict{Symbol,Vector{Any}}()
-    for name in keys(plan.context.data)
-        name === plan.response_name && continue
-        push!(body.args, :($name = plan.context.data[$(QuoteNode(name))]))
-    end
-    predictor_values = Symbol[]
-    shared_groups = BRM._turing_shared_group_plans(plan.predictors)
-    shared_members = Set((member.component_index, member.block_index)
-        for shared in shared_groups for member in shared.members)
-    residual_scales = Dict{Int,Any}()
-    block_residual_scales = Dict{Tuple{Int,Int},Any}()
-    joint_mappings = Dict{Symbol,Tuple{Int,Int,Any}}()
-    for (joint_index, joint) in enumerate(plan.joint_r2d2)
-        for (mapping_index, mapping) in enumerate(joint.predictors)
-            joint_mappings[mapping.predictor] = (joint_index, mapping_index, joint)
-        end
-    end
-    for parameter in plan.parameters
-        prior = _brm_turing_parameter_ast(parameter, callables)
-        nodes[parameter.name] = Any[:($(parameter.name) ~ $prior)]
-    end
-    for assignment in plan.assignments
-        value = _brm_prepared_ast(assignment.expression, callables)
-        statement = _brm_has_row_ref(assignment.expression) ?
-            :($(assignment.name) = [$value for i in eachindex(y)]) :
-            :($(assignment.name) = $value)
-        nodes[assignment.name] = Any[statement]
-    end
-    for (index, component) in enumerate(plan.predictors)
-        beta = index == 1 ? :beta_pop : Symbol(:beta_pop_, component.predictor.name)
-        eta = Symbol(:eta_, component.predictor.name)
-        value = component.predictor.name
-        push!(predictor_values, value)
-        statements = get!(nodes, value, Any[])
-        prior_asts = map(component.priors) do prior
-            if isnothing(prior)
-                push!(callables, Normal)
-                :(callables[$(length(callables))](0, 1))
-            else
-                _brm_turing_prior_ast(BRM._brm_prepare_expr(prior), callables)
-            end
-        end
-        prior_vector = Expr(:vect, prior_asts...)
-        joint_mapping = get(joint_mappings, value, nothing)
-        if !isnothing(joint_mapping)
-            joint_index, mapping_index, joint = joint_mapping
-            site = Symbol(:r2d2_joint_, joint_index)
-            if mapping_index == 1
-                design_exprs = Any[]
-                coefficient_shares = Any[]
-                margin_shares = Any[]
-                fallback_exprs = Any[]
-                for mapping in joint.predictors
-                    mapped = plan.predictors[mapping.component_index]
-                    push!(design_exprs,
-                        :(plan.predictors[$(mapping.component_index)].design.matrix))
-                    push!(coefficient_shares, QuoteNode(mapping.coefficient_shares))
-                    push!(margin_shares, QuoteNode(mapping.margin_shares))
-                    mapped_priors = map(mapped.priors) do prior
-                        isnothing(prior) ? begin
-                            push!(callables, Normal)
-                            :(callables[$(length(callables))]())
-                        end : _brm_turing_prior_ast(
-                            BRM._brm_prepare_expr(prior), callables)
-                    end
-                    push!(fallback_exprs, Expr(:vect, mapped_priors...))
-                end
-                r2_prior = _brm_turing_prior_ast(
-                    BRM._brm_prepare_expr(joint.prior), callables)
-                reference = isnothing(joint.reference_scale) ? nothing :
-                    _brm_prepared_ast(
-                        BRM._brm_prepare_expr(joint.reference_scale), callables)
-                push!(statements, :($site ~ to_submodel(_brm_r2d2_joint(
-                    $(Expr(:tuple, design_exprs...)),
-                    $(Expr(:tuple, coefficient_shares...)),
-                    $(Expr(:tuple, margin_shares...)), $r2_prior,
-                    $(joint.alpha), $reference,
-                    $(Expr(:tuple, fallback_exprs...))))))
-            end
-            push!(statements, :($beta = $site.betas[$mapping_index]))
-            mapping = joint.predictors[mapping_index]
-            block_residual_scales[(index, mapping.block_index)] =
-                :($site.scales[$mapping_index])
-            residual_scale = nothing
-        elseif isnothing(component.r2d2)
-            push!(statements, :($beta ~ product_distribution($prior_vector)))
-            residual_scale = nothing
-        else
-            r2d2 = component.r2d2
-            r2_prior = _brm_turing_prior_ast(
-                BRM._brm_prepare_expr(r2d2.prior), callables)
-            total_scale = isnothing(r2d2.total_scale) ? nothing :
-                _brm_prepared_ast(BRM._brm_prepare_expr(r2d2.total_scale), callables)
-            site = Symbol(:r2d2_, value)
-            push!(statements, :($site ~ to_submodel(_brm_r2d2_population(
-                plan.predictors[$index].design.matrix,
-                $(QuoteNode(r2d2.share_indices)), $r2_prior,
-                $(r2d2.alpha), $total_scale, $prior_vector))))
-            push!(statements, :($beta = $site.beta))
-            residual_scale = :($site.residual_scale)
-        end
-        residual_scales[index] = residual_scale
-        push!(statements, :($eta = plan.predictors[$index].design.matrix * $beta +
-                                  plan.predictors[$index].design.fixed))
-        if !isempty(component.random_effects)
-            effect = Symbol(:group_effect_, index)
-            push!(statements, :($effect = zeros(length(plan.response))))
-            for group_index in eachindex(component.random_effects)
-                (index, group_index) in shared_members && continue
-                group = Symbol(:group_, index, :_, group_index)
-                group_scale = get(block_residual_scales, (index, group_index),
-                                  residual_scale)
-                priors = haskey(block_residual_scales, (index, group_index)) ?
-                    Expr(:tuple, fill(nothing,
-                        size(component.random_effects[group_index].matrix, 2))...) :
-                    _brm_group_prior_ast(
-                        component.random_effects[group_index], callables)
-                push!(statements, :($group ~ to_submodel(
-                    _brm_group_effect_model(
-                        plan.predictors[$index].random_effects[$group_index],
-                        $priors, $group_scale))))
-                push!(statements, :($effect = $effect + $group.effect))
-            end
-            push!(statements, :($eta = $eta + $effect))
-        end
-        for term_index in eachindex(component.terms)
-            term_site = Symbol(:term_, component.predictor.name, :_, term_index)
-            priors = _brm_term_priors_ast(component.terms[term_index], callables)
-            inputs = _brm_term_inputs_ast(component.terms[term_index])
-            push!(statements, :($term_site ~ to_submodel(
-                BRM._brm_turing_term_model(plan.predictors[$index].terms[$term_index],
-                    length(plan.response), $priors, $inputs))))
-            push!(statements, :($eta = $eta + $term_site.effect))
-        end
-        inverse_link = InverseFunctions.inverse(component.predictor.link_lhs_fn)
-        push!(callables, inverse_link)
-        push!(statements, :($value = (callables[$(length(callables))]).($eta)))
-    end
-    emitted = Set{Symbol}()
-    for name in plan.prepared.order
-        statements = get(nodes, name, nothing)
-        isnothing(statements) && continue
-        append!(body.args, statements)
-        push!(emitted, name)
-    end
-    for (name, statements) in nodes
-        name in emitted || append!(body.args, statements)
-    end
-    for (shared_index, shared) in enumerate(shared_groups)
-        site = Symbol(:shared_group_, shared_index)
-        block_exprs = [:(plan.predictors[$(member.component_index)].random_effects[
-            $(member.block_index)]) for member in shared.members]
-        blocks = Expr(:tuple, block_exprs...)
-        prior_exprs = Any[]
-        scale_exprs = Any[]
-        for (member, block) in zip(shared.members, shared.blocks)
-            scale_key = (member.component_index, member.block_index)
-            if haskey(block_residual_scales, scale_key)
-                append!(prior_exprs, fill(nothing, size(block.matrix, 2)))
-            else
-                append!(prior_exprs, map(block.sd_prior) do prior
-                    isnothing(prior) ? nothing :
-                        _brm_turing_prior_ast(BRM._brm_prepare_expr(prior), callables)
-                end)
-            end
-            push!(scale_exprs, get(block_residual_scales,
-                (member.component_index, member.block_index),
-                residual_scales[member.component_index]))
-        end
-        priors = Expr(:tuple, prior_exprs...)
-        scales = Expr(:tuple, scale_exprs...)
-        push!(body.args, :($site ~ to_submodel(
-            _brm_shared_group_effect_model($blocks, $priors, $scales))))
-        for (effect_index, member) in enumerate(shared.members)
-            eta = Symbol(:eta_, member.predictor)
-            value = member.predictor
-            component = plan.predictors[member.component_index]
-            inverse_link = InverseFunctions.inverse(component.predictor.link_lhs_fn)
-            push!(callables, inverse_link)
-            push!(body.args, :($eta = $eta + $site.effects[$effect_index]))
-            push!(body.args, :($value = (callables[$(length(callables))]).($eta)))
-        end
-    end
-    distribution = _brm_prepared_ast(plan.distribution, callables)
-    push!(body.args, quote
-        for i in eachindex(y)
-            y[i] ~ _brm_generic_observation(
-                $distribution, plan.response_modifier,
-                plan.observation_weight, i)
-        end
-    end)
-    parameter_values = Symbol[parameter.name for parameter in plan.parameters]
-    names = Tuple((predictor_values..., parameter_values...))
-    values = Expr(:tuple, predictor_values..., parameter_values...)
-    push!(body.args, :(merge(NamedTuple{$(QuoteNode(names))}($values),
-                             (; response=y))))
-    function_name = gensym(:brm_generic_model)
-    definition = :(Turing.@model function $function_name(plan, callables,
-                                                          group_models,
-                                                          term_models, y)
-        $body
-    end)
-    (; definition, function_name, callables=Tuple(callables))
+    graph = (; plans=(plan,), joint_r2d2=plan.joint_r2d2)
+    _brm_generic_response_graph_ast(graph; single=true)
 end
 
 const _BRM_GENERIC_MODEL_CACHE = Dict{Any,Tuple{Function,Expr}}()
@@ -448,7 +242,7 @@ function _brm_staged_turing_evaluator(definition)
             @__MODULE__, @__MODULE__, evaluator))
 end
 
-function _brm_generic_multi_model_ast(multi::BRM._TuringMultiResponsePlan)
+function _brm_generic_response_graph_ast(multi; single::Bool=false)
     callables = Any[]
     body = Expr(:block)
     node_statements = Dict{Symbol,Vector{Any}}()
@@ -456,7 +250,9 @@ function _brm_generic_multi_model_ast(multi::BRM._TuringMultiResponsePlan)
     predictors = Dict{Symbol,Tuple{Int,Int,Any}}()
     assignments = Dict{Symbol,Tuple{Int,Any}}()
     data_sources = Dict{Symbol,Int}()
-    response_symbols = [Symbol(:y_, i) for i in eachindex(multi.plans)]
+    response_symbols = single ? [:y] :
+        [Symbol(:y_, i) for i in eachindex(multi.plans)]
+    response_names = Set(plan.response_name for plan in multi.plans)
     for (pi, plan) in enumerate(multi.plans)
         foreach(key -> get!(data_sources, key, pi), keys(plan.context.data))
         foreach(p -> get!(parameters, p.name, p), plan.parameters)
@@ -466,6 +262,7 @@ function _brm_generic_multi_model_ast(multi::BRM._TuringMultiResponsePlan)
         end
     end
     for (name, pi) in data_sources
+        name in response_names && continue
         push!(body.args, :($name = multi.plans[$pi].context.data[$(QuoteNode(name))]))
     end
     predictor_entries = Tuple(values(predictors))
@@ -473,6 +270,12 @@ function _brm_generic_multi_model_ast(multi::BRM._TuringMultiResponsePlan)
         Tuple(entry[3] for entry in predictor_entries))
     shared_members = Set((member.predictor, member.block_index)
         for shared in shared_groups for member in shared.members)
+    shared_predictors = Set(member.predictor
+        for shared in shared_groups for member in shared.members)
+    predictor_bases = Dict(name => gensym(Symbol(:predictor_base_, name))
+                          for name in shared_predictors)
+    shared_barriers = [gensym(:shared_group) for _ in shared_groups]
+    predictor_shared_nodes = Dict(name => Symbol[] for name in shared_predictors)
     residual_scales = Dict{Symbol,Any}()
     block_residual_scales = Dict{Tuple{Symbol,Int},Any}()
     joint_mappings = Dict{Symbol,Tuple{Int,Int,Any}}()
@@ -496,7 +299,8 @@ function _brm_generic_multi_model_ast(multi::BRM._TuringMultiResponsePlan)
     end
     logical = Symbol[]
     for (name, (pi, ci, component)) in predictors
-        beta = length(predictors) == 1 ? :beta_pop : Symbol(:beta_pop_, name)
+        beta = single ? (ci == 1 ? :beta_pop : Symbol(:beta_pop_, name)) :
+               length(predictors) == 1 ? :beta_pop : Symbol(:beta_pop_, name)
         eta = Symbol(:eta_, name)
         push!(logical, name)
         prior_asts = map(component.priors) do prior
@@ -519,9 +323,10 @@ function _brm_generic_multi_model_ast(multi::BRM._TuringMultiResponsePlan)
                 margin_shares = Any[]
                 fallback_exprs = Any[]
                 for mapping in joint.predictors
-                    mapped = multi.plans[mapping.plan_index].predictors[
+                    mapped_plan_index = single ? 1 : mapping.plan_index
+                    mapped = multi.plans[mapped_plan_index].predictors[
                         mapping.component_index]
-                    push!(design_exprs, :(multi.plans[$(mapping.plan_index)].predictors[
+                    push!(design_exprs, :(multi.plans[$mapped_plan_index].predictors[
                         $(mapping.component_index)].design.matrix))
                     push!(coefficient_shares, QuoteNode(mapping.coefficient_shares))
                     push!(margin_shares, QuoteNode(mapping.margin_shares))
@@ -571,9 +376,16 @@ function _brm_generic_multi_model_ast(multi::BRM._TuringMultiResponsePlan)
         residual_scales[name] = residual_scale
         push!(statements, :($eta = multi.plans[$pi].predictors[$ci].design.matrix *
             $beta + multi.plans[$pi].predictors[$ci].design.fixed))
+        # Keep the established single-response summation order: saved draws
+        # produce exactly the same predictor values for crossed group blocks.
+        group_effect = single ? Symbol(:group_effect_, ci) : eta
+        if single && !isempty(component.random_effects)
+            push!(statements, :($group_effect = zeros(length(multi.plans[$pi].response))))
+        end
         for (gi, _) in enumerate(component.random_effects)
             (name, gi) in shared_members && continue
-            group = Symbol(:group_, name, :_, gi)
+            group = single ? Symbol(:group_, ci, :_, gi) :
+                    Symbol(:group_, name, :_, gi)
             group_scale = get(block_residual_scales, (name, gi), residual_scale)
             priors = haskey(block_residual_scales, (name, gi)) ?
                 Expr(:tuple, fill(nothing,
@@ -582,7 +394,10 @@ function _brm_generic_multi_model_ast(multi::BRM._TuringMultiResponsePlan)
             push!(statements, :($group ~ to_submodel(_brm_group_effect_model(
                 multi.plans[$pi].predictors[$ci].random_effects[$gi], $priors,
                 $group_scale))))
-            push!(statements, :($eta = $eta + $group.effect))
+            push!(statements, :($group_effect = $group_effect + $group.effect))
+        end
+        if single && !isempty(component.random_effects)
+            push!(statements, :($eta = $eta + $group_effect))
         end
         for term_index in eachindex(component.terms)
             term_site = Symbol(:term_, name, :_, term_index)
@@ -597,20 +412,17 @@ function _brm_generic_multi_model_ast(multi::BRM._TuringMultiResponsePlan)
         inverse_link = InverseFunctions.inverse(component.predictor.link_lhs_fn)
         push!(callables, inverse_link)
         push!(statements, :($name = (callables[$(length(callables))]).($eta)))
-    end
-    emitted = Set{Symbol}()
-    for plan in multi.plans, name in plan.prepared.order
-        name in emitted && continue
-        statements = get(node_statements, name, nothing)
-        isnothing(statements) && continue
-        append!(body.args, statements)
-        push!(emitted, name)
-    end
-    for (name, statements) in node_statements
-        name in emitted || append!(body.args, statements)
+        if name in shared_predictors
+            finalizer = pop!(statements)
+            base = predictor_bases[name]
+            node_statements[base] = pop!(node_statements, name)
+            node_statements[name] = Any[finalizer]
+        end
     end
     for (shared_index, shared) in enumerate(shared_groups)
         site = Symbol(:shared_group_, shared_index)
+        barrier = shared_barriers[shared_index]
+        statements = get!(node_statements, barrier, Any[])
         block_exprs = Any[]
         prior_exprs = Any[]
         scale_exprs = Any[]
@@ -631,17 +443,64 @@ function _brm_generic_multi_model_ast(multi::BRM._TuringMultiResponsePlan)
                 (member.predictor, member.block_index),
                 residual_scales[member.predictor]))
         end
-        push!(body.args, :($site ~ to_submodel(_brm_shared_group_effect_model(
+        push!(statements, :($site ~ to_submodel(_brm_shared_group_effect_model(
             $(Expr(:tuple, block_exprs...)), $(Expr(:tuple, prior_exprs...)),
             $(Expr(:tuple, scale_exprs...))))))
         for (effect_index, member) in enumerate(shared.members)
             eta = Symbol(:eta_, member.predictor)
-            pi, ci, component = predictor_entries[member.component_index]
-            inverse_link = InverseFunctions.inverse(component.predictor.link_lhs_fn)
-            push!(callables, inverse_link)
-            push!(body.args, :($eta = $eta + $site.effects[$effect_index]))
-            push!(body.args, :($(member.predictor) =
-                (callables[$(length(callables))]).($eta)))
+            push!(statements, :($eta = $eta + $site.effects[$effect_index]))
+            push!(predictor_shared_nodes[member.predictor], barrier)
+        end
+    end
+
+    emitted = Set{Symbol}()
+    if isempty(shared_groups)
+        for plan in multi.plans, name in plan.prepared.order
+            name in emitted && continue
+            statements = get(node_statements, name, nothing)
+            isnothing(statements) && continue
+            append!(body.args, statements)
+            push!(emitted, name)
+        end
+        for (name, statements) in node_statements
+            name in emitted || append!(body.args, statements)
+        end
+    else
+        operations = Dict{Symbol,Any}()
+        ordered_names = Symbol[]
+        for plan in multi.plans, operation in plan.prepared.program.operations
+            haskey(operations, operation.name) && continue
+            operations[operation.name] = operation
+            push!(ordered_names, operation.name)
+        end
+        scheduled = Any[]
+        for name in ordered_names
+            operation = operations[name]
+            if name in shared_predictors
+                base = predictor_bases[name]
+                push!(scheduled, BRM._BRMPreparedOperation(
+                    base, :emitter, nothing, operation.dependencies))
+                push!(scheduled, BRM._BRMPreparedOperation(
+                    name, operation.role, operation.expression,
+                    (base, predictor_shared_nodes[name]...)))
+            else
+                push!(scheduled, operation)
+            end
+        end
+        for (shared_index, shared) in enumerate(shared_groups)
+            barrier = shared_barriers[shared_index]
+            dependencies = Tuple(predictor_bases[member.predictor]
+                                 for member in shared.members)
+            push!(scheduled, BRM._BRMPreparedOperation(
+                barrier, :emitter, nothing, dependencies))
+        end
+        for name in BRM._brm_operation_order(scheduled)
+            statements = get(node_statements, name, nothing)
+            isnothing(statements) || append!(body.args, statements)
+            push!(emitted, name)
+        end
+        for (name, statements) in node_statements
+            name in emitted || append!(body.args, statements)
         end
     end
     value_names = Tuple((logical..., keys(parameters)..., keys(assignments)...))
@@ -661,8 +520,9 @@ function _brm_generic_multi_model_ast(multi::BRM._TuringMultiResponsePlan)
             NamedTuple{$(QuoteNode(value_names))}($value_expr),
             (; response=$y))))
     end
-    push!(body.args, :(; responses=$(Expr(:tuple, returned...))))
-    function_name = gensym(:brm_generic_multi_model)
+    push!(body.args, single ? first(returned) :
+        :(; responses=$(Expr(:tuple, returned...))))
+    function_name = gensym(single ? :brm_generic_model : :brm_generic_multi_model)
     signature = Expr(:call, function_name, :multi, :callables,
                      :group_models, :term_models, response_symbols...)
     definition = Expr(:macrocall, GlobalRef(Turing, Symbol("@model")),
@@ -670,6 +530,9 @@ function _brm_generic_multi_model_ast(multi::BRM._TuringMultiResponsePlan)
                       Expr(:function, signature, body))
     (; definition, function_name, callables=Tuple(callables))
 end
+
+_brm_generic_multi_model_ast(multi::BRM._TuringMultiResponsePlan) =
+    _brm_generic_response_graph_ast(multi; single=false)
 
 function _brm_generic_structure_key(definition::Expr)
     function_definition = last(definition.args)
@@ -685,8 +548,10 @@ function BRM._brm_turing_model(plan::BRM._TuringGenericPlan)
     evaluator, definition = _brm_cached_generic_evaluator(lowered)
     group_models = ()
     term_models = Tuple(component.terms for component in plan.predictors)
+    graph = (; plans=(plan,), joint_r2d2=plan.joint_r2d2)
     model = Turing.DynamicPPL.Model{false}(evaluator,
-        (; plan, callables=lowered.callables, group_models, term_models, y=plan.response))
+        (; multi=graph, callables=lowered.callables, group_models, term_models,
+           y=plan.response))
     plan.source_ast = definition
     model
 end
