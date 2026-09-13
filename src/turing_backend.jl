@@ -607,54 +607,6 @@ function _turing_materialize_response_modifier(
             support_kind, prefix="Turing backend")
 end
 
-function _turing_has_categorical_basis(column)
-    preprocess = column.preprocess
-    isnothing(preprocess) && return false
-    preprocess.kind === :population_factor_dummy && return true
-    preprocess.kind === :interaction || return false
-    any(_turing_has_categorical_basis, preprocess.dependencies)
-end
-
-function _turing_predictor_component(brmi::BRMI, context::_BRMBackendContext,
-                                     predictor::Symbol;
-                                     available_predictors=(predictor,),
-                                     allow_group_terms::Bool=false,
-                                     allow_random_slopes::Bool=false,
-                                     allow_zero_correlation::Bool=false)
-    random_effects = _brm_simple_random_effect_plans(
-        brmi, predictor, context; required=true)
-    if !allow_group_terms && !isempty(random_effects)
-        error("Turing backend: random effects for predictor `$predictor` are " *
-              "not yet supported by this likelihood plan")
-    end
-    if !allow_random_slopes && any(!block.intercept_only for block in random_effects)
-        error("Turing backend: random slopes for predictor `$predictor` are " *
-              "not yet supported by this likelihood plan")
-    end
-    if !allow_zero_correlation && any(block.zero_correlation
-                                      for block in random_effects)
-        error("Turing backend: zero-correlation `||` random effects for " *
-              "predictor `$predictor` are not yet supported by this likelihood plan")
-    end
-    if any(block.zero_correlation &&
-           any(_turing_has_categorical_basis, block.columns)
-           for block in random_effects)
-        error("Turing backend: categorical random slopes inside a " *
-              "zero-correlation `||` block are not yet parity-safe; " *
-              "use correlated `|` random effects")
-    end
-    predictor_plan = _brm_simple_population_predictor(
-        brmi, predictor, context; required=true)
-    design = predictor_plan.design
-    k = size(design.matrix, 2)
-    overrides = _brm_simple_population_effect_overrides(
-        brmi, design; prefix="Turing backend", available_predictors)
-    beta_location, beta_scale = _brm_materialize_normal_effect_priors(
-        overrides, k; prefix="Turing backend")
-    _TuringPopulationComponent(
-        predictor_plan, design, beta_location, beta_scale, random_effects)
-end
-
 function _turing_generic_predictor_component(
         brmi::BRMI, context::_BRMBackendContext, predictor::Symbol;
         available_predictors=(predictor,), training=nothing)
