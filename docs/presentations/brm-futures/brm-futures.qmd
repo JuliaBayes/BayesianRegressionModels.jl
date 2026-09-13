@@ -1,0 +1,616 @@
+---
+title: "Beyond feature parity"
+subtitle: "What a backend-neutral regression language makes possible"
+author: "BayesianRegressionModels.jl collaborator deck"
+date: "2026-09-13"
+pagetitle: "BRM.jl and brms: future capability"
+description-meta: "A collaborator-facing comparison of the future capability enabled by brms and BayesianRegressionModels.jl architectures."
+format:
+  revealjs:
+    theme: [simple, theme.scss]
+    embed-resources: true
+    self-contained-math: true
+    width: 1600
+    height: 900
+    margin: 0.06
+    center: false
+    transition: fade
+    background-transition: fade
+    controls: true
+    navigation-mode: linear
+    slide-number: c/t
+    show-slide-number: all
+    hash-type: number
+    menu: false
+    progress: true
+    code-overflow: wrap
+    pdf-separate-fragments: false
+    pdf-max-pages-per-slide: 1
+    footer: "<span class='backend-legend'><b>Backend status</b><span class='legend-both'>Both</span><span class='legend-stan'>StanBlocks only</span><span class='legend-turing'>Turing only</span><span class='legend-planned'>Planned / research</span></span>"
+---
+
+## This is not a feature race
+
+<div class="section-kicker">The comparison that matters</div>
+
+<div class="lede">brms already owns the mature applied-regression benchmark. The question is what each architecture makes <em>cheap to add next</em>.</div>
+
+<div class="rule"></div>
+
+:::: {.grid-3}
+::: {.card .accent-blue}
+<span class="label brms">brms today</span>
+
+**Deep, coherent Stan generation**
+
+Distributional, nonlinear, multivariate, smooth, autocorrelated, censored, missing-data, and custom-family models—with a rich post-processing ecosystem.
+:::
+
+::: {.card .accent-teal}
+<span class="label demo">BRM today</span>
+
+**One formula, shared semantics**
+
+The same `BRMI` is prepared once, then lowered to generated StanBlocks/Stan or a direct Turing model.
+:::
+
+::: {.card .accent-amber}
+<span class="label enabled">The future axis</span>
+
+**Where can computation vary without rewriting statistical intent?**
+
+That is an architectural capability—not a claim that every implementation already exists.
+:::
+::::
+
+::: {.notes}
+Lead by taking brms seriously. It is the mature reference point, not a straw man. The comparison is deliberately about the marginal cost and coherence of future additions. “Architecture-enabled” means a seam exists and engineering is still required.
+
+Sources: current brms overview and `brm()` reference (brms 2.23.2); BRM `docs/refactoring.md` and `docs/src/turing-backend.md` at repository revision `bca7093487eff9d7c55ea200b256bd7655e15f52`.
+:::
+
+## One declaration; two computational realizations
+
+<div class="section-kicker">Demonstrated architecture</div>
+
+<div class="formula-strip"><span class="fn">@brm</span> begin · μ ~ 1 + treatment + <span class="fn">hsgp</span>(time) + (1 + treatment | site) · log(σ) ~ 1 + <span class="fn">hsgp</span>(time) · y ~ censored(Normal(μ, σ), lower, upper) · end</div>
+
+::::: {.pipeline}
+::: {.node}
+<span class="label demo">authoring</span>
+
+**`@brm` formula**
+
+<span class="small muted">statistical intent</span>
+:::
+::: {.arrow}
+→
+:::
+::: {.node .core}
+<span class="label demo">shared</span>
+
+**Prepared BRMI**
+
+<span class="small muted">dependencies · shapes · priors<br/>fitted transforms · replay</span>
+:::
+::: {.arrow}
+→
+:::
+:::: {.branch-pair}
+::: {.node}
+<span class="status stan">StanBlocks</span>
+
+**SLIC → Stan**
+:::
+::: {.node}
+<span class="status turing">Turing</span>
+
+**DynamicPPL model**
+:::
+::::
+:::::
+
+<div class="small muted" style="margin-top: 1em; text-align:center;">The invariant is the prepared statistical program. Parameter geometry and execution belong to the backend.</div>
+
+::: {.notes}
+The shared layer records data and parameter dependencies, axes, population designs, group blocks, observation semantics, term metadata, and fitted preprocessing. StanBlocks remains a generated-program backend. Turing consumes the plan directly and generates a DynamicPPL model; it does not interpret SLIC or Stan.
+
+Demonstrated at the baseline: a 14-model Stan preservation corpus and broad focused Turing gates are recorded in the refactor brief. Exact gate receipts belong to that brief; this slide claims the architecture, not universal backend parity.
+:::
+
+## 1 · Extension can mean composition, not surgery
+
+<div class="section-kicker">Future capability axis</div>
+
+<div class="comparison-row header"><div></div><div>brms</div><div>BRM.jl</div></div>
+<div class="comparison-row"><div><strong>Custom response</strong></div><div>Excellent supported route: `custom_family()` + Stan functions + R post-processing hooks.</div><div>Callable Julia distribution/factory survives preparation; Turing can execute it directly. StanBlocks adds an explicit translation.</div></div>
+<div class="comparison-row"><div><strong>New term</strong></div><div>Extend formula/parser/code generation, or inject Stan with `stanvar()`.</div><div>Add a typed prepared record; implement backend methods only where execution exists.</div></div>
+<div class="comparison-row"><div><strong>Composition</strong></div><div>Large built-in grammar; custom pieces must integrate with generated Stan and downstream methods.</div><div>Prepared callables, evidence wrappers, weights, links, and terms compose before backend lowering.</div></div>
+
+:::: {.grid-2 style="margin-top: 0.7em;"}
+::: {.card .accent-blue}
+<span class="label brms">Fairness</span>
+
+brms already exposes unusually strong escape hatches. Its constraint is deliberate: the executable language is Stan.
+:::
+::: {.card .accent-amber}
+<span class="label enabled">Architecture-enabled</span>
+
+BRM can make “native Julia first, Stan translation second” a normal extension path—but only after validation, replay, and output contracts are implemented.
+:::
+::::
+
+::: {.notes}
+Do not say brms is not extensible. `custom_family()` specifies distributional parameters and links; the user supplies Stan density code, and may supply R functions for `log_lik`, posterior prediction, and expected prediction. `stanvar()` can inject code into every major Stan block. The difference is the executable substrate and how many surfaces must be kept aligned.
+
+Sources: brms `custom_family()` and `stanvar()` reference pages, both for brms 2.23.2; BRM callable-prior and complete-call translation contracts in `docs/refactoring.md`.
+:::
+
+## 2 · Structure need not fit one rectangular table
+
+<div class="section-kicker">Future capability axis</div>
+
+:::: {.grid-2 .wide-right}
+::: {.card .accent-blue .tight}
+<span class="label brms">brms strength</span>
+
+Nonlinear formulas of arbitrary complexity, multivariate models, autocorrelation, splines/GPs, phylogenetic covariance, and custom Stan give broad structural reach.
+
+Its primary user contract remains a formula plus a `data.frame`, with extra data/code supplied through established escape hatches.
+:::
+
+::: {.card .accent-teal .tight}
+<span class="label demo">BRM demonstrated</span>
+
+**Different axes can meet inside one model.**
+
+$$
+C_j(t) = \frac{D_j}{V_j}\exp\!\left(-\frac{CL_j}{V_j}t\right),
+\qquad
+y_{jk} \sim \mathcal N(C_j(t_{jk}),\sigma)
+$$
+
+`kernel(...)` evaluates one structural cell per subject; `ragged(time, subject)` joins an observation axis; formula predictors still own population and group effects.
+:::
+::::
+
+<div class="small muted" style="margin-top:.75em;"><span class="label enabled">Enabled with engineering</span> State-space, ODE, renewal, and multistream models can share formula-level priors/evidence while backend-native cells own mechanics. Each new cell still needs explicit shape, AD, replay, and output support.</div>
+
+::: {.notes}
+BRM currently demonstrates this separation in the population-PK kernel, Warfarin, CDC wastewater renewal, and grey-seal integrated-population examples. The important future capability is not “arbitrary Julia” alone; it is arbitrary structural mechanics that retain formula-governed regression effects, priors, evidence, replay, and named outputs.
+
+Fairness source: current brms nonlinear and multivariate vignettes. BRM source: `docs/src/feature-atlas.md`, `research/warfarin`, `research/wastewater`, and `research/seal`.
+:::
+
+## 3 · A backend can change the question—not the model
+
+<div class="section-kicker">Future capability axis</div>
+
+:::: {.grid-3}
+::: {.card .accent-blue}
+<span class="status stan">StanBlocks only</span>
+
+**Generated program control**
+
+Stan compilation, BridgeStan density access, SLIC extension hooks, descriptor-driven draw transport, and current online WarmupHMC adaptive-centering machinery.
+:::
+
+::: {.card .accent-violet}
+<span class="status turing">Turing only</span>
+
+**Julia-native execution**
+
+Untranslated Julia distributions and functions, DynamicPPL model composition, and direct access to Turing’s inference ecosystem.
+:::
+
+::: {.card .accent-teal}
+<span class="status both">Both</span>
+
+**Shared statistical contract**
+
+Population/distributional predictors, broad priors and likelihoods, group effects, advanced terms, fitted preprocessing, pointwise likelihood, prediction, and replay—within stated subsets.
+:::
+::::
+
+<div class="equation-panel" style="margin-top:.72em;">
+<strong>Future bet:</strong> choose marginalization, HMC implementation, automatic differentiation, particles, or specialized kernels <em>after</em> model preparation—not by forking the public formula language.
+</div>
+
+::: {.notes}
+This is the strongest architectural claim and should be phrased conditionally. Today’s Turing and StanBlocks lowerings do not have universal parity. Future inference methods still require implementation, tests, diagnostics, and output/replay support. The architecture makes those additions localizable; it does not supply them automatically.
+
+brms also offers multiple inference algorithms (`sampling`, mean-field/full-rank VI, Pathfinder, Laplace, fixed-parameter) and two Stan interfaces (`rstan`, `cmdstanr`). Those are meaningful algorithm choices within one generated Stan program, and should be acknowledged if asked.
+:::
+
+## 4 · Geometry is a model implementation choice
+
+<div class="section-kicker">Why centering belongs above handwritten code</div>
+
+:::: {.grid-2}
+::: {.equation-panel}
+<span class="label demo">Centered</span>
+
+$$
+\beta_k \sim \mathcal N(0,s_k)
+$$
+
+The physical coefficient is sampled directly.
+
+<span class="small muted">Often better when the likelihood strongly identifies the coefficient.</span>
+:::
+
+::: {.equation-panel}
+<span class="label demo">Noncentered</span>
+
+$$
+z_k \sim \mathcal N(0,1),\qquad \beta_k=s_kz_k
+$$
+
+Prior scale and latent coordinate are separated.
+
+<span class="small muted">Often better when data are weak and funnel geometry dominates.</span>
+:::
+::::
+
+<div class="card accent-amber" style="margin-top:.7em; text-align:center;">
+<span class="label research">The hard part</span>
+
+The preferred coordinate can differ by group, term, frequency, and stage of adaptation. A fixed global switch throws information away.
+</div>
+
+::: {.notes}
+The classic centered/noncentered tradeoff depends on information. Stan’s user guide explicitly notes noncentering tends to help when the data weakly identify the lower-level parameters, while centering can be more efficient when information is strong. Papaspiliopoulos, Roberts, and Sköld (2007) develop centered, noncentered, and partially noncentered parameterizations. Gorinova et al. (2020) demonstrates automatic partial reparameterization can avoid catastrophic choices and sometimes outperform both endpoints.
+:::
+
+## HSGP turns one geometry choice into many
+
+<div class="section-kicker">Adaptive-centering case study · integration gate</div>
+
+:::: {.grid-2 .wide-left}
+::: {.card .accent-teal .tight}
+$$
+f(x) \approx \sum_{k=1}^{m}\phi_k(x)\,s_k(\rho,\sigma)\,z_k
+$$
+
+Low-frequency and high-frequency basis weights can have very different spectral scales and posterior information.
+
+With partial centeredness $c_k\in[0,1]$:
+
+$$
+u_k\sim\mathcal N(0,s_k^{2c_k}),\qquad
+\beta_k=s_k^{1-c_k}u_k
+$$
+
+The physical function is unchanged; only its coordinates move.
+:::
+
+::: {.case-gate}
+<div class="gate-title">Case artifact is intentionally gated</div>
+
+The dependency lane is still validating the immutable Generable motorcycle reproduction, backend parity, diagnostics, and plots.
+
+<span class="small">Final deck will replace this panel only after that work lands canonically.</span>
+:::
+::::
+
+::: {.notes}
+The HSGP approximation is from Riutort-Mayol et al. (2023): a low-rank Laplace-eigenfunction representation that reduces the GP to a linear basis expansion. The adaptive case follows the public Generable motorcycle example at immutable companion revision `0d00b8535e2c20c49017d03c7b060940eb8e7041`.
+
+This slide is the only allowed pre-integration placeholder. Do not present the deck as final while it remains.
+:::
+
+## Same posterior target; measurable geometry
+
+<div class="section-kicker">Adaptive-centering case study · integration gate</div>
+
+:::: {.grid-3}
+::: {.card .accent-blue}
+<span class="label demo">Noncentered</span>
+
+All $c_k=0$.
+
+Pilot baseline and a robust weak-data default.
+:::
+::: {.card .accent-coral}
+<span class="label demo">Centered</span>
+
+All $c_k=1$.
+
+Useful control; can amplify scale–weight coupling.
+:::
+::: {.card .accent-amber}
+<span class="label research">Adaptive</span>
+
+Choose each $c_k$ from pilot draws, then refit with a fixed geometry.
+
+Offline pilot/refit—not online adaptation.
+:::
+::::
+
+::: {.case-gate style="min-height:175px; margin-top:.72em;"}
+<div class="gate-title">Awaiting reproducible results panel</div>
+
+Selected centeredness · posterior mean/scale bands · R-hat/ESS/divergences · gradient evaluations · wall time · both backends
+:::
+
+::: {.notes}
+The final results slide must report the exact model, data transform, number of basis functions, chain count, draw/evaluation budget, seeds, and source revision. Diagnostics must be described as bounded case-study evidence, not a universal performance claim. The same physical target and Jacobian parity must be tested across Turing/Enzyme and StanBlocks/BridgeStan before comparing sampler behavior.
+:::
+
+## 5 · Replay and outputs are part of model semantics
+
+<div class="section-kicker">Future capability axis</div>
+
+::::: {.pipeline style="grid-template-columns: 1fr .12fr 1.2fr .12fr 1.05fr;"}
+::: {.node}
+<span class="label demo">fit</span>
+
+**raw data**
+
+<span class="small muted">levels · centers · bases · domains</span>
+:::
+::: {.arrow}
+→
+:::
+::: {.node .core}
+<span class="label demo">freeze</span>
+
+**prepared state**
+
+<span class="small muted">apply, do not silently refit</span>
+:::
+::: {.arrow}
+→
+:::
+:::: {.branch-pair}
+::: {.node}
+**new rows**
+
+<span class="small muted">same coordinates</span>
+:::
+::: {.node}
+**new groups**
+
+<span class="small muted">explicit resampling</span>
+:::
+::::
+:::::
+
+:::: {.grid-3 style="margin-top:.72em;"}
+::: {.card .accent-teal}
+**Pointwise likelihood**
+
+Response-named and row-aligned.
+:::
+::: {.card .accent-teal}
+**Posterior prediction**
+
+Regenerate all modeled rows, including fitted missing values.
+:::
+::: {.card .accent-teal}
+**Semantic outputs**
+
+Logical names resolve backend-owned physical carriers.
+:::
+::::
+
+::: {.notes}
+Replay is a statistical issue: refitting a factor level map, spline basis, or HSGP domain on prediction data can silently change the model. BRM records fit/apply state and makes refitting explicit. The current shared preparation drives both backend replay paths, but some Stan descriptor and draw-transport facilities remain StanBlocks-specific.
+:::
+
+## The horizon: evidence before promise
+
+<div class="section-kicker">Capability map</div>
+
+<div class="horizon">
+  <div class="head"></div><div class="head">Demonstrated now</div><div class="head">Enabled with engineering</div><div class="head">Open research question</div>
+  <div class="rowhead">Composition</div><div class="now">Callable priors/likelihoods, modifiers, typed terms</div><div class="next">One extension package carrying shared term semantics across backends</div><div class="open">Can capability inference replace family/term admission tables entirely?</div>
+  <div class="rowhead">Structure</div><div class="now">Multi-axis kernels; PK, renewal, IPM examples</div><div class="next">Reusable ODE/state-space cells with standard replay/output traits</div><div class="open">How much structure belongs in formula syntax versus typed functions?</div>
+  <div class="rowhead">Backends</div><div class="now">Generated Stan + direct Turing from one BRMI</div><div class="next">Backend-specific marginalization, AD, sampler, and kernel choices</div><div class="open">Which semantic equivalence tests are sufficient across executors?</div>
+  <div class="rowhead">Geometry</div><div class="now">Centered/noncentered blocks; adaptive HSGP candidate</div><div class="next">Shared geometry metadata and diagnostics for more term classes</div><div class="open">Can warmup select parameterization without invalid adaptation?</div>
+  <div class="rowhead">Replay</div><div class="now">Frozen transforms, explicit new-group semantics</div><div class="next">One descriptor/output API across Stan and Julia executors</div><div class="open">How should stored fits survive backend evolution?</div>
+</div>
+
+::: {.notes}
+This is the deck’s guardrail. Keep every roadmap statement in one of these three columns. The middle column still needs design, implementation, testing, and maintenance. The right column is explicitly a research question, not a commitment.
+:::
+
+## The bet {.main-end}
+
+<div class="section-kicker" style="color:#8de0d4;">End of main talk</div>
+
+<div class="lede">A regression DSL becomes a research platform when the statistical program survives changes in backend, geometry, and execution strategy.</div>
+
+<div class="rule"></div>
+
+<div class="small" style="max-width:46em;">brms shows how far a coherent high-level language can take applied Bayesian modeling. BRM’s distinct wager is to preserve that coherence while making the computational substrate plural.</div>
+
+<div style="margin-top:1.2em;"><span class="label demo">demonstrated</span> <span class="label enabled">engineering path</span> <span class="label research">research agenda</span></div>
+
+::: {.notes}
+Pause here for a general audience. The rest is collaborator appendix. Do not imply that prospective guests or cited authors have reviewed or endorsed BRM or this comparison.
+:::
+
+## Current parity, compressed {.smaller}
+
+<span class="appendix-badge">Collaborator appendix A</span>
+
+<div class="comparison-row header"><div>Surface</div><div>Status</div><div>Boundary worth remembering</div></div>
+<div class="comparison-row"><div>Population & distributional predictors</div><div><span class="status both">Both</span></div><div>Shared designs, links, coefficient addressing, callable scalar priors.</div></div>
+<div class="comparison-row"><div>Group effects</div><div><span class="status both">Both · partial</span></div><div>Plain/correlated/`||`/shared-ID/stratified/mm; adaptive geometry is not yet shared.</div></div>
+<div class="comparison-row"><div>Advanced terms</div><div><span class="status both">Both · subsets</span></div><div>`s`, `t2`, `me`, `mo`, AR/DAR, GP/HSGP, structured fields; custom SLIC needs a Julia method.</div></div>
+<div class="comparison-row"><div>Responses & evidence</div><div><span class="status both">Both · subsets</span></div><div>Multiple/joint/ordinal, weights, missingness, truncation/censoring; some combinations fail closed.</div></div>
+<div class="comparison-row"><div>Replay & prediction</div><div><span class="status both">Both · subsets</span></div><div>Frozen transforms and explicit group resampling; output surfaces are not yet identical.</div></div>
+<div class="comparison-row"><div>Adaptive geometry / descriptor transport</div><div><span class="status stan">StanBlocks lead</span></div><div>WarmupHMC integration, executable descriptor, unconstrained-draw transport.</div></div>
+<div class="comparison-row"><div>Untranslated Julia callable</div><div><span class="status turing">Turing only</span></div><div>StanBlocks requires an explicit Stan translation and executable companion paths.</div></div>
+
+::: {.notes}
+This table is a talk-sized summary of `docs/src/turing-backend.md`. “Both” never means identical code or identical HMC performance. It means admitted statistical semantics match within the described subset. Update this slide whenever the central adaptive dependency lands.
+:::
+
+## What “shared preparation” contains
+
+<span class="appendix-badge">Collaborator appendix B</span>
+
+:::: {.grid-2}
+::: {.card .accent-teal .tight}
+<span class="label demo">Program</span>
+
+- dependency-ordered operations
+- sampled declarations and deterministic assignments
+- population predictors and term records
+- observations, modifiers, weights, row axes
+- semantic prior addresses
+:::
+::: {.card .accent-blue .tight}
+<span class="label demo">Fitted state</span>
+
+- factor/group coordinates
+- centers, scales, knots, spline bases
+- GP/HSGP domain and frequencies
+- structured-term field shapes
+- replay policy and dependency provenance
+:::
+::::
+
+<div class="formula-box" style="margin-top:.8em;"><span class="dim">prepared expression</span> = (callable object, positional args, keyword args, axis)
+<span class="dim">prepared term</span>       = (callable, source, fitted state, dependencies)
+<span class="dim">prepared observation</span>= (lhs, distribution, evidence, weights, row shape)</div>
+
+::: {.notes}
+The exact private struct names may evolve; the semantic payload is the contract. Prepared expressions keep callable objects rather than reconstructing names. A distribution factory can advertise its result shape through `brm_distribution_type`, remain a real Julia call in Turing, and obtain a separate complete-call translation for Stan.
+:::
+
+## Generated backends: same intent, different geometry
+
+<span class="appendix-badge">Collaborator appendix C</span>
+
+:::: {.grid-2}
+::: {.card .accent-blue}
+<span class="status stan">StanBlocks → Stan</span>
+
+```stan
+parameters {
+  vector[K] beta_pop;
+  real<lower=0> sigma;
+}
+model {
+  beta_pop ~ normal(beta_loc, beta_scale);
+  y ~ normal_id_glm(X, 0, beta_pop, sigma);
+}
+```
+
+Compiler-visible blocks, activity analysis, generated quantities, BridgeStan coordinates.
+:::
+::: {.card .accent-violet}
+<span class="status turing">Turing → DynamicPPL</span>
+
+```julia
+@model function generated(plan)
+    beta_pop ~ product_distribution(priors)
+    mu = plan.design.matrix * beta_pop
+    for i in eachindex(y)
+        y[i] ~ Normal(mu[i], sigma)
+    end
+end
+```
+
+Native callables, submodels, DynamicPPL conditioning/prediction, Julia AD.
+:::
+::::
+
+::: {.notes}
+These are compact explanatory excerpts, not verbatim generated output. The executable four-pane docs are the drift-proof comparison surface. Stan may fuse eligible Gaussian population models with `normal_id_glm`; the Turing model retains its Julia distribution construction. Semantic parity is checked after mapping parameter coordinates, not by comparing source text.
+:::
+
+## Extension seams: where a contributor works
+
+<span class="appendix-badge">Collaborator appendix D</span>
+
+<div class="comparison-row header"><div>Change</div><div>Shared layer</div><div>Backend work</div></div>
+<div class="comparison-row"><div><strong>Callable distribution</strong></div><div>Shape trait; dependency and axis validation.</div><div>Turing often executes directly; StanBlocks adds full-call translation, density, RNG, pointwise paths.</div></div>
+<div class="comparison-row"><div><strong>Structured term</strong></div><div>Typed fitted state, fields, priors, replay.</div><div>SLIC emitter and/or native Julia submodel/effect method.</div></div>
+<div class="comparison-row"><div><strong>Evidence wrapper</strong></div><div>Materialized bounds/endpoints and validation.</div><div>Executable CDF/density/RNG composition per backend.</div></div>
+<div class="comparison-row"><div><strong>Output</strong></div><div>Logical identity and row/group segmentation.</div><div>Physical carrier discovery and regeneration.</div></div>
+
+<div class="card accent-amber" style="margin-top:.8em;">
+<span class="label enabled">Contributor rule</span>
+ Add the semantic record once; let unsupported backends refuse by dispatch. Do not claim support until density, prediction, replay, and named-output behavior are tested at the intended boundary.
+</div>
+
+::: {.notes}
+For StanBlocks, the public extension seams include predictor-term, likelihood-family, prior, submodel-RHS, sampling-LHS registration, and structured group-block hooks. For Turing, implement native term/submodel methods on the same prepared record. Ordinary callables should remain ordinary callables rather than growing an admission list.
+:::
+
+## Boundaries are a product feature
+
+<span class="appendix-badge">Collaborator appendix E</span>
+
+:::: {.grid-3}
+::: {.card .accent-coral .tight}
+<span class="label boundary">Known gaps</span>
+
+- no universal feature cross-product
+- unequal output/transport surfaces
+- adaptive geometry not general across terms/backends
+- structured kernels need explicit shape/AD contracts
+- several replay geometries remain fail-closed
+:::
+::: {.card .accent-amber .tight}
+<span class="label enabled">Required evidence</span>
+
+- construction diagnostics
+- Stan compile or native model execution
+- normalized density + mapped gradients
+- predictive and pointwise semantics
+- frozen replay and new-group behavior
+:::
+::: {.card .accent-violet .tight}
+<span class="label research">Still research</span>
+
+- online geometry selection
+- cross-backend equivalence criteria
+- automatic marginalization
+- mixed discrete/continuous structured inference
+- fit portability across backend evolution
+:::
+::::
+
+<div class="small muted" style="margin-top:.75em; text-align:center;">Failing loudly is part of parity: an unsupported model must not quietly acquire a different meaning.</div>
+
+::: {.notes}
+Use this slide when a collaborator asks whether the shared plan “solves” backend parity. It does not. It creates a place to state semantics once, an explicit dispatch boundary for unsupported execution, and a common target for cross-backend tests.
+:::
+
+## Reproduce, inspect, extend {.smaller}
+
+<span class="appendix-badge">Collaborator appendix F</span>
+
+:::: {.grid-2 .wide-left}
+::: {.card .accent-teal .tight}
+<span class="label demo">Repository trail</span>
+
+1. `docs/refactoring.md` — architecture and fitted preparation
+2. `docs/src/feature-atlas.md` — executable four-pane examples
+3. `docs/src/turing-backend.md` — parity and boundaries
+4. `docs/backend_comparisons.jl` — generated evidence surface
+5. `test/backend_comparisons.jl` and focused backend tests
+6. `research/adaptive_centering/` — case-study provenance and harness
+:::
+::: {.card .accent-blue .tight}
+<span class="label brms">Primary comparison sources</span>
+
+- Bürkner (2018), *Advanced Bayesian Multilevel Modeling with brms*
+- current brms `brm`, `brmsformula`, `custom_family`, `stanvar`, and `gp` documentation
+- Riutort-Mayol et al. (2023), practical HSGP approximation
+- Papaspiliopoulos, Roberts & Sköld (2007), centered/noncentered framework
+- Gorinova et al. (2020), automatic reparameterisation
+- Stan User’s Guide, reparameterization chapter
+:::
+::::
+
+<div class="small muted" style="margin-top:.72em;">Full URLs, immutable revisions, rendering commands, and claim-tier definitions are in the deck README. Prospective guests and cited authors have not reviewed or endorsed this material.</div>
+
+::: {.notes}
+Contributor path: start from the formula and prepared plan, identify the smallest shared semantic record, implement only the backend methods that are real, then test the statistical boundary rather than source spelling. The source and generated artifacts for this deck are versioned together.
+:::

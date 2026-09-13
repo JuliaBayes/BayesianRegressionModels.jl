@@ -57,6 +57,7 @@ makedocs(
         "CDC ww-inference" => "wastewater-cdc.md",
         "Grey-seal IPM" => "seal-brm.md",
         "Turing backend" => "turing-backend.md",
+        "Future-capability deck" => "feature-deck.md",
         "Gallery" => "gallery.md",
         "API" => "api.md",
     ],
