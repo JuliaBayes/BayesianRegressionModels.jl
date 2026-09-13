@@ -1216,6 +1216,29 @@ _brm_term_label(f, t, _target) = _brm_term_label(f, t)
 _brm_term_label(::typeof(dar), t, target) =
     Symbol(:dar_, target, :_, name(_sb_named_inner(:dar, only(getargs(t)))))
 
+_brm_term_owner_labels(f, t, target) = (_brm_term_label(f, t, target),)
+function _brm_term_owner_labels(::typeof(hsgp), t, target)
+    base = _brm_term_label(hsgp, t)
+    axes = Tuple(name(_sb_named_inner(:hsgp, a)) for a in getargs(t))
+    scoped = Symbol(:hsgp_, target, :_, join(string.(axes), "_"))
+    scoped === base ? (base,) : (scoped, base)
+end
+
+_brm_term_owner_matches(_plan, _f, _t, _output) = true
+function _brm_term_owner_matches(plan, ::typeof(hsgp), t, output)
+    owner = output.declaration
+    isnothing(owner) && return false
+    axes = Tuple(name(_sb_named_inner(:hsgp, a)) for a in getargs(t))
+    phi = get(owner.keywords, :PHI, nothing)
+    if phi isa Symbol
+        preproc = get(plan.preproc, phi, nothing)
+        return !isnothing(preproc) && preproc.kind === :hsgp &&
+               preproc.raw_ref == axes
+    end
+    x = get(owner.keywords, :x, nothing)
+    length(axes) == 1 && x === only(axes)
+end
+
 _brm_term_parameter_bindings(::typeof(mo), _t) =
     (; simplex=:simplex_incr)
 _brm_term_parameter_bindings(::typeof(mo1), _t) =
@@ -1327,13 +1350,23 @@ function brm_term_coordinates(d::BRMDescriptor, logical::Symbol,
         "$(Tuple(sort!(unique(e.term for e in all_entries), by=string))).")
     entry = only(entries)
 
-    owners = BRMOutput[
-        o for o in d.outputs
-        if o.logical === term && !isnothing(o.declaration)
-    ]
+    emitted_lp = _sb_lp_emitted_name(logical, entry.link)
+    owner_labels = _brm_term_owner_labels(
+        getf(entry.value), entry.value, emitted_lp)
+    owners = BRMOutput[]
+    for label in owner_labels
+        append!(owners, BRMOutput[
+            o for o in d.outputs
+            if o.logical === label && !isnothing(o.declaration) &&
+               _brm_term_owner_matches(
+                   d.plan, getf(entry.value), entry.value, o)
+        ])
+        isempty(owners) || break
+    end
     length(owners) == 1 || error(
         "brm_descriptor: term `$term` on logical predictor `$logical` has " *
-        "$(length(owners)) logical output owners; expected exactly one.")
+        "$(length(owners)) logical output owners across emitted candidates " *
+        "$(owner_labels); expected exactly one.")
     owner = only(owners).declaration
 
     bindings = _brm_term_parameter_bindings(getf(entry.value), entry.value)
