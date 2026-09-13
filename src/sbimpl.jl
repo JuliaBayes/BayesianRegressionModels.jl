@@ -6044,9 +6044,14 @@ function _sb_emit_direct!(stmts, data, target::Symbol, t::ExprColumn, summands;
                           cat_r2d2=Dict{Symbol,NamedTuple}(),
                           term_overrides=Dict{Symbol,Any}())
     f = getf(t)
-    if f === gp || f === hsgp
+    if f === gp
         push!(summands, _sb_predictor_term!(stmts, data, f, t;
                                             group_block_lookup, term_overrides))
+        return
+    elseif f === hsgp
+        push!(summands, _sb_predictor_term!(stmts, data, f, t;
+                                            target, group_block_lookup,
+                                            term_overrides))
         return
     end
     _sb_emit_direct_expr!(stmts, data, target, getf(t), t, summands; term_overrides)
@@ -8600,8 +8605,29 @@ function _sb_hsgp_check_explicit_domain(fits, axes)
     end
 end
 
+# The first HSGP over a set of axes keeps the historical axis-derived name.
+# A later HSGP over the same axes is scoped by its emitted predictor, so two
+# distributional predictors can own distinct parameters and preprocessing
+# data without making the user duplicate an identical source column.
+function _sb_unique_hsgp_term_names(stmts, suffix::AbstractString, target)
+    bound(name) = any(stmts) do stmt
+        Meta.isexpr(stmt, :call) && length(stmt.args) >= 2 &&
+            stmt.args[1] === :~ && _sb_plan_lhs_name(stmt.args[2]) === name
+    end
+    col = Symbol(:hsgp_, suffix)
+    bound(col) || return String(suffix), col
+    stem = string(something(target, :term), "_", suffix)
+    candidate = Symbol(:hsgp_, stem)
+    serial = 2
+    while bound(candidate)
+        candidate = Symbol(:hsgp_, stem, :_, serial)
+        serial += 1
+    end
+    replace(String(candidate), "hsgp_" => ""; count=1), candidate
+end
+
 _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
-                    term_overrides=Dict{Symbol,Any}(), kwargs...) = begin
+                    term_overrides=Dict{Symbol,Any}(), target=nothing, kwargs...) = begin
     args = getargs(t); kw = getkwargs(t)
     _check_term_kwargs(hsgp, kw)
     isempty(args) && error("sbimpl: `hsgp(x...)` expects at least one positional axis")
@@ -8616,12 +8642,13 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     period = _sb_gp_period(kw, :hsgp, cov)
     cov === :periodic && return _sb_hsgp_periodic_term!(
         stmts, data, t, names, raw, is_raw, K, kw, period, term_overrides)
+    suffix, col_name = _sb_unique_hsgp_term_names(
+        stmts, join(string.(names), "_"), target)
     domain_fits = _sb_hsgp_domain_fits(kw, n_axes; required=!is_raw)
     orthogonal_to = _sb_hsgp_orthogonal_to(kw, n_axes)
     orthogonal_to === :linear && haskey(kw, :by) && error(
         "sbimpl: `hsgp(...; orthogonal_to=:linear)` is an ungrouped " *
         "population-shape constraint and cannot be combined with `by=`")
-    suffix = join(string.(names), "_")
     iso = _sb_gp_iso(kw, :hsgp)
 
     if !is_raw
@@ -8648,7 +8675,6 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         data[omega2_name] = omega2
         _sb_record_static!(data, omega2_name)
         rho_lower = basis.rho_lower
-        col_name = Symbol(:hsgp_, suffix)
         submodel_name = orthogonal_to === :linear ?
             :_sb_hsgp_latent_orthogonal : :_sb_hsgp_latent
         submodel = _sb_gp_submodel_expr(submodel_name, term_overrides, t)
@@ -8717,7 +8743,6 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         (; fits, K, c, iso, domain_fits, orthogonal_to,
          omega2_key=omega2_name, rho_lower_key=rho_lower_name),
         names, false))
-    col_name = Symbol(:hsgp_, suffix)
     submodel = _sb_gp_submodel_expr(
         iso ? :_sb_hsgp : :_sb_hsgp_aniso, term_overrides, t)
     push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
