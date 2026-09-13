@@ -255,6 +255,7 @@ function _brm_generic_response_graph_ast(multi; single::Bool=false)
     data_sources = Dict{Symbol,Int}()
     response_symbols = single ? [:y] :
         [Symbol(:y_, i) for i in eachindex(multi.plans)]
+    response_names = Set(plan.response_name for plan in multi.plans)
     for (pi, plan) in enumerate(multi.plans)
         foreach(key -> get!(data_sources, key, pi), keys(plan.context.data))
         foreach(p -> get!(parameters, p.name, p), plan.parameters)
@@ -264,6 +265,7 @@ function _brm_generic_response_graph_ast(multi; single::Bool=false)
         end
     end
     for (name, pi) in data_sources
+        name in response_names && continue
         push!(body.args, :($name = multi.plans[$pi].context.data[$(QuoteNode(name))]))
     end
     predictor_entries = Tuple(values(predictors))
@@ -271,6 +273,12 @@ function _brm_generic_response_graph_ast(multi; single::Bool=false)
         Tuple(entry[3] for entry in predictor_entries))
     shared_members = Set((member.predictor, member.block_index)
         for shared in shared_groups for member in shared.members)
+    shared_predictors = Set(member.predictor
+        for shared in shared_groups for member in shared.members)
+    predictor_bases = Dict(name => gensym(Symbol(:predictor_base_, name))
+                          for name in shared_predictors)
+    shared_barriers = [gensym(:shared_group) for _ in shared_groups]
+    predictor_shared_nodes = Dict(name => Symbol[] for name in shared_predictors)
     residual_scales = Dict{Symbol,Any}()
     block_residual_scales = Dict{Tuple{Symbol,Int},Any}()
     joint_mappings = Dict{Symbol,Tuple{Int,Int,Any}}()
@@ -371,6 +379,12 @@ function _brm_generic_response_graph_ast(multi; single::Bool=false)
         residual_scales[name] = residual_scale
         push!(statements, :($eta = multi.plans[$pi].predictors[$ci].design.matrix *
             $beta + multi.plans[$pi].predictors[$ci].design.fixed))
+        # Keep the established single-response summation order: saved draws
+        # produce exactly the same predictor values for crossed group blocks.
+        group_effect = single ? Symbol(:group_effect_, ci) : eta
+        if single && !isempty(component.random_effects)
+            push!(statements, :($group_effect = zeros(length(multi.plans[$pi].response))))
+        end
         for (gi, _) in enumerate(component.random_effects)
             (name, gi) in shared_members && continue
             group = single ? Symbol(:group_, ci, :_, gi) :
@@ -383,7 +397,10 @@ function _brm_generic_response_graph_ast(multi; single::Bool=false)
             push!(statements, :($group ~ to_submodel(_brm_group_effect_model(
                 multi.plans[$pi].predictors[$ci].random_effects[$gi], $priors,
                 $group_scale))))
-            push!(statements, :($eta = $eta + $group.effect))
+            push!(statements, :($group_effect = $group_effect + $group.effect))
+        end
+        if single && !isempty(component.random_effects)
+            push!(statements, :($eta = $eta + $group_effect))
         end
         for term_index in eachindex(component.terms)
             term_site = Symbol(:term_, name, :_, term_index)
@@ -398,20 +415,17 @@ function _brm_generic_response_graph_ast(multi; single::Bool=false)
         inverse_link = InverseFunctions.inverse(component.predictor.link_lhs_fn)
         push!(callables, inverse_link)
         push!(statements, :($name = (callables[$(length(callables))]).($eta)))
-    end
-    emitted = Set{Symbol}()
-    for plan in multi.plans, name in plan.prepared.order
-        name in emitted && continue
-        statements = get(node_statements, name, nothing)
-        isnothing(statements) && continue
-        append!(body.args, statements)
-        push!(emitted, name)
-    end
-    for (name, statements) in node_statements
-        name in emitted || append!(body.args, statements)
+        if name in shared_predictors
+            finalizer = pop!(statements)
+            base = predictor_bases[name]
+            node_statements[base] = pop!(node_statements, name)
+            node_statements[name] = Any[finalizer]
+        end
     end
     for (shared_index, shared) in enumerate(shared_groups)
         site = Symbol(:shared_group_, shared_index)
+        barrier = shared_barriers[shared_index]
+        statements = get!(node_statements, barrier, Any[])
         block_exprs = Any[]
         prior_exprs = Any[]
         scale_exprs = Any[]
@@ -432,21 +446,67 @@ function _brm_generic_response_graph_ast(multi; single::Bool=false)
                 (member.predictor, member.block_index),
                 residual_scales[member.predictor]))
         end
-        push!(body.args, :($site ~ to_submodel(_brm_shared_group_effect_model(
+        push!(statements, :($site ~ to_submodel(_brm_shared_group_effect_model(
             $(Expr(:tuple, block_exprs...)), $(Expr(:tuple, prior_exprs...)),
             $(Expr(:tuple, scale_exprs...))))))
         for (effect_index, member) in enumerate(shared.members)
             eta = Symbol(:eta_, member.predictor)
-            pi, ci, component = predictor_entries[member.component_index]
-            inverse_link = InverseFunctions.inverse(component.predictor.link_lhs_fn)
-            push!(callables, inverse_link)
-            push!(body.args, :($eta = $eta + $site.effects[$effect_index]))
-            push!(body.args, :($(member.predictor) =
-                (callables[$(length(callables))]).($eta)))
+            push!(statements, :($eta = $eta + $site.effects[$effect_index]))
+            push!(predictor_shared_nodes[member.predictor], barrier)
         end
     end
-    value_names = single ? Tuple((logical..., keys(parameters)...)) :
-        Tuple((logical..., keys(parameters)..., keys(assignments)...))
+
+    emitted = Set{Symbol}()
+    if isempty(shared_groups)
+        for plan in multi.plans, name in plan.prepared.order
+            name in emitted && continue
+            statements = get(node_statements, name, nothing)
+            isnothing(statements) && continue
+            append!(body.args, statements)
+            push!(emitted, name)
+        end
+        for (name, statements) in node_statements
+            name in emitted || append!(body.args, statements)
+        end
+    else
+        operations = Dict{Symbol,Any}()
+        ordered_names = Symbol[]
+        for plan in multi.plans, operation in plan.prepared.program.operations
+            haskey(operations, operation.name) && continue
+            operations[operation.name] = operation
+            push!(ordered_names, operation.name)
+        end
+        scheduled = Any[]
+        for name in ordered_names
+            operation = operations[name]
+            if name in shared_predictors
+                base = predictor_bases[name]
+                push!(scheduled, BRM._BRMPreparedOperation(
+                    base, :emitter, nothing, operation.dependencies))
+                push!(scheduled, BRM._BRMPreparedOperation(
+                    name, operation.role, operation.expression,
+                    (base, predictor_shared_nodes[name]...)))
+            else
+                push!(scheduled, operation)
+            end
+        end
+        for (shared_index, shared) in enumerate(shared_groups)
+            barrier = shared_barriers[shared_index]
+            dependencies = Tuple(predictor_bases[member.predictor]
+                                 for member in shared.members)
+            push!(scheduled, BRM._BRMPreparedOperation(
+                barrier, :emitter, nothing, dependencies))
+        end
+        for name in BRM._brm_operation_order(scheduled)
+            statements = get(node_statements, name, nothing)
+            isnothing(statements) || append!(body.args, statements)
+            push!(emitted, name)
+        end
+        for (name, statements) in node_statements
+            name in emitted || append!(body.args, statements)
+        end
+    end
+    value_names = Tuple((logical..., keys(parameters)..., keys(assignments)...))
     value_expr = Expr(:tuple, value_names...)
     returned = Any[]
     for (pi, plan) in enumerate(multi.plans)

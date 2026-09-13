@@ -34,6 +34,12 @@ An unsupported operation reports the missing capability. For example, a custom
 distribution may supply density evaluation but lack predictive RNG or a latent
 support transform; these are separate requirements.
 
+Single- and multiple-response models use one response-graph emitter. Shared
+parameters, assignments, predictors, and group blocks are scheduled once;
+response-specific likelihoods, evidence, weights, missing rows, and prediction
+are attached to that graph. A declaration used by several responses is sampled
+once in the generated model.
+
 ## Parameterization
 
 Population coefficients use the shared design matrix and labels, with Normal
@@ -43,6 +49,15 @@ scale can have a hierarchical prior and enter any later likelihood expression.
 Simplex, covariance-factor, horseshoe, and R2D2 declarations use their own
 parameter geometry. Declaration bounds retain the ordinary prior kernel;
 `truncated(distribution; ...)` includes its truncation normalizer.
+
+Term-prior addresses are resolved in core before either backend emits a model.
+Both backends therefore use the same matching, precedence, and rejection rules
+for `sd`, `ar`, `length_scale`, `simplex`, and `latent` term slots. A configured
+simplex prior retains its exact multivariate density and RNG in Turing while a
+simplex bijector supplies the constrained-to-unconstrained transform. Custom
+simplex priors must be continuous multivariate distributions of the fitted
+dimension and implement density, support, and sampling. Stan execution of the
+same custom callable additionally requires a Stan translation.
 
 Group effects default to a noncentered parameterization: plain random intercepts
 use a positive scale and standard-normal latent values, correlated slopes use marginal scales
@@ -67,6 +82,14 @@ backend code.
 
 ## Outputs and replay
 
+`brm_descriptor(backend)` adapts a `TuringBRMI` to the common semantic
+descriptor API. `brm_output` and `brm_outputs` select parameters, linear
+predictors, posterior-predictive values, and pointwise log likelihoods by the
+same logical names and roles used for Stan descriptors. `brm_execute` provides
+Turing-backed pointwise likelihood, generated-quantity, prediction, and replay
+operations. Since this backend emits no Stan program, `descriptor.stan` is
+`nothing` and Stan source highlights are rejected.
+
 `turing_pointwise_loglikelihoods` returns response-named, row-aligned
 log-likelihood vectors; latent rows of a partly missing response remain
 `missing`. `turing_generated_quantities` evaluates the model's deterministic
@@ -86,6 +109,12 @@ from `new_data`, keeps fitted population, scale, and correlation parameters,
 and regenerates only the named groups' standardized effects. For a shared
 `|ID|` block this redraw remains joint across its predictors. Unseen categorical
 levels still fail closed.
+
+Replay of prepared terms dispatches on the actual callable type. GP, HSGP,
+spline, ordered, autoregressive, and extension-defined terms use the same open
+dispatch path whether replay starts from formula expressions or prepared plans.
+Fitted state remains backend-neutral; each backend maps replayed values to its
+own data bindings or sample-site representation.
 
 ## Parity contract
 
@@ -107,7 +136,7 @@ not sufficient.
 | Multiple responses | **Supported** | Shared declarations are sampled once and responses can have distinct row axes; incompatible group schemas fail explicitly |
 | Observation weights | **Supported subset** | Analytic Normal weights rescale sigma; frequency and power weights scale density while predictive draws retain the base distribution |
 | Advanced terms | **Supported subsets** | `s`, `t2`, `mo`/`mo1`, `me`, interval predictors, `ar`/`dar`, exact GP, HSGP, structured fields, and Julia-callable kernel/ragged terms |
-| Outputs | **Supported subset** | Row-aligned pointwise likelihoods, deterministic returned quantities, one-draw posterior prediction, and chain-level Turing prediction; fitted response latents are excluded before regeneration |
+| Outputs | **Supported subset** | Common semantic descriptor queries plus row-aligned pointwise likelihoods, deterministic returned quantities, one-draw posterior prediction, and chain-level Turing prediction; fitted response latents are excluded before regeneration; Stan highlights are unavailable |
 | Replay | **Supported subset** | Frozen preprocessing and existing-group coordinates replay on new rows; refitting constants and selective new-group resampling—including joint `|ID|` and stratified redraws—are explicit |
 
 The matrix is intentionally an overview. The build-generated examples and
