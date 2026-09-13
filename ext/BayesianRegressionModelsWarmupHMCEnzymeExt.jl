@@ -19,6 +19,12 @@ const SmallIndexedReparametrization = WarmupHMC.IndexedReparametrization{
     Vector{Pair{Int,SmallReparametrization}},
 }
 
+# This pullback deliberately mirrors Enzyme's own floating-point graph because
+# WarmupHMC makes discrete centering decisions from these gradients. Enzyme
+# 0.13.200 changed tanh's derivative from `seed / cosh(x)^2` to
+# `(1 - tanh(x)^2) * seed`; the two are algebraically equal but not bit-equal.
+const ENZYME_TANH_PULLBACK_FROM_PRIMAL = pkgversion(Enzyme) >= v"0.13.200"
+
 # Differentiating the generic indexed loop still leaves one Enzyme rule call per
 # accessor.  For BRM's scalar and intercept/slope blocks, run that same reverse
 # pass directly.  The pair vector's exact concrete type makes this dispatch
@@ -57,7 +63,8 @@ function LogDensityProblems.logdensity_and_gradient(
             tau2 = exp(x[scale2_index])
             C21 = tau2 * L21
             C22 = tau2 * stick
-            cosh_raw = cosh(raw)
+            tanh_pullback_factor = ENZYME_TANH_PULLBACK_FROM_PRIMAL ?
+                one(T) - corr * corr : cosh(raw) * cosh(raw)
         end
 
         for group in block.ranef.n_groups:-1:1, term in K:-1:1
@@ -109,7 +116,8 @@ function LogDensityProblems.logdensity_and_gradient(
                 dproduct = -dvariance
                 dcorr = dproduct * corr
                 dcorr += dproduct * corr
-                draw = dcorr / (cosh_raw * cosh_raw)
+                draw = ENZYME_TANH_PULLBACK_FROM_PRIMAL ?
+                    tanh_pullback_factor * dcorr : dcorr / tanh_pullback_factor
                 gradient[raw_index] += draw
                 gradient[scale2_index] += dtau2 * tau2
 
@@ -121,7 +129,8 @@ function LogDensityProblems.logdensity_and_gradient(
                 dtau2 = dC21 * L21
                 dL21 = dC21 * tau2
                 dcorr = dL21 * one(T)
-                draw = dcorr / (cosh_raw * cosh_raw)
+                draw = ENZYME_TANH_PULLBACK_FROM_PRIMAL ?
+                    tanh_pullback_factor * dcorr : dcorr / tanh_pullback_factor
                 dscale1 = ((((dlocation * C21) * (numerator * -c)) *
                     C11^(c - one(c))) * tau1) /
                     (denominator * denominator)
