@@ -147,13 +147,15 @@ function _sb_vector_prior_parts(priors; positive::Bool=true)
         end
         !isnothing(lower) && !isnothing(upper) && lower >= upper &&
             error("vector prior has empty support")
-        push!(calls, (; dist, names, lower, upper))
+        origin = getf(prior) isa Function ? parentmodule(getf(prior)) : StanBlocks
+        push!(calls, (; dist, names, lower, upper, origin))
         push!(shape, (dist, Tuple(argkinds[end-length(names)+1:end]), lower, upper))
     end
     calls, actuals, shape, argkinds
 end
 
-function _sb_vector_prior_family(priors; positive::Bool=true)
+function _sb_vector_prior_family(priors; positive::Bool=true,
+                                 mod::Module=StanBlocks)
     calls, actuals, shape, argkinds = _sb_vector_prior_parts(priors; positive)
     key = repr((positive, shape))
     family = get!(_SB_VECTOR_PRIOR_CACHE, key) do
@@ -166,7 +168,19 @@ function _sb_vector_prior_family(priors; positive::Bool=true)
         for (i, c) in enumerate(calls)
             distname = c.dist isa Symbol ? c.dist : nameof(c.dist)
             push!(densities, Expr(:call, Symbol(distname, :_lpdf), Expr(:ref, :x, i), c.names...))
-            selector = c.dist isa Symbol ? getfield(StanBlocks, c.dist) : c.dist
+            selector = if c.dist isa Symbol
+                if isdefined(StanBlocks, c.dist)
+                    getfield(StanBlocks, c.dist)
+                elseif isdefined(c.origin, c.dist)
+                    getfield(c.origin, c.dist)
+                elseif isdefined(mod, c.dist)
+                    getfield(mod, c.dist)
+                else
+                    error("sbimpl: custom vector-prior family `$(c.dist)` is defined in neither StanBlocks nor the model module")
+                end
+            else
+                c.dist
+            end
             push!(draws, isnothing(c.lower) && isnothing(c.upper) ?
                 Expr(:call, :predictive, selector, c.names...) :
                 isnothing(c.lower) ?
@@ -211,7 +225,7 @@ function _sb_vector_prior_family(priors; positive::Bool=true)
 end
 
 function _sb_vector_priors(base::StanBlocks.SlicModel, target::Symbol, priors)
-    family, args = _sb_vector_prior_family(priors; positive=false)
+    family, args = _sb_vector_prior_family(priors; positive=false, mod=base.mod)
     rhs = Expr(:call, family,
                Expr(:parameters, Expr(:kw, :n, length(priors))), args...)
     Base.merge(base, Expr(:call, :~, target, rhs))
@@ -273,7 +287,7 @@ function _sb_vector_positive_priors(base::StanBlocks.SlicModel,
             isnothing(direct) || return direct
         end
     end
-    family, args = _sb_vector_prior_family(priors)
+    family, args = _sb_vector_prior_family(priors; mod=base.mod)
     rhs = Expr(:call, family, Expr(:parameters, Expr(:kw, :n, nvalue),
                                   Expr(:kw, :lower, 0.0)), args...)
     model = Base.merge(base, Expr(:call, :~, lhs, rhs))

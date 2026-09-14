@@ -71,6 +71,24 @@ const CALLABLE_CACHE = joinpath(tempdir(), "brm-callable-priors")
     @test_throws "must be scalar" SBBRMI(lkj_mean(joint_data); mod=@__MODULE__)
 end
 
+@testset "callable homogeneous ranef scale uses its model-module family" begin
+    # A one-margin shared-ID block is homogeneous but cannot lower to a native
+    # vectorized call when the family itself is callable. Resolve the registered
+    # consumer-module function for the generated vector family's RNG rather
+    # than assuming every distribution token lives in StanBlocks.
+    builder = @brm begin
+        eta ~ 1 + (1 | ri | subject)
+        sd(:, ri) ~ plain_factory(0.0, 2.0)
+        y ~ Normal(eta, 1)
+    end
+    data = (; subject=["a", "a", "b"], y=[0.1, -0.2, 0.3])
+    sb = SBBRMI(builder(data); mod=@__MODULE__)
+    code = BRM.stan_code(sb)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    @test occursin(r"brm_vector_prior_[0-9a-f]+_lpdf", code)
+    @test occursin("registered_plain_lpdf(x[1]", code)
+end
+
 @testset "registered callable prior factory" begin
     builder = @brm begin
         location ~ Normal(0, 1)

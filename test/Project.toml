@@ -57,4 +57,6 @@ rev = "c02aa16ab1b08e4f5283597fe678a88e69555cd1"
 
 [sources.WarmupHMC]
 url = "https://github.com/nsiccha/WarmupHMC.jl"
-rev = "8fa829b39d6f519deaf13cd03ee17e8df6b7b9c2"
+# deeea1d (2026-09-14): includes the exact retained-sampling gradient counter
+# required by full adaptive-centering case studies (913da79 is its ancestor).
+rev = "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"
