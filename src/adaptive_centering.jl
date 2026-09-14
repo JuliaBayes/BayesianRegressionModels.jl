@@ -235,7 +235,9 @@ end
 struct _HSGPAdaptiveCenteringBlock
     logical::Symbol
     term::Symbol
-    target_c::Float64
+    # The compiled model may use a different fixed exponent for every basis.
+    # Both the transform and retrospective scorer must start in that frame.
+    target_c::Vector{Float64}
     effects::Vector{Int}
     length_scales::Vector{Int}
     length_scale_lower::Vector{Float64}
@@ -347,6 +349,7 @@ function _adaptive_hsgp_centering_blocks(model, unc_names)
             if owner.family isa Symbol
                 owner.family in (
                     :_sb_hsgp, :_sb_hsgp_aniso,
+                    :_sb_hsgp_partial, :_sb_hsgp_partial_aniso,
                     :_sb_hsgp_latent, :_sb_hsgp_latent_orthogonal,
                 ) || error(
                     "BRM adaptive centering: HSGP `$(entry.term)` resolved to " *
@@ -401,7 +404,9 @@ function _adaptive_hsgp_centering_blocks(model, unc_names)
                 plan, sigma.output, 1, entry.term, "marginal SD",
             ))
             push!(out, _HSGPAdaptiveCenteringBlock(
-                logical, entry.term, 0.0, collect(weights.coordinates),
+                logical, entry.term,
+                _brm_hsgp_centeredness(kw, length(weights.coordinates)),
+                collect(weights.coordinates),
                 collect(rho.coordinates), rho_lower, only(sigma.coordinates),
                 sigma_lower, omega2,
             ))

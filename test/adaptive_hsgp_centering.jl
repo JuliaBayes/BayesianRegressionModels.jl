@@ -308,7 +308,7 @@ LogDensityProblems.logdensity_and_gradient(target::HSGPQuadraticTarget, x) =
     @test length(blocks) == 2
     @test getfield.(blocks, :logical) == [:mu, :log_sigma]
     @test getfield.(blocks, :term) == [:hsgp_time, :hsgp_time_noise]
-    @test getfield.(blocks, :target_c) == [0.0, 0.0]
+    @test getfield.(blocks, :target_c) == [zeros(3), zeros(2)]
     @test blocks[1].effects == [3, 4, 5]
     @test blocks[2].effects == [8, 9]
     @test blocks[1].length_scales == [1]

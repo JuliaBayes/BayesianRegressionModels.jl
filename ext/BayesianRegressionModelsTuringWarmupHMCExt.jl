@@ -204,7 +204,7 @@ function _hsgp_gradient_component(
     block = BRM._HSGPAdaptiveCenteringBlock(
         logical,
         term_label,
-        0.0,
+        zeros(length(effect_indices)),
         effect_indices,
         rho_indices,
         [Float64(state.rho_lower)],

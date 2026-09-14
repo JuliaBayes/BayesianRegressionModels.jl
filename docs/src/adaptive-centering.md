@@ -196,7 +196,6 @@ refit = WarmupHMC.adaptive_warmup_mcmc(
 
 ![New partial-coordinate samples versus GP hyperparameters](assets/adaptive-hsgp/partial_scatter.png)
 
-<!-- FULL_FIT_RESULTS -->
 Both fits retained 10,000 draws with the configuration above:
 
 | fit | max split R-hat | min bulk ESS | min tail ESS | divergences |
@@ -214,7 +213,6 @@ limitations, rather than a claim that partial centering guarantees a clean fit.
 An independent check applied the source's literal loss formula to every pilot
 weight: all 40 selected values agree exactly with BRM's automated selection.
 The full-fit receipts, candidate scores and figure checks pass 8,221 tests.
-<!-- END_FULL_FIT_RESULTS -->
 
 Rank-normalized split R-hat, bulk ESS and tail ESS are computed with
 MCMCDiagnosticTools. As in the source's main example, each fit has one chain:
@@ -222,6 +220,9 @@ split R-hat is a within-chain diagnostic, not evidence that independent chains
 agree. Divergences must remain visible in any interpretation of the geometry
 comparison; changing the sampler settings to conceal them would answer a
 different question.
+
+ESS alone does not measure computational cost. The [cost comparison below](#compute-cost-and-ess-per-gradient)
+reports the recoverable gradient counts for all three fits, including warmup.
 
 ## Online adaptive centering and the Turing gate
 
@@ -235,8 +236,9 @@ fit = WarmupHMC.adaptive_warmup_mcmc(
 learned = WarmupHMC.reparam_sources(online)
 ```
 
-Returned draws are already back in the original model coordinates. They must
-not be transformed a second time. The reproduction provides a separate
+Returned draws are already back in the original model coordinates: do not
+apply a second sampler-to-model back-transform. An explicit transformation
+for a diagnostic plot is a separate operation, as shown below. The reproduction provides a separate
 `run_online_stanblocks` entry point with the same full model and ordinary
 sampler defaults; it is an extension, not one of the source's two fits.
 
@@ -252,15 +254,184 @@ data, seeds or models.
 The online values come from warmup's `0:0.1:1` candidate grid; the offline
 profile uses the source's finer `0:0.01:1` search over its separate pilot.
 They are not expected to select identical values from different finite
-trajectories. Both preserve the same physical model through their matching
-coordinate transform and Jacobian.
+trajectories and different objectives. Both preserve the same physical model
+through their matching coordinate transform and Jacobian.
 
-**Turing sampling is currently disabled.** A source audit found that its
-explicit length-scale prior incorrectly retained the default HSGP lower
-bound. That defect and the slow gradient path are being fixed and benchmarked
-on matched full-model coordinates. Turing must pass both numerical equality
+### Online pair plots
+
+![Online posterior basis weights versus their hyperparameters, in the learned coordinates](assets/adaptive-hsgp/online_scatter.png)
+
+These are the same pair diagnostics as for the pilot and partial refit, now
+using all 10,000 online draws. BRM transforms each returned NCP weight into
+its learned coordinate `u = s^c*z` exactly once for display. Length-scale and
+marginal-SD axes are logarithmic; each panel has its own coordinate scale.
+This transformation neither samples a new posterior nor changes the physical
+weights represented by the saved draws.
+
+### Which loss is online centering minimizing?
+
+The two selectors use different criteria. The post-hoc selector above uses
+the source's KL-derived log-scale proxy,
+
+```text
+L_offline(c) = log(std(s^c*z)) - mean(c*log(s)).
+```
+
+WarmupHMC's online selector uses **weighted position–gradient correlation**
+at its default `w₁=0`:
+
+```text
+u_c = s^c*z
+g_c = ∂ log p_c / ∂u_c
+L_online(c) = Cor_weighted(u_c, g_c).
+```
+
+It minimizes that signed correlation on `0:0.1:1`; it is not minimizing an
+absolute correlation or reusing the offline loss. For an independent Gaussian coordinate,
+the log-density gradient is a decreasing affine function of position, giving
+correlation `-1`. The optional Jacobian/log-variance part of WarmupHMC's
+criterion has zero weight under these defaults.
+
+![Native online correlation objective on a common pilot reference, faceted only by GP](assets/adaptive-hsgp/online_loss.png)
+
+This plot evaluates WarmupHMC's native `candidate_scoring_losses` on the
+**same 10,000 pilot draws** used by the offline diagnostic, with unit weights.
+It facets only by GP: the coordinate frame in which the reference draws were
+stored does not change the candidate loss landscape. A matched-draw audit
+evaluated all 1,320 candidate comparisons across three representations of
+those physical draws; their largest loss difference was `1.53e-15`.
+
+Unlike the offline proxy plot, these are **raw, interpretable correlations**,
+with fixed y-limits `[-1,0]` and no min–max scaling. Values near `-1` indicate
+a nearly linear decreasing position–score relationship; values near zero
+indicate a weak linear relationship. The exported scores remain unchanged.
+
+This is a **retrospective objective diagnostic**, not a reconstruction of
+the online run's warmup history. Actual online selection accumulates warmup
+trajectory evidence and resets between adaptation windows. Saved posterior
+draws do not retain that leaf stream, its weights, or those group boundaries,
+so a posterior replay need not choose the exact centeredness learned online.
+
+### Pair plots in gradient-loss-selected coordinates
+
+![Pilot hyperparameter pair plots transformed using the gradient-loss minimizers](assets/adaptive-hsgp/gradient_selected_scatter.png)
+
+For this third geometry view, each basis exponent is the minimizer of its
+native gradient-loss curve evaluated on the common pilot, over `0:0.1:1`.
+The familiar hyperparameter pair plots then transform all 10,000 pilot draws
+to those coordinates. **There is no additional fit.** These values need not
+equal warmup's final online selections: the criterion is the same, but the
+posterior pilot and the online warmup stream supply different finite evidence.
+
+### Position versus gradient, without hyperparameter axes
+
+![Mean GP coordinate positions versus exact log-density gradients in three configurations](assets/adaptive-hsgp/gradient_mu.png)
+
+![Log-SD GP coordinate positions versus exact log-density gradients in three configurations](assets/adaptive-hsgp/gradient_log_sigma.png)
+
+Here the columns genuinely change the displayed coordinates: NCP pilot,
+post-hoc partial refit, and online fit in its learned geometry. Each facet
+shows **1,000 evenly selected saved draws**, with transparent points; the
+underlying gradient evaluations and loss calculations still use all 10,000
+draws per fit. There is no KDE, binning, smoothing, or fitted regression line.
+Gradient axes are independent between facets, because reparameterization
+changes their units as well as the coordinate units.
+
+The gradients come from the actual BRM-generated Stan target. At fixed
+hyperparameters, BRM transports them with `g_c = s^(-c)*g_z` (or the equivalent
+source-to-target exponent difference). The change-of-coordinate Jacobian is
+constant with respect to this basis coordinate; its hyperparameter derivatives
+are not being plotted here. Seventy-two independent finite-difference checks
+of the displayed gradients passed, with maximum scaled error `1.56e-8`.
+These scatter plots visualize a component of the correlation criterion;
+their appearance alone is not an ESS or convergence guarantee.
+
+**Turing sampling is currently disabled.** The explicit length-scale
+support mismatch found by the source audit has been corrected. The actual
+DynamicPPL/Enzyme gradient path remains under correctness and runtime
+verification on matched full-model coordinates. Turing must pass both numerical equality
 and warmed gradient-runtime parity before it is used to sample this case
 study. Finite gradients or a 20-draw execution check do not satisfy that gate.
+
+## Compute cost and ESS per gradient
+
+The final original checkpoints retain WarmupHMC's cumulative NUTS evaluation
+counter. It includes step-size adaptation and all discarded restart epochs;
+it is taken once from the final checkpoint, not summed over windows. It counts
+DynamicHMC integration steps, **not** Pathfinder initialization or other setup
+gradient calls. The numerator below is the minimum bulk ESS over the same 44
+sampled model coordinates used in the fit-results table.
+
+| Fit | Total NUTS gradient evaluations | Min bulk ESS / total gradients | Sampling-only gradient evaluations | Min bulk ESS / sampling gradients | Fit runtime |
+| --- | ---: | ---: | --- | --- | --- |
+| Noncentered pilot | 1,770,275 | 0.001420 | Not recorded | Not recoverable | Not recorded |
+| Selected-partial refit | 904,842 | 0.002800 | Not recorded | Not recoverable | Not recorded |
+| Online adaptive centering | 2,587,623 | 0.000896 | Not recorded | Not recoverable | Not recorded |
+
+The refit alone obtains about twice the minimum bulk ESS per NUTS gradient of
+the pilot. But obtaining its fixed centering required that pilot: charging
+both runs costs **2,675,117** evaluations and gives **0.000947** refit bulk ESS
+per total gradient. On this end-to-end accounting the pilot-then-refit workflow
+does not beat the NCP run. The online run removes the observed divergences,
+but uses more gradients and has lower minimum bulk ESS per total gradient;
+it is not a computational-speedup result. The corresponding minimum tail-ESS
+ratios are `0.001630`, `0.001985`, and `0.001072` for the individual runs.
+
+The missing entries are measurement gaps, not zeros. These historical run
+records did not save wall time. Their final retained epoch includes 50
+step-size-adaptation transitions whose evaluation costs were not separately
+stored, so subtracting the last restart's total does **not** give exact
+sampling-only cost. Neither file timestamps nor an average steps-per-draw
+estimate is substituted for those measurements. `report_costs.jl` reproduces
+the exact available counts and ratios; new fit records now preserve wall
+time around the sampler call and the total counter. Sampling-only telemetry
+has been requested upstream so future runs can report that denominator exactly.
+
+Finally, a gradient evaluation is not equally expensive in every coordinate
+system: the online wrapper includes coordinate transport. Without measured
+runtime, these counts cannot establish wall-clock efficiency. The 34/16/0
+divergence counts and single-chain limitations still apply to the ESS figures.
+
+## Native BRM diagnostics, rendered with AlgebraOfVega
+
+The fits use BRM models and WarmupHMC sampling. BRM owns logical-output
+extraction, posterior-predictive execution, HSGP coordinate transport, and
+gradient transport; WarmupHMC owns the online candidate scores. The research
+scripts assemble the comparison panels and retain the scientific provenance.
+**All figures on this page are rendered in Julia with AlgebraOfVega; no R
+renderer is used.**
+
+Plotting is optional: `using BayesianRegressionModels, AlgebraOfVega` loads
+BRM's plotting extension without adding plotting dependencies to fitting-only
+workflows. Given a descriptor and matching saved draws, the reusable calls are:
+
+```julia
+using BayesianRegressionModels, AlgebraOfVega
+
+# Constrained matrices have draws in rows and matching names in columns.
+brm_posteriorplot(descriptor, constrained, names; logical=:mu, x=times)
+brm_pairplot(descriptor, constrained, names;
+    predictor=:mu, term=:hsgp_x, centeredness=learned_mu, bases=[1, 2, 19, 20])
+
+# This simulates replicated observations through BRM's native :predict operation.
+# It is different from plotting the latent conditional-mean ribbons above.
+brm_ppcplot(descriptor, unconstrained; problem=stan_problem,
+    response=:y, seed=1, x=times)
+
+brm_centerednessplot(centering_rows; compare=true)
+brm_centering_lossplot(online_loss_rows; ylimits=(-1, 0))
+brm_centering_lossplot(offline_loss_rows; normalization=:minmax)
+brm_gradientplot(gradient_rows; opacity=0.25, markersize=8)
+```
+
+`hsgp_coordinate_draws` prepares fitted or transformed coordinates and optional
+basis gradients from descriptor-owned metadata. The HSGP diagnostics currently
+support ungrouped squared-exponential terms and reject unsupported geometry.
+WarmupHMC matrices use coordinates in rows: transpose them when calling these
+BRM draw-table helpers. Conversely, `candidate_scoring_losses` expects
+coordinates-by-draws matrices in its current source frame. The reproduction
+scripts handle these boundaries explicitly; none substitutes an unrelated
+hand-written sampler or gradient target.
 
 ## Reproduce and inspect the evidence
 

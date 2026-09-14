@@ -17,10 +17,12 @@ OutputSignatures = "86cfaae4-1704-4c69-ba62-d919d81ae5f8"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 RuntimeGeneratedFunctions = "7e49a35a-f44a-4d26-94aa-eba1b4ca6b47"
 SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 StanBlocks = "2e771a56-c23a-4e0b-9282-20c2e37157e9"
 StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
 
 [weakdeps]
+AlgebraOfVega = "a2420894-485a-4f42-a4fc-c4323ec6fb2b"
 DifferentiationInterface = "a0c0ee7d-e4b9-4e03-894e-1c5f64a51d63"
 Enzyme = "7da242da-08ed-463a-9acd-ee780be4f1d9"
 TreeArrays = "5daaa025-ac78-4e9a-8805-78946e672e43"
@@ -28,6 +30,7 @@ Turing = "fce5fe82-541a-59a6-adf8-730c64b5f9a0"
 WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 
 [extensions]
+BayesianRegressionModelsAlgebraOfVegaExt = "AlgebraOfVega"
 BayesianRegressionModelsDifferentiationInterfaceExt = "DifferentiationInterface"
 BayesianRegressionModelsTreeArraysExt = "TreeArrays"
 BayesianRegressionModelsTuringExt = "Turing"
@@ -36,6 +39,7 @@ BayesianRegressionModelsWarmupHMCEnzymeExt = ["WarmupHMC", "Enzyme"]
 BayesianRegressionModelsWarmupHMCExt = "WarmupHMC"
 
 [compat]
+AlgebraOfVega = "0.2"
 DifferentiationInterface = "0.7"
 Enzyme = "0.13"
 MutatingFunctions = "0.1"
