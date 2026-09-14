@@ -112,33 +112,49 @@ function LogDensityProblems.logdensity_and_gradient(d::EnzymeTuringDensity, x)
     value, copy(gradient)
 end
 
-function turing_density(brmi, seed)
-    Random.seed!(seed)
+function turing_linked_target(brmi; fix_transforms=false, online_init=false)
     backend = TuringBRMI(brmi)
     terms = only.(getproperty.(backend.plan.predictors, :terms))
-    function term_init(term)
+    function term_init(term, index)
         state = term.state
-        weights = zeros(length(state.centeredness))
-        rho = max(1.0, state.rho_lower + 0.5)
+        k = length(state.centeredness)
+        weights = if online_init
+            index == 1 ? collect(range(-0.16, 0.18; length=k)) :
+                collect(range(0.12, -0.1; length=k))
+        else
+            zeros(k)
+        end
+        rho = online_init ?
+            state.rho_lower + (index == 1 ? 0.55 : 0.45) :
+            max(1.0, state.rho_lower + 0.5)
+        sigma = online_init ? (index == 1 ? 0.65 : 0.4) : 1.0
         any(!iszero, state.centeredness) ?
-            (; rho, sigma=1.0, beta_partial=weights) :
-            (; rho, sigma=1.0, beta_raw=weights)
+            (; rho, sigma, beta_partial=weights) :
+            (; rho, sigma, beta_raw=weights)
     end
     initial_params = (;
-        term_mu_1=term_init(terms[1]),
-        term_sigma_1=term_init(terms[2]),
+        term_mu_1=term_init(terms[1], 1),
+        term_sigma_1=term_init(terms[2], 2),
     )
     vi = DP.VarInfo(backend.model, DP.InitFromParams(initial_params), DP.LinkAll())
     ldf = DP.LogDensityFunction(
-        backend.model, DP.getlogjoint_internal, vi; fix_transforms=true)
+        backend.model, DP.getlogjoint_internal, vi; fix_transforms)
     q = collect(DP.get_sample_input_vector(ldf))
+    value = LogDensityProblems.logdensity(ldf, q)
+    isfinite(value) || error("non-finite Turing density at initialization")
+    (; ldf, q, backend)
+end
+
+function turing_density(brmi, seed)
+    Random.seed!(seed)
+    target = turing_linked_target(brmi; fix_transforms=true)
     preparation = DI.prepare_gradient(
-        turing_logdensity, ENZYME_BACKEND, q, DI.Constant(ldf))
-    gradient = similar(q)
-    density = EnzymeTuringDensity(ldf, preparation, gradient)
-    value, grad = LogDensityProblems.logdensity_and_gradient(density, q)
+        turing_logdensity, ENZYME_BACKEND, target.q, DI.Constant(target.ldf))
+    gradient = similar(target.q)
+    density = EnzymeTuringDensity(target.ldf, preparation, gradient)
+    value, grad = LogDensityProblems.logdensity_and_gradient(density, target.q)
     isfinite(value) && all(isfinite, grad) || error("non-finite Turing density at initialization")
-    (; density, q, backend)
+    (; density, q=target.q, backend=target.backend)
 end
 
 function stan_density(brmi, label, output_dir)
@@ -307,6 +323,47 @@ function run_online_stanblocks(;
     (; fit, learned, rows, stan, online, output_dir)
 end
 
+function run_online_turing(;
+        k=parse(Int, get(ENV, "BRM_ADAPTIVE_K", "8")),
+        n_draws=parse(Int, get(ENV, "BRM_ADAPTIVE_DRAWS", "20")),
+        n_evaluations=parse(Int, get(ENV, "BRM_ADAPTIVE_EVALS", "120")),
+        seed=0x20260913,
+        output_dir=get(ENV, "BRM_ADAPTIVE_OUTPUT", mktempdir()))
+    mkpath(output_dir)
+    data = prepared_data(; k)
+    brmi = build_brmi(data, k)
+    turing = turing_linked_target(brmi; online_init=true)
+    online = adaptive_centering_problem(
+        turing.backend, turing.ldf, ENZYME_BACKEND)
+    fit = WarmupHMC.adaptive_warmup_mcmc(
+        Xoshiro(seed), online;
+        init=turing.q,
+        n_draws,
+        n_evaluations,
+        stepsize_adaptation_limit=min(20, n_evaluations),
+        target_acceptance_rate=0.95,
+        max_tree_depth=7,
+        progress=nothing,
+        monitor_ess=false,
+    )
+    learned = [value.c for (_, value) in WarmupHMC.reparam_sources(online)]
+    length(learned) == 2k || error(
+        "expected $k mean and $k log-scale HSGP cells, got $(length(learned))",
+    )
+    rows = [
+        (; predictor=i <= k ? "mu" : "log(sigma)",
+           basis=mod1(i, k), centeredness=learned[i])
+        for i in eachindex(learned)
+    ]
+    write_tsv(joinpath(output_dir, "online_turing_centeredness.tsv"), rows)
+    println("turing_online_basis_functions\t", k)
+    println("turing_online_draws\t", size(fit.posterior_position, 2))
+    println("turing_online_divergences\t", fit.n_divergent_samples)
+    println("turing_online_centeredness\t", join(learned, ','))
+    println("output_dir\t", output_dir)
+    (; fit, learned, rows, turing, online, output_dir)
+end
+
 function posterior_curves(stan, fits, data, selected, k)
     names, draws = constrained_draws(stan, fits)
     index = Dict(names .=> eachindex(names))
@@ -473,7 +530,9 @@ function validate_backends(; k=parse(Int, get(ENV, "BRM_ADAPTIVE_K", "8")))
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
-    if get(ENV, "BRM_ADAPTIVE_ONLINE", "0") == "1"
+    if get(ENV, "BRM_ADAPTIVE_TURING_ONLINE", "0") == "1"
+        run_online_turing()
+    elseif get(ENV, "BRM_ADAPTIVE_ONLINE", "0") == "1"
         run_online_stanblocks()
     elseif get(ENV, "BRM_ADAPTIVE_RUNTIME", "0") == "1"
         run_reproduction()

@@ -1,7 +1,7 @@
 ````@raw html
 ---
 title: Adaptive HSGP centering
-description: A reproducible heteroscedastic motorcycle case study comparing fixed HSGP coordinates across StanBlocks and Turing, plus online adaptation of the compiled StanBlocks geometry.
+description: A reproducible heteroscedastic motorcycle case study comparing fixed and online HSGP coordinates across StanBlocks and Turing.
 ---
 ````
 
@@ -117,12 +117,18 @@ the target coordinates. The six-fit comparison below deliberately remains the
 offline source reproduction; the three formula parameterizations—not an
 additional learned map—are what it measures.
 
-### Online centering on the compiled StanBlocks model
+### Online centering on StanBlocks and native Turing
 
 BRM can now discover the two HSGP blocks from compiler-owned coordinate
-metadata and adapt every basis weight during StanBlocks warmup. The committed
-reproduction exposes the exact bounded showcase as
-`run_online_stanblocks`; its central public-API steps are:
+metadata or DynamicPPL range metadata and adapt every basis weight during
+warmup. Both backends use the same semantic cell: zero location, one
+centeredness value, and the per-basis log spectral scale. They also share the
+same transport, Jacobian, candidate grid, and score. Only backend-native
+coordinate discovery and target-gradient evaluation differ.
+
+The committed reproduction exposes the StanBlocks route as
+`run_online_stanblocks` and the native route as `run_online_turing`. Their
+central public-API steps are:
 
 ```julia
 data = prepared_data(; k=8)
@@ -139,26 +145,50 @@ fit = WarmupHMC.adaptive_warmup_mcmc(
     monitor_ess=false,
 )
 learned_c = [value.c for (_, value) in WarmupHMC.reparam_sources(online)]
+
+turing = turing_linked_target(ncp_brmi; online_init=true)
+native_online = adaptive_centering_problem(
+    turing.backend, turing.ldf, ENZYME_BACKEND)
+native_fit = WarmupHMC.adaptive_warmup_mcmc(
+    Xoshiro(0x20260913), native_online;
+    init=turing.q,
+    n_draws=20,
+    n_evaluations=120,
+    stepsize_adaptation_limit=20,
+    target_acceptance_rate=0.95,
+    max_tree_depth=7,
+    progress=nothing,
+    monitor_ess=false,
+)
+native_c = [value.c for (_, value) in
+            WarmupHMC.reparam_sources(native_online)]
 ```
 
-At the documented fixed seed, the bounded run retained 20 draws with a
-120-evaluation warmup budget, reported zero divergences, and learned:
+At the documented fixed seed, each bounded run retained 20 draws with a
+120-evaluation warmup budget and reported zero divergences. They learned:
 
 | basis frequency | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| mean HSGP `c` | 0.7 | 0.6 | 0.8 | 0.8 | 0.5 | 0.9 | 0.9 | 0.6 |
-| log-scale HSGP `c` | 0.9 | 0.9 | 0.9 | 0.9 | 0.9 | 0.4 | 0.9 | 0.8 |
+| StanBlocks mean `c` | 0.7 | 0.6 | 0.8 | 0.8 | 0.5 | 0.9 | 0.9 | 0.6 |
+| StanBlocks log-scale `c` | 0.9 | 0.9 | 0.9 | 0.9 | 0.9 | 0.4 | 0.9 | 0.8 |
+| Turing mean `c` | 1.0 | 1.0 | 1.0 | 0.5 | 1.0 | 0.8 | 1.0 | 0.4 |
+| Turing log-scale `c` | 0.9 | 1.0 | 0.6 | 0.5 | 0.2 | 0.0 | 0.0 | 0.0 |
 
-This is a genuine online transform: candidate values are learned only from
-warmup frames, the transform and Jacobian preserve the original compiled
-target, and the retained draws are never recycled from an offline pilot. The
-nonzero values across all 16 cells demonstrate that adaptation traversed both
-same-axis HSGP blocks. This tiny run is still execution evidence rather than a
-convergence or efficiency study. The native Turing online bridge currently
-covers only its deliberately small
-ordinary random-intercept contract; native Turing HSGP parity remains a
-separate fail-closed extension rather than being routed through BridgeStan
-coordinate names.
+These are genuine online transforms: candidate values are learned only from
+warmup frames, each transform and Jacobian preserves its original target, and
+the retained draws are never recycled from an offline pilot. Different learned
+values are expected because the finite warmup trajectories and target-gradient
+implementations differ; semantic parity does not require identical adaptation
+decisions. The native initialization is an explicit deterministic point in
+the original model, not a pilot draw. These tiny runs are execution evidence,
+not convergence or efficiency studies.
+
+The native wrapper delegates density evaluation to the exact DynamicPPL
+target and supplies its audited closed-form gradient for this bounded model.
+Enzyme differentiates only the small shared coordinate transport: the current
+Enzyme stack aborts on the full generated DynamicPPL HSGP model, whereas the
+closed-form gradient agrees with finite differences. No BridgeStan parameter
+names, indices, or draws are used by the native route.
 
 ## Bounded reproducibility artifact
 
@@ -218,4 +248,10 @@ Online compiled-StanBlocks adaptation supports ungrouped, nonperiodic
 squared-exponential HSGPs. It fails before construction for grouped or
 periodic HSGPs, upper-bounded hyperparameter transforms, and models that mix
 ordinary random-effect cells with HSGP cells in one online plan. Native Turing
-HSGP adaptation is not yet claimed by this case study.
+HSGP adaptation covers the exact two-predictor Gaussian shape shown here,
+with an identity-linked mean, log-linked scale, the same observed axis, no
+random effects, and zero-location `LogNormal` length-scale and marginal-SD
+priors with any finite positive scale. Population intercepts may be present or
+absent. It fails closed for different axes, grouped or anisotropic HSGPs,
+other covariance families, non-`LogNormal` or shifted hyperpriors, and extra
+model coordinates.
