@@ -151,3 +151,27 @@ end
     @test_throws ErrorException reprocess(raw_sb,
         merge(df, (; w1=[0.0, 1.0, 1.0], w2=[0.0, 1.0, 1.0])))
 end
+
+mixed_builder = @brm begin
+    sigma ~ Exponential(1)
+    loc ~ 1 + (1 | g1) + (1 | mm(g1, g2; weights=(w1, w2)))
+    y ~ Normal(loc, sigma)
+end
+
+@testset "mixed ordinary and multi-membership block metadata" begin
+    sb = SBBRMI(mixed_builder(df); mod=@__MODULE__)
+    blocks = ranef_blocks(sb)
+    @test length(blocks) == 2
+    ordinary, mm = blocks
+    @test ordinary.family === :ranef_intercept
+    @test ordinary.group === :g1
+    @test ordinary.n_groups == 2
+    # The multi-membership branch must bind its own raw factor tuple: before
+    # the explicit assignment it read the ordinary block's stale `:g1`.
+    @test mm.family === :ranef_intercept_draws
+    @test mm.group == (:g1, :g2)
+    @test mm.levels == ["a", "b", "c"]
+    @test (mm.n_terms, mm.n_groups) == (1, 3)
+    @test StanBlocks.stanc_check(BayesianRegressionModels.stan_code(sb);
+                                 warn_pedantic=false).ok
+end

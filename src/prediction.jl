@@ -95,6 +95,7 @@
 const _RANEF_FAMILIES = Dict{Symbol,NamedTuple}(
     :ranef_intercept           => (; z = :xi,     layout = :group,           noncentered = true,  tau = nothing),
     :ranef_intercept_draws     => (; z = :xi,     layout = :group,           noncentered = true,  tau = nothing),
+    :ranef_slope               => (; z = :xi,     layout = :group,           noncentered = true,  tau = :tau),
     :ranef_correlated          => (; z = :z_flat, layout = :flat_term_group, noncentered = true,  tau = :tau),
     :ranef_correlated_draws    => (; z = :z_flat, layout = :flat_term_group, noncentered = true,  tau = :tau),
     :ranef_correlated_draws_generic => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :tau),
@@ -208,6 +209,45 @@ function _ranef_id_of_binding(binding::Symbol, group::Symbol, by::Union{Nothing,
 end
 _ranef_id_of_binding(::Symbol, ::Any, ::Union{Nothing,Symbol}) = nothing
 
+# A zerocorr `(t1 + t2 || g)` expansion gives each scalar margin its own
+# synthetic `g__nocor__N` index. That index is an emission identity, not a new
+# raw column — but a user's own data column may literally carry such a name,
+# so the suffix alone never decides. The emitted index vector is the origin
+# record: the true raw column is the one whose fit/apply level coding
+# reproduces it. Both margins remain addressable as `g` exactly when `g`'s own
+# membership produced the emission.
+function _ranef_matches_index(col::AbstractVector, idx_val::AbstractVector)
+    length(col) == length(idx_val) || return false
+    levels = collect(_sb_fit_levels(col))
+    code = Dict{Any,Int}(level => i for (i, level) in enumerate(levels))
+    all(i -> get(code, col[i], 0) == idx_val[i], eachindex(col, idx_val))
+end
+_ranef_matches_index(::Any, ::Any) = false
+
+function _ranef_raw_group(group::Symbol, brmi, idx_val)
+    value = String(group)
+    parsed = match(r"^(.+)__nocor__[0-9]+$", value)
+    isnothing(parsed) && return group
+    base = Symbol(only(parsed.captures))
+    if idx_val isa StanBlocks.StanExpr
+        # RESAMPLE target: the index is a Stan-side expression, so membership
+        # cannot be verified against it; keep the historical presence rule.
+        # The levels-vs-n_groups control below still guards the count.
+        isnothing(column_data(brmi, base)) || return base
+        return group
+    end
+    base_col = column_data(brmi, base)
+    literal_col = column_data(brmi, group)
+    base_ok = !isnothing(base_col) && _ranef_matches_index(base_col, idx_val)
+    literal_ok = !isnothing(literal_col) && _ranef_matches_index(literal_col, idx_val)
+    # Identical memberships make either answer correct; keep history then.
+    base_ok && return base
+    literal_ok && return group
+    error("BRM prediction: grouping index `$group` matches neither `$base` ",
+          "nor a literal `$group` data column by membership; the block cannot ",
+          "be addressed by level.")
+end
+
 _ranef_plan(sb::SBBRMI) = generative_plan(sb)
 _ranef_plan(plan::GenerativePlan) = plan
 
@@ -279,6 +319,13 @@ function ranef_blocks(model)
         mm_entry = get(plan.preproc, idx_key, nothing)
         if mm_entry isa PreprocEntry && mm_entry.kind === :multi_membership
             group = Tuple(mm_entry.raw_ref.groups)
+            # Multi-membership members are user-written column names straight
+            # from the `mm(...)` call — origin metadata, never synthesis — so
+            # they are used verbatim: no `__nocor__` resolution applies, not
+            # even to a literally suffix-bearing member. The binding must still
+            # be explicit: without this the block below reads an undefined (or
+            # stale) `raw_group` from the ordinary branch.
+            raw_group = group
             by = nothing
             generated = false
             levels = collect(mm_entry.const_.levels)
@@ -290,12 +337,13 @@ function ranef_blocks(model)
                 "BRM prediction: cannot read a grouping factor out of group index ",
                 "key `$(idx_key)` for `$(d.target)`.")
             group, by = parsed
-            raw = column_data(brmi, group)
+            idx_val = _ranef_data_vec(data, idx_key, d.target, fam)
+            raw_group = _ranef_raw_group(group, brmi, idx_val)
+            raw = column_data(brmi, raw_group)
             isnothing(raw) && error(
-                "BRM prediction: grouping factor `$group` (from `$(idx_key)`) is not ",
+                "BRM prediction: grouping factor `$raw_group` (from `$(idx_key)`) is not ",
                 "a raw data column of this model.")
             levels = collect(_sb_fit_levels(raw))
-            idx_val = _ranef_data_vec(data, idx_key, d.target, fam)
             if idx_val isa StanBlocks.StanExpr
                 # RESAMPLE target: `resample_groups` marked this factor's index
                 # with `maybecv(...)`, so it is a Stan-side expression (not a data
@@ -336,7 +384,7 @@ function ranef_blocks(model)
             end
         end
         length(levels) == n_groups || error(
-            "BRM prediction: grouping factor `$group` has $(length(levels)) ",
+            "BRM prediction: grouping factor `$raw_group` has $(length(levels)) ",
             "training levels but block `$(d.target)` was emitted with ",
             "n_groups = $n_groups. The block cannot be addressed by level.")
         n_terms = if haskey(d.keywords, :n_terms) && d.keywords.n_terms isa Symbol
@@ -345,8 +393,8 @@ function ranef_blocks(model)
             1
         end
         push!(seen, d.target)
-        push!(out, RanefBlock(d.target, fam, group,
-                              _ranef_id_of_binding(d.target, group, by), by,
+        push!(out, RanefBlock(d.target, fam, raw_group,
+                              _ranef_id_of_binding(d.target, raw_group, by), by,
                               levels, n_terms, n_groups,
                               Symbol(d.target, :_, spec.z), spec.noncentered,
                               generated))

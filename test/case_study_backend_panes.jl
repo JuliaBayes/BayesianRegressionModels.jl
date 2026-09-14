@@ -6,7 +6,7 @@ using Test, Markdown, StanBlocks
 include(joinpath(@__DIR__, "..", "docs", "backend_comparisons.jl"))
 
 const CASE_PAGES = isempty(ARGS) ? [
-    "adaptive-centering.md", "eight-schools-centering.md",
+    "adaptive-centering.md", "eight-schools-centering.md", "radon-centering.md",
 ] : ARGS
 
 @testset "case-study backend panes in isolated page modules" begin

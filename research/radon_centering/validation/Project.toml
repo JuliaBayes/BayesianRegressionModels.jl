@@ -1,0 +1,8 @@
+[deps]
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+MCMCDiagnosticTools = "be115224-59cd-429b-ad48-344e309966f0"
+
+[compat]
+JSON = "=1.8.0"
+MCMCDiagnosticTools = "=0.3.19"
+julia = "1.10"
