@@ -14,9 +14,9 @@ follows [Generable's motorcycle example](https://www.generable.com/post/hsgp-rep
 fit the noncentered model, inspect its geometry, choose one centering per basis
 weight, and fit the reparameterized model from scratch.
 
-There are **two fits**, not three. The centered plots below transform the
-noncentered pilot draws; they do not come from sampling a centered model.
-Online adaptation is a separate extension of this workflow.
+The source workflow has two fits: a noncentered pilot and a selected-partial
+refit. The centered plots transform the pilot draws. A third fit extends the
+comparison with online adaptation during warmup.
 
 ## The model
 
@@ -40,7 +40,7 @@ The left panel shows frequencies 1, 2, 19 and 20; the dotted vertical lines mark
 the observed domain. The right panel shows how increasing the length scale
 suppresses the high-frequency weights.
 
-### Hyperpriors: verify the implementation, not just the notation
+### Hyperpriors and source equivalence
 
 The source assigns independent `Normal(0,4)` priors to the **log** length scale
 and **log** marginal standard deviation of each GP. BRM expresses these as
@@ -51,9 +51,8 @@ part of that equivalence:
 logpdf(LogNormal(0,4), exp(q)) + q = logpdf(Normal(0,4), q)
 ```
 
-The `+q` is the unconstraining Jacobian. An additional lower bound on the
-length scale would change the model; matching distribution names alone would
-not detect that error.
+The `+q` is the unconstraining Jacobian. Each positive parameter has support
+`(0, Inf)`, with no additional length-scale floor.
 
 `research/adaptive_centering/audit_source.jl` compiles the immutable original
 Stan program and compares it with the actual BRM-generated Stan model. Its
@@ -62,16 +61,15 @@ Jacobian, and all 44 gradient components. Across six tested points the largest
 absolute density and gradient differences were `5.7e-14` and `4.3e-14`.
 The companion `audit_partial_source.jl` checks the fresh partial model against
 the original adaptive Stan program at 16 saved posterior positions. All 51
-checks pass; the largest density and gradient differences are `1.2e-13` and
-`5.0e-12`. These are comparisons of the actual generated targets, including
+checks pass; the largest density and gradient differences are `9.95e-14` and
+`5.59e-12`. These are comparisons of the actual generated targets, including
 the source hyperpriors, not just algebraic prior identities.
 
 ### One BRM formula and its generated backends
 
-This executable example reads the same full dataset and uses the same
-20-frequency model as the sampling run. The tabs expose the generated models;
-generating a Turing model does not imply that it has passed the gradient
-performance gate or has been sampled.
+This executable example reads the full dataset and uses the same 20-frequency
+model as the sampling runs. The tabs expose its generated backends. All fits
+on this page use StanBlocks/BridgeStan; the Turing tab shows generated code.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
@@ -105,8 +103,8 @@ end
 The source configuration is retained: one chain, `Xoshiro(1)`, 10,000 requested
 draws, and ordinary WarmupHMC defaults including Pathfinder initialization.
 The draw count is a floor, so the actual retained count is reported below.
-No evaluation window, target acceptance rate, tree depth or transformation
-setting has been changed to make the comparison look better.
+Evaluation windows, target acceptance, tree depth and transformation settings
+use their defaults.
 
 ```julia
 pilot = WarmupHMC.adaptive_warmup_mcmc(
@@ -200,15 +198,14 @@ Both fits retained 10,000 draws with the configuration above:
 
 | fit | max split R-hat | min bulk ESS | min tail ESS | divergences |
 | --- | ---: | ---: | ---: | ---: |
-| Noncentered pilot | 1.0012 | 2,514 | 2,886 | 34 (0.34%) |
-| Selected-partial refit | 1.0007 | 2,533 | 1,797 | 16 (0.16%) |
+| Noncentered pilot | 1.0009 | 1,922 | 2,160 | 99 (0.99%) |
+| Selected-partial refit | 1.0013 | 2,436 | 2,783 | 36 (0.36%) |
 
 The posterior curves agree visually and the low-frequency coordinate clouds
 become less dependent on the hyperparameters. Divergences decrease, but do
-not disappear. Bulk ESS is similar and the minimum tail ESS is lower in this
-refit, so these results do **not** establish an across-the-board efficiency
-improvement. They reproduce the source's geometry experiment, including its
-limitations, rather than a claim that partial centering guarantees a clean fit.
+not disappear. Both minimum bulk and tail ESS improve in this refit, but
+obtaining its coordinates also required the pilot. The cost accounting below
+includes that distinction; partial centering does not guarantee a clean fit.
 
 An independent check applied the source's literal loss formula to every pilot
 weight: all 40 selected values agree exactly with BRM's automated selection.
@@ -217,14 +214,14 @@ The full-fit receipts, candidate scores and figure checks pass 8,221 tests.
 Rank-normalized split R-hat, bulk ESS and tail ESS are computed with
 MCMCDiagnosticTools. As in the source's main example, each fit has one chain:
 split R-hat is a within-chain diagnostic, not evidence that independent chains
-agree. Divergences must remain visible in any interpretation of the geometry
-comparison; changing the sampler settings to conceal them would answer a
-different question.
+agree. The divergences limit how confidently these samples can represent the
+posterior, despite their favorable R-hat and ESS values.
 
 ESS alone does not measure computational cost. The [cost comparison below](#compute-cost-and-ess-per-gradient)
-reports the recoverable gradient counts for all three fits, including warmup.
+reports measured runtime and exact total and retained-sampling gradient counts
+for all three fits.
 
-## Online adaptive centering and the Turing gate
+## Online adaptive centering
 
 Online centering learns per-weight coordinates inside warmup instead of using
 a separate pilot. BRM discovers the HSGP cells and constructs their transform:
@@ -245,8 +242,8 @@ sampler defaults; it is an extension, not one of the source's two fits.
 ![Online adaptive-centering posterior mean and conditional noise](assets/adaptive-hsgp/online_posterior.png)
 
 The full online StanBlocks run retained 10,000 draws, with **zero divergences**,
-maximum split R-hat `1.0018`, minimum bulk ESS `2,318`, and minimum tail ESS
-`2,775`. This is encouraging evidence from one run, not a guarantee for other
+maximum split R-hat `1.0016`, minimum bulk ESS `2,313`, and minimum tail ESS
+`2,886`. This is encouraging evidence from one run, not a guarantee for other
 data, seeds or models.
 
 ![Online warmup centering compared with the separate offline selection](assets/adaptive-hsgp/online_centeredness.png)
@@ -261,9 +258,9 @@ through their matching coordinate transform and Jacobian.
 
 ![Online posterior basis weights versus their hyperparameters, in the learned coordinates](assets/adaptive-hsgp/online_scatter.png)
 
-These are the same pair diagnostics as for the pilot and partial refit, now
-using all 10,000 online draws. BRM transforms each returned NCP weight into
-its learned coordinate `u = s^c*z` exactly once for display. Length-scale and
+These pair diagnostics use all 10,000 online draws. BRM transforms each
+returned NCP weight into its learned coordinate `u = s^c*z` exactly once for
+display. Length-scale and
 marginal-SD axes are logarithmic; each panel has its own coordinate scale.
 This transformation neither samples a new posterior nor changes the physical
 weights represented by the saved draws.
@@ -299,7 +296,7 @@ This plot evaluates WarmupHMC's native `candidate_scoring_losses` on the
 It facets only by GP: the coordinate frame in which the reference draws were
 stored does not change the candidate loss landscape. A matched-draw audit
 evaluated all 1,320 candidate comparisons across three representations of
-those physical draws; their largest loss difference was `1.53e-15`.
+those physical draws; their largest loss difference was `1.11e-15`.
 
 Unlike the offline proxy plot, these are **raw, interpretable correlations**,
 with fixed y-limits `[-1,0]` and no min–max scaling. Values near `-1` indicate
@@ -332,8 +329,8 @@ posterior pilot and the online warmup stream supply different finite evidence.
 Here the columns genuinely change the displayed coordinates: NCP pilot,
 post-hoc partial refit, and online fit in its learned geometry. Each facet
 shows **1,000 evenly selected saved draws**, with transparent points; the
-underlying gradient evaluations and loss calculations still use all 10,000
-draws per fit. There is no KDE, binning, smoothing, or fitted regression line.
+underlying gradient evaluations and loss calculations use all 10,000
+draws per fit. The points are plotted directly, without smoothing or aggregation.
 Gradient axes are independent between facets, because reparameterization
 changes their units as well as the coordinate units.
 
@@ -342,57 +339,75 @@ hyperparameters, BRM transports them with `g_c = s^(-c)*g_z` (or the equivalent
 source-to-target exponent difference). The change-of-coordinate Jacobian is
 constant with respect to this basis coordinate; its hyperparameter derivatives
 are not being plotted here. Seventy-two independent finite-difference checks
-of the displayed gradients passed, with maximum scaled error `1.56e-8`.
+of the displayed gradients passed, with maximum scaled error `3.95e-9`.
 These scatter plots visualize a component of the correlation criterion;
 their appearance alone is not an ESS or convergence guarantee.
 
-**Turing sampling is currently disabled.** The explicit length-scale
-support mismatch found by the source audit has been corrected. The actual
-DynamicPPL/Enzyme gradient path remains under correctness and runtime
-verification on matched full-model coordinates. Turing must pass both numerical equality
-and warmed gradient-runtime parity before it is used to sample this case
-study. Finite gradients or a 20-draw execution check do not satisfy that gate.
+### Backend gradient comparison
+
+A separate DynamicPPL/Enzyme gradient benchmark passed numerical agreement
+checks against StanBlocks. Fixed-coordinate runtime ratios were
+1.41–1.48× StanBlocks and the online
+wrapper ratios were 1.03–1.19×. The committed receipt is
+`test/receipts/turing_hsgp_gradients.tsv`. The fits and figures here remain
+StanBlocks/BridgeStan results; the gradient benchmark is not
+Turing posterior-sampling evidence.
 
 ## Compute cost and ESS per gradient
 
-The final original checkpoints retain WarmupHMC's cumulative NUTS evaluation
-counter. It includes step-size adaptation and all discarded restart epochs;
-it is taken once from the final checkpoint, not summed over windows. It counts
-DynamicHMC integration steps, **not** Pathfinder initialization or other setup
-gradient calls. The numerator below is the minimum bulk ESS over the same 44
-sampled model coordinates used in the fit-results table.
+Each fit records both exact counters using WarmupHMC `deeea1d` and Julia
+1.10.11, with the model, priors, seed and sampling options specified above.
+`report_costs.jl` verifies each saved fit's counters
+against its final checkpoint; it never sums cumulative counters across windows.
 
-| Fit | Total NUTS gradient evaluations | Min bulk ESS / total gradients | Sampling-only gradient evaluations | Min bulk ESS / sampling gradients | Fit runtime |
-| --- | ---: | ---: | --- | --- | --- |
-| Noncentered pilot | 1,770,275 | 0.001420 | Not recorded | Not recoverable | Not recorded |
-| Selected-partial refit | 904,842 | 0.002800 | Not recorded | Not recoverable | Not recorded |
-| Online adaptive centering | 2,587,623 | 0.000896 | Not recorded | Not recoverable | Not recorded |
+- **Total NUTS gradients** include step-size adaptation and all discarded
+  restart epochs, as well as retained sampling. They count DynamicHMC integration
+  steps, **not** Pathfinder initialization or other setup gradient calls.
+- **Sampling gradients** count only appended transitions corresponding to the
+  final retained draws. They exclude adaptation and discarded epochs.
+- Each ESS numerator is the **minimum over all 44 sampled model
+  coordinates**, in that fit's reported parameterization, not a sum of ESS
+  across parameters.
 
-The refit alone obtains about twice the minimum bulk ESS per NUTS gradient of
-the pilot. But obtaining its fixed centering required that pilot: charging
-both runs costs **2,675,117** evaluations and gives **0.000947** refit bulk ESS
-per total gradient. On this end-to-end accounting the pilot-then-refit workflow
-does not beat the NCP run. The online run removes the observed divergences,
-but uses more gradients and has lower minimum bulk ESS per total gradient;
-it is not a computational-speedup result. The corresponding minimum tail-ESS
-ratios are `0.001630`, `0.001985`, and `0.001072` for the individual runs.
+| Fit | Total NUTS gradients | Min bulk ESS / total | Sampling gradients | Min bulk ESS / sampling | Fit time |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Noncentered pilot | 4,648,302 | 0.000413 | 2,583,577 | 0.000744 | 89.8 s |
+| Selected-partial refit | 850,127 | 0.002866 | 844,074 | 0.002886 | 15.0 s |
+| Online adaptive centering | 3,158,978 | 0.000732 | 2,122,544 | 0.001090 | 159.4 s |
 
-The missing entries are measurement gaps, not zeros. These historical run
-records did not save wall time. Their final retained epoch includes 50
-step-size-adaptation transitions whose evaluation costs were not separately
-stored, so subtracting the last restart's total does **not** give exact
-sampling-only cost. Neither file timestamps nor an average steps-per-draw
-estimate is substituted for those measurements. `report_costs.jl` reproduces
-the exact available counts and ratios. New fresh-fit records preserve wall
-time around the sampler call, the total counter, and, with WarmupHMC containing
-`e376f8f`, the exact retained-sampling counter. The reporter computes both
-ESS-per-gradient ratios when the fit record and final checkpoint agree;
-it does not add measurements to these historical runs.
+The two denominators answer different questions. Outside retained sampling,
+the pilot spent **2,064,725** NUTS evaluations, the partial refit **6,053**,
+and online adaptation **1,036,434**. Charging those costs changes the apparent
+efficiency substantially. The NCP record contains late restarts that discard
+epochs of 3,040 and 3,679 draws. The partial refit receives **only the selected
+centering**, not the pilot's metric or warmup state: it runs fresh Pathfinder
+initialization and has one early metric/step-size restart, followed by the final
+50-transition step-size adaptation. Its 55 non-retained transitions cost those
+6,053 evaluations.
 
-Finally, a gradient evaluation is not equally expensive in every coordinate
-system: the online wrapper includes coordinate transport. Without measured
-runtime, these counts cannot establish wall-clock efficiency. The 34/16/0
-divergence counts and single-chain limitations still apply to the ESS figures.
+The refit alone has about **3.88×** the pilot's
+minimum bulk ESS per sampling gradient. But its coordinates required the pilot:
+together they cost **5,498,429** total NUTS evaluations, giving **0.000443**
+refit minimum bulk ESS per total gradient—only about **1.07×** the pilot alone.
+The refit's numerator is used here; the two runs' ESS values are not added.
+
+Online adaptation avoids the separate pilot and obtains about **1.77×** the
+pilot's minimum bulk ESS per total NUTS evaluation (**1.46×** on sampling-only
+cost), with zero observed divergences. Its total-gradient efficiency is about
+**1.65×** the pilot-plus-refit workflow. The corresponding minimum tail-ESS
+ratios, in table order, are `0.000465`, `0.003274`, `0.000913` per total
+gradient and `0.000836`, `0.003297`, `0.001360` per sampling gradient.
+
+**Gradient efficiency is not wall-clock speed.** The online wrapper also
+performs coordinate transport and adaptation work, and its measured fit time
+here is longer. Timings surround each sampler call, including initialization,
+first-use Julia/AD compilation and checkpoint I/O, but excluding preceding
+Stan compilation, post-fit extraction, plotting and offline centering selection.
+The calls ran sequentially on one CPU core with one BLAS thread on a shared
+host; they are not warmed or replicated timing benchmarks. The pilot and refit
+calls together took **104.9 s**, before their intervening selection/processing
+cost. The 99/36/0 divergences and single-chain limitations still qualify every
+ESS comparison; these numbers do not establish universal superiority.
 
 ## Native BRM diagnostics, rendered with AlgebraOfVega
 
@@ -400,8 +415,7 @@ The fits use BRM models and WarmupHMC sampling. BRM owns logical-output
 extraction, posterior-predictive execution, HSGP coordinate transport, and
 gradient transport; WarmupHMC owns the online candidate scores. The research
 scripts assemble the comparison panels and retain the scientific provenance.
-**All figures on this page are rendered in Julia with AlgebraOfVega; no R
-renderer is used.**
+All figures on this page are rendered in Julia with AlgebraOfVega.
 
 Plotting is optional: `using BayesianRegressionModels, AlgebraOfVega` loads
 BRM's plotting extension without adding plotting dependencies to fitting-only
@@ -432,8 +446,7 @@ support ungrouped squared-exponential terms and reject unsupported geometry.
 WarmupHMC matrices use coordinates in rows: transpose them when calling these
 BRM draw-table helpers. Conversely, `candidate_scoring_losses` expects
 coordinates-by-draws matrices in its current source frame. The reproduction
-scripts handle these boundaries explicitly; none substitutes an unrelated
-hand-written sampler or gradient target.
+scripts handle these boundaries explicitly.
 
 ## Reproduce and inspect the evidence
 
@@ -450,8 +463,6 @@ Primary source boundaries:
 - [Rdatasets at `1dcc2bf`](https://github.com/vincentarelbundock/Rdatasets/tree/1dcc2bf5f955cc1224a3e1307256e1fe86b68dae/csv/MASS).
 - CSV SHA-256: `b89a1e4eb0391a982b32be3e378df00e8593ff9971e9425e9c5d7929b74f9801`.
 
-The source plotting helper swaps the length-scale and marginal-SD labels;
-these figures label the actual model quantities correctly. Different library
-versions and parameter orderings can produce different trajectories at the
-same seed. The source's numerical results are context, not numbers to copy
-into a new run.
+Different library versions and parameter orderings can produce different
+trajectories at the same seed. The recorded environment and source audits
+identify the computation behind these results.
