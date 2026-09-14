@@ -1282,7 +1282,7 @@ Example: drug concentration in each subject
 Formulas and a custom calculation live in the same model declaration.
 </div>
 <div class="source-note">
-Body of the existing <code><span class="citation" data-cites="brm">@brm</span> begin … end</code> population-PK example. Complete declaration and data in appendix B; <code>kernel</code> runs the calculation for each subject.
+<strong>StanBlocks example.</strong> Turing currently rejects this ragged response. Body of the existing <code><span class="citation" data-cites="brm">@brm</span> begin … end</code> declaration; complete code and data in appendix B. <code>kernel</code> runs the calculation for each subject.
 </div>
 <aside class="notes">
 <p>This is the body of the exact population_pk declaration from docs/src/feature-atlas.md. The Lua filter extracts it rather than maintaining a second copy. The structural equation is a one-compartment IV-bolus model: C(t) = dose/V * exp(-(CL/V)t). The log link is explicit on CL and V. The do-block receives evaluated subject-level values. This demonstrates formula/custom-code composition without asserting that every Julia operation is supported by every backend.</p>
@@ -1797,7 +1797,7 @@ display:block!important;
 <span id="cb4-22"><a href aria-label="22"></a>    concentration<span class="op">=</span>[<span class="fl">8.1</span>, <span class="fl">7.6</span>, <span class="fl">5.2</span>, <span class="fl">4.9</span>, <span class="fl">2.1</span>],</span>
 <span id="cb4-23"><a href aria-label="23"></a>))</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="source-note">
-Julia setup: <code>using BayesianRegressionModels, Distributions</code>. Code and data are read directly from <a href="https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/docs/src/feature-atlas.md">the executable feature atlas</a> during rendering.
+<strong>StanBlocks example; Turing does not yet support the ragged-response wrapper.</strong> Julia setup: <code>using BayesianRegressionModels, Distributions</code>. Code and data are read from <a href="https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/docs/src/feature-atlas.md">the executable feature atlas</a>.
 </div>
 <aside class="notes">
 <p>This is the complete checked-in declaration with its data, not a handwritten sketch of a generated backend. The feature atlas executes it and derives the StanBlocks, Stan, and Turing views. Consult the generated view for any unsupported-backend error. This slide and the two main-talk excerpts share the same source and cannot drift independently.</p>

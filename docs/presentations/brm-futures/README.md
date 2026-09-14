@@ -19,6 +19,18 @@ and data; appendix B shows the full declaration. These are source excerpts,
 not manually invented generated Stan/Turing programs. The normal documentation
 build executes the feature atlas and generates its backend views.
 
+The Gaussian example generates both StanBlocks/Stan and Turing code. The PK
+example generates StanBlocks/Stan code; Turing currently rejects its ragged
+response decorator. That limit is visible on the PK slides, not just in notes.
+After preparing the normal docs environment, check those exact declarations
+and their stated construction support from the repository root with:
+
+```sh
+julia --startup-file=no --project=docs docs/presentations/brm-futures/check-examples.jl
+```
+
+This is a focused construction/emission check, not a sampling or gradient test.
+
 The visual system follows the StanCon 2026 StanBlocks.jl presentation at
 StanBlocks.jl revision `c0b5b9197e2d06cf284f1990db024c37ed2b9d47`:
 Reveal `simple`, a 1600×900 canvas, warm paper, Avenir/Inter typography, Stan

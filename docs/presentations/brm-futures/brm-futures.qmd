@@ -79,7 +79,7 @@ The shared `pk` label allows clearance and volume effects to be correlated.
 ::::
 
 <div class="takeaway">Formulas and a custom calculation live in the same model declaration.</div>
-<div class="source-note">Body of the existing <code>@brm begin … end</code> population-PK example. Complete declaration and data in appendix B; <code>kernel</code> runs the calculation for each subject.</div>
+<div class="source-note"><strong>StanBlocks example.</strong> Turing currently rejects this ragged response. Body of the existing <code>@brm begin … end</code> declaration; complete code and data in appendix B. <code>kernel</code> runs the calculation for each subject.</div>
 
 ::: {.notes}
 This is the body of the exact population_pk declaration from docs/src/feature-atlas.md. The Lua filter extracts it rather than maintaining a second copy. The structural equation is a one-compartment IV-bolus model: C(t) = dose/V * exp(-(CL/V)t). The log link is explicit on CL and V. The do-block receives evaluated subject-level values. This demonstrates formula/custom-code composition without asserting that every Julia operation is supported by every backend.
@@ -350,7 +350,7 @@ Consult docs/src/turing-backend.md for the current combinations. Both does not m
 ```{.julia brm-example="population_pk"}
 ```
 
-<div class="source-note">Julia setup: <code>using BayesianRegressionModels, Distributions</code>. Code and data are read directly from <a href="https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/docs/src/feature-atlas.md">the executable feature atlas</a> during rendering.</div>
+<div class="source-note"><strong>StanBlocks example; Turing does not yet support the ragged-response wrapper.</strong> Julia setup: <code>using BayesianRegressionModels, Distributions</code>. Code and data are read from <a href="https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/docs/src/feature-atlas.md">the executable feature atlas</a>.</div>
 
 ::: {.notes}
 This is the complete checked-in declaration with its data, not a handwritten sketch of a generated backend. The feature atlas executes it and derives the StanBlocks, Stan, and Turing views. Consult the generated view for any unsupported-backend error. This slide and the two main-talk excerpts share the same source and cannot drift independently.
