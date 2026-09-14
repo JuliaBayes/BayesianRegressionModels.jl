@@ -120,6 +120,8 @@ BayesianRegressionModels.ranef_blocks
 BayesianRegressionModels.ranef_coordinates
 ```
 
+### [`stan_code`](@id stan_code)
+
 `stan_code` is re-exported from StanBlocks.jl. BRM extends that binding with
 `stan_code(sb::SBBRMI)`, which returns the transpiled Stan source for `sb.model`.
 
