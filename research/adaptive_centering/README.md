@@ -45,6 +45,13 @@ Use the repository's resolved `test` environment and resolve the separate
 Run from the repository root and put large outputs in a fresh disk-backed
 scratch directory. No R installation is used or needed.
 
+Fresh runs require WarmupHMC at or after `913da79d271276b2e6847b9699f5eb1957d050c7`,
+which returns the exact retained-sampling gradient counter. The reproduction
+requires that counter, saves it alongside the run-total counter and elapsed fit
+time, and prints all three at completion. Keep older run directories unchanged;
+`report_costs.jl` can still read their records, with unavailable fields marked
+missing. Turing is not sampled in this reproduction.
+
 ```sh
 # Compile the immutable original .stan file and compare its target with BRM.
 BRM_ADAPTIVE_OUTPUT="$TMPDIR/hsgp-source-audit" \

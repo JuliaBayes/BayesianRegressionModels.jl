@@ -125,7 +125,7 @@ function run_provenance(output_dir)
         "draws_requested_each_fit" => SOURCE_DRAWS, "chains_each_fit" => 1,
         "sampler" => "WarmupHMC.adaptive_warmup_mcmc",
         "sampler_config" => "defaults; n_draws=10000; monitor_ess=true (source progress enables this)",
-        "turing_sampling" => "disabled pending measured value/runtime parity",
+        "turing_sampling" => "not run; user requested StanBlocks-only resampling",
         "blas_threads" => BLAS.get_num_threads(),
         "diagnostics" => "rank-normalized split Rhat; bulk ESS; tail ESS; retained divergences",
         "rhat_scope" => "within one split chain, not independent-chain convergence",
@@ -159,12 +159,17 @@ function sample_source_fit(target, label, output_dir)
     record = (; posterior_position=convert(Matrix{Float64}, fit.posterior_position),
         n_divergent_samples=fit.n_divergent_samples, seed=SOURCE_SEED,
         fit_seconds, total_gradient_evaluations=fit.total_evaluation_counter,
-        sampling_gradient_evaluations=get(fit, :sampling_evaluation_counter, missing),
+        sampling_gradient_evaluations=fit.sampling_evaluation_counter,
         requested_draws=SOURCE_DRAWS, complete=retained >= SOURCE_DRAWS)
     serialize(result_path, record)
     record.complete || error("Stopped early; saved $retained draws, not a completed case study.")
+    0 < record.sampling_gradient_evaluations <= record.total_gradient_evaluations ||
+        error("Invalid retained-sampling/total gradient counters for $label")
     println("completed\t", label, "\tretained=", retained,
-        "\tdivergences=", record.n_divergent_samples)
+        "\tdivergences=", record.n_divergent_samples,
+        "\ttotal_gradients=", record.total_gradient_evaluations,
+        "\tsampling_gradients=", record.sampling_gradient_evaluations,
+        "\tfit_seconds=", record.fit_seconds)
     flush(stdout)
     record
 end
@@ -309,7 +314,7 @@ if abspath(PROGRAM_FILE) == @__FILE__
         error("This is the original k=20, 10000-draw case study. Reduced-budget overrides are no longer accepted.")
     any(get(ENV, key, "0") == "1" for key in
         ("BRM_ADAPTIVE_TURING", "BRM_ADAPTIVE_TURING_ONLINE")) &&
-        error("Turing sampling is disabled until numerical and runtime gradient parity is verified.")
+        error("This reproduction samples through StanBlocks, not Turing, as requested by the user.")
     if get(ENV, "BRM_ADAPTIVE_ONLINE", "0") == "1"
         run_online_stanblocks()
     elseif get(ENV, "BRM_ADAPTIVE_RUNTIME", "0") == "1"
