@@ -85,9 +85,15 @@ function prepare_gradient_diagnostics(fit_dir, output_dir)
         read(joinpath(fit_dir, "eight-schools-model.stan")) ||
         error("generated target differs from the saved full-fit producer")
     pilot = deserialize(joinpath(fit_dir, "noncentered.jls"))
-    partial = deserialize(joinpath(fit_dir, "partial_target.jls"))
+    partial = deserialize(joinpath(fit_dir, "partial.jls"))
+    partial_target = deserialize(joinpath(fit_dir, "partial_target.jls"))
     online = deserialize(joinpath(fit_dir, "online.jls"))
+    # partial.jls holds SOURCE draws u = tau^c*z (nonlinear_adapt=false, no
+    # back-transform): the native frame of the fixed selected-partial
+    # problem. partial_target.jls was written after reparametrize!, so it
+    # holds model-frame z like the other arms.
     for (label, fit) in (("noncentered", pilot), ("selected_partial", partial),
+                         ("selected_partial_target", partial_target),
                          ("online", online))
         fit.complete && size(fit.posterior_position) == (10, SOURCE_DRAWS) ||
             error("$label is not a completed 10-coordinate, 10,000-draw fit")

@@ -1,6 +1,6 @@
 gradient_draws = "10,000 retained draws of each displayed fit"
 scatter_display_draws_per_facet = 1000
-script_sha256 = "0f14954cc6d70a6effaa699d604cdb775e6312fa353558014cf4921d9a1bf03a"
+script_sha256 = "23fa06417cd7cf5b8dfa043fe3429e39d621cd7b0f4eabfc27660b66e60907bd"
 online_loss_reference = "common NCP pilot; unit weights; retrospective"
 
 [pilot]
