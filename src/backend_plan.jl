@@ -385,10 +385,12 @@ function _brm_prepare_observation_weight_values(
     values
 end
 
-function _brm_observation_weight_plan(rhs, target::Symbol,
-                                      response::AbstractVector;
+function _brm_observation_weight_plan(rhs, target::Symbol, response;
                                       prefix="BRM backend lowering")
     rhs isa ExprColumn && getf(rhs) === weighted || return nothing
+    response isa AbstractVector || error(
+        "$prefix: weighted response `$target` must be a one-dimensional " *
+        "observation vector; got $(typeof(response))")
     isempty(getkwargs(rhs)) || error(
         "$prefix: `weighted(distribution, weights)` accepts no keywords")
     args = getargs(rhs)
