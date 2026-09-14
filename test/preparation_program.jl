@@ -40,6 +40,29 @@ const BRM = BayesianRegressionModels
     @test only(model.observations).distribution.args[2].axis === :scalar
 end
 
+@testset "unweighted matrix observations bypass vector weight validation" begin
+    counts = [2 1 0; 0 2 1; 1 0 2]
+    expected_counts = copy(counts)
+    totals = vec(sum(counts; dims=2))
+    probabilities = [0.5, 0.3, 0.2]
+    brmi = (@brm begin
+        counts ~ Multinomial(totals, probabilities)
+    end)((; counts, totals, probabilities))
+
+    prepared = BRM._brm_prepare_model(brmi)
+    @test only(prepared.observations).response == expected_counts
+    @test isnothing(only(prepared.observations).weight)
+    emitted = SBBRMI(brmi; mod=@__MODULE__)
+    @test occursin("multinomial", lowercase(BRM.stan_code(emitted)))
+
+    weighted_vector = (@brm begin
+        y ~ weighted(Normal(0, 1), aweights(w))
+    end)((; y=zeros(3), w=ones(3)))
+    weighted_rhs = last(getargs(parent(weighted_vector.operations.y)))
+    @test_throws "must be a one-dimensional observation vector" BRM._brm_observation_weight_plan(
+        weighted_rhs, :counts, expected_counts; prefix="test")
+end
+
 @testset "missing responses remain observations in the common graph" begin
     brmi = (@brm begin
         sigma ~ Exponential(1)
