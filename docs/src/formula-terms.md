@@ -16,7 +16,7 @@ signature — the rest are covered by their docstrings on the [API](@ref) page.
 | `t2(x, z)` | two-margin tensor-product smooth | — |
 | `gp(x…; cov=:exp_quad, iso=true, jitter=1e-9)` | exact latent Gaussian process, noncentered Cholesky draw | — |
 | `gp(x; cov=:periodic, period, jitter=1e-9)` | exact latent GP under Stan's periodic kernel, one axis | — |
-| `hsgp(x…; k=20, c=1.5, iso=true, by=nothing, domain=nothing, orthogonal_to=nothing)` | Hilbert-space GP approximation over `prod(k)` basis functions | — |
+| `hsgp(x…; k=20, c=1.5, iso=true, by=nothing, domain=nothing, orthogonal_to=nothing, centeredness=0)` | Hilbert-space GP approximation over `prod(k)` basis functions; optional fixed partial centering | — |
 | `hsgp(x; k=20, cov=:periodic, period)` | periodic Hilbert-space basis: `k` harmonics, `2k` cosine/sine functions | — |
 | `ar(time; p=1)` | AR(p) noise process ordered by `time`; only `p=1` is emitted | — |
 | `dar(time; p=1)` | direct differenced-AR(1) trajectory with bounded persistence and scaled innovations | — |
@@ -133,6 +133,32 @@ intercept/linear projection on the new grid; re-orthogonalizing against the
 grid would define a different curve. Evaluation outside the formula's fixed
 `domain` is rejected. This is a population partial effect only: it deliberately
 excludes the intercept, other covariates, and subject-specific random slopes.
+
+### Fixed partial centering of HSGP weights
+
+For a raw, ungrouped squared-exponential HSGP, `centeredness` chooses the
+coordinate of each basis weight without changing its physical prior. It may be
+one scalar shared by all weights or a vector of length `prod(k)`, supplied
+literally or through a data column. With spectral standard deviation `s`, unit
+normal `z`, and centeredness `c` in `[0,1]`, BRM samples and reconstructs
+
+```text
+u ~ Normal(0, s^c)
+w = s^(1-c) u = s z
+```
+
+Thus `c=0` is the default noncentered coordinate and `c=1` is centered;
+intermediate values partially center that frequency. Both StanBlocks and
+Turing use the same log-spectral-scale calculation and endpoint-safe `c=0`
+path, so a numerically vanished high-frequency scale cannot turn `0 * -Inf`
+into `NaN`.
+
+[`select_hsgp_centeredness`](@ref) applies the pilot rule used in the
+[adaptive HSGP case study](adaptive-centering.md): rows are pilot draws,
+columns are basis frequencies, and candidates are fixed before the refit. The
+selector is not an online warmup controller. Periodic, latent-input,
+group-specific, and `orthogonal_to` HSGPs reject nonzero partial centering
+until those geometries have their own verified coordinate contract.
 
 ### Interval-censored predictor
 
