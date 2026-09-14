@@ -12,21 +12,21 @@ const BANDS = [:q05 => :q95, :q10 => :q90, :q25 => :q75]
 """Posterior quantile ribbons; these are not automatically predictive intervals."""
 function posteriorplot(curves; x=:time, ylabel="Response", title="",
                        observations=nothing, observed_y=:response, logscale=false,
-                       xlabel="Observation", bands=BANDS)
+                       xlabel="Observation", bands=BANDS, observation_markersize=7)
     ribbon = data(curves) * mapping(x => xlabel, :q50 => ylabel) *
         lineribbon(bands=bands)
     layers = isnothing(observations) ? ribbon : ribbon +
         data(observations) * mapping(x => xlabel, observed_y => ylabel) *
-        visual(Scatter; color="#252525", opacity=0.65, markersize=3)
+        visual(Scatter; color="#252525", opacity=0.65, markersize=observation_markersize)
     layers * config(width=620, height=320, title=title,
         scales=scales(Y=(; scale=logscale ? log10 : identity)))
 end
 
 """Coordinates versus hyperparameters, with an independently scaled panel per pair."""
-function coordinateplot(rows; title="", logx=true)
+function coordinateplot(rows; title="", logx=true, opacity=0.12, markersize=8)
     data(rows) * mapping(:hyperparameter => "Hyperparameter position",
         :coordinate => "Coordinate position"; col=:parameter, row=:basis_label,
-        color=:basis_label => "Basis") * visual(Scatter; opacity=0.12, markersize=2) *
+        color=:basis_label => "Basis") * visual(Scatter; opacity, markersize) *
         config(width=260, height=190, title=title,
             facet=(; linkxaxes=:none, linkyaxes=:none),
             scales=scales(X=(; scale=logx ? log10 : identity),
@@ -138,7 +138,7 @@ end
 BRM.brm_pairplot(rows::AbstractVector{<:NamedTuple}; kwargs...) =
     coordinateplot(rows; kwargs...)
 
-function BRM.brm_pairplot(gp::NamedTuple; bases=axes(gp.coordinates, 2), title="")
+function BRM.brm_pairplot(gp::NamedTuple; bases=axes(gp.coordinates, 2), kwargs...)
     rows = [(; basis_label="Basis $(lpad(b, 2, '0'))",
               parameter=axis == 0 ? "Marginal SD" : "Length scale $(axis)",
               hyperparameter=axis == 0 ? gp.marginal_sd[i] : gp.length_scales[i, axis],
@@ -147,7 +147,7 @@ function BRM.brm_pairplot(gp::NamedTuple; bases=axes(gp.coordinates, 2), title="
             for i in axes(gp.coordinates, 1)]
     all(row -> isfinite(row.coordinate), rows) || error(
         "Pair plot contains non-finite transformed coordinates; inspect the diagnostic finite mask")
-    coordinateplot(rows; title)
+    coordinateplot(rows; kwargs...)
 end
 
 function BRM.brm_pairplot(d::BRM.BRMDescriptor, draws::AbstractMatrix, names;

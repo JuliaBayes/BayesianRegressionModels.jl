@@ -1,0 +1,20 @@
+source_model_sha256 = "1624c8770e8f08a90894f3417591eb45f93ccfb70cbe9870442ae2ab26343422"
+timed_scope = "sampler call only; compilation/setup excluded; counters follow WarmupHMC documented scopes"
+brm_commit = "e0be210778a95b16cfcb3ec68e956637142eade1"
+seed_each_fit = 1
+sampler = "WarmupHMC.adaptive_warmup_mcmc"
+turing_sampling = "not run"
+julia_version = "1.10.11"
+sampler_config = "defaults; n_draws=10000; monitor_ess=true; no initializer or NUTS overrides"
+source_data_sha256 = "fccd1624bd240b0c26a8b668f4d2181f0653000e4b169d393b3dc815a0b46952"
+draws_requested_each_fit = 10000
+rhat_scope = "within one split chain, not independent-chain convergence"
+schools = 8
+chains_each_fit = 1
+r_sampling = "not run"
+source_data_revision = "93b8b05cb7978952606f2043bec64d3b958b360c"
+blas_threads = 1
+ess_scope = "all 10 unconstrained model coordinates: mu, log(tau), and eight school effects"
+script_sha256 = "63fa5a5fb33a73bfa70964bd595b0add7eba50f0048329c3bf491feffbf64eee"
+source_model_revision = "a42b3da85b7dc38f2745dde4fca197425f18c516"
+diagnostics = "rank-normalized split Rhat; bulk ESS; tail ESS; retained divergences"

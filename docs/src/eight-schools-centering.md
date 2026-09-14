@@ -31,10 +31,11 @@ y       28   8  -3   7  -1   1  18  12
 sigma   15  10  16  11   9  11  10  18
 ```
 
-The reference is Stan's public `example-models` eight-schools program,
-`misc/eight_schools/eight_schools.stan` at revision `a42b3da85b7dc38f2745dde4fca197425f18c516`,
-with data `misc/eight_schools/eight_schools.data.R` at revision
-`93b8b05cb7978952606f2043bec64d3b958b360c`:
+The reference is Stan's public `example-models` eight-schools program:
+[eight_schools.stan](https://github.com/stan-dev/example-models/blob/a42b3da85b7dc38f2745dde4fca197425f18c516/misc/eight_schools/eight_schools.stan)
+at revision `a42b3da85b7dc38f2745dde4fca197425f18c516`, with data
+[eight_schools.data.R](https://github.com/stan-dev/example-models/blob/93b8b05cb7978952606f2043bec64d3b958b360c/misc/eight_schools/eight_schools.data.R)
+at revision `93b8b05cb7978952606f2043bec64d3b958b360c`:
 
 ```text
 data {
@@ -291,8 +292,9 @@ centeredness learned online.
 
 ![Coordinate positions versus exact log-density gradients in three configurations](assets/adaptive-eight-schools/gradient_scatter.png)
 
-Here the columns genuinely change the displayed coordinates: NCP pilot,
-post-hoc partial refit, and online fit in its learned geometry. Each facet
+Here the columns genuinely change the displayed coordinates, left to
+right: NCP pilot, online fit in its learned geometry, and post-hoc partial
+refit. Each facet
 shows **1,000 evenly selected saved draws**, with transparent points; the
 underlying gradient evaluations and loss calculations use all 10,000
 draws per fit. The points are plotted directly, without smoothing or
@@ -388,7 +390,7 @@ brm_pairplot(pair_rows)
 brm_centerednessplot(centering_rows; compare=true)
 brm_centering_lossplot(online_loss_rows; ylimits=(-1, 0))
 brm_centering_lossplot(offline_loss_rows; normalization=:minmax)
-brm_gradientplot(gradient_rows; opacity=0.25, markersize=8)
+brm_gradientplot(gradient_rows; opacity=0.25, markersize=12)
 ```
 
 WarmupHMC matrices use coordinates in rows: transpose them when calling
@@ -400,15 +402,18 @@ reproduction scripts handle these boundaries explicitly.
 
 The script, plotting program, data and source audits are in
 `research/eight_schools_centering/`. The README documents the full
-commands. `provenance.toml` and `packages.tsv` record the source/data
-hashes, exact code and dependencies, seed, school count and sampler
-configuration. Raw model-frame draws are saved before plotting, and
+commands. The small evidence tables behind every number on this page —
+the source audit, diagnostics, both cost counters, centeredness, loss
+profiles, `provenance.toml` and `packages.tsv` — are committed under
+`research/eight_schools_centering/results/` with their own provenance
+note. Full posterior draws and per-draw coordinate tables stay in scratch.
+Raw model-frame draws are saved before plotting, and
 existing completed fits are never silently overwritten.
 
 Primary source boundaries:
 
-- Stan `example-models` model at `a42b3da85b7dc38f2745dde4fca197425f18c516`.
-- Stan `example-models` data at `93b8b05cb7978952606f2043bec64d3b958b360c`.
+- Stan `example-models` model at [`a42b3da`](https://github.com/stan-dev/example-models/blob/a42b3da85b7dc38f2745dde4fca197425f18c516/misc/eight_schools/eight_schools.stan).
+- Stan `example-models` data at [`93b8b05`](https://github.com/stan-dev/example-models/blob/93b8b05cb7978952606f2043bec64d3b958b360c/misc/eight_schools/eight_schools.data.R).
 
 Different library versions and parameter orderings can produce different
 trajectories at the same seed. The recorded environment and source audits

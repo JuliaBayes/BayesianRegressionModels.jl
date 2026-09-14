@@ -12,11 +12,13 @@ const CONFIGURATIONS = ("NCP", "Post-hoc", "Online")
 rows(path) = collect(Tables.namedtupleiterator(CSV.File(path; delim='\t')))
 school_label(j) = "School $j"
 
-function save_spec(output, name, spec; title, size=(1500, 650))
+function save_spec(output, name, spec; title, size=(1500, 650), legend=true)
     fig = Figure(; size, fontsize=15)
-    Label(fig[0, 1], title; fontsize=21, font=:bold, tellwidth=false)
+    Label(fig[0, 1:(legend ? 2 : 1)], title; fontsize=21, font=:bold, tellwidth=false)
     grid = sdraw!(fig[1, 1], spec)
-    AlgebraOfGraphics.legend!(fig[1, 2], grid)
+    # The gradient facets already label every school by row; a second color
+    # legend repeats those labels, so that figure opts out.
+    legend && AlgebraOfGraphics.legend!(fig[1, 2], grid)
     path = joinpath(output, "$name.png")
     save(path, fig; px_per_unit=1.5)
     println("figure\t", path)
@@ -132,9 +134,9 @@ function gradient_figure(diagnostics_dir, output)
     input = [(; row.coordinate, row.gradient, row.configuration,
                basis_label=school_label(Int(row.school))) for row in table]
     length(input) == 24_000 || error("expected 24,000 gradient display points")
-    save_spec(output, "gradient_scatter", brm_gradientplot(input);
+    save_spec(output, "gradient_scatter", brm_gradientplot(input; markersize=12);
         title="Coordinate position versus exact log-density gradient",
-        size=(2400, 1500))
+        size=(2400, 1500), legend=false)
 end
 
 function figure_provenance(fit_dir, diagnostics_dir, output)

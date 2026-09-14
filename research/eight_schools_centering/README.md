@@ -47,12 +47,12 @@ julia --startup-file=no --project=research/eight_schools_centering/plots \
   "$SCRATCH/eight-schools-fit" "$SCRATCH/eight-schools-diagnostics"
 ```
 
-There is deliberately no centered sampling arm, no R execution, and no Turing
-sampling. The selected-partial arm samples fresh draws in selected source
-coordinates and back-transforms them once through WarmupHMC's public
-reparametrization API. Online adaptation uses BRM's `adaptive_centering_problem`
-and WarmupHMC's actual default weighted position-gradient correlation objective
-(`w1=0`), not an offline KL/log-scale proxy.
+Every arm fits the same BRM model lowered through StanBlocks to compiled
+Stan/BridgeStan and sampled with WarmupHMC. The selected-partial arm samples
+fresh draws in selected source coordinates and back-transforms them once
+through WarmupHMC's public reparametrization API. Online adaptation uses
+BRM's `adaptive_centering_problem` with WarmupHMC's default weighted
+position-gradient correlation objective (`w1=0`).
 
 The full harness checks generated Stan with `stanc`, compares the generated
 target to the immutable source at synthetic and saved posterior positions,
