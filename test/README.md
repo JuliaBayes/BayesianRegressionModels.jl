@@ -33,6 +33,11 @@ callable likelihoods and priors, while `turing_backend.jl` retains the existing
 grouping, conditioning, replay, prediction, and parameterization contracts.
 `turing_world_age.jl` constructs and evaluates models inside compiled callers
 and checks that generated-model caching distinguishes prior literals.
+`turing_natural_emission.jl` checks direct observation ASTs and named model
+inputs against an independently written Turing model. It executes the emitted
+source again, checks input-name hygiene and closure captures, and verifies
+bounds, analytic weights, prediction and replay after removing runtime
+preparation-plan lookups from the generated body.
 
 The `turing_terms.jl`, `turing_gp.jl`, `turing_structured.jl`,
 `turing_r2d2.jl`, and `turing_responses.jl` scripts exercise the corresponding

@@ -217,8 +217,33 @@ function _sb_vector_priors(base::StanBlocks.SlicModel, target::Symbol, priors)
     Base.merge(base, Expr(:call, :~, target, rhs))
 end
 
+function _sb_direct_vector_positive_prior(base::StanBlocks.SlicModel,
+                                          target::Symbol, prior, nvalue)
+    emitted = Any[]
+    _sb_emit_prior!(emitted, target, getf(prior), prior) || return nothing
+    stmt = only(emitted)
+    _sb_apply_positive_prior_bounds!(stmt, prior)
+    rhs = stmt.args[3]
+    parameters = findfirst(a -> a isa Expr && a.head === :parameters, rhs.args)
+    n_kw = Expr(:kw, :n, nvalue)
+    if isnothing(parameters)
+        insert!(rhs.args, 2, Expr(:parameters, n_kw))
+    else
+        any(kw -> kw isa Expr && kw.head === :kw && kw.args[1] === :n,
+            rhs.args[parameters].args) && error(
+                "sbimpl: direct vector prior unexpectedly supplied its own `n`")
+        insert!(rhs.args[parameters].args, 1, n_kw)
+    end
+    _, actuals, _, _ = _sb_vector_prior_parts((prior,))
+    dependencies = Set{Symbol}()
+    foreach(arg -> _sb_vector_prior_dependencies!(dependencies, arg), actuals)
+    (; model=Base.merge(base, stmt),
+       dependencies=sort!(collect(dependencies)))
+end
+
 function _sb_vector_positive_priors(base::StanBlocks.SlicModel,
-                                    target::Symbol, priors)
+                                    target::Symbol, priors;
+                                    direct_homogeneous::Bool=false)
     source = only(node for node in base.model.args if node isa Expr &&
         ((node.head === :(::) && node.args[1] === target) ||
          (node.head === :call && node.args[1] === :~ && node.args[2] === target)))
@@ -230,6 +255,22 @@ function _sb_vector_positive_priors(base::StanBlocks.SlicModel,
             nkw = findfirst(k -> k isa Expr && k.head === :kw && k.args[1] === :n,
                             source.args[3].args[params].args)
             isnothing(nkw) || (nvalue = source.args[3].args[params].args[nkw].args[2])
+        end
+    end
+    # Stan's native univariate families vectorise over their variate. When every
+    # margin has the exact same mapped distribution, retain that natural Stan
+    # spelling instead of synthesising a coordinate-by-coordinate UDF. Custom,
+    # composed, or heterogeneous priors keep the general generated-family path.
+    if direct_homogeneous && !isempty(priors) &&
+       all(prior -> isequal(prior, first(priors)), priors)
+        T = _as_distribution_type(getf(first(priors)))
+        if !isnothing(T) &&
+           _brm_distribution_shape(first(priors)) ==
+               (Distributions.Univariate, Distributions.Continuous) &&
+           !isnothing(_sb_stan_dist_name(T))
+            direct = _sb_direct_vector_positive_prior(
+                base, target, first(priors), nvalue)
+            isnothing(direct) || return direct
         end
     end
     family, args = _sb_vector_prior_family(priors)
@@ -304,7 +345,7 @@ end
 #   L      ~ lkj_corr_cholesky(1, K)         # K x K Cholesky factor
 #   tau    ~ half-std_normal(; n=K)          # per-term marginal scales
 #   z_flat ~ std_normal(; n=K*n_groups)      # one standardised vector
-#   z      = reshape(z_flat, K, n_groups)
+#   z      = to_matrix(z_flat, K, n_groups)
 #   b      = (diag_pre_multiply(tau, L) * z)'   # n_groups x K correlated draws
 # Per-row contribution = Z[i, :] . b[group_idx[i], :], returned as a length-n
 # vector via rows_dot_product. Note: `(1 | g) + (0 + x | g)` and `(1 + x | g)`
@@ -341,7 +382,7 @@ ranef_correlated = StanBlocks.@slic begin
     L      ~ lkj_corr_cholesky(1.; n=n_terms)
     tau    ~ std_normal(; n=n_terms, lower=0.)
     z_flat ~ std_normal(; n=n_terms * n_groups)
-    z = reshape(z_flat, n_terms, n_groups)
+    z = to_matrix(z_flat, n_terms, n_groups)
     b = (diag_pre_multiply(tau, L) * z)'   # n_groups x n_terms
     return rows_dot_product(Z, b[group_idx, :])
 end
@@ -372,21 +413,20 @@ ranef_correlated_draws = StanBlocks.@slic begin
     L      ~ lkj_corr_cholesky(1.; n=n_terms)
     tau    ~ std_normal(; n=n_terms, lower=0.)
     z_flat ~ std_normal(; n=n_terms * n_groups)
-    z = reshape(z_flat, n_terms, n_groups)
+    z = to_matrix(z_flat, n_terms, n_groups)
     return (diag_pre_multiply(tau, L) * z)'   # n_groups x n_terms
 end
 
-# Open-prior siblings for random-effect scales whose distribution cannot use
-# the legacy compact family/rate adapter. A configured model is formed with
-# `Base.merge`, replacing the bare typed declaration by one scalar sampling
-# statement per margin. Keeping the positive bound on each statement preserves
-# Stan's constrained-parameter kernel semantics; it does not insert a
-# truncation normalizer.
+# Open-prior siblings for configured random-effect scales. A homogeneous native
+# prior stays one vectorised Stan sampling statement; heterogeneous or custom
+# priors use a generated family with one scalar density per margin. In both
+# cases the retained positive bound preserves Stan's constrained-parameter
+# kernel semantics; it does not insert a truncation normalizer.
 ranef_correlated_draws_generic = StanBlocks.@slic begin
     L ~ lkj_corr_cholesky(lkj_eta; n=n_terms)
     tau ~ std_normal(; n=n_terms, lower=0.0)
     z_flat ~ std_normal(; n=n_terms * n_groups)
-    z = reshape(z_flat, n_terms, n_groups)
+    z = to_matrix(z_flat, n_terms, n_groups)
     return (diag_pre_multiply(tau, L) * z)'
 end
 
@@ -404,7 +444,7 @@ end
 ranef_correlated_draws_r2d2 = StanBlocks.@slic begin
     L      ~ lkj_corr_cholesky(lkj_eta; n=n_terms)
     z_flat ~ std_normal(; n=n_terms * n_groups)
-    z = reshape(z_flat, n_terms, n_groups)
+    z = to_matrix(z_flat, n_terms, n_groups)
     return (diag_pre_multiply(tau, L) * z)'
 end
 
@@ -420,7 +460,7 @@ end
 ranef_correlated_r2d2 = StanBlocks.@slic begin
     L      ~ lkj_corr_cholesky(lkj_eta; n=n_terms)
     z_flat ~ std_normal(; n=n_terms * n_groups)
-    z = reshape(z_flat, n_terms, n_groups)
+    z = to_matrix(z_flat, n_terms, n_groups)
     b = (diag_pre_multiply(tau, L) * z)'
     return rows_dot_product(Z, b[group_idx, :])
 end
@@ -4417,7 +4457,7 @@ function _sb_generic_ranef_submodel(priors, centered::Bool)
     end
     base = centered ? ranef_correlated_draws_centered_generic :
                       ranef_correlated_draws_generic
-    _sb_vector_positive_priors(base, :tau, resolved)
+    _sb_vector_positive_priors(base, :tau, resolved; direct_homogeneous=true)
 end
 
 """
@@ -7623,7 +7663,7 @@ _sb_emit_block_draw!(stmts, prior::Symbol, block_name, idx_name, n_name, n_terms
     elseif prior === :iid_normal
         flat_name = Symbol(:zflat_, suffix)
         push!(stmts, :($flat_name ~ std_normal(; n=$n_name * $n_terms_name)))
-        push!(stmts, :($block_name = reshape($flat_name, $n_terms_name, $n_name)'))
+        push!(stmts, :($block_name = to_matrix($flat_name, $n_terms_name, $n_name)'))
     else
         error("sbimpl: unknown structured-latent prior symbol `:$prior` ",
               "(expected :correlated_normal or :iid_normal)")
@@ -7642,7 +7682,7 @@ function _sb_emit_block_draw!(stmts, prior::NamedTuple, block_name, idx_name, n_
     haskey(prior, :upper) && push!(kw, Expr(:kw, :upper, prior.upper))
     rhs_call = Expr(:call, stan_name, pos_args..., Expr(:parameters, kw...))
     push!(stmts, Expr(:call, :~, flat_name, rhs_call))
-    push!(stmts, :($block_name = reshape($flat_name, $n_terms_name, $n_name)'))
+    push!(stmts, :($block_name = to_matrix($flat_name, $n_terms_name, $n_name)'))
 end
 function _sb_emit_block_draw!(stmts, prior::ExprColumn, block_name, idx_name,
                               n_name, n_terms_name, suffix)

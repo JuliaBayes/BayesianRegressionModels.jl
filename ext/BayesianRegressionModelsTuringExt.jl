@@ -126,35 +126,8 @@ _brm_interval_evidence(base::ContinuousUnivariateDistribution, upper) =
 _brm_interval_evidence(base::DiscreteUnivariateDistribution, upper) =
     _BRMDiscreteIntervalEvidence(base, upper)
 
-_brm_objective_observation(base, ::Nothing, _i) = base
-function _brm_objective_observation(
-        base::Distributions.Distribution,
-        weight::BRM._BRMObservationWeightPlan, i)
-    weight.kind === :analytic && return base
-    _BRMObjectiveWeight(base, weight.values[i])
-end
-
-function _brm_generic_observation(base, modifier, weight, i)
-    if !isnothing(weight) && weight.kind === :analytic
-        base isa Normal || error(
-            "Turing backend: analytic weights require a distribution with " *
-            "Normal location/scale semantics; got $(typeof(base))")
-        base = Normal(mean(base), std(base) / sqrt(weight.values[i]))
-    end
-    if !isnothing(modifier)
-        lower = isnothing(modifier.lower) ? nothing :
-            BRM._brm_response_bound_at(modifier.lower, i)
-        upper = isnothing(modifier.upper) ? nothing :
-            BRM._brm_response_bound_at(modifier.upper, i)
-        base = modifier.kind === :truncated ? truncated(base; lower, upper) :
-               modifier.kind === :censored ? censored(base; lower, upper) :
-               modifier.kind === :interval_censored ?
-                   _brm_interval_evidence(base, upper) :
-               error("Turing backend: response modifier `$(modifier.kind)` " *
-                     "has no executable Distributions.jl composition")
-    end
-    _brm_objective_observation(base, weight, i)
-end
+include("turing_observations.jl")
+include("turing_model_inputs.jl")
 
 function _brm_callable_ast(callable, callables)
     if applicable(parentmodule, callable) && applicable(nameof, callable)
@@ -178,10 +151,12 @@ function _brm_ast_call(callable, args, kwargs, callables)
 end
 
 _brm_prepared_ast(x, _callables) = QuoteNode(x)
+_brm_prepared_ast(x::Union{Number,AbstractString,Char}, _callables) = x
 function _brm_prepared_ast(x::BRM._BRMPreparedRef, callables)
-    value = x.name
-    x.axis === :observation_row ? :(view($value, i, :)) :
-        x.axis === :observation ? :($value[i]) : value
+    value = _brm_reference_ast(x.name, callables)
+    row = _brm_row_symbol(callables)
+    x.axis === :observation_row ? :(view($value, $row, :)) :
+        x.axis === :observation ? :($value[$row]) : value
 end
 _brm_prepared_ast(x::BRM._BRMPreparedExpr, callables) =
     _brm_ast_call(x.callable, x.args, x.kwargs, callables)
@@ -218,9 +193,10 @@ function _brm_term_priors_ast(term, callables)
                              Base.values(expressions))...)
     :(NamedTuple{$(QuoteNode(names))}($values))
 end
-function _brm_term_inputs_ast(term)
+function _brm_term_inputs_ast(term, callables)
     names = Tuple(term.dependencies)
-    :(NamedTuple{$(QuoteNode(names))}($(Expr(:tuple, names...))))
+    values = map(name -> _brm_reference_ast(name, callables), names)
+    :(NamedTuple{$(QuoteNode(names))}($(Expr(:tuple, values...))))
 end
 
 function _brm_generic_model_ast(plan::BRM._TuringGenericPlan)
@@ -254,15 +230,14 @@ function _brm_staged_turing_evaluator(definition)
 end
 
 function _brm_generic_response_graph_ast(multi; single::Bool=false)
-    callables = Any[]
+    row = _brm_fresh_model_name(:i, _brm_model_binding_names(multi.plans))
     body = Expr(:block)
     node_statements = Dict{Symbol,Vector{Any}}()
     parameters = Dict{Symbol,Any}()
     predictors = Dict{Symbol,Tuple{Int,Int,Any}}()
     assignments = Dict{Symbol,Tuple{Int,Any}}()
     data_sources = Dict{Symbol,Int}()
-    response_symbols = single ? [:y] :
-        [Symbol(:y_, i) for i in eachindex(multi.plans)]
+    response_symbols = _brm_response_symbols(multi.plans; single)
     response_names = Set(plan.response_name for plan in multi.plans)
     for (pi, plan) in enumerate(multi.plans)
         foreach(key -> get!(data_sources, key, pi), keys(plan.context.data))
@@ -272,10 +247,10 @@ function _brm_generic_response_graph_ast(multi; single::Bool=false)
             get!(predictors, component.predictor.name, (pi, ci, component))
         end
     end
-    for (name, pi) in data_sources
-        name in response_names && continue
-        push!(body.args, :($name = multi.plans[$pi].context.data[$(QuoteNode(name))]))
+    for name in union(response_names, keys(parameters), keys(predictors), keys(assignments))
+        delete!(data_sources, name)
     end
+    callables = _BRMTuringASTContext(Any[], row, data_sources)
     predictor_entries = Tuple(values(predictors))
     shared_groups = BRM._turing_shared_group_plans(
         Tuple(entry[3] for entry in predictor_entries))
@@ -302,7 +277,7 @@ function _brm_generic_response_graph_ast(multi; single::Bool=false)
     for (pi, assignment) in values(assignments)
         value = _brm_prepared_ast(assignment.expression, callables)
         statement = if _brm_has_row_ref(assignment.expression)
-            :($(assignment.name) = [$value for i in eachindex($(response_symbols[pi]))])
+            :($(assignment.name) = [$value for $row in eachindex($(response_symbols[pi]))])
         else
             :($(assignment.name) = $value)
         end
@@ -366,10 +341,11 @@ function _brm_generic_response_graph_ast(multi; single::Bool=false)
                 :($site.scales[$mapping_index])
             residual_scale = nothing
         elseif isempty(component.priors)
-            push!(statements, :($beta = Float64[]))
             residual_scale = nothing
         elseif isnothing(component.r2d2)
-            push!(statements, :($beta ~ product_distribution($prior_vector)))
+            priors = all(isnothing, component.priors) ?
+                :(fill(Normal(), $(length(component.priors)))) : prior_vector
+            push!(statements, :($beta ~ product_distribution($priors)))
             residual_scale = nothing
         else
             r2d2 = component.r2d2
@@ -386,8 +362,17 @@ function _brm_generic_response_graph_ast(multi; single::Bool=false)
             residual_scale = :($site.residual_scale)
         end
         residual_scales[name] = residual_scale
-        push!(statements, :($eta = multi.plans[$pi].predictors[$ci].design.matrix *
-            $beta + multi.plans[$pi].predictors[$ci].design.fixed))
+        has_offset = !all(iszero, component.design.fixed)
+        term_only = isempty(component.priors) && !has_offset &&
+            isempty(component.random_effects) && length(component.terms) == 1
+        population = if isempty(component.priors)
+            has_offset ? :(copy(multi.plans[$pi].predictors[$ci].design.fixed)) :
+                :(zeros(length(multi.plans[$pi].response)))
+        else
+            product = :(multi.plans[$pi].predictors[$ci].design.matrix * $beta)
+            has_offset ? :($product + multi.plans[$pi].predictors[$ci].design.fixed) : product
+        end
+        term_only || push!(statements, :($eta = $population))
         # Keep the established single-response summation order: saved draws
         # produce exactly the same predictor values for crossed group blocks.
         group_effect = single ? Symbol(:group_effect_, ci) : eta
@@ -414,16 +399,18 @@ function _brm_generic_response_graph_ast(multi; single::Bool=false)
         for term_index in eachindex(component.terms)
             term_site = Symbol(:term_, name, :_, term_index)
             priors = _brm_term_priors_ast(component.terms[term_index], callables)
-            inputs = _brm_term_inputs_ast(component.terms[term_index])
+            inputs = _brm_term_inputs_ast(component.terms[term_index], callables)
             push!(statements, :($term_site ~ to_submodel(
                 BRM._brm_turing_term_model(
                     multi.plans[$pi].predictors[$ci].terms[$term_index],
                     length(multi.plans[$pi].response), $priors, $inputs))))
-            push!(statements, :($eta = $eta + $term_site.effect))
+            push!(statements, term_only ? :($eta = $term_site.effect) :
+                :($eta = $eta + $term_site.effect))
         end
         inverse_link = InverseFunctions.inverse(component.predictor.link_lhs_fn)
         inverse_link_ast = _brm_callable_ast(inverse_link, callables)
-        push!(statements, :($name = $inverse_link_ast.($eta)))
+        push!(statements, inverse_link === identity ? :($name = $eta) :
+            :($name = $inverse_link_ast.($eta)))
         if name in shared_predictors
             finalizer = pop!(statements)
             base = predictor_bases[name]
@@ -516,31 +503,29 @@ function _brm_generic_response_graph_ast(multi; single::Bool=false)
         end
     end
     value_names = Tuple((logical..., keys(parameters)..., keys(assignments)...))
-    value_expr = Expr(:tuple, value_names...)
     returned = Any[]
     for (pi, plan) in enumerate(multi.plans)
         y = response_symbols[pi]
-        distribution = _brm_prepared_ast(plan.distribution, callables)
+        distribution = _brm_observation_ast(plan, pi, callables)
         push!(body.args, quote
-            for i in eachindex($y)
-                $y[i] ~ _brm_generic_observation(
-                    $distribution, multi.plans[$pi].response_modifier,
-                    multi.plans[$pi].observation_weight, i)
+            for $row in eachindex($y)
+                $y[$row] ~ $distribution
             end
         end)
-        push!(returned, :(merge(
-            NamedTuple{$(QuoteNode(value_names))}($value_expr),
-            (; response=$y))))
+        output_names = unique((value_names..., :response))
+        fields = [Expr(:kw, name, name === :response ? y : name)
+                  for name in output_names]
+        push!(returned, Expr(:tuple, Expr(:parameters, fields...)))
     end
     push!(body.args, single ? first(returned) :
         :(; responses=$(Expr(:tuple, returned...))))
-    function_name = gensym(single ? :brm_generic_model : :brm_generic_multi_model)
-    signature = Expr(:call, function_name, :multi, :callables,
-                     :group_models, :term_models, response_symbols...)
+    function_name = single ? :brm_model : :brm_multi_model
+    inputs = _brm_model_inputs!(body, multi, Tuple(callables), response_symbols)
+    signature = Expr(:call, function_name, keys(inputs)...)
     definition = Expr(:macrocall, GlobalRef(Turing, Symbol("@model")),
                       LineNumberNode(0),
                       Expr(:function, signature, body))
-    (; definition, function_name, callables=Tuple(callables))
+    (; definition, inputs)
 end
 
 _brm_generic_multi_model_ast(multi::BRM._TuringMultiResponsePlan) =
@@ -550,32 +535,18 @@ function _brm_generic_structure_key(definition::Expr)
     function_definition = last(definition.args)
     signature, body = function_definition.args
     # Every emitted literal and structural choice belongs to the cache key.
-    # Exclude only the fresh function name. Callable objects remain runtime
-    # tuple arguments, specialized by Julia, and need no name-based registry.
+    # Exclude only the display name. Callable objects remain ordinary runtime
+    # arguments, specialized by Julia, and need no name-based registry.
     (repr(signature.args[2:end]), repr(body))
 end
 
 function BRM._brm_turing_model(plan::BRM._TuringGenericPlan)
     lowered = _brm_generic_model_ast(plan)
     evaluator, definition = _brm_cached_generic_evaluator(lowered)
-    group_models = ()
-    term_models = Tuple(component.terms for component in plan.predictors)
-    graph = (; plans=(plan,), joint_r2d2=plan.joint_r2d2)
-    model = Turing.DynamicPPL.Model{false}(evaluator,
-        (; multi=graph, callables=lowered.callables, group_models, term_models,
-           y=plan.response))
+    model = Turing.DynamicPPL.Model{false}(evaluator, lowered.inputs)
     plan.source_ast = definition
     model
 end
-_random_effect_args(component) = isempty(component.random_effects) ?
-    (0, zeros(0, 0), Int[], 0, 0) : let block = only(component.random_effects)
-        intercept_index = something(
-            findfirst(column -> column.label === :Intercept, block.columns), 0)
-        kind = block.intercept_only ? 1 : block.zero_correlation ? 3 : 2
-        (kind, block.matrix, block.indices, length(block.levels),
-         intercept_index)
-    end
-
 function _zero_correlation_scales(intercept_index, intercept_scale,
                                   slope_scales)
     # DynamicPPL can infer a sampled local as Union{Nothing,T}.  Allocate from
@@ -1118,16 +1089,8 @@ function BRM._brm_turing_model(plan::BRM._TuringMultiResponsePlan)
     if all(child -> child isa BRM._TuringGenericPlan, plan.plans)
         lowered = _brm_generic_multi_model_ast(plan)
         evaluator, definition = _brm_cached_generic_evaluator(lowered)
-        responses = map(child -> child.response, plan.plans)
-        group_models = ()
-        term_models = Tuple(Tuple(component.terms for component in child.predictors)
-                            for child in plan.plans)
-        response_names = Tuple(Symbol(:y_, index) for index in eachindex(responses))
-        response_arguments = NamedTuple{response_names}(responses)
         plan.source_ast = definition
-        return Turing.DynamicPPL.Model{false}(evaluator,
-            (; multi=plan, callables=lowered.callables, group_models, term_models,
-               response_arguments...))
+        return Turing.DynamicPPL.Model{false}(evaluator, lowered.inputs)
     end
     error("Turing backend: internal non-generic multi-response plan")
 end
@@ -1272,13 +1235,11 @@ function BRM.turing_predictive_model(backend::BRM.TuringBRMI)
 end
 
 _brm_predictive_response_varnames(plan) =
-    (Turing.DynamicPPL.@varname(y),)
+    (Core.apply_type(Turing.DynamicPPL.VarName,
+        only(_brm_response_symbols((plan,); single=true)))(),)
 _brm_predictive_response_varnames(plan::BRM._TuringMultiResponsePlan) =
-    ntuple(
-        i -> Core.apply_type(
-            Turing.DynamicPPL.VarName, Symbol(:y_, i))(),
-        length(plan.plans),
-    )
+    Tuple(Core.apply_type(Turing.DynamicPPL.VarName, name)()
+          for name in _brm_response_symbols(plan.plans))
 
 _brm_initialized_chain_skeleton(value) = value
 # DynamicPPL 0.41 can leave `#undef` entries in the skeleton of a

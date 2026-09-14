@@ -232,7 +232,9 @@ end
     end
     layered_code = BayesianRegressionModels.stan_code(
         SBBRMI(layered_resolution(df); mod=@__MODULE__))
-    @test occursin(r"b_p_subject_tau ~ brm_vector_prior_[0-9a-f]+", layered_code)
+    @test occursin(
+        "b_p_subject_tau ~ exponential((1.0 ./ 2));", layered_code)
+    @test !occursin(r"brm_vector_prior_[0-9a-f]+", layered_code)
 
     unknown_margin = @brm begin
         eta ~ 1 + (1 | p | subject)
@@ -255,7 +257,8 @@ end
     end
     half_normal_sb = SBBRMI(half_normal_sd(df); mod=@__MODULE__)
     half_normal_code = BayesianRegressionModels.stan_code(half_normal_sb)
-    @test occursin(r"b_p_subject_tau ~ brm_vector_prior_[0-9a-f]+", half_normal_code)
+    @test occursin("b_p_subject_tau ~ normal(0, 0.5);", half_normal_code)
+    @test !occursin(r"brm_vector_prior_[0-9a-f]+", half_normal_code)
     @test StanBlocks.stanc_check(half_normal_code; warn_pedantic=false).ok
     half_normal_decl = only(d for d in generative_plan(half_normal_sb).declarations
                             if d.target === :b_p_subject)
@@ -269,7 +272,8 @@ end
     shifted_code = BayesianRegressionModels.stan_code(
         SBBRMI(shifted_normal_sd(df); mod=@__MODULE__))
     @test occursin("vector<lower=0.0>[n_terms_p_subject] b_p_subject_tau;", shifted_code)
-    @test occursin("normal_lpdf(x[1] | arg_1, arg_2)", shifted_code)
+    @test occursin("b_p_subject_tau ~ normal(0.1, 0.5);", shifted_code)
+    @test !occursin(r"brm_vector_prior_[0-9a-f]+", shifted_code)
     @test StanBlocks.stanc_check(shifted_code; warn_pedantic=false).ok
 
     affine_sd = @brm begin
@@ -291,7 +295,8 @@ end
     cauchy_sb = SBBRMI(cauchy_sd(df); mod=@__MODULE__)
     cauchy_code = BayesianRegressionModels.stan_code(cauchy_sb)
     @test occursin("vector<lower=0.0>[n_terms_p_subject] b_p_subject_tau;", cauchy_code)
-    @test occursin("cauchy_lpdf(x[1] | arg_1, arg_2)", cauchy_code)
+    @test occursin("b_p_subject_tau ~ cauchy(0, 1);", cauchy_code)
+    @test !occursin(r"brm_vector_prior_[0-9a-f]+", cauchy_code)
     @test StanBlocks.stanc_check(cauchy_code; warn_pedantic=false).ok
 
     sampled_scale_sd = @brm begin
@@ -303,9 +308,12 @@ end
     sampled_scale_sb = SBBRMI(sampled_scale_sd(df); mod=@__MODULE__)
     sampled_scale_code = BayesianRegressionModels.stan_code(sampled_scale_sb)
     @test occursin("log_scale ~ normal(0, 1);", sampled_scale_code)
-    @test occursin("exponential_lpdf(x[1] | arg_1)", sampled_scale_code)
+    @test occursin(
+        "b_p_subject_tau ~ exponential((1.0 ./ exp(log_scale)));",
+        sampled_scale_code)
+    @test !occursin(r"brm_vector_prior_[0-9a-f]+", sampled_scale_code)
     @test first(findfirst("log_scale ~ normal", sampled_scale_code)) <
-          first(findfirst("b_p_subject_tau ~ brm_vector_prior", sampled_scale_code))
+          first(findfirst("b_p_subject_tau ~ exponential", sampled_scale_code))
     @test StanBlocks.stanc_check(sampled_scale_code; warn_pedantic=false).ok
     if RANEF_EFFECT_RUNTIME
         problem = StanBlocks.stan_instantiate(
@@ -429,7 +437,7 @@ end
 # The observed-cQTc shape (Bruno:arv393, snag `ranef-sd-lpdf-el-a190739d`):
 # one intercept-only random effect in a NAMED bucket with an explicit
 # block-level SD prior. It is the smallest model that pins the generated
-# whole-vector density/RNG family and the stable tau coordinate.
+# native vector density/RNG family and the stable tau coordinate.
 @testset "single-term named bucket `(1 | ri | subject)` + `sd(:, ri)` emits" begin
     single = @brm begin
         eta ~ 1 + (1 | ri | subject)
@@ -440,8 +448,9 @@ end
     single_code = BayesianRegressionModels.stan_code(single_sb)
     @test StanBlocks.stan.transpiles(single_sb.model)
     @test StanBlocks.stanc_check(single_code; warn_pedantic=false).ok
-    @test occursin(r"real brm_vector_prior_[0-9a-f]+_lpdf", single_code)
     @test !occursin("brm_ranef_sd", single_code)
-    @test occursin(r"b_ri_subject_tau ~ brm_vector_prior_[0-9a-f]+", single_code)
+    @test occursin(
+        "b_ri_subject_tau ~ exponential((1.0 ./ 10.0));", single_code)
+    @test !occursin(r"brm_vector_prior_[0-9a-f]+", single_code)
     @test brm_descriptor(single_sb) isa BRMDescriptor
 end
