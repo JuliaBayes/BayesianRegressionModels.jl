@@ -106,7 +106,6 @@ there; `BetaBinomial2` above is BRM's own mean/precision parameterization.
 BayesianRegressionModels.VBRMI
 BayesianRegressionModels.SBBRMI
 BayesianRegressionModels.TuringBRMI
-BayesianRegressionModels.stan_code
 BayesianRegressionModels.GenerativeDeclaration
 BayesianRegressionModels.GenerativePlan
 BayesianRegressionModels.generative_plan
@@ -115,10 +114,16 @@ BayesianRegressionModels.restan_data
 BayesianRegressionModels.population_draws
 BayesianRegressionModels.transport_draws
 BayesianRegressionModels.hsgp_population_curve
+BayesianRegressionModels.select_hsgp_centeredness
 BayesianRegressionModels.RanefBlock
 BayesianRegressionModels.ranef_blocks
 BayesianRegressionModels.ranef_coordinates
 ```
+
+### [`stan_code`](@id stan_code)
+
+`stan_code` is re-exported from StanBlocks.jl. BRM extends that binding with
+`stan_code(sb::SBBRMI)`, which returns the transpiled Stan source for `sb.model`.
 
 ## Executable descriptors
 

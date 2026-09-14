@@ -3,18 +3,32 @@
 # extensions must be able to consume this layer after all backends become weak
 # dependencies.
 
+struct _BRMGroupDeclaration{E,EF,G,D}
+    predictor::Symbol
+    expression::E
+    effects::EF
+    raw_group::G
+    explicit_id::Union{Nothing,Symbol}
+    id::Union{Nothing,Symbol}
+    uncorrelated::Bool
+    descriptor::D
+end
+
 """
     _BRMBackendContext
 
 Backend-neutral facts collected from a data-bound [`BRMI`](@ref): raw data,
 likelihood-decorator prepass state, and the observation row axis associated with
-each referenced target. Concrete backends own all later representation choices.
+each referenced target. It also caches grouped-term source declarations in
+formula order. Concrete backends own all later representation choices.
 """
-struct _BRMBackendContext{P<:BRMI,D<:AbstractDict,PP<:AbstractDict,TO<:AbstractDict}
+struct _BRMBackendContext{P<:BRMI,D<:AbstractDict,PP<:AbstractDict,TO<:AbstractDict,TP,GD}
     parent::P
     data::D
     prepass::PP
     target_obs::TO
+    term_priors::TP
+    group_declarations::GD
 end
 
 # Backend-neutral construction replay. Concrete backends consume the same
@@ -371,10 +385,12 @@ function _brm_prepare_observation_weight_values(
     values
 end
 
-function _brm_observation_weight_plan(rhs, target::Symbol,
-                                      response::AbstractVector;
+function _brm_observation_weight_plan(rhs, target::Symbol, response;
                                       prefix="BRM backend lowering")
     rhs isa ExprColumn && getf(rhs) === weighted || return nothing
+    response isa AbstractVector || error(
+        "$prefix: weighted response `$target` must be a one-dimensional " *
+        "observation vector; got $(typeof(response))")
     isempty(getkwargs(rhs)) || error(
         "$prefix: `weighted(distribution, weights)` accepts no keywords")
     args = getargs(rhs)
@@ -579,7 +595,9 @@ function _brm_backend_context(brmi::BRMI;
         _brm_collect_data!(data, op; skip=skip_data)
     end
 
-    _BRMBackendContext(brmi, data, prepass, _brm_collect_target_obs(brmi))
+    _BRMBackendContext(brmi, data, prepass, _brm_collect_target_obs(brmi),
+                       _brm_resolve_term_priors(brmi),
+                       _brm_group_declarations(brmi))
 end
 
 # ---- narrow shared population design --------------------------------------
@@ -723,7 +741,8 @@ function _brm_replay_population_design(
     end
     fixed = zeros(Float64, n)
     foreach(term -> fixed .+= term.values, fixed_terms)
-    matrix = hcat((column.values for column in columns)...)
+    matrix = isempty(columns) ? zeros(Float64, n, 0) :
+        hcat((column.values for column in columns)...)
     _BRMPopulationDesign(
         training.target, Tuple(columns), matrix, training.row_source,
         Tuple(fixed_terms), fixed)
@@ -1060,6 +1079,52 @@ function _brm_random_effect_group(raw)
     (; group, by, id=_brm_group_id(get(kwargs, :id, nothing)))
 end
 
+function _brm_group_declaration(predictor::Symbol, term::ExprColumn)
+    args = getargs(term)
+    length(args) in (2, 3) || error(
+        "BRM backend lowering: grouped term `$(repr(term))` does not have " *
+        "the expected `(effects | group)` or `(effects | ID | group)` shape")
+    inner = first(args)
+    explicit_id = length(args) == 3 ? args[2] : nothing
+    if !isnothing(explicit_id) && !(explicit_id isa Symbol)
+        error("BRM backend lowering: shared random-effect ID must be a " *
+              "symbol; got `$(repr(explicit_id))`")
+    end
+    raw_group = last(args)
+    uncorrelated = getf(term) === doublepipe
+
+    if raw_group isa MultiMembershipTerm
+        descriptor = raw_group
+        id = explicit_id
+    else
+        parsed = _brm_random_effect_group(raw_group)
+        if !isnothing(explicit_id) && !isnothing(parsed.id)
+            error("BRM backend lowering: `(effects | ID | group)` cannot " *
+                  "also carry `gr(...; id=...)`")
+        end
+        id = isnothing(explicit_id) ? parsed.id : explicit_id
+        descriptor = isnothing(parsed.by) ? parsed.group :
+            (parsed.group, parsed.by)
+    end
+    _BRMGroupDeclaration(
+        predictor, term, Tuple(_brm_additive_terms(inner)), raw_group,
+        explicit_id, id, uncorrelated, descriptor)
+end
+
+function _brm_group_declarations(brmi::BRMI)
+    declarations = _BRMGroupDeclaration[]
+    for (predictor, operation) in pairs(brmi.operations)
+        expression = operation isa NamedColumn ? parent(operation) : operation
+        expression isa ExprColumn && getf(expression) === (~) || continue
+        _, rhs = getargs(expression, 2)
+        for term in _brm_additive_terms(rhs)
+            _brm_is_grouped_term(term) || continue
+            push!(declarations, _brm_group_declaration(predictor, term))
+        end
+    end
+    Tuple(declarations)
+end
+
 function _brm_group_strata(group_indices, stratum_indices, n_groups,
                            group::Symbol, by::Symbol)
     length(group_indices) == length(stratum_indices) || error(
@@ -1081,38 +1146,21 @@ end
 function _brm_simple_random_effect_plans(
         brmi::BRMI, target::Symbol, context::_BRMBackendContext;
         required::Bool=false)
-    op = linear_predictor_op(brmi, target)
-    isnothing(op) && return ()
-    _, rhs = getargs(op, 2)
-    grouped = filter(_brm_is_grouped_term, _brm_additive_terms(rhs))
+    grouped = filter(declaration -> declaration.predictor === target,
+                     context.group_declarations)
     plans = ()
     seen = Set{Any}()
-    for term in grouped
-        args = getargs(term)
-        if length(args) ∉ (2, 3)
-            required && error(
-                "BRM backend lowering: grouped term `$(repr(term))` does not " *
-                "have the expected `(effects | group)` or " *
-                "`(effects | ID | group)` shape")
-            return nothing
-        end
-        zero_correlation = getf(term) === doublepipe
-        inner = first(args)
-        explicit_id = length(args) == 3 ? args[2] : nothing
-        group_raw = last(args)
-        if !isnothing(explicit_id) && !(explicit_id isa Symbol)
-            required && error(
-                "BRM backend lowering: shared random-effect ID must be a " *
-                "symbol; got `$(repr(explicit_id))`")
-            return nothing
-        end
+    for declaration in grouped
+        term = declaration.expression
+        zero_correlation = declaration.uncorrelated
+        group_raw = declaration.raw_group
         multi_membership = group_raw isa MultiMembershipTerm
         prepared_mm = nothing
         groups = ()
         weight_sources = nothing
         normalize = true
         if multi_membership
-            isnothing(explicit_id) || error(
+            isnothing(declaration.id) || error(
                 "BRM backend lowering: `mm(...)` cannot carry a shared " *
                 "random-effect ID")
             zero_correlation && error(
@@ -1142,27 +1190,18 @@ function _brm_simple_random_effect_plans(
             stratum_indices = Int[]
             group_strata = Int[]
         else
-            descriptor = try
-                _brm_random_effect_group(group_raw)
-            catch exception
-                required && rethrow(exception)
-                return nothing
-            end
-            if !isnothing(explicit_id) && !isnothing(descriptor.id)
-                required && error(
-                    "BRM backend lowering: `(effects | ID | group)` cannot " *
-                    "also carry `gr(...; id=...)`")
-                return nothing
-            end
-            id = isnothing(explicit_id) ? descriptor.id : explicit_id
+            descriptor = declaration.descriptor
+            id = declaration.id
+            group_column = descriptor isa Tuple ? first(descriptor) : descriptor
+            by_column = descriptor isa Tuple ? last(descriptor) : nothing
+            group = name(group_column)
+            by = isnothing(by_column) ? nothing : name(by_column)
             if zero_correlation && !isnothing(id)
                 required && error(
                     "BRM backend lowering: shared `(effects | ID | group)` " *
                     "blocks are correlated; `||` cannot carry an ID")
                 return nothing
             end
-            group = name(descriptor.group)
-            by = isnothing(descriptor.by) ? nothing : name(descriptor.by)
             zero_correlation && !isnothing(by) && error(
                 "BRM backend lowering: zero-correlation `||` is not " *
                 "supported for stratified `gr($group, by=$by)` blocks")
@@ -1203,7 +1242,7 @@ function _brm_simple_random_effect_plans(
             end
         end
         raw_columns = Any[]
-        for inner_term in _brm_additive_terms(inner)
+        for inner_term in declaration.effects
             columns = _brm_random_effect_columns(inner_term)
             if isnothing(columns) || any(column ->
                     !isnothing(column.source) &&
@@ -1610,7 +1649,7 @@ function _brm_population_design(target::Symbol, terms::Tuple,
         end
         append!(raw_columns, columns)
     end
-    isempty(raw_columns) && begin
+    isempty(raw_columns) && isnothing(row_source) && begin
         required && error("BRM backend lowering: predictor `$target` has no terms")
         return nothing
     end
@@ -1653,7 +1692,8 @@ function _brm_population_design(target::Symbol, terms::Tuple,
             column.label, column.effect_addresses, column.effect_block,
             column.source, values, column.preprocess)
     end
-    matrix = hcat((c.values for c in columns)...)
+    matrix = isempty(columns) ? zeros(Float64, n, 0) :
+        hcat((c.values for c in columns)...)
     fixed = zeros(Float64, n)
     for term in fixed_terms
         length(term.values) == n || error(

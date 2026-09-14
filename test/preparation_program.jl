@@ -29,6 +29,65 @@ const BRM = BayesianRegressionModels
     @test program.context.data[:x] == df.x
     @test program.context.target_obs[:mean] === :y
     @test getf(last(getargs(byname[:spread].expression))) === LogNormal
+
+    model = BRM._brm_prepare_model(brmi; program)
+    @test Tuple(node.name for node in model.parameters) == (:location, :spread)
+    @test Tuple(node.name for node in model.predictors) == (:mean,)
+    @test Tuple(node.name for node in model.assignments) == (:shifted,)
+    @test Tuple(node.name for node in model.observations) == (:y,)
+    @test only(model.predictors).expression === last(getargs(byname[:mean].expression))
+    @test only(model.observations).distribution.args[1].axis === :observation
+    @test only(model.observations).distribution.args[2].axis === :scalar
+end
+
+@testset "unweighted matrix observations bypass vector weight validation" begin
+    counts = [2 1 0; 0 2 1; 1 0 2]
+    expected_counts = copy(counts)
+    totals = vec(sum(counts; dims=2))
+    probabilities = [0.5, 0.3, 0.2]
+    brmi = (@brm begin
+        counts ~ Multinomial(totals, probabilities)
+    end)((; counts, totals, probabilities))
+
+    prepared = BRM._brm_prepare_model(brmi)
+    @test only(prepared.observations).response == expected_counts
+    @test isnothing(only(prepared.observations).weight)
+    emitted = SBBRMI(brmi; mod=@__MODULE__)
+    @test occursin("multinomial", lowercase(BRM.stan_code(emitted)))
+
+    weighted_vector = (@brm begin
+        y ~ weighted(Normal(0, 1), aweights(w))
+    end)((; y=zeros(3), w=ones(3)))
+    weighted_rhs = last(getargs(parent(weighted_vector.operations.y)))
+    @test_throws "must be a one-dimensional observation vector" BRM._brm_observation_weight_plan(
+        weighted_rhs, :counts, expected_counts; prefix="test")
+end
+
+@testset "missing responses remain observations in the common graph" begin
+    brmi = (@brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x
+        mi(y) ~ Normal(mu, sigma)
+    end)((; x=[0., 1.], y=Union{Missing,Float64}[0.1, missing]))
+    model = BRM._brm_prepare_model(brmi)
+    @test only(operation for operation in model.program.operations
+               if operation.name === :y).role === :observation
+    @test Tuple(node.name for node in model.parameters) == (:sigma,)
+    @test only(model.observations).missing_response.missing_indices == [2]
+end
+
+@testset "joint observations retain declaration and data identities" begin
+    data = (; y1=[0.1, 0.2], y2=[0.3, 0.4])
+    brmi = (@brm begin
+        [y1, y2] ~ MvNormal([0.0, 0.0], [1.0, 1.0])
+    end)(data)
+    model = BRM._brm_prepare_model(brmi)
+    observation = only(model.observations)
+    declaration = only(op for op in model.program.operations
+                       if op.role === :observation)
+    @test observation.name === declaration.name
+    @test observation.name !== BRM._brm_observation_name(observation.lhs)
+    @test observation.response == [[0.1, 0.3], [0.2, 0.4]]
 end
 
 @testset "resolved prior dependencies order their owning sample sites" begin

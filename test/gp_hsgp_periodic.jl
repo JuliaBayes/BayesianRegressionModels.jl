@@ -120,9 +120,9 @@ end
             y ~ Normal(mu, 1.); mu ~ 1 + hsgp(x; k=5, iso=false, cov=:periodic, period=24.0) end)),
         ("requires a numeric `period=`", () -> sbb(@brm df begin
             y ~ Normal(mu, 1.); mu ~ 1 + gp(x; cov=:periodic) end)),
-        ("supports exactly one axis", () -> sbb(@brm df begin
+        ("periodic gp requires one isotropic axis", () -> sbb(@brm df begin
             y ~ Normal(mu, 1.); mu ~ 1 + gp(x, z; cov=:periodic, period=24.0) end)),
-        ("`iso=false` has no meaning", () -> sbb(@brm df begin
+        ("periodic gp requires one isotropic axis", () -> sbb(@brm df begin
             y ~ Normal(mu, 1.); mu ~ 1 + gp(x; cov=:periodic, period=24.0, iso=false) end)),
         ("meaningful only with `cov=:periodic`", () -> sbb(@brm df begin
             y ~ Normal(mu, 1.); mu ~ 1 + gp(x; period=24.0) end)),

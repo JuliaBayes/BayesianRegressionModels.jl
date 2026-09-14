@@ -1,0 +1,17 @@
+predictor	basis	centeredness
+mu	1	1.0
+mu	2	1.0
+mu	3	1.0
+mu	4	0.5
+mu	5	1.0
+mu	6	0.8
+mu	7	1.0
+mu	8	0.4
+log(sigma)	1	0.9
+log(sigma)	2	1.0
+log(sigma)	3	0.6
+log(sigma)	4	0.5
+log(sigma)	5	0.2
+log(sigma)	6	0.0
+log(sigma)	7	0.0
+log(sigma)	8	0.0

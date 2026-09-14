@@ -82,12 +82,17 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
         cov === :periodic && error(
             "BRM term preparation: model-derived periodic hsgp is unsupported")
         K, c = _brm_hsgp_options(kw, 1)
+        centeredness = _brm_hsgp_centeredness(kw, prod(K))
+        any(!iszero, centeredness) && error(
+            "BRM term preparation: partial centering currently requires a " *
+            "raw-data HSGP axis")
         fits = _brm_hsgp_domain_fits(kw, 1; required=true)
         orthogonal = _brm_hsgp_orthogonal_to(kw, 1)
         center, L = only(fits)
         _, omega2 = _brm_apply_hsgp(fits, ([center],), K)
         source = name(only(latent_args))
-        state = (; target, latent=true, explicit_domain=true, axis_source=source, K, c, cov, iso,
+        state = (; target, latent=true, explicit_domain=true, axis_source=source,
+                 K, c, centeredness, cov, iso,
                  period=nothing, fits, center, L, omega2,
                  rho_lower=_brm_hsgp_rho_lower_data(fits, K, true),
                  orthogonal, by=nothing,
@@ -107,13 +112,24 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
         levels = _brm_fit_levels(raw)
         (; source, levels, idx=_brm_apply_levels(levels, raw))
     end
+    n_basis = cov === :periodic ? 2 * only(K) : prod(K)
+    centeredness = _brm_hsgp_centeredness(kw, n_basis)
+    if any(!iszero, centeredness)
+        cov === :exp_quad || error(
+            "BRM term preparation: partial centering currently supports the " *
+            "exp_quad HSGP spectrum")
+        isnothing(by_state) || error(
+            "BRM term preparation: partial centering is an ungrouped HSGP " *
+            "weight geometry and cannot be combined with `by=`")
+    end
     if cov === :periodic
         length(axes) == 1 && iso || error(
             "BRM term preparation: periodic hsgp requires one isotropic axis")
         isnothing(by_state) || error(
             "BRM term preparation: periodic hsgp does not support by")
         basis = _brm_hsgp_basis_state(axes, K, cov, iso, period)
-        state = (; target, latent=false, explicit_domain=false, K, c, cov, iso, period, basis..., by=by_state,
+        state = (; target, latent=false, explicit_domain=false, K, c, centeredness,
+                 cov, iso, period, basis..., by=by_state,
                  _brm_gp_priors(term, target, context)...)
     else
         domain_fits = _brm_hsgp_domain_fits(kw, length(axes))
@@ -121,7 +137,8 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
         orthogonal = _brm_hsgp_orthogonal_to(kw, length(axes))
         basis = _brm_hsgp_basis_state(axes, K, cov, iso, period;
                                       fits, orthogonal)
-        state = (; target, latent=false, explicit_domain=!isnothing(domain_fits), K, c, cov, iso, period, basis...,
+        state = (; target, latent=false, explicit_domain=!isnothing(domain_fits),
+                 K, c, centeredness, cov, iso, period, basis...,
                  orthogonal, by=by_state,
                  _brm_gp_priors(term, target, context)...)
     end
@@ -139,53 +156,15 @@ function _brm_replay_gp_axes(training, context, label)
     axes
 end
 
-function _brm_replay_term(training::_BRMPreparedTerm{typeof(gp)},
-                          fresh::ExprColumn, context::_BRMBackendContext)
-    axes = _brm_replay_gp_axes(training, context, :gp)
-    state = merge(training.state, (; X=_brm_gp_matrix(axes)))
-    _BRMPreparedTerm(gp, training.source, state, training.dependencies)
-end
-_brm_replay_term(training::_BRMPreparedTerm{typeof(gp)},
-                 fresh::_BRMPreparedTerm{typeof(gp)},
-                 context::_BRMBackendContext) =
-    _brm_replay_term(training, fresh, (; data=context.data))
-function _brm_replay_term(training::_BRMPreparedTerm{typeof(gp)},
-                          fresh::_BRMPreparedTerm{typeof(gp)}, context)
+function _brm_replay_term(::typeof(gp), training,
+                          fresh::Union{ExprColumn,_BRMPreparedTerm}, context)
     axes = _brm_replay_gp_axes(training, context, :gp)
     state = merge(training.state, (; X=_brm_gp_matrix(axes)))
     _BRMPreparedTerm(gp, training.source, state, training.dependencies)
 end
 
-function _brm_replay_term(training::_BRMPreparedTerm{typeof(hsgp)},
-                          fresh::ExprColumn, context::_BRMBackendContext)
-    get(training.state, :latent, false) && return _BRMPreparedTerm(
-        hsgp, training.source, training.state, training.dependencies)
-    axes = _brm_replay_gp_axes(training, context, :hsgp)
-    get(training.state, :explicit_domain, false) &&
-        _brm_check_hsgp_domain(training.state.fits, axes; prefix="BRM term replay")
-    state = if training.state.cov === :periodic
-        merge(training.state, (; axes,
-            PHI=_brm_apply_hsgp_periodic(training.state.period, only(axes),
-                                         only(training.state.K))))
-    else
-        PHI, omega2 = _brm_apply_hsgp(training.state.fits, axes, training.state.K)
-        get(training.state, :orthogonal, nothing) === :linear &&
-            (PHI = _brm_orthogonalize_hsgp_linear(PHI, only(axes)))
-        merge(training.state, (; axes, PHI, omega2))
-    end
-    if !isnothing(training.state.by)
-        by = training.state.by
-        idx = _brm_apply_levels(by.levels, context.data[by.source])
-        state = merge(state, (; by=merge(by, (; idx))))
-    end
-    _BRMPreparedTerm(hsgp, training.source, state, training.dependencies)
-end
-_brm_replay_term(training::_BRMPreparedTerm{typeof(hsgp)},
-                 fresh::_BRMPreparedTerm{typeof(hsgp)},
-                 context::_BRMBackendContext) =
-    _brm_replay_term(training, fresh, (; data=context.data))
-function _brm_replay_term(training::_BRMPreparedTerm{typeof(hsgp)},
-                          fresh::_BRMPreparedTerm{typeof(hsgp)}, context)
+function _brm_replay_term(::typeof(hsgp), training,
+                          fresh::Union{ExprColumn,_BRMPreparedTerm}, context)
     get(training.state, :latent, false) && return _BRMPreparedTerm(
         hsgp, training.source, training.state, training.dependencies)
     axes = _brm_replay_gp_axes(training, context, :hsgp)

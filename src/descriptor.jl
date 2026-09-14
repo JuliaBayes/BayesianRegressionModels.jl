@@ -369,6 +369,25 @@ end
 _brm_plan_of(plan::GenerativePlan) = plan
 _brm_plan_of(sb::SBBRMI) = generative_plan(sb)
 
+# Backend-neutral identity presented by every descriptor. Concrete adapters
+# add emitted coordinates, but the declaration remains the semantic source.
+_brm_descriptor_formula(brmi::BRMI) = sprint(show, brmi)
+function _brm_descriptor_semantics(brmi::BRMI)
+    program = _brm_prepare_program(brmi)
+    roles = Dict{Symbol,Symbol}()
+    for operation in program.operations
+        role = operation.role === :predictor ? :linear_predictor :
+               operation.role === :observation ? :observation :
+               operation.role === :parameter ? :parameter : operation.role
+        roles[operation.name] = role
+    end
+    # Raw dataframe schema only. Backend context may also contain synthetic
+    # dimensions and joint-response carriers; those remain backend inputs and
+    # must never become columns a replay form asks the user to provide.
+    (; program, roles,
+       columns=Tuple(sort!(collect(Symbol, data_columns(brmi)))))
+end
+
 # The formula-owned population address space. `block` is derived FORWARDS with
 # the same helper sbimpl uses to emit the design, so an inert `log_Vc` predictor
 # and a linked `log(Vc)` predictor never become indistinguishable through name
@@ -838,6 +857,7 @@ end
 
 function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
     brmi = plan.parent
+    semantics = _brm_descriptor_semantics(brmi)
     highlights = _brm_highlights(stan, highlight_specs)
 
     # --- the dataframe columns this declaration reads -----------------------
@@ -846,7 +866,7 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
     # DataColumn op, so it never appears there. The plan already knows every
     # response: an observation declaration's `data_source` IS its dataframe
     # column (including a plate-local alias, `kernel_y => dv`).
-    df_columns = Set{Symbol}(data_columns(brmi))
+    df_columns = Set{Symbol}(semantics.columns)
     for d in plan.declarations
         d.role === :observation && !isnothing(d.data_source) || continue
         entry = get(plan.preproc, d.data_source, nothing)
@@ -934,7 +954,8 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
     # matched no emitted block for a linked LHS, so the coefficient vector
     # silently lost its `labels` — the one thing a consumer mounts a descriptor
     # for — while the same model written with an inert `log_Vc` name kept them.
-    lps = Set{Symbol}(e.logical for e in population_effects)
+    lps = Set{Symbol}(name for (name, role) in semantics.roles
+                      if role === :linear_predictor)
     pop_lp = Dict{Symbol,Symbol}(e.block => e.logical for e in population_effects)
 
     # --- outputs ------------------------------------------------------------
@@ -970,7 +991,7 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
     ops = _brm_derive_operations(plan, stan, outputs, columns)
     ops = _brm_apply_overrides(ops, operations, titles)
 
-    BRMDescriptor(stan.id, stan.name, sprint(show, brmi), plan, stan, highlights,
+    BRMDescriptor(stan.id, stan.name, _brm_descriptor_formula(brmi), plan, stan, highlights,
                   Tuple(inputs), Tuple(outputs), Tuple(ops), columns,
                   Tuple(unpredictable))
 end
@@ -1216,6 +1237,29 @@ _brm_term_label(f, t, _target) = _brm_term_label(f, t)
 _brm_term_label(::typeof(dar), t, target) =
     Symbol(:dar_, target, :_, name(_sb_named_inner(:dar, only(getargs(t)))))
 
+_brm_term_owner_labels(f, t, target) = (_brm_term_label(f, t, target),)
+function _brm_term_owner_labels(::typeof(hsgp), t, target)
+    base = _brm_term_label(hsgp, t)
+    axes = Tuple(name(_sb_named_inner(:hsgp, a)) for a in getargs(t))
+    scoped = Symbol(:hsgp_, target, :_, join(string.(axes), "_"))
+    scoped === base ? (base,) : (scoped, base)
+end
+
+_brm_term_owner_matches(_plan, _f, _t, _output) = true
+function _brm_term_owner_matches(plan, ::typeof(hsgp), t, output)
+    owner = output.declaration
+    isnothing(owner) && return false
+    axes = Tuple(name(_sb_named_inner(:hsgp, a)) for a in getargs(t))
+    phi = get(owner.keywords, :PHI, nothing)
+    if phi isa Symbol
+        preproc = get(plan.preproc, phi, nothing)
+        return !isnothing(preproc) && preproc.kind === :hsgp &&
+               preproc.raw_ref == axes
+    end
+    x = get(owner.keywords, :x, nothing)
+    length(axes) == 1 && x === only(axes)
+end
+
 _brm_term_parameter_bindings(::typeof(mo), _t) =
     (; simplex=:simplex_incr)
 _brm_term_parameter_bindings(::typeof(mo1), _t) =
@@ -1327,13 +1371,23 @@ function brm_term_coordinates(d::BRMDescriptor, logical::Symbol,
         "$(Tuple(sort!(unique(e.term for e in all_entries), by=string))).")
     entry = only(entries)
 
-    owners = BRMOutput[
-        o for o in d.outputs
-        if o.logical === term && !isnothing(o.declaration)
-    ]
+    emitted_lp = _sb_lp_emitted_name(logical, entry.link)
+    owner_labels = _brm_term_owner_labels(
+        getf(entry.value), entry.value, emitted_lp)
+    owners = BRMOutput[]
+    for label in owner_labels
+        append!(owners, BRMOutput[
+            o for o in d.outputs
+            if o.logical === label && !isnothing(o.declaration) &&
+               _brm_term_owner_matches(
+                   d.plan, getf(entry.value), entry.value, o)
+        ])
+        isempty(owners) || break
+    end
     length(owners) == 1 || error(
         "brm_descriptor: term `$term` on logical predictor `$logical` has " *
-        "$(length(owners)) logical output owners; expected exactly one.")
+        "$(length(owners)) logical output owners across emitted candidates " *
+        "$(owner_labels); expected exactly one.")
     owner = only(owners).declaration
 
     bindings = _brm_term_parameter_bindings(getf(entry.value), entry.value)
