@@ -18,7 +18,8 @@ const _SIMPLE_CONTRACT =
 const _HSGP_CONTRACT =
     "native HSGP online adaptive centering currently supports exactly one " *
     "single-response Gaussian model with identity-linked `mu`, log-linked " *
-    "`sigma`, default population and HSGP priors, no random effects, and one " *
+    "`sigma`, default population priors, zero-location LogNormal HSGP priors, " *
+    "no random effects, and one " *
     "ungrouped isotropic squared-exponential HSGP over the same observed axis " *
     "on each predictor"
 
@@ -32,11 +33,21 @@ function _has_hsgp_term(backend::BRM.TuringBRMI)
         plan.predictors)
 end
 
-function _is_default_hsgp_prior(prior)
-    prior isa BRM.ExprColumn || return false
-    BRM.getf(prior) === LogNormal || return false
-    BRM.getargs(prior) == (0.0, 1.0) || return false
-    isempty(BRM.getkwargs(prior))
+function _hsgp_prior_scale(prior, logical, role)
+    prior isa BRM.ExprColumn || _unsupported_hsgp(
+        "predictor `$logical` uses a non-expression $role prior")
+    BRM.getf(prior) === LogNormal || _unsupported_hsgp(
+        "predictor `$logical` uses a non-LogNormal $role prior")
+    isempty(BRM.getkwargs(prior)) || _unsupported_hsgp(
+        "predictor `$logical` uses keyword arguments in its $role prior")
+    args = BRM.getargs(prior)
+    length(args) == 2 && first(args) isa Real && iszero(first(args)) ||
+        _unsupported_hsgp(
+            "predictor `$logical` requires a zero-location LogNormal $role prior")
+    scale = last(args)
+    scale isa Real && isfinite(scale) && scale > 0 || _unsupported_hsgp(
+        "predictor `$logical` has a non-positive LogNormal $role prior scale")
+    Float64(scale)
 end
 
 function _hsgp_component_contract(component, logical)
@@ -64,10 +75,8 @@ function _hsgp_component_contract(component, logical)
         "predictor `$logical` uses anisotropic length scales")
     length(term.source) == 1 || _unsupported_hsgp(
         "predictor `$logical` uses $(length(term.source)) HSGP axes")
-    _is_default_hsgp_prior(state.rho_prior) || _unsupported_hsgp(
-        "predictor `$logical` overrides the HSGP length-scale prior")
-    _is_default_hsgp_prior(state.sigma_prior) || _unsupported_hsgp(
-        "predictor `$logical` overrides the HSGP marginal-SD prior")
+    _hsgp_prior_scale(state.rho_prior, logical, "length-scale")
+    _hsgp_prior_scale(state.sigma_prior, logical, "marginal-SD")
     state.rho_lower isa Real && isfinite(state.rho_lower) && state.rho_lower >= 0 ||
         _unsupported_hsgp(
             "predictor `$logical` has a non-finite HSGP length-scale lower bound")
@@ -145,6 +154,8 @@ struct TuringHSGPGradientComponent
     fixed::Vector{Float64}
     PHI::Matrix{Float64}
     beta_indices::Vector{Int}
+    rho_prior_scale::Float64
+    sd_prior_scale::Float64
 end
 
 function _hsgp_gradient_component(
@@ -154,18 +165,23 @@ function _hsgp_gradient_component(
     beta_site = n_components == 1 ? :beta_pop :
         (component_index == 1 ? :beta_pop : Symbol(:beta_pop_, logical))
     term_site = Symbol(:term_, logical, :_1)
-    beta_indices = _coordinate_range(
-        ranges, _root_varname(beta_site), "population-effect")
+    n_beta = size(component.design.matrix, 2)
+    beta_varname = _root_varname(beta_site)
+    beta_indices = if iszero(n_beta)
+        haskey(ranges, beta_varname) ? collect(ranges[beta_varname].range) : Int[]
+    else
+        _coordinate_range(ranges, beta_varname, "population-effect")
+    end
     rho_indices = _coordinate_range(
         ranges, _field_varname(term_site, :rho), "length-scale")
     sd_indices = _coordinate_range(
         ranges, _field_varname(term_site, :sigma), "marginal-SD")
     effect_indices = _coordinate_range(
         ranges, _field_varname(term_site, :beta_raw), "basis-weight")
-    length(beta_indices) == size(component.design.matrix, 2) ||
+    length(beta_indices) == n_beta ||
         _unsupported_hsgp(
             "`$beta_site` occupies $(length(beta_indices)) coordinates for " *
-            "$(size(component.design.matrix, 2)) population-design columns")
+            "$n_beta population-design columns")
     length(rho_indices) == 1 || _unsupported_hsgp(
         "`$term_site.rho` occupies $(length(rho_indices)) coordinates")
     length(sd_indices) == 1 || _unsupported_hsgp(
@@ -202,6 +218,8 @@ function _hsgp_gradient_component(
         collect(Float64, component.design.fixed),
         PHI,
         beta_indices,
+        _hsgp_prior_scale(state.rho_prior, logical, "length-scale"),
+        _hsgp_prior_scale(state.sigma_prior, logical, "marginal-SD"),
     )
 end
 
@@ -588,13 +606,15 @@ function _accumulate_hsgp_gradient!(
             (0.5 / rho - 0.5 * rho * block.omega2[basis, 1])
     end
 
-    # The native HSGP term uses default LogNormal(0, 1) priors. In the linked
+    # The supported native HSGP priors are LogNormal(0, s). In the linked
     # DynamicPPL frame, marginal SD is exp(v), while length scale is
     # rho_lower + exp(u). These terms include both prior and link Jacobian.
     sd_idx = block.sd
-    gradient[sd_idx] = sd_score - position[sd_idx]
+    gradient[sd_idx] = sd_score -
+        position[sd_idx] / component.sd_prior_scale^2
     gradient[rho_idx] = rho_score + one(eltype(position)) -
-        rho_offset * (log(rho) + one(eltype(position))) / rho
+        rho_offset *
+        (log(rho) / component.rho_prior_scale^2 + one(eltype(position))) / rho
     gradient
 end
 

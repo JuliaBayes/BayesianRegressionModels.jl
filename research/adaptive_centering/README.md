@@ -45,6 +45,12 @@ BRM_ADAPTIVE_ONLINE=1 BRM_ADAPTIVE_K=8 \
   BRM_ADAPTIVE_OUTPUT="$PWD/research/adaptive_centering/results" \
   julia --startup-file=no --project=test research/adaptive_centering/reproduce.jl
 
+# Run the matching native-Turing online HSGP adaptation showcase.
+BRM_ADAPTIVE_TURING_ONLINE=1 BRM_ADAPTIVE_K=8 \
+  BRM_ADAPTIVE_DRAWS=20 BRM_ADAPTIVE_EVALS=120 \
+  BRM_ADAPTIVE_OUTPUT="$PWD/research/adaptive_centering/results" \
+  julia --startup-file=no --project=test research/adaptive_centering/reproduce.jl
+
 # Bounded multi-chain comparison used by the documentation artifact.
 BRM_ADAPTIVE_RUNTIME=1 BRM_ADAPTIVE_K=8 \
   BRM_ADAPTIVE_CHAINS=4 BRM_ADAPTIVE_DRAWS=75 BRM_ADAPTIVE_EVALS=350 \
@@ -71,14 +77,21 @@ criteria chosen before looking at results.
 
 The six-fit comparison is **offline pilot/refit adaptation**. It chooses a
 fixed formula/data geometry before the second fit. The separate
-`BRM_ADAPTIVE_ONLINE=1` run exercises WarmupHMC's online nonlinear
-reparameterizer on the same two-HSGP compiled StanBlocks model: it learns one
-coordinate per basis weight inside warmup, preserves the original target via
-the exact transform and Jacobian, and writes the learned values to
-`results/online_centeredness.tsv`. It does not reuse pilot draws or rewrite the
-BRM formula.
+`BRM_ADAPTIVE_ONLINE=1` and `BRM_ADAPTIVE_TURING_ONLINE=1` runs exercise
+WarmupHMC's online nonlinear reparameterizer on the same two-HSGP model. Each
+learns one coordinate per basis weight inside warmup and preserves its native
+target via the same exact transform and Jacobian. StanBlocks writes
+`results/online_centeredness.tsv`; Turing writes
+`results/online_turing_centeredness.tsv`. Neither reuses pilot draws nor
+rewrites the BRM formula.
 
 The committed bounded online receipt retained 20 draws with a 120-evaluation
 warmup budget, reported zero divergences, and moved all 16 same-axis HSGP
 cells away from their initial `c=0`. Those settings verify the executable
 transform; they are not a convergence or efficiency study.
+
+The corresponding native-Turing receipt also retained 20 draws with the same
+120-evaluation budget and reported zero divergences. It learned mean
+centeredness `[1.0,1.0,1.0,0.5,1.0,0.8,1.0,0.4]` and log-scale centeredness
+`[0.9,1.0,0.6,0.5,0.2,0.0,0.0,0.0]`. The deterministic finite initialization
+is part of the reproduction and is not a pilot or posterior draw.

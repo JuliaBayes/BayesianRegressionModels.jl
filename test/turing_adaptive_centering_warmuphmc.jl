@@ -1,7 +1,7 @@
 using Test
 using BayesianRegressionModels
 import DifferentiationInterface as DI
-using Distributions: Exponential, Laplace, Normal
+using Distributions: Exponential, Laplace, LogNormal, Normal
 import Enzyme
 using LogDensityProblems
 using Random: Xoshiro
@@ -85,6 +85,52 @@ function same_axis_hsgp_problem(backend; linked=true)
     problem, collect(DP.get_sample_input_vector(problem))
 end
 
+function motorcycle_hsgp_backend()
+    lines = readlines(joinpath(
+        @__DIR__, "..", "research", "adaptive_centering", "mcycle.csv"))
+    first(lines) == "rownames,times,accel" || error("unexpected mcycle header")
+    rows = split.(lines[2:end], ',')
+    times = parse.(Float64, getindex.(rows, 2))
+    accel = parse.(Float64, getindex.(rows, 3))
+    length(times) == 133 || error("expected 133 motorcycle observations")
+    xmin, xmax = extrema(times)
+    x = @. -1 + 2 * (times - xmin) / (xmax - xmin)
+    data = (; x, y=accel ./ std(accel))
+    builder = @brm begin
+        length_scale(mu, hsgp(x)) ~ LogNormal(0, 4)
+        sd(mu, hsgp(x)) ~ LogNormal(0, 4)
+        length_scale(sigma, hsgp(x)) ~ LogNormal(0, 4)
+        sd(sigma, hsgp(x)) ~ LogNormal(0, 4)
+        mu ~ hsgp(x; k=8, domain=(-1.5, 1.5))
+        log(sigma) ~ hsgp(x; k=8, domain=(-1.5, 1.5))
+        y ~ Normal(mu, sigma)
+    end
+    TuringBRMI(builder(data))
+end
+
+function motorcycle_hsgp_problem(backend)
+    mu_term = only(backend.plan.predictors[1].terms)
+    sigma_term = only(backend.plan.predictors[2].terms)
+    parameters = (;
+        term_mu_1=(;
+            rho=mu_term.state.rho_lower + 0.55,
+            sigma=0.65,
+            beta_raw=collect(range(-0.16, 0.18; length=8)),
+        ),
+        term_sigma_1=(;
+            rho=sigma_term.state.rho_lower + 0.45,
+            sigma=0.4,
+            beta_raw=collect(range(0.12, -0.1; length=8)),
+        ),
+    )
+    vi = DP.VarInfo(
+        backend.model, DP.InitFromParams(parameters), DP.LinkAll(),
+    )
+    problem = DP.LogDensityFunction(
+        backend.model, DP.getlogjoint_internal, vi)
+    problem, collect(DP.get_sample_input_vector(problem))
+end
+
 function set_turing_sources!(problem, controls)
     ir = WarmupHMC.reparametrizer(problem)
     length(ir.pairs) == length(controls) || throw(DimensionMismatch())
@@ -132,6 +178,47 @@ function central_difference(f, x; step=1e-5)
         gradient[i] = (f(right) - f(left)) / (2step)
     end
     gradient
+end
+
+@testset "Turing motorcycle HSGP metadata and scale-4 priors are exact" begin
+    backend = motorcycle_hsgp_backend()
+    density, q = motorcycle_hsgp_problem(backend)
+    problem = adaptive_centering_problem(backend, density, ENZYME_BACKEND)
+    inner = problem.problem
+    components = [inner.mu, inner.log_sigma]
+    blocks = getfield.(components, :block)
+
+    @test LogDensityProblems.dimension(density) == 20
+    @test all(isempty(component.beta_indices) for component in components)
+    @test getfield.(components, :rho_prior_scale) == [4.0, 4.0]
+    @test getfield.(components, :sd_prior_scale) == [4.0, 4.0]
+    @test blocks[1].length_scales == [1]
+    @test blocks[1].sd == 2
+    @test blocks[1].effects == collect(3:10)
+    @test blocks[2].length_scales == [11]
+    @test blocks[2].sd == 12
+    @test blocks[2].effects == collect(13:20)
+
+    inner_density, inner_gradient =
+        LogDensityProblems.logdensity_and_gradient(inner, q)
+    reference_inner_gradient = central_difference(
+        x -> LogDensityProblems.logdensity(density, x), q)
+    @test inner_density == LogDensityProblems.logdensity(density, q)
+    @test inner_gradient ≈ reference_inner_gradient atol=5e-5 rtol=5e-5
+
+    controls = collect(range(0.1, 1.0; length=16))
+    set_turing_sources!(problem, controls)
+    expected_ljac, expected = manual_turing_hsgp_map(q, blocks, controls)
+    actual_ljac, actual = WarmupHMC.reparametrizer(problem)(q)
+    @test actual_ljac ≈ expected_ljac atol=3e-14 rtol=0
+    @test actual ≈ expected atol=3e-14 rtol=0
+    density_value, gradient =
+        LogDensityProblems.logdensity_and_gradient(problem, q)
+    reference_gradient = central_difference(
+        x -> LogDensityProblems.logdensity(problem, x), q)
+    @test density_value ≈ expected_ljac +
+          LogDensityProblems.logdensity(density, expected) atol=1e-11 rtol=1e-11
+    @test gradient ≈ reference_gradient atol=7e-5 rtol=7e-5
 end
 
 @testset "Turing same-axis HSGP metadata and transform are exact" begin
@@ -442,6 +529,38 @@ end
     end
     @test grouped_error isa ErrorException
     @test occursin("grouped HSGP", grouped_error.msg)
+
+    non_lognormal = TuringBRMI((@brm begin
+        length_scale(mu, hsgp(x)) ~ Normal(1, 0.5)
+        mu ~ hsgp(x; k=3)
+        log(sigma) ~ hsgp(x; k=2)
+        y ~ Normal(mu, sigma)
+    end)(hsgp_data))
+    non_lognormal_error = try
+        adaptive_centering_problem(
+            non_lognormal, hsgp_density, ENZYME_BACKEND)
+        nothing
+    catch error
+        error
+    end
+    @test non_lognormal_error isa ErrorException
+    @test occursin("non-LogNormal", non_lognormal_error.msg)
+
+    shifted_lognormal = TuringBRMI((@brm begin
+        length_scale(mu, hsgp(x)) ~ LogNormal(1, 4)
+        mu ~ hsgp(x; k=3)
+        log(sigma) ~ hsgp(x; k=2)
+        y ~ Normal(mu, sigma)
+    end)(hsgp_data))
+    shifted_lognormal_error = try
+        adaptive_centering_problem(
+            shifted_lognormal, hsgp_density, ENZYME_BACKEND)
+        nothing
+    catch error
+        error
+    end
+    @test shifted_lognormal_error isa ErrorException
+    @test occursin("zero-location", shifted_lognormal_error.msg)
 end
 
 @testset "Turing scalar adaptive centering samples end to end" begin
@@ -472,8 +591,8 @@ end
 end
 
 @testset "Turing same-axis HSGP adapts online with checkpoint support" begin
-    backend = same_axis_hsgp_backend()
-    density, q = same_axis_hsgp_problem(backend)
+    backend = motorcycle_hsgp_backend()
+    density, q = motorcycle_hsgp_problem(backend)
     problem = adaptive_centering_problem(backend, density, ENZYME_BACKEND)
     result = mktempdir() do checkpoint_dir
         sampled = WarmupHMC.adaptive_warmup_mcmc(
