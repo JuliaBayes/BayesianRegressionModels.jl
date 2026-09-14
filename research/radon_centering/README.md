@@ -129,6 +129,16 @@ ineligible for completion.
 - `figures/figure_manifest.tsv`: hashes binding every PNG to its AlgebraOfVega
   specification.
 
+Delivered receipts committed under `results/`: the source audit and coordinate
+map, `fit_costs.tsv` (both exact counters, ESS minima and workflow charge),
+per-fit diagnostics, post-hoc and online centeredness selections, display
+coordinate invariants, and per-run provenance plus dependency snapshots
+(`offline_`/`online_provenance.toml`, `offline_`/`online_packages.tsv`).
+Full `.jls` draws, checkpoints, compiled models and the large display tables
+(loss profiles, retrospective scores, pairs, gradients, PPC curves) stay in
+the run directories outside Git; the docs page embeds figure copies under
+`docs/src/assets/adaptive-radon/`.
+
 The displayed gradient facets retain independent axes, marker size 8, opacity
 0.25, and no KDE, binning, smoothing, or fitted line. All 10,000 retained draws
 enter each candidate-loss calculation; display thinning applies only to

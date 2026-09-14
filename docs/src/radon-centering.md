@@ -16,9 +16,11 @@ few. This case study follows PosteriorDB posterior
 fit the noncentered model, inspect its geometry, choose one centering per county
 effect, and fit the reparameterized model from scratch.
 
-The source workflow has two fits: a noncentered pilot and a selected-partial
-refit. The centered plots transform the pilot draws. A third fit extends the
-comparison with online adaptation during warmup.
+Our comparison protocol runs three fits on the immutable PosteriorDB target:
+a noncentered pilot, a selected-partial refit, and an online adaptive-centering
+fit. The centered plots transform the pilot draws. PosteriorDB supplies the
+model and data only; the fitting workflow and sampler configuration below are
+ours.
 
 ## The model
 
@@ -107,7 +109,7 @@ end
 
 ## 1. Fit the noncentered model
 
-The source configuration is retained: one chain, `Xoshiro(1)`, 10,000 requested
+Our protocol for every fit on this page: one chain, `Xoshiro(1)`, 10,000 requested
 draws, and ordinary WarmupHMC defaults including Pathfinder initialization.
 The draw count is a floor, so the actual retained count is reported below.
 Evaluation windows, target acceptance, tree depth and transformation settings
@@ -125,8 +127,10 @@ sampler.
 
 The bands give 90%, 80% and 50% central posterior-predictive intervals over all
 12,573 observations, simulated through BRM's native `:predict` operation; the
-points are the observed log-radon values. Both use the source's log-radon
-units.
+points are the observed log-radon values. Both use the PosteriorDB data's
+log-radon units. Each observation carries its own interval, shown in floor
+order; the bands join adjacent observations and are not floor-level pooled
+intervals.
 
 ## 2. Inspect the geometry in different coordinates
 
@@ -241,8 +245,8 @@ learned = WarmupHMC.reparam_sources(online)
 Returned draws are already back in the original model coordinates: do not
 apply a second sampler-to-model back-transform. An explicit transformation
 for a diagnostic plot is a separate operation, as shown below. The online run
-is an extension with the same full model and ordinary sampler defaults, not
-one of the source's two fits.
+is the third fit of our protocol, with the same full model and ordinary
+sampler defaults.
 
 ![Online posterior county effects versus their scales, in the learned coordinates](assets/adaptive-radon/pair-fresh-online.png)
 
@@ -306,9 +310,10 @@ and indeed the learned values above differ from these retrospective minima.
 
 Here the columns genuinely change the displayed coordinates: NCP pilot,
 post-hoc partial refit, and online fit in its learned geometry. Each facet
-shows **1,000 evenly selected saved draws**, with transparent points; the
-underlying gradient evaluations and loss calculations use all 10,000
-draws per fit. The points are plotted directly, without smoothing or aggregation.
+shows **1,000 evenly selected saved draws**, with transparent points, and the
+displayed gradients are evaluated at exactly those draws. The candidate-loss
+calculations behind the selection use all 10,000 draws per fit. The points are
+plotted directly, without smoothing or aggregation.
 Gradient axes are independent between facets, because reparameterization
 changes their units as well as the coordinate units.
 
@@ -365,8 +370,8 @@ performs coordinate transport and adaptation work, and its measured fit time
 here is longer. Timings surround each sampler call, including initialization,
 first-use Julia/AD compilation and checkpoint I/O, but excluding preceding
 Stan compilation, post-fit extraction, plotting and offline centering selection.
-The calls ran sequentially on one CPU core with one BLAS thread on a shared
-host; they are not warmed or replicated timing benchmarks. The pilot and refit
+The calls ran sequentially with one BLAS thread on a shared host (no CPU
+affinity was recorded); they are not warmed or replicated timing benchmarks. The pilot and refit
 calls together took **278.5 s**, before their intervening selection/processing
 cost. The single-chain limitation still qualifies every ESS comparison; these
 numbers do not establish universal superiority.
@@ -421,8 +426,12 @@ silently overwritten.
 
 Primary source boundaries:
 
-- PosteriorDB at `5545a1dd07ae297c36edecbcd82aa49097b4c385`: model
-  `radon_variable_intercept_slope_noncentered`, data `radon_all`.
+- [PosteriorDB at `5545a1dd07ae297c36edecbcd82aa49097b4c385`](https://github.com/stan-dev/posteriordb/tree/5545a1dd07ae297c36edecbcd82aa49097b4c385):
+  posterior `radon_all-radon_variable_intercept_slope_noncentered` (model
+  `radon_variable_intercept_slope_noncentered`, data `radon_all`). The
+  reference model, metadata, data archive and the 25-posterior inventory are
+  committed under `research/radon_centering/reference/`; `variant_inventory.tsv`
+  flags the selected row.
 - Data archive SHA-256:
   `3f30c7909d530be01e70ab9e98f9f5d5e83371bb15c6dd168696aefd805b5672`;
   JSON SHA-256:

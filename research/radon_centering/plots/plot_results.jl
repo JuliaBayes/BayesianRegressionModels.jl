@@ -15,11 +15,13 @@ function representative_counties(diagnostics)
     Int.(values)
 end
 
-function save_panel(output, name, plot; title, size=(1300, 500))
+function save_panel(output, name, plot; title, size=(1300, 500), legend=true)
     fig = Figure(; size, fontsize=15)
     Label(fig[0, 1], title; fontsize=21, font=:bold, tellwidth=false)
     grid = sdraw!(fig[1, 1], plot)
-    AlgebraOfGraphics.legend!(fig[1, 2], grid)
+    # Panels whose facet strips already identify every series pass
+    # legend=false: a color legend would only duplicate the strips.
+    legend && AlgebraOfGraphics.legend!(fig[1, 2], grid)
     path = joinpath(output, "$name.png")
     save(path, fig; px_per_unit=1.5)
     spec_path = joinpath(output, "$name.vl.json")
@@ -31,13 +33,23 @@ function save_panel(output, name, plot; title, size=(1300, 500))
 end
 
 function ppc_plot(diagnostics)
-    rows = sort(table(diagnostics, "ppc_curves.tsv"); by=r -> r.floor)
+    # One interval per observation in floor order. Pooling county-specific
+    # intervals at repeated floor values into one floor-level ribbon would be
+    # invalid: many different predictive intervals share the same x.
+    rows = sort(table(diagnostics, "ppc_curves.tsv"); by=r -> (r.floor, r.observation))
     all(r -> all(isfinite, (r.q05, r.q10, r.q25, r.q50, r.q75, r.q90, r.q95)), rows) ||
         error("PPC intervals are non-finite")
-    observations = [(; floor=r.floor, response=r.observation) for r in rows]
-    brm_posteriorplot(rows; x=:floor, xlabel="Floor measurement",
-        ylabel="Log radon", observations, observed_y=:response,
+    indexed = [merge(r, (; position=i)) for (i, r) in enumerate(rows)]
+    observations = [(; position=i, response=r.observation) for (i, r) in enumerate(rows)]
+    bands = brm_posteriorplot(indexed; x=:position, xlabel="Observation (floor order)",
+        ylabel="Log radon",
         title="Observed log radon and posterior predictive intervals")
+    # 12,573 observations would bury the ribbons if drawn over them, so the
+    # dots go UNDER the translucent bands (same ink as the shared helper).
+    dots = data(observations) *
+        mapping(:position => "Observation (floor order)", :response => "Log radon") *
+        visual(Scatter; color="#252525", opacity=0.65, markersize=2)
+    dots + bands
 end
 
 function centering_rows(offline, online)
@@ -102,7 +114,17 @@ function pair_plot(diagnostics, configurations)
     all(r -> isfinite(r.hyperparameter) && r.hyperparameter > 0 &&
              isfinite(r.coordinate), rows) ||
         error("pair plot contains invalid coordinates or scales")
-    brm_pairplot(rows)
+    # Native composition: county hues stay consistent with the loss panels,
+    # but the legend is suppressed at render (legend=false) since the row
+    # strips already identify every county.
+    data(rows) * mapping(:hyperparameter => "Hyperparameter position",
+        :coordinate => "Coordinate position"; col=:parameter, row=:basis_label,
+        color=:basis_label => "County") *
+        visual(Scatter; opacity=0.12, markersize=8) *
+        config(width=260, height=190,
+            facet=(; linkxaxes=:none, linkyaxes=:none),
+            scales=scales(X=(; scale=log10),
+                          Color=(; palette=CENTEREDNESS_COLORS)))
 end
 
 function plot_results(offline, online, diagnostics;
@@ -139,7 +161,8 @@ function plot_results(offline, online, diagnostics;
             ("pair-fresh-online", "5 online learned",
                 "Fresh online-fit coordinates (learned geometry)"))
         push!(paths, save_panel(output, name,
-            pair_plot(diagnostics, (configuration,)); title, size=(1600, 780)))
+            pair_plot(diagnostics, (configuration,)); title, size=(1600, 780),
+            legend=false))
     end
     gradients = [merge(row, (;
         basis_label="$(uppercasefirst(String(row.role))) / $(row.basis_label)"))
@@ -158,9 +181,18 @@ function plot_results(offline, online, diagnostics;
         rows = filter(r -> Symbol(r.role) == role, gradients)
         length(rows) == 3 * length(counties) * 1000 ||
             error("gradient display rows are incomplete for role $role")
-        push!(paths, save_panel(output, name,
-            brm_gradientplot(rows; opacity=0.25, markersize=8);
-            title, size=(1800, 520)))
+        # Native composition, as for pairs: county hues stay consistent with
+        # the loss panels while the legend stays suppressed (legend=false).
+        plot = data(rows) * mapping(:coordinate => "Coordinate position",
+            :gradient => "Log-density gradient";
+            col=:configuration, row=:basis_label,
+            color=:basis_label => "County") *
+            visual(Scatter; opacity=0.25, markersize=12) *
+            config(width=300, height=210,
+                facet=(; linkxaxes=:none, linkyaxes=:none),
+                scales=scales(Color=(; palette=CENTEREDNESS_COLORS)))
+        push!(paths, save_panel(output, name, plot; title, size=(1800, 520),
+                                legend=false))
     end
     manifest = [(; figure=splitext(basename(path))[1], png=path,
         png_sha256=bytes2hex(sha256(read(path))),
