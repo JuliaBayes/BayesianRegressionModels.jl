@@ -8,10 +8,11 @@ that revision are under `reference/` and `variant_inventory.tsv`.
 
 The selected model has two independently hierarchical vectors (386 county
 intercepts and 386 county slopes), one likelihood covariate, and 777 scalar
-parameters. It is the unique maximum under the explicit structural criterion in
-the inventory: more hierarchical effect cells (772) and total scalar parameters
-(777) than every other radon posterior at that revision. Parameterization is not
-part of the complexity criterion; the selected noncentered implementation is the
+parameters. It shares the structural maximum in the inventory with its centered
+twin: 772 hierarchical effect cells and 777 total scalar parameters, more
+cells than every other radon posterior at that revision except that twin.
+Parameterization is not part of the complexity criterion; of the two
+tied variants, the noncentered implementation is selected as the
 adaptive-centering starting point.
 
 The BRM spelling uses fixed population intercept/slope coefficients for the

@@ -41,11 +41,12 @@ beta[j]  = sigma_beta * beta_raw[j]
 ```
 
 The positive `Normal(0,1)` priors are half-normal on the three scales. The
-selected posterior is the most complex radon variant in the PosteriorDB
-inventory at this revision: 772 hierarchical effect cells (386 intercepts plus
-386 slopes) and 777 scalar parameters, more than every other radon posterior on
-both structural criteria. Parameterization is not part of that criterion; the
-noncentered implementation above is the adaptive-centering starting point.
+selected posterior shares the structural maximum of the PosteriorDB
+inventory at this revision with its centered twin: 772 hierarchical effect
+cells (386 intercepts plus 386 slopes) and 777 scalar parameters, more cells
+than every other radon posterior except that twin. Parameterization is not part
+of that criterion; of the two tied variants, the noncentered implementation
+above is selected as the adaptive-centering starting point.
 
 ### Hyperpriors and source equivalence
 
