@@ -12,6 +12,7 @@ const GENERATED_EXAMPLE_PAGES = [
     joinpath(@__DIR__, "src", "wastewater-cdc.md"),
     joinpath(@__DIR__, "src", "seal-brm.md"),
     joinpath(@__DIR__, "src", "adaptive-centering.md"),
+    joinpath(@__DIR__, "src", "radon-centering.md"),
 ]
 const DOCS_MARKDOWN_PAGES = sort!(String[
     joinpath(root, file)
@@ -58,6 +59,7 @@ makedocs(
         "CDC ww-inference" => "wastewater-cdc.md",
         "Grey-seal IPM" => "seal-brm.md",
         "Adaptive HSGP centering" => "adaptive-centering.md",
+        "Adaptive radon centering" => "radon-centering.md",
         "Turing backend" => "turing-backend.md",
         "Formulas and custom models: deck" => "feature-deck.md",
         "Gallery" => "gallery.md",
@@ -90,6 +92,11 @@ BRMDocsComparisons.validate_required_stan_outputs(
 BRMDocsComparisons.validate_required_stan_outputs(
     joinpath(@__DIR__, "build", ".documenter", "adaptive-centering.md"),
     (:adaptive_motorcycle_model,),
+)
+
+BRMDocsComparisons.validate_required_stan_outputs(
+    joinpath(@__DIR__, "build", ".documenter", "radon-centering.md"),
+    (:adaptive_radon_model,),
 )
 
 # Copy committed live-brm recordings into the VitePress build tree so

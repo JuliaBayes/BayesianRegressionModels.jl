@@ -59,11 +59,33 @@ julia --startup-file=no --project=test \
   /absolute/offline-directory /absolute/online-directory \
   /absolute/cost-directory
 
+bash research/radon_centering/plots/setup_plots_env.sh
+
 julia --startup-file=no --project=research/radon_centering/plots \
   research/radon_centering/plots/plot_results.jl \
   /absolute/offline-directory /absolute/online-directory \
   /absolute/diagnostics-directory
 ```
+
+The plotting environment is rebuilt from exact source pins by
+`plots/setup_plots_env.sh`, which materializes clean detached clones below
+the ignored `plots/.bootstrap/` cache (host mirror first, public GitHub
+origin otherwise) and resolves with the canonical resolver. Pins:
+AlgebraOfVega `4124226`, DynamicObjects `1d268ea` (source-pinned per user
+decision; `3352e03` remains the historical compatibility evidence),
+HTMXObjects `a813640`, HTMX `d52ce5b`, Treebars `c02aa16`;
+AlgebraOfGraphics 0.13.2, CairoMakie 0.15.14 and Makie 0.24.14 resolve from
+the registry under the `[compat]` bounds in `plots/Project.toml`. Re-running
+the script reuses the cached checkouts and re-renders byte-identical figures.
+
+Eleven figures land in `<diagnostics>/figures/` with `figure_manifest.tsv`
+hashes binding every PNG to its AlgebraOfVega specification: `data-ppc`,
+`selected-centeredness`, `offline-loss-profiles`, `online-loss-profiles`,
+five per-geometry pair plots (`pair-pilot-ncp`, `pair-pilot-centered`,
+`pair-pilot-posthoc`, `pair-fresh-posthoc`, `pair-fresh-online`) and two
+per-role position–gradient scatters (`position-gradient-intercept`,
+`position-gradient-slope`). The docs page embeds copies under
+`docs/src/assets/adaptive-radon/`.
 
 The audit compares normalized BridgeStan densities and all 777 gradients against
 the immutable PosteriorDB Stan model. The pilot is a full noncentered fit. Its
