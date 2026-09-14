@@ -54,6 +54,11 @@ through WarmupHMC's public reparametrization API. Online adaptation uses
 BRM's `adaptive_centering_problem` with WarmupHMC's default weighted
 position-gradient correlation objective (`w1=0`).
 
+Post-fit diagnostics bind each displayed configuration to its own saved
+fit: pair and gradient panels show the pilot, refit, and online draws in
+their own geometries, each evaluated on its native problem. Only the
+retrospective online-loss replay uses the common pilot, labeled as such.
+
 The full harness checks generated Stan with `stanc`, compares the generated
 target to the immutable source at synthetic and saved posterior positions,
 checks both returned and final-checkpoint counters, computes split R-hat,

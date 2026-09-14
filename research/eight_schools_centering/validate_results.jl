@@ -145,6 +145,51 @@ function validate_results(fit_dir, diagnostics_dir)
         @test all(online_losses["evidence"] .== "retrospective_saved_pilot_draws")
         @test all(online_losses["weights"] .== "unit")
     end
+    # Displayed rows must come from their NAMED fit, not from a shared pilot
+    # passed through coordinate transforms. The .jls binaries are the
+    # independent anchor here: row 1 holds log(tau), rows 2-9 the eight
+    # school coordinates in school order, row 10 mu (same layout the
+    # source/target transform check above relies on).
+    pairs = table(joinpath(diagnostics_dir, "coordinate_pairs.tsv"))
+    scatters = table(joinpath(diagnostics_dir, "gradient_scatter.tsv"))
+    @testset "Plotted rows match their named fits" begin
+        @test length(pairs["configuration"]) == 240_000
+        @test length(scatters["configuration"]) == 24_000
+        learned = [parse(Float64, online_centeredness["centeredness"][j])
+                   for j in 1:8]
+        named = Dict("NCP" => pilot, "Post-hoc" => partial_target,
+                     "Online" => online)
+        pair_key = Dict{Tuple{String,Int,Int},Float64}()
+        for config in ("NCP", "Post-hoc", "Online")
+            fit = named[config]
+            rows = findall(==(config), pairs["configuration"])
+            @test length(rows) == 80_000
+            for row in rows
+                draw = parse(Int, pairs["draw"][row])
+                school = parse(Int, pairs["school"][row])
+                tau = exp(fit.posterior_position[1, draw])
+                @test parse(Float64, pairs["hyperparameter"][row]) ≈ tau
+                expected = if config == "Online"
+                    c = learned[school]
+                    tau^c * fit.posterior_position[school + 1, draw]
+                else
+                    fit.posterior_position[school + 1, draw]
+                end
+                @test parse(Float64, pairs["coordinate"][row]) ≈ expected
+                pair_key[(config, draw, school)] =
+                    parse(Float64, pairs["coordinate"][row])
+            end
+        end
+        # Every gradient-scatter row must sit on its pair-table coordinate:
+        # this binds the gradient display to the fit-anchored pairs without
+        # rebuilding any target.
+        for row in eachindex(scatters["configuration"])
+            key = (scatters["configuration"][row],
+                   parse(Int, scatters["draw"][row]),
+                   parse(Int, scatters["school"][row]))
+            @test parse(Float64, scatters["coordinate"][row]) ≈ pair_key[key]
+        end
+    end
     println("eight_schools_results_verified\t", fit_dir)
 end
 

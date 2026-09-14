@@ -214,6 +214,10 @@ refit = WarmupHMC.adaptive_warmup_mcmc(
 
 ![Post-hoc selected partial coordinates](assets/adaptive-eight-schools/post-hoc_scatter.png)
 
+These are the refit run's own 10,000 draws in the selected partial
+coordinates — not the pilot re-expressed. Each row shows one school's
+partial coordinate against the random-effect scale on a logarithmic axis.
+
 Both fits retained 10,000 draws with the configuration above:
 
 | fit | max split R-hat | min bulk ESS | min tail ESS | divergences |
@@ -256,7 +260,8 @@ workflow.
 
 ![Online-adaptive selected coordinates](assets/adaptive-eight-schools/online_scatter.png)
 
-The full online run retained 10,000 draws, with 1 divergence (0.01%),
+These are the online run's own 10,000 draws, shown in the learned
+coordinates. The full online run retained 10,000 draws, with 1 divergence (0.01%),
 maximum split R-hat `1.0006`, minimum bulk ESS `3,597`, and minimum tail
 ESS `3,131`. This is encouraging evidence from one run, not a guarantee
 for other data, seeds or models.
@@ -294,15 +299,17 @@ centeredness learned online.
 
 Here the columns genuinely change the displayed coordinates, left to
 right: NCP pilot, online fit in its learned geometry, and post-hoc partial
-refit. Each facet
-shows **1,000 evenly selected saved draws**, with transparent points; the
-underlying gradient evaluations and loss calculations use all 10,000
+refit. Each facet shows **1,000 evenly selected draws from its own fit** —
+pilot, refit, or online run — with transparent points; the underlying
+gradient evaluations and loss calculations use all 10,000
 draws per fit. The points are plotted directly, without smoothing or
 aggregation. Gradient axes are independent between facets, because
 reparameterization changes their units as well as the coordinate units.
 
-The gradients come from the actual BRM-generated Stan target. At fixed
-hyperparameters, BRM transports them with `g_c = tau^(-c)*g_z`. The
+The NCP and online gradients come from the actual BRM-generated Stan
+target; the refit gradients come from its fixed selected-partial problem.
+At fixed hyperparameters, the NCP-to-partial display transport is
+`g_c = tau^(-c)*g_z`. The
 change-of-coordinate Jacobian is constant with respect to this school
 coordinate; its hyperparameter derivatives are not being plotted here.
 Seventy-two independent finite-difference checks of the displayed

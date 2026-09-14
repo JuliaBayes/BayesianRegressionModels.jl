@@ -134,7 +134,7 @@ function run_provenance(output_dir)
         "chains_each_fit" => 1,
         "sampler" => "WarmupHMC.adaptive_warmup_mcmc",
         "sampler_config" => "defaults; n_draws=10000; monitor_ess=true; no initializer or NUTS overrides",
-        "timed_scope" => "sampler call only; compilation/setup excluded; counters follow WarmupHMC documented scopes",
+        "timed_scope" => "sampler call only: includes initialization, first-use Julia/AD compilation and checkpoint I/O; excludes Stan compilation, post-fit extraction, plotting and offline selection; counters follow WarmupHMC documented scopes",
         "turing_sampling" => "not run",
         "r_sampling" => "not run",
         "blas_threads" => BLAS.get_num_threads(),
