@@ -156,9 +156,20 @@ function _brm_generic_observation(base, modifier, weight, i)
     _brm_objective_observation(base, weight, i)
 end
 
-function _brm_ast_call(callable, args, kwargs, callables)
+function _brm_callable_ast(callable, callables)
+    if applicable(parentmodule, callable) && applicable(nameof, callable)
+        module_ = parentmodule(callable)
+        name = nameof(callable)
+        if isdefined(module_, name) && getfield(module_, name) === callable
+            return GlobalRef(module_, name)
+        end
+    end
     push!(callables, callable)
-    f = :(callables[$(length(callables))])
+    :(callables[$(length(callables))])
+end
+
+function _brm_ast_call(callable, args, kwargs, callables)
+    f = _brm_callable_ast(callable, callables)
     positional = map(x -> _brm_prepared_ast(x, callables), args)
     keywords = [Expr(:kw, key, _brm_prepared_ast(value, callables))
                 for (key, value) in pairs(kwargs)]
@@ -305,8 +316,7 @@ function _brm_generic_response_graph_ast(multi; single::Bool=false)
         push!(logical, name)
         prior_asts = map(component.priors) do prior
             if isnothing(prior)
-                push!(callables, Normal)
-                :(callables[$(length(callables))](0, 1))
+                :($(_brm_callable_ast(Normal, callables))(0, 1))
             else
                 _brm_turing_prior_ast(BRM._brm_prepare_expr(prior), callables)
             end
@@ -332,8 +342,7 @@ function _brm_generic_response_graph_ast(multi; single::Bool=false)
                     push!(margin_shares, QuoteNode(mapping.margin_shares))
                     mapped_priors = map(mapped.priors) do prior
                         isnothing(prior) ? begin
-                            push!(callables, Normal)
-                            :(callables[$(length(callables))]())
+                            :($(_brm_callable_ast(Normal, callables))())
                         end : _brm_turing_prior_ast(
                             BRM._brm_prepare_expr(prior), callables)
                     end
@@ -413,8 +422,8 @@ function _brm_generic_response_graph_ast(multi; single::Bool=false)
             push!(statements, :($eta = $eta + $term_site.effect))
         end
         inverse_link = InverseFunctions.inverse(component.predictor.link_lhs_fn)
-        push!(callables, inverse_link)
-        push!(statements, :($name = (callables[$(length(callables))]).($eta)))
+        inverse_link_ast = _brm_callable_ast(inverse_link, callables)
+        push!(statements, :($name = $inverse_link_ast.($eta)))
         if name in shared_predictors
             finalizer = pop!(statements)
             base = predictor_bases[name]
@@ -569,9 +578,20 @@ _random_effect_args(component) = isempty(component.random_effects) ?
 
 function _zero_correlation_scales(intercept_index, intercept_scale,
                                   slope_scales)
-    intercept_index == 0 && return slope_scales
-    vcat(slope_scales[1:(intercept_index - 1)], [intercept_scale],
-         slope_scales[intercept_index:end])
+    # DynamicPPL can infer a sampled local as Union{Nothing,T}.  Allocate from
+    # the realized slope type so Enzyme never receives an isbits-union array.
+    scales = Vector{typeof(first(slope_scales))}(
+        undef, length(slope_scales) + (intercept_index > 0))
+    slope_index = 1
+    for term_index in eachindex(scales)
+        if term_index == intercept_index
+            scales[term_index] = intercept_scale
+        else
+            scales[term_index] = slope_scales[slope_index]
+            slope_index += 1
+        end
+    end
+    scales
 end
 
 function _noncentered_group_coefficients(scales, z_flat, n_groups)
@@ -793,13 +813,21 @@ Turing.@model function _brm_zero_correlation_group_effect(
     n_slopes = n_terms - (intercept_index > 0)
     intercept_scale = residual_scale
     if intercept_index > 0 && isnothing(residual_scale)
-        intercept_scale ~ _brm_group_scale_distribution(sd_priors[intercept_index])
+        intercept_prior = sd_priors[intercept_index]
+        if isnothing(intercept_prior)
+            # Match the established random-intercept and Stan default geometry.
+            log_intercept_scale ~ Normal()
+            intercept_scale = exp(log_intercept_scale)
+        else
+            intercept_scale ~ _brm_group_scale_distribution(intercept_prior)
+        end
     end
-    tau_slopes = fill(residual_scale, n_slopes)
     if isnothing(residual_scale)
         tau_slopes ~ product_distribution(
             [_brm_group_scale_distribution(sd_priors[i]) for i in eachindex(sd_priors)
              if i != intercept_index])
+    else
+        tau_slopes = fill(residual_scale, n_slopes)
     end
     scales = _zero_correlation_scales(
         intercept_index, intercept_scale, tau_slopes)
@@ -817,13 +845,21 @@ Turing.@model function _brm_centered_zero_correlation_group_effect(
     n_slopes = n_terms - (intercept_index > 0)
     intercept_scale = residual_scale
     if intercept_index > 0 && isnothing(residual_scale)
-        intercept_scale ~ _brm_group_scale_distribution(sd_priors[intercept_index])
+        intercept_prior = sd_priors[intercept_index]
+        if isnothing(intercept_prior)
+            # Match the established random-intercept and Stan default geometry.
+            log_intercept_scale ~ Normal()
+            intercept_scale = exp(log_intercept_scale)
+        else
+            intercept_scale ~ _brm_group_scale_distribution(intercept_prior)
+        end
     end
-    tau_slopes = fill(residual_scale, n_slopes)
     if isnothing(residual_scale)
         tau_slopes ~ product_distribution(
             [_brm_group_scale_distribution(sd_priors[i]) for i in eachindex(sd_priors)
              if i != intercept_index])
+    else
+        tau_slopes = fill(residual_scale, n_slopes)
     end
     scales = _zero_correlation_scales(
         intercept_index, intercept_scale, tau_slopes)

@@ -189,9 +189,11 @@ const correlated_L_matrix = [1.0 0.0; rho sqrt(1 - rho^2)]
 const correlated_tau = [0.4, 0.7]
 const correlated_params = (;
     beta_pop=beta,
-    L_group=Cholesky(copy(correlated_L_matrix), 'L', 0),
-    tau_group=correlated_tau,
-    z_group_flat=z,
+    group_1_1=(;
+        L=Cholesky(copy(correlated_L_matrix), 'L', 0),
+        tau=correlated_tau,
+        z_flat=z,
+    ),
 )
 
 function correlated_stan_value(name)
@@ -292,9 +294,11 @@ const intercept_log_scale = log(0.6)
 const slope_tau = 0.7
 const zero_params = (;
     beta_pop=beta,
-    log_group_intercept_scale=intercept_log_scale,
-    tau_group_slopes=[slope_tau],
-    z_group_flat=z,
+    group_1_1=(;
+        log_intercept_scale=intercept_log_scale,
+        tau_slopes=[slope_tau],
+        z_flat=z,
+    ),
 )
 
 function zero_stan_value(name)

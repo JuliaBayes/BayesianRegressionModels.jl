@@ -931,7 +931,7 @@ end
     block = only(backend.plan.random_effects)
     params = (;
         beta_pop=[0.25, -0.5], sigma=0.8,
-        group_1_1=(; intercept_scale=0.6, tau_slopes=[0.7],
+        group_1_1=(; log_intercept_scale=log(0.6), tau_slopes=[0.7],
             z_flat=[-0.2, 0.4, 1.1, 0.3, -0.5, 0.8]),
     )
     scales = [0.6, 0.7]
@@ -943,7 +943,7 @@ end
     half_normal = Normal()
     prior = sum(logpdf.(Normal(), params.beta_pop)) +
             logpdf(Exponential(2), params.sigma) +
-            logpdf(Normal(), params.group_1_1.intercept_scale) +
+            logpdf(Normal(), params.group_1_1.log_intercept_scale) +
             sum(logpdf.(half_normal, params.group_1_1.tau_slopes)) +
             sum(logpdf.(Normal(), params.group_1_1.z_flat))
     likelihood = sum(logpdf.(Normal.(mu, params.sigma), df.y))
@@ -1176,7 +1176,7 @@ end
 
     params = (;
         beta_pop=[0.25, -0.5],
-        group_1_1=(; intercept_scale=0.6, tau_slopes=[0.7],
+        group_1_1=(; log_intercept_scale=log(0.6), tau_slopes=[0.7],
             z_flat=[-0.2, 0.4, 1.1, 0.3, -0.5, 0.8]))
     block = only(bernoulli.plan.random_effects)
     scales = [0.6, 0.7]
@@ -1186,7 +1186,7 @@ end
         block.matrix .* b_group[block.indices, :]; dims=2))
     eta = bernoulli.plan.design.matrix * params.beta_pop + group_effect
     prior = sum(logpdf.(Normal(), params.beta_pop)) +
-            logpdf(Normal(), params.group_1_1.intercept_scale) +
+            logpdf(Normal(), params.group_1_1.log_intercept_scale) +
             sum(logpdf.(Normal(), params.group_1_1.tau_slopes)) +
             sum(logpdf.(Normal(), params.group_1_1.z_flat))
 
@@ -1310,7 +1310,7 @@ end
     end)((; df..., y=[0, 2, 5, 1])))
     zero_params = Dict(
         Turing.@varname(beta_pop) => [0.1, -0.2],
-        Turing.@varname(group_1_1.intercept_scale) => 0.6,
+        Turing.@varname(group_1_1.log_intercept_scale) => log(0.6),
         Turing.@varname(group_1_1.tau_slopes) => [0.7],
         Turing.@varname(group_1_1.z_flat) =>
             [-0.2, 0.4, 1.1, 0.3, -0.5, 0.8],
@@ -1320,7 +1320,7 @@ end
     zero_prior =
         sum(logpdf.(Normal(), zero_params[Turing.@varname(beta_pop)])) +
         logpdf(Normal(), zero_params[
-            Turing.@varname(group_1_1.intercept_scale)]) +
+            Turing.@varname(group_1_1.log_intercept_scale)]) +
         sum(logpdf.(half_normal, zero_params[
             Turing.@varname(group_1_1.tau_slopes)])) - log(2.0) +
         sum(logpdf.(Normal(), zero_params[
@@ -2131,7 +2131,7 @@ end
 
     params = (;
         beta_pop=[0.1, 0.2], beta_pop_phi=[-0.4, 0.15],
-        group_1_1=(; intercept_scale=0.4, tau_slopes=[0.7],
+        group_1_1=(; log_intercept_scale=log(0.4), tau_slopes=[0.7],
             z_flat=[-0.2, 0.4, 1.1, 0.3, -0.5, 0.8]),
         group_2_1=(; tau_slopes=[0.45], z_flat=[0.5, -0.7]))
     mean_plan, precision_plan = negative_binomial.plan.predictors
@@ -2154,7 +2154,7 @@ end
                        precision_group_effect
     prior = sum(logpdf.(Normal(), params.beta_pop)) +
             sum(logpdf.(Normal(), params.beta_pop_phi)) +
-            logpdf(Normal(), params.group_1_1.intercept_scale) +
+            logpdf(Normal(), params.group_1_1.log_intercept_scale) +
             sum(logpdf.(Normal(), params.group_1_1.tau_slopes)) +
             sum(logpdf.(Normal(), params.group_1_1.z_flat)) +
             sum(logpdf.(Normal(), params.group_2_1.tau_slopes)) +
@@ -2199,7 +2199,7 @@ end
     @test "group_1_1" in replay_names
     @test "group_2_1" in replay_names
     @test propertynames(replay_parameters.group_1_1) ==
-          (:intercept_scale, :tau_slopes)
+          (:log_intercept_scale, :tau_slopes)
     @test propertynames(replay_parameters.group_2_1) == (:tau_slopes,)
     predictive = turing_posterior_predictive(Xoshiro(112), replayed, bb_params)
     @test length(predictive.y) == length(dist_data.x)
