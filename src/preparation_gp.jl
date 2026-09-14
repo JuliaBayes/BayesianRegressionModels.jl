@@ -33,6 +33,17 @@ function _brm_gp_priors(term, target, context)
     (; rho_prior, sigma_prior)
 end
 
+_brm_zero_rho_lower(lower::Real) = zero(lower)
+_brm_zero_rho_lower(lower::AbstractArray) = zero.(lower)
+
+function _brm_hsgp_declared_rho_lower(term, target, context, default_lower)
+    # An explicit length-scale prior replaces the whole declaration, including
+    # the approximation-validity floor supplied by the default HSGP prior.
+    isnothing(_brm_term_prior_spec(
+        term, target, context, :term_length_scale,
+    )) ? default_lower : _brm_zero_rho_lower(default_lower)
+end
+
 function _brm_hsgp_basis_state(axes, K, cov, iso, period;
                                fits=nothing, orthogonal=nothing)
     if cov === :periodic
@@ -91,10 +102,14 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
         center, L = only(fits)
         _, omega2 = _brm_apply_hsgp(fits, ([center],), K)
         source = name(only(latent_args))
+        rho_lower = _brm_hsgp_declared_rho_lower(
+            term, target, context,
+            _brm_hsgp_rho_lower_data(fits, K, true),
+        )
         state = (; target, latent=true, explicit_domain=true, axis_source=source,
                  K, c, centeredness, cov, iso,
                  period=nothing, fits, center, L, omega2,
-                 rho_lower=_brm_hsgp_rho_lower_data(fits, K, true),
+                 rho_lower,
                  orthogonal, by=nothing,
                  _brm_gp_priors(term, target, context)...)
         return _BRMPreparedTerm(hsgp, (source,), state, (source,))
@@ -128,6 +143,9 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
         isnothing(by_state) || error(
             "BRM term preparation: periodic hsgp does not support by")
         basis = _brm_hsgp_basis_state(axes, K, cov, iso, period)
+        basis = merge(basis, (; rho_lower=_brm_hsgp_declared_rho_lower(
+            term, target, context, basis.rho_lower,
+        )))
         state = (; target, latent=false, explicit_domain=false, K, c, centeredness,
                  cov, iso, period, basis..., by=by_state,
                  _brm_gp_priors(term, target, context)...)
@@ -137,6 +155,9 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
         orthogonal = _brm_hsgp_orthogonal_to(kw, length(axes))
         basis = _brm_hsgp_basis_state(axes, K, cov, iso, period;
                                       fits, orthogonal)
+        basis = merge(basis, (; rho_lower=_brm_hsgp_declared_rho_lower(
+            term, target, context, basis.rho_lower,
+        )))
         state = (; target, latent=false, explicit_domain=!isnothing(domain_fits),
                  K, c, centeredness, cov, iso, period, basis...,
                  orthogonal, by=by_state,
