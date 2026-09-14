@@ -189,9 +189,11 @@ const correlated_L_matrix = [1.0 0.0; rho sqrt(1 - rho^2)]
 const correlated_tau = [0.4, 0.7]
 const correlated_params = (;
     beta_pop=beta,
-    L_group=Cholesky(copy(correlated_L_matrix), 'L', 0),
-    tau_group=correlated_tau,
-    z_group_flat=z,
+    group_1_1=(;
+        L=Cholesky(copy(correlated_L_matrix), 'L', 0),
+        tau=correlated_tau,
+        z_flat=z,
+    ),
 )
 
 function correlated_stan_value(name)
