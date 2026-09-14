@@ -148,16 +148,6 @@ function _coordinate_range(ranges, varname, role)
     collect(ranges[varname].range)
 end
 
-struct TuringHSGPGradientComponent
-    block::BRM._HSGPAdaptiveCenteringBlock
-    design::Matrix{Float64}
-    fixed::Vector{Float64}
-    PHI::Matrix{Float64}
-    beta_indices::Vector{Int}
-    rho_prior_scale::Float64
-    sd_prior_scale::Float64
-end
-
 function _hsgp_gradient_component(
     component, component_index, n_components, term, ranges,
 )
@@ -212,15 +202,9 @@ function _hsgp_gradient_component(
         0.0,
         omega2,
     )
-    TuringHSGPGradientComponent(
-        block,
-        Matrix{Float64}(component.design.matrix),
-        collect(Float64, component.design.fixed),
-        PHI,
-        beta_indices,
-        _hsgp_prior_scale(state.rho_prior, logical, "length-scale"),
-        _hsgp_prior_scale(state.sigma_prior, logical, "marginal-SD"),
-    )
+    _hsgp_prior_scale(state.rho_prior, logical, "length-scale")
+    _hsgp_prior_scale(state.sigma_prior, logical, "marginal-SD")
+    block, beta_indices
 end
 
 function _two_hsgp_geometry(backend, problem, contract)
@@ -235,14 +219,14 @@ function _two_hsgp_geometry(backend, problem, contract)
     sigma = _hsgp_gradient_component(
         contract.sigma, contract.sigma_index, n_components,
         contract.sigma_term, ranges)
-    blocks = [mu.block, sigma.block]
+    blocks = [first(mu), first(sigma)]
 
     claimed = Int[]
-    for component in (mu, sigma)
-        append!(claimed, component.beta_indices)
-        append!(claimed, component.block.effects)
-        append!(claimed, component.block.length_scales)
-        push!(claimed, component.block.sd)
+    for (block, beta_indices) in (mu, sigma)
+        append!(claimed, beta_indices)
+        append!(claimed, block.effects)
+        append!(claimed, block.length_scales)
+        push!(claimed, block.sd)
     end
     length(unique(claimed)) == length(claimed) || _unsupported_hsgp(
         "DynamicPPL metadata assigns overlapping coordinates to the two HSGPs")

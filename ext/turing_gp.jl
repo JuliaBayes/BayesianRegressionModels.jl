@@ -90,7 +90,7 @@ Turing.@model function _brm_turing_hsgp_partial_iso_term(state)
         Turing.@addlogprob! -Inf
     end
     safe_centered_log_scale = max.(centered_log_scale, log_floor)
-    beta_partial ~ product_distribution([
+    beta_partial ~ arraydist([
         Normal(0, exp(safe_centered_log_scale[b]))
         for b in eachindex(safe_centered_log_scale)])
     remaining_log_scale = [_brm_hsgp_remaining_log_scale(log_sqrt_spd[b],
@@ -120,7 +120,7 @@ Turing.@model function _brm_turing_hsgp_partial_aniso_term(state)
         Turing.@addlogprob! -Inf
     end
     safe_centered_log_scale = max.(centered_log_scale, log_floor)
-    beta_partial ~ product_distribution([
+    beta_partial ~ arraydist([
         Normal(0, exp(safe_centered_log_scale[b]))
         for b in eachindex(safe_centered_log_scale)])
     remaining_log_scale = [_brm_hsgp_remaining_log_scale(log_sqrt_spd[b],
