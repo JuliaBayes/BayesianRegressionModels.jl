@@ -43,6 +43,11 @@ The [adaptive HSGP case study](adaptive-centering.md) reproduces a public
 heteroscedastic motorcycle model and compares noncentered, centered, and
 pilot-selected basis-weight coordinates on both executable backends.
 
+The [adaptive eight-schools case study](eight-schools-centering.md) fits
+the standard eight-schools funnel three ways — a noncentered pilot, a
+per-school partially centered refit, and online adaptation — with exact
+sampling costs and native AlgebraOfVega diagnostics.
+
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
 intro_model = (@brm begin
