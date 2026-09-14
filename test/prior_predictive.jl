@@ -232,8 +232,8 @@ end
     end
     bruno_code = BayesianRegressionModels.stan_code(SBBRMI(bruno(ranef_sd_df); mod=@__MODULE__))
     @test StanBlocks.stanc_check(bruno_code; warn_pedantic=false).ok
-    @test occursin(r"brm_vector_prior_[0-9a-f]+_vector_rng", bruno_code)
-    @test !occursin(r"~\s*brm_vector_prior_[0-9a-f]+\(", bruno_code)
-    @test occursin("exponential", bruno_code)
-    @test occursin(r"brm_vector_prior_[0-9a-f]+_vector_rng\([^;]*1\.5,\s*1\.5,\s*1\.5\)", bruno_code)
+    @test occursin(
+        "b_p_subject_tau = exponential_vector_rng(n_terms_p_subject, " *
+        "(1.0 ./ 0.6666666666666666));", bruno_code)
+    @test !occursin(r"brm_vector_prior_[0-9a-f]+", bruno_code)
 end
