@@ -48,9 +48,9 @@ scratch directory. No R installation is used or needed.
 Fresh runs require WarmupHMC at or after `913da79d271276b2e6847b9699f5eb1957d050c7`,
 which returns the exact retained-sampling gradient counter. The reproduction
 requires that counter, saves it alongside the run-total counter and elapsed fit
-time, and prints all three at completion. Keep older run directories unchanged;
-`report_costs.jl` can still read their records, with unavailable fields marked
-missing. Turing is not sampled in this reproduction.
+time, and prints all three at completion. `report_costs.jl` checks the fit record
+against the final checkpoint before computing either efficiency ratio.
+Turing is not sampled in this reproduction.
 
 ```sh
 # Compile the immutable original .stan file and compare its target with BRM.
@@ -87,6 +87,12 @@ julia --startup-file=no --project=research/adaptive_centering/plots \
 julia --startup-file=no --project=test \
   research/adaptive_centering/prepare_gradient_diagnostics.jl \
   "$TMPDIR/hsgp-source-fit" "$TMPDIR/hsgp-online-fit" "$TMPDIR/hsgp-diagnostics"
+
+# Check that the common pilot has the same candidate loss landscape when
+# stored in NCP, selected-partial, or online-selected coordinates. No sampling.
+julia --startup-file=no --project=test \
+  research/adaptive_centering/audit_loss_frames.jl \
+  "$TMPDIR/hsgp-source-fit" "$TMPDIR/hsgp-online-fit" "$TMPDIR/hsgp-frame-audit"
 
 # 1,000 transparent points per facet, with separate coordinate/gradient axes.
 julia --startup-file=no --project=research/adaptive_centering/plots \
@@ -149,12 +155,14 @@ Online curves retain raw correlations and use fixed `[-1,0]` y-limits.
 The offline proxy alone uses per-curve min–max scaling. Gradient previews use marker size 8
 and opacity 0.25, without KDE, binning, smoothing, or a regression overlay.
 
-`report_costs.jl` uses each final checkpoint's run-total NUTS evaluation counter;
-it includes discarded epochs but excludes Pathfinder/setup gradients. The
-historical fits did not save elapsed time or a retained-sampling-only counter,
-and these stay `missing`. New `sample_source_fit` records preserve elapsed wall
-seconds around the sampler call (including initialization/checkpoint I/O, but
-excluding the preceding Stan compilation) and the returned total counter.
+`report_costs.jl` reports both exact counters for the fresh fits. Run-total
+NUTS evaluations include warmup and discarded epochs but exclude Pathfinder/setup
+gradients. Sampling evaluations count only appended transitions corresponding
+to the final retained draws. Minimum bulk and tail ESS over the 44 sampled
+coordinates are divided by each denominator separately. `sample_source_fit`
+also records elapsed wall seconds around the sampler call, including initialization,
+first-use compilation and checkpoint I/O, but excluding preceding Stan compilation
+and subsequent plotting. These timings are not warmed gradient microbenchmarks.
 
 Figures use the source's standardized response units; the noise and
 hyperparameter axes are logarithmic. Hyperparameter labels follow the
