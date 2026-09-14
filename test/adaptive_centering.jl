@@ -121,11 +121,30 @@ end
 
 @testset "random-effect pilot selection uses the scalar criterion" begin
     z = reshape([0.2 -0.4; 1.1 0.6; -0.7 0.9], 3, 2)
-    logs = reshape([log(0.2) log(4.0); log(0.2) log(4.0); log(0.2) log(4.0)], 3, 2)
+    logs = reshape([log(0.2) log(2.0); log(0.5) log(4.0); log(1.0) log(0.5)], 3, 2)
     selected = select_ranef_centeredness(z, logs; candidates=0:0.1:1)
-    @test selected.centeredness == [0.7, 0.0]
+    @test selected.centeredness == [0.0, 0.2]
+    # The reported minima are strict: the second-best candidate trails by
+    # 0.035/0.0079, so these are genuine optima, not floating-point tie noise.
+    for (col, margin) in enumerate((0.034, 0.007))
+        losses = selected.losses[:, col]
+        @test losses[argmin(losses)] == minimum(losses)
+        @test sort(losses)[2] - minimum(losses) > margin
+    end
     @test all(selected.admissible[:, 1])
     @test all(selected.admissible[:, 2])
+end
+
+@testset "constant scales tie the scalar criterion honestly" begin
+    z = reshape([0.2 -0.4; 1.1 0.6; -0.7 0.9], 3, 2)
+    logs = reshape([log(0.2) log(4.0); log(0.2) log(4.0); log(0.2) log(4.0)], 3, 2)
+    tied = select_ranef_centeredness(z, logs; candidates=0:0.1:1)
+    # loss(c) = log std(z) is c-free under constant scales, so every candidate
+    # ties to floating-point noise: pin the tie, never a winning coordinate.
+    for col in 1:2
+        @test maximum(tied.losses[:, col]) - minimum(tied.losses[:, col]) < 1e-12
+    end
+    @test all(tied.admissible)
 end
 
 @testset "adaptive centering includes one-term correlated buckets" begin

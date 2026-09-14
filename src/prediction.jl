@@ -292,6 +292,11 @@ function ranef_blocks(model)
         mm_entry = get(plan.preproc, idx_key, nothing)
         if mm_entry isa PreprocEntry && mm_entry.kind === :multi_membership
             group = Tuple(mm_entry.raw_ref.groups)
+            # Multi-membership groups need no `__nocor__` resolution, but the
+            # raw factor tuple must be bound explicitly: the ordinary branch
+            # below assigns `raw_group`, and without this the block below
+            # reads an undefined (or stale) binding.
+            raw_group = map(_ranef_raw_group, group)
             by = nothing
             generated = false
             levels = collect(mm_entry.const_.levels)
