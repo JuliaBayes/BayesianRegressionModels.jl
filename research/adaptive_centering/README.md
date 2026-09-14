@@ -52,6 +52,10 @@ BRM_ADAPTIVE_OUTPUT="$TMPDIR/hsgp-source-audit" \
 BRM_ADAPTIVE_RUNTIME=1 BRM_ADAPTIVE_OUTPUT="$TMPDIR/hsgp-source-fit" \
   julia --startup-file=no --project=test research/adaptive_centering/reproduce.jl
 
+# Compare the original partial Stan target with the fresh refit's saved positions.
+julia --startup-file=no --project=test research/adaptive_centering/audit_partial_source.jl \
+  "$TMPDIR/hsgp-source-fit" "$TMPDIR/hsgp-partial-source-audit"
+
 # Re-render saved tables without resampling (base R with cairo).
 Rscript research/adaptive_centering/plot_results.R "$TMPDIR/hsgp-source-fit"
 

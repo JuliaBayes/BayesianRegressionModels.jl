@@ -57,9 +57,14 @@ not detect that error.
 
 `research/adaptive_centering/audit_source.jl` compiles the immutable original
 Stan program and compares it with the actual BRM-generated Stan model. Its
-26 checks cover the coordinate mapping, normalized target including the
+26 noncentered-model checks cover the coordinate mapping, normalized target including the
 Jacobian, and all 44 gradient components. Across six tested points the largest
 absolute density and gradient differences were `5.7e-14` and `4.3e-14`.
+The companion `audit_partial_source.jl` checks the fresh partial model against
+the original adaptive Stan program at 16 saved posterior positions. All 51
+checks pass; the largest density and gradient differences are `1.2e-13` and
+`5.0e-12`. These are comparisons of the actual generated targets, including
+the source hyperpriors, not just algebraic prior identities.
 
 ### One BRM formula and its generated backends
 
@@ -169,6 +174,12 @@ plotted heights. Gaps represent explicitly inadmissible candidates.
 
 The selected vectors become ordinary model data through
 `hsgp(...; centeredness=c_mu)` and `hsgp(...; centeredness=c_sigma)`.
+
+![Pilot draws transformed into the selected partial coordinates](assets/adaptive-hsgp/optimal_scatter.png)
+
+These panels apply the selected coordinates to the same pilot draws, so their
+geometry can be compared directly with the noncentered and centered panels.
+They are not the fresh refit's samples shown next.
 
 ## 4. Fit the selected partial model from scratch
 

@@ -250,7 +250,16 @@ function render_results(output_dir)
     run(`Rscript $(joinpath(RESEARCH_DIR, "plot_results.R")) $output_dir`)
 end
 
+function require_fresh_fit_outputs(output_dir, labels)
+    for label in labels
+        isfile(joinpath(output_dir, "$label.jls")) && error(
+            "Saved $label draws exist; use a fresh output directory or render_results. " *
+            "Existing provenance and model files have not been changed.")
+    end
+end
+
 function run_reproduction(; output_dir=get(ENV, "BRM_ADAPTIVE_OUTPUT", mktempdir()))
+    require_fresh_fit_outputs(output_dir, ("noncentered", "partial"))
     mkpath(output_dir)
     before = run_provenance(output_dir)
     data = prepared_data()
@@ -277,8 +286,9 @@ function run_reproduction(; output_dir=get(ENV, "BRM_ADAPTIVE_OUTPUT", mktempdir
 end
 
 function run_online_stanblocks(; output_dir=get(ENV, "BRM_ADAPTIVE_OUTPUT", mktempdir()))
+    require_fresh_fit_outputs(output_dir, ("online",))
     mkpath(output_dir)
-    run_provenance(output_dir)
+    before = run_provenance(output_dir)
     data = prepared_data()
     stan = stan_density(build_brmi(data), "online", output_dir)
     online = adaptive_centering_problem(stan.sb, stan.density, ENZYME_BACKEND)
@@ -291,6 +301,7 @@ function run_online_stanblocks(; output_dir=get(ENV, "BRM_ADAPTIVE_OUTPUT", mkte
     # Returned online draws are already in the original NCP target frame.
     export_fit(stan, fit, data, "online", output_dir)
     write_tsv(joinpath(output_dir, "online_diagnostics.tsv"), [diagnostics("online", fit)])
+    before == package_snapshot() || error("A dependency checkout moved during this run; inspect packages.tsv.")
     (; fit, learned, stan, online, output_dir)
 end
 
@@ -298,7 +309,8 @@ if abspath(PROGRAM_FILE) == @__FILE__
     any(haskey(ENV, key) for key in (
         "BRM_ADAPTIVE_K", "BRM_ADAPTIVE_DRAWS", "BRM_ADAPTIVE_EVALS", "BRM_ADAPTIVE_CHAINS")) &&
         error("This is the original k=20, 10000-draw case study. Reduced-budget overrides are no longer accepted.")
-    get(ENV, "BRM_ADAPTIVE_TURING_ONLINE", "0") == "1" &&
+    any(get(ENV, key, "0") == "1" for key in
+        ("BRM_ADAPTIVE_TURING", "BRM_ADAPTIVE_TURING_ONLINE")) &&
         error("Turing sampling is disabled until numerical and runtime gradient parity is verified.")
     if get(ENV, "BRM_ADAPTIVE_ONLINE", "0") == "1"
         run_online_stanblocks()

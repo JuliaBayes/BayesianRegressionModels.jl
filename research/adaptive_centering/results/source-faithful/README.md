@@ -26,6 +26,13 @@ and all-component gradient comparisons, the 44-coordinate mapping, and the
 four positive-scale prior/Jacobian identity. See
 `source_density_gradient_audit.tsv` and `source_coordinate_map.tsv`.
 
+The original adaptive Stan program is also checked directly against the BRM
+partial model at 16 saved refit positions: 51 checks pass, with maximum
+absolute density/gradient differences `1.14e-13` / `4.96e-12`. The check
+requires byte-identical generated Stan source before interpreting saved
+coordinates. See `partial_source_density_gradient_audit.tsv` and
+`partial_source_coordinate_map.tsv`; it performs no new sampling.
+
 The diagnostics deliberately retain the observed limitations: the offline
 pilot/refit had 34/16 divergences, respectively. The online fit had zero.
 R-hat is rank-normalized and split within one chain, not a between-independent-
