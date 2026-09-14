@@ -125,3 +125,67 @@ end
                 subject=[2, 1, 2, 3], batch=[2, 1, 1, 2], y=[0, 2, 5, 1])
     @test stanc_ok(codeof(gnb, gnb_df))
 end
+
+# A user's own data column may literally carry a `__nocor__N` name. The suffix
+# alone must never reassign it: the emitted index vector arbitrates.
+const lit_df = (; x=[-1.0, 0.5, 2.0, 0.25], g__nocor__1=[1, 1, 2, 2],
+    y=[0.2, 1.1, -0.4, 0.7])
+
+@testset "literal `g__nocor__1` column keeps its own name" begin
+    # No `g` column exists at all: suffix-stripping has nothing to resolve to.
+    lit = @brm begin
+        mu ~ 1 + x + (1 | g__nocor__1)
+        y ~ Normal(mu, 1.0)
+    end
+    sb = SBBRMI(lit(lit_df); mod=@__MODULE__)
+    blocks = ranef_blocks(sb)
+    @test length(blocks) == 1
+    @test only(blocks).group === :g__nocor__1
+    @test only(blocks).levels == [1, 2]
+    @test only(blocks).n_groups == 2
+end
+
+# Same level SET, different membership: `g = [2,1,2,3]` vs
+# `g__nocor__1 = [1,1,2,3]`. Levels alone cannot tell them apart, so the
+# emitted index vector must arbitrate — otherwise the literal block silently
+# inherits `g`'s membership.
+const both_df = (; x=[-1.0, 0.5, 2.0, 0.25], g=[2, 1, 2, 3],
+    g__nocor__1=[1, 1, 2, 3], y=[0.2, 1.1, -0.4, 0.7])
+
+@testset "coexisting `g` and literal `g__nocor__1` keep their memberships" begin
+    both = @brm begin
+        mu ~ 1 + x + (1 | g) + (1 | g__nocor__1)
+        y ~ Normal(mu, 1.0)
+    end
+    sb = SBBRMI(both(both_df); mod=@__MODULE__)
+    blocks = ranef_blocks(sb)
+    @test length(blocks) == 2
+    @test [b.group for b in blocks] == [:g, :g__nocor__1]
+    @test blocks[1].levels == [1, 2, 3]
+    @test blocks[2].levels == [1, 2, 3]
+    # The labels are not interchangeable: each block's own factor must
+    # reproduce its own emitted index vector.
+    plan = BayesianRegressionModels.generative_plan(sb)
+    for b in blocks
+        raw = BayesianRegressionModels.column_data(plan.parent, b.group)
+        levels = collect(BayesianRegressionModels._sb_fit_levels(raw))
+        idx = plan.data[Symbol(b.group, :_idx)]
+        @test all(indexin(raw, levels) .== idx)
+    end
+end
+
+const mm_lit_df = (; x=[0.2, -0.1, 0.4], g__nocor__1=["a", "a", "b"],
+    h=["b", "c", "c"], w1=[2.0, 1.0, 0.0], w2=[1.0, 1.0, 3.0],
+    y=[0.1, 0.2, 0.3])
+
+@testset "multi-membership over a literal suffix-bearing column" begin
+    mm_lit = @brm begin
+        sigma ~ Exponential(1)
+        loc ~ 1 + (1 | mm(g__nocor__1, h; weights=(w1, w2)))
+        y ~ Normal(loc, sigma)
+    end
+    sb = SBBRMI(mm_lit(mm_lit_df); mod=@__MODULE__)
+    blocks = ranef_blocks(sb)
+    @test length(blocks) == 1
+    @test only(blocks).group == (:g__nocor__1, :h)
+end
