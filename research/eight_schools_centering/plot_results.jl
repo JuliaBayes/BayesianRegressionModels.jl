@@ -13,11 +13,14 @@ rows(path) = collect(Tables.namedtupleiterator(CSV.File(path; delim='\t')))
 school_label(j) = "School $j"
 
 function save_spec(output, name, spec; title, size=(1500, 650), legend=true)
-    fig = Figure(; size, fontsize=15)
+    # Without the legend column, facet row strips would run past the canvas
+    # edge, so legend-free figures carry explicit right padding instead.
+    padding = legend ? (5, 5, 5, 5) : (5, 45, 5, 5)
+    fig = Figure(; size, fontsize=15, figure_padding=padding)
     Label(fig[0, 1:(legend ? 2 : 1)], title; fontsize=21, font=:bold, tellwidth=false)
     grid = sdraw!(fig[1, 1], spec)
-    # The gradient facets already label every school by row; a second color
-    # legend repeats those labels, so that figure opts out.
+    # Facet rows already label every school; a second color legend repeats
+    # those labels, so some figures opt out (keeping their row strips).
     legend && AlgebraOfGraphics.legend!(fig[1, 2], grid)
     path = joinpath(output, "$name.png")
     save(path, fig; px_per_unit=1.5)
