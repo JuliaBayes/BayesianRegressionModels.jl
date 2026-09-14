@@ -165,9 +165,10 @@ Its primary user contract remains a formula plus a `data.frame`, with extra data
 **Different axes can meet inside one model.**
 
 $$
-C_j(t) = \frac{D_j}{V_j}\exp\!\left(-\frac{CL_j}{V_j}t\right),
-\qquad
-y_{jk} \sim \mathcal N(C_j(t_{jk}),\sigma)
+\begin{aligned}
+C_j(t) &= \frac{D_j}{V_j}\exp\!\left(-\frac{CL_j}{V_j}t\right), \\
+y_{jk} &\sim \mathcal N(C_j(t_{jk}),\sigma)
+\end{aligned}
 $$
 
 `kernel(...)` evaluates one structural cell per subject; `ragged(time, subject)` joins an observation axis; formula predictors still own population and group effects.
