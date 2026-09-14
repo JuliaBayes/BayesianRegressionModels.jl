@@ -71,7 +71,7 @@ function gradient_preview(input_dir; draws_per_facet=1000)
     for (predictor, plot) in plots
         fig = Figure(size=(1650, 1450), fontsize=15)
         Label(fig[0, 1], "$(predictor == "mu" ? "Mean" : "Log-SD") GP: coordinate–gradient geometry";
-              fontsize=23, font=:bold)
+              fontsize=23, font=:bold, tellwidth=false)
         sdraw!(fig[1, 1], plot)
         save(joinpath(input_dir, "gradient-$predictor.png"), fig; px_per_unit=1.5)
         println("rendered\tgradient-", predictor, ".png")
