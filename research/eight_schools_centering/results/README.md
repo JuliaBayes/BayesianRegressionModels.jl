@@ -30,3 +30,10 @@ tables, pair/gradient display tables and checkpoints stay in scratch —
 they are tens of megabytes and are not needed to check any number on the
 page. The corresponding figures are in
 `docs/src/assets/adaptive-eight-schools/`.
+
+Publication note: the `timed_scope` string recorded in `provenance.toml`
+predates a wording fix and understates the timed region. The measured
+interval is the sampler call including initialization, first-use Julia/AD
+compilation and checkpoint I/O; only Stan compilation, post-fit
+extraction, plotting and offline selection are excluded. Later runs record
+the corrected string; this copy is kept byte-identical to the run output.

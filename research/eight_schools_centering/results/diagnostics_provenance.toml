@@ -1,6 +1,6 @@
-gradient_draws = "all 10,000 retained pilot draws"
+gradient_draws = "10,000 retained draws of each displayed fit"
 scatter_display_draws_per_facet = 1000
-script_sha256 = "69bad15b41a5716cdeb6115afea0d502f04d426dd841d28e53b7715e25f182f2"
+script_sha256 = "0f14954cc6d70a6effaa699d604cdb775e6312fa353558014cf4921d9a1bf03a"
 online_loss_reference = "common NCP pilot; unit weights; retrospective"
 
 [pilot]

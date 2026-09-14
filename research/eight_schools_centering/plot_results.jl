@@ -50,8 +50,8 @@ function posterior_figures(fit_dir, output)
     for (i, panel) in enumerate(specs)
         slot = fig[1, i] = GridLayout()
         Label(slot[0, 1], panel.title; fontsize=18, font=:bold, tellwidth=false)
-        grid = sdraw!(slot[1, 1], panel.spec)
-        AlgebraOfGraphics.legend!(slot[1, 2], grid)
+        # Ribbon panels carry no color mapping, so no legend slot is reserved.
+        sdraw!(slot[1, 1], panel.spec)
     end
     path = joinpath(output, "posterior_theta.png")
     save(path, fig; px_per_unit=1.5)
@@ -68,7 +68,8 @@ function ppc_figure(fit_dir, output)
     spec = brm_ppcplot(descriptor, permutedims(fit.posterior_position);
         problem=stan.density, seed=SOURCE_SEED, response=:y, x=string.(1:8))
     save_spec(output, "posterior_predictive_check", spec;
-        title="Selected-partial posterior predictive check", size=(1450, 650))
+        title="Selected-partial posterior predictive check", size=(1450, 650),
+        legend=false)
 end
 
 function pair_figures(diagnostics_dir, output)
