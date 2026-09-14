@@ -45,6 +45,11 @@ noncentered, pilot-selected and online-adaptive sampling, visualizes their
 coordinate geometry, and reports exact sampling costs. Generated-model tabs
 also show the Turing backend; the reported fits use StanBlocks.
 
+The [adaptive eight-schools case study](eight-schools-centering.md) fits
+the standard eight-schools funnel three ways — a noncentered pilot, a
+per-school partially centered refit, and online adaptation — with exact
+sampling costs and native AlgebraOfVega diagnostics.
+
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
 intro_model = (@brm begin

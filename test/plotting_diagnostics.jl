@@ -73,6 +73,9 @@ end
                    for c in ("Online", "Post-hoc")]
     selected = to_vegalite(brm_centerednessplot(centering; compare=true); interactive=false)
     @test any(d -> get(d, "field", nothing) == "configuration", objects(selected))
+    school_selection = to_vegalite(brm_centerednessplot(centering;
+        compare=true, xlabel="School"); interactive=false)
+    @test any(d -> get(d, "title", nothing) == "School", objects(school_selection))
     selected_values = only(filter(d -> haskey(d, "values"), objects(selected)))["values"]
     # The line and point layers may each carry a copy of the input table.
     @test Set((r["basis"], r["predictor"], r["centeredness"], r["configuration"])

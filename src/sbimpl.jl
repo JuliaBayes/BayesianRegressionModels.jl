@@ -147,7 +147,8 @@ function _sb_vector_prior_parts(priors; positive::Bool=true)
         end
         !isnothing(lower) && !isnothing(upper) && lower >= upper &&
             error("vector prior has empty support")
-        push!(calls, (; dist, names, lower, upper))
+        origin = getf(prior) isa Function ? parentmodule(getf(prior)) : StanBlocks
+        push!(calls, (; dist, names, lower, upper, origin))
         push!(shape, (dist, Tuple(argkinds[end-length(names)+1:end]), lower, upper))
     end
     calls, actuals, shape, argkinds

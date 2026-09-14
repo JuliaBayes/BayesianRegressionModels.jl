@@ -1,0 +1,4 @@
+fit	elapsed_seconds	total_evaluation_counter	sampling_evaluation_counter	counter_scope
+noncentered	24.925983817	78252	76692	MCMC run total excludes Pathfinder/setup; sampling counts retained appended transitions
+selected_partial	25.441658007	71081	69622	MCMC run total excludes Pathfinder/setup; sampling counts retained appended transitions
+online	1.532089197	112114	110410	MCMC run total excludes Pathfinder/setup; sampling counts retained appended transitions

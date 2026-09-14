@@ -34,10 +34,11 @@ function coordinateplot(rows; title="", logx=true, opacity=0.12, markersize=8)
 end
 
 """Compare centering profiles without knowing a model's carrier names."""
-function centerednessplot(rows; title="Selected centeredness", compare=false)
-    axes = compare ? mapping(:basis => "Basis frequency",
+function centerednessplot(rows; title="Selected centeredness", compare=false,
+                          xlabel="Basis frequency")
+    axes = compare ? mapping(:basis => xlabel,
         :centeredness => "Centeredness"; col=:predictor, color=:configuration => "Selection") :
-        mapping(:basis => "Basis frequency", :centeredness => "Centeredness";
+        mapping(:basis => xlabel, :centeredness => "Centeredness";
                 color=:predictor => "GP")
     (data(rows) * axes * visual(Lines; linewidth=2) +
      data(rows) * axes * visual(Scatter; markersize=5)) *
