@@ -1,7 +1,6 @@
 # Local AoV diagnostic preview
 
-The case-study renderer and entry point now use Julia/AlgebraOfVega, with no R
-dependency.
+The case-study renderer uses Julia/AlgebraOfVega.
 Loading `BayesianRegressionModels, AlgebraOfVega` enables the optional BRM
 plotting extension; fitting alone does not acquire a plotting dependency.
 
@@ -17,11 +16,20 @@ This renders the eleven original scientific figures plus the online pair plot.
 Pass the diagnostics directory as a fourth argument to add the pair plot in
 gradient-loss-selected coordinates, using the same pilot draws rather than a
 new fit.
-All 10,000 saved draws appear in each pair panel; the 90%, 80%, and 50% posterior
+All 10,000 saved draws enter each pair panel; the 90%, 80%, and 50% posterior
 bands use the saved full-fit quantiles. Native `hsgp_transform_draws` supplies
 every coordinate change. `sdraw!` composes the AoV panels; CairoMakie supplies
 only layout and static file export. The saved fits and their tables are not
 rewritten, and no sampling is invoked.
+
+Static scatter axes show the 1.25th–98.75th marginal percentiles separately
+in each facet. This is an axis zoom, not data filtering or a joint 97.5%
+probability region. `*-display.tsv` files record every facet's exact limits,
+input count, and visible count. `scatter_display.jl` modifies only Makie axis
+limits on the native AoV/AoG result. The full-range data/spec stays intact.
+Pair plots use `markersize=8`; gradient plots use `markersize=12`. Redundant
+basis legends are omitted where the facet rows already identify the basis;
+other panels share a categorical legend when their color mappings agree.
 
 ## Saved-fit coordinate–gradient preview
 
@@ -53,8 +61,9 @@ chosen display subset, not a fitting or loss-calculation limit. No KDE,
 binning, smoothing, or fitted regression line is applied. Calling
 `gradient_preview(dir; draws_per_facet=nothing)` keeps every saved point.
 It writes one fence per GP as well as a combined file.
-The KB now accepts these larger inline plots without thinning them. The
-1,000-draw display remains an explicit user preference. Separate columns use separate
+The inline interactive previews retain full axis ranges for zooming; the PNG
+exports use the central marginal display ranges described above.
+Separate columns use separate
 fits. Both axes are independent in every facet. Coordinates and gradients
 are in the displayed geometry; online samples are returned in the original
 NCP frame and then transformed to the learned frame exactly once.

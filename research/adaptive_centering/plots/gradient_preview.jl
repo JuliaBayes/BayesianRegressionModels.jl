@@ -1,8 +1,10 @@
 using BayesianRegressionModels, AlgebraOfVega, CSV, Tables, JSON, SHA, TOML, CairoMakie
+include("scatter_display.jl")
 
 # Display subset requested by the user; all draws remain in the diagnostics.
 # Use draws_per_facet=nothing for the full raw-point view. No loss is recomputed.
-function gradient_preview(input_dir; draws_per_facet=1000)
+function gradient_preview(input_dir; draws_per_facet=1000, output_dir=input_dir)
+    mkpath(output_dir)
     source = joinpath(input_dir, "coordinate_gradients.tsv")
     all_rows = collect(Tables.namedtupleiterator(CSV.File(source; delim='\t')))
     draw_ids = sort!(unique(getproperty.(all_rows, :draw)))
@@ -27,7 +29,7 @@ function gradient_preview(input_dir; draws_per_facet=1000)
             @assert count(r -> r.configuration == configuration &&
                 r.basis_label == "Basis $(lpad(basis, 2, '0'))", rows) == displayed
         end
-        plot = brm_gradientplot(rows; title, opacity=0.25, markersize=8)
+        plot = brm_gradientplot(rows; title, opacity=0.25, markersize=12)
         spec = to_vegalite(plot; interactive=false)
         function check_bounded(value)
             if value isa AbstractDict
@@ -42,7 +44,7 @@ function gradient_preview(input_dir; draws_per_facet=1000)
         end
         check_bounded(spec)
         body = JSON.json(spec)
-        open(joinpath(input_dir, "gradient-$predictor.vl.json"), "w") do io
+        open(joinpath(output_dir, "gradient-$predictor.vl.json"), "w") do io
             print(io, body)
         end
         envelope = Dict(
@@ -57,14 +59,14 @@ function gradient_preview(input_dir; draws_per_facet=1000)
                     "url" => "https://github.com/nsiccha/BayesianRegressionModels.jl/blob/$base/research/adaptive_centering/reproduce.jl",
                     "commit" => base, "path" => "research/adaptive_centering/reproduce.jl")]))
         fence = "```kb-aov\n" * JSON.json(envelope) * "\n```"
-        open(joinpath(input_dir, "gradient-$predictor.preview.md"), "w") do io
+        open(joinpath(output_dir, "gradient-$predictor.preview.md"), "w") do io
             print(io, fence)
         end
         push!(output, fence)
         push!(plots, predictor => plot)
         println("AoV preview\t", predictor, "\trows=", length(rows), "\tspec_bytes=", sizeof(body))
     end
-    open(joinpath(input_dir, "preview-fences.md"), "w") do io
+    open(joinpath(output_dir, "preview-fences.md"), "w") do io
         print(io, join(output, "\n\n"))
     end
     println("source_sha256\t", bytes2hex(sha256(read(source))))
@@ -72,8 +74,10 @@ function gradient_preview(input_dir; draws_per_facet=1000)
         fig = Figure(size=(1650, 1450), fontsize=15)
         Label(fig[0, 1], "$(predictor == "mu" ? "Mean" : "Log-SD") GP: coordinate–gradient geometry";
               fontsize=23, font=:bold, tellwidth=false)
-        sdraw!(fig[1, 1], plot)
-        save(joinpath(input_dir, "gradient-$predictor.png"), fig; px_per_unit=1.5)
+        grid = sdraw!(fig[1, 1], plot)
+        receipt = zoom_scatter_axes!(grid; mass=0.975)
+        CSV.write(joinpath(output_dir, "gradient-$predictor-display.tsv"), receipt; delim='\t')
+        save(joinpath(output_dir, "gradient-$predictor.png"), fig; px_per_unit=1.5)
         println("rendered\tgradient-", predictor, ".png")
     end
 end

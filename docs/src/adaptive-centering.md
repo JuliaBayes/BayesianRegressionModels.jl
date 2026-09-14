@@ -137,10 +137,12 @@ stay the same; the sampler's coordinates and their matching Jacobian change.
 
 ![Noncentered pilot weights versus GP hyperparameters](assets/adaptive-hsgp/noncentered_scatter.png)
 
-Rows show frequencies 1, 2, 19 and 20. Columns show the mean GP's marginal SD
-and length scale, then the log-SD GP's marginal SD and length scale. The
-hyperparameter axes are logarithmic. These panels contain the full pilot draw
-set, not a small illustrative selection.
+Rows show frequencies 1, 2, 19 and 20. Columns show the mean GP's length scale
+and marginal SD, then the log-SD GP's length scale and marginal SD. The
+hyperparameter axes are logarithmic. All 10,000 draws enter each pair plot.
+Scatter axes zoom to the 1.25th–98.75th percentiles of each panel's marginal
+positions: the central 97.5% on each axis, not a joint probability region.
+Points outside that window remain in all calculations and saved draw tables.
 
 ![Centered weights obtained by transforming the same pilot draws](assets/adaptive-hsgp/centered_scatter.png)
 
@@ -328,11 +330,12 @@ posterior pilot and the online warmup stream supply different finite evidence.
 
 Here the columns genuinely change the displayed coordinates: NCP pilot,
 post-hoc partial refit, and online fit in its learned geometry. Each facet
-shows **1,000 evenly selected saved draws**, with transparent points; the
+uses **1,000 evenly selected saved draws**, with transparent points; the
 underlying gradient evaluations and loss calculations use all 10,000
 draws per fit. The points are plotted directly, without smoothing or aggregation.
 Gradient axes are independent between facets, because reparameterization
-changes their units as well as the coordinate units.
+changes their units as well as the coordinate units. Each displayed axis uses
+the central 97.5% marginal range of those plotted points, as in the pair plots.
 
 The gradients come from the actual BRM-generated Stan target. At fixed
 hyperparameters, BRM transports them with `g_c = s^(-c)*g_z` (or the equivalent
