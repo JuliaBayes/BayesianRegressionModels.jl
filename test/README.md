@@ -183,6 +183,10 @@ Stan fits. The TSV records normalized-density, absolute and scaled gradient,
 finite-difference, allocation, runtime-ratio, model/draw hash, and exact
 dependency provenance fields. Sampling is intentionally absent: this is the
 numerical/runtime gate that must pass before native Turing sampling.
+The committed source-faithful k=20 measurement is
+`test/receipts/turing_hsgp_gradients.tsv`; its `brm_revision` and
+`benchmark_sha256` columns bind every row to the exact measured implementation
+and harness.
 
 ## Why each constraint exists
 
