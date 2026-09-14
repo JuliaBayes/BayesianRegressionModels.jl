@@ -383,9 +383,11 @@ step-size-adaptation transitions whose evaluation costs were not separately
 stored, so subtracting the last restart's total does **not** give exact
 sampling-only cost. Neither file timestamps nor an average steps-per-draw
 estimate is substituted for those measurements. `report_costs.jl` reproduces
-the exact available counts and ratios; new fit records now preserve wall
-time around the sampler call and the total counter. Sampling-only telemetry
-has been requested upstream so future runs can report that denominator exactly.
+the exact available counts and ratios. New fresh-fit records preserve wall
+time around the sampler call, the total counter, and, with WarmupHMC containing
+`e376f8f`, the exact retained-sampling counter. The reporter computes both
+ESS-per-gradient ratios when the fit record and final checkpoint agree;
+it does not add measurements to these historical runs.
 
 Finally, a gradient evaluation is not equally expensive in every coordinate
 system: the online wrapper includes coordinate transport. Without measured

@@ -1,8 +1,7 @@
 # Local AoV diagnostic preview
 
 The case-study renderer and entry point now use Julia/AlgebraOfVega, with no R
-dependency. Public figure replacement is still pending visual acceptance and
-documentation publication.
+dependency.
 Loading `BayesianRegressionModels, AlgebraOfVega` enables the optional BRM
 plotting extension; fitting alone does not acquire a plotting dependency.
 
@@ -84,6 +83,5 @@ The separate offline KL-proxy figure retains its per-curve min–max display.
   `brm_centerednessplot`, `brm_centering_lossplot`, `brm_gradientplot`.
 
 Input matrices to these helpers are **draws × coordinates**, unlike WarmupHMC's
-returned **coordinates × draws** matrices. Complete AoV export acceptance,
-KB preview delivery, and public documentation integration remain work
-in progress; this preview is not a new claim of case-study completion.
+returned **coordinates × draws** matrices. These previews reuse the saved fits;
+generating a plot does not run a sampler or establish convergence.
