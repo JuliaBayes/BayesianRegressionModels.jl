@@ -1,6 +1,6 @@
 # Full source-configuration results (2026-09-14)
 
-These are fresh fits with exact retained-sampling and run-total NUTS gradient
+These fits record exact retained-sampling and run-total NUTS gradient
 counters. All use 133 observations, 20 basis functions per GP, `Xoshiro(1)`,
 10,000 requested draws, source-equivalent hyperpriors and ordinary WarmupHMC
 initialization/adaptation. Each retained exactly 10,000 draws.
@@ -59,4 +59,4 @@ coordinate frames: all 1,320 comparisons agree within `1.11e-15`
 The observed divergence counts are 99 / 36 / 0 for NCP / selected-partial /
 online. R-hat is rank-normalized and split within one chain, not a claim that
 independent chains agree. Bulk and tail ESS come from MCMCDiagnosticTools.
-The page and its Julia/AlgebraOfVega figures use these new results in place.
+The page and its Julia/AlgebraOfVega figures use these results.

@@ -6,13 +6,11 @@ a noncentered pilot, then a **fresh** partially centered fit selected from
 that pilot. The centered scatter panels transform the pilot draws; there is
 no centered sampling arm.
 
-The previous `results/` files are historical smoke-test artifacts, **not a
-completed reproduction**. They reduced the basis and draw counts, bypassed
-Pathfinder, and changed the sampler settings. Do not use them as posterior
-estimates or backend performance evidence. The full replacement is run into
-a separate output directory. The new full-run diagnostics, source audit and
-selected profiles are checked in under `results/source-faithful/`; their
-figures are in `docs/src/assets/adaptive-hsgp/`.
+An online adaptive-centering fit extends the comparison using the same model
+and sampling configuration. Full-run diagnostics, exact gradient costs,
+source audits and selected profiles are checked in under
+`results/source-faithful/`; their figures are in
+`docs/src/assets/adaptive-hsgp/`.
 
 ## Exact source contract
 
@@ -34,18 +32,18 @@ figures are in `docs/src/assets/adaptive-hsgp/`.
   acceptance rate, tree depth or transformation setting is overridden.
   `monitor_ess=true` retains the diagnostic monitoring enabled by the
   source's progress display. Checkpoints and callbacks only record progress.
-- Offline selection uses `0:0.01:1`. The selector reports inadmissible
-  floating-point underflow candidates explicitly; these are not silently
-  replaced by another prior or basis count.
+- Offline selection uses `0:0.01:1`. Candidates whose partial-coordinate
+  scales underflow are reported as inadmissible; the noncentered endpoint
+  remains available.
 
 ## Run
 
 Use the repository's resolved `test` environment and resolve the separate
 `research/adaptive_centering/plots` environment for Julia/AlgebraOfVega rendering.
 Run from the repository root and put large outputs in a fresh disk-backed
-scratch directory. No R installation is used or needed.
+scratch directory.
 
-Fresh runs require WarmupHMC at or after `913da79d271276b2e6847b9699f5eb1957d050c7`,
+The scripts require WarmupHMC at or after `913da79d271276b2e6847b9699f5eb1957d050c7`,
 which returns the exact retained-sampling gradient counter. The reproduction
 requires that counter, saves it alongside the run-total counter and elapsed fit
 time, and prints all three at completion. `report_costs.jl` checks the fit record
@@ -107,7 +105,7 @@ julia --startup-file=no --project=research/adaptive_centering/plots \
   research/adaptive_centering/plot_results.jl "$TMPDIR/hsgp-source-fit" \
   "$TMPDIR/hsgp-online-fit" "$TMPDIR/hsgp-figures" "$TMPDIR/hsgp-diagnostics"
 
-# Recover original total NUTS costs and ESS/gradient; missing metrics stay missing.
+# Verify both NUTS counters and compute total/sampling ESS per gradient.
 julia --startup-file=no --project=test research/adaptive_centering/report_costs.jl \
   "$TMPDIR/hsgp-source-fit" "$TMPDIR/hsgp-online-fit" "$TMPDIR/hsgp-costs"
 ```
@@ -117,10 +115,6 @@ case study. A completed fit is saved before plotting and is never
 automatically overwritten. A file named `STOP` in the output directory asks
 the sampler to stop at its next boundary; an incomplete fit is labeled and
 cannot report case-study completion.
-
-Turing sampling is not part of this reproduction. Its separate gradient
-comparison passed the user's accepted runtime threshold; the user requested
-these fresh fits through BRM and StanBlocks only.
 
 ## Outputs and interpretation
 
@@ -155,7 +149,7 @@ Online curves retain raw correlations and use fixed `[-1,0]` y-limits.
 The offline proxy alone uses per-curve min–max scaling. Gradient previews use marker size 8
 and opacity 0.25, without KDE, binning, smoothing, or a regression overlay.
 
-`report_costs.jl` reports both exact counters for the fresh fits. Run-total
+`report_costs.jl` reports both exact counters for each fit. Run-total
 NUTS evaluations include warmup and discarded epochs but exclude Pathfinder/setup
 gradients. Sampling evaluations count only appended transitions corresponding
 to the final retained draws. Minimum bulk and tail ESS over the 44 sampled
@@ -165,13 +159,11 @@ first-use compilation and checkpoint I/O, but excluding preceding Stan compilati
 and subsequent plotting. These timings are not warmed gradient microbenchmarks.
 
 Figures use the source's standardized response units; the noise and
-hyperparameter axes are logarithmic. Hyperparameter labels follow the
-actual model semantics (length versus marginal SD), not the source plotting
-helper's swapped labels.
+hyperparameter axes are logarithmic. Pair plots label the GP length scale
+and marginal standard deviation separately.
 
 Diagnostics use MCMCDiagnosticTools' rank-normalized split R-hat, bulk ESS,
 tail ESS and retained-draw divergence count/percent. As in the article,
 each fit is one chain: split R-hat is a within-chain diagnostic, not proof
-that independent chains agree. New-version results must be reported as
-observed; the source article's numerical results are not acceptance targets
-to be manufactured by retuning the sampler.
+that independent chains agree. Different library versions and parameter
+orderings can produce different trajectories at the same seed.

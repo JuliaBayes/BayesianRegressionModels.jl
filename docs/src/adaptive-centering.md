@@ -14,9 +14,9 @@ follows [Generable's motorcycle example](https://www.generable.com/post/hsgp-rep
 fit the noncentered model, inspect its geometry, choose one centering per basis
 weight, and fit the reparameterized model from scratch.
 
-There are **two fits**, not three. The centered plots below transform the
-noncentered pilot draws; they do not come from sampling a centered model.
-Online adaptation is a separate extension of this workflow.
+The source workflow has two fits: a noncentered pilot and a selected-partial
+refit. The centered plots transform the pilot draws. A third fit extends the
+comparison with online adaptation during warmup.
 
 ## The model
 
@@ -40,7 +40,7 @@ The left panel shows frequencies 1, 2, 19 and 20; the dotted vertical lines mark
 the observed domain. The right panel shows how increasing the length scale
 suppresses the high-frequency weights.
 
-### Hyperpriors: verify the implementation, not just the notation
+### Hyperpriors and source equivalence
 
 The source assigns independent `Normal(0,4)` priors to the **log** length scale
 and **log** marginal standard deviation of each GP. BRM expresses these as
@@ -51,9 +51,8 @@ part of that equivalence:
 logpdf(LogNormal(0,4), exp(q)) + q = logpdf(Normal(0,4), q)
 ```
 
-The `+q` is the unconstraining Jacobian. An additional lower bound on the
-length scale would change the model; matching distribution names alone would
-not detect that error.
+The `+q` is the unconstraining Jacobian. Each positive parameter has support
+`(0, Inf)`, with no additional length-scale floor.
 
 `research/adaptive_centering/audit_source.jl` compiles the immutable original
 Stan program and compares it with the actual BRM-generated Stan model. Its
@@ -68,10 +67,9 @@ the source hyperpriors, not just algebraic prior identities.
 
 ### One BRM formula and its generated backends
 
-This executable example reads the same full dataset and uses the same
-20-frequency model as the sampling run. The tabs expose the generated models;
-generating a Turing model does not imply that it has passed the gradient
-performance gate or has been sampled.
+This executable example reads the full dataset and uses the same 20-frequency
+model as the sampling runs. The tabs expose its generated backends. All fits
+on this page use StanBlocks/BridgeStan; the Turing tab shows generated code.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
@@ -105,8 +103,8 @@ end
 The source configuration is retained: one chain, `Xoshiro(1)`, 10,000 requested
 draws, and ordinary WarmupHMC defaults including Pathfinder initialization.
 The draw count is a floor, so the actual retained count is reported below.
-No evaluation window, target acceptance rate, tree depth or transformation
-setting has been changed to make the comparison look better.
+Evaluation windows, target acceptance, tree depth and transformation settings
+use their defaults.
 
 ```julia
 pilot = WarmupHMC.adaptive_warmup_mcmc(
@@ -216,15 +214,14 @@ The full-fit receipts, candidate scores and figure checks pass 8,221 tests.
 Rank-normalized split R-hat, bulk ESS and tail ESS are computed with
 MCMCDiagnosticTools. As in the source's main example, each fit has one chain:
 split R-hat is a within-chain diagnostic, not evidence that independent chains
-agree. Divergences must remain visible in any interpretation of the geometry
-comparison; changing the sampler settings to conceal them would answer a
-different question.
+agree. The divergences limit how confidently these samples can represent the
+posterior, despite their favorable R-hat and ESS values.
 
 ESS alone does not measure computational cost. The [cost comparison below](#compute-cost-and-ess-per-gradient)
 reports measured runtime and exact total and retained-sampling gradient counts
-for all three fresh fits.
+for all three fits.
 
-## Online adaptive centering and the Turing gate
+## Online adaptive centering
 
 Online centering learns per-weight coordinates inside warmup instead of using
 a separate pilot. BRM discovers the HSGP cells and constructs their transform:
@@ -261,9 +258,9 @@ through their matching coordinate transform and Jacobian.
 
 ![Online posterior basis weights versus their hyperparameters, in the learned coordinates](assets/adaptive-hsgp/online_scatter.png)
 
-These are the same pair diagnostics as for the pilot and partial refit, now
-using all 10,000 online draws. BRM transforms each returned NCP weight into
-its learned coordinate `u = s^c*z` exactly once for display. Length-scale and
+These pair diagnostics use all 10,000 online draws. BRM transforms each
+returned NCP weight into its learned coordinate `u = s^c*z` exactly once for
+display. Length-scale and
 marginal-SD axes are logarithmic; each panel has its own coordinate scale.
 This transformation neither samples a new posterior nor changes the physical
 weights represented by the saved draws.
@@ -332,8 +329,8 @@ posterior pilot and the online warmup stream supply different finite evidence.
 Here the columns genuinely change the displayed coordinates: NCP pilot,
 post-hoc partial refit, and online fit in its learned geometry. Each facet
 shows **1,000 evenly selected saved draws**, with transparent points; the
-underlying gradient evaluations and loss calculations still use all 10,000
-draws per fit. There is no KDE, binning, smoothing, or fitted regression line.
+underlying gradient evaluations and loss calculations use all 10,000
+draws per fit. The points are plotted directly, without smoothing or aggregation.
 Gradient axes are independent between facets, because reparameterization
 changes their units as well as the coordinate units.
 
@@ -346,20 +343,21 @@ of the displayed gradients passed, with maximum scaled error `3.95e-9`.
 These scatter plots visualize a component of the correlation criterion;
 their appearance alone is not an ESS or convergence guarantee.
 
-**This study does not sample through Turing.** Its separate actual
-DynamicPPL/Enzyme gradient benchmark passed the numerical agreement checks;
-fixed-coordinate runtime ratios were 1.41–1.48× StanBlocks and the online
-wrapper ratios were 1.03–1.19×. The accepted runtime threshold is 1.5×,
-not a claim of identical speed. The committed receipt is
+### Backend gradient comparison
+
+A separate DynamicPPL/Enzyme gradient benchmark passed numerical agreement
+checks against StanBlocks. Fixed-coordinate runtime ratios were
+1.41–1.48× StanBlocks and the online
+wrapper ratios were 1.03–1.19×. The committed receipt is
 `test/receipts/turing_hsgp_gradients.tsv`. The fits and figures here remain
-StanBlocks/BridgeStan results, as requested; the gradient benchmark is not
+StanBlocks/BridgeStan results; the gradient benchmark is not
 Turing posterior-sampling evidence.
 
 ## Compute cost and ESS per gradient
 
-These are **fresh fits with both exact counters recorded**, using WarmupHMC
-`deeea1d` and Julia 1.10.11. The source model, priors, seed and sampling options
-above are unchanged. `report_costs.jl` verifies each saved fit's counters
+Each fit records both exact counters using WarmupHMC `deeea1d` and Julia
+1.10.11, with the model, priors, seed and sampling options specified above.
+`report_costs.jl` verifies each saved fit's counters
 against its final checkpoint; it never sums cumulative counters across windows.
 
 - **Total NUTS gradients** include step-size adaptation and all discarded
@@ -385,7 +383,7 @@ epochs of 3,040 and 3,679 draws. The partial refit receives **only the selected
 centering**, not the pilot's metric or warmup state: it runs fresh Pathfinder
 initialization and has one early metric/step-size restart, followed by the final
 50-transition step-size adaptation. Its 55 non-retained transitions cost those
-6,053 evaluations; adaptation has not been disabled or skipped.
+6,053 evaluations.
 
 The refit alone has about **3.88×** the pilot's
 minimum bulk ESS per sampling gradient. But its coordinates required the pilot:
@@ -417,8 +415,7 @@ The fits use BRM models and WarmupHMC sampling. BRM owns logical-output
 extraction, posterior-predictive execution, HSGP coordinate transport, and
 gradient transport; WarmupHMC owns the online candidate scores. The research
 scripts assemble the comparison panels and retain the scientific provenance.
-**All figures on this page are rendered in Julia with AlgebraOfVega; no R
-renderer is used.**
+All figures on this page are rendered in Julia with AlgebraOfVega.
 
 Plotting is optional: `using BayesianRegressionModels, AlgebraOfVega` loads
 BRM's plotting extension without adding plotting dependencies to fitting-only
@@ -449,8 +446,7 @@ support ungrouped squared-exponential terms and reject unsupported geometry.
 WarmupHMC matrices use coordinates in rows: transpose them when calling these
 BRM draw-table helpers. Conversely, `candidate_scoring_losses` expects
 coordinates-by-draws matrices in its current source frame. The reproduction
-scripts handle these boundaries explicitly; none substitutes an unrelated
-hand-written sampler or gradient target.
+scripts handle these boundaries explicitly.
 
 ## Reproduce and inspect the evidence
 
@@ -467,8 +463,6 @@ Primary source boundaries:
 - [Rdatasets at `1dcc2bf`](https://github.com/vincentarelbundock/Rdatasets/tree/1dcc2bf5f955cc1224a3e1307256e1fe86b68dae/csv/MASS).
 - CSV SHA-256: `b89a1e4eb0391a982b32be3e378df00e8593ff9971e9425e9c5d7929b74f9801`.
 
-The source plotting helper swaps the length-scale and marginal-SD labels;
-these figures label the actual model quantities correctly. Different library
-versions and parameter orderings can produce different trajectories at the
-same seed. The source's numerical results are context, not numbers to copy
-into a new run.
+Different library versions and parameter orderings can produce different
+trajectories at the same seed. The recorded environment and source audits
+identify the computation behind these results.
