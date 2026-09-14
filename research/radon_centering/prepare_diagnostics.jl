@@ -326,6 +326,18 @@ function prepare_diagnostics(offline_dir, online_dir, output_dir)
     all(f -> f.complete && size(f.posterior_position, 2) == N_DRAWS,
         (pilot, partial, online)) || error("an input fit is incomplete")
     assert_stored_frames(pilot, partial, online)
+    # Fail closed on a producer/checkout mismatch BEFORE any output write.
+    # `stan_density` below already writes the diagnostics Stan source and its
+    # compiled target, so the guard must precede it — a stale regeneration
+    # checkout must never rewrite anything first.
+    producer = TOML.parsefile(joinpath(offline_dir, "provenance.toml"))
+    checkout_script = bytes2hex(sha256(read(joinpath(RESEARCH_DIR, "reproduce.jl"))))
+    producer_script = producer["script_sha256"]
+    checkout_script == producer_script || error(
+        "regeneration checkout reproduce.jl differs from the producer script " *
+        "that saved these draws (producer sha256 $producer_script); rerun " *
+        "this script from a checkout carrying that producer source instead " *
+        "— do not resample the fits")
     stan = stan_density("diagnostics", output_dir)
     read(joinpath(output_dir, "radon-diagnostics.stan")) ==
         read(joinpath(offline_dir, "radon-noncentered.stan")) ||
@@ -387,12 +399,8 @@ function prepare_diagnostics(offline_dir, online_dir, output_dir)
                n_divergent_samples=partial.n_divergent_samples)),
         diagnostics("online", online)]
     write_tsv(joinpath(offline_dir, "diagnostics.tsv"), corrected)
-    producer = TOML.parsefile(joinpath(offline_dir, "provenance.toml"))
-    checkout_script = bytes2hex(sha256(read(joinpath(RESEARCH_DIR, "reproduce.jl"))))
-    producer_script = producer["script_sha256"]
-    checkout_script == producer_script || error(
-        "regeneration checkout reproduce.jl differs from the producer script " *
-        "that saved these draws; rerun the fits instead of reusing them")
+    # The producer/checkout equality was already enforced before any output
+    # write above; checkout_script and producer_script are reused here.
     open(joinpath(output_dir, "diagnostics_provenance.toml"), "w") do io
         TOML.print(io, Dict(
             "posteriordb_revision" => POSTERIORDB_REVISION,

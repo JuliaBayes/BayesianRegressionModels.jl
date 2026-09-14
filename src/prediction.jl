@@ -212,10 +212,50 @@ _ranef_id_of_binding(::Symbol, ::Any, ::Union{Nothing,Symbol}) = nothing
 # A zerocorr `(t1 + t2 || g)` expansion gives each scalar margin its own
 # synthetic `g__nocor__N` index. That index is an emission identity, not a new
 # raw column — but a user's own data column may literally carry such a name,
-# so the suffix alone never decides. The emitted index vector is the origin
-# record: the true raw column is the one whose fit/apply level coding
-# reproduces it. Both margins remain addressable as `g` exactly when `g`'s own
-# membership produced the emission.
+# so the suffix alone never decides. The emitted `:group_index`
+# preprocessing record carries the fit-time level LABELS in order, and those
+# labels are the origin record: everything downstream (level vectors,
+# label-aligned transport) keys off labels, not off the membership coding.
+# Two coexisting columns can share one coding while carrying different
+# labels, so membership equality must not arbitrate — only exact ordered
+# label equality identifies the column the emitter coded.
+function _ranef_levels_equal(levels, recorded)
+    isequal(collect(levels), collect(recorded))
+end
+
+# Formula-level grouping evidence, consulted ONLY for genuine ties (coexisting
+# columns with elementwise-identical values): the set of names plain `|`
+# groupings actually write, and the set of `||` zerocorr bases. A tie name
+# claimed by a plain grouping is that literal block; claimed only by a
+# doublepipe base it is that synthetic block. Anything else fails closed.
+# Per-block formula attribution is not retained, so this is deliberately
+# global: a tie claimed on both sides stays ambiguous and errors.
+function _ranef_formula_group_roles(brmi)
+    plain = Set{Symbol}()
+    piped = Set{Symbol}()
+    for key in keys(brmi.operations)
+        node = brmi.operations[key]
+        node isa NamedColumn || continue
+        _ranef_collect_group_roles!(plain, piped, parent(node))
+    end
+    plain, piped
+end
+
+function _ranef_collect_group_roles!(plain, piped, x)
+    x isa ExprColumn || return nothing
+    f = getf(x)
+    if f === doublepipe || f === Base.:|
+        args = getargs(x)
+        !isempty(args) && args[end] isa NamedColumn &&
+            push!(f === doublepipe ? piped : plain, name(args[end]))
+    end
+    for a in getargs(x)
+        _ranef_collect_group_roles!(plain, piped, a)
+        a isa NamedColumn && _ranef_collect_group_roles!(plain, piped, parent(a))
+    end
+    nothing
+end
+
 function _ranef_matches_index(col::AbstractVector, idx_val::AbstractVector)
     length(col) == length(idx_val) || return false
     levels = collect(_sb_fit_levels(col))
@@ -224,28 +264,57 @@ function _ranef_matches_index(col::AbstractVector, idx_val::AbstractVector)
 end
 _ranef_matches_index(::Any, ::Any) = false
 
-function _ranef_raw_group(group::Symbol, brmi, idx_val)
+const _RANEF_NOCOR_RE = r"^(.+)__nocor__[0-9]+$"
+
+function _ranef_raw_group(group::Symbol, brmi, idx_val, recorded_levels)
     value = String(group)
-    parsed = match(r"^(.+)__nocor__[0-9]+$", value)
+    parsed = match(_RANEF_NOCOR_RE, value)
     isnothing(parsed) && return group
     base = Symbol(only(parsed.captures))
-    if idx_val isa StanBlocks.StanExpr
-        # RESAMPLE target: the index is a Stan-side expression, so membership
-        # cannot be verified against it; keep the historical presence rule.
-        # The levels-vs-n_groups control below still guards the count.
-        isnothing(column_data(brmi, base)) || return base
-        return group
-    end
+    rec = collect(recorded_levels)
     base_col = column_data(brmi, base)
     literal_col = column_data(brmi, group)
-    base_ok = !isnothing(base_col) && _ranef_matches_index(base_col, idx_val)
-    literal_ok = !isnothing(literal_col) && _ranef_matches_index(literal_col, idx_val)
-    # Identical memberships make either answer correct; keep history then.
-    base_ok && return base
-    literal_ok && return group
-    error("BRM prediction: grouping index `$group` matches neither `$base` ",
-          "nor a literal `$group` data column by membership; the block cannot ",
-          "be addressed by level.")
+    base_ok = !isnothing(base_col) && base_col isa AbstractVector &&
+        _ranef_levels_equal(_sb_fit_levels(base_col), rec)
+    literal_ok = !isnothing(literal_col) && literal_col isa AbstractVector &&
+        _ranef_levels_equal(_sb_fit_levels(literal_col), rec)
+    # Initialized up front so no branch-analysis slip can leave the
+    # fail-closed error below referencing an unbound reason.
+    reason = "no raw data column carries its recorded level labels"
+    if base_ok && !literal_ok
+        return base
+    elseif literal_ok && !base_ok
+        return group
+    elseif base_ok && literal_ok
+        # A resampled Stan-expression index carries no coding to verify, so it
+        # joins the identical-values tie: the formula text decides, exactly as
+        # at fit time (replay preserves the formula by construction).
+        concrete = !(idx_val isa StanBlocks.StanExpr)
+        base_repro = concrete && _ranef_matches_index(base_col, idx_val)
+        literal_repro = concrete && _ranef_matches_index(literal_col, idx_val)
+        if base_repro && !literal_repro
+            return base
+        elseif literal_repro && !base_repro
+            return group
+        elseif (base_repro && literal_repro) || !concrete
+            # Elementwise-identical columns (or an unverifiable resample
+            # index): identical values at training time do not make distinct
+            # group names interchangeable for named targeting or new-data
+            # replay. The formula text is the only remaining origin evidence.
+            plain, piped = _ranef_formula_group_roles(brmi)
+            in_plain = group in plain
+            from_pipe = base in piped
+            in_plain && !from_pipe && return group
+            from_pipe && !in_plain && return base
+            reason = "identical values leave the origin unrecoverable from the formula"
+        else
+            reason = "neither candidate's coding reproduces the emitted index"
+        end
+    end
+    error("BRM prediction: grouping index `$group` is ambiguous ($reason). ",
+          "The recorded emission labels are $rec; refusing to guess between ",
+          "`$base` and literal `$group` — rename one of the coexisting columns ",
+          "so the grouping origin is unique.")
 end
 
 _ranef_plan(sb::SBBRMI) = generative_plan(sb)
@@ -338,7 +407,22 @@ function ranef_blocks(model)
                 "key `$(idx_key)` for `$(d.target)`.")
             group, by = parsed
             idx_val = _ranef_data_vec(data, idx_key, d.target, fam)
-            raw_group = _ranef_raw_group(group, brmi, idx_val)
+            # Origin recovery from the `:group_index` record is needed for
+            # synthetic `__nocor__` names (any index) and for resampled
+            # Stan-expression indices (any name — the coding is Stan-side).
+            # Every other shape — plain, bucket, and stratified `gr(g, by=b)`
+            # concrete indices, the last of which carries no such record —
+            # keeps the historical direct answer.
+            raw_group = if isnothing(match(_RANEF_NOCOR_RE, String(group))) &&
+                    !(idx_val isa StanBlocks.StanExpr)
+                group
+            else
+                gi_entry = get(plan.preproc, idx_key, nothing)
+                (gi_entry isa PreprocEntry && gi_entry.kind === :group_index) || error(
+                    "BRM prediction: `$(d.target) ~ $(fam)(…)` group index `$(idx_key)` has no ",
+                    "`:group_index` preprocessing record; its grouping origin cannot be recovered.")
+                _ranef_raw_group(group, brmi, idx_val, gi_entry.const_.levels)
+            end
             raw = column_data(brmi, raw_group)
             isnothing(raw) && error(
                 "BRM prediction: grouping factor `$raw_group` (from `$(idx_key)`) is not ",
@@ -350,16 +434,10 @@ function ranef_blocks(model)
                 # vector) and the block's standardised draws were flipped to
                 # generated quantities. Its group count is NOT recoverable by
                 # iterating the expression — read it off the `:group_index`
-                # preprocessing record, and flag the block `generated` so
-                # `ranef_coordinates` / `transport_draws` treat it as a re-drawn
-                # non-parameter rather than looking for coordinates that no longer
-                # exist in `param_unc_names`.
-                gi_entry = get(plan.preproc, idx_key, nothing)
-                (gi_entry isa PreprocEntry && gi_entry.kind === :group_index) || error(
-                    "BRM prediction: `$(d.target) ~ $(fam)(…)` has a resample-marked ",
-                    "group index `$(idx_key)` (moved to generated quantities) with no ",
-                    "`:group_index` preprocessing record; its group count cannot be ",
-                    "recovered.")
+                # preprocessing record required above, and flag the block
+                # `generated` so `ranef_coordinates` / `transport_draws` treat
+                # it as a re-drawn non-parameter rather than looking for
+                # coordinates that no longer exist in `param_unc_names`.
                 generated = true
                 n_groups = _ranef_data_int(data, gi_entry.const_.n_groups_key,
                                            d.target, fam)

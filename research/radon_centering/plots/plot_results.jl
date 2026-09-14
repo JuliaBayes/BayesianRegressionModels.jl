@@ -164,15 +164,16 @@ function plot_results(offline, online, diagnostics;
             pair_plot(diagnostics, (configuration,)); title, size=(1600, 780),
             legend=false))
     end
-    gradients = [merge(row, (;
-        basis_label="$(uppercasefirst(String(row.role))) / $(row.basis_label)"))
-        for row in table(diagnostics, "coordinate_gradients.tsv")]
+    # Row strips carry just the county: each figure's title already
+    # identifies its role, and the long "Role / County N" strips overlapped
+    # vertically.
+    gradients = table(diagnostics, "coordinate_gradients.tsv")
     length(gradients) == 3 * 2 * length(counties) * 1000 ||
         error("gradient display table is incomplete")
     all(r -> isfinite(r.coordinate) && isfinite(r.gradient), gradients) ||
         error("gradient display contains non-finite values")
     # One scatter figure per hierarchical role: stacking both roles in a single
-    # panel crowds the long role/county facet strips.
+    # panel crowds the facet strips.
     for (name, role, title) in (
             ("position-gradient-intercept", :intercept,
                 "Position versus log-density gradient: county intercepts"),

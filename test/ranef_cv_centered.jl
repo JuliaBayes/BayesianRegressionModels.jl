@@ -191,6 +191,30 @@ end
     @test occursin("normal(0.0, exp(", code)
 end
 
+@testset "centered emission — lone `(0 + x | g)` scalar slope" begin
+    # Regression: the no-correlation scalar fast path is NCP-only. A centered
+    # lone slope must keep the pre-existing `ranef_correlated_centered`
+    # routing instead of erroring.
+    slope_builder = @brm begin
+        mu ~ 1 + zage + (0 + zage | subject)
+        y ~ Normal(mu, 1.0)
+    end
+    df = bucket_df()
+    base = StanBlocks.stan_code(SBBRMI(slope_builder(df); mod=@__MODULE__).model)
+    code = StanBlocks.stan_code(
+        SBBRMI(slope_builder(df); mod=@__MODULE__, centered_groups=[:subject]).model)
+
+    @test stanc_ok(code)
+    @test code != base
+    # Non-centered: the scalar fast path samples tau/xi directly, no LKJ.
+    @test !occursin("lkj_corr_cholesky", base)
+    @test occursin("~ std_normal()", base)
+    # Centered: the per-group slope itself is the parameter, drawn with ONE
+    # vectorised MVN-Cholesky call — the correlated-centered body.
+    @test occursin("~ multi_normal_cholesky0(", code)
+    @test occursin("ranef_b_matrix", code)
+end
+
 @testset "centered emission — `(… |ID| g)` bucket" begin
     df = bucket_df()
     brmi = bucket_builder(df)

@@ -393,7 +393,7 @@ workflows. The reusable calls behind these figures are:
 ```julia
 using BayesianRegressionModels, AlgebraOfVega
 
-brm_posteriorplot(rows; x=:floor, xlabel="Floor measurement",
+brm_posteriorplot(rows; x=:position, xlabel="Observation (floor order)",
     ylabel="Log radon", observations, observed_y=:response)
 brm_pairplot(rows)
 # counties are unordered cells, not basis frequencies, so the county panel
@@ -404,7 +404,7 @@ data(rows) * mapping(:county => "County index",
     visual(Scatter; markersize=5)
 brm_centering_lossplot(rows; normalization=:minmax)
 brm_centering_lossplot(rows; normalization=:none, ylimits=(-1, 0))
-brm_gradientplot(rows; opacity=0.25, markersize=8)
+brm_gradientplot(rows; opacity=0.25, markersize=12)
 ```
 
 `prepare_diagnostics.jl` builds the row tables from saved fits through
