@@ -10,7 +10,7 @@ function representative_counties(diagnostics)
     values = diagnostics["representative_counties"]
     values isa AbstractVector || error("diagnostics provenance lacks representative counties")
     Int.(values)
-) end
+end
 
 function save_panel(output, name, plot; title, size=(1300, 500))
     fig = Figure(; size, fontsize=15)

@@ -18,7 +18,7 @@ function display_coordinate_and_gradient(value, gradient, log_scale, from, to)
     _, coordinate, displayed_gradient = WarmupHMC.reparam(
         rule, value, gradient, [value, gradient, log_scale])
     coordinate, displayed_gradient
-) end
+end
 
 function frame_by_index(centeredness, blocks)
     out = Dict{Int,Float64}()
@@ -75,60 +75,66 @@ const DIAGNOSTIC_DENSITY = Ref{Any}()
 function density_invariants(entries, selected, output_dir)
     fixed = fixed_partial_problem(
         DIAGNOSTIC_STAN[].sb, DIAGNOSTIC_DENSITY[], selected)
+    target = DIAGNOSTIC_TARGET[][:, 1]
+    target_gradient = last(LogDensityProblems.logdensity_and_gradient(
+        DIAGNOSTIC_DENSITY[], collect(target)))
+    source = copy(target)
+    expected_ljac = 0.0
+    for entry in entries, county in 1:RADON_DATA.J
+        index = entry.block.effects[1, county]
+        log_scale = target[only(entry.block.log_scales)]
+        c = selected[index]
+        source[index] = display_coordinate_and_gradient(
+            target[index], 0.0, log_scale, 0.0, c)[1]
+        expected_ljac -= c * log_scale
+    end
+    source_value, source_gradient = LogDensityProblems.logdensity_and_gradient(
+        fixed, collect(source))
+    target_value = LogDensityProblems.logdensity(DIAGNOSTIC_DENSITY[], collect(target))
+    rule_ljac, mapped_target = WarmupHMC.reparametrizer(fixed)(collect(source))
+    maximum(abs.(mapped_target .- target)) < 1e-9 ||
+        error("fixed-partial source did not round-trip to the target frame")
+    abs(rule_ljac - expected_ljac) < 1e-8 ||
+        error("fixed-partial Jacobian disagrees with the scalar frame formula")
     checks = NamedTuple[]
-    draw = 1
+    density_error = abs(source_value - (target_value + rule_ljac))
+    density_error < 1e-7 || error("fixed-partial density/Jacobian mismatch")
     for entry in entries, county in representative_counties()
         index = entry.block.effects[1, county]
         log_index = only(entry.block.log_scales)
-        target = DIAGNOSTIC_TARGET[:, draw]
-        target_gradient = last(LogDensityProblems.logdensity_and_gradient(
-            DIAGNOSTIC_DENSITY[], collect(target)))
         log_scale = target[log_index]
-        c = selected[(entry.role, county)]
+        c = selected[index]
         displayed, displayed_gradient = display_coordinate_and_gradient(
             target[index], target_gradient[index], log_scale, 0.0, c)
-        source = copy(target)
-        source[index] = displayed
-        source_value, source_gradient = LogDensityProblems.logdensity_and_gradient(
-            fixed, collect(source))
-        target_value = LogDensityProblems.logdensity(DIAGNOSTIC_DENSITY[], collect(target))
-        ljac = log_scale * (0.0 - c)
-        density_error = abs(source_value - (target_value + ljac))
         gradient_error = abs(source_gradient[index] - displayed_gradient)
         h = 1e-5 / max(1.0, abs(displayed_gradient))
         function displayed_density(value)
-            mapped = copy(target)
-            mapped[index] = display_coordinate_and_gradient(
-                value, 0.0, log_scale, 0.0, c)[1]
-            LogDensityProblems.logdensity(DIAGNOSTIC_DENSITY[], collect(mapped)) +
-                ljac
+            q = copy(source)
+            q[index] = value
+            LogDensityProblems.logdensity(fixed, collect(q))
         end
         fd = (displayed_density(displayed + h) - displayed_density(displayed - h)) / 2h
         gradient_fd_error = abs(fd - displayed_gradient)
-        roundtrip = display_coordinate_and_gradient(
-            displayed, 0.0, log_scale, c, 0.0)[1]
         isfinite(source_value) || error("non-finite fixed-partial density")
-        density_error < 1e-8 || error("fixed-partial density/Jacobian mismatch")
         gradient_error < 1e-8 || error("fixed-partial target gradient mismatch")
         gradient_fd_error / max(1.0, abs(displayed_gradient)) < 1e-5 ||
             error("displayed-gradient finite-difference mismatch")
-        abs(roundtrip - target[index]) < 1e-10 || error("centering roundtrip failed")
-        push!(checks, (; role=entry.role, county, draw, centeredness=c,
+        push!(checks, (; role=entry.role, county, draw=1, centeredness=c,
             density_absolute_error=density_error,
             target_gradient_absolute_error=gradient_error,
             displayed_gradient_fd_error=gradient_fd_error,
-            roundtrip_absolute_error=abs(roundtrip - target[index])))
+            roundtrip_absolute_error=maximum(abs.(mapped_target .- target))))
     end
     write_tsv(joinpath(output_dir, "density_jacobian_gradient_invariants.tsv"), checks)
     checks
 end
 
 function export_ppc(output_dir)
-    descriptor = brm_descriptor(last(DIAGNOSTIC_STAN).sb)
+    descriptor = brm_descriptor(DIAGNOSTIC_STAN[].sb)
     predicted = brm_predictive_draws(
-        descriptor, permutedims(DIAGNOSTIC_TARGET); problem=DIAGNOSTIC_DENSITY[], seed=SEED)
+        descriptor, permutedims(DIAGNOSTIC_TARGET[]); problem=DIAGNOSTIC_DENSITY[], seed=SEED)
     matrix = predicted.log_radon
-    size(matrix) == (size(DIAGNOSTIC_TARGET, 2), RADON_DATA.N) ||
+    size(matrix) == (size(DIAGNOSTIC_TARGET[], 2), RADON_DATA.N) ||
         error("native PPC returned an unexpected shape: $(size(matrix))")
     all(isfinite, matrix) || error("native PPC returned non-finite draws")
     rows = map(eachindex(RADON_DATA.floor_measure)) do i

@@ -281,7 +281,8 @@ function common_reference_online_losses(sb, density, fit, output_dir)
         last(LogDensityProblems.logdensity_and_gradient(density, collect(q)))
         for q in eachcol(fit.posterior_position)]))
     all(isfinite, gradients) || error("non-finite common-reference pilot gradients")
-    scored = candidate_scoring_losses(adaptive, fit.posterior_position, gradients)
+    scored = candidate_scoring_losses(
+        adaptive, fit.posterior_position, permutedims(gradients))
     rows = NamedTuple[]
     for score in scored, entry in effect_blocks(sb, unc_names)
         county = findfirst(isequal(score.index), vec(entry.block.effects))
