@@ -86,6 +86,14 @@ function prepare_gradient_diagnostics(offline_dir, online_dir, output_dir)
     @assert length(losses) == 3 * 2 * DEFAULT_K * 11
     write_tsv(joinpath(output_dir, "retrospective_online_losses.tsv"), losses)
     write_tsv(joinpath(output_dir, "diagnostic_packages.tsv"), package_snapshot())
+    open(joinpath(output_dir, "diagnostics_provenance.toml"), "w") do io
+        TOML.print(io, Dict(
+            "pilot" => TOML.parsefile(joinpath(offline_dir, "provenance.toml")),
+            "online" => TOML.parsefile(joinpath(online_dir, "provenance.toml")),
+            "diagnostics_commit" => strip(read(`git -C $RESEARCH_DIR rev-parse HEAD`, String)),
+            "coordinate_gradients_sha256" => bytes2hex(sha256(read(joinpath(output_dir, "coordinate_gradients.tsv")))),
+        ))
+    end
     println("retrospective_online_losses\t", length(losses),
             "\tmissing=", count(r -> ismissing(r.loss), losses),
             "\tnonfinite=", count(r -> !ismissing(r.loss) && !isfinite(r.loss), losses))

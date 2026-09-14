@@ -112,10 +112,9 @@ automatically overwritten. A file named `STOP` in the output directory asks
 the sampler to stop at its next boundary; an incomplete fit is labeled and
 cannot report case-study completion.
 
-Turing sampling is disabled until its gradients have passed a matched-value
-and warmed-runtime comparison with StanBlocks on this full model. A separate
-backend optimization task owns that gate; finite gradients alone do not
-satisfy it.
+Turing sampling is not part of this reproduction. Its separate gradient
+comparison passed the user's accepted runtime threshold; the user requested
+these fresh fits through BRM and StanBlocks only.
 
 ## Outputs and interpretation
 

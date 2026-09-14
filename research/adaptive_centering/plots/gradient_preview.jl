@@ -1,4 +1,4 @@
-using BayesianRegressionModels, AlgebraOfVega, CSV, Tables, JSON, SHA, CairoMakie
+using BayesianRegressionModels, AlgebraOfVega, CSV, Tables, JSON, SHA, TOML, CairoMakie
 
 # Display subset requested by the user; all draws remain in the diagnostics.
 # Use draws_per_facet=nothing for the full raw-point view. No loss is recomputed.
@@ -12,8 +12,8 @@ function gradient_preview(input_dir; draws_per_facet=1000)
     indices = Set(draw_ids[round.(Int, range(1, length(draw_ids); length=displayed))])
     length(indices) == displayed || error("Display draw selection duplicated an index")
     labels = Dict("NCP" => "1 NCP", "Post-hoc" => "2 Post-hoc", "Online" => "3 Online")
-    # Canonical/public base of these saved fits, not this unpublished preview tip.
-    base = "8dfe41253af3043482cb3270cf513b50a1de5437"
+    provenance = TOML.parsefile(joinpath(input_dir, "diagnostics_provenance.toml"))
+    base = provenance["pilot"]["brm_commit"]
     output = String[]
     plots = Pair[]
     for (predictor, title) in (("mu", "Mean GP: position versus gradient"),
@@ -52,8 +52,8 @@ function gradient_preview(input_dir; draws_per_facet=1000)
             "provenance" => Dict(
                 "producer" => "BayesianRegressionModels:docs:adaptive-centering",
                 "mode" => "preliminary", "base_commit" => base,
-                "run" => "saved-10000-draw-gradient-preview-v3-display-$displayed",
-                "references" => [Dict("kind" => "spec", "label" => "Original full-fit BRM reproduction harness; preview extension is work in progress",
+                "run" => "$(provenance["coordinate_gradients_sha256"])-display-$displayed",
+                "references" => [Dict("kind" => "spec", "label" => "BRM reproduction harness that produced these pilot draws",
                     "url" => "https://github.com/nsiccha/BayesianRegressionModels.jl/blob/$base/research/adaptive_centering/reproduce.jl",
                     "commit" => base, "path" => "research/adaptive_centering/reproduce.jl")]))
         fence = "```kb-aov\n" * JSON.json(envelope) * "\n```"
