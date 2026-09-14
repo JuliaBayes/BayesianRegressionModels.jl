@@ -150,12 +150,15 @@ function sample_source_fit(target, label, output_dir)
     end
     println("sampling\t", label, "\tseed=1\tn_draws=10000\tWarmupHMC defaults")
     flush(stdout)
+    sampling_started_ns = time_ns()
     fit = WarmupHMC.adaptive_warmup_mcmc(
         Xoshiro(SOURCE_SEED), target; n_draws=SOURCE_DRAWS, monitor_ess=true,
         callback, checkpoint_dir=joinpath(output_dir, "checkpoints-$label"))
+    fit_seconds = (time_ns() - sampling_started_ns) / 1e9
     retained = size(fit.posterior_position, 2)
     record = (; posterior_position=convert(Matrix{Float64}, fit.posterior_position),
         n_divergent_samples=fit.n_divergent_samples, seed=SOURCE_SEED,
+        fit_seconds, total_gradient_evaluations=fit.total_evaluation_counter,
         requested_draws=SOURCE_DRAWS, complete=retained >= SOURCE_DRAWS)
     serialize(result_path, record)
     record.complete || error("Stopped early; saved $retained draws, not a completed case study.")

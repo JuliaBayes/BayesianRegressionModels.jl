@@ -60,6 +60,11 @@ end
     loss_spec = to_vegalite(brm_centering_lossplot(losses); interactive=false)
     @test any(d -> haskey(d, "values") && length(d["values"]) == 11, objects(loss_spec))
     @test any(d -> get(d, "field", nothing) == "loss", objects(loss_spec))
+    bounded_loss = to_vegalite(brm_centering_lossplot(losses; ylimits=(-1, 0));
+                               interactive=false)
+    @test any(d -> get(d, "domain", nothing) == [-1, 0], objects(bounded_loss))
+    @test only(filter(d -> haskey(d, "values"), objects(bounded_loss)))["values"] ==
+          only(filter(d -> haskey(d, "values"), objects(loss_spec)))["values"]
 
     loss_rows = Base.get_extension(BayesianRegressionModels,
         :BayesianRegressionModelsAlgebraOfVegaExt).loss_plot_rows

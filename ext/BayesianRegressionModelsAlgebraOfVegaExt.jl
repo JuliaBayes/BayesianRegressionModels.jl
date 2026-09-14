@@ -26,7 +26,7 @@ end
 function coordinateplot(rows; title="", logx=true)
     data(rows) * mapping(:hyperparameter => "Hyperparameter position",
         :coordinate => "Coordinate position"; col=:parameter, row=:basis_label,
-        color=:basis_label) * visual(Scatter; opacity=0.12, markersize=2) *
+        color=:basis_label => "Basis") * visual(Scatter; opacity=0.12, markersize=2) *
         config(width=260, height=190, title=title,
             facet=(; linkxaxes=:none, linkyaxes=:none),
             scales=scales(X=(; scale=logx ? log10 : identity),
@@ -36,9 +36,9 @@ end
 """Compare centering profiles without knowing a model's carrier names."""
 function centerednessplot(rows; title="Selected centeredness", compare=false)
     axes = compare ? mapping(:basis => "Basis frequency",
-        :centeredness => "Centeredness"; col=:predictor, color=:configuration) :
+        :centeredness => "Centeredness"; col=:predictor, color=:configuration => "Selection") :
         mapping(:basis => "Basis frequency", :centeredness => "Centeredness";
-                color=:predictor)
+                color=:predictor => "GP")
     (data(rows) * axes * visual(Lines; linewidth=2) +
      data(rows) * axes * visual(Scatter; markersize=5)) *
         config(width=compare ? 460 : 760, height=300, title=title,
@@ -78,16 +78,17 @@ map to zero; missing/nonfinite values remain missing/nonfinite. Only curve
 shape and minima should be compared after normalization, not absolute losses.
 """
 function lossplot(rows; ylabel=nothing, title="Centering objective", configurations=false,
-                  normalization=:none)
+                  normalization=:none, ylimits=nothing)
     rows = loss_plot_rows(rows, normalization)
     ylabel = isnothing(ylabel) ? (normalization == :minmax ?
         "Loss (per-curve min–max [0, 1])" : "Loss") : ylabel
     axes = configurations ? mapping(:centeredness => "Candidate centeredness", :loss => ylabel;
-        col=:configuration, row=:predictor, color=:basis_label, group=:segment) :
+        col=:configuration, row=:predictor, color=:basis_label => "Basis", group=:segment) :
         mapping(:centeredness => "Candidate centeredness", :loss => ylabel;
-                col=:predictor, color=:basis_label, group=:segment)
+                col=:predictor, color=:basis_label => "Basis", group=:segment)
     data(rows) * axes *
         visual(Lines; linewidth=2) * config(width=460, height=300, title=title,
+            axis=(; limits=(nothing, ylimits)),
             facet=(; linkyaxes=:none), scales=scales(Color=(; palette=COLORS)))
 end
 
@@ -159,10 +160,10 @@ BRM.brm_centering_lossplot(rows; kwargs...) = lossplot(rows; kwargs...)
 
 """Local prototype: actual coordinate gradients, with unlinked axes in every facet."""
 function BRM.brm_gradientplot(rows; title="Coordinate–gradient diagnostic",
-                              opacity=0.15, markersize=2)
+                              opacity=0.25, markersize=8)
     data(rows) * mapping(:coordinate => "Coordinate position",
         :gradient => "Log-density gradient"; col=:configuration, row=:basis_label,
-        color=:basis_label) * visual(Scatter; opacity, markersize) *
+        color=:basis_label => "Basis") * visual(Scatter; opacity, markersize) *
         config(width=300, height=210, title=title,
             facet=(; linkxaxes=:none, linkyaxes=:none),
             scales=scales(Color=(; palette=COLORS)))

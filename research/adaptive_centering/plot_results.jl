@@ -2,6 +2,7 @@
 # No fitting or posterior subsampling occurs here. Makie provides figure layout;
 # all data marks are AlgebraOfVega specifications. HSGP coordinate changes use BRM.
 using BayesianRegressionModels, AlgebraOfVega, CSV, Tables, CairoMakie
+import AlgebraOfGraphics
 
 const CASE_BASES = (1, 2, 19, 20)
 const CASE_COLORS = ["#0B7BEC", "#E67E22", "#16877A", "#984EA3"]
@@ -13,11 +14,13 @@ case_table(dir, name) = collect(Tables.namedtupleiterator(
 
 function save_case_panels(output, name, panels; title, size=(1300, 460), subtitles=nothing)
     fig = Figure(; size, fontsize=15)
-    Label(fig[0, 1:length(panels)], title; fontsize=21, font=:bold)
+    Label(fig[0, 1:length(panels)], title; fontsize=21, font=:bold, tellwidth=false)
     for (i, panel) in enumerate(panels)
         slot = fig[1, i] = GridLayout()
-        isnothing(subtitles) || Label(slot[0, 1], subtitles[i]; fontsize=18, font=:bold)
-        sdraw!(slot[1, 1], panel)
+        isnothing(subtitles) || Label(slot[0, 1:2], subtitles[i];
+            fontsize=18, font=:bold, tellwidth=false)
+        grid = sdraw!(slot[1, 1], panel)
+        AlgebraOfGraphics.legend!(slot[1, 2], grid)
     end
     path = joinpath(output, "$name.png")
     save(path, fig; px_per_unit=1.5)
@@ -112,7 +115,27 @@ function case_loss_rows(input)
     output
 end
 
-function plot_results(input; online_input=input, output=joinpath(input, "figures"))
+function gradient_selected_profiles(diagnostics_input)
+    scores = case_table(diagnostics_input, "retrospective_online_losses.tsv")
+    selected = NamedTuple[]
+    for p in CASE_GPS, b in 1:20
+        curve = sort(filter(r -> r.configuration == "NCP" &&
+            r.predictor == p && r.basis == b, scores); by=r -> r.centeredness)
+        length(curve) == 11 || error("Incomplete native gradient-loss profile")
+        all(r -> r.evidence == "retrospective_saved_draws" && r.weights == "unit" &&
+            r.objective == "position_gradient_correlation_w1_0" &&
+            r.groups == 10000 && r.effective_n == 10000 &&
+            !ismissing(r.loss) && isfinite(r.loss), curve) ||
+            error("Gradient selection needs the full valid native pilot score receipt")
+        winner = curve[argmin(getproperty.(curve, :loss))]
+        push!(selected, (; predictor=p, basis=b, centeredness=winner.centeredness,
+                          loss=winner.loss))
+    end
+    selected
+end
+
+function plot_results(input; online_input=input, output=joinpath(input, "figures"),
+                      diagnostics_input=nothing)
     mkpath(output)
     observed = case_table(input, "observations.tsv")
     selected = sort(case_table(input, "centeredness.tsv"); by=r -> r.basis)
@@ -172,12 +195,23 @@ function plot_results(input; online_input=input, output=joinpath(input, "figures
             title="Online fit — coordinates in learned geometry", size=(1500, 1350),
             subtitles=gp_label.(CASE_GPS)))
     end
+    if !isnothing(diagnostics_input)
+        gradient_selected = gradient_selected_profiles(diagnostics_input)
+        panels = map(CASE_GPS) do p
+            selected_c = [r.centeredness for r in gradient_selected if r.predictor == p]
+            brm_pairplot(case_pair_rows(input, "noncentered", p; to=selected_c))
+        end
+        push!(paths, save_case_panels(output, "gradient_selected_scatter", panels;
+            title="Gradient-loss-selected geometry — transformed pilot draws, not another fit",
+            size=(1500, 1350), subtitles=gp_label.(CASE_GPS)))
+    end
     println("render_complete\tfigures=", length(paths), "\tbackend=AlgebraOfVega/CairoMakie")
     paths
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
-    1 <= length(ARGS) <= 3 || error("Usage: plot_results.jl OFFLINE_DIR [ONLINE_DIR [OUTPUT_DIR]]")
+    1 <= length(ARGS) <= 4 || error("Usage: plot_results.jl OFFLINE_DIR [ONLINE_DIR [OUTPUT_DIR [DIAGNOSTICS_DIR]]]")
     plot_results(ARGS[1]; online_input=length(ARGS) >= 2 ? ARGS[2] : ARGS[1],
-                 output=length(ARGS) == 3 ? ARGS[3] : joinpath(ARGS[1], "figures"))
+                 output=length(ARGS) >= 3 ? ARGS[3] : joinpath(ARGS[1], "figures"),
+                 diagnostics_input=length(ARGS) == 4 ? ARGS[4] : nothing)
 end

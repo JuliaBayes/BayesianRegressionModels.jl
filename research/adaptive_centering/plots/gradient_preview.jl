@@ -27,7 +27,7 @@ function gradient_preview(input_dir; draws_per_facet=1000)
             @assert count(r -> r.configuration == configuration &&
                 r.basis_label == "Basis $(lpad(basis, 2, '0'))", rows) == displayed
         end
-        plot = brm_gradientplot(rows; title, opacity=0.25, markersize=3)
+        plot = brm_gradientplot(rows; title, opacity=0.25, markersize=8)
         spec = to_vegalite(plot; interactive=false)
         function check_bounded(value)
             if value isa AbstractDict

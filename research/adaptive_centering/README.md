@@ -75,6 +75,28 @@ BRM_ADAPTIVE_ONLINE=1 BRM_ADAPTIVE_OUTPUT="$TMPDIR/hsgp-online-fit" \
 julia --startup-file=no --project=research/adaptive_centering/plots \
   research/adaptive_centering/plot_results.jl \
   "$TMPDIR/hsgp-source-fit" "$TMPDIR/hsgp-online-fit"
+
+# Evaluate the actual compiled BRM target at saved draws; this does not sample.
+julia --startup-file=no --project=test \
+  research/adaptive_centering/prepare_gradient_diagnostics.jl \
+  "$TMPDIR/hsgp-source-fit" "$TMPDIR/hsgp-online-fit" "$TMPDIR/hsgp-diagnostics"
+
+# 1,000 transparent points per facet, with separate coordinate/gradient axes.
+julia --startup-file=no --project=research/adaptive_centering/plots \
+  research/adaptive_centering/plots/gradient_preview.jl "$TMPDIR/hsgp-diagnostics"
+
+# One common pilot reference, GP-only facets, raw correlation with [-1,0] y-limits.
+julia --startup-file=no --project=research/adaptive_centering/plots \
+  research/adaptive_centering/plots/online_loss_preview.jl "$TMPDIR/hsgp-diagnostics"
+
+# Include the pilot pair plots in gradient-loss-selected coordinates (no new fit).
+julia --startup-file=no --project=research/adaptive_centering/plots \
+  research/adaptive_centering/plot_results.jl "$TMPDIR/hsgp-source-fit" \
+  "$TMPDIR/hsgp-online-fit" "$TMPDIR/hsgp-figures" "$TMPDIR/hsgp-diagnostics"
+
+# Recover original total NUTS costs and ESS/gradient; missing metrics stay missing.
+julia --startup-file=no --project=test research/adaptive_centering/report_costs.jl \
+  "$TMPDIR/hsgp-source-fit" "$TMPDIR/hsgp-online-fit" "$TMPDIR/hsgp-costs"
 ```
 
 Reduced-budget environment overrides fail instead of silently changing the
@@ -106,6 +128,27 @@ library handles. The plotted tables and `figures/` contain:
 6. Online posterior, online-versus-offline centeredness, and pair plots in the
    online-selected coordinates (all saved draws, transformed from the returned
    NCP frame once).
+7. Three-configuration coordinate–gradient diagnostics, using 1,000 evenly
+   selected draws per facet only for display (all 10,000 are evaluated).
+8. Native online position–gradient correlation curves at default `w₁=0`,
+   faceted only by GP and replayed on the common 10,000-draw pilot reference.
+9. Pilot hyperparameter pair plots in coordinates selected by that gradient
+   objective, distinct from the online fit's learned-coordinate plots.
+
+The loss export retains all three fit-specific replay tables for auditing;
+the displayed global landscape uses only the common pilot reference, not
+source-coordinate facets. This is retrospective scoring, not warmup history:
+saved posterior matrices lack the original trajectory weights and boundaries.
+Online curves retain raw correlations and use fixed `[-1,0]` y-limits.
+The offline proxy alone uses per-curve min–max scaling. Gradient previews use marker size 8
+and opacity 0.25, without KDE, binning, smoothing, or a regression overlay.
+
+`report_costs.jl` uses each final checkpoint's run-total NUTS evaluation counter;
+it includes discarded epochs but excludes Pathfinder/setup gradients. The
+historical fits did not save elapsed time or a retained-sampling-only counter,
+and these stay `missing`. New `sample_source_fit` records preserve elapsed wall
+seconds around the sampler call (including initialization/checkpoint I/O, but
+excluding the preceding Stan compilation) and the returned total counter.
 
 Figures use the source's standardized response units; the noise and
 hyperparameter axes are logarithmic. Hyperparameter labels follow the

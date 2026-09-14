@@ -1,16 +1,18 @@
 using BayesianRegressionModels, AlgebraOfVega, CSV, Tables, JSON, CairoMakie
+import AlgebraOfGraphics
 
 """Plot the exported native WarmupHMC query, not a reconstructed loss formula."""
-function online_loss_preview(input_dir; normalization=:minmax)
+function online_loss_preview(input_dir)
     all_rows = collect(Tables.namedtupleiterator(CSV.File(
         joinpath(input_dir, "retrospective_online_losses.tsv"); delim='\t')))
-    labels = Dict("NCP" => "1 NCP", "Post-hoc" => "2 Post-hoc", "Online" => "3 Online")
     rows = NamedTuple[]
     unavailable = 0
     segment_id = 0
-    for configuration in ("NCP", "Post-hoc", "Online"), predictor in ("mu", "log_sigma"),
+    # One common physical reference sample, matching the offline pilot loss.
+    # Source coordinates are not a dimension of the global candidate landscape.
+    for predictor in ("mu", "log_sigma"),
         basis in (1, 2, 19, 20)
-        curve = sort(filter(r -> r.configuration == configuration &&
+        curve = sort(filter(r -> r.configuration == "NCP" &&
             r.predictor == predictor && r.basis == basis, all_rows); by=r -> r.centeredness)
         length(curve) == 11 || error("Incomplete native scoring curve")
         segment_id += 1
@@ -23,36 +25,38 @@ function online_loss_preview(input_dir; normalization=:minmax)
                 segment_id += 1
                 continue
             end
-            push!(rows, (; configuration=labels[configuration],
-                predictor=predictor == "mu" ? "Mean GP" : "Log-SD GP",
+            push!(rows, (; predictor=predictor == "mu" ? "Mean GP" : "Log-SD GP",
                 basis_label="Basis $(lpad(basis, 2, '0'))",
                 centeredness=r.centeredness, loss=r.loss,
                 segment=string(segment_id)))
         end
     end
-    title = "Online objective replayed on saved draws — not warmup history"
-    plot = brm_centering_lossplot(rows; title, configurations=true, normalization,
-        ylabel=normalization == :minmax ? "Loss (per-curve min–max [0, 1])" :
-                                          "Position–gradient correlation (w₁ = 0)")
+    title = "Online correlation objective — common pilot reference"
+    outside = filter(r -> !( -1 <= r.loss <= 0), rows)
+    raw_range = extrema(r.loss for r in rows)
+    plot = brm_centering_lossplot(rows; title, normalization=:none, ylimits=(-1, 0),
+        ylabel="Position–gradient correlation (w₁ = 0)")
     spec = to_vegalite(plot; interactive=false)
     base = "8dfe41253af3043482cb3270cf513b50a1de5437"
     envelope = Dict("schema" => "kb-aov/v1", "title" => title,
-        "alt" => "Three independently sampled fits in columns, two GPs in rows, four basis functions per panel. Native WarmupHMC candidate scores, unit-weight replay on all 10,000 saved draws. Display normalization: $normalization per curve; raw correlations retained. $unavailable nonfinite or missing candidate values are gaps, retained in the source table.",
+        "alt" => "Two panels: Mean GP and Log-SD GP. Four basis functions per panel. Native WarmupHMC candidate scores use one common reference of all 10,000 pilot posterior draws, with unit weights. Source coordinates do not change the loss landscape. This is retrospective, not recorded warmup history. Raw correlations, with fixed y limits [-1,0]; no min-max scaling. $unavailable nonfinite or missing candidate values are gaps, retained in the source table.",
         "spec" => spec, "provenance" => Dict(
             "producer" => "BayesianRegressionModels:docs:adaptive-centering",
             "mode" => "preliminary", "base_commit" => base,
-            "run" => "native-candidate-scoring-losses-saved-draws-$normalization-v2",
+            "run" => "native-candidate-scoring-losses-common-pilot-raw-v5",
             "references" => [Dict("kind" => "spec", "label" => "Published full-fit BRM harness; native loss-query extension is work in progress",
                 "url" => "https://github.com/nsiccha/BayesianRegressionModels.jl/blob/$base/research/adaptive_centering/reproduce.jl",
                 "commit" => base, "path" => "research/adaptive_centering/reproduce.jl")]))
     open(joinpath(input_dir, "online-loss.preview.md"), "w") do io
         print(io, "```kb-aov\n", JSON.json(envelope), "\n```\n")
     end
-    fig = Figure(size=(1550, 850), fontsize=15)
-    Label(fig[0, 1], title; fontsize=21, font=:bold)
-    sdraw!(fig[1, 1], plot)
+    fig = Figure(size=(1400, 500), fontsize=15)
+    Label(fig[0, 1:2], title; fontsize=21, font=:bold, tellwidth=false)
+    grid = sdraw!(fig[1, 1], plot)
+    AlgebraOfGraphics.legend!(fig[1, 2], grid)
     save(joinpath(input_dir, "online-loss.png"), fig; px_per_unit=1.5)
     println("native_loss_preview\trows=", length(rows), "\tunavailable=", unavailable,
+            "\toutside_ylim=", length(outside), "\traw_range=", raw_range,
             "\tspec_bytes=", sizeof(JSON.json(spec)))
 end
 
