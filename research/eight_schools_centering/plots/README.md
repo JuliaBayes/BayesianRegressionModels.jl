@@ -21,7 +21,9 @@ julia --startup-file=no --project=research/eight_schools_centering/plots \
   /absolute/figure-directory
 ```
 
-Rendering never samples. Every loss uses all retained draws; scatter displays
-use exactly 1,000 evenly spaced retained draws per school and configuration as
-an explicit visual-density choice, with marker size 8, opacity 0.25, independent
-x/y axes, and no KDE, binning, smoothing, or regression.
+Rendering never samples. Every loss uses all retained draws. Pair panels
+show all 10,000 retained draws per school and configuration (80,000 points
+per panel set); gradient scatters show exactly 1,000 evenly spaced retained
+draws per school and configuration facet as an explicit visual-density
+choice, with marker size 12, opacity 0.25, independent x/y axes, and no KDE,
+binning, smoothing, or regression.

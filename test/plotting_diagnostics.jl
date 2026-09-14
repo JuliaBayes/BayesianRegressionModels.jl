@@ -44,6 +44,12 @@ end
     @test any(d -> get(d, "x", nothing) == "independent" &&
                    get(d, "y", nothing) == "independent", objects(pair))
     @test any(d -> haskey(d, "values") && length(d["values"]) == 10, objects(pair))
+    larger_pair = to_vegalite(brm_pairplot(pair_rows; markersize=12, opacity=0.2);
+                               interactive=false)
+    @test any(d -> get(d, "size", nothing) == 72, objects(larger_pair))
+    @test any(d -> get(d, "opacity", nothing) == 0.2, objects(larger_pair))
+    @test only(filter(d -> haskey(d, "values"), objects(larger_pair)))["values"] ==
+          only(filter(d -> haskey(d, "values"), objects(pair)))["values"]
 
     centering = [(; basis=b, predictor=p, centeredness=0.1b,
                     configuration=c) for b in 1:3 for p in ("Mean", "Log-SD")
