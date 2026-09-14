@@ -260,7 +260,7 @@ function BRMHSGPAdaptiveCenteringState(blocks)
     for (bi, block) in enumerate(blocks), basis in eachindex(block.effects)
         push!(pair_blocks, bi)
         push!(pair_basis, basis)
-        push!(sources, block.target_c)
+        push!(sources, block.target_c[basis])
     end
     effect_indices = BitSet(Iterators.flatten(b.effects for b in blocks))
     BRMHSGPAdaptiveCenteringState(
@@ -344,8 +344,8 @@ function _adaptive_hsgp_centering_reparametrizer(blocks)
     pairs = [begin
         bi, basis = _hsgp_pair_location(state, p)
         block = state.blocks[bi]
-        target = WarmupHMC.PartiallyCentered(block.target_c)
-        source = WarmupHMC.PartiallyCentered(block.target_c)
+        target = WarmupHMC.PartiallyCentered(block.target_c[basis])
+        source = WarmupHMC.PartiallyCentered(block.target_c[basis])
         location = BRMHSGPAdaptiveCenteringArgument(state, p, :location)
         log_scale = BRMHSGPAdaptiveCenteringArgument(state, p, :log_scale)
         block.effects[basis] => WarmupHMC.Reparametrization(
@@ -378,7 +378,8 @@ exact. Literal endpoints are preserved: `c=0` is BRM's standardised draw and
 For an HSGP, each basis weight is one scalar cell with zero location and
 per-basis scale `brm_hsgp_sqrt_spd(omega2, sigma, rho)[basis]`; `c=0` is the
 emitted `beta_raw`, while `c=1` is its literal spectral/model-scale
-coefficient. Grouped or periodic HSGPs and models mixing HSGP cells with
+coefficient. A compiled fixed-partial model starts at its declared per-basis
+`centeredness` values, not at zero. Grouped or periodic HSGPs and models mixing HSGP cells with
 ordinary random-effect cells fail before construction in this first contract.
 
 This changes coordinates, not the statistical model or its priors. Conditional
