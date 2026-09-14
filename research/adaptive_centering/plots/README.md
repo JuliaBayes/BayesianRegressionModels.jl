@@ -15,6 +15,9 @@ julia --startup-file=no --project=research/adaptive_centering/plots \
 ```
 
 This renders the eleven original scientific figures plus the online pair plot.
+Pass the diagnostics directory as a fourth argument to add the pair plot in
+gradient-loss-selected coordinates, using the same pilot draws rather than a
+new fit.
 All 10,000 saved draws appear in each pair panel; the 90%, 80%, and 50% posterior
 bands use the saved full-fit quantiles. Native `hsgp_transform_draws` supplies
 every coordinate change. `sdraw!` composes the AoV panels; CairoMakie supplies
@@ -51,8 +54,8 @@ chosen display subset, not a fitting or loss-calculation limit. No KDE,
 binning, smoothing, or fitted regression line is applied. Calling
 `gradient_preview(dir; draws_per_facet=nothing)` keeps every saved point.
 It writes one fence per GP as well as a combined file;
-delivery requires the KB's approved large-payload plot support (the old small
-inline limits are not a scientific-data limit). Separate columns use separate
+The KB now accepts these larger inline plots without thinning them. The
+1,000-draw display remains an explicit user preference. Separate columns use separate
 fits. Both axes are independent in every facet. Coordinates and gradients
 are in the displayed geometry; online samples are returned in the original
 NCP frame and then transformed to the learned frame exactly once.
@@ -64,13 +67,12 @@ WarmupHMC's public `candidate_scoring_losses` API. Its objective is the actual
 default position–gradient correlation (`w₁=0`), replayed with unit weights on
 the saved draws, not the original online trajectory stream. Missing/nonfinite
 losses are retained in that table rather than replaced or labeled as history.
-The loss preview uses `brm_centering_lossplot(...; normalization=:minmax)`:
-each configuration/GP/basis curve is independently mapped to [0,1], matching
-the offline figure. Its minimum is unchanged, but absolute correlation
-magnitudes cannot be compared after this display normalization. Raw values
-are retained in the input table and in the plot's `raw_loss` column;
-`online_loss_preview(dir; normalization=:none)` shows the raw correlations.
-Constant curves map to zero; missing/nonfinite entries remain gaps.
+The loss preview uses `brm_centering_lossplot(...; ylimits=(-1, 0))` with raw
+correlations, not min–max normalization. It has only two GP facets and uses
+the same 10,000 NCP pilot draws for every candidate. Changing the stored
+coordinate frame cannot change that common-reference loss landscape.
+Missing/nonfinite entries remain gaps; the source table is unchanged.
+The separate offline KL-proxy figure retains its per-curve min–max display.
 
 ## Reusable native pieces
 
