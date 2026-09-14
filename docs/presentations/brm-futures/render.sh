@@ -42,6 +42,12 @@ test "$slide_count" -eq 17
 test "$notes_count" -eq "$slide_count"
 test "$pdf_pages" -eq 18
 
+if rg -q 'integration gate|Case artifact is intentionally gated|Awaiting reproducible results panel' \
+  "$deck_dir/brm-futures.qmd"; then
+  echo "deck still contains an adaptive-centering integration placeholder" >&2
+  exit 1
+fi
+
 if rg -q '(src|href)="brm-futures_files/' "$html"; then
   echo "render is not self-contained: brm-futures_files reference found" >&2
   exit 1

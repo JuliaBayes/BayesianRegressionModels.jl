@@ -412,24 +412,113 @@ $presentation-font-size-root: 34px;
 .status.turing { background: var(--blue-soft); color: var(--blue); }
 .status.planned { background: var(--gold-soft); color: #72500c; }
 
-.case-gate {
-  align-items: center;
-  background: repeating-linear-gradient(-45deg, #fffaf0, #fffaf0 12px, #fff5df 12px, #fff5df 24px);
-  border: 2px dashed #d39c37;
+.case-model {
+  font-size: 0.88em;
+}
+
+.case-online {
+  font-size: 0.76em;
+}
+
+.case-online li {
+  margin-bottom: 0.28em;
+}
+
+.case-invariant {
+  background: var(--red-soft);
+  border: 1px solid #dcaab0;
   border-radius: 0.25em;
-  color: #6d4c0d;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  min-height: 290px;
-  padding: 24px;
+  font-size: 0.72em;
+  margin-top: 0.7em;
+  padding: 0.48em 0.75em;
   text-align: center;
 }
 
-.case-gate .gate-title {
-  font-size: 1.05em;
-  font-weight: 760;
-  letter-spacing: -0.035em;
+.case-provenance {
+  color: var(--muted);
+  font-size: 0.4em;
+  margin-top: 0.5em;
+  text-align: center;
+}
+
+.learned-card {
+  font-size: 0.86em;
+}
+
+.c-row {
+  align-items: center;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 72px minmax(0, 1fr);
+  margin-top: 0.58em;
+  width: 100%;
+}
+
+.c-row > b {
+  color: var(--muted);
+  font-size: 0.66em;
+  text-align: right;
+}
+
+.cstrip {
+  display: flex;
+  min-width: 0;
+  width: 100%;
+}
+
+.cstrip > p {
+  display: flex;
+  flex: 1 1 100%;
+  gap: 5px;
+  margin: 0;
+  min-width: 0;
+  width: 100%;
+}
+
+.cstrip span {
+  align-items: center;
+  background: var(--code-bg);
+  border: 1px solid var(--line);
+  border-radius: 0.2em;
+  display: flex;
+  flex: 1 1 0;
+  font-size: 0.6em;
+  height: 32px;
+  justify-content: center;
+  overflow: hidden;
+  position: relative;
+}
+
+.cstrip span::before {
+  background: rgba(143, 29, 44, 0.34);
+  bottom: 0;
+  content: "";
+  left: 0;
+  position: absolute;
+  top: 0;
+  width: var(--c);
+}
+
+.turing-learned .cstrip span::before {
+  background: rgba(49, 93, 132, 0.34);
+}
+
+.cstrip b {
+  position: relative;
+  z-index: 1;
+}
+
+.c-scale {
+  color: var(--muted);
+  display: flex;
+  font-size: 0.42em;
+  justify-content: space-between;
+  margin: 0.35em 92px 0;
+}
+
+.case-receipts {
+  font-size: 0.76em;
+  margin-top: 0.55em;
 }
 
 .horizon {

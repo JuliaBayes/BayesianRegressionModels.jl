@@ -40,8 +40,11 @@ notes. Source, notes, and references remain in `brm-futures.qmd` and this file.
 ## BRM provenance
 
 The independent deck was drafted against BRM revision
-`bca7093487eff9d7c55ea200b256bd7655e15f52`. Final adaptive-centering claims
-must name the canonical revision on which the case-study dependency lands.
+`bca7093487eff9d7c55ea200b256bd7655e15f52`. Adaptive-centering claims were
+integrated from accepted canonical revision
+`5ccf212831d8e3af10c9fc47305cd4dd0752c5d8`, published in merge
+`5ce974cec08e620bcbe0f2d54b36f3649d889dbf`. The live executable case study is
+<https://nsiccha.github.io/BayesianRegressionModels.jl/dev/adaptive-centering.html>.
 
 The adaptive case is derived from:
 
@@ -53,6 +56,15 @@ The adaptive case is derived from:
 - `MASS::mcycle` data revision
   `1dcc2bf5f955cc1224a3e1307256e1fe86b68dae`, raw CSV SHA-256
   `b89a1e4eb0391a982b32be3e378df00e8593ff9971e9425e9c5d7929b74f9801`.
+
+The online StanBlocks and native-Turing panels use the committed
+`research/adaptive_centering/results/online_centeredness.tsv` and
+`online_turing_centeredness.tsv` artifacts: all 133 observations, two
+eight-frequency HSGPs, `Xoshiro(0x20260913)`, 120 warmup evaluations, 20
+retained draws, and zero reported divergences per backend. They are bounded
+execution receipts, not convergence or efficiency claims. The offline
+six-fit diagnostics likewise fail their convergence gate and are shown only
+to establish the evidence boundary.
 
 ## Primary comparison sources
 
