@@ -5,6 +5,7 @@ using LinearAlgebra
 using Turing
 
 const BRM = BayesianRegressionModels
+const DP = Turing.DynamicPPL
 
 @testset "integrated exact GP and HSGP variants" begin
     x = collect(range(-1.5, 1.5; length=12))
@@ -85,6 +86,53 @@ const BRM = BayesianRegressionModels
           hsgp_term.state.fits
     @test size(only(only(replayed[5].plan.predictors).terms).state.PHI) == (12, 12)
     @test only(only(replayed[7].plan.predictors).terms).state.by.levels == [1, 2, 3]
+end
+
+@testset "explicit HSGP length-scale prior replaces its default floor" begin
+    x_values = collect(range(-1, 1; length=12))
+    z_values = cos.(x_values)
+    data = (; x=x_values, y=zeros(12))
+    explicit_builder = @brm begin
+        length_scale(mu, hsgp(x)) ~ LogNormal(0, 4)
+        sd(mu, hsgp(x)) ~ LogNormal(0, 4)
+        length_scale(sigma, hsgp(x)) ~ LogNormal(0, 4)
+        sd(sigma, hsgp(x)) ~ LogNormal(0, 4)
+        mu ~ hsgp(x; k=20, domain=(-1.5, 1.5))
+        log(sigma) ~ hsgp(x; k=20, domain=(-1.5, 1.5))
+        y ~ Normal(mu, sigma)
+    end
+    explicit = TuringBRMI(explicit_builder(data))
+    explicit_terms = only.(getfield.(explicit.plan.predictors, :terms))
+    @test getfield.(getfield.(explicit_terms, :state), :rho_lower) == (0.0, 0.0)
+
+    parameters = (;
+        term_mu_1=(; rho=0.2, sigma=0.5, beta_raw=zeros(20)),
+        term_sigma_1=(; rho=0.2, sigma=0.5, beta_raw=zeros(20)),
+    )
+    vi = DP.VarInfo(explicit.model, DP.InitFromParams(parameters), DP.LinkAll())
+    @test vi isa DP.VarInfo
+
+    replayed = reprocess(explicit, data)
+    replayed_terms = only.(getfield.(replayed.plan.predictors, :terms))
+    @test getfield.(getfield.(replayed_terms, :state), :rho_lower) == (0.0, 0.0)
+
+    default = TuringBRMI((@brm begin
+        mu ~ hsgp(x; k=20, domain=(-1.5, 1.5))
+        log(sigma) ~ hsgp(x; k=20, domain=(-1.5, 1.5))
+        y ~ Normal(mu, sigma)
+    end)(data))
+    default_terms = only.(getfield.(default.plan.predictors, :terms))
+    @test all(term -> term.state.rho_lower > 0.2, default_terms)
+    @test_throws DomainError DP.VarInfo(
+        default.model, DP.InitFromParams(parameters), DP.LinkAll())
+
+    anisotropic = TuringBRMI((@brm begin
+        length_scale(mu, hsgp(x, z)) ~ LogNormal(0, 4)
+        mu ~ hsgp(x, z; k=(4, 3), iso=false)
+        y ~ Normal(mu, 1)
+    end)((; x=x_values, z=z_values, y=zeros(12))))
+    anisotropic_term = only(only(anisotropic.plan.predictors).terms)
+    @test anisotropic_term.state.rho_lower == [0.0, 0.0]
 end
 
 @testset "explicit HSGP replay rejects extrapolation" begin
