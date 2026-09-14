@@ -147,8 +147,7 @@ function _sb_vector_prior_parts(priors; positive::Bool=true)
         end
         !isnothing(lower) && !isnothing(upper) && lower >= upper &&
             error("vector prior has empty support")
-        origin = getf(prior) isa Function ? parentmodule(getf(prior)) : StanBlocks
-        push!(calls, (; dist, names, lower, upper, origin))
+        push!(calls, (; dist, names, lower, upper))
         push!(shape, (dist, Tuple(argkinds[end-length(names)+1:end]), lower, upper))
     end
     calls, actuals, shape, argkinds
@@ -175,18 +174,57 @@ function _sb_vector_prior_selector(dist::Symbol, mod::Module)
 end
 _sb_vector_prior_selector(dist, _mod) = dist
 
+# Anchor every SLIC macrocall head in a generated-family definition to the
+# StanBlocks module VALUE, so the definition evaluates in ANY consumer module
+# — even one with no `StanBlocks` binding (selective
+# `import StanBlocks: @deffun` imports the macro but not the name) or without
+# inner `@lhs` imported (triads only ever need `@lpxf`). Expansion still runs
+# in the eval module, so `__fundef_mod__` — the trace-context module for the
+# generated body — stays the resolving module.
+_sb_anchor_slic_macrohead(s::Symbol) =
+    Expr(:., QuoteNode(StanBlocks), QuoteNode(s))
+_sb_anchor_slic_macrohead(d::Expr) =
+    d.head === :. ? Expr(:., QuoteNode(StanBlocks), d.args[2]) : d
+function _sb_anchor_slic_macrocalls!(ex::Expr)
+    ex.head === :macrocall && (ex.args[1] = _sb_anchor_slic_macrohead(ex.args[1]))
+    foreach(a -> a isa Expr && _sb_anchor_slic_macrocalls!(a), ex.args)
+    ex
+end
+
 function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
     calls, actuals, shape, argkinds = _sb_vector_prior_parts(priors; positive)
     selectors = [_sb_vector_prior_selector(c.dist, mod) for c in calls]
     # The generated RNG body embeds each selector as a function VALUE, so the
     # cache key must distinguish same-named families defined in different
-    # consumer modules; the density head stays a lazily resolved Symbol.
+    # consumer modules.
     owner_key = map(s -> (nameof(s), Symbol(parentmodule(s))), selectors)
     key = repr((positive, shape, owner_key))
+    # The generated UDF must live where its density companions resolve:
+    # StanBlocks traces a generated function's body in its DEFINING module's
+    # context (builtin -> defining-mod -> Main), so a density head naming a
+    # consumer `@deffun` triad resolves only in the triad's module, while a
+    # head naming a BRM-owned composed family (e.g. `brm_affine`) resolves
+    # only in BRM. Builtin and Main families resolve in every context and
+    # constrain nothing, so the all-builtin and Main shapes keep their
+    # historical BRM home byte for byte. Mixed owners have no single home
+    # and fail loudly rather than emitting an unresolvable program.
+    required = Set{Module}()
+    for s in selectors
+        o = parentmodule(s)
+        (o === StanBlocks || o === Main || parentmodule(o) === StanBlocks) && continue
+        push!(required, o)
+    end
+    length(required) > 1 && error(
+        "sbimpl: vector-prior families $(join(unique!(map(nameof, selectors)), ", ")) ",
+        "span modules $(join(sort!(map(string, collect(required))), ", ")); one ",
+        "generated family has a single definition site, so a heterogeneous ",
+        "vector prior cannot mix custom families from different modules ",
+        "(StanBlocks builtins compose with anything).")
+    home = isempty(required) ? (@__MODULE__) : (only(required))
     family = get!(_SB_VECTOR_PRIOR_CACHE, key) do
         stem = Symbol(:brm_vector_prior_, _sb_stable_fingerprint(key))
         lpdf, lpdfs, rng = Symbol(stem, :_lpdf), Symbol(stem, :_lpdfs), Symbol(stem, :_rng)
-        Core.eval(@__MODULE__, :(function $stem end))
+        Core.eval(home, :(function $stem end))
         typed = [argkinds[i] === :selector ? Symbol(:arg_, i) :
                  Expr(:(::), Symbol(:arg_, i), :real) for i in eachindex(actuals)]
         densities = Any[]; draws = Any[]; guards = Any[]
@@ -220,8 +258,8 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
             $lpdfs(x::vector[n], $(typed...))::vector[n] = $(Expr(:block, point...))
             $rng(vector[n], $(typed...))::vector[n] = $(Expr(:block, drawbody...))
         end
-        Core.eval(@__MODULE__, :(StanBlocks.@deffun $defs))
-        f = getfield(@__MODULE__, stem)
+        Core.eval(home, _sb_anchor_slic_macrocalls!(:(StanBlocks.@deffun $defs)))
+        f = getfield(home, stem)
         autokws = Any[]
         positive && push!(autokws, Expr(:kw, :lower, 0.0))
         lowers = [c.lower for c in calls]
@@ -237,8 +275,9 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
     family, actuals
 end
 
-function _sb_vector_priors(base::StanBlocks.SlicModel, target::Symbol, priors)
-    family, args = _sb_vector_prior_family(priors; positive=false, mod=base.mod)
+function _sb_vector_priors(base::StanBlocks.SlicModel, target::Symbol, priors;
+                            mod::Module=base.mod)
+    family, args = _sb_vector_prior_family(priors; positive=false, mod)
     rhs = Expr(:call, family,
                Expr(:parameters, Expr(:kw, :n, length(priors))), args...)
     Base.merge(base, Expr(:call, :~, target, rhs))
@@ -270,7 +309,8 @@ end
 
 function _sb_vector_positive_priors(base::StanBlocks.SlicModel,
                                     target::Symbol, priors;
-                                    direct_homogeneous::Bool=false)
+                                    direct_homogeneous::Bool=false,
+                                    mod::Module=base.mod)
     source = only(node for node in base.model.args if node isa Expr &&
         ((node.head === :(::) && node.args[1] === target) ||
          (node.head === :call && node.args[1] === :~ && node.args[2] === target)))
@@ -300,7 +340,7 @@ function _sb_vector_positive_priors(base::StanBlocks.SlicModel,
             isnothing(direct) || return direct
         end
     end
-    family, args = _sb_vector_prior_family(priors; mod=base.mod)
+    family, args = _sb_vector_prior_family(priors; mod)
     rhs = Expr(:call, family, Expr(:parameters, Expr(:kw, :n, nvalue),
                                   Expr(:kw, :lower, 0.0)), args...)
     model = Base.merge(base, Expr(:call, :~, lhs, rhs))
@@ -1446,8 +1486,10 @@ _sb_cat_generic = StanBlocks.@slic begin
     return append_row(0., beta)[x]
 end
 
-function _sb_cat_prior_model(prior::ExprColumn, n_contrasts::Int)
-    _sb_vector_priors(_sb_cat_generic, :beta, fill(prior, n_contrasts))
+# `mod` is the SBBRMI caller's module: `_sb_cat_generic` is BRM-owned, so its
+# `base.mod` cannot see consumer-defined custom families.
+function _sb_cat_prior_model(prior::ExprColumn, n_contrasts::Int; mod::Module=@__MODULE__)
+    _sb_vector_priors(_sb_cat_generic, :beta, fill(prior, n_contrasts); mod)
 end
 
 # Minimal `ar(time, p=1)` autoregressive submodel. Adds an AR(1) noise process
@@ -2561,9 +2603,11 @@ function _sb_is_normal_effect_prior(prior::ExprColumn)
     !isnothing(T) && T <: Normal && isempty(getkwargs(prior))
 end
 
-function _sb_population_prior_model(priors; coefficients::Bool=false)
+# `mod` is the SBBRMI caller's module: the `_popefs_generic` bases are
+# BRM-owned, so their `base.mod` cannot see consumer-defined custom families.
+function _sb_population_prior_model(priors; coefficients::Bool=false, mod::Module=@__MODULE__)
     base = coefficients ? _popefs_generic_coefs : _popefs_generic
-    _sb_vector_priors(base, :beta_pop, priors)
+    _sb_vector_priors(base, :beta_pop, priors; mod)
 end
 
 """
@@ -2573,7 +2617,7 @@ Return `(; model, kwargs)` for a population coefficient block. Default and
 Normal-only vectors retain the established named submodels; other callable
 prior ASTs use a configured generic model while preserving `beta_pop`.
 """
-function _sb_population_prior_rhs(priors; coefficients::Bool=false)
+function _sb_population_prior_rhs(priors; coefficients::Bool=false, mod::Module=@__MODULE__)
     default_model = coefficients ? :_popefs_coefs : :popefs
     normal_model = coefficients ? :_popefs_normal_coefs : :_popefs_normal
     (isnothing(priors) || all(isnothing, priors)) &&
@@ -2589,7 +2633,7 @@ function _sb_population_prior_rhs(priors; coefficients::Bool=false)
                 kwargs=(; beta_loc=Expr(:vect, beta_loc...),
                          beta_scale=Expr(:vect, beta_scale...)))
     end
-    (; model=_sb_population_prior_model(priors; coefficients),
+    (; model=_sb_population_prior_model(priors; coefficients, mod),
        kwargs=NamedTuple())
 end
 
@@ -2760,7 +2804,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     r2d2_joint = Dict{Symbol,NamedTuple}()
     id_lookup = _sb_emit_id_buckets!(stmts, data, id_buckets;
         cv_groups, centered_groups, ranef_effect_overrides, r2d2_names,
-        ranef_r2d2_overrides, r2d2_joint)
+        ranef_r2d2_overrides, r2d2_joint, mod)
     # Prepass 2.5: group-block terms. For each `mu ~ f(...)` where f has a
     # _sb_term_group_block declaration, allocate one ranef_correlated_draws
     # block per (f, group-column) pair. The lookup is threaded into _sb_emit!
@@ -2780,7 +2824,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
         isnothing(nc) && error("sbimpl: top-level op `$key` is not a NamedColumn")
         obs_n = get(target_obs, key, nothing)
         _sb_emit_prepared!(stmts, data, get(nodes, key, nothing), key, parent(nc); id_lookup, obs_n, cv_groups,
-                  centered_groups, group_block_lookup, effect_overrides,
+                  centered_groups, group_block_lookup, effect_overrides, mod,
                   r2d2=(; overrides=r2d2_overrides, names=r2d2_names,
                           joint=r2d2_joint))
     end
@@ -3823,8 +3867,8 @@ function _sb_emit_prepared!(stmts, data, node::_BRMPreparedAssignment, key, sour
     push!(stmts, :($key = $(_sb_scalar_expr(rhs, data))))
 end
 
-_sb_emit!(stmts, data, key, op::ExprColumn; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2()) =
-    _sb_emit_expr!(stmts, data, key, getf(op), op; id_lookup, obs_n, cv_groups, centered_groups, group_block_lookup, effect_overrides, r2d2)
+_sb_emit!(stmts, data, key, op::ExprColumn; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2(), mod::Module=@__MODULE__) =
+    _sb_emit_expr!(stmts, data, key, getf(op), op; id_lookup, obs_n, cv_groups, centered_groups, group_block_lookup, effect_overrides, r2d2, mod)
 # Raw data / missing columns appear as top-level ops when the formula mentions
 # them as bare references (e.g. `c2` in `loc ~ 1 + c2`). Nothing to emit — the
 # prepass already stashed data columns in `data`.
@@ -3832,10 +3876,10 @@ _sb_emit!(stmts, data, key, ::DataColumn; kwargs...) = nothing
 _sb_emit!(stmts, data, key, ::MissingColumn; kwargs...) = nothing
 _sb_emit!(stmts, data, key, op; kwargs...) = error("sbimpl: top-level op for `$key` not an ExprColumn (got $(typeof(op)))")
 
-_sb_emit_expr!(stmts, data, key, ::typeof(~), op; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2()) = begin
+_sb_emit_expr!(stmts, data, key, ::typeof(~), op; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2(), mod::Module=@__MODULE__) = begin
     lhs, rhs = getargs(op, 2)
     _sb_sampling!(stmts, data, key, lhs, rhs; id_lookup, obs_n, cv_groups,
-                  centered_groups, group_block_lookup, effect_overrides, r2d2)
+                  centered_groups, group_block_lookup, effect_overrides, r2d2, mod)
 end
 _sb_emit_expr!(stmts, data, key, ::typeof(assign), op; id_lookup=_sb_empty_id_lookup(), kwargs...) = begin
     _, rhs = getargs(op, 2)
@@ -4478,13 +4522,15 @@ end
 _sb_apply_positive_prior_bounds!(stmt, prior::ExprColumn) =
     _sb_apply_prior_bounds!(stmt, prior; lower=0.0)
 
-function _sb_generic_ranef_submodel(priors, centered::Bool)
+# `mod` is the SBBRMI caller's module: the correlated-draws generics are
+# BRM-owned, so their `base.mod` cannot see consumer-defined custom families.
+function _sb_generic_ranef_submodel(priors, centered::Bool; mod::Module=@__MODULE__)
     resolved = map(priors) do prior
         isnothing(prior) ? ExprColumn(Normal) : prior
     end
     base = centered ? ranef_correlated_draws_centered_generic :
                       ranef_correlated_draws_generic
-    _sb_vector_positive_priors(base, :tau, resolved; direct_homogeneous=true)
+    _sb_vector_positive_priors(base, :tau, resolved; direct_homogeneous=true, mod)
 end
 
 """
@@ -4745,10 +4791,10 @@ _sb_prior_arg(x) = error("sbimpl: unsupported prior-arg shape $(typeof(x))")
 
 # LHS backed by real data => this is a likelihood. Record the observed values
 # under the formula name in `data` and emit `key ~ dist(args...)`.
-_sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2()) =
+_sb_sampling!(stmts, data, key, lhs::NamedColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2(), mod::Module=@__MODULE__) =
     _sb_sampling_backed!(stmts, data, key, parent(lhs), rhs; id_lookup, obs_n,
                          cv_groups, centered_groups, group_block_lookup,
-                         effect_overrides, r2d2)
+                         effect_overrides, r2d2, mod)
 
 function _sb_joint_factor_reference(target::Symbol, factor, K::Int)
     factor isa NamedColumn || error(
@@ -5122,7 +5168,8 @@ _sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs;
                      id_lookup, obs_n=nothing, cv_groups=Set{Symbol}(),
                      centered_groups=Set{Symbol}(),
                      group_block_lookup=Dict(),
-                     effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2()) = begin
+                     effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2(),
+                     mod::Module=@__MODULE__) = begin
     rhs_e = _as_expr_column(rhs)
     if !isnothing(rhs_e)
         f = getf(rhs_e)
@@ -5143,7 +5190,7 @@ _sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs;
     end
     _sb_linear_predictor!(stmts, data, key, rhs; id_lookup, brmi_key=key, obs_n,
                           cv_groups, centered_groups, group_block_lookup,
-                          effect_overrides, r2d2)
+                          effect_overrides, r2d2, mod)
 end
 
 _sb_sampling_backed!(stmts, data, key, backing, rhs; id_lookup, kwargs...) =
@@ -5160,10 +5207,10 @@ _sb_sampling_backed!(stmts, data, key, backing, rhs; id_lookup, kwargs...) =
 # Stan name. Per-`typeof(f)` overrides (`mi`, future `cens`/`trunc`, …) live
 # as separate methods of `_sb_sampling!`, mirroring vimpl's
 # `vbroadcasted(::ExprColumn{typeof(F)})` extension idiom.
-_sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2()) =
+_sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2(), mod::Module=@__MODULE__) =
     _sb_sampling_through_link!(stmts, data, key, getf(lhs), only(getargs(lhs)), rhs;
                                id_lookup, obs_n, cv_groups, centered_groups,
-                               group_block_lookup, effect_overrides, r2d2)
+                               group_block_lookup, effect_overrides, r2d2, mod)
 
 _sb_sampling_through_link!(stmts, data, key, f, inner, rhs; kwargs...) =
     error("sbimpl: expected NamedColumn inside link `$f(...)`, got $(typeof(inner))")
@@ -5190,13 +5237,13 @@ _sb_sampling_through_link!(stmts, data, key, f, inner, rhs; kwargs...) =
 _sb_lp_emitted_name(lp_name::Symbol, link_lhs_fn) =
     _brm_lp_emitted_name(lp_name, link_lhs_fn)
 
-function _sb_sampling_through_link!(stmts, data, key, f, inner::NamedColumn, rhs; id_lookup, obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2())
+function _sb_sampling_through_link!(stmts, data, key, f, inner::NamedColumn, rhs; id_lookup, obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2(), mod::Module=@__MODULE__)
     inv_f = InverseFunctions.inverse(f)
     inner_name = name(inner)
     pre_name = _sb_lp_emitted_name(inner_name, f)
     _sb_linear_predictor!(stmts, data, pre_name, rhs; id_lookup, brmi_key=key,
                           obs_n, cv_groups, centered_groups, group_block_lookup,
-                          effect_overrides, r2d2)
+                          effect_overrides, r2d2, mod)
     push!(stmts, :($inner_name = $(_sb_julia_to_stan_fn(inv_f))($pre_name)))
 end
 
@@ -5339,7 +5386,8 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
                                 cv_groups=Set{Symbol}(),
                                 centered_groups=Set{Symbol}(),
                                 group_block_lookup=Dict(),
-                                effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2())
+                                effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2(),
+                                mod::Module=@__MODULE__)
     terms = _sb_terms(rhs)
     pop_terms    = Any[]
     ran_terms    = Any[]  # `(expr | group)` -> collected per-group below
@@ -5431,7 +5479,7 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
                 length(overrides) == length(col_exprs) || error(
                     "sbimpl: internal effect-prior alignment error for `$brmi_key`: " *
                     "$(length(overrides)) priors for $(length(col_exprs)) columns")
-                prior = _sb_population_prior_rhs(overrides)
+                prior = _sb_population_prior_rhs(overrides; mod)
                 call = Expr(:call, prior.model, Expr(:parameters,
                     Expr(:kw, :X, X_name),
                     (Expr(:kw, key, value) for (key, value) in pairs(prior.kwargs))...))
@@ -5447,7 +5495,7 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     for dt in direct_terms
         _sb_emit_direct!(stmts, data, target, dt, summands;
                          group_block_lookup, cat_overrides, cat_r2d2,
-                         term_overrides)
+                         term_overrides, mod)
     end
 
     # A plain (un-`|ID|`'d) random effect under an `r2d2` decomposition IS the
@@ -5848,7 +5896,9 @@ end
 # and the sampled vector index cannot drift apart.
 _sb_term_sd_slots(::typeof(s)) = (:sd,)
 _sb_term_sd_slots(::typeof(t2)) = map(c -> Symbol(:sd_, c), _SB_T2_BLOCKS)
-function _sb_term_sd_submodel(term_overrides, t)
+# `mod` is the SBBRMI caller's module: the smooth generics are BRM-owned, so
+# their `base.mod` cannot see consumer-defined custom families.
+function _sb_term_sd_submodel(term_overrides, t; mod::Module=@__MODULE__)
     slots = _sb_term_sd_slots(getf(t))
     all(slot -> isnothing(_sb_term_cfg(term_overrides, t, slot)), slots) &&
         return (; model=getf(t) === s ? _sb_s_generic : _sb_t2_generic,
@@ -5859,7 +5909,7 @@ function _sb_term_sd_submodel(term_overrides, t)
         push!(priors, isnothing(cfg) ? nothing : cfg.prior)
     end
     base = getf(t) === s ? _sb_s_generic : _sb_t2_generic
-    configured = _sb_vector_positive_priors(base, :sd_pen, priors)
+    configured = _sb_vector_positive_priors(base, :sd_pen, priors; mod)
     (; model=configured.model,
        kwargs=(; (dependency => dependency for dependency in configured.dependencies)...))
 end
@@ -6182,16 +6232,17 @@ _sb_cat_levels_vec(_v) = nothing
 # `mo1(c)` reuses `_sb_mo`; smooths own their complete fixed + penalized bases.
 _sb_emit_direct!(stmts, data, target::Symbol, t::NamedColumn, summands;
                  cat_overrides=Dict{Symbol,Any}(), cat_r2d2=Dict{Symbol,NamedTuple}(),
-                 kwargs...) = begin
+                 mod::Module=@__MODULE__, kwargs...) = begin
     block = _sb_cat_block_name(target, name(t))
     _sb_emit_cat!(stmts, data, target, t, summands;
                   prior=get(cat_overrides, block, nothing),
-                  r2d2=get(cat_r2d2, block, nothing))
+                  r2d2=get(cat_r2d2, block, nothing), mod)
 end
 function _sb_emit_direct!(stmts, data, target::Symbol, t::ExprColumn, summands;
                           group_block_lookup=Dict(), cat_overrides=Dict{Symbol,Any}(),
                           cat_r2d2=Dict{Symbol,NamedTuple}(),
-                          term_overrides=Dict{Symbol,Any}())
+                          term_overrides=Dict{Symbol,Any}(),
+                          mod::Module=@__MODULE__)
     f = getf(t)
     if f === gp
         push!(summands, _sb_predictor_term!(stmts, data, f, t;
@@ -6203,7 +6254,7 @@ function _sb_emit_direct!(stmts, data, target::Symbol, t::ExprColumn, summands;
                                             term_overrides))
         return
     end
-    _sb_emit_direct_expr!(stmts, data, target, getf(t), t, summands; term_overrides)
+    _sb_emit_direct_expr!(stmts, data, target, getf(t), t, summands; term_overrides, mod)
 end
 function _sb_emit_direct_expr!(_stmts, data, _target::Symbol,
                                ::typeof(offset), t, summands; kwargs...)
@@ -6218,7 +6269,8 @@ function _sb_emit_direct_expr!(_stmts, data, _target::Symbol,
     push!(summands, _sb_scalar_expr(only(args), data))
 end
 function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(mo1), t, summands;
-                               term_overrides=Dict{Symbol,Any}())
+                               term_overrides=Dict{Symbol,Any}(),
+                               mod::Module=@__MODULE__)
     inner_name, raw = _sb_inner_data(:mo1, only(getargs(t)))
     prepared = _brm_prepare_term(t, target,
         (; data=Dict{Symbol,Any}(inner_name => raw)))
@@ -6246,15 +6298,18 @@ function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(mo1), t, su
     push!(summands, col_name)
 end
 function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(s), t, summands;
-                               term_overrides=Dict{Symbol,Any}())
-    push!(summands, _sb_predictor_term!(stmts, data, s, t; term_overrides))
+                               term_overrides=Dict{Symbol,Any}(),
+                               mod::Module=@__MODULE__)
+    push!(summands, _sb_predictor_term!(stmts, data, s, t; term_overrides, mod))
 end
 function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(t2), t, summands;
-                               term_overrides=Dict{Symbol,Any}())
-    push!(summands, _sb_predictor_term!(stmts, data, t2, t; target, term_overrides))
+                               term_overrides=Dict{Symbol,Any}(),
+                               mod::Module=@__MODULE__)
+    push!(summands, _sb_predictor_term!(stmts, data, t2, t; target, term_overrides, mod))
 end
 function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(dar), t, summands;
-                               term_overrides=Dict{Symbol,Any}())
+                               term_overrides=Dict{Symbol,Any}(),
+                               mod::Module=@__MODULE__)
     push!(summands, _sb_predictor_term!(stmts, data, dar, t; target, term_overrides))
 end
 _sb_emit_direct_expr!(_stmts, _data, _target::Symbol, f, _t, _summands; kwargs...) =
@@ -6277,7 +6332,7 @@ _sb_emit_direct_expr!(_stmts, _data, _target::Symbol, f, _t, _summands; kwargs..
 # unchanged. The prepass has already refused an explicit `effect(lp, c)`
 # override on a decomposed block, so `prior` and `r2d2` never both arrive.
 function _sb_emit_cat!(stmts, data, target::Symbol, t::NamedColumn, summands;
-                       prior=nothing, r2d2=nothing)
+                       prior=nothing, r2d2=nothing, mod::Module=@__MODULE__)
     backing = parent(t)
     n_levels, idx = _sb_level_index(parent(backing))
     col_name = _sb_cat_block_name(target, name(t))
@@ -6320,7 +6375,7 @@ function _sb_emit_cat!(stmts, data, target::Symbol, t::NamedColumn, summands;
         push!(stmts, :($col_name ~ _sb_cat_normal(;
             x=$idx_name, n_levels=$n_name, beta_loc=$loc, beta_scale=$scale)))
     else
-        model = _sb_cat_prior_model(prior, n_levels - 1)
+        model = _sb_cat_prior_model(prior, n_levels - 1; mod)
         push!(stmts, Expr(:call, :~, col_name,
             Expr(:call, model, Expr(:parameters,
                 Expr(:kw, :x, idx_name), Expr(:kw, :n_levels, n_name)))))
@@ -7799,7 +7854,8 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
                               ranef_effect_overrides=Dict{Tuple{Symbol,Any},NamedTuple}(),
                               r2d2_names=Dict{Symbol,NamedTuple}(),
                               ranef_r2d2_overrides=Dict{Tuple{Symbol,Any},NamedTuple}(),
-                              r2d2_joint=Dict{Symbol,NamedTuple}())
+                              r2d2_joint=Dict{Symbol,NamedTuple}(),
+                              mod::Module=@__MODULE__)
     lookup = _sb_empty_id_lookup()
     for (k, bucket) in pairs(buckets)
         id_sym, _ = k
@@ -7865,7 +7921,7 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
         end
         idx_name = _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, desc;
                                                 cv_groups, centered_groups, id_sym,
-                                                ranef_effect, r2d2_tau,
+                                                ranef_effect, r2d2_tau, mod,
                                                 r2d2_lkj_eta=(isnothing(ranef_effect) ?
                                                     1.0 : ranef_effect.lkj_eta))
         for (brmi_key, cols) in per_target_ranges
@@ -7887,7 +7943,7 @@ _sb_id_bucket_suffix(id_sym, g::Tuple{NamedColumn,NamedColumn}) =
 function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g::NamedColumn;
                                       cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
                                       id_sym=nothing, ranef_effect=nothing, r2d2_tau=nothing,
-                                      r2d2_lkj_eta=1.0)
+                                      mod::Module=@__MODULE__, r2d2_lkj_eta=1.0)
     idx_name, n_name = _sb_ensure_group_data!(data, g)
     gname = name(g)
     if !isnothing(r2d2_tau)
@@ -7921,7 +7977,7 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g:
     generic_prior = !isnothing(ranef_effect)
     generic_config = generic_prior ?
         _sb_generic_ranef_submodel(ranef_effect.sd_prior,
-                                   gname in centered_groups) : nothing
+                                   gname in centered_groups; mod) : nothing
     generic_model = generic_prior ? generic_config.model : nothing
     generic_dependency_kwargs = generic_prior ?
         [Expr(:kw, dependency, dependency)
@@ -7986,7 +8042,7 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name,
                                        g::Tuple{NamedColumn,NamedColumn};
                                        cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
                                        id_sym=nothing, ranef_effect=nothing, r2d2_tau=nothing,
-                                       r2d2_lkj_eta=1.0)
+                                       mod::Module=@__MODULE__, r2d2_lkj_eta=1.0)
     gname, bname = name(g[1]), name(g[2])
     id_str = isnothing(id_sym) ? "ID" : String(id_sym)
     isnothing(r2d2_tau) || error(
@@ -8577,7 +8633,8 @@ end
 # returned contribution is a direct summand (no extra `popefs` beta). Only
 # the default basis is supported -- `bs` and `k=`/`knots=` are follow-ons.
 _sb_predictor_term!(stmts, data, ::typeof(s), t;
-                    term_overrides=Dict{Symbol,Any}(), kwargs...) = begin
+                    term_overrides=Dict{Symbol,Any}(), mod::Module=@__MODULE__,
+                    kwargs...) = begin
     args = getargs(t)
     length(args) == 1 || error("sbimpl: `s(x)` expects 1 positional arg, got $(length(args))")
     isempty(getkwargs(t)) || error("sbimpl: `s(x)` does not support keyword arguments yet")
@@ -8606,7 +8663,7 @@ _sb_predictor_term!(stmts, data, ::typeof(s), t;
     _sb_record_preproc!(data, Xnull_name,
         PreprocEntry(:spline, (; fit, zpen_key=Zpen_name), xname, false))
     col_name = Symbol(:s_, xname)
-    prior = _sb_term_sd_submodel(term_overrides, t)
+    prior = _sb_term_sd_submodel(term_overrides, t; mod)
     prior_kwargs = Any[Expr(:kw, :Xnull, Xnull_name), Expr(:kw, :Zpen, Zpen_name)]
     append!(prior_kwargs, (Expr(:kw, k, v) for (k, v) in pairs(prior.kwargs)))
     push!(stmts, Expr(:call, :~, col_name,
@@ -8621,7 +8678,8 @@ end
 # direct summand, never multiplied by an additional `popefs` beta.
 _sb_predictor_term!(stmts, data, ::typeof(t2), t;
                     target::Union{Symbol,Nothing}=nothing,
-                    term_overrides=Dict{Symbol,Any}(), kwargs...) = begin
+                    term_overrides=Dict{Symbol,Any}(), mod::Module=@__MODULE__,
+                    kwargs...) = begin
     args = getargs(t)
     length(args) == 2 || error(
         "sbimpl: `t2(x, z)` expects exactly 2 positional margins, got $(length(args))")
@@ -8661,7 +8719,7 @@ _sb_predictor_term!(stmts, data, ::typeof(t2), t;
         (; fit, zrr_key=Zrr_name, zrn_key=Zrn_name, znr_key=Znr_name),
         names, false))
     col_name = Symbol(:t2_, suffix)
-    prior = _sb_term_sd_submodel(term_overrides, t)
+    prior = _sb_term_sd_submodel(term_overrides, t; mod)
     prior_kwargs = Any[
         Expr(:kw, :Xfixed, Xfixed_name), Expr(:kw, :Zrr, Zrr_name),
         Expr(:kw, :Zrn, Zrn_name), Expr(:kw, :Znr, Znr_name)]
