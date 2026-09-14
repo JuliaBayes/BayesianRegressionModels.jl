@@ -53,7 +53,7 @@ The default display uses 1,000 evenly spaced saved draws per panel for bases
 chosen display subset, not a fitting or loss-calculation limit. No KDE,
 binning, smoothing, or fitted regression line is applied. Calling
 `gradient_preview(dir; draws_per_facet=nothing)` keeps every saved point.
-It writes one fence per GP as well as a combined file;
+It writes one fence per GP as well as a combined file.
 The KB now accepts these larger inline plots without thinning them. The
 1,000-draw display remains an explicit user preference. Separate columns use separate
 fits. Both axes are independent in every facet. Coordinates and gradients

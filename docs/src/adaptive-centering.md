@@ -287,7 +287,7 @@ L_online(c) = Cor_weighted(u_c, g_c).
 ```
 
 It minimizes that signed correlation on `0:0.1:1`; it is not minimizing an
-absolute correlation or reusing the offline loss. For a Gaussian coordinate,
+absolute correlation or reusing the offline loss. For an independent Gaussian coordinate,
 the log-density gradient is a decreasing affine function of position, giving
 correlation `-1`. The optional Jacobian/log-variance part of WarmupHMC's
 criterion has zero weight under these defaults.
