@@ -189,3 +189,89 @@ const mm_lit_df = (; x=[0.2, -0.1, 0.4], g__nocor__1=["a", "a", "b"],
     @test length(blocks) == 1
     @test only(blocks).group == (:g__nocor__1, :h)
 end
+
+# Identical membership, different labels: `g = [10,20,10,30]` and
+# `g__nocor__1 = [1,2,1,3]` code to the same index vector, so membership
+# cannot arbitrate — the recorded emission labels must.
+const same_df = (; x=[-1.0, 0.5, 2.0, 0.25], g=[10, 20, 10, 30],
+    g__nocor__1=[1, 2, 1, 3], y=[0.2, 1.1, -0.4, 0.7])
+
+@testset "identical membership keeps each block's own labels" begin
+    same = @brm begin
+        mu ~ 1 + x + (1 | g) + (1 | g__nocor__1)
+        y ~ Normal(mu, 1.0)
+    end
+    sb = SBBRMI(same(same_df); mod=@__MODULE__)
+    blocks = ranef_blocks(sb)
+    @test length(blocks) == 2
+    @test [b.group for b in blocks] == [:g, :g__nocor__1]
+    @test blocks[1].levels == [10, 20, 30]
+    @test blocks[2].levels == [1, 2, 3]
+end
+
+@testset "zerocorr keeps its base under identical-membership coexistence" begin
+    # The literal is formula-referenced (population predictor) so both names
+    # resolve; the `|| g` blocks must still come home to `g` with `g`'s labels.
+    zsame = @brm begin
+        mu ~ 1 + x + g__nocor__1 + (1 + x || g)
+        y ~ Normal(mu, 1.0)
+    end
+    sb = SBBRMI(zsame(same_df); mod=@__MODULE__)
+    blocks = ranef_blocks(sb)
+    @test length(blocks) == 2
+    @test [b.group for b in blocks] == [:g, :g]
+    @test all(b -> b.levels == [10, 20, 30], blocks)
+end
+
+# Elementwise-identical columns: either answer carries the same labels and
+# coding, so the historical base preference stands (and must not newly
+# fail closed).
+const tie_df = (; x=[-1.0, 0.5, 2.0, 0.25], g=[10, 20, 10, 30],
+    g__nocor__1=[10, 20, 10, 30], y=[0.2, 1.1, -0.4, 0.7])
+
+@testset "identical values keep the historical base answer" begin
+    ztie = @brm begin
+        mu ~ 1 + x + g__nocor__1 + (1 + x || g)
+        y ~ Normal(mu, 1.0)
+    end
+    sb = SBBRMI(ztie(tie_df); mod=@__MODULE__)
+    blocks = ranef_blocks(sb)
+    @test [b.group for b in blocks] == [:g, :g]
+end
+
+@testset "resample replay keeps identical-membership identities" begin
+    same = @brm begin
+        mu ~ 1 + x + (1 | g) + (1 | g__nocor__1)
+        y ~ Normal(mu, 1.0)
+    end
+    sb = SBBRMI(same(same_df); mod=@__MODULE__)
+    replayed = reprocess(sb, same_df; resample_groups=[:g__nocor__1])
+    blocks = ranef_blocks(replayed)
+    @test [b.group for b in blocks] == [:g, :g__nocor__1]
+    @test !blocks[1].generated
+    @test blocks[2].generated
+    @test blocks[1].levels == [10, 20, 30]
+    @test blocks[2].levels == [1, 2, 3]
+end
+
+@testset "unresolvable grouping origin fails closed" begin
+    same = @brm begin
+        mu ~ 1 + x + (1 | g) + (1 | g__nocor__1)
+        y ~ Normal(mu, 1.0)
+    end
+    sb = SBBRMI(same(same_df); mod=@__MODULE__)
+    plan = BayesianRegressionModels.generative_plan(sb)
+    idx = plan.data[:g__nocor__1_idx]
+    # Recorded labels matching neither candidate: loud error, not a guess.
+    @test_throws "ambiguous" BayesianRegressionModels._ranef_raw_group(
+        :g__nocor__1, plan.parent, idx, ["no", "such"])
+    # Resampled index with both candidates carrying the recorded labels:
+    # arbitration is impossible without the coding, so this errors too.
+    zt = @brm begin
+        mu ~ 1 + x + (1 | g) + (1 | g__nocor__1)
+        y ~ Normal(mu, 1.0)
+    end
+    tsb = SBBRMI(zt(tie_df); mod=@__MODULE__)
+    treplay = reprocess(tsb, tie_df; resample_groups=[:g__nocor__1])
+    @test_throws "ambiguous" ranef_blocks(treplay)
+end

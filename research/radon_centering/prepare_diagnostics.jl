@@ -333,6 +333,16 @@ function prepare_diagnostics(offline_dir, online_dir, output_dir)
     read(joinpath(online_dir, "radon-online.stan")) ==
         read(joinpath(offline_dir, "radon-noncentered.stan")) ||
         error("online producer Stan source differs")
+    # Fail closed on a producer/checkout mismatch BEFORE any output write,
+    # so a stale regeneration checkout can never rewrite diagnostics first.
+    producer = TOML.parsefile(joinpath(offline_dir, "provenance.toml"))
+    checkout_script = bytes2hex(sha256(read(joinpath(RESEARCH_DIR, "reproduce.jl"))))
+    producer_script = producer["script_sha256"]
+    checkout_script == producer_script || error(
+        "regeneration checkout reproduce.jl differs from the producer script " *
+        "that saved these draws (producer sha256 $producer_script); rerun " *
+        "this script from a checkout carrying that producer source instead " *
+        "— do not resample the fits")
     DIAGNOSTIC_STAN[] = stan
     DIAGNOSTIC_DENSITY[] = stan.density
     DIAGNOSTIC_TARGET[] = pilot.posterior_position
@@ -387,12 +397,8 @@ function prepare_diagnostics(offline_dir, online_dir, output_dir)
                n_divergent_samples=partial.n_divergent_samples)),
         diagnostics("online", online)]
     write_tsv(joinpath(offline_dir, "diagnostics.tsv"), corrected)
-    producer = TOML.parsefile(joinpath(offline_dir, "provenance.toml"))
-    checkout_script = bytes2hex(sha256(read(joinpath(RESEARCH_DIR, "reproduce.jl"))))
-    producer_script = producer["script_sha256"]
-    checkout_script == producer_script || error(
-        "regeneration checkout reproduce.jl differs from the producer script " *
-        "that saved these draws; rerun the fits instead of reusing them")
+    # The producer/checkout equality was already enforced before any output
+    # write above; checkout_script and producer_script are reused here.
     open(joinpath(output_dir, "diagnostics_provenance.toml"), "w") do io
         TOML.print(io, Dict(
             "posteriordb_revision" => POSTERIORDB_REVISION,

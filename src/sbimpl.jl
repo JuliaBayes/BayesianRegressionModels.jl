@@ -6572,12 +6572,7 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, 
         end
         Z_name = Symbol(:Z_, target, :_, g)
         push!(stmts, :($Z_name = $(Expr(:call, :hcat, col_exprs...))))
-        if length(gterms) == 1 && length(col_exprs) == 1
-            is_centered && error(
-                "sbimpl: centered emission for a lone scalar slope on `$g` is ",
-                "not implemented. Its no-correlation fast path samples positive `tau` ",
-                "and standardized `xi`, while a centered sibling needs the ",
-                "model-scale slope as its sampled coordinate.")
+        if length(gterms) == 1 && length(col_exprs) == 1 && !is_centered
             push!(stmts, :($r_name ~ ranef_slope(;
                 Z=$Z_name, group_idx=$idx_name, n_groups=$n_groups_expr)))
         elseif is_centered
