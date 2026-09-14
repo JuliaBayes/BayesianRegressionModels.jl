@@ -16,7 +16,7 @@ function posteriorplot(curves; x=:time, ylabel="Response", title="",
     ribbon = data(curves) * mapping(x => xlabel, :q50 => ylabel) *
         lineribbon(bands=bands)
     layers = isnothing(observations) ? ribbon : ribbon +
-        data(observations) * mapping(x, observed_y) *
+        data(observations) * mapping(x => xlabel, observed_y => ylabel) *
         visual(Scatter; color="#252525", opacity=0.65, markersize=3)
     layers * config(width=620, height=320, title=title,
         scales=scales(Y=(; scale=logscale ? log10 : identity)))
@@ -47,9 +47,12 @@ function centerednessplot(rows; title="Selected centeredness", compare=false)
 end
 
 """Candidate losses supplied by the selector, with no loss formula in the renderer."""
-function lossplot(rows; ylabel="Loss", title="Centering objective")
-    data(rows) * mapping(:centeredness => "Candidate centeredness", :loss => ylabel;
-                        col=:predictor, color=:basis_label, group=:segment) *
+function lossplot(rows; ylabel="Loss", title="Centering objective", configurations=false)
+    axes = configurations ? mapping(:centeredness => "Candidate centeredness", :loss => ylabel;
+        col=:configuration, row=:predictor, color=:basis_label, group=:segment) :
+        mapping(:centeredness => "Candidate centeredness", :loss => ylabel;
+                col=:predictor, color=:basis_label, group=:segment)
+    data(rows) * axes *
         visual(Lines; linewidth=2) * config(width=460, height=300, title=title,
             facet=(; linkyaxes=:none), scales=scales(Color=(; palette=COLORS)))
 end
@@ -74,14 +77,18 @@ function BRM.brm_posteriorplot(draws::AbstractMatrix; x=axes(draws, 2),
     posteriorplot(rows; x=:x, bands, kwargs...)
 end
 
+BRM.brm_posteriorplot(curves::AbstractVector{<:NamedTuple}; kwargs...) =
+    posteriorplot(curves; kwargs...)
+
 function BRM.brm_posteriorplot(d::BRM.BRMDescriptor, draws::AbstractMatrix, names;
-        logical::Symbol, role=nothing, kwargs...)
+        logical::Symbol, role=nothing, ylabel=string(logical), kwargs...)
     BRM.brm_posteriorplot(BRM.brm_output_draws(d, draws, names; logical, role);
-                         ylabel=string(logical), kwargs...)
+                         ylabel, kwargs...)
 end
 
 function BRM.brm_ppcplot(d::BRM.BRMDescriptor, draws::AbstractMatrix;
-        problem, seed::Integer, response::Symbol, x=nothing, kwargs...)
+        problem, seed::Integer, response::Symbol, x=nothing,
+        ylabel=string(response), kwargs...)
     predicted = BRM.brm_predictive_draws(d, draws; problem, seed)
     haskey(predicted, response) || error("No predictive output for response $response")
     y = BRM.column_data(d.plan.parent, response)
@@ -89,8 +96,11 @@ function BRM.brm_ppcplot(d::BRM.BRMDescriptor, draws::AbstractMatrix;
     xs = isnothing(x) ? collect(eachindex(y)) : collect(x)
     length(xs) == length(y) || throw(DimensionMismatch("PPC x and observations differ"))
     BRM.brm_posteriorplot(getproperty(predicted, response); x=xs,
-        observations=(; x=xs, response=y), ylabel=string(response), kwargs...)
+        observations=(; x=xs, response=y), ylabel, kwargs...)
 end
+
+BRM.brm_pairplot(rows::AbstractVector{<:NamedTuple}; kwargs...) =
+    coordinateplot(rows; kwargs...)
 
 function BRM.brm_pairplot(gp::NamedTuple; bases=axes(gp.coordinates, 2), title="")
     rows = [(; basis_label="Basis $(lpad(b, 2, '0'))",

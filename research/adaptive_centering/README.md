@@ -40,8 +40,10 @@ figures are in `docs/src/assets/adaptive-hsgp/`.
 
 ## Run
 
-Use the repository's resolved `test` environment. Run from the repository
-root and put large outputs in a fresh disk-backed scratch directory.
+Use the repository's resolved `test` environment and resolve the separate
+`research/adaptive_centering/plots` environment for Julia/AlgebraOfVega rendering.
+Run from the repository root and put large outputs in a fresh disk-backed
+scratch directory. No R installation is used or needed.
 
 ```sh
 # Compile the immutable original .stan file and compare its target with BRM.
@@ -56,8 +58,9 @@ BRM_ADAPTIVE_RUNTIME=1 BRM_ADAPTIVE_OUTPUT="$TMPDIR/hsgp-source-fit" \
 julia --startup-file=no --project=test research/adaptive_centering/audit_partial_source.jl \
   "$TMPDIR/hsgp-source-fit" "$TMPDIR/hsgp-partial-source-audit"
 
-# Re-render saved tables without resampling (base R with cairo).
-Rscript research/adaptive_centering/plot_results.R "$TMPDIR/hsgp-source-fit"
+# Re-render saved tables without resampling (Julia/AlgebraOfVega).
+julia --startup-file=no --project=research/adaptive_centering/plots \
+  research/adaptive_centering/plot_results.jl "$TMPDIR/hsgp-source-fit"
 
 # Check full draw receipts and all 40 selections against the literal source loss.
 julia --startup-file=no --project=test research/adaptive_centering/validate_results.jl \
@@ -68,8 +71,9 @@ julia --startup-file=no --project=test research/adaptive_centering/validate_resu
 BRM_ADAPTIVE_ONLINE=1 BRM_ADAPTIVE_OUTPUT="$TMPDIR/hsgp-online-fit" \
   julia --startup-file=no --project=test research/adaptive_centering/reproduce.jl
 
-# Add online posterior and online-versus-offline centering panels without resampling.
-Rscript research/adaptive_centering/plot_results.R \
+# Add online posterior, learned-coordinate pair plots and centering comparison.
+julia --startup-file=no --project=research/adaptive_centering/plots \
+  research/adaptive_centering/plot_results.jl \
   "$TMPDIR/hsgp-source-fit" "$TMPDIR/hsgp-online-fit"
 ```
 
@@ -99,6 +103,9 @@ library handles. The plotted tables and `figures/` contain:
 4. Per-basis centering-loss profiles and all 40 selected centering values.
 5. The fresh partially centered fit's posterior and weight/hyperparameter
    scatter panels.
+6. Online posterior, online-versus-offline centeredness, and pair plots in the
+   online-selected coordinates (all saved draws, transformed from the returned
+   NCP frame once).
 
 Figures use the source's standardized response units; the noise and
 hyperparameter axes are logarithmic. Hyperparameter labels follow the

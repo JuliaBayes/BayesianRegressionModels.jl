@@ -239,8 +239,9 @@ function export_selection(selected, output_dir)
         for j in 1:DEFAULT_K for i in eachindex(s.candidates)])
 end
 
-function render_results(output_dir)
-    run(`Rscript $(joinpath(RESEARCH_DIR, "plot_results.R")) $output_dir`)
+function render_results(output_dir, online_dir=output_dir)
+    plotting_project = joinpath(RESEARCH_DIR, "plots")
+    run(`$(Base.julia_cmd()) --startup-file=no --project=$plotting_project $(joinpath(RESEARCH_DIR, "plot_results.jl")) $output_dir $online_dir`)
 end
 
 function require_fresh_fit_outputs(output_dir, labels)

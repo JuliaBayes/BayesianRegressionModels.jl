@@ -11,6 +11,7 @@ function prepare_gradient_diagnostics(offline_dir, online_dir, output_dir)
                     for name in ("mu", "log_sigma"))
     rows = NamedTuple[]
     checks = NamedTuple[]
+    losses = NamedTuple[]
     for (label, configuration, dir, partial) in (
             ("noncentered", "NCP", offline_dir, false),
             ("partial", "Post-hoc", offline_dir, true),
@@ -29,9 +30,24 @@ function prepare_gradient_diagnostics(offline_dir, online_dir, output_dir)
             last(LogDensityProblems.logdensity_and_gradient(stan.density, collect(q)))
             for q in eachcol(fit.posterior_position)]))
         @assert all(isfinite, gradients)
+        # Replay the public online scorer on full saved draws. Initial source
+        # and target frames coincide with this compiled model, including the
+        # partial refit's nonzero target centeredness. These are not the
+        # historical NUTS trajectory groups/weights used during adaptation.
+        adaptive = adaptive_centering_problem(stan.sb, stan.density, ENZYME_BACKEND)
+        scored = candidate_scoring_losses(adaptive, fit.posterior_position,
+                                          permutedims(gradients))
         for (name, predictor) in (("mu", :mu), ("log_sigma", :sigma))
             binding = brm_term_coordinates(descriptor, predictor, unconstrained_names;
                                            term=:hsgp_x, parameter=:basis_weights)
+            for (basis, index) in enumerate(binding.coordinates), score in scored
+                score.index == index || continue
+                push!(losses, (; configuration, predictor=name, basis,
+                    centeredness=score.candidate, loss=score.loss,
+                    groups=score.groups, effective_n=score.effective_n,
+                    evidence="retrospective_saved_draws", weights="unit",
+                    objective="position_gradient_correlation_w1_0"))
+            end
             display_c = label == "online" ? online_c[name] : nothing
             gp = hsgp_coordinate_draws(descriptor, permutedims(constrained), names;
                 predictor, term=:hsgp_x, centeredness=display_c,
@@ -67,6 +83,12 @@ function prepare_gradient_diagnostics(offline_dir, online_dir, output_dir)
     end
     write_tsv(joinpath(output_dir, "coordinate_gradients.tsv"), rows)
     write_tsv(joinpath(output_dir, "gradient_checks.tsv"), checks)
+    @assert length(losses) == 3 * 2 * DEFAULT_K * 11
+    write_tsv(joinpath(output_dir, "retrospective_online_losses.tsv"), losses)
+    write_tsv(joinpath(output_dir, "diagnostic_packages.tsv"), package_snapshot())
+    println("retrospective_online_losses\t", length(losses),
+            "\tmissing=", count(r -> ismissing(r.loss), losses),
+            "\tnonfinite=", count(r -> !ismissing(r.loss) && !isfinite(r.loss), losses))
     println("gradient_checks\t", length(checks), "\tmax_relative_error=",
             maximum(row.relative_error for row in checks))
     println("gradient_rows\t", length(rows), "\t", output_dir)
