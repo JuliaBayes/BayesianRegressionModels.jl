@@ -181,6 +181,158 @@ end
     @test all(isfinite, draw)
 end
 
+# Non-Main consumer modules holding custom `@deffun` vector-prior families
+# (the docs-page shape: each case-study page evaluates in its own module).
+# Regression coverage for the snag where `_sb_generic_ranef_submodel` — and the
+# `sd_pen`, heterogeneous-population, and categorical-contrast callers beside
+# it — lowered against the BRM-owned generic's `base.mod`, so the family
+# selector never saw the user module and only the Main fallback saved
+# Main-based callers. Every fixture here fails pre-fix with
+# "vector-prior family ... is not defined in StanBlocks, the model module
+# `BayesianRegressionModels`, or Main" despite the triad living in `mod`.
+struct UserModFlatPositive <: ContinuousUnivariateDistribution end
+struct UserModNormal <: ContinuousUnivariateDistribution end
+usermod_flat_factory() = UserModFlatPositive()
+usermod_normal_factory() = UserModNormal()
+selectivemod_flat_factory() = UserModFlatPositive()
+usermod_missing_factory() = UserModFlatPositive()
+Distributions.logpdf(::UserModFlatPositive, x::Real) = x >= 0 ? 0.0 : -Inf
+Distributions.logpdf(::UserModNormal, x::Real) = -x^2 / 2
+Base.minimum(::UserModFlatPositive) = 0.0
+Base.maximum(::UserModFlatPositive) = Inf
+Distributions.rand(rng::Random.AbstractRNG, ::UserModFlatPositive) = abs(randn(rng))
+Distributions.rand(rng::Random.AbstractRNG, ::UserModNormal) = randn(rng)
+BRM.brm_distribution_type(::typeof(usermod_flat_factory)) = UserModFlatPositive
+BRM.brm_distribution_type(::typeof(usermod_normal_factory)) = UserModNormal
+BRM.brm_distribution_type(::typeof(selectivemod_flat_factory)) = UserModFlatPositive
+BRM.brm_distribution_type(::typeof(usermod_missing_factory)) = UserModFlatPositive
+BRM._sb_stan_dist_name(::typeof(usermod_flat_factory)) = :usermod_flat
+BRM._sb_stan_dist_name(::typeof(usermod_normal_factory)) = :usermod_normal
+BRM._sb_stan_dist_name(::typeof(selectivemod_flat_factory)) = :selectivemod_flat
+BRM._sb_stan_dist_name(::typeof(usermod_missing_factory)) = :brm_usermod_missing_family
+
+const UserModFull = Module(:BRMUserModFull)
+Core.eval(UserModFull, :(using StanBlocks))
+Core.eval(UserModFull, quote
+    StanBlocks.@deffun begin
+        @lpxf usermod_flat_lpdf(y::real)::real =
+            y >= 0.0 ? 0.0 : negative_infinity()
+        usermod_flat_rng()::real = exp(normal_rng(0.0, 1.0))
+        @lpxf usermod_normal_lpdf(y::real)::real = -0.5 * y * y
+        usermod_normal_rng()::real = normal_rng(0.0, 1.0)
+    end
+end)
+
+# A consumer module with NO `StanBlocks` binding at all: selective imports
+# suffice to define the triad, and the generated family must evaluate there
+# too (its macrocall heads are anchored to the StanBlocks module value).
+const UserModSelective = Module(:BRMUserModSelective)
+Core.eval(UserModSelective, :(import StanBlocks: @deffun, @lpxf))
+Core.eval(UserModSelective, quote
+    @deffun begin
+        @lpxf selectivemod_flat_lpdf(y::real)::real =
+            y >= 0.0 ? 0.0 : negative_infinity()
+        selectivemod_flat_rng()::real = exp(normal_rng(0.0, 1.0))
+    end
+end)
+
+@testset "custom vector-prior families resolve in a non-Main model module" begin
+    data = (;
+        school=[1, 2, 3, 4, 5, 6, 7, 8],
+        y=[28.0, 8.0, -3.0, 7.0, -1.0, 1.0, 18.0, 12.0],
+        sigma=[15.0, 10.0, 16.0, 11.0, 9.0, 11.0, 10.0, 18.0],
+    )
+    builder = @brm begin
+        theta ~ 1 + (1 | docblock | school)
+        sd(:, docblock) ~ usermod_flat_factory()
+        y ~ Normal(theta, sigma)
+    end
+    sb = SBBRMI(builder(data); mod=UserModFull)
+    code = BRM.stan_code(sb)
+    @test occursin("usermod_flat_lpdf(x[1])", code)
+    @test occursin(r"b_docblock_school_tau ~ brm_vector_prior_", code)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+
+    mkpath(CALLABLE_CACHE)
+    problem = StanBlocks.stan_instantiate(sb.model;
+        path=joinpath(CALLABLE_CACHE, string(hash(code)) * ".stan"))
+    raw = zeros(LogDensityProblems.dimension(problem))
+    names = StanBlocks.BridgeStan.param_names(problem.model)
+    values = StanBlocks.BridgeStan.param_constrain(problem.model, raw)
+    physical = Dict(zip(names, values))
+    beta = physical["pop_theta_beta_pop.1"]
+    tau = physical["b_docblock_school_tau.1"]
+    z = [physical["b_docblock_school_z_flat.$i"] for i in 1:8]
+    expected = logpdf(Normal(), beta) + sum(logpdf.(Normal(), z)) +
+        sum(logpdf.(Normal.(beta .+ tau .* z, data.sigma), data.y))
+    @test StanBlocks.BridgeStan.log_density(problem.model, raw;
+        propto=false, jacobian=false) ≈ expected
+    draw = StanBlocks.BridgeStan.param_constrain(problem.model, raw;
+        rng=StanBlocks.BridgeStan.StanRNG(problem.model, 8191))
+    @test all(isfinite, draw)
+
+    missing_family = @brm (; school=data.school) begin
+        theta ~ 1 + (1 | docblock | school)
+        sd(:, docblock) ~ usermod_missing_factory()
+    end
+    @test_throws "vector-prior family `brm_usermod_missing_family`" begin
+        SBBRMI(missing_family; mod=UserModFull)
+    end
+end
+
+@testset "non-Main custom families on smooth, population, and contrast priors" begin
+    smooth_data = (; x=collect(range(-1.0, 1.0; length=12)), y=zeros(12))
+    smooth_builder = @brm begin
+        sd(mu, s(x)) ~ usermod_flat_factory()
+        mu ~ 1 + s(x)
+        y ~ Normal(mu, 1)
+    end
+    smooth_code = BRM.stan_code(SBBRMI(smooth_builder(smooth_data); mod=UserModFull))
+    @test occursin("usermod_flat_lpdf", smooth_code)
+    @test StanBlocks.stanc_check(smooth_code; warn_pedantic=false).ok
+
+    pop_data = (; x1=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+                 x2=[0.5, -1.0, 1.0, -0.5, 0.0, 1.5],
+                 y=[-2.4, -2.2, -2.0, -1.8, -1.7, -1.5])
+    pop_builder = @brm begin
+        mu ~ 1 + x1 + x2
+        effect(mu, x1) ~ usermod_normal_factory()
+        effect(mu, x2) ~ Normal(0, 0.5)
+        y ~ Normal(mu, 1)
+    end
+    pop_code = BRM.stan_code(SBBRMI(pop_builder(pop_data); mod=UserModFull))
+    @test occursin("usermod_normal_lpdf", pop_code)
+    @test StanBlocks.stanc_check(pop_code; warn_pedantic=false).ok
+
+    cat_data = (; x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+                 g=[1, 2, 3, 1, 2, 3],
+                 y=[-2.4, -2.2, -2.0, -1.8, -1.7, -1.5])
+    cat_builder = @brm begin
+        mu ~ 1 + factor(g) + x
+        effect(mu, g) ~ usermod_normal_factory()
+        y ~ Normal(mu, 1)
+    end
+    cat_code = BRM.stan_code(SBBRMI(cat_builder(cat_data); mod=UserModFull))
+    @test occursin("usermod_normal_lpdf", cat_code)
+    @test StanBlocks.stanc_check(cat_code; warn_pedantic=false).ok
+end
+
+@testset "generated families evaluate without StanBlocks imports" begin
+    data = (;
+        school=[1, 2, 3, 4, 5, 6, 7, 8],
+        y=[28.0, 8.0, -3.0, 7.0, -1.0, 1.0, 18.0, 12.0],
+        sigma=[15.0, 10.0, 16.0, 11.0, 9.0, 11.0, 10.0, 18.0],
+    )
+    builder = @brm begin
+        theta ~ 1 + (1 | selblock | school)
+        sd(:, selblock) ~ selectivemod_flat_factory()
+        y ~ Normal(theta, sigma)
+    end
+    code = BRM.stan_code(SBBRMI(builder(data); mod=UserModSelective))
+    @test occursin("selectivemod_flat_lpdf(x[1])", code)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+end
+
 @testset "callable AST translation retains two keywords for prior and observation" begin
     builder = @brm begin
         location ~ Normal(0, 1)
