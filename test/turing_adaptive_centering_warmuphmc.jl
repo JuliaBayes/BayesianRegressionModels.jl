@@ -15,7 +15,9 @@ const DP = Turing.DynamicPPL
 const TURING_AC_EXT = Base.get_extension(
     BRM, :BayesianRegressionModelsTuringWarmupHMCExt,
 )
-const ENZYME_BACKEND = DI.AutoEnzyme()
+const ENZYME_BACKEND = DI.AutoEnzyme(;
+    mode=Enzyme.set_runtime_activity(Enzyme.Reverse),
+    function_annotation=Enzyme.Const)
 
 function random_intercept_backend(; centered_groups=())
     data = (;
@@ -185,13 +187,18 @@ end
     density, q = motorcycle_hsgp_problem(backend)
     problem = adaptive_centering_problem(backend, density, ENZYME_BACKEND)
     inner = problem.problem
-    components = [inner.mu, inner.log_sigma]
-    blocks = getfield.(components, :block)
+    contract = TURING_AC_EXT._two_hsgp_contract(backend)
+    blocks, mu, log_sigma = TURING_AC_EXT._two_hsgp_geometry(
+        backend, density, contract)
+    components = [mu, log_sigma]
+    @test blocks == getfield.(components, :block)
+    @test inner.model === density.model
 
     @test LogDensityProblems.dimension(density) == 20
     @test all(isempty(component.beta_indices) for component in components)
     @test getfield.(components, :rho_prior_scale) == [4.0, 4.0]
     @test getfield.(components, :sd_prior_scale) == [4.0, 4.0]
+    @test getfield.(blocks, :length_scale_lower) == [[0.0], [0.0]]
     @test blocks[1].length_scales == [1]
     @test blocks[1].sd == 2
     @test blocks[1].effects == collect(3:10)
@@ -228,7 +235,10 @@ end
     @test LogDensityProblems.capabilities(typeof(problem)) isa
           LogDensityProblems.LogDensityOrder{1}
     inner = problem.problem
-    blocks = [inner.mu.block, inner.log_sigma.block]
+    contract = TURING_AC_EXT._two_hsgp_contract(backend)
+    blocks, _mu, _log_sigma = TURING_AC_EXT._two_hsgp_geometry(
+        backend, density, contract)
+    @test inner.model === density.model
     @test getfield.(blocks, :logical) == [:mu, :sigma]
     @test getfield.(blocks, :term) == [:hsgp_x, :hsgp_x]
     @test blocks[1].effects == [4, 5, 6]

@@ -28,13 +28,19 @@ Turing.@model function _brm_turing_gp_term(state)
     (; effect, rho, sigma, z)
 end
 
-function _brm_hsgp_sqrt_spd(state, sigma, rho)
+function _brm_hsgp_sqrt_spd(state, sigma, rho::Real)
     if state.cov === :periodic
         a = inv(rho^2)
         return [sigma * sqrt(2 * BRM.SpecialFunctions.besselix(Int(j), a))
                 for j in state.harmonics]
     end
-    rhos = rho isa Real ? fill(rho, size(state.omega2, 2)) : rho
+    scale = sigma * sqrt(rho * sqrt(2pi))
+    rho_squared = rho^2
+    [scale * exp(-0.25 * rho_squared * state.omega2[b, 1])
+     for b in axes(state.omega2, 1)]
+end
+
+function _brm_hsgp_sqrt_spd(state, sigma, rhos)
     scale = sigma * prod(sqrt.(rhos .* sqrt(2pi)))
     [scale * exp(-0.25sum(rhos .^ 2 .* state.omega2[b, :]))
      for b in axes(state.omega2, 1)]
@@ -47,8 +53,12 @@ function _brm_hsgp_exp_quad_log_sqrt_spd(state, sigma, rhos)
      for b in axes(state.omega2, 1)]
 end
 
-_brm_hsgp_exp_quad_log_sqrt_spd(state, sigma, rho::Real) =
-    _brm_hsgp_exp_quad_log_sqrt_spd(state, sigma, [rho])
+function _brm_hsgp_exp_quad_log_sqrt_spd(state, sigma, rho::Real)
+    log_scale = log(sigma) + 0.5 * (log(rho) + 0.5log(2pi))
+    rho_squared = rho^2
+    [log_scale - 0.25 * rho_squared * state.omega2[b, 1]
+     for b in axes(state.omega2, 1)]
+end
 
 function _brm_hsgp_log_sqrt_spd(state, sigma, rho)
     if state.cov === :periodic
@@ -67,7 +77,8 @@ _brm_hsgp_remaining_log_scale(log_scale, c) =
 
 Turing.@model function _brm_turing_hsgp_partial_iso_term(state)
     rho ~ _brm_constrained_kernel(
-        _brm_term_distribution(state.rho_prior); lower=state.rho_lower)
+        _brm_term_distribution(state.rho_prior);
+        lower=state.rho_lower)
     sigma ~ _brm_constrained_kernel(
         _brm_term_distribution(state.sigma_prior); lower=0)
     log_sqrt_spd = _brm_hsgp_exp_quad_log_sqrt_spd(state, sigma, rho)
@@ -79,7 +90,7 @@ Turing.@model function _brm_turing_hsgp_partial_iso_term(state)
         Turing.@addlogprob! -Inf
     end
     safe_centered_log_scale = max.(centered_log_scale, log_floor)
-    beta_partial ~ product_distribution([
+    beta_partial ~ arraydist([
         Normal(0, exp(safe_centered_log_scale[b]))
         for b in eachindex(safe_centered_log_scale)])
     remaining_log_scale = [_brm_hsgp_remaining_log_scale(log_sqrt_spd[b],
@@ -109,7 +120,7 @@ Turing.@model function _brm_turing_hsgp_partial_aniso_term(state)
         Turing.@addlogprob! -Inf
     end
     safe_centered_log_scale = max.(centered_log_scale, log_floor)
-    beta_partial ~ product_distribution([
+    beta_partial ~ arraydist([
         Normal(0, exp(safe_centered_log_scale[b]))
         for b in eachindex(safe_centered_log_scale)])
     remaining_log_scale = [_brm_hsgp_remaining_log_scale(log_sqrt_spd[b],
@@ -124,14 +135,14 @@ Turing.@model function _brm_turing_hsgp_term(state)
     rho ~ state.iso ? _brm_constrained_kernel(
         _brm_term_distribution(state.rho_prior); lower=state.rho_lower) :
         product_distribution([
-        _brm_constrained_kernel(_brm_term_distribution(state.rho_prior);
-                                lower=state.rho_lower[j])
-        for j in eachindex(state.rho_lower)])
+            _brm_constrained_kernel(_brm_term_distribution(state.rho_prior);
+                                    lower=state.rho_lower[j])
+            for j in eachindex(state.rho_lower)])
     sigma ~ _brm_constrained_kernel(
         _brm_term_distribution(state.sigma_prior); lower=0)
     sqrt_spd = _brm_hsgp_sqrt_spd(state, sigma, rho)
     if isnothing(state.by)
-        beta_raw ~ product_distribution(fill(Normal(), size(state.PHI, 2)))
+        beta_raw ~ filldist(Normal(), size(state.PHI, 2))
         effect = state.PHI * (sqrt_spd .* beta_raw)
         return (; effect, rho, sigma, beta_raw, sqrt_spd)
     end
@@ -164,7 +175,8 @@ end
 
 Turing.@model function _brm_turing_hsgp_latent_term(state, x)
     rho ~ _brm_constrained_kernel(
-        _brm_term_distribution(state.rho_prior); lower=state.rho_lower)
+        _brm_term_distribution(state.rho_prior);
+        lower=state.rho_lower)
     sigma ~ _brm_constrained_kernel(
         _brm_term_distribution(state.sigma_prior); lower=0)
     sqrt_spd = _brm_hsgp_sqrt_spd(state, sigma, rho)
@@ -182,6 +194,7 @@ function BRM._brm_turing_term_model(
         term::BRM._BRMPreparedTerm{typeof(BRM.gp)}, nobs)
     _brm_checked_term_model(term, nobs, _brm_turing_gp_term(term.state))
 end
+
 function BRM._brm_turing_term_model(
         term::BRM._BRMPreparedTerm{typeof(BRM.hsgp)}, nobs)
     model = any(!iszero, term.state.centeredness) ?
@@ -213,4 +226,48 @@ function BRM._brm_turing_term_model(
     x = getproperty(inputs, prepared.state.axis_source)
     length(x) == nobs || error("Turing backend: hsgp term has $(length(x)) rows; expected $nobs")
     _brm_turing_hsgp_latent_term(prepared.state, x)
+end
+
+function _brm_turing_hsgp_ncp_model(term, nobs, priors, _inputs)
+    prepared = _brm_term_with_priors(term,
+        (; rho_prior=priors.rho, sigma_prior=priors.sigma))
+    _brm_checked_term_model(
+        prepared, nobs, _brm_turing_hsgp_term(prepared.state))
+end
+
+function _brm_turing_hsgp_partial_iso_model(term, nobs, priors, _inputs)
+    prepared = _brm_term_with_priors(term,
+        (; rho_prior=priors.rho, sigma_prior=priors.sigma))
+    _brm_checked_term_model(
+        prepared, nobs, _brm_turing_hsgp_partial_iso_term(prepared.state))
+end
+
+function _brm_turing_hsgp_partial_aniso_model(term, nobs, priors, _inputs)
+    prepared = _brm_term_with_priors(term,
+        (; rho_prior=priors.rho, sigma_prior=priors.sigma))
+    _brm_checked_term_model(
+        prepared, nobs, _brm_turing_hsgp_partial_aniso_term(prepared.state))
+end
+
+function _brm_turing_hsgp_latent_model(term, nobs, priors, inputs)
+    prepared = _brm_term_with_priors(term,
+        (; rho_prior=priors.rho, sigma_prior=priors.sigma))
+    x = getproperty(inputs, prepared.state.axis_source)
+    length(x) == nobs || error(
+        "Turing backend: hsgp term has $(length(x)) rows; expected $nobs")
+    _brm_turing_hsgp_latent_term(prepared.state, x)
+end
+
+function _brm_turing_term_call_ast(
+        term::BRM._BRMPreparedTerm{typeof(BRM.hsgp)}, term_ast, nobs,
+        priors, inputs)
+    model = if get(term.state, :latent, false)
+        :_brm_turing_hsgp_latent_model
+    elseif any(!iszero, term.state.centeredness)
+        term.state.iso ? :_brm_turing_hsgp_partial_iso_model :
+                         :_brm_turing_hsgp_partial_aniso_model
+    else
+        :_brm_turing_hsgp_ncp_model
+    end
+    :($model($term_ast, $nobs, $priors, $inputs))
 end

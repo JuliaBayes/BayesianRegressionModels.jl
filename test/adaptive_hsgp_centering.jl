@@ -11,7 +11,8 @@ const BRM = BayesianRegressionModels
 const BS = BridgeStan
 const DP = Turing.DynamicPPL
 const ENZYME_BACKEND = DI.AutoEnzyme(;
-    mode=Enzyme.set_runtime_activity(Enzyme.Reverse))
+    mode=Enzyme.set_runtime_activity(Enzyme.Reverse),
+    function_annotation=Enzyme.Const)
 
 turing_logdensity_kernel(x, target) = LogDensityProblems.logdensity(target, x)
 

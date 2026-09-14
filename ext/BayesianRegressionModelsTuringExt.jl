@@ -24,6 +24,8 @@ include("turing_r2d2.jl")
 
 BRM._brm_turing_term_model(term, nobs, priors, _inputs) =
     BRM._brm_turing_term_model(term, nobs, priors)
+_brm_turing_term_call_ast(_term, term, nobs, priors, inputs) =
+    :(BRM._brm_turing_term_model($term, $nobs, $priors, $inputs))
 include("turing_gp.jl")
 include("turing_structured.jl")
 
@@ -398,12 +400,18 @@ function _brm_generic_response_graph_ast(multi; single::Bool=false)
         end
         for term_index in eachindex(component.terms)
             term_site = Symbol(:term_, name, :_, term_index)
-            priors = _brm_term_priors_ast(component.terms[term_index], callables)
-            inputs = _brm_term_inputs_ast(component.terms[term_index], callables)
-            push!(statements, :($term_site ~ to_submodel(
-                BRM._brm_turing_term_model(
-                    multi.plans[$pi].predictors[$ci].terms[$term_index],
-                    length(multi.plans[$pi].response), $priors, $inputs))))
+            term = component.terms[term_index]
+            priors = _brm_term_priors_ast(term, callables)
+            inputs = _brm_term_inputs_ast(term, callables)
+            term_model = _brm_turing_term_call_ast(
+                term,
+                :(multi.plans[$pi].predictors[$ci].terms[$term_index]),
+                :(length(multi.plans[$pi].response)),
+                priors,
+                inputs,
+            )
+            push!(statements,
+                  :($term_site ~ to_submodel($term_model)))
             push!(statements, term_only ? :($eta = $term_site.effect) :
                 :($eta = $eta + $term_site.effect))
         end
@@ -540,7 +548,30 @@ function _brm_generic_structure_key(definition::Expr)
     (repr(signature.args[2:end]), repr(body))
 end
 
+function _brm_validate_turing_term_rows(term, nobs)
+    rows = _brm_term_rows(term)
+    isnothing(rows) && return nothing
+    rows == nobs || error(
+        "Turing backend: prepared `$(nameof(term.callable))` term has $rows rows, " *
+        "but its predictor has $nobs observations")
+    nothing
+end
+
+function _brm_validate_turing_term_rows(plan::BRM._TuringGenericPlan)
+    nobs = length(plan.response)
+    for component in plan.predictors, term in component.terms
+        _brm_validate_turing_term_rows(term, nobs)
+    end
+    nothing
+end
+
+function _brm_validate_turing_term_rows(plan::BRM._TuringMultiResponsePlan)
+    foreach(_brm_validate_turing_term_rows, plan.plans)
+    nothing
+end
+
 function BRM._brm_turing_model(plan::BRM._TuringGenericPlan)
+    _brm_validate_turing_term_rows(plan)
     lowered = _brm_generic_model_ast(plan)
     evaluator, definition = _brm_cached_generic_evaluator(lowered)
     model = Turing.DynamicPPL.Model{false}(evaluator, lowered.inputs)
@@ -1086,6 +1117,7 @@ end
 
 
 function BRM._brm_turing_model(plan::BRM._TuringMultiResponsePlan)
+    _brm_validate_turing_term_rows(plan)
     if all(child -> child isa BRM._TuringGenericPlan, plan.plans)
         lowered = _brm_generic_multi_model_ast(plan)
         evaluator, definition = _brm_cached_generic_evaluator(lowered)

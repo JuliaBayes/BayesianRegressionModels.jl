@@ -164,6 +164,30 @@ caller-owned gradient buffer, and measures the repeated hot call separately
 from construction. Sampling is omitted because this focused gate targets
 lowering and density kernels rather than sampler behavior.
 
+The dual-HSGP gradient benchmark exercises the source-faithful 133-row
+motorcycle model through generated Turing/DynamicPPL+Enzyme and compiled
+StanBlocks/BridgeStan targets:
+
+```sh
+BRM_HSGP_BENCH_OUTPUT=/tmp/turing-hsgp-gradient.tsv \
+  julia --project=test test/benchmark_turing_hsgp_gradients.jl
+```
+
+It prepares AD once, separates compilation/setup from hot calls, pins BLAS to
+one thread, and interleaves 21 batches of 1,000 value-and-gradient calls. By
+default it checks a deterministic physical point in fixed NCP, centered, and
+per-basis partial coordinates plus all three online source frames. Set
+`BRM_HSGP_BENCH_DRAW_DIR` to an extracted source-faithful posterior bundle to
+also check columns 1, 2500, 5000, 7500, and 10000 from the original 10,000-draw
+Stan fits. The TSV records normalized-density, absolute and scaled gradient,
+finite-difference, allocation, runtime-ratio, model/draw hash, and exact
+dependency provenance fields. Sampling is intentionally absent: this is the
+numerical/runtime gate that must pass before native Turing sampling.
+The committed source-faithful k=20 measurement is
+`test/receipts/turing_hsgp_gradients.tsv`; its `brm_revision` and
+`benchmark_sha256` columns bind every row to the exact measured implementation
+and harness.
+
 ## Why each constraint exists
 
 Every one of these was paid for by a failed resolve; none is stylistic.
@@ -250,12 +274,13 @@ and no `[extras]`/`[targets]` in the root `Project.toml`:
   every supported Julia version, so carrying both would be two declarations of
   one dependency list.
 
-Seven files are the reason this environment exists — they fail at their own
+Eight files are the reason this environment exists — they fail at their own
 `using` line under `julia --project=.`, before any BRM code runs:
 
 | file | needs beyond the root project |
 | --- | --- |
 | `test/benchmark_turing_multi_membership.jl` | `BridgeStan`, `StanBlocks`, `Enzyme`, `DifferentiationInterface` |
+| `test/benchmark_turing_hsgp_gradients.jl` | `BridgeStan`, `StanBlocks`, `Turing`, `WarmupHMC`, `Enzyme`, `DifferentiationInterface` |
 | `test/adaptive_centering_bridgestan.jl` | `WarmupHMC`, `Enzyme` |
 | `test/adaptive_centering_warmuphmc.jl` | `WarmupHMC`, `Enzyme`, `DifferentiationInterface` |
 | `test/turing_adaptive_centering_warmuphmc.jl` | `Turing`, `WarmupHMC`, `Enzyme`, `DifferentiationInterface` |
