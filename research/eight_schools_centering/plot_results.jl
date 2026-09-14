@@ -43,7 +43,9 @@ function posterior_figures(fit_dir, output)
                            ("online", "Online adaptive fit"))
         matrix = fit_matrix(fit_dir, label)
         push!(specs, (; label, title,
-            spec=brm_posteriorplot(matrix; x=1:8, probs=[0.9, 0.8, 0.5])))
+            spec=brm_posteriorplot(matrix; x=string.(1:8),
+                probs=[0.9, 0.8, 0.5], xlabel="School",
+                ylabel="Treatment effect")))
     end
     fig = Figure(size=(2100, 620), fontsize=15)
     Label(fig[0, 1:3], "School treatment effects"; fontsize=23, font=:bold, tellwidth=false)
@@ -86,7 +88,7 @@ function pair_figures(diagnostics_dir, output)
             configuration == "Post-hoc" ? "Post-hoc selected partial coordinates" :
             "Online-adaptive selected coordinates"
         save_spec(output, "$(lowercase(replace(configuration, " " => "-")))_scatter", spec;
-            title, size=(1800, 1350))
+            title, size=(1800, 1350), legend=false)
     end
 end
 

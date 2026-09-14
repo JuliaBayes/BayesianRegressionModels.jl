@@ -138,7 +138,7 @@ function run_provenance(output_dir)
         "turing_sampling" => "not run",
         "r_sampling" => "not run",
         "blas_threads" => BLAS.get_num_threads(),
-        "ess_scope" => "all 10 unconstrained model coordinates: mu, log(tau), and eight school effects",
+        "ess_scope" => "all 10 unconstrained model coordinates: mu, log(tau), and eight noncentered school coordinates z_1:8 (NCP model frame)",
         "diagnostics" => "rank-normalized split Rhat; bulk ESS; tail ESS; retained divergences",
         "rhat_scope" => "within one split chain, not independent-chain convergence",
     )
@@ -306,7 +306,7 @@ function diagnostics(label, fit)
        min_tail_ess=minimum(MCMCDiagnosticTools.ess(samples; kind=:tail)),
        divergences=fit.n_divergent_samples,
        divergence_percent=100fit.n_divergent_samples / size(q, 2),
-       ess_coordinate_scope="mu, log(tau), theta_effect_1:8")
+       ess_coordinate_scope="mu, log(tau), z_1:8 (NCP model frame)")
 end
 
 function coordinate_arrays(stan, fit)
