@@ -1,4 +1,5 @@
 using Test, BayesianRegressionModels, Distributions, Turing
+using Random
 import StanBlocks
 import LogDensityProblems
 
@@ -8,11 +9,24 @@ plain_factory(location, scale) = Normal(location, scale)
 keyword_factory(location, scale; shift=0.0, blend=0.0) =
     Normal(location + shift + blend, scale)
 vector_factory() = Dirichlet([1.0, 1.0])
+struct FlatPositivePrior <: ContinuousUnivariateDistribution end
+flat_positive_factory() = FlatPositivePrior()
+Distributions.logpdf(::FlatPositivePrior, x::Real) = x >= 0 ? 0.0 : -Inf
+Base.minimum(::FlatPositivePrior) = 0.0
+Base.maximum(::FlatPositivePrior) = Inf
+Distributions.rand(rng::Random.AbstractRNG, ::FlatPositivePrior) =
+    abs(randn(rng))
+missing_translation_factory() = FlatPositivePrior()
 
 BRM.brm_distribution_type(::typeof(plain_factory)) = Normal
 BRM.brm_distribution_type(::typeof(keyword_factory)) = Normal
 BRM.brm_distribution_type(::typeof(vector_factory)) = Dirichlet
+BRM.brm_distribution_type(::typeof(flat_positive_factory)) = FlatPositivePrior
+BRM.brm_distribution_type(::typeof(missing_translation_factory)) = FlatPositivePrior
 BRM._sb_stan_dist_name(::typeof(plain_factory)) = :registered_plain
+BRM._sb_stan_dist_name(::typeof(flat_positive_factory)) = :registered_positive
+BRM._sb_stan_dist_name(::typeof(missing_translation_factory)) =
+    :brm_missing_translation_family
 function BRM._sb_stan_distribution_call(::typeof(keyword_factory), args, kwargs)
     location = :($(args[1]) + $(kwargs.shift) + $(kwargs.blend))
     Expr(:call, :registered_plain, location, args[2])
@@ -37,7 +51,66 @@ StanBlocks.@deffun begin
     end
 end
 
+# A consumer-defined SCALAR-only custom family. The generated homogeneous
+# vector-prior family calls it coordinate by coordinate, so no vector[n]
+# `_lpdf`/`_rng` signatures are required for a shared-ID ranef-scale prior.
+# Boundary: a RESPONSE-FREE program re-drawing tau through the generated
+# family `_rng` still requires StanBlocks' conditioning RNG to accept a
+# consumer `@deffun` family selector (see the tracking issue in the snag
+# decision for `custom-ranef-sd-1baa4c30`); fitting the observed model is the
+# covered surface here.
+StanBlocks.@deffun begin
+    @lpxf registered_positive_lpdf(y::real)::real =
+        y >= 0.0 ? 0.0 : negative_infinity()
+    registered_positive_rng()::real = abs(normal_rng(0.0, 1.0))
+end
+
 const CALLABLE_CACHE = joinpath(tempdir(), "brm-callable-priors")
+
+@testset "callable custom family on a shared-ID random-effect scale" begin
+    data = (;
+        school=[1, 2, 3, 4, 5, 6, 7, 8],
+        y=[28.0, 8.0, -3.0, 7.0, -1.0, 1.0, 18.0, 12.0],
+        sigma=[15.0, 10.0, 16.0, 11.0, 9.0, 11.0, 10.0, 18.0],
+    )
+    builder = @brm begin
+        theta ~ 1 + (1 | eight_schools | school)
+        sd(:, eight_schools) ~ flat_positive_factory()
+        y ~ Normal(theta, sigma)
+    end
+    sb = SBBRMI(builder(data); mod=@__MODULE__)
+    code = BRM.stan_code(sb)
+    @test occursin("registered_positive_lpdf(x[1])", code)
+    @test occursin("(x[1] < 0.0)", code)
+    @test occursin(r"b_eight_schools_school_tau ~ brm_vector_prior_", code)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+
+    mkpath(CALLABLE_CACHE)
+    problem = StanBlocks.stan_instantiate(sb.model;
+        path=joinpath(CALLABLE_CACHE, string(hash(code)) * ".stan"))
+    raw = zeros(LogDensityProblems.dimension(problem))
+    names = StanBlocks.BridgeStan.param_names(problem.model)
+    values = StanBlocks.BridgeStan.param_constrain(problem.model, raw)
+    physical = Dict(zip(names, values))
+    beta = physical["pop_theta_beta_pop.1"]
+    tau = physical["b_eight_schools_school_tau.1"]
+    z = [physical["b_eight_schools_school_z_flat.$i"] for i in 1:8]
+    expected = logpdf(Normal(), beta) + sum(logpdf.(Normal(), z)) +
+        sum(logpdf.(Normal.(beta .+ tau .* z, data.sigma), data.y))
+    @test StanBlocks.BridgeStan.log_density(problem.model, raw;
+        propto=false, jacobian=false) ≈ expected
+    draw = StanBlocks.BridgeStan.param_constrain(problem.model, raw;
+        rng=StanBlocks.BridgeStan.StanRNG(problem.model, 8191))
+    @test all(isfinite, draw)
+
+    missing_family = @brm (; school=data.school) begin
+        theta ~ 1 + (1 | eight_schools | school)
+        sd(:, eight_schools) ~ missing_translation_factory()
+    end
+    @test_throws "vector-prior family `brm_missing_translation_family`" begin
+        SBBRMI(missing_family; mod=@__MODULE__)
+    end
+end
 
 @testset "callable scalar shape admission in structured models" begin
     r2_builder = @brm begin

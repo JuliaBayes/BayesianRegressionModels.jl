@@ -1,4 +1,4 @@
-using BayesianRegressionModels, AlgebraOfVega, CSV, Tables, JSON, CairoMakie
+using BayesianRegressionModels, AlgebraOfVega, CSV, Tables, JSON, TOML, CairoMakie
 import AlgebraOfGraphics
 
 """Plot the exported native WarmupHMC query, not a reconstructed loss formula."""
@@ -37,14 +37,15 @@ function online_loss_preview(input_dir)
     plot = brm_centering_lossplot(rows; title, normalization=:none, ylimits=(-1, 0),
         ylabel="Position–gradient correlation (w₁ = 0)")
     spec = to_vegalite(plot; interactive=false)
-    base = "8dfe41253af3043482cb3270cf513b50a1de5437"
+    provenance = TOML.parsefile(joinpath(input_dir, "diagnostics_provenance.toml"))
+    base = provenance["pilot"]["brm_commit"]
     envelope = Dict("schema" => "kb-aov/v1", "title" => title,
         "alt" => "Two panels: Mean GP and Log-SD GP. Four basis functions per panel. Native WarmupHMC candidate scores use one common reference of all 10,000 pilot posterior draws, with unit weights. Source coordinates do not change the loss landscape. This is retrospective, not recorded warmup history. Raw correlations, with fixed y limits [-1,0]; no min-max scaling. $unavailable nonfinite or missing candidate values are gaps, retained in the source table.",
         "spec" => spec, "provenance" => Dict(
             "producer" => "BayesianRegressionModels:docs:adaptive-centering",
             "mode" => "preliminary", "base_commit" => base,
-            "run" => "native-candidate-scoring-losses-common-pilot-raw-v5",
-            "references" => [Dict("kind" => "spec", "label" => "Published full-fit BRM harness; native loss-query extension is work in progress",
+            "run" => "$(provenance["coordinate_gradients_sha256"])-common-pilot-raw",
+            "references" => [Dict("kind" => "spec", "label" => "BRM reproduction harness that produced this pilot",
                 "url" => "https://github.com/nsiccha/BayesianRegressionModels.jl/blob/$base/research/adaptive_centering/reproduce.jl",
                 "commit" => base, "path" => "research/adaptive_centering/reproduce.jl")]))
     open(joinpath(input_dir, "online-loss.preview.md"), "w") do io

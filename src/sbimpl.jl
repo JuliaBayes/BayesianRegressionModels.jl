@@ -154,10 +154,35 @@ function _sb_vector_prior_parts(priors; positive::Bool=true)
     calls, actuals, shape, argkinds
 end
 
-function _sb_vector_prior_family(priors; positive::Bool=true,
-                                 mod::Module=StanBlocks)
+function _sb_vector_prior_selector(dist::Symbol, mod::Module)
+    # A Symbol head names a family TOKEN. StanBlocks builtins keep precedence;
+    # a consumer-registered `@deffun` family resolves in the model module (the
+    # same builtin -> mod -> Main chain `forward!` uses when the emitted model
+    # is traced). Looking ONLY in StanBlocks made every custom family crash at
+    # lowering time with `UndefVarError: <family> not defined`.
+    if isdefined(StanBlocks, dist)
+        return getfield(StanBlocks, dist)
+    elseif isdefined(mod, dist)
+        return getfield(mod, dist)
+    elseif mod !== Main && isdefined(Main, dist)
+        return getfield(Main, dist)
+    end
+    error(
+        "sbimpl: vector-prior family `$dist` is not defined in StanBlocks, ",
+        "the model module `$mod`, or Main. A custom scalar family registered ",
+        "with `_sb_stan_dist_name` must also define its StanBlocks ",
+        "`$(dist)_lpdf` triad in the module passed as `mod` to `SBBRMI`.")
+end
+_sb_vector_prior_selector(dist, _mod) = dist
+
+function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
     calls, actuals, shape, argkinds = _sb_vector_prior_parts(priors; positive)
-    key = repr((positive, shape))
+    selectors = [_sb_vector_prior_selector(c.dist, mod) for c in calls]
+    # The generated RNG body embeds each selector as a function VALUE, so the
+    # cache key must distinguish same-named families defined in different
+    # consumer modules; the density head stays a lazily resolved Symbol.
+    owner_key = map(s -> (nameof(s), Symbol(parentmodule(s))), selectors)
+    key = repr((positive, shape, owner_key))
     family = get!(_SB_VECTOR_PRIOR_CACHE, key) do
         stem = Symbol(:brm_vector_prior_, _sb_stable_fingerprint(key))
         lpdf, lpdfs, rng = Symbol(stem, :_lpdf), Symbol(stem, :_lpdfs), Symbol(stem, :_rng)
@@ -168,19 +193,7 @@ function _sb_vector_prior_family(priors; positive::Bool=true,
         for (i, c) in enumerate(calls)
             distname = c.dist isa Symbol ? c.dist : nameof(c.dist)
             push!(densities, Expr(:call, Symbol(distname, :_lpdf), Expr(:ref, :x, i), c.names...))
-            selector = if c.dist isa Symbol
-                if isdefined(StanBlocks, c.dist)
-                    getfield(StanBlocks, c.dist)
-                elseif isdefined(c.origin, c.dist)
-                    getfield(c.origin, c.dist)
-                elseif isdefined(mod, c.dist)
-                    getfield(mod, c.dist)
-                else
-                    error("sbimpl: custom vector-prior family `$(c.dist)` is defined in neither StanBlocks nor the model module")
-                end
-            else
-                c.dist
-            end
+            selector = selectors[i]
             push!(draws, isnothing(c.lower) && isnothing(c.upper) ?
                 Expr(:call, :predictive, selector, c.names...) :
                 isnothing(c.lower) ?
