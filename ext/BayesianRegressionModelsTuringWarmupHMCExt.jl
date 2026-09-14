@@ -460,188 +460,6 @@ function _adaptive_centering_reparametrizer(log_scale_index, effect_indices)
     state, WarmupHMC.IndexedReparametrization(pairs)
 end
 
-struct TuringSimpleRandomInterceptProblem{P,D,F,Y,G,B,E}
-    problem::P
-    design::D
-    fixed::F
-    response::Y
-    group_indices::G
-    beta_indices::B
-    log_scale_index::Int
-    effect_indices::E
-    observation_scale::Float64
-end
-
-function TuringSimpleRandomInterceptProblem(
-    problem, plan, block, beta_indices, log_scale_index, effect_indices,
-)
-    component = only(plan.predictors)
-    TuringSimpleRandomInterceptProblem(
-        problem,
-        component.design.matrix,
-        component.design.fixed,
-        plan.response,
-        block.indices,
-        beta_indices,
-        log_scale_index,
-        effect_indices,
-        _fixed_gaussian_scale(plan),
-    )
-end
-
-LogDensityProblems.capabilities(::Type{<:TuringSimpleRandomInterceptProblem}) =
-    LogDensityProblems.LogDensityOrder{1}()
-LogDensityProblems.dimension(problem::TuringSimpleRandomInterceptProblem) =
-    LogDensityProblems.dimension(problem.problem)
-function LogDensityProblems.logdensity(
-    problem::TuringSimpleRandomInterceptProblem, position,
-)
-    LogDensityProblems.logdensity(problem.problem, position)
-end
-
-function LogDensityProblems.logdensity_and_gradient(
-    problem::TuringSimpleRandomInterceptProblem, position,
-)
-    gradient = fill!(similar(position), zero(eltype(position)))
-    log_scale = position[problem.log_scale_index]
-    scale = exp(log_scale)
-    inverse_variance = inv(problem.observation_scale^2)
-
-    for observation in eachindex(problem.response)
-        mean = problem.fixed[observation]
-        for (column, idx) in enumerate(problem.beta_indices)
-            mean += problem.design[observation, column] * position[idx]
-        end
-        group = problem.group_indices[observation]
-        effect_idx = problem.effect_indices[group]
-        group_effect = scale * position[effect_idx]
-        residual_score =
-            (problem.response[observation] - mean - group_effect) * inverse_variance
-        for (column, idx) in enumerate(problem.beta_indices)
-            gradient[idx] += problem.design[observation, column] * residual_score
-        end
-        gradient[effect_idx] += scale * residual_score
-        gradient[problem.log_scale_index] += group_effect * residual_score
-    end
-
-    for idx in problem.beta_indices
-        gradient[idx] -= position[idx]
-    end
-    gradient[problem.log_scale_index] -= log_scale
-    for idx in problem.effect_indices
-        gradient[idx] -= position[idx]
-    end
-    LogDensityProblems.logdensity(problem.problem, position), gradient
-end
-
-struct TuringTwoHSGPProblem{P}
-    problem::P
-    response::Vector{Float64}
-    mu::TuringHSGPGradientComponent
-    log_sigma::TuringHSGPGradientComponent
-end
-
-LogDensityProblems.capabilities(::Type{<:TuringTwoHSGPProblem}) =
-    LogDensityProblems.LogDensityOrder{1}()
-LogDensityProblems.dimension(problem::TuringTwoHSGPProblem) =
-    LogDensityProblems.dimension(problem.problem)
-function LogDensityProblems.logdensity(problem::TuringTwoHSGPProblem, position)
-    LogDensityProblems.logdensity(problem.problem, position)
-end
-
-function _hsgp_predictor_frame(component, position)
-    n = length(component.fixed)
-    eta = Vector{eltype(position)}(undef, n)
-    for observation in 1:n
-        value = component.fixed[observation]
-        for (column, idx) in enumerate(component.beta_indices)
-            value += component.design[observation, column] * position[idx]
-        end
-        eta[observation] = value
-    end
-    scales = Vector{eltype(position)}(undef, length(component.block.effects))
-    for basis in eachindex(component.block.effects)
-        scale = exp(BRM._adaptive_hsgp_log_scale(
-            position, component.block, basis))
-        scales[basis] = scale
-        coefficient = scale * position[component.block.effects[basis]]
-        for observation in 1:n
-            eta[observation] += component.PHI[observation, basis] * coefficient
-        end
-    end
-    eta, scales
-end
-
-function _accumulate_hsgp_gradient!(
-    gradient, component, position, predictor_score, scales,
-)
-    for (column, idx) in enumerate(component.beta_indices)
-        value = -position[idx]
-        for observation in eachindex(predictor_score)
-            value += component.design[observation, column] *
-                     predictor_score[observation]
-        end
-        gradient[idx] = value
-    end
-
-    block = component.block
-    rho_idx = only(block.length_scales)
-    rho_offset = exp(position[rho_idx])
-    rho = only(block.length_scale_lower) + rho_offset
-    sd_score = zero(eltype(position))
-    rho_score = zero(eltype(position))
-    for basis in eachindex(block.effects)
-        projected_score = zero(eltype(position))
-        for observation in eachindex(predictor_score)
-            projected_score += component.PHI[observation, basis] *
-                               predictor_score[observation]
-        end
-        effect_idx = block.effects[basis]
-        standard_weight = position[effect_idx]
-        scale = scales[basis]
-        gradient[effect_idx] = scale * projected_score - standard_weight
-        spectral_score = scale * standard_weight * projected_score
-        sd_score += spectral_score
-        rho_score += spectral_score * rho_offset *
-            (0.5 / rho - 0.5 * rho * block.omega2[basis, 1])
-    end
-
-    # The supported native HSGP priors are LogNormal(0, s). In the linked
-    # DynamicPPL frame, marginal SD is exp(v), while length scale is
-    # rho_lower + exp(u). These terms include both prior and link Jacobian.
-    sd_idx = block.sd
-    gradient[sd_idx] = sd_score -
-        position[sd_idx] / component.sd_prior_scale^2
-    gradient[rho_idx] = rho_score + one(eltype(position)) -
-        rho_offset *
-        (log(rho) / component.rho_prior_scale^2 + one(eltype(position))) / rho
-    gradient
-end
-
-function LogDensityProblems.logdensity_and_gradient(
-    problem::TuringTwoHSGPProblem, position,
-)
-    mu, mu_scales = _hsgp_predictor_frame(problem.mu, position)
-    log_sigma, sigma_scales =
-        _hsgp_predictor_frame(problem.log_sigma, position)
-    mu_score = Vector{eltype(position)}(undef, length(problem.response))
-    log_sigma_score = similar(mu_score)
-    for observation in eachindex(problem.response)
-        residual = problem.response[observation] - mu[observation]
-        inverse_scale = exp(-log_sigma[observation])
-        standardized = residual * inverse_scale
-        mu_score[observation] = standardized * inverse_scale
-        log_sigma_score[observation] = standardized^2 - one(eltype(position))
-    end
-
-    gradient = fill!(similar(position), zero(eltype(position)))
-    _accumulate_hsgp_gradient!(
-        gradient, problem.mu, position, mu_score, mu_scales)
-    _accumulate_hsgp_gradient!(
-        gradient, problem.log_sigma, position, log_sigma_score, sigma_scales)
-    LogDensityProblems.logdensity(problem.problem, position), gradient
-end
-
 function _warmuphmc_hsgp_extension()
     extension = Base.get_extension(
         BRM, :BayesianRegressionModelsWarmupHMCExt)
@@ -650,9 +468,29 @@ function _warmuphmc_hsgp_extension()
     extension
 end
 
+function _prepare_dynamicppl_gradient(problem, ad_backend)
+    prepared = DynamicPPL.LogDensityFunction(
+        problem.model,
+        DynamicPPL.getlogjoint_internal,
+        problem.transform_strategy;
+        adtype=ad_backend,
+        fix_transforms=true,
+    )
+    source_ranges = DynamicPPL.get_all_ranges_and_transforms(problem)
+    prepared_ranges = DynamicPPL.get_all_ranges_and_transforms(prepared)
+    keys(source_ranges) == keys(prepared_ranges) || _unsupported_hsgp(
+        "native AD preparation changed the DynamicPPL variable order")
+    for name in keys(source_ranges)
+        source_ranges[name].range == prepared_ranges[name].range ||
+            _unsupported_hsgp(
+                "native AD preparation changed the `$name` coordinate range")
+    end
+    prepared
+end
+
 function _two_hsgp_adaptive_problem(backend, problem, ad_backend)
     contract = _two_hsgp_contract(backend)
-    blocks, mu, sigma = _two_hsgp_geometry(backend, problem, contract)
+    blocks, _mu, _sigma = _two_hsgp_geometry(backend, problem, contract)
     warmup_extension = _warmuphmc_hsgp_extension()
     state, ir = warmup_extension._adaptive_hsgp_centering_reparametrizer(blocks)
     scoring_plan = WarmupHMC.CandidateScoringPlan(
@@ -663,8 +501,7 @@ function _two_hsgp_adaptive_problem(backend, problem, ad_backend)
         synchronize! = ir_ ->
             warmup_extension._sync_sources!(state, ir_),
     )
-    gradient_problem = TuringTwoHSGPProblem(
-        problem, collect(Float64, contract.plan.response), mu, sigma)
+    gradient_problem = _prepare_dynamicppl_gradient(problem, ad_backend)
     WarmupHMC.ReparametrizedProblem(
         ir, gradient_problem, ad_backend; scoring_plan)
 end
@@ -679,10 +516,10 @@ end
 Wrap a supported native Turing model in WarmupHMC's online partial-centering
 transform. `problem` must be a
 `DynamicPPL.LogDensityFunction` built from `backend.model`. The adapter prepares
-the exact DynamicPPL density while supplying the bounded model's closed-form
-gradient to WarmupHMC. DynamicPPL's own range metadata identifies every native
-coordinate; no compiled-Stan names or ordering are reused. `ad_backend`
-differentiates only WarmupHMC's small coordinate transform.
+the exact DynamicPPL density and prepares its backend-native AD gradient.
+DynamicPPL's own range metadata identifies every native coordinate; no
+compiled-Stan names or ordering are reused. `ad_backend` differentiates both
+the native target and WarmupHMC's small coordinate transform.
 
 The first contract is an identity-link `Normal(predictor, fixed_scale)` model
 with default standard-Normal population, log-scale, and innovation priors.
@@ -727,14 +564,7 @@ function BRM.adaptive_centering_problem(
         _score_candidate;
         synchronize! = ir_ -> _sync_sources!(state, ir_),
     )
-    gradient_problem = TuringSimpleRandomInterceptProblem(
-        problem,
-        backend.plan,
-        block,
-        beta_indices,
-        log_scale_index,
-        effect_indices,
-    )
+    gradient_problem = _prepare_dynamicppl_gradient(problem, ad_backend)
     WarmupHMC.ReparametrizedProblem(
         ir, gradient_problem, ad_backend; scoring_plan,
     )

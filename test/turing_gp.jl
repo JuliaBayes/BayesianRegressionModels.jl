@@ -43,8 +43,12 @@ const DP = Turing.DynamicPPL
         mu ~ 1 + hsgp(x; k=4, by=g)
         y ~ Normal(mu, 1)
     end
+    hsgp_partial = @brm begin
+        mu ~ 1 + hsgp(x; k=5, centeredness=0.5)
+        y ~ Normal(mu, 1)
+    end
     builders = (gp_iso, gp_aniso, gp_periodic, hsgp_iso, hsgp_aniso,
-                hsgp_periodic, hsgp_by)
+                hsgp_periodic, hsgp_by, hsgp_partial)
     backends = map(builder -> TuringBRMI(builder(data)), builders)
     @test all(backend -> length(only(backend.plan.predictors).terms) == 1,
               backends)
