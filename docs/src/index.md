@@ -27,7 +27,7 @@ brms-style syntax (`y ~ 1 + a + (1 | g)`, `log(err) ~ 1 + b`,
 representation, then lowers into a backend-specific executor:
 
 - [`TuringBRMI`](@ref) — direct Turing / `DynamicPPL.Model` execution for the
-  [currently supported population GLMs](turing-backend.md).
+  [generic backend capabilities and support contract](turing-backend.md).
 - [`SBBRMI`](@ref) — StanBlocks → Stan source, fit via Pathfinder or full
   warmup HMC (`WarmupHMC.adaptive_warmup_mcmc`).
 
@@ -38,6 +38,10 @@ generated Stan, and the selected Turing model.
 The [Warfarin PK/PD examples](warfarin.md) render both the faithful public
 two-stage workflow and a joint one-posterior model where shared latent PK
 effects feed the PK and PD likelihoods.
+
+The [adaptive HSGP case study](adaptive-centering.md) reproduces a public
+heteroscedastic motorcycle model and compares noncentered, centered, and
+pilot-selected basis-weight coordinates on both executable backends.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""

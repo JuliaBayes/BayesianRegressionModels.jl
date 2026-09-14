@@ -56,6 +56,11 @@ BridgeStan and prior-only RNG draws, alongside unchanged Dirichlet spellings.
 `turing_shared_assignments.jl` checks that shared group effects reach dependent
 assignments before their consumers are evaluated.
 
+`adaptive_hsgp_centering.jl` checks pilot-selection under spectral underflow,
+the partial-coordinate Jacobian, Turing/Enzyme versus StanBlocks/BridgeStan
+density and gradient parity, physical constrained quantities, and the
+distributional model's two distinct zero-mean HSGP bindings.
+
 `stanblocks_preservation_corpus.jl` compares fourteen representative models'
 emitted SLIC/Stan, prepared data, metadata, and frozen replay against an external
 baseline artifact. Capture the artifact on the implementation base, then use
