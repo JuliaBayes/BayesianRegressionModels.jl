@@ -176,29 +176,21 @@ function diagnostics(label, fit)
        divergence_percent=100fit.n_divergent_samples / size(q, 2))
 end
 
-function constrained_draws(stan, fit)
-    names = BS.param_names(stan.density.model)
-    draws = reduce(hcat, (BS.param_constrain(stan.density.model, collect(q))
+function constrained_draws(stan, fit; include_tp=false)
+    names = BS.param_names(stan.density.model; include_tp, include_gq=false)
+    draws = reduce(hcat, (BS.param_constrain(stan.density.model, collect(q); include_tp, include_gq=false)
                          for q in eachcol(fit.posterior_position)))
     names, draws
 end
 
-log_spectral_scale(sigma, rho, omega2) =
-    log(sigma) + 0.25log(2pi) + 0.5log(rho) - 0.25rho^2 * omega2
-
 function gp_draws(stan, fit, data; partial=false)
     names, draws = constrained_draws(stan, fit)
-    index = Dict(names .=> eachindex(names))
-    map((("mu", "hsgp_x", data.c_mu), ("log_sigma", "hsgp_log_sigma_x", data.c_sigma))) do (name, prefix, c)
-        rho = draws[index["$(prefix)_rho_iso"], :]
-        sigma = draws[index["$(prefix)_sigma"], :]
-        coordinate_name = partial ? "beta_partial" : "beta_raw"
-        coordinates = hcat((draws[index["$(prefix)_$(coordinate_name).$j"], :]
-                            for j in 1:DEFAULT_K)...)
-        logs = hcat((log_spectral_scale.(sigma, rho, (j*pi/(2L))^2)
-                     for j in 1:DEFAULT_K)...)
-        weights = coordinates .* exp.(logs .* (1 .- c'))
-        (; name, rho, sigma, coordinates, logs, weights)
+    descriptor = brm_descriptor(stan.sb)
+    map((("mu", :mu), ("log_sigma", :sigma))) do (name, predictor)
+        gp = hsgp_coordinate_draws(descriptor, permutedims(draws), names;
+                                   predictor, term=:hsgp_x)
+        (; name, rho=vec(gp.length_scales), sigma=gp.marginal_sd,
+           coordinates=gp.coordinates, logs=gp.log_scales, weights=gp.physical_weights)
     end
 end
 
@@ -210,11 +202,12 @@ end
 
 function export_fit(stan, fit, data, label, output_dir; partial=false)
     gps = gp_draws(stan, fit, data; partial)
-    phi = [sin(pi / (2L) * (x + L) * j) / sqrt(L) for x in data.x, j in 1:DEFAULT_K]
+    names, constrained = constrained_draws(stan, fit; include_tp=true)
+    descriptor = brm_descriptor(stan.sb)
     curves = NamedTuple[]
     for gp in gps
-        values = phi * gp.weights'
-        gp.name == "log_sigma" && (values = exp.(values))
+        logical = gp.name == "mu" ? :mu : :sigma
+        values = permutedims(brm_output_draws(descriptor, permutedims(constrained), names; logical))
         # Exactly the source's standardized response units and observed times.
         for i in eachindex(data.times)
             qs = quantile(view(values, i, :), [0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95])

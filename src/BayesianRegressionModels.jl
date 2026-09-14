@@ -64,6 +64,7 @@ include("turing_descriptor.jl")
 # rather than being re-derived (differently) in every consumer.
 include("prediction.jl")
 include("adaptive_centering.jl")
+include("posterior_diagnostics.jl")
 
 # Public surface. The macros and value types everything downstream
 # (web-macro, downstream extensions, tests) reaches for.
@@ -141,6 +142,9 @@ export RanefBlock, ranef_blocks, ranef_coordinates,
        population_draws, transport_draws, term_draws, hsgp_population_curve
 export AdaptiveCenteringBlock, adaptive_centering_blocks,
        adaptive_centering_problem, select_hsgp_centeredness
+export brm_output_draws, brm_predictive_draws, hsgp_coordinate_draws, hsgp_transform_draws
+export brm_posteriorplot, brm_ppcplot, brm_pairplot,
+       brm_centerednessplot, brm_centering_lossplot, brm_gradientplot
 
 # Introspection -- model-shape questions answered without re-walking
 # the operations dict.
