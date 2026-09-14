@@ -203,7 +203,8 @@ the posterior sample retained from the second fit.
 
 ```julia
 refit = WarmupHMC.adaptive_warmup_mcmc(
-    Xoshiro(1), selected_partial_problem; n_draws=10_000, monitor_ess=true)
+    Xoshiro(1), selected_partial_problem; n_draws=10_000, monitor_ess=true,
+    nonlinear_adapt=false)
 ```
 
 ![New partial-coordinate samples versus county scales](assets/adaptive-radon/pair-fresh-posthoc.png)
@@ -223,8 +224,9 @@ distinction; partial centering does not guarantee a clean fit.
 Rank-normalized split R-hat, bulk ESS and tail ESS are computed with
 MCMCDiagnosticTools. Each fit has one chain: split R-hat is a within-chain
 diagnostic, not evidence that independent chains agree. Every ESS minimum is
-taken over all 777 unconstrained model coordinates in that fit's reported
-parameterization.
+taken over all 777 unconstrained model (NCP) coordinates: the pilot and
+online rows natively, and the refit row on the mapped model-frame draws
+(`partial_model_frame.jls`), so every fit's row shares one coordinate frame.
 
 ESS alone does not measure computational cost. The [cost comparison below](#compute-cost-and-ess-per-gradient)
 reports measured runtime and exact total and retained-sampling gradient counts
@@ -336,9 +338,9 @@ against its final checkpoint; it never sums cumulative counters across windows.
   steps, **not** Pathfinder initialization or other setup gradient calls.
 - **Sampling gradients** count only appended transitions corresponding to the
   final retained draws. They exclude adaptation and discarded epochs.
-- Each ESS numerator is the **minimum over all 777 sampled model
-  coordinates**, in that fit's reported parameterization, not a sum of ESS
-  across parameters.
+- Each ESS numerator is the **minimum over all 777 sampled model-frame
+  coordinates** — the refit row uses the mapped model-frame draws, so all
+  three rows share one frame — not a sum of ESS across parameters.
 
 | Fit | Total NUTS gradients | Min bulk ESS / total | Sampling gradients | Min bulk ESS / sampling | Fit time |
 | --- | ---: | ---: | ---: | ---: | ---: |

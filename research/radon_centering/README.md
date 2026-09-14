@@ -58,7 +58,7 @@ julia --startup-file=no --project=test \
 julia --startup-file=no --project=test \
   research/radon_centering/report_costs.jl \
   /absolute/offline-directory /absolute/online-directory \
-  /absolute/cost-directory
+  /absolute/diagnostics-directory /absolute/cost-directory
 
 bash research/radon_centering/plots/setup_plots_env.sh
 
@@ -128,6 +128,18 @@ ineligible for completion.
   observations and all 10,000 pilot draws.
 - `figures/figure_manifest.tsv`: hashes binding every PNG to its AlgebraOfVega
   specification.
+
+Stored/model/display frames are declared in `prepare_diagnostics.jl` and
+enforced by record flags: the pilot and online matrices are already model
+(NCP) coordinates, while `partial.jls` holds stored source (partial-u)
+coordinates (`nonlinear_adapt=false`) and is mapped once with
+`WarmupHMC.reparametrize!` into `partial_model_frame.jls`. Pairs, gradients,
+diagnostics and costs consume model-frame matrices only; five independent
+checks bind every refit coordinate, gradient, density/Jacobian and physical
+target back to the raw saved source draws. The refit `diagnostics.tsv` row is
+model-frame ESS on the mapped draws (the producer's returned-frame row is
+superseded here and noted in `diagnostics_provenance.toml`, which also
+fail-closes the regeneration checkout against the producer script hash).
 
 Delivered receipts committed under `results/`: the source audit and coordinate
 map, `fit_costs.tsv` (both exact counters, ESS minima and workflow charge),
