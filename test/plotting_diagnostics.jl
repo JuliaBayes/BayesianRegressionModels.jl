@@ -26,6 +26,16 @@ end
     @test_throws ErrorException brm_posteriorplot(draws; probs=Float64[])
     @test_throws ErrorException brm_posteriorplot(fill(NaN, 2, 3))
 
+    observations = (; x=[2, 4, 6], response=[5.0, 8.0, 11.0])
+    observed = to_vegalite(brm_posteriorplot(draws; x=observations.x, observations);
+                            interactive=false)
+    @test any(d -> get(d, "size", nothing) == 24.5, objects(observed))
+    larger_observed = to_vegalite(brm_posteriorplot(draws; x=observations.x,
+        observations, observation_markersize=10); interactive=false)
+    @test any(d -> get(d, "size", nothing) == 50, objects(larger_observed))
+    @test filter(d -> haskey(d, "values"), objects(observed)) ==
+          filter(d -> haskey(d, "values"), objects(larger_observed))
+
     rows = [(; coordinate=Float64(i), gradient=-2.0i,
                configuration=c, basis_label="Basis 01")
             for c in ("NCP", "Post-hoc", "Online") for i in 1:2000]
