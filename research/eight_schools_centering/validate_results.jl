@@ -128,7 +128,7 @@ function validate_results(fit_dir, diagnostics_dir)
             @test parse(Int, diagnostics["sampling_gradient_evaluations"][row]) ==
                 fit.sampling_gradient_evaluations
             @test diagnostics["ess_coordinate_scope"][row] ==
-                "mu, log(tau), theta_effect_1:8"
+                "mu, log(tau), z_1:8 (NCP model frame)"
         end
         @test parse(Int, workflow["total_evaluation_counter"][1]) ==
             pilot.total_gradient_evaluations + partial_target.total_gradient_evaluations

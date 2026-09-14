@@ -215,11 +215,12 @@ refit = WarmupHMC.adaptive_warmup_mcmc(
     nonlinear_adapt=false)
 ```
 
-Adaptation is off here on purpose: the coordinates are already chosen, so
-the refit must not re-adapt them. Saved draws keep both frames:
-`partial.jls` holds the source draws `u`, `partial_target.jls` the same
-draws back-transformed to model coordinates. The refit diagnostics below
-are computed in model coordinates, like the other two fits.
+Nonlinear coordinate adaptation is frozen here: the coordinates are already
+chosen, so the refit must not re-adapt them. Ordinary metric and step-size
+adaptation remains enabled. Saved draws keep both frames: `partial.jls`
+holds the source draws `u`, `partial_target.jls` the same draws
+back-transformed to model coordinates. The refit diagnostics below are
+computed in model coordinates, like the other two fits.
 
 ![Post-hoc selected partial coordinates](assets/adaptive-eight-schools/post-hoc_scatter.png)
 
@@ -242,7 +243,8 @@ that found this out; the coordinates alone do not guarantee a cheaper fit.
 
 Rank-normalized split R-hat, bulk ESS and tail ESS are computed with
 MCMCDiagnosticTools over all 10 unconstrained model coordinates (`mu`,
-`log(tau)`, and the eight school coordinates). Each fit has one chain:
+`log(tau)`, and the eight noncentered school coordinates `z`) — not the
+physical effects. Each fit has one chain:
 split R-hat is a within-chain diagnostic, not evidence that independent
 chains agree.
 
