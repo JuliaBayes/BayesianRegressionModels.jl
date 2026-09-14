@@ -1267,7 +1267,10 @@ _brm_term_parameter_bindings(::typeof(mo1), _t) =
 function _brm_term_parameter_bindings(::typeof(hsgp), t)
     rho = _sb_gp_iso(getkwargs(t), :hsgp) ? :rho_iso : :rho
     haskey(getkwargs(t), :by) && return (; length_scale=rho, sd=:sigma)
-    (; length_scale=rho, sd=:sigma, basis_weights=:beta_raw)
+    n_basis = _brm_term_coordinate_count(hsgp, t, Val(:basis_weights), nothing, nothing)
+    partial = any(!iszero, _brm_hsgp_centeredness(getkwargs(t), n_basis))
+    (; length_scale=rho, sd=:sigma,
+       basis_weights=partial ? :beta_partial : :beta_raw)
 end
 _brm_term_parameter_bindings(::typeof(dar), _t) =
     (; ar=:beta, sd=:sigma, innovations=:z)
