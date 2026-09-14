@@ -66,7 +66,7 @@ That is an architectural capability—not a claim that every implementation alre
 ::: {.notes}
 Lead by taking brms seriously. It is the mature reference point, not a straw man. The comparison is deliberately about the marginal cost and coherence of future additions. “Architecture-enabled” means a seam exists and engineering is still required.
 
-Sources: current brms overview and `brm()` reference (brms 2.23.2); BRM `docs/refactoring.md`, `docs/src/turing-backend.md`, and `docs/src/adaptive-centering.md` at accepted case revision `5ccf212831d8e3af10c9fc47305cd4dd0752c5d8` (published in merge `5ce974cec08e620bcbe0f2d54b36f3649d889dbf`).
+Sources: current brms overview and `brm()` reference (brms 2.23.2); BRM `docs/refactoring.md`, `docs/src/turing-backend.md`, and `docs/src/adaptive-centering.md` at corrected case revision `ea27c18ed2517e3061f441971f561235f48cceb8`, canonically integrated in `2db645e5e9bdc59465ecdaa18d039460f682cda2`.
 :::
 
 ## One declaration; two computational realizations
@@ -209,7 +209,7 @@ Untranslated Julia distributions and functions, DynamicPPL model composition, na
 
 **Shared statistical contract**
 
-Population/distributional predictors, broad priors and likelihoods, group effects, advanced terms, fitted preprocessing, replay, and the demonstrated HSGP centering transport—within stated subsets.
+Population/distributional predictors, broad priors and likelihoods, group effects, advanced terms, fitted preprocessing, replay, and fixed HSGP centeredness—within stated subsets.
 :::
 ::::
 
@@ -263,11 +263,11 @@ The preferred coordinate can differ by group, term, frequency, and stage of adap
 The classic centered/noncentered tradeoff depends on information. Stan’s user guide explicitly notes noncentering tends to help when the data weakly identify the lower-level parameters, while centering can be more efficient when information is strong. Papaspiliopoulos, Roberts, and Sköld (2007) develop centered, noncentered, and partially noncentered parameterizations. Gorinova et al. (2020) demonstrates automatic partial reparameterization can avoid catastrophic choices and sometimes outperform both endpoints.
 :::
 
-## One formula; two online geometry adapters
+## One formula; source-faithful geometry study
 
-<div class="section-kicker">Demonstrated · 133-row motorcycle case</div>
+<div class="section-kicker">Demonstrated · all 133 rows · 20 basis functions per GP</div>
 
-:::: {.grid-2 .wide-left}
+:::: {.grid-2 .wide-right .case-study-grid}
 ::: {.card .accent-teal .tight .case-model}
 <span class="label demo">Shared statistical model</span>
 
@@ -279,90 +279,57 @@ y(t) &\sim \mathcal N\!\left(\mu(t),\sigma(t)\right)
 \end{aligned}
 $$
 
-Two same-axis HSGPs, each with eight basis frequencies. Using Normal’s standard-deviation convention, for every frequency:
+For each GP, $\log \ell$ and $\log \alpha$ have $\mathcal N(0,4)$ priors. BRM uses the equivalent positive-scale form $\ell,\alpha\sim\operatorname{LogNormal}(0,4)$ with the unconstraining Jacobian.
 
 $$
 u_k\sim\mathcal N(0,s_k^{c_k}),\qquad
 \beta_k=s_k^{1-c_k}u_k
 $$
-
-$c_k=0$ is noncentered; $c_k=1$ is centered. The physical function is unchanged.
 :::
 
-::: {.card .accent-violet .tight .case-online}
-<span class="status both">Both · online</span>
+::: {.card .accent-violet .tight .case-source-figure}
+<span class="status stan">StanBlocks · source-audited</span>
 
-**Warmup learns 16 coordinates**
+<img src="../../src/assets/adaptive-hsgp/selected_centeredness.png" alt="Selected centeredness for all 20 frequencies in the mean and log-standard-deviation Gaussian processes">
 
-- same transform, Jacobian, candidate grid, and score
-- one $c_k$ per mean and log-scale basis weight
-- StanBlocks discovers compiler-owned BridgeStan coordinates
-- Turing discovers DynamicPPL ranges for the admitted model shape
-- both call `adaptive_centering_problem` and WarmupHMC
+<div class="case-flow"><span><b>1</b> noncentered pilot</span><span><b>2</b> choose each $c_k$</span><span><b>3</b> fresh partial refit</span></div>
 :::
 ::::
 
-<div class="case-invariant"><strong>Same target.</strong> Backend-native gradients and finite warmup trajectories may select different valid coordinates.</div>
+<div class="case-invariant"><strong>Two fits, not three.</strong> Centered geometry is inspected by transforming the pilot; online adaptation is a separate extension.</div>
 
-<div class="case-provenance">Generable companion `0d00b853` · `MASS::mcycle` SHA-256 `b89a1e4…f9801` · BRM case `5ccf212`</div>
+<div class="case-provenance">Generable companion `0d00b853` · `MASS::mcycle` SHA-256 `b89a1e4…f9801` · corrected BRM case `ea27c18` / canonical `2db645e`</div>
 
 ::: {.notes}
-The HSGP approximation is from Riutort-Mayol et al. (2023). The translation follows the public Generable motorcycle example at immutable companion revision `0d00b8535e2c20c49017d03c7b060940eb8e7041`: all 133 `MASS::mcycle` rows, acceleration divided by its sample standard deviation, time min–max mapped to `[-1,1]`, the sine basis evaluated on `[-1.5,1.5]`, and zero-location `LogNormal(0,4)` HSGP length-scale and marginal-scale priors. The committed data come from Rdatasets revision `1dcc2bf5f955cc1224a3e1307256e1fe86b68dae` and have SHA-256 `b89a1e4eb0391a982b32be3e378df00e8593ff9971e9425e9c5d7929b74f9801`.
+The HSGP approximation is from Riutort-Mayol et al. (2023). This is the source-faithful replacement for the earlier bounded smoke study: all 133 `MASS::mcycle` rows, acceleration divided by its sample standard deviation, time mapped to `[-1,1]`, 20 sine functions per GP on `[-1.5,1.5]`, the source's `1/sqrt(1.5)` normalization, and no population intercept. The source puts `Normal(0,4)` on each log length scale and log marginal standard deviation; BRM's `LogNormal(0,4)` positive parameters are equivalent only with the matching unconstraining Jacobian.
 
-The shared coordinate transform and Jacobian preserve the physical target. StanBlocks uses compiler-owned coordinate metadata and BridgeStan/Enzyme target gradients. The native Turing wrapper delegates density evaluation to the exact DynamicPPL target and supplies the audited closed-form target gradient for this bounded two-HSGP Gaussian model; Enzyme differentiates the small shared coordinate transport. No BridgeStan names, indices, or draws enter the Turing path. Accepted BRM revision: `5ccf212831d8e3af10c9fc47305cd4dd0752c5d8`, published in merge `5ce974cec08e620bcbe0f2d54b36f3649d889dbf`.
+The original compiled noncentered target passes 26 density, all-component-gradient, coordinate-map, and prior/Jacobian checks. The original adaptive Stan program and BRM partial model pass 51 checks at 16 saved posterior positions. All 40 source-literal centeredness selections agree with BRM's automated result, and the full-record/figure gate passes 8,221 checks. The corrected case was reviewed at `ea27c18ed2517e3061f441971f561235f48cceb8` and integrated canonically as `2db645e5e9bdc59465ecdaa18d039460f682cda2`.
 :::
 
-## Same target; learned coordinates need not match
+## Pilot → partial refit → online extension
 
-<div class="section-kicker">Demonstrated execution evidence · not an efficiency claim</div>
+<div class="section-kicker">Full-budget evidence · StanBlocks sampled · Turing gated</div>
 
-:::: {.grid-2}
-::: {.card .accent-teal .tight .learned-card .stan-learned}
-<span class="status stan">StanBlocks learned $c$</span>
+:::: {.grid-2 .wide-left .case-result-grid}
+::: {.card .accent-violet .tight .case-result-figure}
+<img src="../../src/assets/adaptive-hsgp/online_centeredness.png" alt="Online warmup centeredness compared with the separate offline pilot selection for both Gaussian processes">
 
-<div class="c-row"><b>mean</b><div class="cstrip">
-<span style="--c:70%"><b>.7</b></span><span style="--c:60%"><b>.6</b></span><span style="--c:80%"><b>.8</b></span><span style="--c:80%"><b>.8</b></span><span style="--c:50%"><b>.5</b></span><span style="--c:90%"><b>.9</b></span><span style="--c:90%"><b>.9</b></span><span style="--c:60%"><b>.6</b></span>
-</div></div>
-
-<div class="c-row"><b>log $\sigma$</b><div class="cstrip">
-<span style="--c:90%"><b>.9</b></span><span style="--c:90%"><b>.9</b></span><span style="--c:90%"><b>.9</b></span><span style="--c:90%"><b>.9</b></span><span style="--c:90%"><b>.9</b></span><span style="--c:40%"><b>.4</b></span><span style="--c:90%"><b>.9</b></span><span style="--c:80%"><b>.8</b></span>
-</div></div>
+<div class="tiny muted">Different finite trajectories and candidate grids need not choose identical coordinates; both transforms preserve the same physical target.</div>
 :::
 
-::: {.card .accent-blue .tight .learned-card .turing-learned}
-<span class="status turing">Turing learned $c$</span>
-
-<div class="c-row"><b>mean</b><div class="cstrip">
-<span style="--c:100%"><b>1</b></span><span style="--c:100%"><b>1</b></span><span style="--c:100%"><b>1</b></span><span style="--c:50%"><b>.5</b></span><span style="--c:100%"><b>1</b></span><span style="--c:80%"><b>.8</b></span><span style="--c:100%"><b>1</b></span><span style="--c:40%"><b>.4</b></span>
-</div></div>
-
-<div class="c-row"><b>log $\sigma$</b><div class="cstrip">
-<span style="--c:90%"><b>.9</b></span><span style="--c:100%"><b>1</b></span><span style="--c:60%"><b>.6</b></span><span style="--c:50%"><b>.5</b></span><span style="--c:20%"><b>.2</b></span><span style="--c:0%"><b>0</b></span><span style="--c:0%"><b>0</b></span><span style="--c:0%"><b>0</b></span>
-</div></div>
+::: {.case-result-stack}
+<div class="card accent-coral case-result"><span class="label demo">Noncentered pilot</span><strong>10,000 draws · 34 divergences</strong><span>max split R-hat 1.0012 · min bulk/tail ESS 2,514 / 2,886</span></div>
+<div class="card accent-amber case-result"><span class="label demo">Fresh selected-partial refit</span><strong>10,000 draws · 16 divergences</strong><span>max split R-hat 1.0007 · min bulk/tail ESS 2,533 / 1,797</span></div>
+<div class="card accent-teal case-result"><span class="label demo">Separate online extension</span><strong>10,000 draws · 0 divergences</strong><span>max split R-hat 1.0018 · min bulk/tail ESS 2,318 / 2,775</span></div>
 :::
 ::::
 
-<div class="c-scale"><span>frequency 1</span><span>$c=0$ noncentered → $c=1$ centered</span><span>frequency 8</span></div>
-
-:::: {.grid-2 .case-receipts}
-::: {.card .accent-teal .tight}
-<span class="label demo">Online receipt · each backend</span>
-
-**133 rows · $k=8\times2$ · 20 retained draws**<br>
-120-evaluation warmup · `Xoshiro(0x20260913)` · **0 divergences**
-:::
-::: {.card .accent-amber .tight}
-<span class="label boundary">Bounded offline comparison</span>
-
-Noncentered divergences: **31 / 29** → centered/adaptive: <strong class="nowrap">0 / 0</strong><br>
-R-hat **2.04–6.64**, ESS **2.07–2.86** → **fails convergence gate**
-:::
-::::
+<div class="case-boundaries"><div><strong>One-chain caveat.</strong> Split R-hat is within-chain; 34 → 16 → 0 is evidence from these runs, not a general efficiency guarantee.</div><div><span class="status planned">Turing gate</span> No corrected samples until matched target values and warmed gradient-runtime parity pass.</div></div>
 
 ::: {.notes}
-The centeredness cells are the committed `results/online_centeredness.tsv` and `results/online_turing_centeredness.tsv` values. Both online runs use all 133 rows, two eight-frequency HSGPs, 20 retained draws, a 120-evaluation warmup budget, and `Xoshiro(0x20260913)`; each reports zero divergences. These are learned during warmup, not selected from or recycled from an offline pilot. Different values are expected: semantic parity means the transform, Jacobian, score, and target are preserved, not that finite backend-native trajectories select the same $c$.
+The source reproduction has two offline fits: a noncentered pilot and a fresh selected-partial refit. Each uses all 133 rows, two 20-frequency HSGPs, `Xoshiro(1)`, 10,000 requested and retained draws, and unchanged WarmupHMC defaults. The pilot's `0:0.01:1` loss search chooses one centeredness per weight. The online StanBlocks run is a separate extension using the same full model and defaults, with warmup choosing from `0:0.1:1`; it is not a third fit in the source reproduction.
 
-The offline six-fit artifact uses four chains, 75 retained draws per chain, a 350-gradient first warmup window, and seeds `0x6a09e667:0x6a09e66a`. Centered and pilot-selected fixed geometry remove the noncentered divergences on both backends, but all maximum R-hat values are above 2 and minimum ESS values are about 2–3. It is pipeline smoke-test evidence only: do not rank coordinates or backend wall time from it. The source-faithful model uses 20 basis functions; this bounded documentation artifact uses 8.
+The divergences are 34, 16, and 0. Keep the limitations visible: each result is one chain, split R-hat is within-chain rather than between-independent-chain evidence, and the partial refit's minimum tail ESS is lower than the pilot's. The online result is encouraging but does not guarantee other seeds, data, or models. Turing model generation exists, but corrected sampling is disabled: the explicit length-scale prior retained the default HSGP lower bound and the gradient path remains too slow. Finite gradients or an old 20-draw check do not satisfy the matched-value and warmed-runtime gate.
 :::
 
 ## 5 · Replay and outputs are part of model semantics
@@ -435,7 +402,7 @@ Replay is a statistical issue: refitting a factor level map, spline basis, or HS
   <div class="rowhead">Composition</div><div class="now">Callable priors/likelihoods, modifiers, typed terms</div><div class="next">One extension package carrying shared term semantics across backends</div><div class="open">Can capability inference replace family/term admission tables entirely?</div>
   <div class="rowhead">Structure</div><div class="now">Multi-axis kernels; PK, renewal, IPM examples</div><div class="next">Reusable ODE/state-space cells with standard replay/output traits</div><div class="open">How much structure belongs in formula syntax versus typed functions?</div>
   <div class="rowhead">Backends</div><div class="now">Generated Stan + direct Turing from one BRMI</div><div class="next">Backend-specific marginalization, AD, sampler, and kernel choices</div><div class="open">Which semantic equivalence tests are sufficient across executors?</div>
-  <div class="rowhead">Geometry</div><div class="now">Fixed + online HSGP centering on StanBlocks; exact two-HSGP native Turing path</div><div class="next">Generalize shared geometry metadata, transport, and gradients to more term classes</div><div class="open">How should geometry selection interact with mass-matrix and stepsize adaptation at scale?</div>
+  <div class="rowhead">Geometry</div><div class="now">Source-faithful fixed + online HSGP centering on StanBlocks; Turing sampling gate closed</div><div class="next">Prove matched Turing target values and warmed gradient runtime; generalize beyond HSGP</div><div class="open">How should geometry selection interact with mass-matrix and stepsize adaptation at scale?</div>
   <div class="rowhead">Replay</div><div class="now">Frozen transforms, explicit new-group semantics; common descriptor/operation API within admitted subsets</div><div class="next">Extend output and transport coverage; close remaining backend differences</div><div class="open">How should stored fits survive backend evolution?</div>
 </div>
 
@@ -469,11 +436,11 @@ Pause here for a general audience. The rest is collaborator appendix. Do not imp
 <div class="comparison-row"><div>Advanced terms</div><div><span class="status both">Both · subsets</span></div><div>`s`, `t2`, `me`, `mo`, AR/DAR, GP/HSGP, structured fields; custom SLIC needs a Julia method.</div></div>
 <div class="comparison-row"><div>Responses & evidence</div><div><span class="status both">Both · subsets</span></div><div>Multiple/joint/ordinal, weights, missingness, truncation/censoring; some combinations fail closed.</div></div>
 <div class="comparison-row"><div>Replay & prediction</div><div><span class="status both">Both · subsets</span></div><div>Frozen transforms and explicit group resampling; output surfaces are not yet identical.</div></div>
-<div class="comparison-row"><div>Adaptive HSGP geometry</div><div><span class="status both">Both · narrow</span></div><div>Shared transform/score; broad ungrouped-SE StanBlocks path, exact two-HSGP Gaussian Turing path.</div></div>
+<div class="comparison-row"><div>Adaptive HSGP geometry</div><div><span class="status stan">StanBlocks only</span></div><div>Source-faithful pilot/refit and online sampling are verified; Turing generation exists but sampling remains gated.</div></div>
 <div class="comparison-row"><div>Untranslated Julia callable</div><div><span class="status turing">Turing only</span></div><div>StanBlocks requires an explicit Stan translation and executable companion paths.</div></div>
 
 ::: {.notes}
-This table is a talk-sized summary of `docs/src/turing-backend.md` and `docs/src/adaptive-centering.md` at `5ccf212831d8e3af10c9fc47305cd4dd0752c5d8`. “Both” never means identical code, gradients, learned centeredness, or HMC performance. It means admitted statistical semantics match within the described subset.
+This table is a talk-sized summary of `docs/src/turing-backend.md` and the corrected `docs/src/adaptive-centering.md` at canonical revision `2db645e5e9bdc59465ecdaa18d039460f682cda2`. “Both” never means identical code, gradients, learned centeredness, or HMC performance. It means admitted statistical semantics match within the described subset. The HSGP row deliberately says StanBlocks only because generating the Turing model is not permission to sample it.
 :::
 
 ## What “shared preparation” contains
@@ -618,12 +585,12 @@ Use this slide when a collaborator asks whether the shared plan “solves” bac
 ::: {.card .accent-teal .tight}
 <span class="label demo">Repository trail</span>
 
-1. `docs/refactoring.md` — architecture and fitted preparation
-2. `docs/src/feature-atlas.md` — executable four-pane examples
-3. `docs/src/turing-backend.md` — parity and boundaries
-4. `docs/backend_comparisons.jl` — generated evidence surface
-5. `test/backend_comparisons.jl` and focused backend tests
-6. `research/adaptive_centering/` — case-study provenance and harness
+1. [`docs/refactoring.md`](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/docs/refactoring.md) — architecture and fitted preparation
+2. [`docs/src/feature-atlas.md`](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/docs/src/feature-atlas.md) — executable four-pane examples
+3. [`docs/src/turing-backend.md`](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/docs/src/turing-backend.md) — parity and boundaries
+4. [`docs/backend_comparisons.jl`](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/docs/backend_comparisons.jl) — generated evidence surface
+5. [`test/backend_comparisons.jl`](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/test/backend_comparisons.jl) and focused backend tests
+6. [`research/adaptive_centering/`](https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/adaptive_centering) — case-study provenance and harness
 :::
 ::: {.card .accent-blue .tight}
 <span class="label brms">Primary comparison sources</span>
