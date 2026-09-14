@@ -1,7 +1,7 @@
 ````@raw html
 ---
 title: Adaptive HSGP centering
-description: Reproducing the motorcycle HSGP case study: a noncentered pilot, per-frequency partial centering, and a fresh posterior fit.
+description: "Reproducing the motorcycle HSGP case study: a noncentered pilot, per-frequency partial centering, and a fresh posterior fit."
 ---
 ````
 
