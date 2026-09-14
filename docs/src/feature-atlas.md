@@ -91,6 +91,8 @@ end)((;
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+using LogExpFunctions: logit
+
 binomial = (@brm begin
     logit(p) ~ 1 + x
     successes ~ Binomial(trials, p)

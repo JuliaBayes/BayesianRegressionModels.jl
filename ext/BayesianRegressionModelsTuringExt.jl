@@ -578,9 +578,20 @@ _random_effect_args(component) = isempty(component.random_effects) ?
 
 function _zero_correlation_scales(intercept_index, intercept_scale,
                                   slope_scales)
-    intercept_index == 0 && return slope_scales
-    vcat(slope_scales[1:(intercept_index - 1)], [intercept_scale],
-         slope_scales[intercept_index:end])
+    # DynamicPPL can infer a sampled local as Union{Nothing,T}.  Allocate from
+    # the realized slope type so Enzyme never receives an isbits-union array.
+    scales = Vector{typeof(first(slope_scales))}(
+        undef, length(slope_scales) + (intercept_index > 0))
+    slope_index = 1
+    for term_index in eachindex(scales)
+        if term_index == intercept_index
+            scales[term_index] = intercept_scale
+        else
+            scales[term_index] = slope_scales[slope_index]
+            slope_index += 1
+        end
+    end
+    scales
 end
 
 function _noncentered_group_coefficients(scales, z_flat, n_groups)
@@ -802,13 +813,21 @@ Turing.@model function _brm_zero_correlation_group_effect(
     n_slopes = n_terms - (intercept_index > 0)
     intercept_scale = residual_scale
     if intercept_index > 0 && isnothing(residual_scale)
-        intercept_scale ~ _brm_group_scale_distribution(sd_priors[intercept_index])
+        intercept_prior = sd_priors[intercept_index]
+        if isnothing(intercept_prior)
+            # Match the established random-intercept and Stan default geometry.
+            log_intercept_scale ~ Normal()
+            intercept_scale = exp(log_intercept_scale)
+        else
+            intercept_scale ~ _brm_group_scale_distribution(intercept_prior)
+        end
     end
-    tau_slopes = fill(residual_scale, n_slopes)
     if isnothing(residual_scale)
         tau_slopes ~ product_distribution(
             [_brm_group_scale_distribution(sd_priors[i]) for i in eachindex(sd_priors)
              if i != intercept_index])
+    else
+        tau_slopes = fill(residual_scale, n_slopes)
     end
     scales = _zero_correlation_scales(
         intercept_index, intercept_scale, tau_slopes)
@@ -826,13 +845,21 @@ Turing.@model function _brm_centered_zero_correlation_group_effect(
     n_slopes = n_terms - (intercept_index > 0)
     intercept_scale = residual_scale
     if intercept_index > 0 && isnothing(residual_scale)
-        intercept_scale ~ _brm_group_scale_distribution(sd_priors[intercept_index])
+        intercept_prior = sd_priors[intercept_index]
+        if isnothing(intercept_prior)
+            # Match the established random-intercept and Stan default geometry.
+            log_intercept_scale ~ Normal()
+            intercept_scale = exp(log_intercept_scale)
+        else
+            intercept_scale ~ _brm_group_scale_distribution(intercept_prior)
+        end
     end
-    tau_slopes = fill(residual_scale, n_slopes)
     if isnothing(residual_scale)
         tau_slopes ~ product_distribution(
             [_brm_group_scale_distribution(sd_priors[i]) for i in eachindex(sd_priors)
              if i != intercept_index])
+    else
+        tau_slopes = fill(residual_scale, n_slopes)
     end
     scales = _zero_correlation_scales(
         intercept_index, intercept_scale, tau_slopes)

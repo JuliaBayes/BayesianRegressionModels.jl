@@ -526,6 +526,8 @@ are NOT priors here — they declare a parameter and stay in
 The default `show(::BRMI)` is unchanged; this is an explicit, opt-in view.
 
 ```jldoctest
+julia> using BayesianRegressionModels
+
 julia> brmi = @brm (; x=[1.0, 2.0], y=[0.1, 0.2]) begin
            mu ~ 1 + x
            y ~ Normal(mu, 0.5)
