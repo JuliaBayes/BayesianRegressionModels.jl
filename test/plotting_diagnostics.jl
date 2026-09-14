@@ -60,4 +60,24 @@ end
     loss_spec = to_vegalite(brm_centering_lossplot(losses); interactive=false)
     @test any(d -> haskey(d, "values") && length(d["values"]) == 11, objects(loss_spec))
     @test any(d -> get(d, "field", nothing) == "loss", objects(loss_spec))
+
+    loss_rows = Base.get_extension(BayesianRegressionModels,
+        :BayesianRegressionModelsAlgebraOfVegaExt).loss_plot_rows
+    inputs = [(; configuration=c, predictor="Mean", basis_label="Basis 01",
+                 segment=string(i), centeredness=0.5(i-1), loss=v)
+              for (c, vs) in (("A", [-0.8, -0.5, -0.2]), ("B", [2.0, 3.0, 4.0]))
+              for (i, v) in enumerate(vs)]
+    saved = copy(inputs)
+    normalized = loss_rows(inputs, :minmax)
+    @test inputs == saved
+    @test getproperty.(normalized, :raw_loss) == getproperty.(inputs, :loss)
+    @test getproperty.(normalized, :loss) ≈ [0.0, 0.5, 1.0, 0.0, 0.5, 1.0]
+    @test argmin(getproperty.(normalized[1:3], :loss)) == argmin(getproperty.(inputs[1:3], :loss))
+    @test loss_rows(inputs, :none) === inputs
+    @test_throws ArgumentError loss_rows(inputs, :unknown)
+    special = [merge(first(inputs), (; loss=v)) for v in (2.0, 2.0, missing, Inf)]
+    result = loss_rows(special, :minmax)
+    @test getproperty.(result[1:2], :loss) == [0.0, 0.0]
+    @test ismissing(result[3].loss)
+    @test result[4].loss == Inf
 end

@@ -45,8 +45,12 @@ compiled target. The output includes all 240,000 coordinate–gradient rows for
 two GPs and four basis functions, plus the 72 numerical checks.
 
 The second command generates AoV plots, PNGs, and `kb-aov/v1` preview fences.
-Each preview contains all 10,000 saved draws per panel for bases 1, 2, 19 and 20,
-with no display thinning. It writes one fence per GP as well as a combined file;
+The default display uses 1,000 evenly spaced saved draws per panel for bases
+1, 2, 19 and 20: 12,000 transparent points per GP figure. This is the user's
+chosen display subset, not a fitting or loss-calculation limit. No KDE,
+binning, smoothing, or fitted regression line is applied. Calling
+`gradient_preview(dir; draws_per_facet=nothing)` keeps every saved point.
+It writes one fence per GP as well as a combined file;
 delivery requires the KB's approved large-payload plot support (the old small
 inline limits are not a scientific-data limit). Separate columns use separate
 fits. Both axes are independent in every facet. Coordinates and gradients
@@ -60,6 +64,13 @@ WarmupHMC's public `candidate_scoring_losses` API. Its objective is the actual
 default position–gradient correlation (`w₁=0`), replayed with unit weights on
 the saved draws, not the original online trajectory stream. Missing/nonfinite
 losses are retained in that table rather than replaced or labeled as history.
+The loss preview uses `brm_centering_lossplot(...; normalization=:minmax)`:
+each configuration/GP/basis curve is independently mapped to [0,1], matching
+the offline figure. Its minimum is unchanged, but absolute correlation
+magnitudes cannot be compared after this display normalization. Raw values
+are retained in the input table and in the plot's `raw_loss` column;
+`online_loss_preview(dir; normalization=:none)` shows the raw correlations.
+Constant curves map to zero; missing/nonfinite entries remain gaps.
 
 ## Reusable native pieces
 
@@ -72,5 +83,5 @@ losses are retained in that table rather than replaced or labeled as history.
 
 Input matrices to these helpers are **draws × coordinates**, unlike WarmupHMC's
 returned **coordinates × draws** matrices. Complete AoV export acceptance,
-unthinned KB preview delivery, and public documentation integration remain work
+KB preview delivery, and public documentation integration remain work
 in progress; this preview is not a new claim of case-study completion.

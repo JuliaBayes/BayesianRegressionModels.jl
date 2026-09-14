@@ -46,8 +46,42 @@ function centerednessplot(rows; title="Selected centeredness", compare=false)
                scales=scales(Color=(; palette=COLORS)))
 end
 
-"""Candidate losses supplied by the selector, with no loss formula in the renderer."""
-function lossplot(rows; ylabel="Loss", title="Centering objective", configurations=false)
+"""Normalize display values per whole curve, never per disconnected segment."""
+function loss_plot_rows(rows, normalization)
+    normalization in (:none, :minmax) || throw(ArgumentError(
+        "Loss plot normalization must be :none or :minmax"))
+    normalization == :none && return rows
+    key(r) = (get(r, :configuration, nothing), r.predictor, r.basis_label)
+    ranges = Dict{Any,Tuple{Float64,Float64}}()
+    for r in rows
+        ismissing(r.loss) || !isfinite(r.loss) || begin
+            low, high = get(ranges, key(r), (Float64(r.loss), Float64(r.loss)))
+            ranges[key(r)] = (min(low, r.loss), max(high, r.loss))
+        end
+    end
+    map(rows) do r
+        value = if ismissing(r.loss) || !isfinite(r.loss)
+            r.loss
+        else
+            low, high = ranges[key(r)]
+            high == low ? 0.0 : (r.loss - low) / (high - low)
+        end
+        merge(r, (; raw_loss=r.loss, loss=value))
+    end
+end
+
+"""Candidate losses supplied by the selector, with optional per-curve display normalization.
+
+`normalization=:minmax` maps each (configuration, predictor, basis) curve to
+[0,1], preserving `raw_loss` and leaving the input unchanged. Constant curves
+map to zero; missing/nonfinite values remain missing/nonfinite. Only curve
+shape and minima should be compared after normalization, not absolute losses.
+"""
+function lossplot(rows; ylabel=nothing, title="Centering objective", configurations=false,
+                  normalization=:none)
+    rows = loss_plot_rows(rows, normalization)
+    ylabel = isnothing(ylabel) ? (normalization == :minmax ?
+        "Loss (per-curve min–max [0, 1])" : "Loss") : ylabel
     axes = configurations ? mapping(:centeredness => "Candidate centeredness", :loss => ylabel;
         col=:configuration, row=:predictor, color=:basis_label, group=:segment) :
         mapping(:centeredness => "Candidate centeredness", :loss => ylabel;
