@@ -30,6 +30,14 @@ to describe the result shape while retaining the original callable.
 The extension generates a body at construction, passes it through DynamicPPL's
 model compiler, and stores an immediately callable evaluator. Density and
 gradient evaluation do not interpret formula ASTs or use `invokelatest`.
+The emitted `@model brm_model(...)` takes the used data, design matrices, and
+captured callables as ordinary arguments with meaningful names. A Gaussian observation is
+`y[i] ~ Normal(mu[i], sigma)`; truncation and censoring compose distribution
+calls directly. Observation structure is resolved while constructing the AST,
+so the sampled body does not dispatch on BRM response metadata. Weighted
+densities and interval evidence retain their dedicated mathematical adapters.
+`turing_model_source` returns this executable definition, with explicit module
+bindings; it can be evaluated with `values(backend.model.args)...` as inputs.
 An unsupported operation reports the missing capability. For example, a custom
 distribution may supply density evaluation but lack predictive RNG or a latent
 support transform; these are separate requirements.

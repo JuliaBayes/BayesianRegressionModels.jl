@@ -777,8 +777,8 @@ end
           normal_likelihood atol=1e-12 rtol=1e-12
 
     ext = Base.get_extension(BRM, :BayesianRegressionModelsTuringExt)
-    objective_normal = ext._brm_generic_observation(
-        Normal(mu[2], normal_params.sigma), nothing, normal_weight, 2)
+    objective_normal = ext._BRMObjectiveWeight(
+        Normal(mu[2], normal_params.sigma), normal_weight.values[2])
     @test rand(Xoshiro(41), objective_normal) ==
           rand(Xoshiro(41), Normal(mu[2], normal_params.sigma))
 
@@ -818,9 +818,8 @@ end
         for i in eachindex(poisson_data.count)
     ]
 
-    objective_poisson = ext._brm_generic_observation(
-        Poisson(rate[2]), poisson_modifier, poisson_weight, 2)
     base_poisson = censored(Poisson(rate[2]); lower=0, upper=4)
+    objective_poisson = ext._BRMObjectiveWeight(base_poisson, poisson_weight.values[2])
     @test rand(Xoshiro(52), objective_poisson) ==
           rand(Xoshiro(52), base_poisson)
 

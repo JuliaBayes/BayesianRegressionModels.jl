@@ -38,7 +38,7 @@ end
     @test all(backend -> length(backend.plan.predictors) == 1, backends)
     @test all(backend -> length(only(backend.plan.predictors).terms) == 1,
               backends)
-    @test all(backend -> length(backend.model.args.term_models) == 1, backends)
+    @test all(backend -> !hasproperty(backend.model.args, :term_models), backends)
     @test all(backend -> occursin("term_mu_1", string(BRM.turing_model_source(backend))),
               backends)
     @test BRM.getf(only(only(backends[1].plan.predictors).terms).state.sd_prior) <:
