@@ -144,8 +144,7 @@ function sample_source_fit(target, label, output_dir)
     isfile(result_path) && error(
         "A completed $label fit already exists. Use render_results to replot it; do not resample.")
     callback = (state, stage) -> begin
-        println("boundary\t", label, '\t', stage, "\twindow=", state.outer_counter,
-            "\tretained=", size(state.posterior_position, 2))
+        println("boundary\t", label, '\t', stage, "\twindow=", state.outer_counter)
         flush(stdout)
         isfile(joinpath(output_dir, "STOP"))
     end

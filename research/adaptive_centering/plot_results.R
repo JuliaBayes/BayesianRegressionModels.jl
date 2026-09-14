@@ -1,8 +1,9 @@
 # Recreate the source article's scientific panels from the full BRM draws.
 # Base R + cairo are sufficient; no plotting package installation is needed.
 args <- commandArgs(trailingOnly = TRUE)
-stopifnot(length(args) == 1L)
+stopifnot(length(args) %in% c(1L, 2L))
 input <- normalizePath(args[[1]], mustWork = TRUE)
+online_input <- if (length(args) == 2L) normalizePath(args[[2]], mustWork = TRUE) else input
 output <- file.path(input, "figures")
 dir.create(output, showWarnings = FALSE)
 read_table <- function(name) read.delim(file.path(input, name), check.names = FALSE)
@@ -36,8 +37,8 @@ save_plot("hsgp_basis", 10, 4.2, function() {
 })
 
 observed <- read_table("observations.tsv")
-posterior <- function(label, title) {
-  data <- read_table(paste0(label, "_curves.tsv"))
+posterior <- function(label, title, data_dir = input) {
+  data <- read.delim(file.path(data_dir, paste0(label, "_curves.tsv")), check.names = FALSE)
   save_plot(paste0(label, "_posterior"), 10, 3.2, function() {
     par(mfrow = c(1, 2), mar = c(4.1, 4.4, 1.2, 1), oma = c(0, 0, 2, 0))
     for (predictor in c("mu", "log_sigma")) {
@@ -70,7 +71,8 @@ centering <- read_table("centeredness.tsv")
 scatter <- function(label, geometry, title) {
   gp <- lapply(c("mu", "log_sigma"), function(p) read_table(paste0(label, "_", p, "_weights.tsv")))
   save_plot(paste0(geometry, "_scatter"), 10, 10, function() {
-    par(mfrow = c(4, 4), mar = c(3.4, 3.6, 2.1, .6), oma = c(.5, .7, 2, 0), cex = .8)
+    par(mfrow = c(4, 4), mar = c(4.1, 4.3, 1.0, .6), oma = c(0, 0, 2, 0),
+        mgp = c(2.5, .7, 0), cex = .8, mex = 1)
     for (basis in bases) {
       for (g in seq_along(gp)) {
         d <- gp[[g]][gp[[g]]$basis == basis, ]
@@ -82,9 +84,9 @@ scatter <- function(label, geometry, title) {
         for (hyper in c("sigma", "rho")) {
           plot(d[[hyper]], weights, log = "x", pch = 16, cex = .40,
                col = adjustcolor(colors[[match(basis, bases)]], alpha.f = .12),
-               xlab = paste(if (g == 1) "Mean GP" else "Log-SD GP",
+               xlab = paste(if (g == 1) "Mean:" else "Log-SD:",
                             if (hyper == "sigma") "marginal SD" else "length scale"),
-               ylab = paste(if (g == 1) "Mean GP weight" else "Log-SD GP weight", basis),
+               ylab = paste(if (g == 1) "Mean weight" else "Log-SD weight", basis),
                panel.first = grid(col = "#EFEFEF"))
         }
       }
@@ -104,7 +106,7 @@ save_plot("loss_profiles", 10, 4.2, function() {
          main = if (gp == "mu") "Mean GP" else "Log-SD GP")
     for (b in seq_along(bases)) {
       d <- loss[loss$predictor == gp & loss$basis == bases[[b]], ]
-      ok <- is.finite(d$loss) & d$admissible
+      ok <- is.finite(d$loss) & as.logical(d$admissible)
       yr <- range(d$loss[ok])
       values <- rep(NA_real_, nrow(d))
       values[ok] <- if (diff(yr) == 0) 0 else (d$loss[ok] - yr[[1]]) / diff(yr)
@@ -125,4 +127,21 @@ if (file.exists(file.path(input, "partial_curves.tsv"))) {
   posterior("partial", "Fresh selected-partial fit")
   scatter("partial", "partial", "Selected-partial refit — newly sampled coordinates")
 }
-if (file.exists(file.path(input, "online_curves.tsv"))) posterior("online", "Online adaptive centering")
+if (file.exists(file.path(online_input, "online_curves.tsv"))) {
+  posterior("online", "Online adaptive centering", online_input)
+  online <- read.delim(file.path(online_input, "online_centeredness.tsv"))
+  save_plot("online_centeredness", 10, 3.7, function() {
+    par(mfrow = c(1, 2), mar = c(4, 4, 2.3, 1))
+    for (gp in c("mu", "log_sigma")) {
+      d <- online[online$predictor == gp, ]
+      d <- d[order(d$basis), ]
+      plot(d$basis, d$centeredness, type = "o", pch = 16, lwd = 2, col = blue,
+           ylim = c(0, 1), xlab = "Basis frequency", ylab = "Centeredness",
+           main = if (gp == "mu") "Mean GP" else "Log-SD GP")
+      lines(centering$basis, centering[[if (gp == "mu") "mean" else "log_scale"]],
+            col = colors[[2]], lty = 2, lwd = 2)
+      legend("bottomleft", c("Online warmup", "Offline pilot selection"),
+             col = colors[1:2], lty = c(1, 2), pch = c(16, NA), bty = "n", cex = .8)
+    }
+  })
+}

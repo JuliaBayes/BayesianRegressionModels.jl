@@ -10,7 +10,9 @@ The previous `results/` files are historical smoke-test artifacts, **not a
 completed reproduction**. They reduced the basis and draw counts, bypassed
 Pathfinder, and changed the sampler settings. Do not use them as posterior
 estimates or backend performance evidence. The full replacement is run into
-a separate output directory.
+a separate output directory. The new full-run diagnostics, source audit and
+selected profiles are checked in under `results/source-faithful/`; their
+figures are in `docs/src/assets/adaptive-hsgp/`.
 
 ## Exact source contract
 
@@ -53,10 +55,18 @@ BRM_ADAPTIVE_RUNTIME=1 BRM_ADAPTIVE_OUTPUT="$TMPDIR/hsgp-source-fit" \
 # Re-render saved tables without resampling (base R with cairo).
 Rscript research/adaptive_centering/plot_results.R "$TMPDIR/hsgp-source-fit"
 
+# Check full draw receipts and all 40 selections against the literal source loss.
+julia --startup-file=no --project=test research/adaptive_centering/validate_results.jl \
+  "$TMPDIR/hsgp-source-fit" "$TMPDIR/hsgp-source-audit"
+
 # Separate extension: online StanBlocks centering with the same full model
 # and sampling defaults. This is additional to the original two-fit study.
 BRM_ADAPTIVE_ONLINE=1 BRM_ADAPTIVE_OUTPUT="$TMPDIR/hsgp-online-fit" \
   julia --startup-file=no --project=test research/adaptive_centering/reproduce.jl
+
+# Add online posterior and online-versus-offline centering panels without resampling.
+Rscript research/adaptive_centering/plot_results.R \
+  "$TMPDIR/hsgp-source-fit" "$TMPDIR/hsgp-online-fit"
 ```
 
 Reduced-budget environment overrides fail instead of silently changing the

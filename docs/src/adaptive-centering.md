@@ -1,23 +1,28 @@
 ````@raw html
 ---
 title: Adaptive HSGP centering
-description: A reproducible heteroscedastic motorcycle case study comparing fixed and online HSGP coordinates across StanBlocks and Turing.
+description: Reproducing the motorcycle HSGP case study: a noncentered pilot, per-frequency partial centering, and a fresh posterior fit.
 ---
 ````
 
 # Adaptive HSGP centering
 
-Partial centering can be chosen independently for each HSGP frequency while
-leaving the physical Gaussian-process prior unchanged. This case study
-translates Generable's public motorcycle example into one BRM model, emits it
-through both executable backends, and compares three coordinate systems with
-fixed-seed multi-chain HMC.
+The difficult geometry of a Gaussian process is not necessarily resolved by
+choosing one centered or noncentered parameterization for every coefficient.
+Low and high HSGP frequencies can need different coordinates. This case study
+follows [Generable's motorcycle example](https://www.generable.com/post/hsgp-reparam):
+fit the noncentered model, inspect its geometry, choose one centering per basis
+weight, and fit the reparameterized model from scratch.
 
-## The model and its provenance
+There are **two fits**, not three. The centered plots below transform the
+noncentered pilot draws; they do not come from sampling a centered model.
+Online adaptation is a separate extension of this workflow.
 
-The response is acceleration from the 133-row `MASS::mcycle` dataset. One
-squared-exponential HSGP models its conditional mean and a second models log
-conditional standard deviation:
+## The model
+
+All 133 `MASS::mcycle` observations are used. A zero-mean squared-exponential
+HSGP models the conditional mean, and another models the log conditional
+standard deviation:
 
 ```text
 mu(t)  = HSGP_mu(t)
@@ -25,233 +30,244 @@ eta(t) = HSGP_sigma(t)
 y(t) ~ Normal(mu(t), exp(eta(t)))
 ```
 
-The translation follows the source's executable preprocessing: acceleration
-is divided by its sample standard deviation, and time is min–max mapped to
-`[-1,1]` before evaluating the sine basis on `[-1.5,1.5]`. It retains 20 basis
-functions and `Normal(0,4)` priors on each log length and marginal scale in the
-source-faithful run. In BRM those are the equivalent positive-scale priors
-`LogNormal(0,4)`.
+Acceleration is divided by its sample standard deviation. Time is mapped to
+`[-1,1]`. Each GP has **20** sine basis functions on `[-1.5,1.5]`, with the
+source's `1/sqrt(1.5)` normalization. There is no additional population intercept.
 
-Primary sources and immutable boundaries:
+![Low and high HSGP basis functions and their prior spectral scales](assets/adaptive-hsgp/hsgp_basis.png)
 
-- [Generable article](https://www.generable.com/post/hsgp-reparam)
-- [companion code at revision `0d00b853`](https://github.com/generable/public-materials/tree/0d00b8535e2c20c49017d03c7b060940eb8e7041/blog/hsgp-reparam)
-- [Rdatasets source at revision `1dcc2bf`](https://github.com/vincentarelbundock/Rdatasets/tree/1dcc2bf5f955cc1224a3e1307256e1fe86b68dae/csv/MASS)
+The left panel shows frequencies 1, 2, 19 and 20; the dotted vertical lines mark
+the observed domain. The right panel shows how increasing the length scale
+suppresses the high-frequency weights.
 
-The committed CSV has SHA-256
-`b89a1e4eb0391a982b32be3e378df00e8593ff9971e9425e9c5d7929b74f9801`.
+### Hyperpriors: verify the implementation, not just the notation
 
-## One formula, four generated views
+The source assigns independent `Normal(0,4)` priors to the **log** length scale
+and **log** marginal standard deviation of each GP. BRM expresses these as
+`LogNormal(0,4)` on the four positive parameters. The change of variables is
+part of that equivalence:
 
-The compact data below exist only to execute documentation generation. The
-audited reproduction script uses all 133 observations and the same formula.
-The nonuniform vectors demonstrate that centeredness is ordinary fixed model
-data rather than pasted generated code.
+```text
+logpdf(LogNormal(0,4), exp(q)) + q = logpdf(Normal(0,4), q)
+```
+
+The `+q` is the unconstraining Jacobian. An additional lower bound on the
+length scale would change the model; matching distribution names alone would
+not detect that error.
+
+`research/adaptive_centering/audit_source.jl` compiles the immutable original
+Stan program and compares it with the actual BRM-generated Stan model. Its
+26 checks cover the coordinate mapping, normalized target including the
+Jacobian, and all 44 gradient components. Across six tested points the largest
+absolute density and gradient differences were `5.7e-14` and `4.3e-14`.
+
+### One BRM formula and its generated backends
+
+This executable example reads the same full dataset and uses the same
+20-frequency model as the sampling run. The tabs expose the generated models;
+generating a Turing model does not imply that it has passed the gradient
+performance gate or has been sampled.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+using Statistics
+
 function adaptive_motorcycle_model()
+    csv = joinpath(dirname(pathof(BayesianRegressionModels)), "..",
+                   "research", "adaptive_centering", "mcycle.csv")
+    rows = split.(readlines(csv)[2:end], ',')
+    times = parse.(Float64, getindex.(rows, 2))
+    accel = parse.(Float64, getindex.(rows, 3))
+    xmin, xmax = extrema(times)
+    x = @. -1 + 2 * (times - xmin) / (xmax - xmin)
+    y = accel ./ std(accel)
     (@brm begin
         length_scale(mu, hsgp(x)) ~ LogNormal(0, 4)
         sd(mu, hsgp(x)) ~ LogNormal(0, 4)
         length_scale(sigma, hsgp(x)) ~ LogNormal(0, 4)
         sd(sigma, hsgp(x)) ~ LogNormal(0, 4)
-
-        mu ~ hsgp(x; k=8, domain=(-1.5, 1.5), centeredness=c_mu)
-        log(sigma) ~ hsgp(x; k=8, domain=(-1.5, 1.5), centeredness=c_sigma)
+        mu ~ hsgp(x; k=20, domain=(-1.5, 1.5))
+        log(sigma) ~ hsgp(x; k=20, domain=(-1.5, 1.5))
         y ~ Normal(mu, sigma)
-    end)((;
-        x=[-1.0, -0.72, -0.43, -0.14, 0.14, 0.43, 0.72, 1.0],
-        y=[0.0, -0.2, -1.1, -1.8, -0.5, 0.8, 0.3, 0.1],
-        c_mu=[0.0, 0.0, 0.18, 0.37, 0.61, 0.79, 0.92, 1.0],
-        c_sigma=[0.0, 0.07, 0.21, 0.46, 0.68, 0.84, 0.96, 1.0],
-    ))
+    end)((; x, y))
 end
 """, :adaptive_motorcycle_model;
-    title="Heteroscedastic motorcycle HSGPs", require_stan=true)
+    title="The full motorcycle model", require_stan=true)
 ```
 
-This same-axis pair deliberately exercises target-scoped bindings:
-`hsgp_x_*` belongs to `mu`, while `hsgp_log_sigma_x_*` belongs to
-`log(sigma)`. The default single-HSGP StanBlocks spelling remains unchanged.
+## 1. Fit the noncentered model
 
-## What changes—and what does not
-
-For one basis frequency, let `s` be its spectral standard deviation and `z`
-its unit-normal weight. BRM's partial coordinate is
-
-```text
-u ~ Normal(0, s^c)
-w = s^(1-c) u
-```
-
-so every `c` gives the same physical weight `w=s*z`. `c=0` is noncentered,
-`c=1` is centered, and values between them interpolate continuously. The
-coordinate density contributes the matching Jacobian. The acceptance test
-checks that identity numerically, then compares normalized density and
-projected gradients between generated Turing/Enzyme and
-StanBlocks/BridgeStan models.
-
-The pilot selector evaluates, for each frequency and candidate `c`,
-
-```text
-log(std(z .* exp.(c .* log(s)))) - mean(c .* log(s))
-```
-
-on the source's `0:0.01:1` grid. Computation uses shifted exponents and an
-exact `c=0` branch. If a centered coordinate would underflow it is marked
-inadmissible, while the noncentered endpoint remains available.
-
-## Offline pilot/refit versus online warmup adaptation
-
-The workflow here is intentionally two fits with three explicit steps:
-
-- sample a noncentered pilot;
-- choose one fixed `c` for each mean and log-scale basis weight;
-- put those two vectors in model data and refit from scratch.
-
-The pilot is therefore part of analysis design and must not be reused as
-posterior draws from the refit. WarmupHMC's online nonlinear adaptation is a
-different algorithm: it learns a transform inside warmup and returns draws in
-the target coordinates. The six-fit comparison below deliberately remains the
-offline source reproduction; the three formula parameterizations—not an
-additional learned map—are what it measures.
-
-### Online centering on StanBlocks and native Turing
-
-BRM can now discover the two HSGP blocks from compiler-owned coordinate
-metadata or DynamicPPL range metadata and adapt every basis weight during
-warmup. Both backends use the same semantic cell: zero location, one
-centeredness value, and the per-basis log spectral scale. They also share the
-same transport, Jacobian, candidate grid, and score. Only backend-native
-coordinate discovery and target-gradient evaluation differ.
-
-The committed reproduction exposes the StanBlocks route as
-`run_online_stanblocks` and the native route as `run_online_turing`. Their
-central public-API steps are:
+The source configuration is retained: one chain, `Xoshiro(1)`, 10,000 requested
+draws, and ordinary WarmupHMC defaults including Pathfinder initialization.
+The draw count is a floor, so the actual retained count is reported below.
+No evaluation window, target acceptance rate, tree depth or transformation
+setting has been changed to make the comparison look better.
 
 ```julia
-data = prepared_data(; k=8)
-ncp_brmi = build_brmi(data, 8)
-stan = stan_density(ncp_brmi, "online-k8", mktempdir())
-online = adaptive_centering_problem(stan.sb, stan.density, ENZYME_BACKEND)
-fit = WarmupHMC.adaptive_warmup_mcmc(
-    Xoshiro(0x20260913), online;
-    n_draws=20,
-    n_evaluations=120,
-    stepsize_adaptation_limit=20,
-    max_tree_depth=7,
-    progress=nothing,
-    monitor_ess=false,
-)
-learned_c = [value.c for (_, value) in WarmupHMC.reparam_sources(online)]
-
-turing = turing_linked_target(ncp_brmi; online_init=true)
-native_online = adaptive_centering_problem(
-    turing.backend, turing.ldf, ENZYME_BACKEND)
-native_fit = WarmupHMC.adaptive_warmup_mcmc(
-    Xoshiro(0x20260913), native_online;
-    init=turing.q,
-    n_draws=20,
-    n_evaluations=120,
-    stepsize_adaptation_limit=20,
-    target_acceptance_rate=0.95,
-    max_tree_depth=7,
-    progress=nothing,
-    monitor_ess=false,
-)
-native_c = [value.c for (_, value) in
-            WarmupHMC.reparam_sources(native_online)]
+pilot = WarmupHMC.adaptive_warmup_mcmc(
+    Xoshiro(1), noncentered_problem; n_draws=10_000, monitor_ess=true)
 ```
 
-At the documented fixed seed, each bounded run retained 20 draws with a
-120-evaluation warmup budget and reported zero divergences. They learned:
+`monitor_ess=true` preserves the diagnostic monitoring enabled by the source's
+progress display; it does not retune the sampler.
 
-| basis frequency | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| StanBlocks mean `c` | 0.7 | 0.6 | 0.8 | 0.8 | 0.5 | 0.9 | 0.9 | 0.6 |
-| StanBlocks log-scale `c` | 0.9 | 0.9 | 0.9 | 0.9 | 0.9 | 0.4 | 0.9 | 0.8 |
-| Turing mean `c` | 1.0 | 1.0 | 1.0 | 0.5 | 1.0 | 0.8 | 1.0 | 0.4 |
-| Turing log-scale `c` | 0.9 | 1.0 | 0.6 | 0.5 | 0.2 | 0.0 | 0.0 | 0.0 |
+![Noncentered pilot mean and conditional-noise posteriors](assets/adaptive-hsgp/noncentered_posterior.png)
 
-These are genuine online transforms: candidate values are learned only from
-warmup frames, each transform and Jacobian preserves its original target, and
-the retained draws are never recycled from an offline pilot. Different learned
-values are expected because the finite warmup trajectories and target-gradient
-implementations differ; semantic parity does not require identical adaptation
-decisions. The native initialization is an explicit deterministic point in
-the original model, not a pilot draw. These tiny runs are execution evidence,
-not convergence or efficiency studies.
+The two panels show the conditional mean and conditional standard deviation,
+not a posterior-predictive interval. Shading gives 90%, 80% and 50% central
+credible intervals. Both use the source's standardized acceleration units;
+the noise axis is logarithmic.
 
-The native wrapper delegates density evaluation to the exact DynamicPPL
-target and supplies its audited closed-form gradient for this bounded model.
-Enzyme differentiates only the small shared coordinate transport: the current
-Enzyme stack aborts on the full generated DynamicPPL HSGP model, whereas the
-closed-form gradient agrees with finite differences. No BridgeStan parameter
-names, indices, or draws are used by the native route.
+## 2. Inspect the geometry in different coordinates
 
-## Bounded reproducibility artifact
+For spectral standard deviation `s` and noncentered weight `z`, the physical
+basis weight is `w = s*z`. In partial coordinates,
 
-The checked artifact uses the full dataset and model but reduces the basis
-from 20 to 8 and runs four chains with 75 retained draws and a 350-gradient
-first warmup window. This keeps the documentation gate bounded. It is useful
-execution evidence, not a publication-quality Monte Carlo fit; in particular,
-short-chain R-hat and ESS estimates should be read as diagnostics of this run,
-not stable performance rankings.
+```text
+u = s^c * z
+u ~ Normal(0, s^c)
+w = s^(1-c) * u
+```
 
-| backend | geometry | max R-hat | min ESS | divergences | gradient evaluations | HMC seconds |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| StanBlocks | noncentered | 2.04 | 2.86 | 31 | 91,535 | 4.69 |
-| StanBlocks | centered | 3.99 | 2.22 | 0 | 126,232 | 1.52 |
-| StanBlocks | adaptive | 3.97 | 2.17 | 0 | 125,007 | 1.49 |
-| Turing | noncentered | 3.41 | 2.18 | 29 | 111,017 | 282.33 |
-| Turing | centered | 6.64 | 2.07 | 0 | 125,987 | 314.54 |
-| Turing | adaptive | 4.29 | 2.19 | 0 | 124,749 | 307.24 |
+`c=0` is noncentered and `c=1` is centered. The physical prior and likelihood
+stay the same; the sampler's coordinates and their matching Jacobian change.
 
-Wall time covers the four sequential HMC chains and excludes Stan compilation
-and one-time Enzyme preparation. The centered and adaptive fits removed the
-pilot's divergences on both backends, but every max R-hat is far above 1.01 and
-every minimum ESS is tiny. This run therefore **fails the convergence gate**.
-It cannot establish that one coordinate is more efficient, nor can backend
-seconds be generalized beyond these implementations on this host.
+![Noncentered pilot weights versus GP hyperparameters](assets/adaptive-hsgp/noncentered_scatter.png)
 
-The pilot selected the following fixed mean/log-scale centeredness profiles:
+Rows show frequencies 1, 2, 19 and 20. Columns show the mean GP's marginal SD
+and length scale, then the log-SD GP's marginal SD and length scale. The
+hyperparameter axes are logarithmic. These panels contain the full pilot draw
+set, not a small illustrative selection.
 
-| basis frequency | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| mean HSGP `c` | 0.59 | 0.66 | 0.80 | 0.56 | 0.06 | 0.64 | 0.15 | 0.57 |
-| log-scale HSGP `c` | 0.76 | 0.52 | 0.69 | 0.47 | 1.00 | 0.49 | 0.89 | 0.77 |
+![Centered weights obtained by transforming the same pilot draws](assets/adaptive-hsgp/centered_scatter.png)
 
-The curve artifact below exercises reconstruction on the original acceleration
-scale: dark band is the conditional-mean 90% interval and pale band is a 90%
-posterior-predictive interval. Because the fit failed its convergence gate,
-these bands are a **pipeline smoke test, not a scientific posterior summary**.
+This is the **same pilot**, transformed to `w=s*z`. It reveals the centered
+geometry without running another chain. A change that helps low frequencies
+can make high frequencies much worse, which motivates choosing their
+centeredness separately.
 
-![Adaptive HSGP posterior over the motorcycle data](assets/adaptive-hsgp-posterior.svg)
+## 3. Select one centering per frequency
 
-The complete script, pinned data, machine-readable diagnostics, selected
-centeredness values, posterior curve table, and plot source live under
-`research/adaptive_centering/`. Run without `BRM_ADAPTIVE_K` for the
-source-faithful 20-function truncation. The original article reports one chain
-in its main workflow and a 40-chain appendix; neither is silently presented as
-this bounded BRM run.
+For each weight, the source searches `0:0.01:1` using
 
-## Current support boundary
+```text
+loss(c) = log(std(z .* exp.(c .* log(s)))) - mean(c .* log(s))
+```
 
-Fixed partial centering is supported for raw, ungrouped, nonperiodic
-squared-exponential HSGPs. It fails closed for periodic bases, latent/model-
-derived axes, `by`-specific weights, and `orthogonal_to` bases. Those variants
-need distinct verified transforms; BRM does not silently reinterpret them as
-the supported geometry.
+BRM's `select_hsgp_centeredness` exposes this pilot-based selection. It uses
+shifted exponents to evaluate the loss stably and reports candidates whose
+partial-coordinate scales would underflow as inadmissible. The noncentered
+endpoint remains available.
 
-Online compiled-StanBlocks adaptation supports ungrouped, nonperiodic
-squared-exponential HSGPs. It fails before construction for grouped or
-periodic HSGPs, upper-bounded hyperparameter transforms, and models that mix
-ordinary random-effect cells with HSGP cells in one online plan. Native Turing
-HSGP adaptation covers the exact two-predictor Gaussian shape shown here,
-with an identity-linked mean, log-linked scale, the same observed axis, no
-random effects, and zero-location `LogNormal` length-scale and marginal-SD
-priors with any finite positive scale. Population intercepts may be present or
-absent. It fails closed for different axes, grouped or anisotropic HSGPs,
-other covariance families, non-`LogNormal` or shifted hyperpriors, and extra
-model coordinates.
+![Per-frequency loss profiles for mean and log-SD GPs](assets/adaptive-hsgp/loss_profiles.png)
+
+Each curve is rescaled to `[0,1]` for display, as in the source. Only its
+minimum matters; losses from different frequencies are not compared by their
+plotted heights. Gaps represent explicitly inadmissible candidates.
+
+![Selected centeredness across all 20 frequencies of both GPs](assets/adaptive-hsgp/selected_centeredness.png)
+
+The selected vectors become ordinary model data through
+`hsgp(...; centeredness=c_mu)` and `hsgp(...; centeredness=c_sigma)`.
+
+## 4. Fit the selected partial model from scratch
+
+The second fit starts fresh, again with `Xoshiro(1)`, 10,000 requested draws,
+and ordinary WarmupHMC defaults. The pilot determines the coordinates, not
+the posterior sample retained from the second fit.
+
+```julia
+refit = WarmupHMC.adaptive_warmup_mcmc(
+    Xoshiro(1), selected_partial_problem; n_draws=10_000, monitor_ess=true)
+```
+
+![Fresh partially centered mean and conditional-noise posteriors](assets/adaptive-hsgp/partial_posterior.png)
+
+![New partial-coordinate samples versus GP hyperparameters](assets/adaptive-hsgp/partial_scatter.png)
+
+<!-- FULL_FIT_RESULTS -->
+Both fits retained 10,000 draws with the configuration above:
+
+| fit | max split R-hat | min bulk ESS | min tail ESS | divergences |
+| --- | ---: | ---: | ---: | ---: |
+| Noncentered pilot | 1.0012 | 2,514 | 2,886 | 34 (0.34%) |
+| Selected-partial refit | 1.0007 | 2,533 | 1,797 | 16 (0.16%) |
+
+The posterior curves agree visually and the low-frequency coordinate clouds
+become less dependent on the hyperparameters. Divergences decrease, but do
+not disappear. Bulk ESS is similar and the minimum tail ESS is lower in this
+refit, so these results do **not** establish an across-the-board efficiency
+improvement. They reproduce the source's geometry experiment, including its
+limitations, rather than a claim that partial centering guarantees a clean fit.
+
+An independent check applied the source's literal loss formula to every pilot
+weight: all 40 selected values agree exactly with BRM's automated selection.
+The full-fit receipts, candidate scores and figure checks pass 8,221 tests.
+<!-- END_FULL_FIT_RESULTS -->
+
+Rank-normalized split R-hat, bulk ESS and tail ESS are computed with
+MCMCDiagnosticTools. As in the source's main example, each fit has one chain:
+split R-hat is a within-chain diagnostic, not evidence that independent chains
+agree. Divergences must remain visible in any interpretation of the geometry
+comparison; changing the sampler settings to conceal them would answer a
+different question.
+
+## Online adaptive centering and the Turing gate
+
+Online centering learns per-weight coordinates inside warmup instead of using
+a separate pilot. BRM discovers the HSGP cells and constructs their transform:
+
+```julia
+online = adaptive_centering_problem(sb, stan_problem, enzyme_backend)
+fit = WarmupHMC.adaptive_warmup_mcmc(
+    Xoshiro(1), online; n_draws=10_000, monitor_ess=true)
+learned = WarmupHMC.reparam_sources(online)
+```
+
+Returned draws are already back in the original model coordinates. They must
+not be transformed a second time. The reproduction provides a separate
+`run_online_stanblocks` entry point with the same full model and ordinary
+sampler defaults; it is an extension, not one of the source's two fits.
+
+![Online adaptive-centering posterior mean and conditional noise](assets/adaptive-hsgp/online_posterior.png)
+
+The full online StanBlocks run retained 10,000 draws, with **zero divergences**,
+maximum split R-hat `1.0018`, minimum bulk ESS `2,318`, and minimum tail ESS
+`2,775`. This is encouraging evidence from one run, not a guarantee for other
+data, seeds or models.
+
+![Online warmup centering compared with the separate offline selection](assets/adaptive-hsgp/online_centeredness.png)
+
+The online values come from warmup's `0:0.1:1` candidate grid; the offline
+profile uses the source's finer `0:0.01:1` search over its separate pilot.
+They are not expected to select identical values from different finite
+trajectories. Both preserve the same physical model through their matching
+coordinate transform and Jacobian.
+
+**Turing sampling is currently disabled.** A source audit found that its
+explicit length-scale prior incorrectly retained the default HSGP lower
+bound. That defect and the slow gradient path are being fixed and benchmarked
+on matched full-model coordinates. Turing must pass both numerical equality
+and warmed gradient-runtime parity before it is used to sample this case
+study. Finite gradients or a 20-draw execution check do not satisfy that gate.
+
+## Reproduce and inspect the evidence
+
+The script, plotting program, data and source audit are in
+`research/adaptive_centering/`. The README documents the full commands.
+`provenance.toml` and `packages.tsv` record the source/data hashes, exact code
+and dependencies, seed, basis count and sampler configuration. Raw model-frame
+draws are saved before plotting, and existing completed fits are never
+silently overwritten.
+
+Primary source boundaries:
+
+- [Companion code at `0d00b853`](https://github.com/generable/public-materials/tree/0d00b8535e2c20c49017d03c7b060940eb8e7041/blog/hsgp-reparam).
+- [Rdatasets at `1dcc2bf`](https://github.com/vincentarelbundock/Rdatasets/tree/1dcc2bf5f955cc1224a3e1307256e1fe86b68dae/csv/MASS).
+- CSV SHA-256: `b89a1e4eb0391a982b32be3e378df00e8593ff9971e9425e9c5d7929b74f9801`.
+
+The source plotting helper swaps the length-scale and marginal-SD labels;
+these figures label the actual model quantities correctly. Different library
+versions and parameter orderings can produce different trajectories at the
+same seed. The source's numerical results are context, not numbers to copy
+into a new run.

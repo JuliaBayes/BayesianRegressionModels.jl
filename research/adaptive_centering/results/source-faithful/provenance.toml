@@ -1,0 +1,16 @@
+data_revision = "1dcc2bf5f955cc1224a3e1307256e1fe86b68dae"
+brm_commit = "09f3fed17e9ebeab1efc80c66a51afc6e0621349"
+seed_each_fit = 1
+sampler = "WarmupHMC.adaptive_warmup_mcmc"
+data_sha256 = "b89a1e4eb0391a982b32be3e378df00e8593ff9971e9425e9c5d7929b74f9801"
+turing_sampling = "disabled pending measured value/runtime parity"
+basis_functions_per_gp = 20
+julia_version = "1.10.11"
+sampler_config = "defaults; n_draws=10000; monitor_ess=true (source progress enables this)"
+draws_requested_each_fit = 10000
+rhat_scope = "within one split chain, not independent-chain convergence"
+blas_threads = 1
+chains_each_fit = 1
+source_revision = "0d00b8535e2c20c49017d03c7b060940eb8e7041"
+script_sha256 = "117623801ca414fd8c25fc9ea15ff6689e6afd471729cd134aa4e3158ac9aade"
+diagnostics = "rank-normalized split Rhat; bulk ESS; tail ESS; retained divergences"
