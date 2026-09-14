@@ -9,7 +9,7 @@ format:
   revealjs:
     theme: [simple, theme.scss]
     embed-resources: true
-    self-contained-math: true
+    html-math-method: mathjax
     width: 1600
     height: 900
     margin: 0.06
@@ -278,10 +278,10 @@ y(t) &\sim \mathcal N\!\left(\mu(t),\sigma(t)\right)
 \end{aligned}
 $$
 
-Two same-axis HSGPs, each with eight basis frequencies. For every frequency:
+Two same-axis HSGPs, each with eight basis frequencies. Using Normal’s standard-deviation convention, for every frequency:
 
 $$
-u_k\sim\mathcal N(0,s_k^{2c_k}),\qquad
+u_k\sim\mathcal N(0,s_k^{c_k}),\qquad
 \beta_k=s_k^{1-c_k}u_k
 $$
 
@@ -353,7 +353,7 @@ The shared coordinate transform and Jacobian preserve the physical target. StanB
 ::: {.card .accent-amber .tight}
 <span class="label boundary">Bounded offline comparison</span>
 
-Noncentered divergences: **31 / 29** → centered/adaptive: **0 / 0**<br>
+Noncentered divergences: **31 / 29** → centered/adaptive: <strong class="nowrap">0 / 0</strong><br>
 R-hat **2.04–6.64**, ESS **2.07–2.86** → **fails convergence gate**
 :::
 ::::
@@ -435,7 +435,7 @@ Replay is a statistical issue: refitting a factor level map, spline basis, or HS
   <div class="rowhead">Structure</div><div class="now">Multi-axis kernels; PK, renewal, IPM examples</div><div class="next">Reusable ODE/state-space cells with standard replay/output traits</div><div class="open">How much structure belongs in formula syntax versus typed functions?</div>
   <div class="rowhead">Backends</div><div class="now">Generated Stan + direct Turing from one BRMI</div><div class="next">Backend-specific marginalization, AD, sampler, and kernel choices</div><div class="open">Which semantic equivalence tests are sufficient across executors?</div>
   <div class="rowhead">Geometry</div><div class="now">Fixed + online HSGP centering on StanBlocks; exact two-HSGP native Turing path</div><div class="next">Generalize shared geometry metadata, transport, and gradients to more term classes</div><div class="open">How should geometry selection interact with mass-matrix and stepsize adaptation at scale?</div>
-  <div class="rowhead">Replay</div><div class="now">Frozen transforms, explicit new-group semantics</div><div class="next">One descriptor/output API across Stan and Julia executors</div><div class="open">How should stored fits survive backend evolution?</div>
+  <div class="rowhead">Replay</div><div class="now">Frozen transforms, explicit new-group semantics; common descriptor/operation API within admitted subsets</div><div class="next">Extend output and transport coverage; close remaining backend differences</div><div class="open">How should stored fits survive backend evolution?</div>
 </div>
 
 ::: {.notes}
@@ -458,13 +458,13 @@ This is the deck’s guardrail. Keep every roadmap statement in one of these thr
 Pause here for a general audience. The rest is collaborator appendix. Do not imply that prospective guests or cited authors have reviewed or endorsed BRM or this comparison.
 :::
 
-## Current parity, compressed {.smaller}
+## Current parity, compressed {.smaller .parity-slide}
 
 <span class="appendix-badge">Collaborator appendix A</span>
 
 <div class="comparison-row header"><div>Surface</div><div>Status</div><div>Boundary worth remembering</div></div>
 <div class="comparison-row"><div>Population & distributional predictors</div><div><span class="status both">Both</span></div><div>Shared designs, links, coefficient addressing, callable scalar priors.</div></div>
-<div class="comparison-row"><div>Group effects</div><div><span class="status both">Both · partial</span></div><div>Plain/correlated/`||`/shared-ID/stratified/mm; adaptive geometry is not yet shared.</div></div>
+<div class="comparison-row"><div>Group effects</div><div><span class="status both">Both · partial</span></div><div>Plain/correlated/`||`/shared-ID/stratified/mm; online adaptation is shared for a narrow fixed-scale Gaussian random-intercept subset, while broader groups remain unsupported.</div></div>
 <div class="comparison-row"><div>Advanced terms</div><div><span class="status both">Both · subsets</span></div><div>`s`, `t2`, `me`, `mo`, AR/DAR, GP/HSGP, structured fields; custom SLIC needs a Julia method.</div></div>
 <div class="comparison-row"><div>Responses & evidence</div><div><span class="status both">Both · subsets</span></div><div>Multiple/joint/ordinal, weights, missingness, truncation/censoring; some combinations fail closed.</div></div>
 <div class="comparison-row"><div>Replay & prediction</div><div><span class="status both">Both · subsets</span></div><div>Frozen transforms and explicit group resampling; output surfaces are not yet identical.</div></div>

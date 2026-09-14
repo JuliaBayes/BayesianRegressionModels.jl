@@ -28,8 +28,10 @@ From the repository root:
 docs/presentations/brm-futures/render.sh
 ```
 
-The script renders one self-contained RevealJS file and prints it to a
-landscape PDF with Chrome's RevealJS print stylesheet. It writes the public
+The script renders one self-contained RevealJS file, verifies a pinned MathJax
+3 runtime, freezes its SVG equations into the document, removes that build-time
+runtime, and prints the result to a landscape PDF with Chrome's RevealJS print
+stylesheet. It rejects external runtime resources and writes the public
 artifacts to `docs/src/public/decks/` so the normal VitePress build publishes
 them unchanged.
 

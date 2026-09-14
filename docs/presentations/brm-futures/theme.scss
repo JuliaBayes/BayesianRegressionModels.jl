@@ -398,6 +398,21 @@ $presentation-font-size-root: 34px;
 
 .comparison-row:last-child { border-bottom: none; }
 
+.parity-slide .comparison-row {
+  font-size: 0.68em;
+  grid-template-columns: 0.65fr 0.38fr 1.45fr;
+  padding-bottom: 12px;
+  padding-top: 12px;
+}
+
+.parity-slide .comparison-row.header {
+  font-size: 0.5em;
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
 .status {
   border-radius: 999px;
   display: inline-block;
