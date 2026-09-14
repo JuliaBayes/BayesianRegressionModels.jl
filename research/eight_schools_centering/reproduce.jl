@@ -463,7 +463,7 @@ function run_reproduction(; output_dir=get(ENV, "BRM_EIGHT_SCHOOLS_OUTPUT", mkte
     brm_names = BS.param_unc_names(stan.density.model)
     saved_receipts = NamedTuple[]
     for draw in round.(Int, range(1, size(pilot.posterior_position, 2); length=16))
-        q_brm = pilot.posterior_position[:, draw]
+        q_brm = collect(pilot.posterior_position[:, draw])
         layout = brm_layout(brm_names)
         logtau = q_brm[layout.scale]
         tau = exp(logtau)
@@ -480,12 +480,13 @@ function run_reproduction(; output_dir=get(ENV, "BRM_EIGHT_SCHOOLS_OUTPUT", mkte
             stan.density.model, q_brm; propto=false, jacobian=true)
         physical_gradient = brm_physical_gradient(
             brm_gradient, brm_names, q_brm, source, q_source, source_names)
-        abs(brm_value - source_value) <= 1e-9 ||
+        transformed_brm_value = brm_value - length(layout.effects) * logtau
+        abs(transformed_brm_value - source_value) <= 1e-9 ||
             error("saved-pilot source density mismatch at draw $draw")
         maximum(abs.(physical_gradient .- source_gradient)) <= 1e-8 ||
             error("saved-pilot source gradient mismatch at draw $draw")
-        push!(saved_receipts, (; draw, source_value, brm_value,
-            density_absolute_error=abs(brm_value - source_value),
+        push!(saved_receipts, (; draw, source_value, brm_value, transformed_brm_value,
+            density_absolute_error=abs(transformed_brm_value - source_value),
             max_gradient_absolute_error=maximum(abs.(physical_gradient .- source_gradient))))
     end
     write_tsv(joinpath(output_dir, "saved_source_density_gradient_audit.tsv"), saved_receipts)
