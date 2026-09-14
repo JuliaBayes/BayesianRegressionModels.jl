@@ -20,7 +20,7 @@ mathjax_url='https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg-full.js'
 mathjax_sha256='a4354ff94fd868aea0cc6eaaa79a57fda0588646fc46ee3700a349ee0a11cbe6'
 mathjax_bundle=$(mktemp "${TMPDIR:-/tmp}/brm-mathjax.XXXXXX")
 typeset_dump=$(mktemp "${TMPDIR:-/tmp}/brm-typeset.XXXXXX")
-typeset_profile=$(mktemp -d /tmp/kb-deck-profile.XXXXXX)
+typeset_profile=$(mktemp -d "${TMPDIR:-/tmp}/kb-deck-profile.XXXXXX")
 cleanup_render() {
   find "$mathjax_bundle" -maxdepth 0 -type f -delete
   find "$typeset_dump" -maxdepth 0 -type f -delete

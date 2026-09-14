@@ -59,7 +59,7 @@ makedocs(
         "Grey-seal IPM" => "seal-brm.md",
         "Adaptive HSGP centering" => "adaptive-centering.md",
         "Turing backend" => "turing-backend.md",
-        "Future-capability deck" => "feature-deck.md",
+        "Formulas and custom models: deck" => "feature-deck.md",
         "Gallery" => "gallery.md",
         "API" => "api.md",
     ],

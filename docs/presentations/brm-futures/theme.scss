@@ -92,11 +92,13 @@ $presentation-font-size-root: 34px;
 
 .reveal div.sourceCode,
 .reveal pre.sourceCode {
-  overflow-x: hidden !important;
+  overflow: visible !important;
 }
 
 .reveal .card pre.sourceCode code.sourceCode {
-  overflow: hidden !important;
+  overflow: visible !important;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .reveal .progress {
@@ -419,8 +421,30 @@ $presentation-font-size-root: 34px;
   font-size: 0.7em;
   font-weight: 720;
   padding: 0.2em 0.55em;
-  white-space: nowrap;
+  white-space: normal;
 }
+
+.takeaway {
+  background: var(--red-soft);
+  border-left: 5px solid var(--teal);
+  font-size: 0.83em;
+  line-height: 1.25;
+  margin-top: 0.75em;
+  padding: 0.55em 0.75em;
+}
+
+.source-note {
+  color: var(--muted);
+  font-size: 0.46em;
+  line-height: 1.35;
+  margin-top: 0.7em;
+  overflow-wrap: anywhere;
+}
+
+.model-code pre { font-size: 0.56em; }
+.complete-example pre { font-size: 0.49em; }
+.complete-example pre code { padding: 0.45em 0.8em; }
+.complete-example .source-note { margin-top: 0.4em; }
 
 .status.both { background: #e8f2e5; color: #316b27; }
 .status.stan { background: var(--red-soft); color: var(--teal-dark); }
@@ -601,7 +625,8 @@ $presentation-font-size-root: 34px;
 }
 
 .main-end h2 { border: 0; color: var(--paper); }
-.main-end .lede { max-width: 25em; }
+.main-end .lede { margin: 0.75em auto; max-width: 25em; }
+.main-end .small { margin-left: auto; margin-right: auto; }
 .main-end .rule { margin-left: auto; margin-right: auto; width: 42%; }
 
 .boundary-slide .card {
