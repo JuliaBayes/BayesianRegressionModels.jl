@@ -198,8 +198,10 @@ values agree exactly.
 ![Offline and online selected centering](assets/adaptive-eight-schools/selected_centeredness.png)
 
 The online run (next section) learns `0.1` for schools 1–7 and `0.0` for
-school 8 on its own coarser grid — the same answer up to grid resolution.
-Both selectors agree the funnel wants nearly noncentered coordinates.
+school 8 on its own coarser grid. That is not the offline answer rounded
+to the grid — school 1 selects `0.02` offline but learns `0.1` online,
+school 8 selects `0.06` but learns `0.0`. Both selectors favor
+nearly noncentered coordinates; neither wants the funnel centered.
 
 ## 4. Fit the selected partial model from scratch
 
@@ -209,8 +211,15 @@ coordinates, not the posterior sample retained from the second fit.
 
 ```julia
 refit = WarmupHMC.adaptive_warmup_mcmc(
-    Xoshiro(1), selected_partial_problem; n_draws=10_000, monitor_ess=true)
+    Xoshiro(1), selected_partial_problem; n_draws=10_000, monitor_ess=true,
+    nonlinear_adapt=false)
 ```
+
+Adaptation is off here on purpose: the coordinates are already chosen, so
+the refit must not re-adapt them. Saved draws keep both frames:
+`partial.jls` holds the source draws `u`, `partial_target.jls` the same
+draws back-transformed to model coordinates. The refit diagnostics below
+are computed in model coordinates, like the other two fits.
 
 ![Post-hoc selected partial coordinates](assets/adaptive-eight-schools/post-hoc_scatter.png)
 
@@ -300,15 +309,20 @@ centeredness learned online.
 Here the columns genuinely change the displayed coordinates, left to
 right: NCP pilot, online fit in its learned geometry, and post-hoc partial
 refit. Each facet shows **1,000 evenly selected draws from its own fit** —
-pilot, refit, or online run — with transparent points; the underlying
-gradient evaluations and loss calculations use all 10,000
-draws per fit. The points are plotted directly, without smoothing or
-aggregation. Gradient axes are independent between facets, because
-reparameterization changes their units as well as the coordinate units.
+pilot, refit, or online run — with transparent points. The plotted
+gradients are evaluated on all 10,000 draws of each fit against its own
+target; the candidate-loss replay is a separate common-pilot calculation
+(plotted above), not a per-fit loss. The points are plotted directly,
+without smoothing or aggregation. Gradient axes are independent between
+facets, because reparameterization changes their units as well as the
+coordinate units.
 
-The NCP and online gradients come from the actual BRM-generated Stan
-target; the refit gradients come from its fixed selected-partial problem.
-At fixed hyperparameters, the NCP-to-partial display transport is
+Provenance per column: NCP gradients are differentiated directly from the
+BRM-generated Stan target at the pilot draws; refit gradients are
+differentiated directly from the fixed selected-partial problem at the
+source draws `u` (no transport — the draws already live in the displayed
+geometry); online gradients are differentiated from the Stan target at the
+online draws and transported once into the learned geometry with
 `g_c = tau^(-c)*g_z`. The
 change-of-coordinate Jacobian is constant with respect to this school
 coordinate; its hyperparameter derivatives are not being plotted here.

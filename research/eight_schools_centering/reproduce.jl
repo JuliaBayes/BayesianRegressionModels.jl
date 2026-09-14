@@ -345,22 +345,16 @@ function offline_selection(coordinates; candidates=0.0:0.01:1.0)
     (; candidates=collect(candidates), selected, losses, admissible)
 end
 
-function export_coordinates(label, stan, fit, output_dir; controls=nothing)
+function export_coordinates(label, stan, fit, output_dir)
     c = coordinate_arrays(stan, fit)
-    # theta_effect is the physical school effect in every arm: mu + tau*z in a
-    # noncentered frame, mu + tau^(1-c)*u in a selected-partial target frame.
-    # The native sampler coordinate stays in noncentered_coordinate either way.
-    physical = if isnothing(controls)
-        c.z .* exp.(c.logtau)'
-    else
-        length(controls) == size(c.z, 1) ||
-            error("centering controls must cover every school effect")
-        stack([c.z[j, :] .* exp.((1 - controls[j]) .* c.logtau)
-               for j in axes(c.z, 1)]; dims=1)
-    end
+    # Every exported fit holds model-frame positions (the refit is exported
+    # after WarmupHMC's back-transform), so the physical school effect is
+    # always theta = mu + tau*z. Source-frame partial coordinates never reach
+    # this writer; their physical effects are asserted cross-binary in
+    # validate_results.jl instead.
     write_tsv(joinpath(output_dir, "$(label)_coordinates.tsv"), [
         (; draw=s, school=j, mu=c.mu[s], tau=exp(c.logtau[s]),
-           theta_effect=c.mu[s] + physical[j, s],
+           theta_effect=c.mu[s] + c.z[j, s] * exp(c.logtau[s]),
            noncentered_coordinate=c.z[j, s], log_tau=c.logtau[s])
         for j in eachindex(c.effects) for s in eachindex(c.mu)])
     c
@@ -420,8 +414,7 @@ function run_reproduction(; output_dir=get(ENV, "BRM_EIGHT_SCHOOLS_OUTPUT", mkte
     partial_target_record = merge(partial_record,
         (; posterior_position=copy(partial.posterior_position)))
     serialize(joinpath(output_dir, "partial_target.jls"), partial_target_record)
-    partial_coordinates = export_coordinates("partial", stan, partial, output_dir;
-        controls=selection.selected)
+    partial_coordinates = export_coordinates("partial", stan, partial, output_dir)
 
     online_target = adaptive_centering_problem(stan.sb, stan.density, ENZYME_BACKEND)
     online, online_record = sample_source_fit(online_target, "online", output_dir)

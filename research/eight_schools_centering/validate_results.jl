@@ -1,4 +1,5 @@
 include(joinpath(@__DIR__, "reproduce.jl"))
+using LogDensityProblems
 using Serialization
 using Statistics
 using Test
@@ -31,7 +32,7 @@ function fit_record(dir, name; checkpoint=name)
     fit
 end
 
-function coordinate_table(dir, label; controls=nothing)
+function coordinate_table(dir, label)
     rows = table(joinpath(dir, "$(label == "selected_partial" ? "partial" : label)_coordinates.tsv"))
     mu = Vector{Float64}(undef, 10_000)
     tau = Vector{Float64}(undef, 10_000)
@@ -46,15 +47,7 @@ function coordinate_table(dir, label; controls=nothing)
         physical[draw, school] = parse(Float64, rows["theta_effect"][row])
     end
     @test all(isfinite, z) && all(isfinite, tau) && all(isfinite, mu)
-    if isnothing(controls)
-        @test physical ≈ mu .+ z .* tau atol=1e-10
-    else
-        for school in 1:8
-            c = controls[school]
-            @test physical[:, school] ≈ mu .+ z[:, school] .*
-                tau .^ (1 - c) atol=1e-8
-        end
-    end
+    @test physical ≈ mu .+ z .* tau atol=1e-10
     (; mu, z, tau, physical)
 end
 
@@ -111,10 +104,18 @@ function validate_results(fit_dir, diagnostics_dir)
                 partial_target.posterior_position[school+1, :] .*
                 exp.(c .* partial_target.posterior_position[1, :]) atol=1e-10
         end
-        # The exported partial physical effects must undo the same transform.
-        partial_controls = [parse(Float64, offline_centeredness["centeredness"][school])
-                            for school in 1:8]
-        partial_coordinates = coordinate_table(fit_dir, "partial"; controls=partial_controls)
+        # The partial coordinates table is exported from the back-transformed
+        # (model-frame) fit, so physical theta is mu + tau*z there. The same
+        # physical effects must equal mu + tau^(1-c)*u against the
+        # source-frame binary: one quantity, both frames, both binaries.
+        partial_coordinates = coordinate_table(fit_dir, "partial")
+        for school in 1:8
+            c = parse(Float64, offline_centeredness["centeredness"][school])
+            u = partial_source.posterior_position[school + 1, :]
+            @test partial_coordinates.physical[:, school] ≈
+                partial_coordinates.mu .+
+                u .* partial_coordinates.tau .^ (1 - c) atol=1e-8
+        end
         @test all(0 .<= parse.(Float64, online_centeredness["centeredness"]) .<= 1)
 
         for (row, fit) in zip(eachindex(diagnostics["fit"]),
@@ -157,27 +158,40 @@ function validate_results(fit_dir, diagnostics_dir)
         @test length(scatters["configuration"]) == 24_000
         learned = [parse(Float64, online_centeredness["centeredness"][j])
                    for j in 1:8]
-        named = Dict("NCP" => pilot, "Post-hoc" => partial_target,
-                     "Online" => online)
+        selected_c = [parse(Float64, offline_centeredness["centeredness"][j])
+                      for j in 1:8]
+        named = Dict("NCP" => pilot, "Online" => online)
         pair_key = Dict{Tuple{String,Int,Int},Float64}()
         for config in ("NCP", "Post-hoc", "Online")
-            fit = named[config]
             rows = findall(==(config), pairs["configuration"])
             @test length(rows) == 80_000
             for row in rows
                 draw = parse(Int, pairs["draw"][row])
                 school = parse(Int, pairs["school"][row])
-                tau = exp(fit.posterior_position[1, draw])
-                @test parse(Float64, pairs["hyperparameter"][row]) ≈ tau
-                expected = if config == "Online"
-                    c = learned[school]
-                    tau^c * fit.posterior_position[school + 1, draw]
+                coordinate = parse(Float64, pairs["coordinate"][row])
+                if config == "Post-hoc"
+                    # The displayed refit coordinate is the source draw u,
+                    # which must also equal tau^c times the back-transformed
+                    # model draw z: both binaries, both frames.
+                    u = partial_source.posterior_position[school + 1, draw]
+                    z = partial_target.posterior_position[school + 1, draw]
+                    tau = exp(partial_target.posterior_position[1, draw])
+                    @test parse(Float64, pairs["hyperparameter"][row]) ≈ tau
+                    @test coordinate ≈ u
+                    @test coordinate ≈ tau^selected_c[school] * z
                 else
-                    fit.posterior_position[school + 1, draw]
+                    fit = named[config]
+                    tau = exp(fit.posterior_position[1, draw])
+                    @test parse(Float64, pairs["hyperparameter"][row]) ≈ tau
+                    expected = if config == "Online"
+                        tau^learned[school] *
+                            fit.posterior_position[school + 1, draw]
+                    else
+                        fit.posterior_position[school + 1, draw]
+                    end
+                    @test coordinate ≈ expected
                 end
-                @test parse(Float64, pairs["coordinate"][row]) ≈ expected
-                pair_key[(config, draw, school)] =
-                    parse(Float64, pairs["coordinate"][row])
+                pair_key[(config, draw, school)] = coordinate
             end
         end
         # Every gradient-scatter row must sit on its pair-table coordinate:
@@ -188,6 +202,35 @@ function validate_results(fit_dir, diagnostics_dir)
                    parse(Int, scatters["draw"][row]),
                    parse(Int, scatters["school"][row]))
             @test parse(Float64, scatters["coordinate"][row]) ≈ pair_key[key]
+        end
+    end
+    @testset "Refit gradients match the partial problem at source draws" begin
+        # Explicit frame check on a small sample: rebuild the fixed
+        # selected-partial problem and differentiate it at the ACTUAL
+        # source-frame draws from partial.jls. This pins the frame the bulk
+        # test above cannot see — written gradients must be du-gradients at
+        # u, not gz-gradients at z.
+        mktempdir() do tmp
+            stan = stan_density("validate", tmp)
+            selected = [parse(Float64, offline_centeredness["centeredness"][j])
+                        for j in 1:8]
+            problem = fixed_partial_problem(stan, selected)
+            shown = Dict{Tuple{Int,Int},Float64}()
+            for row in eachindex(scatters["configuration"])
+                scatters["configuration"][row] == "Post-hoc" || continue
+                shown[(parse(Int, scatters["draw"][row]),
+                       parse(Int, scatters["school"][row]))] =
+                    parse(Float64, scatters["gradient"][row])
+            end
+            @test length(shown) == 8_000
+            present = sort!(unique!(first.(keys(shown))))
+            for draw in (first(present), present[length(present) ÷ 2],
+                         last(present)), school in (1, 8)
+                q = collect(partial_source.posterior_position[:, draw])
+                _value, gradient = LogDensityProblems.logdensity_and_gradient(
+                    problem, q)
+                @test shown[(draw, school)] ≈ gradient[school + 1] atol=1e-10
+            end
         end
     end
     println("eight_schools_results_verified\t", fit_dir)
