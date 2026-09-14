@@ -26,6 +26,15 @@ illustration keeps its two distinct legends.
 
 Verification: `test/scatter_display.jl` passes 22 checks, including exact
 unchanged specifications and point counts after the axis zoom;
-`test/plotting_diagnostics.jl` passes 35 native-AoV specification checks.
+`test/plotting_diagnostics.jl` passes 38 native-AoV specification checks.
 All 15 regenerated figures were inspected, with representative pair and
 gradient figures additionally checked at a 688-pixel browser content width.
+
+`saved_fit_bindings.toml` records an independent full-table check with
+`validate_plot_bindings.jl`: all 240,000 pair-input rows and all 240,000
+gradient-coordinate rows match their named saved fit. Physical basis weights
+are checked against the source spectral formula, and online display coordinates
+against the saved learned centeredness. The validator does not call BRM's
+extraction/transport helpers. It checks coordinate provenance, not gradient
+accuracy; the finite-difference receipt in the parent directory covers the
+gradient values separately.

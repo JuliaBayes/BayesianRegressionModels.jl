@@ -1,0 +1,12 @@
+pair_input_rows = 240000
+gradient_coordinate_rows = 240000
+checks_passed = 1920023
+exit_code = 0
+coordinate_gradients_sha256 = "21e01d829d11407bf653517f1da8a386a59ce923e7f13940d6e7017d36d0dbb4"
+validator_sha256 = "b6c5250e625a471eb975d9116db5b9e7701a9f69f3e5428273860b227022aedf"
+scope = "Saved-fit coordinate and physical-weight bindings; gradient values have separate finite-difference checks"
+
+[fit_sha256]
+online = "21974b452283b4b606ca9de181033fadcc3c5f2f3d5db4fbbc7a819dedd02a49"
+partial = "3827e1faa72e3fd952a2dccf01bcd66398b1d35e307ab0621be12fc1c356a856"
+noncentered = "bcf6e946c0c352758e729ee8d07159ee10cf0044bf5cb77d000c4f9177eabd9a"
