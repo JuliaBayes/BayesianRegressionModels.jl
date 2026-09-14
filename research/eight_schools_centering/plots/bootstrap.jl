@@ -38,13 +38,13 @@ const TEST_PINS_MIRROR = [
     ("WarmupHMC", "$GITHUB/WarmupHMC.jl.git", "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev
 ]
 
-# Plotting-stack pins owned by this entrypoint: the exact working set that
-# rendered the committed eight-schools figures (all verified loaded/rendered;
-# DynamicObjects 3352e033 and Treebars c02aa16 are the inbox-confirmed
-# source pins, not the unregistered 0.5.0 line).
+# Plotting-stack pins owned by this entrypoint. DynamicObjects tracks the
+# user-authorized 0.5.0 SOURCE pin (not the registry); Treebars c02aa16 is
+# the inbox-confirmed source pin. The committed figures were rendered under
+# DO 3352e033; re-render smoke output is compared, never silently swapped.
 const PLOT_STACK_PINS = [
     ("AlgebraOfVega", "$GITHUB/AlgebraOfVega.jl.git", "412422660d859a468b8357a11527ff0033e0881c"),  # kb-extdep
-    ("DynamicObjects", "$GITHUB/DynamicObjects.jl.git", "3352e03368244c5f65280339fe036507818dff72"),  # kb-extdep
+    ("DynamicObjects", "$GITHUB/DynamicObjects.jl.git", "1d268ea6169f9152e5d14ac2c1464fd6a96e2793"),  # 0.5.0 source (not registry)
     ("HTMXObjects", "$GITHUB/HTMXObjects.jl.git", "a813640165d14cf9cb87502ecf632f0c42378a69"),  # kb-extdep
     ("HTMX", "$GITHUB/HTMX.jl.git", "d52ce5be0f42e3c375370c85499ba5c395f781a8"),  # kb-extdep
 ]

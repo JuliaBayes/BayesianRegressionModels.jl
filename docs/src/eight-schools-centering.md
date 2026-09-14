@@ -17,9 +17,9 @@ that funnel three ways and compares what each way costs: a noncentered
 pilot, a per-school partially centered refit chosen from the pilot, and an
 online run that learns its own coordinates during warmup.
 
-The source workflow has two fits: a noncentered pilot and a selected-partial
-refit. The third fit extends the comparison with online adaptation during
-warmup.
+This comparison uses a noncentered pilot and a selected-partial refit,
+then extends them with online adaptation during warmup. (The cited source
+defines the model and data, not a fitting workflow.)
 
 ## The model
 
@@ -249,8 +249,9 @@ learned = WarmupHMC.reparam_sources(online)
 ```
 
 Returned draws are already back in the original model coordinates: do not
-apply a second sampler-to-model back-transform. The online run is an
-extension, not one of the source's two fits.
+apply a second sampler-to-model back-transform. The online run extends this
+comparison; the cited source defines the model and data, not a fitting
+workflow.
 
 ![Online-adaptive selected coordinates](assets/adaptive-eight-schools/online_scatter.png)
 
@@ -350,8 +351,10 @@ corresponding minimum tail-ESS ratios, in table order, are `0.03467`,
 sampler call, including initialization, first-use Julia/AD compilation and
 checkpoint I/O, but excluding preceding Stan compilation, post-fit
 extraction, plotting and offline centering selection. The calls ran
-sequentially on one CPU core with one BLAS thread on a shared host; they
-are not warmed or replicated timing benchmarks. The pilot and refit calls
+sequentially on a shared host with one BLAS thread
+(`BLAS.set_num_threads(1)`); no CPU affinity was set, so single-core
+execution is not claimed. They are not warmed or replicated timing
+benchmarks. The pilot and refit calls
 together took **50.4 s**, before their intervening selection/processing
 cost. A direct per-gradient microbenchmark of both evaluation paths gives
 about 2 μs per evaluation either way, so the pilot/refit wall time sits
