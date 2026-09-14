@@ -99,7 +99,6 @@ const _RANEF_FAMILIES = Dict{Symbol,NamedTuple}(
     :ranef_correlated_draws    => (; z = :z_flat, layout = :flat_term_group, noncentered = true,  tau = :tau),
     :ranef_correlated_draws_generic => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :tau),
     :ranef_correlated_draws_centered_generic => (; z = :b_cols_bc, layout = :group_term, noncentered = false, tau = :tau),
-    :ranef_correlated_draws_effect => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :tau),
     :ranef_intercept_r2d2      => (; z = :xi,     layout = :group,           noncentered = true,  tau = nothing),
     :ranef_correlated_r2d2     => (; z = :z_flat, layout = :flat_term_group, noncentered = true,  tau = :r2d2_tau),
     :ranef_correlated_draws_r2d2 => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :r2d2_tau),
@@ -118,7 +117,6 @@ const _RANEF_FAMILIES = Dict{Symbol,NamedTuple}(
     :ranef_intercept_centered        => (; z = :xi, layout = :group,      noncentered = false, tau = nothing),
     :ranef_correlated_centered       => (; z = :b,  layout = :group_term, noncentered = false, tau = :tau),
     :ranef_correlated_draws_centered => (; z = :b,  layout = :group_term, noncentered = false, tau = :tau),
-    :ranef_correlated_draws_centered_effect => (; z = :b_cols_bc, layout = :group_term, noncentered = false, tau = :tau),
 )
 
 """
