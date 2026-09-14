@@ -1651,6 +1651,55 @@ StanBlocks.@deffun begin
         return rv
     end
 
+    @stanonly brm_hsgp_log_sqrt_spd(omega2::matrix[m, d], sigma::real,
+                                     rho::vector[d])::vector[m] = begin
+        rv::vector[m]
+        log_scale = log(sigma)
+        for axis in 1:d
+            log_scale += 0.5 * (log(rho[axis]) + 0.9189385332046727)
+        end
+        for b in 1:m
+            exponent = 0.
+            for axis in 1:d
+                exponent += rho[axis] * rho[axis] * omega2[b, axis]
+            end
+            rv[b] = log_scale - 0.25 * exponent
+        end
+        return rv
+    end
+
+    @stanonly brm_hsgp_scale_fraction(log_scale::real, c::real)::real = begin
+        if c == 0.
+            return 0.
+        end
+        return c * log_scale
+    end
+
+    @stanonly brm_hsgp_remaining_scale_fraction(log_scale::real, c::real)::real = begin
+        if c == 1.
+            return 0.
+        end
+        return (1. - c) * log_scale
+    end
+
+    @stanonly brm_hsgp_centered_log_scale(log_scale::vector[m],
+                                           c::vector[m])::vector[m] = begin
+        rv::vector[m]
+        for b in 1:m
+            rv[b] = brm_hsgp_scale_fraction(log_scale[b], c[b])
+        end
+        return rv
+    end
+
+    @stanonly brm_hsgp_remaining_log_scale(log_scale::vector[m],
+                                            c::vector[m])::vector[m] = begin
+        rv::vector[m]
+        for b in 1:m
+            rv[b] = brm_hsgp_remaining_scale_fraction(log_scale[b], c[b])
+        end
+        return rv
+    end
+
     @stanonly brm_periodic_cov(X::matrix[n, 1], sigma::real, rho::real,
                                period::real, jitter::real)::matrix[n, n] = begin
         return add_diag(gp_periodic_cov(to_array_1d(col(X, 1)), sigma, rho, period),
@@ -1780,6 +1829,35 @@ _sb_hsgp_aniso = StanBlocks.@slic begin
     beta_raw ~ std_normal(; n=n_basis)
     sqrt_spd = brm_hsgp_sqrt_spd(omega2, sigma, rho)
     return PHI * (sqrt_spd .* beta_raw)
+end
+
+# Per-frequency partial centering. `c=0` is the historical standardized
+# coordinate and `c=1` is the model-scale spectral weight. The scalar helper
+# calls deliberately special-case the endpoints so `0 * -Inf` never becomes
+# NaN when a high-frequency physical scale underflows.
+_sb_hsgp_partial = StanBlocks.@slic begin
+    n_basis = dims(omega2)[1]
+    n_axes = dims(omega2)[2]
+    rho_iso ~ lognormal(0., 1.; lower=rho_lower)
+    sigma ~ lognormal(0., 1.; lower=0.)
+    rho = rep_vector(rho_iso, n_axes)
+    log_sqrt_spd = brm_hsgp_log_sqrt_spd(omega2, sigma, rho)
+    centered_log_scale = brm_hsgp_centered_log_scale(log_sqrt_spd, centeredness)
+    remaining_log_scale = brm_hsgp_remaining_log_scale(log_sqrt_spd, centeredness)
+    beta_partial :: vector[n_basis] ~ normal(0., exp(centered_log_scale))
+    return PHI * (exp(remaining_log_scale) .* beta_partial)
+end
+
+_sb_hsgp_partial_aniso = StanBlocks.@slic begin
+    n_basis = dims(omega2)[1]
+    n_axes = dims(omega2)[2]
+    rho :: vector[n_axes] ~ lognormal(0., 1.; lower=rho_lower)
+    sigma ~ lognormal(0., 1.; lower=0.)
+    log_sqrt_spd = brm_hsgp_log_sqrt_spd(omega2, sigma, rho)
+    centered_log_scale = brm_hsgp_centered_log_scale(log_sqrt_spd, centeredness)
+    remaining_log_scale = brm_hsgp_remaining_log_scale(log_sqrt_spd, centeredness)
+    beta_partial :: vector[n_basis] ~ normal(0., exp(centered_log_scale))
+    return PHI * (exp(remaining_log_scale) .* beta_partial)
 end
 
 # Periodic Hilbert-space basis (`hsgp(x; k, cov=:periodic, period=...)`).
@@ -5909,6 +5987,8 @@ _sb_gp_submodel(::Val{:_sb_gp}) = _sb_gp
 _sb_gp_submodel(::Val{:_sb_gp_aniso}) = _sb_gp_aniso
 _sb_gp_submodel(::Val{:_sb_hsgp}) = _sb_hsgp
 _sb_gp_submodel(::Val{:_sb_hsgp_aniso}) = _sb_hsgp_aniso
+_sb_gp_submodel(::Val{:_sb_hsgp_partial}) = _sb_hsgp_partial
+_sb_gp_submodel(::Val{:_sb_hsgp_partial_aniso}) = _sb_hsgp_partial_aniso
 _sb_gp_submodel(::Val{:_sb_hsgp_by}) = _sb_hsgp_by
 _sb_gp_submodel(::Val{:_sb_hsgp_by_aniso}) = _sb_hsgp_by_aniso
 _sb_gp_submodel(::Val{:_sb_hsgp_latent}) = _sb_hsgp_latent
@@ -5920,6 +6000,8 @@ _sb_gp_rho_lhs(::Val{:_sb_gp}) = :rho
 _sb_gp_rho_lhs(::Val{:_sb_gp_aniso}) = :(rho :: vector[n_axes])
 _sb_gp_rho_lhs(::Val{:_sb_hsgp}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_aniso}) = :(rho :: vector[n_axes])
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_partial}) = :rho_iso
+_sb_gp_rho_lhs(::Val{:_sb_hsgp_partial_aniso}) = :(rho :: vector[n_axes])
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_by}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_by_aniso}) = :(rho :: vector[n_axes])
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_latent}) = :rho_iso
@@ -6046,7 +6128,7 @@ function _sb_emit_direct!(stmts, data, target::Symbol, t::ExprColumn, summands;
     f = getf(t)
     if f === gp
         push!(summands, _sb_predictor_term!(stmts, data, f, t;
-                                            group_block_lookup, term_overrides))
+                                            target, group_block_lookup, term_overrides))
         return
     elseif f === hsgp
         push!(summands, _sb_predictor_term!(stmts, data, f, t;
@@ -8522,6 +8604,27 @@ _sb_predictor_term!(stmts, data, ::typeof(t2), t;
     col_name
 end
 
+# Return a stable axis-derived name for the first structured term, then scope
+# only collisions by predictor. This preserves every historical single-term
+# spelling while allowing two distributional predictors to use the same axis.
+function _sb_unique_structured_term_names(stmts, family::Symbol,
+                                          suffix::AbstractString, target)
+    bound(name) = any(stmts) do stmt
+        Meta.isexpr(stmt, :call) && length(stmt.args) >= 2 && stmt.args[1] === :~ &&
+            _sb_plan_lhs_name(stmt.args[2]) === name
+    end
+    col = Symbol(family, :_, suffix)
+    bound(col) || return String(suffix), col
+    stem = string(something(target, :term), "_", suffix)
+    candidate = Symbol(family, :_, stem)
+    serial = 2
+    while bound(candidate)
+        candidate = Symbol(family, :_, stem, :_, serial)
+        serial += 1
+    end
+    replace(String(candidate), string(family, "_") => ""; count=1), candidate
+end
+
 # `gp(x...)` is the exact GP term. It records an N x d predictor matrix and
 # delegates covariance construction + non-centred sampling to `_sb_gp` (one
 # shared length scale) or `_sb_gp_aniso` (one per axis).
@@ -8530,9 +8633,9 @@ _sb_predictor_term!(stmts, data, ::typeof(gp), t; group_block_lookup=Dict(),
     args = getargs(t); kw = getkwargs(t)
     _check_term_kwargs(gp, kw)
     names, axes = _sb_gp_axes(:gp, args)
-    suffix = join(string.(names), "_")
+    suffix, col_name = _sb_unique_structured_term_names(
+        stmts, :gp, join(string.(names), "_"), target)
     X_name = Symbol(:X_gp_, suffix)
-    col_name = Symbol(:gp_, suffix)
     term_data = Dict{Symbol,Any}(names[j] => axes[j] for j in eachindex(names))
     prepared = _brm_prepare_term(
         t, something(target, :__sb_term__), (; data=term_data))
@@ -8605,27 +8708,6 @@ function _sb_hsgp_check_explicit_domain(fits, axes)
     end
 end
 
-# The first HSGP over a set of axes keeps the historical axis-derived name.
-# A later HSGP over the same axes is scoped by its emitted predictor, so two
-# distributional predictors can own distinct parameters and preprocessing
-# data without making the user duplicate an identical source column.
-function _sb_unique_hsgp_term_names(stmts, suffix::AbstractString, target)
-    bound(name) = any(stmts) do stmt
-        Meta.isexpr(stmt, :call) && length(stmt.args) >= 2 &&
-            stmt.args[1] === :~ && _sb_plan_lhs_name(stmt.args[2]) === name
-    end
-    col = Symbol(:hsgp_, suffix)
-    bound(col) || return String(suffix), col
-    stem = string(something(target, :term), "_", suffix)
-    candidate = Symbol(:hsgp_, stem)
-    serial = 2
-    while bound(candidate)
-        candidate = Symbol(:hsgp_, stem, :_, serial)
-        serial += 1
-    end
-    replace(String(candidate), "hsgp_" => ""; count=1), candidate
-end
-
 _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
                     term_overrides=Dict{Symbol,Any}(), target=nothing, kwargs...) = begin
     args = getargs(t); kw = getkwargs(t)
@@ -8642,10 +8724,14 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     period = _sb_gp_period(kw, :hsgp, cov)
     cov === :periodic && return _sb_hsgp_periodic_term!(
         stmts, data, t, names, raw, is_raw, K, kw, period, term_overrides)
-    suffix, col_name = _sb_unique_hsgp_term_names(
-        stmts, join(string.(names), "_"), target)
+    suffix, col_name = _sb_unique_structured_term_names(
+        stmts, :hsgp, join(string.(names), "_"), target)
+    centeredness = _brm_hsgp_centeredness(kw, prod(K))
+    partial = any(!iszero, centeredness)
     domain_fits = _sb_hsgp_domain_fits(kw, n_axes; required=!is_raw)
     orthogonal_to = _sb_hsgp_orthogonal_to(kw, n_axes)
+    !is_raw && partial && error(
+        "sbimpl: partial centering currently requires a raw-data HSGP axis")
     orthogonal_to === :linear && haskey(kw, :by) && error(
         "sbimpl: `hsgp(...; orthogonal_to=:linear)` is an ungrouped " *
         "population-shape constraint and cannot be combined with `by=`")
@@ -8696,6 +8782,9 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     _sb_hsgp_check_explicit_domain(domain_fits, axes)
 
     if haskey(kw, :by)
+        partial && error(
+            "sbimpl: partial centering is an ungrouped HSGP weight geometry " *
+            "and cannot be combined with `by=`")
         block_info = _sb_find_group_block(hsgp, t, group_block_lookup)
         isnothing(block_info) && error(
             "sbimpl: `hsgp($suffix, by=...)` found no allocated per-group weight ",
@@ -8730,6 +8819,7 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     PHI_name = Symbol(:PHI_hsgp_, suffix)
     omega2_name = Symbol(:omega2_hsgp_, suffix)
     rho_lower_name = Symbol(:rho_lower_hsgp_, suffix)
+    centeredness_name = Symbol(:centeredness_hsgp_, suffix)
     fits = _sb_hsgp_fit_for_emission(
         data, PHI_name, names, axes, K, c, iso,
         domain_fits, orthogonal_to)
@@ -8739,15 +8829,24 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     data[PHI_name] = PHI
     data[omega2_name] = omega2
     data[rho_lower_name] = basis.rho_lower
-    _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp,
-        (; fits, K, c, iso, domain_fits, orthogonal_to,
-         omega2_key=omega2_name, rho_lower_key=rho_lower_name),
-        names, false))
-    submodel = _sb_gp_submodel_expr(
-        iso ? :_sb_hsgp : :_sb_hsgp_aniso, term_overrides, t)
-    push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
+    partial && (data[centeredness_name] = centeredness)
+    preproc_const = (; fits, K, c, iso, domain_fits, orthogonal_to,
+                     omega2_key=omega2_name, rho_lower_key=rho_lower_name)
+    partial && (preproc_const = merge(preproc_const, (; centeredness)))
+    _sb_record_preproc!(data, PHI_name, PreprocEntry(
+        :hsgp, preproc_const, names, false))
+    submodel_name = if partial
+        iso ? :_sb_hsgp_partial : :_sb_hsgp_partial_aniso
+    else
+        iso ? :_sb_hsgp : :_sb_hsgp_aniso
+    end
+    submodel = _sb_gp_submodel_expr(submodel_name, term_overrides, t)
+    call = partial ? _sb_term_model_call(
         submodel, term_overrides, t; PHI=PHI_name, omega2=omega2_name,
-        rho_lower=rho_lower_name)))
+        rho_lower=rho_lower_name, centeredness=centeredness_name) :
+        _sb_term_model_call(submodel, term_overrides, t; PHI=PHI_name,
+                            omega2=omega2_name, rho_lower=rho_lower_name)
+    push!(stmts, Expr(:call, :~, col_name, call))
     col_name
 end
 
@@ -8767,6 +8866,8 @@ function _sb_hsgp_periodic_term!(stmts, data, t, names, raw, is_raw, K, kw,
     _sb_gp_iso(kw, :hsgp) || error(
         "sbimpl: `hsgp(...; cov=:periodic)` has one axis and one length scale; " *
         "`iso=false` has no meaning here")
+    any(!iszero, _brm_hsgp_centeredness(kw, 2 * only(K))) && error(
+        "sbimpl: partial centering currently supports the exp_quad HSGP spectrum")
     for key in (:c, :domain, :orthogonal_to, :by)
         haskey(kw, key) && error(
             "sbimpl: `hsgp(...; cov=:periodic)` does not accept `$key=`: the " *

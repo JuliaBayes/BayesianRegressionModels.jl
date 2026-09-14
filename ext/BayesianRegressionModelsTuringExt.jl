@@ -356,6 +356,9 @@ function _brm_generic_response_graph_ast(multi; single::Bool=false)
             block_residual_scales[(name, mapping.block_index)] =
                 :($site.scales[$mapping_index])
             residual_scale = nothing
+        elseif isempty(component.priors)
+            push!(statements, :($beta = Float64[]))
+            residual_scale = nothing
         elseif isnothing(component.r2d2)
             push!(statements, :($beta ~ product_distribution($prior_vector)))
             residual_scale = nothing
