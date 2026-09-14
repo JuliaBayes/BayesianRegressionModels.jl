@@ -119,6 +119,15 @@ end
     @test occursin("r_mu_subject_log_scale", err.msg)
 end
 
+@testset "random-effect pilot selection uses the scalar criterion" begin
+    z = reshape([0.2 -0.4; 1.1 0.6; -0.7 0.9], 3, 2)
+    logs = reshape([log(0.2) log(4.0); log(0.2) log(4.0); log(0.2) log(4.0)], 3, 2)
+    selected = select_ranef_centeredness(z, logs; candidates=0:0.1:1)
+    @test selected.centeredness == [0.7, 0.0]
+    @test all(selected.admissible[:, 1])
+    @test all(selected.admissible[:, 2])
+end
+
 @testset "adaptive centering includes one-term correlated buckets" begin
     names = [
         "b_p_subject_tau.1",

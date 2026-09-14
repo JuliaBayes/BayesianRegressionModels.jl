@@ -331,6 +331,15 @@ ranef_intercept = StanBlocks.@slic begin
     return exp(log_scale) * xi[group_idx]
 end
 
+# One continuous random slope. This is the scalar sibling of the correlated
+# block: correlation is vacuous at K=1, so the marginal scale is sampled directly
+# and there is no 1x1 LKJ declaration or its normalizing constant.
+ranef_slope = StanBlocks.@slic begin
+    tau ~ std_normal(; n=1, lower=0.0)
+    xi ~ std_normal(; n=n_groups)
+    return tau[1] * (xi[group_idx] .* Z[:, 1])
+end
+
 # Draw-returning sibling used by multi-membership intercepts. The caller keeps
 # `group_idx=` in the declaration metadata (for ranef_blocks) but performs the
 # many-to-one weighted gather with `multi_membership_intercept` below.
@@ -6562,14 +6571,24 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, 
             return
         end
         Z_name = Symbol(:Z_, target, :_, g)
-        k_name = Symbol(:n_terms_, target, :_, g)
-        data[k_name] = length(col_exprs)
         push!(stmts, :($Z_name = $(Expr(:call, :hcat, col_exprs...))))
-        if is_centered
+        if length(gterms) == 1 && length(col_exprs) == 1
+            is_centered && error(
+                "sbimpl: centered emission for a lone scalar slope on `$g` is ",
+                "not implemented. Its no-correlation fast path samples positive `tau` ",
+                "and standardized `xi`, while a centered sibling needs the ",
+                "model-scale slope as its sampled coordinate.")
+            push!(stmts, :($r_name ~ ranef_slope(;
+                Z=$Z_name, group_idx=$idx_name, n_groups=$n_groups_expr)))
+        elseif is_centered
+            k_name = Symbol(:n_terms_, target, :_, g)
+            data[k_name] = length(col_exprs)
             push!(stmts, :($r_name ~ ranef_correlated_centered(;
                 Z=$Z_name, group_idx=$idx_name,
                 n_groups=$n_name, n_terms=$k_name)))
         else
+            k_name = Symbol(:n_terms_, target, :_, g)
+            data[k_name] = length(col_exprs)
             push!(stmts, :($r_name ~ ranef_correlated(;
                 Z=$Z_name, group_idx=$idx_name,
                 n_groups=$n_groups_expr, n_terms=$k_name)))

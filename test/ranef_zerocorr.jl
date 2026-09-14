@@ -40,6 +40,7 @@ const zc_df = (; x=[-1.0, 0.5, 2.0, 0.25], g=[2, 1, 2, 3], y=[0.2, 1.1, -0.4, 0.
 
     # The bug was a hard error at emission — the lone slope now transpiles.
     @test stanc_ok(zc_code)
+    @test !occursin("lkj_corr_cholesky", zc_code)
     # The dropped `0` claims NO group: exactly ONE synthetic nocor group, not a
     # spurious empty second one.
     @test occursin("g__nocor__1", zc_code)
@@ -61,6 +62,33 @@ end
     @test stanc_ok(code)
     @test occursin("g__nocor__1", code)
     @test occursin("g__nocor__2", code)
+end
+
+@testset "zerocorr synthetic groups retain their raw grouping factor" begin
+    zerocorr = @brm begin
+        mu ~ 1 + x + (1 + x || g)
+        y ~ Normal(mu, 1.0)
+    end
+    sb = SBBRMI(zerocorr(zc_df); mod=@__MODULE__)
+    blocks = ranef_blocks(sb)
+    @test length(blocks) == 2
+    @test [b.family for b in blocks] == [:ranef_intercept, :ranef_slope]
+    @test [b.group for b in blocks] == [:g, :g]
+    @test all(b -> b.n_terms == 1 && b.n_groups == 3, blocks)
+    @test all(b -> b.levels == [1, 2, 3], blocks)
+    unc = String[]
+    for b in blocks
+        if b.family === :ranef_intercept
+            push!(unc, "$(b.binding)_log_scale")
+            append!(unc, ["$(b.binding)_xi.$g" for g in 1:3])
+        else
+            push!(unc, "$(b.binding)_tau.1")
+            append!(unc, ["$(b.binding)_xi.$g" for g in 1:3])
+        end
+    end
+    adaptive = adaptive_centering_blocks(sb, unc)
+    @test length(adaptive) == 2
+    @test all(b -> size(b.effects) == (1, 3), adaptive)
 end
 
 @testset "`(… || g)` with no surviving term errors clearly" begin

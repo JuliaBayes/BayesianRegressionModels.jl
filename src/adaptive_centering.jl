@@ -87,8 +87,28 @@ function select_hsgp_centeredness(unit_weights::AbstractMatrix,
        underflow_log=Float64(underflow_log))
 end
 
+"""
+    select_ranef_centeredness(unit_effects, log_scales;
+                              candidates=0:0.1:1,
+                              underflow_log=log(floatmin(Float64)))
+
+Apply the scalar offline partial-centering criterion to ordinary random-effect
+coordinates. Rows are pilot draws; columns are one scalar `(term, group)` cell.
+`unit_effects` holds noncentered standardized effects and `log_scales` the
+matching log standard deviations. The criterion and stable shifted-exponent
+evaluation are identical to [`select_hsgp_centeredness`](@ref); only the
+coordinate interpretation differs. The result is a fixed-partial specification
+for a fresh fit and does not adapt during warmup.
+"""
+select_ranef_centeredness(unit_effects::AbstractMatrix, log_scales::AbstractMatrix;
+                          candidates=0:0.1:1,
+                          underflow_log=log(floatmin(Float64))) =
+    select_hsgp_centeredness(unit_effects, log_scales;
+                             candidates, underflow_log)
+
 const _ADAPTIVE_CORRELATED_FAMILIES = Set((
     :ranef_correlated,
+    :ranef_slope,
     :ranef_correlated_draws,
     :ranef_correlated_draws_effect,
     :ranef_correlated_draws_generic,

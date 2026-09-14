@@ -5,6 +5,7 @@ CategoricalArrays = "324d7699-5711-5eae-9e2f-1d82baa6b597"
 DifferentiationInterface = "a0c0ee7d-e4b9-4e03-894e-1c5f64a51d63"
 Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
 Enzyme = "7da242da-08ed-463a-9acd-ee780be4f1d9"
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 LogDensityProblems = "6fdf6af0-433a-55f7-b3ed-c6c6e0b8df7c"
 MCMCDiagnosticTools = "be115224-59cd-429b-ad48-344e309966f0"
@@ -20,6 +21,7 @@ TreeArrays = "5daaa025-ac78-4e9a-8805-78946e672e43"
 Treebars = "e1e568c4-3a56-40a4-95fa-9b9c6c16fccb"
 Turing = "fce5fe82-541a-59a6-adf8-730c64b5f9a0"
 WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
+ZipFile = "a5390f91-8eb1-5f08-bee0-b1d1ffed6cea"
 
 [compat]
 BridgeStan = "2.9"
@@ -57,4 +59,4 @@ rev = "c02aa16ab1b08e4f5283597fe678a88e69555cd1"
 
 [sources.WarmupHMC]
 url = "https://github.com/nsiccha/WarmupHMC.jl"
-rev = "8fa829b39d6f519deaf13cd03ee17e8df6b7b9c2"
+rev = "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"

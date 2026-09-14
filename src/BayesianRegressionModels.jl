@@ -141,7 +141,8 @@ export parse!, _brm, stan_code, reprocess, restan_data, generative_plan
 export RanefBlock, ranef_blocks, ranef_coordinates,
        population_draws, transport_draws, term_draws, hsgp_population_curve
 export AdaptiveCenteringBlock, adaptive_centering_blocks,
-       adaptive_centering_problem, select_hsgp_centeredness
+       adaptive_centering_problem, select_hsgp_centeredness,
+       select_ranef_centeredness
 export brm_output_draws, brm_predictive_draws, hsgp_coordinate_draws, hsgp_transform_draws
 export brm_posteriorplot, brm_ppcplot, brm_pairplot,
        brm_centerednessplot, brm_centering_lossplot, brm_gradientplot
@@ -170,7 +171,8 @@ export _sb_term_group_block, _sb_emit_group_block_term!
 # caller's namespace can still resolve the BRM built-in submodel names.
 export popefs, _popefs_normal, _popefs_coefs, _popefs_normal_coefs,
        cdirichlet, c0dirichlet, c01dirichlet,
-       ranef_intercept, ranef_intercept_draws, ranef_correlated, ranef_correlated_by,
+       ranef_intercept, ranef_intercept_draws, ranef_slope,
+       ranef_correlated, ranef_correlated_by,
        ranef_correlated_draws, ranef_correlated_by_draws,
        ranef_intercept_centered, ranef_correlated_centered,
        ranef_correlated_draws_centered,
