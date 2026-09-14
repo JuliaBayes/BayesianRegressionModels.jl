@@ -326,15 +326,10 @@ function prepare_diagnostics(offline_dir, online_dir, output_dir)
     all(f -> f.complete && size(f.posterior_position, 2) == N_DRAWS,
         (pilot, partial, online)) || error("an input fit is incomplete")
     assert_stored_frames(pilot, partial, online)
-    stan = stan_density("diagnostics", output_dir)
-    read(joinpath(output_dir, "radon-diagnostics.stan")) ==
-        read(joinpath(offline_dir, "radon-noncentered.stan")) ||
-        error("offline producer Stan source differs")
-    read(joinpath(online_dir, "radon-online.stan")) ==
-        read(joinpath(offline_dir, "radon-noncentered.stan")) ||
-        error("online producer Stan source differs")
-    # Fail closed on a producer/checkout mismatch BEFORE any output write,
-    # so a stale regeneration checkout can never rewrite diagnostics first.
+    # Fail closed on a producer/checkout mismatch BEFORE any output write.
+    # `stan_density` below already writes the diagnostics Stan source and its
+    # compiled target, so the guard must precede it — a stale regeneration
+    # checkout must never rewrite anything first.
     producer = TOML.parsefile(joinpath(offline_dir, "provenance.toml"))
     checkout_script = bytes2hex(sha256(read(joinpath(RESEARCH_DIR, "reproduce.jl"))))
     producer_script = producer["script_sha256"]
@@ -343,6 +338,13 @@ function prepare_diagnostics(offline_dir, online_dir, output_dir)
         "that saved these draws (producer sha256 $producer_script); rerun " *
         "this script from a checkout carrying that producer source instead " *
         "— do not resample the fits")
+    stan = stan_density("diagnostics", output_dir)
+    read(joinpath(output_dir, "radon-diagnostics.stan")) ==
+        read(joinpath(offline_dir, "radon-noncentered.stan")) ||
+        error("offline producer Stan source differs")
+    read(joinpath(online_dir, "radon-online.stan")) ==
+        read(joinpath(offline_dir, "radon-noncentered.stan")) ||
+        error("online producer Stan source differs")
     DIAGNOSTIC_STAN[] = stan
     DIAGNOSTIC_DENSITY[] = stan.density
     DIAGNOSTIC_TARGET[] = pilot.posterior_position

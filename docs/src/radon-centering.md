@@ -393,7 +393,7 @@ workflows. The reusable calls behind these figures are:
 ```julia
 using BayesianRegressionModels, AlgebraOfVega
 
-brm_posteriorplot(rows; x=:position, xlabel="Floor measurement",
+brm_posteriorplot(rows; x=:position, xlabel="Observation (floor order)",
     ylabel="Log radon", observations, observed_y=:response)
 brm_pairplot(rows)
 # counties are unordered cells, not basis frequencies, so the county panel

@@ -223,13 +223,28 @@ end
     @test all(b -> b.levels == [10, 20, 30], blocks)
 end
 
-# Elementwise-identical columns: either answer carries the same labels and
-# coding, so the historical base preference stands (and must not newly
-# fail closed).
+# Elementwise-identical columns: neither labels nor coding can arbitrate,
+# so the formula text decides — a plain `|` grouping on the literal name
+# proves literal origin even when the values coincide. Identical values do
+# not make distinct group names interchangeable for named targeting or
+# new-data replay.
 const tie_df = (; x=[-1.0, 0.5, 2.0, 0.25], g=[10, 20, 10, 30],
     g__nocor__1=[10, 20, 10, 30], y=[0.2, 1.1, -0.4, 0.7])
 
-@testset "identical values keep the historical base answer" begin
+@testset "identical values keep distinct grouping identities" begin
+    zt = @brm begin
+        mu ~ 1 + x + (1 | g) + (1 | g__nocor__1)
+        y ~ Normal(mu, 1.0)
+    end
+    sb = SBBRMI(zt(tie_df); mod=@__MODULE__)
+    blocks = ranef_blocks(sb)
+    @test [b.group for b in blocks] == [:g, :g__nocor__1]
+    @test all(b -> b.levels == [10, 20, 30], blocks)
+end
+
+@testset "identical values keep a zerocorr base" begin
+    # No plain grouping claims the literal name here — only the `|| g`
+    # doublepipe does — so the synthetic blocks come home to `g`.
     ztie = @brm begin
         mu ~ 1 + x + g__nocor__1 + (1 + x || g)
         y ~ Normal(mu, 1.0)
@@ -266,12 +281,15 @@ end
     @test_throws "ambiguous" BayesianRegressionModels._ranef_raw_group(
         :g__nocor__1, plan.parent, idx, ["no", "such"])
     # Resampled index with both candidates carrying the recorded labels:
-    # arbitration is impossible without the coding, so this errors too.
+    # the formula's plain grouping on the literal name still proves literal
+    # origin, so this resolves instead of erroring.
     zt = @brm begin
         mu ~ 1 + x + (1 | g) + (1 | g__nocor__1)
         y ~ Normal(mu, 1.0)
     end
     tsb = SBBRMI(zt(tie_df); mod=@__MODULE__)
     treplay = reprocess(tsb, tie_df; resample_groups=[:g__nocor__1])
-    @test_throws "ambiguous" ranef_blocks(treplay)
+    tblocks = ranef_blocks(treplay)
+    @test [b.group for b in tblocks] == [:g, :g__nocor__1]
+    @test tblocks[2].generated
 end
