@@ -159,6 +159,7 @@ function sample_source_fit(target, label, output_dir)
     record = (; posterior_position=convert(Matrix{Float64}, fit.posterior_position),
         n_divergent_samples=fit.n_divergent_samples, seed=SOURCE_SEED,
         fit_seconds, total_gradient_evaluations=fit.total_evaluation_counter,
+        sampling_gradient_evaluations=get(fit, :sampling_evaluation_counter, missing),
         requested_draws=SOURCE_DRAWS, complete=retained >= SOURCE_DRAWS)
     serialize(result_path, record)
     record.complete || error("Stopped early; saved $retained draws, not a completed case study.")
