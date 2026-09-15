@@ -40,6 +40,7 @@ const zc_df = (; x=[-1.0, 0.5, 2.0, 0.25], g=[2, 1, 2, 3], y=[0.2, 1.1, -0.4, 0.
 
     # The bug was a hard error at emission — the lone slope now transpiles.
     @test stanc_ok(zc_code)
+    @test !occursin("lkj_corr_cholesky", zc_code)
     # The dropped `0` claims NO group: exactly ONE synthetic nocor group, not a
     # spurious empty second one.
     @test occursin("g__nocor__1", zc_code)
@@ -61,6 +62,33 @@ end
     @test stanc_ok(code)
     @test occursin("g__nocor__1", code)
     @test occursin("g__nocor__2", code)
+end
+
+@testset "zerocorr synthetic groups retain their raw grouping factor" begin
+    zerocorr = @brm begin
+        mu ~ 1 + x + (1 + x || g)
+        y ~ Normal(mu, 1.0)
+    end
+    sb = SBBRMI(zerocorr(zc_df); mod=@__MODULE__)
+    blocks = ranef_blocks(sb)
+    @test length(blocks) == 2
+    @test [b.family for b in blocks] == [:ranef_intercept, :ranef_slope]
+    @test [b.group for b in blocks] == [:g, :g]
+    @test all(b -> b.n_terms == 1 && b.n_groups == 3, blocks)
+    @test all(b -> b.levels == [1, 2, 3], blocks)
+    unc = String[]
+    for b in blocks
+        if b.family === :ranef_intercept
+            push!(unc, "$(b.binding)_log_scale")
+            append!(unc, ["$(b.binding)_xi.$g" for g in 1:3])
+        else
+            push!(unc, "$(b.binding)_tau.1")
+            append!(unc, ["$(b.binding)_xi.$g" for g in 1:3])
+        end
+    end
+    adaptive = adaptive_centering_blocks(sb, unc)
+    @test length(adaptive) == 2
+    @test all(b -> size(b.effects) == (1, 3), adaptive)
 end
 
 @testset "`(… || g)` with no surviving term errors clearly" begin
@@ -96,4 +124,172 @@ end
     gnb_df = (; x=[-1.0, 0.5, 2.0, 0.25], z=[0.0, 1.0, -0.5, 0.75],
                 subject=[2, 1, 2, 3], batch=[2, 1, 1, 2], y=[0, 2, 5, 1])
     @test stanc_ok(codeof(gnb, gnb_df))
+end
+
+# A user's own data column may literally carry a `__nocor__N` name. The suffix
+# alone must never reassign it: the emitted index vector arbitrates.
+const lit_df = (; x=[-1.0, 0.5, 2.0, 0.25], g__nocor__1=[1, 1, 2, 2],
+    y=[0.2, 1.1, -0.4, 0.7])
+
+@testset "literal `g__nocor__1` column keeps its own name" begin
+    # No `g` column exists at all: suffix-stripping has nothing to resolve to.
+    lit = @brm begin
+        mu ~ 1 + x + (1 | g__nocor__1)
+        y ~ Normal(mu, 1.0)
+    end
+    sb = SBBRMI(lit(lit_df); mod=@__MODULE__)
+    blocks = ranef_blocks(sb)
+    @test length(blocks) == 1
+    @test only(blocks).group === :g__nocor__1
+    @test only(blocks).levels == [1, 2]
+    @test only(blocks).n_groups == 2
+end
+
+# Same level SET, different membership: `g = [2,1,2,3]` vs
+# `g__nocor__1 = [1,1,2,3]`. Levels alone cannot tell them apart, so the
+# emitted index vector must arbitrate — otherwise the literal block silently
+# inherits `g`'s membership.
+const both_df = (; x=[-1.0, 0.5, 2.0, 0.25], g=[2, 1, 2, 3],
+    g__nocor__1=[1, 1, 2, 3], y=[0.2, 1.1, -0.4, 0.7])
+
+@testset "coexisting `g` and literal `g__nocor__1` keep their memberships" begin
+    both = @brm begin
+        mu ~ 1 + x + (1 | g) + (1 | g__nocor__1)
+        y ~ Normal(mu, 1.0)
+    end
+    sb = SBBRMI(both(both_df); mod=@__MODULE__)
+    blocks = ranef_blocks(sb)
+    @test length(blocks) == 2
+    @test [b.group for b in blocks] == [:g, :g__nocor__1]
+    @test blocks[1].levels == [1, 2, 3]
+    @test blocks[2].levels == [1, 2, 3]
+    # The labels are not interchangeable: each block's own factor must
+    # reproduce its own emitted index vector.
+    plan = BayesianRegressionModels.generative_plan(sb)
+    for b in blocks
+        raw = BayesianRegressionModels.column_data(plan.parent, b.group)
+        levels = collect(BayesianRegressionModels._sb_fit_levels(raw))
+        idx = plan.data[Symbol(b.group, :_idx)]
+        @test all(indexin(raw, levels) .== idx)
+    end
+end
+
+const mm_lit_df = (; x=[0.2, -0.1, 0.4], g__nocor__1=["a", "a", "b"],
+    h=["b", "c", "c"], w1=[2.0, 1.0, 0.0], w2=[1.0, 1.0, 3.0],
+    y=[0.1, 0.2, 0.3])
+
+@testset "multi-membership over a literal suffix-bearing column" begin
+    mm_lit = @brm begin
+        sigma ~ Exponential(1)
+        loc ~ 1 + (1 | mm(g__nocor__1, h; weights=(w1, w2)))
+        y ~ Normal(loc, sigma)
+    end
+    sb = SBBRMI(mm_lit(mm_lit_df); mod=@__MODULE__)
+    blocks = ranef_blocks(sb)
+    @test length(blocks) == 1
+    @test only(blocks).group == (:g__nocor__1, :h)
+end
+
+# Identical membership, different labels: `g = [10,20,10,30]` and
+# `g__nocor__1 = [1,2,1,3]` code to the same index vector, so membership
+# cannot arbitrate — the recorded emission labels must.
+const same_df = (; x=[-1.0, 0.5, 2.0, 0.25], g=[10, 20, 10, 30],
+    g__nocor__1=[1, 2, 1, 3], y=[0.2, 1.1, -0.4, 0.7])
+
+@testset "identical membership keeps each block's own labels" begin
+    same = @brm begin
+        mu ~ 1 + x + (1 | g) + (1 | g__nocor__1)
+        y ~ Normal(mu, 1.0)
+    end
+    sb = SBBRMI(same(same_df); mod=@__MODULE__)
+    blocks = ranef_blocks(sb)
+    @test length(blocks) == 2
+    @test [b.group for b in blocks] == [:g, :g__nocor__1]
+    @test blocks[1].levels == [10, 20, 30]
+    @test blocks[2].levels == [1, 2, 3]
+end
+
+@testset "zerocorr keeps its base under identical-membership coexistence" begin
+    # The literal is formula-referenced (population predictor) so both names
+    # resolve; the `|| g` blocks must still come home to `g` with `g`'s labels.
+    zsame = @brm begin
+        mu ~ 1 + x + g__nocor__1 + (1 + x || g)
+        y ~ Normal(mu, 1.0)
+    end
+    sb = SBBRMI(zsame(same_df); mod=@__MODULE__)
+    blocks = ranef_blocks(sb)
+    @test length(blocks) == 2
+    @test [b.group for b in blocks] == [:g, :g]
+    @test all(b -> b.levels == [10, 20, 30], blocks)
+end
+
+# Elementwise-identical columns: neither labels nor coding can arbitrate,
+# so the formula text decides — a plain `|` grouping on the literal name
+# proves literal origin even when the values coincide. Identical values do
+# not make distinct group names interchangeable for named targeting or
+# new-data replay.
+const tie_df = (; x=[-1.0, 0.5, 2.0, 0.25], g=[10, 20, 10, 30],
+    g__nocor__1=[10, 20, 10, 30], y=[0.2, 1.1, -0.4, 0.7])
+
+@testset "identical values keep distinct grouping identities" begin
+    zt = @brm begin
+        mu ~ 1 + x + (1 | g) + (1 | g__nocor__1)
+        y ~ Normal(mu, 1.0)
+    end
+    sb = SBBRMI(zt(tie_df); mod=@__MODULE__)
+    blocks = ranef_blocks(sb)
+    @test [b.group for b in blocks] == [:g, :g__nocor__1]
+    @test all(b -> b.levels == [10, 20, 30], blocks)
+end
+
+@testset "identical values keep a zerocorr base" begin
+    # No plain grouping claims the literal name here — only the `|| g`
+    # doublepipe does — so the synthetic blocks come home to `g`.
+    ztie = @brm begin
+        mu ~ 1 + x + g__nocor__1 + (1 + x || g)
+        y ~ Normal(mu, 1.0)
+    end
+    sb = SBBRMI(ztie(tie_df); mod=@__MODULE__)
+    blocks = ranef_blocks(sb)
+    @test [b.group for b in blocks] == [:g, :g]
+end
+
+@testset "resample replay keeps identical-membership identities" begin
+    same = @brm begin
+        mu ~ 1 + x + (1 | g) + (1 | g__nocor__1)
+        y ~ Normal(mu, 1.0)
+    end
+    sb = SBBRMI(same(same_df); mod=@__MODULE__)
+    replayed = reprocess(sb, same_df; resample_groups=[:g__nocor__1])
+    blocks = ranef_blocks(replayed)
+    @test [b.group for b in blocks] == [:g, :g__nocor__1]
+    @test !blocks[1].generated
+    @test blocks[2].generated
+    @test blocks[1].levels == [10, 20, 30]
+    @test blocks[2].levels == [1, 2, 3]
+end
+
+@testset "unresolvable grouping origin fails closed" begin
+    same = @brm begin
+        mu ~ 1 + x + (1 | g) + (1 | g__nocor__1)
+        y ~ Normal(mu, 1.0)
+    end
+    sb = SBBRMI(same(same_df); mod=@__MODULE__)
+    plan = BayesianRegressionModels.generative_plan(sb)
+    idx = plan.data[:g__nocor__1_idx]
+    # Recorded labels matching neither candidate: loud error, not a guess.
+    @test_throws "ambiguous" BayesianRegressionModels._ranef_raw_group(
+        :g__nocor__1, plan.parent, idx, ["no", "such"])
+    # Resampled index with both candidates carrying the recorded labels:
+    # the formula's plain grouping on the literal name still proves literal
+    # origin, so this resolves instead of erroring.
+    zt = @brm begin
+        mu ~ 1 + x + (1 | g) + (1 | g__nocor__1)
+        y ~ Normal(mu, 1.0)
+    end
+    tsb = SBBRMI(zt(tie_df); mod=@__MODULE__)
+    treplay = reprocess(tsb, tie_df; resample_groups=[:g__nocor__1])
+    tblocks = ranef_blocks(treplay)
+    @test [b.group for b in tblocks] == [:g, :g__nocor__1]
+    @test tblocks[2].generated
 end

@@ -3,6 +3,7 @@
 # all data marks are AlgebraOfVega specifications. HSGP coordinate changes use BRM.
 using BayesianRegressionModels, AlgebraOfVega, CSV, Tables, CairoMakie
 import AlgebraOfGraphics
+include("plots/scatter_display.jl")
 
 const CASE_BASES = (1, 2, 19, 20)
 const CASE_COLORS = ["#0B7BEC", "#E67E22", "#16877A", "#984EA3"]
@@ -12,18 +13,32 @@ basis_label(b) = "Basis $(lpad(b, 2, '0'))"
 case_table(dir, name) = collect(Tables.namedtupleiterator(
     CSV.File(joinpath(dir, name); delim='\t')))
 
-function save_case_panels(output, name, panels; title, size=(1300, 460), subtitles=nothing)
+function save_case_panels(output, name, panels; title, size=(1300, 460), subtitles=nothing,
+                          legend=:shared, scatter_mass=nothing)
+    legend in (:shared, :each, :none) || error("Unknown legend layout")
     fig = Figure(; size, fontsize=15)
     Label(fig[0, 1:length(panels)], title; fontsize=21, font=:bold, tellwidth=false)
+    receipts = NamedTuple[]
     for (i, panel) in enumerate(panels)
         slot = fig[1, i] = GridLayout()
-        isnothing(subtitles) || Label(slot[0, 1:2], subtitles[i];
+        isnothing(subtitles) || Label(slot[0, legend == :each ? (1:2) : (1:1)], subtitles[i];
             fontsize=18, font=:bold, tellwidth=false)
         grid = sdraw!(slot[1, 1], panel)
-        AlgebraOfGraphics.legend!(slot[1, 2], grid)
+        if legend == :each
+            AlgebraOfGraphics.legend!(slot[1, 2], grid)
+        elseif legend == :shared && i == 1
+            AlgebraOfGraphics.legend!(fig[2, 1:length(panels)], grid;
+                orientation=:horizontal, tellwidth=false)
+        end
+        if !isnothing(scatter_mass)
+            append!(receipts, [merge((; panel=i), r)
+                for r in zoom_scatter_axes!(grid; mass=scatter_mass)])
+        end
     end
     path = joinpath(output, "$name.png")
     save(path, fig; px_per_unit=1.5)
+    isempty(receipts) || CSV.write(joinpath(output, "$name-display.tsv"), receipts; delim='\t')
+    println("legends\t", name, "\t", count(x -> x isa Legend, fig.content))
     println("figure\t", path)
     path
 end
@@ -144,7 +159,7 @@ function plot_results(input; online_input=input, output=joinpath(input, "figures
                     "log_sigma" => getproperty.(selected, :log_scale))
     paths = String[]
     push!(paths, save_case_panels(output, "hsgp_basis", case_basis_panels();
-        title="HSGP basis and prior spectrum"))
+        title="HSGP basis and prior spectrum", legend=:each))
     for (label, title, dir) in (("noncentered", "Noncentered pilot", input),
                                ("partial", "Fresh selected-partial fit", input),
                                ("online", "Online adaptive centering", online_input))
@@ -165,7 +180,8 @@ function plot_results(input; online_input=input, output=joinpath(input, "figures
             brm_pairplot(case_pair_rows(input, label, predictor; from, to))
         end
         push!(paths, save_case_panels(output, "$(geometry)_scatter", panels;
-            title, size=(1500, 1350), subtitles=gp_label.(CASE_GPS)))
+            title, size=(1500, 1350), subtitles=gp_label.(CASE_GPS),
+            legend=:none, scatter_mass=0.975))
     end
     push!(paths, save_case_panels(output, "loss_profiles",
         [brm_centering_lossplot(case_loss_rows(input);
@@ -193,7 +209,7 @@ function plot_results(input; online_input=input, output=joinpath(input, "figures
         end
         push!(paths, save_case_panels(output, "online_scatter", panels;
             title="Online fit — coordinates in learned geometry", size=(1500, 1350),
-            subtitles=gp_label.(CASE_GPS)))
+            subtitles=gp_label.(CASE_GPS), legend=:none, scatter_mass=0.975))
     end
     if !isnothing(diagnostics_input)
         gradient_selected = gradient_selected_profiles(diagnostics_input)
@@ -203,7 +219,8 @@ function plot_results(input; online_input=input, output=joinpath(input, "figures
         end
         push!(paths, save_case_panels(output, "gradient_selected_scatter", panels;
             title="Gradient-loss-selected geometry — transformed pilot draws, not another fit",
-            size=(1500, 1350), subtitles=gp_label.(CASE_GPS)))
+            size=(1500, 1350), subtitles=gp_label.(CASE_GPS),
+            legend=:none, scatter_mass=0.975))
     end
     println("render_complete\tfigures=", length(paths), "\tbackend=AlgebraOfVega/CairoMakie")
     paths

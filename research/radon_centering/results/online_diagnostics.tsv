@@ -1,0 +1,2 @@
+fit	chains	retained_draws	max_split_rhat	min_bulk_ess	min_tail_ess	divergences	divergence_percent
+online	1	10000	1.0075299687379053	641.6226836172033	1146.709310111969	0	0.0

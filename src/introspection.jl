@@ -847,7 +847,13 @@ function column_data(brmi::BRMI, n::Symbol)
     haskey(brmi.operations, n) || return nothing
     _column_data_value(brmi.operations[n])
 end
-_column_data_value(v::NamedColumn) = _column_data_inner(parent(v))
+_column_data_value(v::NamedColumn) = _column_data_expr(parent(v))
+_column_data_expr(d::DataColumn) = _column_data_inner(d)
+_column_data_expr(op::ExprColumn{typeof(~)}) = begin
+    lhs, _ = getargs(op, 2)
+    lhs isa NamedColumn ? _column_data_inner(parent(lhs)) : nothing
+end
+_column_data_expr(_) = nothing
 _column_data_value(_) = nothing
 _column_data_inner(d::DataColumn) = parent(d)
 _column_data_inner(_) = nothing

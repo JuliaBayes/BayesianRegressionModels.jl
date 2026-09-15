@@ -40,8 +40,15 @@ two-stage workflow and a joint one-posterior model where shared latent PK
 effects feed the PK and PD likelihoods.
 
 The [adaptive HSGP case study](adaptive-centering.md) reproduces a public
-heteroscedastic motorcycle model and compares noncentered, centered, and
-pilot-selected basis-weight coordinates on both executable backends.
+heteroscedastic motorcycle model with BRM/StanBlocks fits. It compares
+noncentered, pilot-selected and online-adaptive sampling, visualizes their
+coordinate geometry, and reports exact sampling costs. Generated-model tabs
+also show the Turing backend; the reported fits use StanBlocks.
+
+The [adaptive eight-schools case study](eight-schools-centering.md) fits
+the standard eight-schools funnel three ways — a noncentered pilot, a
+per-school partially centered refit, and online adaptation — with exact
+sampling costs and native AlgebraOfVega diagnostics.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""

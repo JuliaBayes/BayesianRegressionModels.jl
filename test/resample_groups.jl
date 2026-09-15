@@ -110,6 +110,20 @@ resample_future = (;
     @test !occursin("r_mu_subject_xi", plain_params)
 end
 
+@testset "resampled plain block stays introspectable" begin
+    # Regression: the grouping-origin record requirement briefly left the
+    # record handle unbound for ordinary Stan-expression indices, so
+    # `ranef_blocks` on a resample replay threw `UndefVarError` instead of
+    # describing the re-drawn block.
+    fitted = SBBRMI(plain_resample_builder(resample_train); mod=@__MODULE__)
+    replayed = reprocess(fitted, resample_future; resample_groups=[:subject])
+    blocks = ranef_blocks(replayed)
+    @test length(blocks) == 1
+    @test only(blocks).group === :subject
+    @test only(blocks).generated
+    @test only(blocks).levels == [101, 203, 307, 409]
+end
+
 # Regression: `resample_groups` re-emits the fitted BRMI against the new frame,
 # so a prediction slice whose `hsgp(...)` axis is CONSTANT (a fixed future dose)
 # reaches HSGP emission with an all-equal axis. Frozen replay must apply the

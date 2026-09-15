@@ -86,6 +86,12 @@ julia --startup-file=no --project=test \
   research/adaptive_centering/prepare_gradient_diagnostics.jl \
   "$TMPDIR/hsgp-source-fit" "$TMPDIR/hsgp-online-fit" "$TMPDIR/hsgp-diagnostics"
 
+# Bind every pair/gradient coordinate to its own saved fit, without loading a
+# target or sampler; verify physical weights against the source spectral formula.
+julia --startup-file=no research/adaptive_centering/validate_plot_bindings.jl \
+  "$TMPDIR/hsgp-source-fit" "$TMPDIR/hsgp-online-fit" "$TMPDIR/hsgp-diagnostics" \
+  "$TMPDIR/hsgp-source-audit" "$TMPDIR/hsgp-partial-source-audit"
+
 # Check that the common pilot has the same candidate loss landscape when
 # stored in NCP, selected-partial, or online-selected coordinates. No sampling.
 julia --startup-file=no --project=test \

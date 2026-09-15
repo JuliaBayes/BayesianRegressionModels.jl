@@ -17,6 +17,7 @@ end
 @testset "native posterior diagnostics use descriptor-owned values" begin
     sb = SBBRMI(MODEL(D); mod=@__MODULE__)
     descriptor = brm_descriptor(sb)
+    @test column_data(descriptor.plan.parent, :y) == D.y
     scratch = mktempdir()
     problem = StanBlocks.stan_instantiate(sb.model;
         path=joinpath(scratch, "posterior-diagnostics.stan"))

@@ -26,6 +26,16 @@ end
     @test_throws ErrorException brm_posteriorplot(draws; probs=Float64[])
     @test_throws ErrorException brm_posteriorplot(fill(NaN, 2, 3))
 
+    observations = (; x=[2, 4, 6], response=[5.0, 8.0, 11.0])
+    observed = to_vegalite(brm_posteriorplot(draws; x=observations.x, observations);
+                            interactive=false)
+    @test any(d -> get(d, "size", nothing) == 24.5, objects(observed))
+    larger_observed = to_vegalite(brm_posteriorplot(draws; x=observations.x,
+        observations, observation_markersize=10); interactive=false)
+    @test any(d -> get(d, "size", nothing) == 50, objects(larger_observed))
+    @test filter(d -> haskey(d, "values"), objects(observed)) ==
+          filter(d -> haskey(d, "values"), objects(larger_observed))
+
     rows = [(; coordinate=Float64(i), gradient=-2.0i,
                configuration=c, basis_label="Basis 01")
             for c in ("NCP", "Post-hoc", "Online") for i in 1:2000]
@@ -44,12 +54,28 @@ end
     @test any(d -> get(d, "x", nothing) == "independent" &&
                    get(d, "y", nothing) == "independent", objects(pair))
     @test any(d -> haskey(d, "values") && length(d["values"]) == 10, objects(pair))
+    larger_pair = to_vegalite(brm_pairplot(pair_rows; markersize=12, opacity=0.2);
+                               interactive=false)
+    @test any(d -> get(d, "size", nothing) == 72, objects(larger_pair))
+    @test any(d -> get(d, "opacity", nothing) == 0.2, objects(larger_pair))
+    @test only(filter(d -> haskey(d, "values"), objects(larger_pair)))["values"] ==
+          only(filter(d -> haskey(d, "values"), objects(pair)))["values"]
+    gp = (; coordinates=reshape(collect(1.0:10), 5, 2), marginal_sd=ones(5),
+             length_scales=fill(0.5, 5, 1))
+    gp_pair = to_vegalite(brm_pairplot(gp; bases=[2], markersize=12, opacity=0.2);
+                          interactive=false)
+    @test any(d -> get(d, "size", nothing) == 72, objects(gp_pair))
+    @test all(r -> r["basis_label"] == "Basis 02",
+        only(filter(d -> haskey(d, "values"), objects(gp_pair)))["values"])
 
     centering = [(; basis=b, predictor=p, centeredness=0.1b,
                     configuration=c) for b in 1:3 for p in ("Mean", "Log-SD")
                    for c in ("Online", "Post-hoc")]
     selected = to_vegalite(brm_centerednessplot(centering; compare=true); interactive=false)
     @test any(d -> get(d, "field", nothing) == "configuration", objects(selected))
+    school_selection = to_vegalite(brm_centerednessplot(centering;
+        compare=true, xlabel="School"); interactive=false)
+    @test any(d -> get(d, "title", nothing) == "School", objects(school_selection))
     selected_values = only(filter(d -> haskey(d, "values"), objects(selected)))["values"]
     # The line and point layers may each carry a copy of the input table.
     @test Set((r["basis"], r["predictor"], r["centeredness"], r["configuration"])
