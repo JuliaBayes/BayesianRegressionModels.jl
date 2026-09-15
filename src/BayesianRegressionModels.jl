@@ -47,6 +47,7 @@ include("vimpl.jl")
 using StanBlocks
 include("sbimpl.jl")
 include("sb_affine.jl")
+include("total_effects.jl")
 
 # BRMDescriptor — ONE authoritative executable semantic model descriptor.
 # Collapses the GenerativePlan (what BRM emitted), introspection.jl (the
