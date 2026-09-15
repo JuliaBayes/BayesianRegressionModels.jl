@@ -1,0 +1,12 @@
+{
+  "brms_version": "2.23.1",
+  "brms_remote_sha": {},
+  "rows": 2228,
+  "groups": 20,
+  "subj_class": "integer",
+  "load_class": "integer",
+  "mean_load": 2.49416517055655,
+  "mean_subj": 710.777827648115,
+  "source_revision": "d90fc01e6f6fcdced7ee64c9d2ed607d212ec77c",
+  "source_url": "https://github.com/bnicenboim/bcogsci/blob/d90fc01e6f6fcdced7ee64c9d2ed607d212ec77c/data/df_pupil_complete.rda"
+}
