@@ -1,4 +1,5 @@
-fit	elapsed_seconds	total_evaluation_counter	sampling_evaluation_counter	counter_scope
-noncentered	24.925983817	78252	76692	MCMC run total excludes Pathfinder/setup; sampling counts retained appended transitions
-selected_partial	25.441658007	71081	69622	MCMC run total excludes Pathfinder/setup; sampling counts retained appended transitions
-online	1.532089197	112114	110410	MCMC run total excludes Pathfinder/setup; sampling counts retained appended transitions
+fit	elapsed_seconds	julia_compile_seconds	gc_seconds	total_evaluation_counter	sampling_evaluation_counter	counter_scope
+noncentered	0.282673468	0.0	0.00996633	70220	68688	NUTS run total excludes Pathfinder/setup; sampling counts retained appended transitions
+centered	0.787245099	0.0	0.054574178	174269	170284	NUTS run total excludes Pathfinder/setup; sampling counts retained appended transitions
+selected_partial	0.400529978	0.0	0.043105326	70980	69476	NUTS run total excludes Pathfinder/setup; sampling counts retained appended transitions
+online	0.811034516	0.0	0.062053357	70854	69328	NUTS run total excludes Pathfinder/setup; sampling counts retained appended transitions

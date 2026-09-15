@@ -5,11 +5,23 @@ function read_centeredness(path)
     Dict((Symbol(row[1]), parse(Int, row[2])) => parse(Float64, row[3]) for row in rows)
 end
 
-function representative_counties()
-    counties = collect(1:RADON_DATA.J)
-    middle = cld(RADON_DATA.J, 2)
-    unique!(sort!([first(counties), middle, last(counties)]))
+function representative_coordinates(selected)
+    rows = NamedTuple[]
+    for role in (:intercept, :slope)
+        counties = collect(1:RADON_DATA.J)
+        by_c = sort(counties; by=j -> (selected[(role,j)], j))
+        minimum_county = first(by_c)
+        maximum_county = first(sort(counties; by=j -> (-selected[(role,j)], j)))
+        middle_county = first(sort(filter(j -> j ∉ (minimum_county, maximum_county), counties);
+                                  by=j -> (abs(selected[(role,j)] - 0.5), j)))
+        for (rank, county) in enumerate((minimum_county, middle_county, maximum_county))
+            push!(rows, (; role, rank, county, centeredness=selected[(role,county)],
+                criterion=("Minimum", "Nearest 0.5", "Maximum")[rank]))
+        end
+    end
+    rows
 end
+representative_counties(representatives, role) = [r.county for r in representatives if r.role == role]
 
 function display_coordinate_and_gradient(value, gradient, log_scale, from, to)
     rule = WarmupHMC.Reparametrization(
@@ -28,20 +40,11 @@ function frame_by_index(centeredness, blocks)
     out
 end
 
-# Stored/model/display frames, declared explicitly. The pilot and online fits
-# ran with nonlinear_adapt=true, so their saved matrices are already MODEL
-# (NCP) coordinates. The fixed-partial refit ran with nonlinear_adapt=false,
-# so partial.jls holds SOURCE (partial-u) coordinates and must be mapped once
-# with WarmupHMC.reparametrize! before any model-frame use. Pairs, gradients,
-# diagnostics and costs always consume MODEL-frame matrices; the raw saved
-# records are never mutated.
+# WarmupHMC return values are model coordinates. Checkpoints retain sampler
+# source coordinates and the controls needed to reconstruct the model frame.
 function assert_stored_frames(pilot, partial, online)
-    pilot.nonlinear_adapt == true ||
-        error("pilot record disagrees: expected model-frame draws (nonlinear_adapt=true)")
-    partial.nonlinear_adapt == false ||
-        error("refit record disagrees: expected stored source-frame draws (nonlinear_adapt=false)")
-    online.nonlinear_adapt == true ||
-        error("online record disagrees: expected model-frame draws (nonlinear_adapt=true)")
+    pilot.nonlinear_adapt && !partial.nonlinear_adapt && online.nonlinear_adapt ||
+        error("unexpected centering adaptation configuration")
 end
 
 function assert_scalar_blocks(entries)
@@ -78,11 +81,11 @@ end
 # Pair rows carry no draw field, so groups are recovered in construction
 # order (entries x representative counties x draws 1:N), asserting each
 # row's labels as we go.
-function verify_refit_pairs(pairs, entries, raw)
-    per_config = length(entries) * length(representative_counties()) * N_DRAWS
+function verify_refit_pairs(pairs, entries, raw, representatives)
+    per_config = length(representatives) * N_DRAWS
     offset = 3 * per_config
     i = offset
-    for entry in entries, county in representative_counties()
+    for entry in entries, county in representative_counties(representatives, entry.role)
         index = entry.block.effects[1, county]
         label = "County $(lpad(county, 3, '0'))"
         u = vec(raw[index, :])
@@ -105,9 +108,9 @@ end
 # equals the frozen source frame, so displayed gradients must equal fixed
 # source gradients cellwise (the same relationship density_invariants
 # proves at the pilot point).
-function verify_refit_gradients(gradients, fixed, entries, raw)
+function verify_refit_gradients(gradients, fixed, entries, raw, representatives)
     cells = Dict{Tuple{Symbol,String},Int}()
-    for entry in entries, county in representative_counties()
+    for entry in entries, county in representative_counties(representatives, entry.role)
         label = "County $(lpad(county, 3, '0'))"
         cells[(entry.role, label)] = entry.block.effects[1, county]
     end
@@ -145,15 +148,7 @@ function verify_refit_density(fixed, ncp_density, raw, mapped)
     end
 end
 
-# (e) Physical county effects at saved refit draws: rebuild the NCP log
-# target by hand from mapped model draws (physical effects enter the
-# likelihood explicitly) and require agreement with the Stan target.
-# Stan drops every normalizing constant, so each term below is the
-# unnormalized kernel matching the generated model block (population
-# normal(0, 10), tau/sigma and xi std_normal, normal likelihood, plus
-# the lower-bound log-Jacobians). The normalized Distributions.jl form
-# misses the Stan target by exactly the dropped constants (measured
-# -12270.3551469267, constant across draws), so it must not be used.
+# Reconstruct Stan's propto target: retain scale-dependent terms and Jacobians.
 function verify_physical_target(ncp_density, unc_names, entries, mapped)
     original_of = Dict{String,String}()
     for line in readlines(joinpath(RESEARCH_DIR, "results", "source_coordinate_map.tsv"))[2:end]
@@ -195,9 +190,9 @@ function verify_physical_target(ncp_density, unc_names, entries, mapped)
     end
 end
 
-function pair_rows(configuration, evidence, posterior, display_c, entries)
+function pair_rows(configuration, evidence, posterior, display_c, entries, representatives)
     rows = NamedTuple[]
-    for entry in entries, county in representative_counties()
+    for entry in entries, county in representative_counties(representatives, entry.role)
         index = entry.block.effects[1, county]
         log_index = only(entry.block.log_scales)
         scale = exp.(vec(posterior[log_index, :]))
@@ -205,7 +200,7 @@ function pair_rows(configuration, evidence, posterior, display_c, entries)
         coordinate = [display_coordinate_and_gradient(
             z[i], 0.0, log(scale[i]), 0.0, display_c[index])[1] for i in eachindex(z)]
         label = "County $(lpad(county, 3, '0'))"
-        append!(rows, [(; configuration, evidence, role=entry.role,
+        append!(rows, [(; configuration, evidence, role=entry.role, county,
             basis_label=label, parameter=entry.role === :intercept ?
                 "Intercept scale" : "Slope scale",
             hyperparameter=scale[i], coordinate=coordinate[i])
@@ -214,7 +209,7 @@ function pair_rows(configuration, evidence, posterior, display_c, entries)
     rows
 end
 
-function gradient_rows(configuration, evidence, posterior, display_c, entries)
+function gradient_rows(configuration, evidence, posterior, display_c, entries, representatives)
     displayed = round.(Int, range(1, size(posterior, 2); length=1000))
     length(unique(displayed)) == 1000 ||
         error("display draw selection duplicated an index")
@@ -224,13 +219,13 @@ function gradient_rows(configuration, evidence, posterior, display_c, entries)
         _, gradient = LogDensityProblems.logdensity_and_gradient(
             DIAGNOSTIC_DENSITY[], collect(q))
         all(isfinite, gradient) || error("non-finite diagnostic gradient at draw $draw")
-        for entry in entries, county in representative_counties()
+        for entry in entries, county in representative_counties(representatives, entry.role)
             index = entry.block.effects[1, county]
             log_index = only(entry.block.log_scales)
             label = "County $(lpad(county, 3, '0'))"
             coordinate, displayed_gradient = display_coordinate_and_gradient(
                 q[index], gradient[index], q[log_index], 0.0, display_c[index])
-            push!(rows, (; configuration, evidence, role=entry.role,
+            push!(rows, (; configuration, evidence, role=entry.role, county,
                 basis_label=label, draw, coordinate, gradient=displayed_gradient))
         end
     end
@@ -239,7 +234,7 @@ end
 
 const DIAGNOSTIC_DENSITY = Ref{Any}()
 
-function density_invariants(entries, selected, output_dir)
+function density_invariants(entries, selected, output_dir, representatives)
     fixed = fixed_partial_problem(
         DIAGNOSTIC_STAN[].sb, DIAGNOSTIC_DENSITY[], selected)
     target = DIAGNOSTIC_TARGET[][:, 1]
@@ -266,7 +261,7 @@ function density_invariants(entries, selected, output_dir)
     checks = NamedTuple[]
     density_error = abs(source_value - (target_value + rule_ljac))
     density_error < 1e-7 || error("fixed-partial density/Jacobian mismatch")
-    for entry in entries, county in representative_counties()
+    for entry in entries, county in representative_counties(representatives, entry.role)
         index = entry.block.effects[1, county]
         log_index = only(entry.block.log_scales)
         log_scale = target[log_index]
@@ -308,7 +303,8 @@ function export_ppc(output_dir)
         values = view(matrix, :, i)
         q05, q10, q25, q50, q75, q90, q95 = quantile(values, (
             0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95))
-        (; floor=RADON_DATA.floor_measure[i], observation=RADON_DATA.log_radon[i],
+        (; index=i, county=RADON_DATA.county_idx[i],
+           floor=RADON_DATA.floor_measure[i], observation=RADON_DATA.log_radon[i],
            q05, q10, q25, q50, q75, q90, q95)
     end
     write_tsv(joinpath(output_dir, "ppc_curves.tsv"), rows)
@@ -352,6 +348,8 @@ function prepare_diagnostics(offline_dir, online_dir, output_dir)
     entries = effect_blocks(stan.sb, unc_names)
     assert_scalar_blocks(entries)
     offline_selected = read_centeredness(joinpath(offline_dir, "selected_centeredness.tsv"))
+    representatives = representative_coordinates(offline_selected)
+    write_tsv(joinpath(output_dir, "representative_coordinates.tsv"), representatives)
     online_selected = read_centeredness(joinpath(online_dir, "online_centeredness.tsv"))
     offline_by_index = frame_by_index(offline_selected, entries)
     online_by_index = frame_by_index(online_selected, entries)
@@ -359,40 +357,41 @@ function prepare_diagnostics(offline_dir, online_dir, output_dir)
     one_by_index = Dict(index => 1.0 for index in keys(offline_by_index))
     pilot_model = pilot.posterior_position
     online_model = online.posterior_position
-    raw_partial = partial.posterior_position
+    raw_partial = deserialize(joinpath(offline_dir, "checkpoints-partial", "cp_latest.jls")).posterior_position
     refit_problem = fixed_partial_problem(stan.sb, stan.density, offline_by_index)
-    refit_model = map_refit_to_model(refit_problem, raw_partial)
+    refit_model = partial.posterior_position
+    checkpoint_model = map_refit_to_model(refit_problem, raw_partial)
+    maximum(abs.(checkpoint_model .- refit_model)) < 1e-9 ||
+        error("returned model positions disagree with the checkpoint source mapping")
     serialize(joinpath(output_dir, "partial_model_frame.jls"),
         (; posterior_position=refit_model,
-           mapped_from="partial.jls stored source (partial-u) coordinates",
-           mapping="WarmupHMC.reparametrize! with the frozen selected centering",
+           mapped_from="partial.jls returned model coordinates",
+           mapping="identity; checked against the final checkpoint source coordinates",
            n_divergent_samples=partial.n_divergent_samples))
 
     pairs = vcat(
-        pair_rows("1 NCP", "pilot transformed display", pilot_model, zero_by_index, entries),
-        pair_rows("2 centered", "pilot transformed display", pilot_model, one_by_index, entries),
+        pair_rows("1 NCP", "pilot transformed display", pilot_model, zero_by_index, entries, representatives),
+        pair_rows("2 centered", "pilot transformed display", pilot_model, one_by_index, entries, representatives),
         pair_rows("3 post-hoc selected", "pilot transformed display", pilot_model,
-                  offline_by_index, entries),
+                  offline_by_index, entries, representatives),
         pair_rows("4 post-hoc fit", "fresh fit transformed display", refit_model,
-                  offline_by_index, entries),
+                  offline_by_index, entries, representatives),
         pair_rows("5 online learned", "fresh fit transformed display", online_model,
-                  online_by_index, entries))
+                  online_by_index, entries, representatives))
     gradients = vcat(
-        gradient_rows("1 NCP", "pilot", pilot_model, zero_by_index, entries),
-        gradient_rows("2 post-hoc", "fresh fit", refit_model, offline_by_index, entries),
-        gradient_rows("3 online", "fresh fit", online_model, online_by_index, entries))
+        gradient_rows("1 Centered", "pilot transformed display", pilot_model, one_by_index, entries, representatives),
+        gradient_rows("2 post-hoc", "fresh fit", refit_model, offline_by_index, entries, representatives),
+        gradient_rows("3 online", "fresh fit", online_model, online_by_index, entries, representatives))
     verify_mapped_against_raw(entries, offline_by_index, raw_partial, refit_model)
-    verify_refit_pairs(pairs, entries, raw_partial)
-    verify_refit_gradients(gradients, refit_problem, entries, raw_partial)
+    verify_refit_pairs(pairs, entries, raw_partial, representatives)
+    verify_refit_gradients(gradients, refit_problem, entries, raw_partial, representatives)
     verify_refit_density(refit_problem, stan.density, raw_partial, refit_model)
     verify_physical_target(stan.density, unc_names, entries, refit_model)
     write_tsv(joinpath(output_dir, "coordinate_pairs.tsv"), pairs)
     write_tsv(joinpath(output_dir, "coordinate_gradients.tsv"), gradients)
-    density_invariants(entries, offline_by_index, output_dir)
+    density_invariants(entries, offline_by_index, output_dir, representatives)
     ppc = export_ppc(output_dir)
-    # The producer script wrote returned-frame diagnostics for the refit
-    # (source-u ESS). The case-study diagnostics below are model-frame ESS on
-    # the mapped draws, so every fit's row shares one coordinate frame.
+    # Diagnostics use the same model coordinates for every arm.
     corrected = [diagnostics("noncentered", pilot),
         diagnostics("selected_partial",
             (; posterior_position=refit_model,
@@ -411,12 +410,14 @@ function prepare_diagnostics(offline_dir, online_dir, output_dir)
             "reproduce_checkout_note" => "hash of reproduce.jl in this checkout, not provenance by itself",
             "reproduce_producer_sha256" => producer_script,
             "reproduce_producer_note" => "script_sha256 from the immutable run provenance; must equal the checkout hash above",
-            "refit_stored_frame" => "source partial-u (partial.jls, nonlinear_adapt=false)",
-            "refit_model_frame" => "NCP z via WarmupHMC.reparametrize! with frozen selected centering",
-            "refit_diagnostics_frame" => "model-frame ESS on mapped draws (diagnostics.tsv rewritten here)",
+            "refit_stored_frame" => "model NCP z (partial.jls)",
+            "refit_model_frame" => "NCP z, independently verified against checkpoint partial-u",
+            "refit_diagnostics_frame" => "model-frame ESS on returned draws",
             "draws_per_configuration" => N_DRAWS,
             "gradient_display_draws_per_facet" => 1000,
-            "representative_counties" => representative_counties(),
+            "representative_coordinates" => [Dict(string(k) => v isa Symbol ? string(v) : v for (k,v) in Base.pairs(r)) for r in representatives],
+            "coordinate_selection" => "per role: minimum offline centeredness, nearest 0.5, maximum; ties by county index; distinct coordinates",
+            "visual_baseline" => "centered transformation of NCP pilot; sampling and cost baseline stays NCP",
             "pair_evidence_modes" => ["pilot_transformed_display", "fresh_fit_transformed_display"],
             "native_ppc_seed" => SEED,
             "ppc_rows" => length(ppc),

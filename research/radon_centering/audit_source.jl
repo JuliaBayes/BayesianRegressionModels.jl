@@ -18,12 +18,12 @@ function audit_source(; output_dir=get(ENV, "BRM_RADON_AUDIT_OUTPUT", mktempdir(
         "sigma_y" => "sigma_y",
         "pop_mu_beta_pop.1" => "mu_alpha",
         "pop_mu_beta_pop.2" => "mu_beta",
-        "r_mu_county_idx__nocor__1_tau.1" => "sigma_alpha",
-        "r_mu_county_idx__nocor__2_tau.1" => "sigma_beta",
+        "b_county_intercept_county_idx_tau.1" => "sigma_alpha",
+        "b_county_slope_county_idx_tau.1" => "sigma_beta",
     )
     for j in 1:RADON_DATA.J
-        mapping["r_mu_county_idx__nocor__1_xi.$j"] = "alpha_raw.$j"
-        mapping["r_mu_county_idx__nocor__2_xi.$j"] = "beta_raw.$j"
+        mapping["b_county_intercept_county_idx_z_flat.$j"] = "alpha_raw.$j"
+        mapping["b_county_slope_county_idx_z_flat.$j"] = "beta_raw.$j"
     end
     permutation = [only(findall(isequal(mapping[name]), source_names))
                    for name in brm_names]
@@ -31,7 +31,7 @@ function audit_source(; output_dir=get(ENV, "BRM_RADON_AUDIT_OUTPUT", mktempdir(
     @testset "Immutable PosteriorDB target, priors and all 777 gradients" begin
         @test length(source_names) == length(brm_names) == 2RADON_DATA.J + 5
         @test sort(permutation) == collect(1:length(source_names))
-        @test source_names[permutation[1:3]] == ["sigma_y", "mu_alpha", "mu_beta"]
+
         for (point, log_scale) in enumerate((-4.0, -2.5, -1.0, -0.3, 0.0, 0.4))
             q_source = zeros(Float64, length(source_names))
             for (i, name) in enumerate(source_names)

@@ -1,443 +1,272 @@
 ````@raw html
 ---
-title: Adaptive eight-schools centering
-description: "The standard eight-schools meta-analysis through BRM: a noncentered pilot, per-school partial centering, and online adaptation, with exact sampling costs."
+title: Eight schools and the choice of centering
+description: "PosteriorDB eight schools in BRM: manually centered and noncentered fits, adaptive alternatives, posterior checks and measured costs."
 ---
 ````
 
-# Adaptive eight-schools centering
+# Eight schools and the choice of centering
 
-Eight schools ran SAT-coaching experiments and reported one estimated
-treatment effect with one standard error each. The estimates are noisy and
-the schools differ, so the model partially pools them toward a common mean.
-The pooling strength is learned, and that learning has a funnel geometry:
-when the between-school standard deviation `tau` is small, the eight school
-effects must sit almost exactly on the population mean. This case study fits
-that funnel three ways and compares what each way costs: a noncentered
-pilot, a per-school partially centered refit chosen from the pilot, and an
-online run that learns its own coordinates during warmup.
+Eight schools report treatment-effect estimates with substantial uncertainty.
+A hierarchical model pools those estimates toward a common mean. When the
+between-school standard deviation is small, centered school effects occupy a
+narrow region around that mean. Noncentered coordinates separate the scale
+from standardized school effects and can make this region easier to sample.
 
-This comparison uses a noncentered pilot and a selected-partial refit,
-then extends them with online adaptation during warmup. (The cited source
-defines the model and data, not a fitting workflow.)
+This example compares a **manually fully centered fit** with a noncentered fit,
+then uses the same model to demonstrate offline and online centering selection.
 
-## The model
+## The PosteriorDB model
 
-The eight estimated effects and their standard errors are used as reported:
+We reproduce PosteriorDB's
+[eight-schools posterior](https://github.com/stan-dev/posteriordb/blob/5545a1dd07ae297c36edecbcd82aa49097b4c385/posterior_database/posteriors/eight_schools-eight_schools_noncentered.json),
+including its data and priors:
 
 ```text
-school   1   2   3   4   5   6   7   8
-y       28   8  -3   7  -1   1  18  12
-sigma   15  10  16  11   9  11  10  18
+mu ~ Normal(0, 5)
+tau ~ Cauchy(0, 5), restricted to positive values
+z[j] ~ Normal(0, 1)
+theta[j] = mu + tau*z[j]
+y[j] ~ Normal(theta[j], sigma[j])
 ```
 
-The reference is Stan's public `example-models` eight-schools program:
-[eight_schools.stan](https://github.com/stan-dev/example-models/blob/a42b3da85b7dc38f2745dde4fca197425f18c516/misc/eight_schools/eight_schools.stan)
-at revision `a42b3da85b7dc38f2745dde4fca197425f18c516`, with data
-[eight_schools.data.R](https://github.com/stan-dev/example-models/blob/93b8b05cb7978952606f2043bec64d3b958b360c/misc/eight_schools/eight_schools.data.R)
-at revision `93b8b05cb7978952606f2043bec64d3b958b360c`:
-
-```text
-data {
-  int<lower=0> J;
-  array[J] real y;
-  array[J] real<lower=0> sigma;
-}
-parameters {
-  real mu;
-  array[J] real theta;
-  real<lower=0> tau;
-}
-model {
-  theta ~ normal(mu, tau);
-  y ~ normal(theta, sigma);
-}
-```
-
-The source puts no priors on `mu` or `tau`: both are improper flat on
-their support. BRM expresses exactly that with self-contained flat-prior
-families, one of them restricted to the positive half-line for the shared
-random-effect scale. Nothing is replaced with a convenient proper prior.
-
-### Source equivalence
-
-`research/eight_schools_centering/audit_source.jl` compiles the immutable
-original Stan program and compares it with the actual BRM-generated Stan
-model. A second audit replays the comparison at 16 saved pilot draws. The
-two targets differ by the coordinate transform they sample in
-(`theta = mu + tau*z` has an 8-dimensional Jacobian of `tau^8`), which the
-audit makes explicit rather than absorbing silently. Across the 16 draws
-the largest absolute density difference is `1.07e-14` and the largest
-gradient-component difference is `7.64e-14`. These are comparisons of the
-actual generated targets, including support and Jacobians, not just
-algebraic prior identities.
-
-### One BRM formula and its generated backends
-
-This executable example uses the same eight observations and the same flat
-priors as the sampling runs. The tabs expose its generated backends. All
-fits on this page use StanBlocks/BridgeStan; the Turing tab shows generated
-code.
+The positive restriction on `tau` makes its prior half-Cauchy. The sampling
+statement and support match the
+[reference Stan program](https://github.com/stan-dev/posteriordb/blob/5545a1dd07ae297c36edecbcd82aa49097b4c385/posterior_database/models/stan/eight_schools_noncentered.stan).
+Here, `sigma` contains the known standard errors of the reported estimates.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
 using BayesianRegressionModels, Distributions, StanBlocks
-import BayesianRegressionModels as BRM
-import Random
-
-struct EightSchoolsFlat <: ContinuousUnivariateDistribution end
-struct EightSchoolsFlatPositive <: ContinuousUnivariateDistribution end
-Distributions.logpdf(::EightSchoolsFlat, ::Real) = 0.0
-Distributions.loglikelihood(::EightSchoolsFlat, ::AbstractVector{<:Real}) = 0.0
-Base.minimum(::EightSchoolsFlat) = -Inf
-Base.maximum(::EightSchoolsFlat) = Inf
-Distributions.rand(rng::Random.AbstractRNG, ::EightSchoolsFlat) = randn(rng)
-Distributions.logpdf(::EightSchoolsFlatPositive, x::Real) = x >= 0 ? 0.0 : -Inf
-Distributions.loglikelihood(d::EightSchoolsFlatPositive, x::AbstractVector{<:Real}) =
-    sum(Distributions.logpdf(d, x))
-Base.minimum(::EightSchoolsFlatPositive) = 0.0
-Base.maximum(::EightSchoolsFlatPositive) = Inf
-Distributions.rand(rng::Random.AbstractRNG, ::EightSchoolsFlatPositive) = abs(randn(rng))
-eight_schools_flat() = EightSchoolsFlat()
-eight_schools_flat_positive() = EightSchoolsFlatPositive()
-BRM.brm_distribution_type(::typeof(eight_schools_flat)) = EightSchoolsFlat
-BRM.brm_distribution_type(::typeof(eight_schools_flat_positive)) = EightSchoolsFlatPositive
-BRM._sb_stan_dist_name(::typeof(eight_schools_flat)) = :brm_eight_schools_flat
-BRM._sb_stan_dist_name(::typeof(eight_schools_flat_positive)) = :brm_eight_schools_flat_positive
-BRM._sb_stan_dist_name(::Type{EightSchoolsFlat}) = :brm_eight_schools_flat
-BRM._sb_stan_dist_name(::Type{EightSchoolsFlatPositive}) = :brm_eight_schools_flat_positive
-StanBlocks.@deffun begin
-    @lpxf brm_eight_schools_flat_lpdf(y::real)::real = 0.0
-    brm_eight_schools_flat_rng()::real = normal_rng(0.0, 1.0)
-    @lpxf brm_eight_schools_flat_positive_lpdf(y::real)::real = 0.0
-    brm_eight_schools_flat_positive_rng()::real = abs(normal_rng(0.0, 1.0))
-end
 
 function eight_schools_model()
     (@brm begin
         theta ~ 1 + (1 | eight_schools | school)
-        effect(theta, Intercept) ~ eight_schools_flat()
-        sd(:, eight_schools) ~ eight_schools_flat_positive()
+        effect(theta, Intercept) ~ Normal(0, 5)
+        sd(:, eight_schools) ~ Cauchy(0, 5)
         y ~ Normal(theta, sigma)
     end)((; school=1:8,
-           y=[28.0, 8.0, -3.0, 7.0, -1.0, 1.0, 18.0, 12.0],
-           sigma=[15.0, 10.0, 16.0, 11.0, 9.0, 11.0, 10.0, 18.0]))
+             y=Float64[28, 8, -3, 7, -1, 1, 18, 12],
+             sigma=Float64[15, 10, 16, 11, 9, 11, 10, 18]))
 end
 """, :eight_schools_model;
-    title="The eight-schools model", require_stan=true)
+    title="Eight schools with PosteriorDB priors", require_stan=true)
 ```
 
-## 1. Fit the noncentered model
+The tabs show generated backends. The fits below use StanBlocks/BridgeStan
+and WarmupHMC. Independent comparisons with PosteriorDB's centered Stan
+program verify the density and all ten gradient components, including the
+coordinate Jacobian. At 16 retained noncentered draws, the maximum absolute
+errors are `7.11e-15` in density and `1.78e-14` in a gradient component.
 
-One chain, `Xoshiro(1)`, 10,000 requested draws, and ordinary WarmupHMC
-defaults with `monitor_ess=true`. The draw count is a floor, so the actual
-retained count is reported below. The sampler works in noncentered
-coordinates `theta = mu + tau*z`; the plots below show the physical school
-effects `theta`.
+## Choose fully centered coordinates manually
+
+The default BRM model samples standardized effects `z[j]`. Full centering of
+the random effects instead samples `u[j] = tau*z[j]`, so
+`u[j] ~ Normal(0, tau)` and `theta[j] = mu + u[j]`. Thus `u` is the school's
+deviation from the population mean; `theta` is its treatment effect.
+
+To select this parameterization when compiling the model, use the grouping
+factor's name:
 
 ```julia
-pilot = WarmupHMC.adaptive_warmup_mcmc(
-    Xoshiro(1), noncentered_problem; n_draws=10_000, monitor_ess=true)
+model = eight_schools_model()
+centered_sb = SBBRMI(model;
+    mod=@__MODULE__, centered_groups=[:school])
 ```
 
-![School treatment effects across the three fits](assets/adaptive-eight-schools/posterior_theta.png)
-
-The three panels show the eight physical school effects, not a
-posterior-predictive interval. Shading gives 90%, 80% and 50% central
-credible intervals. The aggressive estimates (28 for school 1, 18 for
-school 7) shrink strongly toward the population mean; the three
-parameterizations agree with each other.
-
-![Selected-partial posterior predictive check](assets/adaptive-eight-schools/posterior_predictive_check.png)
-
-The predictive ribbons come from BRM's native `:predict` operation through
-the selected-partial fit, with the eight observed estimates overlaid as
-dots. The intervals are wide because each observation carries its own
-reported standard error on top of the pooled effect uncertainty.
-
-## 2. Inspect the geometry in different coordinates
-
-For school scale `tau` and noncentered effect `z`, the physical effect is
-`theta = mu + tau*z`. In partial coordinates,
-
-```text
-u = tau^c * z
-u ~ Normal(0, tau^c)
-theta = mu + tau^(1-c) * u
-```
-
-`c=0` is noncentered and `c=1` is centered. The physical prior and
-likelihood stay the same; the sampler's coordinates and their matching
-Jacobian change.
-
-![Original noncentered pilot coordinates](assets/adaptive-eight-schools/ncp_scatter.png)
-
-Each row shows one school's noncentered coordinate against the
-random-effect scale on a logarithmic axis. These panels contain the full
-pilot draw set, not a small illustrative selection. The clouds are nearly
-horizontal: conditional on `tau`, the noncentered coordinates barely depend
-on it, which is the geometry noncentering is designed to produce.
-
-## 3. Select one centering per school
-
-For each school, the selection searches `0:0.01:1` using
-
-```text
-loss(c) = log(std(z .* exp.(c .* log(tau)))) - mean(c .* log(tau))
-```
-
-![Per-school loss profiles](assets/adaptive-eight-schools/offline_loss_profiles.png)
-
-Each curve is rescaled to `[0,1]` for display. Only its minimum matters;
-losses from different schools are not compared by their plotted heights.
-Every school minimizes near zero: the selected values are `0.02`, `0.11`,
-`0.06`, `0.10`, `0.09`, `0.09`, `0.09` and `0.06`. An independent check
-applied the literal loss formula to every pilot coordinate: all 8 selected
-values agree exactly.
-
-![Offline and online selected centering](assets/adaptive-eight-schools/selected_centeredness.png)
-
-The online run (next section) learns `0.1` for schools 1–7 and `0.0` for
-school 8 on its own coarser grid. That is not the offline answer rounded
-to the grid — school 1 selects `0.02` offline but learns `0.1` online,
-school 8 selects `0.06` but learns `0.0`. Both selectors favor
-nearly noncentered coordinates; neither wants the funnel centered.
-
-## 4. Fit the selected partial model from scratch
-
-The second fit starts fresh, again with `Xoshiro(1)`, 10,000 requested
-draws, and ordinary WarmupHMC defaults. The pilot determines the
-coordinates, not the posterior sample retained from the second fit.
+We can also choose the same endpoint through the centering controls. This
+lets all four fits below share one compiled noncentered density:
 
 ```julia
-refit = WarmupHMC.adaptive_warmup_mcmc(
-    Xoshiro(1), selected_partial_problem; n_draws=10_000, monitor_ess=true,
-    nonlinear_adapt=false)
+using Random, Enzyme, WarmupHMC, BridgeStan
+using DifferentiationInterface: AutoEnzyme
+
+sb = SBBRMI(model; mod=@__MODULE__)
+problem = StanBlocks.stan_instantiate(sb.model)
+backend = AutoEnzyme(;
+    mode=Enzyme.set_runtime_activity(Enzyme.Reverse),
+    function_annotation=Enzyme.Const)
+
+function fixed_centering(sb, problem, backend, coefficients)
+    target = adaptive_centering_problem(sb, problem, backend)
+    sources = WarmupHMC.reparam_sources(target)
+    length(sources) == length(coefficients) || error("one coefficient per school is required")
+    WarmupHMC.restore_reparam_sources!(target,
+        [index => WarmupHMC.PartiallyCentered(Float64(c))
+         for ((index, _), c) in zip(sources, coefficients)])
+    target
+end
+
+fully_centered = fixed_centering(sb, problem, backend, ones(8))
+centered_fit = WarmupHMC.adaptive_warmup_mcmc(
+    Xoshiro(1), fully_centered;
+    n_draws=10_000, monitor_ess=true, nonlinear_adapt=false)
+
+noncentered_fit = WarmupHMC.adaptive_warmup_mcmc(
+    Xoshiro(1), problem; n_draws=10_000, monitor_ess=true)
 ```
 
-Nonlinear coordinate adaptation is frozen here: the coordinates are already
-chosen, so the refit must not re-adapt them. Ordinary metric and step-size
-adaptation remains enabled. Saved draws keep both frames: `partial.jls`
-holds the source draws `u`, `partial_target.jls` the same draws
-back-transformed to model coordinates. The refit diagnostics below are
-computed in model coordinates, like the other two fits.
+Every coefficient is `1.0`; `nonlinear_adapt=false` keeps that choice fixed.
+At `0.0` the corresponding coordinate is fully noncentered. Intermediate
+values sample `u[j] = tau^c[j]*z[j]`.
 
-![Post-hoc selected partial coordinates](assets/adaptive-eight-schools/post-hoc_scatter.png)
+WarmupHMC returns **model coordinates** in `posterior_position`, including
+when centering is fixed. Its checkpoints retain sampler coordinates. The
+checkpoint-to-model mapping is checked independently before summarizing fits.
 
-These are the refit run's own 10,000 draws in the selected partial
-coordinates — not the pilot re-expressed. Each row shows one school's
-partial coordinate against the random-effect scale on a logarithmic axis.
+[![Centered and noncentered coordinates of the same pilot draws, paired for all eight schools](assets/adaptive-eight-schools/centered_vs_noncentered.png)](assets/adaptive-eight-schools/centered_vs_noncentered.png)
 
-Both fits retained 10,000 draws with the configuration above:
+Both columns use the noncentered pilot's 10,000 retained draws. The left
+column transforms them to `u = tau*z`; the right shows `z`. This isolates
+the change of coordinates. The centered column reveals the narrowing as
+`tau` approaches zero. Vertical scales are independent; horizontal scales
+are shared. Centered coordinates remain the visual reference in the later
+scatter plots. The sampling and cost baseline remains the noncentered fit.
 
-| fit | max split R-hat | min bulk ESS | min tail ESS | divergences |
-| --- | ---: | ---: | ---: | ---: |
-| Noncentered pilot | 1.0008 | 2,762 | 2,713 | 4 (0.04%) |
-| Selected-partial refit | 1.0004 | 3,036 | 2,657 | 6 (0.06%) |
+## Posterior effects and predictive checks
 
-The posterior curves agree visually and the ESS values barely move — as
-they should, since the selected coordinates (`c ≈ 0.1`) are nearly the
-pilot's own. Partial centering did not buy much here because noncentering
-was already close to right. The cost accounting below charges the pilot
-that found this out; the coordinates alone do not guarantee a cheaper fit.
+[![Posterior treatment effects from the noncentered and fully centered fits](assets/adaptive-eight-schools/posterior_theta.png)](assets/adaptive-eight-schools/posterior_theta.png)
 
-Rank-normalized split R-hat, bulk ESS and tail ESS are computed with
-MCMCDiagnosticTools over all 10 unconstrained model coordinates (`mu`,
-`log(tau)`, and the eight noncentered school coordinates `z`) — not the
-physical effects. Each fit has one chain:
-split R-hat is a within-chain diagnostic, not evidence that independent
-chains agree.
+Thin intervals contain 90% of the posterior draws and thick intervals contain
+50%. Schools are categories, so each has a separate interval. These are
+summaries of `theta = mu + tau*z`, in treatment-effect units.
 
-ESS alone does not measure computational cost. The [cost comparison below](#compute-cost-and-ess-per-gradient)
-reports measured runtime and exact total and retained-sampling gradient
-counts for all three fits.
+[![Observed estimates over individual posterior predictive intervals](assets/adaptive-eight-schools/posterior_predictive_check.png)](assets/adaptive-eight-schools/posterior_predictive_check.png)
 
-## Online adaptive centering
+This check uses the noncentered fit. Blue intervals summarize replicated
+reported estimates, including their known standard errors; red points are
+the observed estimates. The school order is the original data order.
 
-Online centering learns per-school coordinates inside warmup instead of
-using a separate pilot:
+## Select centering from a pilot
+
+An offline rule evaluates each school on a grid `c = 0:0.01:1`:
+
+```math
+L_j(c)=\log\operatorname{sd}(\tau^c z_j)-c\,\operatorname{mean}(\log\tau).
+```
+
+Compute it using the noncentered pilot's model coordinates, then hold the
+selected coefficients fixed during a new fit:
 
 ```julia
-online = adaptive_centering_problem(sb, stan_problem, enzyme_backend)
-fit = WarmupHMC.adaptive_warmup_mcmc(
-    Xoshiro(1), online; n_draws=10_000, monitor_ess=true)
-learned = WarmupHMC.reparam_sources(online)
+blocks = adaptive_centering_blocks(sb, BridgeStan.param_unc_names(problem.model))
+block = only(blocks)
+q = noncentered_fit.posterior_position
+z = permutedims(q[vec(block.effects), :])
+logtau = vec(q[only(block.log_scales), :])
+selection = select_ranef_centeredness(z, repeat(logtau, 1, 8);
+    candidates=0:0.01:1)
+selected_problem = fixed_centering(sb, problem, backend, selection.centeredness)
+partial_fit = WarmupHMC.adaptive_warmup_mcmc(
+    Xoshiro(1), selected_problem;
+    n_draws=10_000, monitor_ess=true, nonlinear_adapt=false)
 ```
 
-Returned draws are already back in the original model coordinates: do not
-apply a second sampler-to-model back-transform. The online run extends this
-comparison; the cited source defines the model and data, not a fitting
-workflow.
+[![Offline centering objective for each school](assets/adaptive-eight-schools/offline_loss_profiles.png)](assets/adaptive-eight-schools/offline_loss_profiles.png)
 
-![Online-adaptive selected coordinates](assets/adaptive-eight-schools/online_scatter.png)
+Each curve is rescaled to `[0,1]` for display. Selection uses the unscaled
+objective. The selected values are `0.01, 0.06, 0.03, 0.05, 0.06, 0.05, 0.03, 0.02`:
+all are close to noncentering, as expected with weak information per school.
 
-These are the online run's own 10,000 draws, shown in the learned
-coordinates. The full online run retained 10,000 draws, with 1 divergence (0.01%),
-maximum split R-hat `1.0006`, minimum bulk ESS `3,597`, and minimum tail
-ESS `3,131`. This is encouraging evidence from one run, not a guarantee
-for other data, seeds or models.
+## Adapt centering during warmup
 
-### Which loss is online centering minimizing?
-
-The two selectors use different criteria. The post-hoc selector above uses
-the KL-derived log-scale proxy. WarmupHMC's online selector uses
-**weighted position–gradient correlation** at its default `w₁=0`: for an
-independent Gaussian coordinate the log-density gradient is a decreasing
-affine function of position, giving correlation `-1`. The optional
-Jacobian/log-variance part of WarmupHMC's criterion has zero weight under
-these defaults.
-
-![Native online correlation objective on a common pilot reference](assets/adaptive-eight-schools/online_loss.png)
-
-This plot evaluates WarmupHMC's native `candidate_scoring_losses` on the
-**same 10,000 pilot draws** used by the offline diagnostic, with unit
-weights. These are **raw, interpretable correlations**, with fixed
-y-limits `[-1,0]` and no min–max scaling. Values near `-1` indicate a
-nearly linear decreasing position–score relationship. All 88 candidate
-comparisons (8 schools × 11 candidates) are available; none was
-inadmissible.
-
-This is a **retrospective objective diagnostic**, not a reconstruction of
-the online run's warmup history. Actual online selection accumulates
-warmup trajectory evidence and resets between adaptation windows. Saved
-posterior draws do not retain that leaf stream, its weights, or those
-group boundaries, so a posterior replay need not choose the exact
-centeredness learned online.
-
-### Position versus gradient, without hyperparameter axes
-
-![Coordinate positions versus exact log-density gradients in three configurations](assets/adaptive-eight-schools/gradient_scatter.png)
-
-Here the columns genuinely change the displayed coordinates, left to
-right: NCP pilot, online fit in its learned geometry, and post-hoc partial
-refit. Each facet shows **1,000 evenly selected draws from its own fit** —
-pilot, refit, or online run — with transparent points. The plotted
-gradients are evaluated on all 10,000 draws of each fit against its own
-target; the candidate-loss replay is a separate common-pilot calculation
-(plotted above), not a per-fit loss. The points are plotted directly,
-without smoothing or aggregation. Gradient axes are independent between
-facets, because reparameterization changes their units as well as the
-coordinate units.
-
-Provenance per column: NCP gradients are differentiated directly from the
-BRM-generated Stan target at the pilot draws; refit gradients are
-differentiated directly from the fixed selected-partial problem at the
-source draws `u` (no transport — the draws already live in the displayed
-geometry); online gradients are differentiated from the Stan target at the
-online draws and transported once into the learned geometry with
-`g_c = tau^(-c)*g_z`. The
-change-of-coordinate Jacobian is constant with respect to this school
-coordinate; its hyperparameter derivatives are not being plotted here.
-Seventy-two independent finite-difference checks of the displayed
-gradients passed, with maximum relative error `7.86e-11`. These scatter
-plots visualize a component of the correlation criterion; their appearance
-alone is not an ESS or convergence guarantee.
-
-## Compute cost and ESS per gradient
-
-Each fit records both exact counters with the model, priors, seed and
-sampling options specified above. The saved fits' counters were verified
-against their final checkpoints; cumulative counters across windows are
-never summed.
-
-- **Total NUTS gradients** include step-size adaptation and all discarded
-  restart epochs, as well as retained sampling. They count DynamicHMC
-  integration steps, **not** Pathfinder initialization or other setup
-  gradient calls.
-- **Sampling gradients** count only appended transitions corresponding to
-  the final retained draws. They exclude adaptation and discarded epochs.
-- Each ESS numerator is the **minimum over all 10 sampled model
-  coordinates**, in that fit's reported parameterization, not a sum of ESS
-  across parameters.
-
-| Fit | Total NUTS gradients | Min bulk ESS / total | Sampling gradients | Min bulk ESS / sampling | Fit time |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Noncentered pilot | 78,252 | 0.03530 | 76,692 | 0.03602 | 24.9 s |
-| Selected-partial refit | 71,081 | 0.04272 | 69,622 | 0.04361 | 25.4 s |
-| Online adaptive centering | 112,114 | 0.03208 | 110,410 | 0.03257 | 1.5 s |
-
-The refit alone has about **1.21×** the pilot's minimum bulk ESS per
-sampling gradient. But its coordinates required the pilot: together they
-cost **149,333** total NUTS evaluations, giving **0.02033** refit minimum
-bulk ESS per total gradient — about **0.58×** the pilot alone. The refit's
-numerator is used here; the two runs' ESS values are not added. When the
-right coordinates are nearly the starting ones, the pilot-then-refit
-workflow spends more than it saves.
-
-Online adaptation avoids the separate pilot and obtains about **0.91×**
-the pilot's minimum bulk ESS per total NUTS evaluation (**0.90×** on
-sampling-only cost), with 1 observed divergence. Against the charged
-pilot-plus-refit workflow it is about **1.58×** per total gradient. The
-corresponding minimum tail-ESS ratios, in table order, are `0.03467`,
-`0.03738`, `0.02793` per total gradient and `0.03537`, `0.03817`,
-`0.02836` per sampling gradient.
-
-**Gradient efficiency is not wall-clock speed.** Timings surround each
-sampler call, including initialization, first-use Julia/AD compilation and
-checkpoint I/O, but excluding preceding Stan compilation, post-fit
-extraction, plotting and offline centering selection. The calls ran
-sequentially on a shared host with one BLAS thread
-(`BLAS.set_num_threads(1)`); no CPU affinity was set, so single-core
-execution is not claimed. They are not warmed or replicated timing
-benchmarks. The pilot and refit calls
-together took **50.4 s**, before their intervening selection/processing
-cost. A direct per-gradient microbenchmark of both evaluation paths gives
-about 2 μs per evaluation either way, so the pilot/refit wall time sits
-in non-gradient sampler overhead outside the gradient-counter scope; its
-mechanism is not attributed here. The divergences and single-chain
-limitations still qualify every ESS comparison; these numbers do not
-establish universal superiority.
-
-## Native BRM diagnostics, rendered with AlgebraOfVega
-
-The fits use BRM models and WarmupHMC sampling. The research scripts
-assemble the comparison panels and retain the scientific provenance. All
-figures on this page are rendered in Julia with AlgebraOfVega.
-
-Plotting is optional: `using BayesianRegressionModels, AlgebraOfVega`
-loads BRM's plotting extension without adding plotting dependencies to
-fitting-only workflows. Given a descriptor and matching saved draws, the
-reusable calls are:
+Online adaptation chooses the coordinates during a single fit:
 
 ```julia
-using BayesianRegressionModels, AlgebraOfVega
-
-# Constrained matrices have draws in rows and matching names in columns.
-brm_posteriorplot(draws_matrix; x=1:8, probs=[0.9, 0.8, 0.5])
-
-# This simulates replicated observations through BRM's native :predict operation.
-brm_ppcplot(descriptor, draws_by_rows; problem=stan_problem,
-    response=:y, seed=1, x=["1", "2", "3", "4", "5", "6", "7", "8"])
-
-brm_pairplot(pair_rows)
-brm_centerednessplot(centering_rows; compare=true)
-brm_centering_lossplot(online_loss_rows; ylimits=(-1, 0))
-brm_centering_lossplot(offline_loss_rows; normalization=:minmax)
-brm_gradientplot(gradient_rows; opacity=0.25, markersize=12)
+adaptive = adaptive_centering_problem(sb, problem, backend)
+online_fit = WarmupHMC.adaptive_warmup_mcmc(
+    Xoshiro(1), adaptive; n_draws=10_000, monitor_ess=true)
+learned = [last(pair).c for pair in WarmupHMC.reparam_sources(adaptive)]
 ```
 
-WarmupHMC matrices use coordinates in rows: transpose them when calling
-these BRM draw-table helpers. Conversely, `candidate_scoring_losses`
-expects coordinates-by-draws matrices in their current source frame. The
-reproduction scripts handle these boundaries explicitly.
+[![Offline and online selected centering, by school](assets/adaptive-eight-schools/selected_centeredness.png)](assets/adaptive-eight-schools/selected_centeredness.png)
 
-## Reproduce and inspect the evidence
+Online adaptation selected `0.1` for Schools 2, 5 and 6, and `0.0` for the
+others. The following curves evaluate its position–gradient correlation
+objective retrospectively on the same 10,000 pilot draws, with unit weights.
+They describe that common reference sample, rather than a recorded warmup
+trajectory.
 
-The script, plotting program, data and source audits are in
-`research/eight_schools_centering/`. The README documents the full
-commands. The small evidence tables behind every number on this page —
-the source audit, diagnostics, both cost counters, centeredness, loss
-profiles, `provenance.toml` and `packages.tsv` — are committed under
-`research/eight_schools_centering/results/` with their own provenance
-note. Full posterior draws and per-draw coordinate tables stay in scratch.
-Raw model-frame draws are saved before plotting, and
-existing completed fits are never silently overwritten.
+[![Online correlation objective evaluated on the noncentered pilot](assets/adaptive-eight-schools/online_loss.png)](assets/adaptive-eight-schools/online_loss.png)
 
-Primary source boundaries:
+[![Centered pilot reference beside offline-selected and online-selected fit coordinates](assets/adaptive-eight-schools/selected_vs_online.png)](assets/adaptive-eight-schools/selected_vs_online.png)
 
-- Stan `example-models` model at [`a42b3da`](https://github.com/stan-dev/example-models/blob/a42b3da85b7dc38f2745dde4fca197425f18c516/misc/eight_schools/eight_schools.stan).
-- Stan `example-models` data at [`93b8b05`](https://github.com/stan-dev/example-models/blob/93b8b05cb7978952606f2043bec64d3b958b360c/misc/eight_schools/eight_schools.data.R).
+The centered column reuses the transformed pilot. The other columns show the
+fresh offline-selected and online fits in their respective sampling coordinates.
 
-Different library versions and parameter orderings can produce different
-trajectories at the same seed. The recorded environment and source audits
-identify the computation behind these results.
+## Sampling diagnostics and cost
+
+Each fit uses one chain, `Xoshiro(1)`, 10,000 retained draws, ordinary
+WarmupHMC initialization and adaptation defaults, one Julia thread and one
+BLAS thread. The fully centered and offline-selected fits freeze centering;
+the online fit adapts it.
+
+| Fit | Min bulk ESS | Min tail ESS | Max split R-hat | Divergences |
+|:--|--:|--:|--:|--:|
+| Noncentered | 4,839 | 3,565 | 1.0011 | 1 (0.01%) |
+| Fully centered | 167 | 85 | 1.0022 | 39 (0.39%) |
+| Selected partial | 5,380 | 3,518 | 1.0010 | 0 (0.00%) |
+| Online | 6,437 | 4,518 | 1.0010 | 5 (0.05%) |
+
+The ESS minima and maximum rank-normalized split R-hat cover all ten
+unconstrained **model coordinates**: `mu`, `log(tau)` and `z[1:8]`.
+A split R-hat from one chain checks agreement between parts of that chain;
+it cannot establish convergence across independent chains. Divergences
+indicate numerical problems that the ESS values alone do not describe.
+
+| Fit | Total gradients | Sampling gradients | Bulk ESS / total gradient | Bulk ESS / sampling gradient | Time: median (range) |
+|:--|--:|--:|--:|--:|:--|
+| Noncentered | 70,220 | 68,688 | 0.06892 | 0.07045 | 0.325 s (0.283–0.325) |
+| Fully centered | 174,269 | 170,284 | 0.00096 | 0.00098 | 0.749 s (0.747–0.787) |
+| Selected partial | 70,980 | 69,476 | 0.07580 | 0.07744 | 0.354 s (0.344–0.401) |
+| Online | 70,854 | 69,328 | 0.09085 | 0.09285 | 0.833 s (0.811–0.849) |
+
+**Timing protocol.** Complete priming fits exercise the plain, fixed-centering
+and adaptive call paths before measurement. The table reports the median and
+range of three complete fits per method, reversing their order in the second
+repetition. Every measured fit recorded zero Julia compilation time and the
+same gradient counts across repetitions. The sampler call includes
+initialization, warmup, retained sampling and checkpoint I/O; Stan compilation,
+model setup, offline selection and plotting are outside it.
+
+The priming calls took 23.32 s for noncentering and 25.34 s for fixed centering,
+of which Julia compilation accounted for 23.01 s and 24.55 s respectively.
+The online priming call took 0.96 s, including 0.06 s of compilation.
+These startup costs are recorded separately from repeated-fit times.
+
+Total gradient counts cover NUTS warmup and discarded epochs as well as the
+retained sample; they exclude Pathfinder and other initialization work.
+Sampling counts cover transitions contributing retained draws. ESS per
+sampling gradient measures the retained phase; ESS per total gradient charges
+for NUTS adaptation too.
+
+The offline workflow must pay for its pilot: **141,200 total gradients**
+(70,220 + 70,980). Its retained refit's ESS divided by that total is
+**0.03810 bulk ESS per gradient**. The noncentered baseline is already efficient here; a selected
+refit's per-fit improvement does not by itself justify the pilot cost.
+Online adaptation uses a similar number of gradients to the baseline, but
+its wrapper and adaptation add wall time. Full centering is less efficient
+for this weakly informed model.
+
+## Gradients in the displayed coordinates
+
+[![Centered and noncentered position–gradient panels from the same pilot](assets/adaptive-eight-schools/gradient_centered_vs_noncentered.png)](assets/adaptive-eight-schools/gradient_centered_vs_noncentered.png)
+
+[![Centered pilot reference beside offline-selected and online position–gradient panels](assets/adaptive-eight-schools/gradient_selected_vs_online.png)](assets/adaptive-eight-schools/gradient_selected_vs_online.png)
+
+The centered and noncentered panels use the same 1,000 evenly spaced pilot
+draws. Selected and online panels use 1,000 draws from their respective refits.
+The gradient is taken with respect to the displayed coordinate. All displayed values
+are checked against an independent Gaussian likelihood/prior derivative;
+finite differences additionally check three draws per school and method.
+
+## Reproduce the study
+
+The model, immutable reference files, full-run driver, checkpoint extraction,
+validation and native AlgebraOfVega plotting code live in
+[`research/eight_schools_centering`](https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/eight_schools_centering).
+Its README gives the commands. The committed result tables record source and
+dependency hashes, diagnostics, centering choices, exact costs, timing
+repetitions and coordinate checks. All figures are generated from the saved
+full fits.

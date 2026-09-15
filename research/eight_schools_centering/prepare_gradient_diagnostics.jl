@@ -43,7 +43,8 @@ function transformed_coordinates(positions, gradients, controls, layout)
                     (q[layout.population, draw] + scale^(1 - c) * coordinate)))
             q[index, draw] = coordinate
             g[index, draw] = gradient
-            g[layout.scale, draw] -= c * gz * z
+            # Include the derivative of log|dz/du| = -c*log(tau).
+            g[layout.scale, draw] -= c * (gz * z + 1)
         end
     end
     (; positions=q, gradients=g, product_error, physical_error)
@@ -85,14 +86,13 @@ function prepare_gradient_diagnostics(fit_dir, output_dir)
         read(joinpath(fit_dir, "eight-schools-model.stan")) ||
         error("generated target differs from the saved full-fit producer")
     pilot = deserialize(joinpath(fit_dir, "noncentered.jls"))
-    partial = deserialize(joinpath(fit_dir, "partial.jls"))
+    centered = deserialize(joinpath(fit_dir, "centered_source.jls"))
+    partial = deserialize(joinpath(fit_dir, "partial_source.jls"))
     partial_target = deserialize(joinpath(fit_dir, "partial_target.jls"))
     online = deserialize(joinpath(fit_dir, "online.jls"))
-    # partial.jls holds SOURCE draws u = tau^c*z (nonlinear_adapt=false, no
-    # back-transform): the native frame of the fixed selected-partial
-    # problem. partial_target.jls was written after reparametrize!, so it
-    # holds model-frame z like the other arms.
-    for (label, fit) in (("noncentered", pilot), ("selected_partial", partial),
+    # Source files are copied from the final checkpoint. Return-value files
+    # contain model coordinates, including when nonlinear_adapt=false.
+    for (label, fit) in (("noncentered", pilot), ("centered", centered), ("selected_partial", partial),
                          ("selected_partial_target", partial_target),
                          ("online", online))
         fit.complete && size(fit.posterior_position) == (10, SOURCE_DRAWS) ||
@@ -126,16 +126,17 @@ function prepare_gradient_diagnostics(fit_dir, output_dir)
     end
     write_tsv(joinpath(output_dir, "retrospective_online_losses.tsv"), loss_rows)
 
-    # Every displayed configuration binds to its OWN saved fit: the refit and
-    # online panels show their own draws and gradients, not the pilot
-    # re-expressed. Each arm is evaluated on its native problem, then moved
-    # once into its displayed geometry.
+    # Centered and NCP displays share the retained pilot draws. Centered is
+    # the visual reference in subsequent comparisons with the fresh refits.
     partial_problem = fixed_partial_problem(stan, selected)
     arms = (
         (; label="NCP", fit=pilot, problem=stan.density,
            positions=pilot.posterior_position,
            gradients=gradient_matrix(stan.density, pilot.posterior_position),
            controls=nothing, check_mode=:model),
+        (; label="Centered", fit=pilot, problem=stan.density,
+           positions=positions, gradients=gradients,
+           controls=ones(8), check_mode=:model),
         (; label="Post-hoc", fit=partial, problem=partial_problem,
            positions=partial.posterior_position,
            gradients=gradient_matrix(partial_problem, partial.posterior_position),
@@ -158,6 +159,15 @@ function prepare_gradient_diagnostics(fit_dir, output_dir)
                 arm.controls, layout)
         all(isfinite, moved.positions) && all(isfinite, moved.gradients) ||
             error("non-finite $(arm.label) display coordinates")
+        if !isnothing(arm.controls)
+            displayed_problem = fixed_partial_problem(stan, arm.controls)
+            for draw in (1, 5_000, 10_000)
+                _, expected_gradient = LogDensityProblems.logdensity_and_gradient(
+                    displayed_problem, collect(moved.positions[:, draw]))
+                maximum(abs.(expected_gradient .- moved.gradients[:, draw])) < 1e-8 ||
+                    error("$(arm.label) full gradient disagrees with displayed target")
+            end
+        end
         push!(invariants, (; configuration=arm.label,
             position_gradient_product_error=moved.product_error,
             physical_effect_error=moved.physical_error,
@@ -201,6 +211,16 @@ function prepare_gradient_diagnostics(fit_dir, output_dir)
     write_tsv(joinpath(output_dir, "gradient_checks.tsv"), checks)
     write_tsv(joinpath(output_dir, "frame_invariants.tsv"), invariants)
 
+    predicted = brm_predictive_draws(brm_descriptor(stan.sb),
+        permutedims(pilot.posterior_position); problem=stan.density, seed=SOURCE_SEED).y
+    size(predicted) == (SOURCE_DRAWS, 8) || error("unexpected eight-schools PPC shape")
+    observations = read_eight_schools()
+    write_tsv(joinpath(output_dir, "ppc_intervals.tsv"), [
+        let qs = quantile(view(predicted, :, j), [0.05, 0.25, 0.5, 0.75, 0.95])
+            (; school=j, observed=observations.y[j], q05=qs[1], q25=qs[2],
+               q50=qs[3], q75=qs[4], q95=qs[5])
+        end for j in 1:8])
+
     fit_provenance = TOML.parsefile(joinpath(fit_dir, "provenance.toml"))
     metadata = Dict(
         "pilot" => Dict(
@@ -214,6 +234,7 @@ function prepare_gradient_diagnostics(fit_dir, output_dir)
         "gradient_draws" => "10,000 retained draws of each displayed fit",
         "scatter_display_draws_per_facet" => 1000,
         "online_loss_reference" => "common NCP pilot; unit weights; retrospective",
+        "centered_display_reference" => "NCP pilot transformed with c=1; no centered refit used in scatter plots",
     )
     open(joinpath(output_dir, "diagnostics_provenance.toml"), "w") do io
         TOML.print(io, metadata)

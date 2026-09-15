@@ -1,6 +1,7 @@
 // .vitepress/theme/index.ts
 import DefaultTheme from 'vitepress/theme'
 import type { Theme as ThemeConfig } from 'vitepress'
+import { onMounted } from 'vue'
 
 import { enhanceAppWithTabs } from 'vitepress-plugin-tabs/client'
 
@@ -14,9 +15,12 @@ import './style.css'
 
 export const Theme: ThemeConfig = {
   extends: DefaultTheme,
+  setup() {
+    // Tab enhancement moves SSR code blocks; wait until Vue has hydrated them.
+    onMounted(setupBackendComparisons)
+  },
   enhanceApp({ app, router }) {
     enhanceAppWithTabs(app);
-    setupBackendComparisons();
     // HTMXObjects embed wiring: data-hx-base resolution + SPA route
     // re-process + .htmxo-embed link rewriting. BRM defaults the proxy
     // prefix to `/live-brm` (matches the Vite proxy in config.mts and

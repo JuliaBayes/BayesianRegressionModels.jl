@@ -1,0 +1,55 @@
+pair_plot_draws_per_configuration = 10000
+fit_producer_sha256 = "970d54be06df5123916f84110bb01ae51f1052888821ee4a65ea5bba55f8c380"
+loss_rows = "all 10,000 retained pilot draws"
+renderer = "native AlgebraOfVega specifications with CairoMakie layout"
+plot_script_sha256 = "0873253ff1e655d1af184338f7ccdcbb4965757f753871fc55d27050b2869d67"
+gradient_display_draws_per_facet = 1000
+
+[[render_dependencies]]
+name = "AlgebraOfGraphics"
+git_sha = ""
+source = "/home/n/.julia/packages/AlgebraOfGraphics/HY7hU"
+tree_hash = "88b1f363a4c69268ab705bcb5a049768a367bed9"
+version = "0.13.2"
+[[render_dependencies]]
+name = "AlgebraOfVega"
+git_sha = "412422660d859a468b8357a11527ff0033e0881c"
+source = "/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/test/.bootstrap/algebraofvega-412422660d85"
+tree_hash = "nothing"
+version = "0.2.0"
+[[render_dependencies]]
+name = "BayesianRegressionModels"
+git_sha = "028b2bfdd0629d0cd7cca34e49e0ad8902f50826"
+source = "/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering"
+tree_hash = "nothing"
+version = "0.2.1"
+[[render_dependencies]]
+name = "CairoMakie"
+git_sha = ""
+source = "/home/n/.julia/packages/CairoMakie/uIOIH"
+tree_hash = "3495bfc164949714579501b825b8e5e2cce7c56f"
+version = "0.15.14"
+[[render_dependencies]]
+name = "DynamicObjects"
+git_sha = "1d268ea6169f9152e5d14ac2c1464fd6a96e2793"
+source = "/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/test/.bootstrap/dynamicobjects-1d268ea6169f"
+tree_hash = "nothing"
+version = "0.5.0"
+[[render_dependencies]]
+name = "HTMXObjects"
+git_sha = "a813640165d14cf9cb87502ecf632f0c42378a69"
+source = "/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/test/.bootstrap/htmxobjects-a813640165d1"
+tree_hash = "nothing"
+version = "0.1.0"
+[[render_dependencies]]
+name = "Makie"
+git_sha = ""
+source = "/home/n/.julia/packages/Makie/Iy6pu"
+tree_hash = "37b10d17f74f54dc5fa7d3c6c20fd75613c71d80"
+version = "0.24.14"
+[[render_dependencies]]
+name = "Treebars"
+git_sha = "c02aa16ab1b08e4f5283597fe678a88e69555cd1"
+source = "/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/test/.bootstrap/treebars-c02aa16ab1b0"
+tree_hash = "nothing"
+version = "0.1.0"

@@ -1,4 +1,5 @@
 using Serialization, Test, MCMCDiagnosticTools, JSON, SHA
+using WarmupHMC # Load checkpoint types; all validation below uses independent scalar algebra.
 
 # Read-only acceptance over the saved fits and derived tables: no BRM/WHMC
 # transform helpers, target recompilation, plotting, or sampling.
@@ -25,9 +26,11 @@ selected = Dict((r["role"], parse(Int,r["county"])) => parse(Float64,r["centered
     for r in rows(joinpath(offline,"selected_centeredness.tsv")))
 learned = Dict((r["role"], parse(Int,r["county"])) => parse(Float64,r["centeredness"])
     for r in rows(joinpath(online_dir,"online_centeredness.tsv")))
-q0, qu, qo, qz = (f.posterior_position for f in (pilot,partial,online,mapped))
+q0, qo, qz = (f.posterior_position for f in (pilot,online,mapped))
+qu = deserialize(joinpath(offline, "checkpoints-partial", "cp_latest.jls")).posterior_position
 
 @testset "stored frames and independent scalar map" begin
+    @test partial.posterior_position == qz
     @test length(mapping) == 777
     @test length(at) == 777
     @test pilot.nonlinear_adapt && !partial.nonlinear_adapt && online.nonlinear_adapt
@@ -42,13 +45,27 @@ q0, qu, qo, qz = (f.posterior_position for f in (pilot,partial,online,mapped))
     @test qz[[ma,mb,ca,cb,sy],:] == qu[[ma,mb,ca,cb,sy],:]
 end
 
+representatives = rows(joinpath(diagnostics_dir,"representative_coordinates.tsv"))
+@testset "plotted coordinates selected by inferred centeredness" begin
+    @test length(representatives) == 6
+    for role in ("intercept", "slope")
+        candidates = collect(1:386)
+        lo = first(sort(candidates; by=j -> (selected[(role,j)],j)))
+        hi = first(sort(candidates; by=j -> (-selected[(role,j)],j)))
+        mid = first(sort(filter(j -> j ∉ (lo,hi),candidates); by=j -> (abs(selected[(role,j)]-0.5),j)))
+        actual = filter(r -> r["role"] == role, representatives)
+        @test parse.(Int,getindex.(actual,"county")) == [lo,mid,hi]
+        @test parse.(Float64,getindex.(actual,"centeredness")) == [selected[(role,j)] for j in (lo,mid,hi)]
+    end
+end
+
 pairs = rows(joinpath(diagnostics_dir,"coordinate_pairs.tsv"))
 seen = Dict{Tuple{String,String,Int},Int}()
 @testset "every pair row bound to its named saved fit" begin
     @test length(pairs) == 300000
     for r in pairs
         config,role = r["configuration"],r["role"]
-        j = parse(Int,last(split(r["basis_label"])))
+        j = parse(Int,r["county"])
         key=(config,role,j); draw=get(seen,key,0)+1; seen[key]=draw
         index = role == "intercept" ? ia[j] : ib[j]
         scale = role == "intercept" ? ca : cb
@@ -66,6 +83,18 @@ end
 archive=joinpath(study,"reference","radon_all.json.zip")
 @assert bytes2hex(sha256(read(archive))) == "3f30c7909d530be01e70ab9e98f9f5d5e83371bb15c6dd168696aefd805b5672"
 d=JSON.parse(read(`unzip -p $archive`,String))
+@testset "PPC preserves every original observation and category" begin
+    ppc=rows(joinpath(diagnostics_dir,"ppc_curves.tsv"))
+    @test length(ppc)==length(d["log_radon"])==12573
+    for (i,r) in enumerate(ppc)
+        @test parse(Int,r["index"])==i
+        @test parse(Int,r["county"])==d["county_idx"][i]
+        @test parse(Float64,r["floor"])==d["floor_measure"][i]
+        @test parse(Float64,r["observation"])==d["log_radon"][i]
+        qs=[parse(Float64,r[k]) for k in ("q05","q25","q50","q75","q95")]
+        @test all(isfinite,qs) && issorted(qs)
+    end
+end
 nj=zeros(386); sx=zeros(386); sx2=zeros(386); ys=zeros(386); xy=zeros(386)
 for (j,x,y) in zip(d["county_idx"],d["floor_measure"],d["log_radon"])
     nj[j]+=1; sx[j]+=x; sx2[j]+=x*x; ys[j]+=y; xy[j]+=x*y
@@ -76,7 +105,7 @@ gradient_errors=Float64[]
     @test length(gradient_rows)==18000
     for r in gradient_rows
         config,role=r["configuration"],r["role"]
-        j=parse(Int,last(split(r["basis_label"]))); draw=parse(Int,r["draw"])
+        j=parse(Int,r["county"]); draw=parse(Int,r["draw"])
         post=startswith(config,"2"); on=startswith(config,"3")
         q=post ? qu : on ? qo : q0
         sa,sb,sigma=exp(q[ca,draw]),exp(q[cb,draw]),exp(q[sy,draw])
@@ -84,7 +113,7 @@ gradient_errors=Float64[]
         zb=q[ib[j],draw] * (post ? exp(-selected[("slope",j)]*q[cb,draw]) : 1.0)
         a=q[ma,draw]+sa*za; b=q[mb,draw]+sb*zb
         g=role=="intercept" ? -za+sa*(ys[j]-nj[j]*a-sx[j]*b)/sigma^2 : -zb+sb*(xy[j]-sx[j]*a-sx2[j]*b)/sigma^2
-        c=post ? selected[(role,j)] : on ? learned[(role,j)] : 0.0
+        c=post ? selected[(role,j)] : on ? learned[(role,j)] : 1.0
         scale=role=="intercept" ? ca : cb; z=role=="intercept" ? za : zb
         factor=exp(c*q[scale,draw]); expected_g=g/factor
         @test parse(Float64,r["coordinate"]) ≈ z*factor atol=1e-9 rtol=1e-12

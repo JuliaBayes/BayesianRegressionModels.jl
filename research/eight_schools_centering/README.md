@@ -1,67 +1,76 @@
-# Eight-schools adaptive centering
+# PosteriorDB eight schools: manual and adaptive centering
 
-This is a standalone full case study for the standard eight-schools
-meta-analysis model. It is independent of the motorcycle HSGP reproduction in
-`research/adaptive_centering`; neither its settings nor its figures are shared.
+This study reproduces PosteriorDB posterior
+`eight_schools-eight_schools_noncentered` at
+`5545a1dd07ae297c36edecbcd82aa49097b4c385`. The immutable centered and
+noncentered Stan programs, posterior metadata and data are in `reference/`.
+The BRM formula uses `mu ~ Normal(0,5)` and positive `tau ~ Cauchy(0,5)`.
 
-The authoritative model and data are copied verbatim from Stan's public
-`example-models` repository:
+## Run
 
-- model `misc/eight_schools/eight_schools.stan` at
-  `a42b3da85b7dc38f2745dde4fca197425f18c516`
-  (SHA-256 `1624c8770e8f08a90894f3417591eb45f93ccfb70cbe9870442ae2ab26343422`);
-- data `misc/eight_schools/eight_schools.data.R` at
-  `93b8b05cb7978952606f2043bec64d3b958b360c`
-  (SHA-256 `fccd1624bd240b0c26a8b668f4d2181f0653000e4b169d393b3dc815a0b46952`).
-
-The source model has improper flat priors on `mu` and positive `tau`; the
-latter means a constant density on the declared positive support. The study
-does not replace either with a convenient proper prior. Its one arm that is
-reparameterized for sampling is the eight `theta[j]` coordinates. The physical
-likelihood, data, and priors remain identical in every arm.
-
-## Runs and entry points
-
-All fits use one chain, `Xoshiro(1)`, 10,000 requested retained draws, ordinary
-WarmupHMC initialization/adaptation defaults, and `monitor_ess=true`. Runtime
-and setup are separated explicitly: Stan compilation occurs before the timed
-sampler call, while each reported run-total gradient counter includes all MCMC
-warmup/discarded epochs but excludes Pathfinder and setup. The retained
-sampling counter is reported separately and never estimated.
+From the repository root, after the normal `test/setup_env.jl` bootstrap:
 
 ```sh
-# Compare actual density, support, and gradients with the immutable Stan source.
-BRM_EIGHT_SCHOOLS_OUTPUT="$SCRATCH/eight-schools-audit" \
-  julia --startup-file=no --project=test \
-  research/eight_schools_centering/audit_source.jl
+BRM_EIGHT_SCHOOLS_OUTPUT=/absolute/eight-audit \
+  julia --startup-file=no --project=test research/eight_schools_centering/audit_source.jl
 
-# Full NCP pilot, selected-partial refit, and online-adaptive fit.
-BRM_EIGHT_SCHOOLS_RUNTIME=1 \
-BRM_EIGHT_SCHOOLS_OUTPUT="$SCRATCH/eight-schools-fit" \
-  julia --startup-file=no --project=test \
-  research/eight_schools_centering/reproduce.jl
+BRM_EIGHT_SCHOOLS_RUNTIME=1 BRM_EIGHT_SCHOOLS_OUTPUT=/absolute/eight-fit \
+  julia --startup-file=no --project=test research/eight_schools_centering/reproduce.jl
 
-# Re-render figures from saved exports without invoking a sampler.
+julia --startup-file=no --project=test \
+  research/eight_schools_centering/prepare_gradient_diagnostics.jl \
+  /absolute/eight-fit /absolute/eight-diagnostics
+
+julia --startup-file=no --project=test \
+  research/eight_schools_centering/validate_results.jl \
+  /absolute/eight-fit /absolute/eight-diagnostics
+
+julia --startup-file=no --project=test research/eight_schools_centering/plots/bootstrap.jl
 julia --startup-file=no --project=research/eight_schools_centering/plots \
   research/eight_schools_centering/plot_results.jl \
-  "$SCRATCH/eight-schools-fit" "$SCRATCH/eight-schools-diagnostics"
+  /absolute/eight-fit /absolute/eight-diagnostics /absolute/eight-figures
 ```
 
-Every arm fits the same BRM model lowered through StanBlocks to compiled
-Stan/BridgeStan and sampled with WarmupHMC. The selected-partial arm samples
-fresh draws in selected source coordinates and back-transforms them once
-through WarmupHMC's public reparametrization API. Online adaptation uses
-BRM's `adaptive_centering_problem` with WarmupHMC's default weighted
-position-gradient correlation objective (`w1=0`).
+Use fresh output directories. The driver runs complete 10,000-draw priming
+fits for the plain, fixed-centering and online paths, then three complete
+repetitions of four configurations. Each fit uses `Xoshiro(1)`, normal
+WarmupHMC initialization/adaptation and checkpoint recording. The manual
+centered arm fixes every coefficient at one; offline selection uses
+`0:0.01:1`, and online adaptation uses `0:0.1:1`.
 
-Post-fit diagnostics bind each displayed configuration to its own saved
-fit: pair and gradient panels show the pilot, refit, and online draws in
-their own geometries, each evaluated on its native problem. Only the
-retrospective online-loss replay uses the common pilot, labeled as such.
+Every timed call records wall time, Julia compilation time and GC time.
+The reported benchmark uses warmed repetitions, with the second repetition
+reversing the fit order. Exact NUTS total and retained-sampling gradient
+counters are checked against final checkpoints. The offline workflow charges
+for both pilot and refit.
 
-The full harness checks generated Stan with `stanc`, compares the generated
-target to the immutable source at synthetic and saved posterior positions,
-checks both returned and final-checkpoint counters, computes split R-hat,
-bulk ESS, and tail ESS over the explicitly named ten-coordinate unconstrained
-model scope, validates coordinate/Jacobian/gradient invariants, and emits
-native AlgebraOfVega diagnostics.
+## Coordinates and validation
+
+WarmupHMC `deeea1d` returns model coordinates for every arm. Source-coordinate
+records come from final checkpoints. The driver verifies their transport to
+the returned model draws; `extract_results.jl` independently verifies the
+scalar map and can extract results from complete archived return values and
+checkpoints into a fresh directory without sampling.
+
+`noncentered.jls`, `centered.jls`, `partial.jls` and `online.jls` hold model
+coordinates. Corresponding `*_source.jls` files hold sampler coordinates.
+The `centered_target.jls` and `partial_target.jls` records also hold model
+coordinates. School effects are always `theta = mu + tau*z` in model coordinates.
+
+The source audit checks all ten gradient components against PosteriorDB and
+checks the manually centered density, Jacobian and gradients. Saved-data
+validation checks checkpoint/return coordinates, all pair rows, all displayed
+gradients against an independent Gaussian derivative, the exact offline
+criterion, repeated timing counters and recomputed model-frame diagnostics.
+
+The published sampling/extraction directories and exact producer/extraction
+hashes are in `results/provenance.toml`. Small evidence tables are committed
+under `results/`; full draws and checkpoints stay in scratch. The figure
+manifest records image hashes and rendering dependencies. All plots use native
+AlgebraOfVega with CairoMakie. School summaries and predictive checks use
+individual intervals in the original school order.
+
+The scatter plots use the NCP pilot transformed to fully centered coordinates
+as their first-column visual reference. The NCP comparison uses those same
+physical draws; selected and online columns use their separate saved fits.
+The manually centered fit remains in the posterior summaries and cost table.

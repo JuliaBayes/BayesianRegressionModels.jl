@@ -1,4 +1,5 @@
 using BayesianRegressionModels, AlgebraOfVega, CSV, Tables, CairoMakie, JSON, SHA, TOML
+import Pkg
 import AlgebraOfGraphics
 
 const ROLES = (:intercept, :slope)
@@ -9,15 +10,23 @@ const CENTEREDNESS_COLORS = ["#0B7BEC", "#E67E22", "#16877A", "#984EA3"]
 table(dir, name) = collect(Tables.namedtupleiterator(
     CSV.File(joinpath(dir, name); delim='\t')))
 
-function representative_counties(diagnostics)
-    values = diagnostics["representative_counties"]
-    values isa AbstractVector || error("diagnostics provenance lacks representative counties")
-    Int.(values)
+function display_rows(source, representatives, role, configurations)
+    chosen = Dict(r.county => r for r in representatives if Symbol(r.role) == role)
+    [(; r..., panel=string(findfirst(==(r.configuration), configurations), " ",
+             r.configuration == "2 centered" ? "Centered" :
+             r.configuration == "1 NCP" ? "Noncentered" :
+             r.configuration == "3 post-hoc selected" ? "Selected (pilot)" :
+             r.configuration == "4 post-hoc fit" ? "Selected (refit)" :
+             r.configuration == "5 online learned" ? "Online (refit)" :
+             replace(r.configuration, r"^\d+ " => "")),
+        cell=string(chosen[r.county].rank, " County ", lpad(r.county,3,'0'),
+                    " · c=", chosen[r.county].centeredness))
+     for r in source if Symbol(r.role) == role && r.configuration in configurations]
 end
 
-function save_panel(output, name, plot; title, size=(1300, 500), legend=true)
-    fig = Figure(; size, fontsize=15)
-    Label(fig[0, 1], title; fontsize=21, font=:bold, tellwidth=false)
+function save_panel(output, name, plot; title, size=(1080, 600), legend=true)
+    fig = Figure(; size, fontsize=18, figure_padding=legend ? (5,5,5,5) : (5,45,5,5))
+    Label(fig[0, 1:(legend ? 2 : 1)], title; fontsize=23, font=:bold, tellwidth=false)
     grid = sdraw!(fig[1, 1], plot)
     # Panels whose facet strips already identify every series pass
     # legend=false: a color legend would only duplicate the strips.
@@ -33,23 +42,33 @@ function save_panel(output, name, plot; title, size=(1300, 500), legend=true)
 end
 
 function ppc_plot(diagnostics)
-    # One interval per observation in floor order. Pooling county-specific
-    # intervals at repeated floor values into one floor-level ribbon would be
-    # invalid: many different predictive intervals share the same x.
-    rows = sort(table(diagnostics, "ppc_curves.tsv"); by=r -> (r.floor, r.observation))
-    all(r -> all(isfinite, (r.q05, r.q10, r.q25, r.q50, r.q75, r.q90, r.q95)), rows) ||
+    source = table(diagnostics, "ppc_curves.tsv")
+    [r.index for r in source] == collect(1:length(source)) || error("PPC row order changed")
+    counts = Dict(j => count(r -> r.county == j, source) for j in unique(r.county for r in source))
+    eligible = [j for j in keys(counts) if
+        count(r -> r.county == j && r.floor == 0, source) >= 5 &&
+        count(r -> r.county == j && r.floor == 1, source) >= 5]
+    sort!(eligible; by=j -> (counts[j], j))
+    counties = unique([first(eligible), eligible[cld(length(eligible), 2)], last(eligible)])
+    rows = [merge(r, (; county_label="County $(r.county) (n=$(counts[r.county]))",
+        floor_label="Floor code $(Int(r.floor))",
+        lo90=r.q50-r.q05, hi90=r.q95-r.q50,
+        lo50=r.q50-r.q25, hi50=r.q75-r.q50)) for r in source if r.county in counties]
+    all(r -> all(isfinite, (r.q05, r.q25, r.q50, r.q75, r.q95)), rows) ||
         error("PPC intervals are non-finite")
-    indexed = [merge(r, (; position=i)) for (i, r) in enumerate(rows)]
-    observations = [(; position=i, response=r.observation) for (i, r) in enumerate(rows)]
-    bands = brm_posteriorplot(indexed; x=:position, xlabel="Observation (floor order)",
-        ylabel="Log radon",
-        title="Observed log radon and posterior predictive intervals")
-    # 12,573 observations would bury the ribbons if drawn over them, so the
-    # dots go UNDER the translucent bands (same ink as the shared helper).
-    dots = data(observations) *
-        mapping(:position => "Observation (floor order)", :response => "Log radon") *
-        visual(Scatter; color="#252525", opacity=0.65, markersize=2)
-    dots + bands
+    base = data(rows)
+    wide = base * mapping(:index => "Original data row", :q50 => "Log radon",
+        :lo90, :hi90; row=:county_label) *
+        visual(Errorbars; color="#aac9df", linewidth=1, whiskerwidth=0)
+    narrow = base * mapping(:index => "Original data row", :q50 => "Log radon",
+        :lo50, :hi50; row=:county_label) *
+        visual(Errorbars; color="#5789af", linewidth=2, whiskerwidth=0)
+    observed = base * mapping(:index => "Original data row", :observation => "Log radon";
+        row=:county_label, color=:floor_label => "Observed floor code") *
+        visual(Scatter; markersize=6, strokewidth=0.4, strokecolor=:black)
+    (wide + narrow + observed) * config(facet=(; linkxaxes=:none, linkyaxes=:all),
+        scales=scales(Color=(; categories=["Floor code $j" for j in (0,1,2,3,9)],
+            palette=["#d95f02", "#1b9e77", "#7570b3", "#e7298a", "#444444"])))
 end
 
 function centering_rows(offline, online)
@@ -77,10 +96,11 @@ function centeredness_plot(rows)
                scales=scales(Color=(; palette=CENTEREDNESS_COLORS)))
 end
 
-function offline_loss_rows(offline, counties)
+function offline_loss_rows(offline, representatives)
     source = table(offline, "offline_loss_profiles.tsv")
     rows = NamedTuple[]
-    for role in ROLES, county in counties
+    for cell in representatives
+        role, county = Symbol(cell.role), cell.county
         curve = sort(filter(r -> String(r.role) == String(role) && r.county == county, source);
                      by=r -> r.centeredness)
         length(curve) == 101 || error("offline loss profile is incomplete")
@@ -91,7 +111,7 @@ function offline_loss_rows(offline, counties)
                 continue
             end
             push!(rows, (; predictor=role_label(role),
-                basis_label="County $(lpad(county, 3, '0'))",
+                basis_label=string(cell.rank, " ", cell.criterion),
                 segment="$role-$county-$segment", centeredness=r.centeredness,
                 loss=r.loss))
         end
@@ -99,101 +119,90 @@ function offline_loss_rows(offline, counties)
     rows
 end
 
-function online_loss_rows(offline, counties)
+function online_loss_rows(offline, representatives)
     source = table(offline, "retrospective_online_losses.tsv")
-    rows = filter(r -> String(r.role) in String.(ROLES) && r.county in counties, source)
+    selected = Dict((Symbol(r.role),r.county) => r for r in representatives)
     [(; predictor=role_label(r.role),
-       basis_label="County $(lpad(r.county, 3, '0'))",
-       segment="$(r.role)-$(r.county)", centeredness=r.centeredness,
-       loss=r.loss) for r in rows]
+       basis_label=string(selected[(Symbol(r.role),r.county)].rank, " ",
+                          selected[(Symbol(r.role),r.county)].criterion),
+       segment="$(r.role)-$(r.county)", centeredness=r.centeredness, loss=r.loss)
+     for r in source if haskey(selected,(Symbol(r.role),r.county))]
 end
 
-function pair_plot(diagnostics, configurations)
-    rows = filter(r -> r.configuration in configurations,
-                  table(diagnostics, "coordinate_pairs.tsv"))
-    all(r -> isfinite(r.hyperparameter) && r.hyperparameter > 0 &&
-             isfinite(r.coordinate), rows) ||
+function pair_plot(diagnostics, representatives, role, configurations)
+    rows = display_rows(table(diagnostics, "coordinate_pairs.tsv"),
+                        representatives, role, configurations)
+    length(rows) == length(configurations) * 3 * 10_000 || error("incomplete pair rows")
+    all(r -> isfinite(r.hyperparameter) && r.hyperparameter > 0 && isfinite(r.coordinate), rows) ||
         error("pair plot contains invalid coordinates or scales")
-    # Native composition: county hues stay consistent with the loss panels,
-    # but the legend is suppressed at render (legend=false) since the row
-    # strips already identify every county.
-    data(rows) * mapping(:hyperparameter => "Hyperparameter position",
-        :coordinate => "Coordinate position"; col=:parameter, row=:basis_label,
-        color=:basis_label => "County") *
-        visual(Scatter; opacity=0.12, markersize=8) *
-        config(width=260, height=190,
-            facet=(; linkxaxes=:none, linkyaxes=:none),
-            scales=scales(X=(; scale=log10),
-                          Color=(; palette=CENTEREDNESS_COLORS)))
+    data(rows) * mapping(:hyperparameter => "County-effect SD",
+        :coordinate => "County coordinate"; col=:panel, row=:cell) *
+        visual(Scatter; color="#19679a", opacity=0.12, markersize=3) *
+        config(facet=(; linkxaxes=:all, linkyaxes=:none),
+               scales=scales(X=(; scale=log10)))
+end
+
+function render_dependencies()
+    selected = ("BayesianRegressionModels", "AlgebraOfVega", "AlgebraOfGraphics",
+                "CairoMakie", "Makie", "DynamicObjects", "HTMXObjects", "Treebars")
+    [Dict("name" => p.name, "version" => string(p.version), "source" => p.source,
+          "tree_hash" => string(p.tree_hash),
+          "git_sha" => ispath(joinpath(p.source, ".git")) ?
+              strip(read(`git -C $(p.source) rev-parse HEAD`, String)) : "")
+     for p in sort!(collect(values(Pkg.dependencies())); by=p -> p.name)
+     if p.name in selected]
 end
 
 function plot_results(offline, online, diagnostics;
                       output=joinpath(diagnostics, "figures"))
     mkpath(output)
+    dependencies_before = render_dependencies()
     provenance = TOML.parsefile(joinpath(diagnostics, "diagnostics_provenance.toml"))
-    counties = representative_counties(provenance)
+    representatives = table(diagnostics, "representative_coordinates.tsv")
     paths = String[]
     push!(paths, save_panel(output, "data-ppc", ppc_plot(diagnostics);
-        title="Data and native posterior predictive check", size=(1300, 500)))
+        title="Observed log radon and predictive intervals by county", size=(1050, 1000)))
     push!(paths, save_panel(output, "selected-centeredness",
         centeredness_plot(centering_rows(offline, online));
         title="Per-county selected centering", size=(1050, 520)))
     push!(paths, save_panel(output, "offline-loss-profiles",
-        brm_centering_lossplot(offline_loss_rows(offline, counties);
+        brm_centering_lossplot(offline_loss_rows(offline, representatives);
             normalization=:minmax,
             ylabel="Offline loss (per-county min–max)");
         title="Offline KL/log-scale proxy on the pilot", size=(1050, 500)))
     push!(paths, save_panel(output, "online-loss-profiles",
-        brm_centering_lossplot(online_loss_rows(offline, counties);
+        brm_centering_lossplot(online_loss_rows(offline, representatives);
             normalization=:none, ylimits=(-1, 0),
             ylabel="Position–gradient correlation (w₁ = 0)");
         title="Common-pilot retrospective online objective", size=(1050, 500)))
-    # One figure per geometry: the shared pair algebra has no configuration
-    # facet, so combining geometries would overplot indistinguishable clouds.
-    for (name, configuration, title) in (
-            ("pair-pilot-ncp", "1 NCP", "Noncentered pilot coordinates"),
-            ("pair-pilot-centered", "2 centered",
-                "Centered pilot coordinates (transformed draws)"),
-            ("pair-pilot-posthoc", "3 post-hoc selected",
-                "Post-hoc selected pilot coordinates (transformed draws)"),
-            ("pair-fresh-posthoc", "4 post-hoc fit",
-                "Fresh post-hoc partial-fit coordinates"),
-            ("pair-fresh-online", "5 online learned",
-                "Fresh online-fit coordinates (learned geometry)"))
-        push!(paths, save_panel(output, name,
-            pair_plot(diagnostics, (configuration,)); title, size=(1600, 780),
-            legend=false))
+    # Each role has its own three selected coordinates. The same centered
+    # pilot reference appears first in both the pilot and fresh-fit figures.
+    for role in ROLES
+        for (family, configurations, title) in (
+            ("pilot", ("2 centered", "1 NCP", "3 post-hoc selected"),
+                "$(role_label(role)): one pilot, three coordinate systems"),
+            ("fits", ("2 centered", "4 post-hoc fit", "5 online learned"),
+                "$(role_label(role)): centered reference and fresh fits"))
+            push!(paths, save_panel(output, "pair-$family-$role",
+                pair_plot(diagnostics, representatives, role, configurations);
+                title, size=(1080, 1050), legend=false))
+        end
     end
-    # Row strips carry just the county: each figure's title already
-    # identifies its role, and the long "Role / County N" strips overlapped
-    # vertically.
     gradients = table(diagnostics, "coordinate_gradients.tsv")
-    length(gradients) == 3 * 2 * length(counties) * 1000 ||
-        error("gradient display table is incomplete")
+    length(gradients) == 18_000 || error("gradient display table is incomplete")
     all(r -> isfinite(r.coordinate) && isfinite(r.gradient), gradients) ||
         error("gradient display contains non-finite values")
-    # One scatter figure per hierarchical role: stacking both roles in a single
-    # panel crowds the facet strips.
-    for (name, role, title) in (
-            ("position-gradient-intercept", :intercept,
-                "Position versus log-density gradient: county intercepts"),
-            ("position-gradient-slope", :slope,
-                "Position versus log-density gradient: county slopes"))
-        rows = filter(r -> Symbol(r.role) == role, gradients)
-        length(rows) == 3 * length(counties) * 1000 ||
-            error("gradient display rows are incomplete for role $role")
-        # Native composition, as for pairs: county hues stay consistent with
-        # the loss panels while the legend stays suppressed (legend=false).
-        plot = data(rows) * mapping(:coordinate => "Coordinate position",
-            :gradient => "Log-density gradient";
-            col=:configuration, row=:basis_label,
-            color=:basis_label => "County") *
-            visual(Scatter; opacity=0.25, markersize=12) *
-            config(width=300, height=210,
-                facet=(; linkxaxes=:none, linkyaxes=:none),
-                scales=scales(Color=(; palette=CENTEREDNESS_COLORS)))
-        push!(paths, save_panel(output, name, plot; title, size=(1800, 520),
-                                legend=false))
+    for role in ROLES
+        rows = display_rows(gradients, representatives, role,
+                            ("1 Centered", "2 post-hoc", "3 online"))
+        length(rows) == 9_000 || error("incomplete $role gradient rows")
+        plot = data(rows) * mapping(:coordinate => "County coordinate",
+            :gradient => "Log-density gradient"; col=:panel, row=:cell) *
+            visual(Scatter; color="#19679a", opacity=0.25, markersize=4) *
+            config(facet=(; linkxaxes=:none, linkyaxes=:none))
+        push!(paths, save_panel(output, "position-gradient-$role", plot;
+            title="$(role_label(role)): position and displayed gradient",
+            size=(1080, 1050), legend=false))
     end
     manifest = [(; figure=splitext(basename(path))[1], png=path,
         png_sha256=bytes2hex(sha256(read(path))),
@@ -204,6 +213,11 @@ function plot_results(offline, online, diagnostics;
         for row in manifest
             println(io, join((row.figure, row.png, row.png_sha256, row.spec_sha256), '\t'))
         end
+    end
+    dependencies_before == render_dependencies() || error("render dependency changed")
+    open(joinpath(output, "render_provenance.toml"), "w") do io
+        TOML.print(io, Dict("render_dependencies" => dependencies_before,
+            "plot_script_sha256" => bytes2hex(sha256(read(@__FILE__)))))
     end
     println("render_complete\tfigures=", length(paths), "\tbackend=AlgebraOfVega/CairoMakie")
     paths

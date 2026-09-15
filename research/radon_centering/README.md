@@ -15,24 +15,22 @@ Parameterization is not part of the complexity criterion; of the two
 tied variants, the noncentered implementation is selected as the
 adaptive-centering starting point.
 
-The BRM spelling uses fixed population intercept/slope coefficients for the
-source model's `mu_alpha`/`mu_beta`, and two scalar zerocorr county blocks for
-its independent `alpha`/`beta` vectors. A constant-one `intercept` column
-(`fill(1.0, N)`) spells the intercept margin as the same direct-scale scalar
-family as the slope, so both county scales are half-normal(0, 1):
+The model uses named, independent intercept and slope blocks with explicit
+half-normal scale priors:
 
 ```julia
 sigma_y ~ Normal(0, 1; lower=0)
-mu ~ 1 + floor_measure + (0 + intercept + floor_measure || county_idx)
+mu ~ 1 + floor_measure + (1 | county_intercept | county_idx) +
+     (0 + floor_measure | county_slope | county_idx)
 effect(mu, Intercept) ~ Normal(0, 10)
 effect(mu, floor_measure) ~ Normal(0, 10)
+sd(:, county_intercept) ~ Normal(0, 1)
+sd(:, county_slope) ~ Normal(0, 1)
 log_radon ~ Normal(mu, sigma_y)
 ```
 
-The fixed coefficients and standardized effects give exactly the source
-linear predictor. The positive `Normal(0,1)` priors are half-normal on the three
-scales, and the two zerocorr blocks introduce no correlation. There is no
-rescaling, centering, covariate editing, or prior substitution.
+The data passed to BRM contains the original `floor_measure`, `county_idx`
+and `log_radon` columns.
 
 ## Reproduce
 
@@ -79,16 +77,24 @@ decision),
 HTMXObjects `a813640`, HTMX `d52ce5b`, Treebars `c02aa16`;
 AlgebraOfGraphics 0.13.2, CairoMakie 0.15.14 and Makie 0.24.14 resolve from
 the registry under the `[compat]` bounds in `plots/Project.toml`. Re-running
-the script reuses the cached checkouts and re-renders byte-identical figures.
+the script reuses the cached checkouts. Rendering records dependency identities
+and verifies that they stay unchanged during the run.
 
-Eleven figures land in `<diagnostics>/figures/` with `figure_manifest.tsv`
+Ten figures land in `<diagnostics>/figures/` with `figure_manifest.tsv`
 hashes binding every PNG to its AlgebraOfVega specification: `data-ppc`,
 `selected-centeredness`, `offline-loss-profiles`, `online-loss-profiles`,
-five per-geometry pair plots (`pair-pilot-ncp`, `pair-pilot-centered`,
-`pair-pilot-posthoc`, `pair-fresh-posthoc`, `pair-fresh-online`) and two
-per-role position–gradient scatters (`position-gradient-intercept`,
-`position-gradient-slope`). The docs page embeds copies under
-`docs/src/assets/adaptive-radon/`.
+four pair plots (`pair-pilot-intercept`, `pair-pilot-slope`,
+`pair-fits-intercept`, `pair-fits-slope`) and two position–gradient scatters
+(`position-gradient-intercept`, `position-gradient-slope`). The docs page
+embeds copies under `docs/src/assets/adaptive-radon/`.
+
+Scatter plots select three coordinates per role by the inferred offline
+centeredness: minimum, nearest 0.5, maximum, with county-index tie-breaking.
+The selected counties and controls are in `representative_coordinates.tsv`.
+Every comparison starts with the NCP pilot transformed to centered coordinates.
+Pilot comparisons show the same physical draws in each column; fresh-fit
+comparisons show the separate selected and online draws beside that reference.
+The sampling and cost baseline remains NCP.
 
 The audit compares normalized BridgeStan densities and all 777 gradients against
 the immutable PosteriorDB Stan model. The pilot is a full noncentered fit. Its
@@ -122,28 +128,31 @@ ineligible for completion.
   online fit.
 - `diagnostics.tsv`, `online_diagnostics.tsv`, and `fit_costs.tsv`: split
   R-hat, bulk/tail ESS, divergences, retained draws, exact total and retained-
-  sampling gradient counters, wall time, and ESS-per-gradient ratios.
+  sampling gradient counters, wall time, measured Julia compilation time, and ESS-per-gradient ratios.
+- `representative_coordinates.tsv`: per-role display selection and inferred controls.
 - `coordinate_pairs.tsv`, `coordinate_gradients.tsv`, and
   `density_jacobian_gradient_invariants.tsv`: all 10,000 draws for pair
   geometry, exactly 1,000 evenly selected saved draws per displayed gradient
   facet, and transformed density/Jacobian/gradient/roundtrip checks.
-- `ppc_curves.tsv`: native BRM predictive-replay quantiles for all 12,573
-  observations and all 10,000 pilot draws.
+- `ppc_curves.tsv` (committed as `results/ppc_intervals.tsv`): native BRM
+  predictive-replay quantiles for all 12,573 observations and 10,000 pilot draws.
 - `figures/figure_manifest.tsv`: hashes binding every PNG to its AlgebraOfVega
   specification.
 
-Stored/model/display frames are declared in `prepare_diagnostics.jl` and
-enforced by record flags: the pilot and online matrices are already model
-(NCP) coordinates, while `partial.jls` holds stored source (partial-u)
-coordinates (`nonlinear_adapt=false`) and is mapped once with
-`WarmupHMC.reparametrize!` into `partial_model_frame.jls`. Pairs, gradients,
-diagnostics and costs consume model-frame matrices only; five independent
-checks bind every refit coordinate, gradient, density/Jacobian and physical
-target back to the raw saved source draws. The refit `diagnostics.tsv` row is
-model-frame ESS on the mapped draws (the producer's returned-frame row is
-superseded here and noted in `diagnostics_provenance.toml`, which also
-fail-closes the regeneration checkout against the producer script hash
-before any output write).
+All three returned fit matrices hold model (NCP) coordinates, including the
+fixed-centering refit. Final checkpoints hold sampler coordinates. Extraction
+checks the independent scalar checkpoint-to-model map against the actual
+returned positions, then verifies displayed coordinates, Gaussian gradients,
+the transformed density and the physical linear predictor. Diagnostics use
+model coordinates for every arm.
+
+The PPC table preserves each original row index, county and floor code.
+County facets show independent 50% and 90% predictive intervals with observed
+values overlaid in original row order and coloured by floor code. Displayed
+counties span the minimum, median and maximum sample sizes among counties
+with at least five floor-0 and five floor-1 observations. All recorded floor
+codes in those counties are displayed; the model and full PPC table include
+every observation.
 
 Delivered receipts committed under `results/`: the source audit and coordinate
 map, `fit_costs.tsv` (both exact counters, ESS minima and workflow charge),
@@ -151,11 +160,11 @@ per-fit diagnostics, post-hoc and online centeredness selections, display
 coordinate invariants, and per-run provenance plus dependency snapshots
 (`offline_`/`online_provenance.toml`, `offline_`/`online_packages.tsv`).
 Full `.jls` draws, checkpoints, compiled models and the large display tables
-(loss profiles, retrospective scores, pairs, gradients, PPC curves) stay in
+(loss profiles, retrospective scores, pairs and gradients) stay in
 the run directories outside Git; the docs page embeds figure copies under
 `docs/src/assets/adaptive-radon/`.
 
-The displayed gradient facets retain independent axes, marker size 12, opacity
+The displayed gradient facets retain independent axes, marker size 4, opacity
 0.25, and no KDE, binning, smoothing, or fitted line. All 10,000 retained draws
 enter each candidate-loss calculation; display thinning applies only to
 gradient scatters. Missing or non-finite loss rows remain missing. ESS is a
