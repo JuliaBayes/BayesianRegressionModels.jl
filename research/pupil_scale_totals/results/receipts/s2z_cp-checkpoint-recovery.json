@@ -1,0 +1,9 @@
+{
+  "all_gradient_calls": 104514,
+  "checkpoint": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil4-brms-whmc-v1/s2z_cp-checkpoints/cp_latest.jls",
+  "counter_evidence": "Last window callback immediately before non-evaluating finalization; postprocessing subsequently failed.",
+  "draws": 2000,
+  "log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.5TlKay",
+  "refitted": false,
+  "sampling_gradient_calls": 71248
+}

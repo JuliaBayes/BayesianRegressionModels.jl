@@ -1,0 +1,25 @@
+S2Z_AUDIT_PASS s2z_cp
+SCIENTIFIC_RESULT (arm = "s2z_cp_whmc", draws = 2000, min_bulk_ess = 1578.5561975667965, limiting_qoi = "subject_714_residual_sd", sampling_gradients = 71248, total_gradients = 104514, ess_per_1000_sampling_gradients = 22.15579661978998, ess_per_1000_total_gradients = 15.103777461075039, max_split_rhat = 1.0070497915440355, divergences = 0)
+S2Z_AUDIT_PASS s2z_ncp
+BOUNDARY s2z_ncp init window=0 gradients=148
+BOUNDARY s2z_ncp window window=1 gradients=1430
+BOUNDARY s2z_ncp window window=2 gradients=3509
+BOUNDARY s2z_ncp window window=3 gradients=7570
+BOUNDARY s2z_ncp window window=4 gradients=15589
+BOUNDARY s2z_ncp window window=5 gradients=31613
+BOUNDARY s2z_ncp window window=6 gradients=63665
+BOUNDARY s2z_ncp window window=7 gradients=127671
+BOUNDARY s2z_ncp window window=8 gradients=187780
+SCIENTIFIC_RESULT (arm = "s2z_ncp_whmc", draws = 2000, min_bulk_ess = 83.24151000976032, limiting_qoi = "mean_intercept_group_sd", sampling_gradients = 166256, total_gradients = 187780, ess_per_1000_sampling_gradients = 0.500682742335677, ess_per_1000_total_gradients = 0.4432927362326143, max_split_rhat = 1.0052640714302823, divergences = 0)
+S2Z_AUDIT_PASS s2z_auto
+BOUNDARY s2z_auto init window=0 gradients=146
+BOUNDARY s2z_auto window window=1 gradients=1858
+BOUNDARY s2z_auto window window=2 gradients=4825
+BOUNDARY s2z_auto window window=3 gradients=8884
+BOUNDARY s2z_auto window window=4 gradients=16905
+BOUNDARY s2z_auto window window=5 gradients=32931
+BOUNDARY s2z_auto window window=6 gradients=64949
+BOUNDARY s2z_auto window window=7 gradients=95730
+SCIENTIFIC_RESULT (arm = "s2z_auto_whmc", draws = 2000, min_bulk_ess = 1865.3978539315187, limiting_qoi = "subject_718_total_intercept", sampling_gradients = 61216, total_gradients = 97516, ess_per_1000_sampling_gradients = 30.472390452357534, ess_per_1000_total_gradients = 19.129146539352707, max_split_rhat = 1.0071272310530135, divergences = 0)
+PUPIL4_BRMS_COMPLETE fit
+[kb-run-compact] exit=0 elapsed=186s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.BUZDdJ

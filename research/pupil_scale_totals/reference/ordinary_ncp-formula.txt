@@ -1,0 +1,2 @@
+p_size ~ load + (load || subj) 
+sigma ~ (1 | subj)

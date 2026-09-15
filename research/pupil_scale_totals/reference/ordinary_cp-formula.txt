@@ -1,0 +1,2 @@
+p_size ~ load + (load | gr(subj, cor = FALSE, center = TRUE)) 
+sigma ~ (1 | gr(subj, center = TRUE))
