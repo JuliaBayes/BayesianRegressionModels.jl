@@ -2908,10 +2908,99 @@ emitted before compiling.
 # This boundary is used only while compiling a model, never during sampling.
 stan_code(sb::SBBRMI) = Base.invokelatest(StanBlocks.stan_code, sb.model)
 
+# Display configured submodels from their actual emitted statements. Keep the
+# compiler's value-callee path intact: a merge expression inside a SLIC call
+# does not have the same tracing/binding contract. The display instead binds
+# each configuration once, then uses its name in the body.
+_sb_display_tree(x) = x
+_sb_display_tree(x::QuoteNode) = QuoteNode(_sb_display_tree(x.value))
+_sb_display_tree(x::Expr) = Expr(x.head,
+    (_sb_display_tree(a) for a in x.args if !(a isa LineNumberNode))...)
+
+function _sb_display_templates()
+    [(name, getfield(@__MODULE__, name))
+     for name in sort!(names(@__MODULE__; all=true, imported=false))
+     if isdefined(@__MODULE__, name) && getfield(@__MODULE__, name) isa StanBlocks.SlicModel]
+end
+
+function _sb_display_configuration(model::StanBlocks.SlicModel, templates)
+    body = _sb_display_tree(model.model)
+    best = nothing
+    for (name, base) in templates
+        base.mod === model.mod && isequal(base.data, model.data) || continue
+        source = _sb_display_tree(base.model)
+        isequal(source, body) && return (; name, overrides=Any[])
+        Meta.isexpr(source, :block) && Meta.isexpr(body, :block) || continue
+        overrides = Any[stmt for stmt in body.args if !any(isequal(stmt), source.args)]
+        # A compact configuration must retain some of the named template, and
+        # only replace/add named sampling or assignment statements. Never print
+        # an unrelated template with its entire implementation overridden.
+        0 < length(overrides) < length(body.args) || continue
+        all(overrides) do stmt
+            Meta.isexpr(stmt, :(=), 2) ||
+                (Meta.isexpr(stmt, :call, 3) && stmt.args[1] === :~)
+        end || continue
+        isnothing(best) || length(overrides) < length(best.overrides) || continue
+        # An AST resemblance is not enough: use the supported constructor and
+        # require it to reproduce the complete emitted body, data and namespace.
+        rebuilt = Base.merge(base, overrides...)
+        isequal(_sb_display_tree(rebuilt.model), body) &&
+            isequal(rebuilt.data, model.data) && rebuilt.mod === model.mod || continue
+        best = (; name, overrides)
+    end
+    best
+end
+
+_sb_display_symbols!(out, x) = out
+_sb_display_symbols!(out, x::Symbol) = push!(out, x)
+_sb_display_symbols!(out, x::QuoteNode) = _sb_display_symbols!(out, x.value)
+_sb_display_symbols!(out, x::StanBlocks.SlicModel) = _sb_display_symbols!(out, x.model)
+function _sb_display_symbols!(out, x::Expr)
+    foreach(a -> _sb_display_symbols!(out, a), x.args)
+    out
+end
+
+function _sb_display_parts(sb::SBBRMI)
+    templates = _sb_display_templates()
+    used = _sb_display_symbols!(Set{Symbol}(keys(sb.data)), sb.model.model)
+    definitions = Expr[]
+    configurations = Any[]
+    display_node(x) = x
+    display_node(x::Expr) = Expr(x.head, display_node.(x.args)...)
+    function display_node(x::StanBlocks.SlicModel)
+        config = _sb_display_configuration(x, templates)
+        isnothing(config) && return x
+        base = GlobalRef(@__MODULE__, config.name)
+        isempty(config.overrides) && return base
+        for (prior, alias) in configurations
+            isequal(prior, config) && return alias
+        end
+        index = 1
+        alias = Symbol(config.name, :_configured_, index)
+        while alias in used
+            index += 1
+            alias = Symbol(config.name, :_configured_, index)
+        end
+        push!(used, alias)
+        constructor = Expr(:call, GlobalRef(Base, :merge), base,
+                           Expr(:quote, Expr(:block, config.overrides...)))
+        push!(definitions, Expr(:(=), alias, constructor))
+        push!(configurations, (config, alias))
+        alias
+    end
+    body = display_node(sb.model.model)
+    (; definitions, body)
+end
+
 Base.show(io::IO, sb::SBBRMI) = begin
     print(io, "SBBRMI with data keys = ", sort(collect(keys(sb.data))), "\n")
+    (; definitions, body) = _sb_display_parts(sb)
+    if !isempty(definitions)
+        println(io, "configured submodels:")
+        foreach(definition -> println(io, definition), definitions)
+    end
     print(io, "emitted @slic body:\n")
-    print(io, sb.model.model)
+    print(io, body)
 end
 
 

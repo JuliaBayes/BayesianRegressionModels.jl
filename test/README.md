@@ -47,6 +47,9 @@ in `truncated_priors.jl`, `hierarchical_prior_bounds.jl`,
 `von_mises_prior.jl`. `backend_comparisons.jl` executes the documentation's
 four-pane helper, checks the emitted Stan, and scores the generated Turing
 model.
+`sbbrmi_display.jl` evaluates the displayed configured-submodel bindings and
+body in a fresh module, requiring identical generated Stan and data. It covers
+shared and distinct configurations, unchanged default calls, and replay.
 `callable_priors.jl` checks distribution-factory shape registration and a
 complete-call Stan AST translation against the original Julia factory's
 density.

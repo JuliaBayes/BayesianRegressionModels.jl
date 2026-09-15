@@ -24,6 +24,14 @@ const CASE_PAGES = isempty(ARGS) ? [
                 rendered = Core.eval(page_module, Meta.parse(block))
                 @test rendered isa Markdown.MD
                 @test length(rendered.content) == 5
+                slic = rendered.content[3]
+                @test slic isa Markdown.Code && slic.language == "julia"
+                @test !occursin("SlicModel(untraced", slic.code)
+                if page == "adaptive-centering.md"
+                    @test occursin("configured submodels:", slic.code)
+                    @test occursin("Base.merge(", slic.code)
+                    @test occursin("_configured_1", slic.code)
+                end
                 stan = rendered.content[4]
                 @test stan isa Markdown.Code && stan.language == "stan"
                 @test StanBlocks.stanc_check(stan.code; warn_pedantic=false).ok
