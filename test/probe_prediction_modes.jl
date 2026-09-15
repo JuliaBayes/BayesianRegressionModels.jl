@@ -480,7 +480,7 @@ end
         sigma ~ Exponential(1)
         mu    ~ 1 + t + (1 | site)
         y     ~ Normal(mu, sigma)
-    end)(train_df); mod = @__MODULE__)
+    end)(train_df); mod = @__MODULE__, total_groups = ())
     simpler_p = StanBlocks.stan_instantiate(simpler.model)
     unc_simpler = BS.param_unc_names(simpler_p.model)
     extra = generative_plan(extra_builder, train_df; mod = @__MODULE__)

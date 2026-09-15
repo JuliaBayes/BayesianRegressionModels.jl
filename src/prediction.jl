@@ -773,7 +773,11 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
         length(matching) == 1 || throw(ArgumentError("total prediction target has no matching fitted block $(bt.binding)"))
         bf = only(matching)
         (bf.columns == bt.columns && bf.population_columns == bt.population_columns &&
-         bf.A == bt.A && bf.location == bt.location && bf.precision == bt.precision) ||
+         bf.A == bt.A && bf.location == bt.location && bf.precision == bt.precision &&
+         bf.mixture == bt.mixture &&
+         (isempty(bf.mixture) ||
+          from.data[Symbol(:total_mixture_shape_,bf.predictor)] ==
+          to.data[Symbol(:total_mixture_shape_,bt.predictor)])) ||
             throw(ArgumentError("total prediction changes the fitted design or prior; use frozen preprocessing"))
         cf,ct = _total_coordinates(from,bf,unc_from),_total_coordinates(to,bt,unc_to)
         lf,lt = from.preproc[bf.group_index].const_.levels,to.preproc[bt.group_index].const_.levels

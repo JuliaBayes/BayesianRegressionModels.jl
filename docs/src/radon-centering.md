@@ -68,7 +68,7 @@ function adaptive_radon_model()
     end)((; floor_measure, county_idx, log_radon))
 end
 """, :adaptive_radon_model;
-    title="The full radon model", require_stan=true)
+    title="The full radon model", require_stan=true, total_groups=())
 ```
 
 The tabs show the generated backends. Sampling uses StanBlocks/BridgeStan.
@@ -83,7 +83,7 @@ and gradient errors are `1.42e-10` and `8.55e-11`.
 ```julia
 using Random, WarmupHMC
 
-sb = SBBRMI(adaptive_radon_model(); mod=@__MODULE__)
+sb = SBBRMI(adaptive_radon_model(); mod=@__MODULE__, total_groups=())
 stan_problem = StanBlocks.stan_instantiate(sb.model)
 pilot = WarmupHMC.adaptive_warmup_mcmc(
     Xoshiro(1), stan_problem; n_draws=10_000, monitor_ess=true)

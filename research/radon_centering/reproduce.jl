@@ -101,7 +101,7 @@ end
 function stan_density(label, output_dir)
     mkpath(output_dir)
     data = RADON_DATA
-    sb = SBBRMI(build_model(data); mod=@__MODULE__)
+    sb = SBBRMI(build_model(data); mod=@__MODULE__, total_groups=())
     source = BRM.stan_code(sb)
     checked = StanBlocks.stanc_check(source)
     checked.ok || error("stanc failed for radon $label\n$(checked.output)")

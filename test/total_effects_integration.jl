@@ -137,6 +137,25 @@ end
         @test isempty(total_effect_blocks(SBBRMI(brmi)))
         @test_throws ArgumentError SBBRMI(brmi;total_groups=:g)
     end
+    mixed = @brm begin
+        mu ~ 1 + (1|g)
+        eta ~ 1 + x + (1+x|g2)
+        y ~ Normal(mu + eta,1)
+    end
+    mixed_brmi = mixed((;data...,g2=[1,2,1,2,1,2]))
+    @test isempty(total_effect_blocks(SBBRMI(mixed_brmi)))
+    @test only(total_effect_blocks(SBBRMI(mixed_brmi;total_groups=:g))).group === :g
+    changed_student = @brm begin
+        mu ~ 1 + center(x) + (1+x||g)
+        effect(mu,Intercept) ~ LocationScale(2.,3.,TDist(5))
+        effect(mu,center_x) ~ Flat()
+        y ~ Normal(mu,1)
+    end
+    source_plan = generative_plan(student_builder,data)
+    changed_plan = generative_plan(changed_student,data)
+    # Prior compatibility is checked before any coordinate values are used.
+    @test_throws ArgumentError transport_draws(source_plan,changed_plan,
+        zeros(1,0),String[],String[])
 end
 catch e
     showerror(stdout,e); println()

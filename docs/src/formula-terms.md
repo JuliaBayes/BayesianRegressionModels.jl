@@ -320,6 +320,112 @@ weights `1/M`. Supplied weights must be present, real, finite, nonnegative and
 sum to something positive on every row. It does not combine with `|ID|`,
 `cv_groups` or `centered_groups`, which error explicitly.
 
+### Exact total coefficients
+
+The StanBlocks backend uses **total coefficients** by default for eligible
+independent random effects. For example, in
+
+```julia
+builder = @brm begin
+    mu ~ 1 + x + (1 | subject_effect | subject)
+    effect(mu, Intercept) ~ Normal(0, 3)
+    sd(:, subject_effect) ~ Normal(0, 1)
+    y ~ Normal(mu, 1)
+end
+sb = SBBRMI(builder(data))
+```
+
+the sampled group intercept is `total[j] = intercept + deviation[j]`.
+The fixed slope of `x` remains explicit. BRM integrates out the shared intercept
+using its original prior; this preserves the likelihood and posterior of the
+totals and hyperparameters. All groups have the same status, and the sampler
+uses one total per group without an extra mean direction.
+
+With `intercept ~ Normal(m, s)` and independent `deviation[j] ~ Normal(0, tau)`,
+the exact induced prior is
+
+```math
+\mathbf{total}\mid\tau \sim
+\mathcal N\!\left(m\mathbf 1,\;\tau^2I+s^2\mathbf 1\mathbf 1^\mathsf T\right).
+```
+
+The density uses group sums and a small population-coefficient precision matrix,
+so its work is linear in the number of groups for a fixed number of coefficients.
+Student-t population priors (`TDist` or `LocationScale(..., TDist(...))`) use an
+exact Gaussian scale mixture; `Flat()` denotes an improper uniform population
+prior. Marginalization preserves the supported population prior specified in
+the formula.
+
+`total_effect_blocks(sb)` reports the selected blocks. `total_groups=()` opts out;
+`total_groups=[:subject]` requires that group to be eligible. Explicit
+`centered_groups=[:subject]` selects conventional centered deviations.
+
+Automatic selection currently requires one grouping structure per predictor,
+independent margins, supported population priors, and a known relation between
+the population and random-effect columns. Raw numeric columns, pure data
+expressions, and centered/scaled population columns with matching raw random
+columns are supported. Correlated, crossed, stratified, multi-membership and
+R2D2 blocks use the conventional representation. A request for totals on an
+unsupported group raises an error.
+
+Automatic selection retains the conventional representation if some ordinary
+group blocks require it. A single adaptive wrapper currently uses one geometry
+family: totals, ordinary random effects, or HSGP weights.
+
+#### WarmupHMC and recovery
+
+BRM discovers each total's scale and supplies independent centering controls:
+
+```julia
+using Random, Enzyme, WarmupHMC, BridgeStan, StanBlocks
+using DifferentiationInterface: AutoEnzyme
+
+problem = StanBlocks.stan_instantiate(sb.model)
+backend = AutoEnzyme(;
+    mode=Enzyme.set_runtime_activity(Enzyme.Reverse),
+    function_annotation=Enzyme.Const)
+adaptive = adaptive_centering_problem(sb, problem, backend;
+                                     centeredness=0.0)
+fit = WarmupHMC.adaptive_warmup_mcmc(Xoshiro(1), adaptive;
+    n_draws=2000, nonlinear_adapt=true)
+```
+
+`centeredness=1` means model-scale totals; `0` means scaled totals. Intermediate
+values may differ by group and coefficient. The marginal totals remain
+correlated under their exact prior, including at the NCP endpoint. Online
+selection uses WarmupHMC's default position-gradient loss. For a fixed fit, use
+`nonlinear_adapt=false`.
+
+For a post-hoc refit, call `select_total_centeredness(sb, draws, names)` on a
+pilot in the compiled model frame, then pass its `centeredness` vector to
+`adaptive_centering_problem`. The default `criterion=:position` needs positions;
+`criterion=:gradient` additionally needs matching compiled-frame gradients.
+Both inputs are draws × coordinates. Selection makes no additional gradient
+calls; include the pilot's cost when comparing full workflows.
+
+```julia
+names = BridgeStan.param_unc_names(problem.model)
+draws = permutedims(fit.posterior_position)
+recovered = recover_population_draws(sb, draws, names; rng=Xoshiro(2))
+recovered[:mu].population  # original shared intercept, conditionally recovered
+recovered[:mu].totals      # sampled subject-specific intercepts
+recovered[:mu].deviations  # totals minus the recovered shared intercept
+```
+
+The compiled model also exposes the recovered coefficients and deviations in
+generated quantities. Recovery adds conditional randomness, so compare sampler
+efficiency on consistent scientific quantities and distinguish recovered means
+from sampled totals. The [pupil study](pupil-centering.md) explains this distinction.
+
+`population_draws(...; groups=:subject, rng=...)` substitutes a recovered
+population draw for each group's total. For new groups, use the reusable
+`generative_plan(builder, data)` form, rebuild with `generative_plan(plan, new_data)`,
+and call `transport_draws`. Existing groups retain their totals; new groups share
+one recovered population draw per posterior draw. `resample=:subject` redraws
+existing groups too. Total blocks require frozen preprocessing for replay and use
+this transport route for resampling; `reprocess(...; resample_groups=...)` is not
+supported for them. Improper population priors have no prior-predictive distribution.
+
 ### Response-level wrappers
 
 | Term | What it does |

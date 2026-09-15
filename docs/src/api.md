@@ -119,6 +119,11 @@ BayesianRegressionModels.select_ranef_centeredness
 BayesianRegressionModels.RanefBlock
 BayesianRegressionModels.ranef_blocks
 BayesianRegressionModels.ranef_coordinates
+BayesianRegressionModels.Flat
+BayesianRegressionModels.TotalEffectBlock
+BayesianRegressionModels.total_effect_blocks
+BayesianRegressionModels.recover_population_draws
+BayesianRegressionModels.select_total_centeredness
 ```
 
 ### [`stan_code`](@id stan_code)

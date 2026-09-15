@@ -3,6 +3,8 @@
 # Run: julia --project=. test/effect_priors.jl
 # Set BRM_EFFECT_RUNTIME=0 to skip the BridgeStan density/gradient probe.
 
+# These fixtures inspect conventional emitted parameter names.
+# Exact total-prior equivalence is covered in total_effects_integration.jl.
 using Test
 using BayesianRegressionModels
 using StanBlocks
@@ -36,7 +38,7 @@ end
     @test all(isempty(p.keywords) for p in priors)
     @test occursin("effect(log_ka, Intercept) ~ Normal", sprint(show, brmi))
 
-    sb = SBBRMI(brmi; mod=@__MODULE__)
+    sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
     code = BayesianRegressionModels.stan_code(sb)
     @test StanBlocks.stan.transpiles(sb.model)
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
@@ -77,7 +79,7 @@ end
         sigma ~ Normal(0, 2; lower=0.0)
         y ~ Normal(0, sigma)
     end
-    bounded_sb = SBBRMI(bounded; mod=@__MODULE__)
+    bounded_sb = SBBRMI(bounded; mod=@__MODULE__, total_groups=())
     bounded_code = BayesianRegressionModels.stan_code(bounded_sb)
     @test occursin("real<lower=0.0> sigma;", bounded_code)
     @test occursin("sigma ~ normal(0, 2);", bounded_code)
@@ -86,11 +88,11 @@ end
     @test_throws "requires `lower < upper`" SBBRMI((@brm df begin
         sigma ~ Normal(0, 2; lower=1.0, upper=0.0)
         y ~ Normal(0, sigma)
-    end); mod=@__MODULE__)
-    @test_throws "accepts only `lower` and `upper`" SBBRMI((@brm df begin
+    end); mod=@__MODULE__, total_groups=())
+    @test_throws "constructor keywords (:typo,)" SBBRMI((@brm df begin
         sigma ~ Normal(0, 2; typo=0.0)
         y ~ Normal(0, sigma)
-    end); mod=@__MODULE__)
+    end); mod=@__MODULE__, total_groups=())
 end
 
 @testset "sampled scalar parameter in an effect-prior argument" begin
@@ -101,7 +103,7 @@ end
         y ~ Normal(mu, 1.0)
     end
 
-    sb = SBBRMI(sampled_scale; mod=@__MODULE__)
+    sb = SBBRMI(sampled_scale; mod=@__MODULE__, total_groups=())
     code = BayesianRegressionModels.stan_code(sb)
     @test StanBlocks.stan.transpiles(sb.model)
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
@@ -118,7 +120,7 @@ end
         effect(mu, x) ~ Normal(0.0, y)
         y ~ Normal(mu, 1.0)
     end
-    @test_throws "model-level prior references `y`" SBBRMI(data_arg; mod=@__MODULE__)
+    @test_throws "model-level prior references `y`" SBBRMI(data_arg; mod=@__MODULE__, total_groups=())
 
     # A vector-valued prior declaration has the same sampling-expression
     # carrier, but its whole value is not a scalar Normal scale.
@@ -129,7 +131,7 @@ end
         y ~ Normal(mu, 1.0)
     end
     @test_throws "needs scalar location and scale" SBBRMI(
-        vector_arg; mod=@__MODULE__)
+        vector_arg; mod=@__MODULE__, total_groups=())
 
     if EFFECT_PRIOR_RUNTIME
         isdir(EFFECT_PRIOR_CACHE) || mkpath(EFFECT_PRIOR_CACHE)
@@ -153,7 +155,7 @@ end
         y ~ Normal(mu, 1)
     end
     @test occursin("pop_mu_beta_pop ~ std_normal();",
-                   BayesianRegressionModels.stan_code(SBBRMI(default; mod=@__MODULE__)))
+                   BayesianRegressionModels.stan_code(SBBRMI(default; mod=@__MODULE__, total_groups=())))
 
     # `:` in the predictor slot is the default layer: it reaches every
     # predictor owning that column, so a single-predictor model reads exactly
@@ -164,7 +166,7 @@ end
         y ~ Normal(mu, 1)
     end
     @test occursin("[1.0, 0.25]'",
-                   BayesianRegressionModels.stan_code(SBBRMI(colon_lp; mod=@__MODULE__)))
+                   BayesianRegressionModels.stan_code(SBBRMI(colon_lp; mod=@__MODULE__, total_groups=())))
 
     # Reaching several predictors is the POINT of `:`, not an ambiguity: the old
     # concise form errored here, the default layer sets both.
@@ -174,7 +176,7 @@ end
         effect(:, Intercept) ~ Normal(0, 2)
         y ~ Normal(a + b, 1)
     end
-    both_code = BayesianRegressionModels.stan_code(SBBRMI(both; mod=@__MODULE__))
+    both_code = BayesianRegressionModels.stan_code(SBBRMI(both; mod=@__MODULE__, total_groups=()))
     @test occursin("pop_a_beta_pop ~ normal([0]', [2]');", both_code)
     @test occursin("pop_b_beta_pop ~ normal([0]', [2]');", both_code)
 
@@ -183,14 +185,14 @@ end
         effect(mu, subject) ~ Normal(0, 0.5)
         y ~ Normal(mu, 1)
     end
-    @test_throws "not a population coefficient" SBBRMI(excluded; mod=@__MODULE__)
+    @test_throws "not a population coefficient" SBBRMI(excluded; mod=@__MODULE__, total_groups=())
 
     generic = @brm df begin
         mu ~ 1 + x
         effect(mu, x) ~ Cauchy(0, 1)
         y ~ Normal(mu, 1)
     end
-    generic_sb = SBBRMI(generic; mod=@__MODULE__)
+    generic_sb = SBBRMI(generic; mod=@__MODULE__, total_groups=())
     generic_code = BayesianRegressionModels.stan_code(generic_sb)
     @test occursin("cauchy_lpdf(x[2] | arg_3, arg_4)", generic_code)
     @test StanBlocks.stanc_check(generic_code; warn_pedantic=false).ok
@@ -205,7 +207,7 @@ end
         y ~ Normal(mu, 1)
     end
     bounded_vector_code = BayesianRegressionModels.stan_code(
-        SBBRMI(bounded_vector; mod=@__MODULE__))
+        SBBRMI(bounded_vector; mod=@__MODULE__, total_groups=()))
     @test occursin("vector<lower=0.2, upper=0.8>", bounded_vector_code)
     @test occursin("uniform_lpdf(x[1] | arg_1, arg_2)", bounded_vector_code)
     @test StanBlocks.stanc_check(bounded_vector_code; warn_pedantic=false).ok
@@ -217,7 +219,7 @@ end
         y ~ Normal(mu, 1)
     end
     heterogeneous_code = BayesianRegressionModels.stan_code(
-        SBBRMI(heterogeneous_bounds; mod=@__MODULE__))
+        SBBRMI(heterogeneous_bounds; mod=@__MODULE__, total_groups=()))
     @test occursin("vector[pop_mu_n_covariates] pop_mu_beta_pop;", heterogeneous_code)
     @test occursin("if((x[1] < 0.2))", heterogeneous_code)
     @test occursin("if((x[2] > 0.9))", heterogeneous_code)
@@ -228,7 +230,7 @@ end
         effect(mu, :) ~ Uniform(0.2, 0.8)
         y ~ Normal(0, 1)
     end
-    prior_only_sb = SBBRMI(prior_only; mod=@__MODULE__)
+    prior_only_sb = SBBRMI(prior_only; mod=@__MODULE__, total_groups=())
     prior_only_code = BayesianRegressionModels.stan_code(prior_only_sb)
     @test occursin(r"pop_mu_beta_pop = brm_vector_prior_[0-9a-f]+_vector_rng",
                    prior_only_code)
@@ -336,7 +338,7 @@ end
     # The scalar prior is exactly the entry `popcoefnames` cannot name.
     @test_throws "cannot resolve the `beta_pop` column(s)" popcoefnames(explicit, :log_F_bottle)
 
-    sb = SBBRMI(explicit; mod=@__MODULE__)
+    sb = SBBRMI(explicit; mod=@__MODULE__, total_groups=())
     code = BayesianRegressionModels.stan_code(sb)
     @test StanBlocks.stan.transpiles(sb.model)
     # The scalar prior stays an ordinary parameter…
@@ -354,7 +356,7 @@ end
         y ~ Normal(mu + log_F_bottle, 1)
     end
     @test occursin("pop_mu_beta_pop ~ normal([0.0, 0]', [1.0, 0.25]');",
-                   BayesianRegressionModels.stan_code(SBBRMI(colon_lp; mod=@__MODULE__)))
+                   BayesianRegressionModels.stan_code(SBBRMI(colon_lp; mod=@__MODULE__, total_groups=())))
 
     # Addressing the scalar prior itself is still an error, and names what IS
     # addressable instead of leaking `popcoefnames`' internal failure.
@@ -365,7 +367,7 @@ end
         y ~ Normal(mu + log_F_bottle, 1)
     end
     @test_throws "names no linear predictor with population coefficients" SBBRMI(
-        at_prior; mod=@__MODULE__)
+        at_prior; mod=@__MODULE__, total_groups=())
 
     # An unknown label is still rejected — tolerance must not mute this.
     unknown = @brm df begin
@@ -374,7 +376,7 @@ end
         effect(:, nope) ~ Normal(0, 0.25)
         y ~ Normal(mu + log_F_bottle, 1)
     end
-    @test_throws "matches no population coefficient" SBBRMI(unknown; mod=@__MODULE__)
+    @test_throws "matches no population coefficient" SBBRMI(unknown; mod=@__MODULE__, total_groups=())
 end
 
 # The PMX shape the snag was reported against: a population PK model carries a
@@ -406,7 +408,7 @@ end
     @test_throws "cannot resolve the `beta_pop` column(s)" popcoefnames(pk, :pred)
     @test popcoefnames(pk, :log_CL) == [:Intercept]
 
-    sb = SBBRMI(pk; mod=@__MODULE__)
+    sb = SBBRMI(pk; mod=@__MODULE__, total_groups=())
     code = BayesianRegressionModels.stan_code(sb)
     @test StanBlocks.stan.transpiles(sb.model)
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
@@ -455,7 +457,7 @@ end
     @test [(p.predictor, p.coefficient) for p in effect_priors(linked)] ==
           [(:Vc, :Intercept), (:Vc, :x)]
 
-    linked_sb = @test_nowarn SBBRMI(linked; mod=@__MODULE__)
+    linked_sb = @test_nowarn SBBRMI(linked; mod=@__MODULE__, total_groups=())
     linked_code = BayesianRegressionModels.stan_code(linked_sb)
     @test StanBlocks.stan.transpiles(linked_sb.model)
     @test StanBlocks.stanc_check(linked_code; warn_pedantic=false).ok
@@ -490,7 +492,7 @@ end
         cor(:, p) ~ LKJCholesky(2, 2.0)
         y ~ Normal(log_Vc, 0.2)
     end
-    inert_code = BayesianRegressionModels.stan_code(SBBRMI(inert; mod=@__MODULE__))
+    inert_code = BayesianRegressionModels.stan_code(SBBRMI(inert; mod=@__MODULE__, total_groups=()))
     params(code) = begin
         i = findfirst("parameters {", code)
         code[first(i):findnext("}", code, last(i))[end]]
@@ -505,7 +507,7 @@ end
         effect(log_Vc, Intercept) ~ Normal(log(10), 0.8)
         y ~ Normal(log(Vc), 0.2)
     end
-    @test_throws "Available predictors: Vc" SBBRMI(wrong_underscore; mod=@__MODULE__)
+    @test_throws "Available predictors: Vc" SBBRMI(wrong_underscore; mod=@__MODULE__, total_groups=())
     @test_throws "must be bare symbols" @eval @brm $link_df begin
         log(Vc) ~ 1 + x
         effect(log(Vc), Intercept) ~ Normal(log(10), 0.8)
@@ -549,7 +551,7 @@ end
                                      (predictor=:Vc, coefficient=:Intercept),
                                      (predictor=:Ka, coefficient=:Intercept)]
 
-    sb = SBBRMI(pk; mod=@__MODULE__)
+    sb = SBBRMI(pk; mod=@__MODULE__, total_groups=())
     code = BayesianRegressionModels.stan_code(sb)
     @test StanBlocks.stan.transpiles(sb.model)
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
@@ -579,7 +581,7 @@ end
                 g=[1, 2, 3, 1, 2, 3],
                 y=[-2.4, -2.2, -2.0, -1.8, -1.7, -1.5])
 
-    code_of(m) = BayesianRegressionModels.stan_code(SBBRMI(m; mod=@__MODULE__))
+    code_of(m) = BayesianRegressionModels.stan_code(SBBRMI(m; mod=@__MODULE__, total_groups=()))
 
     # Unconfigured: the hardcoded default, byte for byte as before.
     plain = @brm cat_df begin
@@ -595,7 +597,7 @@ end
         effect(mu, g) ~ Normal(0.0, 0.5)
         y ~ Normal(mu, 1)
     end
-    sb = SBBRMI(configured; mod=@__MODULE__)
+    sb = SBBRMI(configured; mod=@__MODULE__, total_groups=())
     code = BayesianRegressionModels.stan_code(sb)
     @test StanBlocks.stan.transpiles(sb.model)
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
@@ -656,7 +658,7 @@ end
         effect(mu, g) ~ Normal(0.0, 0.5)
         y ~ Normal(mu, 1)
     end
-    @test_throws "g__ref_2" SBBRMI(ambiguous_ref; mod=@__MODULE__)
+    @test_throws "g__ref_2" SBBRMI(ambiguous_ref; mod=@__MODULE__, total_groups=())
 
     # The EMITTED name is not the address — and the error says which name is.
     emitted_guess = @brm cat_df begin
@@ -664,7 +666,7 @@ end
         effect(mu, cat_g) ~ Normal(0.0, 0.5)
         y ~ Normal(mu, 1)
     end
-    @test_throws "address one by that name" SBBRMI(emitted_guess; mod=@__MODULE__)
+    @test_throws "address one by that name" SBBRMI(emitted_guess; mod=@__MODULE__, total_groups=())
 
     # `:` and an explicit predictor reach the same block, but they are NOT a
     # duplicate: `:` is the default layer and the more specific address wins.
@@ -674,7 +676,7 @@ end
         effect(mu, g) ~ Normal(0.0, 0.25)
         y ~ Normal(mu, 1)
     end
-    layered_code = BayesianRegressionModels.stan_code(SBBRMI(layered; mod=@__MODULE__))
+    layered_code = BayesianRegressionModels.stan_code(SBBRMI(layered; mod=@__MODULE__, total_groups=()))
     @test occursin("cat_mu_g_beta ~ normal(0.0, 0.25);", layered_code)
     @test !occursin("cat_mu_g_beta ~ normal(0.0, 0.5);", layered_code)
 
@@ -686,14 +688,14 @@ end
         effect(mu, :) ~ Normal(0.0, 0.25)
         y ~ Normal(mu, 1)
     end
-    @test_throws "equally specific" SBBRMI(tied; mod=@__MODULE__)
+    @test_throws "equally specific" SBBRMI(tied; mod=@__MODULE__, total_groups=())
 
     generic_family = @brm cat_df begin
         mu ~ 1 + factor(g) + x
         effect(mu, g) ~ Cauchy(0, 1)
         y ~ Normal(mu, 1)
     end
-    generic_family_sb = SBBRMI(generic_family; mod=@__MODULE__)
+    generic_family_sb = SBBRMI(generic_family; mod=@__MODULE__, total_groups=())
     generic_family_code = BayesianRegressionModels.stan_code(generic_family_sb)
     @test count("cauchy_lpdf(x[", generic_family_code) == 2
     @test occursin(r"cat_mu_g_beta ~ brm_vector_prior_[0-9a-f]+", generic_family_code)
@@ -737,7 +739,7 @@ end
 
         y ~ Normal(Vc + k10 + k12 + k21 + ka + qt_base + qt_slope, 1.0)
     end
-    repeated_sb = SBBRMI(repeated; mod=@__MODULE__)
+    repeated_sb = SBBRMI(repeated; mod=@__MODULE__, total_groups=())
     repeated_code = BayesianRegressionModels.stan_code(repeated_sb)
     @test StanBlocks.stan.transpiles(repeated_sb.model)
     @test StanBlocks.stanc_check(repeated_code; warn_pedantic=false).ok

@@ -50,7 +50,7 @@ function eight_schools_model()
              sigma=Float64[15, 10, 16, 11, 9, 11, 10, 18]))
 end
 """, :eight_schools_model;
-    title="Eight schools with PosteriorDB priors", require_stan=true)
+    title="Eight schools with PosteriorDB priors", require_stan=true, total_groups=())
 ```
 
 The tabs show generated backends. The fits below use StanBlocks/BridgeStan
@@ -60,8 +60,8 @@ coordinate Jacobian. The independent audit is retained with the source model.
 
 ## Choose fully centered coordinates manually
 
-The default BRM model samples standardized effects `z[j]`. Full centering of
-the random effects instead samples `u[j] = tau*z[j]`, so
+The conventional BRM model (`total_groups=()`) samples standardized effects
+`z[j]`. Full centering of the random effects instead samples `u[j] = tau*z[j]`, so
 `u[j] ~ Normal(0, tau)` and `theta[j] = mu + u[j]`. Thus `u` is the school's
 deviation from the population mean; `theta` is its treatment effect.
 
@@ -81,7 +81,7 @@ lets all six fits below share one compiled noncentered density:
 using Random, Enzyme, WarmupHMC, BridgeStan
 using DifferentiationInterface: AutoEnzyme
 
-sb = SBBRMI(model; mod=@__MODULE__)
+sb = SBBRMI(model; mod=@__MODULE__, total_groups=())
 problem = StanBlocks.stan_instantiate(sb.model)
 backend = AutoEnzyme(;
     mode=Enzyme.set_runtime_activity(Enzyme.Reverse),
