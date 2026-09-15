@@ -1,0 +1,10 @@
+{
+  "brms_sha": "73cf607889879cb2a55f50b88d8141d76ff43279",
+  "grouping": "super_region",
+  "hierarchy": "independent",
+  "observations": 6003,
+  "groups": 7,
+  "group_sizes": [3051, 273, 464, 518, 308, 1312, 77],
+  "population_effects": "intercept and slope retained",
+  "source_data_revision": "2afb605f81cf0bdadc6476df865e0337aaacf183"
+}
