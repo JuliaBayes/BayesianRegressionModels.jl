@@ -223,3 +223,69 @@ uncompressed SHA-256 receipts. Decompress these Julia 1.10.11 `.jls` files and
 load `model.jl` before deserializing Student-mixture records. The conventional
 records retain both native NCP draws and their named/common transformations;
 integrated records retain physical draws, controls and exact cost counters.
+
+## Conditional recovery and ESS sensitivity
+
+The follow-up in `recovery.jl` now recovers the two population coefficients
+and original group deviations from each saved marginal draw. In the Student-t
+case it conditions on the saved mixture precision. It also derives conventional
+NCP `z` coefficients and the two uncentered population/residual intercepts.
+This requires no new HMC transitions. Twelve draws per fit pass an independent
+precision-matrix calculation, conditional density-ratio check and exact
+total-coefficient reconstruction checks. Twenty recovery seeds (101–120)
+measure variation due solely to the added conditional random draws.
+
+The original-physical scope contains the two population coefficients, four
+scale-model quantities and 40 group deviations. Population and residual
+intercepts refer to the centered predictor designs, as in the Stan parameter
+block. A separate 48-quantity scope includes both raw-design intercepts; that
+does not change the minima below. The original-NCP scope replaces deviations
+by their SD-scaled `z` values, matching the conventional Stan parameters.
+
+| Prior / fit | Original physical min ESS / 1,000 sampling gradients | Original NCP min ESS / 1,000 gradients |
+| --- | ---: | ---: |
+| Gaussian brms + WHMC, saved original draws | 0.470 | 0.428 |
+| Same Gaussian brms + WHMC draws, population coefficients refreshed | 0.918 | 0.918 |
+| Gaussian integrated partial, recovered | 60.093 [49.361, 61.650] | 59.435 [49.203, 63.666] |
+| Student-t brms + WHMC, saved original draws | 0.356 | 0.356 |
+| Student-t integrated partial, recovered | 63.678 [54.503, 65.849] | 63.607 [54.503, 68.509] |
+
+Recovered entries show the median and range across 20 seeds, not independent
+HMC replications or confidence intervals. The Gaussian refresh preserves the
+baseline's marginal draws and gradient cost exactly. Its changed minimum
+demonstrates that recovery alone can alter the comparison. The integrated
+partial results remain close to their unrecovered common-quantity efficiencies
+(54.556 Gaussian, 64.457 Student-t); their earlier gain was not created by
+recovery noise.
+
+### Why added recovery noise changes ESS
+
+Write a recovered quantity as `X[t] = m(S[t]) + epsilon[t]`, where `m` is its
+conditional mean given the sampled marginal state and each recovery noise has
+conditional mean zero and is drawn independently across iterations. Then
+
+```
+Var(X) = Var(m(S)) + E[Var(X | S)]
+Cov(X[t], X[t+k]) = Cov(m(S[t]), m(S[t+k]))   for k > 0.
+```
+
+The added variance dilutes positive autocorrelation, raising mean-ESS toward
+the number of draws. With negative autocorrelation it can instead lower ESS.
+The corresponding variance of the sample mean is
+
+```
+Var(mean(X)) = Var(mean(m(S))) + E[Var(X | S)] / N.
+```
+
+Thus recovery can raise ESS while making the mean estimate less precise than
+the conditional-mean (Rao–Blackwell) estimate. These identities concern ordinary
+covariance and mean-ESS; rank-normalized bulk ESS is measured separately. See
+the [Stan definition of ESS and MCSE](https://mc-stan.org/docs/reference-manual/analysis.html#effective-sample-size).
+The recovered values are valid posterior draws: this is a reporting/estimand
+distinction, not evidence that conditional recovery is incorrect.
+
+For the Student-t partial fit, 99.966% of population-intercept posterior
+variance is conditional recovery variance. Its conditional-mean MCSE is 0.225;
+the recovered MCSE is about 12.08 (median across seeds). Its conditional-mean
+and recovered bulk ESS are both about 2,000. This is why MCSE and the shared
+total-coefficient diagnostics accompany recovered-parameter ESS.
