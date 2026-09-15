@@ -248,11 +248,13 @@ own baseline value, using the same parameter scope, so the baseline is **1×**
 in both efficiency columns. For example, 10× means ten times the baseline's
 minimum ESS per gradient. Total gradient counts remain absolute.
 
-WHMC target wrappers count actual density-and-gradient requests. Native Stan
-is instrumented with a counter that contributes exactly zero to the log density;
-every retained count increment was checked against that iteration's leapfrog
-count plus one, and process receipts check the total. Required pilot cost is
-included, while model compilation and research/debugging attempts are not
+WHMC target wrappers count actual density-and-gradient requests. For native
+Stan, we added an integer counter that increments on gradient evaluations
+without changing the model's log density or gradient. We record its value
+throughout each run and at the end of each process, including the auto-centering
+pilot. As a check, every retained NUTS iteration used one gradient evaluation
+at the start of its trajectory plus one per leapfrog step. Required pilot cost
+is included, while model compilation and research/debugging attempts are not
 gradient costs of the completed workflow.
 
 Gradient count is not literal wall time. Our manual target uses sufficient
