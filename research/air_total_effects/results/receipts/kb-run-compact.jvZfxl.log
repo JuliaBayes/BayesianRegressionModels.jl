@@ -1,0 +1,48 @@
+CmdStan path set to: /home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering-park-pupil-air/cmdstan-2.39.0
+Start sampling
+Running MCMC with 1 chain...
+
+Chain 1 Iteration:    1 / 3000 [  0%]  (Warmup) 
+Chain 1 Informational Message: The current Metropolis proposal is about to be rejected because of the following issue:
+Chain 1 Exception: normal_id_glm_lpdf: Scale vector is inf, but must be positive finite! (in '/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/RtmpZxjDuK/model-721f8a203.stan', line 61, column 4 to column 55)
+Chain 1 If this warning occurs sporadically, such as for highly constrained variable types like covariance matrices, then the sampler is fine,
+Chain 1 but if this warning occurs often then your model may be either severely ill-conditioned or misspecified.
+Chain 1 
+Chain 1 Informational Message: The current Metropolis proposal is about to be rejected because of the following issue:
+Chain 1 Exception: normal_id_glm_lpdf: Scale vector is inf, but must be positive finite! (in '/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/RtmpZxjDuK/model-721f8a203.stan', line 61, column 4 to column 55)
+Chain 1 If this warning occurs sporadically, such as for highly constrained variable types like covariance matrices, then the sampler is fine,
+Chain 1 but if this warning occurs often then your model may be either severely ill-conditioned or misspecified.
+Chain 1 
+Chain 1 Informational Message: The current Metropolis proposal is about to be rejected because of the following issue:
+Chain 1 Exception: normal_id_glm_lpdf: Scale vector is inf, but must be positive finite! (in '/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/RtmpZxjDuK/model-721f8a203.stan', line 61, column 4 to column 55)
+Chain 1 If this warning occurs sporadically, such as for highly constrained variable types like covariance matrices, then the sampler is fine,
+Chain 1 but if this warning occurs often then your model may be either severely ill-conditioned or misspecified.
+Chain 1 
+Chain 1 Informational Message: The current Metropolis proposal is about to be rejected because of the following issue:
+Chain 1 Exception: normal_id_glm_lpdf: Scale vector is inf, but must be positive finite! (in '/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/RtmpZxjDuK/model-721f8a203.stan', line 61, column 4 to column 55)
+Chain 1 If this warning occurs sporadically, such as for highly constrained variable types like covariance matrices, then the sampler is fine,
+Chain 1 but if this warning occurs often then your model may be either severely ill-conditioned or misspecified.
+Chain 1 
+Chain 1 Iteration:  500 / 3000 [ 16%]  (Warmup) 
+Chain 1 Iteration: 1000 / 3000 [ 33%]  (Warmup) 
+Chain 1 Iteration: 1001 / 3000 [ 33%]  (Sampling) 
+Chain 1 Iteration: 1500 / 3000 [ 50%]  (Sampling) 
+Chain 1 Iteration: 2000 / 3000 [ 66%]  (Sampling) 
+Chain 1 Iteration: 2500 / 3000 [ 83%]  (Sampling) 
+Chain 1 Iteration: 3000 / 3000 [100%]  (Sampling) 
+Chain 1 finished in 447.3 seconds.
+Warning: 20 of 2000 (1.0%) transitions ended with a divergence.
+See https://mc-stan.org/misc/warnings for details.
+
+Warning: 1375 of 2000 (69.0%) transitions hit the maximum treedepth limit of 10.
+See https://mc-stan.org/misc/warnings for details.
+
+Loading required namespace: rstan
+  sampling_gradients all_gradient_calls warmup_and_initial_gradients
+1            1815412            2459692                       644280
+  precursor_gradient_calls workflow_gradient_calls divergences max_depth_hits
+1                        0                 2459692          20           1375
+  sampling_rows warmup_rows
+1          2000        1000
+AIR_NATIVE_COMPLETE  cluster_region   independent   ordinary_ncp 
+[kb-run-compact] exit=0 elapsed=467s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.jvZfxl

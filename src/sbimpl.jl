@@ -230,7 +230,12 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
         densities = Any[]; draws = Any[]; guards = Any[]
         for (i, c) in enumerate(calls)
             distname = c.dist isa Symbol ? c.dist : nameof(c.dist)
-            push!(densities, Expr(:call, Symbol(distname, :_lpdf), Expr(:ref, :x, i), c.names...))
+            # StanBlocks' flat token is a parameter declaration with no density
+            # contribution, so it has no Stan flat_lpdf builtin to call from a
+            # generated whole-vector prior. Retain the coefficient and support
+            # guards while contributing the exact constant zero.
+            push!(densities, distname === :flat ? 0.0 :
+                Expr(:call, Symbol(distname, :_lpdf), Expr(:ref, :x, i), c.names...))
             selector = selectors[i]
             push!(draws, isnothing(c.lower) && isnothing(c.upper) ?
                 Expr(:call, :predictive, selector, c.names...) :

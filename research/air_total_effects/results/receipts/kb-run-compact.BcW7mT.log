@@ -1,0 +1,57 @@
+AIR_SCIENTIFIC_RESULT (arm = "total_ncp", draws = 2000, min_bulk_ess = 196.86320317441618, limiting_qoi = "group_sd_2", sampling_gradients = 901207, total_gradients = 1178130, ess_per_1000_sampling_gradients = 0.2184439348278655, ess_per_1000_total_gradients = 0.16709803092563313, divergences = 11, max_split_rhat = 1.0207874812079099)
+AIR_SPD_NUMERICAL_REJECTION log_density() failed with exception: Exception: Exception: Exception: mdivide_left_spd: Matrix A is not positive definite (in '/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/air-totals-cluster-independent-v1/model/automatic_totals.stan', line 108, column 4 to column 40) (in '/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/air-totals-cluster-independent-v1/model/automatic_totals.stan', line 35, column 4 to column 104) (in '/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/air-totals-cluster-independent-v1/model/automatic_totals.stan', line 224, column 4 to column 104)
+
+BOUNDARY total_posthoc_position init window=0 gradients=127
+BOUNDARY total_posthoc_position window window=1 gradients=1230
+BOUNDARY total_posthoc_position window window=2 gradients=3398
+BOUNDARY total_posthoc_position window window=3 gradients=7403
+BOUNDARY total_posthoc_position window window=4 gradients=15417
+BOUNDARY total_posthoc_position window window=5 gradients=31417
+BOUNDARY total_posthoc_position window window=6 gradients=37764
+AIR_SCIENTIFIC_RESULT (arm = "total_posthoc_position", draws = 2000, min_bulk_ess = 291.2127887173102, limiting_qoi = "region_4_total_slope", sampling_gradients = 33568, total_gradients = 1215894, ess_per_1000_sampling_gradients = 8.675309482760673, ess_per_1000_total_gradients = 0.2395050791576488, divergences = 0, max_split_rhat = 1.0048252198388128)
+AIR_SPD_NUMERICAL_REJECTION log_density() failed with exception: Exception: Exception: Exception: mdivide_left_spd: Matrix A is not positive definite (in '/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/air-totals-cluster-independent-v1/model/automatic_totals.stan', line 108, column 4 to column 40) (in '/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/air-totals-cluster-independent-v1/model/automatic_totals.stan', line 35, column 4 to column 104) (in '/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/air-totals-cluster-independent-v1/model/automatic_totals.stan', line 224, column 4 to column 104)
+
+BOUNDARY total_posthoc_gradient init window=0 gradients=135
+BOUNDARY total_posthoc_gradient window window=1 gradients=1211
+BOUNDARY total_posthoc_gradient window window=2 gradients=3230
+BOUNDARY total_posthoc_gradient window window=3 gradients=7240
+BOUNDARY total_posthoc_gradient window window=4 gradients=15242
+BOUNDARY total_posthoc_gradient window window=5 gradients=24525
+AIR_SCIENTIFIC_RESULT (arm = "total_posthoc_gradient", draws = 2000, min_bulk_ess = 951.0700356566217, limiting_qoi = "group_sd_2", sampling_gradients = 20672, total_gradients = 1202655, ess_per_1000_sampling_gradients = 46.00764491372976, ess_per_1000_total_gradients = 0.7908086988010873, divergences = 2, max_split_rhat = 1.0016712835196313)
+BOUNDARY total_cp init window=0 gradients=136
+BOUNDARY total_cp window window=1 gradients=1155
+BOUNDARY total_cp window window=2 gradients=3158
+BOUNDARY total_cp window window=3 gradients=7160
+BOUNDARY total_cp window window=4 gradients=15166
+BOUNDARY total_cp window window=5 gradients=27183
+AIR_SCIENTIFIC_RESULT (arm = "total_cp", draws = 2000, min_bulk_ess = 1357.424300807802, limiting_qoi = "group_sd_1", sampling_gradients = 25256, total_gradients = 27183, ess_per_1000_sampling_gradients = 53.74660677889619, ess_per_1000_total_gradients = 49.93651549894427, divergences = 0, max_split_rhat = 1.0019611924354463)
+BOUNDARY total_online_position init window=0 gradients=125
+BOUNDARY total_online_position window window=1 gradients=1488
+BOUNDARY total_online_position window window=2 gradients=3499
+BOUNDARY total_online_position window window=3 gradients=7547
+BOUNDARY total_online_position window window=4 gradients=15560
+BOUNDARY total_online_position window window=5 gradients=31589
+BOUNDARY total_online_position window window=6 gradients=53202
+AIR_SCIENTIFIC_RESULT (arm = "total_online_position", draws = 2000, min_bulk_ess = 259.5420327658814, limiting_qoi = "region_6_total_slope", sampling_gradients = 48056, total_gradients = 53202, ess_per_1000_sampling_gradients = 5.400824720448672, ess_per_1000_total_gradients = 4.878426238973749, divergences = 0, max_split_rhat = 1.0056122293817005)
+BOUNDARY total_online_gradient init window=0 gradients=125
+BOUNDARY total_online_gradient window window=1 gradients=1488
+BOUNDARY total_online_gradient window window=2 gradients=3703
+BOUNDARY total_online_gradient window window=3 gradients=7706
+BOUNDARY total_online_gradient window window=4 gradients=15719
+BOUNDARY total_online_gradient window window=5 gradients=20137
+AIR_SCIENTIFIC_RESULT (arm = "total_online_gradient", draws = 2000, min_bulk_ess = 785.8700330829977, limiting_qoi = "group_sd_1", sampling_gradients = 15934, total_gradients = 20137, ess_per_1000_sampling_gradients = 49.32032340171945, ess_per_1000_total_gradients = 39.02617237339215, divergences = 0, max_split_rhat = 1.003583420867027)
+BOUNDARY ordinary_ncp_whmc init window=0 gradients=121
+BOUNDARY ordinary_ncp_whmc window window=1 gradients=1690
+BOUNDARY ordinary_ncp_whmc window window=2 gradients=4185
+BOUNDARY ordinary_ncp_whmc window window=3 gradients=8539
+BOUNDARY ordinary_ncp_whmc window window=4 gradients=16782
+BOUNDARY ordinary_ncp_whmc window window=5 gradients=32980
+BOUNDARY ordinary_ncp_whmc window window=6 gradients=65041
+BOUNDARY ordinary_ncp_whmc window window=7 gradients=129913
+BOUNDARY ordinary_ncp_whmc window window=8 gradients=258041
+BOUNDARY ordinary_ncp_whmc window window=9 gradients=514594
+BOUNDARY ordinary_ncp_whmc window window=10 gradients=1027402
+BOUNDARY ordinary_ncp_whmc window window=11 gradients=1351111
+AIR_SCIENTIFIC_RESULT (arm = "ordinary_ncp_whmc", draws = 2000, min_bulk_ess = 541.9673711033796, limiting_qoi = "group_sd_1", sampling_gradients = 1304695, total_gradients = 1351111, ess_per_1000_sampling_gradients = 0.41539775281071795, ess_per_1000_total_gradients = 0.4011271991001329, divergences = 6, max_split_rhat = 1.001525077907834)
+AIR_TOTAL_MATRIX_COMPLETE cluster_region independent
+[kb-run-compact] exit=0 elapsed=483s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.BcW7mT

@@ -1,0 +1,8 @@
+S2Z_AUDIT_PASS s2z_cp
+SCIENTIFIC_RESULT (arm = "s2z_cp_native", draws = 2000, min_bulk_ess = 1483.7686586480113, limiting_qoi = "subject_712_total_load_slope", sampling_gradients = 63888, total_gradients = 245020, ess_per_1000_sampling_gradients = 23.224528215752745, ess_per_1000_total_gradients = 6.055704263521391, max_split_rhat = 1.0089674491855103, divergences = 0)
+S2Z_AUDIT_PASS s2z_ncp
+SCIENTIFIC_RESULT (arm = "s2z_ncp_native", draws = 2000, min_bulk_ess = 175.30108012923904, limiting_qoi = "mean_intercept_group_sd", sampling_gradients = 1015808, total_gradients = 1442653, ess_per_1000_sampling_gradients = 0.172573045427127, ess_per_1000_total_gradients = 0.12151299039286581, max_split_rhat = 1.0074657564918308, divergences = 0)
+S2Z_AUDIT_PASS s2z_auto
+SCIENTIFIC_RESULT (arm = "s2z_auto_native", draws = 2000, min_bulk_ess = 1840.204041248729, limiting_qoi = "population_log_sigma_intercept", sampling_gradients = 58112, total_gradients = 171127, ess_per_1000_sampling_gradients = 31.66650676708303, ess_per_1000_total_gradients = 10.753440668326617, max_split_rhat = 1.006432847772392, divergences = 0)
+PUPIL4_BRMS_COMPLETE analyze
+[kb-run-compact] exit=0 elapsed=176s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.LJnk4u

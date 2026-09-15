@@ -1,0 +1,31 @@
+Post-3 built-in totals versus independent analytic target: Test Failed at /home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil4-study/research/pupil_builtin_totals/audit.jl:22
+  Expression: maximum(abs.(g - fd) ./ max.(1.0, abs.(g))) < 3.0e-5
+   Evaluated: 0.0003110953612566192 < 3.0e-5
+
+Stacktrace:
+ [1] macro expansion
+   @ ~/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/Test/src/Test.jl:673 [inlined]
+ [2] macro expansion
+   @ ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil4-study/research/pupil_builtin_totals/audit.jl:22 [inlined]
+ [3] macro expansion
+   @ ~/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/Test/src/Test.jl:1582 [inlined]
+ [4] top-level scope
+   @ ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil4-study/research/pupil_builtin_totals/audit.jl:4
+Post-3 built-in totals versus independent analytic target: Test Failed at /home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil4-study/research/pupil_builtin_totals/audit.jl:22
+  Expression: maximum(abs.(g - fd) ./ max.(1.0, abs.(g))) < 3.0e-5
+   Evaluated: 3.88430237291959e-5 < 3.0e-5
+
+Stacktrace:
+ [1] macro expansion
+   @ ~/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/Test/src/Test.jl:673 [inlined]
+ [2] macro expansion
+   @ ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil4-study/research/pupil_builtin_totals/audit.jl:22 [inlined]
+ [3] macro expansion
+   @ ~/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/Test/src/Test.jl:1582 [inlined]
+ [4] top-level scope
+   @ ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil4-study/research/pupil_builtin_totals/audit.jl:4
+Test Summary:                                             | Pass  Fail  Total   Time
+Post-3 built-in totals versus independent analytic target |   23     2     25  48.7s
+ERROR: LoadError: Some tests did not pass: 23 passed, 2 failed, 0 errored, 0 broken.
+in expression starting at /home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil4-study/research/pupil_builtin_totals/audit.jl:3
+[kb-run-compact] exit=1 elapsed=173s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.34Hedy

@@ -1,0 +1,54 @@
+npm WARN deprecated @xmldom/xmldom@0.9.10: this version has critical issues, please update to the latest version
+npm WARN deprecated mathjax-full@3.2.2: Version 4 replaces this package with the scoped package @mathjax/src
+
+added 39 packages, removed 22 packages, changed 3 packages, and audited 202 packages in 2s
+
+58 packages are looking for funding
+  run `npm fund` for details
+
+6 vulnerabilities (4 moderate, 2 high)
+
+To address issues that do not require attention, run:
+  npm audit fix
+
+To address all issues (including breaking changes), run:
+  npm audit fix --force
+
+Run `npm audit` for details.
+
+> docs:build
+> vitepress build build/.documenter
+
+
+  vitepress v1.6.4
+
+- building client + server bundles...
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+[32m✓[0m building client + server bundles...
+- rendering pages...
+[32m✓[0m rendering pages...
+build complete in 3.91s.
+[kb-run-compact] exit=0 elapsed=7s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.OgrncA

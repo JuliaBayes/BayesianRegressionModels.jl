@@ -1,0 +1,346 @@
+[
+  {
+    "archive": "pupil3-builtin-totals-v2.tar.gz",
+    "bytes": 29827042,
+    "sha256": "2f8db847f019e64dccc229dd26336ce6d02e86f13a8c2540345afdd3a4684209",
+    "members": [
+      {
+        "path": "pupil3-builtin-totals-v2/harness/audit.jl",
+        "bytes": 2252,
+        "sha256": "54398f855d5594b3b72c56a61e0f65f23de09c7127f1a0bac16e94c2d9a79ac0"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/harness/common.jl",
+        "bytes": 4825,
+        "sha256": "a3fba37d6915f377b6f1c25feea175cd6aa6c42a981bb03a5eb2780ac5ee3684"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/harness/reuse_brms.jl",
+        "bytes": 1602,
+        "sha256": "022cd301d67808ec7f48f5d4cd635278b5c750edcc86aebd49e283b2aad31a30"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/harness/total_whmc.jl",
+        "bytes": 3911,
+        "sha256": "c6889225794e4d91b8e1ec97174fc2ad4bde4a3c9abfb9b6e2d711f4411f82e7"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/model/automatic_totals.stan",
+        "bytes": 12543,
+        "sha256": "ff59d3bdf0682f11265dcb446e823bde44e85cd332daf1545dd8ec84e8e43f50"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/pilot-model-gradients.jls",
+        "bytes": 720023,
+        "sha256": "dd1f02b5f16584f59feb2af07ec269ceaf8283b2808dab069e7c6fad516e6645"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/selected_gradient.jls",
+        "bytes": 4423,
+        "sha256": "6b10089dec1e99a5db0f3e2a9ba2b5d3a8d444367cf2e29590c10e42c8936b1e"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/selected_position.jls",
+        "bytes": 4423,
+        "sha256": "8f87d070aa75d8e913720747c323cce18793de935f2e1018f3793dc4b3b6fcb1"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_cp-checkpoints/cp_latest.jls",
+        "bytes": 2229687,
+        "sha256": "db7275754e4be4e3a1f8e8838142dee2322fd3e29504d210af99475a26e88883"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_cp-qois.jls",
+        "bytes": 736023,
+        "sha256": "98b809446493770adfa4162701533e02368e4d13c1786de2584b6e1b20596cf4"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_cp-qois.tsv",
+        "bytes": 5656,
+        "sha256": "338242d60d4cc555d37c3a0aba2695522950738f1a7bcac6a27f220b4e10e2ca"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_cp-summary.tsv",
+        "bytes": 291,
+        "sha256": "09923bdb94d2a98a6e02dc0ac6777e59cbab90b80d33fd050215e63c6ccc6b3e"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_cp.jls",
+        "bytes": 2161446,
+        "sha256": "ae6712beaa80b6523784151f56e7124d87efa5dd7b517a45c852cbd0f7f38d5b"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_ncp-checkpoints/cp_latest.jls",
+        "bytes": 2229703,
+        "sha256": "113a5ff758e00a9978b3e4656b1e30445a935e91cebf092d821f6d2094b04d3a"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_ncp-qois.jls",
+        "bytes": 736023,
+        "sha256": "0722c2d11bfc6d2d17b67df1a101d415f30a491273a735b50c2ce28f99c9afe0"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_ncp-qois.tsv",
+        "bytes": 5653,
+        "sha256": "c4882c20454176ada796ebdb3492f99c13d4bc26493fc41ca19ba05d0521684e"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_ncp-summary.tsv",
+        "bytes": 287,
+        "sha256": "cd702a101362442c3b8e401166100b83dce926312488ff3dbaec1663535a06d8"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_ncp.jls",
+        "bytes": 2161446,
+        "sha256": "288b69408a73f77d7d7473eddf9efde0b2d9d7badbda5e1a30227159d6401f94"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_online_gradient-checkpoints/cp_latest.jls",
+        "bytes": 2247287,
+        "sha256": "dcb3a52954e58c884e438b17de4e75950539164dac3d3e62aba8d1683bd34510"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_online_gradient-qois.jls",
+        "bytes": 736023,
+        "sha256": "dcf6b532368bf8751cdb287adc5e3950010839e3edc00989dcd9000d262f4c54"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_online_gradient-qois.tsv",
+        "bytes": 5660,
+        "sha256": "1c0ea12aced924b24fdff76c626c48de5e9f14b4e06b266c9a5745a3fe084abd"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_online_gradient-summary.tsv",
+        "bytes": 302,
+        "sha256": "5a2bac8bca254b9ae2d688acc33fb606bf49c39ef2a3eb236eaaaa3ada703393"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_online_gradient.jls",
+        "bytes": 2161446,
+        "sha256": "b1e46a6c501dedcd77630bc95a0e7b948c51e3951b669aab13fca46017f86f8e"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_online_position-checkpoints/cp_latest.jls",
+        "bytes": 2241527,
+        "sha256": "c2dfa15e373eee1626288eb42cfc4c12fdaa64bd2652b9a3de898aeaaf09a1b1"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_online_position-qois.jls",
+        "bytes": 736023,
+        "sha256": "c5d33766c5565cb1471b02aaa531c3f6914f74fd7e31e9697864bd727995fe14"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_online_position-qois.tsv",
+        "bytes": 5646,
+        "sha256": "57ea89a8b5e8b63b60a9ff5d8478335ecc858fef487f2ad370a76b29c4b19254"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_online_position-summary.tsv",
+        "bytes": 303,
+        "sha256": "1e8b8b3ecebb6d05e6b753b92b76a5e98fc8d5908d0b56a8aa530d409aea10ac"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_online_position.jls",
+        "bytes": 2161446,
+        "sha256": "815e633f0397fcefed431a0e7576d570d3d8846bde53e597260dc5e02715f9b1"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_posthoc_gradient-checkpoints/cp_latest.jls",
+        "bytes": 2239767,
+        "sha256": "f9458b0b0d9f1de70dca9e1e16020bb4e2630d06cc7a10f814053e12c5c37b2d"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_posthoc_gradient-qois.jls",
+        "bytes": 736023,
+        "sha256": "9af93b31bcc47f59e692827b4475fac156028e54f2d2c4cba7082ce1b8c732ec"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_posthoc_gradient-qois.tsv",
+        "bytes": 5653,
+        "sha256": "16af986173e248674fec419bd955796d629ea9833ad99b5eca4da78089e4e754"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_posthoc_gradient-summary.tsv",
+        "bytes": 306,
+        "sha256": "2f07e6e0ea1a348011e2c950d21d7b390f0dc289606bdbf233e41a7651e9b867"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_posthoc_gradient.jls",
+        "bytes": 2161450,
+        "sha256": "daa1d620cdb4398a2924cc3f59faa5b3cbed7cde4311dbf8d768d440cd275380"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_posthoc_position-checkpoints/cp_latest.jls",
+        "bytes": 2257775,
+        "sha256": "1c81b8b54529684559a7adf74761739b14a362948695b04d508f9824f4bd9028"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_posthoc_position-qois.jls",
+        "bytes": 736023,
+        "sha256": "d59fc93914765eef5ee38c1c6d0b7efeafe9dd65523915cfea990d108c87f53a"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_posthoc_position-qois.tsv",
+        "bytes": 5644,
+        "sha256": "2883b2afd334bdabe8bc64fe11e45f0db38473bb2f6802dbcefb1417e921b6c8"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_posthoc_position-summary.tsv",
+        "bytes": 306,
+        "sha256": "fa9d4eaede706edcbcb106c05952ead4ecc41b82d07905f37580996cc0979702"
+      },
+      {
+        "path": "pupil3-builtin-totals-v2/total_posthoc_position.jls",
+        "bytes": 2161450,
+        "sha256": "c924dc36f4f7873beb7a0376bd54306dd9333d2244572cafe856a2742748a04d"
+      }
+    ]
+  },
+  {
+    "archive": "pupil3-builtin-brms-summary-v1.tar.gz",
+    "bytes": 6119183,
+    "sha256": "668a230e222a6d383ffd6f7266ea30b9aecb870d0458357fa840e4b64e0ee922",
+    "members": [
+      {
+        "path": "pupil3-builtin-brms-summary-v1/ordinary_cp_whmc-qois.jls",
+        "bytes": 736023,
+        "sha256": "f9b17d9e5044a5072ca3865829b5d41c317ecfb4a04181065e0d8d52d250748c"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/ordinary_cp_whmc-qois.tsv",
+        "bytes": 5649,
+        "sha256": "4b7aefd934953d19620302ede8f1bbc8708d65d20db03a371fee848bb60cb3ef"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/ordinary_cp_whmc-summary.tsv",
+        "bytes": 308,
+        "sha256": "59419ef35141e3f772979e22acad1c5054f3a2e8b39612f893f549eb7b09b866"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/ordinary_ncp_native-qois.jls",
+        "bytes": 736023,
+        "sha256": "1c8e625e43d25abc001777841bbccf59d9fb08359631e846c001ac2771bf1dc6"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/ordinary_ncp_native-qois.tsv",
+        "bytes": 5659,
+        "sha256": "caa7e074809a13aba09e8bc2cc10ebcbf1bae1d632e443fd638f0aa89ded4595"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/ordinary_ncp_native-summary.tsv",
+        "bytes": 315,
+        "sha256": "08a4022a720beb7741a63477a1ffe70a75ee1e537bbaafc2fc91384bf9e7e807"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/ordinary_ncp_whmc-qois.jls",
+        "bytes": 736023,
+        "sha256": "5977eb734b90639d235f3c46c716698f8c40cef0d62fec50b166929c13878ab1"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/ordinary_ncp_whmc-qois.tsv",
+        "bytes": 5650,
+        "sha256": "dc58cb59302fbbbe74cc8efffb7df7a524df204bee24ba09a12895f73e55eb73"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/ordinary_ncp_whmc-summary.tsv",
+        "bytes": 297,
+        "sha256": "d07ba025c223af1ff8b43a0088bf83677d110c7d0372c99f4924eadfd770d598"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/reused_brms_fits.tsv",
+        "bytes": 568,
+        "sha256": "17ceffab5920b8b02bf24fad5e651995c3c26bc599a99174ca48fd204dfc99ff"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/s2z_auto_native-qois.jls",
+        "bytes": 736023,
+        "sha256": "4ac80c579e9b525f6b5bb352bab8c6294fb6272ae9512de40ed48c50bc8cadd5"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/s2z_auto_native-qois.tsv",
+        "bytes": 5668,
+        "sha256": "8c062e00a7e1696009481d68e1a813182838c6bd5f5f4f71bb2d7d366a61389a"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/s2z_auto_native-summary.tsv",
+        "bytes": 298,
+        "sha256": "1e78c9a89c24f82ec9d78da96eb9e3d8417a36c5dfb84234839b33a57ea2200a"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/s2z_auto_whmc-qois.jls",
+        "bytes": 736023,
+        "sha256": "a263513b6e032aa319a954b63d7f6dbe79e7913083a4e79b3f223c8527d90177"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/s2z_auto_whmc-qois.tsv",
+        "bytes": 5657,
+        "sha256": "d3f2eb5d4141282e1e32b911ac5fb4b2246434a1d4b7cc93afdae1203d18b9c2"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/s2z_auto_whmc-summary.tsv",
+        "bytes": 292,
+        "sha256": "5016b76ca60b2c4cae499f31795da3607cdfb4584c8bbd0537ece8a3e160151a"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/s2z_cp_native-qois.jls",
+        "bytes": 736023,
+        "sha256": "60b9779e0a4f02b892b21decb8bd366aa1368cfe0e3c28d1ee09fee31f3c1f24"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/s2z_cp_native-qois.tsv",
+        "bytes": 5654,
+        "sha256": "a806968f52e004070bdc4cf914c3b4b7f83e7fe402b9aa2a255847e5d702a69f"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/s2z_cp_native-summary.tsv",
+        "bytes": 306,
+        "sha256": "4a9cce379caf52b2c5113b591c6c3988f396581187baf017922726f500ee5eaa"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/s2z_cp_whmc-qois.jls",
+        "bytes": 736023,
+        "sha256": "4d03f9d581f5635caef6684908ef88312938dae94da6f07aef2140886a71adce"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/s2z_cp_whmc-qois.tsv",
+        "bytes": 5650,
+        "sha256": "b817b2980fb15591ee042210e2901b4f6fbae3911ead41cdb2baf55f3cc4bad8"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/s2z_cp_whmc-summary.tsv",
+        "bytes": 306,
+        "sha256": "becc988224a126d0d43c29e06265a3ae3888d357246f9ed5d7ba83461eee61b2"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/s2z_ncp_native-qois.jls",
+        "bytes": 736023,
+        "sha256": "382c37b062f8c0b64e9b62529c504a22bae9964897c7953b3581c5e565bb7c15"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/s2z_ncp_native-qois.tsv",
+        "bytes": 5642,
+        "sha256": "fbd6b7b8873894fb7d2c4fe87ed6f451988f653a4e46a2ebb8fa65f34c213ab5"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/s2z_ncp_native-summary.tsv",
+        "bytes": 297,
+        "sha256": "2c022c1492bc921fd8452c65b683fbaa56a158f2c1e30f0eafcac5047b29dc22"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/s2z_ncp_whmc-qois.jls",
+        "bytes": 736023,
+        "sha256": "d9ecc6fcb00bb61bc9b614bab634ab674c08455295c285745efed928ab1823d2"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/s2z_ncp_whmc-qois.tsv",
+        "bytes": 5658,
+        "sha256": "61d89ab81bb6235cb88ea8b00a49ccce4485b219f708418c8f4be50595d8a5ee"
+      },
+      {
+        "path": "pupil3-builtin-brms-summary-v1/s2z_ncp_whmc-summary.tsv",
+        "bytes": 292,
+        "sha256": "8733b453246c1688b0dbe3de334a9df5e61f4e0096f564232a83f26f078eb5c9"
+      }
+    ]
+  }
+]

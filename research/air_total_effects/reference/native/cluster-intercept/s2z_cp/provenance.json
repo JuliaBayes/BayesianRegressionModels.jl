@@ -1,0 +1,13 @@
+{
+  "brms_sha": "73cf607889879cb2a55f50b88d8141d76ff43279",
+  "grouping": "cluster_region",
+  "hierarchy": "intercept_only",
+  "arm": "s2z_cp",
+  "seed": 1,
+  "chains": 1,
+  "warmup": 1000,
+  "draws": 2000,
+  "cmdstan": "2.39.0",
+  "cmdstanr": "0.9.0",
+  "source_sha256": "7584c977989c762588321972a42884a51941ade6c6b11d26c7b75be0dd50b8de"
+}

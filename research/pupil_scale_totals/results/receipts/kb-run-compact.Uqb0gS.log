@@ -1,0 +1,90 @@
+CmdStan path set to: /home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering-park-pupil-air/cmdstan-2.39.0
+Start sampling
+Running MCMC with 1 chain...
+
+Chain 1 Iteration:    1 / 3000 [  0%]  (Warmup) 
+Chain 1 Iteration:  500 / 3000 [ 16%]  (Warmup) 
+Chain 1 Iteration: 1000 / 3000 [ 33%]  (Warmup) 
+Chain 1 Iteration: 1001 / 3000 [ 33%]  (Sampling) 
+Chain 1 Iteration: 1500 / 3000 [ 50%]  (Sampling) 
+Chain 1 Iteration: 2000 / 3000 [ 66%]  (Sampling) 
+Chain 1 Iteration: 2500 / 3000 [ 83%]  (Sampling) 
+Chain 1 Iteration: 3000 / 3000 [100%]  (Sampling) 
+Chain 1 finished in 37.2 seconds.
+Loading required namespace: rstan
+  sampling_gradients all_gradient_calls warmup_and_initial_gradients
+1              63888             245020                       181132
+  precursor_gradient_calls workflow_gradient_calls divergences max_depth_hits
+1                        0                  245020           0              0
+  sampling_rows warmup_rows
+1          2000        1000
+PUPIL4_NATIVE_COMPLETE  s2z_cp 
+CmdStan path set to: /home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering-park-pupil-air/cmdstan-2.39.0
+Start sampling
+Running MCMC with 1 chain...
+
+Chain 1 Iteration:    1 / 3000 [  0%]  (Warmup) 
+Chain 1 Informational Message: The current Metropolis proposal is about to be rejected because of the following issue:
+Chain 1 Exception: normal_lpdf: Random variable is -nan, but must be not nan! (in '/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/RtmpBDq84Q/model-92f5a1d01.stan', line 195, column 2 to column 104)
+Chain 1 If this warning occurs sporadically, such as for highly constrained variable types like covariance matrices, then the sampler is fine,
+Chain 1 but if this warning occurs often then your model may be either severely ill-conditioned or misspecified.
+Chain 1 
+Chain 1 Informational Message: The current Metropolis proposal is about to be rejected because of the following issue:
+Chain 1 Exception: normal_lpdf: Random variable is -nan, but must be not nan! (in '/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/RtmpBDq84Q/model-92f5a1d01.stan', line 195, column 2 to column 104)
+Chain 1 If this warning occurs sporadically, such as for highly constrained variable types like covariance matrices, then the sampler is fine,
+Chain 1 but if this warning occurs often then your model may be either severely ill-conditioned or misspecified.
+Chain 1 
+Chain 1 Informational Message: The current Metropolis proposal is about to be rejected because of the following issue:
+Chain 1 Exception: normal_lpdf: Scale parameter[281] is 0, but must be positive! (in '/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/RtmpBDq84Q/model-92f5a1d01.stan', line 225, column 4 to column 41)
+Chain 1 If this warning occurs sporadically, such as for highly constrained variable types like covariance matrices, then the sampler is fine,
+Chain 1 but if this warning occurs often then your model may be either severely ill-conditioned or misspecified.
+Chain 1 
+Chain 1 Iteration:  500 / 3000 [ 16%]  (Warmup) 
+Chain 1 Iteration: 1000 / 3000 [ 33%]  (Warmup) 
+Chain 1 Iteration: 1001 / 3000 [ 33%]  (Sampling) 
+Chain 1 Iteration: 1500 / 3000 [ 50%]  (Sampling) 
+Chain 1 Iteration: 2000 / 3000 [ 66%]  (Sampling) 
+Chain 1 Iteration: 2500 / 3000 [ 83%]  (Sampling) 
+Chain 1 Iteration: 3000 / 3000 [100%]  (Sampling) 
+Chain 1 finished in 220.7 seconds.
+Warning: 5 of 2000 (0.0%) transitions hit the maximum treedepth limit of 10.
+See https://mc-stan.org/misc/warnings for details.
+
+Loading required namespace: rstan
+  sampling_gradients all_gradient_calls warmup_and_initial_gradients
+1            1015808            1442653                       426845
+  precursor_gradient_calls workflow_gradient_calls divergences max_depth_hits
+1                        0                 1442653           0              5
+  sampling_rows warmup_rows
+1          2000        1000
+PUPIL4_NATIVE_COMPLETE  s2z_ncp 
+CmdStan path set to: /home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering-park-pupil-air/cmdstan-2.39.0
+Estimate fixed group-centering weights
+Start sampling
+Running MCMC with 1 chain...
+
+Chain 1 Iteration:    1 / 3000 [  0%]  (Warmup) 
+Chain 1 Informational Message: The current Metropolis proposal is about to be rejected because of the following issue:
+Chain 1 Exception: model_b5cc97dc1e21a32532189e7cf1d86435_model_namespace::log_prob: group_quad_s2z_1 is -nan, but must be greater than or equal to 0.000000 (in '/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/RtmpwYl5jD/model-19813a30c35.stan', line 239, column 2 to column 33)
+Chain 1 If this warning occurs sporadically, such as for highly constrained variable types like covariance matrices, then the sampler is fine,
+Chain 1 but if this warning occurs often then your model may be either severely ill-conditioned or misspecified.
+Chain 1 
+Chain 1 Iteration:  500 / 3000 [ 16%]  (Warmup) 
+Chain 1 Iteration: 1000 / 3000 [ 33%]  (Warmup) 
+Chain 1 Iteration: 1001 / 3000 [ 33%]  (Sampling) 
+Chain 1 Iteration: 1500 / 3000 [ 50%]  (Sampling) 
+Chain 1 Iteration: 2000 / 3000 [ 66%]  (Sampling) 
+Chain 1 Iteration: 2500 / 3000 [ 83%]  (Sampling) 
+Chain 1 Iteration: 3000 / 3000 [100%]  (Sampling) 
+Chain 1 finished in 25.9 seconds.
+Loading required namespace: rstan
+Warning message:
+The automatic-centering Pathfinder precursor has Pareto-k = 2.551; centering weights may be unreliable. Consider rerunning with center_control = autocenter_control(method = "hmc") to estimate centering weights from a centered HMC precursor. 
+  sampling_gradients all_gradient_calls warmup_and_initial_gradients
+1              58112             169341                       111229
+  precursor_gradient_calls workflow_gradient_calls divergences max_depth_hits
+1                     1786                  171127           0              0
+  sampling_rows warmup_rows
+1          2000        1000
+PUPIL4_NATIVE_COMPLETE  s2z_auto 
+[kb-run-compact] exit=0 elapsed=387s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.Uqb0gS

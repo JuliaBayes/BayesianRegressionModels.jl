@@ -1,0 +1,10 @@
+{
+  "brms_sha": "73cf607889879cb2a55f50b88d8141d76ff43279",
+  "grouping": "cluster_log_region",
+  "hierarchy": "intercept_only",
+  "observations": 6003,
+  "groups": 6,
+  "group_sizes": [42, 1677, 1555, 1694, 347, 688],
+  "population_effects": "intercept and slope retained",
+  "source_data_revision": "2afb605f81cf0bdadc6476df865e0337aaacf183"
+}

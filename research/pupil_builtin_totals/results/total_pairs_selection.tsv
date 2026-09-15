@@ -1,0 +1,4 @@
+panel	parameter	centeredness
+1: 718 slope, c=0.60	total_mu.18.2	0.6
+2: 717 slope, c=0.70	total_mu.17.2	0.7
+3: 701 intercept, c=1.00	total_mu.1.1	1.0

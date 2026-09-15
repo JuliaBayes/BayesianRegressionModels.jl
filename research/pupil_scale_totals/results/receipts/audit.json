@@ -1,0 +1,12 @@
+{
+  "brm_density_constant_to_brms": 2.0794415416798357,
+  "group_levels": 20,
+  "observations": 2228,
+  "ordinary_dimension": 66,
+  "status": "passed",
+  "total_blocks": [
+    "logsigma",
+    "mu"
+  ],
+  "total_dimension": 65
+}

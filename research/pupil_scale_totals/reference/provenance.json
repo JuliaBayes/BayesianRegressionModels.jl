@@ -1,0 +1,31 @@
+{
+  "brms_sha": "73cf607889879cb2a55f50b88d8141d76ff43279",
+  "brms_version": "2.23.1",
+  "post": "https://discourse.mc-stan.org/t/help-testing-brms-pr-for-sum-to-zero-and-partial-centering/41542/4",
+  "data_revision": "d90fc01e6f6fcdced7ee64c9d2ed607d212ec77c",
+  "rows": 2228,
+  "subjects": 20,
+  "simplification": "independent mean random intercepts and slopes; all original priors retained",
+  "subject_ids": [
+    701,
+    702,
+    703,
+    704,
+    705,
+    706,
+    707,
+    708,
+    709,
+    710,
+    711,
+    712,
+    713,
+    714,
+    715,
+    716,
+    717,
+    718,
+    719,
+    720
+  ]
+}

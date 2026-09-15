@@ -1,0 +1,7 @@
+AUTOMATIC_MODEL_PANES_COMPLETE pupil_numeric expected_sampling_dimension=45
+AUTOMATIC_MODEL_PANES_COMPLETE pupil_hierarchical expected_sampling_dimension=65
+AUTOMATIC_MODEL_PANES_COMPLETE air_intercept expected_sampling_dimension=10
+AUTOMATIC_MODEL_PANES_COMPLETE air_independent expected_sampling_dimension=16
+Test Summary:                                 | Pass  Total     Time
+Four generated automatic-total model examples |   12     12  2m14.9s
+[kb-run-compact] exit=0 elapsed=149s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.x44d4T

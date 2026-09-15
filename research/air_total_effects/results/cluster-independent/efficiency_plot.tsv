@@ -1,0 +1,43 @@
+model	sampler	metric	value
+brms NCP	Native Stan	1. Total gradients	2459692.0
+brms NCP	Native Stan	2. Sampling efficiency	1.0
+brms NCP	Native Stan	3. Total efficiency	1.0
+brms NCP	WHMC	1. Total gradients	1351111.0
+brms NCP	WHMC	2. Sampling efficiency	1.0971906244357879
+brms NCP	WHMC	3. Total efficiency	1.4355078868668645
+brms S2Z CP	Native Stan	1. Total gradients	851478.0
+brms S2Z CP	Native Stan	2. Sampling efficiency	1.7936789791236616
+brms S2Z CP	Native Stan	3. Total efficiency	1.6063613608683163
+brms S2Z CP	WHMC	1. Total gradients	30584.0
+brms S2Z CP	WHMC	2. Sampling efficiency	82.32096566914403
+brms S2Z CP	WHMC	3. Total efficiency	95.51913042557777
+brms S2Z NCP	Native Stan	1. Total gradients	1681113.0
+brms S2Z NCP	Native Stan	2. Sampling efficiency	0.9763792255815981
+brms S2Z NCP	Native Stan	3. Total efficiency	0.9122376687831678
+brms S2Z NCP	WHMC	1. Total gradients	485549.0
+brms S2Z NCP	WHMC	2. Sampling efficiency	1.5511287208904658
+brms S2Z NCP	WHMC	3. Total efficiency	2.0017787545971717
+brms S2Z auto	Native Stan	1. Total gradients	883701.0
+brms S2Z auto	Native Stan	2. Sampling efficiency	1.8491900360493276
+brms S2Z auto	Native Stan	3. Total efficiency	1.6435352834927683
+brms S2Z auto	WHMC	1. Total gradients	157936.0
+brms S2Z auto	WHMC	2. Sampling efficiency	5.461360166218163
+brms S2Z auto	WHMC	3. Total efficiency	7.071980673434895
+BRM total NCP	WHMC	1. Total gradients	1178130.0
+BRM total NCP	WHMC	2. Sampling efficiency	0.5769762489957608
+BRM total NCP	WHMC	3. Total efficiency	0.597991215284783
+BRM total CP	WHMC	1. Total gradients	27183.0
+BRM total CP	WHMC	2. Sampling efficiency	141.96098234530538
+BRM total CP	WHMC	3. Total efficiency	178.70705851459718
+BRM total post-hoc position	WHMC	1. Total gradients	1215894.0
+BRM total post-hoc position	WHMC	2. Sampling efficiency	22.91410621304233
+BRM total post-hoc position	WHMC	3. Total efficiency	0.857113232029056
+BRM total post-hoc gradient	WHMC	1. Total gradients	1202655.0
+BRM total post-hoc gradient	WHMC	2. Sampling efficiency	121.52005231168577
+BRM total post-hoc gradient	WHMC	3. Total efficiency	2.83005522108338
+BRM total online position	WHMC	1. Total gradients	53202.0
+BRM total online position	WHMC	2. Sampling efficiency	14.265205354149968
+BRM total online position	WHMC	3. Total efficiency	17.458350760694533
+BRM total online gradient	WHMC	1. Total gradients	20137.0
+BRM total online gradient	WHMC	2. Sampling efficiency	130.26983430785506
+BRM total online gradient	WHMC	3. Total efficiency	139.66237732546622

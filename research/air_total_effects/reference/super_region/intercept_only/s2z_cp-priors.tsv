@@ -1,0 +1,8 @@
+prior	class	coef	group	level	resp	dpar	nlpar	lb	ub	tag	source
+	b										default
+	b	log_sat									default
+student_t(3, 2.8, 2.5)	Intercept										default
+student_t(3, 0, 2.5)	sd							0			default
+	sd		region								default
+	sd	Intercept	region								default
+student_t(3, 0, 2.5)	sigma							0			default

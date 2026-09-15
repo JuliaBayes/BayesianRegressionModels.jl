@@ -1,0 +1,13 @@
+{
+  "brms_sha": "73cf607889879cb2a55f50b88d8141d76ff43279",
+  "source_post": 4,
+  "arm": "s2z_cp",
+  "seed": 1,
+  "chains": 1,
+  "warmup": 1000,
+  "draws": 2000,
+  "cmdstan": "2.39.0",
+  "cmdstanr": "0.9.0",
+  "initialization": "common pooled total coefficients, zero deviations, subject-OLS group SDs, both mixture precisions one",
+  "source_sha256": "feb71538448a28c1790f4663679f4a4018e3db345e1377ee36c4181ad0c8e863"
+}

@@ -1,0 +1,7 @@
+
+DevTools listening on ws://127.0.0.1:46343/devtools/browser/3f2d4667-4ab0-4498-9870-f47e82d8934c
+[0915/215218.948547:WARNING:media/gpu/vaapi/vaapi_wrapper.cc:1655] drmGetDevices2() has not found any devices
+[0915/215218.965422:WARNING:sandbox/policy/linux/sandbox_linux.cc:405] InitializeSandbox() called with multiple threads in process gpu-process.
+[0915/215219.063837:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+[0915/215219.063882:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: 
+[0915/215219.089100:ERROR:crypto/nss_util.cc:256] Error initializing NSS with a persistent database (sql:/home/n/.local/share/pki/nssdb): NSS error code: -8126

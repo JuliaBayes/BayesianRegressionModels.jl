@@ -1,0 +1,56 @@
+BOUNDARY total_ncp init window=0 gradients=126
+BOUNDARY total_ncp window window=1 gradients=1160
+BOUNDARY total_ncp window window=2 gradients=3399
+BOUNDARY total_ncp window window=3 gradients=7461
+BOUNDARY total_ncp window window=4 gradients=15716
+BOUNDARY total_ncp window window=5 gradients=31822
+BOUNDARY total_ncp window window=6 gradients=63923
+BOUNDARY total_ncp window window=7 gradients=127979
+BOUNDARY total_ncp window window=8 gradients=256059
+BOUNDARY total_ncp window window=9 gradients=363592
+SCIENTIFIC_RESULT (arm = "total_ncp", draws = 2000, min_bulk_ess = 45.542444802295506, limiting_qoi = "log_sigma_group_sd", sampling_gradients = 338576, total_gradients = 363592, ess_per_1000_sampling_gradients = 0.13451173385678697, ess_per_1000_total_gradients = 0.12525700456086905, max_split_rhat = 1.0342903485675543, divergences = 0)
+BOUNDARY total_posthoc_position init window=0 gradients=121
+BOUNDARY total_posthoc_position window window=1 gradients=2039
+BOUNDARY total_posthoc_position window window=2 gradients=4490
+BOUNDARY total_posthoc_position window window=3 gradients=8531
+BOUNDARY total_posthoc_position window window=4 gradients=16536
+BOUNDARY total_posthoc_position window window=5 gradients=32536
+BOUNDARY total_posthoc_position window window=6 gradients=49804
+SCIENTIFIC_RESULT (arm = "total_posthoc_position", draws = 2000, min_bulk_ess = 1054.734019292195, limiting_qoi = "subject_718_total_load_slope", sampling_gradients = 39920, total_gradients = 413396, ess_per_1000_sampling_gradients = 26.421192868040954, ess_per_1000_total_gradients = 2.5513890296282375, max_split_rhat = 1.0067585671264248, divergences = 0)
+BOUNDARY total_posthoc_gradient init window=0 gradients=126
+BOUNDARY total_posthoc_gradient window window=1 gradients=1209
+BOUNDARY total_posthoc_gradient window window=2 gradients=4128
+BOUNDARY total_posthoc_gradient window window=3 gradients=8137
+BOUNDARY total_posthoc_gradient window window=4 gradients=16141
+BOUNDARY total_posthoc_gradient window window=5 gradients=32147
+BOUNDARY total_posthoc_gradient window window=6 gradients=47029
+SCIENTIFIC_RESULT (arm = "total_posthoc_gradient", draws = 2000, min_bulk_ess = 1773.6713752820056, limiting_qoi = "population_log_sigma_intercept", sampling_gradients = 29840, total_gradients = 410621, ess_per_1000_sampling_gradients = 59.43938925207794, ess_per_1000_total_gradients = 4.31948530465321, max_split_rhat = 1.0053906852758965, divergences = 0)
+BOUNDARY total_cp init window=0 gradients=143
+BOUNDARY total_cp window window=1 gradients=1298
+BOUNDARY total_cp window window=2 gradients=3551
+BOUNDARY total_cp window window=3 gradients=7664
+BOUNDARY total_cp window window=4 gradients=16317
+BOUNDARY total_cp window window=5 gradients=32557
+BOUNDARY total_cp window window=6 gradients=65067
+BOUNDARY total_cp window window=7 gradients=129068
+BOUNDARY total_cp window window=8 gradients=257355
+BOUNDARY total_cp window window=9 gradients=291873
+SCIENTIFIC_RESULT (arm = "total_cp", draws = 2000, min_bulk_ess = 1102.863365889398, limiting_qoi = "subject_716_total_intercept", sampling_gradients = 33072, total_gradients = 291873, ess_per_1000_sampling_gradients = 33.34734415485601, ess_per_1000_total_gradients = 3.7785727555799884, max_split_rhat = 1.0066750352056373, divergences = 0)
+BOUNDARY total_online_position init window=0 gradients=126
+BOUNDARY total_online_position window window=1 gradients=1161
+BOUNDARY total_online_position window window=2 gradients=3401
+BOUNDARY total_online_position window window=3 gradients=7422
+BOUNDARY total_online_position window window=4 gradients=15429
+BOUNDARY total_online_position window window=5 gradients=31437
+BOUNDARY total_online_position window window=6 gradients=38606
+SCIENTIFIC_RESULT (arm = "total_online_position", draws = 2000, min_bulk_ess = 1742.3286450106834, limiting_qoi = "subject_704_total_intercept", sampling_gradients = 29912, total_gradients = 38606, ess_per_1000_sampling_gradients = 58.24848371926596, ess_per_1000_total_gradients = 45.131032611787894, max_split_rhat = 1.0027535061775685, divergences = 0)
+BOUNDARY total_online_gradient init window=0 gradients=126
+BOUNDARY total_online_gradient window window=1 gradients=1161
+BOUNDARY total_online_gradient window window=2 gradients=3401
+BOUNDARY total_online_gradient window window=3 gradients=7416
+BOUNDARY total_online_gradient window window=4 gradients=15430
+BOUNDARY total_online_gradient window window=5 gradients=31437
+BOUNDARY total_online_gradient window window=6 gradients=39224
+SCIENTIFIC_RESULT (arm = "total_online_gradient", draws = 2000, min_bulk_ess = 1505.9322757400203, limiting_qoi = "subject_703_total_load_slope", sampling_gradients = 30584, total_gradients = 39224, ess_per_1000_sampling_gradients = 49.23921906029362, ess_per_1000_total_gradients = 38.393133687028865, max_split_rhat = 1.0033004009564623, divergences = 0)
+PUPIL4_TOTAL_MATRIX_COMPLETE
+[kb-run-compact] exit=0 elapsed=338s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.JiyxOy

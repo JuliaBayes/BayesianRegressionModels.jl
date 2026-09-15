@@ -1,0 +1,27 @@
+AIR_SCIENTIFIC_RESULT (arm = "ordinary_ncp_native", draws = 2000, min_bulk_ess = 687.3172705184242, limiting_qoi = "population_log_sat_slope", sampling_gradients = 1815412, total_gradients = 2459692, ess_per_1000_sampling_gradients = 0.37860125994453275, ess_per_1000_total_gradients = 0.2794322502648397, divergences = 20, max_split_rhat = 1.0017833308554647)
+AIR_S2Z_AUDIT_PASS s2z_cp
+AIR_SCIENTIFIC_RESULT (arm = "s2z_cp_native", draws = 2000, min_bulk_ess = 382.2022229680084, limiting_qoi = "region_1_total_intercept", sampling_gradients = 562816, total_gradients = 851478, ess_per_1000_sampling_gradients = 0.6790891214322415, ess_per_1000_total_gradients = 0.44886916980592384, divergences = 0, max_split_rhat = 1.0045753470024112)
+AIR_S2Z_AUDIT_PASS s2z_ncp
+AIR_SCIENTIFIC_RESULT (arm = "s2z_ncp_native", draws = 2000, min_bulk_ess = 428.5302025673861, limiting_qoi = "group_sd_1", sampling_gradients = 1159260, total_gradients = 1681113, ess_per_1000_sampling_gradients = 0.3696584049888602, ess_per_1000_total_gradients = 0.2549086245644321, divergences = 37, max_split_rhat = 1.0039857919023558)
+AIR_S2Z_AUDIT_PASS s2z_auto
+AIR_SCIENTIFIC_RESULT (arm = "s2z_auto_native", draws = 2000, min_bulk_ess = 405.84566041591006, limiting_qoi = "region_1_total_slope", sampling_gradients = 579692, total_gradients = 883701, ess_per_1000_sampling_gradients = 0.7001056775251514, ess_per_1000_total_gradients = 0.4592567626560455, divergences = 0, max_split_rhat = 1.003328316547346)
+AIR_BRMS_COMPLETE analyze
+AIR_S2Z_AUDIT_PASS s2z_cp
+AIR_SCIENTIFIC_RESULT (arm = "s2z_cp_whmc", draws = 2000, min_bulk_ess = 816.3213840707626, limiting_qoi = "region_1_total_slope", sampling_gradients = 26192, total_gradients = 30584, ess_per_1000_sampling_gradients = 31.166821322188557, ess_per_1000_total_gradients = 26.69112555815991, divergences = 0, max_split_rhat = 1.0029066291477222)
+AIR_S2Z_AUDIT_PASS s2z_ncp
+AIR_SCIENTIFIC_RESULT (arm = "s2z_ncp_whmc", draws = 2000, min_bulk_ess = 271.5974373222957, limiting_qoi = "group_sd_1", sampling_gradients = 462483, total_gradients = 485549, ess_per_1000_sampling_gradients = 0.5872592880652818, ess_per_1000_total_gradients = 0.559361541929436, divergences = 60, max_split_rhat = 1.0161827830337649)
+AIR_S2Z_AUDIT_PASS s2z_auto
+BOUNDARY s2z_auto init window=0 gradients=129
+BOUNDARY s2z_auto window window=1 gradients=1286
+BOUNDARY s2z_auto window window=2 gradients=3441
+BOUNDARY s2z_auto window window=3 gradients=7459
+BOUNDARY s2z_auto window window=4 gradients=15516
+BOUNDARY s2z_auto window window=5 gradients=31618
+BOUNDARY s2z_auto window window=6 gradients=63708
+BOUNDARY s2z_auto window window=7 gradients=127729
+BOUNDARY s2z_auto window window=8 gradients=156874
+AIR_SCIENTIFIC_RESULT (arm = "s2z_auto_whmc", draws = 2000, min_bulk_ess = 312.1035638720663, limiting_qoi = "region_1_total_intercept", sampling_gradients = 150944, total_gradients = 157936, ess_per_1000_sampling_gradients = 2.067677839941079, ess_per_1000_total_gradients = 1.9761394734073692, divergences = 0, max_split_rhat = 1.0058921924822688)
+AIR_BRMS_COMPLETE fit
+AIR_SAVED_VALIDATION_COMPLETE independent
+AIR_COMPLETE cluster-independent
+[kb-run-compact] exit=0 elapsed=196s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.Y1m4i1

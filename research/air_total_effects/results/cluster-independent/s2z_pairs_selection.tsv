@@ -1,0 +1,4 @@
+panel	region	margin	centeredness
+1: region 1 intercept, rho=0.80	1	1	0.800795166190571
+2: region 6 intercept, rho=0.80	6	1	0.800813268366307
+3: region 2 slope, rho=1.00	2	2	0.99957878965599

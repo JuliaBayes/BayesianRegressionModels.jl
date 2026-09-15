@@ -1,0 +1,95 @@
+[
+  {
+    "page": "pupil-centering",
+    "before": {
+      "title": "Pupil: numeric scale predictor and automatic totals | BayesianRegressionModels.jl",
+      "panes": [
+        "BRM authoring",
+        "StanBlocks model",
+        "Stan source",
+        "Turing model"
+      ],
+      "brokenImages": [],
+      "mathErrors": [],
+      "displayMath": 5,
+      "efficiencyTables": [
+        15
+      ],
+      "sidebar": " Sidebar Navigation Adaptive centeringPupil: numeric scale predictorPupil: hierarchical residual SDAir pollution",
+      "width": 1440,
+      "scrollWidth": 1440
+    },
+    "selected": [
+      "stan"
+    ],
+    "mobile": {
+      "width": 390,
+      "scrollWidth": 390
+    },
+    "exceptions": []
+  },
+  {
+    "page": "pupil-scale-centering",
+    "before": {
+      "title": "Pupil: hierarchical residual SD | BayesianRegressionModels.jl",
+      "panes": [
+        "BRM authoring",
+        "StanBlocks model",
+        "Stan source",
+        "Turing model"
+      ],
+      "brokenImages": [],
+      "mathErrors": [],
+      "displayMath": 0,
+      "efficiencyTables": [
+        15
+      ],
+      "sidebar": " Sidebar Navigation Adaptive centeringPupil: numeric scale predictorPupil: hierarchical residual SDAir pollution",
+      "width": 1440,
+      "scrollWidth": 1440
+    },
+    "selected": [
+      "stan"
+    ],
+    "mobile": {
+      "width": 390,
+      "scrollWidth": 390
+    },
+    "exceptions": []
+  },
+  {
+    "page": "air-centering",
+    "before": {
+      "title": "Air pollution: regional effects and automatic totals | BayesianRegressionModels.jl",
+      "panes": [
+        "BRM authoring",
+        "StanBlocks model",
+        "Stan source",
+        "Turing model",
+        "BRM authoring",
+        "StanBlocks model",
+        "Stan source",
+        "Turing model"
+      ],
+      "brokenImages": [],
+      "mathErrors": [],
+      "displayMath": 2,
+      "efficiencyTables": [
+        14,
+        14
+      ],
+      "sidebar": " Sidebar Navigation Adaptive centeringPupil: numeric scale predictorPupil: hierarchical residual SDAir pollution",
+      "width": 1440,
+      "scrollWidth": 1440
+    },
+    "selected": [
+      "stan",
+      "stan"
+    ],
+    "mobile": {
+      "width": 390,
+      "scrollWidth": 390
+    },
+    "exceptions": []
+  }
+]
