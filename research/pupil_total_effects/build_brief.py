@@ -10,9 +10,16 @@ root = Path(__file__).resolve().parent
 rows = list(csv.DictReader((root / "results/student_mixture/matrix/all_scopes.tsv").open(), delimiter="\t"))
 
 
+def relative_efficiency(row, metric):
+    baseline = [r for r in rows if r["scope"] == row["scope"]
+                and r["model"] == "brms NCP" and r["sampler"] == "Native Stan"]
+    assert len(baseline) == 1 and float(baseline[0][metric]) > 0
+    return float(row[metric]) / float(baseline[0][metric])
+
+
 def table(scope):
     lines = [
-        "| Model | Sampler | Total gradients | Min ESS / sampling gradient | Min ESS / total gradient |",
+        "| Model | Sampler | Total gradients | Relative sampling efficiency | Relative total efficiency |",
         "|---|---|---:|---:|---:|",
     ]
     selected = [r for r in rows if r["scope"] == scope]
@@ -20,8 +27,8 @@ def table(scope):
     for r in selected:
         label = r["model"].replace("total coefficients", "Totals")
         lines.append(f'| {label} | {r["sampler"]} | {int(r["total_gradients"]):,} | '
-                     f'{float(r["min_ess_per_sampling_gradient"]):.5g} | '
-                     f'{float(r["min_ess_per_total_gradient"]):.5g} |')
+                     f'{relative_efficiency(r, "min_ess_per_sampling_gradient"):.4g}× | '
+                     f'{relative_efficiency(r, "min_ess_per_total_gradient"):.4g}× |')
     return "\n".join(lines)
 
 
@@ -31,6 +38,16 @@ body = (root / "aki_brief_template.md").read_text()
 body = body.replace("@@PRIMARY@@", table("common44"))
 body = body.replace("@@RECOVERED@@", table("original_physical46"))
 body = body.replace("@@SOURCE_SHA@@", source_sha)
+for token, model, metric in [
+    ("ACP_SAMPLING", "total coefficients ACP", "min_ess_per_sampling_gradient"),
+    ("CP_SAMPLING", "total coefficients CP", "min_ess_per_sampling_gradient"),
+    ("ACP_TOTAL", "total coefficients ACP", "min_ess_per_total_gradient"),
+    ("CP_TOTAL", "total coefficients CP", "min_ess_per_total_gradient"),
+    ("S2Z_AUTO_TOTAL", "brms S2Z auto", "min_ess_per_total_gradient"),
+]:
+    match = [r for r in rows if r["scope"] == "common44" and r["model"] == model and r["sampler"] == "WHMC"]
+    assert len(match) == 1
+    body = body.replace("@@" + token + "@@", f"{relative_efficiency(match[0], metric):.1f}×")
 assert "@@" not in body
 spec = json.loads(gzip.decompress((root / "results/student_mixture/pairs.aov.json.gz").read_bytes()))
 envelope = {

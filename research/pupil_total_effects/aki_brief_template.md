@@ -242,6 +242,12 @@ We report minimum rank-normalized bulk ESS with these three cost quantities:
    a longer run after adaptation.
 3. **Min ESS / total gradients:** end-to-end gradient efficiency for this run.
 
+In the tables and numerical comparisons below, both efficiencies are expressed
+as ratios to **ordinary brms NCP + native Stan**. Each metric is divided by its
+own baseline value, using the same parameter scope, so the baseline is **1×**
+in both efficiency columns. For example, 10× means ten times the baseline's
+minimum ESS per gradient. Total gradient counts remain absolute.
+
 WHMC target wrappers count actual density-and-gradient requests. Native Stan
 is instrumented with a counter that contributes exactly zero to the log density;
 every retained count increment was checked against that iteration's leapfrog
@@ -256,19 +262,19 @@ we do not claim a controlled wall-time ranking.
 
 ## 6. Main results: shared physical quantities
 
-**All efficiency entries below are ESS per gradient, without a factor of 1,000.**
+**All efficiency entries below are relative to brms NCP + native Stan (1×).**
 “Totals” denotes our exact total-coefficient marginalization.
 
 @@PRIMARY@@
 
 Several distinctions matter:
 
-- **Adaptation quality versus up-front cost:** total ACP gives 0.06446
-  ESS/sampling gradient, compared with total CP's 0.03265. But its NCP pilot
+- **Adaptation quality versus up-front cost:** total ACP gives @@ACP_SAMPLING@@
+  the baseline's sampling efficiency, compared with total CP's @@CP_SAMPLING@@. But its NCP pilot
   costs 134,652 gradients and the refit 34,280, for 168,932 overall. Its total
-  efficiency is consequently 0.01139, versus fixed CP's 0.03118.
+  efficiency is consequently @@ACP_TOTAL@@ the baseline, versus fixed CP's @@CP_TOTAL@@.
 - **No clear end-to-end winner between the two best pilots:** total CP and
-  brms S2Z auto + WHMC give 0.03118 and 0.03116. That difference is negligible
+  brms S2Z auto + WHMC give @@CP_TOTAL@@ and @@S2Z_AUTO_TOTAL@@ the baseline's total efficiency. That difference is negligible
   relative to the uncertainty of single-chain runs.
 - **Centering matters strongly:** both marginalized NCP endpoints remain
   inefficient here. Ordinary brms CP also improves the shared-quantity
@@ -326,7 +332,11 @@ sensitivity for our fits is retained in the accompanying results.
 The following minimum is over the **46 original physical parameters**:
 population intercept/slope, 40 deviations, two group scales and the two
 residual-model coefficients. It answers a different question from the common
-44-total scope.
+44-total scope. This table normalizes against the **same brms NCP + native Stan
+fit, evaluated on these 46 original parameters**; its baseline is again 1×.
+The denominators therefore differ between the two tables. Comparing their
+relative multipliers directly would conflate recovery with a change in the
+baseline estimands.
 
 @@RECOVERED@@
 
