@@ -1,0 +1,79 @@
+TESTED_PACKAGE=/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/test/.bootstrap/warmuphmc-deeea1d128d5
+linear_pool from c=0.0: Test Failed at /home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/test/active_reparametrization_state.jl:31
+  Expression: ≈(last(ir(point.q)), model[:, end], atol = 1.0e-10)
+   Evaluated: [0.7487499544087511, 0.24341211175578792, -0.5741969678798853] ≈ [0.7487499544087511, 500.5146596942741, -201.2140564157245] (atol=1.0e-10)
+
+Stacktrace:
+ [1] macro expansion
+   @ ~/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/Test/src/Test.jl:673 [inlined]
+ [2] macro expansion
+   @ ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/test/active_reparametrization_state.jl:31 [inlined]
+ [3] macro expansion
+   @ ~/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/Test/src/Test.jl:1582 [inlined]
+ [4] macro expansion
+   @ ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/test/active_reparametrization_state.jl:6 [inlined]
+ [5] macro expansion
+   @ ~/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/Test/src/Test.jl:1582 [inlined]
+ [6] top-level scope
+   @ ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/test/active_reparametrization_state.jl:4
+linear_pool from c=0.0: Test Failed at /home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/test/active_reparametrization_state.jl:32
+  Expression: ≈(point.q, positions[:, end], atol = 1.0e-10)
+   Evaluated: [0.7487499544087511, 0.2434121117557872, -0.574196967879878] ≈ [0.7487499544087511, 500.5146596942741, -201.2140564157245] (atol=1.0e-10)
+
+Stacktrace:
+ [1] macro expansion
+   @ ~/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/Test/src/Test.jl:673 [inlined]
+ [2] macro expansion
+   @ ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/test/active_reparametrization_state.jl:32 [inlined]
+ [3] macro expansion
+   @ ~/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/Test/src/Test.jl:1582 [inlined]
+ [4] macro expansion
+   @ ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/test/active_reparametrization_state.jl:6 [inlined]
+ [5] macro expansion
+   @ ~/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/Test/src/Test.jl:1582 [inlined]
+ [6] top-level scope
+   @ ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/test/active_reparametrization_state.jl:4
+all_good_leaves from c=0.0: Test Failed at /home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/test/active_reparametrization_state.jl:31
+  Expression: ≈(last(ir(point.q)), model[:, end], atol = 1.0e-10)
+   Evaluated: [0.7487499544087511, 0.24341211175578792, -0.5741969678798853] ≈ [0.7487499544087511, 500.5146596942741, -201.2140564157245] (atol=1.0e-10)
+
+Stacktrace:
+ [1] macro expansion
+   @ ~/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/Test/src/Test.jl:673 [inlined]
+ [2] macro expansion
+   @ ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/test/active_reparametrization_state.jl:31 [inlined]
+ [3] macro expansion
+   @ ~/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/Test/src/Test.jl:1582 [inlined]
+ [4] macro expansion
+   @ ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/test/active_reparametrization_state.jl:6 [inlined]
+ [5] macro expansion
+   @ ~/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/Test/src/Test.jl:1582 [inlined]
+ [6] top-level scope
+   @ ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/test/active_reparametrization_state.jl:4
+all_good_leaves from c=0.0: Test Failed at /home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/test/active_reparametrization_state.jl:32
+  Expression: ≈(point.q, positions[:, end], atol = 1.0e-10)
+   Evaluated: [0.7487499544087511, 0.2434121117557872, -0.574196967879878] ≈ [0.7487499544087511, 500.5146596942741, -201.2140564157245] (atol=1.0e-10)
+
+Stacktrace:
+ [1] macro expansion
+   @ ~/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/Test/src/Test.jl:673 [inlined]
+ [2] macro expansion
+   @ ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/test/active_reparametrization_state.jl:32 [inlined]
+ [3] macro expansion
+   @ ~/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/Test/src/Test.jl:1582 [inlined]
+ [4] macro expansion
+   @ ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/test/active_reparametrization_state.jl:6 [inlined]
+ [5] macro expansion
+   @ ~/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/Test/src/Test.jl:1582 [inlined]
+ [6] top-level scope
+   @ ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/test/active_reparametrization_state.jl:4
+Test Summary:                                         | Pass  Fail  Total   Time
+nonlinear restart preserves the active physical point |  148     4    152  28.1s
+  linear_pool from c=0.0                              |   36     2     38  27.7s
+  linear_pool from c=1.0                              |   38           38   0.0s
+  all_good_leaves from c=0.0                          |   36     2     38   0.4s
+  all_good_leaves from c=1.0                          |   38           38   0.0s
+ERROR: LoadError: Some tests did not pass: 148 passed, 4 failed, 0 errored, 0 broken.
+in expression starting at /home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/test/active_reparametrization_state.jl:3
+in expression starting at /home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/run_online_boundary_tests.jl:6
+[kb-run-compact] exit=1 elapsed=31s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.ikaRih

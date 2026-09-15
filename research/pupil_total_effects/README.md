@@ -151,12 +151,13 @@ to the 40 total coefficients gives 6.821 versus 54.556, about 8.0 times.
 The NCP baseline's own 46-parameter minimum is 0.428, limited by `z_1.1.4`.
 Its 2.5% divergences and the one-chain design limit the comparison.
 
-The online fit failed: max split R-hat was 2.16 and tail ESS was nonfinite.
+The historical online fit failed: max split R-hat was 2.16 and tail ESS was nonfinite.
 Its number is not evidence of usable posterior sampling. Its final source
 gradients, checkpoint gradients and 440 retrospective native candidate-loss
 values passed independent formula checks. The failure is not explained by
-those coordinate/gradient checks. A possible implementation defect has not
-been excluded; no cause is asserted and online runs are now disabled.
+those final-coordinate/gradient checks. The later adaptation-boundary audit
+below identified the active-state transfer defect and verified a correction.
+This historical fit remains unusable and is retained as failure evidence.
 
 ### Student-t mixture
 
@@ -433,3 +434,72 @@ total-coordinate CP/NCP/ACP grid is reused without refitting.
 `share_sources.py` freezes the harness, exact generated Stan, resolved inputs
 and diagnostics in a byte-hashed source snapshot and adds directly inspectable
 KB file links. Neither script publishes a gist or runs posterior sampling.
+
+## Online adaptation repair and both centering losses
+
+WarmupHMC `deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2` transforms its stored
+adaptation positions and gradients when centering changes, but re-evaluates
+the active NUTS point using its old source coordinates. Those numbers now mean
+a different physical point. In the saved failed Gaussian run, window 4 changed
+37 controls and moved the physical log density from -24,481 to -306 million.
+The final gradients were correct at those misplaced points, which is why the
+earlier final-frame audit did not detect the boundary defect.
+
+Candidate WarmupHMC fix `d9eeaac2c092b80aba3ef5d608261faea9b81265` maps the
+active point through the old model frame into the new source frame before
+re-evaluation. Both the halo-based and streaming candidate paths use it. The
+regression has 148 passes/4 failures on the original code and 152/152 passes
+after the fix; existing reparametrization and invariant-scoring tests pass.
+The package default remains position-gradient correlation.
+
+Following the user-directed reporting convention, distinguish four arms:
+
+- **Post-hoc position:** log SD plus inverse log-Jacobian; existing offline ACP.
+- **Post-hoc gradient:** position-gradient correlation, using gradients already
+  stored in the same NCP pilot checkpoint.
+- **Online position:** log SD minus mean forward log-Jacobian, fitted at restarts.
+- **Online gradient:** position-gradient correlation, the package default.
+
+Post-hoc searches use step 0.01; online searches use the existing step 0.1.
+The two position losses differ only by a candidate-independent constant when
+evaluated on the same source-frame observations. Online evidence is the live
+adaptation pool, while post-hoc evidence is the completed pilot's retained
+draws. All post-hoc total costs charge the complete NCP pilot. The post-hoc
+gradient arm reuses recorded gradients; its three verification evaluations
+are audit work, not a required cost of selection.
+
+The position-loss online experiment selects the implementation's existing
+`w1=1` weight in a separate Julia process. There is currently no new public
+sampler keyword for this switch. `online_transport_trial.jl` records the
+process-local experiment explicitly; its Gaussian trials also applied the
+state fix process-locally, and the Student-t trials used the fixed package
+checkout. No existing dependency pin was changed.
+
+All four repaired online pilots (Gaussian/Student-t × position/gradient), and
+both added post-hoc gradient refits, retained 2,000 draws with zero divergences.
+Each uses one chain and seed 1. The current Student-t comparison below uses
+the same 46 scientific QOIs and baseline as the shareable brief:
+
+| Arm | Total gradients | Relative sampling efficiency | Relative total efficiency |
+|---|---:|---:|---:|
+| brms NCP / Native Stan | 1,063,829 | 1× | 1× |
+| brms NCP / WHMC | 274,051 | 1.43× | 1.91× |
+| Totals NCP / WHMC | 134,652 | 3.03× | 4.46× |
+| Totals CP / WHMC | 54,587 | 131× | 195× |
+| brms S2Z auto / WHMC | 64,875 | 173× | 194× |
+| Post-hoc position / WHMC | 168,932 | 258× | 71.2× |
+| Post-hoc gradient / WHMC | 173,699 | 164× | 51.2× |
+| Online position / WHMC | 35,586 | 164× | 217× |
+| Online gradient / WHMC | 35,114 | 276× | 366× |
+
+These are single-chain comparisons, not a replicated ranking. The new
+Student-t posterior means agree with the existing post-hoc position fit to
+within 2.68 estimated combined MCSEs across the 46 quantities. Minimum ESS
+includes conditionally recovered population coefficients; per-QOI MCSE is
+retained, including when recovery noise contributes strongly to ESS.
+
+Code: `audit_online_boundary.jl`, `online_transport_trial.jl`,
+`offline_gradient_trial.jl`, and `compare_online_trials.jl`.
+Full fits, final source-frame checkpoints, selected controls, QOI diagnostics,
+run/test logs and the exact upstream patch are in `results/online_adaptation/`.
+The package fix is a reviewed local candidate pending landing approval.

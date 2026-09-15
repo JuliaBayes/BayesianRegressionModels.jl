@@ -1,0 +1,116 @@
+From d9eeaac2c092b80aba3ef5d608261faea9b81265 Mon Sep 17 00:00:00 2001
+From: KB Remote Agent <kb-agent@strato2.invalid>
+Date: Tue, 15 Sep 2026 14:55:00 +0000
+Subject: [PATCH] Preserve the active physical state when adapting centering
+
+---
+ src/Reparametrizations.jl              | 15 +++++++--
+ test/active_reparametrization_state.jl | 43 ++++++++++++++++++++++++++
+ test/runtests.jl                       |  1 +
+ 3 files changed, 57 insertions(+), 2 deletions(-)
+ create mode 100644 test/active_reparametrization_state.jl
+
+diff --git a/src/Reparametrizations.jl b/src/Reparametrizations.jl
+index 6daaf6b..7545e1a 100644
+--- a/src/Reparametrizations.jl
++++ b/src/Reparametrizations.jl
+@@ -1149,6 +1149,17 @@ function _jointly_transport_halo!(lpdf, old_ir, old_position, old_gradient,
+     gradient
+ end
+ 
++# A centering switch changes coordinate meaning. Preserve the active physical
++# point, just as `_jointly_transport_halo!` preserves the stored history, then
++# refresh the density and gradient in the new source frame. Re-evaluating the
++# old source vector without transforming it can send the chain far outside the
++# typical set at every restarting window.
++function _transport_active_evaluation(lpdf, old_ir, position_and_gradient)
++    _, model_position = old_ir(position_and_gradient.q)
++    _, source_position = _inverse_with_logabsdet_jacobian(reparametrizer(lpdf), model_position)
++    DynamicHMC.evaluate_ℓ(lpdf, source_position; strict=false)
++end
++
+ find_reparametrization!(lpdf, halo_position, halo_gradient, position_and_gradient) = begin
+     ir = reparametrizer(lpdf)
+     isempty(ir.pairs) && return position_and_gradient
+@@ -1159,7 +1170,7 @@ find_reparametrization!(lpdf, halo_position, halo_gradient, position_and_gradien
+     _synchronize_scoring!(lpdf)
+     _jointly_transport_halo!(lpdf, old_ir, old_position, old_gradient,
+                              halo_position, halo_gradient)
+-    DynamicHMC.evaluate_ℓ(lpdf, position_and_gradient.q; strict=false)
++    _transport_active_evaluation(lpdf, old_ir, position_and_gradient)
+ end
+ 
+ function find_reparametrization!(lpdf, recorder::NonlinearRecorder,
+@@ -1180,7 +1191,7 @@ function find_reparametrization!(lpdf, recorder::NonlinearRecorder,
+         lpdf, old_ir, old_position, old_gradient, halo_position, halo_gradient,
+     )
+     reset!(recorder)
+-    DynamicHMC.evaluate_ℓ(lpdf, position_and_gradient.q; strict=false)
++    _transport_active_evaluation(lpdf, old_ir, position_and_gradient)
+ end
+ 
+ # Draws are stored in the SAMPLING parametrization: `logdensity` receives the
+diff --git a/test/active_reparametrization_state.jl b/test/active_reparametrization_state.jl
+new file mode 100644
+index 0000000..d7dc31b
+--- /dev/null
++++ b/test/active_reparametrization_state.jl
+@@ -0,0 +1,43 @@
++# The selected centering may change, but a warmup restart must retain the same
++# physical chain state. Large locations make stale-source reuse unmistakable.
++@testset "nonlinear restart preserves the active physical point" begin
++    for evidence in (:linear_pool, :all_good_leaves), initial_c in (0.0, 1.0)
++        @testset "$evidence from c=$initial_c" begin
++            rng=Xoshiro(913)
++            inner=DiagGaussian([0.5,500.0,-200.0],[0.5,1.0,2.0])
++            ir=WarmupHMC.IndexedReparametrization([
++                k=>WarmupHMC.Reparametrization(
++                    WarmupHMC.PartiallyCentered(1.0),WarmupHMC.PartiallyCentered(initial_c),
++                    inner.mu[k],x->x[1]) for k in 2:3
++            ])
++            rp=WarmupHMC.ReparametrizedProblem(ir,inner,AutoEnzyme())
++            model=inner.mu .+ inner.sigma.*randn(rng,3,128)
++            positions=reduce(hcat,(last(WarmupHMC._inverse_with_logabsdet_jacobian(ir,q))
++                                  for q in eachcol(model)))
++            gradients=reduce(hcat,(last(LogDensityProblems.logdensity_and_gradient(rp,q))
++                                  for q in eachcol(positions)))
++            old_point=WarmupHMC.DynamicHMC.evaluate_ℓ(rp,copy(positions[:,end]))
++            old_source=copy(old_point.q)
++            if evidence===:linear_pool
++                point=WarmupHMC.find_reparametrization!(rp,positions,gradients,old_point)
++            else
++                recorder=WarmupHMC.NonlinearRecorder(rp;mode=evidence)
++                for (q,g) in zip(eachcol(positions),eachcol(gradients))
++                    WarmupHMC.OnlineStatsBase.fit!(ir,recorder.online,q,g)
++                end
++                point=WarmupHMC.find_reparametrization!(rp,recorder,positions,gradients,old_point)
++            end
++            @test all(last(p).c==1.0 for p in WarmupHMC.reparam_sources(rp))
++            @test last(ir(point.q)) ≈ model[:,end] atol=1e-10
++            @test point.q ≈ positions[:,end] atol=1e-10
++            @test old_point.q==old_source
++            value,gradient=LogDensityProblems.logdensity_and_gradient(rp,point.q)
++            @test point.ℓq ≈ value
++            @test point.∇ℓq ≈ gradient
++            for j in 1:8:128
++                @test last(ir(positions[:,j])) ≈ model[:,j] atol=1e-10
++                @test gradients[:,j] ≈ last(LogDensityProblems.logdensity_and_gradient(rp,positions[:,j])) atol=1e-8
++            end
++        end
++    end
++end
+diff --git a/test/runtests.jl b/test/runtests.jl
+index 15e7f01..53dc8f4 100644
+--- a/test/runtests.jl
++++ b/test/runtests.jl
+@@ -42,6 +42,7 @@ end
+     @testset "Invariant candidate scoring" begin
+         include("invariant_scoring.jl")
+     end
++    include("active_reparametrization_state.jl")
+     @testset "WrappedLogDensityProblems + AD" begin
+         include("wrapped_logdensity.jl")
+     end
+-- 
+2.53.0
+

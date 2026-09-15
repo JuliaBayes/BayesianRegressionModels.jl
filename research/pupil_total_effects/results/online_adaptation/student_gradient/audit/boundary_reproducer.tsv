@@ -1,0 +1,2 @@
+changed_controls	halo_physical_error	halo_gradient_error	active_physical_error	source_left_unchanged	physical_logdensity_before	physical_logdensity_after	physical_logdensity_after_correct_transport
+40	1.8189894035458565e-12	3.7922250672411455e-13	9.094947017729282e-13	false	-16941.357214650718	-16941.357214650718	-16941.357214650718

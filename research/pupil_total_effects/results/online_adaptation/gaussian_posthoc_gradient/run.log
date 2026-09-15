@@ -1,0 +1,10 @@
+boundary	partial_gradient	init	window=0	all_gradients=143
+boundary	partial_gradient	window	window=1	all_gradients=1621
+boundary	partial_gradient	window	window=2	all_gradients=3629
+boundary	partial_gradient	window	window=3	all_gradients=7634
+boundary	partial_gradient	window	window=4	all_gradients=15634
+boundary	partial_gradient	window	window=5	all_gradients=31643
+boundary	partial_gradient	window	window=6	all_gradients=32723
+RESULT	(arm = "partial_gradient", retained_draws = 2000, min_bulk_ess = 1264.9092757442656, limiting_parameter = "total_intercept[708]", min_tail_ess = 1217.4409369939278, max_split_rhat = 1.0030273117264017, divergences = 0, divergence_percent = 0.0, sampling_gradients = 29920, transition_gradients = 32580, all_gradient_calls = 32723, min_bulk_ess_per_1000_sampling_gradients = 42.27637953690727, min_bulk_ess_per_1000_all_gradients = 38.65505227956684, min_total_coefficient_ess_per_1000_gradients = 42.27637953690727, min_common_bulk_ess_per_1000_gradients = 42.27637953690727, fit_seconds = 25.737295175, compile_seconds = 25.439922691)
+OFFLINE_GRADIENT_COMPLETE	(arm = "partial_gradient", retained_draws = 2000, min_bulk_ess = 1264.9092757442656, limiting_parameter = "total_intercept[708]", min_tail_ess = 1217.4409369939278, max_split_rhat = 1.0030273117264017, divergences = 0, divergence_percent = 0.0, sampling_gradients = 29920, transition_gradients = 32580, all_gradient_calls = 32723, min_bulk_ess_per_1000_sampling_gradients = 42.27637953690727, min_bulk_ess_per_1000_all_gradients = 38.65505227956684, min_total_coefficient_ess_per_1000_gradients = 42.27637953690727, min_common_bulk_ess_per_1000_gradients = 42.27637953690727, fit_seconds = 25.737295175, compile_seconds = 25.439922691)
+[kb-run-compact] exit=0 elapsed=52s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.3p15hH
