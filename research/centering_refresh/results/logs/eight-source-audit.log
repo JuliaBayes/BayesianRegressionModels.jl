@@ -1,0 +1,9 @@
+WARNING: both BridgeStan and BayesianRegressionModels export "name"; uses of it in module Main must be qualified
+Test Summary:                       | Pass  Total  Time
+Immutable Stan eight-schools target |   26     26  0.0s
+Test Summary:                   | Pass  Total  Time
+Manual fully centered selection |   25     25  0.8s
+Test Summary:                               | Pass  Total  Time
+Native centered_groups and manual c=1 agree |   33     33  0.1s
+source_audit_complete	/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/centering-refresh-eight-v1/source-audit
+[kb-run-compact] exit=0 elapsed=124s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.IG10M5

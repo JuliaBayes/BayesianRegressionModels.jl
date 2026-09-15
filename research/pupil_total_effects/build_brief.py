@@ -56,13 +56,15 @@ if "--docs" in sys.argv:
     repo = root.parents[1]
     body = body.replace("Prepared for discussion with Aki · 15 September 2026", "Case study · 15 September 2026")
     body = body.replace("observed sampling and total efficiency**, after repairing a WHMC bug in the\ntransport of the active sampler position during centering changes.", "observed sampling and total efficiency**.")
+    body = body.replace("The three added arms (post-hoc gradient and both online losses) use the\n  tested local active-state transport fix", "The post-hoc gradient and both online arms use the\n  active-state transport implementation")
+    body = body.replace("The three added Student-t arms use local fix", "The post-hoc gradient and both online Student-t arms use")
     start = body.index("### Online adaptation correction")
     end = body.index("Full draws, native CSVs", start)
     body = body[:start] + """### Online adaptation implementation
 
 The online arms preserve the physical active position when the centering
 coordinates change and reevaluate its density and gradient in the new frame.
-The Student-t runs use WarmupHMC's tested implementation published as
+The online Student-t runs use WarmupHMC's implementation published as
 [`6b377cb`](https://github.com/nsiccha/WarmupHMC.jl/commit/6b377cb23934022af5879d199a7c57abfac54c70).
 Both online losses have zero divergences in 2,000 retained Student-t draws.
 Separate Gaussian sensitivity fits also have zero divergences with both losses.
@@ -94,6 +96,11 @@ Separate Gaussian sensitivity fits also have zero divergences with both losses.
         shutil.copyfile(root / source, assets / filename)
     body = re.sub(r"!\[([^\n]+)\]\(results/student_mixture/(?:qoi46/)?([^/]+\.png)\)",
                   r"![\1](assets/adaptive-pupil/\2)", body)
+    # Documenter parses Julia Markdown before VitePress. Display-dollar fences
+    # from the KB brief must become its native math blocks at that boundary.
+    body, math_blocks = re.subn(r"(?m)^\$\$\n(.*?)\n\$\$$",
+                               r"```math\n\1\n```", body, flags=re.S)
+    assert math_blocks == 16 and "\n$$\n" not in body
     assert "results/student_mixture/" not in re.sub(r"https://[^\s)]+", "", body)
     output = repo / "docs/src/pupil-centering.md"
     output.write_text(body)

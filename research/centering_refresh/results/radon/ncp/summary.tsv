@@ -1,0 +1,2 @@
+case	arm	qois	draws	min_bulk_ess	limiting_qoi	min_tail_ess	max_split_rhat	divergences	sampling_gradients	all_fit_gradients	pilot_gradients	total_gradients	sampling_efficiency	total_efficiency
+radon	ncp	777	10000	475.9790436725938	pop_mu_beta_pop.2	1069.6589738113635	1.0044553818822262	0	160352	164917	0	164917	0.002968338677862414	0.002886173309438043

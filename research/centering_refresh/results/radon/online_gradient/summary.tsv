@@ -1,0 +1,2 @@
+case	arm	qois	draws	min_bulk_ess	limiting_qoi	min_tail_ess	max_split_rhat	divergences	sampling_gradients	all_fit_gradients	pilot_gradients	total_gradients	sampling_efficiency	total_efficiency
+radon	online_gradient	777	10000	330.8176595050066	pop_mu_beta_pop.2	879.7078063968504	1.0067014327650956	0	150000	154448	0	154448	0.0022054510633667105	0.002141935534969741

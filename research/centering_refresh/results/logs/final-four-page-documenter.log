@@ -1,0 +1,85 @@
+[ Info: SetupBuildDirectory: setting up build directory.
+[ Info: Doctest: running doctests.
+[ Info: ExpandTemplates: expanding markdown templates.
+[ Info: CrossReferences: building cross-references.
+[ Info: CheckDocument: running document checks.
+[ Info: Populate: populating indices.
+[ Info: RenderDocument: rendering document.
+[ Info: DocumenterVitepress: rendering MarkdownVitepress pages.
+┌ Warning: Documenter could not auto-detect the building environment. Skipping deployment.
+└ @ Documenter ~/.julia/packages/Documenter/13nbQ/src/deployconfig.jl:95
+Copied: /home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/centering-refresh-render-v1/build/.documenter/components/AuthorBadge.vue
+Copied: /home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/centering-refresh-render-v1/build/.documenter/components/Authors.vue
+Copied: /home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/centering-refresh-render-v1/build/.documenter/components/SidebarDrawerToggle.vue
+Copied: /home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/centering-refresh-render-v1/build/.documenter/components/VersionPicker.vue
+┌ Warning: Cannot extract version for inventory from /home/n/scratch/kb-agent-tmp/Project.toml: no such file
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1472
+┌ Warning: Please set `inventory_version` in the `MarkdownVitepress()` options passed to `makedocs`.
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1481
+fatal: not a git repository (or any of the parent directories): .git
+[ Info: DocumenterVitepress: could not get git tags, assuming no tagged releases exist.
+[ Info: Bases that will be built: [""]
+[ Info: DocumenterVitepress: Did not detect `docs/src/.vitepress/mathjax-plugin.ts` file. Substituting in the default file.
+[ Info: DocumenterVitepress: Did not detect `docs/src/.vitepress/julia-repl-transformer.ts` file. Substituting in the default file.
+[ Info: DocumenterVitepress: Did not detect `docs/src/.vitepress/theme/docstrings.css` file. Substituting in the default file.
+[ Info: DocumenterVitepress: Did not detect `docs/src/.vitepress/theme/overrides.css` file. Substituting in the default file.
+[ Info: Base is "" and ENV["CI"] is not set so this is a local build. Not adding any additional base prefix based on the repository or deploy url and instead using absolute path "/" to facilitate serving docs locally.
+┌ Warning: DocumenterVitepress: No logo.png file found in `docs/src/assets`.  Skipping logo replacement.
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/vitepress_config.jl:154
+┌ Warning: DocumenterVitepress: No favicon.ico file found in `docs/src/assets`.  Skipping favicon replacement.
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/vitepress_config.jl:172
+┌ Info: DocumenterVitepress: did not build Vitepress site because `build_vitepress` was set to `false`.
+│ You can view it yourself by running the following in the `docs` folder:
+│ ```
+│ npm run docs:dev
+│ ```
+│ and if you haven't run `npm` in this repo before, install all packages by running `npm install`.
+│ 
+└ All emitted markdown can be found in `/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/centering-refresh-render-v1/build/.documenter`.
+[ Info: DocumenterVitepress: running `vitepress build`.
+┌ Warning: DocumenterVitepress: Did not find `docs/package.json` in your repository.  Substituting default for now.
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/vitepress_interface.jl:35
+
+up to date, audited 185 packages in 1s
+
+49 packages are looking for funding
+  run `npm fund` for details
+
+4 vulnerabilities (3 moderate, 1 high)
+
+To address all issues (including breaking changes), run:
+  npm audit fix --force
+
+Run `npm audit` for details.
+
+> env
+> env vitepress build build/.documenter
+
+
+  vitepress v1.6.4
+
+- building client + server bundles...
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+[32m✓[0m building client + server bundles...
+- rendering pages...
+[32m✓[0m rendering pages...
+build complete in 3.02s.
+FOUR_PAGE_RENDER_COMPLETE
+[kb-run-compact] exit=0 elapsed=112s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.CSVuv0

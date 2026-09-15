@@ -49,14 +49,14 @@ substitute the different residual model discussed later in the thread.
 
 Writing $x_n$ for load, $s_n$ for numeric subject ID, and $j[n]$ for its group,
 
-$$
+```math
 y_n\sim N(\mu_n,\sigma_n^2),\qquad
 \mu_n=\beta_0+\beta_1(x_n-\bar x)+a_{j[n]}+b_{j[n]}x_n,
-$$
+```
 
-$$
+```math
 \log\sigma_n=\gamma_0+\gamma_1(s_n-\bar s).
-$$
+```
 
 Here $\bar x$ and $\bar s$ are observation-weighted means. Fixed-effect load is
 centered by brms; random-effect load uses the raw predictor. The priors are:
@@ -78,9 +78,9 @@ runs are retained separately; they are not mixed into the main table.
 
 Define the complete subject-specific coefficients
 
-$$
+```math
 A_j=\beta_0-\bar x\beta_1+a_j,\qquad B_j=\beta_1+b_j.
-$$
+```
 
 The likelihood becomes $\mu_n=A_{j[n]}+B_{j[n]}x_n$. Instead of sampling the
 two population coefficients and 40 deviations, integrate out the two
@@ -90,32 +90,32 @@ superfluous direction.
 
 For the Student-t intercept use the exact scale mixture
 
-$$
+```math
 \lambda\sim\operatorname{Gamma}(3/2,\text{rate}=3/2),\qquad
 \beta_0\mid\lambda\sim N(m,s^2/\lambda),
 \quad m=5651.9,\ s=2026.1.
-$$
+```
 
 The fitted target retains $\eta=\log\lambda$; the population coefficients
 are integrated analytically conditional on it. Let
 
-$$
+```math
 \bar A=J^{-1}\sum_j A_j,\quad \bar B=J^{-1}\sum_j B_j,\quad
 Q_A=\sum_j(A_j-\bar A)^2,\quad Q_B=\sum_j(B_j-\bar B)^2,
-$$
+```
 
-$$
+```math
 h=\bar A+\bar x\bar B-m,\qquad
 V=s^2/\lambda+(\tau_a^2+\bar x^2\tau_b^2)/J.
-$$
+```
 
 Up to constants independent of all parameters, the induced log prior is
 
-$$
+```math
 -(J-1)(\log\tau_a+\log\tau_b)
 -\frac{Q_A}{2\tau_a^2}-\frac{Q_B}{2\tau_b^2}
 -\frac12\log V-\frac{h^2}{2V}.
-$$
+```
 
 The implementation includes normalization constants, hyperpriors, the mixture
 prior and log-transform Jacobians. Evaluating this prior and its gradient is
@@ -133,9 +133,9 @@ original coordinates. Original parameters remain recoverable conditionally.
 
 For each total coefficient $q_j$, use the independently specified family
 
-$$
+```math
 r_j(c_j)=c_jm_j+(q_j-m_j)\tau_{k(j)}^{c_j-1},\qquad 0\le c_j\le1,
-$$
+```
 
 where $m_j=5651.9$ for an intercept total and zero for a slope total;
 $\tau_{k(j)}$ is the corresponding group SD. These are fixed reference
@@ -153,18 +153,18 @@ $a_j/\tau_a$ and $b_j/\tau_b$ alongside the population coefficients.
 
 The **position/Jacobian loss** minimizes, separately for each of the 40 total coordinates,
 
-$$
+```math
 L_j(c)=\log\operatorname{sd}_{\mathrm{pilot}}(r_j(c))
        +\operatorname{mean}_{\mathrm{pilot}}[(1-c)\log\tau_{k(j)}],
-$$
+```
 
 The second term is the inverse log-Jacobian contribution. The
 **position–gradient loss** instead minimizes
 
-$$
+```math
 L_j^{\mathrm{grad}}(c)=\operatorname{Corr}_{\mathrm{pilot}}
 \left(r_j(c),\frac{\partial\log\pi_c(r)}{\partial r_j}\right),
-$$
+```
 
 where $\pi_c$ is the density in the candidate source coordinates, including
 the change-of-variable determinant. Neither criterion directly optimizes ESS.
@@ -208,10 +208,10 @@ intercept scale $s\sqrt{3u}$, equivalent to our $\lambda=1/(3u)$.
 For auto, the branch supplies fixed group/term weights $\rho_{jk}$ from its
 own Pathfinder precursor and likelihood-Fisher calculation. Its transform is
 
-$$
+```math
 d_j=1-\rho_j+\rho_j\tau,\qquad
 w_j=\tau(Qz)_j/d_j,\qquad r_j=w_j-\bar w.
-$$
+```
 
 For this Gaussian model, the Fisher calculation accumulates within-subject
 design information weighted by inverse residual variance, computes local
@@ -250,8 +250,8 @@ Each completed fit has **one chain, seed 1 and 2,000 retained draws**.
 - **WHMC:** WarmupHMC commit `deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2`,
   Julia 1.10.11, default adaptive warmup and Pathfinder initialization,
   `monitor_ess=true`, `nonlinear_adapt=false`, retained-draw floor 2,000.
-  The three added arms (post-hoc gradient and both online losses) use the
-  tested local active-state transport fix `d9eeaac2c092b80aba3ef5d608261faea9b81265`.
+  The post-hoc gradient and both online arms use the
+  active-state transport implementation `d9eeaac2c092b80aba3ef5d608261faea9b81265`.
   The two online arms enable `nonlinear_adapt`; all other rows leave it disabled.
 - **Initialization:** ordinary and total-coefficient fits start from the same
   physical per-subject OLS coefficients and scales. The S2Z fits use pooled
@@ -384,28 +384,28 @@ Both exact marginalizations permit recovery of the original population
 coefficients and subject deviations. For our representation, condition on
 the totals, scales and mixture precision. Let
 
-$$
+```math
 C=\frac1J\begin{pmatrix}
 \tau_a^2+\bar x^2\tau_b^2 & \bar x\tau_b^2\\
 \bar x\tau_b^2 & \tau_b^2
 \end{pmatrix},\quad v_0=s^2/\lambda,\quad M=\bar A+\bar x\bar B.
-$$
+```
 
 Then the population coefficients have a two-dimensional Gaussian conditional
 with mean
 
-$$
+```math
 \mu_0=m+\frac{v_0}{v_0+C_{00}}(M-m),\qquad
 \mu_1=\bar B+\frac{C_{01}}{v_0+C_{00}}(m-M)
-$$
+```
 
 and covariance
 
-$$
+```math
 \Sigma_{00}=\frac{v_0C_{00}}{v_0+C_{00}},\quad
 \Sigma_{01}=\frac{v_0C_{01}}{v_0+C_{00}},\quad
 \Sigma_{11}=C_{11}-\frac{C_{01}^2}{v_0+C_{00}}.
-$$
+```
 
 After drawing $(\beta_0,\beta_1)$, recover
 $a_j=A_j-\beta_0+\bar x\beta_1$ and $b_j=B_j-\beta_1$.
@@ -418,19 +418,19 @@ To see why, write a recovered quantity as
 $X_t=m(S_t)+\epsilon_t$, where recovery noise has conditional mean zero and is
 drawn independently across iterations. Then
 
-$$
+```math
 \operatorname{Var}(X)=\operatorname{Var}(m(S))+
 E[\operatorname{Var}(X\mid S)],\quad
 \operatorname{Cov}(X_t,X_{t+k})=\operatorname{Cov}(m(S_t),m(S_{t+k}))\quad(k>0).
-$$
+```
 
 Added recovery variance dilutes positive autocorrelation and can raise ESS.
 Yet for estimating a posterior mean,
 
-$$
+```math
 \operatorname{Var}(\bar X)=\operatorname{Var}(\overline{m(S)})+
 E[\operatorname{Var}(X\mid S)]/N.
-$$
+```
 
 The conditional-mean (Rao–Blackwell) estimate therefore avoids that added
 Monte Carlo noise. This is not invalid posterior recovery; it is a reason to
@@ -464,7 +464,7 @@ Ordinary brms CP/NCP and our recovery conditional have separate audits.
 
 The online arms preserve the physical active position when the centering
 coordinates change and reevaluate its density and gradient in the new frame.
-The Student-t runs use WarmupHMC's tested implementation published as
+The online Student-t runs use WarmupHMC's implementation published as
 [`6b377cb`](https://github.com/nsiccha/WarmupHMC.jl/commit/6b377cb23934022af5879d199a7c57abfac54c70).
 Both online losses have zero divergences in 2,000 retained Student-t draws.
 Separate Gaussian sensitivity fits also have zero divergences with both losses.
@@ -484,9 +484,9 @@ Pinned sources:
 - brms 2.23.1, source commit `73cf607889879cb2a55f50b88d8141d76ff43279` from the PR branch.
 - WarmupHMC commit `deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2`; Julia 1.10.11;
   CmdStan 2.39.0 and CmdStanR 0.9.0.
-  The three added Student-t arms use local fix `d9eeaac2c092b80aba3ef5d608261faea9b81265`.
+  The post-hoc gradient and both online Student-t arms use `d9eeaac2c092b80aba3ef5d608261faea9b81265`.
 - Research code and saved-result manifest: `research/pupil_total_effects/`
-  in the working BayesianRegressionModels repository, snapshot **170ff4d**.
+  in the working BayesianRegressionModels repository, snapshot **170ff4df07cbfc7f6d91fffc4b7adf6cfb6b66aa**.
 
 What remains unestablished is a replicated ranking across seeds/chains,
 matched-initialization performance across all representations, controlled wall

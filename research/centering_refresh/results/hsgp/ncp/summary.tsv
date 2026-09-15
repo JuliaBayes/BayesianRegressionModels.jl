@@ -1,0 +1,2 @@
+case	arm	qois	draws	min_bulk_ess	limiting_qoi	min_tail_ess	max_split_rhat	divergences	sampling_gradients	all_fit_gradients	pilot_gradients	total_gradients	sampling_efficiency	total_efficiency
+hsgp	ncp	192	10000	2705.5983168315984	hsgp_x_sigma	2159.834239494888	1.0009156413293598	99	2583577	4648422	0	4648422	0.0010472296033102936	0.0005820466207309918

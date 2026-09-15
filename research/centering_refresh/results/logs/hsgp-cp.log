@@ -1,0 +1,30 @@
+┌ Warning: Initialization failed the 1-th time, trying again...
+└ @ WarmupHMC ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/src/adaptive_warmup_mcmc.jl:23
+┌ Warning: Initialization failed the 2-th time, trying again...
+└ @ WarmupHMC ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/src/adaptive_warmup_mcmc.jl:23
+┌ Warning: Pathfinder failed after 1 tries. Increase `ntries`, inspect the model for numerical instability, or provide a more suitable `init_sampler`.
+└ @ Pathfinder ~/.julia/packages/Pathfinder/4L3jq/src/singlepath.jl:213
+┌ Warning: Initialization failed the 3-th time, trying again...
+└ @ WarmupHMC ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/src/adaptive_warmup_mcmc.jl:23
+┌ Warning: Initialization failed the 4-th time, trying again...
+└ @ WarmupHMC ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/src/adaptive_warmup_mcmc.jl:23
+┌ Warning: Initialization failed the 5-th time, trying again...
+└ @ WarmupHMC ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/src/adaptive_warmup_mcmc.jl:23
+┌ Warning: Initialization failed the 6-th time, trying again...
+└ @ WarmupHMC ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/src/adaptive_warmup_mcmc.jl:23
+BOUNDARY	hsgp	cp	init	window=0	all_gradients=147
+BOUNDARY	hsgp	cp	window	window=1	all_gradients=1524
+BOUNDARY	hsgp	cp	window	window=2	all_gradients=3612
+BOUNDARY	hsgp	cp	window	window=3	all_gradients=7957
+BOUNDARY	hsgp	cp	window	window=4	all_gradients=16181
+BOUNDARY	hsgp	cp	window	window=5	all_gradients=32300
+BOUNDARY	hsgp	cp	window	window=6	all_gradients=65205
+BOUNDARY	hsgp	cp	window	window=7	all_gradients=129418
+BOUNDARY	hsgp	cp	window	window=8	all_gradients=257597
+BOUNDARY	hsgp	cp	window	window=9	all_gradients=513705
+BOUNDARY	hsgp	cp	window	window=10	all_gradients=1025945
+BOUNDARY	hsgp	cp	window	window=11	all_gradients=2050326
+BOUNDARY	hsgp	cp	window	window=12	all_gradients=4098553
+BOUNDARY	hsgp	cp	window	window=13	all_gradients=4933469
+CASE_ARM_COMPLETE	(case = "hsgp", arm = "cp", qois = 192, draws = 10000, min_bulk_ess = 67.87976972130106, limiting_qoi = "hsgp_log_sigma_x_rho_iso", min_tail_ess = 27.367335402889683, max_split_rhat = 1.0202515892650341, divergences = 707, sampling_gradients = 2860905, all_fit_gradients = 4933469, pilot_gradients = 0, total_gradients = 4933469, sampling_efficiency = 2.3726677300120438e-5, total_efficiency = 1.3759034407898592e-5)
+[kb-run-compact] exit=0 elapsed=257s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.D3H4NG

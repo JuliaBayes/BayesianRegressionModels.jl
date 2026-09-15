@@ -1,0 +1,5 @@
+(node:7) [UNDICI-WS] Warning: WebSockets are experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[{"page":"adaptive-centering","efficiencyRows":[6],"displayMath":1,"brokenImages":[],"selected":["turing"],"mobile":{"width":390,"scrollWidth":390}},{"page":"eight-schools-centering","efficiencyRows":[6],"displayMath":2,"brokenImages":[],"selected":["turing"],"mobile":{"width":390,"scrollWidth":390}},{"page":"radon-centering","efficiencyRows":[6],"displayMath":1,"brokenImages":[],"selected":["turing"],"mobile":{"width":390,"scrollWidth":390}},{"page":"pupil-centering","efficiencyRows":[15],"displayMath":16,"brokenImages":[],"selected":[],"mobile":{"width":390,"scrollWidth":390}}]
+FOUR_PAGE_BROWSER_COMPLETE
+[kb-run-compact] exit=0 elapsed=11s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.HXVJfk

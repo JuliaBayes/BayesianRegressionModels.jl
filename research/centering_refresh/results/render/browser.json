@@ -1,0 +1,111 @@
+[
+  {
+    "page": "adaptive-centering",
+    "before": {
+      "title": "Adaptive HSGP centering | BayesianRegressionModels.jl",
+      "panes": [
+        "BRM authoring",
+        "StanBlocks model",
+        "Stan source",
+        "Turing model"
+      ],
+      "brokenImages": [],
+      "mathErrors": [],
+      "displayMath": 1,
+      "efficiencyTables": [
+        6
+      ],
+      "sidebar": " Sidebar Navigation HomeFormula termsLikelihoodsFeature atlasWarfarin PK/PDWastewater RtCDC ww-inferenceGrey-seal IPMAdaptive centeringMotorcycle HSGPEight schoolsRadonPupil: exact marginalizationTuring backendFormulas and custom models: deckGalleryAPI",
+      "width": 1440,
+      "scrollWidth": 1440
+    },
+    "selected": [
+      "turing"
+    ],
+    "mobile": {
+      "width": 390,
+      "scrollWidth": 390
+    },
+    "exceptions": []
+  },
+  {
+    "page": "eight-schools-centering",
+    "before": {
+      "title": "Eight schools and the choice of centering | BayesianRegressionModels.jl",
+      "panes": [
+        "BRM authoring",
+        "StanBlocks model",
+        "Stan source",
+        "Turing model"
+      ],
+      "brokenImages": [],
+      "mathErrors": [],
+      "displayMath": 2,
+      "efficiencyTables": [
+        6
+      ],
+      "sidebar": " Sidebar Navigation HomeFormula termsLikelihoodsFeature atlasWarfarin PK/PDWastewater RtCDC ww-inferenceGrey-seal IPMAdaptive centeringMotorcycle HSGPEight schoolsRadonPupil: exact marginalizationTuring backendFormulas and custom models: deckGalleryAPI",
+      "width": 1440,
+      "scrollWidth": 1440
+    },
+    "selected": [
+      "turing"
+    ],
+    "mobile": {
+      "width": 390,
+      "scrollWidth": 390
+    },
+    "exceptions": []
+  },
+  {
+    "page": "radon-centering",
+    "before": {
+      "title": "Adaptive radon centering | BayesianRegressionModels.jl",
+      "panes": [
+        "BRM authoring",
+        "StanBlocks model",
+        "Stan source",
+        "Turing model"
+      ],
+      "brokenImages": [],
+      "mathErrors": [],
+      "displayMath": 1,
+      "efficiencyTables": [
+        6
+      ],
+      "sidebar": " Sidebar Navigation HomeFormula termsLikelihoodsFeature atlasWarfarin PK/PDWastewater RtCDC ww-inferenceGrey-seal IPMAdaptive centeringMotorcycle HSGPEight schoolsRadonPupil: exact marginalizationTuring backendFormulas and custom models: deckGalleryAPI",
+      "width": 1440,
+      "scrollWidth": 1440
+    },
+    "selected": [
+      "turing"
+    ],
+    "mobile": {
+      "width": 390,
+      "scrollWidth": 390
+    },
+    "exceptions": []
+  },
+  {
+    "page": "pupil-centering",
+    "before": {
+      "title": "Pupil model: exact marginalization, centering and sampler comparisons | BayesianRegressionModels.jl",
+      "panes": [],
+      "brokenImages": [],
+      "mathErrors": [],
+      "displayMath": 16,
+      "efficiencyTables": [
+        15
+      ],
+      "sidebar": " Sidebar Navigation HomeFormula termsLikelihoodsFeature atlasWarfarin PK/PDWastewater RtCDC ww-inferenceGrey-seal IPMAdaptive centeringMotorcycle HSGPEight schoolsRadonPupil: exact marginalizationTuring backendFormulas and custom models: deckGalleryAPI",
+      "width": 1440,
+      "scrollWidth": 1440
+    },
+    "selected": [],
+    "mobile": {
+      "width": 390,
+      "scrollWidth": 390
+    },
+    "exceptions": []
+  }
+]

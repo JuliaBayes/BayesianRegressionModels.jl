@@ -1,0 +1,8 @@
+┌ Warning: Rejected centering update: nonfinite coordinate transport; retaining previous coordinates
+│   bad_positions = 0
+│   bad_gradients = 3
+└ @ WarmupHMC ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-finite-transport-fix/src/Reparametrizations.jl:1188
+Test Summary:                                          | Pass  Total  Time
+captured HSGP invalid transport is rejected atomically |    8      8  5.5s
+CAPTURED_HSGP_REJECTION_AUDIT_COMPLETE
+[kb-run-compact] exit=0 elapsed=88s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.GX1rDC

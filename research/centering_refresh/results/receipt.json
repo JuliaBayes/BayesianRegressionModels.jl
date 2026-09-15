@@ -1,0 +1,509 @@
+{
+  "completed_fits": 18,
+  "retained_draws_each": 10000,
+  "chain_count_each": 1,
+  "seed_each": 1,
+  "published_active_state_fix": "6b377cb23934022af5879d199a7c57abfac54c70",
+  "finite_transport_fix": "7aed40b18bd4cdabb75330f285d5c9b355575ab9",
+  "stages": {
+    "eight-ncp": {
+      "exit": 0,
+      "elapsed_seconds": 135,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.mICQy7",
+      "retained_log": "logs/eight-ncp.log",
+      "sha256": "bf278cfe5137a87c70c61fa36e8a429126b99744e831c3596eeaf3cf85bb872b"
+    },
+    "radon-ncp": {
+      "exit": 0,
+      "elapsed_seconds": 207,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.EdJsco",
+      "retained_log": "logs/radon-ncp.log",
+      "sha256": "bc4d0d1a53d0a507ae988d040eb3bb98a508638622e51733cd01c629cc7367b0"
+    },
+    "hsgp-ncp": {
+      "exit": 0,
+      "elapsed_seconds": 365,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.By9qr6",
+      "retained_log": "logs/hsgp-ncp.log",
+      "sha256": "f24e7130d0a61014f3d81644565b6a851bef931157264525da90af69f996779b"
+    },
+    "eight-other-five": {
+      "exit": 0,
+      "elapsed_seconds": 231,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.x2iYMB",
+      "retained_log": "logs/eight-other-five.log",
+      "sha256": "c3283a23b011433a6214221130226129372d3dc4c0b9adec47428f2899fe0358"
+    },
+    "radon-other-five": {
+      "exit": 0,
+      "elapsed_seconds": 873,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.t1sVat",
+      "retained_log": "logs/radon-other-five.log",
+      "sha256": "208a03acdb2b0017852238db504e44104c65de7310b6ee221411a9f959c0bb16"
+    },
+    "hsgp-first-batch-with-failure": {
+      "exit": 1,
+      "elapsed_seconds": 317,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.i1kdMT",
+      "retained_log": "logs/hsgp-first-batch-with-failure.log",
+      "sha256": "9d25b1be7ccc2760de7d69bf1c59c17e49e13d40bd1ee2718607205caab261cb"
+    },
+    "hsgp-cp": {
+      "exit": 0,
+      "elapsed_seconds": 257,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.D3H4NG",
+      "retained_log": "logs/hsgp-cp.log",
+      "sha256": "f695b857a7278999b6bf0330cc00ad1f6efbde7708ff53d4322ca107550b4a14"
+    },
+    "hsgp-final-online-gradient": {
+      "exit": 0,
+      "elapsed_seconds": 191,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.kfqRlm",
+      "retained_log": "logs/hsgp-final-online-gradient.log",
+      "sha256": "ed2d9dc7987d9e00765d1a67ec86be14fda35d9a284a7c1282d3a0e84e3cab89"
+    },
+    "eight-source-audit": {
+      "exit": 0,
+      "elapsed_seconds": 124,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.IG10M5",
+      "retained_log": "logs/eight-source-audit.log",
+      "sha256": "df7fdbe7589b69ebb00f8b3cec419d707787e18c8d006131185414ed0cc92f91"
+    },
+    "radon-source-audit": {
+      "exit": 0,
+      "elapsed_seconds": 80,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.Xmc7vo",
+      "retained_log": "logs/radon-source-audit.log",
+      "sha256": "4a6bf3903c21c80c5c333a60881f7eaff26ac92fce7aa0fba3ef27faef89293c"
+    },
+    "hsgp-source-audit": {
+      "exit": 0,
+      "elapsed_seconds": 82,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.cYuJHW",
+      "retained_log": "logs/hsgp-source-audit.log",
+      "sha256": "bf5f3b7e3ac830f87d25ea55f07569ac33f44f0b8b1ae9d53039e804a57687ee"
+    },
+    "eight-final-export": {
+      "exit": 0,
+      "elapsed_seconds": 96,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.oqU9gK",
+      "retained_log": "logs/eight-final-export.log",
+      "sha256": "2aa3cd4f2897d1b04c97b2e9df388e5206e20e93fa1fe4fb59bbc1f5439459f3"
+    },
+    "radon-final-export": {
+      "exit": 0,
+      "elapsed_seconds": 356,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.deBlA6",
+      "retained_log": "logs/radon-final-export.log",
+      "sha256": "52cb6de9acfd2f80906a4d4cd088e220fa81594c3e67ef855b072de52e88ebd3"
+    },
+    "hsgp-final-export": {
+      "exit": 0,
+      "elapsed_seconds": 120,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.hxhKYL",
+      "retained_log": "logs/hsgp-final-export.log",
+      "sha256": "a48d2d8920809cff3317b1c0a7b179d262f9cbcf61dfa02bcc4a1d06da0365d9"
+    },
+    "package-state-and-rejection-regressions": {
+      "exit": 0,
+      "elapsed_seconds": 32,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.yvKwFK",
+      "retained_log": "logs/package-state-and-rejection-regressions.log",
+      "sha256": "c36b6c099e241dfefe89af87c1eb510f6ea4c99004207202629a75fdf81f2342"
+    },
+    "package-reparametrization-and-invariant-scoring": {
+      "exit": 0,
+      "elapsed_seconds": 27,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.I2osG3",
+      "retained_log": "logs/package-reparametrization-and-invariant-scoring.log",
+      "sha256": "9798cf2b529cd1f684c1ac79266f55dac23d87b0cc31e4d8641d425555f0f677"
+    },
+    "captured-hsgp-rejection-audit": {
+      "exit": 0,
+      "elapsed_seconds": 88,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.GX1rDC",
+      "retained_log": "logs/captured-hsgp-rejection-audit.log",
+      "sha256": "fc0403b91aa4d177c1369a508e416edb7dc69689dff5e87e5062c85481e734c7"
+    },
+    "hsgp-original-boundary-audit": {
+      "exit": 0,
+      "elapsed_seconds": 101,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.lB9hw7",
+      "retained_log": "logs/hsgp-original-boundary-audit.log",
+      "sha256": "94ab5550e89ecdd0f0f3e9714de093fa2eb46847a0cd856e85aa3bc4291f7b9f"
+    },
+    "radon-boundary-audit": {
+      "exit": 0,
+      "elapsed_seconds": 117,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.vE9BuB",
+      "retained_log": "logs/radon-boundary-audit.log",
+      "sha256": "cd928d63e06962d0a51af6ffed1c2783fd9d176dc5bba68f71505b6521037631"
+    },
+    "raw-capsules-first-eighteen": {
+      "exit": 0,
+      "elapsed_seconds": 771,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.5g5hY0",
+      "retained_log": "logs/raw-capsules-first-eighteen.log",
+      "sha256": "ea96fe17b647c77408c0ce4e4fa9f4ea2640afcac7c17056ad9e783aefbc45fe"
+    },
+    "raw-capsules-final-addition": {
+      "exit": 0,
+      "elapsed_seconds": 5,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.L8POO2",
+      "retained_log": "logs/raw-capsules-final-addition.log",
+      "sha256": "edddeffc51a59f008fdf0a936683a1b00adb4c6e55611b3f5fce6e826ef9b03d"
+    },
+    "hsgp-final-plots": {
+      "exit": 0,
+      "elapsed_seconds": 80,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.oFBxzb",
+      "retained_log": "logs/hsgp-final-plots.log",
+      "sha256": "839f86d1545c88bb2cea7fc44272c2eeb407bff3c04e47798ea5f8f0d3bb6f1e"
+    },
+    "eight-final-plots": {
+      "exit": 0,
+      "elapsed_seconds": 66,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.wHwoXD",
+      "retained_log": "logs/eight-final-plots.log",
+      "sha256": "0eb799196553b7a8c3454f8a50722484000fedbb5a006d6291a300d0519c64c7"
+    },
+    "radon-final-plots": {
+      "exit": 0,
+      "elapsed_seconds": 61,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.n66UYu",
+      "retained_log": "logs/radon-final-plots.log",
+      "sha256": "2b4b759e43198430a55513ba6a1b0dc849a26e742fb75109760f001c3c18361f"
+    },
+    "full-documenter-and-vitepress-initial": {
+      "exit": 0,
+      "elapsed_seconds": 1840,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.5RTFt9",
+      "retained_log": "logs/full-documenter-and-vitepress-initial.log",
+      "sha256": "177152c82f6ca71791fdf763b42c5be4918fed1e42ee7a7c727e39e1e45cdd02"
+    },
+    "final-four-page-documenter": {
+      "exit": 0,
+      "elapsed_seconds": 112,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.CSVuv0",
+      "retained_log": "logs/final-four-page-documenter.log",
+      "sha256": "492927c3e9e4222dc5d257c7323d932eacfcce088ab7eec745d522351be63e5b"
+    },
+    "final-full-site-vitepress-with-math": {
+      "exit": 0,
+      "elapsed_seconds": 14,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.vtPzRt",
+      "retained_log": "logs/final-full-site-vitepress-with-math.log",
+      "sha256": "87a97a1f53eaefff5dfe540f877e0f460f958c7e737a15093f361344ba881305"
+    },
+    "final-desktop-mobile-browser": {
+      "exit": 0,
+      "elapsed_seconds": 11,
+      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.HXVJfk",
+      "retained_log": "logs/final-desktop-mobile-browser.log",
+      "sha256": "9f1d0f3420bfc054fa0346424325f28e1c04ec2be5e45bf40535818ba8a12a17"
+    }
+  },
+  "fits": [
+    {
+      "case": "eight",
+      "arm": "ncp",
+      "qois": 10,
+      "draws": 10000,
+      "warmuphmc": "d9eeaac2c092b80aba3ef5d608261faea9b81265",
+      "total_gradients": 70276,
+      "sampling_gradients": 68688,
+      "min_bulk_ess": 4839.400320780729,
+      "divergences": 1,
+      "driver_sha256": "e922431976cb5b0353227f3902cc454738086c1299997c6a70086b6a03f32c65"
+    },
+    {
+      "case": "eight",
+      "arm": "cp",
+      "qois": 10,
+      "draws": 10000,
+      "warmuphmc": "d9eeaac2c092b80aba3ef5d608261faea9b81265",
+      "total_gradients": 174583,
+      "sampling_gradients": 170284,
+      "min_bulk_ess": 166.8721498172109,
+      "divergences": 39,
+      "driver_sha256": "2399599cf78a6231f419005663f208b35188010c1f4025c5c92a5b4482115d42"
+    },
+    {
+      "case": "eight",
+      "arm": "posthoc_position",
+      "qois": 10,
+      "draws": 10000,
+      "warmuphmc": "d9eeaac2c092b80aba3ef5d608261faea9b81265",
+      "total_gradients": 141296,
+      "sampling_gradients": 69476,
+      "min_bulk_ess": 5380.203333230999,
+      "divergences": 0,
+      "driver_sha256": "2399599cf78a6231f419005663f208b35188010c1f4025c5c92a5b4482115d42"
+    },
+    {
+      "case": "eight",
+      "arm": "posthoc_gradient",
+      "qois": 10,
+      "draws": 10000,
+      "warmuphmc": "d9eeaac2c092b80aba3ef5d608261faea9b81265",
+      "total_gradients": 158294,
+      "sampling_gradients": 86484,
+      "min_bulk_ess": 3964.5080546891486,
+      "divergences": 0,
+      "driver_sha256": "2399599cf78a6231f419005663f208b35188010c1f4025c5c92a5b4482115d42"
+    },
+    {
+      "case": "eight",
+      "arm": "online_position",
+      "qois": 10,
+      "draws": 10000,
+      "warmuphmc": "d9eeaac2c092b80aba3ef5d608261faea9b81265",
+      "total_gradients": 86499,
+      "sampling_gradients": 84824,
+      "min_bulk_ess": 5350.0713015294195,
+      "divergences": 2,
+      "driver_sha256": "2399599cf78a6231f419005663f208b35188010c1f4025c5c92a5b4482115d42"
+    },
+    {
+      "case": "eight",
+      "arm": "online_gradient",
+      "qois": 10,
+      "draws": 10000,
+      "warmuphmc": "d9eeaac2c092b80aba3ef5d608261faea9b81265",
+      "total_gradients": 104806,
+      "sampling_gradients": 103102,
+      "min_bulk_ess": 4458.254812264295,
+      "divergences": 0,
+      "driver_sha256": "2399599cf78a6231f419005663f208b35188010c1f4025c5c92a5b4482115d42"
+    },
+    {
+      "case": "radon",
+      "arm": "ncp",
+      "qois": 777,
+      "draws": 10000,
+      "warmuphmc": "d9eeaac2c092b80aba3ef5d608261faea9b81265",
+      "total_gradients": 164917,
+      "sampling_gradients": 160352,
+      "min_bulk_ess": 475.9790436725938,
+      "divergences": 0,
+      "driver_sha256": "e922431976cb5b0353227f3902cc454738086c1299997c6a70086b6a03f32c65"
+    },
+    {
+      "case": "radon",
+      "arm": "cp",
+      "qois": 777,
+      "draws": 10000,
+      "warmuphmc": "d9eeaac2c092b80aba3ef5d608261faea9b81265",
+      "total_gradients": 152546,
+      "sampling_gradients": 150000,
+      "min_bulk_ess": 284.75056927026617,
+      "divergences": 0,
+      "driver_sha256": "2399599cf78a6231f419005663f208b35188010c1f4025c5c92a5b4482115d42"
+    },
+    {
+      "case": "radon",
+      "arm": "posthoc_position",
+      "qois": 777,
+      "draws": 10000,
+      "warmuphmc": "d9eeaac2c092b80aba3ef5d608261faea9b81265",
+      "total_gradients": 317186,
+      "sampling_gradients": 150000,
+      "min_bulk_ess": 475.7392254511738,
+      "divergences": 0,
+      "driver_sha256": "2399599cf78a6231f419005663f208b35188010c1f4025c5c92a5b4482115d42"
+    },
+    {
+      "case": "radon",
+      "arm": "posthoc_gradient",
+      "qois": 777,
+      "draws": 10000,
+      "warmuphmc": "d9eeaac2c092b80aba3ef5d608261faea9b81265",
+      "total_gradients": 319385,
+      "sampling_gradients": 150000,
+      "min_bulk_ess": 600.4614078382747,
+      "divergences": 0,
+      "driver_sha256": "2399599cf78a6231f419005663f208b35188010c1f4025c5c92a5b4482115d42"
+    },
+    {
+      "case": "radon",
+      "arm": "online_position",
+      "qois": 777,
+      "draws": 10000,
+      "warmuphmc": "d9eeaac2c092b80aba3ef5d608261faea9b81265",
+      "total_gradients": 154539,
+      "sampling_gradients": 150000,
+      "min_bulk_ess": 375.2566752306822,
+      "divergences": 0,
+      "driver_sha256": "2399599cf78a6231f419005663f208b35188010c1f4025c5c92a5b4482115d42"
+    },
+    {
+      "case": "radon",
+      "arm": "online_gradient",
+      "qois": 777,
+      "draws": 10000,
+      "warmuphmc": "d9eeaac2c092b80aba3ef5d608261faea9b81265",
+      "total_gradients": 154448,
+      "sampling_gradients": 150000,
+      "min_bulk_ess": 330.8176595050066,
+      "divergences": 0,
+      "driver_sha256": "2399599cf78a6231f419005663f208b35188010c1f4025c5c92a5b4482115d42"
+    },
+    {
+      "case": "hsgp",
+      "arm": "ncp",
+      "qois": 192,
+      "draws": 10000,
+      "warmuphmc": "d9eeaac2c092b80aba3ef5d608261faea9b81265",
+      "total_gradients": 4648422,
+      "sampling_gradients": 2583577,
+      "min_bulk_ess": 2705.5983168315984,
+      "divergences": 99,
+      "driver_sha256": "e922431976cb5b0353227f3902cc454738086c1299997c6a70086b6a03f32c65"
+    },
+    {
+      "case": "hsgp",
+      "arm": "cp",
+      "qois": 192,
+      "draws": 10000,
+      "warmuphmc": "d9eeaac2c092b80aba3ef5d608261faea9b81265",
+      "total_gradients": 4933469,
+      "sampling_gradients": 2860905,
+      "min_bulk_ess": 67.87976972130106,
+      "divergences": 707,
+      "driver_sha256": "2399599cf78a6231f419005663f208b35188010c1f4025c5c92a5b4482115d42"
+    },
+    {
+      "case": "hsgp",
+      "arm": "posthoc_position",
+      "qois": 192,
+      "draws": 10000,
+      "warmuphmc": "d9eeaac2c092b80aba3ef5d608261faea9b81265",
+      "total_gradients": 5123265,
+      "sampling_gradients": 468959,
+      "min_bulk_ess": 2784.4308139561454,
+      "divergences": 55,
+      "driver_sha256": "2399599cf78a6231f419005663f208b35188010c1f4025c5c92a5b4482115d42"
+    },
+    {
+      "case": "hsgp",
+      "arm": "posthoc_gradient",
+      "qois": 192,
+      "draws": 10000,
+      "warmuphmc": "d9eeaac2c092b80aba3ef5d608261faea9b81265",
+      "total_gradients": 5134664,
+      "sampling_gradients": 475461,
+      "min_bulk_ess": 3110.0903283401835,
+      "divergences": 43,
+      "driver_sha256": "2399599cf78a6231f419005663f208b35188010c1f4025c5c92a5b4482115d42"
+    },
+    {
+      "case": "hsgp",
+      "arm": "online_position",
+      "qois": 192,
+      "draws": 10000,
+      "warmuphmc": "d9eeaac2c092b80aba3ef5d608261faea9b81265",
+      "total_gradients": 2263320,
+      "sampling_gradients": 2235380,
+      "min_bulk_ess": 4516.948548053981,
+      "divergences": 6,
+      "driver_sha256": "2399599cf78a6231f419005663f208b35188010c1f4025c5c92a5b4482115d42"
+    },
+    {
+      "case": "hsgp",
+      "arm": "online_gradient",
+      "qois": 192,
+      "draws": 10000,
+      "warmuphmc": "7aed40b18bd4cdabb75330f285d5c9b355575ab9",
+      "total_gradients": 713602,
+      "sampling_gradients": 455207,
+      "min_bulk_ess": 2967.8559179840227,
+      "divergences": 12,
+      "driver_sha256": "2399599cf78a6231f419005663f208b35188010c1f4025c5c92a5b4482115d42"
+    }
+  ],
+  "raw_capsules": 19,
+  "limitations": [
+    "Single-chain comparisons",
+    "HSGP and some eight-schools arms have sampling divergences",
+    "17 completed fits use the first state fix; final HSGP online-gradient also uses the finite-transport guard",
+    "Targeted package checks, not a full WarmupHMC test-suite run"
+  ],
+  "files": {
+    "docs/src/adaptive-centering.md": "7a8d32aa9011fd9158b7e3995cc136baac11af6547c43c92f5b338a7d3de6302",
+    "docs/src/assets/centering-refresh-eight/centeredness.png": "77139920394e08aba381744a7b3f3fd80380b5031d97f7c3d6375f7b9f17c547",
+    "docs/src/assets/centering-refresh-eight/efficiency.png": "159c789189aaad09849c6cf97cd26e5e49a0188097eabc8ec7420eb3f279bbb3",
+    "docs/src/assets/centering-refresh-eight/gradients-online-school-effects.png": "03382402e9945830c5e9a0c471f7b7bebfe777511899993e63913d09065adfa1",
+    "docs/src/assets/centering-refresh-eight/gradients-posthoc-school-effects.png": "7302d4d3c7bea98a2456c4f0d980b86d1b43993b4e7c5c0814ec5e7015c514dd",
+    "docs/src/assets/centering-refresh-eight/pairs-online-school-effects.png": "bdc9335bd53babfaa0384cc80b95d5ffa30fe7335e8923e17147ea9a3491b747",
+    "docs/src/assets/centering-refresh-eight/pairs-pilot-school-effects.png": "2662a9d10c5c6ee5a5ad0599412b03ec9c172417d9e32fca53378ace068369e4",
+    "docs/src/assets/centering-refresh-eight/pairs-posthoc-school-effects.png": "a1b2117ff9c0b4d8d9aa1a3ea7043ae949acfa1d9e9bfdba83ef006f11317b20",
+    "docs/src/assets/centering-refresh-eight/posterior-effects.png": "e47e94ee4d8e423f12bf13410341035ea4484b0bae92ed29243d8ba25cfb347e",
+    "docs/src/assets/centering-refresh-eight/ppc.png": "fc868616832a534516a58587cad19b5910b2c31f38b7ee9ae239983661ab0f5d",
+    "docs/src/assets/centering-refresh-hsgp/centeredness.png": "ab6bd9265e632cb69ee2adaa098233711dd0ddce99655c68cd13410d1c9873f0",
+    "docs/src/assets/centering-refresh-hsgp/efficiency.png": "37f0d9975eb2c399c2544531d190f1690d07d2b1339d50ace70ee957fcb860b2",
+    "docs/src/assets/centering-refresh-hsgp/gradients-online-log-sd-gp.png": "a1eb66fb46e24c9a79eb6fa16504821036710f0930369fcb002a34d915d3f736",
+    "docs/src/assets/centering-refresh-hsgp/gradients-online-mean-gp.png": "574735a240adbb478864f5e686a8adb4f05eb8dfcdc15c21706df38a0359714f",
+    "docs/src/assets/centering-refresh-hsgp/gradients-posthoc-log-sd-gp.png": "3ad7d7b0713219d95fbdab6bc6e9836bb47e086a83874fcab448154ba44d5454",
+    "docs/src/assets/centering-refresh-hsgp/gradients-posthoc-mean-gp.png": "af55492b1d5c3b76eab47f9c54cd57619c4a60c5556390df7671e10528ca4662",
+    "docs/src/assets/centering-refresh-hsgp/pairs-online-log-sd-gp.png": "98db332e6bbef5f5866a1fafcd0451d041412a70972963ba4a910a7835037e05",
+    "docs/src/assets/centering-refresh-hsgp/pairs-online-mean-gp.png": "c7fbd6365f72861193561516ac9f65fd90ea31660674fd9241015036eb609376",
+    "docs/src/assets/centering-refresh-hsgp/pairs-pilot-log-sd-gp.png": "f41b5317c7d35f4186efb5aca24ed47383b77925b496c4d1f196d53e90f90aa5",
+    "docs/src/assets/centering-refresh-hsgp/pairs-pilot-mean-gp.png": "f6fadf853c97137cc7e8d02b55f1a85a2ba974aa8b518dcd76cb1a0691476c28",
+    "docs/src/assets/centering-refresh-hsgp/pairs-posthoc-log-sd-gp.png": "0638bc39c2330969a4f66ae94e4a895ce449ceba9e5fe48309a5fa0f048fb2cd",
+    "docs/src/assets/centering-refresh-hsgp/pairs-posthoc-mean-gp.png": "1e3b232cfa55169b60c73af737164abd56d516fad7561c11fc0d54e200e9197f",
+    "docs/src/assets/centering-refresh-hsgp/posterior-ncp.png": "1d1d056158b2c0a0e52def41ab10cb442e5bd1a1f1cd3b1ff2aaf1a5b6a6886e",
+    "docs/src/assets/centering-refresh-hsgp/posterior-online-gradient.png": "32ce8e4f9e8daa69936735dc84f99497ef317e4f3f3e2f902bd7b6a0e684df9e",
+    "docs/src/assets/centering-refresh-hsgp/posterior-online-position.png": "bb569e4290e94cbf5c263492aba70dcbf9657c7cadcbc7f09cf1b20549fb1929",
+    "docs/src/assets/centering-refresh-hsgp/posterior-post-hoc-gradient.png": "9cd4a20086153b19822aa3c26247768ca2b574bfb4d6bfef457c7f20fc286b8f",
+    "docs/src/assets/centering-refresh-hsgp/posterior-post-hoc-position.png": "ead4547f3b59e0b19f8f30828042e72a8065636882198b624089a71a4811ce05",
+    "docs/src/assets/centering-refresh-radon/centeredness.png": "24128ee931dfaf81206f7b72cd6696c2f350cb558096c2778f7c06c00a242df1",
+    "docs/src/assets/centering-refresh-radon/efficiency.png": "f4ae7836fab59e7b6e5eef006b3e2479e56fcfd2bec26686164f55048dd32bb8",
+    "docs/src/assets/centering-refresh-radon/gradients-online-county-intercepts.png": "cf9746e3b46fd2356b5911b3449dbbe6d1cfbac50543e0d34da75804324befbc",
+    "docs/src/assets/centering-refresh-radon/gradients-online-county-slopes.png": "e75a1064b30fee223c40c35c75f9f768221d2f387127a45dce8533079e3e13e0",
+    "docs/src/assets/centering-refresh-radon/gradients-posthoc-county-intercepts.png": "ca440ff6cd8188e1450beb96328b9178ac3e2a96f703d594dfc1cef7186e4883",
+    "docs/src/assets/centering-refresh-radon/gradients-posthoc-county-slopes.png": "0ae93e8b958da82800dd94b302dc061c3f236c692a82d724f3a08bfd9dae38a8",
+    "docs/src/assets/centering-refresh-radon/pairs-online-county-intercepts.png": "3fdc967848aaed31ed16511c5bf54a4440625f14af9c2a8f96de9246b3284ccb",
+    "docs/src/assets/centering-refresh-radon/pairs-online-county-slopes.png": "0c385eb32fba2f5fa07cafa7b27690ea9ffb13ed1e42ab682ef7bd9e22e615dc",
+    "docs/src/assets/centering-refresh-radon/pairs-pilot-county-intercepts.png": "c751de7b5ae0aa8712a3e532210cbfefcec35ef2714080e156ce252b6637f2eb",
+    "docs/src/assets/centering-refresh-radon/pairs-pilot-county-slopes.png": "aca7056e0e65ac8fb535c5b5d7051070ffc50c2f91d1e1bdfc3831d77a0e277e",
+    "docs/src/assets/centering-refresh-radon/pairs-posthoc-county-intercepts.png": "450bcf75205d3a42e9ada4d5136cfe72c16cfa963d2ef415e296b87d695a819b",
+    "docs/src/assets/centering-refresh-radon/pairs-posthoc-county-slopes.png": "2108d0152c899d44a7375693cf03f31636a39bac90d32b9de081beed7165ea04",
+    "docs/src/assets/centering-refresh-radon/ppc.png": "ed976fc7d26d266e76602904b9d65071e6ed9b940898386d337f3803fcbc3463",
+    "docs/src/eight-schools-centering.md": "ef0828b19cff3206484122ccb44e57fd93f6cd20084a253ad786ddc1fac5771b",
+    "docs/src/pupil-centering.md": "a13838607dcc20b4fd6181e2bf4c143c14b91b0538362757c992c57dcb7fd0dc",
+    "docs/src/radon-centering.md": "763d7eb016a0478a80fdca772fd2a218596340ca71c9fef9de585410072921f9",
+    "research/centering_refresh/analyze_transport.jl": "7299c5f594a2add5ee3af2d2bf1735493e82784cc3832514e82005e50ce5b685",
+    "research/centering_refresh/archive_fits.py": "449984a5ad21447fd4445396b3b1b329ad3c53c13cc3b442720be3de652b0ca3",
+    "research/centering_refresh/audit_boundaries.jl": "fcc56997eafa49a91d39ae98d61e6ee910d90ed63cc62f8c46faea83867f5d29",
+    "research/centering_refresh/audit_rejection.jl": "af27e47c0c459128457a6dbdeb9c6586c990e5b46f24db296f076c522d704150",
+    "research/centering_refresh/capture_transport.jl": "0bc1fb3008f4bd002169fd103281a77013ea4994f433305ebb6c84668c64fad9",
+    "research/centering_refresh/export.jl": "3e5eb4a374f05805088596af8b60e47e16271e21b51fd0ff011cdea9d1573aeb",
+    "research/centering_refresh/inspect_failure.jl": "0d6ff7b5f16ad95dd8961e1e900fef4bc60caaef0fac55026478eda8c42cbc72",
+    "research/centering_refresh/plot.jl": "ecece5d1829b1e775fe1520f668ba13a78b8782322a5ce34c18c9b60f88e68a0",
+    "research/centering_refresh/refresh_pages.py": "9a3127c649a83c0921dcaf4534a9e153fe91c8a344b150ccdc59d2ad2af04f37",
+    "research/centering_refresh/replay_failure.jl": "9ed89fd75b0fb7b7cfa5cfdc25690f52a4d303ce9d62b7bfa00db64759d98b01",
+    "research/centering_refresh/run.jl": "2399599cf78a6231f419005663f208b35188010c1f4025c5c92a5b4482115d42",
+    "research/centering_refresh/summarize.py": "79707a889eb5f30e92499ba3c023c57578b41fb84c667e10bfc37f59ad511e94",
+    "docs/src/.vitepress/config.mts": "5f29d6fc25a199eb672c30f53ddf7432f15a010bb80cad7159e7c9023b410398",
+    "docs/package.json": "16799c1c8b5fa253198e371dabdccf3ffae8d6e0bc92c673b27d915ba7c785ed",
+    "docs/make.jl": "2c7e16857c268a3c8e6a356cbfe288d5f6ea862057e84b56c77b220565da62e7",
+    "docs/src/index.md": "9216046213865ed95e8dc3d6c74e9360f1dfca9b6cfe563440228b05cb405bf8",
+    "test/Project.toml": "8293b6117920f5e89e2a908aafc2d9c4729be20e27ff623dfbf3610bc04d3bc2",
+    "research/pupil_total_effects/build_brief.py": "8c49bf78f71d7b68b79f9a690291977650c8bb3f0653dff35277027c8732f61e",
+    "research/centering_refresh/results/render/npm-lock.snapshot.json": "39b229356f5205ef860e19249afe3d4229ff260a5f34672d24e4e1eb9a1252fc"
+  },
+  "render": {
+    "sequence": [
+      "Full site Documenter/VitePress passed on initial snapshot",
+      "Four final page sources parsed and generated backend panels validated",
+      "Final generated four pages copied into full site; final PNGs copied; math:true applied to generated config",
+      "Full site VitePress rebuilt with the committed npm dependency set",
+      "Four pages passed browser tables, math, images, navigation and mobile-width checks"
+    ],
+    "exact_frozen_ci_environment": false,
+    "environment_note": "Local docs helper develops local dependency checkouts; this is local rendering acceptance, not a frozen CI-dependency claim.",
+    "math_reference": "https://vuejs.github.io/vitepress/v1/guide/markdown#math-equations",
+    "browser_log": "logs/final-desktop-mobile-browser.log",
+    "browser_detail": "render/browser.json"
+  }
+}

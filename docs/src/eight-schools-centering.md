@@ -56,8 +56,7 @@ end
 The tabs show generated backends. The fits below use StanBlocks/BridgeStan
 and WarmupHMC. Independent comparisons with PosteriorDB's centered Stan
 program verify the density and all ten gradient components, including the
-coordinate Jacobian. At 16 retained noncentered draws, the maximum absolute
-errors are `7.11e-15` in density and `1.78e-14` in a gradient component.
+coordinate Jacobian. The independent audit is retained with the source model.
 
 ## Choose fully centered coordinates manually
 
@@ -76,7 +75,7 @@ centered_sb = SBBRMI(model;
 ```
 
 We can also choose the same endpoint through the centering controls. This
-lets all four fits below share one compiled noncentered density:
+lets all six fits below share one compiled noncentered density:
 
 ```julia
 using Random, Enzyme, WarmupHMC, BridgeStan
@@ -115,29 +114,19 @@ WarmupHMC returns **model coordinates** in `posterior_position`, including
 when centering is fixed. Its checkpoints retain sampler coordinates. The
 checkpoint-to-model mapping is checked independently before summarizing fits.
 
-[![Centered and noncentered coordinates of the same pilot draws, paired for all eight schools](assets/adaptive-eight-schools/centered_vs_noncentered.png)](assets/adaptive-eight-schools/centered_vs_noncentered.png)
-
-Both columns use the noncentered pilot's 10,000 retained draws. The left
-column transforms them to `u = tau*z`; the right shows `z`. This isolates
-the change of coordinates. The centered column reveals the narrowing as
-`tau` approaches zero. Vertical scales are independent; horizontal scales
-are shared. Centered coordinates remain the visual reference in the later
-scatter plots. The sampling and cost baseline remains the noncentered fit.
 
 ## Posterior effects and predictive checks
 
-[![Posterior treatment effects from the noncentered and fully centered fits](assets/adaptive-eight-schools/posterior_theta.png)](assets/adaptive-eight-schools/posterior_theta.png)
+Thin intervals contain 90% of draws and thick intervals 50%. Each school is
+a category with its own interval. Treatment effects are $\theta_j=\mu+\tau z_j$.
 
-Thin intervals contain 90% of the posterior draws and thick intervals contain
-50%. Schools are categories, so each has a separate interval. These are
-summaries of `theta = mu + tau*z`, in treatment-effect units.
+[![School treatment effects from NCP and CP fits](assets/centering-refresh-eight/posterior-effects.png)](assets/centering-refresh-eight/posterior-effects.png)
 
-[![Observed estimates over individual posterior predictive intervals](assets/adaptive-eight-schools/posterior_predictive_check.png)](assets/adaptive-eight-schools/posterior_predictive_check.png)
+The predictive check uses the NCP fit and includes the known standard error
+of each reported estimate. Red points are the observations in their original
+school order. There are no ribbons between categorical schools.
 
-This check uses the noncentered fit. Blue intervals summarize replicated
-reported estimates, including their known standard errors; red points are
-the observed estimates. The school order is the original data order.
-
+[![Replicated-estimate intervals and observed school estimates](assets/centering-refresh-eight/ppc.png)](assets/centering-refresh-eight/ppc.png)
 ## Select centering from a pilot
 
 An offline rule evaluates each school on a grid `c = 0:0.01:1`:
@@ -163,110 +152,120 @@ partial_fit = WarmupHMC.adaptive_warmup_mcmc(
     n_draws=10_000, monitor_ess=true, nonlinear_adapt=false)
 ```
 
-[![Offline centering objective for each school](assets/adaptive-eight-schools/offline_loss_profiles.png)](assets/adaptive-eight-schools/offline_loss_profiles.png)
 
-Each curve is rescaled to `[0,1]` for display. Selection uses the unscaled
-objective. The selected values are `0.01, 0.06, 0.03, 0.05, 0.06, 0.05, 0.03, 0.02`:
-all are close to noncentering, as expected with weak information per school.
+## Both losses, post-hoc and online
 
-## Adapt centering during warmup
+For a zero-mean random effect with log scale $\ell$, the centering family is
+$u_c=\exp(c\ell)z$: $c=0$ is NCP and $c=1$ is CP. Its transformed effect
+gradient is $g_c=\exp(-c\ell)g_z$. We compare two criteria, minimized separately
+for each effect:
 
-Online adaptation chooses the coordinates during a single fit:
-
-```julia
-adaptive = adaptive_centering_problem(sb, problem, backend)
-online_fit = WarmupHMC.adaptive_warmup_mcmc(
-    Xoshiro(1), adaptive; n_draws=10_000, monitor_ess=true)
-learned = [last(pair).c for pair in WarmupHMC.reparam_sources(adaptive)]
+```math
+L_{\mathrm{position}}(c)=\log\operatorname{sd}(u_c)-\operatorname{mean}(c\ell),
+\qquad
+L_{\mathrm{gradient}}(c)=\operatorname{cor}(u_c,g_c).
 ```
 
-[![Offline and online selected centering, by school](assets/adaptive-eight-schools/selected_centeredness.png)](assets/adaptive-eight-schools/selected_centeredness.png)
+The second is a **signed** correlation: an independent Gaussian coordinate
+has correlation $-1$ with its log-density gradient. The first uses positions
+and the Jacobian, without a gradient term.
 
-Online adaptation selected `0.1` for Schools 2, 5 and 6, and `0.0` for the
-others. The following curves evaluate its position–gradient correlation
-objective retrospectively on the same 10,000 pilot draws, with unit weights.
-They describe that common reference sample, rather than a recorded warmup
-trajectory.
+Both post-hoc arms use the same NCP pilot, select on `0:0.01:1`, then fit
+afresh with the controls fixed. The gradient selector uses the pilot's saved
+gradients. Both online arms select on the native `0:0.1:1` grid during warmup,
+using the sampler's trajectory evidence and weights. They have no separate
+pilot. Controls are frozen for the retained sampling phase.
 
-[![Online correlation objective evaluated on the noncentered pilot](assets/adaptive-eight-schools/online_loss.png)](assets/adaptive-eight-schools/online_loss.png)
+The online gradient criterion is WarmupHMC's default. The research harness
+selects the position criterion through the existing internal loss functions;
+there is currently no public loss-selection keyword. The model, initialization
+policy, seed and requested draw count are otherwise shared across the arms.
 
-[![Centered pilot reference beside offline-selected and online-selected fit coordinates](assets/adaptive-eight-schools/selected_vs_online.png)](assets/adaptive-eight-schools/selected_vs_online.png)
+These runs use the active-position transport implementation published in
+[WarmupHMC `6b377cb`](https://github.com/nsiccha/WarmupHMC.jl/commit/6b377cb23934022af5879d199a7c57abfac54c70).
+When centering changes, the active position and the adaptation sample now
+represent the same physical points before and after the change.
 
-The centered column reuses the transformed pilot. The other columns show the
-fresh offline-selected and online fits in their respective sampling coordinates.
+WarmupHMC returns **model coordinates** in `posterior_position`; checkpoints
+retain sampler coordinates. Export checks their mapping, Jacobian-adjusted
+density and saved gradients before making figures or scientific summaries.
 
-## Sampling diagnostics and cost
+[![Centering selected with both losses, post-hoc and online](assets/centering-refresh-eight/centeredness.png)](assets/centering-refresh-eight/centeredness.png)
 
-Each fit uses one chain, `Xoshiro(1)`, 10,000 retained draws, ordinary
-WarmupHMC initialization and adaptation defaults, one Julia thread and one
-BLAS thread. The fully centered and offline-selected fits freeze centering;
-the online fit adapts it.
+Both criteria favor coordinates close to noncentering in this weakly informed hierarchy.
 
-| Fit | Min bulk ESS | Min tail ESS | Max split R-hat | Divergences |
-|:--|--:|--:|--:|--:|
-| Noncentered | 4,839 | 3,565 | 1.0011 | 1 (0.01%) |
-| Fully centered | 167 | 85 | 1.0022 | 39 (0.39%) |
-| Selected partial | 5,380 | 3,518 | 1.0010 | 0 (0.00%) |
-| Online | 6,437 | 4,518 | 1.0010 | 5 (0.05%) |
+## Sampling efficiency and full workflow cost
 
-The ESS minima and maximum rank-normalized split R-hat cover all ten
-unconstrained **model coordinates**: `mu`, `log(tau)` and `z[1:8]`.
-A split R-hat from one chain checks agreement between parts of that chain;
-it cannot establish convergence across independent chains. Divergences
-indicate numerical problems that the ESS values alone do not describe.
+Each completed arm has one chain, seed 1 and 10,000 retained draws. Every row
+uses the same scientific quantities: **population mean, group SD and eight school treatment effects (10 quantities)**. Standardized effects
+are excluded from the minimum. Positive scales may be stored as logs;
+rank-normalized bulk ESS is invariant under that monotone change.
 
-| Fit | Total gradients | Sampling gradients | Bulk ESS / total gradient | Bulk ESS / sampling gradient | Time: median (range) |
-|:--|--:|--:|--:|--:|:--|
-| Noncentered | 70,220 | 68,688 | 0.06892 | 0.07045 | 0.325 s (0.283–0.325) |
-| Fully centered | 174,269 | 170,284 | 0.00096 | 0.00098 | 0.749 s (0.747–0.787) |
-| Selected partial | 70,980 | 69,476 | 0.07580 | 0.07744 | 0.354 s (0.344–0.401) |
-| Online | 70,854 | 69,328 | 0.09085 | 0.09285 | 0.833 s (0.811–0.849) |
+| WHMC method | Total gradients | Sampling efficiency | Total efficiency |
+|:--|--:|--:|--:|
+| NCP | 70,276 | 1× | 1× |
+| CP | 174,583 | 0.0139× | 0.0139× |
+| Post-hoc position | 141,296 | 1.1× | 0.553× |
+| Post-hoc gradient | 158,294 | 0.651× | 0.364× |
+| Online position | 86,499 | 0.895× | 0.898× |
+| Online gradient | 104,806 | 0.614× | 0.618× |
 
-**Timing protocol.** Complete priming fits exercise the plain, fixed-centering
-and adaptive call paths before measurement. The table reports the median and
-range of three complete fits per method, reversing their order in the second
-repetition. Every measured fit recorded zero Julia compilation time and the
-same gradient counts across repetitions. The sampler call includes
-initialization, warmup, retained sampling and checkpoint I/O; Stan compilation,
-model setup, offline selection and plotting are outside it.
 
-The priming calls took 23.32 s for noncentering and 25.34 s for fixed centering,
-of which Julia compilation accounted for 23.01 s and 24.55 s respectively.
-The online priming call took 0.96 s, including 0.06 s of compilation.
-These startup costs are recorded separately from repeated-fit times.
+Both efficiency columns are relative to this study's **NCP + WarmupHMC**
+baseline. Sampling efficiency is minimum bulk ESS divided by retained-sampling
+gradient calls. Total efficiency divides that same minimum ESS by the full
+workflow's gradient calls. The total includes initialization, all warmup and
+adaptation, active-state reevaluations, and sampling. For each post-hoc row it
+also includes the entire NCP pilot; the pilot's ESS is not added to the refit's.
 
-Total gradient counts cover NUTS warmup and discarded epochs as well as the
-retained sample; they exclude Pathfinder and other initialization work.
-Sampling counts cover transitions contributing retained draws. ESS per
-sampling gradient measures the retained phase; ESS per total gradient charges
-for NUTS adaptation too.
+Gradient counts measure target evaluations, a proxy for compute cost rather
+than a wall-clock speed ratio. Compilation, plotting and independent audits
+are outside the fitting counts. The complete numerical summaries, including
+absolute ESS and both denominators, are in the linked result files.
 
-The offline workflow must pay for its pilot: **141,200 total gradients**
-(70,220 + 70,980). Its retained refit's ESS divided by that total is
-**0.03810 bulk ESS per gradient**. The noncentered baseline is already efficient here; a selected
-refit's per-fit improvement does not by itself justify the pilot cost.
-Online adaptation uses a similar number of gradients to the baseline, but
-its wrapper and adaptation add wall time. Full centering is less efficient
-for this weakly informed model.
+Sampling divergences: **NCP: 1; CP: 39; Post-hoc position: 0; Post-hoc gradient: 0; Online position: 2; Online gradient: 0**. These are one-chain comparisons, so neither
+the ranking nor a within-chain split R-hat establishes cross-chain convergence.
 
-## Gradients in the displayed coordinates
+[![Full gradient cost and the two relative sampling efficiencies](assets/centering-refresh-eight/efficiency.png)](assets/centering-refresh-eight/efficiency.png)
 
-[![Centered and noncentered position–gradient panels from the same pilot](assets/adaptive-eight-schools/gradient_centered_vs_noncentered.png)](assets/adaptive-eight-schools/gradient_centered_vs_noncentered.png)
+The position-loss post-hoc refit modestly improves sampling efficiency here, but its pilot makes total efficiency lower than NCP. Full centering has 39 divergences and poor efficiency; its intervals require that qualification.
 
-[![Centered pilot reference beside offline-selected and online position–gradient panels](assets/adaptive-eight-schools/gradient_selected_vs_online.png)](assets/adaptive-eight-schools/gradient_selected_vs_online.png)
+## Geometry of the fitted coordinates
 
-The centered and noncentered panels use the same 1,000 evenly spaced pilot
-draws. Selected and online panels use 1,000 draws from their respective refits.
-The gradient is taken with respect to the displayed coordinate. All displayed values
-are checked against an independent Gaussian likelihood/prior derivative;
-finite differences additionally check three draws per school and method.
+The left column is always the **centered visualization baseline**, obtained
+from the NCP pilot. The pilot comparison uses those same draws in CP and NCP.
+The post-hoc and online panels each show their two newly fitted loss variants
+in the coordinates actually used by the sampler. CP is the visual reference;
+NCP remains the efficiency baseline. Axes are independent across panels.
 
-## Reproduce the study
+[![School effects: CP and NCP pilot coordinates](assets/centering-refresh-eight/pairs-pilot-school-effects.png)](assets/centering-refresh-eight/pairs-pilot-school-effects.png)
 
-The model, immutable reference files, full-run driver, checkpoint extraction,
-validation and native AlgebraOfVega plotting code live in
-[`research/eight_schools_centering`](https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/eight_schools_centering).
-Its README gives the commands. The committed result tables record source and
-dependency hashes, diagnostics, centering choices, exact costs, timing
-repetitions and coordinate checks. All figures are generated from the saved
-full fits.
+[![School effects: CP reference and both post-hoc losses](assets/centering-refresh-eight/pairs-posthoc-school-effects.png)](assets/centering-refresh-eight/pairs-posthoc-school-effects.png)
+
+[![School effects: CP reference and completed online losses](assets/centering-refresh-eight/pairs-online-school-effects.png)](assets/centering-refresh-eight/pairs-online-school-effects.png)
+
+## Position and gradient in the displayed coordinates
+
+These panels pair each displayed effect coordinate with its own log-density
+gradient, using 1,000 evenly spaced retained draws. The CP reference transforms
+the pilot's positions and gradients together. The fitted panels use gradients
+saved in their actual sampler frame; they do not attach an NCP gradient to a
+centered position.
+
+[![School effects: positions and gradients, posthoc](assets/centering-refresh-eight/gradients-posthoc-school-effects.png)](assets/centering-refresh-eight/gradients-posthoc-school-effects.png)
+
+[![School effects: positions and gradients, online](assets/centering-refresh-eight/gradients-online-school-effects.png)](assets/centering-refresh-eight/gradients-online-school-effects.png)
+
+## Reproduce and inspect
+
+The [refresh harness](https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/centering_refresh)
+contains the driver, both loss selectors, saved-frame audits, export and AoV
+plotting code. Its [results for this study](https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/centering_refresh/results/eight)
+contain the full efficiency denominators, per-quantity ESS and selected controls.
+The original model directory retains the source specification and independent
+density/gradient audit. The refresh uses those same model definitions.
+
+Run `run.jl eight ncp OUTPUT` first, then request
+`cp,posthoc_position,posthoc_gradient,online_position,online_gradient` with the
+same output root. Completed arm directories are immutable. See the harness
+README for the environment and full commands.

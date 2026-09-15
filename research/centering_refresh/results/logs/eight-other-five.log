@@ -1,0 +1,119 @@
+BOUNDARY	eight	posthoc_position	init	window=0	all_gradients=40
+BOUNDARY	eight	posthoc_position	window	window=1	all_gradients=1044
+BOUNDARY	eight	posthoc_position	window	window=2	all_gradients=3049
+BOUNDARY	eight	posthoc_position	window	window=3	all_gradients=7052
+BOUNDARY	eight	posthoc_position	window	window=4	all_gradients=15053
+BOUNDARY	eight	posthoc_position	window	window=5	all_gradients=31058
+BOUNDARY	eight	posthoc_position	window	window=6	all_gradients=63061
+BOUNDARY	eight	posthoc_position	window	window=7	all_gradients=71020
+CASE_ARM_COMPLETE	(case = "eight", arm = "posthoc_position", qois = 10, draws = 10000, min_bulk_ess = 5380.203333230999, limiting_qoi = "log_tau", min_tail_ess = 3517.8694135275596, max_split_rhat = 1.0001336118047743, divergences = 0, sampling_gradients = 69476, all_fit_gradients = 71020, pilot_gradients = 70276, total_gradients = 141296, sampling_efficiency = 0.07743973938095168, total_efficiency = 0.03807753463106528)
+BOUNDARY	eight	posthoc_gradient	init	window=0	all_gradients=39
+BOUNDARY	eight	posthoc_gradient	window	window=1	all_gradients=1040
+BOUNDARY	eight	posthoc_gradient	window	window=2	all_gradients=3041
+BOUNDARY	eight	posthoc_gradient	window	window=3	all_gradients=7046
+BOUNDARY	eight	posthoc_gradient	window	window=4	all_gradients=15046
+BOUNDARY	eight	posthoc_gradient	window	window=5	all_gradients=31049
+BOUNDARY	eight	posthoc_gradient	window	window=6	all_gradients=63055
+BOUNDARY	eight	posthoc_gradient	window	window=7	all_gradients=88018
+CASE_ARM_COMPLETE	(case = "eight", arm = "posthoc_gradient", qois = 10, draws = 10000, min_bulk_ess = 3964.5080546891486, limiting_qoi = "log_tau", min_tail_ess = 3154.8258330236745, max_split_rhat = 1.0005157255380945, divergences = 0, sampling_gradients = 86484, all_fit_gradients = 88018, pilot_gradients = 70276, total_gradients = 158294, sampling_efficiency = 0.045840942309434675, total_efficiency = 0.025045220000057794)
+BOUNDARY	eight	online_position	init	window=0	all_gradients=56
+┌ Error: tsvd(...) failed, falling back to eigen(cov(...))
+│   size(g) = (1, 974)
+│   exception =
+│    LAPACKException(2)
+│    Stacktrace:
+│      [1] chklapackerror
+│        @ ~/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/LinearAlgebra/src/lapack.jl:40 [inlined]
+│      [2] bdsdc!(uplo::Char, compq::Char, d::Vector{Float64}, e_::Vector{Float64})
+│        @ LinearAlgebra.LAPACK ~/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/LinearAlgebra/src/lapack.jl:5738
+│      [3] #svd!#206
+│        @ ~/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/LinearAlgebra/src/bidiag.jl:241 [inlined]
+│      [4] svd!
+│        @ ~/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/LinearAlgebra/src/bidiag.jl:240 [inlined]
+│      [5] svd(M::Bidiagonal{Float64, Vector{Float64}}; kw::@Kwargs{})
+│        @ LinearAlgebra ~/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/LinearAlgebra/src/bidiag.jl:245
+│      [6] svd
+│        @ ~/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/LinearAlgebra/src/bidiag.jl:244 [inlined]
+│      [7] biLanczos(A::SubArray{Float64, 2, ElasticArrays.ElasticMatrix{Float64, Vector{Float64}}, Tuple{Vector{Int64}, Base.Slice{Base.OneTo{Int64}}}, false}, nvals::Int64; maxiter::Int64, initvec::Vector{Float64}, tolconv::Float64, tolreorth::Float64, stepsize::Int64, debug::Bool)
+│        @ TSVD ~/.julia/packages/TSVD/JLekd/src/svd.jl:175
+│      [8] biLanczos
+│        @ ~/.julia/packages/TSVD/JLekd/src/svd.jl:108 [inlined]
+│      [9] _tsvd(A::SubArray{Float64, 2, ElasticArrays.ElasticMatrix{Float64, Vector{Float64}}, Tuple{Vector{Int64}, Base.Slice{Base.OneTo{Int64}}}, false}, nvals::Int64; maxiter::Int64, initvec::Vector{Float64}, tolconv::Float64, tolreorth::Float64, stepsize::Int64, debug::Bool)
+│        @ TSVD ~/.julia/packages/TSVD/JLekd/src/svd.jl:236
+│     [10] _tsvd
+│        @ ~/.julia/packages/TSVD/JLekd/src/svd.jl:222 [inlined]
+│     [11] #tsvd#7
+│        @ ~/.julia/packages/TSVD/JLekd/src/svd.jl:345 [inlined]
+│     [12] tsvd (repeats 2 times)
+│        @ ~/.julia/packages/TSVD/JLekd/src/svd.jl:335 [inlined]
+│     [13] grad_cov_ev(p::SubArray{Float64, 2, ElasticArrays.ElasticMatrix{Float64, Vector{Float64}}, Tuple{Vector{Int64}, Base.Slice{Base.OneTo{Int64}}}, false}, g::SubArray{Float64, 2, ElasticArrays.ElasticMatrix{Float64, Vector{Float64}}, Tuple{Vector{Int64}, Base.Slice{Base.OneTo{Int64}}}, false})
+│        @ WarmupHMC ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/src/MatrixExpressions.jl:111
+│     [14] update_loss!(t::WarmupHMC.SuccessiveReflections{Float64, Int64}, p::ElasticArrays.ElasticMatrix{Float64, Vector{Float64}}, g::ElasticArrays.ElasticMatrix{Float64, Vector{Float64}}; threshold::Float64, v_f::typeof(WarmupHMC.grad_cov_ev), idx_f::WarmupHMC.var"#14#17", kwargs::@Kwargs{})
+│        @ WarmupHMC ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/src/MatrixExpressions.jl:169
+│     [15] update_loss!
+│        @ ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/src/MatrixExpressions.jl:153 [inlined]
+│     [16] #update_loss!#23
+│        @ ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/src/MatrixExpressions.jl:210 [inlined]
+│     [17] update_loss!
+│        @ ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/src/MatrixExpressions.jl:209 [inlined]
+│     [18] #104
+│        @ ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/src/adaptive_warmup_mcmc.jl:669 [inlined]
+│     [19] map(f::WarmupHMC.var"#104#105"{WarmupHMC.AWMState{ReparametrizedProblem{IndexedReparametrization{Vector{Pair{Int64, Reparametrization{PartiallyCentered{Float64}, PartiallyCentered{Float64}, Tuple{BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringArgument{:location, true}, BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringArgument{:log_scale, true}}}}}}, CountedDensity{StanLogDensityProblems.StanProblem{StanModel, true, @NamedTuple{}}}, ADTypes.AutoEnzyme{EnzymeCore.ReverseMode{false, true, false, EnzymeCore.FFIABI, false, false}, EnzymeCore.Const}, CandidateScoringPlan{BayesianRegressionModelsWarmupHMCExt.var"#14#16"{BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringState{true}}, typeof(BayesianRegressionModelsWarmupHMCExt._score_candidate), BayesianRegressionModelsWarmupHMCExt.var"#15#17"{BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringState{true}}}}, @NamedTuple{}, DynamicHMC.NUTS{Val{:generalized}}, DynamicHMC.DualAveraging{Float64}, Nothing, Xoshiro, WarmupHMC.RecordingPosterior2{ReparametrizedProblem{IndexedReparametrization{Vector{Pair{Int64, Reparametrization{PartiallyCentered{Float64}, PartiallyCentered{Float64}, Tuple{BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringArgument{:location, true}, BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringArgument{:log_scale, true}}}}}}, CountedDensity{StanLogDensityProblems.StanProblem{StanModel, true, @NamedTuple{}}}, ADTypes.AutoEnzyme{EnzymeCore.ReverseMode{false, true, false, EnzymeCore.FFIABI, false, false}, EnzymeCore.Const}, CandidateScoringPlan{BayesianRegressionModelsWarmupHMCExt.var"#14#16"{BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringState{true}}, typeof(BayesianRegressionModelsWarmupHMCExt._score_candidate), BayesianRegressionModelsWarmupHMCExt.var"#15#17"{BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringState{true}}}}, Float64, WarmupHMC.NUTSLeaves{Float64}, WarmupHMC.LimitedRecorder2, Xoshiro}, WarmupHMC.NonlinearRecorder{WarmupHMC.OnlineReparametrizer{Vector{Pair{Int64, WarmupHMC.OnlineReparametrizer{Vector{Pair{PartiallyCentered{Float64}, WarmupHMC.WeightedReparametrizationLoss}}}}}}, Float64}, @NamedTuple{diagonal::Diagonal{Float64, Vector{Float64}}, pathfinder::WarmupHMC.MatrixFactorization{Float64, LowerTriangular{Float64, Matrix{Float64}}, Diagonal{Float64, Vector{Float64}}}, adaptive::WarmupHMC.MatrixFactorization{Float64, WarmupHMC.SuccessiveReflections{Float64, Int64}, Diagonal{Float64, Vector{Float64}}}}, @NamedTuple{diagonal::DynamicHMC.GaussianKineticEnergy{WarmupHMC.MatrixFactorization{Float64, Diagonal{Float64, Vector{Float64}}, Diagonal{Float64, Vector{Float64}}}, WarmupHMC.MatrixInverse{Float64, Diagonal{Float64, Vector{Float64}}}}, pathfinder::DynamicHMC.GaussianKineticEnergy{WarmupHMC.MatrixFactorization{Float64, WarmupHMC.MatrixFactorization{Float64, LowerTriangular{Float64, Matrix{Float64}}, Diagonal{Float64, Vector{Float64}}}, WarmupHMC.MatrixFactorization{Float64, Diagonal{Float64, Vector{Float64}}, UpperTriangular{Float64, Adjoint{Float64, Matrix{Float64}}}}}, WarmupHMC.MatrixFactorization{Float64, WarmupHMC.MatrixInverse{Float64, UpperTriangular{Float64, Adjoint{Float64, Matrix{Float64}}}}, WarmupHMC.MatrixInverse{Float64, Diagonal{Float64, Vector{Float64}}}}}, adaptive::DynamicHMC.GaussianKineticEnergy{WarmupHMC.MatrixFactorization{Float64, WarmupHMC.MatrixFactorization{Float64, WarmupHMC.SuccessiveReflections{Float64, Int64}, Diagonal{Float64, Vector{Float64}}}, WarmupHMC.MatrixFactorization{Float64, Diagonal{Float64, Vector{Float64}}, WarmupHMC.MatrixInverse{Float64, WarmupHMC.SuccessiveReflections{Float64, Int64}}}}, WarmupHMC.MatrixFactorization{Float64, WarmupHMC.SuccessiveReflections{Float64, Int64}, WarmupHMC.MatrixInverse{Float64, Diagonal{Float64, Vector{Float64}}}}}}, OnlineStatsBase.Group{Vector{OnlineStatsBase.Variance{Float64, Float64, OnlineStatsBase.EqualWeight}}, Union{NTuple{10, Number}, NamedTuple{names, R} where R<:NTuple{10, Number}, AbstractVector{<:Number}} where names}, OnlineStatsBase.Group{Vector{OnlineStatsBase.Variance{Float64, Float64, OnlineStatsBase.EqualWeight}}, Union{NTuple{10, Number}, NamedTuple{names, R} where R<:NTuple{10, Number}, AbstractVector{<:Number}} where names}, WarmupHMC.WeightedScaleAdaptation{Float64}, Vector{Float64}, DynamicHMC.EvaluatedLogDensity{Vector{Float64}, Float64}, DynamicHMC.DualAveragingState{Float64}, OnlineStatsBase.Mean{Float64, OnlineStatsBase.EqualWeight}}, WarmupHMC.RecordingPosterior2{ReparametrizedProblem{IndexedReparametrization{Vector{Pair{Int64, Reparametrization{PartiallyCentered{Float64}, PartiallyCentered{Float64}, Tuple{BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringArgument{:location, true}, BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringArgument{:log_scale, true}}}}}}, CountedDensity{StanLogDensityProblems.StanProblem{StanModel, true, @NamedTuple{}}}, ADTypes.AutoEnzyme{EnzymeCore.ReverseMode{false, true, false, EnzymeCore.FFIABI, false, false}, EnzymeCore.Const}, CandidateScoringPlan{BayesianRegressionModelsWarmupHMCExt.var"#14#16"{BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringState{true}}, typeof(BayesianRegressionModelsWarmupHMCExt._score_candidate), BayesianRegressionModelsWarmupHMCExt.var"#15#17"{BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringState{true}}}}, Float64, WarmupHMC.NUTSLeaves{Float64}, WarmupHMC.LimitedRecorder2, Xoshiro}}, t::Tuple{Diagonal{Float64, Vector{Float64}}, WarmupHMC.MatrixFactorization{Float64, LowerTriangular{Float64, Matrix{Float64}}, Diagonal{Float64, Vector{Float64}}}, WarmupHMC.MatrixFactorization{Float64, WarmupHMC.SuccessiveReflections{Float64, Int64}, Diagonal{Float64, Vector{Float64}}}})
+│        @ Base ./tuple.jl:293
+│     [20] map(::Function, ::@NamedTuple{diagonal::Diagonal{Float64, Vector{Float64}}, pathfinder::WarmupHMC.MatrixFactorization{Float64, LowerTriangular{Float64, Matrix{Float64}}, Diagonal{Float64, Vector{Float64}}}, adaptive::WarmupHMC.MatrixFactorization{Float64, WarmupHMC.SuccessiveReflections{Float64, Int64}, Diagonal{Float64, Vector{Float64}}}})
+│        @ Base ./namedtuple.jl:265
+│     [21] run_outer_iteration!(state::WarmupHMC.AWMState{ReparametrizedProblem{IndexedReparametrization{Vector{Pair{Int64, Reparametrization{PartiallyCentered{Float64}, PartiallyCentered{Float64}, Tuple{BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringArgument{:location, true}, BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringArgument{:log_scale, true}}}}}}, CountedDensity{StanLogDensityProblems.StanProblem{StanModel, true, @NamedTuple{}}}, ADTypes.AutoEnzyme{EnzymeCore.ReverseMode{false, true, false, EnzymeCore.FFIABI, false, false}, EnzymeCore.Const}, CandidateScoringPlan{BayesianRegressionModelsWarmupHMCExt.var"#14#16"{BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringState{true}}, typeof(BayesianRegressionModelsWarmupHMCExt._score_candidate), BayesianRegressionModelsWarmupHMCExt.var"#15#17"{BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringState{true}}}}, @NamedTuple{}, DynamicHMC.NUTS{Val{:generalized}}, DynamicHMC.DualAveraging{Float64}, Nothing, Xoshiro, WarmupHMC.RecordingPosterior2{ReparametrizedProblem{IndexedReparametrization{Vector{Pair{Int64, Reparametrization{PartiallyCentered{Float64}, PartiallyCentered{Float64}, Tuple{BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringArgument{:location, true}, BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringArgument{:log_scale, true}}}}}}, CountedDensity{StanLogDensityProblems.StanProblem{StanModel, true, @NamedTuple{}}}, ADTypes.AutoEnzyme{EnzymeCore.ReverseMode{false, true, false, EnzymeCore.FFIABI, false, false}, EnzymeCore.Const}, CandidateScoringPlan{BayesianRegressionModelsWarmupHMCExt.var"#14#16"{BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringState{true}}, typeof(BayesianRegressionModelsWarmupHMCExt._score_candidate), BayesianRegressionModelsWarmupHMCExt.var"#15#17"{BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringState{true}}}}, Float64, WarmupHMC.NUTSLeaves{Float64}, WarmupHMC.LimitedRecorder2, Xoshiro}, WarmupHMC.NonlinearRecorder{WarmupHMC.OnlineReparametrizer{Vector{Pair{Int64, WarmupHMC.OnlineReparametrizer{Vector{Pair{PartiallyCentered{Float64}, WarmupHMC.WeightedReparametrizationLoss}}}}}}, Float64}, @NamedTuple{diagonal::Diagonal{Float64, Vector{Float64}}, pathfinder::WarmupHMC.MatrixFactorization{Float64, LowerTriangular{Float64, Matrix{Float64}}, Diagonal{Float64, Vector{Float64}}}, adaptive::WarmupHMC.MatrixFactorization{Float64, WarmupHMC.SuccessiveReflections{Float64, Int64}, Diagonal{Float64, Vector{Float64}}}}, @NamedTuple{diagonal::DynamicHMC.GaussianKineticEnergy{WarmupHMC.MatrixFactorization{Float64, Diagonal{Float64, Vector{Float64}}, Diagonal{Float64, Vector{Float64}}}, WarmupHMC.MatrixInverse{Float64, Diagonal{Float64, Vector{Float64}}}}, pathfinder::DynamicHMC.GaussianKineticEnergy{WarmupHMC.MatrixFactorization{Float64, WarmupHMC.MatrixFactorization{Float64, LowerTriangular{Float64, Matrix{Float64}}, Diagonal{Float64, Vector{Float64}}}, WarmupHMC.MatrixFactorization{Float64, Diagonal{Float64, Vector{Float64}}, UpperTriangular{Float64, Adjoint{Float64, Matrix{Float64}}}}}, WarmupHMC.MatrixFactorization{Float64, WarmupHMC.MatrixInverse{Float64, UpperTriangular{Float64, Adjoint{Float64, Matrix{Float64}}}}, WarmupHMC.MatrixInverse{Float64, Diagonal{Float64, Vector{Float64}}}}}, adaptive::DynamicHMC.GaussianKineticEnergy{WarmupHMC.MatrixFactorization{Float64, WarmupHMC.MatrixFactorization{Float64, WarmupHMC.SuccessiveReflections{Float64, Int64}, Diagonal{Float64, Vector{Float64}}}, WarmupHMC.MatrixFactorization{Float64, Diagonal{Float64, Vector{Float64}}, WarmupHMC.MatrixInverse{Float64, WarmupHMC.SuccessiveReflections{Float64, Int64}}}}, WarmupHMC.MatrixFactorization{Float64, WarmupHMC.SuccessiveReflections{Float64, Int64}, WarmupHMC.MatrixInverse{Float64, Diagonal{Float64, Vector{Float64}}}}}}, OnlineStatsBase.Group{Vector{OnlineStatsBase.Variance{Float64, Float64, OnlineStatsBase.EqualWeight}}, Union{NTuple{10, Number}, NamedTuple{names, R} where R<:NTuple{10, Number}, AbstractVector{<:Number}} where names}, OnlineStatsBase.Group{Vector{OnlineStatsBase.Variance{Float64, Float64, OnlineStatsBase.EqualWeight}}, Union{NTuple{10, Number}, NamedTuple{names, R} where R<:NTuple{10, Number}, AbstractVector{<:Number}} where names}, WarmupHMC.WeightedScaleAdaptation{Float64}, Vector{Float64}, DynamicHMC.EvaluatedLogDensity{Vector{Float64}, Float64}, DynamicHMC.DualAveragingState{Float64}, OnlineStatsBase.Mean{Float64, OnlineStatsBase.EqualWeight}})
+│        @ WarmupHMC ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/src/adaptive_warmup_mcmc.jl:668
+│     [22] (::WarmupHMC.var"#122#123"{Int64, Int64, Nothing, Int64, Float64, Int64, Missing, Bool, Bool, Nothing, Nothing, Nothing, Float64, Nothing, Nothing, Bool, var"#79#83"{SubString{String}, CountedDensity{StanLogDensityProblems.StanProblem{StanModel, true, @NamedTuple{}}}}, String, @NamedTuple{}, @Kwargs{}, Xoshiro, ReparametrizedProblem{IndexedReparametrization{Vector{Pair{Int64, Reparametrization{PartiallyCentered{Float64}, PartiallyCentered{Float64}, Tuple{BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringArgument{:location, true}, BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringArgument{:log_scale, true}}}}}}, CountedDensity{StanLogDensityProblems.StanProblem{StanModel, true, @NamedTuple{}}}, ADTypes.AutoEnzyme{EnzymeCore.ReverseMode{false, true, false, EnzymeCore.FFIABI, false, false}, EnzymeCore.Const}, CandidateScoringPlan{BayesianRegressionModelsWarmupHMCExt.var"#14#16"{BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringState{true}}, typeof(BayesianRegressionModelsWarmupHMCExt._score_candidate), BayesianRegressionModelsWarmupHMCExt.var"#15#17"{BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringState{true}}}}, Nothing})(progress::Nothing)
+│        @ WarmupHMC ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/src/adaptive_warmup_mcmc.jl:1529
+│     [23] with_progress(::WarmupHMC.var"#122#123"{Int64, Int64, Nothing, Int64, Float64, Int64, Missing, Bool, Bool, Nothing, Nothing, Nothing, Float64, Nothing, Nothing, Bool, var"#79#83"{SubString{String}, CountedDensity{StanLogDensityProblems.StanProblem{StanModel, true, @NamedTuple{}}}}, String, @NamedTuple{}, @Kwargs{}, Xoshiro, ReparametrizedProblem{IndexedReparametrization{Vector{Pair{Int64, Reparametrization{PartiallyCentered{Float64}, PartiallyCentered{Float64}, Tuple{BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringArgument{:location, true}, BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringArgument{:log_scale, true}}}}}}, CountedDensity{StanLogDensityProblems.StanProblem{StanModel, true, @NamedTuple{}}}, ADTypes.AutoEnzyme{EnzymeCore.ReverseMode{false, true, false, EnzymeCore.FFIABI, false, false}, EnzymeCore.Const}, CandidateScoringPlan{BayesianRegressionModelsWarmupHMCExt.var"#14#16"{BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringState{true}}, typeof(BayesianRegressionModelsWarmupHMCExt._score_candidate), BayesianRegressionModelsWarmupHMCExt.var"#15#17"{BayesianRegressionModelsWarmupHMCExt.BRMAdaptiveCenteringState{true}}}}, Nothing}, ::Nothing, ::Vararg{Any}; kwargs::@Kwargs{description::String})
+│        @ Treebars ~/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/test/.bootstrap/treebars-c02aa16ab1b0/src/convenience.jl:9
+│     [24] #adaptive_warmup_mcmc#121
+│        @ ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/src/adaptive_warmup_mcmc.jl:1491 [inlined]
+│     [25] macro expansion
+│        @ ./timing.jl:503 [inlined]
+│     [26] main(ARM::SubString{String})
+│        @ Main ~/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/research/centering_refresh/run.jl:164
+│     [27] #invokelatest#2
+│        @ ./essentials.jl:892 [inlined]
+│     [28] invokelatest
+│        @ ./essentials.jl:889 [inlined]
+│     [29] top-level scope
+│        @ ~/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/research/centering_refresh/run.jl:212
+│     [30] include(mod::Module, _path::String)
+│        @ Base ./Base.jl:495
+│     [31] exec_options(opts::Base.JLOptions)
+│        @ Base ./client.jl:316
+│     [32] _start()
+│        @ Base ./client.jl:550
+└ @ WarmupHMC ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix/src/MatrixExpressions.jl:113
+BOUNDARY	eight	online_position	window	window=1	all_gradients=1059
+BOUNDARY	eight	online_position	window	window=2	all_gradients=3059
+BOUNDARY	eight	online_position	window	window=3	all_gradients=7063
+BOUNDARY	eight	online_position	window	window=4	all_gradients=15073
+BOUNDARY	eight	online_position	window	window=5	all_gradients=31076
+BOUNDARY	eight	online_position	window	window=6	all_gradients=63076
+BOUNDARY	eight	online_position	window	window=7	all_gradients=86499
+CASE_ARM_COMPLETE	(case = "eight", arm = "online_position", qois = 10, draws = 10000, min_bulk_ess = 5350.0713015294195, limiting_qoi = "log_tau", min_tail_ess = 4071.335919394698, max_split_rhat = 1.0005305286494846, divergences = 2, sampling_gradients = 84824, all_fit_gradients = 86499, pilot_gradients = 0, total_gradients = 86499, sampling_efficiency = 0.06307261272198221, total_efficiency = 0.06185125032115307)
+BOUNDARY	eight	online_gradient	init	window=0	all_gradients=56
+BOUNDARY	eight	online_gradient	window	window=1	all_gradients=1059
+BOUNDARY	eight	online_gradient	window	window=2	all_gradients=3062
+BOUNDARY	eight	online_gradient	window	window=3	all_gradients=7065
+BOUNDARY	eight	online_gradient	window	window=4	all_gradients=15070
+BOUNDARY	eight	online_gradient	window	window=5	all_gradients=31071
+BOUNDARY	eight	online_gradient	window	window=6	all_gradients=63072
+BOUNDARY	eight	online_gradient	window	window=7	all_gradients=104806
+CASE_ARM_COMPLETE	(case = "eight", arm = "online_gradient", qois = 10, draws = 10000, min_bulk_ess = 4458.254812264295, limiting_qoi = "log_tau", min_tail_ess = 2896.2003345173366, max_split_rhat = 1.0005520862488324, divergences = 0, sampling_gradients = 103102, all_fit_gradients = 104806, pilot_gradients = 0, total_gradients = 104806, sampling_efficiency = 0.043241205915154846, total_efficiency = 0.04253816396260037)
+┌ Warning: 58 (57.4%) updates to the inverse Hessian estimate were rejected to keep it positive definite.
+└ @ Pathfinder ~/.julia/packages/Pathfinder/4L3jq/src/singlepath.jl:221
+BOUNDARY	eight	cp	init	window=0	all_gradients=314
+BOUNDARY	eight	cp	window	window=1	all_gradients=1319
+BOUNDARY	eight	cp	window	window=2	all_gradients=3537
+BOUNDARY	eight	cp	window	window=3	all_gradients=7541
+BOUNDARY	eight	cp	window	window=4	all_gradients=15555
+BOUNDARY	eight	cp	window	window=5	all_gradients=31560
+BOUNDARY	eight	cp	window	window=6	all_gradients=63574
+BOUNDARY	eight	cp	window	window=7	all_gradients=127575
+BOUNDARY	eight	cp	window	window=8	all_gradients=174583
+CASE_ARM_COMPLETE	(case = "eight", arm = "cp", qois = 10, draws = 10000, min_bulk_ess = 166.8721498172109, limiting_qoi = "log_tau", min_tail_ess = 84.89093478629219, max_split_rhat = 1.0006723774624258, divergences = 39, sampling_gradients = 170284, all_fit_gradients = 174583, pilot_gradients = 0, total_gradients = 174583, sampling_efficiency = 0.000979963765340319, total_efficiency = 0.0009558327547195941)
+[kb-run-compact] exit=0 elapsed=231s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.x2iYMB
