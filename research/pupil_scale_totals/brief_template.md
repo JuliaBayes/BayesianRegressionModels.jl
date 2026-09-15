@@ -95,6 +95,6 @@ The six total fits completed with exit 0; all native fits and final WHMC process
 
 ## Inspectable model, harness and results
 
-The study uses brms revision `73cf607889879cb2a55f50b88d8141d76ff43279`, BRM implementation `54cbe3f` (the same tree landed as `5f30e53`), the repaired WHMC checkout `7aed40b`, CmdStan 2.39.0 and CmdStanR 0.9.0. The data revision is `d90fc01e6f6fcdced7ee64c9d2ed607d212ec77c`. The old pupil docs page is unchanged.
+The study uses brms revision `73cf607889879cb2a55f50b88d8141d76ff43279`, BRM implementation `54cbe3f` (the same tree landed as `5f30e53`), the repaired WHMC checkout `7aed40b`, CmdStan 2.39.0 and CmdStanR 0.9.0. The data revision is `d90fc01e6f6fcdced7ee64c9d2ed607d212ec77c`. Both pupil models now have documentation drafts using the built-in BRM functions; publication is pending.
 
 {{SOURCE_LINKS}}

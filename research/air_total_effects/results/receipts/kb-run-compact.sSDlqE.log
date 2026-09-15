@@ -1,0 +1,57 @@
+Test Summary:                                   | Pass  Total   Time
+Exact AIR target and automatic coordinate audit |   25     25  43.2s
+AIR_AUTOMATIC_AUDIT_COMPLETE cluster_region intercept_only
+BOUNDARY total_ncp init window=0 gradients=124
+BOUNDARY total_ncp window window=1 gradients=1139
+BOUNDARY total_ncp window window=2 gradients=3164
+BOUNDARY total_ncp window window=3 gradients=7174
+BOUNDARY total_ncp window window=4 gradients=15188
+BOUNDARY total_ncp window window=5 gradients=31194
+BOUNDARY total_ncp window window=6 gradients=62909
+AIR_SCIENTIFIC_RESULT (arm = "total_ncp", draws = 2000, min_bulk_ess = 101.01501395708598, limiting_qoi = "group_sd_1", sampling_gradients = 54388, total_gradients = 62909, ess_per_1000_sampling_gradients = 1.8573033381827975, ess_per_1000_total_gradients = 1.6057323110697355, divergences = 6, max_split_rhat = 1.0235930061917362)
+BOUNDARY total_posthoc_position init window=0 gradients=128
+BOUNDARY total_posthoc_position window window=1 gradients=1133
+BOUNDARY total_posthoc_position window window=2 gradients=3137
+BOUNDARY total_posthoc_position window window=3 gradients=7137
+BOUNDARY total_posthoc_position window window=4 gradients=15139
+BOUNDARY total_posthoc_position window window=5 gradients=16013
+AIR_SCIENTIFIC_RESULT (arm = "total_posthoc_position", draws = 2000, min_bulk_ess = 1058.352499675998, limiting_qoi = "region_3_total_intercept", sampling_gradients = 14424, total_gradients = 78922, ess_per_1000_sampling_gradients = 73.37441068191889, ess_per_1000_total_gradients = 13.410107443754567, divergences = 0, max_split_rhat = 1.0016290292231211)
+BOUNDARY total_posthoc_gradient init window=0 gradients=128
+BOUNDARY total_posthoc_gradient window window=1 gradients=1133
+BOUNDARY total_posthoc_gradient window window=2 gradients=3137
+BOUNDARY total_posthoc_gradient window window=3 gradients=7137
+BOUNDARY total_posthoc_gradient window window=4 gradients=15139
+BOUNDARY total_posthoc_gradient window window=5 gradients=16013
+AIR_SCIENTIFIC_RESULT (arm = "total_posthoc_gradient", draws = 2000, min_bulk_ess = 1058.352499675998, limiting_qoi = "region_3_total_intercept", sampling_gradients = 14424, total_gradients = 78922, ess_per_1000_sampling_gradients = 73.37441068191889, ess_per_1000_total_gradients = 13.410107443754567, divergences = 0, max_split_rhat = 1.0016290292231211)
+BOUNDARY total_cp init window=0 gradients=128
+BOUNDARY total_cp window window=1 gradients=1133
+BOUNDARY total_cp window window=2 gradients=3137
+BOUNDARY total_cp window window=3 gradients=7137
+BOUNDARY total_cp window window=4 gradients=15139
+BOUNDARY total_cp window window=5 gradients=16013
+AIR_SCIENTIFIC_RESULT (arm = "total_cp", draws = 2000, min_bulk_ess = 1058.352499675998, limiting_qoi = "region_3_total_intercept", sampling_gradients = 14424, total_gradients = 16013, ess_per_1000_sampling_gradients = 73.37441068191889, ess_per_1000_total_gradients = 66.09333039880084, divergences = 0, max_split_rhat = 1.0016290292231211)
+BOUNDARY total_online_position init window=0 gradients=124
+BOUNDARY total_online_position window window=1 gradients=1140
+BOUNDARY total_online_position window window=2 gradients=3142
+BOUNDARY total_online_position window window=3 gradients=7147
+BOUNDARY total_online_position window window=4 gradients=15151
+BOUNDARY total_online_position window window=5 gradients=16286
+AIR_SCIENTIFIC_RESULT (arm = "total_online_position", draws = 2000, min_bulk_ess = 830.2951807827999, limiting_qoi = "region_3_total_intercept", sampling_gradients = 14698, total_gradients = 16286, ess_per_1000_sampling_gradients = 56.49035112143147, ess_per_1000_total_gradients = 50.98214299292643, divergences = 0, max_split_rhat = 1.002701515867655)
+BOUNDARY total_online_gradient init window=0 gradients=124
+BOUNDARY total_online_gradient window window=1 gradients=1140
+BOUNDARY total_online_gradient window window=2 gradients=3142
+BOUNDARY total_online_gradient window window=3 gradients=7147
+BOUNDARY total_online_gradient window window=4 gradients=15151
+BOUNDARY total_online_gradient window window=5 gradients=16286
+AIR_SCIENTIFIC_RESULT (arm = "total_online_gradient", draws = 2000, min_bulk_ess = 830.2951807827999, limiting_qoi = "region_3_total_intercept", sampling_gradients = 14698, total_gradients = 16286, ess_per_1000_sampling_gradients = 56.49035112143147, ess_per_1000_total_gradients = 50.98214299292643, divergences = 0, max_split_rhat = 1.002701515867655)
+BOUNDARY ordinary_ncp_whmc init window=0 gradients=130
+BOUNDARY ordinary_ncp_whmc window window=1 gradients=1135
+BOUNDARY ordinary_ncp_whmc window window=2 gradients=3405
+BOUNDARY ordinary_ncp_whmc window window=3 gradients=7417
+BOUNDARY ordinary_ncp_whmc window window=4 gradients=15456
+BOUNDARY ordinary_ncp_whmc window window=5 gradients=31471
+BOUNDARY ordinary_ncp_whmc window window=6 gradients=63587
+BOUNDARY ordinary_ncp_whmc window window=7 gradients=110573
+AIR_SCIENTIFIC_RESULT (arm = "ordinary_ncp_whmc", draws = 2000, min_bulk_ess = 85.52141300825332, limiting_qoi = "group_sd_1", sampling_gradients = 106570, total_gradients = 110573, ess_per_1000_sampling_gradients = 0.8024905039715992, ess_per_1000_total_gradients = 0.7734384796311334, divergences = 68, max_split_rhat = 1.0373705360732979)
+AIR_TOTAL_MATRIX_COMPLETE cluster_region intercept_only
+[kb-run-compact] exit=0 elapsed=273s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.sSDlqE

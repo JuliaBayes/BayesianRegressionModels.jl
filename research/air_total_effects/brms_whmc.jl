@@ -55,6 +55,7 @@ function analyze_native(d,m,label,out,native)
     else
         l=s2z_layout(d,target,label,data);audit_s2z(d,m,target,l,out,label)
         positions=hcat([first(s2z_to_total(d,m,l,x)) for x in eachcol(constrained)]...)
+        serialize(joinpath(out,label*"_native-totals.jls"),positions)
         total_qois(d,m,positions)
     end
     c=costs(dir)

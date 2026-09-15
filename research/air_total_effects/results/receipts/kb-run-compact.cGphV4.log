@@ -1,0 +1,21 @@
+AIR_SCIENTIFIC_RESULT (arm = "ordinary_ncp_native", draws = 2000, min_bulk_ess = 422.41566775175767, limiting_qoi = "population_intercept_at_mean_log_sat", sampling_gradients = 799353, total_gradients = 1060905, ess_per_1000_sampling_gradients = 0.52844696617359, ess_per_1000_total_gradients = 0.39816540383140586, divergences = 6, max_split_rhat = 1.003003417318427)
+AIR_BRMS_COMPLETE analyze
+AIR_S2Z_AUDIT_PASS s2z_cp
+BOUNDARY s2z_cp init window=0 gradients=134
+BOUNDARY s2z_cp window window=1 gradients=1137
+BOUNDARY s2z_cp window window=2 gradients=3142
+BOUNDARY s2z_cp window window=3 gradients=7142
+BOUNDARY s2z_cp window window=4 gradients=15146
+BOUNDARY s2z_cp window window=5 gradients=16068
+AIR_SCIENTIFIC_RESULT (arm = "s2z_cp_whmc", draws = 2000, min_bulk_ess = 1783.4029847090476, limiting_qoi = "population_intercept_at_mean_log_sat", sampling_gradients = 14448, total_gradients = 16068, ess_per_1000_sampling_gradients = 123.43597623955202, ess_per_1000_total_gradients = 110.99097490098627, divergences = 0, max_split_rhat = 1.0009000159940402)
+AIR_S2Z_AUDIT_PASS s2z_ncp
+BOUNDARY s2z_ncp init window=0 gradients=141
+BOUNDARY s2z_ncp window window=1 gradients=1599
+BOUNDARY s2z_ncp window window=2 gradients=3617
+BOUNDARY s2z_ncp window window=3 gradients=7630
+BOUNDARY s2z_ncp window window=4 gradients=15636
+BOUNDARY s2z_ncp window window=5 gradients=31641
+BOUNDARY s2z_ncp window window=6 gradients=33426
+AIR_SCIENTIFIC_RESULT (arm = "s2z_ncp_whmc", draws = 2000, min_bulk_ess = 68.59472929037197, limiting_qoi = "group_sd_1", sampling_gradients = 28686, total_gradients = 33426, ess_per_1000_sampling_gradients = 2.391226706071672, ess_per_1000_total_gradients = 2.052136938023454, divergences = 22, max_split_rhat = 1.0425112822529825)
+AIR_BRMS_COMPLETE fit
+[kb-run-compact] exit=0 elapsed=229s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.cGphV4

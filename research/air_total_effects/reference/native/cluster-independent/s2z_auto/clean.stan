@@ -1,0 +1,391 @@
+// generated with brms 2.23.1
+functions {
+  // Explicit substitution avoids general matrix solves for one or two rows.
+  vector mdivide_left_tri_low_brms(matrix L, vector b) {
+    int K = rows(L);
+    if (cols(L) != K || num_elements(b) != K) {
+      return mdivide_left_tri_low(L, b);
+    }
+    if (K == 1 && L[1, 1] != 0.0) {
+      return b / L[1, 1];
+    }
+    if (K == 2 && L[1, 1] != 0.0 && L[2, 2] != 0.0) {
+      vector[2] x;
+      x[1] = b[1] / L[1, 1];
+      x[2] = (b[2] - L[2, 1] * x[1]) / L[2, 2];
+      return x;
+    }
+    return mdivide_left_tri_low(L, b);
+  }
+
+  matrix mdivide_left_tri_low_brms(matrix L, matrix B) {
+    int K = rows(L);
+    if (cols(L) != K || rows(B) != K) {
+      return mdivide_left_tri_low(L, B);
+    }
+    if (K == 1 && L[1, 1] != 0.0) {
+      return B / L[1, 1];
+    }
+    if (K == 2 && L[1, 1] != 0.0 && L[2, 2] != 0.0) {
+      matrix[2, cols(B)] X;
+      X[1] = B[1] / L[1, 1];
+      X[2] = (B[2] - L[2, 1] * X[1]) / L[2, 2];
+      return X;
+    }
+    return mdivide_left_tri_low(L, B);
+  }
+
+  row_vector mdivide_right_tri_low_brms(row_vector b, matrix L) {
+    int K = rows(L);
+    if (cols(L) != K || num_elements(b) != K) {
+      return mdivide_right_tri_low(b, L);
+    }
+    if (K == 1 && L[1, 1] != 0.0) {
+      return b / L[1, 1];
+    }
+    if (K == 2 && L[1, 1] != 0.0 && L[2, 2] != 0.0) {
+      row_vector[2] x;
+      x[2] = b[2] / L[2, 2];
+      x[1] = (b[1] - x[2] * L[2, 1]) / L[1, 1];
+      return x;
+    }
+    return mdivide_right_tri_low(b, L);
+  }
+
+  matrix cholesky_decompose_brms(matrix A) {
+    int K = rows(A);
+    if (cols(A) != K) {
+      return cholesky_decompose(A);
+    }
+    if (K == 1 && A[1, 1] > 0.0 && !is_inf(A[1, 1])) {
+      return rep_matrix(sqrt(A[1, 1]), 1, 1);
+    }
+    if (K == 2 && A[1, 2] == A[2, 1] && A[1, 1] > 0.0 &&
+        !is_inf(A[1, 1]) && !is_inf(A[2, 1]) && !is_inf(A[2, 2])) {
+      matrix[2, 2] L = rep_matrix(0.0, 2, 2);
+      real pivot;
+      L[1, 1] = sqrt(A[1, 1]);
+      L[2, 1] = A[2, 1] / L[1, 1];
+      pivot = A[2, 2] - square(L[2, 1]);
+      if (pivot > 0.0) {
+        L[2, 2] = sqrt(pivot);
+        return L;
+      }
+    }
+    // Preserve Stan's validation and treatment of numerical boundary cases.
+    return cholesky_decompose(A);
+  }
+
+  matrix chol2inv_brms(matrix L) {
+    int K = rows(L);
+    if (cols(L) != K) {
+      return chol2inv(L);
+    }
+    if (K == 1 && L[1, 1] != 0.0) {
+      return rep_matrix(inv_square(L[1, 1]), 1, 1);
+    }
+    if (K == 2 && L[1, 2] == 0.0 &&
+        L[1, 1] != 0.0 && L[2, 2] != 0.0) {
+      matrix[2, 2] precision;
+      real a = inv(L[1, 1]);
+      real d = inv(L[2, 2]);
+      real c = -L[2, 1] * a / L[2, 2];
+      precision[1, 1] = square(a) + square(c);
+      precision[1, 2] = c * d;
+      precision[2, 1] = precision[1, 2];
+      precision[2, 2] = square(d);
+      return precision;
+    }
+    return chol2inv(L);
+  }
+  vector sum_to_zero_constrain_brms(vector y) {
+    int N = num_elements(y);
+    vector[N + 1] z = zeros_vector(N + 1);
+    real sum_w = 0;
+    for (ii in 1:N) {
+      int i = N - ii + 1;
+      real w = y[i] * inv_sqrt(i * (i + 1.0));
+      sum_w += w;
+      z[i] += sum_w;
+      z[i + 1] -= i * w;
+    }
+    return z;
+  }
+
+  real s2z_require_finite_brms(real x) {
+    if (is_nan(x) || is_inf(x)) {
+      reject("S2Z population-prior locations must be finite.");
+    }
+    return x;
+  }
+
+  real s2z_require_positive_brms(real x) {
+    if (is_nan(x) || is_inf(x) || x <= 0) {
+      reject("S2Z population-prior scales and degrees of freedom must be ",
+             "finite and strictly positive.");
+    }
+    return x;
+  }
+
+  real s2z_prior_coordinate_brms(real x, int index, int expected_size) {
+    return x;
+  }
+
+  real s2z_prior_coordinate_brms(vector x, int index, int expected_size) {
+    if (num_elements(x) != expected_size) {
+      reject("An S2Z vector-valued population-prior argument must have one ",
+             "entry per population-level coefficient.");
+    }
+    return x[index];
+  }
+
+  real s2z_prior_coordinate_brms(row_vector x, int index,
+                                 int expected_size) {
+    if (num_elements(x) != expected_size) {
+      reject("An S2Z vector-valued population-prior argument must have one ",
+             "entry per population-level coefficient.");
+    }
+    return x[index];
+  }
+
+  real s2z_prior_coordinate_brms(array[] real x, int index,
+                                 int expected_size) {
+    if (num_elements(x) != expected_size) {
+      reject("An S2Z vector-valued population-prior argument must have one ",
+             "entry per population-level coefficient.");
+    }
+    return x[index];
+  }
+
+  real s2z_prior_coordinate_brms(array[] int x, int index,
+                                 int expected_size) {
+    if (num_elements(x) != expected_size) {
+      reject("An S2Z vector-valued population-prior argument must have one ",
+             "entry per population-level coefficient.");
+    }
+    return x[index];
+  }
+  
+
+}
+data {
+  int<lower=1> N;  // total number of observations
+  vector[N] Y;  // response variable
+  int<lower=1> K;  // number of population-level effects
+  matrix[N, K] X;  // population-level design matrix
+  int<lower=1> Kc;  // number of population-level effects after centering
+  // data for group-level effects of ID 1
+  int<lower=1> N_1;  // number of grouping levels
+  int<lower=1> M_1;  // number of coefficients per level
+  array[N] int<lower=1> J_1;  // grouping indicator per observation
+  // group-level predictor values
+  vector[N] Z_1_1;
+  vector[N] Z_1_2;
+  matrix<lower=0,upper=1>[N_1, M_1] rho_s2z_1;  // fixed precursor/final centering fractions
+  int<lower=0,upper=1> compute_rho_center_candidate_1;  // evaluate the precursor proposal in generated quantities?
+  int prior_only;  // should the likelihood be ignored?
+}
+transformed data {
+  matrix[N, Kc] Xc;  // centered version of X without an intercept
+  vector[Kc] means_X;  // column means of X before centering
+  vector[M_1] mean_rho_s2z_1;
+  array[N_1] matrix[M_1, M_1] gram_fisher_s2z_1;
+  vector[M_1] intercept_map_s2z_1;
+  for (i in 2:K) {
+    means_X[i - 1] = mean(X[, i]);
+    Xc[, i - 1] = X[, i] - means_X[i - 1];
+  }
+  for (k in 1:M_1) {
+    mean_rho_s2z_1[k] = mean(rho_s2z_1[, k]);
+  }
+  for (j in 1:N_1) {
+    gram_fisher_s2z_1[j] = rep_matrix(0.0, M_1, M_1);
+  }
+  for (n in 1:N) {
+    vector[M_1] design_fisher_s2z;
+    design_fisher_s2z[1] = Z_1_1[n];
+    design_fisher_s2z[2] = Z_1_2[n];
+    gram_fisher_s2z_1[J_1[n]] += design_fisher_s2z * design_fisher_s2z';
+  }
+  intercept_map_s2z_1 = zeros_vector(M_1);
+  intercept_map_s2z_1[1] = 1.0;
+  intercept_map_s2z_1[2] = means_X[1];
+}
+parameters {
+  vector[2] theta_s2z;  // finite-population coefficients for physical S2Z effects
+  real<lower=0> sigma;  // dispersion parameter
+  vector<lower=0>[M_1] sd_1;  // group-level standard deviations
+  vector[M_1 * (N_1 - 1)] z_s2z_1;  // partially centered orthonormal independent S2Z coordinates
+  real<lower=0> udf_b_s2z_1;  // mixing variable for population coefficient 1
+}
+transformed parameters {
+  // component-wise physical S2Z effects of ID 1
+  vector[N_1] r_s2z_1_1;
+  vector[N_1] r_s2z_1_2;
+  vector[2] prior_mean_s2z_1;
+  vector<lower=0>[2] prior_prec_s2z_1;
+  vector<lower=0>[M_1] D_diag_s2z_1;
+  real<lower=0> rank1_info_s2z_1;
+  vector[M_1] mhat_s2z_1;
+  vector[2] qhat_s2z_1;
+  real<lower=0> group_quad_s2z_1;
+  real log_det_partial_s2z_1;
+  // prior contributions to the log posterior
+  real lprior = 0;
+  
+  log_det_partial_s2z_1 = 0.0;
+  {
+    vector[N_1] centered_partial_s2z = sum_to_zero_constrain_brms(segment(z_s2z_1, (1 - 1) * (N_1 - 1) + 1, N_1 - 1));
+    vector[N_1] scale_partial_s2z = 1.0 - rho_s2z_1[, 1] + rho_s2z_1[, 1] * sd_1[1];
+    centered_partial_s2z = sd_1[1] * centered_partial_s2z ./ scale_partial_s2z;
+    r_s2z_1_1 = centered_partial_s2z - mean(centered_partial_s2z);
+    log_det_partial_s2z_1 += -sum(log(scale_partial_s2z));
+    log_det_partial_s2z_1 += log(
+      (1.0 - mean_rho_s2z_1[1]) + mean_rho_s2z_1[1] * sd_1[1]
+    );
+  }
+  {
+    vector[N_1] centered_partial_s2z = sum_to_zero_constrain_brms(segment(z_s2z_1, (2 - 1) * (N_1 - 1) + 1, N_1 - 1));
+    vector[N_1] scale_partial_s2z = 1.0 - rho_s2z_1[, 2] + rho_s2z_1[, 2] * sd_1[2];
+    centered_partial_s2z = sd_1[2] * centered_partial_s2z ./ scale_partial_s2z;
+    r_s2z_1_2 = centered_partial_s2z - mean(centered_partial_s2z);
+    log_det_partial_s2z_1 += -sum(log(scale_partial_s2z));
+    log_det_partial_s2z_1 += log(
+      (1.0 - mean_rho_s2z_1[2]) + mean_rho_s2z_1[2] * sd_1[2]
+    );
+  }
+  prior_mean_s2z_1[1] = 2.7999999999999998;
+  prior_prec_s2z_1[1] = inv_square(2.5 * sqrt(3 * udf_b_s2z_1));
+  prior_mean_s2z_1[2] = 0;
+  prior_prec_s2z_1[2] = 0.0;
+  {
+    vector[M_1] base_info_s2z = zeros_vector(M_1);
+    vector[M_1] base_score_s2z = zeros_vector(M_1);
+    vector[M_1] scaled_score_s2z;
+    vector[M_1] independent_mode_s2z;
+    real group_info_s2z = N_1;
+    base_info_s2z[2] = prior_prec_s2z_1[2];
+    base_score_s2z[2] = prior_prec_s2z_1[2] * (theta_s2z[2] - prior_mean_s2z_1[2]);
+    D_diag_s2z_1 = group_info_s2z + square(sd_1) .* base_info_s2z;
+    scaled_score_s2z[1] = square(sd_1[1]) * base_score_s2z[1];
+    scaled_score_s2z[2] = square(sd_1[2]) * base_score_s2z[2];
+    independent_mode_s2z = scaled_score_s2z ./ D_diag_s2z_1;
+    rank1_info_s2z_1 = prior_prec_s2z_1[1] * dot_product(
+      square(sd_1) .* square(intercept_map_s2z_1),
+      1.0 ./ D_diag_s2z_1
+    );
+    mhat_s2z_1 = independent_mode_s2z +
+      prior_prec_s2z_1[1] * square(sd_1) .* intercept_map_s2z_1 ./
+      D_diag_s2z_1 * (theta_s2z[1] - prior_mean_s2z_1[1] -
+      dot_product(intercept_map_s2z_1, independent_mode_s2z)) /
+      (1.0 + rank1_info_s2z_1);
+  }
+  qhat_s2z_1 = theta_s2z;
+  qhat_s2z_1[1] -= dot_product(intercept_map_s2z_1, mhat_s2z_1);
+  qhat_s2z_1[2] -= mhat_s2z_1[2];
+  group_quad_s2z_1 = 0.0;
+  group_quad_s2z_1 += dot_self((r_s2z_1_1 + mhat_s2z_1[1]) / sd_1[1]);
+  group_quad_s2z_1 += dot_self((r_s2z_1_2 + mhat_s2z_1[2]) / sd_1[2]);
+  lprior += student_t_lpdf(sigma | 3, 0, 2.5)
+    - 1 * student_t_lccdf(0 | 3, 0, 2.5);
+  lprior += student_t_lpdf(sd_1 | 3, 0, 2.5)
+    - 2 * student_t_lccdf(0 | 3, 0, 2.5);
+  lprior += inv_chi_square_lpdf(udf_b_s2z_1 | 3);
+  lprior += normal_lpdf(qhat_s2z_1[1] | 2.7999999999999998, 2.5 * sqrt(3 * udf_b_s2z_1));
+  lprior += -0.5 * group_quad_s2z_1
+    + log_det_partial_s2z_1
+    - 0.5 * sum(log(D_diag_s2z_1))
+    - 0.5 * log1p(rank1_info_s2z_1) - 0.5 * N_1 * M_1 * log(2 * pi()) + 0.5 * M_1 * log(2 * pi()) + 0.5 * M_1 * log(1.0 * N_1);
+}
+model {
+  
+  // likelihood including constants
+  if (!prior_only) {
+    // initialize linear predictor term
+    vector[N] mu = rep_vector(0.0, N);
+    mu += theta_s2z[1];
+    for (n in 1:N) {
+      // add more terms to the linear predictor
+      mu[n] += r_s2z_1_1[J_1[n]] * Z_1_1[n] + r_s2z_1_2[J_1[n]] * Z_1_2[n];
+    }
+    target += normal_id_glm_lpdf(Y | Xc, mu, tail(theta_s2z, 1), sigma);
+  }
+  // priors including constants
+  target += lprior;
+}
+generated quantities {
+  matrix<lower=0,upper=1>[N_1, M_1] rho_center_candidate_1;
+  vector<lower=0,upper=1>[M_1] mean_rho_center_candidate_1;
+  vector[M_1] mean_r_s2z_1;
+  vector[2] q_recovered_s2z_1;
+  real Intercept;
+  vector[Kc] b;
+  real b_Intercept;
+  vector[N_1] r_1_1;
+  vector[N_1] r_1_2;
+  if (compute_rho_center_candidate_1) {
+  {
+    real obs_prec_fisher_s2z = inv_square(sigma);
+    array[N_1] matrix[M_1, M_1] white_post_cov_fisher_s2z;
+    matrix[M_1, M_1] sum_white_post_cov_fisher_s2z = rep_matrix(0.0, M_1, M_1);
+    matrix[M_1, M_1] L_sum_white_post_cov_fisher_s2z;
+    real restricted_prior_fraction_fisher_s2z = 1.0 - inv(N_1);
+    for (j in 1:N_1) {
+      matrix[M_1, M_1] K_fisher_s2z = 1.0 * obs_prec_fisher_s2z * quad_form_diag(gram_fisher_s2z_1[j], sd_1);
+      matrix[M_1, M_1] L_post_precision_fisher_s2z;
+      matrix[M_1, M_1] white_factor_fisher_s2z;
+      K_fisher_s2z = 0.5 * (K_fisher_s2z + K_fisher_s2z');
+      L_post_precision_fisher_s2z = cholesky_decompose_brms(
+        add_diag(K_fisher_s2z, 1.0)
+      );
+      white_factor_fisher_s2z = mdivide_left_tri_low_brms(
+        L_post_precision_fisher_s2z, diag_matrix(rep_vector(1.0, M_1))
+      );
+      white_post_cov_fisher_s2z[j] = crossprod(white_factor_fisher_s2z);
+      sum_white_post_cov_fisher_s2z += white_post_cov_fisher_s2z[j];
+    }
+    sum_white_post_cov_fisher_s2z = 0.5 * (sum_white_post_cov_fisher_s2z + sum_white_post_cov_fisher_s2z');
+    L_sum_white_post_cov_fisher_s2z = cholesky_decompose_brms(sum_white_post_cov_fisher_s2z);
+    for (j in 1:N_1) {
+      matrix[M_1, M_1] constraint_factor_fisher_s2z = mdivide_left_tri_low_brms(
+        L_sum_white_post_cov_fisher_s2z, white_post_cov_fisher_s2z[j]
+      );
+      matrix[M_1, M_1] restricted_white_post_cov_fisher_s2z = white_post_cov_fisher_s2z[j] - crossprod(constraint_factor_fisher_s2z);
+      for (k in 1:M_1) {
+        // Compare posterior and prior variances on the S2Z subspace.
+        rho_center_candidate_1[j, k] = fmin(1.0, fmax(0.0, 1.0 -
+          restricted_white_post_cov_fisher_s2z[k, k] / restricted_prior_fraction_fisher_s2z));
+        rho_center_candidate_1[j, k] = rho_center_candidate_1[j, k] / (rho_center_candidate_1[j, k] + (1.0 - rho_center_candidate_1[j, k]) * (sd_1[k]));
+      }
+    }
+    for (k in 1:M_1) {
+      mean_rho_center_candidate_1[k] = mean(rho_center_candidate_1[, k]);
+    }
+  }
+  } else {
+    rho_center_candidate_1 = rho_s2z_1;
+    mean_rho_center_candidate_1 = mean_rho_s2z_1;
+  }
+  {
+    vector[M_1] independent_noise_s2z;
+    real sqrt_rank1_s2z = sqrt(1.0 + rank1_info_s2z_1);
+    real rank1_adjust_s2z;
+    for (k in 1:M_1) {
+      independent_noise_s2z[k] = sd_1[k] * std_normal_rng() / sqrt(D_diag_s2z_1[k]);
+    }
+    rank1_adjust_s2z = prior_prec_s2z_1[1] / (sqrt_rank1_s2z * (1.0 + sqrt_rank1_s2z)) *
+      dot_product(intercept_map_s2z_1, independent_noise_s2z);
+    mean_r_s2z_1 = mhat_s2z_1 + independent_noise_s2z -
+      rank1_adjust_s2z * square(sd_1) .* intercept_map_s2z_1 ./ D_diag_s2z_1;
+  }
+  q_recovered_s2z_1 = theta_s2z;
+  q_recovered_s2z_1[1] -= dot_product(intercept_map_s2z_1, mean_r_s2z_1);
+  q_recovered_s2z_1[2] -= mean_r_s2z_1[2];
+  r_1_1 = r_s2z_1_1 + mean_r_s2z_1[1];
+  r_1_2 = r_s2z_1_2 + mean_r_s2z_1[2];
+  Intercept = q_recovered_s2z_1[1];
+  b = tail(q_recovered_s2z_1, Kc);
+  b_Intercept = Intercept - dot_product(means_X, b);
+  
+}
+

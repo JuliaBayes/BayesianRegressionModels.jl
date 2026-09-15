@@ -49,7 +49,7 @@ for key, model, sampler in labels:
 
 def write(name, items):
     with (output / name).open("w") as f:
-        w = csv.DictWriter(f, fieldnames=list(items[0]), delimiter="\t")
+        w = csv.DictWriter(f, fieldnames=list(items[0]), delimiter="\t", lineterminator="\n")
         w.writeheader(); w.writerows(items)
 
 write("comparison.tsv", rows)

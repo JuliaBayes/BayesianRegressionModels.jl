@@ -1,0 +1,160 @@
+{
+  "versions": {
+    "brm_total_implementation": "54cbe3f",
+    "brm_landed": "5f30e53e62fd1ac3bb43675c40eb0ab9b97f0945",
+    "brm_retained_flat_prior_fix": "f38bea8",
+    "research_harness": "dd1779f",
+    "warmuphmc": "7aed40b18bd4cdabb75330f285d5c9b355575ab9",
+    "brms": "73cf607889879cb2a55f50b88d8141d76ff43279",
+    "julia": "1.10.11",
+    "cmdstan": "2.39.0",
+    "cmdstanr": "0.9.0",
+    "note": "The completed result and plotting additions are committed with this manifest. Machine-local manifest paths must be replaced with these source revisions. Failed attempts are retained explicitly; only completed workflow costs enter the tables."
+  },
+  "processes": [
+    {
+      "file": "kb-run-compact.0ayvW3.log",
+      "sha256": "ae6a9d4cb62743e4190ba3efa1889c13deffbbbeb47d78fe6c3ca756dc25a8be",
+      "exit": 0,
+      "elapsed_seconds": 8,
+      "source": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.0ayvW3",
+      "purpose": "completed"
+    },
+    {
+      "file": "kb-run-compact.e5v30a.log",
+      "sha256": "3049fb196406266586eb087cf07d5b6def8e7286ab819eb4a250a65411eeca36",
+      "exit": 1,
+      "elapsed_seconds": 383,
+      "source": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.e5v30a",
+      "purpose": "retained failed attempt; not a completed fit"
+    },
+    {
+      "file": "kb-run-compact.BcW7mT.log",
+      "sha256": "8253d30c3a912ffe464776585ba35043bbae85b089120db29f98b1773faf18d4",
+      "exit": 0,
+      "elapsed_seconds": 483,
+      "source": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.BcW7mT",
+      "purpose": "completed"
+    },
+    {
+      "file": "kb-run-compact.sSDlqE.log",
+      "sha256": "e0311ad9c1fb9a68b2ae3b4ce28426a4e79ac63b7841a630fc96088b74716d90",
+      "exit": 0,
+      "elapsed_seconds": 273,
+      "source": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.sSDlqE",
+      "purpose": "completed"
+    },
+    {
+      "file": "kb-run-compact.jvZfxl.log",
+      "sha256": "86ee63e60e79456c8569419e3517d66077f6abbabed65d09d07c2252367c0c82",
+      "exit": 0,
+      "elapsed_seconds": 467,
+      "source": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.jvZfxl",
+      "purpose": "completed"
+    },
+    {
+      "file": "kb-run-compact.CHxJss.log",
+      "sha256": "65ea3dc4bbe4381f66debd8027a18b05ae8fa087053c24ac9bcc39d8e2f2b86a",
+      "exit": 0,
+      "elapsed_seconds": 133,
+      "source": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.CHxJss",
+      "purpose": "completed"
+    },
+    {
+      "file": "kb-run-compact.9fJ8bk.log",
+      "sha256": "c6bc56fdf1caf41cbe53d5d5e7e01c5c67888788e96e21dc39d7f66dbb93ef79",
+      "exit": 0,
+      "elapsed_seconds": 294,
+      "source": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.9fJ8bk",
+      "purpose": "completed"
+    },
+    {
+      "file": "kb-run-compact.cGphV4.log",
+      "sha256": "20affb3e4d4885901b29d148f614d0331823ace2187ef671c4fe127cea60ec5f",
+      "exit": 0,
+      "elapsed_seconds": 229,
+      "source": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.cGphV4",
+      "purpose": "completed"
+    },
+    {
+      "file": "kb-run-compact.JzHiqD.log",
+      "sha256": "2270c94809de76ff5c091419a17f417aa1c5d7547f63e83b4640e131e19639c0",
+      "exit": 0,
+      "elapsed_seconds": 675,
+      "source": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.JzHiqD",
+      "purpose": "completed"
+    },
+    {
+      "file": "kb-run-compact.WwHnFY.log",
+      "sha256": "5fa0fc8020ae47c2d8334144b7a533e9958a883ac96f0d156383e6e10cb85346",
+      "exit": 0,
+      "elapsed_seconds": 177,
+      "source": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.WwHnFY",
+      "purpose": "completed"
+    },
+    {
+      "file": "kb-run-compact.6Qn0PO.log",
+      "sha256": "5edbff1fada514366880f73da50199ef9829ca6c9183ec4bfe4a4d3f5ee4a955",
+      "exit": 0,
+      "elapsed_seconds": 155,
+      "source": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.6Qn0PO",
+      "purpose": "completed"
+    },
+    {
+      "file": "kb-run-compact.Y1m4i1.log",
+      "sha256": "02cbdb4ef2ad0ed92aad6b16fd57cdc09e4db8fb81c5c6668f9e3541bd7763ab",
+      "exit": 0,
+      "elapsed_seconds": 196,
+      "source": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.Y1m4i1",
+      "purpose": "completed"
+    },
+    {
+      "file": "kb-run-compact.Hm6ucv.log",
+      "sha256": "49cdb4a84bb72ef01665867de91e89d782f765abe72acb86ccba97a9367aa32c",
+      "exit": 0,
+      "elapsed_seconds": 147,
+      "source": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.Hm6ucv",
+      "purpose": "completed"
+    },
+    {
+      "file": "kb-run-compact.yK21hK.log",
+      "sha256": "4f901926af3495ce941e138e3d687aaaf77ac6d9b6a4bca65a02a29e3fcf0181",
+      "exit": 0,
+      "elapsed_seconds": 28,
+      "source": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.yK21hK",
+      "purpose": "completed"
+    },
+    {
+      "file": "kb-run-compact.JBPJKX.log",
+      "sha256": "b6c39b0b90c9cba7fc67b50eb4de7b5a7ef3619044841fb92702a69979009adc",
+      "exit": 0,
+      "elapsed_seconds": 25,
+      "source": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.JBPJKX",
+      "purpose": "completed"
+    },
+    {
+      "file": "kb-run-compact.h8mBQv.log",
+      "sha256": "816a46a21da943aa8ae2286bcbb1bc41588e470ebf625e3bf73726084276d6d7",
+      "exit": 0,
+      "elapsed_seconds": 6,
+      "source": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.h8mBQv",
+      "purpose": "completed"
+    },
+    {
+      "file": "kb-run-compact.0viHMQ.log",
+      "sha256": "ee32b781914a59e38ad4abbd21c14a29705e7d90f8ab708f91c84dab8f785676",
+      "exit": 0,
+      "elapsed_seconds": 4,
+      "source": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.0viHMQ",
+      "purpose": "completed"
+    },
+    {
+      "file": "kb-run-compact.hsbRe2.log",
+      "sha256": "2d8e0a92cd3c3b3b635f773a3f4349d0f918008ae4388538675c6d00acc6c968",
+      "exit": 0,
+      "elapsed_seconds": 154,
+      "source": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.hsbRe2",
+      "purpose": "completed"
+    }
+  ]
+}

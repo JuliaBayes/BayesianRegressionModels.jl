@@ -49,8 +49,12 @@ scientific quantities:
   fully centered selection.
 - [Radon](radon-centering.md): county intercepts and floor slopes, with
   categorical predictive checks.
-- [Pupil](pupil-centering.md): exact total-coefficient marginalization,
-  brms sum-to-zero parametrizations, both adaptation losses and conditional recovery.
+- [Pupil: numeric scale predictor](pupil-centering.md): automatic total
+  coefficients, brms sum-to-zero comparisons and both adaptation losses.
+- [Pupil: hierarchical residual SD](pupil-scale-centering.md): automatic totals
+  in both the mean and residual-scale predictors.
+- [Air pollution](air-centering.md): regional intercepts and slopes, exact
+  marginalization and matched scientific quantities.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""

@@ -1,0 +1,5 @@
+┌ Warning: Assignment to `tm` in soft scope is ambiguous because a global variable by the same name exists: `tm` will be treated as a new local. Disambiguate by using `local tm` to suppress this warning or `global tm` to assign to the existing global variable.
+└ @ ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil4-study/research/export_builtin_targets.jl:25
+BUILTIN_EXPORT_EXACT research/air_total_effects/reference/automatic_totals/intercept_only
+BUILTIN_EXPORT_EXACT research/air_total_effects/reference/automatic_totals/independent
+[kb-run-compact] exit=0 elapsed=154s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.hsbRe2

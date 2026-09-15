@@ -1,0 +1,2 @@
+sampling_gradients	all_gradient_calls	warmup_and_initial_gradients	precursor_gradient_calls	workflow_gradient_calls	divergences	max_depth_hits	sampling_rows	warmup_rows
+391932	603455	211523	0	603455	35	0	2000	1000

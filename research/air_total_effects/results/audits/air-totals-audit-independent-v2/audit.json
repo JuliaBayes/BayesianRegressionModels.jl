@@ -1,0 +1,10 @@
+{
+  "constant_offset": 2.0794415416798357,
+  "grouping": "cluster_region",
+  "groups": 6,
+  "hierarchy": "independent",
+  "observations": 6003,
+  "ordinary_dimension": 17,
+  "status": "passed",
+  "total_dimension": 16
+}

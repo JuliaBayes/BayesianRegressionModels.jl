@@ -1,6 +1,7 @@
 using Documenter, DocumenterVitepress, BayesianRegressionModels
 
 include("backend_comparisons.jl")
+include("centering_examples.jl")
 
 const GENERATED_EXAMPLE_PAGES = [
     joinpath(@__DIR__, "src", "index.md"),
@@ -14,6 +15,9 @@ const GENERATED_EXAMPLE_PAGES = [
     joinpath(@__DIR__, "src", "adaptive-centering.md"),
     joinpath(@__DIR__, "src", "eight-schools-centering.md"),
     joinpath(@__DIR__, "src", "radon-centering.md"),
+    joinpath(@__DIR__, "src", "pupil-centering.md"),
+    joinpath(@__DIR__, "src", "pupil-scale-centering.md"),
+    joinpath(@__DIR__, "src", "air-centering.md"),
 ]
 const DOCS_MARKDOWN_PAGES = sort!(String[
     joinpath(root, file)
@@ -63,7 +67,9 @@ makedocs(
             "Motorcycle HSGP" => "adaptive-centering.md",
             "Eight schools" => "eight-schools-centering.md",
             "Radon" => "radon-centering.md",
-            "Pupil: exact marginalization" => "pupil-centering.md",
+            "Pupil: numeric scale predictor" => "pupil-centering.md",
+            "Pupil: hierarchical residual SD" => "pupil-scale-centering.md",
+            "Air pollution" => "air-centering.md",
         ],
         "Turing backend" => "turing-backend.md",
         "Formulas and custom models: deck" => "feature-deck.md",
@@ -108,6 +114,13 @@ BRMDocsComparisons.validate_required_stan_outputs(
     joinpath(@__DIR__, "build", ".documenter", "radon-centering.md"),
     (:adaptive_radon_model,),
 )
+
+for (page, names) in (("pupil-centering.md", (:pupil_numeric_brm_model,)),
+                      ("pupil-scale-centering.md", (:pupil_hierarchical_brm_model,)),
+                      ("air-centering.md", (:air_intercept_brm_model,:air_independent_brm_model)))
+    BRMDocsComparisons.validate_required_stan_outputs(
+        joinpath(@__DIR__, "build", ".documenter", page), names)
+end
 
 # Copy committed live-brm recordings into the VitePress build tree so
 # the gallery embed resolves the same URLs in production as in dev

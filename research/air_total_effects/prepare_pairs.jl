@@ -65,4 +65,6 @@ function prepare(grouping,hierarchy,totals,brms,native,out)
     total_pairs(d,m,totals,out);s2z_pairs(d,m,brms,native,out)
     println("AIR_PAIRS_COMPLETE ",hierarchy)
 end
-abspath(PROGRAM_FILE)==@__FILE__ && prepare(ARGS...)
+if abspath(PROGRAM_FILE)==@__FILE__
+    prepare(ARGS...)
+end

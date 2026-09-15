@@ -1,0 +1,108 @@
+[ Info: SetupBuildDirectory: setting up build directory.
+[ Info: Doctest: running doctests.
+[ Info: ExpandTemplates: expanding markdown templates.
+[ Info: CrossReferences: building cross-references.
+[ Info: CheckDocument: running document checks.
+[ Info: Populate: populating indices.
+[ Info: RenderDocument: rendering document.
+[ Info: DocumenterVitepress: rendering MarkdownVitepress pages.
+┌ Warning: Documenter could not auto-detect the building environment. Skipping deployment.
+└ @ Documenter ~/.julia/packages/Documenter/13nbQ/src/deployconfig.jl:95
+Copied: /home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/automatic-total-render-v1/build/.documenter/components/AuthorBadge.vue
+Copied: /home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/automatic-total-render-v1/build/.documenter/components/Authors.vue
+Copied: /home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/automatic-total-render-v1/build/.documenter/components/SidebarDrawerToggle.vue
+Copied: /home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/automatic-total-render-v1/build/.documenter/components/VersionPicker.vue
+┌ Warning: Cannot extract version for inventory from /home/n/scratch/kb-agent-tmp/Project.toml: no such file
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/BNfZY/src/writer.jl:1472
+┌ Warning: Please set `inventory_version` in the `MarkdownVitepress()` options passed to `makedocs`.
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/BNfZY/src/writer.jl:1481
+fatal: not a git repository (or any of the parent directories): .git
+[ Info: DocumenterVitepress: could not get git tags, assuming no tagged releases exist.
+[ Info: Bases that will be built: [""]
+[ Info: DocumenterVitepress: Did not detect `docs/src/.vitepress/mathjax-plugin.ts` file. Substituting in the default file.
+[ Info: DocumenterVitepress: Did not detect `docs/src/.vitepress/julia-repl-transformer.ts` file. Substituting in the default file.
+[ Info: DocumenterVitepress: Did not detect `docs/src/.vitepress/theme/docstrings.css` file. Substituting in the default file.
+[ Info: DocumenterVitepress: Did not detect `docs/src/.vitepress/theme/overrides.css` file. Substituting in the default file.
+[ Info: Base is "" and ENV["CI"] is not set so this is a local build. Not adding any additional base prefix based on the repository or deploy url and instead using absolute path "/" to facilitate serving docs locally.
+┌ Warning: DocumenterVitepress: No logo.png file found in `docs/src/assets`.  Skipping logo replacement.
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/BNfZY/src/vitepress_config.jl:154
+┌ Warning: DocumenterVitepress: No favicon.ico file found in `docs/src/assets`.  Skipping favicon replacement.
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/BNfZY/src/vitepress_config.jl:172
+┌ Info: DocumenterVitepress: did not build Vitepress site because `build_vitepress` was set to `false`.
+│ You can view it yourself by running the following in the `docs` folder:
+│ ```
+│ npm run docs:dev
+│ ```
+│ and if you haven't run `npm` in this repo before, install all packages by running `npm install`.
+│ 
+└ All emitted markdown can be found in `/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/automatic-total-render-v1/build/.documenter`.
+[ Info: DocumenterVitepress: running `vitepress build`.
+┌ Warning: DocumenterVitepress: Did not find `docs/package.json` in your repository.  Substituting default for now.
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/BNfZY/src/vitepress_interface.jl:35
+
+added 184 packages, and audited 185 packages in 13s
+
+49 packages are looking for funding
+  run `npm fund` for details
+
+4 vulnerabilities (3 moderate, 1 high)
+
+To address all issues (including breaking changes), run:
+  npm audit fix --force
+
+Run `npm audit` for details.
+
+> env
+> env vitepress build build/.documenter
+
+
+  vitepress v1.6.4
+
+- building client + server bundles...
+[31m✖[0m building client + server bundles...
+build error:
+You need to install `markdown-it-mathjax3` to use math support.
+Error: You need to install `markdown-it-mathjax3` to use math support.
+    at createMarkdownRenderer (file:///home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/automatic-total-render-v1/node_modules/vitepress/dist/node/chunk-D3CUZ4fa.js:35790:13)
+    at async localSearchPlugin (file:///home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/automatic-total-render-v1/node_modules/vitepress/dist/node/chunk-D3CUZ4fa.js:40442:14)
+    at async createVitePressPlugin (file:///home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/automatic-total-render-v1/node_modules/vitepress/dist/node/chunk-D3CUZ4fa.js:45194:5)
+    at async resolveViteConfig (file:///home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/automatic-total-render-v1/node_modules/vitepress/dist/node/chunk-D3CUZ4fa.js:45267:14)
+    at async file:///home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/automatic-total-render-v1/node_modules/vitepress/dist/node/chunk-D3CUZ4fa.js:45338:54
+    at async task (file:///home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/automatic-total-render-v1/node_modules/vitepress/dist/node/chunk-D3CUZ4fa.js:40415:5)
+    at async bundle (file:///home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/automatic-total-render-v1/node_modules/vitepress/dist/node/chunk-D3CUZ4fa.js:45337:3)
+    at async build (file:///home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/automatic-total-render-v1/node_modules/vitepress/dist/node/chunk-D3CUZ4fa.js:49579:59)
+ERROR: LoadError: failed process: Process(`/home/n/.julia/artifacts/86336b0ee0dfedf3d771b32af4db6325d14c1e6d/bin/npm run env -- vitepress build build/.documenter`, ProcessExited(1)) [1]
+
+Stacktrace:
+  [1] pipeline_error
+    @ ./process.jl:565 [inlined]
+  [2] run(::Cmd; wait::Bool)
+    @ Base ./process.jl:480
+  [3] run
+    @ ./process.jl:477 [inlined]
+  [4] (::DocumenterVitepress.var"#5#7"{String, Cmd, String, String})(::String)
+    @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/BNfZY/src/vitepress_interface.jl:53
+  [5] (::JLLWrappers.var"#2#3"{DocumenterVitepress.var"#5#7"{String, Cmd, String, String}, String})()
+    @ JLLWrappers ~/.julia/packages/JLLWrappers/Kp7TC/src/runtime.jl:49
+  [6] withenv(::JLLWrappers.var"#2#3"{DocumenterVitepress.var"#5#7"{String, Cmd, String, String}, String}, ::Pair{String, String}, ::Vararg{Pair{String, String}})
+    @ Base ./env.jl:257
+  [7] withenv_executable_wrapper(f::Function, executable_path::String, PATH::String, LIBPATH::String, adjust_PATH::Bool, adjust_LIBPATH::Bool)
+    @ JLLWrappers ~/.julia/packages/JLLWrappers/Kp7TC/src/runtime.jl:48
+  [8] invokelatest(::Any, ::Any, ::Vararg{Any}; kwargs::@Kwargs{})
+    @ Base ./essentials.jl:892
+  [9] invokelatest(::Any, ::Any, ::Vararg{Any})
+    @ Base ./essentials.jl:889
+ [10] node(f::Function; adjust_PATH::Bool, adjust_LIBPATH::Bool)
+    @ NodeJS_20_jll ~/.julia/packages/JLLWrappers/Kp7TC/src/products/executable_generators.jl:28
+ [11] #4
+    @ ~/.julia/packages/DocumenterVitepress/BNfZY/src/vitepress_interface.jl:45 [inlined]
+ [12] cd(f::DocumenterVitepress.var"#4#6"{String, Cmd, String, String}, dir::String)
+    @ Base.Filesystem ./file.jl:112
+ [13] run_vitepress_command(builddir::String, command::String; md_output_path::String, kwargs::Cmd)
+    @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/BNfZY/src/vitepress_interface.jl:40
+ [14] build_docs(builddir::String)
+    @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/BNfZY/src/vitepress_interface.jl:25
+ [15] top-level scope
+    @ ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/render_total_pages.jl:29
+in expression starting at /home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/render_total_pages.jl:29
+[kb-run-compact] exit=1 elapsed=165s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.ovy5EU
