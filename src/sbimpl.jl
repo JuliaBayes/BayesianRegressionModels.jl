@@ -2256,12 +2256,23 @@ end
 
 """
     SBBRMI(brmi::BRMI; mod=@__MODULE__, cv_groups=Set{Symbol}(),
-           centered_groups=Set{Symbol}(), held_out=()) -> SBBRMI
+           centered_groups=Set{Symbol}(), total_groups=:auto, held_out=()) -> SBBRMI
 
 StanBlocks backend: walks `brmi`, emits a `StanBlocks.SlicModel`, and
 materialises the data dict. Pass `mod` if you're constructing the model
 from a module other than `BayesianRegressionModels` so SLIC's symbol
 resolver finds your locally-defined submodels.
+
+`total_groups=:auto` integrates matching population coefficients into group
+totals when the exact Gaussian conditional construction is available. It supports
+one grouping structure per predictor, independent random-effect margins, and
+Normal, Flat, or Student-t population priors (Student-t uses its exact Gaussian
+scale mixture). Unmatched fixed effects remain explicit. Original population
+coefficients and deviations are recovered in generated quantities. Inspect
+[`total_effect_blocks`](@ref), or use `total_groups=()` for the conventional
+representation. Naming a group explicitly requires eligibility and errors
+otherwise. Correlated, crossed, stratified, multi-membership and R2D2 blocks
+retain conventional emission under `:auto`.
 
 `cv_groups` is an opt-in set of grouping-factor names (e.g. `[:subject]`)
 whose per-group random effect should be emitted with **cv-contagious
@@ -2278,11 +2289,10 @@ buckets are both supported; stratified `gr(g, by=b)` errors if opted-in.
 `centered_groups` is an opt-in set of grouping-factor names whose per-group
 random effect should be emitted in the **centered** parameterization -- the
 per-group effect itself is the sampled parameter, with the covariance as its
-prior (`bc ~ multi_normal_cholesky(0, diag_pre_multiply(tau, L))`), instead of
-the default non-centered standardised draw plus downstream scaling. Centered
-is the better geometry when the per-group likelihood is strong (dense repeated
-measurement per level, e.g. many PK samples per subject); non-centered stays
-the default, and a group not named here is untouched by this kwarg. Plain
+prior (`bc ~ multi_normal_cholesky(0, diag_pre_multiply(tau, L))`). Naming a
+group here explicitly selects conventional centered deviations and excludes
+it from automatic totals. Other conventional blocks use noncentered draws.
+Plain
 `(… | g)` ranefs and `(… |ID| g)` buckets are supported; stratified
 `gr(g, by=b)` is not.
 
@@ -2705,7 +2715,7 @@ const _SB_STAN_RESERVED_IDENTIFIERS = Set{Symbol}((
 ))
 
 SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
-       centered_groups=Set{Symbol}(), held_out=(), _frozen_preproc=nothing) = begin
+       centered_groups=Set{Symbol}(), total_groups=:auto, held_out=(), _frozen_preproc=nothing) = begin
     cv_groups = cv_groups isa Set ? cv_groups : Set{Symbol}(cv_groups)
     centered_groups = centered_groups isa Set ? centered_groups : Set{Symbol}(centered_groups)
     both = intersect(cv_groups, centered_groups)
@@ -2745,6 +2755,12 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     ranef_r2d2_overrides = _sb_ranef_r2d2_overrides(brmi, id_buckets,
                                                     effect_overrides)
     r2d2_overrides = _sb_r2d2_overrides(brmi, id_buckets, effect_overrides)
+    total_plans = _sb_plan_totals(brmi,prepared,effect_overrides,id_buckets,
+        ranef_effect_overrides,total_groups; cv_groups,centered_groups,r2d2_overrides,ranef_r2d2_overrides)
+    data[_SB_TOTAL_PLANS_KEY] = total_plans
+    for plan in values(total_plans), key in plan.claimed
+        delete!(id_buckets,key)
+    end
     gb_terms = _sb_collect_group_block_terms(brmi)
     prior_value_refs = Set{Symbol}()
     _brm_operation_references!(prior_value_refs, effect_overrides)
@@ -2845,6 +2861,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     # Pop the preproc side-channel BEFORE building the SlicModel so it never
     # pollutes Stan's data dict.
     bindings = pop!(data, _SB_BINDINGS_KEY)
+    pop!(data, _SB_TOTAL_PLANS_KEY)
     preproc_ctx = pop!(data, _SB_PREPROC_KEY, Dict{Symbol,PreprocEntry}())
     preproc = preproc_ctx isa _SBPreprocContext ? preproc_ctx.recorded : preproc_ctx
     # Drop leaked non-Stan data (raw `CategoricalVector`/string predictor columns
@@ -3377,12 +3394,12 @@ generative_plan(sb::SBBRMI) = _generative_plan(sb, nothing, Set{Symbol}())
 
 function generative_plan(builder::Function, df;
                          mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
-                         held_out=())
+                         total_groups=:auto, held_out=())
     brmi = Base.invokelatest(builder, df)
     brmi isa BRMI || error(
         "generative_plan: builder returned $(typeof(brmi)); expected a BRMI from `@brm begin ... end`")
     cv_groups = cv_groups isa Set ? cv_groups : Set{Symbol}(cv_groups)
-    _generative_plan(SBBRMI(brmi; mod, cv_groups, held_out), builder, cv_groups)
+    _generative_plan(SBBRMI(brmi; mod, cv_groups, total_groups, held_out), builder, cv_groups)
 end
 
 function generative_plan(plan::GenerativePlan, new_df;
@@ -3390,7 +3407,15 @@ function generative_plan(plan::GenerativePlan, new_df;
     isnothing(plan.builder) && error(
         "generative_plan: this plan was built from an SBBRMI and has no reusable `@brm` builder. " *
         "Construct it with `generative_plan(builder, df)` to rebuild the same declarations for new groups.")
-    generative_plan(plan.builder, new_df; mod=plan.model.mod, cv_groups, held_out)
+    # Preserve the fitted representation and population/random basis relation.
+    # An empty selected set also preserves an explicit conventional opt-out.
+    selected = unique(b.group for b in total_effect_blocks(plan))
+    isempty(selected) && return generative_plan(plan.builder,new_df;
+        mod=plan.model.mod,cv_groups,held_out,total_groups=())
+    brmi = Base.invokelatest(plan.builder,new_df)
+    sb = SBBRMI(brmi;mod=plan.model.mod,cv_groups,held_out,total_groups=selected,
+                _frozen_preproc=plan.preproc)
+    _generative_plan(sb,plan.builder,cv_groups)
 end
 
 stan_code(plan::GenerativePlan) = Base.invokelatest(StanBlocks.stan_code, plan.model)
@@ -3509,6 +3534,8 @@ function _sb_mark_resample_groups(sb::SBBRMI, groups)
 end
 
 function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool)
+    isempty(total_effect_blocks(sb)) || throw(ArgumentError(
+        "total-coefficient prediction uses generative_plan(plan,new_df) and transport_draws(...;resample=groups) to share one recovered population draw across new groups; resample_groups does not perform this recovery"))
     # Re-emission cannot safely guess constructor-only geometry that SBBRMI did
     # not historically retain.  The public ergonomic path starts from the
     # ordinary non-centred fit; fail if the supplied artifact used a different
@@ -3560,6 +3587,10 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
     end
     if e.kind === :static
         new_data[key] = deepcopy(e.const_)
+        new_preproc[key] = e
+    elseif e.kind === :total_basis
+        freeze || throw(ArgumentError("total-coefficient replay requires freeze_constants=true; rebuild the model to fit a different population/random design basis"))
+        new_data[key] = copy(e.const_)
         new_preproc[key] = e
     elseif e.kind === :zscale || e.kind === :standardize ||
            e.kind === :center || e.kind === :protect
@@ -5486,6 +5517,8 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
                                 group_block_lookup=Dict(),
                                 effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2(),
                                 mod::Module=@__MODULE__)
+    total = get(get(data,_SB_TOTAL_PLANS_KEY,Dict()),brmi_key,nothing)
+    isnothing(total) || return _sb_emit_total!(stmts,data,target,total;mod)
     terms = _sb_terms(rhs)
     pop_terms    = Any[]
     ran_terms    = Any[]  # `(expr | group)` -> collected per-group below

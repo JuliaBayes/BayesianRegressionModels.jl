@@ -51,7 +51,7 @@ const UNC_NONCENTERED = [
 ]
 
 @testset "adaptive centering block metadata" begin
-    sb = SBBRMI(builder(df); mod=@__MODULE__)
+    sb = SBBRMI(builder(df); total_groups=(), mod=@__MODULE__)
     block = only(adaptive_centering_blocks(sb, UNC_NONCENTERED))
     @test block.ranef.binding === :r_mu_subject
     @test block.target_c == 0.0
@@ -59,7 +59,7 @@ const UNC_NONCENTERED = [
     @test block.cholesky_free == [4, 5, 6]
     @test block.log_scales == [7, 8, 9]
 
-    centered = SBBRMI(builder(df); mod=@__MODULE__, centered_groups=[:subject])
+    centered = SBBRMI(builder(df); total_groups=(), mod=@__MODULE__, centered_groups=[:subject])
     unc_centered = vcat(
         UNC_NONCENTERED[1:9],
         ["r_mu_subject_b.$g.$k" for g in 1:2 for k in 1:3],
@@ -85,7 +85,7 @@ end
         "r_mu_subject_xi.1",
         "r_mu_subject_xi.2",
     ]
-    sb = SBBRMI(intercept_builder(df); mod=@__MODULE__)
+    sb = SBBRMI(intercept_builder(df); total_groups=(), mod=@__MODULE__)
     block = only(adaptive_centering_blocks(sb, names))
     @test block.ranef.family === :ranef_intercept
     @test block.ranef.n_terms == 1
@@ -95,7 +95,7 @@ end
     @test block.log_scales == [1]
 
     centered = SBBRMI(
-        intercept_builder(df); mod=@__MODULE__, centered_groups=[:subject],
+        intercept_builder(df); total_groups=(), mod=@__MODULE__, centered_groups=[:subject],
     )
     centered_block = only(adaptive_centering_blocks(centered, names))
     @test centered_block.ranef.family === :ranef_intercept_centered
@@ -153,7 +153,7 @@ end
         "b_p_subject_z_flat.1",
         "b_p_subject_z_flat.2",
     ]
-    sb = SBBRMI(single_bucket_builder(df); mod=@__MODULE__)
+    sb = SBBRMI(single_bucket_builder(df); total_groups=(), mod=@__MODULE__)
     block = only(adaptive_centering_blocks(sb, names))
     @test block.ranef.family === :ranef_correlated_draws
     @test block.ranef.n_terms == 1
@@ -168,7 +168,7 @@ end
         "b_p_subject_b.2.1",
     ]
     centered = SBBRMI(
-        single_bucket_builder(df); mod=@__MODULE__, centered_groups=[:subject],
+        single_bucket_builder(df); total_groups=(), mod=@__MODULE__, centered_groups=[:subject],
     )
     centered_block = only(adaptive_centering_blocks(centered, centered_names))
     @test centered_block.ranef.family === :ranef_correlated_draws_centered
@@ -204,7 +204,7 @@ end
         mu ~ 1 + x + (1 + x | gr(subject, by=stratum))
         y ~ Normal(mu, sigma)
     end
-    by_sb = SBBRMI(by_builder(by_df); mod=@__MODULE__)
+    by_sb = SBBRMI(by_builder(by_df); total_groups=(), mod=@__MODULE__)
     err = try
         adaptive_centering_blocks(by_sb, String[])
         nothing

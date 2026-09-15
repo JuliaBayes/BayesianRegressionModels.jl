@@ -598,7 +598,7 @@ _ranef_check_draws(draws, unc_names) =
         "draws × coordinates, in `unc_names` order.")
 
 """
-    population_draws(model, draws, unc_names; groups) -> Matrix{Float64}
+    population_draws(model, draws, unc_names; groups, rng=Random.default_rng()) -> Matrix{Float64}
 
 Population-level ("no random effects") draws: a copy of `draws` with every
 random-effect coordinate of the named grouping factors set to zero, so the model
@@ -629,6 +629,11 @@ one block: selecting its grouping factor zeroes that factor's effects in *every*
 sub-formula that shares the bucket, which is what "population-level for `g`"
 means.
 
+For exact total-coefficient blocks, each posterior draw instead recovers one
+population coefficient vector conditionally and replaces the selected group
+totals with its implied population means. `rng` controls this recovery. The
+input and returned draws are both in the compiled model frame.
+
 # Example
 
 ```julia
@@ -636,13 +641,28 @@ unc  = BridgeStan.param_unc_names(stan_model)
 pop  = population_draws(sb, draws, unc; groups = :subject)
 ```
 """
-function population_draws(model, draws::AbstractMatrix, unc_names; groups)
+function population_draws(model, draws::AbstractMatrix, unc_names; groups,
+                          rng::Random.AbstractRNG=Random.default_rng())
     _ranef_check_draws(draws, unc_names)
-    blocks = _ranef_select(ranef_blocks(model), groups)
+    selected = Set(groups isa Symbol ? (groups,) : groups)
+    total_blocks = filter(b -> b.group in selected,total_effect_blocks(model))
+    remaining = setdiff(selected,Set(b.group for b in total_blocks))
+    blocks = isempty(remaining) ? RanefBlock[] : _ranef_select(ranef_blocks(model), remaining)
     out = Matrix{Float64}(draws)
     for b in blocks
         _ranef_assert_noncentered(b, "population-level prediction")
         out[:, vec(ranef_coordinates(b, unc_names))] .= 0.0
+    end
+    for block in total_blocks
+        coordinates = _total_coordinates(model,block,unc_names)
+        for i in axes(draws,1)
+            conditional = _total_conditional(block,coordinates,view(draws,i,:))
+            beta = conditional.mean + conditional.factor.U\randn(rng,length(conditional.mean))
+            mu = block.A*beta
+            for k in axes(coordinates.totals,2), g in axes(coordinates.totals,1)
+                out[i,coordinates.totals[g,k]] = mu[k]
+            end
+        end
     end
     out
 end
@@ -725,7 +745,10 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
     resample_set = Set{Symbol}(resample isa Symbol ? (resample,) : resample)
     blocks_from = ranef_blocks(from)
     blocks_to   = ranef_blocks(to)
+    totals_from = total_effect_blocks(from)
+    totals_to = total_effect_blocks(to)
     known_groups = Set{Symbol}()
+    union!(known_groups,(b.group for b in totals_from))
     for b in blocks_from
         union!(known_groups, _ranef_group_symbols(b.group))
     end
@@ -744,6 +767,27 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
     # `plan[j]` is 0 for "draw fresh", otherwise the source coordinate to copy.
     plan_idx = zeros(Int, length(unc_to))
     claimed = falses(length(unc_to))
+    total_plans = NamedTuple[]
+    for bt in totals_to
+        matching = filter(b -> b.predictor === bt.predictor && b.group === bt.group,totals_from)
+        length(matching) == 1 || throw(ArgumentError("total prediction target has no matching fitted block $(bt.binding)"))
+        bf = only(matching)
+        (bf.columns == bt.columns && bf.population_columns == bt.population_columns &&
+         bf.A == bt.A && bf.location == bt.location && bf.precision == bt.precision) ||
+            throw(ArgumentError("total prediction changes the fitted design or prior; use frozen preprocessing"))
+        cf,ct = _total_coordinates(from,bf,unc_from),_total_coordinates(to,bt,unc_to)
+        lf,lt = from.preproc[bf.group_index].const_.levels,to.preproc[bt.group_index].const_.levels
+        level_pos = Dict(level=>i for (i,level) in enumerate(lf))
+        source_groups = [bt.group in resample_set ? 0 : get(level_pos,level,0) for level in lt]
+        claimed[vec(ct.totals)] .= true
+        for k in axes(ct.totals,2), g in axes(ct.totals,1)
+            gf = source_groups[g]
+            gf == 0 || (plan_idx[ct.totals[g,k]] = cf.totals[gf,k])
+        end
+        push!(total_plans,(;block=bf,source=cf,target=ct,source_groups))
+    end
+    length(total_plans) == length(totals_from) || throw(ArgumentError(
+        "total prediction cannot change to a conventional parameterization"))
 
     for bt in blocks_to
         # A resample target's block is re-drawn in the target's generated
@@ -801,6 +845,20 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
             Random.randn!(rng, view(out, :, j))
         else
             @views out[:, j] .= draws[:, plan_idx[j]]
+        end
+    end
+    for plan in total_plans
+        any(iszero,plan.source_groups) || continue
+        for i in axes(draws,1)
+            conditional = _total_conditional(plan.block,plan.source,view(draws,i,:))
+            beta = conditional.mean + conditional.factor.U\randn(rng,length(conditional.mean))
+            mu = plan.block.A*beta
+            for g in eachindex(plan.source_groups)
+                plan.source_groups[g] == 0 || continue
+                for k in eachindex(mu)
+                    out[i,plan.target.totals[g,k]] = mu[k]+conditional.tau[k]*randn(rng)
+                end
+            end
         end
     end
     out

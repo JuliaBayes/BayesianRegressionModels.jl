@@ -132,7 +132,7 @@ const ADAPTIVE_GRADIENT_ATOL = 1e-10
 end
 
 @testset "two-term BridgeStan target is bit-exact" begin
-    sb = SBBRMI(slope_builder(df); mod=@__MODULE__)
+    sb = SBBRMI(slope_builder(df); total_groups=(), mod=@__MODULE__)
     problem = StanBlocks.stan_instantiate(sb.model)
     unc_names = StanBlocks.BridgeStan.param_unc_names(problem.model)
     block = only(adaptive_centering_blocks(sb, unc_names))
@@ -160,7 +160,7 @@ end
 end
 
 @testset "BridgeStan target differentiates through the mixed correlated frame" begin
-    sb = SBBRMI(builder(df); mod=@__MODULE__)
+    sb = SBBRMI(builder(df); total_groups=(), mod=@__MODULE__)
     problem = StanBlocks.stan_instantiate(sb.model)
     unc_names = StanBlocks.BridgeStan.param_unc_names(problem.model)
     block = only(adaptive_centering_blocks(sb, unc_names))
@@ -248,7 +248,7 @@ end
 end
 
 @testset "BridgeStan scalar random intercept adapts through the public wrapper" begin
-    sb = SBBRMI(intercept_builder(df); mod=@__MODULE__)
+    sb = SBBRMI(intercept_builder(df); total_groups=(), mod=@__MODULE__)
     problem = StanBlocks.stan_instantiate(sb.model)
     unc_names = StanBlocks.BridgeStan.param_unc_names(problem.model)
     block = only(adaptive_centering_blocks(sb, unc_names))

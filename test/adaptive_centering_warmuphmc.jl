@@ -130,7 +130,7 @@ end
         "r_mu_subject_xi.1",
         "r_mu_subject_xi.2",
     ]
-    sb = SBBRMI(intercept_builder(df); mod=@__MODULE__)
+    sb = SBBRMI(intercept_builder(df); total_groups=(), mod=@__MODULE__)
     block = only(adaptive_centering_blocks(sb, names))
     state, ir = AC_EXT._adaptive_centering_reparametrizer([block])
     @test first.(ir.pairs) == [2, 3]
@@ -147,7 +147,7 @@ end
     @test roundtrip ≈ x atol=1e-15
 
     centered = SBBRMI(
-        intercept_builder(df); mod=@__MODULE__, centered_groups=[:subject],
+        intercept_builder(df); total_groups=(), mod=@__MODULE__, centered_groups=[:subject],
     )
     centered_block = only(adaptive_centering_blocks(centered, names))
     centered_state, centered_ir =
@@ -191,7 +191,7 @@ end
 
 @testset "WarmupHMC correlated transform is exact at both BRM endpoints" begin
     @test !isnothing(AC_EXT)
-    sb = SBBRMI(builder(df); mod=@__MODULE__)
+    sb = SBBRMI(builder(df); total_groups=(), mod=@__MODULE__)
     block = only(adaptive_centering_blocks(sb, UNC_NONCENTERED))
     state, ir = AC_EXT._adaptive_centering_reparametrizer([block])
     @test first.(ir.pairs) == vec(block.effects)
@@ -248,7 +248,7 @@ end
     end for i in eachindex(x)]
     @test ad_gradient ≈ finite_difference atol=2e-8 rtol=2e-8
 
-    centered = SBBRMI(builder(df); mod=@__MODULE__, centered_groups=[:subject])
+    centered = SBBRMI(builder(df); total_groups=(), mod=@__MODULE__, centered_groups=[:subject])
     unc_centered = vcat(
         UNC_NONCENTERED[1:9],
         ["r_mu_subject_b.$g.$k" for g in 1:2 for k in 1:3],
@@ -366,7 +366,7 @@ end
 end
 
 @testset "candidate scores remove the installed source controls" begin
-    sb = SBBRMI(builder(df); mod=@__MODULE__)
+    sb = SBBRMI(builder(df); total_groups=(), mod=@__MODULE__)
     block = only(adaptive_centering_blocks(sb, UNC_NONCENTERED))
     state, ir = AC_EXT._adaptive_centering_reparametrizer([block])
     x = collect(range(-0.7, 0.9, length=length(UNC_NONCENTERED)))

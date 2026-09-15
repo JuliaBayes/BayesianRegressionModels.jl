@@ -14,7 +14,7 @@ include("introspection.jl")
 # VBRMI — vectorized implementation. Materializes predictors and
 # likelihood into a LogDensityProblems-compatible object.
 using LogExpFunctions, InverseFunctions, Distributions, ElasticArrays,
-      LogDensityProblems, LinearAlgebra, SpecialFunctions, Random
+      LogDensityProblems, LinearAlgebra, SpecialFunctions, Random, Statistics
 using StatsBase: AbstractWeights, AnalyticWeights, FrequencyWeights,
                  ProbabilityWeights, UnitWeights, Weights,
                  aweights, fweights, pweights, uweights, weights
@@ -48,6 +48,7 @@ using StanBlocks
 include("sbimpl.jl")
 include("sb_affine.jl")
 include("total_effects.jl")
+include("total_effects_plan.jl")
 
 # BRMDescriptor — ONE authoritative executable semantic model descriptor.
 # Collapses the GenerativePlan (what BRM emitted), introspection.jl (the
@@ -72,6 +73,8 @@ include("posterior_diagnostics.jl")
 export @brm, @n, @x, @getproperty
 export assign, effect, r2d2, doublepipe, gr, mm, gp, offset, zscale, center, standardize, protect, factor
 export LKJCovarianceFactor, MvNormalCholesky
+export Flat, TotalEffectBlock, total_effect_blocks, recover_population_draws, select_total_centeredness
+export brm_total, brm_total_recover_rng, brm_total_deviations
 export weighted, AbstractWeights, AnalyticWeights, FrequencyWeights,
        ProbabilityWeights, UnitWeights, Weights,
        aweights, fweights, pweights, uweights, weights

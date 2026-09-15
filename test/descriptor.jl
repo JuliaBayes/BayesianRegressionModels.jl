@@ -47,7 +47,7 @@ df = (; x=[0.0, 1.0, 2.0], y=[1.0, 2.0, 3.0])
 end
 
 @testset "reflection — one declaration, derived surface" begin
-    d = brm_descriptor(hier_builder, df; mod=@__MODULE__, name=:hier)
+    d = brm_descriptor(hier_builder, df; total_groups=(), mod=@__MODULE__, name=:hier)
 
     @test d isa BRMDescriptor
     @test d.name === :hier
@@ -81,8 +81,8 @@ end
 end
 
 @testset "stable identity" begin
-    a = brm_descriptor(hier_builder, df; mod=@__MODULE__, name=:hier)
-    b = brm_descriptor(hier_builder, df; mod=@__MODULE__, name=:something_else)
+    a = brm_descriptor(hier_builder, df; total_groups=(), mod=@__MODULE__, name=:hier)
+    b = brm_descriptor(hier_builder, df; total_groups=(), mod=@__MODULE__, name=:something_else)
     # Identity is content, not label.
     @test a.id == b.id
     @test a.name !== b.name
@@ -218,7 +218,7 @@ end
 end
 
 @testset "generative semantics — BRM roles and labels" begin
-    d = brm_descriptor(hier_builder, df; mod=@__MODULE__)
+    d = brm_descriptor(hier_builder, df; total_groups=(), mod=@__MODULE__)
     byname = Dict(o.name => o for o in d.outputs)
 
     @test byname[:sigma].role === :parameter
@@ -297,7 +297,7 @@ end
     end
 
     identity_link = brm_population_effect_coordinates(
-        brm_descriptor(hier_builder, df; mod=@__MODULE__), :mu,
+        brm_descriptor(hier_builder, df; total_groups=(), mod=@__MODULE__), :mu,
         ["pop_mu_beta_pop.1", "pop_mu_beta_pop.2"])
     @test identity_link.link === identity
     @test identity_link.inverse_link === identity
@@ -474,7 +474,7 @@ end
 end
 
 @testset "semantic output query — role, not emitted name" begin
-    d = brm_descriptor(hier_builder, df; mod=@__MODULE__)
+    d = brm_descriptor(hier_builder, df; total_groups=(), mod=@__MODULE__)
     byname = Dict(o.name => o for o in d.outputs)
 
     # An OBSERVATION's twins carry its logical target. This is the case a
@@ -528,7 +528,7 @@ end
 end
 
 @testset "execution — BRM -> StanBlocks -> BridgeStan" begin
-    d = brm_descriptor(hier_builder, df; mod=@__MODULE__)
+    d = brm_descriptor(hier_builder, df; total_groups=(), mod=@__MODULE__)
 
     src = brm_execute(d, :transpile)
     @test src isa AbstractString
@@ -551,7 +551,7 @@ end
 end
 
 @testset "replay — the same declaration on genuinely new groups" begin
-    d = brm_descriptor(hier_builder, df; mod=@__MODULE__, name=:hier)
+    d = brm_descriptor(hier_builder, df; total_groups=(), mod=@__MODULE__, name=:hier)
     new_df = (; x=[0.0, 1.0, 2.0, 3.0],
                 g=[7, 7, 8, 8],
                 y=[0.2, 0.4, 0.6, 0.8],
@@ -1077,7 +1077,7 @@ end
 end
 
 @testset "fail closed" begin
-    d = brm_descriptor(hier_builder, df; mod=@__MODULE__, name=:hier)
+    d = brm_descriptor(hier_builder, df; total_groups=(), mod=@__MODULE__, name=:hier)
 
     # 1. An operation the model does not offer errors and NAMES the ones it does.
     err = try; brm_operation(d, :simulate); catch e; e; end
@@ -1089,11 +1089,11 @@ end
     # 2. Suppressing an operation that was never derived is loud — a caller
     #    doing that is holding exactly the stale list this type removes.
     @test_throws ErrorException brm_descriptor(
-        hier_builder, df; mod=@__MODULE__, operations=Dict(:simulate => nothing))
+        hier_builder, df; total_groups=(), mod=@__MODULE__, operations=Dict(:simulate => nothing))
 
     # 3. Retitling an operation that is not offered is loud for the same reason.
     @test_throws ErrorException brm_descriptor(
-        hier_builder, df; mod=@__MODULE__, titles=Dict(:simulate => "nope"))
+        hier_builder, df; total_groups=(), mod=@__MODULE__, titles=Dict(:simulate => "nope"))
 
     # 4. A model with no predictive draw is not offered :predict at all,
     #    instead of offering one that would return nothing usable.
@@ -1108,26 +1108,26 @@ end
 
 @testset "extension points" begin
     # (a) add an operation the derivation cannot know about
-    d = brm_descriptor(hier_builder, df; mod=@__MODULE__,
+    d = brm_descriptor(hier_builder, df; total_groups=(), mod=@__MODULE__,
                        operations=Dict(:summarise => (dd; kwargs...) -> length(dd.outputs)))
     @test :summarise in Symbol[op.name for op in d.operations]
     @test brm_operation(d, :summarise).origin === :override
     @test brm_execute(d, :summarise) == length(d.outputs)
 
     # (b) replace a derived operation's behaviour, keeping its identity
-    d2 = brm_descriptor(hier_builder, df; mod=@__MODULE__,
+    d2 = brm_descriptor(hier_builder, df; total_groups=(), mod=@__MODULE__,
                         operations=Dict(:transpile => (dd; kwargs...) -> "STUB"))
     @test brm_execute(d2, :transpile) == "STUB"
     @test brm_operation(d2, :transpile).origin === :override
 
     # (c) suppress a derived operation — the button simply is not there
-    d3 = brm_descriptor(hier_builder, df; mod=@__MODULE__,
+    d3 = brm_descriptor(hier_builder, df; total_groups=(), mod=@__MODULE__,
                         operations=Dict(:pointwise_loglik => nothing))
     @test :pointwise_loglik ∉ Symbol[op.name for op in d3.operations]
     @test :fit in Symbol[op.name for op in d3.operations]
 
     # (d) relabel
-    d4 = brm_descriptor(hier_builder, df; mod=@__MODULE__,
+    d4 = brm_descriptor(hier_builder, df; total_groups=(), mod=@__MODULE__,
                         titles=Dict(:fit => "Run the sampler"))
     @test brm_operation(d4, :fit).title == "Run the sampler"
     @test brm_operation(d4, :fit).origin === :stan   # still the derived runner

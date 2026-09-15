@@ -355,6 +355,62 @@ function _adaptive_hsgp_centering_reparametrizer(blocks)
     state, WarmupHMC.IndexedReparametrization(pairs)
 end
 
+mutable struct BRMTotalCenteringState
+    indices::Vector{Int}
+    scales::Vector{Int}
+    locations::Vector{Float64}
+    sources::Vector{Float64}
+end
+
+struct BRMTotalCenteringArgument{KIND} <: Function
+    state::BRMTotalCenteringState
+    pair_number::Int
+end
+(arg::BRMTotalCenteringArgument{:location})(x) = arg.state.locations[arg.pair_number]
+(arg::BRMTotalCenteringArgument{:log_scale})(x) = x[arg.state.scales[arg.pair_number]]
+
+function _sync_sources!(state::BRMTotalCenteringState,ir)
+    length(state.sources) == length(ir.pairs) || throw(DimensionMismatch("total centering pair count changed"))
+    for (p,(index,value)) in enumerate(ir.pairs)
+        index == state.indices[p] || throw(ArgumentError("total centering pair order changed"))
+        state.sources[p] = value.source.c
+    end
+    ir
+end
+
+function _prepare_frame(state::BRMTotalCenteringState,ir,position,gradient)
+    _sync_sources!(state,ir)
+    source = copy(state.sources)
+    location = copy(state.locations)
+    scale,innovation,invariant_gradient = similar(source),similar(source),similar(source)
+    for p in eachindex(source)
+        scale[p] = exp(position[state.scales[p]])
+        factor = scale[p]^source[p]
+        innovation[p] = (position[state.indices[p]]-source[p]*location[p])/factor
+        invariant_gradient[p] = factor*gradient[state.indices[p]]
+    end
+    BRMAdaptiveCenteringFrame(source,location,scale,innovation,invariant_gradient)
+end
+
+function _adaptive_total_centering_reparametrizer(model,blocks,names)
+    indices,scales,locations = Int[],Int[],Float64[]
+    for block in blocks
+        coords = BRM._total_coordinates(model,block,names)
+        mu = block.A*block.location
+        for k in axes(coords.totals,2), g in axes(coords.totals,1)
+            push!(indices,coords.totals[g,k])
+            push!(scales,coords.scales[k])
+            push!(locations,mu[k])
+        end
+    end
+    state = BRMTotalCenteringState(indices,scales,locations,ones(length(indices)))
+    pairs = [indices[p] => WarmupHMC.Reparametrization(
+        WarmupHMC.PartiallyCentered(1.),WarmupHMC.PartiallyCentered(1.),
+        BRMTotalCenteringArgument{:location}(state,p),
+        BRMTotalCenteringArgument{:log_scale}(state,p)) for p in eachindex(indices)]
+    state,WarmupHMC.IndexedReparametrization(pairs)
+end
+
 """
     adaptive_centering_problem(model, problem, ad_backend; unc_names=nothing)
 
@@ -387,10 +443,34 @@ on a block's `C = diag(tau) * L`, an intermediate source coordinate is Gaussian
 with covariance `A(c) * A(c)'` whenever the block innovation is standard normal;
 the wrapped density and Jacobian still represent the original BRM prior exactly.
 """
-function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=nothing)
+function _initial_centering!(state,ir,centeredness)
+    isnothing(centeredness) && return ir
+    values = centeredness isa Real ? fill(centeredness,length(ir.pairs)) : collect(centeredness)
+    length(values) == length(ir.pairs) || throw(DimensionMismatch("one centering value is required per adaptive coordinate"))
+    all(c -> c isa Real && isfinite(c) && 0 <= c <= 1,values) ||
+        throw(ArgumentError("centeredness values must lie in [0,1]"))
+    ir.pairs .= [index => WarmupHMC.Reparametrization(value.target,
+        WarmupHMC.PartiallyCentered(Float64(c)),value.args...)
+        for ((index,value),c) in zip(ir.pairs,values)]
+    _sync_sources!(state,ir)
+end
+
+function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=nothing,
+                                       centeredness=nothing)
     names = isnothing(unc_names) ? _problem_unc_names(problem) : unc_names
     blocks = BRM.adaptive_centering_blocks(model, names)
     hsgp_blocks = BRM._adaptive_hsgp_centering_blocks(model, names)
+    total_blocks = BRM.total_effect_blocks(model)
+    if !isempty(total_blocks)
+        isempty(blocks) && isempty(hsgp_blocks) || throw(ArgumentError(
+            "adaptive total coefficients cannot yet be mixed with ordinary or HSGP blocks; use total_groups=() for the conventional model"))
+        state,ir = _adaptive_total_centering_reparametrizer(model,total_blocks,names)
+        _initial_centering!(state,ir,centeredness)
+        scoring = WarmupHMC.CandidateScoringPlan(
+            (ir_,q,g) -> _prepare_frame(state,ir_,q,g), _score_candidate;
+            synchronize! = ir_ -> _sync_sources!(state,ir_))
+        return WarmupHMC.ReparametrizedProblem(ir,problem,ad_backend;scoring_plan=scoring)
+    end
     !isempty(blocks) && !isempty(hsgp_blocks) && error(
         "BRM adaptive centering: a single online plan cannot yet mix ordinary " *
         "random-effect cells with HSGP basis-weight cells. Build a model with " *
@@ -403,6 +483,7 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
     state, ir = isempty(hsgp_blocks) ?
         _adaptive_centering_reparametrizer(blocks) :
         _adaptive_hsgp_centering_reparametrizer(hsgp_blocks)
+    _initial_centering!(state,ir,centeredness)
     plan = WarmupHMC.CandidateScoringPlan(
         (ir_, position, gradient) -> _prepare_frame(state, ir_, position, gradient),
         _score_candidate;
