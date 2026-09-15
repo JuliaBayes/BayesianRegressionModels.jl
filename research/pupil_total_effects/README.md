@@ -82,14 +82,18 @@ mean coefficients. The integrated target has these three additional arms:
 2. **Post-hoc partial refit:** choose each scalar control from that control fit's
    draws using the variance/Jacobian criterion on `0:0.01:1`, then start a
    fresh fit with those controls fixed.
-3. **Online adaptation:** begin at `c=0` and use WarmupHMC's default weighted
-   position-gradient-correlation criterion on `0:0.1:1`.
+
+Online adaptation was tested in the first Gaussian pilot and failed. It is
+disabled for subsequent runs at the user's request. Its historical fit and
+audit receipts remain available.
 
 For intercepts the source coordinate is
 `c*m + (A-m)*exp((c-1)*log_tau_a)`, with `m=5651.9`; for slopes `m=0`.
 `c=1` gives the physical total coefficient. `c=0` scales the total coefficient;
 it does **not** whiten the induced joint prior and is not an independent-Normal
-NCP. All methods target the same 44-dimensional posterior.
+NCP. The conventional baseline samples 46 parameters; integrating its two
+population coefficients gives the same 44-dimensional marginal posterior
+sampled by the Gaussian integrated fits.
 
 Each fit uses seed 1, one chain, and a 2,000 retained-draw floor. All start
 Pathfinder from the same physical within-subject regression estimates. Other
@@ -103,6 +107,8 @@ Run from the repository root using the existing test environment:
 julia --project=test --startup-file=no research/pupil_total_effects/audit.jl
 PUPIL_TOTAL_OUTPUT=/absolute/new/output/directory \
   kb-run-compact julia --project=test --startup-file=no research/pupil_total_effects/run.jl
+PUPIL_BASELINE_OUTPUT=/absolute/new/baseline/directory \
+  kb-run-compact julia --project=test --startup-file=no research/pupil_total_effects/brms_baseline.jl
 ```
 
 An existing output directory is refused. A `STOP` file in the output directory
@@ -113,8 +119,12 @@ stops at a documented sampler boundary and reports the run as incomplete.
 Each arm writes and prints its own diagnostics immediately: min bulk/tail ESS,
 limiting coordinate, split R-hat, divergences, retained draws and exact gradient
 counts. Primary ESS/gradient covers **all 44 model-frame coordinates**; a
-secondary minimum covers the 40 total coefficients. With one chain, R-hat is
-only a within-chain split diagnostic.
+secondary minimum covers the 40 total coefficients. Both use the same physical
+quantities across fits, not each sampler's internal coordinates. The original
+46-parameter NCP minimum is reported separately. Without conditional recovery
+in the integrated fits, there is no comparison for their full original
+population/deviation parameter set. With one chain, R-hat is only a within-chain
+split diagnostic.
 
 Sampling gradients count the retained sampling epoch; transition gradients
 include discarded epochs and transition warmup. A separate instrumented target
@@ -122,23 +132,94 @@ counts every requested density-and-gradient evaluation, including initialization
 The offline workflow additionally reports pilot plus refit cost. Fit wall time
 includes compilation and checkpoint I/O and is not a controlled timing benchmark.
 
-### First Gaussian integrated-target run
+### Gaussian comparison
 
 Saved receipts are in `results/gaussian/`. All three fits retained 2,000 draws.
 
-| Integrated arm | Min bulk ESS / 1,000 sampling gradients | Divergences |
+| Arm | Min bulk ESS / 1,000 sampling gradients, common 44 quantities | Divergences |
 | --- | ---: | ---: |
+| Conventional brms NCP | 0.918 | 50 |
 | Fixed scaled-total control | 1.210 | 0 |
 | Partial refit | 54.556 | 0 |
-| Online | 1.120 | 1,024 (51.2%) |
+| Historical online failure | 1.120 (unusable) | 1,024 (51.2%) |
+
+The partial refit has 59.4 times the baseline's common-coordinate sampling
+efficiency. Counting its integrated pilot plus all initialization and warmup
+gradient calls reduces that comparison to 15.8 times. Restricting the metric
+to the 40 total coefficients gives 6.821 versus 54.556, about 8.0 times.
+The NCP baseline's own 46-parameter minimum is 0.428, limited by `z_1.1.4`.
+Its 2.5% divergences and the one-chain design limit the comparison.
 
 The online fit failed: max split R-hat was 2.16 and tail ESS was nonfinite.
 Its number is not evidence of usable posterior sampling. Its final source
 gradients, checkpoint gradients and 440 retrospective native candidate-loss
 values passed independent formula checks. The failure is not explained by
-those coordinate/gradient checks. The partial/control efficiency ratio measures
-centering within the integrated target, not a gain against conventional brms NCP.
+those coordinate/gradient checks. A possible implementation defect has not
+been excluded; no cause is asserted and online runs are now disabled.
+
+### Student-t mixture
+
+The second comparison restores the source population-intercept prior through
+
+```
+lambda ~ Gamma(shape=3/2, rate=3/2)
+beta0 | lambda ~ Normal(5651.9, 2026.1/sqrt(lambda)).
+```
+
+The integrated target samples `eta=log(lambda)`. Replace the first term in `v`
+by `2026.1^2*exp(-eta)` and add `log p(lambda) + eta` to the density. This
+adds one sampled mixture coordinate: 45 integrated coordinates versus 46 in
+the conventional Student-t NCP. The 40 centering controls remain independent
+scalar choices; the mixture precision is not reparametrized. Conditional
+Gaussian integration and its gradient remain O(J). `audit_mixture.R` uses
+quadrature solely as an independent check of the Student-t prior identity;
+the sampler performs no numerical integration.
+
+Set `PUPIL_INTERCEPT_PRIOR=student_mixture` for both Julia drivers. The
+conventional baseline uses brms's direct Student-t prior, without a sampled
+mixture variable. The common-quantity comparison excludes the integrated
+precision; the full integrated minimum includes it.
+
+| Arm | Min bulk ESS / 1,000 sampling gradients, common 44 quantities | Divergences |
+| --- | ---: | ---: |
+| Conventional brms Student-t NCP | 0.356 | 0 |
+| Integrated scaled-total control | 0.757 | 0 |
+| Integrated partial refit | 64.457 | 0 |
+
+The common-quantity sampling ratio is 180.9 times. Charging the integrated
+pilot plus refit gives 168,932 all-gradient calls, 11.395 minimum ESS per
+1,000 calls, and a 37.3-times comparison against the conventional baseline's
+all-gradient efficiency. This includes initialization and warmup in each arm.
+
+Each retained 2,000 draws. The partial minimum is `total_load[702]`; including
+the mixture precision does not change it. Its max split R-hat is 1.0063,
+versus 1.0091 for NCP and 1.0300 for the integrated control. These remain
+one-chain smoke results. Gaussian and Student-t comparisons concern different
+priors and are kept separate.
+
+### Saved-draw checks and figures
+
+`compare_saved.jl INTEGRATED_DIR BASELINE_DIR` compares the means of the common
+44 quantities, with mean MCSE, and writes sampling/workflow efficiency ratios.
+This is a descriptive convergence check, not a proof of equivalence.
+In these pilots no common mean differed by more than three estimated combined
+MCSEs (maximum 2.96 for Gaussian and 2.66 for Student-t).
+
+`prepare_pairs.jl INTEGRATED_DIR` exports every retained partial-refit draw in
+three coordinate systems: centered total, scaled total, and selected partial.
+Rows select distinct coordinates by minimum centeredness, nearest 0.5 among
+remaining coordinates, and maximum among the rest. All columns use the same
+draws. `plot_saved.jl` renders native AoV facets using the existing
+`research/adaptive_centering/plots` environment. The centered total is the
+visualization baseline. It is not the conventional deviation CP, and the
+scaled total is not the conventional brms NCP.
 
 Density audits, fitted sources, package provenance, learned controls, fit files
 and checkpoints are preserved in the run directory. `export_reference.R`
 exports original/modified brms source and standata without sampling in brms.
+The committed `results/*/fits/` archives also preserve every completed fit
+record, including the failed Gaussian online record, with compressed and
+uncompressed SHA-256 receipts. Decompress these Julia 1.10.11 `.jls` files and
+load `model.jl` before deserializing Student-mixture records. The conventional
+records retain both native NCP draws and their named/common transformations;
+integrated records retain physical draws, controls and exact cost counters.

@@ -9,6 +9,23 @@ const INTERCEPT_SD = 2026.1
 const GROUP_SCALE = 2026.1
 const LOG_SIGMA_SCALE = 2.5
 
+abstract type MeanPrior end
+struct GaussianMean <: MeanPrior end
+struct StudentMixtureMean <: MeanPrior end
+extra_dimensions(::GaussianMean) = 0
+extra_dimensions(::StudentMixtureMean) = 1
+mean_variance(::GaussianMean, q) = INTERCEPT_SD^2
+mean_variance(::StudentMixtureMean, q) = INTERCEPT_SD^2*exp(-q[end])
+mixture_term!(g, ::GaussianMean, q, h, v) = 0.0
+function mixture_term!(g, ::StudentMixtureMean, q, h, v)
+    eta = q[end]
+    lambda = exp(eta)
+    variance = INTERCEPT_SD^2*exp(-eta)
+    # lambda ~ Gamma(nu/2, rate=nu/2); beta0|lambda ~ Normal(m,s/sqrt(lambda)).
+    g[end] = 1.5 - 1.5lambda + variance/2*(1/v-h^2/v^2)
+    logpdf(Gamma(1.5,2/3),lambda) + eta
+end
+
 struct PupilData
     ids::Vector{Int}
     group::Vector{Int}
@@ -46,18 +63,21 @@ function load_data(path=joinpath(@__DIR__, "reference", "pupil.csv"))
 end
 
 """Physical model frame: log(tau_a), log(tau_b), gamma0, gamma1, A[1:J], B[1:J]."""
-struct PupilProblem
+struct PupilProblem{P<:MeanPrior}
     data::PupilData
     gradient_calls::Base.RefValue{Int}
+    mean_prior::P
 end
-PupilProblem(data=load_data()) = PupilProblem(data, Ref(0))
-LogDensityProblems.dimension(p::PupilProblem) = 4 + 2length(p.data.ids)
-LogDensityProblems.capabilities(::Type{PupilProblem}) = LogDensityProblems.LogDensityOrder{1}()
+PupilProblem(data=load_data(), prior=GaussianMean()) = PupilProblem(data, Ref(0), prior)
+LogDensityProblems.dimension(p::PupilProblem) = 4 + 2length(p.data.ids) + extra_dimensions(p.mean_prior)
+LogDensityProblems.capabilities(::Type{<:PupilProblem}) = LogDensityProblems.LogDensityOrder{1}()
 
 function coordinate_names(data)
     vcat(["log_tau_intercept", "log_tau_load", "log_sigma_intercept", "log_sigma_subj_slope"],
          ["total_intercept[$id]" for id in data.ids], ["total_load[$id]" for id in data.ids])
 end
+coordinate_names(data, ::GaussianMean) = coordinate_names(data)
+coordinate_names(data, ::StudentMixtureMean) = vcat(coordinate_names(data),"log_intercept_mixture_precision")
 
 student3_log(x, scale) = log(2 / (pi * sqrt(3) * scale)) - 2log1p(x^2 / (3scale^2))
 student3_grad(x, scale) = -4x / (3scale^2 + x^2)
@@ -65,7 +85,7 @@ student3_grad(x, scale) = -4x / (3scale^2 + x^2)
 function evaluate(p::PupilProblem, q)
     d = p.data
     J = length(d.ids)
-    length(q) == 4 + 2J || throw(DimensionMismatch())
+    length(q) == LogDensityProblems.dimension(p) || throw(DimensionMismatch())
     g = zeros(length(q))
     all(isfinite, q) || return -Inf, g
     la, lb, gamma0, gamma1 = q[1:4]
@@ -81,11 +101,13 @@ function evaluate(p::PupilProblem, q)
     # effects leaves a proper Gaussian factor on mean(A)+xbar*mean(B), and a
     # flat common-slope direction. No flat group-effect prior is introduced.
     h = ma + d.xbar * mb - INTERCEPT_MEAN
-    v = INTERCEPT_SD^2 + (va + d.xbar^2 * vb) / J
+    v = mean_variance(p.mean_prior,q) + (va + d.xbar^2 * vb) / J
+    isfinite(v) && v > 0 || return -Inf, g
     lp = -(J-1)*log(2pi) - log(J) - (J-1)*(la+lb) - (qa/va + qb/vb)/2
     lp += -(log(2pi*v) + h^2/v)/2
     g[1] = -(J-1) + qa/va + va/J*(h^2/v^2 - 1/v)
     g[2] = -(J-1) + qb/vb + d.xbar^2*vb/J*(h^2/v^2 - 1/v)
+    lp += mixture_term!(g,p.mean_prior,q,h,v)
     for (k, variance, ell) in ((1, va, la), (2, vb, lb))
         tau = sqrt(variance)
         lp += log(2) + student3_log(tau, GROUP_SCALE) + ell
@@ -126,6 +148,8 @@ function initial_position(d::PupilData)
     vcat(log(max(std(A), 1.0)), log(max(std(d.slope), 1.0)), mean(log.(sigmas)),
          0.0, A, d.slope)
 end
+initial_position(d, ::GaussianMean) = initial_position(d)
+initial_position(d, ::StudentMixtureMean) = vcat(initial_position(d),0.0)
 
 function to_source(q, controls, d)
     J = length(d.ids)

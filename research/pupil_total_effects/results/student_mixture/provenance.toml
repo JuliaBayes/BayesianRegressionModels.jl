@@ -1,0 +1,28 @@
+groups = 20
+original_parameters_recovered = false
+sampled_dimensions = 45
+timing_scope = "full sampler call including Pathfinder, first-use compilation and checkpoint IO; not a timing benchmark"
+sigma_slope_prior = "flat"
+intercept_prior = "student_mixture"
+online_status = "disabled at user request 2026-09-15T14:23:49+02:00; historical failed fit preserved"
+chains_each_arm = 1
+data_sha256 = "27e73bec304bc68271b0a9d46b1736a7c8e62fd8dcfac7d20704524c47edc8e8"
+seed_each_arm = 1
+julia_version = "1.10.11"
+draw_floor_each_arm = 2000
+population_load_prior = "flat, as in brms source; integrated out"
+posterior_scope = "same independent-RE pupil posterior for each intercept-prior comparison; forum model additionally has correlated REs"
+ess_scope = "all model-frame coordinates; common minimum excludes any mixture precision"
+source_data_revision = "d90fc01e6f6fcdced7ee64c9d2ed607d212ec77c"
+observations = 2228
+group_sd_priors = "half student_t(3,0,2026.1)"
+comparison_baseline = "conventional brms NCP, run separately with brms_baseline.jl"
+source_post = "https://discourse.mc-stan.org/t/help-testing-brms-pr-for-sum-to-zero-and-partial-centering/41542/3"
+transform_gradient_error = 1.6759440939252117e-7
+sigma_intercept_prior = "student_t(3,0,2.5)"
+integrated_control = "fixed c=0 scaled total coefficients; not independent-standard-normal NCP"
+offline_criterion = "log standard deviation plus inverse log-Jacobian; grid 0:0.01:1"
+git_commit = "e51ee53688a4c47b708686d390de6c6d125b5073"
+residual_model = "log_sigma=gamma0+gamma1*(numeric_subj-mean_numeric_subj)"
+changes_from_post = "independent random intercept/load effects; original Student-t mean-intercept prior via exact mixture"
+integrated_dimensions = 2

@@ -12,6 +12,8 @@ writeLines(make_stancode(original, data=df_pupil_complete),
            file.path(root,"post3-original.stan"))
 writeLines(make_stancode(modified, data=df_pupil_complete, prior=prior),
            file.path(root,"pupil-uncorrelated-gaussian.stan"))
+writeLines(make_stancode(modified, data=df_pupil_complete),
+           file.path(root,"pupil-uncorrelated-student.stan"))
 write.table(get_prior(modified, data=df_pupil_complete, prior=prior),
             file.path(root,"priors.tsv"), sep="\t", row.names=FALSE, quote=FALSE)
 data <- make_standata(modified, data=df_pupil_complete, prior=prior)

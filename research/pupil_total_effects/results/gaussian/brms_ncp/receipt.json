@@ -1,0 +1,15 @@
+{
+  "target": "actual brms-emitted independent-RE Gaussian-intercept NCP",
+  "source_base": "e51ee53",
+  "source_note": "model/audit/run read from Gaussian-producing commit; brms_baseline.jl is exact successful driver",
+  "warmuphmc_commit": "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2",
+  "seed": 1,
+  "chains": 1,
+  "retained_draws": 2000,
+  "inner_session": 11073,
+  "exit_code": 0,
+  "wrapper_seconds": 84,
+  "wrapper_log": "kb-run-compact.HVXiyU",
+  "raw_fits": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil-brms-baseline-v3",
+  "comparison_scope": "common 44 total-coefficient/hyperparameter coordinates; original 46 NCP minimum separate"
+}

@@ -1,0 +1,18 @@
+{
+  "producer": "AlgebraOfVega",
+  "aov_commit": "412422660d859a468b8357a11527ff0033e0881c",
+  "run": "pupil-student-total-v1",
+  "source_draws": "partial.jls",
+  "draws_per_panel": 2000,
+  "panels": 9,
+  "plotted_rows": 18000,
+  "selection": "minimum c; closest to 0.5 among unused; maximum among unused",
+  "same_draws_all_columns": true,
+  "visualization_baseline": "centered total coefficients",
+  "spec_sha256": "f024355d0c45bda74d9e7745e06c1cd97dd612d56c5c6d816d7656e9bd914590",
+  "rows_sha256": "bdcdc74b52dc0cab43e2d76ed3806ee2b47681d5e7d82bdb2e047b56d363cd3b",
+  "render_exit": 0,
+  "render_log": "kb-run-compact.2Dnpas",
+  "static_visual_inspection": "passed; no overlapping facet labels",
+  "online": "not plotted; disabled"
+}

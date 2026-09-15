@@ -1,0 +1,4 @@
+selection	coordinate	parameter	centeredness
+Minimum c	40	total_load[720]	0.6
+Nearest 0.5 (distinct)	37	total_load[717]	0.63
+Maximum c (distinct)	1	total_intercept[701]	1.0

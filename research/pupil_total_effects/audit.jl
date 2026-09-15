@@ -14,12 +14,13 @@ function reference_density(p, q)
     tau = exp.(q[1:2])
     D = Diagonal(tau.^2)
     T = [1.0 -d.xbar; 0.0 1.0]
-    precision = Diagonal([inv(PTE.INTERCEPT_SD^2), 0.0]) + J*T'*(D\T)
+    prior_variance = PTE.mean_variance(p.mean_prior,q)
+    precision = Diagonal([inv(prior_variance), 0.0]) + J*T'*(D\T)
     covariance = inv(Symmetric(precision))
-    natural = [PTE.INTERCEPT_MEAN/PTE.INTERCEPT_SD^2, 0.0] + T'*(D\[sum(A),sum(B)])
+    natural = [PTE.INTERCEPT_MEAN/prior_variance, 0.0] + T'*(D\[sum(A),sum(B)])
     conditional_mean = covariance * natural
     beta = [5700.0, 40.0]
-    lp = logpdf(Normal(PTE.INTERCEPT_MEAN, PTE.INTERCEPT_SD), beta[1])
+    lp = logpdf(Normal(PTE.INTERCEPT_MEAN, sqrt(prior_variance)), beta[1])
     for j in 1:J
         lp += logpdf(MvNormal(T*beta, D), [A[j], B[j]])
     end
@@ -28,6 +29,9 @@ function reference_density(p, q)
         lp += logpdf(truncated(LocationScale(0.0, PTE.GROUP_SCALE, TDist(3)), 0, Inf), t) + log(t)
     end
     lp += logpdf(LocationScale(0.0, PTE.LOG_SIGMA_SCALE, TDist(3)), q[3])
+    if p.mean_prior isa PTE.StudentMixtureMean
+        lp += logpdf(Gamma(1.5,2/3),exp(q[end])) + q[end]
+    end
     for i in eachindex(d.y)
         j = d.group[i]
         sigma = exp(q[3] + q[4]*(d.ids[j]-d.idbar))
@@ -47,10 +51,10 @@ end
 
 function audit_model(p)
     rng = Xoshiro(9241)
-    initial = PTE.initial_position(p.data)
+    initial = PTE.initial_position(p.data,p.mean_prior)
     rows = NamedTuple[]
     @testset "Pupil induced target and independent gradients" begin
-        @test LogDensityProblems.dimension(p) == 44
+        @test LogDensityProblems.dimension(p) == 44 + PTE.extra_dimensions(p.mean_prior)
         for k in 1:12
             q = copy(initial)
             q[1:2] .+= 0.7randn(rng, 2)
@@ -58,6 +62,7 @@ function audit_model(p)
             q[4] = 0.01randn(rng)
             q[5:24] .+= 80randn(rng, 20)
             q[25:44] .+= 8randn(rng, 20)
+            p.mean_prior isa PTE.StudentMixtureMean && (q[end] = randn(rng))
             value, g = PTE.evaluate(p, q)
             reference = reference_density(p, q)
             fd = numerical_gradient(x -> reference_density(p,x), q)
