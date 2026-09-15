@@ -325,14 +325,18 @@ sum to something positive on every row. It does not combine with `|ID|`,
 The StanBlocks backend uses **total coefficients** by default for eligible
 independent random effects. For example, in
 
-```julia
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
 builder = @brm begin
     mu ~ 1 + x + (1 | subject_effect | subject)
     effect(mu, Intercept) ~ Normal(0, 3)
     sd(:, subject_effect) ~ Normal(0, 1)
     y ~ Normal(mu, 1)
 end
-sb = SBBRMI(builder(data))
+data = (; subject=[1, 1, 2, 2, 3, 3], x=[0., 1., 0., 1., 0., 1.],
+          y=[0.2, 0.8, -0.1, 0.9, 0.4, 1.2])
+total_intercept_model = builder(data)
+""", :total_intercept_model; title="Exact total intercepts with a fixed slope")
 ```
 
 the sampled group intercept is `total[j] = intercept + deviation[j]`.
@@ -380,6 +384,7 @@ BRM discovers each total's scale and supplies independent centering controls:
 using Random, Enzyme, WarmupHMC, BridgeStan, StanBlocks
 using DifferentiationInterface: AutoEnzyme
 
+sb = SBBRMI(total_intercept_model)
 problem = StanBlocks.stan_instantiate(sb.model)
 backend = AutoEnzyme(;
     mode=Enzyme.set_runtime_activity(Enzyme.Reverse),
