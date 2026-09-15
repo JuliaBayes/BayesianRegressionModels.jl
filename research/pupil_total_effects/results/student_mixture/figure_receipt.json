@@ -9,10 +9,15 @@
   "selection": "minimum c; closest to 0.5 among unused; maximum among unused",
   "same_draws_all_columns": true,
   "visualization_baseline": "centered total coefficients",
-  "spec_sha256": "f024355d0c45bda74d9e7745e06c1cd97dd612d56c5c6d816d7656e9bd914590",
-  "rows_sha256": "bdcdc74b52dc0cab43e2d76ed3806ee2b47681d5e7d82bdb2e047b56d363cd3b",
+  "spec_sha256": "217f0faf07b06094250951e8084200e0fed955055c430896728398d76a93b488",
+  "rows_sha256": "f8d64a25c15227e51725553420211d051a272e3819ce13feaa4b6496f4781efc",
   "render_exit": 0,
-  "render_log": "kb-run-compact.2Dnpas",
-  "static_visual_inspection": "passed; no overlapping facet labels",
-  "online": "not plotted; disabled"
+  "render_log": "kb-run-compact.yqTwYo",
+  "static_visual_inspection": "Student-t render inspected: passed, no overlapping labels; Gaussian uses identical layout",
+  "online": "not plotted; disabled",
+  "column_labels": [
+    "CP",
+    "NCP",
+    "ACP (offline)"
+  ]
 }

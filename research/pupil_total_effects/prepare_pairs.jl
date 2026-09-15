@@ -20,7 +20,7 @@ function prepare_pairs(output)
         kind = j<=20 ? "A" : "B"
         subject = data.ids[mod1(j,20)]
         panel = "$k: $kind$subject (c=$(controls[j]))"
-        for (column,c) in (("1. Centered total",1.0),("2. Scaled total",0.0),("3. Selected partial",controls[j]))
+        for (column,c) in (("1. CP",1.0),("2. NCP",0.0),("3. ACP (offline)",controls[j]))
             for s in axes(fit.positions,2)
                 ell = fit.positions[j<=20 ? 1 : 2,s]
                 value = fit.positions[4+j,s]

@@ -1,0 +1,61 @@
+CmdStan path set to: /home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering-park-pupil-air/cmdstan-2.39.0
+Running MCMC with 1 chain...
+
+Chain 1 Iteration:    1 / 3000 [  0%]  (Warmup) 
+Chain 1 Informational Message: The current Metropolis proposal is about to be rejected because of the following issue:
+Chain 1 Exception: normal_lpdf: Scale parameter[1] is 0, but must be positive! (in '/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/RtmpLQbUDf/model-7611336de.stan', line 74, column 4 to column 41)
+Chain 1 If this warning occurs sporadically, such as for highly constrained variable types like covariance matrices, then the sampler is fine,
+Chain 1 but if this warning occurs often then your model may be either severely ill-conditioned or misspecified.
+Chain 1 
+Chain 1 Informational Message: The current Metropolis proposal is about to be rejected because of the following issue:
+Chain 1 Exception: normal_lpdf: Scale parameter[1] is 0, but must be positive! (in '/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/RtmpLQbUDf/model-7611336de.stan', line 74, column 4 to column 41)
+Chain 1 If this warning occurs sporadically, such as for highly constrained variable types like covariance matrices, then the sampler is fine,
+Chain 1 but if this warning occurs often then your model may be either severely ill-conditioned or misspecified.
+Chain 1 
+Chain 1 Informational Message: The current Metropolis proposal is about to be rejected because of the following issue:
+Chain 1 Exception: normal_lpdf: Scale parameter[1] is 0, but must be positive! (in '/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/RtmpLQbUDf/model-7611336de.stan', line 74, column 4 to column 41)
+Chain 1 If this warning occurs sporadically, such as for highly constrained variable types like covariance matrices, then the sampler is fine,
+Chain 1 but if this warning occurs often then your model may be either severely ill-conditioned or misspecified.
+Chain 1 
+Chain 1 Informational Message: The current Metropolis proposal is about to be rejected because of the following issue:
+Chain 1 Exception: normal_lpdf: Scale parameter[1] is 0, but must be positive! (in '/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/RtmpLQbUDf/model-7611336de.stan', line 74, column 4 to column 41)
+Chain 1 If this warning occurs sporadically, such as for highly constrained variable types like covariance matrices, then the sampler is fine,
+Chain 1 but if this warning occurs often then your model may be either severely ill-conditioned or misspecified.
+Chain 1 
+Chain 1 Informational Message: The current Metropolis proposal is about to be rejected because of the following issue:
+Chain 1 Exception: normal_lpdf: Scale parameter[1] is 0, but must be positive! (in '/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/RtmpLQbUDf/model-7611336de.stan', line 74, column 4 to column 41)
+Chain 1 If this warning occurs sporadically, such as for highly constrained variable types like covariance matrices, then the sampler is fine,
+Chain 1 but if this warning occurs often then your model may be either severely ill-conditioned or misspecified.
+Chain 1 
+Chain 1 Informational Message: The current Metropolis proposal is about to be rejected because of the following issue:
+Chain 1 Exception: normal_lpdf: Scale parameter[1] is 0, but must be positive! (in '/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/RtmpLQbUDf/model-7611336de.stan', line 74, column 4 to column 41)
+Chain 1 If this warning occurs sporadically, such as for highly constrained variable types like covariance matrices, then the sampler is fine,
+Chain 1 but if this warning occurs often then your model may be either severely ill-conditioned or misspecified.
+Chain 1 
+Chain 1 Informational Message: The current Metropolis proposal is about to be rejected because of the following issue:
+Chain 1 Exception: normal_lpdf: Scale parameter[1] is 0, but must be positive! (in '/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/RtmpLQbUDf/model-7611336de.stan', line 74, column 4 to column 41)
+Chain 1 If this warning occurs sporadically, such as for highly constrained variable types like covariance matrices, then the sampler is fine,
+Chain 1 but if this warning occurs often then your model may be either severely ill-conditioned or misspecified.
+Chain 1 
+Chain 1 Informational Message: The current Metropolis proposal is about to be rejected because of the following issue:
+Chain 1 Exception: normal_lpdf: Scale parameter[1] is 0, but must be positive! (in '/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/RtmpLQbUDf/model-7611336de.stan', line 74, column 4 to column 41)
+Chain 1 If this warning occurs sporadically, such as for highly constrained variable types like covariance matrices, then the sampler is fine,
+Chain 1 but if this warning occurs often then your model may be either severely ill-conditioned or misspecified.
+Chain 1 
+Chain 1 Iteration:  500 / 3000 [ 16%]  (Warmup) 
+Chain 1 Iteration: 1000 / 3000 [ 33%]  (Warmup) 
+Chain 1 Iteration: 1001 / 3000 [ 33%]  (Sampling) 
+Chain 1 Iteration: 1500 / 3000 [ 50%]  (Sampling) 
+Chain 1 Iteration: 2000 / 3000 [ 66%]  (Sampling) 
+Chain 1 Iteration: 2500 / 3000 [ 83%]  (Sampling) 
+Chain 1 Iteration: 3000 / 3000 [100%]  (Sampling) 
+Chain 1 finished in 219.5 seconds.
+Warning: 42 of 2000 (2.0%) transitions hit the maximum treedepth limit of 10.
+See https://mc-stan.org/misc/warnings for details.
+
+  sampling_gradients all_gradient_calls warmup_and_initial_gradients
+1             852992            1223801                       370809
+  divergences max_depth_hits sampling_rows warmup_rows
+1           0             42          2000        1000
+NATIVE_COMPLETE	 /home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil-gaussian-native-v1 
+[kb-run-compact] exit=0 elapsed=238s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.rcTNid

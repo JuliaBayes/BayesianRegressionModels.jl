@@ -4,14 +4,15 @@ This is a manual WarmupHMC experiment for [pupil post 3](https://discourse.mc-st
 It uses all 2,228 observations from 20 subjects, in their original order.
 The original data and a lossless CSV export are pinned in `reference/`.
 
-The user requested two changes to the forum model:
+The first Gaussian sensitivity used two changes to the forum model:
 
 - Independent random intercept and load effects, replacing the learned correlation.
 - `Normal(5651.9, 2026.1)` for the mean population intercept, replacing its
   Student-t prior. These numbers match the original location and scale, not
   its variance.
 
-The corresponding explicit brms model is:
+The current comparison restores the Student-t intercept prior and retains
+independent random effects. The earlier Gaussian sensitivity was:
 
 ```r
 brm(bf(p_size ~ load + (load || subj), sigma ~ subj),
@@ -75,7 +76,7 @@ identity; it compares all coordinate gradients by finite differences.
 ## Comparison arms
 
 The comparison baseline is the conventional brms NCP, retaining both population
-mean coefficients. The integrated target has these three additional arms:
+mean coefficients. The integrated target has these two additional arms:
 
 1. **Scaled total coefficients:** ordinary WarmupHMC with fixed centering
    controls `c=0`. This additional control still learns its linear transformation.
@@ -99,7 +100,8 @@ Each fit uses seed 1, one chain, and a 2,000 retained-draw floor. All start
 Pathfinder from the same physical within-subject regression estimates. Other
 WarmupHMC settings are defaults. Returned positions are already in the model
 frame; saved checkpoints are verified using their own source-to-model map.
-Original population/deviation parameters are not reconstructed.
+The original runs saved marginal draws; the recovery follow-up below now
+reconstructs population/deviation parameters from those saved draws.
 
 Run from the repository root using the existing test environment:
 
@@ -121,10 +123,9 @@ limiting coordinate, split R-hat, divergences, retained draws and exact gradient
 counts. Primary ESS/gradient covers **all 44 model-frame coordinates**; a
 secondary minimum covers the 40 total coefficients. Both use the same physical
 quantities across fits, not each sampler's internal coordinates. The original
-46-parameter NCP minimum is reported separately. Without conditional recovery
-in the integrated fits, there is no comparison for their full original
-population/deviation parameter set. With one chain, R-hat is only a within-chain
-split diagnostic.
+46-parameter NCP minimum is reported separately. Conditional recovery below
+adds a separate comparison for the original population/deviation parameters.
+With one chain, R-hat is only a within-chain split diagnostic.
 
 Sampling gradients count the retained sampling epoch; transition gradients
 include discarded epochs and transition warmup. A separate instrumented target
@@ -206,7 +207,8 @@ In these pilots no common mean differed by more than three estimated combined
 MCSEs (maximum 2.96 for Gaussian and 2.66 for Student-t).
 
 `prepare_pairs.jl INTEGRATED_DIR` exports every retained partial-refit draw in
-three coordinate systems: centered total, scaled total, and selected partial.
+three coordinate systems: CP, NCP, and offline adaptive partial centering (ACP),
+all applied to total coefficients.
 Rows select distinct coordinates by minimum centeredness, nearest 0.5 among
 remaining coordinates, and maximum among the rest. All columns use the same
 draws. `plot_saved.jl` renders native AoV facets using the existing
@@ -289,3 +291,32 @@ variance is conditional recovery variance. Its conditional-mean MCSE is 0.225;
 the recovered MCSE is about 12.08 (median across seeds). Its conditional-mean
 and recovered bulk ESS are both about 2,000. This is why MCSE and the shared
 total-coefficient diagnostics accompany recovered-parameter ESS.
+
+## Native Stan sensitivity
+
+`native_stan.R` samples the exact exported ordinary brms target under
+CmdStan 2.39.0, CmdStanR 0.9.0: one chain, seed 1, 1,000 warmup iterations,
+2,000 retained draws, diagonal-metric NUTS, target acceptance 0.8, maximum
+depth 10. It receives the same physical OLS initialization as WHMC; WHMC
+additionally applies its usual Pathfinder and adaptive warmup policy.
+
+| Intercept prior | Sampler | Common 44 min ESS / 1,000 sampling gradients | Sampling gradients | All gradients | Divergences |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Gaussian | WHMC | 0.918 | 154,742 | 166,865 | 50 |
+| Gaussian | Native Stan | 0.465 | 852,992 | 1,223,801 | 0 |
+| Student-t | WHMC | 0.356 | 234,960 | 274,051 | 0 |
+| Student-t | Native Stan | 0.472 | 682,496 | 1,063,829 | 0 |
+
+The native Gaussian and Student-t fits hit depth 10 on 42 and 14 sampling
+iterations respectively. Their common-coordinate minima are both the random
+intercept SD (reported in log units); maximum within-chain split R-hat is
+1.0065 and 1.0057. These are individual smoke fits, not repeated benchmarks.
+
+The injected C++ counter increments on reverse-mode target evaluations and
+returns exactly zero to the density. Every retained counter increment equals
+that transition's leapfrog count plus one. Final process receipts verify all
+calls, including initialization and warmup. Source instrumentation is reversible;
+the original Stan source is preserved. `analyze_native.jl` uses named native
+columns to construct the same common totals and original-parameter scopes as
+the WHMC analysis. Full native CSVs, fit records, cost receipts and exact
+executed source are archived under `results/*/native_ncp/`.
