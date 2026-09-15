@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 import sys
+from urllib.parse import urlencode
 
 root = Path(__file__).resolve().parent
 results = root / "results"
@@ -33,7 +34,7 @@ for token, name, title, alt in (
     body = body.replace("{{" + token + "}}", figure(name, title, alt))
 
 def link(label, path):
-    return f"[{label}]({root / path})"
+    return f"[{label}](/code?{urlencode({'path': str(root / path), 'host': 'strato2'})})"
 
 groups = [
     ("BRM formula, automatic target and independent audit", [("model and priors", "common.jl"), ("density/gradient/recovery audit", "audit.jl"), ("generated Stan", "reference/automatic_totals/automatic_totals.stan"), ("exact data", "reference/automatic_totals/automatic_totals.json")]),

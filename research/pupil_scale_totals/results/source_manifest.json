@@ -21,8 +21,8 @@
   },
   {
     "path": "build_brief.py",
-    "bytes": 4466,
-    "sha256": "02280cd287f19f22d011a44fa9c11d98c1978c525795f574fb8a907f405bfcb0"
+    "bytes": 4552,
+    "sha256": "7ee1c91fa31c37c15a43b4c0a80d0c46b931a92a83feeaf3559105393753b487"
   },
   {
     "path": "capture.R",
