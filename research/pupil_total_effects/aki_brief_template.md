@@ -23,9 +23,11 @@ brms S2Z auto + WHMC are essentially tied for the best total efficiency**.
 Neither S2Z nor exact total-coefficient marginalization makes the NCP endpoint
 efficient here. Centering is a major part of the observed improvement.
 
-These are measured smoke tests, not a replicated performance ranking. The
-primary comparison uses identical physical quantities without conditional
-recovery noise. We report recovered original parameters separately below.
+These are measured smoke tests, not a replicated performance ranking. One
+table compares the **same 46 scientific quantities** throughout: population
+coefficients, group scales, residual-model coefficients and subject-specific
+total coefficients. Marginalized methods conditionally recover the population
+coefficients; that recovery and its effect on ESS are explained below.
 
 ## 1. Exact model and data
 
@@ -205,6 +207,15 @@ source and resolved data/weights** to native Stan and BridgeStan + WHMC.
 The precursor cost was 789 gradient calls, charged to both workflows. There
 is no retuning of brms's weights using the WHMC result.
 
+![The same 2,000 retained brms S2Z auto + WHMC draws viewed in CP, NCP and brms auto coordinates. Rows select distinct subject/term weights by minimum rho, nearest 0.5 among remaining weights, and maximum among the rest. Lowercase a and b denote zero-sum intercept and slope contrasts. Each displayed vector has 20 subject-labelled entries but only 19 independent directions.](results/student_mixture/qoi46/s2z_pairs.png)
+
+The CP column shows physical zero-sum contrasts $r_j$, NCP shows $r_j/\tau$,
+and ACP shows the subject-labelled source coordinates $(Qz)_j$ of the auto
+fit. The latter uses the full inverse transformation, including the shared
+centering correction. These are constrained coordinates for visualization;
+the sampler uses the 19 independent entries of $z$ per term. This plot's
+contrasts differ from the complete subject totals in the preceding plot.
+
 The ordinary brms CP control uses the same branch's `center=TRUE` without
 S2Z. Its generated convention incorporates the population slope into the
 centered slope coordinates while leaving the random intercept coordinates
@@ -228,11 +239,19 @@ Each completed fit has **one chain, seed 1 and 2,000 retained draws**.
   is therefore not fully controlled across parametrization families; WHMC
   additionally runs Pathfinder from that point.
 
-The primary estimands are the **same 44 physical quantities** in every row:
-20 intercept totals, 20 slope totals, the two group SDs, and the two
-residual-model coefficients. Group SDs are stored in log units; rank-based ESS
-is unchanged by this monotone transformation. Mixture auxiliaries and
-conditionally recovered quantities are excluded from this shared scope.
+The estimands are the **same 46 scientific quantities** in every row:
+
+- Population intercept $\beta_0$ at mean load and population slope $\beta_1$.
+- Group SDs $\tau_a,\tau_b$ and residual-model coefficients $\gamma_0,\gamma_1$.
+- Subject-specific intercept totals $A_1,\ldots,A_{20}$ and slope totals
+  $B_1,\ldots,B_{20}$.
+
+Group SDs are stored in log units; rank-based ESS is unchanged by this monotone
+transformation. Population coefficients come directly from ordinary brms and
+from exact conditional recovery for both marginalized representations. Totals
+are deterministic functions of the sampled state in every arm. Deviations,
+standardized sampler coordinates and the auxiliary mixture precision are not
+additional quantities in the minimum.
 
 We report minimum rank-normalized bulk ESS with these three cost quantities:
 
@@ -242,15 +261,17 @@ We report minimum rank-normalized bulk ESS with these three cost quantities:
    a longer run after adaptation.
 3. **Min ESS / total gradients:** end-to-end gradient efficiency for this run.
 
-In the tables and numerical comparisons below, both efficiencies are expressed
+In the table, plot and numerical comparisons below, both efficiencies are expressed
 as ratios to **ordinary brms NCP + native Stan**. Each metric is divided by its
 own baseline value, using the same parameter scope, so the baseline is **1×**
 in both efficiency columns. For example, 10× means ten times the baseline's
 minimum ESS per gradient. Total gradient counts remain absolute.
 
 WHMC target wrappers count actual density-and-gradient requests. For native
-Stan, we added an integer counter that increments on gradient evaluations
-without changing the model's log density or gradient. We record its value
+Stan, we use CmdStan's user-defined C++ function support (`user_header` and
+`allow-undefined`) to add an integer counter to the generated model. It
+increments on gradient evaluations without changing the model's log density
+or gradient; the CmdStan NUTS sampler itself is unchanged. We record its value
 throughout each run and at the end of each process, including the auto-centering
 pilot. As a check, every retained NUTS iteration used one gradient evaluation
 at the start of its trajectory plus one per leapfrog step. Required pilot cost
@@ -262,12 +283,19 @@ statistics while generated brms evaluates the observations, so the time per
 gradient differs. These numbers primarily compare sampling/adaptation work;
 we do not claim a controlled wall-time ranking.
 
-## 6. Main results: shared physical quantities
+## 6. Sampling efficiency for the 46 scientific quantities
+
+Each row takes the minimum bulk ESS over the population coefficients, scales,
+residual-model coefficients and subject totals listed above. The baseline's
+minimum ESS is **170.3**, limited by its population intercept at mean load.
+The identical estimands and baseline denominator apply to every row.
 
 **All efficiency entries below are relative to brms NCP + native Stan (1×).**
 “Totals” denotes our exact total-coefficient marginalization.
 
 @@PRIMARY@@
+
+![The table plotted with logarithmic axes. Total gradient cost is better to the left; relative sampling and total efficiencies are better to the right. Orange denotes native Stan and blue WHMC. The baseline is ordinary brms NCP + native Stan; its two efficiencies equal 1. Points are single-chain pilot measurements, without uncertainty intervals.](results/student_mixture/qoi46/efficiency.png)
 
 Several distinctions matter:
 
@@ -279,13 +307,13 @@ Several distinctions matter:
   brms S2Z auto + WHMC give @@CP_TOTAL@@ and @@S2Z_AUTO_TOTAL@@ the baseline's total efficiency. That difference is negligible
   relative to the uncertainty of single-chain runs.
 - **Centering matters strongly:** both marginalized NCP endpoints remain
-  inefficient here. Ordinary brms CP also improves the shared-quantity
-  baseline substantially. Thus a comparison only against ordinary NCP would
+  inefficient here. Ordinary brms CP improves on the ordinary NCP
+  baseline, but its population intercept still limits efficiency. Thus a comparison only against ordinary NCP would
   give an incomplete account of the gains.
 - **Sampler choice and initialization matter:** native and WHMC sampling
   efficiencies differ, and total cost can reverse the impression. For ordinary
-  Student-t NCP, native Stan has better sampling efficiency but nearly the
-  same total efficiency as WHMC.
+  Student-t NCP, WHMC achieves 1.43× the native baseline's sampling efficiency
+  and 1.91× its total efficiency on these quantities.
 
 All Student-t rows have zero sampling divergences. This does not certify
 convergence: the total-NCP control has within-chain split $\hat R$ up to
@@ -296,7 +324,15 @@ combined MCSEs, for native S2Z NCP's `total_load[716]`. These descriptive checks
 and the low-ESS arms motivate replicated convergence checks before strong
 performance claims.
 
-## 7. Conditional recovery and the ESS question
+## 7. Conditional recovery of population coefficients and its effect on ESS
+
+The population coefficients are scientific quantities in the main table.
+Ordinary brms samples them; the two marginalized representations recover them
+using additional conditional random draws. No further HMC transitions are run.
+Subject deviations can also be recovered, but they are not additional headline
+quantities: the table already includes the complete subject-specific effects.
+
+### Exact conditional recovery
 
 Both exact marginalizations permit recovery of the original population
 coefficients and subject deviations. For our representation, condition on
@@ -328,24 +364,8 @@ $$
 After drawing $(\beta_0,\beta_1)$, recover
 $a_j=A_j-\beta_0+\bar x\beta_1$ and $b_j=B_j-\beta_1$.
 This needs no additional HMC. The brms rows use its actual generated-quantity
-recovery; our rows below use recovery seed 101. The independent 20-seed
+recovery; our rows use recovery seed 101. The independent 20-seed
 sensitivity for our fits is retained in the accompanying results.
-
-The following minimum is over the **46 original physical parameters**:
-population intercept/slope, 40 deviations, two group scales and the two
-residual-model coefficients. It answers a different question from the common
-44-total scope. This table normalizes against the **same brms NCP + native Stan
-fit, evaluated on these 46 original parameters**; its baseline is again 1×.
-The denominators therefore differ between the two tables. Comparing their
-relative multipliers directly would conflate recovery with a change in the
-baseline estimands.
-
-@@RECOVERED@@
-
-In particular, ordinary brms CP's shared-total efficiency improves much more
-than its original-parameter efficiency: its population/group decomposition
-still mixes slowly. Conversely, recovering an integrated-out direction can
-substantially alter ESS without changing any sampled marginal state.
 
 To see why, write a recovered quantity as
 $X_t=m(S_t)+\epsilon_t$, where recovery noise has conditional mean zero and is
@@ -375,8 +395,11 @@ intercept variance is conditional recovery variance. Its conditional-mean
 MCSE is **0.225**, while recovered-mean MCSE is approximately **12.08**
 (median over 20 recovery seeds). Both bulk ESS values are about 2,000.
 Thus ESS alone does not reveal the difference in mean-estimation precision.
-The main table avoids this issue by using totals determined directly by the
-sampled marginal state. See the [Stan discussion of ESS and MCSE](https://mc-stan.org/docs/reference-manual/analysis.html#effective-sample-size).
+The main table includes recovered population coefficients because they are
+quantities of interest, and includes totals without recovery noise. Its minimum
+can therefore be limited by either kind of quantity. Per-quantity ESS and MCSE
+are retained so this distinction can be examined directly. See the
+[Stan discussion of ESS and MCSE](https://mc-stan.org/docs/reference-manual/analysis.html#effective-sample-size).
 
 ## 8. Verification, reproducibility and limits
 
@@ -414,9 +437,13 @@ time, behavior of the original correlated-effects pupil model, and behavior
 with multiple crossed group structures. No online-centering result or native
 Stan implementation of our manual total target is included here.
 
+## 9. Inspect the harness and exact generated Stan files
+
+@@CODE_LINKS@@
+
 The most useful next comparison would repeat the promising CP/ACP/S2Z-auto
-arms with matched physical starting states and multiple chains, reporting
-common estimands, recovered estimands and conditional-mean MCSE separately.
+arms with matched physical starting states and multiple chains, keeping this
+scientific scope fixed and checking conditional-mean MCSE for recovered quantities.
 The present result is narrower: **symmetric total coefficients can preserve
 the exact posterior and sample efficiently; a strong CP baseline and full
 pilot accounting materially change the apparent benefit of adaptation.**

@@ -324,34 +324,39 @@ executed source are archived under `results/*/native_ncp/`.
 ## Matched Student-t parametrization matrix
 
 All rows below target the same independent-RE Student-t pupil posterior.
-Primary ESS is the minimum across the common 44 physical quantities. Each fit
+Primary ESS is the minimum across the same 46 scientific quantities: population
+intercept at mean load, population slope, two group SDs, two residual-model
+coefficients, and 40 subject-specific total coefficients. Population coefficients
+are conditionally recovered for marginalized arms; deviations, standardized
+coordinates and the mixture auxiliary are excluded from the minimum. Each fit
 has one chain and 2,000 retained draws; WHMC nonlinear online adaptation is off.
 Total gradients includes initialization, warmup and any required precursor or
-offline pilot. The final two columns are ESS per gradient, without a factor of
-1,000. Full numbers and original-parameter scopes are in
-`results/student_mixture/matrix/`.
+offline pilot. The final two columns are relative to ordinary brms NCP + native
+Stan on these same 46 quantities (baseline minimum ESS 170.298). Full numbers
+and per-QOI ESS/MCSE are in `results/student_mixture/qoi46/`. Historical
+diagnostic scopes are retained in `results/student_mixture/matrix/`.
 
-| Model | Sampler | Total gradients | Min ESS / sampling gradient | Min ESS / total gradient |
+| Model | Sampler | Total gradients | Relative sampling efficiency | Relative total efficiency |
 |---|---|---:|---:|---:|
-| brms NCP | Native Stan | 1063829 | 0.0004719 | 0.0003027 |
-| brms NCP | WHMC | 274051 | 0.0003564 | 0.0003056 |
-| brms CP | WHMC | 80373 | 0.0119 | 0.01107 |
-| brms S2Z CP | Native Stan | 319693 | 0.0339 | 0.006423 |
-| brms S2Z CP | WHMC | 188667 | 0.03541 | 0.01097 |
-| brms S2Z NCP | Native Stan | 771035 | 0.0002924 | 0.0001945 |
-| brms S2Z NCP | WHMC | 123267 | 0.0007962 | 0.0007166 |
-| brms S2Z auto | Native Stan | 150012 | 0.04659 | 0.01002 |
-| brms S2Z auto | WHMC | 64875 | 0.04332 | 0.03116 |
-| total coefficients CP | WHMC | 54587 | 0.03265 | 0.03118 |
-| total coefficients NCP | WHMC | 134652 | 0.0007572 | 0.0007147 |
-| total coefficients ACP | WHMC | 168932 | 0.06446 | 0.01139 |
+| brms NCP | Native Stan | 1063829 | 1× | 1× |
+| brms NCP | WHMC | 274051 | 1.43× | 1.91× |
+| brms CP | WHMC | 80373 | 2.54× | 3.68× |
+| brms S2Z CP | Native Stan | 319693 | 135× | 40.0× |
+| brms S2Z CP | WHMC | 188667 | 137× | 66.0× |
+| brms S2Z NCP | Native Stan | 771035 | 1.17× | 1.22× |
+| brms S2Z NCP | WHMC | 123267 | 3.19× | 4.48× |
+| brms S2Z auto | Native Stan | 150012 | 187× | 62.6× |
+| brms S2Z auto | WHMC | 64875 | 173× | 194× |
+| total coefficients CP | WHMC | 54587 | 131× | 195× |
+| total coefficients NCP | WHMC | 134652 | 3.03× | 4.46× |
+| total coefficients ACP | WHMC | 168932 | 258× | 71.2× |
 
 The partial refit has the highest sampling efficiency in this pilot. Once its
 134,652-gradient pilot is charged, fixed total CP and brms S2Z auto under WHMC
 are nearly tied for the best total efficiency. The poor S2Z NCP results show
 that integrating out population means alone does not guarantee good geometry
-in the chosen coordinates. Ordinary brms CP also substantially improves the
-shared-quantity baseline. All Student-t rows have zero sampling divergences,
+in the chosen coordinates. Ordinary brms CP improves on NCP but its population
+intercept still limits efficiency. All Student-t rows have zero sampling divergences,
 but the total NCP control has within-chain split R-hat up to 1.030. This is
 not a replicated ranking or a convergence certification.
 
@@ -413,3 +418,18 @@ Full fit records, native CSVs, resolved auto weights, source capsules, exact
 cost receipts and wrapper logs are archived by arm. `compare_matrix.jl`
 recomputes common, recovered-physical and original-NCP scope comparisons from
 saved draws. No extra HMC is required for that analysis.
+
+`compare_qois.jl` produces the current 46-QOI table and per-quantity MCSE from
+those same saved fits. `prepare_s2z_pairs.jl` audits all 2,000 saved auto-WHMC
+draws against the actual source coordinates, then selects distinct minimum,
+nearest-0.5 and maximum rho subject/term coordinates. Its CP/NCP/auto columns
+show `r`, `r/tau` and `Q*z`, respectively. Each displayed vector has 20
+subject-labelled entries but only 19 independent directions per term.
+`plot_comparison.jl` renders this grid and the three-metric efficiency plot
+through AoV, with native specifications and static PNG exports. The existing
+total-coordinate CP/NCP/ACP grid is reused without refitting.
+
+`build_brief.py` builds the single-scope KB brief with three AoV envelopes.
+`share_sources.py` freezes the harness, exact generated Stan, resolved inputs
+and diagnostics in a byte-hashed source snapshot and adds directly inspectable
+KB file links. Neither script publishes a gist or runs posterior sampling.
