@@ -1,0 +1,23 @@
+{
+  "source_tree": "dd382b8 plus captured matrix drivers",
+  "analysis_exit": 0,
+  "all_fits_retained": 2000,
+  "chains": 1,
+  "seed": 1,
+  "primary_scope": "common44: physical totals and shared hyperparameters; no recovered random quantities",
+  "total_cost": "fit total + auto precursor + required offline pilot",
+  "first_cp_attempts": [
+    {
+      "run": "pupil-s2z-whmc-v1/s2z_cp",
+      "exit": 1,
+      "log": "kb-run-compact.lLnGob",
+      "reason": "one-element vector JSON export; no sampling"
+    },
+    {
+      "run": "pupil-s2z-whmc-v2/s2z_cp",
+      "exit": 1,
+      "log": "kb-run-compact.WLEZ7Y",
+      "reason": "BridgeStan numerical domain exception in Pathfinder ELBO; before sampling"
+    }
+  ]
+}

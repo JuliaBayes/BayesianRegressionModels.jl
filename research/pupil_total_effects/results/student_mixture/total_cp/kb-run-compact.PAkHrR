@@ -1,0 +1,16 @@
+Test Summary:                                  | Pass  Total  Time
+Pupil induced target and independent gradients |   37     37  0.3s
+reparametrization_gradient_relative_error=1.6759440939252117e-7
+boundary	centered_total	init	window=0	all_gradients=138
+boundary	centered_total	window	window=1	all_gradients=1171
+boundary	centered_total	window	window=2	all_gradients=3176
+boundary	centered_total	window	window=3	all_gradients=7194
+boundary	centered_total	window	window=4	all_gradients=15201
+boundary	centered_total	window	window=5	all_gradients=31206
+boundary	centered_total	window	window=6	all_gradients=54587
+RESULT	(arm = "centered_total", retained_draws = 2000, min_bulk_ess = 1702.2751137857306, limiting_parameter = "total_load[705]", min_tail_ess = 1184.508919698348, max_split_rhat = 1.0024177029551438, divergences = 0, divergence_percent = 0.0, sampling_gradients = 52136, transition_gradients = 54449, all_gradient_calls = 54587, min_bulk_ess_per_1000_sampling_gradients = 32.65066583139732, min_bulk_ess_per_1000_all_gradients = 31.18462479685146, min_total_coefficient_ess_per_1000_gradients = 32.65066583139732, min_common_bulk_ess_per_1000_gradients = 32.65066583139732, fit_seconds = 26.731181768, compile_seconds = 26.402404596)
+Test Summary:                            | Pass  Total  Time
+Independent conditional recovery algebra |   60     60  0.0s
+RECOVERY_COMPLETE	centered_total
+FIXED_CP_COMPLETE	/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil-student-total-cp-v1
+[kb-run-compact] exit=0 elapsed=63s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.PAkHrR

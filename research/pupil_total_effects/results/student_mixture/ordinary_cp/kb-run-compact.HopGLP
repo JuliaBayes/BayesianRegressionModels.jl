@@ -1,0 +1,11 @@
+boundary	ordinary_cp	init	window=0	all_gradients=146
+boundary	ordinary_cp	window	window=1	all_gradients=1184
+boundary	ordinary_cp	window	window=2	all_gradients=3269
+boundary	ordinary_cp	window	window=3	all_gradients=7284
+boundary	ordinary_cp	window	window=4	all_gradients=15295
+boundary	ordinary_cp	window	window=5	all_gradients=31304
+boundary	ordinary_cp	window	window=6	all_gradients=63317
+boundary	ordinary_cp	window	window=7	all_gradients=80373
+ORDINARY_CP_RESULT	(arm = "brms_cp_whmc", retained_draws = 2000, min_bulk_ess = 889.4117547246819, limiting_parameter = "log_tau_intercept", min_tail_ess = 1040.445135233054, max_split_rhat = 1.003220919637192, divergences = 0, divergence_percent = 0.0, sampling_gradients = 74768, transition_gradients = 80227, all_gradient_calls = 80373, min_bulk_ess_per_1000_sampling_gradients = 11.895620515791274, min_bulk_ess_per_1000_all_gradients = 11.06605146908392, min_total_coefficient_ess_per_1000_gradients = 22.22358865616558, min_common_bulk_ess_per_1000_gradients = 11.895620515791274, fit_seconds = 33.908393831, compile_seconds = NaN)
+ORDINARY_CP_COMPLETE	/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil-ordinary-cp-whmc-v1
+[kb-run-compact] exit=0 elapsed=68s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.HopGLP

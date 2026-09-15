@@ -1,0 +1,16 @@
+{
+  "run": "pupil-ordinary-cp-whmc-v1",
+  "exit": 0,
+  "log": "kb-run-compact.HopGLP",
+  "wrapper_seconds": 68,
+  "files": [
+    {
+      "path": "brms_cp.jls.gz",
+      "bytes": 2176954,
+      "sha256": "6c0a7065fa594092e728836eea4763507b566ef0635aefb4f7646e2017681311",
+      "compressed_sha256": "f8909b374769c68e6268c87ce6a4d044050875adaca014af30551cc0687be370"
+    }
+  ],
+  "online": false,
+  "initialization": "physical per-subject OLS; WHMC default Pathfinder"
+}

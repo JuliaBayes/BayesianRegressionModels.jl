@@ -1,0 +1,18 @@
+S2Z_AUDIT_PASS	/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil-s2z-whmc-v3/s2z_cp
+S2Z_RESULT	(arm = "s2z_cp_native", retained_draws = 2000, min_bulk_ess = 2053.5232422106214, limiting_parameter = "log_tau_load", min_tail_ess = 859.8206551509876, max_split_rhat = 1.0030361901180018, divergences = 0, divergence_percent = 0.0, sampling_gradients = 60584, transition_gradients = 319693, all_gradient_calls = 319693, min_bulk_ess_per_1000_sampling_gradients = 33.895471448082354, min_bulk_ess_per_1000_all_gradients = 6.423422602967914, min_total_coefficient_ess_per_1000_gradients = 34.38963772674129, min_common_bulk_ess_per_1000_gradients = 33.895471448082354, fit_seconds = NaN, compile_seconds = NaN)
+STAN_NUMERICAL_REJECTION	log_density() failed with exception: Exception: normal_lpdf: Random variable is -nan, but must be not nan! (in '/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil-s2z-whmc-v3/s2z_cp/clean.stan', line 169, column 2 to column 104)
+
+┌ Warning: 41 (40.6%) updates to the inverse Hessian estimate were rejected to keep it positive definite.
+└ @ Pathfinder ~/.julia/packages/Pathfinder/4L3jq/src/singlepath.jl:221
+boundary	s2z_cp	init	window=0	all_gradients=252
+boundary	s2z_cp	window	window=1	all_gradients=1356
+boundary	s2z_cp	window	window=2	all_gradients=3524
+boundary	s2z_cp	window	window=3	all_gradients=7900
+boundary	s2z_cp	window	window=4	all_gradients=15975
+boundary	s2z_cp	window	window=5	all_gradients=31989
+boundary	s2z_cp	window	window=6	all_gradients=64736
+boundary	s2z_cp	window	window=7	all_gradients=128739
+boundary	s2z_cp	window	window=8	all_gradients=188667
+S2Z_RESULT	(arm = "s2z_cp_whmc", retained_draws = 2000, min_bulk_ess = 1838.8996950751584, limiting_parameter = "log_intercept_mixture_precision", min_tail_ess = 893.9277536632397, max_split_rhat = 1.0030510892556586, divergences = 0, divergence_percent = 0.0, sampling_gradients = 58456, transition_gradients = 188415, all_gradient_calls = 188667, min_bulk_ess_per_1000_sampling_gradients = 31.457843421978215, min_bulk_ess_per_1000_all_gradients = 9.746800951280077, min_total_coefficient_ess_per_1000_gradients = 39.470101737095725, min_common_bulk_ess_per_1000_gradients = 35.406073815784225, fit_seconds = 50.67289027, compile_seconds = 22.370675673)
+S2Z_WHMC_COMPLETE	/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil-s2z-whmc-v3/s2z_cp
+[kb-run-compact] exit=0 elapsed=99s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.9Rdc8A

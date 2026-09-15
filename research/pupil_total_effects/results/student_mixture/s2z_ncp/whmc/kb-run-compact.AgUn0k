@@ -1,0 +1,13 @@
+S2Z_AUDIT_PASS	/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil-s2z-whmc-v3/s2z_ncp
+S2Z_RESULT	(arm = "s2z_ncp_native", retained_draws = 2000, min_bulk_ess = 149.97339845151416, limiting_parameter = "log_tau_intercept", min_tail_ess = 262.2939349245891, max_split_rhat = 1.0097906789754827, divergences = 0, divergence_percent = 0.0, sampling_gradients = 512896, transition_gradients = 771035, all_gradient_calls = 771035, min_bulk_ess_per_1000_sampling_gradients = 0.29240508495194767, min_bulk_ess_per_1000_all_gradients = 0.19450919666618788, min_total_coefficient_ess_per_1000_gradients = 4.030842817441387, min_common_bulk_ess_per_1000_gradients = 0.29240508495194767, fit_seconds = NaN, compile_seconds = NaN)
+boundary	s2z_ncp	init	window=0	all_gradients=136
+boundary	s2z_ncp	window	window=1	all_gradients=1674
+boundary	s2z_ncp	window	window=2	all_gradients=3829
+boundary	s2z_ncp	window	window=3	all_gradients=8130
+boundary	s2z_ncp	window	window=4	all_gradients=16157
+boundary	s2z_ncp	window	window=5	all_gradients=32182
+boundary	s2z_ncp	window	window=6	all_gradients=64208
+boundary	s2z_ncp	window	window=7	all_gradients=123267
+S2Z_RESULT	(arm = "s2z_ncp_whmc", retained_draws = 2000, min_bulk_ess = 88.33167026434374, limiting_parameter = "log_tau_intercept", min_tail_ess = 173.96358202830734, max_split_rhat = 1.0105782230132845, divergences = 0, divergence_percent = 0.0, sampling_gradients = 110944, transition_gradients = 123131, all_gradient_calls = 123267, min_bulk_ess_per_1000_sampling_gradients = 0.7961824908453251, min_bulk_ess_per_1000_all_gradients = 0.7165881400889431, min_total_coefficient_ess_per_1000_gradients = 14.121360077524157, min_common_bulk_ess_per_1000_gradients = 0.7961824908453251, fit_seconds = 39.176942546, compile_seconds = 20.832888581)
+S2Z_WHMC_COMPLETE	/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil-s2z-whmc-v3/s2z_ncp
+[kb-run-compact] exit=0 elapsed=87s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.AgUn0k

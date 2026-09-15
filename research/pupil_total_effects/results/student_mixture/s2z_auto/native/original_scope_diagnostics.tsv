@@ -1,0 +1,4 @@
+arm	recovery_seed	scope	min_bulk_ess	limiting_parameter	min_bulk_ess_per_1000_sampling_gradients	min_bulk_ess_per_1000_all_gradients
+s2z_auto_native	1	original_physical46	1693.5677701417574	deviation_load[717]	52.51698617408079	11.349240868644628
+s2z_auto_native	1	original_physical_plus_raw_intercepts48	1693.5677701417574	deviation_load[717]	52.51698617408079	11.349240868644628
+s2z_auto_native	1	original_stan_ncp46	1826.753280301886	log_tau_load	56.6470255613336	12.24176755796282

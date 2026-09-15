@@ -320,3 +320,96 @@ the original Stan source is preserved. `analyze_native.jl` uses named native
 columns to construct the same common totals and original-parameter scopes as
 the WHMC analysis. Full native CSVs, fit records, cost receipts and exact
 executed source are archived under `results/*/native_ncp/`.
+
+## Matched Student-t parametrization matrix
+
+All rows below target the same independent-RE Student-t pupil posterior.
+Primary ESS is the minimum across the common 44 physical quantities. Each fit
+has one chain and 2,000 retained draws; WHMC nonlinear online adaptation is off.
+Total gradients includes initialization, warmup and any required precursor or
+offline pilot. The final two columns are ESS per gradient, without a factor of
+1,000. Full numbers and original-parameter scopes are in
+`results/student_mixture/matrix/`.
+
+| Model | Sampler | Total gradients | Min ESS / sampling gradient | Min ESS / total gradient |
+|---|---|---:|---:|---:|
+| brms NCP | Native Stan | 1063829 | 0.0004719 | 0.0003027 |
+| brms NCP | WHMC | 274051 | 0.0003564 | 0.0003056 |
+| brms CP | WHMC | 80373 | 0.0119 | 0.01107 |
+| brms S2Z CP | Native Stan | 319693 | 0.0339 | 0.006423 |
+| brms S2Z CP | WHMC | 188667 | 0.03541 | 0.01097 |
+| brms S2Z NCP | Native Stan | 771035 | 0.0002924 | 0.0001945 |
+| brms S2Z NCP | WHMC | 123267 | 0.0007962 | 0.0007166 |
+| brms S2Z auto | Native Stan | 150012 | 0.04659 | 0.01002 |
+| brms S2Z auto | WHMC | 64875 | 0.04332 | 0.03116 |
+| total coefficients CP | WHMC | 54587 | 0.03265 | 0.03118 |
+| total coefficients NCP | WHMC | 134652 | 0.0007572 | 0.0007147 |
+| total coefficients ACP | WHMC | 168932 | 0.06446 | 0.01139 |
+
+The partial refit has the highest sampling efficiency in this pilot. Once its
+134,652-gradient pilot is charged, fixed total CP and brms S2Z auto under WHMC
+are nearly tied for the best total efficiency. The poor S2Z NCP results show
+that integrating out population means alone does not guarantee good geometry
+in the chosen coordinates. Ordinary brms CP also substantially improves the
+shared-quantity baseline. All Student-t rows have zero sampling divergences,
+but the total NCP control has within-chain split R-hat up to 1.030. This is
+not a replicated ranking or a convergence certification.
+
+### S2Z target and audit
+
+`s2z_native.R` uses the pinned brms branch at
+`73cf607889879cb2a55f50b88d8141d76ff43279` with
+`gr(subj,cor=FALSE,s2z=TRUE,center=TRUE/FALSE/"auto")`. Native Stan fits each
+resolved target. `s2z_whmc.jl` runs its identical clean source and resolved data
+through BridgeStan and WarmupHMC. The brms auto precursor runs once; its 789
+gradient calls are charged to each method using its fixed weights.
+
+For each of the two coefficient blocks, a J-by-(J-1) orthonormal Helmert matrix
+Q encodes zero-sum physical deviations. CP uses `r=Q*z`; NCP uses `r=tau*Q*z`.
+For auto, with fixed group-labelled weights rho, set
+`scale=1-rho+rho*tau`, `w=tau*(Q*z)/scale`, and `r=w-mean(w)`.
+Two finite-population coefficients and the 38 contrasts replace the original
+42 population/group coefficients after integrating two group means. A Student-t
+mixing variable adds one coordinate, giving 45 total sampled dimensions.
+
+The branch uses `u ~ inv_chi_square(3)` and intercept prior scale
+`2026.1*sqrt(3*u)`; our precision is `lambda=1/(3*u)`. Mapping finite-population
+coefficients theta and physical S2Z deviations to totals gives
+`A=theta[1]-xbar*theta[2]+r_a`, `B=theta[2]+r_b`.
+The source-to-total log determinant is `log(J)` for CP and
+`log(J)+(J-1)*(log(tau_a)+log(tau_b))` for NCP. For auto each contrast block
+adds `(J-1)*log(tau)-sum(log(scale))+log(mean(scale))` to `log(J)`.
+
+Eight nontrivial points per target pass absolute density, finite-difference
+gradient, inverse-transform and generated-quantity reconstruction checks.
+Maximum absolute density discrepancy is below 4.8e-11; maximum normalized
+coordinate-gradient discrepancy is below 2e-7. The same physical totals are
+reconstructed before and after native brms conditional recovery.
+
+The local BridgeStan wrapper rejects recognized numerical-domain exceptions
+from invalid sampler/Pathfinder proposals, like Stan's native sampler. It
+preserves the first complete exception and a rejection count; unrelated errors
+propagate. This was needed when S2Z CP Pathfinder scored a nonfinite proposal.
+No production package was changed. Failed pre-sampling attempts are recorded.
+
+### Initialization and cost limits
+
+Native/WHMC pairs use the same supplied physical initialization. Ordinary and
+integrated fits use per-subject OLS coefficients; S2Z fits use pooled finite-
+population coefficients, zero contrasts, and the same OLS scales. WHMC then
+runs Pathfinder, whereas native Stan applies its usual NUTS warmup. Thus the
+posterior and per-row inputs are matched, but initialization across different
+parametrizations is not fully controlled. Total costs include that sensitivity.
+
+Our manual Gaussian likelihood uses exact sufficient statistics, while the
+generated brms likelihood evaluates the individual observations. Consequently
+gradient count is an algorithmic cost proxy, not equal wall time per gradient.
+No controlled wall-time ranking is claimed. The original brms CP branch also
+uses its own mean-centering convention: its generated code centers the load
+coefficient around the population slope but does not absorb the population
+intercept. Its semantics are audited using actual generated quantities.
+
+Full fit records, native CSVs, resolved auto weights, source capsules, exact
+cost receipts and wrapper logs are archived by arm. `compare_matrix.jl`
+recomputes common, recovered-physical and original-NCP scope comparisons from
+saved draws. No extra HMC is required for that analysis.

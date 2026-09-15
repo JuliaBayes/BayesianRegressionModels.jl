@@ -1,18 +1,5 @@
 include("run.jl")
-using BridgeStan
-
-struct BrmsPupilProblem{M}
-    model::M
-    gradient_calls::Base.RefValue{Int}
-end
-LogDensityProblems.dimension(p::BrmsPupilProblem) = length(BridgeStan.param_unc_names(p.model))
-LogDensityProblems.capabilities(::Type{<:BrmsPupilProblem}) = LogDensityProblems.LogDensityOrder{1}()
-LogDensityProblems.logdensity(p::BrmsPupilProblem,q) = BridgeStan.log_density(
-    p.model,convert(Vector{Float64},q);propto=false,jacobian=true)
-function LogDensityProblems.logdensity_and_gradient(p::BrmsPupilProblem,q)
-    p.gradient_calls[] += 1
-    BridgeStan.log_density_gradient(p.model,convert(Vector{Float64},q);propto=false,jacobian=true)
-end
+include("stan_target.jl")
 
 function brms_layout(p)
     # Name the constrained serialization, and use native conversions for the
@@ -108,7 +95,7 @@ function main_baseline()
     data = PTE.load_data()
     write_tsv(joinpath(output,"brms_equivalence_audit.tsv"),baseline_audit(p,layout,data;student))
     mkpath(joinpath(output,"source"))
-    for name in ("model.jl","audit.jl","run.jl","brms_baseline.jl")
+    for name in ("model.jl","audit.jl","run.jl","stan_target.jl","brms_baseline.jl")
         cp(joinpath(@__DIR__,name),joinpath(output,"source",name))
     end
     cp(joinpath(@__DIR__,"reference"),joinpath(output,"source","reference"))

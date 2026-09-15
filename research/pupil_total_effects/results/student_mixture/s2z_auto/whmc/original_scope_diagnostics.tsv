@@ -1,0 +1,4 @@
+arm	recovery_seed	scope	min_bulk_ess	limiting_parameter	min_bulk_ess_per_1000_sampling_gradients	min_bulk_ess_per_1000_all_gradients
+s2z_auto_whmc	101	original_physical46	1882.1800831949658	deviation_load[713]	40.32782146029667	29.369598402068565
+s2z_auto_whmc	101	original_physical_plus_raw_intercepts48	1882.1800831949658	deviation_load[713]	40.32782146029667	29.369598402068565
+s2z_auto_whmc	101	original_stan_ncp46	1884.1777106773775	z_load[711]	40.3706228719013	29.400769445391777
