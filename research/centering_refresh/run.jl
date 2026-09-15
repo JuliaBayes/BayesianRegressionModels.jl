@@ -1,8 +1,7 @@
 # Full case-study refresh after the WarmupHMC active-position transport fix.
 # Each invocation runs one arm; completed fits are immutable and reusable.
-const CASE, ARM, OUTPUT = ARGS
+const CASE, REQUEST, OUTPUT = ARGS
 CASE in ("hsgp", "eight", "radon") || error("Unknown case $CASE")
-ARM in ("ncp", "cp", "posthoc_position", "posthoc_gradient", "online_position", "online_gradient") || error("Unknown arm $ARM")
 const CASE_DIR = CASE == "hsgp" ? "adaptive_centering" : CASE == "eight" ? "eight_schools_centering" : "radon_centering"
 include(joinpath(@__DIR__, "..", CASE_DIR, "reproduce.jl"))
 using Test
@@ -19,7 +18,7 @@ function LogDensityProblems.logdensity_and_gradient(p::CountedDensity, x)
     LogDensityProblems.logdensity_and_gradient(p.problem, x)
 end
 
-function use_position_loss!()
+function select_online_loss!(position::Bool)
     # Existing internal selector, explicitly process-local until a public loss
     # keyword exists. The transport repair itself must already be in the package.
     source = read(joinpath(pkgdir(WarmupHMC), "src", "Reparametrizations.jl"), String)
@@ -31,7 +30,7 @@ function use_position_loss!()
         last_index = findnext(stop, source, first_index).start - 1
         body = source[first_index:last_index]
         @test occursin("w1=0", body)
-        Base.include_string(WarmupHMC, replace(body, "w1=0" => "w1=1"), "case-study-position-loss")
+        Base.include_string(WarmupHMC, replace(body, "w1=0" => (position ? "w1=1" : "w1=0")), "case-study-loss-selection")
     end
 end
 
@@ -62,7 +61,7 @@ function candidate_inputs(stan, pilot, indices)
     logs
 end
 
-function select_controls(stan, pilot, indices, gradients, output)
+function select_controls(stan, pilot, indices, gradients, output, arm)
     logs = candidate_inputs(stan, pilot, indices)
     selected = zeros(length(indices)); rows = NamedTuple[]
     for (j, index) in enumerate(indices)
@@ -72,7 +71,7 @@ function select_controls(stan, pilot, indices, gradients, output)
             scale = exp.(c .* ell)
             u = z .* scale
             gu = g ./ scale
-            score = if ARM == "posthoc_position"
+            score = if arm == "posthoc_position"
                 log(std(u)) - mean(c .* ell)
             else
                 cor(u, gu)
@@ -110,23 +109,25 @@ function physical_qois(stan, positions)
     else
         # Functions at each unique observed time, and all four GP hyperparameters.
         data = prepared_data(); draw = (; posterior_position=positions)
-        names, constrained = constrained_draws(stan, draw; include_tp=true)
-        descriptor = brm_descriptor(stan.sb)
         times = unique(data.times); keep = [findfirst(==(t), data.times) for t in times]
         blocks = BRM._adaptive_hsgp_centering_blocks(stan.sb, BS.param_unc_names(stan.density.model))
         hyper = vcat([vcat(b.length_scales, b.sd) for b in blocks]...)
         qnames = String.(BS.param_unc_names(stan.density.model))[hyper]
         matrices = [positions[hyper, :]]
-        for logical in (:mu, :sigma)
-            values = permutedims(brm_output_draws(descriptor, permutedims(constrained), names; logical))
-            push!(matrices, values[keep, :])
+        basis = [sin(pi / (2L) * (data.x[i] + L) * j) / sqrt(L) for i in keep, j in 1:DEFAULT_K]
+        for gp in gp_draws(stan, draw, data)
+            logical = gp.name == "mu" ? :mu : :sigma
+            values = basis * transpose(gp.weights)
+            logical == :sigma && (values = exp.(values))
+            push!(matrices, values)
             append!(qnames, ["$(logical)(time=$t)" for t in times])
         end
         return qnames, vcat(matrices...)
     end
 end
 
-function main()
+function main(ARM)
+    ARM in ("ncp", "cp", "posthoc_position", "posthoc_gradient", "online_position", "online_gradient") || error("Unknown arm $ARM")
     out = joinpath(OUTPUT, ARM)
     ispath(out) && error("Preserve existing $out")
     mkpath(out); BLAS.set_num_threads(1)
@@ -147,7 +148,7 @@ function main()
         for j in (1, 5000, 10000)
             @test last(LogDensityProblems.logdensity_and_gradient(stan.density, checkpoint.posterior_position[:,j])) ≈ checkpoint.posterior_gradient[:,j]
         end
-        controls = select_controls(stan, pilot, indices, checkpoint.posterior_gradient, out)
+        controls = select_controls(stan, pilot, indices, checkpoint.posterior_gradient, out, ARM)
         pilot_cost = pilot.all_gradient_calls
     end
     WarmupHMC.restore_reparam_sources!(adaptive, [idx => PartiallyCentered(c) for (idx,c) in zip(indices, controls)])
@@ -205,5 +206,9 @@ function main()
     println("CASE_ARM_COMPLETE\t", summary); flush(stdout)
 end
 
-ARM == "online_position" && use_position_loss!()
-Base.invokelatest(main)
+if abspath(PROGRAM_FILE) == @__FILE__
+    for arm in split(REQUEST, ',')
+        startswith(arm, "online") && select_online_loss!(arm == "online_position")
+        Base.invokelatest(main, arm)
+    end
+end
