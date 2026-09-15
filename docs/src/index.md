@@ -39,16 +39,18 @@ The [Warfarin PK/PD examples](warfarin.md) render both the faithful public
 two-stage workflow and a joint one-posterior model where shared latent PK
 effects feed the PK and PD likelihoods.
 
-The [adaptive HSGP case study](adaptive-centering.md) reproduces a public
-heteroscedastic motorcycle model with BRM/StanBlocks fits. It compares
-noncentered, pilot-selected and online-adaptive sampling, visualizes their
-coordinate geometry, and reports exact sampling costs. Generated-model tabs
-also show the Turing backend; the reported fits use StanBlocks.
+The **Adaptive centering** case studies compare fixed coordinates, post-hoc
+selection and online adaptation, with explicit gradient costs and common
+scientific quantities:
 
-The [adaptive eight-schools case study](eight-schools-centering.md) fits
-the standard eight-schools funnel three ways — a noncentered pilot, a
-per-school partially centered refit, and online adaptation — with exact
-sampling costs and native AlgebraOfVega diagnostics.
+- [Motorcycle HSGP](adaptive-centering.md): two Gaussian processes for the mean
+  and changing noise level.
+- [Eight schools](eight-schools-centering.md): PosteriorDB priors and manual
+  fully centered selection.
+- [Radon](radon-centering.md): county intercepts and floor slopes, with
+  categorical predictive checks.
+- [Pupil](pupil-centering.md): exact total-coefficient marginalization,
+  brms sum-to-zero parametrizations, both adaptation losses and conditional recovery.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""

@@ -50,6 +50,56 @@ for token, model, metric in [
     assert len(match) == 1
     body = body.replace("@@" + token + "@@", f"{relative_efficiency(match[0], metric):.1f}×")
 assert "@@" not in body
+
+if "--docs" in sys.argv:
+    import shutil
+    repo = root.parents[1]
+    body = body.replace("Prepared for discussion with Aki · 15 September 2026", "Case study · 15 September 2026")
+    body = body.replace("observed sampling and total efficiency**, after repairing a WHMC bug in the\ntransport of the active sampler position during centering changes.", "observed sampling and total efficiency**.")
+    start = body.index("### Online adaptation correction")
+    end = body.index("Full draws, native CSVs", start)
+    body = body[:start] + """### Online adaptation implementation
+
+The online arms preserve the physical active position when the centering
+coordinates change and reevaluate its density and gradient in the new frame.
+The Student-t runs use WarmupHMC's tested implementation published as
+[`6b377cb`](https://github.com/nsiccha/WarmupHMC.jl/commit/6b377cb23934022af5879d199a7c57abfac54c70).
+Both online losses have zero divergences in 2,000 retained Student-t draws.
+Separate Gaussian sensitivity fits also have zero divergences with both losses.
+
+""" + body[end:]
+    body = body.split("## 9. Inspect the harness and exact generated Stan files")[0]
+    base = "https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/pupil_total_effects/"
+    def link(label, path):
+        assert (root / path).is_file(), path
+        return f"[{label}]({base}{path})"
+    groups = [
+        ("Model, sampling and independent checks", [("manual total-coefficient target", "model.jl"), ("independent density/gradient audit", "audit.jl"), ("NCP pilot and post-hoc position refit", "run.jl"), ("fixed CP", "fixed_cp.jl")]),
+        ("Adaptation and recovery", [("online experiment", "online_transport_trial.jl"), ("post-hoc gradient selection", "offline_gradient_trial.jl"), ("conditional recovery", "recovery.jl"), ("46-QOI comparison for the added arms", "compare_online_trials.jl")]),
+        ("brms and native Stan harness", [("ordinary brms + WHMC", "brms_baseline.jl"), ("S2Z preparation/native sampling", "s2z_native.R"), ("S2Z + WHMC", "s2z_whmc.jl"), ("native gradient counter", "native_gradient_counter.hpp"), ("counter integration", "native_tools.R")]),
+        ("Exact generated Stan programs", [("ordinary NCP", "results/student_mixture/native_ncp/pupil-original.stan"), ("ordinary CP", "results/student_mixture/ordinary_cp/ordinary_cp.stan"), ("S2Z CP", "results/student_mixture/s2z_cp/clean.stan"), ("S2Z NCP", "results/student_mixture/s2z_ncp/clean.stan"), ("S2Z auto", "results/student_mixture/s2z_auto/clean.stan")]),
+        ("Numerical results", [("complete 15-row table", "results/online_adaptation/brief_matrix/qoi46.tsv"), ("original twelve arms, per QOI", "results/student_mixture/qoi46/parameters.tsv"), ("additional arms, per QOI", "results/online_adaptation/comparison/parameters.tsv"), ("online-fix and run manifest", "results/online_adaptation/receipt.json")]),
+    ]
+    body += "## 9. Inspect and reproduce the calculation\n\nThe saved source files can be inspected without rerunning the experiments.\n\n"
+    for title, files in groups:
+        body += f"- **{title}:** " + ", ".join(link(label, path) for label, path in files) + ".\n"
+    body += "\nOur total target is implemented in Julia; the linked Stan programs are the exact brms comparison targets. The research README describes the preserved run artifacts and environments.\n"
+    assets = repo / "docs/src/assets/adaptive-pupil"
+    assets.mkdir(exist_ok=True)
+    for filename, source in [
+        ("pairs.png", "results/student_mixture/pairs.png"),
+        ("s2z_pairs.png", "results/student_mixture/qoi46/s2z_pairs.png"),
+        ("efficiency.png", "results/online_adaptation/brief_matrix/efficiency.png"),
+    ]:
+        shutil.copyfile(root / source, assets / filename)
+    body = re.sub(r"!\[([^\n]+)\]\(results/student_mixture/(?:qoi46/)?([^/]+\.png)\)",
+                  r"![\1](assets/adaptive-pupil/\2)", body)
+    assert "results/student_mixture/" not in re.sub(r"https://[^\s)]+", "", body)
+    output = repo / "docs/src/pupil-centering.md"
+    output.write_text(body)
+    print(output)
+    sys.exit(0)
+
 def envelope(name, title, caption):
     path = root / ("results/student_mixture/" + name + ".aov.json.gz")
     if name == "qoi46/efficiency":
