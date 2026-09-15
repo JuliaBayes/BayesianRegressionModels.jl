@@ -29,6 +29,9 @@ function fit_record(dir, name; checkpoint=name)
     @test checkpoint.total_evaluation_counter == fit.total_gradient_evaluations
     @test checkpoint.sampling_evaluation_counter == fit.sampling_gradient_evaluations
     @test size(checkpoint.posterior_position, 2) == size(fit.posterior_position, 2)
+    if endswith(name, "_source")
+        @test fit.posterior_position == checkpoint.posterior_position
+    end
     fit
 end
 
@@ -64,7 +67,9 @@ function validate_results(fit_dir, diagnostics_dir)
     online_losses = table(joinpath(diagnostics_dir, "retrospective_online_losses.tsv"))
 
     pilot = fit_record(fit_dir, "noncentered")
-    partial_source = fit_record(fit_dir, "partial")
+    centered_source = fit_record(fit_dir, "centered_source"; checkpoint="centered")
+    centered_target = fit_record(fit_dir, "centered_target"; checkpoint="centered")
+    partial_source = fit_record(fit_dir, "partial_source"; checkpoint="partial")
     partial_target = fit_record(fit_dir, "partial_target"; checkpoint="partial")
     online = fit_record(fit_dir, "online")
     pilot_coordinates = coordinate_table(fit_dir, "noncentered")
@@ -96,6 +101,10 @@ function validate_results(fit_dir, diagnostics_dir)
             end
         end
 
+        for school in 1:8
+            @test centered_source.posterior_position[school+1,:] ≈
+                centered_target.posterior_position[school+1,:] .* exp.(centered_target.posterior_position[1,:]) atol=1e-10
+        end
         # The fresh partial fit's serialized source and target positions must
         # obey the selected scalar transform exactly.
         for school in 1:8
@@ -119,7 +128,7 @@ function validate_results(fit_dir, diagnostics_dir)
         @test all(0 .<= parse.(Float64, online_centeredness["centeredness"]) .<= 1)
 
         for (row, fit) in zip(eachindex(diagnostics["fit"]),
-                              (pilot, partial_target, online))
+                              (pilot, centered_target, partial_target, online))
             @test parse(Int, diagnostics["retained_draws"][row]) == 10_000
             @test parse(Int, diagnostics["divergences"][row]) ==
                 fit.n_divergent_samples
@@ -135,9 +144,9 @@ function validate_results(fit_dir, diagnostics_dir)
         @test parse(Int, workflow["sampling_evaluation_counter"][1]) ==
             pilot.sampling_gradient_evaluations +
             partial_target.sampling_gradient_evaluations
-        @test length(costs["fit"]) == 3
+        @test length(costs["fit"]) == 4
 
-        @test length(gradient_checks["configuration"]) == 72
+        @test length(gradient_checks["configuration"]) == 96
         @test maximum(number_column(gradient_checks, "relative_error")) < 1e-4
         @test maximum(number_column(frame_checks, "position_gradient_product_error")) < 1e-12
         @test maximum(number_column(frame_checks, "physical_effect_error")) < 1e-12
@@ -154,15 +163,15 @@ function validate_results(fit_dir, diagnostics_dir)
     pairs = table(joinpath(diagnostics_dir, "coordinate_pairs.tsv"))
     scatters = table(joinpath(diagnostics_dir, "gradient_scatter.tsv"))
     @testset "Plotted rows match their named fits" begin
-        @test length(pairs["configuration"]) == 240_000
-        @test length(scatters["configuration"]) == 24_000
+        @test length(pairs["configuration"]) == 320_000
+        @test length(scatters["configuration"]) == 32_000
         learned = [parse(Float64, online_centeredness["centeredness"][j])
                    for j in 1:8]
         selected_c = [parse(Float64, offline_centeredness["centeredness"][j])
                       for j in 1:8]
-        named = Dict("NCP" => pilot, "Online" => online)
+        named = Dict("NCP" => pilot, "Centered" => pilot, "Online" => online)
         pair_key = Dict{Tuple{String,Int,Int},Float64}()
-        for config in ("NCP", "Post-hoc", "Online")
+        for config in ("NCP", "Centered", "Post-hoc", "Online")
             rows = findall(==(config), pairs["configuration"])
             @test length(rows) == 80_000
             for row in rows
@@ -173,18 +182,21 @@ function validate_results(fit_dir, diagnostics_dir)
                     # The displayed refit coordinate is the source draw u,
                     # which must also equal tau^c times the back-transformed
                     # model draw z: both binaries, both frames.
-                    u = partial_source.posterior_position[school + 1, draw]
-                    z = partial_target.posterior_position[school + 1, draw]
-                    tau = exp(partial_target.posterior_position[1, draw])
+                    raw = partial_source
+                    model = partial_target
+                    u = raw.posterior_position[school + 1, draw]
+                    z = model.posterior_position[school + 1, draw]
+                    tau = exp(model.posterior_position[1, draw])
+                    c = selected_c[school]
                     @test parse(Float64, pairs["hyperparameter"][row]) ≈ tau
                     @test coordinate ≈ u
-                    @test coordinate ≈ tau^selected_c[school] * z
+                    @test coordinate ≈ tau^c * z
                 else
                     fit = named[config]
                     tau = exp(fit.posterior_position[1, draw])
                     @test parse(Float64, pairs["hyperparameter"][row]) ≈ tau
-                    expected = if config == "Online"
-                        tau^learned[school] *
+                    expected = if config in ("Online", "Centered")
+                        tau^(config == "Centered" ? 1.0 : learned[school]) *
                             fit.posterior_position[school + 1, draw]
                     else
                         fit.posterior_position[school + 1, draw]
@@ -204,34 +216,44 @@ function validate_results(fit_dir, diagnostics_dir)
             @test parse(Float64, scatters["coordinate"][row]) ≈ pair_key[key]
         end
     end
-    @testset "Refit gradients match the partial problem at source draws" begin
-        # Explicit frame check on a small sample: rebuild the fixed
-        # selected-partial problem and differentiate it at the ACTUAL
-        # source-frame draws from partial.jls. This pins the frame the bulk
-        # test above cannot see — written gradients must be du-gradients at
-        # u, not gz-gradients at z.
-        mktempdir() do tmp
-            stan = stan_density("validate", tmp)
-            selected = [parse(Float64, offline_centeredness["centeredness"][j])
-                        for j in 1:8]
-            problem = fixed_partial_problem(stan, selected)
-            shown = Dict{Tuple{Int,Int},Float64}()
-            for row in eachindex(scatters["configuration"])
-                scatters["configuration"][row] == "Post-hoc" || continue
-                shown[(parse(Int, scatters["draw"][row]),
-                       parse(Int, scatters["school"][row]))] =
-                    parse(Float64, scatters["gradient"][row])
-            end
-            @test length(shown) == 8_000
-            present = sort!(unique!(first.(keys(shown))))
-            for draw in (first(present), present[length(present) ÷ 2],
-                         last(present)), school in (1, 8)
-                q = collect(partial_source.posterior_position[:, draw])
-                _value, gradient = LogDensityProblems.logdensity_and_gradient(
-                    problem, q)
-                @test shown[(draw, school)] ≈ gradient[school + 1] atol=1e-10
-            end
+    @testset "All displayed gradients against the Gaussian derivative" begin
+        observations = read_eight_schools()
+        named = Dict("NCP" => pilot, "Centered" => pilot,
+                     "Post-hoc" => partial_target, "Online" => online)
+        for row in eachindex(scatters["configuration"])
+            configuration = scatters["configuration"][row]
+            draw = parse(Int, scatters["draw"][row])
+            j = parse(Int, scatters["school"][row])
+            q = named[configuration].posterior_position[:, draw]
+            tau, mu, z = exp(q[1]), q[10], q[j+1]
+            c = configuration == "Centered" ? 1.0 : configuration == "Post-hoc" ?
+                parse(Float64, offline_centeredness["centeredness"][j]) :
+                configuration == "Online" ? parse(Float64, online_centeredness["centeredness"][j]) : 0.0
+            gz = -z + tau * (observations.y[j] - mu - tau*z) / observations.sigma[j]^2
+            @test parse(Float64, scatters["gradient"][row]) ≈ gz / tau^c atol=1e-8
         end
+    end
+    @testset "Timing repetitions and diagnostic recomputation" begin
+        timing = table(joinpath(fit_dir, "timing_repetitions.tsv"))
+        @test length(timing["fit"]) == 12
+        @test all(==(0.0), number_column(timing, "compile_seconds"))
+        for (label, fit) in (("noncentered", pilot), ("centered", centered_target),
+                             ("selected_partial", partial_target), ("online", online))
+            q = fit.posterior_position
+            samples = permutedims(reshape(q, 10, 10_000, 1), (2,3,1))
+            i = only(findall(==(label), diagnostics["fit"]))
+            @test parse(Float64, diagnostics["min_bulk_ess"][i]) ≈ minimum(MCMCDiagnosticTools.ess(samples; kind=:bulk))
+            @test parse(Float64, diagnostics["min_tail_ess"][i]) ≈ minimum(MCMCDiagnosticTools.ess(samples; kind=:tail))
+            @test parse(Float64, diagnostics["max_split_rhat"][i]) ≈ maximum(MCMCDiagnosticTools.rhat(samples))
+            indices = findall(==(label), timing["fit"])
+            @test length(indices) == 3
+            @test all(parse(Int,timing["total_gradients"][i]) == fit.total_gradient_evaluations for i in indices)
+            @test all(parse(Int,timing["sampling_gradients"][i]) == fit.sampling_gradient_evaluations for i in indices)
+        end
+        ppc = table(joinpath(diagnostics_dir, "ppc_intervals.tsv"))
+        @test parse.(Int, ppc["school"]) == collect(1:8)
+        @test number_column(ppc, "observed") == read_eight_schools().y
+        @test all(number_column(ppc,"q05") .<= number_column(ppc,"q50") .<= number_column(ppc,"q95"))
     end
     println("eight_schools_results_verified\t", fit_dir)
 end

@@ -81,22 +81,21 @@ end
 
 const RADON_DATA = read_radon()
 
-# Fixed population coefficients are the source model's mu_alpha and mu_beta. The
-# two scalar zerocorr blocks are its independent alpha and beta vectors. A
-# constant-one slope column spells the intercept margin as the same direct-scale
-# scalar family as the slope; both scales are half-normal(0, 1), as in PosteriorDB.
+# Separate named blocks give the county intercept and slope independent scales.
 const RADON_NCP = @brm begin
     sigma_y ~ Normal(0, 1; lower=0)
     mu ~ 1 + floor_measure +
-          (0 + intercept + floor_measure || county_idx)
+          (1 | county_intercept | county_idx) +
+          (0 + floor_measure | county_slope | county_idx)
     effect(mu, Intercept) ~ Normal(0, 10)
     effect(mu, floor_measure) ~ Normal(0, 10)
+    sd(:, county_intercept) ~ Normal(0, 1)
+    sd(:, county_slope) ~ Normal(0, 1)
     log_radon ~ Normal(mu, sigma_y)
 end
 
 function build_model(data)
-    RADON_NCP((; data.floor_measure, data.county_idx, data.log_radon,
-               intercept=fill(1.0, data.N)))
+    RADON_NCP((; data.floor_measure, data.county_idx, data.log_radon))
 end
 
 function stan_density(label, output_dir)
@@ -158,7 +157,7 @@ function run_provenance(output_dir)
         "turing_sampling" => false,
         "r_sampling" => false,
         "blas_threads" => BLAS.get_num_threads(),
-        "timing_scope" => "sampler call only; Stan compilation and setup are outside fit_seconds",
+        "timing_scope" => "complete sampler call: initialization, first-use Julia compilation, adaptation, sampling and checkpoint IO; Stan compilation and model setup excluded; Julia compilation measured separately",
         "counter_scope" => "NUTS including warmup and discarded epochs; excludes Pathfinder/setup; sampling counter counts retained appended transitions",
         "diagnostics" => "rank-normalized split Rhat; bulk ESS; tail ESS; retained divergences",
         "rhat_scope" => "within one split chain, not independent-chain convergence",
@@ -191,16 +190,24 @@ function sample_fit(target, label, output_dir; nonlinear_adapt=true)
             "\tnonlinear_adapt=", nonlinear_adapt,
             "\tWarmupHMC defaults otherwise")
     flush(stdout)
-    started_ns = time_ns()
-    fit = WarmupHMC.adaptive_warmup_mcmc(
+    Base.cumulative_compile_timing(true)
+    compilation_before = Base.cumulative_compile_time_ns()
+    measured = try
+        @timed WarmupHMC.adaptive_warmup_mcmc(
         Xoshiro(SEED), target; n_draws=N_DRAWS, monitor_ess=true, callback,
         checkpoint_dir=joinpath(output_dir, "checkpoints-$label"), nonlinear_adapt)
-    fit_seconds = (time_ns() - started_ns) / 1e9
+    finally
+        Base.cumulative_compile_timing(false)
+    end
+    compilation = Base.cumulative_compile_time_ns() .- compilation_before
+    fit = measured.value
+    fit_seconds = measured.time
     retained = size(fit.posterior_position, 2)
     total = fit.total_evaluation_counter
     sampling = fit.sampling_evaluation_counter
     record = (; posterior_position=convert(Matrix{Float64}, fit.posterior_position),
         n_divergent_samples=fit.n_divergent_samples, seed=SEED, fit_seconds,
+        julia_compile_seconds=first(compilation)/1e9, gc_seconds=measured.gctime,
         total_gradient_evaluations=total,
         sampling_gradient_evaluations=sampling,
         requested_draws=N_DRAWS, complete=retained >= N_DRAWS,

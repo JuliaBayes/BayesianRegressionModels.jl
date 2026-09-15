@@ -3,6 +3,7 @@ using BridgeStan
 import DifferentiationInterface as DI
 import Enzyme
 using Distributions
+using JSON
 using LinearAlgebra
 using LogDensityProblems
 using MCMCDiagnosticTools
@@ -18,10 +19,10 @@ import Pkg
 const BRM = BayesianRegressionModels
 const BS = BridgeStan
 const RESEARCH_DIR = @__DIR__
-const SOURCE_MODEL_REVISION = "a42b3da85b7dc38f2745dde4fca197425f18c516"
-const SOURCE_DATA_REVISION = "93b8b05cb7978952606f2043bec64d3b958b360c"
-const SOURCE_MODEL_SHA256 = "1624c8770e8f08a90894f3417591eb45f93ccfb70cbe9870442ae2ab26343422"
-const SOURCE_DATA_SHA256 = "fccd1624bd240b0c26a8b668f4d2181f0653000e4b169d393b3dc815a0b46952"
+const SOURCE_MODEL_REVISION = "5545a1dd07ae297c36edecbcd82aa49097b4c385"
+const SOURCE_DATA_REVISION = SOURCE_MODEL_REVISION
+const SOURCE_MODEL_SHA256 = "ccaf2d7beed22602f62f276cd4096194ab5de5b5c1d6bb2bae9a3655a3845c05"
+const SOURCE_DATA_SHA256 = "f06889e8cae3755c00a4a44f002d5fc3acf3263ff9ae8ffe5655b1907bcadd80"
 const SOURCE_DRAWS = 10_000
 const SOURCE_SEED = 1
 const ENZYME_BACKEND = DI.AutoEnzyme(;
@@ -29,67 +30,25 @@ const ENZYME_BACKEND = DI.AutoEnzyme(;
     function_annotation=Enzyme.Const)
 
 function checked_file(name, digest)
-    path = joinpath(RESEARCH_DIR, name)
+    path = joinpath(RESEARCH_DIR, "reference", name)
     bytes2hex(sha256(read(path))) == digest || error("$name source hash mismatch")
     path
 end
 
 function read_eight_schools()
-    path = checked_file("eight_schools.data.R", SOURCE_DATA_SHA256)
-    lines = readlines(path)
-    values = Dict{String,Vector{Float64}}()
-    for line in lines
-        m = match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*<-\s*(?:c\()?([^)]*)\)?\s*$", line)
-        m === nothing && error("unrecognized source data line: $line")
-        values[m.captures[1]] = parse.(Float64, split(strip(m.captures[2]), ','; keepempty=false))
-    end
-    values["J"] == [8.0] || error("expected eight schools")
+    values = JSON.parsefile(checked_file("eight_schools.json", SOURCE_DATA_SHA256))
+    values["J"] == 8 || error("expected eight schools")
     length(values["y"]) == length(values["sigma"]) == 8 ||
         error("expected eight estimates and standard errors")
     all(isfinite, values["y"]) && all(>(0), values["sigma"]) ||
         error("eight-schools data must be finite with positive standard errors")
-    (; J=Int(only(values["J"])), y=values["y"], sigma=values["sigma"])
-end
-
-"""A self-contained flat prior, without loading or sampling through Turing."""
-struct EightSchoolsFlat <: ContinuousUnivariateDistribution end
-struct EightSchoolsFlatPositive <: ContinuousUnivariateDistribution end
-
-Distributions.logpdf(::EightSchoolsFlat, ::Real) = 0.0
-Distributions.loglikelihood(::EightSchoolsFlat, ::AbstractVector{<:Real}) = 0.0
-Base.minimum(::EightSchoolsFlat) = -Inf
-Base.maximum(::EightSchoolsFlat) = Inf
-Distributions.rand(rng::Random.AbstractRNG, ::EightSchoolsFlat) = randn(rng)
-
-Distributions.logpdf(::EightSchoolsFlatPositive, x::Real) = x >= 0 ? 0.0 : -Inf
-Distributions.loglikelihood(d::EightSchoolsFlatPositive, x::AbstractVector{<:Real}) =
-    sum(Distributions.logpdf(d, x))
-Base.minimum(::EightSchoolsFlatPositive) = 0.0
-Base.maximum(::EightSchoolsFlatPositive) = Inf
-Distributions.rand(rng::Random.AbstractRNG, ::EightSchoolsFlatPositive) = abs(randn(rng))
-
-eight_schools_flat() = EightSchoolsFlat()
-eight_schools_flat_positive() = EightSchoolsFlatPositive()
-BRM.brm_distribution_type(::typeof(eight_schools_flat)) = EightSchoolsFlat
-BRM.brm_distribution_type(::typeof(eight_schools_flat_positive)) = EightSchoolsFlatPositive
-BRM._sb_stan_dist_name(::typeof(eight_schools_flat)) = :brm_eight_schools_flat
-BRM._sb_stan_dist_name(::typeof(eight_schools_flat_positive)) = :brm_eight_schools_flat_positive
-# Homogeneous positive vector-prior lowering asks for the mapped distribution
-# TYPE as well as the factory callable.
-BRM._sb_stan_dist_name(::Type{EightSchoolsFlat}) = :brm_eight_schools_flat
-BRM._sb_stan_dist_name(::Type{EightSchoolsFlatPositive}) = :brm_eight_schools_flat_positive
-
-StanBlocks.@deffun begin
-    @lpxf brm_eight_schools_flat_lpdf(y::real)::real = 0.0
-    brm_eight_schools_flat_rng()::real = normal_rng(0.0, 1.0)
-    @lpxf brm_eight_schools_flat_positive_lpdf(y::real)::real = 0.0
-    brm_eight_schools_flat_positive_rng()::real = abs(normal_rng(0.0, 1.0))
+    (; J=Int(values["J"]), y=Float64.(values["y"]), sigma=Float64.(values["sigma"]))
 end
 
 const EIGHT_SCHOOLS = @brm begin
     theta ~ 1 + (1 | eight_schools | school)
-    effect(theta, Intercept) ~ eight_schools_flat()
-    sd(:, eight_schools) ~ eight_schools_flat_positive()
+    effect(theta, Intercept) ~ Normal(0, 5)
+    sd(:, eight_schools) ~ Cauchy(0, 5)
     y ~ Normal(theta, sigma)
 end
 
@@ -119,6 +78,7 @@ end
 function run_provenance(output_dir)
     BLAS.set_num_threads(1)
     packages = package_snapshot()
+    cp(@__FILE__, joinpath(output_dir, "reproduce.jl"); force=false)
     write_tsv(joinpath(output_dir, "packages.tsv"), packages)
     metadata = Dict(
         "source_model_revision" => SOURCE_MODEL_REVISION,
@@ -129,6 +89,9 @@ function run_provenance(output_dir)
         "brm_commit" => strip(read(`git -C $RESEARCH_DIR rev-parse HEAD`, String)),
         "script_sha256" => bytes2hex(sha256(read(@__FILE__))),
         "schools" => 8,
+        "posteriordb_posterior" => "eight_schools-eight_schools_noncentered",
+        "timing_protocol" => "one complete priming fit per call path, then three full repetitions; alternate arm order; primary figures and diagnostics use repetition 1",
+        "timing_instrumentation" => "Base cumulative compilation timers used by Julia 1.10 @time; @timed wall time and GC; no subtraction from reported wall time",
         "seed_each_fit" => SOURCE_SEED,
         "draws_requested_each_fit" => SOURCE_DRAWS,
         "chains_each_fit" => 1,
@@ -155,9 +118,6 @@ function stan_density(label, output_dir)
     checked = StanBlocks.stanc_check(code; warn_pedantic=false)
     checked.ok || error("stanc failed for $label\n$(checked.output)")
     path = joinpath(output_dir, "eight-schools-$label.stan")
-    # The callable flat-prior families are generated during SBBRMI lowering.
-    # Enter the newest Julia world for compilation so StanBlocks sees their
-    # registered lpdf metadata when this helper is itself called from a function.
     problem = Base.invokelatest(StanBlocks.stan_instantiate, sb.model; path)
     q = zeros(LogDensityProblems.dimension(problem))
     value, gradient = LogDensityProblems.logdensity_and_gradient(problem, q)
@@ -185,7 +145,7 @@ end
 
 function source_model(output_dir)
     mkpath(output_dir)
-    source_path = checked_file("eight_schools.stan", SOURCE_MODEL_SHA256)
+    source_path = checked_file("eight_schools_centered.stan", SOURCE_MODEL_SHA256)
     data = read_eight_schools()
     array_json(x) = "[" * join(x, ",") * "]"
     source_data = "{" * join((
@@ -256,7 +216,7 @@ function brm_physical_gradient(gradient, brm_names, q_brm, source_model, source_
     source_ordered
 end
 
-function sample_source_fit(target, label, output_dir; nonlinear_adapt=true)
+function sample_fit(target, label, output_dir; nonlinear_adapt=true)
     result_path = joinpath(output_dir, "$label.jls")
     isfile(result_path) && error("A completed $label fit already exists; use a fresh directory.")
     callback = (state, stage) -> begin
@@ -266,17 +226,30 @@ function sample_source_fit(target, label, output_dir; nonlinear_adapt=true)
     end
     println("sampling\t", label, "\tseed=1\tn_draws=10000\tWarmupHMC defaults")
     flush(stdout)
-    started = time_ns()
-    fit = WarmupHMC.adaptive_warmup_mcmc(
+    # Julia 1.10 instrumentation used by Base.@time. Compilation is measured
+    # separately, while wall time remains the complete sampler call.
+    Base.cumulative_compile_timing(true)
+    compilation_before = Base.cumulative_compile_time_ns()
+    measured = try
+        @timed WarmupHMC.adaptive_warmup_mcmc(
         Xoshiro(SOURCE_SEED), target; n_draws=SOURCE_DRAWS, monitor_ess=true,
         nonlinear_adapt, callback, checkpoint_dir=joinpath(output_dir, "checkpoints-$label"))
-    fit_seconds = (time_ns() - started) / 1e9
+    finally
+        Base.cumulative_compile_timing(false)
+    end
+    compilation = Base.cumulative_compile_time_ns() .- compilation_before
+    fit = measured.value
+    fit_seconds = measured.time
     retained = size(fit.posterior_position, 2)
     record = (; posterior_position=convert(Matrix{Float64}, fit.posterior_position),
         n_divergent_samples=fit.n_divergent_samples, seed=SOURCE_SEED, fit_seconds,
+        julia_compile_seconds=first(compilation) / 1e9,
+        julia_recompile_seconds=last(compilation) / 1e9,
+        gc_seconds=measured.gctime, allocated_bytes=measured.bytes,
         total_gradient_evaluations=fit.total_evaluation_counter,
         sampling_gradient_evaluations=fit.sampling_evaluation_counter,
-        requested_draws=SOURCE_DRAWS, complete=retained >= SOURCE_DRAWS)
+        requested_draws=SOURCE_DRAWS, complete=retained >= SOURCE_DRAWS,
+        stored_frame="model", nonlinear_adapt)
     serialize(result_path, record)
     record.complete || error("$label stopped early with $retained draws")
     0 < record.sampling_gradient_evaluations <= record.total_gradient_evaluations ||
@@ -288,6 +261,13 @@ function sample_source_fit(target, label, output_dir; nonlinear_adapt=true)
         error("$label sampling counter differs from final checkpoint")
     size(checkpoint.posterior_position, 2) == retained ||
         error("$label final-checkpoint retained draws differ")
+    source_record = merge(record, (; posterior_position=copy(checkpoint.posterior_position),
+        stored_frame="source"))
+    serialize(joinpath(output_dir, "$(label)_source.jls"), source_record)
+    checkpoint_model = copy(checkpoint.posterior_position)
+    WarmupHMC.reparametrize!(target, checkpoint_model)
+    checkpoint_model ≈ fit.posterior_position ||
+        error("returned draws disagree with checkpoint source-to-model mapping")
     println("completed\t", label, "\tretained=", retained,
         "\tdivergences=", record.n_divergent_samples,
         "\ttotal_gradients=", record.total_gradient_evaluations,
@@ -347,11 +327,7 @@ end
 
 function export_coordinates(label, stan, fit, output_dir)
     c = coordinate_arrays(stan, fit)
-    # Every exported fit holds model-frame positions (the refit is exported
-    # after WarmupHMC's back-transform), so the physical school effect is
-    # always theta = mu + tau*z. Source-frame partial coordinates never reach
-    # this writer; their physical effects are asserted cross-binary in
-    # validate_results.jl instead.
+    # All sampler return values hold model-frame positions: theta = mu + tau*z.
     write_tsv(joinpath(output_dir, "$(label)_coordinates.tsv"), [
         (; draw=s, school=j, mu=c.mu[s], tau=exp(c.logtau[s]),
            theta_effect=c.mu[s] + c.z[j, s] * exp(c.logtau[s]),
@@ -384,7 +360,7 @@ function fixed_partial_problem(stan, selected)
 end
 
 function run_reproduction(; output_dir=get(ENV, "BRM_EIGHT_SCHOOLS_OUTPUT", mktempdir()))
-    for label in ("noncentered", "partial", "online")
+    for label in ("noncentered", "centered", "partial", "online")
         isfile(joinpath(output_dir, "$label.jls")) && error(
             "Saved $label output exists; use a fresh directory or re-render existing figures.")
     end
@@ -395,29 +371,41 @@ function run_reproduction(; output_dir=get(ENV, "BRM_EIGHT_SCHOOLS_OUTPUT", mkte
         (; school=j, estimate=data.y[j], standard_error=data.sigma[j])
         for j in 1:data.J])
 
-    # One compiled BRM target serves all three arms. Its generated coordinates
-    # are noncentered (`theta = mu + tau*z`); partial and online arms change only
-    # WarmupHMC's sampler source frame.
+    # One compiled BRM target serves all arms. Prime every distinct sampler
+    # path with a complete fit, preserving its timing and checkpoint evidence.
     stan = stan_density("model", output_dir)
-    pilot, pilot_record = sample_source_fit(stan.density, "noncentered", output_dir)
+    priming = joinpath(output_dir, "priming")
+    mkpath(priming)
+    sample_fit(stan.density, "noncentered", priming)
+    sample_fit(fixed_partial_problem(stan, ones(8)), "centered", priming;
+                      nonlinear_adapt=false)
+    sample_fit(adaptive_centering_problem(stan.sb, stan.density, ENZYME_BACKEND),
+                      "online", priming)
+
+    pilot, pilot_record = sample_fit(stan.density, "noncentered", output_dir)
+    centered_target = fixed_partial_problem(stan, ones(8))
+    centered, centered_record = sample_fit(
+        centered_target, "centered", output_dir; nonlinear_adapt=false)
+    centered_target_record = merge(centered_record,
+        (; posterior_position=copy(centered.posterior_position)))
+    serialize(joinpath(output_dir, "centered_target.jls"), centered_target_record)
+    export_coordinates("centered", stan, centered, output_dir)
     pilot_coordinates = export_coordinates("noncentered", stan, pilot, output_dir)
     selection = offline_selection(pilot_coordinates)
     export_selection(selection, output_dir)
 
     partial_target = fixed_partial_problem(stan, selection.selected)
-    partial, partial_record = sample_source_fit(
+    partial, partial_record = sample_fit(
         partial_target, "partial", output_dir; nonlinear_adapt=false)
-    # The serialized partial.jls is the actual selected source frame. Freeze it,
-    # then apply WarmupHMC's one required source-to-target transform in place.
-    partial_source = copy(partial.posterior_position)
-    WarmupHMC.reparametrize!(partial_target, partial.posterior_position)
+    # Returned positions are model coordinates; checkpoints retain sampler coordinates.
+    partial_source = deserialize(joinpath(output_dir, "partial_source.jls")).posterior_position
     partial_target_record = merge(partial_record,
         (; posterior_position=copy(partial.posterior_position)))
     serialize(joinpath(output_dir, "partial_target.jls"), partial_target_record)
     partial_coordinates = export_coordinates("partial", stan, partial, output_dir)
 
     online_target = adaptive_centering_problem(stan.sb, stan.density, ENZYME_BACKEND)
-    online, online_record = sample_source_fit(online_target, "online", output_dir)
+    online, online_record = sample_fit(online_target, "online", output_dir)
     learned = [last(pair).c for pair in WarmupHMC.reparam_sources(online_target)]
     length(learned) == data.J || error("expected one adapted coordinate per school")
     all(c -> 0 <= c <= 1, learned) || error("online centering outside [0,1]")
@@ -428,6 +416,7 @@ function run_reproduction(; output_dir=get(ENV, "BRM_EIGHT_SCHOOLS_OUTPUT", mkte
     rows = NamedTuple[]
     for (label, fit, record) in (
             ("noncentered", pilot, pilot_record),
+            ("centered", centered, centered_target_record),
             ("selected_partial", partial, partial_target_record),
             ("online", online, online_record))
         d = diagnostics(label, fit)
@@ -435,6 +424,8 @@ function run_reproduction(; output_dir=get(ENV, "BRM_EIGHT_SCHOOLS_OUTPUT", mkte
             (; total_gradient_evaluations=record.total_gradient_evaluations,
               sampling_gradient_evaluations=record.sampling_gradient_evaluations,
               fit_seconds=record.fit_seconds,
+              julia_compile_seconds=record.julia_compile_seconds,
+              gc_seconds=record.gc_seconds,
               min_bulk_ess_per_total_gradient=d.min_bulk_ess /
                   record.total_gradient_evaluations,
               min_bulk_ess_per_sampling_gradient=d.min_bulk_ess /
@@ -447,6 +438,7 @@ function run_reproduction(; output_dir=get(ENV, "BRM_EIGHT_SCHOOLS_OUTPUT", mkte
     write_tsv(joinpath(output_dir, "diagnostics.tsv"), rows)
     write_tsv(joinpath(output_dir, "fit_costs.tsv"), [
         (; fit=row.fit, elapsed_seconds=row.fit_seconds,
+         julia_compile_seconds=row.julia_compile_seconds, gc_seconds=row.gc_seconds,
          total_evaluation_counter=row.total_gradient_evaluations,
          sampling_evaluation_counter=row.sampling_gradient_evaluations,
          counter_scope="MCMC run total excludes Pathfinder/setup; sampling counts retained appended transitions")
@@ -461,6 +453,39 @@ function run_reproduction(; output_dir=get(ENV, "BRM_EIGHT_SCHOOLS_OUTPUT", mkte
     write_tsv(joinpath(output_dir, "centeredness.tsv"), [
         (; school=j, offline=selection.selected[j], online=learned[j])
         for j in 1:data.J])
+
+    # Repeat complete fits with the same seeds, selected controls, checkpoint
+    # policy and thread counts. Reverse the order in repetition 2.
+    timing_rows = [(; repetition=1, fit=row.fit, seconds=row.fit_seconds,
+        compile_seconds=row.julia_compile_seconds, gc_seconds=row.gc_seconds,
+        total_gradients=row.total_gradient_evaluations,
+        sampling_gradients=row.sampling_gradient_evaluations) for row in rows]
+    for repetition in 2:3
+        directory = joinpath(output_dir, "repeat-$repetition")
+        mkpath(directory)
+        labels = ["noncentered", "centered", "selected_partial", "online"]
+        iseven(repetition) && reverse!(labels)
+        for label in labels
+            problem = label == "noncentered" ? stan.density :
+                label == "centered" ? fixed_partial_problem(stan, ones(8)) :
+                label == "selected_partial" ? fixed_partial_problem(stan, selection.selected) :
+                adaptive_centering_problem(stan.sb, stan.density, ENZYME_BACKEND)
+            _, record = sample_fit(problem, label, directory;
+                nonlinear_adapt=label in ("noncentered", "online"))
+            push!(timing_rows, (; repetition, fit=label, seconds=record.fit_seconds,
+                compile_seconds=record.julia_compile_seconds, gc_seconds=record.gc_seconds,
+                total_gradients=record.total_gradient_evaluations,
+                sampling_gradients=record.sampling_gradient_evaluations))
+        end
+    end
+    write_tsv(joinpath(output_dir, "timing_repetitions.tsv"), timing_rows)
+    write_tsv(joinpath(output_dir, "priming_costs.tsv"), [
+        let record = deserialize(joinpath(priming, "$label.jls"))
+            (; fit=label, seconds=record.fit_seconds,
+               compile_seconds=record.julia_compile_seconds, gc_seconds=record.gc_seconds,
+               total_gradients=record.total_gradient_evaluations,
+               sampling_gradients=record.sampling_gradient_evaluations)
+        end for label in ("noncentered", "centered", "online")])
 
     # Bind the saved draws to the immutable source target as well as the synthetic audit.
     source = source_model(output_dir)
@@ -499,7 +524,7 @@ function run_reproduction(; output_dir=get(ENV, "BRM_EIGHT_SCHOOLS_OUTPUT", mkte
     before == package_snapshot() || error("a dependency checkout moved during the run")
     println("eight_schools_reproduction_complete\t", output_dir)
     foreach(row -> println("diagnostic\t", row), rows)
-    (; stan, pilot, partial, partial_source, online, selection, learned, rows, output_dir)
+    (; stan, pilot, centered, partial, partial_source, online, selection, learned, rows, output_dir)
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__

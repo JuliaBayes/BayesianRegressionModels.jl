@@ -1,0 +1,7 @@
+role	rank	county	centeredness	criterion
+intercept	1	83	0.0	Minimum
+intercept	2	7	0.5	Nearest 0.5
+intercept	3	6	1.0	Maximum
+slope	1	2	0.0	Minimum
+slope	2	21	0.5	Nearest 0.5
+slope	3	188	1.0	Maximum

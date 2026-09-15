@@ -21,9 +21,9 @@ julia --startup-file=no --project=research/eight_schools_centering/plots \
   /absolute/figure-directory
 ```
 
-Rendering never samples. Every loss uses all retained draws. Pair panels
-show all 10,000 retained draws per school and configuration (80,000 points
-per panel set); gradient scatters show exactly 1,000 evenly spaced retained
-draws per school and configuration facet as an explicit visual-density
-choice, with marker size 12, opacity 0.25, independent x/y axes, and no KDE,
-binning, smoothing, or regression.
+Rendering consumes saved tables. Each paired geometry figure has one column
+per configuration and one row per school. Pair panels use all 10,000 draws;
+gradient panels use 1,000 evenly spaced draws per facet. Posterior and
+predictive summaries use individual 50% and 90% intervals. Observed estimates
+are overlaid in the original school order. Every school has a distinct colour
+in objective plots. The renderer records figure hashes and dependency identities.

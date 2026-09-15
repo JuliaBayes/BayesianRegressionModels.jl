@@ -1,4 +1,5 @@
 configuration	position_gradient_product_error	physical_effect_error	retained_draws
 NCP	0.0	0.0	10000
+Centered	3.552713678800501e-15	0.0	10000
 Post-hoc	0.0	0.0	10000
-Online	7.105427357601002e-15	1.4210854715202004e-14	10000
+Online	3.552713678800501e-15	1.4210854715202004e-14	10000

@@ -1,0 +1,11 @@
+brm	source_physical
+b_eight_schools_school_tau.1	tau (positive; unconstrained log)
+b_eight_schools_school_z_flat.1	theta.1
+b_eight_schools_school_z_flat.2	theta.2
+b_eight_schools_school_z_flat.3	theta.3
+b_eight_schools_school_z_flat.4	theta.4
+b_eight_schools_school_z_flat.5	theta.5
+b_eight_schools_school_z_flat.6	theta.6
+b_eight_schools_school_z_flat.7	theta.7
+b_eight_schools_school_z_flat.8	theta.8
+pop_theta_beta_pop.1	mu

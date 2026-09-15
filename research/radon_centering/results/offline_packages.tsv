@@ -17,7 +17,7 @@ ArrayInterface	7.30.2	1aec1ff0dcaa83a484e7f72097562fa3102c6722	/home/n/.julia/pa
 Artifacts	nothing	nothing	/home/n/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/Artifacts	
 BangBang	0.4.9	cceb62468025be98d42a5dc581b163c20896b040	/home/n/.julia/packages/BangBang/ZEWNl	
 Base64	nothing	nothing	/home/n/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/Base64	
-BayesianRegressionModels	0.2.1	nothing	/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-radon	918145dff003967863bfc2dd7a8a2c7e67dc77b6
+BayesianRegressionModels	0.2.1	nothing	/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering	028b2bfdd0629d0cd7cca34e49e0ad8902f50826
 Bijectors	0.16.3	a58fb73182f07a5a561bfadbe40efb9c6c892853	/home/n/.julia/packages/Bijectors/6t7LY	
 BridgeStan	2.9.0	3037ad381e5595495008cf529c7adb7146b689ac	/home/n/.julia/packages/BridgeStan/lLxtM	
 CEnum	0.5.0	389ad5c84de1ae7cf0e28e381131c98ea87d54fc	/home/n/.julia/packages/CEnum/B6ahP	
@@ -53,7 +53,7 @@ DynamicPPL	0.42.13	8f9dc691ddef45d534e9ca1ddea33101a02283c7	/home/n/.julia/packa
 ElasticArrays	1.2.12	75e5697f521c9ab89816d3abeea806dfc5afb967	/home/n/.julia/packages/ElasticArrays/tYOnZ	
 EllipticalSliceSampling	2.0.0	e611b7fdfbfb5b18d5e98776c30daede41b44542	/home/n/.julia/packages/EllipticalSliceSampling/cdEl3	
 EnumX	1.0.7	c49898e8438c828577f04b92fc9368c388ac783c	/home/n/.julia/packages/EnumX/CGSQY	
-Enzyme	0.13.204	d242d84323f15c1b4788e9eaaca3f8d5ca08dca3	/home/n/.julia/packages/Enzyme/378BD	
+Enzyme	0.13.203	b1809f2dfc41143c3f1b0a0a8092691cd3502ce2	/home/n/.julia/packages/Enzyme/ANMFY	
 EnzymeCore	0.8.21	971d7831cc85f43bc9f51d615a3f7f21270c2f1d	/home/n/.julia/packages/EnzymeCore/w6Eem	
 Enzyme_jll	0.0.293+0	d405b496023e00071fcf874377e7d3e455badd66	/home/n/.julia/packages/Enzyme_jll/fk3Zf	
 ExprTools	0.1.11	d2e49e7efd29719d6f28b891b0e0e159daa9d2b4	/home/n/.julia/packages/ExprTools/9lavJ	
@@ -115,7 +115,7 @@ Missings	1.2.0	ec4f7fbeab05d7747bdf98eb74d130a2a2ed298d	/home/n/.julia/packages/
 MistyClosures	2.1.0	d1a692e293c2a0dc8fda79c04cad60582f3d4de3	/home/n/.julia/packages/MistyClosures/2vtLL	
 Mmap	nothing	nothing	/home/n/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/Mmap	
 MozillaCACerts_jll	2025.12.2	nothing	/home/n/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/MozillaCACerts_jll	
-MutatingFunctions	0.1.0	nothing	/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-radon/test/.bootstrap/mutatingfunctions-4fc41b1c7b77	4fc41b1c7b774133ceaacc4ff3c34c67b15b87b2
+MutatingFunctions	0.1.0	nothing	/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/test/.bootstrap/mutatingfunctions-4fc41b1c7b77	4fc41b1c7b774133ceaacc4ff3c34c67b15b87b2
 NLSolversBase	8.0.1	f96d38936d92d610318dec4d3b5ef37b0373c20f	/home/n/.julia/packages/NLSolversBase/THQGs	
 NaNMath	1.1.4	dbd2e8cd2c1c27f0b584f6661b4309609c5a685e	/home/n/.julia/packages/NaNMath/1MJdn	
 NetworkOptions	1.2.0	nothing	/home/n/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/NetworkOptions	
@@ -131,7 +131,7 @@ Optimization	5.9.1	b4d47691ca17e5f8e26cc7e453f6ab92d480285f	/home/n/.julia/packa
 OptimizationBase	5.6.1	c390a9e18ec082cee22136a42f50b208b8312d0b	/home/n/.julia/packages/OptimizationBase/TvAnm	
 OptimizationOptimJL	0.4.21	6bc626d531967889260563d7cd42294047fd91e8	/home/n/.julia/packages/OptimizationOptimJL/qQFV2	
 OrderedCollections	1.8.2	94ba93778373a53bfd5a0caaf7d809c445292ff4	/home/n/.julia/packages/OrderedCollections/MglBA	
-OutputSignatures	0.1.0	nothing	/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-radon/test/.bootstrap/outputsignatures-121de3194f02	121de3194f02044e00bac0d11019a93458ddb63a
+OutputSignatures	0.1.0	nothing	/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/test/.bootstrap/outputsignatures-121de3194f02	121de3194f02044e00bac0d11019a93458ddb63a
 PDMats	0.11.41	123266c25174ef6c8d4718920abc206452cf8de6	/home/n/.julia/packages/PDMats/ZCpqF	
 PSIS	0.9.10	554bfcb2e56a9928b793a3c99f1d16e324c79ee0	/home/n/.julia/packages/PSIS/a8uY5	
 Parsers	3.0.0	663e8b48b789916221e0765393b289ca6c88f24e	/home/n/.julia/packages/Parsers/pJXgH	
@@ -161,9 +161,9 @@ Roots	3.0.8	4db094d5e079abbda658acfe1c4d098430417717	/home/n/.julia/packages/Roo
 RuntimeGeneratedFunctions	0.5.26	1719b26eee2c5e40d4b41c647b91dbaac1dcbf05	/home/n/.julia/packages/RuntimeGeneratedFunctions/xVoUB	
 SHA	0.7.0	nothing	/home/n/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/SHA	
 SSMProblems	0.6.1	cbf723e4c486375cf91236db53a7beefe8291951	/home/n/.julia/packages/SSMProblems/ZMavr	
-SciMLBase	3.55.0	8a14bac10be51ecf8cb167e483e39c068ca24bfd	/home/n/.julia/packages/SciMLBase/1DcFZ	
+SciMLBase	3.54.0	84423004c68e76f8c6121159562b7f2e642e9fa5	/home/n/.julia/packages/SciMLBase/JgcQp	
 SciMLLogging	2.1.0	3aafee7edc2ec7e71f50dcc6816cb031fac390a0	/home/n/.julia/packages/SciMLLogging/zP0QP	
-SciMLOperators	1.30.1	9eba48f738160e04268c0770e01dae2451199bc2	/home/n/.julia/packages/SciMLOperators/g0aVc	
+SciMLOperators	1.30.0	0b5b895913f1269a8c80b59435c61d5a7d79970c	/home/n/.julia/packages/SciMLOperators/1imDM	
 SciMLPublic	1.3.0	74685afb51732a464fbce79a72708f7c4203ceb7	/home/n/.julia/packages/SciMLPublic/hI11w	
 SciMLStructures	1.10.5	5c2f9dbf6f07eea6bc9e93f117b00b7939a79f9e	/home/n/.julia/packages/SciMLStructures/YPjs4	
 ScientificTypesBase	3.1.0	e785eaa35a0f5518a388f9010e66fda64ea95ede	/home/n/.julia/packages/ScientificTypesBase/9YgOY	
@@ -178,7 +178,7 @@ SparseConnectivityTracer	1.2.3	5c127b6b5e36e1ba38556b578c6346b2375ec0b4	/home/n/
 SparseMatrixColorings	0.4.28	63e1776f40bbd5e7394edce08e62f852b1384baf	/home/n/.julia/packages/SparseMatrixColorings/jDQiY	
 SpecialFunctions	2.9.0	429071b23f4c9a13fb6582f807cc2ef454082408	/home/n/.julia/packages/SpecialFunctions/EJiJa	
 StableTasks	0.1.7	c4f6610f85cb965bee5bfafa64cbeeda55a4e0b2	/home/n/.julia/packages/StableTasks/YtV0L	
-StanBlocks	0.2.1	nothing	/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-radon/test/.bootstrap/stanblocks-bec23bc3c523	bec23bc3c52303ebde60a026af48c435e4c81330
+StanBlocks	0.2.1	nothing	/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/test/.bootstrap/stanblocks-bec23bc3c523	bec23bc3c52303ebde60a026af48c435e4c81330
 StanLogDensityProblems	0.1.13	5f78ad0a1fb966e4d00a9699afd30ad7cdcabc5d	/home/n/.julia/packages/StanLogDensityProblems/YRaN5	
 StaticArrays	1.9.20	e206cf4850fd7ac4255ffd2b98922f563e18ac53	/home/n/.julia/packages/StaticArrays/k7bbZ	
 StaticArraysCore	1.4.4	6ab403037779dae8c514bad259f32a447262455a	/home/n/.julia/packages/StaticArraysCore/MoJEf	
@@ -205,13 +205,13 @@ TerminalLoggers	0.1.8	81c9b4137edfe56a56efcdcb35d721b2ce3e2416	/home/n/.julia/pa
 Test	nothing	nothing	/home/n/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/Test	
 Tracy	0.1.6	73e3ff50fd3990874c59fef0f35d10644a1487bc	/home/n/.julia/packages/Tracy/tYwAE	
 TransmuteDims	0.1.17	488b1a1effa8c0b97cd3335a7c1cbd23a3f2f6d3	/home/n/.julia/packages/TransmuteDims/1ynEo	
-TreeArrays	0.1.0	nothing	/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-radon/test/.bootstrap/treearrays-c317cc003fc4	c317cc003fc41c2d933c27dc80799141eebd434e
-Treebars	0.1.0	nothing	/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-radon/test/.bootstrap/treebars-c02aa16ab1b0	c02aa16ab1b08e4f5283597fe678a88e69555cd1
+TreeArrays	0.1.0	nothing	/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/test/.bootstrap/treearrays-c317cc003fc4	c317cc003fc41c2d933c27dc80799141eebd434e
+Treebars	0.1.0	nothing	/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/test/.bootstrap/treebars-c02aa16ab1b0	c02aa16ab1b08e4f5283597fe678a88e69555cd1
 TupleTools	1.6.0	41e43b9dc950775eac654b9f845c839cd2f1821e	/home/n/.julia/packages/TupleTools/2iodI	
 Turing	0.46.1	653ea28a8ffc069c46f2867fdf57b831ac25fe64	/home/n/.julia/packages/Turing/4sXd9	
 UUIDs	nothing	nothing	/home/n/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/UUIDs	
 Unicode	nothing	nothing	/home/n/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/Unicode	
-WarmupHMC	0.2.1	nothing	/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-radon/test/.bootstrap/warmuphmc-deeea1d128d5	deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2
+WarmupHMC	0.2.1	nothing	/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/test/.bootstrap/warmuphmc-deeea1d128d5	deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2
 ZipFile	0.10.1	f492b7fe1698e623024e873244f10d89c95c340a	/home/n/.julia/packages/ZipFile/yQ7yx	
 Zlib_jll	1.2.13+1	nothing	/home/n/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/Zlib_jll	
 libblastrampoline_jll	5.11.0+0	nothing	/home/n/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/libblastrampoline_jll	

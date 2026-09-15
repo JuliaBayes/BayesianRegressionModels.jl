@@ -7,15 +7,10 @@ function reexport_coordinates(fit_dir)
     read(joinpath(fit_dir, "eight-schools-reexport.stan")) ==
         read(joinpath(fit_dir, "eight-schools-model.stan")) ||
         error("re-export target differs from the saved full-fit producer")
-    pilot = deserialize(joinpath(fit_dir, "noncentered.jls"))
-    partial_target = deserialize(joinpath(fit_dir, "partial_target.jls"))
-    online = deserialize(joinpath(fit_dir, "online.jls"))
-    # All three binaries hold model-frame positions (the refit only after
-    # WarmupHMC's back-transform), so physical theta is mu + tau*z with no
-    # controls anywhere.
-    export_coordinates("noncentered", stan, pilot, fit_dir)
-    export_coordinates("partial", stan, partial_target, fit_dir)
-    export_coordinates("online", stan, online, fit_dir)
+    for label in ("noncentered", "centered", "partial", "online")
+        fit = deserialize(joinpath(fit_dir, "$label.jls"))
+        export_coordinates(label, stan, fit, fit_dir)
+    end
     println("eight_schools_coordinates_reexported\t", fit_dir)
 end
 

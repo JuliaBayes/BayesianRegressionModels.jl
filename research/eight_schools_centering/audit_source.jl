@@ -1,17 +1,6 @@
 include(joinpath(@__DIR__, "reproduce.jl"))
 using Test
 
-function source_model(output_dir)
-    mkpath(output_dir)
-    source_path = checked_file("eight_schools.stan", SOURCE_MODEL_SHA256)
-    data = read_eight_schools()
-    array_json(x) = "[" * join(x, ",") * "]"
-    source_data = "{" * join((
-        "\"J\":8", "\"y\":" * array_json(data.y),
-        "\"sigma\":" * array_json(data.sigma)), ",") * "}"
-    BS.StanModel(source_path, source_data)
-end
-
 function audit_source(; output_dir=get(ENV, "BRM_EIGHT_SCHOOLS_OUTPUT", mktempdir()))
     mkpath(output_dir)
     source = source_model(output_dir)
@@ -42,11 +31,52 @@ function audit_source(; output_dir=get(ENV, "BRM_EIGHT_SCHOOLS_OUTPUT", mktempdi
                 density_absolute_error=abs(transformed_brm_value - source_value),
                 max_gradient_absolute_error=maximum(abs.(physical_gradient .- source_gradient))))
         end
-        # The two source improper priors are constants on their declared supports;
-        # BridgeStan's positive unconstraining Jacobian is included above.
-        @test Distributions.logpdf(EightSchoolsFlat(), 0.3) == 0.0
-        @test Distributions.logpdf(EightSchoolsFlatPositive(), 0.3) == 0.0
-        @test Distributions.logpdf(EightSchoolsFlatPositive(), -0.1) == -Inf
+
+    end
+    centered = fixed_partial_problem(stan, ones(8))
+    layout = brm_layout(brm_names)
+    @testset "Manual fully centered selection" begin
+        @test all(last(p).c == 1 for p in WarmupHMC.reparam_sources(centered))
+        for point in 1:8
+            q = [0.15sin(i + point) for i in eachindex(brm_names)]
+            q[layout.scale] = -2.0 + 0.5point
+            tau = exp(q[layout.scale])
+            ncp = copy(q)
+            ncp[layout.effects] ./= tau
+            vn, gn = LogDensityProblems.logdensity_and_gradient(stan.density, ncp)
+            vc, gc = LogDensityProblems.logdensity_and_gradient(centered, q)
+            @test vc ≈ vn - 8log(tau) atol=1e-9
+            expected = copy(gn)
+            expected[layout.effects] ./= tau
+            expected[layout.scale] -= dot(gn[layout.effects], ncp[layout.effects]) + 8
+            @test gc ≈ expected atol=1e-8
+            restored = reshape(copy(q), :, 1)
+            WarmupHMC.reparametrize!(centered, restored)
+            @test vec(restored) ≈ ncp atol=1e-12
+        end
+    end
+    centered_sb = SBBRMI(build_brmi(); mod=@__MODULE__, centered_groups=[:school])
+    centered_density = Base.invokelatest(StanBlocks.stan_instantiate, centered_sb.model;
+        path=joinpath(output_dir, "eight-schools-native-centered.stan"))
+    centered_names = BS.param_unc_names(centered_density.model)
+    centered_block = only(adaptive_centering_blocks(centered_sb, centered_names))
+    centered_mu = only(findall(n -> occursin("pop_theta_beta_pop", n), centered_names))
+    @testset "Native centered_groups and manual c=1 agree" begin
+        @test StanBlocks.stanc_check(BRM.stan_code(centered_sb)).ok
+        for point in 1:8
+            q = [0.2sin(i+point) for i in eachindex(brm_names)]
+            q[layout.scale] = -2 + 0.5point
+            qc = zeros(10)
+            qc[centered_mu] = q[layout.population]
+            qc[only(centered_block.log_scales)] = q[layout.scale]
+            qc[vec(centered_block.effects)] = q[layout.effects]
+            vw, gw = LogDensityProblems.logdensity_and_gradient(centered, q)
+            vn, gn = LogDensityProblems.logdensity_and_gradient(centered_density, qc)
+            @test vw ≈ vn atol=1e-9
+            @test gw[layout.effects] ≈ gn[vec(centered_block.effects)] atol=1e-8
+            @test gw[layout.population] ≈ gn[centered_mu] atol=1e-8
+            @test gw[layout.scale] ≈ gn[only(centered_block.log_scales)] atol=1e-8
+        end
     end
     write_tsv(joinpath(output_dir, "source_density_gradient_audit.tsv"), receipts)
     layout = brm_layout(brm_names)

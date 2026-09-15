@@ -14,11 +14,12 @@ function report_costs(offline, online, diagnostics_dir, output)
     mapped = deserialize(joinpath(diagnostics_dir, "partial_model_frame.jls"))
     size(mapped.posterior_position) == (777, N_DRAWS) ||
         error("mapped refit matrix has an unexpected shape")
-    @assert mapped.n_divergent_samples ==
-        deserialize(joinpath(offline, "partial.jls")).n_divergent_samples
+    partial_record = deserialize(joinpath(offline, "partial.jls"))
+    @assert mapped.n_divergent_samples == partial_record.n_divergent_samples
+    @assert mapped.posterior_position == partial_record.posterior_position
     rows = NamedTuple[]
-    for (label, dir, frame) in (("noncentered", offline, :model),
-            ("partial", offline, :mapped_model), ("online", online, :model))
+    for (label, dir) in (("noncentered", offline),
+            ("partial", offline), ("online", online))
         fit = deserialize(joinpath(dir, "$label.jls"))
         checkpoint = deserialize(joinpath(dir, "checkpoints-$label", "cp_latest.jls"))
         @assert fit.complete && size(fit.posterior_position) == size(checkpoint.posterior_position)
@@ -26,23 +27,19 @@ function report_costs(offline, online, diagnostics_dir, output)
         total = checkpoint.total_evaluation_counter
         @assert total > 0 && fit.total_gradient_evaluations == total
         sampling = recorded_sampling_cost(fit, checkpoint, total)
-        scope = frame === :model ?
-            "all_777_unconstrained_model_coordinates" :
-            "all_777_model_coordinates_mapped_from_stored_source_partial_u"
-        stats = frame === :model ? diagnostics(label, fit) :
-            diagnostics(label, (; posterior_position=mapped.posterior_position,
-                n_divergent_samples=fit.n_divergent_samples))
+        stats = diagnostics(label, fit)
         push!(rows, (; fit=label,
             total_nuts_gradient_evaluations=total,
             sampling_gradient_evaluations=sampling,
             fit_seconds=fit.fit_seconds,
+            julia_compile_seconds=fit.julia_compile_seconds,
             min_bulk_ess=stats.min_bulk_ess,
             min_tail_ess=stats.min_tail_ess,
             min_bulk_ess_per_total_gradient=stats.min_bulk_ess / total,
             min_tail_ess_per_total_gradient=stats.min_tail_ess / total,
             min_bulk_ess_per_sampling_gradient=stats.min_bulk_ess / sampling,
             min_tail_ess_per_sampling_gradient=stats.min_tail_ess / sampling,
-            parameter_scope=scope,
+            parameter_scope="all_777_unconstrained_returned_model_coordinates",
             counter_scope="NUTS_steps_including_warmup_and_discarded_epochs_excluding_initializer",
             evidence="final_checkpoint_and_returned_result_agree"))
     end
@@ -54,6 +51,7 @@ function report_costs(offline, online, diagnostics_dir, output)
         sampling_gradient_evaluations=pilot.sampling_gradient_evaluations +
                                       partial.sampling_gradient_evaluations,
         fit_seconds=pilot.fit_seconds + partial.fit_seconds,
+        julia_compile_seconds=pilot.julia_compile_seconds + partial.julia_compile_seconds,
         min_bulk_ess=partial.min_bulk_ess,
         min_tail_ess=partial.min_tail_ess,
         min_bulk_ess_per_total_gradient=partial.min_bulk_ess /
@@ -64,7 +62,7 @@ function report_costs(offline, online, diagnostics_dir, output)
             (pilot.sampling_gradient_evaluations + partial.sampling_gradient_evaluations),
         min_tail_ess_per_sampling_gradient=partial.min_tail_ess /
             (pilot.sampling_gradient_evaluations + partial.sampling_gradient_evaluations),
-        parameter_scope="mapped_model_frame_refit_minimum_over_all_777_coordinates_charged_for_pilot_plus_refit",
+        parameter_scope="returned_model_frame_refit_minimum_over_all_777_coordinates_charged_for_pilot_plus_refit",
         counter_scope="NUTS_steps_including_warmup_and_discarded_epochs_excluding_initializer",
         evidence="charge_the_pilot_when_assessing_the_posthoc_workflow")
     push!(rows, workflow)

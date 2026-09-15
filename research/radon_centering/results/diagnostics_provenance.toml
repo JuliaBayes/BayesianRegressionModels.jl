@@ -1,0 +1,55 @@
+gradient_display_draws_per_facet = 1000
+diagnostics_script_sha256 = "fc8dfaca3f5897e8746a07e8a04b0ecc2192df7046f718e584d1c3507467ea85"
+reproduce_producer_note = "script_sha256 from the immutable run provenance; must equal the checkout hash above"
+coordinate_selection = "per role: minimum offline centeredness, nearest 0.5, maximum; ties by county index; distinct coordinates"
+refit_diagnostics_frame = "model-frame ESS on returned draws"
+visual_baseline = "centered transformation of NCP pilot; sampling and cost baseline stays NCP"
+reproduce_checkout_sha256 = "99a5ceb6af15ae547b7dd594c38a5fff26f106790a0ab0717e40b22747a5830b"
+pair_evidence_modes = ["pilot_transformed_display", "fresh_fit_transformed_display"]
+diagnostics_commit = "028b2bfdd0629d0cd7cca34e49e0ad8902f50826"
+native_ppc_seed = 1
+draws_per_configuration = 10000
+posteriordb_revision = "5545a1dd07ae297c36edecbcd82aa49097b4c385"
+ppc_rows = 12573
+reproduce_producer_sha256 = "99a5ceb6af15ae547b7dd594c38a5fff26f106790a0ab0717e40b22747a5830b"
+posterior_name = "radon_all-radon_variable_intercept_slope_noncentered"
+reproduce_checkout_note = "hash of reproduce.jl in this checkout, not provenance by itself"
+refit_model_frame = "NCP z, independently verified against checkpoint partial-u"
+refit_stored_frame = "model NCP z (partial.jls)"
+
+[[representative_coordinates]]
+rank = 1
+role = "intercept"
+county = 83
+criterion = "Minimum"
+centeredness = 0.0
+[[representative_coordinates]]
+rank = 2
+role = "intercept"
+county = 7
+criterion = "Nearest 0.5"
+centeredness = 0.5
+[[representative_coordinates]]
+rank = 3
+role = "intercept"
+county = 6
+criterion = "Maximum"
+centeredness = 1.0
+[[representative_coordinates]]
+rank = 1
+role = "slope"
+county = 2
+criterion = "Minimum"
+centeredness = 0.0
+[[representative_coordinates]]
+rank = 2
+role = "slope"
+county = 21
+criterion = "Nearest 0.5"
+centeredness = 0.5
+[[representative_coordinates]]
+rank = 3
+role = "slope"
+county = 188
+criterion = "Maximum"
+centeredness = 1.0
