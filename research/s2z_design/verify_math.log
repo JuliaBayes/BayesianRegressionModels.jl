@@ -1,0 +1,16 @@
+Test Summary:                                             | Pass  Total  Time
+Heterogeneous S2Z transform, inverse, restricted Jacobian |  432    432  6.3s
+Test Summary:                                                 | Pass  Total  Time
+Scalar transformed target: all coordinate and scale gradients |    9      9  0.7s
+Test Summary:                                                    | Pass  Total  Time
+Joint omitted means: exact Gaussian marginalization and recovery |  124    124  0.3s
+MATH_CHECKS_COMPLETE
+max_full_finite_difference_logjac_absolute_error = 5.022382509878298e-11
+max_inverse_absolute_error = 1.1102230246251565e-15
+max_marginalization_logdensity_absolute_error = 1.2434497875801753e-14
+max_recovered_covariance_absolute_error = 4.884981308350689e-15
+max_restricted_logjac_absolute_error = 1.7763568394002505e-15
+max_transformed_gradient_scaled_error = 1.8910633059476822e-9
+scope = math only; no BRM implementation or sampling benchmark
+seed = 582309
+transform_cases = 36
