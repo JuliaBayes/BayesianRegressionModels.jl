@@ -1,0 +1,18 @@
+{
+  "run": "pupil-online-brief-matrix-v1",
+  "qoi_count": 46,
+  "efficiency_rows": 15,
+  "plot_values": 45,
+  "additional_fits": 3,
+  "plot_log": "kb-run-compact.nm7nut",
+  "plot_exit": 0,
+  "warmuphmc_reviewed": "d9eeaac2c092b80aba3ef5d608261faea9b81265",
+  "warmuphmc_landed_published": "6b377cb23934022af5879d199a7c57abfac54c70",
+  "files": {
+    "efficiency.aov.json": "2cc00e3c4ebf9eec4648dfc3d74d540ed059d294769550020bffd879db0bdad1",
+    "efficiency.aov.json.gz": "b63b61b36bfd384238ce36a990f91e3ebc4867d297a8a5cb4d24fcfc3eda6d77",
+    "efficiency.png": "1a4bce5c24b7980711bb9de3acc59822756ea97f4bb4fd9f8dacb24b48134e2a",
+    "efficiency_plot.tsv": "24dc127aedc05a0203f59e54d8f09c580dcb3e508659f6306c47253e34f2459c",
+    "qoi46.tsv": "99f736273d67206343c3dcdc6ea0e0e14d56124e52ae8e46c6d5fa44a003b655"
+  }
+}

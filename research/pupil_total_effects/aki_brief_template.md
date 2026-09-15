@@ -12,14 +12,17 @@ integrate out two population/group-mean directions and permit exact conditional
 recovery of the original parameters.
 
 For the total-coefficient representation we tested fixed centered (CP), fixed
-noncentered (NCP), and offline adaptively partially centered (ACP) coordinates
-with WarmupHMC (WHMC). We tested brms S2Z CP/NCP/auto with both WHMC and native
+noncentered (NCP), and adaptively partially centered (ACP) coordinates with
+WarmupHMC (WHMC). Adaptation is tested both post-hoc and online, each with a
+position/Jacobian loss and a position–gradient loss. We tested brms S2Z CP/NCP/auto with both WHMC and native
 Stan. Ordinary brms NCP under both samplers, and ordinary brms CP under WHMC,
 provide additional controls.
 
-In these one-chain pilots, our ACP has the best **sampling-epoch** minimum
-ESS per gradient. After charging its pilot and all warmup, **our fixed CP and
-brms S2Z auto + WHMC are essentially tied for the best total efficiency**.
+In these one-chain pilots, **online gradient-loss adaptation has the highest
+observed sampling and total efficiency**, after repairing a WHMC bug in the
+transport of the active sampler position during centering changes. All four
+total-coefficient adaptation arms have zero sampling divergences. Online
+adaptation avoids the separate NCP pilot charged to the post-hoc arms.
 Neither S2Z nor exact total-coefficient marginalization makes the NCP endpoint
 efficient here. Centering is a major part of the observed improvement.
 
@@ -141,26 +144,42 @@ locations, not a claim that the marginal prior on each total has that mean.
 
 - **CP:** $c_j=1$, so the sampler uses the physical total coefficient.
 - **NCP:** $c_j=0$, so it uses $(q_j-m_j)/\tau_{k(j)}$.
-- **ACP:** choose each $c_j$ from a pilot, then hold it fixed during a fresh fit.
+- **Post-hoc ACP:** choose each $c_j$ from a pilot, then hold it fixed during a fresh fit.
+- **Online ACP:** update $c_j$ at warmup adaptation boundaries, then hold it fixed during retained sampling.
 
 The NCP endpoint does **not** whiten the induced joint prior. The total
 coefficients remain coupled by the integrated population-intercept factor.
 It differs from ordinary brms NCP, which samples standardized deviations
 $a_j/\tau_a$ and $b_j/\tau_b$ alongside the population coefficients.
 
-Our offline choice minimizes, separately for each of the 40 total coordinates,
+The **position/Jacobian loss** minimizes, separately for each of the 40 total coordinates,
 
 $$
 L_j(c)=\log\operatorname{sd}_{\mathrm{pilot}}(r_j(c))
        +\operatorname{mean}_{\mathrm{pilot}}[(1-c)\log\tau_{k(j)}],
 $$
 
-over the fixed grid $0,0.01,\ldots,1$. The second term is the inverse
-log-Jacobian contribution. This is a variance/Jacobian criterion, not a direct
-optimization of ESS. We used a 2,000-draw total-NCP WHMC pilot, then a fresh
-2,000-draw fit with the selected controls. Its full pilot cost is charged.
-WHMC's ordinary linear and step-size adaptation remains enabled in every
-WHMC arm. **Nonlinear online centering adaptation is disabled in this matrix.**
+The second term is the inverse log-Jacobian contribution. The
+**position–gradient loss** instead minimizes
+
+$$
+L_j^{\mathrm{grad}}(c)=\operatorname{Corr}_{\mathrm{pilot}}
+\left(r_j(c),\frac{\partial\log\pi_c(r)}{\partial r_j}\right),
+$$
+
+where $\pi_c$ is the density in the candidate source coordinates, including
+the change-of-variable determinant. Neither criterion directly optimizes ESS.
+
+Both post-hoc arms use the same saved 2,000-draw total-NCP pilot and grid
+$0,0.01,\ldots,1$, followed by a fresh 2,000-draw fit. The gradient criterion
+uses the pilot's stored source gradients, requiring no new target-gradient
+evaluations for selection. Each arm is charged the full pilot cost.
+
+Both online arms begin at total NCP and select controls from the evolving
+warmup sample pool on the existing coarser grid $0,0.1,\ldots,1$. They have
+no separate pilot. WHMC's ordinary linear and step-size adaptation remains
+enabled in every WHMC arm. The position-loss trials select WHMC's existing
+internal loss weights process-locally; no new public selection API is claimed.
 
 ![The same 2,000 retained ACP-fit draws viewed as total CP, total NCP and offline ACP. Rows select distinct coordinates by minimum selected centeredness, nearest 0.5 among remaining coordinates, and maximum among the rest. A denotes intercept total, B slope total; numeric suffixes are subject IDs. CP is the visualization baseline.](results/student_mixture/pairs.png)
 
@@ -232,6 +251,9 @@ Each completed fit has **one chain, seed 1 and 2,000 retained draws**.
 - **WHMC:** WarmupHMC commit `deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2`,
   Julia 1.10.11, default adaptive warmup and Pathfinder initialization,
   `monitor_ess=true`, `nonlinear_adapt=false`, retained-draw floor 2,000.
+  The three added arms (post-hoc gradient and both online losses) use the
+  tested local active-state transport fix `d9eeaac2c092b80aba3ef5d608261faea9b81265`.
+  The two online arms enable `nonlinear_adapt`; all other rows leave it disabled.
 - **Initialization:** ordinary and total-coefficient fits start from the same
   physical per-subject OLS coefficients and scales. The S2Z fits use pooled
   finite-population coefficients, zero contrasts and the OLS scales. The
@@ -299,13 +321,17 @@ The identical estimands and baseline denominator apply to every row.
 
 Several distinctions matter:
 
-- **Adaptation quality versus up-front cost:** total ACP gives @@ACP_SAMPLING@@
+- **Adaptation quality versus up-front cost:** post-hoc position ACP gives @@ACP_SAMPLING@@
   the baseline's sampling efficiency, compared with total CP's @@CP_SAMPLING@@. But its NCP pilot
   costs 134,652 gradients and the refit 34,280, for 168,932 overall. Its total
   efficiency is consequently @@ACP_TOTAL@@ the baseline, versus fixed CP's @@CP_TOTAL@@.
-- **No clear end-to-end winner between the two best pilots:** total CP and
-  brms S2Z auto + WHMC give @@CP_TOTAL@@ and @@S2Z_AUTO_TOTAL@@ the baseline's total efficiency. That difference is negligible
-  relative to the uncertainty of single-chain runs.
+- **Online adaptation avoids a separate pilot:** online position and gradient
+  losses give 217× and 366× the baseline's total efficiency, respectively;
+  their sampling efficiencies are 164× and 276×. The post-hoc gradient arm
+  gives 164× sampling and 51.2× total efficiency. These single-chain measurements
+  do not establish a stable ordering of the two losses.
+- **Strong fixed and brms-auto controls remain useful:** total CP and
+  brms S2Z auto + WHMC give @@CP_TOTAL@@ and @@S2Z_AUTO_TOTAL@@ the baseline's total efficiency.
 - **Centering matters strongly:** both marginalized NCP endpoints remain
   inefficient here. Ordinary brms CP improves on the ordinary NCP
   baseline, but its population intercept still limits efficiency. Thus a comparison only against ordinary NCP would
@@ -319,10 +345,15 @@ All Student-t rows have zero sampling divergences. This does not certify
 convergence: the total-NCP control has within-chain split $\hat R$ up to
 1.030, and some NCP minima are below 100 effective draws. Native ordinary NCP
 hit depth 10 on 14 retained iterations. Across the common-coordinate mean
-checks, the largest difference from the total-ACP fit was 4.42 estimated
+checks, the largest difference from the post-hoc position fit was 4.42 estimated
 combined MCSEs, for native S2Z NCP's `total_load[716]`. These descriptive checks
 and the low-ESS arms motivate replicated convergence checks before strong
 performance claims.
+
+The new post-hoc gradient, online position and online gradient arms differ
+from the post-hoc position fit by at most 1.71, 2.67 and 2.15 combined MCSEs,
+respectively, over these 46 quantities. The two online arms' maximum
+within-chain split $\hat R$ values are 1.0048 and 1.0067.
 
 ## 7. Conditional recovery of population coefficients and its effect on ESS
 
@@ -364,8 +395,9 @@ $$
 After drawing $(\beta_0,\beta_1)$, recover
 $a_j=A_j-\beta_0+\bar x\beta_1$ and $b_j=B_j-\beta_1$.
 This needs no additional HMC. The brms rows use its actual generated-quantity
-recovery; our rows use recovery seed 101. The independent 20-seed
-sensitivity for our fits is retained in the accompanying results.
+recovery; our rows use recovery seed 101. The earlier independent 20-seed
+sensitivity is retained for the original total CP/NCP/post-hoc-position fits;
+it has not been repeated for the three newly added arms.
 
 To see why, write a recovered quantity as
 $X_t=m(S_t)+\epsilon_t$, where recovery noise has conditional mean zero and is
@@ -390,7 +422,7 @@ Monte Carlo noise. This is not invalid posterior recovery; it is a reason to
 compare the same estimands and examine MCSE as well as ESS. These equations
 describe covariance/mean ESS; rank-normalized bulk ESS is measured separately.
 
-In our Student-t ACP fit, about **99.966%** of the recovered population-
+In our Student-t post-hoc position fit, about **99.966%** of the recovered population-
 intercept variance is conditional recovery variance. Its conditional-mean
 MCSE is **0.225**, while recovered-mean MCSE is approximately **12.08**
 (median over 20 recovery seeds). Both bulk ESS values are about 2,000.
@@ -413,6 +445,36 @@ coordinate-gradient discrepancy below $2\times10^{-7}$. Generated quantities
 recover exactly the same totals before and after adding conditional noise.
 Ordinary brms CP/NCP and our recovery conditional have separate audits.
 
+### Online adaptation correction
+
+The original WHMC implementation correctly transported the stored adaptation
+positions and gradients when centering changed, but reevaluated the active
+NUTS position using its unchanged numerical source coordinates. Those numbers
+then denoted a different physical state. One recorded failed Gaussian-pupil
+warmup boundary moved the physical position by $3.21\times10^7$ in maximum
+absolute coordinate difference and changed its log density from about
+$-24{,}481$ to $-3.06\times10^8$.
+
+The fix maps the active old source position to physical coordinates, then
+into the new source coordinates before reevaluation. It covers both halo and
+streaming evidence paths. Its deterministic regression gives four expected
+failures on the original code and **152/152 passing checks** with the fix;
+the existing reparametrization and invariant-scoring tests also pass.
+The full package suite was not run. Gaussian and Student-t pupil pilots
+with each online loss now have **zero divergences in 2,000 retained draws**,
+compared with 1,024 divergences in the recorded broken Gaussian run.
+AIR/Park failures were not separately rerun or diagnosed here.
+
+The Student-t rows use the actual fixed package. The Gaussian sensitivity
+used an equivalent process-local active-state repair. The reviewed fix
+`d9eeaac` has landed and been published on WarmupHMC dev as
+[`6b377cb`](https://github.com/nsiccha/WarmupHMC.jl/commit/6b377cb23934022af5879d199a7c57abfac54c70).
+The faulty halo call dates to `44f739a` (17 March 2026); the streaming path
+copied it in `d9f88a8` (28 July). Earlier online runs that changed centering
+through those paths were exposed, although this alone does not establish
+that their retained posterior draws were invalid: later warmup could recover.
+Their adaptation-efficiency comparisons require reassessment.
+
 Full draws, native CSVs, source capsules, resolved auto weights, per-parameter
 diagnostics, gradient receipts and process logs are retained. The matrix is
 computed from saved draws; no posterior refits are needed to change diagnostic
@@ -428,18 +490,25 @@ Pinned sources:
 - brms 2.23.1, source commit `73cf607889879cb2a55f50b88d8141d76ff43279` from the PR branch.
 - WarmupHMC commit `deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2`; Julia 1.10.11;
   CmdStan 2.39.0 and CmdStanR 0.9.0.
+  The three added Student-t arms use local fix `d9eeaac2c092b80aba3ef5d608261faea9b81265`.
 - Research code and saved-result manifest: `research/pupil_total_effects/`
   in the working BayesianRegressionModels repository, snapshot **@@SOURCE_SHA@@**.
 
 What remains unestablished is a replicated ranking across seeds/chains,
 matched-initialization performance across all representations, controlled wall
 time, behavior of the original correlated-effects pupil model, and behavior
-with multiple crossed group structures. No online-centering result or native
-Stan implementation of our manual total target is included here.
+with multiple crossed group structures. No native Stan implementation of our
+manual total target is included here.
 
 ## 9. Inspect the harness and exact generated Stan files
 
 @@CODE_LINKS@@
+
+### Online correction and added adaptation arms
+
+- [WarmupHMC patch](/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/research/pupil_total_effects/results/online_adaptation/warmuphmc-active-state.patch), [deterministic boundary audit](/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/research/pupil_total_effects/audit_online_boundary.jl).
+- [Online driver](/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/research/pupil_total_effects/online_transport_trial.jl), [post-hoc gradient driver](/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/research/pupil_total_effects/offline_gradient_trial.jl), [46-QOI comparison and recovery](/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/research/pupil_total_effects/compare_online_trials.jl).
+- [Complete 15-row table](/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/research/pupil_total_effects/results/online_adaptation/brief_matrix/qoi46.tsv), [new per-QOI results](/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/research/pupil_total_effects/results/online_adaptation/comparison/parameters.tsv), [source and run manifest](/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/research/pupil_total_effects/results/online_adaptation/receipt.json).
 
 The most useful next comparison would repeat the promising CP/ACP/S2Z-auto
 arms with matched physical starting states and multiple chains, keeping this
