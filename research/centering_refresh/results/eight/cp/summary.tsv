@@ -1,0 +1,2 @@
+case	arm	qois	draws	min_bulk_ess	limiting_qoi	min_tail_ess	max_split_rhat	divergences	sampling_gradients	all_fit_gradients	pilot_gradients	total_gradients	sampling_efficiency	total_efficiency
+eight	cp	10	10000	166.8721498172109	log_tau	84.89093478629219	1.0006723774624258	39	170284	174583	0	174583	0.000979963765340319	0.0009558327547195941

@@ -1,0 +1,4 @@
+arm	recovery_seed	scope	min_bulk_ess	limiting_parameter	min_bulk_ess_per_1000_sampling_gradients	min_bulk_ess_per_1000_all_gradients
+brms_native_ncp	0	original_physical46	168.78955530232312	deviation_intercept[707]	0.24731215318818445	0.1586622993942853
+brms_native_ncp	0	original_physical_plus_raw_intercepts48	168.78955530232312	deviation_intercept[707]	0.24731215318818445	0.1586622993942853
+brms_native_ncp	0	original_stan_ncp46	167.21133720787452	z_intercept[707]	0.2449997321711402	0.15717877328769428

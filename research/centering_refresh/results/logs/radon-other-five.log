@@ -1,0 +1,51 @@
+BOUNDARY	radon	posthoc_position	init	window=0	all_gradients=117
+BOUNDARY	radon	posthoc_position	window	window=1	all_gradients=1197
+BOUNDARY	radon	posthoc_position	window	window=2	all_gradients=3199
+BOUNDARY	radon	posthoc_position	window	window=3	all_gradients=7204
+BOUNDARY	radon	posthoc_position	window	window=4	all_gradients=15214
+BOUNDARY	radon	posthoc_position	window	window=5	all_gradients=31219
+BOUNDARY	radon	posthoc_position	window	window=6	all_gradients=63229
+BOUNDARY	radon	posthoc_position	window	window=7	all_gradients=127234
+BOUNDARY	radon	posthoc_position	window	window=8	all_gradients=152269
+CASE_ARM_COMPLETE	(case = "radon", arm = "posthoc_position", qois = 777, draws = 10000, min_bulk_ess = 475.7392254511738, limiting_qoi = "pop_mu_beta_pop.2", min_tail_ess = 876.2802245134556, max_split_rhat = 1.00257293642112, divergences = 0, sampling_gradients = 150000, all_fit_gradients = 152269, pilot_gradients = 164917, total_gradients = 317186, sampling_efficiency = 0.003171594836341159, total_efficiency = 0.0014998746018146255)
+BOUNDARY	radon	posthoc_gradient	init	window=0	all_gradients=127
+BOUNDARY	radon	posthoc_gradient	window	window=1	all_gradients=1301
+BOUNDARY	radon	posthoc_gradient	window	window=2	all_gradients=3324
+BOUNDARY	radon	posthoc_gradient	window	window=3	all_gradients=7333
+BOUNDARY	radon	posthoc_gradient	window	window=4	all_gradients=15343
+BOUNDARY	radon	posthoc_gradient	window	window=5	all_gradients=31348
+BOUNDARY	radon	posthoc_gradient	window	window=6	all_gradients=63358
+BOUNDARY	radon	posthoc_gradient	window	window=7	all_gradients=127363
+BOUNDARY	radon	posthoc_gradient	window	window=8	all_gradients=154468
+CASE_ARM_COMPLETE	(case = "radon", arm = "posthoc_gradient", qois = 777, draws = 10000, min_bulk_ess = 600.4614078382747, limiting_qoi = "pop_mu_beta_pop.2", min_tail_ess = 1243.4869887672075, max_split_rhat = 1.0058646172586805, divergences = 0, sampling_gradients = 150000, all_fit_gradients = 154468, pilot_gradients = 164917, total_gradients = 319385, sampling_efficiency = 0.004003076052255164, total_efficiency = 0.001880055130448439)
+BOUNDARY	radon	online_position	init	window=0	all_gradients=151
+BOUNDARY	radon	online_position	window	window=1	all_gradients=1350
+BOUNDARY	radon	online_position	window	window=2	all_gradients=3379
+BOUNDARY	radon	online_position	window	window=3	all_gradients=7389
+BOUNDARY	radon	online_position	window	window=4	all_gradients=15399
+BOUNDARY	radon	online_position	window	window=5	all_gradients=31404
+BOUNDARY	radon	online_position	window	window=6	all_gradients=63414
+BOUNDARY	radon	online_position	window	window=7	all_gradients=127419
+BOUNDARY	radon	online_position	window	window=8	all_gradients=154539
+CASE_ARM_COMPLETE	(case = "radon", arm = "online_position", qois = 777, draws = 10000, min_bulk_ess = 375.2566752306822, limiting_qoi = "pop_mu_beta_pop.2", min_tail_ess = 843.3779095780009, max_split_rhat = 1.0036291386716605, divergences = 0, sampling_gradients = 150000, all_fit_gradients = 154539, pilot_gradients = 0, total_gradients = 154539, sampling_efficiency = 0.002501711168204548, total_efficiency = 0.0024282328423937145)
+BOUNDARY	radon	online_gradient	init	window=0	all_gradients=151
+BOUNDARY	radon	online_gradient	window	window=1	all_gradients=1350
+BOUNDARY	radon	online_gradient	window	window=2	all_gradients=3368
+BOUNDARY	radon	online_gradient	window	window=3	all_gradients=7373
+BOUNDARY	radon	online_gradient	window	window=4	all_gradients=15383
+BOUNDARY	radon	online_gradient	window	window=5	all_gradients=31388
+BOUNDARY	radon	online_gradient	window	window=6	all_gradients=63398
+BOUNDARY	radon	online_gradient	window	window=7	all_gradients=127403
+BOUNDARY	radon	online_gradient	window	window=8	all_gradients=154448
+CASE_ARM_COMPLETE	(case = "radon", arm = "online_gradient", qois = 777, draws = 10000, min_bulk_ess = 330.8176595050066, limiting_qoi = "pop_mu_beta_pop.2", min_tail_ess = 879.7078063968504, max_split_rhat = 1.0067014327650956, divergences = 0, sampling_gradients = 150000, all_fit_gradients = 154448, pilot_gradients = 0, total_gradients = 154448, sampling_efficiency = 0.0022054510633667105, total_efficiency = 0.002141935534969741)
+BOUNDARY	radon	cp	init	window=0	all_gradients=118
+BOUNDARY	radon	cp	window	window=1	all_gradients=1210
+BOUNDARY	radon	cp	window	window=2	all_gradients=3221
+BOUNDARY	radon	cp	window	window=3	all_gradients=7226
+BOUNDARY	radon	cp	window	window=4	all_gradients=15236
+BOUNDARY	radon	cp	window	window=5	all_gradients=31241
+BOUNDARY	radon	cp	window	window=6	all_gradients=63251
+BOUNDARY	radon	cp	window	window=7	all_gradients=127256
+BOUNDARY	radon	cp	window	window=8	all_gradients=152546
+CASE_ARM_COMPLETE	(case = "radon", arm = "cp", qois = 777, draws = 10000, min_bulk_ess = 284.75056927026617, limiting_qoi = "pop_mu_beta_pop.2", min_tail_ess = 447.61612755939586, max_split_rhat = 1.0030169346143254, divergences = 0, sampling_gradients = 150000, all_fit_gradients = 152546, pilot_gradients = 0, total_gradients = 152546, sampling_efficiency = 0.0018983371284684411, total_efficiency = 0.0018666537914482594)
+[kb-run-compact] exit=0 elapsed=873s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.t1sVat

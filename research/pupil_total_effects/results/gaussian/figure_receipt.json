@@ -1,0 +1,23 @@
+{
+  "producer": "AlgebraOfVega",
+  "aov_commit": "412422660d859a468b8357a11527ff0033e0881c",
+  "run": "pupil-total-v1",
+  "source_draws": "partial.jls",
+  "draws_per_panel": 2000,
+  "panels": 9,
+  "plotted_rows": 18000,
+  "selection": "minimum c; closest to 0.5 among unused; maximum among unused",
+  "same_draws_all_columns": true,
+  "visualization_baseline": "centered total coefficients",
+  "spec_sha256": "592d7d79b25aa9ccf45298d5b4ea16dd076f1a5e54a1d2dd3368db2e8f9e7b79",
+  "rows_sha256": "1e69be12a90292fb444c564e731f1289b38c34b08de3e5bc12b022efce43b0e9",
+  "render_exit": 0,
+  "render_log": "kb-run-compact.yqTwYo",
+  "static_visual_inspection": "Student-t render inspected: passed, no overlapping labels; Gaussian uses identical layout",
+  "online": "not plotted; disabled",
+  "column_labels": [
+    "CP",
+    "NCP",
+    "ACP (offline)"
+  ]
+}

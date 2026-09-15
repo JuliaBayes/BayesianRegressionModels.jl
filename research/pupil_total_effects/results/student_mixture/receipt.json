@@ -1,0 +1,17 @@
+{
+  "integrated_output": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil-student-total-v1",
+  "baseline_output": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil-student-brms-v1",
+  "integrated_exit": 0,
+  "baseline_exit": 0,
+  "integrated_wrapper_seconds": 58,
+  "baseline_wrapper_seconds": 97,
+  "integrated_log": "kb-run-compact.iOqi1q",
+  "baseline_log": "kb-run-compact.AEVFWq",
+  "integrated_session": 34981,
+  "baseline_session": 36544,
+  "warmuphmc_commit": "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2",
+  "online": "disabled by user",
+  "source_capsules": "each run/source",
+  "saved_fits": "each run/*.jls; checkpoints in each run",
+  "draw_frame": "physical total coefficients; no original population/deviation recovery"
+}

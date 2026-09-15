@@ -1,0 +1,2 @@
+arm	retained_draws	min_bulk_ess	limiting_parameter	min_tail_ess	max_split_rhat	divergences	divergence_percent	sampling_gradients	transition_gradients	all_gradient_calls	min_bulk_ess_per_1000_sampling_gradients	min_bulk_ess_per_1000_all_gradients	min_total_coefficient_ess_per_1000_gradients	min_common_bulk_ess_per_1000_gradients	fit_seconds	compile_seconds
+centered_total	2000	1702.2751137857306	total_load[705]	1184.508919698348	1.0024177029551438	0	0.0	52136	54449	54587	32.65066583139732	31.18462479685146	32.65066583139732	32.65066583139732	26.731181768	26.402404596

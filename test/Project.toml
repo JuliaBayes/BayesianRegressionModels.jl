@@ -59,6 +59,6 @@ rev = "c02aa16ab1b08e4f5283597fe678a88e69555cd1"
 
 [sources.WarmupHMC]
 url = "https://github.com/nsiccha/WarmupHMC.jl"
-# deeea1d (2026-09-14): includes the exact retained-sampling gradient counter
-# required by full adaptive-centering case studies (913da79 is its ancestor).
-rev = "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"
+# 7aed40b (2026-09-15): preserve the active physical position and reject
+# nonfinite centering transports; includes the retained-sampling gradient counter.
+rev = "7aed40b18bd4cdabb75330f285d5c9b355575ab9"

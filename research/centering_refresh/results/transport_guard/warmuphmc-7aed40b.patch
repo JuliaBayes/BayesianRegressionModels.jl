@@ -1,0 +1,114 @@
+From 7aed40b18bd4cdabb75330f285d5c9b355575ab9 Mon Sep 17 00:00:00 2001
+From: KB Remote Agent <kb-agent@strato2.invalid>
+Date: Tue, 15 Sep 2026 16:04:10 +0000
+Subject: [PATCH] Reject nonfinite centering transports before updating the
+ metric
+
+---
+ src/Reparametrizations.jl              | 41 +++++++++++++++++++++-----
+ test/active_reparametrization_state.jl | 25 ++++++++++++++++
+ 2 files changed, 59 insertions(+), 7 deletions(-)
+
+diff --git a/src/Reparametrizations.jl b/src/Reparametrizations.jl
+index 7545e1a..0b26972 100644
+--- a/src/Reparametrizations.jl
++++ b/src/Reparametrizations.jl
+@@ -1160,6 +1160,35 @@ function _transport_active_evaluation(lpdf, old_ir, position_and_gradient)
+     DynamicHMC.evaluate_ℓ(lpdf, source_position; strict=false)
+ end
+ 
++# A candidate can be representable in the streaming scoring evidence but not
++# in every point of the linear-adaptation pool (e.g. HSGP scales underflow).
++# Treat the coordinate update as a transaction: an unusable transport must not
++# poison the metric, nor change the meaning of the preserved sampler state.
++function _validated_transport!(lpdf, old_ir, old_position, old_gradient,
++                               position, gradient, position_and_gradient)
++    _jointly_transport_halo!(lpdf, old_ir, old_position, old_gradient,
++                             position, gradient)
++    ir = reparametrizer(lpdf)
++    if all(isfinite, position) && all(isfinite, gradient)
++        _, physical = old_ir(position_and_gradient.q)
++        _, source = _inverse_with_logabsdet_jacobian(ir, physical)
++        if all(isfinite, source)
++            point = DynamicHMC.evaluate_ℓ(lpdf, source; strict=false)
++            if isfinite(point.ℓq) && all(isfinite, point.∇ℓq)
++                return point
++            end
++        end
++    end
++    bad_positions = count(!isfinite, position)
++    bad_gradients = count(!isfinite, gradient)
++    ir.pairs .= old_ir.pairs
++    _synchronize_scoring!(lpdf)
++    position .= old_position
++    gradient .= old_gradient
++    @warn "Rejected centering update: nonfinite coordinate transport; retaining previous coordinates" bad_positions bad_gradients
++    position_and_gradient
++end
++
+ find_reparametrization!(lpdf, halo_position, halo_gradient, position_and_gradient) = begin
+     ir = reparametrizer(lpdf)
+     isempty(ir.pairs) && return position_and_gradient
+@@ -1168,9 +1197,8 @@ find_reparametrization!(lpdf, halo_position, halo_gradient, position_and_gradien
+     old_gradient = copy(halo_gradient)
+     optimize!(ir, halo_position, halo_gradient)
+     _synchronize_scoring!(lpdf)
+-    _jointly_transport_halo!(lpdf, old_ir, old_position, old_gradient,
+-                             halo_position, halo_gradient)
+-    _transport_active_evaluation(lpdf, old_ir, position_and_gradient)
++    _validated_transport!(lpdf, old_ir, old_position, old_gradient,
++                          halo_position, halo_gradient, position_and_gradient)
+ end
+ 
+ function find_reparametrization!(lpdf, recorder::NonlinearRecorder,
+@@ -1187,11 +1215,10 @@ function find_reparametrization!(lpdf, recorder::NonlinearRecorder,
+     old_gradient = copy(halo_gradient)
+     optimize!(ir, recorder.online)
+     _synchronize_scoring!(lpdf)
+-    _jointly_transport_halo!(
+-        lpdf, old_ir, old_position, old_gradient, halo_position, halo_gradient,
+-    )
++    point = _validated_transport!(lpdf, old_ir, old_position, old_gradient,
++                                  halo_position, halo_gradient, position_and_gradient)
+     reset!(recorder)
+-    _transport_active_evaluation(lpdf, old_ir, position_and_gradient)
++    point
+ end
+ 
+ # Draws are stored in the SAMPLING parametrization: `logdensity` receives the
+diff --git a/test/active_reparametrization_state.jl b/test/active_reparametrization_state.jl
+index d7dc31b..038a5bb 100644
+--- a/test/active_reparametrization_state.jl
++++ b/test/active_reparametrization_state.jl
+@@ -41,3 +41,28 @@
+         end
+     end
+ end
++
++@testset "unrepresentable centering updates preserve the complete old state" begin
++    inner=DiagGaussian(zeros(2),ones(2))
++    old_ir=WarmupHMC.IndexedReparametrization([
++        2=>WarmupHMC.Reparametrization(WarmupHMC.PartiallyCentered(0.0),
++            WarmupHMC.PartiallyCentered(0.0),0.0,x->x[1])])
++    rp=WarmupHMC.ReparametrizedProblem(WarmupHMC.IndexedReparametrization(copy(old_ir.pairs)),inner,AutoEnzyme())
++    old_position=[-1000.0 0.0; 1.0 0.5]
++    old_gradient=reduce(hcat,(last(LogDensityProblems.logdensity_and_gradient(rp,q)) for q in eachcol(old_position)))
++    active=WarmupHMC.DynamicHMC.evaluate_ℓ(rp,copy(old_position[:,end]))
++    WarmupHMC.restore_reparam_sources!(rp,[2=>WarmupHMC.PartiallyCentered(1.0)])
++    position=copy(old_position);gradient=copy(old_gradient)
++    WarmupHMC._jointly_transport_halo!(rp,old_ir,old_position,old_gradient,position,gradient)
++    @test !all(isfinite,gradient) # The existing transport cannot represent exp(-1000).
++    point=@test_logs (:warn,r"Rejected centering update") WarmupHMC._validated_transport!(
++        rp,old_ir,old_position,old_gradient,position,gradient,active)
++    @test point === active
++    @test position == old_position
++    @test gradient == old_gradient
++    @test WarmupHMC.reparam_sources(rp) == [2=>WarmupHMC.PartiallyCentered(0.0)]
++    @test last(WarmupHMC.reparametrizer(rp)(point.q)) == old_position[:,end]
++    value,g=LogDensityProblems.logdensity_and_gradient(rp,point.q)
++    @test point.ℓq == value
++    @test point.∇ℓq == g
++end
+-- 
+2.53.0
+

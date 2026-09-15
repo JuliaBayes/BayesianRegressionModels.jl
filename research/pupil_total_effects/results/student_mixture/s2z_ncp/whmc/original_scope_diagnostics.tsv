@@ -1,0 +1,4 @@
+arm	recovery_seed	scope	min_bulk_ess	limiting_parameter	min_bulk_ess_per_1000_sampling_gradients	min_bulk_ess_per_1000_all_gradients
+s2z_ncp_whmc	101	original_physical46	88.33167026434374	log_tau_intercept	0.7961824908453251	0.7165881400889431
+s2z_ncp_whmc	101	original_physical_plus_raw_intercepts48	88.33167026434374	log_tau_intercept	0.7961824908453251	0.7165881400889431
+s2z_ncp_whmc	101	original_stan_ncp46	88.33167026434374	log_tau_intercept	0.7961824908453251	0.7165881400889431

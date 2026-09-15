@@ -1,0 +1,22 @@
+{
+  "run": "pupil-student-total-cp-v1",
+  "exit": 0,
+  "log": "kb-run-compact.PAkHrR",
+  "wrapper_seconds": 63,
+  "files": [
+    {
+      "path": "centered_total.jls.gz",
+      "bytes": 720784,
+      "sha256": "5699b9a6e30a2e475226b1d879f07a680e2b12e4a7272c64f4755a58dab8d8df",
+      "compressed_sha256": "039769de9c7adabe9a2a9fb48733701cb3609c8305f5e4e2d791a0309d14e983"
+    },
+    {
+      "path": "centered_total_recovered_seed101.jls.gz",
+      "bytes": 769434,
+      "sha256": "20a64729e6b3affe655deb16fad345be7e1023c52b4adc2d2bac3bf1ade0e1db",
+      "compressed_sha256": "393dbcc386f80a714bac8ce024b1334d329a6b0822638d08066a674456cb87ec"
+    }
+  ],
+  "online": false,
+  "initialization": "physical per-subject OLS; WHMC default Pathfinder"
+}

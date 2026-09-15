@@ -1,0 +1,9 @@
+{
+  "path": "/home/niko/.local/state/kb-agents/uploads/1aa6513b92c72749.bin",
+  "compression": "gzip",
+  "bytes": 1292041,
+  "sha256": "9bdf8b981d9504f0ead9dcf961d6929cb854c04bb4a115fa3c48db9196216002",
+  "uncompressed_sha256": "1a7fd34c6a772cdb38da2bd685c510a6c7ca3d5e82b838a2fbff403c24ddf0c3",
+  "restore_to": "OUTPUT/online_gradient/transport-failure.jls",
+  "verified_readback": true
+}

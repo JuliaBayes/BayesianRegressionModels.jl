@@ -1,0 +1,19 @@
+method	metric	value
+NCP	Total gradients	164917.0
+NCP	Relative sampling efficiency	1.0
+NCP	Relative total efficiency	1.0
+CP	Total gradients	152546.0
+CP	Relative sampling efficiency	0.6395284819168574
+CP	Relative total efficiency	0.6467573466029
+Post-hoc position	Total gradients	317186.0
+Post-hoc position	Relative sampling efficiency	1.0684747195441713
+Post-hoc position	Relative total efficiency	0.5196758617751409
+Post-hoc gradient	Total gradients	319385.0
+Post-hoc gradient	Relative sampling efficiency	1.348591413139519
+Post-hoc gradient	Relative total efficiency	0.6514006363722136
+Online position	Total gradients	154539.0
+Online position	Relative sampling efficiency	0.8427984268985447
+Online position	Relative total efficiency	0.8413329977285763
+Online gradient	Total gradients	154448.0
+Online gradient	Relative sampling efficiency	0.7429917211990511
+Online gradient	Relative total efficiency	0.7421368384100225

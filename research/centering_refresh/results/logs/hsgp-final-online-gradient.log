@@ -1,0 +1,17 @@
+BOUNDARY	hsgp	online_gradient	init	window=0	all_gradients=120
+BOUNDARY	hsgp	online_gradient	window	window=1	all_gradients=1172
+BOUNDARY	hsgp	online_gradient	window	window=2	all_gradients=3180
+BOUNDARY	hsgp	online_gradient	window	window=3	all_gradients=7192
+┌ Warning: Rejected centering update: nonfinite coordinate transport; retaining previous coordinates
+│   bad_positions = 0
+│   bad_gradients = 3
+└ @ WarmupHMC ~/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-finite-transport-fix/src/Reparametrizations.jl:1188
+BOUNDARY	hsgp	online_gradient	window	window=4	all_gradients=15249
+BOUNDARY	hsgp	online_gradient	window	window=5	all_gradients=31340
+BOUNDARY	hsgp	online_gradient	window	window=6	all_gradients=63747
+BOUNDARY	hsgp	online_gradient	window	window=7	all_gradients=127772
+BOUNDARY	hsgp	online_gradient	window	window=8	all_gradients=255953
+BOUNDARY	hsgp	online_gradient	window	window=9	all_gradients=512003
+BOUNDARY	hsgp	online_gradient	window	window=10	all_gradients=713602
+CASE_ARM_COMPLETE	(case = "hsgp", arm = "online_gradient", qois = 192, draws = 10000, min_bulk_ess = 2967.8559179840227, limiting_qoi = "hsgp_x_rho_iso", min_tail_ess = 1801.2718661300087, max_split_rhat = 1.0004343881950624, divergences = 12, sampling_gradients = 455207, all_fit_gradients = 713602, pilot_gradients = 0, total_gradients = 713602, sampling_efficiency = 0.006519794111215387, total_efficiency = 0.004158979260125424)
+[kb-run-compact] exit=0 elapsed=191s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.kfqRlm

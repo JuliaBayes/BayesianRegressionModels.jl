@@ -1,0 +1,5 @@
+TESTED_PACKAGE=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix
+Test Summary:                                         | Pass  Total   Time
+nonlinear restart preserves the active physical point |  152    152  26.3s
+ONLINE_STATE_TESTS_COMPLETE
+[kb-run-compact] exit=0 elapsed=31s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.5grkbe

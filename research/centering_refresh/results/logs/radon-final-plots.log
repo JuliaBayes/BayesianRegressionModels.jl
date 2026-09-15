@@ -1,0 +1,17 @@
+REFRESH_FIGURE pairs-pilot-county-intercepts
+REFRESH_FIGURE pairs-posthoc-county-intercepts
+REFRESH_FIGURE gradients-posthoc-county-intercepts
+REFRESH_FIGURE pairs-online-county-intercepts
+REFRESH_FIGURE gradients-online-county-intercepts
+REFRESH_FIGURE pairs-pilot-county-slopes
+REFRESH_FIGURE pairs-posthoc-county-slopes
+REFRESH_FIGURE gradients-posthoc-county-slopes
+REFRESH_FIGURE pairs-online-county-slopes
+REFRESH_FIGURE gradients-online-county-slopes
+REFRESH_FIGURE centeredness
+┌ Warning: Assignment to `spec` in soft scope is ambiguous because a global variable by the same name exists: `spec` will be treated as a new local. Disambiguate by using `local spec` to suppress this warning or `global spec` to assign to the existing global variable.
+└ @ ~/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/research/centering_refresh/plot.jl:68
+REFRESH_FIGURE ppc
+REFRESH_FIGURE efficiency
+REFRESH_PLOTS_COMPLETE radon
+[kb-run-compact] exit=0 elapsed=61s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.n66UYu

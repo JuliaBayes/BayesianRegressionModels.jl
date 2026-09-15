@@ -1,0 +1,15 @@
+{
+  "brms_sha": "73cf607889879cb2a55f50b88d8141d76ff43279",
+  "cmdstan": "2.39.0",
+  "cmdstanr": "0.9.0",
+  "arm": "s2z_ncp",
+  "target": "pupil Student-t intercept, independent REs, numeric-subject sigma regression",
+  "seed": 1,
+  "chains": 1,
+  "warmup": 1000,
+  "draws": 2000,
+  "adapt_delta": 0.8,
+  "max_treedepth": 10,
+  "initialization": "pooled total coefficients, zero contrasts, OLS group SDs and log residual scale; same physical point for every S2Z arm",
+  "source_sha256": "af8b60c46c5fa27e7b272dab3e0049d4fec03b69cdd49c1a94ad8255c5c42c29"
+}

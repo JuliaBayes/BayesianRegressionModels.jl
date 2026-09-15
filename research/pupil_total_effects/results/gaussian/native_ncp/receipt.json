@@ -1,0 +1,35 @@
+{
+  "run": "pupil-gaussian-native-v1",
+  "fit_exit": 0,
+  "analysis_exit": 0,
+  "fit_log": "kb-run-compact.rcTNid",
+  "analysis_log": "kb-run-compact.TWv924",
+  "wrapper_seconds": 238,
+  "files": [
+    {
+      "path": "native_ncp.jls.gz",
+      "bytes": 1440891,
+      "sha256": "9fa2e41f8d2250e76032b88573ecaf0bde774f8a9ee5c084a159a339d3044830",
+      "compressed_sha256": "e4213d1aff93fdbd52dc5ff49b8af0279b1c2e79a96eefad27f2c4c1107522fc"
+    },
+    {
+      "path": "sampling.tsv.gz",
+      "bytes": 3346092,
+      "sha256": "10e263925a2db8ead08cc87110982cb9a2dfa5ccc641dc9f1eb18d5477237859",
+      "compressed_sha256": "7bc469f9f67e2008edbad13c09f66df02facf175ab0561478095075e33519832"
+    },
+    {
+      "path": "pupil-1.csv.gz",
+      "bytes": 5578810,
+      "sha256": "47e9ea114964c7f3e5b30880c625f8faf39573e21199fc67cd5ec8b0d4cdf943",
+      "compressed_sha256": "f98ce95a7c7f78c63e02b20b426f21f17633dfa9fcd7bd2321707edc3474bba9"
+    },
+    {
+      "path": "fit.rds.gz",
+      "bytes": 128620,
+      "sha256": "40e040905bbc6e54d6ffb4321452d8dbb4f4b25ef1817c4bca1af23b0711f5be",
+      "compressed_sha256": "bc2e1e02e12e24ceb2d3e3138fc85dc65425c9d9700056eddbbb9a20f27c45e4"
+    }
+  ],
+  "source_note": "Captured driver is the exact pre-refactor driver that produced this fit."
+}

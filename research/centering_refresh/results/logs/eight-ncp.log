@@ -1,0 +1,10 @@
+BOUNDARY	eight	ncp	init	window=0	all_gradients=56
+BOUNDARY	eight	ncp	window	window=1	all_gradients=1058
+BOUNDARY	eight	ncp	window	window=2	all_gradients=3063
+BOUNDARY	eight	ncp	window	window=3	all_gradients=7063
+BOUNDARY	eight	ncp	window	window=4	all_gradients=15068
+BOUNDARY	eight	ncp	window	window=5	all_gradients=31073
+BOUNDARY	eight	ncp	window	window=6	all_gradients=63079
+BOUNDARY	eight	ncp	window	window=7	all_gradients=70276
+CASE_ARM_COMPLETE	(case = "eight", arm = "ncp", qois = 10, draws = 10000, min_bulk_ess = 4839.400320780729, limiting_qoi = "log_tau", min_tail_ess = 3564.942558714608, max_split_rhat = 1.0010734128799128, divergences = 1, sampling_gradients = 68688, all_fit_gradients = 70276, pilot_gradients = 0, total_gradients = 70276, sampling_efficiency = 0.07045481482618113, total_efficiency = 0.06886277421567433)
+[kb-run-compact] exit=0 elapsed=135s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.mICQy7

@@ -1,0 +1,16 @@
+BOUNDARY	hsgp	ncp	init	window=0	all_gradients=120
+BOUNDARY	hsgp	ncp	window	window=1	all_gradients=1171
+BOUNDARY	hsgp	ncp	window	window=2	all_gradients=3650
+BOUNDARY	hsgp	ncp	window	window=3	all_gradients=7949
+BOUNDARY	hsgp	ncp	window	window=4	all_gradients=16516
+BOUNDARY	hsgp	ncp	window	window=5	all_gradients=32698
+BOUNDARY	hsgp	ncp	window	window=6	all_gradients=64860
+BOUNDARY	hsgp	ncp	window	window=7	all_gradients=129057
+BOUNDARY	hsgp	ncp	window	window=8	all_gradients=257172
+BOUNDARY	hsgp	ncp	window	window=9	all_gradients=513341
+BOUNDARY	hsgp	ncp	window	window=10	all_gradients=1025427
+BOUNDARY	hsgp	ncp	window	window=11	all_gradients=2049599
+BOUNDARY	hsgp	ncp	window	window=12	all_gradients=4097793
+BOUNDARY	hsgp	ncp	window	window=13	all_gradients=4648422
+CASE_ARM_COMPLETE	(case = "hsgp", arm = "ncp", qois = 192, draws = 10000, min_bulk_ess = 2705.5983168315984, limiting_qoi = "hsgp_x_sigma", min_tail_ess = 2159.834239494888, max_split_rhat = 1.0009156413293598, divergences = 99, sampling_gradients = 2583577, all_fit_gradients = 4648422, pilot_gradients = 0, total_gradients = 4648422, sampling_efficiency = 0.0010472296033102936, total_efficiency = 0.0005820466207309918)
+[kb-run-compact] exit=0 elapsed=365s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.By9qr6

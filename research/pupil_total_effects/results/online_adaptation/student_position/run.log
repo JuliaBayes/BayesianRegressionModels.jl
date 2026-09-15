@@ -1,0 +1,12 @@
+BOUNDARY_REPRODUCER	(changed_controls = 40, halo_physical_error = 2.7284841053187847e-12, halo_gradient_error = 2.844168800430859e-13, active_physical_error = 1.8189894035458565e-12, source_left_unchanged = false, physical_logdensity_before = -16941.357214650718, physical_logdensity_after = -16941.357214650718, physical_logdensity_after_correct_transport = -16941.357214650718)
+ONLINE_BOUNDARY_AUDIT_COMPLETE (no historical online checkpoints for this prior)
+boundary	online_position	init	window=0	all_gradients=116
+boundary	online_position	window	window=1	all_gradients=2096
+boundary	online_position	window	window=2	all_gradients=4154
+boundary	online_position	window	window=3	all_gradients=8167
+boundary	online_position	window	window=4	all_gradients=16179
+boundary	online_position	window	window=5	all_gradients=32188
+boundary	online_position	window	window=6	all_gradients=35586
+RESULT	(arm = "online_position", retained_draws = 2000, min_bulk_ess = 1238.5772622433328, limiting_parameter = "log_tau_load", min_tail_ess = 905.3939978166865, max_split_rhat = 1.0048161146327774, divergences = 0, divergence_percent = 0.0, sampling_gradients = 30352, transition_gradients = 35468, all_gradient_calls = 35586, min_bulk_ess_per_1000_sampling_gradients = 40.80710537174924, min_bulk_ess_per_1000_all_gradients = 34.80518356216863, min_total_coefficient_ess_per_1000_gradients = 44.67653268775526, min_common_bulk_ess_per_1000_gradients = 40.80710537174924, fit_seconds = 26.989158383, compile_seconds = 26.330095483)
+ONLINE_TRIAL_COMPLETE criterion=position
+[kb-run-compact] exit=0 elapsed=57s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.CTJXmb

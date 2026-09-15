@@ -1,0 +1,11 @@
+sampled_dimensions = 46
+intercept_prior = "Student-t(3,5651.9,2026.1)"
+data_sha256 = "27e73bec304bc68271b0a9d46b1736a7c8e62fd8dcfac7d20704524c47edc8e8"
+julia_version = "1.10.11"
+target = "conventional brms NCP; independent random effects"
+draw_floor = 2000
+stan_sha256 = "d3acb33365d6ce20bc0dc4db47455ab545ed359277c58c5331762513a871940c"
+chains = 1
+git_commit = "e51ee53688a4c47b708686d390de6c6d125b5073"
+common_dimensions = 44
+seed = 1

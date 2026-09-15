@@ -1,0 +1,30 @@
+[
+  {
+    "file": "scaled_total.jls.gz",
+    "uncompressed_sha256": "34cef1f9a8295235bb47ac5c44f479976030fc48fcb358b49557c4a2eca42225",
+    "compressed_sha256": "d27f8a05fe3ff097bce5b05e622eafa368d8c80bb5ce6117eb20f3baf2f819c1",
+    "bytes": 668090,
+    "source": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil-total-v1/scaled_total.jls"
+  },
+  {
+    "file": "partial.jls.gz",
+    "uncompressed_sha256": "32bd1b7cb2e38ca582324ff015b813d9f68d2fcf842711c88e4326201ef3763e",
+    "compressed_sha256": "db5db4a29ff4f7e643f97f4ba6d8389b61459cc947ef430bf943d9eb7052888a",
+    "bytes": 668208,
+    "source": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil-total-v1/partial.jls"
+  },
+  {
+    "file": "online.jls.gz",
+    "uncompressed_sha256": "ecc051ae807751871633b15aa6e414a0bc5c67de3375f93f85b44dade2517c08",
+    "compressed_sha256": "be1bcc574e5b5227818e091650d732cbfc633908d708242a711caa4e2bec0252",
+    "bytes": 18928,
+    "source": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil-total-v1/online.jls"
+  },
+  {
+    "file": "brms_ncp.jls.gz",
+    "uncompressed_sha256": "49d0ca21df9f66a5fbe3c05d2597814804972f46f13639fb7089fd0d0f1c55c4",
+    "compressed_sha256": "ab774d2cd1f71341b51637eaa4b42f82cd60f1494993915c3c8e527156088719",
+    "bytes": 2067652,
+    "source": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil-brms-baseline-v3/brms_ncp.jls"
+  }
+]

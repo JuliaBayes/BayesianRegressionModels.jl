@@ -1,0 +1,16 @@
+{
+  "brms_target_sha256": "68f0fac8ac6c07044a2f273c242fa175164761022d3292dd4a999f4c5f11ff86",
+  "cmdstan": "2.39.0",
+  "cmdstanr": "0.9.0",
+  "intercept_prior": "gaussian",
+  "algorithm": "native Stan NUTS, diagonal metric",
+  "seed": 1,
+  "chains": 1,
+  "iter_warmup": 1000,
+  "iter_sampling": 2000,
+  "adapt_delta": 0.8,
+  "max_treedepth": 10,
+  "initialization": "same physical OLS point supplied to WarmupHMC, without its Pathfinder initialization",
+  "counter_scope": "reverse-mode target calls reaching first transformed-parameter statement",
+  "counter_identity": "sampling increments equal leapfrogs+1, checked on every retained transition"
+}

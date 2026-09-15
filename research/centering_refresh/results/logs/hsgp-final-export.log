@@ -1,0 +1,2 @@
+REFRESH_EXPORT_COMPLETE case=hsgp pairs=960000 gradients=48000 checks=18
+[kb-run-compact] exit=0 elapsed=120s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.hxhKYL

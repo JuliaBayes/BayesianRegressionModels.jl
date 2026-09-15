@@ -1,0 +1,15 @@
+BOUNDARY_REPRODUCER	(changed_controls = 40, halo_physical_error = 2.7284841053187847e-12, halo_gradient_error = 2.5545175452499373e-13, active_physical_error = 3.552713678800501e-15, source_left_unchanged = false, physical_logdensity_before = -16944.378049063387, physical_logdensity_after = -16944.378049063387, physical_logdensity_after_correct_transport = -16944.378049063387)
+(window = 2, changed_controls = 28, dropped_draws = 19, active_equals_last_old_source = true, physical_error = 2389.78126382941, physical_logdensity_before = -16949.661621875002, physical_logdensity_after = -47562.99710356098)
+(window = 4, changed_controls = 37, dropped_draws = 1662, active_equals_last_old_source = true, physical_error = 3.2051983012888845e7, physical_logdensity_before = -24480.83602695532, physical_logdensity_after = -3.0643118459574884e8)
+(window = 5, changed_controls = 22, dropped_draws = 692, active_equals_last_old_source = true, physical_error = 8.134608708886564e6, physical_logdensity_before = -1.8079796971943158e8, physical_logdensity_after = -1.7387713536576325e8)
+ONLINE_BOUNDARY_AUDIT_COMPLETE
+boundary	online_position	init	window=0	all_gradients=122
+boundary	online_position	window	window=1	all_gradients=1344
+boundary	online_position	window	window=2	all_gradients=3370
+boundary	online_position	window	window=3	all_gradients=7379
+boundary	online_position	window	window=4	all_gradients=15381
+boundary	online_position	window	window=5	all_gradients=31384
+boundary	online_position	window	window=6	all_gradients=34466
+RESULT	(arm = "online_position", retained_draws = 2000, min_bulk_ess = 1513.5911113038767, limiting_parameter = "total_intercept[709]", min_tail_ess = 1163.829129822801, max_split_rhat = 1.0026305190511864, divergences = 0, divergence_percent = 0.0, sampling_gradients = 29952, transition_gradients = 34342, all_gradient_calls = 34466, min_bulk_ess_per_1000_sampling_gradients = 50.53389126949374, min_bulk_ess_per_1000_all_gradients = 43.91548515359707, min_total_coefficient_ess_per_1000_gradients = 50.53389126949374, min_common_bulk_ess_per_1000_gradients = 50.53389126949374, fit_seconds = 26.540017341, compile_seconds = 25.991687812)
+ONLINE_TRIAL_COMPLETE criterion=position
+[kb-run-compact] exit=0 elapsed=59s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.btvpgO

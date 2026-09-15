@@ -1,0 +1,42 @@
+{
+  "run_native": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil-s2z-native-v1/s2z_ncp",
+  "run_whmc": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil-s2z-whmc-v3/s2z_ncp",
+  "native_exit": 0,
+  "whmc_exit": 0,
+  "native_wrapper_log": "kb-run-compact.WqsDnP",
+  "whmc_wrapper_log": "kb-run-compact.AgUn0k",
+  "whmc_wrapper_seconds": 87,
+  "brms_sha": "73cf607889879cb2a55f50b88d8141d76ff43279",
+  "warmuphmc_sha": "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2",
+  "autocenter_precursor_charged_to_each_sampler": true,
+  "files": {
+    "native": [
+      {
+        "path": "fit.jls.gz",
+        "bytes": 4690842,
+        "sha256": "e5012d3ddc380c21bbc0680f2e38bfa18a51278305ad21e4a233e7e63eeec79e",
+        "compressed_sha256": "ee989fb1120245cb0eb58635249944f8a9adde95f494b234a3593e7967905a3f"
+      },
+      {
+        "path": "fit.rds.gz",
+        "bytes": 1266927,
+        "sha256": "423fabe3cb36564a2312f75cebcb01b8864efe6b63e55ef408f4dfa38fba5c0b",
+        "compressed_sha256": "854c2448fd84b4e646ac3b77b261af46ce496fc81bfdbc4cde897e1c90086e33"
+      },
+      {
+        "path": "pupil-1.csv.gz",
+        "bytes": 8737974,
+        "sha256": "d9c3541df580309b1afdfad29c5e0f35eb31d315be94d6ee0a9413249a5a61c3",
+        "compressed_sha256": "a675c7f4b7f3b94ae066c667ba732de61475b4282f03c3e201861ca1fdb0f543"
+      }
+    ],
+    "whmc": [
+      {
+        "path": "fit.jls.gz",
+        "bytes": 5266839,
+        "sha256": "ba36bfa052b295c29c866ef2624a2f19a94a8a93f5a8f7ed63a3a6aca15871f6",
+        "compressed_sha256": "77e625577813278c01042207ab2be6465f1445990fe7549a64bb4b7a32ae8057"
+      }
+    ]
+  }
+}

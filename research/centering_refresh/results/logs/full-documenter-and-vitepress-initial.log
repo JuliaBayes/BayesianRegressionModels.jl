@@ -1,0 +1,803 @@
+[kb-docs-build] resolving docs Julia environment with canonical local dependencies
+RESOLVE-SKEW	OutputSignatures	/home/n/github/nsiccha/OutputSignatures.jl	on main @121de31	2 commits behind mirror main @4f9c5a7
+RESOLVE-SKEW	MutatingFunctions	/home/n/github/nsiccha/MutatingFunctions.jl	on main @0134a6c	16 commits behind mirror main @c59329c
+RESOLVE-SKEW: a host checkout is NOT guaranteed to be on its active line. If any dep above matters to what you are about to verify, re-run with RESOLVE_ACCEPTANCE=1 and an explicit `Name=<clone-path>=<40hexsha>` overlay per skewed dep, and read the KB-DEVELOPED evidence.
+   Resolving package versions...
+    Updating `~/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/docs/Project.toml`
+  [a2420894] + AlgebraOfVega v0.2.0 `~/github/nsiccha/AlgebraOfVega.jl`
+  [23d02862] + DynamicObjects v0.5.0 `~/github/nsiccha/DynamicObjects.jl`
+  [27f3e1ef] + HTMX v1.0.0 `~/github/nsiccha/HTMX.jl`
+  [b12ef442] + HTMXObjects v0.1.0 `~/github/nsiccha/HTMXObjects.jl`
+  [8a4c2d94] + MutatingFunctions v0.1.0 `~/github/nsiccha/MutatingFunctions.jl`
+  [86cfaae4] + OutputSignatures v0.1.0 `~/github/nsiccha/OutputSignatures.jl`
+  [5daaa025] + TreeArrays v0.1.0 `~/github/nsiccha/TreeArrays.jl`
+  [e1e568c4] + Treebars v0.1.0 `~/github/nsiccha/Treebars.jl`
+  [60658175] + WarmupHMC v0.2.1 `~/github/nsiccha/WarmupHMC.jl`
+  [a5390f91] + ZipFile v0.10.1
+    Updating `~/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/docs/Manifest.toml`
+  [23d02862] ~ DynamicObjects v0.4.3 `~/github/nsiccha/DynamicObjects.jl` ⇒ v0.5.0 `~/github/nsiccha/DynamicObjects.jl`
+  [a5390f91] + ZipFile v0.10.1
+  No Changes to `~/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/docs/Project.toml`
+  No Changes to `~/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/docs/Manifest.toml`
+┌ Warning: The project dependencies or compat requirements have changed since the manifest was last resolved.
+│ It is recommended to `Pkg.resolve()` or consider `Pkg.update()` if necessary.
+└ @ Pkg.API ~/.julia/juliaup/julia-1.10.11+0.x64.linux.gnu/share/julia/stdlib/v1.10/Pkg/src/API.jl:1142
+Precompiling packages...
+   2595.5 ms  ✓ Treebars
+    529.2 ms  ✓ Treebars → HTTPExt
+   1381.6 ms  ✓ DynamicObjects
+   2901.6 ms  ✓ WarmupHMC
+  10174.7 ms  ✓ HTMXObjects
+   2231.6 ms  ✓ HTMXObjects → HTMXObjectsTreebarsExt
+   2029.2 ms  ✓ Treebars → HTMXObjectsExt
+   5773.8 ms  ✓ AlgebraOfVega
+  18205.7 ms  ✓ AlgebraOfVega → AlgebraOfVegaHTMXObjectsExt
+  94431.4 ms  ✓ BayesianRegressionModels
+   5061.3 ms  ✓ BayesianRegressionModels → BayesianRegressionModelsDifferentiationInterfaceExt
+   6075.3 ms  ✓ BayesianRegressionModels → BayesianRegressionModelsTreeArraysExt
+   6318.8 ms  ✓ BayesianRegressionModels → BayesianRegressionModelsWarmupHMCExt
+   8003.0 ms  ✓ BayesianRegressionModels → BayesianRegressionModelsTuringExt
+   9497.7 ms  ✓ BayesianRegressionModels → BayesianRegressionModelsAlgebraOfVegaExt
+   7014.3 ms  ✓ BayesianRegressionModels → BayesianRegressionModelsTuringWarmupHMCExt
+  16 dependencies successfully precompiled in 112 seconds. 516 already precompiled.
+==> NOTE: re-resolve added 9 dep(s) to /home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/docs/Project.toml and ROLLED THEM BACK: AlgebraOfVega, DynamicObjects, HTMX, HTMXObjects, MutatingFunctions, OutputSignatures, TreeArrays, Treebars, WarmupHMC
+    That file is GIT-TRACKED, so it is a committed contract, not generated
+    state: this resolve develops every local checkout into the ACTIVE project
+    -- right for an app, wrong for a package test/ or docs/ env. It has been
+    restored byte-for-byte, so 'git status' is clean and there is nothing
+    to revert. The Manifest keeps every developed path, so a plain import
+    still resolves through it.
+    Pkg may warn just above that the manifest needs re-resolving. That is
+    this rollback, not a problem: the manifest was resolved while the extra
+    deps were present. Loading is unaffected -- do not run Pkg.resolve to
+    chase it, or you will simply re-add them.
+    If a later build fails on one of the names above as a MISSING direct
+    dependency, that env genuinely needs it: declare it in the file rather
+    than letting a resolve inject it, and this rollback will stop touching it.
+[ Info: SetupBuildDirectory: setting up build directory.
+[ Info: Doctest: running doctests.
+[ Info: ExpandTemplates: expanding markdown templates.
+[ Info: CrossReferences: building cross-references.
+┌ Warning: Cannot resolve @ref for md"[`brm_term_coordinates`](@ref)" in docs/src/formula-terms.md.
+│ - No docstring found in doc for binding `BayesianRegressionModels.brm_term_coordinates`.
+└ @ Documenter ~/.julia/packages/Documenter/13nbQ/src/utilities/utilities.jl:49
+┌ Warning: Cannot resolve @ref for md"[`term_draws`](@ref)" in docs/src/formula-terms.md.
+│ - No docstring found in doc for binding `BayesianRegressionModels.term_draws`.
+└ @ Documenter ~/.julia/packages/Documenter/13nbQ/src/utilities/utilities.jl:49
+┌ Warning: Cannot resolve @ref for md"[multi-axis population PK kernel](@ref)" in docs/src/formula-terms.md.
+│ - Header or `@id` anchor with slug 'multi-axis-population-PK-kernel' in docs/src/formula-terms.md does not exist.
+│ - Header or `@id` anchor with slug 'multi-axis-population-PK-kernel' is not unique in docs/src/formula-terms.md.
+└ @ Documenter ~/.julia/packages/Documenter/13nbQ/src/utilities/utilities.jl:49
+┌ Warning: Cannot resolve @ref for md"[multi-axis population PK kernel](@ref)" in docs/src/formula-terms.md.
+│ - Header or `@id` anchor with slug 'multi-axis-population-PK-kernel' in docs/src/formula-terms.md does not exist.
+│ - Header or `@id` anchor with slug 'multi-axis-population-PK-kernel' is not unique in docs/src/formula-terms.md.
+└ @ Documenter ~/.julia/packages/Documenter/13nbQ/src/utilities/utilities.jl:49
+┌ Warning: Cannot resolve @ref for md"[multi-axis population PK kernel](@ref)" in docs/src/index.md.
+│ - Header or `@id` anchor with slug 'multi-axis-population-PK-kernel' in docs/src/index.md does not exist.
+│ - Header or `@id` anchor with slug 'multi-axis-population-PK-kernel' is not unique in docs/src/index.md.
+└ @ Documenter ~/.julia/packages/Documenter/13nbQ/src/utilities/utilities.jl:49
+┌ Warning: invalid local link/image: file does not exist in docs/src/index.md
+│   link =
+│    @ast MarkdownAST.Link("/gallery", "") do
+│      MarkdownAST.Text("Gallery")
+│    end
+│    
+└ @ Documenter ~/.julia/packages/Documenter/13nbQ/src/utilities/utilities.jl:49
+┌ Warning: invalid local link/image: file does not exist in docs/src/index.md
+│   link =
+│    @ast MarkdownAST.Link("/api", "") do
+│      MarkdownAST.Text("API")
+│    end
+│    
+└ @ Documenter ~/.julia/packages/Documenter/13nbQ/src/utilities/utilities.jl:49
+┌ Warning: invalid local link/image: file does not exist in docs/src/feature-deck.md
+│   link =
+│    @ast MarkdownAST.Link("decks/brm-futures.html", "") do
+│      MarkdownAST.Text("Open the self-contained RevealJS deck")
+│    end
+│    
+└ @ Documenter ~/.julia/packages/Documenter/13nbQ/src/utilities/utilities.jl:49
+┌ Warning: invalid local link/image: file does not exist in docs/src/feature-deck.md
+│   link =
+│    @ast MarkdownAST.Link("decks/brm-futures.pdf", "") do
+│      MarkdownAST.Text("Download the landscape PDF")
+│    end
+│    
+└ @ Documenter ~/.julia/packages/Documenter/13nbQ/src/utilities/utilities.jl:49
+[ Info: CheckDocument: running document checks.
+[ Info: Populate: populating indices.
+[ Info: RenderDocument: rendering document.
+[ Info: DocumenterVitepress: rendering MarkdownVitepress pages.
+┌ Warning: Documenter could not auto-detect the building environment. Skipping deployment.
+└ @ Documenter ~/.julia/packages/Documenter/13nbQ/src/deployconfig.jl:95
+Copied: /home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/docs/build/.documenter/components/AuthorBadge.vue
+Copied: /home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/docs/build/.documenter/components/Authors.vue
+Copied: /home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/docs/build/.documenter/components/SidebarDrawerToggle.vue
+Copied: /home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/docs/build/.documenter/components/VersionPicker.vue
+[ Info: Automatic `version="0.2.1"` for inventory from ../Project.toml
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+┌ Warning: Unexpected Julia interpolation in the Markdown. This probably means that you
+│ have an unbalanced or un-escaped $ in the text.
+│ 
+│ To write the dollar sign, escape it with `\$`
+│ 
+│ We don't have the file or line number available, but we got given the value:
+│ 
+│ `$` which is of type `Symbol`
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/writer.jl:1399
+[ Info: Bases that will be built: [""]
+[ Info: DocumenterVitepress: Did not detect `docs/src/.vitepress/mathjax-plugin.ts` file. Substituting in the default file.
+[ Info: DocumenterVitepress: Did not detect `docs/src/.vitepress/julia-repl-transformer.ts` file. Substituting in the default file.
+[ Info: DocumenterVitepress: Did not detect `docs/src/.vitepress/theme/docstrings.css` file. Substituting in the default file.
+[ Info: DocumenterVitepress: Did not detect `docs/src/.vitepress/theme/overrides.css` file. Substituting in the default file.
+[ Info: Base is "" and ENV["CI"] is not set so this is a local build. Not adding any additional base prefix based on the repository or deploy url and instead using absolute path "/" to facilitate serving docs locally.
+┌ Warning: DocumenterVitepress: No logo.png file found in `docs/src/assets`.  Skipping logo replacement.
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/vitepress_config.jl:154
+┌ Warning: DocumenterVitepress: No favicon.ico file found in `docs/src/assets`.  Skipping favicon replacement.
+└ @ DocumenterVitepress ~/.julia/packages/DocumenterVitepress/aVWpg/src/vitepress_config.jl:172
+┌ Info: DocumenterVitepress: did not build Vitepress site because `build_vitepress` was set to `false`.
+│ You can view it yourself by running the following in the `docs` folder:
+│ ```
+│ npm run docs:dev
+│ ```
+│ and if you haven't run `npm` in this repo before, install all packages by running `npm install`.
+│ 
+└ All emitted markdown can be found in `/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/docs/build/.documenter`.
+[ Info: Copied public assets to /home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/docs/build/.documenter/public
+[ Info: DocumenterVitepress: running `vitepress build`.
+
+> env
+> env vitepress build build/.documenter
+
+
+  vitepress v1.6.4
+
+- building client + server bundles...
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+
+The language 'brm-comparison' is not loaded, falling back to 'txt' for syntax highlighting.
+[32m✓[0m building client + server bundles...
+- rendering pages...
+[32m✓[0m rendering pages...
+build complete in 11.43s.
+npm notice 
+npm notice New major version of npm available! 10.5.0 -> 12.0.2
+npm notice Changelog: <https://github.com/npm/cli/releases/tag/v12.0.2>
+npm notice Run `npm install -g npm@12.0.2` to update!
+npm notice 
+[ Info: Found no bases suitable for deployment (empty bases are skipped).
+[kb-run-compact] exit=0 elapsed=1840s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.5RTFt9

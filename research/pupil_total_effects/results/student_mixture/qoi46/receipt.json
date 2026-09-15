@@ -1,0 +1,31 @@
+{
+  "run": "pupil-qoi46-plots-v1",
+  "fits": "Existing 12 Student-t arms, 2000 retained draws each; no new HMC",
+  "qoi_count": 46,
+  "efficiency_rows": 12,
+  "plot_values": 36,
+  "s2z_scatter_rows": 18000,
+  "logs": {
+    "qoi_analysis": "kb-run-compact.TlYMOW",
+    "s2z_coordinate_audit": "kb-run-compact.LpIhnu",
+    "plots": "kb-run-compact.mhCbUp"
+  },
+  "exit_codes": {
+    "qoi_analysis": 0,
+    "s2z_coordinate_audit": 0,
+    "plots": 0
+  },
+  "files": {
+    "efficiency.aov.json.gz": "08cc61c26dfd535e3682bb9002d8e26c89b8ae1aa32eb478050e4b535c5aacde",
+    "efficiency.png": "06b0863255c91aaa4c22bb5e6f10317810040d541b19eeeed7734ddfa82187df",
+    "efficiency_plot.tsv": "919adc81df9bf7bcca90397cfa9c60e0decb4f96082efa1eff83aa5732f65552",
+    "parameters.tsv": "8f55e2c2800cdbd461e679fead7e110c62878a3ae5b9c113b475a7e71f8d8fd9",
+    "qoi46.tsv": "28a2558e1ffa7d5a6fa8717f90fab2c5244d298038b8e86690ceb83e648957cd",
+    "s2z_pairs.aov.json.gz": "f793632b026705645b73c24226ea53a68a148611bd8f5cf9d60fd6fc911c3223",
+    "s2z_pairs.png": "a01aa6db250040fd840695baba87e66bcf668718739264b68f4b362545c34003",
+    "s2z_pairs.tsv.gz": "13af38b5d1b9ab001501c249e360526ebcdd16190fdfca1d1d07aaa29203a22d",
+    "s2z_pairs_audit.tsv": "2a96a5c5b231ade2faf779876f7509fc514d46b69b20bd7778a92f3a38c6b4ec",
+    "s2z_pairs_selection.tsv": "e610cd13aef17a3cbd52d9924214ad37e21c7efd3394f715446d384f6ef15363",
+    "table.md": "253ae5350dde711c7837c6cb8525517bf7ed1be80cdf502c31338dc24c071bc9"
+  }
+}

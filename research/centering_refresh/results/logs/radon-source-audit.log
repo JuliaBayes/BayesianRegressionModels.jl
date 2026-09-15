@@ -1,0 +1,4 @@
+Test Summary:                                              | Pass  Total  Time
+Immutable PosteriorDB target, priors and all 777 gradients |   20     20  0.3s
+radon_source_audit_complete	/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/centering-refresh-radon-v1/source-audit
+[kb-run-compact] exit=0 elapsed=80s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.Xmc7vo

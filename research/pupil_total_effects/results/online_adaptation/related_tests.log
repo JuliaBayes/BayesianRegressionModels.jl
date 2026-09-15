@@ -1,0 +1,25 @@
+TESTED_PACKAGE=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-online-state-fix
+Test Summary:                  | Pass  Total  Time
+PartiallyCentered reparam math |   12     12  0.1s
+Test Summary:                             | Pass  Total  Time
+Reparametrization inverse (constant args) |    5      5  0.0s
+Test Summary:                         | Pass  Total  Time
+Reparametrization with extractor args |    2      2  0.0s
+Test Summary:                                     | Pass  Total  Time
+IndexedReparametrization round-trip + passthrough |    7      7  0.7s
+Test Summary:                    | Pass  Total  Time
+ReparametrizedProblem logdensity |    4      4  0.3s
+Test Summary:                                             | Pass  Total   Time
+gradient at a coordinate exactly on its centered location |   19     19  19.4s
+Test Summary:                                        | Pass  Total  Time
+source controls cancel from position-gradient scores |   24     24  0.8s
+Test Summary:                            | Pass  Total  Time
+transport gradient and literal endpoints |  130    130  0.1s
+Test Summary:                                                    | Pass  Total  Time
+one prepare, deterministic ordinals, and linear persistent state |    6      6  0.4s
+Test Summary:                 | Pass  Total  Time
+fixed-frame winner regression |    2      2  0.8s
+Test Summary:                 | Pass  Total  Time
+public candidate loss queries |   42     42  1.1s
+RELATED_REPARAMETRIZATION_TESTS_COMPLETE
+[kb-run-compact] exit=0 elapsed=27s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.MoDng3

@@ -1,0 +1,2 @@
+arm	retained_draws	min_bulk_ess	limiting_parameter	min_tail_ess	max_split_rhat	divergences	divergence_percent	sampling_gradients	transition_gradients	all_gradient_calls	min_bulk_ess_per_1000_sampling_gradients	min_bulk_ess_per_1000_all_gradients	min_total_coefficient_ess_per_1000_gradients	min_common_bulk_ess_per_1000_gradients	fit_seconds	compile_seconds
+partial_gradient	2000	1264.9092757442656	total_intercept[708]	1217.4409369939278	1.0030273117264017	0	0.0	29920	32580	32723	42.27637953690727	38.65505227956684	42.27637953690727	42.27637953690727	25.737295175	25.439922691

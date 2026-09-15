@@ -1,0 +1,2 @@
+case	arm	qois	draws	min_bulk_ess	limiting_qoi	min_tail_ess	max_split_rhat	divergences	sampling_gradients	all_fit_gradients	pilot_gradients	total_gradients	sampling_efficiency	total_efficiency
+hsgp	online_position	192	10000	4516.948548053981	hsgp_x_rho_iso	4489.270979878141	1.0009753829153536	6	2235380	2263320	0	2263320	0.0020206625039384716	0.00199571803724351

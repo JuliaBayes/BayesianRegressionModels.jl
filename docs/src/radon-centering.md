@@ -93,7 +93,7 @@ Every fit uses one chain and 10,000 retained draws, with ordinary WarmupHMC
 initialization and adaptation defaults. The same seed and model are used for
 the selected-partial and online fits.
 
-[![Observed log radon over individual predictive intervals, faceted by county](assets/adaptive-radon/data-ppc.png)](assets/adaptive-radon/data-ppc.png)
+[![Observed log radon over individual predictive intervals, faceted by county](assets/centering-refresh-radon/ppc.png)](assets/centering-refresh-radon/ppc.png)
 
 Each vertical interval predicts one observation: the thin interval contains
 90% of replicated values and the thick interval 50%. Observed values are
@@ -110,45 +110,12 @@ The supplied floor covariate contains codes `0`, `1`, `2`, `3` and `9`
 (with counts 8,299, 3,949, 22, 19 and 284). The formula uses those numeric
 values as supplied by PosteriorDB; plot labels identify them as codes.
 
-## Compare centered and noncentered geometry
-
-A county effect can be written as `u = s^c*z`: `c=0` samples a standardized
-innovation and `c=1` samples the model-scale deviation. The population
-intercept and floor coefficient remain separate from those county deviations.
-
-[![County-intercept pilot draws in centered, noncentered and selected coordinates](assets/adaptive-radon/pair-pilot-intercept.png)](assets/adaptive-radon/pair-pilot-intercept.png)
-
-[![County-slope pilot draws in centered, noncentered and selected coordinates](assets/adaptive-radon/pair-pilot-slope.png)](assets/adaptive-radon/pair-pilot-slope.png)
-
-Each column displays the same 10,000 pilot draws. Centered coordinates are
-shown first, followed by noncentered and offline-selected coordinates. The
-scale axes are logarithmic. Centered coordinates remain the visual reference
-in the subsequent scatters; the noncentered fit remains the sampling and cost
-baseline.
-
-For each role, the rows select the minimum inferred offline centeredness,
-the value nearest `0.5`, and the maximum. Ties use the lowest county index.
-The same coordinates appear throughout the geometry and gradient comparisons:
-
-| Selection | Intercept county | Slope county | Inferred `c` |
-|:--|--:|--:|--:|
-| Minimum | 83 | 2 | 0.0 |
-| Nearest 0.5 | 7 | 21 | 0.5 |
-| Maximum | 6 | 188 | 1.0 |
-
-The complete fit and selection include all 386 counties.
 
 ## Select one centering per county effect
 
-The offline selector uses the pilot to evaluate `c = 0:0.01:1` for each of the
-772 effect cells:
-
-```text
-loss(c) = log(std(z .* exp.(c .* log(s)))) - mean(c .* log(s))
-```
-
-BRM exposes the rule through `select_ranef_centeredness`. The following code
-selects and freezes every scalar control:
+Each county deviation has coordinates $u=s^c z$. Its population coefficient
+remains separate. The following position-loss selection freezes an independent
+control for every county intercept and slope:
 
 ```julia
 using Enzyme, BridgeStan
@@ -177,116 +144,134 @@ refit = WarmupHMC.adaptive_warmup_mcmc(
     n_draws=10_000, monitor_ess=true, nonlinear_adapt=false)
 ```
 
-[![Offline loss profiles for the representative counties](assets/adaptive-radon/offline-loss-profiles.png)](assets/adaptive-radon/offline-loss-profiles.png)
+## Both losses, post-hoc and online
 
-The displayed curves are individually rescaled to `[0,1]`. Selection uses
-their unscaled minima. Every cell has its own 101-point profile in the
-saved tables.
+For a zero-mean random effect with log scale $\ell$, the centering family is
+$u_c=\exp(c\ell)z$: $c=0$ is NCP and $c=1$ is CP. Its transformed effect
+gradient is $g_c=\exp(-c\ell)g_z$. We compare two criteria, minimized separately
+for each effect:
 
-[![Offline and online selected centering across every county](assets/adaptive-radon/selected-centeredness.png)](assets/adaptive-radon/selected-centeredness.png)
-
-The selected column above transforms the pilot using the inferred controls.
-The refit uses those controls for a separate sampling run; its retained draws
-appear alongside the online fit below.
-
-## Adapt centering during warmup
-
-Online selection adapts the coordinates within one run:
-
-```julia
-online = adaptive_centering_problem(sb, stan_problem, backend)
-online_fit = WarmupHMC.adaptive_warmup_mcmc(
-    Xoshiro(1), online; n_draws=10_000, monitor_ess=true)
-learned = WarmupHMC.reparam_sources(online)
+```math
+L_{\mathrm{position}}(c)=\log\operatorname{sd}(u_c)-\operatorname{mean}(c\ell),
+\qquad
+L_{\mathrm{gradient}}(c)=\operatorname{cor}(u_c,g_c).
 ```
 
-WarmupHMC returns model coordinates for all three fits, including the
-fixed-centering refit. Checkpoints retain sampler coordinates. Extraction
-checks the scalar checkpoint-to-model map against the returned draws before
-computing summaries or changing coordinates for display.
+The second is a **signed** correlation: an independent Gaussian coordinate
+has correlation $-1$ with its log-density gradient. The first uses positions
+and the Jacobian, without a gradient term.
 
-[![Centered pilot reference beside selected and online county-intercept refits](assets/adaptive-radon/pair-fits-intercept.png)](assets/adaptive-radon/pair-fits-intercept.png)
+Both post-hoc arms use the same NCP pilot, select on `0:0.01:1`, then fit
+afresh with the controls fixed. The gradient selector uses the pilot's saved
+gradients. Both online arms select on the native `0:0.1:1` grid during warmup,
+using the sampler's trajectory evidence and weights. They have no separate
+pilot. Controls are frozen for the retained sampling phase.
 
-[![Centered pilot reference beside selected and online county-slope refits](assets/adaptive-radon/pair-fits-slope.png)](assets/adaptive-radon/pair-fits-slope.png)
+The online gradient criterion is WarmupHMC's default. The research harness
+selects the position criterion through the existing internal loss functions;
+there is currently no public loss-selection keyword. The model, initialization
+policy, seed and requested draw count are otherwise shared across the arms.
 
-The left column repeats the centered pilot reference. The middle and right
-columns use the fresh offline-selected and online fits, each displayed in
-its own sampling coordinates.
+These runs use the active-position transport implementation published in
+[WarmupHMC `6b377cb`](https://github.com/nsiccha/WarmupHMC.jl/commit/6b377cb23934022af5879d199a7c57abfac54c70).
+When centering changes, the active position and the adaptation sample now
+represent the same physical points before and after the change.
 
-The online objective is weighted position–gradient correlation, with the
-default `w₁=0`, evaluated over `c = 0:0.1:1`. For an independent Gaussian
-coordinate, its log-density gradient is an affine decreasing function of
-position and this correlation is `-1`.
+WarmupHMC returns **model coordinates** in `posterior_position`; checkpoints
+retain sampler coordinates. Export checks their mapping, Jacobian-adjusted
+density and saved gradients before making figures or scientific summaries.
 
-[![Online objective evaluated on the common noncentered pilot](assets/adaptive-radon/online-loss-profiles.png)](assets/adaptive-radon/online-loss-profiles.png)
+[![Centering selected with both losses, post-hoc and online](assets/centering-refresh-radon/centeredness.png)](assets/centering-refresh-radon/centeredness.png)
 
-These curves evaluate the online objective retrospectively on the same
-10,000 pilot draws used for the offline profiles, with unit weights.
-All 8,492 cell–candidate combinations are retained. The vertical scale shows
-raw correlations in `[-1,0]`. Online selection itself uses warmup trajectory
-evidence, whose samples and weights differ from this common pilot reference.
+## Sampling efficiency and full workflow cost
 
-## Diagnostics and compute cost
+Each completed arm has one chain, seed 1 and 10,000 retained draws. Every row
+uses the same scientific quantities: **two population coefficients, two group SDs, residual SD, and all 386 county intercept totals and 386 slope totals (777 quantities)**. Standardized effects
+are excluded from the minimum. Positive scales may be stored as logs;
+rank-normalized bulk ESS is invariant under that monotone change.
 
-| Fit | Max split R-hat | Min bulk ESS | Min tail ESS | Divergences |
-|:--|--:|--:|--:|--:|
-| Noncentered pilot | 1.0045 | 356 | 827 | 0 (0.00%) |
-| Selected-partial refit | 1.0026 | 476 | 876 | 0 (0.00%) |
-| Online | 1.0013 | 365 | 640 | 0 (0.00%) |
+| WHMC method | Total gradients | Sampling efficiency | Total efficiency |
+|:--|--:|--:|--:|
+| NCP | 164,917 | 1× | 1× |
+| CP | 152,546 | 0.64× | 0.647× |
+| Post-hoc position | 317,186 | 1.07× | 0.52× |
+| Post-hoc gradient | 319,385 | 1.35× | 0.651× |
+| Online position | 154,539 | 0.843× | 0.841× |
+| Online gradient | 154,448 | 0.743× | 0.742× |
 
-R-hat and ESS use all 777 unconstrained model coordinates. The R-hat values
-are rank-normalized split-chain diagnostics from a single chain; they cannot
-establish agreement between independent chains.
 
-| Fit | Total gradients | Sampling gradients | Bulk ESS / total | Bulk ESS / sampling | Elapsed (Julia compilation) |
-|:--|--:|--:|--:|--:|:--|
-| Noncentered pilot | 164,766 | 160,352 | 0.002162 | 0.002221 | 89.1 s (23.62 s) |
-| Selected-partial refit | 152,152 | 150,000 | 0.003127 | 0.003172 | 92.6 s (23.93 s) |
-| Online | 154,427 | 150,000 | 0.002362 | 0.002432 | 175.8 s (0.08 s) |
+Both efficiency columns are relative to this study's **NCP + WarmupHMC**
+baseline. Sampling efficiency is minimum bulk ESS divided by retained-sampling
+gradient calls. Total efficiency divides that same minimum ESS by the full
+workflow's gradient calls. The total includes initialization, all warmup and
+adaptation, active-state reevaluations, and sampling. For each post-hoc row it
+also includes the entire NCP pilot; the pilot's ESS is not added to the refit's.
 
-Both exact NUTS counters agree with the final checkpoints. Total gradients
-include NUTS adaptation and discarded epochs; sampling gradients count
-transitions contributing retained draws. Neither count includes Pathfinder
-or other initialization work. ESS ratios use the minimum bulk ESS across
-parameters, not a sum of parameter ESS values.
+Gradient counts measure target evaluations, a proxy for compute cost rather
+than a wall-clock speed ratio. Compilation, plotting and independent audits
+are outside the fitting counts. The complete numerical summaries, including
+absolute ESS and both denominators, are in the linked result files.
 
-The selected-partial refit obtains more effective draws per gradient than the
-pilot when considered alone. Its full workflow costs **316,918 total gradients**
-for pilot plus refit, giving **0.001501 minimum bulk ESS per total gradient**.
-That is lower than the noncentered baseline's 0.002162; the pilot cost outweighs
-the refit's improvement in this run. Online adaptation gives
-1.09 times the baseline's minimum bulk ESS per total gradient, while taking
-more elapsed time. This dataset does not show a clear overall advantage for
-adaptive centering under this protocol.
+Sampling divergences: **NCP: 0; CP: 0; Post-hoc position: 0; Post-hoc gradient: 0; Online position: 0; Online gradient: 0**. These are one-chain comparisons, so neither
+the ranking nor a within-chain split R-hat establishes cross-chain convergence.
 
-Times cover each complete sampler call, including initialization, Julia
-compilation, adaptation, sampling and checkpoint I/O. Stan compilation,
-model setup, offline selection and plotting are outside the timed region.
-The three fits ran sequentially with one BLAS thread on a shared host.
-These elapsed times describe the recorded runs; the
-[eight-schools example](eight-schools-centering.md#sampling-diagnostics-and-cost)
-also demonstrates a warmed, repeated timing protocol.
+[![Full gradient cost and the two relative sampling efficiencies](assets/centering-refresh-radon/efficiency.png)](assets/centering-refresh-radon/efficiency.png)
 
-## Position and gradient in the selected coordinates
+The population floor slope limits minimum ESS in every arm. A more favorable local effect geometry does not necessarily improve this global bottleneck. In this run, neither online loss beats NCP in total efficiency.
 
-[![County-intercept positions versus log-density gradients](assets/adaptive-radon/position-gradient-intercept.png)](assets/adaptive-radon/position-gradient-intercept.png)
+For each random-effect role, the scatter rows select the minimum post-hoc
+position-loss centeredness, the value nearest `0.5`, and the maximum. Ties use
+the lowest county index, with distinct counties in the three rows. These same
+coordinates are used throughout. The selection and full fits include all
+386 counties; the selected county labels appear in the figures and exported
+coordinate table.
 
-[![County-slope positions versus log-density gradients](assets/adaptive-radon/position-gradient-slope.png)](assets/adaptive-radon/position-gradient-slope.png)
+## Geometry of the fitted coordinates
 
-Columns show the pilot in centered coordinates, the offline-selected refit
-and the online-selected fit. Rows use the same centeredness-based selections
-as the pair plots.
-Each facet uses 1,000 evenly spaced retained draws from its named fit, with
-the derivative taken in its displayed coordinate. All displayed gradients
-are checked against an independent Gaussian derivative computed from the
-original data. Further checks cover the transformed density, Jacobian,
-physical linear predictor and checkpoint-to-return map.
+The left column is always the **centered visualization baseline**, obtained
+from the NCP pilot. The pilot comparison uses those same draws in CP and NCP.
+The post-hoc and online panels each show their two newly fitted loss variants
+in the coordinates actually used by the sampler. CP is the visual reference;
+NCP remains the efficiency baseline. Axes are independent across panels.
 
-## Reproduce the study
+[![County intercepts: CP and NCP pilot coordinates](assets/centering-refresh-radon/pairs-pilot-county-intercepts.png)](assets/centering-refresh-radon/pairs-pilot-county-intercepts.png)
 
-The immutable source and data, executable driver, saved-result validation,
-centering diagnostics and native AlgebraOfVega plotting code are in
-[`research/radon_centering`](https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/radon_centering).
-Its README gives the commands. Committed tables record source and dependency
-identities, diagnostics, selected controls and both gradient costs. Full
-returns, checkpoints and per-draw tables remain in the recorded run directories.
+[![County intercepts: CP reference and both post-hoc losses](assets/centering-refresh-radon/pairs-posthoc-county-intercepts.png)](assets/centering-refresh-radon/pairs-posthoc-county-intercepts.png)
+
+[![County intercepts: CP reference and completed online losses](assets/centering-refresh-radon/pairs-online-county-intercepts.png)](assets/centering-refresh-radon/pairs-online-county-intercepts.png)
+
+[![County slopes: CP and NCP pilot coordinates](assets/centering-refresh-radon/pairs-pilot-county-slopes.png)](assets/centering-refresh-radon/pairs-pilot-county-slopes.png)
+
+[![County slopes: CP reference and both post-hoc losses](assets/centering-refresh-radon/pairs-posthoc-county-slopes.png)](assets/centering-refresh-radon/pairs-posthoc-county-slopes.png)
+
+[![County slopes: CP reference and completed online losses](assets/centering-refresh-radon/pairs-online-county-slopes.png)](assets/centering-refresh-radon/pairs-online-county-slopes.png)
+
+## Position and gradient in the displayed coordinates
+
+These panels pair each displayed effect coordinate with its own log-density
+gradient, using 1,000 evenly spaced retained draws. The CP reference transforms
+the pilot's positions and gradients together. The fitted panels use gradients
+saved in their actual sampler frame; they do not attach an NCP gradient to a
+centered position.
+
+[![County intercepts: positions and gradients, posthoc](assets/centering-refresh-radon/gradients-posthoc-county-intercepts.png)](assets/centering-refresh-radon/gradients-posthoc-county-intercepts.png)
+
+[![County intercepts: positions and gradients, online](assets/centering-refresh-radon/gradients-online-county-intercepts.png)](assets/centering-refresh-radon/gradients-online-county-intercepts.png)
+
+[![County slopes: positions and gradients, posthoc](assets/centering-refresh-radon/gradients-posthoc-county-slopes.png)](assets/centering-refresh-radon/gradients-posthoc-county-slopes.png)
+
+[![County slopes: positions and gradients, online](assets/centering-refresh-radon/gradients-online-county-slopes.png)](assets/centering-refresh-radon/gradients-online-county-slopes.png)
+
+## Reproduce and inspect
+
+The [refresh harness](https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/centering_refresh)
+contains the driver, both loss selectors, saved-frame audits, export and AoV
+plotting code. Its [results for this study](https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/centering_refresh/results/radon)
+contain the full efficiency denominators, per-quantity ESS and selected controls.
+The original model directory retains the source specification and independent
+density/gradient audit. The refresh uses those same model definitions.
+
+Run `run.jl radon ncp OUTPUT` first, then request
+`cp,posthoc_position,posthoc_gradient,online_position,online_gradient` with the
+same output root. Completed arm directories are immutable. See the harness
+README for the environment and full commands.

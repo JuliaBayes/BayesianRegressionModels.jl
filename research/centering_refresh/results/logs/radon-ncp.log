@@ -1,0 +1,11 @@
+BOUNDARY	radon	ncp	init	window=0	all_gradients=151
+BOUNDARY	radon	ncp	window	window=1	all_gradients=1349
+BOUNDARY	radon	ncp	window	window=2	all_gradients=3389
+BOUNDARY	radon	ncp	window	window=3	all_gradients=7398
+BOUNDARY	radon	ncp	window	window=4	all_gradients=15399
+BOUNDARY	radon	ncp	window	window=5	all_gradients=31409
+BOUNDARY	radon	ncp	window	window=6	all_gradients=63413
+BOUNDARY	radon	ncp	window	window=7	all_gradients=127420
+BOUNDARY	radon	ncp	window	window=8	all_gradients=164917
+CASE_ARM_COMPLETE	(case = "radon", arm = "ncp", qois = 777, draws = 10000, min_bulk_ess = 475.9790436725938, limiting_qoi = "pop_mu_beta_pop.2", min_tail_ess = 1069.6589738113635, max_split_rhat = 1.0044553818822262, divergences = 0, sampling_gradients = 160352, all_fit_gradients = 164917, pilot_gradients = 0, total_gradients = 164917, sampling_efficiency = 0.002968338677862414, total_efficiency = 0.002886173309438043)
+[kb-run-compact] exit=0 elapsed=207s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.EdJsco

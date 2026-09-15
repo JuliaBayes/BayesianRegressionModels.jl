@@ -1,0 +1,13 @@
+extra_library <- Sys.getenv("PUPIL_BRMS_LIBRARY")
+if(nzchar(extra_library)) .libPaths(c(extra_library,.libPaths()))
+suppressPackageStartupMessages(library(brms))
+load("research/pupil_total_effects/reference/df_pupil_complete.rda")
+pin <- readLines(file.path(dirname(find.package("brms")),"brms-source-sha.txt"))
+stopifnot(pin=="73cf607889879cb2a55f50b88d8141d76ff43279")
+formula <- bf(p_size ~ load + (load | gr(subj,cor=FALSE,center=TRUE)),sigma ~ subj)
+out <- commandArgs(trailingOnly=TRUE)[[1]]
+stopifnot(!dir.exists(out));dir.create(out,recursive=TRUE)
+writeLines(make_stancode(formula,data=df_pupil_complete,normalize=TRUE),file.path(out,"ordinary_cp.stan"))
+cmdstanr::write_stan_json(make_standata(formula,data=df_pupil_complete),file.path(out,"data.json"))
+writeLines(pin,file.path(out,"brms-source-sha.txt"))
+cat("ORDINARY_CP_CAPTURE_COMPLETE\n")

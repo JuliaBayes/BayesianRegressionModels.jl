@@ -1,0 +1,2 @@
+criterion	pilot_gradient_calls	refit_gradient_calls	workflow_gradient_calls	scoring_gradient_calls	scoring_evidence	validation_gradient_calls	grid_step
+position-gradient correlation	134652	39047	173699	0	stored NCP pilot positions and source gradients	3	0.01

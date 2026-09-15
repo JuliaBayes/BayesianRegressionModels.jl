@@ -1,0 +1,12 @@
+S2Z_AUDIT_PASS	/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil-s2z-whmc-v3/s2z_auto
+S2Z_RESULT	(arm = "s2z_auto_native", retained_draws = 2000, min_bulk_ess = 1502.5446578902295, limiting_parameter = "total_intercept[717]", min_tail_ess = 1132.2274889851062, max_split_rhat = 1.0025723009499352, divergences = 0, divergence_percent = 0.0, sampling_gradients = 32248, transition_gradients = 149223, all_gradient_calls = 149223, min_bulk_ess_per_1000_sampling_gradients = 46.59342154211826, min_bulk_ess_per_1000_all_gradients = 10.06912244017497, min_total_coefficient_ess_per_1000_gradients = 46.59342154211826, min_common_bulk_ess_per_1000_gradients = 46.59342154211826, fit_seconds = NaN, compile_seconds = NaN)
+boundary	s2z_auto	init	window=0	all_gradients=138
+boundary	s2z_auto	window	window=1	all_gradients=1231
+boundary	s2z_auto	window	window=2	all_gradients=3986
+boundary	s2z_auto	window	window=3	all_gradients=8085
+boundary	s2z_auto	window	window=4	all_gradients=16085
+boundary	s2z_auto	window	window=5	all_gradients=32110
+boundary	s2z_auto	window	window=6	all_gradients=64086
+S2Z_RESULT	(arm = "s2z_auto_whmc", retained_draws = 2000, min_bulk_ess = 2021.7381125913062, limiting_parameter = "total_intercept[711]", min_tail_ess = 1048.869513429118, max_split_rhat = 1.0042264220858699, divergences = 0, divergence_percent = 0.0, sampling_gradients = 46672, transition_gradients = 63948, all_gradient_calls = 64086, min_bulk_ess_per_1000_sampling_gradients = 43.318008925936454, min_bulk_ess_per_1000_all_gradients = 31.5472663700544, min_total_coefficient_ess_per_1000_gradients = 43.318008925936454, min_common_bulk_ess_per_1000_gradients = 43.318008925936454, fit_seconds = 30.248989524, compile_seconds = 20.401262461)
+S2Z_WHMC_COMPLETE	/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil-s2z-whmc-v3/s2z_auto
+[kb-run-compact] exit=0 elapsed=86s log=/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.MnWqmi
