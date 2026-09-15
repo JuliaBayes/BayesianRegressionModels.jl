@@ -846,12 +846,12 @@ end
 
 function brm_descriptor(builder::Function, df;
                         mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
-                        held_out=(),
+                        total_groups=:auto, held_out=(),
                         name::Union{Nothing,Symbol}=nothing,
                         operations=Dict{Symbol,Any}(),
                         titles=Dict{Symbol,String}(),
                         highlights=())
-    brm_descriptor(generative_plan(builder, df; mod, cv_groups, held_out);
+    brm_descriptor(generative_plan(builder, df; mod, cv_groups, total_groups, held_out);
                    name, operations, titles, highlights)
 end
 
@@ -983,6 +983,31 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
                                  _brm_output_segments(o)))
     end
     outputs = _brm_label_population!(outputs, brmi, pop_lp)
+    for i in eachindex(outputs)
+        o = outputs[i]
+        isnothing(o.declaration) && continue
+        binding = get(plan.bindings,o.declaration.target,nothing)
+        isnothing(binding) && continue
+        hasproperty(binding,:population_columns) && o.name !== o.declaration.target || continue
+        outputs[i] = BRMOutput(o.name,o.kind,o.type,o.size,o.constraints,o.generative,
+            o.source,o.role,o.declaration,o.logical,collect(Symbol,binding.population_columns),o.segments)
+    end
+    for block in total_effect_blocks(plan), i in eachindex(outputs)
+        o = outputs[i]
+        role,labels = if o.name === block.population
+            (:population_effect,collect(Symbol,block.population_columns))
+        elseif o.name === block.binding
+            (:total_effect,nothing)
+        elseif o.name === block.deviations
+            (:random_effect,nothing)
+        elseif o.name === block.scales
+            (:parameter,collect(Symbol,block.columns))
+        else
+            continue
+        end
+        outputs[i] = BRMOutput(o.name,o.kind,o.type,o.size,o.constraints,o.generative,
+            o.source,role,o.declaration,block.predictor,labels,o.segments)
+    end
 
     # --- schema -------------------------------------------------------------
     columns = Tuple(sort!(collect(df_columns)))
@@ -1001,6 +1026,14 @@ end
 # what the traced model supports, and the two BRM ones are gated on the
 # declaration.
 function _brm_reprocess_supported(plan, outputs)
+    # Total blocks carry the same group-index provenance as ordinary blocks,
+    # while recovered deviations are generated assignments rather than priors.
+    totals = total_effect_blocks(plan)
+    if !isempty(totals)
+        all(b -> haskey(plan.preproc,b.group_index) &&
+            plan.preproc[b.group_index].kind === :group_index,totals) || return false
+        outputs = filter(o -> all(b -> o.name !== b.deviations,totals),outputs)
+    end
     any(o -> o.role === :random_effect, outputs) || return true
 
     ranef_declarations = [d for d in plan.declarations

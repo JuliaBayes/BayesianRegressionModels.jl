@@ -118,9 +118,10 @@ function exception_text(backend::AbstractString, err)
     "$backend unsupported for this BRM example\n\n$reason"
 end
 
-function stan_emissions(brmi::BRM.BRMI, mod::Module; required::Bool=false)
+function stan_emissions(brmi::BRM.BRMI, mod::Module;
+                        required::Bool=false, total_groups=:auto)
     try
-        sb = Base.invokelatest(BRM.SBBRMI, brmi; mod=mod)
+        sb = Base.invokelatest(BRM.SBBRMI, brmi; mod=mod, total_groups)
         sb_source = strip(sprint(show, sb), '\n')
         stan_source = strip(Base.invokelatest(BRM.stan_code, sb), '\n')
         return sb_source, stan_source
@@ -152,7 +153,7 @@ The StanBlocks, Stan, and Turing panes are always derived during this build.
 """
 function comparison(mod::Module, code::AbstractString, brmi_name::Symbol;
                     title=replace(string(brmi_name), '_' => ' '),
-                    require_stan::Bool=false)
+                    require_stan::Bool=false, total_groups=:auto)
     displayed = strip(code, '\n')
     Core.eval(mod, :(using BayesianRegressionModels, Distributions))
     evaluate_source(mod, displayed)
@@ -160,7 +161,7 @@ function comparison(mod::Module, code::AbstractString, brmi_name::Symbol;
     brmi = candidate isa Function ? Base.invokelatest(candidate) : candidate
     brmi isa BRM.BRMI || error(
         "docs comparison `$brmi_name` did not evaluate to or construct a BRMI")
-    sb_source, stan_source = stan_emissions(brmi, mod; required=require_stan)
+    sb_source, stan_source = stan_emissions(brmi, mod; required=require_stan, total_groups)
     turing_source = turing_emission(brmi)
     return Markdown.MD([
         Markdown.Code("brm-comparison", string(title)),

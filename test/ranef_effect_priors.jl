@@ -3,6 +3,8 @@
 # Run: julia --project=. test/ranef_effect_priors.jl
 # Set BRM_RANEF_EFFECT_RUNTIME=0 to skip the BridgeStan density/gradient probe.
 
+# These fixtures inspect conventional emitted parameter names.
+# Exact total-prior equivalence is covered in total_effects_integration.jl.
 using Test
 using BayesianRegressionModels
 using StanBlocks
@@ -59,7 +61,7 @@ end
     ]
     @test isnothing(ranefcoefnames(brmi, :absent))
 
-    sb = SBBRMI(brmi; mod=@__MODULE__)
+    sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
     code = BayesianRegressionModels.stan_code(sb)
     @test StanBlocks.stan.transpiles(sb.model)
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
@@ -126,7 +128,7 @@ end
         y ~ Normal(eta_CL + eta_Vc, 1)
     end
     partial_brmi = partial_builder(df)
-    partial = SBBRMI(partial_brmi; mod=@__MODULE__)
+    partial = SBBRMI(partial_brmi; mod=@__MODULE__, total_groups=())
     partial_code = BayesianRegressionModels.stan_code(partial)
     @test StanBlocks.stanc_check(partial_code; warn_pedantic=false).ok
     @test occursin(r"b_p_subject_tau ~ brm_vector_prior_[0-9a-f]+", partial_code)
@@ -134,7 +136,7 @@ end
                         if d.target === :b_p_subject)
     @test partial_decl.keywords.lkj_eta == 1.0
 
-    centered = SBBRMI(partial_brmi; mod=@__MODULE__, centered_groups=[:subject])
+    centered = SBBRMI(partial_brmi; mod=@__MODULE__, total_groups=(), centered_groups=[:subject])
     centered_code = BayesianRegressionModels.stan_code(centered)
     @test StanBlocks.stanc_check(centered_code; warn_pedantic=false).ok
     centered_block = only(ranef_blocks(centered))
@@ -168,7 +170,7 @@ end
         @test all(isfinite, centered_gradient)
     end
 
-    cv = SBBRMI(partial_brmi; mod=@__MODULE__, cv_groups=[:subject])
+    cv = SBBRMI(partial_brmi; mod=@__MODULE__, total_groups=(), cv_groups=[:subject])
     cv_code = BayesianRegressionModels.stan_code(cv)
     @test StanBlocks.stanc_check(cv_code; warn_pedantic=false).ok
     cv_decl = only(d for d in generative_plan(cv).declarations
@@ -181,7 +183,7 @@ end
         eta_Vc ~ 1 + x + (1 + x | p | subject)
         y ~ Normal(eta_CL + eta_Vc, 1)
     end
-    default_sb = SBBRMI(default_builder(df); mod=@__MODULE__)
+    default_sb = SBBRMI(default_builder(df); mod=@__MODULE__, total_groups=())
     default_code = BayesianRegressionModels.stan_code(default_sb)
     default_decl = only(d for d in generative_plan(default_sb).declarations
                         if d.target === :b_p_subject)
@@ -199,7 +201,7 @@ end
     @test_throws "unseen level" reprocess(
         partial, merge(new_df, (; subject=[1, 1, 2, 2, 3, 9])))
 
-    reusable = generative_plan(partial_builder, df; mod=@__MODULE__)
+    reusable = generative_plan(partial_builder, df; mod=@__MODULE__, total_groups=())
     rebuilt = generative_plan(reusable, new_df)
     rebuilt_decl = only(d for d in rebuilt.declarations if d.target === :b_p_subject)
     @test rebuilt_decl.family isa StanBlocks.SlicModel
@@ -211,14 +213,14 @@ end
         cor(:, p) ~ LKJCholesky(3, 2)
         y ~ Normal(eta, 1)
     end
-    @test_throws "does not match" SBBRMI(wrong_dimension(df); mod=@__MODULE__)
+    @test_throws "does not match" SBBRMI(wrong_dimension(df); mod=@__MODULE__, total_groups=())
 
     ambiguous_shorthand = @brm begin
         eta ~ 1 + (1 + x | p | subject)
         sd(eta, p) ~ Exponential(1)
         y ~ Normal(eta, 1)
     end
-    @test_throws "is ambiguous" SBBRMI(ambiguous_shorthand(df); mod=@__MODULE__)
+    @test_throws "is ambiguous" SBBRMI(ambiguous_shorthand(df); mod=@__MODULE__, total_groups=())
 
     # `sd(eta, p)` and `sd(eta, p, x)` reach the same single margin, but they
     # are NOT a duplicate: naming the coefficient is strictly more specific, so
@@ -231,7 +233,7 @@ end
         y ~ Normal(eta, 1)
     end
     layered_code = BayesianRegressionModels.stan_code(
-        SBBRMI(layered_resolution(df); mod=@__MODULE__))
+        SBBRMI(layered_resolution(df); mod=@__MODULE__, total_groups=()))
     @test occursin(
         "b_p_subject_tau ~ exponential((1.0 ./ 2));", layered_code)
     @test !occursin(r"brm_vector_prior_[0-9a-f]+", layered_code)
@@ -241,21 +243,21 @@ end
         sd(eta, p, nope) ~ Exponential(1)
         y ~ Normal(eta, 1)
     end
-    @test_throws "matches no random-effect margin" SBBRMI(unknown_margin(df); mod=@__MODULE__)
+    @test_throws "matches no random-effect margin" SBBRMI(unknown_margin(df); mod=@__MODULE__, total_groups=())
 
     unknown_id = @brm begin
         eta ~ 1 + (1 | p | subject)
         sd(:, q) ~ Exponential(1)
         y ~ Normal(eta, 1)
     end
-    @test_throws "matches no shared" SBBRMI(unknown_id(df); mod=@__MODULE__)
+    @test_throws "matches no shared" SBBRMI(unknown_id(df); mod=@__MODULE__, total_groups=())
 
     half_normal_sd = @brm begin
         eta ~ 1 + (1 | p | subject)
         sd(:, p) ~ Normal(0, 0.5)
         y ~ Normal(eta, 1)
     end
-    half_normal_sb = SBBRMI(half_normal_sd(df); mod=@__MODULE__)
+    half_normal_sb = SBBRMI(half_normal_sd(df); mod=@__MODULE__, total_groups=())
     half_normal_code = BayesianRegressionModels.stan_code(half_normal_sb)
     @test occursin("b_p_subject_tau ~ normal(0, 0.5);", half_normal_code)
     @test !occursin(r"brm_vector_prior_[0-9a-f]+", half_normal_code)
@@ -270,7 +272,7 @@ end
         y ~ Normal(eta, 1)
     end
     shifted_code = BayesianRegressionModels.stan_code(
-        SBBRMI(shifted_normal_sd(df); mod=@__MODULE__))
+        SBBRMI(shifted_normal_sd(df); mod=@__MODULE__, total_groups=()))
     @test occursin("vector<lower=0.0>[n_terms_p_subject] b_p_subject_tau;", shifted_code)
     @test occursin("b_p_subject_tau ~ normal(0.1, 0.5);", shifted_code)
     @test !occursin(r"brm_vector_prior_[0-9a-f]+", shifted_code)
@@ -282,7 +284,7 @@ end
         y ~ Normal(eta, 1)
     end
     affine_code = BayesianRegressionModels.stan_code(
-        SBBRMI(affine_sd(df); mod=@__MODULE__))
+        SBBRMI(affine_sd(df); mod=@__MODULE__, total_groups=()))
     @test occursin("brm_affine_normal_lpdf(x[1] | arg_2, arg_3, arg_4, arg_5)",
                    affine_code)
     @test StanBlocks.stanc_check(affine_code; warn_pedantic=false).ok
@@ -292,7 +294,7 @@ end
         sd(:, p) ~ Cauchy(0, 1)
         y ~ Normal(eta, 1)
     end
-    cauchy_sb = SBBRMI(cauchy_sd(df); mod=@__MODULE__)
+    cauchy_sb = SBBRMI(cauchy_sd(df); mod=@__MODULE__, total_groups=())
     cauchy_code = BayesianRegressionModels.stan_code(cauchy_sb)
     @test occursin("vector<lower=0.0>[n_terms_p_subject] b_p_subject_tau;", cauchy_code)
     @test occursin("b_p_subject_tau ~ cauchy(0, 1);", cauchy_code)
@@ -305,7 +307,7 @@ end
         sd(:, p) ~ Exponential(exp(log_scale))
         y ~ Normal(eta, 1)
     end
-    sampled_scale_sb = SBBRMI(sampled_scale_sd(df); mod=@__MODULE__)
+    sampled_scale_sb = SBBRMI(sampled_scale_sd(df); mod=@__MODULE__, total_groups=())
     sampled_scale_code = BayesianRegressionModels.stan_code(sampled_scale_sb)
     @test occursin("log_scale ~ normal(0, 1);", sampled_scale_code)
     @test occursin(
@@ -346,7 +348,7 @@ end
         cor(:, p) ~ Cauchy(0, 1)
         y ~ Normal(eta, 1)
     end
-    @test_throws "expects `LKJCholesky" SBBRMI(bad_cor_family(df); mod=@__MODULE__)
+    @test_throws "expects `LKJCholesky" SBBRMI(bad_cor_family(df); mod=@__MODULE__, total_groups=())
 
     ambiguous_id = @brm begin
         eta_a ~ 1 + (1 | p | subject)
@@ -354,7 +356,7 @@ end
         sd(:, p) ~ Exponential(1)
         y ~ Normal(eta_a + eta_b, 1)
     end
-    @test_throws "addresses 2 blocks" SBBRMI(ambiguous_id(df); mod=@__MODULE__)
+    @test_throws "addresses 2 blocks" SBBRMI(ambiguous_id(df); mod=@__MODULE__, total_groups=())
     @test_throws "ambiguous" ranefcoefnames(ambiguous_id(df), :p)
 
     stratified_df = merge(df, (; stratum=[1, 1, 1, 2, 2, 2]))
@@ -363,7 +365,7 @@ end
         sd(:, p) ~ Exponential(1)
         y ~ Normal(eta, 1)
     end
-    @test_throws "stratified" SBBRMI(stratified(stratified_df); mod=@__MODULE__)
+    @test_throws "stratified" SBBRMI(stratified(stratified_df); mod=@__MODULE__, total_groups=())
 
     @test_throws LoadError eval(quote
         @brm begin
@@ -381,7 +383,7 @@ end
 # population surface orders the three.
 @testset "`:` predictor claims one margin across every predictor" begin
     margin_names(b) = ranefcoefnames(b, :p)
-    rates(b) = BayesianRegressionModels.stan_code(SBBRMI(b; mod=@__MODULE__))
+    rates(b) = BayesianRegressionModels.stan_code(SBBRMI(b; mod=@__MODULE__, total_groups=()))
 
     cross = @brm begin
         eta_Vc ~ 1 + x + (1 + x | p | subject)
@@ -422,7 +424,7 @@ end
         sd(eta_Q, p) ~ Exponential(1 / 5)
         y ~ Normal(eta_Vc + eta_Q, 1)
     end
-    @test_throws "equally specific" SBBRMI(tied(df); mod=@__MODULE__)
+    @test_throws "equally specific" SBBRMI(tied(df); mod=@__MODULE__, total_groups=())
 
     # An unmatched coefficient still fails loudly rather than falling back to
     # the block default.
@@ -431,7 +433,7 @@ end
         sd(:, p, nope) ~ Exponential(1)
         y ~ Normal(eta_Vc, 1)
     end
-    @test_throws "matches no random-effect margin" SBBRMI(unknown(df); mod=@__MODULE__)
+    @test_throws "matches no random-effect margin" SBBRMI(unknown(df); mod=@__MODULE__, total_groups=())
 end
 
 # The observed-cQTc shape (Bruno:arv393, snag `ranef-sd-lpdf-el-a190739d`):
@@ -444,7 +446,7 @@ end
         sd(:, ri) ~ Exponential(10.0)
         y ~ Normal(eta, 1)
     end
-    single_sb = SBBRMI(single(df); mod=@__MODULE__)
+    single_sb = SBBRMI(single(df); mod=@__MODULE__, total_groups=())
     single_code = BayesianRegressionModels.stan_code(single_sb)
     @test StanBlocks.stan.transpiles(single_sb.model)
     @test StanBlocks.stanc_check(single_code; warn_pedantic=false).ok

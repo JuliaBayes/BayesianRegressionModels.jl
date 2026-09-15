@@ -113,7 +113,7 @@ end
 
 function stan_density(label, output_dir)
     mkpath(output_dir)
-    sb = SBBRMI(build_brmi(); mod=@__MODULE__)
+    sb = SBBRMI(build_brmi(); mod=@__MODULE__, total_groups=())
     code = BRM.stan_code(sb)
     checked = StanBlocks.stanc_check(code; warn_pedantic=false)
     checked.ok || error("stanc failed for $label\n$(checked.output)")
