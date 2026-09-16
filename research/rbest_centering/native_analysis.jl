@@ -19,7 +19,7 @@ function native_arm(c, dir, label, out)
     qois = hcat(Float64.(cols["beta.1"]), Float64.(cols["tau.1"]), theta)
     fit = (; sampling_gradients=Int(only(counts["sampling_gradients"])), all_gradient_calls=Int(only(counts["all_gradient_calls"])),
         pilot_gradient_calls=0, total_gradient_calls=Int(only(counts["workflow_gradient_calls"])),
-        divergences=Int(only(counts["divergences"])), fit_seconds=NaN, max_depth_hits=Int(only(counts["max_depth_hits"])))
+        divergences=Int(only(counts["divergences"])), fit_seconds=NaN, max_depth_hits=Int(only(counts["max_depth_hits"])), numerical_rejections=0)
     diagnostics(c, label, qois, fit, out)
     write_tsv(joinpath(out, label * "-provenance.tsv"), [(; arm=label, variant=prov["variant"], parametrization=prov["parametrization"],
         rbest_version=prov["rbest_version"], rbest_sha=prov["rbest_sha"], adapt_delta=prov["adapt_delta"], step_size=string(prov["step_size"]),
