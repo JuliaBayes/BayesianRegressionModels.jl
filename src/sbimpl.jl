@@ -4866,6 +4866,141 @@ _sb_dirichlet_column_hint(x::AbstractColumn) = string(
 
 _sb_dirichlet_arg_label(x::AbstractColumn) = x isa NamedColumn ? name(x) : "that argument"
 
+# `x ~ MvNormal(...)` on a non-data LHS declares a VECTOR PARAMETER (decision `187g4va`,
+# 2026-09-16: the faithful Distributions.jl surface). The constructor shapes are
+# Distributions.jl's, nothing invented on top of them:
+#
+#   MvNormal(mu, Σ::AbstractMatrix)   covariance          -> x ~ multi_normal(mu, Σ)
+#   MvNormal(mu, Diagonal(v))         variances           -> x ~ normal(mu, sqrt.(v))   (vectorised)
+#   MvNormal(mu, λ * I)               covariance λ·I      -> x ~ normal(mu, sqrt(λ))
+#   MvNormal(Σ)                       zero mean           -> x ~ multi_normal(rep_vector(0, n), Σ)
+#   MvNormal(mu, σ::Real)             std σ               -> x ~ normal(mu, σ)
+#   MvNormal(mu, σ::AbstractVector)   stds                -> x ~ normal(mu, σ)
+#   MvNormal(n::Int, σ::Real)         zero mean, std σ    -> x ~ normal(rep_vector(0, n), σ)
+#
+# (The three `σ` forms are deprecated constructors in Distributions.jl but keep their
+# Distributions meaning here — a standard deviation — because `eps ~ MvNormal(zeros(T - 1), 1.0)`
+# is the spelling a random walk wants.) The dimension `n` is fixed from a DATA-valued mean —
+# a numeric vector, a data column, or a data-only formula expression such as
+# `zeros(length(time) - 1)` evaluated in Julia at build time — from a data-valued vector /
+# matrix scale, or from the integer form; a parameter-bearing mean with a scalar scale has no
+# data-determinable size and is refused loudly. Data-valued arguments are registered under
+# `<x>_mu` / `<x>_scale` (a data column is referenced by its own name, as the Dirichlet
+# concentration is under `<x>_alpha`); parameter-bearing arguments are emitted as Stan
+# expressions (`MvNormal(zeros(k), sig)` with a sampled `sig`). The LHS is emitted TYPED,
+# `x::vector[<x>_n]`, so the declaration never rests on family-signature inference.
+#
+# `MvNormal` is deliberately NOT added to `_sb_stan_dist_name` (same reasoning as
+# `Dirichlet`): that table is shared with the observation path, and a vector-valued
+# RESPONSE keeps its own spelling (`MvNormalCholesky`, `[y1, y2] ~ ...`).
+function _sb_emit_vector_prior!(stmts, data, target, ::Type{<:MvNormal}, op)
+    args, kwargs = getargs(op), getkwargs(op)
+    isempty(kwargs) || error(
+        "sbimpl: `$target ~ MvNormal(...)` takes no keywords, got ",
+        "$(collect(keys(kwargs))). Bounds on a multivariate normal parameter are not supported.")
+    length(args) in (1, 2) || error(
+        "sbimpl: `$target ~ MvNormal(...)` takes `MvNormal(mu, scale)`, `MvNormal(Σ)` or ",
+        "`MvNormal(n, σ)`; got $(length(args)) positional arguments.")
+    n_key, mu_key, sc_key = Symbol(target, :_n), Symbol(target, :_mu), Symbol(target, :_scale)
+    for key in (n_key, mu_key, sc_key)
+        haskey(data, key) && error(
+            "sbimpl: `$target ~ MvNormal(...)` reserves data key `$key`, but that name is ",
+            "already used. Rename the parameter.")
+    end
+    mu_arg, scale_arg = length(args) == 2 ? (args[1], args[2]) : (nothing, only(args))
+    mu_val = _sb_mvnormal_data_value(mu_arg)
+    scale_val = _sb_mvnormal_data_value(scale_arg)
+
+    n = nothing
+    if mu_arg === nothing || mu_val isa Integer
+        mu_val isa Integer && (n = Int(mu_val))
+        mu_val = :zero
+    elseif mu_val isa AbstractVector{<:Real}
+        n = length(mu_val)
+    elseif mu_val !== nothing
+        error("sbimpl: `$target ~ MvNormal(...)` mean must be a vector, a data column, or the ",
+              "integer dimension `MvNormal(n, σ)`; got $(typeof(mu_val)).")
+    end
+    scale_n = scale_val isa AbstractVector{<:Real} ? length(scale_val) :
+              scale_val isa AbstractMatrix{<:Real} ? size(scale_val, 1) : nothing
+    if isnothing(n)
+        isnothing(scale_n) && error(
+            "sbimpl: the dimension of `$target ~ MvNormal(...)` must be determinable from data: ",
+            "give a data-valued mean (a numeric vector, a data column, or a data-only expression ",
+            "such as `zeros(length(t) - 1)`), a vector/matrix scale, or the integer form ",
+            "`MvNormal(n, σ)`. A parameter-bearing mean with a scalar scale has no size.")
+        n = scale_n
+    elseif !isnothing(scale_n) && scale_n != n
+        error("sbimpl: `$target ~ MvNormal(...)` mean has length $n but the scale has size $scale_n.")
+    end
+    n >= 1 || error("sbimpl: `$target ~ MvNormal(...)` dimension must be positive, got $n.")
+    data[n_key] = n
+
+    mu_expr = if mu_val === :zero
+        Expr(:call, :rep_vector, 0.0, n_key)
+    elseif mu_val isa AbstractVector{<:Real}
+        if mu_arg isa NamedColumn && parent(mu_arg) isa DataColumn
+            _sb_scalar_expr(mu_arg, data)               # the data column, by its own name
+        else
+            data[mu_key] = collect(Float64, mu_val)
+            mu_key
+        end
+    else
+        _sb_scalar_expr(mu_arg, data)                   # parameter-bearing mean, as Stan
+    end
+
+    rhs = if scale_val isa Diagonal
+        v = diag(scale_val)
+        all(>(0), v) || error("sbimpl: `$target ~ MvNormal(mu, Diagonal(v))` needs positive variances.")
+        data[sc_key] = sqrt.(collect(Float64, v))        # variances -> standard deviations
+        Expr(:call, :normal, mu_expr, sc_key)
+    elseif scale_val isa AbstractMatrix{<:Real}
+        size(scale_val, 1) == size(scale_val, 2) || error(
+            "sbimpl: `$target ~ MvNormal(mu, Σ)` needs a square covariance, got $(size(scale_val)).")
+        data[sc_key] = Matrix{Float64}(scale_val)
+        Expr(:call, :multi_normal, mu_expr, sc_key)
+    elseif scale_val isa UniformScaling
+        scale_val.λ > 0 || error("sbimpl: `$target ~ MvNormal(mu, λ * I)` needs λ > 0.")
+        Expr(:call, :normal, mu_expr, sqrt(Float64(scale_val.λ)))
+    elseif scale_val isa AbstractVector{<:Real}
+        all(>(0), scale_val) || error("sbimpl: `$target ~ MvNormal(mu, σ)` needs positive standard deviations.")
+        data[sc_key] = collect(Float64, scale_val)
+        Expr(:call, :normal, mu_expr, sc_key)
+    elseif scale_val isa Real
+        scale_val > 0 || error("sbimpl: `$target ~ MvNormal(mu, σ)` needs σ > 0, got $scale_val.")
+        Expr(:call, :normal, mu_expr, Float64(scale_val))
+    elseif scale_val === nothing
+        # a model quantity: a sampled scalar scale such as `sig` (isotropic)
+        Expr(:call, :normal, mu_expr, _sb_scalar_expr(scale_arg, data))
+    else
+        error("sbimpl: `$target ~ MvNormal(...)` scale of type $(typeof(scale_val)) is not ",
+              "supported; use a real or vector of standard deviations, `Diagonal(variances)`, ",
+              "`λ * I`, or a covariance matrix.")
+    end
+    push!(stmts, Expr(:call, :~, Expr(:(::), target, Expr(:ref, :vector, n_key)), rhs))
+    true
+end
+
+# Evaluate a formula argument in Julia when it is data-only (literals, data columns, and
+# calls over them); `nothing` when it involves a model quantity (a sampled declaration, a
+# linear predictor, an assignment), which is then emitted as a Stan expression instead.
+_sb_mvnormal_data_value(x::Real) = x
+_sb_mvnormal_data_value(x::AbstractArray{<:Real}) = x
+_sb_mvnormal_data_value(x::UniformScaling) = x
+_sb_mvnormal_data_value(::Nothing) = nothing
+_sb_mvnormal_data_value(_) = nothing
+function _sb_mvnormal_data_value(x::NamedColumn)
+    backing = parent(x)
+    backing isa DataColumn ? parent(backing) : nothing
+end
+function _sb_mvnormal_data_value(x::ExprColumn)
+    args = map(_sb_mvnormal_data_value, getargs(x))
+    any(isnothing, args) && return nothing
+    kwargs = map(_sb_mvnormal_data_value, getkwargs(x))
+    any(isnothing, values(kwargs)) && return nothing
+    getf(x)(args...; kwargs...)
+end
+
 # Affine priors and observations share the complete base-call transformation.
 function _sb_emit_prior!(stmts, target, ::Type{<:LocationScale}, op)
     loc, scale, base = _sb_location_scale_parts(getargs(op))
