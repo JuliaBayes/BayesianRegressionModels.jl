@@ -15,9 +15,9 @@ PRODUCER = "BayesianRegressionModels:epi"
 FIGURES = {
     "single_R":        ("Single patch: R_t recovered", "Posterior 50/80/95 % bands of the daily reproduction number over 56 days with the simulated truth as a dashed line."),
     "forecast":        ("Forecast from a 42-day fit", "Posterior predictive case bands through day 56 from a fit that observes days 1–42 only; points are the simulated counts coloured by fitted/forecast; dashed line is the true expected count."),
-    "patch_R":         ("Six patches: R_{g,t}", "Per-patch posterior bands of the reproduction number with the truth dashed, one panel per patch."),
-    "patch_cases":     ("Six patches: expected vs simulated cases", "Per-patch posterior bands of expected daily cases on a symlog axis with the simulated counts as points."),
-    "patch_recovery":  ("Six patches: K_mix, delta, log I0 recovered", "Posterior median and 95 % interval against the truth for the 36 mixing weights, 48 weekly deviations and 6 seeds; dashed identity line."),
+    "patch_R":         ("Six patches: R_{g,t}", "One panel, colour = patch 1–6: posterior median of the reproduction number with its 95 % band per patch, the simulated truth dashed in the same colour."),
+    "patch_cases":     ("Six patches: expected vs simulated cases", "One panel, colour = patch, symlog axis: expected daily cases per patch (posterior median solid, truth dashed) and the simulated counts as points."),
+    "patch_recovery":  ("Six patches: K_mix, delta, log I0 recovered", "Posterior median minus truth with the 95 % interval for each of the 36 mixing weights, 48 weekly deviations and 6 seeds along one axis, coloured by quantity; dashed zero line."),
     "delay_pmf":       ("Reporting-delay PMF", "Daily reporting-delay masses: bands over posterior draws of the censored LogNormal fit, truth dashed, PMF at the posterior means as points."),
     "prior_predictive":("Prior predictive cases", "50/80/95 % bands of daily cases drawn from the prior (held_out=:all) on a symlog axis with the simulated series as points."),
     "scalars":         ("Scalar parameters", "Posterior median with 50/95 % intervals for every scalar parameter of the single-patch, 42-day, delay and six-patch fits; crosses mark the truth."),
