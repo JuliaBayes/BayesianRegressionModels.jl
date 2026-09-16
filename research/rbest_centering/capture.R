@@ -68,14 +68,15 @@ writeLines(clean,file.path(out,"clean.stan"))
 s <- counter_statements("beta_raw[1]")
 ins <- function(code,pattern,line,after=TRUE) { i <- grep(pattern,code,fixed=TRUE);stopifnot(length(i)==1L)
   if(after) append(code,line,after=i) else append(code,line,after=i-1L) }
-instr <- c("functions {",s[1:2],"}",clean)
+# Pull request 64 already has a functions block (zero_sum_basis); declare the counter inside it.
+instr <- if(any(clean=="functions {")) ins(clean,"functions {",s[1:2]) else c("functions {",s[1:2],"}",clean)
 instr <- ins(instr,"transformed parameters {",s[[3]])
 instr <- ins(instr,"model {",s[[4]])
 gq_end <- max(grep("^}$",instr));instr <- append(instr,s[[5]],after=gq_end-1L)
 writeLines(instr,file.path(out,"instrumented.stan"))
 nonblank <- function(x) { x <- trimws(strsplit(x,"\n")[[1]]);x[nzchar(x)] }
 stopifnot(identical(nonblank(strip_counter(paste(instr,collapse="\n"),"beta_raw[1]")),
-  nonblank(paste(c("functions {","}",clean),collapse="\n"))))
+  nonblank(paste(if(any(clean=="functions {")) clean else c("functions {","}",clean),collapse="\n"))))
 write_json(list(rbest_version=as.character(packageVersion("RBesT")),rbest_sha=sha,case=case,H=H,
   clean_sha256=digest(file.path(out,"clean.stan"),algo="sha256",file=TRUE),
   data_ncp_sha256=digest(file.path(out,"data-ncp.json"),algo="sha256",file=TRUE),
