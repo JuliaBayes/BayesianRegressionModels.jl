@@ -2,12 +2,14 @@ using Markdown, Test
 include("backend_comparisons.jl")
 include("centering_examples.jl")
 out=only(ARGS);mkpath(out)
-@testset "Four generated automatic-total model examples" begin
+@testset "Generated automatic-total model examples" begin
     for (which,name,blocks,dimensions) in (
         (:pupil_numeric,:pupil_numeric_brm_model,1,45),
         (:pupil_hierarchical,:pupil_hierarchical_brm_model,2,65),
         (:air_intercept,:air_intercept_brm_model,1,10),
-        (:air_independent,:air_independent_brm_model,1,16))
+        (:air_independent,:air_independent_brm_model,1,16),
+        (:rbest_as,:rbest_as_brm_model,1,9),
+        (:rbest_crohn,:rbest_crohn_brm_model,1,7))
         mod=Module(which)
         code=BRMCenteringExamples.authoring(which)
         rendered=BRMDocsComparisons.comparison(mod,code,name;require_stan=true)

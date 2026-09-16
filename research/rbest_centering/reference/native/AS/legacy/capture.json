@@ -1,0 +1,21 @@
+{
+  "rbest_version": "1.11.0",
+  "rbest_sha": "3d5fa1dda74f9d68360094a11983f32dd1b61c10",
+  "case": "AS",
+  "H": 8,
+  "clean_sha256": "cb4f793a743f524f948e1849847a5a83e4546f0bea297029a533dc9c54d6b6da",
+  "data_ncp_sha256": "663b3a939be26374113cf3b249fc48d87f846f1f9605a1581f19212831b766c8",
+  "control": {
+    "adapt_delta": 0.99,
+    "stepsize": 0.01,
+    "max_treedepth": 20,
+    "warmup": 2000,
+    "iter": 6000,
+    "thin": 4,
+    "chains": 4,
+    "init": 1
+  },
+  "variant": "legacy",
+  "formula": "cbind(r, n - r) ~ 1 | study",
+  "family": "binomial"
+}
