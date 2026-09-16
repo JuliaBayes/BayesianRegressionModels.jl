@@ -22,8 +22,10 @@
 #
 # Run: julia --project=test research/ema_ctsem/ema_ekf.jl
 
+using BayesianRegressionModels
 using StanBlocks
 using LogDensityProblems
+using Distributions: Normal, Exponential
 
 StanBlocks.@deffun begin
     @lhs @lpxf ema_ekf_lpdf(y::matrix[2, T], smoked::int[T],
@@ -184,8 +186,20 @@ ekf_sampled(ys, ym, smoked, workload, dt) = @slic (; ys=ys, ym=ym, smoked=smoked
     smoked ~ bernoulli_logit(l31 * x[1,:] + thr)
 end
 
+# The full nonlinear EMA as a @brm MODEL, states integrated out by the EKF.
+# `ema_ekf` is a StanBlocks @lpxf family; BRM now accepts a custom @lpxf family
+# as a @brm response (src/sbimpl.jl), so this is a plain `y ~ ema_ekf(...)`.
+brm_ekf_marginalized(data) = @brm data begin
+    bm ~ Normal(0,0.5); a12 ~ Normal(0,0.5); a21 ~ Normal(0,0.5); a22 ~ Normal(-0.5,0.3)
+    cm ~ Normal(0,0.5); wls ~ Normal(0,0.5); b0 ~ Normal(0,0.5)
+    q0 ~ Normal(0,0.5); qw ~ Normal(0,0.5); diffm ~ Exponential(1.0)
+    l31 ~ Normal(0,1); thr ~ Normal(0,1); r1 ~ Exponential(1.0); r2 ~ Exponential(1.0)
+    y ~ ema_ekf(smoked, workload, dt, b0, bm, a12, a21, a22, cm, wls,
+                q0, qw, diffm, l31, thr, r1, r2, 0.0, 0.0, 10.0)
+end
+
 function gate(name, model)
-    print(rpad(name, 34))
+    print(rpad(name, 40))
     local code
     try code = StanBlocks.stan_code(model) catch e
         println("transpile FAIL: ", first(sprint(showerror, e), 160)); return end
@@ -206,8 +220,10 @@ function main()
     workload = [0.3*sin(t/2) for t in 1:T]; dt = [0.5 + 0.3*abs(sin(t)) for t in 1:T]
     y2 = permutedims(hcat(ys, ym))
     println("T = ", T)
-    gate("full EMA — sampled", ekf_sampled(ys, ym, smoked, workload, dt))
-    gate("full EMA — EKF marginalized", ekf_marginalized(y2, smoked, workload, dt))
+    gate("full EMA — sampled (@slic)", ekf_sampled(ys, ym, smoked, workload, dt))
+    gate("full EMA — EKF marginalized (@slic)", ekf_marginalized(y2, smoked, workload, dt))
+    sb = SBBRMI(brm_ekf_marginalized((; y=y2, smoked, workload, dt)); mod=@__MODULE__)
+    gate("full EMA — EKF marginalized (@brm)", sb.model)
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__

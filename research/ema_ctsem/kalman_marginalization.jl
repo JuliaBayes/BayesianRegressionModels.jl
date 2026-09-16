@@ -1,5 +1,5 @@
-# Marginalizing the latent states of a state-space model with ONE general
-# Kalman-filter higher-order function.
+# Marginalizing the latent states of a state-space model with ONE general,
+# DIMENSION-GENERIC Kalman-filter function.
 #
 #   kalman(y, A, Q, C, R, m0, P0)   integrates the states out of ANY
 #   linear-Gaussian state-space model:
@@ -7,6 +7,12 @@
 #       y[t] = C x[t]   + N(0, R)     (obs,   dim M — inferred from y, C)
 #   K and M come from the matrix argument sizes, so the SAME function marginalizes
 #   the EMA's 2 coupled states (K=M=2) and a 1-D AR(1) (K=M=1).
+#
+# NB: this is NOT a higher-order function — it takes linear-algebra objects
+# (A, Q, C, R), not functions. A TRUE marginalization HOF takes user predict/
+# update functions and covers Kalman / EKF / HMM-forward uniformly; that broader
+# "sequential-marginalization" combinator family is StanBlocks-level work
+# (decision 14doey5, option B — delegated to StanBlocks).
 #
 # This is the LINEAR-GAUSSIAN version of the EMA (the softplus drift replaced by a
 # free linear drift matrix A; the binary smoking indicator dropped) — exactly the
