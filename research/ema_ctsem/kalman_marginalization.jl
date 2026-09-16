@@ -1,165 +1,164 @@
-# Marginalizing the latent states via a Kalman filter — "yes, it's just a @deffun".
+# Marginalizing the latent states of a state-space model with ONE general
+# Kalman-filter higher-order function.
 #
-# Companion to the EMA translation (ema_brm.jl). The EMA/SSM models there SAMPLE
-# the latent states (innovations are parameters; dim grows as N*T*processes — the
-# "expressive but not competitive" regime). This file shows the competitive
-# alternative for the LINEAR-GAUSSIAN case: a Kalman filter as a custom `@lpxf`
-# log-density that integrates the states OUT, so HMC samples only the physical
-# parameters — and the innovation funnel disappears.
+#   kalman(y, A, Q, C, R, m0, P0)   integrates the states out of ANY
+#   linear-Gaussian state-space model:
+#       x[t] = A x[t-1] + N(0, Q)     (state, dim K — inferred from A)
+#       y[t] = C x[t]   + N(0, R)     (obs,   dim M — inferred from y, C)
+#   K and M come from the matrix argument sizes, so the SAME function marginalizes
+#   the EMA's 2 coupled states (K=M=2) and a 1-D AR(1) (K=M=1).
 #
-# VERIFIED (strato2, StanBlocks bec23bc3c523), T=30 scalar AR(1) state space:
-#   sampled (innovations are parameters) : dim 34  (3 params + x0 + 30 innovations)
-#   marginalized (Kalman @lpxf)          : dim 3   (states integrated out)
-# both stanc + BridgeStan finite log-density + gradient.
+# This is the LINEAR-GAUSSIAN version of the EMA (the softplus drift replaced by a
+# free linear drift matrix A; the binary smoking indicator dropped) — exactly the
+# case where marginalization is exact. The faithful nonlinear/non-Gaussian EMA
+# (softplus drift + Bernoulli indicator) needs an Extended Kalman filter — see
+# ema_ekf.jl.
 #
-# StanBlocks already ships marginal-likelihood recurrences of exactly this shape
-# (`car_normal_lpdf`, `garch11_lpdf`, `arma11_lpdf`, `ar1_recurse`) — a Kalman
-# filter is the same pattern.
-#
-# BOUNDARY FINDING — the @lpxf family works directly at the @slic level, but the
-# @brm formula surface REJECTS a custom @lpxf distribution as a top-level response:
-#   "distribution `kalman_ar1` has no Stan translation; define `_sb_stan_dist_name`
-#    or `_sb_stan_distribution_call`".
-# So making Kalman marginalization a first-class @brm response family needs a
-# BRM-side registration hook (a small BRM change); at the @slic level it is
-# already usable today.
-#
-# WHERE THE NONLINEAR EMA WOULD NEED MORE: exact Kalman is linear-Gaussian only.
-# The EMA drift is state-dependent and one indicator is Bernoulli, so the filter
-# becomes an EXTENDED KF (per-step Jacobian linearization) + quadrature/Laplace
-# for the binary indicator — same @deffun SHAPE, but approximate and numerically
-# more delicate (positive-definite covariance recursion, AD through solve/logdet).
+# VERIFIED (strato2, StanBlocks bec23bc3c523), T=30, stanc + BridgeStan finite
+# log-density + gradient:
+#   EMA 2 states  sampled (2·T innovations) : dim 68
+#                 marginalized (Kalman HOF)  : dim 8    <- states integrated out
+#   AR(1)         marginalized (Kalman HOF)  : dim 3    <- same function, K=1
 #
 # Run: julia --project=test research/ema_ctsem/kalman_marginalization.jl
 
-using BayesianRegressionModels
 using StanBlocks
 using LogDensityProblems
-using Distributions: Normal, Exponential
 
-# ── The Kalman marginal log-density as a custom @lpxf distribution ────────────
-# Scalar linear-Gaussian filter: transition phi, process var q, obs var r, prior
-# x0 ~ N(m0, P0). Returns log p(y | phi, q, r, m0, P0), latent trajectory
-# integrated out. Triad: _lpdf / _lpdfs / _rng. `1.8378770664093453` = log(2*pi)
-# inlined (a Julia const cannot be referenced inside a @deffun body).
+# ── the HOF: one general multivariate Kalman marginal log-density ─────────────
+# 1.8378770664093453 = log(2π), inlined (a Julia const can't be used in @deffun).
 StanBlocks.@deffun begin
-    @lhs @lpxf kalman_ar1_lpdf(y::vector[T], phi::real, q::real, r::real,
-                               m0::real, P0::real)::real = begin
-        m = m0; P = P0
+    @lhs @lpxf kalman_lpdf(y::matrix[M, T], A::matrix[K, K], Q::matrix[K, K],
+                           C::matrix[M, K], R::matrix[M, M],
+                           m0::vector[K], P0::matrix[K, K])::real = begin
+        m::vector[K] = m0
+        P::matrix[K, K] = P0
         ll = 0.0
         for t in 1:T
             if t > 1
-                m = phi * m
-                P = phi * phi * P + q
+                m = A * m
+                P = A * P * A' + Q
             end
-            v = y[t] - m
-            S = P + r
-            ll = ll - 0.5 * (1.8378770664093453 + log(S) + v * v / S)
-            Kg = P / S
-            m = m + Kg * v
-            P = (1.0 - Kg) * P
+            v::vector[M] = y[:, t] - C * m
+            S::matrix[M, M] = C * P * C' + R
+            Sinv::matrix[M, M] = inverse(S)
+            ll = ll - 0.5 * (M * 1.8378770664093453 + log_determinant(S) + quad_form(Sinv, v))
+            G::matrix[K, M] = P * C' * Sinv
+            m = m + G * v
+            P = P - G * C * P
         end
         ll
     end
-    kalman_ar1_lpdfs(y::vector[T], phi::real, q::real, r::real,
-                     m0::real, P0::real)::vector[T] = begin
+    kalman_lpdfs(y::matrix[M, T], A::matrix[K, K], Q::matrix[K, K],
+                 C::matrix[M, K], R::matrix[M, M],
+                 m0::vector[K], P0::matrix[K, K])::vector[T] = begin
         out::vector[T]
-        m = m0; P = P0
+        m::vector[K] = m0
+        P::matrix[K, K] = P0
         for t in 1:T
             if t > 1
-                m = phi * m
-                P = phi * phi * P + q
+                m = A * m
+                P = A * P * A' + Q
             end
-            v = y[t] - m
-            S = P + r
-            out[t] = -0.5 * (1.8378770664093453 + log(S) + v * v / S)
-            Kg = P / S
-            m = m + Kg * v
-            P = (1.0 - Kg) * P
+            v::vector[M] = y[:, t] - C * m
+            S::matrix[M, M] = C * P * C' + R
+            Sinv::matrix[M, M] = inverse(S)
+            out[t] = -0.5 * (M * 1.8378770664093453 + log_determinant(S) + quad_form(Sinv, v))
+            G::matrix[K, M] = P * C' * Sinv
+            m = m + G * v
+            P = P - G * C * P
         end
         out
     end
-    kalman_ar1_rng(vector[T], phi::real, q::real, r::real,
-                   m0::real, P0::real)::vector[T] = begin
-        out::vector[T]
-        x = normal_rng(m0, sqrt(P0))
+    kalman_rng(matrix[M, T], A::matrix[K, K], Q::matrix[K, K],
+               C::matrix[M, K], R::matrix[M, M],
+               m0::vector[K], P0::matrix[K, K])::matrix[M, T] = begin
+        out::matrix[M, T]
+        x::vector[K] = multi_normal_rng(m0, P0)
         for t in 1:T
             if t > 1
-                x = normal_rng(phi * x, sqrt(q))
+                x = multi_normal_rng(A * x, Q)
             end
-            out[t] = normal_rng(x, sqrt(r))
+            out[:, t] = multi_normal_rng(C * x, R)
         end
         out
     end
 end
 
-# SAMPLED: the AR(1) latent trajectory is built from sampled innovations.
+# matrix-assembly helpers (build A/Q/R from scalar params) + the sampled trajectory
 StanBlocks.@deffun begin
-    ar1_traj(z::vector[T], phi::real, sq::real, x0::real)::vector[T] = begin
-        x::vector[T]
-        cur = x0
-        x[1] = cur
+    mat2(a::real, b::real, c::real, d::real)::matrix[2, 2] = begin
+        M::matrix[2, 2]; M[1,1]=a; M[1,2]=b; M[2,1]=c; M[2,2]=d; M
+    end
+    mat1(a::real)::matrix[1, 1] = begin
+        M::matrix[1, 1]; M[1,1]=a; M
+    end
+    lg_traj(zs::vector[T], zm::vector[T], a11::real, a12::real, a21::real, a22::real,
+            sq1::real, sq2::real, s10::real, s20::real)::matrix[2, T] = begin
+        out::matrix[2, T]
+        s1 = s10; s2 = s20
+        out[1,1] = s1; out[2,1] = s2
         for t in 2:T
-            cur = phi * cur + sq * z[t]
-            x[t] = cur
+            ns1 = a11*s1 + a12*s2 + sq1*zs[t]
+            ns2 = a21*s1 + a22*s2 + sq2*zm[t]
+            s1 = ns1; s2 = ns2
+            out[1,t] = s1; out[2,t] = s2
         end
-        x
+        out
     end
 end
-sampled(y) = @slic (; y = y) begin
-    phi ~ normal(0.5, 0.3)
-    sq  ~ exponential(1.0)        # process SD
-    sr  ~ exponential(1.0)        # obs SD
-    x0  ~ normal(0.0, 1.0)
-    z::vector[dims(y)[1]] ~ std_normal()
-    x = ar1_traj(z, phi, sq, x0)
-    y ~ normal(x, sr)
+
+# EMA 2 states — MARGINALIZED (states integrated out by the Kalman HOF).
+ema2_marginalized(y, I2, m0, P0) = @slic (; y=y, I2=I2, m0=m0, P0=P0) begin
+    a11 ~ normal(-0.5,0.3); a12 ~ normal(0,0.3); a21 ~ normal(0,0.3); a22 ~ normal(-0.5,0.3)
+    q1 ~ exponential(1.0); q2 ~ exponential(1.0); r1 ~ exponential(1.0); r2 ~ exponential(1.0)
+    y ~ kalman(mat2(a11,a12,a21,a22), mat2(q1,0.0,0.0,q2), I2, mat2(r1,0.0,0.0,r2), m0, P0)
 end
 
-# MARGINALIZED: states integrated out by the Kalman filter (dim = params only).
-marginalized(y) = @slic (; y = y) begin
-    phi ~ normal(0.5, 0.3)
-    q   ~ exponential(1.0)        # process VARIANCE
-    r   ~ exponential(1.0)        # obs VARIANCE
-    y ~ kalman_ar1(phi, q, r, 0.0, 10.0)
+# EMA 2 states — SAMPLED (the 2·T latent states are parameters).
+ema2_sampled(ys, ym) = @slic (; ys=ys, ym=ym) begin
+    a11 ~ normal(-0.5,0.3); a12 ~ normal(0,0.3); a21 ~ normal(0,0.3); a22 ~ normal(-0.5,0.3)
+    sq1 ~ exponential(1.0); sq2 ~ exponential(1.0); sr1 ~ exponential(1.0); sr2 ~ exponential(1.0)
+    s10 ~ normal(0,1); s20 ~ normal(0,1)
+    zs::vector[dims(ys)[1]] ~ std_normal()
+    zm::vector[dims(ys)[1]] ~ std_normal()
+    x = lg_traj(zs, zm, a11, a12, a21, a22, sq1, sq2, s10, s20)
+    ys ~ normal(x[1,:], sr1)
+    ym ~ normal(x[2,:], sr2)
 end
 
-# @brm surface: a custom @lpxf family is NOT accepted as a top-level response
-# without a BRM `_sb_stan_dist_name` registration (documented boundary).
-brm_marginalized(data) = @brm data begin
-    phi ~ Normal(0.5, 0.3)
-    q ~ Exponential(1.0)
-    r ~ Exponential(1.0)
-    y ~ kalman_ar1(phi, q, r, 0.0, 10.0)
+# The SAME kalman HOF on a 1-D AR(1) (K=M=1) — "applicable to a bunch of things".
+ar1_marginalized(y, m0, P0) = @slic (; y=y, m0=m0, P0=P0) begin
+    phi ~ normal(0.5,0.3); q ~ exponential(1.0); r ~ exponential(1.0)
+    y ~ kalman(mat1(phi), mat1(q), mat1(1.0), mat1(r), m0, P0)
 end
 
 function gate(name, model)
-    print(rpad(name, 34))
+    print(rpad(name, 38))
     local code
     try code = StanBlocks.stan_code(model) catch e
-        println("transpile FAIL: ", first(sprint(showerror, e), 100)); return end
+        println("transpile FAIL: ", first(sprint(showerror, e), 150)); return end
     r = StanBlocks.stanc_check(code; warn_pedantic=false)
-    r.ok || (println("stanc FAIL: ", first(r.output, 200)); return)
-    cache = joinpath(tempdir(), "brm-kalman"); isdir(cache)||mkpath(cache)
+    r.ok || (println("stanc FAIL"); return)
+    cache = joinpath(tempdir(), "brm-khof"); isdir(cache)||mkpath(cache)
     prob = StanBlocks.stan_instantiate(model; path=joinpath(cache, string(hash(code))*".stan"))
     dim = LogDensityProblems.dimension(prob)
     q = [0.1*((i%5)-2) for i in 1:dim]
     lp, g = LogDensityProblems.logdensity_and_gradient(prob, q)
-    println("OK  dim=", dim, "  lp=", round(lp;digits=3), "  finite_grad=", all(isfinite,g))
+    println("OK  dim=", dim, "  finite_grad=", all(isfinite,g))
 end
 
 function main()
-    y = [sin(t/3) + 0.1*(t%5-2) for t in 1:30]
-    println("T = ", length(y))
-    gate("sampled (innovations sampled)", sampled(y))
-    gate("marginalized (Kalman @lpxf)", marginalized(y))
-    println("── @brm wiring (expected to reject: needs _sb_stan_dist_name) ──")
-    try
-        sb = SBBRMI(brm_marginalized((; y = y)); mod=@__MODULE__)
-        gate("@brm y ~ kalman_ar1(...)", sb.model)
-    catch e
-        println("@brm rejected: ", first(sprint(showerror, e), 140))
-    end
+    T = 30
+    ys = [sin(t/3) + 0.1*(t%5-2) for t in 1:T]
+    ym = [cos(t/4) + 0.1*(t%3-1) for t in 1:T]
+    y2 = permutedims(hcat(ys, ym)); y1 = permutedims(reshape(ys, T, 1))
+    I2 = [1.0 0.0; 0.0 1.0]; m0_2 = [0.0, 0.0]; P0_2 = [10.0 0.0; 0.0 10.0]
+    m0_1 = [0.0]; P0_1 = reshape([10.0], 1, 1)
+    println("T = ", T, "  (one kalman HOF)")
+    gate("EMA 2 states — sampled",       ema2_sampled(ys, ym))
+    gate("EMA 2 states — marginalized",  ema2_marginalized(y2, I2, m0_2, P0_2))
+    gate("AR(1) — marginalized (K=1)",   ar1_marginalized(y1, m0_1, P0_1))
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
