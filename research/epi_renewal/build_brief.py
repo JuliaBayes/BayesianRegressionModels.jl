@@ -65,7 +65,7 @@ def main():
         used.append(name)
         payload = envelope(name, a.base_commit, a.run)
         return "```kb-aov\n" + json.dumps(payload, separators=(",", ":"), ensure_ascii=False) + "\n```"
-    out = re.sub(r"\{\{fig:([a-z_]+)\}\}", sub, text)
+    out = re.sub(r"\{\{fig:([A-Za-z_]+)\}\}", sub, text)
     missing = [n for n in FIGURES if n not in used]
     pathlib.Path(a.out).write_text(out, encoding="utf-8")
     print(f"wrote {a.out}: {len(used)} figures embedded ({len(out)} bytes); unused figures: {missing or 'none'}")
