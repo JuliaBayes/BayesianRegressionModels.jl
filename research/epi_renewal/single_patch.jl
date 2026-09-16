@@ -16,13 +16,30 @@
 #                       `ar(:, dar(time)) ~ Normal(0, 0.01)` pins beta ≈ 0 ≈ pure RW).
 #                       Pure formula surface, no kernel. NOT exactly the PR's RW.
 #   single_kernel_rw  — the EXACT RW: in-cell `z ~ std_normal()` + `cumulative_sum`
-#                       inside a ONE-CELL `kernel(...)` (a degenerate 1-level ranef
-#                       supplies the grouping the kernel requires). Exact, but pays
-#                       two nuisance coordinates (the 1-level block's tau and z).
+#                       inside a ONE-CELL `kernel(...)`. The kernel requires a
+#                       ranef-bearing LP for its grouping, so a zero-mean dummy
+#                       `g0 ~ 0 + (1 | series)` (1 level) is passed and left unused;
+#                       it reaches no likelihood, so activity analysis lowers it to
+#                       generated quantities (no nuisance sampler coordinates).
+#                       The cell RETURNS the log-R path; the observation is at TOP
+#                       level against the flat backing `Z.mem` — the integer ragged
+#                       observation cannot take a discrete family IN-cell on the test
+#                       env's StanBlocks pin bec23bc3 (fixed upstream in 9a958f97;
+#                       error: "family ... is discrete ... A RaggedVector stores its
+#                       groups in a real vector"), the same wall + lossless escape
+#                       as research/ema_ctsem/ema_brm.jl's Kfull3.
 #
 # Every model is gated: @brm build -> SBBRMI -> stan_code -> stanc_check ->
 # stan_instantiate -> LogDensityProblems.logdensity_and_gradient finite.
 # Run: julia --project=test research/epi_renewal/single_patch.jl
+#
+# VERIFIED (strato2, test env from test/setup_env.jl, StanBlocks pin bec23bc3):
+#   probe   top-level vector parameter in @brm:
+#           `eps::vector[5] ~ std_normal()`   REJECTED — parser: "Don't know how to handle xassignable(eps::vector[5])"
+#           `eps ~ MvNormal(zeros(5), 1.0)`   REJECTED — sbimpl: "distribution MvNormal has no Stan translation"
+#   single_dar        OK  dim=60  (55 innovations + dar beta + dar sigma + init + log_I0 + cluster), finite gradient
+#   single_kernel_rw  OK  dim=59  (55 innovations + sig + init + log_I0 + cluster; the dummy ranef is
+#                     GQ-lowered and costs no sampler coordinate), finite gradient
 
 using BayesianRegressionModels
 using StanBlocks
@@ -146,14 +163,13 @@ single_kernel_rw(d) = @brm d begin
     log_I0 ~ Normal(log(50.0), 0.5)
     cluster ~ Normal(0.0, 0.1; lower=0.0)
     sig ~ Normal(0.0, 0.05; lower=0.0)
-    init ~ 1 + (1 | series)                          # degenerate 1-level ranef: the kernel's grouping
-    effect(init, Intercept) ~ Normal(log(1.3), 0.1)
-    Z ~ kernel(time, cases, gen_pmf, delay_pmf, init) do ts, cs, gp, dp, linit
-        z::vector[dims(ts)[1] - 1] ~ std_normal()
-        logR = append_row(linit, linit + sig * cumulative_sum(z))
-        cs ~ renewal_negbin(logR, log_I0, cluster, gp, dp)
-        logR
+    init ~ Normal(log(1.3), 0.1)                     # Z_1, exactly the PR's prior
+    g0 ~ 0 + (1 | series)                            # grouping dummy for the one-cell kernel (unused -> GQ)
+    Z ~ kernel(time, g0) do ts, gd
+        z::vector[dims(ts)[1] - 1] ~ std_normal()    # the T-1 innovations
+        append_row(init, init + sig * cumulative_sum(z))
     end
+    cases ~ renewal_negbin(Z.mem, log_I0, cluster, gen_pmf, delay_pmf)   # flat int obs vs the ragged result's backing
 end
 
 # ── gate ─────────────────────────────────────────────────────────────────────
@@ -193,7 +209,7 @@ end
 function main()
     s = simulate_single()
     d_flat = (; time=s.time, cases=s.cases, gen_pmf=s.gen_pmf, delay_pmf=s.delay_pmf)
-    d_cell = (; series=["all"], time=[s.time], cases=[s.cases], gen_pmf=[s.gen_pmf], delay_pmf=[s.delay_pmf])
+    d_cell = (; series=["all"], time=[s.time], cases=s.cases, gen_pmf=s.gen_pmf, delay_pmf=s.delay_pmf)
     println("single-patch renewal: T=", s.T, "  cases range=", extrema(s.cases))
     probe_toplevel_vector((; y=randn(5)))
     println("── single-patch @brm ──")
