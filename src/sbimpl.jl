@@ -3669,9 +3669,19 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         push!(handled, e.const_.n_key)
         new_preproc[key] = e
     elseif e.kind === :kernel_subject_count
-        subjects = _sb_kernel_subject_values(
-            _sb_df_column(df, e.raw_ref), e.raw_ref)
-        new_data[key] = length(subjects)
+        if e.const_ isa NamedTuple && get(e.const_, :from_data_length, false)
+            # No-random-effects panel: the subject count is the pre-grouped
+            # per-subject column's length, not a unique-label count.
+            col = _sb_df_column(df, e.raw_ref)
+            col isa AbstractVector || error(
+                "sbimpl: reprocess: kernel per-subject column `$(e.raw_ref)` must be a " *
+                "vector, got $(typeof(col))")
+            new_data[key] = length(col)
+        else
+            subjects = _sb_kernel_subject_values(
+                _sb_df_column(df, e.raw_ref), e.raw_ref)
+            new_data[key] = length(subjects)
+        end
         new_preproc[key] = e
     elseif e.kind === :kernel_ragged
         arg_name, event_group, subject_group = e.raw_ref
@@ -4287,47 +4297,74 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
 
     # n_subjects + long-format guard (pre-grouped: one row per subject).
     #
-    # v2 (`0xuaz0k`): the GROUPING IS DERIVED from the per-subject LPs' ranef
-    # bucket. `by=` only ever restated a fact the ranef already knew (the subject
-    # count), and a kernel with no per-subject LP now fails loudly because there
-    # is no authoritative grouping to derive.
-    #
-    # ORDER: cells stay in ROW order, deliberately. `_sb_linear_predictor!`
-    # returns `popefs(X) + rows_dot_product(Z, b[group_idx,:])`, i.e. a
-    # ROW-ordered vector of length n_rows — it has already mapped level -> row.
-    # Reordering cells to the ranef's LEVEL order (which `_sb_level_index` sorts)
-    # would therefore MIS-align the LP against its own subjects whenever the
-    # labels are not sorted. The only thing that must hold is the bijection
-    # below: one level per row.
-    isempty(lp_cols) && error(
-        "sbimpl: kernel(...) needs at least one per-subject linear-predictor ",
-        "positional arg with a random-effect term; without one there is no grouping ",
-        "to derive.")
-    lp_buckets = [_sb_kernel_lp_bucket(c) for c in lp_cols]
-    groups = unique([b[2] for b in lp_buckets])
-    length(groups) == 1 || error(
-        "sbimpl: kernel(...) per-subject linear predictors disagree on their ",
-        "grouping — got groups $(groups) across $(Tuple(name(c) for c in lp_cols)). ",
-        "LPs may use distinct `|ID|` buckets, but every LP handed to one kernel ",
-        "must describe the same subjects.")
-    group_col = first(lp_buckets)[3]
+    # v2 (`0xuaz0k`) derives the subject grouping from the per-subject LPs' ranef
+    # bucket — `by=` only ever restated a fact the ranef already knew (the subject
+    # count). That premise fails for a genuine NO-random-effects panel (Charles
+    # Driver's ctsem fit sets `indvarying = FALSE`: many subjects, ALL parameters
+    # shared), which carries no ranef bucket to derive from. Snag
+    # `a-hierarchical-b-78a26fe9`: such a panel passes its data PRE-GROUPED — one
+    # entry per subject in every positional column, exactly as the pre-ragged
+    # `Vector{Vector}` columns already are — so the only fact the ranef path ever
+    # contributed here, the subject COUNT, is the columns' common length. There is
+    # no group column, so `ragged(...)` (which joins a secondary event axis onto
+    # subject LABELS) has nothing to join against and is rejected in this mode.
+    nsub_sym = Symbol("kernel_nsub_", target)
+    if isempty(lp_cols)
+        isempty(ragged_specs) || error(
+            "sbimpl: kernel(...) `ragged(...)` needs a subject grouping to join its ",
+            "event rows against, which a no-random-effects panel does not supply. ",
+            "Declare a per-subject linear predictor with a `(1 | ID | group)` term, ",
+            "or pass pre-grouped per-subject columns directly (one entry per subject).")
+        isempty(dcol_names) && error(
+            "sbimpl: kernel(...) with no per-subject linear predictor needs at least ",
+            "one pre-grouped per-subject data column to derive the subject count from.")
+        col_lens = unique(length(data[k]) for k in dcol_names)
+        length(col_lens) == 1 || error(
+            "sbimpl: kernel(...) pre-grouped per-subject columns disagree on the ",
+            "subject count: ",
+            join(("$(k)=$(length(data[k]))" for k in dcol_names), ", "),
+            ". Every positional column must carry exactly one entry per subject.")
+        nsub = only(col_lens)
+        # Count only; no group column exists (labels are the implicit 1:nsub row
+        # order). Replayed on a new frame, the count is that frame's matching
+        # column length — see the `:kernel_subject_count` reprocess branch.
+        data[nsub_sym] = nsub
+        _sb_record_preproc!(data, nsub_sym, PreprocEntry(
+            :kernel_subject_count, (; from_data_length = true), first(dcol_names), false))
+    else
+        # ORDER: cells stay in ROW order, deliberately. `_sb_linear_predictor!`
+        # returns `popefs(X) + rows_dot_product(Z, b[group_idx,:])`, i.e. a
+        # ROW-ordered vector of length n_rows — it has already mapped level -> row.
+        # Reordering cells to the ranef's LEVEL order (which `_sb_level_index` sorts)
+        # would therefore MIS-align the LP against its own subjects whenever the
+        # labels are not sorted. The only thing that must hold is the bijection
+        # below: one level per row.
+        lp_buckets = [_sb_kernel_lp_bucket(c) for c in lp_cols]
+        groups = unique([b[2] for b in lp_buckets])
+        length(groups) == 1 || error(
+            "sbimpl: kernel(...) per-subject linear predictors disagree on their ",
+            "grouping — got groups $(groups) across $(Tuple(name(c) for c in lp_cols)). ",
+            "LPs may use distinct `|ID|` buckets, but every LP handed to one kernel ",
+            "must describe the same subjects.")
+        group_col = first(lp_buckets)[3]
 
-    # The labels identify groups to Julia callers but never enter the emitted
-    # Stan program: only their count and row order do. Accept arbitrary unique
-    # labels so a reusable generative-plan builder can rebuild on genuinely new
-    # subject ids without app-local recoding to 1:n.
-    g_vals = _sb_kernel_subject_values(
-        parent(parent(group_col)), name(group_col))
-    nsub = length(g_vals)
-    # Arbitrary labels identify rows on the Julia side; the emitted Stan program
-    # consumes only their integer index/count. The generic data prepass has
-    # already materialised the raw column, so discard it when Stan cannot type it
-    # (e.g. `Vector{String}`). Numeric group labels remain available in case the
-    # consumer also passed that column to the cell as ordinary numeric data.
-    all(v -> v isa Real, g_vals) || pop!(data, name(group_col), nothing)
-    nsub_sym = Symbol("kernel_nsub_", target); data[nsub_sym] = nsub
-    _sb_record_preproc!(data, nsub_sym,
-        PreprocEntry(:kernel_subject_count, nothing, name(group_col), false))
+        # The labels identify groups to Julia callers but never enter the emitted
+        # Stan program: only their count and row order do. Accept arbitrary unique
+        # labels so a reusable generative-plan builder can rebuild on genuinely new
+        # subject ids without app-local recoding to 1:n.
+        g_vals = _sb_kernel_subject_values(
+            parent(parent(group_col)), name(group_col))
+        nsub = length(g_vals)
+        # Arbitrary labels identify rows on the Julia side; the emitted Stan program
+        # consumes only their integer index/count. The generic data prepass has
+        # already materialised the raw column, so discard it when Stan cannot type it
+        # (e.g. `Vector{String}`). Numeric group labels remain available in case the
+        # consumer also passed that column to the cell as ordinary numeric data.
+        all(v -> v isa Real, g_vals) || pop!(data, name(group_col), nothing)
+        data[nsub_sym] = nsub
+        _sb_record_preproc!(data, nsub_sym,
+            PreprocEntry(:kernel_subject_count, nothing, name(group_col), false))
+    end
 
     # `ragged(x, group)` positionals, now that the subject row order is known.
     #

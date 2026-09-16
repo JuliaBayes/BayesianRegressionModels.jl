@@ -125,8 +125,10 @@ end
     sb = SBBRMI(v2_lp_model(df); mod = @__MODULE__)
 
     @testset "grouping is derived from one shared LP grouping" begin
-        @test_throws "needs at least one per-subject linear-predictor" SBBRMI(
-            v2_no_lp_model(df); mod = @__MODULE__)
+        # A kernel with NO per-subject LP is no longer an error — it is a
+        # no-random-effects panel whose grouping comes from the pre-grouped
+        # columns' length (snag `a-hierarchical-b-78a26fe9`, covered in its own
+        # testset below). What stays rejected are the retired kwargs.
         # Retired kwargs are rejected at CONSTRUCTION, not at lowering: these
         # assert the builder call itself throws, with NO `SBBRMI` in sight.
         # Previously only `SBBRMI(...)` objected, so a consumer gate that stopped
@@ -215,6 +217,55 @@ end
                 LogDensityProblems.logdensity_and_gradient(shuffled_prob, q)
             @test isapprox(shuffled_lp, lp; atol = 1e-8, rtol = 0)
             @test isapprox(shuffled_g, g; atol = 1e-8, rtol = 0)
+        else
+            @info "Skipping BridgeStan runtime gate (BRM_KERNEL_RUNTIME=0)"
+        end
+    end
+end
+
+# snag `a-hierarchical-b-78a26fe9`: a NO-random-effects panel (Charles Driver's
+# ctsem fit sets `indvarying = FALSE`) has no ranef bucket to derive grouping
+# from, yet the panel is real — many subjects, ALL parameters shared, each
+# subject's latent path marginalized in the cell. The data arrives PRE-GROUPED
+# (one entry per subject in every positional column, exactly as the pre-ragged
+# `Vector{Vector}` columns `t`/`dv` already are; `dose` is scalar-per-subject),
+# so the subject COUNT — the only fact the ranef path ever contributed here — is
+# the columns' common length. Before this, `kernel(...)` with no per-subject LP
+# failed loudly ("needs at least one per-subject linear-predictor").
+@testset "kernel(...) — no-random-effects panel (grouping from pre-grouped columns)" begin
+    df = v2_df()
+    sb = SBBRMI(v2_no_lp_model(df); mod = @__MODULE__)
+    @test sb isa SBBRMI
+
+    @testset "subject count is the pre-grouped columns' length; no group leakage" begin
+        @test sb.data[:kernel_nsub_pred] == V2_N
+        # No ranef, so no group-index / subject-count-by-label machinery, and the
+        # string subject column is not consulted (there is none passed to kernel).
+        @test !haskey(sb.data, :subject_idx)
+        @test !haskey(sb.data, :n_subject)
+    end
+
+    @testset "transpile + stanc" begin
+        @test StanBlocks.stan.transpiles(sb.model)
+        code = StanBlocks.stan_code(sb.model)
+        @test !occursin(r"(^|[^A-Za-z0-9_])_[A-Za-z]", code)
+        @test StanBlocks.stanc_check(code; warn_pedantic = false).ok
+    end
+
+    @testset "BridgeStan runtime — a shared-parameter panel is a live density" begin
+        if V2_RUN_BRIDGESTAN
+            using LogDensityProblems
+            cache = joinpath(tempdir(), "brm-v2-no-ranef")
+            isdir(cache) || mkpath(cache)
+            code = StanBlocks.stan_code(sb.model)
+            prob = StanBlocks.stan_instantiate(
+                sb.model; path = joinpath(cache, string(hash(code)) * ".stan"))
+            dim = LogDensityProblems.dimension(prob)
+            q = [0.1 * ((i % 5) - 2) for i in 1:dim]
+            lp, g = LogDensityProblems.logdensity_and_gradient(prob, q)
+            @test isfinite(lp)
+            @test length(g) == dim
+            @test all(isfinite, g)
         else
             @info "Skipping BridgeStan runtime gate (BRM_KERNEL_RUNTIME=0)"
         end
