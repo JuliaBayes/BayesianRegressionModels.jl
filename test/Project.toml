@@ -51,7 +51,7 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # bec23bc3 (2026-09-07): registers the native `log_modified_bessel_first_kind`
 # builtin that the periodic `hsgp(x; cov=:periodic)` spectral weights call
 # (StanBlocks snag log-modified-bes-60f43dd8).
-rev = "bec23bc3c52303ebde60a026af48c435e4c81330"
+rev = "9a958f97c52719985220e0c410a66642b1084000"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"

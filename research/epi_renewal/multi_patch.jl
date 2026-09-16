@@ -13,26 +13,31 @@
 # THE COUPLING is the point: I_{g,t} reads EVERY patch's history through K, so the
 # recursion is one sequential scan over t of a P-vector — it cannot be one
 # independent kernel cell per patch (a cell sees only its own slice). It is one
-# `@deffun` scan over the whole T×P system, called from a custom `@lpxf` family
-# that is the @brm RESPONSE (the pattern single_patch.jl verified).
+# `@deffun` scan over the whole T×P system, called inside ONE global kernel cell.
 #
 # What the formula surface cannot declare (measured in single_patch.jl's probe):
 # a top-level VECTOR parameter. The T-1 trend innovations, the P·W deviation
-# innovations and the P seeds are therefore declared inside ONE global
-# `kernel(...)` cell — a pure vector-latent declarator that returns them
-# concatenated; `Lat.mem` (the ragged result's flat backing) carries them to the
-# top-level observation. The kernel's required grouping comes from an unused
-# zero-mean dummy ranef (`g0 ~ 0 + (1 | series)`, lowered to GQ).
+# innovations and the P seeds are therefore declared inside that one global
+# `kernel(...)` cell, whose required grouping comes from an unused zero-mean
+# dummy ranef (`g0 ~ 0 + (1 | series)`, lowered to GQ, no sampler coordinate).
+# The cell computes the expected cases `Yf` (named, so posterior-addressable),
+# observes the ragged INTEGER `cases_flat` slice in-cell with the `nb_clust`
+# family, and returns `Yf`. In-cell observation of an integer ragged slice with
+# a discrete family needs the test env's StanBlocks pin >= 9a958f97 (snag
+# ragged-int-obser-771dd259); on pin bec23bc3 the lossless escape was a
+# top-level observation against the ragged result's flat backing `.mem`.
 #
 # Gate: @brm build -> SBBRMI -> stan_code -> stanc_check -> stan_instantiate ->
 # finite log-density + gradient.   Run: julia --project=test research/epi_renewal/multi_patch.jl
 #
-# VERIFIED (strato2, test env from test/setup_env.jl, StanBlocks pin bec23bc3):
+# VERIFIED (strato2, test env from test/setup_env.jl, StanBlocks pin 9a958f97):
 #   patch_model  OK  dim=115  (55 trend innovations + 48 deviation innovations (6 patches × 8 weeks)
-#                + 6 seeds + init + sig + sig_d + rho + gamma + cluster), finite gradient;
-#                the dummy ranef is GQ-lowered and costs no sampler coordinate.
+#                + 6 seeds + init + sig + sig_d + rho + gamma + cluster), finite gradient; the dummy
+#                ranef is GQ-lowered and costs no sampler coordinate. The same dim and verdict held on
+#                pin bec23bc3 with the top-level `.mem` observation (canonical 8b4ec2f6); the probe-point
+#                log-density differs between the two spellings only through the emitted coordinate order.
 
-include(joinpath(@__DIR__, "single_patch.jl"))   # fixtures + clamp2 / R_to_r / lagged_sum / gate; its main() is guarded
+include(joinpath(@__DIR__, "single_patch.jl"))   # fixtures + clamp2 / R_to_r / lagged_sum / nb_clust / gate; its main() is guarded
 
 # ── spatial structure and the coupled recursion as Stan functions ────────────
 StanBlocks.@deffun begin
@@ -78,14 +83,10 @@ StanBlocks.@deffun begin
         end
         delta
     end
-    # the whole coupled system from the concatenated latents lat = [z (T-1); eta (P·W); log_I0 (P)]:
-    # expected reported cases, flattened column-major (Y[t + (g-1)T]). `wgrid` supplies W by its length.
-    patch_expected_cases(lat::vector[NL], init::real, sig::real, sig_d::real, rho::real, gamma::real,
-                         pop::vector[P], dist_flat::vector[PP], week::int[T], wgrid::vector[W],
-                         gen_pmf::vector[G], delay_pmf::vector[D])::vector[T * P] = begin
-        z = lat[1:(T - 1)]
-        eta = lat[T:(T - 1 + P * W)]
-        log_I0 = lat[(T + P * W):(T - 1 + P * W + P)]
+    # the whole coupled system: expected reported cases, flattened column-major (Y[t + (g-1)T])
+    patch_expected_cases(z::vector[Tm1], eta::vector[PW], log_I0::vector[P], init::real, sig::real,
+                         sig_d::real, rho::real, gamma::real, pop::vector[P], dist_flat::vector[PP],
+                         week::int[T], gen_pmf::vector[G], delay_pmf::vector[D], W::int)::vector[T * P] = begin
         Z = append_row(init, init + sig * cumulative_sum(z))     # vector[T]
         K = gravity_K(pop, dist_flat, gamma)
         L = corr_chol(dist_flat, P, 30.0)
@@ -125,44 +126,7 @@ StanBlocks.@deffun begin
     end
 end
 
-# ── the observation model as a custom family: cases_flat ~ patch_renewal_negbin(Lat.mem, ...) ──
-StanBlocks.@deffun begin
-    @lhs @lpxf patch_renewal_negbin_lpmf(cases::int[TP], lat::vector[NL], init::real, sig::real, sig_d::real,
-            rho::real, gamma::real, cluster::real, pop::vector[P], dist_flat::vector[PP], week::int[T],
-            wgrid::vector[W], gen_pmf::vector[G], delay_pmf::vector[D])::real = begin
-        Y = patch_expected_cases(lat, init, sig, sig_d, rho, gamma, pop, dist_flat, week, wgrid, gen_pmf, delay_pmf)
-        phi = 1.0 / (cluster * cluster)
-        lp = 0.0
-        for i in 1:TP
-            lp += neg_binomial_2_lpmf(cases[i], Y[i], phi)
-        end
-        lp
-    end
-    patch_renewal_negbin_lpmfs(cases::int[TP], lat::vector[NL], init::real, sig::real, sig_d::real,
-            rho::real, gamma::real, cluster::real, pop::vector[P], dist_flat::vector[PP], week::int[T],
-            wgrid::vector[W], gen_pmf::vector[G], delay_pmf::vector[D])::vector[TP] = begin
-        Y = patch_expected_cases(lat, init, sig, sig_d, rho, gamma, pop, dist_flat, week, wgrid, gen_pmf, delay_pmf)
-        phi = 1.0 / (cluster * cluster)
-        out::vector[TP]
-        for i in 1:TP
-            out[i] = neg_binomial_2_lpmf(cases[i], Y[i], phi)
-        end
-        out
-    end
-    patch_renewal_negbin_rng(int[TP], lat::vector[NL], init::real, sig::real, sig_d::real,
-            rho::real, gamma::real, cluster::real, pop::vector[P], dist_flat::vector[PP], week::int[T],
-            wgrid::vector[W], gen_pmf::vector[G], delay_pmf::vector[D])::int[TP] = begin
-        Y = patch_expected_cases(lat, init, sig, sig_d, rho, gamma, pop, dist_flat, week, wgrid, gen_pmf, delay_pmf)
-        phi = 1.0 / (cluster * cluster)
-        out::int[TP]
-        for i in 1:TP
-            out[i] = neg_binomial_2_rng(Y[i], phi)
-        end
-        out
-    end
-end
-
-# ── the @brm model ───────────────────────────────────────────────────────────
+# ── the @brm model: population on the formula surface, the coupled system in one global cell ──
 patch_model(d) = @brm d begin
     init    ~ Normal(log(1.3), 0.1)                      # Z_1
     sig     ~ Normal(0.0, 0.05; lower=0.0)               # trend RW step sd
@@ -171,29 +135,28 @@ patch_model(d) = @brm d begin
     gamma   ~ Normal(1.5, 0.5; lower=0.0)                # gravity distance exponent
     cluster ~ Normal(0.0, 0.1; lower=0.0)                # NegBin cluster factor
     g0      ~ 0 + (1 | series)                           # grouping dummy for the one-cell kernel (unused -> GQ)
-    # one global cell: declares the vector latents and returns them concatenated
-    Lat ~ kernel(time, pop_r, wgrid_r, seed_mean_r, g0) do ts, pp, wg, sm, gd
+    Y ~ kernel(time, cases_flat, pop, dist_flat, week, wgrid, seed_mean, gen_pmf, delay_pmf,
+               g0) do ts, cf, pp, df, wk, wg, sm, gp, dp, gd
         z::vector[dims(ts)[1] - 1] ~ std_normal()                   # trend innovations (T-1)
         eta::vector[dims(pp)[1] * dims(wg)[1]] ~ std_normal()       # deviation innovations (P·W)
         lI0::vector[dims(pp)[1]] ~ normal(sm, 0.5)                  # per-patch seeds (P)
-        append_row(z, append_row(eta, lI0))
+        Yf = patch_expected_cases(z, eta, lI0, init, sig, sig_d, rho, gamma, pp, df, wk, gp, dp, dims(wg)[1])
+        cf ~ nb_clust(Yf, cluster)                                  # the ragged INTEGER observation, in-cell
+        Yf
     end
-    cases_flat ~ patch_renewal_negbin(Lat.mem, init, sig, sig_d, rho, gamma, cluster,
-                                      pop, dist_flat, week, wgrid, gen_pmf, delay_pmf)
 end
 
 function patch_data(p)
-    wgrid = collect(1.0:p.n_weeks)
-    (; series=["all"],
-       time=[p.time], pop_r=[p.pop], wgrid_r=[wgrid], seed_mean_r=[p.seed_mean],   # ragged, in-cell (sizes + seed prior)
-       cases_flat=vec(p.cases), pop=p.pop, dist_flat=vec(p.dist), week=p.week, wgrid,  # flat, top-level
-       gen_pmf=p.gen_pmf, delay_pmf=p.delay_pmf)
+    # one global cell: every positional is a 1-element ragged column, so the cell receives the whole vector
+    (; series=["all"], time=[p.time], cases_flat=[vec(p.cases)], pop=[p.pop], dist_flat=[vec(p.dist)],
+       week=[p.week], wgrid=[collect(1.0:p.n_weeks)], seed_mean=[p.seed_mean],
+       gen_pmf=[p.gen_pmf], delay_pmf=[p.delay_pmf])
 end
 
 function main_patches()
     p = simulate_patches()
     println("six-patch renewal: T=", p.T, " P=", p.n_patches, "  per-patch cases=", vec(sum(p.cases; dims=1)))
-    println("── six-patch @brm (one global cell, coupled @deffun scan) ──")
+    println("── six-patch @brm (one global cell, coupled @deffun scan, in-cell observation) ──")
     gate("patch_model", patch_model, patch_data(p))
 end
 

@@ -21,25 +21,27 @@
 #                       `g0 ~ 0 + (1 | series)` (1 level) is passed and left unused;
 #                       it reaches no likelihood, so activity analysis lowers it to
 #                       generated quantities (no nuisance sampler coordinates).
-#                       The cell RETURNS the log-R path; the observation is at TOP
-#                       level against the flat backing `Z.mem` — the integer ragged
-#                       observation cannot take a discrete family IN-cell on the test
-#                       env's StanBlocks pin bec23bc3 (fixed upstream in 9a958f97;
-#                       error: "family ... is discrete ... A RaggedVector stores its
-#                       groups in a real vector"), the same wall + lossless escape
-#                       as research/ema_ctsem/ema_brm.jl's Kfull3.
+#                       The cell computes the expected cases and observes the ragged
+#                       INTEGER `cases` slice IN-cell with the `nb_clust` family. That
+#                       needs the test env's StanBlocks pin >= 9a958f97 (the integer
+#                       ragged carrier, snag ragged-int-obser-771dd259): on the earlier
+#                       pin bec23bc3 it failed with "family ... is discrete ... A
+#                       RaggedVector stores its groups in a real vector", and the
+#                       lossless escape was to observe the flat Vector{Int} at top
+#                       level against `Z.mem` (research/ema_ctsem/ema_brm.jl's Kfull3).
 #
 # Every model is gated: @brm build -> SBBRMI -> stan_code -> stanc_check ->
 # stan_instantiate -> LogDensityProblems.logdensity_and_gradient finite.
 # Run: julia --project=test research/epi_renewal/single_patch.jl
 #
-# VERIFIED (strato2, test env from test/setup_env.jl, StanBlocks pin bec23bc3):
+# VERIFIED (strato2, test env from test/setup_env.jl, StanBlocks pin 9a958f97; the same verdicts held on
+# the earlier pin bec23bc3 with the top-level `.mem` observation, and on canonical 8b4ec2f6):
 #   probe   top-level vector parameter in @brm:
 #           `eps::vector[5] ~ std_normal()`   REJECTED — parser: "Don't know how to handle xassignable(eps::vector[5])"
 #           `eps ~ MvNormal(zeros(5), 1.0)`   REJECTED — sbimpl: "distribution MvNormal has no Stan translation"
 #   single_dar        OK  dim=60  (55 innovations + dar beta + dar sigma + init + log_I0 + cluster), finite gradient
 #   single_kernel_rw  OK  dim=59  (55 innovations + sig + init + log_I0 + cluster; the dummy ranef is
-#                     GQ-lowered and costs no sampler coordinate), finite gradient
+#                     GQ-lowered and costs no sampler coordinate; ragged integer obs IN-cell), finite gradient
 
 using BayesianRegressionModels
 using StanBlocks
@@ -147,6 +149,35 @@ end
 
 # ── @brm models ──────────────────────────────────────────────────────────────
 
+# The observation family on a PRECOMPUTED expectation, for cells that compute Y themselves:
+# cases ~ nb_clust(Y, cluster)  ==  neg_binomial_2(Y, 1/cluster^2), with the pointwise + sized-RNG twins.
+StanBlocks.@deffun begin
+    @lhs @lpxf nb_clust_lpmf(cases::int[N], Y::vector[N], cluster::real)::real = begin
+        phi = 1.0 / (cluster * cluster)
+        lp = 0.0
+        for i in 1:N
+            lp += neg_binomial_2_lpmf(cases[i], Y[i], phi)
+        end
+        lp
+    end
+    nb_clust_lpmfs(cases::int[N], Y::vector[N], cluster::real)::vector[N] = begin
+        phi = 1.0 / (cluster * cluster)
+        out::vector[N]
+        for i in 1:N
+            out[i] = neg_binomial_2_lpmf(cases[i], Y[i], phi)
+        end
+        out
+    end
+    nb_clust_rng(int[N], Y::vector[N], cluster::real)::int[N] = begin
+        phi = 1.0 / (cluster * cluster)
+        out::int[N]
+        for i in 1:N
+            out[i] = neg_binomial_2_rng(Y[i], phi)
+        end
+        out
+    end
+end
+
 # (1) trend via the native `dar` term: pure formula surface.
 single_dar(d) = @brm d begin
     log_I0 ~ Normal(log(50.0), 0.5)
@@ -165,11 +196,13 @@ single_kernel_rw(d) = @brm d begin
     sig ~ Normal(0.0, 0.05; lower=0.0)
     init ~ Normal(log(1.3), 0.1)                     # Z_1, exactly the PR's prior
     g0 ~ 0 + (1 | series)                            # grouping dummy for the one-cell kernel (unused -> GQ)
-    Z ~ kernel(time, g0) do ts, gd
+    Z ~ kernel(time, cases, gen_pmf, delay_pmf, g0) do ts, cs, gp, dp, gd
         z::vector[dims(ts)[1] - 1] ~ std_normal()    # the T-1 innovations
-        append_row(init, init + sig * cumulative_sum(z))
+        logR = append_row(init, init + sig * cumulative_sum(z))
+        Y = expected_cases(logR, log_I0, gp, dp)      # expected reported cases (named -> posterior-addressable)
+        cs ~ nb_clust(Y, cluster)                     # the ragged INTEGER observation, in-cell
+        logR
     end
-    cases ~ renewal_negbin(Z.mem, log_I0, cluster, gen_pmf, delay_pmf)   # flat int obs vs the ragged result's backing
 end
 
 # ── gate ─────────────────────────────────────────────────────────────────────
@@ -209,7 +242,7 @@ end
 function main()
     s = simulate_single()
     d_flat = (; time=s.time, cases=s.cases, gen_pmf=s.gen_pmf, delay_pmf=s.delay_pmf)
-    d_cell = (; series=["all"], time=[s.time], cases=s.cases, gen_pmf=s.gen_pmf, delay_pmf=s.delay_pmf)
+    d_cell = (; series=["all"], time=[s.time], cases=[s.cases], gen_pmf=[s.gen_pmf], delay_pmf=[s.delay_pmf])
     println("single-patch renewal: T=", s.T, "  cases range=", extrema(s.cases))
     probe_toplevel_vector((; y=randn(5)))
     println("── single-patch @brm ──")
