@@ -1,0 +1,4 @@
+panel	trial	label	centeredness	parameter
+1: APhTh04, c=0.07	5	APhTh04	0.07	b_map_study_z_flat.5
+2: NEJM07, c=0.27	3	NEJM07	0.27	b_map_study_z_flat.3
+3: AIMed07, c=0.22	2	AIMed07	0.22	b_map_study_z_flat.2

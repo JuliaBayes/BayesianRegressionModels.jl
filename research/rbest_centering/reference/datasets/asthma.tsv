@@ -1,0 +1,11 @@
+study	NCT	d	n	mu_hat	log_mu_hat	se_log_mu_hat	kappa_hat	log_kappa_hat	se_log_kappa_hat	phase
+Study_1	ISRCTN75169762	0.96	32	3.73	1.32	0.18	0.73	-0.32	0.38	not phase III / early proof-of-concept
+Study_2	NCT01000506	1	155	2.4	0.88	0.11	0.8	-0.22	0.17	phase II
+Study_3	NCT01691521	0.62	191	1.75	0.56	0.11	1.43	0.36	0.22	phase III
+Study_4	NCT01287039	1	244	1.8	0.59	0.1	1.97	0.68	0.15	phase III
+Study_5	NCT01285323	1	232	2.11	0.75	0.13	3.38	1.22	0.14	phase III
+Study_6	NCT01238861	1	80	0.57	-0.56	0.16	1.61	0.48	0.48	phase IIb
+Study_7	NCT01545440; NCT01545453	1	66	0.88	-0.13	0.28	2.56	0.94	0.51	converted from phase III to phase IIb
+Study_8	NCT01691508	0.46	66	2.12	0.75	0.16	0.67	-0.39	0.53	phase III
+Study_9	NCT00292877	0.5	11	1.99	0.69	0.31	0	-70.67	41.44	not phase III / early proof-of-concept
+Study_10	NCT01312961	0.23	52	4.64	1.53	5.28	1.13	0.12	6.67	phase II

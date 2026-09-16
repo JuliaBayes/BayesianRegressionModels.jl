@@ -1,0 +1,20 @@
+{
+  "arm": "rbest_ncp",
+  "parametrization": "ncp",
+  "variant": "legacy",
+  "case": "crohn",
+  "rbest_version": "1.11.0",
+  "rbest_sha": "3d5fa1dda74f9d68360094a11983f32dd1b61c10",
+  "seed": 1,
+  "chains": 1,
+  "warmup": 2000,
+  "draws": 10000,
+  "thin": 1,
+  "adapt_delta": 0.99,
+  "step_size": 0.01,
+  "max_treedepth": 20,
+  "cmdstan": "2.39.0",
+  "cmdstanr": "0.9.0",
+  "clean_sha256": "cb4f793a743f524f948e1849847a5a83e4546f0bea297029a533dc9c54d6b6da",
+  "data_sha256": "726c624fc72438fc5ec93cae8f32232f07689e85ef1d855e8e50791d79f62356"
+}

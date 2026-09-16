@@ -18,6 +18,7 @@ const GENERATED_EXAMPLE_PAGES = [
     joinpath(@__DIR__, "src", "pupil-centering.md"),
     joinpath(@__DIR__, "src", "pupil-scale-centering.md"),
     joinpath(@__DIR__, "src", "air-centering.md"),
+    joinpath(@__DIR__, "src", "rbest-centering.md"),
 ]
 const DOCS_MARKDOWN_PAGES = sort!(String[
     joinpath(root, file)
@@ -70,6 +71,7 @@ makedocs(
             "Pupil: numeric scale predictor" => "pupil-centering.md",
             "Pupil: hierarchical residual SD" => "pupil-scale-centering.md",
             "Air pollution" => "air-centering.md",
+            "RBesT MAP prior" => "rbest-centering.md",
         ],
         "Turing backend" => "turing-backend.md",
         "Formulas and custom models: deck" => "feature-deck.md",
@@ -117,7 +119,8 @@ BRMDocsComparisons.validate_required_stan_outputs(
 
 for (page, names) in (("pupil-centering.md", (:pupil_numeric_brm_model,)),
                       ("pupil-scale-centering.md", (:pupil_hierarchical_brm_model,)),
-                      ("air-centering.md", (:air_intercept_brm_model,:air_independent_brm_model)))
+                      ("air-centering.md", (:air_intercept_brm_model,:air_independent_brm_model)),
+                      ("rbest-centering.md", (:rbest_as_brm_model,:rbest_crohn_brm_model)))
     BRMDocsComparisons.validate_required_stan_outputs(
         joinpath(@__DIR__, "build", ".documenter", page), names)
 end

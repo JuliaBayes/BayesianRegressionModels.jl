@@ -1,0 +1,38 @@
+{
+  "H": 8,
+  "case": "AS",
+  "constant_offset": 0.6931471805599453,
+  "family": "binomial",
+  "ordinary_dimension": 10,
+  "ordinary_names": [
+    "b_map_study_tau.1",
+    "b_map_study_z_flat.1",
+    "b_map_study_z_flat.2",
+    "b_map_study_z_flat.3",
+    "b_map_study_z_flat.4",
+    "b_map_study_z_flat.5",
+    "b_map_study_z_flat.6",
+    "b_map_study_z_flat.7",
+    "b_map_study_z_flat.8",
+    "pop_eta_beta_pop.1"
+  ],
+  "rbest_constants": {
+    "rbest_cp_minus_brm": -5.260686318193791,
+    "rbest_ncp_minus_brm": 0.9042042998251176,
+    "rbest_s2z_cp_minus_brm_total_minus_jacobian": -4.369292753306183,
+    "rbest_s2z_ncp_minus_brm_total_minus_jacobian": 1.024986537460416
+  },
+  "status": "passed",
+  "total_dimension": 9,
+  "total_names": [
+    "total_scale_eta_tau.1",
+    "total_eta.1.1",
+    "total_eta.2.1",
+    "total_eta.3.1",
+    "total_eta.4.1",
+    "total_eta.5.1",
+    "total_eta.6.1",
+    "total_eta.7.1",
+    "total_eta.8.1"
+  ]
+}

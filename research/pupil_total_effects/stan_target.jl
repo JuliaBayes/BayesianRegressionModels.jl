@@ -18,7 +18,7 @@ function reject_stan_numerical_error(p,e)
     # first full cause and counting every rejected evaluation. Other errors
     # (including serialization, API and model-structure errors) propagate.
     recognized=e isa ErrorException && occursin("failed with exception: Exception:",message) &&
-        occursin(r"(normal|student_t|inv_chi_square|gamma)_lpdf:",message) &&
+        occursin(r"(normal|student_t|inv_chi_square|gamma)_lpdf:|binomial_logit_lpmf:",message) &&
         occursin(r"must be (not nan|positive|finite|greater than 0)",message)
     p.reject_numerical_errors && recognized || return false
     p.numerical_rejections[]+=1

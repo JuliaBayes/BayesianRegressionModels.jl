@@ -17,6 +17,23 @@ function authoring(which::Symbol)
                  subj=Int.(reference["J_1"]))
         """
         which==:pupil_numeric && (data*="data = merge(data, (;subject_id=700 .+ data.subj))\n")
+    elseif which in (:rbest_as,:rbest_crohn)
+        source=read(joinpath(root,"research","rbest_centering","model.jl"),String)
+        marker=which==:rbest_as ? "const AS_MODEL =" : "const CROHN_MODEL ="
+        start=first(findfirst(marker,source))
+        endpoint=which==:rbest_as ? "\n# gMAP with the documented crohn" : "\nfunction read_dataset"
+        finish=first(findnext(endpoint,source,start))-1
+        builder=replace(strip(source[start:finish]),marker=>"builder =";count=1)
+        name=which==:rbest_as ? "rbest_as_brm_model" : "rbest_crohn_brm_model"
+        dataset=which==:rbest_as ? "AS" : "crohn"
+        columns=which==:rbest_as ? "n=Int.(column(\"n\")), r=Int.(column(\"r\"))" :
+            "y=Float64.(column(\"y\")), y_se=88 ./ sqrt.(Float64.(column(\"n\")))"
+        data="""
+        table, header = readdlm(joinpath(pkgdir(BayesianRegressionModels),
+            "research", "rbest_centering", "reference", "datasets", "$dataset.tsv"), '\\t'; header=true)
+        column(name) = table[:, only(findall(==(name), vec(header)))]
+        data = (;study=collect(1:size(table, 1)), $columns)
+        """
     else
         which in (:air_intercept,:air_independent) || error("Unknown centering model")
         source=read(joinpath(root,"research","air_total_effects","model.jl"),String)
@@ -37,7 +54,7 @@ function authoring(which::Symbol)
         """
     end
     body=join(("    "*line for line in split(strip(data)*"\n\n"*builder*"\n\nbuilder(data)",'\n')),'\n')
-    "using BayesianRegressionModels, Distributions, JSON\n\nfunction $name()\n$body\nend"
+    "using BayesianRegressionModels, Distributions, JSON, DelimitedFiles\n\nfunction $name()\n$body\nend"
 end
 
 end
