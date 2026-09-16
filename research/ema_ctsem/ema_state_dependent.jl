@@ -153,13 +153,12 @@ function fixture(; n=8, nt=15, seed=20260916)
 end
 data = fixture()
 
-# ── the @brm model (VERIFIED, single series): global params, the whole latent
-#    path marginalized by the state-dependent-diffusion EKF ──────────────────────
-# fitDemo's fit model sets `indvarying <- FALSE`: NO random effects, all 100
-# subjects share the parameters. The state-dependent-diffusion filter itself is a
-# custom @lpxf and verifies as a top-level response (below). The natural
-# multi-subject form (`ema_state_dependent_kernel`, further down) is BLOCKED by a
-# BRM gap and is shown but NOT run — see the note there.
+# ── the @brm model: multi-subject, in the KERNEL, FAITHFUL to Charles's fit
+#    (`indvarying = FALSE` — ALL parameters shared, NO random effects). Each
+#    subject is an independent series; with no `|ID|` bucket to derive from, the
+#    kernel takes the subject COUNT from the pre-grouped `Vector{Vector}` columns'
+#    common length (BRM `28e914d4`). Each subject's latent path is marginalized by
+#    the state-dependent-diffusion EKF in the cell. No per-subject parameters. ────
 ema_state_dependent(d) = @brm d begin
     b0    ~ Normal(0.5, 0.5)               # softplus offset
     bm    ~ Normal(0.4, 0.5)               # mood -> stress recovery modulation
@@ -177,47 +176,25 @@ ema_state_dependent(d) = @brm d begin
     r2    ~ Exponential(1.0)              # moodReport meas. var
     s0    ~ Normal(0.0, 1.0)              # T0 stress mean
     m0    ~ Normal(0.5, 1.0)              # T0 mood mean
-    stressReport ~ ema_sd(moodReport, smoked, dt, b0, bm, a12, a21, a22, cintm,
-                          qd0, qd1, cz, sdm, l31, thr, r1, r2, s0, m0, 0.6, 0.5)
+    pred ~ kernel(dt, stressReport, moodReport, smoked) do dti, ys, ym, smk
+        ys ~ ema_sd(ym, smk, dti, b0, bm, a12, a21, a22, cintm, qd0, qd1, cz, sdm,
+                    l31, thr, r1, r2, s0, m0, 0.6, 0.5)
+        ys
+    end
 end
 
-# ── the INTENDED multi-subject form — SHOWN, NOT RUN ──────────────────────────
-# fitDemo has NO random effects (`indvarying = FALSE`), so this natural spelling
-# fails: `kernel(...) needs at least one per-subject linear-predictor positional
-# arg with a random-effect term; without one there is no grouping to derive`
-# (src/sbimpl.jl:4302). BRM derives the kernel's subject grouping ONLY from a
-# random-effect bucket (decision 0xuaz0k), so a shared-parameters panel cannot use
-# the kernel today. Reported: snag `a-hierarchical-b-78a26fe9` (BayesianRegression-
-# Models) — a design fork awaiting a user-gated decision (re-admit an explicit
-# grouping, or derive it from the pre-ragged data). Uncomment once that lands.
-#
-#   ema_state_dependent_kernel(d) = @brm d begin
-#       b0 ~ Normal(0.5,0.5); bm ~ Normal(0.4,0.5); a12 ~ Normal(-0.25,0.5)
-#       a21 ~ Normal(-0.30,0.5); a22 ~ Normal(-0.60,0.3); cintm ~ Normal(0.3,0.5)
-#       qd0 ~ Normal(-0.2,0.5); qd1 ~ Normal(0.3,0.5); cz ~ Normal(0.7,0.5); sdm ~ Exponential(1.0)
-#       l31 ~ Normal(1.2,0.5); thr ~ Normal(-1.0,0.5); r1 ~ Exponential(1.0); r2 ~ Exponential(1.0)
-#       s0 ~ Normal(0.0,1.0); m0 ~ Normal(0.5,1.0)
-#       pred ~ kernel(dt, stressReport, moodReport, smoked) do dti, ys, ym, smk
-#           ys ~ ema_sd(ym, smk, dti, b0,bm,a12,a21,a22,cintm,qd0,qd1,cz,sdm,l31,thr,r1,r2,s0,m0,0.6,0.5)
-#           ys
-#       end
-#   end
-
 function main()
-    # verify on ONE subject's series (the state-dependent-diffusion EKF itself)
-    d1 = (; stressReport = data.stressReport[1], moodReport = data.moodReport[1],
-           smoked = data.smoked[1], dt = data.dt[1])
-    sb = SBBRMI(ema_state_dependent(d1); mod=@__MODULE__)
+    sb = SBBRMI(ema_state_dependent(data); mod=@__MODULE__)
     code = StanBlocks.stan_code(sb.model)
     @assert StanBlocks.stanc_check(code; warn_pedantic=false).ok "stanc failed"
-    prob = StanBlocks.stan_instantiate(sb.model; path=joinpath(tempdir(), "ema_sd.stan"))
+    # content-hashed path so a differently-shaped model never reuses a stale .stan/.so
+    prob = StanBlocks.stan_instantiate(sb.model; path=joinpath(tempdir(), "ema_sd_$(hash(code)).stan"))
     dim = LogDensityProblems.dimension(prob)
     q = [0.03*((i % 7) - 3) for i in 1:dim]
     lp, g = LogDensityProblems.logdensity_and_gradient(prob, q)
-    println("fitDemo: state-dependent-diffusion EMA (single series, EKF-marginalized)")
-    println("  occasions = ", length(d1.dt))
+    println("fitDemo: state-dependent-diffusion EMA (multi-subject, EKF in kernel, indvarying=FALSE)")
+    println("  subjects = ", length(data.subject), "  occasions = ", length(data.dt[1]))
     println("  dim = ", dim, "  lp = ", round(lp; digits=2), "  finite_grad = ", all(isfinite, g))
-    println("  (multi-subject kernel form blocked by snag a-hierarchical-b-78a26fe9)")
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
