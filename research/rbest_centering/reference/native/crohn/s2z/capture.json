@@ -1,0 +1,21 @@
+{
+  "rbest_version": "1.12.0",
+  "rbest_sha": "a5acbbc39c2cd620f0549159aa7c1991d4c28d6a",
+  "case": "crohn",
+  "H": 6,
+  "clean_sha256": "b71a8dcf56fda7a41c247095ff4fcb462fe78eb239f9f28d35dedf2c210bab74",
+  "data_ncp_sha256": "df108542452e1211a098f8823246150f94d865444812aa28e118622188d3c018",
+  "control": {
+    "adapt_delta": 0.95,
+    "stepsize": 0.01,
+    "max_treedepth": 20,
+    "warmup": 2000,
+    "iter": 6000,
+    "thin": 4,
+    "chains": 4,
+    "init": 1
+  },
+  "variant": "s2z",
+  "formula": "cbind(y, y.se) ~ 1 | study",
+  "family": "gaussian"
+}
