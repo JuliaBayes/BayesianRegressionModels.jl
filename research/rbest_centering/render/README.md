@@ -1,0 +1,5 @@
+# Local render evidence
+
+- `render_page.jl REPO OUT`: focused Documenter run of `rbest-centering.md` and `air-centering.md` (generated backend panes with required Stan outputs validated by `BRMDocsComparisons.validate_required_stan_outputs`), then the repository's `docs/package.json` dependencies installed with DocumenterVitepress's bundled npm, then `DocumenterVitepress.build_docs`. Run in the `rbest-docs-env` (the docs environment developing this checkout).
+- `check_rbest_page.mjs [OUT]`: headless Chrome check over that build (own temporary HTTP server, isolated profile, Chrome child closed on exit). Verified 2026-09-16 on strato2: `rbest-centering` two 18-row efficiency tables, one display equation, eight backend panes with Stan selected on both models, no broken images or math errors, sidebar entry present, client-side navigation, 390 px layout without document overflow; `air-centering` unchanged (14 + 14 rows). `browser/results.json` is the measured DOM state; `browser/*.png` the screenshots.
+- `rbest-centering.documenter.md`: the exact Documenter-expanded page text checked before the VitePress build.
