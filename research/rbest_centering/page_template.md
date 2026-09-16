@@ -99,7 +99,7 @@ Both efficiency columns are relative to RBesT 1.11's default non-centered fit un
 
 ## Saved-draw geometry
 
-Each figure reuses the same 10,000 post-hoc-position draws across its columns, with CP as the visualization baseline; rows select the trials with minimum, middle and maximum inferred centeredness.
+Each figure reuses the same 10,000 post-hoc-position draws across its columns, with CP as the visualization baseline; rows select the trials with minimum, middle and maximum inferred centeredness. The interactive previews in the KB brief show every fifth draw.
 
 ### AS
 

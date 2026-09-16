@@ -52,8 +52,9 @@ for key, model, sampler in labels:
         plot.append(dict(model=model, sampler=sampler, metric=metric, value=value))
 
 def write(name, items):
+    fields = list(dict.fromkeys(k for item in items for k in item))   # union, first-seen order
     with (output / name).open("w") as f:
-        w = csv.DictWriter(f, fieldnames=list(items[0]), delimiter="\t", lineterminator="\n")
+        w = csv.DictWriter(f, fieldnames=fields, delimiter="\t", lineterminator="\n", restval="0")
         w.writeheader(); w.writerows(items)
 
 write("comparison.tsv", rows)

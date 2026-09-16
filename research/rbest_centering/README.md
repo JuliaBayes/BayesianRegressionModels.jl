@@ -105,3 +105,27 @@ Relation to BRM's exact totals: both integrate the data-free common shift of the
 ## Proposed page scope (decided in the next leaf)
 
 Primary: `AS` (binomial, the package's canonical example). Secondary: `crohn` (Gaussian with known SE, the RBesT counterpart of eight schools with RBesT's own priors). `transplant` (binomial, H = 11) is a cheap third case if the protocol needs a larger trial count.
+
+## Reproduce
+
+Scratch roots below are the session scratchpad (`<scratch>`); `PUPIL_BRMS_LIBRARY` is the pinned R library with cmdstanr, `RBEST_LIBRARY` the RBesT builds (1.11 clone; for `s2z` the pull-request-64 worktree library first, then the 1.11 library, colon-separated). Julia study env: the pinned `pupil4-env` (BRM source identical to this tree); docs env: `rbest-docs-env` developing this tree.
+
+```sh
+# RBesT programs, exact data and initial values (legacy = 1.11-0, s2z = pull request 64)
+Rscript research/rbest_centering/capture.R <clone> <scratch>/rbest-capture-$case-v1 $case legacy
+Rscript research/rbest_centering/capture.R <clone-pr64> <scratch>/rbest-capture-$case-s2z-v1 $case s2z
+# Native arms (rbest_ncp rbest_cp stan_ncp stan_cp from the legacy capture; s2z_ncp s2z_cp from the s2z capture)
+Rscript research/rbest_centering/native.R <cmdstan> <capture> <scratch>/rbest-native-$case-v1/$arm $arm
+julia --project=<env> research/rbest_centering/native_analysis.jl $case <scratch>/rbest-native-$case-v1 <scratch>/rbest-summary-$case-v1
+# BRM targets: audit, twelve WarmupHMC arms, pairs, checks, tables, figures
+julia --project=<env> research/rbest_centering/audit.jl $case <scratch>/rbest-audit-$case-v1 <legacy-capture> <s2z-capture>
+julia --project=<env> research/rbest_centering/run.jl $case <scratch>/rbest-matrix-$case-v1 <scratch>/rbest-audit-$case-v1
+julia --project=<env> research/rbest_centering/pairs.jl $case <scratch>/rbest-matrix-$case-v1 research/rbest_centering/results/$case
+julia --project=<env> research/rbest_centering/complete.jl $case <scratch>/rbest-matrix-$case-v1 <scratch>/rbest-summary-$case-v1 research/rbest_centering/results/$case
+python3 research/rbest_centering/assemble.py <scratch> research/rbest_centering/results/$case $case
+julia --project=research/adaptive_centering/plots research/rbest_centering/plot.jl research/rbest_centering/results/$case $case
+python3 research/archive_total_study.py <scratch> research/rbest_centering/results/fits rbest-matrix-AS-v1 rbest-matrix-crohn-v1 rbest-native-{AS,crohn}-v1/<arm>...
+python3 research/rbest_centering/build_pages.py /tmp/rbest-brief.md
+```
+
+`results/<case>/comparison.tsv` is the numerical truth for the page tables; `results/fits/manifest.json` lists the 14 raw archives with per-member SHA-256. `reference/native/<case>/{legacy,s2z}` holds the captured programs and data, `reference/native/<case>/<arm>` each arm's gradient counts and provenance, `reference/automatic_totals/<case>` BRM's generated Stan and the audit receipt.

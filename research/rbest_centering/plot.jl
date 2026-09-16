@@ -19,9 +19,13 @@ save(joinpath(out, "efficiency.png"), figure; px_per_unit=1.5)
 for kind in ("total", "ordinary")
     path = joinpath(out, kind * "_pairs.tsv"); isfile(path) || continue
     pairs = CSV.File(path; delim='\t')
-    spec = data(pairs) * mapping(:log_group_sd => "Log between-trial SD", :coordinate => "Coordinate"; row=:panel => "Selected trial", col=:column => "Visualization") *
+    layer(rows) = data(rows) * mapping(:log_group_sd => "Log between-trial SD", :coordinate => "Coordinate"; row=:panel => "Selected trial", col=:column => "Visualization") *
         visual(Scatter; markersize=3, opacity=0.15) * config(width=270, height=270, facet=(; linkxaxes=:none, linkyaxes=:none))
-    open(io -> JSON.print(io, to_vegalite(spec; interactive=false)), joinpath(out, kind * "_pairs.aov.json"), "w")
+    spec = layer(pairs)
+    # The interactive envelope carries every fifth draw (2,000 per panel) so the KB brief stays small;
+    # the PNG and every calculation use all 10,000 draws.
+    preview = filter(r -> r.draw % 5 == 0, collect(pairs))
+    open(io -> JSON.print(io, to_vegalite(layer(preview); interactive=false)), joinpath(out, kind * "_pairs.aov.json"), "w")
     pairfigure = Figure(size=(1200, 1100)); sdraw!(pairfigure[1, 1], spec)
     save(joinpath(out, kind * "_pairs.png"), pairfigure; px_per_unit=1.5)
 end
