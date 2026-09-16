@@ -1154,3 +1154,88 @@ something else. Use `Dirichlet` when you want the simplex itself.
   and is rejected; write `Dirichlet(K, 1.0)` for the flat case.
 - StanBlocks-only, like [`s`](@ref), [`t2`](@ref) and [`r2d2`](@ref); not
   available to `VBRMI`.
+
+## Vector-valued parameter: `x ~ MvNormal(...)`
+
+A non-data left-hand side with an `MvNormal` right-hand side declares a
+**vector-valued parameter** — Stan's `vector[n]` — rather than a linear
+predictor. It is addressable by name anywhere later in the formula block: as an
+argument of a `@deffun` in a top-level assignment, inside a custom family call,
+or in a `kernel(...)` cell. It is implemented only by the `SBBRMI` StanBlocks
+backend (decision `187g4va`).
+
+The inciting shape is a latent path whose innovations the formula wants to
+state directly — the log-reproduction-number random walk of a renewal model
+(`research/epi_renewal/`), where the PR being translated writes
+`eps ~ MvNormal(zeros(T - 1), 1.0)` and `log_I0 ~ MvNormal(seed_mean, 0.25 * I)`.
+Before this seam the only way to get such a vector was a one-cell `kernel(...)`
+with a dummy grouping random effect.
+
+```julia
+StanBlocks.@deffun begin
+    rw_path(init::real, sig::real, eps::vector[K])::vector[K + 1] =
+        append_row(init, init + sig * cumulative_sum(eps))
+end
+
+@brm df begin
+    sig  ~ Normal(0.0, 0.05; lower=0.0)
+    init ~ Normal(0.0, 1.0)
+    eps  ~ MvNormal(zeros(length(time) - 1), 1.0)   # vector[T-1] of iid N(0, 1)
+    walk = rw_path(init, sig, eps)
+    y ~ Normal(walk, 0.3)
+end
+```
+
+### What it emits
+
+For `eps ~ MvNormal(zeros(length(time) - 1), 1.0)` the generated Stan declares
+the dimension as data (`<name>_n`), the mean as data (`<name>_mu`), the
+parameter as `vector[eps_n] eps`, and the model statement as
+`eps ~ normal(eps_mu, 1.0)` — Stan's vectorised univariate normal, no matrix.
+A full covariance emits `multi_normal(<name>_mu, <name>_scale)`. The three data
+names are reserved, so a collision is rejected rather than overwritten; a data
+column used as the mean is referenced by its own name instead of being copied.
+
+A vector nothing later reads is a generated quantity, not a sampler parameter:
+StanBlocks' activity analysis lowers an unused declaration, exactly as it does
+for an unused random effect. A top-level assignment's right-hand side is
+Julia-evaluated by the macro, so Stan builtins (`append_row`, `cumulative_sum`)
+reach it through a `@deffun`, as in the example.
+
+### Accepted spellings
+
+Only the genuine `Distributions.MvNormal` constructors, with Julia's
+parameterization preserved (the `σ` forms are deprecated in Distributions.jl
+but keep their Distributions meaning — a standard deviation):
+
+| spelling | meaning | emitted |
+|---|---|---|
+| `MvNormal(mu, Σ::Matrix)` | mean and covariance | `multi_normal` |
+| `MvNormal(mu, Diagonal(v))` | variances on the diagonal | vectorised `normal` with `sqrt.(v)` |
+| `MvNormal(mu, λ * I)` | covariance `λ·I` | vectorised `normal` with `sqrt(λ)` |
+| `MvNormal(Σ)` | zero mean | `multi_normal` |
+| `MvNormal(mu, σ::Real)` | isotropic, standard deviation `σ` | vectorised `normal` |
+| `MvNormal(mu, σ::Vector)` | standard deviations | vectorised `normal` |
+| `MvNormal(n, σ::Real)` | zero mean, `n` components | vectorised `normal` |
+
+The mean is a numeric vector literal, a **data column**, or a data-only
+expression over data columns (`zeros(length(time) - 1)`, `fill(c, k)`) —
+evaluated in Julia at build time and shipped as data. The scale may be a
+literal, a data column, or a **sampled scalar parameter** (`MvNormal(zeros(k), sig)`
+emits `normal(eps_mu, sig)`). The dimension comes from the mean, from a
+vector/matrix scale, or from the integer form; when the mean itself involves a
+parameter and the scale is a scalar, there is no data-determinable size and the
+statement is rejected with a message saying so.
+
+### Current limits
+
+- The left-hand side must be a non-data name. A vector-valued *response* keeps
+  its own spelling ([`MvNormalCholesky`](@ref), `[y1, y2] ~ ...`); `MvNormal`
+  is not added to the family table.
+- No keywords: bounds on a multivariate normal parameter are not supported.
+- A parameter-bearing *covariance* (an `LKJCovarianceFactor` product, a sampled
+  matrix) is not admitted here; use the scalar-scale form or compose the
+  vector inside a `@deffun`.
+- StanBlocks-only, like [`Dirichlet`](@ref), [`s`](@ref) and [`r2d2`](@ref);
+  not available to `VBRMI`. `TuringBRMI` retains the generic callable, so the
+  same statement lowers there through its own path.
