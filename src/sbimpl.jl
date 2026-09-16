@@ -10318,8 +10318,16 @@ function _sb_emit_distribution_likelihood!(stmts, target, constructor, args, dat
     push!(stmts, Expr(:call, :~, target, rhs))
 end
 
+# A non-distribution family reaching this fallback is a StanBlocks `@lpxf` custom
+# log-density — a whole-series marginal-likelihood family (a Kalman / EKF filter,
+# a user `@lpxf foo_lpdf`, …), which is itself a valid Stan sampling distribution.
+# Emit `target ~ fam(args...)` straight through and let StanBlocks lower the
+# density plus its `_gen` / `_likelihood` generated-quantity twins — or raise its
+# own clear "missing `lpxf_expr`" error for a non-family. Distribution families
+# dispatch to the `::Type{D}` method above and never reach here.
 _sb_lik_family!(stmts, target, fam, args, data) =
-    _sb_emit_distribution_likelihood!(stmts, target, fam, args, data)
+    _sb_lik_stan_exprs!(stmts, target, nameof(fam),
+                        map(a -> _sb_scalar_expr(a, data), args))
 
 
 # ---- scalar-expression reducer (unwraps NamedColumn references etc.) --------
