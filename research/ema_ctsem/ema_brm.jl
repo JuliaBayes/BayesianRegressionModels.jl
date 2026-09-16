@@ -18,9 +18,12 @@
 #   Part A: inc1 dim20, inc2_ar dim83, inc3 dim166, inc4a dim83, inc4b dim85  -> all OK
 #           inc2_dar -> WALL "dar time axis must be strictly increasing" (panel)
 #           inc5_coupled -> WALL "cyclic model declarations" (VAR/transition matrix)
-#   Part B: K0b dim70, K1 dim70, K2 dim143, Kfull2cont dim173 -> all OK
-#           Kfull (+ binary indicator) -> WALL: integer ragged observation has no
-#             carrier in StanBlocks (snag StanBlocks/ragged-int-obser-771dd259).
+#   Part B: K0b dim70, K1 dim70, K2 dim143, Kfull2cont dim173, Kfull3 dim175 -> all OK
+#           Kfull (binary AS A RAGGED KERNEL-CELL obs) -> fails: integer ragged
+#             observation has no carrier in StanBlocks (snag ragged-int-obser-771dd259).
+#           Kfull3 is the COMPLETE 3-indicator model: the binary is observed at
+#             top level against the ragged latent's flat backing (stress.mem) —
+#             the lossless workaround. So the ENTIRE ctsem EMA demo builds.
 #
 # The states are SAMPLED (dim grows with subjects x pings x processes) — the
 # "expressive but not competitive" regime. Marginalizing them (Kalman/filter)
@@ -86,8 +89,9 @@ function ema_ragged(; n_subjects = 6, nt = 10, seed = 1)
         push!(stressReport, sr); push!(moodReport, mr); push!(smoked, sm)
     end
     srmr = [vcat(stressReport[i], moodReport[i]) for i in 1:n_subjects]
+    smoked_flat = reduce(vcat, smoked)   # flat int[total], same order as the ragged latent
     (; subject, age, treatment, t_grid, dt_grid, sqrt_dt_grid, workload,
-       stressReport, moodReport, smoked, srmr)
+       stressReport, moodReport, smoked, srmr, smoked_flat)
 end
 
 # ============================================================================ #
@@ -267,8 +271,9 @@ Kfull2cont(d) = @brm d begin
     end
 end
 
-# Kfull: as Kfull2cont but adds the BINARY indicator. WALL: integer ragged
-#   observation has no carrier in StanBlocks (snag ragged-int-obser-771dd259).
+# Kfull: as Kfull2cont but adds the BINARY indicator AS A RAGGED KERNEL-CELL obs.
+#   Fails: integer ragged observation has no carrier in StanBlocks
+#   (snag ragged-int-obser-771dd259). See Kfull3 for the working spelling.
 Kfull(d) = @brm d begin
     sigma_s ~ Exponential(1); sigma_m ~ Exponential(1)
     bm ~ Normal(0, 0.5); a12 ~ Normal(0, 0.5); a21 ~ Normal(0, 0.5); a22 ~ Normal(-0.5, 0.3)
@@ -291,6 +296,36 @@ Kfull(d) = @brm d begin
         smk ~ bernoulli_logit(l31 .* st .+ smoke_threshold)
         st
     end
+end
+
+# Kfull3: the COMPLETE 3-indicator EMA model. The binary indicator is observed
+#   at TOP LEVEL against the ragged latent's flat backing (`stress.mem`), the
+#   lossless workaround for the integer-ragged carrier gap (snag handler
+#   verified: identical density/gradient — bernoulli_logit factorises
+#   elementwise, so the ragged grouping is pure bookkeeping).  OK, dim 175.
+Kfull3(d) = @brm d begin
+    sigma_s ~ Exponential(1); sigma_m ~ Exponential(1)
+    bm ~ Normal(0, 0.5); a12 ~ Normal(0, 0.5); a21 ~ Normal(0, 0.5); a22 ~ Normal(-0.5, 0.3)
+    wls ~ Normal(0, 0.5); qw ~ Normal(0, 0.5); diffm ~ Exponential(1)
+    l31 ~ Normal(0, 1); smoke_threshold ~ Normal(0, 1)
+    b0 ~ 1 + age + treatment + (1 | subject)
+    q0 ~ 1 + (1 | subject)
+    cm ~ 1 + age + treatment + (1 | subject)
+    s0 ~ 1 + (1 | subject)
+    m0 ~ 1 + (1 | subject)
+    stress ~ kernel(dt_grid, workload, stressReport, moodReport,
+                    b0, q0, cm, s0, m0) do dt, wl, sR, mR, lb0, lq0, lcm, ls0, lm0
+        zs::vector[dims(dt)[1]] ~ std_normal()
+        zm::vector[dims(dt)[1]] ~ std_normal()
+        traj = ema_full(dt, wl, lb0, bm, a12, a21, a22, lcm, wls, lq0, qw, diffm, ls0, lm0, zs, zm)
+        st = traj[1:dims(dt)[1]]
+        mo = traj[(dims(dt)[1] + 1):(2 * dims(dt)[1])]
+        sR ~ normal(st, sigma_s)
+        mR ~ normal(mo, sigma_m)
+        st
+    end
+    # discrete indicator: top-level, against the ragged latent's flat backing.
+    smoked_flat ~ BernoulliLogit(l31 * stress.mem + smoke_threshold)
 end
 
 # ============================================================================ #
@@ -322,7 +357,9 @@ function main()
     end
     println("── Part B: kernel + one @deffun ──")
     for (n, f) in (("K0b", K0b), ("K1", K1), ("K2", K2),
-                   ("Kfull2cont", Kfull2cont), ("Kfull (+binary, WALL)", Kfull))
+                   ("Kfull2cont", Kfull2cont),
+                   ("Kfull (binary as ragged cell obs, FAILS)", Kfull),
+                   ("Kfull3 (full 3-indicator, binary via .mem)", Kfull3))
         gate(n, f, R)
     end
 end
