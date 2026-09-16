@@ -19,5 +19,10 @@ for (page, models) in (("rbest-centering", (:rbest_as_brm_model, :rbest_crohn_br
     BRMDocsComparisons.validate_required_stan_outputs(joinpath(root, "build/.documenter", page * ".md"), models)
 end
 cp(joinpath(repo, "docs/package.json"), joinpath(root, "package.json"); force=true)
+# Install the repository's docs dependencies (math support) with DocumenterVitepress's bundled npm;
+# build_docs alone leaves a plugin-less default node_modules and fails on `markdown-it-mathjax3`.
+npm = DocumenterVitepress.npm                      # the NodeJS_20_jll npm path; its `node` sits beside it
+run(addenv(Cmd(`$npm install --no-audit --no-fund`; dir=root), "PATH" => dirname(npm) * ":" * ENV["PATH"]))
+isdir(joinpath(root, "node_modules", "markdown-it-mathjax3")) || error("docs dependencies did not install: markdown-it-mathjax3 missing")
 DocumenterVitepress.build_docs(joinpath(root, "build"))
 println("RBEST_PAGE_RENDER_COMPLETE")

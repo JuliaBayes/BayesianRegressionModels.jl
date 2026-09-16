@@ -1,0 +1,72 @@
+[
+  {
+    "page": "rbest-centering",
+    "before": {
+      "title": "RBesT meta-analytic-predictive priors: sum-to-zero and automatic totals | BayesianRegressionModels.jl",
+      "panes": [
+        "BRM authoring",
+        "StanBlocks model",
+        "Stan source",
+        "Turing model",
+        "BRM authoring",
+        "StanBlocks model",
+        "Stan source",
+        "Turing model"
+      ],
+      "brokenImages": [],
+      "mathErrors": [],
+      "displayMath": 1,
+      "efficiencyTables": [
+        18,
+        18
+      ],
+      "sidebar": " Sidebar Navigation Adaptive centeringAir pollutionRBesT MAP prior",
+      "width": 1440,
+      "scrollWidth": 1440
+    },
+    "selected": [
+      "stan",
+      "stan"
+    ],
+    "mobile": {
+      "width": 390,
+      "scrollWidth": 390
+    },
+    "exceptions": []
+  },
+  {
+    "page": "air-centering",
+    "before": {
+      "title": "Air pollution: regional effects and automatic totals | BayesianRegressionModels.jl",
+      "panes": [
+        "BRM authoring",
+        "StanBlocks model",
+        "Stan source",
+        "Turing model",
+        "BRM authoring",
+        "StanBlocks model",
+        "Stan source",
+        "Turing model"
+      ],
+      "brokenImages": [],
+      "mathErrors": [],
+      "displayMath": 2,
+      "efficiencyTables": [
+        14,
+        14
+      ],
+      "sidebar": " Sidebar Navigation Adaptive centeringAir pollutionRBesT MAP prior",
+      "width": 1440,
+      "scrollWidth": 1440
+    },
+    "selected": [
+      "stan",
+      "stan"
+    ],
+    "mobile": {
+      "width": 390,
+      "scrollWidth": 390
+    },
+    "exceptions": []
+  }
+]
