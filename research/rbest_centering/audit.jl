@@ -100,7 +100,7 @@ if s2z_dir != "none"
                 xi = (Q' * eps) ./ (param == "ncp" ? tau : gs)
                 raw = vcat((alpha - gm) / gs, (ltau - t1) / t2, xi, 0.0)
                 pb = BridgeStan.param_constrain(t.model, q; include_tp=true); pr = BridgeStan.param_constrain(native, raw; include_tp=true)
-                @test pr[theta_cols] ≈ T[gi] rtol=1e-10
+                @test pr[theta_cols] ≈ T rtol=1e-10   # theta[h] = alpha + re[group_index[h]] = T[h] in row order
                 # T = alpha 1 + Q * (tau * xi) under NCP: the map from RBesT's sampled contrasts to the totals
                 # carries the Jacobian (H - 1) log tau; under CP the contrast scale is the constant guess g_s.
                 jacobian = param == "ncp" ? (c.H - 1) * ltau : 0.0
