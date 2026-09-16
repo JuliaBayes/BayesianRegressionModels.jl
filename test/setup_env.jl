@@ -46,7 +46,7 @@ const PINS = [
     ("MutatingFunctions", "https://github.com/nsiccha/MutatingFunctions.jl.git", "4fc41b1c7b774133ceaacc4ff3c34c67b15b87b2"),  # main
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "121de3194f02044e00bac0d11019a93458ddb63a"),  # main
     ("TreeArrays",        "https://github.com/nsiccha/TreeArrays.jl.git",        "c317cc003fc41c2d933c27dc80799141eebd434e"),  # main
-    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "bec23bc3c52303ebde60a026af48c435e4c81330"),  # devibe (registers log_modified_bessel_first_kind for the periodic hsgp basis; contains 66448de, the prior-predictive fix)
+    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "9a958f97c52719985220e0c410a66642b1084000"),  # devibe (registers log_modified_bessel_first_kind for the periodic hsgp basis; contains 66448de, the prior-predictive fix, and 9a958f97, the integer ragged carrier for in-cell discrete families over int ragged observations — snag ragged-int-obser-771dd259)
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
 ]
