@@ -1,0 +1,105 @@
+{
+ "fits": [
+  {
+   "dim": 59,
+   "divergences": 10,
+   "draws": 1000,
+   "gq_failed": 0,
+   "max_rhat": 1.0092703525716866,
+   "min_ess": 235.3097140674976,
+   "name": "single_rw",
+   "seconds": 40.083832119,
+   "target_acceptance_rate": 0.9
+  },
+  {
+   "dim": 59,
+   "divergences": 0,
+   "draws": 1000,
+   "gq_failed": 4,
+   "max_rhat": 1.01574676159594,
+   "min_ess": 1007.6811580067115,
+   "name": "single_rw prior",
+   "seconds": 1.889444959,
+   "target_acceptance_rate": 0.8
+  },
+  {
+   "dim": 2,
+   "divergences": 0,
+   "draws": 1000,
+   "gq_failed": 0,
+   "max_rhat": 1.0038845500265197,
+   "min_ess": 346.053495759008,
+   "name": "delay_model",
+   "seconds": 2.036336364,
+   "target_acceptance_rate": 0.9
+  },
+  {
+   "dim": 115,
+   "divergences": 15,
+   "draws": 1000,
+   "gq_failed": 0,
+   "max_rhat": 1.0281530082953751,
+   "min_ess": 209.4017128403636,
+   "name": "patch_model",
+   "seconds": 392.612033934,
+   "target_acceptance_rate": 0.9
+  },
+  {
+   "dim": 59,
+   "divergences": 0,
+   "draws": 1000,
+   "gq_failed": 0,
+   "max_rhat": 2.1027525819177453,
+   "min_ess": 2.5426840843322145,
+   "name": "single_rw_fc (obs 1..42)",
+   "seconds": 173.48274547,
+   "seed": 1,
+   "target_acceptance_rate": 0.9
+  },
+  {
+   "dim": 59,
+   "divergences": 1,
+   "draws": 1000,
+   "gq_failed": 0,
+   "max_rhat": 1.0152335341689716,
+   "min_ess": 165.07547251305857,
+   "name": "single_rw_fc (obs 1..42)",
+   "seconds": 14.912878163,
+   "seed": 2,
+   "target_acceptance_rate": 0.9
+  }
+ ],
+ "n_draws": 1000,
+ "seeds": {
+  "linelist": 2,
+  "patches": [
+   42,
+   8
+  ],
+  "sampler_first": 1,
+  "single": 132
+ },
+ "truth": {
+  "patches": {
+   "cluster": 0.1,
+   "gamma": 1.5,
+   "init": 0.1823215567939546,
+   "rho": 0.8,
+   "sigma": 0.03,
+   "sigma_d": 0.15
+  },
+  "single": {
+   "cluster": 0.1,
+   "init": 0.26236426446749106,
+   "log_I0": 3.912023005428146,
+   "sigma": 0.05
+  }
+ },
+ "mixing_rule": "a fit with min ESS < 50 or split-Rhat > 1.05 is refit on the next seed (up to 3 attempts); all attempts listed in fits, the last one reported",
+ "truth_single": {
+  "cluster": 0.1,
+  "init": 0.26236426446749106,
+  "log_I0": 3.912023005428146,
+  "sigma": 0.05
+ }
+}
