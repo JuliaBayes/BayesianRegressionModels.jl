@@ -1,0 +1,34 @@
+{
+  "H": 6,
+  "case": "crohn",
+  "constant_offset": 0.6931471805599453,
+  "family": "gaussian",
+  "ordinary_dimension": 8,
+  "ordinary_names": [
+    "b_map_study_tau.1",
+    "b_map_study_z_flat.1",
+    "b_map_study_z_flat.2",
+    "b_map_study_z_flat.3",
+    "b_map_study_z_flat.4",
+    "b_map_study_z_flat.5",
+    "b_map_study_z_flat.6",
+    "pop_theta_beta_pop.1"
+  ],
+  "rbest_constants": {
+    "rbest_cp_minus_brm": 15.008580577929976,
+    "rbest_ncp_minus_brm": -2.796983713564096,
+    "rbest_s2z_cp_minus_brm_total_minus_jacobian": 12.017927730756995,
+    "rbest_s2z_ncp_minus_brm_total_minus_jacobian": -2.820042512154739
+  },
+  "status": "passed",
+  "total_dimension": 7,
+  "total_names": [
+    "total_scale_theta_tau.1",
+    "total_theta.1.1",
+    "total_theta.2.1",
+    "total_theta.3.1",
+    "total_theta.4.1",
+    "total_theta.5.1",
+    "total_theta.6.1"
+  ]
+}

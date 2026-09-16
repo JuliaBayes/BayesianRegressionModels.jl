@@ -1,0 +1,1270 @@
+[
+  {
+    "archive": "rbest-matrix-AS-v1.tar.gz",
+    "bytes": 54338562,
+    "sha256": "01bc898d1c59b3260aaaff85011c330b5d64ef1c9eb0f52204dff48095f9234c",
+    "members": [
+      {
+        "path": "rbest-matrix-AS-v1/model/automatic_totals.stan",
+        "bytes": 11446,
+        "sha256": "4b892739c829c357f54b49f200d302afc740f1e0a753798b98a6becdb4993754"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/model/ordinary_ncp.stan",
+        "bytes": 2704,
+        "sha256": "ebdc0a595d784ff2d50d7f18664333753622e59db9c316752cefe60bc25e5b1b"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_cp-checkpoints/cp_latest.jls",
+        "bytes": 1773888,
+        "sha256": "44e9f36f3c47e09f88ec3bbe4a7961c97dc87d3d8bdfaf79a3de35c3582da072"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_cp-qois.jls",
+        "bytes": 800019,
+        "sha256": "22b6677aefb5948e127be68c2b534182d9a3f8d0e9571743c32954e60447be30"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_cp-qois.tsv",
+        "bytes": 1355,
+        "sha256": "ea5e5483814c606331b89b176b733112b170f625cb3ffe8f22a395898ad33717"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_cp-summary.tsv",
+        "bytes": 397,
+        "sha256": "efe7f215c2430573a596510417e95cc7aa0e4c3cb44fef3b2f8a43e8f6344f31"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_cp.jls",
+        "bytes": 2401261,
+        "sha256": "3a69b90c62ccee0905758b43698aa904861ebbaeb5e12384d285a725b4950153"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_ncp-checkpoints/cp_latest.jls",
+        "bytes": 1773896,
+        "sha256": "b11160f5eae68b42eb3d8892d83607b2339e9a04144bb89c73819cc3dc0603ce"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_ncp-qois.jls",
+        "bytes": 800019,
+        "sha256": "27a75cb0164a4f23d962f51dd67d50b56d2a82384490152a16dea78a3294a14a"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_ncp-qois.tsv",
+        "bytes": 1362,
+        "sha256": "877244ac8c160e831c7861fac0290832d2f8bd9c783786d553a6fb0304559d9b"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_ncp-summary.tsv",
+        "bytes": 402,
+        "sha256": "08130e3b148f0889260267f7d873c5ae2397e0a4493c08a73c03103a00318391"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_ncp.jls",
+        "bytes": 2400768,
+        "sha256": "01491ce4b11802ddffd480d62df7af0d7861bc82d4de7c2799c376bb7dbbbb2a"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_online_gradient-checkpoints/cp_latest.jls",
+        "bytes": 1774236,
+        "sha256": "a76064628114ac7f95ecdd69d52c06312a189a2d3f5c215ca575a90c30bb99e5"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_online_gradient-qois.jls",
+        "bytes": 800019,
+        "sha256": "344bbc53cb91dd893c71647b01ae30577faec25f4377f3d7072348d7cf44daf9"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_online_gradient-qois.tsv",
+        "bytes": 1353,
+        "sha256": "3c6e180e4eac51168e3ca42bc167c18ed5d86af8fd4cb86ac680a77368188b48"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_online_gradient-summary.tsv",
+        "bytes": 413,
+        "sha256": "206473b5abf4e0198bbb7fe91133af87a8588ca02a71a3f74b79c477051aea7d"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_online_gradient.jls",
+        "bytes": 2400820,
+        "sha256": "e03ea6bff214e760541f68185c6b1c449f8a8d77b3a195d42579a6cdcdcdf88f"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_online_position-checkpoints/cp_latest.jls",
+        "bytes": 1774236,
+        "sha256": "e44038d66134c0e7832b43013372589c3d464d815de3080b12fda6ab7c5c727a"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_online_position-qois.jls",
+        "bytes": 800019,
+        "sha256": "08311b87352c3d280ca85fac6b6ec09780a5433e2e935e97b72036b7fb45901f"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_online_position-qois.tsv",
+        "bytes": 1352,
+        "sha256": "d4800240323c7ccb6e5d6f98c04bcd6f71a87dac07ed1147f9bb9e49e67fd81c"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_online_position-summary.tsv",
+        "bytes": 410,
+        "sha256": "80c4b6a6c450f12b8e3ee0224d565b830260a7b2b4d9732988c4f3246301f5db"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_online_position.jls",
+        "bytes": 2400820,
+        "sha256": "cddf74f898c06d9752270ca1327cdc504f093bd4fbcad8b6bf17c10c27941626"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_posthoc_gradient-checkpoints/cp_latest.jls",
+        "bytes": 1774688,
+        "sha256": "bab3ef93d3fd20965f5550607ddfd0f9852111ad8ddf4de357a64ccd080d952d"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_posthoc_gradient-qois.jls",
+        "bytes": 800019,
+        "sha256": "2b84ebc540a52976760a68f7ffe0e13f24847c3a1e9e77be0171bade1d381ea0"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_posthoc_gradient-qois.tsv",
+        "bytes": 1360,
+        "sha256": "628ce5b8988c1504511ce673da35dafd3fa8f6a84be17ab0330d8874fd316d0f"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_posthoc_gradient-selection_losses.tsv",
+        "bytes": 26163,
+        "sha256": "c9349694d2e7511bc69f0f0d75374fab4391040d2ba403de42b60e16e7be3e8c"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_posthoc_gradient-summary.tsv",
+        "bytes": 419,
+        "sha256": "1c10956c76ee6dbaed847fa39a0e6712152b1555660f970c8fdde1c94999ca98"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_posthoc_gradient.jls",
+        "bytes": 2400772,
+        "sha256": "e09a945b2d7735fc5bac8903ff58684087f7a37bf4189e87f6c039baad6859aa"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_posthoc_position-checkpoints/cp_latest.jls",
+        "bytes": 1804612,
+        "sha256": "ffe2106df863640a9c5aa06682a605118db29b3704b27328073a36caa528fbf0"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_posthoc_position-qois.jls",
+        "bytes": 800019,
+        "sha256": "5da9403fd79e736fc09ea368a7df92624e05ca98b442232cc61533d67321ef78"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_posthoc_position-qois.tsv",
+        "bytes": 1358,
+        "sha256": "2df0f613c619b19503156e1fae55b885b4d7d9b3c47f56426eb252889b8c904d"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_posthoc_position-selection_losses.tsv",
+        "bytes": 26260,
+        "sha256": "83adb0a31a60168c0ec50060ee0ca34f49d4ffd6d0236e1d7fb8d69c201bd3dc"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_posthoc_position-summary.tsv",
+        "bytes": 418,
+        "sha256": "563230425a43b6e398173cbc35f634029d85c4b109a5b5afda36d4b47754f09f"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_posthoc_position.jls",
+        "bytes": 2400772,
+        "sha256": "f820fe1df9cfd3c49584412d05bb6c17dd3162ef44421de54624b7ede8c73932"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_selected_gradient.jls",
+        "bytes": 76,
+        "sha256": "509a43a6a5b3bc3d26be3fc83ca6f1b4b3a29bf74d99144f940587761958a58b"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/ordinary_selected_position.jls",
+        "bytes": 76,
+        "sha256": "83abf90254579e6eb58a0f5b431e12fe57d1f724ddb6a78c4a34a55cb34876e4"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total-pilot-model-gradients.jls",
+        "bytes": 720019,
+        "sha256": "4ee08508ff9292bb821b07456f15b08548d3faf6f44cf322c31b705c88d62672"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_cp-checkpoints/cp_latest.jls",
+        "bytes": 1597563,
+        "sha256": "cdc5aacfe5f6be816a8533751093cb85f45974dd87072aaf6278a28ef2c3a66e"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_cp-qois.jls",
+        "bytes": 800019,
+        "sha256": "210bf12a09748cc9742301739ae6ed9545b3e7ad91bb776fd562bf0990d1f447"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_cp-qois.tsv",
+        "bytes": 1356,
+        "sha256": "4f0716da3a009b2f0bf64bd70bc459bffe739480b4abe6849a9b1a7cbcc3a96e"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_cp-summary.tsv",
+        "bytes": 398,
+        "sha256": "b64f354074bc109d6a2b2cf3c8f2175d7dd1207535e74c71474bd3a0b66caaab"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_cp.jls",
+        "bytes": 2160692,
+        "sha256": "8fcc9c0bcf855c0f9da85529891103c34d3b9f4831eaea9f3fce38e6028698c4"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_ncp-checkpoints/cp_latest.jls",
+        "bytes": 1604343,
+        "sha256": "b64f9035b6f305b0976594bb884a35ed34c446b84563fad30e244fe13eb9db3a"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_ncp-qois.jls",
+        "bytes": 800019,
+        "sha256": "8cf2c5f7b3b4c10f07ea7f491ae4dccd8c697e422747de75bd6bc70aa64ab7e7"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_ncp-qois.tsv",
+        "bytes": 1357,
+        "sha256": "12e69ab1e3bd493bd0a05134b74bee9bc0519b22acf60a834896aff5dd6203f4"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_ncp-summary.tsv",
+        "bytes": 402,
+        "sha256": "e3898ecf06d54853587bd31a955b6d96f408921665821df4c5f6514f869604b0"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_ncp.jls",
+        "bytes": 2160688,
+        "sha256": "cbd4dbfd7e2efa34cce0d9119e6c9a592755f53bdd506b688e6a97d61d6407d0"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_online_gradient-checkpoints/cp_latest.jls",
+        "bytes": 1598487,
+        "sha256": "195d098e67eff29d2103b6501a6bc0806e197689d3767fa9d3de2803d44c640f"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_online_gradient-qois.jls",
+        "bytes": 800019,
+        "sha256": "e567f3484c395a03299d65befbb642b07a8cc6f771d427227674d1530188d770"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_online_gradient-qois.tsv",
+        "bytes": 1353,
+        "sha256": "b2bb09fab33af92bc096948562c56ae837edd929726d2367c6b40d716adc7bca"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_online_gradient-summary.tsv",
+        "bytes": 410,
+        "sha256": "70d5d833bfd1270c80ff688d4e77fa56d60050c4895f41db7ed6dd75d2755936"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_online_gradient.jls",
+        "bytes": 2160688,
+        "sha256": "165418b2da254d2f8d209b8ab4f28f7c42d4901486bac4a9cc272873b3f41223"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_online_position-checkpoints/cp_latest.jls",
+        "bytes": 1598495,
+        "sha256": "8a1805d7e048bc87d836f16ee11e3de8e5386c2c0e42820ae9213ea520a066ef"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_online_position-qois.jls",
+        "bytes": 800019,
+        "sha256": "13a207e067bb91241339b2ea011c32b5ae4042dd8ad82b688b83c1d5a9c32f3b"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_online_position-qois.tsv",
+        "bytes": 1353,
+        "sha256": "8a0b8082e42d8d436ec2f536098c8362ec9cc8673cd7b9ac744c524a15757657"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_online_position-summary.tsv",
+        "bytes": 410,
+        "sha256": "307ede9040607e508f3f494bc7f6e69bc814c916c3b7b81caf4308e7c1fb4518"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_online_position.jls",
+        "bytes": 2160692,
+        "sha256": "d33d5805f0e5b6f2f1276655b5618ea4d877f9961bee1988688bba5d4034072f"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_posthoc_gradient-checkpoints/cp_latest.jls",
+        "bytes": 1604359,
+        "sha256": "744b57c3076f7ccf807a6464d868ee0aff1acceb23f9db52bb16ad7513d9d10a"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_posthoc_gradient-qois.jls",
+        "bytes": 800019,
+        "sha256": "f6c9bbde95d1ac27e566caab841c5a5b3438d18ab724489a1a518cd0cdc1af91"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_posthoc_gradient-qois.tsv",
+        "bytes": 1352,
+        "sha256": "1f273bd25dedb381b57b3f25c95bbffd8e5ba9c62b65a2e890952e516c747b5d"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_posthoc_gradient-summary.tsv",
+        "bytes": 417,
+        "sha256": "837ff02bcb372cf15a027bd1d646e101e1a082b21be5959ccc3fa12f020c5a27"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_posthoc_gradient.jls",
+        "bytes": 2160692,
+        "sha256": "47fe6a22c6a9cd1fde05a801b2f066f837f12dd9c77139b3b1c5af3a3c05be11"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_posthoc_position-checkpoints/cp_latest.jls",
+        "bytes": 1649415,
+        "sha256": "63aafaf0df3682a05c9f5f7a36de7240fdc35286926df98eece732f271e7da54"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_posthoc_position-qois.jls",
+        "bytes": 800019,
+        "sha256": "c914f02fb4dd743bd1859429d374b5df0f36b271d288a87fd97eb591545899d9"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_posthoc_position-qois.tsv",
+        "bytes": 1359,
+        "sha256": "24676023b4bbd95106a9f3871ec2611645093a4a912af7e5fc501ed6ac78e5fb"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_posthoc_position-summary.tsv",
+        "bytes": 416,
+        "sha256": "027a783b64626bae881ba0d833528e5ad9f4f3c8f09ce4d6bac9d80a38768e0b"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_posthoc_position.jls",
+        "bytes": 2160696,
+        "sha256": "ee2f993c134f9938d1c59745e53b89868bbb02fb47c6b87464d3886c65c7293d"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_selected_gradient.jls",
+        "bytes": 1083,
+        "sha256": "d45f5871eb2ed29a80eda16c97b5d132efe46e6c6c9c40b1075107a098f4d5fe"
+      },
+      {
+        "path": "rbest-matrix-AS-v1/total_selected_position.jls",
+        "bytes": 1083,
+        "sha256": "e9358caa9779ce3db9e30a3f6ea194968647dbb7f59b87063f3387249c34c33c"
+      }
+    ]
+  },
+  {
+    "archive": "rbest-matrix-crohn-v1.tar.gz",
+    "bytes": 42893107,
+    "sha256": "d62ac02f8aa89f83294765303d51c01397cc1b02aa13f03906cab4dcc5e3785e",
+    "members": [
+      {
+        "path": "rbest-matrix-crohn-v1/model/automatic_totals.stan",
+        "bytes": 11084,
+        "sha256": "9aeb5db3b78385cd151657cfbab09470578d3e3b857fc5531a9e0a5e03295210"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/model/ordinary_ncp.stan",
+        "bytes": 2269,
+        "sha256": "57fc1ac3e1b4061367d4dbb9b30dcb285ab4c40b120e0192590398b54f1d915f"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_cp-checkpoints/cp_latest.jls",
+        "bytes": 1448610,
+        "sha256": "b6a0991133004e957971641d824717d8a5d6eb911a33e2074495e84244d8a5e8"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_cp-qois.jls",
+        "bytes": 640019,
+        "sha256": "813c3fd9d23628245d81077dcdd41b72ac928ffd0698724ea755b3946d4a7828"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_cp-qois.tsv",
+        "bytes": 1073,
+        "sha256": "da0c13cb38c1ef61e0da84d68317074c1c0b0c760eb544f4b74918a3eb66bb0d"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_cp-summary.tsv",
+        "bytes": 375,
+        "sha256": "344f68dcec24ddc2ce8c9dec3a9d388d3c0f4ead9fc7207507b774d05d1f4563"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_cp.jls",
+        "bytes": 1920696,
+        "sha256": "e6c541023afdc0c405f321a68e48f261df676e62d253e6f6477eedb2fd9b6352"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_ncp-checkpoints/cp_latest.jls",
+        "bytes": 1479678,
+        "sha256": "2a5533704f049929f695fb59cd05a76b680e498d63ae3a8cd092c85820154d18"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_ncp-qois.jls",
+        "bytes": 640019,
+        "sha256": "ceae2571628e6428b220b4a68d489e68d98c074942b7f68815ec6ba7a1c7f2e6"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_ncp-qois.tsv",
+        "bytes": 1072,
+        "sha256": "e9e86edd6b4df2afcbd9670c9fcc5eb1524cea457483a4117c6c1673e6afa905"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_ncp-summary.tsv",
+        "bytes": 379,
+        "sha256": "0d6c6b3c73f65590bd795ead057c06715a2a9f842f94f83203e8e05525231813"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_ncp.jls",
+        "bytes": 1920692,
+        "sha256": "c184ad4553cf83e90dc0cd767120ecdae1d18f5c99ba482f1625d34bfcb5d657"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_online_gradient-checkpoints/cp_latest.jls",
+        "bytes": 1419386,
+        "sha256": "601b6ae775074d4630cac4f764ce673551f7fee270b61384674556897e2cce0e"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_online_gradient-qois.jls",
+        "bytes": 640019,
+        "sha256": "9310f208f8e2dcb763f872fbf91de7e46c44732490f7208682b17616b142dedb"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_online_gradient-qois.tsv",
+        "bytes": 1067,
+        "sha256": "8858cfe704759762527125fb61f8ea40ec4039bdd99dc5bdc1bf65f5feed65e0"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_online_gradient-summary.tsv",
+        "bytes": 389,
+        "sha256": "cb45e3d8210ea649817ad411360bb1cc45cf749edbb475e1236ec66a0cb2535a"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_online_gradient.jls",
+        "bytes": 1920696,
+        "sha256": "84d831e46c1d14a14836ac6eeac898d207cb6a98070d1f09afb7fd4e34048150"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_online_position-checkpoints/cp_latest.jls",
+        "bytes": 1419390,
+        "sha256": "de9fe2d411e6220b59c1490185fee3c33aad355df4caa0877563d9aa0e4f3f89"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_online_position-qois.jls",
+        "bytes": 640019,
+        "sha256": "c175f7f778c6229af992a43244dc4629b4c19a35e0b67b1a8382b0c6c9035331"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_online_position-qois.tsv",
+        "bytes": 1068,
+        "sha256": "4221d71c204d942eaae28af3304d4ebbd0a07fafb69b26a0182c85ce8c850cfa"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_online_position-summary.tsv",
+        "bytes": 391,
+        "sha256": "336291018c618776196ca68da849c5d469e89d62f0a79341534be2d24e85faa4"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_online_position.jls",
+        "bytes": 1920692,
+        "sha256": "d4e7abcc2c7edc0deba14242e0b59c3ca011ceb4ab115f67617c491bd0727c77"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_posthoc_gradient-checkpoints/cp_latest.jls",
+        "bytes": 1419114,
+        "sha256": "70b60b4c8c08ca3a27aac7e136c68db0995055ccbde78d2eaa61c8201475b5a3"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_posthoc_gradient-qois.jls",
+        "bytes": 640019,
+        "sha256": "82473770bc752cceb14b692cc661c96a51823b73c380bb1547f36e9e6c00c852"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_posthoc_gradient-qois.tsv",
+        "bytes": 1069,
+        "sha256": "91f26ce463bdd1dae2c507d85f1f5ee770337616ce884224cd1ceafc77b1100c"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_posthoc_gradient-selection_losses.tsv",
+        "bytes": 19673,
+        "sha256": "2cfbeeccaa76f54a38220be086ed3ed67c1fd3b2941585919d7d88e9fce93a49"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_posthoc_gradient-summary.tsv",
+        "bytes": 395,
+        "sha256": "74342a16ab205a1d55ad89282fc9ebb20ef1f898050d9cbeb1ca4299437d45e9"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_posthoc_gradient.jls",
+        "bytes": 1920696,
+        "sha256": "46d9d1ebd8f8ad6f633cb71e64dad1ebac6a4fd86d4021e7a5eeeec46b359835"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_posthoc_position-checkpoints/cp_latest.jls",
+        "bytes": 1419118,
+        "sha256": "940061e4b48d32e43b18457a3bc441d17299c954da7a92f6785c2f2455247ce0"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_posthoc_position-qois.jls",
+        "bytes": 640019,
+        "sha256": "bf74b0f7a7401b558ac008b12182b24e6b3465e77b745a86404d10e25a4f0616"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_posthoc_position-qois.tsv",
+        "bytes": 1064,
+        "sha256": "23bde67f86b88596b3c1e05c26520bd7fc8ce32ebccb3db132a996a91245abf3"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_posthoc_position-selection_losses.tsv",
+        "bytes": 19698,
+        "sha256": "518acf361eeb70a3e854987ce0213ef5af819ea0875d7b08b7f6166b13d30041"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_posthoc_position-summary.tsv",
+        "bytes": 396,
+        "sha256": "e5d9fe56abd2a3c9971478d5cf03a8ccb13d6e001dc7b7cbef0ccd1004185636"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_posthoc_position.jls",
+        "bytes": 1920696,
+        "sha256": "a00e4fa2252adc14974def765be1745343a3c8ea5129af8725be3e1bf0fc53c7"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_selected_gradient.jls",
+        "bytes": 60,
+        "sha256": "d9ae74d811ef431655ab5dca069a10d8c450bc75c826c71e21c84db58d23619a"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/ordinary_selected_position.jls",
+        "bytes": 60,
+        "sha256": "71e8919ac12391e6aeaf2226b8554157d52eda3300c88d165674b1e196542862"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total-pilot-model-gradients.jls",
+        "bytes": 560019,
+        "sha256": "5adcd6316df34e8ef8888d1e3e4b02d734da3a8d559f8c361a4a88eddd41eb62"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_cp-checkpoints/cp_latest.jls",
+        "bytes": 1284089,
+        "sha256": "936bf6daa2384d38fa7384d59f6c7b227b0e6f6711619a12f97d2c99fea0ee6e"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_cp-qois.jls",
+        "bytes": 640019,
+        "sha256": "664a5d4b2cce4a0a3bd38df4d7f3f7fafce302417cb51d5d6075ed128d3d6eb5"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_cp-qois.tsv",
+        "bytes": 1069,
+        "sha256": "4f99d4edcbfd15ef3714871f173073b295482690c20f658c28d1106a71eee064"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_cp-summary.tsv",
+        "bytes": 373,
+        "sha256": "1c44f97169f45454275cc7a2858a946c8dea880f67b39916a4e4924d2cc3aaae"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_cp.jls",
+        "bytes": 1680642,
+        "sha256": "1564fff768f6803b42d1d672cdecf210684ae1a904db79a495443657e9e9e26e"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_ncp-checkpoints/cp_latest.jls",
+        "bytes": 1758057,
+        "sha256": "ebb8371721a215d794e0210dff75e6945c05882dfc48f8faf9d88f2f6858d29c"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_ncp-qois.jls",
+        "bytes": 640019,
+        "sha256": "77bd1f6c8823978d694367dc9012a267054f0a2f4d67c9d49b192fef1d70afbc"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_ncp-qois.tsv",
+        "bytes": 1061,
+        "sha256": "fe82a5f4b3bf619f77c30c4f07474b771cccbf287d6cbe14cc4f4df9c9b3b457"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_ncp-summary.tsv",
+        "bytes": 381,
+        "sha256": "e819939754f9959a52ccfa1bb3ae3b8114a43a8cd5d06ebf95b419194ac0f8d3"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_ncp.jls",
+        "bytes": 1680642,
+        "sha256": "ff8a2e3d90017cb7e7fc4e6d65c61c949eb772b23c0c685ad5407a4d4f3185e4"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_online_gradient-checkpoints/cp_latest.jls",
+        "bytes": 1243093,
+        "sha256": "04be59e6d380db537227bb2f36042288be93091b8c846f8fe209921fc34f1959"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_online_gradient-qois.jls",
+        "bytes": 640019,
+        "sha256": "7575438a65cb41c5de65e4a67f1f26d6c6a545476a4b448cd2bc35b1862d9ba9"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_online_gradient-qois.tsv",
+        "bytes": 1067,
+        "sha256": "a5eb6e6aae02c6a4333e1562e1e6762d3bd47c3ef3d11a157fd06d52a71d1edc"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_online_gradient-summary.tsv",
+        "bytes": 387,
+        "sha256": "299eabf081b0b036c96492aca8762af6918334c9aa39b52fe0dc895e55a32725"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_online_gradient.jls",
+        "bytes": 1680642,
+        "sha256": "82658da9f72dfb19a3ff26114a3def4c26ed450c5085f3d287481b40c6421ab4"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_online_position-checkpoints/cp_latest.jls",
+        "bytes": 1243089,
+        "sha256": "e3ddc7ac73f2e23f3cfdd6bf368805273c54d82e1a9656005fc72bc639503fb7"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_online_position-qois.jls",
+        "bytes": 640019,
+        "sha256": "ce0b5ba82b228726aa9d8bbde1ebadc11b77993bbc7eb381f172bde80842c6e8"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_online_position-qois.tsv",
+        "bytes": 1065,
+        "sha256": "ac071ab6ba501d4596831e7ca45190d02d29ed530ed184a1da55648a1c987ada"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_online_position-summary.tsv",
+        "bytes": 388,
+        "sha256": "ed33a2da2a84b931efa5724cc337a5ce9df1d8a30c4cccfd77e6e45969917013"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_online_position.jls",
+        "bytes": 1680642,
+        "sha256": "6aa6568de4aefd571372c45dac6166bceebd9ddaedf47ad4c40abc4b81ec1626"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_posthoc_gradient-checkpoints/cp_latest.jls",
+        "bytes": 1243385,
+        "sha256": "2b89fcbb749661771a01233ef739c807ebea3fdc15cabe0bab8291f1d8b40bb1"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_posthoc_gradient-qois.jls",
+        "bytes": 640019,
+        "sha256": "85ac30853a0387cfceac2673c2a7b4da4d714227f45943e72d4e4f2efc27f4a6"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_posthoc_gradient-qois.tsv",
+        "bytes": 1056,
+        "sha256": "624383293f784827b1d3944f111760cd0837dfa2cfe338f7fc50c4ef77628243"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_posthoc_gradient-summary.tsv",
+        "bytes": 391,
+        "sha256": "bda36337c4170ca922b83fb4e4e0cf0ae802d8b03725faa004d22191e974c9ac"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_posthoc_gradient.jls",
+        "bytes": 1680646,
+        "sha256": "55b48edef9eb0aa70b03bb5baa0aa787e37f96860f6abe5e53c0f872a7f5ff98"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_posthoc_position-checkpoints/cp_latest.jls",
+        "bytes": 1242829,
+        "sha256": "91dd6360d821cbf454c652f65c08831156cc071f3c3c066ab13ca8e5696de12e"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_posthoc_position-qois.jls",
+        "bytes": 640019,
+        "sha256": "1757c005721554835237fefd866fa4a63223b45ec4b2d8fcae1a05d1680435bb"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_posthoc_position-qois.tsv",
+        "bytes": 1058,
+        "sha256": "c6a4347bd585046e169b13cf9c53e26c45bbc2a2aab30cf4c21e2c12b5eb5a19"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_posthoc_position-summary.tsv",
+        "bytes": 394,
+        "sha256": "effde5a490954a265905c5c6c1cbf03208a18bc59d1117fc365000512f19f8f1"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_posthoc_position.jls",
+        "bytes": 1680646,
+        "sha256": "d3e398b13ccf7880c8d7772718c443770fdf4d7ac154ab3a400de399b5006365"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_selected_gradient.jls",
+        "bytes": 875,
+        "sha256": "b3c02bf5a11cb63d2fdb63703770f9842da783bd15133782a60338586b58a2ee"
+      },
+      {
+        "path": "rbest-matrix-crohn-v1/total_selected_position.jls",
+        "bytes": 875,
+        "sha256": "215fc21fcf12cbc2134dcc52823b9bc042899ee51d3d72032fa5153d13becfe0"
+      }
+    ]
+  },
+  {
+    "archive": "rbest-native-AS-v1-rbest_ncp.tar.gz",
+    "bytes": 5007475,
+    "sha256": "cd385f4441c15acfb643c27d0b7d3dda8dc214ddc56712556a0b74d91a335213",
+    "members": [
+      {
+        "path": "rbest-native-AS-v1/rbest_ncp/R-session.txt",
+        "bytes": 1414,
+        "sha256": "6697badbaafd2bdc250b3a19de235a1959c286b21643d91e434c20aa90e06be7"
+      },
+      {
+        "path": "rbest-native-AS-v1/rbest_ncp/counter-receipts/process-979060.tsv",
+        "bytes": 34,
+        "sha256": "9320cb2f545ef90106db812ec4e00a62f28925eea1afa2e2a491d23222002dff"
+      },
+      {
+        "path": "rbest-native-AS-v1/rbest_ncp/counter-receipts/process-979062.tsv",
+        "bytes": 39,
+        "sha256": "710f2f02e3e48d6168339b7771a796ea14963490512e607fd481c2399da8737d"
+      },
+      {
+        "path": "rbest-native-AS-v1/rbest_ncp/gradient_counts.tsv",
+        "bytes": 213,
+        "sha256": "e0fec31384678b28e070a3d3542323cd2d8bb6ffbd8fed12c4170cc9bec2c70f"
+      },
+      {
+        "path": "rbest-native-AS-v1/rbest_ncp/native_gradient_counter.hpp",
+        "bytes": 1493,
+        "sha256": "326265e32eb59c42c295bb9d6aee0bcbab07a2345ae0245a46cc38a2ce9304b3"
+      },
+      {
+        "path": "rbest-native-AS-v1/rbest_ncp/provenance.json",
+        "bytes": 541,
+        "sha256": "b032178e1f696ef2f22b3c29587e4bfd7a797af665d90f74b5b2209a4ba8a99c"
+      },
+      {
+        "path": "rbest-native-AS-v1/rbest_ncp/sampling/gmap-1.csv",
+        "bytes": 6460442,
+        "sha256": "b1280ab44867e5d008bd1ddf80f96c282d4fbfe6837b6e9ec1c7282fb38169dd"
+      },
+      {
+        "path": "rbest-native-AS-v1/rbest_ncp/sampling.tsv",
+        "bytes": 4863941,
+        "sha256": "adffe814bc40e99bae29bd6f74e286087c1290f6d42942e56861bbb4c410c5f3"
+      }
+    ]
+  },
+  {
+    "archive": "rbest-native-AS-v1-rbest_cp.tar.gz",
+    "bytes": 4734830,
+    "sha256": "9be66f317d0b018441d6b9c420cd5082eedf109eeb37683199de497e49fe7dfe",
+    "members": [
+      {
+        "path": "rbest-native-AS-v1/rbest_cp/R-session.txt",
+        "bytes": 1414,
+        "sha256": "6697badbaafd2bdc250b3a19de235a1959c286b21643d91e434c20aa90e06be7"
+      },
+      {
+        "path": "rbest-native-AS-v1/rbest_cp/counter-receipts/process-980198.tsv",
+        "bytes": 34,
+        "sha256": "0c2c5faa4b0e8df47a9613ce7599e7d58c1118d5673bf5e177e62610adc83008"
+      },
+      {
+        "path": "rbest-native-AS-v1/rbest_cp/counter-receipts/process-980200.tsv",
+        "bytes": 39,
+        "sha256": "dfde8143ecabea99bb4d59541108b58f29d3206b2a5b2d3939547e1e692e9386"
+      },
+      {
+        "path": "rbest-native-AS-v1/rbest_cp/gradient_counts.tsv",
+        "bytes": 215,
+        "sha256": "71abdceda4f679875f0d70adfa28a17755e50e04f79a33bb179b6744c078eefa"
+      },
+      {
+        "path": "rbest-native-AS-v1/rbest_cp/native_gradient_counter.hpp",
+        "bytes": 1493,
+        "sha256": "326265e32eb59c42c295bb9d6aee0bcbab07a2345ae0245a46cc38a2ce9304b3"
+      },
+      {
+        "path": "rbest-native-AS-v1/rbest_cp/provenance.json",
+        "bytes": 539,
+        "sha256": "64892e69b7897eccc1f92497fdd39e122c3e63936be215353883c8aa3e3f755b"
+      },
+      {
+        "path": "rbest-native-AS-v1/rbest_cp/sampling/gmap-1.csv",
+        "bytes": 6480934,
+        "sha256": "c56049e0250c1501e65fd1ac625163cd5c0ed0403a0609ba44049821aa324d8f"
+      },
+      {
+        "path": "rbest-native-AS-v1/rbest_cp/sampling.tsv",
+        "bytes": 4879118,
+        "sha256": "1a5f3e4239be77f7066db3093c86aaa289bfaeafa15c428a41b10bc2f84d2951"
+      }
+    ]
+  },
+  {
+    "archive": "rbest-native-AS-v1-stan_ncp.tar.gz",
+    "bytes": 4703773,
+    "sha256": "290977cd38390f5ade47edb59c1d11f56922b9f8355fe9db9dac694736685a97",
+    "members": [
+      {
+        "path": "rbest-native-AS-v1/stan_ncp/R-session.txt",
+        "bytes": 1414,
+        "sha256": "6697badbaafd2bdc250b3a19de235a1959c286b21643d91e434c20aa90e06be7"
+      },
+      {
+        "path": "rbest-native-AS-v1/stan_ncp/counter-receipts/process-981631.tsv",
+        "bytes": 34,
+        "sha256": "fdfdb2685cec7b829353d2d31d802be8bfefcab268b284f8cccd6f9d7767ffa8"
+      },
+      {
+        "path": "rbest-native-AS-v1/stan_ncp/counter-receipts/process-981633.tsv",
+        "bytes": 39,
+        "sha256": "b73961cd669d37367a190ff7fd5ca4f3ac1701dd0ae9451e62a87d13c5e6c840"
+      },
+      {
+        "path": "rbest-native-AS-v1/stan_ncp/gradient_counts.tsv",
+        "bytes": 213,
+        "sha256": "5bbc099d82189adf2e3c7505de29fa50b80de82320d6bdcf8617a708062292b5"
+      },
+      {
+        "path": "rbest-native-AS-v1/stan_ncp/native_gradient_counter.hpp",
+        "bytes": 1493,
+        "sha256": "326265e32eb59c42c295bb9d6aee0bcbab07a2345ae0245a46cc38a2ce9304b3"
+      },
+      {
+        "path": "rbest-native-AS-v1/stan_ncp/provenance.json",
+        "bytes": 552,
+        "sha256": "f792d4358d93a14994ffa5f58c9242b40634f4ce72d1394f304dda72ab9b48fc"
+      },
+      {
+        "path": "rbest-native-AS-v1/stan_ncp/sampling/gmap-1.csv",
+        "bytes": 5909576,
+        "sha256": "d3bb3cf00feb8dcbf95a5ef750cb2960623b6467efa7d0c4203e9f12f05f9701"
+      },
+      {
+        "path": "rbest-native-AS-v1/stan_ncp/sampling.tsv",
+        "bytes": 4852384,
+        "sha256": "9ef062f65e5d0456d6b076f0f2b97ed6782e3b175ce3c4187ac1c5027ee072a3"
+      }
+    ]
+  },
+  {
+    "archive": "rbest-native-AS-v1-stan_cp.tar.gz",
+    "bytes": 4394087,
+    "sha256": "ca1a7970a65aaf0c9ff10cf76d5a42019a7d475f44563d3b0c860cb5fb110846",
+    "members": [
+      {
+        "path": "rbest-native-AS-v1/stan_cp/R-session.txt",
+        "bytes": 1414,
+        "sha256": "6697badbaafd2bdc250b3a19de235a1959c286b21643d91e434c20aa90e06be7"
+      },
+      {
+        "path": "rbest-native-AS-v1/stan_cp/counter-receipts/process-982984.tsv",
+        "bytes": 34,
+        "sha256": "2ae8072186e09091deffbec2a693af1bb41e539b1f8ff2397540d3c88ec1994b"
+      },
+      {
+        "path": "rbest-native-AS-v1/stan_cp/counter-receipts/process-982987.tsv",
+        "bytes": 39,
+        "sha256": "72eca0da74997c3e4fbff215fecedc8474ce8e1b1ca6acdb1c9b699293ff7e79"
+      },
+      {
+        "path": "rbest-native-AS-v1/stan_cp/gradient_counts.tsv",
+        "bytes": 215,
+        "sha256": "f3aaaba224b55bebdcd95eac3dcb4948a8af5978dd41c081c9edc3eb1cf2d948"
+      },
+      {
+        "path": "rbest-native-AS-v1/stan_cp/native_gradient_counter.hpp",
+        "bytes": 1493,
+        "sha256": "326265e32eb59c42c295bb9d6aee0bcbab07a2345ae0245a46cc38a2ce9304b3"
+      },
+      {
+        "path": "rbest-native-AS-v1/stan_cp/provenance.json",
+        "bytes": 550,
+        "sha256": "e54e1b75822a63a31a39bbcb677f91617ad775c2e3d9776638d18858e95a40cb"
+      },
+      {
+        "path": "rbest-native-AS-v1/stan_cp/sampling/gmap-1.csv",
+        "bytes": 5923761,
+        "sha256": "ef979c80548dd9f154e69bc8e05c1b32cca1d32ded28efed58759f75b50af363"
+      },
+      {
+        "path": "rbest-native-AS-v1/stan_cp/sampling.tsv",
+        "bytes": 4868507,
+        "sha256": "a72f0f08ea9b914fdf75590295ee7e99e31f040c949231eb34b7dfb488d5156a"
+      }
+    ]
+  },
+  {
+    "archive": "rbest-native-AS-v1-s2z_ncp.tar.gz",
+    "bytes": 5004204,
+    "sha256": "357be41b8eb9cc8ec7014418b0bb2638e998ab5d0910d9b4df2cc737aecd70db",
+    "members": [
+      {
+        "path": "rbest-native-AS-v1/s2z_ncp/R-session.txt",
+        "bytes": 1414,
+        "sha256": "6697badbaafd2bdc250b3a19de235a1959c286b21643d91e434c20aa90e06be7"
+      },
+      {
+        "path": "rbest-native-AS-v1/s2z_ncp/counter-receipts/process-953811.tsv",
+        "bytes": 34,
+        "sha256": "09fddc71cbfb3d8e135969062310b7a0a6475a2d479734b09fce373ea89dff9f"
+      },
+      {
+        "path": "rbest-native-AS-v1/s2z_ncp/counter-receipts/process-953813.tsv",
+        "bytes": 39,
+        "sha256": "e93851e02cd43e28ccf15676cdcb22f483fc9182dc0f1867ca3a6cde36d901d1"
+      },
+      {
+        "path": "rbest-native-AS-v1/s2z_ncp/gradient_counts.tsv",
+        "bytes": 213,
+        "sha256": "ec460120e9a59f3cc6a724bc57ce6c7b85714212b09e1f3af9c2fd4df3f3a5c4"
+      },
+      {
+        "path": "rbest-native-AS-v1/s2z_ncp/native_gradient_counter.hpp",
+        "bytes": 1493,
+        "sha256": "326265e32eb59c42c295bb9d6aee0bcbab07a2345ae0245a46cc38a2ce9304b3"
+      },
+      {
+        "path": "rbest-native-AS-v1/s2z_ncp/provenance.json",
+        "bytes": 536,
+        "sha256": "db9f9d6ea5c6b98eb6786c0ed2439cf56a7cb9728825b556226b4cffe8f4bb12"
+      },
+      {
+        "path": "rbest-native-AS-v1/s2z_ncp/sampling/gmap-1.csv",
+        "bytes": 6462206,
+        "sha256": "37aee77443d971cf658e82c9a17f247c626bd561d448a1062a1f89491ddb4ab7"
+      },
+      {
+        "path": "rbest-native-AS-v1/s2z_ncp/sampling.tsv",
+        "bytes": 4865797,
+        "sha256": "5020fcab934f8fc30db890c02eb2e21d457cea77000817995d0fbab00394d717"
+      }
+    ]
+  },
+  {
+    "archive": "rbest-native-AS-v1-s2z_cp.tar.gz",
+    "bytes": 4993397,
+    "sha256": "c96239f451f83640f132969954128e2693913f500e49711b8cd38a2c8897b6fc",
+    "members": [
+      {
+        "path": "rbest-native-AS-v1/s2z_cp/R-session.txt",
+        "bytes": 1414,
+        "sha256": "6697badbaafd2bdc250b3a19de235a1959c286b21643d91e434c20aa90e06be7"
+      },
+      {
+        "path": "rbest-native-AS-v1/s2z_cp/counter-receipts/process-955037.tsv",
+        "bytes": 34,
+        "sha256": "fc4e363ef586bb3ad1bf9f5cf07dafb60efff6a2c660cfbdc384858f876c6be0"
+      },
+      {
+        "path": "rbest-native-AS-v1/s2z_cp/counter-receipts/process-955079.tsv",
+        "bytes": 39,
+        "sha256": "03e874c54b319534b1ba1248b26a067fe198006fbc931a20f3bee85d69d45394"
+      },
+      {
+        "path": "rbest-native-AS-v1/s2z_cp/gradient_counts.tsv",
+        "bytes": 213,
+        "sha256": "13518ace6df66179a8c5c057d07fb207d5ee25fe5bb1b51f845b7a5aa05b1798"
+      },
+      {
+        "path": "rbest-native-AS-v1/s2z_cp/native_gradient_counter.hpp",
+        "bytes": 1493,
+        "sha256": "326265e32eb59c42c295bb9d6aee0bcbab07a2345ae0245a46cc38a2ce9304b3"
+      },
+      {
+        "path": "rbest-native-AS-v1/s2z_cp/provenance.json",
+        "bytes": 534,
+        "sha256": "918db9d09ac3a93664fb64cc753e68f90236dca2c0449e9d4a7e547b796fe4d8"
+      },
+      {
+        "path": "rbest-native-AS-v1/s2z_cp/sampling/gmap-1.csv",
+        "bytes": 6469381,
+        "sha256": "f4c5e12673f514d8ed4e20ee76e7dfee3f9e0144f3debf76cff04f15f2c90ecf"
+      },
+      {
+        "path": "rbest-native-AS-v1/s2z_cp/sampling.tsv",
+        "bytes": 4872117,
+        "sha256": "b2f336189760e19d54fd243aa3110af0aa2c8bf8bf9712a267a14df10a35c532"
+      }
+    ]
+  },
+  {
+    "archive": "rbest-native-crohn-v1-rbest_ncp.tar.gz",
+    "bytes": 4207047,
+    "sha256": "1c4444ae74049d71b46896413dc2d991d16797c118e6e173c57a017ffea13f8d",
+    "members": [
+      {
+        "path": "rbest-native-crohn-v1/rbest_ncp/R-session.txt",
+        "bytes": 1414,
+        "sha256": "6697badbaafd2bdc250b3a19de235a1959c286b21643d91e434c20aa90e06be7"
+      },
+      {
+        "path": "rbest-native-crohn-v1/rbest_ncp/counter-receipts/process-983758.tsv",
+        "bytes": 34,
+        "sha256": "f6446cd228375ca1a6cb4cb73290b27ac3d586ef2aad23074c4e130ae575248a"
+      },
+      {
+        "path": "rbest-native-crohn-v1/rbest_ncp/counter-receipts/process-983760.tsv",
+        "bytes": 39,
+        "sha256": "03a32f6a8c65ca851e9f52ce6fa2fc046afa67eb0fe6bfd9ea28c8bf589e2520"
+      },
+      {
+        "path": "rbest-native-crohn-v1/rbest_ncp/gradient_counts.tsv",
+        "bytes": 213,
+        "sha256": "2dcf781e456b0a3804e2cca57fd1997adf757ddf0e12695884a6a4b435145ee4"
+      },
+      {
+        "path": "rbest-native-crohn-v1/rbest_ncp/native_gradient_counter.hpp",
+        "bytes": 1493,
+        "sha256": "326265e32eb59c42c295bb9d6aee0bcbab07a2345ae0245a46cc38a2ce9304b3"
+      },
+      {
+        "path": "rbest-native-crohn-v1/rbest_ncp/provenance.json",
+        "bytes": 544,
+        "sha256": "8e8b06d076120616c8518123e127168e64047375babb39f0b5d87d829a5b9ca9"
+      },
+      {
+        "path": "rbest-native-crohn-v1/rbest_ncp/sampling/gmap-1.csv",
+        "bytes": 5461682,
+        "sha256": "89eeed9c70fd4f04438f7a17cbff89eb4e855e713c603a82b2ad095b2fac2483"
+      },
+      {
+        "path": "rbest-native-crohn-v1/rbest_ncp/sampling.tsv",
+        "bytes": 4112245,
+        "sha256": "1acd472e4019664c69bc45da89786f58cc1d159b9c9f86f9a5f68dda831015f1"
+      }
+    ]
+  },
+  {
+    "archive": "rbest-native-crohn-v1-rbest_cp.tar.gz",
+    "bytes": 4201353,
+    "sha256": "ba719e7f02a88cfc5e59619956413a61c5a47e6d9a677525cbb1f493018afdda",
+    "members": [
+      {
+        "path": "rbest-native-crohn-v1/rbest_cp/R-session.txt",
+        "bytes": 1414,
+        "sha256": "6697badbaafd2bdc250b3a19de235a1959c286b21643d91e434c20aa90e06be7"
+      },
+      {
+        "path": "rbest-native-crohn-v1/rbest_cp/counter-receipts/process-984596.tsv",
+        "bytes": 34,
+        "sha256": "f0cf55ef0ab45caa8894d0b2eec14bd3fdb381b7f13797d95bd9e9ee9753e307"
+      },
+      {
+        "path": "rbest-native-crohn-v1/rbest_cp/counter-receipts/process-984598.tsv",
+        "bytes": 39,
+        "sha256": "9a0918951047c9337cd2cd8bcea7afcbac4e06e9e7b53b52bf192fa08383fbdd"
+      },
+      {
+        "path": "rbest-native-crohn-v1/rbest_cp/gradient_counts.tsv",
+        "bytes": 214,
+        "sha256": "df2de2466cbea108c4f6ba5b95a18cca10659a564f37ae52ceb03a1224f47e81"
+      },
+      {
+        "path": "rbest-native-crohn-v1/rbest_cp/native_gradient_counter.hpp",
+        "bytes": 1493,
+        "sha256": "326265e32eb59c42c295bb9d6aee0bcbab07a2345ae0245a46cc38a2ce9304b3"
+      },
+      {
+        "path": "rbest-native-crohn-v1/rbest_cp/provenance.json",
+        "bytes": 542,
+        "sha256": "61b7432790327785408beb2138f2ca186cdda7d5bbc397c05e103f2f8db315e1"
+      },
+      {
+        "path": "rbest-native-crohn-v1/rbest_cp/sampling/gmap-1.csv",
+        "bytes": 5487538,
+        "sha256": "621c79e0df2a24be1c5e83328bd9257df598a54857a883567f975221edccfaaf"
+      },
+      {
+        "path": "rbest-native-crohn-v1/rbest_cp/sampling.tsv",
+        "bytes": 4134235,
+        "sha256": "a82a5243c0d333b148c6eb27917e537eddfc54a8ab7049e559d8ab78753d7e2f"
+      }
+    ]
+  },
+  {
+    "archive": "rbest-native-crohn-v1-stan_ncp.tar.gz",
+    "bytes": 3973606,
+    "sha256": "1d86a863b578154ed2be9419d2c37f93921b9208e602829775e5d5c926c15b44",
+    "members": [
+      {
+        "path": "rbest-native-crohn-v1/stan_ncp/R-session.txt",
+        "bytes": 1414,
+        "sha256": "6697badbaafd2bdc250b3a19de235a1959c286b21643d91e434c20aa90e06be7"
+      },
+      {
+        "path": "rbest-native-crohn-v1/stan_ncp/counter-receipts/process-985738.tsv",
+        "bytes": 34,
+        "sha256": "2a2efd867ece0c11e5d38b5234b665a796ba2231580f96b98154e0addfb6c45c"
+      },
+      {
+        "path": "rbest-native-crohn-v1/stan_ncp/counter-receipts/process-985740.tsv",
+        "bytes": 39,
+        "sha256": "353aab8fa6e1a33d301aa354ac54d66e2e74b147310de65bb2b9696ecb1a5a7d"
+      },
+      {
+        "path": "rbest-native-crohn-v1/stan_ncp/gradient_counts.tsv",
+        "bytes": 213,
+        "sha256": "5e22267d0b515fd701056ac44a50a7ee404ef5c9026637595bad56813e5457f7"
+      },
+      {
+        "path": "rbest-native-crohn-v1/stan_ncp/native_gradient_counter.hpp",
+        "bytes": 1493,
+        "sha256": "326265e32eb59c42c295bb9d6aee0bcbab07a2345ae0245a46cc38a2ce9304b3"
+      },
+      {
+        "path": "rbest-native-crohn-v1/stan_ncp/provenance.json",
+        "bytes": 555,
+        "sha256": "721f1863940158683e89dfec7c5bcd4a69d9f8e538ed9ae3d9d85ef911e76b5d"
+      },
+      {
+        "path": "rbest-native-crohn-v1/stan_ncp/sampling/gmap-1.csv",
+        "bytes": 4979544,
+        "sha256": "2d0052fd4a9a8a8ba05ad5d06741a9cf86c605f3a70118bd490707a5a525cd30"
+      },
+      {
+        "path": "rbest-native-crohn-v1/stan_ncp/sampling.tsv",
+        "bytes": 4095292,
+        "sha256": "58291d19577472891bd2fe72aab2854b51fc03c6c91a915308a161f420ffa2fd"
+      }
+    ]
+  },
+  {
+    "archive": "rbest-native-crohn-v1-stan_cp.tar.gz",
+    "bytes": 3945641,
+    "sha256": "db4cb5e47cc2114e21e996932406330fe6eb0780f889b21fc83e0b7d86d482c1",
+    "members": [
+      {
+        "path": "rbest-native-crohn-v1/stan_cp/R-session.txt",
+        "bytes": 1414,
+        "sha256": "6697badbaafd2bdc250b3a19de235a1959c286b21643d91e434c20aa90e06be7"
+      },
+      {
+        "path": "rbest-native-crohn-v1/stan_cp/counter-receipts/process-986963.tsv",
+        "bytes": 34,
+        "sha256": "27f00cc13620fe1c646dcbda51630acd25170273a3a670e9d0c7e38343580461"
+      },
+      {
+        "path": "rbest-native-crohn-v1/stan_cp/counter-receipts/process-986965.tsv",
+        "bytes": 39,
+        "sha256": "adfc4708896c957b719a8a5683fa9aa4b2c813355af678a475e4648aade773f6"
+      },
+      {
+        "path": "rbest-native-crohn-v1/stan_cp/gradient_counts.tsv",
+        "bytes": 215,
+        "sha256": "8b10651d885b88b3a64dc0cd951f19aad7c225f4dfd829b347a98814e5256b7c"
+      },
+      {
+        "path": "rbest-native-crohn-v1/stan_cp/native_gradient_counter.hpp",
+        "bytes": 1493,
+        "sha256": "326265e32eb59c42c295bb9d6aee0bcbab07a2345ae0245a46cc38a2ce9304b3"
+      },
+      {
+        "path": "rbest-native-crohn-v1/stan_cp/provenance.json",
+        "bytes": 553,
+        "sha256": "9f74b60eee9d2af13d4670fdf51ebad15b40b93a137967aeec32da74b5431762"
+      },
+      {
+        "path": "rbest-native-crohn-v1/stan_cp/sampling/gmap-1.csv",
+        "bytes": 5008382,
+        "sha256": "5ab00d5f917ee4dbcb4fb21466277df179281726e6c6d64ef4a99090f349df77"
+      },
+      {
+        "path": "rbest-native-crohn-v1/stan_cp/sampling.tsv",
+        "bytes": 4113573,
+        "sha256": "851efcc7d95edc0c133e1209976360fa6a26d8b16f9416ae2bfbd4e66f2ec73f"
+      }
+    ]
+  },
+  {
+    "archive": "rbest-native-crohn-v1-s2z_ncp.tar.gz",
+    "bytes": 4192482,
+    "sha256": "49d7f12d15effb3e660d35dc6cc07c1c02a82b94d02d7bb31547f0ecf917664c",
+    "members": [
+      {
+        "path": "rbest-native-crohn-v1/s2z_ncp/R-session.txt",
+        "bytes": 1414,
+        "sha256": "6697badbaafd2bdc250b3a19de235a1959c286b21643d91e434c20aa90e06be7"
+      },
+      {
+        "path": "rbest-native-crohn-v1/s2z_ncp/counter-receipts/process-959811.tsv",
+        "bytes": 34,
+        "sha256": "a4ba04fad88b97ab730f15d61842d03597d2a9ffd00208092b3398c9872549b0"
+      },
+      {
+        "path": "rbest-native-crohn-v1/s2z_ncp/counter-receipts/process-959813.tsv",
+        "bytes": 39,
+        "sha256": "d19a1ef83ad47a4c83de501a83166ccb1df27e9c3c46d66026f577ec0651b565"
+      },
+      {
+        "path": "rbest-native-crohn-v1/s2z_ncp/gradient_counts.tsv",
+        "bytes": 213,
+        "sha256": "7b8d4a6f2ff7871a9f238fb4714f837da04aa856d8a0d0a52f5fd7fdfd6e7d7f"
+      },
+      {
+        "path": "rbest-native-crohn-v1/s2z_ncp/native_gradient_counter.hpp",
+        "bytes": 1493,
+        "sha256": "326265e32eb59c42c295bb9d6aee0bcbab07a2345ae0245a46cc38a2ce9304b3"
+      },
+      {
+        "path": "rbest-native-crohn-v1/s2z_ncp/provenance.json",
+        "bytes": 539,
+        "sha256": "d300e8b084177a05be3616447a265cfa7fd7922747498c6b8f507a15690d44f5"
+      },
+      {
+        "path": "rbest-native-crohn-v1/s2z_ncp/sampling/gmap-1.csv",
+        "bytes": 5449643,
+        "sha256": "17bdef6668841058f589516d71f4c6b8fbf58922da1397ef41a0e27cf99725ba"
+      },
+      {
+        "path": "rbest-native-crohn-v1/s2z_ncp/sampling.tsv",
+        "bytes": 4101496,
+        "sha256": "b33109bc59b97b123a7d9959e53c423e576a8e5a446b66c9321216c5c32f4307"
+      }
+    ]
+  },
+  {
+    "archive": "rbest-native-crohn-v1-s2z_cp.tar.gz",
+    "bytes": 4160010,
+    "sha256": "6eff1d28a471d3fc2a0bce60780859c5978063ff15641d1ad16f6b30db99683d",
+    "members": [
+      {
+        "path": "rbest-native-crohn-v1/s2z_cp/R-session.txt",
+        "bytes": 1414,
+        "sha256": "6697badbaafd2bdc250b3a19de235a1959c286b21643d91e434c20aa90e06be7"
+      },
+      {
+        "path": "rbest-native-crohn-v1/s2z_cp/counter-receipts/process-961393.tsv",
+        "bytes": 34,
+        "sha256": "576f7f7ba7645f40503a307e4a9d2525150d50f0bd70bb9e21a9d395a19b4809"
+      },
+      {
+        "path": "rbest-native-crohn-v1/s2z_cp/counter-receipts/process-961395.tsv",
+        "bytes": 39,
+        "sha256": "7936506689f79fdd0c7f700efbc97ed7acbfa822243d004a2940e60a636c660e"
+      },
+      {
+        "path": "rbest-native-crohn-v1/s2z_cp/gradient_counts.tsv",
+        "bytes": 214,
+        "sha256": "e80be4276b8b4d51a98c4d11204631c6ac15771fe0d2fb95e22648ba06a7994d"
+      },
+      {
+        "path": "rbest-native-crohn-v1/s2z_cp/native_gradient_counter.hpp",
+        "bytes": 1493,
+        "sha256": "326265e32eb59c42c295bb9d6aee0bcbab07a2345ae0245a46cc38a2ce9304b3"
+      },
+      {
+        "path": "rbest-native-crohn-v1/s2z_cp/provenance.json",
+        "bytes": 537,
+        "sha256": "6c9e0332198130c6a9114c556fcf404447582753fc7969ffa08c2c7cbe1225a2"
+      },
+      {
+        "path": "rbest-native-crohn-v1/s2z_cp/sampling/gmap-1.csv",
+        "bytes": 5455688,
+        "sha256": "8b84ef66f7f83c4c6f8af876dede8d7a52560508176dc7f75e9c726db682faab"
+      },
+      {
+        "path": "rbest-native-crohn-v1/s2z_cp/sampling.tsv",
+        "bytes": 4106814,
+        "sha256": "af7ff88539f6aa257a4c0938f137929ddb74506ad460f37e7f23c860407f6a13"
+      }
+    ]
+  }
+]
