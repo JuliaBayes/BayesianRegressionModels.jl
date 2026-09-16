@@ -20,7 +20,7 @@ strip_counter <- function(code,anchor) {
   code
 }
 
-collect_native_csv <- function(csv,receipts,out,warmup=1000L,draws=2000L) {
+collect_native_csv <- function(csv,receipts,out,warmup=1000L,draws=2000L,max_depth=10L) {
   stopifnot(length(csv)==1L)
   x <- read.csv(csv,comment.char="#",check.names=FALSE)
   stopifnot(nrow(x)==warmup+draws,all(is.finite(x$pupil_gradients)),all(diff(x$pupil_gradients)>=0))
@@ -35,7 +35,7 @@ collect_native_csv <- function(csv,receipts,out,warmup=1000L,draws=2000L) {
   costs <- data.frame(sampling_gradients=sum(increments),all_gradient_calls=main_cost,
     warmup_and_initial_gradients=x$pupil_gradients[[warmup]],
     precursor_gradient_calls=workflow_cost-main_cost,workflow_gradient_calls=workflow_cost,
-    divergences=sum(sampling$divergent__),max_depth_hits=sum(sampling$treedepth__>=10),
+    divergences=sum(sampling$divergent__),max_depth_hits=sum(sampling$treedepth__>=max_depth),
     sampling_rows=draws,warmup_rows=warmup)
   write.table(costs,file.path(out,"gradient_counts.tsv"),sep="\t",row.names=FALSE,quote=FALSE)
   write.table(sampling,file.path(out,"sampling.tsv"),sep="\t",row.names=FALSE,quote=FALSE)
