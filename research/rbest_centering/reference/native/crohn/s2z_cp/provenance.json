@@ -1,0 +1,20 @@
+{
+  "arm": "s2z_cp",
+  "parametrization": "cp",
+  "variant": "s2z",
+  "case": "crohn",
+  "rbest_version": "1.12.0",
+  "rbest_sha": "a5acbbc39c2cd620f0549159aa7c1991d4c28d6a",
+  "seed": 1,
+  "chains": 1,
+  "warmup": 2000,
+  "draws": 10000,
+  "thin": 1,
+  "adapt_delta": 0.95,
+  "step_size": 0.01,
+  "max_treedepth": 20,
+  "cmdstan": "2.39.0",
+  "cmdstanr": "0.9.0",
+  "clean_sha256": "b71a8dcf56fda7a41c247095ff4fcb462fe78eb239f9f28d35dedf2c210bab74",
+  "data_sha256": "e9ed9c444ba9a67ba1a10428fe0de5cae5ca6a3e76571ff0c4f154009c42dc9c"
+}

@@ -14,16 +14,21 @@
 #   julia --project=test research/ema_ctsem/ema_brm.jl
 # on a host with stanc + a BridgeStan toolchain (see test/README.md).
 #
-# VERIFIED (strato2, canonical 504dd283, StanBlocks bec23bc3c523):
+# VERIFIED (strato2, StanBlocks bec23bc3c523):
 #   Part A: inc1 dim20, inc2_ar dim83, inc3 dim166, inc4a dim83, inc4b dim85  -> all OK
 #           inc2_dar -> WALL "dar time axis must be strictly increasing" (panel)
 #           inc5_coupled -> WALL "cyclic model declarations" (VAR/transition matrix)
-#   Part B: K0b dim70, K1 dim70, K2 dim143, Kfull2cont dim173, Kfull3 dim175 -> all OK
+#   Part B: K0b dim70, K1 dim70, K2 dim143, Kfull2cont dim174, Kfull3 dim191 -> all OK
 #           Kfull (binary AS A RAGGED KERNEL-CELL obs) -> fails: integer ragged
 #             observation has no carrier in StanBlocks (snag ragged-int-obser-771dd259).
-#           Kfull3 is the COMPLETE 3-indicator model: the binary is observed at
-#             top level against the ragged latent's flat backing (stress.mem) —
-#             the lossless workaround. So the ENTIRE ctsem EMA demo builds.
+#           Kfull3 is the COMPLETE, FAITHFUL 3-indicator model: the four subject-
+#             varying params (b0,q0,cint_mood,wl_stress) share one correlated
+#             (1|p|subject) block (= ctsem's 4x4 rawPCov), a process-noise
+#             correlation diff21 and manifest means mm_stress/mm_mood are included,
+#             and the binary is observed at top level against the ragged latent's
+#             flat backing (stress.mem). So the ENTIRE ctsem EMA demo builds.
+#   The marginalized (competitive) counterparts are ema_kernel_marginalized.jl
+#   (faithful EKF, states integrated out) and ema_kernel_kalman.jl (linear-Gaussian).
 #
 # The states are SAMPLED (dim grows with subjects x pings x processes) — the
 # "expressive but not competitive" regime. Marginalizing them (Kalman/filter)
@@ -211,20 +216,26 @@ StanBlocks.@deffun begin
         end
         out
     end
-    # Full EMA generator: nonlinear state-dependent drift + input-dependent diffusion.
+    # Full EMA generator: nonlinear state-dependent drift + input-dependent
+    # diffusion, with a free process-noise CORRELATION diff21 (fisher-z): the mood
+    # innovation is correlated with the stress innovation, matching the spec's
+    # DIFFUSION off-diagonal. (Single Euler step per occasion; the substepped mesh
+    # lives in the marginalized EKF, where refining Δt adds no parameters.)
     ema_full(dt::vector[nt], wl::vector[nt],
              b0::real, bm::real, a12::real, a21::real, a22::real,
-             cm::real, wls::real, q0::real, qw::real, diffm::real,
+             cm::real, wls::real, q0::real, qw::real, diffm::real, diff21::real,
              s0::real, m0::real, zs::vector[nt], zm::vector[nt])::vector[2 * nt] = begin
         out::vector[2 * nt]
         s = s0; m = m0
+        corr = tanh(diff21)
         out[1] = s; out[nt + 1] = m
         for t in 2:nt
             drift_s = -log1p(exp(b0 + bm * m)) * s + a12 * m + wls * wl[t - 1]
             drift_m = a21 * s + a22 * m + cm
             gs = exp(q0 + qw * wl[t - 1])
+            zc = corr * zs[t] + sqrt(1 - corr * corr) * zm[t]
             s = s + drift_s * dt[t] + gs * sqrt(dt[t]) * zs[t]
-            m = m + drift_m * dt[t] + diffm * sqrt(dt[t]) * zm[t]
+            m = m + drift_m * dt[t] + diffm * sqrt(dt[t]) * zc
             out[t] = s; out[nt + t] = m
         end
         out
@@ -252,7 +263,7 @@ end
 Kfull2cont(d) = @brm d begin
     sigma_s ~ Exponential(1); sigma_m ~ Exponential(1)
     bm ~ Normal(0, 0.5); a12 ~ Normal(0, 0.5); a21 ~ Normal(0, 0.5); a22 ~ Normal(-0.5, 0.3)
-    wls ~ Normal(0, 0.5); qw ~ Normal(0, 0.5); diffm ~ Exponential(1)
+    wls ~ Normal(0, 0.5); qw ~ Normal(0, 0.5); diffm ~ Exponential(1); diff21 ~ Normal(0, 0.5)
     b0 ~ 1 + age + treatment + (1 | subject)
     q0 ~ 1 + (1 | subject)
     cm ~ 1 + age + treatment + (1 | subject)
@@ -262,7 +273,7 @@ Kfull2cont(d) = @brm d begin
                     b0, q0, cm, s0, m0) do dt, wl, sR, mR, lb0, lq0, lcm, ls0, lm0
         zs::vector[dims(dt)[1]] ~ std_normal()
         zm::vector[dims(dt)[1]] ~ std_normal()
-        traj = ema_full(dt, wl, lb0, bm, a12, a21, a22, lcm, wls, lq0, qw, diffm, ls0, lm0, zs, zm)
+        traj = ema_full(dt, wl, lb0, bm, a12, a21, a22, lcm, wls, lq0, qw, diffm, diff21, ls0, lm0, zs, zm)
         st = traj[1:dims(dt)[1]]
         mo = traj[(dims(dt)[1] + 1):(2 * dims(dt)[1])]
         sR ~ normal(st, sigma_s)
@@ -277,7 +288,7 @@ end
 Kfull(d) = @brm d begin
     sigma_s ~ Exponential(1); sigma_m ~ Exponential(1)
     bm ~ Normal(0, 0.5); a12 ~ Normal(0, 0.5); a21 ~ Normal(0, 0.5); a22 ~ Normal(-0.5, 0.3)
-    wls ~ Normal(0, 0.5); qw ~ Normal(0, 0.5); diffm ~ Exponential(1)
+    wls ~ Normal(0, 0.5); qw ~ Normal(0, 0.5); diffm ~ Exponential(1); diff21 ~ Normal(0, 0.5)
     l31 ~ Normal(0, 1); smoke_threshold ~ Normal(0, 1)
     b0 ~ 1 + age + treatment + (1 | subject)
     q0 ~ 1 + (1 | subject)
@@ -288,7 +299,7 @@ Kfull(d) = @brm d begin
                     b0, q0, cm, s0, m0) do dt, wl, sR, mR, smk, lb0, lq0, lcm, ls0, lm0
         zs::vector[dims(dt)[1]] ~ std_normal()
         zm::vector[dims(dt)[1]] ~ std_normal()
-        traj = ema_full(dt, wl, lb0, bm, a12, a21, a22, lcm, wls, lq0, qw, diffm, ls0, lm0, zs, zm)
+        traj = ema_full(dt, wl, lb0, bm, a12, a21, a22, lcm, wls, lq0, qw, diffm, diff21, ls0, lm0, zs, zm)
         st = traj[1:dims(dt)[1]]
         mo = traj[(dims(dt)[1] + 1):(2 * dims(dt)[1])]
         sR ~ normal(st, sigma_s)
@@ -306,22 +317,26 @@ end
 Kfull3(d) = @brm d begin
     sigma_s ~ Exponential(1); sigma_m ~ Exponential(1)
     bm ~ Normal(0, 0.5); a12 ~ Normal(0, 0.5); a21 ~ Normal(0, 0.5); a22 ~ Normal(-0.5, 0.3)
-    wls ~ Normal(0, 0.5); qw ~ Normal(0, 0.5); diffm ~ Exponential(1)
+    qw ~ Normal(0, 0.5); diffm ~ Exponential(1); diff21 ~ Normal(0, 0.5)   # + process-noise corr
     l31 ~ Normal(0, 1); smoke_threshold ~ Normal(0, 1)
-    b0 ~ 1 + age + treatment + (1 | subject)
-    q0 ~ 1 + (1 | subject)
-    cm ~ 1 + age + treatment + (1 | subject)
+    mm_s ~ Normal(0, 0.5); mm_m ~ Normal(0, 0.5)                            # manifest means
+    # the four subject-varying params (b0, q0, cint_mood, wl_stress) share ONE
+    # correlated block (brms (1|p|subject) = ctsem's free 4x4 rawPCov).
+    b0  ~ 1 + age + treatment + (1 | p | subject)
+    q0  ~ 1 +                   (1 | p | subject)
+    cm  ~ 1 + age + treatment + (1 | p | subject)
+    wls ~ 1 +                   (1 | p | subject)                           # wl_stress per-subject
     s0 ~ 1 + (1 | subject)
     m0 ~ 1 + (1 | subject)
     stress ~ kernel(dt_grid, workload, stressReport, moodReport,
-                    b0, q0, cm, s0, m0) do dt, wl, sR, mR, lb0, lq0, lcm, ls0, lm0
+                    b0, q0, cm, wls, s0, m0) do dt, wl, sR, mR, lb0, lq0, lcm, lwls, ls0, lm0
         zs::vector[dims(dt)[1]] ~ std_normal()
         zm::vector[dims(dt)[1]] ~ std_normal()
-        traj = ema_full(dt, wl, lb0, bm, a12, a21, a22, lcm, wls, lq0, qw, diffm, ls0, lm0, zs, zm)
+        traj = ema_full(dt, wl, lb0, bm, a12, a21, a22, lcm, lwls, lq0, qw, diffm, diff21, ls0, lm0, zs, zm)
         st = traj[1:dims(dt)[1]]
         mo = traj[(dims(dt)[1] + 1):(2 * dims(dt)[1])]
-        sR ~ normal(st, sigma_s)
-        mR ~ normal(mo, sigma_m)
+        sR ~ normal(mm_s .+ st, sigma_s)
+        mR ~ normal(mm_m .+ mo, sigma_m)
         st
     end
     # discrete indicator: top-level, against the ragged latent's flat backing.
