@@ -10,12 +10,12 @@
 # directly rather than through adaptive_centering_problem).
 #
 # Illustrative recovery (strato2, StanBlocks bec23bc, 20 subjects x 30, 600 draws,
-# seed 1) — z = (est - true)/sd; most params land within ~1-2 sd:
-#   the state-dependent shock correlation `cz` (= ctsem's `rs`) is the WIDEST
-#   posterior but RECOVERS (~0.69 vs 0.70) once there are enough subjects — echoing
-#   fitDemo.Rmd 288-296 ("generating through ctsem it recovers"). The coupling term
-#   `a21` stays biased: a single-step-EKF / integration-path cost (a substepped
-#   mesh, as in ema_kernel_marginalized.jl, is the faithful refinement).
+# seed 1) — z = (est - true)/sd. With the SUBSTEPPED EKF (nsub=8) matched to
+# fine-grid generation, NEARLY ALL params land within ~1 sd. In particular the
+# coupling term `a21` (z 7.9 -> -1.3) and the state-dependent shock correlation
+# `cz` (= ctsem's `rs`, z ~0.1, est ~0.74 vs 0.70) both RECOVER: single-step Euler
+# was the integration-path cost Driver flags (fitDemo.Rmd 288-296); substepping
+# closes it. (Earlier single-step runs left a21 grossly biased.)
 #
 # Run: julia --project=test research/ema_ctsem/ema_state_dependent_fit.jl
 

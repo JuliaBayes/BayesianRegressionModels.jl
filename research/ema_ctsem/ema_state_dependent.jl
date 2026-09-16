@@ -40,23 +40,22 @@ StanBlocks.@deffun begin
             b0::real, bm::real, a12::real, a21::real, a22::real, cintm::real,
             qd0::real, qd1::real, cz::real, sdm::real,
             l31::real, thr::real, r1::real, r2::real,
-            ms0::real, mm0::real, P0s::real, P0m::real)::real = begin
+            ms0::real, mm0::real, P0s::real, P0m::real, nsub::int)::real = begin
         ms=ms0; mm=mm0; p11=P0s; p12=0.0; p22=P0m; ll=0.0
         for t in 1:T
             if t>1
-                d=dt[t]
-                # drift + Jacobian at the current estimate (softplus self-decay on stress)
-                sp=log1p_exp(b0+bm*mm); sig=inv_logit(b0+bm*mm)
-                nms=ms+(-sp*ms+a12*mm)*d; nmm=mm+(a21*ms+a22*mm+cintm)*d
-                f11=1-d*sp; f12=d*(a12-bm*sig*ms); f21=d*a21; f22=1+d*a22
-                # STATE-DEPENDENT, CORRELATED process-noise covariance Q(x_hat)*d
-                sds=exp(qd0+qd1*mm)                # stress sd depends on MOOD
-                corr=tanh(cz*ms)                    # shock corr depends on STRESS (fisher-z)
-                qs=sds*sds*d; qc=corr*sds*sdm*d; qm=sdm*sdm*d
-                # P = F P F' + Q
-                fp11=f11*p11+f12*p12; fp12=f11*p12+f12*p22; fp21=f21*p11+f22*p12; fp22=f21*p12+f22*p22
-                np11=fp11*f11+fp12*f12+qs; np12=fp11*f21+fp12*f22+qc; np22=fp21*f21+fp22*f22+qm
-                ms=nms; mm=nmm; p11=np11; p12=np12; p22=np22
+                h=dt[t]/nsub                       # SUBSTEPPED continuous-time predict
+                for st in 1:nsub
+                    sp=log1p_exp(b0+bm*mm); sig=inv_logit(b0+bm*mm)
+                    nms=ms+(-sp*ms+a12*mm)*h; nmm=mm+(a21*ms+a22*mm+cintm)*h
+                    f11=1-h*sp; f12=h*(a12-bm*sig*ms); f21=h*a21; f22=1+h*a22
+                    sds=exp(qd0+qd1*mm)            # stress sd depends on MOOD
+                    corr=tanh(cz*ms)               # shock corr depends on STRESS (fisher-z)
+                    qs=sds*sds*h; qc=corr*sds*sdm*h; qm=sdm*sdm*h
+                    fp11=f11*p11+f12*p12; fp12=f11*p12+f12*p22; fp21=f21*p11+f22*p12; fp22=f21*p12+f22*p22
+                    np11=fp11*f11+fp12*f12+qs; np12=fp11*f21+fp12*f22+qc; np22=fp21*f21+fp22*f22+qm
+                    ms=nms; mm=nmm; p11=np11; p12=np12; p22=np22
+                end
             end
             # Gaussian update (2 continuous indicators, loadings [1;1])
             v1=ys[t]-ms; v2=ym[t]-mm; s11=p11+r1; s12=p12; s22=p22+r2
@@ -81,17 +80,20 @@ StanBlocks.@deffun begin
             b0::real, bm::real, a12::real, a21::real, a22::real, cintm::real,
             qd0::real, qd1::real, cz::real, sdm::real,
             l31::real, thr::real, r1::real, r2::real,
-            ms0::real, mm0::real, P0s::real, P0m::real)::vector[T] = begin
+            ms0::real, mm0::real, P0s::real, P0m::real, nsub::int)::vector[T] = begin
         out::vector[T]; ms=ms0; mm=mm0; p11=P0s; p12=0.0; p22=P0m
         for t in 1:T
             if t>1
-                d=dt[t]; sp=log1p_exp(b0+bm*mm); sig=inv_logit(b0+bm*mm)
-                nms=ms+(-sp*ms+a12*mm)*d; nmm=mm+(a21*ms+a22*mm+cintm)*d
-                f11=1-d*sp; f12=d*(a12-bm*sig*ms); f21=d*a21; f22=1+d*a22
-                sds=exp(qd0+qd1*mm); corr=tanh(cz*ms); qs=sds*sds*d; qc=corr*sds*sdm*d; qm=sdm*sdm*d
-                fp11=f11*p11+f12*p12; fp12=f11*p12+f12*p22; fp21=f21*p11+f22*p12; fp22=f21*p12+f22*p22
-                np11=fp11*f11+fp12*f12+qs; np12=fp11*f21+fp12*f22+qc; np22=fp21*f21+fp22*f22+qm
-                ms=nms; mm=nmm; p11=np11; p12=np12; p22=np22
+                h=dt[t]/nsub
+                for st in 1:nsub
+                    sp=log1p_exp(b0+bm*mm); sig=inv_logit(b0+bm*mm)
+                    nms=ms+(-sp*ms+a12*mm)*h; nmm=mm+(a21*ms+a22*mm+cintm)*h
+                    f11=1-h*sp; f12=h*(a12-bm*sig*ms); f21=h*a21; f22=1+h*a22
+                    sds=exp(qd0+qd1*mm); corr=tanh(cz*ms); qs=sds*sds*h; qc=corr*sds*sdm*h; qm=sdm*sdm*h
+                    fp11=f11*p11+f12*p12; fp12=f11*p12+f12*p22; fp21=f21*p11+f22*p12; fp22=f21*p12+f22*p22
+                    np11=fp11*f11+fp12*f12+qs; np12=fp11*f21+fp12*f22+qc; np22=fp21*f21+fp22*f22+qm
+                    ms=nms; mm=nmm; p11=np11; p12=np12; p22=np22
+                end
             end
             v1=ys[t]-ms; v2=ym[t]-mm; s11=p11+r1; s12=p12; s22=p22+r2
             det=s11*s22-s12*s12; si11=s22/det; si12=-s12/det; si22=s11/det
@@ -112,14 +114,18 @@ StanBlocks.@deffun begin
             b0::real, bm::real, a12::real, a21::real, a22::real, cintm::real,
             qd0::real, qd1::real, cz::real, sdm::real,
             l31::real, thr::real, r1::real, r2::real,
-            ms0::real, mm0::real, P0s::real, P0m::real)::vector[T] = begin
+            ms0::real, mm0::real, P0s::real, P0m::real, nsub::int)::vector[T] = begin
         out::vector[T]; s=normal_rng(ms0,sqrt(P0s)); m=normal_rng(mm0,sqrt(P0m))
         for t in 1:T
             if t>1
-                d=dt[t]; sds=exp(qd0+qd1*m); corr=tanh(cz*s)
-                zs=normal_rng(0.,1.); zc=normal_rng(0.,1.); z2=corr*zs+sqrt(1-corr*corr)*zc
-                s=s+(-log1p_exp(b0+bm*m)*s+a12*m)*d+sds*sqrt(d)*zs
-                m=m+(a21*s+a22*m+cintm)*d+sdm*sqrt(d)*z2
+                h=dt[t]/nsub
+                for st in 1:nsub
+                    sds=exp(qd0+qd1*m); corr=tanh(cz*s)
+                    zs=normal_rng(0.,1.); zc=normal_rng(0.,1.); z2=corr*zs+sqrt(1-corr*corr)*zc
+                    ds=(-log1p_exp(b0+bm*m)*s+a12*m)*h+sds*sqrt(h)*zs
+                    dm=(a21*s+a22*m+cintm)*h+sdm*sqrt(h)*z2
+                    s=s+ds; m=m+dm
+                end
             end
             out[t]=normal_rng(s,sqrt(r1))
         end
@@ -139,10 +145,14 @@ function fixture(; n=8, nt=15, seed=20260916)
             dv = t==1 ? 0.0 : exp(0.3*randn2())        # log-normal irregular intervals, median 1
             push!(d, t==1 ? 1.0 : dv)
             if t>1
-                sds=exp(-0.2+0.3*m); corr=tanh(0.7*s)
-                zs=randn2(); zc=randn2(); z2=corr*zs+sqrt(max(1-corr*corr,0.0))*zc
-                s=s+(-log(1+exp(0.5+0.4*m))*s-0.25*m)*dv+sds*sqrt(dv)*zs
-                m=m+(-0.30*s-0.60*m+0.3)*dv+0.6*sqrt(dv)*z2
+                ng=8; hh=dv/ng                          # fine-grid Euler-Maruyama, matched to the EKF's nsub
+                for _ in 1:ng
+                    sds=exp(-0.2+0.3*m); corr=tanh(0.7*s)
+                    zs=randn2(); zc=randn2(); z2=corr*zs+sqrt(max(1-corr*corr,0.0))*zc
+                    ds=(-log(1+exp(0.5+0.4*m))*s-0.25*m)*hh+sds*sqrt(hh)*zs
+                    dm=(-0.30*s-0.60*m+0.3)*hh+0.6*sqrt(hh)*z2
+                    s=s+ds; m=m+dm
+                end
             end
             push!(a, s+sqrt(0.3)*randn2()); push!(b, m+sqrt(0.3)*randn2())
             p=1/(1+exp(-(1.2*s-1))); push!(c, rnd()<p ? 1 : 0)
@@ -178,7 +188,7 @@ ema_state_dependent(d) = @brm d begin
     m0    ~ Normal(0.5, 1.0)              # T0 mood mean
     pred ~ kernel(dt, stressReport, moodReport, smoked) do dti, ys, ym, smk
         ys ~ ema_sd(ym, smk, dti, b0, bm, a12, a21, a22, cintm, qd0, qd1, cz, sdm,
-                    l31, thr, r1, r2, s0, m0, 0.6, 0.5)
+                    l31, thr, r1, r2, s0, m0, 0.6, 0.5, 8)   # nsub=8 substeps per interval
         ys
     end
 end
