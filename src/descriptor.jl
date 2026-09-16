@@ -1269,6 +1269,10 @@ _brm_term_label(f, t) = _sb_term_key(t)
 _brm_term_label(f, t, _target) = _brm_term_label(f, t)
 _brm_term_label(::typeof(dar), t, target) =
     Symbol(:dar_, target, :_, name(_sb_named_inner(:dar, only(getargs(t)))))
+_brm_term_label(::typeof(rw), t, target) =
+    Symbol(:rw_, target, :_, name(_sb_named_inner(:rw, only(getargs(t)))))
+_brm_term_label(::typeof(cdar), t, target) =
+    Symbol(:cdar_, target, :_, name(_sb_named_inner(:cdar, only(getargs(t)))))
 
 _brm_term_owner_labels(f, t, target) = (_brm_term_label(f, t, target),)
 function _brm_term_owner_labels(::typeof(hsgp), t, target)
@@ -1307,6 +1311,10 @@ function _brm_term_parameter_bindings(::typeof(hsgp), t)
 end
 _brm_term_parameter_bindings(::typeof(dar), _t) =
     (; ar=:beta, sd=:sigma, innovations=:z)
+_brm_term_parameter_bindings(::typeof(rw), _t) =
+    (; sd=:sigma, innovations=:z)
+_brm_term_parameter_bindings(::typeof(cdar), _t) =
+    (; ar=:rho, sd=:sigma, innovations=:eta)
 _brm_term_parameter_bindings(_f, _t) = NamedTuple()
 
 function _brm_term_coordinate_entries(brmi, logical::Symbol)
@@ -1363,6 +1371,8 @@ public term-output label BRM derives from the formula (for example
 | ungrouped `hsgp(...)` | `:length_scale`, `:sd`, `:basis_weights` |
 | grouped `hsgp(...; by=...)` | `:length_scale`, `:sd` |
 | `dar(...)` | `:ar`, `:sd`, `:innovations` |
+| `rw(...)` | `:sd`, `:innovations` |
+| `cdar(...)` | `:ar`, `:sd`, `:innovations` |
 
 The returned named tuple contains `logical`, `term`, `parameter`, the owning
 [`BRMOutput`](@ref), `coordinates`, and the formula LHS `link` / `inverse_link`.

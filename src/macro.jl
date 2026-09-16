@@ -659,7 +659,7 @@ _effect_address_symbol(x) = error(
 # of its identity. Keyword arguments are likewise excluded -- `hsgp(x; k=20)`
 # and `hsgp(x)` are the same term with different tuning.
 const _TERM_HEADS =
-    (:s, :t2, :mo, :mo1, :me, :interval_censored, :gp, :hsgp, :ar, :dar)
+    (:s, :t2, :mo, :mo1, :me, :interval_censored, :gp, :hsgp, :ar, :dar, :rw, :cdar)
 
 _is_term_address(x) = Meta.isexpr(x, :call) && !isempty(x.args) &&
                       x.args[1] isa Symbol && x.args[1] in _TERM_HEADS

@@ -74,6 +74,46 @@ be finite and strictly increasing. Only `p=1` is supported. Dispatch tag — see
 function dar end
 
 """
+    rw(time)
+
+Random-walk trajectory marker. The StanBlocks backend emits the path
+
+`x[1] = 0`, `x[t+1] = x[t] + sigma * z[t]`,
+
+over the sorted distinct values of `time` — i.e. `dar(time)` with the
+differences' persistence fixed at zero — with `sigma > 0` and standardized
+innovations `z`; each row reads the point of its own time value, so rows may
+share a time (several groups per day get one shared walk). It is a direct
+predictor summand: a formula intercept supplies the initial level and no
+additional population coefficient multiplies the path. `sd(lp, rw(time))`
+addresses `sigma`; the term has no persistence, so `ar(lp, rw(time))` is
+refused. On replay the grid may gain new times (a forecast). Dispatch tag —
+see `_sb_rw1`.
+"""
+function rw end
+
+"""
+    cdar(step; by=group, cor=C)
+
+Grouped, correlated, damped random-walk deviation marker. For every level `g`
+of the `by` group column and every distinct value `w` of the `step` column
+(sorted), the StanBlocks backend emits
+
+`delta[:, 1] = sigma * L * eta[:, 1]`,
+`delta[:, w] = rho * delta[:, w-1] + sigma * sqrt(1 - rho^2) * L * eta[:, w]`,
+
+with `L L' = C` the Cholesky factor of the group correlation (or covariance)
+matrix `C` — a `P × P` matrix given as a data field or a literal, `P` the number
+of group levels — `0 <= rho <= 1`, `sigma > 0`, and standardized innovations
+`eta`. Each row contributes `delta[group(row), step(row)]` directly, with no
+additional population coefficient. `sd(lp, cdar(step))` addresses `sigma` and
+`ar(lp, cdar(step))` addresses `rho`. On replay the group levels and `C` are
+frozen from the fit while the step grid may grow (a forecast). Dispatch tag —
+see `_sb_cdar`.
+"""
+function cdar end
+
+"""
     Horseshoe
 
 Carvalho-Polson-Scott horseshoe shrinkage prior marker. Use as a prior

@@ -1558,6 +1558,66 @@ _sb_dar1 = StanBlocks.@slic begin
     return differenced_ar1_path(beta, sigma, z)
 end
 
+# Random-walk path: `dar` with the increments' persistence fixed at zero, so
+# the trajectory is the zero-started cumulative sum of scaled innovations. The
+# same zero start keeps the formula intercept as the initial level.
+StanBlocks.@deffun begin
+    random_walk_path(sigma::real, z::vector[n])::vector[n + 1] =
+        append_row(0., sigma * cumulative_sum(z))
+end
+
+# Each row reads the walk at its own grid point, so a long frame whose rows share
+# times (several groups per day) gets ONE shared walk — identical to the plain
+# path when the times are unique.
+StanBlocks.@deffun begin
+    random_walk_rows(sigma::real, z::vector[n], idx::int[N])::vector[N] = begin
+        x = random_walk_path(sigma, z)
+        out::vector[N]
+        for i in 1:N
+            out[i] = x[idx[i]]
+        end
+        out
+    end
+end
+
+_sb_rw1 = StanBlocks.@slic begin
+    sigma ~ normal(0., 0.2; lower=0.)
+    z ~ std_normal(; n=n_steps - 1)
+    return random_walk_rows(sigma, z, time_idx)
+end
+
+# Grouped correlated damped walk: per-group deviations over W steps whose
+# innovations are correlated across the P groups by the Cholesky factor `L`
+# (data, from the term's `cor=`), damped by `rho` with the stationary scaling
+# `sigma * sqrt(1 - rho^2)`; each row reads the deviation of its own group at
+# its own step. `eta` is column-major `P × W`.
+StanBlocks.@deffun begin
+    correlated_damped_walk(sigma::real, rho::real, eta::vector[PW], L::matrix[P, P], W::int,
+                           group_idx::int[N], step_idx::int[N])::vector[N] = begin
+        E = to_matrix(eta, P, W)
+        delta::matrix[P, W]
+        prev = sigma * (L * col(E, 1))
+        delta[:, 1] = prev
+        scale = sigma * sqrt(1.0 - rho * rho)
+        for w in 2:W
+            prev = rho * prev + scale * (L * col(E, w))
+            delta[:, w] = prev
+        end
+        out::vector[N]
+        for i in 1:N
+            out[i] = delta[group_idx[i], step_idx[i]]
+        end
+        out
+    end
+end
+
+_sb_cdar = StanBlocks.@slic begin
+    sigma ~ normal(0., 0.2; lower=0.)
+    rho ~ normal(0.5, 0.2; lower=0., upper=1.)
+    eta ~ std_normal(; n=n_groups * n_steps)
+    return correlated_damped_walk(sigma, rho, eta, L, n_steps, group_idx, step_idx)
+end
+
 # Penalized 1-D thin-plate regression spline. `Xnull` contains the unpenalized
 # polynomial null space {1, x}; `Zpen` is the range-space basis after the
 # wiggliness penalty has been diagonalized and absorbed into the columns. The
@@ -3848,6 +3908,41 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             new_data[key] = [raw[r] for r in rows]
         end
         new_preproc[key] = e
+    elseif e.kind === :rw
+        # `rw(time)`: the grid may gain new steps; each row reads its own point.
+        raw = _sb_df_column(df, e.raw_ref)
+        raw isa AbstractVector || error("sbimpl: reprocess: `rw` time column must be a vector")
+        all(isfinite, raw) || error("sbimpl: reprocess: `rw` time axis must be finite")
+        steps = _brm_cdar_levels(vcat(e.const_.steps, collect(Float64, raw)))
+        time_idx = [searchsortedfirst(steps, Float64(v)) for v in raw]
+        k = e.const_.keys
+        new_data[k.n_steps] = length(steps)
+        new_data[k.time_idx] = time_idx
+        push!(handled, k.n_steps)
+        new_preproc[key] = PreprocEntry(:rw, merge(e.const_, (; steps)), e.raw_ref, true)
+    elseif e.kind === :cdar
+        # `cdar(step; by=group, cor=C)`: levels and `L` are frozen from the fit (the
+        # correlation is a hyperparameter of the term — rebuild the model to change
+        # it or the level set); the step grid may gain new steps.
+        step_col, group_col = e.raw_ref
+        step_raw = _sb_df_column(df, step_col)
+        group_raw = _sb_df_column(df, group_col)
+        (step_raw isa AbstractVector && group_raw isa AbstractVector) || error(
+            "sbimpl: reprocess: `cdar` step and group columns must be vectors")
+        all(isfinite, step_raw) || error("sbimpl: reprocess: `cdar` step axis must be finite")
+        steps = _brm_cdar_levels(vcat(e.const_.steps, collect(step_raw)))
+        step_idx, group_idx = _brm_cdar_indices(step_raw, steps, group_raw, e.const_.groups;
+                                                prefix="sbimpl: reprocess")
+        k = e.const_.keys
+        new_data[k.n_groups] = length(e.const_.groups)
+        new_data[k.n_steps] = length(steps)
+        new_data[k.L] = e.const_.L
+        new_data[k.group_idx] = group_idx
+        new_data[k.step_idx] = step_idx
+        for other in (k.n_groups, k.n_steps, k.L, k.group_idx)
+            push!(handled, other)
+        end
+        new_preproc[key] = PreprocEntry(:cdar, merge(e.const_, (; steps)), e.raw_ref, true)
     else
         error("sbimpl: reprocess: unknown preproc kind `$(e.kind)` for key `$key`")
     end
@@ -5644,7 +5739,7 @@ _sb_classify_term!(t::ExprColumn, pop_terms, ran_terms, direct_terms) = begin
     f = getf(t)
     f === (|) && (push!(ran_terms, t); return)
     (f === offset || f === mo1 || f === s || f === t2 || f === gp ||
-     f === hsgp || f === dar) &&
+     f === hsgp || f === dar || f === rw || f === cdar) &&
         (push!(direct_terms, t); return)
     push!(pop_terms, t)
 end
@@ -6141,7 +6236,7 @@ _sb_term_slot_config(::Val{:sd_rn}, entry) = (; prior=entry.spec.expression)
 _sb_term_slot_config(::Val{:sd_nr}, entry) = (; prior=entry.spec.expression)
 _sb_term_slot_config(::Val{:sigma}, entry) =
     _sb_gp_scale_prior(entry.spec, _sb_term_prior_spelling(entry);
-        default=getf(entry.term) === dar ?
+        default=getf(entry.term) in (dar, rw, cdar) ?
             "`Normal(0, 0.2)` truncated to be positive" :
             "`LogNormal(0, 1)` truncated to be positive")
 _sb_term_slot_config(::Val{:ar}, entry) =
@@ -6469,6 +6564,22 @@ function _sb_dar_submodel_expr(term_overrides, t)
     Base.merge(_sb_dar1, stmts...)
 end
 
+function _sb_rw_submodel_expr(term_overrides, t)
+    sigma_cfg = _sb_term_cfg(term_overrides, t, :sigma)
+    isnothing(sigma_cfg) && return :_sb_rw1
+    Base.merge(_sb_rw1, _sb_gp_prior_stmt(:sigma, sigma_cfg))
+end
+
+function _sb_cdar_submodel_expr(term_overrides, t)
+    rho_cfg = _sb_term_cfg(term_overrides, t, :ar)
+    sigma_cfg = _sb_term_cfg(term_overrides, t, :sigma)
+    (isnothing(rho_cfg) && isnothing(sigma_cfg)) && return :_sb_cdar
+    stmts = Any[]
+    isnothing(rho_cfg) || push!(stmts, _sb_gp_prior_stmt(:rho, rho_cfg))
+    isnothing(sigma_cfg) || push!(stmts, _sb_gp_prior_stmt(:sigma, sigma_cfg))
+    Base.merge(_sb_cdar, stmts...)
+end
+
 # The single carrier every prior surface rides on. Folding the term dict into
 # the record `_sb_effect_prior_overrides` already produces keeps the whole
 # threading path — nine `_sb_emit!`/`_sb_sampling!` signatures deep — unchanged,
@@ -6619,6 +6730,16 @@ function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(dar), t, su
                                term_overrides=Dict{Symbol,Any}(),
                                mod::Module=@__MODULE__)
     push!(summands, _sb_predictor_term!(stmts, data, dar, t; target, term_overrides))
+end
+function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(rw), t, summands;
+                               term_overrides=Dict{Symbol,Any}(),
+                               mod::Module=@__MODULE__)
+    push!(summands, _sb_predictor_term!(stmts, data, rw, t; target, term_overrides))
+end
+function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(cdar), t, summands;
+                               term_overrides=Dict{Symbol,Any}(),
+                               mod::Module=@__MODULE__)
+    push!(summands, _sb_predictor_term!(stmts, data, cdar, t; target, term_overrides))
 end
 _sb_emit_direct_expr!(_stmts, _data, _target::Symbol, f, _t, _summands; kwargs...) =
     error("sbimpl: unsupported direct-summand term `$f`")
@@ -9392,6 +9513,71 @@ _sb_predictor_term!(stmts, data, ::typeof(dar), t;
         submodel, term_overrides, t; time=xname)))
     col_name
 end
+# `rw(time)` is the pure random-walk trajectory: `dar` without a persistence
+# coefficient. It owns its innovation scale and innovations; the formula
+# intercept is the initial level.
+_sb_predictor_term!(stmts, data, ::typeof(rw), t;
+                    target::Symbol, term_overrides=Dict{Symbol,Any}(), kwargs...) = begin
+    xname, raw = _sb_inner_data(:rw, only(getargs(t)))
+    prepared = _brm_prepare_term(t, target,
+        (; data=Dict{Symbol,Any}(xname => raw)))
+    st = prepared.state
+    col_name = Symbol(:rw_, target, :_, xname)
+    keys_ = (; n_steps=Symbol(col_name, :_n_steps), time_idx=Symbol(col_name, :_time_idx))
+    for key in values(keys_)
+        haskey(data, key) && error("sbimpl: `rw` reserves data key `$key`, but that name is already used")
+    end
+    data[keys_.n_steps] = st.n_steps
+    data[keys_.time_idx] = st.time_idx
+    # replay: the grid may grow (a forecast appends steps); recorded on the index key
+    _sb_record_preproc!(data, keys_.time_idx, PreprocEntry(:rw, (; steps=st.steps, keys=keys_), xname, true))
+    submodel = _sb_rw_submodel_expr(term_overrides, t)
+    push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
+        submodel, term_overrides, t; keys_...)))
+    col_name
+end
+# `cdar(step; by=group, cor=C)`: the grouped correlated damped walk. The shared
+# preparation resolves the step grid, the group levels, the index maps and the
+# Cholesky factor; they ride as data under the term's own name.
+_sb_predictor_term!(stmts, data, ::typeof(cdar), t;
+                    target::Symbol, term_overrides=Dict{Symbol,Any}(), kwargs...) = begin
+    args, kw = getargs(t), getkwargs(t)
+    length(args) == 1 || error("sbimpl: `cdar(step; by=group, cor=C)` needs exactly one step axis")
+    haskey(kw, :by) || error("sbimpl: `cdar(step; by=group, cor=C)` needs `by=`")
+    haskey(kw, :cor) || error("sbimpl: `cdar(step; by=group, cor=C)` needs `cor=`")
+    xname, raw = _sb_inner_data(:cdar, only(args))
+    gname, graw = _sb_inner_data(:cdar, kw.by)
+    ctx = Dict{Symbol,Any}(xname => raw, gname => graw)
+    if kw.cor isa NamedColumn
+        cname, craw = _sb_inner_data(:cdar, kw.cor)
+        ctx[cname] = craw
+        # the prepass stashed the raw matrix field; it is a fitted constant of this term
+        # (its factor is frozen on replay), so it replays as one
+        haskey(data, cname) && _sb_record_preproc!(data, cname, PreprocEntry(:static, craw, nothing, false))
+    end
+    prepared = _brm_prepare_term(t, target, (; data=ctx))
+    st = prepared.state
+    col_name = Symbol(:cdar_, target, :_, xname)
+    keys_ = (; n_groups=Symbol(col_name, :_n_groups), n_steps=Symbol(col_name, :_n_steps),
+               L=Symbol(col_name, :_L), group_idx=Symbol(col_name, :_group_idx),
+               step_idx=Symbol(col_name, :_step_idx))
+    for key in values(keys_)
+        haskey(data, key) && error("sbimpl: `cdar` reserves data key `$key`, but that name is already used")
+    end
+    data[keys_.n_groups] = st.n_groups
+    data[keys_.n_steps] = st.n_steps
+    data[keys_.L] = st.L
+    data[keys_.group_idx] = st.group_idx
+    data[keys_.step_idx] = st.step_idx
+    # replay: the group levels and the factor are constants of the fitted term; the step
+    # grid may grow (a forecast). Recorded on the step-index key; the other keys ride along.
+    _sb_record_preproc!(data, keys_.step_idx, PreprocEntry(:cdar,
+        (; steps=st.steps, groups=st.groups, L=st.L, keys=keys_), (xname, gname), true))
+    submodel = _sb_cdar_submodel_expr(term_overrides, t)
+    push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
+        submodel, term_overrides, t; keys_...)))
+    col_name
+end
 # Vector-wise wrapper predictors: `zscale`, `standardize`, and `center`
 # need the whole inner column to compute (mean / sd are not element-wise),
 # so the generic broadcast-based fallback in `_sb_materialize_vec` won't
@@ -9435,7 +9621,7 @@ function _sb_materialize_protect_term!(stmts, data, f, t)
         return cn
     catch err
         _ee = _as_error_exception(err); isnothing(_ee) && rethrow()
-        error("sbimpl: unsupported predictor-term function `$f` (supported: `mo`, `mo1`, `me`, `interval_censored`, `s`, `ar`, `dar`, `protect`, `zscale`, `center`, `standardize`, or any expression in raw data columns) -- materialization failed: $(_ee.msg)")
+        error("sbimpl: unsupported predictor-term function `$f` (supported: `mo`, `mo1`, `me`, `interval_censored`, `s`, `ar`, `dar`, `rw`, `cdar`, `protect`, `zscale`, `center`, `standardize`, or any expression in raw data columns) -- materialization failed: $(_ee.msg)")
     end
 end
 _sb_predictor_term!(stmts, data, f::Function, t; kwargs...) =
