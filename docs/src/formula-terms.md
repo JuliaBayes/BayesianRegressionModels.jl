@@ -1171,19 +1171,24 @@ state directly — the log-reproduction-number random walk of a renewal model
 Before this seam the only way to get such a vector was a one-cell `kernel(...)`
 with a dummy grouping random effect.
 
-```julia
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+using StanBlocks
 StanBlocks.@deffun begin
     rw_path(init::real, sig::real, eps::vector[K])::vector[K + 1] =
         append_row(init, init + sig * cumulative_sum(eps))
 end
-
-@brm df begin
+random_walk = (@brm begin
     sig  ~ Normal(0.0, 0.05; lower=0.0)
     init ~ Normal(0.0, 1.0)
     eps  ~ MvNormal(zeros(length(time) - 1), 1.0)   # vector[T-1] of iid N(0, 1)
     walk = rw_path(init, sig, eps)
     y ~ Normal(walk, 0.3)
-end
+end)((;
+    time=collect(1.0:8),
+    y=[0.4, 1.1, 0.9, 1.6, 1.2, 2.0, 1.8, 2.5],
+))
+""", :random_walk; title="Random walk on a top-level vector parameter", require_stan=true)
 ```
 
 ### What it emits
