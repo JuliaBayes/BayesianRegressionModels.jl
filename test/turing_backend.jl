@@ -1559,6 +1559,56 @@ end
     @test_throws "is not a population coefficient" TuringBRMI(treated)
 end
 
+@testset "Turing extension — per-level random effects without an intercept" begin
+    # Decision `0wfo466`: `(0 + c | g)` codes every level of `c`, exactly as the
+    # SBBRMI backend does; a random intercept or `cmc=false` keeps K-1 dummies.
+    df = (;
+        c=repeat([1, 2, 3], 4),
+        g=repeat([1, 2, 3, 4]; inner=3),
+        y=[-2.4, -2.2, -2.0, -1.8, -1.7, -1.5, -1.2, -1.0, -0.9, -0.6, -0.4, -0.1],
+    )
+    plan_of(builder) = only(BRM._brm_turing_plan(builder(df)).random_effects)
+
+    cells = plan_of(@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + (0 + c | g)
+        y ~ Normal(mu, sigma)
+    end)
+    @test Tuple(col.label for col in cells.columns) ==
+          (:c_dummy_1, :c_dummy_2, :c_dummy_3)
+    @test cells.matrix == hcat((Float64.(df.c .== k) for k in 1:3)...)
+
+    treated = plan_of(@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + (1 + c | g)
+        y ~ Normal(mu, sigma)
+    end)
+    @test Tuple(col.label for col in treated.columns) ==
+          (:Intercept, :c_dummy_2, :c_dummy_3)
+
+    pinned = plan_of(@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + (0 + factor(c; cmc=false) | g)
+        y ~ Normal(mu, sigma)
+    end)
+    @test Tuple(col.label for col in pinned.columns) == (:c_dummy_2, :c_dummy_3)
+
+    uncorrelated = plan_of(@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + (0 + c || g)
+        y ~ Normal(mu, sigma)
+    end)
+    @test uncorrelated.zero_correlation
+    @test Tuple(col.label for col in uncorrelated.columns) ==
+          (:c_dummy_1, :c_dummy_2, :c_dummy_3)
+
+    @test TuringBRMI((@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + (0 + c | g)
+        y ~ Normal(mu, sigma)
+    end)(df)) isa TuringBRMI
+end
+
 @testset "Turing extension — categorical interactions" begin
     df = (;
         x=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
