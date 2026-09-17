@@ -1,5 +1,6 @@
-# Adaptive partial centering for ordinary random-effect blocks and ungrouped
-# squared-exponential HSGP basis weights.
+# Adaptive partial centering for ordinary random-effect blocks and
+# squared-exponential HSGP basis weights. Online HSGP adaptation is
+# ungrouped-only; the offline pilot selector feeds grouped emission too.
 #
 # This file owns only BRM/Stan emission semantics: which unconstrained
 # coordinates are one block's effects, optional LKJ-Cholesky free values, and
@@ -39,6 +40,11 @@ remains valid even when a physical high-frequency scale is `-Inf`.
 The result is a named tuple with `centeredness`, the candidate `losses`, an
 `admissible` mask, and the normalized `candidates`. This is an offline
 pilot-then-refit rule. It does not update geometry during warmup.
+
+The selected per-basis vector feeds `hsgp(...; centeredness=...)` directly —
+both the ungrouped and the grouped (`by=`) emission, whose spectral scales
+are shared across groups. Online adaptation during WarmupHMC
+(`adaptive_centering_problem` HSGP blocks) remains ungrouped-only.
 """
 function select_hsgp_centeredness(unit_weights::AbstractMatrix,
                                   log_scales::AbstractMatrix;

@@ -219,11 +219,14 @@ excludes the intercept, other covariates, and subject-specific random slopes.
 
 ### Fixed partial centering of HSGP weights
 
-For a raw, ungrouped squared-exponential HSGP, `centeredness` chooses the
-coordinate of each basis weight without changing its physical prior. It may be
-one scalar shared by all weights or a vector of length `prod(k)`, supplied
-literally or through a data column. With spectral standard deviation `s`, unit
-normal `z`, and centeredness `c` in `[0,1]`, BRM samples and reconstructs
+For a raw squared-exponential HSGP — ungrouped or grouped (`by=`) —
+`centeredness` chooses the coordinate of each basis weight without changing
+its physical prior. It may be one scalar shared by all weights or a vector of
+length `prod(k)`, supplied literally or through a data column. Grouped weights
+share their spectral scales across groups, so one per-basis vector serves
+every group; each group's weights are sampled in that shared partial frame.
+With spectral standard deviation `s`, unit normal `z`, and centeredness `c` in
+`[0,1]`, BRM samples and reconstructs
 
 ```text
 u ~ Normal(0, s^c)
@@ -239,9 +242,10 @@ into `NaN`.
 [`select_hsgp_centeredness`](@ref) applies the pilot rule used in the
 [adaptive HSGP case study](adaptive-centering.md): rows are pilot draws,
 columns are basis frequencies, and candidates are fixed before the refit. The
-selector is not an online warmup controller. Periodic, latent-input,
-group-specific, and `orthogonal_to` HSGPs reject nonzero partial centering
-until those geometries have their own verified coordinate contract.
+selector is not an online warmup controller. Periodic, latent-input, and
+`orthogonal_to` HSGPs reject nonzero partial centering until those geometries
+have their own verified coordinate contract. Online adaptation during
+WarmupHMC remains ungrouped-only.
 
 ### Interval-censored predictor
 
