@@ -3,10 +3,14 @@
 # The log-reproduction-number process is stated on the formula surface:
 #   single patch   log_R ~ 1 + rw(time)                                      (intercept = Z_1, sd(:, rw) = σ)
 #   six patches    log_R ~ 1 + rw(time) + cdar(week; by=patch, cor=C)        (shared walk + correlated damped weekly deviations)
-# and the per-patch seeds keep the PR's own prior line `log_I0 ~ MvNormal(seed_mean, 0.5)` (a prior
-# statement, not a regression term: `0 + factor(patch)` emits treatment contrasts, so it cannot give
-# one seed per patch — measured 2026-09-16). The mechanistic map — renewal recursion + reporting-delay
-# convolution + NegBin(mean, cluster²) — stays a family, as the PR itself writes it as a function.
+#   seeds          log_I0 ~ 0 + offset(seed_mean_row) + factor(patch)         (one cell mean per patch: m_g + δ_g)
+# The seeds are a formula line since decision 0woa6hh: an intercept-free predictor codes its first
+# categorical term by CELL MEANS (brms semantics), one coefficient per patch, so the PR's
+# `log I0_g ~ N(m_g, 0.5)` is the offset m_g plus a cell mean δ_g ~ N(0, 0.5). Before it, `0 +
+# factor(patch)` emitted K−1 treatment contrasts and the seeds had to stay the prior statement
+# `log_I0 ~ MvNormal(seed_mean, 0.5)` (kept in vector_params.jl). The mechanistic map — renewal
+# recursion + reporting-delay convolution + NegBin(mean, cluster²) — stays a family, as the PR itself
+# writes it as a function.
 #
 # Everything else (PMFs, simulation, the Stan functions, the fit + recovery helpers) comes from wren16.jl.
 #   Run: julia --project=test research/epi_renewal/formula_lines.jl [n_draws]
@@ -15,8 +19,17 @@ include(joinpath(@__DIR__, "wren16.jl"))   # main guarded
 
 # ── the six-patch observation family on the long (day, patch) frame ───────────
 # rows are column-major over (day, patch): i = t + (g - 1) * T, so `to_matrix` reshapes the row
-# vectors without copying; T = N / P. `log_I0` is the per-patch vector parameter.
+# vectors without copying; T = N / P. The family reads the per-patch seed vector; the formula line
+# `log_I0` is per ROW (constant within a patch), so `patch_seeds` reads each patch's first row.
 StanBlocks.@deffun begin
+    patch_seeds(log_I0_row::vector[N], pop::vector[P])::vector[P] = begin
+        T = N / P
+        out::vector[P]
+        for g in 1:P
+            out[g] = log_I0_row[(g - 1) * T + 1]
+        end
+        out
+    end
     patch_expected_flat(log_R::vector[N], log_I0::vector[P], gamma::real, pop::vector[P], dist_flat::vector[PP],
                         gen_pmf::vector[G], delay_pmf::vector[D])::vector[N] = begin
         T = N / P
@@ -73,15 +86,17 @@ patch_formula(d) = @brm d begin
     sd(:, rw(time)) ~ Normal(0.0, 0.05)                     # σ
     sd(:, cdar(week)) ~ Normal(0.0, 0.2)                    # σ_δ
     ar(:, cdar(week)) ~ Normal(0.8, 0.1)                    # ρ
-    log_I0  ~ MvNormal(seed_mean, 0.5)                      # per-patch seeds (the PR's line)
-    Yf      = patch_expected_flat(log_R, log_I0, gamma, pop, dist_flat, gen_pmf, delay_pmf)
-    cases_flat ~ patch_nb(log_R, log_I0, cluster, gamma, pop, dist_flat, gen_pmf, delay_pmf)
+    log_I0  ~ 0 + offset(seed_mean_row) + factor(patch)     # per-patch seeds m_g + δ_g: cell means, as a formula line
+    effect(log_I0, patch) ~ Normal(0.0, 0.5)                # δ_g
+    seeds   = patch_seeds(log_I0, pop)
+    Yf      = patch_expected_flat(log_R, seeds, gamma, pop, dist_flat, gen_pmf, delay_pmf)
+    cases_flat ~ patch_nb(log_R, seeds, cluster, gamma, pop, dist_flat, gen_pmf, delay_pmf)
 end
 
 # the long (day, patch) frame, column-major: row i = t + (g - 1) * T
 patch_long(p) = (; time=repeat(p.time; outer=p.n_patches), week=repeat(p.week; outer=p.n_patches),
                   patch=repeat(1:p.n_patches; inner=p.T), cases_flat=vec(p.cases),
-                  seed_mean=p.seed_mean, C=exp.(-p.dist ./ p.ell), pop=p.pop, dist_flat=vec(p.dist),
+                  seed_mean_row=repeat(p.seed_mean; inner=p.T), C=exp.(-p.dist ./ p.ell), pop=p.pop, dist_flat=vec(p.dist),
                   gen_pmf=p.gen_pmf, delay_pmf=p.delay_pmf)
 
 function main_formula(; n_draws=1000)
@@ -116,7 +131,10 @@ function main_formula(; n_draws=1000)
     T, P = p.T, p.n_patches
     PR = band_rows(r2, "log_R", vec(p.R); transform=exp, keys=j -> (; day=(j - 1) % T + 1, patch=(j - 1) ÷ T + 1))
     PY = band_rows(r2, "Yf", vec(p.Y_t); keys=j -> (; day=(j - 1) % T + 1, patch=(j - 1) ÷ T + 1))
-    PS = band_rows(r2, "log_I0", p.log_I0; keys=j -> (; patch=j))
+    PS = band_rows(r2, "seeds", p.log_I0; keys=j -> (; patch=j))
+    # the cell means themselves are term parameters: δ_g = log I0_g − m_g
+    PD = band_rows(r2, "cat_log_I0_patch_beta", p.log_I0 .- p.seed_mean; keys=j -> (; patch=j))
+    println(@sprintf("  six patches: seed cell means δ_g 95%% coverage %.0f%%", 100cov90(PD)))
     println(@sprintf("  six patches: 95%% coverage R %.0f%%, Yf %.0f%%, seeds %.0f%%", 100cov90(PR), 100cov90(PY), 100cov90(PS)))
     save_json("formula_single_R.json", R1); save_json("formula_patch_R.json", PR); save_json("formula_patch_Y.json", PY)
     save_json("formula_scalars.json", scalars)
