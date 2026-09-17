@@ -67,14 +67,20 @@ paths; ragged observations additionally require a sized RNG.
 Use `HurdlePoisson(lambda, p_zero)` when zeros arise from a separate hurdle
 and every count from the Poisson component is strictly positive:
 
-```julia
-using BayesianRegressionModels
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+using LogExpFunctions: logit
 
-hurdle_model = @brm data begin
+hurdle_counts = (@brm begin
     log(lambda) ~ 1 + x
-    logit(p_zero) ~ 1 + group
+    logit(p_zero) ~ 1 + factor(group)
     y ~ HurdlePoisson(lambda, p_zero)
-end
+end)((;
+    x=[0.0, 0.5, 1.0, 1.5, 2.0, 2.5],
+    group=[1, 1, 2, 2, 3, 3],
+    y=[0, 1, 0, 3, 2, 5],
+))
+""", :hurdle_counts; title="Hurdle-Poisson counts")
 ```
 
 Here `p_zero` is exactly ``P(Y=0)``. Conditional on crossing the hurdle,
