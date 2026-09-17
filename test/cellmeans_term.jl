@@ -86,20 +86,48 @@ end
           "vector[patch_n_levels] cat_mu_patch_beta;"
 end
 
-@testset "an explicit `ref=` requests treatment coding" begin
+@testset "`cmc=false` requests treatment coding (brms' switch)" begin
     df = cells_df()
     pinned = @brm df begin
-        mu ~ 0 + factor(patch; ref=1)
+        mu ~ 0 + factor(patch; cmc=false)
         y ~ Normal(mu, 1.0)
     end
     code = stan(pinned)
     @test declaration(code, "cat_mu_patch_beta") ==
           "vector[(patch_n_levels - 1)] cat_mu_patch_beta;"
     @test occursin("append_row(0.0, cat_mu_patch_beta)[patch_idx]", code)
+    # `cmc=true` is the default, spelled out.
+    explicit = @brm df begin
+        mu ~ 0 + factor(patch; cmc=true)
+        y ~ Normal(mu, 1.0)
+    end
+    @test declaration(stan(explicit), "cat_mu_patch_beta") ==
+          "vector[patch_n_levels] cat_mu_patch_beta;"
+    wrong = @brm df begin
+        mu ~ 0 + factor(patch; cmc=0)
+        y ~ Normal(mu, 1.0)
+    end
+    @test_throws "expects `true` or `false`" sbbrmi(wrong)
+
+    # A reference level alone does NOT opt out: as in R, a releveled factor
+    # without an intercept is still cell-mean coded (in its releveled order);
+    # with `cmc=false` it is K-1 contrasts against that reference.
+    releveled = @brm df begin
+        mu ~ 0 + factor(patch; ref=3)
+        y ~ Normal(mu, 1.0)
+    end
+    @test declaration(stan(releveled), "cat_mu_patch__ref_3_beta") ==
+          "vector[patch__ref_3_n_levels] cat_mu_patch__ref_3_beta;"
+    reffed = @brm df begin
+        mu ~ 0 + factor(patch; ref=3, cmc=false)
+        y ~ Normal(mu, 1.0)
+    end
+    @test declaration(stan(reffed), "cat_mu_patch__ref_3_beta") ==
+          "vector[(patch__ref_3_n_levels - 1)] cat_mu_patch__ref_3_beta;"
 
     # The cell means then pass to the next categorical term.
     passed = @brm df begin
-        mu ~ 0 + factor(patch; ref=1) + arm
+        mu ~ 0 + factor(patch; cmc=false) + arm
         y ~ Normal(mu, 1.0)
     end
     passed_code = stan(passed)
@@ -114,7 +142,7 @@ end
             period=[1, 2, 3, 1, 2, 3], y=[1, 1, 2, 2, 3, 3])
     ordinal = @brm od begin
         eta ~ 0 + x + period
-        log(disc) ~ 0 + factor(group; ref=1)
+        log(disc) ~ 0 + factor(group; cmc=false)
         y ~ Ordinal(Cumulative(), ProbitLink(), eta; discrimination=disc)
     end
     code = stan(ordinal)
@@ -124,8 +152,8 @@ end
           "vector[(group_n_levels - 1)] cat_log_disc_group_beta;"
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
 
-    # The discrimination predictor is not threshold-located: without the
-    # explicit reference it is an ordinary intercept-free predictor.
+    # The discrimination predictor is not threshold-located: without
+    # `cmc=false` it is an ordinary intercept-free predictor.
     free_disc = @brm od begin
         eta ~ 0 + x
         log(disc) ~ 0 + group

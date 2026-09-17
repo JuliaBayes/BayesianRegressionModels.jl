@@ -6001,7 +6001,7 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
                joint_spec.cat_lookup
     # The ONE categorical term this predictor codes by cell means (it has no
     # intercept), decided on the RAW formula terms: the `factor(...)` lowering
-    # in `_sb_terms` has already dropped an explicit `ref=`. Only the first
+    # in `_sb_terms` has already dropped the `cmc=false` opt-out. Only the first
     # direct term carrying that block name takes it.
     cellmeans_block = _brm_cellmeans_block(_brm_additive_terms(rhs);
         implicit_intercept=brmi_key in get(data, _SB_THRESHOLD_LOCATED_KEY, ()))
@@ -7004,7 +7004,7 @@ function _sb_emit_cat_cells!(stmts, col_name::Symbol, idx_name::Symbol,
         "sbimpl: categorical block `$col_name` is cell-mean coded (its predictor " *
         "has no intercept), and an `r2d2(...)` decomposition covers treatment " *
         "contrasts only. Give the predictor an intercept, keep this factor " *
-        "treatment-coded with `factor(...; ref=1)`, or leave `:contrasts` out " *
+        "treatment-coded with `factor(...; cmc=false)`, or leave `:contrasts` out " *
         "of the decomposition.")
     priors = isnothing(prior) ? Any[nothing for _ in 1:n_levels] : prior
     length(priors) == n_levels || error(
@@ -7876,7 +7876,7 @@ function _sb_ranef_r2d2_joint(brmi::BRMI, id, margins, include, effect_overrides
                     "treatment contrasts of `$lp`, but `$(e.address)` is cell-mean " *
                     "coded there (`$lp` has no intercept). Give `$lp` an intercept, " *
                     "keep the factor treatment-coded with `factor($(e.address); " *
-                    "ref=1)`, or leave `:contrasts` out of `include=`")
+                    "cmc=false)`, or leave `:contrasts` out of `include=`")
                 n_levels, _ = _sb_level_index(_sb_cat_levels(e.term))
                 n_contrasts = n_levels - 1
                 push!(cats, (; emitted=e.emitted, address=e.address,

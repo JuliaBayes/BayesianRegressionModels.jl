@@ -426,11 +426,17 @@ function protect end
 protect(x::Real) = x
 
 """
-    factor(x; ref=k)
+    factor(x; ref=k, cmc=true)
 
 Treat `x` as a categorical predictor with optional reference level
 `ref`. Dispatch tag — backend buckets it into the categorical-predictor
 path in `introspection.jl` and `_sb_cat` (sbimpl).
+
+Under an intercept the term is K−1 treatment contrasts against `ref`. As the
+first categorical term of a predictor WITHOUT an intercept it is cell-mean coded
+(K coefficients, no reference) — brms / R `model.matrix` semantics. `cmc=false`
+(brms' name, "cell-mean coding") switches that off and keeps the treatment
+contrasts, e.g. to pin one group of an intercept-free predictor at zero.
 """
 function factor end
 

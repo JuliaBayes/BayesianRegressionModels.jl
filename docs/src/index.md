@@ -277,9 +277,11 @@ The rule, in full:
 - Only the **first** categorical term is cell-mean coded. A second one's full
   indicator set would be collinear with the first's, so later categorical
   terms — and every `&` interaction — stay treatment-coded.
-- A reference level only has a meaning under treatment coding, so writing one
-  asks for it: `factor(site; ref=1)` keeps K−1 contrasts with or without an
-  intercept, and the cell means pass to the next categorical term.
+- `factor(site; cmc=false)` — brms' switch, "cell-mean coding" — keeps K−1
+  treatment contrasts in a predictor without an intercept, and the cell means
+  pass to the next categorical term. A `ref=` alone does not opt out: as in R,
+  a releveled factor without an intercept is still cell-mean coded, in its
+  releveled order.
 - An ordinal model's estimated thresholds *are* its location predictor's
   intercept, so the `eta` of `Ordinal(...)` / `OrderedLogistic(...)` keeps
   treatment contrasts even though it is written `eta ~ 0 + ...`.

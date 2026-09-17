@@ -298,9 +298,10 @@ requires an intercept-free common predictor (`eta ~ 0 + ...`). They count as
 that predictor's intercept: a categorical term of `eta` keeps its K−1 treatment
 contrasts rather than the cell means an intercept-free predictor otherwise gets
 ("Cell means" on the [overview page](index.md)). A positive discrimination parameter
-is explicit, and its predictor is *not* threshold-located — pin one group's
-discrimination at `exp(0) = 1` with an explicit reference level, which is what
-identifies the scale against the free thresholds:
+is explicit, and its predictor is *not* threshold-located — switch its cell-mean
+coding off with `cmc=false` (brms' name for it) so that one group's
+discrimination stays pinned at `exp(0) = 1`, which is what identifies the scale
+against the free thresholds:
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
@@ -310,7 +311,7 @@ ordinal_disc_data = (;
 )
 ordinal_disc = @brm ordinal_disc_data begin
     eta ~ 0 + x
-    log(disc) ~ 0 + factor(group; ref=1)
+    log(disc) ~ 0 + factor(group; cmc=false)
     y ~ Ordinal(Cumulative(), ProbitLink(), eta;
                 discrimination=disc)
 end

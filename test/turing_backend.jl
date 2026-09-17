@@ -1538,11 +1538,11 @@ end
     @test Turing.logjoint(backend.model, params) ≈
           prior + likelihood atol=1e-12 rtol=1e-12
 
-    # An explicit reference level requests treatment coding; the cell means
+    # `cmc=false` (brms' switch) requests treatment coding; the cell means
     # then pass to the next categorical term.
     pinned = TuringBRMI((@brm begin
         sigma ~ Exponential(2)
-        mu ~ 0 + factor(g; ref=1) + h
+        mu ~ 0 + factor(g; cmc=false) + h
         y ~ Normal(mu, sigma)
     end)(df))
     @test Tuple(c.label for c in pinned.plan.design.columns) ==

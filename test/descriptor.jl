@@ -362,7 +362,7 @@ end
     end
 
     reffed_builder = @brm begin
-        mu ~ 0 + factor(indication; ref=3)
+        mu ~ 0 + factor(indication; ref=3, cmc=false)
         y ~ Normal(mu, 1.0)
     end
     reffed = brm_descriptor(

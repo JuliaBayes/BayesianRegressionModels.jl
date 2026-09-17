@@ -1495,11 +1495,16 @@ function _brm_categorical_term_block(term::ExprColumn{typeof(factor)})
 end
 _brm_categorical_term_block(_term) = nothing
 
-# A reference level only has a meaning under treatment coding, so writing one is
-# the request for it: `factor(g; ref=1)` keeps K-1 contrasts with or without an
-# intercept.
-_brm_requests_treatment_coding(term::ExprColumn{typeof(factor)}) =
-    haskey(getkwargs(term), :ref)
+# The opt-out is brms' own switch (decision `1u6tdi3`): `factor(g; cmc=false)`
+# -- "cell-mean coding" off -- keeps K-1 treatment contrasts in a predictor
+# without an intercept. A `ref=` alone does not: as in R, a releveled factor
+# under `0 +` is still cell-mean coded, in its releveled order.
+function _brm_requests_treatment_coding(term::ExprColumn{typeof(factor)})
+    cmc = get(getkwargs(term), :cmc, true)
+    cmc isa Bool || error(
+        "BRM: `factor(...; cmc=...)` expects `true` or `false`, got `$(repr(cmc))`")
+    !cmc
+end
 _brm_requests_treatment_coding(_term) = false
 
 """
@@ -1618,7 +1623,7 @@ function _brm_population_columns(term::ExprColumn{typeof(factor)};
         raw
     end
     kwargs = getkwargs(term)
-    all(k -> k === :ref, keys(kwargs)) || return nothing
+    all(k -> k === :ref || k === :cmc, keys(kwargs)) || return nothing
     ref_raw = get(kwargs, :ref, 1)
     ref_raw isa Integer || return nothing
     1 <= ref_raw <= maximum(raw_values) || error(
