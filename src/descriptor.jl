@@ -1478,16 +1478,22 @@ end
 # predictor/ref address, while the latter is the frozen level order that drove
 # the sampled K-1 vector. The emitted block name is used only to join two
 # producer-owned descriptor records; it is never exposed as a consumer address.
+#
+# `cellmeans` marks the intercept-free predictor's cell-mean coded term
+# (decision `0woa6hh`): its carrier holds one coordinate per level and there is
+# no reference level.
 function _brm_categorical_effect_entry(plan, emitted_lp::Symbol,
-                                       term::NamedColumn)
+                                       term::NamedColumn;
+                                       cellmeans::Bool=false)
     isnothing(_sb_cat_levels(term)) && return nothing
     address = name(term)
     _brm_categorical_effect_entry(
-        plan, emitted_lp, address, address, identity)
+        plan, emitted_lp, address, address, identity; cellmeans)
 end
 
 function _brm_categorical_effect_entry(plan, emitted_lp::Symbol,
-                                       term::ExprColumn)
+                                       term::ExprColumn;
+                                       cellmeans::Bool=false)
     getf(term) === factor || return nothing
     lowered = only(_sb_terms(term))
     lowered isa NamedColumn && !isnothing(_sb_cat_levels(lowered)) || return nothing
@@ -1501,14 +1507,15 @@ function _brm_categorical_effect_entry(plan, emitted_lp::Symbol,
     decode = ref == 1 ? identity :
         level -> level == 1 ? ref : level == ref ? 1 : level
     _brm_categorical_effect_entry(
-        plan, emitted_lp, name(lowered), name(predictor), decode)
+        plan, emitted_lp, name(lowered), name(predictor), decode; cellmeans)
 end
 
-_brm_categorical_effect_entry(_plan, _emitted_lp::Symbol, _term) = nothing
+_brm_categorical_effect_entry(_plan, _emitted_lp::Symbol, _term;
+                              cellmeans::Bool=false) = nothing
 
 function _brm_categorical_effect_entry(plan, emitted_lp::Symbol,
                                        address::Symbol, predictor::Symbol,
-                                       decode)
+                                       decode; cellmeans::Bool=false)
     key = Symbol(address, :_idx)
     preproc = get(plan.preproc, key, nothing)
     (!isnothing(preproc) && preproc.kind === :factor) || error(
@@ -1531,8 +1538,9 @@ function _brm_categorical_effect_entry(plan, emitted_lp::Symbol,
     decoded = map(decode, levels)
     (; predictor, address,
        emitted=_sb_cat_block_name(emitted_lp, address),
-       reference_level=first(decoded),
-       nonreference_levels=decoded[2:end])
+       coding=cellmeans ? :cellmeans : :treatment,
+       reference_level=cellmeans ? nothing : first(decoded),
+       nonreference_levels=cellmeans ? decoded : decoded[2:end])
 end
 
 function _brm_categorical_effect_entries(d::BRMDescriptor, logical::Symbol,
@@ -1541,9 +1549,15 @@ function _brm_categorical_effect_entries(d::BRMDescriptor, logical::Symbol,
     isnothing(op) && return NamedTuple[]
     _, rhs = getargs(op, 2)
     emitted_lp = _sb_lp_emitted_name(logical, link)
+    # The same first-match rule the emitter applies (`_sb_linear_predictor!`).
+    cellmeans_block = _brm_predictor_cellmeans_block(d.plan.parent, logical)
     entries = NamedTuple[]
     for term in _brm_additive_terms(rhs)
-        entry = _brm_categorical_effect_entry(d.plan, emitted_lp, term)
+        cellmeans = !isnothing(cellmeans_block) &&
+            _brm_categorical_term_block(term) === cellmeans_block &&
+            !_brm_requests_treatment_coding(term)
+        cellmeans && (cellmeans_block = nothing)
+        entry = _brm_categorical_effect_entry(d.plan, emitted_lp, term; cellmeans)
         isnothing(entry) || push!(entries, entry)
     end
     entries
@@ -1581,21 +1595,30 @@ function _brm_categorical_effect_coordinates(d::BRMDescriptor,
 
     coordinates = _brm_emitted_coordinates(output, constrained_names)
     expected_count = length(categorical.nonreference_levels)
+    cellmeans = categorical.coding === :cellmeans
     length(coordinates) == expected_count || error(
         "brm_descriptor: categorical address `$coefficient` on logical " *
-        "predictor `$logical` owns $expected_count treatment contrasts but " *
+        "predictor `$logical` owns $expected_count " *
+        (cellmeans ? "cell means" : "treatment contrasts") * " but " *
         "resolves to $(length(coordinates)) constrained coordinates. " *
         "Re-reflect the model that produced the posterior draws.")
-    contrasts = [
+    # Treatment coding pairs every non-reference level with the reference;
+    # cell-mean coding has no reference, so each level owns its coordinate.
+    contrasts = cellmeans ? NamedTuple[] : [
         (; nonreference_level=level,
            reference_level=categorical.reference_level,
            coordinate)
         for (level, coordinate) in
             zip(categorical.nonreference_levels, coordinates)
     ]
+    cells = cellmeans ? [
+        (; level, coordinate)
+        for (level, coordinate) in
+            zip(categorical.nonreference_levels, coordinates)
+    ] : NamedTuple[]
 
     (; logical, coefficient, predictor=categorical.predictor, output,
-       coordinates, contrasts,
+       coordinates, coding=categorical.coding, contrasts, cells,
        reference_level=categorical.reference_level,
        nonreference_levels=categorical.nonreference_levels,
        link=entry.link,
@@ -1620,9 +1643,12 @@ an emitted `pop_*` / `cat_*` name. Returns a named tuple with:
 
 A categorical predictor is addressed by the formula column, just like its
 `effect(logical, column)` prior. Its result additionally contains `predictor`,
-the frozen `reference_level` and ordered `nonreference_levels`, plus
+`coding`, the frozen `reference_level` and ordered `nonreference_levels`, plus
 `contrasts`, which pairs every non-reference level with its reference level and
-exact constrained coordinate. For example, `coefficient=:indication` resolves
+exact constrained coordinate. A cell-mean coded block (`coding === :cellmeans`,
+the first categorical term of a predictor without an intercept) has no
+reference: `reference_level === nothing`, `nonreference_levels` lists every
+level, `contrasts` is empty and `cells` pairs each level with its coordinate. For example, `coefficient=:indication` resolves
 the K-1 block in `log(Vc) ~ 1 + indication`; the block's emitted spelling stays
 private. A `factor(g; ref=3)` term remains addressable as `coefficient=:g` and
 reports the fitted reference and contrast order after recoding.

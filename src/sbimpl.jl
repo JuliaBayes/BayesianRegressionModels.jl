@@ -6986,10 +6986,14 @@ function _sb_emit_cat_cells!(stmts, col_name::Symbol, idx_name::Symbol,
             isnothing(priors[i]) && continue
             beta_loc[i], beta_scale[i] = _sb_effect_normal_args(priors[i])
         end
+        # One shared Normal over every level keeps Stan's natural scalar
+        # spelling -- the statement a treatment-coded block emits for the same
+        # `effect(lp, c)` -- and only per-level priors need the vectors.
+        shared = !isempty(priors) && allequal(beta_loc) && allequal(beta_scale)
+        loc = shared ? first(beta_loc) : Expr(:vect, beta_loc...)
+        scale = shared ? first(beta_scale) : Expr(:vect, beta_scale...)
         push!(stmts, :($col_name ~ _sb_cat_cells_normal(;
-            x=$idx_name, n_levels=$n_name,
-            beta_loc=$(Expr(:vect, beta_loc...)),
-            beta_scale=$(Expr(:vect, beta_scale...)))))
+            x=$idx_name, n_levels=$n_name, beta_loc=$loc, beta_scale=$scale)))
     else
         model = _sb_cat_cells_prior_model(priors; mod)
         push!(stmts, Expr(:call, :~, col_name,

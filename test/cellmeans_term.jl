@@ -1,0 +1,303 @@
+# test/cellmeans_term.jl — cell-mean coding of an intercept-free predictor's
+# first categorical term (decision `0woa6hh`, brms / R `model.matrix`
+# semantics): K addressable coefficients instead of K-1 treatment contrasts
+# against a reference level pinned at zero.
+
+using Test
+using BayesianRegressionModels
+using StanBlocks
+using LogDensityProblems
+using Distributions: Cauchy, Exponential, Normal
+import StanBlocks.stan: transpiles
+
+const CELLS_RUNTIME = get(ENV, "BRM_CELLS_RUNTIME", "1") != "0"
+const CELLS_CACHE = joinpath(tempdir(), "brm-cellmeans-term")
+const BS = StanBlocks.BridgeStan
+
+cells_df() = (; patch=[1, 2, 3, 1, 2, 3], arm=[1, 1, 2, 2, 1, 2],
+                x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+                y=[-2.4, -2.2, -2.0, -1.8, -1.7, -1.5])
+
+sbbrmi(brmi) = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
+# BRM's own `stan_code` (it `invokelatest`s): a per-level prior of a new shape
+# generates its vector-prior family during the call, inside this testset's world.
+stan(sb::SBBRMI) = BayesianRegressionModels.stan_code(sb)
+stan(brmi) = stan(sbbrmi(brmi))
+
+# Exactly one declaration of `name`, so a constraint or size asserted below can
+# never be satisfied by a different parameter of the same program.
+declaration(code, name) = only(
+    strip(l) for l in split(code, '\n')
+    if occursin(Regex("\\b$(name);\$"), strip(l)) && !occursin("~", l))
+
+@testset "no intercept: the first categorical term owns K cell means" begin
+    df = cells_df()
+    cells = @brm df begin
+        mu ~ 0 + factor(patch)
+        y ~ Normal(mu, 1.0)
+    end
+    code = stan(cells)
+    @test declaration(code, "cat_mu_patch_beta") == "vector[patch_n_levels] cat_mu_patch_beta;"
+    @test occursin("cat_mu_patch = cat_mu_patch_beta[patch_idx];", code)
+    @test !occursin("append_row(0.0, cat_mu_patch_beta)", code)
+    @test occursin("cat_mu_patch_beta ~ std_normal();", code)
+    @test popcoefnames(cells, :mu) == Symbol[]
+    @test transpiles(sbbrmi(cells).model)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+
+    # `0` is only a marker and BRM has no implicit intercept: the bare column,
+    # with or without the marker, is the same formula.
+    bare = @brm df begin
+        mu ~ patch
+        y ~ Normal(mu, 1.0)
+    end
+    @test stan(bare) == code
+end
+
+@testset "an intercept keeps K-1 treatment contrasts" begin
+    df = cells_df()
+    treated = @brm df begin
+        mu ~ 1 + factor(patch)
+        y ~ Normal(mu, 1.0)
+    end
+    code = stan(treated)
+    @test declaration(code, "cat_mu_patch_beta") ==
+          "vector[(patch_n_levels - 1)] cat_mu_patch_beta;"
+    @test occursin("append_row(0.0, cat_mu_patch_beta)[patch_idx]", code)
+end
+
+@testset "only the FIRST eligible categorical term is cell-mean coded" begin
+    df = cells_df()
+    two = @brm df begin
+        mu ~ x + patch + arm
+        y ~ Normal(mu, 1.0)
+    end
+    code = stan(two)
+    @test declaration(code, "cat_mu_patch_beta") == "vector[patch_n_levels] cat_mu_patch_beta;"
+    @test declaration(code, "cat_mu_arm_beta") == "vector[(arm_n_levels - 1)] cat_mu_arm_beta;"
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+
+    # A random intercept is not a population intercept.
+    grouped = @brm df begin
+        mu ~ 0 + patch + (1 | arm)
+        y ~ Normal(mu, 1.0)
+    end
+    @test declaration(stan(grouped), "cat_mu_patch_beta") ==
+          "vector[patch_n_levels] cat_mu_patch_beta;"
+end
+
+@testset "an explicit `ref=` requests treatment coding" begin
+    df = cells_df()
+    pinned = @brm df begin
+        mu ~ 0 + factor(patch; ref=1)
+        y ~ Normal(mu, 1.0)
+    end
+    code = stan(pinned)
+    @test declaration(code, "cat_mu_patch_beta") ==
+          "vector[(patch_n_levels - 1)] cat_mu_patch_beta;"
+    @test occursin("append_row(0.0, cat_mu_patch_beta)[patch_idx]", code)
+
+    # The cell means then pass to the next categorical term.
+    passed = @brm df begin
+        mu ~ 0 + factor(patch; ref=1) + arm
+        y ~ Normal(mu, 1.0)
+    end
+    passed_code = stan(passed)
+    @test declaration(passed_code, "cat_mu_patch_beta") ==
+          "vector[(patch_n_levels - 1)] cat_mu_patch_beta;"
+    @test declaration(passed_code, "cat_mu_arm_beta") == "vector[arm_n_levels] cat_mu_arm_beta;"
+    @test StanBlocks.stanc_check(passed_code; warn_pedantic=false).ok
+end
+
+@testset "an ordinal model's thresholds are its location predictor's intercept" begin
+    od = (; x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5], group=[1, 2, 1, 2, 1, 2],
+            period=[1, 2, 3, 1, 2, 3], y=[1, 1, 2, 2, 3, 3])
+    ordinal = @brm od begin
+        eta ~ 0 + x + period
+        log(disc) ~ 0 + factor(group; ref=1)
+        y ~ Ordinal(Cumulative(), ProbitLink(), eta; discrimination=disc)
+    end
+    code = stan(ordinal)
+    @test declaration(code, "cat_eta_period_beta") ==
+          "vector[(period_n_levels - 1)] cat_eta_period_beta;"
+    @test declaration(code, "cat_log_disc_group_beta") ==
+          "vector[(group_n_levels - 1)] cat_log_disc_group_beta;"
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+
+    # The discrimination predictor is not threshold-located: without the
+    # explicit reference it is an ordinary intercept-free predictor.
+    free_disc = @brm od begin
+        eta ~ 0 + x
+        log(disc) ~ 0 + group
+        y ~ Ordinal(Cumulative(), ProbitLink(), eta; discrimination=disc)
+    end
+    @test declaration(stan(free_disc), "cat_log_disc_group_beta") ==
+          "vector[group_n_levels] cat_log_disc_group_beta;"
+
+    legacy = @brm od begin
+        eta ~ 0 + period
+        y ~ OrderedLogistic(eta)
+    end
+    @test declaration(stan(legacy), "cat_eta_period_beta") ==
+          "vector[(period_n_levels - 1)] cat_eta_period_beta;"
+end
+
+@testset "prior addresses: the block, and each level on its own" begin
+    df = cells_df()
+    block = @brm df begin
+        mu ~ 0 + factor(patch)
+        effect(mu, patch) ~ Normal(0.0, 0.5)
+        y ~ Normal(mu, 1.0)
+    end
+    # One shared Normal keeps the scalar statement a treatment block emits.
+    @test occursin("cat_mu_patch_beta ~ normal(0.0, 0.5);", stan(block))
+
+    levelled = @brm df begin
+        mu ~ 0 + factor(patch)
+        effect(mu, patch) ~ Normal(0.0, 2.0)
+        effect(mu, patch_lvl_3) ~ Normal(log(50), 0.5)
+        y ~ Normal(mu, 1.0)
+    end
+    code = stan(levelled)
+    @test occursin("cat_mu_patch_beta ~ normal([0.0, 0.0, $(log(50))]', [2.0, 2.0, 0.5]');", code)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+
+    # A level address alone leaves the other levels at the default Normal(0, 1).
+    lone = @brm df begin
+        mu ~ 0 + factor(patch)
+        effect(mu, patch_lvl_2) ~ Normal(1.0, 0.25)
+        y ~ Normal(mu, 1.0)
+    end
+    @test occursin("cat_mu_patch_beta ~ normal([0.0, 1.0, 0.0]', [1.0, 0.25, 1.0]');", stan(lone))
+
+    # The `:` layers reach cell means too, and the level address outranks the
+    # block address of the same statement shape instead of tying with it.
+    layered = @brm df begin
+        mu ~ 0 + factor(patch)
+        effect(:, :) ~ Normal(0.0, 3.0)
+        effect(:, patch_lvl_1) ~ Normal(0.0, 0.1)
+        y ~ Normal(mu, 1.0)
+    end
+    @test occursin("cat_mu_patch_beta ~ normal([0.0, 0.0, 0.0]', [0.1, 3.0, 3.0]');", stan(layered))
+
+    tied = @brm df begin
+        mu ~ 0 + factor(patch)
+        effect(:, patch) ~ Normal(0.0, 0.5)
+        effect(mu, :) ~ Normal(0.0, 0.25)
+        y ~ Normal(mu, 1.0)
+    end
+    @test_throws "equally specific" sbbrmi(tied)
+
+    # A per-level family that is not Normal takes the generated vector prior.
+    heavy = @brm df begin
+        mu ~ 0 + factor(patch)
+        effect(mu, patch_lvl_1) ~ Cauchy(0, 1)
+        y ~ Normal(mu, 1.0)
+    end
+    heavy_code = stan(heavy)
+    @test occursin(r"cat_mu_patch_beta ~ brm_vector_prior_[0-9a-f]+", heavy_code)
+    @test count("cauchy_lpdf(x[", heavy_code) == 1
+    @test StanBlocks.stanc_check(heavy_code; warn_pedantic=false).ok
+end
+
+@testset "level addresses exist only where cell means do" begin
+    df = cells_df()
+    treated = @brm df begin
+        mu ~ 1 + factor(patch)
+        effect(mu, patch_lvl_2) ~ Normal(0.0, 0.5)
+        y ~ Normal(mu, 1.0)
+    end
+    @test_throws "not a population coefficient" sbbrmi(treated)
+
+    beyond = @brm df begin
+        mu ~ 0 + factor(patch)
+        effect(mu, patch_lvl_4) ~ Normal(0.0, 0.5)
+        y ~ Normal(mu, 1.0)
+    end
+    @test_throws "patch_lvl_4" sbbrmi(beyond)
+end
+
+@testset "replay keeps the frozen level set" begin
+    df = cells_df()
+    cells = @brm df begin
+        mu ~ 0 + factor(patch)
+        y ~ Normal(mu, 1.0)
+    end
+    sb = sbbrmi(cells)
+    @test sb.data[:patch_n_levels] == 3
+    replay = reprocess(sb, (; patch=[3, 1], y=[0.0, 0.0]))
+    @test replay.data[:patch_idx] == [3, 1]
+    @test replay.data[:patch_n_levels] == 3
+    @test stan(replay) == stan(sb)
+    @test_throws "not a training level" reprocess(sb, (; patch=[1, 9], y=[0.0, 0.0]))
+end
+
+@testset "BridgeStan: K coordinates, exact cells, density and gradient" begin
+    if CELLS_RUNTIME
+        df = cells_df()
+        cells = @brm df begin
+            mu ~ 0 + factor(patch)
+            effect(mu, patch_lvl_3) ~ Normal(log(50), 0.5)
+            y ~ Normal(mu, 1.0)
+        end
+        sb = sbbrmi(cells)
+        code = stan(sb)
+        isdir(CELLS_CACHE) || mkpath(CELLS_CACHE)
+        problem = StanBlocks.stan_instantiate(
+            sb.model; path=joinpath(CELLS_CACHE, string(hash(code)) * ".stan"))
+        sm = problem.model
+        @test LogDensityProblems.dimension(problem) == 3
+        names = String.(BS.param_names(sm))
+        beta_i = [only(findall(==("cat_mu_patch_beta.$k"), names)) for k in 1:3]
+
+        q = zeros(3)
+        q[beta_i] .= [0.3, -0.7, 4.0]
+        constrained_names = BS.param_names(sm; include_tp=true, include_gq=false)
+        constrained = BS.param_constrain(sm, q; include_tp=true, include_gq=false)
+        mu = [v for (nm, v) in zip(constrained_names, constrained)
+              if startswith(String(nm), "mu.")]
+        # Every row reads its own level's cell mean; no level is pinned at zero.
+        @test mu ≈ [0.3, -0.7, 4.0, 0.3, -0.7, 4.0]
+
+        lp, gradient = LogDensityProblems.logdensity_and_gradient(problem, q)
+        @test isfinite(lp)
+        @test all(isfinite, gradient)
+        # The level-3 prior is Normal(log 50, 0.5): moving that one coordinate
+        # to its prior mean changes the density by exactly the two kernels.
+        q2 = copy(q); q2[beta_i[3]] = log(50)
+        lp2 = LogDensityProblems.logdensity(problem, q2)
+        kernel(b) = -0.5 * ((b - log(50)) / 0.5)^2 -
+                    0.5 * sum(abs2, df.y[[3, 6]] .- b)
+        @test lp2 - lp ≈ kernel(log(50)) - kernel(4.0)
+
+        resolved = brm_population_effect_coordinates(
+            brm_descriptor(sb), :mu, constrained_names; coefficient=:patch)
+        @test resolved.coding === :cellmeans
+        @test isnothing(resolved.reference_level)
+        @test resolved.nonreference_levels == [1, 2, 3]
+        @test isempty(resolved.contrasts)
+        @test [c.level for c in resolved.cells] == [1, 2, 3]
+        @test String.(constrained_names[[c.coordinate for c in resolved.cells]]) ==
+              ["cat_mu_patch_beta.1", "cat_mu_patch_beta.2", "cat_mu_patch_beta.3"]
+
+        treated = @brm df begin
+            mu ~ 1 + factor(patch)
+            y ~ Normal(mu, 1.0)
+        end
+        tsb = sbbrmi(treated)
+        tcode = stan(tsb)
+        tproblem = StanBlocks.stan_instantiate(
+            tsb.model; path=joinpath(CELLS_CACHE, string(hash(tcode)) * ".stan"))
+        tnames = BS.param_names(tproblem.model; include_tp=true, include_gq=false)
+        tresolved = brm_population_effect_coordinates(
+            brm_descriptor(tsb), :mu, tnames; coefficient=:patch)
+        @test tresolved.coding === :treatment
+        @test tresolved.reference_level == 1
+        @test tresolved.nonreference_levels == [2, 3]
+        @test isempty(tresolved.cells)
+        @test length(tresolved.contrasts) == 2
+    else
+        @info "Skipping BridgeStan cell-means runtime gate (BRM_CELLS_RUNTIME=0)"
+        @test true
+    end
+end

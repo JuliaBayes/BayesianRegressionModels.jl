@@ -630,8 +630,10 @@ end
     end
     @test occursin("cat_mu_g__ref_3_beta ~ normal(0.0, 0.5);", code_of(reffed))
 
-    # An intercept-less formula has no `beta_pop` labels at all; the contrast
-    # block must stay reachable anyway.
+    # An intercept-less formula has no `beta_pop` labels at all; the block must
+    # stay reachable anyway. Its first categorical term is CELL-MEAN coded
+    # (decision `0woa6hh`; `test/cellmeans_term.jl` owns that contract), so the
+    # one shared Normal covers K cell means rather than K-1 contrasts.
     no_intercept = @brm cat_df begin
         mu ~ 0 + factor(g)
         effect(mu, g) ~ Normal(0.0, 0.5)
@@ -639,6 +641,7 @@ end
     end
     @test popcoefnames(no_intercept, :mu) == Symbol[]
     @test occursin("cat_mu_g_beta ~ normal(0.0, 0.5);", code_of(no_intercept))
+    @test occursin("vector[g_n_levels] cat_mu_g_beta;", code_of(no_intercept))
 
     # Same column at two reference levels: each EXACT emitted name binds to its
     # own block, so the plain block never loses its name to the other's alias.
