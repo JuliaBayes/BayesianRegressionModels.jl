@@ -537,6 +537,68 @@ raw flat data column; `group` names, for every row of that frame, which subject
 the row belongs to. See the [multi-axis population PK kernel](@ref) for a
 runnable example whose subject and observation columns have different lengths.
 
+### Downstream grouped terms: the reusable-term pattern
+
+A parametric shape with group-varying parameters — a single-peak transient, a
+saturating sigmoid — belongs in the downstream package whose science needs it,
+not in BRM core. BRM core promotes such a term only once two or more
+downstream packages have shipped the same curves; until then the package ships
+its own term through the supported group-block seams, first-class rather than
+as an escape hatch. The worked example is bordet's `transient` /
+`saturating` pair (in the bordet tree, not here).
+
+The recipe, for a term used in top-level `target ~ term(...)` position:
+
+1. Declare the marker in the downstream module (`function transient end`).
+2. Declare one structured-latent field per parameter group with the fields
+   form of `_sb_term_group_block` (extend, never shadow:
+   `import BayesianRegressionModels: _sb_term_group_block,
+   _sb_emit_group_block_term!`). The `group` spec names the grouping column
+   (`(; kwarg=:series)` reads it from the call's `series=` keyword, mirroring
+   `cdar`'s `by=` convention); `prior=:correlated_normal` draws the
+   per-group parameters through BRM's non-centered LKJ block.
+3. Emit the mean from the block columns in `_sb_emit_group_block_term!`,
+   reusing StanBlocks builtins (e.g. `biomarker_time_response`) so the
+   downstream module ships no custom Stan code:
+
+```julia
+module DownstreamTerms
+using StanBlocks
+import BayesianRegressionModels: _sb_term_group_block, _sb_emit_group_block_term!
+
+function transient end
+
+_sb_term_group_block(::typeof(transient)) = (; fields=[
+    (; name=:transient, n_per_group=3, group=(; kwarg=:series),
+       prior=:correlated_normal),
+])
+
+function _sb_emit_group_block_term!(stmts, data, target, ::typeof(transient),
+                                    rhs_e, block_info)
+    (; block_name, idx_name) = block_info
+    push!(stmts, :(tloc = $(block_name)[$(idx_name), 1]))
+    push!(stmts, :(tlog_slope = $(block_name)[$(idx_name), 2]))
+    push!(stmts, :(tmag = $(block_name)[$(idx_name), 3]))
+    push!(stmts, :($target =
+        biomarker_time_response(logt, tloc, tlog_slope, tmag)))
+end
+end
+```
+
+4. Fit through `SBBRMI(brmi; mod=DownstreamTerms)` so SLIC resolves the
+   downstream module.
+
+Verified contract (`test/downstream_group_block_term.jl` pins all of it):
+works are SBBRMI lowering to stanc-clean Stan, `brm_descriptor`, and
+`reprocess` / `restan_data` on fitted group levels. Loud boundaries are
+`reprocess` with an unseen group level (frozen-level guard refuses) and
+`TuringBRMI` (the marker has no Julia call semantics and the grouped
+parameters have no Turing term model — fail-closed `MethodError`, never a
+silently dropped term). Backend-neutral preparation passes the top-level
+`target ~ term(...)` shape through untouched, so no preparation methods are
+needed for this position; a term nested inside a predictor
+(`mu ~ 1 + term(...)`) additionally needs a `_sb_predictor_term!` method.
+
 ## Fixed-one contribution: `offset(x)`
 
 [`offset`](@ref) adds `x` directly to a population-level linear predictor with
