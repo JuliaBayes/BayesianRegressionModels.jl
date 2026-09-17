@@ -635,11 +635,11 @@ NP.@model function natural_three_family_outcome(x)
     @. w ~ Poisson(exp(log_rate_w))
 end
 
-NP.@model function natural_mixed_censored_outcome(x, upper)
+NP.@model function natural_mixed_censored_outcome(x, y_upper)
     beta_mu_y[(:Intercept, :x)] ~ StandardNormal()
     sigma_y ~ Exponential(2)
     mu_y = dot(beta_mu_y, (1, x))
-    @. y ~ censored(Normal(mu_y, sigma_y); upper=upper)
+    @. y ~ censored(Normal(mu_y, sigma_y); upper=y_upper)
     beta_eta_z[(:Intercept, :x)] ~ StandardNormal()
     eta_z = dot(beta_eta_z, (1, x))
     @. z ~ BernoulliLogit(eta_z)
@@ -8714,11 +8714,11 @@ end
 @testset "typed native PPL heterogeneous response evidence declarations" begin
     data = (;
         x=[-1.0, 0.0, 1.0],
-        upper=[0.4, 0.8, 0.6],
+        y_upper=[0.4, 0.8, 0.6],
         y=[0.2, 0.8, 0.5],
         z=Bool[true, false, true])
     declaration = NP.model(
-        inputs=(; x=NP.input(), upper=NP.input()),
+        inputs=(; x=NP.input(), y_upper=NP.input()),
         parameters=(;
             beta_mu_y=NP.parameter(
                 NP.RealSupport(), (:Intercept, :x);
@@ -8735,17 +8735,17 @@ end
         observations=(;
             y=NP.broadcasted(NP.evidence_observation(
                 NP.normal(:y, :mu_y, :sigma_y),
-                NP.censored_evidence(upper=:upper))),
+                NP.censored_evidence(upper=:y_upper))),
             z=NP.broadcasted(NP.bernoulli_logit(:z, :eta_z))),
         site_order=(
             :beta_mu_y, :sigma_y, :y,
             :beta_eta_z, :z))
-    natural = natural_mixed_censored_outcome(data.x, data.upper)
+    natural = natural_mixed_censored_outcome(data.x, data.y_upper)
     @test natural.declaration == declaration
     brmi = @brm data begin
         sigma_y ~ Exponential(2)
         mu_y ~ 1 + x
-        y ~ censored(Normal(mu_y, sigma_y); upper=upper)
+        y ~ censored(Normal(mu_y, sigma_y); upper=y_upper)
         eta_z ~ 1 + x
         z ~ BernoulliLogit(eta_z)
     end
@@ -8775,7 +8775,7 @@ end
     prior_density =
         sum(logpdf.(Normal(), position[[1, 2, 4, 5]])) +
         logpdf(Exponential(2), exp(position[3])) + position[3]
-    y_pointwise = map(mu_y, data.y, data.upper) do mu, value, upper
+    y_pointwise = map(mu_y, data.y, data.y_upper) do mu, value, upper
         logpdf(BRM.censored(
             Normal(mu, exp(position[3])); upper), value)
     end
@@ -8819,7 +8819,7 @@ end
         MersenneTwister(948), work, prepared, position, predictive_query)
     @test predictive_values.y isa Vector{Float64}
     @test predictive_values.z isa Vector{Bool}
-    @test all(predictive_values.y .<= data.upper)
+    @test all(predictive_values.y .<= data.y_upper)
     @test predictive_values == NP.simulate(
         MersenneTwister(948), work, prepared, position, predictive_query)
 
@@ -8827,7 +8827,7 @@ end
         MersenneTwister(949), work, prepared)
     @test prior.response.y isa Vector{Float64}
     @test prior.response.z isa Vector{Bool}
-    @test all(prior.response.y .<= data.upper)
+    @test all(prior.response.y .<= data.y_upper)
     @test prior == NP.simulate_prior(
         MersenneTwister(949), work, prepared)
 
@@ -8843,7 +8843,7 @@ end
     @test pointwise_draws.z[1, :] == pointwise_values.z
     @test predictive_draws.y isa Matrix{Float64}
     @test predictive_draws.z isa Matrix{Bool}
-    @test all(predictive_draws.y .<= permutedims(data.upper))
+    @test all(predictive_draws.y .<= permutedims(data.y_upper))
     @test predictive_draws == NP.simulate_draws(
         MersenneTwister(950), work, prepared, positions,
         predictive_query)
@@ -8917,7 +8917,7 @@ end
     new_x = [-0.5, 0.5]
     new_upper = [0.3, 0.9]
     prediction_only = NP.rebind(
-        prepared, (;); bindings=(; x=new_x, upper=new_upper))
+        prepared, (;); bindings=(; x=new_x, y_upper=new_upper))
     @test !NP.has_response(prediction_only)
     prediction_work = NP.workspace(
         prediction_only, Float64, DI.AutoEnzyme())
@@ -8933,7 +8933,7 @@ end
     replayed = NP.rebind(
         prepared,
         (; y=[0.1, 0.9], z=Bool[false, true]);
-        bindings=(; x=new_x, upper=new_upper))
+        bindings=(; x=new_x, y_upper=new_upper))
     @test NP.has_response(replayed)
     @test isfinite(NP.logdensity!(
         NP.workspace(replayed), replayed, position))
@@ -8942,17 +8942,17 @@ end
         natural; y=data.y, z=data.z[1:2]))
     @test_throws DimensionMismatch NP.rebind(
         prepared, (; y=data.y, z=data.z);
-        bindings=(; x=data.x, upper=data.upper[1:2]))
+        bindings=(; x=data.x, y_upper=data.y_upper[1:2]))
     @test_throws ArgumentError NP.rebind(
         prepared, (; y=data.y, z=data.z);
-        bindings=(; x=data.x, upper=[0.4, Inf, 0.6]))
+        bindings=(; x=data.x, y_upper=[0.4, Inf, 0.6]))
 
     invalid_evidence = @brm data begin
         sigma_y ~ Exponential(2)
         mu_y ~ 1 + x
         y ~ Normal(mu_y, sigma_y)
         eta_z ~ 1 + x
-        z ~ censored(BernoulliLogit(eta_z); upper=upper)
+        z ~ censored(BernoulliLogit(eta_z); upper=y_upper)
     end
     @test capability_error(() -> NP.compile(invalid_evidence)).capability ==
           :response_evidence

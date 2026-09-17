@@ -480,7 +480,9 @@ end
     @test ranefcoefnames(linked, :p) ==
           [(predictor=:Vc, coefficient=:Intercept), (predictor=:Vc, coefficient=:x)]
     @test occursin("b_p_subject_L ~ lkj_corr_cholesky(2.0);", linked_code)
-    @test occursin(r"b_p_subject_tau ~ brm_vector_prior_[0-9a-f]+\(", linked_code)
+    # Homogeneous univariate margins take the direct native-Stan path, not the
+    # generated `brm_vector_prior_` family.
+    @test occursin("b_p_subject_tau ~ exponential((1.0 ./ 0.3));", linked_code)
 
     # Same model with the quantity declared as an INERT name and the link undone
     # by hand: identical parameter block, so the posterior is the same fit.

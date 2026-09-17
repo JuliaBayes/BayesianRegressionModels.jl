@@ -107,8 +107,12 @@ end
     @test block.group === :subject
     @test block.levels == ["a", "b", "c"]
     @test block.indices == [2, 1, 2, 3]
-    @test block.indices == sb.data[:subject_idx]
-    @test length(block.levels) == sb.data[:n_subject]
+    # The default `total_groups=:auto` integrates this intercept-only block
+    # into group totals, so the geometry rides the totals carriers instead of
+    # the conventional `subject_idx` / `n_subject` keys.
+    @test only(total_effect_blocks(sb)).group === :subject
+    @test block.indices == sb.data[:total_group_mu]
+    @test length(block.levels) == sb.data[:total_ng_mu]
     @test plan.design.matrix == hcat(ones(4), df.x)
     @test only(plan.random_effects).indices == block.indices
 
