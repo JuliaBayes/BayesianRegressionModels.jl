@@ -529,6 +529,11 @@ function BRM.adaptive_centering_problem(
     _has_hsgp_term(backend) &&
         return _two_hsgp_adaptive_problem(backend, problem, ad_backend)
     block = _simple_random_intercept_block(backend)
+    # Fail-closed contract gate: the fixed scale is not consumed downstream,
+    # but the entry promises identity-link Normal with fixed scale, so a
+    # Laplace (or any non-Normal) observation must refuse loudly here rather
+    # than silently adapt the wrong geometry.
+    _fixed_gaussian_scale(backend.plan)
     problem.model === backend.model || _unsupported(
         "the DynamicPPL problem was not built from this backend's exact model",
     )

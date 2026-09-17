@@ -191,13 +191,22 @@ end
     blocks, mu, log_sigma = TURING_AC_EXT._two_hsgp_geometry(
         backend, density, contract)
     components = [mu, log_sigma]
-    @test blocks == getfield.(components, :block)
+    @test blocks == first.(components)
     @test inner.model === density.model
 
     @test LogDensityProblems.dimension(density) == 20
-    @test all(isempty(component.beta_indices) for component in components)
-    @test getfield.(components, :rho_prior_scale) == [4.0, 4.0]
-    @test getfield.(components, :sd_prior_scale) == [4.0, 4.0]
+    @test all(isempty(component[2]) for component in components)
+    # `_hsgp_gradient_component` returns plain `(block, beta_indices)` tuples
+    # since the native-gradient perf pass; the prior scales it still parses
+    # (and refuses loudly) are pinned through the same parser here.
+    @test TURING_AC_EXT._hsgp_prior_scale(
+        contract.mu_term.state.rho_prior, :mu, "length-scale") == 4.0
+    @test TURING_AC_EXT._hsgp_prior_scale(
+        contract.sigma_term.state.rho_prior, :sigma, "length-scale") == 4.0
+    @test TURING_AC_EXT._hsgp_prior_scale(
+        contract.mu_term.state.sigma_prior, :mu, "marginal-SD") == 4.0
+    @test TURING_AC_EXT._hsgp_prior_scale(
+        contract.sigma_term.state.sigma_prior, :sigma, "marginal-SD") == 4.0
     @test getfield.(blocks, :length_scale_lower) == [[0.0], [0.0]]
     @test blocks[1].length_scales == [1]
     @test blocks[1].sd == 2
