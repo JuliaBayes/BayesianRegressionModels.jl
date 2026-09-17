@@ -11,6 +11,9 @@ name is gensym-ed). The two-argument form bakes `df` in and returns the
 `BRMI` directly. Inside `formula_block`, each line is one of:
 
 - `lhs ~ rhs` — a sampling statement (likelihood or linear predictor).
+- `(x, y, z) ~ rhs` — broadcast one RHS over several sampling LHSs, sugar
+  for repeating the `~` row once per name. Each slot takes one ordinary
+  sampling LHS; `[y1, y2] ~ ...` stays the joint multivariate response.
 - `lhs = rhs` — a literal binding (named intermediate).
 - `ragged(y, group) ~ rhs` — group a flat observed response at the formula
   boundary, aligned to the `kernel(...)` result referenced by `rhs`.
@@ -561,6 +564,9 @@ elseif isxcall(x, :~) && _is_effect_lhs(x.args[2])
 elseif isxcall(x, :~) && Meta.isexpr(x.args[2], :vect)
     _, lhs, rhs = x.args
     _parse_joint_response!(lhs, rhs; info)
+elseif isxcall(x, :~) && Meta.isexpr(x.args[2], :tuple)
+    _, lhs, rhs = x.args
+    _parse_broadcast_lhs!(lhs, rhs; info)
 elseif isxcall(x, :~)
     _, lhs, rhs = x.args
     # Shield brms-style `(e | ID | g)` ranef IDs from parselocals! so the bare
@@ -617,6 +623,27 @@ function _parse_joint_response!(lhs::Expr, rhs; info)
     parsed_rhs = _x(rhs)
     :($key = $NamedColumn($(QuoteNode(key)),
         $ExprColumn(~, $joint, $parsed_rhs)))
+end
+
+function _parse_broadcast_lhs!(lhs::Expr, rhs; info)
+    Meta.isexpr(lhs, :tuple) || error(
+        "@brm: a broadcast LHS must use tuple syntax `(x, y)`")
+    isempty(lhs.args) && error(
+        "@brm: a broadcast LHS `(x, y, ...) ~ rhs` needs at least one name; " *
+        "got `() ~ ...`. Write `x ~ rhs` or `(x, y) ~ rhs`.")
+    for elem in lhs.args
+        (Meta.isexpr(elem, :tuple) || Meta.isexpr(elem, :vect)) && error(
+            "@brm: a broadcast LHS `(x, y, ...) ~ rhs` takes one sampling LHS " *
+            "per slot; nested collections such as `$elem` are not supported. " *
+            "Write one statement per target.")
+        _is_effect_lhs(elem) && error(
+            "@brm: a broadcast LHS `(x, y, ...) ~ rhs` takes sampling LHSs, " *
+            "not prior addresses; got `$elem`. Write one " *
+            "`effect(...)/sd(...)/cor(...) ~ ...` statement per target.")
+    end
+    Expr(:block, map(lhs.args) do elem
+        parse!(Expr(:call, :~, elem, deepcopy(rhs)); info)
+    end...)
 end
 
 # Public prior-address heads. The user writes the PARAMETER as the head --
