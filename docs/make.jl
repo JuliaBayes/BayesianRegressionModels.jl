@@ -21,6 +21,7 @@ const GENERATED_EXAMPLE_PAGES = [
     joinpath(@__DIR__, "src", "pupil-scale-centering.md"),
     joinpath(@__DIR__, "src", "air-centering.md"),
     joinpath(@__DIR__, "src", "rbest-centering.md"),
+    joinpath(@__DIR__, "src", "intermediate-representation.md"),
 ]
 const DOCS_MARKDOWN_PAGES = sort!(String[
     joinpath(root, file)
@@ -77,6 +78,7 @@ makedocs(
             "Air pollution" => "air-centering.md",
             "RBesT MAP prior" => "rbest-centering.md",
         ],
+        "Intermediate representation" => "intermediate-representation.md",
         "Turing backend" => "turing-backend.md",
         "Formulas and custom models: deck" => "feature-deck.md",
         "Gallery" => "gallery.md",
