@@ -1,7 +1,9 @@
 # test/cellmeans_term.jl — cell-mean coding of an intercept-free predictor's
 # first categorical term (decision `0woa6hh`, brms / R `model.matrix`
 # semantics): K addressable coefficients instead of K-1 treatment contrasts
-# against a reference level pinned at zero.
+# against a reference level pinned at zero. The same rule inside a random-effect
+# block (decision `0wfo466`): `(0 + c | g)` gives every level of `c` its own
+# group-level effect.
 
 using Test
 using BayesianRegressionModels
@@ -367,6 +369,158 @@ end
         @test length(tresolved.contrasts) == 2
     else
         @info "Skipping BridgeStan cell-means runtime gate (BRM_CELLS_RUNTIME=0)"
+        @test true
+    end
+end
+
+
+# ---- random-effect blocks (decision `0wfo466`) --------------------------------
+
+ranef_df() = (; c=repeat([1, 2, 3], 4), g=repeat([1, 2, 3, 4]; inner=3),
+                x=collect(range(-1.0, 1.0; length=12)),
+                y=[-2.4, -2.2, -2.0, -1.8, -1.7, -1.5, -1.2, -1.0, -0.9, -0.6, -0.4, -0.1])
+
+# The right-hand side of the one `Z_<lp>_<suffix> = hcat(...)` statement.
+zcols(code, z) = only(
+    String(strip(last(split(strip(l), " = "; limit=2)), ';'))
+    for l in split(code, '\n') if occursin(" $z = hcat(", l))
+
+@testset "random effects: an intercept-free LHS codes its first factor per level" begin
+    df = ranef_df()
+    cells = @brm df begin
+        mu ~ 1 + (0 + c | g)
+        y ~ Normal(mu, 1.0)
+    end
+    sb = sbbrmi(cells)
+    code = stan(sb)
+    @test zcols(code, "Z_mu_g") == "hcat(c_dummy_1, c_dummy_2, c_dummy_3)"
+    @test sb.data[:n_terms_mu_g] == 3
+    @test sb.data[:c_dummy_1] == Float64.(df.c .== 1)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+
+    # An intercept keeps the K-1 dummies -- including one contributed by a
+    # SIBLING term of the same block, since BRM merges `(1 | g) + (0 + c | g)`.
+    treated = @brm df begin
+        mu ~ 1 + (1 + c | g)
+        y ~ Normal(mu, 1.0)
+    end
+    @test endswith(zcols(stan(treated), "Z_mu_g"), ", c_dummy_2, c_dummy_3)")
+    @test !haskey(sbbrmi(treated).data, :c_dummy_1)
+    merged = @brm df begin
+        mu ~ 1 + (1 | g) + (0 + c | g)
+        y ~ Normal(mu, 1.0)
+    end
+    @test endswith(zcols(stan(merged), "Z_mu_g"), ", c_dummy_2, c_dummy_3)")
+    @test !haskey(sbbrmi(merged).data, :c_dummy_1)
+
+    # `cmc=false` opts out here too; a continuous slope does not count as the
+    # first FACTOR.
+    pinned = @brm df begin
+        mu ~ 1 + (0 + factor(c; cmc=false) | g)
+        y ~ Normal(mu, 1.0)
+    end
+    @test zcols(stan(pinned), "Z_mu_g") == "hcat(c_dummy_2, c_dummy_3)"
+    sloped = @brm df begin
+        mu ~ 1 + (0 + x + c | g)
+        y ~ Normal(mu, 1.0)
+    end
+    @test zcols(stan(sloped), "Z_mu_g") == "hcat(x, c_dummy_1, c_dummy_2, c_dummy_3)"
+
+    # Zero-correlation `||` splits the LHS into single-term blocks; the decision
+    # still belongs to the ORIGINAL left-hand side.
+    free = @brm df begin
+        mu ~ 1 + (0 + c || g)
+        y ~ Normal(mu, 1.0)
+    end
+    @test zcols(stan(free), "Z_mu_g__nocor__1") == "hcat(c_dummy_1, c_dummy_2, c_dummy_3)"
+    withint = @brm df begin
+        mu ~ 1 + (1 + c || g)
+        y ~ Normal(mu, 1.0)
+    end
+    @test zcols(stan(withint), "Z_mu_g__nocor__2") == "hcat(c_dummy_2, c_dummy_3)"
+end
+
+@testset "random effects: shared |ID| buckets size, name and address every level" begin
+    df = ranef_df()
+    shared = @brm df begin
+        mu ~ 1 + (0 + c | p | g)
+        sd(mu, p, c_dummy_1) ~ Exponential(0.5)
+        y ~ Normal(mu, 1.0)
+    end
+    @test ranefcoefnames(shared, :p) == [
+        (predictor=:mu, coefficient=:c_dummy_1),
+        (predictor=:mu, coefficient=:c_dummy_2),
+        (predictor=:mu, coefficient=:c_dummy_3)]
+    sb = sbbrmi(shared)
+    code = stan(sb)
+    @test sb.data[:n_terms_p_g] == 3
+    @test zcols(code, "Z_mu_p_g") == "hcat(c_dummy_1, c_dummy_2, c_dummy_3)"
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+
+    treated = @brm df begin
+        mu ~ 1 + (1 + c | p | g)
+        y ~ Normal(mu, 1.0)
+    end
+    @test ranefcoefnames(treated, :p) == [
+        (predictor=:mu, coefficient=:Intercept),
+        (predictor=:mu, coefficient=:c_dummy_2),
+        (predictor=:mu, coefficient=:c_dummy_3)]
+    @test sbbrmi(treated).data[:n_terms_p_g] == 3
+end
+
+@testset "random effects: replay keeps every fitted level column" begin
+    df = ranef_df()
+    sb = sbbrmi(@brm df begin
+        mu ~ 1 + (0 + c | g)
+        y ~ Normal(mu, 1.0)
+    end)
+    subset = (; c=[3, 1], g=[2, 4], x=[0.0, 0.0], y=[0.0, 0.0])
+    replay = reprocess(sb, subset)
+    @test replay.data[:c_dummy_1] == [0.0, 1.0]
+    @test replay.data[:c_dummy_2] == [0.0, 0.0]
+    @test replay.data[:c_dummy_3] == [1.0, 0.0]
+    @test stan(replay) == stan(sb)
+    # A frozen RE-EMISSION for a new population carries only some levels too.
+    resampled = reprocess(sb, subset; freeze_constants=true, resample_groups=[:g])
+    @test zcols(stan(resampled), "Z_mu_g") == "hcat(c_dummy_1, c_dummy_2, c_dummy_3)"
+    @test resampled.data[:n_terms_mu_g] == 3
+    @test_throws "not a training level" reprocess(
+        sb, (; c=[1, 9], g=[1, 2], x=[0.0, 0.0], y=[0.0, 0.0]))
+end
+
+@testset "random effects, BridgeStan: level-1 rows carry a group effect" begin
+    if CELLS_RUNTIME
+        df = ranef_df()
+        sb = sbbrmi(@brm df begin
+            mu ~ 1 + (0 + c | g)
+            y ~ Normal(mu, 1.0)
+        end)
+        code = stan(sb)
+        isdir(CELLS_CACHE) || mkpath(CELLS_CACHE)
+        problem = StanBlocks.stan_instantiate(
+            sb.model; path=joinpath(CELLS_CACHE, string(hash(code)) * ".stan"))
+        sm = problem.model
+        # UNCONSTRAINED names index `q`: the 3 x 3 Cholesky factor has 9
+        # constrained entries but 3 free coordinates.
+        names = String.(BS.param_unc_names(sm))
+        # intercept + tau[3] + L (3 free) + z[3 x 4]
+        @test LogDensityProblems.dimension(problem) == 1 + 3 + 3 + 12
+        q = zeros(LogDensityProblems.dimension(problem))
+        z_i = findall(startswith("r_mu_g_z"), names)
+        @test length(z_i) == 12
+        q[z_i] .= 1.0
+        constrained_names = BS.param_names(sm; include_tp=true, include_gq=false)
+        constrained = BS.param_constrain(sm, q; include_tp=true, include_gq=false)
+        r = [v for (nm, v) in zip(constrained_names, constrained)
+             if startswith(String(nm), "r_mu_g.")]
+        # tau = 1, L = I, z = 1 => every per-level group effect is 1, and every
+        # row reads exactly one of them -- level-1 rows included.
+        @test r ≈ ones(12)
+        lp, gradient = LogDensityProblems.logdensity_and_gradient(problem, q)
+        @test isfinite(lp)
+        @test all(isfinite, gradient)
+    else
+        @info "Skipping BridgeStan random-effect runtime gate (BRM_CELLS_RUNTIME=0)"
         @test true
     end
 end
