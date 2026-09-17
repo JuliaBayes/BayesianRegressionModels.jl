@@ -11069,6 +11069,14 @@ _sb_scalar_expr(x::ExprColumn, data) = begin
                            for (key, value) in pairs(getkwargs(x)))...))
     call
 end
+# A lambda handed to a higher-order `@deffun` or custom family -- written inline,
+# or as a trailing `do` block, which `@brm` folds in as the FIRST positional
+# argument (macro.jl `_x`) -- is passed through verbatim: StanBlocks resolves a
+# closure at trace time and inlines it, and the body may read model parameters.
+# Its free references to data columns were already registered as shared data by
+# the macro (`capturedata`), the same path a `kernel(...)` cell body uses.
+_sb_scalar_expr(x::Expr, _) = Meta.isexpr(x, :->) ? x :
+    error("sbimpl: cannot lift to Stan expression: $(typeof(x)): $x")
 _sb_scalar_expr(x, _) = error("sbimpl: cannot lift to Stan expression: $(typeof(x)): $x")
 
 # ==============================================================================
