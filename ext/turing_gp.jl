@@ -90,25 +90,13 @@ Turing.@model function _brm_turing_hsgp_partial_iso_term(state)
         Turing.@addlogprob! -Inf
     end
     safe_centered_log_scale = max.(centered_log_scale, log_floor)
+    beta_partial ~ arraydist([
+        Normal(0, exp(safe_centered_log_scale[b]))
+        for b in eachindex(safe_centered_log_scale)])
     remaining_log_scale = [_brm_hsgp_remaining_log_scale(log_sqrt_spd[b],
                              state.centeredness[b]) for b in eachindex(log_sqrt_spd)]
-    if isnothing(state.by)
-        beta_partial ~ arraydist([
-            Normal(0, exp(safe_centered_log_scale[b]))
-            for b in eachindex(safe_centered_log_scale)])
-        weights = exp.(remaining_log_scale) .* beta_partial
-        effect = state.PHI * weights
-        return (; effect, rho, sigma, beta_partial, log_sqrt_spd,
-                  centeredness=state.centeredness, weights)
-    end
-    n_levels = length(state.by.levels)
-    n_basis = length(safe_centered_log_scale)
-    beta_partial ~ arraydist([Normal(0, exp(safe_centered_log_scale[b]))
-                              for _g in 1:n_levels for b in 1:n_basis])
-    by_weights = reshape(beta_partial, n_basis, n_levels)
-    weights = exp.(remaining_log_scale) .* by_weights
-    effect = [dot(state.PHI[i, :], weights[:, state.by.idx[i]])
-              for i in axes(state.PHI, 1)]
+    weights = exp.(remaining_log_scale) .* beta_partial
+    effect = state.PHI * weights
     (; effect, rho, sigma, beta_partial, log_sqrt_spd,
        centeredness=state.centeredness, weights)
 end
@@ -132,25 +120,13 @@ Turing.@model function _brm_turing_hsgp_partial_aniso_term(state)
         Turing.@addlogprob! -Inf
     end
     safe_centered_log_scale = max.(centered_log_scale, log_floor)
+    beta_partial ~ arraydist([
+        Normal(0, exp(safe_centered_log_scale[b]))
+        for b in eachindex(safe_centered_log_scale)])
     remaining_log_scale = [_brm_hsgp_remaining_log_scale(log_sqrt_spd[b],
                              state.centeredness[b]) for b in eachindex(log_sqrt_spd)]
-    if isnothing(state.by)
-        beta_partial ~ arraydist([
-            Normal(0, exp(safe_centered_log_scale[b]))
-            for b in eachindex(safe_centered_log_scale)])
-        weights = exp.(remaining_log_scale) .* beta_partial
-        effect = state.PHI * weights
-        return (; effect, rho, sigma, beta_partial, log_sqrt_spd,
-                  centeredness=state.centeredness, weights)
-    end
-    n_levels = length(state.by.levels)
-    n_basis = length(safe_centered_log_scale)
-    beta_partial ~ arraydist([Normal(0, exp(safe_centered_log_scale[b]))
-                              for _g in 1:n_levels for b in 1:n_basis])
-    by_weights = reshape(beta_partial, n_basis, n_levels)
-    weights = exp.(remaining_log_scale) .* by_weights
-    effect = [dot(state.PHI[i, :], weights[:, state.by.idx[i]])
-              for i in axes(state.PHI, 1)]
+    weights = exp.(remaining_log_scale) .* beta_partial
+    effect = state.PHI * weights
     (; effect, rho, sigma, beta_partial, log_sqrt_spd,
        centeredness=state.centeredness, weights)
 end

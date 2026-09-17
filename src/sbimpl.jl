@@ -2137,45 +2137,6 @@ _sb_hsgp_by_aniso = StanBlocks.@slic begin
     return rows_dot_product(PHI_scaled, beta[group_idx, :])
 end
 
-# Per-group HSGP with per-frequency partial centering. Spectral
-# hyperparameters stay shared across groups (decision 7p44fo); each group's
-# tensor-basis weights are sampled in the partial frame `beta_partial[g, b] ~
-# normal(0, exp(c[b] * log_sqrt_spd[b]))` and scaled by the remaining
-# `exp((1 - c[b]) * log_sqrt_spd[b])` at the use site — the grouped analogue
-# of `_sb_hsgp_partial`. Unlike `_sb_hsgp_by`, the weights cannot live in the
-# shared iid-normal group block: their prior scale depends on the sampled
-# length scale and marginal SD, so they are declared here instead. The flat
-# prior repeats the per-basis centered scales once per group so
-# `to_matrix(...)'` rows stay group-major, matching the `_sb_hsgp_by` layout.
-_sb_hsgp_by_partial = StanBlocks.@slic begin
-    n_axes = dims(omega2)[2]
-    n_basis = dims(omega2)[1]
-    rho_iso ~ lognormal(0., 1.; lower=rho_lower)
-    sigma ~ lognormal(0., 1.; lower=0.)
-    rho = rep_vector(rho_iso, n_axes)
-    log_sqrt_spd = brm_hsgp_log_sqrt_spd(omega2, sigma, rho)
-    centered_log_scale = brm_hsgp_centered_log_scale(log_sqrt_spd, centeredness)
-    remaining_log_scale = brm_hsgp_remaining_log_scale(log_sqrt_spd, centeredness)
-    beta_flat :: vector[n_groups * n_basis] ~ normal(0., rep_vector(exp(centered_log_scale), n_groups))
-    beta_partial = to_matrix(beta_flat, n_basis, n_groups)'
-    PHI_scaled = diag_post_multiply(PHI, exp(remaining_log_scale))
-    return rows_dot_product(PHI_scaled, beta_partial[group_idx, :])
-end
-
-_sb_hsgp_by_partial_aniso = StanBlocks.@slic begin
-    n_axes = dims(omega2)[2]
-    n_basis = dims(omega2)[1]
-    rho :: vector[n_axes] ~ lognormal(0., 1.; lower=rho_lower)
-    sigma ~ lognormal(0., 1.; lower=0.)
-    log_sqrt_spd = brm_hsgp_log_sqrt_spd(omega2, sigma, rho)
-    centered_log_scale = brm_hsgp_centered_log_scale(log_sqrt_spd, centeredness)
-    remaining_log_scale = brm_hsgp_remaining_log_scale(log_sqrt_spd, centeredness)
-    beta_flat :: vector[n_groups * n_basis] ~ normal(0., rep_vector(exp(centered_log_scale), n_groups))
-    beta_partial = to_matrix(beta_flat, n_basis, n_groups)'
-    PHI_scaled = diag_post_multiply(PHI, exp(remaining_log_scale))
-    return rows_dot_product(PHI_scaled, beta_partial[group_idx, :])
-end
-
 # Categorical -> (n_levels::Int, per-row level index::Vector{Int}). Mirrors
 # vimpl._level_index so the integer indices the walker stashes in `data`
 # agree with what the cimpl-side uses.
@@ -6707,8 +6668,6 @@ _sb_gp_submodel(::Val{:_sb_hsgp_partial}) = _sb_hsgp_partial
 _sb_gp_submodel(::Val{:_sb_hsgp_partial_aniso}) = _sb_hsgp_partial_aniso
 _sb_gp_submodel(::Val{:_sb_hsgp_by}) = _sb_hsgp_by
 _sb_gp_submodel(::Val{:_sb_hsgp_by_aniso}) = _sb_hsgp_by_aniso
-_sb_gp_submodel(::Val{:_sb_hsgp_by_partial}) = _sb_hsgp_by_partial
-_sb_gp_submodel(::Val{:_sb_hsgp_by_partial_aniso}) = _sb_hsgp_by_partial_aniso
 _sb_gp_submodel(::Val{:_sb_hsgp_latent}) = _sb_hsgp_latent
 _sb_gp_submodel(::Val{:_sb_hsgp_latent_orthogonal}) = _sb_hsgp_latent_orthogonal
 _sb_gp_submodel(::Val{:_sb_gp_periodic}) = _sb_gp_periodic
@@ -6722,8 +6681,6 @@ _sb_gp_rho_lhs(::Val{:_sb_hsgp_partial}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_partial_aniso}) = :(rho :: vector[n_axes])
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_by}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_by_aniso}) = :(rho :: vector[n_axes])
-_sb_gp_rho_lhs(::Val{:_sb_hsgp_by_partial}) = :rho_iso
-_sb_gp_rho_lhs(::Val{:_sb_hsgp_by_partial_aniso}) = :(rho :: vector[n_axes])
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_latent}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_hsgp_latent_orthogonal}) = :rho_iso
 _sb_gp_rho_lhs(::Val{:_sb_gp_periodic}) = :rho
@@ -9726,8 +9683,15 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     _sb_hsgp_check_explicit_domain(domain_fits, axes)
 
     if haskey(kw, :by)
-        group_col = _sb_resolve_group_col((; kwarg=:by), t, data)
-        gname = name(group_col)
+        partial && error(
+            "sbimpl: partial centering is an ungrouped HSGP weight geometry " *
+            "and cannot be combined with `by=`")
+        block_info = _sb_find_group_block(hsgp, t, group_block_lookup)
+        isnothing(block_info) && error(
+            "sbimpl: `hsgp($suffix, by=...)` found no allocated per-group weight ",
+            "block — prepass 2.5 should have allocated it")
+        info = block_info
+        gname = name(_sb_resolve_group_col((; kwarg=:by), t, data))
         PHI_name = Symbol(:PHI_hsgp_, suffix, :_by_, gname)
         omega2_name = Symbol(:omega2_hsgp_, suffix, :_by_, gname)
         rho_lower_name = Symbol(:rho_lower_hsgp_, suffix, :_by_, gname)
@@ -9740,31 +9704,11 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         data[PHI_name] = PHI
         data[omega2_name] = omega2
         data[rho_lower_name] = basis.rho_lower
-        preproc_const = (; fits, K, c, iso, domain_fits, orthogonal_to,
-                         omega2_key=omega2_name, rho_lower_key=rho_lower_name)
-        col_name = Symbol(:hsgp_, suffix, :_by_, gname)
-        if partial
-            centeredness_name = Symbol(:centeredness_hsgp_, suffix, :_by_, gname)
-            data[centeredness_name] = centeredness
-            idx_name, n_name = _sb_ensure_group_data!(data, group_col)
-            _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp,
-                merge(preproc_const, (; centeredness)), names, false))
-            submodel = _sb_gp_submodel_expr(
-                iso ? :_sb_hsgp_by_partial : :_sb_hsgp_by_partial_aniso,
-                term_overrides, t)
-            push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
-                submodel, term_overrides, t; PHI=PHI_name, omega2=omega2_name,
-                rho_lower=rho_lower_name, centeredness=centeredness_name,
-                group_idx=idx_name, n_groups=n_name)))
-            return col_name
-        end
-        block_info = _sb_find_group_block(hsgp, t, group_block_lookup)
-        isnothing(block_info) && error(
-            "sbimpl: `hsgp($suffix, by=...)` found no allocated per-group weight ",
-            "block — prepass 2.5 should have allocated it")
-        info = block_info
         _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp,
-            preproc_const, names, false))
+            (; fits, K, c, iso, domain_fits, orthogonal_to,
+             omega2_key=omega2_name, rho_lower_key=rho_lower_name),
+            names, false))
+        col_name = Symbol(:hsgp_, suffix, :_by_, gname)
         submodel = _sb_gp_submodel_expr(
             iso ? :_sb_hsgp_by : :_sb_hsgp_by_aniso, term_overrides, t)
         push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
@@ -9869,11 +9813,6 @@ function _sb_term_group_block(::typeof(hsgp), call)
     isempty(args) && error("sbimpl: `hsgp(x...; by=...)` expects at least one positional axis")
     names = Tuple(name(_sb_named_inner(:hsgp, a)) for a in args)
     K, _ = _sb_hsgp_options(kw, length(args))
-    # A partially centered grouped HSGP samples its per-group weights inside
-    # the `_sb_hsgp_by_partial[_aniso]` term submodel — their prior scale
-    # depends on the sampled length scale and marginal SD, so no shared
-    # iid-normal block is allocated for them.
-    any(!iszero, _brm_hsgp_centeredness(kw, prod(K))) && return nothing
     fname = Symbol(:hsgpw_, join(string.(names), "_"))
     (; fields=[(; name=fname, n_per_group=prod(K), group=(; kwarg=:by), prior=:iid_normal)])
 end

@@ -133,6 +133,9 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
         cov === :exp_quad || error(
             "BRM term preparation: partial centering currently supports the " *
             "exp_quad HSGP spectrum")
+        isnothing(by_state) || error(
+            "BRM term preparation: partial centering is an ungrouped HSGP " *
+            "weight geometry and cannot be combined with `by=`")
     end
     if cov === :periodic
         length(axes) == 1 && iso || error(

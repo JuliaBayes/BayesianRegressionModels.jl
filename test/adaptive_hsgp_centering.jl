@@ -143,64 +143,6 @@ end
     @test physical["hsgp_x_sigma"] ≈ sigma
 end
 
-const HSGP_GROUPED_DATA = (;
-    x=collect(range(-1.2, 1.2; length=10)),
-    y=[0.15sin(2x) - 0.05cos(3x) for x in range(-1.2, 1.2; length=10)],
-    g=repeat(["a", "b"], inner=5),
-    hsgp_c=[0.0, 0.35, 0.75, 1.0],
-)
-
-const HSGP_GROUPED_PARTIAL = @brm begin
-    mu ~ hsgp(x; k=4, c=1.5, by=g, centeredness=hsgp_c)
-    y ~ Normal(mu, 1)
-end
-
-@testset "StanBlocks and Turing share the grouped partial HSGP model" begin
-    turing = TuringBRMI(HSGP_GROUPED_PARTIAL(HSGP_GROUPED_DATA))
-    term = only(only(turing.plan.predictors).terms)
-    @test !isnothing(term.state.by)
-    @test term.state.centeredness ≈ HSGP_C
-    @test term.state.by.idx == [1, 1, 1, 1, 1, 2, 2, 2, 2, 2]
-
-    rho = term.state.rho_lower + 0.45
-    sigma = 0.8
-    ext = Base.get_extension(BRM, :BayesianRegressionModelsTuringExt)
-    log_scale = ext._brm_hsgp_log_sqrt_spd(term.state, sigma, rho)
-    z_a = [0.2, -0.35, 0.1, 0.4]
-    z_b = [-0.15, 0.3, -0.2, 0.05]
-    flat = vcat(exp.(HSGP_C .* log_scale) .* z_a,
-                exp.(HSGP_C .* log_scale) .* z_b)
-    model = BRM._brm_turing_term_model(term, length(HSGP_GROUPED_DATA.y))
-    values = (; rho, sigma, beta_partial=flat)
-    generated = Turing.generated_quantities(model, values)
-    expected_a = exp.(log_scale) .* z_a
-    expected_b = exp.(log_scale) .* z_b
-    expected_effect = [dot(term.state.PHI[i, :],
-                           term.state.by.idx[i] == 1 ? expected_a : expected_b)
-                       for i in axes(term.state.PHI, 1)]
-    @test generated.effect ≈ expected_effect rtol=2e-14 atol=2e-14
-    turing_lp = Turing.logjoint(model, values)
-
-    sb = SBBRMI(HSGP_GROUPED_PARTIAL(HSGP_GROUPED_DATA); mod=@__MODULE__)
-    code = BRM.stan_code(sb)
-    @test occursin("hsgp_x_by_g_beta_flat ~ normal(0.0, " *
-                   "rep_vector(exp(hsgp_x_by_g_centered_log_scale), n_g))", code)
-    checked = StanBlocks.stanc_check(code)
-    checked.ok || @error "grouped partial HSGP stanc" output=checked.output
-    @test checked.ok
-    path = joinpath(tempdir(), "brm-grouped-partial-hsgp.stan")
-    problem = StanBlocks.stan_instantiate(sb.model; path)
-    json = "{\"hsgp_x_by_g_rho_iso\":$rho," *
-           "\"hsgp_x_by_g_sigma\":$sigma," *
-           "\"hsgp_x_by_g_beta_flat\":[$(join(flat, ','))]}"
-    stan_q = BS.param_unconstrain_json(problem.model, json)
-    stan_gradient = zeros(length(stan_q))
-    stan_lp, _ = BS.log_density_gradient!(
-        problem.model, stan_q, stan_gradient;
-        propto=false, jacobian=false)
-    @test turing_lp ≈ stan_lp rtol=5e-11 atol=5e-9
-end
-
 @testset "two zero-mean HSGPs have distinct backend bindings" begin
     builder = @brm begin
         mu ~ hsgp(x; k=4, centeredness=hsgp_c)
