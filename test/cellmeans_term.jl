@@ -230,6 +230,47 @@ end
     @test replay.data[:patch_n_levels] == 3
     @test stan(replay) == stan(sb)
     @test_throws "not a training level" reprocess(sb, (; patch=[1, 9], y=[0.0, 0.0]))
+
+    # A level address names a position in the FITTED level order. A replay
+    # frame carrying only a subset of the levels must neither lose the address
+    # nor shrink the per-level prior vector.
+    levelled = @brm df begin
+        mu ~ 0 + factor(patch)
+        effect(mu, patch_lvl_3) ~ Normal(log(50), 0.5)
+        y ~ Normal(mu, 1.0)
+    end
+    levelled_sb = sbbrmi(levelled)
+    subset = reprocess(levelled_sb, (; patch=[3, 1], y=[0.0, 0.0]))
+    @test subset.data[:patch_idx] == [3, 1]
+    @test subset.data[:patch_n_levels] == 3
+    @test stan(subset) == stan(levelled_sb)
+    @test occursin("[1.0, 1.0, 0.5]'", stan(subset))
+
+    # The same holds for a treatment block whose prior is a generated
+    # per-contrast family: its length is the fitted K-1, not the replayed one.
+    heavy = @brm df begin
+        mu ~ 1 + factor(patch)
+        effect(mu, patch) ~ Cauchy(0, 1)
+        y ~ Normal(mu, 1.0)
+    end
+    heavy_sb = sbbrmi(heavy)
+    @test stan(reprocess(heavy_sb, (; patch=[2, 2], y=[0.0, 0.0]))) == stan(heavy_sb)
+
+    # A reusable generative plan is a FRESH build on the new frame (new
+    # population): levels, and with them the level addresses, come from that
+    # frame. A frame without the addressed level refuses loudly and names the
+    # addresses that do exist, rather than re-pointing the prior.
+    builder = @brm begin
+        mu ~ 0 + factor(patch)
+        effect(mu, patch_lvl_3) ~ Normal(log(50), 0.5)
+        y ~ Normal(mu, 1.0)
+    end
+    plan = generative_plan(builder, df; mod=@__MODULE__, total_groups=())
+    rebuilt = generative_plan(plan, (; patch=[3, 1, 2], y=[0.0, 0.0, 0.0]))
+    @test rebuilt.data[:patch_idx] == [3, 1, 2]
+    @test rebuilt.data[:patch_n_levels] == 3
+    @test_throws "`patch_lvl_1`, `patch_lvl_2`" generative_plan(
+        plan, (; patch=[3, 1], y=[0.0, 0.0]))
 end
 
 @testset "BridgeStan: K coordinates, exact cells, density and gradient" begin

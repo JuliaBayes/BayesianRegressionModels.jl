@@ -2505,7 +2505,7 @@ _sb_effect_unresolved_note(unresolved) =
     "such a coefficient explicitly with `effect(linear_predictor, coefficient)` " *
     "to see why."
 
-function _sb_effect_prior_overrides(brmi::BRMI)
+function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing)
     specs = effect_priors(brmi)
     isempty(specs) && return Dict{Symbol,Any}()
 
@@ -2554,7 +2554,7 @@ function _sb_effect_prior_overrides(brmi::BRMI)
     level_map_of(lp::Symbol) = get!(resolved_levels, lp) do
         _sb_is_prior_declaration(brmi, lp) && return Dict{Symbol,Tuple{Symbol,Int}}()
         try
-            _sb_cat_level_address_map(brmi, lp)
+            _sb_cat_level_address_map(brmi, lp; frozen_preproc)
         catch
             Dict{Symbol,Tuple{Symbol,Int}}()
         end
@@ -2563,7 +2563,7 @@ function _sb_effect_prior_overrides(brmi::BRMI)
     cellmeans_of(lp::Symbol) = get!(resolved_cells, lp) do
         _sb_is_prior_declaration(brmi, lp) && return Dict{Symbol,Int}()
         try
-            _sb_cat_cellmeans_blocks(brmi, lp)
+            _sb_cat_cellmeans_blocks(brmi, lp; frozen_preproc)
         catch
             Dict{Symbol,Int}()
         end
@@ -2705,7 +2705,7 @@ function _sb_effect_prior_overrides(brmi::BRMI)
             isnothing(idx) && error(
                 "sbimpl: `$(spec.coefficient)` is not a population coefficient of " *
                 "`$target`. Available labels: $(join(labels, ", "))." *
-                _sb_effect_cat_note(cat_map))
+                _sb_effect_cat_note(cat_map) * _sb_effect_level_note(level_map))
             cells = get!(pop_overrides, target) do
                 Any[nothing for _ in labels]
             end
@@ -2738,6 +2738,15 @@ end
 # natural wrong guess once a user has read the transpiled code, so name the
 # address that does work rather than leaving "Available labels" looking
 # exhaustive.
+# The per-level addresses of a cell-mean block are positions in the level order
+# of the DATA THE MODEL IS BUILT ON, so an address valid at fit time is absent
+# from a fresh build on a frame carrying fewer levels. Name what does exist.
+function _sb_effect_level_note(level_map)
+    isempty(level_map) && return ""
+    " Cell-mean level address(es) on this data: " *
+    join(("`$a`" for a in sort!(collect(keys(level_map)))), ", ") * "."
+end
+
 function _sb_effect_cat_note(cat_map)
     isempty(cat_map) && return ""
     " Categorical contrast block(s) " *
@@ -2903,7 +2912,8 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     context = prepared.context
     nodes = Dict(node.name => node for node in _brm_prepared_nodes(prepared))
     prepass = context.prepass
-    effect_overrides = _sb_prior_overrides(brmi; term_priors=context.term_priors)
+    effect_overrides = _sb_prior_overrides(brmi; term_priors=context.term_priors,
+                                           frozen_preproc=_frozen_preproc)
     # Prepass 2: collect brms-style `|ID|` ranef buckets across all sub-formulas,
     # emit one shared ranef_correlated_draws per bucket, and build a lookup
     # `(brmi_key, (id_sym, group_key)) => (bucket_name, col_range, idx_name, suffix)`
@@ -6272,7 +6282,7 @@ end
 # `_sb_cat_addresses` for the address spellings that resolve onto it.
 _sb_cat_block_name(lp::Symbol, term::Symbol) = Symbol(:cat_, lp, :_, term)
 
-function _sb_cat_entries(brmi::BRMI, lhs::Symbol)
+function _sb_cat_entries(brmi::BRMI, lhs::Symbol; frozen_preproc=nothing)
     op = linear_predictor_op(brmi, lhs)
     isnothing(op) && return nothing
     predictors = [lp for lp in linear_predictors(brmi) if lp.name === lhs]
@@ -6293,10 +6303,16 @@ function _sb_cat_entries(brmi::BRMI, lhs::Symbol)
         t isa NamedColumn && !isnothing(_sb_cat_levels(t)) || continue
         cellmeans = name(t) === cellmeans_block
         cellmeans && (cellmeans_block = nothing)
+        # A frozen replay counts the FITTED levels (see `_sb_emit_cat!`): the
+        # `<c>_lvl_<k>` addresses name positions in that order, whatever subset
+        # of levels the replayed rows happen to carry.
+        record = isnothing(frozen_preproc) ? nothing :
+            get(frozen_preproc, Symbol(name(t), :_idx), nothing)
+        n_levels = !isnothing(record) && record.kind === :factor ?
+            length(record.const_) : first(_sb_level_index(_sb_cat_levels(t)))
         push!(entries, (; address=name(t),
                           emitted=_sb_cat_block_name(emitted_lp, name(t)),
-                          term=t, cellmeans,
-                          n_levels=first(_sb_level_index(_sb_cat_levels(t)))))
+                          term=t, cellmeans, n_levels))
     end
     entries
 end
@@ -6304,9 +6320,9 @@ end
 # Per-level addresses of a predictor's cell-mean block: `<c>_lvl_<k>` ->
 # `(emitted block, k)`, `k` the level's position in the frozen level order.
 # Empty when every categorical term of `lhs` is treatment-coded.
-function _sb_cat_level_address_map(brmi::BRMI, lhs::Symbol)
+function _sb_cat_level_address_map(brmi::BRMI, lhs::Symbol; frozen_preproc=nothing)
     out = Dict{Symbol,Tuple{Symbol,Int}}()
-    entries = _sb_cat_entries(brmi, lhs)
+    entries = _sb_cat_entries(brmi, lhs; frozen_preproc)
     isnothing(entries) && return out
     for e in entries
         e.cellmeans || continue
@@ -6318,8 +6334,8 @@ function _sb_cat_level_address_map(brmi::BRMI, lhs::Symbol)
 end
 
 # Emitted cell-mean blocks of `lhs` with their level counts.
-function _sb_cat_cellmeans_blocks(brmi::BRMI, lhs::Symbol)
-    entries = _sb_cat_entries(brmi, lhs)
+function _sb_cat_cellmeans_blocks(brmi::BRMI, lhs::Symbol; frozen_preproc=nothing)
+    entries = _sb_cat_entries(brmi, lhs; frozen_preproc)
     isnothing(entries) && return Dict{Symbol,Int}()
     Dict{Symbol,Int}(e.emitted => e.n_levels for e in entries if e.cellmeans)
 end
@@ -6727,8 +6743,9 @@ end
 # and lets a formula that configures ONLY a term parameter still reach
 # `_sb_linear_predictor!`.
 function _sb_prior_overrides(brmi::BRMI;
-        term_priors=_brm_resolve_term_priors(brmi; prefix="sbimpl"))
-    effects = _sb_effect_prior_overrides(brmi)
+        term_priors=_brm_resolve_term_priors(brmi; prefix="sbimpl"),
+        frozen_preproc=nothing)
+    effects = _sb_effect_prior_overrides(brmi; frozen_preproc)
     terms = _sb_term_prior_overrides(brmi; resolved=term_priors)
     isempty(terms) && return effects
     out = Dict{Symbol,Any}()
@@ -6913,17 +6930,24 @@ function _sb_emit_cat!(stmts, data, target::Symbol, t::NamedColumn, summands;
                        prior=nothing, r2d2=nothing, cellmeans::Bool=false,
                        mod::Module=@__MODULE__)
     backing = parent(t)
-    n_levels, idx = _sb_level_index(parent(backing))
     col_name = _sb_cat_block_name(target, name(t))
     idx_name = Symbol(name(t), :_idx)
     n_name   = Symbol(name(t), :_n_levels)
+    # The FITTED level set drives the coefficient count. On a frozen replay it
+    # comes from the recorded `PreprocEntry(:factor)`, so a prediction frame
+    # carrying only a SUBSET of the training levels keeps the fitted count --
+    # and with it the per-level prior vector of a cell-mean block, whose
+    # `<c>_lvl_<k>` addresses are positions in that fitted order -- instead of
+    # re-deriving both from the new rows. Mirrors `_sb_mo_levels_for_emission`.
+    levels = _sb_cat_levels_for_emission(data, idx_name, name(t), parent(backing))
+    n_levels, idx = length(levels), _sb_apply_levels(levels, parent(backing))
     data[idx_name] = idx
     data[n_name]   = n_levels
     # Frozen level set drives the K-1 treatment-contrast betas; reprocess
     # re-codes a new df against it and updates the `<x>_n_levels` count key
     # (derived from raw_ref). Dimension-coupled (unseen level / changed count).
     _sb_record_preproc!(data, idx_name,
-        PreprocEntry(:factor, _sb_fit_levels(parent(backing)), name(t), true))
+        PreprocEntry(:factor, levels, name(t), true))
     if cellmeans
         _sb_emit_cat_cells!(stmts, col_name, idx_name, n_name, n_levels, prior,
                             r2d2; mod)
@@ -6963,6 +6987,11 @@ function _sb_emit_cat!(stmts, data, target::Symbol, t::NamedColumn, summands;
                 Expr(:kw, :x, idx_name), Expr(:kw, :n_levels, n_name)))))
     end
     push!(summands, col_name)
+end
+
+function _sb_cat_levels_for_emission(data, idx_name::Symbol, source::Symbol, raw)
+    frozen = _sb_frozen_preproc_entry(data, idx_name, :factor, source)
+    isnothing(frozen) ? _sb_fit_levels(raw) : frozen.const_
 end
 
 function _sb_emit_cat_cells!(stmts, col_name::Symbol, idx_name::Symbol,
