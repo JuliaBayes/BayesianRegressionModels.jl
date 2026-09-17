@@ -6190,7 +6190,8 @@ EXCLUDED — emitted as their OWN parameters, NOT `beta_pop`, so they never
 appear in `pop_<lhs>_beta_pop`:
 
 - integer- or `CategoricalVector`-typed bare predictors → `cat_<lhs>_<name>`
-  (K−1 treatment contrasts);
+  (K−1 treatment contrasts; K cell means for the first categorical term of a
+  predictor without an intercept);
 - `offset(x)` → `x` itself, with fixed coefficient one;
 - `mo1(c)` → `mo1_<c>`; `s(x)` and `t2(x,z)` → their own fixed/range
   coefficients and smoothing scales;
@@ -6207,8 +6208,11 @@ resolves against — with ONE addition that is deliberately not listed here,
 because it is not a `beta_pop` column: a categorical / integer-coded
 predictor (bare, or wrapped in `factor(...)`) is addressable by its COLUMN
 name, which sets one shared Normal prior over its K-1 treatment contrasts
-(`cat_<lhs>_<c>_beta`). Everything else in the EXCLUDED list above still owns
-parameters no `effect(...)` address reaches.
+(`cat_<lhs>_<c>_beta`). A predictor without an intercept codes its first
+categorical term by K cell means instead; the column name then covers all K,
+and each is also addressable on its own as `<c>_lvl_<k>` (`k` = the level's
+position in the fitted level order). Everything else in the EXCLUDED list above
+still owns parameters no `effect(...)` address reaches.
 """
 function popcoefnames(brmi::BRMI, lhs::Symbol)
     op = linear_predictor_op(brmi, lhs)

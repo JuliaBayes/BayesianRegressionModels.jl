@@ -1712,7 +1712,9 @@ Materialise the backend-neutral population design for the first common surface:
 an additive intercept, continuous raw-data columns, pure numeric data
 expressions, fitted `zscale`/`standardize`/`center` columns, pairwise
 continuous/categorical interactions, treatment contrasts for integer or
-`CategoricalVector` columns, and pure data-derived fixed `offset(...)` terms.
+`CategoricalVector` columns (cell means for the first such term of a predictor
+without an intercept -- `_brm_cellmeans_block`), and pure data-derived fixed
+`offset(...)` terms.
 Plain grouped terms are separated into `_BRMRandomEffectPlan` values rather
 than being mistaken for population columns.
 Returns `nothing` for a term requiring richer lowering unless `required=true`,
