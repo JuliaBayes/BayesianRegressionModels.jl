@@ -25,7 +25,9 @@ signature — the rest are covered by their docstrings on the [API](@ref) page.
 | `mo(c)`, `mo1(c)` | monotonic effect of an ordered factor via Dirichlet increments | — |
 | `me(x, sd)` | measurement-error covariate — `x` is observed with known `sd` | — |
 | `interval_censored(x; upper=lloq, lower=0)` | quantified/BLOQ covariate with bounded latent values on BLOQ rows | — |
-| `factor(c; ref=k)` | treatment contrasts for a categorical column, reference level `k` | ✓ |
+| `factor(c)`, a bare integer / `CategoricalArray` column | K−1 treatment contrasts under an intercept; K cell means as the first categorical term of a predictor without one ("Cell means" on the [overview page](index.md)) | ✓ |
+| `factor(c; ref=k)` | reference level `k` for the term's treatment contrasts | ✓ |
+| `factor(c; cmc=false)` | keep K−1 treatment contrasts even in a predictor without an intercept (brms' `cmc`, "cell-mean coding") | ✓ |
 | `protect(x)` | materialize a raw data expression as one literal column | ✓ |
 
 A plain RHS expression in raw data columns (`log(exposure)`, `x^2`) is treated

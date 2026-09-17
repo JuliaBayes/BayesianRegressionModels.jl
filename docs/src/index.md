@@ -225,8 +225,9 @@ end)((;
 """, :categorical_prior; title="Categorical effect prior")
 ```
 
-One shared `(location, scale)` covers every contrast in the block; per-level
-scales are not expressible here. The `:`-predictor form `effect(:, g)` reaches
+One shared `(location, scale)` covers every contrast in the block; a treatment
+contrast has no per-level address (a cell mean does — see below). The
+`:`-predictor form `effect(:, g)` reaches
 the corresponding block in every predictor owning it, and the statement
 composes with population overrides on the same predictor
 (`effect(mu, x) ~ Normal(0, 0.25)`) — each addresses its own parameter. A
@@ -236,6 +237,64 @@ addresses whenever that is unambiguous; when two `factor(g; ref=…)` blocks of
 one column would both claim it, the bare address is refused and each block is
 addressed by its reference-qualified column name. Models with no such statement
 keep the same `std_normal()` contrast prior under the predictor-qualified name.
+
+### Cell means: a categorical predictor without an intercept
+
+Treatment contrasts measure each level against a reference, so they need an
+intercept to measure from. A predictor **without** one codes its first
+categorical term by **cell means** instead — one coefficient per level, no
+reference level, exactly what `0 + factor(g)` means in brms and in R's
+`model.matrix`. Each cell mean is addressable on its own, as
+`<column>_lvl_<k>` with `k` the level's position in the fitted level order, so
+a per-group location can carry a per-group prior:
+
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+cell_means = (@brm begin
+    sigma ~ Exponential(1)
+    mu ~ 0 + factor(site)
+    effect(mu, site) ~ Normal(0.0, 2.0)          # every site
+    effect(mu, site_lvl_3) ~ Normal(4.0, 0.5)    # ... except the third
+    y ~ Normal(mu, sigma)
+end)((;
+    site=[1, 2, 3, 1, 2, 3],
+    y=[-0.4, 0.2, 4.1, -0.1, 0.5, 3.8],
+))
+""", :cell_means; title="Cell means with a per-level prior")
+```
+
+The emitted carrier is the same `cat_<predictor>_<column>_beta` vector, of
+length K rather than K−1 and with no pinned zero. The column address sets one
+prior over all K cell means; a level address is more specific and overrides it
+for that level, under the same most-specific-wins rule as every other
+`effect(...)` statement.
+
+The rule, in full:
+
+- BRM has no implicit intercept and `0` is only a marker, so "without an
+  intercept" means the predictor has no `1` term: `mu ~ site`, `mu ~ 0 + site`
+  and `mu ~ 0 + factor(site)` are the same formula.
+- Only the **first** categorical term is cell-mean coded. A second one's full
+  indicator set would be collinear with the first's, so later categorical
+  terms — and every `&` interaction — stay treatment-coded.
+- `factor(site; cmc=false)` — brms' switch, "cell-mean coding" — keeps K−1
+  treatment contrasts in a predictor without an intercept, and the cell means
+  pass to the next categorical term. A `ref=` alone does not opt out: as in R,
+  a releveled factor without an intercept is still cell-mean coded, in its
+  releveled order.
+- An ordinal model's estimated thresholds *are* its location predictor's
+  intercept, so the `eta` of `Ordinal(...)` / `OrderedLogistic(...)` keeps
+  treatment contrasts even though it is written `eta ~ 0 + ...`.
+- A random intercept `(1 | g)` is not a population intercept.
+- The rule is about population terms. A categorical term *inside* a
+  random-effect block is unaffected: `(0 + c | g)` still expands to the K−1
+  dummy columns of levels 2…K, so level 1 carries no group-level effect there.
+
+`brm_population_effect_coordinates` reports which coding a block has
+(`coding === :cellmeans` or `:treatment`); a cell-mean block has no
+`reference_level`, and `cells` pairs each level with its posterior coordinate.
+An `r2d2(...)` decomposition allocates its shares over treatment contrasts and
+refuses a cell-mean block.
 
 ### Term-internal parameters
 

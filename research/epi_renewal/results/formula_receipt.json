@@ -8,19 +8,19 @@
    "max_rhat": 1.040066019935641,
    "min_ess": 55.09343903782715,
    "name": "single_rw_formula",
-   "seconds": 23.388598593,
+   "seconds": 31.971233681,
    "seed": 1,
    "target_acceptance_rate": 0.9
   },
   {
    "dim": 115,
-   "divergences": 3,
+   "divergences": 8,
    "draws": 1000,
    "gq_failed": 0,
-   "max_rhat": 1.014652757218581,
-   "min_ess": 158.8180154987004,
+   "max_rhat": 1.0102484881881781,
+   "min_ess": 256.19163512879504,
    "name": "patch_formula",
-   "seconds": 346.450999116,
+   "seconds": 776.181885341,
    "seed": 1,
    "target_acceptance_rate": 0.9
   }
