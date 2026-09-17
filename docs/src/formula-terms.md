@@ -1329,3 +1329,67 @@ statement is rejected with a message saying so.
 - StanBlocks-only, like [`Dirichlet`](@ref), [`s`](@ref) and [`r2d2`](@ref);
   not available to `VBRMI`. `TuringBRMI` retains the generic callable, so the
   same statement lowers there through its own path.
+
+## Function-valued arguments: lambdas and `do` blocks
+
+A top-level assignment may hand a **function** to a higher-order `@deffun`:
+written inline as the first argument, or as a trailing `do` block, which is the
+same thing — `@brm` folds the block in as the first positional argument, as
+`kernel(...) do … end` already does. Higher-order functions therefore take
+their function argument **first**.
+
+The body is Stan-side code, resolved by StanBlocks as a closure. It may read
+
+- its own parameters (`l` below),
+- **sampled model parameters** (`rate`) — they are passed into the generated
+  Stan function as arguments, so they are estimated, not frozen in, and
+- **shared data vectors** by name: a free name that is a data field and not a
+  formula name is registered as Stan data, the way a `kernel(...)` cell body
+  captures one.
+
+The example is a distributed lag whose weights decay at a sampled rate — a
+filter that a data vector of weights could not express, because the weights
+depend on a parameter.
+
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+using StanBlocks
+StanBlocks.@deffun begin
+    # Y[t] = sum over lags l = 0 .. L-1 of f(l) * x[t - l]
+    lagged(f, x::vector[T], L::int)::vector[T] = begin
+        Y::vector[T]
+        for t in 1:T
+            acc = 0.0
+            for l in 0:(L - 1)
+                if t - l >= 1
+                    acc += f(l) * x[t - l]
+                end
+            end
+            Y[t] = acc
+        end
+        Y
+    end
+end
+decaying_lag = (@brm begin
+    rate ~ Normal(1.0, 0.5; lower=0.0)
+    log_mu ~ 1 + rw(time)
+    Y = lagged(exp(log_mu), 3) do l
+        exp(-rate * l)                 # reads the sampled `rate`
+    end
+    y ~ Poisson(Y)
+end)((;
+    time=collect(1.0:12),
+    y=[3, 4, 6, 5, 8, 9, 12, 11, 15, 18, 17, 21],
+))
+""", :decaying_lag; title="A do block that reads a sampled parameter", require_stan=true)
+```
+
+In the generated Stan the closure is a function of its own (`lagged_closure_1`)
+and the call site passes what the body captured:
+`Y = lagged_closure_1(rate, exp(log_mu), 3)`. The inline spelling
+`lagged(l -> exp(-rate * l), exp(log_mu), 3)` emits the same program.
+
+The callee may live in another module — a package that ships `@deffun`
+operators — as long as the calling module imports it and is passed as `mod=`.
+This is a StanBlocks feature: `TuringBRMI` refuses the assignment by name, as
+it does for every Stan-only callee.
