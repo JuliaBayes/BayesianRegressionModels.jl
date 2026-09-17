@@ -1,0 +1,67 @@
+[
+ {
+  "model": "reporting delay",
+  "name": "reporting delay",
+  "seed": 1,
+  "draws": 1000,
+  "seconds": 14.393546971,
+  "divergences": 0,
+  "dim": 2,
+  "min_ess": 394.5270928427971,
+  "max_rhat": 1.0025715409880396,
+  "target_acceptance_rate": 0.9,
+  "gq_failed": 0
+ },
+ {
+  "model": "one population",
+  "name": "one population",
+  "seed": 1,
+  "draws": 2000,
+  "seconds": 58.614924953,
+  "divergences": 1,
+  "dim": 59,
+  "min_ess": 156.82079886996266,
+  "max_rhat": 1.0050788927183254,
+  "target_acceptance_rate": 0.995,
+  "gq_failed": 0
+ },
+ {
+  "model": "one population, prior only",
+  "name": "one population, prior only",
+  "seed": 1,
+  "draws": 1000,
+  "seconds": 0.806602648,
+  "divergences": 0,
+  "dim": 59,
+  "min_ess": 491.9770838119334,
+  "max_rhat": 1.0151656803449798,
+  "target_acceptance_rate": 0.8,
+  "gq_failed": 2
+ },
+ {
+  "model": "one population, days 1-42",
+  "name": "one population, days 1-42",
+  "seed": 1,
+  "draws": 2000,
+  "seconds": 40.100879388,
+  "divergences": 0,
+  "dim": 59,
+  "min_ess": 296.22458756502436,
+  "max_rhat": 1.0093183479921974,
+  "target_acceptance_rate": 0.995,
+  "gq_failed": 0
+ },
+ {
+  "model": "six patches",
+  "name": "six patches",
+  "seed": 1,
+  "draws": 2000,
+  "seconds": 840.549394234,
+  "divergences": 2,
+  "dim": 115,
+  "min_ess": 88.8649610039006,
+  "max_rhat": 1.0056722626977292,
+  "target_acceptance_rate": 0.9,
+  "gq_failed": 0
+ }
+]
