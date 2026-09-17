@@ -19,7 +19,10 @@
 #     moment-matched predict (gh=3), against a true 0.70 (z = -2.5 / -2.0). That is NOT a
 #     bias of the filter: over 8 independent panels of the same design (generator drawn from
 #     Xoshiro instead of this fixture's LCG) the gh=0 estimates are 0.40 ... 0.86 with mean
-#     0.664 (se 0.057). One parameter in 14 at |z| ~ 2 is what chance produces.
+#     0.664 (se 0.057); over all 21 replicated panels 0.630 (se 0.029), i.e. a shortfall of
+#     6-10%, not 35%. One parameter in 14 at |z| ~ 2 is what chance produces. Nor is it
+#     discretisation: the PSIS-certified filter (nsub=16, gh=3; k-hat 0.14 against nsub=32,
+#     see ema_state_dependent_psis.jl) gives 0.476 +/- 0.120 on this panel.
 #   - Driver reports rs ~ 0.41 on hand-rolled Euler-Maruyama data vs 0.641 +/- 0.092 on
 #     ctGenerate data (fitDemo.Rmd 288-296). Those are different data-generating processes:
 #     with no max timestep set, ctsem's generator AND filter take ONE step per observation

@@ -18,6 +18,19 @@
 # Both are DATA, so every rung is the SAME compiled model and shares one parameter space --
 # which is exactly what importance weighting between rungs needs.
 #
+# RESULT (strato2, 100 subjects x 30, 600 draws, reference nsub=32 / gh=5):
+#   (nsub, gh)   fit      sd(log ratio)   k-hat   IS-ESS   cz            cz reweighted
+#   ( 2, 0)        98 s   11.72           3.22      1.1    0.478+-0.091  --
+#   ( 8, 0)       285 s    1.92           0.84     34.3    0.457+-0.105  (k-hat failed)
+#   ( 8, 3)      1715 s    2.75           0.81     21.7    0.483+-0.108  (k-hat failed)
+#   (16, 3)      3009 s    0.92           0.14    288.5    0.474+-0.115  0.476+-0.120   <- certified
+# The precision axis that matters is the SUBSTEP COUNT (the analogue of solver step size), not
+# the predict order: 3 -> 5 quadrature nodes changes the log-density by 7e-7, and moment
+# matching at 8 substeps is no closer to the reference than the first-order predict. Posterior
+# means of the uncertified 8-substep fits sit within 0.54 / 0.64 certified sds of the
+# certified ones (2 substeps: 3.95). An IS estimate whose k-hat failed is NOT evidence: the
+# failed rungs' reweighted cz (0.491, 0.531) suggested a drift that the certified rung refutes.
+#
 # Sampler: WarmupHMC.adaptive_warmup_mcmc on the BridgeStan problem (native BRM via SB).
 #
 # Run: julia --project=test research/ema_ctsem/ema_state_dependent_psis.jl [outdir]
@@ -80,6 +93,7 @@ function main(outdir=nothing;
                 for i in eachindex(unc); println(io, join(vcat(C[:, i], [lr[i], w[i]]), ",")); end
             end
         end
+        flush(stdout)                                    # a rung takes minutes to an hour: show it when it lands
         if khat <= khat_ok
             println("k-hat <= ", khat_ok, ": this filter is reliable for this posterior -- stop; the IS columns are the reference posterior.")
             return
