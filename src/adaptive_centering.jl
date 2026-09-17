@@ -326,18 +326,22 @@ end
     _adaptive_hsgp_centering_blocks(model, unc_names)
 
 Resolve the compiled coordinates and fixed spectral geometry for every
-ungrouped squared-exponential HSGP in an `SBBRMI` or `GenerativePlan`.
+ungrouped and grouped squared-exponential HSGP in an `SBBRMI` or
+`GenerativePlan`. A grouped term contributes one block per group level; all of
+them share the term's spectral scales, so each level's basis weights adapt as
+independent scalar cells around the same per-basis frame.
 
 This is the backend-internal companion to [`adaptive_centering_blocks`](@ref).
 It follows BRM's formula-term descriptor to declaration-owned parameter roles,
 then reads the declaration's compiler-owned `omega2` data binding.  It never
 parses generated Stan or assumes a global parameter order.  The metadata is
-intentionally fail-closed: grouped and periodic HSGPs, bounded transforms, and
+intentionally fail-closed: periodic HSGPs, bounded transforms, and
 declaration/artifact coordinate drift raise before a reparametrizer is built.
 """
 function _adaptive_hsgp_centering_blocks(model, unc_names)
     descriptor = brm_descriptor(model)
     plan = descriptor.plan
+    pos = _ranef_name_positions(unc_names)
     out = _HSGPAdaptiveCenteringBlock[]
 
     for predictor in linear_predictors(plan.parent)
@@ -345,17 +349,17 @@ function _adaptive_hsgp_centering_blocks(model, unc_names)
         for entry in _brm_term_coordinate_entries(plan.parent, logical)
             getf(entry.value) === hsgp || continue
             kw = getkwargs(entry.value)
-            haskey(kw, :by) && error(
-                "BRM adaptive centering: grouped HSGP `$(entry.term)` on " *
-                "predictor `$logical` is unsupported; its basis weights live " *
-                "in a separate per-group field rather than `beta_raw`.",
-            )
             covariance = _sb_gp_cov(kw, :hsgp)
             covariance === :exp_quad || error(
                 "BRM adaptive centering: HSGP `$(entry.term)` on predictor " *
                 "`$logical` uses covariance `$covariance`; this first contract " *
                 "supports only the non-periodic squared-exponential geometry.",
             )
+            if haskey(kw, :by)
+                _adaptive_grouped_hsgp_blocks!(
+                    out, descriptor, plan, pos, unc_names, logical, entry, kw)
+                continue
+            end
 
             weights = brm_term_coordinates(
                 descriptor, logical, unc_names;
@@ -433,16 +437,120 @@ function _adaptive_hsgp_centering_blocks(model, unc_names)
         end
     end
 
-    claimed = Int[]
+    claimed_effects = Int[]
+    claimed_scales = Int[]
+    seen_terms = Set{Tuple{Symbol,Symbol}}()
     for block in out
-        append!(claimed, block.effects)
-        append!(claimed, block.length_scales)
-        push!(claimed, block.sd)
+        append!(claimed_effects, block.effects)
+        # One grouped term contributes one block per group level; all of them
+        # share the term's length-scale and marginal-SD coordinates, so scales
+        # are claimed once per (predictor, term), while every weight cell is
+        # claimed exactly once.
+        (block.logical, block.term) in seen_terms && continue
+        push!(seen_terms, (block.logical, block.term))
+        append!(claimed_scales, block.length_scales)
+        push!(claimed_scales, block.sd)
     end
-    length(unique(claimed)) == length(claimed) || error(
+    length(unique(claimed_effects)) == length(claimed_effects) &&
+        length(unique(claimed_scales)) == length(claimed_scales) || error(
         "BRM adaptive centering: emitted HSGP blocks claim overlapping " *
         "unconstrained coordinates; refusing an ambiguous transform.",
     )
+    out
+end
+
+# Grouped squared-exponential HSGP weights for online adaptation. Spectral
+# hyperparameters stay shared across groups, so one term contributes one
+# ordinary `_HSGPAdaptiveCenteringBlock` per group level: each block's
+# `effects` are that level's basis-weight coordinates and every block shares
+# the term's per-basis compiled frame, length scales, marginal SD, and
+# spectral frequencies. The flat index rule mirrors the emitted
+# `to_matrix(zflat, n_basis, n_groups)'` layout: flat position `(g-1)*B+b`
+# addresses frequency `b` in level `g`.
+function _adaptive_grouped_hsgp_blocks!(
+        out, descriptor, plan, pos, unc_names, logical, entry, kw)
+    args = getargs(entry.value)
+    K, _ = _sb_hsgp_options(kw, length(args))
+    B = prod(K)
+    axnames = Tuple(name(_sb_named_inner(:hsgp, a)) for a in args)
+    gname = name(kw[:by])
+    n_key = Symbol(:n_, gname)
+    G = get(plan.data, n_key, nothing)
+    G isa Integer || error(
+        "BRM adaptive centering: grouped HSGP `$(entry.term)` on predictor " *
+        "`$logical` has no integer group count under `$n_key`; refusing " *
+        "an ambiguous weight layout.",
+    )
+    field = Symbol(:hsgpw_, join(string.(axnames), "_"))
+    flat_name = Symbol(:zflat_, field, :_, gname)
+    flat_names = ["$(flat_name).$i" for i in 1:(G*B)]
+    flat = _adaptive_named_indices(pos, flat_names, entry.term,
+        "grouped HSGP basis weights")
+
+    rho = brm_term_coordinates(
+        descriptor, logical, unc_names;
+        term=entry.term, parameter=:length_scale,
+    )
+    sigma = brm_term_coordinates(
+        descriptor, logical, unc_names;
+        term=entry.term, parameter=:sd,
+    )
+    owner = rho.output.declaration
+    isnothing(owner) && error(
+        "BRM adaptive centering: grouped HSGP `$(entry.term)` length scale " *
+        "has no compiler declaration owner.",
+    )
+    if owner.family isa Symbol
+        owner.family in (:_sb_hsgp_by, :_sb_hsgp_by_aniso) || error(
+            "BRM adaptive centering: grouped HSGP `$(entry.term)` resolved to " *
+            "unsupported emitted family `$(owner.family)`.",
+        )
+    end
+    sigma = _adaptive_same_hsgp_owner(sigma, owner, "marginal SD")
+    get(owner.keywords, :beta, nothing) === Symbol(:b_, field, :_, gname) || error(
+        "BRM adaptive centering: grouped HSGP `$(entry.term)` declaration " *
+        "does not carry the expected per-group weight block; refusing " *
+        "crossed term metadata.",
+    )
+    length(rho.coordinates) >= 1 || error(
+        "BRM adaptive centering: grouped HSGP `$(entry.term)` has no length-scale coordinate.",
+    )
+    length(sigma.coordinates) == 1 || error(
+        "BRM adaptive centering: grouped HSGP `$(entry.term)` must have one marginal-SD coordinate.",
+    )
+    omega_key = get(owner.keywords, :omega2, nothing)
+    omega_key isa Symbol || error(
+        "BRM adaptive centering: grouped HSGP `$(entry.term)` declaration does " *
+        "not expose its compiler-owned `omega2` data binding.",
+    )
+    omega_raw = get(plan.data, omega_key, nothing)
+    omega_raw isa AbstractMatrix{<:Real} || error(
+        "BRM adaptive centering: grouped HSGP `$(entry.term)` compiler data " *
+        "`$omega_key` is not a real spectral-frequency matrix.",
+    )
+    omega2 = Matrix{Float64}(omega_raw)
+    size(omega2) == (B, length(rho.coordinates)) || error(
+        "BRM adaptive centering: grouped HSGP `$(entry.term)` owns " *
+        "$B basis weights and $(length(rho.coordinates)) length scales, but " *
+        "`$omega_key` has size $(size(omega2)).",
+    )
+    rho_lower = _adaptive_lower_bounds(
+        plan, rho.output, length(rho.coordinates), entry.term,
+        "length scale",
+    )
+    sigma_lower = only(_adaptive_lower_bounds(
+        plan, sigma.output, 1, entry.term, "marginal SD",
+    ))
+    target_c = _brm_hsgp_centeredness(kw, B)
+    rho_idx = collect(rho.coordinates)
+    sd_idx = only(sigma.coordinates)
+    for g in 1:G
+        push!(out, _HSGPAdaptiveCenteringBlock(
+            logical, entry.term, target_c,
+            flat[(g-1)*B+1:g*B],
+            rho_idx, rho_lower, sd_idx, sigma_lower, omega2,
+        ))
+    end
     out
 end
 
