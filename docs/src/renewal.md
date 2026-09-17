@@ -140,13 +140,12 @@ Main.BRMDocsComparisons.source_code_region(
 )
 ```
 
-Every declaration on this page is rendered in four panes: the `@brm` source, the
-StanBlocks model it lowers to, the generated Stan program, and the output of the
-Turing backend. These are StanBlocks models. `@deffun` functions and `@lpxf`
-families are Stan code with no Turing counterpart, and the Turing backend
-currently does not refuse them: it applies the custom functions row by row, so
-the program in the fourth pane is not an equivalent of the model and does not
-run. Read the first three panes; the fourth documents a current limitation.
+Every declaration on this page is rendered in the standard comparison panes:
+the `@brm` source, its intermediate representation, the StanBlocks model it
+lowers to, the generated Stan program, and the Turing backend. These are
+StanBlocks models. `@deffun` functions and `@lpxf` families are Stan code with
+no Turing counterpart, so the Turing pane reports each model as unsupported and
+names the statement it cannot lower.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(
@@ -410,10 +409,9 @@ Main.BRMDocsComparisons.source_code_region(
 - The data are simulated from the model family that is fitted, so the figures
   show that the declarations recover their own parameters — not how the model
   behaves under misspecification, reporting artefacts or day-of-week effects.
-- The models use the StanBlocks backend. The Turing backend cannot express
-  top-level assignments that call `@deffun` functions, or custom `@lpxf`
-  families, and currently lowers them row by row instead of refusing; the Turing
-  panes on this page are therefore not equivalents of the Stan programs.
+- The models use the StanBlocks backend. The Turing backend refuses top-level
+  assignments that call `@deffun` functions, and custom `@lpxf` families, naming
+  the statement.
 
 ## Run it
 

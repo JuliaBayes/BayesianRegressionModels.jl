@@ -5,7 +5,8 @@
 # block of the page in order, in a fresh module, as Documenter does, and checks
 # that
 #   - each `source_code_region` / `source_function` marker still resolves,
-#   - each four-pane comparison carries a Stan pane that `stanc` accepts,
+#   - each backend comparison carries exactly one Stan pane that `stanc` accepts,
+#     and a Turing pane that refuses the Stan-only callees,
 #   - the tables generated from the checked-in summaries render,
 # and that every model of the source file has a finite BridgeStan log density
 # and gradient.
@@ -39,10 +40,16 @@ end
         if occursin("Main.BRMDocsComparisons.comparison(", block)
             comparisons += 1
             @test occursin("require_stan=true", block)
-            @test rendered isa Markdown.MD && length(rendered.content) == 5
-            stan = rendered.content[4]
-            @test stan isa Markdown.Code && stan.language == "stan"
-            @test StanBlocks.stanc_check(stan.code; warn_pedantic=false).ok
+            @test rendered isa Markdown.MD
+            stan_panes = [pane for pane in rendered.content
+                          if pane isa Markdown.Code && pane.language == "stan"]
+            @test length(stan_panes) == 1
+            @test StanBlocks.stanc_check(only(stan_panes).code; warn_pedantic=false).ok
+            # `@deffun` / `@lpxf` callees are Stan-only: the Turing pane must refuse
+            # them by name, which is what the page tells its reader.
+            turing_pane = last(rendered.content)
+            @test turing_pane isa Markdown.Code
+            @test occursin("Turing unsupported for this BRM example", turing_pane.code)
         elseif occursin("source_code_region", block)
             @test rendered isa Markdown.MD
             @test only(rendered.content) isa Markdown.Code
