@@ -10509,6 +10509,42 @@ function _sb_lik_family!(stmts, target, ::Type{<:BinomialLogit},
     _sb_lik_stan!(stmts, target, :binomial_logit, args, data)
 end
 
+# Bernoulli / BernoulliLogit 0/1 responses reach Stan as `int` data. A
+# float or Bool 0/1 column is the natural way to write binary outcomes
+# (`y = [0.0, 1.0]`), but passed through untouched it emits a real
+# observation whose sized-token GQ draw
+# `bernoulli_logit_rng(<real token>, mu)` matches no StanBlocks overload
+# and dies inside the tracer with `tracetype not defined`
+# (snag brm-sbbrmi-berno-18aeccfe). Coerce here so density, pointwise
+# log-lik and RNG paths all see the `int[n]` token the sized-token
+# `bernoulli[_logit]_rng(int[n], …)` overloads expect; anything outside
+# 0/1 fails loudly at lowering instead of inside the StanBlocks tracer.
+_sb_is_bernoulli_value(::Bool) = true
+_sb_is_bernoulli_value(v::Real) = v == 0 || v == 1
+_sb_is_bernoulli_value(_) = false
+function _sb_coerce_bernoulli_response!(data, target, family::AbstractString)
+    response = get(data, target, nothing)
+    response isa AbstractVector || error(
+        "sbimpl: `$family` expects an observed vector for `$target`, got " *
+        "$(typeof(response))")
+    bad = findfirst(v -> !_sb_is_bernoulli_value(v), response)
+    isnothing(bad) || error(
+        "sbimpl: `$family` response `$target` must contain only 0/1 values, " *
+        "got $(repr(response[bad])) at row $bad")
+    data[target] = Int.(response)
+    nothing
+end
+function _sb_lik_family!(stmts, target, ::Type{<:Bernoulli},
+                         args::Tuple{Any}, data)
+    _sb_coerce_bernoulli_response!(data, target, "Bernoulli")
+    _sb_lik_stan!(stmts, target, :bernoulli, args, data)
+end
+function _sb_lik_family!(stmts, target, ::Type{<:BernoulliLogit},
+                         args::Tuple{Any}, data)
+    _sb_coerce_bernoulli_response!(data, target, "BernoulliLogit")
+    _sb_lik_stan!(stmts, target, :bernoulli_logit, args, data)
+end
+
 _sb_von_mises_observations(data, target) = begin
     raw = get(data, target, nothing)
     raw isa AbstractVector || error(
