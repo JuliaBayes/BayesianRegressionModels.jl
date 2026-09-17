@@ -37,15 +37,16 @@ StanBlocks.@deffun begin
         ms=ms0; mm=mm0; p11=P0; p12=0.0; p22=P0; ll=0.0
         for t in 1:T
             if t>1
-                wl=workload[t-1]; d=dt[t]
-                nms=ms+(a11*ms+a12*mm+wls*wl)*d; nmm=mm+(a21*ms+a22*mm+cm)*d
+                d=dt[t]
+                nms=ms+(a11*ms+a12*mm)*d; nmm=mm+(a21*ms+a22*mm+cm)*d
                 f11=1+a11*d; f12=a12*d; f21=a21*d; f22=1+a22*d
                 qs=q1*q1*d; qm=q2*q2*d
                 fp11=f11*p11+f12*p12; fp12=f11*p12+f12*p22; fp21=f21*p11+f22*p12; fp22=f21*p12+f22*p22
                 np11=fp11*f11+fp12*f12+qs; np12=fp11*f21+fp12*f22; np22=fp21*f21+fp22*f22+qm
                 ms=nms; mm=nmm; p11=np11; p12=np12; p22=np22
             end
-            v1=ys[t]-ms; v2=ym[t]-mm; s11=p11+r1; s12=p12; s22=p22+r2
+            ms=ms+wls*workload[t]                    # TDPREDEFFECT = IMPULSE at the observation (ctsem)
+            v1=ys[t]-ms; v2=ym[t]-mm; s11=p11+r1*r1; s12=p12; s22=p22+r2*r2   # merr cells are SDs
             det=s11*s22-s12*s12; si11=s22/det; si12=-s12/det; si22=s11/det
             quad=v1*(si11*v1+si12*v2)+v2*(si12*v1+si22*v2)
             ll=ll-0.5*(2*l2pi()+log(det)+quad)
@@ -63,14 +64,15 @@ StanBlocks.@deffun begin
         out::vector[T]; ms=ms0; mm=mm0; p11=P0; p12=0.0; p22=P0
         for t in 1:T
             if t>1
-                wl=workload[t-1]; d=dt[t]
-                nms=ms+(a11*ms+a12*mm+wls*wl)*d; nmm=mm+(a21*ms+a22*mm+cm)*d
+                d=dt[t]
+                nms=ms+(a11*ms+a12*mm)*d; nmm=mm+(a21*ms+a22*mm+cm)*d
                 f11=1+a11*d; f12=a12*d; f21=a21*d; f22=1+a22*d; qs=q1*q1*d; qm=q2*q2*d
                 fp11=f11*p11+f12*p12; fp12=f11*p12+f12*p22; fp21=f21*p11+f22*p12; fp22=f21*p12+f22*p22
                 np11=fp11*f11+fp12*f12+qs; np12=fp11*f21+fp12*f22; np22=fp21*f21+fp22*f22+qm
                 ms=nms; mm=nmm; p11=np11; p12=np12; p22=np22
             end
-            v1=ys[t]-ms; v2=ym[t]-mm; s11=p11+r1; s12=p12; s22=p22+r2
+            ms=ms+wls*workload[t]                    # TDPREDEFFECT = IMPULSE at the observation (ctsem)
+            v1=ys[t]-ms; v2=ym[t]-mm; s11=p11+r1*r1; s12=p12; s22=p22+r2*r2   # merr cells are SDs
             det=s11*s22-s12*s12; si11=s22/det; si12=-s12/det; si22=s11/det
             quad=v1*(si11*v1+si12*v2)+v2*(si12*v1+si22*v2); out[t]=-0.5*(2*l2pi()+log(det)+quad)
             k11=p11*si11+p12*si12; k12=p11*si12+p12*si22; k21=p12*si11+p22*si12; k22=p12*si12+p22*si22
@@ -87,11 +89,12 @@ StanBlocks.@deffun begin
         out::vector[T]; s=normal_rng(ms0,sqrt(P0)); m=normal_rng(mm0,sqrt(P0))
         for t in 1:T
             if t>1
-                wl=workload[t-1]; d=dt[t]
-                s=s+(a11*s+a12*m+wls*wl)*d+q1*sqrt(d)*normal_rng(0.,1.)
+                d=dt[t]
+                s=s+(a11*s+a12*m)*d+q1*sqrt(d)*normal_rng(0.,1.)
                 m=m+(a21*s+a22*m+cm)*d+q2*sqrt(d)*normal_rng(0.,1.)
             end
-            out[t]=normal_rng(s,sqrt(r1))
+            s=s+wls*workload[t]
+            out[t]=normal_rng(s,r1)
         end
         out
     end
@@ -147,7 +150,7 @@ function main()
     sb = SBBRMI(ema_kernel_kalman(data); mod=@__MODULE__)
     code = StanBlocks.stan_code(sb.model)
     @assert StanBlocks.stanc_check(code; warn_pedantic=false).ok "stanc failed"
-    prob = StanBlocks.stan_instantiate(sb.model; path=joinpath(tempdir(), "ema_kernel_kalman.stan"))
+    prob = StanBlocks.stan_instantiate(sb.model; path=joinpath(tempdir(), "ema_kernel_kalman_$(hash(code)).stan"))
     dim = LogDensityProblems.dimension(prob)
     q = [0.05*((i % 7) - 3) for i in 1:dim]
     lp, g = LogDensityProblems.logdensity_and_gradient(prob, q)

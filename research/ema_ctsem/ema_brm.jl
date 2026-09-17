@@ -226,15 +226,15 @@ StanBlocks.@deffun begin
              cm::real, wls::real, q0::real, qw::real, diffm::real, diff21::real,
              s0::real, m0::real, zs::vector[nt], zm::vector[nt])::vector[2 * nt] = begin
         out::vector[2 * nt]
-        s = s0; m = m0
+        s = s0 + wls * wl[1]; m = m0           # TDPREDEFFECT = IMPULSE at each observation (ctsem)
         corr = tanh(diff21)
         out[1] = s; out[nt + 1] = m
         for t in 2:nt
-            drift_s = -log1p(exp(b0 + bm * m)) * s + a12 * m + wls * wl[t - 1]
+            drift_s = -log1p(exp(b0 + bm * m)) * s + a12 * m
             drift_m = a21 * s + a22 * m + cm
-            gs = exp(q0 + qw * wl[t - 1])
+            gs = exp(q0 + qw * wl[t])              # DIFFUSION reads tdpreds[rowi]: the CURRENT row
             zc = corr * zs[t] + sqrt(1 - corr * corr) * zm[t]
-            s = s + drift_s * dt[t] + gs * sqrt(dt[t]) * zs[t]
+            s = s + drift_s * dt[t] + gs * sqrt(dt[t]) * zs[t] + wls * wl[t]   # impulse at row t
             m = m + drift_m * dt[t] + diffm * sqrt(dt[t]) * zc
             out[t] = s; out[nt + t] = m
         end
