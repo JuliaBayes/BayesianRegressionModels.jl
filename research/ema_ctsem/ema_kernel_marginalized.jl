@@ -5,10 +5,11 @@
 #
 # This version closes the parameterization gaps of the earlier draft so the model
 # matches Charles Driver's spec cell for cell:
-#   * DRIFT  -log1p(exp(b0+bm*mood))*stress + a12*mood + wl_stress*workload ;
-#            a21*stress + a22*mood + cint_mood
-#   * DIFFUSION (covmattransform='z'): stress sd = exp(q0+qw*workload) (input-
-#            dependent), mood sd = diffm, and a FREE process-noise CORRELATION
+#   * DRIFT  -log1p(exp(b0+bm*mood))*stress + a12*mood ;  a21*stress + a22*mood + cint_mood
+#   * TDPREDEFFECT wl_stress*workload enters as an IMPULSE at each observation (ctsem's
+#            chi(t) is a sum of Dirac deltas): stress jumps by wl_stress*workload[t] at row t.
+#   * DIFFUSION (covmattransform='z'): stress sd = exp(q0+qw*tdpreds[rowi]) (input-
+#            dependent, read at the CURRENT row), mood sd = diffm, and a FREE process-noise CORRELATION
 #            diff21 (fisher-z) — the off-diagonal the earlier draft dropped.
 #   * LAMBDA  [1;1;l31 on stress]; MANIFESTMEANS mm_stress, mm_mood, smoke_threshold
 #            (the continuous manifest intercepts the earlier draft dropped).
@@ -16,7 +17,9 @@
 #            integrated within the filter (ctsem's julia-backend treatment).
 #   * Subject-varying b0, q0, cint_mood, wl_stress share ONE correlated random-
 #            effect block (brms `(1|p|subject)` = ctsem's free 4x4 rawPCov), with
-#            b0 and cint_mood regressed on age+treatment.
+#            b0 regressed on age+treatment, cint_mood on treatment (the rendered beta).
+#   * T0MEANS + a FREE T0VAR (sd / fisher-z form), and merr as SDs (Theta = [merr]^2):
+#            ctsem covariance-type matrices are all in SD form (UcorSDtoCov).
 #   * Continuous-time transition solved by a SUBSTEPPED Euler mesh over each
 #            irregular Δt (NSUB substeps), not a single step.
 #
@@ -46,14 +49,14 @@ StanBlocks.@deffun begin
             b0::real, bm::real, a12::real, a21::real, a22::real, cm::real, wls::real,
             q0::real, qw::real, diffm::real, diff21::real, l31::real, thr::real,
             mm_s::real, mm_m::real, r1::real, r2::real,
-            ms0::real, mm0::real, P0s::real, P0m::real, nsub::int)::real = begin
-        ms=ms0; mm=mm0; p11=P0s; p12=0.0; p22=P0m; ll=0.0
+            ms0::real, mm0::real, t0sd1::real, t0sd2::real, t0z::real, nsub::int)::real = begin
+        ms=ms0; mm=mm0; p11=t0sd1*t0sd1; p12=tanh(t0z)*t0sd1*t0sd2; p22=t0sd2*t0sd2; ll=0.0
         for t in 1:T
             if t>1
-                wl=workload[t-1]; h=dt[t]/nsub
+                wl=workload[t]; h=dt[t]/nsub              # DIFFUSION uses tdpreds[rowi]: the CURRENT row
                 for st in 1:nsub
                     sp=log1p_exp(b0+bm*mm); sig=inv_logit(b0+bm*mm)
-                    nms=ms+(-sp*ms+a12*mm+wls*wl)*h; nmm=mm+(a21*ms+a22*mm+cm)*h
+                    nms=ms+(-sp*ms+a12*mm)*h; nmm=mm+(a21*ms+a22*mm+cm)*h
                     f11=1-h*sp; f12=h*(a12-bm*sig*ms); f21=h*a21; f22=1+h*a22
                     sds=exp(q0+qw*wl); corr=tanh(diff21)
                     qs=sds*sds*h; qc=corr*sds*diffm*h; qm=diffm*diffm*h
@@ -62,8 +65,9 @@ StanBlocks.@deffun begin
                     ms=nms; mm=nmm; p11=np11; p12=np12; p22=np22
                 end
             end
+            ms=ms+wls*workload[t]                    # TDPREDEFFECT = IMPULSE at the observation (ctsem)
             # Gaussian update (2 continuous indicators + manifest means)
-            v1=ys[t]-(ms+mm_s); v2=ym[t]-(mm+mm_m); s11=p11+r1; s12=p12; s22=p22+r2
+            v1=ys[t]-(ms+mm_s); v2=ym[t]-(mm+mm_m); s11=p11+r1*r1; s12=p12; s22=p22+r2*r2
             det=s11*s22-s12*s12; si11=s22/det; si12=-s12/det; si22=s11/det
             quad=v1*(si11*v1+si12*v2)+v2*(si12*v1+si22*v2)
             ll=ll-0.5*(2*l2pi()+log(det)+quad)
@@ -85,14 +89,14 @@ StanBlocks.@deffun begin
             b0::real, bm::real, a12::real, a21::real, a22::real, cm::real, wls::real,
             q0::real, qw::real, diffm::real, diff21::real, l31::real, thr::real,
             mm_s::real, mm_m::real, r1::real, r2::real,
-            ms0::real, mm0::real, P0s::real, P0m::real, nsub::int)::vector[T] = begin
-        out::vector[T]; ms=ms0; mm=mm0; p11=P0s; p12=0.0; p22=P0m
+            ms0::real, mm0::real, t0sd1::real, t0sd2::real, t0z::real, nsub::int)::vector[T] = begin
+        out::vector[T]; ms=ms0; mm=mm0; p11=t0sd1*t0sd1; p12=tanh(t0z)*t0sd1*t0sd2; p22=t0sd2*t0sd2
         for t in 1:T
             if t>1
-                wl=workload[t-1]; h=dt[t]/nsub
+                wl=workload[t]; h=dt[t]/nsub              # DIFFUSION uses tdpreds[rowi]: the CURRENT row
                 for st in 1:nsub
                     sp=log1p_exp(b0+bm*mm); sig=inv_logit(b0+bm*mm)
-                    nms=ms+(-sp*ms+a12*mm+wls*wl)*h; nmm=mm+(a21*ms+a22*mm+cm)*h
+                    nms=ms+(-sp*ms+a12*mm)*h; nmm=mm+(a21*ms+a22*mm+cm)*h
                     f11=1-h*sp; f12=h*(a12-bm*sig*ms); f21=h*a21; f22=1+h*a22
                     sds=exp(q0+qw*wl); corr=tanh(diff21); qs=sds*sds*h; qc=corr*sds*diffm*h; qm=diffm*diffm*h
                     fp11=f11*p11+f12*p12; fp12=f11*p12+f12*p22; fp21=f21*p11+f22*p12; fp22=f21*p12+f22*p22
@@ -100,7 +104,8 @@ StanBlocks.@deffun begin
                     ms=nms; mm=nmm; p11=np11; p12=np12; p22=np22
                 end
             end
-            v1=ys[t]-(ms+mm_s); v2=ym[t]-(mm+mm_m); s11=p11+r1; s12=p12; s22=p22+r2
+            ms=ms+wls*workload[t]                    # TDPREDEFFECT = IMPULSE at the observation (ctsem)
+            v1=ys[t]-(ms+mm_s); v2=ym[t]-(mm+mm_m); s11=p11+r1*r1; s12=p12; s22=p22+r2*r2
             det=s11*s22-s12*s12; si11=s22/det; si12=-s12/det; si22=s11/det
             quad=v1*(si11*v1+si12*v2)+v2*(si12*v1+si22*v2); lg=-0.5*(2*l2pi()+log(det)+quad)
             k11=p11*si11+p12*si12; k12=p11*si12+p12*si22; k21=p12*si11+p22*si12; k22=p12*si12+p22*si22
@@ -119,18 +124,21 @@ StanBlocks.@deffun begin
             b0::real, bm::real, a12::real, a21::real, a22::real, cm::real, wls::real,
             q0::real, qw::real, diffm::real, diff21::real, l31::real, thr::real,
             mm_s::real, mm_m::real, r1::real, r2::real,
-            ms0::real, mm0::real, P0s::real, P0m::real, nsub::int)::vector[T] = begin
-        out::vector[T]; s=normal_rng(ms0,sqrt(P0s)); m=normal_rng(mm0,sqrt(P0m))
+            ms0::real, mm0::real, t0sd1::real, t0sd2::real, t0z::real, nsub::int)::vector[T] = begin
+        out::vector[T]; z01=normal_rng(0.,1.); z02=normal_rng(0.,1.); r0=tanh(t0z)
+        s=ms0+t0sd1*z01; m=mm0+t0sd2*(r0*z01+sqrt(1-r0*r0)*z02)
         for t in 1:T
             if t>1
-                wl=workload[t-1]; h=dt[t]/nsub; corr=tanh(diff21)
+                wl=workload[t]; h=dt[t]/nsub; corr=tanh(diff21)
                 for st in 1:nsub
                     sds=exp(q0+qw*wl); z1=normal_rng(0.,1.); z2=corr*z1+sqrt(1-corr*corr)*normal_rng(0.,1.)
-                    s=s+(-log1p_exp(b0+bm*m)*s+a12*m+wls*wl)*h+sds*sqrt(h)*z1
-                    m=m+(a21*s+a22*m+cm)*h+diffm*sqrt(h)*z2
+                    ds=(-log1p_exp(b0+bm*m)*s+a12*m)*h+sds*sqrt(h)*z1
+                    dm=(a21*s+a22*m+cm)*h+diffm*sqrt(h)*z2
+                    s=s+ds; m=m+dm
                 end
             end
-            out[t]=normal_rng(s+mm_s,sqrt(r1))
+            s=s+wls*workload[t]                       # impulse at the observation
+            out[t]=normal_rng(s+mm_s,r1)
         end
         out
     end
@@ -170,16 +178,20 @@ ema_kernel_marginalized(d) = @brm d begin
     thr   ~ Normal(0, 1)                    # smoking threshold
     mm_s  ~ Normal(0, 0.5)                  # manifest mean, stressReport
     mm_m  ~ Normal(0, 0.5)                  # manifest mean, moodReport
-    r1    ~ Exponential(1.0)               # stressReport meas. sd
-    r2    ~ Exponential(1.0)               # moodReport meas. sd
+    r1    ~ Exponential(1.0)               # merr_stress (an SD; Theta = [merr]^2)
+    r2    ~ Exponential(1.0)               # merr_mood   (an SD)
     s0    ~ Normal(0, 1)                    # T0MEANS stress (population)
     m0    ~ Normal(0, 1)                    # T0MEANS mood (population)
+    t0sd1 ~ Exponential(1.0)               # T0VAR (free): stress sd
+    t0sd2 ~ Exponential(1.0)               #               mood sd
+    t0z   ~ Normal(0, 0.5)                  #               fisher-z correlation (T0cov_2_1)
 
     # the FOUR subject-varying params share ONE correlated block (ctsem rawPCov),
     # with b0 and cint_mood regressed on the covariates.
     b0  ~ 1 + age + treatment + (1 | p | subject)   # stress-drift baseline
     q0  ~ 1 +                   (1 | p | subject)    # stress process-noise baseline
-    cm  ~ 1 + age + treatment + (1 | p | subject)   # cint_mood
+    cm  ~ 1 +       treatment + (1 | p | subject)   # cint_mood: the rendered beta has raw_cint_mood_treatment only
+                                                     #   (its age cell renders `raw_0`, i.e. not a named free effect)
     wls ~ 1 +                   (1 | p | subject)    # wl_stress (now per-subject)
 
     # per subject: integrate out THIS subject's entire latent path with the EKF
@@ -187,7 +199,7 @@ ema_kernel_marginalized(d) = @brm d begin
                   b0, q0, cm, wls) do dti, wli, ys, ym, smk, lb0, lq0, lcm, lwls
         ys ~ ema_ekf(ym, smk, wli, dti,
                      lb0, bm, a12, a21, a22, lcm, lwls, lq0, qw, diffm, diff21, l31, thr,
-                     mm_s, mm_m, r1, r2, s0, m0, 10.0, 10.0, 4)
+                     mm_s, mm_m, r1, r2, s0, m0, t0sd1, t0sd2, t0z, 4)
         ys
     end
 end
@@ -196,7 +208,7 @@ function main()
     sb = SBBRMI(ema_kernel_marginalized(data); mod=@__MODULE__)
     code = StanBlocks.stan_code(sb.model)
     @assert StanBlocks.stanc_check(code; warn_pedantic=false).ok "stanc failed"
-    prob = StanBlocks.stan_instantiate(sb.model; path=joinpath(tempdir(), "ema_kernel_marg.stan"))
+    prob = StanBlocks.stan_instantiate(sb.model; path=joinpath(tempdir(), "ema_kernel_marg_$(hash(code)).stan"))
     dim = LogDensityProblems.dimension(prob)
     q = [0.05*((i % 7) - 3) for i in 1:dim]
     lp, g = LogDensityProblems.logdensity_and_gradient(prob, q)

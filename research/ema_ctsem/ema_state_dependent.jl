@@ -18,8 +18,11 @@
 #   CINT    = [0 ; 0.3]              (cint_mood only)
 #   LAMBDA  = [1 0 ; 0 1 ; 1.2 0]    (smoked loads 1.2 on stress)
 #   MANIFESTMEANS = [0 ; 0 ; -1]     (binary threshold -1; no continuous intercepts)
-#   MANIFESTVAR   = diag(.3, .3, 0)  (continuous meas var; binary via filter)
-#   T0MEANS = [0 ; 0.5]   T0VAR = diag(.6, .5)
+#   MANIFESTVAR   = diag(.3, .3, 0)  (SD form: meas. sd 0.3; binary via filter)
+#   T0MEANS = [0 ; 0.5]   T0VAR = diag(.6, .5)  (SD form: T0 sds 0.6, 0.5)
+#   ctsem covariance-type matrices are in SD / fisher-z form (UcorSDtoCov): the
+#   actual variance is the cell SQUARED -- cf. `[merr_stress]^2` in the rendered
+#   Theta and Charles's own `truecov()` in fitDemo.Rmd. T0VAR is FREE in the fit.
 #   NO covariates, NO time-dependent predictors, NO between-subject random effects.
 #
 # VERIFIED (strato2, StanBlocks bec23bc3c523): SBBRMI -> stan_code -> stanc_check
@@ -40,8 +43,8 @@ StanBlocks.@deffun begin
             b0::real, bm::real, a12::real, a21::real, a22::real, cintm::real,
             qd0::real, qd1::real, cz::real, sdm::real,
             l31::real, thr::real, r1::real, r2::real,
-            ms0::real, mm0::real, P0s::real, P0m::real, nsub::int)::real = begin
-        ms=ms0; mm=mm0; p11=P0s; p12=0.0; p22=P0m; ll=0.0
+            ms0::real, mm0::real, t0sd1::real, t0sd2::real, t0z::real, nsub::int)::real = begin
+        ms=ms0; mm=mm0; p11=t0sd1*t0sd1; p12=tanh(t0z)*t0sd1*t0sd2; p22=t0sd2*t0sd2; ll=0.0
         for t in 1:T
             if t>1
                 h=dt[t]/nsub                       # SUBSTEPPED continuous-time predict
@@ -58,7 +61,7 @@ StanBlocks.@deffun begin
                 end
             end
             # Gaussian update (2 continuous indicators, loadings [1;1])
-            v1=ys[t]-ms; v2=ym[t]-mm; s11=p11+r1; s12=p12; s22=p22+r2
+            v1=ys[t]-ms; v2=ym[t]-mm; s11=p11+r1*r1; s12=p12; s22=p22+r2*r2
             det=s11*s22-s12*s12; si11=s22/det; si12=-s12/det; si22=s11/det
             quad=v1*(si11*v1+si12*v2)+v2*(si12*v1+si22*v2)
             ll=ll-0.5*(2*l2pi()+log(det)+quad)
@@ -80,8 +83,8 @@ StanBlocks.@deffun begin
             b0::real, bm::real, a12::real, a21::real, a22::real, cintm::real,
             qd0::real, qd1::real, cz::real, sdm::real,
             l31::real, thr::real, r1::real, r2::real,
-            ms0::real, mm0::real, P0s::real, P0m::real, nsub::int)::vector[T] = begin
-        out::vector[T]; ms=ms0; mm=mm0; p11=P0s; p12=0.0; p22=P0m
+            ms0::real, mm0::real, t0sd1::real, t0sd2::real, t0z::real, nsub::int)::vector[T] = begin
+        out::vector[T]; ms=ms0; mm=mm0; p11=t0sd1*t0sd1; p12=tanh(t0z)*t0sd1*t0sd2; p22=t0sd2*t0sd2
         for t in 1:T
             if t>1
                 h=dt[t]/nsub
@@ -95,7 +98,7 @@ StanBlocks.@deffun begin
                     ms=nms; mm=nmm; p11=np11; p12=np12; p22=np22
                 end
             end
-            v1=ys[t]-ms; v2=ym[t]-mm; s11=p11+r1; s12=p12; s22=p22+r2
+            v1=ys[t]-ms; v2=ym[t]-mm; s11=p11+r1*r1; s12=p12; s22=p22+r2*r2
             det=s11*s22-s12*s12; si11=s22/det; si12=-s12/det; si22=s11/det
             quad=v1*(si11*v1+si12*v2)+v2*(si12*v1+si22*v2); lg=-0.5*(2*l2pi()+log(det)+quad)
             k11=p11*si11+p12*si12; k12=p11*si12+p12*si22; k21=p12*si11+p22*si12; k22=p12*si12+p22*si22
@@ -114,8 +117,9 @@ StanBlocks.@deffun begin
             b0::real, bm::real, a12::real, a21::real, a22::real, cintm::real,
             qd0::real, qd1::real, cz::real, sdm::real,
             l31::real, thr::real, r1::real, r2::real,
-            ms0::real, mm0::real, P0s::real, P0m::real, nsub::int)::vector[T] = begin
-        out::vector[T]; s=normal_rng(ms0,sqrt(P0s)); m=normal_rng(mm0,sqrt(P0m))
+            ms0::real, mm0::real, t0sd1::real, t0sd2::real, t0z::real, nsub::int)::vector[T] = begin
+        out::vector[T]; z01=normal_rng(0.,1.); z02=normal_rng(0.,1.); r0=tanh(t0z)
+        s=ms0+t0sd1*z01; m=mm0+t0sd2*(r0*z01+sqrt(1-r0*r0)*z02)
         for t in 1:T
             if t>1
                 h=dt[t]/nsub
@@ -127,7 +131,7 @@ StanBlocks.@deffun begin
                     s=s+ds; m=m+dm
                 end
             end
-            out[t]=normal_rng(s,sqrt(r1))
+            out[t]=normal_rng(s,r1)
         end
         out
     end
@@ -140,7 +144,15 @@ function fixture(; n=8, nt=15, seed=20260916)
     subject=String[]; stressReport=Vector{Float64}[]; moodReport=Vector{Float64}[]
     smoked=Vector{Int}[]; dt=Vector{Float64}[]
     for i in 1:n
-        push!(subject,"s$i"); s=0.0; m=0.5; a=Float64[]; b=Float64[]; c=Int[]; d=Float64[]
+        push!(subject,"s$i"); s=0.0+0.6*randn2(); m=0.5+0.5*randn2()   # T0 ~ N(T0MEANS, T0VAR), SD form
+        a=Float64[]; b=Float64[]; c=Int[]; d=Float64[]
+        for _ in 1:80                                   # ctGenerate(burnin = 10): 10 time units, h = 0.125
+            hh=0.125; sds=exp(-0.2+0.3*m); corr=tanh(0.7*s)
+            zs=randn2(); zc=randn2(); z2=corr*zs+sqrt(max(1-corr*corr,0.0))*zc
+            ds=(-log(1+exp(0.5+0.4*m))*s-0.25*m)*hh+sds*sqrt(hh)*zs
+            dm=(-0.30*s-0.60*m+0.3)*hh+0.6*sqrt(hh)*z2
+            s=s+ds; m=m+dm
+        end
         for t in 1:nt
             dv = t==1 ? 0.0 : exp(0.3*randn2())        # log-normal irregular intervals, median 1
             push!(d, t==1 ? 1.0 : dv)
@@ -154,7 +166,7 @@ function fixture(; n=8, nt=15, seed=20260916)
                     s=s+ds; m=m+dm
                 end
             end
-            push!(a, s+sqrt(0.3)*randn2()); push!(b, m+sqrt(0.3)*randn2())
+            push!(a, s+0.3*randn2()); push!(b, m+0.3*randn2())   # MANIFESTVAR .3 is an SD
             p=1/(1+exp(-(1.2*s-1))); push!(c, rnd()<p ? 1 : 0)
         end
         push!(stressReport,a); push!(moodReport,b); push!(smoked,c); push!(dt,d)
@@ -182,13 +194,16 @@ ema_state_dependent(d) = @brm d begin
     sdm   ~ Exponential(1.0)              # mood diffusion sd
     l31   ~ Normal(1.2, 0.5)              # smoked loading on stress
     thr   ~ Normal(-1.0, 0.5)             # smoking threshold
-    r1    ~ Exponential(1.0)              # stressReport meas. var
-    r2    ~ Exponential(1.0)              # moodReport meas. var
-    s0    ~ Normal(0.0, 1.0)              # T0 stress mean
-    m0    ~ Normal(0.5, 1.0)              # T0 mood mean
+    r1    ~ Exponential(1.0)              # merr_stress (an SD; squared in the filter)
+    r2    ~ Exponential(1.0)              # merr_mood   (an SD)
+    s0    ~ Normal(0.0, 1.0)              # T0MEANS stress
+    m0    ~ Normal(0.5, 1.0)              # T0MEANS mood
+    t0sd1 ~ Exponential(1.0)              # T0VAR (free in the fit): stress sd
+    t0sd2 ~ Exponential(1.0)              #                          mood sd
+    t0z   ~ Normal(0.0, 0.5)              #                          fisher-z correlation
     pred ~ kernel(dt, stressReport, moodReport, smoked) do dti, ys, ym, smk
         ys ~ ema_sd(ym, smk, dti, b0, bm, a12, a21, a22, cintm, qd0, qd1, cz, sdm,
-                    l31, thr, r1, r2, s0, m0, 0.6, 0.5, 8)   # nsub=8 substeps per interval
+                    l31, thr, r1, r2, s0, m0, t0sd1, t0sd2, t0z, 8)   # nsub=8 substeps per interval
         ys
     end
 end
