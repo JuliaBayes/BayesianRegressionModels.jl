@@ -1531,11 +1531,18 @@ nonemptyjoin(io::IO, iterator, args...; first) = if length(iterator) > 0
     join(io, iterator, args...)
 end
 Base.show(io::IO, x::ExprColumn) = begin
-    print(io, getf(x), "(", )
+    _show_call_head(io, getf(x))
+    print(io, "(", )
     join(io, getargs(x), ", ")
     nonemptyjoin(io, ["$key=$value" for (key, value) in pairs(getkwargs(x))], ", "; first="; ")
     print(io, ")")
 end
+# A resolved call head prints as the name the user wrote: hygiene roots it at
+# the author's module (`GlobalRef(mod, :Normal)`), which `print` would render
+# `Distributions.Normal` anywhere outside `Main`. The binding is already
+# resolved, so the module prefix is noise, not information.
+_show_call_head(io::IO, f) = print(io, f)
+_show_call_head(io::IO, g::GlobalRef) = print(io, g.name)
 Base.show(io::IO, x::MultiMembershipTerm) = begin
     print(io, "mm(")
     join(io, getfield(x, :groups), ", ")
