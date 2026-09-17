@@ -21,7 +21,8 @@ using StanBlocks
 using Distributions: Normal, Exponential
 
 stanc_ok(code) = StanBlocks.stanc_check(code; warn_pedantic=false).ok
-codeof(builder, df) = StanBlocks.stan_code(SBBRMI(builder(df); mod=@__MODULE__).model)
+codeof(builder, df) =
+    BayesianRegressionModels.stan_code(SBBRMI(builder(df); mod=@__MODULE__, total_groups=()))
 
 const zc_df = (; x=[-1.0, 0.5, 2.0, 0.25], g=[2, 1, 2, 3], y=[0.2, 1.1, -0.4, 0.7])
 
@@ -69,7 +70,7 @@ end
         mu ~ 1 + x + (1 + x || g)
         y ~ Normal(mu, 1.0)
     end
-    sb = SBBRMI(zerocorr(zc_df); mod=@__MODULE__)
+    sb = SBBRMI(zerocorr(zc_df); mod=@__MODULE__, total_groups=())
     blocks = ranef_blocks(sb)
     @test length(blocks) == 2
     @test [b.family for b in blocks] == [:ranef_intercept, :ranef_slope]
@@ -98,6 +99,8 @@ end
         mu ~ 1 + (0 || g)
         y ~ Normal(mu, 1.0)
     end
+    # With totals off, the `||`-specific sbimpl wording fires (on the default
+    # plan the shared preparation's "has no columns" wording fires instead).
     @test_throws "has no terms after dropping" codeof(empty, zc_df)
 end
 
@@ -137,7 +140,7 @@ const lit_df = (; x=[-1.0, 0.5, 2.0, 0.25], g__nocor__1=[1, 1, 2, 2],
         mu ~ 1 + x + (1 | g__nocor__1)
         y ~ Normal(mu, 1.0)
     end
-    sb = SBBRMI(lit(lit_df); mod=@__MODULE__)
+    sb = SBBRMI(lit(lit_df); mod=@__MODULE__, total_groups=())
     blocks = ranef_blocks(sb)
     @test length(blocks) == 1
     @test only(blocks).group === :g__nocor__1
@@ -157,7 +160,7 @@ const both_df = (; x=[-1.0, 0.5, 2.0, 0.25], g=[2, 1, 2, 3],
         mu ~ 1 + x + (1 | g) + (1 | g__nocor__1)
         y ~ Normal(mu, 1.0)
     end
-    sb = SBBRMI(both(both_df); mod=@__MODULE__)
+    sb = SBBRMI(both(both_df); mod=@__MODULE__, total_groups=())
     blocks = ranef_blocks(sb)
     @test length(blocks) == 2
     @test [b.group for b in blocks] == [:g, :g__nocor__1]
@@ -184,7 +187,7 @@ const mm_lit_df = (; x=[0.2, -0.1, 0.4], g__nocor__1=["a", "a", "b"],
         loc ~ 1 + (1 | mm(g__nocor__1, h; weights=(w1, w2)))
         y ~ Normal(loc, sigma)
     end
-    sb = SBBRMI(mm_lit(mm_lit_df); mod=@__MODULE__)
+    sb = SBBRMI(mm_lit(mm_lit_df); mod=@__MODULE__, total_groups=())
     blocks = ranef_blocks(sb)
     @test length(blocks) == 1
     @test only(blocks).group == (:g__nocor__1, :h)
@@ -201,7 +204,7 @@ const same_df = (; x=[-1.0, 0.5, 2.0, 0.25], g=[10, 20, 10, 30],
         mu ~ 1 + x + (1 | g) + (1 | g__nocor__1)
         y ~ Normal(mu, 1.0)
     end
-    sb = SBBRMI(same(same_df); mod=@__MODULE__)
+    sb = SBBRMI(same(same_df); mod=@__MODULE__, total_groups=())
     blocks = ranef_blocks(sb)
     @test length(blocks) == 2
     @test [b.group for b in blocks] == [:g, :g__nocor__1]
@@ -216,7 +219,7 @@ end
         mu ~ 1 + x + g__nocor__1 + (1 + x || g)
         y ~ Normal(mu, 1.0)
     end
-    sb = SBBRMI(zsame(same_df); mod=@__MODULE__)
+    sb = SBBRMI(zsame(same_df); mod=@__MODULE__, total_groups=())
     blocks = ranef_blocks(sb)
     @test length(blocks) == 2
     @test [b.group for b in blocks] == [:g, :g]
@@ -236,7 +239,7 @@ const tie_df = (; x=[-1.0, 0.5, 2.0, 0.25], g=[10, 20, 10, 30],
         mu ~ 1 + x + (1 | g) + (1 | g__nocor__1)
         y ~ Normal(mu, 1.0)
     end
-    sb = SBBRMI(zt(tie_df); mod=@__MODULE__)
+    sb = SBBRMI(zt(tie_df); mod=@__MODULE__, total_groups=())
     blocks = ranef_blocks(sb)
     @test [b.group for b in blocks] == [:g, :g__nocor__1]
     @test all(b -> b.levels == [10, 20, 30], blocks)
@@ -249,7 +252,7 @@ end
         mu ~ 1 + x + g__nocor__1 + (1 + x || g)
         y ~ Normal(mu, 1.0)
     end
-    sb = SBBRMI(ztie(tie_df); mod=@__MODULE__)
+    sb = SBBRMI(ztie(tie_df); mod=@__MODULE__, total_groups=())
     blocks = ranef_blocks(sb)
     @test [b.group for b in blocks] == [:g, :g]
 end
@@ -259,7 +262,7 @@ end
         mu ~ 1 + x + (1 | g) + (1 | g__nocor__1)
         y ~ Normal(mu, 1.0)
     end
-    sb = SBBRMI(same(same_df); mod=@__MODULE__)
+    sb = SBBRMI(same(same_df); mod=@__MODULE__, total_groups=())
     replayed = reprocess(sb, same_df; resample_groups=[:g__nocor__1])
     blocks = ranef_blocks(replayed)
     @test [b.group for b in blocks] == [:g, :g__nocor__1]
@@ -274,7 +277,7 @@ end
         mu ~ 1 + x + (1 | g) + (1 | g__nocor__1)
         y ~ Normal(mu, 1.0)
     end
-    sb = SBBRMI(same(same_df); mod=@__MODULE__)
+    sb = SBBRMI(same(same_df); mod=@__MODULE__, total_groups=())
     plan = BayesianRegressionModels.generative_plan(sb)
     idx = plan.data[:g__nocor__1_idx]
     # Recorded labels matching neither candidate: loud error, not a guess.
@@ -287,7 +290,7 @@ end
         mu ~ 1 + x + (1 | g) + (1 | g__nocor__1)
         y ~ Normal(mu, 1.0)
     end
-    tsb = SBBRMI(zt(tie_df); mod=@__MODULE__)
+    tsb = SBBRMI(zt(tie_df); mod=@__MODULE__, total_groups=())
     treplay = reprocess(tsb, tie_df; resample_groups=[:g__nocor__1])
     tblocks = ranef_blocks(treplay)
     @test [b.group for b in tblocks] == [:g, :g__nocor__1]

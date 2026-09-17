@@ -179,7 +179,10 @@ end
     df = bucket_df()
     brmi = intercept_builder(df)
 
-    base = StanBlocks.stan_code(SBBRMI(brmi; mod=@__MODULE__).model)
+    # The contrast under test is centered vs the standardised-draw base, so
+    # the base builds with totals off (the centered side already excludes
+    # totals by design).
+    base = StanBlocks.stan_code(SBBRMI(brmi; mod=@__MODULE__, total_groups=()).model)
     code = StanBlocks.stan_code(
         SBBRMI(brmi; mod=@__MODULE__, centered_groups=[:subject]).model)
 
