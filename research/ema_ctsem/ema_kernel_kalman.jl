@@ -1,21 +1,18 @@
-# The EMA as a HIERARCHICAL @brm model whose per-subject latent states are
-# marginalized EXACTLY by a Kalman filter INSIDE the kernel cell.
+# A hierarchical continuous-time state-space model whose per-subject latent states
+# are marginalized EXACTLY by a Kalman filter inside the `kernel(...)` cell.
 #
-# This is the LINEAR-GAUSSIAN rung of the SSM hierarchy: the softplus stress
-# self-decay of the full EMA is replaced by a FREE linear drift coefficient
-# (a11) and the binary indicator is dropped, so the model is linear-Gaussian and
-# the Kalman filter integrates the states out EXACTLY (no approximation). It is
-# the exact-marginalization counterpart of ema_kernel_marginalized.jl (which uses
-# an EKF for the true nonlinear/non-Gaussian EMA) and of ema_brm.jl (which
-# SAMPLES the same continuous-time coupled states).
+# This is the LINEAR-GAUSSIAN member of the family in this directory (the models
+# follow the EMA demonstration model of ctsem, Charles Driver's R package,
+# https://github.com/cdriveraus/ctsem): the stress self-decay is a free linear
+# drift coefficient and there is no binary indicator, so the Kalman filter
+# integrates the latent path out without approximation. No latent state is a
+# parameter; the model's dimension does not grow with the number of occasions.
 #
-# Same shape as the EKF file: the population lives on the @brm formula surface
-# (per-subject params are ordinary LPs with covariates + random effects), and
-# each subject's entire latent path is integrated out in the kernel(...) do-block
-# by a custom StanBlocks @lpxf Kalman family invoked once per subject.
-#
-# VERIFIED (strato2, StanBlocks bec23bc3c523): SBBRMI -> stan_code -> stanc_check
-# -> stan_instantiate + LogDensityProblems.logdensity_and_gradient, finite.
+# Same division of labour as ema_sampled.jl (which SAMPLES the states) and
+# ema_kernel_marginalized.jl (which uses an extended Kalman filter for the
+# nonlinear / non-Gaussian model): the population lives on the formula surface,
+# and each subject's likelihood is ONE custom StanBlocks `@lpxf` family -- the
+# filter -- called once per subject in the cell.
 #
 # Run: julia --project=test research/ema_ctsem/ema_kernel_kalman.jl
 
@@ -24,12 +21,12 @@ using StanBlocks
 using LogDensityProblems
 using Distributions: Normal, Exponential
 
-# ── the per-subject exact marginalizer: a 2-state Kalman filter as an @lpxf ────
-# Continuous-time linear-Gaussian dynamics; ys is the LHS (stressReport),
-# ym / workload / dt are per-cell vector args (the kernel slices vectors).
-# 1.8378770664093453 = log(2pi), via a zero-arg @deffun (no @deffun const).
+# The per-subject marginalizer: a 2-state Kalman filter as a custom `@lpxf` family.
+# `ys` (stressReport) is the left-hand side of `ys ~ kalman2(...)`; ym / workload / dt are
+# that subject's series. A family is the triad `_lpdf` (the log-likelihood), `_lpdfs`
+# (pointwise terms, for LOO / hold-out) and `_rng` (posterior-predictive draws).
 StanBlocks.@deffun begin
-    l2pi()::real = 1.8378770664093453
+    l2pi()::real = 1.8378770664093453          # log(2 pi)
     @lhs @lpxf kalman2_lpdf(ys::vector[T], ym::vector[T], workload::vector[T], dt::vector[T],
             a11::real, a12::real, a21::real, a22::real, cm::real, wls::real,
             q1::real, q2::real, r1::real, r2::real,
@@ -45,8 +42,8 @@ StanBlocks.@deffun begin
                 np11=fp11*f11+fp12*f12+qs; np12=fp11*f21+fp12*f22; np22=fp21*f21+fp22*f22+qm
                 ms=nms; mm=nmm; p11=np11; p12=np12; p22=np22
             end
-            ms=ms+wls*workload[t]                    # TDPREDEFFECT = IMPULSE at the observation (ctsem)
-            v1=ys[t]-ms; v2=ym[t]-mm; s11=p11+r1*r1; s12=p12; s22=p22+r2*r2   # merr cells are SDs
+            ms=ms+wls*workload[t]                    # workload acts as an impulse at the observation
+            v1=ys[t]-ms; v2=ym[t]-mm; s11=p11+r1*r1; s12=p12; s22=p22+r2*r2   # r1, r2: measurement sds
             det=s11*s22-s12*s12; si11=s22/det; si12=-s12/det; si22=s11/det
             quad=v1*(si11*v1+si12*v2)+v2*(si12*v1+si22*v2)
             ll=ll-0.5*(2*l2pi()+log(det)+quad)
@@ -71,8 +68,8 @@ StanBlocks.@deffun begin
                 np11=fp11*f11+fp12*f12+qs; np12=fp11*f21+fp12*f22; np22=fp21*f21+fp22*f22+qm
                 ms=nms; mm=nmm; p11=np11; p12=np12; p22=np22
             end
-            ms=ms+wls*workload[t]                    # TDPREDEFFECT = IMPULSE at the observation (ctsem)
-            v1=ys[t]-ms; v2=ym[t]-mm; s11=p11+r1*r1; s12=p12; s22=p22+r2*r2   # merr cells are SDs
+            ms=ms+wls*workload[t]                    # workload acts as an impulse at the observation
+            v1=ys[t]-ms; v2=ym[t]-mm; s11=p11+r1*r1; s12=p12; s22=p22+r2*r2   # r1, r2: measurement sds
             det=s11*s22-s12*s12; si11=s22/det; si12=-s12/det; si22=s11/det
             quad=v1*(si11*v1+si12*v2)+v2*(si12*v1+si22*v2); out[t]=-0.5*(2*l2pi()+log(det)+quad)
             k11=p11*si11+p12*si12; k12=p11*si12+p12*si22; k21=p12*si11+p22*si12; k22=p12*si12+p22*si22
@@ -100,8 +97,8 @@ StanBlocks.@deffun begin
     end
 end
 
-# ── synthetic EMA panel: per-subject covariates + ragged obs ──────────────────
-function fixture(; n=5, nt=10, seed=1)
+"""Synthetic EMA panel: per-subject covariates + ragged per-subject series."""
+function ema_kalman_fixture(; n=5, nt=10, seed=1)
     rng=seed; rnd()=(rng=(1103515245*rng+12345)%2^31; rng/2^31)
     subject=String[]; age=Float64[]; treatment=Float64[]
     stressReport=Vector{Float64}[]; moodReport=Vector{Float64}[]
@@ -118,36 +115,37 @@ function fixture(; n=5, nt=10, seed=1)
     end
     (; subject, age, treatment, stressReport, moodReport, workload, dt)
 end
-data = fixture()
 
-# ── the model: population on the formula surface, states marginalized in-cell ─
-ema_kernel_kalman(d) = @brm d begin
-    # global drift / coupling / noise params
-    a12 ~ Normal(0, 0.5)                   # mood -> stress
-    a21 ~ Normal(0, 0.5)                   # stress -> mood
-    a22 ~ Normal(-0.5, 0.3)                # mood self-decay
-    wls ~ Normal(0, 0.5)                   # workload -> stress
-    q1  ~ Exponential(1.0)                # stress process-noise sd
-    q2  ~ Exponential(1.0)                # mood process-noise sd
-    r1  ~ Exponential(1.0)                # stressReport meas. sd
-    r2  ~ Exponential(1.0)                # moodReport meas. sd
+function ema_kernel_kalman_model(data = ema_kalman_fixture())
+    @brm data begin
+        # shared drift / coupling / noise parameters
+        a12 ~ Normal(0, 0.5)                   # mood -> stress
+        a21 ~ Normal(0, 0.5)                   # stress -> mood
+        a22 ~ Normal(-0.5, 0.3)                # mood self-decay
+        wls ~ Normal(0, 0.5)                   # workload -> stress
+        q1  ~ Exponential(1.0)                 # stress process-noise sd
+        q2  ~ Exponential(1.0)                 # mood process-noise sd
+        r1  ~ Exponential(1.0)                 # stressReport measurement sd
+        r2  ~ Exponential(1.0)                 # moodReport measurement sd
 
-    # per-subject parameters: covariates + random effects on the FORMULA surface
-    a11 ~ 1 + age       + (1 | subject)    # stress self-decay (age covariate)
-    cm  ~ 1 + treatment + (1 | subject)    # mood intercept (treatment covariate)
-    s0  ~ 1             + (1 | subject)     # stress initial mean
-    m0  ~ 1             + (1 | subject)     # mood initial mean
+        # subject-level parameters: covariates + random effects on the formula surface
+        a11 ~ 1 + age       + (1 | subject)    # stress self-decay
+        cm  ~ 1 + treatment + (1 | subject)    # mood intercept
+        s0  ~ 1             + (1 | subject)    # initial stress mean
+        m0  ~ 1             + (1 | subject)    # initial mood mean
 
-    # per subject: integrate out THIS subject's entire latent path EXACTLY
-    pred ~ kernel(dt, workload, stressReport, moodReport,
-                  a11, cm, s0, m0) do dti, wli, ys, ym, la11, lcm, ls0, lm0
-        ys ~ kalman2(ym, wli, dti, la11, a12, a21, a22, lcm, wls, q1, q2, r1, r2, ls0, lm0, 10.0)
-        ys
+        # per subject: integrate out THIS subject's entire latent path, exactly
+        pred ~ kernel(dt, workload, stressReport, moodReport,
+                      a11, cm, s0, m0) do dti, wli, ys, ym, la11, lcm, ls0, lm0
+            ys ~ kalman2(ym, wli, dti, la11, a12, a21, a22, lcm, wls, q1, q2, r1, r2, ls0, lm0, 10.0)
+            ys
+        end
     end
 end
 
 function main()
-    sb = SBBRMI(ema_kernel_kalman(data); mod=@__MODULE__)
+    data = ema_kalman_fixture()
+    sb = SBBRMI(ema_kernel_kalman_model(data); mod=@__MODULE__)
     code = StanBlocks.stan_code(sb.model)
     @assert StanBlocks.stanc_check(code; warn_pedantic=false).ok "stanc failed"
     prob = StanBlocks.stan_instantiate(sb.model; path=joinpath(tempdir(), "ema_kernel_kalman_$(hash(code)).stan"))
