@@ -1503,10 +1503,23 @@ end
 # no name. For the former we strip the outermost parens; for the latter we
 # prefix with the operation key so the name doesn't get lost.
 _show_top(io::IO, key, op) = print(io, key, ": ", op)
-_show_top(io::IO, key, op::ExprColumn{<:Union{typeof(~),typeof(assign)}}) =
-    join(io, getargs(op), " $(getop(op)) ")
+_show_top(io::IO, key, op::ExprColumn{<:Union{typeof(~),typeof(assign)}}) = begin
+    args = getargs(op)
+    _show_bare(io, first(args))
+    for arg in Base.tail(args)
+        print(io, " ", getop(op), " ")
+        _show_bare(io, arg)
+    end
+end
+# Print one statement side without the outermost grouping parentheses, so a
+# top-level `loc ~ (1 + x)` reads `loc ~ 1 + x`. Only `*`/`+` sides are
+# unwrapped: `~` binds tighter than `|`/`||`/`&&` in Julia, so unwrapping a
+# top-level `y ~ (a | g)` would print the misleading `y ~ a | g`.
+_show_bare(io::IO, x) = show(io, x)
+_show_bare(io::IO, x::ExprColumn{<:Union{typeof(*),typeof(+)}}) =
+    join(io, getargs(x), " $(getop(x)) ")
 Base.show(io::IO, d::DataColumn) = begin
-    print(io, "data (eltype=", eltype(parent(d)), ")")
+    print(io, "data (eltype=", eltype(parent(d)), ", n=", length(parent(d)), ")")
 end
 Base.show(io::IO, x::ExprColumn{<:Union{typeof.((~,*,+,|,doublepipe,assign))...}}) = begin
     print(io, "(", )
