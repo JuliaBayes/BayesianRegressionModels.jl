@@ -276,6 +276,100 @@ end
     @test alias_sigma.coordinates == [8, 9]
 end
 
+const GROUPED_HSGP_ONLINE_BUILDER = @brm begin
+    loc ~ 1 + hsgp(x; k=4, by=g)
+    y ~ Normal(loc, 1)
+end
+
+const GROUPED_HSGP_ONLINE_ANISO_BUILDER = @brm begin
+    loc ~ 1 + hsgp(x, x2; k=(3, 4), c=(1.5, 2.0), iso=false, by=g)
+    y ~ Normal(loc, 1)
+end
+
+const GROUPED_HSGP_ONLINE_JOINT_BUILDER = @brm begin
+    loc ~ 1 + x + hsgp(x; k=4, by=g) + (1 + x | subject)
+    y ~ Normal(loc, 1)
+end
+
+function grouped_hsgp_online_df()
+    x = collect(range(-1.0, 1.0; length=8))
+    x2 = x .^ 2 .+ 0.1 .* x
+    y = sin.(x)
+    g = repeat(["a", "b"], inner=4)
+    subject = repeat([11, 12], inner=4)
+    (; x, x2, y, g, subject)
+end
+
+function grouped_hsgp_fake_unc_names()
+    vcat(
+        ["pop_loc_beta_pop.1"],
+        ["hsgp_x_by_g_rho_iso", "hsgp_x_by_g_sigma"],
+        ["zflat_hsgpw_x_g.$i" for i in 1:8],
+    )
+end
+
+@testset "grouped HSGPs resolve one online block per group level" begin
+    df = grouped_hsgp_online_df()
+    sb = SBBRMI(GROUPED_HSGP_ONLINE_BUILDER(df); mod=@__MODULE__)
+    names = grouped_hsgp_fake_unc_names()
+    blocks = BRM._adaptive_hsgp_centering_blocks(sb, names)
+    @test length(blocks) == 2
+    @test getfield.(blocks, :logical) == [:loc, :loc]
+    @test getfield.(blocks, :term) == [:hsgp_x_by_g, :hsgp_x_by_g]
+    @test blocks[1].effects == [4, 5, 6, 7]
+    @test blocks[2].effects == [8, 9, 10, 11]
+    @test blocks[1].target_c == zeros(4)
+    @test blocks[1].length_scales == [2]
+    @test blocks[2].length_scales == [2]
+    @test blocks[1].sd == 3
+    @test blocks[2].sd == 3
+    @test blocks[1].omega2 == blocks[2].omega2 == sb.data[:omega2_hsgp_x_by_g]
+    @test isempty(intersect(blocks[1].effects, blocks[2].effects))
+
+    # A missing flat coordinate fails closed naming the coordinate.
+    @test_throws "zflat_hsgpw_x_g.8" BRM._adaptive_hsgp_centering_blocks(
+        sb, names[1:end-1])
+
+    # Ordinary random-effect metadata ignores the grouped HSGP field.
+    @test isempty(BRM.adaptive_centering_blocks(sb, names))
+
+    # Anisotropic grouped terms share one vector length scale per axis.
+    aniso_sb = SBBRMI(GROUPED_HSGP_ONLINE_ANISO_BUILDER(df); mod=@__MODULE__)
+    aniso_names = vcat(
+        ["pop_loc_beta_pop.1"],
+        ["hsgp_x_x2_by_g_rho.1", "hsgp_x_x2_by_g_rho.2",
+         "hsgp_x_x2_by_g_sigma"],
+        ["zflat_hsgpw_x_x2_g.$i" for i in 1:24],
+    )
+    aniso_blocks = BRM._adaptive_hsgp_centering_blocks(aniso_sb, aniso_names)
+    @test length(aniso_blocks) == 2
+    @test length(aniso_blocks[1].effects) == 12
+    @test aniso_blocks[1].length_scales == [2, 3]
+    @test size(aniso_blocks[1].omega2) == (12, 2)
+
+    # A joint model resolves both families with disjoint cells.
+    joint_sb = SBBRMI(GROUPED_HSGP_ONLINE_JOINT_BUILDER(df); mod=@__MODULE__)
+    joint_names = vcat(
+        ["pop_loc_beta_pop.1", "pop_loc_beta_pop.2"],
+        ["hsgp_x_by_g_rho_iso", "hsgp_x_by_g_sigma"],
+        ["zflat_hsgpw_x_g.$i" for i in 1:8],
+        ["r_loc_subject_L.1", "r_loc_subject_tau.1", "r_loc_subject_tau.2",
+         "r_loc_subject_z_flat.1", "r_loc_subject_z_flat.2",
+         "r_loc_subject_z_flat.3", "r_loc_subject_z_flat.4"],
+    )
+    joint_hsgp = BRM._adaptive_hsgp_centering_blocks(joint_sb, joint_names)
+    joint_ranef = BRM.adaptive_centering_blocks(joint_sb, joint_names)
+    @test length(joint_hsgp) == 2
+    @test length(joint_ranef) == 1
+    hsgp_cells = vcat(vec.(getfield.(joint_hsgp, :effects))...)
+    ranef_cells = vcat(
+        vec(joint_ranef[1].effects), joint_ranef[1].cholesky_free,
+        joint_ranef[1].log_scales)
+    @test length(hsgp_cells) == 8
+    @test length(ranef_cells) == 4 + 1 + 2
+    @test isempty(intersect(hsgp_cells, ranef_cells))
+end
+
 function manual_hsgp_map(x, blocks, controls)
     y = copy(x)
     ljac = zero(eltype(x))
@@ -340,9 +434,21 @@ LogDensityProblems.logdensity_and_gradient(target::HSGPQuadraticTarget, x) =
         y ~ Normal(mu, 1)
     end
     grouped_sb = SBBRMI(grouped; mod=@__MODULE__)
-    @test_throws "grouped HSGP" BRM._adaptive_hsgp_centering_blocks(
-        grouped_sb, String[],
+    grouped_names = vcat(
+        ["pop_mu_beta_pop.1"],
+        ["hsgp_time_by_group_rho_iso", "hsgp_time_by_group_sigma"],
+        ["zflat_hsgpw_time_group.$i" for i in 1:9],
     )
+    grouped_blocks = BRM._adaptive_hsgp_centering_blocks(
+        grouped_sb, grouped_names)
+    @test length(grouped_blocks) == 3
+    @test getfield.(grouped_blocks, :term) == fill(:hsgp_time_by_group, 3)
+    @test grouped_blocks[1].effects == [4, 5, 6]
+    @test grouped_blocks[2].effects == [7, 8, 9]
+    @test grouped_blocks[3].effects == [10, 11, 12]
+    @test grouped_blocks[1].length_scales == [2]
+    @test grouped_blocks[1].sd == 3
+    @test grouped_blocks[1].omega2 == grouped_sb.data[:omega2_hsgp_time_by_group]
 
     bounded = @brm HSGP_ONLINE_DATA begin
         mu ~ 1 + hsgp(time; k=3)
