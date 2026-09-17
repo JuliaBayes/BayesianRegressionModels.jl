@@ -1537,11 +1537,15 @@ Base.show(io::IO, x::ExprColumn) = begin
     nonemptyjoin(io, ["$key=$value" for (key, value) in pairs(getkwargs(x))], ", "; first="; ")
     print(io, ")")
 end
-# A resolved call head prints as the name the user wrote: hygiene roots it at
-# the author's module (`GlobalRef(mod, :Normal)`), which `print` would render
-# `Distributions.Normal` anywhere outside `Main`. The binding is already
-# resolved, so the module prefix is noise, not information.
+# A resolved call head prints as the name the user wrote. Julia prints a
+# type/callable binding module-qualified unless it is visible from the
+# display context, so a docs build (whose `Main` never imports
+# `Distributions`) would render `Distributions.Normal` next to authoring
+# surface that says `Normal`. The binding is already resolved, so the module
+# prefix is noise, not information — print the bare name.
 _show_call_head(io::IO, f) = print(io, f)
+_show_call_head(io::IO, f::Union{Function,DataType,UnionAll}) =
+    print(io, Base.nameof(f))
 _show_call_head(io::IO, g::GlobalRef) = print(io, g.name)
 Base.show(io::IO, x::MultiMembershipTerm) = begin
     print(io, "mm(")
