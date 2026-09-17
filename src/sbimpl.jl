@@ -1506,6 +1506,35 @@ function _sb_cat_prior_model(prior::ExprColumn, n_contrasts::Int; mod::Module=@_
     _sb_vector_priors(_sb_cat_generic, :beta, fill(prior, n_contrasts); mod)
 end
 
+# Cell-mean coded categorical predictor (decision `0woa6hh`): the FIRST
+# categorical term of a predictor with no intercept owns one coefficient per
+# level and no reference, so every level can carry its own prior. Siblings of
+# the three treatment-coded submodels above, same `beta` carrier and the same
+# `cat_<lp>_<c>_beta` Stan parameter -- only its length (K, not K-1) and the
+# absence of the pinned zero differ. `beta_loc` / `beta_scale` are per-level
+# vectors here, exactly as `_popefs_normal`'s are per-column.
+_sb_cat_cells = StanBlocks.@slic begin
+    beta ~ std_normal(; n=n_levels)
+    return beta[x]
+end
+
+_sb_cat_cells_normal = StanBlocks.@slic begin
+    beta ~ normal(beta_loc, beta_scale; n=n_levels)
+    return beta[x]
+end
+
+_sb_cat_cells_generic = StanBlocks.@slic begin
+    beta::vector[n_levels]
+    return beta[x]
+end
+
+# One prior per level; an unconfigured level keeps the default `Normal(0, 1)`.
+function _sb_cat_cells_prior_model(priors::AbstractVector; mod::Module=@__MODULE__)
+    default = ExprColumn(Normal, 0.0, 1.0)
+    _sb_vector_priors(_sb_cat_cells_generic, :beta,
+                      Any[something(p, default) for p in priors]; mod)
+end
+
 # Minimal `ar(time, p=1)` autoregressive submodel. Adds an AR(1) noise process
 # `u[t] = phi * u[t-1] + epsilon[t]` (with `u[1] = epsilon[1]`; no stationary
 # init) to the linear predictor. `phi` is parameterized via `tanh(phi_raw)` so
@@ -2416,6 +2445,7 @@ SBBRMI(parent::BRMI, model, data::AbstractDict, preproc::AbstractDict,
 # Bind semantic meaning at emission time. These records are removed from the
 # Stan data dictionary and carried with the emitted artifact through replay.
 const _SB_BINDINGS_KEY = :__brm_emission_bindings__
+const _SB_THRESHOLD_LOCATED_KEY = :__brm_threshold_located__
 function _sb_record_binding!(data, key, role, logical; family=nothing)
     bindings = get(data, _SB_BINDINGS_KEY, nothing)
     isnothing(bindings) || (bindings[key] = (; role, logical, family))
@@ -2516,6 +2546,29 @@ function _sb_effect_prior_overrides(brmi::BRMI)
         end
     end
 
+    # A cell-mean coded block (decision `0woa6hh`) holds one cell PER LEVEL: its
+    # block address claims every level, and each level also answers to its own
+    # more specific `<c>_lvl_<k>` address. Resolved with the same lazy,
+    # never-fatal discipline as the block map above.
+    resolved_levels = Dict{Symbol,Dict{Symbol,Tuple{Symbol,Int}}}()
+    level_map_of(lp::Symbol) = get!(resolved_levels, lp) do
+        _sb_is_prior_declaration(brmi, lp) && return Dict{Symbol,Tuple{Symbol,Int}}()
+        try
+            _sb_cat_level_address_map(brmi, lp)
+        catch
+            Dict{Symbol,Tuple{Symbol,Int}}()
+        end
+    end
+    resolved_cells = Dict{Symbol,Dict{Symbol,Int}}()
+    cellmeans_of(lp::Symbol) = get!(resolved_cells, lp) do
+        _sb_is_prior_declaration(brmi, lp) && return Dict{Symbol,Int}()
+        try
+            _sb_cat_cellmeans_blocks(brmi, lp)
+        catch
+            Dict{Symbol,Int}()
+        end
+    end
+
     # Every slot is a name or `:`, and `:` means THE DEFAULT: a broader
     # statement is the base layer that a more specific one overrides. So a cell
     # carries the winning expression AND the specificity that won it, and
@@ -2529,8 +2582,30 @@ function _sb_effect_prior_overrides(brmi::BRMI)
     # `slot` is a 0-argument getter / 1-argument setter pair over whichever
     # container owns the cell, so pop columns and categorical blocks share one
     # precedence rule instead of two drifting copies.
-    _claim!(get_cell, set_cell!, spec, what) =
-        _brm_claim_effect_prior!(get_cell, set_cell!, spec, what; prefix="sbimpl")
+    _claim!(get_cell, set_cell!, spec, what; level_address::Bool=false) =
+        _brm_claim_effect_prior!(get_cell, set_cell!, spec, what;
+                                 prefix="sbimpl", level_address)
+    # Claim a whole categorical block: its single shared cell when treatment
+    # coded, every per-level cell when cell-mean coded.
+    function _claim_cat_block!(target, emitted, spec)
+        target_cat = get!(cat_overrides, target) do
+            Dict{Symbol,Any}()
+        end
+        n_cells = get(cellmeans_of(target), emitted, nothing)
+        if isnothing(n_cells)
+            _claim!(() -> get(target_cat, emitted, nothing),
+                    v -> (target_cat[emitted] = v), spec,
+                    "`$target`'s `$emitted` contrast block")
+        else
+            cells = get!(target_cat, emitted) do
+                Any[nothing for _ in 1:n_cells]
+            end
+            for level in 1:n_cells
+                _claim!(() -> cells[level], v -> (cells[level] = v), spec,
+                        "`$target`'s `$emitted` cell mean $level")
+            end
+        end
+    end
 
     for spec in specs
         _brm_validate_population_effect_spec(spec; prefix="sbimpl")
@@ -2547,7 +2622,8 @@ function _sb_effect_prior_overrides(brmi::BRMI)
                              if all_coefficients ?
                                 (!isnothing(labels_of(lp)) || !isempty(cat_map_of(lp))) :
                                 (spec.coefficient in something(labels_of(lp), Symbol[]) ||
-                                 haskey(cat_map_of(lp), spec.coefficient))]
+                                 haskey(cat_map_of(lp), spec.coefficient) ||
+                                 haskey(level_map_of(lp), spec.coefficient))]
             isempty(targets) && error(
                 "sbimpl: `$(_spelling(spec))` matches no population coefficient " *
                 "or categorical contrast block in any linear predictor. Inspect " *
@@ -2573,13 +2649,8 @@ function _sb_effect_prior_overrides(brmi::BRMI)
                                 "`$target`'s `$(labels[idx])` column")
                     end
                 end
-                for emitted in values(cat_map)
-                    target_cat = get!(cat_overrides, target) do
-                        Dict{Symbol,Any}()
-                    end
-                    _claim!(() -> get(target_cat, emitted, nothing),
-                            v -> (target_cat[emitted] = v), spec,
-                            "`$target`'s `$emitted` contrast block")
+                for emitted in unique(values(cat_map))
+                    _claim_cat_block!(target, emitted, spec)
                 end
                 continue
             end
@@ -2592,13 +2663,29 @@ function _sb_effect_prior_overrides(brmi::BRMI)
             # even for an intercept-less `mu ~ 0 + factor(g)` whose `labels` are
             # legitimately empty.
             if haskey(cat_map, spec.coefficient)
-                emitted = cat_map[spec.coefficient]
+                _claim_cat_block!(target, cat_map[spec.coefficient], spec)
+                continue
+            end
+
+            # One cell mean, by its own `<c>_lvl_<k>` address. A data column or
+            # population label of that exact spelling would make the address
+            # mean two things, so refuse rather than pick one.
+            level_map = level_map_of(target)
+            if haskey(level_map, spec.coefficient)
+                spec.coefficient in something(labels, Symbol[]) && error(
+                    "sbimpl: `$(_spelling(spec))` is ambiguous: `$(spec.coefficient)` " *
+                    "names both a population coefficient of `$target` and a cell " *
+                    "mean of its categorical block. Rename the data column.")
+                emitted, level = level_map[spec.coefficient]
                 target_cat = get!(cat_overrides, target) do
                     Dict{Symbol,Any}()
                 end
-                _claim!(() -> get(target_cat, emitted, nothing),
-                        v -> (target_cat[emitted] = v), spec,
-                        "`$target`'s `$emitted` contrast block")
+                cells = get!(target_cat, emitted) do
+                    Any[nothing for _ in 1:cellmeans_of(target)[emitted]]
+                end
+                _claim!(() -> cells[level], v -> (cells[level] = v), spec,
+                        "`$target`'s `$emitted` cell mean $level";
+                        level_address=true)
                 continue
             end
 
@@ -2637,8 +2724,11 @@ function _sb_effect_prior_overrides(brmi::BRMI)
     for lp in union(keys(pop_overrides), keys(cat_overrides))
         pop = get(pop_overrides, lp, nothing)
         cat = get(cat_overrides, lp, Dict{Symbol,Any}())
+        # A cell-mean block's value is its per-level vector; a treatment block's
+        # stays the one shared expression.
+        _unwrap_cat(v) = v isa AbstractVector ? Any[_unwrap(c) for c in v] : _unwrap(v)
         out[lp] = (; pop = isnothing(pop) ? nothing : Any[_unwrap(c) for c in pop],
-                     cat = Dict{Symbol,Any}(k => _unwrap(v) for (k, v) in cat))
+                     cat = Dict{Symbol,Any}(k => _unwrap_cat(v) for (k, v) in cat))
     end
     out
 end
@@ -2801,6 +2891,9 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
         Dict{Symbol,PreprocEntry}() :
         _SBPreprocContext(Dict{Symbol,PreprocEntry}(), _frozen_preproc)
     data[_SB_BINDINGS_KEY] = Dict{Symbol,NamedTuple}()
+    # Predictors whose intercept an ordinal response's thresholds supply: their
+    # categorical terms stay treatment-coded (see `_brm_cellmeans_block`).
+    data[_SB_THRESHOLD_LOCATED_KEY] = _brm_threshold_located_predictors(brmi)
     _sb_validate_covariance_factor_names(brmi)
     # The shared, backend-neutral pass owns raw-data materialisation,
     # likelihood-decorator claims, and target -> observation row axes. Its
@@ -2927,6 +3020,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     # pollutes Stan's data dict.
     bindings = pop!(data, _SB_BINDINGS_KEY)
     pop!(data, _SB_TOTAL_PLANS_KEY)
+    pop!(data, _SB_THRESHOLD_LOCATED_KEY)
     preproc_ctx = pop!(data, _SB_PREPROC_KEY, Dict{Symbol,PreprocEntry}())
     preproc = preproc_ctx isa _SBPreprocContext ? preproc_ctx.recorded : preproc_ctx
     # Drop leaked non-Stan data (raw `CategoricalVector`/string predictor columns
@@ -5895,10 +5989,18 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     cat_overrides = _sb_cat_effect_overrides(effect_overrides, brmi_key)
     cat_r2d2 = isnothing(joint_spec) ? Dict{Symbol,NamedTuple}() :
                joint_spec.cat_lookup
+    # The ONE categorical term this predictor codes by cell means (it has no
+    # intercept), decided on the RAW formula terms: the `factor(...)` lowering
+    # in `_sb_terms` has already dropped an explicit `ref=`. Only the first
+    # direct term carrying that block name takes it.
+    cellmeans_block = _brm_cellmeans_block(_brm_additive_terms(rhs);
+        implicit_intercept=brmi_key in get(data, _SB_THRESHOLD_LOCATED_KEY, ()))
     for dt in direct_terms
+        cellmeans = dt isa NamedColumn && name(dt) === cellmeans_block
+        cellmeans && (cellmeans_block = nothing)
         _sb_emit_direct!(stmts, data, target, dt, summands;
                          group_block_lookup, cat_overrides, cat_r2d2,
-                         term_overrides, mod)
+                         term_overrides, cellmeans, mod)
     end
 
     # A plain (un-`|ID|`'d) random effect under an `r2d2` decomposition IS the
@@ -6178,9 +6280,44 @@ function _sb_cat_entries(brmi::BRMI, lhs::Symbol)
     for t in _sb_terms(rhs)
         _sb_classify_term!(t, pop_terms, ran_terms, direct_terms)
     end
-    [(; address=name(t), emitted=_sb_cat_block_name(emitted_lp, name(t)), term=t)
-     for t in direct_terms
-     if t isa NamedColumn && !isnothing(_sb_cat_levels(t))]
+    # `cellmeans` marks the ONE entry this predictor codes by cell means -- the
+    # first carrying the block name `_brm_predictor_cellmeans_block` selects,
+    # exactly as `_sb_linear_predictor!` picks it at emission.
+    cellmeans_block = _brm_predictor_cellmeans_block(brmi, lhs)
+    entries = NamedTuple[]
+    for t in direct_terms
+        t isa NamedColumn && !isnothing(_sb_cat_levels(t)) || continue
+        cellmeans = name(t) === cellmeans_block
+        cellmeans && (cellmeans_block = nothing)
+        push!(entries, (; address=name(t),
+                          emitted=_sb_cat_block_name(emitted_lp, name(t)),
+                          term=t, cellmeans,
+                          n_levels=first(_sb_level_index(_sb_cat_levels(t)))))
+    end
+    entries
+end
+
+# Per-level addresses of a predictor's cell-mean block: `<c>_lvl_<k>` ->
+# `(emitted block, k)`, `k` the level's position in the frozen level order.
+# Empty when every categorical term of `lhs` is treatment-coded.
+function _sb_cat_level_address_map(brmi::BRMI, lhs::Symbol)
+    out = Dict{Symbol,Tuple{Symbol,Int}}()
+    entries = _sb_cat_entries(brmi, lhs)
+    isnothing(entries) && return out
+    for e in entries
+        e.cellmeans || continue
+        for level in 1:e.n_levels
+            out[_brm_cellmeans_level_address(e.address, level)] = (e.emitted, level)
+        end
+    end
+    out
+end
+
+# Emitted cell-mean blocks of `lhs` with their level counts.
+function _sb_cat_cellmeans_blocks(brmi::BRMI, lhs::Symbol)
+    entries = _sb_cat_entries(brmi, lhs)
+    isnothing(entries) && return Dict{Symbol,Int}()
+    Dict{Symbol,Int}(e.emitted => e.n_levels for e in entries if e.cellmeans)
 end
 
 function _sb_cat_coefnames(brmi::BRMI, lhs::Symbol)
@@ -6651,16 +6788,17 @@ _sb_cat_levels_vec(_v) = nothing
 # `mo1(c)` reuses `_sb_mo`; smooths own their complete fixed + penalized bases.
 _sb_emit_direct!(stmts, data, target::Symbol, t::NamedColumn, summands;
                  cat_overrides=Dict{Symbol,Any}(), cat_r2d2=Dict{Symbol,NamedTuple}(),
-                 mod::Module=@__MODULE__, kwargs...) = begin
+                 cellmeans::Bool=false, mod::Module=@__MODULE__, kwargs...) = begin
     block = _sb_cat_block_name(target, name(t))
     _sb_emit_cat!(stmts, data, target, t, summands;
                   prior=get(cat_overrides, block, nothing),
-                  r2d2=get(cat_r2d2, block, nothing), mod)
+                  r2d2=get(cat_r2d2, block, nothing), cellmeans, mod)
 end
 function _sb_emit_direct!(stmts, data, target::Symbol, t::ExprColumn, summands;
                           group_block_lookup=Dict(), cat_overrides=Dict{Symbol,Any}(),
                           cat_r2d2=Dict{Symbol,NamedTuple}(),
                           term_overrides=Dict{Symbol,Any}(),
+                          cellmeans::Bool=false,
                           mod::Module=@__MODULE__)
     f = getf(t)
     if f === gp
@@ -6760,8 +6898,16 @@ _sb_emit_direct_expr!(_stmts, _data, _target::Symbol, f, _t, _summands; kwargs..
 # `cat_<lp>_<c>_beta` carrier and every descriptor/coordinate reader are
 # unchanged. The prepass has already refused an explicit `effect(lp, c)`
 # override on a decomposed block, so `prior` and `r2d2` never both arrive.
+#
+# `cellmeans=true` (decision `0woa6hh`) is the intercept-free predictor's first
+# categorical term: K cell means through the `_sb_cat_cells*` siblings, no
+# reference level. `prior` is then a per-LEVEL vector (`nothing` = the default
+# `Normal(0, 1)`), since each cell mean is addressable on its own. Data keys,
+# the `PreprocEntry(:factor)` record and the `cat_<lp>_<c>_beta` carrier are the
+# same for both codings, so replay and every coordinate reader see one shape.
 function _sb_emit_cat!(stmts, data, target::Symbol, t::NamedColumn, summands;
-                       prior=nothing, r2d2=nothing, mod::Module=@__MODULE__)
+                       prior=nothing, r2d2=nothing, cellmeans::Bool=false,
+                       mod::Module=@__MODULE__)
     backing = parent(t)
     n_levels, idx = _sb_level_index(parent(backing))
     col_name = _sb_cat_block_name(target, name(t))
@@ -6774,7 +6920,10 @@ function _sb_emit_cat!(stmts, data, target::Symbol, t::NamedColumn, summands;
     # (derived from raw_ref). Dimension-coupled (unseen level / changed count).
     _sb_record_preproc!(data, idx_name,
         PreprocEntry(:factor, _sb_fit_levels(parent(backing)), name(t), true))
-    if !isnothing(r2d2)
+    if cellmeans
+        _sb_emit_cat_cells!(stmts, col_name, idx_name, n_name, n_levels, prior,
+                            r2d2; mod)
+    elseif !isnothing(r2d2)
         isnothing(prior) || error(
             "sbimpl: internal r2d2 error: categorical block `$col_name` carries " *
             "both a joint decomposition claim and an explicit contrast prior")
@@ -6810,6 +6959,43 @@ function _sb_emit_cat!(stmts, data, target::Symbol, t::NamedColumn, summands;
                 Expr(:kw, :x, idx_name), Expr(:kw, :n_levels, n_name)))))
     end
     push!(summands, col_name)
+end
+
+function _sb_emit_cat_cells!(stmts, col_name::Symbol, idx_name::Symbol,
+                             n_name::Symbol, n_levels::Int, prior, r2d2;
+                             mod::Module=@__MODULE__)
+    # The R2D2 decomposition allocates its variance shares over TREATMENT
+    # contrasts (`brm_cat_variances` reads dummies `2:K`); it has no share for a
+    # cell mean, so say so rather than decompose the wrong columns.
+    isnothing(r2d2) || error(
+        "sbimpl: categorical block `$col_name` is cell-mean coded (its predictor " *
+        "has no intercept), and an `r2d2(...)` decomposition covers treatment " *
+        "contrasts only. Give the predictor an intercept, keep this factor " *
+        "treatment-coded with `factor(...; ref=1)`, or leave `:contrasts` out " *
+        "of the decomposition.")
+    priors = isnothing(prior) ? Any[nothing for _ in 1:n_levels] : prior
+    length(priors) == n_levels || error(
+        "sbimpl: internal effect-prior alignment error for `$col_name`: " *
+        "$(length(priors)) per-level priors for $n_levels cell means")
+    if all(isnothing, priors)
+        push!(stmts, :($col_name ~ _sb_cat_cells(; x=$idx_name, n_levels=$n_name)))
+    elseif all(_sb_is_normal_effect_prior, priors)
+        beta_loc = Any[0.0 for _ in priors]
+        beta_scale = Any[1.0 for _ in priors]
+        for i in eachindex(priors)
+            isnothing(priors[i]) && continue
+            beta_loc[i], beta_scale[i] = _sb_effect_normal_args(priors[i])
+        end
+        push!(stmts, :($col_name ~ _sb_cat_cells_normal(;
+            x=$idx_name, n_levels=$n_name,
+            beta_loc=$(Expr(:vect, beta_loc...)),
+            beta_scale=$(Expr(:vect, beta_scale...)))))
+    else
+        model = _sb_cat_cells_prior_model(priors; mod)
+        push!(stmts, Expr(:call, :~, col_name,
+            Expr(:call, model, Expr(:parameters,
+                Expr(:kw, :x, idx_name), Expr(:kw, :n_levels, n_name)))))
+    end
 end
 
 # Expand a ranef LHS term into one-or-more design-matrix column references.
@@ -7646,6 +7832,14 @@ function _sb_ranef_r2d2_joint(brmi::BRMI, id, margins, include, effect_overrides
                     "include=...)`, which owns the contrast coefficients of " *
                     "`$lp`; drop the override, or leave `:contrasts` out of " *
                     "`include=`")
+                # The shares are allocated over treatment contrasts; a
+                # cell-mean block has none (`_sb_emit_cat_cells!`).
+                e.cellmeans && error(
+                    "sbimpl: `sd(:, $id) ~ r2d2(...; include=...)` decomposes the " *
+                    "treatment contrasts of `$lp`, but `$(e.address)` is cell-mean " *
+                    "coded there (`$lp` has no intercept). Give `$lp` an intercept, " *
+                    "keep the factor treatment-coded with `factor($(e.address); " *
+                    "ref=1)`, or leave `:contrasts` out of `include=`")
                 n_levels, _ = _sb_level_index(_sb_cat_levels(e.term))
                 n_contrasts = n_levels - 1
                 push!(cats, (; emitted=e.emitted, address=e.address,

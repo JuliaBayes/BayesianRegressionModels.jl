@@ -1459,37 +1459,148 @@ _brm_level_index(raw::AbstractVector) = begin
     length(levels), Int[lookup[level] for level in raw]
 end
 
+# ---- cell-mean coding of an intercept-free predictor (decision `0woa6hh`) ----
+#
+# brms / R `model.matrix` semantics: a predictor WITHOUT an intercept codes its
+# FIRST categorical main-effect term by cell means -- one coefficient per level,
+# each addressable for its own prior -- instead of K-1 treatment contrasts
+# against a reference level pinned at zero. Later categorical terms stay
+# treatment-coded (their full indicator sets would be collinear with the
+# first's), and so does every interaction. `0` is only a marker in BRM
+# (`_brm_additive_terms` drops it) and there is no implicit intercept, so "no
+# intercept" means "no `1` among the additive terms".
+#
+# Every backend asks this ONE predicate, so SBBRMI's direct `cat_*` block and the
+# shared population design cannot disagree about which term is cell-mean coded.
+_brm_is_categorical_data(raw) =
+    raw isa CA.CategoricalVector ||
+    (raw isa AbstractVector && eltype(raw) <: Integer)
+
+# The emitted block name of a categorical MAIN-EFFECT term, else `nothing`.
+function _brm_categorical_term_block(term::NamedColumn)
+    backing = parent(term)
+    backing isa DataColumn && _brm_is_categorical_data(parent(backing)) ?
+        name(term) : nothing
+end
+function _brm_categorical_term_block(term::ExprColumn{typeof(factor)})
+    args = getargs(term)
+    length(args) == 1 || return nothing
+    inner = only(args)
+    inner isa NamedColumn || return nothing
+    backing = parent(inner)
+    backing isa DataColumn && _brm_is_categorical_data(parent(backing)) ||
+        return nothing
+    ref = get(getkwargs(term), :ref, 1)
+    ref isa Integer && ref != 1 ? Symbol(name(inner), :__ref_, ref) : name(inner)
+end
+_brm_categorical_term_block(_term) = nothing
+
+# A reference level only has a meaning under treatment coding, so writing one is
+# the request for it: `factor(g; ref=1)` keeps K-1 contrasts with or without an
+# intercept.
+_brm_requests_treatment_coding(term::ExprColumn{typeof(factor)}) =
+    haskey(getkwargs(term), :ref)
+_brm_requests_treatment_coding(_term) = false
+
+"""
+    _brm_cellmeans_block(terms; implicit_intercept=false)
+
+The emitted block name of the categorical term that `terms` (one predictor's
+additive terms) codes by cell means, or `nothing` when every categorical term is
+treatment-coded. `implicit_intercept=true` marks a predictor whose location is
+supplied elsewhere (an ordinal model's thresholds).
+"""
+function _brm_cellmeans_block(terms; implicit_intercept::Bool=false)
+    implicit_intercept && return nothing
+    any(term -> term isa Integer && term == 1, terms) && return nothing
+    for term in terms
+        block = _brm_categorical_term_block(term)
+        isnothing(block) && continue
+        _brm_requests_treatment_coding(term) && continue
+        return block
+    end
+    nothing
+end
+
+# An ordinal response's estimated thresholds ARE its location predictor's
+# intercept -- brms writes the same model `y ~ g`, thresholds standing in for the
+# intercept and `g` treatment-coded. BRM only spells that predictor `eta ~ 0 +
+# ...` because its intercept is explicit, so it keeps treatment coding; K cell
+# means on top of K-1 free thresholds would leave the location to the priors.
+_brm_threshold_location(::Type{<:Ordinal}, rhs) =
+    length(getargs(rhs)) >= 3 ? getargs(rhs)[3] : nothing
+_brm_threshold_location(::Type{<:OrderedLogistic}, rhs) =
+    isempty(getargs(rhs)) ? nothing : first(getargs(rhs))
+_brm_threshold_location(_family, _rhs) = nothing
+
+function _brm_threshold_located_predictors(brmi::BRMI)
+    out = Set{Symbol}()
+    for op_nc in values(brmi.operations)
+        op = _named_op(op_nc)
+        (isnothing(op) || getf(op) !== (~)) && continue
+        rhs = last(getargs(op, 2))
+        rhs isa ExprColumn || continue
+        location = _brm_threshold_location(getf(rhs), rhs)
+        location isa NamedColumn && push!(out, name(location))
+    end
+    out
+end
+
+"""
+    _brm_predictor_cellmeans_block(brmi, lhs)
+
+The emitted block name of the categorical term that linear predictor `lhs`
+codes by cell means, or `nothing`. See [`_brm_cellmeans_block`](@ref).
+"""
+function _brm_predictor_cellmeans_block(brmi::BRMI, lhs::Symbol)
+    op = linear_predictor_op(brmi, lhs)
+    isnothing(op) && return nothing
+    _brm_cellmeans_block(_brm_additive_terms(last(getargs(op, 2)));
+        implicit_intercept=lhs in _brm_threshold_located_predictors(brmi))
+end
+
+# The per-level address of a cell-mean coefficient: `<block>_lvl_<k>`, `k` the
+# level's position in the frozen level order -- the spelling interaction columns
+# (`int_x_x_g_lvl_2`) and the shared design's dummy labels already use.
+_brm_cellmeans_level_address(block::Symbol, level::Integer) =
+    Symbol(block, :_lvl_, level)
+
 function _brm_categorical_population_columns(
         raw, source::Symbol, block::Symbol,
-        effect_addresses::Tuple=(block,); ref::Integer=1)
-    is_categorical = raw isa CA.CategoricalVector ||
-                     (raw isa AbstractVector && eltype(raw) <: Integer)
-    is_categorical || return nothing
+        effect_addresses::Tuple=(block,); ref::Integer=1,
+        cellmeans::Bool=false)
+    _brm_is_categorical_data(raw) || return nothing
     n_levels, indices = _brm_level_index(raw)
-    n_levels >= 2 || return nothing
+    # Treatment coding drops a single-level factor (its lone level is the
+    # reference); cell means keep its one coefficient.
+    n_levels >= (cellmeans ? 1 : 2) || return nothing
     levels = _brm_fit_levels(raw)
     Tuple(begin
-        label = Symbol(block, :_lvl_, level)
+        label = _brm_cellmeans_level_address(block, level)
         values = Float64[index == level ? 1.0 : 0.0 for index in indices]
         preprocess = _BRMPopulationPreprocess(
             :population_factor_dummy,
             (; levels, level, n_levels, ref), source)
-        (; label, effect_addresses, effect_block=block, source, values,
-           preprocess)
-    end for level in 2:n_levels)
+        # A cell mean is addressable on its own (`effect(lp, g_lvl_2)`) as well
+        # as through its block; a treatment contrast only through its block.
+        addresses = cellmeans ? (label, effect_addresses...) : effect_addresses
+        (; label, effect_addresses=addresses, effect_block=block, source,
+           values, preprocess)
+    end for level in (cellmeans ? 1 : 2):n_levels)
 end
 
-function _brm_population_columns(term::NamedColumn)
+function _brm_population_columns(term::NamedColumn; cellmeans::Bool=false)
     backing = parent(term)
     categorical = backing isa DataColumn ?
         _brm_categorical_population_columns(
-            parent(backing), name(term), name(term)) : nothing
+            parent(backing), name(term), name(term); cellmeans) : nothing
     !isnothing(categorical) && return categorical
     column = _brm_population_column(term)
     isnothing(column) ? nothing : (column,)
 end
 
-function _brm_population_columns(term::ExprColumn{typeof(factor)})
+function _brm_population_columns(term::ExprColumn{typeof(factor)};
+                                 cellmeans::Bool=false)
     args = getargs(term)
     length(args) == 1 || return nothing
     inner = only(args)
@@ -1521,11 +1632,12 @@ function _brm_population_columns(term::ExprColumn{typeof(factor)})
             for value in raw_values]
     addresses = ref_raw == 1 ? (source,) : (block, source)
     _brm_categorical_population_columns(
-        recoded, source, block, addresses; ref=ref_raw)
+        recoded, source, block, addresses; ref=ref_raw, cellmeans)
 end
-_brm_population_columns(term) = let column = _brm_population_column(term)
-    isnothing(column) ? nothing : (column,)
-end
+_brm_population_columns(term; cellmeans::Bool=false) =
+    let column = _brm_population_column(term)
+        isnothing(column) ? nothing : (column,)
+    end
 
 function _brm_random_categorical_column(column)
     _brm_population_column_is_categorical(column) || return column
@@ -1580,7 +1692,8 @@ function _brm_interaction_population_column(left, right)
        source=left.source, values, preprocess)
 end
 
-function _brm_population_columns(term::ExprColumn{typeof(&)})
+function _brm_population_columns(term::ExprColumn{typeof(&)};
+                                 cellmeans::Bool=false)
     args = getargs(term)
     length(args) == 2 || return nothing
     left = _brm_population_columns(args[1])
@@ -1623,9 +1736,13 @@ function _brm_population_design(target::Symbol, terms::Tuple,
                                 data::AbstractDict,
                                 obs_name::Union{Nothing,Symbol};
                                 required::Bool=false,
-                                row_source::Union{Nothing,Symbol}=nothing)
+                                row_source::Union{Nothing,Symbol}=nothing,
+                                implicit_intercept::Bool=false)
     raw_columns = Any[]
     fixed_terms = _BRMPopulationFixedTerm[]
+    # At most one term is cell-mean coded, and only the FIRST term carrying that
+    # block name: a repeated categorical stays treatment-coded.
+    cellmeans_block = _brm_cellmeans_block(terms; implicit_intercept)
     for term in terms
         # Grouped terms have their own backend-neutral geometry. They are not
         # coefficient-bearing population columns and are planned separately.
@@ -1635,7 +1752,11 @@ function _brm_population_design(target::Symbol, terms::Tuple,
             push!(fixed_terms, fixed)
             continue
         end
-        columns = _brm_population_columns(term)
+        cellmeans = !isnothing(cellmeans_block) &&
+            _brm_categorical_term_block(term) === cellmeans_block &&
+            !_brm_requests_treatment_coding(term)
+        cellmeans && (cellmeans_block = nothing)
+        columns = _brm_population_columns(term; cellmeans)
         if isnothing(columns)
             required && error(
                 "BRM backend lowering: predictor `$target` contains unsupported " *
@@ -1771,9 +1892,15 @@ end
 # One precedence engine is shared by the simple direct-BRMI plan and SBBRMI's
 # richer population/categorical resolver. A cell stores both the exact parsed
 # RHS and the specificity that won it; formula order never decides a tie.
+#
+# `level_address=true` marks a claim that reached one cell-mean coefficient
+# through its own `<block>_lvl_<k>` address. It outranks the same statement
+# shape addressed at the whole block, so `effect(mu, g_lvl_2)` overrides
+# `effect(mu, g)` instead of tying with it.
 function _brm_claim_effect_prior!(get_cell, set_cell!, spec, what;
-                                  prefix="BRM backend lowering")
-    rank = _brm_effect_specificity(spec)
+                                  prefix="BRM backend lowering",
+                                  level_address::Bool=false)
+    rank = _brm_effect_specificity(spec) + (level_address ? 0.5 : 0.0)
     spelling = _brm_effect_spelling(spec)
     held = get_cell()
     if isnothing(held) || rank > held.rank
@@ -1997,7 +2124,9 @@ Resolve formula-level `effect(...) ~ Normal(...)` statements against a narrow
 shared population design. The output is aligned 1:1 with `design.columns` and
 contains the winning parsed RHS (or `nothing` for the default Normal(0, 1)).
 An `effect(lp, categorical_column)` address fans out over that column's K-1
-treatment contrasts, matching SBBRMI's one-prior-per-contrast-block contract.
+treatment contrasts, matching SBBRMI's one-prior-per-contrast-block contract; on
+a cell-mean coded column it fans out over all K cell means, each of which also
+answers to its own more specific `<column>_lvl_<k>` address.
 For a distributional likelihood, `available_predictors` names its complete
 predictor set: a prior targeting a peer is ignored by this component, while a
 prior targeting no member still fails loudly.
@@ -2047,9 +2176,13 @@ function _brm_simple_population_effect_overrides(brmi::BRMI,
             idxs
         end
         for idx in indices
+            column = design.columns[idx]
+            level_address = spec.coefficient === column.label &&
+                            column.effect_block !== column.label
             _brm_claim_effect_prior!(
                 () -> cells[idx], v -> (cells[idx] = v), spec,
-                "`$(design.target)`'s `$(labels[idx])` column"; prefix)
+                "`$(design.target)`'s `$(labels[idx])` column";
+                prefix, level_address)
         end
     end
     Any[isnothing(cell) ? nothing : cell.expression for cell in cells]
