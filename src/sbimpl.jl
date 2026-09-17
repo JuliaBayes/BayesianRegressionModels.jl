@@ -5839,12 +5839,19 @@ _sb_real_vec(label::Symbol, n::Symbol, v) =
 
 # ---- linear predictor: emit `X_<name> = hcat(...); <name> ~ popefs(; X=X_<name>)` --
 
+# Direct-summand routing, extensible for downstream terms. Built-in direct
+# terms own their `_sb_emit_direct_expr!` (or gp/hsgp `_sb_predictor_term!`)
+# emission; a downstream term joins by defining `_sb_is_direct_term` for its
+# marker (plus its `_sb_predictor_term!` emit method — see the group-block
+# branch of `_sb_emit_direct!`). Default is population-column treatment.
+_sb_is_direct_term(f) = false
+for _direct_builtin in (offset, mo1, s, t2, gp, hsgp, dar, rw, cdar)
+    @eval _sb_is_direct_term(::typeof($_direct_builtin)) = true
+end
 _sb_classify_term!(t::ExprColumn, pop_terms, ran_terms, direct_terms) = begin
     f = getf(t)
     f === (|) && (push!(ran_terms, t); return)
-    (f === offset || f === mo1 || f === s || f === t2 || f === gp ||
-     f === hsgp || f === dar || f === rw || f === cdar) &&
-        (push!(direct_terms, t); return)
+    _sb_is_direct_term(f) && (push!(direct_terms, t); return)
     push!(pop_terms, t)
 end
 _sb_classify_term!(t, pop_terms, ran_terms, direct_terms) =
@@ -6827,6 +6834,14 @@ function _sb_emit_direct!(stmts, data, target::Symbol, t::ExprColumn, summands;
                                             target, group_block_lookup, term_overrides))
         return
     elseif f === hsgp
+        push!(summands, _sb_predictor_term!(stmts, data, f, t;
+                                            target, group_block_lookup,
+                                            term_overrides))
+        return
+    elseif !isnothing(_sb_find_group_block(f, t, group_block_lookup))
+        # Downstream group-block term in nested position: the prepass
+        # allocated its block; its own `_sb_predictor_term!` method threads
+        # the block into a per-observation contribution column.
         push!(summands, _sb_predictor_term!(stmts, data, f, t;
                                             target, group_block_lookup,
                                             term_overrides))
