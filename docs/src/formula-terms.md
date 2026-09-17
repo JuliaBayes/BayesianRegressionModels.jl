@@ -701,7 +701,7 @@ through intercept-free named predictors combined by assignment (write `*`:
 the formula layer is element-wise by intent and sbimpl dots it — a literal
 `.*` is evaluated at parse time and fails):
 
-```julia
+```text
 brmi = (@brm df begin
     sigma ~ Exponential(1)
     base ~ Normal(0, 1)
