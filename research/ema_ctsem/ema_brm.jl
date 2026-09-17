@@ -1,38 +1,20 @@
-# Translating the ctsem "EMA" continuous-time state-space demo to `@brm`.
+# How far does the pure `@brm` formula surface carry a continuous-time state-space
+# model, and where does the `kernel(...)` cell take over? -- an incremental build-up
+# towards the hierarchical EMA model of ctsem (Charles Driver's R package,
+# https://github.com/cdriveraus/ctsem): two latent processes (stress, mood), three
+# indicators, time-dependent and time-independent predictors.
 #
-# Companion to the note prepared for Charles Driver (ctsem author). The ctsem
-# demo (ctModelLatex render) is a nonlinear, hierarchical, continuous-time SDE
-# state-space model of two latent processes (stress, mood) measured by three
-# indicators, with time-dependent and time-independent predictors.
+#   Part A -- the MEASUREMENT + FACTOR layer on the pure `@brm` formula surface.
+#             Two formula-surface boundaries show why the dynamics need a cell:
+#             `dar(time)` is a single strictly increasing series (not a panel), and
+#             mutually coupled latents are a cyclic declaration.
+#   Part B -- the DYNAMICS via the `kernel(...)` do-block + one `@deffun` scan.
 #
-# This file is the runnable, self-contained translation, built incrementally:
-#   Part A — the MEASUREMENT + FACTOR layer on the pure `@brm` formula surface.
-#   Part B — the DYNAMICS via the `kernel(...)` do-block + one `@deffun` scan.
+# The complete model these increments lead to is ema_sampled.jl.
 #
 # Every model is gated on the full pipeline: @brm build -> SBBRMI lowering ->
 # transpile -> stanc -> BridgeStan finite log-density + gradient. Run with
 #   julia --project=test research/ema_ctsem/ema_brm.jl
-# on a host with stanc + a BridgeStan toolchain (see test/README.md).
-#
-# VERIFIED (strato2, StanBlocks bec23bc3c523):
-#   Part A: inc1 dim20, inc2_ar dim83, inc3 dim166, inc4a dim83, inc4b dim85  -> all OK
-#           inc2_dar -> WALL "dar time axis must be strictly increasing" (panel)
-#           inc5_coupled -> WALL "cyclic model declarations" (VAR/transition matrix)
-#   Part B: K0b dim70, K1 dim70, K2 dim143, Kfull2cont dim174, Kfull3 dim191 -> all OK
-#           Kfull (binary AS A RAGGED KERNEL-CELL obs) -> fails: integer ragged
-#             observation has no carrier in StanBlocks (snag ragged-int-obser-771dd259).
-#           Kfull3 is the COMPLETE, FAITHFUL 3-indicator model: the four subject-
-#             varying params (b0,q0,cint_mood,wl_stress) share one correlated
-#             (1|p|subject) block (= ctsem's 4x4 rawPCov), a process-noise
-#             correlation diff21 and manifest means mm_stress/mm_mood are included,
-#             and the binary is observed at top level against the ragged latent's
-#             flat backing (stress.mem). So the ENTIRE ctsem EMA demo builds.
-#   The marginalized (competitive) counterparts are ema_kernel_marginalized.jl
-#   (faithful EKF, states integrated out) and ema_kernel_kalman.jl (linear-Gaussian).
-#
-# The states are SAMPLED (dim grows with subjects x pings x processes) — the
-# "expressive but not competitive" regime. Marginalizing them (Kalman/filter)
-# and a structured metric are cross-package (StanBlocks + WarmupHMC) work.
 
 using BayesianRegressionModels
 using StanBlocks
@@ -216,30 +198,6 @@ StanBlocks.@deffun begin
         end
         out
     end
-    # Full EMA generator: nonlinear state-dependent drift + input-dependent
-    # diffusion, with a free process-noise CORRELATION diff21 (fisher-z): the mood
-    # innovation is correlated with the stress innovation, matching the spec's
-    # DIFFUSION off-diagonal. (Single Euler step per occasion; the substepped mesh
-    # lives in the marginalized EKF, where refining Δt adds no parameters.)
-    ema_full(dt::vector[nt], wl::vector[nt],
-             b0::real, bm::real, a12::real, a21::real, a22::real,
-             cm::real, wls::real, q0::real, qw::real, diffm::real, diff21::real,
-             s0::real, m0::real, zs::vector[nt], zm::vector[nt])::vector[2 * nt] = begin
-        out::vector[2 * nt]
-        s = s0; m = m0
-        corr = tanh(diff21)
-        out[1] = s; out[nt + 1] = m
-        for t in 2:nt
-            drift_s = -log1p(exp(b0 + bm * m)) * s + a12 * m + wls * wl[t - 1]
-            drift_m = a21 * s + a22 * m + cm
-            gs = exp(q0 + qw * wl[t - 1])
-            zc = corr * zs[t] + sqrt(1 - corr * corr) * zm[t]
-            s = s + drift_s * dt[t] + gs * sqrt(dt[t]) * zs[t]
-            m = m + drift_m * dt[t] + diffm * sqrt(dt[t]) * zc
-            out[t] = s; out[nt + t] = m
-        end
-        out
-    end
 end
 
 # K2: COUPLED linear dynamics (the VAR the formula rejected as cyclic).  OK, dim 143.
@@ -258,90 +216,9 @@ K2(d) = @brm d begin
     end
 end
 
-# Kfull2cont: the FULL nonlinear coupled continuous-time hierarchical EMA model
-#   with covariates on parameters + the TWO continuous indicators.  OK, dim 173.
-Kfull2cont(d) = @brm d begin
-    sigma_s ~ Exponential(1); sigma_m ~ Exponential(1)
-    bm ~ Normal(0, 0.5); a12 ~ Normal(0, 0.5); a21 ~ Normal(0, 0.5); a22 ~ Normal(-0.5, 0.3)
-    wls ~ Normal(0, 0.5); qw ~ Normal(0, 0.5); diffm ~ Exponential(1); diff21 ~ Normal(0, 0.5)
-    b0 ~ 1 + age + treatment + (1 | subject)
-    q0 ~ 1 + (1 | subject)
-    cm ~ 1 + age + treatment + (1 | subject)
-    s0 ~ 1 + (1 | subject)
-    m0 ~ 1 + (1 | subject)
-    stress ~ kernel(dt_grid, workload, stressReport, moodReport,
-                    b0, q0, cm, s0, m0) do dt, wl, sR, mR, lb0, lq0, lcm, ls0, lm0
-        zs::vector[dims(dt)[1]] ~ std_normal()
-        zm::vector[dims(dt)[1]] ~ std_normal()
-        traj = ema_full(dt, wl, lb0, bm, a12, a21, a22, lcm, wls, lq0, qw, diffm, diff21, ls0, lm0, zs, zm)
-        st = traj[1:dims(dt)[1]]
-        mo = traj[(dims(dt)[1] + 1):(2 * dims(dt)[1])]
-        sR ~ normal(st, sigma_s)
-        mR ~ normal(mo, sigma_m)
-        st
-    end
-end
-
-# Kfull: as Kfull2cont but adds the BINARY indicator AS A RAGGED KERNEL-CELL obs.
-#   Fails: integer ragged observation has no carrier in StanBlocks
-#   (snag ragged-int-obser-771dd259). See Kfull3 for the working spelling.
-Kfull(d) = @brm d begin
-    sigma_s ~ Exponential(1); sigma_m ~ Exponential(1)
-    bm ~ Normal(0, 0.5); a12 ~ Normal(0, 0.5); a21 ~ Normal(0, 0.5); a22 ~ Normal(-0.5, 0.3)
-    wls ~ Normal(0, 0.5); qw ~ Normal(0, 0.5); diffm ~ Exponential(1); diff21 ~ Normal(0, 0.5)
-    l31 ~ Normal(0, 1); smoke_threshold ~ Normal(0, 1)
-    b0 ~ 1 + age + treatment + (1 | subject)
-    q0 ~ 1 + (1 | subject)
-    cm ~ 1 + age + treatment + (1 | subject)
-    s0 ~ 1 + (1 | subject)
-    m0 ~ 1 + (1 | subject)
-    stress ~ kernel(dt_grid, workload, stressReport, moodReport, smoked,
-                    b0, q0, cm, s0, m0) do dt, wl, sR, mR, smk, lb0, lq0, lcm, ls0, lm0
-        zs::vector[dims(dt)[1]] ~ std_normal()
-        zm::vector[dims(dt)[1]] ~ std_normal()
-        traj = ema_full(dt, wl, lb0, bm, a12, a21, a22, lcm, wls, lq0, qw, diffm, diff21, ls0, lm0, zs, zm)
-        st = traj[1:dims(dt)[1]]
-        mo = traj[(dims(dt)[1] + 1):(2 * dims(dt)[1])]
-        sR ~ normal(st, sigma_s)
-        mR ~ normal(mo, sigma_m)
-        smk ~ bernoulli_logit(l31 .* st .+ smoke_threshold)
-        st
-    end
-end
-
-# Kfull3: the COMPLETE 3-indicator EMA model. The binary indicator is observed
-#   at TOP LEVEL against the ragged latent's flat backing (`stress.mem`), the
-#   lossless workaround for the integer-ragged carrier gap (snag handler
-#   verified: identical density/gradient — bernoulli_logit factorises
-#   elementwise, so the ragged grouping is pure bookkeeping).  OK, dim 175.
-Kfull3(d) = @brm d begin
-    sigma_s ~ Exponential(1); sigma_m ~ Exponential(1)
-    bm ~ Normal(0, 0.5); a12 ~ Normal(0, 0.5); a21 ~ Normal(0, 0.5); a22 ~ Normal(-0.5, 0.3)
-    qw ~ Normal(0, 0.5); diffm ~ Exponential(1); diff21 ~ Normal(0, 0.5)   # + process-noise corr
-    l31 ~ Normal(0, 1); smoke_threshold ~ Normal(0, 1)
-    mm_s ~ Normal(0, 0.5); mm_m ~ Normal(0, 0.5)                            # manifest means
-    # the four subject-varying params (b0, q0, cint_mood, wl_stress) share ONE
-    # correlated block (brms (1|p|subject) = ctsem's free 4x4 rawPCov).
-    b0  ~ 1 + age + treatment + (1 | p | subject)
-    q0  ~ 1 +                   (1 | p | subject)
-    cm  ~ 1 + age + treatment + (1 | p | subject)
-    wls ~ 1 +                   (1 | p | subject)                           # wl_stress per-subject
-    s0 ~ 1 + (1 | subject)
-    m0 ~ 1 + (1 | subject)
-    stress ~ kernel(dt_grid, workload, stressReport, moodReport,
-                    b0, q0, cm, wls, s0, m0) do dt, wl, sR, mR, lb0, lq0, lcm, lwls, ls0, lm0
-        zs::vector[dims(dt)[1]] ~ std_normal()
-        zm::vector[dims(dt)[1]] ~ std_normal()
-        traj = ema_full(dt, wl, lb0, bm, a12, a21, a22, lcm, lwls, lq0, qw, diffm, diff21, ls0, lm0, zs, zm)
-        st = traj[1:dims(dt)[1]]
-        mo = traj[(dims(dt)[1] + 1):(2 * dims(dt)[1])]
-        sR ~ normal(mm_s .+ st, sigma_s)
-        mR ~ normal(mm_m .+ mo, sigma_m)
-        st
-    end
-    # discrete indicator: top-level, against the ragged latent's flat backing.
-    smoked_flat ~ BernoulliLogit(l31 * stress.mem + smoke_threshold)
-end
+# The FULL nonlinear, hierarchical, three-indicator model built on these increments
+# is ema_sampled.jl (latent states sampled); its marginalized counterparts are
+# ema_kernel_kalman.jl, ema_kernel_marginalized.jl and ema_state_dependent.jl.
 
 # ============================================================================ #
 # Reproducible gate: build -> stanc -> BridgeStan finite density/gradient.
@@ -371,10 +248,7 @@ function main()
         gate(n, f, L)
     end
     println("── Part B: kernel + one @deffun ──")
-    for (n, f) in (("K0b", K0b), ("K1", K1), ("K2", K2),
-                   ("Kfull2cont", Kfull2cont),
-                   ("Kfull (binary as ragged cell obs, FAILS)", Kfull),
-                   ("Kfull3 (full 3-indicator, binary via .mem)", Kfull3))
+    for (n, f) in (("K0b", K0b), ("K1", K1), ("K2", K2))
         gate(n, f, R)
     end
 end

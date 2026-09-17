@@ -109,7 +109,10 @@ end
     unmarked_expression = @brm begin
         y_cat ~ CategoricalLogit(1 + x)
     end
-    @test_throws "expects one existing scalar linear predictor" begin
+    # Unmarked arguments keep ordinary expression semantics: one expression is
+    # one predictor, so three outcome levels against one predictor fails the
+    # arity check (the old scalar-LP-reference error is gone by design).
+    @test_throws "received 1 non-reference predictors; expected 2" begin
         SBBRMI(unmarked_expression(df); mod=@__MODULE__)
     end
 
