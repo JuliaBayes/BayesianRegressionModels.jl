@@ -358,7 +358,8 @@ function _brm_prepare_predictor_geometry(
     end
     design = _brm_population_design(
         name, ordinary_terms, context.data, get(context.target_obs, name, nothing);
-        required=true, row_source)
+        required=true, row_source,
+        implicit_intercept=name in _brm_threshold_located_predictors(brmi))
     predictor_plan = _BRMPopulationPredictor(
         name, link_lhs_fn, _brm_lp_emitted_name(name, link_lhs_fn), design)
     priors = _brm_simple_population_effect_overrides(
