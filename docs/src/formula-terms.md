@@ -840,8 +840,8 @@ directly without an extra population coefficient.
 `reprocess(sb, new_df)` evaluates all four blocks against the frozen training
 knots, penalty decomposition, and intercept constraint. Passing
 `freeze_constants=false` re-estimates them from `new_df`. Like [`s`](@ref),
-`t2` is implemented only by the StanBlocks backend and is not available to
-`VBRMI`.
+`t2` is implemented by both the StanBlocks and Turing backends; it remains
+unavailable to `VBRMI`.
 
 ## Term-internal priors
 
@@ -1024,8 +1024,8 @@ overriding bounds (`Uniform(0.84, 2)`) or accept the error knowingly.
 predictor's population block with a *joint* prior induced by a prior on that
 predictor's coefficient of determination. It is a separate statement in the
 formula block — addressed with [`effect`](@ref), never with a per-column
-`effect(lp, coef) ~ Normal(...)` — and is implemented only by the `SBBRMI`
-StanBlocks backend.
+`effect(lp, coef) ~ Normal(...)` — and is implemented by both the `SBBRMI`
+and `TuringBRMI` backends.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
@@ -1363,7 +1363,7 @@ A non-data left-hand side with a `Dirichlet` right-hand side declares a
 **simplex-valued parameter** — Stan's `simplex[K]` — rather than a linear
 predictor. Like every other scalar-parameter prior declaration it is addressable
 by name anywhere later in the formula block, `kernel(...)` cells included. It is
-implemented only by the `SBBRMI` StanBlocks backend.
+implemented by both `SBBRMI` and `TuringBRMI`.
 
 The [multi-axis population PK kernel](@ref) shows the executable base shape:
 ordinary formula parameters feed a `kernel(...)` cell, while `ragged(...)`
@@ -1429,8 +1429,8 @@ something else. Use `Dirichlet` when you want the simplex itself.
   `alpha` a sampled parameter is not supported.
 - `Dirichlet(K)` — no concentration — is not a `Distributions.jl` constructor
   and is rejected; write `Dirichlet(K, 1.0)` for the flat case.
-- StanBlocks-only, like [`s`](@ref), [`t2`](@ref) and [`r2d2`](@ref); not
-  available to `VBRMI`.
+- Not available to `VBRMI`. [`s`](@ref), [`t2`](@ref), [`r2d2`](@ref), and
+  this simplex surface are supported by both `SBBRMI` and `TuringBRMI`.
 
 ## Vector-valued parameter: `x ~ MvNormal(...)`
 
@@ -1438,8 +1438,9 @@ A non-data left-hand side with an `MvNormal` right-hand side declares a
 **vector-valued parameter** — Stan's `vector[n]` — rather than a linear
 predictor. It is addressable by name anywhere later in the formula block: as an
 argument of a `@deffun` in a top-level assignment, inside a custom family call,
-or in a `kernel(...)` cell. It is implemented only by the `SBBRMI` StanBlocks
-backend (decision `187g4va`).
+or in a `kernel(...)` cell. `SBBRMI` emits Stan's vector-parameter form
+(decision `187g4va`), while `TuringBRMI` lowers the retained generic callable
+directly.
 
 The inciting shape is a latent path whose innovations the formula wants to
 state directly — the log-reproduction-number random walk of a renewal model
@@ -1520,9 +1521,10 @@ statement is rejected with a message saying so.
 - A parameter-bearing *covariance* (an `LKJCovarianceFactor` product, a sampled
   matrix) is not admitted here; use the scalar-scale form or compose the
   vector inside a `@deffun`.
-- StanBlocks-only, like [`Dirichlet`](@ref), [`s`](@ref) and [`r2d2`](@ref);
-  not available to `VBRMI`. `TuringBRMI` retains the generic callable, so the
-  same statement lowers there through its own path.
+- Not available to `VBRMI`. `TuringBRMI` retains the generic callable, so the
+  same statement lowers there through its own path; [`Dirichlet`](@ref),
+  [`s`](@ref), and [`r2d2`](@ref) are likewise supported by both executable
+  backends.
 
 ## Function-valued arguments: lambdas and `do` blocks
 
