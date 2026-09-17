@@ -2,7 +2,7 @@ using Test, Markdown, BayesianRegressionModels, Distributions, Turing
 import StanBlocks
 Base.include(@__MODULE__, joinpath(@__DIR__, "..", "docs", "backend_comparisons.jl"))
 
-@testset "four-pane comparisons execute one model through both backends" begin
+@testset "five-pane comparisons execute one model through both backends" begin
     sources = (
         """
         data = (; x=[-1.0, 0.0, 1.0], y=[0.2, 0.4, 0.7])
@@ -34,12 +34,15 @@ Base.include(@__MODULE__, joinpath(@__DIR__, "..", "docs", "backend_comparisons.
     for (i, source) in pairs(sources)
         mod = BRMDocsComparisons.example_module(Symbol(:refactoring_comparison_, i))
         panes = BRMDocsComparisons.comparison(mod, source, :model; require_stan=true)
-        @test length(panes.content) == 5
+        @test length(panes.content) == 6
         @test getfield.(panes.content, :language) ==
-              ["brm-comparison", "julia", "julia", "stan", "julia"]
+              ["brm-comparison", "julia", "julia", "julia", "stan", "julia"]
         @test panes.content[2].code == strip(source, '\n')
-        @test StanBlocks.stanc_check(panes.content[4].code).ok
-        turing_source = panes.content[5].code
+        ir_source = panes.content[3].code
+        @test startswith(ir_source, "BRMI:")
+        @test occursin("~", ir_source)
+        @test StanBlocks.stanc_check(panes.content[5].code).ok
+        turing_source = panes.content[6].code
         @test !occursin("unsupported", turing_source)
         @test occursin("@model", turing_source)
         @test occursin("~", turing_source)

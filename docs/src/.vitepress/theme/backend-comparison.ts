@@ -72,6 +72,12 @@ function enhanceComparison(root: HTMLElement) {
   root.dataset.backendComparisonReady = '1'
   const labels = labelsFor(root, panes)
   const semanticIds = semanticIdsFor(root, panes)
+  const defaultOff = new Set(
+    (root.dataset.defaultOff || '')
+      .split('|')
+      .map((id) => id.trim())
+      .filter(Boolean),
+  )
   const title = root.dataset.comparisonTitle || labels.join(' · ')
   const id = `backend-comparison-${++comparisonCounter}`
   let active = 0
@@ -177,7 +183,7 @@ function enhanceComparison(root: HTMLElement) {
     option.className = 'backend-comparison__selector-option'
     const checkbox = document.createElement('input')
     checkbox.type = 'checkbox'
-    checkbox.checked = true
+    checkbox.checked = !defaultOff.has(semanticIds[index])
     checkbox.value = semanticIds[index]
     checkbox.setAttribute('aria-controls', `${id}-${semanticIds[index]}-column`)
     column.id = `${id}-${semanticIds[index]}-column`
@@ -238,23 +244,24 @@ function materializeGeneratedComparisons(root: ParentNode) {
   sentinels.forEach((sentinel) => {
     const panes: HTMLElement[] = []
     let cursor = sentinel.nextElementSibling
-    while (cursor && panes.length < 4) {
+    while (cursor && panes.length < 5) {
       if (!(cursor instanceof HTMLElement) || !cursor.matches('div[class*="language-"]')) {
         break
       }
       panes.push(cursor)
       cursor = cursor.nextElementSibling
     }
-    if (panes.length !== 4) return
+    if (panes.length !== 5) return
 
     const title = sentinel.textContent?.trim() || 'BRM model comparison'
     const comparison = document.createElement('div')
     comparison.className = 'backend-comparison'
     comparison.dataset.backendComparison = ''
     comparison.dataset.comparisonTitle = title
-    comparison.dataset.paneIds = 'brm|stanblocks|stan|turing'
+    comparison.dataset.paneIds = 'brm|ir|stanblocks|stan|turing'
     comparison.dataset.paneLabels =
-      'BRM authoring|StanBlocks model|Stan source|Turing model'
+      'BRM authoring|IR|StanBlocks model|Stan source|Turing model'
+    comparison.dataset.defaultOff = 'stan'
     sentinel.replaceWith(comparison)
     panes.forEach((pane) => comparison.appendChild(pane))
   })
