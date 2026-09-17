@@ -5938,6 +5938,7 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     end
     isempty(pop_terms) && isempty(ran_terms) && isempty(direct_terms) &&
         error("sbimpl: empty RHS for `$target` — no predictor terms")
+    _sb_warn_implicit_integer_categoricals!(target, brmi_key, rhs)
 
     # Direct fixed-slope terms such as `offset(log(exposure))` may contribute
     # an expression rather than a named emitted column. Keep the summand
@@ -6836,6 +6837,52 @@ _sb_cat_levels_data(_d) = nothing
 _sb_cat_levels_vec(v::AbstractVector{<:Integer}) = v
 _sb_cat_levels_vec(v::CA.CategoricalVector) = v
 _sb_cat_levels_vec(_v) = nothing
+
+# A bare integer-typed column in a population formula is treatment-coded
+# into its own `cat_<lp>_<col>` block and is ABSENT from `beta_pop` -- the
+# Integer-means-categorical rule -- which reads as "dropped" to a consumer
+# summarizing `beta_pop` (snag brm-int-predicto-b36205e3: a bambi
+# replication with `sex::Vector{Int}` cost a full refit cycle to exactly
+# that misdiagnosis). Name the reinterpretation once per predictor, with
+# the emitted block and both spellings that silence it. Walks the RAW
+# additive terms so explicit `factor(...)` (which `_sb_terms` rewrites to an
+# otherwise identical NamedColumn) and `CategoricalVector` columns stay
+# silent; the classifier routes every bare integer NamedColumn to the cat
+# path, so the predicate below matches emission exactly. The `_id` is keyed
+# by predictor: a second model reusing the same predictor name stays silent
+# for the session, and so does every frozen-preproc replay rebuild.
+function _sb_warn_implicit_integer_categoricals!(target::Symbol, brmi_key::Symbol, rhs)
+    cols = Tuple{Symbol,Type}[]
+    for t in _brm_additive_terms(rhs)
+        t isa NamedColumn || continue
+        lvls = _sb_cat_levels(t)
+        lvls isa AbstractVector{<:Integer} || continue
+        any(c -> c[1] === name(t), cols) || push!(cols, (name(t), typeof(lvls)))
+    end
+    isempty(cols) && return nothing
+    if length(cols) == 1
+        (nm, T) = only(cols)
+        block = _sb_cat_block_name(target, nm)
+        msg = "sbimpl: predictor `$brmi_key` — bare column `$nm` (`$T`) " *
+            "has integer element type, so it is emitted as categorical block " *
+            "`$block` (absent from `beta_pop`), not as a numeric slope. Wrap " *
+            "it in `protect($nm)` for a numeric coefficient, or write " *
+            "`factor($nm)` / pass a `CategoricalVector` to declare the " *
+            "categorical intent — either silences this warning."
+    else
+        col_list = join(["`$(nm)` (`$T`)" for (nm, T) in cols], ", ")
+        block_list = join(["`$(_sb_cat_block_name(target, nm))`" for (nm, _) in cols], ", ")
+        first_nm = first(cols)[1]
+        msg = "sbimpl: predictor `$brmi_key` — bare columns $col_list " *
+            "have integer element type, so they are emitted as categorical " *
+            "blocks $block_list (absent from `beta_pop`), not as numeric " *
+            "slopes. Wrap one in `protect($first_nm)` for a numeric " *
+            "coefficient, or write `factor(...)` / pass `CategoricalVector`s " *
+            "to declare the categorical intent — either silences this warning."
+    end
+    @warn msg maxlog=1 _id=Symbol(:sbimpl_implicit_categorical_, target)
+    nothing
+end
 
 # Free-summand terms (no popefs beta): `mo1(c)`, `s(x)`, `t2(x,z)`, categoricals.
 # Categoricals emit
