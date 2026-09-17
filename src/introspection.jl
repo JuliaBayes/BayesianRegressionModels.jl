@@ -388,6 +388,8 @@ Which parameter each class reaches:
 | `sd(lp, gp(x))` / `sd(lp, hsgp(x))` | the GP marginal amplitude `sigma` |
 | `length_scale(lp, gp(x))` / `length_scale(lp, hsgp(x))` | the GP length scale `rho` |
 | `ar(lp, dar(time))` | the differenced-AR persistence coefficient `beta` |
+| `sd(lp, rw(time))` | the random walk's innovation scale `sigma` |
+| `sd(lp, cdar(step))` / `ar(lp, cdar(step))` | the grouped damped walk's innovation scale `sigma` / persistence `rho` |
 
 Standardized raw innovations (`b_pen_raw`, `z`, `beta_raw`, `epsilon`) are
 deliberately NOT addressable: they carry no independent scale, and giving them

@@ -20,6 +20,8 @@ signature — the rest are covered by their docstrings on the [API](@ref) page.
 | `hsgp(x; k=20, cov=:periodic, period)` | periodic Hilbert-space basis: `k` harmonics, `2k` cosine/sine functions | — |
 | `ar(time; p=1)` | AR(p) noise process ordered by `time`; only `p=1` is emitted | — |
 | `dar(time; p=1)` | direct differenced-AR(1) trajectory with bounded persistence and scaled innovations | — |
+| `rw(time)` | direct random-walk trajectory: `dar` with the persistence fixed at zero | — |
+| `cdar(step; by=group, cor=C)` | per-group deviations following a damped walk over `step` with innovations correlated across groups by `C` | — |
 | `mo(c)`, `mo1(c)` | monotonic effect of an ordered factor via Dirichlet increments | — |
 | `me(x, sd)` | measurement-error covariate — `x` is observed with known `sd` | — |
 | `interval_censored(x; upper=lloq, lower=0)` | quantified/BLOQ covariate with bounded latent values on BLOQ rows | — |
@@ -62,6 +64,85 @@ sd(:, dar(week)) ~ Normal(0.0, 0.3)  # positive innovation sigma
 `ar` accepts `Normal`, `Beta`, or an in-bounds `Uniform`; `sd` accepts the
 positive-scale family set documented below. The standardized `z` innovations
 are inspectable through the descriptor but deliberately have no prior override.
+
+### Random-walk trajectories
+
+`rw(time)` is `dar(time)` with the increments' persistence fixed at zero — the
+path
+
+```
+x[1] = 0
+x[t+1] = x[t] + sigma * z[t]
+```
+
+over the sorted distinct values of `time`, as a direct predictor summand: in
+`log_R ~ 1 + rw(time)` the population intercept is the initial level and the
+term samples a positive innovation scale `sigma` (default `Normal(0, 0.2)`
+truncated at zero) and one standardized innovation `z` per step after the
+first. Each row reads the point of its own time value, so a long frame whose
+rows share times (several groups per day) gets one shared walk — with unique
+times it is the plain path. Address the scale as `sd(:, rw(time))`; there is
+no persistence to address, so `ar(:, rw(time))` is refused with a message
+saying so. The time column must be nonempty and finite; on replay the grid may
+gain new times (a forecast extends the walk with prior innovations). This is
+the log-reproduction-number walk of a renewal model (`research/epi_renewal/`),
+stated as one formula line.
+
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+random_walk_term = (@brm begin
+    mu ~ 1 + rw(t)
+    effect(mu, Intercept) ~ Normal(0.0, 1.0)
+    sd(:, rw(t)) ~ Normal(0.0, 0.05)
+    y ~ Normal(mu, 0.3)
+end)((;
+    t=collect(1.0:8),
+    y=[0.4, 1.1, 0.9, 1.6, 1.2, 2.0, 1.8, 2.5],
+))
+""", :random_walk_term; title="Random-walk trajectory", require_stan=true)
+```
+
+### Grouped correlated damped walks
+
+`cdar(step; by=group, cor=C)` gives every level of `group` its own deviation
+path over the sorted distinct values of `step`, damped with a shared
+persistence `rho` and driven by innovations that are correlated **across
+groups** through the Cholesky factor `L` of `C` (`L L' = C`):
+
+```
+delta[:, 1] = sigma * L * eta[:, 1]
+delta[:, w] = rho * delta[:, w-1] + sigma * sqrt(1 - rho^2) * L * eta[:, w]
+```
+
+Each row contributes `delta[group(row), step(row)]` as a direct summand, so
+`log_R ~ 1 + rw(time) + cdar(week; by=patch, cor=C)` is a shared random walk
+plus spatially correlated weekly patch deviations — the six-patch renewal model
+of `research/epi_renewal/`, stated on the formula surface. `C` is a `P × P`
+symmetric positive-definite matrix, `P` the number of group levels, supplied as
+a data field (a matrix-valued field is accepted) or a literal; it is a fixed
+hyperparameter, not a sampled covariance. The term samples `sigma > 0`
+(default `Normal(0, 0.2)` truncated at zero), `rho` on `[0, 1]` (default
+`Normal(0.5, 0.2)` truncated), and `P·W` standardized innovations `eta`;
+address them as `sd(:, cdar(step))` and `ar(:, cdar(step))`. On replay the
+group levels and `L` are frozen from the fit while the step grid may grow — a
+forecast extends the walk with prior innovations — and an unseen group level is
+refused.
+
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+grouped_walk = (@brm begin
+    mu ~ 1 + cdar(week; by=patch, cor=C)
+    sd(:, cdar(week)) ~ Normal(0.0, 0.2)
+    ar(:, cdar(week)) ~ Normal(0.8, 0.1)
+    y ~ Normal(mu, 0.3)
+end)((;
+    week=[1, 1, 2, 2, 3, 3],
+    patch=["a", "b", "a", "b", "a", "b"],
+    y=[0.2, -0.1, 0.4, 0.0, 0.5, 0.1],
+    C=[1.0 0.6; 0.6 1.0],
+))
+""", :grouped_walk; title="Grouped correlated damped walk", require_stan=true)
+```
 
 ### HSGP over a model-derived predictor
 

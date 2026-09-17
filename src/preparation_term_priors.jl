@@ -22,6 +22,12 @@ _brm_term_prior_slots(::typeof(hsgp)) = _brm_term_prior_slots(gp)
 _brm_term_prior_slots(::typeof(dar)) = (
     _BRMTermPriorSlot(:sigma, :term_sd, :positive),
     _BRMTermPriorSlot(:ar, :term_ar, :unit_interval))
+# a random walk owns only its innovation scale: `ar(lp, rw(t))` is refused here
+_brm_term_prior_slots(::typeof(rw)) =
+    (_BRMTermPriorSlot(:sigma, :term_sd, :positive),)
+_brm_term_prior_slots(::typeof(cdar)) = (
+    _BRMTermPriorSlot(:sigma, :term_sd, :positive),
+    _BRMTermPriorSlot(:ar, :term_ar, :unit_interval))
 _brm_term_prior_slots(::typeof(mo)) =
     (_BRMTermPriorSlot(:simplex, :term_simplex, :simplex),)
 _brm_term_prior_slots(::typeof(mo1)) = _brm_term_prior_slots(mo)

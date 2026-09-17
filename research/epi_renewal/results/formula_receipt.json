@@ -1,0 +1,28 @@
+{
+ "fits": [
+  {
+   "dim": 59,
+   "divergences": 14,
+   "draws": 1000,
+   "gq_failed": 0,
+   "max_rhat": 1.040066019935641,
+   "min_ess": 55.09343903782715,
+   "name": "single_rw_formula",
+   "seconds": 23.388598593,
+   "seed": 1,
+   "target_acceptance_rate": 0.9
+  },
+  {
+   "dim": 115,
+   "divergences": 3,
+   "draws": 1000,
+   "gq_failed": 0,
+   "max_rhat": 1.014652757218581,
+   "min_ess": 158.8180154987004,
+   "name": "patch_formula",
+   "seconds": 346.450999116,
+   "seed": 1,
+   "target_acceptance_rate": 0.9
+  }
+ ]
+}

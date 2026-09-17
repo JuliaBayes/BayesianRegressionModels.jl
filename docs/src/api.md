@@ -62,6 +62,8 @@ BayesianRegressionModels.s
 BayesianRegressionModels.t2
 BayesianRegressionModels.ar
 BayesianRegressionModels.dar
+BayesianRegressionModels.rw
+BayesianRegressionModels.cdar
 BayesianRegressionModels.mo
 BayesianRegressionModels.mo1
 BayesianRegressionModels.kernel

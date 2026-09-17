@@ -91,6 +91,37 @@ Turing.@model function _brm_turing_dar_term(state)
     (; effect=path, beta, sigma, z, path)
 end
 
+# `rw`: the same walk with the increments' persistence fixed at zero.
+Turing.@model function _brm_turing_rw_term(state)
+    sigma ~ _brm_constrained_kernel(
+        _brm_term_distribution(state.sd_prior); lower=0)
+    z ~ product_distribution(fill(Normal(), state.n_steps - 1))
+    path = zeros(eltype(z), state.n_steps)
+    for i in eachindex(z)
+        path[i + 1] = path[i] + sigma * z[i]
+    end
+    (; effect=path[state.time_idx], sigma, z, path)
+end
+
+# `cdar`: per-group deviations, damped over steps, innovations correlated across
+# groups by the fitted Cholesky factor; each row reads its (group, step) cell.
+Turing.@model function _brm_turing_cdar_term(state)
+    sigma ~ _brm_constrained_kernel(
+        _brm_term_distribution(state.sd_prior); lower=0)
+    rho ~ _brm_constrained_kernel(
+        _brm_term_distribution(state.ar_prior); lower=0, upper=1)
+    eta ~ product_distribution(fill(Normal(), state.n_groups * state.n_steps))
+    E = reshape(eta, state.n_groups, state.n_steps)
+    delta = zeros(eltype(eta), state.n_groups, state.n_steps)
+    delta[:, 1] = sigma .* (state.L * E[:, 1])
+    scale = sigma * sqrt(1 - rho^2)
+    for w in 2:state.n_steps
+        delta[:, w] = rho .* delta[:, w - 1] .+ scale .* (state.L * E[:, w])
+    end
+    effect = [delta[state.group_idx[i], state.step_idx[i]] for i in eachindex(state.group_idx)]
+    (; effect, sigma, rho, eta, delta)
+end
+
 function _brm_term_rows(term::BRM._BRMPreparedTerm{typeof(BRM.s)})
     size(term.state.Xnull, 1)
 end
@@ -108,6 +139,8 @@ _brm_term_rows(term::BRM._BRMPreparedTerm{typeof(BRM.interval_censored)}) =
     term.state.nobs
 _brm_term_rows(term::BRM._BRMPreparedTerm{typeof(BRM.ar)}) = length(term.state.time)
 _brm_term_rows(term::BRM._BRMPreparedTerm{typeof(BRM.dar)}) = length(term.state.time)
+_brm_term_rows(term::BRM._BRMPreparedTerm{typeof(BRM.rw)}) = length(term.state.time)
+_brm_term_rows(term::BRM._BRMPreparedTerm{typeof(BRM.cdar)}) = length(term.state.group_idx)
 
 function _brm_checked_term_model(term, nobs, model)
     rows = _brm_term_rows(term)
@@ -160,6 +193,14 @@ function BRM._brm_turing_term_model(
         term::BRM._BRMPreparedTerm{typeof(BRM.dar)}, nobs)
     _brm_checked_term_model(term, nobs, _brm_turing_dar_term(term.state))
 end
+function BRM._brm_turing_term_model(
+        term::BRM._BRMPreparedTerm{typeof(BRM.rw)}, nobs)
+    _brm_checked_term_model(term, nobs, _brm_turing_rw_term(term.state))
+end
+function BRM._brm_turing_term_model(
+        term::BRM._BRMPreparedTerm{typeof(BRM.cdar)}, nobs)
+    _brm_checked_term_model(term, nobs, _brm_turing_cdar_term(term.state))
+end
 
 
 function _brm_term_with_priors(term, replacements)
@@ -187,6 +228,13 @@ BRM._brm_turing_term_model(
         priors) = BRM._brm_turing_term_model(
     _brm_term_with_priors(term, (; latent_prior=priors.latent)), nobs)
 BRM._brm_turing_term_model(term::BRM._BRMPreparedTerm{typeof(BRM.dar)}, nobs,
+                           priors) = BRM._brm_turing_term_model(
+    _brm_term_with_priors(term,
+        (; ar_prior=priors.ar, sd_prior=priors.sd)), nobs)
+BRM._brm_turing_term_model(term::BRM._BRMPreparedTerm{typeof(BRM.rw)}, nobs,
+                           priors) = BRM._brm_turing_term_model(
+    _brm_term_with_priors(term, (; sd_prior=priors.sd)), nobs)
+BRM._brm_turing_term_model(term::BRM._BRMPreparedTerm{typeof(BRM.cdar)}, nobs,
                            priors) = BRM._brm_turing_term_model(
     _brm_term_with_priors(term,
         (; ar_prior=priors.ar, sd_prior=priors.sd)), nobs)
