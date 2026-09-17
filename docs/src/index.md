@@ -284,6 +284,9 @@ The rule, in full:
   intercept, so the `eta` of `Ordinal(...)` / `OrderedLogistic(...)` keeps
   treatment contrasts even though it is written `eta ~ 0 + ...`.
 - A random intercept `(1 | g)` is not a population intercept.
+- The rule is about population terms. A categorical term *inside* a
+  random-effect block is unaffected: `(0 + c | g)` still expands to the K−1
+  dummy columns of levels 2…K, so level 1 carries no group-level effect there.
 
 `brm_population_effect_coordinates` reports which coding a block has
 (`coding === :cellmeans` or `:treatment`); a cell-mean block has no
