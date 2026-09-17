@@ -41,6 +41,10 @@ Base.include(@__MODULE__, joinpath(@__DIR__, "..", "docs", "backend_comparisons.
         ir_source = panes.content[3].code
         @test startswith(ir_source, "BRMI:")
         @test occursin("~", ir_source)
+        # Resolved call heads print as written, never module-qualified: the
+        # docs build's `Main` does not import `Distributions`, and Julia
+        # qualifies bindings invisible from the display context.
+        @test !occursin("Distributions.", ir_source)
         @test StanBlocks.stanc_check(panes.content[5].code).ok
         turing_source = panes.content[6].code
         @test !occursin("unsupported", turing_source)
@@ -57,4 +61,13 @@ Base.include(@__MODULE__, joinpath(@__DIR__, "..", "docs", "backend_comparisons.
             @test length(findall("@model", turing_source)) == 1
         end
     end
+end
+
+@testset "IR call heads print bare names" begin
+    show_head(x) = (io = IOBuffer();
+        BayesianRegressionModels._show_call_head(io, x);
+        String(take!(io)))
+    @test show_head(Distributions.Normal) == "Normal"
+    @test show_head(Distributions.Exponential) == "Exponential"
+    @test show_head(+) == "+"
 end
