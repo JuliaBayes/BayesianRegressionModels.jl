@@ -168,6 +168,34 @@ end
 
 const _brm_has_row_ref = BRM._brm_has_row_ref
 
+# A callable with no Julia methods cannot execute in the emitted Turing
+# program. In practice this is a Stan-only `@deffun` function or a `@lpxf`
+# family base stub (`function f end` with no methods); the Turing backend runs
+# ordinary Julia, so emitting a call to one only moves the failure from
+# construction time to sampling time (or out-of-bounds row indexing before
+# it). Walk a prepared expression tree and return the first such callee, or
+# `nothing` when every call resolves to real Julia code.
+_brm_turing_stan_only(x) = nothing
+_brm_turing_stan_only(x::BRM._BRMPreparedExpr) =
+    _brm_turing_stan_only_callable(x.callable) !== nothing ?
+        _brm_turing_stan_only_callable(x.callable) :
+        _brm_turing_stan_only_args(x.args, x.kwargs)
+_brm_turing_stan_only_callable(callable::Function) =
+    isempty(methods(callable)) ? callable : nothing
+_brm_turing_stan_only_callable(_callable) = nothing
+function _brm_turing_stan_only_args(args, kwargs)
+    for arg in args
+        found = _brm_turing_stan_only(arg)
+        isnothing(found) || return found
+    end
+    for value in values(kwargs)
+        found = _brm_turing_stan_only(value)
+        isnothing(found) || return found
+    end
+    nothing
+end
+_brm_turing_stan_only(x::Tuple) = _brm_turing_stan_only_args(x, (;))
+
 function _brm_group_prior_ast(block, callables)
     Expr(:tuple, map(block.sd_prior) do prior
         if isnothing(prior)
@@ -277,6 +305,17 @@ function _brm_generic_response_graph_ast(multi; single::Bool=false)
         node_statements[parameter.name] = Any[:($(parameter.name) ~ $prior)]
     end
     for (pi, assignment) in values(assignments)
+        if _brm_has_row_ref(assignment.expression)
+            stan_only = _brm_turing_stan_only(assignment.expression)
+            isnothing(stan_only) || error(
+                "Turing backend: assignment `$(assignment.name)` calls " *
+                "`$(nameof(stan_only))`, which defines no Julia methods " *
+                "(a Stan `@deffun` function has no Julia implementation). " *
+                "Row-dependent assignments lower to row-wise Julia " *
+                "comprehensions, so this call cannot execute. Express the " *
+                "computation with row-wise Julia code or fit this model " *
+                "with the Stan backend.")
+        end
         value = _brm_prepared_ast(assignment.expression, callables)
         statement = if _brm_has_row_ref(assignment.expression)
             :($(assignment.name) = [$value for $row in eachindex($(response_symbols[pi]))])

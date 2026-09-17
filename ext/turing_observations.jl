@@ -53,6 +53,14 @@ _brm_weight_ast(::Val{:power}, base, weight) =
     :(_BRMObjectiveWeight($base, $weight))
 
 function _brm_observation_ast(plan, index, callables)
+    stan_only = _brm_turing_stan_only(plan.distribution)
+    isnothing(stan_only) || error(
+        "Turing backend: observation `$(plan.response_name)` calls " *
+        "`$(nameof(stan_only))`, which defines no Julia methods " *
+        "(a Stan `@lpxf` family has no Julia implementation). " *
+        "Each observation row is sampled from the Julia distribution this " *
+        "call returns, so a Stan-only family cannot execute. Use a " *
+        "Distributions.jl callable or fit this model with the Stan backend.")
     row = _brm_row_symbol(callables)
     weight = plan.observation_weight
     weight_value = :(multi.plans[$index].observation_weight.values[$row])
