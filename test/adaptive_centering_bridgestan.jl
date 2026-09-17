@@ -307,7 +307,8 @@ end
     problem = StanBlocks.stan_instantiate(sb.model)
     unc_names = StanBlocks.BridgeStan.param_unc_names(problem.model)
     blocks = adaptive_centering_blocks(sb, unc_names)
-    hsgp_blocks = BRM._adaptive_hsgp_centering_blocks(sb, unc_names)
+    hsgp_blocks = BayesianRegressionModels._adaptive_hsgp_centering_blocks(
+        sb, unc_names)
     @test length(blocks) == 1
     @test length(hsgp_blocks) == 2
     flat_pos = [findfirst(==("zflat_hsgpw_x_g.$i"), unc_names) for i in 1:6]
@@ -326,10 +327,9 @@ end
     backend = AutoEnzyme()
     wrapped = adaptive_centering_problem(sb, problem, backend)
     wir = WarmupHMC.reparametrizer(wrapped)
-    ranef_cells = vcat(vec(blocks[1].effects), blocks[1].cholesky_free,
-                       blocks[1].log_scales)
-    @test length(wir.pairs) == length(ranef_cells) + 6
-    @test first.(wir.pairs) == vcat(ranef_cells, flat_pos)
+    ranef_pairs = vec(blocks[1].effects)
+    @test length(wir.pairs) == length(ranef_pairs) + 6
+    @test first.(wir.pairs) == vcat(ranef_pairs, flat_pos)
     @test WarmupHMC.candidate_scoring_plan(wrapped) isa
           WarmupHMC.CandidateScoringPlan
 
