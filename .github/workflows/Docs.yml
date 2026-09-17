@@ -18,14 +18,21 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  # A replacement docs publish must be able to cancel a wedged run for the
-  # same branch instead of waiting behind GitHub's default six-hour timeout.
-  cancel-in-progress: true
+  # Push builds always run to completion and the queue collapses onto the
+  # tip: GitHub keeps at most one `pending` run per group (default
+  # `queue: single`) and cancels any older pending run when a newer one
+  # arrives — so the running build finishes and only the newest queued
+  # build runs next. Only PR previews cancel in progress. A genuinely
+  # wedged run is bounded by the build job's `timeout-minutes` instead of
+  # by cancellation (which is what the old comment above was written for).
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
 
 jobs:
   build:
     if: github.repository == 'nsiccha/BayesianRegressionModels.jl'
     runs-on: ubuntu-latest
+    # Bound a wedged docs build well under GitHub's default six-hour timeout.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - name: Configure git for private repos
