@@ -332,6 +332,72 @@ down by its counts:
 
 [![Seeds of the six patches: prior mean, posterior interval and truth](assets/renewal/patch_seeds.png)](assets/renewal/patch_seeds.png)
 
+## The same models through a package
+
+Everything mechanical above is user code, which is the point — but it is also
+forty lines of Stan functions that the next renewal model would copy. The
+repository carries them once more as a small example package,
+[`examples/EpiRenewal`](https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/examples/EpiRenewal),
+that sits on top of BayesianRegressionModels the way `epidemia` sits on
+`rstanarm`: the package owns the renewal recursion, the mixing and the delay,
+and the model keeps one line per mechanical step.
+
+```@eval
+let mod = Main.BRMDocsComparisons.example_module(:renewal_package)
+    Core.eval(mod, :(using BayesianRegressionModels, Distributions, StanBlocks))
+    Base.include(mod, joinpath(Main.BRMDocsComparisons.REPOSITORY_ROOT,
+                               "examples", "EpiRenewal", "src", "EpiRenewal.jl"))
+    Core.eval(mod, :(using .EpiRenewal))
+    # the simulated data of the sections above
+    Core.eval(mod, :(const page = $(Main.BRMDocsComparisons.example_module(:renewal))))
+end
+nothing
+```
+
+The six-patch model, with `using EpiRenewal`:
+
+```@eval
+Main.BRMDocsComparisons.comparison(
+    Main.BRMDocsComparisons.example_module(:renewal_package),
+    Main.BRMDocsComparisons.source_function(
+        "examples/EpiRenewal/models.jl", :epirenewal_patch_model,
+    ),
+    :epirenewal_patch_model;
+    title="Six coupled patches with EpiRenewal's operators",
+    require_stan=true,
+)
+```
+
+`seeded_history`, `renewal` and `delay` are ordinary Stan functions that the
+package declares with `@deffun`; `past`, `I` and `Y` are named quantities of the
+model. This is the same posterior as the hand-written version: the package's
+test requires the same dimension and the same log density and gradient at
+arbitrary points for every model on this page, so the fits and figures above
+are this model's fits and figures.
+
+Each operator takes its kernel **first**, as a data vector or as a function. A
+function can be written as a `do` block, and its body may read sampled
+parameters ([Formula terms](formula-terms.md)) — which a data vector cannot. So
+the reporting delay of step 1 no longer has to be a fixed input: here it is
+estimated inside the renewal model, from the counts.
+
+```@eval
+Main.BRMDocsComparisons.comparison(
+    Main.BRMDocsComparisons.example_module(:renewal_package),
+    Main.BRMDocsComparisons.source_function(
+        "examples/EpiRenewal/models.jl", :epirenewal_estimated_delay_model,
+    ),
+    :epirenewal_estimated_delay_model;
+    title="Reporting delay estimated inside the renewal model",
+    require_stan=true,
+)
+```
+
+The operators read plain vectors, so they rely on the frame's layout — one row
+per (patch, day), ordered by patch and then by day, every patch covering the
+same days. The package's `epi_frame(rows; time, by)` sorts a table into that
+order and refuses one that cannot satisfy it.
+
 ## Parameters and sampler diagnostics
 
 Posterior medians and 95 % intervals next to the values the data were simulated
@@ -402,8 +468,11 @@ Main.BRMDocsComparisons.source_code_region(
 ## Scope
 
 - The generation-interval and reporting-delay distributions are fixed inputs of
-  the renewal models. Step 1 estimates a delay distribution, but its
-  uncertainty is not propagated into steps 2 and 3.
+  the fitted renewal models. Step 1 estimates a delay distribution, but its
+  uncertainty is not propagated into steps 2 and 3. The model that estimates the
+  delay inside the renewal model is shown and checked (finite density and
+  gradient, and the same expected cases as the fixed-delay model at the true
+  delay parameters), not fitted here.
 - The correlation matrix `C` of `cdar` is data, not a sampled covariance; its
   length scale (30 km) is fixed.
 - The data are simulated from the model family that is fitted, so the figures

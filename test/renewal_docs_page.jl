@@ -28,7 +28,7 @@ end
 @testset "renewal docs page: build-time blocks evaluate in order" begin
     source = read(RENEWAL_PAGE, String)
     blocks = [m.captures[1] for m in eachmatch(r"(?ms)^```@eval[^\n]*\n(.*?)^```\s*$", source)]
-    @test count(b -> occursin("Main.BRMDocsComparisons.comparison(", b), blocks) == 3
+    @test count(b -> occursin("Main.BRMDocsComparisons.comparison(", b), blocks) == 5
     page_module = Module(gensym(:RenewalDocs))
     comparisons = 0
     for block in blocks
@@ -58,7 +58,7 @@ end
             @test any(part -> part isa Markdown.Table, rendered.content)
         end
     end
-    @test comparisons == 3
+    @test comparisons == 5
 end
 
 @testset "renewal models: finite BridgeStan density and gradient" begin
