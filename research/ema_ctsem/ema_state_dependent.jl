@@ -1,32 +1,25 @@
-# Charles Driver's SECOND demo (`fitDemo.Rmd`): a state-dependent continuous-time
-# model, translated to @brm with the latent states EKF-marginalized in the kernel.
+# A continuous-time state-space model whose dynamics depend on the LATENT STATE, with the
+# states marginalized inside the `kernel(...)` cell.
 #
-# What makes this HARDER than the first EMA demo (ema_brm.jl / ema_kernel_*.jl):
-# there THREE matrix cells are functions of the LATENT STATE, not of an input:
-#   1. DRIFT[1,1] = -log1p(exp(b0 + bm*mood))       stress recovers faster in good mood
+# The model follows a demonstration model of ctsem (Charles Driver's R package for
+# hierarchical continuous-time dynamic modelling, https://github.com/cdriveraus/ctsem).
+# Three cells of the system matrices are functions of the latent state, not of an input:
+#   1. DRIFT[1,1]     = -softplus(b0 + bm*mood)      stress recovers faster in good mood
 #   2. DIFFUSION[1,1] = exp(qd0 + qd1*mood)          stress is MORE VOLATILE in good mood
-#   3. DIFFUSION[2,1] = fisher-z corr = tanh(cz*stress)   the two shocks COUPLE MORE
-#                                                          tightly the more stressed
-# The first demo's diffusion was INPUT-dependent (on workload) and DIAGONAL; here
-# it is STATE-dependent AND correlated, so the process-noise covariance Q depends
-# on the very states being integrated out. The EKF evaluates the drift Jacobian
-# and Q at the running state estimate each step.
+#   3. DIFFUSION[2,1] = tanh(cz*stress)              the two shocks couple more tightly
+#                                                    the more stressed (a fisher-z correlation)
+# So the process-noise covariance depends on the very states being integrated out.
 #
-# Generating truth (fitDemo.Rmd, ctsem `type='ct'`, covmattransform='z'):
-#   DRIFT   = [ -log1p(exp(0.5 + 0.4*mood))  -0.25 ;  -0.30  -0.60 ]
-#   DIFFUSION (sd / fisher-z corr) = [ exp(-0.2 + 0.3*mood)  0 ;  0.7*stress  0.6 ]
-#   CINT    = [0 ; 0.3]              (cint_mood only)
-#   LAMBDA  = [1 0 ; 0 1 ; 1.2 0]    (smoked loads 1.2 on stress)
-#   MANIFESTMEANS = [0 ; 0 ; -1]     (binary threshold -1; no continuous intercepts)
-#   MANIFESTVAR   = diag(.3, .3, 0)  (SD form: meas. sd 0.3; binary via filter)
-#   T0MEANS = [0 ; 0.5]   T0VAR = diag(.6, .5)  (SD form: T0 sds 0.6, 0.5)
-#   ctsem covariance-type matrices are in SD / fisher-z form (UcorSDtoCov): the
-#   actual variance is the cell SQUARED -- cf. `[merr_stress]^2` in the rendered
-#   Theta and Charles's own `truecov()` in fitDemo.Rmd. T0VAR is FREE in the fit.
-#   NO covariates, NO time-dependent predictors, NO between-subject random effects.
-#
-# VERIFIED (strato2, StanBlocks bec23bc3c523): SBBRMI -> stan_code -> stanc_check
-# -> stan_instantiate + LogDensityProblems.logdensity_and_gradient, finite.
+# Generating values (ctsem matrix names; covariance-type cells are in sd / fisher-z form,
+# i.e. the variance is the cell SQUARED):
+#   DRIFT     = [ -softplus(0.5 + 0.4*mood)  -0.25 ;  -0.30  -0.60 ]
+#   DIFFUSION = [ exp(-0.2 + 0.3*mood)  0 ;  0.7*stress  0.6 ]
+#   CINT      = [0 ; 0.3]
+#   LAMBDA    = [1 0 ; 0 1 ; 1.2 0]        the binary indicator loads 1.2 on stress
+#   MANIFESTMEANS = [0 ; 0 ; -1]           binary threshold -1
+#   MANIFESTVAR   = diag(.3, .3, 0)        measurement sd 0.3
+#   T0MEANS = [0 ; 0.5]   T0VAR = diag(.6, .5)
+# All parameters are shared across subjects: no covariates, no random effects.
 #
 # Run: julia --project=test research/ema_ctsem/ema_state_dependent.jl
 
@@ -35,13 +28,14 @@ using StanBlocks
 using LogDensityProblems
 using Distributions: Normal, Exponential
 
-# ── per-subject marginalizer with STATE-DEPENDENT, CORRELATED diffusion ────────
-# ys = stressReport (LHS); ym = moodReport; smoked = binary; dt = intervals.
-# Substepped continuous-discrete Gaussian filter. Its PRECISION is two integers, both DATA
-# (so one compiled model serves every setting -- see `with_filter`):
+# The per-subject marginalizer, a custom `@lpxf` family: a substepped continuous-discrete
+# Gaussian filter with STATE-DEPENDENT, CORRELATED diffusion. `ys` (stressReport) is the
+# left-hand side of `ys ~ ema_sd(...)`; ym = moodReport, smoked = binary, dt = intervals.
+# Its PRECISION is two integers, both DATA (so one compiled model serves every setting --
+# see `with_filter`):
 #   nsub    Euler substeps per observation interval.
 #   gh = 0  first-order predict (EKF): drift Jacobian + Q evaluated PLUG-IN at the filtered
-#           mean. This is what ctsem's julia engine does (kalman_filters.jl).
+#           mean -- the order ctsem's filter uses.
 #   gh = K  (3 or 5) MOMENT-MATCHED predict: the Euler map and Q(x) are averaged over the
 #           state uncertainty N(m,P) with a KxK Gauss-Hermite rule. The first-order filter
 #           uses tanh(cz*E[stress]) where the process carries E[tanh(cz*stress)] (attenuated
@@ -50,7 +44,7 @@ using Distributions: Normal, Exponential
 # (5 nodes) with a moment-matched state update -- as ctsem's `_binary_moments` does -- not
 # linearised.
 StanBlocks.@deffun begin
-    l2pi()::real = 1.8378770664093453
+    l2pi()::real = 1.8378770664093453          # log(2 pi)
     # probabilists' Gauss-Hermite node / weight i of a K-point rule (K = 3 or 5)
     ghx(i::int, K::int)::real = begin
         x=0.0
@@ -116,7 +110,7 @@ StanBlocks.@deffun begin
                     end
                 end
             end
-            # Gaussian update (2 continuous indicators, loadings [1;1]); merr cells are SDs
+            # Gaussian update (2 continuous indicators, loadings [1;1]); r1, r2 are measurement sds
             v1=ys[t]-ms; v2=ym[t]-mm; s11=p11+r1*r1; s12=p12; s22=p22+r2*r2
             det=s11*s22-s12*s12; si11=s22/det; si12=-s12/det; si22=s11/det
             quad=v1*(si11*v1+si12*v2)+v2*(si12*v1+si22*v2); lg=-0.5*(2*l2pi()+log(det)+quad)
@@ -171,20 +165,21 @@ StanBlocks.@deffun begin
     end
 end
 
-# ── synthetic panel from the generating truth (state-dependent SDE) ────────────
-# `ng`: Euler-Maruyama steps per observation interval in the GENERATOR (finer = closer to the
-# SDE). `rng`: an AbstractRNG to draw from; the default is a dependency-free LCG + Box-Muller,
-# kept so that the numbers reported from this fixture stay reproducible.
-function fixture(; n=8, nt=15, seed=20260916, ng=8, rng=nothing)
+"""
+Synthetic panel drawn from the generating values above. `ng`: Euler-Maruyama steps per
+observation interval in the generator (finer = closer to the SDE). `rng`: an `AbstractRNG`
+to draw from; the default is a dependency-free LCG + Box-Muller stream.
+"""
+function ema_state_dependent_fixture(; n=8, nt=15, seed=20260916, ng=8, rng=nothing)
     state=seed; lcg()=(state=(1103515245*state+12345)%2^31; state/2^31)
     rnd()=rng === nothing ? lcg() : rand(rng)
     randn2()=rng === nothing ? (u1=max(lcg(),1e-9); u2=lcg(); sqrt(-2*log(u1))*cos(6.283185307*u2)) : randn(rng)
     subject=String[]; stressReport=Vector{Float64}[]; moodReport=Vector{Float64}[]
     smoked=Vector{Int}[]; dt=Vector{Float64}[]
     for i in 1:n
-        push!(subject,"s$i"); s=0.0+0.6*randn2(); m=0.5+0.5*randn2()   # T0 ~ N(T0MEANS, T0VAR), SD form
+        push!(subject,"s$i"); s=0.0+0.6*randn2(); m=0.5+0.5*randn2()   # initial state ~ N(T0MEANS, T0VAR)
         a=Float64[]; b=Float64[]; c=Int[]; d=Float64[]
-        for _ in 1:80                                   # ctGenerate(burnin = 10): 10 time units, h = 0.125
+        for _ in 1:80                                   # burn-in: 10 time units at h = 0.125
             hh=0.125; sds=exp(-0.2+0.3*m); corr=tanh(0.7*s)
             zs=randn2(); zc=randn2(); z2=corr*zs+sqrt(max(1-corr*corr,0.0))*zc
             ds=(-log(1+exp(0.5+0.4*m))*s-0.25*m)*hh+sds*sqrt(hh)*zs
@@ -204,7 +199,7 @@ function fixture(; n=8, nt=15, seed=20260916, ng=8, rng=nothing)
                     s=s+ds; m=m+dm
                 end
             end
-            push!(a, s+0.3*randn2()); push!(b, m+0.3*randn2())   # MANIFESTVAR .3 is an SD
+            push!(a, s+0.3*randn2()); push!(b, m+0.3*randn2())   # measurement sd 0.3
             p=1/(1+exp(-(1.2*s-1))); push!(c, rnd()<p ? 1 : 0)
         end
         push!(stressReport,a); push!(moodReport,b); push!(smoked,c); push!(dt,d)
@@ -216,45 +211,44 @@ end
 # emitted Stan -- and the compiled model -- is the same for every setting, and draws from one
 # setting are valid points for another. That is what lets a cheap-filter posterior be
 # importance-weighted toward a more precise one (ema_state_dependent_psis.jl).
-#   gh = 0: first-order plug-in (ctsem's estimator);  gh = 3 / 5: moment-matched predict.
+#   gh = 0: first-order plug-in;  gh = 3 / 5: moment-matched predict.
 with_filter(d; nsub=8, gh=3) = merge(d, (; nsub, gh))
-data = with_filter(fixture())
 
-# ── the @brm model: multi-subject, in the KERNEL, FAITHFUL to Charles's fit
-#    (`indvarying = FALSE` — ALL parameters shared, NO random effects). Each
-#    subject is an independent series; with no `|ID|` bucket to derive from, the
-#    kernel takes the subject COUNT from the pre-grouped `Vector{Vector}` columns'
-#    common length (BRM `28e914d4`). Each subject's latent path is marginalized by
-#    the state-dependent-diffusion EKF in the cell. No per-subject parameters. ────
-ema_state_dependent(d) = @brm d begin
-    b0    ~ Normal(0.5, 0.5)               # softplus offset
-    bm    ~ Normal(0.4, 0.5)               # mood -> stress recovery modulation
-    a12   ~ Normal(-0.25, 0.5)             # mood -> stress
-    a21   ~ Normal(-0.30, 0.5)             # stress -> mood
-    a22   ~ Normal(-0.60, 0.3)             # mood self-decay
-    cintm ~ Normal(0.3, 0.5)               # cint_mood
-    qd0   ~ Normal(-0.2, 0.5)              # stress log-sd offset
-    qd1   ~ Normal(0.3, 0.5)               # stress volatility on MOOD (state dependent)
-    cz    ~ Normal(0.7, 0.5)               # shock-correlation on STRESS (state dependent)
-    sdm   ~ Exponential(1.0)              # mood diffusion sd
-    l31   ~ Normal(1.2, 0.5)              # smoked loading on stress
-    thr   ~ Normal(-1.0, 0.5)             # smoking threshold
-    r1    ~ Exponential(1.0)              # merr_stress (an SD; squared in the filter)
-    r2    ~ Exponential(1.0)              # merr_mood   (an SD)
-    s0    ~ Normal(0.0, 1.0)              # T0MEANS stress
-    m0    ~ Normal(0.5, 1.0)              # T0MEANS mood
-    t0sd1 ~ Exponential(1.0)              # T0VAR (free in the fit): stress sd
-    t0sd2 ~ Exponential(1.0)              #                          mood sd
-    t0z   ~ Normal(0.0, 0.5)              #                          fisher-z correlation
-    pred ~ kernel(dt, stressReport, moodReport, smoked) do dti, ys, ym, smk
-        ys ~ ema_sd(ym, smk, dti, b0, bm, a12, a21, a22, cintm, qd0, qd1, cz, sdm,
-                    l31, thr, r1, r2, s0, m0, t0sd1, t0sd2, t0z, nsub, gh)   # filter precision: DATA
-        ys
+# Every subject is an independent series sharing all parameters. With no random-effect
+# grouping to derive it from, the kernel takes the subject count from the common length of
+# the pre-grouped (vector-of-vectors) columns.
+function ema_state_dependent_model(data = with_filter(ema_state_dependent_fixture()))
+    @brm data begin
+        b0    ~ Normal(0.5, 0.5)               # stress recovery: softplus offset
+        bm    ~ Normal(0.4, 0.5)               #                  modulation by mood
+        a12   ~ Normal(-0.25, 0.5)             # mood -> stress
+        a21   ~ Normal(-0.30, 0.5)             # stress -> mood
+        a22   ~ Normal(-0.60, 0.3)             # mood self-decay
+        cintm ~ Normal(0.3, 0.5)               # mood intercept
+        qd0   ~ Normal(-0.2, 0.5)              # stress log-sd: offset
+        qd1   ~ Normal(0.3, 0.5)               #                dependence on MOOD
+        cz    ~ Normal(0.7, 0.5)               # shock correlation: dependence on STRESS
+        sdm   ~ Exponential(1.0)               # mood diffusion sd
+        l31   ~ Normal(1.2, 0.5)               # binary indicator: loading on stress
+        thr   ~ Normal(-1.0, 0.5)              #                   threshold
+        r1    ~ Exponential(1.0)               # measurement sd, stressReport
+        r2    ~ Exponential(1.0)               # measurement sd, moodReport
+        s0    ~ Normal(0.0, 1.0)               # initial stress mean
+        m0    ~ Normal(0.5, 1.0)               # initial mood mean
+        t0sd1 ~ Exponential(1.0)               # initial covariance: stress sd
+        t0sd2 ~ Exponential(1.0)               #                     mood sd
+        t0z   ~ Normal(0.0, 0.5)               #                     fisher-z correlation
+        pred ~ kernel(dt, stressReport, moodReport, smoked) do dti, ys, ym, smk
+            ys ~ ema_sd(ym, smk, dti, b0, bm, a12, a21, a22, cintm, qd0, qd1, cz, sdm,
+                        l31, thr, r1, r2, s0, m0, t0sd1, t0sd2, t0z, nsub, gh)   # filter precision: DATA
+            ys
+        end
     end
 end
 
 function main()
-    sb = SBBRMI(ema_state_dependent(data); mod=@__MODULE__)
+    data = with_filter(ema_state_dependent_fixture())
+    sb = SBBRMI(ema_state_dependent_model(data); mod=@__MODULE__)
     code = StanBlocks.stan_code(sb.model)
     @assert StanBlocks.stanc_check(code; warn_pedantic=false).ok "stanc failed"
     # content-hashed path so a differently-shaped model never reuses a stale .stan/.so
@@ -262,7 +256,7 @@ function main()
     dim = LogDensityProblems.dimension(prob)
     q = [0.03*((i % 7) - 3) for i in 1:dim]
     lp, g = LogDensityProblems.logdensity_and_gradient(prob, q)
-    println("fitDemo: state-dependent-diffusion EMA (multi-subject, EKF in kernel, indvarying=FALSE)")
+    println("state-dependent-diffusion model, latent states marginalized in the kernel cell")
     println("  subjects = ", length(data.subject), "  occasions = ", length(data.dt[1]))
     println("  dim = ", dim, "  lp = ", round(lp; digits=2), "  finite_grad = ", all(isfinite, g))
 end
