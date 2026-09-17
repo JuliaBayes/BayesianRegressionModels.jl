@@ -138,7 +138,8 @@ export name, getf, getargs, getkwargs, getbroadcast, getop
 
 # Macro plumbing + compiled-output accessors used by downstream code
 # (web-macro's Formula struct, downstream direct pipeline calls).
-export parse!, _brm, stan_code, reprocess, restan_data, generative_plan
+export parse!, _brm, stan_code, stan_model, stan_instantiate,
+       reprocess, restan_data, generative_plan
 
 # Post-fit prediction — the population-level ("nore") and transported
 # ("recov") modes, plus the random-effect block description both stand on.

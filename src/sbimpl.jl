@@ -3089,10 +3089,37 @@ Return the transpiled Stan source generated from `sb.model`. Forwards
 to `StanBlocks.stan_code`. Useful for inspecting what the sbimpl walker
 emitted before compiling.
 """
-# Model construction can register composed Stan families. Enter the compiler
-# in the current world so their hooks are visible in the same calling function.
-# This boundary is used only while compiling a model, never during sampling.
+# Model construction can register composed Stan families (e.g. the
+# `brm_vector_prior_*` triad behind a totals scale prior) via `Core.eval`.
+# A trace that runs in the SAME compiled caller frame resolves methods at
+# that frame's world age, so the fresh hooks are invisible there and tracing
+# dies with "`brm_vector_prior_*` is missing `lpxf_expr`" — while an identical
+# top-level call succeeds. Enter the compiler in the current world so the
+# hooks are visible in the same calling function. This boundary is used only
+# while compiling a model, never during sampling.
 stan_code(sb::SBBRMI) = Base.invokelatest(StanBlocks.stan_code, sb.model)
+
+"""
+    stan_model(sb::SBBRMI; kwargs...) -> StanModel
+
+Trace `sb.model` end to end. Forwards to `StanBlocks.stan_model` in the
+current world, for the same lowering-time registration reason as `stan_code`
+above. Prefer this over `StanBlocks.stan_model(sb.model)` when the trace may
+run inside a function that also built `sb`.
+"""
+stan_model(sb::SBBRMI; kwargs...) =
+    Base.invokelatest(StanBlocks.stan_model, sb.model; kwargs...)
+
+"""
+    stan_instantiate(sb::SBBRMI; kwargs...) -> StanProblem
+
+Compile `sb.model` via BridgeStan. Forwards to `StanBlocks.stan_instantiate`
+in the current world, for the same lowering-time registration reason as
+`stan_code` above. Prefer this over `StanBlocks.stan_instantiate(sb.model)`
+when the build may run inside a function that also built `sb`.
+"""
+stan_instantiate(sb::SBBRMI; kwargs...) =
+    Base.invokelatest(StanBlocks.stan_instantiate, sb.model; kwargs...)
 
 # Display configured submodels from their actual emitted statements. Keep the
 # compiler's value-callee path intact: a merge expression inside a SLIC call
@@ -5839,12 +5866,19 @@ _sb_real_vec(label::Symbol, n::Symbol, v) =
 
 # ---- linear predictor: emit `X_<name> = hcat(...); <name> ~ popefs(; X=X_<name>)` --
 
+# Direct-summand routing, extensible for downstream terms. Built-in direct
+# terms own their `_sb_emit_direct_expr!` (or gp/hsgp `_sb_predictor_term!`)
+# emission; a downstream term joins by defining `_sb_is_direct_term` for its
+# marker (plus its `_sb_predictor_term!` emit method — see the group-block
+# branch of `_sb_emit_direct!`). Default is population-column treatment.
+_sb_is_direct_term(f) = false
+for _direct_builtin in (offset, mo1, s, t2, gp, hsgp, dar, rw, cdar)
+    @eval _sb_is_direct_term(::typeof($_direct_builtin)) = true
+end
 _sb_classify_term!(t::ExprColumn, pop_terms, ran_terms, direct_terms) = begin
     f = getf(t)
     f === (|) && (push!(ran_terms, t); return)
-    (f === offset || f === mo1 || f === s || f === t2 || f === gp ||
-     f === hsgp || f === dar || f === rw || f === cdar) &&
-        (push!(direct_terms, t); return)
+    _sb_is_direct_term(f) && (push!(direct_terms, t); return)
     push!(pop_terms, t)
 end
 _sb_classify_term!(t, pop_terms, ran_terms, direct_terms) =
@@ -6827,6 +6861,14 @@ function _sb_emit_direct!(stmts, data, target::Symbol, t::ExprColumn, summands;
                                             target, group_block_lookup, term_overrides))
         return
     elseif f === hsgp
+        push!(summands, _sb_predictor_term!(stmts, data, f, t;
+                                            target, group_block_lookup,
+                                            term_overrides))
+        return
+    elseif !isnothing(_sb_find_group_block(f, t, group_block_lookup))
+        # Downstream group-block term in nested position: the prepass
+        # allocated its block; its own `_sb_predictor_term!` method threads
+        # the block into a per-observation contribution column.
         push!(summands, _sb_predictor_term!(stmts, data, f, t;
                                             target, group_block_lookup,
                                             term_overrides))
