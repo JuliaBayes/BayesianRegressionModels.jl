@@ -1499,6 +1499,66 @@ end
     end
 end
 
+@testset "Turing extension — cell means without an intercept" begin
+    # Decision `0woa6hh`: the shared population design codes an intercept-free
+    # predictor's FIRST categorical term by cell means, exactly as SBBRMI does.
+    df = (;
+        g=[1, 2, 3, 1, 2, 3],
+        h=[1, 1, 2, 2, 1, 2],
+        y=[-2.4, -2.2, -2.0, -1.8, -1.7, -1.5],
+    )
+    brmi = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 0 + g + h
+        effect(mu, g) ~ Normal(0.5, 0.25)
+        effect(mu, g_lvl_3) ~ Normal(2.0, 0.1)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    backend = TuringBRMI(brmi)
+
+    expected_X = hcat(
+        Float64.(df.g .== 1),
+        Float64.(df.g .== 2),
+        Float64.(df.g .== 3),
+        Float64.(df.h .== 2),
+    )
+    @test backend.plan.design.matrix == expected_X
+    @test Tuple(c.label for c in backend.plan.design.columns) ==
+          (:g_lvl_1, :g_lvl_2, :g_lvl_3, :h_lvl_2)
+    # The level address outranks the block address; the second categorical
+    # term stays treatment-coded at its default prior.
+    @test _turing_test_priors(backend) ==
+          (Normal(0.5, 0.25), Normal(0.5, 0.25), Normal(2.0, 0.1), Normal())
+
+    params = (; beta_pop=[0.25, -0.5, 1.9, 0.2], sigma=0.8)
+    mu = expected_X * params.beta_pop
+    prior = sum(logpdf.(_turing_test_priors(backend), params.beta_pop)) +
+            logpdf(Exponential(2), params.sigma)
+    likelihood = sum(logpdf.(Normal.(mu, params.sigma), df.y))
+    @test Turing.logjoint(backend.model, params) ≈
+          prior + likelihood atol=1e-12 rtol=1e-12
+
+    # An explicit reference level requests treatment coding; the cell means
+    # then pass to the next categorical term.
+    pinned = TuringBRMI((@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 0 + factor(g; ref=1) + h
+        y ~ Normal(mu, sigma)
+    end)(df))
+    @test Tuple(c.label for c in pinned.plan.design.columns) ==
+          (:g_lvl_2, :g_lvl_3, :h_lvl_1, :h_lvl_2)
+
+    # An intercept keeps every categorical term treatment-coded, and a level
+    # address exists only where a cell mean does.
+    treated = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + g
+        effect(mu, g_lvl_2) ~ Normal(0.0, 0.5)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    @test_throws "is not a population coefficient" TuringBRMI(treated)
+end
+
 @testset "Turing extension — categorical interactions" begin
     df = (;
         x=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],

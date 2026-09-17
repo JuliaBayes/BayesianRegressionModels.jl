@@ -378,9 +378,11 @@ end
     @test reffed_result.nonreference_levels == [2, 1]
     @test reffed_result.coordinates == [1, 2]
 
+    # A single-level factor under treatment coding is all reference: no
+    # contrast, no coordinate.
     one_level_df = (; indication=fill(1, 4), y=zeros(4))
     one_level_builder = @brm begin
-        mu ~ 0 + indication
+        mu ~ 1 + indication
         y ~ Normal(mu, 1.0)
     end
     one_level = brm_descriptor(
@@ -388,10 +390,45 @@ end
         mod=@__MODULE__, name=:categorical_one_level)
     one_level_result = brm_population_effect_coordinates(
         one_level, :mu, String[]; coefficient=:indication)
+    @test one_level_result.coding === :treatment
     @test one_level_result.reference_level == 1
     @test isempty(one_level_result.nonreference_levels)
     @test isempty(one_level_result.coordinates)
     @test isempty(one_level_result.contrasts)
+
+    # Without an intercept the factor is cell-mean coded (decision `0woa6hh`):
+    # no reference level, one coordinate per level -- here the lone level's.
+    cells_builder = @brm begin
+        mu ~ 0 + indication
+        y ~ Normal(mu, 1.0)
+    end
+    one_cell = brm_population_effect_coordinates(
+        brm_descriptor(cells_builder, one_level_df;
+                       mod=@__MODULE__, name=:categorical_one_cell),
+        :mu, ["cat_mu_indication_beta.1"]; coefficient=:indication)
+    @test one_cell.coding === :cellmeans
+    @test isnothing(one_cell.reference_level)
+    @test one_cell.nonreference_levels == [1]
+    @test one_cell.coordinates == [1]
+    @test isempty(one_cell.contrasts)
+    @test one_cell.cells == [(; level=1, coordinate=1)]
+
+    cells = brm_population_effect_coordinates(
+        brm_descriptor(cells_builder, categorical_df;
+                       mod=@__MODULE__, name=:categorical_cells),
+        :mu, ["sigma", "cat_mu_indication_beta.1", "cat_mu_indication_beta.2",
+              "lp__", "cat_mu_indication_beta.3"]; coefficient=:indication)
+    @test cells.coding === :cellmeans
+    @test cells.nonreference_levels == [1, 2, 3]
+    @test cells.cells == [(; level=1, coordinate=2), (; level=2, coordinate=3),
+                          (; level=3, coordinate=5)]
+    @test_throws "owns 3 cell means but resolves to 2" begin
+        brm_population_effect_coordinates(
+            brm_descriptor(cells_builder, categorical_df;
+                           mod=@__MODULE__, name=:categorical_cells),
+            :mu, ["cat_mu_indication_beta.1", "cat_mu_indication_beta.2"];
+            coefficient=:indication)
+    end
 end
 
 @testset "term coordinates — monotonic simplex and HSGP internals" begin

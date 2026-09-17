@@ -1724,9 +1724,10 @@ level-coding primitive.
 function _brm_simple_population_design(target::Symbol, rhs,
                                        data::AbstractDict,
                                        obs_name::Union{Nothing,Symbol};
-                                       required::Bool=false)
+                                       required::Bool=false,
+                                       implicit_intercept::Bool=false)
     _brm_population_design(target, Tuple(_brm_additive_terms(rhs)), data,
-                           obs_name; required)
+                           obs_name; required, implicit_intercept)
 end
 
 # A backend may lower structured terms separately while sharing exactly the
@@ -1862,7 +1863,8 @@ function _brm_simple_population_predictor(brmi::BRMI, target::Symbol,
     link_lhs_fn, name = peeled
     design = _brm_simple_population_design(
         name, rhs, context.data, get(context.target_obs, name, nothing);
-        required)
+        required,
+        implicit_intercept=name in _brm_threshold_located_predictors(brmi))
     isnothing(design) && return nothing
     _BRMPopulationPredictor(
         name, link_lhs_fn, _brm_lp_emitted_name(name, link_lhs_fn), design)
