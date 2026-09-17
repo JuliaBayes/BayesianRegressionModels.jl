@@ -19,6 +19,7 @@ df = (;
     prog=[0.0, 0.0, 1.0, 1.0, 2.0, 2.0],
     math=[41.0, 48.0, 52.0, 57.0, 63.0, 69.0],
     y_zip=[0, 1, 0, 2, 3, 0],
+    y_hurdle=[0, 1, 2, 0, 4, 1],
     y_nb=[0, 1, 2, 4, 3, 6],
     y_ord=[1, 2, 3, 1, 2, 3],
     y_t=[-0.8, -0.2, 0.1, 0.7, 1.0, 1.4],
@@ -49,6 +50,7 @@ family_builder = @brm begin
 
     log(lambda) ~ 1 + x
     y_zip ~ ZeroInflatedPoisson(lambda, 0.25)
+    y_hurdle ~ HurdlePoisson(lambda, 0.35)
 
     # Exact catalogue shape for bambi:negative_binomial_interaction and
     # bambi:plot_pred_nb: the interaction includes a transformed operand.
@@ -667,6 +669,7 @@ end
     @test occursin("exp_prior = exponential_rng((1.0 ./ 2.5));", code)
     @test occursin("gamma_prior = gamma_rng(3.0, (1.0 ./ 2.5));", code)
     @test occursin("zero_inflated_poisson(", code)
+    @test occursin("hurdle_poisson(", code)
     @test occursin("neg_binomial_2(", code)
     @test occursin("ordered_logistic(", code)
     @test occursin("student_t(", code)
@@ -700,7 +703,7 @@ end
     unseen_cat = merge(new_df, (; y_cat=[10, 20, 30, 40, 10, 20]))
     @test_throws "not a training level" reprocess(sb, unseen_cat)
 
-    for target in (:y_zip, :y_nb, :y_ord, :y_t, :y_bb_shapes,
+    for target in (:y_zip, :y_hurdle, :y_nb, :y_ord, :y_t, :y_bb_shapes,
                    :y_bb_mean_precision, :y_cat, :y_truncated, :y_censored,
                    :y_lognormal_censored, :y_exponential_censored,
                    :y_weibull_censored, :count_truncated, :count_censored,
@@ -715,6 +718,7 @@ end
     families = Dict(d.target => d.family for d in plan.declarations
                     if d.role === :observation)
     @test families[:y_zip] === :zero_inflated_poisson
+    @test families[:y_hurdle] === :hurdle_poisson
     @test families[:y_nb] === :neg_binomial_2
     @test families[:y_ord] === :ordered_logistic
     @test families[:y_t] === :student_t

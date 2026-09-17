@@ -1268,6 +1268,129 @@ StanBlocks.@deffun begin
     end
 end
 
+# Hurdle-Poisson lpmf, pointwise log-pmf, and generated-quantities RNG.
+# The positive component is a Poisson conditioned on Y > 0, so its log-pmf
+# subtracts `poisson_lccdf(0 | lambda)`. Predictive draws use exact rejection
+# sampling from that same zero-truncated component.
+StanBlocks.@deffun begin
+    @lpxf hurdle_poisson_lpmf(
+        y::int, lambda::real, p_zero::real
+    )::real = begin
+        if y == 0
+            log(p_zero)
+        else
+            log1m(p_zero) + poisson_lpmf(y, lambda) -
+                (poisson_lccdf(0::int, lambda)::real)
+        end
+    end
+    hurdle_poisson_lpmf(
+        y::int[n], lambda::vector[n], p_zero::vector[n]
+    )::real = begin
+        rv = 0.
+        for i in 1:n
+            rv += hurdle_poisson_lpmf(y[i], lambda[i], p_zero[i])::real
+        end
+        rv
+    end
+    hurdle_poisson_lpmf(
+        y::int[n], lambda::vector[n], p_zero::real
+    )::real = begin
+        hurdle_poisson_lpmf(y, lambda, rep_vector(p_zero, n))
+    end
+    hurdle_poisson_lpmf(
+        y::int[n], lambda::real, p_zero::vector[n]
+    )::real = begin
+        hurdle_poisson_lpmf(y, rep_vector(lambda, n), p_zero)
+    end
+    hurdle_poisson_lpmf(
+        y::int[n], lambda::real, p_zero::real
+    )::real = begin
+        hurdle_poisson_lpmf(
+            y, rep_vector(lambda, n), rep_vector(p_zero, n))
+    end
+
+    hurdle_poisson_lpmfs(args...) = begin
+        hurdle_poisson_lpmf(args...)
+    end
+    hurdle_poisson_lpmfs(
+        y::int[n], lambda::vector[n], p_zero::vector[n]
+    )::vector[n] = begin
+        rv::vector[n]
+        for i in 1:n
+            rv[i] = hurdle_poisson_lpmf(y[i], lambda[i], p_zero[i])
+        end
+        rv
+    end
+    hurdle_poisson_lpmfs(
+        y::int[n], lambda::vector[n], p_zero::real
+    )::vector[n] = begin
+        hurdle_poisson_lpmfs(y, lambda, rep_vector(p_zero, n))
+    end
+    hurdle_poisson_lpmfs(
+        y::int[n], lambda::real, p_zero::vector[n]
+    )::vector[n] = begin
+        hurdle_poisson_lpmfs(y, rep_vector(lambda, n), p_zero)
+    end
+    hurdle_poisson_lpmfs(
+        y::int[n], lambda::real, p_zero::real
+    )::vector[n] = begin
+        hurdle_poisson_lpmfs(
+            y, rep_vector(lambda, n), rep_vector(p_zero, n))
+    end
+
+    hurdle_poisson_positive_rng(lambda::real)::int = begin
+        draw::int[1]
+        draw[1] = poisson_rng(lambda)
+        while draw[1] == 0
+            draw[1] = poisson_rng(lambda)
+        end
+        draw[1]
+    end
+    hurdle_poisson_rng(lambda::real, p_zero::real)::int = begin
+        if bernoulli_rng(p_zero) == 1
+            0
+        else
+            hurdle_poisson_positive_rng(lambda)
+        end
+    end
+    hurdle_poisson_rng(
+        int[n], lambda::vector[n], p_zero::vector[n]
+    )::int[n] = begin
+        rv::int[n]
+        for i in 1:n
+            rv[i] = hurdle_poisson_rng(lambda[i], p_zero[i])
+        end
+        rv
+    end
+    hurdle_poisson_rng(
+        int[n], lambda::vector[n], p_zero::real
+    )::int[n] = begin
+        rv::int[n]
+        for i in 1:n
+            rv[i] = hurdle_poisson_rng(lambda[i], p_zero)
+        end
+        rv
+    end
+    hurdle_poisson_rng(
+        int[n], lambda::real, p_zero::vector[n]
+    )::int[n] = begin
+        rv::int[n]
+        for i in 1:n
+            rv[i] = hurdle_poisson_rng(lambda, p_zero[i])
+        end
+        rv
+    end
+    hurdle_poisson_rng(
+        int[n], lambda::real, p_zero::real
+    )::int[n] = begin
+        rv::int[n]
+        for i in 1:n
+            rv[i] = hurdle_poisson_rng(lambda, p_zero)
+        end
+        rv
+    end
+end
+
 # Native-Stan von-Mises density with the two public BRM support contracts made
 # explicit. `principal == 0` is Distributions.jl's `VonMises`: moving inclusive
 # support `[mu - pi, mu + pi]`. `principal == 1` is `CircularVonMises`: fixed
@@ -10539,6 +10662,10 @@ _sb_lik_family!(_, target, ::Type{<:Ordinal}, args, ::NamedTuple, _) = error(
 _sb_lik_family!(stmts, target, ::Type{<:ZeroInflatedPoisson},
                 args::Tuple{Any,Any}, data) =
     _sb_lik_stan!(stmts, target, :zero_inflated_poisson, args, data)
+
+_sb_lik_family!(stmts, target, ::Type{<:HurdlePoisson},
+                args::Tuple{Any,Any}, data) =
+    _sb_lik_stan!(stmts, target, :hurdle_poisson, args, data)
 
 _sb_lik_family!(stmts, target, ::Type{<:NegativeBinomial2},
                 args::Tuple{Any,Any}, data) =

@@ -89,6 +89,7 @@ BayesianRegressionModels.CloglogLink
 BayesianRegressionModels.CategoricalLogit
 BayesianRegressionModels.Horseshoe
 BayesianRegressionModels.ZeroInflatedPoisson
+BayesianRegressionModels.HurdlePoisson
 BayesianRegressionModels.NegativeBinomial2
 BayesianRegressionModels.BetaBinomial2
 BayesianRegressionModels.BinomialLogit
