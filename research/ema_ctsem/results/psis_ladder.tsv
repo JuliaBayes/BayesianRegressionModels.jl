@@ -1,0 +1,5 @@
+nsub	gh	fit_seconds	reweight_seconds	sd_log_ratio	khat	is_ess	draws
+2	0	98	442	11.72	3.22	1.1	600
+8	0	285	483	1.921	0.838	34.3	600
+8	3	1715	545	2.747	0.81	21.7	600
+16	3	3009	514	0.918	0.141	288.5	600
