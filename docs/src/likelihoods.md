@@ -13,7 +13,7 @@ response wrapper below.
 
 | Outcome | Accepted constructors |
 | --- | --- |
-| Continuous | `Normal`, `NormalCanon`, `Cauchy`, `TDist`, `Logistic`, `Gumbel`, `Chisq`, `Exponential`, `Gamma`, `Erlang`, `Beta`, `Uniform`, `LogNormal`, `Laplace`, `Frechet`, `Rayleigh`, `SkewNormal`, `Pareto`, `Weibull`, `InverseGamma`, `VonMises` |
+| Continuous | `Normal`, `NormalCanon`, `Cauchy`, `TDist`, `Logistic`, `Gumbel`, `Chisq`, `Exponential`, `Gamma`, `Erlang`, `Beta`, `Uniform`, `LogNormal`, `Laplace`, `Frechet`, `Rayleigh`, `SkewNormal`, `Pareto`, `Weibull`, `InverseGamma`, `InverseGaussian`, `VonMises` |
 | Continuous, restricted parameterization | `Arcsine()` — the standard `[0, 1]` form only; `SkewedExponentialPower(mu, sigma, 1, alpha)` — only the literal shape `1` |
 | Discrete | `Bernoulli`, `BernoulliLogit`, `Binomial`, `BinomialLogit`, `BetaBinomial`, `Poisson`, `NegativeBinomial` |
 
@@ -98,6 +98,32 @@ components can produce zeros. `HurdlePoisson` is also an executable
 Distributions.jl distribution with matching `params`, `logpdf`, and `rand`
 semantics outside a formula. It requires finite `lambda > 0` and
 `0 <= p_zero <= 1`; BRM supplies no implicit link or prior.
+
+## Wald regression with `InverseGaussian`
+
+Use Distributions.jl's `InverseGaussian(mu, lambda)` for positive continuous
+outcomes whose variance grows with the cube of the mean — the Wald GLM with a
+log link:
+
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+wald_costs = (@brm begin
+    log(lambda) ~ 1
+    eta ~ 1 + x
+    y ~ InverseGaussian(exp(eta), lambda)
+end)((;
+    x=[-1.0, -0.5, 0.0, 0.5, 1.0],
+    y=[1.2, 0.8, 1.1, 2.0, 1.6],
+))
+""", :wald_costs; title="Log-link Wald costs")
+```
+
+This preserves the constructor order `(mu, lambda)` — already Stan's order, so
+no parameterization translation applies — the shorthand
+`InverseGaussian(mu) == InverseGaussian(mu, 1)`, and the strict `y > 0`,
+`mu > 0`, `lambda > 0` domain. Density, pointwise log likelihood, and
+predictive RNG all use the same closed form; BRM supplies no implicit link or
+prior.
 
 ## Correlated Gaussian outcomes
 
