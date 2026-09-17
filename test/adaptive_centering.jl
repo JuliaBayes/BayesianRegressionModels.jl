@@ -215,3 +215,42 @@ end
     @test occursin("stratified", lowercase(err.msg))
     @test occursin("r_mu_subject__by__stratum", err.msg)
 end
+
+@testset "cdar walks resolve through the cdar metadata contract" begin
+    cdar_builder = @brm begin
+        mu ~ 1 + cdar(week; by=patch, cor=C)
+        y ~ Normal(mu, 1.0)
+    end
+    cdar_df = (;
+        week=repeat(1:2; inner=2), patch=repeat(["a", "b"]; outer=2),
+        y=zeros(4), C=[1.0 0.0; 0.0 1.0])
+    cdar_sb = SBBRMI(cdar_builder(cdar_df); mod=@__MODULE__)
+    cdar_names = vcat(
+        ["pop_mu_beta_pop.1", "cdar_mu_week_sigma", "cdar_mu_week_rho"],
+        ["cdar_mu_week_eta.$i" for i in 1:4],
+    )
+    @test isempty(ranef_blocks(cdar_sb))
+    @test isempty(adaptive_centering_blocks(cdar_sb, cdar_names))
+    cdar_blocks = BayesianRegressionModels._adaptive_cdar_centering_blocks(
+        cdar_sb, cdar_names)
+    @test length(cdar_blocks) == 1
+    @test only(cdar_blocks).term === :cdar_mu_week
+
+    mixed_builder = @brm begin
+        mu ~ 1 + (1 | subject) + cdar(week; by=patch, cor=C)
+        y ~ Normal(mu, 1.0)
+    end
+    mixed_df = (;
+        subject=["s1", "s1", "s2", "s2"], week=[1, 2, 1, 2],
+        patch=["a", "a", "b", "b"], y=zeros(4), C=[1.0 0.0; 0.0 1.0])
+    mixed_sb = SBBRMI(mixed_builder(mixed_df); total_groups=(), mod=@__MODULE__)
+    mixed_names = vcat(
+        ["pop_mu_beta_pop.1", "cdar_mu_week_sigma", "cdar_mu_week_rho"],
+        ["cdar_mu_week_eta.$i" for i in 1:4],
+        ["r_mu_subject_log_scale", "r_mu_subject_xi.1", "r_mu_subject_xi.2"],
+    )
+    @test length(ranef_blocks(mixed_sb)) == 1
+    @test length(adaptive_centering_blocks(mixed_sb, mixed_names)) == 1
+    @test length(BayesianRegressionModels._adaptive_cdar_centering_blocks(
+        mixed_sb, mixed_names)) == 1
+end
