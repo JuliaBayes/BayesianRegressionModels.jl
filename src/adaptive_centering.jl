@@ -202,6 +202,11 @@ literal standardised draw and `c=1` is the literal model-scale effect.
 Stratified `gr(g, by=b)` blocks currently raise rather than being silently
 left fixed: they carry one `L,tau` frame per stratum and need a separate indexed
 metadata contract.
+
+Correlated `cdar(step; by=group, cor=C)` walks are not ordinary random-effect
+blocks either; they have their own metadata contract in
+[`_adaptive_cdar_centering_blocks`](@ref) and join the online plan through the
+WarmupHMC extension exactly like the ungrouped-HSGP companion below.
 """
 function adaptive_centering_blocks(model, unc_names)
     pos = _ranef_name_positions(unc_names)
@@ -566,6 +571,208 @@ function _adaptive_hsgp_log_scale(x::AbstractVector,
         value -= 0.25 * rho * rho * block.omega2[basis, axis]
     end
     value
+end
+
+# The cdar path has its own metadata type for the same reason the HSGP path
+# does: `AdaptiveCenteringBlock` feeds the small-block Enzyme specialization
+# for ordinary random effects, and walk cells must not perturb that dispatch.
+# Cells are scalar and independent like HSGP basis weights — location zero and
+# one marginal prior spread each — so per-pair transport stays O(1) and the
+# whole walk stays linear, unlike a time-triangular map whose per-cell history
+# reread would cost O((P*W)^2) per gradient with no legal Enzyme cache.
+struct _CDARAdaptiveCenteringBlock
+    logical::Symbol
+    term::Symbol
+    n_groups::Int
+    n_steps::Int
+    # Column-major `eta` unconstrained indices: position `p + (w - 1) * P`
+    # addresses group `p`, step `w`, matching the emitted `eta.1`, ... order.
+    effects::Vector{Int}
+    sigma::Int
+    sigma_lower::Float64
+    rho::Int
+    # Frozen per-group marginal variances `C[p, p]` of `C = L * L'`.
+    cdiag::Vector{Float64}
+end
+
+Base.show(io::IO, b::_CDARAdaptiveCenteringBlock) = print(
+    io,
+    "CDARAdaptiveCenteringBlock(", b.logical, ", ", b.term,
+    ", ", b.n_groups, "×", b.n_steps, " walk cells)",
+)
+
+function _adaptive_cdar_physical(block::_CDARAdaptiveCenteringBlock, x::AbstractVector)
+    sigma = block.sigma_lower + exp(x[block.sigma])
+    rho = 1 / (1 + exp(-x[block.rho]))
+    sigma, rho
+end
+
+function _adaptive_cdar_log_scale(x::AbstractVector,
+                                  block::_CDARAdaptiveCenteringBlock,
+                                  pair::Int)
+    1 <= pair <= length(block.effects) || throw(BoundsError(block.effects, pair))
+    p = mod(pair - 1, block.n_groups) + 1
+    w = div(pair - 1, block.n_groups) + 1
+    sigma, rho = _adaptive_cdar_physical(block, x)
+    isfinite(sigma) && sigma > 0 || error(
+        "BRM adaptive centering: cdar `$(block.term)` marginal scale is not " *
+        "finite-positive at this position.",
+    )
+    0 <= rho <= 1 || error(
+        "BRM adaptive centering: cdar `$(block.term)` persistence left " *
+        "[0, 1] at this position.",
+    )
+    one_minus_rho2 = 1 - rho * rho
+    spread = if one_minus_rho2 <= 1e-12
+        Float64(w)
+    else
+        exp(log1p(-rho^(2w)) - log(one_minus_rho2))
+    end
+    log(sigma) + 0.5 * log(block.cdiag[p]) + 0.5 * log(spread)
+end
+
+function _adaptive_cdar_rho_bounds(plan, output::BRMOutput, owner)
+    constraints = output.constraints
+    unsupported = setdiff(collect(keys(constraints)), (:lower, :upper))
+    isempty(unsupported) || error(
+        "BRM adaptive centering: cdar `$owner` persistence uses unsupported Stan " *
+        "constraint(s) $(Tuple(unsupported)); this contract supports a " *
+        "[0, 1] interval and no offset/multiplier transform.",
+    )
+    lower = _adaptive_constraint_value(plan, get(constraints, :lower, nothing), owner, "persistence")
+    upper = _adaptive_constraint_value(plan, get(constraints, :upper, nothing), owner, "persistence")
+    lower == 0.0 || error(
+        "BRM adaptive centering: cdar `$owner` persistence lower bound is " *
+        "$lower, not 0; the compiled logit transform is unsupported.",
+    )
+    upper == 1.0 || error(
+        "BRM adaptive centering: cdar `$owner` persistence upper bound is " *
+        "$upper, not 1; the compiled logit transform is unsupported.",
+    )
+    nothing
+end
+
+"""
+    _adaptive_cdar_centering_blocks(model, unc_names)
+
+Resolve the compiled coordinates and frozen walk geometry for every
+`cdar(step; by=group, cor=C)` term in an `SBBRMI` or `GenerativePlan`.
+
+This is the backend-internal companion to [`adaptive_centering_blocks`](@ref),
+following the same descriptor-to-declaration route as
+[`_adaptive_hsgp_centering_blocks`](@ref). Each of the `P * W` innovations is
+one scalar cell with zero location and its marginal prior spread
+`sigma * sqrt(C[p, p] * (1 - rho^(2w)) / (1 - rho^2))`; `c=0` is the emitted
+`eta` frame. The metadata is intentionally fail-closed: a non-`[0, 1]`
+persistence transform, a non-lower-bounded scale, a missing or misshapen
+frozen factor, and declaration/artifact coordinate drift all raise before a
+reparametrizer is built.
+"""
+function _adaptive_cdar_centering_blocks(model, unc_names)
+    descriptor = brm_descriptor(model)
+    plan = descriptor.plan
+    out = _CDARAdaptiveCenteringBlock[]
+
+    for predictor in linear_predictors(plan.parent)
+        logical = predictor.name
+        for entry in _brm_term_coordinate_entries(plan.parent, logical)
+            getf(entry.value) === cdar || continue
+
+            innovations = brm_term_coordinates(
+                descriptor, logical, unc_names;
+                term=entry.term, parameter=:innovations,
+            )
+            owner = innovations.output.declaration
+            isnothing(owner) && error(
+                "BRM adaptive centering: cdar `$(entry.term)` innovations " *
+                "have no compiler declaration owner.",
+            )
+            if owner.family isa Symbol
+                owner.family === :_sb_cdar || error(
+                    "BRM adaptive centering: cdar `$(entry.term)` resolved to " *
+                    "unsupported emitted family `$(owner.family)`.",
+                )
+            end
+            isempty(innovations.output.constraints) || error(
+                "BRM adaptive centering: cdar `$(entry.term)` innovations " *
+                "are constrained, so they are not the emitted standard-normal " *
+                "`eta` coordinates this transform requires.",
+            )
+
+            sigma = _adaptive_same_hsgp_owner(brm_term_coordinates(
+                descriptor, logical, unc_names;
+                term=entry.term, parameter=:sd,
+            ), owner, "marginal SD")
+            rho = _adaptive_same_hsgp_owner(brm_term_coordinates(
+                descriptor, logical, unc_names;
+                term=entry.term, parameter=:ar,
+            ), owner, "persistence")
+            length(sigma.coordinates) == 1 || error(
+                "BRM adaptive centering: cdar `$(entry.term)` must have one marginal-SD coordinate.",
+            )
+            length(rho.coordinates) == 1 || error(
+                "BRM adaptive centering: cdar `$(entry.term)` must have one persistence coordinate.",
+            )
+
+            l_key = get(owner.keywords, :L, nothing)
+            l_key isa Symbol || error(
+                "BRM adaptive centering: cdar `$(entry.term)` declaration does " *
+                "not expose its frozen correlation-factor `L` data binding.",
+            )
+            l_raw = get(plan.data, l_key, nothing)
+            l_raw isa AbstractMatrix{<:Real} || error(
+                "BRM adaptive centering: cdar `$(entry.term)` compiler data " *
+                "`$l_key` is not a real correlation-factor matrix.",
+            )
+            ng_key = get(owner.keywords, :n_groups, nothing)
+            ns_key = get(owner.keywords, :n_steps, nothing)
+            n_groups = ng_key isa Symbol ? get(plan.data, ng_key, nothing) : nothing
+            n_steps = ns_key isa Symbol ? get(plan.data, ns_key, nothing) : nothing
+            n_groups isa Integer && n_steps isa Integer || error(
+                "BRM adaptive centering: cdar `$(entry.term)` declaration does " *
+                "not expose integer group/step counts.",
+            )
+            P, W = Int(n_groups), Int(n_steps)
+            L = Matrix{Float64}(l_raw)
+            size(L) == (P, P) || error(
+                "BRM adaptive centering: cdar `$(entry.term)` owns a " *
+                "$(size(L)) factor for $P groups.",
+            )
+            length(innovations.coordinates) == P * W || error(
+                "BRM adaptive centering: cdar `$(entry.term)` owns " *
+                "$(length(innovations.coordinates)) innovations for a " *
+                "$P×$W walk.",
+            )
+            cdiag = vec(sum(abs2, L; dims=2))
+            all(c -> isfinite(c) && c > 0, cdiag) || error(
+                "BRM adaptive centering: cdar `$(entry.term)` frozen factor " *
+                "has a non-finite or non-positive marginal variance.",
+            )
+
+            sigma_lower = only(_adaptive_lower_bounds(
+                plan, sigma.output, 1, entry.term, "marginal SD",
+            ))
+            _adaptive_cdar_rho_bounds(plan, rho.output, entry.term)
+            push!(out, _CDARAdaptiveCenteringBlock(
+                logical, entry.term, P, W,
+                collect(innovations.coordinates),
+                only(sigma.coordinates), sigma_lower, only(rho.coordinates),
+                cdiag,
+            ))
+        end
+    end
+
+    claimed = Int[]
+    for block in out
+        append!(claimed, block.effects)
+        push!(claimed, block.sigma)
+        push!(claimed, block.rho)
+    end
+    length(unique(claimed)) == length(claimed) || error(
+        "BRM adaptive centering: emitted cdar blocks claim overlapping " *
+        "unconstrained coordinates; refusing an ambiguous transform.",
+    )
+    out
 end
 
 # Stan's native `cholesky_factor_corr[K]` constrain transform.  Its

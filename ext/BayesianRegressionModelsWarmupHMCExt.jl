@@ -489,6 +489,126 @@ function _adaptive_joint_centering_reparametrizer(blocks, hsgp_blocks)
     state, WarmupHMC.IndexedReparametrization(pairs)
 end
 
+# cdar walk cells are scalar zero-location cells like HSGP basis weights, so
+# they reuse that frame shape one-to-one: per-cell marginal spread, diagonal
+# transport, linear cost. They keep their own state/argument types for the same
+# reason — the ordinary-block exact small-block dispatch must not see them —
+# and they form their own plan rather than joining the joint ordinary+HSGP
+# wrapper, whose pair order and checkpoint contract are already settled.
+mutable struct BRMCDARAdaptiveCenteringState
+    blocks::Vector{BRM._CDARAdaptiveCenteringBlock}
+    pair_blocks::Vector{Int}
+    pair_cells::Vector{Int}
+    sources::Vector{Float64}
+    effect_indices::BitSet
+end
+
+function BRMCDARAdaptiveCenteringState(blocks)
+    pair_blocks = Int[]
+    pair_cells = Int[]
+    sources = Float64[]
+    for (bi, block) in enumerate(blocks), cell in eachindex(block.effects)
+        push!(pair_blocks, bi)
+        push!(pair_cells, cell)
+        push!(sources, 0.0)
+    end
+    effect_indices = BitSet(Iterators.flatten(b.effects for b in blocks))
+    BRMCDARAdaptiveCenteringState(
+        collect(blocks), pair_blocks, pair_cells, sources, effect_indices,
+    )
+end
+
+struct BRMCDARAdaptiveCenteringArgument{KIND} <: Function
+    state::BRMCDARAdaptiveCenteringState
+    pair_number::Int
+end
+
+function BRMCDARAdaptiveCenteringArgument(state, pair_number, kind::Symbol)
+    kind in (:location, :log_scale) || error(
+        "unknown BRM cdar adaptive-centering argument kind $kind",
+    )
+    BRMCDARAdaptiveCenteringArgument{kind}(state, pair_number)
+end
+
+function _cdar_pair_location(state, pair_number)
+    (state.pair_blocks[pair_number], state.pair_cells[pair_number])
+end
+
+function _cdar_pair_index(state, pair_number)
+    bi, cell = _cdar_pair_location(state, pair_number)
+    state.blocks[bi].effects[cell]
+end
+
+function (::BRMCDARAdaptiveCenteringArgument{:location})(x)
+    zero(eltype(x))
+end
+
+function (arg::BRMCDARAdaptiveCenteringArgument{:log_scale})(x)
+    bi, cell = _cdar_pair_location(arg.state, arg.pair_number)
+    BRM._adaptive_cdar_log_scale(x, arg.state.blocks[bi], cell)
+end
+
+function _sync_sources!(state::BRMCDARAdaptiveCenteringState, ir)
+    length(ir.pairs) == length(state.sources) || throw(DimensionMismatch(
+        "BRM cdar adaptive-centering plan has $(length(state.sources)) walk " *
+        "cells but the WarmupHMC reparametrizer has $(length(ir.pairs)) pairs",
+    ))
+    for (p, (idx, value)) in enumerate(ir.pairs)
+        expected = _cdar_pair_index(state, p)
+        idx == expected || throw(ArgumentError(
+            "BRM cdar adaptive-centering pair $p addresses raw coordinate $idx, " *
+            "but the model metadata requires $expected; pair ordering changed",
+        ))
+        state.sources[p] = Float64(value.source.c)
+    end
+    ir
+end
+
+function _prepare_frame(state::BRMCDARAdaptiveCenteringState,
+                        ir, position, gradient)
+    _sync_sources!(state, ir)
+    _centering_frame(state, position, gradient)
+end
+
+function _centering_frame(state::BRMCDARAdaptiveCenteringState, position, gradient)
+    T = promote_type(eltype(position), eltype(gradient), Float64)
+    n = length(state.sources)
+    source = T.(state.sources)
+    location = zeros(T, n)
+    scale = Vector{T}(undef, n)
+    innovation = Vector{T}(undef, n)
+    invariant_gradient = Vector{T}(undef, n)
+    for p in eachindex(state.sources)
+        bi, cell = _cdar_pair_location(state, p)
+        block = state.blocks[bi]
+        idx = block.effects[cell]
+        s = exp(BRM._adaptive_cdar_log_scale(position, block, cell))
+        c = source[p]
+        scale[p] = s
+        innovation[p] = position[idx] / s^c
+        invariant_gradient[p] = s^c * gradient[idx]
+    end
+    BRMAdaptiveCenteringFrame(
+        source, location, scale, innovation, invariant_gradient,
+    )
+end
+
+function _adaptive_cdar_centering_reparametrizer(blocks)
+    state = BRMCDARAdaptiveCenteringState(blocks)
+    pairs = [begin
+        bi, cell = _cdar_pair_location(state, p)
+        block = state.blocks[bi]
+        target = WarmupHMC.PartiallyCentered(0.0)
+        source = WarmupHMC.PartiallyCentered(0.0)
+        location = BRMCDARAdaptiveCenteringArgument(state, p, :location)
+        log_scale = BRMCDARAdaptiveCenteringArgument(state, p, :log_scale)
+        block.effects[cell] => WarmupHMC.Reparametrization(
+            target, source, location, log_scale,
+        )
+    end for p in eachindex(state.sources)]
+    state, WarmupHMC.IndexedReparametrization(pairs)
+end
+
 mutable struct BRMTotalCenteringState
     indices::Vector{Int}
     scales::Vector{Int}
@@ -563,8 +683,10 @@ end
 
 Wrap a compiled BRM log-density in WarmupHMC's strictly-online adaptive
 centering for exact total-coefficient blocks, ordinary scalar or correlated
-random-effect blocks, or squared-exponential HSGP basis weights (ungrouped or
-grouped). Ordinary and HSGP cells adapt together in one wrapper.
+random-effect blocks, squared-exponential HSGP basis weights (ungrouped or
+grouped), or `cdar` correlated-walk cells. Ordinary and HSGP cells adapt
+together in one wrapper; `cdar` cells form a separate plan and mix with
+neither family.
 
 `model` is the `SBBRMI` or `GenerativePlan` that emitted `problem`. When
 `problem` is StanBlocks' `StanProblem`, unconstrained names are read from its
@@ -583,7 +705,7 @@ exact. Literal endpoints are preserved: `c=0` is BRM's standardised draw and
 For exact totals, `c=1` is the sampled group total and `c=0` is the total
 scaled around its prior location. The exact marginal prior remains correlated
 at either endpoint. Each group/term cell receives its own control automatically.
-Totals cannot currently share one wrapper with ordinary or HSGP cells.
+Totals cannot currently share one wrapper with ordinary, HSGP, or cdar cells.
 
 For an HSGP, each basis weight is one scalar cell with zero location and
 per-basis scale `brm_hsgp_sqrt_spd(omega2, sigma, rho)[basis]`; `c=0` is the
@@ -596,6 +718,13 @@ basis-weight cells adapt together in one wrapper: pairs enumerate ordinary
 cells first, then HSGP cells, each in the family's own deterministic order
 (that order is load-bearing across checkpoint/resume).
 
+For a `cdar` walk, each of the `P * W` innovations is one scalar cell with
+zero location and its marginal prior spread
+`sigma * sqrt(C[p, p] * (1 - rho^(2w)) / (1 - rho^2))`; `c=0` is the emitted
+`eta` frame. Walk cells form their own plan rather than joining the joint
+wrapper, whose pair order and checkpoint contract are already settled: a model
+mixing cdar cells with ordinary or HSGP cells fails before construction.
+
 This changes coordinates, not the statistical model or its priors. Conditional
 on a block's `C = diag(tau) * L`, an intermediate source coordinate is Gaussian
 with covariance `A(c) * A(c)'` whenever the block innovation is standard normal;
@@ -606,10 +735,11 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
     names = isnothing(unc_names) ? _problem_unc_names(problem) : unc_names
     blocks = BRM.adaptive_centering_blocks(model, names)
     hsgp_blocks = BRM._adaptive_hsgp_centering_blocks(model, names)
+    cdar_blocks = BRM._adaptive_cdar_centering_blocks(model, names)
     total_blocks = BRM.total_effect_blocks(model)
     if !isempty(total_blocks)
-        isempty(blocks) && isempty(hsgp_blocks) || throw(ArgumentError(
-            "adaptive total coefficients cannot yet be mixed with ordinary or HSGP blocks; use total_groups=() for the conventional model"))
+        isempty(blocks) && isempty(hsgp_blocks) && isempty(cdar_blocks) || throw(ArgumentError(
+            "adaptive total coefficients cannot yet be mixed with ordinary, HSGP, or cdar blocks; use total_groups=() for the conventional model"))
         state,ir = _adaptive_total_centering_reparametrizer(model,total_blocks,names)
         _initial_centering!(state,ir,centeredness)
         scoring = WarmupHMC.CandidateScoringPlan(
@@ -617,11 +747,19 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
             synchronize! = ir_ -> _sync_sources!(state,ir_))
         return WarmupHMC.ReparametrizedProblem(ir,problem,ad_backend;scoring_plan=scoring)
     end
-    isempty(blocks) && isempty(hsgp_blocks) && error(
+    isempty(blocks) && isempty(hsgp_blocks) && isempty(cdar_blocks) && error(
         "BRM adaptive centering: this model has no supported ordinary " *
-        "random-effect blocks or squared-exponential HSGPs.",
+        "random-effect blocks, squared-exponential HSGPs, or cdar " *
+        "correlated walks.",
     )
-    state, ir = if !isempty(blocks) && !isempty(hsgp_blocks)
+    state, ir = if !isempty(cdar_blocks)
+        (isempty(blocks) && isempty(hsgp_blocks)) || error(
+            "BRM adaptive centering: a single online plan cannot yet mix " *
+            "cdar walk cells with ordinary or HSGP cells. Build a model " *
+            "with one supported adaptive geometry family.",
+        )
+        _adaptive_cdar_centering_reparametrizer(cdar_blocks)
+    elseif !isempty(blocks) && !isempty(hsgp_blocks)
         _adaptive_joint_centering_reparametrizer(blocks, hsgp_blocks)
     elseif !isempty(hsgp_blocks)
         _adaptive_hsgp_centering_reparametrizer(hsgp_blocks)
