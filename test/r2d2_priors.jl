@@ -158,7 +158,9 @@ end
     control_code = BayesianRegressionModels.stan_code(control)
     @test !occursin("r2d2", control_code)
     @test occursin("pop_eta_beta_pop ~ std_normal();", control_code)
-    @test occursin("r_eta_subject", control_code)
+    # Default `total_groups=:auto` absorbs the intercept block into group
+    # totals: the per-subject structure rides `total_group_eta`.
+    @test occursin("total_group_eta", control_code)
 end
 
 @testset "R2D2M2 random-effect block and per-margin ICC spellings" begin
