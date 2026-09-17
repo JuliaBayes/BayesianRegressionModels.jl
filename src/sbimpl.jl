@@ -7038,7 +7038,9 @@ end
 # Expand a ranef LHS term into one-or-more design-matrix column references.
 # Continuous/intercept terms produce a single column; categorical NamedColumns
 # expand to K-1 treatment-coded dummy columns (level 1 is reference), matching
-# the design-matrix that brms / lme4 build for `(1 + c | g)`.
+# the design-matrix that brms / lme4 build for `(1 + c | g)`. The first
+# categorical term of an intercept-free LHS arrives wrapped as `_SBCellMeansTerm`
+# and expands to all K per-level columns instead -- their `(0 + c | g)`.
 # `gterms` is the full LHS-terms list of the current ranef block, threaded so
 # an intercept term (`t === 1`) can probe peer terms in the same block for a
 # deterministic length probe (analogous to how `pop_terms` is threaded on the
@@ -7062,12 +7064,39 @@ _sb_ranef_cols_dispatch!(cols, data, stmts, t, ::Nothing, gterms=();
         t, data, stmts, gterms; group_idx, term_overrides))
 function _sb_ranef_cols_dispatch!(cols, data, _stmts, t, levels, _gterms=();
                                   group_idx=nothing, term_overrides=nothing)
-    n_levels, idx = _sb_level_index(levels)
     # Single-level factor: `2:n_levels` is empty, so this contributes 0 dummy
     # columns uniformly (no shape special-case) — a `(1 + c | g)` degenerates to
     # intercept-only, matching how the population path drops a K=1 factor.
-    fitted_levels = _sb_fit_levels(levels)
-    for lvl in 2:n_levels
+    _sb_ranef_factor_dummies!(cols, data, t, levels, 2)
+end
+
+# The ONE categorical term an intercept-free random-effect LHS codes per level
+# (decision `0wfo466`, brms / lme4 semantics: `(0 + c | g)` gives every level of
+# `c` its own group-level effect). `_sb_ranef_lowered_terms` decides which term
+# that is, with the same `_brm_cellmeans_block` rule the population side uses,
+# and wraps it; every consumer of a lowered random-effect term list -- the column
+# emitter, the column counter that sizes shared `|ID|` buckets, and
+# `ranefcoefnames` -- reads the wrapper, so they cannot disagree.
+struct _SBCellMeansTerm
+    term::NamedColumn
+end
+
+function _sb_ranef_cols!(cols, data, _stmts, t::_SBCellMeansTerm, _gterms=();
+                         kwargs...)
+    _sb_ranef_factor_dummies!(cols, data, t.term, _sb_cat_levels(t.term), 1)
+end
+
+# Columns `<c>_dummy_<lvl>` for `lvl in first_level:K`: `first_level = 2` is
+# treatment coding (level 1 is the reference), `1` is per-level coding.
+function _sb_ranef_factor_dummies!(cols, data, t::NamedColumn, levels, first_level::Int)
+    # A frozen re-emission (`resample_groups`) keeps the FITTED level set, read
+    # off the recorded first dummy, so a frame carrying only some levels still
+    # emits every fitted column -- the `_sb_cat_levels_for_emission` rule.
+    frozen = _sb_frozen_preproc_entry(
+        data, Symbol(name(t), :_dummy_, first_level), :ranef_factor_dummy, name(t))
+    fitted_levels = isnothing(frozen) ? _sb_fit_levels(levels) : frozen.const_.levels
+    n_levels, idx = length(fitted_levels), _sb_apply_levels(fitted_levels, levels)
+    for lvl in first_level:n_levels
         col_name = Symbol(name(t), :_dummy_, lvl)
         data[col_name] = Float64[l == lvl ? 1.0 : 0.0 for l in idx]
         _sb_record_preproc!(data, col_name, PreprocEntry(
@@ -7076,6 +7105,27 @@ function _sb_ranef_cols_dispatch!(cols, data, _stmts, t, levels, _gterms=();
             name(t), true))
         push!(cols, col_name)
     end
+end
+
+# Lower one random-effect LHS (its RAW additive terms, merged across every
+# `(… | g)` term of the block) to the term list the emitters consume, wrapping
+# the per-level term. Decided on the raw terms: the `factor(...)` lowering drops
+# the `cmc=false` opt-out, and an intercept contributed by ANOTHER term of the
+# same block (`(1 | g) + (0 + c | g)`) keeps `c` treatment-coded.
+function _sb_ranef_lowered_terms(raw_terms)
+    cellmeans_block = _brm_cellmeans_block(raw_terms)
+    out = Any[]
+    for t in raw_terms
+        if !isnothing(cellmeans_block) &&
+           _brm_categorical_term_block(t) === cellmeans_block &&
+           !_brm_requests_treatment_coding(t)
+            push!(out, _SBCellMeansTerm(only(_sb_terms(t))))
+            cellmeans_block = nothing
+        else
+            append!(out, _sb_terms(t))
+        end
+    end
+    out
 end
 
 # Collected ranef handling. Terms that share a grouping symbol are merged into
@@ -7185,12 +7235,20 @@ function _sb_emit_ranefs!(stmts, data, target::Symbol, ran_terms, summands;
         if id_sym === nothing
             k = _sb_group_key(desc)
             haskey(plain_by_group, k) || (push!(plain_keys_seen, k); plain_by_group[k] = Any[]; plain_descs[k] = desc)
-            append!(plain_by_group[k], _sb_terms(lhs))
+            append!(plain_by_group[k], _brm_additive_terms(lhs))
         else
             k = (id_sym, _sb_group_key(desc))
             haskey(id_terms_by_bucket, k) || (push!(id_keys_seen, k); id_terms_by_bucket[k] = Any[])
-            append!(id_terms_by_bucket[k], _sb_terms(lhs))
+            append!(id_terms_by_bucket[k], _brm_additive_terms(lhs))
         end
+    end
+    # The containers hold RAW terms until here so the per-level decision sees the
+    # whole merged block; lower each block exactly once.
+    for k in plain_keys_seen
+        plain_by_group[k] = _sb_ranef_lowered_terms(plain_by_group[k])
+    end
+    for k in id_keys_seen
+        id_terms_by_bucket[k] = _sb_ranef_lowered_terms(id_terms_by_bucket[k])
     end
     for k in plain_keys_seen
         gterms = plain_by_group[k]
@@ -7497,11 +7555,41 @@ _sb_collect_id_buckets(brmi::BRMI) =
 # by Stan lowering. This is the single source of truth for public margin
 # addresses: categorical terms therefore expose their emitted dummy-column
 # labels, and formula order is preserved across predictors and terms.
+# A shared `|ID|` bucket records each declaration's RAW effects. Lower them for
+# the sizing pass and for `ranefcoefnames` exactly as `_sb_emit_ranefs!` lowers
+# the block it emits: the per-level decision is made on ALL of one predictor's
+# effects in the bucket (an intercept declared in a sibling `(1 | ID | g)` keeps
+# `(0 + c | ID | g)` treatment-coded), and the first eligible term takes it.
+function _sb_bucket_target_terms(bucket)
+    merged = Dict{Symbol,Vector{Any}}()
+    for (predictor, terms) in bucket.per_target
+        append!(get!(merged, predictor, Any[]), terms)
+    end
+    cellmeans_block = Dict{Symbol,Any}(
+        predictor => _brm_cellmeans_block(terms) for (predictor, terms) in merged)
+    out = Pair{Symbol,Vector{Any}}[]
+    for (predictor, terms) in bucket.per_target
+        lowered = Any[]
+        for t in terms
+            block = cellmeans_block[predictor]
+            if !isnothing(block) && _brm_categorical_term_block(t) === block &&
+               !_brm_requests_treatment_coding(t)
+                push!(lowered, _SBCellMeansTerm(only(_sb_terms(t))))
+                cellmeans_block[predictor] = nothing
+            else
+                append!(lowered, _sb_terms(t))
+            end
+        end
+        push!(out, predictor => lowered)
+    end
+    out
+end
+
 function _sb_id_bucket_margins(bucket)
     out = NamedTuple[]
     scratch_data = Dict{Symbol,Any}()
     scratch_stmts = Any[]
-    for (predictor, terms) in bucket.per_target
+    for (predictor, terms) in _sb_bucket_target_terms(bucket)
         for t in terms
             if t isa Integer
                 t == 1 || error(
@@ -7533,8 +7621,11 @@ end
 Ordered `(predictor, coefficient)` addresses of the marginal SDs in the
 shared random-effect block selected by public `|ID|` symbol `id`. The k-th
 entry labels the k-th `tau` element emitted by the SBBRMI backend. Categorical
-random slopes use the exact treatment-contrast column symbols emitted into the
-random-effect design matrix.
+random slopes use the exact dummy-column symbols emitted into the random-effect
+design matrix: `<c>_dummy_2 … <c>_dummy_K` under a random intercept, and
+`<c>_dummy_1 … <c>_dummy_K` for the first categorical term of an intercept-free
+block such as `(0 + c | ID | g)` (every level owns a group-level effect; opt
+out with `factor(c; cmc=false)`).
 
 Returns `nothing` when `id` is absent. Reusing one ID with multiple grouping
 factors is ambiguous on the public ID-only surface and raises.
@@ -8500,6 +8591,8 @@ _sb_group_desc_matches(_, _) = false
 # submodel terms (mo/s/ar/me) -> 1.
 _sb_ranef_term_ncols(t::Int, _) = t == 0 ? 0 : 1
 _sb_ranef_term_ncols(t::NamedColumn, _data) = _sb_ranef_named_ncols(_sb_cat_levels(t))
+_sb_ranef_term_ncols(t::_SBCellMeansTerm, _data) =
+    _sb_level_index(_sb_cat_levels(t.term))[1]
 _sb_ranef_named_ncols(::Nothing) = 1
 _sb_ranef_named_ncols(levels) = _sb_level_index(levels)[1] - 1
 _sb_ranef_term_ncols(::ExprColumn, _) = 1
@@ -8530,7 +8623,7 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
         n_terms_name = Symbol(:n_terms_, suffix)
         cursor = 0
         per_target_ranges = Pair{Symbol,UnitRange{Int}}[]
-        for (brmi_key, terms) in bucket.per_target
+        for (brmi_key, terms) in _sb_bucket_target_terms(bucket)
             ncols = sum(_sb_ranef_term_ncols(t, data) for t in terms; init=0)
             ncols > 0 || error("sbimpl: `|$id_sym|` bucket sees empty term list for target `$brmi_key`")
             push!(per_target_ranges, brmi_key => (cursor+1):(cursor+ncols))
@@ -8917,11 +9010,29 @@ _sb_collect_terms_expr!(acc, ::typeof(doublepipe), x) = begin
     isempty(inner) && error(
         "sbimpl: `(… || $(name(rhs_nc)))` has no terms after dropping `0`; an ",
         "uncorrelated block needs at least one slope or intercept term")
+    # Each term becomes its OWN single-term block, which on its own has no
+    # intercept. The per-level decision belongs to the ORIGINAL left-hand side,
+    # so every categorical term that is not the one it selects is pinned to
+    # treatment coding here, with the same switch a user would write.
+    cellmeans_block = _brm_cellmeans_block(inner)
     for (i, term) in enumerate(inner)
         nocor = NamedColumn(Symbol(name(rhs_nc), :__nocor__, i), parent(rhs_nc))
+        if !isnothing(_brm_categorical_term_block(term))
+            if !isnothing(cellmeans_block) &&
+               _brm_categorical_term_block(term) === cellmeans_block &&
+               !_brm_requests_treatment_coding(term)
+                cellmeans_block = nothing
+            else
+                term = _sb_treatment_coded(term)
+            end
+        end
         push!(acc, ExprColumn(|, term, nocor))
     end
 end
+
+_sb_treatment_coded(term::NamedColumn) = ExprColumn(factor, term; cmc=false)
+_sb_treatment_coded(term::ExprColumn{typeof(factor)}) =
+    ExprColumn(factor, getargs(term)...; getkwargs(term)..., cmc=false)
 
 # The `0` drop-intercept marker (`x::Int == 0`), matching `_sb_collect_terms!`.
 _sb_is_drop_intercept(t) = t isa Int && t == 0

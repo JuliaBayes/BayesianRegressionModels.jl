@@ -1242,8 +1242,16 @@ function _brm_simple_random_effect_plans(
             end
         end
         raw_columns = Any[]
+        # Per-level coding of the first categorical term of an intercept-free
+        # random-effect LHS (decision `0wfo466`) -- the population rule, applied
+        # to this declaration's own effects, as brms' shared `model.matrix` does.
+        cellmeans_block = _brm_cellmeans_block(declaration.effects)
         for inner_term in declaration.effects
-            columns = _brm_random_effect_columns(inner_term)
+            cellmeans = !isnothing(cellmeans_block) &&
+                _brm_categorical_term_block(inner_term) === cellmeans_block &&
+                !_brm_requests_treatment_coding(inner_term)
+            cellmeans && (cellmeans_block = nothing)
+            columns = _brm_random_effect_columns(inner_term; cellmeans)
             if isnothing(columns) || any(column ->
                     !isnothing(column.source) &&
                     !(column.values isa AbstractVector{<:Real}), columns)
@@ -1653,7 +1661,8 @@ function _brm_random_categorical_column(column)
         column.preprocess)
 end
 
-function _brm_random_effect_columns(term::ExprColumn{typeof(&)})
+function _brm_random_effect_columns(term::ExprColumn{typeof(&)};
+                                    cellmeans::Bool=false)
     args = getargs(term)
     length(args) == 2 || return nothing
     left = _brm_random_effect_columns(args[1])
@@ -1664,8 +1673,8 @@ function _brm_random_effect_columns(term::ExprColumn{typeof(&)})
     Tuple(_brm_interaction_population_column(l, r)
           for l in left for r in right)
 end
-function _brm_random_effect_columns(term)
-    columns = _brm_population_columns(term)
+function _brm_random_effect_columns(term; cellmeans::Bool=false)
+    columns = _brm_population_columns(term; cellmeans)
     isnothing(columns) && return nothing
     Tuple(_brm_random_categorical_column(column) for column in columns)
 end
