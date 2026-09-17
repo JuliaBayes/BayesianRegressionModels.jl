@@ -148,6 +148,13 @@ BRM adds:
   one-logical-many-carriers contract an observation's two twins already use;
   the model still builds and unambiguous names still resolve directly.
 
+  A formula-authored top-level `=` assignment is claimed the same
+  unconditional way, under its own name: `qt_scale = sqrt((1 - r2_qt) * V)`
+  gives `logical == :qt_scale` (role stays `:stan_derived`) whenever the
+  assignment survives to a posterior-draw carrier. Data-folded assignments
+  never reach the outputs so they stay unclaimed, and an emitted name an
+  earlier claim already owns keeps its existing logical.
+
   ⚠ **A predictive twin is not a substitute for the location it was drawn
   from.** In the model above `qt_y_gen` is `normal_..._rng(qt_loc, qt_sigma)` —
   noise ADDED — so it answers a different question than `qt_loc` does.
@@ -549,8 +556,21 @@ function _brm_kernel_cell_values(brmi)
     cells
 end
 
+# Formula-authored top-level `lhs = rhs` bindings (`qt_scale = ...`), keyed by
+# the bound name. Mirrors `_brm_kernel_cell_values`, but top-level: one formula
+# namespace, so keys are already unique and no cell/target join applies.
+function _brm_top_level_assignments(brmi)
+    names = Symbol[]
+    for (target, op_nc) in pairs(brmi.operations)
+        op = _as_expr_column(parent(op_nc)); isnothing(op) && continue
+        getf(op) === assign || continue
+        push!(names, target)
+    end
+    names
+end
+
 function _brm_logical_outputs(stan, by_name, targets, cell_values,
-                              formula_predictors)
+                              formula_predictors, top_assignments)
     logical = Dict{Symbol,Symbol}()
     output_names = Set{Symbol}(o.name for o in stan.outputs)
     model_names = Set{Symbol}(keys(stan.model))
@@ -665,6 +685,31 @@ function _brm_logical_outputs(stan, by_name, targets, cell_values,
             # so it stays unclaimed rather than raising on every model.
             foreach(emitted -> claim!(emitted, lc), carriers(Symbol(target, "_", lc), owned))
         end
+    end
+
+    # ---- formula-authored top-level `=` assignments -------------------------
+    #
+    # A deterministic top-level assignment (`qt_scale = sqrt((1 - r2_qt) * V)`)
+    # is author-named and saved in every posterior draw, exactly like a named
+    # cell value — so it is claimed the same unconditional way, under its own
+    # name (decision `1l2im4z`). Three guards keep the rule honest:
+    #
+    # * Only posterior-draw carriers (`:parameter` / `:transformed_parameter` /
+    #   `:generated_quantity`): a data-folded assignment never reaches the
+    #   outputs, and a transformed-data carrier must never pose as
+    #   posterior-addressable.
+    # * Never clobber: twins, predictors, declarations, and cells claim first,
+    #   so an emitted name they already own keeps its existing logical — every
+    #   previously-describing model keeps describing.
+    # * An assignment the compiler declines to emit stays unclaimed rather
+    #   than raising, like a folded-away cell value.
+    kinds = Dict{Symbol,Symbol}(o.name => o.kind for o in stan.outputs)
+    for name in top_assignments
+        name in output_names || continue
+        get(kinds, name, nothing) in
+            (:parameter, :transformed_parameter, :generated_quantity) || continue
+        haskey(logical, name) && continue
+        claim!(name, name)
     end
     logical
 end
@@ -939,7 +984,8 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
     logical_outputs = _brm_logical_outputs(
         stan, by_name, targets, _brm_kernel_cell_values(brmi),
         Iterators.flatten(((e.logical for e in population_effects),
-                           covariance_factors)))
+                           covariance_factors)),
+        _brm_top_level_assignments(brmi))
 
     # Linear-predictor names come from the FORMULA, not from the emitted body:
     # `mu = pop_mu + r_mu_g` is an `=`, so no declaration binds it, yet it is

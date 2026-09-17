@@ -14,7 +14,7 @@
 using Test
 using BayesianRegressionModels
 using StanBlocks
-using Distributions: Exponential, LogNormal, Normal
+using Distributions: Beta, Exponential, LogNormal, Normal
 
 df = (; x=[0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
         g=[1, 1, 2, 2, 3, 3],
@@ -1017,6 +1017,82 @@ qt_schedule(n) = (;
           cumsum(maximum.(replay_sched.qt_idx))
     @test brm_output(replayed, :pk_loc).segments ==
           cumsum(length.(replay_sched.t))
+end
+
+@testset "top-level `=` assignments are addressable, no annotation" begin
+    assign_df = (; V=2.0, y=[0.2, 0.8, 0.5])
+    assign_builder = @brm begin
+        r2_qt ~ Beta(1.0, 1.0)
+        qt_scale = sqrt((1 - r2_qt) * V)
+        y ~ Normal(0, qt_scale)
+    end
+    d = brm_descriptor(assign_builder, assign_df; mod=@__MODULE__, name=:assigned)
+
+    # The motivating case: a deterministic top-level assignment is
+    # author-named and saved in every draw, so it carries its own logical —
+    # role stays `:stan_derived`, no declaration owns it.
+    published = brm_output(d, :qt_scale)
+    @test published.logical === :qt_scale
+    @test published.role === :stan_derived
+    @test published.kind === :transformed_parameter
+    @test published.declaration === nothing
+    @test published.name === :qt_scale
+    # Neighbors unchanged: the declared carrier keeps its logical.
+    @test brm_output(d, :r2_qt).logical === :r2_qt
+
+    # It compiles and the carrier holds the bound value: read both through
+    # one constrained draw.
+    ops = Symbol[op.name for op in d.operations]
+    @test :fit in ops
+    prob = brm_execute(d, :fit)
+    n = StanBlocks.LogDensityProblems.dimension(prob)
+    @test isfinite(StanBlocks.LogDensityProblems.logdensity(prob, 0.1 .* randn(n)))
+    constrained_names = StanBlocks.BridgeStan.param_names(
+        prob.model; include_tp=true, include_gq=true)
+    cols = brm_output_coordinates(d, :qt_scale, constrained_names)
+    @test length(cols) == 1
+    r2_cols = brm_output_coordinates(d, :r2_qt, constrained_names)
+    theta = 0.1 .* randn(n)
+    full = StanBlocks.BridgeStan.param_constrain(
+        prob.model, theta; include_tp=true, include_gq=true,
+        rng=StanBlocks.BridgeStan.StanRNG(prob.model, 1))
+    @test full[cols] ≈ sqrt.((1 .- full[r2_cols]) .* assign_df.V) atol=1e-10
+
+    # Replay keeps the assignment addressable on new data.
+    @test :replay in ops
+    replayed = brm_execute(d, :replay, (; V=3.0, y=[0.1, 0.4, 0.6]))
+    @test brm_output(replayed, :qt_scale).logical === :qt_scale
+
+    # Prior regime: the transformed parameter still evaluates from prior
+    # draws, so the logical survives with no observation.
+    prior_sb = SBBRMI(assign_builder(assign_df); mod=@__MODULE__, held_out=:all)
+    prior_d = brm_descriptor(prior_sb)
+    @test brm_output(prior_d, :qt_scale).logical === :qt_scale
+end
+
+@testset "data-folded assignments stay unclaimed, twin names keep their claim" begin
+    # `ld` folds to data and never reaches the outputs: no logical attaches.
+    fold_df = (; d=[0.5, 1.0, 1.5, 2.0], y=[0.2, 0.8, 0.5, 0.9])
+    fold_builder = @brm begin
+        sigma ~ Exponential(1)
+        ld = log(d)
+        y ~ Normal(ld, sigma)
+    end
+    fold_d = brm_descriptor(fold_builder, fold_df; mod=@__MODULE__)
+    @test isempty(brm_outputs(fold_d; logical=:ld))
+    @test_throws ErrorException brm_output(fold_d, :ld)
+
+    # An assignment colliding with a twin name must not clobber the existing
+    # claim: previously-describing models keep describing.
+    clash_df = (; y=[0.2, 0.8, 0.5])
+    clash_builder = @brm begin
+        mu ~ 1
+        y_gen = mu * 2
+        y ~ Normal(mu, 1.0)
+    end
+    clash_d = brm_descriptor(clash_builder, clash_df; mod=@__MODULE__)
+    @test brm_output(clash_d, :y; role=:posterior_predictive).name === :y_gen
+    @test isempty(brm_outputs(clash_d; logical=:y_gen))
 end
 
 @testset "two cells naming one value — ambiguity, not failure" begin
