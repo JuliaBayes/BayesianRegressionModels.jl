@@ -588,6 +588,52 @@ end
 4. Fit through `SBBRMI(brmi; mod=DownstreamTerms)` so SLIC resolves the
    downstream module.
 
+A second shape follows the same three steps. A saturating 0-to-1 dose
+multiplier is two per-group parameters (`loc`, `log_slope`) whose emit hook
+exps the log-sigmoid builtin — the bordet composition shape:
+
+```julia
+function saturating end
+
+_sb_term_group_block(::typeof(saturating)) = (; fields=[
+    (; name=:saturating, n_per_group=2, group=(; kwarg=:series),
+       prior=:correlated_normal),
+])
+
+function _sb_emit_group_block_term!(stmts, data, target, ::typeof(saturating),
+                                    rhs_e, block_info)
+    (; block_name, idx_name) = block_info
+    push!(stmts, :(dloc = $(block_name)[$(idx_name), 1]))
+    push!(stmts, :(dlog_slope = $(block_name)[$(idx_name), 2]))
+    push!(stmts, :($target =
+        exp(biomarker_dose_response(logd, dloc, dlog_slope))))
+end
+```
+
+and a bordet-inspired mean composes both shapes with ordinary formula
+arithmetic (write `*`: the formula layer is element-wise by intent and
+sbimpl dots it — a literal `.*` is evaluated at parse time and fails):
+
+```julia
+brmi = (@brm df begin
+    sigma ~ Exponential(1)
+    base ~ Normal(0, 1)
+    bump ~ transient(; logt, series)
+    resp ~ saturating(; logd, series)
+    mu = base + bump * resp
+    y ~ Normal(mu, sigma)
+end)
+sb = SBBRMI(brmi; mod=DownstreamTerms)
+```
+
+Each shape owns its own per-group hierarchy (two LKJ blocks here). That is
+the honest limit of the pair-of-terms spelling: parameters correlate within
+a shape, not across shapes. A model that needs the bump and the sigmoid
+parameters jointly correlated (all six in one covariance) wants one joint
+term with `n_per_group=6` instead — that is what bordet's
+`biomarker_hierarchical_parametric` hatch does today, and what its
+`transient` / `saturating` worked example will decide per fit.
+
 Verified contract (`test/downstream_group_block_term.jl` pins all of it):
 works are SBBRMI lowering to stanc-clean Stan, `brm_descriptor`, and
 `reprocess` / `restan_data` on fitted group levels. Loud boundaries are

@@ -2,12 +2,13 @@
 # pattern (snag brm-parametric-t-ae5e02f9; user decision: option B — documented
 # downstream reusable-term pattern, NOT BRM-core transient/saturating terms).
 #
-# A downstream package defines a grouped parametric term through BRM's public
-# seams ONLY: its own marker + a `_sb_term_group_block` fields-form declaration
-# + a `_sb_emit_group_block_term!` method. No BRM src change, no custom
-# @slic/@deffun — the emit hook reuses StanBlocks builtins. This file ACTS as
-# that downstream module (separate `module`, methods added via `import`) and
-# pins the supported contract:
+# A downstream package defines grouped parametric terms through BRM's public
+# seams ONLY: its own markers + `_sb_term_group_block` fields-form declarations
+# + `_sb_emit_group_block_term!` methods. No BRM src change, no custom
+# @slic/@deffun — each emit hook reuses a StanBlocks builtin. This file ACTS as
+# that downstream module (separate `module`, methods added via `import`) with
+# a bordet-inspired pair (`transient`, 3 params; `saturating`, 2 params) plus
+# their `base + bump * resp` composition, and pins the supported contract:
 #   - SBBRMI lowers to a stanc-clean hierarchical model;
 #   - `brm_descriptor` and frozen-level replay work;
 #   - unseen replay levels and TuringBRMI refuse LOUDLY.
@@ -42,9 +43,28 @@ function _sb_emit_group_block_term!(stmts, data, target, ::typeof(transient),
     push!(stmts, :($target =
         biomarker_time_response(logt, tloc, tlog_slope, tmag)))
 end
+
+# Saturating 0-to-1 dose multiplier over `logd`, with per-`series`
+# hierarchical (loc, log_slope). The StanBlocks builtin returns the
+# LOG-sigmoid, so the emit hook exps it — the bordet composition shape.
+function saturating end
+
+_sb_term_group_block(::typeof(saturating)) = (; fields=[
+    (; name=:saturating, n_per_group=2, group=(; kwarg=:series),
+       prior=:correlated_normal),
+])
+
+function _sb_emit_group_block_term!(stmts, data, target, ::typeof(saturating),
+                                    rhs_e, block_info)
+    (; block_name, idx_name) = block_info
+    push!(stmts, :(dloc = $(block_name)[$(idx_name), 1]))
+    push!(stmts, :(dlog_slope = $(block_name)[$(idx_name), 2]))
+    push!(stmts, :($target =
+        exp(biomarker_dose_response(logd, dloc, dlog_slope))))
+end
 end
 
-using .DownstreamTransientTerms: transient
+using .DownstreamTransientTerms: transient, saturating
 
 # Long-format data: 2 series x 6 observations.
 downstream_df() = (;
@@ -98,4 +118,36 @@ end
     # silently drop the term. If Turing support lands, this test (and the
     # docs boundary table) must be updated to the new contract.
     @test_throws "no method matching transient" TuringBRMI(downstream_model())
+end
+
+# Bordet-inspired composition: baseline + transient time bump x saturating
+# dose multiplier, each shape with its own per-series hierarchy.
+composed_df() = (;
+    logt=[-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, -2.0, -1.0, -0.5, 0.0, 0.5, 1.0],
+    logd=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+    series=[1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2],
+    y=[0.05, 0.2, 0.5, 0.4, 0.2, 0.1, 0.03, 0.15, 0.6, 0.45, 0.22, 0.12],
+)
+
+composed_model(df=composed_df()) = @brm df begin
+    sigma ~ Exponential(1)
+    base ~ Normal(0, 1)
+    bump ~ transient(; logt, series)
+    resp ~ saturating(; logd, series)
+    mu = base + bump * resp
+    y ~ Normal(mu, sigma)
+end
+
+@testset "bordet-inspired transient x saturating composition lowers clean" begin
+    sb = SBBRMI(composed_model(); mod=@__MODULE__)
+    code = StanBlocks.stan_code(sb.model)
+    @test occursin("biomarker_time_response(logt, tloc, tlog_slope, tmag)", code)
+    @test occursin("bump .* resp", code)  # composed mean keeps both shapes
+    @test occursin("biomarker_dose_response(logd, dloc, dlog_slope)", code)
+    @test occursin("b_transient_series_L ~ lkj_corr_cholesky", code)
+    @test occursin("b_saturating_series_L ~ lkj_corr_cholesky", code)
+    @test sb.data[:n_terms_transient_series] == 3
+    @test sb.data[:n_terms_saturating_series] == 2
+    @test transpiles(sb.model)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
 end
