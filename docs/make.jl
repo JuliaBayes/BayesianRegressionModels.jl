@@ -11,6 +11,7 @@ const GENERATED_EXAMPLE_PAGES = [
     joinpath(@__DIR__, "src", "warfarin.md"),
     joinpath(@__DIR__, "src", "wastewater.md"),
     joinpath(@__DIR__, "src", "wastewater-cdc.md"),
+    joinpath(@__DIR__, "src", "renewal.md"),
     joinpath(@__DIR__, "src", "seal-brm.md"),
     joinpath(@__DIR__, "src", "state-space-models.md"),
     joinpath(@__DIR__, "src", "adaptive-centering.md"),
@@ -65,6 +66,7 @@ makedocs(
         "Warfarin PK/PD" => "warfarin.md",
         "Wastewater Rt" => "wastewater.md",
         "CDC ww-inference" => "wastewater-cdc.md",
+        "Epidemic renewal models" => "renewal.md",
         "Grey-seal IPM" => "seal-brm.md",
         "State-space models" => "state-space-models.md",
         "Adaptive centering" => [
