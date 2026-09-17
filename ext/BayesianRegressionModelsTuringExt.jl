@@ -25,7 +25,11 @@ include("turing_r2d2.jl")
 BRM._brm_turing_term_model(term, nobs, priors, _inputs) =
     BRM._brm_turing_term_model(term, nobs, priors)
 _brm_turing_term_call_ast(_term, term, nobs, priors, inputs) =
-    :(BRM._brm_turing_term_model($term, $nobs, $priors, $inputs))
+    :(BRM.turing_term_model($term, $nobs, $priors, $inputs))
+BRM.turing_term_model(term, nobs, priors, inputs) =
+    BRM._brm_turing_term_model(term, nobs, priors, inputs)
+BRM.turing_group_effect(block, sd_priors, residual_scale) =
+    _brm_group_effect_model(block, sd_priors, residual_scale)
 include("turing_gp.jl")
 include("turing_structured.jl")
 
@@ -429,7 +433,7 @@ function _brm_generic_response_graph_ast(multi; single::Bool=false)
                 Expr(:tuple, fill(nothing,
                     size(component.random_effects[gi].matrix, 2))...) :
                 _brm_group_prior_ast(component.random_effects[gi], callables)
-            push!(statements, :($group ~ to_submodel(_brm_group_effect_model(
+            push!(statements, :($group ~ to_submodel(BRM.turing_group_effect(
                 multi.plans[$pi].predictors[$ci].random_effects[$gi], $priors,
                 $group_scale))))
             push!(statements, :($group_effect = $group_effect + $group.effect))
