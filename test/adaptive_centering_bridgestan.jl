@@ -287,3 +287,102 @@ end
     @test inverse_ljac ≈ -ljac atol=2e-12
     @test roundtrip ≈ x atol=2e-12
 end
+
+const JOINT_HSGP_BUILDER = @brm begin
+    loc ~ 1 + x + hsgp(x; k=3, by=g) + (1 + x | subject)
+    y ~ Normal(loc, 1)
+end
+
+function joint_hsgp_df()
+    x = collect(range(-1.0, 1.0; length=8))
+    y = sin.(x)
+    g = repeat(["a", "b"], inner=4)
+    subject = repeat([11, 12], inner=4)
+    (; x, y, g, subject)
+end
+
+@testset "joint ordinary+HSGP wrapper adapts a mixed BridgeStan model" begin
+    sb = SBBRMI(JOINT_HSGP_BUILDER(joint_hsgp_df()); total_groups=(),
+                mod=@__MODULE__)
+    problem = StanBlocks.stan_instantiate(sb.model)
+    unc_names = StanBlocks.BridgeStan.param_unc_names(problem.model)
+    blocks = adaptive_centering_blocks(sb, unc_names)
+    hsgp_blocks = BRM._adaptive_hsgp_centering_blocks(sb, unc_names)
+    @test length(blocks) == 1
+    @test length(hsgp_blocks) == 2
+    flat_pos = [findfirst(==("zflat_hsgpw_x_g.$i"), unc_names) for i in 1:6]
+    @test all(!isnothing, flat_pos)
+    @test hsgp_blocks[1].effects == flat_pos[1:3]
+    @test hsgp_blocks[2].effects == flat_pos[4:6]
+    @test hsgp_blocks[1].length_scales == hsgp_blocks[2].length_scales
+    @test hsgp_blocks[1].sd == hsgp_blocks[2].sd
+
+    # The HSGP-only reparametrizer enumerates every group level's cells.
+    _, hir = AC_EXT._adaptive_hsgp_centering_reparametrizer(hsgp_blocks)
+    @test first.(hir.pairs) == flat_pos
+
+    # The public joint wrapper (previously: mixing error) orders ordinary
+    # cells first, then HSGP cells.
+    backend = AutoEnzyme()
+    wrapped = adaptive_centering_problem(sb, problem, backend)
+    wir = WarmupHMC.reparametrizer(wrapped)
+    ranef_cells = vcat(vec(blocks[1].effects), blocks[1].cholesky_free,
+                       blocks[1].log_scales)
+    @test length(wir.pairs) == length(ranef_cells) + 6
+    @test first.(wir.pairs) == vcat(ranef_cells, flat_pos)
+    @test WarmupHMC.candidate_scoring_plan(wrapped) isa
+          WarmupHMC.CandidateScoringPlan
+
+    x = zeros(length(unc_names))
+    x[blocks[1].cholesky_free] .= -0.27
+    x[blocks[1].log_scales] .= [-0.31, 0.44]
+    x[vec(blocks[1].effects)] .= collect(range(-0.63, 0.81, length=4))
+    x[hsgp_blocks[1].length_scales] .= -0.2
+    x[hsgp_blocks[1].sd] = -0.4
+    x[flat_pos] .= collect(range(-0.5, 0.7, length=6))
+    plain = LogDensityProblems.logdensity_and_gradient(problem, x)
+    adaptive = LogDensityProblems.logdensity_and_gradient(wrapped, x)
+    @test adaptive[1] ≈ plain[1] atol=2e-12
+    @test adaptive[2] ≈ plain[2] atol=2e-12
+
+    controls = collect(range(0.15, 0.85, length=length(wir.pairs)))
+    wir.pairs .= map(wir.pairs, controls) do (idx, value), c
+        idx => WarmupHMC.Reparametrization(
+            value.target, WarmupHMC.PartiallyCentered(c), value.args...)
+    end
+    wstate = wir.pairs[1][2].args[1].state
+    AC_EXT._sync_sources!(wstate, wir)
+    @test vcat(wstate.ranef.sources, wstate.hsgp.sources) == controls
+    lp, gradient = LogDensityProblems.logdensity_and_gradient(wrapped, x)
+    @test isfinite(lp)
+    @test all(isfinite, gradient)
+    ljac, model_position = wir(x)
+    inner_lp, _ = LogDensityProblems.logdensity_and_gradient(
+        problem, model_position)
+    @test lp ≈ ljac + inner_lp atol=2e-12
+
+    step = 1e-5
+    finite_difference = [begin
+        plus, minus = copy(x), copy(x)
+        plus[i] += step
+        minus[i] -= step
+        (LogDensityProblems.logdensity(wrapped, plus) -
+         LogDensityProblems.logdensity(wrapped, minus)) / (2step)
+    end for i in eachindex(x)]
+    @test gradient ≈ finite_difference atol=2e-5 rtol=2e-5
+
+    restored = collect(range(0.1, 0.9, length=length(wir.pairs)))
+    wstate.ranef.sources .= -1.0
+    wstate.hsgp.sources .= -1.0
+    WarmupHMC.restore_reparam_sources!(
+        wrapped,
+        [idx => WarmupHMC.PartiallyCentered(c)
+         for ((idx, _), c) in zip(wir.pairs, restored)],
+    )
+    @test [value.source.c for (_, value) in wir.pairs] == restored
+    @test vcat(wstate.ranef.sources, wstate.hsgp.sources) == restored
+
+    # The joint accessors are new differentiated code: stress them past the
+    # historical GC-corruption threshold like the family accessors.
+    @test isfinite(enzyme_gradient_stress(wrapped, x; n=2000))
+end

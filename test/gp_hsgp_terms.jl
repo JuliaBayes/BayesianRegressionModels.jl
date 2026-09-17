@@ -325,3 +325,13 @@ end
         end
     end
 end
+
+@testset "model-derived HSGP with bounded scales refuses online adaptation" begin
+    sb = SBBRMI(latent_hsgp_model(latent_hsgp_df()); mod=@__MODULE__)
+    names = vcat(
+        ["hsgp_x_rho_iso", "hsgp_x_sigma"],
+        ["hsgp_x_beta_raw.$b" for b in 1:5],
+    )
+    @test_throws "unsupported Stan constraint" BayesianRegressionModels._adaptive_hsgp_centering_blocks(
+        sb, names)
+end
