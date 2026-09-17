@@ -3089,10 +3089,37 @@ Return the transpiled Stan source generated from `sb.model`. Forwards
 to `StanBlocks.stan_code`. Useful for inspecting what the sbimpl walker
 emitted before compiling.
 """
-# Model construction can register composed Stan families. Enter the compiler
-# in the current world so their hooks are visible in the same calling function.
-# This boundary is used only while compiling a model, never during sampling.
+# Model construction can register composed Stan families (e.g. the
+# `brm_vector_prior_*` triad behind a totals scale prior) via `Core.eval`.
+# A trace that runs in the SAME compiled caller frame resolves methods at
+# that frame's world age, so the fresh hooks are invisible there and tracing
+# dies with "`brm_vector_prior_*` is missing `lpxf_expr`" — while an identical
+# top-level call succeeds. Enter the compiler in the current world so the
+# hooks are visible in the same calling function. This boundary is used only
+# while compiling a model, never during sampling.
 stan_code(sb::SBBRMI) = Base.invokelatest(StanBlocks.stan_code, sb.model)
+
+"""
+    stan_model(sb::SBBRMI; kwargs...) -> StanModel
+
+Trace `sb.model` end to end. Forwards to `StanBlocks.stan_model` in the
+current world, for the same lowering-time registration reason as `stan_code`
+above. Prefer this over `StanBlocks.stan_model(sb.model)` when the trace may
+run inside a function that also built `sb`.
+"""
+stan_model(sb::SBBRMI; kwargs...) =
+    Base.invokelatest(StanBlocks.stan_model, sb.model; kwargs...)
+
+"""
+    stan_instantiate(sb::SBBRMI; kwargs...) -> StanProblem
+
+Compile `sb.model` via BridgeStan. Forwards to `StanBlocks.stan_instantiate`
+in the current world, for the same lowering-time registration reason as
+`stan_code` above. Prefer this over `StanBlocks.stan_instantiate(sb.model)`
+when the build may run inside a function that also built `sb`.
+"""
+stan_instantiate(sb::SBBRMI; kwargs...) =
+    Base.invokelatest(StanBlocks.stan_instantiate, sb.model; kwargs...)
 
 # Display configured submodels from their actual emitted statements. Keep the
 # compiler's value-callee path intact: a merge expression inside a SLIC call
