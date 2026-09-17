@@ -87,8 +87,8 @@ times it is the plain path. Address the scale as `sd(:, rw(time))`; there is
 no persistence to address, so `ar(:, rw(time))` is refused with a message
 saying so. The time column must be nonempty and finite; on replay the grid may
 gain new times (a forecast extends the walk with prior innovations). This is
-the log-reproduction-number walk of a renewal model (`research/epi_renewal/`),
-stated as one formula line.
+the log-reproduction-number walk of a renewal model
+([Epidemic renewal models](renewal.md)), stated as one formula line.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
@@ -118,8 +118,8 @@ delta[:, w] = rho * delta[:, w-1] + sigma * sqrt(1 - rho^2) * L * eta[:, w]
 
 Each row contributes `delta[group(row), step(row)]` as a direct summand, so
 `log_R ~ 1 + rw(time) + cdar(week; by=patch, cor=C)` is a shared random walk
-plus spatially correlated weekly patch deviations — the six-patch renewal model
-of `research/epi_renewal/`, stated on the formula surface. `C` is a `P × P`
+plus spatially correlated weekly patch deviations — the six-patch model of
+[Epidemic renewal models](renewal.md), stated on the formula surface. `C` is a `P × P`
 symmetric positive-definite matrix, `P` the number of group levels, supplied as
 a data field (a matrix-valued field is accepted) or a literal; it is a fixed
 hyperparameter, not a sampled covariance. The term samples `sigma > 0`
@@ -1249,8 +1249,10 @@ backend (decision `187g4va`).
 
 The inciting shape is a latent path whose innovations the formula wants to
 state directly — the log-reproduction-number random walk of a renewal model
-(`research/epi_renewal/`), where the PR being translated writes
-`eps ~ MvNormal(zeros(T - 1), 1.0)` and `log_I0 ~ MvNormal(seed_mean, 0.25 * I)`.
+written with explicit innovations, `eps ~ MvNormal(zeros(T - 1), 1.0)`, or a
+vector of per-group seeds, `log_I0 ~ MvNormal(seed_mean, 0.25 * I)`. (The
+[Epidemic renewal models](renewal.md) page states the same walk with the
+`rw(time)` term and the seeds as cell means.)
 Before this seam the only way to get such a vector was a one-cell `kernel(...)`
 with a dummy grouping random effect.
 
