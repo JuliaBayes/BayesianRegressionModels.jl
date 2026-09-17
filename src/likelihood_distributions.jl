@@ -472,6 +472,62 @@ end
 Random.rand(rng::Random.AbstractRNG, d::ZeroInflatedPoisson) =
     rand(rng) < d.zi ? 0 : rand(rng, Poisson(d.lambda))
 
+raw"""
+    HurdlePoisson(lambda, p_zero)
+
+Hurdle-Poisson distribution with a structural-zero probability `p_zero` and
+a zero-truncated `Poisson(lambda)` positive component:
+
+```math
+P(Y = 0) = p_\mathrm{zero}, \qquad
+P(Y = y) = (1 - p_\mathrm{zero})
+             \frac{\operatorname{Poisson}(y \mid \lambda)}{1 - e^{-\lambda}},
+\quad y \ge 1.
+```
+
+`lambda` must be finite and strictly positive; `p_zero` must lie in `[0, 1]`.
+The same constructor is accepted as a likelihood inside [`@brm`](@ref).
+"""
+struct HurdlePoisson{T<:Real} <: Distributions.DiscreteUnivariateDistribution
+    lambda::T
+    p_zero::T
+
+    HurdlePoisson{T}(lambda::T, p_zero::T) where {T<:Real} =
+        new{T}(lambda, p_zero)
+end
+
+function HurdlePoisson(lambda::Real, p_zero::Real; check_args::Bool=true)
+    lambda_p, p_zero_p = promote(float(lambda), float(p_zero))
+    Distributions.@check_args(HurdlePoisson,
+        (lambda_p, isfinite(lambda_p) && lambda_p > zero(lambda_p),
+         "lambda must be finite and strictly positive"),
+        (p_zero_p,
+         isfinite(p_zero_p) && zero(p_zero_p) <= p_zero_p <= one(p_zero_p),
+         "p_zero must be finite and lie in [0, 1]"),
+    )
+    HurdlePoisson{typeof(lambda_p)}(lambda_p, p_zero_p)
+end
+
+Distributions.params(d::HurdlePoisson) = (d.lambda, d.p_zero)
+Distributions.partype(::HurdlePoisson{T}) where {T} = T
+Distributions.@distr_support HurdlePoisson 0 Inf
+
+function Distributions.logpdf(d::HurdlePoisson, k::Real)
+    (!isinteger(k) || k < 0) && return oftype(float(d.lambda), -Inf)
+    k == 0 && return log(d.p_zero)
+    log1p(-d.p_zero) + logpdf(Poisson(d.lambda), Int(k)) -
+        log1mexp(-d.lambda)
+end
+
+function Random.rand(rng::Random.AbstractRNG, d::HurdlePoisson)
+    rand(rng) < d.p_zero && return 0
+    draw = rand(rng, Poisson(d.lambda))
+    while iszero(draw)
+        draw = rand(rng, Poisson(d.lambda))
+    end
+    draw
+end
+
 """
     NegativeBinomial2(mu, phi)
 

@@ -32,7 +32,7 @@ _ALLOWED_CALLS = Set{Symbol}([
     :zscale, :center, :standardize, :factor, :offset, :protect,
     :s, :bs, :t2, :gp, :hsgp, :ar, :dar, :ar1, :mo, :mo1, :mi,
     :cbind, :mvbind, :mm, :gr, :dp, :me, :centered,
-    :Horseshoe, :ZeroInflatedPoisson, :weighted,
+    :Horseshoe, :ZeroInflatedPoisson, :HurdlePoisson, :weighted,
     :length, :unique, :sort, :size, :eltype, :nrow, :ncol,
 ])
 

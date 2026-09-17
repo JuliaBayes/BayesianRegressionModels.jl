@@ -81,7 +81,7 @@ export weighted, AbstractWeights, AnalyticWeights, FrequencyWeights,
 export me, mi, s, t2, ar, dar, rw, cdar, mo, mo1, hsgp, OrderedLogistic, Ordinal,
        OrdinalStructure, Cumulative, StoppingRatio,
        OrdinalLink, LogitLink, ProbitLink, CloglogLink, Horseshoe,
-       CategoricalLogit, ZeroInflatedPoisson, NegativeBinomial2,
+       CategoricalLogit, ZeroInflatedPoisson, HurdlePoisson, NegativeBinomial2,
        BetaBinomial, BetaBinomial2, CircularVonMises, SkewDoubleExponential,
        sb_group_demo, addprop
 # Hierarchical biomarker family — formula-surface markers for custom likelihood + submodel
@@ -203,6 +203,8 @@ export popefs, _popefs_normal, _popefs_coefs, _popefs_normal_coefs,
        _sb_mi_normal, mi_merge,
        zero_inflated_poisson, zero_inflated_poisson_lpmf,
        zero_inflated_poisson_lpmfs, zero_inflated_poisson_rng,
+       hurdle_poisson, hurdle_poisson_lpmf,
+       hurdle_poisson_lpmfs, hurdle_poisson_rng,
        brm_von_mises, brm_von_mises_lpdf,
        brm_von_mises_lpdfs, brm_von_mises_rng,
        sb_group_demo_slic, sb_group_clamped_demo, sb_group_clamped_demo_slic

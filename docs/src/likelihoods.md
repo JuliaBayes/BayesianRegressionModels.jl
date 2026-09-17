@@ -35,6 +35,7 @@ are rejected rather than silently treated as a standard beta likelihood.
 | `SkewDoubleExponential(mu, sigma, tau)` | Stan-native asymmetric-Laplace parameterization |
 | `LocationScale(mu, sigma, TDist(nu))` | location-scale Student-t regression |
 | `ZeroInflatedPoisson(lambda, zi)` | zero-inflated Poisson |
+| `HurdlePoisson(lambda, p_zero)` | hurdle Poisson with zero-truncated positive component |
 | `NegativeBinomial2(mu, phi)` | mean/precision negative binomial |
 | `BetaBinomial2(n, mean, precision)` | mean/precision beta-binomial |
 | `CategoricalLogit(eta2, eta3, ...)` or `CategoricalLogit(@brm(...))` | reference-class categorical logit |
@@ -60,6 +61,37 @@ Every specialized family is expected to supply the fitted density, pointwise
 log likelihood, and posterior-predictive RNG used by BRM's generated
 quantities. Truncation and censoring additionally require matching CDF/CCDF
 paths; ragged observations additionally require a sized RNG.
+
+## Hurdle counts with `HurdlePoisson`
+
+Use `HurdlePoisson(lambda, p_zero)` when zeros arise from a separate hurdle
+and every count from the Poisson component is strictly positive:
+
+```julia
+using BayesianRegressionModels
+
+hurdle_model = @brm data begin
+    log(lambda) ~ 1 + x
+    logit(p_zero) ~ 1 + group
+    y ~ HurdlePoisson(lambda, p_zero)
+end
+```
+
+Here `p_zero` is exactly ``P(Y=0)``. Conditional on crossing the hurdle,
+positive observations follow a zero-truncated Poisson distribution:
+
+```math
+P(Y=y \mid Y>0) =
+\frac{\operatorname{Poisson}(y \mid \lambda)}{1-e^{-\lambda}},
+\qquad y=1,2,\ldots
+```
+
+This differs from `ZeroInflatedPoisson(lambda, zi)`: zero inflation mixes a
+structural-zero component with an ordinary Poisson component, so both mixture
+components can produce zeros. `HurdlePoisson` is also an executable
+Distributions.jl distribution with matching `params`, `logpdf`, and `rand`
+semantics outside a formula. It requires finite `lambda > 0` and
+`0 <= p_zero <= 1`; BRM supplies no implicit link or prior.
 
 ## Correlated Gaussian outcomes
 
