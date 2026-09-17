@@ -14,18 +14,22 @@
 #   - every parameter but one recovers within ~2 sd, and our posterior sds match the
 #     standard errors in Driver's own fitDemo recovery table to a median ratio of 1.10
 #     (his fit is ML + Hessian draws; ours a full NUTS posterior).
-#   - the exception is the state-dependent shock correlation `cz` (= ctsem's `rs`):
-#     0.458 +/- 0.097 against a true 0.70 (z = -2.5). Driver reports the same thing
-#     (fitDemo.Rmd 288-296): hand-rolled Euler-Maruyama data gave rs ~ 0.41, while data
-#     generated through ctsem's own machinery recover it (his 0.641 +/- 0.092) -- "the
-#     discrepancy lives between the two integration paths". Our data are an independent
-#     fine-grid Euler-Maruyama; the estimator is a first-order Gaussian filter that
-#     evaluates tanh(rs*E[stress]) where the data carry E[tanh(rs*stress)], which is
-#     attenuated toward zero. A particle filter (ctParticleLik) is what would settle it.
+#   - the exception ON THIS DATASET is the state-dependent shock correlation `cz` (= ctsem's
+#     `rs`): 0.458 +/- 0.097 with the first-order predict (gh=0), 0.483 +/- 0.108 with the
+#     moment-matched predict (gh=3), against a true 0.70 (z = -2.5 / -2.0). That is NOT a
+#     bias of the filter: over 8 independent panels of the same design (generator drawn from
+#     Xoshiro instead of this fixture's LCG) the gh=0 estimates are 0.40 ... 0.86 with mean
+#     0.664 (se 0.057). One parameter in 14 at |z| ~ 2 is what chance produces.
+#   - Driver reports rs ~ 0.41 on hand-rolled Euler-Maruyama data vs 0.641 +/- 0.092 on
+#     ctGenerate data (fitDemo.Rmd 288-296). Those are different data-generating processes:
+#     with no max timestep set, ctsem's generator AND filter take ONE step per observation
+#     interval (state_sampling.jl / substep_mesh.jl), freezing the state-dependent cells at
+#     the interval start; Euler-Maruyama at small steps lets them track the state. Our filter
+#     substeps (nsub), so it matches fine-grid data.
 #   - s0, m0 and T0VAR are not compared with truth: after the burn-in the first observed
 #     state is not distributed as T0MEANS/T0VAR (Driver's table omits them too).
 #
-# Run: julia --project=test research/ema_ctsem/ema_state_dependent_fit.jl
+# Run: julia --project=test research/ema_ctsem/ema_state_dependent_fit.jl [gh]   (gh = 0 | 3 | 5)
 
 using BayesianRegressionModels, StanBlocks, LogDensityProblems, BridgeStan, Random, WarmupHMC
 using Distributions: Normal, Exponential
@@ -33,13 +37,13 @@ import Statistics
 
 include(joinpath(@__DIR__, "ema_state_dependent.jl"))   # ema_sd triad, fixture, ema_state_dependent
 
-function main()
-    panel = fixture(n=100, nt=30, seed=20260916)         # Charles's design: 100 subjects x 30
+function main(; gh=3)                                    # gh=0: ctsem's first-order predict; 3: moment-matched
+    panel = with_filter(fixture(n=100, nt=30, seed=20260916); nsub=8, gh)   # Charles's design: 100 subjects x 30
     sb = SBBRMI(ema_state_dependent(panel); mod=@__MODULE__)
     code = StanBlocks.stan_code(sb.model)
     prob = StanBlocks.stan_instantiate(sb.model; path=joinpath(tempdir(), "ema_sd_fit_$(hash(code)).stan"))
     println("state-dependent EMA in the kernel, dim=", LogDensityProblems.dimension(prob),
-            " subjects=", length(panel.subject), " — WarmupHMC.adaptive_warmup_mcmc")
+            " subjects=", length(panel.subject), " nsub=", panel.nsub, " gh=", panel.gh, " — WarmupHMC.adaptive_warmup_mcmc")
 
     fit = WarmupHMC.adaptive_warmup_mcmc(Xoshiro(1), prob; n_draws=600, progress=nothing)
     unc = fit.posterior_position
@@ -59,5 +63,5 @@ function main()
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
-    main()
+    main(; gh = isempty(ARGS) ? 3 : parse(Int, ARGS[1]))
 end

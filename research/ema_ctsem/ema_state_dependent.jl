@@ -37,18 +37,44 @@ using Distributions: Normal, Exponential
 
 # ── per-subject marginalizer with STATE-DEPENDENT, CORRELATED diffusion ────────
 # ys = stressReport (LHS); ym = moodReport; smoked = binary; dt = intervals.
-# Substepped continuous-discrete Gaussian filter. Two predict steps, chosen by `gh`:
-#   gh = 0  first-order (EKF): drift Jacobian + Q evaluated PLUG-IN at the filtered mean.
-#           This is what ctsem's julia engine does (kalman_filters.jl).
-#   gh = 1  MOMENT-MATCHED: the Euler map and Q(x) are averaged over the state uncertainty
-#           N(m,P) with a 3x3 Gauss-Hermite rule. The first-order filter uses
-#           tanh(cz*E[stress]) where the process carries E[tanh(cz*stress)] (attenuated
-#           toward 0), which biases cz (= ctsem's rs) low on true-SDE data; this removes it.
+# Substepped continuous-discrete Gaussian filter. Its PRECISION is two integers, both DATA
+# (so one compiled model serves every setting -- see `with_filter`):
+#   nsub    Euler substeps per observation interval.
+#   gh = 0  first-order predict (EKF): drift Jacobian + Q evaluated PLUG-IN at the filtered
+#           mean. This is what ctsem's julia engine does (kalman_filters.jl).
+#   gh = K  (3 or 5) MOMENT-MATCHED predict: the Euler map and Q(x) are averaged over the
+#           state uncertainty N(m,P) with a KxK Gauss-Hermite rule. The first-order filter
+#           uses tanh(cz*E[stress]) where the process carries E[tanh(cz*stress)] (attenuated
+#           toward 0); moment matching integrates that instead of plugging in.
 # The binary indicator is integrated by Gauss-Hermite quadrature over the latent predictor
 # (5 nodes) with a moment-matched state update -- as ctsem's `_binary_moments` does -- not
 # linearised.
 StanBlocks.@deffun begin
     l2pi()::real = 1.8378770664093453
+    # probabilists' Gauss-Hermite node / weight i of a K-point rule (K = 3 or 5)
+    ghx(i::int, K::int)::real = begin
+        x=0.0
+        if K==3; x=(i-2)*1.7320508075688772; end
+        if K==5
+            if i==1; x=-2.8569700138728056; end
+            if i==2; x=-1.3556261799742659; end
+            if i==4; x=1.3556261799742659; end
+            if i==5; x=2.8569700138728056; end
+        end
+        x
+    end
+    ghw(i::int, K::int)::real = begin
+        w=0.6666666666666666
+        if K==3
+            if i!=2; w=0.16666666666666666; end
+        end
+        if K==5
+            w=0.5333333333333333
+            if i==1 || i==5; w=0.011257411327720689; end
+            if i==2 || i==4; w=0.22207592200561263; end
+        end
+        w
+    end
     ema_sd_lpdfs(ys::vector[T], ym::vector[T], smoked::int[T], dt::vector[T],
             b0::real, bm::real, a12::real, a21::real, a22::real, cintm::real,
             qd0::real, qd1::real, cz::real, sdm::real,
@@ -59,16 +85,14 @@ StanBlocks.@deffun begin
             if t>1
                 h=dt[t]/nsub                       # SUBSTEPPED continuous-time predict
                 for st in 1:nsub
-                    if gh==1
+                    if gh>0
                         l11=sqrt(p11); l21=p12/l11; l22=sqrt(p22-l21*l21+1e-12)
                         ey1=0.0; ey2=0.0; c11=0.0; c12=0.0; c22=0.0; q11=0.0; q12=0.0
-                        for a in 1:3
-                            xa=(a-2)*1.7320508075688772; wa=0.16666666666666666
-                            if a==2; wa=0.6666666666666666; end
-                            for b in 1:3
-                                xb=(b-2)*1.7320508075688772; wb=0.16666666666666666
-                                if b==2; wb=0.6666666666666666; end
-                                w=wa*wb; xs=ms+l11*xa; xm=mm+l21*xa+l22*xb
+                        for a in 1:gh
+                            xa=ghx(a,gh)
+                            for b in 1:gh
+                                xb=ghx(b,gh); w=ghw(a,gh)*ghw(b,gh)
+                                xs=ms+l11*xa; xm=mm+l21*xa+l22*xb
                                 y1=xs+h*(-log1p_exp(b0+bm*xm)*xs+a12*xm)
                                 y2=xm+h*(a21*xs+a22*xm+cintm)
                                 sdx=exp(qd0+qd1*xm)            # stress sd depends on MOOD
@@ -103,11 +127,7 @@ StanBlocks.@deffun begin
             # Binary indicator: Gauss-Hermite (5 nodes) over eta ~ N(l31*stress+thr, l31^2*p11)
             etabar=l31*ms+thr; s2=l31*l31*p11+1e-12; sde=sqrt(s2); z0=0.0; z1=0.0; z2=0.0
             for i in 1:5
-                xi=0.0; wi=0.5333333333333333
-                if i==1; xi=-2.8569700138728056; wi=0.011257411327720689; end
-                if i==2; xi=-1.3556261799742659; wi=0.22207592200561263; end
-                if i==4; xi=1.3556261799742659; wi=0.22207592200561263; end
-                if i==5; xi=2.8569700138728056; wi=0.011257411327720689; end
+                xi=ghx(i,5); wi=ghw(i,5)
                 eta=etabar+sde*xi; pr=1-inv_logit(eta)
                 if smoked[t]==1; pr=inv_logit(eta); end
                 z0=z0+wi*pr; z1=z1+wi*pr*eta; z2=z2+wi*pr*eta*eta
@@ -152,9 +172,13 @@ StanBlocks.@deffun begin
 end
 
 # ── synthetic panel from the generating truth (state-dependent SDE) ────────────
-function fixture(; n=8, nt=15, seed=20260916)
-    rng=seed; rnd()=(rng=(1103515245*rng+12345)%2^31; rng/2^31)
-    randn2()=(u1=max(rnd(),1e-9); u2=rnd(); sqrt(-2*log(u1))*cos(6.283185307*u2))
+# `ng`: Euler-Maruyama steps per observation interval in the GENERATOR (finer = closer to the
+# SDE). `rng`: an AbstractRNG to draw from; the default is a dependency-free LCG + Box-Muller,
+# kept so that the numbers reported from this fixture stay reproducible.
+function fixture(; n=8, nt=15, seed=20260916, ng=8, rng=nothing)
+    state=seed; lcg()=(state=(1103515245*state+12345)%2^31; state/2^31)
+    rnd()=rng === nothing ? lcg() : rand(rng)
+    randn2()=rng === nothing ? (u1=max(lcg(),1e-9); u2=lcg(); sqrt(-2*log(u1))*cos(6.283185307*u2)) : randn(rng)
     subject=String[]; stressReport=Vector{Float64}[]; moodReport=Vector{Float64}[]
     smoked=Vector{Int}[]; dt=Vector{Float64}[]
     for i in 1:n
@@ -171,7 +195,7 @@ function fixture(; n=8, nt=15, seed=20260916)
             dv = t==1 ? 0.0 : exp(0.3*randn2())        # log-normal irregular intervals, median 1
             push!(d, t==1 ? 1.0 : dv)
             if t>1
-                ng=8; hh=dv/ng                          # fine-grid Euler-Maruyama, matched to the EKF's nsub
+                hh=dv/ng                                # fine-grid Euler-Maruyama
                 for _ in 1:ng
                     sds=exp(-0.2+0.3*m); corr=tanh(0.7*s)
                     zs=randn2(); zc=randn2(); z2=corr*zs+sqrt(max(1-corr*corr,0.0))*zc
@@ -187,7 +211,14 @@ function fixture(; n=8, nt=15, seed=20260916)
     end
     (; subject, stressReport, moodReport, smoked, dt)
 end
-data = fixture()
+
+# The filter's precision rides in the DATA (scalar ints read inside the kernel cell), so the
+# emitted Stan -- and the compiled model -- is the same for every setting, and draws from one
+# setting are valid points for another. That is what lets a cheap-filter posterior be
+# importance-weighted toward a more precise one (ema_state_dependent_psis.jl).
+#   gh = 0: first-order plug-in (ctsem's estimator);  gh = 3 / 5: moment-matched predict.
+with_filter(d; nsub=8, gh=3) = merge(d, (; nsub, gh))
+data = with_filter(fixture())
 
 # ── the @brm model: multi-subject, in the KERNEL, FAITHFUL to Charles's fit
 #    (`indvarying = FALSE` — ALL parameters shared, NO random effects). Each
@@ -217,37 +248,7 @@ ema_state_dependent(d) = @brm d begin
     t0z   ~ Normal(0.0, 0.5)              #                          fisher-z correlation
     pred ~ kernel(dt, stressReport, moodReport, smoked) do dti, ys, ym, smk
         ys ~ ema_sd(ym, smk, dti, b0, bm, a12, a21, a22, cintm, qd0, qd1, cz, sdm,
-                    l31, thr, r1, r2, s0, m0, t0sd1, t0sd2, t0z, 8, 1)   # nsub=8; gh=1: moment-matched predict
-        ys
-    end
-end
-
-# Same model, FIRST-ORDER predict (gh = 0): the estimator ctsem's julia engine uses. Identical
-# parameters in identical order, so draws from one are valid points for the other -- which is
-# what lets a cheap-filter posterior be importance-weighted toward the accurate one.
-ema_state_dependent_ekf(d) = @brm d begin
-    b0    ~ Normal(0.5, 0.5)               # softplus offset
-    bm    ~ Normal(0.4, 0.5)               # mood -> stress recovery modulation
-    a12   ~ Normal(-0.25, 0.5)             # mood -> stress
-    a21   ~ Normal(-0.30, 0.5)             # stress -> mood
-    a22   ~ Normal(-0.60, 0.3)             # mood self-decay
-    cintm ~ Normal(0.3, 0.5)               # cint_mood
-    qd0   ~ Normal(-0.2, 0.5)              # stress log-sd offset
-    qd1   ~ Normal(0.3, 0.5)               # stress volatility on MOOD (state dependent)
-    cz    ~ Normal(0.7, 0.5)               # shock-correlation on STRESS (state dependent)
-    sdm   ~ Exponential(1.0)              # mood diffusion sd
-    l31   ~ Normal(1.2, 0.5)              # smoked loading on stress
-    thr   ~ Normal(-1.0, 0.5)             # smoking threshold
-    r1    ~ Exponential(1.0)              # merr_stress (an SD; squared in the filter)
-    r2    ~ Exponential(1.0)              # merr_mood   (an SD)
-    s0    ~ Normal(0.0, 1.0)              # T0MEANS stress
-    m0    ~ Normal(0.5, 1.0)              # T0MEANS mood
-    t0sd1 ~ Exponential(1.0)              # T0VAR (free in the fit): stress sd
-    t0sd2 ~ Exponential(1.0)              #                          mood sd
-    t0z   ~ Normal(0.0, 0.5)              #                          fisher-z correlation
-    pred ~ kernel(dt, stressReport, moodReport, smoked) do dti, ys, ym, smk
-        ys ~ ema_sd(ym, smk, dti, b0, bm, a12, a21, a22, cintm, qd0, qd1, cz, sdm,
-                    l31, thr, r1, r2, s0, m0, t0sd1, t0sd2, t0z, 8, 0)   # nsub=8; gh=0: first-order plug-in (ctsem's estimator)
+                    l31, thr, r1, r2, s0, m0, t0sd1, t0sd2, t0z, nsub, gh)   # filter precision: DATA
         ys
     end
 end
