@@ -756,12 +756,14 @@ function _rk_interaction_side_atoms(side, target::Symbol, origin::String,
             values = collect(raw)
             levels = raw isa CA.CategoricalVector ?
                 collect(CA.levels(raw)) : sort!(unique(values))
-            return _rk_interaction_dummies(source, values, levels)
+            atoms = _rk_interaction_dummies(source, values, levels)
+            return atoms, (Any[], length(levels))
         end
         raw isa AbstractVector{<:Real} && !(eltype(raw) <: Integer) ||
             error("$prefix: predictor `$target` $origin operand " *
                   "`$source` is neither continuous nor categorical")
-        return Any[(source, raw, source, false)]
+        return Any[(source, raw, source, false)],
+            (Any[(:col, source)], 0)
     end
     side isa ExprColumn || error(
         "$prefix: predictor `$target` $origin operand is not supported " *
@@ -772,10 +774,11 @@ function _rk_interaction_side_atoms(side, target::Symbol, origin::String,
         "admitted inside `&` operands (interaction coding is always " *
         "full-rank there); use the bare grouping column")
     if f === (&)
-        nested = _rk_interaction_columns(side, target, origin, data,
+        nested, isp = _rk_interaction_columns(side, target, origin, data,
             columns, derived, taken)
-        return Any[(name, values, label, false)
-                   for (name, values, label) in nested]
+        atoms = Any[(name, values, label, false)
+                    for (name, values, label) in nested]
+        return atoms, isp
     end
     if f === zscale || f === center || f === standardize
         sargs = getargs(side)
@@ -784,8 +787,10 @@ function _rk_interaction_side_atoms(side, target::Symbol, origin::String,
             "exactly one argument")
         vname = _rk_staged_transform(f, only(sargs), target, origin,
             data, columns, derived, taken)
-        return Any[(vname, _rk_eval_dotted(
+        atoms = Any[(vname, _rk_eval_dotted(
             vname, data, derived, Dict{Symbol,Any}()), vname, false)]
+        return atoms, (Any[(:expr, _rk_gate_derived_expr(
+            vname, derived, target))], 0)
     end
     lowered, isvec = _rk_lower_data_expr(
         side, target, origin, data, columns, derived, taken)
@@ -796,7 +801,8 @@ function _rk_interaction_side_atoms(side, target::Symbol, origin::String,
         haskey(data, lowered) || error(
             "$prefix: internal: staged interaction operand `$lowered` " *
             "is not bound")
-        return Any[(lowered, data[lowered], lowered, false)]
+        return Any[(lowered, data[lowered], lowered, false)],
+            (Any[(:col, lowered)], 0)
     end
     lowered isa Expr || error(
         "$prefix: internal: interaction operand lowered to " *
@@ -806,7 +812,8 @@ function _rk_interaction_side_atoms(side, target::Symbol, origin::String,
     _rk_push_derived!(derived, staged, lowered, staged, target)
     _rk_cross_derived_refs!(lowered, data, columns)
     Any[(staged, _rk_eval_dotted(
-        lowered, data, derived, Dict{Symbol,Any}()), staged, false)]
+        lowered, data, derived, Dict{Symbol,Any}()), staged, false)],
+        (Any[(:expr, lowered)], 0)
 end
 
 # Shared `&` column builder used by top-level interaction terms and nested
@@ -822,12 +829,14 @@ function _rk_interaction_columns(term, target::Symbol, origin::String,
     args = getargs(term)
     length(args) == 2 || error(
         "$prefix: predictor `$target` $origin `&` takes exactly two operands")
-    left = _rk_interaction_side_atoms(args[1], target, origin,
+    left, lspine = _rk_interaction_side_atoms(args[1], target, origin,
         data, columns, derived, taken)
-    right = _rk_interaction_side_atoms(args[2], target, origin,
+    right, rspine = _rk_interaction_side_atoms(args[2], target, origin,
         data, columns, derived, taken)
-    map([(l, r) for l in left for r in right]) do ((latom, lvalues,
-            llabel, lcat), (ratom, rvalues, rlabel, rcat))
+    spine = (vcat(lspine[1], rspine[1]), lspine[2] + rspine[2])
+    specs = map([(l, r) for l in left for r in right]) do (
+            (latom, lvalues, llabel, lcat),
+            (ratom, rvalues, rlabel, rcat))
         defexpr = Expr(:call, :.*, latom, ratom)
         label = lcat && !rcat ? Symbol(:int_, rlabel, :_x_, llabel) :
             Symbol(:int_, llabel, :_x_, rlabel)
@@ -840,6 +849,7 @@ function _rk_interaction_columns(term, target::Symbol, origin::String,
             defexpr, data, derived, Dict{Symbol,Any}())
         name, got, label
     end
+    specs, spine
 end
 
 # A `&` term whose every leaf operand is categorical: its full-rank dummy
@@ -919,7 +929,7 @@ end
 function _rk_term_specs(term, target::Symbol, data::AbstractDict,
         columns::Dict{Symbol,AbstractVector},
         derived::Vector{_RKDerivedSpec}, taken::Set{Symbol},
-        has_intercept::Bool)
+        has_intercept::Bool, spines::Dict{Symbol,Any})
     prefix = "RK backend"
     term isa Integer && term == 1 && return _RKTermSpec[_RKTermSpec(
         :intercept, Symbol[], (;), :Intercept, :Intercept)]
@@ -1048,8 +1058,11 @@ function _rk_term_specs(term, target::Symbol, data::AbstractDict,
             :continuous, [source], (;), source, source)]
     end
     if term isa ExprColumn && getf(term) === (&)
-        specs = _rk_interaction_columns(term, target, "`&` interaction",
-            data, columns, derived, taken)
+        specs, spine = _rk_interaction_columns(term, target,
+            "`&` interaction", data, columns, derived, taken)
+        for (dname, _, _) in specs
+            spines[dname] = spine
+        end
         return _RKTermSpec[_RKTermSpec(
             :continuous, [dname], (;), dlabel, dlabel)
             for (dname, _, dlabel) in specs]
@@ -1232,6 +1245,206 @@ function _rk_gate_cover_identified!(terms::Vector{_RKTermSpec},
           "(`factor(...; ref=..., cmc=false)` pins a level at zero)")
 end
 
+# Co-occurrence gate canonical forms. A lowered dotted expression
+# normalizes two ways: scaling-normalized (scalar multiplications and
+# divisions stripped — equal forms denote the same vector up to a
+# nonzero scalar factor) and affine-normalized (scalar additions
+# stripped too — equal forms are affine cousins over the same base).
+# Staged names resolve through the derived registry; predictor terms
+# never reference assignments (NamedColumn needs DataColumn backing),
+# so anything neither data nor staged is an internal error.
+# Scalar-valued forms (numbers, reductions, all-scalar calls) collapse
+# to `_RK_GATE_CONST`; unrecognized operators keep their structure, so
+# normalization is total but never strips what it cannot prove scalar.
+const _RK_GATE_CONST = :__rk_gate_const__
+
+function _rk_gate_derived_expr(name::Symbol,
+        derived::AbstractVector, target::Symbol)
+    for spec in derived
+        spec.name === name || continue
+        spec.expression isa Expr && return spec.expression
+        error("RK backend: internal: derived `$name` in `$target` " *
+            "has no expression to compare")
+    end
+    error("RK backend: internal: derived `$name` in `$target` " *
+        "is not staged")
+end
+
+function _rk_gate_norm(node, data::AbstractDict,
+        derived::AbstractVector, affine::Bool)
+    _rk_gate_norm_inner(
+        node, data, derived, affine, Set{Symbol}())
+end
+
+function _rk_gate_norm_inner(node, data::AbstractDict,
+        derived::AbstractVector, affine::Bool, visited::Set{Symbol})
+    prefix = "RK backend"
+    node isa Number && return _RK_GATE_CONST
+    if node isa Symbol
+        haskey(data, node) && return node
+        node in visited && error(
+            "$prefix: internal: staged cycle at `$node`")
+        for spec in derived
+            if spec.name === node
+                push!(visited, node)
+                return _rk_gate_norm_inner(spec.expression, data,
+                    derived, affine, visited)
+            end
+        end
+        error("$prefix: internal: name `$node` is neither data nor staged")
+    end
+    node isa Expr || error(
+        "$prefix: internal: cannot normalize `$(repr(node))`")
+    if node.head === :.
+        # Dotted math `log.(x)`: all-scalar stays scalar, else keep.
+        length(node.args) == 2 && node.args[1] isa Symbol ||
+            error("$prefix: internal: cannot normalize `$(repr(node))`")
+        tup = node.args[2]
+        tup isa Expr && tup.head === :tuple ||
+            error("$prefix: internal: cannot normalize `$(repr(node))`")
+        parts = Any[_rk_gate_norm_inner(a, data, derived, affine, visited)
+                    for a in tup.args]
+        all(p -> p === _RK_GATE_CONST, parts) && return _RK_GATE_CONST
+        return (:math, node.args[1], parts...)
+    end
+    node.head === :call || error(
+        "$prefix: internal: cannot normalize `$(repr(node))`")
+    fn, args = node.args[1], node.args[2:end]
+    fn isa Symbol || error(
+        "$prefix: internal: cannot normalize `$(repr(node))`")
+    haskey(_RK_DERIVED_RED_FN, fn) && return _RK_GATE_CONST
+    if fn === :.*
+        parts = Any[_rk_gate_norm_inner(a, data, derived, affine, visited)
+                    for a in args]
+        rest = filter(p -> p !== _RK_GATE_CONST, parts)
+        isempty(rest) && return _RK_GATE_CONST
+        length(rest) == 1 && return only(rest)
+        return (:prod, sort!(rest; by=repr)...)
+    end
+    if fn === :./
+        length(args) == 2 || error(
+            "$prefix: internal: cannot normalize `$(repr(node))`")
+        num = _rk_gate_norm_inner(
+            args[1], data, derived, affine, visited)
+        den = _rk_gate_norm_inner(
+            args[2], data, derived, affine, visited)
+        den === _RK_GATE_CONST && return num
+        num === _RK_GATE_CONST && return (:inv, den)
+        return (:div, num, den)
+    end
+    if fn === :.+ || fn === :.-
+        length(args) == 2 || error(
+            "$prefix: internal: cannot normalize `$(repr(node))`")
+        left = _rk_gate_norm_inner(
+            args[1], data, derived, affine, visited)
+        right = _rk_gate_norm_inner(
+            args[2], data, derived, affine, visited)
+        if affine
+            right === _RK_GATE_CONST && return left
+            left === _RK_GATE_CONST && return right
+        end
+        left === _RK_GATE_CONST && right === _RK_GATE_CONST &&
+            return _RK_GATE_CONST
+        return (fn, left, right)
+    end
+    if fn === :.^
+        length(args) == 2 || error(
+            "$prefix: internal: cannot normalize `$(repr(node))`")
+        base = _rk_gate_norm_inner(
+            args[1], data, derived, affine, visited)
+        expo = _rk_gate_norm_inner(
+            args[2], data, derived, affine, visited)
+        base === _RK_GATE_CONST && expo === _RK_GATE_CONST &&
+            return _RK_GATE_CONST
+        args[2] isa Number && args[2] == 0 && return _RK_GATE_CONST
+        args[2] isa Number && args[2] == 1 && return base
+        return (:pow, base, expo)
+    end
+    parts = Any[_rk_gate_norm_inner(a, data, derived, affine, visited)
+                for a in args]
+    all(p -> p === _RK_GATE_CONST, parts) && return _RK_GATE_CONST
+    (fn, parts...)
+end
+
+# A continuous-cat cross over levels that partition the rows sums
+# exactly to its continuous spine: Σ_dummies = 1 rowwise (bit-exact),
+# and nested crosses splice partial sums level by level, so the fold
+# below holds for arbitrarily nested `&` terms. Single-leaf spines
+# project to the leaf; multi-leaf spines fold left-deep over `.*`
+# (normalization sorts products, so association order is free).
+function _rk_gate_sumfold(spine::Vector{Any})
+    exprs = Any[id[2] for id in spine]
+    foldl((a, b) -> Expr(:call, :.*, a, b), exprs)
+end
+
+# Mains-plus-crosses co-occurrence: a continuous `&` cross whose
+# spine sums exactly to a main effect (up to a scalar factor) is
+# structurally singular — the full cross already spans the main.
+# Same for two crosses sharing a spine sum, and (under an intercept)
+# for affine-cousin spine sums, where the intercept closes the rank
+# gap. Non-affine distinct spines and intercept-free affine cousins
+# stay admitted. Zero-column and nesting-residual designs are out of
+# this gate's scope.
+function _rk_gate_cross_identified!(terms::Vector{_RKTermSpec},
+        spines::Dict{Symbol,Any}, derived::Vector{_RKDerivedSpec},
+        data::AbstractDict, target::Symbol, has_intercept::Bool)
+    prefix = "RK backend"
+    crosses = Tuple{Symbol,Any}[] # (representative column, spine)
+    for spec in terms
+        spec.kind === :continuous || continue
+        dname = only(spec.columns)
+        haskey(spines, dname) || continue
+        any(c -> c[2] == spines[dname], crosses) && continue
+        push!(crosses, (dname, spines[dname]))
+    end
+    usable = filter(
+        c -> !isempty(c[2][1]) && c[2][2] >= 1, crosses)
+    isempty(usable) && return nothing
+    mains = Tuple{Symbol,Any}[] # (addressee, identity expression)
+    for spec in terms
+        spec.kind === :continuous || continue
+        dname = only(spec.columns)
+        haskey(spines, dname) && continue
+        identity = haskey(data, dname) ? dname :
+            _rk_gate_derived_expr(dname, derived, target)
+        push!(mains, (spec.addressee, identity))
+    end
+    sums = [(dname, _rk_gate_sumfold(spine[1]))
+            for (dname, spine) in usable]
+    for (dname, sumfold) in sums
+        for (addressee, main) in mains
+            _rk_gate_norm(main, data, derived, false) ==
+                _rk_gate_norm(sumfold, data, derived, false) && error(
+                "$prefix: predictor `$target` interaction `$dname` sums " *
+                "exactly to main effect `$addressee` — structurally " *
+                "singular (drop the main effect — the full cross already " *
+                "spans it — or the interaction)")
+            has_intercept &&
+                _rk_gate_norm(main, data, derived, true) ==
+                _rk_gate_norm(sumfold, data, derived, true) && error(
+                "$prefix: predictor `$target` interaction `$dname` is an " *
+                "affine cousin of main effect `$addressee` — singular " *
+                "with an intercept (drop the intercept, the main effect, " *
+                "or the interaction)")
+        end
+    end
+    for i in 1:length(sums), j in (i + 1):length(sums)
+        first, second = sums[i], sums[j]
+        _rk_gate_norm(first[2], data, derived, false) ==
+            _rk_gate_norm(second[2], data, derived, false) && error(
+            "$prefix: predictor `$target` interactions `$(first[1])` and " *
+            "`$(second[1])` sum to the same vector — structurally " *
+            "singular (drop one of the interactions)")
+        has_intercept &&
+            _rk_gate_norm(first[2], data, derived, true) ==
+            _rk_gate_norm(second[2], data, derived, true) && error(
+            "$prefix: predictor `$target` interactions `$(first[1])` " *
+            "and `$(second[1])` are affine cousins — singular with an " *
+            "intercept (drop the intercept or one of the interactions)")
+    end
+    nothing
+end
+
 function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         available::Tuple, columns::Dict{Symbol,AbstractVector},
         derived::Vector{_RKDerivedSpec}, taken::Set{Symbol})
@@ -1257,12 +1470,15 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
     # attribution, before shared machinery can throw undecorated errors.
     # One term can lower to several specs (multi-column interactions).
     terms = _RKTermSpec[]
+    spines = Dict{Symbol,Any}()
     for term in ordinary
         append!(terms, _rk_term_specs(term, target, context.data,
-            columns, derived, taken, has_intercept))
+            columns, derived, taken, has_intercept, spines))
     end
     _rk_gate_cover_identified!(
         terms, ordinary, target, context.data, has_intercept)
+    _rk_gate_cross_identified!(
+        terms, spines, derived, context.data, target, has_intercept)
     geometry = _brm_prepare_predictor_geometry(
         brmi, context, target; available_predictors=available)
     isempty(geometry.terms) || error(
