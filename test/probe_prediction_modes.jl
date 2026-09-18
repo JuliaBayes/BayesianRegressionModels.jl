@@ -42,8 +42,9 @@ mixed_builder = @brm begin
     y      ~ Normal(mu + eta_CL + eta_V, sigma)
 end
 
-# `subjects` are LABELS, so a replay frame can introduce new ones and permute
-# the old ones — the two things a positional splice cannot survive.
+# `subjects` are LABELS, so a replay frame can permute the old ones — the thing
+# a positional splice cannot survive. Genuinely NEW labels are refused for
+# conventional blocks — they re-draw Stan-side via `reprocess` instead.
 function mixed_df(subjects; seed = 1, n_per = 4)
     rng = MersenneTwister(seed)
     n = length(subjects) * n_per
@@ -357,11 +358,12 @@ end
     rng = MersenneTwister(13)
     draws = randn(rng, 3, BS.param_unc_num(train_sm))
     # THE CASE A POSITIONAL SPLICE GETS SILENTLY WRONG. Training levels are
-    # [11, 12, 13, 14]; here a subject sorting BEFORE all of them is introduced
-    # and two are dropped, so the retained subject 11 moves from block column 1
-    # to column 2. Copying column-for-column would hand subject 11 subject 12's
-    # effect and never error.
-    shifted_subjects = [1, 11, 13]
+    # [11, 12, 13, 14]; here two are dropped, so the retained subject 13 moves
+    # from block column 3 to column 2. Copying column-for-column would hand
+    # subject 13 subject 12's effect and never error.
+    # Subset-only on purpose: a target with a genuinely NEW level is refused
+    # (next testset) — new levels re-draw Stan-side via `reprocess`.
+    shifted_subjects = [11, 13]
     shifted_df = mixed_df(shifted_subjects; seed = 2)
     shifted_plan = generative_plan(mixed_builder, shifted_df; mod = @__MODULE__)
     shifted_p = StanBlocks.stan_instantiate(shifted_plan.model)
@@ -372,19 +374,28 @@ end
     for b in ranef_blocks(shifted_plan)
         b.group === :subject || continue
         bt = only(filter(x -> x.binding === b.binding, ranef_blocks(train_sb)))
-        @test b.levels == [1, 11, 13]           # the emitter's sorted order
+        @test b.levels == [11, 13]               # the emitter's sorted order
         c_to = ranef_coordinates(b, unc_shifted)
         c_from = ranef_coordinates(bt, unc_train)
-        # Subject 11 is at target column 2 and source column 1 — the retained
+        # Subject 13 is at target column 2 and source column 3 — the retained
         # levels must follow their LABEL across that shift.
-        @test moved[:, c_to[:, 2]] == draws[:, c_from[:, 1]]   # 11
-        @test moved[:, c_to[:, 3]] == draws[:, c_from[:, 3]]   # 13
-        # …and the positional answer for subject 11 must NOT be what we got.
+        @test moved[:, c_to[:, 1]] == draws[:, c_from[:, 1]]   # 11
+        @test moved[:, c_to[:, 2]] == draws[:, c_from[:, 3]]   # 13
+        # …and the positional answer for subject 13 must NOT be what we got.
         @test moved[:, c_to[:, 2]] != draws[:, c_from[:, 2]]   # would be 12
     end
 end
 
-@testset "transport_draws — new subjects are drawn fresh, old ones reused" begin
+@testset "transport_draws — fresh conventional draws are refused (GQ route)" begin
+    # Decision 2026-09-18T13-47-28-143-1umq4k7: Sb population prediction goes
+    # through the StanBlocks GQ artifact — `reprocess(fit, new_df;
+    # resample_groups=[g])` re-draws the new levels Stan-side, and
+    # `transport_draws` onto THAT artifact only copies L/tau + population
+    # coordinates by name (test/transport_resample_target.jl). Drawing fresh
+    # N(0,1) Julia-side for a plain or `|ID|` block is refused, naming the
+    # route. The old assertions below this line used to bless that Julia-side
+    # path; they were rewritten, not weakened — the GQ file carries the
+    # positive half of the contract.
     rng = MersenneTwister(17)
     draws = randn(rng, 6, BS.param_unc_num(train_sm))
     # Two of the training subjects, plus two genuinely new ones.
@@ -394,60 +405,42 @@ end
     new_p = StanBlocks.stan_instantiate(new_plan.model)
     unc_new = BS.param_unc_names(new_p.model)
 
-    moved = transport_draws(train_sb, new_plan, draws, unc_train, unc_new;
-                            rng = MersenneTwister(3))
-    @test size(moved) == (6, length(unc_new))
-    @test all(isfinite, moved)
-
-    for b in ranef_blocks(new_plan)
-        bt = only(filter(x -> x.binding === b.binding, ranef_blocks(train_sb)))
-        c_to = ranef_coordinates(b, unc_new)
-        c_from = ranef_coordinates(bt, unc_train)
-        for (g, lvl) in enumerate(b.levels)
-            gf = findfirst(==(lvl), bt.levels)
-            if isnothing(gf)
-                # A new level: fresh N(0,1), so it cannot equal any source column.
-                @test all(t -> !any(gg -> moved[:, c_to[t, g]] == draws[:, c_from[t, gg]],
-                                    1:bt.n_groups), 1:b.n_terms)
-            else
-                @test moved[:, c_to[:, g]] == draws[:, c_from[:, gf]]
-            end
-        end
+    # A target with genuinely new levels of a plain/`|ID|` block is refused,
+    # naming the block, the new levels, and the `reprocess` route.
+    err = try
+        transport_draws(train_sb, new_plan, draws, unc_train, unc_new;
+                        rng = MersenneTwister(3))
+        nothing
+    catch e
+        e
     end
+    @test err isa ErrorException
+    @test occursin("resample_groups", err.msg)
+    @test occursin("90", err.msg)
 
-    # Non-ranef coordinates (pop coefficients, sigma, L, tau) are carried over
-    # verbatim — that is what makes a fresh z a draw from the FITTED covariance.
-    claimed = Set(reduce(vcat,
-        vec(ranef_coordinates(b, unc_new)) for b in ranef_blocks(new_plan)))
-    pos_train = Dict(String(n) => i for (i, n) in enumerate(unc_train))
-    for (j, nm) in enumerate(unc_new)
-        j in claimed && continue
-        @test moved[:, j] == draws[:, pos_train[String(nm)]]
+    # `resample=` on a conventional factor is the same request — re-draw
+    # Stan-side instead.
+    err_resample = try
+        transport_draws(train_sb, new_plan, draws, unc_train, unc_new;
+                        resample = :subject, rng = MersenneTwister(3))
+        nothing
+    catch e
+        e
     end
+    @test err_resample isa ErrorException
+    @test occursin("resample_groups", err_resample.msg)
+    @test occursin("subject", err_resample.msg)
 
-    # The transported draws evaluate on the new model.
-    @test all(i -> isfinite(BS.log_density(new_p.model, moved[i, :])), 1:size(moved, 1))
-
-    # `resample=` additionally re-draws the EXISTING levels of that factor.
-    loo = transport_draws(train_sb, new_plan, draws, unc_train, unc_new;
-                          resample = :subject, rng = MersenneTwister(3))
-    for b in ranef_blocks(new_plan)
-        b.group === :subject || continue
-        bt = only(filter(x -> x.binding === b.binding, ranef_blocks(train_sb)))
-        c_to = ranef_coordinates(b, unc_new)
-        c_from = ranef_coordinates(bt, unc_train)
-        for (g, lvl) in enumerate(b.levels)
-            gf = findfirst(==(lvl), bt.levels)
-            isnothing(gf) && continue
-            @test moved[:, c_to[:, g]] != loo[:, c_to[:, g]]
-        end
+    # The unknown-group guard still fires first, with its own message.
+    err_nope = try
+        transport_draws(train_sb, new_plan, draws, unc_train, unc_new;
+                        resample = :nope)
+        nothing
+    catch e
+        e
     end
-    # The site factor was NOT resampled, so it is untouched by `resample=:subject`.
-    site_b = only(filter(b -> b.group === :site, ranef_blocks(new_plan)))
-    c_site = vec(ranef_coordinates(site_b, unc_new))
-    @test loo[:, c_site] == moved[:, c_site]
-    @test_throws ErrorException transport_draws(train_sb, new_plan, draws,
-                                                unc_train, unc_new; resample = :nope)
+    @test err_nope isa ErrorException
+    @test occursin("names no random-effect block", err_nope.msg)
 end
 
 @testset "transport_draws — a changed design is refused, not spliced" begin
