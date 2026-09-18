@@ -2209,6 +2209,32 @@ StanBlocks.@deffun begin
         end
         return out
     end
+
+    # Per-group spectrally scaled HSGP basis for hyper-predictor models. Each
+    # group g has its own (rho, sigma): scale PHI's rows by that group's
+    # spectral weights, masked to the group's rows. The loop is why this is a
+    # `@deffun` — `@slic` bodies cannot contain control flow. The rho floor
+    # applies uniformly: sampled shared hypers already carry it as a bound,
+    # predicted ones arrive unfloored and are floored here per element.
+    @stanonly brm_hsgp_by_hyper_S(PHI::matrix[n, m], omega2::matrix[m, d],
+            group_idx::int[n], rho_vec::vector[gcount],
+            sigma_vec::vector[gcount], rho_lower::real)::matrix[n, m] = begin
+        S = rep_matrix(0., n, m)
+        for g in 1:gcount
+            rho_g = fmax(rho_vec[g], rho_lower)
+            sigma_g = sigma_vec[g]
+            sqrt_spd_g = brm_hsgp_sqrt_spd(
+                omega2, sigma_g, rep_vector(rho_g, d))
+            mg = rep_vector(0., n)
+            for i in 1:n
+                if group_idx[i] == g
+                    mg[i] = 1.
+                end
+            end
+            S = S + diag_pre_multiply(mg, diag_post_multiply(PHI, sqrt_spd_g))
+        end
+        return S
+    end
 end
 
 # Exact latent squared-exponential GP. The non-centred draw keeps the geometry
@@ -2525,6 +2551,14 @@ end
 # last-resort fallback so a data-iterating helper can never mistake it for a
 # column while present.
 const _SB_PREPROC_KEY = :__preproc__
+
+# Reserved side-channel key: the constructor stashes validated hyper-predictor
+# plans here so the owning term's emitter can lower them; popped before the
+# `SlicModel` like every other side-channel. Rebuilt from `brmi` on every
+# construction. Frozen replay re-emission must keep these plans visible to
+# term sites — that leg belongs to the lowering work (B2), not the
+# validation/threading work (B1).
+const _SB_HYPER_PLANS_KEY = :__sb_hyper_plans__
 
 _sb_record_preproc!(data, key::Symbol, entry::PreprocEntry) = begin
     pp = get(data, _SB_PREPROC_KEY, nothing)
@@ -3218,6 +3252,10 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     prepass = context.prepass
     effect_overrides = _sb_prior_overrides(brmi; term_priors=context.term_priors,
                                            frozen_preproc=_frozen_preproc)
+    # Hyper-predictor statements validate here (they need the term context)
+    # and ride the `data` side-channel to their term's emitter; the statement
+    # emitter skips them below.
+    data[_SB_HYPER_PLANS_KEY] = _sb_collect_hyper_plans(brmi)
     # Prepass 2: collect brms-style `|ID|` ranef buckets across all sub-formulas,
     # emit one shared ranef_correlated_draws per bucket, and build a lookup
     # `(brmi_key, (id_sym, group_key)) => (bucket_name, col_range, idx_name, suffix)`
@@ -3334,6 +3372,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     # pollutes Stan's data dict.
     bindings = pop!(data, _SB_BINDINGS_KEY)
     pop!(data, _SB_TOTAL_PLANS_KEY)
+    pop!(data, _SB_HYPER_PLANS_KEY, ())
     pop!(data, _SB_THRESHOLD_LOCATED_KEY)
     preproc_ctx = pop!(data, _SB_PREPROC_KEY, Dict{Symbol,PreprocEntry}())
     preproc = preproc_ctx isa _SBPreprocContext ? preproc_ctx.recorded : preproc_ctx
@@ -3904,8 +3943,8 @@ end
 
 """
     generative_plan(sb::SBBRMI) -> GenerativePlan
-    generative_plan(builder::Function, df; mod=@__MODULE__, cv_groups=Set(), held_out=()) -> GenerativePlan
-    generative_plan(plan::GenerativePlan, new_df; cv_groups=Set(), held_out=()) -> GenerativePlan
+    generative_plan(builder::Function, df; mod=@__MODULE__, cv_groups=Set(), centered_groups=Set(), held_out=()) -> GenerativePlan
+    generative_plan(plan::GenerativePlan, new_df; cv_groups=Set(), centered_groups=nothing, held_out=()) -> GenerativePlan
 
 Snapshot the declarations BRM actually emitted. The inventory is derived from
 `sb.model.model`, so auto-introduced population coefficients, random-effect
@@ -3928,31 +3967,55 @@ new_population_plan = generative_plan(plan, new_schedule)
 The `SBBRMI` form has no reusable formula builder to apply to genuinely new
 groups; use [`reprocess`](@ref) on that plan for the existing frozen-constant
 replay semantics instead.
+
+`centered_groups` selects the centered parameterization per grouping factor,
+exactly as in [`SBBRMI`](@ref). The builder form defaults to empty; the plan
+form defaults to `nothing`, which infers the source plan's own centered groups
+— read off its emitted declarations, so a centered fit rebuilds centered
+unless explicitly overridden. A group named in both `cv_groups` and
+`centered_groups` is refused by the `SBBRMI` constructor, as at fit time.
 """
 generative_plan(sb::SBBRMI) = _generative_plan(sb, nothing, Set{Symbol}())
 
+# The plan form's default: the source plan's own centered groups, read off its
+# EMITTED declarations rather than trusted from any stored kwarg — the emission
+# is the record, so a rebuild cannot disagree with the fit it replays. Only
+# plain `Symbol` groups qualify; typed `mm(...)` blocks (a tuple group) never
+# have a centered sibling.
+_generative_plan_centered(plan::GenerativePlan) =
+    Set{Symbol}(b.group for b in ranef_blocks(plan)
+                if !b.noncentered && b.group isa Symbol)
+
 function generative_plan(builder::Function, df;
                          mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
+                         centered_groups=Set{Symbol}(),
                          total_groups=:auto, held_out=())
     brmi = Base.invokelatest(builder, df)
     brmi isa BRMI || error(
         "generative_plan: builder returned $(typeof(brmi)); expected a BRMI from `@brm begin ... end`")
     cv_groups = cv_groups isa Set ? cv_groups : Set{Symbol}(cv_groups)
-    _generative_plan(SBBRMI(brmi; mod, cv_groups, total_groups, held_out), builder, cv_groups)
+    centered_groups = centered_groups isa Set ? centered_groups : Set{Symbol}(centered_groups)
+    _generative_plan(SBBRMI(brmi; mod, cv_groups, centered_groups, total_groups, held_out), builder, cv_groups)
 end
 
 function generative_plan(plan::GenerativePlan, new_df;
-                         cv_groups=plan.cv_groups, held_out=plan.held_out)
+                         cv_groups=plan.cv_groups, held_out=plan.held_out,
+                         centered_groups=nothing)
     isnothing(plan.builder) && error(
         "generative_plan: this plan was built from an SBBRMI and has no reusable `@brm` builder. " *
         "Construct it with `generative_plan(builder, df)` to rebuild the same declarations for new groups.")
+    # `nothing` infers the source plan's own centered groups off its emitted
+    # declarations (after the builder check, so a builder-less plan still
+    # reports the missing builder rather than a declaration walk).
+    centered_groups = isnothing(centered_groups) ? _generative_plan_centered(plan) :
+        (centered_groups isa Set ? centered_groups : Set{Symbol}(centered_groups))
     # Preserve the fitted representation and population/random basis relation.
     # An empty selected set also preserves an explicit conventional opt-out.
     selected = unique(b.group for b in total_effect_blocks(plan))
     isempty(selected) && return generative_plan(plan.builder,new_df;
-        mod=plan.model.mod,cv_groups,held_out,total_groups=())
+        mod=plan.model.mod,cv_groups,centered_groups,held_out,total_groups=())
     brmi = Base.invokelatest(plan.builder,new_df)
-    sb = SBBRMI(brmi;mod=plan.model.mod,cv_groups,held_out,total_groups=selected,
+    sb = SBBRMI(brmi;mod=plan.model.mod,cv_groups,centered_groups,held_out,total_groups=selected,
                 _frozen_preproc=plan.preproc)
     _generative_plan(sb,plan.builder,cv_groups)
 end
@@ -4516,9 +4579,13 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
                     "reprocess covers the Julia-side predictor transforms ",
                     "(zscale/standardize/center/factor/mo/s/t2/gp/hsgp), protect/implicit-fn ",
                     "columns, typed `mm(...)`, plain random-effects group indices, ",
-                    "kernel ragged inputs, and pass-through raw columns; this derived ",
-                    "structure is outside that replay surface — ",
-                    "rebuild the SBBRMI from the new DataFrame instead.")
+                    "kernel ragged inputs, and pass-through raw columns. A key BRM ",
+                    "cannot re-derive — a kernel(...) cell capture or a column your own ",
+                    "preprocessing computes outside BRM (e.g. a per-subject index) — is ",
+                    "CARRIED THROUGH when you include it, recomputed for the replay ",
+                    "design, as a column `$k` of the new DataFrame; the emitted Stan ",
+                    "program is then byte-identical. Otherwise rebuild the SBBRMI from ",
+                    "the new DataFrame instead.")
             end
         elseif v isa Number || v isa AbstractString || v isa Bool
             new_data[k] = v   # frozen structural scalar / formula literal (e.g. me `sd_<x>`)
@@ -4598,6 +4665,10 @@ _sb_emit!(stmts, data, key, ::MissingColumn; kwargs...) = nothing
 _sb_emit!(stmts, data, key, op; kwargs...) = error("sbimpl: top-level op for `$key` not an ExprColumn (got $(typeof(op)))")
 
 _sb_emit_expr!(stmts, data, key, ::typeof(~), op; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2(), mod::Module=@__MODULE__) = begin
+    # Hyper-predictor statements are not statements: the owning term's
+    # emitter lowers them. Skipping here keeps them out of the sampling
+    # path. B2 must ensure descriptor/post-passes account for skipped ops.
+    isnothing(_hyper_predictor_statement(op)) || return nothing
     lhs, rhs = getargs(op, 2)
     _sb_sampling!(stmts, data, key, lhs, rhs; id_lookup, obs_n, cv_groups,
                   centered_groups, group_block_lookup, effect_overrides, r2d2, mod)
@@ -6794,6 +6865,305 @@ end
 # name one term.
 _sb_term_key(t) = _brm_prepared_term_key(t)
 _sb_term_address_map(brmi::BRMI, lhs::Symbol) = _brm_term_address_map(brmi, lhs)
+
+# ---- hyper-predictor statements -------------------------------------------
+#
+# `log(length_scale(...)) ~ <formula>` and `log(sd(...)) ~ <formula>` predict
+# a GP/HSGP term's hyperparameters from a linear + random-effect formula
+# instead of sampling them. The macro normalises the LHS onto the prior
+# address vectors; every semantic refusal lives here, where the term context
+# exists. Validated plans ride the `data` side-channel (`_SB_HYPER_PLANS_KEY`)
+# to the owning term's emitter, which lowers them; `_sb_emit_expr!(~)` skips
+# them as statements.
+_sb_hyper_plans(data) = get(data, _SB_HYPER_PLANS_KEY, ())
+
+function _sb_hyper_plans_for(data, target, term_key)
+    plans = _sb_hyper_plans(data)
+    isempty(plans) && return ()
+    filter(p -> p.lp === target && p.term_key === term_key, plans)
+end
+
+_sb_hyper_class(::Val{:term_length_scale}) = :length_scale
+_sb_hyper_class(::Val{:term_sd}) = :sd
+
+function _sb_hyper_spelling(hyper, lp, term_key)
+    lpstr = lp === _EFFECT_COLON ? ":" : string(lp)
+    "$hyper($lpstr, $term_key)"
+end
+
+# A hyper random effect must be exactly `(1 | <bare data column>)`: no
+# slopes (level-grid covariate semantics are undecided), no shared `|ID|`
+# blocks (hyper blocks are per-(term, hyper)), no `gr(...)` (bare columns
+# only), and its group must be the addressed term's own `by=` grouping.
+function _sb_hyper_ranef_group(t, spelling, term_key, kw; prefix="sbimpl")
+    args = getargs(t)
+    length(args) in (2, 3) || error(
+        "$prefix: hyper-predictor `$spelling` — grouped term `$(repr(t))` " *
+        "does not have the expected `(effects | group)` shape")
+    length(args) == 3 && error(
+        "$prefix: hyper-predictor `$spelling` — shared `|ID|` blocks are " *
+        "not supported; hyper random effects use plain `(1 | group)`")
+    first(args) == 1 || error(
+        "$prefix: hyper-predictor `$spelling` — hyper random-effect " *
+        "effects must be exactly `1`; population slopes need level-grid " *
+        "covariate semantics that are not decided yet")
+    raw_group = last(args)
+    (raw_group isa NamedColumn && parent(raw_group) isa DataColumn) || error(
+        "$prefix: hyper-predictor `$spelling` — hyper random-effect group " *
+        "must be one raw data column; `gr(...)` is not supported, use a " *
+        "bare grouping column")
+    by = get(kw, :by, nothing)
+    isnothing(by) && error(
+        "$prefix: hyper-predictor `$spelling` puts a random effect over " *
+        "`$(name(raw_group))`, but `$term_key` is used without grouping; " *
+        "hyper random effects need a grouped term (`by=...`) — without " *
+        "grouping write a population-only hyper-predictor")
+    by isa NamedColumn || error(
+        "$prefix: hyper-predictor `$spelling` — hyper-predictors need a " *
+        "plain `by=<column>` grouping")
+    name(by) === name(raw_group) || error(
+        "$prefix: hyper-predictor `$spelling` puts its random effect over " *
+        "`$(name(raw_group))`, but `$term_key` groups by `$(name(by))`; " *
+        "the two must match — one hyper-predictor level per term group")
+    name(raw_group)
+end
+
+function _sb_collect_hyper_plans(brmi::BRMI; prefix="sbimpl")
+    lps = [p.name for p in linear_predictors(brmi)]
+    plans = Any[]
+    for (key, op_nc) in pairs(brmi.operations)
+        op = _named_op(op_nc)
+        isnothing(op) && continue
+        matched = _hyper_predictor_statement(op)
+        isnothing(matched) && continue
+        address, rhs = matched
+        class, term_key = address[1], address[2]
+        addr_lp = length(address) >= 3 ? address[3] : _EFFECT_COLON
+        hyper = _sb_hyper_class(Val(class))
+        spelling = _sb_hyper_spelling(hyper, addr_lp, term_key)
+        # Resolve the addressed linear predictor, mirroring
+        # `_brm_resolve_term_priors`: an explicit predictor restricts the
+        # search, `:` searches every predictor carrying the term.
+        candidates = addr_lp === _EFFECT_COLON ? lps : [addr_lp]
+        reached = [(lp, get(_brm_term_address_map(brmi, lp), term_key, []))
+                   for lp in candidates]
+        reached = filter(pair -> !isempty(last(pair)), reached)
+        if isempty(reached)
+            location = addr_lp === _EFFECT_COLON ? "any linear predictor" :
+                "`$addr_lp`"
+            error("$prefix: `$spelling` matches no `$term_key` term in $location")
+        end
+        if addr_lp === _EFFECT_COLON && length(reached) > 1
+            found = join(("`$lp`" for (lp, _) in reached), ", ")
+            error("$prefix: `$spelling` is ambiguous — names no linear " *
+                  "predictor and `$term_key` appears in $found")
+        end
+        lp, terms = only(reached)
+        length(terms) == 1 || error(
+            "$prefix: `$spelling` is ambiguous — `$lp` carries " *
+            "$(length(terms)) terms spelled `$term_key`")
+        term = only(terms)
+        # The addressed term must own the addressed slot. `length_scale`
+        # exists only on `gp`/`hsgp`, so anything else fails here first.
+        component = length(address) >= 4 ? address[4] : nothing
+        slots = filter(s -> s.class === class && s.component === component,
+                       _brm_term_prior_slots(getf(term)))
+        isempty(slots) && error(
+            "$prefix: `$spelling` — `$(nameof(getf(term)))` has no " *
+            "$(_brm_term_prior_class(Val(class))) to predict")
+        f = getf(term)
+        if f === gp
+            error("$prefix: `$spelling` predicts a `gp(...)` hyperparameter, " *
+                  "which is not supported; use `hsgp(...)`")
+        elseif f !== hsgp
+            error("$prefix: `$spelling` — hyper-predictors support only " *
+                  "`hsgp(...)` terms, got `$(nameof(f))`")
+        end
+        kw = getkwargs(term)
+        _sb_gp_cov(kw, :hsgp) === :periodic && error(
+            "$prefix: `$spelling` — hyper-predictors do not support " *
+            "`hsgp(...; cov=:periodic)`")
+        _sb_gp_iso(kw, :hsgp) || error(
+            "$prefix: `$spelling` — hyper-predictors need one length scale " *
+            "per group (`iso=true`); anisotropic `iso=false` is not supported")
+        # A distribution RHS confuses a hyper-predictor with a term prior.
+        # Point back at the prior spelling, which drops `log(...)`.
+        rhs isa ExprColumn && getf(rhs) isa Type && error(
+            "$prefix: hyper-predictor `$spelling` needs a predictor formula " *
+            "RHS such as `1 + (1 | g)`; got a distribution. To set a fixed " *
+            "prior on the sampled hyperparameter, drop `log(...)`: " *
+            "`$spelling ~ LogNormal(0, 1)`")
+        intercept = false
+        ranefs = Symbol[]
+        for t in _brm_additive_terms(rhs)
+            if t isa Integer
+                t == 1 || error(
+                    "$prefix: hyper-predictor `$spelling` — `~ $t` is not " *
+                    "a hyper-predictor formula; use `1` and `(1 | group)` terms")
+                intercept = true
+            elseif t isa ExprColumn && getf(t) === (|)
+                push!(ranefs, _sb_hyper_ranef_group(t, spelling, term_key, kw;
+                                                   prefix))
+            elseif t isa ExprColumn && getf(t) === doublepipe
+                error("$prefix: hyper-predictor `$spelling` uses uncorrelated " *
+                      "`||`; hyper random effects use `|`")
+            elseif t isa ExprColumn && (getf(t) === s || getf(t) === t2)
+                error("$prefix: hyper-predictor `$spelling` cannot use a " *
+                      "smooth term; hyper-predictors accept only `1` and " *
+                      "`(1 | group)` over the term's grouping")
+            else
+                error("$prefix: hyper-predictor `$spelling` cannot use `$t`; " *
+                      "population slopes need level-grid covariate semantics " *
+                      "that are not decided yet — use `1` and `(1 | group)`")
+            end
+        end
+        (intercept || !isempty(ranefs)) || error(
+            "$prefix: hyper-predictor `$spelling` needs at least an " *
+            "intercept `1` or a random effect `(1 | group)`")
+        length(unique(ranefs)) == length(ranefs) || error(
+            "$prefix: hyper-predictor `$spelling` repeats a random-effect " *
+            "grouping; each group may appear once")
+        push!(plans, (; key, lp, term_key, term, hyper, spelling, intercept,
+                      ranefs))
+    end
+    seen = Set()
+    for p in plans
+        k = (p.lp, p.term_key, p.hyper)
+        k in seen && error(
+            "$prefix: duplicate hyper-predictor `$(p.spelling)` — one " *
+            "hyper-predictor statement per (predictor, term, hyperparameter)")
+        push!(seen, k)
+    end
+    Tuple(plans)
+end
+
+function _sb_hyper_plan_for(plans, hyper)
+    i = findfirst(p -> p.hyper === hyper, plans)
+    isnothing(i) ? nothing : plans[i]
+end
+
+# ---- hyper-predictor lowering (B2) ------------------------------------------
+#
+# A validated plan replaces its hyper's shared sampled scalar with per-group
+# predictions from the hyper linear predictor. Grouped terms lower through a
+# generated submodel (the per-group loop is structural); ungrouped terms
+# merge four statements onto today's submodel (one scalar, no structure
+# change). In both cases an explicit `length_scale`/`sd` prior statement
+# retargets from the sampled scalar to the hyper-LP intercept; a model with
+# no plans keeps today's code path byte for byte.
+#
+# Defaults (flagged: the adopted decision names today's LogNormal(0,1) as the
+# reference; on the log scale that is Normal(0,1), which is what an
+# intercept-only hyper-LP must carry to reproduce today's predictive prior
+# exactly — a literal LogNormal intercept would constrain it positive):
+# intercept ~ Normal(0,1), ranef SD ~ half-Normal(0,1), NCP deviations.
+# The per-group loop lives in the `@stanonly brm_hsgp_by_hyper_S` deffun
+# (`@slic` bodies cannot contain control flow); it rebuilds its row mask
+# from `group_idx` at Stan runtime, so no hyper data is emitted and replay
+# needs no new preproc entry.
+function _sb_hyper_names(hyper)
+    hyper === :length_scale && return (; beta=:beta0_rho, sd=:sd_rho,
+        z=:z_rho, r=:r_rho, eta=:eta_rho, sampled=:rho_iso)
+    hyper === :sd && return (; beta=:beta0_sigma, sd=:sd_sigma, z=:z_sigma,
+        r=:r_sigma, eta=:eta_sigma, sampled=:sigma)
+    error("sbimpl: internal error — unknown hyper `$hyper`")
+end
+
+function _sb_hyper_param_stmts!(body, hyper, plan)
+    nm = _sb_hyper_names(hyper)
+    vec = hyper === :length_scale ? :rho_vec : :sigma_vec
+    if isnothing(plan)
+        # Mixed model: this hyper keeps today's shared sampled scalar,
+        # broadcast to one value per group for the uniform deffun call.
+        if hyper === :length_scale
+            push!(body, :($(nm.sampled) ~ lognormal(0., 1.; lower=rho_lower)))
+        else
+            push!(body, :($(nm.sampled) ~ lognormal(0., 1.; lower=0.)))
+        end
+        push!(body, :($vec = rep_vector($(nm.sampled), G)))
+        return nothing
+    end
+    plan.intercept && push!(body, :($(nm.beta) ~ normal(0., 1.)))
+    if !isempty(plan.ranefs)
+        push!(body, :($(nm.sd) ~ normal(0., 1.; lower=0.)))
+        push!(body, :($(nm.z) ~ std_normal(; n=G)))
+        push!(body, :($(nm.r) = $(nm.sd) * $(nm.z)))
+        eta_rhs = plan.intercept ? :($(nm.beta) + $(nm.r)) : nm.r
+        push!(body, :($(nm.eta) = $eta_rhs))
+    else
+        # B1 guarantees an intercept when there is no ranef.
+        push!(body, :($(nm.eta) = rep_vector($(nm.beta), G)))
+    end
+    # Vectorized link inversion; the rho floor applies per element inside
+    # the deffun (a `@slic` body cannot loop over groups).
+    push!(body, :($vec = exp($(nm.eta))))
+    nothing
+end
+
+function _sb_hyper_intercept_stmt(hyper, plan, cfg, spelling)
+    nm = _sb_hyper_names(hyper)
+    if isnothing(plan)
+        return _sb_gp_prior_stmt(nm.sampled, cfg)
+    end
+    plan.intercept || error(
+        "sbimpl: hyper-predictor `$spelling` has no intercept, but " *
+        "`$hyper(...)` sets an intercept prior; add `1` to the " *
+        "hyper-predictor or drop the prior statement")
+    _sb_gp_prior_stmt(nm.beta, cfg)
+end
+
+function _sb_hsgp_by_hyper_model(term_overrides, t, rho_plan, sigma_plan)
+    body = Any[]
+    _sb_hyper_param_stmts!(body, :length_scale, rho_plan)
+    _sb_hyper_param_stmts!(body, :sd, sigma_plan)
+    push!(body, :(S = brm_hsgp_by_hyper_S(
+        PHI, omega2, group_idx, rho_vec, sigma_vec, rho_lower)))
+    push!(body, :(return rows_dot_product(S, beta[group_idx, :])))
+    base = StanBlocks.SlicModel(Expr(:block, body...), Dict{Symbol,Any}(),
+                                @__MODULE__)
+    stmts = Any[]
+    rho_cfg = _sb_term_cfg(term_overrides, t, :length_scale)
+    isnothing(rho_cfg) || push!(stmts, _sb_hyper_intercept_stmt(
+        :length_scale, rho_plan, rho_cfg,
+        isnothing(rho_plan) ? "" : rho_plan.spelling))
+    sigma_cfg = _sb_term_cfg(term_overrides, t, :sigma)
+    isnothing(sigma_cfg) || push!(stmts, _sb_hyper_intercept_stmt(
+        :sd, sigma_plan, sigma_cfg,
+        isnothing(sigma_plan) ? "" : sigma_plan.spelling))
+    isempty(stmts) && return base
+    Base.merge(base, stmts...)
+end
+
+# Ungrouped scalar variant: one predicted value, so four spliced statements
+# onto today's submodel — no generator, no duplication of the base.
+function _sb_gp_hyper_submodel_expr(submodel::Symbol, term_overrides, t,
+                                    rho_plan, sigma_plan)
+    base = _sb_gp_submodel(Val(submodel))
+    stmts = Any[]
+    for (hyper, plan, det) in ((:length_scale, rho_plan,
+                                :(rho_iso = fmax(exp(beta0_rho), rho_lower))),
+                               (:sd, sigma_plan, :(sigma = exp(beta0_sigma))))
+        isnothing(plan) && continue
+        isempty(plan.ranefs) || error(
+            "sbimpl: internal error — hyper ranef reached ungrouped lowering " *
+            "(B1 should have refused it)")
+        nm = _sb_hyper_names(hyper)
+        plan.intercept || error(
+            "sbimpl: internal error — ungrouped hyper-predictor without " *
+            "intercept or ranef (B1 should have refused it)")
+        push!(stmts, :($(nm.beta) ~ normal(0., 1.)))
+        push!(stmts, det)
+    end
+    rho_cfg = _sb_term_cfg(term_overrides, t, :length_scale)
+    isnothing(rho_cfg) || push!(stmts, _sb_hyper_intercept_stmt(
+        :length_scale, rho_plan, rho_cfg,
+        isnothing(rho_plan) ? "" : rho_plan.spelling))
+    sigma_cfg = _sb_term_cfg(term_overrides, t, :sigma)
+    isnothing(sigma_cfg) || push!(stmts, _sb_hyper_intercept_stmt(
+        :sd, sigma_plan, sigma_cfg,
+        isnothing(sigma_plan) ? "" : sigma_plan.spelling))
+    Base.merge(base, stmts...)
+end
 
 # The three penalty blocks of a tensor smooth, in the order `_sb_t2` samples
 # them. Fixed here so the public component name and the vector index cannot
@@ -10144,6 +10514,14 @@ end
 _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
                     term_overrides=Dict{Symbol,Any}(), target=nothing, kwargs...) = begin
     args = getargs(t); kw = getkwargs(t)
+    # Hyper-predictor plans for this term (B1 validated them; each branch
+    # below lowers or loudly refuses its shape). A plan can never silently
+    # drop to shared sampled hyperparameters: every branch checks.
+    if isnothing(target) && !isempty(_sb_hyper_plans(data))
+        error("sbimpl: internal error — hyper-predictor plans need the " *
+              "owning linear predictor (`target=nothing`)")
+    end
+    hyper_plans = _sb_hyper_plans_for(data, target, _sb_term_key(t))
     _check_term_kwargs(hsgp, kw)
     isempty(args) && error("sbimpl: `hsgp(x...)` expects at least one positional axis")
     names, backings, raw = _sb_hsgp_raw_axes(args)
@@ -10171,6 +10549,9 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     iso = _sb_gp_iso(kw, :hsgp)
 
     if !is_raw
+        isempty(hyper_plans) || error(
+            "sbimpl: hyper-predictors on a model-derived `hsgp(...)` axis " *
+            "are not supported")
         n_axes == 1 || error(
             "sbimpl: model-derived `hsgp(...)` currently supports exactly one axis")
         iso || error(
@@ -10241,11 +10622,30 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
              omega2_key=omega2_name, rho_lower_key=rho_lower_name),
             names, false))
         col_name = Symbol(:hsgp_, suffix, :_by_, gname)
-        submodel = _sb_gp_submodel_expr(
-            iso ? :_sb_hsgp_by : :_sb_hsgp_by_aniso, term_overrides, t)
-        push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
-            submodel, term_overrides, t; PHI=PHI_name, omega2=omega2_name,
-            rho_lower=rho_lower_name, beta=info.block_name, group_idx=info.idx_name)))
+        rho_plan = _sb_hyper_plan_for(hyper_plans, :length_scale)
+        sigma_plan = _sb_hyper_plan_for(hyper_plans, :sd)
+        if isnothing(rho_plan) && isnothing(sigma_plan)
+            submodel = _sb_gp_submodel_expr(
+                iso ? :_sb_hsgp_by : :_sb_hsgp_by_aniso, term_overrides, t)
+            push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
+                submodel, term_overrides, t; PHI=PHI_name, omega2=omega2_name,
+                rho_lower=rho_lower_name, beta=info.block_name, group_idx=info.idx_name)))
+        else
+            iso || error("sbimpl: internal error — hyper-predictor reached " *
+                         "aniso grouped emission (B1 should have refused it)")
+            # Level count, stashed by prepass 2.5 under the same
+            # `Symbol(:n_, gname)` convention `_sb_ensure_group_data!` uses.
+            G_name = Symbol(:n_, gname)
+            haskey(data, G_name) || error(
+                "sbimpl: internal error — hyper-predictor needs `$G_name`, " *
+                "which prepass 2.5 should have stashed")
+            submodel = _sb_hsgp_by_hyper_model(
+                term_overrides, t, rho_plan, sigma_plan)
+            push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
+                submodel, term_overrides, t; PHI=PHI_name, omega2=omega2_name,
+                rho_lower=rho_lower_name, beta=info.block_name,
+                group_idx=info.idx_name, G=G_name)))
+        end
         return col_name
     end
 
@@ -10273,7 +10673,16 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     else
         iso ? :_sb_hsgp : :_sb_hsgp_aniso
     end
-    submodel = _sb_gp_submodel_expr(submodel_name, term_overrides, t)
+    rho_plan = _sb_hyper_plan_for(hyper_plans, :length_scale)
+    sigma_plan = _sb_hyper_plan_for(hyper_plans, :sd)
+    if isnothing(rho_plan) && isnothing(sigma_plan)
+        submodel = _sb_gp_submodel_expr(submodel_name, term_overrides, t)
+    else
+        iso || error("sbimpl: internal error — hyper-predictor reached " *
+                     "aniso ungrouped emission (B1 should have refused it)")
+        submodel = _sb_gp_hyper_submodel_expr(
+            submodel_name, term_overrides, t, rho_plan, sigma_plan)
+    end
     call = partial ? _sb_term_model_call(
         submodel, term_overrides, t; PHI=PHI_name, omega2=omega2_name,
         rho_lower=rho_lower_name, centeredness=centeredness_name) :

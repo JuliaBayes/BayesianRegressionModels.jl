@@ -90,3 +90,24 @@ end
     end)(data))
     @test Turing.logjoint(backend.model, (; y_cutpoints=Float64[])) == 0
 end
+
+@testset "generic mixture likelihoods retain density, pointwise, and RNG" begin
+    data = (; y=[-2.0, -1.8, 1.9, 2.2])
+    builder = @brm begin
+        mu1 ~ Normal(-2, 0.1)
+        mu2 ~ Normal(2, 0.1)
+        log(sigma) ~ 1
+        y ~ MixtureModel([
+            Normal(mu1, exp(log(sigma))),
+            Normal(mu2, exp(log(sigma))),
+        ], [0.4, 0.6])
+    end
+    backend = TuringBRMI(builder(data))
+    parameters = (; mu1=-2.0, mu2=2.0, beta_pop=[log(0.3)])
+    mixture = MixtureModel([Normal(-2.0, 0.3), Normal(2.0, 0.3)], [0.4, 0.6])
+    expected = logpdf.(mixture, data.y)
+    @test Turing.loglikelihood(backend.model, parameters) ≈ sum(expected)
+    @test turing_pointwise_loglikelihoods(backend, parameters).y ≈ expected
+    @test length(turing_posterior_predictive(
+        Xoshiro(42), backend, parameters).y) == length(data.y)
+end

@@ -208,35 +208,45 @@ blocks either; they have their own metadata contract in
 [`_adaptive_cdar_centering_blocks`](@ref) and join the online plan through the
 WarmupHMC extension exactly like the ungrouped-HSGP companion below.
 """
+# One block's frame: the same name spells the whole-file loop uses, factored
+# so centered replay (prediction.jl) resolves ONE block's hyperparameters
+# without tripping over a sibling this contract skips or refuses. Returns
+# `nothing` for a family outside both sets; stratified blocks raise rather
+# than being silently left fixed.
+function _adaptive_block(ranef::RanefBlock, unc_names, pos)
+    ranef.family in _ADAPTIVE_STRATIFIED_FAMILIES && error(
+        "BRM adaptive centering: stratified block `$(ranef.binding)` ",
+        "(`$(ranef.family)`, group `$(ranef.group)`, by `$(ranef.by)`) is ",
+        "not supported by the first correlated-block contract. It has one ",
+        "Cholesky/scale frame per stratum and must not be treated as an ",
+        "ordinary single-frame block.",
+    )
+    is_intercept = ranef.family in _ADAPTIVE_INTERCEPT_FAMILIES
+    is_correlated = ranef.family in _ADAPTIVE_CORRELATED_FAMILIES
+    (is_intercept || is_correlated) || return nothing
+    K = ranef.n_terms
+    n_cholesky = K * (K - 1) ÷ 2
+    binding = ranef.binding
+    cholesky_names = is_intercept ? String[] :
+        ["$(binding)_L.$i" for i in 1:n_cholesky]
+    scale_names = is_intercept ? ["$(binding)_log_scale"] :
+        ["$(binding)_tau.$i" for i in 1:K]
+    target_c = ranef.noncentered ? 0.0 : 1.0
+    AdaptiveCenteringBlock(
+        ranef,
+        target_c,
+        ranef_coordinates(ranef, unc_names),
+        _adaptive_named_indices(pos, cholesky_names, binding, "Cholesky"),
+        _adaptive_named_indices(pos, scale_names, binding, "scale"),
+    )
+end
+
 function adaptive_centering_blocks(model, unc_names)
     pos = _ranef_name_positions(unc_names)
     out = AdaptiveCenteringBlock[]
     for ranef in ranef_blocks(model)
-        ranef.family in _ADAPTIVE_STRATIFIED_FAMILIES && error(
-            "BRM adaptive centering: stratified block `$(ranef.binding)` ",
-            "(`$(ranef.family)`, group `$(ranef.group)`, by `$(ranef.by)`) is ",
-            "not supported by the first correlated-block contract. It has one ",
-            "Cholesky/scale frame per stratum and must not be treated as an ",
-            "ordinary single-frame block.",
-        )
-        is_intercept = ranef.family in _ADAPTIVE_INTERCEPT_FAMILIES
-        is_correlated = ranef.family in _ADAPTIVE_CORRELATED_FAMILIES
-        (is_intercept || is_correlated) || continue
-        K = ranef.n_terms
-        n_cholesky = K * (K - 1) ÷ 2
-        binding = ranef.binding
-        cholesky_names = is_intercept ? String[] :
-            ["$(binding)_L.$i" for i in 1:n_cholesky]
-        scale_names = is_intercept ? ["$(binding)_log_scale"] :
-            ["$(binding)_tau.$i" for i in 1:K]
-        target_c = ranef.noncentered ? 0.0 : 1.0
-        push!(out, AdaptiveCenteringBlock(
-            ranef,
-            target_c,
-            ranef_coordinates(ranef, unc_names),
-            _adaptive_named_indices(pos, cholesky_names, binding, "Cholesky"),
-            _adaptive_named_indices(pos, scale_names, binding, "scale"),
-        ))
+        blk = _adaptive_block(ranef, unc_names, pos)
+        isnothing(blk) || push!(out, blk)
     end
 
     claimed = Int[]
@@ -806,6 +816,22 @@ function _adaptive_block_cholesky(x::AbstractVector, block::AdaptiveCenteringBlo
     L = _adaptive_cholesky_corr(x[block.cholesky_free], K)
     tau = exp.(x[block.log_scales])
     tau .* L
+end
+
+# The per-draw model-scale factor `C` with fresh effect `b = C * z`,
+# reconstructed from one unconstrained draw with no BridgeStan call. Correlated
+# blocks rebuild `tau .* L` above; a scalar `(1 | g)` intercept block has no
+# Cholesky and its scale is `exp(log_scale)`, so it is the 1×1 factor. Shared
+# by centered replay (prediction.jl); the WarmupHMC online path calls
+# `_adaptive_block_cholesky` directly and never reaches the intercept branch.
+function _adaptive_block_cov_chol(x::AbstractVector, block::AdaptiveCenteringBlock)
+    if block.ranef.family in _ADAPTIVE_INTERCEPT_FAMILIES
+        block.ranef.n_terms == 1 || error(
+            "BRM adaptive centering: intercept block `$(block.ranef.binding)` ",
+            "has $(block.ranef.n_terms) terms; the scalar scale path needs one.")
+        return fill(exp(x[only(block.log_scales)]), 1, 1)
+    end
+    _adaptive_block_cholesky(x, block)
 end
 
 """

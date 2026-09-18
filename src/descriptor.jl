@@ -891,12 +891,14 @@ end
 
 function brm_descriptor(builder::Function, df;
                         mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
+                        centered_groups=Set{Symbol}(),
                         total_groups=:auto, held_out=(),
                         name::Union{Nothing,Symbol}=nothing,
                         operations=Dict{Symbol,Any}(),
                         titles=Dict{Symbol,String}(),
                         highlights=())
-    brm_descriptor(generative_plan(builder, df; mod, cv_groups, total_groups, held_out);
+    brm_descriptor(generative_plan(builder, df; mod, cv_groups, centered_groups,
+                                   total_groups, held_out);
                    name, operations, titles, highlights)
 end
 

@@ -149,10 +149,15 @@ end
     centered_adaptive = only(adaptive_centering_blocks(centered, centered_unc_names))
     @test centered_adaptive.target_c == 1.0
     @test size(centered_adaptive.effects) == (3, 3)
-    @test_throws "NON-CENTERED" population_draws(
+    # Centered blocks zero like any other: the coordinate IS the effect, so
+    # `population_draws` zeroes exactly it (snag centered-replay-dd30b327).
+    centered_pop = population_draws(
         centered, ones(1, length(centered_unc_names)), centered_unc_names;
         groups=:subject,
     )
+    centered_coords = vec(ranef_coordinates(centered_block, centered_unc_names))
+    @test all(iszero, centered_pop[:, centered_coords])
+    @test all(isone, centered_pop[:, setdiff(eachindex(centered_unc_names), centered_coords)])
     if RANEF_EFFECT_RUNTIME
         isdir(RANEF_EFFECT_CACHE) || mkpath(RANEF_EFFECT_CACHE)
         centered_problem = StanBlocks.stan_instantiate(

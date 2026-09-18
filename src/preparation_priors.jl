@@ -41,6 +41,17 @@ end
 # catalogue of constructors accepted by one backend.
 _brm_distribution_shape(::Type{D}, _args) where {D<:Distribution} =
     (Distributions.variate_form(D), Distributions.value_support(D))
+function _brm_distribution_shape(::Type{<:MixtureModel}, args)
+    length(args) >= 1 || error(
+        "BRM preparation: MixtureModel needs at least one component")
+    components = first(args)
+    components isa AbstractVector && !isempty(components) || error(
+        "BRM preparation: MixtureModel components must be a nonempty vector")
+    shapes = map(_brm_distribution_shape, components)
+    all(==(first(shapes)), shapes) || error(
+        "BRM preparation: MixtureModel components must share one variate shape")
+    first(shapes)
+end
 function _brm_distribution_shape(::Type{<:LocationScale}, args)
     length(args) == 3 || error("BRM preparation: LocationScale expects three arguments")
     _brm_distribution_shape(last(args))
