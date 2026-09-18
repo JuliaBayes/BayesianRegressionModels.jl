@@ -107,39 +107,64 @@ end
 
 @testset "factors and ref gating" begin
     brmi = @brm df begin
-        mu ~ 1 + factor(g; ref=1)
+        mu ~ 0 + g
+        effect(mu, g) ~ Normal(0, 2)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
     ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
     @test ast isa Expr
+    @test Expr(:call, :.~,
+        Expr(:ref, :mu_b1, Expr(:call, :levels, :g)),
+        Expr(:., :Normal, Expr(:tuple, 0.0, 2.0))) in ast.args
+    affine = only(a for a in ast.args if a isa Expr && a.head === :(=))
+    @test affine == Expr(:(=), :mu, Expr(:ref, :mu_b1, :g))
+    # Subsets under an intercept drop the reference position: edge drops
+    # spell as literal ranges, middle drops as literal index lists.
+    brmi = @brm df begin
+        mu ~ 1 + factor(g; ref=3)
+        effect(mu, g) ~ Normal(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test Expr(:call, :.~,
+        Expr(:ref, :mu_b2, Expr(:ref, Expr(:call, :levels, :g),
+            Expr(:call, :(:), 1, 2))),
+        Expr(:., :Normal, Expr(:tuple, 0.0, 2.0))) in ast.args
     affine = only(a for a in ast.args if a isa Expr && a.head === :(=))
     @test affine == Expr(:(=), :mu, Expr(:call, :.+,
         :mu_b1, Expr(:ref, :mu_b2, :g)))
-    priors = [a for a in ast.args if a isa Expr && a.head === :call &&
-        length(a.args) == 3 && a.args[1] === :~ &&
-        a.args[2] in (:mu_b1, :mu_b2)]
-    @test length(priors) == 2
-    # Non-1 refs pin via treatment(g, ref).
     brmi = @brm df begin
-        mu ~ 1 + factor(g; ref=3)
+        mu ~ 1 + factor(g; ref=2)
+        effect(mu, g) ~ Normal(0, 2)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
     ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
-    affine = only(a for a in ast.args if a isa Expr && a.head === :(=))
-    @test affine == Expr(:(=), :mu, Expr(:call, :.+,
-        :mu_b1, Expr(:ref, :mu_b2, Expr(:call, :treatment, :g, 3))))
-    # String refs lower to the same sort-order treatment index.
+    @test Expr(:call, :.~,
+        Expr(:ref, :mu_b2, Expr(:ref, Expr(:call, :levels, :g),
+            Expr(:vect, 1, 3))),
+        Expr(:., :Normal, Expr(:tuple, 0.0, 2.0))) in ast.args
+    # String refs lower to the same sort-order drop position.
     brmi = @brm df begin
         mu ~ 1 + factor(gs; ref="c")
+        effect(mu, gs) ~ Normal(0, 2)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
     ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
-    affine = only(a for a in ast.args if a isa Expr && a.head === :(=))
-    @test affine == Expr(:(=), :mu, Expr(:call, :.+,
-        :mu_b1, Expr(:ref, :mu_b2, Expr(:call, :treatment, :gs, 3))))
+    @test Expr(:call, :.~,
+        Expr(:ref, :mu_b2, Expr(:ref, Expr(:call, :levels, :gs),
+            Expr(:call, :(:), 1, 2))),
+        Expr(:., :Normal, Expr(:tuple, 0.0, 2.0))) in ast.args
+    # A bare factor under an intercept never reaches the surface.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + g
+        effect(mu, g) ~ Normal(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
 end
 
 @testset "derived definitions" begin
@@ -177,9 +202,11 @@ end
         y ~ Normal(mu, s)
     end
     ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
-    @test ast.args[1] == Expr(:(=), :int_x_x_g_lvl_2,
+    @test ast.args[1] == Expr(:(=), :int_x_x_g_lvl_1,
+        Expr(:call, :.*, :x, Expr(:call, :.==, :g, 1)))
+    @test ast.args[2] == Expr(:(=), :int_x_x_g_lvl_2,
         Expr(:call, :.*, :x, Expr(:call, :.==, :g, 2)))
-    @test ast.args[2] == Expr(:(=), :int_x_x_g_lvl_3,
+    @test ast.args[3] == Expr(:(=), :int_x_x_g_lvl_3,
         Expr(:call, :.*, :x, Expr(:call, :.==, :g, 3)))
 end
 
