@@ -68,7 +68,10 @@ end
 struct _RKTermSpec
     kind::Symbol # :intercept | :continuous | :factor | :offset
     columns::Vector{Symbol}
-    options::NamedTuple # factor: (contrasts=:treatment, ref::Int, levels=:observed)
+    # factor: (coding=:fullrank, levels=:observed) over every observed level,
+    # or (coding=:subset, drop::Int, levels=:observed) over every observed
+    # level but the `drop`-th (thin-layer `levels(g)` sort order).
+    options::NamedTuple
     addressee::Symbol
     label::Symbol
 end
@@ -131,13 +134,28 @@ Base.parent(x::RKBRMI) = x.parent
 structure_of(x::RKBRMI) = structure_of(parent(x))
 priors_of(x::RKBRMI) = priors_of(parent(x))
 
+# Thin-layer `levels(g)` order, mirrored exactly (sort of observed values;
+# `CategoricalValue`/non-`String` rows string-normalize, as in the thin
+# layer's `_grouping_levels`). Every position below (subset drops,
+# coefficient counts) is a position in THIS order.
+function _rk_grouping_levels(col::AbstractVector)
+    v = first(col)
+    if v isa CA.CategoricalValue ||
+            (v isa AbstractString && !isa(v, String))
+        return sort!(unique!(string.(col)))
+    end
+    return sort(unique(col))
+end
+
 function _rk_num_coefficients(plan::_RKStructuralPlan)
     total = 0
     for predictor in plan.predictors, term in predictor.terms
         if term.kind === :intercept || term.kind === :continuous
             total += 1
         elseif term.kind === :factor
-            total += length(sort!(unique(plan.columns[only(term.columns)]))) - 1
+            width = length(_rk_grouping_levels(
+                plan.columns[only(term.columns)]))
+            total += term.options.coding === :fullrank ? width : width - 1
         end
     end
     total
@@ -430,23 +448,24 @@ function _rk_gate_evidence_values!(specs::AbstractVector,
     nothing
 end
 
-function _rk_factor_options(source::Symbol, raw::AbstractVector,
+# Factor columns cross as plain value vectors; a `CategoricalVector`
+# crosses string-normalized (the thin layer's `levels(g)` is observed-only
+# sort order, so declared-but-unobserved levels cannot cross).
+function _rk_factor_crossed(raw::AbstractVector)
+    raw isa CA.CategoricalVector ? string.(collect(raw)) : raw
+end
+
+# The thin-layer `levels(g)` position of `ref_value`, or a fail-closed
+# error naming the observed levels.
+function _rk_factor_ref_position(source::Symbol, crossed::AbstractVector,
         ref_value::Union{Integer,AbstractString}, target::Symbol)
     prefix = "RK backend"
-    fit_levels = collect(_brm_fit_levels(raw))
-    ref_value in fit_levels || error(
-        "$prefix: predictor `$target` factor `$source` ref `$ref_value` is " *
-        "not an observed level (levels: $(join(fit_levels, ", ")))")
-    # Factor columns cross as plain value vectors so both sides sort the same
-    # values; the thin layer indexes its sort-ordered levels from `ref`.
-    crossed = raw isa CA.CategoricalVector ? collect(raw) : raw
-    sort_levels = sort!(unique(crossed))
-    ref_index = findfirst(==(ref_value), sort_levels)
-    isnothing(ref_index) && error(
-        "$prefix: predictor `$target` factor `$source` ref level " *
-        "`$ref_value` is not observed; unused levels cannot be the " *
-        "reference in slice 1 (drop them or set an explicit observed `ref`)")
-    (contrasts=:treatment, ref=ref_index, levels=:observed), crossed
+    levels = _rk_grouping_levels(crossed)
+    pos = findfirst(==(ref_value), levels)
+    isnothing(pos) && error(
+        "$prefix: predictor `$target` factor `$source` ref `$ref_value` " *
+        "is not an observed level (levels: $(join(levels, ", ")))")
+    pos, length(levels)
 end
 
 # ---- provisional derived lowering (interactions, zscale-family, data exprs) ----
@@ -588,14 +607,14 @@ end
 
 function _rk_verify_derived_values!(expression, expected::AbstractVector,
         name::Symbol, target::Symbol, data::AbstractDict,
-        derived::Vector{_RKDerivedSpec})
+        derived::Vector{_RKDerivedSpec}; origin="shared lowering")
     prefix = "RK backend"
     got = _rk_eval_dotted(expression, data, derived, Dict{Symbol,Any}())
     got isa AbstractVector && length(got) == length(expected) &&
         all(isapprox.(Float64.(got), Float64.(expected);
             rtol=1e-9, atol=1e-12)) && return nothing
     error("$prefix: internal: derived column `$name` in `$target` " *
-          "disagrees with shared lowering values")
+          "disagrees with $origin values")
 end
 
 # Lower a BRM scalar data-expression node to thin-layer dotted AST. Returns
@@ -698,28 +717,24 @@ function _rk_lower_data_expr(node, target::Symbol, origin::String,
 end
 
 # Comparison atoms for one categorical operand: `(group .== value)` per
-# non-reference level, each with its 0/1 values. `recoded` carries the
-# shared treatment recode (identity for bare operands).
-function _rk_interaction_dummies(source::Symbol, raw_values::AbstractVector,
-        recoded::AbstractVector, levels::AbstractVector,
-        target::Symbol, origin::String)
-    prefix = "RK backend"
-    length(levels) >= 2 || error(
-        "$prefix: predictor `$target` $origin groups `$source` with a " *
-        "single observed level; slice 1 interactions need at least two")
+# level with its 0/1 values and `<source>_lvl_<k>` label (`k` the level's
+# position). Full-rank over every level: reference dropping left with the
+# treatment vocabulary. An unobserved declared level compares against its
+# own level value (an all-zero column, not a crash).
+function _rk_interaction_dummies(source::Symbol, values::AbstractVector,
+        levels::AbstractVector)
     lookup = Dict(level => i for (i, level) in enumerate(levels))
-    codes = Int[lookup[value] for value in recoded]
-    map(2:length(levels)) do level
-        rawval = raw_values[findfirst(==(level), codes)]
-        atom = Expr(:call, :.==, source, rawval)
-        atom, Float64.(codes .== level)
+    codes = Int[lookup[value] for value in values]
+    map(enumerate(levels)) do (i, lvl)
+        atom = Expr(:call, :.==, source, lvl)
+        atom, Float64.(codes .== i), Symbol(source, :_lvl_, i), true
     end
 end
 
-# Lower one `&` operand to a list of (atom, values): bare continuous
-# columns lower to their name, categorical operands to per-level
-# comparisons, nested forms to staged derived names (defs emitted as a
-# side effect). No terms or priors: operands feed the cross product.
+# Lower one `&` operand to a list of (atom, values, label, categorical):
+# bare continuous columns lower to their name, categorical operands to
+# per-level comparisons, nested forms to staged derived names (defs emitted
+# as a side effect). No terms or priors: operands feed the cross product.
 function _rk_interaction_side_atoms(side, target::Symbol, origin::String,
         data::AbstractDict, columns::Dict{Symbol,AbstractVector},
         derived::Vector{_RKDerivedSpec}, taken::Set{Symbol})
@@ -741,67 +756,26 @@ function _rk_interaction_side_atoms(side, target::Symbol, origin::String,
             values = collect(raw)
             levels = raw isa CA.CategoricalVector ?
                 collect(CA.levels(raw)) : sort!(unique(values))
-            return _rk_interaction_dummies(
-                source, values, values, levels, target, origin)
+            return _rk_interaction_dummies(source, values, levels)
         end
         raw isa AbstractVector{<:Real} && !(eltype(raw) <: Integer) ||
             error("$prefix: predictor `$target` $origin operand " *
                   "`$source` is neither continuous nor categorical")
-        return Any[(source, raw)]
+        return Any[(source, raw, source, false)]
     end
     side isa ExprColumn || error(
         "$prefix: predictor `$target` $origin operand is not supported " *
         "in slice 1")
     f = getf(side)
-    if f === factor
-        args = getargs(side)
-        length(args) == 1 || error(
-            "$prefix: predictor `$target` $origin `factor()` needs " *
-            "exactly one argument")
-        inner = only(args)
-        inner isa NamedColumn && parent(inner) isa DataColumn || error(
-            "$prefix: predictor `$target` $origin `factor()` needs a " *
-            "raw data column")
-        source = name(inner)
-        haskey(data, source) || error(
-            "$prefix: predictor `$target` $origin `factor()` column " *
-            "`$source` is not bound data")
-        raw = data[source]
-        raw isa AbstractVector && _brm_is_categorical_data(raw) || error(
-            "$prefix: predictor `$target` $origin `factor()` column " *
-            "`$source` must be categorical")
-        _brm_is_string_categorical_data(raw) && error(
-            "$prefix: predictor `$target` $origin over string grouping " *
-            "column `$source` is out of slice 1 (mixed interactions " *
-            "need in-graph level codes)")
-        kwargs = getkwargs(side)
-        all(k -> k === :ref || k === :cmc, keys(kwargs)) || error(
-            "$prefix: predictor `$target` $origin `factor()` takes " *
-            "only `ref`/`cmc`")
-        raw_values = raw isa CA.CategoricalVector ?
-            [CA.levels(raw)[code] for code in Int.(CA.levelcode.(raw))] :
-            collect(raw)
-        eltype(raw_values) <: Integer || error(
-            "$prefix: predictor `$target` $origin `factor()` column " *
-            "`$source` has non-integer levels")
-        ref_raw = get(kwargs, :ref, 1)
-        ref_raw isa Integer || error(
-            "$prefix: predictor `$target` $origin `factor()` ref must " *
-            "be an integer level value")
-        1 <= ref_raw <= maximum(raw_values) || error(
-            "$prefix: predictor `$target` $origin `factor()` ref " *
-            "`$ref_raw` out of range (max level $(maximum(raw_values)))")
-        recoded = ref_raw == 1 ? raw_values :
-            Int[value == ref_raw ? 1 : value == 1 ? ref_raw : value
-                for value in raw_values]
-        levels = sort!(unique(recoded))
-        return _rk_interaction_dummies(
-            source, raw_values, recoded, levels, target, origin)
-    end
+    f === factor && error(
+        "$prefix: predictor `$target` $origin `factor()` is not " *
+        "admitted inside `&` operands (interaction coding is always " *
+        "full-rank there); use the bare grouping column")
     if f === (&)
         nested = _rk_interaction_columns(side, target, origin, data,
             columns, derived, taken)
-        return Any[(name, values) for (name, values, _) in nested]
+        return Any[(name, values, label, false)
+                   for (name, values, label) in nested]
     end
     if f === zscale || f === center || f === standardize
         sargs = getargs(side)
@@ -811,7 +785,7 @@ function _rk_interaction_side_atoms(side, target::Symbol, origin::String,
         vname = _rk_staged_transform(f, only(sargs), target, origin,
             data, columns, derived, taken)
         return Any[(vname, _rk_eval_dotted(
-            vname, data, derived, Dict{Symbol,Any}()))]
+            vname, data, derived, Dict{Symbol,Any}()), vname, false)]
     end
     lowered, isvec = _rk_lower_data_expr(
         side, target, origin, data, columns, derived, taken)
@@ -822,7 +796,7 @@ function _rk_interaction_side_atoms(side, target::Symbol, origin::String,
         haskey(data, lowered) || error(
             "$prefix: internal: staged interaction operand `$lowered` " *
             "is not bound")
-        return Any[(lowered, data[lowered])]
+        return Any[(lowered, data[lowered], lowered, false)]
     end
     lowered isa Expr || error(
         "$prefix: internal: interaction operand lowered to " *
@@ -832,13 +806,15 @@ function _rk_interaction_side_atoms(side, target::Symbol, origin::String,
     _rk_push_derived!(derived, staged, lowered, staged, target)
     _rk_cross_derived_refs!(lowered, data, columns)
     Any[(staged, _rk_eval_dotted(
-        lowered, data, derived, Dict{Symbol,Any}()))]
+        lowered, data, derived, Dict{Symbol,Any}()), staged, false)]
 end
 
 # Shared `&` column builder used by top-level interaction terms and nested
-# `&` operands alike. Returns (name, values, label) per crossed pair,
-# aligned with shared `_brm_population_columns` order and verified
-# against shared values.
+# `&` operands alike. Returns (name, values, label) per crossed pair.
+# Shared `_brm_population_columns` stays treatment-coded, so the full-rank
+# cross decouples from it: labels mirror the shared
+# `int_<left>_x_<right>` scheme (continuous operand first) and every pair
+# verifies against its own sides' values.
 function _rk_interaction_columns(term, target::Symbol, origin::String,
         data::AbstractDict, columns::Dict{Symbol,AbstractVector},
         derived::Vector{_RKDerivedSpec}, taken::Set{Symbol})
@@ -850,28 +826,33 @@ function _rk_interaction_columns(term, target::Symbol, origin::String,
         data, columns, derived, taken)
     right = _rk_interaction_side_atoms(args[2], target, origin,
         data, columns, derived, taken)
-    shared = _brm_population_columns(term; cellmeans=false)
-    (!isnothing(shared) && !isempty(shared)) || error(
-        "$prefix: predictor `$target` $origin cannot be coded by shared " *
-        "lowering")
-    # Shared crosses `for l in left for r in right`; align by order and
-    # verify every pair against shared values.
-    atoms = [(latom, ratom)
-             for (latom, _) in left for (ratom, _) in right]
-    length(atoms) == length(shared) || error(
-        "$prefix: internal: interaction `$origin` crossing drifted " *
-        "($(length(atoms)) pairs, $(length(shared)) shared columns)")
-    map(zip(atoms, shared)) do ((latom, ratom), scol)
+    map([(l, r) for l in left for r in right]) do ((latom, lvalues,
+            llabel, lcat), (ratom, rvalues, rlabel, rcat))
         defexpr = Expr(:call, :.*, latom, ratom)
-        _rk_verify_derived_values!(defexpr, scol.values, scol.label,
-            target, data, derived)
+        label = lcat && !rcat ? Symbol(:int_, rlabel, :_x_, llabel) :
+            Symbol(:int_, llabel, :_x_, rlabel)
+        _rk_verify_derived_values!(defexpr, lvalues .* rvalues, label,
+            target, data, derived; origin="interaction side values")
         name = _rk_push_derived!(
-            derived, scol.label, defexpr, scol.label, target)
+            derived, label, defexpr, label, target)
         _rk_cross_derived_refs!(defexpr, data, columns)
         got = _rk_eval_dotted(
             defexpr, data, derived, Dict{Symbol,Any}())
-        name, got, scol.label
+        name, got, label
     end
+end
+
+# A `&` term whose every leaf operand is categorical: its full-rank dummy
+# cross partitions the rows, so it structurally spans the intercept.
+function _rk_cross_leaf_categorical(side, data::AbstractDict)
+    if side isa NamedColumn
+        raw = get(data, name(side), nothing)
+        return raw isa AbstractVector && _brm_is_categorical_data(raw)
+    end
+    side isa ExprColumn && getf(side) === (&) || return false
+    args = getargs(side)
+    length(args) == 2 || return false
+    return all(a -> _rk_cross_leaf_categorical(a, data), args)
 end
 
 # Lower a `center`/`zscale`/`standardize` inner form to the bare name of
@@ -937,7 +918,8 @@ end
 
 function _rk_term_specs(term, target::Symbol, data::AbstractDict,
         columns::Dict{Symbol,AbstractVector},
-        derived::Vector{_RKDerivedSpec}, taken::Set{Symbol})
+        derived::Vector{_RKDerivedSpec}, taken::Set{Symbol},
+        has_intercept::Bool)
     prefix = "RK backend"
     term isa Integer && term == 1 && return _RKTermSpec[_RKTermSpec(
         :intercept, Symbol[], (;), :Intercept, :Intercept)]
@@ -999,11 +981,39 @@ function _rk_term_specs(term, target::Symbol, data::AbstractDict,
         raw isa AbstractVector && _brm_is_categorical_data(raw) || error(
             "$prefix: predictor `$target` factor column `$source` must be " *
             "categorical (integer codes, strings, or a CategoricalVector)")
-        ref_value = get(kwargs, :ref, first(_brm_fit_levels(raw)))
-        ref_value isa Integer || ref_value isa AbstractString || error(
-            "$prefix: predictor `$target` `factor($source; ref=...)` ref " *
-            "must be an integer or string level value")
-        options, crossed = _rk_factor_options(source, raw, ref_value, target)
+        cmc = get(kwargs, :cmc, true)
+        cmc isa Bool || error(
+            "$prefix: predictor `$target` `factor($source; cmc=...)` " *
+            "expects `true` or `false`, got `$(repr(cmc))`")
+        crossed = _rk_factor_crossed(raw)
+        if has_intercept || !cmc
+            # A subset of the observed levels: under an intercept this is
+            # identified reference coding; with `cmc=false` and no
+            # intercept it pins the reference level at zero (unmapped
+            # rows contribute 0). `cmc` only switches intercept-free
+            # coding, so it is inert under an intercept.
+            ref_value = get(
+                kwargs, :ref, first(_rk_grouping_levels(crossed)))
+            ref_value isa Integer || ref_value isa AbstractString || error(
+                "$prefix: predictor `$target` " *
+                "`factor($source; ref=...)` ref must be an integer or " *
+                "string level value")
+            pos, K = _rk_factor_ref_position(
+                source, crossed, ref_value, target)
+            K == 1 && error(
+                "$prefix: predictor `$target` factor `$source` has a " *
+                "single observed level, so a reference subset is empty; " *
+                "drop the term" * (has_intercept ? " or the intercept" :
+                    " or use the bare column for its one cell mean"))
+            options = (coding=:subset, drop=pos, levels=:observed)
+        else
+            haskey(kwargs, :ref) && error(
+                "$prefix: predictor `$target` `factor($source; ref=...)` " *
+                "under `0 +` is full-rank over every observed level, so " *
+                "an explicit `ref` is meaningless (drop it, or set " *
+                "`cmc=false` to pin the level at zero)")
+            options = (coding=:fullrank, levels=:observed)
+        end
         columns[source] = crossed
         return _RKTermSpec[_RKTermSpec(
             :factor, [source], options, source, source)]
@@ -1018,11 +1028,17 @@ function _rk_term_specs(term, target::Symbol, data::AbstractDict,
         raw isa AbstractVector || error(
             "$prefix: predictor `$target` column `$source` is not a vector")
         if _brm_is_categorical_data(raw)
-            options, crossed = _rk_factor_options(
-                source, raw, first(_brm_fit_levels(raw)), target)
+            has_intercept && error(
+                "$prefix: predictor `$target` bare factor `$source` " *
+                "under an intercept is unidentified (full-rank covers " *
+                "every row); name an explicit reference " *
+                "(`factor($source; ref=...)`) or drop the intercept " *
+                "(`0 + ...`)")
+            crossed = _rk_factor_crossed(raw)
             columns[source] = crossed
             return _RKTermSpec[_RKTermSpec(
-                :factor, [source], options, source, source)]
+                :factor, [source],
+                (coding=:fullrank, levels=:observed), source, source)]
         end
         raw isa AbstractVector{<:Real} && !(eltype(raw) <: Integer) || error(
             "$prefix: predictor `$target` column `$source` is neither a " *
@@ -1100,7 +1116,8 @@ function _rk_term_specs(term, target::Symbol, data::AbstractDict,
 end
 
 function _rk_population_priors(brmi::BRMI, design, target::Symbol,
-        available::Tuple)
+        available::Tuple, factor_addressees::Set{Symbol},
+        terms::Vector{_RKTermSpec}, derived::Vector{_RKDerivedSpec})
     prefix = "RK backend"
     overrides = _brm_simple_population_effect_overrides(
         brmi, design; prefix, available_predictors=available)
@@ -1117,6 +1134,8 @@ function _rk_population_priors(brmi::BRMI, design, target::Symbol,
             "prior cannot have keywords in slice 1")
     end
     n = length(design.columns)
+    stated = isnothing(overrides) ? fill(false, n) :
+        Bool[!isnothing(cell) for cell in overrides]
     location, scale = _brm_materialize_normal_effect_priors(overrides, n;
         prefix)
     groups = Dict{Symbol,Vector{Int}}()
@@ -1145,17 +1164,72 @@ function _rk_population_priors(brmi::BRMI, design, target::Symbol,
     priors = _RKPopulationPrior[]
     for addressee in order
         idxs = groups[addressee]
+        if addressee in factor_addressees
+            all(stated[idxs]) || error(
+                "$prefix: predictor `$target` factor `$addressee` " *
+                "needs one explicit Normal prior on the whole block " *
+                "(e.g. `effect($target, $addressee) ~ Normal(0, 2)`); " *
+                "slice 1 has no default factor prior (the stated " *
+                "prior sizes the thin-layer block)")
+        end
         first_loc, first_scale = location[first(idxs)], scale[first(idxs)]
         all(i -> location[i] == first_loc && scale[i] == first_scale,
             idxs) || error(
             "$prefix: predictor `$target` addressee `$addressee` has " *
             "disagreeing population priors across its columns; slice 1 " *
             "needs one shared Normal per addressee (address the source " *
-            "column, not individual contrasts)")
+            "column, not individual levels)")
         push!(priors, _RKPopulationPrior(
             target, addressee, first_loc, first_scale))
     end
+    known = Set(order)
+    for term in terms
+        term.kind === :continuous || continue
+        term.addressee in known && continue
+        any(d -> d.name === term.addressee, derived) || error(
+            "$prefix: internal: addressee `$(term.addressee)` in " *
+            "`$target` has no shared design column")
+        # Full-rank-only interaction dummies (e.g. the reference level's)
+        # have no shared column — shared stays treatment-coded — so they
+        # take the emitter default. Explicit claims on these labels fail
+        # in the shared seam (unaddressable there); a future slice could
+        # bridge them, since the thin layer takes per-addressee priors
+        # for every block.
+        push!(known, term.addressee)
+        push!(priors, _RKPopulationPrior(target, term.addressee, 0.0, 1.0))
+    end
     priors
+end
+
+# Structural identifiability over full-cover groups: a bare (full-rank)
+# factor and a factor-only `&` cross each structurally span the
+# intercept, so an intercept admits neither, and an intercept-free
+# predictor admits at most one of them. Subsets never span.
+function _rk_gate_cover_identified!(terms::Vector{_RKTermSpec},
+        ordinary::Tuple, target::Symbol, data::AbstractDict,
+        has_intercept::Bool)
+    prefix = "RK backend"
+    fullrank = Symbol[only(t.columns) for t in terms
+        if t.kind === :factor && t.options.coding === :fullrank]
+    purecross = [term for term in ordinary
+        if term isa ExprColumn && getf(term) === (&) &&
+            _rk_cross_leaf_categorical(term, data)]
+    isempty(fullrank) && isempty(purecross) && return nothing
+    who = join([["`$s`" for s in fullrank];
+        ["`$t`" for t in purecross]], ", ")
+    if has_intercept
+        fixes = String["drop the intercept (`0 + ...`)"]
+        isempty(fullrank) || pushfirst!(fixes,
+            "name an explicit reference (`factor(g; ref=...)`)")
+        error("$prefix: predictor `$target` combines an intercept with " *
+              "full-cover group(s) $who — unidentified (each covers " *
+              "every row); " * join(fixes, " or "))
+    end
+    length(fullrank) + length(purecross) >= 2 || return nothing
+    error("$prefix: predictor `$target` has full-cover groups $who " *
+          "without an intercept — mutually collinear (each covers every " *
+          "row); keep one full-cover group and subset the rest " *
+          "(`factor(...; ref=..., cmc=false)` pins a level at zero)")
 end
 
 function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
@@ -1178,19 +1252,17 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
     ordinary = Tuple(t for t in raw_terms if !(t in structured) && !(t in grouped))
     isempty(ordinary) && error(
         "$prefix: predictor `$target` has no terms")
-    cellmeans = _brm_cellmeans_block(ordinary; implicit_intercept=false)
-    isnothing(cellmeans) || error(
-        "$prefix: predictor `$target` uses cell-means coding (categorical " *
-        "without an intercept); slice 1 needs treatment contrasts — add an " *
-        "intercept or opt the categorical into treatment coding")
+    has_intercept = any(t -> t isa Integer && t == 1, ordinary)
     # Classify before building geometry: fail fast on unknown terms with RK
     # attribution, before shared machinery can throw undecorated errors.
     # One term can lower to several specs (multi-column interactions).
     terms = _RKTermSpec[]
     for term in ordinary
         append!(terms, _rk_term_specs(term, target, context.data,
-            columns, derived, taken))
+            columns, derived, taken, has_intercept))
     end
+    _rk_gate_cover_identified!(
+        terms, ordinary, target, context.data, has_intercept)
     geometry = _brm_prepare_predictor_geometry(
         brmi, context, target; available_predictors=available)
     isempty(geometry.terms) || error(
@@ -1200,7 +1272,10 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
     isnothing(geometry.r2d2) || error(
         "$prefix: predictor `$target` `r2d2` priors are out of slice 1")
     design = geometry.component.design
-    priors = _rk_population_priors(brmi, design, target, available)
+    factor_addressees = Set{Symbol}(t.addressee
+        for t in terms if t.kind === :factor)
+    priors = _rk_population_priors(brmi, design, target, available,
+        factor_addressees, terms, derived)
     _RKPredictorSpec(target, link, terms, target), priors
 end
 
