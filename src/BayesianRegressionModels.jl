@@ -125,7 +125,8 @@ export AbstractColumn, MissingColumn, DataColumn, NamedColumn,
 export BRMI, VBRMI, SBBRMI, TuringBRMI, RKBRMI, GenerativeDeclaration, GenerativePlan,
        brm_distribution_type, turing_model_source,
        turing_pointwise_loglikelihoods, turing_predictive_model,
-       turing_generated_quantities, turing_posterior_predictive
+       turing_generated_quantities, turing_posterior_predictive,
+       rk_logdensity_problem, rk_restore_draws
 export NativePPL
 export BRMDescriptor, BRMInput, BRMOutput, BRMOperation, BRMHighlight
 export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,

@@ -1,6 +1,7 @@
 module BayesianRegressionModelsReactiveKernelsExt
 
 using BayesianRegressionModels
+using LogDensityProblems
 using ReactiveKernels
 using ReactiveKernelsPPL
 
@@ -133,6 +134,42 @@ end
 function BRM.RKBRMI(brmi::BRM.BRMI)
     plan = BRM._brm_rk_plan(brmi)
     BRM.RKBRMI(brmi, plan, BRM._brm_rk_model(plan))
+end
+
+# LogDensityProblems shim over the thin-layer sampler query: the packed
+# unconstrained coordinates are the sampler space, so no transform sits
+# between the sampler and the kernel. The `StructuralPlan` is re-serialized
+# from the BRM-side plan (pure and cheap) because `prepare_sampler` derives
+# its have/bound boundary from it; `model` stays exactly `build_kernel`
+# output.
+struct RKLogDensityProblem{Q<:SamplerQuery}
+    query::Q
+end
+
+function BRM.rk_logdensity_problem(backend::BRM.RKBRMI;
+        ad_backend,
+        u0=zeros(Float64, backend.model.layout.total))
+    translated = _rk_ppl_structural_plan(backend.plan)
+    query = prepare_sampler(backend.model, translated, u0; backend=ad_backend)
+    RKLogDensityProblem(query)
+end
+
+LogDensityProblems.capabilities(::Type{<:RKLogDensityProblem}) =
+    LogDensityProblems.LogDensityOrder{1}()
+LogDensityProblems.dimension(problem::RKLogDensityProblem) =
+    problem.query.layout.total
+LogDensityProblems.logdensity(problem::RKLogDensityProblem,
+        position::AbstractVector) = problem.query(position)
+function LogDensityProblems.logdensity_and_gradient(
+        problem::RKLogDensityProblem, position::AbstractVector)
+    u = position isa Vector{Float64} ? position : Vector{Float64}(position)
+    gradient = Vector{Float64}(undef, length(u))
+    value, _ = sampler_value_and_gradient!(problem.query, gradient, u)
+    value, gradient
+end
+
+function BRM.rk_restore_draws(backend::BRM.RKBRMI, U::AbstractMatrix)
+    restore_draws(backend.model.layout, U)
 end
 
 end

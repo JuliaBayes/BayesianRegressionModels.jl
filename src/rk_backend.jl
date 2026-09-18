@@ -125,6 +125,28 @@ Base.show(io::IO, x::RKBRMI) = print(io, "RKBRMI with ",
 # generic here lets the core validate and materialise plans without loading RK.
 function _brm_rk_model end
 
+"""
+    rk_logdensity_problem(backend::RKBRMI; ad_backend, u0) -> problem
+
+A `LogDensityProblems`-compatible density over the backend's packed
+unconstrained coordinates (order 1: value + gradient). `ad_backend` is a
+`DifferentiationInterface` AD type (e.g. reverse-mode `AutoEnzyme`);
+`u0` is a length-consistent exemplar (default: zeros). Implemented only by
+the `BayesianRegressionModelsReactiveKernelsExt` package extension.
+"""
+function rk_logdensity_problem end
+
+"""
+    rk_restore_draws(backend::RKBRMI, U::AbstractMatrix) -> NamedTuple
+
+Restore named constrained parameters from an unconstrained draws matrix `U`
+(`dimension` rows × draws columns, e.g. sampler output): coefficient
+predictors map to `(size × draws)` matrices, sampled parameters to
+length-`draws` vectors. Implemented only by the
+`BayesianRegressionModelsReactiveKernelsExt` package extension.
+"""
+function rk_restore_draws end
+
 const _RK_ADMITTED_SPELLINGS =
     "`y ~ Normal(mu, s)` + `mu ~ ...`, `y ~ BernoulliLogit(eta)` (or " *
     "`Bernoulli(logistic(eta))`) + `eta ~ ...`, `y ~ Bernoulli(p)` + " *
