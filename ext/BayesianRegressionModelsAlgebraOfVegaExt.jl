@@ -170,4 +170,114 @@ function BRM.brm_gradientplot(rows; title="Coordinate–gradient diagnostic",
             scales=scales(Color=(; palette=COLORS)))
 end
 
+# ---- conditional effects ---------------------------------------------------
+#
+# One-call ribbons over `brm_conditional_draws` / `brm_contrast_draws` /
+# `brm_slope_draws` results. Summaries come from the single core helper
+# `brm_summarize_draws`, so plot bands and printed tables agree by
+# construction; the reference line on comparisons is a plain two-point
+# `Lines` layer rather than a special mark, so it translates on every
+# backend the ribbon does.
+
+function _conditional_x_column(result, by, what)
+    haskey(result, :grid) && haskey(result, :draws) || error(
+        "Conditional plot needs a `brm_conditional_draws` / " *
+        "`brm_slope_draws` result (a NamedTuple with `grid` and `draws`).")
+    column = if by !== :auto
+        by
+    else
+        focal = get(result, :focal, nothing)
+        focals = focal isa Symbol ? [focal] :
+            focal isa AbstractVector ? collect(focal) : Symbol[]
+        length(focals) == 1 || error(
+            "Conditional plot needs `by=` naming the x-axis grid column " *
+            "($what records $(length(focals)) focal columns).")
+        only(focals)
+    end
+    haskey(result.grid, column) || error(
+        "Conditional plot x-axis `$column` is not a grid column. Grid " *
+        "columns are $(Tuple(keys(result.grid))).")
+    column
+end
+
+function _conditional_rows(draws::AbstractMatrix, xs; probs, how)
+    length(xs) == size(draws, 2) || throw(DimensionMismatch(
+        "Conditional plot x values must match the grid elements " *
+        "(matrix columns)"))
+    summaries = BRM.brm_summarize_draws(draws; probs, how)
+    bands = [Symbol(:lower_, k) => Symbol(:upper_, k)
+             for k in eachindex(probs)]
+    rows = map(summaries, xs) do summary, x
+        merge(summary, (; x))
+    end
+    rows, bands
+end
+
+function _conditional_ribbon(result::NamedTuple, x_column;
+                             probs=[0.95, 0.8, 0.5], how=:hdi,
+                             ylabel="Response", kwargs...)
+    rows, bands = _conditional_rows(result.draws, result.grid[x_column];
+                                    probs, how)
+    posteriorplot(rows; x=:x, bands, ylabel, kwargs...)
+end
+
+function BRM.brm_predictionsplot(cond::NamedTuple; by=:auto,
+        probs=[0.95, 0.8, 0.5], how=:hdi, ylabel="Response", kwargs...)
+    x_column = _conditional_x_column(cond, by, "conditional draws")
+    _conditional_ribbon(cond, x_column; probs, how, ylabel, kwargs...)
+end
+
+function BRM.brm_slopesplot(slope::NamedTuple; by=:auto,
+        probs=[0.95, 0.8, 0.5], how=:hdi, ylabel=nothing, kwargs...)
+    haskey(slope, :wrt) || error(
+        "Slope plot needs a `brm_slope_draws` result (a NamedTuple with " *
+        "`grid`, `draws`, and `wrt`).")
+    x_column = _conditional_x_column(slope, by, "slope draws")
+    label = isnothing(ylabel) ? "Slope wrt $(slope.wrt)" : ylabel
+    _conditional_ribbon(slope, x_column; probs, how, ylabel=label, kwargs...)
+end
+
+function BRM.brm_comparisonsplot(contrast::NamedTuple; x_by,
+        probs=[0.95], how=:hdi, ylabel=nothing,
+        xlabel="Grid", title="")
+    for key in (:draws, :labels, :pairs, :how, :subgrid, :n_sub)
+        haskey(contrast, key) || error(
+            "Comparison plot needs a `brm_contrast_draws` result " *
+            "(missing `$key`).")
+    end
+    haskey(contrast.subgrid, x_by) || error(
+        "Comparison plot x-axis `$x_by` is not a subgrid column. Subgrid " *
+        "columns are $(Tuple(keys(contrast.subgrid))).")
+    contrast.how in (:diff, :ratio) || error(
+        "Comparison plot needs `how` `:diff` or `:ratio` (got " *
+        "$(repr(contrast.how))).")
+    xs = contrast.subgrid[x_by]
+    length(contrast.labels) == length(contrast.pairs) || throw(DimensionMismatch(
+        "Comparison plot labels and pairs disagree."))
+    summaries = BRM.brm_summarize_draws(contrast.draws; probs, how)
+    bands = [Symbol(:lower_, k) => Symbol(:upper_, k)
+             for k in eachindex(probs)]
+    n_sub = contrast.n_sub
+    length(summaries) == length(contrast.pairs) * n_sub || throw(DimensionMismatch(
+        "Comparison plot draws do not factor into pairs × $n_sub sub-cells."))
+    rows = map(eachindex(summaries)) do i
+        pair = cld(i, n_sub)
+        merge(summaries[i], (; x=xs[mod1(i, n_sub)],
+                              pair=contrast.labels[pair]))
+    end
+    null = contrast.how === :diff ? 0.0 : 1.0
+    reference = [(; x, y=null, pair=label)
+                 for label in contrast.labels for x in xs]
+    label = isnothing(ylabel) ?
+        (contrast.how === :diff ? "Difference" : "Ratio") : ylabel
+    ribbon = data(rows) * mapping(:x => xlabel, :q50 => label;
+                                  col=:pair => "Comparison") *
+        lineribbon(bands=bands)
+    null_layer = data(reference) * mapping(:x => xlabel, :y => label;
+                                           col=:pair => "Comparison") *
+        visual(Lines; linewidth=1.5, linestyle=:dash)
+    (ribbon + null_layer) * config(width=320, height=300, title=title,
+        scales=scales(Color=(; palette=COLORS)))
+end
+
 end
