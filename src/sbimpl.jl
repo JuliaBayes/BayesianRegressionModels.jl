@@ -4579,9 +4579,13 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
                     "reprocess covers the Julia-side predictor transforms ",
                     "(zscale/standardize/center/factor/mo/s/t2/gp/hsgp), protect/implicit-fn ",
                     "columns, typed `mm(...)`, plain random-effects group indices, ",
-                    "kernel ragged inputs, and pass-through raw columns; this derived ",
-                    "structure is outside that replay surface — ",
-                    "rebuild the SBBRMI from the new DataFrame instead.")
+                    "kernel ragged inputs, and pass-through raw columns. A key BRM ",
+                    "cannot re-derive — a kernel(...) cell capture or a column your own ",
+                    "preprocessing computes outside BRM (e.g. a per-subject index) — is ",
+                    "CARRIED THROUGH when you include it, recomputed for the replay ",
+                    "design, as a column `$k` of the new DataFrame; the emitted Stan ",
+                    "program is then byte-identical. Otherwise rebuild the SBBRMI from ",
+                    "the new DataFrame instead.")
             end
         elseif v isa Number || v isa AbstractString || v isa Bool
             new_data[k] = v   # frozen structural scalar / formula literal (e.g. me `sd_<x>`)
