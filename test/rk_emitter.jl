@@ -438,6 +438,57 @@ end
     @test only(plan.predictors).link === :log
 end
 
+@testset "slice-1 count/positive plan shapes" begin
+    brmi = @brm df begin
+        logit(p) ~ 1 + x
+        b ~ Binomial(h, p)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    likelihood = only(plan.responses)
+    @test (likelihood.family, likelihood.link) === (:binomial_logit, :logit)
+    @test likelihood.trials === :h
+    @test plan.columns[:h] == [1, 2, 1, 2, 1, 2]
+    brmi = @brm df begin
+        logit(p) ~ 1 + x
+        b ~ Binomial(2, p)
+    end
+    @test only(BRM._brm_rk_plan(brmi).responses).trials == 2
+    # Relocated from fail-closed: the logistic-expression twin is admitted.
+    brmi = @brm df begin
+        eta ~ 1 + x
+        b ~ Binomial(10, logistic(eta))
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:binomial_logit, :logit)
+    @test likelihood.trials == 10
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        phi ~ Exponential(1)
+        c ~ NegativeBinomial2(mu, phi)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:nb2_log, :log)
+    @test likelihood.scale === :phi
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        c ~ NegativeBinomial2(mu, 2.0)
+    end
+    @test only(BRM._brm_rk_plan(brmi).responses).scale == 2.0
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        alpha ~ Exponential(1)
+        z ~ Gamma(alpha, mu / alpha)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:gamma_log, :log)
+    @test likelihood.scale === :alpha
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        z ~ Gamma(2.0, mu / 2.0)
+    end
+    @test only(BRM._brm_rk_plan(brmi).responses).scale == 2.0
+end
+
 @testset "weights, evidence, and multi-response" begin
     brmi = @brm df begin
         mu ~ 1 + x
@@ -615,9 +666,53 @@ end
         mu ~ 1 + x
         y ~ Gamma(2, mu)
     end)
+    # NOTE: `Binomial(10, logistic(eta))` lived here until slice 1 admitted
+    # Binomial; it now plans in "slice-1 count/positive plan shapes".
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        logit(p) ~ 1 + x
+        b ~ Binomial(n, p)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        logit(p) ~ 1 + x
+        b ~ Binomial(2.5, p)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        logit(p) ~ 1 + x
+        b ~ Binomial(-1, p)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        logit(p) ~ 1 + x
+        c ~ Binomial(h, p)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        logit(p) ~ 1 + x
+        y ~ Binomial(h, p)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        b ~ Binomial(h, mu)
+    end)
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         eta ~ 1 + x
-        b ~ Binomial(10, logistic(eta))
+        b ~ BinomialLogit(2, eta)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        c ~ NegativeBinomial2(mu)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        z ~ Gamma(2.0, mu / 3.0)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        alpha ~ Exponential(1)
+        z ~ Gamma(alpha, mu)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        phi ~ Exponential(1)
+        c ~ truncated(NegativeBinomial2(mu, phi); lower=0, upper=5)
     end)
     logit_eta = @brm df begin
         logit(eta) ~ 1 + x

@@ -18,6 +18,9 @@ const _RK_PPL_FAMILY = Dict{Symbol,ReactiveKernelsPPL.LikelihoodFamily}(
     :gaussian => ReactiveKernelsPPL.GaussianFam,
     :bernoulli_logit => ReactiveKernelsPPL.BernoulliLogitFam,
     :poisson_log => ReactiveKernelsPPL.PoissonLogFam,
+    :binomial_logit => ReactiveKernelsPPL.BinomialLogitFam,
+    :nb2_log => ReactiveKernelsPPL.NegativeBinomial2Fam,
+    :gamma_log => ReactiveKernelsPPL.GammaLogFam,
 )
 
 const _RK_PPL_LINK = Dict{Symbol,ReactiveKernelsPPL.LinkFunction}(
@@ -61,7 +64,7 @@ function _rk_ppl_response(spec::BRM._RKLikelihoodSpec)
         _rk_ppl_mapped(_RK_PPL_FAMILY, spec.family, "family", spec.label),
         _rk_ppl_mapped(_RK_PPL_LINK, spec.link, "link", spec.label),
         spec.response, spec.predictor, spec.scale, spec.weights,
-        _rk_ppl_evidence(spec.evidence), spec.label)
+        _rk_ppl_evidence(spec.evidence), spec.label, spec.trials, nothing)
 end
 
 function _rk_ppl_term(term::BRM._RKTermSpec)
