@@ -16,6 +16,12 @@ resample_builder = @brm begin
     y ~ Normal(mu, 1.0)
 end
 
+# NOTE (2026-09-18): these fixtures exercise the CONVENTIONAL GQ resample
+# path, so every SBBRMI below pins `total_groups=()`. The default `:auto`
+# integrates eligible blocks (e.g. the plain `(1 | subject)` shape) into
+# group totals, and `resample_groups` refuses totals models — their route is
+# `generative_plan` + `transport_draws` recovery. Without the pin the plain
+# and HSGP fixtures throw ArgumentError instead of resampling.
 plain_resample_builder = @brm begin
     mu ~ 1 + zage + (1 | subject)
     y ~ Normal(mu, 1.0)
@@ -98,7 +104,8 @@ resample_future = (;
 
     # The smallest public acceptance shape: a plain `(1 | subject)` fit built
     # without cv_groups gains a different-size new population automatically.
-    plain = SBBRMI(plain_resample_builder(resample_train); mod=@__MODULE__)
+    plain = SBBRMI(plain_resample_builder(resample_train); mod=@__MODULE__,
+                     total_groups=())
     plain_replay = reprocess(
         plain, resample_future; resample_groups=[:subject])
     plain_code = StanBlocks.stan_code(plain_replay.model)
@@ -115,7 +122,8 @@ end
     # record handle unbound for ordinary Stan-expression indices, so
     # `ranef_blocks` on a resample replay threw `UndefVarError` instead of
     # describing the re-drawn block.
-    fitted = SBBRMI(plain_resample_builder(resample_train); mod=@__MODULE__)
+    fitted = SBBRMI(plain_resample_builder(resample_train); mod=@__MODULE__,
+                     total_groups=())
     replayed = reprocess(fitted, resample_future; resample_groups=[:subject])
     blocks = ranef_blocks(replayed)
     @test length(blocks) == 1
@@ -140,7 +148,8 @@ end
     hsgp_future = (; subject = repeat([101, 203, 307, 409], inner=2),
                      dose = fill(2.0, 8), y = zeros(8))
 
-    fitted = SBBRMI(hsgp_resample_builder(hsgp_train); mod=@__MODULE__)
+    fitted = SBBRMI(hsgp_resample_builder(hsgp_train); mod=@__MODULE__,
+                     total_groups=())
     fit_fits = fitted.preproc[:PHI_hsgp_dose].const_.fits
 
     replay = reprocess(fitted, hsgp_future; freeze_constants=true,
