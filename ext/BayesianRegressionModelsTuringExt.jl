@@ -31,9 +31,13 @@ BRM.turing_term_model(term, nobs, priors, inputs) =
 BRM.turing_group_effect(block, sd_priors, residual_scale) =
     _brm_group_effect_model(block, sd_priors, residual_scale)
 BRM.turing_default_correlated_group(matrix, indices, levels, lkj_eta) =
-    _brm_correlated_group_effect(
-        matrix, indices, length(levels), ntuple(_ -> nothing, size(matrix, 2)),
-        lkj_eta, nothing)
+    let n_terms = size(matrix, 2), n_groups = length(levels)
+        tau_prior = product_distribution(fill(
+            _brm_constrained_kernel(Normal(); lower=0), n_terms))
+        z_prior = product_distribution(fill(Normal(), n_terms * n_groups))
+        _brm_prepared_correlated_group_effect(
+            matrix, indices, n_groups, tau_prior, z_prior, lkj_eta)
+    end
 include("turing_gp.jl")
 include("turing_structured.jl")
 
@@ -724,9 +728,10 @@ Turing.@model function _brm_stratified_group_frame(
     (; L, tau, factor)
 end
 
-Turing.@model function _brm_random_intercept_effect(group_idx, n_groups)
+Turing.@model function _brm_random_intercept_effect(
+        group_idx, n_groups, z_prior)
     log_scale ~ Normal()
-    z ~ product_distribution(fill(Normal(), n_groups))
+    z ~ z_prior
     scale = exp(log_scale)
     values = scale .* z
     effect = values[group_idx]
@@ -768,6 +773,18 @@ Turing.@model function _brm_centered_random_intercept_effect_prior(
     (; effect, scale, values)
 end
 
+
+Turing.@model function _brm_prepared_correlated_group_effect(
+        Z, group_idx, n_groups, tau_prior, z_prior, lkj_eta)
+    n_terms = size(Z, 2)
+    L ~ LKJCholesky(n_terms, lkj_eta)
+    tau ~ tau_prior
+    z_flat ~ z_prior
+    z = reshape(z_flat, n_terms, n_groups)
+    coefficients = transpose(Diagonal(tau) * Matrix(L.L) * z)
+    effect = vec(sum(Z .* coefficients[group_idx, :]; dims=2))
+    (; effect, L, tau, coefficients)
+end
 
 Turing.@model function _brm_correlated_group_effect(
         Z, group_idx, n_groups, sd_priors, lkj_eta, residual_scale)
@@ -979,9 +996,11 @@ function _brm_group_effect_model(block, sd_priors, residual_scale=nothing)
     if block.intercept_only
         prior = only(sd_priors)
         if isnothing(prior) && isnothing(residual_scale)
-            return (block.centered ? _brm_centered_random_intercept_effect :
-                                     _brm_random_intercept_effect)(
+            block.centered && return _brm_centered_random_intercept_effect(
                 block.indices, length(block.levels))
+            z_prior = product_distribution(fill(Normal(), length(block.levels)))
+            return _brm_random_intercept_effect(
+                block.indices, length(block.levels), z_prior)
         end
         if block.centered
             return _brm_centered_random_intercept_effect_prior(

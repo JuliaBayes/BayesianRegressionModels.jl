@@ -157,6 +157,7 @@ export name, getf, getargs, getkwargs, getbroadcast, getop
 # Macro plumbing + compiled-output accessors used by downstream code
 # (web-macro's Formula struct, downstream direct pipeline calls).
 export parse!, _brm, stan_code, stan_model, stan_instantiate,
+       transpiles, compiles,
        reprocess, restan_data, generative_plan
 
 # Post-fit prediction — the population-level ("nore") and transported
@@ -221,6 +222,7 @@ export popefs, _popefs_normal, _popefs_coefs, _popefs_normal_coefs,
        brm_hsgp_centered_log_scale, brm_hsgp_remaining_log_scale,
        brm_hsgp_basis_1d,
        brm_hsgp_orthogonalize_linear,
+       brm_hsgp_by_hyper_S,
        brm_periodic_cov, brm_hsgp_periodic_sqrt_spd,
        _sb_horseshoe, _sb_horseshoe_scaled,
        _sb_mi_normal, mi_merge,

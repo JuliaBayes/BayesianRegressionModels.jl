@@ -587,6 +587,9 @@ elseif isxcall(x, :~) && Meta.isexpr(x.args[2], :vect)
 elseif isxcall(x, :~) && Meta.isexpr(x.args[2], :tuple)
     _, lhs, rhs = x.args
     _parse_broadcast_lhs!(lhs, rhs; info)
+elseif isxcall(x, :~) && _is_hyper_lhs(x.args[2])
+    _, lhs, rhs = x.args
+    _parse_hyper!(lhs, rhs; info)
 elseif isxcall(x, :~)
     _, lhs, rhs = x.args
     # Shield brms-style `(e | ID | g)` ranef IDs from parselocals! so the bare
@@ -923,6 +926,53 @@ function _parse_effect!(lhs::Expr, rhs; info)
     info.alllocals[key] = :local
     parselocals!(rhs; info, val=:nonlocal)
     quoted_lhs = Expr(:call, :effect, map(QuoteNode, address)...)
+    :(@n $key = @x $(Expr(:call, :~, quoted_lhs, rhs)))
+end
+
+# ---- hyper-predictor statements ---------------------------------------------
+#
+# `log(length_scale(hsgp(x))) ~ 1 + (1 | g)` defines a distributional linear
+# predictor for a GP/HSGP hyperparameter. The `log` wrap is what tells it
+# apart from a prior statement (whose RHS is a distribution) and from a
+# linked predictor (whose wrap holds a bare name, not a hyper address).
+# Only `log` is supported.
+#
+# The macro only normalises the address syntax here, reusing the prior
+# machinery, so the operation keeps a `log(effect(...))` LHS the backend
+# matches without re-parsing (same principle as term keys). Every semantic
+# refusal (unmatched term, smooths, ungrouped ranef, unsupported term kind,
+# distribution RHS, non-term-hyper address) fires at SBBRMI construction,
+# where the term context exists and function-wrapped builders stay testable.
+function _is_hyper_lhs(x)
+    isxcall(x, :log) || return false
+    length(x.args) == 2 || return false
+    inner = x.args[2]
+    Meta.isexpr(inner, :call) || return false
+    length(inner.args) >= 2 || return false
+    head = inner.args[1]
+    head isa Symbol || return false
+    head === :length_scale || head === :sd || return false
+    length(inner.args) in (2, 3)
+end
+
+function _parse_hyper!(lhs, rhs; info)
+    inner = lhs.args[2]
+    head = inner.args[1]::Symbol
+    slots = map(_prior_slot, inner.args[2:end])
+    # A one-slot address names just the term (`length_scale(hsgp(x))`); expand
+    # to the default-`:` two-slot form so it normalises exactly like its
+    # prior-statement twin.
+    length(slots) == 1 && (slots = [_EFFECT_COLON, first(slots)])
+    address = _prior_address(head, slots)
+    key = Symbol("__hyper__", replace(join(string.(address), "__"),
+                                      "(" => "_", ")" => "", "," => "_"))
+    haskey(info.alllocals, key) && error(
+        "@brm: duplicate `$head($(join(string.(inner.args[2:end]), ", ")))` " *
+        "hyper-predictor statement")
+    info.alllocals[key] = :local
+    rhs = rewrite_ranef_ids(rhs)
+    parselocals!(rhs; info, val=:nonlocal)
+    quoted_lhs = Expr(:call, :log, Expr(:call, :effect, map(QuoteNode, address)...))
     :(@n $key = @x $(Expr(:call, :~, quoted_lhs, rhs)))
 end
 rewrite_ranef_ids(x) = x
