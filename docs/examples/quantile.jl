@@ -15,15 +15,6 @@ OUT = joinpath(SCRATCH, ".out", "results", "quantile")
 mkpath(OUT)
 mkpath(joinpath(SCRATCH, ".out", "stan"))
 
-# instantiate(path=) skips regeneration when the file exists (snag
-# stan-instantiate-4654c020): purge artifacts so reruns never go stale.
-function purge_stan(names...)
-    for n in names
-        rm(joinpath(SCRATCH, ".out", "stan", n * ".stan"); force=true)
-        rm(joinpath(SCRATCH, ".out", "stan", n * "_model.so"); force=true)
-    end
-end
-
 df = CSV.read(joinpath(SCRATCH, "data", "bmi.csv"), DataFrame)
 age = Float64.(df.age); bmi = Float64.(df.bmi)
 println("N=", length(age), " age range=", extrema(age))
@@ -47,7 +38,6 @@ for tau in (0.1, 0.5, 0.9)
     data = (; bmi=bmi ./ 10, agez=agez, tau=tau)
     sb = SBBRMI(builder(data); mod=@__MODULE__)
     tag = replace(string(tau), "." => "p")
-    purge_stan("quant_0p1", "quant_0p5", "quant_0p9")
 problem = StanBlocks.stan_instantiate(sb.model;
         path=joinpath(SCRATCH, ".out", "stan", "quant_$tag.stan"))
     fit = adaptive_warmup_mcmc(

@@ -61,3 +61,4 @@ first. `mister_p.jl` unpacks its gzipped input to `.out/tmp/` on first run
 | strack.jl | Strack_RRR_re_analysis | rrr_long.csv |
 | shooter.jl | shooter_crossed_random_ANOVA | shooter.csv |
 | quantile.jl | quantile_regression | bmi.csv |
+| prior_sensitivity.jl | prior_sensitivity | body_fat.csv |
