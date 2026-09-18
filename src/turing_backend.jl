@@ -196,6 +196,9 @@ turing_model_source(backend::TuringBRMI{<:BRMI,<:_TuringMultiResponsePlan}) =
 """Build the native Turing submodel for one backend-neutral group block."""
 function turing_group_effect end
 
+"""Build the default noncentered correlated-slope Turing submodel."""
+function turing_default_correlated_group end
+
 function _turing_unobserved_response(response)
     T = nonmissingtype(eltype(response))
     unobserved = Vector{Union{Missing,T}}(undef, length(response))
