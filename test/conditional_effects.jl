@@ -9,7 +9,7 @@
 #                         via the chain rule)
 #   4. contrasts        — layout exactness plus treatment-coefficient agreement
 #   5. predictive       — shape, seed determinism, Monte-Carlo agreement with
-#                         response means (adaptive 5-SE tolerance)
+#                         response means (model-implied per-cell 6-SE tolerance)
 #   6. summaries        — HDI/ETI values and error paths
 #   7. error paths      — every fail-closed branch, all compile-free
 #
@@ -526,12 +526,42 @@ end
     @test pred3.draws != pred.draws
 
     # Monte-Carlo means over RNG seeds agree with response means. The
-    # tolerance is adaptive (5 posterior-RNG standard errors): it catches
-    # a wrong family map (an O(1) scale error), not sampling noise.
+    # tolerance is adaptive (6 model-implied per-cell standard errors):
+    # it catches a wrong family map (an O(1) scale error), not sampling
+    # noise. Model-implied, not sampled — sample SEs collapse on
+    # rare-event cells (all-64-zero Bernoulli draws have sample sd
+    # exactly 0) and under-cover heteroskedastic ones (synthetic rows
+    # with large sigma/phi). The 0.05 absolute floor covers
+    # near-degenerate cells; a wrong map shifts low-variance cells by
+    # O(1), far above it.
     means = Dict(r => brm_conditional_draws(d, unc, grid_x; problem=prob,
                                             response=r).draws
                  for r in (:yN, :yB, :yNB, :yBi, :yBi2, :yP, :yLN, :yNB2,
                             :yG, :yE, :yBe))
+    second = let (cc, nn) = cond_constrained(prob, unc)
+        Dict(nm => vec(cc[:, brm_output_coordinates(d2, nm, nn)])
+             for nm in (:sigma, :phi, :theta))
+    end
+    rowmat(v) = repeat(reshape(v, 12, 1), 1, 6)
+    cellsd = Dict{Symbol,Matrix{Float64}}()
+    cellsd[:yN] = rowmat(second[:sigma])
+    cellsd[:yLN] = rowmat(second[:sigma])
+    for r in (:yB, :yBe)
+        p = means[r]
+        cellsd[r] = sqrt.(clamp.(p .* (1 .- p), 0.0, Inf))
+    end
+    nmat = repeat(reshape(Float64.(grid_x.n), 1, 6), 12, 1)
+    p_bi = means[:yBi] ./ nmat
+    cellsd[:yBi] = sqrt.(clamp.(nmat .* p_bi .* (1 .- p_bi), 0.0, Inf))
+    p_bi2 = means[:yBi2] ./ 10
+    cellsd[:yBi2] = sqrt.(clamp.(10 .* p_bi2 .* (1 .- p_bi2), 0.0, Inf))
+    cellsd[:yP] = sqrt.(max.(means[:yP], 0.0))
+    for r in (:yNB, :yNB2)
+        mu = means[r]
+        cellsd[r] = sqrt.(max.(mu .+ mu .^ 2 ./ rowmat(second[:phi]), 0.0))
+    end
+    cellsd[:yG] = means[:yG] .* rowmat(second[:theta]) # shape*scale^2
+    cellsd[:yE] = means[:yE] # sd == mean for Exponential either way
     acc = Dict(r => zeros(12, 6) for r in keys(means))
     n_seeds = 64
     for seed in 1:n_seeds
@@ -540,10 +570,18 @@ end
             acc[r] .+= getproperty(drawn, r)
         end
     end
-    for r in keys(means)
+    for r in sort!(collect(keys(means)))
         mc = acc[r] ./ n_seeds
-        pooled = std(vec(getproperty(
-            brm_predictive_draws(d2, unc; problem=prob, seed=1), r)))
-        @test vec(mc) ≈ vec(means[r]) atol=5 * pooled / sqrt(n_seeds) + 1e-6
+        se = cellsd[r] ./ sqrt(n_seeds)
+        dev = abs.(mc .- means[r])
+        bound = 6 .* se .+ 0.05
+        bad = findall(vec(dev) .> vec(bound))
+        if !isempty(bad)
+            flat = vec(dev) .- vec(bound)
+            worst = argmax(flat)
+            @info "MC mismatch" response=r n_bad=length(bad) worst_cell=worst
+            @info "MC mismatch detail" mc=vec(mc)[worst] mean=vec(means[r])[worst] se=vec(se)[worst] dev=vec(dev)[worst]
+        end
+        @test isempty(bad)
     end
 end

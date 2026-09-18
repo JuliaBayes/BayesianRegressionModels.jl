@@ -288,19 +288,20 @@ _brm_mean_link_ok(_) = false
 #   (; role=:constant, value)
 #   (; role=:data, name)
 # or `nothing` when the argument has no response-mean reading. A `~`-backed
-# name is a linear predictor only if `linear_predictors` lists it; a
-# `~`-backed name that is also data-backed is a chained outcome, which v1
-# refuses (its grid values would be the arbitrary response fill); any other
-# `~`-backed name is a sampled parameter, which evaluates through its
-# parameter carrier but never joins the logical default. `=`-backed names
-# are refused: assignment bodies need their own evaluator.
-function _brm_mean_argument(value, brmi::BRMI)
+# name is a linear predictor only if the descriptor carries an
+# `:linear_predictor` output for it — `linear_predictors` also lists prior
+# statements, so it cannot decide this. A `~`-backed name that is also
+# data-backed is a chained outcome, which v1 refuses (its grid values would
+# be the arbitrary response fill); any other `~`-backed name is a sampled
+# parameter, which evaluates through its parameter carrier but never joins
+# the logical default. `=`-backed names are refused: assignment bodies need
+# their own evaluator.
+function _brm_mean_argument(value, brmi::BRMI, lp_names)
     value isa Number && return (; role=:constant, value)
     if value isa NamedColumn
         payload = parent(value)
         payload isa DataColumn && return (; role=:data, name=name(value))
         if payload isa ExprColumn && getf(payload) === (~)
-            lp_names = [e.name for e in linear_predictors(brmi)]
             if name(value) in lp_names
                 return (; role=:linear_predictor, link_fn=identity,
                           link_lp=name(value))
@@ -314,7 +315,7 @@ function _brm_mean_argument(value, brmi::BRMI)
     if value isa ExprColumn
         args = getargs(value)
         length(args) == 1 || return nothing
-        inner = _brm_mean_argument(only(args), brmi)
+        inner = _brm_mean_argument(only(args), brmi, lp_names)
         isnothing(inner) && return nothing
         inner.role === :linear_predictor || inner.role === :parameter ||
             return nothing
@@ -366,7 +367,7 @@ function _brm_hidden_hint(brmi::BRMI)
     join(("$k: $v" for (k, v) in hidden), ", ") * "."
 end
 
-function _brm_mean_outcome(brmi::BRMI, response::Symbol)
+function _brm_mean_outcome(brmi::BRMI, response::Symbol, lp_names)
     found = [o for o in outcomes(brmi) if o.response === response]
     isempty(found) && error(
         "BRM prediction: `$response` is not a scalar observed response. " *
@@ -392,7 +393,7 @@ function _brm_mean_outcome(brmi::BRMI, response::Symbol)
         "`exp.(mu)` would be a median, not a mean. Use `scale=:link` for " *
         "the linear predictor or `target=:predictive` for response draws.")
     raw = getargs(rh)
-    classified = [_brm_mean_argument(a, brmi) for a in raw]
+    classified = [_brm_mean_argument(a, brmi, lp_names) for a in raw]
     (; response, family=outcome.family, args=classified, raw)
 end
 
@@ -660,7 +661,10 @@ function brm_conditional_draws(d::BRMDescriptor, unc_draws::AbstractMatrix,
             _brm_hidden_hint(d.plan.parent))
         response
     end
-    outcome = _brm_mean_outcome(d.plan.parent, selected_response)
+    lp_names = Tuple(
+        o.logical for o in brm_outputs(d; role=:linear_predictor)
+        if !isnothing(o.logical))
+    outcome = _brm_mean_outcome(d.plan.parent, selected_response, lp_names)
     mean_lps = Symbol[c.link_lp for c in outcome.args
                       if !isnothing(c) && c.role === :linear_predictor]
     unique!(mean_lps)
@@ -720,13 +724,16 @@ function brm_conditional_draws(d::BRMDescriptor, unc_draws::AbstractMatrix,
     end
     d2 = brm_execute(d, :reprocess, grid)
     prob = isnothing(problem) ? brm_execute(d2, :instantiate) : problem
-    selections = map(needed) do lp
-        (lp, :linear_predictor) => (names -> brm_output_coordinates(
-            d2, lp, names; role=:linear_predictor))
+    # One `map` (one closure type): separate LP/parameter maps produce
+    # distinct closure types that `append!` cannot merge.
+    requests = vcat([(lp, true) for lp in needed],
+                    [(name, false) for name in param_needs])
+    selections = map(requests) do (key, is_lp)
+        (key, is_lp ? :linear_predictor : :parameter) =>
+            (names -> is_lp ? brm_output_coordinates(
+                d2, key, names; role=:linear_predictor) :
+                brm_output_coordinates(d2, key, names))
     end
-    append!(selections, map(param_needs) do name
-        (name, :parameter) => (names -> brm_output_coordinates(d2, name, names))
-    end)
     measured = _brm_constrain_grid_lps(prob, unc_draws, selections)
     for lp in needed
         size(measured[lp], 2) == n_grid || throw(DimensionMismatch(
