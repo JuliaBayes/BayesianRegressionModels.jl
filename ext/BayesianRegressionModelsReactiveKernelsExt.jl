@@ -90,29 +90,9 @@ function _rk_ppl_parameter(parameter::BRM._RKSampledParameter)
         parameter.support_override, parameter.label)
 end
 
-# Prepared assignment expressions lower to pure `:call` Exprs: the thin layer
-# requires Symbol callables from its allowlist, and the core walk already
-# confined references to scalars and bare-column reductions.
-function _rk_ppl_assignment_expr(node, name::Symbol)
-    node isa Number && return node
-    node isa BRM._BRMPreparedRef && return node.name
-    node isa BRM._BRMPreparedExpr || error(
-        "RK backend: internal: assignment `$name` holds an unlowerable node")
-    isempty(node.kwargs) || error(
-        "RK backend: internal: assignment `$name` carries keywords " *
-        "(slice 1 admits pure positional calls)")
-    node.callable isa Function || error(
-        "RK backend: internal: assignment `$name` calls a non-function " *
-        "callable")
-    lowered = map(node.args) do arg
-        _rk_ppl_assignment_expr(arg, name)
-    end
-    Expr(:call, nameof(node.callable), lowered...)
-end
-
 function _rk_ppl_assignment(spec::BRM._RKAssignmentSpec)
     AssignmentSpec(spec.name,
-        _rk_ppl_assignment_expr(spec.expression, spec.name), spec.label)
+        BRM._rk_lower_assignment_expr(spec.expression, spec.name), spec.label)
 end
 
 function _rk_ppl_structural_plan(plan::BRM._RKStructuralPlan)
@@ -127,8 +107,19 @@ end
 
 # The executable `model` of an `RKBRMI` is the thin-layer `(; spec, layout)`
 # pair: the `KernelSpec` callable after `prepare`, plus its `LayoutTable`.
+# Expressible plans route through the `@rkppl` AST surface
+# (`lower_rkppl` + `bind_data`, the same function the macro lowers
+# through); the inexpressible subset (offset-only predictors,
+# predictor/data name overlap) keeps the legacy direct serializer.
 function BRM._brm_rk_model(plan::BRM._RKStructuralPlan)
-    build_kernel(_rk_ppl_structural_plan(plan))
+    ast = BRM._rk_emit_ast(plan)
+    translated = if ast === nothing
+        _rk_ppl_structural_plan(plan)
+    else
+        unbound = lower_rkppl(ast, Tuple(sort!(collect(keys(plan.columns)))))
+        bind_data(unbound, plan.columns)
+    end
+    build_kernel(translated)
 end
 
 function BRM.RKBRMI(brmi::BRM.BRMI)

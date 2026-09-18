@@ -40,6 +40,7 @@ include("preparation_gp.jl")
 include("preparation_structured.jl")
 include("turing_backend.jl")
 include("rk_backend.jl")
+include("rk_ast.jl")
 include("native_ppl.jl")
 include("vimpl.jl")
 
@@ -68,6 +69,11 @@ include("turing_descriptor.jl")
 include("prediction.jl")
 include("adaptive_centering.jl")
 include("posterior_diagnostics.jl")
+
+# Prior/likelihood power-scaling sensitivity — PSIS weights, CJS distance, the
+# per-variable summary, and the SBBRMI input assembly. After the descriptor
+# and diagnostics, whose coordinates and draw conventions it stands on.
+include("powerscale.jl")
 
 # Public surface. The macros and value types everything downstream
 # (web-macro, downstream extensions, tests) reaches for.
@@ -151,6 +157,8 @@ export AdaptiveCenteringBlock, adaptive_centering_blocks,
        adaptive_centering_problem, select_hsgp_centeredness,
        select_ranef_centeredness
 export brm_output_draws, brm_predictive_draws, hsgp_coordinate_draws, hsgp_transform_draws
+export BRMPowerscaleSensitivity, brm_psis_weights, brm_cjs_dist,
+       brm_powerscale_weights, brm_powerscale_sensitivity, brm_powerscale_inputs
 export brm_posteriorplot, brm_ppcplot, brm_pairplot,
        brm_centerednessplot, brm_centering_lossplot, brm_gradientplot
 
