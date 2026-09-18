@@ -112,3 +112,57 @@ end
     @test ismissing(result[3].loss)
     @test result[4].loss == Inf
 end
+
+@testset "conditional predictions / comparisons / slopes" begin
+    draws = [Float64(i) + j / 10 + sin(i * j) / 5
+             for i in 1:20, j in 1:4]
+    cond = (; grid=(; x=[0.0, 1.0, 2.0, 3.0], g=[1, 1, 2, 2]), draws,
+              target=:mean, logical=:mu, response=:y, scale=:response,
+              focal=:x)
+    pred = to_vegalite(brm_predictionsplot(cond); interactive=false)
+    tables = filter(d -> haskey(d, "values"), objects(pred))
+    @test !isempty(tables)
+    @test all(d -> !haskey(d, "params"), objects(pred))
+    @test any(d -> length(d["values"]) == 4, tables)
+    @test any(d -> get(d, "field", nothing) == "q50", objects(pred))
+    @test_throws ErrorException brm_predictionsplot((; grid=cond.grid))
+    @test_throws ErrorException brm_predictionsplot(cond; by=:nope)
+    nofocal = merge(cond, (; focal=nothing))
+    @test_throws ErrorException brm_predictionsplot(nofocal)
+    @test to_vegalite(brm_predictionsplot(nofocal; by=:x);
+                      interactive=false) isa AbstractDict
+
+    slope = merge(cond, (; wrt=:x))
+    slope_spec = to_vegalite(brm_slopesplot(slope); interactive=false)
+    @test any(d -> get(d, "title", nothing) == "Slope wrt x",
+              objects(slope_spec))
+    @test_throws ErrorException brm_slopesplot(cond)
+
+    contrast = (; draws=[Float64(i + j) for i in 1:20, j in 1:6],
+                  labels=["b vs a", "c vs a"], pairs=[("b", "a"), ("c", "a")],
+                  by=:g, how=:diff, subgrid=(; x=[0.0, 1.0, 2.0]), n_sub=3,
+                  target=:mean, logical=:mu, scale=:response)
+    comp = to_vegalite(brm_comparisonsplot(contrast; x_by=:x); interactive=false)
+    @test all(d -> !haskey(d, "params"), objects(comp))
+    @test any(d -> get(d, "field", nothing) == "pair", objects(comp))
+    comp_tables = filter(d -> haskey(d, "values"), objects(comp))
+    # AoV merges the ribbon and null-reference layers into one table with
+    # `__src` provenance: 6 ribbon rows plus 6 reference rows here.
+    rows = only(comp_tables)["values"]
+    @test length(rows) == 12
+    nulls = filter(r -> haskey(r, "y"), rows)
+    @test length(nulls) == 6
+    @test all(r -> r["y"] == 0.0, nulls)
+    @test sort!(unique!([r["pair"] for r in nulls])) ==
+        ["b vs a", "c vs a"]
+    @test count(r -> haskey(r, "q50"), rows) == 6
+    ratio = merge(contrast, (; how=:ratio))
+    ratio_spec = to_vegalite(brm_comparisonsplot(ratio; x_by=:x);
+                             interactive=false)
+    ratio_rows = only(filter(d -> haskey(d, "values"),
+                             objects(ratio_spec)))["values"]
+    @test all(r -> r["y"] == 1.0, filter(r -> haskey(r, "y"), ratio_rows))
+    @test_throws ErrorException brm_comparisonsplot(contrast; x_by=:nope)
+    @test_throws ErrorException brm_comparisonsplot((; draws=contrast.draws);
+                                                   x_by=:x)
+end
