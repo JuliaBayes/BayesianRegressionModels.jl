@@ -158,16 +158,19 @@ function _rk_strip_logistic(arg, predictor::Symbol)
 end
 
 function _rk_scale_argument(arg, parameters::Set{Symbol},
-        assignments::Set{Symbol}, response::Symbol)
+        assignments::Set{Symbol}, consts::Dict{Symbol,Float64},
+        aliases::Dict{Symbol,Symbol}, response::Symbol)
     prefix = "RK backend"
     arg isa Number && return _rk_positive_literal(arg, response, "scale")
     if arg isa NamedColumn
-        name(arg) in parameters && return name(arg)
-        name(arg) in assignments && return name(arg)
-        return error("$prefix: response `$response` scale `$(name(arg))` is " *
-                     "not a sampled parameter or scalar assignment; slice 1 " *
-                     "admits a sampled parameter, a scalar assignment, or a " *
-                     "positive numeric literal")
+        parent(arg) isa DataColumn && error(
+            "$prefix: response `$response` scale cannot be a data column; " *
+            "slice 1 admits a sampled parameter, a scalar assignment, or " *
+            "a positive numeric literal")
+        kind, value = _rk_resolve_use_ref(name(arg), consts, aliases,
+            parameters, assignments, "response `$response` scale")
+        kind === :number && return _rk_positive_literal(value, response, "scale")
+        return value
     end
     error("$prefix: response `$response` scale must be a sampled parameter " *
           "or a positive numeric literal")
@@ -183,7 +186,8 @@ end
 
 function _rk_classify_response(rhs::ExprColumn, predictor::Symbol,
         predictor_link::Symbol, parameters::Set{Symbol},
-        assignments::Set{Symbol}, response::Symbol)
+        assignments::Set{Symbol}, consts::Dict{Symbol,Float64},
+        aliases::Dict{Symbol,Symbol}, response::Symbol)
     prefix = "RK backend"
     head = getf(rhs)
     args = getargs(rhs)
@@ -197,7 +201,8 @@ function _rk_classify_response(rhs::ExprColumn, predictor::Symbol,
             "$prefix: response `$response` location must be the linear " *
             "predictor `$predictor` itself, not a deterministic transform; " *
             "write the transform into the predictor formula")
-        scale = _rk_scale_argument(args[2], parameters, assignments, response)
+        scale = _rk_scale_argument(args[2], parameters, assignments, consts,
+            aliases, response)
         triple = (:gaussian, predictor_link, predictor_link)
         triple in _RK_SLICE1_TRIPLES || error(
             "$prefix: response `$response` pairs `Normal` with a " *
@@ -262,53 +267,107 @@ end
 
 function _rk_evidence_bound(bound, data::AbstractDict, response::Symbol,
         side::String, columns::Dict{Symbol,AbstractVector},
-        bound_columns::Set{Symbol})
+        consts::Dict{Symbol,Float64}, aliases::Dict{Symbol,Symbol},
+        parameters::Set{Symbol}, assign_names::Set{Symbol})
     prefix = "RK backend"
     isnothing(bound) && return nothing
-    bound isa Number || return _rk_evidence_column_bound(
-        bound, data, response, side, columns, bound_columns)
-    value = Float64(bound)
-    isnan(value) && error(
-        "$prefix: response `$response` $side bound is NaN")
-    value
-end
-
-function _rk_evidence_column_bound(bound::NamedColumn, data::AbstractDict,
-        response::Symbol, side::String, columns::Dict{Symbol,AbstractVector},
-        bound_columns::Set{Symbol})
-    prefix = "RK backend"
-    parent(bound) isa DataColumn || error(
-        "$prefix: response `$response` $side bound must be a numeric " *
+    bound isa Number && return _rk_evidence_literal(
+        Float64(bound), response, side)
+    bound isa NamedColumn || error(
+        "RK backend: response `$response` $side bound must be a numeric " *
         "literal or a raw data column")
+    parent(bound) isa DataColumn || return _rk_evidence_name_bound(
+        name(bound), response, side, consts, aliases, parameters, assign_names)
     key = name(bound)
     raw = get(data, key, nothing)
     raw isa AbstractVector{<:Real} || error(
         "$prefix: response `$response` $side bound column `$key` must be a " *
         "real vector")
     columns[key] = raw
-    push!(bound_columns, key)
     key
 end
 
-function _rk_evidence_column_bound(bound, ::AbstractDict, response::Symbol,
-        side::String, ::Dict{Symbol,AbstractVector}, ::Set{Symbol})
-    error("RK backend: response `$response` $side bound must be a numeric " *
-          "literal or a raw data column")
+function _rk_evidence_literal(value::Float64, response::Symbol, side::String)
+    prefix = "RK backend"
+    isnan(value) && error(
+        "$prefix: response `$response` $side bound is NaN")
+    # One-sided = omitted side: ±Inf normalizes to nothing (the thin layer
+    # accepts finite literals only, and the omission is semantics-preserving).
+    isinf(value) && return nothing
+    value
+end
+
+function _rk_evidence_name_bound(name::Symbol, response::Symbol, side::String,
+        consts::Dict{Symbol,Float64}, aliases::Dict{Symbol,Symbol},
+        parameters::Set{Symbol}, assign_names::Set{Symbol})
+    prefix = "RK backend"
+    # `Inf`/`NaN` arrive as names (Julia globals, not literals); resolve them
+    # before the use-ref walk so Inf omits and NaN fails with its own error.
+    name === :Inf && return _rk_evidence_literal(Inf, response, side)
+    name === :NaN && return _rk_evidence_literal(NaN, response, side)
+    kind, value = _rk_resolve_use_ref(name, consts, aliases, parameters,
+        assign_names, "response `$response` $side bound")
+    kind === :number && return _rk_evidence_literal(value, response, side)
+    error("$prefix: response `$response` $side bound must be a numeric " *
+          "literal or a raw data column (parameter/assignment bounds are " *
+          "out of slice 1)")
 end
 
 function _rk_plan_evidence(modifier, family::Symbol, data::AbstractDict,
         response::Symbol, columns::Dict{Symbol,AbstractVector},
-        bound_columns::Set{Symbol})
+        consts::Dict{Symbol,Float64}, aliases::Dict{Symbol,Symbol},
+        parameters::Set{Symbol}, assign_names::Set{Symbol})
     prefix = "RK backend"
     isnothing(modifier) && return _RKResponseEvidence(:none, nothing, nothing)
     family in (:gaussian, :poisson_log) || error(
         "$prefix: response `$response` evidence ($(modifier.kind)) on a " *
         "Bernoulli response is out of slice 1")
     lower = _rk_evidence_bound(modifier.lower, data, response, "lower",
-        columns, bound_columns)
+        columns, consts, aliases, parameters, assign_names)
     upper = _rk_evidence_bound(modifier.upper, data, response, "upper",
-        columns, bound_columns)
+        columns, consts, aliases, parameters, assign_names)
+    if modifier.kind === :interval_censored
+        lower === nothing || error(
+            "$prefix: response `$response` interval evidence takes no " *
+            "lower bound (the response itself is the lower endpoint)")
+        upper === nothing && error(
+            "$prefix: response `$response` interval evidence requires an " *
+            "upper bound")
+    end
     _RKResponseEvidence(modifier.kind, lower, upper)
+end
+
+function _rk_bound_values(bound, columns::Dict{Symbol,AbstractVector},
+        n_obs::Int)
+    isnothing(bound) && return nothing
+    bound isa Float64 && return fill(bound, n_obs)
+    columns[bound]
+end
+
+function _rk_gate_evidence_values!(specs::AbstractVector,
+        columns::Dict{Symbol,AbstractVector}, n_obs::Int)
+    prefix = "RK backend"
+    for spec in specs
+        evidence = spec.evidence
+        evidence.kind === :none && continue
+        lower = _rk_bound_values(evidence.lower, columns, n_obs)
+        upper = _rk_bound_values(evidence.upper, columns, n_obs)
+        if evidence.kind === :interval_censored
+            response = columns[spec.response]
+            all(isfinite, response) || error(
+                "$prefix: response `$(spec.response)` interval evidence " *
+                "requires finite response values")
+            all(response .< upper) || error(
+                "$prefix: response `$(spec.response)` interval evidence " *
+                "requires response < upper every row")
+        else
+            (isnothing(lower) || isnothing(upper)) && continue
+            all(lower .< upper) || error(
+                "$prefix: response `$(spec.response)` evidence requires " *
+                "strict lower < upper every row")
+        end
+    end
+    nothing
 end
 
 function _rk_factor_options(source::Symbol, raw::AbstractVector,
@@ -519,7 +578,7 @@ function _rk_resolve_use_ref(name::Symbol, consts::Dict{Symbol,Float64},
     error("$prefix: $origin references unknown name `$name`")
 end
 
-function _rk_walk_assignment_expr!(node, in_reduction::Bool, name::Symbol,
+function _rk_walk_assignment_expr!(node, name::Symbol,
         data::AbstractDict, parameters::Set{Symbol}, assign_names::Set{Symbol})
     prefix = "RK backend"
     node isa Number && return nothing
@@ -531,18 +590,11 @@ function _rk_walk_assignment_expr!(node, in_reduction::Bool, name::Symbol,
                 "parameter `$ref`; slice 1 admits scalar parameters only")
             return nothing
         end
-        if ref in assign_names
-            return nothing # scalarity verified by the callee's own walk
-        end
-        if haskey(data, ref)
-            in_reduction || error(
-                "$prefix: assignment `$name` references data column " *
-                "`$ref` outside a reduction; assignments are scalar in " *
-                "slice 1 (precompute the column)")
-            data[ref] isa AbstractVector || error(
-                "$prefix: assignment `$name` column `$ref` must be a vector")
-            return nothing
-        end
+        ref in assign_names && return nothing # scalarity by the callee's walk
+        haskey(data, ref) && error(
+            "$prefix: assignment `$name` references data column `$ref` " *
+            "outside a reduction; assignments are scalar in slice 1 " *
+            "(precompute the column)")
         error("$prefix: assignment `$name` references unknown name `$ref`")
     end
     node isa _BRMPreparedExpr || error(
@@ -556,19 +608,36 @@ function _rk_walk_assignment_expr!(node, in_reduction::Bool, name::Symbol,
         "minimum,maximum,length} only")
     isempty(node.kwargs) || error(
         "$prefix: assignment `$name` call keywords are out of slice 1")
-    nested = in_reduction || callable in _RK_ASSIGNMENT_REDUCTIONS
+    if callable in _RK_ASSIGNMENT_REDUCTIONS
+        # Mirrors the thin layer: a reduction takes exactly one bare raw
+        # column (no nesting, no scalars) or the plan fails validation.
+        length(node.args) == 1 || error(
+            "$prefix: assignment `$name` reduction `$callable` takes " *
+            "exactly one whole column")
+        arg = only(node.args)
+        arg isa _BRMPreparedRef && haskey(data, arg.name) &&
+            data[arg.name] isa AbstractVector || error(
+            "$prefix: assignment `$name` reduction `$callable` takes " *
+            "exactly one whole column")
+        return nothing
+    end
     for arg in node.args
-        _rk_walk_assignment_expr!(
-            arg, nested, name, data, parameters, assign_names)
+        _rk_walk_assignment_expr!(arg, name, data, parameters, assign_names)
     end
     nothing
 end
 
 function _rk_rewrite_assignment_refs!(node, consts::Dict{Symbol,Float64},
         aliases::Dict{Symbol,Symbol}, parameters::Set{Symbol},
-        assign_names::Set{Symbol}, origin::String)
+        assign_names::Set{Symbol}, data::AbstractDict, origin::String)
     node isa Number && return node
     if node isa _BRMPreparedRef
+        # Data refs pass through (the walk validates their positions);
+        # params/consts first so a data collision still resolves loudly
+        # at the name-hygiene gate rather than silently shadowing.
+        haskey(data, node.name) && node.name ∉ parameters &&
+            !haskey(consts, node.name) && !haskey(aliases, node.name) &&
+            node.name ∉ assign_names && return node
         kind, value = _rk_resolve_use_ref(
             node.name, consts, aliases, parameters, assign_names, origin)
         kind === :number && return value
@@ -578,11 +647,11 @@ function _rk_rewrite_assignment_refs!(node, consts::Dict{Symbol,Float64},
     callable = node.callable
     args = map(node.args) do arg
         _rk_rewrite_assignment_refs!(
-            arg, consts, aliases, parameters, assign_names, origin)
+            arg, consts, aliases, parameters, assign_names, data, origin)
     end
     kwargs = map(node.kwargs) do value
         _rk_rewrite_assignment_refs!(
-            value, consts, aliases, parameters, assign_names, origin)
+            value, consts, aliases, parameters, assign_names, data, origin)
     end
     _BRMPreparedExpr(callable, args, kwargs)
 end
@@ -719,8 +788,8 @@ function _rk_plan_assignments!(kept, exprs::Dict{Symbol,Any},
         name = assignment.name
         haskey(exprs, name) || continue
         rewritten = _rk_rewrite_assignment_refs!(exprs[name], consts,
-            aliases, parameters, assign_names, "assignment `$name`")
-        _rk_walk_assignment_expr!(rewritten, false, name, data,
+            aliases, parameters, assign_names, data, "assignment `$name`")
+        _rk_walk_assignment_expr!(rewritten, name, data,
             parameters, assign_names)
         push!(specs, _RKAssignmentSpec(name, rewritten, name))
     end
@@ -770,10 +839,13 @@ function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
         all(isfinite, values) || error(
             "$prefix: response `$response` must be finite")
     elseif family === :bernoulli_logit
-        all(x -> x == 0 || x == 1, values) || error(
-            "$prefix: response `$response` must be 0/1 (or Bool)")
+        # Mirrors the thin layer: Bool or 0/1 integers (float 0.0/1.0 fails
+        # validation there, so it fails here with BRM-side attribution).
+        (eltype(values) <: Integer &&
+         all(x -> x == 0 || x == 1, values)) || error(
+            "$prefix: response `$response` must be Bool or 0/1 integers")
     elseif family === :poisson_log
-        all(x -> isfinite(x) && x >= 0 && x == trunc(x), values) || error(
+        (eltype(values) <: Integer && all(>=(0), values)) || error(
             "$prefix: response `$response` must hold non-negative integers")
     end
     values
@@ -839,7 +911,7 @@ function _rk_referenced_predictor(program, rhs, response::Symbol)
 end
 
 function _rk_gate_crossed_columns!(columns::Dict{Symbol,AbstractVector},
-        bound_columns::Set{Symbol}, n_obs::Int)
+        n_obs::Int)
     prefix = "RK backend"
     for key in sort!(collect(keys(columns)))
         values = columns[key]
@@ -850,13 +922,38 @@ function _rk_gate_crossed_columns!(columns::Dict{Symbol,AbstractVector},
             "$prefix: column `$key` has missing values; slice 1 has no " *
             "missingness machinery")
         eltype(values) <: Real || continue
-        key in bound_columns && continue # ±Inf bounds are one-sided laws
         all(isfinite, values) || error(
             "$prefix: column `$key` must be finite")
     end
-    for key in sort!(collect(bound_columns))
-        any(x -> x isa Real && isnan(x), columns[key]) && error(
-            "$prefix: bound column `$key` is NaN")
+    nothing
+end
+
+function _rk_gate_name_hygiene!(predictor_specs::AbstractVector,
+        parameters::AbstractVector, assignments::AbstractVector,
+        columns::Dict{Symbol,AbstractVector})
+    prefix = "RK backend"
+    pnames = [spec.name for spec in predictor_specs]
+    length(unique(pnames)) == length(pnames) || error(
+        "$prefix: internal: duplicate predictor names")
+    both = union(Set(spec.name for spec in parameters),
+        Set(spec.name for spec in assignments))
+    col_overlap = sort!(filter(n -> haskey(columns, n), collect(both)))
+    isempty(col_overlap) || error(
+        "$prefix: parameter/assignment name(s) " *
+        "$(join(col_overlap, ", ")) collide with raw columns; rename them")
+    for pn in pnames
+        pn in both && error(
+            "$prefix: predictor `$pn` collides with a parameter/assignment " *
+            "name; rename it")
+        block = Symbol(string(pn) * "_coef")
+        block in both && error(
+            "$prefix: parameter/assignment `$block` collides with " *
+            "predictor `$pn` coefficient block name; rename it")
+    end
+    for n in sort!(collect(Iterators.flatten(
+            (pnames, both, keys(columns)))))
+        startswith(string(n), "_ppl_") && error(
+            "$prefix: name `$n` uses the reserved `_ppl_` prefix; rename it")
     end
     nothing
 end
@@ -893,6 +990,17 @@ function _brm_rk_plan(brmi::BRMI)
     roots = Set{Symbol}()
     for entry in peeled
         union!(roots, _brm_prepared_references(_brm_prepare_expr(entry.rhs)))
+        # Truncation/censoring bounds reference assignments too; without them
+        # a bound-only constant (e.g. `lo` in `truncated(.., lo, 2.0)`) is
+        # pruned as dead and fails as "unknown name" at evidence time.
+        modifier = entry.modifier
+        if !isnothing(modifier)
+            for bound in (modifier.lower, modifier.upper)
+                isnothing(bound) && continue
+                union!(roots,
+                    _brm_prepared_references(_brm_prepare_expr(bound)))
+            end
+        end
     end
     union!(roots, Tuple(parameter.name for parameter in prepared.parameters))
     referenced = _brm_reachable_operations(program, roots)
@@ -926,7 +1034,6 @@ function _brm_rk_plan(brmi::BRMI)
     end
     available = Tuple(predictor_order)
     columns = Dict{Symbol,AbstractVector}()
-    bound_columns = Set{Symbol}()
     predictor_specs = _RKPredictorSpec[]
     prior_specs = _RKPopulationPrior[]
     for target in predictor_order
@@ -942,7 +1049,7 @@ function _brm_rk_plan(brmi::BRMI)
         predictor = response_predictor[entry.key]
         family, link, scale = _rk_classify_response(entry.rhs, predictor,
             predictor_link[predictor], parameter_names, assignment_names,
-            entry.key)
+            consts, aliases, entry.key)
         weights = if isnothing(entry.weight_plan)
             nothing
         else
@@ -951,21 +1058,27 @@ function _brm_rk_plan(brmi::BRMI)
             source
         end
         evidence = _rk_plan_evidence(entry.modifier, family, context.data,
-            entry.key, columns, bound_columns)
+            entry.key, columns, consts, aliases, parameter_names,
+            assignment_names)
         gated = _rk_gate_response_values!(family, entry.raw_response, entry.key)
         columns[entry.key] = gated
         push!(response_specs, _RKLikelihoodSpec(family, link, entry.key,
             predictor, scale, weights, evidence, entry.key))
     end
-    # Phase 6: one observation axis, no missing, finite data.
+    # Phase 6: one observation axis, no missing, finite data, evidence
+    # values, and name hygiene (mirrors thin-side validation, R8).
     n_obs = length(first(peeled).raw_response)
+    n_obs > 0 || error(
+        "$prefix: plan needs at least one observation, got none")
     for entry in Iterators.drop(peeled, 1)
         length(entry.raw_response) == n_obs || error(
             "$prefix: response `$(entry.key)` has " *
             "$(length(entry.raw_response)) rows, expected $n_obs (one " *
             "observation axis in slice 1)")
     end
-    _rk_gate_crossed_columns!(columns, bound_columns, n_obs)
+    _rk_gate_crossed_columns!(columns, n_obs)
+    _rk_gate_evidence_values!(response_specs, columns, n_obs)
+    _rk_gate_name_hygiene!(predictor_specs, parameters, assignments, columns)
     _RKStructuralPlan(response_specs, predictor_specs, prior_specs,
         parameters, assignments, columns, n_obs)
 end

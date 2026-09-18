@@ -23,6 +23,8 @@ df = (;
     n=[1.0, 2.0, 1.0, 2.0, 1.0, 2.0],
     b=[0, 1, 0, 1, 1, 0],
     c=[2, 1, 3, 2, 4, 3],
+    bf=[0.0, 1.0, 0.0, 1.0, 1.0, 0.0],
+    cf=[2.0, 1.0, 3.0, 2.0, 4.0, 3.0],
 )
 
 @testset "gaussian identity plan shape" begin
@@ -238,6 +240,104 @@ end
         mu ~ 1 + x
         s ~ Exponential(1)
         y ~ Normal(0, s)
+    end)
+end
+
+@testset "thin-side validation mirrors" begin
+    # Bare-column reduction crosses; nested reduction fails closed.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        m = sum(x)
+        s ~ Exponential(m)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    @test length(plan.assignments) == 1
+    @test only(plan.assignments).name === :m
+    @test only(plan.parameters).args == (:m,)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        m = sum(log(x))
+        s ~ Exponential(m)
+        y ~ Normal(mu, s)
+    end)
+    # Response eltypes mirror the thin layer exactly.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        eta ~ 1 + x
+        bf ~ BernoulliLogit(eta)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        cf ~ Poisson(mu)
+    end)
+    # Interval evidence: upper required, lower forbidden, ordered values.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        s ~ Exponential(1)
+        y ~ interval_censored(Normal(mu, s); upper=2.0)
+    end
+    evidence = only(BRM._brm_rk_plan(brmi).responses).evidence
+    @test evidence.kind === :interval_censored
+    @test (evidence.lower, evidence.upper) == (nothing, 2.0)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        s ~ Exponential(1)
+        y ~ interval_censored(Normal(mu, s); lower=0.0)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        s ~ Exponential(1)
+        y ~ interval_censored(Normal(mu, s); upper=1.0)
+    end)
+    # Inf bounds normalize to omission; NaN and reversals fail closed.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        s ~ Exponential(1)
+        y ~ truncated(Normal(mu, s), 0, Inf)
+    end
+    evidence = only(BRM._brm_rk_plan(brmi).responses).evidence
+    @test (evidence.lower, evidence.upper) == (0.0, nothing)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        s ~ Exponential(1)
+        y ~ truncated(Normal(mu, s), 0, NaN)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        s ~ Exponential(1)
+        y ~ truncated(Normal(mu, s), 5.0, 1.0)
+    end)
+    # Folded constants substitute into scale and bounds.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        s0 = 0.5
+        y ~ Normal(mu, s0)
+    end
+    @test only(BRM._brm_rk_plan(brmi).responses).scale == 0.5
+    brmi = @brm df begin
+        mu ~ 1 + x
+        lo = 0.0
+        s ~ Exponential(1)
+        y ~ truncated(Normal(mu, s), lo, 2.0)
+    end
+    evidence = only(BRM._brm_rk_plan(brmi).responses).evidence
+    @test (evidence.lower, evidence.upper) == (0.0, 2.0)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        s ~ Exponential(1)
+        y ~ truncated(Normal(mu, 1.0), s, 2.0)
+    end)
+    # Name hygiene mirrors the thin layer.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        mu_coef ~ Normal(0, 1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        _ppl_s ~ Exponential(1)
+        y ~ Normal(mu, _ppl_s)
     end)
 end
 
