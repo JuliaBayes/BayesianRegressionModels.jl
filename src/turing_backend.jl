@@ -427,18 +427,7 @@ function _turing_replay_input(plan, new_data)
 end
 
 function _turing_direct_observations(brmi::BRMI)
-    found = Any[]
-    for (key, op_nc) in pairs(brmi.operations)
-        op_nc isa NamedColumn || continue
-        op = parent(op_nc)
-        op isa ExprColumn{typeof(~)} || continue
-        lhs, rhs = getargs(op, 2)
-        isnothing(_brm_observation_name(lhs)) && continue
-        push!(found, (; key, lhs, rhs))
-    end
-    isempty(found) && error(
-        "Turing backend: direct execution requires at least one observed likelihood")
-    Tuple(found)
+    _brm_direct_observations(brmi; prefix="Turing backend")
 end
 
 
@@ -703,6 +692,9 @@ function _brm_turing_single_plan(brmi::BRMI, observation;
         observation_overrides=Dict(observation.key =>
             (; distribution=rhs, response=raw_response, modifier=response_modifier,
                weight=observation_weight, missing_response)))
+    # Reject logit-scale likelihoods over linked predictors before lowering
+    # (double link); see `_brm_validate_logit_family_links`.
+    _brm_validate_logit_family_links(prepared_model; prefix="Turing backend")
     prepared_observation = only(node for node in prepared_model.observations
                                 if node.name === observation.key)
     # A standalone sampled declaration still contributes its prior density.

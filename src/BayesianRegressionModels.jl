@@ -39,6 +39,7 @@ include("preparation_terms.jl")
 include("preparation_gp.jl")
 include("preparation_structured.jl")
 include("turing_backend.jl")
+include("rk_backend.jl")
 include("native_ppl.jl")
 include("vimpl.jl")
 
@@ -67,6 +68,11 @@ include("turing_descriptor.jl")
 include("prediction.jl")
 include("adaptive_centering.jl")
 include("posterior_diagnostics.jl")
+
+# Prior/likelihood power-scaling sensitivity — PSIS weights, CJS distance, the
+# per-variable summary, and the SBBRMI input assembly. After the descriptor
+# and diagnostics, whose coordinates and draw conventions it stands on.
+include("powerscale.jl")
 
 # Public surface. The macros and value types everything downstream
 # (web-macro, downstream extensions, tests) reaches for.
@@ -121,10 +127,11 @@ export brm_ordinal, brm_ordinal_lpmf, brm_ordinal_lpmfs, brm_ordinal_rng,
 export Data, MaybeData, maybedata
 export AbstractColumn, MissingColumn, DataColumn, NamedColumn,
        ExprColumn, LikelihoodColumn, MaterializedColumn
-export BRMI, VBRMI, SBBRMI, TuringBRMI, GenerativeDeclaration, GenerativePlan,
+export BRMI, VBRMI, SBBRMI, TuringBRMI, RKBRMI, GenerativeDeclaration, GenerativePlan,
        brm_distribution_type, turing_model_source,
        turing_pointwise_loglikelihoods, turing_predictive_model,
-       turing_generated_quantities, turing_posterior_predictive
+       turing_generated_quantities, turing_posterior_predictive,
+       rk_logdensity_problem, rk_restore_draws
 export NativePPL
 export BRMDescriptor, BRMInput, BRMOutput, BRMOperation, BRMHighlight
 export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
@@ -149,6 +156,8 @@ export AdaptiveCenteringBlock, adaptive_centering_blocks,
        adaptive_centering_problem, select_hsgp_centeredness,
        select_ranef_centeredness
 export brm_output_draws, brm_predictive_draws, hsgp_coordinate_draws, hsgp_transform_draws
+export BRMPowerscaleSensitivity, brm_psis_weights, brm_cjs_dist,
+       brm_powerscale_weights, brm_powerscale_sensitivity, brm_powerscale_inputs
 export brm_posteriorplot, brm_ppcplot, brm_pairplot,
        brm_centerednessplot, brm_centering_lossplot, brm_gradientplot
 
