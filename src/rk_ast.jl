@@ -48,32 +48,60 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol})
         if term.kind === :intercept
             push!(summands, coefs[index])
         elseif term.kind === :continuous
-            push!(summands, Expr(:call, :*, coefs[index], only(term.columns)))
+            push!(summands, Expr(:call, :.*, coefs[index], only(term.columns)))
         elseif term.kind === :factor
-            col = only(term.columns)
-            ref = term.options.ref
-            index_expr = ref == 1 ? col :
-                Expr(:call, :treatment, col, ref)
-            push!(summands, Expr(:ref, coefs[index], index_expr))
+            # Factor use is always bare `c[g]`; the LevelMap (full cover
+            # or subset) rides the broadcast prior, and unmapped rows
+            # contribute 0.
+            push!(summands, Expr(:ref, coefs[index], only(term.columns)))
         elseif term.kind === :offset
             push!(summands, only(term.columns))
         end
     end
     length(summands) == 1 ? only(summands) :
-        Expr(:call, :+, summands...)
+        Expr(:call, :.+, summands...)
+end
+
+function _rk_ast_dotted(head::Symbol, args...)
+    Expr(:., head, Expr(:tuple, args...))
+end
+
+# The `levels(g)[S]` subset literal dropping position `p` of `K`: edge
+# drops spell as explicit literal ranges, middle drops as literal index
+# lists (no `end` — the plan knows `K`, so the literal is exact).
+function _rk_ast_subset_literal(p::Int, K::Int)
+    p == 1 && return Expr(:call, :(:), 2, K)
+    p == K && return Expr(:call, :(:), 1, K - 1)
+    Expr(:vect, [1:p-1; p+1:K]...)
+end
+
+# A factor coefficient's broadcast prior: `c[levels(g)] .~ Normal.(...)`
+# full-rank, `c[levels(g)[S]] .~ Normal.(...)` for a reference subset.
+# Always stated (factors have no default prior); the scalar location and
+# scale broadcast over the LevelMap block.
+function _rk_ast_factor_prior(coef::Symbol, col::Symbol,
+        options::NamedTuple, K::Int, location::Float64, scale::Float64)
+    index = if options.coding === :fullrank
+        Expr(:call, :levels, col)
+    else
+        Expr(:ref, Expr(:call, :levels, col),
+            _rk_ast_subset_literal(options.drop, K))
+    end
+    Expr(:call, :.~, Expr(:ref, coef, index),
+        _rk_ast_dotted(:Normal, location, scale))
 end
 
 function _rk_ast_response_dist(response::_RKLikelihoodSpec)
     predictor = response.predictor
     base = if response.family === :gaussian
-        Expr(:call, :Normal, predictor, response.scale)
+        _rk_ast_dotted(:Normal, predictor, response.scale)
     elseif response.family === :bernoulli_logit
         # Triple 2 and triple 3 both lower to the T2 shape: the affine
         # value feeds logistic either way.
-        Expr(:call, :Bernoulli,
-            Expr(:call, :logistic, predictor))
+        _rk_ast_dotted(:Bernoulli,
+            _rk_ast_dotted(:logistic, predictor))
     elseif response.family === :poisson_log
-        Expr(:call, :Poisson, Expr(:call, :exp, predictor))
+        _rk_ast_dotted(:Poisson, _rk_ast_dotted(:exp, predictor))
     end
     evidence = response.evidence
     # Missing sides emit as ∓Inf floats; the thin layer normalizes them
@@ -81,18 +109,18 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec)
     dist = if evidence.kind === :truncated
         lo = evidence.lower === nothing ? -Inf : evidence.lower
         hi = evidence.upper === nothing ? Inf : evidence.upper
-        Expr(:call, :truncated, base, lo, hi)
+        _rk_ast_dotted(:truncated, base, lo, hi)
     elseif evidence.kind === :censored
         lo = evidence.lower === nothing ? -Inf : evidence.lower
         hi = evidence.upper === nothing ? Inf : evidence.upper
-        Expr(:call, :censored, base, lo, hi)
+        _rk_ast_dotted(:censored, base, lo, hi)
     elseif evidence.kind === :interval_censored
-        Expr(:call, :interval_censored, base, evidence.upper)
+        _rk_ast_dotted(:interval_censored, base, evidence.upper)
     else
         base
     end
     response.weights === nothing ? dist :
-        Expr(:call, :weighted, dist, response.weights)
+        _rk_ast_dotted(:weighted, dist, response.weights)
 end
 
 function _rk_ast_sampled(parameter::_RKSampledParameter)
@@ -112,10 +140,14 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
     taken = union(Set(keys(plan.columns)),
         Set(p.name for p in plan.parameters),
         Set(a.name for a in plan.assignments),
-        Set(p.name for p in plan.predictors))
+        Set(p.name for p in plan.predictors),
+        Set(d.name for d in plan.derived))
     priors = Dict((p.predictor, p.addressee) => (p.location, p.scale)
         for p in plan.population_priors)
     stmts = Expr[]
+    for derived in plan.derived
+        push!(stmts, Expr(:(=), derived.name, derived.expression))
+    end
     for predictor in plan.predictors
         coefs = Dict{Int,Symbol}()
         counter = 0
@@ -125,9 +157,20 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
             coef = _rk_ast_coef_name(
                 string(predictor.name, "_b", counter), taken)
             coefs[index] = coef
-            location, scale = priors[(predictor.name, term.addressee)]
-            push!(stmts, Expr(:call, :~,
-                coef, Expr(:call, :Normal, location, scale)))
+            key = (predictor.name, term.addressee)
+            haskey(priors, key) || error(
+                "RK backend: internal: no population prior for " *
+                "`$(predictor.name)` addressee `$(term.addressee)`")
+            location, scale = priors[key]
+            if term.kind === :factor
+                col = only(term.columns)
+                K = length(_rk_grouping_levels(plan.columns[col]))
+                push!(stmts, _rk_ast_factor_prior(
+                    coef, col, term.options, K, location, scale))
+            else
+                push!(stmts, Expr(:call, :~,
+                    coef, Expr(:call, :Normal, location, scale)))
+            end
         end
         push!(stmts, Expr(:(=), predictor.name,
             _rk_ast_affine(predictor, coefs)))
@@ -140,7 +183,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
             _rk_lower_assignment_expr(assignment.expression, assignment.name)))
     end
     for response in plan.responses
-        push!(stmts, Expr(:call, :~,
+        push!(stmts, Expr(:call, :.~,
             response.response, _rk_ast_response_dist(response)))
     end
     Expr(:block, stmts...)
