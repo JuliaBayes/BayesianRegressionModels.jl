@@ -452,3 +452,165 @@ end
         end
     end
 end
+
+# ---- random effects on a kernel-delivered ragged LP (snag kernel-ragged-lp) ----
+#
+# A `ragged(x, group)` LP is an ordinary linear predictor over its OWN frame,
+# so it may carry `(1 | ID | g)` terms — including a grouping FINER than the
+# ragged `group` (per-lesion intercepts inside a per-subject tumor vector).
+# Rows sharing a lesion share the drawn value; the cell receives the
+# per-subject vector through the same fancy-index as a fixed-effect ragged LP.
+#
+# The one rule the per-subject case never teaches: EVERY grouping column must
+# live on the LP's own (secondary) frame. The subject-level term uses the
+# event-frame subject key (`tgi_obs_subject`), never the subject-frame column
+# (`subject`) — the latter names a 3-row column against a 7-row LP and is
+# refused loudly by the ragged length check, not silently misaligned.
+#
+# WHAT THE LOAD-BEARING ASSERTIONS ARE:
+#
+#   1. Rows 1 and 4 share lesion `s1:L1` NON-contiguously, and the emitted
+#      `subject_lesion_idx` must map both to 1 — the lesion join is by label,
+#      exactly like the subject join. The constrained `tgi_kg[1]` and
+#      `tgi_kg[4]` are then EXACTLY equal at any parameter value (same
+#      subject, same lesion, no event-varying population terms), while
+#      `tgi_kg[1]` and `tgi_kg[2]` differ.
+#   2. A sixth lesion level must widen the unconstrained dimension by exactly
+#      1 — the lesion block is a live parameter, not data folded into a
+#      constant (the same trap note 1 guards for the fixed-effect case).
+#   3. Block-permuting the tumor frame leaves the density unchanged: the
+#      lesion levels sort independently of event-frame order, so the same
+#      point gives the same density and gradient.
+
+function ev_lesion_df(; sub_order = collect(1:3), ev_order = collect(1:7))
+    subj = (;
+        subject = ["s1", "s2", "s3"],
+        t_obs   = [abs.(sin.(1:4)) .+ 0.5 for _ in 1:3],
+        dv      = [abs.(cos.(1:4)) .+ 0.1 for _ in 1:3],
+        weight  = [60.0, 75.0, 90.0],
+    )
+    # 7 tumor rows; lesions nested in subjects (s1: L1, L2; s2: L3; s3: L4,
+    # L5). Rows 1 and 4 share L1 with rows 2-3 of other lesions between
+    # them, so contiguity can never explain a shared value.
+    ev = (;
+        tgi_obs_subject = ["s1", "s1", "s2", "s1", "s2", "s3", "s3"],
+        subject_lesion  = ["s1:L1", "s1:L2", "s2:L3", "s1:L1",
+                           "s2:L3", "s3:L4", "s3:L5"],
+    )
+    (; (k => v[sub_order] for (k, v) in pairs(subj))...,
+       (k => v[ev_order]  for (k, v) in pairs(ev))...)
+end
+
+ev_lesion_model(df) = @brm df begin
+    sigma     ~ Exponential(1)
+    log(tgi_kg) ~ 1 + (1 | tg | tgi_obs_subject) + (1 | tgl | subject_lesion)
+    log_CL    ~ 1 + weight + (1 | p | subject)
+    pred ~ kernel(t_obs, dv, ragged(tgi_kg, tgi_obs_subject), log_CL) do ts, yy, lkg, lCL
+        kg_total = sum(exp(lkg))
+        mu = kg_total .* exp(-exp(lCL) .* ts)
+        yy ~ normal(mu, sigma)
+        mu
+    end
+end
+
+# The subject-level ranef names the SUBJECT-frame column (3 rows) against the
+# 7-row tumor frame — the spelling a per-subject habit reaches for first.
+ev_lesion_subjectcol_model(df) = @brm df begin
+    sigma     ~ Exponential(1)
+    log(tgi_kg) ~ 1 + (1 | tg | subject) + (1 | tgl | subject_lesion)
+    log_CL    ~ 1 + weight + (1 | p | subject)
+    pred ~ kernel(t_obs, dv, ragged(tgi_kg, tgi_obs_subject), log_CL) do ts, yy, lkg, lCL
+        kg_total = sum(exp(lkg))
+        mu = kg_total .* exp(-exp(lCL) .* ts)
+        yy ~ normal(mu, sigma)
+        mu
+    end
+end
+
+# Same 7 tumor rows, but row 4 is its own sixth lesion instead of sharing L1
+# with row 1 — the dimension delta pins the lesion block as live parameters.
+ev_lesion_wide_df() = merge(ev_lesion_df(), (;
+    subject_lesion = ["s1:L1", "s1:L2", "s2:L3", "s1:L6",
+                      "s2:L3", "s3:L4", "s3:L5"],
+))
+
+@testset "kernel(...) — random effects on a ragged(x, group) LP" begin
+    df = ev_lesion_df()
+    sb = SBBRMI(ev_lesion_model(df); mod = @__MODULE__)
+    descriptor = brm_descriptor(
+        sb; name = :joint_pk_tgi_brm1_direct_linear, highlights = ())
+
+    @testset "the lesion ranef lowers onto the tumor frame" begin
+        @test !haskey(sb.data, :tgi_kg)
+        @test sb.data[:kernel_pred_tgi_kg_ragged] == [[1, 2, 4], [3, 5], [6, 7]]
+        # Rows 1 and 4 share lesion 1 although rows 2-3 sit between them.
+        @test sb.data[:subject_lesion_idx] == [1, 2, 3, 1, 3, 4, 5]
+        @test sb.data[:n_subject_lesion] == 5
+        @test sb.data[:tgi_obs_subject_idx] == [1, 1, 2, 1, 2, 3, 3]
+
+        tgi_kg = brm_output(descriptor, :tgi_kg; role = :linear_predictor)
+        @test tgi_kg.name === :tgi_kg
+        @test tgi_kg.logical === :tgi_kg
+    end
+
+    @testset "transpile + stanc" begin
+        @test StanBlocks.stan.transpiles(sb.model)
+        code = StanBlocks.stan_code(sb.model)
+        # The lesion block indexes the tumor frame, and the cell reads the
+        # bare LHS-link name through the ragged fancy-index.
+        @test occursin("b_tgl_subject_lesion[subject_lesion_idx, 1]", code)
+        @test occursin(r"tgi_kg\[\s*kernel_pred_tgi_kg_ragged\.1\[", code)
+        @test StanBlocks.stanc_check(code; warn_pedantic = false).ok
+    end
+
+    @testset "the subject-frame column is refused loudly, not misaligned" begin
+        @test_throws "row axis" SBBRMI(
+            ev_lesion_subjectcol_model(df); mod = @__MODULE__)
+    end
+
+    @testset "BridgeStan runtime — lesions share one drawn value" begin
+        if EV_RUN_BRIDGESTAN
+            using LogDensityProblems
+            prob = ev_problem(sb, "lesion")
+            dim = LogDensityProblems.dimension(prob)
+            q = [0.1 * ((i % 5) - 2) for i in 1:dim]
+            lp, g = LogDensityProblems.logdensity_and_gradient(prob, q)
+            @test isfinite(lp)
+            @test length(g) == dim
+            @test all(isfinite, g)
+
+            constrained_names = StanBlocks.BridgeStan.param_names(
+                prob.model; include_tp = true, include_gq = false)
+            tgi_idx = findall(
+                n -> n == "tgi_kg" || startswith(n, "tgi_kg."),
+                constrained_names)
+            @test length(tgi_idx) == 7
+            constrained = StanBlocks.BridgeStan.param_constrain(
+                prob.model, q; include_tp = true, include_gq = false)
+            # Same subject, same lesion, no event-varying population terms:
+            # rows 1 and 4 are the SAME drawn value; row 2 is another lesion.
+            @test constrained[tgi_idx][1] == constrained[tgi_idx][4]
+            @test constrained[tgi_idx][1] != constrained[tgi_idx][2]
+
+            # A sixth lesion level widens the unconstrained dimension by
+            # exactly 1 — the lesion block is live, not a folded constant.
+            wide = SBBRMI(ev_lesion_model(ev_lesion_wide_df()); mod = @__MODULE__)
+            @test LogDensityProblems.dimension(ev_problem(wide, "lesion_wide")) ==
+                  dim + 1
+
+            # Block-permuting the tumor frame leaves the density unchanged:
+            # `[6,1,3,2,4,7,5]` interleaves the subjects while the lesion
+            # levels sort the same, so the same point still applies.
+            perm = SBBRMI(
+                ev_lesion_model(ev_lesion_df(; ev_order = [6, 1, 3, 2, 4, 7, 5]));
+                mod = @__MODULE__)
+            @test perm.data[:kernel_pred_tgi_kg_ragged] == [[2, 4, 5], [3, 7], [1, 6]]
+            perm_lp, perm_g = LogDensityProblems.logdensity_and_gradient(
+                ev_problem(perm, "lesion_perm"), q)
+            @test isapprox(perm_lp, lp; atol = 1e-8, rtol = 0)
+            @test isapprox(perm_g, g; atol = 1e-8, rtol = 0)
+        else
+            @info "Skipping BridgeStan runtime gate (BRM_KERNEL_RUNTIME=0)"
+        end
+    end
+end
