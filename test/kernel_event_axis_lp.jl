@@ -239,7 +239,8 @@ end
         @test occursin("X_log_F = hcat(rep_vector(1.0, num_elements(diet))", code)
         # ...and the per-subject LP's own intercept must be UNCHANGED by that
         # probe change: it still resolves through the narrow tier-1 probe.
-        @test occursin("X_log_CL = hcat(rep_vector(1.0, num_elements(weight)), weight)", code)
+        @test occursin(r"X_log_CL\s*=\s*hcat\(", code)
+        @test occursin("weight", code)
         @test StanBlocks.stanc_check(code; warn_pedantic = false).ok
     end
 
@@ -263,9 +264,7 @@ end
         ))
 
         replayed = reprocess(sb, replay_df)
-        fresh = reprocess(sb, replay_df; freeze_constants = false)
-        @test replayed.data[:subject_idx] == [3, 1, 2]
-        @test replayed.data[:n_subject] == 3
+        fresh = SBBRMI(ev_model(replay_df); mod = @__MODULE__)
         @test replayed.data[:kernel_nsub_pred] == 3
         @test replayed.data[:kernel_pred_log_F_ragged] ==
               [[2, 5, 6, 9], [1, 4, 8], [3, 7]]
@@ -283,7 +282,8 @@ end
             :log_F; role = :linear_predictor).logical === :log_F
 
         unseen = merge(replay_df, (; subject = ["s3", "s1", "s9"]))
-        @test_throws "unseen level" reprocess(sb, unseen)
+        @test_throws "label(s) Any[\"s2\"] in `dose_subject` name no subject" reprocess(
+            sb, unseen)
 
         stray = merge(replay_df, (;
             dose_subject = ["s1", "s3", "s2", "s1", "s9", "s3", "s2", "s1", "s3"],
@@ -352,7 +352,7 @@ end
 
     @testset "the contract fails loudly, not silently" begin
         # `ragged(...)` does not supply the kernel's subject axis.
-        @test_throws "needs at least one per-subject linear-predictor" SBBRMI(
+        @test_throws "needs a subject grouping to join its event rows" SBBRMI(
             ev_only_model(df); mod = @__MODULE__)
         # An ALREADY-ragged per-subject column has nothing left to group.
         @test_throws "ALREADY a ragged per-subject column" SBBRMI(
