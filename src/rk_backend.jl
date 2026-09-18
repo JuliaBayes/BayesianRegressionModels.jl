@@ -390,6 +390,16 @@ function _rk_gate_evidence_values!(specs::AbstractVector,
                 "$prefix: response `$(spec.response)` evidence requires " *
                 "strict lower < upper every row")
         end
+        # Mirrors the thin layer: the poisson.cdf(::Int) endpoint needs
+        # integer-valued bounds (literals and columns alike).
+        if spec.family === :poisson_log
+            for (side, bound) in (("lower", lower), ("upper", upper))
+                bound === nothing && continue
+                all(v -> v == round(v), bound) || error(
+                    "$prefix: response `$(spec.response)` Poisson evidence " *
+                    "$side bound must be integer-valued")
+            end
+        end
     end
     nothing
 end
@@ -449,6 +459,11 @@ function _rk_term_spec(term, target::Symbol, data::AbstractDict,
             "$prefix: predictor `$target` `factor()` takes only `ref`/`cmc`")
         source = name(inner)
         raw = get(data, source, nothing)
+        raw isa AbstractVector{<:AbstractString} && error(
+            "$prefix: predictor `$target` string grouping column " *
+            "`$source` is out of slice 1 in the BRM lane (shared " *
+            "population lowering only codes integer/CategoricalVector " *
+            "groupings); encode levels as integers")
         raw isa AbstractVector && _brm_is_categorical_data(raw) || error(
             "$prefix: predictor `$target` factor column `$source` must be " *
             "categorical (integer codes or a CategoricalVector)")
@@ -469,6 +484,12 @@ function _rk_term_spec(term, target::Symbol, data::AbstractDict,
         raw = get(data, source, nothing)
         raw isa AbstractVector || error(
             "$prefix: predictor `$target` column `$source` is not a vector")
+        if raw isa AbstractVector{<:AbstractString}
+            error("$prefix: predictor `$target` string grouping column " *
+                  "`$source` is out of slice 1 in the BRM lane (shared " *
+                  "population lowering only codes integer/CategoricalVector " *
+                  "groupings); encode levels as integers")
+        end
         if _brm_is_categorical_data(raw)
             options, crossed = _rk_factor_options(
                 source, raw, first(_brm_fit_levels(raw)), target)
@@ -487,8 +508,8 @@ function _rk_term_spec(term, target::Symbol, data::AbstractDict,
         "$prefix: predictor `$target` term `$(nameof(getf(term)))` is out " *
         "of slice 1")
     error("$prefix: predictor `$target` term `$term` is not supported in " *
-          "slice 1 (admitted: `1`, continuous columns, integer/categorical " *
-          "columns, `factor()`, `offset()`)")
+          "slice 1 (admitted: `1`, continuous columns, integer/string/" *
+          "categorical columns, `factor()`, `offset()`)")
 end
 
 function _rk_population_priors(brmi::BRMI, design, target::Symbol,
@@ -734,6 +755,16 @@ function _rk_plan_parameters!(prepared, data::AbstractDict,
                       "assignment)")
             end
         end
+        # Mirrors the thin layer: :positive adds log(2), exact only at
+        # location 0 — nonzero literals and references fail closed here
+        # with BRM attribution instead of silently wrong densities.
+        if support_override === :positive
+            location = first(resolved)
+            location isa Number && location == 0 || error(
+                "$prefix: parameter `$(parameter.name)` half-normal " *
+                "location must be the literal 0 (slice 1 supports " *
+                "zero-location half-normals only)")
+        end
         push!(specs, _RKSampledParameter(
             parameter.name, family, Tuple(resolved), support_override,
             parameter.name))
@@ -766,7 +797,11 @@ function _rk_half_normal_prior(prior::_BRMPreparedExpr, name::Symbol)
     lower isa Number && lower == 0 || error(
         "$prefix: parameter `$name` truncated prior must have lower " *
         "bound 0 for a half-Normal")
-    (isnothing(upper) || (upper isa Number && upper == Inf)) || error(
+    # `Inf` arrives as a name (Julia global), not a literal — same as
+    # evidence bounds.
+    upper_is_inf = upper isa Number && upper == Inf ||
+        upper isa _BRMPreparedRef && upper.name === :Inf
+    (isnothing(upper) || upper_is_inf) || error(
         "$prefix: parameter `$name` truncated prior must have upper " *
         "bound Inf (or omit it) for a half-Normal")
     isempty(inner.kwargs) || error(
