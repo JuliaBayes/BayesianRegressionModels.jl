@@ -134,6 +134,186 @@ _brm_hsgp_rescale(value, log_scale, exponent) =
     iszero(exponent) ? value : value * exp(exponent * log_scale)
 
 """
+    hsgp_boundary_check(d::BRMDescriptor, draws::AbstractMatrix, names;
+                        predictor::Symbol, term::Symbol)
+
+Post-fit verdict on whether a fitted `hsgp` term's length scale lives where
+the Hilbert-space approximation still represents the kernel. An HSGP over a
+domain of half-width `L` fitted on data extending to `extent` keeps a margin
+`L - extent` past the data; once posterior `rho` approaches that margin the
+prior covariance silently distorts (boundary eats edge-point variance), while
+the model still transpiles, samples, and returns finite draws. This check
+reports the distortion ratio per group and flags at `1.0` — it reports, never
+fails: a flagged term fitted fine, it just may not be the GP you asked for.
+
+Returns `(; predictor, term, n_groups, margin, floor, mean_rho, ratios,
+flagged, floor_binding)`:
+
+- `margin` — the fitted past-data margin `(c-1)/c * L`, from the frozen basis
+  fit (for an auto-fitted domain `L = c * extent`, so this is exact);
+- `mean_rho` / `ratios` — per-group posterior-mean `rho` and
+  `mean_rho / margin` (`n_groups == 1` for a bare term, even a grouped one,
+  whose hyper value is scalar-shared; one entry per group for a
+  hyper-driven term, with `rho` reconstructed as `exp(eta)` from the
+  hyper-LP coefficients, never sliced from a transformed parameter);
+- `flagged` — whether any ratio reaches `1.0`;
+- `floor_binding` — per-group posterior probability the hyper value sits
+  below the approximation-validity floor (`mean(rho < floor)`): structural
+  `0.0` for a default-floor bare term, measured otherwise. In particular a
+  hyper-driven term's sub-floor mass is likelihood-flat prior reported as
+  posterior — this number says how much.
+
+`draws` is draws × coordinates with `names` its constrained axis (the same
+orientation every resolver here takes); carriers resolve through
+[`brm_term_coordinates`](@ref), so a response-free prior program works with
+`include_gq=true` names exactly as a fit does.
+
+v1 covers one-dimensional auto-fitted `exp_quad` terms, grouped or not, bare
+or hyper-driven. Periodic, multi-axis, anisotropic, model-derived-axis, and
+explicit-`domain=` terms refuse loudly: their boundary geometry needs its own
+margin rule, and a wrong margin here would be worse than none.
+"""
+function hsgp_boundary_check(d::BRMDescriptor, draws::AbstractMatrix, names;
+                             predictor::Symbol, term::Symbol)
+    _brm_check_draw_names(draws, names)
+    entries = [e for e in _brm_term_coordinate_entries(d.plan.parent, predictor)
+               if e.term === term]
+    length(entries) == 1 || error(
+        "HSGP boundary check: term `$term` occurs $(length(entries)) times " *
+        "on logical predictor `$predictor`; expected exactly one.")
+    entry = only(entries)
+    getf(entry.value) === hsgp || error(
+        "HSGP boundary check: term `$term` is not an `hsgp` term")
+    t = entry.value
+    kw = getkwargs(t)
+    _brm_gp_cov(kw, :hsgp) === :exp_quad || error(
+        "HSGP boundary check: term `$term` uses a non-`exp_quad` covariance; " *
+        "v1 covers `exp_quad` only")
+    length(getargs(t)) == 1 || error(
+        "HSGP boundary check: term `$term` spans " *
+        "$(length(getargs(t))) axes; v1 covers one-dimensional terms only")
+    _sb_gp_iso(kw, :hsgp) || error(
+        "HSGP boundary check: term `$term` is anisotropic; v1 covers " *
+        "isotropic terms only")
+    for a in getargs(t)
+        inner = _sb_named_inner(:hsgp, a)
+        (inner isa NamedColumn && parent(inner) isa DataColumn) || error(
+            "HSGP boundary check: term `$term` has a model-derived axis; " *
+            "v1 covers raw-data axes only")
+    end
+    # Owner join, mirroring `brm_term_coordinates`: formula term to logical
+    # term output to owning declaration.
+    link = entry.link
+    emitted_lp = _sb_lp_emitted_name(predictor, link)
+    owner_labels = _brm_term_owner_labels(getf(t), t, emitted_lp)
+    owners = BRMOutput[]
+    for label in owner_labels
+        append!(owners, BRMOutput[
+            o for o in d.outputs
+            if o.logical === label && !isnothing(o.declaration) &&
+               _brm_term_owner_matches(d.plan, getf(t), t, o)
+        ])
+        isempty(owners) || break
+    end
+    length(owners) == 1 || error(
+        "HSGP boundary check: term `$term` has $(length(owners)) logical " *
+        "output owners; expected exactly one.")
+    owner = only(owners).declaration
+    # The latent/model-derived shape carries an `x` keyword instead of a `PHI`
+    # binding (see `_brm_term_owner_matches`); without frozen fits there is no
+    # margin to check against.
+    phi = get(owner.keywords, :PHI, nothing)
+    phi isa Symbol || error(
+        "HSGP boundary check: term `$term` has no frozen basis fit; v1 " *
+        "covers raw-data auto-fitted terms only")
+    preproc = get(d.plan.preproc, phi, nothing)
+    if isnothing(preproc) || preproc.kind !== :hsgp
+        error("HSGP boundary check: term `$term` resolves to no fitted " *
+              "`:hsgp` preprocessing record at `$phi`. Re-reflect the model " *
+              "that produced the posterior draws.")
+    end
+    const_ = preproc.const_
+    get(const_, :cov, :exp_quad) === :exp_quad || error(
+        "HSGP boundary check: term `$term` is periodic; v1 covers " *
+        "`exp_quad` only")
+    const_.iso || error(
+        "HSGP boundary check: term `$term` is anisotropic; v1 covers " *
+        "isotropic terms only")
+    length(const_.fits) == 1 || error(
+        "HSGP boundary check: term `$term` spans " *
+        "$(length(const_.fits)) fitted axes; v1 covers one-dimensional " *
+        "terms only")
+    isnothing(const_.domain_fits) || error(
+        "HSGP boundary check: term `$term` uses an explicit `domain=`; the " *
+        "boundary margin needs the fitted data extent, which v1 does not " *
+        "retain — auto-fitted domains only")
+    _, L = only(const_.fits)
+    c = only(const_.c)
+    (c isa Real && c > 1 && L > 0) || error(
+        "HSGP boundary check: term `$term` has an unusable frozen fit " *
+        "(c=$(repr(c)), L=$(repr(L))).")
+    margin = (c - 1) / c * L
+    floor_key = const_.rho_lower_key
+    floor = get(d.plan.data, floor_key, nothing)
+    floor isa Real || error(
+        "HSGP boundary check: term `$term` has no validity floor at " *
+        "`$floor_key`. Re-reflect the model that produced the posterior draws.")
+    # Hyper values reconstruct from coefficients (the B3 roles), never from a
+    # transformed-parameter carrier — the same eta the emitter builds.
+    plans = _brm_term_hyper_plans(d.plan, predictor, t)
+    rho_plan = _sb_hyper_plan_for(plans, :length_scale)
+    rho_draws = if isnothing(rho_plan)
+        rho = brm_term_coordinates(d, predictor, names; term,
+                                   parameter=:length_scale)
+        length(rho.coordinates) == 1 || error(
+            "HSGP boundary check: term `$term` resolves `:length_scale` to " *
+            "$(length(rho.coordinates)) coordinates; expected one.")
+        draws_mat = Matrix(@view draws[:, rho.coordinates])
+        all(x -> isfinite(x) && x > 0, draws_mat) || error(
+            "HSGP boundary check: term `$term` needs finite positive " *
+            "constrained length scales")
+        draws_mat
+    else
+        _brm_hyper_eta_rho_draws(d, draws, names, predictor, term, rho_plan)
+    end
+    n_groups = size(rho_draws, 2)
+    mean_rho = vec(sum(rho_draws; dims=1) ./ size(rho_draws, 1))
+    ratios = mean_rho ./ margin
+    binding = vec(sum(rho_draws .< floor; dims=1) ./ size(rho_draws, 1))
+    (; predictor, term, n_groups, margin, floor,
+       mean_rho, ratios, flagged=any(ratios .>= 1.0), floor_binding=binding)
+end
+
+# Per-draw per-group hyper values from the sampled hyper-LP coefficients,
+# following the emitter's eta construction (`_sb_hyper_param_stmts!`): full
+# `beta + sd*z` when a ranef is present, the bare intercept when it is not.
+# B1 guarantees at least one of the two.
+function _brm_hyper_eta_rho_draws(d, draws, names, predictor, term, plan)
+    at(role) = brm_term_coordinates(d, predictor, names; term,
+                                    parameter=role).coordinates
+    if isempty(plan.ranefs)
+        beta = vec(Matrix(@view draws[:, at(:length_scale_intercept)]))
+        all(isfinite, beta) || error(
+            "HSGP boundary check: term `$term` needs finite hyper-LP " *
+            "intercept draws")
+        return reshape(exp.(beta), :, 1)
+    end
+    z = Matrix(@view draws[:, at(:length_scale_ranef_z)])
+    sd = vec(Matrix(@view draws[:, at(:length_scale_ranef_sd)]))
+    all(isfinite, z) && all(isfinite, sd) && all(>(0), sd) || error(
+        "HSGP boundary check: term `$term` needs finite hyper-LP " *
+        "deviation draws and a finite positive group scale")
+    if plan.intercept
+        beta = vec(Matrix(@view draws[:, at(:length_scale_intercept)]))
+        all(isfinite, beta) || error(
+            "HSGP boundary check: term `$term` needs finite hyper-LP " *
+            "intercept draws")
+        return exp.(beta .+ sd .* z)
+    end
+    exp.(sd .* z)
+end
+
+"""
     hsgp_transform_draws(coordinates, log_scales; from=0.0, to, gradients=nothing)
 
 Transform saved HSGP basis coordinates between centering frames without a model
