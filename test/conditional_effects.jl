@@ -585,3 +585,64 @@ end
         @test isempty(bad)
     end
 end
+
+# ---- fused-Gaussian carrier (its OWN compiled program) ----------------------
+# A pure-population Gaussian `mu ~ 1 + x` fuses to `normal_id_glm`, which
+# re-emits `mu = X * pop_mu` AFTER the likelihood, so its carrier lands in
+# `generated quantities` (off the gradient path — the point of the fusion).
+# The `:mean` / `:link` engine must read that GQ carrier, not only transformed
+# parameters. This is a SEPARATE model so its parameters do not perturb the
+# fixed-seed `unc` matrix of the shared fixture above.
+# Regression for snag brm-conditional-bf9d2446 (reporter: BRM:bambi).
+@testset "means — fused Gaussian reads the generated-quantities carrier" begin
+    fdf = (; x=[0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0],
+             y=[1.2, 1.4, 2.1, 2.3, 3.0, 3.5, 3.9, 4.3, 4.8])
+    fb = @brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x
+        y ~ Normal(mu, sigma)
+    end
+    fd = brm_descriptor(fb, fdf; mod=@__MODULE__, name=:cond_fused)
+    fgrid = brm_prediction_grid(fd; focal=:x, n=6)
+    fd2 = brm_execute(fd, :reprocess, fgrid)
+    fprob = brm_execute(fd2, :instantiate)
+    # The fusion actually fired: `mu` is a generated quantity, not a TP.
+    @test brm_output(fd2, :mu; role=:linear_predictor).kind ===
+        :generated_quantity
+    func = randn(MersenneTwister(20260918), 8,
+                 length(BridgeStan.param_unc_names(fprob.model))) .* 0.5
+
+    fmean = brm_conditional_draws(fd, func, fgrid; problem=fprob,
+                                  response=:y, focal=:x)
+    @test fmean.target === :mean
+    @test fmean.logical === :mu
+    @test size(fmean.draws) == (8, 6)
+    @test all(isfinite, fmean.draws)
+    # Deterministic: the GQ carrier is a pure assignment, RNG-independent.
+    @test brm_conditional_draws(fd, func, fgrid; problem=fprob,
+                                response=:y).draws == fmean.draws
+    # Normal identity: response mean == link == mu.
+    flink = brm_conditional_draws(fd, func, fgrid; problem=fprob,
+                                  response=:y, scale=:link, logical=:mu)
+    @test flink.draws == fmean.draws
+    # Exact: the fused `mu = X * pop_mu`, `X = [1  x]`. `beta_pop` is a
+    # parameter (present without GQ), so rebuild the mean by hand and compare.
+    ftp = BridgeStan.param_names(fprob.model; include_tp=true, include_gq=false)
+    fcc = Matrix{Float64}(undef, size(func, 1), length(ftp))
+    for (i, row) in enumerate(eachrow(func))
+        fcc[i, :] .= BridgeStan.param_constrain(
+            fprob.model, collect(Float64, row); include_tp=true,
+            include_gq=false)
+    end
+    b0 = fcc[:, brm_population_effect_coordinates(
+        fd2, :mu, ftp; coefficient=:Intercept).coordinates]
+    b1 = fcc[:, brm_population_effect_coordinates(
+        fd2, :mu, ftp; coefficient=:x).coordinates]
+    manual = b0 .+ b1 .* reshape(Float64.(fgrid.x), 1, 6)
+    @test fmean.draws ≈ manual atol=1e-12
+    # Predictive still works on the fused model.
+    fpred = brm_conditional_draws(fd, func, fgrid; problem=fprob,
+                                  response=:y, target=:predictive, seed=7)
+    @test size(fpred.draws) == (8, 6)
+    @test all(isfinite, fpred.draws)
+end

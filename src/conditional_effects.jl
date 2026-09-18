@@ -478,13 +478,24 @@ _brm_mean_formula(family, _) = error(
 
 # ---- conditional draws -----------------------------------------------------
 #
-# `target=:mean` evaluates the linear-predictor transformed parameters on
-# the reprocessed problem with `BridgeStan.param_constrain` (`include_tp`,
-# no GQ, no RNG): deterministic, exact, and valid for every term the Stan
-# program computes — the same validity argument `:predict`-on-reprocess
-# stands on, since `reprocess` reuses the transpiled model. Output
-# selection stays descriptor-driven (`role=:linear_predictor`); no
-# compiler-owned name is constructed or parsed here.
+# `target=:mean` evaluates the linear-predictor carriers on the reprocessed
+# problem with `BridgeStan.param_constrain` (`include_tp`): deterministic,
+# exact, and valid for every term the Stan program computes — the same
+# validity argument `:predict`-on-reprocess stands on, since `reprocess`
+# reuses the transpiled model. Output selection stays descriptor-driven
+# (`role=:linear_predictor`); no compiler-owned name is constructed or
+# parsed here.
+#
+# A carrier normally lives in `transformed parameters`, but the Tier-1
+# `normal_id_glm` fusion (`_sb_fuse_normal_id_glm!`) deliberately re-emits a
+# pure-population Gaussian linear predictor (`mu = X * pop_mu`) AFTER the
+# likelihood, so it lands in `generated quantities` — off the gradient path,
+# which is the point of the fusion. When any needed carrier is a
+# `:generated_quantity` (the descriptor's own `kind`, so this stays
+# name-parsing-free), the reading switches to `include_gq=true` and passes a
+# StanRNG. Every such LP is a deterministic assignment, so the extracted
+# values are RNG-independent; the seed only satisfies BridgeStan's GQ
+# contract (`param_constrain` requires an RNG whenever `include_gq=true`).
 
 function _brm_check_conditional_grid(grid)
     grid isa NamedTuple || error(
@@ -504,9 +515,14 @@ function _brm_check_conditional_grid(grid)
 end
 
 function _brm_constrain_grid_lps(prob, unc_draws::AbstractMatrix,
-                                 selections)
+                                 selections; include_gq::Bool=false,
+                                 seed::Integer=1)
     names = BridgeStan.param_names(prob.model; include_tp=true,
-                                   include_gq=false)
+                                   include_gq=include_gq)
+    # `param_constrain` requires an RNG whenever `include_gq=true`; a fused
+    # Gaussian LP carrier is a deterministic GQ assignment, so the seed does
+    # not affect the extracted values — see the note above this function.
+    rng = include_gq ? BridgeStan.StanRNG(prob.model, seed) : nothing
     resolved = map(selections) do ((name, _), coordinates_fn)
         coordinates = coordinates_fn(names)
         name => coordinates
@@ -519,7 +535,7 @@ function _brm_constrain_grid_lps(prob, unc_draws::AbstractMatrix,
     for (i, row) in enumerate(eachrow(unc_draws))
         constrained = BridgeStan.param_constrain(
             prob.model, collect(Float64, row); include_tp=true,
-            include_gq=false)
+            include_gq=include_gq, rng=rng)
         for (name, coordinates) in resolved
             out[name][i, :] .= @view constrained[coordinates]
         end
@@ -734,7 +750,17 @@ function brm_conditional_draws(d::BRMDescriptor, unc_draws::AbstractMatrix,
                 d2, key, names; role=:linear_predictor) :
                 brm_output_coordinates(d2, key, names))
     end
-    measured = _brm_constrain_grid_lps(prob, unc_draws, selections)
+    # A pure-population Gaussian linear predictor is fused to `normal_id_glm`
+    # and its carrier is re-emitted into `generated quantities`; read the GQ
+    # block when any needed carrier lives there (descriptor `kind`, no name
+    # parsing). See the note above `_brm_constrain_grid_lps`.
+    needs_gq = any(requests) do (key, is_lp)
+        o = is_lp ? brm_output(d2, key; role=:linear_predictor) :
+            brm_output(d2, key)
+        o.kind === :generated_quantity
+    end
+    measured = _brm_constrain_grid_lps(prob, unc_draws, selections;
+                                       include_gq=needs_gq, seed)
     for lp in needed
         size(measured[lp], 2) == n_grid || throw(DimensionMismatch(
             "BRM prediction: linear predictor `$lp` has " *
