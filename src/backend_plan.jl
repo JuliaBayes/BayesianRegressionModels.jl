@@ -1505,7 +1505,17 @@ end
 # shared population design cannot disagree about which term is cell-mean coded.
 _brm_is_categorical_data(raw) =
     raw isa CA.CategoricalVector ||
-    (raw isa AbstractVector && eltype(raw) <: Integer)
+    (raw isa AbstractVector && eltype(raw) <: Integer) ||
+    _brm_is_string_categorical_data(raw)
+
+# Plain string vectors and string-leveled `CategoricalVector`s code exactly
+# like integer levels: `sort(unique)` order with the reference first, the
+# reference addressed by level value. (A bare `CategoricalVector` of any
+# level type keeps its declared level order downstream, as before.)
+_brm_is_string_categorical_data(raw) =
+    raw isa CA.CategoricalVector ?
+        eltype(CA.levels(raw)) <: AbstractString :
+    raw isa AbstractVector ? eltype(raw) <: AbstractString : false
 
 # The emitted block name of a categorical MAIN-EFFECT term, else `nothing`.
 function _brm_categorical_term_block(term::NamedColumn)
@@ -1522,6 +1532,14 @@ function _brm_categorical_term_block(term::ExprColumn{typeof(factor)})
     backing isa DataColumn && _brm_is_categorical_data(parent(backing)) ||
         return nothing
     ref = get(getkwargs(term), :ref, 1)
+    if ref isa AbstractString
+        # Mirror of the population-columns default: an explicit `ref` naming
+        # the first sorted level keeps the source block name.
+        fit = _brm_fit_levels(_brm_factor_values(parent(backing)))
+        isempty(fit) && return name(inner)
+        return ref == first(fit) ? name(inner) :
+            Symbol(string(name(inner), "__ref_", ref))
+    end
     ref isa Integer && ref != 1 ? Symbol(name(inner), :__ref_, ref) : name(inner)
 end
 _brm_categorical_term_block(_term) = nothing
@@ -1603,14 +1621,17 @@ _brm_cellmeans_level_address(block::Symbol, level::Integer) =
 
 function _brm_categorical_population_columns(
         raw, source::Symbol, block::Symbol,
-        effect_addresses::Tuple=(block,); ref::Integer=1,
-        cellmeans::Bool=false)
+        effect_addresses::Tuple=(block,); ref::Union{Integer,AbstractString}=1,
+        cellmeans::Bool=false, levels::Union{Nothing,AbstractVector}=nothing)
     _brm_is_categorical_data(raw) || return nothing
     n_levels, indices = _brm_level_index(raw)
     # Treatment coding drops a single-level factor (its lone level is the
     # reference); cell means keep its one coefficient.
     n_levels >= (cellmeans ? 1 : 2) || return nothing
-    levels = _brm_fit_levels(raw)
+    # `levels` carries the fitted level values when `raw` is already recoded
+    # (string `factor(...; ref=...)` recodes to integer codes); otherwise the
+    # levels are derived from `raw` exactly as before.
+    levels = isnothing(levels) ? _brm_fit_levels(raw) : levels
     Tuple(begin
         label = _brm_cellmeans_level_address(block, level)
         values = Float64[index == level ? 1.0 : 0.0 for index in indices]
@@ -1635,6 +1656,44 @@ function _brm_population_columns(term::NamedColumn; cellmeans::Bool=false)
     isnothing(column) ? nothing : (column,)
 end
 
+# The level values a `factor(...)` term codes over. A `CategoricalVector`
+# contributes its unwrapped values -- its declared level order is ignored,
+# as in the integer `factor(...)` path -- while a plain vector codes itself.
+_brm_factor_values(raw::CA.CategoricalVector) = CA.unwrap.(raw)
+_brm_factor_values(raw::AbstractVector) = raw
+
+# String mirror of the integer `factor(...)` body below: `sort(unique)` level
+# order with the reference first, the reference addressed by level value.
+# Strings recode to integer codes (there is no string value that sorts
+# first for every level set, as `1` does for 1-based integers), while the
+# fitted string levels ride along for replay and prior addressing.
+function _brm_string_factor_population_columns(term, inner, raw::AbstractVector;
+                                               cellmeans::Bool=false)
+    values = _brm_factor_values(raw)
+    any(ismissing, values) && return nothing
+    kwargs = getkwargs(term)
+    all(k -> k === :ref || k === :cmc, keys(kwargs)) || return nothing
+    fit_levels = _brm_fit_levels(values)
+    isempty(fit_levels) && return nothing
+    ref_raw = get(kwargs, :ref, first(fit_levels))
+    ref_raw isa AbstractString || return nothing
+    ref_raw in fit_levels || error(
+        "BRM backend lowering: `factor($(name(inner)); ref=$(repr(ref_raw)))` " *
+        "ref is not an observed level (levels $(repr(collect(fit_levels))))")
+    source = name(inner)
+    block = ref_raw == first(fit_levels) ? source :
+        Symbol(string(source, "__ref_", ref_raw))
+    lookup = Dict(level => code for (code, level) in enumerate(fit_levels))
+    codes = Int[lookup[value] for value in values]
+    ref_code = lookup[ref_raw]
+    recoded = Int[code == ref_code ? 1 : code == 1 ? ref_code : code
+                  for code in codes]
+    addresses = ref_raw == first(fit_levels) ? (source,) : (block, source)
+    _brm_categorical_population_columns(
+        recoded, source, block, addresses; ref=ref_raw, cellmeans,
+        levels=fit_levels)
+end
+
 function _brm_population_columns(term::ExprColumn{typeof(factor)};
                                  cellmeans::Bool=false)
     args = getargs(term)
@@ -1645,6 +1704,10 @@ function _brm_population_columns(term::ExprColumn{typeof(factor)};
     backing isa DataColumn || return nothing
     raw = parent(backing)
     raw isa AbstractVector || return nothing
+    if _brm_is_string_categorical_data(raw)
+        return _brm_string_factor_population_columns(
+            term, inner, raw; cellmeans)
+    end
     raw_values = if raw isa CA.CategoricalVector
         levels = CA.levels(raw)
         eltype(levels) <: Integer || return nothing
@@ -1748,10 +1811,10 @@ end
 Materialise the backend-neutral population design for the first common surface:
 an additive intercept, continuous raw-data columns, pure numeric data
 expressions, fitted `zscale`/`standardize`/`center` columns, pairwise
-continuous/categorical interactions, treatment contrasts for integer or
-`CategoricalVector` columns (cell means for the first such term of a predictor
-without an intercept -- `_brm_cellmeans_block`), and pure data-derived fixed
-`offset(...)` terms.
+continuous/categorical interactions, treatment contrasts for integer,
+string, or `CategoricalVector` columns (cell means for the first such term of
+a predictor without an intercept -- `_brm_cellmeans_block`), and pure
+data-derived fixed `offset(...)` terms.
 Plain grouped terms are separated into `_BRMRandomEffectPlan` values rather
 than being mistaken for population columns.
 Returns `nothing` for a term requiring richer lowering unless `required=true`,
@@ -1805,7 +1868,8 @@ function _brm_population_design(target::Symbol, terms::Tuple,
                 "expressions and fixed data-derived `offset(...)` terms, plus " *
                 "`zscale`, `standardize`, and `center` of one numeric column, " *
                 "pairwise continuous/categorical interactions, and ordered " *
-                "treatment contrasts for integer or `CategoricalVector` columns")
+                "treatment contrasts for integer, string, or " *
+                "`CategoricalVector` columns")
             return nothing
         end
         append!(raw_columns, columns)

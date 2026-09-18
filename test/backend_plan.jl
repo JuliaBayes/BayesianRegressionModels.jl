@@ -398,6 +398,213 @@ end
 end
 
 
+@testset "backend-neutral string treatment contrasts" begin
+    df = (;
+        g=["b", "c", "a", "b", "c", "a"],
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        y=[-2.4, -2.2, -2.0, -1.8, -1.7, -1.5],
+    )
+    brmi = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + g + x
+        effect(mu, g) ~ Normal(0.5, 0.25)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    context = BRM._brm_backend_context(brmi)
+    _, rhs = getargs(linear_predictor_op(brmi, :mu), 2)
+    design = BRM._brm_simple_population_design(
+        :mu, rhs, context.data, context.target_obs[:mu]; required=true)
+
+    # `sort(unique)` level order with the first level as the reference --
+    # the same geometry as the integer testset above, with string levels.
+    @test Tuple(c.label for c in design.columns) ==
+          (:Intercept, :g_lvl_2, :g_lvl_3, :x)
+    @test Tuple(c.effect_addresses for c in design.columns) ==
+          ((:Intercept,), (:g,), (:g,), (:x,))
+    @test design.matrix == hcat(
+        ones(6),
+        Float64.(df.g .== "b"),
+        Float64.(df.g .== "c"),
+        df.x,
+    )
+    @test design.columns[2].preprocess.kind === :population_factor_dummy
+    @test design.columns[2].preprocess.const_.levels == ["a", "b", "c"]
+
+    overrides = BRM._brm_simple_population_effect_overrides(brmi, design)
+    location, scale = BRM._brm_materialize_normal_effect_priors(
+        overrides, length(design.columns))
+    @test location == [0.0, 0.5, 0.5, 0.0]
+    @test scale == [1.0, 0.25, 0.25, 1.0]
+
+    # A declared `CategoricalVector` keeps its level order (dropped reference
+    # first), exactly as for integer levels.
+    declared = BRM.CA.categorical(
+        ["j", "k", "l", "j", "k", "l"]; levels=["l", "k", "j"])
+    declared_brmi = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + g
+        y ~ Normal(mu, sigma)
+    end)((; g=declared, y=zeros(6)))
+    declared_context = BRM._brm_backend_context(declared_brmi)
+    _, declared_rhs = getargs(
+        linear_predictor_op(declared_brmi, :mu), 2)
+    declared_design = BRM._brm_simple_population_design(
+        :mu, declared_rhs, declared_context.data,
+        declared_context.target_obs[:mu]; required=true)
+    @test declared_design.matrix == hcat(
+        ones(6), Float64.(declared .== "k"), Float64.(declared .== "j"))
+    @test declared_design.columns[2].preprocess.const_.levels == ["l", "k", "j"]
+
+    reffed = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + factor(g; ref="c")
+        effect(mu, g) ~ Normal(-0.5, 0.2)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    reffed_context = BRM._brm_backend_context(reffed)
+    _, reffed_rhs = getargs(linear_predictor_op(reffed, :mu), 2)
+    reffed_design = BRM._brm_simple_population_design(
+        :mu, reffed_rhs, reffed_context.data,
+        reffed_context.target_obs[:mu]; required=true)
+    @test Tuple(c.label for c in reffed_design.columns) ==
+          (:Intercept, :g__ref_c_lvl_2, :g__ref_c_lvl_3)
+    @test reffed_design.matrix == hcat(
+        ones(6), Float64.(df.g .== "b"), Float64.(df.g .== "a"))
+    @test reffed_design.columns[2].effect_addresses == (:g__ref_c, :g)
+    @test reffed_design.columns[2].preprocess.const_.levels == ["a", "b", "c"]
+    @test reffed_design.columns[2].preprocess.const_.ref == "c"
+    reffed_overrides = BRM._brm_simple_population_effect_overrides(
+        reffed, reffed_design)
+    @test BRM._brm_materialize_normal_effect_priors(
+        reffed_overrides, 3) == ([0.0, -0.5, -0.5], [1.0, 0.2, 0.2])
+
+    # No `ref` (or a `ref` naming the first sorted level) keeps the source
+    # block name, as `ref=1` does for integer levels.
+    defaulted = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + factor(g)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    defaulted_context = BRM._brm_backend_context(defaulted)
+    _, defaulted_rhs = getargs(linear_predictor_op(defaulted, :mu), 2)
+    defaulted_design = BRM._brm_simple_population_design(
+        :mu, defaulted_rhs, defaulted_context.data,
+        defaulted_context.target_obs[:mu]; required=true)
+    @test Tuple(c.label for c in defaulted_design.columns) ==
+          (:Intercept, :g_lvl_2, :g_lvl_3)
+    @test defaulted_design.matrix == design.matrix[:, 1:3]
+    firsted = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + factor(g; ref="a")
+        y ~ Normal(mu, sigma)
+    end)(df)
+    firsted_context = BRM._brm_backend_context(firsted)
+    _, firsted_rhs = getargs(linear_predictor_op(firsted, :mu), 2)
+    firsted_design = BRM._brm_simple_population_design(
+        :mu, firsted_rhs, firsted_context.data,
+        firsted_context.target_obs[:mu]; required=true)
+    @test Tuple(c.label for c in firsted_design.columns) ==
+          (:Intercept, :g_lvl_2, :g_lvl_3)
+    @test firsted_design.matrix == design.matrix[:, 1:3]
+
+    # An unknown level value fails loudly; a non-string `ref` on string data
+    # stays fail-closed like any unsupported population term.
+    unknown = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + factor(g; ref="z")
+        y ~ Normal(mu, sigma)
+    end)(df)
+    unknown_context = BRM._brm_backend_context(unknown)
+    _, unknown_rhs = getargs(linear_predictor_op(unknown, :mu), 2)
+    @test_throws "is not an observed level" BRM._brm_simple_population_design(
+        :mu, unknown_rhs, unknown_context.data,
+        unknown_context.target_obs[:mu]; required=true)
+    mistyped = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + factor(g; ref=2)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    mistyped_context = BRM._brm_backend_context(mistyped)
+    _, mistyped_rhs = getargs(linear_predictor_op(mistyped, :mu), 2)
+    @test_throws "unsupported population term" begin
+        BRM._brm_simple_population_design(
+            :mu, mistyped_rhs, mistyped_context.data,
+            mistyped_context.target_obs[:mu]; required=true)
+    end
+
+    ambiguous = (@brm begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + factor(g; ref="b") + factor(g; ref="c")
+        effect(mu, g) ~ Normal(0, 0.5)
+        y ~ Normal(mu, sigma)
+    end)(df)
+    ambiguous_context = BRM._brm_backend_context(ambiguous)
+    _, ambiguous_rhs = getargs(linear_predictor_op(ambiguous, :mu), 2)
+    ambiguous_design = BRM._brm_simple_population_design(
+        :mu, ambiguous_rhs, ambiguous_context.data,
+        ambiguous_context.target_obs[:mu]; required=true)
+    @test Tuple(c.label for c in ambiguous_design.columns) ==
+          (:Intercept,
+           :g__ref_b_lvl_2, :g__ref_b_lvl_3,
+           :g__ref_c_lvl_2, :g__ref_c_lvl_3)
+    @test_throws "ambiguously names categorical contrast blocks" begin
+        BRM._brm_simple_population_effect_overrides(
+            ambiguous, ambiguous_design)
+    end
+
+    # An intercept-free predictor codes its first string term by cell means,
+    # each addressable for its own prior.
+    cells = (@brm begin
+        mu ~ 0 + g
+        effect(mu, g_lvl_2) ~ Normal(1.0, 0.5)
+        y ~ Normal(mu, 1.0)
+    end)(df)
+    cells_context = BRM._brm_backend_context(cells)
+    _, cells_rhs = getargs(linear_predictor_op(cells, :mu), 2)
+    cells_design = BRM._brm_simple_population_design(
+        :mu, cells_rhs, cells_context.data,
+        cells_context.target_obs[:mu]; required=true)
+    @test Tuple(c.label for c in cells_design.columns) ==
+          (:g_lvl_1, :g_lvl_2, :g_lvl_3)
+    @test Tuple(c.effect_addresses for c in cells_design.columns) ==
+          ((:g_lvl_1, :g), (:g_lvl_2, :g), (:g_lvl_3, :g))
+    @test cells_design.matrix == hcat(
+        Float64.(df.g .== "a"),
+        Float64.(df.g .== "b"),
+        Float64.(df.g .== "c"),
+    )
+    cells_overrides = BRM._brm_simple_population_effect_overrides(
+        cells, cells_design)
+    @test BRM._brm_materialize_normal_effect_priors(
+        cells_overrides, 3) == ([0.0, 1.0, 0.0], [1.0, 0.5, 1.0])
+
+    # Frozen replay re-codes new string rows against the fitted levels; an
+    # unseen level fails loudly, exactly as for integers.
+    future_g = ["c", "a", "b", "a"]
+    bare_entry = BRM._brm_population_preproc_entry(
+        design.columns[2].preprocess)
+    bare_replay = BRM._brm_replay_preprocess(
+        bare_entry, future_g; freeze=true)
+    @test bare_replay.values.primary == Float64.(future_g .== "b")
+    @test_throws "is not a training level" BRM._brm_replay_preprocess(
+        bare_entry, ["a", "zzz"]; freeze=true)
+    reffed_entry = BRM._brm_population_preproc_entry(
+        reffed_design.columns[2].preprocess)
+    reffed_replay = BRM._brm_replay_preprocess(
+        reffed_entry, future_g; freeze=true)
+    @test reffed_replay.values.primary == Float64.(future_g .== "b")
+    reffed_entry3 = BRM._brm_population_preproc_entry(
+        reffed_design.columns[3].preprocess)
+    reffed_replay3 = BRM._brm_replay_preprocess(
+        reffed_entry3, future_g; freeze=true)
+    @test reffed_replay3.values.primary == Float64.(future_g .== "a")
+    refit = BRM._brm_replay_preprocess(
+        reffed_entry, ["x", "y", "z", "x"]; freeze=false)
+    @test refit.entry.const_.levels == ["x", "y", "z"]
+    @test refit.values.primary == Float64.(["x", "y", "z", "x"] .== "y")
+end
+
+
 @testset "backend-neutral pure expressions and fixed offsets" begin
     df = (;
         x=[1.0, 2.0, 4.0],
@@ -528,20 +735,10 @@ end
     @test design.row_source === :y
     @test design.matrix == ones(3, 1)
 
-    unsupported = (@brm begin
-        sigma ~ Exponential(1)
-        mu ~ 1 + g
-        y ~ Normal(mu, sigma)
-    end)((; g=["a", "b", "a"], y=zeros(3)))
-    cat_context = BRM._brm_backend_context(unsupported)
-    _, cat_rhs = getargs(linear_predictor_op(unsupported, :mu), 2)
-    @test isnothing(BRM._brm_simple_population_design(
-        :mu, cat_rhs, cat_context.data, cat_context.target_obs[:mu]))
-    @test_throws "supports `1`, continuous raw-data columns" begin
-        BRM._brm_simple_population_design(
-            :mu, cat_rhs, cat_context.data, cat_context.target_obs[:mu];
-            required=true)
-    end
+    # Bare string columns used to be rejected here; they now lower to
+    # ordered treatment contrasts (the "backend-neutral string treatment
+    # contrasts" testset owns that contract), so only genuinely
+    # non-materialisable terms remain in this fail-closed testset.
 
     # A parameter-owning term head (`mo`, `me`, `s`, ...) is NOT a materialisable
     # data expression — the simple design must DECLINE it so the richer emitter
