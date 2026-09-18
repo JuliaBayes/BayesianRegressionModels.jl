@@ -175,3 +175,6 @@ function brm_pairplot end
 function brm_centerednessplot end
 function brm_centering_lossplot end
 function brm_gradientplot end
+function brm_predictionsplot end
+function brm_comparisonsplot end
+function brm_slopesplot end
