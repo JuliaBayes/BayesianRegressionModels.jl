@@ -23,6 +23,7 @@ df = (;
     n=[1.0, 2.0, 1.0, 2.0, 1.0, 2.0],
     b=[0, 1, 0, 1, 1, 0],
     c=[2, 1, 3, 2, 4, 3],
+    gs=["a", "a", "b", "b", "c", "c"],
 )
 
 @testset "gaussian AST exact shape" begin
@@ -124,6 +125,16 @@ end
     affine = only(a for a in ast.args if a isa Expr && a.head === :(=))
     @test affine == Expr(:(=), :mu, Expr(:call, :+,
         :mu_b1, Expr(:ref, :mu_b2, Expr(:call, :treatment, :g, 3))))
+    # String refs lower to the same sort-order treatment index.
+    brmi = @brm df begin
+        mu ~ 1 + factor(gs; ref="c")
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    affine = only(a for a in ast.args if a isa Expr && a.head === :(=))
+    @test affine == Expr(:(=), :mu, Expr(:call, :+,
+        :mu_b1, Expr(:ref, :mu_b2, Expr(:call, :treatment, :gs, 3))))
 end
 
 @testset "sampled, assignments, collisions" begin

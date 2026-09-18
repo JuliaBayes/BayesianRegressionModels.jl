@@ -88,17 +88,31 @@ end
     factor_term = only(plan.predictors).terms[2]
     @test factor_term.kind === :factor
     @test factor_term.options == (contrasts=:treatment, ref=3, levels=:observed)
-    # String groupings fail closed in the BRM lane (shared population
-    # lowering only codes integer/CategoricalVector groupings) — with RK
-    # attribution, before shared machinery can throw undecorated errors.
-    # The thin layer admits strings; lifting this is an upstream snag.
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    # String groupings code exactly like integer levels (shared
+    # population lowering): sort(unique) order, ref by level value.
+    bare = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + gs
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    bare_term = only(bare.predictors).terms[2]
+    @test bare_term.kind === :factor
+    @test bare_term.options == (contrasts=:treatment, ref=1, levels=:observed)
+    @test bare_term.addressee === :gs
+    @test bare.columns[:gs] == ["a", "a", "b", "b", "c", "c"]
+    @test sort!([p.addressee for p in bare.population_priors]) ==
+        [:Intercept, :gs]
+    explicit = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + factor(gs; ref="b")
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    explicit_term = only(explicit.predictors).terms[2]
+    @test explicit_term.kind === :factor
+    @test explicit_term.options == (contrasts=:treatment, ref=2, levels=:observed)
+    # A non-string non-integer ref still fails closed with attribution.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + factor(gs; ref=1.5)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)

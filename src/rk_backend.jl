@@ -405,7 +405,7 @@ function _rk_gate_evidence_values!(specs::AbstractVector,
 end
 
 function _rk_factor_options(source::Symbol, raw::AbstractVector,
-        ref_value::Integer, target::Symbol)
+        ref_value::Union{Integer,AbstractString}, target::Symbol)
     prefix = "RK backend"
     fit_levels = collect(_brm_fit_levels(raw))
     ref_value in fit_levels || error(
@@ -459,18 +459,13 @@ function _rk_term_spec(term, target::Symbol, data::AbstractDict,
             "$prefix: predictor `$target` `factor()` takes only `ref`/`cmc`")
         source = name(inner)
         raw = get(data, source, nothing)
-        raw isa AbstractVector{<:AbstractString} && error(
-            "$prefix: predictor `$target` string grouping column " *
-            "`$source` is out of slice 1 in the BRM lane (shared " *
-            "population lowering only codes integer/CategoricalVector " *
-            "groupings); encode levels as integers")
         raw isa AbstractVector && _brm_is_categorical_data(raw) || error(
             "$prefix: predictor `$target` factor column `$source` must be " *
-            "categorical (integer codes or a CategoricalVector)")
+            "categorical (integer codes, strings, or a CategoricalVector)")
         ref_value = get(kwargs, :ref, first(_brm_fit_levels(raw)))
-        ref_value isa Integer || error(
+        ref_value isa Integer || ref_value isa AbstractString || error(
             "$prefix: predictor `$target` `factor($source; ref=...)` ref " *
-            "must be an integer level value")
+            "must be an integer or string level value")
         options, crossed = _rk_factor_options(source, raw, ref_value, target)
         columns[source] = crossed
         return _RKTermSpec(:factor, [source], options, source, source)
@@ -484,12 +479,6 @@ function _rk_term_spec(term, target::Symbol, data::AbstractDict,
         raw = get(data, source, nothing)
         raw isa AbstractVector || error(
             "$prefix: predictor `$target` column `$source` is not a vector")
-        if raw isa AbstractVector{<:AbstractString}
-            error("$prefix: predictor `$target` string grouping column " *
-                  "`$source` is out of slice 1 in the BRM lane (shared " *
-                  "population lowering only codes integer/CategoricalVector " *
-                  "groupings); encode levels as integers")
-        end
         if _brm_is_categorical_data(raw)
             options, crossed = _rk_factor_options(
                 source, raw, first(_brm_fit_levels(raw)), target)
