@@ -501,6 +501,75 @@ end
     @test isempty(plan.assignments) # folded literal disappears
 end
 
+@testset "mains and crosses gate co-occurrence" begin
+    # A full mixed cross sums exactly to its continuous leaf, so a main
+    # effect on that leaf is structurally singular (intercept or not).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + x & g
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 0 + x + x & g
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Two crosses over the same leaf both sum to it.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x & g + x & h
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 0 + x & g + x & h
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # An affine cousin (z-scored main) collides only with an intercept.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + zscale(x) + x & g
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    free = BRM._brm_rk_plan(@brm df begin
+        mu ~ 0 + zscale(x) + x & g
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test length(only(free.predictors).terms) == 4
+    # Identical data-expression mains collide by expression equality,
+    # while non-affine cousins (log) stay independent.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + log(z) + log(z) & g
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    nonaffine = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + z + log(z) & g
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test length(only(nonaffine.predictors).terms) == 5
+    # Nested crosses splice their leaves: (x & g) & h still sums to x.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + (x & g) & h
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Product mains meet product sums: (x & g) & z sums to x * z.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x * z + (x & g) & z
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Negated affine cousins collide with an intercept (1 - x).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + (1 - x) + x & g
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+end
+
 @testset "fail closed: scope" begin
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x + (1 | g)
