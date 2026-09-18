@@ -12,6 +12,7 @@ using BayesianRegressionModels
 using Distributions: Bernoulli, Binomial, Cauchy, Exponential, Gamma,
                      Normal, Poisson, truncated
 using LogExpFunctions: logistic, logit
+using Statistics: mean
 
 const BRM = BayesianRegressionModels
 
@@ -23,6 +24,7 @@ df = (;
     n=[1.0, 2.0, 1.0, 2.0, 1.0, 2.0],
     b=[0, 1, 0, 1, 1, 0],
     c=[2, 1, 3, 2, 4, 3],
+    gs=["a", "a", "b", "b", "c", "c"],
     bf=[0.0, 1.0, 0.0, 1.0, 1.0, 0.0],
     cf=[2.0, 1.0, 3.0, 2.0, 4.0, 3.0],
 )
@@ -86,6 +88,20 @@ end
     factor_term = only(plan.predictors).terms[2]
     @test factor_term.kind === :factor
     @test factor_term.options == (contrasts=:treatment, ref=3, levels=:observed)
+    # String groupings fail closed in the BRM lane (shared population
+    # lowering only codes integer/CategoricalVector groupings) — with RK
+    # attribution, before shared machinery can throw undecorated errors.
+    # The thin layer admits strings; lifting this is an upstream snag.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + gs
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + factor(gs; ref="b")
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
 end
 
 @testset "bernoulli-logit spellings" begin
@@ -167,6 +183,16 @@ end
     end
     plan = BRM._brm_rk_plan(brmi)
     parameter = only(plan.parameters)
+    @test parameter.family === :Normal
+    @test parameter.support_override === :positive
+
+    # Positional form with Inf upper plans identically.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        s ~ truncated(Normal(0, 1), 0, Inf)
+        y ~ Normal(mu, s)
+    end
+    parameter = only(BRM._brm_rk_plan(brmi).parameters)
     @test parameter.family === :Normal
     @test parameter.support_override === :positive
 
@@ -305,6 +331,17 @@ end
         s ~ Exponential(1)
         y ~ truncated(Normal(mu, s), 0, NaN)
     end)
+    # Poisson evidence bounds must be integer-valued (poisson.cdf(::Int)).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        c ~ truncated(Poisson(mu), 0, 6.5)
+    end)
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        c ~ truncated(Poisson(mu), 0, 6)
+    end
+    @test only(BRM._brm_rk_plan(brmi).responses).evidence.kind ===
+        :truncated
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
         s ~ Exponential(1)
@@ -341,6 +378,18 @@ end
         mu ~ 1 + x
         _ppl_s ~ Exponential(1)
         y ~ Normal(mu, _ppl_s)
+    end)
+    # Half-normal location must be the literal 0 (:positive adds log(2)).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        s ~ truncated(Normal(0.5, 1), 0, Inf)
+        y ~ Normal(mu, s)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        m = mean(x)
+        s ~ truncated(Normal(m, 1), 0, Inf)
+        y ~ Normal(mu, s)
     end)
 end
 

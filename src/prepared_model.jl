@@ -183,6 +183,75 @@ function _brm_prepare_model(brmi::BRMI;
         program, Tuple(parameters), Tuple(predictors), Tuple(assignments), Tuple(observations))
 end
 
+# Logit-scale likelihood families consume their linear predictor on the
+# UNLINKED (linear) scale. A linked predictor's public name is already on the
+# inverse-link scale (`logit(p) ~ ...` binds `p = logistic(eta)`), so feeding
+# it to one of these families applies the link twice — silently fitting
+# `bernoulli_logit(logistic(eta))`, whose expressible probabilities collapse
+# to [0.5, 0.731] (snag logit-link-predi-e5d55be7). RK rejects this shape at
+# its own seam (`_rk_classify_response`); sbimpl and Turing share this
+# backend-neutral validator, each calling it with its own prefix right after
+# `_brm_prepare_model`. Only DIRECT predictor references are checked: an
+# explicit re-link (`Normal(log(Vc), sigma)`, a documented brm-use pattern)
+# maps back to the linear scale and keeps working, while nested arithmetic on
+# a linked public name stays unchecked.
+_brm_logit_scale_positions(::Type{<:BernoulliLogit}, nargs) =
+    nargs >= 1 ? (1,) : ()
+_brm_logit_scale_positions(::Type{<:BinomialLogit}, nargs) =
+    nargs >= 2 ? (2,) : ()
+_brm_logit_scale_positions(::Type{<:CategoricalLogit}, nargs) =
+    ntuple(identity, nargs)
+_brm_logit_scale_positions(_, _) = ()
+
+_brm_logit_family_remedy(::Type{<:BernoulliLogit}, predictor) =
+    "Write `Bernoulli($predictor)` to consume the probability, or drop the " *
+    "link (`$predictor ~ ...`) so `BernoulliLogit` consumes linear-scale logits"
+_brm_logit_family_remedy(::Type{<:BinomialLogit}, predictor) =
+    "Write `Binomial(n, $predictor)` to consume the probability, or drop " *
+    "the link (`$predictor ~ ...`) so `BinomialLogit` consumes " *
+    "linear-scale logits"
+_brm_logit_family_remedy(::Type{<:CategoricalLogit}, predictor) =
+    "Drop the link (`$predictor ~ ...`) so `$predictor` stays on the linear " *
+    "(logit) scale"
+
+function _brm_validate_logit_family_links(prepared; prefix="BRM")
+    links = Dict{Symbol,Any}(
+        predictor.name => predictor.link for predictor in prepared.predictors)
+    isempty(links) && return nothing
+    for observation in prepared.observations
+        _brm_validate_logit_expr!(
+            observation.distribution, observation.name, links, prefix)
+    end
+    nothing
+end
+
+_brm_validate_logit_expr!(_x, _response, _links, _prefix) = nothing
+function _brm_validate_logit_expr!(xs::Tuple, response, links, prefix)
+    foreach(x -> _brm_validate_logit_expr!(x, response, links, prefix), xs)
+    nothing
+end
+function _brm_validate_logit_expr!(expr::_BRMPreparedExpr, response, links, prefix)
+    _brm_validate_logit_expr!(expr.args, response, links, prefix)
+    for value in values(expr.kwargs)
+        _brm_validate_logit_expr!(value, response, links, prefix)
+    end
+    callable = expr.callable
+    positions = _brm_logit_scale_positions(callable, length(expr.args))
+    isempty(positions) && return nothing
+    for position in positions
+        arg = expr.args[position]
+        arg isa _BRMPreparedRef || continue
+        link = get(links, arg.name, identity)
+        link === identity && continue
+        error("$prefix: response `$response` applies `$(nameof(callable))` " *
+              "to `$(nameof(link))`-link predictor `$(arg.name)` (double " *
+              "link): `$(arg.name)` is on the inverse-`$(nameof(link))` " *
+              "scale, not linear-scale logits. " *
+              _brm_logit_family_remedy(callable, arg.name) * ".")
+    end
+    nothing
+end
+
 _brm_prepared_operation(model::_BRMPreparedModel, key::Symbol) =
     only(operation for operation in model.program.operations if operation.name === key)
 
