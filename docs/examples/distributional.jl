@@ -26,8 +26,8 @@ function sample_fit(sb, problem, seed; draws=800)
         nonlinear_adapt=false, monitor_ess=false,
     )
     P = fit.posterior_position
-    con_names = BridgeStan.param_names(problem.model)
-    C = permutedims(hcat([BridgeStan.param_constrain(problem.model, collect(P[:, i])) for i in axes(P, 2)]...))
+    con_names = BridgeStan.param_names(problem.model; include_tp=true)
+    C = permutedims(hcat([BridgeStan.param_constrain(problem.model, collect(P[:, i]); include_tp=true) for i in axes(P, 2)]...))
     rows = map(eachindex(con_names)) do i
         v = C[:, i]
         Dict("name" => string(con_names[i]), "mean" => mean(v), "sd" => std(v),
@@ -109,88 +109,20 @@ open(joinpath(OUT, "gamma_curves.json"), "w") do io
 end
 
 # ================= bikes NB, splines on mu and alpha =================
-# Notebook-faithful explicit B-spline basis (bambi: bs(hour, 8)), NOT s():
-# the same variable smoothed twice collides in transpile
-# (snag distributional-m-3f3a622f); explicit columns are also what the
-# notebook fits.
-function bspline_basis(x::AbstractVector{<:Real}, df::Int=8, degree::Int=3)
-    nint = df - degree - 1
-    qs = quantile(x, range(0, 1; length=nint + 2))[2:end-1]
-    lo, hi = minimum(x), maximum(x)
-    knots = vcat(fill(lo, degree + 1), qs, fill(hi, degree + 1))
-    nc = length(knots) - degree - 1
-    @assert nc == df
-    function col(j, d, v)
-        if d == 0
-            return (knots[j] <= v < knots[j+1]) ||
-                   (v == hi && j == nc) ? 1.0 : 0.0
-        end
-        a = knots[j+d] == knots[j] ? 0.0 :
-            (v - knots[j]) / (knots[j+d] - knots[j]) * col(j, d - 1, v)
-        b = knots[j+d+1] == knots[j+1] ? 0.0 :
-            (knots[j+d+1] - v) / (knots[j+d+1] - knots[j+1]) * col(j + 1, d - 1, v)
-        return a + b
-    end
-    B = zeros(length(x), nc)
-    for i in eachindex(x), j in 1:nc
-        B[i, j] = col(j, degree, x[i])
-    end
-    return B, knots
-end
-function bspline_predict(x::AbstractVector{<:Real}, knots, degree::Int=3)
-    nc = length(knots) - degree - 1
-    lo, hi = knots[1], knots[end]
-    function col(j, d, v)
-        if d == 0
-            return (knots[j] <= v < knots[j+1]) ||
-                   (v == hi && j == nc) ? 1.0 : 0.0
-        end
-        a = knots[j+d] == knots[j] ? 0.0 :
-            (v - knots[j]) / (knots[j+d] - knots[j]) * col(j, d - 1, v)
-        b = knots[j+d+1] == knots[j+1] ? 0.0 :
-            (knots[j+d+1] - v) / (knots[j+d+1] - knots[j+1]) * col(j + 1, d - 1, v)
-        return a + b
-    end
-    B = zeros(length(x), nc)
-    for i in eachindex(x), j in 1:nc
-        B[i, j] = col(j, degree, x[i])
-    end
-    return B
-end
-
+# Native double smooth (snag distributional-m-3f3a622f landed): same
+# variable smoothed on both linear predictors. Basis/knots/priors are
+# BRM's s() defaults rather than the notebook's bs(hour, 8) + Normal(0, 5/1)
+# columns, so fitted curves agree qualitatively, not numerically.
 bdf = CSV.read(joinpath(SCRATCH, "data", "bike_sharing.csv"), DataFrame)
 bdf = bdf[1:50:nrow(bdf), :]
 hour = Float64.(bdf.hour); cnt = Int.(bdf.count)
 println("BIKE_N=", length(hour))
-Bm, knots = bspline_basis(hour)
-println("BS_POU=", maximum(abs.(sum(Bm; dims=2) .- 1.0)))
-mcols = Dict(Symbol("m$k") => Bm[:, k] for k in 1:8)
-acols = Dict(Symbol("a$k") => Bm[:, k] for k in 1:8)
-open(joinpath(OUT, "bike_knots.json"), "w") do io
-    JSON.print(io, Dict("knots" => knots))
-end
 b_bk = @brm begin
-    log(mu) ~ 0 + m1 + m2 + m3 + m4 + m5 + m6 + m7 + m8
-    effect(mu, m1) ~ Normal(0, 5)
-    effect(mu, m2) ~ Normal(0, 5)
-    effect(mu, m3) ~ Normal(0, 5)
-    effect(mu, m4) ~ Normal(0, 5)
-    effect(mu, m5) ~ Normal(0, 5)
-    effect(mu, m6) ~ Normal(0, 5)
-    effect(mu, m7) ~ Normal(0, 5)
-    effect(mu, m8) ~ Normal(0, 5)
-    log(alpha) ~ 0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8
-    effect(alpha, a1) ~ Normal(0, 1)
-    effect(alpha, a2) ~ Normal(0, 1)
-    effect(alpha, a3) ~ Normal(0, 1)
-    effect(alpha, a4) ~ Normal(0, 1)
-    effect(alpha, a5) ~ Normal(0, 1)
-    effect(alpha, a6) ~ Normal(0, 1)
-    effect(alpha, a7) ~ Normal(0, 1)
-    effect(alpha, a8) ~ Normal(0, 1)
+    log(mu) ~ 1 + s(hour)
+    log(alpha) ~ 1 + s(hour)
     count ~ NegativeBinomial2(mu, alpha)
 end
-sb = SBBRMI(b_bk((; count=cnt, mcols..., acols...)); mod=@__MODULE__)
+sb = SBBRMI(b_bk((; count=cnt, hour=hour)); mod=@__MODULE__)
 problem = StanBlocks.stan_instantiate(sb.model; path=joinpath(SCRATCH, ".out", "stan", "dist_bikes.stan"))
 fb = sample_fit(sb, problem, 31003)
 open(joinpath(OUT, "bikes.json"), "w") do io
@@ -198,28 +130,43 @@ open(joinpath(OUT, "bikes.json"), "w") do io
 end
 println("DIST_BIKES_DONE")
 flush(stdout)
-# posterior-mean mu + intervals on grid (bambi: 200 pts over 0..23)
-hgrid = collect(range(0, 23; length=200))
-Bg = bspline_predict(hgrid, knots)
-mu_i = findall(n -> occursin("beta_pop", n) && occursin("_mu_", n), fb["names"])
-al_i = findall(n -> occursin("beta_pop", n) && occursin("alpha", n), fb["names"])
-println("BIKE_MU_N=", length(mu_i), " BIKE_ALPHA_N=", length(al_i))
-Bmu = hcat([fb["draws"][i] for i in mu_i]...)
-Bal = hcat([fb["draws"][i] for i in al_i]...)
-sub = 1:4:size(Bmu, 1)
-brows = map(eachindex(hgrid)) do gi
-    mu_d = exp.(Bmu * Bg[gi, :])
-    al_d = exp.(Bal * Bg[gi, :])
+# posterior mu/alpha curves at fitted points through the descriptor (grid
+# evaluation has no s() helper; fitted hours are dense over 0..23).
+d_bk = BRM.brm_descriptor(b_bk, (; count=cnt, hour=hour); mod=@__MODULE__,
+    name=:dist_bikes)
+Cb = hcat(fb["draws"]...)
+lmu = BRM.brm_output_draws(d_bk, Cb, fb["names"]; logical=:mu)
+lal = BRM.brm_output_draws(d_bk, Cb, fb["names"]; logical=:alpha)
+sub = 1:20:size(lmu, 1)  # thin for the predictive bands (exact NB quantiles)
+brows = map(sortperm(hour)) do i
+    mu_d = lmu[:, i]  # carriers are response-scale already (mu = exp(log_mu))
+    al_d = lal[:, i]
     qs = quantile(mu_d, [0.05, 0.5, 0.95])
-    NB = NegativeBinomial.(al_d[sub], al_d[sub] ./ (al_d[sub] .+ mu_d[sub]))
-    yq = quantile.(NB, 0.95)
-    Dict("hour" => hgrid[gi], "mu" => mean(mu_d),
+    # NB quantiles stall far into the tail: cap at sane magnitudes and report
+    # the excluded tail-draw fraction rather than hanging on sampler garbage.
+    ok = isfinite.(mu_d[sub]) .& isfinite.(al_d[sub]) .& (al_d[sub] .> 1e-3) .&
+        (al_d[sub] .< 1e7) .& (mu_d[sub] .> 0) .& (mu_d[sub] .< 1e7)
+    n_excl = count(.!ok)
+    safeq(p) = begin
+        any(ok) || return NaN
+        v = try
+            mean(quantile.(NegativeBinomial.(al_d[sub][ok], al_d[sub][ok] ./ (al_d[sub][ok] .+ mu_d[sub][ok])), p))
+        catch
+            NaN
+        end
+        isfinite(v) ? v : NaN
+    end
+    yq95, yq05 = safeq(0.95), safeq(0.05)
+    Dict("hour" => hour[i], "mu" => mean(mu_d),
         "mu_q05" => qs[1], "mu_q50" => qs[2], "mu_q95" => qs[3],
-        "y_q05" => mean(quantile.(NB, 0.05)), "y_q95" => mean(yq))
+        "y_q05" => (isnan(yq05) ? nothing : yq05),
+        "y_q95" => (isnan(yq95) ? nothing : yq95), "n_excluded" => n_excl,
+        "n_band_draws" => length(sub))
 end
 open(joinpath(OUT, "bikes_curves.json"), "w") do io
     JSON.print(io, Dict("grid" => brows,
-        "obs" => [Dict("hour" => hour[i], "count" => cnt[i]) for i in eachindex(hour)]))
+        "obs" => [Dict("hour" => hour[i], "count" => cnt[i]) for i in eachindex(hour)],
+        "note" => "y bands missing (null) where tail draws exceeded sane magnitudes"))
 end
 println("DIST_CURVES_DONE")
 flush(stdout)

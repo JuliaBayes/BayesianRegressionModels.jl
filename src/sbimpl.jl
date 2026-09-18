@@ -3425,6 +3425,45 @@ when the build may run inside a function that also built `sb`.
 stan_instantiate(sb::SBBRMI; kwargs...) =
     Base.invokelatest(StanBlocks.stan_instantiate, sb.model; kwargs...)
 
+"""
+    transpiles(sb::SBBRMI; re=true) -> Bool
+
+Return `true` if `sb` successfully transpiles to Stan source, `false`
+otherwise. Forwards through [`stan_code`](@ref), so — like the rest of the
+BRM trace surface — it re-enters the compiler in the current world and is
+call-site independent: build + predicate inside one function works on a
+freshly built model, while direct `StanBlocks.transpiles(sb.model)` from the
+same frame dies with `` `brm_vector_prior_*` is missing `lpxf_expr` ``
+(snag `two-sbbrmi-fits-f2beca06`). Set `re=false` to swallow the error and
+just return `false`; the default `re=true` rethrows.
+"""
+transpiles(sb::SBBRMI; re=true) = try
+    stan_code(sb)
+    return true
+catch e
+    re && rethrow()
+    return false
+end
+
+"""
+    compiles(sb::SBBRMI; re=true) -> Bool
+
+Return `true` if `sb` successfully transpiles **and** compiles via
+BridgeStan (i.e. [`stan_instantiate`](@ref) succeeds), `false` otherwise.
+Strictly stronger than [`transpiles`](@ref): a model that transpiles can
+still fail to compile if `stanc` rejects the generated Stan or the C++
+build fails. Call-site independent for the same lowering-time registration
+reason as `transpiles` above. Set `re=false` to swallow the error and just
+return `false`; the default `re=true` rethrows.
+"""
+compiles(sb::SBBRMI; re=true) = try
+    stan_instantiate(sb)
+    return true
+catch e
+    re && rethrow()
+    return false
+end
+
 # Display configured submodels from their actual emitted statements. Keep the
 # compiler's value-callee path intact: a merge expression inside a SLIC call
 # does not have the same tracing/binding contract. The display instead binds
@@ -7523,6 +7562,13 @@ function _sb_ranef_cols!(cols, data, stmts, t, gterms=(); group_idx=nothing,
 end
 _sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(offset)}, gterms=(); kwargs...) =
     error("sbimpl: `offset(...)` is a population-level fixed contribution and cannot appear inside a random-effects term")
+# `a & b` in a random-effects LHS lowers through the SAME interaction expander
+# as the population path (treatment coding; cont×cont / cont×cat / cat×cat).
+# Without this the term falls through to the protect-style materializer, which
+# broadcasts `&` over raw vectors and dies with
+# `MethodError: no method matching &(::Float64, ::Float64)`.
+_sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(&)}, gterms=(); kwargs...) =
+    _sb_interaction_cols!(cols, t, data, stmts)
 _sb_ranef_cols_dispatch!(cols, data, stmts, t, ::Nothing, gterms=();
                          group_idx=nothing, term_overrides=Dict{Symbol,Any}()) =
     _sb_maybe_push_col!(cols, _sb_predictor_col(
@@ -8090,7 +8136,10 @@ random slopes use the exact dummy-column symbols emitted into the random-effect
 design matrix: `<c>_dummy_2 … <c>_dummy_K` under a random intercept, and
 `<c>_dummy_1 … <c>_dummy_K` for the first categorical term of an intercept-free
 block such as `(0 + c | ID | g)` (every level owns a group-level effect; opt
-out with `factor(c; cmc=false)`).
+out with `factor(c; cmc=false)`). Interaction slopes (`a & b`) use the exact
+emitted `int_…` design-column symbols shared with the population path:
+`int_a_x_b` for continuous × continuous, `int_c_x_g_lvl_k` for continuous ×
+categorical, `int_g_lvl_j_x_h_lvl_k` for categorical × categorical.
 
 Returns `nothing` when `id` is absent. Reusing one ID with multiple grouping
 factors is ambiguous on the public ID-only surface and raises.
@@ -9060,6 +9109,21 @@ _sb_ranef_term_ncols(t::_SBCellMeansTerm, _data) =
     _sb_level_index(_sb_cat_levels(t.term))[1]
 _sb_ranef_named_ncols(::Nothing) = 1
 _sb_ranef_named_ncols(levels) = _sb_level_index(levels)[1] - 1
+# `a & b` expands to one column per operand-contrast product (the population
+# `_sb_interaction_cols!` rule), so the shared-`|ID|` bucket pre-sizer must
+# count it exactly: the emitter later asserts expanded == reserved.
+_sb_ranef_term_ncols(t::ExprColumn{typeof(&)}, _) = begin
+    args = getargs(t)
+    length(args) == 2 ||
+        error("sbimpl: interaction `&` expects exactly 2 operands, got $(length(args))")
+    prod(_sb_interaction_operand_ncols(a) for a in args; init=1)
+end
+_sb_interaction_operand_ncols(t::NamedColumn) =
+    _sb_ranef_named_ncols(_sb_cat_levels(t))
+_sb_interaction_operand_ncols(::ExprColumn) = 1
+_sb_interaction_operand_ncols(t) = error(
+    "sbimpl: interaction operand must be a raw-data NamedColumn or data-materialized ExprColumn, got $(typeof(t)); " *
+    "interactions with parameter-owning terms such as `mo` / `me` / `s` / `gp` / `ar` are not supported")
 _sb_ranef_term_ncols(::ExprColumn, _) = 1
 _sb_ranef_term_ncols(t, _) = error("sbimpl: unsupported ranef term $(typeof(t)): $t")
 
