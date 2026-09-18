@@ -268,6 +268,30 @@ end
     end
 end
 
+@testset "hyper-predictor recovery sizing rule" begin
+    # Executable pin for the Hyper-predictors recovery guidance
+    # (docs/src/formula-terms.md), on the snag hyper-predictor-d453ecf9 public
+    # grid (log of [0.5, 1, 2, 4, 7, 14], truths rho 1.3/2.1): the default
+    # basis violates the margin rule while reproducing the reported floor, a
+    # small-k basis violates the floor rule, and the guided basis satisfies
+    # both. Guards the floor/L computation against drift — the floor below is
+    # the independently recomputed 0.6955 from that snag.
+    grid = log.([0.5, 1.0, 2.0, 4.0, 7.0, 14.0])
+    half_range = maximum(abs, grid .- sum(grid) / length(grid))
+    rho_min, rho_max = 1.3, 2.5
+    bad = BRM._brm_fit_hsgp(grid, 10, 1.5)
+    @test bad[2] ≈ 2.5325 atol=1e-3
+    @test BRM._brm_hsgp_rho_lower(bad, 10) ≈ 0.6955 atol=1e-4
+    @test bad[2] - half_range < 2 * rho_max
+    smallk = BRM._brm_fit_hsgp(grid, 5, 1.5)
+    @test BRM._brm_hsgp_rho_lower(smallk, 5) ≈ 1.4125 atol=1e-3
+    @test BRM._brm_hsgp_rho_lower(smallk, 5) > rho_min
+    good = BRM._brm_fit_hsgp(grid, 24, 4.0)
+    @test good[2] - half_range > 2 * rho_max
+    @test BRM._brm_hsgp_rho_lower(good, 24) ≈ 0.7695 atol=1e-3
+    @test BRM._brm_hsgp_rho_lower(good, 24) < rho_min
+end
+
 @testset "hyper-predictor prior-regime coordinates survive" begin
     df = hyper_df()
     sb = SBBRMI(hyper_prior_model(df); mod=@__MODULE__)
