@@ -689,6 +689,9 @@ function _brm_turing_single_plan(brmi::BRMI, observation;
         observation_overrides=Dict(observation.key =>
             (; distribution=rhs, response=raw_response, modifier=response_modifier,
                weight=observation_weight, missing_response)))
+    # Reject logit-scale likelihoods over linked predictors before lowering
+    # (double link); see `_brm_validate_logit_family_links`.
+    _brm_validate_logit_family_links(prepared_model; prefix="Turing backend")
     prepared_observation = only(node for node in prepared_model.observations
                                 if node.name === observation.key)
     # A standalone sampled declaration still contributes its prior density.
