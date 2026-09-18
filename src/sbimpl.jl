@@ -1522,6 +1522,124 @@ StanBlocks.@deffun begin
     end
 end
 
+# Inverse-Gaussian (Wald) density with the BRM support contract made explicit.
+# StanBlocks registers no `inverse_gaussian` builtin — neither the pinned
+# 9a958f97 nor current 1ca694c — so, unlike `brm_von_mises` above, this triad
+# cannot delegate to a native Stan density: it spells the closed form directly
+# from long-registered builtins. The scalar density matches Distributions.jl's
+# `logpdf(::InverseGaussian, x)` operation-for-operation:
+# `(log(λ) - (log2π + 3*log(y)) - λ*(y-μ)^2/(μ^2*y))/2` on `y > 0` (else
+# `-inf`), with `μ > 0`, `λ > 0` required. The `log2π` literal is
+# `Float64(Distributions.log2π)` exactly. The RNG is the Michael–Schucane–Haas
+# (1976) transform — the same algorithm Distributions.jl's
+# `rand(::InverseGaussian)` uses — over `normal_rng` and `uniform_rng`.
+StanBlocks.@deffun begin
+    @lpxf brm_inverse_gaussian_lpdf(y::real, mu::real, lambda::real)::real = begin
+        if mu <= 0.
+            negative_infinity()
+        else
+            if lambda <= 0.
+                negative_infinity()
+            else
+                if y <= 0.
+                    negative_infinity()
+                else
+                    (log(lambda) - (1.8378770664093456 + 3. * log(y)) - lambda * (y - mu) * (y - mu) / (mu * mu * y)) / 2.
+                end
+            end
+        end
+    end
+    brm_inverse_gaussian_lpdf(y::vector[n], mu::vector[n], lambda::vector[n])::real = begin
+        rv = 0.
+        for i in 1:n
+            rv += brm_inverse_gaussian_lpdf(y[i], mu[i], lambda[i])::real
+        end
+        rv
+    end
+    brm_inverse_gaussian_lpdf(y::vector[n], mu::vector[n], lambda::real)::real = begin
+        brm_inverse_gaussian_lpdf(y, mu, rep_vector(lambda, n))
+    end
+    brm_inverse_gaussian_lpdf(y::vector[n], mu::real, lambda::vector[n])::real = begin
+        brm_inverse_gaussian_lpdf(y, rep_vector(mu, n), lambda)
+    end
+    brm_inverse_gaussian_lpdf(y::vector[n], mu::real, lambda::real)::real = begin
+        brm_inverse_gaussian_lpdf(y, rep_vector(mu, n), rep_vector(lambda, n))
+    end
+
+    brm_inverse_gaussian_lpdfs(args...) = begin
+        brm_inverse_gaussian_lpdf(args...)
+    end
+    brm_inverse_gaussian_lpdfs(y::vector[n], mu::vector[n], lambda::vector[n])::vector[n] = begin
+        rv::vector[n]
+        for i in 1:n
+            rv[i] = brm_inverse_gaussian_lpdf(y[i], mu[i], lambda[i])
+        end
+        rv
+    end
+    brm_inverse_gaussian_lpdfs(y::vector[n], mu::vector[n], lambda::real)::vector[n] = begin
+        brm_inverse_gaussian_lpdfs(y, mu, rep_vector(lambda, n))
+    end
+    brm_inverse_gaussian_lpdfs(y::vector[n], mu::real, lambda::vector[n])::vector[n] = begin
+        brm_inverse_gaussian_lpdfs(y, rep_vector(mu, n), lambda)
+    end
+    brm_inverse_gaussian_lpdfs(y::vector[n], mu::real, lambda::real)::vector[n] = begin
+        brm_inverse_gaussian_lpdfs(y, rep_vector(mu, n), rep_vector(lambda, n))
+    end
+
+    brm_inverse_gaussian_rng(mu::real, lambda::real)::real = begin
+        if mu <= 0.
+            reject("brm_inverse_gaussian_rng: mu must be strictly positive")
+            0.
+        else
+            if lambda <= 0.
+                reject("brm_inverse_gaussian_rng: lambda must be strictly positive")
+                0.
+            else
+                # Michael–Schucane–Haas (1976): chi-square-via-normal
+                # transform, then inversion with probability 1 - mu/(mu+x).
+                z = normal_rng(0., 1.)
+                v = z * z
+                w = mu * v
+                x = mu + mu / (2. * lambda) * (w - sqrt(w * (4. * lambda + w)))
+                u = uniform_rng(0., 1.)
+                if u < mu / (mu + x)
+                    x
+                else
+                    mu * mu / x
+                end
+            end
+        end
+    end
+    brm_inverse_gaussian_rng(vector[n], mu::vector[n], lambda::vector[n])::vector[n] = begin
+        rv::vector[n]
+        for i in 1:n
+            rv[i] = brm_inverse_gaussian_rng(mu[i], lambda[i])
+        end
+        rv
+    end
+    brm_inverse_gaussian_rng(vector[n], mu::vector[n], lambda::real)::vector[n] = begin
+        rv::vector[n]
+        for i in 1:n
+            rv[i] = brm_inverse_gaussian_rng(mu[i], lambda)
+        end
+        rv
+    end
+    brm_inverse_gaussian_rng(vector[n], mu::real, lambda::vector[n])::vector[n] = begin
+        rv::vector[n]
+        for i in 1:n
+            rv[i] = brm_inverse_gaussian_rng(mu, lambda[i])
+        end
+        rv
+    end
+    brm_inverse_gaussian_rng(vector[n], mu::real, lambda::real)::vector[n] = begin
+        rv::vector[n]
+        for i in 1:n
+            rv[i] = brm_inverse_gaussian_rng(mu, lambda)
+        end
+        rv
+    end
+end
+
 function addprop end
 
 StanBlocks.@deffun begin
@@ -3032,6 +3150,9 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     # input `data` already carries the Stan preprocessing side-channel, which
     # the generic collector leaves untouched.
     prepared = _brm_prepare_model(brmi; program=_brm_prepare_program(brmi; data))
+    # Reject logit-scale likelihoods over linked predictors before emission
+    # (double link); see `_brm_validate_logit_family_links`.
+    _brm_validate_logit_family_links(prepared; prefix="sbimpl")
     context = prepared.context
     nodes = Dict(node.name => node for node in _brm_prepared_nodes(prepared))
     prepass = context.prepass
@@ -4917,6 +5038,28 @@ function _sb_emit_prior!(stmts, target, ::Type{<:VonMises}, op)
     declaration = _sb_prior_bound_keywords(target, VonMises, (; lower, upper))
     push!(stmts, Expr(:call, :~, target,
         Expr(:call, brm_von_mises, declaration, mu, kappa, 0.0, 0.0, 0)))
+    true
+end
+
+# The prior uses the same exact density/RNG as an observation. Its declaration
+# additionally carries the positive-half-line support.
+function _sb_emit_prior!(stmts, target, ::Type{<:InverseGaussian}, op)
+    length(getargs(op)) in (0, 1, 2) || error(
+        "sbimpl: `InverseGaussian` expects `InverseGaussian()`, " *
+        "`InverseGaussian(mu)`, or `InverseGaussian(mu, lambda)`, got " *
+        "$(length(getargs(op))) positional arguments")
+    args = map(_sb_effect_prior_arg, getargs(op))
+    mu, lambda = _sb_stan_dist_args(InverseGaussian, args)
+    bounds = _sb_prior_bound_keywords(target, InverseGaussian, getkwargs(op))
+    supplied = Dict(kw.args[1] => kw.args[2] for kw in bounds.args)
+    lower = 0.0
+    if haskey(supplied, :lower)
+        lower = _sb_bound_intersection(max, lower, supplied[:lower])
+    end
+    decl_kwargs = haskey(supplied, :upper) ? (; lower, upper=supplied[:upper]) : (; lower)
+    declaration = _sb_prior_bound_keywords(target, InverseGaussian, decl_kwargs)
+    push!(stmts, Expr(:call, :~, target,
+        Expr(:call, brm_inverse_gaussian, declaration, mu, lambda)))
     true
 end
 # Generic scalar prior via a Distributions.jl constructor on the RHS
@@ -7090,7 +7233,7 @@ end
 function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(s), t, summands;
                                term_overrides=Dict{Symbol,Any}(),
                                mod::Module=@__MODULE__)
-    push!(summands, _sb_predictor_term!(stmts, data, s, t; term_overrides, mod))
+    push!(summands, _sb_predictor_term!(stmts, data, s, t; target, term_overrides, mod))
 end
 function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(t2), t, summands;
                                term_overrides=Dict{Symbol,Any}(),
@@ -9620,16 +9763,20 @@ end
 # flat null-space coefficients, penalized coefficients, and smoothing SD; the
 # returned contribution is a direct summand (no extra `popefs` beta). Only
 # the default basis is supported -- `bs` and `k=`/`knots=` are follow-ons.
+# Carriers disambiguate like `gp`/`hsgp`: the first `s(x)` keeps the
+# historical `s_<x>` names, while a repeat of the same column -- in another
+# predictor or twice in one -- takes `s_<target>_<x>` (+ serial).
 _sb_predictor_term!(stmts, data, ::typeof(s), t;
-                    term_overrides=Dict{Symbol,Any}(), mod::Module=@__MODULE__,
-                    kwargs...) = begin
+                    term_overrides=Dict{Symbol,Any}(), target=nothing,
+                    mod::Module=@__MODULE__, kwargs...) = begin
     args = getargs(t)
     length(args) == 1 || error("sbimpl: `s(x)` expects 1 positional arg, got $(length(args))")
     isempty(getkwargs(t)) || error("sbimpl: `s(x)` does not support keyword arguments yet")
     xname, raw = _sb_inner_data(:s, only(args))
     v = _sb_real_vec(:s, xname, raw)
-    Xnull_name = Symbol(:Xnull_, xname)
-    Zpen_name = Symbol(:Zpen_, xname)
+    suffix, col_name = _sb_unique_structured_term_names(stmts, :s, string(xname), target)
+    Xnull_name = Symbol(:Xnull_, suffix)
+    Zpen_name = Symbol(:Zpen_, suffix)
     frozen = _sb_frozen_preproc_entry(data, Xnull_name, :spline, xname)
     prepared = if isnothing(frozen)
         _brm_prepare_term(t, :__sb_term__,
@@ -9650,7 +9797,6 @@ _sb_predictor_term!(stmts, data, ::typeof(s), t;
     # both matrices at new x values against these constants.
     _sb_record_preproc!(data, Xnull_name,
         PreprocEntry(:spline, (; fit, zpen_key=Zpen_name), xname, false))
-    col_name = Symbol(:s_, xname)
     prior = _sb_term_sd_submodel(term_overrides, t; mod)
     prior_kwargs = Any[Expr(:kw, :Xnull, Xnull_name), Expr(:kw, :Zpen, Zpen_name)]
     append!(prior_kwargs, (Expr(:kw, k, v) for (k, v) in pairs(prior.kwargs)))
@@ -10783,6 +10929,48 @@ _sb_lik_family!(_, target, ::Type{<:CircularVonMises}, args, ::NamedTuple, _) = 
     "sbimpl: `CircularVonMises($target)` expects exactly two positional " *
     "arguments `(mu, kappa)`, got $(length(args))")
 
+_sb_inverse_gaussian_observations(data, target) = begin
+    raw = get(data, target, nothing)
+    raw isa AbstractVector || error(
+        "sbimpl: inverse-Gaussian likelihood expects an observed vector for " *
+        "`$target`, got $(typeof(raw))")
+    all(y -> y isa Real && isfinite(y) && y > 0, raw) || error(
+        "sbimpl: inverse-Gaussian outcome `$target` must contain only finite " *
+        "strictly positive values")
+    raw
+end
+
+function _sb_validate_inverse_gaussian!(data, target, mu, lambda)
+    _sb_inverse_gaussian_observations(data, target)
+    if mu isa Real
+        isfinite(mu) && mu > 0 || error(
+            "sbimpl: inverse-Gaussian mean `mu` must be finite and strictly " *
+            "positive, got $(repr(mu))")
+    end
+    if lambda isa Real
+        isfinite(lambda) && lambda > 0 || error(
+            "sbimpl: inverse-Gaussian shape `lambda` must be finite and " *
+            "strictly positive, got $(repr(lambda))")
+    end
+    nothing
+end
+
+# Distributions.jl's exact constructor semantics. Zero arguments is the unit
+# `(1, 1)`, one positional argument is `mu` (`lambda` defaults to one), while
+# the two-argument form is `(mu, lambda)` — already Stan's order, so the
+# two-argument form passes through unchanged. A dedicated StanBlocks
+# `inverse_gaussian` builtin does not exist, hence the `brm_inverse_gaussian`
+# custom density above rather than a `_sb_stan_dist_name` table entry.
+function _sb_lik_family!(stmts, target, ::Type{<:InverseGaussian}, args, data)
+    length(args) in (1, 2) || error(
+        "sbimpl: `InverseGaussian` expects `InverseGaussian(mu)` or " *
+        "`InverseGaussian(mu, lambda)`, got $(length(args)) positional arguments")
+    arg_exprs = map(a -> _sb_scalar_expr(a, data), args)
+    mu, lambda = _sb_stan_dist_args(InverseGaussian, arg_exprs)
+    _sb_validate_inverse_gaussian!(data, target, mu, lambda)
+    _sb_lik_stan_exprs!(stmts, target, :brm_inverse_gaussian, (mu, lambda))
+end
+
 # Reference-class categorical regression. The user supplies one named scalar
 # LP per non-reference class; the fitted outcome level order determines which
 # class each argument owns. A leading all-zero row fixes class 1 as the
@@ -11232,6 +11420,14 @@ _sb_stan_dist_args(::Type{<:Binomial}, args::Tuple{Any}) = (args[1], 0.5)
 _sb_stan_dist_args(::Type{<:Poisson}, ::Tuple{}) = (1.0,)
 
 _sb_stan_dist_args(::Type{<:VonMises}, args::Tuple{Any}) = (0.0, args[1])
+
+# `InverseGaussian` is deliberately NOT in `_sb_stan_dist_name` (same reasoning
+# as `VonMises` above it): the bespoke likelihood and prior methods normalize
+# through here and emit the `brm_inverse_gaussian` custom density. The
+# two-argument `(mu, lambda)` form already matches Stan's order and passes
+# through the generic fallback unchanged.
+_sb_stan_dist_args(::Type{<:InverseGaussian}, ::Tuple{}) = (1.0, 1.0)
+_sb_stan_dist_args(::Type{<:InverseGaussian}, args::Tuple{Any}) = (args[1], 1.0)
 
 # Distributions `Multinomial(n, p)` -> StanBlocks `multinomial(obs | probs, N)`:
 # reorder to (probs, N) so the emitted `obs ~ multinomial(probs, N)` matches the

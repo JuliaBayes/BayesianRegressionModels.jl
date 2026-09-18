@@ -190,6 +190,8 @@ The committed source-faithful k=20 measurement is
 `test/receipts/turing_hsgp_gradients.tsv`; its `brm_revision` and
 `benchmark_sha256` columns bind every row to the exact measured implementation
 and harness.
+A committed `k=8` noncentered pilot is
+`test/receipts/turing_hsgp_gradients_k8_noncentered.tsv`.
 
 ## Why each constraint exists
 

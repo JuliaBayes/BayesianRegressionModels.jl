@@ -380,11 +380,10 @@ end)((;
 """, :interval_normal; title="Interval-censored Normal evidence")
 ```
 
-## A StanBlocks-only surface
+## Spline term
 
-The Turing pane is deliberately not removed for unsupported features. This
-smooth example exercises the same build path and preserves the current
-fail-closed reason beside the successful StanBlocks and Stan emissions.
+This smooth example is supported by both backends. The Turing pane shows the
+native spline submodel selected directly from the shared BRMI preparation.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
@@ -396,5 +395,5 @@ end)((;
     x=collect(range(-2, 2; length=20)),
     y=sin.(collect(range(-2, 2; length=20))),
 ))
-""", :smooth; title="Spline term with an unsupported Turing executor")
+""", :smooth; title="Spline term")
 ```
