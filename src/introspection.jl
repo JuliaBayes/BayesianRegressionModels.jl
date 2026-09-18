@@ -257,7 +257,9 @@ in formula order. Each entry has
 Both slots are always present: `predictor` and `coefficient` are each either
 a `Symbol` or `Symbol(":")`, the wildcard meaning *every value of this slot*.
 `coefficient` uses the same labels as [`popcoefnames`](@ref), including
-`:Intercept`. `expression` is the exact parsed RHS [`ExprColumn`](@ref);
+`:Intercept` — or a whole-interaction `a&b` key for an `effect(lp, a & b)`
+statement, which the backends fan out over every column the term emits.
+`expression` is the exact parsed RHS [`ExprColumn`](@ref);
 `family`, `arguments`, and `keywords` are its decomposed, directly inspectable
 parts.
 
