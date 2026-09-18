@@ -3425,6 +3425,45 @@ when the build may run inside a function that also built `sb`.
 stan_instantiate(sb::SBBRMI; kwargs...) =
     Base.invokelatest(StanBlocks.stan_instantiate, sb.model; kwargs...)
 
+"""
+    transpiles(sb::SBBRMI; re=true) -> Bool
+
+Return `true` if `sb` successfully transpiles to Stan source, `false`
+otherwise. Forwards through [`stan_code`](@ref), so — like the rest of the
+BRM trace surface — it re-enters the compiler in the current world and is
+call-site independent: build + predicate inside one function works on a
+freshly built model, while direct `StanBlocks.transpiles(sb.model)` from the
+same frame dies with `` `brm_vector_prior_*` is missing `lpxf_expr` ``
+(snag `two-sbbrmi-fits-f2beca06`). Set `re=false` to swallow the error and
+just return `false`; the default `re=true` rethrows.
+"""
+transpiles(sb::SBBRMI; re=true) = try
+    stan_code(sb)
+    return true
+catch e
+    re && rethrow()
+    return false
+end
+
+"""
+    compiles(sb::SBBRMI; re=true) -> Bool
+
+Return `true` if `sb` successfully transpiles **and** compiles via
+BridgeStan (i.e. [`stan_instantiate`](@ref) succeeds), `false` otherwise.
+Strictly stronger than [`transpiles`](@ref): a model that transpiles can
+still fail to compile if `stanc` rejects the generated Stan or the C++
+build fails. Call-site independent for the same lowering-time registration
+reason as `transpiles` above. Set `re=false` to swallow the error and just
+return `false`; the default `re=true` rethrows.
+"""
+compiles(sb::SBBRMI; re=true) = try
+    stan_instantiate(sb)
+    return true
+catch e
+    re && rethrow()
+    return false
+end
+
 # Display configured submodels from their actual emitted statements. Keep the
 # compiler's value-callee path intact: a merge expression inside a SLIC call
 # does not have the same tracing/binding contract. The display instead binds
