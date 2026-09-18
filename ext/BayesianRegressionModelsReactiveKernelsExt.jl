@@ -99,6 +99,29 @@ function _rk_ppl_derived(spec::BRM._RKDerivedSpec)
     VectorAssignmentSpec(spec.name, spec.expression, spec.label)
 end
 
+# The LevelMap subset a factor term's options select: full cover, or every
+# observed position but the reference drop (edge drops as ranges, middle
+# drops as index lists — the same literals the AST surface emits).
+function _rk_ppl_levelsubset(options::NamedTuple, K::Int)
+    options.coding === :fullrank && return Colon()
+    p = options.drop
+    p == 1 && return UnitRange(2, K)
+    p == K && return UnitRange(1, K - 1)
+    return Vector{Int}([1:p-1; p+1:K])
+end
+
+function _rk_ppl_levelmaps(plan::BRM._RKStructuralPlan)
+    maps = LevelMap[]
+    for predictor in plan.predictors, term in predictor.terms
+        term.kind === :factor || continue
+        col = only(term.columns)
+        K = length(BRM._rk_grouping_levels(plan.columns[col]))
+        push!(maps, LevelMap(predictor.name, col, [], :levels,
+            _rk_ppl_levelsubset(term.options, K)))
+    end
+    maps
+end
+
 function _rk_ppl_structural_plan(plan::BRM._RKStructuralPlan)
     StructuralPlan(
         _rk_ppl_response.(plan.responses),
@@ -107,7 +130,8 @@ function _rk_ppl_structural_plan(plan::BRM._RKStructuralPlan)
         _rk_ppl_parameter.(plan.parameters),
         _rk_ppl_assignment.(plan.assignments),
         plan.columns, plan.n_obs;
-        derived=_rk_ppl_derived.(plan.derived))
+        derived=_rk_ppl_derived.(plan.derived),
+        levelmaps=_rk_ppl_levelmaps(plan))
 end
 
 # The executable `model` of an `RKBRMI` is the thin-layer `(; spec, layout)`
@@ -119,7 +143,7 @@ end
 function BRM._brm_rk_model(plan::BRM._RKStructuralPlan)
     ast = BRM._rk_emit_ast(plan)
     translated = if ast === nothing
-        _rk_ppl_structural_plan(plan)
+        bind_data(_rk_ppl_structural_plan(plan), plan.columns)
     else
         unbound = lower_rkppl(ast, Tuple(sort!(collect(keys(plan.columns)))))
         bind_data(unbound, plan.columns)

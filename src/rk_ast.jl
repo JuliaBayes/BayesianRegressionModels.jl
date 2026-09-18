@@ -50,11 +50,10 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol})
         elseif term.kind === :continuous
             push!(summands, Expr(:call, :.*, coefs[index], only(term.columns)))
         elseif term.kind === :factor
-            col = only(term.columns)
-            ref = term.options.ref
-            index_expr = ref == 1 ? col :
-                Expr(:call, :treatment, col, ref)
-            push!(summands, Expr(:ref, coefs[index], index_expr))
+            # Factor use is always bare `c[g]`; the LevelMap (full cover
+            # or subset) rides the broadcast prior, and unmapped rows
+            # contribute 0.
+            push!(summands, Expr(:ref, coefs[index], only(term.columns)))
         elseif term.kind === :offset
             push!(summands, only(term.columns))
         end
@@ -65,6 +64,31 @@ end
 
 function _rk_ast_dotted(head::Symbol, args...)
     Expr(:., head, Expr(:tuple, args...))
+end
+
+# The `levels(g)[S]` subset literal dropping position `p` of `K`: edge
+# drops spell as explicit literal ranges, middle drops as literal index
+# lists (no `end` — the plan knows `K`, so the literal is exact).
+function _rk_ast_subset_literal(p::Int, K::Int)
+    p == 1 && return Expr(:call, :(:), 2, K)
+    p == K && return Expr(:call, :(:), 1, K - 1)
+    Expr(:vect, [1:p-1; p+1:K]...)
+end
+
+# A factor coefficient's broadcast prior: `c[levels(g)] .~ Normal.(...)`
+# full-rank, `c[levels(g)[S]] .~ Normal.(...)` for a reference subset.
+# Always stated (factors have no default prior); the scalar location and
+# scale broadcast over the LevelMap block.
+function _rk_ast_factor_prior(coef::Symbol, col::Symbol,
+        options::NamedTuple, K::Int, location::Float64, scale::Float64)
+    index = if options.coding === :fullrank
+        Expr(:call, :levels, col)
+    else
+        Expr(:ref, Expr(:call, :levels, col),
+            _rk_ast_subset_literal(options.drop, K))
+    end
+    Expr(:call, :.~, Expr(:ref, coef, index),
+        _rk_ast_dotted(:Normal, location, scale))
 end
 
 function _rk_ast_response_dist(response::_RKLikelihoodSpec)
@@ -138,8 +162,15 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
                 "RK backend: internal: no population prior for " *
                 "`$(predictor.name)` addressee `$(term.addressee)`")
             location, scale = priors[key]
-            push!(stmts, Expr(:call, :~,
-                coef, Expr(:call, :Normal, location, scale)))
+            if term.kind === :factor
+                col = only(term.columns)
+                K = length(_rk_grouping_levels(plan.columns[col]))
+                push!(stmts, _rk_ast_factor_prior(
+                    coef, col, term.options, K, location, scale))
+            else
+                push!(stmts, Expr(:call, :~,
+                    coef, Expr(:call, :Normal, location, scale)))
+            end
         end
         push!(stmts, Expr(:(=), predictor.name,
             _rk_ast_affine(predictor, coefs)))
