@@ -50,13 +50,11 @@ rev = "c317cc003fc41c2d933c27dc80799141eebd434e"
 
 [sources.StanBlocks]
 url = "https://github.com/nsiccha/StanBlocks.jl"
-# 3aba023a (2026-09-18): `y ~ skew_double_exponential(mu_vec, sigma_scalar, tau)`
-# transpiles + stanc clean (StanBlocks snag sbbrmi-response-f3ed0938), and
-# `stan_instantiate` at a taken path rewrites on mismatch with a warning
-# instead of silently sampling the stale program (snag stan-instantiate-4654c020).
-# Contains fe1d3b5e's native `inv_cloglog` (snag stanblocks-trace-e1235cb1)
-# and bec23bc3's `log_modified_bessel_first_kind` for periodic hsgp.
-rev = "3aba023afd840115545e64f1482d6f3973a0d073"
+# 9607eee6 (2026-09-18): distribution HOFs accept a family call in the token
+# position (StanBlocks snag hof-call-form-fa-b2bfce08) — `censored(normal(mu,
+# sigma); ...)` desugars to the token form. Contains 3aba023a (skew_double_
+# exponential vector transpiler fix, stan_instantiate stale-path rewrite).
+rev = "9607eee6c7e839032f252b91d405007eea6a9021"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"

@@ -46,7 +46,7 @@ const PINS = [
     ("MutatingFunctions", "https://github.com/nsiccha/MutatingFunctions.jl.git", "4fc41b1c7b774133ceaacc4ff3c34c67b15b87b2"),  # main
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "121de3194f02044e00bac0d11019a93458ddb63a"),  # main
     ("TreeArrays",        "https://github.com/nsiccha/TreeArrays.jl.git",        "c317cc003fc41c2d933c27dc80799141eebd434e"),  # main
-    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "3aba023afd840115545e64f1482d6f3973a0d073"),  # devibe (skew_double_exponential vector transpiler fix — snag sbbrmi-response-f3ed0938 — plus stan_instantiate stale-path rewrite+warn — snag stan-instantiate-4654c020; contains fe1d3b5e native inv_cloglog — snag stanblocks-trace-e1235cb1 / BRM snag brm-tracer-inv-c-a19794bc — 66448de prior-predictive fix, 9a958f97 integer ragged carrier — snag ragged-int-obser-771dd259 — and bec23bc3 log_modified_bessel_first_kind for the periodic hsgp basis)
+    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "9607eee6c7e839032f252b91d405007eea6a9021"),  # devibe (distribution HOFs accept a family call in the token position — snag hof-call-form-fa-b2bfce08 — BRM snag censored-in-kern-87b50f51; contains 3aba023a skew_double_exponential vector transpiler fix + stan_instantiate stale-path rewrite+warn)
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
 ]

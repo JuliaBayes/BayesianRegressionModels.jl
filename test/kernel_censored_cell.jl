@@ -8,8 +8,9 @@
 # token plus positional arguments (`yy ~ censored(normal, mu, sigma;
 # lower=lloq)`), per stanblocks-use §8.1 — which lowers through the same
 # `lower_clamping` / `lower_conditioning` / `interval_evidence_impl` builtins
-# as plain-`@slic` use. The `Distributions.jl` call form is not valid there in
-# either case (`Normal(...)` or `normal(...)`).
+# as plain-`@slic` use. The `Distributions.jl` `Normal(...)` call form is not
+# valid there (deliberate UnionAll rejection); the lowercase `normal(...)`
+# call form is sugar for the token form (StanBlocks 9607eee6).
 
 using Test
 using BayesianRegressionModels
@@ -83,11 +84,10 @@ end
     @test knc_stanc_ok(sb.model)
 end
 
-@testset "kernel(...) cell: distribution call forms still fail loudly" begin
+@testset "kernel(...) cell: Distributions call form still fails loudly" begin
     # `Normal(...)` hits the deliberate UnionAll rejection (StanBlocks decision
-    # `3bbtrv`); `normal(...)` traces to `anything` in the family-token
-    # position. Neither message is matched here — the wording is owned by
-    # StanBlocks — only that both stay loud instead of silently accepted.
+    # `3bbtrv`). The message is not matched here — the wording is owned by
+    # StanBlocks — only that it stays loud instead of silently accepted.
     df = knc_df()
     m_cap = @brm df begin
         sigma ~ Exponential(1)
@@ -100,6 +100,12 @@ end
     end
     sb_cap = SBBRMI(m_cap; mod = @__MODULE__)
     @test_throws Exception StanBlocks.stan_code(sb_cap.model)
+end
+
+@testset "kernel(...) cell: lowercase call form is token sugar" begin
+    # Since StanBlocks 9607eee6 the lowercase `normal(mu, sigma)` call form
+    # desugars to the token form: same lowering, same stanc-clean program.
+    df = knc_df()
     m_call = @brm df begin
         sigma ~ Exponential(1)
         log_a ~ 1 + (1 | site)
@@ -110,5 +116,11 @@ end
         end
     end
     sb_call = SBBRMI(m_call; mod = @__MODULE__)
-    @test_throws Exception StanBlocks.stan_code(sb_call.model)
+    @test StanBlocks.stan.transpiles(sb_call.model)
+    code = StanBlocks.stan_code(sb_call.model)
+    @test occursin("lower_clamping_normal_lpdf", code)
+    @test occursin("lower_clamping_normal_lpdfs", code)
+    @test occursin("lower_clamping_vector_normal_rng", code)
+    @test occursin("~ lower_clamping_normal(", code)
+    @test knc_stanc_ok(sb_call.model)
 end
