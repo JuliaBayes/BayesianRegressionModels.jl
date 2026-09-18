@@ -207,6 +207,8 @@ export popefs, _popefs_normal, _popefs_coefs, _popefs_normal_coefs,
        hurdle_poisson_lpmfs, hurdle_poisson_rng,
        brm_von_mises, brm_von_mises_lpdf,
        brm_von_mises_lpdfs, brm_von_mises_rng,
+       brm_inverse_gaussian, brm_inverse_gaussian_lpdf,
+       brm_inverse_gaussian_lpdfs, brm_inverse_gaussian_rng,
        sb_group_demo_slic, sb_group_clamped_demo, sb_group_clamped_demo_slic
 
 end # module
