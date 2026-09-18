@@ -12,6 +12,7 @@
 # It does not check Documenter cross-references, VitePress dead links or rendering.
 
 include(joinpath(@__DIR__, "backend_comparisons.jl"))
+include(joinpath(@__DIR__, "centering_examples.jl"))
 using Markdown
 
 function check_page(page)
