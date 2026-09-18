@@ -79,7 +79,7 @@ end
     @test occursin("BRM.turing_group_effect", source)
     @test !occursin("_brm_group_effect_model", source)
     @test !occursin("multi.plans", source)
-    @test haskey(backend.model.args, :random_effects_mu_1)
+    @test haskey(backend.model.args, :group_effects_mu_1)
     @test haskey(backend.model.args, :X_mu)
 end
 
