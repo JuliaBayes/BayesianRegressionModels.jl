@@ -9,6 +9,9 @@ end
 
 function _brm_turing_term_model end
 
+"""Build the native Turing submodel for one prepared formula term."""
+function turing_term_model end
+
 _brm_prepare_term(_term, _target, _context) = nothing
 _brm_prepares_term(_term) = false
 _brm_prepares_term(term::ExprColumn{typeof(s)}) = true

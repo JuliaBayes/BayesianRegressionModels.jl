@@ -67,6 +67,22 @@ end
         rand.(Ref(Xoshiro(31)), Normal.(data.x .* 0.3 .+ 0.2, 0.7))
 end
 
+@testset "grouped emission names its reusable geometry" begin
+    data = (; x=[-1., 0.5, 2., 0.25], subject=[2, 1, 2, 3],
+            y=[-0.2, 0.4, 1.2, 0.1])
+    backend = TuringBRMI((@brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 + x | subject)
+        y ~ Normal(mu, sigma)
+    end)(data))
+    source = string(turing_model_source(backend))
+    @test occursin("BRM.turing_group_effect", source)
+    @test !occursin("_brm_group_effect_model", source)
+    @test !occursin("multi.plans", source)
+    @test haskey(backend.model.args, :group_effects_mu_1)
+    @test haskey(backend.model.args, :X_mu)
+end
+
 @testset "generated input names do not capture model bindings" begin
     backend = TuringBRMI((@brm begin
         X_mu ~ Normal()

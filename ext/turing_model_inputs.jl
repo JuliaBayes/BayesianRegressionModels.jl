@@ -105,6 +105,8 @@ function _brm_input_name(path, multi)
         fields == ((:property, :design), (:property, :fixed)) &&
             return Symbol(:offset_, predictor)
         if length(fields) == 2 && fields[2][1] === :index
+            fields[1] == (:property, :random_effects) && return Symbol(
+                :group_effects_, predictor, :_, only(fields[2][2]))
             return Symbol(fields[1][2], :_, predictor, :_, only(fields[2][2]))
         end
         return Symbol(:predictor_, predictor)
