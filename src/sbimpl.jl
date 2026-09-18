@@ -7230,7 +7230,7 @@ end
 function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(s), t, summands;
                                term_overrides=Dict{Symbol,Any}(),
                                mod::Module=@__MODULE__)
-    push!(summands, _sb_predictor_term!(stmts, data, s, t; term_overrides, mod))
+    push!(summands, _sb_predictor_term!(stmts, data, s, t; target, term_overrides, mod))
 end
 function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(t2), t, summands;
                                term_overrides=Dict{Symbol,Any}(),
@@ -9760,16 +9760,20 @@ end
 # flat null-space coefficients, penalized coefficients, and smoothing SD; the
 # returned contribution is a direct summand (no extra `popefs` beta). Only
 # the default basis is supported -- `bs` and `k=`/`knots=` are follow-ons.
+# Carriers disambiguate like `gp`/`hsgp`: the first `s(x)` keeps the
+# historical `s_<x>` names, while a repeat of the same column -- in another
+# predictor or twice in one -- takes `s_<target>_<x>` (+ serial).
 _sb_predictor_term!(stmts, data, ::typeof(s), t;
-                    term_overrides=Dict{Symbol,Any}(), mod::Module=@__MODULE__,
-                    kwargs...) = begin
+                    term_overrides=Dict{Symbol,Any}(), target=nothing,
+                    mod::Module=@__MODULE__, kwargs...) = begin
     args = getargs(t)
     length(args) == 1 || error("sbimpl: `s(x)` expects 1 positional arg, got $(length(args))")
     isempty(getkwargs(t)) || error("sbimpl: `s(x)` does not support keyword arguments yet")
     xname, raw = _sb_inner_data(:s, only(args))
     v = _sb_real_vec(:s, xname, raw)
-    Xnull_name = Symbol(:Xnull_, xname)
-    Zpen_name = Symbol(:Zpen_, xname)
+    suffix, col_name = _sb_unique_structured_term_names(stmts, :s, string(xname), target)
+    Xnull_name = Symbol(:Xnull_, suffix)
+    Zpen_name = Symbol(:Zpen_, suffix)
     frozen = _sb_frozen_preproc_entry(data, Xnull_name, :spline, xname)
     prepared = if isnothing(frozen)
         _brm_prepare_term(t, :__sb_term__,
@@ -9790,7 +9794,6 @@ _sb_predictor_term!(stmts, data, ::typeof(s), t;
     # both matrices at new x values against these constants.
     _sb_record_preproc!(data, Xnull_name,
         PreprocEntry(:spline, (; fit, zpen_key=Zpen_name), xname, false))
-    col_name = Symbol(:s_, xname)
     prior = _sb_term_sd_submodel(term_overrides, t; mod)
     prior_kwargs = Any[Expr(:kw, :Xnull, Xnull_name), Expr(:kw, :Zpen, Zpen_name)]
     append!(prior_kwargs, (Expr(:kw, k, v) for (k, v) in pairs(prior.kwargs)))
