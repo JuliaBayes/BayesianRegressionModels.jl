@@ -112,10 +112,14 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
     taken = union(Set(keys(plan.columns)),
         Set(p.name for p in plan.parameters),
         Set(a.name for a in plan.assignments),
-        Set(p.name for p in plan.predictors))
+        Set(p.name for p in plan.predictors),
+        Set(d.name for d in plan.derived))
     priors = Dict((p.predictor, p.addressee) => (p.location, p.scale)
         for p in plan.population_priors)
     stmts = Expr[]
+    for derived in plan.derived
+        push!(stmts, Expr(:(=), derived.name, derived.expression))
+    end
     for predictor in plan.predictors
         coefs = Dict{Int,Symbol}()
         counter = 0
@@ -125,7 +129,11 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
             coef = _rk_ast_coef_name(
                 string(predictor.name, "_b", counter), taken)
             coefs[index] = coef
-            location, scale = priors[(predictor.name, term.addressee)]
+            key = (predictor.name, term.addressee)
+            haskey(priors, key) || error(
+                "RK backend: internal: no population prior for " *
+                "`$(predictor.name)` addressee `$(term.addressee)`")
+            location, scale = priors[key]
             push!(stmts, Expr(:call, :~,
                 coef, Expr(:call, :Normal, location, scale)))
         end

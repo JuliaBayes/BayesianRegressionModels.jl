@@ -24,6 +24,7 @@ df = (;
     b=[0, 1, 0, 1, 1, 0],
     c=[2, 1, 3, 2, 4, 3],
     gs=["a", "a", "b", "b", "c", "c"],
+    h=[1, 2, 1, 2, 1, 2],
 )
 
 @testset "gaussian AST exact shape" begin
@@ -135,6 +136,47 @@ end
     affine = only(a for a in ast.args if a isa Expr && a.head === :(=))
     @test affine == Expr(:(=), :mu, Expr(:call, :+,
         :mu_b1, Expr(:ref, :mu_b2, Expr(:call, :treatment, :gs, 3))))
+end
+
+@testset "derived definitions" begin
+    brmi = @brm df begin
+        mu ~ 1 + x + x & z
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast.args[1] == Expr(:(=), :int_x_x_z,
+        Expr(:call, :.*, :x, :z))
+    affine = only(a for a in ast.args if a isa Expr && a.head === :(=) &&
+        a.args[1] === :mu)
+    @test affine == Expr(:(=), :mu, Expr(:call, :+,
+        :mu_b1, Expr(:call, :*, :mu_b2, :x),
+        Expr(:call, :*, :mu_b3, :int_x_x_z)))
+    priors = [a for a in ast.args if a isa Expr && a.head === :call &&
+        length(a.args) == 3 && a.args[1] === :~ &&
+        a.args[2] in (:mu_b1, :mu_b2, :mu_b3)]
+    @test length(priors) == 3
+    # Transforms stage inline reductions in a single definition.
+    brmi = @brm df begin
+        mu ~ 1 + zscale(x)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast.args[1] == Expr(:(=), :zscale_x, Expr(:call, :./,
+        Expr(:call, :.-, :x, Expr(:call, :mean, :x)),
+        Expr(:call, :std, :x)))
+    # Mixed interactions compare against raw level values.
+    brmi = @brm df begin
+        mu ~ 1 + x & g
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast.args[1] == Expr(:(=), :int_x_x_g_lvl_2,
+        Expr(:call, :.*, :x, Expr(:call, :.==, :g, 2)))
+    @test ast.args[2] == Expr(:(=), :int_x_x_g_lvl_3,
+        Expr(:call, :.*, :x, Expr(:call, :.==, :g, 3)))
 end
 
 @testset "sampled, assignments, collisions" begin

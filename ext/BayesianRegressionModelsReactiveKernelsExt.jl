@@ -95,6 +95,10 @@ function _rk_ppl_assignment(spec::BRM._RKAssignmentSpec)
         BRM._rk_lower_assignment_expr(spec.expression, spec.name), spec.label)
 end
 
+function _rk_ppl_derived(spec::BRM._RKDerivedSpec)
+    VectorAssignmentSpec(spec.name, spec.expression, spec.label)
+end
+
 function _rk_ppl_structural_plan(plan::BRM._RKStructuralPlan)
     StructuralPlan(
         _rk_ppl_response.(plan.responses),
@@ -102,7 +106,8 @@ function _rk_ppl_structural_plan(plan::BRM._RKStructuralPlan)
         _rk_ppl_prior.(plan.population_priors),
         _rk_ppl_parameter.(plan.parameters),
         _rk_ppl_assignment.(plan.assignments),
-        plan.columns, plan.n_obs)
+        plan.columns, plan.n_obs;
+        derived=_rk_ppl_derived.(plan.derived))
 end
 
 # The executable `model` of an `RKBRMI` is the thin-layer `(; spec, layout)`
