@@ -64,3 +64,6 @@ first. `mister_p.jl` unpacks its gzipped input to `.out/tmp/` on first run
 | prior_sensitivity.jl | prior_sensitivity | body_fat.csv |
 | alternative_samplers.jl | alternative_samplers | (simulated) |
 | kulprit.jl | kulprit | (simulated) |
+| plot_predictions.jl | plot_predictions | mtcars.csv, nb_data.dta, movies.csv.gz |
+| plot_slopes.jl | plot_slopes | Wells.csv |
+| plot_comparisons.jl | plot_comparisons | fish.csv |

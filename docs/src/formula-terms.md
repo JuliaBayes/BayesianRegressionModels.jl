@@ -940,9 +940,9 @@ scale.
   half-normal); `Uniform(a, b)` additionally declares `<lower=a, upper=b>` so
   the declaration and the density's support agree. An **anisotropic** term
   (`iso=false`) has one length scale per axis and the statement sets all of
-  them; the isotropic form has a single shared one. With `by=g` the length
-  scale and amplitude are shared across groups, so one statement configures the
-  whole term.
+  them; the isotropic form has a single shared one. With `by=g` the term keeps
+  one shared length scale and amplitude unless hyper-predictor statements
+  predict them per group ([Hyper-predictors](@ref)).
 - `ar(:, dar(time))` accepts `Normal`, `Beta`, or `Uniform`; every declaration
   stays within `[0, 1]`. `sd(:, dar(time))` accepts the same positive-scale
   families as a GP amplitude. The older `ar(time)` term's transformed
@@ -962,6 +962,83 @@ Omitting an explicit HSGP prior is not a model-preserving workaround. In
 particular, removing `length_scale(:, hsgp(x)) ~ LogNormal(0, 1)` restores the
 default approximation-validity floor described below, changing the parameter
 support and the emitted Stan program.
+
+### Hyper-predictors
+
+A bare grouped term shares one length scale and one amplitude across all
+groups — only the basis weights vary per group. When each group needs its own
+smoothness or amplitude (per-biomarker hypers), predict the hypers with
+hyper-predictor statements: `log(length_scale(hsgp(x))) ~ 1 + (1 | g)` and
+`log(sd(hsgp(x))) ~ 1 + (1 | g)`. Both hypers use a log link, and each group
+evaluates its own linear predictor to `eta_rho[g]` / `eta_sigma[g]`, consumed
+as `rho_g = max(exp(eta_rho[g]), rho_lower)` and
+`sigma_g = exp(eta_sigma[g])`.
+
+- The hyper linear predictor accepts `1` and `(1 | g)` only. Smooths are
+  refused, population slopes need level-grid covariate semantics that are not
+  decided yet, and the random effect must be exactly `(1 | g)` over the
+  addressed term's own `by=` grouping. An ungrouped term takes an
+  intercept-only scalar (`~ 1`); a random effect without grouping is refused.
+- Defaults reproduce today's predictive prior: the intercept carries
+  `Normal(0, 1)` on the log scale (that is `LogNormal(0, 1)` on the natural
+  scale), the random-effect SD carries half-`Normal(0, 1)`, and the group
+  deviations are non-centered. An explicit `length_scale(:, hsgp(x)) ~ ...` /
+  `sd(:, hsgp(x)) ~ ...` statement retargets from the shared scalar to the
+  hyper-LP intercept and sets its own support, exactly as term priors do.
+- The approximation-validity floor (next section) applies per group: each
+  `rho_g` is maximised with the same domain-derived floor the bare term
+  declares, so no group can silently leave the kernel the basis approximates.
+- Scope is deliberately narrow: `hsgp` only (`gp` is refused by name),
+  isotropic (`iso=true`) only, and neither periodic nor model-derived axes.
+  Lowering is SBBRMI-only.
+- Posterior addressing: the sampled hyper coefficients resolve through
+  `brm_term_coordinates` under the `:length_scale_intercept` /
+  `:length_scale_ranef_sd` / `:length_scale_ranef_z` roles (and the `:sd_*`
+  mirrors) — one coordinate for the intercept and SD, one per group for the
+  deviations. The `:length_scale` / `:sd` roles themselves name no sampled
+  carrier on a predicted hyper and redirect to these roles; the per-group
+  values are deterministic transforms with no role.
+- After fitting, `hsgp_boundary_check` reports per-group
+  posterior-mean-`rho` over the domain margin (flagged at 1.0) and the
+  per-group probability the hyper value sits below the validity floor —
+  the executable form of the sizing guidance below.
+
+#### Hyper recovery needs a wider domain than latent recovery
+
+A good latent fit does **not** imply the hypers recover: fitting the smooth
+only needs the basis to span the data, while hyper posteriors need the HSGP
+prior covariance to match the kernel on the data grid — a strictly stronger
+requirement. The Dirichlet boundary pins the prior toward zero within roughly
+one length scale of `±L`, so when the plausible `rho` approaches the domain
+margin `(c-1)·max|x-mean(x)|` the prior variance collapses at the data edges
+and the `rho` posterior drags low with tight, confident-wrong credible
+intervals (snag `hyper-predictor-d453ecf9`: truth `rho=2.1` recovered as
+`0.76±0.12` at `c=1.5, k=10` on a 6-point grid, while the latent RMSE was
+0.07).
+
+Size `(c, k)` for hyper recovery from the plausible hyper range before fitting:
+
+- **Margin clears the largest plausible `rho`:**
+  `(c-1)·max|x-mean(x)| ≳ 2·rho_max`. The default `c=1.5` leaves a margin of
+  half the data half-range; once `rho_max` approaches that margin, widen `c`.
+- **Floor clears the smallest plausible `rho`:** raising `c` raises `L` and the
+  floor `(4L/π)·√(log(100)/(k²-1))` with it, so raise `k` alongside until the
+  floor sits below `rho_min` with headroom (target `rho_min/2`).
+- **Widen until the posterior stabilises:** intermediate domains can overshoot
+  (same case: `c=2.5` recovers `3.35`, `c=3.0` recovers `3.86`, `c=4.0`
+  recovers `2.75` against the exact-GP `2.71`). Do not stop at the first `c`
+  that moves the posterior.
+
+Two further posterior signatures to read correctly:
+
+- Mass with `eta` below `log(rho_lower)` is likelihood-flat — the floor binds
+  by `max()` inside the basis function, so `rho_vec = exp(eta)` reports prior
+  mass there as posterior. Check `P(rho_g < rho_lower)`; if substantial, widen
+  `k` to lower the floor and re-fit.
+- With few groups the half-`Normal(0, 1)` hyper SD shrinks group hypers together
+  (expected hierarchical pooling, not a bug). A chain stuck at huge `rho` with
+  a vanished smooth is the `rho→∞` degenerate tail all HSGP hypers share —
+  check `Rhat`: it is non-convergence, not information.
 
 ### `hsgp` bounds its length scale by default
 

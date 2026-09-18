@@ -1365,6 +1365,51 @@ _brm_term_parameter_bindings(::typeof(cdar), _t) =
     (; ar=:rho, sd=:sigma, innovations=:eta)
 _brm_term_parameter_bindings(_f, _t) = NamedTuple()
 
+# ---- hyper-predictor term roles ---------------------------------------------
+# A hyper-predictor statement replaces its hyper's shared sampled scalar with
+# a small linear predictor over the term's grouping levels (sbimpl B2), so the
+# `:length_scale` / `:sd` role no longer names a draw carrier: grouped terms
+# drop `rho_iso`/`sigma` entirely, while ungrouped terms keep the name as a
+# transformed-parameter deterministic (which `_brm_carrier_indices`
+# deliberately never selects). The sampled hyper coefficients resolve under
+# their own roles instead — the standard population-intercept / ranef-scale /
+# ranef-deviation vocabulary, scoped per hyper so the two hypers of one term
+# never collide:
+#   `:length_scale_intercept` / `:sd_intercept` (beta0; exactly 1),
+#   `:length_scale_ranef_sd` / `:sd_ranef_sd` (sd; exactly 1),
+#   `:length_scale_ranef_z` / `:sd_ranef_z` (z; one per term group).
+# A role exists only for a hyper with a validated plan, and the intercept /
+# ranef roles only for the pieces the plan's formula uses. Per-group hyper
+# VALUES (`rho_vec`/`sigma_vec`) are deterministic transforms of group-level
+# quantities — inputs to basis construction, not draws to slice — so they get
+# no role (spelling decision `0r1uyux` §Descriptor).
+function _brm_term_hyper_plans(plan, logical::Symbol, t)
+    getf(t) === hsgp || return ()
+    plans = _sb_collect_hyper_plans(plan.parent)
+    key = _sb_term_key(t)
+    Tuple(p for p in plans if p.lp === logical && p.term_key === key)
+end
+
+function _brm_hyper_role_bindings(plans)
+    names = Symbol[]
+    vals = Symbol[]
+    for p in plans
+        nm = _sb_hyper_names(p.hyper)
+        prefix = p.hyper === :length_scale ? "length_scale" : "sd"
+        if p.intercept
+            push!(names, Symbol(prefix, "_intercept"))
+            push!(vals, nm.beta)
+        end
+        if !isempty(p.ranefs)
+            push!(names, Symbol(prefix, "_ranef_sd"))
+            push!(vals, nm.sd)
+            push!(names, Symbol(prefix, "_ranef_z"))
+            push!(vals, nm.z)
+        end
+    end
+    NamedTuple{Tuple(names)}(Tuple(vals))
+end
+
 function _brm_term_coordinate_entries(brmi, logical::Symbol)
     predictors = [lp for lp in linear_predictors(brmi) if lp.name === logical]
     length(predictors) == 1 || return NamedTuple[]
@@ -1418,6 +1463,7 @@ public term-output label BRM derives from the formula (for example
 | `mo(...)` / `mo1(...)` | `:simplex` |
 | ungrouped `hsgp(...)` | `:length_scale`, `:sd`, `:basis_weights` |
 | grouped `hsgp(...; by=...)` | `:length_scale`, `:sd` |
+| `hsgp(...)` with hyper-predictor(s) | `:length_scale_intercept`, `:length_scale_ranef_sd`, `:length_scale_ranef_z`, `:sd_intercept`, `:sd_ranef_sd`, `:sd_ranef_z` — only the planned pieces |
 | `dar(...)` | `:ar`, `:sd`, `:innovations` |
 | `rw(...)` | `:sd`, `:innovations` |
 | `cdar(...)` | `:ar`, `:sd`, `:innovations` |
@@ -1438,6 +1484,11 @@ parameter owned by that declaration. Consumers never construct or parse the
 compiler-owned carrier name. Missing or duplicate predictors/terms/owners,
 unsupported parameter roles, and descriptor/artifact coordinate drift all
 error rather than selecting by descriptor order.
+
+On a term whose hyper is predicted (`log(length_scale(...)) ~ ...`), the
+`:length_scale` / `:sd` role itself names no sampled carrier and errors,
+redirecting to the hyper roles above; the per-group hyper values
+(`rho_vec`/`sigma_vec`) are deterministic transforms with no role.
 
 Generated-aware: for a response-free `regime="prior"` program (no observation
 `~`) StanBlocks re-draws every term carrier from its prior into generated
@@ -1485,6 +1536,18 @@ function brm_term_coordinates(d::BRMDescriptor, logical::Symbol,
     owner = only(owners).declaration
 
     bindings = _brm_term_parameter_bindings(getf(entry.value), entry.value)
+    hyper_plans = _brm_term_hyper_plans(d.plan, logical, entry.value)
+    hyper_bindings = _brm_hyper_role_bindings(hyper_plans)
+    bindings = merge(bindings, hyper_bindings)
+    if parameter in (:length_scale, :sd) &&
+       any(p -> p.hyper === parameter, hyper_plans)
+        roles = Tuple(k for k in keys(hyper_bindings) if
+                      startswith(String(k), String(parameter)))
+        error("brm_descriptor: term `$term` on logical predictor `$logical` " *
+              "predicts `$parameter` with a hyper-predictor, so `$parameter` " *
+              "names no sampled carrier; address the sampled hyper " *
+              "coefficients under $roles instead.")
+    end
     haskey(bindings, parameter) || error(
         "brm_descriptor: term `$term` on logical predictor `$logical` exposes " *
         "no parameter role `$parameter`; available roles are $(keys(bindings)).")
