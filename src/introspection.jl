@@ -228,6 +228,25 @@ function linear_predictors(brmi::BRMI)
     out
 end
 
+# Match a normalized hyper-predictor `~` operation: LHS `log(effect(...))`
+# with a term-hyper address (`:term_length_scale` / `:term_sd`, normalised
+# by the macro onto the same address vectors prior statements use).
+# Returns `(address, rhs)` or `nothing`. The macro owns the normalisation,
+# so every consumer matches without re-parsing (same principle as term keys).
+function _hyper_predictor_statement(op)
+    op isa ExprColumn && getf(op) === (~) || return nothing
+    lhs, rhs = getargs(op, 2)
+    lhs isa ExprColumn && getf(lhs) === log || return nothing
+    inner = getargs(lhs)
+    length(inner) == 1 || return nothing
+    addr = only(inner)
+    addr isa ExprColumn && getf(addr) === effect || return nothing
+    address = getargs(addr)
+    isempty(address) && return nothing
+    first(address) in (:term_length_scale, :term_sd) || return nothing
+    (address, rhs)
+end
+
 # ---- population-effect prior statements -----------------------------------
 
 # Every internal address class that is NOT a population-coefficient address.

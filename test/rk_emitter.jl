@@ -25,14 +25,17 @@ df = (;
     b=[0, 1, 0, 1, 1, 0],
     c=[2, 1, 3, 2, 4, 3],
     gs=["a", "a", "b", "b", "c", "c"],
+    h=[1, 2, 1, 2, 1, 2],
     bf=[0.0, 1.0, 0.0, 1.0, 1.0, 0.0],
     cf=[2.0, 1.0, 3.0, 2.0, 4.0, 3.0],
+    k1=[1, 1, 1, 1, 1, 1],
 )
 
 @testset "gaussian identity plan shape" begin
     brmi = @brm df begin
-        mu ~ 1 + x + g + offset(z)
+        mu ~ 0 + x + g + offset(z)
         effect(mu, x) ~ Normal(0, 2)
+        effect(mu, g) ~ Normal(0, 2)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
@@ -52,19 +55,19 @@ df = (;
     @test predictor.name === :mu
     @test predictor.link === :identity
     @test [t.kind for t in predictor.terms] ==
-        [:intercept, :continuous, :factor, :offset]
-    factor_term = predictor.terms[3]
+        [:continuous, :factor, :offset]
+    factor_term = predictor.terms[2]
     @test factor_term.columns == [:g]
-    @test factor_term.options == (contrasts=:treatment, ref=1, levels=:observed)
+    @test factor_term.options == (coding=:fullrank, levels=:observed)
     @test factor_term.addressee === :g
     @test plan.columns[:g] == [1, 1, 2, 2, 3, 3]
     @test sort!([p.addressee for p in plan.population_priors]) ==
-        [:Intercept, :g, :x]
+        [:g, :x]
     x_prior = only(p for p in plan.population_priors if p.addressee === :x)
     @test (x_prior.location, x_prior.scale) == (0.0, 2.0)
-    default_prior = only(
-        p for p in plan.population_priors if p.addressee === :Intercept)
-    @test (default_prior.location, default_prior.scale) == (0.0, 1.0)
+    g_prior = only(
+        p for p in plan.population_priors if p.addressee === :g)
+    @test (g_prior.location, g_prior.scale) == (0.0, 2.0)
     @test length(plan.parameters) == 1
     @test only(plan.parameters).name === :s
     @test only(plan.parameters).family === :Exponential
@@ -78,27 +81,318 @@ df = (;
     @test priors_of(backend) == priors_of(brmi)
 end
 
-@testset "factor ref translates to sort-order index" begin
+@testset "factor subsets translate refs to sort-order drops" begin
     brmi = @brm df begin
         mu ~ 1 + factor(g; ref=3)
+        effect(mu, g) ~ Normal(0, 2)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
     plan = BRM._brm_rk_plan(brmi)
     factor_term = only(plan.predictors).terms[2]
     @test factor_term.kind === :factor
-    @test factor_term.options == (contrasts=:treatment, ref=3, levels=:observed)
-    # String groupings fail closed in the BRM lane (shared population
-    # lowering only codes integer/CategoricalVector groupings) — with RK
-    # attribution, before shared machinery can throw undecorated errors.
-    # The thin layer admits strings; lifting this is an upstream snag.
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
-        mu ~ 1 + gs
+    @test factor_term.options == (coding=:subset, drop=3, levels=:observed)
+    # String groupings code exactly like integer levels: sort(unique)
+    # order, ref by level value.
+    bare = BRM._brm_rk_plan(@brm df begin
+        mu ~ 0 + gs
+        effect(mu, gs) ~ Normal(0, 2)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    bare_term = only(bare.predictors).terms[1]
+    @test bare_term.kind === :factor
+    @test bare_term.options == (coding=:fullrank, levels=:observed)
+    @test bare_term.addressee === :gs
+    @test bare.columns[:gs] == ["a", "a", "b", "b", "c", "c"]
+    @test sort!([p.addressee for p in bare.population_priors]) ==
+        [:gs]
+    explicit = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + factor(gs; ref="b")
+        effect(mu, gs) ~ Normal(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    explicit_term = only(explicit.predictors).terms[2]
+    @test explicit_term.kind === :factor
+    @test explicit_term.options == (coding=:subset, drop=2, levels=:observed)
+    # `cmc=false` without an intercept pins the reference at zero: a
+    # subset with no intercept.
+    pinned = BRM._brm_rk_plan(@brm df begin
+        mu ~ 0 + factor(g; ref=3, cmc=false)
+        effect(mu, g) ~ Normal(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    pinned_term = only(pinned.predictors).terms[1]
+    @test pinned_term.kind === :factor
+    @test pinned_term.options == (coding=:subset, drop=3, levels=:observed)
+    @test sort!([p.addressee for p in pinned.population_priors]) == [:g]
+    # A non-string non-integer ref still fails closed with attribution.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + factor(gs; ref=1.5)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # An explicit ref under `0 +` (cell means) is meaningless.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 0 + factor(g; ref=3)
+        effect(mu, g) ~ Normal(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # A bare factor under an intercept is unidentified.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + g
+        effect(mu, g) ~ Normal(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Factor blocks need an explicit prior (no default).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 0 + g
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # `cmc` is inert under an intercept: still a reference subset.
+    inert = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + factor(g; ref=3, cmc=false)
+        effect(mu, g) ~ Normal(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    inert_term = only(inert.predictors).terms[2]
+    @test inert_term.options == (coding=:subset, drop=3, levels=:observed)
+    # `factor()` without `ref` under `0 +` is full-rank like the bare column.
+    noref = BRM._brm_rk_plan(@brm df begin
+        mu ~ 0 + factor(g)
+        effect(mu, g) ~ Normal(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test only(noref.predictors).terms[1].options ==
+        (coding=:fullrank, levels=:observed)
+    # A global population prior also satisfies the explicit-prior rule.
+    global_prior = BRM._brm_rk_plan(@brm df begin
+        mu ~ 0 + x + g
+        effect(mu, :) ~ Normal(0, 3)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test sort!([p.addressee for p in global_prior.population_priors]) ==
+        [:g, :x]
+    @test only(p for p in global_prior.population_priors
+        if p.addressee === :g).scale == 3.0
+    # Two reference subsets share one intercept (neither spans it).
+    two = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + factor(g; ref=1) + factor(h; ref=1)
+        effect(mu, g) ~ Normal(0, 2)
+        effect(mu, h) ~ Normal(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test [t.options for t in only(two.predictors).terms[2:3]] ==
+        [(coding=:subset, drop=1, levels=:observed),
+         (coding=:subset, drop=1, levels=:observed)]
+    @test sort!([p.addressee for p in two.population_priors]) ==
+        [:Intercept, :g, :h]
+    # A single observed level subsets to nothing (fail closed), but
+    # full-ranks to one cell mean.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + factor(k1; ref=1)
+        effect(mu, k1) ~ Normal(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    one = BRM._brm_rk_plan(@brm df begin
+        mu ~ 0 + k1
+        effect(mu, k1) ~ Normal(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test only(one.predictors).terms[1].options ==
+        (coding=:fullrank, levels=:observed)
+    @test sort!([p.addressee for p in one.population_priors]) == [:k1]
+end
+
+@testset "continuous interaction lowers to derived product" begin
+    brmi = @brm df begin
+        mu ~ 1 + x + x & z
+        effect(mu, int_x_x_z) ~ Normal(0, 5)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    @test length(plan.derived) == 1
+    derived = only(plan.derived)
+    @test derived.name === :int_x_x_z
+    @test derived.expression == Expr(:call, :.*, :x, :z)
+    @test [t.kind for t in only(plan.predictors).terms] ==
+        [:intercept, :continuous, :continuous]
+    interaction = only(plan.predictors).terms[3]
+    @test interaction.columns == [:int_x_x_z]
+    @test interaction.addressee === :int_x_x_z
+    @test sort!([p.addressee for p in plan.population_priors]) ==
+        [:Intercept, :int_x_x_z, :x]
+    prior = only(
+        p for p in plan.population_priors if p.addressee === :int_x_x_z)
+    @test (prior.location, prior.scale) == (0.0, 5.0)
+    @test sort!(collect(keys(plan.columns))) == [:x, :y, :z]
+end
+
+@testset "categorical interactions lower to comparison products" begin
+    brmi = @brm df begin
+        mu ~ 1 + x & g
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    @test [d.name for d in plan.derived] ==
+        [:int_x_x_g_lvl_1, :int_x_x_g_lvl_2, :int_x_x_g_lvl_3]
+    @test plan.derived[1].expression ==
+        Expr(:call, :.*, :x, Expr(:call, :.==, :g, 1))
+    @test plan.derived[2].expression ==
+        Expr(:call, :.*, :x, Expr(:call, :.==, :g, 2))
+    @test plan.derived[3].expression ==
+        Expr(:call, :.*, :x, Expr(:call, :.==, :g, 3))
+    @test length(only(plan.predictors).terms) == 4
+    @test sort!([p.addressee for p in plan.population_priors]) ==
+        [:Intercept, :int_x_x_g_lvl_1, :int_x_x_g_lvl_2, :int_x_x_g_lvl_3]
+    # The reference level's dummy has no shared column (shared stays
+    # treatment-coded), so it takes the emitter default.
+    defaulted = only(p for p in plan.population_priors
+        if p.addressee === :int_x_x_g_lvl_1)
+    @test (defaulted.location, defaulted.scale) == (0.0, 1.0)
+    # `factor()` is not admitted inside `&` operands (coding there is
+    # always full-rank); the bare column spells it.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x & factor(g; ref=3)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Factor-factor crosses level comparisons; the full cross covers
+    # every row, so it needs an intercept-free predictor.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + g & h
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    crossed = BRM._brm_rk_plan(@brm df begin
+        mu ~ 0 + g & h
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test [d.name for d in crossed.derived] ==
+        [:int_g_lvl_1_x_h_lvl_1, :int_g_lvl_1_x_h_lvl_2,
+         :int_g_lvl_2_x_h_lvl_1, :int_g_lvl_2_x_h_lvl_2,
+         :int_g_lvl_3_x_h_lvl_1, :int_g_lvl_3_x_h_lvl_2]
+    @test crossed.derived[1].expression == Expr(:call, :.*,
+        Expr(:call, :.==, :g, 1), Expr(:call, :.==, :h, 1))
+    @test sort!([p.addressee for p in crossed.population_priors]) ==
+        sort!([d.name for d in crossed.derived])
+    # String groupings in interactions fail closed: level codes cannot be
+    # derived in-graph from raw strings.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x & gs
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+end
+
+@testset "center/zscale lower to inline reductions" begin
+    brmi = @brm df begin
+        mu ~ 1 + center(x)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    @test [d.name for d in plan.derived] == [:center_x]
+    @test only(plan.derived).expression ==
+        Expr(:call, :.-, :x, Expr(:call, :mean, :x))
+    @test only(plan.predictors).terms[2].addressee === :center_x
+    scaled = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + zscale(x)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test [d.name for d in scaled.derived] == [:zscale_x]
+    @test only(scaled.derived).expression == Expr(:call, :./,
+        Expr(:call, :.-, :x, Expr(:call, :mean, :x)),
+        Expr(:call, :std, :x))
+    standardized = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + standardize(x)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test [d.name for d in standardized.derived] == [:standardize_x]
+    @test only(standardized.derived).expression ==
+        only(scaled.derived).expression
+end
+
+@testset "numeric data expressions lower to dotted forms" begin
+    brmi = @brm df begin
+        mu ~ 1 + log(z)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    # The shared protect label carries a process hash: assert structure,
+    # not the exact name.
+    @test length(plan.derived) == 1
+    derived = only(plan.derived)
+    @test derived.expression == Expr(:., :log, Expr(:tuple, :z))
+    term = only(plan.predictors).terms[2]
+    @test term.kind === :continuous
+    @test term.columns == [derived.name]
+    @test term.addressee === derived.name
+    prior = only(
+        p for p in plan.population_priors if p.addressee === derived.name)
+    @test (prior.location, prior.scale) == (0.0, 1.0)
+    @test sort!(collect(keys(plan.columns))) == [:y, :z]
+    arithmetic = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x * 2
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test only(arithmetic.derived).expression ==
+        Expr(:call, :.*, :x, 2)
+    # Unknown functions fail closed with the admitted list named.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + sind(z)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Scalar-valued terms fail closed (predictors take vector terms).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + mean(x)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Nested specials fail closed: shared materialization would crash.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + log(center(x))
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+end
+
+@testset "offset of data expression lowers to derived offset" begin
+    brmi = @brm df begin
+        mu ~ 1 + x + offset(log(z))
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    @test [d.name for d in plan.derived] == [:rkd_offset_log_z]
+    @test only(plan.derived).expression ==
+        Expr(:., :log, Expr(:tuple, :z))
+    off = only(plan.predictors).terms[3]
+    @test off.kind === :offset
+    @test off.columns == [:rkd_offset_log_z]
+    @test sort!([p.addressee for p in plan.population_priors]) ==
+        [:Intercept, :x]
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + offset(center(x))
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
@@ -218,13 +512,24 @@ end
         sigma ~ Exponential(1)
         y ~ Normal(mu, sigma)
     end)
+    # `&` interactions used to fail here; they are provisionally admitted
+    # now (derived lowering, covered above). Monotonic effects stay closed.
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
-        mu ~ 1 + x & g
+        mu ~ 1 + mo(x)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
-        mu ~ 0 + g
+        mu ~ 1 + g
+        effect(mu, g) ~ Normal(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Two full-cover groups without an intercept are mutually collinear.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 0 + g + h
+        effect(mu, g) ~ Normal(0, 2)
+        effect(mu, h) ~ Normal(0, 2)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
