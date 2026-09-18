@@ -940,9 +940,9 @@ scale.
   half-normal); `Uniform(a, b)` additionally declares `<lower=a, upper=b>` so
   the declaration and the density's support agree. An **anisotropic** term
   (`iso=false`) has one length scale per axis and the statement sets all of
-  them; the isotropic form has a single shared one. With `by=g` the length
-  scale and amplitude are shared across groups, so one statement configures the
-  whole term.
+  them; the isotropic form has a single shared one. With `by=g` the term keeps
+  one shared length scale and amplitude unless hyper-predictor statements
+  predict them per group ([Hyper-predictors](@ref)).
 - `ar(:, dar(time))` accepts `Normal`, `Beta`, or `Uniform`; every declaration
   stays within `[0, 1]`. `sd(:, dar(time))` accepts the same positive-scale
   families as a GP amplitude. The older `ar(time)` term's transformed
@@ -962,6 +962,42 @@ Omitting an explicit HSGP prior is not a model-preserving workaround. In
 particular, removing `length_scale(:, hsgp(x)) ~ LogNormal(0, 1)` restores the
 default approximation-validity floor described below, changing the parameter
 support and the emitted Stan program.
+
+### Hyper-predictors
+
+A bare grouped term shares one length scale and one amplitude across all
+groups — only the basis weights vary per group. When each group needs its own
+smoothness or amplitude (per-biomarker hypers), predict the hypers with
+hyper-predictor statements: `log(length_scale(hsgp(x))) ~ 1 + (1 | g)` and
+`log(sd(hsgp(x))) ~ 1 + (1 | g)`. Both hypers use a log link, and each group
+evaluates its own linear predictor to `eta_rho[g]` / `eta_sigma[g]`, consumed
+as `rho_g = max(exp(eta_rho[g]), rho_lower)` and
+`sigma_g = exp(eta_sigma[g])`.
+
+- The hyper linear predictor accepts `1` and `(1 | g)` only. Smooths are
+  refused, population slopes need level-grid covariate semantics that are not
+  decided yet, and the random effect must be exactly `(1 | g)` over the
+  addressed term's own `by=` grouping. An ungrouped term takes an
+  intercept-only scalar (`~ 1`); a random effect without grouping is refused.
+- Defaults reproduce today's predictive prior: the intercept carries
+  `Normal(0, 1)` on the log scale (that is `LogNormal(0, 1)` on the natural
+  scale), the random-effect SD carries half-`Normal(0, 1)`, and the group
+  deviations are non-centered. An explicit `length_scale(:, hsgp(x)) ~ ...` /
+  `sd(:, hsgp(x)) ~ ...` statement retargets from the shared scalar to the
+  hyper-LP intercept and sets its own support, exactly as term priors do.
+- The approximation-validity floor (next section) applies per group: each
+  `rho_g` is maximised with the same domain-derived floor the bare term
+  declares, so no group can silently leave the kernel the basis approximates.
+- Scope is deliberately narrow: `hsgp` only (`gp` is refused by name),
+  isotropic (`iso=true`) only, and neither periodic nor model-derived axes.
+  Lowering is SBBRMI-only.
+- Posterior addressing: the sampled hyper coefficients resolve through
+  `brm_term_coordinates` under the `:length_scale_intercept` /
+  `:length_scale_ranef_sd` / `:length_scale_ranef_z` roles (and the `:sd_*`
+  mirrors) — one coordinate for the intercept and SD, one per group for the
+  deviations. The `:length_scale` / `:sd` roles themselves name no sampled
+  carrier on a predicted hyper and redirect to these roles; the per-group
+  values are deterministic transforms with no role.
 
 ### `hsgp` bounds its length scale by default
 
