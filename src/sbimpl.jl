@@ -3150,6 +3150,9 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     # input `data` already carries the Stan preprocessing side-channel, which
     # the generic collector leaves untouched.
     prepared = _brm_prepare_model(brmi; program=_brm_prepare_program(brmi; data))
+    # Reject logit-scale likelihoods over linked predictors before emission
+    # (double link); see `_brm_validate_logit_family_links`.
+    _brm_validate_logit_family_links(prepared; prefix="sbimpl")
     context = prepared.context
     nodes = Dict(node.name => node for node in _brm_prepared_nodes(prepared))
     prepass = context.prepass
