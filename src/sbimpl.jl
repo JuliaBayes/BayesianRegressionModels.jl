@@ -2810,6 +2810,22 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing)
         end
     end
 
+    # Interaction `a & b` terms emit one `beta_pop` column per expanded
+    # contrast and are addressable as a TERM through `effect(lp, a & b)`.
+    # Resolved with the same lazy, never-fatal discipline as the maps above:
+    # a predictor is walked for its `&` terms only when a statement could
+    # reach it.
+    resolved_interactions = Dict{Symbol,Dict{Symbol,Vector{Symbol}}}()
+    interaction_map_of(lp::Symbol) = get!(resolved_interactions, lp) do
+        _sb_is_prior_declaration(brmi, lp) && return Dict{Symbol,Vector{Symbol}}()
+        try
+            _sb_interaction_address_map(brmi, lp)
+        catch err
+            haskey(unresolved, lp) || (unresolved[lp] = sprint(showerror, err))
+            Dict{Symbol,Vector{Symbol}}()
+        end
+    end
+
     # Every slot is a name or `:`, and `:` means THE DEFAULT: a broader
     # statement is the base layer that a more specific one overrides. So a cell
     # carries the winning expression AND the specificity that won it, and
@@ -2864,7 +2880,8 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing)
                                 (!isnothing(labels_of(lp)) || !isempty(cat_map_of(lp))) :
                                 (spec.coefficient in something(labels_of(lp), Symbol[]) ||
                                  haskey(cat_map_of(lp), spec.coefficient) ||
-                                 haskey(level_map_of(lp), spec.coefficient))]
+                                 haskey(level_map_of(lp), spec.coefficient) ||
+                                 haskey(interaction_map_of(lp), spec.coefficient))]
             isempty(targets) && error(
                 "sbimpl: `$(_spelling(spec))` matches no population coefficient " *
                 "or categorical contrast block in any linear predictor. Inspect " *
@@ -2877,6 +2894,7 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing)
         for target in targets
             cat_map = cat_map_of(target)
             labels = labels_of(target)
+            interaction_map = interaction_map_of(target)
 
             if all_coefficients
                 # The default layer for this predictor: every `beta_pop` column
@@ -2930,6 +2948,27 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing)
                 continue
             end
 
+            # A whole interaction term, addressed the way the formula spells
+            # it. Claims every `beta_pop` column the term emitted — one for
+            # continuous × continuous, K-1 for continuous × categorical. A
+            # direct `int_…` label address refines it (level bonus below),
+            # mirroring block vs `<c>_lvl_<k>` for cell means.
+            if !isnothing(labels) && haskey(interaction_map, spec.coefficient)
+                for lab in interaction_map[spec.coefficient]
+                    idx = findfirst(==(lab), labels)
+                    isnothing(idx) && error(
+                        "sbimpl: internal interaction-address error: `$lab`, " *
+                        "emitted by `$(_spelling(spec))`'s term, is not among " *
+                        "`$target`'s population labels ($(join(labels, ", "))).")
+                    cells = get!(pop_overrides, target) do
+                        Any[nothing for _ in labels]
+                    end
+                    _claim!(() -> cells[idx], v -> (cells[idx] = v), spec,
+                            "`$target`'s `$lab` column")
+                end
+                continue
+            end
+
             if isnothing(labels)
                 # An EXPLICITLY addressed target that cannot be named is a
                 # genuine error -- just not one an unrelated predictor may raise
@@ -2946,12 +2985,19 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing)
             isnothing(idx) && error(
                 "sbimpl: `$(spec.coefficient)` is not a population coefficient of " *
                 "`$target`. Available labels: $(join(labels, ", "))." *
-                _sb_effect_cat_note(cat_map) * _sb_effect_level_note(level_map))
+                _sb_effect_cat_note(cat_map) * _sb_effect_level_note(level_map) *
+                _sb_effect_interaction_note(interaction_map))
             cells = get!(pop_overrides, target) do
                 Any[nothing for _ in labels]
             end
+            # A direct `int_…` label refines a whole-term `a & b` address on
+            # that column alone — the interaction analogue of the cell-mean
+            # `<c>_lvl_<k>` bonus.
+            in_interaction = any(labs -> spec.coefficient in labs,
+                                 values(interaction_map))
             _claim!(() -> cells[idx], v -> (cells[idx] = v), spec,
-                    "`$target`'s `$(spec.coefficient)` column")
+                    "`$target`'s `$(spec.coefficient)` column";
+                    level_address=in_interaction)
         end
     end
 
@@ -2994,6 +3040,20 @@ function _sb_effect_cat_note(cat_map)
     join(("`$a`" for a in sort!(collect(keys(cat_map)))), ", ") *
     " own their own `cat_<lp>_<c>_beta` parameters rather than `beta_pop` columns; " *
     "address one by that name to set its contrast prior."
+end
+
+# Trailing hint naming the whole-term interaction addresses a predictor
+# offers. Operands print in key (sorted) order; either surface order addresses
+# the same term.
+function _sb_effect_interaction_note(interaction_map)
+    isempty(interaction_map) && return ""
+    spells = sort!(["$(ops[1]) & $(ops[2])"
+                    for ops in (_interaction_key_operands(k)
+                                for k in keys(interaction_map))])
+    " Interaction term(s) on this data: " *
+    join(("`$s`" for s in spells), ", ") *
+    " — address one as `effect(<lp>, a & b)` (either operand order) to set " *
+    "every `beta_pop` column it emits."
 end
 
 # Readers for the `_sb_effect_prior_overrides` value shape. Kept as functions so
@@ -3364,6 +3424,45 @@ when the build may run inside a function that also built `sb`.
 """
 stan_instantiate(sb::SBBRMI; kwargs...) =
     Base.invokelatest(StanBlocks.stan_instantiate, sb.model; kwargs...)
+
+"""
+    transpiles(sb::SBBRMI; re=true) -> Bool
+
+Return `true` if `sb` successfully transpiles to Stan source, `false`
+otherwise. Forwards through [`stan_code`](@ref), so — like the rest of the
+BRM trace surface — it re-enters the compiler in the current world and is
+call-site independent: build + predicate inside one function works on a
+freshly built model, while direct `StanBlocks.transpiles(sb.model)` from the
+same frame dies with `` `brm_vector_prior_*` is missing `lpxf_expr` ``
+(snag `two-sbbrmi-fits-f2beca06`). Set `re=false` to swallow the error and
+just return `false`; the default `re=true` rethrows.
+"""
+transpiles(sb::SBBRMI; re=true) = try
+    stan_code(sb)
+    return true
+catch e
+    re && rethrow()
+    return false
+end
+
+"""
+    compiles(sb::SBBRMI; re=true) -> Bool
+
+Return `true` if `sb` successfully transpiles **and** compiles via
+BridgeStan (i.e. [`stan_instantiate`](@ref) succeeds), `false` otherwise.
+Strictly stronger than [`transpiles`](@ref): a model that transpiles can
+still fail to compile if `stanc` rejects the generated Stan or the C++
+build fails. Call-site independent for the same lowering-time registration
+reason as `transpiles` above. Set `re=false` to swallow the error and just
+return `false`; the default `re=true` rethrows.
+"""
+compiles(sb::SBBRMI; re=true) = try
+    stan_instantiate(sb)
+    return true
+catch e
+    re && rethrow()
+    return false
+end
 
 # Display configured submodels from their actual emitted statements. Keep the
 # compiler's value-callee path intact: a merge expression inside a SLIC call
@@ -3980,7 +4079,15 @@ function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool)
     # not historically retain.  The public ergonomic path starts from the
     # ordinary non-centred fit; fail if the supplied artifact used a different
     # emission rather than silently changing it while adding CV sizing.
-    baseline = SBBRMI(sb.parent; mod=sb.model.mod, held_out=sb.held_out)
+    #
+    # `total_groups` is the exception that proves the rule: unlike centered/cv
+    # geometry it IS inferable — `sb` was just proven totals-free — so both
+    # re-emissions below pin `total_groups=()` to reproduce `sb`'s conventional
+    # program. The default `:auto` would integrate totals for an eligible shape
+    # and false-trigger the geometry check (for a conventionally-built fit) or
+    # emit a totals `cv_template` the cv-contagion assertion cannot see.
+    baseline = SBBRMI(sb.parent; mod=sb.model.mod, held_out=sb.held_out,
+                      total_groups=())
     stan_code(baseline) == stan_code(sb) || error(
         "sbimpl: `resample_groups` requires an SBBRMI emitted with the default " *
         "non-centered, non-CV constructor. The supplied model used additional " *
@@ -3991,7 +4098,7 @@ function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool)
     rebound = _sb_rebind_brmi(sb.parent, new_df)
     cv_template = SBBRMI(
         rebound; mod=sb.model.mod, cv_groups=groups,
-        held_out=sb.held_out,
+        held_out=sb.held_out, total_groups=(),
         _frozen_preproc=freeze ? sb.preproc : nothing)
     _sb_assert_cv_reemission(cv_template, groups)
     preproc = _sb_resample_preproc(sb.preproc, cv_template.preproc, groups)
@@ -6495,7 +6602,11 @@ formula (left-to-right) order:
   labelled by the column name;
 - single-`beta` wrapped terms (`mo`, `me`, `protect`,
   `log(x)`, `x^2`, …) — one column each, labelled by the emitted design key;
-- an interaction `a & b` — one label per expanded treatment-contrast column.
+- an interaction `a & b` — one label per expanded treatment-contrast column:
+  `int_a_x_b` for continuous × continuous; `int_c_x_g_lvl_k` for continuous
+  `c` × categorical `g` (levels `2..K` — the continuous operand first,
+  whatever the surface order); `int_g_lvl_j_x_h_lvl_k` for categorical ×
+  categorical.
 
 EXCLUDED — emitted as their OWN parameters, NOT `beta_pop`, so they never
 appear in `pop_<lhs>_beta_pop`:
@@ -6524,6 +6635,11 @@ categorical term by K cell means instead; the column name then covers all K,
 and each is also addressable on its own as `<c>_lvl_<k>` (`k` = the level's
 position in the fitted level order). Everything else in the EXCLUDED list above
 still owns parameters no `effect(...)` address reaches.
+
+An interaction term is also addressable WHOLE, the way the formula spells
+it: `effect(lhs, a & b)` sets one shared Normal prior over every `beta_pop`
+column the term emits, in either operand order; a direct `int_…` label
+address refines it on that column alone.
 """
 function popcoefnames(brmi::BRMI, lhs::Symbol)
     op = linear_predictor_op(brmi, lhs)
@@ -7082,6 +7198,39 @@ function _sb_cat_address_map(brmi::BRMI, lhs::Symbol)
     out
 end
 
+# interaction `&`-key -> the ordered `beta_pop` labels the term emits, for one
+# linear predictor. This walker drives the SAME `_sb_terms` +
+# `_sb_classify_term!` + `_sb_pop_cols!` the emitter (and `popcoefnames`)
+# does, so the claimed labels can never drift from what is actually emitted.
+# Only bare-column operands are keyed — the parse gate rejects anything else,
+# so a transformed operand's columns stay reachable only through their
+# `int_…` labels. Duplicate identical terms append: both emit, both are
+# claimed.
+function _sb_interaction_address_map(brmi::BRMI, lhs::Symbol)
+    out = Dict{Symbol,Vector{Symbol}}()
+    op = linear_predictor_op(brmi, lhs)
+    isnothing(op) && return out
+    _, rhs = getargs(op, 2)
+    pop_terms = Any[]; ran_terms = Any[]; direct_terms = Any[]
+    for t in _sb_terms(rhs)
+        _sb_classify_term!(t, pop_terms, ran_terms, direct_terms)
+    end
+    scratch = Dict{Symbol,Any}(); scratch_stmts = Any[]
+    for t in pop_terms
+        te = _as_expr_column(t)
+        (isnothing(te) || getf(te) !== (&)) && continue
+        args = getargs(te)
+        length(args) == 2 || continue
+        all(a -> a isa NamedColumn, args) || continue
+        cols = Any[]
+        _sb_pop_cols!(cols, t, scratch, scratch_stmts, pop_terms)
+        labels = Symbol[c isa Symbol ? c : :Intercept for c in cols]
+        key = _brm_interaction_key(name(args[1]), name(args[2]))
+        append!(get!(out, key, Symbol[]), labels)
+    end
+    out
+end
+
 _popcoef_show(t::ExprColumn) = string(getf(t))
 _popcoef_show(t::NamedColumn) = string(name(t))
 _popcoef_show(t) = string(t)
@@ -7413,6 +7562,13 @@ function _sb_ranef_cols!(cols, data, stmts, t, gterms=(); group_idx=nothing,
 end
 _sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(offset)}, gterms=(); kwargs...) =
     error("sbimpl: `offset(...)` is a population-level fixed contribution and cannot appear inside a random-effects term")
+# `a & b` in a random-effects LHS lowers through the SAME interaction expander
+# as the population path (treatment coding; cont×cont / cont×cat / cat×cat).
+# Without this the term falls through to the protect-style materializer, which
+# broadcasts `&` over raw vectors and dies with
+# `MethodError: no method matching &(::Float64, ::Float64)`.
+_sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(&)}, gterms=(); kwargs...) =
+    _sb_interaction_cols!(cols, t, data, stmts)
 _sb_ranef_cols_dispatch!(cols, data, stmts, t, ::Nothing, gterms=();
                          group_idx=nothing, term_overrides=Dict{Symbol,Any}()) =
     _sb_maybe_push_col!(cols, _sb_predictor_col(
@@ -7980,7 +8136,10 @@ random slopes use the exact dummy-column symbols emitted into the random-effect
 design matrix: `<c>_dummy_2 … <c>_dummy_K` under a random intercept, and
 `<c>_dummy_1 … <c>_dummy_K` for the first categorical term of an intercept-free
 block such as `(0 + c | ID | g)` (every level owns a group-level effect; opt
-out with `factor(c; cmc=false)`).
+out with `factor(c; cmc=false)`). Interaction slopes (`a & b`) use the exact
+emitted `int_…` design-column symbols shared with the population path:
+`int_a_x_b` for continuous × continuous, `int_c_x_g_lvl_k` for continuous ×
+categorical, `int_g_lvl_j_x_h_lvl_k` for categorical × categorical.
 
 Returns `nothing` when `id` is absent. Reusing one ID with multiple grouping
 factors is ambiguous on the public ID-only surface and raises.
@@ -8950,6 +9109,21 @@ _sb_ranef_term_ncols(t::_SBCellMeansTerm, _data) =
     _sb_level_index(_sb_cat_levels(t.term))[1]
 _sb_ranef_named_ncols(::Nothing) = 1
 _sb_ranef_named_ncols(levels) = _sb_level_index(levels)[1] - 1
+# `a & b` expands to one column per operand-contrast product (the population
+# `_sb_interaction_cols!` rule), so the shared-`|ID|` bucket pre-sizer must
+# count it exactly: the emitter later asserts expanded == reserved.
+_sb_ranef_term_ncols(t::ExprColumn{typeof(&)}, _) = begin
+    args = getargs(t)
+    length(args) == 2 ||
+        error("sbimpl: interaction `&` expects exactly 2 operands, got $(length(args))")
+    prod(_sb_interaction_operand_ncols(a) for a in args; init=1)
+end
+_sb_interaction_operand_ncols(t::NamedColumn) =
+    _sb_ranef_named_ncols(_sb_cat_levels(t))
+_sb_interaction_operand_ncols(::ExprColumn) = 1
+_sb_interaction_operand_ncols(t) = error(
+    "sbimpl: interaction operand must be a raw-data NamedColumn or data-materialized ExprColumn, got $(typeof(t)); " *
+    "interactions with parameter-owning terms such as `mo` / `me` / `s` / `gp` / `ar` are not supported")
 _sb_ranef_term_ncols(::ExprColumn, _) = 1
 _sb_ranef_term_ncols(t, _) = error("sbimpl: unsupported ranef term $(typeof(t)): $t")
 

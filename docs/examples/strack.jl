@@ -16,14 +16,6 @@ OUT = joinpath(SCRATCH, ".out", "results", "strack")
 mkpath(OUT)
 mkpath(joinpath(SCRATCH, ".out", "stan"))
 
-# instantiate(path=) skips regeneration when the file exists (snag
-# stan-instantiate-4654c020): purge artifacts so reruns never go stale.
-function purge_stan(names...)
-    for n in names
-        rm(joinpath(SCRATCH, ".out", "stan", n * ".stan"); force=true)
-        rm(joinpath(SCRATCH, ".out", "stan", n * "_model.so"); force=true)
-    end
-end
 
 function sample_fit(sb, problem, seed; draws=800)
     rp = try
@@ -64,7 +56,6 @@ b1 = @brm begin
     value ~ Normal(mu, sigma)
 end
 sb = SBBRMI(b1((; value=value[m1], condition=cond[m1], uid=uid[m1])); mod=@__MODULE__)
-purge_stan("strack_m1", "strack_m2")
 problem = StanBlocks.stan_instantiate(sb.model; path=joinpath(SCRATCH, ".out", "stan", "strack_m1.stan"))
 f1 = sample_fit(sb, problem, 36001)
 open(joinpath(OUT, "strack_m1.json"), "w") do io

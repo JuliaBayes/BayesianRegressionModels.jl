@@ -4,6 +4,7 @@ authors = ["Nikolas Siccha <nikolassiccha@gmail.com>"]
 version = "0.2.1"
 
 [deps]
+BridgeStan = "c88b6f0a-829e-4b0b-94b7-f06ab5908f5a"
 CategoricalArrays = "324d7699-5711-5eae-9e2f-1d82baa6b597"
 Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
 ElasticArrays = "fdbdab4c-e67f-52f5-8c3f-e7b388dad3d4"
@@ -42,6 +43,7 @@ BayesianRegressionModelsWarmupHMCEnzymeExt = ["WarmupHMC", "Enzyme"]
 BayesianRegressionModelsWarmupHMCExt = "WarmupHMC"
 
 [compat]
+BridgeStan = "2.9"
 AlgebraOfVega = "0.2"
 DifferentiationInterface = "0.7"
 Enzyme = "0.13"

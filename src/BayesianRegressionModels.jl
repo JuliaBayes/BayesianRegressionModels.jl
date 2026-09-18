@@ -75,6 +75,16 @@ include("posterior_diagnostics.jl")
 # and diagnostics, whose coordinates and draw conventions it stands on.
 include("powerscale.jl")
 
+# Conditional effects — bambi `interpret`-style predictions / comparisons /
+# slopes on reprocessed grids. The `:mean` engine constrains fitted draws
+# on the reprocessed problem through BridgeStan directly (transformed
+# parameters only, no RNG); `:predict` selection cannot reach them because
+# StanBlocks offers only `:draw` generated quantities there. `import`, not
+# `using`: BridgeStan exports `name`, which would clash with BRM's own
+# column accessor of the same name.
+import BridgeStan
+include("conditional_effects.jl")
+
 # Public surface. The macros and value types everything downstream
 # (web-macro, downstream extensions, tests) reaches for.
 export @brm, @n, @x, @getproperty
@@ -147,6 +157,7 @@ export name, getf, getargs, getkwargs, getbroadcast, getop
 # Macro plumbing + compiled-output accessors used by downstream code
 # (web-macro's Formula struct, downstream direct pipeline calls).
 export parse!, _brm, stan_code, stan_model, stan_instantiate,
+       transpiles, compiles,
        reprocess, restan_data, generative_plan
 
 # Post-fit prediction — the population-level ("nore") and transported
@@ -159,8 +170,11 @@ export AdaptiveCenteringBlock, adaptive_centering_blocks,
 export brm_output_draws, brm_predictive_draws, hsgp_coordinate_draws, hsgp_transform_draws
 export BRMPowerscaleSensitivity, brm_psis_weights, brm_cjs_dist,
        brm_powerscale_weights, brm_powerscale_sensitivity, brm_powerscale_inputs
+export brm_prediction_grid, brm_conditional_draws, brm_contrast_draws,
+       brm_slope_draws, brm_summarize_draws
 export brm_posteriorplot, brm_ppcplot, brm_pairplot,
-       brm_centerednessplot, brm_centering_lossplot, brm_gradientplot
+       brm_centerednessplot, brm_centering_lossplot, brm_gradientplot,
+       brm_predictionsplot, brm_comparisonsplot, brm_slopesplot
 
 # Introspection -- model-shape questions answered without re-walking
 # the operations dict.
