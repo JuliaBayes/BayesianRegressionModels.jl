@@ -20,38 +20,46 @@
 #   1. WHICH unconstrained coordinates carry a grouping factor's effects, and
 #   2. WHETHER "set those coordinates to zero" means "population mean" at all.
 #
-# (2) is the dangerous one. Zeroing the random-effect coordinates gives the
-# population mean ONLY under a NON-CENTERED emission, where the sampled
-# coordinate is a standardised draw `z ~ std_normal()` scaled into an effect
-# (`b = diag_pre_multiply(tau, L) * z`). Under a centered parameterization the
-# same coordinates carry the effects themselves and a mean-zero substitution is
-# simply wrong — silently, with no error and plausible numbers. Symmetrically,
-# overwriting those coordinates with fresh standard normals reproduces a draw
-# from the fitted covariance only under the same emission.
+# (2) is the dangerous one, and it splits by operation. ZEROING the
+# random-effect coordinates gives the population mean under BOTH emissions:
+# non-centered, where the sampled coordinate is a standardised draw
+# `z ~ std_normal()` scaled into an effect (`b = C * z` with
+# `C = diag_pre_multiply(tau, L)`, so `z = 0` is `b = 0`); and centered, where
+# the coordinates ARE the effects and `0` is their prior mean. But RE-DRAWING
+# those coordinates with fresh standard normals reproduces a draw from the
+# fitted covariance ONLY under the non-centered emission. Under a centered one
+# the same substitution would silently return standard normals at the wrong
+# scale — plausible numbers, no error — so a centered fresh draw goes through
+# the model's own transformation instead: `b = C * z` with `z ~ N(0, 1)` and
+# `C` rebuilt per draw from that draw's fitted `tau` / `L`.
 #
 # So both facts belong HERE, next to the submodels that emit them:
 #
 #   * `ranef_blocks` reports every random-effect block BRM emitted, with the
-#     name of the parameter that carries the standardised draw and an explicit
-#     `noncentered` flag read from a table that sits beside the `@slic`
-#     submodel definitions in sbimpl.jl.
+#     name of the parameter that carries the effect (or standardised draw) and
+#     an explicit `noncentered` flag read from a table that sits beside the
+#     `@slic` submodel definitions in sbimpl.jl.
 #   * `ranef_coordinates` resolves that block to unconstrained coordinates BY
 #     NAME and refuses (loudly) on any coordinate it cannot account for. A
 #     positional splice misaligns silently the moment a template row drops a
 #     covariate level; a name match cannot.
 #   * `population_draws` / `transport_draws` are the two modes, both built on
-#     those two primitives and neither reaching into the layout itself.
+#     those two primitives. `transport_draws` additionally reads a centered
+#     block's fitted hyperparameters BY NAME (the adaptive-centering frame)
+#     to scale its fresh draws; nothing here reaches into the layout itself.
 #
 # The family table (`_RANEF_FAMILIES`) is the ONE place coupled to the emitted
 # parameterization. Any `ranef_*` submodel missing from it is a hard error
-# rather than a guess, so adding a centered emission breaks every consumer at
+# rather than a guess, so adding a NEW emission breaks every consumer at
 # the BRM boundary — loudly, once — instead of quietly returning wrong
 # population-level predictions in each of them.
 #
 # WHAT THIS LAYER DOES NOT DO: it does not build the new model. `recov`'s model
 # half is `generative_plan(plan, new_df)` (the builder form, which rebuilds the
-# same declarations for genuinely new groups) or `reprocess` for a same-groups
-# new grid; this file only transports DRAWS between two already-built models.
+# same declarations) or `reprocess` for a new grid — including
+# `reprocess(...; resample_groups=[g])`, which is the ONLY route for genuinely
+# new groups of a conventional block (re-drawn Stan-side); this file only
+# transports DRAWS between two already-built models.
 # ==============================================================================
 
 # ---- the emission table ------------------------------------------------------
@@ -68,8 +76,11 @@
 #                `:group_term`       `<p>.<g>.<t>`   array[n_groups] vector[n_terms]
 #                `:flat_term_group`  `<p>.<i>`, i = t + (g-1)*n_terms
 #   `noncentered` — true iff the sampled coordinate is a standard normal scaled
-#              into the effect. Zeroing (population mean) and re-drawing (a
-#              fresh group from the fitted covariance) are BOTH valid only here.
+#              into the effect. Zeroing (population mean) is valid only here;
+#              Julia-side re-drawing (a fresh group from the fitted covariance)
+#              is narrowed further — plain and `|ID|` blocks re-draw Stan-side
+#              via `reprocess(...; resample_groups=...)` instead
+#              (`_ranef_fresh_draws_refused`).
 #   `tau`    — the submodel-internal name of the per-margin FITTED between-group
 #              SD vector, so the emitted carrier is `<binding>_<tau>` (a
 #              `vector[n_terms]` in `ranefcoefnames` order). `:tau` for the
@@ -106,15 +117,17 @@ const _RANEF_FAMILIES = Dict{Symbol,NamedTuple}(
     :ranef_correlated_by       => (; z = :z,      layout = :group_term,      noncentered = true,  tau = nothing),
     :ranef_correlated_by_draws => (; z = :z,      layout = :group_term,      noncentered = true,  tau = nothing),
     # Centered emissions — the opt-in `SBBRMI(...; centered_groups = [:g])` path,
-    # which SHIPS. They are DESCRIBED here so `ranef_blocks` can list them, and
-    # refused at the operation by `_ranef_assert_noncentered`: the coordinate is
-    # the effect ITSELF, so zeroing or re-drawing it would silently return a
-    # different quantity. Describing is always safe; substituting is not. Layouts
-    # measured against `param_unc_names` with n_terms=3, n_groups=2 so `.g.t` and
-    # `.t.g` are distinguishable, against the `ranef_correlated_by` control in
-    # the same capture. `tau` stays directly readable under centering (the b's
-    # are centered, the scale is still sampled), so `brm_ranef_sd_coordinates`
-    # resolves it regardless of the `noncentered` flag.
+    # which SHIPS. The coordinate is the effect ITSELF (unconstrained, so the
+    # unconstrained value IS the effect): `population_draws` zeroes it, which is
+    # exactly the population mean, and `transport_draws` copies retained levels
+    # by label while fresh levels are drawn `b = C * z` with `C` rebuilt per
+    # draw from the fitted `tau` / `L` — never bare `N(0, 1)`, which would be
+    # the wrong scale. Layouts measured against `param_unc_names` with
+    # n_terms=3, n_groups=2 so `.g.t` and `.t.g` are distinguishable, against
+    # the `ranef_correlated_by` control in the same capture. `tau` stays
+    # directly readable under centering (the b's are centered, the scale is
+    # still sampled), so `brm_ranef_sd_coordinates` resolves it regardless of
+    # the `noncentered` flag.
     :ranef_intercept_centered        => (; z = :xi, layout = :group,      noncentered = false, tau = nothing),
     :ranef_correlated_centered       => (; z = :b,  layout = :group_term, noncentered = false, tau = :tau),
     :ranef_correlated_draws_centered => (; z = :b,  layout = :group_term, noncentered = false, tau = :tau),
@@ -139,13 +152,16 @@ address its draws without reading the generated Stan.
   emitter assigned (`sort(unique(raw))`, or `levels()` for a
   `CategoricalVector`). `levels[g]` is the label of column `g` of the block.
 - `n_terms` / `n_groups` — the block's shape.
-- `z` — the emitted Stan parameter carrying the STANDARDISED draw.
+- `z` — the emitted Stan parameter carrying the block's effect coordinates:
+  the STANDARDISED draw under the default emission, the effects themselves
+  under a centered one.
 - `noncentered` — see [`population_draws`](@ref). **Not always true**, and not a
-  formality: `centered_groups = [:g]` emits the three `*_centered` families with
-  `noncentered = false`. Those blocks are DESCRIBED normally — listing them,
-  reading `levels`, resolving coordinates all work — and it is
-  `population_draws` / `transport_draws` that refuse them. So a successful
-  `ranef_blocks` is NOT clearance to zero or transport; branch on this flag.
+  formality: `centered_groups = [:g]` emits the `*_centered` families with
+  `noncentered = false`. Both emissions are fully supported: `population_draws`
+  zeroes either (a centered coordinate IS the effect, so `0` is its mean), and
+  `transport_draws` copies retained levels by label under either while drawing
+  fresh centered levels through the fitted covariance (`b = C * z` per draw)
+  rather than bare `N(0, 1)`.
 - `generated` — true iff `resample_groups` moved this block's standardised draws
   to GENERATED QUANTITIES (a `reprocess(model, new_df; resample_groups = [g])`
   re-draw target; [`transport_draws`](@ref)). Such a block is re-drawn Stan-side
@@ -582,13 +598,44 @@ function _ranef_select(blocks, groups)
     unique!(b -> b.binding, out)
 end
 
-function _ranef_assert_noncentered(b::RanefBlock, what::AbstractString)
-    b.noncentered || error(
-        "BRM prediction: $what requires a NON-CENTERED emission, but block ",
-        "`$(b.binding)` (`$(b.family)`) is centered — its coordinates carry the ",
-        "effects themselves, not a standardised draw. Substituting them would ",
-        "silently produce a different quantity.")
-    nothing
+# Julia-side fresh standardised draws survive ONLY where no StanBlocks
+# generated-quantities re-draw exists: stratified `gr(g, by=b)` blocks
+# (`by !== nothing`), typed `mm(...)` blocks (`group isa Tuple`), plain
+# (non-bucket) R2D2 blocks (whose cv sizing is unbuilt — the bucket R2D2
+# sibling IS cv-contagious), and zerocorr `||` synthetic `__nocor__` margins
+# (whose emission never sees the user's `cv_groups` spelling). Every other
+# NON-CENTERED conventional block re-draws Stan-side via `reprocess(...;
+# resample_groups=...)`, so fresh levels there are refused with the route
+# (decision 2026-09-18T13-47-28-143-1umq4k7). CENTERED blocks are exempt:
+# no centered GQ emission exists (the constructor excludes centered ∩ cv),
+# so they re-draw Julia-side as `b = C * z` through the fitted covariance
+# in the centered phase below instead of refusing.
+const _RANEF_NO_GQ_FAMILIES = (:ranef_intercept_r2d2, :ranef_correlated_r2d2)
+
+_ranef_fresh_draws_refused(bt::RanefBlock) =
+    bt.noncentered && bt.by === nothing && bt.group isa Symbol &&
+    !(bt.family in _RANEF_NO_GQ_FAMILIES) &&
+    isnothing(match(_RANEF_NOCOR_RE, String(bt.group)))
+
+function _ranef_fresh_refusal(bt::RanefBlock, fresh::Bool, new_levels)
+    reasons = String[]
+    fresh && push!(reasons,
+        "`resample` names grouping factor `$(bt.group)`, whose levels must be re-drawn")
+    if !isempty(new_levels)
+        shown = join(repr.(first(new_levels, 5)), ", ")
+        push!(reasons, "level(s) $shown" *
+            (length(new_levels) > 5 ? " … ($(length(new_levels)) total)" : "") *
+            " are new to the source model")
+    end
+    error(
+        "BRM prediction: block `$(bt.binding)` (group `$(bt.group)`) needs FRESH ",
+        "standardised draws ($(join(reasons, "; "))), but Julia-side fresh draws ",
+        "are no longer the population-prediction route for plain and `|ID|` ",
+        "random effects. Build the target with ",
+        "`reprocess(fit, new_df; resample_groups=[$(repr(bt.group))])` so ",
+        "StanBlocks re-draws the new levels in generated quantities, then ",
+        "`transport_draws` onto THAT artifact: its block is `generated=true` ",
+        "and skipped, while `L`/`tau` and the population coordinates copy by name.")
 end
 
 _ranef_check_draws(draws, unc_names) =
@@ -596,6 +643,22 @@ _ranef_check_draws(draws, unc_names) =
         "BRM prediction: draw matrix has $(size(draws, 2)) columns but the model ",
         "has $(length(unc_names)) unconstrained coordinates. `draws` must be ",
         "draws × coordinates, in `unc_names` order.")
+
+# A centered source block's fitted-hyperparameter frame, resolved BY NAME
+# against the SOURCE unconstrained names through the single adaptive-centering
+# spelling (`_adaptive_block`). A centered family the frame contract does not
+# cover — a future emission added to `_RANEF_FAMILIES` but not there — is a
+# loud error, never a guessed scale.
+function _ranef_centered_frame(bf::RanefBlock, unc_from)
+    frame = _adaptive_block(bf, unc_from, _ranef_name_positions(unc_from))
+    isnothing(frame) && error(
+        "BRM prediction: block `$(bf.binding)` (`$(bf.family)`) is a centered ",
+        "emission whose fitted covariance frame is not implemented here; ",
+        "fresh levels cannot be drawn from the fitted covariance. Cover ",
+        "`$(bf.family)` in `_adaptive_block` (src/adaptive_centering.jl) in ",
+        "the same change that tables it.")
+    frame
+end
 
 """
     population_draws(model, draws, unc_names; groups, rng=Random.default_rng()) -> Matrix{Float64}
@@ -613,16 +676,17 @@ evaluates at those factors' population mean.
 
 Every other coordinate — population coefficients, residual scales, and the
 random effects' own `L` / `tau` hyperparameters — is left untouched: only the
-per-group standardised draws are zeroed.
+per-group effect coordinates are zeroed.
 
-# Why zeroing is the population mean here, and only here
+# Why zeroing is the population mean under both emissions
 
-BRM emits random effects non-centered: the sampled coordinate is
+BRM's default emission is non-centered: the sampled coordinate is
 `z ~ std_normal()` and the effect is `b = diag_pre_multiply(tau, L) * z`. Zero
-`z` is therefore exactly `b = 0`, the population mean. Under a centered emission
-the same coordinates would hold the effects, and this substitution would quietly
-return something else — so the emission is asserted per block rather than
-assumed ([`ranef_blocks`](@ref)).
+`z` is therefore exactly `b = 0`, the population mean. Under the opt-in
+centered emission (`SBBRMI(...; centered_groups = [...])`) the same coordinates
+hold the effects themselves — unconstrained, so the unconstrained value IS the
+effect — and `0` is their prior mean. Either way the model's per-row
+contribution of that factor reads exactly zero ([`ranef_blocks`](@ref)).
 
 A brms-style `(… |ID| g)` bucket is shared across sub-formulas and is zeroed as
 one block: selecting its grouping factor zeroes that factor's effects in *every*
@@ -650,7 +714,9 @@ function population_draws(model, draws::AbstractMatrix, unc_names; groups,
     blocks = isempty(remaining) ? RanefBlock[] : _ranef_select(ranef_blocks(model), remaining)
     out = Matrix{Float64}(draws)
     for b in blocks
-        _ranef_assert_noncentered(b, "population-level prediction")
+        # Zeroing is the population mean under BOTH emissions: a non-centered
+        # coordinate is `z` with `b = C * z`, and a centered coordinate IS `b`
+        # — in both cases `0` reads as a zero contribution of that factor.
         out[:, vec(ranef_coordinates(b, unc_names))] .= 0.0
     end
     for block in total_blocks
@@ -683,9 +749,13 @@ fit can be evaluated on new data without refitting.
 - `draws` — draws × coordinates in `unc_from` order; `unc_from` / `unc_to` are
   the two models' `param_unc_names`.
 - `resample` — grouping factors whose EXISTING levels should also be re-drawn
-  rather than reused (leave-all-out / out-of-sample semantics). New levels are
-  always drawn fresh regardless.
-- `rng` — the source for those fresh draws.
+  rather than reused (leave-all-out / out-of-sample semantics). For
+  conventional plain and `|ID|` blocks this is REFUSED — re-draw Stan-side via
+  `reprocess(...; resample_groups=...)` instead (rule 2). It is honoured for
+  total-coefficient blocks (conditional recovery, the sanctioned totals
+  route) and for the block kinds with no GQ emission.
+- `rng` — the source for the surviving Julia-side draws: total-coefficient
+  recovery and the rule-2 exception kinds.
 
 Returns a draws × `length(unc_to)` matrix aligned to `to`.
 
@@ -698,9 +768,22 @@ Every coordinate of `to` is accounted for exactly once, by NAME:
    level label, so a reordering, an insertion, or a dropped level cannot
    misalign it.
 2. A random-effect coordinate for a level `from` does not have, or for a factor
-   in `resample`, is drawn `N(0, 1)`. Under BRM's non-centered emission that is
-   exactly a draw of that group's effect from the fitted covariance, because the
-   `L` / `tau` hyperparameters are copied per draw by rule 3.
+   in `resample`, is drawn fresh — subject to the emission. Under a CENTERED
+   emission (`centered_groups`) the coordinate holds the effect itself, so the
+   fresh draw is `b = C * z` with `z ~ N(0, 1)` and `C` rebuilt per draw from
+   that draw's fitted `tau` / `L` — a draw from the fitted covariance through
+   the model's own transformation (a bare `N(0, 1)` would be the wrong scale).
+   No StanBlocks generated-quantities re-draw exists for centered blocks, so
+   this Julia-side draw is the route. Under the NON-CENTERED emission, plain
+   `(… | g)` and shared `(… |ID| g)` blocks REFUSE fresh draws: population
+   prediction for the Sb backend goes through the StanBlocks model
+   (`reprocess(fit, new_df; resample_groups=[g])`, whose block is
+   `generated=true` and skipped here), never through Julia-side randomness.
+   Julia-side `N(0, 1)` survives only for block kinds with no GQ re-draw:
+   stratified `gr(g, by=b)` blocks, typed `mm(...)` blocks, plain (non-bucket)
+   R2D2 blocks, and zerocorr `||` synthetic margins — exactly a draw from the
+   fitted covariance, because the `L` / `tau` hyperparameters are copied per
+   draw by rule 3.
 3. Every other coordinate must exist in `from` under the same name and is copied.
 
 Anything that does not fit those three rules raises. In particular a coordinate
@@ -731,12 +814,12 @@ the exact wrong answer.
 # Example
 
 ```julia
-new_plan = generative_plan(plan, new_df)          # new subjects, new schedule
-new_sb   = ...                                     # its compiled model
-moved    = transport_draws(sb, new_plan, draws,
-                           unc_old, unc_new)       # new subjects drawn fresh
-loo      = transport_draws(sb, new_plan, draws,
-                           unc_old, unc_new; resample = :subject)
+same_plan = generative_plan(plan, same_df)        # same subjects, new schedule
+moved     = transport_draws(sb, same_plan, draws,
+                            unc_old, unc_same)    # levels copied by label
+pop       = reprocess(sb, new_df;                 # NEW subjects: Stan-side
+                      resample_groups=[:subject])
+moved_pop = transport_draws(sb, pop, draws, unc_old, unc_pop)  # GQ re-draw
 ```
 """
 function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
@@ -767,6 +850,12 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
     # `plan[j]` is 0 for "draw fresh", otherwise the source coordinate to copy.
     plan_idx = zeros(Int, length(unc_to))
     claimed = falses(length(unc_to))
+    # Centered fresh cells defer to the `b = C * z` phase below rather than the
+    # bare-`N(0, 1)` fill: one entry per centered block with fresh levels, each
+    # a (source frame, per-fresh-group target columns in term order) pair plus
+    # scratch vectors for the draw.
+    centered_plans = Tuple{AdaptiveCenteringBlock,Vector{Vector{Int}},Vector{Float64},Vector{Float64}}[]
+    centered_deferred = falses(length(unc_to))
     total_plans = NamedTuple[]
     for bt in totals_to
         matching = filter(b -> b.predictor === bt.predictor && b.group === bt.group,totals_from)
@@ -815,18 +904,47 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
             "BRM prediction: block `$(bt.binding)` has $(bt.n_terms) terms in the ",
             "target model but $(bf.n_terms) in the source. The design changed; ",
             "draws cannot be transported.")
-        _ranef_assert_noncentered(bt, "transported prediction")
+        # A centered/noncentered MIX is a family mismatch and refused above:
+        # the centered variants are distinct families, so `bf` shares `bt`'s
+        # emission here.
+        centered = !bt.noncentered
+        frame = centered ? _ranef_centered_frame(bf, unc_from)::AdaptiveCenteringBlock : nothing
         coords_to = ranef_coordinates(bt, unc_to)
         coords_from = ranef_coordinates(bf, unc_from)
         level_pos = Dict(l => g for (g, l) in enumerate(bf.levels))
         fresh = any(g -> g in resample_set, _ranef_group_symbols(bt.group))
+        if _ranef_fresh_draws_refused(bt)
+            new_levels = [l for l in bt.levels if !haskey(level_pos, l)]
+            (fresh || !isempty(new_levels)) &&
+                _ranef_fresh_refusal(bt, fresh, new_levels)
+        end
+        fresh_groups = Vector{Int}[]
         for g in 1:bt.n_groups
             gf = fresh ? 0 : get(level_pos, bt.levels[g], 0)
-            for t in 1:bt.n_terms
-                j = coords_to[t, g]
-                claimed[j] = true
-                plan_idx[j] = gf == 0 ? 0 : coords_from[t, gf]
+            if gf == 0 && centered
+                # A centered fresh level is drawn `b = C * z` per draw in the
+                # phase below — never bare `N(0, 1)`, which would be the wrong
+                # scale. `plan_idx` stays 0 and the cell is claimed here so the
+                # name-copy fall-through leaves it alone.
+                js = [coords_to[t, g] for t in 1:bt.n_terms]
+                for j in js
+                    claimed[j] = true
+                    centered_deferred[j] = true
+                end
+                push!(fresh_groups, js)
+            else
+                for t in 1:bt.n_terms
+                    j = coords_to[t, g]
+                    claimed[j] = true
+                    plan_idx[j] = gf == 0 ? 0 : coords_from[t, gf]
+                end
             end
+        end
+        if centered && !isempty(fresh_groups)
+            K = frame.ranef.n_terms
+            push!(centered_plans, (frame, fresh_groups,
+                                   Vector{Float64}(undef, K),
+                                   Vector{Float64}(undef, K)))
         end
     end
 
@@ -846,9 +964,26 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
 
     for j in 1:length(unc_to)
         if plan_idx[j] == 0
-            Random.randn!(rng, view(out, :, j))
+            centered_deferred[j] || Random.randn!(rng, view(out, :, j))
         else
             @views out[:, j] .= draws[:, plan_idx[j]]
+        end
+    end
+    # Centered fresh draws, through the model's own transformation: per draw,
+    # rebuild `C` from that draw's fitted `tau` / `L` and emit `b = C * z`
+    # with `z ~ N(0, 1)` per fresh group. RNG order is draws outer, blocks in
+    # target declaration order, fresh groups ascending, terms ascending — the
+    # same draws-outer shape as the total-recovery phase below.
+    for i in 1:n_draws
+        for (frame, fresh_groups, z, b) in centered_plans
+            C = _adaptive_block_cov_chol(view(draws, i, :), frame)
+            for js in fresh_groups
+                Random.randn!(rng, z)
+                mul!(b, C, z)
+                for (t, j) in enumerate(js)
+                    out[i, j] = b[t]
+                end
+            end
         end
     end
     for plan in total_plans

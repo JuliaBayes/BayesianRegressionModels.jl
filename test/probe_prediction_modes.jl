@@ -42,8 +42,9 @@ mixed_builder = @brm begin
     y      ~ Normal(mu + eta_CL + eta_V, sigma)
 end
 
-# `subjects` are LABELS, so a replay frame can introduce new ones and permute
-# the old ones — the two things a positional splice cannot survive.
+# `subjects` are LABELS, so a replay frame can permute the old ones — the thing
+# a positional splice cannot survive. Genuinely NEW labels are refused for
+# conventional blocks — they re-draw Stan-side via `reprocess` instead.
 function mixed_df(subjects; seed = 1, n_per = 4)
     rng = MersenneTwister(seed)
     n = length(subjects) * n_per
@@ -129,38 +130,72 @@ end
 end
 
 # The centered families are the reason `noncentered` is reported rather than
-# assumed. `centered_groups=` ships, so a consumer may be handed one. Assert the
-# designed split: DESCRIBED by `ranef_blocks` (you can list it and read its
-# shape), REFUSED by the operations (the coordinate is the effect itself, so
-# zeroing it would silently mean something else).
-@testset "centered emissions — described, then refused at the operation" begin
-    centered_int_builder = @brm begin
-        sigma ~ Exponential(1)
-        mu    ~ 1 + x + (1 | subject)
-        y     ~ Normal(mu, sigma)
-    end
-    centered_corr_builder = @brm begin
-        sigma ~ Exponential(1)
-        mu    ~ 1 + x + (1 + x + t | subject)
-        y     ~ Normal(mu, sigma)
-    end
-    centered_bucket_builder = @brm begin
-        sigma  ~ Exponential(1)
-        eta_CL ~ 0 + x + (1 | p | subject)
-        eta_V  ~ 0 + x + (1 | p | subject)
-        eta_Q  ~ 0 + x + (1 | p | subject)
-        y      ~ Normal(eta_CL + eta_V + eta_Q, sigma)
-    end
+# assumed. `centered_groups=` ships, so a consumer may be handed one. Both
+# replay operations support them: `population_draws` zeroes the effect
+# coordinates (a centered coordinate IS the effect, so `0` is its mean), and
+# `transport_draws` copies retained levels by label while fresh levels go
+# through the fitted covariance (`b = C * z` per draw). The BridgeStan halves
+# (§6–§7) prove the model agrees; this half pins the description plus the
+# draw-matrix wiring without compiling anything.
+centered_int_builder = @brm begin
+    sigma ~ Exponential(1)
+    mu    ~ 1 + x + (1 | subject)
+    y     ~ Normal(mu, sigma)
+end
+centered_corr_builder = @brm begin
+    sigma ~ Exponential(1)
+    mu    ~ 1 + x + (1 + x + t | subject)
+    y     ~ Normal(mu, sigma)
+end
+centered_bucket_builder = @brm begin
+    sigma  ~ Exponential(1)
+    eta_CL ~ 0 + x + (1 | p | subject)
+    eta_V  ~ 0 + x + (1 | p | subject)
+    eta_Q  ~ 0 + x + (1 | p | subject)
+    y      ~ Normal(eta_CL + eta_V + eta_Q, sigma)
+end
+centered_generic_builder = @brm begin
+    eta_CL ~ 1 + (1 | p | subject)
+    eta_Vc ~ 1 + x + (1 + x | p | subject)
+    sd(eta_Vc, p, x) ~ Exponential(1 / 4)
+    y ~ Normal(eta_CL + eta_Vc, 1)
+end
 
+# Synthetic unconstrained names for declaration-level replay checks: each
+# block's effect coordinates spelled per its measured layout, its fitted
+# hyperparameter frame (`tau` / `L`, or `log_scale` for a scalar intercept),
+# plus inert shared names. Same construction the ranef-effect suite uses; no
+# BridgeStan involved. Resolution is by name, so the order is irrelevant.
+function centered_fake_unc(blocks)
+    names = String["sigma", "pop_mu_beta_pop.1"]
+    for b in blocks
+        layout = BayesianRegressionModels._RANEF_FAMILIES[b.family].layout
+        for g in 1:b.n_groups, t in 1:b.n_terms
+            push!(names, BayesianRegressionModels._ranef_coord_name(b, layout, t, g))
+        end
+        K = b.n_terms
+        if b.family === :ranef_intercept_centered
+            push!(names, "$(b.binding)_log_scale")
+        else
+            append!(names, ["$(b.binding)_tau.$i" for i in 1:K])
+            append!(names, ["$(b.binding)_L.$i" for i in 1:(K * (K - 1) ÷ 2)])
+        end
+    end
+    names
+end
+
+@testset "centered emissions — described, then operated" begin
     # n_terms = 3 and n_groups = 2 throughout, so `.g.t` and `.t.g` are
     # DISTINGUISHABLE — a square fixture cannot discriminate the two layouts.
     cdf = mixed_df([11, 12])
     for (builder, family, binding, z, n_terms) in (
-            (centered_int_builder,    :ranef_intercept_centered,        :r_mu_subject, :r_mu_subject_xi, 1),
-            (centered_corr_builder,   :ranef_correlated_centered,       :r_mu_subject, :r_mu_subject_b,  3),
-            (centered_bucket_builder, :ranef_correlated_draws_centered, :b_p_subject,  :b_p_subject_b,   3),
+            (centered_int_builder,     :ranef_intercept_centered,               :r_mu_subject, :r_mu_subject_xi,        1),
+            (centered_corr_builder,    :ranef_correlated_centered,              :r_mu_subject, :r_mu_subject_b,         3),
+            (centered_bucket_builder,  :ranef_correlated_draws_centered,        :b_p_subject,  :b_p_subject_b,          3),
+            (centered_generic_builder, :ranef_correlated_draws_centered_generic, :b_p_subject, :b_p_subject_b_cols_bc, 3),
         )
-        csb = SBBRMI(builder(cdf); mod = @__MODULE__, centered_groups = [:subject])
+        csb = SBBRMI(builder(cdf); mod = @__MODULE__, centered_groups = [:subject],
+                     total_groups = ())
         blocks = ranef_blocks(csb)                  # DESCRIBES — must not raise
         b = only(filter(bb -> bb.binding === binding, blocks))
         @test b.family === family
@@ -170,16 +205,118 @@ end
         @test !b.noncentered
         @test occursin(string(b.z), StanBlocks.stan_code(csb.model))
 
-        # ...and REFUSES, naming the block and why.
-        err = try
-            population_draws(csb, zeros(1, 2), ["a", "b"]; groups = :subject)
-            nothing
-        catch e
-            e
-        end
-        @test err isa ErrorException
-        @test occursin("NON-CENTERED", err.msg)
-        @test occursin(string(binding), err.msg)
+        # ...and OPERATES: population zeroes exactly the effect coordinates.
+        unc = centered_fake_unc(blocks)
+        draws = randn(MersenneTwister(5), 3, length(unc))
+        pop = population_draws(csb, draws, unc; groups = :subject)
+        coords = vec(ranef_coordinates(b, unc))
+        @test all(iszero, pop[:, coords])
+        keep = setdiff(1:length(unc), coords)
+        @test pop[:, keep] == draws[:, keep]
+    end
+end
+
+@testset "generative_plan — centered_groups carried and inferred" begin
+    cdf = mixed_df([11, 12])
+    ndf = mixed_df([12, 13])
+    # Builder form: explicit kwarg, default empty.
+    explicit = generative_plan(centered_bucket_builder, ndf;
+                               mod = @__MODULE__, centered_groups = [:subject])
+    @test only(ranef_blocks(explicit)).family === :ranef_correlated_draws_centered
+    defaulted = generative_plan(centered_bucket_builder, ndf; mod = @__MODULE__)
+    @test only(ranef_blocks(defaulted)).family === :ranef_correlated_draws
+    # Plan form: the source plan's own centered groups are the default — read
+    # off its emitted declarations, so a centered fit rebuilds centered with
+    # no kwarg. An explicit override still wins.
+    inferred = generative_plan(explicit, ndf)
+    @test only(ranef_blocks(inferred)).family === :ranef_correlated_draws_centered
+    @test only(ranef_blocks(inferred)).levels == [12, 13]
+    overridden = generative_plan(explicit, ndf; centered_groups = Set{Symbol}())
+    @test only(ranef_blocks(overridden)).family === :ranef_correlated_draws
+    # The cv/centered mutual exclusion holds on rebuild, as at fit time.
+    @test_throws ErrorException generative_plan(
+        explicit, ndf; cv_groups = [:subject])
+end
+
+@testset "transport_draws — centered wiring without compiling" begin
+    from_df = mixed_df([11, 12, 13])
+    to_df = mixed_df([12, 13, 90])          # 12, 13 retained; 90 fresh
+    from_sb = SBBRMI(centered_bucket_builder(from_df); mod = @__MODULE__,
+                     centered_groups = [:subject], total_groups = ())
+    to_plan = generative_plan(centered_bucket_builder, to_df;
+                              mod = @__MODULE__, centered_groups = [:subject])
+    unc_from = centered_fake_unc(ranef_blocks(from_sb))
+    unc_to = centered_fake_unc(ranef_blocks(to_plan))
+    draws = randn(MersenneTwister(9), 4, length(unc_from))
+    moved = transport_draws(from_sb, to_plan, draws, unc_from, unc_to;
+                            rng = MersenneTwister(3))
+    @test size(moved) == (4, length(unc_to))
+    @test all(isfinite, moved)
+    bf = only(ranef_blocks(from_sb))
+    bt = only(ranef_blocks(to_plan))
+    c_from = ranef_coordinates(bf, unc_from)
+    c_to = ranef_coordinates(bt, unc_to)
+    # Retained levels follow their LABEL (12: target col 1 ← source col 2).
+    @test moved[:, c_to[:, 1]] == draws[:, c_from[:, 2]]   # 12
+    @test moved[:, c_to[:, 2]] == draws[:, c_from[:, 3]]   # 13
+    # The fresh level is drawn, not copied: finite and equal to no source col.
+    @test all(t -> !any(gg -> moved[:, c_to[t, 3]] == draws[:, c_from[t, gg]],
+                        1:bf.n_groups), 1:bt.n_terms)
+    # Hyperparameters and inert names cross verbatim — that is what makes a
+    # fresh `b = C * z` a draw from the FITTED covariance.
+    pos_from = Dict(String(n) => i for (i, n) in enumerate(unc_from))
+    for (j, nm) in enumerate(unc_to)
+        j in vec(c_to) && continue
+        @test moved[:, j] == draws[:, pos_from[String(nm)]]
+    end
+    # `resample=` additionally re-draws the EXISTING levels of that factor:
+    # groups 1–2 were copies in `moved` and are fresh in `loo`.
+    loo = transport_draws(from_sb, to_plan, draws, unc_from, unc_to;
+                          resample = :subject, rng = MersenneTwister(3))
+    for g in 1:2, t in 1:bt.n_terms
+        @test loo[:, c_to[t, g]] != moved[:, c_to[t, g]]
+    end
+    # A centered/noncentered MIX is a family mismatch, refused by name.
+    plain_to = generative_plan(centered_bucket_builder, to_df; mod = @__MODULE__)
+    unc_plain = centered_fake_unc(ranef_blocks(plain_to))
+    err = try
+        transport_draws(from_sb, plain_to, draws, unc_from, unc_plain)
+        nothing
+    catch e
+        e
+    end
+    @test err isa ErrorException
+    @test occursin("parameterization changed", err.msg)
+end
+
+@testset "transport_draws — centered K=1 stream pinned without compiling" begin
+    # The scalar intercept path has no Cholesky — its scale is one `exp()` —
+    # so the whole fresh draw replicates here exactly: per draw, `b =
+    # exp(log_scale) * z` with `z` next on the documented RNG stream (draws
+    # outer, blocks in target order, fresh groups ascending). This pins the
+    # order and the wiring; the correlated `C` itself is proven against
+    # BridgeStan's own constrain in §7.
+    from_df = mixed_df([11, 12])
+    to_df = mixed_df([12, 90])
+    from_sb = SBBRMI(centered_int_builder(from_df); mod = @__MODULE__,
+                     centered_groups = [:subject], total_groups = ())
+    to_plan = generative_plan(centered_int_builder, to_df;
+                              mod = @__MODULE__, centered_groups = [:subject])
+    unc_from = centered_fake_unc(ranef_blocks(from_sb))
+    unc_to = centered_fake_unc(ranef_blocks(to_plan))
+    draws = randn(MersenneTwister(9), 4, length(unc_from))
+    moved = transport_draws(from_sb, to_plan, draws, unc_from, unc_to;
+                            rng = MersenneTwister(3))
+    bt = only(ranef_blocks(to_plan))
+    c_to = ranef_coordinates(bt, unc_to)
+    bf = only(ranef_blocks(from_sb))
+    c_from = ranef_coordinates(bf, unc_from)
+    @test moved[:, c_to[:, 1]] == draws[:, c_from[:, 2]]   # 12 retained
+    ls = only(findall(==("r_mu_subject_log_scale"), unc_from))
+    expected_rng = MersenneTwister(3)
+    for i in 1:size(draws, 1)
+        z = randn(expected_rng)
+        @test moved[i, only(c_to[:, 2])] == exp(draws[i, ls]) * z
     end
 end
 
@@ -357,11 +494,12 @@ end
     rng = MersenneTwister(13)
     draws = randn(rng, 3, BS.param_unc_num(train_sm))
     # THE CASE A POSITIONAL SPLICE GETS SILENTLY WRONG. Training levels are
-    # [11, 12, 13, 14]; here a subject sorting BEFORE all of them is introduced
-    # and two are dropped, so the retained subject 11 moves from block column 1
-    # to column 2. Copying column-for-column would hand subject 11 subject 12's
-    # effect and never error.
-    shifted_subjects = [1, 11, 13]
+    # [11, 12, 13, 14]; here two are dropped, so the retained subject 13 moves
+    # from block column 3 to column 2. Copying column-for-column would hand
+    # subject 13 subject 12's effect and never error.
+    # Subset-only on purpose: a target with a genuinely NEW level is refused
+    # (next testset) — new levels re-draw Stan-side via `reprocess`.
+    shifted_subjects = [11, 13]
     shifted_df = mixed_df(shifted_subjects; seed = 2)
     shifted_plan = generative_plan(mixed_builder, shifted_df; mod = @__MODULE__)
     shifted_p = StanBlocks.stan_instantiate(shifted_plan.model)
@@ -372,19 +510,28 @@ end
     for b in ranef_blocks(shifted_plan)
         b.group === :subject || continue
         bt = only(filter(x -> x.binding === b.binding, ranef_blocks(train_sb)))
-        @test b.levels == [1, 11, 13]           # the emitter's sorted order
+        @test b.levels == [11, 13]               # the emitter's sorted order
         c_to = ranef_coordinates(b, unc_shifted)
         c_from = ranef_coordinates(bt, unc_train)
-        # Subject 11 is at target column 2 and source column 1 — the retained
+        # Subject 13 is at target column 2 and source column 3 — the retained
         # levels must follow their LABEL across that shift.
-        @test moved[:, c_to[:, 2]] == draws[:, c_from[:, 1]]   # 11
-        @test moved[:, c_to[:, 3]] == draws[:, c_from[:, 3]]   # 13
-        # …and the positional answer for subject 11 must NOT be what we got.
+        @test moved[:, c_to[:, 1]] == draws[:, c_from[:, 1]]   # 11
+        @test moved[:, c_to[:, 2]] == draws[:, c_from[:, 3]]   # 13
+        # …and the positional answer for subject 13 must NOT be what we got.
         @test moved[:, c_to[:, 2]] != draws[:, c_from[:, 2]]   # would be 12
     end
 end
 
-@testset "transport_draws — new subjects are drawn fresh, old ones reused" begin
+@testset "transport_draws — fresh conventional draws are refused (GQ route)" begin
+    # Decision 2026-09-18T13-47-28-143-1umq4k7: Sb population prediction goes
+    # through the StanBlocks GQ artifact — `reprocess(fit, new_df;
+    # resample_groups=[g])` re-draws the new levels Stan-side, and
+    # `transport_draws` onto THAT artifact only copies L/tau + population
+    # coordinates by name (test/transport_resample_target.jl). Drawing fresh
+    # N(0,1) Julia-side for a plain or `|ID|` block is refused, naming the
+    # route. The old assertions below this line used to bless that Julia-side
+    # path; they were rewritten, not weakened — the GQ file carries the
+    # positive half of the contract.
     rng = MersenneTwister(17)
     draws = randn(rng, 6, BS.param_unc_num(train_sm))
     # Two of the training subjects, plus two genuinely new ones.
@@ -394,60 +541,227 @@ end
     new_p = StanBlocks.stan_instantiate(new_plan.model)
     unc_new = BS.param_unc_names(new_p.model)
 
-    moved = transport_draws(train_sb, new_plan, draws, unc_train, unc_new;
-                            rng = MersenneTwister(3))
+    # A target with genuinely new levels of a plain/`|ID|` block is refused,
+    # naming the block, the new levels, and the `reprocess` route.
+    err = try
+        transport_draws(train_sb, new_plan, draws, unc_train, unc_new;
+                        rng = MersenneTwister(3))
+        nothing
+    catch e
+        e
+    end
+    @test err isa ErrorException
+    @test occursin("resample_groups", err.msg)
+    @test occursin("90", err.msg)
+
+    # `resample=` on a conventional factor is the same request — re-draw
+    # Stan-side instead.
+    err_resample = try
+        transport_draws(train_sb, new_plan, draws, unc_train, unc_new;
+                        resample = :subject, rng = MersenneTwister(3))
+        nothing
+    catch e
+        e
+    end
+    @test err_resample isa ErrorException
+    @test occursin("resample_groups", err_resample.msg)
+    @test occursin("subject", err_resample.msg)
+
+    # The unknown-group guard still fires first, with its own message.
+    err_nope = try
+        transport_draws(train_sb, new_plan, draws, unc_train, unc_new;
+                        resample = :nope)
+        nothing
+    catch e
+        e
+    end
+    @test err_nope isa ErrorException
+    @test occursin("names no random-effect block", err_nope.msg)
+end
+
+# ---- 6. centered population — the model agrees it is at the mean ----------
+
+# The centered mirror of the §3–§5 mixed fixture: a K=2 `|p|` bucket and a K=2
+# plain ranef on :subject (both centered), a scalar intercept on :site left
+# non-centered as the control.
+centered_mixed_builder = @brm begin
+    sigma  ~ Exponential(1)
+    eta_CL ~ 0 + x + (1 | p | subject)
+    eta_V  ~ 0 + x + (1 | p | subject)
+    mu     ~ 1 + t + (1 | site) + (1 + x | subject)
+    y      ~ Normal(mu + eta_CL + eta_V, sigma)
+end
+cmixed_sb = SBBRMI(centered_mixed_builder(train_df); mod = @__MODULE__,
+                   centered_groups = [:subject], total_groups = ())
+cmixed_p = StanBlocks.stan_instantiate(cmixed_sb.model)
+cmixed_sm = cmixed_p.model
+unc_mixed = BS.param_unc_names(cmixed_sm)
+
+cint_sb = SBBRMI(centered_int_builder(train_df); mod = @__MODULE__,
+                 centered_groups = [:subject], total_groups = ())
+cint_p = StanBlocks.stan_instantiate(cint_sb.model)
+cint_sm = cint_p.model
+unc_cint = BS.param_unc_names(cint_sm)
+
+@testset "population_draws — centered: the model reports zero random effects" begin
+    rng = MersenneTwister(71)
+    draws = randn(rng, 3, BS.param_unc_num(cmixed_sm))
+    pop = population_draws(cmixed_sb, draws, unc_mixed; groups = :subject)
+    blocks = ranef_blocks(cmixed_sb)
+    subj_coords = reduce(vcat,
+        vec(ranef_coordinates(b, unc_mixed)) for b in blocks if b.group === :subject)
+    @test all(iszero, pop[:, subj_coords])
+    keep = setdiff(1:length(unc_mixed), subj_coords)
+    @test pop[:, keep] == draws[:, keep]
+
+    # THE SEMANTIC CHECK: the model itself says the per-row subject
+    # contributions are exactly zero, and the site contribution is not. The
+    # prefixes select the per-row contribution carriers only — not the `b` /
+    # `bm` / `L` / `tau` parameter carriers, which share the stem.
+    cons = constrained_by_name(cmixed_sm, pop[1, :])
+    subj_keys = [k for k in keys(cons) if startswith(k, "r_eta_CL_p_subject.") ||
+        startswith(k, "r_eta_V_p_subject.") || startswith(k, "r_mu_subject.")]
+    site_keys = [k for k in keys(cons) if startswith(k, "r_mu_site.")]
+    @test !isempty(subj_keys)       # control: the carriers were actually found
+    @test !isempty(site_keys)
+    @test all(k -> cons[k] == 0.0, subj_keys)
+    @test any(k -> cons[k] != 0.0, site_keys)
+    ref = constrained_by_name(cmixed_sm, draws[1, :])
+    @test all(k -> cons[k] == ref[k],
+              [k for k in keys(cons) if startswith(k, "pop_mu.")])
+
+    # The scalar intercept-centered path zeroes its `xi` the same way.
+    idraws = randn(MersenneTwister(72), 2, BS.param_unc_num(cint_sm))
+    ipop = population_draws(cint_sb, idraws, unc_cint; groups = :subject)
+    iblock = only(ranef_blocks(cint_sb))
+    @test all(iszero, ipop[:, vec(ranef_coordinates(iblock, unc_cint))])
+    icons = constrained_by_name(cint_sm, ipop[1, :])
+    isubj = [k for k in keys(icons) if startswith(k, "r_mu_subject.")]
+    @test !isempty(isubj)
+    @test all(k -> icons[k] == 0.0, isubj)
+end
+
+# ---- 7. centered transport — through the fitted covariance ------------------
+
+@testset "transport_draws — centered identity replay reproduces the fit exactly" begin
+    plan0 = generative_plan(centered_mixed_builder, train_df; mod = @__MODULE__,
+                            centered_groups = [:subject], total_groups = ())
+    same_plan = generative_plan(plan0, train_df)   # inference preserves centered
+    @test all(!b.noncentered for b in ranef_blocks(same_plan) if b.group === :subject)
+    # Same declaration, same data, same compiled model: every coordinate is a
+    # copy, so the matrix is identical and the density reproduces bit for bit.
+    # (Cross-instantiation name order is covered by the fresh-level test below,
+    # which does compile its target separately.)
+    draws = randn(MersenneTwister(73), 4, length(unc_mixed))
+    moved = transport_draws(cmixed_sb, same_plan, draws, unc_mixed, unc_mixed)
+    @test moved == draws
+    for i in 1:size(draws, 1)
+        @test BS.log_density(cmixed_sm, moved[i, :]) ≈
+              BS.log_density(cmixed_sm, draws[i, :])
+    end
+end
+
+@testset "transport_draws — centered fresh levels go through the fitted covariance" begin
+    plan0 = generative_plan(centered_mixed_builder, train_df; mod = @__MODULE__,
+                            centered_groups = [:subject], total_groups = ())
+    new_subjects = [12, 13, 90, 91]
+    new_df = mixed_df(new_subjects; seed = 5)
+    new_plan = generative_plan(plan0, new_df)
+    new_p = StanBlocks.stan_instantiate(new_plan.model)
+    unc_new = BS.param_unc_names(new_p.model)
+
+    draws = randn(MersenneTwister(75), 6, length(unc_mixed))
+    moved = transport_draws(cmixed_sb, new_plan, draws, unc_mixed, unc_new;
+                            rng = MersenneTwister(77))
     @test size(moved) == (6, length(unc_new))
     @test all(isfinite, moved)
 
-    for b in ranef_blocks(new_plan)
-        bt = only(filter(x -> x.binding === b.binding, ranef_blocks(train_sb)))
+    to_blocks = ranef_blocks(new_plan)
+    from_by_binding = Dict(b.binding => b for b in ranef_blocks(cmixed_sb))
+    for b in to_blocks
+        b.group === :subject || continue
+        bt = from_by_binding[b.binding]
+        @test b.levels == [12, 13, 90, 91]
         c_to = ranef_coordinates(b, unc_new)
-        c_from = ranef_coordinates(bt, unc_train)
-        for (g, lvl) in enumerate(b.levels)
-            gf = findfirst(==(lvl), bt.levels)
-            if isnothing(gf)
-                # A new level: fresh N(0,1), so it cannot equal any source column.
-                @test all(t -> !any(gg -> moved[:, c_to[t, g]] == draws[:, c_from[t, gg]],
-                                    1:bt.n_groups), 1:b.n_terms)
-            else
-                @test moved[:, c_to[:, g]] == draws[:, c_from[:, gf]]
-            end
-        end
+        c_from = ranef_coordinates(bt, unc_mixed)
+        @test moved[:, c_to[:, 1]] == draws[:, c_from[:, 2]]   # 12 by label
+        @test moved[:, c_to[:, 2]] == draws[:, c_from[:, 3]]   # 13 by label
     end
 
-    # Non-ranef coordinates (pop coefficients, sigma, L, tau) are carried over
-    # verbatim — that is what makes a fresh z a draw from the FITTED covariance.
-    claimed = Set(reduce(vcat,
-        vec(ranef_coordinates(b, unc_new)) for b in ranef_blocks(new_plan)))
-    pos_train = Dict(String(n) => i for (i, n) in enumerate(unc_train))
-    for (j, nm) in enumerate(unc_new)
-        j in claimed && continue
-        @test moved[:, j] == draws[:, pos_train[String(nm)]]
+    # EXACTNESS, independently of the replay helper: rebuild each draw's `C`
+    # from BridgeStan's OWN constrained values and replicate the documented
+    # RNG stream (draws outer, blocks in target order, fresh groups ascending).
+    cnames = BS.param_names(cmixed_sm; include_tp = true, include_gq = false)
+    cblocks = [b for b in to_blocks if !b.noncentered]
+    @test length(cblocks) == 2                       # bucket + plain, in order
+    expected_rng = MersenneTwister(77)
+    for i in 1:size(draws, 1)
+        cvals = BS.param_constrain(cmixed_sm, draws[i, :];
+                                   include_tp = true, include_gq = false)
+        cdict = Dict(n => v for (n, v) in zip(cnames, cvals))
+        for b in cblocks
+            K = b.n_terms
+            tau = [cdict["$(b.binding)_tau.$k"] for k in 1:K]
+            l_found = [n for n in cnames if startswith(n, "$(b.binding)_L.")]
+            length(l_found) == K * K || error(
+                "probe: expected a full $K×$K constrained Cholesky flatten, got: $l_found")
+            L = reshape([cdict["$(b.binding)_L.$r.$c"] for c in 1:K for r in 1:K], K, K)
+            for r in 1:K, c in (r + 1):K
+                @test L[r, c] == 0.0                 # structural upper zeros
+            end
+            C = tau .* L
+            c_to = ranef_coordinates(b, unc_new)
+            for g in 3:4                             # the fresh levels 90, 91
+                z = randn(expected_rng, K)
+                @test moved[i, vec(c_to[:, g])] ≈ C * z
+            end
+        end
     end
 
     # The transported draws evaluate on the new model.
     @test all(i -> isfinite(BS.log_density(new_p.model, moved[i, :])), 1:size(moved, 1))
 
-    # `resample=` additionally re-draws the EXISTING levels of that factor.
-    loo = transport_draws(train_sb, new_plan, draws, unc_train, unc_new;
-                          resample = :subject, rng = MersenneTwister(3))
-    for b in ranef_blocks(new_plan)
+    # `resample=` additionally re-draws the EXISTING levels of that factor;
+    # the noncentered site block is untouched by it.
+    loo = transport_draws(cmixed_sb, new_plan, draws, unc_mixed, unc_new;
+                          resample = :subject, rng = MersenneTwister(77))
+    for b in to_blocks
         b.group === :subject || continue
-        bt = only(filter(x -> x.binding === b.binding, ranef_blocks(train_sb)))
         c_to = ranef_coordinates(b, unc_new)
-        c_from = ranef_coordinates(bt, unc_train)
-        for (g, lvl) in enumerate(b.levels)
-            gf = findfirst(==(lvl), bt.levels)
-            isnothing(gf) && continue
-            @test moved[:, c_to[:, g]] != loo[:, c_to[:, g]]
+        for g in 1:2, t in 1:b.n_terms
+            @test loo[:, c_to[t, g]] != moved[:, c_to[t, g]]
         end
     end
-    # The site factor was NOT resampled, so it is untouched by `resample=:subject`.
-    site_b = only(filter(b -> b.group === :site, ranef_blocks(new_plan)))
-    c_site = vec(ranef_coordinates(site_b, unc_new))
-    @test loo[:, c_site] == moved[:, c_site]
-    @test_throws ErrorException transport_draws(train_sb, new_plan, draws,
-                                                unc_train, unc_new; resample = :nope)
+    site_b = only(filter(b -> b.group === :site, to_blocks))
+    @test loo[:, vec(ranef_coordinates(site_b, unc_new))] ==
+          moved[:, vec(ranef_coordinates(site_b, unc_new))]
+end
+
+@testset "transport_draws — centered K=1 fresh levels scale by the fitted sd" begin
+    new_df = mixed_df([12, 13, 90]; seed = 5)
+    plan0 = generative_plan(centered_int_builder, train_df; mod = @__MODULE__,
+                            centered_groups = [:subject], total_groups = ())
+    new_plan = generative_plan(plan0, new_df)
+    new_p = StanBlocks.stan_instantiate(new_plan.model)
+    unc_new = BS.param_unc_names(new_p.model)
+    draws = randn(MersenneTwister(79), 4, length(unc_cint))
+    moved = transport_draws(cint_sb, new_plan, draws, unc_cint, unc_new;
+                            rng = MersenneTwister(81))
+    bt = only(ranef_blocks(new_plan))
+    @test bt.levels == [12, 13, 90]
+    c_to = ranef_coordinates(bt, unc_new)
+    bf = only(ranef_blocks(cint_sb))
+    c_from = ranef_coordinates(bf, unc_cint)
+    @test moved[:, c_to[:, 1]] == draws[:, c_from[:, 2]]   # 12 by label
+    @test moved[:, c_to[:, 2]] == draws[:, c_from[:, 3]]   # 13 by label
+    # Scalar path: one `exp()`, replicated bit-exactly on the same stream.
+    ls = only(findall(==("r_mu_subject_log_scale"), unc_cint))
+    expected_rng = MersenneTwister(81)
+    for i in 1:size(draws, 1)
+        z = randn(expected_rng)
+        @test moved[i, only(c_to[:, 3])] == exp(draws[i, ls]) * z
+    end
+    @test all(i -> isfinite(BS.log_density(new_p.model, moved[i, :])), 1:size(moved, 1))
 end
 
 @testset "transport_draws — a changed design is refused, not spliced" begin

@@ -139,6 +139,15 @@ slicing the block. Correlation priors are block-wide by construction — one
 shared `|ID|` covariance spans every predictor that slices it — so `cor`
 takes `:` in the predictor slot.
 
+An interaction term is addressed the way the formula spells it:
+`effect(mu, gen & mathz)` sets one shared `Normal` prior over every
+`beta_pop` column the `gen & mathz` term emits — one column for a
+continuous × continuous interaction, `K-1` for a continuous × categorical
+one. Operand order does not matter (`a & b` and `b & a` are the same
+address). Each emitted column keeps its own `int_…` label (see
+[`popcoefnames`](@ref)), and addressing one of those labels directly refines
+the whole-term address on that column alone.
+
 There is deliberately no concise, predictor-inferring form: name the linear
 predictor or write `:`. Two statements reaching the same parameter resolve
 most-specific-wins — fewer `:` slots wins — and an exact tie is an error.
@@ -530,6 +539,17 @@ _brm(x::Expr; df=nothing) = begin
         :(__caps__ = $capturedata(__df__, ($(map(QuoteNode, real_captures)...),))),
         finalize,
     )
+    # Hygiene: the body assigns every formula name (nonlocal bindings, the
+    # maybelocals destructuring, `@n` literal/response bindings) plus the
+    # `__ddf__`/`__caps__` temporaries. Without an explicit local scope, a
+    # builder defined in local scope (a function, loop, or let block) is a
+    # closure that CAPTURES same-named enclosing bindings and overwrites them
+    # when it runs — e.g. an in-loop `@brm` silently replaces the loop variable
+    # with a NamedColumn (snag bambi-quantile-r-36bd8217). Declare every
+    # assigned name `let`-local so the builder can neither read nor clobber
+    # enclosing state; reads of never-assigned names (call heads, spliced
+    # values) still resolve outward exactly as before.
+    body = Expr(:let, Expr(:block, unique!([keys(alllocals)..., :__ddf__, :__caps__])...), body)
     if isnothing(df)
         # no-df: `gensym_model(__df__) = body` — a reusable `df -> BRMI` builder.
         Expr(:(=), lhs, body)
@@ -567,6 +587,9 @@ elseif isxcall(x, :~) && Meta.isexpr(x.args[2], :vect)
 elseif isxcall(x, :~) && Meta.isexpr(x.args[2], :tuple)
     _, lhs, rhs = x.args
     _parse_broadcast_lhs!(lhs, rhs; info)
+elseif isxcall(x, :~) && _is_hyper_lhs(x.args[2])
+    _, lhs, rhs = x.args
+    _parse_hyper!(lhs, rhs; info)
 elseif isxcall(x, :~)
     _, lhs, rhs = x.args
     # Shield brms-style `(e | ID | g)` ranef IDs from parselocals! so the bare
@@ -724,7 +747,54 @@ end
 # it needs no separate carrier to be told apart from a coefficient or group id.
 _is_term_key(s::Symbol) = occursin('(', string(s))
 
-_prior_slot(x) = _is_term_address(x) ? _term_address_key(x) : _effect_address_symbol(x)
+# ---- interaction-address slots ----------------------------------------------
+#
+# A prior on a whole interaction term names the term the way the formula
+# spells it: `effect(mu, gen & mathz)`. That slot is a `&` call, not a bare
+# symbol, so it gets its own tokenizer and is canonicalised to a sorted
+# `&`-joined key -- the address vector stays homogeneous (plain Symbols, one
+# QuoteNode per slot) and the backend matches the key against the `&` terms
+# it walks without re-parsing an `Expr`.
+#
+# The operands are SORTED because the backends normalise emission order by
+# operand type (a continuous × categorical interaction always emits the
+# continuous operand first), which parse time cannot know. Sorting makes
+# `a & b` and `b & a` the same key, so the address never depends on surface
+# order. Only bare-symbol operands are accepted: a transformed operand such
+# as `zscale(m) & g` is still addressable column by column through its
+# emitted `int_…` labels (see `popcoefnames`).
+_brm_interaction_key(a::Symbol, b::Symbol) =
+    Symbol(join(sort!([a, b]), "&"))
+
+_is_interaction_address(x) = Meta.isexpr(x, :call) && length(x.args) == 3 &&
+                             x.args[1] === :&
+
+function _interaction_address_key(x::Expr)
+    _is_interaction_address(x) || error(
+        "@brm: internal interaction-address error on `$x`")
+    a, b = x.args[2], x.args[3]
+    for operand in (a, b)
+        operand isa Symbol || error(
+            "@brm: an interaction prior address names two plain columns, " *
+            "`effect(<linear_predictor|:>, <a & b>)`; got `$x`. Address a " *
+            "transformed operand column by column through its emitted " *
+            "`int_…` labels (`popcoefnames(brmi, lp)` lists them).")
+    end
+    _brm_interaction_key(a, b)
+end
+
+# A canonicalised interaction key is the one address symbol that can contain
+# `&`: a bare `&` never survives Julia parsing as a Symbol (source `a&b` is
+# always the call), so the marker is unambiguous.
+_is_interaction_key(s::Symbol) = occursin('&', string(s))
+
+# Split a canonicalised key back into its (sorted) operand pair.
+_interaction_key_operands(s::Symbol) =
+    Tuple(Symbol(p) for p in split(string(s), '&'))
+
+_prior_slot(x) = _is_term_address(x) ? _term_address_key(x) :
+                 _is_interaction_address(x) ? _interaction_address_key(x) :
+                 _effect_address_symbol(x)
 
 # Public head -> internal class for the term-parameter heads whose target slot
 # is ALWAYS a term. `sd` is absent because it is shared with the random-effect
@@ -770,6 +840,19 @@ function _prior_address(head::Symbol, args::Vector{Symbol})
     elseif !isempty(term_slots) && term_slots != [2]
         error("@brm: a term belongs in the TARGET slot — " *
               "`$head(<linear_predictor|:>, <term>)`; got `$spelling`.")
+    end
+
+    # An interaction key addresses population columns, so only `effect` takes
+    # one, and only in the coefficient slot.
+    interaction_slots = findall(_is_interaction_key, args)
+    if !isempty(interaction_slots) && head !== :effect
+        error("@brm: `$head` addresses a covariance or a term's own " *
+              "parameters, not population interaction columns; got " *
+              "`$spelling`. Address the interaction through `effect`, as in " *
+              "`effect(<linear_predictor|:>, a & b)`.")
+    elseif !isempty(interaction_slots) && interaction_slots != [2]
+        error("@brm: an interaction belongs in the COEFFICIENT slot — " *
+              "`effect(<linear_predictor|:>, <a & b>)`; got `$spelling`.")
     end
 
     if haskey(_TERM_PRIOR_HEAD_CLASS, head)
@@ -829,18 +912,67 @@ function _parse_effect!(lhs::Expr, rhs; info)
     address = _prior_address(head, args)
     # The key becomes a generated LOCAL NAME. A term key carries `(`/`)`/`,`,
     # which are legal inside a `Symbol` but not in emitted Julia source, so
-    # those three characters are folded out. Nothing else is touched -- `:`
-    # already rode through this key before term addresses existed, and
-    # rewriting it would move the generated name of every ALREADY-configured
-    # model. The ADDRESS itself is untouched, so diagnostics stay spelled the
-    # way the user wrote them.
+    # those three characters are folded out. An interaction key's `&` is
+    # folded the same way, to the `_x_` the emitted `int_a_x_b` columns
+    # already use. Nothing else is touched -- `:` already rode through this
+    # key before term addresses existed, and rewriting it would move the
+    # generated name of every ALREADY-configured model. The ADDRESS itself is
+    # untouched, so diagnostics stay spelled the way the user wrote them.
     key = Symbol("__effect__", replace(join(string.(address), "__"),
-                                       "(" => "_", ")" => "", "," => "_"))
+                                       "(" => "_", ")" => "", "," => "_",
+                                       "&" => "_x_"))
     haskey(info.alllocals, key) && error(
         "@brm: duplicate `$head($(join(args, ", ")))` prior statement")
     info.alllocals[key] = :local
     parselocals!(rhs; info, val=:nonlocal)
     quoted_lhs = Expr(:call, :effect, map(QuoteNode, address)...)
+    :(@n $key = @x $(Expr(:call, :~, quoted_lhs, rhs)))
+end
+
+# ---- hyper-predictor statements ---------------------------------------------
+#
+# `log(length_scale(hsgp(x))) ~ 1 + (1 | g)` defines a distributional linear
+# predictor for a GP/HSGP hyperparameter. The `log` wrap is what tells it
+# apart from a prior statement (whose RHS is a distribution) and from a
+# linked predictor (whose wrap holds a bare name, not a hyper address).
+# Only `log` is supported.
+#
+# The macro only normalises the address syntax here, reusing the prior
+# machinery, so the operation keeps a `log(effect(...))` LHS the backend
+# matches without re-parsing (same principle as term keys). Every semantic
+# refusal (unmatched term, smooths, ungrouped ranef, unsupported term kind,
+# distribution RHS, non-term-hyper address) fires at SBBRMI construction,
+# where the term context exists and function-wrapped builders stay testable.
+function _is_hyper_lhs(x)
+    isxcall(x, :log) || return false
+    length(x.args) == 2 || return false
+    inner = x.args[2]
+    Meta.isexpr(inner, :call) || return false
+    length(inner.args) >= 2 || return false
+    head = inner.args[1]
+    head isa Symbol || return false
+    head === :length_scale || head === :sd || return false
+    length(inner.args) in (2, 3)
+end
+
+function _parse_hyper!(lhs, rhs; info)
+    inner = lhs.args[2]
+    head = inner.args[1]::Symbol
+    slots = map(_prior_slot, inner.args[2:end])
+    # A one-slot address names just the term (`length_scale(hsgp(x))`); expand
+    # to the default-`:` two-slot form so it normalises exactly like its
+    # prior-statement twin.
+    length(slots) == 1 && (slots = [_EFFECT_COLON, first(slots)])
+    address = _prior_address(head, slots)
+    key = Symbol("__hyper__", replace(join(string.(address), "__"),
+                                      "(" => "_", ")" => "", "," => "_"))
+    haskey(info.alllocals, key) && error(
+        "@brm: duplicate `$head($(join(string.(inner.args[2:end]), ", ")))` " *
+        "hyper-predictor statement")
+    info.alllocals[key] = :local
+    rhs = rewrite_ranef_ids(rhs)
+    parselocals!(rhs; info, val=:nonlocal)
+    quoted_lhs = Expr(:call, :log, Expr(:call, :effect, map(QuoteNode, address)...))
     :(@n $key = @x $(Expr(:call, :~, quoted_lhs, rhs)))
 end
 rewrite_ranef_ids(x) = x

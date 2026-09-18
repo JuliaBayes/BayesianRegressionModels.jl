@@ -1139,6 +1139,9 @@ function _brm_group_declarations(brmi::BRMI)
     for (predictor, operation) in pairs(brmi.operations)
         expression = operation isa NamedColumn ? parent(operation) : operation
         expression isa ExprColumn && getf(expression) === (~) || continue
+        # Hyper-predictor ranefs lower through their own per-level blocks, not
+        # through the observation model's shared group declarations.
+        isnothing(_hyper_predictor_statement(expression)) || continue
         _, rhs = getargs(expression, 2)
         for term in _brm_additive_terms(rhs)
             _brm_is_grouped_term(term) || continue
@@ -1788,9 +1791,23 @@ function _brm_interaction_population_column(left, right)
                          if !isnothing(c.preprocess))
     preprocess = _BRMPopulationPreprocess(
         :interaction, nothing, (left.label, right.label), dependencies)
-    (; label, effect_addresses=(label,), effect_block=label,
+    # The whole-term address: a categorical dummy contributes its BLOCK
+    # (the source column for a bare operand; the recoded `c__ref_k` block for
+    # `factor(c; ref=k)`, so a recoded term never shares a bare term's key), a
+    # continuous operand its label. Every column one `&` term emits shares
+    # this block, so `effect(lp, a & b)` fans out over all of them through the
+    # ordinary block machinery — and a direct `int_…` label claim refines it
+    # via the usual level-address bonus.
+    key = _brm_interaction_key(_brm_interaction_key_operand(left, left_cat),
+                               _brm_interaction_key_operand(right, right_cat))
+    (; label, effect_addresses=(label, key), effect_block=key,
        source=left.source, values, preprocess)
 end
+
+# The operand name an interaction column contributes to its term's `&` key:
+# a categorical dummy's block, anything else's own label.
+_brm_interaction_key_operand(column, is_categorical::Bool) =
+    is_categorical ? column.effect_block : column.label
 
 function _brm_population_columns(term::ExprColumn{typeof(&)};
                                  cellmeans::Bool=false)
@@ -2232,6 +2249,8 @@ An `effect(lp, categorical_column)` address fans out over that column's K-1
 treatment contrasts, matching SBBRMI's one-prior-per-contrast-block contract; on
 a cell-mean coded column it fans out over all K cell means, each of which also
 answers to its own more specific `<column>_lvl_<k>` address.
+An `effect(lp, a & b)` address likewise fans out over every `beta_pop` column
+the interaction term emits, refined per column by a direct `int_…` label address.
 For a distributional likelihood, `available_predictors` names its complete
 predictor set: a prior targeting a peer is ignored by this component, while a
 prior targeting no member still fails loudly.

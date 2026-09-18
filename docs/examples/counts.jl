@@ -66,19 +66,19 @@ end
 println("NB_ADD_DONE")
 flush(stdout)
 
-gen_m = gen .* mathz; voc_m = voc .* mathz
+# native interactions (whole-interaction Expr addresses).
 b_nb2 = @brm begin
-    log(mu) ~ 0 + acad + gen + voc + mathz + gen_m + voc_m
+    log(mu) ~ 0 + acad + gen + voc + mathz + gen & mathz + voc & mathz
     effect(mu, acad) ~ Normal(0, 2.5)
     effect(mu, gen) ~ Normal(0, 2.5)
     effect(mu, voc) ~ Normal(0, 2.5)
     effect(mu, mathz) ~ Normal(0, 2.5)
-    effect(mu, gen_m) ~ Normal(0, 2.5)
-    effect(mu, voc_m) ~ Normal(0, 2.5)
+    effect(mu, gen & mathz) ~ Normal(0, 2.5)
+    effect(mu, voc & mathz) ~ Normal(0, 2.5)
     phi ~ Exponential(1)
     daysabs ~ NegativeBinomial2(mu, phi)
 end
-sb = SBBRMI(b_nb2((; daysabs=ysc, acad=acad, gen=gen, voc=voc, mathz=mathz, gen_m=gen_m, voc_m=voc_m)); mod=@__MODULE__)
+sb = SBBRMI(b_nb2((; daysabs=ysc, acad=acad, gen=gen, voc=voc, mathz=mathz)); mod=@__MODULE__)
 problem = StanBlocks.stan_instantiate(sb.model; path=joinpath(SCRATCH, ".out", "stan", "nb_int.stan"))
 f = sample_fit(sb, problem, 2002)
 open(joinpath(OUT, "nb_int.json"), "w") do io
