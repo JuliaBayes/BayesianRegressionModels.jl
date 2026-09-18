@@ -1139,6 +1139,9 @@ function _brm_group_declarations(brmi::BRMI)
     for (predictor, operation) in pairs(brmi.operations)
         expression = operation isa NamedColumn ? parent(operation) : operation
         expression isa ExprColumn && getf(expression) === (~) || continue
+        # Hyper-predictor ranefs lower through their own per-level blocks, not
+        # through the observation model's shared group declarations.
+        isnothing(_hyper_predictor_statement(expression)) || continue
         _, rhs = getargs(expression, 2)
         for term in _brm_additive_terms(rhs)
             _brm_is_grouped_term(term) || continue
