@@ -421,18 +421,7 @@ function _turing_replay_input(plan, new_data)
 end
 
 function _turing_direct_observations(brmi::BRMI)
-    found = Any[]
-    for (key, op_nc) in pairs(brmi.operations)
-        op_nc isa NamedColumn || continue
-        op = parent(op_nc)
-        op isa ExprColumn{typeof(~)} || continue
-        lhs, rhs = getargs(op, 2)
-        isnothing(_brm_observation_name(lhs)) && continue
-        push!(found, (; key, lhs, rhs))
-    end
-    isempty(found) && error(
-        "Turing backend: direct execution requires at least one observed likelihood")
-    Tuple(found)
+    _brm_direct_observations(brmi; prefix="Turing backend")
 end
 
 

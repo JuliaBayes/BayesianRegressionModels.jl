@@ -39,6 +39,7 @@ include("preparation_terms.jl")
 include("preparation_gp.jl")
 include("preparation_structured.jl")
 include("turing_backend.jl")
+include("rk_backend.jl")
 include("native_ppl.jl")
 include("vimpl.jl")
 
@@ -121,7 +122,7 @@ export brm_ordinal, brm_ordinal_lpmf, brm_ordinal_lpmfs, brm_ordinal_rng,
 export Data, MaybeData, maybedata
 export AbstractColumn, MissingColumn, DataColumn, NamedColumn,
        ExprColumn, LikelihoodColumn, MaterializedColumn
-export BRMI, VBRMI, SBBRMI, TuringBRMI, GenerativeDeclaration, GenerativePlan,
+export BRMI, VBRMI, SBBRMI, TuringBRMI, RKBRMI, GenerativeDeclaration, GenerativePlan,
        brm_distribution_type, turing_model_source,
        turing_pointwise_loglikelihoods, turing_predictive_model,
        turing_generated_quantities, turing_posterior_predictive
