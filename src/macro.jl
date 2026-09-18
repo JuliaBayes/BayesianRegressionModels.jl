@@ -539,6 +539,17 @@ _brm(x::Expr; df=nothing) = begin
         :(__caps__ = $capturedata(__df__, ($(map(QuoteNode, real_captures)...),))),
         finalize,
     )
+    # Hygiene: the body assigns every formula name (nonlocal bindings, the
+    # maybelocals destructuring, `@n` literal/response bindings) plus the
+    # `__ddf__`/`__caps__` temporaries. Without an explicit local scope, a
+    # builder defined in local scope (a function, loop, or let block) is a
+    # closure that CAPTURES same-named enclosing bindings and overwrites them
+    # when it runs — e.g. an in-loop `@brm` silently replaces the loop variable
+    # with a NamedColumn (snag bambi-quantile-r-36bd8217). Declare every
+    # assigned name `let`-local so the builder can neither read nor clobber
+    # enclosing state; reads of never-assigned names (call heads, spliced
+    # values) still resolve outward exactly as before.
+    body = Expr(:let, Expr(:block, unique!([keys(alllocals)..., :__ddf__, :__caps__])...), body)
     if isnothing(df)
         # no-df: `gensym_model(__df__) = body` — a reusable `df -> BRMI` builder.
         Expr(:(=), lhs, body)
