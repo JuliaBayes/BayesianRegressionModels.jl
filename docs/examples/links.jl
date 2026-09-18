@@ -86,28 +86,16 @@ end
 println("LINK_PROBIT_DONE")
 flush(stdout)
 
-# trial expansion shared with the cloglog fit
-yt = Int[]; xt = Float64[]
-for (x, n, y) in zip(x0, nvec, yvec)
-    append!(yt, fill(1, y)); append!(xt, fill(x, y))
-    append!(yt, fill(0, n - y)); append!(xt, fill(x, n - y))
-end
-mxt = sum(xt) / length(xt)
-sxt = sqrt(sum((xt .- mxt) .^ 2) / length(xt))
-xzt = (xt .- mxt) ./ sxt
-open(joinpath(OUT, "links_scale_t.json"), "w") do io
-    JSON.print(io, Dict("mean" => mxt, "std" => sxt))
-end
-# cloglog via inline Bernoulli expression (exact; the 2-level ordinal route is
-# loglog-shaped -- verified against brm_ordinal_lpmf -- and direct inv_cloglog
-# lacks a StanBlocks tracer rule, snag brm-tracer-inv-c-a19794bc).
+# cloglog through the user-link path (native inv_cloglog tracer rule;
+# snag brm-tracer-inv-c-a19794bc landed). A 2-level ordinal Cumulative()+
+# CloglogLink() is loglog-shaped, not cloglog -- verified in brm_ordinal_lpmf.
 b_cll = @brm begin
-    eta ~ 1 + xz
-    effect(eta, Intercept) ~ Normal(0, 5)
-    effect(eta, xz) ~ Normal(0, 2.5)
-    y ~ Bernoulli(1 - exp(-exp(eta)))
+    cloglog(p) ~ 1 + xz
+    effect(p, Intercept) ~ Normal(0, 5)
+    effect(p, xz) ~ Normal(0, 2.5)
+    y ~ Binomial(nvec, p)
 end
-sb = SBBRMI(b_cll((; y=yt, xz=xzt)); mod=@__MODULE__)
+sb = SBBRMI(b_cll((; y=yvec, xz=xz, nvec=nvec)); mod=@__MODULE__)
 problem = StanBlocks.stan_instantiate(sb.model; path=joinpath(SCRATCH, ".out", "stan", "link_cloglog.stan"))
 f = sample_fit(sb, problem, 5003)
 open(joinpath(OUT, "link_cloglog.json"), "w") do io

@@ -15,15 +15,6 @@ OUT = joinpath(SCRATCH, ".out", "results", "quantile")
 mkpath(OUT)
 mkpath(joinpath(SCRATCH, ".out", "stan"))
 
-# instantiate(path=) skips regeneration when the file exists (snag
-# stan-instantiate-4654c020): purge artifacts so reruns never go stale.
-function purge_stan(names...)
-    for n in names
-        rm(joinpath(SCRATCH, ".out", "stan", n * ".stan"); force=true)
-        rm(joinpath(SCRATCH, ".out", "stan", n * "_model.so"); force=true)
-    end
-end
-
 df = CSV.read(joinpath(SCRATCH, "data", "bmi.csv"), DataFrame)
 age = Float64.(df.age); bmi = Float64.(df.bmi)
 println("N=", length(age), " age range=", extrema(age))
@@ -34,23 +25,19 @@ open(joinpath(OUT, "quant_scale.json"), "w") do io
     JSON.print(io, Dict("mean" => mage, "std" => sage))
 end
 
-function make_builder(tau)
-    # literal-splice: @brm cannot see the loop local, and bare-global Float64
-    # args are rejected at trace time (verified by probe).
-    Core.eval(@__MODULE__, quote
-        @brm begin
-            sigma ~ Exponential(1)
-            mu ~ 1 + s(agez)
-            bmi ~ SkewDoubleExponential(mu, sigma, $tau)
-        end
-    end)
+# Named numeric constants ride in data (snag bambi-quantile-r-36bd8217): one
+# builder, `tau` supplied per fit through the data container. A bare scope
+# name would be shadowed by the builder's data-side binding and rejected at
+# trace time, so the earlier Core.eval literal-splice is gone.
+builder = @brm begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + s(agez)
+    bmi ~ SkewDoubleExponential(mu, sigma, tau)
 end
 for tau in (0.1, 0.5, 0.9)
-    builder = make_builder(tau)
-    data = (; bmi=bmi ./ 10, agez=agez)
+    data = (; bmi=bmi ./ 10, agez=agez, tau=tau)
     sb = SBBRMI(builder(data); mod=@__MODULE__)
     tag = replace(string(tau), "." => "p")
-    purge_stan("quant_0p1", "quant_0p5", "quant_0p9")
 problem = StanBlocks.stan_instantiate(sb.model;
         path=joinpath(SCRATCH, ".out", "stan", "quant_$tag.stan"))
     fit = adaptive_warmup_mcmc(
