@@ -50,10 +50,12 @@ rev = "c317cc003fc41c2d933c27dc80799141eebd434e"
 
 [sources.StanBlocks]
 url = "https://github.com/nsiccha/StanBlocks.jl"
-# bec23bc3 (2026-09-07): registers the native `log_modified_bessel_first_kind`
-# builtin that the periodic `hsgp(x; cov=:periodic)` spectral weights call
-# (StanBlocks snag log-modified-bes-60f43dd8).
-rev = "9a958f97c52719985220e0c410a66642b1084000"
+# fe1d3b5e (2026-09-18): registers the native `inv_cloglog` builtin that
+# consumer `@deffun` custom families call (StanBlocks snag
+# stanblocks-trace-e1235cb1; BRM snag brm-tracer-inv-c-a19794bc). Supersedes
+# 9a958f97, which carried the periodic-hsgp `log_modified_bessel_first_kind`
+# registration (StanBlocks snag log-modified-bes-60f43dd8).
+rev = "fe1d3b5eecb55e837659d1231d8078a7f39ca04c"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
