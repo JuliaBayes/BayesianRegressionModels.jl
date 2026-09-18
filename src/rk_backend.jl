@@ -102,6 +102,8 @@ struct RKBRMI{P<:BRMI,PL,M}
 end
 
 Base.parent(x::RKBRMI) = x.parent
+structure_of(x::RKBRMI) = structure_of(parent(x))
+priors_of(x::RKBRMI) = priors_of(parent(x))
 
 function _rk_num_coefficients(plan::_RKStructuralPlan)
     total = 0

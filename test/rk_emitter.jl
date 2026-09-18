@@ -71,6 +71,9 @@ df = (;
     backend = BRM.RKBRMI(brmi, plan, nothing)
     @test sprint(show, backend) ==
         "RKBRMI with 4 population coefficients and 6 observations"
+    @test parent(backend) === brmi
+    @test structure_of(backend) == structure_of(brmi)
+    @test priors_of(backend) == priors_of(brmi)
 end
 
 @testset "factor ref translates to sort-order index" begin
