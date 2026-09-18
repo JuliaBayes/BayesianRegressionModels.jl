@@ -104,6 +104,19 @@ function _brm_input_name(path, multi)
             return Symbol(:X_, predictor)
         fields == ((:property, :design), (:property, :fixed)) &&
             return Symbol(:offset_, predictor)
+        let block = length(fields) == 3 &&
+                    fields[1] == (:property, :random_effects) &&
+                    fields[2][1] === :index
+            block && fields[3] == (:property, :matrix) &&
+                return Symbol(:group_matrix_, predictor,
+                              :_, only(fields[2][2]))
+            block && fields[3] == (:property, :indices) &&
+                return Symbol(:group_indices_, predictor,
+                              :_, only(fields[2][2]))
+            block && fields[3] == (:property, :levels) &&
+                return Symbol(:group_levels_, predictor,
+                              :_, only(fields[2][2]))
+        end
         if length(fields) == 2 && fields[2][1] === :index
             fields[1] == (:property, :random_effects) && return Symbol(
                 :group_effects_, predictor, :_, only(fields[2][2]))

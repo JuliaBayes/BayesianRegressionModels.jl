@@ -30,6 +30,10 @@ BRM.turing_term_model(term, nobs, priors, inputs) =
     BRM._brm_turing_term_model(term, nobs, priors, inputs)
 BRM.turing_group_effect(block, sd_priors, residual_scale) =
     _brm_group_effect_model(block, sd_priors, residual_scale)
+BRM.turing_default_correlated_group(matrix, indices, levels, lkj_eta) =
+    _brm_correlated_group_effect(
+        matrix, indices, length(levels), ntuple(_ -> nothing, size(matrix, 2)),
+        lkj_eta, nothing)
 include("turing_gp.jl")
 include("turing_structured.jl")
 
@@ -436,9 +440,19 @@ function _brm_generic_response_graph_ast(multi; single::Bool=false)
                 Expr(:tuple, fill(nothing,
                     size(component.random_effects[gi].matrix, 2))...) :
                 _brm_group_prior_ast(component.random_effects[gi], callables)
-            push!(statements, :($group ~ to_submodel(BRM.turing_group_effect(
-                multi.plans[$pi].predictors[$ci].random_effects[$gi], $priors,
-                $group_scale))))
+            block = component.random_effects[gi]
+            block_path = :(multi.plans[$pi].predictors[$ci].random_effects[$gi])
+            group_call = if !block.intercept_only && !block.zero_correlation &&
+                            !block.centered && isnothing(block.by) &&
+                            !_brm_has_group_prior_override(block) &&
+                            isnothing(group_scale)
+                :(BRM.turing_default_correlated_group(
+                    $block_path.matrix, $block_path.indices,
+                    $block_path.levels, $(block.lkj_eta)))
+            else
+                :(BRM.turing_group_effect($block_path, $priors, $group_scale))
+            end
+            push!(statements, :($group ~ to_submodel($group_call)))
             push!(statements, :($group_effect = $group_effect + $group.effect))
         end
         if single && !isempty(component.random_effects)

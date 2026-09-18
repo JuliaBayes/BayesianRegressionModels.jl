@@ -76,10 +76,12 @@ end
         y ~ Normal(mu, sigma)
     end)(data))
     source = string(turing_model_source(backend))
-    @test occursin("BRM.turing_group_effect", source)
+    @test occursin("BRM.turing_default_correlated_group", source)
     @test !occursin("_brm_group_effect_model", source)
     @test !occursin("multi.plans", source)
-    @test haskey(backend.model.args, :group_effects_mu_1)
+    @test haskey(backend.model.args, :group_matrix_mu_1)
+    @test haskey(backend.model.args, :group_indices_mu_1)
+    @test haskey(backend.model.args, :group_levels_mu_1)
     @test haskey(backend.model.args, :X_mu)
 end
 
