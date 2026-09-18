@@ -7,8 +7,6 @@
 # Bernoulli. Categoricals are hand dummies (counts.jl pattern) with intercept
 # form so grid typicals are valid cells; the notebook's `0 +` full-dummy form
 # gives identical predictions. Link/response self-consistency asserted per family.
-# Gaussian target=:mean is snagged upstream (brm-conditional-bf9d2446: GLM
-# emission lacks the LP carrier), so the mtcars curves use target=:predictive.
 using Random, Statistics, Distributions, CSV, DataFrames, JSON, ReadStatTables
 using BayesianRegressionModels, StanBlocks, BridgeStan, LogDensityProblems
 using WarmupHMC, Enzyme
@@ -66,14 +64,17 @@ end
 dd1, U1, divmt = sample_engine(bmt, dmt, "mtcars", 44021)
 # hp curve at typicals (low/A cell): must decline like the notebook
 ghp = BRM.brm_prediction_grid(dd1; focal=:hp, n=25)
-chp = BRM.brm_conditional_draws(dd1, U1, ghp; focal=:hp, target=:predictive, seed=31)
+chp = BRM.brm_conditional_draws(dd1, U1, ghp; focal=:hp)
 shp = BRM.brm_summarize_draws(chp.draws; probs=[0.94])
 mh = getproperty.(shp, :mean)
 @assert mh[end] < mh[1] - 2.0 "mpg must fall over the hp grid"
+# Gaussian identity link: link and response coincide
+chp_link = BRM.brm_conditional_draws(dd1, U1, ghp; focal=:hp, scale=:link)
+@assert maximum(abs.(chp_link.draws .- chp.draws)) < 1e-6
 # hp x wt factorial (notebook cell 15, 50x5 -> 25x5 here)
 gwt = BRM.brm_prediction_grid(dd1;
     focal=[:hp => collect(range(50, 350; length=25)), :wt => collect(range(1, 6; length=5))])
-cwt = BRM.brm_conditional_draws(dd1, U1, gwt; focal=[:hp, :wt], target=:predictive, seed=32)
+cwt = BRM.brm_conditional_draws(dd1, U1, gwt; focal=[:hp, :wt])
 swt = BRM.brm_summarize_draws(cwt.draws; probs=[0.94])
 # gear x cyl one-hot panel (notebook cell 17)
 mpgfill = Statistics.median(mpg); hpm = sum(hp) / length(hp); wtm = sum(wt) / length(wt)
@@ -83,12 +84,19 @@ cells = [(cm, ch, gb, gc) for cm in (0.0, 1.0) for ch in (0.0, 1.0)
 gcat = (; mpg=fill(mpgfill, 9), hp=fill(hpm, 9), wt=fill(wtm, 9),
     cylm=[c[1] for c in cells], cylh=[c[2] for c in cells],
     gearb=[c[3] for c in cells], gearc=[c[4] for c in cells])
-ccat = BRM.brm_conditional_draws(dd1, U1, gcat; focal=[:cylm, :cylh, :gearb, :gearc],
-    target=:predictive, seed=33)
+ccat = BRM.brm_conditional_draws(dd1, U1, gcat; focal=[:cylm, :cylh, :gearb, :gearc])
 scat = BRM.brm_summarize_draws(ccat.draws; probs=[0.94])
-println("MTCARS_DONE hpgrid=", length(shp))
+# predictive target is wider than the mean (notebook cell 11/12 point)
+cprd = BRM.brm_conditional_draws(dd1, U1, ghp; focal=:hp, target=:predictive, seed=11)
+sprd = BRM.brm_summarize_draws(cprd.draws; probs=[0.94])
+wmean = mean([r.upper_1 - r.lower_1 for r in shp])
+wpred = mean([r.upper_1 - r.lower_1 for r in sprd])
+@assert wpred > wmean "predictive must be wider than the mean"
+println("MTCARS_DONE hpgrid=", length(shp), " wmean=", round(wmean; digits=2),
+    " wpred=", round(wpred; digits=2))
 res["mtcars_hp"] = [Dict("hp" => ghp.hp[i], "mean" => shp[i].mean,
     "lo" => shp[i].lower_1, "hi" => shp[i].upper_1) for i in eachindex(shp)]
+res["mtcars_predw"] = Dict("mean" => wmean, "predictive" => wpred)
 
 # ---------- 2. students negative-binomial interaction ----------
 sdf = DataFrame(readstat(joinpath(SCRATCH, "data", "nb_data.dta")))
