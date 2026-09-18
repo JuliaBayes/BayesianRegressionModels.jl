@@ -185,6 +185,9 @@ _brm_turing_stan_only(x::BRM._BRMPreparedExpr) =
         _brm_turing_stan_only_callable(x.callable) :
         _brm_turing_stan_only_args(x.args, x.kwargs)
 _brm_turing_stan_only_callable(callable::Function) =
+    # `MvNormalCholesky` is a formula marker with no direct Julia methods, but
+    # `_brm_ast_call` lowers it to an ordinary covariance-factor `MvNormal`.
+    callable === BRM.MvNormalCholesky ? nothing :
     isempty(methods(callable)) ? callable : nothing
 _brm_turing_stan_only_callable(_callable) = nothing
 function _brm_turing_stan_only_args(args, kwargs)
