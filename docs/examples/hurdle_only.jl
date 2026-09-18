@@ -1,7 +1,7 @@
 # Bambi replication: https://bambinos.github.io/bambi/notebooks/zero_inflated_regression.html
 # Run: julia --project=. hurdle_only.jl   (from docs/examples/, after Pkg.instantiate())
 # Inputs: data/ (vendored). Outputs: .out/results/<model>/ + .out/stan/ (gitignored).
-# Batch5: bambi zero_inflated_regression (ZIP half; hurdle blocked, snag filed).
+# Batch5: bambi zero_inflated_regression (ZIP + hurdle halves; native HurdlePoisson).
 # bambi psi = P(non-structural zero complement) = 1 - zi_BRM: all five fitted
 # zi-submodel coefs match bambi's psi coefs in magnitude with flipped signs
 # (BRM zi = P(extra zero), verified in the emitted zero_inflated_poisson_lpmf).
@@ -55,7 +55,7 @@ open(joinpath(OUT, "zip_scale.json"), "w") do io
         "n" => length(yf)))
 end
 
-# --- model C: hurdle (needs canonical >= 8983840 for HurdlePoisson) ---
+# --- model C: hurdle (native HurdlePoisson) ---
 # BRM p_zero = P(Y=0) = 1 - psi_bambi: p_zero coefs compare vs NEGATED bambi psi.
 b_h = @brm begin
     log(lambda) ~ 1 + livebait + camper + persz + chz
