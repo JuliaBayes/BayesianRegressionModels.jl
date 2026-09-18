@@ -193,6 +193,9 @@ turing_model_source(backend::TuringBRMI) = backend.plan.source_ast
 turing_model_source(backend::TuringBRMI{<:BRMI,<:_TuringMultiResponsePlan}) =
     backend.plan.source_ast
 
+"""Build the native Turing submodel for one backend-neutral group block."""
+function turing_group_effect end
+
 function _turing_unobserved_response(response)
     T = nonmissingtype(eltype(response))
     unobserved = Vector{Union{Missing,T}}(undef, length(response))
