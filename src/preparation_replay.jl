@@ -53,6 +53,8 @@ end
 function _brm_replay_preprocess(::Val{:population_factor_dummy}, entry,
                                 raw::AbstractVector, freeze, prefix)
     ref = entry.const_.ref
+    ref isa AbstractString &&
+        return _brm_replay_string_factor_dummy(entry, raw, freeze, prefix)
     recoded = if ref == 1
         raw
     else
@@ -72,6 +74,33 @@ function _brm_replay_preprocess(::Val{:population_factor_dummy}, entry,
     fit = (; levels, level=entry.const_.level,
            n_levels=entry.const_.n_levels, ref)
     _BRMPreprocessResult((primary=values,), _BRMPreprocEntry(
+        :population_factor_dummy, fit, entry.raw_ref, true))
+end
+
+# String mirror of the integer `factor(...; ref=...)` replay above. Fit time
+# recodes string levels to sorted integer codes with the reference first, so
+# replay maps the raw strings back onto the frozen (or, with
+# `freeze=false`, re-derived) level set and applies the same code swap.
+# Unseen levels fail loudly under `freeze=true`, exactly as for integers. A
+# re-derived level set that drops the reference keeps the codes as they are:
+# there is no string analogue of the integer path's phantom recoded value.
+function _brm_replay_string_factor_dummy(entry, raw::AbstractVector,
+                                          freeze, prefix)
+    values = _brm_factor_values(raw)
+    levels = freeze ? entry.const_.levels : _brm_fit_levels(values)
+    length(levels) == entry.const_.n_levels || error(
+        "$prefix: categorical population predictor `$(entry.raw_ref)` has " *
+        "$(length(levels)) levels, but the fitted interaction design has " *
+        "$(entry.const_.n_levels). Preserve the fitted level count or rebuild " *
+        "the model.")
+    ref_code = findfirst(==(entry.const_.ref), levels)
+    codes = _brm_apply_fitted_levels(levels, values; prefix)
+    indices = isnothing(ref_code) ? codes :
+        Int[code == ref_code ? 1 : code == 1 ? ref_code : code for code in codes]
+    dummy = Float64[index == entry.const_.level ? 1.0 : 0.0 for index in indices]
+    fit = (; levels, level=entry.const_.level,
+           n_levels=entry.const_.n_levels, ref=entry.const_.ref)
+    _BRMPreprocessResult((primary=dummy,), _BRMPreprocEntry(
         :population_factor_dummy, fit, entry.raw_ref, true))
 end
 

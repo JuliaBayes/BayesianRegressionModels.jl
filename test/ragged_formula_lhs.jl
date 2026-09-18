@@ -289,7 +289,11 @@ hsgp_censored_df(; subs, dose_amt) = (;
 
 @testset "ragged observation LHS — reprocess/resample regenerates response + bound" begin
     train = hsgp_censored_df(; subs = ["s1", "s2", "s3"], dose_amt = [100.0, 50.0])
-    sb = SBBRMI(hsgp_censored_builder(train); mod = @__MODULE__)
+    # `total_groups=()`: this testset exercises the CONVENTIONAL GQ resample
+    # path (see the resample call below), and the default `:auto` would
+    # integrate the single-margin subject bucket into totals, which
+    # `resample_groups` refuses (same pin as test/resample_groups.jl).
+    sb = SBBRMI(hsgp_censored_builder(train); mod = @__MODULE__, total_groups = ())
 
     # (0) The gathered response and its data-backed bound now carry provenance.
     @test sb.preproc[:pk_conc].kind === :ragged_gather
