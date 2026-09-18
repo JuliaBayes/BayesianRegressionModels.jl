@@ -4040,7 +4040,15 @@ function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool)
     # not historically retain.  The public ergonomic path starts from the
     # ordinary non-centred fit; fail if the supplied artifact used a different
     # emission rather than silently changing it while adding CV sizing.
-    baseline = SBBRMI(sb.parent; mod=sb.model.mod, held_out=sb.held_out)
+    #
+    # `total_groups` is the exception that proves the rule: unlike centered/cv
+    # geometry it IS inferable — `sb` was just proven totals-free — so both
+    # re-emissions below pin `total_groups=()` to reproduce `sb`'s conventional
+    # program. The default `:auto` would integrate totals for an eligible shape
+    # and false-trigger the geometry check (for a conventionally-built fit) or
+    # emit a totals `cv_template` the cv-contagion assertion cannot see.
+    baseline = SBBRMI(sb.parent; mod=sb.model.mod, held_out=sb.held_out,
+                      total_groups=())
     stan_code(baseline) == stan_code(sb) || error(
         "sbimpl: `resample_groups` requires an SBBRMI emitted with the default " *
         "non-centered, non-CV constructor. The supplied model used additional " *
@@ -4051,7 +4059,7 @@ function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool)
     rebound = _sb_rebind_brmi(sb.parent, new_df)
     cv_template = SBBRMI(
         rebound; mod=sb.model.mod, cv_groups=groups,
-        held_out=sb.held_out,
+        held_out=sb.held_out, total_groups=(),
         _frozen_preproc=freeze ? sb.preproc : nothing)
     _sb_assert_cv_reemission(cv_template, groups)
     preproc = _sb_resample_preproc(sb.preproc, cv_template.preproc, groups)

@@ -86,7 +86,11 @@ end
             mu
         end
     end
-    sb = SBBRMI(builder(subj_df()); mod=@__MODULE__)
+    # `total_groups=()`: this testset exercises the CONVENTIONAL GQ resample
+    # path, and the default `:auto` would integrate the single-margin subject
+    # bucket into totals, which `resample_groups` refuses (same pin as
+    # test/resample_groups.jl, 2026-09-18).
+    sb = SBBRMI(builder(subj_df()); mod=@__MODULE__, total_groups=())
 
     # The gathered kernel ragged columns now carry explicit regeneration
     # provenance, superseding the historical incidental error.

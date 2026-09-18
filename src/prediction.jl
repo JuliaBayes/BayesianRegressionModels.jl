@@ -50,8 +50,10 @@
 #
 # WHAT THIS LAYER DOES NOT DO: it does not build the new model. `recov`'s model
 # half is `generative_plan(plan, new_df)` (the builder form, which rebuilds the
-# same declarations for genuinely new groups) or `reprocess` for a same-groups
-# new grid; this file only transports DRAWS between two already-built models.
+# same declarations) or `reprocess` for a new grid — including
+# `reprocess(...; resample_groups=[g])`, which is the ONLY route for genuinely
+# new groups of a conventional block (re-drawn Stan-side); this file only
+# transports DRAWS between two already-built models.
 # ==============================================================================
 
 # ---- the emission table ------------------------------------------------------
@@ -68,8 +70,11 @@
 #                `:group_term`       `<p>.<g>.<t>`   array[n_groups] vector[n_terms]
 #                `:flat_term_group`  `<p>.<i>`, i = t + (g-1)*n_terms
 #   `noncentered` — true iff the sampled coordinate is a standard normal scaled
-#              into the effect. Zeroing (population mean) and re-drawing (a
-#              fresh group from the fitted covariance) are BOTH valid only here.
+#              into the effect. Zeroing (population mean) is valid only here;
+#              Julia-side re-drawing (a fresh group from the fitted covariance)
+#              is narrowed further — plain and `|ID|` blocks re-draw Stan-side
+#              via `reprocess(...; resample_groups=...)` instead
+#              (`_ranef_fresh_draws_refused`).
 #   `tau`    — the submodel-internal name of the per-margin FITTED between-group
 #              SD vector, so the emitted carrier is `<binding>_<tau>` (a
 #              `vector[n_terms]` in `ranefcoefnames` order). `:tau` for the
@@ -591,6 +596,43 @@ function _ranef_assert_noncentered(b::RanefBlock, what::AbstractString)
     nothing
 end
 
+# Julia-side fresh standardised draws survive ONLY where no StanBlocks
+# generated-quantities re-draw exists: stratified `gr(g, by=b)` blocks
+# (`by !== nothing`), typed `mm(...)` blocks (`group isa Tuple`), plain
+# (non-bucket) R2D2 blocks (whose cv sizing is unbuilt — the bucket R2D2
+# sibling IS cv-contagious), and zerocorr `||` synthetic `__nocor__` margins
+# (whose emission never sees the user's `cv_groups` spelling). Every other
+# conventional block re-draws Stan-side via `reprocess(...;
+# resample_groups=...)`, so fresh levels there are refused with the route
+# (decision 2026-09-18T13-47-28-143-1umq4k7).
+const _RANEF_NO_GQ_FAMILIES = (:ranef_intercept_r2d2, :ranef_correlated_r2d2)
+
+_ranef_fresh_draws_refused(bt::RanefBlock) =
+    bt.by === nothing && bt.group isa Symbol &&
+    !(bt.family in _RANEF_NO_GQ_FAMILIES) &&
+    isnothing(match(_RANEF_NOCOR_RE, String(bt.group)))
+
+function _ranef_fresh_refusal(bt::RanefBlock, fresh::Bool, new_levels)
+    reasons = String[]
+    fresh && push!(reasons,
+        "`resample` names grouping factor `$(bt.group)`, whose levels must be re-drawn")
+    if !isempty(new_levels)
+        shown = join(repr.(first(new_levels, 5)), ", ")
+        push!(reasons, "level(s) $shown" *
+            (length(new_levels) > 5 ? " … ($(length(new_levels)) total)" : "") *
+            " are new to the source model")
+    end
+    error(
+        "BRM prediction: block `$(bt.binding)` (group `$(bt.group)`) needs FRESH ",
+        "standardised draws ($(join(reasons, "; "))), but Julia-side fresh draws ",
+        "are no longer the population-prediction route for plain and `|ID|` ",
+        "random effects. Build the target with ",
+        "`reprocess(fit, new_df; resample_groups=[$(repr(bt.group))])` so ",
+        "StanBlocks re-draws the new levels in generated quantities, then ",
+        "`transport_draws` onto THAT artifact: its block is `generated=true` ",
+        "and skipped, while `L`/`tau` and the population coordinates copy by name.")
+end
+
 _ranef_check_draws(draws, unc_names) =
     size(draws, 2) == length(unc_names) || error(
         "BRM prediction: draw matrix has $(size(draws, 2)) columns but the model ",
@@ -683,9 +725,13 @@ fit can be evaluated on new data without refitting.
 - `draws` — draws × coordinates in `unc_from` order; `unc_from` / `unc_to` are
   the two models' `param_unc_names`.
 - `resample` — grouping factors whose EXISTING levels should also be re-drawn
-  rather than reused (leave-all-out / out-of-sample semantics). New levels are
-  always drawn fresh regardless.
-- `rng` — the source for those fresh draws.
+  rather than reused (leave-all-out / out-of-sample semantics). For
+  conventional plain and `|ID|` blocks this is REFUSED — re-draw Stan-side via
+  `reprocess(...; resample_groups=...)` instead (rule 2). It is honoured for
+  total-coefficient blocks (conditional recovery, the sanctioned totals
+  route) and for the block kinds with no GQ emission.
+- `rng` — the source for the surviving Julia-side draws: total-coefficient
+  recovery and the rule-2 exception kinds.
 
 Returns a draws × `length(unc_to)` matrix aligned to `to`.
 
@@ -698,9 +744,16 @@ Every coordinate of `to` is accounted for exactly once, by NAME:
    level label, so a reordering, an insertion, or a dropped level cannot
    misalign it.
 2. A random-effect coordinate for a level `from` does not have, or for a factor
-   in `resample`, is drawn `N(0, 1)`. Under BRM's non-centered emission that is
-   exactly a draw of that group's effect from the fitted covariance, because the
-   `L` / `tau` hyperparameters are copied per draw by rule 3.
+   in `resample`, is drawn `N(0, 1)` — BUT only for block kinds with no
+   StanBlocks generated-quantities re-draw: stratified `gr(g, by=b)` blocks,
+   typed `mm(...)` blocks, plain (non-bucket) R2D2 blocks, and zerocorr `||`
+   synthetic margins. Under BRM's non-centered emission that is exactly a draw
+   of that group's effect from the fitted covariance, because the `L` / `tau`
+   hyperparameters are copied per draw by rule 3. Every other conventional
+   block — plain `(… | g)` and shared `(… |ID| g)` — REFUSES fresh draws:
+   population prediction for the Sb backend goes through the StanBlocks model
+   (`reprocess(fit, new_df; resample_groups=[g])`, whose block is
+   `generated=true` and skipped here), never through Julia-side randomness.
 3. Every other coordinate must exist in `from` under the same name and is copied.
 
 Anything that does not fit those three rules raises. In particular a coordinate
@@ -731,12 +784,12 @@ the exact wrong answer.
 # Example
 
 ```julia
-new_plan = generative_plan(plan, new_df)          # new subjects, new schedule
-new_sb   = ...                                     # its compiled model
-moved    = transport_draws(sb, new_plan, draws,
-                           unc_old, unc_new)       # new subjects drawn fresh
-loo      = transport_draws(sb, new_plan, draws,
-                           unc_old, unc_new; resample = :subject)
+same_plan = generative_plan(plan, same_df)        # same subjects, new schedule
+moved     = transport_draws(sb, same_plan, draws,
+                            unc_old, unc_same)    # levels copied by label
+pop       = reprocess(sb, new_df;                 # NEW subjects: Stan-side
+                      resample_groups=[:subject])
+moved_pop = transport_draws(sb, pop, draws, unc_old, unc_pop)  # GQ re-draw
 ```
 """
 function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
@@ -820,6 +873,11 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
         coords_from = ranef_coordinates(bf, unc_from)
         level_pos = Dict(l => g for (g, l) in enumerate(bf.levels))
         fresh = any(g -> g in resample_set, _ranef_group_symbols(bt.group))
+        if _ranef_fresh_draws_refused(bt)
+            new_levels = [l for l in bt.levels if !haskey(level_pos, l)]
+            (fresh || !isempty(new_levels)) &&
+                _ranef_fresh_refusal(bt, fresh, new_levels)
+        end
         for g in 1:bt.n_groups
             gf = fresh ? 0 : get(level_pos, bt.levels[g], 0)
             for t in 1:bt.n_terms
