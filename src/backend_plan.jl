@@ -271,6 +271,29 @@ function _brm_collect_target_obs(brmi::BRMI)
     target_obs
 end
 
+"""
+    _brm_direct_observations(brmi::BRMI; prefix="BRM backend lowering")
+
+Backend-neutral enumeration of observed likelihood statements: every `name ~
+distribution` operation whose LHS names response data. Returns `(key, lhs,
+rhs)` records in operation order. Concrete backends admit or reject each
+record's decorators, family, and shape.
+"""
+function _brm_direct_observations(brmi::BRMI; prefix="BRM backend lowering")
+    found = Any[]
+    for (key, op_nc) in pairs(brmi.operations)
+        op_nc isa NamedColumn || continue
+        op = parent(op_nc)
+        op isa ExprColumn{typeof(~)} || continue
+        lhs, rhs = getargs(op, 2)
+        isnothing(_brm_observation_name(lhs)) && continue
+        push!(found, (; key, lhs, rhs))
+    end
+    isempty(found) && error(
+        "$prefix: direct execution requires at least one observed likelihood")
+    Tuple(found)
+end
+
 # ---- shared response composition -----------------------------------------
 
 """
