@@ -3943,8 +3943,8 @@ end
 
 """
     generative_plan(sb::SBBRMI) -> GenerativePlan
-    generative_plan(builder::Function, df; mod=@__MODULE__, cv_groups=Set(), held_out=()) -> GenerativePlan
-    generative_plan(plan::GenerativePlan, new_df; cv_groups=Set(), held_out=()) -> GenerativePlan
+    generative_plan(builder::Function, df; mod=@__MODULE__, cv_groups=Set(), centered_groups=Set(), held_out=()) -> GenerativePlan
+    generative_plan(plan::GenerativePlan, new_df; cv_groups=Set(), centered_groups=nothing, held_out=()) -> GenerativePlan
 
 Snapshot the declarations BRM actually emitted. The inventory is derived from
 `sb.model.model`, so auto-introduced population coefficients, random-effect
@@ -3967,31 +3967,55 @@ new_population_plan = generative_plan(plan, new_schedule)
 The `SBBRMI` form has no reusable formula builder to apply to genuinely new
 groups; use [`reprocess`](@ref) on that plan for the existing frozen-constant
 replay semantics instead.
+
+`centered_groups` selects the centered parameterization per grouping factor,
+exactly as in [`SBBRMI`](@ref). The builder form defaults to empty; the plan
+form defaults to `nothing`, which infers the source plan's own centered groups
+— read off its emitted declarations, so a centered fit rebuilds centered
+unless explicitly overridden. A group named in both `cv_groups` and
+`centered_groups` is refused by the `SBBRMI` constructor, as at fit time.
 """
 generative_plan(sb::SBBRMI) = _generative_plan(sb, nothing, Set{Symbol}())
 
+# The plan form's default: the source plan's own centered groups, read off its
+# EMITTED declarations rather than trusted from any stored kwarg — the emission
+# is the record, so a rebuild cannot disagree with the fit it replays. Only
+# plain `Symbol` groups qualify; typed `mm(...)` blocks (a tuple group) never
+# have a centered sibling.
+_generative_plan_centered(plan::GenerativePlan) =
+    Set{Symbol}(b.group for b in ranef_blocks(plan)
+                if !b.noncentered && b.group isa Symbol)
+
 function generative_plan(builder::Function, df;
                          mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
+                         centered_groups=Set{Symbol}(),
                          total_groups=:auto, held_out=())
     brmi = Base.invokelatest(builder, df)
     brmi isa BRMI || error(
         "generative_plan: builder returned $(typeof(brmi)); expected a BRMI from `@brm begin ... end`")
     cv_groups = cv_groups isa Set ? cv_groups : Set{Symbol}(cv_groups)
-    _generative_plan(SBBRMI(brmi; mod, cv_groups, total_groups, held_out), builder, cv_groups)
+    centered_groups = centered_groups isa Set ? centered_groups : Set{Symbol}(centered_groups)
+    _generative_plan(SBBRMI(brmi; mod, cv_groups, centered_groups, total_groups, held_out), builder, cv_groups)
 end
 
 function generative_plan(plan::GenerativePlan, new_df;
-                         cv_groups=plan.cv_groups, held_out=plan.held_out)
+                         cv_groups=plan.cv_groups, held_out=plan.held_out,
+                         centered_groups=nothing)
     isnothing(plan.builder) && error(
         "generative_plan: this plan was built from an SBBRMI and has no reusable `@brm` builder. " *
         "Construct it with `generative_plan(builder, df)` to rebuild the same declarations for new groups.")
+    # `nothing` infers the source plan's own centered groups off its emitted
+    # declarations (after the builder check, so a builder-less plan still
+    # reports the missing builder rather than a declaration walk).
+    centered_groups = isnothing(centered_groups) ? _generative_plan_centered(plan) :
+        (centered_groups isa Set ? centered_groups : Set{Symbol}(centered_groups))
     # Preserve the fitted representation and population/random basis relation.
     # An empty selected set also preserves an explicit conventional opt-out.
     selected = unique(b.group for b in total_effect_blocks(plan))
     isempty(selected) && return generative_plan(plan.builder,new_df;
-        mod=plan.model.mod,cv_groups,held_out,total_groups=())
+        mod=plan.model.mod,cv_groups,centered_groups,held_out,total_groups=())
     brmi = Base.invokelatest(plan.builder,new_df)
-    sb = SBBRMI(brmi;mod=plan.model.mod,cv_groups,held_out,total_groups=selected,
+    sb = SBBRMI(brmi;mod=plan.model.mod,cv_groups,centered_groups,held_out,total_groups=selected,
                 _frozen_preproc=plan.preproc)
     _generative_plan(sb,plan.builder,cv_groups)
 end
