@@ -38,10 +38,11 @@ df = (;
     @test ast == Expr(:block,
         Expr(:call, :~, :mu_b1, Expr(:call, :Normal, 0.0, 1.0)),
         Expr(:call, :~, :mu_b2, Expr(:call, :Normal, 0.0, 1.0)),
-        Expr(:(=), :mu, Expr(:call, :+,
-            :mu_b1, Expr(:call, :*, :mu_b2, :x))),
+        Expr(:(=), :mu, Expr(:call, :.+,
+            :mu_b1, Expr(:call, :.*, :mu_b2, :x))),
         Expr(:call, :~, :sigma, Expr(:call, :Exponential, 1.0)),
-        Expr(:call, :~, :y, Expr(:call, :Normal, :mu, :sigma)))
+        Expr(:call, :.~, :y,
+            Expr(:., :Normal, Expr(:tuple, :mu, :sigma))))
 end
 
 @testset "link wrappers and triples" begin
@@ -50,23 +51,26 @@ end
         b ~ BernoulliLogit(eta)
     end
     ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
-    @test ast.args[end] == Expr(:call, :~,
-        :b, Expr(:call, :Bernoulli, Expr(:call, :logistic, :eta)))
+    @test ast.args[end] == Expr(:call, :.~,
+        :b, Expr(:., :Bernoulli, Expr(:tuple,
+            Expr(:., :logistic, Expr(:tuple, :eta)))))
     # Triple 3 lowers to the T2 shape: the affine value feeds logistic.
     brmi = @brm df begin
         logit(p) ~ 1 + x
         b ~ Bernoulli(p)
     end
     ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
-    @test ast.args[end] == Expr(:call, :~,
-        :b, Expr(:call, :Bernoulli, Expr(:call, :logistic, :p)))
+    @test ast.args[end] == Expr(:call, :.~,
+        :b, Expr(:., :Bernoulli, Expr(:tuple,
+            Expr(:., :logistic, Expr(:tuple, :p)))))
     brmi = @brm df begin
         log(mu) ~ 1 + x
         c ~ Poisson(mu)
     end
     ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
-    @test ast.args[end] == Expr(:call, :~,
-        :c, Expr(:call, :Poisson, Expr(:call, :exp, :mu)))
+    @test ast.args[end] == Expr(:call, :.~,
+        :c, Expr(:., :Poisson, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :mu)))))
 end
 
 @testset "evidence and weights shapes" begin
@@ -76,19 +80,19 @@ end
         y ~ weighted(truncated(Normal(mu, s), 0.0, 2.0), fweights(n))
     end
     ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
-    @test ast.args[end] == Expr(:call, :~,
-        :y, Expr(:call, :weighted,
-            Expr(:call, :truncated,
-                Expr(:call, :Normal, :mu, :s), 0.0, 2.0), :n))
+    @test ast.args[end] == Expr(:call, :.~,
+        :y, Expr(:., :weighted, Expr(:tuple,
+            Expr(:., :truncated, Expr(:tuple,
+                Expr(:., :Normal, Expr(:tuple, :mu, :s)), 0.0, 2.0)), :n)))
     brmi = @brm df begin
         mu ~ 1 + x
         s ~ Exponential(1)
         y ~ interval_censored(Normal(mu, s); upper=2.0)
     end
     ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
-    @test ast.args[end] == Expr(:call, :~,
-        :y, Expr(:call, :interval_censored,
-            Expr(:call, :Normal, :mu, :s), 2.0))
+    @test ast.args[end] == Expr(:call, :.~,
+        :y, Expr(:., :interval_censored, Expr(:tuple,
+            Expr(:., :Normal, Expr(:tuple, :mu, :s)), 2.0)))
     # Missing sides emit as ∓Inf floats (normalized back at bind).
     brmi = @brm df begin
         mu ~ 1 + x
@@ -96,9 +100,9 @@ end
         y ~ truncated(Normal(mu, s), 0, Inf)
     end
     ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
-    @test ast.args[end] == Expr(:call, :~,
-        :y, Expr(:call, :truncated,
-            Expr(:call, :Normal, :mu, :s), 0.0, Inf))
+    @test ast.args[end] == Expr(:call, :.~,
+        :y, Expr(:., :truncated, Expr(:tuple,
+            Expr(:., :Normal, Expr(:tuple, :mu, :s)), 0.0, Inf)))
 end
 
 @testset "factors and ref gating" begin
@@ -110,7 +114,7 @@ end
     ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
     @test ast isa Expr
     affine = only(a for a in ast.args if a isa Expr && a.head === :(=))
-    @test affine == Expr(:(=), :mu, Expr(:call, :+,
+    @test affine == Expr(:(=), :mu, Expr(:call, :.+,
         :mu_b1, Expr(:ref, :mu_b2, :g)))
     priors = [a for a in ast.args if a isa Expr && a.head === :call &&
         length(a.args) == 3 && a.args[1] === :~ &&
@@ -124,7 +128,7 @@ end
     end
     ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
     affine = only(a for a in ast.args if a isa Expr && a.head === :(=))
-    @test affine == Expr(:(=), :mu, Expr(:call, :+,
+    @test affine == Expr(:(=), :mu, Expr(:call, :.+,
         :mu_b1, Expr(:ref, :mu_b2, Expr(:call, :treatment, :g, 3))))
     # String refs lower to the same sort-order treatment index.
     brmi = @brm df begin
@@ -134,7 +138,7 @@ end
     end
     ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
     affine = only(a for a in ast.args if a isa Expr && a.head === :(=))
-    @test affine == Expr(:(=), :mu, Expr(:call, :+,
+    @test affine == Expr(:(=), :mu, Expr(:call, :.+,
         :mu_b1, Expr(:ref, :mu_b2, Expr(:call, :treatment, :gs, 3))))
 end
 
@@ -149,9 +153,9 @@ end
         Expr(:call, :.*, :x, :z))
     affine = only(a for a in ast.args if a isa Expr && a.head === :(=) &&
         a.args[1] === :mu)
-    @test affine == Expr(:(=), :mu, Expr(:call, :+,
-        :mu_b1, Expr(:call, :*, :mu_b2, :x),
-        Expr(:call, :*, :mu_b3, :int_x_x_z)))
+    @test affine == Expr(:(=), :mu, Expr(:call, :.+,
+        :mu_b1, Expr(:call, :.*, :mu_b2, :x),
+        Expr(:call, :.*, :mu_b3, :int_x_x_z)))
     priors = [a for a in ast.args if a isa Expr && a.head === :call &&
         length(a.args) == 3 && a.args[1] === :~ &&
         a.args[2] in (:mu_b1, :mu_b2, :mu_b3)]
@@ -228,7 +232,7 @@ end
     affines = [a for a in ast.args if a isa Expr && a.head === :(=) &&
         a.args[1] === :mu]
     responses = [a for a in ast.args if a isa Expr && a.head === :call &&
-        length(a.args) == 3 && a.args[1] === :~ &&
+        length(a.args) == 3 && a.args[1] === :.~ &&
         a.args[2] in (:y, :z)]
     @test length(affines) == 1
     @test length(responses) == 2
