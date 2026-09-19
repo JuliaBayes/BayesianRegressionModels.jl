@@ -119,7 +119,7 @@ end
 
 struct _RKTermSpec
     kind::Symbol # :intercept | :continuous | :factor | :offset |
-                # :ranef_gather | :spline
+                # :ranef_gather | :spline | :gp
     columns::Vector{Symbol}
     # factor: (coding=:fullrank, levels=:observed) over every observed level,
     # or (coding=:subset, drop::Int, levels=:observed) over every observed
@@ -2203,6 +2203,109 @@ function _rk_plan_spline_term!(prepared::_BRMPreparedTerm{typeof(t2)},
         (; id, kind=:t2, k=prepared.state.fit.k), id, id)
 end
 
+# ---- exact-GP latent terms (iso single-axis; mirrors `_sb_gp`) ----
+#
+# A `:gp` term carries its thin-layer names + hyper priors in `options`:
+# `(; rho, sigma, z, f, jitter, rho_param, sigma_param)`. The hypers are
+# `_RKSampledParameter`s emitted by the AST preamble (before the predictor
+# affine that uses `f`), NOT entries of `plan.parameters` — the parameters
+# loop emits after predictors, which would violate topo order. The AST is
+# the sole emission path; overlap alpha-renames and GP composes with it
+# (preamble names never collide with the affine).
+
+function _rk_mint_gp_stem!(taken::Set{Symbol},
+        columns::Dict{Symbol,AbstractVector})
+    stem = ""
+    names(stem) = (Symbol(:rho_gp, stem), Symbol(:sigma_gp, stem),
+                   Symbol(:z_gp, stem), Symbol(:f_gp, stem))
+    while any(nm -> nm in taken || haskey(columns, nm), names(stem))
+        stem = stem == "" ? "2" : string(parse(Int, stem) + 1)
+    end
+    for nm in names(stem)
+        push!(taken, nm)
+    end
+    stem
+end
+
+const _RK_GP_HYPER_ADMITTED = "LogNormal, InverseGamma, Gamma, Exponential, " *
+    "or zero-location Normal"
+
+function _rk_gp_hyper_prior(prior, role::String, target::Symbol, axis::Symbol)
+    prefix = "RK backend"
+    where = "predictor `$target` `gp($axis)` $role"
+    prior isa ExprColumn || error(
+        "$prefix: $where prior is not a distribution call")
+    f = getf(prior)
+    f isa Type || error(
+        "$prefix: $where prior is out of slice 1 (admitted: " *
+        "$_RK_GP_HYPER_ADMITTED)")
+    name = nameof(f)
+    isempty(getkwargs(prior)) || error(
+        "$prefix: $where prior cannot have keywords in slice 1")
+    args = getargs(prior)
+    if name === :Normal
+        length(args) == 2 || error(
+            "$prefix: $where prior `Normal` needs 2 " *
+            "arguments, got $(length(args))")
+        location, scale = args
+        location isa Number && location == 0 || error(
+            "$prefix: $where `Normal` prior must have " *
+            "location 0 in slice 1 (a positive scale takes a half-Normal)")
+        scale isa Number && isfinite(Float64(scale)) || error(
+            "$prefix: $where prior hyperparameters must be " *
+            "finite literals")
+        return (:Normal, (0.0, Float64(scale)), :positive)
+    end
+    (name === :LogNormal || name === :InverseGamma || name === :Gamma ||
+        name === :Exponential) || error(
+        "$prefix: $where prior `$name` is out of slice 1 " *
+        "(admitted: $_RK_GP_HYPER_ADMITTED)")
+    expected = _RK_SLICE1_PRIOR_ARITY[name]
+    length(args) == expected || error(
+        "$prefix: $where prior `$name` needs $expected " *
+        "argument(s), got $(length(args))")
+    resolved = map(args) do arg
+        arg isa Number && isfinite(Float64(arg)) || error(
+            "$prefix: $where prior hyperparameters must be " *
+            "finite literals")
+        Float64(arg)
+    end
+    (name, Tuple(resolved), nothing)
+end
+
+function _rk_plan_gp_term!(prepared::_BRMPreparedTerm{typeof(gp)},
+        target::Symbol, data::AbstractDict,
+        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol})
+    prefix = "RK backend"
+    state = prepared.state
+    state.cov === :exp_quad || error(
+        "$prefix: predictor `$target` `gp(...; cov=$(repr(state.cov)))` " *
+        "is out of slice 1 (the thin-layer surface is exp_quad; " *
+        "periodic is sequenced)")
+    (state.iso && length(prepared.source) == 1) || error(
+        "$prefix: predictor `$target` anisotropic or multi-axis `gp(...)` " *
+        "is out of slice 1 (the thin-layer surface is iso single-axis; " *
+        "sequenced)")
+    axis = only(prepared.source)
+    _rk_plan_spline_axis!(axis, target, "gp", data, columns)
+    stem = _rk_mint_gp_stem!(taken, columns)
+    rho = Symbol(:rho_gp, stem)
+    sigma = Symbol(:sigma_gp, stem)
+    z = Symbol(:z_gp, stem)
+    f = Symbol(:f_gp, stem)
+    rho_family, rho_args, rho_support = _rk_gp_hyper_prior(
+        state.rho_prior, "length-scale", target, axis)
+    sig_family, sig_args, sig_support = _rk_gp_hyper_prior(
+        state.sigma_prior, "marginal-scale", target, axis)
+    _RKTermSpec(:gp, [axis],
+        (; rho, sigma, z, f, jitter=Float64(state.jitter),
+         rho_param=_RKSampledParameter(
+             rho, rho_family, rho_args, rho_support, rho),
+         sigma_param=_RKSampledParameter(
+             sigma, sig_family, sig_args, sig_support, sigma)),
+        f, f)
+end
+
 function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         available::Tuple, columns::Dict{Symbol,AbstractVector},
         derived::Vector{_RKDerivedSpec}, taken::Set{Symbol},
@@ -2216,7 +2319,9 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
     structured = filter(t -> _brm_prepares_term(t), raw_terms)
     spline_raw = filter(t -> t isa ExprColumn &&
         (getf(t) === s || getf(t) === t2), structured)
-    other_structured = filter(t -> !(t in spline_raw), structured)
+    gp_raw = filter(t -> t isa ExprColumn && getf(t) === gp, structured)
+    other_structured = filter(
+        t -> !(t in spline_raw) && !(t in gp_raw), structured)
     isempty(other_structured) || error(
         "$prefix: predictor `$target` structured term(s) " *
         "$(join(unique!(string.(getf.(filter(t -> t isa ExprColumn, other_structured)))), ", ")) " *
@@ -2224,7 +2329,7 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
     _rk_gate_spline_term_priors!(brmi, target, spline_raw)
     grouped = filter(t -> _brm_is_grouped_term(t), raw_terms)
     ordinary = Tuple(t for t in raw_terms if !(t in structured) && !(t in grouped))
-    isempty(ordinary) && isempty(spline_raw) && error(
+    isempty(ordinary) && isempty(spline_raw) && isempty(gp_raw) && error(
         "$prefix: predictor `$target` has no terms")
     has_intercept = any(t -> t isa Integer && t == 1, ordinary)
     # Classify before building geometry: fail fast on unknown terms with RK
@@ -2262,12 +2367,17 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         brmi, context, target, ordinary, available, link, terms, derived)
     geometry = _brm_prepare_predictor_geometry(
         brmi, context, target; available_predictors=available)
-    all(t -> t.callable === s || t.callable === t2, geometry.terms) || error(
-        "$prefix: internal: non-spline structured terms survived pre-check " *
-        "in `$target`")
     for prepared in geometry.terms
-        push!(terms, _rk_plan_spline_term!(
-            prepared, target, context.data, columns, taken))
+        if prepared.callable === gp
+            push!(terms, _rk_plan_gp_term!(
+                prepared, target, context.data, columns, taken))
+        elseif prepared.callable === s || prepared.callable === t2
+            push!(terms, _rk_plan_spline_term!(
+                prepared, target, context.data, columns, taken))
+        else
+            error("$prefix: internal: unexpected structured term " *
+                "survived pre-check in `$target`")
+        end
     end
     isnothing(geometry.r2d2) || error(
         "$prefix: predictor `$target` `r2d2` priors are out of slice 1")
@@ -3157,8 +3267,27 @@ function _rk_gate_name_hygiene!(predictor_specs::AbstractVector,
             "$prefix: internal: generated spline id `$sn` collides with " *
             "raw column `$sn`")
     end
+    gnames = Symbol[]
+    for spec in predictor_specs, term in spec.terms
+        term.kind === :gp || continue
+        append!(gnames, (term.options.rho, term.options.sigma,
+            term.options.z, term.options.f))
+    end
+    length(unique(gnames)) == length(gnames) || error(
+        "$prefix: internal: duplicate gp latent names")
+    for gn in gnames
+        gn in both && error(
+            "$prefix: internal: generated gp name `$gn` collides with a " *
+            "parameter/assignment name")
+        gn in pnames && error(
+            "$prefix: internal: generated gp name `$gn` collides with " *
+            "predictor `$gn`")
+        haskey(columns, gn) && error(
+            "$prefix: internal: generated gp name `$gn` collides with " *
+            "raw column `$gn`")
+    end
     for n in sort!(collect(Iterators.flatten(
-            (pnames, both, dnames, vnames, snames, keys(columns)))))
+            (pnames, both, dnames, vnames, snames, gnames, keys(columns)))))
         startswith(string(n), "_ppl_") && error(
             "$prefix: name `$n` uses the reserved `_ppl_` prefix; rename it")
     end

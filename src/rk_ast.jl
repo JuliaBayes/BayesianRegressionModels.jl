@@ -59,6 +59,8 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol})
             # assigned-then-used `spline(...)` closed (no gather alias).
             push!(summands,
                 Expr(:call, :spline, QuoteNode(term.options.id)))
+        elseif term.kind === :gp
+            push!(summands, term.options.f)
         end
     end
     length(summands) == 1 ? only(summands) :
@@ -267,6 +269,37 @@ function _rk_ast_vector_parameter(parameter::_RKVectorParameter)
         Expr(:call, :Dirichlet, Expr(:vect, alpha...)))
 end
 
+# A GP latent's `@plate` block: `z[i] ~ Normal(0, 1)` over the using
+# response's index (length `n_obs`, like every column). The macrocall
+# carries a synthetic line node; the surface reads only `args[3]`.
+function _rk_ast_plate(name::Symbol, range::Symbol)
+    cell = Expr(:call, :~,
+        Expr(:ref, name, :i), Expr(:call, :Normal, 0.0, 1.0))
+    loop = Expr(:for, Expr(:(=), :i, Expr(:call, :eachindex, range)),
+        Expr(:block, cell))
+    Expr(:macrocall, Symbol("@plate"), LineNumberNode(0), loop)
+end
+
+# `gp_chol_latent(gp_exp_quad_cov(x, sigma, rho, jitter), z)`: arg order
+# is (locations, sigma, rho, jitter) per the thin-layer contract.
+function _rk_ast_gp_latent(term)
+    options = term.options
+    Expr(:call, :gp_chol_latent,
+        Expr(:call, :gp_exp_quad_cov, only(term.columns),
+            options.sigma, options.rho, options.jitter),
+        options.z)
+end
+
+function _rk_ast_gp_names(plan::_RKStructuralPlan)
+    names = Set{Symbol}()
+    for predictor in plan.predictors, term in predictor.terms
+        term.kind === :gp || continue
+        options = term.options
+        push!(names, options.rho, options.sigma, options.z, options.f)
+    end
+    names
+end
+
 function _rk_emit_ast(plan::_RKStructuralPlan)
     taken = union(Set(keys(plan.columns)),
         Set(p.name for p in plan.parameters),
@@ -274,7 +307,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         Set(p.name for p in plan.predictors),
         Set(d.name for d in plan.derived),
         Set(v.name for v in plan.vector_parameters),
-        _rk_ast_spline_ids(plan))
+        _rk_ast_spline_ids(plan),
+        _rk_ast_gp_names(plan))
     # A predictor sharing its name with a data column cannot keep it:
     # the program has one namespace, so the affine (definition and
     # response uses) is alpha-renamed. Unreachable via `@brm`
@@ -292,6 +326,11 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
     end
     priors = Dict((p.predictor, p.addressee) => (p.location, p.scale)
         for p in plan.population_priors)
+    response_for = Dict{Symbol,Symbol}()
+    for response in plan.responses
+        haskey(response_for, response.predictor) ||
+            (response_for[response.predictor] = response.response)
+    end
     stmts = Expr[]
     for derived in plan.derived
         push!(stmts, Expr(:(=), derived.name, derived.expression))
@@ -301,7 +340,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         counter = 0
         for (index, term) in enumerate(predictor.terms)
             (term.kind === :offset || term.kind === :ranef_gather ||
-                term.kind === :spline) && continue
+                term.kind === :spline || term.kind === :gp) && continue
             counter += 1
             coef = _rk_ast_coef_name(
                 string(predictor.name, "_b", counter), taken)
@@ -324,6 +363,18 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         for term in predictor.terms
             term.kind === :spline || continue
             push!(stmts, _rk_ast_spline_basis(term))
+        end
+        for term in predictor.terms
+            term.kind === :gp || continue
+            options = term.options
+            push!(stmts, _rk_ast_sampled(options.rho_param))
+            push!(stmts, _rk_ast_sampled(options.sigma_param))
+            response = get(response_for, predictor.name, nothing)
+            isnothing(response) && error(
+                "RK backend: internal: gp predictor `$(predictor.name)` " *
+                "feeds no response")
+            push!(stmts, _rk_ast_plate(options.z, response))
+            push!(stmts, Expr(:(=), options.f, _rk_ast_gp_latent(term)))
         end
         push!(stmts, Expr(:(=), get(rename, predictor.name, predictor.name),
             _rk_ast_affine(predictor, coefs)))
