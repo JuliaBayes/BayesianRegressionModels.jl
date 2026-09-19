@@ -211,6 +211,17 @@ struct _RKStructuralPlan
     vector_parameters::Vector{_RKVectorParameter}
 end
 
+# A submodel-bearing emitted program: `defs` are surface-spelling
+# `sm(args...) = begin ... end` definitions (the extension evaluates
+# each through `@rkppl` in a fresh module per lowering); `main` is the
+# `begin ... end` block lowered via `lower_rkppl(main, data_names;
+# mod)`. Kernel plans carry no defs (a single plate, no top-level
+# repeated structure — `plate() do` bodies are not expansion sites).
+struct _RKEmittedProgram
+    defs::Vector{Expr}
+    main::Expr
+end
+
 """
     RKBRMI(brmi; kwargs...)
 
@@ -4142,7 +4153,7 @@ function _rk_emit_ast(plan::_RKKernelPlan)
             _rk_lower_assignment_expr(assignment.expression, assignment.name)))
     end
     push!(stmts, _rk_emit_kernel_ast(plan.kernel))
-    Expr(:block, stmts...)
+    _RKEmittedProgram(Expr[], Expr(:block, stmts...))
 end
 
 """

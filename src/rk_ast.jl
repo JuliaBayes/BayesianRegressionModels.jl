@@ -1,7 +1,9 @@
 # BRM-side `@rkppl` AST emission (phase 2 U3 retarget). Pure Julia: builds
-# the `begin ... end` block `Expr` that the thin layer lowers via
-# `lower_rkppl(ast, data_names)` — no ReactiveKernels dependency, so this
-# file is committed-testable without the PPL.
+# the `_RKEmittedProgram` (surface-spelling submodel `defs` + the `main`
+# `begin ... end` block `Expr`) that the thin layer lowers via
+# `lower_rkppl(main, data_names; mod)` after evaluating the defs through
+# `@rkppl` — no ReactiveKernels dependency, so this file is
+# committed-testable without the PPL.
 #
 # Total over slice-1 plans: offset-only predictors emit a bare data
 # affine (`mu = z`, no coefficients, no priors), and a predictor sharing
@@ -33,6 +35,48 @@ function _rk_ast_coef_name(base::String, taken::Set{Symbol})
     end
     push!(taken, name)
     name
+end
+
+# Thin-layer `_ns` mirror: a submodel local `nm` under use-site LHS
+# `lhs` expands to `lhs_nm`. The emitter predicts expanded names with
+# this to reserve them in `taken` (no silent merge on collision).
+_rk_ast_ns(lhs::Symbol, nm::Symbol) = Symbol(lhs, :_, nm)
+
+# Mint a submodel-local spelling: the candidate must avoid `taken`
+# itself (a local shadows any same-named free outer reference in the
+# body — arguments fail loud, free names would clobber silently), must
+# avoid the def's own argument names (the thin layer rejects arg/local
+# overlap), and its expansion must avoid `taken` (no merge with an
+# existing program name). Bumps the LOCAL spelling; the expanded name
+# follows. Expanded names match the old flat spellings exactly except
+# in adversarial edges (data holding a bare `bN` column, or a renamed
+# predictor LHS whose prefix differs).
+function _rk_ast_mint_local(base::String, lhs::Symbol, taken::Set{Symbol},
+        argset::Set{Symbol})
+    candidate = Symbol(base)
+    while candidate in taken || candidate in argset ||
+            _rk_ast_ns(lhs, candidate) in taken
+        candidate = Symbol(string(candidate), "_")
+    end
+    push!(taken, _rk_ast_ns(lhs, candidate))
+    candidate
+end
+
+_rk_ast_popefs_name(predictor::Symbol) = Symbol(:popefs_, predictor)
+
+# Sorted distinct data columns the affine reads: the submodel's explicit
+# inputs (SB passes X explicitly). Outer parameters/atoms (factor coefs,
+# spline/hsgp atoms, gp latents, ranef draws) stay free references.
+function _rk_ast_popefs_args(predictor::_RKPredictorSpec)
+    cols = Set{Symbol}()
+    for term in predictor.terms
+        (term.kind === :continuous || term.kind === :factor ||
+            term.kind === :offset || term.kind === :ranef_gather ||
+            term.kind === :monotonic ||
+            term.kind === :monotonic_summand) || continue
+        union!(cols, term.columns)
+    end
+    sort!(collect(cols))
 end
 
 function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol})
@@ -160,22 +204,39 @@ function _rk_ast_factor_prior(coef::Symbol, col::Symbol,
         _rk_ast_dotted(:Normal, location, scale))
 end
 
-# Scale use-site: a scalar scale passes through; a distributional scale
-# predictor inverts its link exactly like a location predictor (`exp.` for
-# log) so the response always reads the constrained vector.
-function _rk_ast_scale_use(response::_RKLikelihoodSpec,
-        rename::Dict{Symbol,Symbol}, predictor_link::Dict{Symbol,Symbol})
+# The scale-slot formal role per family (Stan/SB-literal where one
+# exists): `normal_id_glm(eta, sigma)` reads like its Stan fused form.
+_rk_ast_glm_scale_role(family::Symbol) =
+    family === :nb2_log ? :phi :
+    family === :gamma_log ? :alpha :
+    family === :beta_logit ? :kappa : :sigma
+
+_rk_ast_glm_uses_scale(family::Symbol) =
+    family === :gaussian || family === :nb2_log ||
+    family === :gamma_log || family === :beta_logit
+
+# The scale-slot body spelling inside a stream def. A direct scale
+# (outer name, literal, or the plan-forbidden nothing) passes through
+# the role formal — the call carries the value, so literal and outer
+# scales share one def. A distributional scale predictor inverts its
+# link on the role formal exactly like a location predictor (`exp.` for
+# log), so the response always reads the constrained vector; the link
+# is structural and joins the def name (see `_rk_ast_glm_name`).
+# Returns `(formal, body)`.
+function _rk_ast_glm_scale_leaf(response::_RKLikelihoodSpec,
+        predictor_link::Dict{Symbol,Symbol})
     name = response.scale_predictor
-    name === nothing && return response.scale
+    formal = _rk_ast_glm_scale_role(response.family)
+    name === nothing && return formal, formal
     response.scale === nothing || error(
         "RK backend: internal: response `$(response.response)` carries " *
         "both a scalar scale and a scale predictor")
     link = predictor_link[name]
-    use = get(rename, name, name)
-    link === :identity && return use
-    link === :log && return _rk_ast_dotted(:exp, use)
-    link === :logit && return _rk_ast_dotted(:logistic, use)
-    error("RK backend: internal: scale predictor `$name` has link `$link`")
+    body = link === :identity ? formal :
+        link === :log ? _rk_ast_dotted(:exp, formal) :
+        link === :logit ? _rk_ast_dotted(:logistic, formal) :
+        error("RK backend: internal: scale predictor `$name` has link `$link`")
+    formal, body
 end
 
 # The inverse-link spelling (`Bernoulli.(logistic.(η))`,
@@ -184,12 +245,19 @@ end
 # `LikelihoodSpec` carries the same family+link the link-faithful
 # direct serializer produced, on all six slice-1 families (verified
 # behaviorally against `lower_rkppl`, not assumed).
+#
+# `leaf` maps each role to its stream-def BODY spelling: `:predictor`
+# (`:eta`, or `:p` for simplex responses), `:scale` (the role formal,
+# possibly link-inverted), `:trials`/`:weights`/`:lower`/`:upper`
+# (formals; the call carries columns or literals so defs share across
+# values), `:extra_predictors` (renamed free refs — categorical tails
+# are per-response defs). Evidence and weights STRUCTURE (which
+# wrapper, whether weighted) still read from `response`.
 function _rk_ast_response_dist(response::_RKLikelihoodSpec,
-        rename::Dict{Symbol,Symbol}, predictor_link::Dict{Symbol,Symbol})
-    predictor = get(rename, response.predictor, response.predictor)
+        leaf::Dict{Symbol,Any})
+    predictor = leaf[:predictor]
     base = if response.family === :gaussian
-        _rk_ast_dotted(:Normal, predictor,
-            _rk_ast_scale_use(response, rename, predictor_link))
+        _rk_ast_dotted(:Normal, predictor, leaf[:scale])
     elseif response.family === :bernoulli_logit
         # Triple 2 and triple 3 both lower to the T2 shape: the affine
         # value feeds logistic either way.
@@ -200,7 +268,7 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
     elseif response.family === :binomial_logit
         # Both triples lower to one spelling: `Binomial.(n,
         # logistic.(p))` with a column or literal `n`.
-        _rk_ast_dotted(:Binomial, response.trials,
+        _rk_ast_dotted(:Binomial, leaf[:trials],
             _rk_ast_dotted(:logistic, predictor))
     elseif response.family === :bernoulli_probit
         _rk_ast_dotted(:Bernoulli,
@@ -209,10 +277,10 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
         _rk_ast_dotted(:Bernoulli,
             _rk_ast_dotted(:cloglog, predictor))
     elseif response.family === :binomial_probit
-        _rk_ast_dotted(:Binomial, response.trials,
+        _rk_ast_dotted(:Binomial, leaf[:trials],
             _rk_ast_dotted(:probit, predictor))
     elseif response.family === :binomial_cloglog
-        _rk_ast_dotted(:Binomial, response.trials,
+        _rk_ast_dotted(:Binomial, leaf[:trials],
             _rk_ast_dotted(:cloglog, predictor))
     elseif response.family === :beta_logit
         # Mean-concentration form: the plan pins mu (the predictor
@@ -221,25 +289,25 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
         # words (peel-and-discard, like `logistic`/`exp`); the AST
         # never calls them.
         mu_log = _rk_ast_dotted(:logistic, predictor)
-        kappa = response.scale
+        kappa = leaf[:scale]
         _rk_ast_dotted(:Beta,
             Expr(:call, :.*, mu_log, kappa),
             Expr(:call, :.*, Expr(:call, :.-, 1, mu_log), kappa))
     elseif response.family === :nb2_log
         _rk_ast_dotted(:NegativeBinomial2,
             _rk_ast_dotted(:exp, predictor),
-            _rk_ast_scale_use(response, rename, predictor_link))
+            leaf[:scale])
     elseif response.family === :gamma_log
         # Mean-shape form: the plan pins both alpha positions identical,
         # so the same value emits twice.
-        shape = _rk_ast_scale_use(response, rename, predictor_link)
+        shape = leaf[:scale]
         _rk_ast_dotted(:Gamma, shape, Expr(:call, :./,
             _rk_ast_dotted(:exp, predictor), shape))
     elseif response.family === :categorical_logit
         # Reference-coded: K−1 non-reference etas, class 1 the implicit
         # zero reference (class order follows predictor order).
-        extras = [get(rename, p, p) for p in response.extra_predictors]
-        _rk_ast_dotted(:CategoricalLogit, predictor, extras...)
+        _rk_ast_dotted(:CategoricalLogit, predictor,
+            leaf[:extra_predictors]...)
     elseif response.family === :ordered_logit
         # Cutpoints are implicit surface-side (`y_cutpoints`).
         _rk_ast_dotted(:OrderedLogistic, predictor)
@@ -255,29 +323,130 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
             Expr(:call, linktag), predictor)
     elseif response.family === :multinomial
         # Lead count column (LHS) + trials + simplex + tail count columns.
-        _rk_ast_dotted(:Multinomial, response.trials, predictor,
+        _rk_ast_dotted(:Multinomial, leaf[:trials], predictor,
             response.count_columns...)
     elseif response.family === :categorical
         _rk_ast_dotted(:Categorical, predictor)
     end
     evidence = response.evidence
-    # Missing sides emit as ∓Inf floats; the thin layer normalizes them
-    # back to nothing at bind.
     dist = if evidence.kind === :truncated
-        lo = evidence.lower === nothing ? -Inf : evidence.lower
-        hi = evidence.upper === nothing ? Inf : evidence.upper
-        _rk_ast_dotted(:truncated, base, lo, hi)
+        _rk_ast_dotted(:truncated, base, leaf[:lower], leaf[:upper])
     elseif evidence.kind === :censored
-        lo = evidence.lower === nothing ? -Inf : evidence.lower
-        hi = evidence.upper === nothing ? Inf : evidence.upper
-        _rk_ast_dotted(:censored, base, lo, hi)
+        _rk_ast_dotted(:censored, base, leaf[:lower], leaf[:upper])
     elseif evidence.kind === :interval_censored
-        _rk_ast_dotted(:interval_censored, base, evidence.upper)
+        _rk_ast_dotted(:interval_censored, base, leaf[:upper])
     else
         base
     end
     response.weights === nothing ? dist :
-        _rk_ast_dotted(:weighted, dist, response.weights)
+        _rk_ast_dotted(:weighted, dist, leaf[:weights])
+end
+
+# The shared stream-submodel lattice name for a response: mechanical
+# `<family>_glm` (+ ordinal structure/link, + distributional-scale
+# link, + evidence, + weights), except the Gaussian identity plain
+# case, which takes SB's fused name `normal_id_glm` verbatim for
+# cross-backend grep-ability. Every structural body input joins the
+# name; value inputs (columns, literals, outer names) ride arguments,
+# so same name means same body and defs dedupe by name. Per-response
+# `glm_<response>` names (see below) prefix with `glm_` while lattice
+# names suffix with it, so the two classes cannot collide.
+function _rk_ast_glm_name(response::_RKLikelihoodSpec,
+        predictor_link::Dict{Symbol,Symbol})
+    family = response.family
+    if family === :gaussian && response.link === :identity &&
+            response.scale_predictor === nothing &&
+            response.evidence.kind === :none && response.weights === nothing
+        return :normal_id_glm
+    end
+    parts = Any[family]
+    family === :ordinal &&
+        push!(parts, response.ordinal_structure, response.link)
+    if response.scale_predictor !== nothing
+        push!(parts, :dist, predictor_link[response.scale_predictor])
+    end
+    response.evidence.kind !== :none && push!(parts, response.evidence.kind)
+    response.weights !== nothing && push!(parts, :weighted)
+    push!(parts, :glm)
+    Symbol(join(parts, "_"))
+end
+
+# Categorical-logit tails and multinomial counts vary in number per
+# response, so no fixed-arity shared def fits: those responses get a
+# per-response `glm_<response>` def (same body scheme, bespoke name).
+_rk_ast_glm_defname(response::_RKLikelihoodSpec,
+        predictor_link::Dict{Symbol,Symbol}) =
+    (response.family === :categorical_logit ||
+        response.family === :multinomial) ?
+    Symbol(:glm_, response.response) :
+    _rk_ast_glm_name(response, predictor_link)
+
+# Build the stream-submodel definition + use-site call for a response.
+# Formal order is fixed — location, scale role, `n`, `weights`,
+# `lower`, `upper` (absent roles skipped) — so shared defs agree by
+# construction. Location is `:eta` (pre-link by construction — the body
+# applies the inverse link) or `:p` for simplex responses. Missing
+# evidence sides pass ∓Inf floats; the thin layer normalizes them back
+# to nothing at bind. Returns `(defname, def, call)`.
+function _rk_ast_glm_parts(response::_RKLikelihoodSpec,
+        rename::Dict{Symbol,Symbol}, predictor_link::Dict{Symbol,Symbol},
+        taken::Set{Symbol})
+    family = response.family
+    loc_formal =
+        (family === :multinomial || family === :categorical) ? :p : :eta
+    formals = Symbol[loc_formal]
+    callargs = Any[get(rename, response.predictor, response.predictor)]
+    leaf = Dict{Symbol,Any}(:predictor => loc_formal)
+    if _rk_ast_glm_uses_scale(family)
+        formal, body = _rk_ast_glm_scale_leaf(response, predictor_link)
+        leaf[:scale] = body
+        push!(formals, formal)
+        push!(callargs, response.scale_predictor === nothing ?
+            response.scale : get(rename, response.scale_predictor,
+                response.scale_predictor))
+    end
+    if family === :binomial_logit || family === :binomial_probit ||
+            family === :binomial_cloglog || family === :multinomial
+        leaf[:trials] = :n
+        push!(formals, :n)
+        push!(callargs, response.trials)
+    end
+    if response.weights !== nothing
+        leaf[:weights] = :weights
+        push!(formals, :weights)
+        push!(callargs, response.weights)
+    end
+    kind = response.evidence.kind
+    if kind === :truncated || kind === :censored
+        leaf[:lower] = :lower
+        leaf[:upper] = :upper
+        push!(formals, :lower, :upper)
+        lower = response.evidence.lower
+        upper = response.evidence.upper
+        push!(callargs, lower === nothing ? -Inf : lower,
+            upper === nothing ? Inf : upper)
+    elseif kind === :interval_censored
+        leaf[:upper] = :upper
+        push!(formals, :upper)
+        push!(callargs, response.evidence.upper)
+    end
+    if family === :categorical_logit
+        leaf[:extra_predictors] =
+            [get(rename, p, p) for p in response.extra_predictors]
+    end
+    dist = _rk_ast_response_dist(response, leaf)
+    # The response slot: `slot` unless taken (a free tail/count ref with
+    # the same spelling would clobber under substitution).
+    slot = :slot
+    while slot in taken
+        slot = Symbol(string(slot), "_")
+    end
+    defname = _rk_ast_glm_defname(response, predictor_link)
+    def = Expr(:(=), Expr(:call, defname, formals...),
+        Expr(:block, Expr(:call, :.~, slot, dist), slot))
+    call = Expr(:call, :~, response.response,
+        Expr(:call, defname, callargs...))
+    defname, def, call
 end
 
 function _rk_ast_bucket_margin(z::_RKRanefZRecipe)
@@ -416,12 +585,24 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         haskey(response_for, response.predictor) ||
             (response_for[response.predictor] = response.response)
     end
+    defs = Expr[]
+    seen_glm = Dict{Symbol,Expr}()
     stmts = Expr[]
     for derived in plan.derived
         push!(stmts, Expr(:(=), derived.name, derived.expression))
     end
     for predictor in plan.predictors
+        lhs = get(rename, predictor.name, predictor.name)
+        # Scalar-coefficient terms (intercept/continuous/free-beta
+        # monotonic) become submodel locals inside a per-predictor
+        # `popefs_<pred>` latent submodel; factor terms keep top-level
+        # broadcast priors (a `c[levels(g)]` LHS is not a bare Symbol
+        # and cannot sit in a submodel body). Counter order is
+        # unchanged, so expanded names match the old flat spellings.
+        argcols = _rk_ast_popefs_args(predictor)
+        argset = Set(argcols)
         coefs = Dict{Int,Symbol}()
+        scalar_stmts = Expr[]
         counter = 0
         for (index, term) in enumerate(predictor.terms)
             (term.kind === :offset || term.kind === :ranef_gather ||
@@ -429,9 +610,6 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
                 term.kind === :gp || term.kind === :dar ||
                 term.kind === :monotonic_summand) && continue
             counter += 1
-            coef = _rk_ast_coef_name(
-                string(predictor.name, "_b", counter), taken)
-            coefs[index] = coef
             key = (predictor.name, term.addressee)
             haskey(priors, key) || error(
                 "RK backend: internal: no population prior for " *
@@ -440,11 +618,17 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
             if term.kind === :factor
                 col = only(term.columns)
                 K = length(_rk_grouping_levels(plan.columns[col]))
+                coef = _rk_ast_coef_name(
+                    string(predictor.name, "_b", counter), taken)
+                coefs[index] = coef
                 push!(stmts, _rk_ast_factor_prior(
                     coef, col, term.options, K, location, scale))
             else
-                push!(stmts, Expr(:call, :~,
-                    coef, Expr(:call, :Normal, location, scale)))
+                local_coef = _rk_ast_mint_local(
+                    string("b", counter), lhs, taken, argset)
+                coefs[index] = local_coef
+                push!(scalar_stmts, Expr(:call, :~,
+                    local_coef, Expr(:call, :Normal, location, scale)))
             end
         end
         for term in predictor.terms
@@ -473,8 +657,20 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
             push!(stmts, _rk_ast_plate(options.z, response))
             push!(stmts, Expr(:(=), options.f, _rk_ast_gp_latent(term)))
         end
-        push!(stmts, Expr(:(=), get(rename, predictor.name, predictor.name),
-            _rk_ast_affine(predictor, coefs)))
+        if isempty(scalar_stmts)
+            # No scalar coefficients (offset-only, gp-only,
+            # factor-only): nothing repeated, nothing to name — the
+            # affine stays inline exactly as before.
+            push!(stmts, Expr(:(=), lhs, _rk_ast_affine(predictor, coefs)))
+        else
+            defname = _rk_ast_popefs_name(predictor.name)
+            body = Expr(:block, scalar_stmts...,
+                _rk_ast_affine(predictor, coefs))
+            push!(defs, Expr(:(=),
+                Expr(:call, defname, argcols...), body))
+            push!(stmts, Expr(:call, :~, lhs,
+                Expr(:call, defname, argcols...)))
+        end
     end
     for bucket in plan.ranef_buckets
         push!(stmts, _rk_ast_bucket(bucket, rename))
@@ -492,9 +688,17 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
     end
     predictor_link = Dict(spec.name => spec.link for spec in plan.predictors)
     for response in plan.responses
-        push!(stmts, Expr(:call, :.~,
-            response.response,
-            _rk_ast_response_dist(response, rename, predictor_link)))
+        defname, def, call = _rk_ast_glm_parts(
+            response, rename, predictor_link, taken)
+        if haskey(seen_glm, defname)
+            seen_glm[defname] == def || error(
+                "RK backend: internal: glm lattice collision on " *
+                "`$defname` (same name, different body)")
+        else
+            seen_glm[defname] = def
+            push!(defs, def)
+        end
+        push!(stmts, call)
     end
-    Expr(:block, stmts...)
+    _RKEmittedProgram(defs, Expr(:block, stmts...))
 end

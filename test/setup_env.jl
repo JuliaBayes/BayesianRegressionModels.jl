@@ -54,12 +54,14 @@ const PINS = [
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
-    # through. 4fa2f88 (2026-09-19, main): SB-mirroring mo/mo1 monotonic
-    # effects over increment simplexes (peer todo 1d9d0cy; the surface BRM
-    # mo/mo1 emission targets) on top of the 50ef06e floor (KernelPlate
-    # reader + ranef Stage C + offset-only predictors + HSGP Stage A).
-    # The 50ef06e..4fa2f88 range also carries the ordinal-v12 slice.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "4fa2f88e6de1d45ad90619e9512d2490ed0e04d2"),  # main
+    # through. 86e5265 (2026-09-19, main): v12 PPL primitives — ordinal
+    # modeled latent scale, mo/mo1 simplex (peer todo 1d9d0cy; the surface
+    # BRM mo/mo1 emission targets), non-centered scan/ar, LKJ Cholesky
+    # log-Jacobian fix — on top of the KernelPlate-reader floor (50ef06e;
+    # peer todo 1q5mk32, P2 execution-parity gate). The BRM-side
+    # submodel-emission flip (todo 10n4rb4) builds against this pin: the
+    # RKPPLSubmodel/_expand_submodels surface is stable here.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "86e52656adf70c9c1981d9964cc7278066985f13"),  # main
 ]
 
 function main()
