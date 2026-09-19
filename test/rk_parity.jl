@@ -1,4 +1,4 @@
-# test/rk_parity.jl — BRM→RK end-to-end parity on ranef models.
+# test/rk_parity.jl — BRM→RK end-to-end parity (ranef + P2 kernel models).
 #
 # Run: julia --project=test test/rk_parity.jl
 #
@@ -315,5 +315,88 @@ end
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
+end
+
+# P2 kernel(...) execution parity (peer KernelPlate reader, RK @ 50ef06e).
+# Ex1/Ex2 neutral translations from parent todo 14bv4nq; SB oracles
+# re-verified on c13f41c (same numbers the peer pins in PPL test_kernel.jl).
+# Convention: posterior at constrained sigma = 1.0 (u = [0.0]) == SB oracle
+# (logjac(0) = 0); the unconstrained gradient == oracle constrained d/dσ + 1
+# (exp-Jacobian). Kernel-built specs expose no direct :posterior prepare
+# query, so the gradient cross-check findiffs the sampler value itself.
+_kernel_pk1cmt_cols = (;
+    t    = [[0.5, 1.0, 2.0, 4.0] for _ in 1:3],
+    dose = fill(100.0, 3),
+    dv   = [[1.0, 2.0, 1.5, 0.8] for _ in 1:3],
+    CL   = [5.0, 6.0, 4.5],
+    Vc   = [50.0, 55.0, 48.0],
+    Ka   = [1.0, 1.2, 0.9],
+)
+_kernel_doseplate_cols = (;
+    dose = fill(100.0, 4),
+    dv   = [0.5, 1.2, 2.1, 3.3],
+    ls   = [0.1, 0.2, 0.15, 0.25],
+)
+
+function _check_kernel_parity(backend::BRM.RKBRMI, u, val_oracle, grad_oracle;
+        grad_atol = 1e-8)
+    problem = BRM.rk_logdensity_problem(backend;
+        ad_backend = _PARITY_BACKEND, u0 = u)
+    @test LogDensityProblems.dimension(problem) == length(u)
+    value, grad = LogDensityProblems.logdensity_and_gradient(problem, u)
+    @test value ≈ val_oracle atol = 1e-9
+    @test grad[1] ≈ grad_oracle + 1.0 atol = grad_atol
+    @test all(isfinite, grad)
+    @test grad ≈ _findiff_grad(
+        w -> LogDensityProblems.logdensity(problem, w), u) rtol = 1e-5 atol = 1e-7
+    return value
+end
+
+@testset "rk parity kernel Ex1 pk1cmt" begin
+    brmi = @brm _kernel_pk1cmt_cols begin
+        sigma ~ Exponential(1)
+        pred ~ kernel(t, dose, dv, CL, Vc, Ka) do ts, d, yy, CLi, Vci, Kai
+            ke = CLi / Vci
+            mu = d * Kai / (Vci * (Kai - ke)) .* (exp.(-ke .* ts) .- exp.(-Kai .* ts))
+            yy ~ Normal(mu, sigma)
+            mu
+        end
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    @test plan isa BRM._RKKernelPlan
+    @test plan.kernel.n_subjects == 3
+    @test plan.kernel.data_columns == [:t, :dose, :dv, :CL, :Vc, :Ka]
+    @test plan.kernel.slice_kinds == [:vector, :scalar, :vector, :scalar, :scalar, :scalar]
+    @test plan.kernel.n_timepoints == 4
+    @test plan.obs.family === :gaussian
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 1
+    @test _layout_signature(layout) == [(:sampled, :sigma, 1, :exp)]
+    _check_kernel_parity(backend, [0.0], -13.703526816545866, -9.647471163820416)
+end
+
+@testset "rk parity kernel Ex2 doseplate" begin
+    brmi = @brm _kernel_doseplate_cols begin
+        sigma ~ Exponential(1)
+        pred ~ kernel(dose, dv, ls) do dd, yy, lsi
+            mu = (dd ./ 10.0) .* exp.(lsi)
+            yy ~ Normal(mu, sigma)
+            mu
+        end
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    @test plan isa BRM._RKKernelPlan
+    @test plan.kernel.n_subjects == 4
+    @test plan.kernel.data_columns == [:dose, :dv, :ls]
+    @test plan.kernel.slice_kinds == [:scalar, :scalar, :scalar]
+    @test plan.kernel.n_timepoints === nothing
+    @test plan.obs.family === :gaussian
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 1
+    @test _layout_signature(layout) == [(:sampled, :sigma, 1, :exp)]
+    _check_kernel_parity(backend, [0.0], -211.80708530040758, 409.2626623351777;
+        grad_atol = 1e-7)
 end
 
