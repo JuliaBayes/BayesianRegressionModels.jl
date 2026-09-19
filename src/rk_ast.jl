@@ -54,10 +54,36 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol})
                 Expr(:call, :ranef, QuoteNode(id), group))
         elseif term.kind === :offset
             push!(summands, only(term.columns))
+        elseif term.kind === :spline
+            # Direct summand, always inline: the thin layer fails an
+            # assigned-then-used `spline(...)` closed (no gather alias).
+            push!(summands,
+                Expr(:call, :spline, QuoteNode(term.options.id)))
         end
     end
     length(summands) == 1 ? only(summands) :
         Expr(:call, :.+, summands...)
+end
+
+# A spline declaration: `spline_basis(:id, axes...; k=k)` — kind is
+# inferred thin-layer-side from the axis count (1 → `:tps`, 2 → `:t2`),
+# so BRM states only the literal `k` (`Int` for `s`, `(Int, Int)` for
+# `t2`). Shape-verified against `Meta.parse` of the surface spelling.
+function _rk_ast_spline_basis(term)
+    options = term.options
+    kval = options.k isa Tuple ? Expr(:tuple, options.k...) : options.k
+    Expr(:call, :spline_basis,
+        Expr(:parameters, Expr(:kw, :k, kval)),
+        QuoteNode(options.id), term.columns...)
+end
+
+function _rk_ast_spline_ids(plan::_RKStructuralPlan)
+    ids = Set{Symbol}()
+    for predictor in plan.predictors, term in predictor.terms
+        term.kind === :spline || continue
+        push!(ids, term.options.id)
+    end
+    ids
 end
 
 function _rk_ast_dotted(head::Symbol, args...)
@@ -224,7 +250,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         Set(a.name for a in plan.assignments),
         Set(p.name for p in plan.predictors),
         Set(d.name for d in plan.derived),
-        Set(v.name for v in plan.vector_parameters))
+        Set(v.name for v in plan.vector_parameters),
+        _rk_ast_spline_ids(plan))
     # A predictor sharing its name with a data column cannot keep it:
     # the program has one namespace, so the affine (definition and
     # response uses) is alpha-renamed. Unreachable via `@brm`
@@ -250,7 +277,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         coefs = Dict{Int,Symbol}()
         counter = 0
         for (index, term) in enumerate(predictor.terms)
-            (term.kind === :offset || term.kind === :ranef_gather) && continue
+            (term.kind === :offset || term.kind === :ranef_gather ||
+                term.kind === :spline) && continue
             counter += 1
             coef = _rk_ast_coef_name(
                 string(predictor.name, "_b", counter), taken)
@@ -269,6 +297,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
                 push!(stmts, Expr(:call, :~,
                     coef, Expr(:call, :Normal, location, scale)))
             end
+        end
+        for term in predictor.terms
+            term.kind === :spline || continue
+            push!(stmts, _rk_ast_spline_basis(term))
         end
         push!(stmts, Expr(:(=), get(rename, predictor.name, predictor.name),
             _rk_ast_affine(predictor, coefs)))
