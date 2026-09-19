@@ -9,6 +9,7 @@
 
 using Test
 using BayesianRegressionModels
+using CategoricalArrays: categorical
 using Distributions: Bernoulli, Binomial, Categorical, Cauchy, Dirichlet,
                      Exponential, Gamma, Multinomial, Normal, Poisson,
                      truncated
@@ -623,11 +624,8 @@ end
 end
 
 @testset "fail closed: scope" begin
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
-        mu ~ 1 + x + (1 | g)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
-    end)
+    # `(1|g)` used to fail here; the draws regime admits it now (ranef
+    # buckets, covered below). Structured terms stay closed.
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + s(x)
         sigma ~ Exponential(1)
@@ -1060,4 +1058,349 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
+end
+
+@testset "ranef ID bucket plan shape" begin
+    brmi = @brm df begin
+        mu ~ 1 + x + (1 + x | ID | g)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    @test length(plan.ranef_buckets) == 1
+    bucket = only(plan.ranef_buckets)
+    @test bucket.id === :ID
+    @test bucket.group === :g
+    @test bucket.kind === :correlated
+    @test bucket.lkj_eta == 1.0
+    @test bucket.label === :bucket_ID_g
+    margins = [(m.predictor, m.coefficient) for m in bucket.margins]
+    @test margins == [(:mu, :Intercept), (:mu, :x)]
+    @test [m.z.kind for m in bucket.margins] == [:ones, :column]
+    @test bucket.slices == [(:mu, 1:2)]
+    # ranefcoefnames order agreement with SB.
+    sb_margins = [(m.predictor, m.coefficient)
+        for m in BRM.ranefcoefnames(brmi, :ID)]
+    @test margins == sb_margins
+    terms = only(plan.predictors).terms
+    @test [t.kind for t in terms] == [:intercept, :continuous, :ranef_gather]
+    gather = terms[3]
+    @test gather.columns == [:g]
+    @test gather.options == (bucket_id=:ID, bucket_group=:g)
+    @test gather.addressee === :r_mu_ID_g
+    @test gather.label === :r_mu_ID_g
+    @test sort!([p.addressee for p in plan.population_priors]) ==
+        [:Intercept, :x]
+    @test plan.columns[:g] == [1, 1, 2, 2, 3, 3]
+    backend = BRM.RKBRMI(brmi, plan, nothing)
+    @test sprint(show, backend) ==
+        "RKBRMI with 2 population coefficients and 6 observations"
+end
+
+@testset "ranef plain bucket kinds" begin
+    # (1|g) — :intercept1, no eta. Draws-always pending the totals fork
+    # (SB routes matchable lone intercepts through brm_total).
+    intercept = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + (1 | g)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    ib = only(intercept.ranef_buckets)
+    @test ib.id === nothing
+    @test ib.kind === :intercept1
+    @test ib.label === :bucket_g
+    @test isnan(ib.lkj_eta)
+    @test [(m.predictor, m.coefficient) for m in ib.margins] ==
+        [(:mu, :Intercept)]
+    @test ib.slices == [(:mu, 1:1)]
+    gather = only(intercept.predictors).terms[end]
+    @test gather.kind === :ranef_gather
+    @test gather.addressee === :r_mu_g
+    @test gather.label === :r_mu_g
+    @test gather.options == (bucket_id=nothing, bucket_group=:g)
+    # (0+x|g) — :slope1.
+    slope = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + (0 + x | g)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    sb = only(slope.ranef_buckets)
+    @test sb.id === nothing
+    @test sb.kind === :slope1
+    @test isnan(sb.lkj_eta)
+    @test [(m.predictor, m.coefficient) for m in sb.margins] == [(:mu, :x)]
+    # (1+x|g) — :correlated with eta.
+    correlated = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + (1 + x | g)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    cb = only(correlated.ranef_buckets)
+    @test cb.id === nothing
+    @test cb.kind === :correlated
+    @test cb.lkj_eta == 1.0
+    @test cb.slices == [(:mu, 1:2)]
+end
+
+@testset "ranef categorical slope dummies" begin
+    treatment = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + (1 + c | g)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    tb = only(treatment.ranef_buckets)
+    @test tb.kind === :correlated
+    @test [m.coefficient for m in tb.margins] ==
+        [:Intercept, :c_dummy_2, :c_dummy_3, :c_dummy_4]
+    @test [m.z.level for m in tb.margins[2:4]] == [2, 3, 4]
+    @test [m.z.column for m in tb.margins[2:4]] == [:c, :c, :c]
+    @test treatment.columns[:c] == [2, 1, 3, 2, 4, 3]
+    # Non-1..K codes prove value-based (not positional) labels.
+    codedf = (; df..., c=[2, 4, 2, 6, 4, 6])
+    coded = BRM._brm_rk_plan(@brm codedf begin
+        mu ~ 1 + x + (1 + c | g)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    cb = only(coded.ranef_buckets)
+    @test [m.coefficient for m in cb.margins] ==
+        [:Intercept, :c_dummy_4, :c_dummy_6]
+    @test [m.z.level for m in cb.margins[2:3]] == [4, 6]
+    # Intercept-free LHS: per-level coding.
+    cellmeans = BRM._brm_rk_plan(@brm codedf begin
+        mu ~ 1 + x + (0 + c | g)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    mb = only(cellmeans.ranef_buckets)
+    @test [m.coefficient for m in mb.margins] ==
+        [:c_dummy_2, :c_dummy_4, :c_dummy_6]
+    # String slopes ride the thin layer's exact-match dummies.
+    strings = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + (1 + gs | g)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    gb = only(strings.ranef_buckets)
+    @test [m.coefficient for m in gb.margins] ==
+        [:Intercept, :gs_dummy_b, :gs_dummy_c]
+    @test [m.z.level for m in gb.margins[2:3]] == ["b", "c"]
+end
+
+@testset "ranef categorical group codes" begin
+    catdf = (; df...,
+        g=categorical(["b", "b", "a", "a", "c", "c"]; levels=["b", "a", "c"]))
+    plan = BRM._brm_rk_plan(@brm catdf begin
+        mu ~ 1 + x + (1 + x | ID | g)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    bucket = only(plan.ranef_buckets)
+    @test bucket.group === :g_idx
+    # Declared (not sorted) numbering: b->1, a->2, c->3.
+    @test plan.columns[:g_idx] == [1, 1, 2, 2, 3, 3]
+    @test bucket.label === :bucket_ID_g_idx
+    gather = only(plan.predictors).terms[end]
+    @test gather.columns == [:g_idx]
+    @test gather.addressee === :r_mu_ID_g_idx
+    @test gather.label === :r_mu_ID_g_idx
+end
+
+@testset "ranef multi-target ID slices" begin
+    mdf = (; x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+             g=[1, 1, 2, 2, 3, 3],
+             y1=[0.5, -0.2, 0.1, 0.9, 1.4, 1.1],
+             y2=[1.5, 1.2, 1.1, 0.9, 0.4, 0.1])
+    plan = BRM._brm_rk_plan(@brm mdf begin
+        mu1 ~ 1 + x + (1 | ID | g)
+        mu2 ~ 1 + x + (x | ID | g)
+        s1 ~ Exponential(1)
+        s2 ~ Exponential(1)
+        y1 ~ Normal(mu1, s1)
+        y2 ~ Normal(mu2, s2)
+    end)
+    @test length(plan.predictors) == 2
+    bucket = only(plan.ranef_buckets)
+    @test bucket.id === :ID
+    @test bucket.kind === :correlated
+    @test [(m.predictor, m.coefficient) for m in bucket.margins] ==
+        [(:mu1, :Intercept), (:mu2, :x)]
+    @test bucket.slices == [(:mu1, 1:1), (:mu2, 2:2)]
+    for predictor in plan.predictors
+        gather = predictor.terms[end]
+        @test gather.kind === :ranef_gather
+        @test gather.options.bucket_id === :ID
+    end
+end
+
+# Fail-closed gates name the admitted spelling; assert the message, not
+# just the throw, so a vacuous parser error cannot stand in for the gate.
+function rk_throws_admission(f, needle::String)
+    try
+        f()
+    catch err
+        @test err isa ErrorException
+        @test occursin("RK backend", sprint(showerror, err))
+        @test occursin(needle, sprint(showerror, err))
+        return nothing
+    end
+    @test false
+end
+
+@testset "ranef degenerate slopes" begin
+    degdf = (; df..., k1=[1, 1, 1, 1, 1, 1])
+    # A single-level treatment slope fails closed with guidance (SB drops
+    # such slopes silently; the shared slope surface rejects them, so the
+    # RK path cannot mirror the drop).
+    rk_throws_admission("single observed level") do
+        BRM._brm_rk_plan(@brm degdf begin
+            mu ~ 1 + x + (1 + k1 | g)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    end
+    # Intercept-free, the same column codes its one cell mean.
+    cellmean1 = BRM._brm_rk_plan(@brm degdf begin
+        mu ~ 1 + x + (0 + k1 | g)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    bucket = only(cellmean1.ranef_buckets)
+    @test bucket.kind === :slope1
+    @test [(m.predictor, m.coefficient) for m in bucket.margins] ==
+        [(:mu, :k1_dummy_1)]
+    # Empty LHS errors (mirrors SB).
+    rk_throws_admission("no terms after dropping") do
+        BRM._brm_rk_plan(@brm df begin
+            mu ~ 1 + x + (0 | g)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    end
+end
+
+@testset "ranef K=1 ID stays correlated" begin
+    # Unmatched-regime mirror of SB (vacuous 1x1 LKJ); the totals fork
+    # decides the matchable lone-intercept regime separately.
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + (1 | ID | g)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    bucket = only(plan.ranef_buckets)
+    @test bucket.id === :ID
+    @test bucket.kind === :correlated
+    @test bucket.lkj_eta == 1.0
+    @test [(m.predictor, m.coefficient) for m in bucket.margins] ==
+        [(:mu, :Intercept)]
+end
+
+@testset "fail closed: ranef draws-regime battery" begin
+    # `||` zerocorr is deferred.
+    rk_throws_admission("||") do
+        BRM._brm_rk_plan(@brm df begin
+            mu ~ 1 + x + (0 + x || g)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    end
+    # mm(...) is deferred.
+    rk_throws_admission("mm(...)") do
+        BRM._brm_rk_plan(@brm df begin
+            mu ~ 1 + x + (1 | mm(g, h))
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    end
+    # gr(...; by=...) is deferred.
+    rk_throws_admission("by=") do
+        BRM._brm_rk_plan(@brm df begin
+            mu ~ 1 + x + (1 | gr(g, by=h))
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    end
+    # `&` in a ranef LHS is deferred.
+    rk_throws_admission("draws regime") do
+        BRM._brm_rk_plan(@brm df begin
+            mu ~ 1 + x + (1 + x & z | g)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    end
+    # offset() in a ranef LHS is refused (mirrors SB).
+    rk_throws_admission("draws regime") do
+        BRM._brm_rk_plan(@brm df begin
+            mu ~ 1 + x + (1 + offset(z) | g)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    end
+    # Transformed slopes are deferred.
+    rk_throws_admission("draws regime") do
+        BRM._brm_rk_plan(@brm df begin
+            mu ~ 1 + x + (1 + zscale(x) | g)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    end
+    # sd()/cor() statements are deferred (buckets take defaults).
+    rk_throws_admission("sd(...)") do
+        BRM._brm_rk_plan(@brm df begin
+            mu ~ 1 + x + (1 + x | p | g)
+            sd(:, p) ~ Exponential(0.3)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    end
+    # Duplicate blocks mirror SB's rejection.
+    rk_throws_admission("repeats") do
+        BRM._brm_rk_plan(@brm df begin
+            mu ~ 1 + x + (1 | g) + (x | g)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    end
+    # One ID, two groups is ambiguous (mirrors SB).
+    rk_throws_admission("conflicting grouping") do
+        BRM._brm_rk_plan(@brm df begin
+            mu ~ 1 + x + (1 | ID | g) + (1 | ID | h)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    end
+    # factor() slopes are refused (shared slope surface takes bare
+    # columns; SB recodes — narrowing, disclosed).
+    rk_throws_admission("bare columns") do
+        BRM._brm_rk_plan(@brm df begin
+            mu ~ 1 + x + (1 + factor(c) | g)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    end
+    # Non-1 integers are not ranef terms (mirrors SB).
+    rk_throws_admission("unsupported integer") do
+        BRM._brm_rk_plan(@brm df begin
+            mu ~ 1 + x + (2 | g)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    end
+    # Bool slopes need integer codes.
+    boolf = (; df..., b=[true, false, true, false, true, false])
+    rk_throws_admission("Bool column") do
+        BRM._brm_rk_plan(@brm boolf begin
+            mu ~ 1 + x + (1 + b | g)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    end
+    # Ranef-only predictors stay out of scope.
+    rk_throws_admission("has no terms") do
+        BRM._brm_rk_plan(@brm df begin
+            mu ~ (1 | g)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    end
 end

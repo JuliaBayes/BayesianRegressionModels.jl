@@ -346,7 +346,8 @@ end
         BRM._RKAssignmentSpec[],
         BRM._RKDerivedSpec[],
         Dict{Symbol,AbstractVector}(:y => df.y, :n => df.n),
-        6)
+        6,
+        BRM._RKRanefBucket[])
     ast = BRM._rk_emit_ast(plan)
     @test ast == Expr(:block,
         Expr(:call, :~, :n_b1, Expr(:call, :Normal, 0.0, 1.0)),
@@ -356,4 +357,120 @@ end
         Expr(:call, :~, :s, Expr(:call, :Exponential, 1.0)),
         Expr(:call, :.~, :y,
             Expr(:., :Normal, Expr(:tuple, :n_, :s))))
+end
+
+# Canonicalize for parser comparisons (drop line info; unwrap the
+# toplevel block `Meta.parse` returns for a single expression).
+function rk_strip_lines(x)
+    x isa LineNumberNode && return nothing
+    x isa Expr || return x
+    args = Any[]
+    for a in x.args
+        a isa LineNumberNode && continue
+        push!(args, rk_strip_lines(a))
+    end
+    Expr(x.head, args...)
+end
+function rk_parsed_surface(str::String)
+    parsed = rk_strip_lines(Meta.parse(str))
+    parsed.head === :block ? only(parsed.args) : parsed
+end
+rk_bucket_stmts(ast) =
+    [a for a in ast.args if a isa Expr && a.head === :do]
+
+@testset "ranef bucket AST matches surface" begin
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + (1 + x | ID | g)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    ast = BRM._rk_emit_ast(plan)
+    @test length(rk_bucket_stmts(ast)) == 1
+    @test rk_strip_lines(only(rk_bucket_stmts(ast))) ==
+        rk_parsed_surface("ranef_bucket(:ID, g; eta = 1.0) do\n mu => [1, x]\nend")
+    affine = only([a for a in ast.args if a isa Expr && a.head === :(=) &&
+        a.args[1] === :mu])
+    @test Expr(:call, :ranef, QuoteNode(:ID), :g) in affine.args[2].args
+end
+
+@testset "ranef eta iff correlated" begin
+    kinds = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + (1 + x | g)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    correlated = only(rk_bucket_stmts(BRM._rk_emit_ast(kinds)))
+    @test rk_strip_lines(correlated) ==
+        rk_parsed_surface("ranef_bucket(g; eta = 1.0) do\n mu => [1, x]\nend")
+    ones = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + (1 | g)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    intercept1 = only(rk_bucket_stmts(BRM._rk_emit_ast(ones)))
+    @test rk_strip_lines(intercept1) ==
+        rk_parsed_surface("ranef_bucket(g) do\n mu => [1]\nend")
+    slopes = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + (0 + x | g)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    slope1 = only(rk_bucket_stmts(BRM._rk_emit_ast(slopes)))
+    @test rk_strip_lines(slope1) ==
+        rk_parsed_surface("ranef_bucket(g) do\n mu => [x]\nend")
+    affine = only([a for a in BRM._rk_emit_ast(ones).args if a isa Expr &&
+        a.head === :(=) && a.args[1] === :mu])
+    @test Expr(:call, :ranef, :g) in affine.args[2].args
+end
+
+@testset "ranef dummy values in AST" begin
+    codedf = (; df..., c=[2, 4, 2, 6, 4, 6])
+    plan = BRM._brm_rk_plan(@brm codedf begin
+        mu ~ 1 + x + (1 + c | g)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test rk_strip_lines(only(rk_bucket_stmts(BRM._rk_emit_ast(plan)))) ==
+        rk_parsed_surface("ranef_bucket(g; eta = 1.0) do\n " *
+            "mu => [1, dummy(c, 4), dummy(c, 6)]\nend")
+end
+
+@testset "ranef multi-target body order" begin
+    mdf = (; x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+             g=[1, 1, 2, 2, 3, 3],
+             y1=[0.5, -0.2, 0.1, 0.9, 1.4, 1.1],
+             y2=[1.5, 1.2, 1.1, 0.9, 0.4, 0.1])
+    plan = BRM._brm_rk_plan(@brm mdf begin
+        mu1 ~ 1 + x + (1 | ID | g)
+        mu2 ~ 1 + x + (x | ID | g)
+        s1 ~ Exponential(1)
+        s2 ~ Exponential(1)
+        y1 ~ Normal(mu1, s1)
+        y2 ~ Normal(mu2, s2)
+    end)
+    @test rk_strip_lines(only(rk_bucket_stmts(BRM._rk_emit_ast(plan)))) ==
+        rk_parsed_surface("ranef_bucket(:ID, g; eta = 1.0) do\n " *
+            "mu1 => [1]; mu2 => [x]\nend")
+    for target in (:mu1, :mu2)
+        affine = only([a for a in BRM._rk_emit_ast(plan).args if a isa Expr &&
+            a.head === :(=) && a.args[1] === target])
+        @test Expr(:call, :ranef, QuoteNode(:ID), :g) in affine.args[2].args
+    end
+end
+
+@testset "ranef bucket follows predictor rename" begin
+    # Programmatic overlap (unreachable via @brm): the margin lines use the
+    # renamed predictor, matching the renamed affine.
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + (1 + x | ID | g)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    plan.columns[:mu] = plan.columns[:x]
+    ast = BRM._rk_emit_ast(plan)
+    @test rk_strip_lines(only(rk_bucket_stmts(ast))) ==
+        rk_parsed_surface("ranef_bucket(:ID, g; eta = 1.0) do\n mu_ => [1, x]\nend")
+    affine = only([a for a in ast.args if a isa Expr && a.head === :(=) &&
+        a.args[1] === :mu_])
+    @test Expr(:call, :ranef, QuoteNode(:ID), :g) in affine.args[2].args
 end

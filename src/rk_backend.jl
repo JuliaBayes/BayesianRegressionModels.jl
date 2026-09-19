@@ -6,12 +6,14 @@
 #
 # Slice-1 admission (user-resolved D3/D4): population GLMs —
 # Gaussian/Bernoulli-logit/Poisson-log + frequency/power weights + response
-# evidence on Gaussian/Poisson — density+gradient contract. Predictor terms
-# admit raw columns plus derived columns (provisional lowering):
-# `&` interactions, `center`/`zscale`/`standardize`, and pure numeric data
-# expressions lower to thin-layer dotted definitions computed in-graph from
-# raw columns; only raw columns cross the boundary. Everything else fails
-# closed with the admitted spelling named.
+# evidence on Gaussian/Poisson — density+gradient contract — plus the
+# random-effects draws regime (non-centered `(x|g)` / `|ID|` buckets
+# mirroring SB, peer Stage-A surface). Predictor terms admit raw columns
+# plus derived columns (provisional lowering): `&` interactions,
+# `center`/`zscale`/`standardize`, and pure numeric data expressions lower
+# to thin-layer dotted definitions computed in-graph from raw columns; only
+# raw columns cross the boundary. Everything else fails closed with the
+# admitted spelling named.
 
 const _RK_SLICE1_TRIPLES = Set{Tuple{Symbol,Symbol,Symbol}}([
     (:gaussian, :identity, :identity),
@@ -71,7 +73,8 @@ struct _RKLikelihoodSpec
 end
 
 struct _RKTermSpec
-    kind::Symbol # :intercept | :continuous | :factor | :offset
+    kind::Symbol # :intercept | :continuous | :factor | :offset |
+                # :ranef_gather
     columns::Vector{Symbol}
     # factor: (coding=:fullrank, levels=:observed) over every observed level,
     # or (coding=:subset, drop::Int, levels=:observed) over every observed
@@ -109,6 +112,28 @@ struct _RKAssignmentSpec
     label::Symbol
 end
 
+struct _RKRanefZRecipe
+    kind::Symbol # :ones | :column | :dummy
+    column::Symbol # :none for :ones
+    level::Union{Nothing,Int,String} # dummy only: raw level value
+end
+
+struct _RKRanefMargin
+    predictor::Symbol
+    coefficient::Symbol # :Intercept | column | <column>_dummy_<value>
+    z::_RKRanefZRecipe
+end
+
+struct _RKRanefBucket
+    id::Union{Nothing,Symbol}
+    group::Symbol # bound grouping column (raw, or <group>_idx codes)
+    kind::Symbol # :intercept1 | :slope1 | :correlated
+    margins::Vector{_RKRanefMargin}
+    slices::Vector{Tuple{Symbol,UnitRange{Int}}}
+    lkj_eta::Float64 # correlated only; NaN otherwise
+    label::Symbol # :bucket_<suffix>
+end
+
 struct _RKStructuralPlan
     responses::Vector{_RKLikelihoodSpec}
     predictors::Vector{_RKPredictorSpec}
@@ -118,6 +143,7 @@ struct _RKStructuralPlan
     derived::Vector{_RKDerivedSpec}
     columns::Dict{Symbol,AbstractVector}
     n_obs::Int
+    ranef_buckets::Vector{_RKRanefBucket}
 end
 
 """
@@ -1595,6 +1621,279 @@ function _rk_gate_cross_identified!(terms::Vector{_RKTermSpec},
     nothing
 end
 
+# ---- random effects (draws regime; peer Stage-A surface) ----
+#
+# Buckets mirror SB's draws path (`_sb_collect_id_buckets`,
+# `_sb_emit_id_buckets!`, `ranefcoefnames`): one shared non-centered block
+# per (id, group), sliced per target predictor. Plain `(x|g)` blocks are
+# degenerate single-slice buckets. Totals-matchable models emit draws too
+# (the totals fork may add a totals-collapse path later — additive).
+
+_rk_ranef_suffix(id::Nothing, group::Symbol) = group
+_rk_ranef_suffix(id::Symbol, group::Symbol) = Symbol(id, :_, group)
+_rk_ranef_bucket_label(id, group) = Symbol(:bucket_, _rk_ranef_suffix(id, group))
+_rk_ranef_gather_label(target, id, group) =
+    Symbol(:r_, target, :_, _rk_ranef_suffix(id, group))
+
+function _rk_ranef_group_column!(columns::Dict{Symbol,AbstractVector},
+        taken::Set{Symbol}, gname::Symbol, raw::AbstractVector, what::String)
+    prefix = "RK backend"
+    if !(raw isa CA.CategoricalVector)
+        columns[gname] = raw
+        return gname
+    end
+    # Categorical groupings cross as SB-ordered dense codes (declared
+    # numbering, mirroring SB's `<g>_idx` transport): the thin layer sorts
+    # the bound column, so codes make that sort the identity and keep
+    # numbering parity with SB.
+    _, codes = _brm_level_index(raw)
+    idx = Symbol(gname, :_idx)
+    haskey(columns, idx) && error(
+        "$prefix: $what grouping column `$gname` needs `$idx` for its " *
+        "level codes, but a raw column already uses that name; rename it")
+    push!(taken, idx)
+    columns[idx] = collect(Int, codes)
+    idx
+end
+
+function _rk_ranef_dummies!(margins::Vector{_RKRanefMargin}, target::Symbol,
+        term::NamedColumn, columns::Dict{Symbol,AbstractVector},
+        what::String, first_level::Int)
+    prefix = "RK backend"
+    backing = parent(term)
+    backing isa DataColumn || error(
+        "$prefix: $what slope `$(name(term))` is not a raw data column")
+    source = name(term)
+    raw = parent(backing)
+    eltype(raw) === Bool && error(
+        "$prefix: $what slope `$source` is a Bool column; the draws " *
+        "regime needs integer codes (recodify true/false as 1/0)")
+    fitted = collect(_sb_fit_levels(raw))
+    first_level == 2 && length(fitted) < 2 && error(
+        "$prefix: $what slope `$source` has a single observed level, so " *
+        "a treatment contrast is empty (SB drops such slopes silently; " *
+        "the RK path needs an explicit slope — drop it or code it " *
+        "intercept-free for its one cell mean)")
+    keep = if raw isa CA.CategoricalVector
+        # The thin layer derives levels from bound data, so only observed
+        # levels cross (SB keeps unobserved declared levels as prior-only
+        # coefficients; those columns contribute nothing observable).
+        observed = Set{Int}(_brm_apply_fitted_levels(fitted, raw))
+        [p for p in first_level:length(fitted) if p in observed]
+    else
+        collect(first_level:length(fitted))
+    end
+    isempty(keep) && return 0
+    kept_values = raw isa CA.CategoricalVector ?
+        string.(fitted[keep]) : fitted[keep]
+    if raw isa CA.CategoricalVector
+        length(unique(kept_values)) == length(kept_values) || error(
+            "$prefix: $what slope `$source` has distinct levels with the " *
+            "same string form; the draws regime needs unambiguous levels")
+    end
+    columns[source] = _rk_factor_crossed(raw)
+    for k in kept_values
+        push!(margins, _RKRanefMargin(target,
+            Symbol(string(source) * "_dummy_" * string(k)),
+            _RKRanefZRecipe(:dummy, source, k)))
+    end
+    length(kept_values)
+end
+
+function _rk_ranef_recipes!(margins::Vector{_RKRanefMargin}, lowered::Vector{Any},
+        target::Symbol, data::AbstractDict,
+        columns::Dict{Symbol,AbstractVector}, what::String)
+    prefix = "RK backend"
+    admitted = "`1`, continuous columns, integer/string/categorical columns"
+    for t in lowered
+        if t isa Integer
+            t == 1 || error(
+                "$prefix: $what has unsupported integer random-effect " *
+                "term `$t` (admitted: `1`)")
+            push!(margins, _RKRanefMargin(target, :Intercept,
+                _RKRanefZRecipe(:ones, :none, nothing)))
+        elseif t isa _SBCellMeansTerm
+            _rk_ranef_dummies!(margins, target, t.term, columns, what, 1)
+        elseif t isa NamedColumn
+            backing = parent(t)
+            backing isa DataColumn || error(
+                "$prefix: $what slope `$(name(t))` is not a raw data " *
+                "column (admitted: $admitted)")
+            source = name(t)
+            raw = parent(backing)
+            # SB's ranef rule admits integer/categorical Z columns; string
+            # columns ride along via the thin layer's exact-match dummies
+            # (SB itself chokes materializing them).
+            if !isnothing(_sb_cat_levels(t)) ||
+                    (raw isa AbstractVector && eltype(raw) <: AbstractString)
+                _rk_ranef_dummies!(margins, target, t, columns, what, 2)
+            else
+                raw isa AbstractVector{<:Real} &&
+                    !(eltype(raw) <: Integer) || error(
+                    "$prefix: $what slope `$source` must be a real " *
+                    "non-integer vector (admitted: $admitted)")
+                columns[source] = raw
+                push!(margins, _RKRanefMargin(target, source,
+                    _RKRanefZRecipe(:column, source, nothing)))
+            end
+        else
+            head = t isa ExprColumn ? "`$(nameof(getf(t)))`" : "`$t`"
+            error("$prefix: $what term $head is not in the draws regime " *
+                "(admitted: $admitted; `&` interactions, `offset()`, and " *
+                "transformed slopes are deferred)")
+        end
+    end
+    margins
+end
+
+function _rk_gate_ranef_factor!(effects, target::Symbol, what::String)
+    prefix = "RK backend"
+    for t in effects
+        t isa ExprColumn && getf(t) === factor || continue
+        error("$prefix: $what `factor(...)` slopes are not in the draws " *
+            "regime (the shared slope surface takes bare columns; use a " *
+            "bare categorical column)")
+    end
+end
+
+function _rk_lower_ranef_bucket(context, id::Union{Nothing,Symbol},
+        gname::Symbol, targets::Vector{Any},
+        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol})
+    prefix = "RK backend"
+    data = context.data
+    raw = get(data, gname, nothing)
+    bound = _rk_ranef_group_column!(columns, taken, gname, raw,
+        id === nothing ? "predictor `$(first(targets)[1])` random effect" :
+            "`|$id|` random-effect block")
+    margins = _RKRanefMargin[]
+    slices = Tuple{Symbol,UnitRange{Int}}[]
+    cursor = 0
+    for (target, d) in targets
+        what = id === nothing ? "predictor `$target` random effect" :
+            "`|$id|` random-effect block for predictor `$target`"
+        _rk_gate_ranef_factor!(d.effects, target, what)
+        lowered = _sb_ranef_lowered_terms(collect(Any, d.effects))
+        before = length(margins)
+        _rk_ranef_recipes!(margins, lowered, target, data, columns, what)
+        ncols = length(margins) - before
+        if ncols == 0
+            # Degenerate blocks span no coefficients: plain ones are a
+            # no-op, ID targets error (both mirror SB).
+            id === nothing && continue
+            error("$prefix: $what spans no coefficients (every slope " *
+                "degenerated; mirrors SB: an ID bucket target needs at " *
+                "least one column)")
+        end
+        push!(slices, (target, (cursor+1):(cursor+ncols)))
+        cursor += ncols
+    end
+    isempty(margins) && return nothing
+    kind = if id !== nothing || length(margins) > 1
+        :correlated
+    elseif margins[1].z.kind === :ones
+        :intercept1
+    else
+        :slope1
+    end
+    eta = kind === :correlated ? 1.0 : NaN
+    _RKRanefBucket(id, bound, kind, margins, slices, eta,
+        _rk_ranef_bucket_label(id, bound))
+end
+
+function _rk_plan_ranef_buckets(brmi::BRMI, context,
+        predictor_order::Vector{Symbol},
+        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol})
+    prefix = "RK backend"
+    buckets = _RKRanefBucket[]
+    lookup = Dict{Tuple{Symbol,Symbol,Union{Nothing,Symbol}},
+        Union{_RKRanefBucket,Nothing}}()
+    declarations =
+        [d for d in context.group_declarations if d.predictor in predictor_order]
+    isempty(declarations) && return buckets, lookup
+    for d in declarations
+        what = "predictor `$(d.predictor)` random effect"
+        d.uncorrelated && error(
+            "$prefix: $what with `||` is not in the draws regime " *
+            "(admitted: `(effects | group)`, `(effects | ID | group)`)")
+        d.descriptor isa MultiMembershipTerm && error(
+            "$prefix: $what with `mm(...)` is not in the draws regime " *
+            "(admitted: `(effects | group)`, `(effects | ID | group)`)")
+        d.descriptor isa Tuple && error(
+            "$prefix: $what with `gr(...; by=...)` is not in the draws " *
+            "regime (admitted: `(effects | group)`, " *
+            "`(effects | ID | group)`)")
+        isempty(d.effects) && error(
+            "$prefix: $what has no terms after dropping `0` (mirrors SB)")
+    end
+    if !isempty(ranef_effect_priors(brmi))
+        error("$prefix: `sd(...)`/`cor(...)` random-effect priors are not " *
+            "in the draws regime (buckets take LKJ(1.0) + half-normal " *
+            "scales); drop the statements")
+    end
+    plain_keys = Tuple{Symbol,Symbol}[]
+    plain_decls = Dict{Tuple{Symbol,Symbol},Any}()
+    id_keys = Tuple{Symbol,Symbol}[]
+    id_decls = Dict{Tuple{Symbol,Symbol},Vector{Any}}()
+    id_groups = Dict{Symbol,Symbol}()
+    for d in declarations
+        desc = d.descriptor
+        desc isa NamedColumn || error(
+            "$prefix: internal: unexpected group descriptor " *
+            "`$(typeof(desc))`")
+        gcol = desc
+        parent(gcol) isa DataColumn || error(
+            "$prefix: predictor `$(d.predictor)` group `$(name(gcol))` " *
+            "must be a raw data column")
+        gname = name(gcol)
+        get(context.data, gname, nothing) isa AbstractVector || error(
+            "$prefix: predictor `$(d.predictor)` grouping column " *
+            "`$gname` must be a vector")
+        if isnothing(d.id)
+            key = (d.predictor, gname)
+            haskey(plain_decls, key) && error(
+                "$prefix: predictor `$(d.predictor)` repeats " *
+                "random-effect block group `$gname` (mirrors SB: merge " *
+                "the declarations into one `(effects | $gname)`)")
+            push!(plain_keys, key)
+            plain_decls[key] = d
+        else
+            haskey(id_groups, d.id) && id_groups[d.id] != gname && error(
+                "$prefix: `|$(d.id)|` sees conflicting grouping factors " *
+                "(`$(id_groups[d.id])` vs `$gname`) (mirrors SB)")
+            id_groups[d.id] = gname
+            key = (d.id, gname)
+            prior = get(id_decls, key, Any[])
+            any(p -> p.predictor === d.predictor, prior) && error(
+                "$prefix: predictor `$(d.predictor)` repeats " *
+                "random-effect block ID `$(d.id)`, group `$gname` " *
+                "(mirrors SB: merge the declarations)")
+            haskey(id_decls, key) || push!(id_keys, key)
+            push!(get!(id_decls, key, Any[]), d)
+        end
+    end
+    for key in plain_keys
+        target, gname = key
+        bucket = _rk_lower_ranef_bucket(context, nothing, gname,
+            Any[(target, plain_decls[key])], columns, taken)
+        # A `nothing` bucket is a fully degenerate plain block: record it
+        # so the predictor attaches no gather (vs a missing key, which is
+        # an internal error).
+        lookup[(target, gname, nothing)] = bucket
+        isnothing(bucket) || push!(buckets, bucket)
+    end
+    for key in id_keys
+        id, gname = key
+        decls = id_decls[key]
+        bucket = _rk_lower_ranef_bucket(context, id, gname,
+            Any[(d.predictor, d) for d in decls], columns, taken)
+        for d in decls
+            lookup[(d.predictor, gname, id)] = bucket
+        end
+        isnothing(bucket) || push!(buckets, bucket)
+    end
+    buckets, lookup
+end
+
 # Offset-only predictors (SB-admitted) carry no coefficient columns,
 # so the shared geometry — which requires at least one — cannot build
 # them. The empty-column design builds directly instead: the
@@ -1629,7 +1928,9 @@ end
 
 function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         available::Tuple, columns::Dict{Symbol,AbstractVector},
-        derived::Vector{_RKDerivedSpec}, taken::Set{Symbol})
+        derived::Vector{_RKDerivedSpec}, taken::Set{Symbol},
+        ranef_buckets::Dict{Tuple{Symbol,Symbol,Union{Nothing,Symbol}},
+            Union{_RKRanefBucket,Nothing}})
     prefix = "RK backend"
     op = linear_predictor_op(brmi, target)
     _, rhs = getargs(op, 2)
@@ -1641,9 +1942,6 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         "$(join(unique!(string.(getf.(filter(t -> t isa ExprColumn, structured)))), ", ")) " *
         "are out of slice 1 (population GLMs only)")
     grouped = filter(t -> _brm_is_grouped_term(t), raw_terms)
-    isempty(grouped) || error(
-        "$prefix: predictor `$target` random-effect term(s) are out of " *
-        "slice 1 (population GLMs only)")
     ordinary = Tuple(t for t in raw_terms if !(t in structured) && !(t in grouped))
     isempty(ordinary) && error(
         "$prefix: predictor `$target` has no terms")
@@ -1657,6 +1955,23 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         append!(terms, _rk_term_specs(term, target, context.data,
             columns, derived, taken, has_intercept, spines))
     end
+    for term in grouped
+        decl = _brm_group_declaration(target, term)
+        decl.descriptor isa NamedColumn || error(
+            "$prefix: internal: unexpected group descriptor " *
+            "`$(typeof(decl.descriptor))`")
+        gname = name(decl.descriptor)
+        key = (target, gname, decl.id)
+        haskey(ranef_buckets, key) || error(
+            "$prefix: internal: no draws-regime bucket for predictor " *
+            "`$target` term `$term`")
+        bucket = ranef_buckets[key]
+        # Degenerate plain block: no gather (mirrors SB's no-op).
+        bucket === nothing && continue
+        gather = _rk_ranef_gather_label(target, bucket.id, bucket.group)
+        push!(terms, _RKTermSpec(:ranef_gather, [bucket.group],
+            (bucket_id=bucket.id, bucket_group=bucket.group), gather, gather))
+    end
     _rk_gate_cover_identified!(
         terms, ordinary, target, context.data, has_intercept)
     _rk_gate_cross_identified!(
@@ -1667,8 +1982,6 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         brmi, context, target; available_predictors=available)
     isempty(geometry.terms) || error(
         "$prefix: internal: structured terms survived pre-check in `$target`")
-    isempty(geometry.component.random_effects) || error(
-        "$prefix: internal: random effects survived pre-check in `$target`")
     isnothing(geometry.r2d2) || error(
         "$prefix: predictor `$target` `r2d2` priors are out of slice 1")
     design = geometry.component.design
@@ -2177,10 +2490,11 @@ end
     _brm_rk_plan(brmi::BRMI)
 
 Lower a data-bound [`BRMI`](@ref) to the backend-neutral RK structural plan.
-Slice-1 admission (population GLMs, density+gradient contract) is enforced
-here with RK-attributed errors; everything else fails closed. The package
-extension translates the returned [`_RKStructuralPlan`](@ref) to the
-thin-layer contract at the boundary.
+Slice-1 admission (population GLMs plus the random-effects draws regime,
+density+gradient contract) is enforced here with RK-attributed errors;
+everything else fails closed. The package extension translates the
+returned [`_RKStructuralPlan`](@ref) to the thin-layer contract at the
+boundary.
 """
 function _brm_rk_plan(brmi::BRMI)
     prefix = "RK backend"
@@ -2254,9 +2568,12 @@ function _brm_rk_plan(brmi::BRMI)
         assignment_names)
     predictor_specs = _RKPredictorSpec[]
     prior_specs = _RKPopulationPrior[]
+    ranef_buckets, ranef_lookup = _rk_plan_ranef_buckets(
+        brmi, context, predictor_order, columns, taken)
     for target in predictor_order
         spec, priors = _rk_plan_predictor(
-            brmi, context, target, available, columns, derived, taken)
+            brmi, context, target, available, columns, derived, taken,
+            ranef_lookup)
         push!(predictor_specs, spec)
         append!(prior_specs, priors)
     end
@@ -2307,5 +2624,5 @@ function _brm_rk_plan(brmi::BRMI)
     _rk_gate_name_hygiene!(
         predictor_specs, parameters, assignments, derived, columns)
     _RKStructuralPlan(response_specs, predictor_specs, prior_specs,
-        parameters, assignments, derived, columns, n_obs)
+        parameters, assignments, derived, columns, n_obs, ranef_buckets)
 end

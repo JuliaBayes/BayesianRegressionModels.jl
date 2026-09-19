@@ -47,6 +47,11 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol})
             # or subset) rides the broadcast prior, and unmapped rows
             # contribute 0.
             push!(summands, Expr(:ref, coefs[index], only(term.columns)))
+        elseif term.kind === :ranef_gather
+            id = term.options.bucket_id
+            group = only(term.columns)
+            push!(summands, id === nothing ? Expr(:call, :ranef, group) :
+                Expr(:call, :ranef, QuoteNode(id), group))
         elseif term.kind === :offset
             push!(summands, only(term.columns))
         end
@@ -136,6 +141,37 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
         _rk_ast_dotted(:weighted, dist, response.weights)
 end
 
+function _rk_ast_bucket_margin(z::_RKRanefZRecipe)
+    z.kind === :ones && return 1
+    z.kind === :column && return z.column
+    Expr(:call, :dummy, z.column, z.level)
+end
+
+# One `ranef_bucket(...) do ... end` block. The do-block shape matches the
+# parser's exactly (committed tests compare against `Meta.parse`), so the
+# thin layer lowers it like hand-written surface. `eta` rides iff
+# `:correlated` (peer rule: K=1 plain buckets take no eta).
+function _rk_ast_bucket(bucket::_RKRanefBucket, rename::Dict{Symbol,Symbol})
+    lines = Any[]
+    for (predictor, cols) in bucket.slices
+        elements = Any[_rk_ast_bucket_margin(m.z)
+            for m in bucket.margins[cols]]
+        push!(lines, Expr(:call, :(=>),
+            get(rename, predictor, predictor), Expr(:vect, elements...)))
+    end
+    call = if bucket.id === nothing
+        args = Any[:ranef_bucket, bucket.group]
+        bucket.kind === :correlated && insert!(args, 2,
+            Expr(:parameters, Expr(:kw, :eta, bucket.lkj_eta)))
+        Expr(:call, args...)
+    else
+        Expr(:call, :ranef_bucket,
+            Expr(:parameters, Expr(:kw, :eta, bucket.lkj_eta)),
+            QuoteNode(bucket.id), bucket.group)
+    end
+    Expr(:do, call, Expr(:(->), Expr(:tuple), Expr(:block, lines...)))
+end
+
 function _rk_ast_sampled(parameter::_RKSampledParameter)
     name = parameter.name
     family, override = parameter.family, parameter.support_override
@@ -179,7 +215,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         coefs = Dict{Int,Symbol}()
         counter = 0
         for (index, term) in enumerate(predictor.terms)
-            term.kind === :offset && continue
+            (term.kind === :offset || term.kind === :ranef_gather) && continue
             counter += 1
             coef = _rk_ast_coef_name(
                 string(predictor.name, "_b", counter), taken)
@@ -201,6 +237,9 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         end
         push!(stmts, Expr(:(=), get(rename, predictor.name, predictor.name),
             _rk_ast_affine(predictor, coefs)))
+    end
+    for bucket in plan.ranef_buckets
+        push!(stmts, _rk_ast_bucket(bucket, rename))
     end
     for parameter in plan.parameters
         push!(stmts, _rk_ast_sampled(parameter))
