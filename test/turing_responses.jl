@@ -74,6 +74,31 @@ end
                 for (x, treat, y) in zip(data.x, data.treat, [1, 3, 2, 1])]
     @test Turing.loglikelihood(backend.model, parameters) ≈ sum(expected)
     @test StanBlocks.stanc_check(stan_code(SBBRMI(builder(data)))).ok
+
+    # p>1 per_threshold packs stage-major: flat[(k-1)*p+j] is the stage-k,
+    # term-j coefficient, matching SB-Stan's `array[n_cut] vector[n_terms]`
+    # runtime layout (snag brm-threshold-et-0f516c0c). Every flat entry is
+    # distinct, so a term-major read cannot agree with this ref by accident.
+    p2_data = (; x=data.x, z1=[0.0, 1.0, 0.5, -1.0],
+        z2=[1.0, 0.0, -0.5, 2.0], y=data.y)
+    p2_builder = @brm begin
+        eta ~ 0 + x
+        y ~ Ordinal(StoppingRatio(), ProbitLink(), eta; per_threshold=(z1, z2))
+    end
+    p2_backend = TuringBRMI(p2_builder(p2_data))
+    p2_flat = [1.0, 2.0, 3.0, 4.0]
+    p2_parameters = (; beta_pop=[0.4], y_thresholds=[-0.5, 0.8],
+        y_threshold_beta=p2_flat)
+    p2_stage_eta(x, a, b) =
+        [0.4x + p2_flat[(k - 1) * 2 + 1] * a + p2_flat[(k - 1) * 2 + 2] * b
+         for k in 1:2]
+    p2_expected = [logpdf(Ordinal(StoppingRatio(), ProbitLink(),
+                        p2_stage_eta(x, a, b), p2_parameters.y_thresholds), y)
+                   for (x, a, b, y) in
+                       zip(p2_data.x, p2_data.z1, p2_data.z2, [1, 3, 2, 1])]
+    @test Turing.loglikelihood(p2_backend.model, p2_parameters) ≈ sum(p2_expected)
+    @test turing_pointwise_loglikelihoods(p2_backend, p2_parameters).y ≈ p2_expected
+    @test StanBlocks.stanc_check(stan_code(SBBRMI(p2_builder(p2_data)))).ok
 end
 
 @testset "one outcome level has zero-information likelihood" begin
