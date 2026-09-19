@@ -1595,6 +1595,38 @@ function _rk_gate_cross_identified!(terms::Vector{_RKTermSpec},
     nothing
 end
 
+# Offset-only predictors (SB-admitted) carry no coefficient columns,
+# so the shared geometry — which requires at least one — cannot build
+# them. The empty-column design builds directly instead: the
+# fixed-offset vector still materializes and validates its row axis,
+# and the prior/r2d2 seam runs unchanged over zero columns (a stated
+# effect or r2d2 prior keeps its fail-closed error).
+function _rk_plan_offset_only_predictor(brmi::BRMI, context, target::Symbol,
+        ordinary::Tuple, available::Tuple, link::Symbol,
+        terms::Vector{_RKTermSpec}, derived::Vector{_RKDerivedSpec})
+    prefix = "RK backend"
+    isempty(terms) && error(
+        "$prefix: internal: predictor `$target` has no term specs")
+    raw_sources = [column for term in terms for column in term.columns
+        if haskey(context.data, column)]
+    row_source = isempty(raw_sources) ?
+        get(context.target_obs, target, nothing) : first(raw_sources)
+    isnothing(row_source) && error(
+        "$prefix: predictor `$target` has no data column from which to " *
+        "determine its row axis")
+    design = _brm_population_design(target, ordinary, context.data,
+        get(context.target_obs, target, nothing);
+        required=true, row_source,
+        implicit_intercept=target in _brm_threshold_located_predictors(brmi))
+    priors = _rk_population_priors(brmi, design, target, available,
+        Set{Symbol}(), terms, derived)
+    r2d2 = _brm_whole_predictor_r2d2(brmi, design, (); prefix,
+        available_predictors=available)
+    isnothing(r2d2) || error(
+        "$prefix: predictor `$target` `r2d2` priors are out of slice 1")
+    _RKPredictorSpec(target, link, terms, target), priors
+end
+
 function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         available::Tuple, columns::Dict{Symbol,AbstractVector},
         derived::Vector{_RKDerivedSpec}, taken::Set{Symbol})
@@ -1629,6 +1661,8 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         terms, ordinary, target, context.data, has_intercept)
     _rk_gate_cross_identified!(
         terms, spines, derived, context.data, target, has_intercept)
+    any(t -> t.kind !== :offset, terms) || return _rk_plan_offset_only_predictor(
+        brmi, context, target, ordinary, available, link, terms, derived)
     geometry = _brm_prepare_predictor_geometry(
         brmi, context, target; available_predictors=available)
     isempty(geometry.terms) || error(

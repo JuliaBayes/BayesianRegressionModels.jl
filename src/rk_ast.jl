@@ -3,9 +3,11 @@
 # `lower_rkppl(ast, data_names)` — no ReactiveKernels dependency, so this
 # file is committed-testable without the PPL.
 #
-# Returns `nothing` for the inexpressible subset (offset-only predictors,
-# predictor/data name overlap), which the extension routes through the
-# legacy direct serializer.
+# Total over slice-1 plans: offset-only predictors emit a bare data
+# affine (`mu = z`, no coefficients, no priors), and a predictor sharing
+# its name with a data column is alpha-renamed (the single program
+# namespace cannot hold both bindings). The AST is the sole emission
+# path; the extension holds no fallback serializer.
 
 function _rk_lower_assignment_expr(node, name::Symbol)
     node isa Number && return node
@@ -22,15 +24,6 @@ function _rk_lower_assignment_expr(node, name::Symbol)
         _rk_lower_assignment_expr(arg, name)
     end
     Expr(:call, nameof(node.callable), lowered...)
-end
-
-function _rk_ast_expressible(plan::_RKStructuralPlan)
-    columns = plan.columns
-    for predictor in plan.predictors
-        haskey(columns, predictor.name) && return false
-        any(term -> term.kind !== :offset, predictor.terms) || return false
-    end
-    true
 end
 
 function _rk_ast_coef_name(base::String, taken::Set{Symbol})
@@ -91,8 +84,15 @@ function _rk_ast_factor_prior(coef::Symbol, col::Symbol,
         _rk_ast_dotted(:Normal, location, scale))
 end
 
-function _rk_ast_response_dist(response::_RKLikelihoodSpec)
-    predictor = response.predictor
+# The inverse-link spelling (`Bernoulli.(logistic.(η))`,
+# `Poisson.(exp.(η))`, …) is what the `@rkppl` surface takes; the thin
+# layer recovers the link-native HAVE from it — the lowered
+# `LikelihoodSpec` carries the same family+link the link-faithful
+# direct serializer produced, on all six slice-1 families (verified
+# behaviorally against `lower_rkppl`, not assumed).
+function _rk_ast_response_dist(response::_RKLikelihoodSpec,
+        rename::Dict{Symbol,Symbol})
+    predictor = get(rename, response.predictor, response.predictor)
     base = if response.family === :gaussian
         _rk_ast_dotted(:Normal, predictor, response.scale)
     elseif response.family === :bernoulli_logit
@@ -149,12 +149,26 @@ function _rk_ast_sampled(parameter::_RKSampledParameter)
 end
 
 function _rk_emit_ast(plan::_RKStructuralPlan)
-    _rk_ast_expressible(plan) || return nothing
     taken = union(Set(keys(plan.columns)),
         Set(p.name for p in plan.parameters),
         Set(a.name for a in plan.assignments),
         Set(p.name for p in plan.predictors),
         Set(d.name for d in plan.derived))
+    # A predictor sharing its name with a data column cannot keep it:
+    # the program has one namespace, so the affine (definition and
+    # response uses) is alpha-renamed. Unreachable via `@brm`
+    # (observation discovery claims `P ~ …` as a likelihood whenever `P`
+    # is observed data), but programmatic plans can still overlap.
+    rename = Dict{Symbol,Symbol}()
+    for predictor in plan.predictors
+        haskey(plan.columns, predictor.name) || continue
+        fresh = Symbol(string(predictor.name), "_")
+        while fresh in taken
+            fresh = Symbol(string(fresh), "_")
+        end
+        push!(taken, fresh)
+        rename[predictor.name] = fresh
+    end
     priors = Dict((p.predictor, p.addressee) => (p.location, p.scale)
         for p in plan.population_priors)
     stmts = Expr[]
@@ -185,7 +199,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
                     coef, Expr(:call, :Normal, location, scale)))
             end
         end
-        push!(stmts, Expr(:(=), predictor.name,
+        push!(stmts, Expr(:(=), get(rename, predictor.name, predictor.name),
             _rk_ast_affine(predictor, coefs)))
     end
     for parameter in plan.parameters
@@ -197,7 +211,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
     end
     for response in plan.responses
         push!(stmts, Expr(:call, :.~,
-            response.response, _rk_ast_response_dist(response)))
+            response.response, _rk_ast_response_dist(response, rename)))
     end
     Expr(:block, stmts...)
 end
