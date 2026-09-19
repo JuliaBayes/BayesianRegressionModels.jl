@@ -1098,8 +1098,8 @@ end
 end
 
 @testset "ranef plain bucket kinds" begin
-    # (1|g) — :intercept1, no eta. Draws-always pending the totals fork
-    # (SB routes matchable lone intercepts through brm_total).
+    # (1|g) — :intercept1, no eta. Draws-always per 0yl36fh (interim);
+    # SB routes matchable lone intercepts through brm_total.
     intercept = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x + (1 | g)
         s ~ Exponential(1)
@@ -1280,8 +1280,8 @@ end
 end
 
 @testset "ranef K=1 ID stays correlated" begin
-    # Unmatched-regime mirror of SB (vacuous 1x1 LKJ); the totals fork
-    # decides the matchable lone-intercept regime separately.
+    # Unmatched-regime mirror of SB (vacuous 1x1 LKJ); 0yl36fh keeps the
+    # matchable lone-intercept regime on draws too (interim).
     plan = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x + (1 | ID | g)
         s ~ Exponential(1)
