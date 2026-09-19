@@ -23,7 +23,19 @@ const _RK_SLICE1_TRIPLES = Set{Tuple{Symbol,Symbol,Symbol}}([
     (:binomial_logit, :logit, :logit),
     (:nb2_log, :log, :log),
     (:gamma_log, :log, :log),
+    (:categorical_logit, :logit, :identity),
+    (:ordered_logit, :logit, :identity),
+    (:ordinal, :logit, :identity),
+    (:ordinal, :probit, :identity),
+    (:ordinal, :cloglog, :identity),
 ])
+# Leveled simplex responses (multinomial/categorical) name a simplex
+# vector parameter instead of a linear predictor, so they skip the
+# triple (the thin-layer scan-state precedent) and validate on the
+# simplex path.
+const _RK_SIMPLEX_FAMILIES = Set{Symbol}([:multinomial, :categorical])
+const _RK_ORDINAL_LINKS = Dict{Symbol,Symbol}(
+    :LogitLink => :logit, :ProbitLink => :probit, :CloglogLink => :cloglog)
 const _RK_SLICE1_PRIOR_ARITY = Dict{Symbol,Int}(
     :Normal => 2, :Cauchy => 2, :Exponential => 1, :Gamma => 2,
     :LogNormal => 2, :Beta => 2, :InverseGamma => 2, :Flat => 0)
@@ -61,15 +73,31 @@ end
 
 struct _RKLikelihoodSpec
     family::Symbol # :gaussian | :bernoulli_logit | :poisson_log |
-                   # :binomial_logit | :nb2_log | :gamma_log
-    link::Symbol   # effective link: :identity | :logit | :log
+                   # :binomial_logit | :nb2_log | :gamma_log |
+                   # :categorical_logit | :ordered_logit | :ordinal |
+                   # :multinomial | :categorical
+    link::Symbol   # effective link: :identity | :logit | :log |
+                   # :probit | :cloglog (ordinal only)
     response::Symbol
-    predictor::Symbol
+    predictor::Symbol # leveled simplex responses name their simplex
+                      # vector parameter here (no linear predictor)
     scale::Union{Nothing,Symbol,Float64}
     weights::Union{Nothing,Symbol}
     evidence::_RKResponseEvidence
     label::Symbol
-    trials::Union{Nothing,Symbol,Int} # binomial only: data col or literal
+    trials::Union{Nothing,Symbol,Int} # binomial/multinomial: data col or literal
+    # Leveled trailing fields (thin-layer LikelihoodSpec mirror); every
+    # other family leaves them at defaults.
+    n_levels::Union{Nothing,Int}
+    thresholds::Union{Nothing,Symbol} # ordered/ordinal cutpoint param
+    extra_predictors::Vector{Symbol}  # categorical-logit tail (class 3..K)
+    count_columns::Vector{Symbol}     # multinomial tail count columns
+    ordinal_structure::Union{Nothing,Symbol} # :cumulative | :stopping
+    # Reserved for the ordinal-extras surface ask (always defaults until
+    # the surface spells discrimination/per-threshold).
+    discrimination::Union{Nothing,Float64,Symbol} # ordinal literal or column
+    threshold_columns::Vector{Symbol} # ordinal per-threshold design columns
+    threshold_coefs::Union{Nothing,Symbol} # per-threshold coef vector param
 end
 
 struct _RKTermSpec
@@ -134,6 +162,14 @@ struct _RKRanefBucket
     label::Symbol # :bucket_<suffix>
 end
 
+struct _RKVectorParameter
+    name::Symbol
+    family::Symbol # :ordered_normal | :vector_normal | :simplex_dirichlet
+    args::Tuple # literals: (location, scale) / (concentration-vector,)
+    size::Union{Nothing,Int}
+    label::Symbol
+end
+
 struct _RKStructuralPlan
     responses::Vector{_RKLikelihoodSpec}
     predictors::Vector{_RKPredictorSpec}
@@ -144,6 +180,7 @@ struct _RKStructuralPlan
     columns::Dict{Symbol,AbstractVector}
     n_obs::Int
     ranef_buckets::Vector{_RKRanefBucket}
+    vector_parameters::Vector{_RKVectorParameter}
 end
 
 """
@@ -228,7 +265,11 @@ const _RK_ADMITTED_SPELLINGS =
     "`logit(p) ~ ...`, `y ~ Poisson(mu)` + `log(mu) ~ ...`, " *
     "`H ~ Binomial(n, p)` + `logit(p) ~ ...` (or `Binomial(n, " *
     "logistic(eta))` + `eta ~ ...`), `y ~ NegativeBinomial2(mu, phi)` + " *
-    "`log(mu) ~ ...`, or `y ~ Gamma(alpha, mu/alpha)` + `log(mu) ~ ...`"
+    "`log(mu) ~ ...`, `y ~ Gamma(alpha, mu/alpha)` + `log(mu) ~ ...`, " *
+    "`y ~ CategoricalLogit(eta_2, ..., eta_K)` + identity `eta_j ~ ...`, " *
+    "`y ~ OrderedLogistic(eta)` + `eta ~ ...`, `y ~ Ordinal(structure, " *
+    "link, eta)` + `eta ~ 0 + ...`, `obs ~ Multinomial(N, s)` + " *
+    "`s ~ Dirichlet(...)`, or `y ~ Categorical(s)` + `s ~ Dirichlet(...)`"
 
 function _rk_predictor_link(brmi::BRMI, target::Symbol)
     prefix = "RK backend"
@@ -358,13 +399,17 @@ end
 function _rk_classify_response(rhs::ExprColumn, predictor::Symbol,
         predictor_link::Symbol, parameters::Set{Symbol},
         assignments::Set{Symbol}, consts::Dict{Symbol,Float64},
-        aliases::Dict{Symbol,Symbol}, response::Symbol)
+        aliases::Dict{Symbol,Symbol}, response::Symbol,
+        extra::Vector{Symbol} = Symbol[],
+        extra_links::Vector{Symbol} = Symbol[])
     prefix = "RK backend"
     head = getf(rhs)
     args = getargs(rhs)
-    isempty(getkwargs(rhs)) || error(
+    # Ordinal carries its SB keywords (`discrimination`, `per_threshold`);
+    # the arm below admits exactly those two.
+    head !== Ordinal && (isempty(getkwargs(rhs)) || error(
         "$prefix: response `$response` distribution keywords are out of " *
-        "slice 1; admitted spellings: $_RK_ADMITTED_SPELLINGS")
+        "slice 1; admitted spellings: $_RK_ADMITTED_SPELLINGS"))
     if head === Normal
         length(args) == 2 || error(
             "$prefix: response `$response` `Normal` needs `(location, scale)`")
@@ -487,20 +532,60 @@ function _rk_classify_response(rhs::ExprColumn, predictor::Symbol,
             "mu/alpha)` with a `log(mu)` predictor")
         return (:gamma_log, predictor_link, shape, nothing)
     elseif head === OrderedLogistic
-        # Ordinal admission point (decision 0w1i3qb): the single-predictor
-        # shape reaches classification, but the thin layer has no
-        # cumulative-ordinal likelihood or ordered cutpoint parameters yet.
-        error("$prefix: response `$response` family `OrderedLogistic` " *
-              "needs thin-layer cumulative-ordinal support (ordered " *
-              "cutpoints plus a cumulative-logit likelihood); slice 1 " *
-              "admits $_RK_ADMITTED_SPELLINGS")
+        length(args) == 1 || error(
+            "$prefix: response `$response` `OrderedLogistic` needs one " *
+            "argument; write `OrderedLogistic(eta)` with an `eta ~ ...` " *
+            "predictor")
+        _rk_is_predictor_ref(only(args), predictor) || error(
+            "$prefix: response `$response` location must be the linear " *
+            "predictor `$predictor` itself")
+        triple = (:ordered_logit, :logit, predictor_link)
+        triple in _RK_SLICE1_TRIPLES || error(
+            "$prefix: response `$response` pairs `OrderedLogistic` with " *
+            "a $predictor_link-link predictor; write `OrderedLogistic(eta)` " *
+            "with an identity-link predictor")
+        return (:ordered_logit, :logit, nothing, nothing)
     elseif head === Ordinal
-        # Same decision: general typed ordinal needs the structure x link
-        # likelihood plus threshold parameters in the thin layer.
-        error("$prefix: response `$response` family `Ordinal` needs " *
-              "thin-layer general-ordinal support (structure x link " *
-              "likelihood plus threshold parameters); slice 1 admits " *
-              "$_RK_ADMITTED_SPELLINGS")
+        length(args) == 3 || error(
+            "$prefix: response `$response` `Ordinal` needs `(structure, " *
+            "link, eta)`; write `Ordinal(Cumulative(), LogitLink(), eta)` " *
+            "with an `eta ~ 0 + ...` predictor")
+        structure = _brm_ordinal_tag(args[1], OrdinalStructure; prefix)
+        link_tag = _brm_ordinal_tag(args[2], OrdinalLink; prefix)
+        link = _RK_ORDINAL_LINKS[nameof(typeof(link_tag))]
+        _rk_is_predictor_ref(args[3], predictor) || error(
+            "$prefix: response `$response` `Ordinal` location must be the " *
+            "linear predictor `$predictor` itself")
+        _brm_ordinal_has_fixed_intercept(args[3]) && error(
+            "$prefix: `Ordinal($response)` cannot include a fixed intercept " *
+            "in `eta`; the estimated thresholds already supply the location. " *
+            "Use `eta ~ 0 + ...`.")
+        triple = (:ordinal, link, predictor_link)
+        triple in _RK_SLICE1_TRIPLES || error(
+            "$prefix: response `$response` pairs `Ordinal` with a " *
+            "$predictor_link-link predictor; write `Ordinal(structure, " *
+            "link, eta)` with an identity-link predictor")
+        return (:ordinal, link, nothing, nothing)
+    elseif head === CategoricalLogit
+        preds = [predictor; extra...]
+        length(args) == length(preds) || error(
+            "$prefix: response `$response` `CategoricalLogit` arguments " *
+            "must be its resolved non-reference predictors " *
+            "($(join(preds, ", ")))")
+        for (arg, owned) in zip(args, preds)
+            _rk_is_predictor_ref(arg, owned) || error(
+                "$prefix: response `$response` `CategoricalLogit` argument " *
+                "must be the linear predictor `$owned` itself (class order " *
+                "follows argument order)")
+        end
+        for (owned, plink) in zip(preds, [predictor_link; extra_links...])
+            triple = (:categorical_logit, :logit, plink)
+            triple in _RK_SLICE1_TRIPLES || error(
+                "$prefix: response `$response` pairs `CategoricalLogit` " *
+                "with a $plink-link predictor `$owned`; write identity-link " *
+                "predictors (`eta_j ~ ...`)")
+        end
+        return (:categorical_logit, :logit, nothing, nothing)
     end
     head_name = head isa Function ? nameof(head) :
         head isa Type ? nameof(head) : string(head)
@@ -2104,6 +2189,8 @@ function _rk_plan_parameters!(prepared, data::AbstractDict,
             "$prefix: parameter `$(parameter.name)` prior is not a " *
             "distribution call")
         callable = prior.callable
+        # Dirichlet simplexes plan as vector parameters (below), not here.
+        callable === Dirichlet && continue
         family, args, support_override = if callable === truncated
             # Keyword bounds are validated inside the half-normal gate.
             _rk_half_normal_prior(prior, parameter.name)
@@ -2166,6 +2253,79 @@ end
 
 const _RK_SLICE1_PRIOR_ARITY_KEYS =
     Tuple(sort!(collect(keys(_RK_SLICE1_PRIOR_ARITY))))
+
+# Dirichlet simplex parameters (`s ~ Dirichlet(alpha)` /
+# `s ~ Dirichlet(K, a)`): the shared-simplex source for multinomial and
+# categorical responses. Concentrations are frozen hyperparameters
+# (thin-layer literal-only rule): a numeric vector literal, a symmetric
+# integer dimension with a numeric (or folded-const) concentration, and
+# nothing else.
+function _rk_dirichlet_alpha(args, name::Symbol,
+        consts::Dict{Symbol,Float64})
+    prefix = "RK backend"
+    if length(args) == 1
+        arg = only(args)
+        arg isa _BRMPreparedExpr && arg.callable === Base.vect ||
+            error("$prefix: parameter `$name` `Dirichlet` needs a numeric " *
+                  "concentration vector literal (`Dirichlet([1.0, 2.0])`) " *
+                  "or symmetric `Dirichlet(K, a)`")
+        isempty(arg.kwargs) || error(
+            "$prefix: parameter `$name` `Dirichlet` takes no keywords")
+        isempty(arg.args) && error(
+            "$prefix: parameter `$name` `Dirichlet` concentration is empty")
+        alpha = Float64[]
+        for value in arg.args
+            value isa Number || error(
+                "$prefix: parameter `$name` `Dirichlet` concentration " *
+                "must be a numeric literal vector (concentrations are " *
+                "frozen hyperparameters)")
+            push!(alpha, Float64(value))
+        end
+        all(isfinite, alpha) && all(>(0), alpha) || error(
+            "$prefix: parameter `$name` `Dirichlet` concentration must be " *
+            "finite and strictly positive")
+        return alpha
+    elseif length(args) == 2
+        dimension, concentration = args
+        dimension isa Integer && dimension >= 1 || error(
+            "$prefix: parameter `$name` symmetric `Dirichlet(K, a)` needs " *
+            "a positive integer dimension")
+        level = if concentration isa Number
+            Float64(concentration)
+        elseif concentration isa _BRMPreparedRef &&
+                haskey(consts, concentration.name)
+            consts[concentration.name]
+        else
+            error("$prefix: parameter `$name` symmetric `Dirichlet(K, a)` " *
+                  "needs a numeric concentration literal")
+        end
+        isfinite(level) && level > 0 || error(
+            "$prefix: parameter `$name` symmetric `Dirichlet(K, a)` needs " *
+            "a finite strictly positive concentration")
+        return fill(level, Int(dimension))
+    end
+    error("$prefix: parameter `$name` `Dirichlet` takes a concentration " *
+          "vector `Dirichlet(alpha)` or symmetric `Dirichlet(K, a)`, got " *
+          "$(length(args)) arguments")
+end
+
+function _rk_plan_vector_parameters!(prepared,
+        consts::Dict{Symbol,Float64})
+    prefix = "RK backend"
+    specs = _RKVectorParameter[]
+    for parameter in prepared.parameters
+        prior = parameter.prior
+        prior isa _BRMPreparedExpr || continue
+        prior.callable === Dirichlet || continue
+        isempty(prior.kwargs) || error(
+            "$prefix: parameter `$(parameter.name)` `Dirichlet` takes no " *
+            "keywords")
+        alpha = _rk_dirichlet_alpha(prior.args, parameter.name, consts)
+        push!(specs, _RKVectorParameter(parameter.name, :simplex_dirichlet,
+            (alpha,), length(alpha), parameter.name))
+    end
+    specs
+end
 
 function _rk_half_normal_prior(prior::_BRMPreparedExpr, name::Symbol)
     prefix = "RK backend"
@@ -2311,6 +2471,23 @@ function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
         # validation there, so it fails here with BRM-side attribution).
         (eltype(values) <: Real && all(>(0), values)) || error(
             "$prefix: response `$response` must hold strictly positive values")
+    elseif family === :categorical_logit || family === :ordinal ||
+            family === :categorical
+        # Recoded 1..K by construction (`_rk_leveled_levels`); assert the
+        # thin-layer bind rule (integer 1..K, exact coverage, no gaps).
+        (eltype(values) <: Integer && eltype(values) !== Bool) || error(
+            "$prefix: response `$response` must hold integers 1..K " *
+            "(recoded levels)")
+        K = isempty(values) ? 0 : maximum(values)
+        all(x -> x >= 1, values) && sort(unique(values)) == collect(1:K) ||
+            error("$prefix: response `$response` must cover every level " *
+                  "1..$K exactly (recoded levels have no gaps)")
+    elseif family === :ordered_logit
+        # Raw-integer coding (SB compat); contiguity is planned in
+        # `_rk_ordered_levels` — re-assert the eltype half of the bind rule.
+        (eltype(values) <: Integer && eltype(values) !== Bool) || error(
+            "$prefix: response `$response` `OrderedLogistic` expects " *
+            "integer outcome data, got $(eltype(values))")
     end
     values
 end
@@ -2340,6 +2517,36 @@ function _rk_gate_trials_values!(specs::AbstractVector,
         all(y .<= n) || error(
             "$prefix: response `$(spec.response)` exceeds its trials " *
             "(`$trials`) on some row; Binomial needs y <= n every row")
+    end
+    nothing
+end
+
+# Multinomial trials validation once columns cross: integer trials and
+# row sums meeting trials every row.
+function _rk_gate_multinomial_trials!(specs::AbstractVector,
+        columns::Dict{Symbol,AbstractVector}, n_obs::Int)
+    prefix = "RK backend"
+    for spec in specs
+        spec.family === :multinomial || continue
+        trials = spec.trials
+        n = if trials isa Int
+            fill(trials, n_obs)
+        else
+            raw = columns[trials]
+            eltype(raw) <: Integer || error(
+                "$prefix: response `$(spec.response)` trials column " *
+                "`$trials` must hold integers")
+            raw
+        end
+        all(>=(0), n) || error(
+            "$prefix: response `$(spec.response)` trials must be " *
+            "non-negative every row")
+        counts = [columns[c] for c in [spec.response; spec.count_columns...]]
+        sums = [sum(row) for row in zip(counts...)]
+        bad = findfirst(i -> sums[i] != n[i], 1:length(sums))
+        isnothing(bad) || error(
+            "$prefix: response `$(spec.response)` count rows must sum to " *
+            "their trials (`$trials`) every row; first mismatch at row $bad")
     end
     nothing
 end
@@ -2388,27 +2595,6 @@ end
 
 function _rk_referenced_predictor(program, rhs, response::Symbol)
     prefix = "RK backend"
-    # Categorical-machinery admission point (decision 0w1i3qb): these
-    # families never fit the one-predictor plan shape — CategoricalLogit
-    # takes K-1 predictors, Categorical/Multinomial take simplex
-    # probabilities, not a predictor at all — so they gate on the head
-    # before the predictor-count checks below.
-    head = getf(rhs)
-    head === CategoricalLogit && error(
-        "$prefix: response `$response` family `CategoricalLogit` needs " *
-        "multi-predictor categorical support (K-1 linear predictors plus " *
-        "a thin-layer multi-logit likelihood); slice 1 lowers " *
-        "likelihoods of one declared linear predictor")
-    head === Categorical && error(
-        "$prefix: response `$response` family `Categorical` needs " *
-        "thin-layer simplex-probability support (Dirichlet-backed " *
-        "simplex parameters); slice 1 lowers likelihoods of one " *
-        "declared linear predictor")
-    head === Multinomial && error(
-        "$prefix: response `$response` family `Multinomial` needs " *
-        "thin-layer multinomial support (simplex probabilities plus a " *
-        "count-matrix response); slice 1 lowers likelihoods of one " *
-        "declared linear predictor")
     referenced = _brm_reachable_operations(
         program, _brm_prepared_references(_brm_prepare_expr(rhs)))
     names = Symbol[node.name for node in program.operations
@@ -2422,6 +2608,220 @@ function _rk_referenced_predictor(program, rhs, response::Symbol)
         "predictors ($(join(names, ", "))); distributional and " *
         "multi-predictor likelihoods are out of slice 1")
     only(names)
+end
+
+# CategoricalLogit references K-1 predictors positionally (class order
+# 2..K follows argument order). Each argument must name a declared
+# linear predictor; returns the names in order (possibly empty — the
+# K=1-or-mismatch shape resolves against observed levels in Phase 5).
+function _rk_categorical_refs(program, rhs::ExprColumn, response::Symbol)
+    prefix = "RK backend"
+    declared = Set{Symbol}(node.name for node in program.operations
+        if node.role === :predictor)
+    names = Symbol[]
+    for arg in getargs(rhs)
+        arg isa NamedColumn && name(arg) in declared || error(
+            "$prefix: response `$response` `CategoricalLogit` argument " *
+            "`$(arg isa NamedColumn ? name(arg) : arg)` is not a declared " *
+            "linear predictor; write one `eta_j ~ ...` predictor per " *
+            "non-reference class")
+        push!(names, name(arg))
+    end
+    length(unique(names)) == length(names) || error(
+        "$prefix: response `$response` `CategoricalLogit` repeats a " *
+        "predictor ($(join(names, ", "))) — one linear predictor per " *
+        "non-reference class")
+    names
+end
+
+# ---- leveled responses (categorical / ordinal / multinomial) ----
+const _RK_LEVELED_FAMILIES =
+    Set{Symbol}([:categorical_logit, :ordered_logit, :ordinal,
+        :multinomial, :categorical])
+
+# Recoded 1..K levels for a leveled vector response (SB's
+# `_brm_response_levels`: sort(unique) order, reference = level 1).
+function _rk_leveled_levels(response::Symbol, raw::AbstractVector)
+    prefix = "RK backend"
+    raw isa AbstractVector || error(
+        "$prefix: response `$response` must be an observed vector")
+    prepared = _brm_response_levels(response, raw; prefix)
+    K = prepared.fit.n_levels
+    K >= 1 || error(
+        "$prefix: response `$response` has no observed levels")
+    (prepared.response, K, prepared.fit.levels)
+end
+
+# OrderedLogistic keeps SB's raw-integer coding (K = max(y)): no recode,
+# since recoding would change the cutpoint count and the posterior. Gaps
+# fail closed — the thin layer needs exact 1..K coverage.
+function _rk_ordered_levels(response::Symbol, raw::AbstractVector)
+    prefix = "RK backend"
+    (eltype(raw) <: Integer && eltype(raw) !== Bool) || error(
+        "$prefix: response `$response` `OrderedLogistic` expects integer " *
+        "outcome data, got $(eltype(raw))")
+    any(x -> x < 1, raw) && error(
+        "$prefix: response `$response` `OrderedLogistic` expects positive " *
+        "integer outcome data")
+    K = isempty(raw) ? 0 : maximum(raw)
+    K >= 1 || error(
+        "$prefix: response `$response` has no observed levels")
+    sort(unique(raw)) == collect(1:K) || error(
+        "$prefix: response `$response` holds non-contiguous levels " *
+        "($(join(sort(unique(raw)), ", "))); SB accepts gappy " *
+        "`OrderedLogistic` levels, but RK needs recoded contiguous 1..K — " *
+        "recode the response or drop empty levels")
+    (Int.(raw), K)
+end
+
+# The shared-simplex source of a multinomial/categorical response: a
+# `Dirichlet`-sampled vector parameter (data columns and other
+# parameters fail closed — the thin layer takes a simplex latent only).
+function _rk_simplex_source(arg, response::Symbol,
+        vectors::Dict{Symbol,_RKVectorParameter})
+    prefix = "RK backend"
+    arg isa NamedColumn || error(
+        "$prefix: response `$response` probabilities must be a " *
+        "`Dirichlet`-sampled parameter (`s ~ Dirichlet(...)`)")
+    parent(arg) isa DataColumn && error(
+        "$prefix: response `$response` probabilities cannot be a data " *
+        "column; declare a shared simplex (`s ~ Dirichlet(...)`) — fixed " *
+        "probability vectors are out of slice 1")
+    sname = name(arg)
+    haskey(vectors, sname) || error(
+        "$prefix: response `$response` probabilities `$(sname)` must be a " *
+        "`Dirichlet`-sampled parameter (`$(sname) ~ Dirichlet(...)`)")
+    (sname, vectors[sname].size)
+end
+
+# Ordinal extras gate: `discrimination`/`per_threshold` are plan-level
+# only in the thin layer (the AST surface spells `Ordinal.(structure,
+# link, eta)`), and the AST-only lowering has no direct route — so any
+# extras fail closed here naming the surface gap. Drop the keywords for
+# the plain ordinal (even `discrimination=1.0`).
+function _rk_ordinal_extras(rhs::ExprColumn, response::Symbol)
+    prefix = "RK backend"
+    kwargs = getkwargs(rhs)
+    for key in keys(kwargs)
+        key === :discrimination || key === :per_threshold || error(
+            "$prefix: response `$response` `Ordinal` takes only " *
+            "`discrimination` and `per_threshold` keywords, got `$key`")
+    end
+    isempty(kwargs) && return (nothing, Symbol[], nothing, Symbol[],
+        _RKVectorParameter[])
+    given = join(["`$key`" for key in keys(kwargs)], ", ")
+    error("$prefix: response `$response` ordinal extras need thin-layer " *
+          "surface support (got $given; the AST lowering spells " *
+          "`Ordinal.(structure, link, eta)` only) — drop the keywords " *
+          "for the plain ordinal")
+end
+
+# Defaults for non-leveled families (the thin-layer leaves these at
+# defaults too).
+function _rk_unleveled(entry, predictor::Symbol)
+    (; predictor, n_levels=nothing, thresholds=nothing,
+        extra_predictors=Symbol[], count_columns=Symbol[],
+        ordinal_structure=nothing, discrimination=nothing,
+        threshold_columns=Symbol[], threshold_coefs=nothing,
+        response_values=entry.raw_response, cross_columns=Symbol[])
+end
+
+# Leveled spec fields for one response. Appends implicit threshold
+# vectors (cutpoints/thresholds/coefs) to `implicit`; multinomial count
+# columns split in the caller (`response_values === nothing` marks it).
+function _rk_plan_leveled!(entry, family::Symbol,
+        predictor::Union{Symbol,Nothing}, extra::Vector{Symbol},
+        implicit::Vector{_RKVectorParameter},
+        vectors::Dict{Symbol,_RKVectorParameter}, data::AbstractDict)
+    prefix = "RK backend"
+    key, rhs, raw = entry.key, entry.rhs, entry.raw_response
+    if family === :categorical_logit
+        recoded, K, levels = _rk_leveled_levels(key, raw)
+        n_nonref = 1 + length(extra)
+        K == 1 + n_nonref || error(
+            "$prefix: `CategoricalLogit($key)` observed $K outcome levels " *
+            "but received $n_nonref non-reference predictors; expected " *
+            "$(K - 1). Outcome level order is $(collect(levels)).")
+        return (; predictor, n_levels=K, thresholds=nothing,
+            extra_predictors=extra, count_columns=Symbol[],
+            ordinal_structure=nothing, discrimination=nothing,
+            threshold_columns=Symbol[], threshold_coefs=nothing,
+            response_values=recoded, cross_columns=Symbol[])
+    elseif family === :ordered_logit
+        recoded, K = _rk_ordered_levels(key, raw)
+        cut = Symbol(key, :_cutpoints)
+        push!(implicit, _RKVectorParameter(cut, :ordered_normal, (0.0, 1.0),
+            K - 1, cut))
+        return (; predictor, n_levels=K, thresholds=cut,
+            extra_predictors=Symbol[], count_columns=Symbol[],
+            ordinal_structure=nothing, discrimination=nothing,
+            threshold_columns=Symbol[], threshold_coefs=nothing,
+            response_values=recoded, cross_columns=Symbol[])
+    elseif family === :ordinal
+        recoded, K, _ = _rk_leveled_levels(key, raw)
+        structure = _brm_ordinal_tag(getargs(rhs)[1], OrdinalStructure;
+            prefix) isa Cumulative ? :cumulative : :stopping
+        (discrimination, threshold_columns, threshold_coefs, cross,
+            coef_implicit) = _rk_ordinal_extras(rhs, key)
+        append!(implicit, coef_implicit)
+        thresh = Symbol(key, :_thresholds)
+        vfam = structure === :cumulative ? :ordered_normal : :vector_normal
+        push!(implicit, _RKVectorParameter(thresh, vfam, (0.0, 1.0), K - 1,
+            thresh))
+        return (; predictor, n_levels=K, thresholds=thresh,
+            extra_predictors=Symbol[], count_columns=Symbol[],
+            ordinal_structure=structure, discrimination, threshold_columns,
+            threshold_coefs, response_values=recoded,
+            cross_columns=cross)
+    elseif family === :categorical
+        recoded, K, _ = _rk_leveled_levels(key, raw)
+        simplex, ssize = _rk_simplex_source(getargs(rhs)[1], key, vectors)
+        ssize == K || error(
+            "$prefix: response `$key` has $K outcome levels but simplex " *
+            "`$simplex` has $ssize categories; sizes must agree")
+        return (; predictor=simplex, n_levels=K, thresholds=nothing,
+            extra_predictors=Symbol[], count_columns=Symbol[],
+            ordinal_structure=nothing, discrimination=nothing,
+            threshold_columns=Symbol[], threshold_coefs=nothing,
+            response_values=recoded, cross_columns=Symbol[])
+    else # :multinomial
+        simplex, ssize = _rk_simplex_source(getargs(rhs)[2], key, vectors)
+        matrix = get(data, key, nothing)
+        matrix isa AbstractMatrix || error(
+            "$prefix: response `$key` `Multinomial` needs an n×K integer " *
+            "count matrix, got $(typeof(matrix))")
+        (eltype(matrix) <: Integer && eltype(matrix) !== Bool &&
+            all(>=(0), matrix)) || error(
+            "$prefix: response `$key` `Multinomial` count matrix must " *
+            "hold non-negative integers")
+        K = size(matrix, 2)
+        K >= 1 || error(
+            "$prefix: response `$key` `Multinomial` needs at least one " *
+            "category")
+        ssize == K || error(
+            "$prefix: response `$key` has $K count columns but simplex " *
+            "`$simplex` has $ssize categories; sizes must agree")
+        tails = [Symbol(key, :_count_, k) for k in 2:K]
+        return (; predictor=simplex, n_levels=K, thresholds=nothing,
+            extra_predictors=Symbol[], count_columns=tails,
+            ordinal_structure=nothing, discrimination=nothing,
+            threshold_columns=Symbol[], threshold_coefs=nothing,
+            response_values=nothing, cross_columns=Symbol[])
+    end
+end
+
+# Split a multinomial n×K count matrix into the lead response column
+# (category 1, under the response key) plus K−1 raw tail columns.
+function _rk_split_multinomial_counts!(columns::Dict{Symbol,AbstractVector},
+        key::Symbol, matrix::AbstractMatrix, tails::Vector{Symbol})
+    prefix = "RK backend"
+    size(matrix, 2) == 1 + length(tails) || error(
+        "$prefix: internal: multinomial tail names disagree with $key")
+    columns[key] = Int.(vec(matrix[:, 1]))
+    for (k, name) in enumerate(tails)
+        columns[name] = Int.(vec(matrix[:, k + 1]))
+    end
+    nothing
 end
 
 function _rk_gate_crossed_columns!(columns::Dict{Symbol,AbstractVector},
@@ -2444,13 +2844,57 @@ end
 
 function _rk_gate_name_hygiene!(predictor_specs::AbstractVector,
         parameters::AbstractVector, assignments::AbstractVector,
-        derived::AbstractVector, columns::Dict{Symbol,AbstractVector})
+        derived::AbstractVector, columns::Dict{Symbol,AbstractVector},
+        response_specs::AbstractVector, vector_parameters::AbstractVector)
     prefix = "RK backend"
     pnames = [spec.name for spec in predictor_specs]
     length(unique(pnames)) == length(pnames) || error(
         "$prefix: internal: duplicate predictor names")
     both = union(Set(spec.name for spec in parameters),
         Set(spec.name for spec in assignments))
+    # Leveled names share the one name table (thin-layer rule): vector
+    # parameters (Dirichlet simplexes + implicit thresholds/coefs)
+    # collide with nothing; threshold references must resolve; generated
+    # multinomial tail columns must exist and collide with nothing.
+    vnames = [spec.name for spec in vector_parameters]
+    length(unique(vnames)) == length(vnames) || error(
+        "$prefix: internal: duplicate vector parameter names")
+    for name in vnames
+        name in both && error(
+            "$prefix: vector parameter `$name` collides with a " *
+            "parameter/assignment name; rename it")
+        name in pnames && error(
+            "$prefix: vector parameter `$name` collides with predictor " *
+            "`$name`; rename it")
+        haskey(columns, name) && error(
+            "$prefix: vector parameter `$name` collides with raw column " *
+            "`$name`; rename it")
+    end
+    dnames = [spec.name for spec in derived]
+    for spec in response_specs
+        for tname in (spec.thresholds, spec.threshold_coefs)
+            tname === nothing && continue
+            tname in vnames || error(
+                "$prefix: internal: response `$(spec.response)` references " *
+                "missing vector parameter `$tname`")
+        end
+        for cname in spec.count_columns
+            haskey(columns, cname) || error(
+                "$prefix: internal: multinomial tail column `$cname` missing")
+            cname in both && error(
+                "$prefix: generated count column `$cname` collides with a " *
+                "parameter/assignment name; rename it")
+            cname in pnames && error(
+                "$prefix: generated count column `$cname` collides with " *
+                "predictor `$cname`; rename the predictor")
+            cname in vnames && error(
+                "$prefix: generated count column `$cname` collides with " *
+                "vector parameter `$cname`; rename the parameter")
+            cname in dnames && error(
+                "$prefix: generated count column `$cname` collides with " *
+                "derived column `$cname`; rename the raw column")
+        end
+    end
     col_overlap = sort!(filter(n -> haskey(columns, n), collect(both)))
     isempty(col_overlap) || error(
         "$prefix: parameter/assignment name(s) " *
@@ -2464,7 +2908,6 @@ function _rk_gate_name_hygiene!(predictor_specs::AbstractVector,
             "$prefix: parameter/assignment `$block` collides with " *
             "predictor `$pn` coefficient block name; rename it")
     end
-    dnames = [spec.name for spec in derived]
     length(unique(dnames)) == length(dnames) || error(
         "$prefix: internal: duplicate derived column names")
     for dn in dnames
@@ -2474,12 +2917,15 @@ function _rk_gate_name_hygiene!(predictor_specs::AbstractVector,
         dn in pnames && error(
             "$prefix: generated derived column `$dn` collides with " *
             "predictor `$dn`; rename the predictor")
+        dn in vnames && error(
+            "$prefix: generated derived column `$dn` collides with " *
+            "vector parameter `$dn`; rename the parameter")
         haskey(columns, dn) && error(
             "$prefix: generated derived column `$dn` collides with raw " *
             "column `$dn`; rename the raw column")
     end
     for n in sort!(collect(Iterators.flatten(
-            (pnames, both, dnames, keys(columns)))))
+            (pnames, both, dnames, vnames, keys(columns)))))
         startswith(string(n), "_ppl_") && error(
             "$prefix: name `$n` uses the reserved `_ppl_` prefix; rename it")
     end
@@ -2550,13 +2996,33 @@ function _brm_rk_plan(brmi::BRMI)
         kept_assignments, context.data, parameter_names)
     parameters = _rk_plan_parameters!(prepared, context.data, consts,
         aliases, parameter_names, assignment_names)
+    vector_specs = _rk_plan_vector_parameters!(prepared, consts)
+    vector_by_name = Dict{Symbol,_RKVectorParameter}(
+        spec.name => spec for spec in vector_specs)
     assignments = _rk_plan_assignments!(kept_assignments, exprs,
         context.data, consts, aliases, parameter_names, assignment_names)
     _rk_gate_acyclic!(parameters, assignments)
     # Phase 4: discover and plan predictors (deduped, first-referenced order).
     predictor_order = Symbol[]
-    response_predictor = Dict{Symbol,Symbol}()
+    response_predictor = Dict{Symbol,Union{Symbol,Nothing}}()
+    response_extra_predictors = Dict{Symbol,Vector{Symbol}}()
     for entry in peeled
+        head = getf(entry.rhs)
+        if head === Categorical || head === Multinomial
+            # No linear predictor (the simplex path resolves in Phase 5).
+            response_predictor[entry.key] = nothing
+            continue
+        elseif head === CategoricalLogit
+            preds = _rk_categorical_refs(program, entry.rhs, entry.key)
+            response_predictor[entry.key] =
+                isempty(preds) ? nothing : first(preds)
+            response_extra_predictors[entry.key] =
+                isempty(preds) ? Symbol[] : preds[2:end]
+            for target in preds
+                target in predictor_order || push!(predictor_order, target)
+            end
+            continue
+        end
         target = _rk_referenced_predictor(program, entry.rhs, entry.key)
         response_predictor[entry.key] = target
         target in predictor_order || push!(predictor_order, target)
@@ -2565,7 +3031,7 @@ function _brm_rk_plan(brmi::BRMI)
     columns = Dict{Symbol,AbstractVector}()
     derived = _RKDerivedSpec[]
     taken = union(Set{Symbol}(predictor_order), parameter_names,
-        assignment_names)
+        assignment_names, Set{Symbol}(spec.name for spec in vector_specs))
     predictor_specs = _RKPredictorSpec[]
     prior_specs = _RKPopulationPrior[]
     ranef_buckets, ranef_lookup = _rk_plan_ranef_buckets(
@@ -2580,11 +3046,53 @@ function _brm_rk_plan(brmi::BRMI)
     predictor_link = Dict(spec.name => spec.link for spec in predictor_specs)
     # Phase 5: response specs (triples need predictor links and name tables).
     response_specs = _RKLikelihoodSpec[]
+    implicit_vectors = _RKVectorParameter[]
     for entry in peeled
-        predictor = response_predictor[entry.key]
-        family, link, scale, trials = _rk_classify_response(entry.rhs,
-            predictor, predictor_link[predictor], parameter_names,
-            assignment_names, consts, aliases, entry.key)
+        head = getf(entry.rhs)
+        extra = get(response_extra_predictors, entry.key, Symbol[])
+        family, link, scale, trials, predictor = if head === Categorical
+            length(getargs(entry.rhs)) == 1 || error(
+                "$prefix: response `$(entry.key)` `Categorical` needs " *
+                "`Categorical(s)` with a `Dirichlet`-sampled `s`")
+            (:categorical, :identity, nothing, nothing, nothing)
+        elseif head === Multinomial
+            length(getargs(entry.rhs)) == 2 || error(
+                "$prefix: response `$(entry.key)` `Multinomial` needs " *
+                "`(trials, probs)`; write `Multinomial(N, s)` with a " *
+                "`Dirichlet`-sampled `s`")
+            mtrials = _rk_trials_argument(getargs(entry.rhs)[1], entry.key,
+                parameter_names, assignment_names, consts, aliases)
+            (:multinomial, :identity, nothing, mtrials, nothing)
+        else
+            resolved = response_predictor[entry.key]
+            if head === CategoricalLogit && resolved === nothing
+                # Zero-arg shape: K=1 (rejected per 0dteta6) or arity mismatch.
+                levels = _brm_fit_levels(entry.raw_response)
+                modal = length(levels)
+                modal < 1 && error(
+                    "$prefix: response `$(entry.key)` has no observed levels")
+                modal == 1 && error(
+                    "$prefix: response `$(entry.key)` has a single " *
+                    "observed level; single-level `CategoricalLogit` is " *
+                    "inexpressible (decision 0dteta6) — a categorical " *
+                    "response needs at least two levels")
+                error("$prefix: `CategoricalLogit($(entry.key))` observed " *
+                      "$modal outcome levels but received 0 non-reference " *
+                      "predictors; expected $(modal - 1). Outcome level " *
+                      "order is $(collect(levels)).")
+            end
+            plink = predictor_link[resolved]
+            extra_links = [predictor_link[p] for p in extra]
+            classified = _rk_classify_response(entry.rhs, resolved, plink,
+                parameter_names, assignment_names, consts, aliases,
+                entry.key, extra, extra_links)
+            (classified[1], classified[2], classified[3], classified[4],
+                resolved)
+        end
+        leveled = family in _RK_LEVELED_FAMILIES ?
+            _rk_plan_leveled!(entry, family, predictor, extra,
+                implicit_vectors, vector_by_name, context.data) :
+            _rk_unleveled(entry, predictor)
         if trials isa Symbol
             raw = get(context.data, trials, nothing)
             raw isa AbstractVector || error(
@@ -2602,10 +3110,27 @@ function _brm_rk_plan(brmi::BRMI)
         evidence = _rk_plan_evidence(entry.modifier, family, context.data,
             entry.key, columns, consts, aliases, parameter_names,
             assignment_names)
-        gated = _rk_gate_response_values!(family, entry.raw_response, entry.key)
-        columns[entry.key] = gated
+        for col in leveled.cross_columns
+            raw = get(context.data, col, nothing)
+            raw isa AbstractVector || error(
+                "$prefix: response `$(entry.key)` leveled column `$col` " *
+                "is not a vector")
+            columns[col] = raw
+        end
+        if family === :multinomial
+            _rk_split_multinomial_counts!(columns, entry.key,
+                context.data[entry.key], leveled.count_columns)
+        else
+            gated = _rk_gate_response_values!(family,
+                leveled.response_values, entry.key)
+            columns[entry.key] = gated
+        end
         push!(response_specs, _RKLikelihoodSpec(family, link, entry.key,
-            predictor, scale, weights, evidence, entry.key, trials))
+            leveled.predictor, scale, weights, evidence, entry.key, trials,
+            leveled.n_levels, leveled.thresholds,
+            leveled.extra_predictors, leveled.count_columns,
+            leveled.ordinal_structure, leveled.discrimination,
+            leveled.threshold_columns, leveled.threshold_coefs))
     end
     # Phase 6: one observation axis, no missing, finite data, evidence
     # values, and name hygiene (mirrors thin-side validation, R8).
@@ -2620,9 +3145,25 @@ function _brm_rk_plan(brmi::BRMI)
     end
     _rk_gate_crossed_columns!(columns, n_obs)
     _rk_gate_trials_values!(response_specs, columns, n_obs)
+    _rk_gate_multinomial_trials!(response_specs, columns, n_obs)
     _rk_gate_evidence_values!(response_specs, columns, n_obs)
-    _rk_gate_name_hygiene!(
-        predictor_specs, parameters, assignments, derived, columns)
+    # A declared simplex must back a multinomial/categorical response —
+    # an unreferenced `s ~ Dirichlet(...)` does nothing (and the longtail
+    # lane pins that shape closed), so it fails here, not silently.
+    used_simplex = Set{Symbol}(spec.predictor for spec in response_specs
+        if spec.family in _RK_SIMPLEX_FAMILIES)
+    for spec in vector_specs
+        spec.family === :simplex_dirichlet || continue
+        spec.name in used_simplex || error(
+            "$prefix: parameter `$(spec.name)` is declared " *
+            "`Dirichlet`-sampled but no multinomial/categorical response " *
+            "uses it; write `Multinomial(N, $(spec.name))` or " *
+            "`Categorical($(spec.name))`, or drop the declaration")
+    end
+    _rk_gate_name_hygiene!(predictor_specs, parameters, assignments,
+        derived, columns, response_specs,
+        [vector_specs; implicit_vectors])
     _RKStructuralPlan(response_specs, predictor_specs, prior_specs,
-        parameters, assignments, derived, columns, n_obs, ranef_buckets)
+        parameters, assignments, derived, columns, n_obs, ranef_buckets,
+        [vector_specs; implicit_vectors])
 end
