@@ -88,6 +88,7 @@ function _sb_insert_indexed_priors(base::StanBlocks.SlicModel,
 end
 
 const _SB_VECTOR_PRIOR_CACHE = Dict{String,Function}()
+const _SB_MIXTURE_CACHE = Dict{String,Function}()
 const _sb_lower_conditioning_rng = StanBlocks.lower_conditioning_rng
 const _sb_upper_conditioning_rng = StanBlocks.upper_conditioning_rng
 const _sb_conditioning_rng = StanBlocks.conditioning_rng
@@ -5798,6 +5799,23 @@ end
 StanBlocks.@deffun begin
     brm_joint_mean_rows(value::real, rows::int)::vector[rows] = rep_vector(value, rows)
     brm_joint_mean_rows(value::vector[n], rows::int)::vector[n] = begin
+        @stan_assert n == rows
+        value
+    end
+end
+# Integer sibling of `brm_joint_mean_rows` for mixture trial counts: broadcast
+# a scalar count to the response row axis, or pass a per-row count vector
+# through with a row-count assertion. A loop rather than `rep_array`, whose
+# integer overload is not established in StanBlocks' tracer.
+StanBlocks.@deffun begin
+    brm_mixture_rows_int(value::int, rows::int)::int[rows] = begin
+        out::int[rows]
+        for i in 1:rows
+            out[i] = value
+        end
+        out
+    end
+    brm_mixture_rows_int(value::int[n], rows::int)::int[n] = begin
         @stan_assert n == rows
         value
     end
@@ -12034,6 +12052,391 @@ function _sb_lik_family!(stmts, target, ::Type{<:Multinomial}, args::Tuple{Any,A
     N_expr = _sb_scalar_expr(args[1], data)
     probs_expr = _sb_scalar_expr(args[2], data)
     _sb_lik_stan_exprs!(stmts, target, :brm_multinomial, (probs_expr, N_expr))
+end
+
+# ---- generic MixtureModel likelihood -----------------------------------------
+#
+# `y ~ MixtureModel([D1(th1), ..., DK(thK)], weights)` with K same-family
+# scalar components lowers to a generated `@lpxf` triad (model density,
+# pointwise log-likelihood, posterior-predictive RNG), following the
+# `_sb_vector_prior_family` precedent: one fingerprinted `brm_mixture_<hash>`
+# family per (component Stan family, arity, K, discrete/continuous) shape,
+# cached in `_SB_MIXTURE_CACHE`.
+#
+# Each row contributes `log_sum_exp(log(weights) + component_lpdf)` — the
+# vector `log_sum_exp` StanBlocks traces (its tracer has no binary overload),
+# over one `terms::vector[K]` per row. Predictive draws select
+# `categorical_rng(weights)` per row, then draw from that row's selected
+# component. Component densities call the SAME `X_lpdf`/`X_lpmf`/`X_rng`
+# functions the plain single-family path resolves, with the SAME
+# `_sb_stan_dist_args` parameterization translation, so a family that lowers
+# plainly lowers identically as a mixture component.
+#
+# The contract is deliberately narrow (fail-closed, brms rule):
+#
+# - every component is a scalar (`Univariate`) Distributions.jl call, all of
+#   ONE Julia family. Heterogeneous families are rejected: Stan's `_lpmf`
+#   functions THROW on out-of-support `y` (probed: `poisson_lpmf` at `y = -1`
+#   throws `Random variable is -1, but must be nonnegative!`) while
+#   Distributions.jl/Turing return `-Inf`, so mixed-support mixtures would
+#   crash Stan where Turing stays finite. Same-family mixtures share one
+#   support structure and cannot diverge this way.
+# - the family must be directly Stan-mapped (`_sb_stan_dist_name`) or one of
+#   the two native translations (`NegativeBinomial2` → `neg_binomial_2`,
+#   `BetaBinomial2` → `beta_binomial`). Bespoke/custom families
+#   (`ZeroInflatedPoisson`, `HurdlePoisson`, `VonMises`, `InverseGaussian`,
+#   `LocationScale`, ordinals, ...) are rejected: composing customs is v2.
+# - `Uniform`/`Pareto` (parameter-dependent continuous support) and
+#   `Categorical` (simplex, not scalar, parameters) are rejected.
+# - Binomial-family components (`Binomial`, `BinomialLogit`, `BetaBinomial`,
+#   `BetaBinomial2`) must share ONE identical trial-count expression: trial
+#   counts are parameter-dependent support (`{0..N}`), and structurally
+#   different counts could silently diverge on `reprocess`. Value-equal but
+#   structurally different counts are rejected — share one column.
+# - weights are a numeric vector summing to 1 (frozen as
+#   `<target>_mixture_weights` data via `_sb_record_static!`), a length-K
+#   numeric data column, or a Dirichlet-backed simplex parameter. Anything
+#   else is rejected.
+#
+# Scalar-vs-vector component arguments need no Julia-side classification:
+# every translated argument is wrapped in
+# `brm_joint_mean_rows(arg, num_elements(y))` (real positions) or
+# `brm_mixture_rows_int(arg, num_elements(y))` (trial-count positions), whose
+# two-method dispatch broadcasts scalars and passes row vectors through —
+# the `CategoricalLogit` emitter's established pattern.
+_sb_mixture_int_positions(::Type{<:Binomial}) = (1,)
+_sb_mixture_int_positions(::Type{<:BinomialLogit}) = (1,)
+_sb_mixture_int_positions(::Type{<:BetaBinomial}) = (1,)
+_sb_mixture_int_positions(::Type{<:BetaBinomial2}) = (1,)
+_sb_mixture_int_positions(::Type) = ()
+
+function _sb_mixture_stan_name(T::Type, target)
+    T <: NegativeBinomial2 && return :neg_binomial_2
+    T <: BetaBinomial2 && return :beta_binomial
+    name = _sb_stan_dist_name(T)
+    isnothing(name) && error(
+        "sbimpl: `MixtureModel($target)` component `$T` has no Stan translation; " *
+        "mixture components must be directly Stan-mapped scalar families")
+    name === :categorical && error(
+        "sbimpl: `MixtureModel($target)` component `Categorical` takes simplex " *
+        "parameters, not per-observation scalars; categorical mixtures are not supported")
+    (T <: Uniform || T <: Pareto) && error(
+        "sbimpl: `MixtureModel($target)` component `$T` has parameter-dependent " *
+        "support; mixtures over it are not yet supported")
+    name
+end
+
+function _sb_mixture_component_args(T::Type, comp::ExprColumn, target, k, data)
+    isempty(getkwargs(comp)) || error(
+        "sbimpl: `MixtureModel($target)` component $k (`$T`) takes no constructor keywords")
+    raw = getargs(comp)
+    if T <: BetaBinomial2
+        length(raw) == 3 || error(
+            "sbimpl: `MixtureModel($target)` `BetaBinomial2` component $k expects " *
+            "`(trials, mean, precision)`, got $(length(raw)) arguments")
+        trials, mean, precision = map(a -> _sb_scalar_expr(a, data), raw)
+        alpha = Expr(:call, Symbol(".*"), mean, precision)
+        beta = Expr(:call, Symbol(".*"), Expr(:call, :-, 1, mean), precision)
+        return (trials, alpha, beta)
+    end
+    if T <: NegativeBinomial2
+        length(raw) == 2 || error(
+            "sbimpl: `MixtureModel($target)` `NegativeBinomial2` component $k expects " *
+            "`(mu, phi)`, got $(length(raw)) arguments")
+    end
+    _sb_stan_dist_args(T, map(a -> _sb_scalar_expr(a, data), raw))
+end
+
+function _sb_mixture_coerce_discrete!(data, target)
+    response = data[target]
+    response isa AbstractVector{<:Integer} && !(eltype(response) <: Bool) &&
+        return response
+    bad = findfirst(response) do value
+        !(value isa Real && !(value isa Bool) && isfinite(value) && isinteger(value))
+    end
+    isnothing(bad) || error(
+        "sbimpl: `MixtureModel($target)` discrete response must contain only " *
+        "integer values, got $(repr(response[bad])) at row $bad")
+    data[target] = Int.(response)
+end
+
+function _sb_mixture_check_weights(weights, K, target)
+    length(weights) == K || error(
+        "sbimpl: `MixtureModel($target)` has $K components but " *
+        "$(length(weights)) weights")
+    all(isfinite, weights) || error(
+        "sbimpl: `MixtureModel($target)` weights must be finite")
+    all(>=(0), weights) || error(
+        "sbimpl: `MixtureModel($target)` weights must be nonnegative")
+    total = sum(weights)
+    isapprox(total, 1.0; atol=1e-8) || error(
+        "sbimpl: `MixtureModel($target)` weights must sum to 1 (got $total)")
+    nothing
+end
+
+function _sb_mixture_weights_expr!(target, weights, K, data)
+    if weights isa Union{AbstractVector,Tuple} && all(w -> w isa Real, weights)
+        _sb_mixture_check_weights(weights, K, target)
+        key = Symbol(target, :_mixture_weights)
+        haskey(data, key) && error(
+            "sbimpl: reserved derived weights key `$key` collides with a model/data " *
+            "column; rename that column")
+        data[key] = Float64.(collect(weights))
+        _sb_record_static!(data, key)
+        return key
+    elseif weights isa NamedColumn && parent(weights) isa DataColumn
+        raw = parent(parent(weights))
+        raw isa AbstractVector && all(w -> w isa Real, raw) || error(
+            "sbimpl: `MixtureModel($target)` data weights `$(name(weights))` must " *
+            "be a numeric vector")
+        _sb_mixture_check_weights(raw, K, target)
+        return _sb_scalar_expr(weights, data)
+    elseif weights isa NamedColumn
+        backing = parent(weights)
+        declaration = backing isa ExprColumn && getf(backing) === (~) ? backing : nothing
+        rhs_e = isnothing(declaration) ? nothing :
+            _as_expr_column(getargs(declaration, 2)[2])
+        isnothing(rhs_e) || !(getf(rhs_e) isa Type && getf(rhs_e) <: Dirichlet) &&
+            error(
+                "sbimpl: `MixtureModel($target)` weights `$(name(weights))` must be " *
+                "a numeric vector or a `~ Dirichlet(...)` simplex parameter")
+        return _sb_scalar_expr(weights, data)
+    end
+    error(
+        "sbimpl: `MixtureModel($target)` weights must be a numeric vector of " *
+        "length $K or a simplex-valued model expression, got $(typeof(weights))")
+end
+
+function _sb_mixture_family(stan_name::Symbol, n_args::Int, int_positions::Tuple,
+                            K::Int, discrete::Bool)
+    key = repr((:mixture, stan_name, n_args, int_positions, K, discrete))
+    get!(_SB_MIXTURE_CACHE, key) do
+        stem = Symbol(:brm_mixture_, _sb_stable_fingerprint(key))
+        suffix = discrete ? :lpmf : :lpdf
+        density = Symbol(stem, :_, suffix)
+        pointwise = Symbol(density, :s)
+        rng = Symbol(stem, :_rng)
+        Core.eval(@__MODULE__, :(function $stem end))
+        density_fn = Symbol(stan_name, :_, suffix)
+        rng_fn = Symbol(stan_name, :_rng)
+        y_scalar = discrete ? :int : :real
+        y_vector = discrete ? :int : :vector
+        argname(k, j) = Symbol(:c, k, :_, j)
+        scalar_kind(j) = j in int_positions ? :int : :real
+        vector_kind(j) = j in int_positions ? :int : :vector
+        scalar_formals = Any[Expr(:(::), :y, y_scalar),
+                             Expr(:(::), :weights, Expr(:ref, :vector, :K))]
+        vector_formals = Any[Expr(:(::), :y, Expr(:ref, y_vector, :n)),
+                             Expr(:(::), :weights, Expr(:ref, :vector, :K))]
+        for k in 1:K, j in 1:n_args
+            push!(scalar_formals, Expr(:(::), argname(k, j), scalar_kind(j)))
+            push!(vector_formals, Expr(:(::), argname(k, j),
+                                      Expr(:ref, vector_kind(j), :n)))
+        end
+        scalar_assignments = Any[]
+        for k in 1:K
+            call = Expr(:call, density_fn, :y,
+                        (argname(k, j) for j in 1:n_args)...)
+            push!(scalar_assignments,
+                  Expr(:(=), Expr(:ref, :terms, k),
+                       Expr(:call, :+,
+                            Expr(:call, :log, Expr(:ref, :weights, k)), call)))
+        end
+        row_actuals = Any[Expr(:ref, argname(k, j), :i)
+                          for k in 1:K for j in 1:n_args]
+        row_call = Expr(:call, density, Expr(:ref, :y, :i), :weights, row_actuals...)
+        scalar_body = quote
+            terms::vector[K]
+            $(scalar_assignments...)
+            log_sum_exp(terms)
+        end
+        vector_body = quote
+            rv = 0.
+            for i in 1:n
+                rv = rv + ($(row_call)::real)
+            end
+            rv
+        end
+        pointwise_body = quote
+            rv::vector[n]
+            for i in 1:n
+                rv[i] = $row_call
+            end
+            rv
+        end
+        comp_rng(k) = Expr(:call, rng_fn, (argname(k, j) for j in 1:n_args)...)
+        scalar_rng_body = if K == 1
+            quote
+                $(comp_rng(1))
+            end
+        else
+            branch = Expr(:block, comp_rng(K))
+            for k in (K - 1):-1:1
+                branch = Expr(:if, Expr(:call, :(==), :k, k),
+                              Expr(:block, comp_rng(k)), branch)
+            end
+            quote
+                k = categorical_rng(weights)
+                $branch
+            end
+        end
+        vector_rng_call = Expr(:call, rng, :weights, row_actuals...)
+        vector_rng_body = quote
+            rv::$(Expr(:ref, y_vector, :n))
+            for i in 1:n
+                rv[i] = $vector_rng_call
+            end
+            rv
+        end
+        nobroadcast(x) = filter(a -> !(a isa LineNumberNode), x.args)
+        scalar_sig = Expr(:(::), Expr(:call, density, scalar_formals...), :real)
+        vector_sig = Expr(:(::), Expr(:call, density, vector_formals...), :real)
+        splat = Expr(:..., :args)
+        pointwise_sig = Expr(:(::), Expr(:call, pointwise, vector_formals...),
+                             Expr(:ref, :vector, :n))
+        scalar_rng_sig = Expr(:(::),
+                              Expr(:call, rng, scalar_formals[2:end]...), y_scalar)
+        vector_rng_sig = Expr(:(::),
+                              Expr(:call, rng, Expr(:ref, y_vector, :n),
+                                   vector_formals[2:end]...),
+                              Expr(:ref, y_vector, :n))
+        defs = quote
+            @lpxf $scalar_sig = begin
+                $(nobroadcast(scalar_body)...)
+            end
+            $vector_sig = begin
+                $(nobroadcast(vector_body)...)
+            end
+            $(Expr(:call, pointwise, splat)) = begin
+                $(Expr(:call, density, splat))
+            end
+            $pointwise_sig = begin
+                $(nobroadcast(pointwise_body)...)
+            end
+            $scalar_rng_sig = begin
+                $(nobroadcast(scalar_rng_body)...)
+            end
+            $vector_rng_sig = begin
+                $(nobroadcast(vector_rng_body)...)
+            end
+        end
+        Core.eval(@__MODULE__,
+                  _sb_anchor_slic_macrocalls!(:(StanBlocks.@deffun $defs)))
+        getfield(@__MODULE__, stem)
+    end
+end
+
+function _sb_lik_family!(stmts, target, ::Type{<:MixtureModel}, args, data)
+    length(args) == 2 || error(
+        "sbimpl: `MixtureModel($target)` expects `(components, weights)`, got " *
+        "$(length(args)) arguments")
+    components, weights = args
+    components isa AbstractVector || error(
+        "sbimpl: `MixtureModel($target)` components must be a vector of " *
+        "distribution calls, got $(typeof(components))")
+    K = length(components)
+    K >= 1 || error(
+        "sbimpl: `MixtureModel($target)` needs at least one component")
+    Ts = map(enumerate(components)) do (k, comp)
+        comp isa ExprColumn || error(
+            "sbimpl: `MixtureModel($target)` component $k must be a distribution " *
+            "call, got $(typeof(comp))")
+        T = getf(comp)
+        # Shape first: a shape query subsumes the family check and stays
+        # correct for families Julia's `<:` answers conservatively
+        # (`LocationScale`'s dependent bounds fail `<: Distribution`, yet it
+        # has a known shape and must reach the Stan-translation verdict).
+        shape = _brm_distribution_shape(comp)
+        isnothing(shape) && error(
+            "sbimpl: `MixtureModel($target)` component $k must be a " *
+            "Distributions.jl family, got `$T`")
+        first(shape) === Distributions.Univariate || error(
+            "sbimpl: `MixtureModel($target)` component $k (`$T`) is not scalar; " *
+            "mixtures of vector responses are not supported")
+        T
+    end
+    allequal(Ts) || error(
+        "sbimpl: `MixtureModel($target)` components must share one family " *
+        "(found $(join(unique!(map(string, Ts)), ", "))); heterogeneous mixtures " *
+        "are not supported because Stan rejects out-of-support values where " *
+        "Turing returns `-Inf`")
+    T = first(Ts)
+    stan_name = _sb_mixture_stan_name(T, target)
+    response = get(data, target, nothing)
+    response isa AbstractVector || error(
+        "sbimpl: `MixtureModel($target)` expects an observed vector, got " *
+        "$(typeof(response))")
+    n_obs = length(response)
+    discrete = Distributions.value_support(T) === Distributions.Discrete
+    if discrete
+        if T <: Bernoulli || T <: BernoulliLogit
+            _sb_coerce_bernoulli_response!(data, target, "MixtureModel")
+        else
+            _sb_mixture_coerce_discrete!(data, target)
+            if T <: Binomial || T <: BinomialLogit ||
+               T <: BetaBinomial || T <: BetaBinomial2
+                lengths = map(comp -> length(getargs(comp)), components)
+                valid = T <: Binomial ? all(<=(2), lengths) :
+                    T <: BinomialLogit ? all(==(2), lengths) : all(==(3), lengths)
+                valid || error(
+                    "sbimpl: `MixtureModel($target)` `$T` components need " *
+                    "explicit trial counts")
+                foreach(components) do comp
+                    raw = getargs(comp)
+                    trial = isempty(raw) ? 1 : first(raw)
+                    _brm_materialize_count_argument(
+                        trial, n_obs, "MixtureModel trial count"; prefix="sbimpl")
+                end
+                data[target] = _brm_validate_binomial_response(
+                    data[target], _brm_materialize_count_argument(
+                        isempty(getargs(first(components))) ? 1 :
+                            first(getargs(first(components))),
+                        n_obs, "MixtureModel trial count"; prefix="sbimpl"),
+                    target; prefix="sbimpl")
+            else
+                all(>=(0), data[target]) || error(
+                    "sbimpl: `MixtureModel($target)` response must be nonnegative")
+            end
+        end
+    else
+        all(value -> value isa Real && !(value isa Bool), response) || error(
+            "sbimpl: `MixtureModel($target)` continuous response must contain " *
+            "only real values")
+        response isa AbstractVector{<:AbstractFloat} ||
+            (data[target] = Float64.(response))
+    end
+    weights_expr = _sb_mixture_weights_expr!(target, weights, K, data)
+    translated = map(enumerate(components)) do (k, comp)
+        Tuple(_sb_mixture_component_args(T, comp, target, k, data))
+    end
+    allequal(map(length, translated)) || error(
+        "sbimpl: internal `MixtureModel($target)` components translated to " *
+        "different arities")
+    P = length(first(translated))
+    int_positions = _sb_mixture_int_positions(T)
+    if !isempty(int_positions)
+        trials = map(t -> t[first(int_positions)], translated)
+        all(t -> isequal(t, first(trials)), trials) || error(
+            "sbimpl: `MixtureModel($target)` `$T` components must share one " *
+            "identical trial-count expression; value-equal but structurally " *
+            "different counts could diverge on `reprocess` — share one column")
+    end
+    family = _sb_mixture_family(stan_name, P, int_positions, K, discrete)
+    rows = Expr(:call, :num_elements, target)
+    actuals = Any[weights_expr]
+    for t in translated, (j, arg) in enumerate(t)
+        arg isa Bool && error(
+            "sbimpl: `MixtureModel($target)` component arguments must be numeric, " *
+            "got a Boolean")
+        if arg isa Integer && !(j in int_positions)
+            arg = Float64(arg)
+        end
+        push!(actuals, j in int_positions ?
+              Expr(:call, :brm_mixture_rows_int, arg, rows) :
+              Expr(:call, :brm_joint_mean_rows, arg, rows))
+    end
+    push!(stmts, Expr(:call, :~, target, Expr(:call, family, actuals...)))
+    nothing
 end
 
 # Default: look up the Stan name from the table and emit

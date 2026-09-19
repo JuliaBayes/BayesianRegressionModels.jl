@@ -44,6 +44,7 @@ are rejected rather than silently treated as a standard beta likelihood.
 | `CircularVonMises(mu, kappa; interval=(-pi, pi))` | von Mises on a fixed principal interval |
 | `TruncatedNormal(mu, sigma, lower, upper)` | legacy censored-Normal marker; new models should use `censored` below |
 | `[y1, y2, ...] ~ MvNormalCholesky([mu1, mu2, ...], L)` | row-wise correlated Gaussian outcomes using a declared `LKJCovarianceFactor` |
+| `MixtureModel([D, ...], weights)` | finite mixture over K same-family scalar components |
 
 ### Response compositions and modifiers
 
@@ -164,6 +165,41 @@ side, and outcome rows must be complete, finite, and nonempty. A missing value
 is rejected; BRM never silently drops the row or replaces the joint density
 with conditionally independent pieces. Correlated outcomes are currently an
 [`SBBRMI`](@ref)-only feature.
+
+## Finite mixtures with `MixtureModel`
+
+Use Distributions.jl's `MixtureModel` when each observation comes from one of
+`K` latent subpopulations with its own parameters:
+
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+mixture_gaussians = (@brm begin
+    mu1 ~ Normal(-2, 0.1)
+    mu2 ~ Normal(2, 0.1)
+    log(sigma) ~ 1
+    y ~ MixtureModel([
+        Normal(mu1, exp(log(sigma))),
+        Normal(mu2, exp(log(sigma))),
+    ], [0.4, 0.6])
+end)((;
+    y=[-2.0, -1.8, 1.9, 2.2],
+))
+""", :mixture_gaussians; title="Two-component Gaussian mixture")
+```
+
+Each row contributes `log_sum_exp(log(weights) + component_lpdf)`, with
+matching pointwise log likelihoods and posterior-predictive draws (select a
+component per row, then draw from it). The contract is deliberately narrow.
+Every component must be a scalar (`Univariate`) call of ONE Julia family:
+heterogeneous families are rejected because Stan's discrete densities throw
+on out-of-support values where Turing returns `-Inf`, so mixed-support
+mixtures would crash Stan where Turing stays finite. The family must be
+directly Stan-mapped, or `NegativeBinomial2` / `BetaBinomial2` (which are
+native translations); bespoke families, `Uniform` / `Pareto`
+(parameter-dependent continuous support), and `Categorical` (simplex
+parameters) are rejected. Binomial-family components must share one
+identical trial-count expression. Weights are a numeric vector summing to 1,
+a length-`K` numeric data column, or a Dirichlet-backed simplex parameter.
 
 ## Adding another likelihood
 
