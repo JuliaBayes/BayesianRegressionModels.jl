@@ -102,7 +102,7 @@ end
 
 struct _RKTermSpec
     kind::Symbol # :intercept | :continuous | :factor | :offset |
-                # :ranef_gather
+                # :ranef_gather | :spline
     columns::Vector{Symbol}
     # factor: (coding=:fullrank, levels=:observed) over every observed level,
     # or (coding=:subset, drop::Int, levels=:observed) over every observed
@@ -2011,6 +2011,83 @@ function _rk_plan_offset_only_predictor(brmi::BRMI, context, target::Symbol,
     _RKPredictorSpec(target, link, terms, target), priors
 end
 
+# ---- spline smooth terms (s/t2; mirrors `_sb_s_generic`/`_sb_t2_generic`) ----
+#
+# A `:spline` term carries its thin-layer declaration in `options`:
+# `(; id, kind, k)` with `kind in (:tps, :t2)` and `k` an `Int` (`s`)
+# or an `(Int, Int)` tuple (`t2`). The thin layer owns every parameter
+# (`b_<id>_fixed`, `b_<id>_raw`/`_<block>_raw`, `sd_<id>`) plus the
+# materialized `<id>_<block>_<j>` columns: BRM ships raw axes + the
+# declaration, and the basis fit stays in-graph host-side (user-GO'd
+# in-graph contract, decision `1cj6p76`). One id per smooth occurrence
+# (exactly-one-use linkage), minted below with numeric stems on collision.
+function _rk_mint_spline_id!(taken::Set{Symbol},
+        columns::Dict{Symbol,AbstractVector}, base::String)
+    name = Symbol(base)
+    serial = 2
+    while name in taken || haskey(columns, name)
+        name = Symbol(base * "_" * string(serial))
+        serial += 1
+    end
+    push!(taken, name)
+    name
+end
+
+# `sd(...)` smoothing-scale overrides are sequenced: the thin-layer
+# spline surface takes default half-normal scales and fails overrides
+# closed, so BRM rejects them here with RK attribution instead of
+# emitting a default the formula did not ask for.
+function _rk_gate_spline_term_priors!(brmi::BRMI, target::Symbol,
+        spline_raw::AbstractVector)
+    prefix = "RK backend"
+    isempty(spline_raw) && return nothing
+    per_target = get(_brm_resolve_term_priors(brmi), target, Dict())
+    for t in spline_raw
+        key = _brm_prepared_term_key(t)
+        isempty(get(per_target, key, Dict())) || error(
+            "$prefix: predictor `$target` smoothing-scale priors on " *
+            "`$key` are out of slice 1 (the thin-layer spline surface " *
+            "takes default half-normal scales; `sd(...)` overrides are " *
+            "sequenced)")
+    end
+    nothing
+end
+
+function _rk_plan_spline_axis!(axis::Symbol, target::Symbol, head::String,
+        data::AbstractDict, columns::Dict{Symbol,AbstractVector})
+    prefix = "RK backend"
+    raw = get(data, axis, nothing)
+    raw isa AbstractVector && eltype(raw) <: Real &&
+        !(eltype(raw) <: Bool) &&
+        !(raw isa CA.CategoricalVector) || error(
+        "$prefix: predictor `$target` `$head` axis `$axis` must be a " *
+        "plain numeric vector")
+    columns[axis] = raw
+    nothing
+end
+
+function _rk_plan_spline_term!(prepared::_BRMPreparedTerm{typeof(s)},
+        target::Symbol, data::AbstractDict,
+        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol})
+    axis = prepared.source
+    _rk_plan_spline_axis!(axis, target, "s", data, columns)
+    id = _rk_mint_spline_id!(taken, columns, "s_" * string(axis))
+    _RKTermSpec(:spline, [axis],
+        (; id, kind=:tps, k=prepared.state.fit.k), id, id)
+end
+
+function _rk_plan_spline_term!(prepared::_BRMPreparedTerm{typeof(t2)},
+        target::Symbol, data::AbstractDict,
+        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol})
+    first_axis, second_axis = prepared.source
+    _rk_plan_spline_axis!(first_axis, target, "t2", data, columns)
+    _rk_plan_spline_axis!(second_axis, target, "t2", data, columns)
+    base = "t2_" * string(first_axis) * "_" * string(second_axis)
+    id = _rk_mint_spline_id!(taken, columns, base)
+    _RKTermSpec(:spline, [first_axis, second_axis],
+        (; id, kind=:t2, k=prepared.state.fit.k), id, id)
+end
+
 function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         available::Tuple, columns::Dict{Symbol,AbstractVector},
         derived::Vector{_RKDerivedSpec}, taken::Set{Symbol},
@@ -2022,13 +2099,17 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
     link = _rk_predictor_link(brmi, target)
     raw_terms = _brm_additive_terms(rhs)
     structured = filter(t -> _brm_prepares_term(t), raw_terms)
-    isempty(structured) || error(
+    spline_raw = filter(t -> t isa ExprColumn &&
+        (getf(t) === s || getf(t) === t2), structured)
+    other_structured = filter(t -> !(t in spline_raw), structured)
+    isempty(other_structured) || error(
         "$prefix: predictor `$target` structured term(s) " *
-        "$(join(unique!(string.(getf.(filter(t -> t isa ExprColumn, structured)))), ", ")) " *
+        "$(join(unique!(string.(getf.(filter(t -> t isa ExprColumn, other_structured)))), ", ")) " *
         "are out of slice 1 (population GLMs only)")
+    _rk_gate_spline_term_priors!(brmi, target, spline_raw)
     grouped = filter(t -> _brm_is_grouped_term(t), raw_terms)
     ordinary = Tuple(t for t in raw_terms if !(t in structured) && !(t in grouped))
-    isempty(ordinary) && error(
+    isempty(ordinary) && isempty(spline_raw) && error(
         "$prefix: predictor `$target` has no terms")
     has_intercept = any(t -> t isa Integer && t == 1, ordinary)
     # Classify before building geometry: fail fast on unknown terms with RK
@@ -2061,12 +2142,18 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         terms, ordinary, target, context.data, has_intercept)
     _rk_gate_cross_identified!(
         terms, spines, derived, context.data, target, has_intercept)
-    any(t -> t.kind !== :offset, terms) || return _rk_plan_offset_only_predictor(
+    any(t -> t.kind !== :offset, terms) || !isempty(spline_raw) ||
+        return _rk_plan_offset_only_predictor(
         brmi, context, target, ordinary, available, link, terms, derived)
     geometry = _brm_prepare_predictor_geometry(
         brmi, context, target; available_predictors=available)
-    isempty(geometry.terms) || error(
-        "$prefix: internal: structured terms survived pre-check in `$target`")
+    all(t -> t.callable === s || t.callable === t2, geometry.terms) || error(
+        "$prefix: internal: non-spline structured terms survived pre-check " *
+        "in `$target`")
+    for prepared in geometry.terms
+        push!(terms, _rk_plan_spline_term!(
+            prepared, target, context.data, columns, taken))
+    end
     isnothing(geometry.r2d2) || error(
         "$prefix: predictor `$target` `r2d2` priors are out of slice 1")
     design = geometry.component.design
@@ -2924,8 +3011,26 @@ function _rk_gate_name_hygiene!(predictor_specs::AbstractVector,
             "$prefix: generated derived column `$dn` collides with raw " *
             "column `$dn`; rename the raw column")
     end
+    snames = Symbol[]
+    for spec in predictor_specs, term in spec.terms
+        term.kind === :spline || continue
+        push!(snames, term.options.id)
+    end
+    length(unique(snames)) == length(snames) || error(
+        "$prefix: internal: duplicate spline smooth ids")
+    for sn in snames
+        sn in both && error(
+            "$prefix: internal: generated spline id `$sn` collides with " *
+            "a parameter/assignment name")
+        sn in pnames && error(
+            "$prefix: internal: generated spline id `$sn` collides with " *
+            "predictor `$sn`")
+        haskey(columns, sn) && error(
+            "$prefix: internal: generated spline id `$sn` collides with " *
+            "raw column `$sn`")
+    end
     for n in sort!(collect(Iterators.flatten(
-            (pnames, both, dnames, vnames, keys(columns)))))
+            (pnames, both, dnames, vnames, snames, keys(columns)))))
         startswith(string(n), "_ppl_") && error(
             "$prefix: name `$n` uses the reserved `_ppl_` prefix; rename it")
     end

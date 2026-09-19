@@ -625,19 +625,8 @@ end
 
 @testset "fail closed: scope" begin
     # `(1|g)` used to fail here; the draws regime admits it now (ranef
-    # buckets, covered below). Structured terms stay closed.
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
-        mu ~ 1 + s(x)
-        sigma ~ Exponential(1)
-        y ~ Normal(mu, sigma)
-    end)
-    # Tensor-product smooths stay closed with `s(x)` (thin-layer spline
-    # contract pending): `t2(x, z)` must fail, not partially plan.
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
-        mu ~ 1 + t2(x, z)
-        sigma ~ Exponential(1)
-        y ~ Normal(mu, sigma)
-    end)
+    # buckets, covered below). `s(x)`/`t2(x, z)` used to fail here too;
+    # they plan now (thin-layer spline surface landed, covered below).
     # `&` interactions used to fail here; they are provisionally admitted
     # now (derived lowering, covered above). Monotonic effects stay closed.
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
@@ -664,6 +653,113 @@ end
         effect(mu, :) ~ r2d2(R2=Normal(0.5, 0.2), tau_bsv=0.5)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
+    end)
+end
+
+@testset "spline plan shape" begin
+    # `s(x)` needs 10 unique axis values for the default rank-10 basis,
+    # so smooth tests carry their own 12-row frame, not the shared 6-row df.
+    # The scale is `sigma`: a parameter named `s` would shadow the smooth
+    # head at macro expansion (shared @brm resolution, not RK-specific).
+    xs = collect(range(-2.0, 2.0, length=12))
+    zs = collect(range(0.0, 3.0, length=12))
+    sdf = (; x=xs, z=zs, y=sin.(xs), w=cos.(xs))
+    brmi = @brm sdf begin
+        mu ~ 1 + s(x)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    predictor = only(plan.predictors)
+    @test [t.kind for t in predictor.terms] == [:intercept, :spline]
+    term = only(t for t in predictor.terms if t.kind === :spline)
+    @test term.columns == [:x]
+    @test (term.options.id, term.options.kind, term.options.k) ==
+        (:s_x, :tps, 10)
+    @test plan.columns[:x] == sdf.x
+    # Spline parameters are thin-layer-owned: nothing lands in
+    # plan.parameters for the smooth itself.
+    @test [p.name for p in plan.parameters] == [:sigma]
+    # `t2(x, z)`: tensor declaration over both axes, default k=(5, 5).
+    brmi = @brm sdf begin
+        mu ~ 1 + t2(x, z)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    term = only(t for t in only(plan.predictors).terms if t.kind === :spline)
+    @test term.columns == [:x, :z]
+    @test (term.options.id, term.options.kind, term.options.k) ==
+        (:t2_x_z, :t2, (5, 5))
+    @test plan.columns[:z] == sdf.z
+    # Explicit `k` rides the declaration.
+    brmi = @brm sdf begin
+        mu ~ 1 + t2(x, z; k=(4, 6))
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    term = only(t for t in only(plan.predictors).terms if t.kind === :spline)
+    @test term.options.k == (4, 6)
+    # One id per smooth occurrence: a second smooth in the same
+    # predictor takes its own axis-derived id.
+    brmi = @brm sdf begin
+        mu ~ 1 + s(x) + s(z)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    ids = [t.options.id for t in only(plan.predictors).terms
+        if t.kind === :spline]
+    @test ids == [:s_x, :s_z]
+    # ... and the same smooth in a second predictor serializes instead
+    # of colliding (exactly-one-use linkage per declaration).
+    brmi = @brm sdf begin
+        mu ~ 1 + s(x)
+        nu ~ 1 + s(x)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+        w ~ Normal(nu, sigma)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    ids = Set(t.options.id for p in plan.predictors for t in p.terms
+        if t.kind === :spline)
+    @test ids == Set([:s_x, :s_x_2])
+    # Generated ids disambiguate against user parameters.
+    brmi = @brm sdf begin
+        mu ~ 1 + s(x)
+        s_x ~ Normal(0, 1)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    term = only(t for t in only(plan.predictors).terms if t.kind === :spline)
+    @test term.options.id == :s_x_2
+    # A smooth-only predictor plans (no ordinary terms required).
+    brmi = @brm sdf begin
+        mu ~ s(x)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    @test [t.kind for t in only(plan.predictors).terms] == [:spline]
+end
+
+@testset "fail closed: spline sequenced spellings" begin
+    # `sd(...)` smoothing-scale overrides stay closed until the
+    # thin-layer surface sequences them (default half-normal only).
+    # The gate precedes the basis fit, so the shared 6-row df suffices.
+    @test_throws "smoothing-scale priors" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + s(x)
+        sd(mu, s(x)) ~ Exponential(3)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end)
+    @test_throws "smoothing-scale priors" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + t2(x, z)
+        sd(mu, t2(x, z), rr) ~ Exponential(3)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
     end)
 end
 

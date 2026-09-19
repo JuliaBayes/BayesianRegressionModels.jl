@@ -547,3 +547,47 @@ end
     @test ast.args[end] == Expr(:call, :.~,
         :b, Expr(:., :Categorical, Expr(:tuple, :s)))
 end
+
+@testset "spline AST shape" begin
+    # Own 12-row frame: `s(x)` needs 10 unique axis values.
+    xs = collect(range(-2.0, 2.0, length=12))
+    zs = collect(range(0.0, 3.0, length=12))
+    sdf = (; x=xs, z=zs, y=sin.(xs))
+    brmi = @brm sdf begin
+        mu ~ 1 + s(x)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast == Expr(:block,
+        Expr(:call, :~, :mu_b1, Expr(:call, :Normal, 0.0, 1.0)),
+        Expr(:call, :spline_basis,
+            Expr(:parameters, Expr(:kw, :k, 10)),
+            QuoteNode(:s_x), :x),
+        Expr(:(=), :mu, Expr(:call, :.+,
+            :mu_b1, Expr(:call, :spline, QuoteNode(:s_x)))),
+        Expr(:call, :~, :sigma, Expr(:call, :Exponential, 1.0)),
+        Expr(:call, :.~, :y,
+            Expr(:., :Normal, Expr(:tuple, :mu, :sigma))))
+    # The declaration matches the parsed surface spelling exactly.
+    @test ast.args[2] == Meta.parse("spline_basis(:s_x, x; k = 10)")
+    # `t2(x, z)`: tuple-`k` declaration + inline summand.
+    brmi = @brm sdf begin
+        mu ~ 1 + t2(x, z)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast == Expr(:block,
+        Expr(:call, :~, :mu_b1, Expr(:call, :Normal, 0.0, 1.0)),
+        Expr(:call, :spline_basis,
+            Expr(:parameters, Expr(:kw, :k, Expr(:tuple, 5, 5))),
+            QuoteNode(:t2_x_z), :x, :z),
+        Expr(:(=), :mu, Expr(:call, :.+,
+            :mu_b1, Expr(:call, :spline, QuoteNode(:t2_x_z)))),
+        Expr(:call, :~, :sigma, Expr(:call, :Exponential, 1.0)),
+        Expr(:call, :.~, :y,
+            Expr(:., :Normal, Expr(:tuple, :mu, :sigma))))
+    @test ast.args[2] ==
+        Meta.parse("spline_basis(:t2_x_z, x, z; k = (5, 5))")
+end
