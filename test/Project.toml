@@ -71,10 +71,10 @@ rev = "7aed40b18bd4cdabb75330f285d5c9b355575ab9"
 
 [sources.ReactiveKernels]
 url = "https://github.com/nsiccha/ReactiveKernels.jl"
-# 50ef06e (2026-09-19, main): thin-layer KernelPlate reader (peer todo
-# 1q5mk32; P2 execution-parity gate) on top of the ranef Stage-C floor
-# (range also: offset-only predictors + HSGP Stage A 71d9e2f).
+# 4fa2f88 (2026-09-19, main): SB-mirroring mo/mo1 monotonic effects
+# (peer todo 1d9d0cy; the surface BRM mo/mo1 emission targets) on top
+# of the 50ef06e floor (range also: ordinal-v12 slice).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "50ef06e1882c4f3dbb11e52f19666d494e8f9985"
+rev = "4fa2f88e6de1d45ad90619e9512d2490ed0e04d2"
