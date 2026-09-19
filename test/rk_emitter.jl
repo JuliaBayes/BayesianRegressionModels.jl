@@ -1024,3 +1024,40 @@ end
     @test occursin("Multinomial", multinomial.msg)
     @test occursin("simplex", multinomial.msg)
 end
+
+@testset "offset-only predictors plan with no priors" begin
+    brmi = @brm df begin
+        mu ~ 0 + offset(z)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    predictor = only(plan.predictors)
+    @test predictor.name === :mu
+    @test [t.kind for t in predictor.terms] == [:offset]
+    @test predictor.terms[1].columns == [:z]
+    @test isempty(plan.population_priors)
+    @test plan.columns[:z] == df.z
+    @test only(plan.responses).predictor === :mu
+    # A derived offset-only predictor stages its definition.
+    derived = BRM._brm_rk_plan(@brm df begin
+        mu ~ 0 + offset(log(z))
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test only(derived.predictors).terms[1].columns == [:rkd_offset_log_z]
+    @test isempty(derived.population_priors)
+    # Offsets take no priors: stated effect and r2d2 priors stay fail-closed.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 0 + offset(z)
+        effect(mu, z) ~ Normal(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 0 + offset(z)
+        effect(mu, :) ~ r2d2(R2=Normal(0.5, 0.2), tau_bsv=0.5)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+end

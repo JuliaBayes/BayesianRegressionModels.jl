@@ -3,9 +3,10 @@
 # Run: julia --project=test test/rk_ast.jl
 #
 # Pure-Julia checks (no ReactiveKernels dependency): exact `Expr` shapes
-# for the expressible subset, `nothing` for the inexpressible subset.
-# Lowerability through the real `lower_rkppl` is covered by the scratch
-# parity corpus, which routes every case through the retargeted factory.
+# over the whole slice-1 surface (`_rk_emit_ast` is total — the AST is
+# the sole emission path, no fallback). Lowerability through the real
+# `lower_rkppl` is covered by the scratch parity corpus, which routes
+# every case through the retargeted factory.
 
 using Test
 using BayesianRegressionModels
@@ -293,4 +294,66 @@ end
         a.args[2] in (:y, :z)]
     @test length(affines) == 1
     @test length(responses) == 2
+end
+
+@testset "offset-only predictors emit bare affines" begin
+    brmi = @brm df begin
+        mu ~ 0 + offset(z)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast == Expr(:block,
+        Expr(:(=), :mu, :z),
+        Expr(:call, :~, :s, Expr(:call, :Exponential, 1.0)),
+        Expr(:call, :.~, :y,
+            Expr(:., :Normal, Expr(:tuple, :mu, :s))))
+    # Several offsets sum; a derived offset stages its definition first.
+    brmi = @brm df begin
+        mu ~ 0 + offset(z) + offset(x)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    affine = only(a for a in ast.args if a isa Expr && a.head === :(=) &&
+        a.args[1] === :mu)
+    @test affine == Expr(:(=), :mu, Expr(:call, :.+, :z, :x))
+    brmi = @brm df begin
+        mu ~ 0 + offset(log(z))
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast.args[1] == Expr(:(=), :rkd_offset_log_z,
+        Expr(:., :log, Expr(:tuple, :z)))
+    @test ast.args[2] == Expr(:(=), :mu, :rkd_offset_log_z)
+end
+
+@testset "predictor/data overlap alpha-renames" begin
+    # Unreachable via `@brm` (observation discovery claims `n ~ …` as a
+    # likelihood), so the plan is built by hand; the affine (definition
+    # and response uses) moves to `n_` while the overlapping data column
+    # keeps `n` — definition and data reference coexist.
+    plan = BRM._RKStructuralPlan(
+        [BRM._RKLikelihoodSpec(:gaussian, :identity, :y, :n, :s, nothing,
+            BRM._RKResponseEvidence(:none, nothing, nothing), :y, nothing)],
+        [BRM._RKPredictorSpec(:n, :identity, BRM._RKTermSpec[
+            BRM._RKTermSpec(:intercept, Symbol[], (;), :Intercept, :Intercept),
+            BRM._RKTermSpec(:continuous, [:n], (;), :n, :n)], :n)],
+        [BRM._RKPopulationPrior(:n, :Intercept, 0.0, 1.0),
+            BRM._RKPopulationPrior(:n, :n, 0.0, 1.0)],
+        [BRM._RKSampledParameter(:s, :Exponential, (1.0,), nothing, :s)],
+        BRM._RKAssignmentSpec[],
+        BRM._RKDerivedSpec[],
+        Dict{Symbol,AbstractVector}(:y => df.y, :n => df.n),
+        6)
+    ast = BRM._rk_emit_ast(plan)
+    @test ast == Expr(:block,
+        Expr(:call, :~, :n_b1, Expr(:call, :Normal, 0.0, 1.0)),
+        Expr(:call, :~, :n_b2, Expr(:call, :Normal, 0.0, 1.0)),
+        Expr(:(=), :n_, Expr(:call, :.+,
+            :n_b1, Expr(:call, :.*, :n_b2, :n))),
+        Expr(:call, :~, :s, Expr(:call, :Exponential, 1.0)),
+        Expr(:call, :.~, :y,
+            Expr(:., :Normal, Expr(:tuple, :n_, :s))))
 end
