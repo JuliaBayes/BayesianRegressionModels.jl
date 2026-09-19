@@ -151,12 +151,13 @@ end
 # parser's exactly (committed tests compare against `Meta.parse`), so the
 # thin layer lowers it like hand-written surface. `eta` rides iff
 # `:correlated` (peer rule: K=1 plain buckets take no eta).
-function _rk_ast_bucket(bucket::_RKRanefBucket)
+function _rk_ast_bucket(bucket::_RKRanefBucket, rename::Dict{Symbol,Symbol})
     lines = Any[]
     for (predictor, cols) in bucket.slices
         elements = Any[_rk_ast_bucket_margin(m.z)
             for m in bucket.margins[cols]]
-        push!(lines, Expr(:call, :(=>), predictor, Expr(:vect, elements...)))
+        push!(lines, Expr(:call, :(=>),
+            get(rename, predictor, predictor), Expr(:vect, elements...)))
     end
     call = if bucket.id === nothing
         args = Any[:ranef_bucket, bucket.group]
@@ -238,7 +239,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
             _rk_ast_affine(predictor, coefs)))
     end
     for bucket in plan.ranef_buckets
-        push!(stmts, _rk_ast_bucket(bucket))
+        push!(stmts, _rk_ast_bucket(bucket, rename))
     end
     for parameter in plan.parameters
         push!(stmts, _rk_ast_sampled(parameter))

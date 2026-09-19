@@ -457,3 +457,20 @@ end
         @test Expr(:call, :ranef, QuoteNode(:ID), :g) in affine.args[2].args
     end
 end
+
+@testset "ranef bucket follows predictor rename" begin
+    # Programmatic overlap (unreachable via @brm): the margin lines use the
+    # renamed predictor, matching the renamed affine.
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + (1 + x | ID | g)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    plan.columns[:mu] = plan.columns[:x]
+    ast = BRM._rk_emit_ast(plan)
+    @test rk_strip_lines(only(rk_bucket_stmts(ast))) ==
+        rk_parsed_surface("ranef_bucket(:ID, g; eta = 1.0) do\n mu_ => [1, x]\nend")
+    affine = only([a for a in ast.args if a isa Expr && a.head === :(=) &&
+        a.args[1] === :mu_])
+    @test Expr(:call, :ranef, QuoteNode(:ID), :g) in affine.args[2].args
+end
