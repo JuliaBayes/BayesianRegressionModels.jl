@@ -692,7 +692,8 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    # Simplex-valued parameter declaration stays closed.
+    # Unreferenced simplex-valued parameter declaration stays closed
+    # (response-linked simplexes are the categorical lane's open shape).
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
         s ~ Dirichlet(3, 1.0)
@@ -970,9 +971,9 @@ end
     @test_throws ErrorException BRM._rk_gate_acyclic!([cyclic_a, cyclic_b], [])
 end
 
-# Categorical/ordinal/multinomial admission points (decision 0w1i3qb):
-# each family fails closed naming the missing thin-layer support, not the
-# generic out-of-slice-1 spellings error.
+# Leveled emission (thin-layer contract 0178bfe2): categorical-logit,
+# ordered-logit, ordinal, multinomial, and categorical plan shapes, plus
+# the fail-closed battery for the new surface.
 function rk_plan_error(formula)
     try
         BRM._brm_rk_plan(formula)
@@ -982,45 +983,245 @@ function rk_plan_error(formula)
     end
 end
 
-@testset "fail closed: categorical/ordinal/multinomial attribution" begin
-    ordered = rk_plan_error(@brm df begin
+@testset "leveled plan shapes" begin
+    # Reference-coded categorical: K−1 etas, class 1 implicit zero.
+    # c = [2,1,3,2,4,3] has 4 levels, already 1..4 contiguous.
+    plan = BRM._brm_rk_plan(@brm df begin
+        eta1 ~ 1 + x
+        eta2 ~ 1 + x
+        eta3 ~ 1 + x
+        c ~ CategoricalLogit(eta1, eta2, eta3)
+    end)
+    spec = only(plan.responses)
+    @test (spec.family, spec.link) === (:categorical_logit, :logit)
+    @test spec.predictor === :eta1
+    @test spec.extra_predictors == [:eta2, :eta3]
+    @test spec.n_levels == 4
+    @test plan.columns[:c] == [2, 1, 3, 2, 4, 3]
+    @test sort!([p.name for p in plan.predictors]) ==
+        [:eta1, :eta2, :eta3]
+    # Cumulative-logit ordinal: implicit ordered cutpoints, raw coding.
+    plan = BRM._brm_rk_plan(@brm df begin
         eta ~ 1 + x
         c ~ OrderedLogistic(eta)
     end)
-    @test ordered isa ErrorException
-    @test occursin("OrderedLogistic", ordered.msg)
-    @test occursin("ordered cutpoints", ordered.msg)
-    ordinal = rk_plan_error(@brm df begin
+    spec = only(plan.responses)
+    @test (spec.family, spec.link) === (:ordered_logit, :logit)
+    @test spec.n_levels == 4
+    @test spec.thresholds === :c_cutpoints
+    cut = only(plan.vector_parameters)
+    @test (cut.name, cut.family, cut.args, cut.size) ==
+        (:c_cutpoints, :ordered_normal, (0.0, 1.0), 3)
+    @test plan.columns[:c] == [2, 1, 3, 2, 4, 3]
+    # General typed ordinal, plain (no extras).
+    plan = BRM._brm_rk_plan(@brm df begin
         eta ~ 0 + x
-        c ~ Ordinal(Cumulative(), LogitLink(), eta)
+        c ~ Ordinal(StoppingRatio(), ProbitLink(), eta)
     end)
-    @test ordinal isa ErrorException
-    @test occursin("Ordinal", ordinal.msg)
-    @test occursin("threshold", ordinal.msg)
-    # The genuine two-predictor shape: the head-first gate fires, not the
-    # generic several-predictors error.
-    catlogit = rk_plan_error(@brm df begin
+    spec = only(plan.responses)
+    @test (spec.family, spec.link) === (:ordinal, :probit)
+    @test spec.ordinal_structure === :stopping
+    @test spec.thresholds === :c_thresholds
+    @test only(plan.vector_parameters).family === :vector_normal
+    @test only(plan.vector_parameters).size == 3
+    # Extras fields stay defaulted (any extras fail closed at plan —
+    # thin-layer surface gap; see the fail-closed battery).
+    @test spec.discrimination === nothing
+    @test isempty(spec.threshold_columns)
+    @test spec.threshold_coefs === nothing
+    # Shared-simplex multinomial: lead + tail count columns.
+    mdf = (;
+        df...,
+        obs=[3 1 0; 2 2 1; 0 0 5; 1 1 1; 4 0 0; 2 1 2],
+        n=[4, 5, 5, 3, 4, 5],
+    )
+    plan = BRM._brm_rk_plan(@brm mdf begin
+        s ~ Dirichlet(3, 1.0)
+        obs ~ Multinomial(n, s)
+    end)
+    spec = only(plan.responses)
+    @test (spec.family, spec.link) === (:multinomial, :identity)
+    @test spec.predictor === :s
+    @test spec.trials === :n
+    @test spec.n_levels == 3
+    @test spec.count_columns == [:obs_count_2, :obs_count_3]
+    @test plan.columns[:obs] == [3, 2, 0, 1, 4, 2]
+    @test plan.columns[:obs_count_2] == [1, 2, 0, 1, 0, 1]
+    @test plan.columns[:obs_count_3] == [0, 1, 5, 1, 0, 2]
+    simplex = only(plan.vector_parameters)
+    @test (simplex.name, simplex.family, simplex.size) ==
+        (:s, :simplex_dirichlet, 3)
+    @test only(simplex.args) == [1.0, 1.0, 1.0]
+    # Plain categorical over simplex probs; b = [0,1,...] recodes to 1..2.
+    plan = BRM._brm_rk_plan(@brm df begin
+        s ~ Dirichlet([2.0, 5.0])
+        b ~ Categorical(s)
+    end)
+    spec = only(plan.responses)
+    @test (spec.family, spec.link) === (:categorical, :identity)
+    @test spec.predictor === :s
+    @test spec.n_levels == 2
+    @test plan.columns[:b] == [1, 2, 1, 2, 2, 1]
+    @test only(only(plan.vector_parameters).args) == [2.0, 5.0]
+end
+
+@testset "fail closed: leveled surfaces" begin
+    # K=1 categorical is inexpressible (decision 0dteta6).
+    single = rk_plan_error(@brm df begin
+        k1 ~ CategoricalLogit()
+    end)
+    @test single isa ErrorException
+    @test occursin("single-level", single.msg)
+    @test occursin("inexpressible", single.msg)
+    # Arity: b has 2 levels but 2 etas (expects K=3).
+    arity = rk_plan_error(@brm df begin
         eta1 ~ 1 + x
         eta2 ~ 1 + x
-        c ~ CategoricalLogit(eta1, eta2)
+        b ~ CategoricalLogit(eta1, eta2)
     end)
-    @test catlogit isa ErrorException
-    @test occursin("CategoricalLogit", catlogit.msg)
-    @test occursin("multi-predictor", catlogit.msg)
-    categorical = rk_plan_error(@brm df begin
-        mu ~ 1 + x
+    @test arity isa ErrorException
+    @test occursin("observed 2 outcome levels but received 2", arity.msg)
+    # Zero-arg with K>=2 is an arity mismatch, not the K=1 case.
+    noetas = rk_plan_error(@brm df begin
+        c ~ CategoricalLogit()
+    end)
+    @test noetas isa ErrorException
+    @test occursin("received 0 non-reference predictors", noetas.msg)
+    # Repeated and non-predictor arguments.
+    dup = rk_plan_error(@brm df begin
+        eta1 ~ 1 + x
+        eta2 ~ 1 + x
+        c ~ CategoricalLogit(eta1, eta1, eta2)
+    end)
+    @test dup isa ErrorException
+    @test occursin("repeats a predictor", dup.msg)
+    datap = rk_plan_error(@brm df begin
+        eta1 ~ 1 + x
+        eta2 ~ 1 + x
+        c ~ CategoricalLogit(eta1, eta2, x)
+    end)
+    @test datap isa ErrorException
+    @test occursin("not a declared linear predictor", datap.msg)
+    nonid = rk_plan_error(@brm df begin
+        logit(p) ~ 1 + x
+        b ~ CategoricalLogit(p)
+    end)
+    @test nonid isa ErrorException
+    @test occursin("identity-link predictors", nonid.msg)
+    # Ordered gaps and non-integers.
+    gap = rk_plan_error(@brm (; df..., g3=[1, 1, 3, 3, 1, 3]) begin
+        eta ~ 1 + x
+        g3 ~ OrderedLogistic(eta)
+    end)
+    @test gap isa ErrorException
+    @test occursin("non-contiguous", gap.msg)
+    floaty = rk_plan_error(@brm df begin
+        eta ~ 1 + x
+        cf ~ OrderedLogistic(eta)
+    end)
+    @test floaty isa ErrorException
+    @test occursin("expects integer outcome data", floaty.msg)
+    # Ordinal shape errors.
+    fixed = rk_plan_error(@brm df begin
+        eta ~ 1 + x
+        c ~ Ordinal(Cumulative(), LogitLink(), eta)
+    end)
+    @test fixed isa ErrorException
+    @test occursin("cannot include a fixed intercept", fixed.msg)
+    # Any ordinal extras fail closed naming the thin-layer surface gap
+    # (the AST lowering spells three positionals only) — even values
+    # that would otherwise validate.
+    extras = rk_plan_error(@brm df begin
+        eta ~ 0 + x
+        c ~ Ordinal(StoppingRatio(), LogitLink(), eta;
+            discrimination=2.0, per_threshold=(z,))
+    end)
+    @test extras isa ErrorException
+    @test occursin("surface support", extras.msg)
+    @test occursin("drop the keywords", extras.msg)
+    onedisc = rk_plan_error(@brm df begin
+        eta ~ 0 + x
+        c ~ Ordinal(Cumulative(), LogitLink(), eta; discrimination=1.0)
+    end)
+    @test onedisc isa ErrorException
+    @test occursin("surface support", onedisc.msg)
+    # Unknown Ordinal keywords die at `@brm` formula validation (before
+    # any backend); the planner's own keyword check is defense-in-depth.
+    badkw = try
+        (@brm df begin
+            eta ~ 0 + x
+            c ~ Ordinal(Cumulative(), LogitLink(), eta; foo=1)
+        end)
+        nothing
+    catch error
+        error
+    end
+    @test badkw isa ErrorException
+    @test occursin("unsupported keyword", badkw.msg)
+    # Simplex source errors.
+    nonsimp = rk_plan_error(@brm df begin
+        s ~ Exponential(1)
+        b ~ Categorical(s)
+    end)
+    @test nonsimp isa ErrorException
+    @test occursin("must be a `Dirichlet`-sampled parameter", nonsimp.msg)
+    datasimp = rk_plan_error(@brm df begin
         c ~ Categorical(z)
     end)
-    @test categorical isa ErrorException
-    @test occursin("Categorical", categorical.msg)
-    @test occursin("simplex", categorical.msg)
-    multinomial = rk_plan_error(@brm df begin
-        mu ~ 1 + x
-        c ~ Multinomial(n, z)
+    @test datasimp isa ErrorException
+    @test occursin("cannot be a data column", datasimp.msg)
+    badalpha = rk_plan_error(@brm df begin
+        s ~ Dirichlet([1.0, -2.0])
+        b ~ Categorical(s)
     end)
-    @test multinomial isa ErrorException
-    @test occursin("Multinomial", multinomial.msg)
-    @test occursin("simplex", multinomial.msg)
+    @test badalpha isa ErrorException
+    @test occursin("strictly positive", badalpha.msg)
+    badsym = rk_plan_error(@brm df begin
+        s ~ Dirichlet(0, 1.0)
+        b ~ Categorical(s)
+    end)
+    @test badsym isa ErrorException
+    @test occursin("positive integer dimension", badsym.msg)
+    sizemix = rk_plan_error(@brm df begin
+        s ~ Dirichlet(2, 1.0)
+        c ~ Categorical(s)
+    end)
+    @test sizemix isa ErrorException
+    @test occursin("sizes must agree", sizemix.msg)
+    unused = rk_plan_error(@brm df begin
+        mu ~ 1 + x
+        s ~ Dirichlet(2, 1.0)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end)
+    @test unused isa ErrorException
+    @test occursin("no multinomial/categorical response uses it", unused.msg)
+    # Multinomial shape errors.
+    badsums = rk_plan_error(@brm (;
+        df...,
+        obs=[3 1 0; 2 2 1; 0 0 5; 1 1 1; 4 0 0; 2 1 2],
+        n=[4, 5, 5, 3, 4, 4],
+    ) begin
+        s ~ Dirichlet(3, 1.0)
+        obs ~ Multinomial(n, s)
+    end)
+    @test badsums isa ErrorException
+    @test occursin("must sum to their trials", badsums.msg)
+    nomatrix = rk_plan_error(@brm df begin
+        s ~ Dirichlet(3, 1.0)
+        c ~ Multinomial(n, s)
+    end)
+    @test nomatrix isa ErrorException
+    @test occursin("needs an n×K integer count matrix", nomatrix.msg)
+    # Evidence stays Gaussian/Poisson-only.
+    ev = rk_plan_error(@brm df begin
+        eta1 ~ 1 + x
+        eta2 ~ 1 + x
+        eta3 ~ 1 + x
+        c ~ truncated(CategoricalLogit(eta1, eta2, eta3), 1, 3)
+    end)
+    @test ev isa ErrorException
+    @test occursin("evidence", ev.msg)
 end
 
 @testset "offset-only predictors plan with no priors" begin
