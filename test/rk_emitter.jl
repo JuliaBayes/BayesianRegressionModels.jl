@@ -5,7 +5,8 @@
 # Covers `_brm_rk_plan` (core, no RK dependency): the structural plan shape
 # for the four admitted (family, link, predictor-link) triples and the
 # fail-closed battery for everything outside slice 1. Execution/parity
-# against the thin layer lives in the later parity corpus, not here.
+# against the thin layer lives in the parity corpus
+# (test/rk_parity.jl carries the ranef slice), not here.
 
 using Test
 using BayesianRegressionModels

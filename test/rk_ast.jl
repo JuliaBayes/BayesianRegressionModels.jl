@@ -5,8 +5,9 @@
 # Pure-Julia checks (no ReactiveKernels dependency): exact `Expr` shapes
 # over the whole slice-1 surface (`_rk_emit_ast` is total — the AST is
 # the sole emission path, no fallback). Lowerability through the real
-# `lower_rkppl` is covered by the scratch parity corpus, which routes
-# every case through the retargeted factory.
+# `lower_rkppl` is covered per-slice by the parity corpus
+# (test/rk_parity.jl carries the ranef slice), which routes each case
+# through the retargeted factory.
 
 using Test
 using BayesianRegressionModels
