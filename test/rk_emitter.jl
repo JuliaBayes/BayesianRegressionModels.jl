@@ -661,6 +661,29 @@ end
     end)
 end
 
+@testset "fail closed: exact gp awaits thin-layer dense cholesky" begin
+    # `gp(...)` converges on SBBRMI only once ReactiveKernelsPPL grows the
+    # latent non-centred construct SB emits (`_sb_gp`:
+    # `cholesky_decompose(K) * z`, `z ~ std_normal`, `rho`/`sigma` lognormal).
+    # Until then every spelling fails at the structured-term gate. When the
+    # thin layer lands it, this testset flips to plan-shape assertions.
+    @test_throws "structured term(s)" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + gp(x)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test_throws "structured term(s)" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + gp(x, z; iso=false)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test_throws "structured term(s)" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + gp(x; cov=:periodic, period=1.0)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+end
+
 @testset "fail closed: response side" begin
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
