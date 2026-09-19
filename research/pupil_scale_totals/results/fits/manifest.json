@@ -319,7 +319,28 @@
         "bytes": 3122045,
         "sha256": "4c4981d7c83783cf9ced4f4d30cc5983e61673b7edc96f84fa7c5dd38398b2de"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/6abdbd84d971856a.bin",
+        "bytes": 20971520,
+        "sha256": "17980d5602684e0b73f1f9f65e524902923c0731a8a4d7bbd023c699ce99ecff"
+      },
+      {
+        "index": 1,
+        "path": "/home/niko/.local/state/kb-agents/uploads/a046d59e7fce45bd.bin",
+        "bytes": 20971520,
+        "sha256": "b17b78072652b84d9e2f0af40054cbaf614f160eb2428c9fe0427d23dd092fdd"
+      },
+      {
+        "index": 2,
+        "path": "/home/niko/.local/state/kb-agents/uploads/adec912a7f543525.bin",
+        "bytes": 1482547,
+        "sha256": "ed76739cc2fba03107575c1cff7ad1152281f29c4cf4b09c0950dd549f5ed642"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "pupil4-brms-whmc-v1.tar.gz",
@@ -486,7 +507,22 @@
         "bytes": 291,
         "sha256": "476a7c6c06d8b797425a4cc76ef93a89914629d3cab674be0372a4e47c9a2ee1"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/c21f441aac1795a9.bin",
+        "bytes": 20971520,
+        "sha256": "2d9639b8088e64ea818a0568fd5aac8c97d35452d8ce18bcc6889e9a7c30459c"
+      },
+      {
+        "index": 1,
+        "path": "/home/niko/.local/state/kb-agents/uploads/2d52ca1f1f8b7b22.bin",
+        "bytes": 11137987,
+        "sha256": "358696a8a2fb9db47f66c093ba0ce6b417246a0d87877bf62b14179c45fe7a98"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "pupil4-summary-v1.tar.gz",
@@ -583,7 +619,16 @@
         "bytes": 297,
         "sha256": "872bae57955a14153441d91651c693455210fd3ad9da90034cc3f4ad6146f1c4"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/3d1b2504f14e877e.bin",
+        "bytes": 6867814,
+        "sha256": "34e8da736e79033e65b7ae1822cb183ae2109527c0b44edfbf4f073f513ed544"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "native-ordinary_ncp.tar.gz",
@@ -665,7 +710,16 @@
         "bytes": 4820299,
         "sha256": "170cf2fca5fff4e6a23f0311e023f3251043c245ae6d7bfaf383a4b62def2c24"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/ec64f5d8c07ea395.bin",
+        "bytes": 7762505,
+        "sha256": "c35e0fc7f1ce7e14185ad2bf600c45ed22d2cc303d4a5c09cc67c5e72ab651e9"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "native-s2z_cp.tar.gz",
@@ -747,7 +801,16 @@
         "bytes": 7699455,
         "sha256": "344b66cb7913e4bcedd284364ed5ce9762bce07d08d92e51e8c6e258e3567592"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/f42d0277b7b1d9a3.bin",
+        "bytes": 11469377,
+        "sha256": "23b8d65d5055a739b87c9b7d0944d51f1e1d2131d1d09756ff13aedc66c22647"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "native-s2z_ncp.tar.gz",
@@ -829,7 +892,16 @@
         "bytes": 7762364,
         "sha256": "b8bb2905c8d1d357d7b4618b38ada2ec1695bc84f52db36698351f9dff427639"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/5d725289dafc7921.bin",
+        "bytes": 11475707,
+        "sha256": "b66382e41ab101ca50de4960b400aaf6ec72b3061ce1dbbc0965c83f16f253f1"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "native-s2z_auto.tar.gz",
@@ -931,6 +1003,15 @@
         "bytes": 10017716,
         "sha256": "20c35a3c6d6d9c2c9060dcb0e4297133485492dcefff7b08b61cec206e482556"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/ad1af78118737879.bin",
+        "bytes": 14435628,
+        "sha256": "6392e4e8e22cdaa369d4e9fdbc606ce537946971d954a38fc570f21395b03c65"
+      }
+    ],
+    "complete": true
   }
 ]

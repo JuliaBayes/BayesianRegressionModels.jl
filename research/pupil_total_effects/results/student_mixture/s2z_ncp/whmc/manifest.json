@@ -1,0 +1,93 @@
+[
+  {
+    "archive": "source.tar.gz",
+    "bytes": 83992,
+    "sha256": "f370c8e62c106a8587c861c19dfbf8407ba29dbc43cd0849d3ce1ea26bfbfbb3",
+    "members": [
+      {
+        "path": "source/audit.jl",
+        "bytes": 3350,
+        "sha256": "32761e5cbc621417e3f7ffb6965c44dcf396a75aa8afa08e46c75d5de3fd76ea"
+      },
+      {
+        "path": "source/model.jl",
+        "bytes": 7046,
+        "sha256": "0f606ebe962133992d68e76b5aa47cf2ba408933b826b38880298d45cab22827"
+      },
+      {
+        "path": "source/recovery.jl",
+        "bytes": 9267,
+        "sha256": "c03d0bf033c082e2b0b4d86f5e8937d1b7116229760aef95d3862ce7f4ae3b72"
+      },
+      {
+        "path": "source/reference/df_pupil_complete.rda",
+        "bytes": 17854,
+        "sha256": "ab45331f4d2be447211832bd6cf13501b31032837ddb16acada6d414fbf46042"
+      },
+      {
+        "path": "source/reference/post3-original.stan",
+        "bytes": 4134,
+        "sha256": "b62a9d1519355bb4814ee45bc68da65fcbfd078a82fc96984b875bd0ea6a9d60"
+      },
+      {
+        "path": "source/reference/priors.tsv",
+        "bytes": 402,
+        "sha256": "73483bebbb134929d9909094b6b3fb07dcf2132ac4f8b3a4985884ec90565cf4"
+      },
+      {
+        "path": "source/reference/provenance.json",
+        "bytes": 403,
+        "sha256": "9ad0e73fb55068f9282095093a32319769ca918cee85c7cb241c283c7fdba7e9"
+      },
+      {
+        "path": "source/reference/pupil-uncorrelated-gaussian.stan",
+        "bytes": 3169,
+        "sha256": "68f0fac8ac6c07044a2f273c242fa175164761022d3292dd4a999f4c5f11ff86"
+      },
+      {
+        "path": "source/reference/pupil-uncorrelated-student.stan",
+        "bytes": 3175,
+        "sha256": "d3acb33365d6ce20bc0dc4db47455ab545ed359277c58c5331762513a871940c"
+      },
+      {
+        "path": "source/reference/pupil.csv",
+        "bytes": 62224,
+        "sha256": "27e73bec304bc68271b0a9d46b1736a7c8e62fd8dcfac7d20704524c47edc8e8"
+      },
+      {
+        "path": "source/reference/standata.json",
+        "bytes": 83329,
+        "sha256": "454f70d493fa3f024606f49df3bbfb933cb21299465efaf0859ac0f654ae9166"
+      },
+      {
+        "path": "source/reference/student_mixture_marginal_audit.tsv",
+        "bytes": 509,
+        "sha256": "9a43222ffa8ecdf54e09d390a0aa4649b809cff7e002f3544f1133878b531f3a"
+      },
+      {
+        "path": "source/run.jl",
+        "bytes": 11230,
+        "sha256": "029ac386ee0128384db09cb880bf6bef72b2a9c9afa698ff7f33a848fdfa3c48"
+      },
+      {
+        "path": "source/s2z_whmc.jl",
+        "bytes": 11023,
+        "sha256": "faf94224c2409cba0e55678855b19718d0b31ab244ffe4288528fc4ca7d2859f"
+      },
+      {
+        "path": "source/stan_target.jl",
+        "bytes": 2026,
+        "sha256": "0404f95f2b1019d776d797736e5ca7788e2917c6d3161470e9d9e5496ee7887d"
+      }
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/b5f98d47ae1e6eea.bin",
+        "bytes": 83992,
+        "sha256": "f370c8e62c106a8587c861c19dfbf8407ba29dbc43cd0849d3ce1ea26bfbfbb3"
+      }
+    ],
+    "complete": true
+  }
+]

@@ -1,0 +1,23 @@
+[
+  {
+    "archive": "precursor.tar.gz",
+    "bytes": 1801194,
+    "sha256": "7c6e657472ce09e1ea3765201b936475ff21954a2ad039d7a049377ae6891235",
+    "members": [
+      {
+        "path": "precursor/model_2a5acb6762104b4ee368cc475353ae9a-202609151306-1-8b3363.csv",
+        "bytes": 3909916,
+        "sha256": "69f5902e7c2263cebf586bd685d515ed546fcc4750a560b9e2eac2a2356a2b2c"
+      }
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/031e3ad7c04cec1e.bin",
+        "bytes": 1801194,
+        "sha256": "7c6e657472ce09e1ea3765201b936475ff21954a2ad039d7a049377ae6891235"
+      }
+    ],
+    "complete": true
+  }
+]
