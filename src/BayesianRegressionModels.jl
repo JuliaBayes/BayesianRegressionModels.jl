@@ -167,7 +167,7 @@ export RanefBlock, ranef_blocks, ranef_coordinates,
 export AdaptiveCenteringBlock, adaptive_centering_blocks,
        adaptive_centering_problem, select_hsgp_centeredness,
        select_ranef_centeredness
-export brm_output_draws, brm_predictive_draws, hsgp_coordinate_draws, hsgp_transform_draws
+export brm_output_draws, brm_predictive_draws, hsgp_coordinate_draws, hsgp_transform_draws, hsgp_boundary_check
 export BRMPowerscaleSensitivity, brm_psis_weights, brm_cjs_dist,
        brm_powerscale_weights, brm_powerscale_sensitivity, brm_powerscale_inputs
 export brm_prediction_grid, brm_conditional_draws, brm_contrast_draws,

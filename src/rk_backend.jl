@@ -18,6 +18,9 @@ const _RK_SLICE1_TRIPLES = Set{Tuple{Symbol,Symbol,Symbol}}([
     (:bernoulli_logit, :logit, :identity),
     (:bernoulli_logit, :logit, :logit),
     (:poisson_log, :log, :log),
+    (:binomial_logit, :logit, :logit),
+    (:nb2_log, :log, :log),
+    (:gamma_log, :log, :log),
 ])
 const _RK_SLICE1_PRIOR_ARITY = Dict{Symbol,Int}(
     :Normal => 2, :Cauchy => 2, :Exponential => 1, :Gamma => 2,
@@ -55,7 +58,8 @@ struct _RKResponseEvidence
 end
 
 struct _RKLikelihoodSpec
-    family::Symbol # :gaussian | :bernoulli_logit | :poisson_log
+    family::Symbol # :gaussian | :bernoulli_logit | :poisson_log |
+                   # :binomial_logit | :nb2_log | :gamma_log
     link::Symbol   # effective link: :identity | :logit | :log
     response::Symbol
     predictor::Symbol
@@ -63,6 +67,7 @@ struct _RKLikelihoodSpec
     weights::Union{Nothing,Symbol}
     evidence::_RKResponseEvidence
     label::Symbol
+    trials::Union{Nothing,Symbol,Int} # binomial only: data col or literal
 end
 
 struct _RKTermSpec
@@ -194,7 +199,10 @@ function rk_restore_draws end
 const _RK_ADMITTED_SPELLINGS =
     "`y ~ Normal(mu, s)` + `mu ~ ...`, `y ~ BernoulliLogit(eta)` (or " *
     "`Bernoulli(logistic(eta))`) + `eta ~ ...`, `y ~ Bernoulli(p)` + " *
-    "`logit(p) ~ ...`, or `y ~ Poisson(mu)` + `log(mu) ~ ...`"
+    "`logit(p) ~ ...`, `y ~ Poisson(mu)` + `log(mu) ~ ...`, " *
+    "`H ~ Binomial(n, p)` + `logit(p) ~ ...` (or `Binomial(n, " *
+    "logistic(eta))` + `eta ~ ...`), `y ~ NegativeBinomial2(mu, phi)` + " *
+    "`log(mu) ~ ...`, or `y ~ Gamma(alpha, mu/alpha)` + `log(mu) ~ ...`"
 
 function _rk_predictor_link(brmi::BRMI, target::Symbol)
     prefix = "RK backend"
@@ -227,21 +235,90 @@ end
 
 function _rk_scale_argument(arg, parameters::Set{Symbol},
         assignments::Set{Symbol}, consts::Dict{Symbol,Float64},
-        aliases::Dict{Symbol,Symbol}, response::Symbol)
+        aliases::Dict{Symbol,Symbol}, response::Symbol, what::String="scale")
     prefix = "RK backend"
-    arg isa Number && return _rk_positive_literal(arg, response, "scale")
+    arg isa Number && return _rk_positive_literal(arg, response, what)
     if arg isa NamedColumn
         parent(arg) isa DataColumn && error(
-            "$prefix: response `$response` scale cannot be a data column; " *
+            "$prefix: response `$response` $what cannot be a data column; " *
             "slice 1 admits a sampled parameter, a scalar assignment, or " *
             "a positive numeric literal")
         kind, value = _rk_resolve_use_ref(name(arg), consts, aliases,
-            parameters, assignments, "response `$response` scale")
-        kind === :number && return _rk_positive_literal(value, response, "scale")
+            parameters, assignments, "response `$response` $what")
+        kind === :number && return _rk_positive_literal(value, response, what)
         return value
     end
-    error("$prefix: response `$response` scale must be a sampled parameter " *
+    error("$prefix: response `$response` $what must be a sampled parameter " *
           "or a positive numeric literal")
+end
+
+# Binomial trials: an integer data column (values validated once columns
+# cross) or a non-negative integer literal. Folded constants ride the
+# literal path; sampled parameters, live assignments, and expressions
+# cannot — the thin layer takes `ColumnRef | Int` only.
+function _rk_trials_argument(arg, response::Symbol,
+        parameters::Set{Symbol}, assignments::Set{Symbol},
+        consts::Dict{Symbol,Float64}, aliases::Dict{Symbol,Symbol})
+    prefix = "RK backend"
+    arg isa Number && return _rk_trials_literal(arg, response)
+    if arg isa NamedColumn
+        parent(arg) isa DataColumn && return name(arg)
+        kind, value = _rk_resolve_use_ref(name(arg), consts, aliases,
+            parameters, assignments, "response `$response` trials")
+        kind === :number && return _rk_trials_literal(value, response)
+        error("$prefix: response `$response` trials must be an integer " *
+              "data column or a non-negative integer literal, not a " *
+              "sampled parameter or assignment")
+    end
+    error("$prefix: response `$response` trials must be an integer data " *
+          "column or a non-negative integer literal")
+end
+
+function _rk_trials_literal(x::Number, response::Symbol)
+    prefix = "RK backend"
+    isfinite(Float64(x)) && x == round(x) && x >= 0 || error(
+        "$prefix: response `$response` trials literal must be a " *
+        "non-negative integer")
+    Int(x)
+end
+
+# Gamma mean-shape form: `Gamma(alpha, mu/alpha)` with the SAME alpha in
+# both positions (same name, or equal literals) — mirrors the thin
+# layer's double-alpha identity rule. Returns the shape value.
+function _rk_gamma_shape_args(args, predictor::Symbol, response::Symbol,
+        parameters::Set{Symbol}, assignments::Set{Symbol},
+        consts::Dict{Symbol,Float64}, aliases::Dict{Symbol,Symbol})
+    prefix = "RK backend"
+    length(args) == 2 || error(
+        "$prefix: response `$response` `Gamma` needs `(shape, scale)`; " *
+        "write `Gamma(alpha, $predictor/alpha)` with a `log($predictor)` " *
+        "predictor")
+    shape = _rk_scale_argument(args[1], parameters, assignments, consts,
+        aliases, response, "shape")
+    scale = args[2]
+    scale isa ExprColumn && getf(scale) === (/) || error(
+        "$prefix: response `$response` `Gamma` scale must be " *
+        "`$predictor/alpha` with the same shape in both positions")
+    isempty(getkwargs(scale)) || error(
+        "$prefix: response `$response` `Gamma` scale takes no keywords")
+    sargs = getargs(scale)
+    length(sargs) == 2 && _rk_is_predictor_ref(sargs[1], predictor) || error(
+        "$prefix: response `$response` `Gamma` scale must be " *
+        "`$predictor/alpha` with the linear predictor `$predictor` itself")
+    _rk_gamma_same_alpha(args[1], sargs[2]) || error(
+        "$prefix: response `$response` `Gamma` shape and scale divisor " *
+        "must be identical (`Gamma(alpha, $predictor/alpha)`); distinct " *
+        "shapes are out of slice 1")
+    shape
+end
+
+function _rk_gamma_same_alpha(shape_arg, divisor_arg)
+    shape_arg isa Number && divisor_arg isa Number &&
+        return shape_arg == divisor_arg
+    shape_arg isa NamedColumn && divisor_arg isa NamedColumn &&
+        return name(shape_arg) == name(divisor_arg) &&
+            typeof(parent(shape_arg)) === typeof(parent(divisor_arg))
+    false
 end
 
 function _rk_positive_literal(x::Number, response::Symbol, what::String)
@@ -276,7 +353,7 @@ function _rk_classify_response(rhs::ExprColumn, predictor::Symbol,
             "$prefix: response `$response` pairs `Normal` with a " *
             "$predictor_link-link predictor; slice 1 admits " *
             "$_RK_ADMITTED_SPELLINGS")
-        return (:gaussian, predictor_link, scale)
+        return (:gaussian, predictor_link, scale, nothing)
     elseif head === BernoulliLogit
         length(args) == 1 || error(
             "$prefix: response `$response` `BernoulliLogit` needs one argument")
@@ -290,7 +367,7 @@ function _rk_classify_response(rhs::ExprColumn, predictor::Symbol,
             "$prefix: response `$response` applies `BernoulliLogit` on top " *
             "of a $predictor_link-link predictor (double link); use an " *
             "identity-link predictor")
-        return (:bernoulli_logit, :logit, nothing)
+        return (:bernoulli_logit, :logit, nothing, nothing)
     elseif head === Bernoulli
         length(args) == 1 || error(
             "$prefix: response `$response` `Bernoulli` needs one argument")
@@ -302,7 +379,7 @@ function _rk_classify_response(rhs::ExprColumn, predictor::Symbol,
                 "a $predictor_link-link predictor; write `BernoulliLogit` " *
                 "with an identity predictor or `Bernoulli(p)` with a " *
                 "`logit(p)` predictor")
-            return (:bernoulli_logit, predictor_link, nothing)
+            return (:bernoulli_logit, predictor_link, nothing, nothing)
         end
         isnothing(_rk_strip_logistic(arg, predictor)) || predictor_link === :identity || error(
             "$prefix: response `$response` applies `logistic` on top of a " *
@@ -312,7 +389,7 @@ function _rk_classify_response(rhs::ExprColumn, predictor::Symbol,
             "$prefix: response `$response` probability must be the linear " *
             "predictor `$predictor` or `logistic($predictor)`; admitted " *
             "spellings: $_RK_ADMITTED_SPELLINGS")
-        return (:bernoulli_logit, :logit, nothing)
+        return (:bernoulli_logit, :logit, nothing, nothing)
     elseif head === Poisson
         length(args) == 1 || error(
             "$prefix: response `$response` `Poisson` needs one argument")
@@ -325,7 +402,64 @@ function _rk_classify_response(rhs::ExprColumn, predictor::Symbol,
             "$prefix: response `$response` pairs `Poisson` with a " *
             "$predictor_link-link predictor; write `Poisson(mu)` with a " *
             "`log(mu)` predictor")
-        return (:poisson_log, predictor_link, nothing)
+        return (:poisson_log, predictor_link, nothing, nothing)
+    elseif head === Binomial
+        length(args) == 2 || error(
+            "$prefix: response `$response` `Binomial` needs `(trials, " *
+            "probability)`")
+        trials = _rk_trials_argument(args[1], response, parameters,
+            assignments, consts, aliases)
+        arg = args[2]
+        if _rk_is_predictor_ref(arg, predictor)
+            triple = (:binomial_logit, predictor_link, predictor_link)
+            triple in _RK_SLICE1_TRIPLES || error(
+                "$prefix: response `$response` pairs `Binomial` with a " *
+                "$predictor_link-link predictor; write `Binomial(n, p)` " *
+                "with a `logit(p)` predictor or `Binomial(n, " *
+                "logistic(eta))` with an identity predictor")
+            return (:binomial_logit, predictor_link, nothing, trials)
+        end
+        isnothing(_rk_strip_logistic(arg, predictor)) || predictor_link === :identity || error(
+            "$prefix: response `$response` applies `logistic` on top of a " *
+            "$predictor_link-link predictor (double link); use an " *
+            "identity-link predictor")
+        isnothing(_rk_strip_logistic(arg, predictor)) && error(
+            "$prefix: response `$response` probability must be the linear " *
+            "predictor `$predictor` or `logistic($predictor)`; admitted " *
+            "spellings: $_RK_ADMITTED_SPELLINGS")
+        return (:binomial_logit, :logit, nothing, trials)
+    elseif head === NegativeBinomial2
+        length(args) == 2 || error(
+            "$prefix: response `$response` `NegativeBinomial2` needs " *
+            "`(mean, dispersion)`; write `NegativeBinomial2(mu, phi)` " *
+            "with a `log(mu)` predictor")
+        _rk_is_predictor_ref(args[1], predictor) || error(
+            "$prefix: response `$response` mean must be the linear " *
+            "predictor `$predictor` itself; write `NegativeBinomial2(mu, " *
+            "phi)` with a `log(mu)` predictor (slice 1 has no " *
+            "`NegativeBinomial2(exp(..))` spelling)")
+        dispersion = _rk_scale_argument(args[2], parameters, assignments,
+            consts, aliases, response, "dispersion")
+        triple = (:nb2_log, predictor_link, predictor_link)
+        triple in _RK_SLICE1_TRIPLES || error(
+            "$prefix: response `$response` pairs `NegativeBinomial2` with " *
+            "a $predictor_link-link predictor; write " *
+            "`NegativeBinomial2(mu, phi)` with a `log(mu)` predictor")
+        return (:nb2_log, predictor_link, dispersion, nothing)
+    elseif head === BinomialLogit
+        error("$prefix: response `$response` `BinomialLogit` is out of " *
+              "slice 1; write `Binomial(n, p)` with a `logit(p)` " *
+              "predictor or `Binomial(n, logistic(eta))` with an " *
+              "identity predictor")
+    elseif head === Gamma
+        shape = _rk_gamma_shape_args(args, predictor, response, parameters,
+            assignments, consts, aliases)
+        triple = (:gamma_log, predictor_link, predictor_link)
+        triple in _RK_SLICE1_TRIPLES || error(
+            "$prefix: response `$response` pairs `Gamma` with a " *
+            "$predictor_link-link predictor; write `Gamma(alpha, " *
+            "mu/alpha)` with a `log(mu)` predictor")
+        return (:gamma_log, predictor_link, shape, nothing)
     end
     head_name = head isa Function ? nameof(head) :
         head isa Type ? nameof(head) : string(head)
@@ -388,8 +522,9 @@ function _rk_plan_evidence(modifier, family::Symbol, data::AbstractDict,
     prefix = "RK backend"
     isnothing(modifier) && return _RKResponseEvidence(:none, nothing, nothing)
     family in (:gaussian, :poisson_log) || error(
-        "$prefix: response `$response` evidence ($(modifier.kind)) on a " *
-        "Bernoulli response is out of slice 1")
+        "$prefix: response `$response` evidence ($(modifier.kind)) is out " *
+        "of slice 1 (evidence is admitted on Gaussian and Poisson " *
+        "responses only)")
     lower = _rk_evidence_bound(modifier.lower, data, response, "lower",
         columns, consts, aliases, parameters, assign_names)
     upper = _rk_evidence_bound(modifier.upper, data, response, "upper",
@@ -1801,8 +1936,50 @@ function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
     elseif family === :poisson_log
         (eltype(values) <: Integer && all(>=(0), values)) || error(
             "$prefix: response `$response` must hold non-negative integers")
+    elseif family === :binomial_logit
+        # Rowwise y <= n is checked once trials cross (below): trials may
+        # be a column or a literal, and neither is visible here.
+        (eltype(values) <: Integer && all(>=(0), values)) || error(
+            "$prefix: response `$response` must hold non-negative integers")
+    elseif family === :nb2_log
+        (eltype(values) <: Integer && all(>=(0), values)) || error(
+            "$prefix: response `$response` must hold non-negative integers")
+    elseif family === :gamma_log
+        # Mirrors the thin layer: strictly positive (y = 0 fails
+        # validation there, so it fails here with BRM-side attribution).
+        (eltype(values) <: Real && all(>(0), values)) || error(
+            "$prefix: response `$response` must hold strictly positive values")
     end
     values
+end
+
+# Binomial trials validation once columns cross: integer trials, no
+# missing (covered by the crossed-columns gate for columns; literals
+# are validated at classification), and y <= n every row.
+function _rk_gate_trials_values!(specs::AbstractVector,
+        columns::Dict{Symbol,AbstractVector}, n_obs::Int)
+    prefix = "RK backend"
+    for spec in specs
+        spec.family === :binomial_logit || continue
+        trials = spec.trials
+        n = if trials isa Int
+            fill(trials, n_obs)
+        else
+            raw = columns[trials]
+            eltype(raw) <: Integer || error(
+                "$prefix: response `$(spec.response)` trials column " *
+                "`$trials` must hold integers")
+            raw
+        end
+        all(>=(0), n) || error(
+            "$prefix: response `$(spec.response)` trials must be " *
+            "non-negative every row")
+        y = columns[spec.response]
+        all(y .<= n) || error(
+            "$prefix: response `$(spec.response)` exceeds its trials " *
+            "(`$trials`) on some row; Binomial needs y <= n every row")
+    end
+    nothing
 end
 
 function _rk_peel_observation(brmi::BRMI, observation)
@@ -2018,9 +2195,16 @@ function _brm_rk_plan(brmi::BRMI)
     response_specs = _RKLikelihoodSpec[]
     for entry in peeled
         predictor = response_predictor[entry.key]
-        family, link, scale = _rk_classify_response(entry.rhs, predictor,
-            predictor_link[predictor], parameter_names, assignment_names,
-            consts, aliases, entry.key)
+        family, link, scale, trials = _rk_classify_response(entry.rhs,
+            predictor, predictor_link[predictor], parameter_names,
+            assignment_names, consts, aliases, entry.key)
+        if trials isa Symbol
+            raw = get(context.data, trials, nothing)
+            raw isa AbstractVector || error(
+                "$prefix: response `$(entry.key)` trials column `$trials` " *
+                "is not a vector")
+            columns[trials] = raw
+        end
         weights = if isnothing(entry.weight_plan)
             nothing
         else
@@ -2034,7 +2218,7 @@ function _brm_rk_plan(brmi::BRMI)
         gated = _rk_gate_response_values!(family, entry.raw_response, entry.key)
         columns[entry.key] = gated
         push!(response_specs, _RKLikelihoodSpec(family, link, entry.key,
-            predictor, scale, weights, evidence, entry.key))
+            predictor, scale, weights, evidence, entry.key, trials))
     end
     # Phase 6: one observation axis, no missing, finite data, evidence
     # values, and name hygiene (mirrors thin-side validation, R8).
@@ -2048,6 +2232,7 @@ function _brm_rk_plan(brmi::BRMI)
             "observation axis in slice 1)")
     end
     _rk_gate_crossed_columns!(columns, n_obs)
+    _rk_gate_trials_values!(response_specs, columns, n_obs)
     _rk_gate_evidence_values!(response_specs, columns, n_obs)
     _rk_gate_name_hygiene!(
         predictor_specs, parameters, assignments, derived, columns)

@@ -102,6 +102,19 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec)
             _rk_ast_dotted(:logistic, predictor))
     elseif response.family === :poisson_log
         _rk_ast_dotted(:Poisson, _rk_ast_dotted(:exp, predictor))
+    elseif response.family === :binomial_logit
+        # Both triples lower to one spelling: `Binomial.(n,
+        # logistic.(p))` with a column or literal `n`.
+        _rk_ast_dotted(:Binomial, response.trials,
+            _rk_ast_dotted(:logistic, predictor))
+    elseif response.family === :nb2_log
+        _rk_ast_dotted(:NegativeBinomial2,
+            _rk_ast_dotted(:exp, predictor), response.scale)
+    elseif response.family === :gamma_log
+        # Mean-shape form: the plan pins both alpha positions identical,
+        # so the same value emits twice.
+        _rk_ast_dotted(:Gamma, response.scale, Expr(:call, :./,
+            _rk_ast_dotted(:exp, predictor), response.scale))
     end
     evidence = response.evidence
     # Missing sides emit as ∓Inf floats; the thin layer normalizes them

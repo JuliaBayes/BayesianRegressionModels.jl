@@ -9,7 +9,8 @@
 
 using Test
 using BayesianRegressionModels
-using Distributions: Bernoulli, Exponential, Gamma, Normal, Poisson, truncated
+using Distributions: Bernoulli, Binomial, Exponential, Gamma, Normal, Poisson,
+                     truncated
 using LogExpFunctions: logistic, logit
 using Statistics: mean
 
@@ -71,6 +72,35 @@ end
     @test ast.args[end] == Expr(:call, :.~,
         :c, Expr(:., :Poisson, Expr(:tuple,
             Expr(:., :exp, Expr(:tuple, :mu)))))
+end
+
+@testset "slice-1 response AST shapes" begin
+    brmi = @brm df begin
+        logit(p) ~ 1 + x
+        b ~ Binomial(h, p)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast.args[end] == Expr(:call, :.~,
+        :b, Expr(:., :Binomial, Expr(:tuple, :h,
+            Expr(:., :logistic, Expr(:tuple, :p)))))
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        phi ~ Exponential(1)
+        c ~ NegativeBinomial2(mu, phi)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast.args[end] == Expr(:call, :.~,
+        :c, Expr(:., :NegativeBinomial2, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :mu)), :phi)))
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        alpha ~ Exponential(1)
+        z ~ Gamma(alpha, mu / alpha)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast.args[end] == Expr(:call, :.~,
+        :z, Expr(:., :Gamma, Expr(:tuple, :alpha,
+            Expr(:call, :./, Expr(:., :exp, Expr(:tuple, :mu)), :alpha))))
 end
 
 @testset "evidence and weights shapes" begin

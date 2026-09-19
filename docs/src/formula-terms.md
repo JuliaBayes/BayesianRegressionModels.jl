@@ -998,6 +998,10 @@ as `rho_g = max(exp(eta_rho[g]), rho_lower)` and
   deviations. The `:length_scale` / `:sd` roles themselves name no sampled
   carrier on a predicted hyper and redirect to these roles; the per-group
   values are deterministic transforms with no role.
+- After fitting, `hsgp_boundary_check` reports per-group
+  posterior-mean-`rho` over the domain margin (flagged at 1.0) and the
+  per-group probability the hyper value sits below the validity floor —
+  the executable form of the sizing guidance below.
 
 #### Hyper recovery needs a wider domain than latent recovery
 
