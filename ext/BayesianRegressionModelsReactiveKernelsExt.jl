@@ -7,24 +7,35 @@ using ReactiveKernelsPPL
 
 const BRM = BayesianRegressionModels
 
-# Sole emission path: BRM-side `_RKStructuralPlan` (plain data, no RK
-# types) → `@rkppl` AST (`BRM._rk_emit_ast`, total over slice-1 plans) →
-# thin-layer `StructuralPlan` via `lower_rkppl` + `bind_data` (the same
-# function the macro lowers through). Model execution and the sampler
-# boundary both derive from this one lowering, so the boundary plan is
-# definitionally the plan the model was built from — there is no
-# parallel direct serializer to drift (the retired one did: factor term
-# options and the preserved Binomial triple-3 are both rejected from
-# hand-built plans yet accepted from the AST route).
+# Sole emission path: BRM-side plan (plain data, no RK types) → `@rkppl`
+# AST (`BRM._rk_emit_ast`, total over admitted plans) → thin-layer
+# `StructuralPlan` via `lower_rkppl` + `bind_data` (the same function the
+# macro lowers through). Model execution and the sampler boundary both
+# derive from this one lowering, so the boundary plan is definitionally
+# the plan the model was built from — there is no parallel direct
+# serializer to drift (the retired one did: factor term options and the
+# preserved Binomial triple-3 are both rejected from hand-built plans yet
+# accepted from the AST route). Kernel plans ride the same route; until
+# the thin-layer KernelPlate reader lands, `lower_rkppl`/`build_kernel`
+# fail closed with thin-layer attribution (leaf 14bv4nq).
+const _RK_PLAN_TYPES = Union{BRM._RKStructuralPlan,BRM._RKKernelPlan}
 function _rk_translated_plan(plan::BRM._RKStructuralPlan)
     ast = BRM._rk_emit_ast(plan)
     unbound = lower_rkppl(ast, Tuple(sort!(collect(keys(plan.columns)))))
     bind_data(unbound, plan.columns)
 end
 
+# Kernel plans additionally bind the plate dims (subjects/timepoints) the
+# `subjects=...` key names; the counts live on the kernel spec.
+function _rk_translated_plan(plan::BRM._RKKernelPlan)
+    ast = BRM._rk_emit_ast(plan)
+    unbound = lower_rkppl(ast, Tuple(sort!(collect(keys(plan.columns)))))
+    bind_data(unbound, plan.columns; dims=BRM._rk_kernel_bind_dims(plan.kernel))
+end
+
 # The executable `model` of an `RKBRMI` is the thin-layer `(; spec, layout)`
 # pair: the `KernelSpec` callable after `prepare`, plus its `LayoutTable`.
-function BRM._brm_rk_model(plan::BRM._RKStructuralPlan)
+function BRM._brm_rk_model(plan::_RK_PLAN_TYPES)
     build_kernel(_rk_translated_plan(plan))
 end
 
