@@ -15,7 +15,7 @@
 # raw columns cross the boundary. Everything else fails closed with the
 # admitted spelling named.
 
-const _RK_SLICE1_TRIPLES = Set{Tuple{Symbol,Symbol,Symbol}}([
+const _RK_ADMITTED_TRIPLES = Set{Tuple{Symbol,Symbol,Symbol}}([
     (:gaussian, :identity, :identity),
     (:bernoulli_logit, :logit, :identity),
     (:bernoulli_logit, :logit, :logit),
@@ -28,6 +28,21 @@ const _RK_SLICE1_TRIPLES = Set{Tuple{Symbol,Symbol,Symbol}}([
     (:ordinal, :logit, :identity),
     (:ordinal, :probit, :identity),
     (:ordinal, :cloglog, :identity),
+    # Slice 2 group A (links + Beta): planner-side triples key the @brm
+    # link spelling; the AST moves the link into the response wrapper so
+    # the thin layer sees its Identity-predlink triples (Binomial
+    # precedent).
+    (:bernoulli_probit, :probit, :probit),
+    (:bernoulli_cloglog, :cloglog, :cloglog),
+    (:binomial_probit, :probit, :probit),
+    (:binomial_cloglog, :cloglog, :cloglog),
+    (:beta_logit, :logit, :logit),
+])
+# Slice-2 families: no weights or evidence (no driving case — the thin
+# layer admits neither on the new triples, so the planner fails closed).
+const _RK_SLICE2_FAMILIES = Set{Symbol}([
+    :bernoulli_probit, :bernoulli_cloglog, :binomial_probit,
+    :binomial_cloglog, :beta_logit,
 ])
 # Leveled simplex responses (multinomial/categorical) name a simplex
 # vector parameter instead of a linear predictor, so they skip the
@@ -75,9 +90,11 @@ struct _RKLikelihoodSpec
     family::Symbol # :gaussian | :bernoulli_logit | :poisson_log |
                    # :binomial_logit | :nb2_log | :gamma_log |
                    # :categorical_logit | :ordered_logit | :ordinal |
-                   # :multinomial | :categorical
+                   # :multinomial | :categorical | slice-2 group A:
+                   # :bernoulli_probit | :bernoulli_cloglog |
+                   # :binomial_probit | :binomial_cloglog | :beta_logit
     link::Symbol   # effective link: :identity | :logit | :log |
-                   # :probit | :cloglog (ordinal only)
+                   # :probit | :cloglog
     response::Symbol
     predictor::Symbol # leveled simplex responses name their simplex
                       # vector parameter here (no linear predictor)
@@ -269,7 +286,10 @@ const _RK_ADMITTED_SPELLINGS =
     "`y ~ CategoricalLogit(eta_2, ..., eta_K)` + identity `eta_j ~ ...`, " *
     "`y ~ OrderedLogistic(eta)` + `eta ~ ...`, `y ~ Ordinal(structure, " *
     "link, eta)` + `eta ~ 0 + ...`, `obs ~ Multinomial(N, s)` + " *
-    "`s ~ Dirichlet(...)`, or `y ~ Categorical(s)` + `s ~ Dirichlet(...)`"
+    "`s ~ Dirichlet(...)`, `y ~ Categorical(s)` + `s ~ Dirichlet(...)`, " *
+    "slice-2 group A: `y ~ Bernoulli(p)` / `H ~ Binomial(n, p)` + " *
+    "`probit(p)` / `cloglog(p) ~ ...`, or `y ~ Beta(mu*kappa, " *
+    "(1-mu)*kappa)` + `logit(mu) ~ ...`"
 
 function _rk_predictor_link(brmi::BRMI, target::Symbol)
     prefix = "RK backend"
@@ -278,13 +298,15 @@ function _rk_predictor_link(brmi::BRMI, target::Symbol)
     link_fn, _ = _peel_lp_lhs(lhs)
     link_fn === identity && return :identity
     link_fn isa Function || error(
-        "$prefix: predictor `$target` has an uninterpretable link; slice 1 " *
-        "admits identity, logit, and log links")
+        "$prefix: predictor `$target` has an uninterpretable link; " *
+        "admitted links are identity, logit, log, probit, and cloglog")
     name = nameof(link_fn)
     name === :logit && return :logit
     name === :log && return :log
-    error("$prefix: predictor `$target` uses link `$name`; slice 1 admits " *
-          "identity, logit, and log links")
+    name === :probit && return :probit
+    name === :cloglog && return :cloglog
+    error("$prefix: predictor `$target` uses link `$name`; admitted links " *
+          "are identity, logit, log, probit, and cloglog")
 end
 
 _rk_is_predictor_ref(arg, predictor::Symbol) =
@@ -388,6 +410,74 @@ function _rk_gamma_same_alpha(shape_arg, divisor_arg)
     false
 end
 
+# Beta mean-concentration form: `Beta(mu*kappa, (1-mu)*kappa)` with the
+# SAME mu (the linear predictor itself) and the SAME kappa in both
+# positions — mirrors the thin layer's structural-match rule. Either
+# multiplication order admits; anything else fails closed. Returns the
+# concentration value.
+function _rk_beta_shape_args(args, predictor::Symbol, response::Symbol,
+        parameters::Set{Symbol}, assignments::Set{Symbol},
+        consts::Dict{Symbol,Float64}, aliases::Dict{Symbol,Symbol})
+    prefix = "RK backend"
+    length(args) == 2 || error(
+        "$prefix: response `$response` `Beta` needs `(a, b)`; write " *
+        "`Beta($predictor*kappa, (1-$predictor)*kappa)` with a " *
+        "`logit($predictor)` predictor")
+    main_factors = _rk_beta_split_product(
+        args[1], predictor, response, "first")
+    comp_factors = _rk_beta_split_product(
+        args[2], predictor, response, "second")
+    main_mu, main_kappa = _rk_beta_orient_factors(main_factors,
+        f -> _rk_is_predictor_ref(f, predictor), predictor, response,
+        "first", "`$predictor*kappa`")
+    comp_mu, comp_kappa = _rk_beta_orient_factors(comp_factors,
+        f -> _rk_beta_is_complement(f, predictor), predictor, response,
+        "second", "`(1-$predictor)*kappa`")
+    _rk_gamma_same_alpha(main_kappa, comp_kappa) || error(
+        "$prefix: response `$response` `Beta` concentration must be " *
+        "identical in both positions (`Beta($predictor*kappa, " *
+        "(1-$predictor)*kappa)`); distinct concentrations are out of " *
+        "slice 2")
+    _rk_scale_argument(main_kappa, parameters, assignments, consts,
+        aliases, response, "concentration")
+end
+
+# Split one `Beta` position into its two factors: a bare product, no
+# keywords. Orientation (which factor is mu-side) happens in
+# `_rk_beta_orient_factors`, so either multiplication order admits.
+function _rk_beta_split_product(position, predictor::Symbol,
+        response::Symbol, which::String)
+    position isa ExprColumn && getf(position) === (*) ||
+        error("RK backend: response `$response` `Beta` $which argument " *
+              "must be a product (`$predictor*kappa` / " *
+              "`(1-$predictor)*kappa`)")
+    isempty(getkwargs(position)) ||
+        error("RK backend: response `$response` `Beta` $which argument " *
+              "takes no keywords")
+    pargs = getargs(position)
+    length(pargs) == 2 ||
+        error("RK backend: response `$response` `Beta` $which argument " *
+              "must be a two-factor product")
+    return pargs[1], pargs[2]
+end
+
+# Orient `(mu-side, kappa-side)`: the factor passing `mu_test` is mu.
+function _rk_beta_orient_factors(factors, mu_test, predictor::Symbol,
+        response::Symbol, which::String, form::String)
+    f1, f2 = factors
+    mu_test(f1) && return f1, f2
+    mu_test(f2) && return f2, f1
+    error("RK backend: response `$response` `Beta` $which argument must " *
+          "be $form")
+end
+
+_rk_beta_is_complement(factor, predictor::Symbol) =
+    factor isa ExprColumn && getf(factor) === (-) &&
+    let cargs = getargs(factor)
+        length(cargs) == 2 && cargs[1] isa Number && cargs[1] == 1 &&
+            _rk_is_predictor_ref(cargs[2], predictor)
+    end
+
 function _rk_positive_literal(x::Number, response::Symbol, what::String)
     prefix = "RK backend"
     value = Float64(x)
@@ -420,7 +510,7 @@ function _rk_classify_response(rhs::ExprColumn, predictor::Symbol,
         scale = _rk_scale_argument(args[2], parameters, assignments, consts,
             aliases, response)
         triple = (:gaussian, predictor_link, predictor_link)
-        triple in _RK_SLICE1_TRIPLES || error(
+        triple in _RK_ADMITTED_TRIPLES || error(
             "$prefix: response `$response` pairs `Normal` with a " *
             "$predictor_link-link predictor; slice 1 admits " *
             "$_RK_ADMITTED_SPELLINGS")
@@ -444,13 +534,21 @@ function _rk_classify_response(rhs::ExprColumn, predictor::Symbol,
             "$prefix: response `$response` `Bernoulli` needs one argument")
         arg = only(args)
         if _rk_is_predictor_ref(arg, predictor)
-            triple = (:bernoulli_logit, predictor_link, predictor_link)
-            triple in _RK_SLICE1_TRIPLES || error(
+            # The triple table is the admission key: plain `Bernoulli(p)`
+            # over a logit/probit/cloglog predictor (slice-2 group A adds
+            # the latter two). Identity stays closed — the identity
+            # spelling wraps `logistic` (stripped below).
+            for family in (:bernoulli_logit, :bernoulli_probit,
+                    :bernoulli_cloglog)
+                (family, predictor_link, predictor_link) in
+                    _RK_ADMITTED_TRIPLES || continue
+                return (family, predictor_link, nothing, nothing)
+            end
+            error(
                 "$prefix: response `$response` pairs plain `Bernoulli` with " *
                 "a $predictor_link-link predictor; write `BernoulliLogit` " *
                 "with an identity predictor or `Bernoulli(p)` with a " *
-                "`logit(p)` predictor")
-            return (:bernoulli_logit, predictor_link, nothing, nothing)
+                "`logit(p)`/`probit(p)`/`cloglog(p)` predictor")
         end
         isnothing(_rk_strip_logistic(arg, predictor)) || predictor_link === :identity || error(
             "$prefix: response `$response` applies `logistic` on top of a " *
@@ -469,7 +567,7 @@ function _rk_classify_response(rhs::ExprColumn, predictor::Symbol,
             "predictor `$predictor` itself; write `Poisson(mu)` with a " *
             "`log(mu)` predictor (slice 1 has no `Poisson(exp(..))` spelling)")
         triple = (:poisson_log, predictor_link, predictor_link)
-        triple in _RK_SLICE1_TRIPLES || error(
+        triple in _RK_ADMITTED_TRIPLES || error(
             "$prefix: response `$response` pairs `Poisson` with a " *
             "$predictor_link-link predictor; write `Poisson(mu)` with a " *
             "`log(mu)` predictor")
@@ -482,13 +580,19 @@ function _rk_classify_response(rhs::ExprColumn, predictor::Symbol,
             assignments, consts, aliases)
         arg = args[2]
         if _rk_is_predictor_ref(arg, predictor)
-            triple = (:binomial_logit, predictor_link, predictor_link)
-            triple in _RK_SLICE1_TRIPLES || error(
+            # Triple-table admission like `Bernoulli` above (slice-2
+            # group A adds probit/cloglog).
+            for family in (:binomial_logit, :binomial_probit,
+                    :binomial_cloglog)
+                (family, predictor_link, predictor_link) in
+                    _RK_ADMITTED_TRIPLES || continue
+                return (family, predictor_link, nothing, trials)
+            end
+            error(
                 "$prefix: response `$response` pairs `Binomial` with a " *
                 "$predictor_link-link predictor; write `Binomial(n, p)` " *
-                "with a `logit(p)` predictor or `Binomial(n, " *
-                "logistic(eta))` with an identity predictor")
-            return (:binomial_logit, predictor_link, nothing, trials)
+                "with a `logit(p)`/`probit(p)`/`cloglog(p)` predictor or " *
+                "`Binomial(n, logistic(eta))` with an identity predictor")
         end
         isnothing(_rk_strip_logistic(arg, predictor)) || predictor_link === :identity || error(
             "$prefix: response `$response` applies `logistic` on top of a " *
@@ -512,7 +616,7 @@ function _rk_classify_response(rhs::ExprColumn, predictor::Symbol,
         dispersion = _rk_scale_argument(args[2], parameters, assignments,
             consts, aliases, response, "dispersion")
         triple = (:nb2_log, predictor_link, predictor_link)
-        triple in _RK_SLICE1_TRIPLES || error(
+        triple in _RK_ADMITTED_TRIPLES || error(
             "$prefix: response `$response` pairs `NegativeBinomial2` with " *
             "a $predictor_link-link predictor; write " *
             "`NegativeBinomial2(mu, phi)` with a `log(mu)` predictor")
@@ -526,7 +630,7 @@ function _rk_classify_response(rhs::ExprColumn, predictor::Symbol,
         shape = _rk_gamma_shape_args(args, predictor, response, parameters,
             assignments, consts, aliases)
         triple = (:gamma_log, predictor_link, predictor_link)
-        triple in _RK_SLICE1_TRIPLES || error(
+        triple in _RK_ADMITTED_TRIPLES || error(
             "$prefix: response `$response` pairs `Gamma` with a " *
             "$predictor_link-link predictor; write `Gamma(alpha, " *
             "mu/alpha)` with a `log(mu)` predictor")
@@ -540,7 +644,7 @@ function _rk_classify_response(rhs::ExprColumn, predictor::Symbol,
             "$prefix: response `$response` location must be the linear " *
             "predictor `$predictor` itself")
         triple = (:ordered_logit, :logit, predictor_link)
-        triple in _RK_SLICE1_TRIPLES || error(
+        triple in _RK_ADMITTED_TRIPLES || error(
             "$prefix: response `$response` pairs `OrderedLogistic` with " *
             "a $predictor_link-link predictor; write `OrderedLogistic(eta)` " *
             "with an identity-link predictor")
@@ -561,7 +665,7 @@ function _rk_classify_response(rhs::ExprColumn, predictor::Symbol,
             "in `eta`; the estimated thresholds already supply the location. " *
             "Use `eta ~ 0 + ...`.")
         triple = (:ordinal, link, predictor_link)
-        triple in _RK_SLICE1_TRIPLES || error(
+        triple in _RK_ADMITTED_TRIPLES || error(
             "$prefix: response `$response` pairs `Ordinal` with a " *
             "$predictor_link-link predictor; write `Ordinal(structure, " *
             "link, eta)` with an identity-link predictor")
@@ -580,17 +684,27 @@ function _rk_classify_response(rhs::ExprColumn, predictor::Symbol,
         end
         for (owned, plink) in zip(preds, [predictor_link; extra_links...])
             triple = (:categorical_logit, :logit, plink)
-            triple in _RK_SLICE1_TRIPLES || error(
+            triple in _RK_ADMITTED_TRIPLES || error(
                 "$prefix: response `$response` pairs `CategoricalLogit` " *
                 "with a $plink-link predictor `$owned`; write identity-link " *
                 "predictors (`eta_j ~ ...`)")
         end
         return (:categorical_logit, :logit, nothing, nothing)
+    elseif head === Beta
+        concentration = _rk_beta_shape_args(args, predictor, response,
+            parameters, assignments, consts, aliases)
+        triple = (:beta_logit, predictor_link, predictor_link)
+        triple in _RK_ADMITTED_TRIPLES || error(
+            "$prefix: response `$response` pairs `Beta` with a " *
+            "$predictor_link-link predictor; write `Beta(mu*kappa, " *
+            "(1-mu)*kappa)` with a `logit(mu)` predictor (slice 2 " *
+            "admits a logit mu link only)")
+        return (:beta_logit, predictor_link, concentration, nothing)
     end
     head_name = head isa Function ? nameof(head) :
         head isa Type ? nameof(head) : string(head)
-    error("$prefix: response `$response` family `$head_name` is out of " *
-          "slice 1; admitted spellings: $_RK_ADMITTED_SPELLINGS")
+    error("$prefix: response `$response` family `$head_name` is not " *
+          "admitted; admitted spellings: $_RK_ADMITTED_SPELLINGS")
 end
 
 function _rk_evidence_bound(bound, data::AbstractDict, response::Symbol,
@@ -2543,12 +2657,19 @@ function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
         (eltype(values) <: Integer &&
          all(x -> x == 0 || x == 1, values)) || error(
             "$prefix: response `$response` must be Bool or 0/1 integers")
+    elseif family === :bernoulli_probit || family === :bernoulli_cloglog
+        (eltype(values) <: Integer &&
+         all(x -> x == 0 || x == 1, values)) || error(
+            "$prefix: response `$response` must be Bool or 0/1 integers")
     elseif family === :poisson_log
         (eltype(values) <: Integer && all(>=(0), values)) || error(
             "$prefix: response `$response` must hold non-negative integers")
     elseif family === :binomial_logit
         # Rowwise y <= n is checked once trials cross (below): trials may
         # be a column or a literal, and neither is visible here.
+        (eltype(values) <: Integer && all(>=(0), values)) || error(
+            "$prefix: response `$response` must hold non-negative integers")
+    elseif family === :binomial_probit || family === :binomial_cloglog
         (eltype(values) <: Integer && all(>=(0), values)) || error(
             "$prefix: response `$response` must hold non-negative integers")
     elseif family === :nb2_log
@@ -2576,6 +2697,11 @@ function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
         (eltype(values) <: Integer && eltype(values) !== Bool) || error(
             "$prefix: response `$response` `OrderedLogistic` expects " *
             "integer outcome data, got $(eltype(values))")
+    elseif family === :beta_logit
+        # Mirrors the thin layer: strictly inside (0, 1).
+        (eltype(values) <: Real && all(x -> 0 < x < 1, values)) || error(
+            "$prefix: response `$response` must hold values strictly " *
+            "inside (0, 1)")
     end
     values
 end
@@ -2587,7 +2713,8 @@ function _rk_gate_trials_values!(specs::AbstractVector,
         columns::Dict{Symbol,AbstractVector}, n_obs::Int)
     prefix = "RK backend"
     for spec in specs
-        spec.family === :binomial_logit || continue
+        spec.family in (:binomial_logit, :binomial_probit,
+            :binomial_cloglog) || continue
         trials = spec.trials
         n = if trials isa Int
             fill(trials, n_obs)
@@ -3209,6 +3336,12 @@ function _brm_rk_plan(brmi::BRMI)
         weights = if isnothing(entry.weight_plan)
             nothing
         else
+            # Slice-2 families carry no weights (no driving case; the
+            # thin layer admits none on the new triples).
+            family in _RK_SLICE2_FAMILIES && error(
+                "$prefix: response `$(entry.key)` weights are out of " *
+                "slice 2 for family `$family`; slice 2 admits weights " *
+                "on slice-1 families only")
             source = entry.weight_plan.source
             columns[source] = entry.weight_plan.values
             source

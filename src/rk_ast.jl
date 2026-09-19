@@ -138,6 +138,29 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
         # logistic.(p))` with a column or literal `n`.
         _rk_ast_dotted(:Binomial, response.trials,
             _rk_ast_dotted(:logistic, predictor))
+    elseif response.family === :bernoulli_probit
+        _rk_ast_dotted(:Bernoulli,
+            _rk_ast_dotted(:probit, predictor))
+    elseif response.family === :bernoulli_cloglog
+        _rk_ast_dotted(:Bernoulli,
+            _rk_ast_dotted(:cloglog, predictor))
+    elseif response.family === :binomial_probit
+        _rk_ast_dotted(:Binomial, response.trials,
+            _rk_ast_dotted(:probit, predictor))
+    elseif response.family === :binomial_cloglog
+        _rk_ast_dotted(:Binomial, response.trials,
+            _rk_ast_dotted(:cloglog, predictor))
+    elseif response.family === :beta_logit
+        # Mean-concentration form: the plan pins mu (the predictor
+        # itself) and kappa identical in both positions, so the same
+        # values emit twice. `probit`/`cloglog` are thin-layer link
+        # words (peel-and-discard, like `logistic`/`exp`); the AST
+        # never calls them.
+        mu_log = _rk_ast_dotted(:logistic, predictor)
+        kappa = response.scale
+        _rk_ast_dotted(:Beta,
+            Expr(:call, :.*, mu_log, kappa),
+            Expr(:call, :.*, Expr(:call, :.-, 1, mu_log), kappa))
     elseif response.family === :nb2_log
         _rk_ast_dotted(:NegativeBinomial2,
             _rk_ast_dotted(:exp, predictor), response.scale)
