@@ -683,6 +683,50 @@ end
             Expr(:., :Normal, Expr(:tuple, :mu, :s))))
 end
 
+@testset "dar AST shape" begin
+    # Own frame: `dar` needs a strictly increasing time axis.
+    tdf = (; t=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        y=[0.5, -0.2, 0.1, 0.9, 1.4, 1.1])
+    brmi = @brm tdf begin
+        mu ~ 1 + dar(t)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast == Expr(:block,
+        Expr(:call, :~, :mu_b1, Expr(:call, :Normal, 0.0, 1.0)),
+        Expr(:call, :~, :dar_mu_t_beta,
+            Expr(:call, :truncated,
+                Expr(:call, :Normal, 0.5, 0.2), 0, 1)),
+        Expr(:call, :~, :dar_mu_t_sigma,
+            Expr(:call, :HalfNormal, 0.2)),
+        Expr(:(=), :mu, Expr(:call, :.+,
+            :mu_b1, Expr(:call, :dar, :dar_mu_t_beta, :dar_mu_t_sigma))),
+        Expr(:call, :~, :s, Expr(:call, :Exponential, 1.0)),
+        Expr(:call, :.~, :y,
+            Expr(:., :Normal, Expr(:tuple, :mu, :s))))
+    # Both dar spellings match the parsed surface exactly.
+    @test rk_strip_lines(ast.args[2]) == rk_parsed_surface(
+        "dar_mu_t_beta ~ truncated(Normal(0.5, 0.2), 0, 1)")
+    affine = only([a for a in ast.args if a isa Expr && a.head === :(=) &&
+        a.args[1] === :mu])
+    @test rk_strip_lines(affine.args[2]) ==
+        rk_parsed_surface("mu_b1 .+ dar(dar_mu_t_beta, dar_mu_t_sigma)")
+    # Prior overrides ride the preamble statements.
+    brmi = @brm tdf begin
+        mu ~ 1 + dar(t)
+        ar(mu, dar(t)) ~ Normal(0.6, 0.1)
+        sd(mu, dar(t)) ~ Normal(0, 0.3)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast.args[2] == Expr(:call, :~, :dar_mu_t_beta,
+        Expr(:call, :truncated, Expr(:call, :Normal, 0.6, 0.1), 0, 1))
+    @test ast.args[3] == Expr(:call, :~, :dar_mu_t_sigma,
+        Expr(:call, :HalfNormal, 0.3))
+end
+
 @testset "exact gp AST shape" begin
     brmi = @brm df begin
         mu ~ 1 + gp(x)
