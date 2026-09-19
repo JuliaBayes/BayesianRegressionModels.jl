@@ -111,14 +111,31 @@ function _ref_lkj_k2_eta1(L)
     return c # + (2*1-2) * log(L[2, 2]) == c; L kept for the call shape
 end
 
-# K=2 spherical-Cholesky theta Jacobian: theta = pi*sigmoid(t).
+# K=2 spherical-Cholesky theta Jacobian: theta = pi*sigmoid(t). The
+# log-sin term is the correlation-matrix (Omega-pullback) volume
+# element the Stan-verbatim `lkj_corr_cholesky_logpdf` is a density
+# against (peer F1 fix `a5b810a`: the hyperspherical exponent dropped
+# it at K=2, and posterior parity vs SBBRMI failed on L until it was
+# restored). Without it theta is uniform / rho arcsine at eta=1;
+# with it rho is uniform.
 function _lkj2_theta_jac(t)
     s = 1 / (1 + exp(-t))
-    return log(pi) + log(s) + log1p(-s)
+    return log(sin(pi * s)) + log(pi) + log(s) + log1p(-s)
 end
 
 function _layout_signature(layout)
     return [(e.kind, e.name, e.size, e.transform) for e in layout.entries]
+end
+
+# SB `ar1_recurse` verbatim (`u[1] = eps[1]`,
+# `u[t] = phi*u[t-1] + eps[t]`), over the constrained innovations.
+function _ref_ar1_path(phi, eps)
+    u = Vector{Float64}(undef, length(eps))
+    u[1] = eps[1]
+    for t in 2:length(eps)
+        u[t] = phi * u[t-1] + eps[t]
+    end
+    return u
 end
 
 _parity_cols = (;
@@ -350,6 +367,46 @@ function _check_kernel_parity(backend::BRM.RKBRMI, u, val_oracle, grad_oracle;
     @test grad ≈ _findiff_grad(
         w -> LogDensityProblems.logdensity(problem, w), u) rtol = 1e-5 atol = 1e-7
     return value
+end
+
+@testset "rk parity ar(1) latent path" begin
+    ar_cols = (;
+        t=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        y=[0.5, -0.2, 0.1, 0.9, 1.4, 1.1],
+    )
+    brmi = @brm ar_cols begin
+        mu ~ 1 + ar(t; p=1)
+        y ~ Normal(mu, sigma)
+        effect(mu, Intercept) ~ Normal(0, 5)
+        sigma ~ Exponential(1)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 10
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 1, :identity),
+        (:sampled, :mu_b2, 1, :identity),
+        (:sampled, :phi_raw_ar_mu_t, 1, :identity),
+        (:sampled, :sigma, 1, :exp),
+        (:scan, :_ppl_scan_z_ar_mu_t, 6, :identity),
+    ]
+    u = collect(range(-0.4, 0.4; length = layout.total))
+    nt = constrain(layout, u)
+    phi = tanh(nt.phi_raw_ar_mu_t)
+    path = _ref_ar1_path(phi, nt._ppl_scan_z_ar_mu_t)
+    ll = sum(logpdf.(Normal.(nt.mu[1] .+ nt.mu_b2 .* path, nt.sigma),
+        ar_cols.y))
+    pr = logpdf(Normal(0, 5), nt.mu[1]) +
+        logpdf(Normal(0, 1), nt.mu_b2) +
+        logpdf(Normal(0, 1), nt.phi_raw_ar_mu_t) +
+        logpdf(Exponential(1), nt.sigma) +
+        sum(logpdf.(Normal(0, 1), nt._ppl_scan_z_ar_mu_t))
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # Jacobian: sigma's exp only (betas/innovations ride identity).
+    @test logjac(layout, u) ≈ u[4]
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[4]
+    _check_parity_gradient(backend, u)
 end
 
 @testset "rk parity kernel Ex1 pk1cmt" begin
