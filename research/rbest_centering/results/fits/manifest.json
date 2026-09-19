@@ -349,7 +349,28 @@
         "bytes": 1083,
         "sha256": "e9358caa9779ce3db9e30a3f6ea194968647dbb7f59b87063f3387249c34c33c"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/4e608ef53531806c.bin",
+        "bytes": 20971520,
+        "sha256": "ecd271e020bbcadf5a2022fee6d5d50cf28d34a0999e98eef2d7863d754da0e3"
+      },
+      {
+        "index": 1,
+        "path": "/home/niko/.local/state/kb-agents/uploads/6e82cf75e01a0fdc.bin",
+        "bytes": 20971520,
+        "sha256": "739b59dfbddff9284eb5c69d45c0ec55c3743dbc2d08c6d32b3c517500b5ed19"
+      },
+      {
+        "index": 2,
+        "path": "/home/niko/.local/state/kb-agents/uploads/eceef485cd05801f.bin",
+        "bytes": 12395522,
+        "sha256": "74f23d3c59e314f0d4a0f69fc23b5d28d1388b031b8ac4135950d5df5a29e756"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "rbest-matrix-crohn-v1.tar.gz",
@@ -701,7 +722,28 @@
         "bytes": 875,
         "sha256": "215fc21fcf12cbc2134dcc52823b9bc042899ee51d3d72032fa5153d13becfe0"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/24543f0f73e997d2.bin",
+        "bytes": 20971520,
+        "sha256": "1ef14ae95c21437483b610760f9bd07c7ee34ab7a19740da38cf7654310d0ac7"
+      },
+      {
+        "index": 1,
+        "path": "/home/niko/.local/state/kb-agents/uploads/2ed3e0d0038ee559.bin",
+        "bytes": 20971520,
+        "sha256": "5fdf0b44b6f306dacec94c2ca48619c4566e94161a55cea2c264f1b1fabe1ac7"
+      },
+      {
+        "index": 2,
+        "path": "/home/niko/.local/state/kb-agents/uploads/ac03ae1b765f2d43.bin",
+        "bytes": 950067,
+        "sha256": "7697a83c12b50f3a83bc3cf7d09422beb3783bbf0194debf7c5aebfdcdd91f7c"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "rbest-native-AS-v1-rbest_ncp.tar.gz",
@@ -748,7 +790,16 @@
         "bytes": 4863941,
         "sha256": "adffe814bc40e99bae29bd6f74e286087c1290f6d42942e56861bbb4c410c5f3"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/cc9932f4945fe59c.bin",
+        "bytes": 5007475,
+        "sha256": "cd385f4441c15acfb643c27d0b7d3dda8dc214ddc56712556a0b74d91a335213"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "rbest-native-AS-v1-rbest_cp.tar.gz",
@@ -795,7 +846,16 @@
         "bytes": 4879118,
         "sha256": "1a5f3e4239be77f7066db3093c86aaa289bfaeafa15c428a41b10bc2f84d2951"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/189310869b26e71b.bin",
+        "bytes": 4734830,
+        "sha256": "9be66f317d0b018441d6b9c420cd5082eedf109eeb37683199de497e49fe7dfe"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "rbest-native-AS-v1-stan_ncp.tar.gz",
@@ -842,7 +902,16 @@
         "bytes": 4852384,
         "sha256": "9ef062f65e5d0456d6b076f0f2b97ed6782e3b175ce3c4187ac1c5027ee072a3"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/b5b7913effea5ca4.bin",
+        "bytes": 4703773,
+        "sha256": "290977cd38390f5ade47edb59c1d11f56922b9f8355fe9db9dac694736685a97"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "rbest-native-AS-v1-stan_cp.tar.gz",
@@ -889,7 +958,16 @@
         "bytes": 4868507,
         "sha256": "a72f0f08ea9b914fdf75590295ee7e99e31f040c949231eb34b7dfb488d5156a"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/c81553cac2204601.bin",
+        "bytes": 4394087,
+        "sha256": "ca1a7970a65aaf0c9ff10cf76d5a42019a7d475f44563d3b0c860cb5fb110846"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "rbest-native-AS-v1-s2z_ncp.tar.gz",
@@ -936,7 +1014,16 @@
         "bytes": 4865797,
         "sha256": "5020fcab934f8fc30db890c02eb2e21d457cea77000817995d0fbab00394d717"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/85de5451d2bb0971.bin",
+        "bytes": 5004204,
+        "sha256": "357be41b8eb9cc8ec7014418b0bb2638e998ab5d0910d9b4df2cc737aecd70db"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "rbest-native-AS-v1-s2z_cp.tar.gz",
@@ -983,7 +1070,16 @@
         "bytes": 4872117,
         "sha256": "b2f336189760e19d54fd243aa3110af0aa2c8bf8bf9712a267a14df10a35c532"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/daaffa943427f7bb.bin",
+        "bytes": 4993397,
+        "sha256": "c96239f451f83640f132969954128e2693913f500e49711b8cd38a2c8897b6fc"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "rbest-native-crohn-v1-rbest_ncp.tar.gz",
@@ -1030,7 +1126,16 @@
         "bytes": 4112245,
         "sha256": "1acd472e4019664c69bc45da89786f58cc1d159b9c9f86f9a5f68dda831015f1"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/c39ade6d8d0524cd.bin",
+        "bytes": 4207047,
+        "sha256": "1c4444ae74049d71b46896413dc2d991d16797c118e6e173c57a017ffea13f8d"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "rbest-native-crohn-v1-rbest_cp.tar.gz",
@@ -1077,7 +1182,16 @@
         "bytes": 4134235,
         "sha256": "a82a5243c0d333b148c6eb27917e537eddfc54a8ab7049e559d8ab78753d7e2f"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/06138a1f83a70937.bin",
+        "bytes": 4201353,
+        "sha256": "ba719e7f02a88cfc5e59619956413a61c5a47e6d9a677525cbb1f493018afdda"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "rbest-native-crohn-v1-stan_ncp.tar.gz",
@@ -1124,7 +1238,16 @@
         "bytes": 4095292,
         "sha256": "58291d19577472891bd2fe72aab2854b51fc03c6c91a915308a161f420ffa2fd"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/e3b3564db04cd962.bin",
+        "bytes": 3973606,
+        "sha256": "1d86a863b578154ed2be9419d2c37f93921b9208e602829775e5d5c926c15b44"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "rbest-native-crohn-v1-stan_cp.tar.gz",
@@ -1171,7 +1294,16 @@
         "bytes": 4113573,
         "sha256": "851efcc7d95edc0c133e1209976360fa6a26d8b16f9416ae2bfbd4e66f2ec73f"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/e26420f055c6e8a3.bin",
+        "bytes": 3945641,
+        "sha256": "db4cb5e47cc2114e21e996932406330fe6eb0780f889b21fc83e0b7d86d482c1"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "rbest-native-crohn-v1-s2z_ncp.tar.gz",
@@ -1218,7 +1350,16 @@
         "bytes": 4101496,
         "sha256": "b33109bc59b97b123a7d9959e53c423e576a8e5a446b66c9321216c5c32f4307"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/691f5739b1344dcf.bin",
+        "bytes": 4192482,
+        "sha256": "49d7f12d15effb3e660d35dc6cc07c1c02a82b94d02d7bb31547f0ecf917664c"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "rbest-native-crohn-v1-s2z_cp.tar.gz",
@@ -1265,6 +1406,15 @@
         "bytes": 4106814,
         "sha256": "af7ff88539f6aa257a4c0938f137929ddb74506ad460f37e7f23c860407f6a13"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/a953d2bc5b876cf8.bin",
+        "bytes": 4160010,
+        "sha256": "6eff1d28a471d3fc2a0bce60780859c5978063ff15641d1ad16f6b30db99683d"
+      }
+    ],
+    "complete": true
   }
 ]
