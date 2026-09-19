@@ -256,9 +256,11 @@ function _rk_num_coefficients(plan::_RKStructuralPlan)
     total
 end
 
-Base.show(io::IO, x::RKBRMI) = print(io, "RKBRMI with ",
-    _rk_num_coefficients(x.plan), " population coefficients and ",
-    x.plan.n_obs, " observations")
+_rk_plan_summary(plan::_RKStructuralPlan) = string(
+    _rk_num_coefficients(plan), " population coefficients and ",
+    plan.n_obs, " observations")
+# `_rk_plan_summary(::_RKKernelPlan)` is defined with that type, below.
+Base.show(io::IO, x::RKBRMI) = print(io, "RKBRMI with ", _rk_plan_summary(x.plan))
 
 # Implemented only by the ReactiveKernels package extension. Keeping the
 # generic here lets the core validate and materialise plans without loading RK.
@@ -3397,6 +3399,283 @@ function _rk_gate_name_hygiene!(predictor_specs::AbstractVector,
     nothing
 end
 
+# Every `<result> ~ kernel(...)` operation in the BRMI, as `(result, rhs)` pairs.
+# The kernel RHS is an ExprColumn whose head is the `kernel` marker; its first
+# positional arg is the do-block cell (a verbatim `:->` lambda), the rest are the
+# per-subject positional args.
+function _rk_kernel_ops(brmi::BRMI)
+    ops = Tuple{Symbol,Any}[]
+    for (key, op_nc) in pairs(brmi.operations)
+        op_nc isa NamedColumn || continue
+        op = parent(op_nc)
+        op isa ExprColumn{typeof(~)} || continue
+        _, rhs = getargs(op, 2)
+        rhs isa ExprColumn && getf(rhs) === kernel || continue
+        push!(ops, (key, rhs))
+    end
+    ops
+end
+
+# Panel-mode kernel(...) structural extraction (Phase 1a). The cell body is
+# captured verbatim as a quoted `:->` lambda; RK does not trace SLIC (unlike
+# SBBRMI's plate), so we PARSE it here into a real cell scope: local assignments
+# feeding exactly one in-cell observation `<resp> ~ <Family>(...)`, plus the
+# collected per-subject result. `obs_dist` is the raw distribution Expr; family/
+# link/evidence classification is a later increment. v1 = panel mode (ranef-free,
+# mirroring `_sb_kernel_doblock!`'s no-random-effects branch): every positional
+# arg is a per-subject DATA column and the subject count is their common length;
+# linear-predictor args (grouped kernels) and `ragged(...)` are out of panel v1.
+struct _RKKernelSpec
+    result::Symbol
+    subject_count::Symbol            # bound-dims key for n subjects (kernel_nsub_<result>)
+    timepoint_count::Union{Nothing,Symbol} # bound-dims key for T (kernel_T_<result>), or nothing
+    n_timepoints::Union{Nothing,Int} # T = common inner length of vector slices (nothing if none)
+    slice_params::Vector{Symbol}     # cell do-block params, in order
+    data_columns::Vector{Symbol}     # per-subject data columns, parallel to params
+    slice_kinds::Vector{Symbol}      # :vector (flat T-blocked) | :scalar (per-subject), parallel
+    assignments::Vector{Pair{Symbol,Any}}  # cell-local name => raw cell Expr
+    obs_response::Symbol             # the sliced observation param
+    obs_dist::Any                    # raw distribution Expr (classified later)
+    collected::Any                   # final cell expression = per-subject result
+    n_subjects::Int
+end
+
+function _rk_kernel_spec(brmi::BRMI, result::Symbol, rhs)
+    prefix = "RK backend"
+    dcols = getargs(rhs)
+    (!isempty(dcols) && first(dcols) isa Expr && first(dcols).head === :->) || error(
+        "$prefix: kernel(...) `$result` is missing its inline do-block cell")
+    lam = first(dcols)
+    ptuple = lam.args[1]
+    params = ptuple isa Symbol ? Symbol[ptuple] :
+        (Meta.isexpr(ptuple, :tuple) && all(p -> p isa Symbol, ptuple.args) ?
+            Symbol[ptuple.args...] :
+            error("$prefix: kernel(...) `$result` cell params must be plain names"))
+    body = lam.args[2]
+    body_stmts = Meta.isexpr(body, :block) ?
+        Any[s for s in body.args if !(s isa LineNumberNode)] : Any[body]
+
+    posargs = collect(dcols[2:end])
+    length(posargs) == length(params) || error(
+        "$prefix: kernel(...) `$result` has $(length(params)) cell params but " *
+        "$(length(posargs)) positional args")
+    data_columns = Symbol[]
+    slice_kinds = Symbol[]
+    outer_lengths = Int[]
+    vector_ts = Tuple{Symbol,Int}[]
+    for c in posargs
+        if c isa ExprColumn && getf(c) === ragged
+            error("$prefix: kernel(...) `$result` uses `ragged(...)`; the RK " *
+                  "backend's ragged/grouped kernel is out of Phase-1 panel mode " *
+                  "(it needs the offsets representation and RK random effects). " *
+                  "Panel kernels take per-subject data columns only.")
+        end
+        c isa NamedColumn || error(
+            "$prefix: kernel(...) `$result` positional args must be per-subject " *
+            "data columns in panel mode; got $(typeof(c))")
+        parent(c) isa DataColumn || error(
+            "$prefix: kernel(...) `$result` arg `$(name(c))` is a linear " *
+            "predictor; RK panel mode (Phase 1, ranef-free) takes per-subject " *
+            "data columns only — grouped kernels need RK random effects")
+        col = parent(parent(c))
+        push!(data_columns, name(c))
+        push!(outer_lengths, length(col))
+        # A Vector-of-Vector column is a per-subject VECTOR slice (flat T-blocked
+        # at bind); a scalar-eltype column is a per-subject SCALAR slice. Vector
+        # slices must be uniform-T (varying = ragged = out of Phase-1).
+        if eltype(col) <: AbstractVector
+            push!(slice_kinds, :vector)
+            inner = unique(length(v) for v in col)
+            length(inner) == 1 || error(
+                "$prefix: kernel(...) `$result` per-subject vector column " *
+                "`$(name(c))` has varying timepoint counts $(sort(collect(inner)))" *
+                "; a ragged panel is out of Phase-1 (needs the offsets " *
+                "representation) — panel v1 requires equal-length per-subject vectors")
+            push!(vector_ts, (name(c), only(inner)))
+        else
+            push!(slice_kinds, :scalar)
+        end
+    end
+    isempty(outer_lengths) && error(
+        "$prefix: kernel(...) `$result` panel mode needs at least one " *
+        "per-subject data column to derive the subject count from")
+    length(unique(outer_lengths)) == 1 || error(
+        "$prefix: kernel(...) `$result` per-subject columns disagree on the " *
+        "subject count: $(collect(zip(data_columns, outer_lengths)))")
+    nsub = first(outer_lengths)
+    n_timepoints = if isempty(vector_ts)
+        nothing
+    else
+        ts = unique(last.(vector_ts))
+        length(ts) == 1 || error(
+            "$prefix: kernel(...) `$result` per-subject vector columns disagree " *
+            "on the timepoint count T: $(vector_ts)")
+        first(ts)
+    end
+
+    assignments = Pair{Symbol,Any}[]
+    obs = nothing
+    collected = nothing
+    for s in body_stmts
+        if Meta.isexpr(s, :(=)) && s.args[1] isa Symbol
+            push!(assignments, s.args[1] => s.args[2])
+            collected = s.args[1]
+        elseif Meta.isexpr(s, :call) && length(s.args) == 3 && s.args[1] === :~
+            isnothing(obs) || error(
+                "$prefix: kernel(...) `$result` cell has more than one `~` " *
+                "observation; Phase-1 panel mode admits exactly one")
+            obs = (response=s.args[2], dist=s.args[3])
+        else
+            collected = s
+        end
+    end
+    isnothing(obs) && error(
+        "$prefix: kernel(...) `$result` cell has no `~` observation; Phase-1 " *
+        "panel mode needs exactly one in-cell likelihood")
+    obs.response isa Symbol || error(
+        "$prefix: kernel(...) `$result` observation LHS must be a plain cell " *
+        "name; got $(obs.response)")
+    isnothing(collected) && error(
+        "$prefix: kernel(...) `$result` cell must end with a collected result " *
+        "expression (the per-subject value bound to `$result`)")
+
+    _RKKernelSpec(result, Symbol("kernel_nsub_", result),
+        isnothing(n_timepoints) ? nothing : Symbol("kernel_T_", result),
+        n_timepoints, params, data_columns, slice_kinds,
+        assignments, obs.response, obs.dist, collected, nsub)
+end
+
+# In-cell observation classification (Phase-1a: Gaussian only). The cell obs
+# `<resp> ~ <Family>(...)` is a raw quoted Expr in @brm likelihood vocabulary
+# (the markers SBBRMI refuses in-cell). v1 admits `Normal(location, scale)` — the
+# primary panel-PKPD residual — over the subject's timepoint vector; other
+# families and the evidence/weights wrappers are follow-ups (fail closed).
+struct _RKKernelObs
+    response::Symbol
+    family::Symbol
+    location::Any    # cell-scope name/expr (e.g. a cell assignment)
+    scale::Any       # cell-scope name or numeric literal
+end
+
+function _rk_classify_cell_obs(result::Symbol, response::Symbol, dist)
+    prefix = "RK backend"
+    (Meta.isexpr(dist, :call) && dist.args[1] === :Normal &&
+        length(dist.args) == 3) || error(
+        "$prefix: kernel(...) `$result` in-cell observation `$response ~ ...` " *
+        "admits only `Normal(location, scale)` in Phase-1a; other families and " *
+        "the evidence/weights wrappers are follow-ups")
+    _RKKernelObs(response, :gaussian, dist.args[2], dist.args[3])
+end
+
+# Emit the panel kernel as an `@rkppl` subject-plate carrying a REAL cell
+# subgraph (NOT the thin layer's desugar-to-flat): local assignments feeding one
+# in-cell observation, then the collected per-subject result. The thin layer
+# lowers `plate(cols...; subjects=N) do slices... <cell> end` by mapping the cell
+# subgraph over N subjects (per-subject sliced HAVE ports; globals stay HAVE
+# ports visible in-cell; the vector observation reduces over the subject's
+# timepoints). Contract co-designed with peer `ReactiveKernels:brm`.
+function _rk_emit_kernel_ast(spec::_RKKernelSpec)
+    obs = _rk_classify_cell_obs(spec.result, spec.obs_response, spec.obs_dist)
+    cell = Any[]
+    for (nm, ex) in spec.assignments
+        push!(cell, Expr(:(=), nm, ex))
+    end
+    # The in-cell observation is a VECTOR obs over the subject's timepoints and
+    # MUST be emitted dotted (`yy .~ Normal.(mu, sigma)`): RK rejects a scalar `~`
+    # over vectors (explicit-dots ruling) and the thin-layer desugar never invents
+    # dots (peer `ReactiveKernels:brm` CellSpec scoping, 2026-09-19). One obs per
+    # cell, reduced in-cell.
+    push!(cell, Expr(:call, :.~, obs.response,
+        _rk_ast_dotted(:Normal, obs.location, obs.scale)))
+    push!(cell, spec.collected)
+    plate_call = Expr(:call, :plate,
+        Expr(:parameters, Expr(:kw, :subjects, spec.subject_count)),
+        spec.data_columns...)
+    Expr(:call, :~, spec.result,
+        Expr(:do, plate_call,
+            Expr(:->, Expr(:tuple, spec.slice_params...), Expr(:block, cell...))))
+end
+
+# A panel kernel model's plan. Deliberately a SEPARATE type from the GLM
+# `_RKStructuralPlan` (which stays untouched — no regression risk on the GLM
+# path): a panel kernel has no top-level observation (its likelihood is in the
+# cell), so it carries globals-as-`parameters` + `assignments` + the flattened
+# per-subject `columns` + the `_RKKernelSpec`. `columns` holds the thin-layer
+# bind layout: a `:vector` slice is a flat contiguous T-block (subject order),
+# a `:scalar` slice is length n_sub.
+struct _RKKernelPlan
+    kernel::_RKKernelSpec
+    obs::_RKKernelObs        # classified in-cell observation (family/loc/scale)
+    parameters::Vector{_RKSampledParameter}
+    assignments::Vector{_RKAssignmentSpec}
+    columns::Dict{Symbol,AbstractVector}
+end
+
+_rk_plan_summary(plan::_RKKernelPlan) = string(
+    plan.kernel.n_subjects, "-subject kernel plate and ",
+    length(plan.parameters), " parameters")
+
+function _brm_rk_kernel_plan(brmi::BRMI)
+    prefix = "RK backend"
+    kops = _rk_kernel_ops(brmi)
+    length(kops) == 1 || error(
+        "$prefix: RK panel mode admits exactly one kernel(...) per model; " *
+        "got $(length(kops))")
+    result, rhs = only(kops)
+    spec = _rk_kernel_spec(brmi, result, rhs)
+    # Classify the in-cell family up front (Gaussian v1); an unadmitted family
+    # fails at plan time, not only at emission. The plan carries the STRUCTURED
+    # obs so the thin-layer reader consumes (family, loc, scale) without parsing
+    # the raw Expr.
+    obs = _rk_classify_cell_obs(spec.result, spec.obs_response, spec.obs_dist)
+    # Globals (scalar params + top-level assignments) via the shared prepared-
+    # model path — verified to extract cleanly for a kernel model.
+    ctx = _brm_backend_context(brmi; retain_mm_sources=true)
+    program = _brm_prepare_program(brmi; context=ctx)
+    prepared = _brm_prepare_model(brmi; program,
+        additional_parameters=(), observation_overrides=Dict{Symbol,Any}())
+    roots = Set{Symbol}(p.name for p in prepared.parameters)
+    referenced = _brm_reachable_operations(program, roots)
+    kept = Tuple(node for node in prepared.assignments if node.name in referenced)
+    parameter_names = Set{Symbol}(p.name for p in prepared.parameters)
+    assignment_names = Set{Symbol}(a.name for a in kept)
+    consts, aliases, exprs = _rk_fold_assignment_consts!(
+        kept, ctx.data, parameter_names)
+    parameters = _rk_plan_parameters!(prepared, ctx.data, consts, aliases,
+        parameter_names, assignment_names)
+    assignments = _rk_plan_assignments!(kept, exprs, ctx.data, consts, aliases,
+        parameter_names, assignment_names)
+    _rk_gate_acyclic!(parameters, assignments)
+    # Flatten per-subject columns to the bind layout: :vector -> flat contiguous
+    # T-block (subject order); :scalar -> length n_sub.
+    columns = Dict{Symbol,AbstractVector}()
+    posargs = collect(getargs(rhs)[2:end])
+    for (i, c) in enumerate(posargs)
+        col = parent(parent(c))
+        flat = spec.slice_kinds[i] === :vector ? reduce(vcat, col) : collect(col)
+        all(x -> x isa Real && isfinite(x), flat) || error(
+            "$prefix: kernel(...) `$result` column `$(spec.data_columns[i])` " *
+            "must be finite real values")
+        columns[spec.data_columns[i]] = flat
+    end
+    _RKKernelPlan(spec, obs, parameters, assignments, columns)
+end
+
+# Emit a panel kernel model: globals (sampled params + assignments) as top-level
+# `@rkppl` statements, then the subject-plate cell subgraph.
+function _rk_emit_ast(plan::_RKKernelPlan)
+    stmts = Expr[]
+    for parameter in plan.parameters
+        push!(stmts, _rk_ast_sampled(parameter))
+    end
+    for assignment in plan.assignments
+        push!(stmts, Expr(:(=), assignment.name,
+            _rk_lower_assignment_expr(assignment.expression, assignment.name)))
+    end
+    push!(stmts, _rk_emit_kernel_ast(plan.kernel))
+    Expr(:block, stmts...)
+end
+
 """
     _brm_rk_plan(brmi::BRMI)
 
@@ -3409,6 +3688,10 @@ boundary.
 """
 function _brm_rk_plan(brmi::BRMI)
     prefix = "RK backend"
+    # A kernel(...) model routes to the panel-kernel planner (which admits the
+    # ranef-free panel case and fails closed on the rest); it has no top-level
+    # observation, so it must not enter the GLM flow below.
+    isempty(_rk_kernel_ops(brmi)) || return _brm_rk_kernel_plan(brmi)
     observations = _brm_direct_observations(brmi; prefix)
     keys = Tuple(observation.key for observation in observations)
     length(unique(keys)) == length(keys) || error(
