@@ -679,6 +679,50 @@ end
         :z_gp)) in ast.args
 end
 
+@testset "hsgp AST shape" begin
+    brmi = @brm df begin
+        mu ~ 1 + hsgp(x; k=4)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast == Expr(:block,
+        Expr(:call, :~, :mu_b1, Expr(:call, :Normal, 0.0, 1.0)),
+        Expr(:call, :hsgp_basis,
+            Expr(:parameters, Expr(:kw, :k, 4), Expr(:kw, :c, 1.5),
+                Expr(:kw, :iso, true)),
+            QuoteNode(:hsgp_x), :x),
+        Expr(:(=), :mu, Expr(:call, :.+,
+            :mu_b1, Expr(:call, :hsgp, QuoteNode(:hsgp_x)))),
+        Expr(:call, :~, :s, Expr(:call, :Exponential, 1.0)),
+        Expr(:call, :.~, :y,
+            Expr(:., :Normal, Expr(:tuple, :mu, :s))))
+    # The declaration matches the parsed surface spelling exactly.
+    @test ast.args[2] ==
+        Meta.parse("hsgp_basis(:hsgp_x, x; k = 4, c = 1.5, iso = true)")
+    # Aniso multi-axis: tuple-`k`/`c` declaration + inline summand.
+    brmi = @brm df begin
+        mu ~ 1 + hsgp(x, z; k=(4, 3), c=(1.5, 2.0), iso=false)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast == Expr(:block,
+        Expr(:call, :~, :mu_b1, Expr(:call, :Normal, 0.0, 1.0)),
+        Expr(:call, :hsgp_basis,
+            Expr(:parameters, Expr(:kw, :k, Expr(:tuple, 4, 3)),
+                Expr(:kw, :c, Expr(:tuple, 1.5, 2.0)),
+                Expr(:kw, :iso, false)),
+            QuoteNode(:hsgp_x_z), :x, :z),
+        Expr(:(=), :mu, Expr(:call, :.+,
+            :mu_b1, Expr(:call, :hsgp, QuoteNode(:hsgp_x_z)))),
+        Expr(:call, :~, :s, Expr(:call, :Exponential, 1.0)),
+        Expr(:call, :.~, :y,
+            Expr(:., :Normal, Expr(:tuple, :mu, :s))))
+    @test ast.args[2] == Meta.parse("hsgp_basis(:hsgp_x_z, x, z; " *
+        "k = (4, 3), c = (1.5, 2.0), iso = false)")
+end
+
 @testset "distributional scale AST" begin
     brmi = @brm df begin
         mu ~ 1 + x
