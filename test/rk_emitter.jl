@@ -2379,10 +2379,13 @@ end
     @test length(plan.columns[:obs]) == 6
     @test length(plan.columns[:dose]) == 2
     @test plan.columns[:t] == [0.0, 1.0, 2.0, 0.0, 1.0, 2.0]   # flat T-blocked
-    # full AST: globals as top-level `~`, then the subject plate as the last stmt
-    ast = BRM._rk_emit_ast(plan)
-    @test Meta.isexpr(ast, :block)
-    stmts = filter(s -> !(s isa LineNumberNode), ast.args)
+    # full program: no submodel defs (a single plate carries no top-level
+    # repeated structure); globals as top-level `~`, then the subject
+    # plate as the last main-block stmt
+    prog = BRM._rk_emit_ast(plan)
+    @test prog isa BRM._RKEmittedProgram && isempty(prog.defs)
+    @test Meta.isexpr(prog.main, :block)
+    stmts = filter(s -> !(s isa LineNumberNode), prog.main.args)
     @test any(s -> Meta.isexpr(s, :call) && s.args[1] === :~ && s.args[2] === :sigma,
               stmts)
     @test any(s -> Meta.isexpr(s, :call) && s.args[1] === :~ && s.args[2] === :b0,
