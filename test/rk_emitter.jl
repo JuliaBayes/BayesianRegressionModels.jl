@@ -632,6 +632,13 @@ end
         sigma ~ Exponential(1)
         y ~ Normal(mu, sigma)
     end)
+    # Tensor-product smooths stay closed with `s(x)` (thin-layer spline
+    # contract pending): `t2(x, z)` must fail, not partially plan.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + t2(x, z)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end)
     # `&` interactions used to fail here; they are provisionally admitted
     # now (derived lowering, covered above). Monotonic effects stay closed.
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
