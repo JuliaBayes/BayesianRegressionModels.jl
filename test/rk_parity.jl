@@ -113,8 +113,11 @@ end
 
 # K=2 spherical-Cholesky theta Jacobian: theta = pi*sigmoid(t).
 function _lkj2_theta_jac(t)
+    # theta = pi*sigmoid(t); the (i-j) = 1 Gram exponent keeps one log-sin
+    # term (Omega volume element — peer fix a5b810a, RK 86e5265; the old
+    # (i-1-j) = 0 exponent dropped it, pinning the buggy Jacobian).
     s = 1 / (1 + exp(-t))
-    return log(pi) + log(s) + log1p(-s)
+    return log(sin(pi * s)) + log(pi) + log(s) + log1p(-s)
 end
 
 function _layout_signature(layout)
