@@ -9,8 +9,9 @@
 
 using Test
 using BayesianRegressionModels
-using Distributions: Bernoulli, Binomial, Categorical, Cauchy, Exponential,
-                     Gamma, Multinomial, Normal, Poisson, truncated
+using Distributions: Bernoulli, Binomial, Categorical, Cauchy, Dirichlet,
+                     Exponential, Gamma, Multinomial, Normal, Poisson,
+                     truncated
 using LogExpFunctions: logistic, logit
 using Statistics: mean
 
@@ -665,6 +666,57 @@ end
         effect(mu, :) ~ r2d2(R2=Normal(0.5, 0.2), tau_bsv=0.5)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
+    end)
+end
+
+@testset "fail closed: SB long tail (mo1/me/ar/dar, simplex/LKJ/joint)" begin
+    # Monotonic direct summand stays closed (`mo` is pinned above).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + mo1(c)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Measurement-error latent predictor stays closed.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + me(x, 0.5)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # AR(1) latent path stays closed.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + ar(x; p=1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Differenced-AR trajectory stays closed.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + dar(x; p=1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Simplex-valued parameter declaration stays closed.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        s ~ Dirichlet(3, 1.0)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end)
+    # LKJ covariance-factor declaration stays closed.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1))
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Joint correlated-outcome response stays closed.
+    dfj = (y1=[0.5, -0.2, 0.1, 0.9, 1.4, 1.1],
+           y2=[0.1, 0.3, -0.4, 0.2, 0.8, -0.1],
+           x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5])
+    @test_throws ErrorException BRM._brm_rk_plan(@brm dfj begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1))
+        [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
     end)
 end
 
