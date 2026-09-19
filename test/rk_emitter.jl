@@ -2304,4 +2304,19 @@ end
     end
     rresult, rrhs = only(BRM._rk_kernel_ops(rbrmi))
     @test_throws "varying timepoint counts" BRM._rk_kernel_spec(rbrmi, rresult, rrhs)
+
+    # bind dims for the extension: subjects key always, timepoint key only
+    # when vector slices name one (all-scalar plates omit it).
+    @test BRM._rk_kernel_bind_dims(spec) ==
+        Dict(:kernel_nsub_pred => 2, :kernel_T_pred => 3)
+    scalar_brmi = @brm (; dose=[10.0, 20.0], obs=[0.1, 0.2]) begin
+        pred ~ kernel(dose, obs) do dd, yy
+            mu = dd .* 0.1
+            yy ~ Normal(mu, 1.0)
+            mu
+        end
+    end
+    sresult, srhs = only(BRM._rk_kernel_ops(scalar_brmi))
+    scalar_spec = BRM._rk_kernel_spec(scalar_brmi, sresult, srhs)
+    @test BRM._rk_kernel_bind_dims(scalar_spec) == Dict(:kernel_nsub_pred => 2)
 end

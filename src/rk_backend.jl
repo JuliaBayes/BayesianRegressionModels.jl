@@ -3543,6 +3543,18 @@ struct _RKKernelSpec
     n_subjects::Int
 end
 
+# Plate dims the extension binds (`bind_data(..., dims)`): the subjects
+# key always, the timepoint key only when vector slices name one
+# (all-scalar plates leave both timepoint fields `nothing`).
+function _rk_kernel_bind_dims(kernel::_RKKernelSpec)
+    dims = Dict{Symbol,Int}()
+    dims[kernel.subject_count] = kernel.n_subjects
+    if kernel.timepoint_count !== nothing && kernel.n_timepoints !== nothing
+        dims[kernel.timepoint_count] = kernel.n_timepoints
+    end
+    dims
+end
+
 function _rk_kernel_spec(brmi::BRMI, result::Symbol, rhs)
     prefix = "RK backend"
     dcols = getargs(rhs)
