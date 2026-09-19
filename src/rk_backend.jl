@@ -1711,8 +1711,9 @@ end
 # Buckets mirror SB's draws path (`_sb_collect_id_buckets`,
 # `_sb_emit_id_buckets!`, `ranefcoefnames`): one shared non-centered block
 # per (id, group), sliced per target predictor. Plain `(x|g)` blocks are
-# degenerate single-slice buckets. Totals-matchable models emit draws too
-# (the totals fork may add a totals-collapse path later — additive).
+# degenerate single-slice buckets. Totals-matchable models emit draws too,
+# per decision 0yl36fh (draws-always, interim — the user notes RK-side
+# marginalization may supersede it later, which would be additive).
 
 _rk_ranef_suffix(id::Nothing, group::Symbol) = group
 _rk_ranef_suffix(id::Symbol, group::Symbol) = Symbol(id, :_, group)
