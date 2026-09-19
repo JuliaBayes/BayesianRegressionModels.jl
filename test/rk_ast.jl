@@ -627,6 +627,62 @@ end
         Meta.parse("spline_basis(:t2_x_z, x, z; k = (5, 5))")
 end
 
+@testset "monotonic AST shape" begin
+    brmi = @brm df begin
+        mu ~ 1 + mo(c)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast == Expr(:block,
+        Expr(:call, :~, :mu_b1, Expr(:call, :Normal, 0.0, 1.0)),
+        Expr(:call, :~, :mu_b2, Expr(:call, :Normal, 0.0, 1.0)),
+        Expr(:(=), :mu, Expr(:call, :.+,
+            :mu_b1, Expr(:call, :.*,
+                :mu_b2, Expr(:call, :mo, :c_idx, :mo_c_simplex_incr)))),
+        Expr(:call, :~, :s, Expr(:call, :Exponential, 1.0)),
+        Expr(:call, :~, :mo_c_simplex_incr,
+            Expr(:call, :Dirichlet, Expr(:vect, 1.0, 1.0, 1.0))),
+        Expr(:call, :.~, :y,
+            Expr(:., :Normal, Expr(:tuple, :mu, :s))))
+    # The summand matches the parsed surface spelling exactly.
+    affine = only([a for a in ast.args if a isa Expr && a.head === :(=) &&
+        a.args[1] === :mu])
+    @test rk_strip_lines(affine.args[2]) ==
+        rk_parsed_surface("mu_b1 .+ mu_b2 .* mo(c_idx, mo_c_simplex_incr)")
+    # `mo1(c)`: beta-free inline summand, no second coefficient.
+    brmi = @brm df begin
+        mu ~ 1 + mo1(c)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast == Expr(:block,
+        Expr(:call, :~, :mu_b1, Expr(:call, :Normal, 0.0, 1.0)),
+        Expr(:(=), :mu, Expr(:call, :.+,
+            :mu_b1, Expr(:call, :mo1, :c_idx, :mo1_c_simplex_incr))),
+        Expr(:call, :~, :s, Expr(:call, :Exponential, 1.0)),
+        Expr(:call, :~, :mo1_c_simplex_incr,
+            Expr(:call, :Dirichlet, Expr(:vect, 1.0, 1.0, 1.0))),
+        Expr(:call, :.~, :y,
+            Expr(:., :Normal, Expr(:tuple, :mu, :s))))
+    # Coefficient-free `mo1` predictor: the affine is the bare summand.
+    brmi = @brm df begin
+        mu ~ mo1(c)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast == Expr(:block,
+        Expr(:(=), :mu,
+            Expr(:call, :mo1, :c_idx, :mo1_c_simplex_incr)),
+        Expr(:call, :~, :s, Expr(:call, :Exponential, 1.0)),
+        Expr(:call, :~, :mo1_c_simplex_incr,
+            Expr(:call, :Dirichlet, Expr(:vect, 1.0, 1.0, 1.0))),
+        Expr(:call, :.~, :y,
+            Expr(:., :Normal, Expr(:tuple, :mu, :s))))
+end
+
 @testset "exact gp AST shape" begin
     brmi = @brm df begin
         mu ~ 1 + gp(x)

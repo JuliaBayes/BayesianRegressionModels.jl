@@ -74,7 +74,8 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # 86e5265 (2026-09-19, main): thin-layer scan-ar slice (non-centered
 # @scan lowering + ScanSummandTerm + tanh, peer todo 01x2742; the
 # surface BRM ar emission targets) on top of the KernelPlate reader +
-# ranef Stage-C floor (range also: me/mo slices, LKJ Jacobian fix).
+# ranef Stage-C floor (range also: ordinal-v12, me/mo slices incl. the
+# surface BRM mo/mo1 emission targets, LKJ Jacobian fix).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.

@@ -52,6 +52,16 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol})
             group = only(term.columns)
             push!(summands, id === nothing ? Expr(:call, :ranef, group) :
                 Expr(:call, :ranef, QuoteNode(id), group))
+        elseif term.kind === :monotonic
+            # Free-beta monotonic column: `b .* mo(idx, s)` is the only
+            # `mo()` shape the thin layer lowers.
+            push!(summands, Expr(:call, :.*, coefs[index],
+                Expr(:call, :mo, only(term.columns),
+                    term.options.increments)))
+        elseif term.kind === :monotonic_summand
+            # Beta-free direct summand, always inline like `spline(...)`.
+            push!(summands, Expr(:call, :mo1, only(term.columns),
+                term.options.increments))
         elseif term.kind === :offset
             push!(summands, only(term.columns))
         elseif term.kind === :spline
@@ -437,7 +447,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         for (index, term) in enumerate(predictor.terms)
             (term.kind === :offset || term.kind === :ranef_gather ||
                 term.kind === :spline || term.kind === :hsgp ||
-                term.kind === :gp) && continue
+                term.kind === :gp ||
+                term.kind === :monotonic_summand) && continue
             counter += 1
             coef = _rk_ast_coef_name(
                 string(predictor.name, "_b", counter), taken)

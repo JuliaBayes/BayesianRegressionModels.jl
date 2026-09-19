@@ -61,8 +61,9 @@ const PINS = [
     # gate) and the ranef Stage-C floor (LKJ-correlated buckets, SB
     # ranef_correlated_draws mirror) — the BRM-side ranef corpus
     # (test/rk_parity.jl) builds against it. The 50ef06e..86e5265 range
-    # also carries the me/mo thin-layer slices (peer todos 0b2gol2,
-    # 1d9d0cy) and the LKJ Cholesky log-Jacobian fix.
+    # also carries the ordinal-v12 slice, the me/mo thin-layer slices
+    # (peer todos 0b2gol2, 1d9d0cy; the surface BRM mo/mo1 emission
+    # targets), and the LKJ Cholesky log-Jacobian fix.
     ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "86e52656adf70c9c1981d9964cc7278066985f13"),  # main
 ]
 
