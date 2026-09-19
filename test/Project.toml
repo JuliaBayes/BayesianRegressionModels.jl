@@ -14,6 +14,9 @@ MutatingFunctions = "8a4c2d94-4b3b-4f9e-be63-a3c0cd816e3a"
 OutputSignatures = "86cfaae4-1704-4c69-ba62-d919d81ae5f8"
 PSIS = "ce719bf2-d5d0-4fb9-925d-10a81b42ad04"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+ReactiveKernels = "78e9f072-d36b-4c73-b7a3-751b0eb26cf9"
+ReactiveKernelsDistributionKernels = "4b169cd9-fc12-43fd-ba39-43e54ed8db7a"
+ReactiveKernelsPPL = "e266ea2a-6817-46cd-8bec-6238f0035f44"
 SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
 StanBlocks = "2e771a56-c23a-4e0b-9282-20c2e37157e9"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
@@ -65,3 +68,11 @@ url = "https://github.com/nsiccha/WarmupHMC.jl"
 # 7aed40b (2026-09-15): preserve the active physical position and reject
 # nonfinite centering transports; includes the retained-sampling gradient counter.
 rev = "7aed40b18bd4cdabb75330f285d5c9b355575ab9"
+
+[sources.ReactiveKernels]
+url = "https://github.com/nsiccha/ReactiveKernels.jl"
+# 1720295c (2026-09-19, main): thin-layer ranef Stage C — LKJ-correlated
+# bucket codegen + parity (SB ranef_correlated_draws mirror). The nested
+# ReactiveKernelsPPL / ReactiveKernelsDistributionKernels packages have no
+# standalone repos, so they stay develop-path-only via test/setup_env.jl.
+rev = "1720295c43c01c966314678a5658ccf6c538d022"

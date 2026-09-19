@@ -2,7 +2,7 @@
 #
 #     julia --project=test test/setup_env.jl
 #
-# The test env has six external UNREGISTERED dependencies plus the unregistered
+# The test env has seven external UNREGISTERED dependencies plus the unregistered
 # BRM root itself. Each external package is materialized at a specific GitHub
 # COMMIT under the ignored `test/.bootstrap/` cache; there is NO dependence on
 # any shared `~/github/nsiccha/<pkg>` checkout. A full-SHA revision is
@@ -10,7 +10,11 @@
 # `dev`/`devibe` branch rather than `main`; the commit only has to be pushed to
 # GitHub, which every pin below is.
 #
-# All seven paths enter ONE `Pkg.develop` call on EVERY Julia version we run.
+# ReactiveKernels contributes three developed paths from ONE pinned checkout
+# (the monorepo root plus the nested `ReactiveKernelsDistributionKernels` and
+# `ReactiveKernelsPPL` packages, which have no standalone repos).
+#
+# All ten paths enter ONE `Pkg.develop` call on EVERY Julia version we run.
 # On 1.11+ the `[sources]` blocks in `test/Project.toml` (which mirror these
 # revisions) would also resolve them; on **1.10, which is what this suite runs
 # on, `[sources]` is IGNORED**, so a bare `Pkg.resolve()` fails with
@@ -49,6 +53,11 @@ const PINS = [
     ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "9607eee6c7e839032f252b91d405007eea6a9021"),  # devibe (distribution HOFs accept a family call in the token position — snag hof-call-form-fa-b2bfce08 — BRM snag censored-in-kern-87b50f51; contains 3aba023a skew_double_exponential vector transpiler fix + stan_instantiate stale-path rewrite+warn)
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
+    # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
+    # through (ranef Stage C: LKJ-correlated buckets, SB ranef_correlated_draws
+    # mirror). Pinned to the peer handoff: joint Stage-C parity confirmed, and
+    # the BRM-side ranef corpus (test/rk_parity.jl) builds against it.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "1720295c43c01c966314678a5658ccf6c538d022"),  # main
 ]
 
 function main()
@@ -61,6 +70,13 @@ function main()
             origin=url,
         )
     end
+    # Nested monorepo packages develop from the pinned ReactiveKernels
+    # checkout (same revision, no separate pins).
+    rk_root = paths["ReactiveKernels"]
+    paths["ReactiveKernelsDistributionKernels"] =
+        joinpath(rk_root, "packages", "ReactiveKernelsDistributionKernels")
+    paths["ReactiveKernelsPPL"] =
+        joinpath(rk_root, "packages", "ReactiveKernelsPPL")
 
     Pkg.activate(TESTENV)
     Pkg.develop(PackageSpec[
