@@ -59,6 +59,8 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol})
             # assigned-then-used `spline(...)` closed (no gather alias).
             push!(summands,
                 Expr(:call, :spline, QuoteNode(term.options.id)))
+        elseif term.kind === :gp
+            push!(summands, term.options.f)
         end
     end
     length(summands) == 1 ? only(summands) :
@@ -115,6 +117,24 @@ function _rk_ast_factor_prior(coef::Symbol, col::Symbol,
         _rk_ast_dotted(:Normal, location, scale))
 end
 
+# Scale use-site: a scalar scale passes through; a distributional scale
+# predictor inverts its link exactly like a location predictor (`exp.` for
+# log) so the response always reads the constrained vector.
+function _rk_ast_scale_use(response::_RKLikelihoodSpec,
+        rename::Dict{Symbol,Symbol}, predictor_link::Dict{Symbol,Symbol})
+    name = response.scale_predictor
+    name === nothing && return response.scale
+    response.scale === nothing || error(
+        "RK backend: internal: response `$(response.response)` carries " *
+        "both a scalar scale and a scale predictor")
+    link = predictor_link[name]
+    use = get(rename, name, name)
+    link === :identity && return use
+    link === :log && return _rk_ast_dotted(:exp, use)
+    link === :logit && return _rk_ast_dotted(:logistic, use)
+    error("RK backend: internal: scale predictor `$name` has link `$link`")
+end
+
 # The inverse-link spelling (`Bernoulli.(logistic.(η))`,
 # `Poisson.(exp.(η))`, …) is what the `@rkppl` surface takes; the thin
 # layer recovers the link-native HAVE from it — the lowered
@@ -122,10 +142,11 @@ end
 # direct serializer produced, on all six slice-1 families (verified
 # behaviorally against `lower_rkppl`, not assumed).
 function _rk_ast_response_dist(response::_RKLikelihoodSpec,
-        rename::Dict{Symbol,Symbol})
+        rename::Dict{Symbol,Symbol}, predictor_link::Dict{Symbol,Symbol})
     predictor = get(rename, response.predictor, response.predictor)
     base = if response.family === :gaussian
-        _rk_ast_dotted(:Normal, predictor, response.scale)
+        _rk_ast_dotted(:Normal, predictor,
+            _rk_ast_scale_use(response, rename, predictor_link))
     elseif response.family === :bernoulli_logit
         # Triple 2 and triple 3 both lower to the T2 shape: the affine
         # value feeds logistic either way.
@@ -138,14 +159,39 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
         # logistic.(p))` with a column or literal `n`.
         _rk_ast_dotted(:Binomial, response.trials,
             _rk_ast_dotted(:logistic, predictor))
+    elseif response.family === :bernoulli_probit
+        _rk_ast_dotted(:Bernoulli,
+            _rk_ast_dotted(:probit, predictor))
+    elseif response.family === :bernoulli_cloglog
+        _rk_ast_dotted(:Bernoulli,
+            _rk_ast_dotted(:cloglog, predictor))
+    elseif response.family === :binomial_probit
+        _rk_ast_dotted(:Binomial, response.trials,
+            _rk_ast_dotted(:probit, predictor))
+    elseif response.family === :binomial_cloglog
+        _rk_ast_dotted(:Binomial, response.trials,
+            _rk_ast_dotted(:cloglog, predictor))
+    elseif response.family === :beta_logit
+        # Mean-concentration form: the plan pins mu (the predictor
+        # itself) and kappa identical in both positions, so the same
+        # values emit twice. `probit`/`cloglog` are thin-layer link
+        # words (peel-and-discard, like `logistic`/`exp`); the AST
+        # never calls them.
+        mu_log = _rk_ast_dotted(:logistic, predictor)
+        kappa = response.scale
+        _rk_ast_dotted(:Beta,
+            Expr(:call, :.*, mu_log, kappa),
+            Expr(:call, :.*, Expr(:call, :.-, 1, mu_log), kappa))
     elseif response.family === :nb2_log
         _rk_ast_dotted(:NegativeBinomial2,
-            _rk_ast_dotted(:exp, predictor), response.scale)
+            _rk_ast_dotted(:exp, predictor),
+            _rk_ast_scale_use(response, rename, predictor_link))
     elseif response.family === :gamma_log
         # Mean-shape form: the plan pins both alpha positions identical,
         # so the same value emits twice.
-        _rk_ast_dotted(:Gamma, response.scale, Expr(:call, :./,
-            _rk_ast_dotted(:exp, predictor), response.scale))
+        shape = _rk_ast_scale_use(response, rename, predictor_link)
+        _rk_ast_dotted(:Gamma, shape, Expr(:call, :./,
+            _rk_ast_dotted(:exp, predictor), shape))
     elseif response.family === :categorical_logit
         # Reference-coded: K−1 non-reference etas, class 1 the implicit
         # zero reference (class order follows predictor order).
@@ -244,6 +290,37 @@ function _rk_ast_vector_parameter(parameter::_RKVectorParameter)
         Expr(:call, :Dirichlet, Expr(:vect, alpha...)))
 end
 
+# A GP latent's `@plate` block: `z[i] ~ Normal(0, 1)` over the using
+# response's index (length `n_obs`, like every column). The macrocall
+# carries a synthetic line node; the surface reads only `args[3]`.
+function _rk_ast_plate(name::Symbol, range::Symbol)
+    cell = Expr(:call, :~,
+        Expr(:ref, name, :i), Expr(:call, :Normal, 0.0, 1.0))
+    loop = Expr(:for, Expr(:(=), :i, Expr(:call, :eachindex, range)),
+        Expr(:block, cell))
+    Expr(:macrocall, Symbol("@plate"), LineNumberNode(0), loop)
+end
+
+# `gp_chol_latent(gp_exp_quad_cov(x, sigma, rho, jitter), z)`: arg order
+# is (locations, sigma, rho, jitter) per the thin-layer contract.
+function _rk_ast_gp_latent(term)
+    options = term.options
+    Expr(:call, :gp_chol_latent,
+        Expr(:call, :gp_exp_quad_cov, only(term.columns),
+            options.sigma, options.rho, options.jitter),
+        options.z)
+end
+
+function _rk_ast_gp_names(plan::_RKStructuralPlan)
+    names = Set{Symbol}()
+    for predictor in plan.predictors, term in predictor.terms
+        term.kind === :gp || continue
+        options = term.options
+        push!(names, options.rho, options.sigma, options.z, options.f)
+    end
+    names
+end
+
 function _rk_emit_ast(plan::_RKStructuralPlan)
     taken = union(Set(keys(plan.columns)),
         Set(p.name for p in plan.parameters),
@@ -251,7 +328,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         Set(p.name for p in plan.predictors),
         Set(d.name for d in plan.derived),
         Set(v.name for v in plan.vector_parameters),
-        _rk_ast_spline_ids(plan))
+        _rk_ast_spline_ids(plan),
+        _rk_ast_gp_names(plan))
     # A predictor sharing its name with a data column cannot keep it:
     # the program has one namespace, so the affine (definition and
     # response uses) is alpha-renamed. Unreachable via `@brm`
@@ -269,6 +347,11 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
     end
     priors = Dict((p.predictor, p.addressee) => (p.location, p.scale)
         for p in plan.population_priors)
+    response_for = Dict{Symbol,Symbol}()
+    for response in plan.responses
+        haskey(response_for, response.predictor) ||
+            (response_for[response.predictor] = response.response)
+    end
     stmts = Expr[]
     for derived in plan.derived
         push!(stmts, Expr(:(=), derived.name, derived.expression))
@@ -278,7 +361,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         counter = 0
         for (index, term) in enumerate(predictor.terms)
             (term.kind === :offset || term.kind === :ranef_gather ||
-                term.kind === :spline) && continue
+                term.kind === :spline || term.kind === :gp) && continue
             counter += 1
             coef = _rk_ast_coef_name(
                 string(predictor.name, "_b", counter), taken)
@@ -302,6 +385,18 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
             term.kind === :spline || continue
             push!(stmts, _rk_ast_spline_basis(term))
         end
+        for term in predictor.terms
+            term.kind === :gp || continue
+            options = term.options
+            push!(stmts, _rk_ast_sampled(options.rho_param))
+            push!(stmts, _rk_ast_sampled(options.sigma_param))
+            response = get(response_for, predictor.name, nothing)
+            isnothing(response) && error(
+                "RK backend: internal: gp predictor `$(predictor.name)` " *
+                "feeds no response")
+            push!(stmts, _rk_ast_plate(options.z, response))
+            push!(stmts, Expr(:(=), options.f, _rk_ast_gp_latent(term)))
+        end
         push!(stmts, Expr(:(=), get(rename, predictor.name, predictor.name),
             _rk_ast_affine(predictor, coefs)))
     end
@@ -319,9 +414,11 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         push!(stmts, Expr(:(=), assignment.name,
             _rk_lower_assignment_expr(assignment.expression, assignment.name)))
     end
+    predictor_link = Dict(spec.name => spec.link for spec in plan.predictors)
     for response in plan.responses
         push!(stmts, Expr(:call, :.~,
-            response.response, _rk_ast_response_dist(response, rename)))
+            response.response,
+            _rk_ast_response_dist(response, rename, predictor_link)))
     end
     Expr(:block, stmts...)
 end

@@ -10,7 +10,7 @@
 
 using Test
 using BayesianRegressionModels
-using Distributions: Bernoulli, Binomial, Categorical, Dirichlet,
+using Distributions: Bernoulli, Beta, Binomial, Categorical, Dirichlet,
                      Exponential, Gamma, Multinomial, Normal, Poisson,
                      truncated
 using LogExpFunctions: logistic, logit
@@ -30,6 +30,10 @@ df = (;
     h=[1, 2, 1, 2, 1, 2],
     obs=[3 1 1; 2 2 1; 0 0 5; 1 2 2; 4 0 1; 2 1 2],
 )
+
+probit(p) = quantile(Normal(), p)
+cloglog(p) = log(-log1p(-p))
+dfp = merge(df, (; prop=[0.2, 0.7, 0.4, 0.6, 0.3, 0.8]))
 
 @testset "gaussian AST exact shape" begin
     brmi = @brm df begin
@@ -104,6 +108,36 @@ end
     @test ast.args[end] == Expr(:call, :.~,
         :z, Expr(:., :Gamma, Expr(:tuple, :alpha,
             Expr(:call, :./, Expr(:., :exp, Expr(:tuple, :mu)), :alpha))))
+end
+
+@testset "slice-2 group-A AST shapes" begin
+    brmi = @brm df begin
+        probit(p) ~ 1 + x
+        b ~ Bernoulli(p)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast.args[end] == Expr(:call, :.~,
+        :b, Expr(:., :Bernoulli, Expr(:tuple,
+            Expr(:., :probit, Expr(:tuple, :p)))))
+    brmi = @brm df begin
+        cloglog(p) ~ 1 + x
+        b ~ Binomial(h, p)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast.args[end] == Expr(:call, :.~,
+        :b, Expr(:., :Binomial, Expr(:tuple, :h,
+            Expr(:., :cloglog, Expr(:tuple, :p)))))
+    brmi = @brm dfp begin
+        logit(mu) ~ 1 + x
+        kappa ~ Gamma(2.0, 1000.0)
+        prop ~ Beta(mu * kappa, (1 - mu) * kappa)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    mu_log = Expr(:., :logistic, Expr(:tuple, :mu))
+    @test ast.args[end] == Expr(:call, :.~,
+        :prop, Expr(:., :Beta, Expr(:tuple,
+            Expr(:call, :.*, mu_log, :kappa),
+            Expr(:call, :.*, Expr(:call, :.-, 1, mu_log), :kappa))))
 end
 
 @testset "evidence and weights shapes" begin
@@ -338,8 +372,8 @@ end
     # keeps `n` — definition and data reference coexist.
     plan = BRM._RKStructuralPlan(
         [BRM._RKLikelihoodSpec(:gaussian, :identity, :y, :n, :s, nothing,
-            BRM._RKResponseEvidence(:none, nothing, nothing), :y, nothing,
-            nothing, nothing, Symbol[], Symbol[], nothing, nothing,
+            nothing, BRM._RKResponseEvidence(:none, nothing, nothing), :y,
+            nothing, nothing, nothing, Symbol[], Symbol[], nothing, nothing,
             Symbol[], nothing)],
         [BRM._RKPredictorSpec(:n, :identity, BRM._RKTermSpec[
             BRM._RKTermSpec(:intercept, Symbol[], (;), :Intercept, :Intercept),
@@ -590,4 +624,110 @@ end
             Expr(:., :Normal, Expr(:tuple, :mu, :sigma))))
     @test ast.args[2] ==
         Meta.parse("spline_basis(:t2_x_z, x, z; k = (5, 5))")
+end
+
+@testset "exact gp AST shape" begin
+    brmi = @brm df begin
+        mu ~ 1 + gp(x)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    plate = Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
+        Expr(:for, Expr(:(=), :i, Expr(:call, :eachindex, :y)),
+            Expr(:block, Expr(:call, :~,
+                Expr(:ref, :z_gp, :i),
+                Expr(:call, :Normal, 0.0, 1.0)))))
+    @test ast == Expr(:block,
+        Expr(:call, :~, :mu_b1, Expr(:call, :Normal, 0.0, 1.0)),
+        Expr(:call, :~, :rho_gp, Expr(:call, :LogNormal, 0.0, 1.0)),
+        Expr(:call, :~, :sigma_gp, Expr(:call, :LogNormal, 0.0, 1.0)),
+        plate,
+        Expr(:(=), :f_gp, Expr(:call, :gp_chol_latent,
+            Expr(:call, :gp_exp_quad_cov, :x, :sigma_gp, :rho_gp, 1e-9),
+            :z_gp)),
+        Expr(:(=), :mu, Expr(:call, :.+, :mu_b1, :f_gp)),
+        Expr(:call, :~, :s, Expr(:call, :Exponential, 1.0)),
+        Expr(:call, :.~, :y,
+            Expr(:., :Normal, Expr(:tuple, :mu, :s))))
+    # Hyper overrides ride the preamble with their families.
+    brmi = @brm df begin
+        mu ~ 1 + gp(x)
+        length_scale(:, gp(x)) ~ Gamma(2, 1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test Expr(:call, :~, :rho_gp, Expr(:call, :Gamma, 2.0, 1.0)) in ast.args
+    # Overlap alpha-renames the affine; the GP preamble is unaffected.
+    # (Overlap is unconstructible from formulas — a data-named LHS
+    # classifies as an observation — so force it by plan surgery.)
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + gp(x)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    plan.columns[:mu] = plan.columns[:y]
+    ast = BRM._rk_emit_ast(plan)
+    @test Expr(:(=), :mu_,
+        Expr(:call, :.+, :mu_b1, :f_gp)) in ast.args
+    @test Expr(:call, :.~, :y,
+        Expr(:., :Normal, Expr(:tuple, :mu_, :s))) in ast.args
+    @test Expr(:(=), :f_gp, Expr(:call, :gp_chol_latent,
+        Expr(:call, :gp_exp_quad_cov, :x, :sigma_gp, :rho_gp, 1e-9),
+        :z_gp)) in ast.args
+end
+
+@testset "distributional scale AST" begin
+    brmi = @brm df begin
+        mu ~ 1 + x
+        log(sigma) ~ 1 + z
+        y ~ Normal(mu, sigma)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast == Expr(:block,
+        Expr(:call, :~, :mu_b1, Expr(:call, :Normal, 0.0, 1.0)),
+        Expr(:call, :~, :mu_b2, Expr(:call, :Normal, 0.0, 1.0)),
+        Expr(:(=), :mu, Expr(:call, :.+,
+            :mu_b1, Expr(:call, :.*, :mu_b2, :x))),
+        Expr(:call, :~, :sigma_b1, Expr(:call, :Normal, 0.0, 1.0)),
+        Expr(:call, :~, :sigma_b2, Expr(:call, :Normal, 0.0, 1.0)),
+        Expr(:(=), :sigma, Expr(:call, :.+,
+            :sigma_b1, Expr(:call, :.*, :sigma_b2, :z))),
+        Expr(:call, :.~, :y,
+            Expr(:., :Normal, Expr(:tuple, :mu,
+                Expr(:., :exp, Expr(:tuple, :sigma))))))
+    # Identity-link scale reads the affine bare.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        sigma ~ 1 + z
+        y ~ Normal(mu, sigma)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast.args[end] == Expr(:call, :.~, :y,
+        Expr(:., :Normal, Expr(:tuple, :mu, :sigma)))
+    # NB2 dispersion as a predictor.
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        log(phi) ~ 1 + z
+        c ~ NegativeBinomial2(mu, phi)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast.args[end] == Expr(:call, :.~, :c,
+        Expr(:., :NegativeBinomial2, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :mu)),
+            Expr(:., :exp, Expr(:tuple, :phi)))))
+    # Gamma shape inverts at both use positions.
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        log(alpha) ~ 1 + x
+        z ~ Gamma(alpha, mu / alpha)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast.args[end] == Expr(:call, :.~, :z,
+        Expr(:., :Gamma, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :alpha)),
+            Expr(:call, :./,
+                Expr(:., :exp, Expr(:tuple, :mu)),
+                Expr(:., :exp, Expr(:tuple, :alpha))))))
 end
