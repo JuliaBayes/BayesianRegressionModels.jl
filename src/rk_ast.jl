@@ -54,10 +54,36 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol})
                 Expr(:call, :ranef, QuoteNode(id), group))
         elseif term.kind === :offset
             push!(summands, only(term.columns))
+        elseif term.kind === :spline
+            # Direct summand, always inline: the thin layer fails an
+            # assigned-then-used `spline(...)` closed (no gather alias).
+            push!(summands,
+                Expr(:call, :spline, QuoteNode(term.options.id)))
         end
     end
     length(summands) == 1 ? only(summands) :
         Expr(:call, :.+, summands...)
+end
+
+# A spline declaration: `spline_basis(:id, axes...; k=k)` — kind is
+# inferred thin-layer-side from the axis count (1 → `:tps`, 2 → `:t2`),
+# so BRM states only the literal `k` (`Int` for `s`, `(Int, Int)` for
+# `t2`). Shape-verified against `Meta.parse` of the surface spelling.
+function _rk_ast_spline_basis(term)
+    options = term.options
+    kval = options.k isa Tuple ? Expr(:tuple, options.k...) : options.k
+    Expr(:call, :spline_basis,
+        Expr(:parameters, Expr(:kw, :k, kval)),
+        QuoteNode(options.id), term.columns...)
+end
+
+function _rk_ast_spline_ids(plan::_RKStructuralPlan)
+    ids = Set{Symbol}()
+    for predictor in plan.predictors, term in predictor.terms
+        term.kind === :spline || continue
+        push!(ids, term.options.id)
+    end
+    ids
 end
 
 function _rk_ast_dotted(head::Symbol, args...)
@@ -120,6 +146,30 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
         # so the same value emits twice.
         _rk_ast_dotted(:Gamma, response.scale, Expr(:call, :./,
             _rk_ast_dotted(:exp, predictor), response.scale))
+    elseif response.family === :categorical_logit
+        # Reference-coded: K−1 non-reference etas, class 1 the implicit
+        # zero reference (class order follows predictor order).
+        extras = [get(rename, p, p) for p in response.extra_predictors]
+        _rk_ast_dotted(:CategoricalLogit, predictor, extras...)
+    elseif response.family === :ordered_logit
+        # Cutpoints are implicit surface-side (`y_cutpoints`).
+        _rk_ast_dotted(:OrderedLogistic, predictor)
+    elseif response.family === :ordinal
+        # Plain ordinal only: discrimination/per-threshold fail closed at
+        # plan (the surface spells three positionals only); thresholds
+        # are implicit surface-side (`y_thresholds`).
+        structure = response.ordinal_structure === :cumulative ?
+            :Cumulative : :StoppingRatio
+        linktag = response.link === :logit ? :LogitLink :
+            response.link === :probit ? :ProbitLink : :CloglogLink
+        _rk_ast_dotted(:Ordinal, Expr(:call, structure),
+            Expr(:call, linktag), predictor)
+    elseif response.family === :multinomial
+        # Lead count column (LHS) + trials + simplex + tail count columns.
+        _rk_ast_dotted(:Multinomial, response.trials, predictor,
+            response.count_columns...)
+    elseif response.family === :categorical
+        _rk_ast_dotted(:Categorical, predictor)
     end
     evidence = response.evidence
     # Missing sides emit as ∓Inf floats; the thin layer normalizes them
@@ -184,12 +234,24 @@ function _rk_ast_sampled(parameter::_RKSampledParameter)
     Expr(:call, :~, name, Expr(:call, family, parameter.args...))
 end
 
+# Simplex vector parameters emit as `s ~ Dirichlet([...])` (frozen
+# concentration vector); threshold vectors are implicit surface-side
+# (cutpoints/thresholds), so they emit nothing here.
+function _rk_ast_vector_parameter(parameter::_RKVectorParameter)
+    parameter.family === :simplex_dirichlet || return nothing
+    alpha = only(parameter.args)
+    Expr(:call, :~, parameter.name,
+        Expr(:call, :Dirichlet, Expr(:vect, alpha...)))
+end
+
 function _rk_emit_ast(plan::_RKStructuralPlan)
     taken = union(Set(keys(plan.columns)),
         Set(p.name for p in plan.parameters),
         Set(a.name for a in plan.assignments),
         Set(p.name for p in plan.predictors),
-        Set(d.name for d in plan.derived))
+        Set(d.name for d in plan.derived),
+        Set(v.name for v in plan.vector_parameters),
+        _rk_ast_spline_ids(plan))
     # A predictor sharing its name with a data column cannot keep it:
     # the program has one namespace, so the affine (definition and
     # response uses) is alpha-renamed. Unreachable via `@brm`
@@ -215,7 +277,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         coefs = Dict{Int,Symbol}()
         counter = 0
         for (index, term) in enumerate(predictor.terms)
-            (term.kind === :offset || term.kind === :ranef_gather) && continue
+            (term.kind === :offset || term.kind === :ranef_gather ||
+                term.kind === :spline) && continue
             counter += 1
             coef = _rk_ast_coef_name(
                 string(predictor.name, "_b", counter), taken)
@@ -235,6 +298,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
                     coef, Expr(:call, :Normal, location, scale)))
             end
         end
+        for term in predictor.terms
+            term.kind === :spline || continue
+            push!(stmts, _rk_ast_spline_basis(term))
+        end
         push!(stmts, Expr(:(=), get(rename, predictor.name, predictor.name),
             _rk_ast_affine(predictor, coefs)))
     end
@@ -243,6 +310,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
     end
     for parameter in plan.parameters
         push!(stmts, _rk_ast_sampled(parameter))
+    end
+    for vector_parameter in plan.vector_parameters
+        stmt = _rk_ast_vector_parameter(vector_parameter)
+        stmt === nothing || push!(stmts, stmt)
     end
     for assignment in plan.assignments
         push!(stmts, Expr(:(=), assignment.name,

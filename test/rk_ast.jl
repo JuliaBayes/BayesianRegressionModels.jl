@@ -10,7 +10,8 @@
 
 using Test
 using BayesianRegressionModels
-using Distributions: Bernoulli, Binomial, Exponential, Gamma, Normal, Poisson,
+using Distributions: Bernoulli, Binomial, Categorical, Dirichlet,
+                     Exponential, Gamma, Multinomial, Normal, Poisson,
                      truncated
 using LogExpFunctions: logistic, logit
 using Statistics: mean
@@ -27,6 +28,7 @@ df = (;
     c=[2, 1, 3, 2, 4, 3],
     gs=["a", "a", "b", "b", "c", "c"],
     h=[1, 2, 1, 2, 1, 2],
+    obs=[3 1 1; 2 2 1; 0 0 5; 1 2 2; 4 0 1; 2 1 2],
 )
 
 @testset "gaussian AST exact shape" begin
@@ -336,7 +338,9 @@ end
     # keeps `n` — definition and data reference coexist.
     plan = BRM._RKStructuralPlan(
         [BRM._RKLikelihoodSpec(:gaussian, :identity, :y, :n, :s, nothing,
-            BRM._RKResponseEvidence(:none, nothing, nothing), :y, nothing)],
+            BRM._RKResponseEvidence(:none, nothing, nothing), :y, nothing,
+            nothing, nothing, Symbol[], Symbol[], nothing, nothing,
+            Symbol[], nothing)],
         [BRM._RKPredictorSpec(:n, :identity, BRM._RKTermSpec[
             BRM._RKTermSpec(:intercept, Symbol[], (;), :Intercept, :Intercept),
             BRM._RKTermSpec(:continuous, [:n], (;), :n, :n)], :n)],
@@ -347,7 +351,8 @@ end
         BRM._RKDerivedSpec[],
         Dict{Symbol,AbstractVector}(:y => df.y, :n => df.n),
         6,
-        BRM._RKRanefBucket[])
+        BRM._RKRanefBucket[],
+        BRM._RKVectorParameter[])
     ast = BRM._rk_emit_ast(plan)
     @test ast == Expr(:block,
         Expr(:call, :~, :n_b1, Expr(:call, :Normal, 0.0, 1.0)),
@@ -473,4 +478,116 @@ end
     affine = only([a for a in ast.args if a isa Expr && a.head === :(=) &&
         a.args[1] === :mu_])
     @test Expr(:call, :ranef, QuoteNode(:ID), :g) in affine.args[2].args
+end
+
+@testset "leveled AST shapes" begin
+    # Reference-coded categorical over K−1 etas.
+    brmi = @brm df begin
+        eta1 ~ 1 + x
+        eta2 ~ 1 + x
+        eta3 ~ 1 + x
+        c ~ CategoricalLogit(eta1, eta2, eta3)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast.args[end] == Expr(:call, :.~,
+        :c, Expr(:., :CategoricalLogit, Expr(:tuple, :eta1, :eta2, :eta3)))
+    # Ordered-logit: cutpoints implicit (no cutpoint statement).
+    brmi = @brm df begin
+        eta ~ 1 + x
+        c ~ OrderedLogistic(eta)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast.args[end] == Expr(:call, :.~,
+        :c, Expr(:., :OrderedLogistic, Expr(:tuple, :eta)))
+    @test all(ast.args) do stmt
+        !(stmt isa Expr && stmt.head === :call && length(stmt.args) >= 2 &&
+            stmt.args[2] === :c_cutpoints)
+    end
+    # Plain typed ordinal with tag calls; thresholds implicit.
+    brmi = @brm df begin
+        eta ~ 0 + x
+        c ~ Ordinal(StoppingRatio(), ProbitLink(), eta)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast.args[end] == Expr(:call, :.~,
+        :c, Expr(:., :Ordinal, Expr(:tuple, Expr(:call, :StoppingRatio),
+            Expr(:call, :ProbitLink), :eta)))
+    # Ordinal extras fail closed at plan (the AST lowering spells
+    # `Ordinal.(structure, link, eta)` only — thin-layer surface gap).
+    extras = try
+        BRM._brm_rk_plan(@brm df begin
+            eta ~ 0 + x
+            c ~ Ordinal(StoppingRatio(), LogitLink(), eta;
+                discrimination=2.0, per_threshold=(z,))
+        end)
+        nothing
+    catch error
+        error
+    end
+    @test extras isa ErrorException
+    @test occursin("surface support", extras.msg)
+    # Shared-simplex multinomial + Dirichlet statement.
+    brmi = @brm df begin
+        s ~ Dirichlet(3, 1.0)
+        obs ~ Multinomial(5, s)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    stmts = ast.args
+    @test Expr(:call, :~, :s, Expr(:call, :Dirichlet,
+        Expr(:vect, 1.0, 1.0, 1.0))) in stmts
+    @test stmts[end] == Expr(:call, :.~,
+        :obs, Expr(:., :Multinomial, Expr(:tuple, 5, :s,
+            :obs_count_2, :obs_count_3)))
+    # Plain categorical over simplex probs.
+    brmi = @brm df begin
+        s ~ Dirichlet([2.0, 5.0])
+        b ~ Categorical(s)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast.args[end] == Expr(:call, :.~,
+        :b, Expr(:., :Categorical, Expr(:tuple, :s)))
+end
+
+@testset "spline AST shape" begin
+    # Own 12-row frame: `s(x)` needs 10 unique axis values.
+    xs = collect(range(-2.0, 2.0, length=12))
+    zs = collect(range(0.0, 3.0, length=12))
+    sdf = (; x=xs, z=zs, y=sin.(xs))
+    brmi = @brm sdf begin
+        mu ~ 1 + s(x)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast == Expr(:block,
+        Expr(:call, :~, :mu_b1, Expr(:call, :Normal, 0.0, 1.0)),
+        Expr(:call, :spline_basis,
+            Expr(:parameters, Expr(:kw, :k, 10)),
+            QuoteNode(:s_x), :x),
+        Expr(:(=), :mu, Expr(:call, :.+,
+            :mu_b1, Expr(:call, :spline, QuoteNode(:s_x)))),
+        Expr(:call, :~, :sigma, Expr(:call, :Exponential, 1.0)),
+        Expr(:call, :.~, :y,
+            Expr(:., :Normal, Expr(:tuple, :mu, :sigma))))
+    # The declaration matches the parsed surface spelling exactly.
+    @test ast.args[2] == Meta.parse("spline_basis(:s_x, x; k = 10)")
+    # `t2(x, z)`: tuple-`k` declaration + inline summand.
+    brmi = @brm sdf begin
+        mu ~ 1 + t2(x, z)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast == Expr(:block,
+        Expr(:call, :~, :mu_b1, Expr(:call, :Normal, 0.0, 1.0)),
+        Expr(:call, :spline_basis,
+            Expr(:parameters, Expr(:kw, :k, Expr(:tuple, 5, 5))),
+            QuoteNode(:t2_x_z), :x, :z),
+        Expr(:(=), :mu, Expr(:call, :.+,
+            :mu_b1, Expr(:call, :spline, QuoteNode(:t2_x_z)))),
+        Expr(:call, :~, :sigma, Expr(:call, :Exponential, 1.0)),
+        Expr(:call, :.~, :y,
+            Expr(:., :Normal, Expr(:tuple, :mu, :sigma))))
+    @test ast.args[2] ==
+        Meta.parse("spline_basis(:t2_x_z, x, z; k = (5, 5))")
 end
