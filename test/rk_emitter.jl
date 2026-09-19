@@ -1009,11 +1009,9 @@ end
         s ~ Exponential(1)
         y ~ weighted(Normal(mu, s), aweights(n))
     end)
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
-        mu ~ 1 + x
-        s ~ 1 + x
-        y ~ Normal(mu, s)
-    end)
+    # NOTE: `Normal(mu, s)` with `s ~ 1 + x` lived here until the
+    # distributional lift admitted a scale predictor; it now plans in
+    # "distributional scale/shape predictors".
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
         s ~ Exponential(1)
@@ -1277,6 +1275,90 @@ end
     cyclic_a = BRM._RKSampledParameter(:a, :Normal, (:b,), nothing, :a)
     cyclic_b = BRM._RKSampledParameter(:b, :Normal, (:a,), nothing, :b)
     @test_throws ErrorException BRM._rk_gate_acyclic!([cyclic_a, cyclic_b], [])
+end
+
+@testset "distributional scale/shape predictors" begin
+    # Log-link scale: the flagship `log(sigma) ~ ...` + bare `sigma` spelling.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        log(sigma) ~ 1 + z
+        y ~ Normal(mu, sigma)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    likelihood = only(plan.responses)
+    @test (likelihood.family, likelihood.link) === (:gaussian, :identity)
+    @test likelihood.predictor === :mu
+    @test isnothing(likelihood.scale)
+    @test likelihood.scale_predictor === :sigma
+    @test [p.name for p in plan.predictors] == [:mu, :sigma]
+    @test [p.link for p in plan.predictors] == [:identity, :log]
+    @test isempty(plan.parameters)
+    @test sort!([(p.predictor, p.addressee)
+                 for p in plan.population_priors]) ==
+        [(:mu, :Intercept), (:mu, :x), (:sigma, :Intercept), (:sigma, :z)]
+    sigma_spec = only(p for p in plan.predictors if p.name === :sigma)
+    @test [t.kind for t in sigma_spec.terms] == [:intercept, :continuous]
+
+    # Identity-link scale is admitted (SB emits it raw).
+    brmi = @brm df begin
+        mu ~ 1 + x
+        sigma ~ 1 + z
+        y ~ Normal(mu, sigma)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test isnothing(likelihood.scale)
+    @test likelihood.scale_predictor === :sigma
+
+    # NB2 dispersion as a linear predictor.
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        log(phi) ~ 1 + z
+        c ~ NegativeBinomial2(mu, phi)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:nb2_log, :log)
+    @test likelihood.predictor === :mu
+    @test isnothing(likelihood.scale)
+    @test likelihood.scale_predictor === :phi
+
+    # Gamma shape as a linear predictor (same predictor in both positions).
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        log(alpha) ~ 1 + x
+        z ~ Gamma(alpha, mu / alpha)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:gamma_log, :log)
+    @test likelihood.predictor === :mu
+    @test isnothing(likelihood.scale)
+    @test likelihood.scale_predictor === :alpha
+end
+
+@testset "distributional fail-closed" begin
+    # The scale slot naming the location is degenerate.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        y ~ Normal(mu, mu)
+    end)
+    # Deterministic wrappers spell as an LP link, not at the use-site.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        log_sigma ~ 1 + z
+        y ~ Normal(mu, exp(log_sigma))
+    end)
+    # A third predictor behind the two slots stays out.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + tau
+        log(sigma) ~ 1 + z
+        tau ~ 1 + x
+        y ~ Normal(mu, sigma)
+    end)
+    # Binomial trials cannot be a predictor.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        logit(p) ~ 1 + x
+        eta2 ~ 1 + z
+        b ~ Binomial(eta2, p)
+    end)
 end
 
 # Leveled emission (thin-layer contract 0178bfe2): categorical-logit,

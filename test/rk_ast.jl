@@ -372,8 +372,8 @@ end
     # keeps `n` — definition and data reference coexist.
     plan = BRM._RKStructuralPlan(
         [BRM._RKLikelihoodSpec(:gaussian, :identity, :y, :n, :s, nothing,
-            BRM._RKResponseEvidence(:none, nothing, nothing), :y, nothing,
-            nothing, nothing, Symbol[], Symbol[], nothing, nothing,
+            nothing, BRM._RKResponseEvidence(:none, nothing, nothing), :y,
+            nothing, nothing, nothing, Symbol[], Symbol[], nothing, nothing,
             Symbol[], nothing)],
         [BRM._RKPredictorSpec(:n, :identity, BRM._RKTermSpec[
             BRM._RKTermSpec(:intercept, Symbol[], (;), :Intercept, :Intercept),
@@ -676,4 +676,58 @@ end
     @test Expr(:(=), :f_gp, Expr(:call, :gp_chol_latent,
         Expr(:call, :gp_exp_quad_cov, :x, :sigma_gp, :rho_gp, 1e-9),
         :z_gp)) in ast.args
+end
+
+@testset "distributional scale AST" begin
+    brmi = @brm df begin
+        mu ~ 1 + x
+        log(sigma) ~ 1 + z
+        y ~ Normal(mu, sigma)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast == Expr(:block,
+        Expr(:call, :~, :mu_b1, Expr(:call, :Normal, 0.0, 1.0)),
+        Expr(:call, :~, :mu_b2, Expr(:call, :Normal, 0.0, 1.0)),
+        Expr(:(=), :mu, Expr(:call, :.+,
+            :mu_b1, Expr(:call, :.*, :mu_b2, :x))),
+        Expr(:call, :~, :sigma_b1, Expr(:call, :Normal, 0.0, 1.0)),
+        Expr(:call, :~, :sigma_b2, Expr(:call, :Normal, 0.0, 1.0)),
+        Expr(:(=), :sigma, Expr(:call, :.+,
+            :sigma_b1, Expr(:call, :.*, :sigma_b2, :z))),
+        Expr(:call, :.~, :y,
+            Expr(:., :Normal, Expr(:tuple, :mu,
+                Expr(:., :exp, Expr(:tuple, :sigma))))))
+    # Identity-link scale reads the affine bare.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        sigma ~ 1 + z
+        y ~ Normal(mu, sigma)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast.args[end] == Expr(:call, :.~, :y,
+        Expr(:., :Normal, Expr(:tuple, :mu, :sigma)))
+    # NB2 dispersion as a predictor.
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        log(phi) ~ 1 + z
+        c ~ NegativeBinomial2(mu, phi)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast.args[end] == Expr(:call, :.~, :c,
+        Expr(:., :NegativeBinomial2, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :mu)),
+            Expr(:., :exp, Expr(:tuple, :phi)))))
+    # Gamma shape inverts at both use positions.
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        log(alpha) ~ 1 + x
+        z ~ Gamma(alpha, mu / alpha)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast.args[end] == Expr(:call, :.~, :z,
+        Expr(:., :Gamma, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :alpha)),
+            Expr(:call, :./,
+                Expr(:., :exp, Expr(:tuple, :mu)),
+                Expr(:., :exp, Expr(:tuple, :alpha))))))
 end
