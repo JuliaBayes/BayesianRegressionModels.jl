@@ -10,7 +10,7 @@
 
 using Test
 using BayesianRegressionModels
-using Distributions: Bernoulli, Binomial, Categorical, Dirichlet,
+using Distributions: Bernoulli, Beta, Binomial, Categorical, Dirichlet,
                      Exponential, Gamma, Multinomial, Normal, Poisson,
                      truncated
 using LogExpFunctions: logistic, logit
@@ -30,6 +30,10 @@ df = (;
     h=[1, 2, 1, 2, 1, 2],
     obs=[3 1 1; 2 2 1; 0 0 5; 1 2 2; 4 0 1; 2 1 2],
 )
+
+probit(p) = quantile(Normal(), p)
+cloglog(p) = log(-log1p(-p))
+dfp = merge(df, (; prop=[0.2, 0.7, 0.4, 0.6, 0.3, 0.8]))
 
 @testset "gaussian AST exact shape" begin
     brmi = @brm df begin
@@ -104,6 +108,36 @@ end
     @test ast.args[end] == Expr(:call, :.~,
         :z, Expr(:., :Gamma, Expr(:tuple, :alpha,
             Expr(:call, :./, Expr(:., :exp, Expr(:tuple, :mu)), :alpha))))
+end
+
+@testset "slice-2 group-A AST shapes" begin
+    brmi = @brm df begin
+        probit(p) ~ 1 + x
+        b ~ Bernoulli(p)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast.args[end] == Expr(:call, :.~,
+        :b, Expr(:., :Bernoulli, Expr(:tuple,
+            Expr(:., :probit, Expr(:tuple, :p)))))
+    brmi = @brm df begin
+        cloglog(p) ~ 1 + x
+        b ~ Binomial(h, p)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test ast.args[end] == Expr(:call, :.~,
+        :b, Expr(:., :Binomial, Expr(:tuple, :h,
+            Expr(:., :cloglog, Expr(:tuple, :p)))))
+    brmi = @brm dfp begin
+        logit(mu) ~ 1 + x
+        kappa ~ Gamma(2.0, 1000.0)
+        prop ~ Beta(mu * kappa, (1 - mu) * kappa)
+    end
+    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    mu_log = Expr(:., :logistic, Expr(:tuple, :mu))
+    @test ast.args[end] == Expr(:call, :.~,
+        :prop, Expr(:., :Beta, Expr(:tuple,
+            Expr(:call, :.*, mu_log, :kappa),
+            Expr(:call, :.*, Expr(:call, :.-, 1, mu_log), :kappa))))
 end
 
 @testset "evidence and weights shapes" begin
