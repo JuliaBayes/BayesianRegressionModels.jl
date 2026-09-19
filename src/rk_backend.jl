@@ -129,7 +129,7 @@ end
 
 struct _RKTermSpec
     kind::Symbol # :intercept | :continuous | :factor | :offset |
-                # :ranef_gather | :spline | :gp
+                # :ranef_gather | :spline | :gp | :hsgp
     columns::Vector{Symbol}
     # factor: (coding=:fullrank, levels=:observed) over every observed level,
     # or (coding=:subset, drop::Int, levels=:observed) over every observed
@@ -2241,7 +2241,10 @@ end
 # declaration, and the basis fit stays in-graph host-side (user-GO'd
 # in-graph contract, decision `1cj6p76`). One id per smooth occurrence
 # (exactly-one-use linkage), minted below with numeric stems on collision.
-function _rk_mint_spline_id!(taken::Set{Symbol},
+# One smooth-id domain for every basis-declaring smooth (`s`/`t2`/`hsgp`):
+# ids must not collide with each other, user names (`taken`), or raw
+# columns — numeric stems on collision.
+function _rk_mint_smooth_id!(taken::Set{Symbol},
         columns::Dict{Symbol,AbstractVector}, base::String)
     name = Symbol(base)
     serial = 2
@@ -2291,7 +2294,7 @@ function _rk_plan_spline_term!(prepared::_BRMPreparedTerm{typeof(s)},
         columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol})
     axis = prepared.source
     _rk_plan_spline_axis!(axis, target, "s", data, columns)
-    id = _rk_mint_spline_id!(taken, columns, "s_" * string(axis))
+    id = _rk_mint_smooth_id!(taken, columns, "s_" * string(axis))
     _RKTermSpec(:spline, [axis],
         (; id, kind=:tps, k=prepared.state.fit.k), id, id)
 end
@@ -2303,7 +2306,7 @@ function _rk_plan_spline_term!(prepared::_BRMPreparedTerm{typeof(t2)},
     _rk_plan_spline_axis!(first_axis, target, "t2", data, columns)
     _rk_plan_spline_axis!(second_axis, target, "t2", data, columns)
     base = "t2_" * string(first_axis) * "_" * string(second_axis)
-    id = _rk_mint_spline_id!(taken, columns, base)
+    id = _rk_mint_smooth_id!(taken, columns, base)
     _RKTermSpec(:spline, [first_axis, second_axis],
         (; id, kind=:t2, k=prepared.state.fit.k), id, id)
 end
@@ -2411,6 +2414,79 @@ function _rk_plan_gp_term!(prepared::_BRMPreparedTerm{typeof(gp)},
         f, f)
 end
 
+# ---- HSGP smooth terms (mirrors `_sb_hsgp`/`_sb_hsgp_aniso`) ----
+#
+# A `:hsgp` term carries its thin-layer declaration in `options`:
+# `(; id, k, c, iso)` with `k`/`c` scalars (one axis) or per-axis
+# tuples (variadic axes), normalized from the prepared state's
+# per-axis tuples. The thin layer owns every parameter
+# (`beta_raw_<id>`, `rho_<id>`/`rho_<id>_1..d`, `sigma_<id>`) and
+# evaluates the basis in-graph from the raw axes: BRM ships the
+# recipe, never materialized `PHI`/`omega2` (user-GO'd in-graph
+# contract, decision `02e64eo`). One id per smooth occurrence
+# (exactly-one-use linkage), minted with numeric stems on collision.
+
+# `length_scale(...)`/`sd(...)` hyper overrides are sequenced: the
+# thin-layer hsgp surface is self-priored with `LogNormal(0, 1)`
+# defaults (the floor-zeroing override surface is a peer follow-up),
+# so BRM rejects them here with RK attribution instead of emitting a
+# default the formula did not ask for.
+function _rk_gate_hsgp_term_priors!(brmi::BRMI, target::Symbol,
+        hsgp_raw::AbstractVector)
+    prefix = "RK backend"
+    isempty(hsgp_raw) && return nothing
+    per_target = get(_brm_resolve_term_priors(brmi), target, Dict())
+    for t in hsgp_raw
+        key = _brm_prepared_term_key(t)
+        isempty(get(per_target, key, Dict())) || error(
+            "$prefix: predictor `$target` hyper priors on " *
+            "`$key` are out of slice 1 (the thin-layer hsgp surface " *
+            "is self-priored with LogNormal(0, 1) defaults; " *
+            "`length_scale(...)`/`sd(...)` overrides are sequenced)")
+    end
+    nothing
+end
+
+function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
+        target::Symbol, data::AbstractDict,
+        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol})
+    prefix = "RK backend"
+    state = prepared.state
+    state.latent && error(
+        "$prefix: predictor `$target` model-derived `hsgp(...)` axis " *
+        "is out of slice 1 (the thin-layer surface binds raw data " *
+        "columns; latent axes are sequenced)")
+    state.cov === :exp_quad || error(
+        "$prefix: predictor `$target` `hsgp(...; cov=$(repr(state.cov)))` " *
+        "is out of slice 1 (the thin-layer surface is exp_quad; " *
+        "periodic is sequenced)")
+    isnothing(state.by) || error(
+        "$prefix: predictor `$target` grouped `hsgp(...; by=...)` " *
+        "is out of slice 1 (the thin-layer surface is ungrouped; " *
+        "`by=` weights are sequenced)")
+    any(!iszero, state.centeredness) && error(
+        "$prefix: predictor `$target` partially-centered `hsgp(...)` " *
+        "is out of slice 1 (the thin-layer surface is non-centered; " *
+        "partial centering is sequenced)")
+    state.explicit_domain && error(
+        "$prefix: predictor `$target` `hsgp(...; domain=...)` " *
+        "is out of slice 1 (the thin-layer surface fits the boundary " *
+        "from raw columns; explicit domains are sequenced)")
+    state.orthogonal === nothing || error(
+        "$prefix: predictor `$target` `hsgp(...; orthogonal_to=:linear)` " *
+        "is out of slice 1 (the thin-layer surface takes the raw " *
+        "tensor-product basis; orthogonalization is sequenced)")
+    axes = Tuple(prepared.source)
+    for axis in axes
+        _rk_plan_spline_axis!(axis, target, "hsgp", data, columns)
+    end
+    base = "hsgp_" * join(string.(axes), "_")
+    id = _rk_mint_smooth_id!(taken, columns, base)
+    k = length(state.K) == 1 ? only(state.K) : state.K
+    c = length(state.c) == 1 ? only(state.c) : state.c
+    _RKTermSpec(:hsgp, collect(axes), (; id, k, c, iso=state.iso), id, id)
+end
+
 function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         available::Tuple, columns::Dict{Symbol,AbstractVector},
         derived::Vector{_RKDerivedSpec}, taken::Set{Symbol},
@@ -2425,16 +2501,20 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
     spline_raw = filter(t -> t isa ExprColumn &&
         (getf(t) === s || getf(t) === t2), structured)
     gp_raw = filter(t -> t isa ExprColumn && getf(t) === gp, structured)
+    hsgp_raw = filter(t -> t isa ExprColumn && getf(t) === hsgp, structured)
     other_structured = filter(
-        t -> !(t in spline_raw) && !(t in gp_raw), structured)
+        t -> !(t in spline_raw) && !(t in gp_raw) && !(t in hsgp_raw),
+        structured)
     isempty(other_structured) || error(
         "$prefix: predictor `$target` structured term(s) " *
         "$(join(unique!(string.(getf.(filter(t -> t isa ExprColumn, other_structured)))), ", ")) " *
         "are out of slice 1 (population GLMs only)")
     _rk_gate_spline_term_priors!(brmi, target, spline_raw)
+    _rk_gate_hsgp_term_priors!(brmi, target, hsgp_raw)
     grouped = filter(t -> _brm_is_grouped_term(t), raw_terms)
     ordinary = Tuple(t for t in raw_terms if !(t in structured) && !(t in grouped))
-    isempty(ordinary) && isempty(spline_raw) && isempty(gp_raw) && error(
+    isempty(ordinary) && isempty(spline_raw) && isempty(gp_raw) &&
+        isempty(hsgp_raw) && error(
         "$prefix: predictor `$target` has no terms")
     has_intercept = any(t -> t isa Integer && t == 1, ordinary)
     # Classify before building geometry: fail fast on unknown terms with RK
@@ -2468,6 +2548,7 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
     _rk_gate_cross_identified!(
         terms, spines, derived, context.data, target, has_intercept)
     any(t -> t.kind !== :offset, terms) || !isempty(spline_raw) ||
+        !isempty(hsgp_raw) ||
         return _rk_plan_offset_only_predictor(
         brmi, context, target, ordinary, available, link, terms, derived)
     geometry = _brm_prepare_predictor_geometry(
@@ -2478,6 +2559,9 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
                 prepared, target, context.data, columns, taken))
         elseif prepared.callable === s || prepared.callable === t2
             push!(terms, _rk_plan_spline_term!(
+                prepared, target, context.data, columns, taken))
+        elseif prepared.callable === hsgp
+            push!(terms, _rk_plan_hsgp_term!(
                 prepared, target, context.data, columns, taken))
         else
             error("$prefix: internal: unexpected structured term " *
@@ -3391,8 +3475,27 @@ function _rk_gate_name_hygiene!(predictor_specs::AbstractVector,
             "$prefix: internal: generated gp name `$gn` collides with " *
             "raw column `$gn`")
     end
+    hnames = Symbol[]
+    for spec in predictor_specs, term in spec.terms
+        term.kind === :hsgp || continue
+        push!(hnames, term.options.id)
+    end
+    length(unique(hnames)) == length(hnames) || error(
+        "$prefix: internal: duplicate hsgp smooth ids")
+    for hn in hnames
+        hn in both && error(
+            "$prefix: internal: generated hsgp id `$hn` collides with " *
+            "a parameter/assignment name")
+        hn in pnames && error(
+            "$prefix: internal: generated hsgp id `$hn` collides with " *
+            "predictor `$hn`")
+        haskey(columns, hn) && error(
+            "$prefix: internal: generated hsgp id `$hn` collides with " *
+            "raw column `$hn`")
+    end
     for n in sort!(collect(Iterators.flatten(
-            (pnames, both, dnames, vnames, snames, gnames, keys(columns)))))
+            (pnames, both, dnames, vnames, snames, gnames, hnames,
+                keys(columns)))))
         startswith(string(n), "_ppl_") && error(
             "$prefix: name `$n` uses the reserved `_ppl_` prefix; rename it")
     end
