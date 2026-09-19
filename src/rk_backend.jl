@@ -460,6 +460,21 @@ function _rk_classify_response(rhs::ExprColumn, predictor::Symbol,
             "$predictor_link-link predictor; write `Gamma(alpha, " *
             "mu/alpha)` with a `log(mu)` predictor")
         return (:gamma_log, predictor_link, shape, nothing)
+    elseif head === OrderedLogistic
+        # Ordinal admission point (decision 0w1i3qb): the single-predictor
+        # shape reaches classification, but the thin layer has no
+        # cumulative-ordinal likelihood or ordered cutpoint parameters yet.
+        error("$prefix: response `$response` family `OrderedLogistic` " *
+              "needs thin-layer cumulative-ordinal support (ordered " *
+              "cutpoints plus a cumulative-logit likelihood); slice 1 " *
+              "admits $_RK_ADMITTED_SPELLINGS")
+    elseif head === Ordinal
+        # Same decision: general typed ordinal needs the structure x link
+        # likelihood plus threshold parameters in the thin layer.
+        error("$prefix: response `$response` family `Ordinal` needs " *
+              "thin-layer general-ordinal support (structure x link " *
+              "likelihood plus threshold parameters); slice 1 admits " *
+              "$_RK_ADMITTED_SPELLINGS")
     end
     head_name = head isa Function ? nameof(head) :
         head isa Type ? nameof(head) : string(head)
@@ -2026,6 +2041,27 @@ end
 
 function _rk_referenced_predictor(program, rhs, response::Symbol)
     prefix = "RK backend"
+    # Categorical-machinery admission point (decision 0w1i3qb): these
+    # families never fit the one-predictor plan shape — CategoricalLogit
+    # takes K-1 predictors, Categorical/Multinomial take simplex
+    # probabilities, not a predictor at all — so they gate on the head
+    # before the predictor-count checks below.
+    head = getf(rhs)
+    head === CategoricalLogit && error(
+        "$prefix: response `$response` family `CategoricalLogit` needs " *
+        "multi-predictor categorical support (K-1 linear predictors plus " *
+        "a thin-layer multi-logit likelihood); slice 1 lowers " *
+        "likelihoods of one declared linear predictor")
+    head === Categorical && error(
+        "$prefix: response `$response` family `Categorical` needs " *
+        "thin-layer simplex-probability support (Dirichlet-backed " *
+        "simplex parameters); slice 1 lowers likelihoods of one " *
+        "declared linear predictor")
+    head === Multinomial && error(
+        "$prefix: response `$response` family `Multinomial` needs " *
+        "thin-layer multinomial support (simplex probabilities plus a " *
+        "count-matrix response); slice 1 lowers likelihoods of one " *
+        "declared linear predictor")
     referenced = _brm_reachable_operations(
         program, _brm_prepared_references(_brm_prepare_expr(rhs)))
     names = Symbol[node.name for node in program.operations
