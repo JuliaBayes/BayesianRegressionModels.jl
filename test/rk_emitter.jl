@@ -13,8 +13,8 @@ using BayesianRegressionModels
 using CategoricalArrays: categorical
 using Distributions: Bernoulli, Beta, Binomial, Categorical, Cauchy, Dirichlet,
                      Exponential, Gamma, InverseGaussian, LocationScale,
-                     LogNormal, Multinomial, Normal, Poisson, TDist, Uniform,
-                     Weibull, truncated
+                     LogNormal, Multinomial, MvNormal, Normal, Poisson, TDist,
+                     Uniform, Weibull, truncated
 using LogExpFunctions: logistic, logit
 using Statistics: mean
 
@@ -680,12 +680,8 @@ end
     # buckets, covered below). `s(x)`/`t2(x, z)` used to fail here too;
     # they plan now (thin-layer spline surface landed, covered below).
     # `&` interactions used to fail here; they are provisionally admitted
-    # now (derived lowering, covered above). Monotonic effects stay closed.
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
-        mu ~ 1 + mo(x)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
-    end)
+    # now (derived lowering, covered above). `mo(x)` used to fail here too;
+    # it plans now (thin-layer monotonic surface landed, covered below).
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + g
         effect(mu, g) ~ Normal(0, 2)
@@ -815,13 +811,199 @@ end
     end)
 end
 
-@testset "fail closed: SB long tail (mo1/me/ar/dar, simplex/LKJ/joint)" begin
-    # Monotonic direct summand stays closed (`mo` is pinned above).
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+@testset "monotonic plan shape" begin
+    # `mo(c)`: free-beta column over bound `<c>_idx` codes + a
+    # `:simplex_dirichlet` increments vector (thin-layer monotonic surface).
+    brmi = @brm df begin
+        mu ~ 1 + mo(c)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    predictor = only(plan.predictors)
+    @test [t.kind for t in predictor.terms] == [:intercept, :monotonic]
+    term = only(t for t in predictor.terms if t.kind === :monotonic)
+    @test term.columns == [:c_idx]
+    @test term.addressee == :c_idx
+    @test (term.options.increments, term.options.source) ==
+        (:mo_c_simplex_incr, :c)
+    @test term.options.alpha == [1.0, 1.0, 1.0]
+    @test plan.columns[:c_idx] == [2, 1, 3, 2, 4, 3]
+    @test eltype(plan.columns[:c_idx]) <: Integer
+    vec = only(plan.vector_parameters)
+    @test (vec.name, vec.family, vec.size) ==
+        (:mo_c_simplex_incr, :simplex_dirichlet, 3)
+    @test only(vec.args) == [1.0, 1.0, 1.0]
+    @test [(p.addressee, p.location, p.scale)
+        for p in plan.population_priors] ==
+        [(:Intercept, 0.0, 1.0), (:c_idx, 0.0, 1.0)]
+    @test [p.name for p in plan.parameters] == [:s]
+    @test BRM._rk_num_coefficients(plan) == 2
+    # `mo1(c)`: beta-free direct summand — self-addressed, no beta prior.
+    plan = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + mo1(c)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
+    @test [t.kind for t in only(plan.predictors).terms] ==
+        [:intercept, :monotonic_summand]
+    term = only(t for t in only(plan.predictors).terms
+        if t.kind === :monotonic_summand)
+    @test (term.columns, term.addressee) == ([:c_idx], term.label)
+    @test term.options.increments == :mo1_c_simplex_incr
+    @test [(p.addressee, p.location, p.scale)
+        for p in plan.population_priors] == [(:Intercept, 0.0, 1.0)]
+    @test only(plan.vector_parameters).name == :mo1_c_simplex_incr
+    # Beta-free `mo1` plans without an intercept (coefficient-free LP).
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ mo1(c)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test [t.kind for t in only(plan.predictors).terms] ==
+        [:monotonic_summand]
+    @test isempty(plan.population_priors)
+    # Dirichlet overrides ride the increments concentration.
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + mo(c)
+        simplex(mu, mo(c)) ~ Dirichlet(1, 2, 3)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test only(plan.vector_parameters).args == ([1.0, 2.0, 3.0],)
+    # Scalar Dirichlet expands over the increments (SB `rep_vector`).
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + mo(c)
+        simplex(mu, mo(c)) ~ Dirichlet(2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test only(plan.vector_parameters).args == ([2.0, 2.0, 2.0],)
+    # Non-Dirichlet simplex priors stay closed (thin-layer increments are
+    # Dirichlet-sampled).
+    @test_throws "is not Dirichlet" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + mo(c)
+        simplex(mu, mo(c)) ~ MvNormal([0.0, 0.0, 0.0], 1.0)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # ... as do sampled (non-literal) concentrations.
+    @test_throws "not a literal vector" BRM._brm_rk_plan(@brm df begin
+        concentration ~ Exponential(1)
+        mu ~ 1 + mo(c)
+        simplex(mu, mo(c)) ~ Dirichlet(concentration)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # K=1 `mo` vanishes (SB: no column, no beta, no `simplex[0]`).
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + mo(k1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test [t.kind for t in only(plan.predictors).terms] == [:intercept]
+    @test isempty(plan.vector_parameters)
+    @test !haskey(plan.columns, :k1_idx)
+    # ... and re-inflates to a zeros offset under `0 +` (SB scalar `0.0`).
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 0 + mo(k1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test [t.kind for t in only(plan.predictors).terms] == [:offset]
+    @test plan.columns[:mo_k1_zero] == zeros(6)
+    # K=1 `mo1` contributes a zeros offset (SB scalar `0.0`, vector-shaped).
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + mo1(k1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test [t.kind for t in only(plan.predictors).terms] ==
+        [:intercept, :offset]
+    zero = only(t for t in only(plan.predictors).terms
+        if t.kind === :offset)
+    @test plan.columns[only(zero.columns)] == zeros(6)
+    # SB emits one contrast per (head, source): a second `mo(c)` fails closed.
+    @test_throws "one `mo` contrast per model" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + mo(c) + mo(c)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # ... and across predictors (one `mo(c)` per model, not per predictor).
+    @test_throws "one `mo` contrast per model" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + mo(c)
+        log(sigma) ~ 1 + mo(c)
+        y ~ Normal(mu, sigma)
+    end)
+    # ... while `mo(c)` + `mo1(c)` coexist (separate SB contrasts).
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + mo(c) + mo1(c)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test [t.kind for t in only(plan.predictors).terms] ==
+        [:intercept, :monotonic, :monotonic_summand]
+    @test Set(v.name for v in plan.vector_parameters) ==
+        Set([:mo_c_simplex_incr, :mo1_c_simplex_incr])
+    # Whole-predictor `:` fans out onto the mo beta (SB covers it too).
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + mo(c)
+        effect(mu, :) ~ Normal(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test [(p.addressee, p.location, p.scale)
+        for p in plan.population_priors] ==
+        [(:Intercept, 0.0, 2.0), (:x, 0.0, 2.0), (:c_idx, 0.0, 2.0)]
+    # ... but a column-specific claim leaves the mo beta at its default.
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + mo(c)
+        effect(mu, x) ~ Normal(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test [(p.addressee, p.location, p.scale)
+        for p in plan.population_priors] ==
+        [(:Intercept, 0.0, 1.0), (:x, 0.0, 2.0), (:c_idx, 0.0, 1.0)]
+    # Generated-name `effect(mu, mo_c)` stays unaddressable
+    # (interaction-label precedent): the colon is the mainline spelling.
+    @test_throws "not a population coefficient" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + mo(c)
+        effect(mu, mo_c) ~ Normal(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # String ordinals code by sorted level (shared `_brm_fit_levels`).
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + mo(gs)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test plan.columns[:gs_idx] == [1, 1, 2, 2, 3, 3]
+    @test only(plan.vector_parameters).size == 2
+    # Increments disambiguate against user parameters (smooth-id precedent).
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + mo(c)
+        mo_c_simplex_incr ~ Normal(0, 1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test only(plan.vector_parameters).name == :mo_c_simplex_incr_2
+    # A raw `<c>_idx` column colliding with the codes fails loud: sharing
+    # one prior across the continuous column and the mo beta would
+    # silently misprice one of them.
+    dfc = (; df..., c_idx=[0.5, -0.2, 0.1, 0.9, 1.4, 1.1])
+    @test_throws "collides with a population column" BRM._brm_rk_plan(
+        @brm dfc begin
+            mu ~ 1 + c_idx + mo(c)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+end
+
+@testset "fail closed: SB long tail (me/ar/dar, simplex/LKJ/joint)" begin
+    # `mo1(c)` used to fail here; it plans now (thin-layer monotonic
+    # surface landed, covered in "monotonic plan shape").
     # Measurement-error latent predictor stays closed.
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + me(x, 0.5)

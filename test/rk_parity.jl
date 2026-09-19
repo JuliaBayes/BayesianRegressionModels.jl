@@ -27,7 +27,7 @@
 using Test
 using BayesianRegressionModels
 using DifferentiationInterface: AutoEnzyme
-using Distributions: Exponential, Normal, logpdf
+using Distributions: Dirichlet, Exponential, Normal, logpdf
 using Enzyme
 using LogDensityProblems
 using ReactiveKernels: prepare
@@ -129,6 +129,99 @@ _parity_cols = (;
 _parity_cols_multi = merge(_parity_cols,
     (; y2 = [0.5, 1.5, 1.0, 2.0, 2.5, 1.5]))
 _parity_cols_dummy = merge(_parity_cols, (; c = [1, 2, 2, 1, 2, 1]))
+_parity_cols_mo = (; c = [1, 2, 3, 1, 2, 3], y = [1.0, 2.0, 1.5, 2.5, 3.0, 2.0])
+
+# SB `_sb_mo` contrast `cumsum([0; incr])[idx]`, explicit loop (never the
+# thin-layer gather recipe).
+function _ref_mo_contrast(incr, idx)
+    K = length(incr) + 1
+    cum = zeros(Float64, K)
+    for j in 2:K
+        cum[j] = cum[j - 1] + incr[j - 1]
+    end
+    return [cum[i] for i in idx]
+end
+
+# Stick-breaking log-Jacobian over the packed increments (the
+# thin-layer-owned parameterization, NOT Stan's ILR — `Σ [log(r) +
+# log(z) + log1p(-z)]` with `z[j] = σ(u[j] + log(d-j))`, per the layout
+# docs; re-derived here, not imported).
+function _ref_simplex_logjac(u)
+    d = length(u) + 1
+    jac = 0.0
+    remaining = 1.0
+    for j in 1:(d - 1)
+        z = 1 / (1 + exp(-(u[j] + log(d - j))))
+        jac += log(remaining) + log(z) + log1p(-z)
+        remaining *= 1 - z
+    end
+    return jac
+end
+
+@testset "rk parity mo monotonic" begin
+    brmi = @brm _parity_cols_mo begin
+        mu ~ 1 + mo(c)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 4
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+        (:sampled, :s, 1, :exp),
+        (:vector, :mo_c_simplex_incr, 1, :simplex),
+    ]
+    u = collect(range(-0.4, 0.4; length = layout.total))
+    nt = constrain(layout, u)
+    contrast = _ref_mo_contrast(nt.mo_c_simplex_incr, _parity_cols_mo.c)
+    ll = sum(logpdf.(Normal.(nt.mu[1] .+ nt.mu[2] .* contrast, nt.s),
+        _parity_cols_mo.y))
+    # Full Dirichlet logpdf (normalizer included): the thin layer keeps
+    # the log-multivariate-Beta constant Stan drops for data alpha, so the
+    # RK posterior exceeds Stan's by exactly that constant (peer-verified
+    # core parity is modulo it) while every gradient agrees.
+    pr = logpdf(Normal(0, 1), nt.mu[1]) +
+        logpdf(Normal(0, 1), nt.mu[2]) +
+        logpdf(Exponential(1), nt.s) +
+        logpdf(Dirichlet(ones(2)), nt.mo_c_simplex_incr)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    jac = u[3] + _ref_simplex_logjac(u[4:4])
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity mo1 summand (override alpha)" begin
+    brmi = @brm _parity_cols_mo begin
+        mu ~ 1 + mo1(c)
+        simplex(mu, mo1(c)) ~ Dirichlet(1, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 3
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 1, :identity),
+        (:sampled, :s, 1, :exp),
+        (:vector, :mo1_c_simplex_incr, 1, :simplex),
+    ]
+    u = collect(range(-0.4, 0.4; length = layout.total))
+    nt = constrain(layout, u)
+    contrast = _ref_mo_contrast(nt.mo1_c_simplex_incr, _parity_cols_mo.c)
+    ll = sum(logpdf.(Normal.(nt.mu[1] .+ contrast, nt.s), _parity_cols_mo.y))
+    pr = logpdf(Normal(0, 1), nt.mu[1]) +
+        logpdf(Exponential(1), nt.s) +
+        logpdf(Dirichlet([1.0, 2.0]), nt.mo1_c_simplex_incr)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    jac = u[2] + _ref_simplex_logjac(u[3:3])
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
+    _check_parity_gradient(backend, u)
+end
 
 @testset "rk parity K=1 intercept" begin
     brmi = @brm _parity_cols begin

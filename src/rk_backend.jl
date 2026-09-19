@@ -129,7 +129,8 @@ end
 
 struct _RKTermSpec
     kind::Symbol # :intercept | :continuous | :factor | :offset |
-                # :ranef_gather | :spline | :gp | :hsgp
+                # :ranef_gather | :spline | :gp | :hsgp |
+                # :monotonic | :monotonic_summand
     columns::Vector{Symbol}
     # factor: (coding=:fullrank, levels=:observed) over every observed level,
     # or (coding=:subset, drop::Int, levels=:observed) over every observed
@@ -245,7 +246,8 @@ end
 function _rk_num_coefficients(plan::_RKStructuralPlan)
     total = 0
     for predictor in plan.predictors, term in predictor.terms
-        if term.kind === :intercept || term.kind === :continuous
+        if term.kind === :intercept || term.kind === :continuous ||
+                term.kind === :monotonic
             total += 1
         elseif term.kind === :factor
             width = length(_rk_grouping_levels(
@@ -1691,6 +1693,19 @@ function _rk_population_priors(brmi::BRMI, design, target::Symbol,
         push!(known, term.addressee)
         push!(priors, _RKPopulationPrior(target, term.addressee, 0.0, 1.0))
     end
+    for term in terms
+        term.kind === :monotonic || continue
+        # A design column already claimed this addressee: the raw data
+        # holds a `<c>_idx` column the monotonic codes clobbered (mirrored
+        # SB overwrite). Sharing one prior across the continuous column
+        # and the mo beta would silently misprice one of them — fail loud.
+        term.addressee in known && error(
+            "$prefix: predictor `$target` monotonic index " *
+            "`$(term.addressee)` collides with a population column; " *
+            "rename the raw `<c>_idx` column")
+        push!(known, term.addressee)
+        push!(priors, _rk_mo_beta_prior(brmi, target, term.addressee))
+    end
     priors
 end
 
@@ -2244,7 +2259,7 @@ end
 # One smooth-id domain for every basis-declaring smooth (`s`/`t2`/`hsgp`):
 # ids must not collide with each other, user names (`taken`), or raw
 # columns — numeric stems on collision.
-function _rk_mint_smooth_id!(taken::Set{Symbol},
+function _rk_mint_generated!(taken::Set{Symbol},
         columns::Dict{Symbol,AbstractVector}, base::String)
     name = Symbol(base)
     serial = 2
@@ -2254,6 +2269,11 @@ function _rk_mint_smooth_id!(taken::Set{Symbol},
     end
     push!(taken, name)
     name
+end
+
+function _rk_mint_smooth_id!(taken::Set{Symbol},
+        columns::Dict{Symbol,AbstractVector}, base::String)
+    _rk_mint_generated!(taken, columns, base)
 end
 
 # `sd(...)` smoothing-scale overrides are sequenced: the thin-layer
@@ -2487,6 +2507,166 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
     _RKTermSpec(:hsgp, collect(axes), (; id, k, c, iso=state.iso), id, id)
 end
 
+# ---- monotonic terms (mo/mo1; mirrors `_sb_mo`) ----
+#
+# A `:monotonic` term carries `(; increments, alpha, source)`: the
+# increment-simplex vector parameter name (SB's `<mo_c>_simplex_incr`),
+# its frozen literal concentration, and the raw ordinal column. A
+# `:monotonic_summand` (`mo1`) carries the same and is beta-free
+# (self-addressed: no population prior). The thin layer owns the
+# stick-breaking geometry + Dirichlet density + level-gather recipe;
+# BRM ships the bound `<c>_idx` codes (SB's `<c>_idx`) + the declaration.
+# One increments name per monotonic occurrence (exactly-one-use linkage),
+# minted with numeric stems on collision. Unlike smooths (which SB suffixes
+# per occurrence), duplicate (head, source) pairs fail closed in
+# `_rk_gate_monotonic_unique!`: SB emits one `<mo_c>`/`mo1_<c>` contrast
+# per model, so a second `mo(c)` dies in StanBlocks name resolution — RK
+# rejects it here with attribution instead of admitting a model SB cannot
+# express. `mo(c)` + `mo1(c)` coexist (separate contrasts, separate
+# simplexes — SB-accepted, parity-held).
+function _rk_plan_monotonic_core!(head::Symbol,
+        prepared::_BRMPreparedTerm, target::Symbol,
+        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol})
+    prefix = "RK backend"
+    source = prepared.source
+    K = length(prepared.state.levels)
+    # K=1 degenerates caller-side (`mo` vanishes like SB's dropped column;
+    # `mo1` zeros like SB's scalar `0.0` summand), before the simplex prior
+    # is even consulted — SB returns before `_sb_mo_prior_plan` too.
+    K < 2 && return nothing
+    idx_name = Symbol(source, :_idx)
+    # SB's unconditional `data[<c>_idx] = idx` overwrite, mirrored: a raw
+    # column literally named `<c>_idx` is clobbered in both backends
+    # (reproduced garbage, not diverged garbage).
+    columns[idx_name] = prepared.state.idx
+    alpha = prepared.state.alpha
+    if isnothing(alpha)
+        constructor = getf(prepared.state.simplex_prior)
+        T = _as_distribution_type(constructor)
+        if isnothing(T) || !(T <: Dirichlet)
+            error("$prefix: predictor `$target` `$head($source)` simplex " *
+                "prior is not Dirichlet; slice 1 admits `Dirichlet` " *
+                "concentrations only (the thin-layer increments are " *
+                "Dirichlet-sampled)")
+        end
+        error("$prefix: predictor `$target` `$head($source)` Dirichlet " *
+            "concentration is not a literal vector; slice 1 admits " *
+            "literal concentrations only (sampled/data concentrations " *
+            "fail closed thin-layer-side)")
+    end
+    alpha_vec = collect(Float64, alpha)
+    length(alpha_vec) == K - 1 || error(
+        "$prefix: internal: `$head($source)` concentration has " *
+        "$(length(alpha_vec)) entries for $K levels")
+    increments = _rk_mint_generated!(
+        taken, columns, string(head, "_", source, "_simplex_incr"))
+    (; source, idx_name, increments, alpha=alpha_vec)
+end
+
+function _rk_plan_mo_term!(prepared::_BRMPreparedTerm{typeof(mo)},
+        target::Symbol, columns::Dict{Symbol,AbstractVector},
+        taken::Set{Symbol})
+    core = _rk_plan_monotonic_core!(
+        :mo, prepared, target, columns, taken)
+    # Single-level factor: 0 increments — the free-beta monotonic effect is
+    # identically 0, so contribute NO term (SB returns no column: no beta,
+    # no `simplex[0]`). A lone `0 + mo(c)` is re-inflated to a zeros offset
+    # after the geometry loop (SB's scalar `0.0`, vector-shaped).
+    isnothing(core) && return nothing
+    _RKTermSpec(:monotonic, [core.idx_name],
+        (; increments=core.increments, alpha=core.alpha, source=core.source),
+        core.idx_name, Symbol(:mo_, target, :_, core.source))
+end
+
+function _rk_plan_mo1_term!(prepared::_BRMPreparedTerm{typeof(mo1)},
+        target::Symbol, columns::Dict{Symbol,AbstractVector},
+        taken::Set{Symbol})
+    core = _rk_plan_monotonic_core!(
+        :mo1, prepared, target, columns, taken)
+    label = Symbol(:mo1_, target, :_, prepared.source)
+    if isnothing(core)
+        # Single-level factor: SB contributes a scalar `0.0` summand. A
+        # zeros offset is the vector-shaped twin: it keeps the summand
+        # list non-empty with identical values, without a `simplex[0]`.
+        zero = _rk_mint_generated!(
+            taken, columns, "mo1_$(prepared.source)_zero")
+        columns[zero] = zeros(length(prepared.state.idx))
+        return _RKTermSpec(:offset, [zero], (;), zero, Symbol(:offset_, zero))
+    end
+    _RKTermSpec(:monotonic_summand, [core.idx_name],
+        (; increments=core.increments, alpha=core.alpha, source=core.source),
+        label, label)
+end
+
+# The `mo` free beta is a population coefficient the shared design does not
+# materialize (its contrast needs the increment simplex), so the shared seam
+# cannot resolve its prior: default Normal(0, 1) (SB's `std_normal()`), with
+# whole-predictor `effect(lp, :)` / `effect(:, :)` claims fanning out onto it
+# through the shared precedence engine — SB applies `:` to the mo column too
+# (verified against emitted Stan). Generated-name `effect(mu, mo_c)` claims
+# stay unaddressable (they fail in the shared seam, like generated
+# interaction labels): the colon is the mainline spelling.
+function _rk_mo_beta_prior(brmi::BRMI, target::Symbol, addressee::Symbol)
+    prefix = "RK backend"
+    won = Ref{Any}(nothing)
+    for spec in effect_priors(brmi)
+        spec.coefficient === _EFFECT_COLON || continue
+        spec.predictor === _EFFECT_COLON || spec.predictor === target ||
+            continue
+        _brm_claim_effect_prior!(() -> won[], v -> (won[] = v), spec,
+            "`$target`'s monotonic `$addressee` column"; prefix)
+    end
+    expression = isnothing(won[]) ? nothing : won[].expression
+    if !isnothing(expression)
+        expression isa ExprColumn && getf(expression) === Normal || error(
+            "$prefix: predictor `$target` population-effect priors must " *
+            "be `Normal(location, scale)` in slice 1")
+        isempty(getkwargs(expression)) || error(
+            "$prefix: predictor `$target` population-effect `Normal` " *
+            "prior cannot have keywords in slice 1")
+    end
+    location, scale = _brm_materialize_normal_effect_priors(
+        Any[expression], 1; prefix)
+    _RKPopulationPrior(target, addressee, location[1], scale[1])
+end
+
+# SB single-contrast rule (see the section header): duplicate (head, source)
+# pairs fail closed. Runs per-predictor (ahead of population priors, which
+# would otherwise misattribute the second `mo(c)` as an index collision)
+# and model-wide in `_rk_plan_monotonic_vectors!` (cross-predictor pairs).
+function _rk_gate_monotonic_unique!(prefix::String, where::String,
+        terms::AbstractVector)
+    seen = Set{Tuple{Symbol,Symbol}}()
+    for term in terms
+        (term.kind === :monotonic ||
+            term.kind === :monotonic_summand) || continue
+        key = (term.kind, term.options.source)
+        key in seen || (push!(seen, key); continue)
+        head = term.kind === :monotonic ? "mo" : "mo1"
+        error("$prefix: $where two `$head($(term.options.source))` terms; " *
+            "SB emits one `$head` contrast per model, so the second is " *
+            "out of slice 1 (drop it)")
+    end
+    nothing
+end
+
+# One `:simplex_dirichlet` vector parameter per monotonic term (SB: one
+# increment simplex per contrast).
+function _rk_plan_monotonic_vectors!(predictor_specs::AbstractVector)
+    prefix = "RK backend"
+    _rk_gate_monotonic_unique!(prefix, "predictors carry",
+        [term for spec in predictor_specs for term in spec.terms])
+    specs = _RKVectorParameter[]
+    for spec in predictor_specs, term in spec.terms
+        (term.kind === :monotonic ||
+            term.kind === :monotonic_summand) || continue
+        push!(specs, _RKVectorParameter(term.options.increments,
+            :simplex_dirichlet, (term.options.alpha,),
+            length(term.options.alpha), term.options.increments))
+    end
+    specs
+end
+
 function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         available::Tuple, columns::Dict{Symbol,AbstractVector},
         derived::Vector{_RKDerivedSpec}, taken::Set{Symbol},
@@ -2502,8 +2682,11 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         (getf(t) === s || getf(t) === t2), structured)
     gp_raw = filter(t -> t isa ExprColumn && getf(t) === gp, structured)
     hsgp_raw = filter(t -> t isa ExprColumn && getf(t) === hsgp, structured)
+    mo_raw = filter(t -> t isa ExprColumn &&
+        (getf(t) === mo || getf(t) === mo1), structured)
     other_structured = filter(
-        t -> !(t in spline_raw) && !(t in gp_raw) && !(t in hsgp_raw),
+        t -> !(t in spline_raw) && !(t in gp_raw) && !(t in hsgp_raw) &&
+            !(t in mo_raw),
         structured)
     isempty(other_structured) || error(
         "$prefix: predictor `$target` structured term(s) " *
@@ -2514,7 +2697,7 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
     grouped = filter(t -> _brm_is_grouped_term(t), raw_terms)
     ordinary = Tuple(t for t in raw_terms if !(t in structured) && !(t in grouped))
     isempty(ordinary) && isempty(spline_raw) && isempty(gp_raw) &&
-        isempty(hsgp_raw) && error(
+        isempty(hsgp_raw) && isempty(mo_raw) && error(
         "$prefix: predictor `$target` has no terms")
     has_intercept = any(t -> t isa Integer && t == 1, ordinary)
     # Classify before building geometry: fail fast on unknown terms with RK
@@ -2548,7 +2731,7 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
     _rk_gate_cross_identified!(
         terms, spines, derived, context.data, target, has_intercept)
     any(t -> t.kind !== :offset, terms) || !isempty(spline_raw) ||
-        !isempty(gp_raw) || !isempty(hsgp_raw) ||
+        !isempty(gp_raw) || !isempty(hsgp_raw) || !isempty(mo_raw) ||
         return _rk_plan_offset_only_predictor(
         brmi, context, target, ordinary, available, link, terms, derived)
     geometry = _brm_prepare_predictor_geometry(
@@ -2563,11 +2746,38 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         elseif prepared.callable === hsgp
             push!(terms, _rk_plan_hsgp_term!(
                 prepared, target, context.data, columns, taken))
+        elseif prepared.callable === mo
+            spec = _rk_plan_mo_term!(
+                prepared, target, columns, taken)
+            spec === nothing || push!(terms, spec)
+        elseif prepared.callable === mo1
+            push!(terms, _rk_plan_mo1_term!(
+                prepared, target, columns, taken))
         else
             error("$prefix: internal: unexpected structured term " *
                 "survived pre-check in `$target`")
         end
     end
+    if isempty(terms)
+        # Every term degenerated (K=1 monotonic under `0 +`; SB emits
+        # scalar `0.0`): a zeros offset is the vector-shaped twin. Only
+        # K=1 `mo` drops terms, so a monotonic prepared term must exist.
+        first_mo = nothing
+        for prepared in geometry.terms
+            if prepared.callable === mo || prepared.callable === mo1
+                first_mo = prepared
+                break
+            end
+        end
+        isnothing(first_mo) && error(
+            "$prefix: internal: predictor `$target` planned no terms")
+        zero = _rk_mint_generated!(
+            taken, columns, "mo_$(first_mo.source)_zero")
+        columns[zero] = zeros(length(first_mo.state.idx))
+        push!(terms, _RKTermSpec(:offset, [zero], (;), zero,
+            Symbol(:offset_, zero)))
+    end
+    _rk_gate_monotonic_unique!(prefix, "predictor `$target` carries", terms)
     isnothing(geometry.r2d2) || error(
         "$prefix: predictor `$target` `r2d2` priors are out of slice 1")
     design = geometry.component.design
@@ -3910,6 +4120,7 @@ function _brm_rk_plan(brmi::BRMI)
         push!(predictor_specs, spec)
         append!(prior_specs, priors)
     end
+    mo_vectors = _rk_plan_monotonic_vectors!(predictor_specs)
     predictor_link = Dict(spec.name => spec.link for spec in predictor_specs)
     # Phase 5: response specs (triples need predictor links and name tables).
     response_specs = _RKLikelihoodSpec[]
@@ -4055,8 +4266,8 @@ function _brm_rk_plan(brmi::BRMI)
     end
     _rk_gate_name_hygiene!(predictor_specs, parameters, assignments,
         derived, columns, response_specs,
-        [vector_specs; implicit_vectors])
+        [vector_specs; implicit_vectors; mo_vectors])
     _RKStructuralPlan(response_specs, predictor_specs, prior_specs,
         parameters, assignments, derived, columns, n_obs, ranef_buckets,
-        [vector_specs; implicit_vectors])
+        [vector_specs; implicit_vectors; mo_vectors])
 end
