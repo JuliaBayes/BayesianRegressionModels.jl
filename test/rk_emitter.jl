@@ -942,6 +942,161 @@ end
     end)
 end
 
+@testset "hsgp plan shape" begin
+    # The shared 6-row df suffices: no minimum-axis fit like `s(x)`.
+    brmi = @brm df begin
+        mu ~ 1 + hsgp(x; k=4)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    predictor = only(plan.predictors)
+    @test [t.kind for t in predictor.terms] == [:intercept, :hsgp]
+    term = only(t for t in predictor.terms if t.kind === :hsgp)
+    @test term.columns == [:x]
+    @test (term.options.id, term.options.k, term.options.c,
+        term.options.iso) == (:hsgp_x, 4, 1.5, true)
+    @test plan.columns[:x] == df.x
+    # HSGP parameters are thin-layer-owned: nothing lands in
+    # plan.parameters for the smooth itself.
+    @test [p.name for p in plan.parameters] == [:s]
+    # Defaults ride the declaration (k=20, c=1.5, iso=true).
+    brmi = @brm df begin
+        mu ~ 1 + hsgp(x)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    term = only(t for t in only(plan.predictors).terms if t.kind === :hsgp)
+    @test (term.options.k, term.options.c, term.options.iso) ==
+        (20, 1.5, true)
+    # Aniso multi-axis: per-axis tuples over both axes.
+    brmi = @brm df begin
+        mu ~ 1 + hsgp(x, z; k=(4, 3), c=(1.5, 2.0), iso=false)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    term = only(t for t in only(plan.predictors).terms if t.kind === :hsgp)
+    @test term.columns == [:x, :z]
+    @test (term.options.id, term.options.k, term.options.c,
+        term.options.iso) == (:hsgp_x_z, (4, 3), (1.5, 2.0), false)
+    @test plan.columns[:z] == df.z
+    # Iso multi-axis shares one length scale (scalar broadcasts).
+    brmi = @brm df begin
+        mu ~ 1 + hsgp(x, z; k=4)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    term = only(t for t in only(plan.predictors).terms if t.kind === :hsgp)
+    @test (term.options.k, term.options.c, term.options.iso) ==
+        ((4, 4), (1.5, 1.5), true)
+    # One id per smooth occurrence: a second smooth in the same
+    # predictor takes its own axis-derived id.
+    brmi = @brm df begin
+        mu ~ 1 + hsgp(x; k=4) + hsgp(z; k=3)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    ids = [t.options.id for t in only(plan.predictors).terms
+        if t.kind === :hsgp]
+    @test ids == [:hsgp_x, :hsgp_z]
+    # ... and the same smooth in a second predictor serializes instead
+    # of colliding (exactly-one-use linkage per declaration).
+    brmi = @brm df begin
+        mu ~ 1 + hsgp(x; k=4)
+        nu ~ 1 + hsgp(x; k=4)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+        z ~ Normal(nu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    ids = Set(t.options.id for p in plan.predictors for t in p.terms
+        if t.kind === :hsgp)
+    @test ids == Set([:hsgp_x, :hsgp_x_2])
+    # Generated ids disambiguate against user parameters.
+    brmi = @brm df begin
+        mu ~ 1 + hsgp(x; k=4)
+        hsgp_x ~ Normal(0, 1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    term = only(t for t in only(plan.predictors).terms if t.kind === :hsgp)
+    @test term.options.id == :hsgp_x_2
+    # A smooth-only predictor plans (no ordinary terms required).
+    brmi = @brm df begin
+        mu ~ hsgp(x; k=4)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    @test [t.kind for t in only(plan.predictors).terms] == [:hsgp]
+end
+
+@testset "fail closed: hsgp sequenced spellings" begin
+    # Hyper overrides stay closed until the thin-layer surface
+    # sequences them (self-priored LogNormal(0, 1) defaults only).
+    # The gate precedes the basis fit, so the shared 6-row df suffices.
+    @test_throws "hyper priors" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + hsgp(x; k=4)
+        length_scale(:, hsgp(x)) ~ Gamma(2, 1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test_throws "hyper priors" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + hsgp(x; k=4)
+        sd(:, hsgp(x)) ~ Exponential(2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Grouped weights stay closed (ungrouped surface only).
+    @test_throws "by=" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + hsgp(x; k=4, by=g)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Periodic stays closed (exp_quad surface only).
+    @test_throws "cov=:periodic" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + hsgp(x; cov=:periodic, period=1.0)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Partial centering stays closed (non-centered surface only).
+    @test_throws "partially-centered" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + hsgp(x; k=4, centeredness=0.5)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Explicit domains stay closed (the surface fits the boundary
+    # from raw columns).
+    @test_throws "domain=" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + hsgp(x; k=4, domain=(-2.0, 2.0))
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Orthogonalization stays closed (raw tensor-product basis only).
+    @test_throws "orthogonal" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + hsgp(x; k=4, orthogonal_to=:linear)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Latent axes stay closed (raw data columns only). The latent
+    # axis needs its own observation, else the shared seam fails the
+    # axis predictor's row axis before the RK gate is reached.
+    ldf = merge(df, (; x_obs=[0.3, 0.5, 0.4, 0.6, 0.5, 0.7]))
+    @test_throws "model-derived" BRM._brm_rk_plan(@brm ldf begin
+        xlat ~ 1
+        xob_sd ~ Exponential(1)
+        x_obs ~ Normal(xlat, xob_sd)
+        mu ~ 1 + hsgp(xlat; k=4, domain=(0.0, 2.0))
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+end
+
 @testset "fail closed: response side" begin
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x

@@ -59,6 +59,11 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol})
             # assigned-then-used `spline(...)` closed (no gather alias).
             push!(summands,
                 Expr(:call, :spline, QuoteNode(term.options.id)))
+        elseif term.kind === :hsgp
+            # Direct summand, always inline: the thin layer fails an
+            # assigned-then-used `hsgp(...)` closed (no gather alias).
+            push!(summands,
+                Expr(:call, :hsgp, QuoteNode(term.options.id)))
         elseif term.kind === :gp
             push!(summands, term.options.f)
         end
@@ -83,6 +88,29 @@ function _rk_ast_spline_ids(plan::_RKStructuralPlan)
     ids = Set{Symbol}()
     for predictor in plan.predictors, term in predictor.terms
         term.kind === :spline || continue
+        push!(ids, term.options.id)
+    end
+    ids
+end
+
+# A hsgp declaration: `hsgp_basis(:id, axes...; k=k, c=c, iso=iso)` —
+# `k`/`c` scalars for one axis, per-axis tuples otherwise (the thin
+# layer broadcasts scalars). Shape-verified against `Meta.parse` of
+# the surface spelling.
+function _rk_ast_hsgp_basis(term)
+    options = term.options
+    kval = options.k isa Tuple ? Expr(:tuple, options.k...) : options.k
+    cval = options.c isa Tuple ? Expr(:tuple, options.c...) : options.c
+    Expr(:call, :hsgp_basis,
+        Expr(:parameters, Expr(:kw, :k, kval), Expr(:kw, :c, cval),
+            Expr(:kw, :iso, options.iso)),
+        QuoteNode(options.id), term.columns...)
+end
+
+function _rk_ast_hsgp_ids(plan::_RKStructuralPlan)
+    ids = Set{Symbol}()
+    for predictor in plan.predictors, term in predictor.terms
+        term.kind === :hsgp || continue
         push!(ids, term.options.id)
     end
     ids
@@ -329,6 +357,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         Set(d.name for d in plan.derived),
         Set(v.name for v in plan.vector_parameters),
         _rk_ast_spline_ids(plan),
+        _rk_ast_hsgp_ids(plan),
         _rk_ast_gp_names(plan))
     # A predictor sharing its name with a data column cannot keep it:
     # the program has one namespace, so the affine (definition and
@@ -361,7 +390,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         counter = 0
         for (index, term) in enumerate(predictor.terms)
             (term.kind === :offset || term.kind === :ranef_gather ||
-                term.kind === :spline || term.kind === :gp) && continue
+                term.kind === :spline || term.kind === :hsgp ||
+                term.kind === :gp) && continue
             counter += 1
             coef = _rk_ast_coef_name(
                 string(predictor.name, "_b", counter), taken)
@@ -384,6 +414,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         for term in predictor.terms
             term.kind === :spline || continue
             push!(stmts, _rk_ast_spline_basis(term))
+        end
+        for term in predictor.terms
+            term.kind === :hsgp || continue
+            push!(stmts, _rk_ast_hsgp_basis(term))
         end
         for term in predictor.terms
             term.kind === :gp || continue
