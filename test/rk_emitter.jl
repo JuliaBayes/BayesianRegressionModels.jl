@@ -9,8 +9,9 @@
 
 using Test
 using BayesianRegressionModels
-using Distributions: Bernoulli, Binomial, Cauchy, Dirichlet, Exponential,
-                     Gamma, Normal, Poisson, truncated
+using Distributions: Bernoulli, Binomial, Categorical, Cauchy, Dirichlet,
+                     Exponential, Gamma, Multinomial, Normal, Poisson,
+                     truncated
 using LogExpFunctions: logistic, logit
 using Statistics: mean
 
@@ -969,4 +970,57 @@ end
     cyclic_a = BRM._RKSampledParameter(:a, :Normal, (:b,), nothing, :a)
     cyclic_b = BRM._RKSampledParameter(:b, :Normal, (:a,), nothing, :b)
     @test_throws ErrorException BRM._rk_gate_acyclic!([cyclic_a, cyclic_b], [])
+end
+
+# Categorical/ordinal/multinomial admission points (decision 0w1i3qb):
+# each family fails closed naming the missing thin-layer support, not the
+# generic out-of-slice-1 spellings error.
+function rk_plan_error(formula)
+    try
+        BRM._brm_rk_plan(formula)
+        nothing
+    catch error
+        error
+    end
+end
+
+@testset "fail closed: categorical/ordinal/multinomial attribution" begin
+    ordered = rk_plan_error(@brm df begin
+        eta ~ 1 + x
+        c ~ OrderedLogistic(eta)
+    end)
+    @test ordered isa ErrorException
+    @test occursin("OrderedLogistic", ordered.msg)
+    @test occursin("ordered cutpoints", ordered.msg)
+    ordinal = rk_plan_error(@brm df begin
+        eta ~ 0 + x
+        c ~ Ordinal(Cumulative(), LogitLink(), eta)
+    end)
+    @test ordinal isa ErrorException
+    @test occursin("Ordinal", ordinal.msg)
+    @test occursin("threshold", ordinal.msg)
+    # The genuine two-predictor shape: the head-first gate fires, not the
+    # generic several-predictors error.
+    catlogit = rk_plan_error(@brm df begin
+        eta1 ~ 1 + x
+        eta2 ~ 1 + x
+        c ~ CategoricalLogit(eta1, eta2)
+    end)
+    @test catlogit isa ErrorException
+    @test occursin("CategoricalLogit", catlogit.msg)
+    @test occursin("multi-predictor", catlogit.msg)
+    categorical = rk_plan_error(@brm df begin
+        mu ~ 1 + x
+        c ~ Categorical(z)
+    end)
+    @test categorical isa ErrorException
+    @test occursin("Categorical", categorical.msg)
+    @test occursin("simplex", categorical.msg)
+    multinomial = rk_plan_error(@brm df begin
+        mu ~ 1 + x
+        c ~ Multinomial(n, z)
+    end)
+    @test multinomial isa ErrorException
+    @test occursin("Multinomial", multinomial.msg)
+    @test occursin("simplex", multinomial.msg)
 end
