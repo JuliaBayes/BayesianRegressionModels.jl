@@ -51,3 +51,18 @@ web-macro/src/*-ext.jl
 # match the local example filenames directly; see the pending naming decision.
 web-macro/examples/bruno-*.jl
 web-macro/examples/bordet-*.jl
+
+# Large fit-artifact archives and serialized draws — never commit these
+# (snag brm-binaries-in-93881f23). Raw-fit tarballs are produced by
+# research/archive_total_study.py et al. into a results/ tree; keep them in
+# the producing run's scratch / artifact store, not in git history: they are
+# incompressible, so every version pays full packfile weight in every clone.
+# The in-tree manifest.json files remain the hash authority for archives
+# published before the untracking commit (see research/ARCHIVED_FITS.md).
+# Docs example inputs stay vendored (docs/examples/*.jl read them from the
+# checkout); only NEW compressed archives are blocked there.
+research/**/*.tar.gz
+research/**/*.jls
+research/**/*.jls.gz
+research/**/*.csv.gz
+docs/**/*.csv.gz
