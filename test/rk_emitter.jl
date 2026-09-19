@@ -1701,3 +1701,157 @@ end
         end)
     end
 end
+
+@testset "kernel(...) end-to-end via _brm_rk_plan" begin
+    # Phase-1a: a panel kernel is ADMITTED — `_brm_rk_plan` returns a
+    # `_RKKernelPlan` (globals as parameters + flattened per-subject columns +
+    # the kernel spec) and `_rk_emit_ast` produces the globals plus the subject
+    # plate. A grouped (LP-arg) kernel still fails closed (needs RK random
+    # effects). See `BayesianRegressionModels:rk:kernel` todo `11b8mr9`.
+    kdf = (;
+        t=[[0.0, 1.0, 2.0], [0.0, 1.0, 2.0]],
+        dose=[10.0, 20.0],
+        obs=[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+    )
+    brmi = @brm kdf begin
+        sigma ~ Exponential(1)
+        b0 ~ Normal(0, 1)
+        pred ~ kernel(t, dose, obs) do ts, d, yy
+            mu = b0 .* d .* ts
+            yy ~ Normal(mu, sigma)
+            mu
+        end
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    @test plan isa BRM._RKKernelPlan
+    @test plan.kernel.result === :pred
+    @test Set(p.name for p in plan.parameters) == Set([:sigma, :b0])
+    @test plan.obs.family === :gaussian
+    # flattened bind layout: vector slices -> n_sub*T = 6; scalar -> n_sub = 2
+    @test length(plan.columns[:t]) == 6
+    @test length(plan.columns[:obs]) == 6
+    @test length(plan.columns[:dose]) == 2
+    @test plan.columns[:t] == [0.0, 1.0, 2.0, 0.0, 1.0, 2.0]   # flat T-blocked
+    # full AST: globals as top-level `~`, then the subject plate as the last stmt
+    ast = BRM._rk_emit_ast(plan)
+    @test Meta.isexpr(ast, :block)
+    stmts = filter(s -> !(s isa LineNumberNode), ast.args)
+    @test any(s -> Meta.isexpr(s, :call) && s.args[1] === :~ && s.args[2] === :sigma,
+              stmts)
+    @test any(s -> Meta.isexpr(s, :call) && s.args[1] === :~ && s.args[2] === :b0,
+              stmts)
+    plate_stmt = last(stmts)
+    @test Meta.isexpr(plate_stmt, :call) && plate_stmt.args[1] === :~ &&
+        plate_stmt.args[2] === :pred
+
+    # grouped (LP-arg) kernel still fails closed via _brm_rk_plan
+    gbrmi = @brm df begin
+        sigma ~ Exponential(1)
+        log_CL ~ 1 + (1 | pk | g)
+        pred ~ kernel(x, log_CL) do xs, lCL
+            mu = exp(lCL) .* xs
+            yy ~ Normal(mu, sigma)
+            mu
+        end
+        y ~ Normal(pred, sigma)
+    end
+    @test_throws "per-subject data columns only" BRM._brm_rk_plan(gbrmi)
+end
+
+@testset "kernel(...) panel-mode structural extraction" begin
+    # Phase-1a: parse a ranef-free panel kernel cell into a `_RKKernelSpec`
+    # (params, per-subject data columns, subject count, cell assignments, the
+    # in-cell observation, collected result). See `11b8mr9`. `_brm_rk_plan` still
+    # fails closed on kernels (guard above); the extraction is tested directly.
+    kdf = (;
+        t=[[0.0, 1.0, 2.0], [0.0, 1.0, 2.0]],
+        dose=[10.0, 20.0],
+        obs=[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+    )
+    brmi = @brm kdf begin
+        sigma ~ Exponential(1)
+        b0 ~ Normal(0, 1)
+        pred ~ kernel(t, dose, obs) do ts, d, yy
+            mu = b0 .* d .* ts
+            yy ~ Normal(mu, sigma)
+            mu
+        end
+    end
+    ops = BRM._rk_kernel_ops(brmi)
+    @test length(ops) == 1
+    result, rhs = only(ops)
+    @test result === :pred
+    spec = BRM._rk_kernel_spec(brmi, result, rhs)
+    @test spec.result === :pred
+    @test spec.subject_count === :kernel_nsub_pred
+    @test spec.n_subjects == 2
+    @test spec.slice_params == [:ts, :d, :yy]
+    @test spec.data_columns == [:t, :dose, :obs]
+    @test [p.first for p in spec.assignments] == [:mu]
+    @test spec.obs_response === :yy
+    @test spec.collected === :mu
+    # per-slice kind (vector T-blocked vs scalar-per-subject) + T
+    @test spec.slice_kinds == [:vector, :scalar, :vector]  # t, dose, obs
+    @test spec.n_timepoints == 3
+    @test spec.timepoint_count === :kernel_T_pred
+
+    # AST emission: `pred ~ plate(t, dose, obs; subjects=kernel_nsub_pred) do ...`
+    ast = BRM._rk_emit_kernel_ast(spec)
+    @test Meta.isexpr(ast, :call) && ast.args[1] === :~ && ast.args[2] === :pred
+    do_expr = ast.args[3]
+    @test Meta.isexpr(do_expr, :do)
+    plate_call = do_expr.args[1]
+    @test Meta.isexpr(plate_call, :call) && plate_call.args[1] === :plate
+    @test plate_call.args[2] == Expr(:parameters,
+        Expr(:kw, :subjects, :kernel_nsub_pred))
+    @test collect(plate_call.args[3:end]) == [:t, :dose, :obs]
+    lam = do_expr.args[2]
+    @test lam.args[1] == Expr(:tuple, :ts, :d, :yy)
+    cellbody = filter(s -> !(s isa LineNumberNode), lam.args[2].args)
+    @test any(s -> Meta.isexpr(s, :(=)) && s.args[1] === :mu, cellbody)
+    # vector obs is emitted DOTTED: `yy .~ Normal.(mu, sigma)`
+    obs_stmt = only(s for s in cellbody
+                    if Meta.isexpr(s, :call) && s.args[1] === :.~)
+    @test obs_stmt.args[2] === :yy
+    @test Meta.isexpr(obs_stmt.args[3], :.) && obs_stmt.args[3].args[1] === :Normal
+    @test cellbody[end] === :mu
+
+    # non-Gaussian in-cell family is a follow-up (fail closed)
+    poisson_brmi = @brm kdf begin
+        pred ~ kernel(t, dose, obs) do ts, d, yy
+            mu = d .* ts
+            yy ~ Poisson(mu)
+            mu
+        end
+    end
+    presult, prhs = only(BRM._rk_kernel_ops(poisson_brmi))
+    pspec = BRM._rk_kernel_spec(poisson_brmi, presult, prhs)
+    @test_throws "only `Normal(location, scale)`" BRM._rk_emit_kernel_ast(pspec)
+
+    # a linear-predictor (grouped) arg is out of panel mode
+    gbrmi = @brm df begin
+        sigma ~ Exponential(1)
+        log_CL ~ 1 + (1 | pk | g)
+        pred ~ kernel(x, log_CL) do xs, lCL
+            mu = exp(lCL) .* xs
+            yy = mu
+            mu
+        end
+        y ~ Normal(pred, sigma)
+    end
+    gresult, grhs = only(BRM._rk_kernel_ops(gbrmi))
+    @test_throws "per-subject data columns only" BRM._rk_kernel_spec(
+        gbrmi, gresult, grhs)
+
+    # varying per-subject vector length (ragged panel) fails closed until offsets
+    rdf = (; t=[[0.0, 1.0], [0.0, 1.0, 2.0]], obs=[[0.1, 0.2], [0.3, 0.4, 0.5]])
+    rbrmi = @brm rdf begin
+        pred ~ kernel(t, obs) do ts, yy
+            mu = ts .* 2.0
+            yy ~ Normal(mu, 1.0)
+            mu
+        end
+    end
+    rresult, rrhs = only(BRM._rk_kernel_ops(rbrmi))
+    @test_throws "varying timepoint counts" BRM._rk_kernel_spec(rbrmi, rresult, rrhs)
+end
