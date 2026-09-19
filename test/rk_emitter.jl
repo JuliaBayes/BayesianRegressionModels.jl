@@ -12,8 +12,8 @@ using BayesianRegressionModels
 using CategoricalArrays: categorical
 using Distributions: Bernoulli, Beta, Binomial, Categorical, Cauchy, Dirichlet,
                      Exponential, Gamma, InverseGaussian, LocationScale,
-                     LogNormal, Multinomial, Normal, Poisson, TDist, Weibull,
-                     truncated
+                     LogNormal, Multinomial, Normal, Poisson, TDist, Uniform,
+                     Weibull, truncated
 using LogExpFunctions: logistic, logit
 using Statistics: mean
 
@@ -866,24 +866,76 @@ end
     end)
 end
 
-@testset "fail closed: exact gp awaits thin-layer dense cholesky" begin
-    # `gp(...)` converges on SBBRMI only once ReactiveKernelsPPL grows the
-    # latent non-centred construct SB emits (`_sb_gp`:
-    # `cholesky_decompose(K) * z`, `z ~ std_normal`, `rho`/`sigma` lognormal).
-    # Until then every spelling fails at the structured-term gate. When the
-    # thin layer lands it, this testset flips to plan-shape assertions.
-    @test_throws "structured term(s)" BRM._brm_rk_plan(@brm df begin
+@testset "exact gp iso plan shape" begin
+    brmi = @brm df begin
         mu ~ 1 + gp(x)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
-    end)
-    @test_throws "structured term(s)" BRM._brm_rk_plan(@brm df begin
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    predictor = only(plan.predictors)
+    @test [t.kind for t in predictor.terms] == [:intercept, :gp]
+    term = only(t for t in predictor.terms if t.kind === :gp)
+    @test term.columns == [:x]
+    @test (term.options.rho, term.options.sigma, term.options.z,
+        term.options.f) == (:rho_gp, :sigma_gp, :z_gp, :f_gp)
+    @test term.options.jitter == 1e-9
+    @test term.options.rho_param.family === :LogNormal
+    @test term.options.rho_param.args == (0.0, 1.0)
+    @test term.options.sigma_param.family === :LogNormal
+    @test term.options.sigma_param.args == (0.0, 1.0)
+    @test plan.columns[:x] == df.x
+    # Hypers ride the term, not plan.parameters (topo order: the AST
+    # preamble emits them before the predictor affine).
+    @test [p.name for p in plan.parameters] == [:s]
+    # Explicit hyper priors lower onto the term's sampled params.
+    brmi = @brm df begin
+        mu ~ 1 + gp(x)
+        length_scale(:, gp(x)) ~ Gamma(2, 1)
+        sd(:, gp(x)) ~ Exponential(2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    term = only(t for t in only(plan.predictors).terms if t.kind === :gp)
+    @test (term.options.rho_param.family, term.options.rho_param.args) ==
+        (:Gamma, (2.0, 1.0))
+    @test (term.options.sigma_param.family,
+        term.options.sigma_param.args) == (:Exponential, (2.0,))
+    # Generated names disambiguate against user parameters.
+    brmi = @brm df begin
+        mu ~ 1 + gp(x)
+        rho_gp ~ Normal(0, 1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    term = only(t for t in only(plan.predictors).terms if t.kind === :gp)
+    @test (term.options.rho, term.options.sigma, term.options.z,
+        term.options.f) == (:rho_gp2, :sigma_gp2, :z_gp2, :f_gp2)
+end
+
+@testset "fail closed: exact gp sequenced spellings" begin
+    # Aniso, multi-axis, periodic, and Uniform hyper priors stay closed
+    # until the thin-layer surface sequences them.
+    @test_throws "anisotropic or multi-axis" BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + gp(x, z; iso=false)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    @test_throws "structured term(s)" BRM._brm_rk_plan(@brm df begin
+    @test_throws "anisotropic or multi-axis" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + gp(x, z)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test_throws "cov=:periodic" BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + gp(x; cov=:periodic, period=1.0)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test_throws "Uniform" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + gp(x)
+        length_scale(:, gp(x)) ~ Uniform(0.5, 2.0)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
