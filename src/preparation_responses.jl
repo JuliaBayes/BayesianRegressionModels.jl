@@ -87,8 +87,12 @@ function _brm_ordinal_discrimination(raw; prefix="BRM")
     raw
 end
 
+# Stage-major packing: flat[(k-1)*p+j] is the stage-k, term-j
+# coefficient, matching SB-Stan's `array[n_cut] vector[n_terms]` runtime
+# layout. A plain `reshape(beta, n_cut, p)` would read term-major and
+# diverge from SB for p>1 (snag brm-threshold-et-0f516c0c).
 _brm_threshold_eta(eta, columns, beta, n_cut) =
-    eta .+ reshape(beta, n_cut, length(columns)) * collect(columns)
+    eta .+ permutedims(reshape(beta, length(columns), n_cut)) * collect(columns)
 
 _brm_prepare_response(target, rhs::ExprColumn, raw; training=nothing) =
     _brm_prepare_response(getf(rhs), target, rhs, raw; training)
