@@ -117,6 +117,24 @@ function _rk_ast_factor_prior(coef::Symbol, col::Symbol,
         _rk_ast_dotted(:Normal, location, scale))
 end
 
+# Scale use-site: a scalar scale passes through; a distributional scale
+# predictor inverts its link exactly like a location predictor (`exp.` for
+# log) so the response always reads the constrained vector.
+function _rk_ast_scale_use(response::_RKLikelihoodSpec,
+        rename::Dict{Symbol,Symbol}, predictor_link::Dict{Symbol,Symbol})
+    name = response.scale_predictor
+    name === nothing && return response.scale
+    response.scale === nothing || error(
+        "RK backend: internal: response `$(response.response)` carries " *
+        "both a scalar scale and a scale predictor")
+    link = predictor_link[name]
+    use = get(rename, name, name)
+    link === :identity && return use
+    link === :log && return _rk_ast_dotted(:exp, use)
+    link === :logit && return _rk_ast_dotted(:logistic, use)
+    error("RK backend: internal: scale predictor `$name` has link `$link`")
+end
+
 # The inverse-link spelling (`Bernoulli.(logistic.(η))`,
 # `Poisson.(exp.(η))`, …) is what the `@rkppl` surface takes; the thin
 # layer recovers the link-native HAVE from it — the lowered
@@ -124,10 +142,11 @@ end
 # direct serializer produced, on all six slice-1 families (verified
 # behaviorally against `lower_rkppl`, not assumed).
 function _rk_ast_response_dist(response::_RKLikelihoodSpec,
-        rename::Dict{Symbol,Symbol})
+        rename::Dict{Symbol,Symbol}, predictor_link::Dict{Symbol,Symbol})
     predictor = get(rename, response.predictor, response.predictor)
     base = if response.family === :gaussian
-        _rk_ast_dotted(:Normal, predictor, response.scale)
+        _rk_ast_dotted(:Normal, predictor,
+            _rk_ast_scale_use(response, rename, predictor_link))
     elseif response.family === :bernoulli_logit
         # Triple 2 and triple 3 both lower to the T2 shape: the affine
         # value feeds logistic either way.
@@ -165,12 +184,14 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
             Expr(:call, :.*, Expr(:call, :.-, 1, mu_log), kappa))
     elseif response.family === :nb2_log
         _rk_ast_dotted(:NegativeBinomial2,
-            _rk_ast_dotted(:exp, predictor), response.scale)
+            _rk_ast_dotted(:exp, predictor),
+            _rk_ast_scale_use(response, rename, predictor_link))
     elseif response.family === :gamma_log
         # Mean-shape form: the plan pins both alpha positions identical,
         # so the same value emits twice.
-        _rk_ast_dotted(:Gamma, response.scale, Expr(:call, :./,
-            _rk_ast_dotted(:exp, predictor), response.scale))
+        shape = _rk_ast_scale_use(response, rename, predictor_link)
+        _rk_ast_dotted(:Gamma, shape, Expr(:call, :./,
+            _rk_ast_dotted(:exp, predictor), shape))
     elseif response.family === :categorical_logit
         # Reference-coded: K−1 non-reference etas, class 1 the implicit
         # zero reference (class order follows predictor order).
@@ -393,9 +414,11 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         push!(stmts, Expr(:(=), assignment.name,
             _rk_lower_assignment_expr(assignment.expression, assignment.name)))
     end
+    predictor_link = Dict(spec.name => spec.link for spec in plan.predictors)
     for response in plan.responses
         push!(stmts, Expr(:call, :.~,
-            response.response, _rk_ast_response_dist(response, rename)))
+            response.response,
+            _rk_ast_response_dist(response, rename, predictor_link)))
     end
     Expr(:block, stmts...)
 end
