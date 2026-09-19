@@ -2548,7 +2548,7 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
     _rk_gate_cross_identified!(
         terms, spines, derived, context.data, target, has_intercept)
     any(t -> t.kind !== :offset, terms) || !isempty(spline_raw) ||
-        !isempty(hsgp_raw) ||
+        !isempty(gp_raw) || !isempty(hsgp_raw) ||
         return _rk_plan_offset_only_predictor(
         brmi, context, target, ordinary, available, link, terms, derived)
     geometry = _brm_prepare_predictor_geometry(

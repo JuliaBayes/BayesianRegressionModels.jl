@@ -914,6 +914,14 @@ end
     term = only(t for t in only(plan.predictors).terms if t.kind === :gp)
     @test (term.options.rho, term.options.sigma, term.options.z,
         term.options.f) == (:rho_gp2, :sigma_gp2, :z_gp2, :f_gp2)
+    # A gp-only predictor plans (no ordinary terms required).
+    brmi = @brm df begin
+        mu ~ gp(x)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    @test [t.kind for t in only(plan.predictors).terms] == [:gp]
 end
 
 @testset "fail closed: exact gp sequenced spellings" begin
@@ -937,6 +945,13 @@ end
     @test_throws "Uniform" BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + gp(x)
         length_scale(:, gp(x)) ~ Uniform(0.5, 2.0)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # A gp-only sequenced spelling fails closed with RK attribution, not
+    # the offset-only internal error.
+    @test_throws "anisotropic or multi-axis" BRM._brm_rk_plan(@brm df begin
+        mu ~ gp(x, z)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
