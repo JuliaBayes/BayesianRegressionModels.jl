@@ -199,7 +199,16 @@
         "bytes": 768871,
         "sha256": "f9c45e07694321fba4bac4835bb87084a32fa8e57dbcde9728d5a6c0935aa296"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/eb085b370871fd08.bin",
+        "bytes": 12635971,
+        "sha256": "9b1df40d8d64428f06b207611ef38af65e777df6feda3434f3a3bc417d8194f0"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "air-brms-whmc-cluster-independent-v1.tar.gz",
@@ -316,7 +325,16 @@
         "bytes": 279,
         "sha256": "5eb35f4b3586b32f463663b766f1652a6bff78e42d70d464e5edcf0234111044"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/36431e06c39fe134.bin",
+        "bytes": 4473854,
+        "sha256": "825d9a1f08ec130a30e8b06954e45f3ebc9f6d46b7cfa20b6a677544f8be2b41"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "air-summary-cluster-independent-v1.tar.gz",
@@ -418,7 +436,16 @@
         "bytes": 256019,
         "sha256": "6964309cfef053f59ab6c0906894a4cb62a4b77057b09e7e7aa80bd8e038d929"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/764b1186b3cbe0b5.bin",
+        "bytes": 1760902,
+        "sha256": "f4d8723907778a2b0896b090902377c5905e218951e62bc367efb998b57e460f"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "air-native-cluster-independent-v1-ordinary_ncp.tar.gz",
@@ -495,7 +522,16 @@
         "bytes": 1304817,
         "sha256": "09acf337b48adbd8d6fdd0cfec8a9def3ee33d91aebde56175c9d9dcc7b05797"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/682273fad71e44ba.bin",
+        "bytes": 2181649,
+        "sha256": "72fe4057d285b37f269f7f62fddff6b22d14dbb3bdae837655b239aa4f9a72d9"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "air-native-cluster-independent-v1-s2z_cp.tar.gz",
@@ -572,7 +608,16 @@
         "bytes": 2205505,
         "sha256": "058a0e7438ce531be3313170f056e7e8ce7bef73c043c92814eeff0edfb6b230"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/07e75096827497a0.bin",
+        "bytes": 3242464,
+        "sha256": "49af53e301b62a6495bdfe90c957f8138e5dd9fc03c636bbbcb257239334e1d0"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "air-native-cluster-independent-v1-s2z_ncp.tar.gz",
@@ -649,7 +694,16 @@
         "bytes": 2203656,
         "sha256": "0a739799392577f4458e27fa7b78943df5082d9bee17f23b898fcf881c966e98"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/40a2e2beeb6607dd.bin",
+        "bytes": 3243119,
+        "sha256": "b0d1b437748f00a84564cbdc343726943e83b64d01eb1a4d55c0ab746c2bfd99"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "air-native-cluster-independent-v1-s2z_auto.tar.gz",
@@ -746,7 +800,16 @@
         "bytes": 2740963,
         "sha256": "be11f4fc72bfb459452f4efbee9d1783dfd87a438ef5cfed59503dfd4dbc5fea"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/c74cd251d0e20c19.bin",
+        "bytes": 4022032,
+        "sha256": "eda68991c30ddba96da12c445a40f88ea1095b97370b944709f9d0f8262ae384"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "air-totals-cluster-intercept-v1.tar.gz",
@@ -948,7 +1011,16 @@
         "bytes": 480610,
         "sha256": "e015f49f29e8f8f0db3abf6c41a42774f1488daee1f2e57c7178e5928e18b4d7"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/7b3c19dcbe1d15a3.bin",
+        "bytes": 7697032,
+        "sha256": "890750abc567d5bf71b6619bd75fd54ff893b817b58ecbe75f44f1c2293ea16c"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "air-brms-whmc-cluster-intercept-v1.tar.gz",
@@ -1065,7 +1137,16 @@
         "bytes": 276,
         "sha256": "0b4967cd5026217598a3348b61dfe1220c7086c4333652ac7135a133f8c7974c"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/e4ac53d142483a56.bin",
+        "bytes": 2724318,
+        "sha256": "48f295e3f8e38ac8cbc6d54073f8231089442f99d2707ac99794351051838226"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "air-summary-cluster-intercept-v1.tar.gz",
@@ -1167,7 +1248,16 @@
         "bytes": 160019,
         "sha256": "aabfd86d843dfa766d95b13380181230390bfa4d41cf545e2ac467a59a98d719"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/ba8143d8efb9b6cd.bin",
+        "bytes": 1046189,
+        "sha256": "6b6747731cf7ec0a85fe0948c0d2afe1cec1e54195d3f1c73a55b0267abd4f40"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "air-native-cluster-intercept-v1-ordinary_ncp.tar.gz",
@@ -1244,7 +1334,16 @@
         "bytes": 829448,
         "sha256": "565ffe2ffa64e355ac0f10680ef05ef2b3faae0279b700adcd7f9a6cfdd26449"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/9523cd1389f48078.bin",
+        "bytes": 1429885,
+        "sha256": "2db41a44f28e089e800bc281f2ad5b7a2cabaf55a8b7cd53ff1ea5f2d2cd960e"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "air-native-cluster-intercept-v1-s2z_cp.tar.gz",
@@ -1321,7 +1420,16 @@
         "bytes": 1557523,
         "sha256": "840b407bbed90b0203d7310ec8a6754b680e4f7ad7be6a76aed0a3e9fa158c45"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/d3754dac5ad8082a.bin",
+        "bytes": 2150186,
+        "sha256": "e01ea57b993e69daacee0a19c2bccb1bf9ae813000e9a1ffc57bc7502297108f"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "air-native-cluster-intercept-v1-s2z_ncp.tar.gz",
@@ -1398,7 +1506,16 @@
         "bytes": 1560360,
         "sha256": "818ab8cc858fcecdac6799bb26228a7457b006e522c4d4c8124a474be4ec7a31"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/00d660f785082633.bin",
+        "bytes": 2157098,
+        "sha256": "ab43268012a20a6647fce60e3f4369ccb1ffa6ee2d168efe863c81bc6d82d559"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "air-native-cluster-intercept-v1-s2z_auto.tar.gz",
@@ -1495,6 +1612,15 @@
         "bytes": 1843969,
         "sha256": "8ba3e8bb7df6b7e1af200818ec81777a158e59c86f51c37a3d8e81c8f0542d6d"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/90822b7a14db21d7.bin",
+        "bytes": 2635825,
+        "sha256": "1d0c57723575fa92ffbf53f78343979c4b1ce2833d5f853a25b66996d69f9de5"
+      }
+    ],
+    "complete": true
   }
 ]

@@ -194,7 +194,22 @@
         "bytes": 2161450,
         "sha256": "c924dc36f4f7873beb7a0376bd54306dd9333d2244572cafe856a2742748a04d"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/03a413c3ff96387c.bin",
+        "bytes": 20971520,
+        "sha256": "80d39aa3d80b34b3d60b6dbd2f957b14f415f02375938265cdcb7e8039aa899b"
+      },
+      {
+        "index": 1,
+        "path": "/home/niko/.local/state/kb-agents/uploads/f554441dec7772c8.bin",
+        "bytes": 8855522,
+        "sha256": "7990fd04793df2175659b6d7b4c08b9ff29c05ad0f0f4c360f0e6cd3d7de305f"
+      }
+    ],
+    "complete": true
   },
   {
     "archive": "pupil3-builtin-brms-summary-v1.tar.gz",
@@ -341,6 +356,15 @@
         "bytes": 292,
         "sha256": "8733b453246c1688b0dbe3de334a9df5e61f4e0096f564232a83f26f078eb5c9"
       }
-    ]
+    ],
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/784e7c4d55f2fbf1.bin",
+        "bytes": 6119183,
+        "sha256": "668a230e222a6d383ffd6f7266ea30b9aecb870d0458357fa840e4b64e0ee922"
+      }
+    ],
+    "complete": true
   }
 ]
