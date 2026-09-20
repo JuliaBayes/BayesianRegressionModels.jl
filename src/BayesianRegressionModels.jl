@@ -56,6 +56,7 @@ include("total_effects_plan.jl")
 # per-cell Fisher reliability candidate. Shared by SBBRMI emission, the
 # offline selector and audits; Stan codegen arrives with the planner.
 include("s2z_kernel.jl")
+include("s2z_plan.jl")
 
 # BRMDescriptor — ONE authoritative executable semantic model descriptor.
 # Collapses the GenerativePlan (what BRM emitted), introspection.jl (the
@@ -96,6 +97,8 @@ export @brm, @n, @x, @getproperty
 export assign, effect, r2d2, doublepipe, gr, mm, gp, offset, zscale, center, standardize, protect, factor
 export LKJCovarianceFactor, MvNormalCholesky
 export Flat, TotalEffectBlock, total_effect_blocks, recover_population_draws, select_total_centeredness
+export S2ZEffectBlock, s2z_effect_blocks, recover_s2z_draws
+export brm_s2z_contrast, brm_s2z_theta, brm_s2z_deviations, brm_s2z_effects, brm_s2z_recover_rng
 export brm_total, brm_total_recover_rng, brm_total_deviations
 export weighted, AbstractWeights, AnalyticWeights, FrequencyWeights,
        ProbabilityWeights, UnitWeights, Weights,

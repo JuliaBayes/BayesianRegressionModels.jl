@@ -709,6 +709,9 @@ function population_draws(model, draws::AbstractMatrix, unc_names; groups,
                           rng::Random.AbstractRNG=Random.default_rng())
     _ranef_check_draws(draws, unc_names)
     selected = Set(groups isa Symbol ? (groups,) : groups)
+    s2z_hit = filter(b -> b.group in selected, s2z_effect_blocks(model))
+    isempty(s2z_hit) || throw(ArgumentError(
+        "population draws for S2Z block(s) $(join(sort!(collect(Set(b.group for b in s2z_hit))), ", ")) need recovery-aware population projection, which is not implemented yet"))
     total_blocks = filter(b -> b.group in selected,total_effect_blocks(model))
     remaining = setdiff(selected,Set(b.group for b in total_blocks))
     blocks = isempty(remaining) ? RanefBlock[] : _ranef_select(ranef_blocks(model), remaining)
@@ -830,6 +833,9 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
     blocks_to   = ranef_blocks(to)
     totals_from = total_effect_blocks(from)
     totals_to = total_effect_blocks(to)
+    (isempty(s2z_effect_blocks(from)) && isempty(s2z_effect_blocks(to))) ||
+        throw(ArgumentError(
+            "transport_draws does not support S2Z blocks yet; recovery-aware draw transport is not implemented"))
     known_groups = Set{Symbol}()
     union!(known_groups,(b.group for b in totals_from))
     for b in blocks_from
