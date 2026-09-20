@@ -667,20 +667,55 @@ end
                 Expr(:call, :StoppingRatio), Expr(:call, :ProbitLink),
                 :eta))),
             :slot)) in prog.defs
-    # Ordinal extras fail closed at plan (the AST lowering spells
-    # `Ordinal.(structure, link, eta)` only — thin-layer surface gap).
-    extras = try
-        BRM._brm_rk_plan(@brm df begin
-            eta ~ 0 + x
-            c ~ Ordinal(StoppingRatio(), LogitLink(), eta;
-                discrimination=2.0, per_threshold=(z,))
-        end)
-        nothing
-    catch error
-        error
+    # Ordinal extras ride plan-level: the response keeps the submodel
+    # call spelling with no extra statements or defs (thresholds and
+    # their coefs stay implicit).
+    brmi = @brm df begin
+        eta ~ 0 + x
+        c ~ Ordinal(StoppingRatio(), LogitLink(), eta;
+            discrimination=2.0, per_threshold=(z,))
     end
-    @test extras isa ErrorException
-    @test occursin("surface support", extras.msg)
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test prog.main.args[end] == Expr(:call, :~, :c,
+        Expr(:call, :ordinal_stopping_logit_glm, :eta))
+    @test length(prog.defs) == 2
+    @test all(prog.main.args) do stmt
+        !(stmt isa Expr && stmt.head === :call && length(stmt.args) >= 2 &&
+            stmt.args[2] === :c_threshold_beta)
+    end
+    @test all(prog.defs) do d
+        all(d.args[2].args) do stmt
+            !(stmt isa Expr && stmt.head === :call &&
+                length(stmt.args) >= 2 && stmt.args[2] === :c_threshold_beta)
+        end
+    end
+    # A modeled scale skips the AST entirely (no affine, no priors, no
+    # submodel def — the extension translates it plan-level); the
+    # location side still emits.
+    brmi = @brm df begin
+        eta ~ 0 + x
+        log(disc) ~ 0 + x
+        c ~ Ordinal(Cumulative(), LogitLink(), eta; discrimination=disc)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test prog.main.args[end] == Expr(:call, :~, :c,
+        Expr(:call, :ordinal_cumulative_logit_glm, :eta))
+    @test length(prog.defs) == 2
+    @test all(prog.defs) do d
+        d.args[1].args[1] !== :popefs_disc
+    end
+    defined = Symbol[]
+    for stmt in prog.main.args
+        stmt isa Expr || continue
+        if stmt.head === :(=) && stmt.args[1] isa Symbol
+            push!(defined, stmt.args[1])
+        elseif stmt.head === :call && !isempty(stmt.args) &&
+                stmt.args[1] === :(~) && stmt.args[2] isa Symbol
+            push!(defined, stmt.args[2])
+        end
+    end
+    @test :eta in defined
+    @test :disc ∉ defined
     # Shared-simplex multinomial + Dirichlet statement.
     brmi = @brm df begin
         s ~ Dirichlet(3, 1.0)

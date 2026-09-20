@@ -16,10 +16,160 @@ const BRM = BayesianRegressionModels
 # was built from — there is no parallel direct serializer to drift
 # (the retired one did: factor term options and the preserved Binomial
 # triple-3 are both rejected from hand-built plans yet accepted from
-# the AST route). Kernel plans ride the same route; until the
-# thin-layer KernelPlate reader lands, `lower_rkppl`/`build_kernel`
+# the AST route). Ordinal extras are the one plan-level patch: the
+# surface spells `Ordinal` with three positionals only, so after
+# lowering the extension rebuilds ordinal responses carrying extras,
+# translates modeled-scale predictors (which the AST skips — they have
+# no response use-site), and appends the per-threshold coefficient
+# vectors; `bind_data` then validates the patched plan with the full
+# thin-layer suite. Kernel plans ride the same route; until
+# the thin-layer KernelPlate reader lands, `lower_rkppl`/`build_kernel`
 # fail closed with thin-layer attribution (leaf 14bv4nq).
 const _RK_PLAN_TYPES = Union{BRM._RKStructuralPlan,BRM._RKKernelPlan}
+
+# Population term kinds a modeled ordinal scale admits (the planner gates
+# the same set; anything else is an internal error here).
+const _RK_PPL_TERM = Dict{Symbol,TermKind}(
+    :intercept => InterceptTerm,
+    :continuous => ContinuousTerm,
+    :factor => FactorTerm,
+    :offset => OffsetTerm,
+)
+
+# The LevelMap subset a scale factor term's options select: full cover,
+# or every observed position but the reference drop (edge drops as
+# ranges, middle drops as index lists — the same values the surface
+# parses from the AST subset literals).
+function _rk_ppl_levelsubset(options::NamedTuple, K::Int)
+    options.coding === :fullrank && return Colon()
+    p = options.drop
+    p == 1 && return UnitRange(2, K)
+    p == K && return UnitRange(1, K - 1)
+    return Vector{Int}([1:p-1; p+1:K])
+end
+
+# Discrimination symbols naming a planned predictor (predictor-first,
+# mirroring the planner): the modeled scales, deduped in plan order.
+function _rk_ordinal_scale_names(plan::BRM._RKStructuralPlan)
+    scales = Symbol[]
+    for response in plan.responses
+        d = response.discrimination
+        d isa Symbol || continue
+        any(p -> p.name === d, plan.predictors) || continue
+        d in scales || push!(scales, d)
+    end
+    scales
+end
+
+_rk_response_wants_extras(response::BRM._RKLikelihoodSpec) =
+    response.discrimination !== nothing ||
+    !isempty(response.threshold_columns) ||
+    response.threshold_coefs !== nothing
+
+function _rk_patch_ordinal_response(lowered::LikelihoodSpec,
+        planned::BRM._RKLikelihoodSpec)
+    LikelihoodSpec(lowered.family, lowered.link, lowered.response,
+        lowered.predictor, lowered.scale, lowered.weights, lowered.evidence,
+        lowered.label, lowered.trials, lowered.range;
+        n_levels = lowered.n_levels, thresholds = lowered.thresholds,
+        extra_predictors = lowered.extra_predictors,
+        count_columns = lowered.count_columns,
+        ordinal_structure = lowered.ordinal_structure,
+        discrimination = planned.discrimination,
+        threshold_columns = planned.threshold_columns,
+        threshold_coefs = planned.threshold_coefs)
+end
+
+function _rk_patch_scale_predictor!(predictors::Vector{PredictorSpec},
+        priors::Vector{PopulationPrior}, levelmaps::Vector{LevelMap},
+        plan::BRM._RKStructuralPlan, sname::Symbol)
+    any(p -> p.name === sname, predictors) &&
+        error("RK backend: internal: scale predictor `$sname` already " *
+              "lowered (a modeled scale feeds no response slot)")
+    spec = only(p for p in plan.predictors if p.name === sname)
+    spec.link === :log ||
+        error("RK backend: internal: scale predictor `$sname` has link " *
+              "`$(spec.link)` (the planner gates `log`)")
+    terms = map(spec.terms) do term
+        kind = get(_RK_PPL_TERM, term.kind, nothing)
+        kind === nothing &&
+            error("RK backend: internal: scale predictor `$sname` term " *
+                  "kind `$(term.kind)` (the planner gates population terms)")
+        # Factor sizing lives in the LevelMap; terms take no options.
+        TermSpec(kind, term.columns, NamedTuple(), term.addressee, term.label)
+    end
+    push!(predictors, PredictorSpec(spec.name, LogLink, terms, spec.label))
+    for prior in plan.population_priors
+        prior.predictor === sname || continue
+        push!(priors, PopulationPrior(prior.predictor, prior.addressee,
+            prior.location, prior.scale))
+    end
+    for term in spec.terms
+        term.kind === :factor || continue
+        col = only(term.columns)
+        K = length(BRM._rk_grouping_levels(plan.columns[col]))
+        push!(levelmaps, LevelMap(sname, col, [], :levels,
+            _rk_ppl_levelsubset(term.options, K)))
+    end
+    nothing
+end
+
+function _rk_patch_threshold_coefs!(vectors::Vector{VectorParameter},
+        plan::BRM._RKStructuralPlan, response::BRM._RKLikelihoodSpec)
+    response.threshold_coefs === nothing && return nothing
+    spec = only(v for v in plan.vector_parameters
+        if v.name === response.threshold_coefs)
+    spec.family === :vector_normal ||
+        error("RK backend: internal: threshold coefs `$(spec.name)` " *
+              "family `$(spec.family)` (the planner gates `:vector_normal`)")
+    any(p -> p.name === spec.name, vectors) &&
+        error("RK backend: internal: threshold coefs `$(spec.name)` " *
+              "already lowered")
+    args = NamedTuple(
+        Symbol(:arg, i) => value for (i, value) in enumerate(spec.args))
+    push!(vectors, VectorParameter(
+        spec.name, spec.family, args, spec.size, spec.label))
+    nothing
+end
+
+function _rk_patch_ordinal_extras(unbound::StructuralPlan,
+        plan::BRM._RKStructuralPlan)
+    scales = _rk_ordinal_scale_names(plan)
+    any(_rk_response_wants_extras, plan.responses) || begin
+        isempty(scales) ||
+            error("RK backend: internal: scales without extras")
+        return unbound
+    end
+    by_response = Dict{Symbol,BRM._RKLikelihoodSpec}(
+        spec.response => spec for spec in plan.responses)
+    responses = map(unbound.responses) do lowered
+        planned = get(by_response, lowered.response, nothing)
+        planned === nothing &&
+            error("RK backend: internal: lowered response " *
+                  "`$(lowered.response)` matches no planned response")
+        _rk_response_wants_extras(planned) || return lowered
+        _rk_patch_ordinal_response(lowered, planned)
+    end
+    predictors = copy(unbound.predictors)
+    priors = copy(unbound.population_priors)
+    levelmaps = copy(unbound.levelmaps)
+    for sname in scales
+        _rk_patch_scale_predictor!(predictors, priors, levelmaps, plan, sname)
+    end
+    vectors = copy(unbound.vector_parameters)
+    for spec in plan.responses
+        _rk_patch_threshold_coefs!(vectors, plan, spec)
+    end
+    StructuralPlan(responses, predictors, priors, unbound.parameters,
+        unbound.assignments, unbound.columns, unbound.n_obs;
+        roles = unbound.roles, derived = unbound.derived,
+        levelmaps = levelmaps, plate_parameters = unbound.plate_parameters,
+        scans = unbound.scans, ranef_buckets = unbound.ranef_buckets,
+        vector_parameters = vectors, spline_bases = unbound.spline_bases,
+        spline_vectors = unbound.spline_vectors,
+        hsgp_bases = unbound.hsgp_bases,
+        kernel_plates = unbound.kernel_plates)
+end
 
 # Evaluate the emitted submodel defs through `@rkppl` in a FRESH module
 # per lowering (defs differ per model — a shared module would leak stale
@@ -39,7 +189,7 @@ function _rk_translated_plan(plan::BRM._RKStructuralPlan)
     emitted = BRM._rk_emit_ast(plan)
     unbound = lower_rkppl(emitted.main,
         Tuple(sort!(collect(keys(plan.columns)))); mod=_rk_emit_module(emitted))
-    bind_data(unbound, plan.columns)
+    bind_data(_rk_patch_ordinal_extras(unbound, plan), plan.columns)
 end
 
 # Kernel plans additionally bind the plate dims (subjects/timepoints) the

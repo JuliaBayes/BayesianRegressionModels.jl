@@ -72,9 +72,10 @@ rev = "7aed40b18bd4cdabb75330f285d5c9b355575ab9"
 [sources.ReactiveKernels]
 url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # 86e5265 (2026-09-19, main): v12 PPL primitives — ordinal modeled
-# latent scale, mo/mo1 simplex (peer todo 1d9d0cy; the surface BRM mo/mo1
-# emission targets), non-centered scan/ar, LKJ Cholesky log-Jacobian fix —
-# on top of the KernelPlate-reader floor (50ef06e).
+# latent scale (the surface the BRM ordinal discrimination/per_threshold
+# extras target), mo/mo1 simplex (peer todo 1d9d0cy; the surface BRM
+# mo/mo1 emission targets), non-centered scan/ar, LKJ Cholesky
+# log-Jacobian fix — on top of the KernelPlate-reader floor (50ef06e).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
