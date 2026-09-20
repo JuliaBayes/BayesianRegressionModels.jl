@@ -207,7 +207,7 @@ end
 
 struct _RKRanefBucket
     id::Union{Nothing,Symbol}
-    group::Symbol # bound grouping column (raw, or <group>_idx codes)
+    group::Symbol # bound grouping column (raw; crossed strings if categorical)
     kind::Symbol # :intercept1 | :slope1 | :correlated
     margins::Vector{_RKRanefMargin}
     slices::Vector{Tuple{Symbol,UnitRange{Int}}}
@@ -1008,7 +1008,18 @@ end
 
 # Factor columns cross as plain value vectors; a `CategoricalVector`
 # crosses string-normalized (the thin layer's `levels(g)` is observed-only
-# sort order, so declared-but-unobserved levels cannot cross).
+# sort order, so declared-but-unobserved levels cannot cross). The
+# normalization is load-bearing, not deletable preprocessing: the
+# thin-layer `_declared_codes` encoder compares bound rows against
+# stringified levels, and a non-string-leveled categorical compares
+# all-false there (`categorical([1,2]) .== "1"` is `Bool[0,0]` —
+# verified empirically 2026-09-20, todo 14pgdwz), which would silently
+# zero dummy indicators and group codes alike. The substantive
+# level/code computation already happens in-graph thin-side (bind
+# derivation + the `_ppl_gidx` encoder); only this row/level type
+# agreement stays Julia-side. (A `string()` surface word would move
+# even this; no such word exists — a possible peer follow-up, not
+# requested.)
 function _rk_factor_crossed(raw::AbstractVector)
     raw isa CA.CategoricalVector ? string.(collect(raw)) : raw
 end
@@ -2068,22 +2079,37 @@ _rk_ranef_gather_label(target, id, group) =
 function _rk_ranef_group_column!(columns::Dict{Symbol,AbstractVector},
         taken::Set{Symbol}, gname::Symbol, raw::AbstractVector, what::String)
     prefix = "RK backend"
-    if !(raw isa CA.CategoricalVector)
+    raw isa CA.CategoricalVector || begin
         columns[gname] = raw
         return gname
     end
-    # Categorical groupings cross as SB-ordered dense codes (declared
-    # numbering, mirroring SB's `<g>_idx` transport): the thin layer sorts
-    # the bound column, so codes make that sort the identity and keep
-    # numbering parity with SB.
-    _, codes = _brm_level_index(raw)
-    idx = Symbol(gname, :_idx)
-    haskey(columns, idx) && error(
-        "$prefix: $what grouping column `$gname` needs `$idx` for its " *
-        "level codes, but a raw column already uses that name; rename it")
-    push!(taken, idx)
-    columns[idx] = collect(Int, codes)
-    idx
+    # Categorical groupings bind factor-crossed strings (todo 14pgdwz/P1,
+    # DONE): the thin layer numbers them by bind-derived sort order (peer
+    # `_declared_codes`, RK >= fd1af39) — no outside-model codes, so the
+    # last REAL outside-model computation on the RK side is gone. SB
+    # numbers `CA.levels` order instead, so two shapes fail closed: a
+    # custom-ordered declaration would silently misnumber groups (fixed
+    # by the peer P2 declared-levels surface spelling,
+    # ReactiveKernels:brm todo 15a8se2), and distinct levels sharing one
+    # string form would collapse (same rule as the slope dummies below).
+    # Unobserved declared levels keep today's drop behavior on both
+    # sides (no regression, same P2).
+    crossed = _rk_factor_crossed(raw)
+    mask = .!ismissing.(raw)
+    obs_strs = Set(crossed[mask])
+    obs_lvls = Set(CA.levelcode.(raw)[mask])
+    length(obs_strs) == length(obs_lvls) || error(
+        "$prefix: $what grouping `$gname` has distinct levels with the " *
+        "same string form; the draws regime needs unambiguous levels")
+    sb_order = filter(lv -> lv in obs_strs, string.(CA.levels(raw)))
+    issorted(sb_order) || error(
+        "$prefix: $what grouping `$gname` declares custom-ordered " *
+        "levels ($(join(repr.(CA.levels(raw)), ", "))); the thin layer " *
+        "numbers groupings by sorted crossed strings — reorder the " *
+        "declaration to sorted order or await the peer declared-levels " *
+        "surface spelling (ReactiveKernels:brm P2 15a8se2)")
+    columns[gname] = crossed
+    gname
 end
 
 function _rk_ranef_dummies!(margins::Vector{_RKRanefMargin}, target::Symbol,

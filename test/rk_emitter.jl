@@ -3162,23 +3162,36 @@ end
     @test [m.z.level for m in gb.margins[2:3]] == ["b", "c"]
 end
 
-@testset "ranef categorical group codes" begin
+@testset "ranef custom-order categorical grouping fails closed" begin
     catdf = (; df...,
         g=categorical(["b", "b", "a", "a", "c", "c"]; levels=["b", "a", "c"]))
+    err = rk_plan_error(@brm catdf begin
+        mu ~ 1 + x + (1 + x | ID | g)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test err isa ErrorException
+    @test occursin("custom-ordered", err.msg)
+    @test occursin("15a8se2", err.msg)
+end
+
+@testset "ranef categorical grouping binds crossed strings" begin
+    catdf = (; df...,
+        g=categorical(["b", "b", "a", "a", "c", "c"]))
     plan = BRM._brm_rk_plan(@brm catdf begin
         mu ~ 1 + x + (1 + x | ID | g)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
     bucket = only(plan.ranef_buckets)
-    @test bucket.group === :g_idx
-    # Declared (not sorted) numbering: b->1, a->2, c->3.
-    @test plan.columns[:g_idx] == [1, 1, 2, 2, 3, 3]
-    @test bucket.label === :bucket_ID_g_idx
+    @test bucket.group === :g
+    @test plan.columns[:g] == ["b", "b", "a", "a", "c", "c"]
+    @test !haskey(plan.columns, :g_idx)
+    @test bucket.label === :bucket_ID_g
     gather = only(plan.predictors).terms[end]
-    @test gather.columns == [:g_idx]
-    @test gather.addressee === :r_mu_ID_g_idx
-    @test gather.label === :r_mu_ID_g_idx
+    @test gather.columns == [:g]
+    @test gather.addressee === :r_mu_ID_g
+    @test gather.label === :r_mu_ID_g
 end
 
 @testset "ranef multi-target ID slices" begin
