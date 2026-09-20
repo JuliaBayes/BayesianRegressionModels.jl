@@ -135,6 +135,32 @@ parameterization the partial map consumes.
 """
 function _s2z_fisher_candidate(
         infos::AbstractVector{<:AbstractMatrix{<:Real}}, sd::AbstractVector{<:Real})
+    raw = _s2z_fisher_raw(infos, sd)
+    scales = Vector{Float64}(vec(sd))
+    out = similar(raw)
+    for j in axes(raw, 1), k in axes(raw, 2)
+        out[j, k] = _s2z_rescale_rho(raw[j, k], scales[k])
+    end
+    out
+end
+
+"""
+    _s2z_fisher_raw(infos, sd) -> Matrix
+
+Per-(group, coefficient) RAW reliability in `[0, 1]` from one draw's expected
+observation information: the whitened projected posterior-vs-prior fraction
+`clamp(1 - restricted[k,k] / (1 - 1/J))` BEFORE the interpolation-weight
+rescale. `infos[j]` is group `j`'s `M x M` expected-information matrix and
+`sd` the `M` prior scales of that draw.
+
+The offline selector aggregates THIS quantity across posterior draws (median
+of within-draw group means) and rescales once at the posterior-median scale
+via [`_s2z_rescale_rho`](@ref): rescaling per draw and then taking the median
+mixes the chart nonlinearity with per-draw scale variation, which is fragile
+when the pilot is approximate (brms precursor pareto_k 1.71 / ESS 1.88).
+"""
+function _s2z_fisher_raw(
+        infos::AbstractVector{<:AbstractMatrix{<:Real}}, sd::AbstractVector{<:Real})
     J = length(infos)
     J >= 2 || throw(ArgumentError("S2Z Fisher candidates need at least two groups (J >= 2)"))
     M = length(sd)
@@ -166,8 +192,21 @@ function _s2z_fisher_candidate(
     for j in 1:J, k in 1:M
         G = L \ white[j]
         restricted = white[j][k, k] - dot(view(G, :, k), view(G, :, k))
-        raw = clamp(1 - restricted / prior_fraction, 0.0, 1.0)
-        out[j, k] = raw / (raw + (1 - raw) * scales[k])
+        out[j, k] = clamp(1 - restricted / prior_fraction, 0.0, 1.0)
     end
     out
+end
+
+"""
+    _s2z_rescale_rho(raw, sd) -> Real
+
+brms interpolation-weight chart: `raw / (raw + (1 - raw) * sd)`. Applied once
+to aggregated raw reliability at the posterior-median scale, not per draw.
+"""
+function _s2z_rescale_rho(raw::Real, sd::Real)
+    isfinite(raw) && 0 <= raw <= 1 ||
+        throw(ArgumentError("S2Z rescale needs raw reliability in [0, 1]"))
+    isfinite(sd) && sd > 0 ||
+        throw(ArgumentError("S2Z rescale needs a finite positive scale"))
+    raw / (raw + (1 - raw) * sd)
 end
