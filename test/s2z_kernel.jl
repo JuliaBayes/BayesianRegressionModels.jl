@@ -124,3 +124,36 @@ end
     @test_throws DimensionMismatch BRM._s2z_fisher_candidate(
         [fill(1.0, 2, 2) for _ in 1:2], [1.0])
 end
+
+@testset "Fisher raw/rescale split" begin
+    # Balanced M == 1 closed form: raw = K / (1 + K) with K = sd^2 * info.
+    for J in (2, 5, 20), (I, sd) in ((0.0, 1.7), (0.3, 0.4), (2.5, 1.7), (1e6, 0.9))
+        infos = [fill(I, 1, 1) for _ in 1:J]
+        raw = BRM._s2z_fisher_raw(infos, [sd])
+        @test size(raw) == (J, 1)
+        @test all(0 .<= raw .<= 1)
+        K = sd^2 * I
+        @test raw ≈ fill(K / (1 + K), J, 1) atol = 1e-10
+    end
+    # Zero information is fully raw-unreliable; overwhelming information fully raw.
+    @test all(BRM._s2z_fisher_raw([zeros(2, 2) for _ in 1:4], [1.3, 0.7]) .< 1e-12)
+    @test all(BRM._s2z_fisher_raw(
+        [fill(1e12, 2, 2) + 1e12 * I for _ in 1:4], [1.3, 0.7]) .> 1 - 1e-9)
+    # The composed candidate is bit-identical to rescaling the raw matrix.
+    J, sd = 6, [1.1, 0.6]
+    ramp = [fill(0.1 * j, 2, 2) + 0.1 * j * I for j in 1:J]
+    raw = BRM._s2z_fisher_raw(ramp, sd)
+    rho = BRM._s2z_fisher_candidate(ramp, sd)
+    @test rho == [BRM._s2z_rescale_rho(raw[j, k], sd[k]) for j in 1:J, k in 1:2]
+    # Chart endpoints, a known value, and the algebraic inverse roundtrip.
+    @test BRM._s2z_rescale_rho(0.0, 2.5) == 0.0
+    @test BRM._s2z_rescale_rho(1.0, 2.5) == 1.0
+    @test BRM._s2z_rescale_rho(0.25, 2.0) ≈ 0.25 / (0.25 + 0.75 * 2.0)
+    for (r, s) in ((0.0, 0.3), (0.2, 1.7), (0.9998, 2500.0), (1.0, 0.9))
+        rho1 = BRM._s2z_rescale_rho(r, s)
+        @test rho1 * s / (1 - rho1 + rho1 * s) ≈ r atol = 1e-12
+    end
+    @test_throws ArgumentError BRM._s2z_rescale_rho(-0.1, 1.0)
+    @test_throws ArgumentError BRM._s2z_rescale_rho(0.5, 0.0)
+    @test_throws ArgumentError BRM._s2z_fisher_raw([fill(1.0, 1, 1)], [1.0])
+end
