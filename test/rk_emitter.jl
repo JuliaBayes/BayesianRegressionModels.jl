@@ -1167,21 +1167,281 @@ end
         sigma ~ Exponential(1)
         y ~ Normal(mu, sigma)
     end)
-    # LKJ covariance-factor declaration stays closed.
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
-        mu ~ 1 + x
-        L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1))
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
-    end)
-    # Joint correlated-outcome response stays closed.
+end
+
+@testset "LKJ factor + joint plan shape" begin
     dfj = (y1=[0.5, -0.2, 0.1, 0.9, 1.4, 1.1],
            y2=[0.1, 0.3, -0.4, 0.2, 0.8, -0.1],
            x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5])
-    @test_throws ErrorException BRM._brm_rk_plan(@brm dfj begin
+    plan = BRM._brm_rk_plan(@brm dfj begin
         mu1 ~ 1 + x
         mu2 ~ 1 + x
         L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1))
+        [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
+    end)
+    spec = only(plan.responses)
+    @test spec.family === :mvnormal_cholesky
+    @test spec.link === :identity
+    @test spec.response === :y1
+    @test spec.predictor === :mu1
+    @test spec.extra_predictors == [:mu2]
+    @test spec.extra_responses == [:y2]
+    @test spec.factor === :L_res
+    @test spec.label === :brm_joint_y1__y2
+    @test spec.scale === nothing
+    @test spec.trials === nothing
+    @test spec.weights === nothing
+    stem = only(plan.parameters)
+    @test stem.name === :L_res
+    @test stem.family === :LKJCovarianceFactor
+    @test stem.args == (2, 1.0, 1.0)
+    @test stem.args[1] isa Int
+    @test [p.name for p in plan.predictors] == [:mu1, :mu2]
+    @test plan.n_obs == 6
+    @test plan.columns[:y1] == dfj.y1
+    @test plan.columns[:y2] == dfj.y2
+    @test plan.columns[:x] == dfj.x
+    # Omitted scale_prior defaults to Exponential(1); shape rides.
+    plan = BRM._brm_rk_plan(@brm dfj begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        L_res ~ LKJCovarianceFactor(2; shape=2)
+        [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
+    end)
+    @test only(plan.parameters).args == (2, 1.0, 2.0)
+    # Sampled scale hyperparameters ride the scalar-prior shape; folded
+    # const assignments plan as numbers.
+    plan = BRM._brm_rk_plan(@brm dfj begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        tau ~ Exponential(1)
+        L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(tau))
+        [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
+    end)
+    @test only(p for p in plan.parameters if p.name === :L_res).args ==
+        (2, :tau, 1.0)
+    plan = BRM._brm_rk_plan(@brm dfj begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        t = 2.0
+        L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(t))
+        [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
+    end)
+    @test only(p for p in plan.parameters if p.name === :L_res).args ==
+        (2, 2.0, 1.0)
+    # K=3: three outcomes, three means, width-3 stem.
+    df3 = merge(dfj, (; y3=[-0.3, 0.7, 0.2, -0.1, 0.4, 0.6]))
+    plan = BRM._brm_rk_plan(@brm df3 begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        mu3 ~ 1 + x
+        L3 ~ LKJCovarianceFactor(3; scale_prior=Exponential(1))
+        [y1, y2, y3] ~ MvNormalCholesky([mu1, mu2, mu3], L3)
+    end)
+    spec = only(plan.responses)
+    @test (spec.response, spec.extra_responses) == (:y1, [:y2, :y3])
+    @test (spec.predictor, spec.extra_predictors) == (:mu1, [:mu2, :mu3])
+    @test spec.factor === :L3
+    @test only(plan.parameters).args == (3, 1.0, 1.0)
+    # Mixed joint + plain responses share the one observation axis.
+    plan = BRM._brm_rk_plan(@brm df3 begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        mu3 ~ 1 + x
+        L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1))
+        s ~ Exponential(1)
+        [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
+        y3 ~ Normal(mu3, s)
+    end)
+    @test [r.family for r in plan.responses] ==
+        [:mvnormal_cholesky, :gaussian]
+    @test plan.n_obs == 6
+end
+
+@testset "LKJ factor + joint fail-closed battery" begin
+    dfj = (y1=[0.5, -0.2, 0.1, 0.9, 1.4, 1.1],
+           y2=[0.1, 0.3, -0.4, 0.2, 0.8, -0.1],
+           x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5])
+    # Non-Exponential scale priors stay closed (SB admits more; the RK
+    # slice mirrors the thin-layer Exponential-only contract).
+    @test_throws "scale prior is `Exponential" BRM._brm_rk_plan(@brm dfj begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        L_res ~ LKJCovarianceFactor(2; scale_prior=Normal(0, 1))
+        [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
+    end)
+    @test_throws "must be finite and positive" BRM._brm_rk_plan(@brm dfj begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(0))
+        [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
+    end)
+    @test_throws "must be finite and positive" BRM._brm_rk_plan(@brm dfj begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(-1))
+        [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
+    end)
+    # Shape is a literal hyperparameter.
+    @test_throws "must be finite and strictly positive" BRM._brm_rk_plan(
+        @brm dfj begin
+            mu1 ~ 1 + x
+            mu2 ~ 1 + x
+            L_res ~ LKJCovarianceFactor(2; shape=0)
+            [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
+        end)
+    @test_throws "must be a finite positive literal" BRM._brm_rk_plan(
+        @brm dfj begin
+            mu1 ~ 1 + x
+            mu2 ~ 1 + x
+            eta ~ Exponential(1)
+            L_res ~ LKJCovarianceFactor(2; shape=eta)
+            [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
+        end)
+    # Unknown keywords and bad dimensions stay closed.
+    @test_throws "accepts only" BRM._brm_rk_plan(@brm dfj begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1), df=3)
+        [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
+    end)
+    @test_throws "needs an integer dimension" BRM._brm_rk_plan(@brm dfj begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        L_res ~ LKJCovarianceFactor(0; scale_prior=Exponential(1))
+        [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
+    end)
+    # A stem no joint response uses fails (the old LKJ pin shape, now
+    # with linkage attribution).
+    @test_throws "no joint response uses" BRM._brm_rk_plan(@brm dfj begin
+        mu ~ 1 + x
+        L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1))
+        s ~ Exponential(1)
+        y1 ~ Normal(mu, s)
+    end)
+    # A K=1 stem can never link (`@brm` needs at least two outcomes).
+    @test_throws "no joint response uses" BRM._brm_rk_plan(@brm dfj begin
+        mu ~ 1 + x
+        L1 ~ LKJCovarianceFactor(1; scale_prior=Exponential(1))
+        s ~ Exponential(1)
+        y1 ~ Normal(mu, s)
+    end)
+    # Factor linkage: unknown stem, scalar-backed stem, width mismatch.
+    @test_throws "must be a sampled parameter" BRM._brm_rk_plan(@brm dfj begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_missing)
+    end)
+    @test_throws "must name an `LKJCovarianceFactor` declaration" BRM._brm_rk_plan(
+        @brm dfj begin
+            mu1 ~ 1 + x
+            mu2 ~ 1 + x
+            s ~ Exponential(1)
+            [y1, y2] ~ MvNormalCholesky([mu1, mu2], s)
+        end)
+    @test_throws "has 2 ordered outcomes but factor" BRM._brm_rk_plan(
+        @brm dfj begin
+            mu1 ~ 1 + x
+            mu2 ~ 1 + x
+            L3 ~ LKJCovarianceFactor(3; scale_prior=Exponential(1))
+            [y1, y2] ~ MvNormalCholesky([mu1, mu2], L3)
+        end)
+    # One factor per joint response.
+    df4 = merge(dfj, (; y3=[-0.3, 0.7, 0.2, -0.1, 0.4, 0.6],
+        y4=[0.2, -0.5, 0.3, 0.1, -0.2, 0.9]))
+    @test_throws "feeds two joint responses" BRM._brm_rk_plan(@brm df4 begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        mu3 ~ 1 + x
+        mu4 ~ 1 + x
+        L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1))
+        [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
+        [y3, y4] ~ MvNormalCholesky([mu3, mu4], L_res)
+    end)
+    # Means: one declared identity-link predictor per outcome.
+    @test_throws "received 1 means" BRM._brm_rk_plan(@brm dfj begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1))
+        [y1, y2] ~ MvNormalCholesky([mu1], L_res)
+    end)
+    @test_throws "repeat a predictor" BRM._brm_rk_plan(@brm dfj begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1))
+        [y1, y2] ~ MvNormalCholesky([mu1, mu1], L_res)
+    end)
+    @test_throws "not a declared linear predictor" BRM._brm_rk_plan(
+        @brm dfj begin
+            mu1 ~ 1 + x
+            mu2 ~ 1 + x
+            L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1))
+            [y1, y2] ~ MvNormalCholesky([0.0, mu2], L_res)
+        end)
+    @test_throws "not a declared linear predictor" BRM._brm_rk_plan(
+        @brm dfj begin
+            mu1 ~ 1 + x
+            mu2 ~ 1 + x
+            L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1))
+            [y1, y2] ~ MvNormalCholesky([x, mu2], L_res)
+        end)
+    @test_throws "must be identity-link" BRM._brm_rk_plan(@brm dfj begin
+        mu1 ~ 1 + x
+        log(mu2) ~ 1 + x
+        L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1))
+        [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
+    end)
+    # The joint family is joint-only both directions.
+    @test_throws "joint-only" BRM._brm_rk_plan(@brm dfj begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1))
+        y1 ~ MvNormalCholesky([mu1, mu2], L_res)
+    end)
+    @test_throws "explicit joint family" BRM._brm_rk_plan(@brm dfj begin
+        mu1 ~ 1 + x
+        s ~ Exponential(1)
+        [y1, y2] ~ Normal(mu1, s)
+    end)
+    # Row weights and bounded evidence stay closed on joint responses.
+    dfw = merge(dfj, (; w=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0]))
+    @test_throws "weights on a joint density" BRM._brm_rk_plan(@brm dfw begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1))
+        [y1, y2] ~ weighted(MvNormalCholesky([mu1, mu2], L_res), w)
+    end)
+    # Complete aligned rows: missing and non-finite outcomes fail.
+    dfm = merge(dfj, (; y2=[0.1, 0.3, missing, 0.2, 0.8, -0.1]))
+    @test_throws "contains `missing`" BRM._brm_rk_plan(@brm dfm begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1))
+        [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
+    end)
+    dfn = merge(dfj, (; y2=[0.1, 0.3, Inf, 0.2, 0.8, -0.1]))
+    @test_throws "non-finite" BRM._brm_rk_plan(@brm dfn begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1))
+        [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
+    end)
+    # Sampled scales must be scalar (vector-valued θ fails here, not
+    # thin-side).
+    @test_throws "not a scalar parameter" BRM._brm_rk_plan(@brm dfj begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        L_other ~ LKJCovarianceFactor(2; scale_prior=Exponential(1))
+        L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(L_other))
+        [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
+    end)
+    # The stem reserves its two derived thin-layer bindings.
+    @test_throws "reserves emitted binding" BRM._brm_rk_plan(@brm dfj begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1))
+        L_res_scales ~ Normal(0, 1)
+        s ~ Exponential(1)
         [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
     end)
 end

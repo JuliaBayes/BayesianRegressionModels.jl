@@ -503,6 +503,14 @@ function _rk_ast_sampled(parameter::_RKSampledParameter)
                 0, 1))
     end
     family === :Flat && return Expr(:call, :~, name, Expr(:call, :Flat))
+    if family === :LKJCovarianceFactor
+        # SB's covariance-factor declaration, decomposed thin-side into
+        # `<stem>_scales` / `<stem>_L_corr`; K/θ/η positional.
+        K, theta, eta = parameter.args
+        return Expr(:call, :~, name,
+            Expr(:call, :LKJCovarianceFactor, K,
+                Expr(:call, :Exponential, theta), eta))
+    end
     Expr(:call, :~, name, Expr(:call, family, parameter.args...))
 end
 
@@ -595,6 +603,25 @@ function _rk_ast_dar_names(plan::_RKStructuralPlan)
         push!(names, options.beta, options.sigma)
     end
     names
+end
+
+# A joint correlated-outcomes response emits the plain-`~` vector form
+# directly in main (row-grouped, never broadcast — no stream-submodel
+# def): `[y1, y2] ~ MvNormalCholesky([mu1, mu2], L)`.
+function _rk_ast_joint_response(response::_RKLikelihoodSpec,
+        rename::Dict{Symbol,Symbol})
+    outcomes = [response.response; response.extra_responses...]
+    means = [get(rename, response.predictor, response.predictor);
+        [get(rename, p, p) for p in response.extra_predictors]...]
+    stem = response.factor
+    stem === nothing && error(
+        "RK backend: internal: joint response `$(response.label)` has " *
+        "no factor stem")
+    length(outcomes) == length(means) || error(
+        "RK backend: internal: joint response `$(response.label)` has " *
+        "$(length(outcomes)) outcomes but $(length(means)) means")
+    Expr(:call, :~, Expr(:vect, outcomes...),
+        Expr(:call, :MvNormalCholesky, Expr(:vect, means...), stem))
 end
 
 function _rk_emit_ast(plan::_RKStructuralPlan)
@@ -748,6 +775,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
     end
     predictor_link = Dict(spec.name => spec.link for spec in plan.predictors)
     for response in plan.responses
+        if response.family === :mvnormal_cholesky
+            push!(stmts, _rk_ast_joint_response(response, rename))
+            continue
+        end
         defname, def, call = _rk_ast_glm_parts(
             response, rename, predictor_link, taken)
         if haskey(seen_glm, defname)
