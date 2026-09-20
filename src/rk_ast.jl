@@ -125,6 +125,11 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol})
                 Expr(:call, :hsgp, QuoteNode(term.options.id)))
         elseif term.kind === :gp
             push!(summands, term.options.f)
+        elseif term.kind === :ar
+            # Scaled scan summand: the thin layer classifies
+            # `coef .* state` as a ScanSummandTerm (SB's `ar` latent
+            # path with its free beta).
+            push!(summands, Expr(:call, :.*, coefs[index], term.options.state))
         end
     end
     length(summands) == 1 ? only(summands) :
@@ -542,6 +547,46 @@ function _rk_ast_gp_names(plan::_RKStructuralPlan)
     names
 end
 
+# An AR(1) latent path: the sampled `phi_raw ~ Normal(0, 1)`, the
+# non-centered `@scan` block the thin layer folds through RK-core
+# `scan(...)`, and the `phi = tanh(phi_raw)` stationarity map. The
+# loop bound `T` is the thin-layer data-length name (binds `n_obs`);
+# the seed + innovation shape is SB's `ar1_recurse` verbatim
+# (`u[1] = eps[1]`, `u[t] = phi*u[t-1] + eps[t]`). Shape-verified
+# against `Meta.parse` of the surface spelling.
+function _rk_ast_ar_preamble(term)
+    options = term.options
+    state, phi, phi_raw, eps =
+        options.state, options.phi, options.phi_raw, options.eps
+    setup = Expr(:call, :~,
+        Expr(:ref, state, 1), Expr(:call, :Normal, 0.0, 1.0))
+    innov = Expr(:call, :~,
+        eps, Expr(:call, :Normal, 0.0, 1.0))
+    carry = Expr(:(=), Expr(:ref, state, :t),
+        Expr(:call, :+,
+            Expr(:call, :*, phi,
+                Expr(:ref, state, Expr(:call, :-, :t, 1))),
+            eps))
+    loop = Expr(:for, Expr(:(=), :t, Expr(:call, :(:), 2, :T)),
+        Expr(:block, innov, carry))
+    scan = Expr(:macrocall, Symbol("@scan"), LineNumberNode(0),
+        Expr(:block, setup, loop))
+    Any[Expr(:call, :~, phi_raw, Expr(:call, :Normal, 0.0, 1.0)),
+        scan,
+        Expr(:(=), phi, Expr(:call, :tanh, phi_raw))]
+end
+
+function _rk_ast_ar_names(plan::_RKStructuralPlan)
+    names = Set{Symbol}()
+    for predictor in plan.predictors, term in predictor.terms
+        term.kind === :ar || continue
+        options = term.options
+        push!(names, options.state, options.phi, options.phi_raw,
+            options.eps)
+    end
+    names
+end
+
 function _rk_ast_dar_names(plan::_RKStructuralPlan)
     names = Set{Symbol}()
     for predictor in plan.predictors, term in predictor.terms
@@ -562,7 +607,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         _rk_ast_spline_ids(plan),
         _rk_ast_hsgp_ids(plan),
         _rk_ast_gp_names(plan),
-        _rk_ast_dar_names(plan))
+        _rk_ast_dar_names(plan),
+        _rk_ast_ar_names(plan))
     # A predictor sharing its name with a data column cannot keep it:
     # the program has one namespace, so the affine (definition and
     # response uses) is alpha-renamed. Unreachable via `@brm`
@@ -666,6 +712,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
                 "feeds no response")
             push!(stmts, _rk_ast_plate(options.z, response))
             push!(stmts, Expr(:(=), options.f, _rk_ast_gp_latent(term)))
+        end
+        for term in predictor.terms
+            term.kind === :ar || continue
+            append!(stmts, _rk_ast_ar_preamble(term))
         end
         if isempty(scalar_stmts)
             # No scalar coefficients (offset-only, gp-only,

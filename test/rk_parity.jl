@@ -125,6 +125,17 @@ function _layout_signature(layout)
     return [(e.kind, e.name, e.size, e.transform) for e in layout.entries]
 end
 
+# SB `ar1_recurse` verbatim (`u[1] = eps[1]`,
+# `u[t] = phi*u[t-1] + eps[t]`), over the constrained innovations.
+function _ref_ar1_path(phi, eps)
+    u = Vector{Float64}(undef, length(eps))
+    u[1] = eps[1]
+    for t in 2:length(eps)
+        u[t] = phi * u[t-1] + eps[t]
+    end
+    return u
+end
+
 _parity_cols = (;
     g = [1, 2, 1, 3, 2, 3],
     x = [0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
@@ -447,6 +458,49 @@ function _check_kernel_parity(backend::BRM.RKBRMI, u, val_oracle, grad_oracle;
     @test grad ≈ _findiff_grad(
         w -> LogDensityProblems.logdensity(problem, w), u) rtol = 1e-5 atol = 1e-7
     return value
+end
+
+@testset "rk parity ar(1) latent path" begin
+    ar_cols = (;
+        t=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        y=[0.5, -0.2, 0.1, 0.9, 1.4, 1.1],
+    )
+    brmi = @brm ar_cols begin
+        mu ~ 1 + ar(t; p=1)
+        y ~ Normal(mu, sigma)
+        effect(mu, Intercept) ~ Normal(0, 5)
+        sigma ~ Exponential(1)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 10
+    # Submodel expansion inlines the popefs body at the call site, which
+    # follows the top-level preamble — so the preamble's phi_raw precedes
+    # the expanded beta in sampled order.
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 1, :identity),
+        (:sampled, :phi_raw_ar_mu_t, 1, :identity),
+        (:sampled, :mu_b2, 1, :identity),
+        (:sampled, :sigma, 1, :exp),
+        (:scan, :_ppl_scan_z_ar_mu_t, 6, :identity),
+    ]
+    u = collect(range(-0.4, 0.4; length = layout.total))
+    nt = constrain(layout, u)
+    phi = tanh(nt.phi_raw_ar_mu_t)
+    path = _ref_ar1_path(phi, nt._ppl_scan_z_ar_mu_t)
+    ll = sum(logpdf.(Normal.(nt.mu[1] .+ nt.mu_b2 .* path, nt.sigma),
+        ar_cols.y))
+    pr = logpdf(Normal(0, 5), nt.mu[1]) +
+        logpdf(Normal(0, 1), nt.mu_b2) +
+        logpdf(Normal(0, 1), nt.phi_raw_ar_mu_t) +
+        logpdf(Exponential(1), nt.sigma) +
+        sum(logpdf.(Normal(0, 1), nt._ppl_scan_z_ar_mu_t))
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # Jacobian: sigma's exp only (betas/innovations ride identity).
+    @test logjac(layout, u) ≈ u[4]
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[4]
+    _check_parity_gradient(backend, u)
 end
 
 @testset "rk parity kernel Ex1 pk1cmt" begin

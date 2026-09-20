@@ -1147,20 +1147,15 @@ end
     @test term.options.beta == :dar_mu_t_beta_2
 end
 
-@testset "fail closed: SB long tail (me/ar, simplex/LKJ/joint)" begin
+@testset "fail closed: SB long tail (me, simplex/LKJ/joint)" begin
     # `mo1(c)` used to fail here; it plans now (thin-layer monotonic
     # surface landed, covered in "monotonic plan shape"). `dar(t)` used to
     # fail here too; it plans now (thin-layer dar surface, covered in
-    # "differenced-AR plan shape").
+    # "differenced-AR plan shape"). `ar` plans now as well (thin-layer
+    # scan-ar slice landed, covered in "ar plan shape").
     # Measurement-error latent predictor stays closed.
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + me(x, 0.5)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
-    end)
-    # AR(1) latent path stays closed.
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
-        mu ~ 1 + ar(x; p=1)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
@@ -1188,6 +1183,141 @@ end
         mu2 ~ 1 + x
         L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1))
         [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
+    end)
+end
+
+@testset "ar plan shape" begin
+    brmi = @brm df begin
+        mu ~ 1 + ar(x; p=1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    predictor = only(plan.predictors)
+    @test [t.kind for t in predictor.terms] == [:intercept, :ar]
+    term = only(t for t in predictor.terms if t.kind === :ar)
+    @test term.columns == [:x]
+    @test term.addressee === :ar_mu_x
+    @test (term.options.state, term.options.phi, term.options.phi_raw,
+        term.options.eps) ==
+        (:ar_mu_x, :phi_ar_mu_x, :phi_raw_ar_mu_x, :eps_ar_mu_x)
+    @test plan.columns[:x] == df.x
+    # AR parameters are preamble-emitted (like gp hypers): nothing lands
+    # in plan.parameters for the path itself.
+    @test [p.name for p in plan.parameters] == [:s]
+    # Default beta prior matches SB's popefs default.
+    prior = only(p for p in plan.population_priors
+        if p.addressee === :ar_mu_x)
+    @test (prior.location, prior.scale) == (0.0, 1.0)
+    # `:`-wide statements claim the latent beta exactly as SB does.
+    brmi = @brm df begin
+        mu ~ 1 + ar(x; p=1)
+        effect(mu, :) ~ Normal(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    got = Dict(p.addressee => (p.location, p.scale)
+        for p in plan.population_priors)
+    @test got == Dict(:Intercept => (0.0, 2.0), :ar_mu_x => (0.0, 2.0))
+    # The predictor-wide default loses to the predictor-specific claim.
+    brmi = @brm df begin
+        mu ~ 1 + ar(x; p=1)
+        effect(:, :) ~ Normal(1, 3)
+        effect(mu, :) ~ Normal(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    prior = only(p for p in plan.population_priors
+        if p.addressee === :ar_mu_x)
+    @test (prior.location, prior.scale) == (0.0, 2.0)
+    # Explicit addresses on the latent column stay sequenced (SB's
+    # `popcoefnames` spelling `ar_x`; the predictor-namespaced Stan
+    # spelling is not a coefficient on either side).
+    @test_throws "sequenced" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + ar(x; p=1)
+        effect(mu, ar_x) ~ Normal(0, 1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test_throws "sequenced" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + ar(x; p=1)
+        effect(:, ar_x) ~ Normal(0, 1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test_throws "not a population coefficient" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + ar(x; p=1)
+        effect(mu, ar_mu_x) ~ Normal(0, 1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Two time axes mint two states.
+    brmi = @brm df begin
+        mu ~ 1 + ar(x; p=1) + ar(z; p=1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    states = [t.options.state for t in only(plan.predictors).terms
+        if t.kind === :ar]
+    @test states == [:ar_mu_x, :ar_mu_z]
+    # ... and an exact duplicate fails closed exactly as SB does
+    # (its deterministic names collide; mo precedent).
+    @test_throws "already taken" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + ar(x; p=1) + ar(x; p=1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # The same axis on a second predictor namespaces by predictor.
+    brmi = @brm df begin
+        mu ~ 1 + ar(x; p=1)
+        nu ~ 1 + ar(x; p=1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+        n ~ Normal(nu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    states = Set(t.options.state for p in plan.predictors for t in p.terms
+        if t.kind === :ar)
+    @test states == Set([:ar_mu_x, :ar_nu_x])
+    # p > 1 stays closed (shared preparation admits p=1 only).
+    @test_throws "p=1" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + ar(x; p=2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # A non-numeric time axis stays closed.
+    dfb = merge(df, (; flag=[true, false, true, false, true, false]))
+    @test_throws "plain numeric vector" BRM._brm_rk_plan(@brm dfb begin
+        mu ~ 1 + ar(flag; p=1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # A scan summand needs a sibling coefficient.
+    @test_throws "sibling population coefficient" BRM._brm_rk_plan(@brm df begin
+        mu ~ 0 + ar(x; p=1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test_throws "sibling population coefficient" BRM._brm_rk_plan(@brm df begin
+        mu ~ ar(x; p=1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Offsets are not coefficients.
+    @test_throws "sibling population coefficient" BRM._brm_rk_plan(@brm df begin
+        mu ~ 0 + offset(z) + ar(x; p=1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # A data column holding the deterministic name fails closed too.
+    dfc = merge(df, (; ar_mu_x=[0.5, -0.2, 0.1, 0.9, 1.4, 1.1]))
+    @test_throws "already taken" BRM._brm_rk_plan(@brm dfc begin
+        mu ~ 1 + ar_mu_x + ar(x; p=1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
     end)
 end
 

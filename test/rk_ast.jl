@@ -1045,6 +1045,69 @@ end
         "k = (4, 3), c = (1.5, 2.0), iso = false)")
 end
 
+@testset "ar AST shape" begin
+    brmi = @brm df begin
+        mu ~ 1 + ar(x; p=1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test prog isa BRM._RKEmittedProgram
+    scan = Expr(:macrocall, Symbol("@scan"), LineNumberNode(0),
+        Expr(:block,
+            Expr(:call, :~,
+                Expr(:ref, :ar_mu_x, 1),
+                Expr(:call, :Normal, 0.0, 1.0)),
+            Expr(:for, Expr(:(=), :t, Expr(:call, :(:), 2, :T)),
+                Expr(:block,
+                    Expr(:call, :~,
+                        :eps_ar_mu_x,
+                        Expr(:call, :Normal, 0.0, 1.0)),
+                    Expr(:(=), Expr(:ref, :ar_mu_x, :t),
+                        Expr(:call, :+,
+                            Expr(:call, :*,
+                                :phi_ar_mu_x,
+                                Expr(:ref, :ar_mu_x,
+                                    Expr(:call, :-, :t, 1))),
+                            :eps_ar_mu_x))))))
+    @test prog.defs == Expr[
+        Expr(:(=), Expr(:call, :popefs_mu), Expr(:block,
+            Expr(:call, :~, :b1, Expr(:call, :Normal, 0.0, 1.0)),
+            Expr(:call, :~, :b2, Expr(:call, :Normal, 0.0, 1.0)),
+            Expr(:call, :.+, :b1, Expr(:call, :.*, :b2, :ar_mu_x)))),
+        Expr(:(=), Expr(:call, :normal_id_glm, :eta, :sigma), Expr(:block,
+            Expr(:call, :.~, :slot,
+                Expr(:., :Normal, Expr(:tuple, :eta, :sigma))),
+            :slot)),
+    ]
+    @test prog.main == Expr(:block,
+        Expr(:call, :~, :phi_raw_ar_mu_x, Expr(:call, :Normal, 0.0, 1.0)),
+        scan,
+        Expr(:(=), :phi_ar_mu_x,
+            Expr(:call, :tanh, :phi_raw_ar_mu_x)),
+        Expr(:call, :~, :mu, Expr(:call, :popefs_mu)),
+        Expr(:call, :~, :s, Expr(:call, :Exponential, 1.0)),
+        Expr(:call, :~, :y, Expr(:call, :normal_id_glm, :mu, :s)))
+    # The scan block matches the parsed surface spelling exactly.
+    @test rk_strip_lines(prog.main.args[2]) == rk_parsed_surface(
+        "@scan begin\n" *
+        "ar_mu_x[1] ~ Normal(0.0, 1.0)\n" *
+        "for t in 2:T\n" *
+        "eps_ar_mu_x ~ Normal(0.0, 1.0)\n" *
+        "ar_mu_x[t] = phi_ar_mu_x * ar_mu_x[t - 1] + eps_ar_mu_x\n" *
+        "end\nend")
+    # A `:`-wide prior rides the beta's submodel-local statement.
+    brmi = @brm df begin
+        mu ~ 1 + ar(x; p=1)
+        effect(mu, :) ~ Normal(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    popefs_body = prog.defs[1].args[2].args
+    @test Expr(:call, :~, :b2, Expr(:call, :Normal, 0.0, 2.0)) in popefs_body
+end
+
 @testset "distributional scale AST" begin
     brmi = @brm df begin
         mu ~ 1 + x

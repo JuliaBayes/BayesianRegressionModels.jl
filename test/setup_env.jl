@@ -58,11 +58,13 @@ const PINS = [
     # modeled latent scale (the surface the BRM ordinal
     # discrimination/per_threshold extras target), mo/mo1 simplex (peer
     # todo 1d9d0cy; the surface BRM mo/mo1 emission targets),
-    # non-centered scan/ar, LKJ Cholesky log-Jacobian fix — on top of the
-    # KernelPlate-reader floor (50ef06e; peer todo 1q5mk32, P2
-    # execution-parity gate). The BRM-side submodel-emission flip (todo
-    # 10n4rb4) builds against this pin: the RKPPLSubmodel/_expand_submodels
-    # surface is stable here.
+    # non-centered scan/ar (ScanSummandTerm + tanh, peer todo 01x2742;
+    # the surface BRM ar emission targets), LKJ Cholesky log-Jacobian
+    # fix — on top of the KernelPlate-reader floor (50ef06e; peer todo
+    # 1q5mk32, P2 execution-parity gate). The BRM-side submodel-emission
+    # flip (todo 10n4rb4) builds against this pin: the
+    # RKPPLSubmodel/_expand_submodels surface is stable here. The
+    # BRM-side ranef corpus (test/rk_parity.jl) builds against it too.
     ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "86e52656adf70c9c1981d9964cc7278066985f13"),  # main
 ]
 
