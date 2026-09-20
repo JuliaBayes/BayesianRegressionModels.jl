@@ -38,103 +38,156 @@ function _rk_ast_coef_name(base::String, taken::Set{Symbol})
 end
 
 # Thin-layer `_ns` mirror: a submodel local `nm` under use-site LHS
-# `lhs` expands to `lhs_nm`. The emitter predicts expanded names with
-# this to reserve them in `taken` (no silent merge on collision).
+# `lhs` expands to `lhs_nm`. The emitter predicts expanded names to
+# reserve them in `taken` (no silent merge on collision); on collision
+# the predictor LHS is alpha-renamed (the def's canonical locals never
+# move, so the def stays shared).
 _rk_ast_ns(lhs::Symbol, nm::Symbol) = Symbol(lhs, :_, nm)
 
-# Mint a submodel-local spelling: the candidate must avoid `taken`
-# itself (a local shadows any same-named free outer reference in the
-# body — arguments fail loud, free names would clobber silently), must
-# avoid the def's own argument names (the thin layer rejects arg/local
-# overlap), and its expansion must avoid `taken` (no merge with an
-# existing program name). Bumps the LOCAL spelling; the expanded name
-# follows. Expanded names match the old flat spellings exactly except
-# in adversarial edges (data holding a bare `bN` column, or a renamed
-# predictor LHS whose prefix differs).
-function _rk_ast_mint_local(base::String, lhs::Symbol, taken::Set{Symbol},
-        argset::Set{Symbol})
-    candidate = Symbol(base)
-    while candidate in taken || candidate in argset ||
-            _rk_ast_ns(lhs, candidate) in taken
-        candidate = Symbol(string(candidate), "_")
+# The lattice word per affine term kind. The latent-def name is a pure
+# function of the ordered skeleton (`popefs_normal_i_c`), so same name
+# means same body across all programs: identical skeletons share one
+# def, different skeletons cannot collide. Single letters for the GLM
+# core, short words elsewhere; `rid` marks a ranef gather carrying an
+# explicit bucket id (absent-vs-present is structural — different call
+# arity — so it joins the name while the id itself rides an argument).
+function _rk_ast_popefs_word(term::_RKTermSpec)
+    kind = term.kind
+    kind === :intercept && return "i"
+    kind === :continuous && return "c"
+    kind === :factor && return "f"
+    kind === :offset && return "o"
+    kind === :spline && return "s"
+    kind === :hsgp && return "h"
+    kind === :gp && return "gp"
+    kind === :ar && return "ar"
+    kind === :me && return "me"
+    kind === :monotonic && return "mo"
+    kind === :monotonic_summand && return "mo1"
+    kind === :dar && return "dar"
+    if kind === :ranef_gather
+        return term.options.bucket_id === nothing ? "r" : "rid"
     end
-    push!(taken, _rk_ast_ns(lhs, candidate))
-    candidate
+    error("RK backend: internal: no popefs lattice word for `$kind`")
 end
 
-_rk_ast_popefs_name(predictor::Symbol) = Symbol(:popefs_, predictor)
-
-# Sorted distinct data columns the affine reads: the submodel's explicit
-# inputs (SB passes X explicitly). Outer parameters/atoms (factor coefs,
-# spline/hsgp atoms, gp latents, ranef draws) stay free references.
-function _rk_ast_popefs_args(predictor::_RKPredictorSpec)
-    cols = Set{Symbol}()
-    for term in predictor.terms
-        (term.kind === :continuous || term.kind === :factor ||
-            term.kind === :offset || term.kind === :ranef_gather ||
-            term.kind === :monotonic ||
-            term.kind === :monotonic_summand) || continue
-        union!(cols, term.columns)
+# The shared latent-def name for a predictor: family + ordered skeleton
+# words, plus the stated scalar-slot pattern (`_s1_3`) when an R2D2
+# predictor states priors on only some slots (unstated slots join the
+# simplex with no statement, so the body differs). Fully-stated bodies
+# — R2D2 or not — share one name.
+function _rk_ast_popefs_lattice(predictor::_RKPredictorSpec,
+        stated::Vector{Int}, nscalar::Int)
+    parts = Any["popefs", "normal",
+        (_rk_ast_popefs_word(t) for t in predictor.terms)...]
+    if !isempty(stated) && length(stated) != nscalar
+        push!(parts, "s" * join(sort!(copy(stated)), "_"))
     end
-    sort!(collect(cols))
+    Symbol(join(parts, "_"))
 end
 
-function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol})
+# Canonical slot assignment (a pure skeleton function): every column
+# slot gets its own `x` formal in term order (sharing a formal across
+# slots would bake a per-model dedup pattern into the body), every
+# outer reference an `f` formal (`dar` takes two), and every scalar
+# coefficient a `b` local. Scalar numbers follow the historical
+# counter — factor terms consume a number without taking a local, so
+# `1 + factor(g) + x` numbers its locals `b1, b3` exactly as before
+# (expanded posterior names are unchanged). Returns the counts plus
+# the per-term-index maps (`reff` holds a tuple for `dar`).
+function _rk_ast_popefs_slots(predictor::_RKPredictorSpec)
+    colf = Dict{Int,Symbol}()
+    reff = Dict{Int,Any}()
+    number = Dict{Int,Int}()
+    nx = 0
+    nf = 0
+    nb = 0
+    nscalar = 0
+    for (index, term) in enumerate(predictor.terms)
+        kind = term.kind
+        if kind === :continuous || kind === :factor || kind === :offset ||
+                kind === :ranef_gather || kind === :monotonic ||
+                kind === :monotonic_summand
+            nx += 1
+            colf[index] = Symbol(:x, nx)
+        end
+        if kind === :factor || kind === :monotonic ||
+                kind === :monotonic_summand || kind === :spline ||
+                kind === :hsgp || kind === :gp || kind === :ar ||
+                kind === :me
+            nf += 1
+            reff[index] = Symbol(:f, nf)
+        elseif kind === :dar
+            reff[index] = (Symbol(:f, nf + 1), Symbol(:f, nf + 2))
+            nf += 2
+        elseif kind === :ranef_gather && term.options.bucket_id !== nothing
+            nf += 1
+            reff[index] = Symbol(:f, nf)
+        end
+        if !(kind === :offset || kind === :ranef_gather ||
+                kind === :spline || kind === :hsgp || kind === :gp ||
+                kind === :dar || kind === :monotonic_summand)
+            nb += 1
+            number[index] = nb
+            kind === :factor || (nscalar += 1)
+        end
+    end
+    (; nx, nf, nb, nscalar, number, colf, reff)
+end
+
+function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol},
+        colref::Dict{Int}, refref::Dict{Int})
     summands = Any[]
     for (index, term) in enumerate(predictor.terms)
         if term.kind === :intercept
             push!(summands, coefs[index])
         elseif term.kind === :continuous
-            push!(summands, Expr(:call, :.*, coefs[index], only(term.columns)))
+            push!(summands, Expr(:call, :.*, coefs[index], colref[index]))
         elseif term.kind === :factor
             # Factor use is always bare `c[g]`; the LevelMap (full cover
             # or subset) rides the broadcast prior, and unmapped rows
             # contribute 0.
-            push!(summands, Expr(:ref, coefs[index], only(term.columns)))
+            push!(summands, Expr(:ref, refref[index], colref[index]))
         elseif term.kind === :ranef_gather
-            id = term.options.bucket_id
-            group = only(term.columns)
-            push!(summands, id === nothing ? Expr(:call, :ranef, group) :
-                Expr(:call, :ranef, QuoteNode(id), group))
+            push!(summands, term.options.bucket_id === nothing ?
+                Expr(:call, :ranef, colref[index]) :
+                Expr(:call, :ranef, refref[index], colref[index]))
         elseif term.kind === :monotonic
             # Free-beta monotonic column: `b .* mo(idx, s)` is the only
             # `mo()` shape the thin layer lowers.
             push!(summands, Expr(:call, :.*, coefs[index],
-                Expr(:call, :mo, only(term.columns),
-                    term.options.increments)))
+                Expr(:call, :mo, colref[index], refref[index])))
         elseif term.kind === :monotonic_summand
             # Beta-free direct summand, always inline like `spline(...)`.
-            push!(summands, Expr(:call, :mo1, only(term.columns),
-                term.options.increments))
+            push!(summands,
+                Expr(:call, :mo1, colref[index], refref[index]))
         elseif term.kind === :dar
             # Beta-free trajectory summand, always inline like `mo1(...)`
             # (the surface takes no axis — T is n_obs by construction).
             push!(summands, Expr(:call, :dar,
-                term.options.beta, term.options.sigma))
+                refref[index][1], refref[index][2]))
         elseif term.kind === :offset
-            push!(summands, only(term.columns))
+            push!(summands, colref[index])
         elseif term.kind === :spline
             # Direct summand, always inline: the thin layer fails an
             # assigned-then-used `spline(...)` closed (no gather alias).
-            push!(summands,
-                Expr(:call, :spline, QuoteNode(term.options.id)))
+            push!(summands, Expr(:call, :spline, refref[index]))
         elseif term.kind === :hsgp
             # Direct summand, always inline: the thin layer fails an
             # assigned-then-used `hsgp(...)` closed (no gather alias).
-            push!(summands,
-                Expr(:call, :hsgp, QuoteNode(term.options.id)))
+            push!(summands, Expr(:call, :hsgp, refref[index]))
         elseif term.kind === :gp
-            push!(summands, term.options.f)
+            push!(summands, refref[index])
         elseif term.kind === :ar
             # Scaled scan summand: the thin layer classifies
             # `coef .* state` as a ScanSummandTerm (SB's `ar` latent
             # path with its free beta).
-            push!(summands, Expr(:call, :.*, coefs[index], term.options.state))
+            push!(summands, Expr(:call, :.*, coefs[index], refref[index]))
         elseif term.kind === :me
             # Scaled latent summand: the thin layer classifies
             # `coef .* latent` as a ContinuousTerm over the plate
             # vector (SB's `me` true covariate with its free beta).
-            push!(summands, Expr(:call, :.*, coefs[index], term.options.latent))
+            push!(summands, Expr(:call, :.*, coefs[index], refref[index]))
         end
     end
     length(summands) == 1 ? only(summands) :
@@ -269,9 +322,9 @@ end
 # (`:eta`, or `:p` for simplex responses), `:scale` (the role formal,
 # possibly link-inverted), `:trials`/`:weights`/`:lower`/`:upper`
 # (formals; the call carries columns or literals so defs share across
-# values), `:extra_predictors` (renamed free refs — categorical tails
-# are per-response defs). Evidence and weights STRUCTURE (which
-# wrapper, whether weighted) still read from `response`.
+# values), `:extra_predictors`/`:count_columns` (tail/count formals).
+# Evidence and weights STRUCTURE (which wrapper, whether weighted)
+# still read from `response`.
 function _rk_ast_response_dist(response::_RKLikelihoodSpec,
         leaf::Dict{Symbol,Any})
     predictor = leaf[:predictor]
@@ -343,7 +396,7 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
     elseif response.family === :multinomial
         # Lead count column (LHS) + trials + simplex + tail count columns.
         _rk_ast_dotted(:Multinomial, leaf[:trials], predictor,
-            response.count_columns...)
+            leaf[:count_columns]...)
     elseif response.family === :categorical
         _rk_ast_dotted(:Categorical, predictor)
     end
@@ -363,13 +416,12 @@ end
 
 # The shared stream-submodel lattice name for a response: mechanical
 # `<family>_glm` (+ ordinal structure/link, + distributional-scale
-# link, + evidence, + weights), except the Gaussian identity plain
-# case, which takes SB's fused name `normal_id_glm` verbatim for
-# cross-backend grep-ability. Every structural body input joins the
-# name; value inputs (columns, literals, outer names) ride arguments,
-# so same name means same body and defs dedupe by name. Per-response
-# `glm_<response>` names (see below) prefix with `glm_` while lattice
-# names suffix with it, so the two classes cannot collide.
+# link, + evidence, + weights, + leveled class count), except the
+# Gaussian identity plain case, which takes SB's fused name
+# `normal_id_glm` verbatim for cross-backend grep-ability. Every
+# structural body input joins the name; value inputs (columns,
+# literals, outer names) ride arguments, so same name means same body
+# and defs dedupe by name.
 function _rk_ast_glm_name(response::_RKLikelihoodSpec,
         predictor_link::Dict{Symbol,Symbol})
     family = response.family
@@ -386,30 +438,40 @@ function _rk_ast_glm_name(response::_RKLikelihoodSpec,
     end
     response.evidence.kind !== :none && push!(parts, response.evidence.kind)
     response.weights !== nothing && push!(parts, :weighted)
+    if family === :categorical_logit || family === :multinomial
+        push!(parts, Symbol(:k, _rk_ast_glm_levels(response)))
+    end
     push!(parts, :glm)
     Symbol(join(parts, "_"))
 end
 
-# Categorical-logit tails and multinomial counts vary in number per
-# response, so no fixed-arity shared def fits: those responses get a
-# per-response `glm_<response>` def (same body scheme, bespoke name).
-_rk_ast_glm_defname(response::_RKLikelihoodSpec,
-        predictor_link::Dict{Symbol,Symbol}) =
-    (response.family === :categorical_logit ||
-        response.family === :multinomial) ?
-    Symbol(:glm_, response.response) :
-    _rk_ast_glm_name(response, predictor_link)
+# The class count behind a leveled response: the planned `n_levels`
+# when set, else the tail/count arity implies it (K−2 tails, K−1 tail
+# counts). A mismatch is an internal error — the name must capture
+# the body exactly.
+function _rk_ast_glm_levels(response::_RKLikelihoodSpec)
+    family = response.family
+    implied = family === :categorical_logit ?
+        length(response.extra_predictors) + 2 :
+        length(response.count_columns) + 1
+    n = response.n_levels
+    n === nothing && return implied
+    n == implied || error(
+        "RK backend: internal: response `$(response.response)` plans " *
+        "$n levels but carries $implied")
+    n
+end
 
 # Build the stream-submodel definition + use-site call for a response.
 # Formal order is fixed — location, scale role, `n`, `weights`,
-# `lower`, `upper` (absent roles skipped) — so shared defs agree by
+# `lower`, `upper`, then categorical tails (`t1..`) or multinomial
+# tail counts (`c1..`) — absent roles skipped, so shared defs agree by
 # construction. Location is `:eta` (pre-link by construction — the body
 # applies the inverse link) or `:p` for simplex responses. Missing
 # evidence sides pass ∓Inf floats; the thin layer normalizes them back
 # to nothing at bind. Returns `(defname, def, call)`.
 function _rk_ast_glm_parts(response::_RKLikelihoodSpec,
-        rename::Dict{Symbol,Symbol}, predictor_link::Dict{Symbol,Symbol},
-        taken::Set{Symbol})
+        rename::Dict{Symbol,Symbol}, predictor_link::Dict{Symbol,Symbol})
     family = response.family
     loc_formal =
         (family === :multinomial || family === :categorical) ? :p : :eta
@@ -450,19 +512,25 @@ function _rk_ast_glm_parts(response::_RKLikelihoodSpec,
         push!(callargs, response.evidence.upper)
     end
     if family === :categorical_logit
-        leaf[:extra_predictors] =
-            [get(rename, p, p) for p in response.extra_predictors]
+        tails = Symbol[Symbol(:t, i)
+            for i in 1:length(response.extra_predictors)]
+        leaf[:extra_predictors] = tails
+        append!(formals, tails)
+        append!(callargs,
+            (get(rename, p, p) for p in response.extra_predictors))
+    elseif family === :multinomial
+        counts = Symbol[Symbol(:c, i)
+            for i in 1:length(response.count_columns)]
+        leaf[:count_columns] = counts
+        append!(formals, counts)
+        append!(callargs, response.count_columns)
     end
     dist = _rk_ast_response_dist(response, leaf)
-    # The response slot: `slot` unless taken (a free tail/count ref with
-    # the same spelling would clobber under substitution).
-    slot = :slot
-    while slot in taken
-        slot = Symbol(string(slot), "_")
-    end
-    defname = _rk_ast_glm_defname(response, predictor_link)
+    # The response slot is fixed: bodies reference formals only, so no
+    # free tail/count spelling can clobber it under substitution.
+    defname = _rk_ast_glm_name(response, predictor_link)
     def = Expr(:(=), Expr(:call, defname, formals...),
-        Expr(:block, Expr(:call, :.~, slot, dist), slot))
+        Expr(:block, Expr(:call, :.~, :slot, dist), :slot))
     call = Expr(:call, :~, response.response,
         Expr(:call, defname, callargs...))
     defname, def, call
@@ -687,7 +755,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
             (response_for[response.predictor] = response.response)
     end
     defs = Expr[]
-    seen_glm = Dict{Symbol,Expr}()
+    seen = Dict{Symbol,Expr}()
     stmts = Expr[]
     for derived in plan.derived
         push!(stmts, Expr(:(=), derived.name, derived.expression))
@@ -706,34 +774,63 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         lhs = get(rename, predictor.name, predictor.name)
         r2d2 = get(r2d2s, predictor.name, nothing)
         # Scalar-coefficient terms (intercept/continuous/free-beta
-        # monotonic) become submodel locals inside a per-predictor
-        # `popefs_<pred>` latent submodel; factor terms keep top-level
-        # broadcast priors (a `c[levels(g)]` LHS is not a bare Symbol
-        # and cannot sit in a submodel body). Counter order is
-        # unchanged, so expanded names match the old flat spellings.
-        # An R2D2 predictor states a prior ONLY for explicit-Normal
-        # columns (share-0 overrides); the rest join the simplex with
-        # no statement (their scales derive at bind).
-        # Without a scalar override the affine inlines, so its scalar
-        # coefficients need program-global names (submodel locals are
-        # unreserved at top level — a data `b1` column would merge
-        # silently); with one the submodel path namespaces them.
+        # monotonic, plus the `ar`/`me` scaling coefs) become canonical
+        # `b` locals inside a SHARED lattice-named latent submodel; the
+        # name is a pure function of the ordered term skeleton, so
+        # identical skeletons share one def across all programs.
+        # Factor terms keep top-level broadcast priors (a `c[levels(g)]`
+        # LHS is not a bare Symbol and cannot sit in a submodel body)
+        # with program-global coefficient names; the affine references
+        # them through an `f` formal. Every other body input — data
+        # columns (`x`), outer references (`f`), prior locations/scales
+        # (`loc`/`s`) — rides a formal in fixed order, so the body
+        # carries no baked values. An R2D2 predictor states a prior
+        # ONLY for explicit-Normal columns (share-0 overrides); the
+        # rest join the simplex with no statement (their scales derive
+        # at bind), and the stated-slot pattern joins the def name.
+        # Without a scalar statement the affine inlines, so its scalar
+        # coefficients need program-global names; with one the submodel
+        # path namespaces them.
         flat_scalars = r2d2 !== nothing && !any(
             t -> (t.kind === :intercept || t.kind === :continuous ||
                   t.kind === :monotonic) &&
                 haskey(r2d2.overrides, t.addressee),
             predictor.terms)
-        argcols = _rk_ast_popefs_args(predictor)
-        argset = Set(argcols)
+        slots = _rk_ast_popefs_slots(predictor)
         coefs = Dict{Int,Symbol}()
+        factorcoef = Dict{Int,Symbol}()
+        colactual = Dict{Int,Any}()
+        refactual = Dict{Int,Any}()
         scalar_stmts = Expr[]
-        counter = 0
+        stated = Int[]
+        stateloc = Dict{Int,Tuple{Float64,Float64}}()
         for (index, term) in enumerate(predictor.terms)
-            (term.kind === :offset || term.kind === :ranef_gather ||
-                term.kind === :spline || term.kind === :hsgp ||
-                term.kind === :gp || term.kind === :dar ||
-                term.kind === :monotonic_summand) && continue
-            counter += 1
+            kind = term.kind
+            if haskey(slots.colf, index)
+                colactual[index] = only(term.columns)
+            end
+            if kind === :monotonic || kind === :monotonic_summand
+                refactual[index] = term.options.increments
+            elseif kind === :spline || kind === :hsgp
+                refactual[index] = QuoteNode(term.options.id)
+            elseif kind === :gp
+                refactual[index] = term.options.f
+            elseif kind === :ar
+                refactual[index] = term.options.state
+            elseif kind === :me
+                refactual[index] = term.options.latent
+            elseif kind === :dar
+                refactual[index] =
+                    (term.options.beta, term.options.sigma)
+            elseif kind === :ranef_gather &&
+                    term.options.bucket_id !== nothing
+                refactual[index] = QuoteNode(term.options.bucket_id)
+            end
+            (kind === :offset || kind === :ranef_gather ||
+                kind === :spline || kind === :hsgp ||
+                kind === :gp || kind === :dar ||
+                kind === :monotonic_summand) && continue
+            slot = slots.number[index]
             override = if r2d2 === nothing
                 key = (predictor.name, term.addressee)
                 haskey(priors, key) || error(
@@ -743,27 +840,30 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
             else
                 get(r2d2.overrides, term.addressee, nothing)
             end
-            if term.kind === :factor
+            if kind === :factor
                 col = only(term.columns)
                 K = length(_rk_grouping_levels(plan.columns[col]))
                 coef = _rk_ast_coef_name(
-                    string(predictor.name, "_b", counter), taken)
-                coefs[index] = coef
+                    string(predictor.name, "_b", slot), taken)
+                factorcoef[index] = coef
+                refactual[index] = coef
                 override === nothing || push!(stmts,
                     _rk_ast_factor_prior(coef, col, term.options, K,
                         override[1], override[2]))
             else
                 if flat_scalars
-                    coef = _rk_ast_coef_name(
-                        string(predictor.name, "_b", counter), taken)
-                    coefs[index] = coef
+                    coefs[index] = _rk_ast_coef_name(
+                        string(predictor.name, "_b", slot), taken)
                 else
-                    local_coef = _rk_ast_mint_local(
-                        string("b", counter), lhs, taken, argset)
+                    local_coef = Symbol(:b, slot)
                     coefs[index] = local_coef
-                    override === nothing || push!(scalar_stmts,
-                        Expr(:call, :~, local_coef,
-                            Expr(:call, :Normal, override[1], override[2])))
+                    if override !== nothing
+                        push!(stated, slot)
+                        stateloc[slot] = override
+                        push!(scalar_stmts, Expr(:call, :~, local_coef,
+                            Expr(:call, :Normal, Symbol(:loc, slot),
+                                Symbol(:s, slot))))
+                    end
                 end
             end
         end
@@ -804,20 +904,78 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
                 only(term.columns), options.loc, options.scale))
         end
         if isempty(scalar_stmts)
-            # No scalar coefficients (offset-only, gp-only,
+            # No scalar statements (offset-only, gp-only,
             # factor-only — or an override-free R2D2 predictor, whose
-            # coefficients all join the simplex): nothing repeated,
-            # nothing to name — the affine stays inline exactly as
-            # before.
-            push!(stmts, Expr(:(=), lhs, _rk_ast_affine(predictor, coefs)))
+            # coefficients all join the simplex): the affine stays
+            # inline over program-global names exactly as before.
+            push!(stmts, Expr(:(=), lhs,
+                _rk_ast_affine(predictor, coefs, colactual, refactual)))
         else
-            defname = _rk_ast_popefs_name(predictor.name)
+            # Canonical use-site: columns, then outer references, then
+            # prior locations/scales — the callarg order mirrors the
+            # formal order slot by slot (term order, like the
+            # assignment).
+            formals = Symbol[]
+            callargs = Any[]
+            for (index, term) in enumerate(predictor.terms)
+                haskey(slots.colf, index) || continue
+                push!(formals, slots.colf[index])
+                push!(callargs, colactual[index])
+            end
+            for (index, term) in enumerate(predictor.terms)
+                haskey(slots.reff, index) || continue
+                formal = slots.reff[index]
+                if formal isa Tuple
+                    append!(formals, formal)
+                    append!(callargs, refactual[index])
+                else
+                    push!(formals, formal)
+                    push!(callargs, refactual[index])
+                end
+            end
+            for slot in sort!(stated)
+                push!(formals, Symbol(:loc, slot), Symbol(:s, slot))
+                loc, scale = stateloc[slot]
+                push!(callargs, loc, scale)
+            end
+            # Expanded locals must avoid `taken`; on collision the LHS
+            # is alpha-renamed (the def's canonical locals never move,
+            # so the def stays shared).
+            localslots = sort!([slots.number[index]
+                for (index, term) in enumerate(predictor.terms)
+                if term.kind === :intercept || term.kind === :continuous ||
+                    term.kind === :monotonic || term.kind === :ar ||
+                    term.kind === :me])
+            if any(slot -> _rk_ast_ns(lhs, Symbol(:b, slot)) in taken,
+                    localslots)
+                fresh = Symbol(string(lhs), "_")
+                while fresh in taken || any(slot ->
+                        _rk_ast_ns(fresh, Symbol(:b, slot)) in taken,
+                        localslots)
+                    fresh = Symbol(string(fresh), "_")
+                end
+                push!(taken, fresh)
+                rename[predictor.name] = fresh
+                lhs = fresh
+            end
+            for slot in localslots
+                push!(taken, _rk_ast_ns(lhs, Symbol(:b, slot)))
+            end
+            defname =
+                _rk_ast_popefs_lattice(predictor, stated, slots.nscalar)
             body = Expr(:block, scalar_stmts...,
-                _rk_ast_affine(predictor, coefs))
-            push!(defs, Expr(:(=),
-                Expr(:call, defname, argcols...), body))
+                _rk_ast_affine(predictor, coefs, slots.colf, slots.reff))
+            def = Expr(:(=), Expr(:call, defname, formals...), body)
+            if haskey(seen, defname)
+                seen[defname] == def || error(
+                    "RK backend: internal: submodel lattice collision " *
+                    "on `$defname` (same name, different body)")
+            else
+                seen[defname] = def
+                push!(defs, def)
+            end
             push!(stmts, Expr(:call, :~, lhs,
-                Expr(:call, defname, argcols...)))
+                Expr(:call, defname, callargs...)))
         end
         r2d2 === nothing || push!(stmts, _rk_ast_r2d2_decl(r2d2, lhs))
     end
@@ -842,13 +1000,13 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
             continue
         end
         defname, def, call = _rk_ast_glm_parts(
-            response, rename, predictor_link, taken)
-        if haskey(seen_glm, defname)
-            seen_glm[defname] == def || error(
-                "RK backend: internal: glm lattice collision on " *
+            response, rename, predictor_link)
+        if haskey(seen, defname)
+            seen[defname] == def || error(
+                "RK backend: internal: submodel lattice collision on " *
                 "`$defname` (same name, different body)")
         else
-            seen_glm[defname] = def
+            seen[defname] = def
             push!(defs, def)
         end
         push!(stmts, call)
