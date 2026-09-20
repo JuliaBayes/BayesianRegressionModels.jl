@@ -146,6 +146,7 @@ _parity_cols = (;
 _parity_cols_multi = merge(_parity_cols,
     (; y2 = [0.5, 1.5, 1.0, 2.0, 2.5, 1.5]))
 _parity_cols_dummy = merge(_parity_cols, (; c = [1, 2, 2, 1, 2, 1]))
+_parity_cols_xz = merge(_parity_cols, (; z = [0.1, -0.2, 0.3, 0.4, -0.5, 0.6]))
 _parity_cols_mo = (; c = [1, 2, 3, 1, 2, 3], y = [1.0, 2.0, 1.5, 2.5, 3.0, 2.0])
 _parity_cols_r2d2 = merge(_parity_cols,
     (; z = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]))
@@ -510,6 +511,45 @@ end
     @test _rk_query(backend, :prior, u) ≈ pr
     @test _rk_query(backend, :likelihood, u) ≈ -34.557661700821690 atol = 1e-12
     @test _rk_query(backend, :prior, u) ≈ -12.267527341929741 atol = 1e-12
+    jac = u[2] + u[4] + u[5] + _lkj2_theta_jac(u[3])
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity ranef interaction" begin
+    brmi = @brm _parity_cols_xz begin
+        mu ~ 1 + (1 + x & z | g)
+        y ~ Normal(mu, sigma)
+        effect(mu, Intercept) ~ Normal(0, 5)
+        sigma ~ Exponential(1)
+    end
+    # The cross margin gathers the in-graph derived product (SB: `x .* z`).
+    bucket = only(BRM._brm_rk_plan(brmi).ranef_buckets)
+    @test bucket.kind === :correlated
+    @test [m.coefficient for m in bucket.margins] == [:Intercept, :int_x_x_z]
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 11
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 1, :identity),
+        (:sampled, :sigma, 1, :exp),
+        (:ranef_corr, :L_g, 1, :lkj),
+        (:ranef, :tau_g, 2, :exp),
+        (:ranef, :z_flat_g, 6, :identity),
+    ]
+    u = collect(range(-0.4, 0.4; length = layout.total))
+    nt = constrain(layout, u)
+    r = _ref_corr_r(_parity_cols_xz.g, nt.L_g, nt.tau_g, nt.z_flat_g,
+        [ones(6), _parity_cols_xz.x .* _parity_cols_xz.z], 1:2)
+    ll = sum(logpdf.(Normal.(nt.mu[1] .+ r, nt.sigma), _parity_cols_xz.y))
+    pr = logpdf(Normal(0, 5), nt.mu[1]) +
+        logpdf(Exponential(1), nt.sigma) +
+        _ref_lkj_k2_eta1(nt.L_g) +
+        sum(logpdf.(Normal(0, 1), nt.tau_g)) +
+        sum(logpdf.(Normal(0, 1), nt.z_flat_g))
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
     jac = u[2] + u[4] + u[5] + _lkj2_theta_jac(u[3])
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac

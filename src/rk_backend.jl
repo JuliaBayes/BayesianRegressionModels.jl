@@ -2158,9 +2158,11 @@ end
 
 function _rk_ranef_recipes!(margins::Vector{_RKRanefMargin}, lowered::Vector{Any},
         target::Symbol, data::AbstractDict,
-        columns::Dict{Symbol,AbstractVector}, what::String)
+        columns::Dict{Symbol,AbstractVector}, derived::Vector{_RKDerivedSpec},
+        taken::Set{Symbol}, what::String)
     prefix = "RK backend"
-    admitted = "`1`, continuous columns, integer/string/categorical columns"
+    admitted = "`1`, continuous columns, integer/string/categorical " *
+        "columns, continuous `&` interactions"
     for t in lowered
         if t isa Integer
             t == 1 || error(
@@ -2170,6 +2172,19 @@ function _rk_ranef_recipes!(margins::Vector{_RKRanefMargin}, lowered::Vector{Any
                 _RKRanefZRecipe(:ones, :none, nothing)))
         elseif t isa _SBCellMeansTerm
             _rk_ranef_dummies!(margins, target, t.term, columns, what, 1)
+        elseif t isa ExprColumn && getf(t) === (&)
+            # Same `&` recipe as the population path (D5a in-graph):
+            # each crossed pair is a derived `.*` definition the thin
+            # layer computes from raw columns, and the margin gathers
+            # it like any continuous Z column.
+            _rk_gate_ranef_interaction!(t, target, what, data)
+            specs, _ = _rk_interaction_columns(t, target,
+                "random-effect `&` interaction", data, columns,
+                derived, taken)
+            for (dname, _, dlabel) in specs
+                push!(margins, _RKRanefMargin(target, dlabel,
+                    _RKRanefZRecipe(:column, dname, nothing)))
+            end
         elseif t isa NamedColumn
             backing = parent(t)
             backing isa DataColumn || error(
@@ -2195,8 +2210,8 @@ function _rk_ranef_recipes!(margins::Vector{_RKRanefMargin}, lowered::Vector{Any
         else
             head = t isa ExprColumn ? "`$(nameof(getf(t)))`" : "`$t`"
             error("$prefix: $what term $head is not in the draws regime " *
-                "(admitted: $admitted; `&` interactions, `offset()`, and " *
-                "transformed slopes are deferred)")
+                "(admitted: $admitted; categorical `&` operands, " *
+                "`offset()`, and transformed slopes are deferred)")
         end
     end
     margins
@@ -2212,9 +2227,53 @@ function _rk_gate_ranef_factor!(effects, target::Symbol, what::String)
     end
 end
 
+# Ranef `&` takes continuous leaves only. SB lowers ranef crosses
+# treatment-coded (`_sb_interaction_cols!`: `2:n_levels` loops), while
+# the shared `_rk_interaction_columns` recipe expands categorical
+# leaves full-rank; admitting those would mismatch SB's Z in both
+# count and values. Categorical crosses stay fail-closed here until a
+# treatment-coded cross recipe exists — precompute numeric columns
+# outside the formula. Non-leaf data expressions pass through: the
+# shared recipe validates them, and neither side admits categorical
+# columns inside arithmetic.
+function _rk_gate_ranef_interaction!(t, target::Symbol, what::String,
+        data::AbstractDict)
+    prefix = "RK backend"
+    if t isa ExprColumn && getf(t) === (&)
+        for a in getargs(t)
+            _rk_gate_ranef_interaction!(a, target, what, data)
+        end
+        return nothing
+    end
+    if t isa ExprColumn && getf(t) === factor
+        error("$prefix: $what `factor(...)` inside `&` is not in the " *
+            "draws regime (random-effect crosses take continuous " *
+            "columns; precompute numeric columns outside the formula)")
+    end
+    if t isa ExprColumn && (getf(t) === zscale || getf(t) === center ||
+            getf(t) === standardize)
+        args = getargs(t)
+        length(args) == 1 || error(
+            "$prefix: $what `$(nameof(getf(t)))` inside `&` needs " *
+            "exactly one argument")
+        _rk_gate_ranef_interaction!(only(args), target, what, data)
+        return nothing
+    end
+    t isa NamedColumn || return nothing
+    source = name(t)
+    raw = get(data, source, nothing)
+    raw isa AbstractVector && _brm_is_categorical_data(raw) && error(
+        "$prefix: $what `&` operand `$source` is categorical, which " *
+        "is not in the draws regime (SB codes ranef crosses " *
+        "treatment-coded; precompute numeric columns outside the " *
+        "formula)")
+    return nothing
+end
+
 function _rk_lower_ranef_bucket(context, id::Union{Nothing,Symbol},
         gname::Symbol, targets::Vector{Any},
-        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol})
+        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol},
+        derived::Vector{_RKDerivedSpec})
     prefix = "RK backend"
     data = context.data
     raw = get(data, gname, nothing)
@@ -2230,7 +2289,8 @@ function _rk_lower_ranef_bucket(context, id::Union{Nothing,Symbol},
         _rk_gate_ranef_factor!(d.effects, target, what)
         lowered = _sb_ranef_lowered_terms(collect(Any, d.effects))
         before = length(margins)
-        _rk_ranef_recipes!(margins, lowered, target, data, columns, what)
+        _rk_ranef_recipes!(margins, lowered, target, data, columns,
+            derived, taken, what)
         ncols = length(margins) - before
         if ncols == 0
             # Degenerate blocks span no coefficients: plain ones are a
@@ -2258,7 +2318,8 @@ end
 
 function _rk_plan_ranef_buckets(brmi::BRMI, context,
         predictor_order::Vector{Symbol},
-        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol})
+        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol},
+        derived::Vector{_RKDerivedSpec})
     prefix = "RK backend"
     buckets = _RKRanefBucket[]
     lookup = Dict{Tuple{Symbol,Symbol,Union{Nothing,Symbol}},
@@ -2330,7 +2391,7 @@ function _rk_plan_ranef_buckets(brmi::BRMI, context,
     for key in plain_keys
         target, gname = key
         bucket = _rk_lower_ranef_bucket(context, nothing, gname,
-            Any[(target, plain_decls[key])], columns, taken)
+            Any[(target, plain_decls[key])], columns, taken, derived)
         # A `nothing` bucket is a fully degenerate plain block: record it
         # so the predictor attaches no gather (vs a missing key, which is
         # an internal error).
@@ -2341,7 +2402,7 @@ function _rk_plan_ranef_buckets(brmi::BRMI, context,
         id, gname = key
         decls = id_decls[key]
         bucket = _rk_lower_ranef_bucket(context, id, gname,
-            Any[(d.predictor, d) for d in decls], columns, taken)
+            Any[(d.predictor, d) for d in decls], columns, taken, derived)
         for d in decls
             lookup[(d.predictor, gname, id)] = bucket
         end
@@ -5306,7 +5367,7 @@ function _brm_rk_plan(brmi::BRMI)
     r2d2_specs = _RKR2D2Prior[]
     r2d2_vectors = _RKVectorParameter[]
     ranef_buckets, ranef_lookup = _rk_plan_ranef_buckets(
-        brmi, context, predictor_order, columns, taken)
+        brmi, context, predictor_order, columns, taken, derived)
     me_sources = Set{Symbol}()
     for target in predictor_order
         spec, priors, r2d2 = _rk_plan_predictor(

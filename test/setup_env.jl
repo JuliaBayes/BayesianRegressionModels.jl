@@ -65,12 +65,14 @@ const PINS = [
     # bind-time coverage validation (P1 switch: categorical groupings
     # bind crossed strings, no more `<g>_idx` codes), and the ranef
     # followers) plus vector-shaped derived locals as ranef margins
-    # (9873b0d). The me plate-vector surface (PlateParameter lowering
-    # + corpus 34_me, re-cut 8a6c36c) is on GitHub main as of
-    # fd1af39; this pin keeps the committed `rk parity me` case on the
-    # current main. (Supersedes the parked 64ccf38 pin, which never
-    # reached GitHub; the R2D2 slice itself rode 64ccf38 over the
-    # v12 floor 86e5265.)
+    # (peer todo 1x0g5yb — the surface BRM ranef-`&` emission targets;
+    # emitter-baked twin oracle + corpus 44, candidate 9873b0d). The me
+    # plate-vector surface (PlateParameter lowering + corpus 34_me,
+    # re-cut 8a6c36c) is on GitHub main as of fd1af39; this pin keeps
+    # the committed `rk parity me` case on the current main, and the
+    # hierarchical sweep (ranef `&`) on the margins surface.
+    # (Supersedes the parked 64ccf38 pin, which never reached GitHub;
+    # the R2D2 slice itself rode 64ccf38 over the v12 floor 86e5265.)
     ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "d5e8bed5a57cf6af0a73edbecb6cc9bbfd9c0c0b"),  # main
 ]
 

@@ -74,7 +74,10 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # d5e8bed (2026-09-20, main): fd1af39 (ranef `_declared_codes` in-model
 # encoder + coverage validation on top of 64ccf38 = R2D2 over v12
 # 86e5265, incl. the re-cut me plate-vector surface 8a6c36c) plus
-# vector-shaped derived locals as ranef margins (9873b0d).
+# vector-shaped derived locals as ranef margins (peer todo 1x0g5yb —
+# the surface BRM ranef-`&` emission targets; emitter-baked twin
+# oracle + corpus 44, candidate 9873b0d). Bumped for the me parity +
+# hierarchical sweep.
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
