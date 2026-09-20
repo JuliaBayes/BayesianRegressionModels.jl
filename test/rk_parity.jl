@@ -718,6 +718,55 @@ end
     _check_parity_gradient(backend, u)
 end
 
+# `me(x, sd)` measurement-error parity (thin-layer PlateParameter
+# surface, re-cut 8a6c36c, RK @ d5e8bed). SB shape per `_sb_me`
+# (src/sbimpl.jl): a length-N latent true covariate with the
+# `latent(...)` Normal prior, the LP riding it through popefs's free
+# beta, and the self-contained observation likelihood
+# `x_obs ~ normal(x_true, sd)`. The synthetic observation response
+# lowers with a width-0 `x_loc_coef` block (no free location
+# coefficient — the plate IS the mean); both betas stay in `mu_coef`.
+@testset "rk parity me(x, sd) latent" begin
+    me_cols = (;
+        x=[0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
+        y=[1.0, 2.0, 1.5, 2.5, 3.0, 2.0],
+    )
+    brmi = @brm me_cols begin
+        mu ~ 1 + me(x, 0.5)
+        latent(mu, me(x)) ~ Normal(0.5, 1.5)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 9
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+        (:coefficient, :x_loc_coef, 0, :identity),
+        (:sampled, :sigma, 1, :exp),
+        (:plate, :me_x, 6, :identity),
+    ]
+    u = collect(range(-0.4, 0.4; length = layout.total))
+    nt = constrain(layout, u)
+    b = Vector(nt.mu)
+    xt = Vector(nt.me_x)
+    @test isempty(nt.x_loc)
+    lp = b[1] .+ b[2] .* xt
+    ll = sum(logpdf.(Normal.(lp, nt.sigma), me_cols.y)) +
+        sum(logpdf.(Normal.(xt, 0.5), me_cols.x))
+    pr = logpdf(Normal(0, 1), b[1]) +
+        logpdf(Normal(0, 1), b[2]) +
+        logpdf(Exponential(1), nt.sigma) +
+        sum(logpdf.(Normal(0.5, 1.5), xt))
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # Jacobian: sigma's exp only (betas ride identity, the plate
+    # carries its Normal args directly with no transform).
+    @test logjac(layout, u) ≈ u[3]
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[3]
+    _check_parity_gradient(backend, u)
+end
+
 @testset "rk parity kernel Ex1 pk1cmt" begin
     brmi = @brm _kernel_pk1cmt_cols begin
         sigma ~ Exponential(1)
