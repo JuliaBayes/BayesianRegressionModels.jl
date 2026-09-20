@@ -130,6 +130,11 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol})
             # `coef .* state` as a ScanSummandTerm (SB's `ar` latent
             # path with its free beta).
             push!(summands, Expr(:call, :.*, coefs[index], term.options.state))
+        elseif term.kind === :me
+            # Scaled latent summand: the thin layer classifies
+            # `coef .* latent` as a ContinuousTerm over the plate
+            # vector (SB's `me` true covariate with its free beta).
+            push!(summands, Expr(:call, :.*, coefs[index], term.options.latent))
         end
     end
     length(summands) == 1 ? only(summands) :
@@ -512,6 +517,14 @@ function _rk_ast_sampled(parameter::_RKSampledParameter)
                 0, 1))
     end
     family === :Flat && return Expr(:call, :~, name, Expr(:call, :Flat))
+    if family === :LKJCovarianceFactor
+        # SB's covariance-factor declaration, decomposed thin-side into
+        # `<stem>_scales` / `<stem>_L_corr`; K/θ/η positional.
+        K, theta, eta = parameter.args
+        return Expr(:call, :~, name,
+            Expr(:call, :LKJCovarianceFactor, K,
+                Expr(:call, :Exponential, theta), eta))
+    end
     Expr(:call, :~, name, Expr(:call, family, parameter.args...))
 end
 
@@ -525,12 +538,15 @@ function _rk_ast_vector_parameter(parameter::_RKVectorParameter)
         Expr(:call, :Dirichlet, Expr(:vect, alpha...)))
 end
 
-# A GP latent's `@plate` block: `z[i] ~ Normal(0, 1)` over the using
-# response's index (length `n_obs`, like every column). The macrocall
-# carries a synthetic line node; the surface reads only `args[3]`.
-function _rk_ast_plate(name::Symbol, range::Symbol)
+# A `@plate` block: `name[i] ~ Normal(loc, scale)` over the range
+# column's index (length `n_obs`, like every column). GP latents take
+# the standardized default; `me` latents take the shared-scalar args.
+# The macrocall carries a synthetic line node; the surface reads only
+# `args[3]`.
+function _rk_ast_plate(name::Symbol, range::Symbol,
+        loc::Float64=0.0, scale::Float64=1.0)
     cell = Expr(:call, :~,
-        Expr(:ref, name, :i), Expr(:call, :Normal, 0.0, 1.0))
+        Expr(:ref, name, :i), Expr(:call, :Normal, loc, scale))
     loop = Expr(:for, Expr(:(=), :i, Expr(:call, :eachindex, range)),
         Expr(:block, cell))
     Expr(:macrocall, Symbol("@plate"), LineNumberNode(0), loop)
@@ -606,6 +622,34 @@ function _rk_ast_dar_names(plan::_RKStructuralPlan)
     names
 end
 
+# A joint correlated-outcomes response emits the plain-`~` vector form
+# directly in main (row-grouped, never broadcast — no stream-submodel
+# def): `[y1, y2] ~ MvNormalCholesky([mu1, mu2], L)`.
+function _rk_ast_joint_response(response::_RKLikelihoodSpec,
+        rename::Dict{Symbol,Symbol})
+    outcomes = [response.response; response.extra_responses...]
+    means = [get(rename, response.predictor, response.predictor);
+        [get(rename, p, p) for p in response.extra_predictors]...]
+    stem = response.factor
+    stem === nothing && error(
+        "RK backend: internal: joint response `$(response.label)` has " *
+        "no factor stem")
+    length(outcomes) == length(means) || error(
+        "RK backend: internal: joint response `$(response.label)` has " *
+        "$(length(outcomes)) outcomes but $(length(means)) means")
+    Expr(:call, :~, Expr(:vect, outcomes...),
+        Expr(:call, :MvNormalCholesky, Expr(:vect, means...), stem))
+end
+
+function _rk_ast_me_names(plan::_RKStructuralPlan)
+    names = Set{Symbol}()
+    for predictor in plan.predictors, term in predictor.terms
+        term.kind === :me || continue
+        push!(names, term.options.latent)
+    end
+    names
+end
+
 function _rk_emit_ast(plan::_RKStructuralPlan)
     taken = union(Set(keys(plan.columns)),
         Set(p.name for p in plan.parameters),
@@ -617,7 +661,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         _rk_ast_hsgp_ids(plan),
         _rk_ast_gp_names(plan),
         _rk_ast_dar_names(plan),
-        _rk_ast_ar_names(plan))
+        _rk_ast_ar_names(plan),
+        _rk_ast_me_names(plan))
     # A predictor sharing its name with a data column cannot keep it:
     # the program has one namespace, so the affine (definition and
     # response uses) is alpha-renamed. Unreachable via `@brm`
@@ -752,6 +797,12 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
             term.kind === :ar || continue
             append!(stmts, _rk_ast_ar_preamble(term))
         end
+        for term in predictor.terms
+            term.kind === :me || continue
+            options = term.options
+            push!(stmts, _rk_ast_plate(options.latent,
+                only(term.columns), options.loc, options.scale))
+        end
         if isempty(scalar_stmts)
             # No scalar coefficients (offset-only, gp-only,
             # factor-only — or an override-free R2D2 predictor, whose
@@ -786,6 +837,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
     end
     predictor_link = Dict(spec.name => spec.link for spec in plan.predictors)
     for response in plan.responses
+        if response.family === :mvnormal_cholesky
+            push!(stmts, _rk_ast_joint_response(response, rename))
+            continue
+        end
         defname, def, call = _rk_ast_glm_parts(
             response, rename, predictor_link, taken)
         if haskey(seen_glm, defname)
