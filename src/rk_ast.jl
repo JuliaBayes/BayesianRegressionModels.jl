@@ -141,6 +141,15 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol})
         Expr(:call, :.+, summands...)
 end
 
+# An R2D2 declaration: `r2d2(mu, R2, phi[, tau])` — positional
+# predictor + R2/phi parameter names, plus the tau sampled-parameter
+# name or data literal (BRM always states tau; the thin layer only
+# synthesizes it when omitted). Shape-verified against `Meta.parse`
+# of the surface spelling.
+function _rk_ast_r2d2_decl(r2d2::_RKR2D2Prior, lhs::Symbol)
+    Expr(:call, :r2d2, lhs, r2d2.r2, r2d2.phi, r2d2.tau)
+end
+
 # A spline declaration: `spline_basis(:id, axes...; k=k)` — kind is
 # inferred thin-layer-side from the axis count (1 → `:tps`, 2 → `:t2`),
 # so BRM states only the literal `k` (`Int` for `s`, `(Int, Int)` for
@@ -671,6 +680,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
     end
     priors = Dict((p.predictor, p.addressee) => (p.location, p.scale)
         for p in plan.population_priors)
+    r2d2s = Dict(rp.predictor => rp for rp in plan.r2d2_priors)
     response_for = Dict{Symbol,Symbol}()
     for response in plan.responses
         haskey(response_for, response.predictor) ||
@@ -694,12 +704,25 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
     for predictor in plan.predictors
         predictor.name in scales && continue
         lhs = get(rename, predictor.name, predictor.name)
+        r2d2 = get(r2d2s, predictor.name, nothing)
         # Scalar-coefficient terms (intercept/continuous/free-beta
         # monotonic) become submodel locals inside a per-predictor
         # `popefs_<pred>` latent submodel; factor terms keep top-level
         # broadcast priors (a `c[levels(g)]` LHS is not a bare Symbol
         # and cannot sit in a submodel body). Counter order is
         # unchanged, so expanded names match the old flat spellings.
+        # An R2D2 predictor states a prior ONLY for explicit-Normal
+        # columns (share-0 overrides); the rest join the simplex with
+        # no statement (their scales derive at bind).
+        # Without a scalar override the affine inlines, so its scalar
+        # coefficients need program-global names (submodel locals are
+        # unreserved at top level — a data `b1` column would merge
+        # silently); with one the submodel path namespaces them.
+        flat_scalars = r2d2 !== nothing && !any(
+            t -> (t.kind === :intercept || t.kind === :continuous ||
+                  t.kind === :monotonic) &&
+                haskey(r2d2.overrides, t.addressee),
+            predictor.terms)
         argcols = _rk_ast_popefs_args(predictor)
         argset = Set(argcols)
         coefs = Dict{Int,Symbol}()
@@ -711,25 +734,37 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
                 term.kind === :gp || term.kind === :dar ||
                 term.kind === :monotonic_summand) && continue
             counter += 1
-            key = (predictor.name, term.addressee)
-            haskey(priors, key) || error(
-                "RK backend: internal: no population prior for " *
-                "`$(predictor.name)` addressee `$(term.addressee)`")
-            location, scale = priors[key]
+            override = if r2d2 === nothing
+                key = (predictor.name, term.addressee)
+                haskey(priors, key) || error(
+                    "RK backend: internal: no population prior for " *
+                    "`$(predictor.name)` addressee `$(term.addressee)`")
+                priors[key]
+            else
+                get(r2d2.overrides, term.addressee, nothing)
+            end
             if term.kind === :factor
                 col = only(term.columns)
                 K = length(_rk_grouping_levels(plan.columns[col]))
                 coef = _rk_ast_coef_name(
                     string(predictor.name, "_b", counter), taken)
                 coefs[index] = coef
-                push!(stmts, _rk_ast_factor_prior(
-                    coef, col, term.options, K, location, scale))
+                override === nothing || push!(stmts,
+                    _rk_ast_factor_prior(coef, col, term.options, K,
+                        override[1], override[2]))
             else
-                local_coef = _rk_ast_mint_local(
-                    string("b", counter), lhs, taken, argset)
-                coefs[index] = local_coef
-                push!(scalar_stmts, Expr(:call, :~,
-                    local_coef, Expr(:call, :Normal, location, scale)))
+                if flat_scalars
+                    coef = _rk_ast_coef_name(
+                        string(predictor.name, "_b", counter), taken)
+                    coefs[index] = coef
+                else
+                    local_coef = _rk_ast_mint_local(
+                        string("b", counter), lhs, taken, argset)
+                    coefs[index] = local_coef
+                    override === nothing || push!(scalar_stmts,
+                        Expr(:call, :~, local_coef,
+                            Expr(:call, :Normal, override[1], override[2])))
+                end
             end
         end
         for term in predictor.terms
@@ -770,8 +805,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         end
         if isempty(scalar_stmts)
             # No scalar coefficients (offset-only, gp-only,
-            # factor-only): nothing repeated, nothing to name — the
-            # affine stays inline exactly as before.
+            # factor-only — or an override-free R2D2 predictor, whose
+            # coefficients all join the simplex): nothing repeated,
+            # nothing to name — the affine stays inline exactly as
+            # before.
             push!(stmts, Expr(:(=), lhs, _rk_ast_affine(predictor, coefs)))
         else
             defname = _rk_ast_popefs_name(predictor.name)
@@ -782,6 +819,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
             push!(stmts, Expr(:call, :~, lhs,
                 Expr(:call, defname, argcols...)))
         end
+        r2d2 === nothing || push!(stmts, _rk_ast_r2d2_decl(r2d2, lhs))
     end
     for bucket in plan.ranef_buckets
         push!(stmts, _rk_ast_bucket(bucket, rename))

@@ -696,12 +696,8 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
-        mu ~ 1 + x
-        effect(mu, :) ~ r2d2(R2=Normal(0.5, 0.2), tau_bsv=0.5)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
-    end)
+    # `r2d2` used to fail here too; it plans now (thin-layer R2D2
+    # surface landed, covered below).
 end
 
 @testset "spline plan shape" begin
@@ -996,6 +992,161 @@ end
     @test_throws "collides with a population column" BRM._brm_rk_plan(
         @brm dfc begin
             mu ~ 1 + c_idx + mo(c)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+end
+
+@testset "r2d2 plan shape" begin
+    # `effect(mu, :) ~ r2d2(...)`: no PopulationPrior rows — the prior
+    # mass lives in the R2D2Prior (SB-named R2/phi/tau_bsv, minted).
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + z
+        effect(mu, :) ~ r2d2(R2=Beta(2, 5), alpha=0.5)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    rp = only(plan.r2d2_priors)
+    @test (rp.predictor, rp.r2, rp.phi, rp.tau) ==
+        (:mu, :r2d2_mu_R2, :r2d2_mu_phi, :r2d2_mu_tau_bsv)
+    @test isempty(rp.overrides)
+    @test isempty(plan.population_priors)
+    @test [(p.name, p.family, p.args, p.support_override)
+        for p in plan.parameters] == [
+        (:s, :Exponential, (1.0,), nothing),
+        (:r2d2_mu_R2, :Beta, (2.0, 5.0), nothing),
+        (:r2d2_mu_tau_bsv, :Normal, (0.0, 1.0), :positive)]
+    vec = only(plan.vector_parameters)
+    @test (vec.name, vec.family, vec.size) ==
+        (:r2d2_mu_phi, :simplex_dirichlet, 2)
+    @test only(vec.args) == [0.5, 0.5]
+    # A data `tau_bsv` inlines as a literal (no sampled tau); the R2
+    # prior defaults to Beta(1, 1) (SB `_brm_r2d2_prior`).
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + z
+        effect(mu, :) ~ r2d2(tau_bsv=2.0)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    rp = only(plan.r2d2_priors)
+    @test rp.tau == 2.0
+    @test [p.name for p in plan.parameters] == [:s, :r2d2_mu_R2]
+    r2 = only(p for p in plan.parameters if p.name === :r2d2_mu_R2)
+    @test (r2.family, r2.args) == (:Beta, (1.0, 1.0))
+    # Explicit-Normal columns keep their own scale and leave the simplex.
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + z
+        effect(mu, :) ~ r2d2()
+        effect(mu, x) ~ Normal(0, 3)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    rp = only(plan.r2d2_priors)
+    @test rp.overrides == Dict(:x => (0.0, 3.0))
+    @test only(plan.vector_parameters).size == 1
+    # ... the intercept too (unstated it rides the thin-layer default).
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        effect(mu, :) ~ r2d2()
+        effect(mu, Intercept) ~ Normal(1, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test only(plan.r2d2_priors).overrides ==
+        Dict(:Intercept => (1.0, 2.0))
+    # A full-cover factor joins the simplex per dummy.
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 0 + g
+        effect(mu, :) ~ r2d2()
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test only(plan.vector_parameters).size == 3
+    # A subset-coded block rides share 0 with an explicit Normal (the
+    # subset survives, like the PopulationPrior path); the rest joins.
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + factor(g; ref=3)
+        effect(mu, :) ~ r2d2()
+        effect(mu, g) ~ Normal(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    rp = only(plan.r2d2_priors)
+    @test rp.overrides == Dict(:g => (0.0, 2.0))
+    @test only(plan.vector_parameters).size == 1
+    # Generated names disambiguate against user parameters.
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        effect(mu, :) ~ r2d2()
+        r2d2_mu_R2 ~ Normal(0, 1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test only(plan.r2d2_priors).r2 == :r2d2_mu_R2_2
+    # Non-Beta R2 stays closed (SB would need a Stan translation too).
+    @test_throws "must be `Beta(a, b)`" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        effect(mu, :) ~ r2d2(R2=Normal(0.5, 0.2), tau_bsv=0.5)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Non-Normal overrides stay closed (Normal-only slice-1 rule).
+    @test_throws "must be `Normal(location, scale)`" BRM._brm_rk_plan(
+        @brm df begin
+            mu ~ 1 + x
+            effect(mu, :) ~ r2d2()
+            effect(mu, x) ~ Cauchy(0, 1)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    # Every column excluded: SB mirror (`_sb_r2d2_overrides` refuses it).
+    @test_throws "has nothing to allocate" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        effect(mu, :) ~ r2d2()
+        effect(mu, x) ~ Normal(0, 1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Intercept-only decomposes nothing (SB's tau-only no-op has no
+    # thin-layer form).
+    @test_throws "decomposes nothing" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1
+        effect(mu, :) ~ r2d2()
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # The mo contrast is parameter-derived: no data variance exists.
+    @test_throws "combines `mo` with `r2d2`" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + mo(c)
+        effect(mu, :) ~ r2d2()
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # ... while beta-free `mo1` summands coexist (peer skips them).
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + mo1(c)
+        effect(mu, :) ~ r2d2()
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test Set(v.name for v in plan.vector_parameters) ==
+        Set([:r2d2_mu_phi, :mo1_c_simplex_incr])
+    phi = only(v for v in plan.vector_parameters
+        if v.name === :r2d2_mu_phi)
+    @test phi.size == 1
+    # gp latents have no R2D2 term rule.
+    @test_throws "combines `gp` with `r2d2`" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + gp(x)
+        effect(mu, :) ~ r2d2()
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # An unstated subset-coded factor would join under full cover,
+    # changing the coding — it must ride share 0 or go full-rank.
+    @test_throws "subset-coded but carries no explicit" BRM._brm_rk_plan(
+        @brm df begin
+            mu ~ 1 + factor(g; ref=3)
+            effect(mu, :) ~ r2d2()
             s ~ Exponential(1)
             y ~ Normal(mu, s)
         end)
@@ -2876,7 +3027,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    @test_throws "decomposes nothing" BRM._brm_rk_plan(@brm df begin
         mu ~ 0 + offset(z)
         effect(mu, :) ~ r2d2(R2=Normal(0.5, 0.2), tau_bsv=0.5)
         s ~ Exponential(1)

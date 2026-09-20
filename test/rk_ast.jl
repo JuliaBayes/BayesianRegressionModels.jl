@@ -473,7 +473,8 @@ end
         Dict{Symbol,AbstractVector}(:y => df.y, :n => df.n),
         6,
         BRM._RKRanefBucket[],
-        BRM._RKVectorParameter[])
+        BRM._RKVectorParameter[],
+        BRM._RKR2D2Prior[])
     prog = BRM._rk_emit_ast(plan)
     @test prog.defs == Expr[
         Expr(:(=), Expr(:call, :popefs_n, :n), Expr(:block,
@@ -927,6 +928,75 @@ end
         Expr(:call, :truncated, Expr(:call, :Normal, 0.6, 0.1), 0, 1))
     @test prog.main.args[2] == Expr(:call, :~, :dar_mu_t_sigma,
         Expr(:call, :HalfNormal, 0.3))
+end
+
+@testset "r2d2 AST shape" begin
+    # Override-free: the affine inlines with program-global coefficient
+    # names (no priors to state), followed by the bare `r2d2(...)`
+    # declaration; R2/phi/tau sample top-level (SB spellings, minted).
+    brmi = @brm df begin
+        mu ~ 1 + x + z
+        effect(mu, :) ~ r2d2(R2=Beta(2, 5), alpha=0.5)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test prog.defs == Expr[
+        Expr(:(=), Expr(:call, :normal_id_glm, :eta, :sigma), Expr(:block,
+            Expr(:call, :.~, :slot,
+                Expr(:., :Normal, Expr(:tuple, :eta, :sigma))),
+            :slot)),
+    ]
+    @test prog.main == Expr(:block,
+        Expr(:(=), :mu, Expr(:call, :.+,
+            :mu_b1, Expr(:call, :.*, :mu_b2, :x),
+            Expr(:call, :.*, :mu_b3, :z))),
+        Expr(:call, :r2d2, :mu, :r2d2_mu_R2, :r2d2_mu_phi,
+            :r2d2_mu_tau_bsv),
+        Expr(:call, :~, :s, Expr(:call, :Exponential, 1.0)),
+        Expr(:call, :~, :r2d2_mu_R2, Expr(:call, :Beta, 2.0, 5.0)),
+        Expr(:call, :~, :r2d2_mu_tau_bsv, Expr(:call, :HalfNormal, 1.0)),
+        Expr(:call, :~, :r2d2_mu_phi,
+            Expr(:call, :Dirichlet, Expr(:vect, 0.5, 0.5))),
+        Expr(:call, :~, :y, Expr(:call, :normal_id_glm, :mu, :s)))
+    # The declaration matches the parsed surface exactly.
+    @test rk_strip_lines(prog.main.args[2]) == rk_parsed_surface(
+        "r2d2(mu, r2d2_mu_R2, r2d2_mu_phi, r2d2_mu_tau_bsv)")
+    # An explicit Normal rides the submodel as a share-0 override
+    # (simplex columns stay bare locals); a data `tau_bsv` inlines.
+    brmi = @brm df begin
+        mu ~ 1 + x + z
+        effect(mu, :) ~ r2d2(tau_bsv=2.0)
+        effect(mu, x) ~ Normal(0, 3)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test prog.defs[1] == Expr(:(=), Expr(:call, :popefs_mu, :x, :z),
+        Expr(:block,
+            Expr(:call, :~, :b2, Expr(:call, :Normal, 0.0, 3.0)),
+            Expr(:call, :.+, :b1, Expr(:call, :.*, :b2, :x),
+                Expr(:call, :.*, :b3, :z))))
+    @test prog.main.args[1] ==
+        Expr(:call, :~, :mu, Expr(:call, :popefs_mu, :x, :z))
+    @test prog.main.args[2] ==
+        Expr(:call, :r2d2, :mu, :r2d2_mu_R2, :r2d2_mu_phi, 2.0)
+    @test rk_strip_lines(prog.main.args[2]) ==
+        rk_parsed_surface("r2d2(mu, r2d2_mu_R2, r2d2_mu_phi, 2.0)")
+    @test prog.main.args[5] == Expr(:call, :~, :r2d2_mu_phi,
+        Expr(:call, :Dirichlet, Expr(:vect, 1.0)))
+    # Inline coefficients namespace against data (a `mu_b1` column
+    # would otherwise merge with the minted name silently).
+    dfb = (; df..., mu_b1=[0.2, -0.1, 0.4, 0.0, 0.3, -0.3])
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(@brm dfb begin
+        mu ~ 1 + x + mu_b1
+        effect(mu, :) ~ r2d2()
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end))
+    @test prog.main.args[1] == Expr(:(=), :mu, Expr(:call, :.+,
+        :mu_b1_, Expr(:call, :.*, :mu_b2, :x),
+        Expr(:call, :.*, :mu_b3, :mu_b1)))
 end
 
 @testset "exact gp AST shape" begin
