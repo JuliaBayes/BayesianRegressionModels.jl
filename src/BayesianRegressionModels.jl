@@ -52,6 +52,11 @@ include("sb_affine.jl")
 include("total_effects.jl")
 include("total_effects_plan.jl")
 
+# S2Z geometry kernel — implicit Helmert, Sean's rho partial map and the
+# per-cell Fisher reliability candidate. Shared by SBBRMI emission, the
+# offline selector and audits; Stan codegen arrives with the planner.
+include("s2z_kernel.jl")
+
 # BRMDescriptor — ONE authoritative executable semantic model descriptor.
 # Collapses the GenerativePlan (what BRM emitted), introspection.jl (the
 # formula shape), the preproc record (dataframe provenance) and StanBlocks'
