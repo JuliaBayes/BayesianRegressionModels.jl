@@ -2080,6 +2080,97 @@ end
     @test only(only(plan.vector_parameters).args) == [2.0, 5.0]
 end
 
+@testset "ordinal extras plan shapes" begin
+    # Literal discrimination (either structure).
+    plan = BRM._brm_rk_plan(@brm df begin
+        eta ~ 0 + x
+        c ~ Ordinal(Cumulative(), LogitLink(), eta; discrimination=2.0)
+    end)
+    spec = only(plan.responses)
+    @test (spec.family, spec.link) === (:ordinal, :logit)
+    @test spec.ordinal_structure === :cumulative
+    @test spec.discrimination == 2.0
+    @test isempty(spec.threshold_columns)
+    @test spec.threshold_coefs === nothing
+    @test spec.thresholds === :c_thresholds
+    @test length(plan.vector_parameters) == 1
+    # Column discrimination crosses the column.
+    plan = BRM._brm_rk_plan(@brm df begin
+        eta ~ 0 + x
+        c ~ Ordinal(Cumulative(), ProbitLink(), eta; discrimination=z)
+    end)
+    spec = only(plan.responses)
+    @test spec.discrimination === :z
+    @test plan.columns[:z] == df.z
+    # Modeled discrimination: the log-link predictor plans with terms
+    # and priors (the AST skips it; the extension translates it).
+    plan = BRM._brm_rk_plan(@brm df begin
+        eta ~ 0 + x
+        log(disc) ~ 1 + x
+        c ~ Ordinal(Cumulative(), LogitLink(), eta; discrimination=disc)
+    end)
+    spec = only(plan.responses)
+    @test spec.discrimination === :disc
+    @test sort!([p.name for p in plan.predictors]) == [:disc, :eta]
+    dspec = only(p for p in plan.predictors if p.name === :disc)
+    @test dspec.link === :log
+    @test [(t.kind, t.addressee) for t in dspec.terms] ==
+        [(:intercept, :Intercept), (:continuous, :x)]
+    @test sort!([(p.predictor, p.addressee) for p in plan.population_priors
+        if p.predictor === :disc]) ==
+        [(:disc, :Intercept), (:disc, :x)]
+    # Modeled grouping scale (the `log(disc) ~ group` recipe): factor
+    # terms plan with an explicit block prior.
+    plan = BRM._brm_rk_plan(@brm df begin
+        eta ~ 0 + x
+        log(disc) ~ 0 + g
+        effect(disc, g) ~ Normal(0, 1)
+        c ~ Ordinal(StoppingRatio(), CloglogLink(), eta; discrimination=disc)
+    end)
+    spec = only(plan.responses)
+    @test spec.discrimination === :disc
+    dspec = only(p for p in plan.predictors if p.name === :disc)
+    @test [(t.kind, t.addressee) for t in dspec.terms] == [(:factor, :g)]
+    @test dspec.terms[1].options.coding === :fullrank
+    @test only([p for p in plan.population_priors
+        if p.predictor === :disc]).addressee === :g
+    # per_threshold p=1 and p=2 (stopping only): design columns cross
+    # and the stage-major coef vector plans at (K-1)*p (c has K=4).
+    plan = BRM._brm_rk_plan(@brm df begin
+        eta ~ 0 + x
+        c ~ Ordinal(StoppingRatio(), LogitLink(), eta; per_threshold=(z,))
+    end)
+    spec = only(plan.responses)
+    @test spec.threshold_columns == [:z]
+    @test spec.threshold_coefs === :c_threshold_beta
+    @test plan.columns[:z] == df.z
+    coef = only(v for v in plan.vector_parameters
+        if v.name === :c_threshold_beta)
+    @test (coef.family, coef.args, coef.size) ==
+        (:vector_normal, (0.0, 1.0), 3)
+    plan = BRM._brm_rk_plan(@brm df begin
+        eta ~ 0 + x
+        c ~ Ordinal(StoppingRatio(), ProbitLink(), eta;
+            per_threshold=(z, x))
+    end)
+    spec = only(plan.responses)
+    @test spec.threshold_columns == [:z, :x]
+    coef = only(v for v in plan.vector_parameters
+        if v.name === :c_threshold_beta)
+    @test coef.size == 6
+    # Full combination: stopping + modeled scale + per_threshold.
+    plan = BRM._brm_rk_plan(@brm df begin
+        eta ~ 0 + x
+        log(disc) ~ 1 + x
+        c ~ Ordinal(StoppingRatio(), LogitLink(), eta;
+            discrimination=disc, per_threshold=(z,))
+    end)
+    spec = only(plan.responses)
+    @test spec.discrimination === :disc
+    @test spec.threshold_columns == [:z]
+    @test spec.threshold_coefs === :c_threshold_beta
+end
+
 @testset "fail closed: leveled surfaces" begin
     # K=1 categorical is inexpressible (decision 0dteta6).
     single = rk_plan_error(@brm df begin
@@ -2143,23 +2234,109 @@ end
     end)
     @test fixed isa ErrorException
     @test occursin("cannot include a fixed intercept", fixed.msg)
-    # Any ordinal extras fail closed naming the thin-layer surface gap
-    # (the AST lowering spells three positionals only) — even values
-    # that would otherwise validate.
-    extras = rk_plan_error(@brm df begin
+    # Ordinal extras fail-closed battery (admitted shapes plan in
+    # "ordinal extras plan shapes").
+    cumstage = rk_plan_error(@brm df begin
         eta ~ 0 + x
-        c ~ Ordinal(StoppingRatio(), LogitLink(), eta;
-            discrimination=2.0, per_threshold=(z,))
+        c ~ Ordinal(Cumulative(), LogitLink(), eta; per_threshold=(z,))
     end)
-    @test extras isa ErrorException
-    @test occursin("surface support", extras.msg)
-    @test occursin("drop the keywords", extras.msg)
-    onedisc = rk_plan_error(@brm df begin
+    @test cumstage isa ErrorException
+    @test occursin("`StoppingRatio()` only", cumstage.msg)
+    @test occursin("non-monotone", cumstage.msg)
+    # Non-positive/non-finite literal scales: the helper pins each
+    # spelling directly (zero, negative, infinite, NaN), and the surface
+    # pins the zero literal end to end.
+    for bad in (0.0, -1.0, Inf, NaN)
+        literr = try
+            BRM._rk_ordinal_discrimination(bad, :c, BRM._RKPredictorSpec[])
+            nothing
+        catch error
+            error
+        end
+        @test literr isa ErrorException
+        @test occursin("finite and strictly positive", literr.msg)
+    end
+    @test BRM._rk_ordinal_discrimination(2.0, :c,
+        BRM._RKPredictorSpec[]) == (2.0, Symbol[])
+    zerodisc = rk_plan_error(@brm df begin
         eta ~ 0 + x
-        c ~ Ordinal(Cumulative(), LogitLink(), eta; discrimination=1.0)
+        c ~ Ordinal(Cumulative(), LogitLink(), eta; discrimination=0.0)
     end)
-    @test onedisc isa ErrorException
-    @test occursin("surface support", onedisc.msg)
+    @test zerodisc isa ErrorException
+    @test occursin("finite and strictly positive", zerodisc.msg)
+    # x carries negatives — not a discrimination column.
+    negcol = rk_plan_error(@brm df begin
+        eta ~ 0 + x
+        c ~ Ordinal(Cumulative(), LogitLink(), eta; discrimination=x)
+    end)
+    @test negcol isa ErrorException
+    @test occursin("finite positive values", negcol.msg)
+    # A sampled parameter is not a scale (SB takes it; the thin layer
+    # takes literals, data columns, and log-link predictors only).
+    sampled = rk_plan_error(@brm df begin
+        eta ~ 0 + x
+        d ~ Normal(0, 1)
+        c ~ Ordinal(Cumulative(), LogitLink(), eta; discrimination=d)
+    end)
+    @test sampled isa ErrorException
+    @test occursin("neither a declared `log()` linear predictor", sampled.msg)
+    # An identity-link predictor is not a scale either.
+    nonlog = rk_plan_error(@brm df begin
+        eta ~ 0 + x
+        disc ~ 0 + x
+        c ~ Ordinal(Cumulative(), LogitLink(), eta; discrimination=disc)
+    end)
+    @test nonlog isa ErrorException
+    @test occursin("must be a `log()` linear predictor", nonlog.msg)
+    # Random effects are out of slice for a modeled scale.
+    ranefscale = rk_plan_error(@brm df begin
+        eta ~ 0 + x
+        log(disc) ~ 0 + x + (1 | g)
+        c ~ Ordinal(Cumulative(), LogitLink(), eta; discrimination=disc)
+    end)
+    @test ranefscale isa ErrorException
+    @test occursin("admits population terms only", ranefscale.msg)
+    # A modeled scale feeds no other response slot (here the Poisson
+    # location legitimately takes the log-link predictor).
+    shared = rk_plan_error(@brm (; df..., counts=[1, 2, 1, 3, 2, 1]) begin
+        eta ~ 0 + x
+        log(disc) ~ 0 + x
+        c ~ Ordinal(Cumulative(), LogitLink(), eta; discrimination=disc)
+        counts ~ Poisson(disc)
+    end)
+    @test shared isa ErrorException
+    @test occursin("also feeds a location", shared.msg)
+    # per_threshold shape errors.
+    nontuple = rk_plan_error(@brm df begin
+        eta ~ 0 + x
+        c ~ Ordinal(StoppingRatio(), LogitLink(), eta; per_threshold=z)
+    end)
+    @test nontuple isa ErrorException
+    @test occursin("expects a tuple", nontuple.msg)
+    noncol = rk_plan_error(@brm df begin
+        eta ~ 0 + x
+        c ~ Ordinal(StoppingRatio(), LogitLink(), eta; per_threshold=(eta,))
+    end)
+    @test noncol isa ErrorException
+    @test occursin("only raw numeric data columns", noncol.msg)
+    dupes = rk_plan_error(@brm df begin
+        eta ~ 0 + x
+        c ~ Ordinal(StoppingRatio(), LogitLink(), eta; per_threshold=(z, z))
+    end)
+    @test dupes isa ErrorException
+    @test occursin("repeat a column", dupes.msg)
+    short = rk_plan_error(@brm (; df..., w=[0.5, 0.25]) begin
+        eta ~ 0 + x
+        c ~ Ordinal(StoppingRatio(), LogitLink(), eta; per_threshold=(w,))
+    end)
+    @test short isa ErrorException
+    @test occursin("rows; outcome", short.msg)
+    infty = rk_plan_error(@brm (; df..., w=[0.1, 0.2, Inf, 0.4, 0.5, 0.6]) begin
+        eta ~ 0 + x
+        c ~ Ordinal(StoppingRatio(), LogitLink(), eta; per_threshold=(w,))
+    end)
+    @test infty isa ErrorException
+    @test occursin("non-finite", infty.msg)
     # Unknown Ordinal keywords die at `@brm` formula validation (before
     # any backend); the planner's own keyword check is defense-in-depth.
     badkw = try

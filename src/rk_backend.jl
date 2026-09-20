@@ -760,22 +760,25 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
         structure = _brm_ordinal_tag(args[1], OrdinalStructure; prefix)
         link_tag = _brm_ordinal_tag(args[2], OrdinalLink; prefix)
         link = _RK_ORDINAL_LINKS[nameof(typeof(link_tag))]
-        predictor = only(candidates)
-        _rk_is_predictor_ref(args[3], predictor) || error(
-            "$prefix: response `$response` `Ordinal` location must be the " *
-            "linear predictor `$predictor` itself")
+        # The location is whichever candidate the eta slot names (a
+        # modeled discrimination adds a second candidate).
+        loc = args[3]
+        loc isa NamedColumn && name(loc) in candidates || error(
+            "$prefix: response `$response` `Ordinal` location must be " *
+            "$(_rk_lp_phrase(candidates)) itself")
+        location = name(loc)
         _brm_ordinal_has_fixed_intercept(args[3]) && error(
             "$prefix: `Ordinal($response)` cannot include a fixed intercept " *
             "in `eta`; the estimated thresholds already supply the location. " *
             "Use `eta ~ 0 + ...`.")
-        plink = predictor_link[predictor]
+        plink = predictor_link[location]
         triple = (:ordinal, link, plink)
         triple in _RK_ADMITTED_TRIPLES || error(
             "$prefix: response `$response` pairs `Ordinal` with a " *
             "$plink-link predictor; write `Ordinal(structure, " *
             "link, eta)` with an identity-link predictor")
         return (; family=:ordinal, link, scale=nothing,
-            scale_predictor=nothing, trials=nothing, location=predictor)
+            scale_predictor=nothing, trials=nothing, location)
     elseif head === CategoricalLogit
         lead = only(candidates)
         preds = [lead; extra...]
@@ -3726,12 +3729,95 @@ function _rk_simplex_source(arg, response::Symbol,
     (sname, vectors[sname].size)
 end
 
-# Ordinal extras gate: `discrimination`/`per_threshold` are plan-level
-# only in the thin layer (the AST surface spells `Ordinal.(structure,
-# link, eta)`), and the AST-only lowering has no direct route — so any
-# extras fail closed here naming the surface gap. Drop the keywords for
-# the plain ordinal (even `discrimination=1.0`).
-function _rk_ordinal_extras(rhs::ExprColumn, response::Symbol)
+# Ordinal extras: `discrimination` (a positive literal, a raw data
+# column, or a `log()` linear predictor — the modeled scale, positive by
+# construction via `exp`) and `per_threshold` (a tuple of raw numeric
+# design columns, StoppingRatio only). These are thin-layer IR fields
+# (`LikelihoodSpec` discrimination/threshold_columns/threshold_coefs):
+# the AST spells the plain three-positional ordinal and the extension
+# carries the extras plan-level (the surface takes no extras).
+function _rk_ordinal_discrimination(raw, response::Symbol,
+        predictor_specs::AbstractVector)
+    prefix = "RK backend"
+    raw === nothing && return (nothing, Symbol[])
+    if raw isa Number
+        value = Float64(raw)
+        isfinite(value) && value > 0 || error(
+            "$prefix: response `$response` ordinal discrimination must be " *
+            "finite and strictly positive, got $(repr(raw))")
+        return (value, Symbol[])
+    end
+    raw isa NamedColumn || error(
+        "$prefix: response `$response` ordinal discrimination must be a " *
+        "positive literal, a raw data column, or a `log()` linear " *
+        "predictor, got $(repr(raw))")
+    sname = name(raw)
+    known = findfirst(spec -> spec.name === sname, predictor_specs)
+    if known !== nothing
+        # Predictor-first, mirroring the thin layer (a name that is both
+        # a predictor and a data column fails closed at hygiene).
+        spec = predictor_specs[known]
+        spec.link === :log || error(
+            "$prefix: response `$response` discrimination predictor " *
+            "`$sname` must be a `log()` linear predictor (a modeled scale " *
+            "is positive by construction via `exp`); got a $(spec.link)-link " *
+            "predictor — write `log($sname) ~ ...`")
+        bad = unique!([term.kind for term in spec.terms if
+            !(term.kind in (:intercept, :continuous, :factor, :offset))])
+        isempty(bad) || error(
+            "$prefix: response `$response` discrimination predictor " *
+            "`$sname` uses $(join(bad, ", ")) terms; a modeled scale " *
+            "admits population terms only (intercept, continuous, " *
+            "factor, offset)")
+        return (sname, Symbol[])
+    end
+    parent(raw) isa DataColumn || error(
+        "$prefix: response `$response` ordinal discrimination `$sname` is " *
+        "neither a declared `log()` linear predictor nor a raw data " *
+        "column (sampled parameters and assignments are not admitted — " *
+        "the thin layer takes literals, data columns, and log-link " *
+        "predictors only)")
+    values = parent(parent(raw))
+    values isa AbstractVector{<:Real} &&
+        all(x -> isfinite(x) && x > 0, values) || error(
+        "$prefix: response `$response` ordinal discrimination data " *
+        "`$sname` must contain only finite positive values")
+    (sname, [sname])
+end
+
+function _rk_ordinal_threshold_columns(raw, response::Symbol, n_obs::Int)
+    prefix = "RK backend"
+    raw isa Tuple || error(
+        "$prefix: response `$response` `per_threshold` expects a tuple " *
+        "of raw numeric columns, for example `per_threshold=(treat,)`")
+    names = Symbol[]
+    for term in raw
+        term isa NamedColumn && parent(term) isa DataColumn || error(
+            "$prefix: response `$response` `per_threshold` currently " *
+            "accepts only raw numeric data columns; got $(typeof(term))")
+        key = name(term)
+        values = parent(parent(term))
+        values isa AbstractVector{<:Real} || error(
+            "$prefix: response `$response` threshold predictor `$key` " *
+            "must be numeric, got $(typeof(values))")
+        length(values) == n_obs || error(
+            "$prefix: response `$response` threshold predictor `$key` " *
+            "has $(length(values)) rows; outcome `$response` has $n_obs")
+        all(isfinite, values) || error(
+            "$prefix: response `$response` threshold predictor `$key` " *
+            "contains non-finite values")
+        push!(names, key)
+    end
+    length(unique(names)) == length(names) || error(
+        "$prefix: response `$response` threshold columns repeat a column " *
+        "($(join(names, ", "))); the thin layer takes distinct design " *
+        "columns)")
+    names
+end
+
+function _rk_ordinal_extras(rhs::ExprColumn, response::Symbol,
+        structure::Symbol, K::Int, n_obs::Int,
+        predictor_specs::AbstractVector)
     prefix = "RK backend"
     kwargs = getkwargs(rhs)
     for key in keys(kwargs)
@@ -3739,13 +3825,25 @@ function _rk_ordinal_extras(rhs::ExprColumn, response::Symbol)
             "$prefix: response `$response` `Ordinal` takes only " *
             "`discrimination` and `per_threshold` keywords, got `$key`")
     end
-    isempty(kwargs) && return (nothing, Symbol[], nothing, Symbol[],
-        _RKVectorParameter[])
-    given = join(["`$key`" for key in keys(kwargs)], ", ")
-    error("$prefix: response `$response` ordinal extras need thin-layer " *
-          "surface support (got $given; the AST lowering spells " *
-          "`Ordinal.(structure, link, eta)` only) — drop the keywords " *
-          "for the plain ordinal")
+    discrimination, crossed = _rk_ordinal_discrimination(
+        get(kwargs, :discrimination, nothing), response, predictor_specs)
+    threshold_columns = _rk_ordinal_threshold_columns(
+        get(kwargs, :per_threshold, ()), response, n_obs)
+    structure === :cumulative && !isempty(threshold_columns) && error(
+        "$prefix: response `$response` `per_threshold` is currently " *
+        "supported for `StoppingRatio()` only; unrestricted cumulative " *
+        "category-specific effects can make cumulative probabilities " *
+        "non-monotone")
+    threshold_coefs = nothing
+    coef_implicit = _RKVectorParameter[]
+    if !isempty(threshold_columns)
+        threshold_coefs = Symbol(response, :_threshold_beta)
+        push!(coef_implicit, _RKVectorParameter(threshold_coefs,
+            :vector_normal, (0.0, 1.0),
+            (K - 1) * length(threshold_columns), threshold_coefs))
+    end
+    (discrimination, threshold_columns, threshold_coefs,
+        [crossed; threshold_columns], coef_implicit)
 end
 
 # Defaults for non-leveled families (the thin-layer leaves these at
@@ -3764,7 +3862,8 @@ end
 function _rk_plan_leveled!(entry, family::Symbol,
         predictor::Union{Symbol,Nothing}, extra::Vector{Symbol},
         implicit::Vector{_RKVectorParameter},
-        vectors::Dict{Symbol,_RKVectorParameter}, data::AbstractDict)
+        vectors::Dict{Symbol,_RKVectorParameter}, data::AbstractDict,
+        predictor_specs::AbstractVector)
     prefix = "RK backend"
     key, rhs, raw = entry.key, entry.rhs, entry.raw_response
     if family === :categorical_logit
@@ -3794,7 +3893,8 @@ function _rk_plan_leveled!(entry, family::Symbol,
         structure = _brm_ordinal_tag(getargs(rhs)[1], OrdinalStructure;
             prefix) isa Cumulative ? :cumulative : :stopping
         (discrimination, threshold_columns, threshold_coefs, cross,
-            coef_implicit) = _rk_ordinal_extras(rhs, key)
+            coef_implicit) = _rk_ordinal_extras(rhs, key, structure, K,
+            length(raw), predictor_specs)
         append!(implicit, coef_implicit)
         thresh = Symbol(key, :_thresholds)
         vfam = structure === :cumulative ? :ordered_normal : :vector_normal
@@ -3925,6 +4025,15 @@ function _rk_gate_name_hygiene!(predictor_specs::AbstractVector,
             cname in dnames && error(
                 "$prefix: generated count column `$cname` collides with " *
                 "derived column `$cname`; rename the raw column")
+        end
+        for cname in spec.threshold_columns
+            haskey(columns, cname) || error(
+                "$prefix: internal: threshold column `$cname` missing")
+        end
+        d = spec.discrimination
+        if d isa Symbol && d in pnames && haskey(columns, d)
+            error("$prefix: discrimination predictor `$d` collides with " *
+                  "raw column `$d`; rename one of them")
         end
     end
     col_overlap = sort!(filter(n -> haskey(columns, n), collect(both)))
@@ -4347,6 +4456,33 @@ function _rk_emit_ast(plan::_RKKernelPlan)
     _RKEmittedProgram(Expr[], Expr(:block, stmts...))
 end
 
+# A modeled ordinal scale feeds nothing else: a discrimination
+# predictor that also fills a location, scale/shape, or categorical-logit
+# tail slot would need two links at once (the scale is `log` by
+# construction, and the AST skips it — the extension translates it).
+function _rk_gate_ordinal_scale_slots!(response_specs::AbstractVector,
+        predictor_specs::AbstractVector)
+    prefix = "RK backend"
+    pnames = Set(spec.name for spec in predictor_specs)
+    occupied = Set{Symbol}()
+    for spec in response_specs
+        spec.family in (:categorical, :multinomial) ||
+            push!(occupied, spec.predictor)
+        spec.scale_predictor === nothing ||
+            push!(occupied, spec.scale_predictor)
+        union!(occupied, spec.extra_predictors)
+    end
+    for spec in response_specs
+        d = spec.discrimination
+        (d isa Symbol && d in pnames && d in occupied) || continue
+        error("$prefix: response `$(spec.response)` discrimination " *
+              "predictor `$d` also feeds a location, scale/shape, or " *
+              "categorical-logit slot; use a dedicated `log()` predictor " *
+              "for the modeled scale")
+    end
+    nothing
+end
+
 """
     _brm_rk_plan(brmi::BRMI)
 
@@ -4510,33 +4646,40 @@ function _brm_rk_plan(brmi::BRMI)
             classified = _rk_classify_response(entry.rhs, candidates,
                 predictor_link, parameter_names, assignment_names, consts,
                 aliases, entry.key, extra, extra_links)
-            # Every referenced predictor must feed a slot: the scale slot naming
-            # the location is degenerate, and anything else unclaimed is a name
-            # shadowed across slots (rename one of them). The
-            # categorical-logit tail feeds `extra_predictors`, not a slot.
-            classified.scale_predictor === nothing ||
-                classified.scale_predictor !== classified.location ||
-                error("$prefix: response `$(entry.key)` feeds the location " *
-                      "predictor `$(classified.location)` into the scale/shape " *
-                      "slot too; the two slots take distinct predictors")
-            claimed = classified.scale_predictor === nothing ?
-                Set([classified.location]) :
-                Set([classified.location, classified.scale_predictor])
-            union!(claimed, extra)
-            unclaimed = filter(name -> name ∉ claimed, candidates)
-            isempty(unclaimed) || error(
-                "$prefix: response `$(entry.key)` references linear " *
-                "predictor(s) $(join(unclaimed, ", ")) outside the location " *
-                "and scale/shape slots; every referenced predictor must feed " *
-                "one slot (if a name shadows a data column, rename one of them)")
             (classified.family, classified.link, classified.scale,
                 classified.scale_predictor, classified.trials,
                 classified.location)
         end
         leveled = family in _RK_LEVELED_FAMILIES ?
             _rk_plan_leveled!(entry, family, predictor, extra,
-                implicit_vectors, vector_by_name, context.data) :
+                implicit_vectors, vector_by_name, context.data,
+                predictor_specs) :
             _rk_unleveled(entry, predictor)
+        # Every referenced predictor must feed a slot: the scale slot naming
+        # the location is degenerate, and anything else unclaimed is a name
+        # shadowed across slots (rename one of them). The categorical-logit
+        # tail feeds `extra_predictors`, not a slot; an ordinal
+        # discrimination predictor feeds the discrimination slot. Runs
+        # after the leveled plan so the ordinal extras are known.
+        if predictor !== nothing
+            scale_predictor === nothing || scale_predictor !== predictor ||
+                error("$prefix: response `$(entry.key)` feeds the location " *
+                      "predictor `$predictor` into the scale/shape " *
+                      "slot too; the two slots take distinct predictors")
+            claimed = scale_predictor === nothing ?
+                Set([predictor]) :
+                Set([predictor, scale_predictor])
+            union!(claimed, extra)
+            disc = leveled.discrimination
+            disc isa Symbol && haskey(predictor_link, disc) &&
+                push!(claimed, disc)
+            unclaimed = filter(name -> name ∉ claimed, candidates)
+            isempty(unclaimed) || error(
+                "$prefix: response `$(entry.key)` references linear " *
+                "predictor(s) $(join(unclaimed, ", ")) outside the location " *
+                "and scale/shape slots; every referenced predictor must feed " *
+                "one slot (if a name shadows a data column, rename one of them)")
+        end
         if trials isa Symbol
             raw = get(context.data, trials, nothing)
             raw isa AbstractVector || error(
@@ -4582,6 +4725,9 @@ function _brm_rk_plan(brmi::BRMI)
             leveled.ordinal_structure, leveled.discrimination,
             leveled.threshold_columns, leveled.threshold_coefs))
     end
+    # A modeled ordinal scale feeds no other response slot (needs the
+    # whole response table, so it runs after the loop).
+    _rk_gate_ordinal_scale_slots!(response_specs, predictor_specs)
     # Phase 6: one observation axis, no missing, finite data, evidence
     # values, and name hygiene (mirrors thin-side validation, R8).
     n_obs = length(first(peeled).raw_response)
