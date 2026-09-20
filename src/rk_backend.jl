@@ -95,7 +95,8 @@ struct _RKLikelihoodSpec
                    # :categorical_logit | :ordered_logit | :ordinal |
                    # :multinomial | :categorical | slice-2 group A:
                    # :bernoulli_probit | :bernoulli_cloglog |
-                   # :binomial_probit | :binomial_cloglog | :beta_logit
+                   # :binomial_probit | :binomial_cloglog | :beta_logit |
+                   # longtail: :mvnormal_cholesky (joint correlated outcomes)
     link::Symbol   # effective link: :identity | :logit | :log |
                    # :probit | :cloglog
     response::Symbol
@@ -125,12 +126,16 @@ struct _RKLikelihoodSpec
     discrimination::Union{Nothing,Float64,Symbol} # ordinal literal or column
     threshold_columns::Vector{Symbol} # ordinal per-threshold design columns
     threshold_coefs::Union{Nothing,Symbol} # per-threshold coef vector param
+    # Joint correlated-outcomes trailing fields (thin-layer
+    # LikelihoodSpec mirror); every other family leaves them at defaults.
+    extra_responses::Vector{Symbol} # joint tail outcome columns (K >= 2)
+    factor::Union{Nothing,Symbol} # joint LKJ stem (`L ~ LKJCovarianceFactor`)
 end
 
 struct _RKTermSpec
     kind::Symbol # :intercept | :continuous | :factor | :offset |
-                # :ranef_gather | :spline | :gp | :hsgp |
-                # :monotonic | :monotonic_summand
+                # :ranef_gather | :spline | :gp | :hsgp | :ar |
+                # :monotonic | :monotonic_summand | :dar | :me
     columns::Vector{Symbol}
     # factor: (coding=:fullrank, levels=:observed) over every observed level,
     # or (coding=:subset, drop::Int, levels=:observed) over every observed
@@ -154,9 +159,29 @@ struct _RKPopulationPrior
     scale::Float64
 end
 
+# Flat whole-predictor R2D2 variance decomposition (SB
+# `effect(lp, :) ~ r2d2(...)` mirror; the `sd(...) ~ r2d2(...)`
+# R2D2M2/ICC grammar belongs to the hierarchical lane, never here).
+# One per predictor at most; a predictor carrying one has NO
+# `_RKPopulationPrior` rows (coverage moves here, like the thin-layer
+# `R2D2Prior`). `r2`/`phi` name the Beta/Dirichlet sampled parameters
+# (planned alongside, in `parameters`/`vector_parameters`); `tau` is a
+# sampled half-Normal name or the data `tau_bsv` literal; `overrides`
+# maps explicit-Normal addressees to (location, scale) — those columns
+# keep their own scale and leave the simplex (share 0).
+struct _RKR2D2Prior
+    predictor::Symbol
+    r2::Symbol
+    phi::Symbol
+    tau::Union{Symbol,Float64}
+    overrides::Dict{Symbol,Tuple{Float64,Float64}}
+end
+
 struct _RKSampledParameter
     name::Symbol
-    family::Symbol
+    family::Symbol # scalar prior family, or :LKJCovarianceFactor for a
+                   # joint factor stem (args `(K::Int, theta, eta)`; the
+                   # thin layer derives `<stem>_scales`/`<stem>_L_corr`)
     args::Tuple # Number literals or Symbol param/assignment refs, positional
     support_override::Union{Nothing,Symbol}
     label::Symbol
@@ -182,7 +207,7 @@ end
 
 struct _RKRanefBucket
     id::Union{Nothing,Symbol}
-    group::Symbol # bound grouping column (raw, or <group>_idx codes)
+    group::Symbol # bound grouping column (raw; crossed strings if categorical)
     kind::Symbol # :intercept1 | :slope1 | :correlated
     margins::Vector{_RKRanefMargin}
     slices::Vector{Tuple{Symbol,UnitRange{Int}}}
@@ -209,6 +234,7 @@ struct _RKStructuralPlan
     n_obs::Int
     ranef_buckets::Vector{_RKRanefBucket}
     vector_parameters::Vector{_RKVectorParameter}
+    r2d2_priors::Vector{_RKR2D2Prior}
 end
 
 # A submodel-bearing emitted program: `defs` are surface-spelling
@@ -258,7 +284,8 @@ function _rk_num_coefficients(plan::_RKStructuralPlan)
     total = 0
     for predictor in plan.predictors, term in predictor.terms
         if term.kind === :intercept || term.kind === :continuous ||
-                term.kind === :monotonic
+                term.kind === :ar || term.kind === :monotonic ||
+                term.kind === :me
             total += 1
         elseif term.kind === :factor
             width = length(_rk_grouping_levels(
@@ -313,8 +340,10 @@ const _RK_ADMITTED_SPELLINGS =
     "link, eta)` + `eta ~ 0 + ...`, `obs ~ Multinomial(N, s)` + " *
     "`s ~ Dirichlet(...)`, `y ~ Categorical(s)` + `s ~ Dirichlet(...)`, " *
     "slice-2 group A: `y ~ Bernoulli(p)` / `H ~ Binomial(n, p)` + " *
-    "`probit(p)` / `cloglog(p) ~ ...`, or `y ~ Beta(mu*kappa, " *
-    "(1-mu)*kappa)` + `logit(mu) ~ ...`"
+    "`probit(p)` / `cloglog(p) ~ ...`, `y ~ Beta(mu*kappa, " *
+    "(1-mu)*kappa)` + `logit(mu) ~ ...`, or `[y1, y2] ~ " *
+    "MvNormalCholesky([mu1, mu2], L)` + `L ~ LKJCovarianceFactor(K; " *
+    "...)` + identity `mu_j ~ ...`"
 
 function _rk_predictor_link(brmi::BRMI, target::Symbol)
     prefix = "RK backend"
@@ -760,22 +789,25 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
         structure = _brm_ordinal_tag(args[1], OrdinalStructure; prefix)
         link_tag = _brm_ordinal_tag(args[2], OrdinalLink; prefix)
         link = _RK_ORDINAL_LINKS[nameof(typeof(link_tag))]
-        predictor = only(candidates)
-        _rk_is_predictor_ref(args[3], predictor) || error(
-            "$prefix: response `$response` `Ordinal` location must be the " *
-            "linear predictor `$predictor` itself")
+        # The location is whichever candidate the eta slot names (a
+        # modeled discrimination adds a second candidate).
+        loc = args[3]
+        loc isa NamedColumn && name(loc) in candidates || error(
+            "$prefix: response `$response` `Ordinal` location must be " *
+            "$(_rk_lp_phrase(candidates)) itself")
+        location = name(loc)
         _brm_ordinal_has_fixed_intercept(args[3]) && error(
             "$prefix: `Ordinal($response)` cannot include a fixed intercept " *
             "in `eta`; the estimated thresholds already supply the location. " *
             "Use `eta ~ 0 + ...`.")
-        plink = predictor_link[predictor]
+        plink = predictor_link[location]
         triple = (:ordinal, link, plink)
         triple in _RK_ADMITTED_TRIPLES || error(
             "$prefix: response `$response` pairs `Ordinal` with a " *
             "$plink-link predictor; write `Ordinal(structure, " *
             "link, eta)` with an identity-link predictor")
         return (; family=:ordinal, link, scale=nothing,
-            scale_predictor=nothing, trials=nothing, location=predictor)
+            scale_predictor=nothing, trials=nothing, location)
     elseif head === CategoricalLogit
         lead = only(candidates)
         preds = [lead; extra...]
@@ -818,6 +850,39 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
             "admits a logit mu link only)")
         return (; family=:beta_logit, link=plink, scale=concentration,
             scale_predictor=nothing, trials=nothing, location=predictor)
+    elseif head === MvNormalCholesky
+        # Joint correlated-outcomes response (SB
+        # `[y1..yK] ~ MvNormalCholesky([mu1..muK], L)`): Phase 4 resolved
+        # the means positionally (`candidates` holds the lead, `extra`
+        # the tail), so only the factor stem and the identity links are
+        # left here. The stem's LKJ shape and width gate in Phase 6
+        # (linkage needs the planned parameters).
+        length(args) == 2 || error(
+            "$prefix: response `$response` `MvNormalCholesky(means, " *
+            "factor)` needs exactly two arguments")
+        means, factor = args
+        means isa AbstractVector || error(
+            "$prefix: response `$response` `MvNormalCholesky` means must " *
+            "use vector syntax `[mu1, mu2, ...]`, got $(typeof(means))")
+        factor isa NamedColumn || error(
+            "$prefix: response `$response` `MvNormalCholesky` factor must " *
+            "name an `LKJCovarianceFactor` declaration, got " *
+            "$(typeof(factor))")
+        stem = name(factor)
+        stem in parameters || error(
+            "$prefix: response `$response` joint factor `$stem` must be " *
+            "a sampled parameter, not observed data; declare it with " *
+            "`$stem ~ LKJCovarianceFactor(K; ...)`")
+        location = first(candidates)
+        linked = Tuple{Symbol,Symbol}[(location, predictor_link[location]);
+            ((p, l) for (p, l) in zip(extra, extra_links))...]
+        bad = [p for (p, l) in linked if l !== :identity]
+        isempty(bad) || error(
+            "$prefix: response `$response` joint mean predictor(s) " *
+            "$(join(bad, ", ")) must be identity-link (joint means " *
+            "enter the MvNormal directly)")
+        return (; family=:mvnormal_cholesky, link=:identity, scale=nothing,
+            scale_predictor=nothing, trials=nothing, location, factor=stem)
     end
     head_name = head isa Function ? nameof(head) :
         head isa Type ? nameof(head) : string(head)
@@ -943,7 +1008,18 @@ end
 
 # Factor columns cross as plain value vectors; a `CategoricalVector`
 # crosses string-normalized (the thin layer's `levels(g)` is observed-only
-# sort order, so declared-but-unobserved levels cannot cross).
+# sort order, so declared-but-unobserved levels cannot cross). The
+# normalization is load-bearing, not deletable preprocessing: the
+# thin-layer `_declared_codes` encoder compares bound rows against
+# stringified levels, and a non-string-leveled categorical compares
+# all-false there (`categorical([1,2]) .== "1"` is `Bool[0,0]` —
+# verified empirically 2026-09-20, todo 14pgdwz), which would silently
+# zero dummy indicators and group codes alike. The substantive
+# level/code computation already happens in-graph thin-side (bind
+# derivation + the `_ppl_gidx` encoder); only this row/level type
+# agreement stays Julia-side. (A `string()` surface word would move
+# even this; no such word exists — a possible peer follow-up, not
+# requested.)
 function _rk_factor_crossed(raw::AbstractVector)
     raw isa CA.CategoricalVector ? string.(collect(raw)) : raw
 end
@@ -1621,36 +1697,17 @@ function _rk_term_specs(term, target::Symbol, data::AbstractDict,
           "`center`/`zscale`/`standardize`, pure numeric data expressions)")
 end
 
-function _rk_population_priors(brmi::BRMI, design, target::Symbol,
-        available::Tuple, factor_addressees::Set{Symbol},
-        terms::Vector{_RKTermSpec}, derived::Vector{_RKDerivedSpec})
-    prefix = "RK backend"
-    overrides = _brm_simple_population_effect_overrides(
-        brmi, design; prefix, available_predictors=available)
-    # The shared seam resolves (location, scale) without checking the family;
-    # slice 1 admits Normal-only population effects (NativePPL precedent).
-    claimed = isnothing(overrides) ? () : overrides
-    for expression in claimed
-        isnothing(expression) && continue
-        expression isa ExprColumn && getf(expression) === Normal || error(
-            "$prefix: predictor `$target` population-effect priors must " *
-            "be `Normal(location, scale)` in slice 1")
-        isempty(getkwargs(expression)) || error(
-            "$prefix: predictor `$target` population-effect `Normal` " *
-            "prior cannot have keywords in slice 1")
-    end
-    n = length(design.columns)
-    stated = isnothing(overrides) ? fill(false, n) :
-        Bool[!isnothing(cell) for cell in overrides]
-    location, scale = _brm_materialize_normal_effect_priors(overrides, n;
-        prefix)
+# Design columns grouped by prior addressee (derived columns by label —
+# each is its own coefficient; factor dummies by source — one prior
+# per block), in first-seen order. Shared by the PopulationPrior path
+# and the R2D2 override composition (same addressees both ways).
+function _rk_design_addressee_groups(design, target::Symbol;
+        prefix="RK backend")
     groups = Dict{Symbol,Vector{Int}}()
     order = Symbol[]
     for (i, column) in enumerate(design.columns)
         kind = isnothing(column.preprocess) ? nothing :
             column.preprocess.kind
-        # Derived columns group by label (each is its own coefficient);
-        # factor dummies keep grouping by source (one prior per block).
         addressee = if kind in (:interaction, :zscale, :standardize,
                 :center, :protect)
             column.label
@@ -1667,6 +1724,38 @@ function _rk_population_priors(brmi::BRMI, design, target::Symbol,
         haskey(groups, addressee) || push!(order, addressee)
         push!(get!(groups, addressee, Int[]), i)
     end
+    groups, order
+end
+
+function _rk_population_priors(brmi::BRMI, design, target::Symbol,
+        available::Tuple, factor_addressees::Set{Symbol},
+        terms::Vector{_RKTermSpec}, derived::Vector{_RKDerivedSpec},
+        r2d2::Union{Nothing,_BRMR2D2Plan})
+    prefix = "RK backend"
+    overrides = _brm_simple_population_effect_overrides(
+        brmi, design; prefix, available_predictors=available)
+    # The shared seam resolves (location, scale) without checking the family;
+    # slice 1 admits Normal-only population effects (NativePPL precedent).
+    claimed = isnothing(overrides) ? () : overrides
+    for expression in claimed
+        isnothing(expression) && continue
+        expression isa ExprColumn && getf(expression) === Normal || error(
+            "$prefix: predictor `$target` population-effect priors must " *
+            "be `Normal(location, scale)` in slice 1")
+        isempty(getkwargs(expression)) || error(
+            "$prefix: predictor `$target` population-effect `Normal` " *
+            "prior cannot have keywords in slice 1")
+    end
+    # An R2D2 predictor carries its prior mass in the R2D2Prior
+    # (explicit Normals ride the overrides map) — no PopulationPrior
+    # rows. The Normal-only validation above still applies.
+    isnothing(r2d2) || return _RKPopulationPrior[]
+    n = length(design.columns)
+    stated = isnothing(overrides) ? fill(false, n) :
+        Bool[!isnothing(cell) for cell in overrides]
+    location, scale = _brm_materialize_normal_effect_priors(overrides, n;
+        prefix)
+    groups, order = _rk_design_addressee_groups(design, target; prefix)
     priors = _RKPopulationPrior[]
     for addressee in order
         idxs = groups[addressee]
@@ -1716,6 +1805,27 @@ function _rk_population_priors(brmi::BRMI, design, target::Symbol,
             "rename the raw `<c>_idx` column")
         push!(known, term.addressee)
         push!(priors, _rk_mo_beta_prior(brmi, target, term.addressee))
+    end
+    # Latent `ar` columns are not design columns, so their betas resolve
+    # through the dedicated cell (default Normal(0, 1), `:`-wide claims
+    # via the shared claim engine); one prior per addressee.
+    seen_ar = Set{Symbol}()
+    for term in terms
+        term.kind === :ar || continue
+        term.addressee in seen_ar && continue
+        push!(seen_ar, term.addressee)
+        location, scale = _rk_ar_beta_prior(brmi, target, term.addressee)
+        push!(priors, _RKPopulationPrior(target, term.addressee, location, scale))
+    end
+    # Latent `me` columns are not design columns, so their betas resolve
+    # through the dedicated cell (default Normal(0, 1), `:`-wide claims
+    # via the shared claim engine); one prior per addressee.
+    seen_me = Set{Symbol}()
+    for term in terms
+        term.kind === :me || continue
+        term.addressee in seen_me && continue
+        push!(seen_me, term.addressee)
+        push!(priors, _rk_me_beta_prior(brmi, target, term.addressee))
     end
     priors
 end
@@ -1969,22 +2079,37 @@ _rk_ranef_gather_label(target, id, group) =
 function _rk_ranef_group_column!(columns::Dict{Symbol,AbstractVector},
         taken::Set{Symbol}, gname::Symbol, raw::AbstractVector, what::String)
     prefix = "RK backend"
-    if !(raw isa CA.CategoricalVector)
+    raw isa CA.CategoricalVector || begin
         columns[gname] = raw
         return gname
     end
-    # Categorical groupings cross as SB-ordered dense codes (declared
-    # numbering, mirroring SB's `<g>_idx` transport): the thin layer sorts
-    # the bound column, so codes make that sort the identity and keep
-    # numbering parity with SB.
-    _, codes = _brm_level_index(raw)
-    idx = Symbol(gname, :_idx)
-    haskey(columns, idx) && error(
-        "$prefix: $what grouping column `$gname` needs `$idx` for its " *
-        "level codes, but a raw column already uses that name; rename it")
-    push!(taken, idx)
-    columns[idx] = collect(Int, codes)
-    idx
+    # Categorical groupings bind factor-crossed strings (todo 14pgdwz/P1,
+    # DONE): the thin layer numbers them by bind-derived sort order (peer
+    # `_declared_codes`, RK >= fd1af39) — no outside-model codes, so the
+    # last REAL outside-model computation on the RK side is gone. SB
+    # numbers `CA.levels` order instead, so two shapes fail closed: a
+    # custom-ordered declaration would silently misnumber groups (fixed
+    # by the peer P2 declared-levels surface spelling,
+    # ReactiveKernels:brm todo 15a8se2), and distinct levels sharing one
+    # string form would collapse (same rule as the slope dummies below).
+    # Unobserved declared levels keep today's drop behavior on both
+    # sides (no regression, same P2).
+    crossed = _rk_factor_crossed(raw)
+    mask = .!ismissing.(raw)
+    obs_strs = Set(crossed[mask])
+    obs_lvls = Set(CA.levelcode.(raw)[mask])
+    length(obs_strs) == length(obs_lvls) || error(
+        "$prefix: $what grouping `$gname` has distinct levels with the " *
+        "same string form; the draws regime needs unambiguous levels")
+    sb_order = filter(lv -> lv in obs_strs, string.(CA.levels(raw)))
+    issorted(sb_order) || error(
+        "$prefix: $what grouping `$gname` declares custom-ordered " *
+        "levels ($(join(repr.(CA.levels(raw)), ", "))); the thin layer " *
+        "numbers groupings by sorted crossed strings — reorder the " *
+        "declaration to sorted order or await the peer declared-levels " *
+        "surface spelling (ReactiveKernels:brm P2 15a8se2)")
+    columns[gname] = crossed
+    gname
 end
 
 function _rk_ranef_dummies!(margins::Vector{_RKRanefMargin}, target::Symbol,
@@ -2310,12 +2435,13 @@ function _rk_plan_offset_only_predictor(brmi::BRMI, context, target::Symbol,
         required=true, row_source,
         implicit_intercept=target in _brm_threshold_located_predictors(brmi))
     priors = _rk_population_priors(brmi, design, target, available,
-        Set{Symbol}(), terms, derived)
+        Set{Symbol}(), terms, derived, nothing)
     r2d2 = _brm_whole_predictor_r2d2(brmi, design, (); prefix,
         available_predictors=available)
     isnothing(r2d2) || error(
-        "$prefix: predictor `$target` `r2d2` priors are out of slice 1")
-    _RKPredictorSpec(target, link, terms, target), priors
+        "$prefix: predictor `$target` `r2d2` decomposes nothing (no " *
+        "coefficient columns); drop the `r2d2` statement")
+    _RKPredictorSpec(target, link, terms, target), priors, nothing
 end
 
 # ---- spline smooth terms (s/t2; mirrors `_sb_s_generic`/`_sb_t2_generic`) ----
@@ -2579,6 +2705,159 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
     _RKTermSpec(:hsgp, collect(axes), (; id, k, c, iso=state.iso), id, id)
 end
 
+# ---- AR(1) latent-path terms (mirrors `_sb_ar1`) ----
+#
+# An `:ar` term carries its thin-layer scan names in `options`:
+# `(; state, phi, phi_raw, eps)`. The state is the `@scan` carried
+# array, `phi = tanh(phi_raw)` the stationarity map over the sampled
+# `phi_raw ~ Normal(0, 1)`, and `eps` the per-step innovation local.
+# The thin layer owns the innovations (`_ppl_scan_z_<state>` under a
+# `Normal(0, 1)` plate-vector prior) and folds the state through
+# RK-core `scan(...)` (`u[1] = eps[1]`,
+# `u[t] = phi*u[t-1] + eps[t]` — SB's `ar1_recurse` verbatim); BRM
+# ships the time axis (a length probe, as in SB) + the declaration,
+# and the path takes a free population beta through the AST's generic
+# coef path (`coef .* state`, classified thin-layer-side as a
+# `ScanSummandTerm`). Names are SB-deterministic
+# (`ar_<predictor>_<time>`): a duplicate `ar` term re-derives the
+# names SB's own declarations would collide on, so it fails closed
+# exactly as SB does (mo precedent) — never a serialized second
+# exchangeable path. The time VALUES never cross (rows are already in
+# time order, as in SB); the loop bound is the thin-layer data-length
+# name (`T`, which binds `n_obs`).
+function _rk_plan_ar_term!(prepared::_BRMPreparedTerm{typeof(ar)},
+        target::Symbol, data::AbstractDict,
+        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol})
+    prefix = "RK backend"
+    source = prepared.source
+    raw = get(data, source, nothing)
+    raw isa AbstractVector && eltype(raw) <: Real &&
+        !(eltype(raw) <: Bool) &&
+        !(raw isa CA.CategoricalVector) || error(
+        "$prefix: predictor `$target` `ar` time axis `$source` must be a " *
+        "plain numeric vector")
+    columns[source] = raw
+    # SB's emitted Stan column name (`ar_<predictor>_<time>`, `sbimpl.jl`
+    # walker): the beta's deterministic address label and scan-state
+    # stem. (Explicit `effect(...)` addresses speak SB's `popcoefnames`
+    # vocabulary, the un-namespaced `ar_<time>` — see
+    # `_rk_gate_ar_effect_priors!`.)
+    base = "ar_" * string(target) * "_" * string(source)
+    addressee = Symbol(base)
+    state, phi, phi_raw, eps = Symbol(base), Symbol(:phi_, base),
+        Symbol(:phi_raw_, base), Symbol(:eps_, base)
+    for nm in (state, phi, phi_raw, eps)
+        (nm in taken || haskey(columns, nm)) && error(
+            "$prefix: predictor `$target` `ar` latent name `$nm` is " *
+            "already taken — duplicate `ar($source)` terms collide " *
+            "exactly as SB's deterministic names do (rename the " *
+            "colliding parameter, data column, or term)")
+    end
+    for nm in (state, phi, phi_raw, eps)
+        push!(taken, nm)
+    end
+    _RKTermSpec(:ar, [source], (; state, phi, phi_raw, eps),
+        addressee, addressee)
+end
+
+# An `ar` latent path needs a sibling population coefficient: the
+# thin-layer surface pairs every scan summand with an intercept or
+# coefficient (`mu = a .+ b .* u`) and fails a scan-only predictor
+# closed. Gate it here with RK attribution. (Address collisions with
+# fellow terms need no separate check: every fellow addressee a
+# deterministic `ar_*` name could equal is already in `taken`/bound
+# columns when the term plans, so the taken check in
+# `_rk_plan_ar_term!` fires first.)
+function _rk_gate_ar_sibling!(terms::Vector{_RKTermSpec}, target::Symbol)
+    prefix = "RK backend"
+    any(t -> t.kind === :ar, terms) || return nothing
+    any(t -> t.kind === :intercept || t.kind === :continuous ||
+        t.kind === :factor, terms) || error(
+        "$prefix: predictor `$target` carries an `ar(...)` latent path " *
+        "with no sibling population coefficient — the thin-layer scan " *
+        "surface pairs every scan summand with an intercept or " *
+        "coefficient (`mu = a .+ b .* u`); add an intercept or a " *
+        "continuous/factor term")
+    nothing
+end
+
+# Explicit `effect(...)` addresses on the `ar` latent column are
+# sequenced: the shared seam resolves design columns only, so it would
+# misreport the (SB-valid) label as "not a population coefficient".
+# Reject it here with RK attribution instead. Runs before predictor
+# geometry (which invokes the shared seam); labels derive
+# syntactically, leniently — malformed terms stay shared prep's error.
+# The label is SB's `popcoefnames` vocabulary (`ar_<time>`, WITHOUT
+# the predictor namespace the emitted Stan column carries): SB
+# resolves `effect(mu, ar_x)` and rejects `effect(mu, ar_mu_x)`
+# ("not a population coefficient"), and the RK side matches both —
+# the namespaced spelling falls through to the shared seam below.
+function _rk_gate_ar_effect_priors!(brmi::BRMI, target::Symbol,
+        ar_raw::AbstractVector)
+    prefix = "RK backend"
+    isempty(ar_raw) && return nothing
+    addresses = Set{Symbol}()
+    for t in ar_raw
+        t isa ExprColumn || continue
+        args = getargs(t)
+        length(args) == 1 || continue
+        axis = only(args)
+        axis isa NamedColumn || continue
+        push!(addresses, Symbol(:ar_, name(axis)))
+    end
+    isempty(addresses) && return nothing
+    for spec in effect_priors(brmi)
+        spec.coefficient in addresses || continue
+        (spec.predictor === _EFFECT_COLON || spec.predictor === target) ||
+            continue
+        error("$prefix: predictor `$target` explicit priors on the `ar` " *
+            "latent column `$(spec.coefficient)` are out of slice 1 " *
+            "(address the predictor with `effect($target, :)`, or take " *
+            "the Normal(0, 1) default; per-column `effect(...)` " *
+            "addresses on latent columns are sequenced)")
+    end
+    nothing
+end
+
+# The `ar` beta's prior: the shared seam resolves design columns only,
+# and the latent column is not one — so `:`-wide statements claim this
+# cell through the SAME claim engine (tie semantics identical to the
+# design cells), defaulting to Normal(0, 1) (SB's `popefs` default).
+# Runs after the shared seam (which owns spec validation); explicit
+# ar addresses never reach here (gated above).
+function _rk_ar_beta_prior(brmi::BRMI, target::Symbol, addressee::Symbol)
+    prefix = "RK backend"
+    cell = Ref{Any}(nothing)
+    for spec in effect_priors(brmi)
+        (spec.predictor === _EFFECT_COLON || spec.predictor === target) ||
+            continue
+        spec.coefficient === _EFFECT_COLON || continue
+        _brm_claim_effect_prior!(() -> cell[], v -> (cell[] = v), spec,
+            "`$target`'s `$addressee` column"; prefix)
+    end
+    held = cell[]
+    isnothing(held) && return (0.0, 1.0)
+    expression = held.expression
+    expression isa ExprColumn && getf(expression) === Normal || error(
+        "$prefix: predictor `$target` population-effect priors must " *
+        "be `Normal(location, scale)` in slice 1")
+    isempty(getkwargs(expression)) || error(
+        "$prefix: predictor `$target` population-effect `Normal` " *
+        "prior cannot have keywords in slice 1")
+    raw_location, raw_scale = _brm_normal_effect_args(expression; prefix)
+    location = _brm_numeric_constant(raw_location)
+    scale = _brm_numeric_constant(raw_scale)
+    isnothing(location) && error(
+        "$prefix: population-effect Normal location must be a numeric constant")
+    isnothing(scale) && error(
+        "$prefix: population-effect Normal scale must be a numeric constant")
+    isfinite(location) || error(
+        "$prefix: population-effect Normal location must be finite")
+    isfinite(scale) && scale > 0 || error(
+        "$prefix: population-effect Normal scale must be finite and positive")
+    location, scale
+end
+
 # ---- monotonic terms (mo/mo1; mirrors `_sb_mo`) ----
 #
 # A `:monotonic` term carries `(; increments, alpha, source)`: the
@@ -2702,6 +2981,139 @@ function _rk_mo_beta_prior(brmi::BRMI, target::Symbol, addressee::Symbol)
     _RKPopulationPrior(target, addressee, location[1], scale[1])
 end
 
+# Flat whole-predictor R2D2 (SB `_sb_emit_r2d2_params!` /
+# `_sb_emit_r2d2_popefs!` mirror): the shared `_BRMR2D2Plan` (R2 prior,
+# share indices, alpha, tau literal-or-nothing) becomes an
+# `_RKR2D2Prior` plus its Beta-R2 / Dirichlet-phi / optional
+# half-Normal-tau sampled parameters (SB spellings
+# `r2d2_<target>_R2/_phi/_tau_bsv`, minted). Only the share COUNT
+# crosses the boundary (as the Dirichlet length) — the thin layer
+# recomputes the share composition at bind from the same
+# override/no-override structure, so the numbering itself need not
+# agree. Returns `(; prior, scalars, phi)`.
+function _rk_plan_r2d2_prior(brmi::BRMI, design, r2plan::_BRMR2D2Plan,
+        target::Symbol, available::Tuple, terms::Vector{_RKTermSpec},
+        taken::Set{Symbol}, columns::Dict{Symbol,AbstractVector})
+    prefix = "RK backend"
+    for term in terms
+        # The mo contrast is parameter-derived, so no data variance
+        # exists (the thin layer rejects it too); gp latents have no
+        # R2D2 term rule thin-layer-side. mo1/dar/spline/hsgp summands
+        # are skipped by the bind-time share composition, like offsets
+        # and ranef gathers.
+        term.kind === :monotonic && error(
+            "$prefix: predictor `$target` combines `mo` with `r2d2`; " *
+            "the mo contrast is parameter-derived, so no data variance " *
+            "exists to decompose (drop one of them)")
+        term.kind === :gp && error(
+            "$prefix: predictor `$target` combines `gp` with `r2d2`; " *
+            "gp latents have no R2D2 term rule in slice 1")
+    end
+    n = length(design.columns)
+    cell_overrides = _brm_simple_population_effect_overrides(
+        brmi, design; prefix, available_predictors=available)
+    stated = isnothing(cell_overrides) ? fill(false, n) :
+        Bool[!isnothing(cell) for cell in cell_overrides]
+    n_shares = count(!iszero, r2plan.share_indices)
+    if n_shares == 0
+        # SB mirror (`_sb_r2d2_overrides`): zero shares is a legitimate
+        # no-op only with no non-intercept columns at all — but SB's
+        # tau-only no-op has no thin-layer form (the peer rejects a
+        # decomposition over nothing, and a bare tau would be an unused
+        # parameter), so both shapes fail closed here.
+        labels = Symbol[c.label for c in design.columns]
+        if all(l -> l === :Intercept, labels)
+            error("$prefix: predictor `$target` `r2d2` decomposes " *
+                "nothing (no non-intercept coefficient columns); drop " *
+                "the `r2d2` statement")
+        end
+        excluded = Symbol[labels[i] for i in eachindex(labels)
+            if labels[i] !== :Intercept && stated[i]]
+        error("$prefix: predictor `$target` `r2d2` has nothing to " *
+            "allocate: every non-intercept population column " *
+            "($(join(excluded, ", "))) carries its own explicit " *
+            "`Normal` prior, and an explicitly prioried column leaves " *
+            "the Dirichlet allocation (SB mirror); drop those " *
+            "per-column statements or drop the `r2d2` statement")
+    end
+    prior = r2plan.prior
+    ab = if prior isa Beta
+        (Float64(prior.α), Float64(prior.β))
+    elseif prior isa ExprColumn && getf(prior) === Beta &&
+            length(getargs(prior)) == 2
+        a = _brm_numeric_constant(getargs(prior)[1])
+        b = _brm_numeric_constant(getargs(prior)[2])
+        (isnothing(a) || isnothing(b)) && error(
+            "$prefix: predictor `$target` R2D2 `R2` Beta shapes must be " *
+            "numeric constants in slice 1")
+        (Float64(a), Float64(b))
+    else
+        error("$prefix: predictor `$target` R2D2 `R2` prior must be " *
+            "`Beta(a, b)` with numeric shapes in slice 1")
+    end
+    (all(isfinite, ab) && all(b -> b > 0, ab)) || error(
+        "$prefix: predictor `$target` R2D2 `R2` Beta shapes must be " *
+        "finite and positive")
+    scalars = _RKSampledParameter[]
+    r2_name = _rk_mint_generated!(taken, columns, "r2d2_$(target)_R2")
+    push!(scalars,
+        _RKSampledParameter(r2_name, :Beta, ab, nothing, r2_name))
+    tau = if isnothing(r2plan.total_scale)
+        # SB's honest default: a sampled half-standard-normal (SB
+        # `std_normal(; lower=0.)`), not a fabricated constant.
+        tau_name = _rk_mint_generated!(
+            taken, columns, "r2d2_$(target)_tau_bsv")
+        push!(scalars, _RKSampledParameter(
+            tau_name, :Normal, (0.0, 1.0), :positive, tau_name))
+        tau_name
+    else
+        Float64(r2plan.total_scale)
+    end
+    phi_name = _rk_mint_generated!(taken, columns, "r2d2_$(target)_phi")
+    phi = _RKVectorParameter(phi_name, :simplex_dirichlet,
+        (fill(r2plan.alpha, n_shares),), n_shares, phi_name)
+    location, scale = _brm_materialize_normal_effect_priors(
+        cell_overrides, n; prefix)
+    groups, order = _rk_design_addressee_groups(design, target; prefix)
+    overrides = Dict{Symbol,Tuple{Float64,Float64}}()
+    for addressee in order
+        idxs = groups[addressee]
+        any_stated = any(stated[idxs])
+        any_stated || continue
+        all(stated[idxs]) || error(
+            "$prefix: predictor `$target` addressee `$addressee` mixes " *
+            "explicit-Normal columns with simplex columns; the R2D2 " *
+            "composition is per-block (state the whole block or none " *
+            "of it)")
+        first_loc, first_scale = location[first(idxs)], scale[first(idxs)]
+        all(i -> location[i] == first_loc && scale[i] == first_scale,
+            idxs) || error(
+            "$prefix: predictor `$target` addressee `$addressee` has " *
+            "disagreeing population priors across its columns; slice 1 " *
+            "needs one shared Normal per addressee (address the source " *
+            "column, not individual levels)")
+        overrides[addressee] = (first_loc, first_scale)
+    end
+    for term in terms
+        # An unstated factor joins the simplex under a FULL-cover
+        # LevelMap thin-layer-side — for a subset-coded (treatment /
+        # reference) block that changes the coding, so subset blocks
+        # must ride share 0 with an explicit Normal (which keeps the
+        # subset, like the PopulationPrior path).
+        term.kind === :factor || continue
+        term.options.coding === :subset || continue
+        haskey(overrides, term.addressee) && continue
+        error("$prefix: predictor `$target` factor `$(term.addressee)` " *
+            "is subset-coded but carries no explicit Normal prior; an " *
+            "unstated factor joins the R2D2 simplex under full cover, " *
+            "which changes the coding — state " *
+            "`effect($target, $(term.addressee)) ~ Normal(0, s)` " *
+            "(share-0 override) or use full-rank coding")
+    end
+    (; prior=_RKR2D2Prior(target, r2_name, phi_name, tau, overrides),
+        scalars, phi)
+end
+
 # SB single-contrast rule (see the section header): duplicate (head, source)
 # pairs fail closed. Runs per-predictor (ahead of population priors, which
 # would otherwise misattribute the second `mo(c)` as an index collision)
@@ -2722,6 +3134,126 @@ function _rk_gate_monotonic_unique!(prefix::String, where::String,
     nothing
 end
 
+# ---- differenced-AR terms (dar; mirrors `_sb_dar1`) ----
+#
+# A `:dar` term carries `(; beta, sigma, source, beta_param, sigma_param)`:
+# the persistence/scale sampled-scalar names (SB's `<dar_mu_t>_beta/_sigma`),
+# the raw time axis, and their `_RKSampledParameter`s (options-carried like
+# gp hypers; the AST preamble emits them). Beta-free direct summand
+# (self-addressed: no population prior). The thin layer owns the scan-tier
+# trajectory + z[T-1] innovations (sized from n_obs); BRM ships the bound
+# time axis (SB binds it too — values never enter the path, only its
+# length, which the Phase-6 gate checks) + the declaration. T<2 (n_obs=1:
+# SB's path is identically 0, the thin layer fails z[0] at layout) emits a
+# zeros offset instead — the mo1-K=1 twin. One dar summand per predictor
+# (thin-layer v1 state scoping) and at least one estimated coefficient
+# (no coefficient-free dar predictor in v1) fail closed in
+# `_rk_gate_dar_admitted!`.
+function _rk_dar_beta_prior(prior, target::Symbol, source::Symbol)
+    prefix = "RK backend"
+    where = "predictor `$target` `dar($source)` persistence"
+    prior isa ExprColumn || error(
+        "$prefix: $where prior is not a distribution call")
+    f = getf(prior)
+    f isa Type || error(
+        "$prefix: $where prior is out of slice 1 (admitted: Normal)")
+    nameof(f) === :Normal || error(
+        "$prefix: $where prior `$(nameof(f))` is out of slice 1 (the " *
+        "thin-layer persistence is truncated-Normal on [0, 1]; admitted: " *
+        "Normal)")
+    isempty(getkwargs(prior)) || error(
+        "$prefix: $where prior cannot have keywords in slice 1")
+    args = getargs(prior)
+    length(args) == 2 || error(
+        "$prefix: $where prior `Normal` needs 2 arguments, got " *
+        "$(length(args))")
+    resolved = map(args) do arg
+        arg isa Number && isfinite(Float64(arg)) || error(
+            "$prefix: $where prior hyperparameters must be finite literals")
+        Float64(arg)
+    end
+    (:Normal, (resolved[1], resolved[2]), :interval)
+end
+
+function _rk_dar_sigma_prior(prior, target::Symbol, source::Symbol)
+    prefix = "RK backend"
+    where = "predictor `$target` `dar($source)` scale"
+    prior isa ExprColumn || error(
+        "$prefix: $where prior is not a distribution call")
+    f = getf(prior)
+    f isa Type || error(
+        "$prefix: $where prior is out of slice 1 (admitted: Normal)")
+    nameof(f) === :Normal || error(
+        "$prefix: $where prior `$(nameof(f))` is out of slice 1 (the " *
+        "thin-layer scale is HalfNormal; admitted: Normal)")
+    isempty(getkwargs(prior)) || error(
+        "$prefix: $where prior cannot have keywords in slice 1")
+    args = getargs(prior)
+    length(args) == 2 || error(
+        "$prefix: $where prior `Normal` needs 2 arguments, got " *
+        "$(length(args))")
+    location, scale = args
+    location isa Number && location == 0 || error(
+        "$prefix: $where `Normal` prior must have location 0 in " *
+        "slice 1 (a positive scale takes a half-Normal)")
+    scale isa Number && isfinite(Float64(scale)) || error(
+        "$prefix: $where prior hyperparameters must be finite literals")
+    (:Normal, (0.0, Float64(scale)), :positive)
+end
+
+function _rk_plan_dar_term!(prepared::_BRMPreparedTerm{typeof(dar)},
+        target::Symbol, columns::Dict{Symbol,AbstractVector},
+        taken::Set{Symbol})
+    source = prepared.source
+    # SB binds the axis under its own name; the values never enter the path
+    # (only its length, Phase-6-gated), so a second use of the raw column
+    # reads Float64-converted time in both backends.
+    columns[source] = prepared.state.time
+    if length(prepared.state.time) < 2
+        # Single observation: SB's path is identically 0 (no innovations),
+        # while the thin layer fails z[0] at layout — so emit the zeros
+        # offset twin (mo1-K=1 shape) and never touch the surface.
+        zero = _rk_mint_generated!(taken, columns, "dar_$(source)_zero")
+        columns[zero] = zeros(length(prepared.state.time))
+        return _RKTermSpec(:offset, [zero], (;), zero, Symbol(:offset_, zero))
+    end
+    beta_family, beta_args, beta_support = _rk_dar_beta_prior(
+        prepared.state.ar_prior, target, source)
+    sigma_family, sigma_args, sigma_support = _rk_dar_sigma_prior(
+        prepared.state.sd_prior, target, source)
+    stem = "dar_$(target)_$(source)"
+    beta = _rk_mint_generated!(taken, columns, stem * "_beta")
+    sigma = _rk_mint_generated!(taken, columns, stem * "_sigma")
+    label = Symbol(stem)
+    _RKTermSpec(:dar, Symbol[],
+        (; beta, sigma, source,
+         beta_param=_RKSampledParameter(
+             beta, beta_family, beta_args, beta_support, beta),
+         sigma_param=_RKSampledParameter(
+             sigma, sigma_family, sigma_args, sigma_support, sigma)),
+        label, label)
+end
+
+# Thin-layer v1 admission for dar summands (see the section header): at most
+# one per predictor (state scoping), and at least one estimated coefficient
+# (the surface fails coefficient-free dar predictors closed — latent-only
+# shapes stay out until the peer admits them, spline-only precedent aside).
+function _rk_gate_dar_admitted!(prefix::String, target::Symbol,
+        terms::Vector{_RKTermSpec})
+    dar_count = count(t -> t.kind === :dar, terms)
+    dar_count == 0 && return nothing
+    dar_count == 1 || error(
+        "$prefix: predictor `$target` carries $dar_count `dar()` terms; " *
+        "the thin layer splices one dar summand per predictor in v1 " *
+        "(multi-trajectory predictors are sequenced)")
+    any(t -> t.kind === :intercept || t.kind === :continuous ||
+        t.kind === :factor || t.kind === :monotonic, terms) || error(
+        "$prefix: predictor `$target` `dar()` has no estimated " *
+        "coefficients — add an intercept or coefficient (the thin layer " *
+        "admits no coefficient-free dar predictor in v1)")
+    nothing
+end
+
 # One `:simplex_dirichlet` vector parameter per monotonic term (SB: one
 # increment simplex per contrast).
 function _rk_plan_monotonic_vectors!(predictor_specs::AbstractVector)
@@ -2739,11 +3271,167 @@ function _rk_plan_monotonic_vectors!(predictor_specs::AbstractVector)
     specs
 end
 
+# ---- measurement-error terms (me; mirrors `_sb_me`) ----
+#
+# An `:me` term carries `(; latent, loc, scale, sd)`: the plate-vector
+# latent name (SB's un-namespaced `me_<x>` — the beta addressee, the
+# `popcoefnames` label, and the thin-layer `PlateParameter` alike), the
+# shared-scalar Normal args (default `(0, 1)`, overridable via
+# `latent(<lp|:>, me(x)) ~ Normal(...)`), and the scalar observation
+# error `sd` (shared prep gates finite `sd > 0`; SB never takes vector
+# error sizes either). `columns` holds the observed source column (bound
+# as data, so Phase 6 checks its length/missingness/finiteness).
+#
+# The thin layer owns the plate (`x[i]`-ranged `@plate` with the shared
+# args) and lowers `coef .* latent` to a `ContinuousTerm` over the
+# plate; the observation likelihood rides a synthetic gaussian-identity
+# plan response (`_rk_plan_me_observations!`, sharing the
+# `normal_id_glm` lattice with the main responses). SB shares ONE
+# latent per model across collectors, so a second `me(x)` term fails
+# closed here (dedup is sequenced with the hierarchical row) — never a
+# serialized second exchangeable latent double-counting the evidence.
+function _rk_plan_me_term!(prepared::_BRMPreparedTerm{typeof(me)},
+        target::Symbol, columns::Dict{Symbol,AbstractVector},
+        taken::Set{Symbol}, me_sources::Set{Symbol})
+    prefix = "RK backend"
+    source = prepared.source
+    source in me_sources && error(
+        "$prefix: predictor `$target` carries a second `me($source)` " *
+        "term; SB shares one latent true covariate per model, so the " *
+        "second is out of slice 1 (use one `me($source)` term)")
+    latent = Symbol(:me_, source)
+    (latent in taken || haskey(columns, latent)) && error(
+        "$prefix: predictor `$target` `me` latent name `$latent` is " *
+        "already taken — rename the colliding parameter, data column, " *
+        "or term")
+    push!(me_sources, source)
+    push!(taken, latent)
+    columns[source] = prepared.state.x_obs
+    loc, scale = _rk_me_latent_args(
+        prepared.state.latent_prior, target, source)
+    _RKTermSpec(:me, [source], (; latent, loc, scale, sd=prepared.state.sd_x),
+        latent, latent)
+end
+
+# The `me` latent's Normal args: shared prep resolves the
+# `latent(<lp|:>, me(x))` override (defaulting to `Normal(0, 1)`) into
+# `latent_prior`; slice 1 materializes Normal-only (SB's arbitrary-prior
+# merge is sequenced), with numeric-constant args like every other
+# slice-1 Normal.
+function _rk_me_latent_args(prior, target::Symbol, source::Symbol)
+    prefix = "RK backend"
+    prior isa ExprColumn && getf(prior) === Normal || error(
+        "$prefix: predictor `$target` `me($source)` latent prior must " *
+        "be `Normal(location, scale)` in slice 1")
+    isempty(getkwargs(prior)) || error(
+        "$prefix: predictor `$target` `me($source)` latent `Normal` " *
+        "prior cannot have keywords in slice 1")
+    raw_location, raw_scale = _brm_normal_effect_args(prior; prefix)
+    location = _brm_numeric_constant(raw_location)
+    scale = _brm_numeric_constant(raw_scale)
+    isnothing(location) && error(
+        "$prefix: predictor `$target` `me($source)` latent Normal " *
+        "location must be a numeric constant")
+    isnothing(scale) && error(
+        "$prefix: predictor `$target` `me($source)` latent Normal " *
+        "scale must be a numeric constant")
+    isfinite(location) || error(
+        "$prefix: predictor `$target` `me($source)` latent Normal " *
+        "location must be finite")
+    isfinite(scale) && scale > 0 || error(
+        "$prefix: predictor `$target` `me($source)` latent Normal " *
+        "scale must be finite and positive")
+    location, scale
+end
+
+# Explicit `effect(...)` addresses on the `me` latent column are
+# sequenced: the shared seam resolves design columns only, so it would
+# misreport the (SB-valid) `me_<x>` label as "not a population
+# coefficient". Reject it here with RK attribution instead. Runs before
+# predictor geometry (which invokes the shared seam); labels derive
+# syntactically, leniently — malformed terms stay shared prep's error.
+function _rk_gate_me_effect_priors!(brmi::BRMI, target::Symbol,
+        me_raw::AbstractVector)
+    prefix = "RK backend"
+    isempty(me_raw) && return nothing
+    addresses = Set{Symbol}()
+    for t in me_raw
+        t isa ExprColumn || continue
+        args = getargs(t)
+        length(args) == 2 || continue
+        axis = first(args)
+        axis isa NamedColumn || continue
+        push!(addresses, Symbol(:me_, name(axis)))
+    end
+    isempty(addresses) && return nothing
+    for spec in effect_priors(brmi)
+        spec.coefficient in addresses || continue
+        (spec.predictor === _EFFECT_COLON || spec.predictor === target) ||
+            continue
+        error("$prefix: predictor `$target` explicit priors on the `me` " *
+            "latent column `$(spec.coefficient)` are out of slice 1 " *
+            "(address the predictor with `effect($target, :)`, or take " *
+            "the Normal(0, 1) default; per-column `effect(...)` " *
+            "addresses on latent columns are sequenced)")
+    end
+    nothing
+end
+
+# The `me` beta's prior: the latent column is not a design column, so
+# `:`-wide statements claim this cell through the SAME claim engine
+# (tie semantics identical to the design cells), defaulting to
+# Normal(0, 1) (SB's `popefs` default). Runs after the shared seam
+# (which owns spec validation); explicit me addresses never reach here
+# (gated above).
+function _rk_me_beta_prior(brmi::BRMI, target::Symbol, addressee::Symbol)
+    prefix = "RK backend"
+    won = Ref{Any}(nothing)
+    for spec in effect_priors(brmi)
+        spec.coefficient === _EFFECT_COLON || continue
+        spec.predictor === _EFFECT_COLON || spec.predictor === target ||
+            continue
+        _brm_claim_effect_prior!(() -> won[], v -> (won[] = v), spec,
+            "`$target`'s measurement-error `$addressee` column"; prefix)
+    end
+    expression = isnothing(won[]) ? nothing : won[].expression
+    if !isnothing(expression)
+        expression isa ExprColumn && getf(expression) === Normal || error(
+            "$prefix: predictor `$target` population-effect priors must " *
+            "be `Normal(location, scale)` in slice 1")
+        isempty(getkwargs(expression)) || error(
+            "$prefix: predictor `$target` population-effect `Normal` " *
+            "prior cannot have keywords in slice 1")
+    end
+    location, scale = _brm_materialize_normal_effect_priors(
+        Any[expression], 1; prefix)
+    _RKPopulationPrior(target, addressee, location[1], scale[1])
+end
+
+# One synthetic gaussian-identity observation per `:me` term: the SB
+# `x_obs ~ Normal(x_true, sd)` likelihood (scalar constant `sd`) the
+# thin layer lowers through its plate-mean path. Runs after the formula
+# responses (Phase 5) so the observation order is deterministic;
+# `_rk_gate_crossed_columns!` already bounds the source column.
+function _rk_plan_me_observations!(response_specs::Vector{_RKLikelihoodSpec},
+        predictor_specs::AbstractVector)
+    for spec in predictor_specs, term in spec.terms
+        term.kind === :me || continue
+        source = only(term.columns)
+        push!(response_specs, _RKLikelihoodSpec(:gaussian, :identity,
+            source, term.options.latent, term.options.sd, nothing,
+            nothing, _RKResponseEvidence(:none, nothing, nothing),
+            source, nothing, nothing, nothing, Symbol[], Symbol[],
+            nothing, nothing, Symbol[], nothing, Symbol[], nothing))
+    end
+    nothing
+end
+
 function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         available::Tuple, columns::Dict{Symbol,AbstractVector},
         derived::Vector{_RKDerivedSpec}, taken::Set{Symbol},
         ranef_buckets::Dict{Tuple{Symbol,Symbol,Union{Nothing,Symbol}},
-            Union{_RKRanefBucket,Nothing}})
+            Union{_RKRanefBucket,Nothing}},
+        me_sources::Set{Symbol})
     prefix = "RK backend"
     op = linear_predictor_op(brmi, target)
     _, rhs = getargs(op, 2)
@@ -2756,9 +3444,13 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
     hsgp_raw = filter(t -> t isa ExprColumn && getf(t) === hsgp, structured)
     mo_raw = filter(t -> t isa ExprColumn &&
         (getf(t) === mo || getf(t) === mo1), structured)
+    dar_raw = filter(t -> t isa ExprColumn && getf(t) === dar, structured)
+    ar_raw = filter(t -> t isa ExprColumn && getf(t) === ar, structured)
+    me_raw = filter(t -> t isa ExprColumn && getf(t) === me, structured)
     other_structured = filter(
         t -> !(t in spline_raw) && !(t in gp_raw) && !(t in hsgp_raw) &&
-            !(t in mo_raw),
+            !(t in mo_raw) && !(t in dar_raw) && !(t in ar_raw) &&
+            !(t in me_raw),
         structured)
     isempty(other_structured) || error(
         "$prefix: predictor `$target` structured term(s) " *
@@ -2766,10 +3458,13 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         "are out of slice 1 (population GLMs only)")
     _rk_gate_spline_term_priors!(brmi, target, spline_raw)
     _rk_gate_hsgp_term_priors!(brmi, target, hsgp_raw)
+    _rk_gate_ar_effect_priors!(brmi, target, ar_raw)
+    _rk_gate_me_effect_priors!(brmi, target, me_raw)
     grouped = filter(t -> _brm_is_grouped_term(t), raw_terms)
     ordinary = Tuple(t for t in raw_terms if !(t in structured) && !(t in grouped))
     isempty(ordinary) && isempty(spline_raw) && isempty(gp_raw) &&
-        isempty(hsgp_raw) && isempty(mo_raw) && error(
+        isempty(hsgp_raw) && isempty(mo_raw) && isempty(dar_raw) &&
+        isempty(ar_raw) && isempty(me_raw) && error(
         "$prefix: predictor `$target` has no terms")
     has_intercept = any(t -> t isa Integer && t == 1, ordinary)
     # Classify before building geometry: fail fast on unknown terms with RK
@@ -2804,6 +3499,7 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         terms, spines, derived, context.data, target, has_intercept)
     any(t -> t.kind !== :offset, terms) || !isempty(spline_raw) ||
         !isempty(gp_raw) || !isempty(hsgp_raw) || !isempty(mo_raw) ||
+        !isempty(dar_raw) || !isempty(ar_raw) || !isempty(me_raw) ||
         return _rk_plan_offset_only_predictor(
         brmi, context, target, ordinary, available, link, terms, derived)
     geometry = _brm_prepare_predictor_geometry(
@@ -2825,6 +3521,15 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         elseif prepared.callable === mo1
             push!(terms, _rk_plan_mo1_term!(
                 prepared, target, columns, taken))
+        elseif prepared.callable === dar
+            push!(terms, _rk_plan_dar_term!(
+                prepared, target, columns, taken))
+        elseif prepared.callable === ar
+            push!(terms, _rk_plan_ar_term!(
+                prepared, target, context.data, columns, taken))
+        elseif prepared.callable === me
+            push!(terms, _rk_plan_me_term!(
+                prepared, target, columns, taken, me_sources))
         else
             error("$prefix: internal: unexpected structured term " *
                 "survived pre-check in `$target`")
@@ -2850,14 +3555,18 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
             Symbol(:offset_, zero)))
     end
     _rk_gate_monotonic_unique!(prefix, "predictor `$target` carries", terms)
-    isnothing(geometry.r2d2) || error(
-        "$prefix: predictor `$target` `r2d2` priors are out of slice 1")
+    _rk_gate_dar_admitted!(prefix, target, terms)
+    _rk_gate_ar_sibling!(terms, target)
     design = geometry.component.design
     factor_addressees = Set{Symbol}(t.addressee
         for t in terms if t.kind === :factor)
+    r2plan = geometry.r2d2
     priors = _rk_population_priors(brmi, design, target, available,
-        factor_addressees, terms, derived)
-    _RKPredictorSpec(target, link, terms, target), priors
+        factor_addressees, terms, derived, r2plan)
+    r2d2 = isnothing(r2plan) ? nothing :
+        _rk_plan_r2d2_prior(brmi, design, r2plan, target, available,
+            terms, taken, columns)
+    _RKPredictorSpec(target, link, terms, target), priors, r2d2
 end
 
 function _rk_resolve_use_ref(name::Symbol, consts::Dict{Symbol,Float64},
@@ -2974,6 +3683,13 @@ function _rk_plan_parameters!(prepared, data::AbstractDict,
         callable = prior.callable
         # Dirichlet simplexes plan as vector parameters (below), not here.
         callable === Dirichlet && continue
+        # LKJ covariance-factor stems plan as stem declarations (the
+        # thin layer derives `<stem>_scales`/`<stem>_L_corr` itself).
+        if callable === LKJCovarianceFactor
+            push!(specs, _rk_lkj_factor_parameter(parameter.name, prior,
+                consts, aliases, parameters, assign_names))
+            continue
+        end
         family, args, support_override = if callable === truncated
             # Keyword bounds are validated inside the half-normal gate.
             _rk_half_normal_prior(prior, parameter.name)
@@ -3090,6 +3806,72 @@ function _rk_dirichlet_alpha(args, name::Symbol,
     error("$prefix: parameter `$name` `Dirichlet` takes a concentration " *
           "vector `Dirichlet(alpha)` or symmetric `Dirichlet(K, a)`, got " *
           "$(length(args)) arguments")
+end
+
+# LKJ covariance-factor stem (`L ~ LKJCovarianceFactor(K; scale_prior,
+# shape)`): SB's factor-first declaration. The scale prior is
+# Exponential-only in this slice (SB's default; sampled-θ
+# hyperparameters ride the scalar-prior shape) and the shape is a
+# literal hyperparameter (the thin-layer contract); anything else fails
+# closed. Width agreement with the joint response gates in Phase 6.
+function _rk_lkj_factor_parameter(name::Symbol, prior::_BRMPreparedExpr,
+        consts::Dict{Symbol,Float64}, aliases::Dict{Symbol,Symbol},
+        parameters::Set{Symbol}, assign_names::Set{Symbol})
+    prefix = "RK backend"
+    length(prior.args) == 1 || error(
+        "$prefix: `$name ~ LKJCovarianceFactor(K; ...)` needs exactly " *
+        "one dimension argument, got $(length(prior.args))")
+    K = only(prior.args)
+    K isa Integer && !(K isa Bool) && K >= 1 || error(
+        "$prefix: `$name ~ LKJCovarianceFactor(K; ...)` needs an " *
+        "integer dimension >= 1, got $(repr(K))")
+    unknown = Symbol[k for k in keys(prior.kwargs)
+        if !(k in (:scale_prior, :shape))]
+    isempty(unknown) || error(
+        "$prefix: `$name ~ LKJCovarianceFactor(...)` accepts only " *
+        "`scale_prior` and `shape`, got $unknown")
+    scale_expr = get(prior.kwargs, :scale_prior, nothing)
+    theta = if isnothing(scale_expr)
+        1.0
+    else
+        scale_expr isa _BRMPreparedExpr &&
+            scale_expr.callable === Exponential &&
+            isempty(scale_expr.kwargs) &&
+            length(scale_expr.args) == 1 || error(
+            "$prefix: parameter `$name` joint-factor scale prior is " *
+            "`Exponential(θ)` in this slice (SB's default)")
+        raw = only(scale_expr.args)
+        if raw isa Number
+            value = Float64(raw)
+            isfinite(value) && value > 0 || error(
+                "$prefix: parameter `$name` joint-factor `Exponential` " *
+                "scale must be finite and positive")
+            value
+        elseif raw isa _BRMPreparedRef
+            _, resolved = _rk_resolve_use_ref(raw.name, consts, aliases,
+                parameters, assign_names,
+                "parameter `$name` joint-factor scale")
+            resolved isa Number &&
+                (!isfinite(resolved) || resolved <= 0) && error(
+                "$prefix: parameter `$name` joint-factor `Exponential` " *
+                "scale must be finite and positive")
+            resolved
+        else
+            error("$prefix: parameter `$name` joint-factor `Exponential` " *
+                  "scale must be a literal or a scalar reference, not an " *
+                  "expression (precompute into an assignment)")
+        end
+    end
+    shape_raw = get(prior.kwargs, :shape, 1.0)
+    shape_raw isa Number && !(shape_raw isa Bool) || error(
+        "$prefix: parameter `$name` LKJ `shape` must be a finite " *
+        "positive literal (a hyperparameter)")
+    shape = Float64(shape_raw)
+    isfinite(shape) && shape > 0 || error(
+        "$prefix: parameter `$name` LKJ `shape` must be finite and " *
+        "strictly positive, got $(repr(shape_raw))")
+    _RKSampledParameter(name, :LKJCovarianceFactor, (Int(K), theta, shape),
+        nothing, name)
 end
 
 function _rk_plan_vector_parameters!(prepared,
@@ -3283,6 +4065,14 @@ function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
         (eltype(values) <: Real && all(x -> 0 < x < 1, values)) || error(
             "$prefix: response `$response` must hold values strictly " *
             "inside (0, 1)")
+    elseif family === :mvnormal_cholesky
+        # Mirrors the thin layer: one raw numeric column per outcome
+        # (complete aligned rows pack in the peel; the finite check
+        # re-asserts the bind rule here with BRM attribution).
+        eltype(values) <: Real || error(
+            "$prefix: response `$response` must be real-valued")
+        all(isfinite, values) || error(
+            "$prefix: response `$response` must be finite")
     end
     values
 end
@@ -3353,9 +4143,12 @@ function _rk_peel_observation(brmi::BRMI, observation)
     isnothing(missing_response) || error(
         "$prefix: response `$(observation.key)` uses `mi()` (modelled " *
         "missingness); slice 1 has no missingness machinery")
+    observation.lhs isa JointResponseColumn &&
+        return _rk_peel_joint_observation(observation)
     observation.lhs isa NamedColumn || error(
         "$prefix: response `$(observation.key)` is not a plain response " *
-        "column (joint/multivariate responses are out of slice 1)")
+        "column (slice 1 admits plain response columns and `[y1, ...]` " *
+        "joint responses only)")
     parent(observation.lhs) isa DataColumn || error(
         "$prefix: response `$(observation.key)` carries a response " *
         "decorator or link; slice 1 admits plain response columns only")
@@ -3386,7 +4179,38 @@ function _rk_peel_observation(brmi::BRMI, observation)
             "$prefix: response `$(observation.key)` bounded base must be " *
             "a distribution call")
     end
-    (; key=observation.key, rhs, raw_response, weight_plan, modifier)
+    (; key=observation.key, rhs, raw_response, weight_plan, modifier,
+        joint_outcomes=Symbol[])
+end
+
+# Joint correlated-outcomes peel (SB `[y1..yK] ~ MvNormalCholesky(...)`):
+# the vector LHS takes the explicit joint family only (row weights and
+# bounded evidence change the head, so they fail here with attribution),
+# and the outcomes pack to complete aligned row vectors (missingness
+# fails at packing — the joint density never drops or factorizes
+# missing outcome patterns). `raw_response` is the row-vector
+# collection (its length is the observation axis); Phase 5 unpacks one
+# raw numeric column per outcome.
+function _rk_peel_joint_observation(observation)
+    prefix = "RK backend"
+    outcomes = collect(Symbol, joint_response_names(observation.lhs))
+    rhs = observation.rhs
+    rhs isa ExprColumn || error(
+        "$prefix: response `$(observation.key)` likelihood must be a " *
+        "distribution call")
+    head = getf(rhs)
+    head === MvNormalCholesky || error(
+        "$prefix: vector response $outcomes supports the explicit " *
+        "joint family `MvNormalCholesky(means, factor)`; got " *
+        "`$(head isa Function || head isa Type ? nameof(head) : head)`" *
+        (head === weighted ?
+            " (row weights on a joint density are out of slice)" :
+            head === truncated || head === censored ||
+                head === interval_censored ?
+            " (bounded joint responses are out of slice)" : ""))
+    rows = _brm_joint_response_values(observation.lhs; prefix)
+    (; key=observation.key, rhs, raw_response=rows, weight_plan=nothing,
+        modifier=nothing, joint_outcomes=outcomes)
 end
 
 function _rk_referenced_predictors(program, rhs, response::Symbol)
@@ -3427,6 +4251,47 @@ function _rk_categorical_refs(program, rhs::ExprColumn, response::Symbol)
         "$prefix: response `$response` `CategoricalLogit` repeats a " *
         "predictor ($(join(names, ", "))) — one linear predictor per " *
         "non-reference class")
+    names
+end
+
+# Joint correlated-outcomes means resolve positionally (outcome order):
+# one declared linear predictor per outcome. Scalar, data-backed, and
+# expression means are SB-only — the thin layer takes one identity-link
+# predictor per outcome, so anything else fails closed here.
+function _rk_joint_refs(program, rhs::ExprColumn, response::Symbol,
+        outcomes::Vector{Symbol})
+    prefix = "RK backend"
+    isempty(outcomes) && error(
+        "$prefix: response `$response` `MvNormalCholesky` is joint-only; " *
+        "write `[y1, y2] ~ MvNormalCholesky([mu1, mu2], L)` with a " *
+        "vector response")
+    args = getargs(rhs)
+    length(args) == 2 || error(
+        "$prefix: response `$response` `MvNormalCholesky(means, factor)` " *
+        "needs exactly two arguments")
+    means = args[1]
+    means isa AbstractVector || error(
+        "$prefix: response `$response` `MvNormalCholesky` means must use " *
+        "vector syntax `[mu1, mu2, ...]`, got $(typeof(means))")
+    K = length(outcomes)
+    length(means) == K || error(
+        "$prefix: response `$response` has $K outcomes but " *
+        "`MvNormalCholesky` received $(length(means)) means (one mean " *
+        "per outcome, in outcome order)")
+    declared = Set{Symbol}(node.name for node in program.operations
+        if node.role === :predictor)
+    names = Symbol[]
+    for m in means
+        m isa NamedColumn && name(m) in declared || error(
+            "$prefix: response `$response` joint mean " *
+            "`$(m isa NamedColumn ? name(m) : m)` is not a " *
+            "declared linear predictor; the RK slice admits one " *
+            "identity-link predictor per outcome (`mu_j ~ ...`)")
+        push!(names, name(m))
+    end
+    length(unique(names)) == length(names) || error(
+        "$prefix: response `$response` joint means repeat a predictor " *
+        "($(join(names, ", "))) — one linear predictor per outcome)")
     names
 end
 
@@ -3490,12 +4355,95 @@ function _rk_simplex_source(arg, response::Symbol,
     (sname, vectors[sname].size)
 end
 
-# Ordinal extras gate: `discrimination`/`per_threshold` are plan-level
-# only in the thin layer (the AST surface spells `Ordinal.(structure,
-# link, eta)`), and the AST-only lowering has no direct route — so any
-# extras fail closed here naming the surface gap. Drop the keywords for
-# the plain ordinal (even `discrimination=1.0`).
-function _rk_ordinal_extras(rhs::ExprColumn, response::Symbol)
+# Ordinal extras: `discrimination` (a positive literal, a raw data
+# column, or a `log()` linear predictor — the modeled scale, positive by
+# construction via `exp`) and `per_threshold` (a tuple of raw numeric
+# design columns, StoppingRatio only). These are thin-layer IR fields
+# (`LikelihoodSpec` discrimination/threshold_columns/threshold_coefs):
+# the AST spells the plain three-positional ordinal and the extension
+# carries the extras plan-level (the surface takes no extras).
+function _rk_ordinal_discrimination(raw, response::Symbol,
+        predictor_specs::AbstractVector)
+    prefix = "RK backend"
+    raw === nothing && return (nothing, Symbol[])
+    if raw isa Number
+        value = Float64(raw)
+        isfinite(value) && value > 0 || error(
+            "$prefix: response `$response` ordinal discrimination must be " *
+            "finite and strictly positive, got $(repr(raw))")
+        return (value, Symbol[])
+    end
+    raw isa NamedColumn || error(
+        "$prefix: response `$response` ordinal discrimination must be a " *
+        "positive literal, a raw data column, or a `log()` linear " *
+        "predictor, got $(repr(raw))")
+    sname = name(raw)
+    known = findfirst(spec -> spec.name === sname, predictor_specs)
+    if known !== nothing
+        # Predictor-first, mirroring the thin layer (a name that is both
+        # a predictor and a data column fails closed at hygiene).
+        spec = predictor_specs[known]
+        spec.link === :log || error(
+            "$prefix: response `$response` discrimination predictor " *
+            "`$sname` must be a `log()` linear predictor (a modeled scale " *
+            "is positive by construction via `exp`); got a $(spec.link)-link " *
+            "predictor — write `log($sname) ~ ...`")
+        bad = unique!([term.kind for term in spec.terms if
+            !(term.kind in (:intercept, :continuous, :factor, :offset))])
+        isempty(bad) || error(
+            "$prefix: response `$response` discrimination predictor " *
+            "`$sname` uses $(join(bad, ", ")) terms; a modeled scale " *
+            "admits population terms only (intercept, continuous, " *
+            "factor, offset)")
+        return (sname, Symbol[])
+    end
+    parent(raw) isa DataColumn || error(
+        "$prefix: response `$response` ordinal discrimination `$sname` is " *
+        "neither a declared `log()` linear predictor nor a raw data " *
+        "column (sampled parameters and assignments are not admitted — " *
+        "the thin layer takes literals, data columns, and log-link " *
+        "predictors only)")
+    values = parent(parent(raw))
+    values isa AbstractVector{<:Real} &&
+        all(x -> isfinite(x) && x > 0, values) || error(
+        "$prefix: response `$response` ordinal discrimination data " *
+        "`$sname` must contain only finite positive values")
+    (sname, [sname])
+end
+
+function _rk_ordinal_threshold_columns(raw, response::Symbol, n_obs::Int)
+    prefix = "RK backend"
+    raw isa Tuple || error(
+        "$prefix: response `$response` `per_threshold` expects a tuple " *
+        "of raw numeric columns, for example `per_threshold=(treat,)`")
+    names = Symbol[]
+    for term in raw
+        term isa NamedColumn && parent(term) isa DataColumn || error(
+            "$prefix: response `$response` `per_threshold` currently " *
+            "accepts only raw numeric data columns; got $(typeof(term))")
+        key = name(term)
+        values = parent(parent(term))
+        values isa AbstractVector{<:Real} || error(
+            "$prefix: response `$response` threshold predictor `$key` " *
+            "must be numeric, got $(typeof(values))")
+        length(values) == n_obs || error(
+            "$prefix: response `$response` threshold predictor `$key` " *
+            "has $(length(values)) rows; outcome `$response` has $n_obs")
+        all(isfinite, values) || error(
+            "$prefix: response `$response` threshold predictor `$key` " *
+            "contains non-finite values")
+        push!(names, key)
+    end
+    length(unique(names)) == length(names) || error(
+        "$prefix: response `$response` threshold columns repeat a column " *
+        "($(join(names, ", "))); the thin layer takes distinct design " *
+        "columns)")
+    names
+end
+
+function _rk_ordinal_extras(rhs::ExprColumn, response::Symbol,
+        structure::Symbol, K::Int, n_obs::Int,
+        predictor_specs::AbstractVector)
     prefix = "RK backend"
     kwargs = getkwargs(rhs)
     for key in keys(kwargs)
@@ -3503,13 +4451,25 @@ function _rk_ordinal_extras(rhs::ExprColumn, response::Symbol)
             "$prefix: response `$response` `Ordinal` takes only " *
             "`discrimination` and `per_threshold` keywords, got `$key`")
     end
-    isempty(kwargs) && return (nothing, Symbol[], nothing, Symbol[],
-        _RKVectorParameter[])
-    given = join(["`$key`" for key in keys(kwargs)], ", ")
-    error("$prefix: response `$response` ordinal extras need thin-layer " *
-          "surface support (got $given; the AST lowering spells " *
-          "`Ordinal.(structure, link, eta)` only) — drop the keywords " *
-          "for the plain ordinal")
+    discrimination, crossed = _rk_ordinal_discrimination(
+        get(kwargs, :discrimination, nothing), response, predictor_specs)
+    threshold_columns = _rk_ordinal_threshold_columns(
+        get(kwargs, :per_threshold, ()), response, n_obs)
+    structure === :cumulative && !isempty(threshold_columns) && error(
+        "$prefix: response `$response` `per_threshold` is currently " *
+        "supported for `StoppingRatio()` only; unrestricted cumulative " *
+        "category-specific effects can make cumulative probabilities " *
+        "non-monotone")
+    threshold_coefs = nothing
+    coef_implicit = _RKVectorParameter[]
+    if !isempty(threshold_columns)
+        threshold_coefs = Symbol(response, :_threshold_beta)
+        push!(coef_implicit, _RKVectorParameter(threshold_coefs,
+            :vector_normal, (0.0, 1.0),
+            (K - 1) * length(threshold_columns), threshold_coefs))
+    end
+    (discrimination, threshold_columns, threshold_coefs,
+        [crossed; threshold_columns], coef_implicit)
 end
 
 # Defaults for non-leveled families (the thin-layer leaves these at
@@ -3522,13 +4482,100 @@ function _rk_unleveled(entry, predictor::Symbol)
         response_values=entry.raw_response, cross_columns=Symbol[])
 end
 
+# The joint factor stem off a classified `MvNormalCholesky` RHS (the
+# classify arm guarantees the two-argument shape with a named factor).
+_rk_joint_stem(rhs::ExprColumn) = name(getargs(rhs)[2])
+
+# Joint correlated-outcomes response spec: the lead outcome takes
+# `response`, the tail `extra_responses`, the tail means ride the
+# reused `extra_predictors`, and the LKJ stem links explicitly. Each
+# outcome crosses as its own raw numeric column (the thin layer binds
+# K columns, row-aligned by the uniform-`n_obs` rule).
+function _rk_plan_joint_response!(entry, link::Symbol, predictor::Symbol,
+        extra::Vector{Symbol}, evidence::_RKResponseEvidence,
+        columns::Dict{Symbol,AbstractVector})
+    prefix = "RK backend"
+    outcomes = entry.joint_outcomes
+    K = length(outcomes)
+    K >= 2 || error(
+        "$prefix: internal: joint response `$(entry.key)` has fewer " *
+        "than two outcomes")
+    length(extra) == K - 1 || error(
+        "$prefix: internal: joint response `$(entry.key)` has $K " *
+        "outcomes but $(1 + length(extra)) mean predictors")
+    stem = _rk_joint_stem(entry.rhs)
+    for (i, outcome) in enumerate(outcomes)
+        column = Float64[row[i] for row in entry.raw_response]
+        columns[outcome] = _rk_gate_response_values!(
+            :mvnormal_cholesky, column, outcome)
+    end
+    _RKLikelihoodSpec(:mvnormal_cholesky, link, first(outcomes), predictor,
+        nothing, nothing, nothing, evidence, entry.key, nothing, nothing,
+        nothing, extra, Symbol[], nothing, nothing, Symbol[], nothing,
+        outcomes[2:end], stem)
+end
+
+# Joint responses link their LKJ factor stem explicitly (SB's
+# factor-first contract): the stem must be a planned
+# `LKJCovarianceFactor` declaration of matching width, feeding exactly
+# one joint response. The thin layer derives `<stem>_scales` /
+# `<stem>_L_corr` and enforces the same linkage — this gate gives BRM
+# attribution instead of a thin-layer error.
+function _rk_gate_joint_factors!(response_specs::AbstractVector,
+        parameters::AbstractVector, assignment_names::Set{Symbol})
+    prefix = "RK backend"
+    stems = Dict{Symbol,Int}()
+    for spec in parameters
+        spec.family === :LKJCovarianceFactor || continue
+        stems[spec.name] = spec.args[1]
+        # A sampled scale hyperparameter θ must be scalar: a
+        # vector-valued θ sails through the name table and fails
+        # thin-side, so it fails here instead.
+        theta = spec.args[2]
+        theta isa Symbol || continue
+        theta in assignment_names && continue
+        any(p -> p.name === theta &&
+            p.family !== :LKJCovarianceFactor, parameters) || error(
+            "$prefix: parameter `$(spec.name)` joint-factor scale " *
+            "`$theta` is not a scalar parameter or assignment " *
+            "(sampled scales ride the scalar-prior shape)")
+    end
+    used = Set{Symbol}()
+    for spec in response_specs
+        spec.family === :mvnormal_cholesky || continue
+        stem = spec.factor
+        K = 1 + length(spec.extra_responses)
+        haskey(stems, stem) || error(
+            "$prefix: response `$(spec.label)` joint factor `$stem` " *
+            "must name an `LKJCovarianceFactor` declaration " *
+            "(`$stem ~ LKJCovarianceFactor($K; ...)` before the response)")
+        stems[stem] == K || error(
+            "$prefix: response `$(spec.label)` has $K ordered outcomes " *
+            "but factor `$stem` has dimension $(stems[stem])")
+        stem in used && error(
+            "$prefix: factor `$stem` feeds two joint responses; one " *
+            "factor per joint response (declare one stem per " *
+            "`[..] ~ MvNormalCholesky(..)` statement)")
+        push!(used, stem)
+    end
+    for stem in keys(stems)
+        stem in used || error(
+            "$prefix: parameter `$stem` is declared " *
+            "`LKJCovarianceFactor`-sampled but no joint response uses " *
+            "it; write `[y1, ...] ~ MvNormalCholesky([mu1, ...], $stem)`, " *
+            "or drop the declaration")
+    end
+    nothing
+end
+
 # Leveled spec fields for one response. Appends implicit threshold
 # vectors (cutpoints/thresholds/coefs) to `implicit`; multinomial count
 # columns split in the caller (`response_values === nothing` marks it).
 function _rk_plan_leveled!(entry, family::Symbol,
         predictor::Union{Symbol,Nothing}, extra::Vector{Symbol},
         implicit::Vector{_RKVectorParameter},
-        vectors::Dict{Symbol,_RKVectorParameter}, data::AbstractDict)
+        vectors::Dict{Symbol,_RKVectorParameter}, data::AbstractDict,
+        predictor_specs::AbstractVector)
     prefix = "RK backend"
     key, rhs, raw = entry.key, entry.rhs, entry.raw_response
     if family === :categorical_logit
@@ -3558,7 +4605,8 @@ function _rk_plan_leveled!(entry, family::Symbol,
         structure = _brm_ordinal_tag(getargs(rhs)[1], OrdinalStructure;
             prefix) isa Cumulative ? :cumulative : :stopping
         (discrimination, threshold_columns, threshold_coefs, cross,
-            coef_implicit) = _rk_ordinal_extras(rhs, key)
+            coef_implicit) = _rk_ordinal_extras(rhs, key, structure, K,
+            length(raw), predictor_specs)
         append!(implicit, coef_implicit)
         thresh = Symbol(key, :_thresholds)
         vfam = structure === :cumulative ? :ordered_normal : :vector_normal
@@ -3690,6 +4738,15 @@ function _rk_gate_name_hygiene!(predictor_specs::AbstractVector,
                 "$prefix: generated count column `$cname` collides with " *
                 "derived column `$cname`; rename the raw column")
         end
+        for cname in spec.threshold_columns
+            haskey(columns, cname) || error(
+                "$prefix: internal: threshold column `$cname` missing")
+        end
+        d = spec.discrimination
+        if d isa Symbol && d in pnames && haskey(columns, d)
+            error("$prefix: discrimination predictor `$d` collides with " *
+                  "raw column `$d`; rename one of them")
+        end
     end
     col_overlap = sort!(filter(n -> haskey(columns, n), collect(both)))
     isempty(col_overlap) || error(
@@ -3757,6 +4814,24 @@ function _rk_gate_name_hygiene!(predictor_specs::AbstractVector,
             "$prefix: internal: generated gp name `$gn` collides with " *
             "raw column `$gn`")
     end
+    darnames = Symbol[]
+    for spec in predictor_specs, term in spec.terms
+        term.kind === :dar || continue
+        append!(darnames, (term.options.beta, term.options.sigma))
+    end
+    length(unique(darnames)) == length(darnames) || error(
+        "$prefix: internal: duplicate dar trajectory names")
+    for dn in darnames
+        dn in both && error(
+            "$prefix: internal: generated dar name `$dn` collides with a " *
+            "parameter/assignment name")
+        dn in pnames && error(
+            "$prefix: internal: generated dar name `$dn` collides with " *
+            "predictor `$dn`")
+        haskey(columns, dn) && error(
+            "$prefix: internal: generated dar name `$dn` collides with " *
+            "raw column `$dn`")
+    end
     hnames = Symbol[]
     for spec in predictor_specs, term in spec.terms
         term.kind === :hsgp || continue
@@ -3775,8 +4850,76 @@ function _rk_gate_name_hygiene!(predictor_specs::AbstractVector,
             "$prefix: internal: generated hsgp id `$hn` collides with " *
             "raw column `$hn`")
     end
+    anames = Symbol[]
+    for spec in predictor_specs, term in spec.terms
+        term.kind === :ar || continue
+        append!(anames, (term.options.state, term.options.phi,
+            term.options.phi_raw, term.options.eps))
+    end
+    length(unique(anames)) == length(anames) || error(
+        "$prefix: internal: duplicate ar latent names")
+    for an in anames
+        an in both && error(
+            "$prefix: internal: generated ar name `$an` collides with a " *
+            "parameter/assignment name")
+        an in pnames && error(
+            "$prefix: internal: generated ar name `$an` collides with " *
+            "predictor `$an`")
+        haskey(columns, an) && error(
+            "$prefix: internal: generated ar name `$an` collides with " *
+            "raw column `$an`")
+    end
+    # LKJ factor stems reserve their two derived thin-layer bindings
+    # (`<stem>_scales`, `<stem>_L_corr`); a model binding under either
+    # spelling would collide at lowering — fail here with BRM
+    # attribution instead (SB reserves the same two names).
+    for spec in parameters
+        spec.family === :LKJCovarianceFactor || continue
+        for piece in (Symbol(spec.name, :_scales),
+                Symbol(spec.name, :_L_corr))
+            piece in both && error(
+                "$prefix: `$(spec.name) ~ LKJCovarianceFactor(...)` " *
+                "reserves emitted binding `$piece`, but the model also " *
+                "declares that parameter/assignment; rename one of them")
+            piece in pnames && error(
+                "$prefix: `$(spec.name) ~ LKJCovarianceFactor(...)` " *
+                "reserves emitted binding `$piece`, but the model also " *
+                "declares predictor `$piece`; rename one of them")
+            haskey(columns, piece) && error(
+                "$prefix: `$(spec.name) ~ LKJCovarianceFactor(...)` " *
+                "reserves emitted binding `$piece`, but the data also " *
+                "binds raw column `$piece`; rename one of them")
+            piece in vnames && error(
+                "$prefix: `$(spec.name) ~ LKJCovarianceFactor(...)` " *
+                "reserves emitted binding `$piece`, but the model also " *
+                "declares vector parameter `$piece`; rename one of them")
+            piece in dnames && error(
+                "$prefix: `$(spec.name) ~ LKJCovarianceFactor(...)` " *
+                "reserves emitted binding `$piece`, but the model also " *
+                "declares derived column `$piece`; rename one of them")
+        end
+    end
+    menames = Symbol[]
+    for spec in predictor_specs, term in spec.terms
+        term.kind === :me || continue
+        push!(menames, term.options.latent)
+    end
+    length(unique(menames)) == length(menames) || error(
+        "$prefix: internal: duplicate me latent names")
+    for mn in menames
+        mn in both && error(
+            "$prefix: internal: generated me name `$mn` collides with a " *
+            "parameter/assignment name")
+        mn in pnames && error(
+            "$prefix: internal: generated me name `$mn` collides with " *
+            "predictor `$mn`")
+        haskey(columns, mn) && error(
+            "$prefix: internal: generated me name `$mn` collides with " *
+            "raw column `$mn`")
+    end
     for n in sort!(collect(Iterators.flatten(
-            (pnames, both, dnames, vnames, snames, gnames, hnames,
+            (pnames, both, dnames, vnames, snames, gnames, hnames, anames,
+                darnames, menames,
                 keys(columns)))))
         startswith(string(n), "_ppl_") && error(
             "$prefix: name `$n` uses the reserved `_ppl_` prefix; rename it")
@@ -4073,6 +5216,33 @@ function _rk_emit_ast(plan::_RKKernelPlan)
     _RKEmittedProgram(Expr[], Expr(:block, stmts...))
 end
 
+# A modeled ordinal scale feeds nothing else: a discrimination
+# predictor that also fills a location, scale/shape, or categorical-logit
+# tail slot would need two links at once (the scale is `log` by
+# construction, and the AST skips it — the extension translates it).
+function _rk_gate_ordinal_scale_slots!(response_specs::AbstractVector,
+        predictor_specs::AbstractVector)
+    prefix = "RK backend"
+    pnames = Set(spec.name for spec in predictor_specs)
+    occupied = Set{Symbol}()
+    for spec in response_specs
+        spec.family in (:categorical, :multinomial) ||
+            push!(occupied, spec.predictor)
+        spec.scale_predictor === nothing ||
+            push!(occupied, spec.scale_predictor)
+        union!(occupied, spec.extra_predictors)
+    end
+    for spec in response_specs
+        d = spec.discrimination
+        (d isa Symbol && d in pnames && d in occupied) || continue
+        error("$prefix: response `$(spec.response)` discrimination " *
+              "predictor `$d` also feeds a location, scale/shape, or " *
+              "categorical-logit slot; use a dedicated `log()` predictor " *
+              "for the modeled scale")
+    end
+    nothing
+end
+
 """
     _brm_rk_plan(brmi::BRMI)
 
@@ -4169,6 +5339,17 @@ function _brm_rk_plan(brmi::BRMI)
                 target in predictor_order || push!(predictor_order, target)
             end
             continue
+        elseif head === MvNormalCholesky
+            # Joint means resolve positionally (outcome order); the lead
+            # feeds the location slot, the tail the extra predictors.
+            preds = _rk_joint_refs(program, entry.rhs, entry.key,
+                entry.joint_outcomes)
+            response_predictors[entry.key] = [first(preds)]
+            response_extra_predictors[entry.key] = preds[2:end]
+            for target in preds
+                target in predictor_order || push!(predictor_order, target)
+            end
+            continue
         end
         names = _rk_referenced_predictors(program, entry.rhs, entry.key)
         response_predictors[entry.key] = names
@@ -4183,14 +5364,21 @@ function _brm_rk_plan(brmi::BRMI)
         assignment_names, Set{Symbol}(spec.name for spec in vector_specs))
     predictor_specs = _RKPredictorSpec[]
     prior_specs = _RKPopulationPrior[]
+    r2d2_specs = _RKR2D2Prior[]
+    r2d2_vectors = _RKVectorParameter[]
     ranef_buckets, ranef_lookup = _rk_plan_ranef_buckets(
         brmi, context, predictor_order, columns, taken, derived)
+    me_sources = Set{Symbol}()
     for target in predictor_order
-        spec, priors = _rk_plan_predictor(
+        spec, priors, r2d2 = _rk_plan_predictor(
             brmi, context, target, available, columns, derived, taken,
-            ranef_lookup)
+            ranef_lookup, me_sources)
         push!(predictor_specs, spec)
         append!(prior_specs, priors)
+        isnothing(r2d2) && continue
+        push!(r2d2_specs, r2d2.prior)
+        append!(parameters, r2d2.scalars)
+        push!(r2d2_vectors, r2d2.phi)
     end
     mo_vectors = _rk_plan_monotonic_vectors!(predictor_specs)
     predictor_link = Dict(spec.name => spec.link for spec in predictor_specs)
@@ -4236,33 +5424,40 @@ function _brm_rk_plan(brmi::BRMI)
             classified = _rk_classify_response(entry.rhs, candidates,
                 predictor_link, parameter_names, assignment_names, consts,
                 aliases, entry.key, extra, extra_links)
-            # Every referenced predictor must feed a slot: the scale slot naming
-            # the location is degenerate, and anything else unclaimed is a name
-            # shadowed across slots (rename one of them). The
-            # categorical-logit tail feeds `extra_predictors`, not a slot.
-            classified.scale_predictor === nothing ||
-                classified.scale_predictor !== classified.location ||
-                error("$prefix: response `$(entry.key)` feeds the location " *
-                      "predictor `$(classified.location)` into the scale/shape " *
-                      "slot too; the two slots take distinct predictors")
-            claimed = classified.scale_predictor === nothing ?
-                Set([classified.location]) :
-                Set([classified.location, classified.scale_predictor])
-            union!(claimed, extra)
-            unclaimed = filter(name -> name ∉ claimed, candidates)
-            isempty(unclaimed) || error(
-                "$prefix: response `$(entry.key)` references linear " *
-                "predictor(s) $(join(unclaimed, ", ")) outside the location " *
-                "and scale/shape slots; every referenced predictor must feed " *
-                "one slot (if a name shadows a data column, rename one of them)")
             (classified.family, classified.link, classified.scale,
                 classified.scale_predictor, classified.trials,
                 classified.location)
         end
         leveled = family in _RK_LEVELED_FAMILIES ?
             _rk_plan_leveled!(entry, family, predictor, extra,
-                implicit_vectors, vector_by_name, context.data) :
+                implicit_vectors, vector_by_name, context.data,
+                predictor_specs) :
             _rk_unleveled(entry, predictor)
+        # Every referenced predictor must feed a slot: the scale slot naming
+        # the location is degenerate, and anything else unclaimed is a name
+        # shadowed across slots (rename one of them). The categorical-logit
+        # tail feeds `extra_predictors`, not a slot; an ordinal
+        # discrimination predictor feeds the discrimination slot. Runs
+        # after the leveled plan so the ordinal extras are known.
+        if predictor !== nothing
+            scale_predictor === nothing || scale_predictor !== predictor ||
+                error("$prefix: response `$(entry.key)` feeds the location " *
+                      "predictor `$predictor` into the scale/shape " *
+                      "slot too; the two slots take distinct predictors")
+            claimed = scale_predictor === nothing ?
+                Set([predictor]) :
+                Set([predictor, scale_predictor])
+            union!(claimed, extra)
+            disc = leveled.discrimination
+            disc isa Symbol && haskey(predictor_link, disc) &&
+                push!(claimed, disc)
+            unclaimed = filter(name -> name ∉ claimed, candidates)
+            isempty(unclaimed) || error(
+                "$prefix: response `$(entry.key)` references linear " *
+                "predictor(s) $(join(unclaimed, ", ")) outside the location " *
+                "and scale/shape slots; every referenced predictor must feed " *
+                "one slot (if a name shadows a data column, rename one of them)")
+        end
         if trials isa Symbol
             raw = get(context.data, trials, nothing)
             raw isa AbstractVector || error(
@@ -4286,6 +5481,13 @@ function _brm_rk_plan(brmi::BRMI)
         evidence = _rk_plan_evidence(entry.modifier, family,
             context.data, entry.key, columns, consts, aliases, parameter_names,
             assignment_names)
+        if family === :mvnormal_cholesky
+            # Joint responses cross one raw column per outcome (not the
+            # packed row vectors) and carry the factor stem explicitly.
+            push!(response_specs, _rk_plan_joint_response!(entry, link,
+                predictor, extra, evidence, columns))
+            continue
+        end
         for col in leveled.cross_columns
             raw = get(context.data, col, nothing)
             raw isa AbstractVector || error(
@@ -4306,8 +5508,15 @@ function _brm_rk_plan(brmi::BRMI)
             entry.key, trials, leveled.n_levels, leveled.thresholds,
             leveled.extra_predictors, leveled.count_columns,
             leveled.ordinal_structure, leveled.discrimination,
-            leveled.threshold_columns, leveled.threshold_coefs))
+            leveled.threshold_columns, leveled.threshold_coefs, Symbol[],
+            nothing))
     end
+    # Measurement-error observations ride synthetic responses (SB's
+    # `x_obs ~ Normal(x_true, sd)` likelihood per `me` term).
+    _rk_plan_me_observations!(response_specs, predictor_specs)
+    # A modeled ordinal scale feeds no other response slot (needs the
+    # whole response table, so it runs after the loop).
+    _rk_gate_ordinal_scale_slots!(response_specs, predictor_specs)
     # Phase 6: one observation axis, no missing, finite data, evidence
     # values, and name hygiene (mirrors thin-side validation, R8).
     n_obs = length(first(peeled).raw_response)
@@ -4336,10 +5545,12 @@ function _brm_rk_plan(brmi::BRMI)
             "uses it; write `Multinomial(N, $(spec.name))` or " *
             "`Categorical($(spec.name))`, or drop the declaration")
     end
+    _rk_gate_joint_factors!(response_specs, parameters, assignment_names)
     _rk_gate_name_hygiene!(predictor_specs, parameters, assignments,
         derived, columns, response_specs,
-        [vector_specs; implicit_vectors; mo_vectors])
+        [vector_specs; implicit_vectors; mo_vectors; r2d2_vectors])
     _RKStructuralPlan(response_specs, predictor_specs, prior_specs,
         parameters, assignments, derived, columns, n_obs, ranef_buckets,
-        [vector_specs; implicit_vectors; mo_vectors])
+        [vector_specs; implicit_vectors; mo_vectors; r2d2_vectors],
+        r2d2_specs)
 end

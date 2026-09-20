@@ -106,6 +106,11 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol})
             # Beta-free direct summand, always inline like `spline(...)`.
             push!(summands, Expr(:call, :mo1, only(term.columns),
                 term.options.increments))
+        elseif term.kind === :dar
+            # Beta-free trajectory summand, always inline like `mo1(...)`
+            # (the surface takes no axis — T is n_obs by construction).
+            push!(summands, Expr(:call, :dar,
+                term.options.beta, term.options.sigma))
         elseif term.kind === :offset
             push!(summands, only(term.columns))
         elseif term.kind === :spline
@@ -120,10 +125,29 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol})
                 Expr(:call, :hsgp, QuoteNode(term.options.id)))
         elseif term.kind === :gp
             push!(summands, term.options.f)
+        elseif term.kind === :ar
+            # Scaled scan summand: the thin layer classifies
+            # `coef .* state` as a ScanSummandTerm (SB's `ar` latent
+            # path with its free beta).
+            push!(summands, Expr(:call, :.*, coefs[index], term.options.state))
+        elseif term.kind === :me
+            # Scaled latent summand: the thin layer classifies
+            # `coef .* latent` as a ContinuousTerm over the plate
+            # vector (SB's `me` true covariate with its free beta).
+            push!(summands, Expr(:call, :.*, coefs[index], term.options.latent))
         end
     end
     length(summands) == 1 ? only(summands) :
         Expr(:call, :.+, summands...)
+end
+
+# An R2D2 declaration: `r2d2(mu, R2, phi[, tau])` — positional
+# predictor + R2/phi parameter names, plus the tau sampled-parameter
+# name or data literal (BRM always states tau; the thin layer only
+# synthesizes it when omitted). Shape-verified against `Meta.parse`
+# of the surface spelling.
+function _rk_ast_r2d2_decl(r2d2::_RKR2D2Prior, lhs::Symbol)
+    Expr(:call, :r2d2, lhs, r2d2.r2, r2d2.phi, r2d2.tau)
 end
 
 # A spline declaration: `spline_basis(:id, axes...; k=k)` — kind is
@@ -307,9 +331,9 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
         # Cutpoints are implicit surface-side (`y_cutpoints`).
         _rk_ast_dotted(:OrderedLogistic, predictor)
     elseif response.family === :ordinal
-        # Plain ordinal only: discrimination/per-threshold fail closed at
-        # plan (the surface spells three positionals only); thresholds
-        # are implicit surface-side (`y_thresholds`).
+        # The surface spells three positionals only; discrimination and
+        # per-threshold design ride plan-level via the extension, and
+        # thresholds are implicit surface-side (`y_thresholds`).
         structure = response.ordinal_structure === :cumulative ?
             :Cumulative : :StoppingRatio
         linktag = response.link === :logit ? :LogitLink :
@@ -483,7 +507,24 @@ function _rk_ast_sampled(parameter::_RKSampledParameter)
         return Expr(:call, :~, name,
             Expr(:call, head, parameter.args[2]))
     end
+    if override === :interval
+        # Unit-interval truncated-Normal (dar persistence): the thin-layer
+        # screen takes `truncated(Normal(mu, s), 0, 1)` exactly.
+        return Expr(:call, :~, name,
+            Expr(:call, :truncated,
+                Expr(:call, :Normal,
+                    parameter.args[1], parameter.args[2]),
+                0, 1))
+    end
     family === :Flat && return Expr(:call, :~, name, Expr(:call, :Flat))
+    if family === :LKJCovarianceFactor
+        # SB's covariance-factor declaration, decomposed thin-side into
+        # `<stem>_scales` / `<stem>_L_corr`; K/θ/η positional.
+        K, theta, eta = parameter.args
+        return Expr(:call, :~, name,
+            Expr(:call, :LKJCovarianceFactor, K,
+                Expr(:call, :Exponential, theta), eta))
+    end
     Expr(:call, :~, name, Expr(:call, family, parameter.args...))
 end
 
@@ -497,12 +538,15 @@ function _rk_ast_vector_parameter(parameter::_RKVectorParameter)
         Expr(:call, :Dirichlet, Expr(:vect, alpha...)))
 end
 
-# A GP latent's `@plate` block: `z[i] ~ Normal(0, 1)` over the using
-# response's index (length `n_obs`, like every column). The macrocall
-# carries a synthetic line node; the surface reads only `args[3]`.
-function _rk_ast_plate(name::Symbol, range::Symbol)
+# A `@plate` block: `name[i] ~ Normal(loc, scale)` over the range
+# column's index (length `n_obs`, like every column). GP latents take
+# the standardized default; `me` latents take the shared-scalar args.
+# The macrocall carries a synthetic line node; the surface reads only
+# `args[3]`.
+function _rk_ast_plate(name::Symbol, range::Symbol,
+        loc::Float64=0.0, scale::Float64=1.0)
     cell = Expr(:call, :~,
-        Expr(:ref, name, :i), Expr(:call, :Normal, 0.0, 1.0))
+        Expr(:ref, name, :i), Expr(:call, :Normal, loc, scale))
     loop = Expr(:for, Expr(:(=), :i, Expr(:call, :eachindex, range)),
         Expr(:block, cell))
     Expr(:macrocall, Symbol("@plate"), LineNumberNode(0), loop)
@@ -528,6 +572,84 @@ function _rk_ast_gp_names(plan::_RKStructuralPlan)
     names
 end
 
+# An AR(1) latent path: the sampled `phi_raw ~ Normal(0, 1)`, the
+# non-centered `@scan` block the thin layer folds through RK-core
+# `scan(...)`, and the `phi = tanh(phi_raw)` stationarity map. The
+# loop bound `T` is the thin-layer data-length name (binds `n_obs`);
+# the seed + innovation shape is SB's `ar1_recurse` verbatim
+# (`u[1] = eps[1]`, `u[t] = phi*u[t-1] + eps[t]`). Shape-verified
+# against `Meta.parse` of the surface spelling.
+function _rk_ast_ar_preamble(term)
+    options = term.options
+    state, phi, phi_raw, eps =
+        options.state, options.phi, options.phi_raw, options.eps
+    setup = Expr(:call, :~,
+        Expr(:ref, state, 1), Expr(:call, :Normal, 0.0, 1.0))
+    innov = Expr(:call, :~,
+        eps, Expr(:call, :Normal, 0.0, 1.0))
+    carry = Expr(:(=), Expr(:ref, state, :t),
+        Expr(:call, :+,
+            Expr(:call, :*, phi,
+                Expr(:ref, state, Expr(:call, :-, :t, 1))),
+            eps))
+    loop = Expr(:for, Expr(:(=), :t, Expr(:call, :(:), 2, :T)),
+        Expr(:block, innov, carry))
+    scan = Expr(:macrocall, Symbol("@scan"), LineNumberNode(0),
+        Expr(:block, setup, loop))
+    Any[Expr(:call, :~, phi_raw, Expr(:call, :Normal, 0.0, 1.0)),
+        scan,
+        Expr(:(=), phi, Expr(:call, :tanh, phi_raw))]
+end
+
+function _rk_ast_ar_names(plan::_RKStructuralPlan)
+    names = Set{Symbol}()
+    for predictor in plan.predictors, term in predictor.terms
+        term.kind === :ar || continue
+        options = term.options
+        push!(names, options.state, options.phi, options.phi_raw,
+            options.eps)
+    end
+    names
+end
+
+function _rk_ast_dar_names(plan::_RKStructuralPlan)
+    names = Set{Symbol}()
+    for predictor in plan.predictors, term in predictor.terms
+        term.kind === :dar || continue
+        options = term.options
+        push!(names, options.beta, options.sigma)
+    end
+    names
+end
+
+# A joint correlated-outcomes response emits the plain-`~` vector form
+# directly in main (row-grouped, never broadcast — no stream-submodel
+# def): `[y1, y2] ~ MvNormalCholesky([mu1, mu2], L)`.
+function _rk_ast_joint_response(response::_RKLikelihoodSpec,
+        rename::Dict{Symbol,Symbol})
+    outcomes = [response.response; response.extra_responses...]
+    means = [get(rename, response.predictor, response.predictor);
+        [get(rename, p, p) for p in response.extra_predictors]...]
+    stem = response.factor
+    stem === nothing && error(
+        "RK backend: internal: joint response `$(response.label)` has " *
+        "no factor stem")
+    length(outcomes) == length(means) || error(
+        "RK backend: internal: joint response `$(response.label)` has " *
+        "$(length(outcomes)) outcomes but $(length(means)) means")
+    Expr(:call, :~, Expr(:vect, outcomes...),
+        Expr(:call, :MvNormalCholesky, Expr(:vect, means...), stem))
+end
+
+function _rk_ast_me_names(plan::_RKStructuralPlan)
+    names = Set{Symbol}()
+    for predictor in plan.predictors, term in predictor.terms
+        term.kind === :me || continue
+        push!(names, term.options.latent)
+    end
+    names
+end
+
 function _rk_emit_ast(plan::_RKStructuralPlan)
     taken = union(Set(keys(plan.columns)),
         Set(p.name for p in plan.parameters),
@@ -537,7 +659,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         Set(v.name for v in plan.vector_parameters),
         _rk_ast_spline_ids(plan),
         _rk_ast_hsgp_ids(plan),
-        _rk_ast_gp_names(plan))
+        _rk_ast_gp_names(plan),
+        _rk_ast_dar_names(plan),
+        _rk_ast_ar_names(plan),
+        _rk_ast_me_names(plan))
     # A predictor sharing its name with a data column cannot keep it:
     # the program has one namespace, so the affine (definition and
     # response uses) is alpha-renamed. Unreachable via `@brm`
@@ -555,6 +680,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
     end
     priors = Dict((p.predictor, p.addressee) => (p.location, p.scale)
         for p in plan.population_priors)
+    r2d2s = Dict(rp.predictor => rp for rp in plan.r2d2_priors)
     response_for = Dict{Symbol,Symbol}()
     for response in plan.responses
         haskey(response_for, response.predictor) ||
@@ -566,14 +692,37 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
     for derived in plan.derived
         push!(stmts, Expr(:(=), derived.name, derived.expression))
     end
+    # Modeled ordinal scales skip the AST: a discrimination predictor has
+    # no response use-site (the surface spells `Ordinal` with three
+    # positionals only), so its affine and priors would lower to dead
+    # posterior dimensions — the extension translates it plan-level
+    # instead. Same predictor-first rule as the planner: a discrimination
+    # symbol naming a predictor is a scale (column discriminations match
+    # no predictor and need no AST change).
+    scales = Set{Symbol}(response.discrimination
+        for response in plan.responses if response.discrimination isa Symbol)
     for predictor in plan.predictors
+        predictor.name in scales && continue
         lhs = get(rename, predictor.name, predictor.name)
+        r2d2 = get(r2d2s, predictor.name, nothing)
         # Scalar-coefficient terms (intercept/continuous/free-beta
         # monotonic) become submodel locals inside a per-predictor
         # `popefs_<pred>` latent submodel; factor terms keep top-level
         # broadcast priors (a `c[levels(g)]` LHS is not a bare Symbol
         # and cannot sit in a submodel body). Counter order is
         # unchanged, so expanded names match the old flat spellings.
+        # An R2D2 predictor states a prior ONLY for explicit-Normal
+        # columns (share-0 overrides); the rest join the simplex with
+        # no statement (their scales derive at bind).
+        # Without a scalar override the affine inlines, so its scalar
+        # coefficients need program-global names (submodel locals are
+        # unreserved at top level — a data `b1` column would merge
+        # silently); with one the submodel path namespaces them.
+        flat_scalars = r2d2 !== nothing && !any(
+            t -> (t.kind === :intercept || t.kind === :continuous ||
+                  t.kind === :monotonic) &&
+                haskey(r2d2.overrides, t.addressee),
+            predictor.terms)
         argcols = _rk_ast_popefs_args(predictor)
         argset = Set(argcols)
         coefs = Dict{Int,Symbol}()
@@ -582,28 +731,40 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         for (index, term) in enumerate(predictor.terms)
             (term.kind === :offset || term.kind === :ranef_gather ||
                 term.kind === :spline || term.kind === :hsgp ||
-                term.kind === :gp ||
+                term.kind === :gp || term.kind === :dar ||
                 term.kind === :monotonic_summand) && continue
             counter += 1
-            key = (predictor.name, term.addressee)
-            haskey(priors, key) || error(
-                "RK backend: internal: no population prior for " *
-                "`$(predictor.name)` addressee `$(term.addressee)`")
-            location, scale = priors[key]
+            override = if r2d2 === nothing
+                key = (predictor.name, term.addressee)
+                haskey(priors, key) || error(
+                    "RK backend: internal: no population prior for " *
+                    "`$(predictor.name)` addressee `$(term.addressee)`")
+                priors[key]
+            else
+                get(r2d2.overrides, term.addressee, nothing)
+            end
             if term.kind === :factor
                 col = only(term.columns)
                 K = length(_rk_grouping_levels(plan.columns[col]))
                 coef = _rk_ast_coef_name(
                     string(predictor.name, "_b", counter), taken)
                 coefs[index] = coef
-                push!(stmts, _rk_ast_factor_prior(
-                    coef, col, term.options, K, location, scale))
+                override === nothing || push!(stmts,
+                    _rk_ast_factor_prior(coef, col, term.options, K,
+                        override[1], override[2]))
             else
-                local_coef = _rk_ast_mint_local(
-                    string("b", counter), lhs, taken, argset)
-                coefs[index] = local_coef
-                push!(scalar_stmts, Expr(:call, :~,
-                    local_coef, Expr(:call, :Normal, location, scale)))
+                if flat_scalars
+                    coef = _rk_ast_coef_name(
+                        string(predictor.name, "_b", counter), taken)
+                    coefs[index] = coef
+                else
+                    local_coef = _rk_ast_mint_local(
+                        string("b", counter), lhs, taken, argset)
+                    coefs[index] = local_coef
+                    override === nothing || push!(scalar_stmts,
+                        Expr(:call, :~, local_coef,
+                            Expr(:call, :Normal, override[1], override[2])))
+                end
             end
         end
         for term in predictor.terms
@@ -613,6 +774,12 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         for term in predictor.terms
             term.kind === :hsgp || continue
             push!(stmts, _rk_ast_hsgp_basis(term))
+        end
+        for term in predictor.terms
+            term.kind === :dar || continue
+            options = term.options
+            push!(stmts, _rk_ast_sampled(options.beta_param))
+            push!(stmts, _rk_ast_sampled(options.sigma_param))
         end
         for term in predictor.terms
             term.kind === :gp || continue
@@ -626,10 +793,22 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
             push!(stmts, _rk_ast_plate(options.z, response))
             push!(stmts, Expr(:(=), options.f, _rk_ast_gp_latent(term)))
         end
+        for term in predictor.terms
+            term.kind === :ar || continue
+            append!(stmts, _rk_ast_ar_preamble(term))
+        end
+        for term in predictor.terms
+            term.kind === :me || continue
+            options = term.options
+            push!(stmts, _rk_ast_plate(options.latent,
+                only(term.columns), options.loc, options.scale))
+        end
         if isempty(scalar_stmts)
             # No scalar coefficients (offset-only, gp-only,
-            # factor-only): nothing repeated, nothing to name — the
-            # affine stays inline exactly as before.
+            # factor-only — or an override-free R2D2 predictor, whose
+            # coefficients all join the simplex): nothing repeated,
+            # nothing to name — the affine stays inline exactly as
+            # before.
             push!(stmts, Expr(:(=), lhs, _rk_ast_affine(predictor, coefs)))
         else
             defname = _rk_ast_popefs_name(predictor.name)
@@ -640,6 +819,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
             push!(stmts, Expr(:call, :~, lhs,
                 Expr(:call, defname, argcols...)))
         end
+        r2d2 === nothing || push!(stmts, _rk_ast_r2d2_decl(r2d2, lhs))
     end
     for bucket in plan.ranef_buckets
         push!(stmts, _rk_ast_bucket(bucket, rename))
@@ -657,6 +837,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
     end
     predictor_link = Dict(spec.name => spec.link for spec in plan.predictors)
     for response in plan.responses
+        if response.family === :mvnormal_cholesky
+            push!(stmts, _rk_ast_joint_response(response, rename))
+            continue
+        end
         defname, def, call = _rk_ast_glm_parts(
             response, rename, predictor_link, taken)
         if haskey(seen_glm, defname)

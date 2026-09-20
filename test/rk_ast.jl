@@ -461,7 +461,7 @@ end
         [BRM._RKLikelihoodSpec(:gaussian, :identity, :y, :n, :s, nothing,
             nothing, BRM._RKResponseEvidence(:none, nothing, nothing), :y,
             nothing, nothing, nothing, Symbol[], Symbol[], nothing, nothing,
-            Symbol[], nothing)],
+            Symbol[], nothing, Symbol[], nothing)],
         [BRM._RKPredictorSpec(:n, :identity, BRM._RKTermSpec[
             BRM._RKTermSpec(:intercept, Symbol[], (;), :Intercept, :Intercept),
             BRM._RKTermSpec(:continuous, [:n], (;), :n, :n)], :n)],
@@ -473,7 +473,8 @@ end
         Dict{Symbol,AbstractVector}(:y => df.y, :n => df.n),
         6,
         BRM._RKRanefBucket[],
-        BRM._RKVectorParameter[])
+        BRM._RKVectorParameter[],
+        BRM._RKR2D2Prior[])
     prog = BRM._rk_emit_ast(plan)
     @test prog.defs == Expr[
         Expr(:(=), Expr(:call, :popefs_n, :n), Expr(:block,
@@ -679,20 +680,55 @@ end
                 Expr(:call, :StoppingRatio), Expr(:call, :ProbitLink),
                 :eta))),
             :slot)) in prog.defs
-    # Ordinal extras fail closed at plan (the AST lowering spells
-    # `Ordinal.(structure, link, eta)` only — thin-layer surface gap).
-    extras = try
-        BRM._brm_rk_plan(@brm df begin
-            eta ~ 0 + x
-            c ~ Ordinal(StoppingRatio(), LogitLink(), eta;
-                discrimination=2.0, per_threshold=(z,))
-        end)
-        nothing
-    catch error
-        error
+    # Ordinal extras ride plan-level: the response keeps the submodel
+    # call spelling with no extra statements or defs (thresholds and
+    # their coefs stay implicit).
+    brmi = @brm df begin
+        eta ~ 0 + x
+        c ~ Ordinal(StoppingRatio(), LogitLink(), eta;
+            discrimination=2.0, per_threshold=(z,))
     end
-    @test extras isa ErrorException
-    @test occursin("surface support", extras.msg)
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test prog.main.args[end] == Expr(:call, :~, :c,
+        Expr(:call, :ordinal_stopping_logit_glm, :eta))
+    @test length(prog.defs) == 2
+    @test all(prog.main.args) do stmt
+        !(stmt isa Expr && stmt.head === :call && length(stmt.args) >= 2 &&
+            stmt.args[2] === :c_threshold_beta)
+    end
+    @test all(prog.defs) do d
+        all(d.args[2].args) do stmt
+            !(stmt isa Expr && stmt.head === :call &&
+                length(stmt.args) >= 2 && stmt.args[2] === :c_threshold_beta)
+        end
+    end
+    # A modeled scale skips the AST entirely (no affine, no priors, no
+    # submodel def — the extension translates it plan-level); the
+    # location side still emits.
+    brmi = @brm df begin
+        eta ~ 0 + x
+        log(disc) ~ 0 + x
+        c ~ Ordinal(Cumulative(), LogitLink(), eta; discrimination=disc)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test prog.main.args[end] == Expr(:call, :~, :c,
+        Expr(:call, :ordinal_cumulative_logit_glm, :eta))
+    @test length(prog.defs) == 2
+    @test all(prog.defs) do d
+        d.args[1].args[1] !== :popefs_disc
+    end
+    defined = Symbol[]
+    for stmt in prog.main.args
+        stmt isa Expr || continue
+        if stmt.head === :(=) && stmt.args[1] isa Symbol
+            push!(defined, stmt.args[1])
+        elseif stmt.head === :call && !isempty(stmt.args) &&
+                stmt.args[1] === :(~) && stmt.args[2] isa Symbol
+            push!(defined, stmt.args[2])
+        end
+    end
+    @test :eta in defined
+    @test :disc ∉ defined
     # Shared-simplex multinomial + Dirichlet statement.
     brmi = @brm df begin
         s ~ Dirichlet(3, 1.0)
@@ -854,6 +890,127 @@ end
         Expr(:call, :~, :y, Expr(:call, :normal_id_glm, :mu, :s)))
 end
 
+@testset "dar AST shape" begin
+    # Own frame: `dar` needs a strictly increasing time axis.
+    tdf = (; t=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        y=[0.5, -0.2, 0.1, 0.9, 1.4, 1.1])
+    brmi = @brm tdf begin
+        mu ~ 1 + dar(t)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    # The dar summand rides inside the per-predictor submodel (nullary:
+    # it reads no data columns); the trajectory scalars stay top-level.
+    @test prog.defs == Expr[
+        Expr(:(=), Expr(:call, :popefs_mu), Expr(:block,
+            Expr(:call, :~, :b1, Expr(:call, :Normal, 0.0, 1.0)),
+            Expr(:call, :.+,
+                :b1, Expr(:call, :dar, :dar_mu_t_beta, :dar_mu_t_sigma)))),
+        Expr(:(=), Expr(:call, :normal_id_glm, :eta, :sigma), Expr(:block,
+            Expr(:call, :.~, :slot,
+                Expr(:., :Normal, Expr(:tuple, :eta, :sigma))),
+            :slot)),
+    ]
+    @test prog.main == Expr(:block,
+        Expr(:call, :~, :dar_mu_t_beta,
+            Expr(:call, :truncated,
+                Expr(:call, :Normal, 0.5, 0.2), 0, 1)),
+        Expr(:call, :~, :dar_mu_t_sigma,
+            Expr(:call, :HalfNormal, 0.2)),
+        Expr(:call, :~, :mu, Expr(:call, :popefs_mu)),
+        Expr(:call, :~, :s, Expr(:call, :Exponential, 1.0)),
+        Expr(:call, :~, :y, Expr(:call, :normal_id_glm, :mu, :s)))
+    # Both dar spellings match the parsed surface exactly.
+    @test rk_strip_lines(prog.main.args[1]) == rk_parsed_surface(
+        "dar_mu_t_beta ~ truncated(Normal(0.5, 0.2), 0, 1)")
+    ret = rk_def_body(prog, :popefs_mu).args[end]
+    @test rk_strip_lines(ret) ==
+        rk_parsed_surface("b1 .+ dar(dar_mu_t_beta, dar_mu_t_sigma)")
+    # Prior overrides ride the preamble statements.
+    brmi = @brm tdf begin
+        mu ~ 1 + dar(t)
+        ar(mu, dar(t)) ~ Normal(0.6, 0.1)
+        sd(mu, dar(t)) ~ Normal(0, 0.3)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test prog.main.args[1] == Expr(:call, :~, :dar_mu_t_beta,
+        Expr(:call, :truncated, Expr(:call, :Normal, 0.6, 0.1), 0, 1))
+    @test prog.main.args[2] == Expr(:call, :~, :dar_mu_t_sigma,
+        Expr(:call, :HalfNormal, 0.3))
+end
+
+@testset "r2d2 AST shape" begin
+    # Override-free: the affine inlines with program-global coefficient
+    # names (no priors to state), followed by the bare `r2d2(...)`
+    # declaration; R2/phi/tau sample top-level (SB spellings, minted).
+    brmi = @brm df begin
+        mu ~ 1 + x + z
+        effect(mu, :) ~ r2d2(R2=Beta(2, 5), alpha=0.5)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test prog.defs == Expr[
+        Expr(:(=), Expr(:call, :normal_id_glm, :eta, :sigma), Expr(:block,
+            Expr(:call, :.~, :slot,
+                Expr(:., :Normal, Expr(:tuple, :eta, :sigma))),
+            :slot)),
+    ]
+    @test prog.main == Expr(:block,
+        Expr(:(=), :mu, Expr(:call, :.+,
+            :mu_b1, Expr(:call, :.*, :mu_b2, :x),
+            Expr(:call, :.*, :mu_b3, :z))),
+        Expr(:call, :r2d2, :mu, :r2d2_mu_R2, :r2d2_mu_phi,
+            :r2d2_mu_tau_bsv),
+        Expr(:call, :~, :s, Expr(:call, :Exponential, 1.0)),
+        Expr(:call, :~, :r2d2_mu_R2, Expr(:call, :Beta, 2.0, 5.0)),
+        Expr(:call, :~, :r2d2_mu_tau_bsv, Expr(:call, :HalfNormal, 1.0)),
+        Expr(:call, :~, :r2d2_mu_phi,
+            Expr(:call, :Dirichlet, Expr(:vect, 0.5, 0.5))),
+        Expr(:call, :~, :y, Expr(:call, :normal_id_glm, :mu, :s)))
+    # The declaration matches the parsed surface exactly.
+    @test rk_strip_lines(prog.main.args[2]) == rk_parsed_surface(
+        "r2d2(mu, r2d2_mu_R2, r2d2_mu_phi, r2d2_mu_tau_bsv)")
+    # An explicit Normal rides the submodel as a share-0 override
+    # (simplex columns stay bare locals); a data `tau_bsv` inlines.
+    brmi = @brm df begin
+        mu ~ 1 + x + z
+        effect(mu, :) ~ r2d2(tau_bsv=2.0)
+        effect(mu, x) ~ Normal(0, 3)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test prog.defs[1] == Expr(:(=), Expr(:call, :popefs_mu, :x, :z),
+        Expr(:block,
+            Expr(:call, :~, :b2, Expr(:call, :Normal, 0.0, 3.0)),
+            Expr(:call, :.+, :b1, Expr(:call, :.*, :b2, :x),
+                Expr(:call, :.*, :b3, :z))))
+    @test prog.main.args[1] ==
+        Expr(:call, :~, :mu, Expr(:call, :popefs_mu, :x, :z))
+    @test prog.main.args[2] ==
+        Expr(:call, :r2d2, :mu, :r2d2_mu_R2, :r2d2_mu_phi, 2.0)
+    @test rk_strip_lines(prog.main.args[2]) ==
+        rk_parsed_surface("r2d2(mu, r2d2_mu_R2, r2d2_mu_phi, 2.0)")
+    @test prog.main.args[5] == Expr(:call, :~, :r2d2_mu_phi,
+        Expr(:call, :Dirichlet, Expr(:vect, 1.0)))
+    # Inline coefficients namespace against data (a `mu_b1` column
+    # would otherwise merge with the minted name silently).
+    dfb = (; df..., mu_b1=[0.2, -0.1, 0.4, 0.0, 0.3, -0.3])
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(@brm dfb begin
+        mu ~ 1 + x + mu_b1
+        effect(mu, :) ~ r2d2()
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end))
+    @test prog.main.args[1] == Expr(:(=), :mu, Expr(:call, :.+,
+        :mu_b1_, Expr(:call, :.*, :mu_b2, :x),
+        Expr(:call, :.*, :mu_b3, :mu_b1)))
+end
+
 @testset "exact gp AST shape" begin
     brmi = @brm df begin
         mu ~ 1 + gp(x)
@@ -970,6 +1127,134 @@ end
         "k = (4, 3), c = (1.5, 2.0), iso = false)")
 end
 
+@testset "ar AST shape" begin
+    brmi = @brm df begin
+        mu ~ 1 + ar(x; p=1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test prog isa BRM._RKEmittedProgram
+    scan = Expr(:macrocall, Symbol("@scan"), LineNumberNode(0),
+        Expr(:block,
+            Expr(:call, :~,
+                Expr(:ref, :ar_mu_x, 1),
+                Expr(:call, :Normal, 0.0, 1.0)),
+            Expr(:for, Expr(:(=), :t, Expr(:call, :(:), 2, :T)),
+                Expr(:block,
+                    Expr(:call, :~,
+                        :eps_ar_mu_x,
+                        Expr(:call, :Normal, 0.0, 1.0)),
+                    Expr(:(=), Expr(:ref, :ar_mu_x, :t),
+                        Expr(:call, :+,
+                            Expr(:call, :*,
+                                :phi_ar_mu_x,
+                                Expr(:ref, :ar_mu_x,
+                                    Expr(:call, :-, :t, 1))),
+                            :eps_ar_mu_x))))))
+    @test prog.defs == Expr[
+        Expr(:(=), Expr(:call, :popefs_mu), Expr(:block,
+            Expr(:call, :~, :b1, Expr(:call, :Normal, 0.0, 1.0)),
+            Expr(:call, :~, :b2, Expr(:call, :Normal, 0.0, 1.0)),
+            Expr(:call, :.+, :b1, Expr(:call, :.*, :b2, :ar_mu_x)))),
+        Expr(:(=), Expr(:call, :normal_id_glm, :eta, :sigma), Expr(:block,
+            Expr(:call, :.~, :slot,
+                Expr(:., :Normal, Expr(:tuple, :eta, :sigma))),
+            :slot)),
+    ]
+    @test prog.main == Expr(:block,
+        Expr(:call, :~, :phi_raw_ar_mu_x, Expr(:call, :Normal, 0.0, 1.0)),
+        scan,
+        Expr(:(=), :phi_ar_mu_x,
+            Expr(:call, :tanh, :phi_raw_ar_mu_x)),
+        Expr(:call, :~, :mu, Expr(:call, :popefs_mu)),
+        Expr(:call, :~, :s, Expr(:call, :Exponential, 1.0)),
+        Expr(:call, :~, :y, Expr(:call, :normal_id_glm, :mu, :s)))
+    # The scan block matches the parsed surface spelling exactly.
+    @test rk_strip_lines(prog.main.args[2]) == rk_parsed_surface(
+        "@scan begin\n" *
+        "ar_mu_x[1] ~ Normal(0.0, 1.0)\n" *
+        "for t in 2:T\n" *
+        "eps_ar_mu_x ~ Normal(0.0, 1.0)\n" *
+        "ar_mu_x[t] = phi_ar_mu_x * ar_mu_x[t - 1] + eps_ar_mu_x\n" *
+        "end\nend")
+    # A `:`-wide prior rides the beta's submodel-local statement.
+    brmi = @brm df begin
+        mu ~ 1 + ar(x; p=1)
+        effect(mu, :) ~ Normal(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    popefs_body = prog.defs[1].args[2].args
+    @test Expr(:call, :~, :b2, Expr(:call, :Normal, 0.0, 2.0)) in popefs_body
+end
+
+@testset "me AST shape" begin
+    brmi = @brm df begin
+        mu ~ 1 + me(x, 0.5)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test prog isa BRM._RKEmittedProgram
+    plate = Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
+        Expr(:for, Expr(:(=), :i, Expr(:call, :eachindex, :x)),
+            Expr(:block,
+                Expr(:call, :~,
+                    Expr(:ref, :me_x, :i),
+                    Expr(:call, :Normal, 0.0, 1.0)))))
+    @test prog.defs == Expr[
+        Expr(:(=), Expr(:call, :popefs_mu), Expr(:block,
+            Expr(:call, :~, :b1, Expr(:call, :Normal, 0.0, 1.0)),
+            Expr(:call, :~, :b2, Expr(:call, :Normal, 0.0, 1.0)),
+            Expr(:call, :.+, :b1, Expr(:call, :.*, :b2, :me_x)))),
+        Expr(:(=), Expr(:call, :normal_id_glm, :eta, :sigma), Expr(:block,
+            Expr(:call, :.~, :slot,
+                Expr(:., :Normal, Expr(:tuple, :eta, :sigma))),
+            :slot)),
+    ]
+    @test prog.main == Expr(:block,
+        plate,
+        Expr(:call, :~, :mu, Expr(:call, :popefs_mu)),
+        Expr(:call, :~, :s, Expr(:call, :Exponential, 1.0)),
+        Expr(:call, :~, :y, Expr(:call, :normal_id_glm, :mu, :s)),
+        Expr(:call, :~, :x, Expr(:call, :normal_id_glm, :me_x, 0.5)))
+    # The observation shares the one `normal_id_glm` def with the main
+    # response (same name, same body — no lattice collision).
+    @test rk_def_names(prog) == [:popefs_mu, :normal_id_glm]
+    # The plate block matches the parsed surface spelling exactly.
+    @test rk_strip_lines(prog.main.args[1]) == rk_parsed_surface(
+        "@plate for i in eachindex(x)\n" *
+        "me_x[i] ~ Normal(0.0, 1.0)\n" *
+        "end")
+    # A `latent(...)` override rides the plate's shared-scalar args.
+    brmi = @brm df begin
+        mu ~ 1 + me(x, 0.5)
+        latent(mu, me(x)) ~ Normal(0.5, 1.5)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test prog.main.args[1] == Expr(:macrocall, Symbol("@plate"),
+        LineNumberNode(0),
+        Expr(:for, Expr(:(=), :i, Expr(:call, :eachindex, :x)),
+            Expr(:block,
+                Expr(:call, :~,
+                    Expr(:ref, :me_x, :i),
+                    Expr(:call, :Normal, 0.5, 1.5)))))
+    # A `:`-wide prior rides the beta's submodel-local statement.
+    brmi = @brm df begin
+        mu ~ 1 + me(x, 0.5)
+        effect(mu, :) ~ Normal(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    popefs_body = prog.defs[1].args[2].args
+    @test Expr(:call, :~, :b2, Expr(:call, :Normal, 0.0, 2.0)) in popefs_body
+end
+
 @testset "distributional scale AST" begin
     brmi = @brm df begin
         mu ~ 1 + x
@@ -1066,6 +1351,14 @@ end
             s ~ Exponential(1)
             y ~ Normal(mu, s)
         end),
+        @brm((y1=[0.5, -0.2, 0.1, 0.9, 1.4, 1.1],
+                y2=[0.1, 0.3, -0.4, 0.2, 0.8, -0.1],
+                x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5]), begin
+            mu1 ~ 1 + x
+            mu2 ~ 1 + x
+            L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1))
+            [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
+        end),
     ]
     for brmi in models
         prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
@@ -1093,4 +1386,72 @@ end
         end
         @test Set(c.args[1] for c in calls) == Set(keys(arities))
     end
+end
+
+@testset "correlated AST shape" begin
+    dfj = (y1=[0.5, -0.2, 0.1, 0.9, 1.4, 1.1],
+        y2=[0.1, 0.3, -0.4, 0.2, 0.8, -0.1],
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5])
+    brmi = @brm dfj begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1), shape=2)
+        [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    # The joint response emits no stream-submodel def (plain `~`,
+    # row-grouped) — defs hold the two predictor submodels only.
+    @test prog.defs == Expr[
+        Expr(:(=), Expr(:call, :popefs_mu1, :x), Expr(:block,
+            Expr(:call, :~, :b1, Expr(:call, :Normal, 0.0, 1.0)),
+            Expr(:call, :~, :b2, Expr(:call, :Normal, 0.0, 1.0)),
+            Expr(:call, :.+, :b1, Expr(:call, :.*, :b2, :x)))),
+        Expr(:(=), Expr(:call, :popefs_mu2, :x), Expr(:block,
+            Expr(:call, :~, :b1, Expr(:call, :Normal, 0.0, 1.0)),
+            Expr(:call, :~, :b2, Expr(:call, :Normal, 0.0, 1.0)),
+            Expr(:call, :.+, :b1, Expr(:call, :.*, :b2, :x)))),
+    ]
+    @test prog.main == Expr(:block,
+        Expr(:call, :~, :mu1, Expr(:call, :popefs_mu1, :x)),
+        Expr(:call, :~, :mu2, Expr(:call, :popefs_mu2, :x)),
+        Expr(:call, :~, :L_res, Expr(:call, :LKJCovarianceFactor, 2,
+            Expr(:call, :Exponential, 1.0), 2.0)),
+        Expr(:call, :~, Expr(:vect, :y1, :y2),
+            Expr(:call, :MvNormalCholesky, Expr(:vect, :mu1, :mu2),
+                :L_res)))
+    # Both joint spellings match the parsed surface exactly.
+    @test rk_strip_lines(prog.main.args[3]) == rk_parsed_surface(
+        "L_res ~ LKJCovarianceFactor(2, Exponential(1.0), 2.0)")
+    @test rk_strip_lines(prog.main.args[4]) == rk_parsed_surface(
+        "[y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)")
+    # Sampled scale hyperparameters emit as bare names.
+    brmi = @brm dfj begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        tau ~ Exponential(1)
+        L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(tau))
+        [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test prog.main.args[3] == Expr(:call, :~, :tau,
+        Expr(:call, :Exponential, 1.0))
+    @test prog.main.args[4] == Expr(:call, :~, :L_res,
+        Expr(:call, :LKJCovarianceFactor, 2,
+            Expr(:call, :Exponential, :tau), 1.0))
+    @test rk_strip_lines(prog.main.args[4]) == rk_parsed_surface(
+        "L_res ~ LKJCovarianceFactor(2, Exponential(tau), 1.0)")
+    # K=3: three outcomes, three means, width-3 stem.
+    df3 = merge(dfj, (; y3=[-0.3, 0.7, 0.2, -0.1, 0.4, 0.6]))
+    brmi = @brm df3 begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        mu3 ~ 1 + x
+        L3 ~ LKJCovarianceFactor(3; scale_prior=Exponential(1))
+        [y1, y2, y3] ~ MvNormalCholesky([mu1, mu2, mu3], L3)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test prog.main.args[end] ==
+        Expr(:call, :~, Expr(:vect, :y1, :y2, :y3),
+            Expr(:call, :MvNormalCholesky, Expr(:vect, :mu1, :mu2, :mu3),
+                :L3))
 end
