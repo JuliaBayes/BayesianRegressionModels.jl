@@ -154,6 +154,24 @@ struct _RKPopulationPrior
     scale::Float64
 end
 
+# Flat whole-predictor R2D2 variance decomposition (SB
+# `effect(lp, :) ~ r2d2(...)` mirror; the `sd(...) ~ r2d2(...)`
+# R2D2M2/ICC grammar belongs to the hierarchical lane, never here).
+# One per predictor at most; a predictor carrying one has NO
+# `_RKPopulationPrior` rows (coverage moves here, like the thin-layer
+# `R2D2Prior`). `r2`/`phi` name the Beta/Dirichlet sampled parameters
+# (planned alongside, in `parameters`/`vector_parameters`); `tau` is a
+# sampled half-Normal name or the data `tau_bsv` literal; `overrides`
+# maps explicit-Normal addressees to (location, scale) — those columns
+# keep their own scale and leave the simplex (share 0).
+struct _RKR2D2Prior
+    predictor::Symbol
+    r2::Symbol
+    phi::Symbol
+    tau::Union{Symbol,Float64}
+    overrides::Dict{Symbol,Tuple{Float64,Float64}}
+end
+
 struct _RKSampledParameter
     name::Symbol
     family::Symbol
@@ -209,6 +227,7 @@ struct _RKStructuralPlan
     n_obs::Int
     ranef_buckets::Vector{_RKRanefBucket}
     vector_parameters::Vector{_RKVectorParameter}
+    r2d2_priors::Vector{_RKR2D2Prior}
 end
 
 # A submodel-bearing emitted program: `defs` are surface-spelling
@@ -1624,36 +1643,17 @@ function _rk_term_specs(term, target::Symbol, data::AbstractDict,
           "`center`/`zscale`/`standardize`, pure numeric data expressions)")
 end
 
-function _rk_population_priors(brmi::BRMI, design, target::Symbol,
-        available::Tuple, factor_addressees::Set{Symbol},
-        terms::Vector{_RKTermSpec}, derived::Vector{_RKDerivedSpec})
-    prefix = "RK backend"
-    overrides = _brm_simple_population_effect_overrides(
-        brmi, design; prefix, available_predictors=available)
-    # The shared seam resolves (location, scale) without checking the family;
-    # slice 1 admits Normal-only population effects (NativePPL precedent).
-    claimed = isnothing(overrides) ? () : overrides
-    for expression in claimed
-        isnothing(expression) && continue
-        expression isa ExprColumn && getf(expression) === Normal || error(
-            "$prefix: predictor `$target` population-effect priors must " *
-            "be `Normal(location, scale)` in slice 1")
-        isempty(getkwargs(expression)) || error(
-            "$prefix: predictor `$target` population-effect `Normal` " *
-            "prior cannot have keywords in slice 1")
-    end
-    n = length(design.columns)
-    stated = isnothing(overrides) ? fill(false, n) :
-        Bool[!isnothing(cell) for cell in overrides]
-    location, scale = _brm_materialize_normal_effect_priors(overrides, n;
-        prefix)
+# Design columns grouped by prior addressee (derived columns by label —
+# each is its own coefficient; factor dummies by source — one prior
+# per block), in first-seen order. Shared by the PopulationPrior path
+# and the R2D2 override composition (same addressees both ways).
+function _rk_design_addressee_groups(design, target::Symbol;
+        prefix="RK backend")
     groups = Dict{Symbol,Vector{Int}}()
     order = Symbol[]
     for (i, column) in enumerate(design.columns)
         kind = isnothing(column.preprocess) ? nothing :
             column.preprocess.kind
-        # Derived columns group by label (each is its own coefficient);
-        # factor dummies keep grouping by source (one prior per block).
         addressee = if kind in (:interaction, :zscale, :standardize,
                 :center, :protect)
             column.label
@@ -1670,6 +1670,38 @@ function _rk_population_priors(brmi::BRMI, design, target::Symbol,
         haskey(groups, addressee) || push!(order, addressee)
         push!(get!(groups, addressee, Int[]), i)
     end
+    groups, order
+end
+
+function _rk_population_priors(brmi::BRMI, design, target::Symbol,
+        available::Tuple, factor_addressees::Set{Symbol},
+        terms::Vector{_RKTermSpec}, derived::Vector{_RKDerivedSpec},
+        r2d2::Union{Nothing,_BRMR2D2Plan})
+    prefix = "RK backend"
+    overrides = _brm_simple_population_effect_overrides(
+        brmi, design; prefix, available_predictors=available)
+    # The shared seam resolves (location, scale) without checking the family;
+    # slice 1 admits Normal-only population effects (NativePPL precedent).
+    claimed = isnothing(overrides) ? () : overrides
+    for expression in claimed
+        isnothing(expression) && continue
+        expression isa ExprColumn && getf(expression) === Normal || error(
+            "$prefix: predictor `$target` population-effect priors must " *
+            "be `Normal(location, scale)` in slice 1")
+        isempty(getkwargs(expression)) || error(
+            "$prefix: predictor `$target` population-effect `Normal` " *
+            "prior cannot have keywords in slice 1")
+    end
+    # An R2D2 predictor carries its prior mass in the R2D2Prior
+    # (explicit Normals ride the overrides map) — no PopulationPrior
+    # rows. The Normal-only validation above still applies.
+    isnothing(r2d2) || return _RKPopulationPrior[]
+    n = length(design.columns)
+    stated = isnothing(overrides) ? fill(false, n) :
+        Bool[!isnothing(cell) for cell in overrides]
+    location, scale = _brm_materialize_normal_effect_priors(overrides, n;
+        prefix)
+    groups, order = _rk_design_addressee_groups(design, target; prefix)
     priors = _RKPopulationPrior[]
     for addressee in order
         idxs = groups[addressee]
@@ -2263,12 +2295,13 @@ function _rk_plan_offset_only_predictor(brmi::BRMI, context, target::Symbol,
         required=true, row_source,
         implicit_intercept=target in _brm_threshold_located_predictors(brmi))
     priors = _rk_population_priors(brmi, design, target, available,
-        Set{Symbol}(), terms, derived)
+        Set{Symbol}(), terms, derived, nothing)
     r2d2 = _brm_whole_predictor_r2d2(brmi, design, (); prefix,
         available_predictors=available)
     isnothing(r2d2) || error(
-        "$prefix: predictor `$target` `r2d2` priors are out of slice 1")
-    _RKPredictorSpec(target, link, terms, target), priors
+        "$prefix: predictor `$target` `r2d2` decomposes nothing (no " *
+        "coefficient columns); drop the `r2d2` statement")
+    _RKPredictorSpec(target, link, terms, target), priors, nothing
 end
 
 # ---- spline smooth terms (s/t2; mirrors `_sb_s_generic`/`_sb_t2_generic`) ----
@@ -2808,6 +2841,139 @@ function _rk_mo_beta_prior(brmi::BRMI, target::Symbol, addressee::Symbol)
     _RKPopulationPrior(target, addressee, location[1], scale[1])
 end
 
+# Flat whole-predictor R2D2 (SB `_sb_emit_r2d2_params!` /
+# `_sb_emit_r2d2_popefs!` mirror): the shared `_BRMR2D2Plan` (R2 prior,
+# share indices, alpha, tau literal-or-nothing) becomes an
+# `_RKR2D2Prior` plus its Beta-R2 / Dirichlet-phi / optional
+# half-Normal-tau sampled parameters (SB spellings
+# `r2d2_<target>_R2/_phi/_tau_bsv`, minted). Only the share COUNT
+# crosses the boundary (as the Dirichlet length) — the thin layer
+# recomputes the share composition at bind from the same
+# override/no-override structure, so the numbering itself need not
+# agree. Returns `(; prior, scalars, phi)`.
+function _rk_plan_r2d2_prior(brmi::BRMI, design, r2plan::_BRMR2D2Plan,
+        target::Symbol, available::Tuple, terms::Vector{_RKTermSpec},
+        taken::Set{Symbol}, columns::Dict{Symbol,AbstractVector})
+    prefix = "RK backend"
+    for term in terms
+        # The mo contrast is parameter-derived, so no data variance
+        # exists (the thin layer rejects it too); gp latents have no
+        # R2D2 term rule thin-layer-side. mo1/dar/spline/hsgp summands
+        # are skipped by the bind-time share composition, like offsets
+        # and ranef gathers.
+        term.kind === :monotonic && error(
+            "$prefix: predictor `$target` combines `mo` with `r2d2`; " *
+            "the mo contrast is parameter-derived, so no data variance " *
+            "exists to decompose (drop one of them)")
+        term.kind === :gp && error(
+            "$prefix: predictor `$target` combines `gp` with `r2d2`; " *
+            "gp latents have no R2D2 term rule in slice 1")
+    end
+    n = length(design.columns)
+    cell_overrides = _brm_simple_population_effect_overrides(
+        brmi, design; prefix, available_predictors=available)
+    stated = isnothing(cell_overrides) ? fill(false, n) :
+        Bool[!isnothing(cell) for cell in cell_overrides]
+    n_shares = count(!iszero, r2plan.share_indices)
+    if n_shares == 0
+        # SB mirror (`_sb_r2d2_overrides`): zero shares is a legitimate
+        # no-op only with no non-intercept columns at all — but SB's
+        # tau-only no-op has no thin-layer form (the peer rejects a
+        # decomposition over nothing, and a bare tau would be an unused
+        # parameter), so both shapes fail closed here.
+        labels = Symbol[c.label for c in design.columns]
+        if all(l -> l === :Intercept, labels)
+            error("$prefix: predictor `$target` `r2d2` decomposes " *
+                "nothing (no non-intercept coefficient columns); drop " *
+                "the `r2d2` statement")
+        end
+        excluded = Symbol[labels[i] for i in eachindex(labels)
+            if labels[i] !== :Intercept && stated[i]]
+        error("$prefix: predictor `$target` `r2d2` has nothing to " *
+            "allocate: every non-intercept population column " *
+            "($(join(excluded, ", "))) carries its own explicit " *
+            "`Normal` prior, and an explicitly prioried column leaves " *
+            "the Dirichlet allocation (SB mirror); drop those " *
+            "per-column statements or drop the `r2d2` statement")
+    end
+    prior = r2plan.prior
+    ab = if prior isa Beta
+        (Float64(prior.α), Float64(prior.β))
+    elseif prior isa ExprColumn && getf(prior) === Beta &&
+            length(getargs(prior)) == 2
+        a = _brm_numeric_constant(getargs(prior)[1])
+        b = _brm_numeric_constant(getargs(prior)[2])
+        (isnothing(a) || isnothing(b)) && error(
+            "$prefix: predictor `$target` R2D2 `R2` Beta shapes must be " *
+            "numeric constants in slice 1")
+        (Float64(a), Float64(b))
+    else
+        error("$prefix: predictor `$target` R2D2 `R2` prior must be " *
+            "`Beta(a, b)` with numeric shapes in slice 1")
+    end
+    (all(isfinite, ab) && all(b -> b > 0, ab)) || error(
+        "$prefix: predictor `$target` R2D2 `R2` Beta shapes must be " *
+        "finite and positive")
+    scalars = _RKSampledParameter[]
+    r2_name = _rk_mint_generated!(taken, columns, "r2d2_$(target)_R2")
+    push!(scalars,
+        _RKSampledParameter(r2_name, :Beta, ab, nothing, r2_name))
+    tau = if isnothing(r2plan.total_scale)
+        # SB's honest default: a sampled half-standard-normal (SB
+        # `std_normal(; lower=0.)`), not a fabricated constant.
+        tau_name = _rk_mint_generated!(
+            taken, columns, "r2d2_$(target)_tau_bsv")
+        push!(scalars, _RKSampledParameter(
+            tau_name, :Normal, (0.0, 1.0), :positive, tau_name))
+        tau_name
+    else
+        Float64(r2plan.total_scale)
+    end
+    phi_name = _rk_mint_generated!(taken, columns, "r2d2_$(target)_phi")
+    phi = _RKVectorParameter(phi_name, :simplex_dirichlet,
+        (fill(r2plan.alpha, n_shares),), n_shares, phi_name)
+    location, scale = _brm_materialize_normal_effect_priors(
+        cell_overrides, n; prefix)
+    groups, order = _rk_design_addressee_groups(design, target; prefix)
+    overrides = Dict{Symbol,Tuple{Float64,Float64}}()
+    for addressee in order
+        idxs = groups[addressee]
+        any_stated = any(stated[idxs])
+        any_stated || continue
+        all(stated[idxs]) || error(
+            "$prefix: predictor `$target` addressee `$addressee` mixes " *
+            "explicit-Normal columns with simplex columns; the R2D2 " *
+            "composition is per-block (state the whole block or none " *
+            "of it)")
+        first_loc, first_scale = location[first(idxs)], scale[first(idxs)]
+        all(i -> location[i] == first_loc && scale[i] == first_scale,
+            idxs) || error(
+            "$prefix: predictor `$target` addressee `$addressee` has " *
+            "disagreeing population priors across its columns; slice 1 " *
+            "needs one shared Normal per addressee (address the source " *
+            "column, not individual levels)")
+        overrides[addressee] = (first_loc, first_scale)
+    end
+    for term in terms
+        # An unstated factor joins the simplex under a FULL-cover
+        # LevelMap thin-layer-side — for a subset-coded (treatment /
+        # reference) block that changes the coding, so subset blocks
+        # must ride share 0 with an explicit Normal (which keeps the
+        # subset, like the PopulationPrior path).
+        term.kind === :factor || continue
+        term.options.coding === :subset || continue
+        haskey(overrides, term.addressee) && continue
+        error("$prefix: predictor `$target` factor `$(term.addressee)` " *
+            "is subset-coded but carries no explicit Normal prior; an " *
+            "unstated factor joins the R2D2 simplex under full cover, " *
+            "which changes the coding — state " *
+            "`effect($target, $(term.addressee)) ~ Normal(0, s)` " *
+            "(share-0 override) or use full-rank coding")
+    end
+    (; prior=_RKR2D2Prior(target, r2_name, phi_name, tau, overrides),
+        scalars, phi)
+end
+
 # SB single-contrast rule (see the section header): duplicate (head, source)
 # pairs fail closed. Runs per-predictor (ahead of population priors, which
 # would otherwise misattribute the second `mo(c)` as an index collision)
@@ -3089,14 +3255,16 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
     _rk_gate_monotonic_unique!(prefix, "predictor `$target` carries", terms)
     _rk_gate_dar_admitted!(prefix, target, terms)
     _rk_gate_ar_sibling!(terms, target)
-    isnothing(geometry.r2d2) || error(
-        "$prefix: predictor `$target` `r2d2` priors are out of slice 1")
     design = geometry.component.design
     factor_addressees = Set{Symbol}(t.addressee
         for t in terms if t.kind === :factor)
+    r2plan = geometry.r2d2
     priors = _rk_population_priors(brmi, design, target, available,
-        factor_addressees, terms, derived)
-    _RKPredictorSpec(target, link, terms, target), priors
+        factor_addressees, terms, derived, r2plan)
+    r2d2 = isnothing(r2plan) ? nothing :
+        _rk_plan_r2d2_prior(brmi, design, r2plan, target, available,
+            terms, taken, columns)
+    _RKPredictorSpec(target, link, terms, target), priors, r2d2
 end
 
 function _rk_resolve_use_ref(name::Symbol, consts::Dict{Symbol,Float64},
@@ -4593,14 +4761,20 @@ function _brm_rk_plan(brmi::BRMI)
         assignment_names, Set{Symbol}(spec.name for spec in vector_specs))
     predictor_specs = _RKPredictorSpec[]
     prior_specs = _RKPopulationPrior[]
+    r2d2_specs = _RKR2D2Prior[]
+    r2d2_vectors = _RKVectorParameter[]
     ranef_buckets, ranef_lookup = _rk_plan_ranef_buckets(
         brmi, context, predictor_order, columns, taken)
     for target in predictor_order
-        spec, priors = _rk_plan_predictor(
+        spec, priors, r2d2 = _rk_plan_predictor(
             brmi, context, target, available, columns, derived, taken,
             ranef_lookup)
         push!(predictor_specs, spec)
         append!(prior_specs, priors)
+        isnothing(r2d2) && continue
+        push!(r2d2_specs, r2d2.prior)
+        append!(parameters, r2d2.scalars)
+        push!(r2d2_vectors, r2d2.phi)
     end
     mo_vectors = _rk_plan_monotonic_vectors!(predictor_specs)
     predictor_link = Dict(spec.name => spec.link for spec in predictor_specs)
@@ -4758,8 +4932,9 @@ function _brm_rk_plan(brmi::BRMI)
     end
     _rk_gate_name_hygiene!(predictor_specs, parameters, assignments,
         derived, columns, response_specs,
-        [vector_specs; implicit_vectors; mo_vectors])
+        [vector_specs; implicit_vectors; mo_vectors; r2d2_vectors])
     _RKStructuralPlan(response_specs, predictor_specs, prior_specs,
         parameters, assignments, derived, columns, n_obs, ranef_buckets,
-        [vector_specs; implicit_vectors; mo_vectors])
+        [vector_specs; implicit_vectors; mo_vectors; r2d2_vectors],
+        r2d2_specs)
 end
