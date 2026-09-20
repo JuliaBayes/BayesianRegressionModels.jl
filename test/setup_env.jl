@@ -54,20 +54,29 @@ const PINS = [
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
-    # through. fd1af39 (2026-09-20, GitHub main): everything 86e5265
+    # through. d5e8bed (2026-09-20, GitHub main): everything fd1af39
     # carried (v12 PPL primitives — ordinal modeled latent scale, mo/mo1
     # simplex, non-centered scan/ar, LKJ Cholesky log-Jacobian fix — on
     # top of the KernelPlate-reader floor with stable
-    # RKPPLSubmodel/_expand_submodels) plus HSGP Stage B, the flat
+    # RKPPLSubmodel/_expand_submodels — plus HSGP Stage B, the flat
     # whole-predictor R2D2 surface (same slice ba0cc25 the BRM R2D2
     # emission targets, via the RK-side reconcile re-cut), me/vscale,
     # the ranef `_declared_codes` in-model grouping encoder +
     # bind-time coverage validation (P1 switch: categorical groupings
     # bind crossed strings, no more `<g>_idx` codes), and the ranef
-    # followers. (Supersedes the parked 64ccf38 pin, which never
-    # reached GitHub; the R2D2 slice itself rode 64ccf38 over the
-    # v12 floor 86e5265.)
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "fd1af39961eaffebd150c1b48510951fcddb6919"),  # main
+    # followers) plus vector-shaped derived locals as ranef margins
+    # (peer todo 1x0g5yb — the surface BRM ranef-`&` emission targets;
+    # emitter-baked twin oracle + corpus 44, candidate 9873b0d). The me
+    # plate-vector surface (PlateParameter lowering + corpus 34_me,
+    # re-cut 8a6c36c) is on GitHub main as of fd1af39; this pin keeps
+    # the committed `rk parity me` case on the current main, and the
+    # hierarchical sweep (ranef `&`) on the margins surface. The
+    # correlated-outcomes slice (LKJ factor + MvNormal joint response
+    # eee553b, corpus renumber a48955f) the `rk parity correlated
+    # outcomes` cases target is likewise on main as of fd1af39.
+    # (Supersedes the parked 64ccf38 pin, which never reached GitHub;
+    # the R2D2 slice itself rode 64ccf38 over the v12 floor 86e5265.)
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "d5e8bed5a57cf6af0a73edbecb6cc9bbfd9c0c0b"),  # main
 ]
 
 function main()

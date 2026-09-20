@@ -597,6 +597,18 @@ end
             "mu => [1, dummy(c, 4), dummy(c, 6)]\nend")
 end
 
+@testset "ranef interaction margin references derived def" begin
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + (1 + x & z | g)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    prog = BRM._rk_emit_ast(plan)
+    @test Expr(:(=), :int_x_x_z, Expr(:call, :.*, :x, :z)) in prog.main.args
+    @test rk_strip_lines(only(rk_bucket_stmts(prog.main))) ==
+        rk_parsed_surface("ranef_bucket(g; eta = 1.0) do\n mu => [1, int_x_x_z]\nend")
+end
+
 @testset "ranef multi-target body order" begin
     mdf = (; x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
              g=[1, 1, 2, 2, 3, 3],
