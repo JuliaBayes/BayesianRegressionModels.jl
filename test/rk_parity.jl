@@ -27,6 +27,7 @@
 
 using Test
 using BayesianRegressionModels
+using CategoricalArrays: categorical, levelcode
 using DifferentiationInterface: AutoEnzyme
 using Distributions: Beta, Dirichlet, Exponential, Normal, logcdf, logccdf,
                      logpdf
@@ -161,6 +162,14 @@ function _ref_dummy_variance(col, lvl)
     m = count(==(lvl), col)
     return m * (n - m) / (n * (n - 1))
 end
+
+# Default-ordered categorical grouping: `categorical` sorts levels, so
+# `CA.levels` order == the thin layer's bind-derived sort order (P1).
+_parity_cols_cat = (;
+    g = categorical(["a", "b", "a", "c", "b", "c"]),
+    x = [0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
+    y = [1.0, 2.0, 1.5, 2.5, 3.0, 2.0],
+)
 
 # SB `_sb_mo` contrast `cumsum([0; incr])[idx]`, explicit loop (never the
 # thin-layer gather recipe).
@@ -403,6 +412,34 @@ end
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     # Jacobian: sigma's exp only (log_scale/xi ride identity).
+    @test logjac(layout, u) ≈ u[2]
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[2]
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity K=1 intercept categorical grouping" begin
+    brmi = @brm _parity_cols_cat begin
+        mu ~ 1 + (1 | g)
+        y ~ Normal(mu, sigma)
+        effect(mu, Intercept) ~ Normal(0, 5)
+        sigma ~ Exponential(1)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 6
+    # SB numbering is CA.levels positions (levelcodes) — independent of
+    # the thin layer's sorted-strings `_declared_codes` encoder.
+    idx = levelcode.(_parity_cols_cat.g)
+    u = collect(range(-0.4, 0.4; length = layout.total))
+    nt = constrain(layout, u)
+    r = exp(nt.log_scale_g) .* nt.xi_g[idx]
+    ll = sum(logpdf.(Normal.(nt.mu[1] .+ r, nt.sigma), _parity_cols_cat.y))
+    pr = logpdf(Normal(0, 5), nt.mu[1]) +
+        logpdf(Exponential(1), nt.sigma) +
+        logpdf(Normal(0, 1), nt.log_scale_g) +
+        sum(logpdf.(Normal(0, 1), nt.xi_g))
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
     @test logjac(layout, u) ≈ u[2]
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[2]
     _check_parity_gradient(backend, u)

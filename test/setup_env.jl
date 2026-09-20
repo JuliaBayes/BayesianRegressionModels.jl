@@ -61,8 +61,12 @@ const PINS = [
     # RKPPLSubmodel/_expand_submodels) plus HSGP Stage B, the flat
     # whole-predictor R2D2 surface (same slice ba0cc25 the BRM R2D2
     # emission targets, via the RK-side reconcile re-cut), me/vscale,
-    # and the ranef followers. (Supersedes the parked 64ccf38 pin,
-    # which never reached GitHub.)
+    # the ranef `_declared_codes` in-model grouping encoder +
+    # bind-time coverage validation (P1 switch: categorical groupings
+    # bind crossed strings, no more `<g>_idx` codes), and the ranef
+    # followers. (Supersedes the parked 64ccf38 pin, which never
+    # reached GitHub; the R2D2 slice itself rode 64ccf38 over the
+    # v12 floor 86e5265.)
     ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "fd1af39961eaffebd150c1b48510951fcddb6919"),  # main
 ]
 
