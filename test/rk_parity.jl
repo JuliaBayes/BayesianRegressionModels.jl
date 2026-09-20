@@ -28,7 +28,8 @@
 using Test
 using BayesianRegressionModels
 using DifferentiationInterface: AutoEnzyme
-using Distributions: Dirichlet, Exponential, Normal, logcdf, logccdf, logpdf
+using Distributions: Beta, Dirichlet, Exponential, Normal, logcdf, logccdf,
+                     logpdf
 using Enzyme
 using LogDensityProblems
 using ReactiveKernels: prepare
@@ -145,6 +146,21 @@ _parity_cols_multi = merge(_parity_cols,
     (; y2 = [0.5, 1.5, 1.0, 2.0, 2.5, 1.5]))
 _parity_cols_dummy = merge(_parity_cols, (; c = [1, 2, 2, 1, 2, 1]))
 _parity_cols_mo = (; c = [1, 2, 3, 1, 2, 3], y = [1.0, 2.0, 1.5, 2.5, 3.0, 2.0])
+_parity_cols_r2d2 = merge(_parity_cols,
+    (; z = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]))
+
+# Sample variance, N−1 normalization (Stan `variance()`); dummy
+# variance without materializing the dummy (SB `brm_cat_variances`).
+function _ref_sample_variance(col)
+    n = length(col)
+    m = sum(col) / n
+    return sum((x - m)^2 for x in col) / (n - 1)
+end
+function _ref_dummy_variance(col, lvl)
+    n = length(col)
+    m = count(==(lvl), col)
+    return m * (n - m) / (n * (n - 1))
+end
 
 # SB `_sb_mo` contrast `cumsum([0; incr])[idx]`, explicit loop (never the
 # thin-layer gather recipe).
@@ -233,6 +249,128 @@ end
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     jac = u[2] + _ref_simplex_logjac(u[3:3])
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity r2d2 flat" begin
+    brmi = @brm _parity_cols_r2d2 begin
+        mu ~ 1 + x + z
+        effect(mu, :) ~ r2d2(R2=Beta(2, 5), alpha=0.5)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 7
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 3, :identity),
+        (:sampled, :s, 1, :exp),
+        (:sampled, :r2d2_mu_R2, 1, :logistic),
+        (:sampled, :r2d2_mu_tau_bsv, 1, :exp),
+        (:vector, :r2d2_mu_phi, 1, :simplex),
+    ]
+    u = collect(range(-0.4, 0.4; length = layout.total))
+    nt = constrain(layout, u)
+    R2, tau, phi = nt.r2d2_mu_R2, nt.r2d2_mu_tau_bsv, nt.r2d2_mu_phi
+    cols = _parity_cols_r2d2
+    sx = sqrt(phi[1] * R2 * tau^2 / _ref_sample_variance(cols.x))
+    sz = sqrt(phi[2] * R2 * tau^2 / _ref_sample_variance(cols.z))
+    mu_hat = nt.mu[1] .+ nt.mu[2] .* cols.x .+ nt.mu[3] .* cols.z
+    ll = sum(logpdf.(Normal.(mu_hat, nt.s), cols.y))
+    # The sampled tau carries the thin-layer `:positive` half
+    # renormalizer (+log 2, peer-blessed in `test_r2d2.jl`) over SB's
+    # Stan-convention unnormalized half-normal — a constant the RK
+    # posterior exceeds SB's by, while every gradient agrees (the mo
+    # Dirichlet-normalizer precedent).
+    pr = logpdf(Normal(0, 1), nt.mu[1]) +
+        logpdf(Normal(0, sx), nt.mu[2]) +
+        logpdf(Normal(0, sz), nt.mu[3]) +
+        logpdf(Exponential(1), nt.s) +
+        logpdf(Beta(2, 5), R2) +
+        logpdf(Normal(0, 1), tau) + log(2) +
+        logpdf(Dirichlet([0.5, 0.5]), phi)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    jac = u[4] + (log(R2) + log1p(-R2)) + u[6] + _ref_simplex_logjac(u[7:7])
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity r2d2 override + tau literal" begin
+    brmi = @brm _parity_cols_r2d2 begin
+        mu ~ 1 + x + z
+        effect(mu, :) ~ r2d2(tau_bsv=2.0)
+        effect(mu, x) ~ Normal(0, 3)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 5
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 3, :identity),
+        (:sampled, :s, 1, :exp),
+        (:sampled, :r2d2_mu_R2, 1, :logistic),
+        (:vector, :r2d2_mu_phi, 0, :simplex),
+    ]
+    u = collect(range(-0.4, 0.4; length = layout.total))
+    nt = constrain(layout, u)
+    R2, phi = nt.r2d2_mu_R2, nt.r2d2_mu_phi
+    @test phi ≈ [1.0]
+    cols = _parity_cols_r2d2
+    sz = sqrt(phi[1] * R2 * 2.0^2 / _ref_sample_variance(cols.z))
+    mu_hat = nt.mu[1] .+ nt.mu[2] .* cols.x .+ nt.mu[3] .* cols.z
+    ll = sum(logpdf.(Normal.(mu_hat, nt.s), cols.y))
+    pr = logpdf(Normal(0, 1), nt.mu[1]) +
+        logpdf(Normal(0, 3), nt.mu[2]) +
+        logpdf(Normal(0, sz), nt.mu[3]) +
+        logpdf(Exponential(1), nt.s) +
+        logpdf(Beta(1, 1), R2) +
+        logpdf(Dirichlet([1.0]), phi)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    jac = u[4] + (log(R2) + log1p(-R2))
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity r2d2 factor join" begin
+    brmi = @brm _parity_cols begin
+        mu ~ 0 + g
+        effect(mu, :) ~ r2d2()
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 8
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 3, :identity),
+        (:sampled, :s, 1, :exp),
+        (:sampled, :r2d2_mu_R2, 1, :logistic),
+        (:sampled, :r2d2_mu_tau_bsv, 1, :exp),
+        (:vector, :r2d2_mu_phi, 2, :simplex),
+    ]
+    u = collect(range(-0.4, 0.4; length = layout.total))
+    nt = constrain(layout, u)
+    R2, tau, phi = nt.r2d2_mu_R2, nt.r2d2_mu_tau_bsv, nt.r2d2_mu_phi
+    cols = _parity_cols
+    sc = [sqrt(phi[k] * R2 * tau^2 / _ref_dummy_variance(cols.g, k))
+        for k in 1:3]
+    mu_hat = nt.mu[_group_index(cols.g)]
+    ll = sum(logpdf.(Normal.(mu_hat, nt.s), cols.y))
+    pr = sum(logpdf(Normal(0, sc[k]), nt.mu[k]) for k in 1:3) +
+        logpdf(Exponential(1), nt.s) +
+        logpdf(Beta(1, 1), R2) +
+        logpdf(Normal(0, 1), tau) + log(2) +
+        logpdf(Dirichlet(ones(3)), phi)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    jac = u[4] + (log(R2) + log1p(-R2)) + u[6] + _ref_simplex_logjac(u[7:8])
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
