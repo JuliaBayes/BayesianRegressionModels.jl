@@ -1147,12 +1147,14 @@ end
     @test term.options.beta == :dar_mu_t_beta_2
 end
 
-@testset "fail closed: SB long tail (me, simplex/LKJ/joint)" begin
+@testset "fail closed: SB long tail (me, simplex)" begin
     # `mo1(c)` used to fail here; it plans now (thin-layer monotonic
     # surface landed, covered in "monotonic plan shape"). `dar(t)` used to
     # fail here too; it plans now (thin-layer dar surface, covered in
     # "differenced-AR plan shape"). `ar` plans now as well (thin-layer
-    # scan-ar slice landed, covered in "ar plan shape").
+    # scan-ar slice landed, covered in "ar plan shape"). The LKJ
+    # declaration and joint response plan now too (thin-layer correlated
+    # slice landed, covered in "LKJ factor + joint plan shape").
     # Measurement-error latent predictor stays closed.
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + me(x, 0.5)
