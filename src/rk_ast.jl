@@ -106,6 +106,11 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol})
             # Beta-free direct summand, always inline like `spline(...)`.
             push!(summands, Expr(:call, :mo1, only(term.columns),
                 term.options.increments))
+        elseif term.kind === :dar
+            # Beta-free trajectory summand, always inline like `mo1(...)`
+            # (the surface takes no axis — T is n_obs by construction).
+            push!(summands, Expr(:call, :dar,
+                term.options.beta, term.options.sigma))
         elseif term.kind === :offset
             push!(summands, only(term.columns))
         elseif term.kind === :spline
@@ -483,6 +488,15 @@ function _rk_ast_sampled(parameter::_RKSampledParameter)
         return Expr(:call, :~, name,
             Expr(:call, head, parameter.args[2]))
     end
+    if override === :interval
+        # Unit-interval truncated-Normal (dar persistence): the thin-layer
+        # screen takes `truncated(Normal(mu, s), 0, 1)` exactly.
+        return Expr(:call, :~, name,
+            Expr(:call, :truncated,
+                Expr(:call, :Normal,
+                    parameter.args[1], parameter.args[2]),
+                0, 1))
+    end
     family === :Flat && return Expr(:call, :~, name, Expr(:call, :Flat))
     Expr(:call, :~, name, Expr(:call, family, parameter.args...))
 end
@@ -528,6 +542,16 @@ function _rk_ast_gp_names(plan::_RKStructuralPlan)
     names
 end
 
+function _rk_ast_dar_names(plan::_RKStructuralPlan)
+    names = Set{Symbol}()
+    for predictor in plan.predictors, term in predictor.terms
+        term.kind === :dar || continue
+        options = term.options
+        push!(names, options.beta, options.sigma)
+    end
+    names
+end
+
 function _rk_emit_ast(plan::_RKStructuralPlan)
     taken = union(Set(keys(plan.columns)),
         Set(p.name for p in plan.parameters),
@@ -537,7 +561,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         Set(v.name for v in plan.vector_parameters),
         _rk_ast_spline_ids(plan),
         _rk_ast_hsgp_ids(plan),
-        _rk_ast_gp_names(plan))
+        _rk_ast_gp_names(plan),
+        _rk_ast_dar_names(plan))
     # A predictor sharing its name with a data column cannot keep it:
     # the program has one namespace, so the affine (definition and
     # response uses) is alpha-renamed. Unreachable via `@brm`
@@ -582,7 +607,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         for (index, term) in enumerate(predictor.terms)
             (term.kind === :offset || term.kind === :ranef_gather ||
                 term.kind === :spline || term.kind === :hsgp ||
-                term.kind === :gp ||
+                term.kind === :gp || term.kind === :dar ||
                 term.kind === :monotonic_summand) && continue
             counter += 1
             key = (predictor.name, term.addressee)
@@ -613,6 +638,12 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         for term in predictor.terms
             term.kind === :hsgp || continue
             push!(stmts, _rk_ast_hsgp_basis(term))
+        end
+        for term in predictor.terms
+            term.kind === :dar || continue
+            options = term.options
+            push!(stmts, _rk_ast_sampled(options.beta_param))
+            push!(stmts, _rk_ast_sampled(options.sigma_param))
         end
         for term in predictor.terms
             term.kind === :gp || continue

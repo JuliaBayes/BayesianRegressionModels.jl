@@ -130,7 +130,7 @@ end
 struct _RKTermSpec
     kind::Symbol # :intercept | :continuous | :factor | :offset |
                 # :ranef_gather | :spline | :gp | :hsgp |
-                # :monotonic | :monotonic_summand
+                # :monotonic | :monotonic_summand | :dar
     columns::Vector{Symbol}
     # factor: (coding=:fullrank, levels=:observed) over every observed level,
     # or (coding=:subset, drop::Int, levels=:observed) over every observed
@@ -2661,6 +2661,126 @@ function _rk_gate_monotonic_unique!(prefix::String, where::String,
     nothing
 end
 
+# ---- differenced-AR terms (dar; mirrors `_sb_dar1`) ----
+#
+# A `:dar` term carries `(; beta, sigma, source, beta_param, sigma_param)`:
+# the persistence/scale sampled-scalar names (SB's `<dar_mu_t>_beta/_sigma`),
+# the raw time axis, and their `_RKSampledParameter`s (options-carried like
+# gp hypers; the AST preamble emits them). Beta-free direct summand
+# (self-addressed: no population prior). The thin layer owns the scan-tier
+# trajectory + z[T-1] innovations (sized from n_obs); BRM ships the bound
+# time axis (SB binds it too — values never enter the path, only its
+# length, which the Phase-6 gate checks) + the declaration. T<2 (n_obs=1:
+# SB's path is identically 0, the thin layer fails z[0] at layout) emits a
+# zeros offset instead — the mo1-K=1 twin. One dar summand per predictor
+# (thin-layer v1 state scoping) and at least one estimated coefficient
+# (no coefficient-free dar predictor in v1) fail closed in
+# `_rk_gate_dar_admitted!`.
+function _rk_dar_beta_prior(prior, target::Symbol, source::Symbol)
+    prefix = "RK backend"
+    where = "predictor `$target` `dar($source)` persistence"
+    prior isa ExprColumn || error(
+        "$prefix: $where prior is not a distribution call")
+    f = getf(prior)
+    f isa Type || error(
+        "$prefix: $where prior is out of slice 1 (admitted: Normal)")
+    nameof(f) === :Normal || error(
+        "$prefix: $where prior `$(nameof(f))` is out of slice 1 (the " *
+        "thin-layer persistence is truncated-Normal on [0, 1]; admitted: " *
+        "Normal)")
+    isempty(getkwargs(prior)) || error(
+        "$prefix: $where prior cannot have keywords in slice 1")
+    args = getargs(prior)
+    length(args) == 2 || error(
+        "$prefix: $where prior `Normal` needs 2 arguments, got " *
+        "$(length(args))")
+    resolved = map(args) do arg
+        arg isa Number && isfinite(Float64(arg)) || error(
+            "$prefix: $where prior hyperparameters must be finite literals")
+        Float64(arg)
+    end
+    (:Normal, (resolved[1], resolved[2]), :interval)
+end
+
+function _rk_dar_sigma_prior(prior, target::Symbol, source::Symbol)
+    prefix = "RK backend"
+    where = "predictor `$target` `dar($source)` scale"
+    prior isa ExprColumn || error(
+        "$prefix: $where prior is not a distribution call")
+    f = getf(prior)
+    f isa Type || error(
+        "$prefix: $where prior is out of slice 1 (admitted: Normal)")
+    nameof(f) === :Normal || error(
+        "$prefix: $where prior `$(nameof(f))` is out of slice 1 (the " *
+        "thin-layer scale is HalfNormal; admitted: Normal)")
+    isempty(getkwargs(prior)) || error(
+        "$prefix: $where prior cannot have keywords in slice 1")
+    args = getargs(prior)
+    length(args) == 2 || error(
+        "$prefix: $where prior `Normal` needs 2 arguments, got " *
+        "$(length(args))")
+    location, scale = args
+    location isa Number && location == 0 || error(
+        "$prefix: $where `Normal` prior must have location 0 in " *
+        "slice 1 (a positive scale takes a half-Normal)")
+    scale isa Number && isfinite(Float64(scale)) || error(
+        "$prefix: $where prior hyperparameters must be finite literals")
+    (:Normal, (0.0, Float64(scale)), :positive)
+end
+
+function _rk_plan_dar_term!(prepared::_BRMPreparedTerm{typeof(dar)},
+        target::Symbol, columns::Dict{Symbol,AbstractVector},
+        taken::Set{Symbol})
+    source = prepared.source
+    # SB binds the axis under its own name; the values never enter the path
+    # (only its length, Phase-6-gated), so a second use of the raw column
+    # reads Float64-converted time in both backends.
+    columns[source] = prepared.state.time
+    if length(prepared.state.time) < 2
+        # Single observation: SB's path is identically 0 (no innovations),
+        # while the thin layer fails z[0] at layout — so emit the zeros
+        # offset twin (mo1-K=1 shape) and never touch the surface.
+        zero = _rk_mint_generated!(taken, columns, "dar_$(source)_zero")
+        columns[zero] = zeros(length(prepared.state.time))
+        return _RKTermSpec(:offset, [zero], (;), zero, Symbol(:offset_, zero))
+    end
+    beta_family, beta_args, beta_support = _rk_dar_beta_prior(
+        prepared.state.ar_prior, target, source)
+    sigma_family, sigma_args, sigma_support = _rk_dar_sigma_prior(
+        prepared.state.sd_prior, target, source)
+    stem = "dar_$(target)_$(source)"
+    beta = _rk_mint_generated!(taken, columns, stem * "_beta")
+    sigma = _rk_mint_generated!(taken, columns, stem * "_sigma")
+    label = Symbol(stem)
+    _RKTermSpec(:dar, Symbol[],
+        (; beta, sigma, source,
+         beta_param=_RKSampledParameter(
+             beta, beta_family, beta_args, beta_support, beta),
+         sigma_param=_RKSampledParameter(
+             sigma, sigma_family, sigma_args, sigma_support, sigma)),
+        label, label)
+end
+
+# Thin-layer v1 admission for dar summands (see the section header): at most
+# one per predictor (state scoping), and at least one estimated coefficient
+# (the surface fails coefficient-free dar predictors closed — latent-only
+# shapes stay out until the peer admits them, spline-only precedent aside).
+function _rk_gate_dar_admitted!(prefix::String, target::Symbol,
+        terms::Vector{_RKTermSpec})
+    dar_count = count(t -> t.kind === :dar, terms)
+    dar_count == 0 && return nothing
+    dar_count == 1 || error(
+        "$prefix: predictor `$target` carries $dar_count `dar()` terms; " *
+        "the thin layer splices one dar summand per predictor in v1 " *
+        "(multi-trajectory predictors are sequenced)")
+    any(t -> t.kind === :intercept || t.kind === :continuous ||
+        t.kind === :factor || t.kind === :monotonic, terms) || error(
+        "$prefix: predictor `$target` `dar()` has no estimated " *
+        "coefficients — add an intercept or coefficient (the thin layer " *
+        "admits no coefficient-free dar predictor in v1)")
+    nothing
+end
+
 # One `:simplex_dirichlet` vector parameter per monotonic term (SB: one
 # increment simplex per contrast).
 function _rk_plan_monotonic_vectors!(predictor_specs::AbstractVector)
@@ -2695,9 +2815,10 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
     hsgp_raw = filter(t -> t isa ExprColumn && getf(t) === hsgp, structured)
     mo_raw = filter(t -> t isa ExprColumn &&
         (getf(t) === mo || getf(t) === mo1), structured)
+    dar_raw = filter(t -> t isa ExprColumn && getf(t) === dar, structured)
     other_structured = filter(
         t -> !(t in spline_raw) && !(t in gp_raw) && !(t in hsgp_raw) &&
-            !(t in mo_raw),
+            !(t in mo_raw) && !(t in dar_raw),
         structured)
     isempty(other_structured) || error(
         "$prefix: predictor `$target` structured term(s) " *
@@ -2708,7 +2829,7 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
     grouped = filter(t -> _brm_is_grouped_term(t), raw_terms)
     ordinary = Tuple(t for t in raw_terms if !(t in structured) && !(t in grouped))
     isempty(ordinary) && isempty(spline_raw) && isempty(gp_raw) &&
-        isempty(hsgp_raw) && isempty(mo_raw) && error(
+        isempty(hsgp_raw) && isempty(mo_raw) && isempty(dar_raw) && error(
         "$prefix: predictor `$target` has no terms")
     has_intercept = any(t -> t isa Integer && t == 1, ordinary)
     # Classify before building geometry: fail fast on unknown terms with RK
@@ -2743,6 +2864,7 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         terms, spines, derived, context.data, target, has_intercept)
     any(t -> t.kind !== :offset, terms) || !isempty(spline_raw) ||
         !isempty(gp_raw) || !isempty(hsgp_raw) || !isempty(mo_raw) ||
+        !isempty(dar_raw) ||
         return _rk_plan_offset_only_predictor(
         brmi, context, target, ordinary, available, link, terms, derived)
     geometry = _brm_prepare_predictor_geometry(
@@ -2763,6 +2885,9 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
             spec === nothing || push!(terms, spec)
         elseif prepared.callable === mo1
             push!(terms, _rk_plan_mo1_term!(
+                prepared, target, columns, taken))
+        elseif prepared.callable === dar
+            push!(terms, _rk_plan_dar_term!(
                 prepared, target, columns, taken))
         else
             error("$prefix: internal: unexpected structured term " *
@@ -2789,6 +2914,7 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
             Symbol(:offset_, zero)))
     end
     _rk_gate_monotonic_unique!(prefix, "predictor `$target` carries", terms)
+    _rk_gate_dar_admitted!(prefix, target, terms)
     isnothing(geometry.r2d2) || error(
         "$prefix: predictor `$target` `r2d2` priors are out of slice 1")
     design = geometry.component.design
@@ -3696,6 +3822,24 @@ function _rk_gate_name_hygiene!(predictor_specs::AbstractVector,
             "$prefix: internal: generated gp name `$gn` collides with " *
             "raw column `$gn`")
     end
+    darnames = Symbol[]
+    for spec in predictor_specs, term in spec.terms
+        term.kind === :dar || continue
+        append!(darnames, (term.options.beta, term.options.sigma))
+    end
+    length(unique(darnames)) == length(darnames) || error(
+        "$prefix: internal: duplicate dar trajectory names")
+    for dn in darnames
+        dn in both && error(
+            "$prefix: internal: generated dar name `$dn` collides with a " *
+            "parameter/assignment name")
+        dn in pnames && error(
+            "$prefix: internal: generated dar name `$dn` collides with " *
+            "predictor `$dn`")
+        haskey(columns, dn) && error(
+            "$prefix: internal: generated dar name `$dn` collides with " *
+            "raw column `$dn`")
+    end
     hnames = Symbol[]
     for spec in predictor_specs, term in spec.terms
         term.kind === :hsgp || continue
@@ -3715,7 +3859,7 @@ function _rk_gate_name_hygiene!(predictor_specs::AbstractVector,
             "raw column `$hn`")
     end
     for n in sort!(collect(Iterators.flatten(
-            (pnames, both, dnames, vnames, snames, gnames, hnames,
+            (pnames, both, dnames, vnames, snames, gnames, hnames, darnames,
                 keys(columns)))))
         startswith(string(n), "_ppl_") && error(
             "$prefix: name `$n` uses the reserved `_ppl_` prefix; rename it")
