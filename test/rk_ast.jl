@@ -851,26 +851,34 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
-    @test ast == Expr(:block,
-        Expr(:call, :~, :mu_b1, Expr(:call, :Normal, 0.0, 1.0)),
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    # The dar summand rides inside the per-predictor submodel (nullary:
+    # it reads no data columns); the trajectory scalars stay top-level.
+    @test prog.defs == Expr[
+        Expr(:(=), Expr(:call, :popefs_mu), Expr(:block,
+            Expr(:call, :~, :b1, Expr(:call, :Normal, 0.0, 1.0)),
+            Expr(:call, :.+,
+                :b1, Expr(:call, :dar, :dar_mu_t_beta, :dar_mu_t_sigma)))),
+        Expr(:(=), Expr(:call, :normal_id_glm, :eta, :sigma), Expr(:block,
+            Expr(:call, :.~, :slot,
+                Expr(:., :Normal, Expr(:tuple, :eta, :sigma))),
+            :slot)),
+    ]
+    @test prog.main == Expr(:block,
         Expr(:call, :~, :dar_mu_t_beta,
             Expr(:call, :truncated,
                 Expr(:call, :Normal, 0.5, 0.2), 0, 1)),
         Expr(:call, :~, :dar_mu_t_sigma,
             Expr(:call, :HalfNormal, 0.2)),
-        Expr(:(=), :mu, Expr(:call, :.+,
-            :mu_b1, Expr(:call, :dar, :dar_mu_t_beta, :dar_mu_t_sigma))),
+        Expr(:call, :~, :mu, Expr(:call, :popefs_mu)),
         Expr(:call, :~, :s, Expr(:call, :Exponential, 1.0)),
-        Expr(:call, :.~, :y,
-            Expr(:., :Normal, Expr(:tuple, :mu, :s))))
+        Expr(:call, :~, :y, Expr(:call, :normal_id_glm, :mu, :s)))
     # Both dar spellings match the parsed surface exactly.
-    @test rk_strip_lines(ast.args[2]) == rk_parsed_surface(
+    @test rk_strip_lines(prog.main.args[1]) == rk_parsed_surface(
         "dar_mu_t_beta ~ truncated(Normal(0.5, 0.2), 0, 1)")
-    affine = only([a for a in ast.args if a isa Expr && a.head === :(=) &&
-        a.args[1] === :mu])
-    @test rk_strip_lines(affine.args[2]) ==
-        rk_parsed_surface("mu_b1 .+ dar(dar_mu_t_beta, dar_mu_t_sigma)")
+    ret = rk_def_body(prog, :popefs_mu).args[end]
+    @test rk_strip_lines(ret) ==
+        rk_parsed_surface("b1 .+ dar(dar_mu_t_beta, dar_mu_t_sigma)")
     # Prior overrides ride the preamble statements.
     brmi = @brm tdf begin
         mu ~ 1 + dar(t)
@@ -879,10 +887,10 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    ast = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
-    @test ast.args[2] == Expr(:call, :~, :dar_mu_t_beta,
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test prog.main.args[1] == Expr(:call, :~, :dar_mu_t_beta,
         Expr(:call, :truncated, Expr(:call, :Normal, 0.6, 0.1), 0, 1))
-    @test ast.args[3] == Expr(:call, :~, :dar_mu_t_sigma,
+    @test prog.main.args[2] == Expr(:call, :~, :dar_mu_t_sigma,
         Expr(:call, :HalfNormal, 0.3))
 end
 
