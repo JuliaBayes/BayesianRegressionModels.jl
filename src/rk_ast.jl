@@ -130,6 +130,11 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol})
             # `coef .* state` as a ScanSummandTerm (SB's `ar` latent
             # path with its free beta).
             push!(summands, Expr(:call, :.*, coefs[index], term.options.state))
+        elseif term.kind === :me
+            # Scaled latent summand: the thin layer classifies
+            # `coef .* latent` as a ContinuousTerm over the plate
+            # vector (SB's `me` true covariate with its free beta).
+            push!(summands, Expr(:call, :.*, coefs[index], term.options.latent))
         end
     end
     length(summands) == 1 ? only(summands) :
@@ -524,12 +529,15 @@ function _rk_ast_vector_parameter(parameter::_RKVectorParameter)
         Expr(:call, :Dirichlet, Expr(:vect, alpha...)))
 end
 
-# A GP latent's `@plate` block: `z[i] ~ Normal(0, 1)` over the using
-# response's index (length `n_obs`, like every column). The macrocall
-# carries a synthetic line node; the surface reads only `args[3]`.
-function _rk_ast_plate(name::Symbol, range::Symbol)
+# A `@plate` block: `name[i] ~ Normal(loc, scale)` over the range
+# column's index (length `n_obs`, like every column). GP latents take
+# the standardized default; `me` latents take the shared-scalar args.
+# The macrocall carries a synthetic line node; the surface reads only
+# `args[3]`.
+function _rk_ast_plate(name::Symbol, range::Symbol,
+        loc::Float64=0.0, scale::Float64=1.0)
     cell = Expr(:call, :~,
-        Expr(:ref, name, :i), Expr(:call, :Normal, 0.0, 1.0))
+        Expr(:ref, name, :i), Expr(:call, :Normal, loc, scale))
     loop = Expr(:for, Expr(:(=), :i, Expr(:call, :eachindex, range)),
         Expr(:block, cell))
     Expr(:macrocall, Symbol("@plate"), LineNumberNode(0), loop)
@@ -624,6 +632,15 @@ function _rk_ast_joint_response(response::_RKLikelihoodSpec,
         Expr(:call, :MvNormalCholesky, Expr(:vect, means...), stem))
 end
 
+function _rk_ast_me_names(plan::_RKStructuralPlan)
+    names = Set{Symbol}()
+    for predictor in plan.predictors, term in predictor.terms
+        term.kind === :me || continue
+        push!(names, term.options.latent)
+    end
+    names
+end
+
 function _rk_emit_ast(plan::_RKStructuralPlan)
     taken = union(Set(keys(plan.columns)),
         Set(p.name for p in plan.parameters),
@@ -635,7 +652,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         _rk_ast_hsgp_ids(plan),
         _rk_ast_gp_names(plan),
         _rk_ast_dar_names(plan),
-        _rk_ast_ar_names(plan))
+        _rk_ast_ar_names(plan),
+        _rk_ast_me_names(plan))
     # A predictor sharing its name with a data column cannot keep it:
     # the program has one namespace, so the affine (definition and
     # response uses) is alpha-renamed. Unreachable via `@brm`
@@ -743,6 +761,12 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
         for term in predictor.terms
             term.kind === :ar || continue
             append!(stmts, _rk_ast_ar_preamble(term))
+        end
+        for term in predictor.terms
+            term.kind === :me || continue
+            options = term.options
+            push!(stmts, _rk_ast_plate(options.latent,
+                only(term.columns), options.loc, options.scale))
         end
         if isempty(scalar_stmts)
             # No scalar coefficients (offset-only, gp-only,

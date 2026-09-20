@@ -135,7 +135,7 @@ end
 struct _RKTermSpec
     kind::Symbol # :intercept | :continuous | :factor | :offset |
                 # :ranef_gather | :spline | :gp | :hsgp | :ar |
-                # :monotonic | :monotonic_summand | :dar
+                # :monotonic | :monotonic_summand | :dar | :me
     columns::Vector{Symbol}
     # factor: (coding=:fullrank, levels=:observed) over every observed level,
     # or (coding=:subset, drop::Int, levels=:observed) over every observed
@@ -265,7 +265,8 @@ function _rk_num_coefficients(plan::_RKStructuralPlan)
     total = 0
     for predictor in plan.predictors, term in predictor.terms
         if term.kind === :intercept || term.kind === :continuous ||
-                term.kind === :ar || term.kind === :monotonic
+                term.kind === :ar || term.kind === :monotonic ||
+                term.kind === :me
             total += 1
         elseif term.kind === :factor
             width = length(_rk_grouping_levels(
@@ -1773,6 +1774,16 @@ function _rk_population_priors(brmi::BRMI, design, target::Symbol,
         location, scale = _rk_ar_beta_prior(brmi, target, term.addressee)
         push!(priors, _RKPopulationPrior(target, term.addressee, location, scale))
     end
+    # Latent `me` columns are not design columns, so their betas resolve
+    # through the dedicated cell (default Normal(0, 1), `:`-wide claims
+    # via the shared claim engine); one prior per addressee.
+    seen_me = Set{Symbol}()
+    for term in terms
+        term.kind === :me || continue
+        term.addressee in seen_me && continue
+        push!(seen_me, term.addressee)
+        push!(priors, _rk_me_beta_prior(brmi, target, term.addressee))
+    end
     priors
 end
 
@@ -3007,11 +3018,167 @@ function _rk_plan_monotonic_vectors!(predictor_specs::AbstractVector)
     specs
 end
 
+# ---- measurement-error terms (me; mirrors `_sb_me`) ----
+#
+# An `:me` term carries `(; latent, loc, scale, sd)`: the plate-vector
+# latent name (SB's un-namespaced `me_<x>` — the beta addressee, the
+# `popcoefnames` label, and the thin-layer `PlateParameter` alike), the
+# shared-scalar Normal args (default `(0, 1)`, overridable via
+# `latent(<lp|:>, me(x)) ~ Normal(...)`), and the scalar observation
+# error `sd` (shared prep gates finite `sd > 0`; SB never takes vector
+# error sizes either). `columns` holds the observed source column (bound
+# as data, so Phase 6 checks its length/missingness/finiteness).
+#
+# The thin layer owns the plate (`x[i]`-ranged `@plate` with the shared
+# args) and lowers `coef .* latent` to a `ContinuousTerm` over the
+# plate; the observation likelihood rides a synthetic gaussian-identity
+# plan response (`_rk_plan_me_observations!`, sharing the
+# `normal_id_glm` lattice with the main responses). SB shares ONE
+# latent per model across collectors, so a second `me(x)` term fails
+# closed here (dedup is sequenced with the hierarchical row) — never a
+# serialized second exchangeable latent double-counting the evidence.
+function _rk_plan_me_term!(prepared::_BRMPreparedTerm{typeof(me)},
+        target::Symbol, columns::Dict{Symbol,AbstractVector},
+        taken::Set{Symbol}, me_sources::Set{Symbol})
+    prefix = "RK backend"
+    source = prepared.source
+    source in me_sources && error(
+        "$prefix: predictor `$target` carries a second `me($source)` " *
+        "term; SB shares one latent true covariate per model, so the " *
+        "second is out of slice 1 (use one `me($source)` term)")
+    latent = Symbol(:me_, source)
+    (latent in taken || haskey(columns, latent)) && error(
+        "$prefix: predictor `$target` `me` latent name `$latent` is " *
+        "already taken — rename the colliding parameter, data column, " *
+        "or term")
+    push!(me_sources, source)
+    push!(taken, latent)
+    columns[source] = prepared.state.x_obs
+    loc, scale = _rk_me_latent_args(
+        prepared.state.latent_prior, target, source)
+    _RKTermSpec(:me, [source], (; latent, loc, scale, sd=prepared.state.sd_x),
+        latent, latent)
+end
+
+# The `me` latent's Normal args: shared prep resolves the
+# `latent(<lp|:>, me(x))` override (defaulting to `Normal(0, 1)`) into
+# `latent_prior`; slice 1 materializes Normal-only (SB's arbitrary-prior
+# merge is sequenced), with numeric-constant args like every other
+# slice-1 Normal.
+function _rk_me_latent_args(prior, target::Symbol, source::Symbol)
+    prefix = "RK backend"
+    prior isa ExprColumn && getf(prior) === Normal || error(
+        "$prefix: predictor `$target` `me($source)` latent prior must " *
+        "be `Normal(location, scale)` in slice 1")
+    isempty(getkwargs(prior)) || error(
+        "$prefix: predictor `$target` `me($source)` latent `Normal` " *
+        "prior cannot have keywords in slice 1")
+    raw_location, raw_scale = _brm_normal_effect_args(prior; prefix)
+    location = _brm_numeric_constant(raw_location)
+    scale = _brm_numeric_constant(raw_scale)
+    isnothing(location) && error(
+        "$prefix: predictor `$target` `me($source)` latent Normal " *
+        "location must be a numeric constant")
+    isnothing(scale) && error(
+        "$prefix: predictor `$target` `me($source)` latent Normal " *
+        "scale must be a numeric constant")
+    isfinite(location) || error(
+        "$prefix: predictor `$target` `me($source)` latent Normal " *
+        "location must be finite")
+    isfinite(scale) && scale > 0 || error(
+        "$prefix: predictor `$target` `me($source)` latent Normal " *
+        "scale must be finite and positive")
+    location, scale
+end
+
+# Explicit `effect(...)` addresses on the `me` latent column are
+# sequenced: the shared seam resolves design columns only, so it would
+# misreport the (SB-valid) `me_<x>` label as "not a population
+# coefficient". Reject it here with RK attribution instead. Runs before
+# predictor geometry (which invokes the shared seam); labels derive
+# syntactically, leniently — malformed terms stay shared prep's error.
+function _rk_gate_me_effect_priors!(brmi::BRMI, target::Symbol,
+        me_raw::AbstractVector)
+    prefix = "RK backend"
+    isempty(me_raw) && return nothing
+    addresses = Set{Symbol}()
+    for t in me_raw
+        t isa ExprColumn || continue
+        args = getargs(t)
+        length(args) == 2 || continue
+        axis = first(args)
+        axis isa NamedColumn || continue
+        push!(addresses, Symbol(:me_, name(axis)))
+    end
+    isempty(addresses) && return nothing
+    for spec in effect_priors(brmi)
+        spec.coefficient in addresses || continue
+        (spec.predictor === _EFFECT_COLON || spec.predictor === target) ||
+            continue
+        error("$prefix: predictor `$target` explicit priors on the `me` " *
+            "latent column `$(spec.coefficient)` are out of slice 1 " *
+            "(address the predictor with `effect($target, :)`, or take " *
+            "the Normal(0, 1) default; per-column `effect(...)` " *
+            "addresses on latent columns are sequenced)")
+    end
+    nothing
+end
+
+# The `me` beta's prior: the latent column is not a design column, so
+# `:`-wide statements claim this cell through the SAME claim engine
+# (tie semantics identical to the design cells), defaulting to
+# Normal(0, 1) (SB's `popefs` default). Runs after the shared seam
+# (which owns spec validation); explicit me addresses never reach here
+# (gated above).
+function _rk_me_beta_prior(brmi::BRMI, target::Symbol, addressee::Symbol)
+    prefix = "RK backend"
+    won = Ref{Any}(nothing)
+    for spec in effect_priors(brmi)
+        spec.coefficient === _EFFECT_COLON || continue
+        spec.predictor === _EFFECT_COLON || spec.predictor === target ||
+            continue
+        _brm_claim_effect_prior!(() -> won[], v -> (won[] = v), spec,
+            "`$target`'s measurement-error `$addressee` column"; prefix)
+    end
+    expression = isnothing(won[]) ? nothing : won[].expression
+    if !isnothing(expression)
+        expression isa ExprColumn && getf(expression) === Normal || error(
+            "$prefix: predictor `$target` population-effect priors must " *
+            "be `Normal(location, scale)` in slice 1")
+        isempty(getkwargs(expression)) || error(
+            "$prefix: predictor `$target` population-effect `Normal` " *
+            "prior cannot have keywords in slice 1")
+    end
+    location, scale = _brm_materialize_normal_effect_priors(
+        Any[expression], 1; prefix)
+    _RKPopulationPrior(target, addressee, location[1], scale[1])
+end
+
+# One synthetic gaussian-identity observation per `:me` term: the SB
+# `x_obs ~ Normal(x_true, sd)` likelihood (scalar constant `sd`) the
+# thin layer lowers through its plate-mean path. Runs after the formula
+# responses (Phase 5) so the observation order is deterministic;
+# `_rk_gate_crossed_columns!` already bounds the source column.
+function _rk_plan_me_observations!(response_specs::Vector{_RKLikelihoodSpec},
+        predictor_specs::AbstractVector)
+    for spec in predictor_specs, term in spec.terms
+        term.kind === :me || continue
+        source = only(term.columns)
+        push!(response_specs, _RKLikelihoodSpec(:gaussian, :identity,
+            source, term.options.latent, term.options.sd, nothing,
+            nothing, _RKResponseEvidence(:none, nothing, nothing),
+            source, nothing, nothing, nothing, Symbol[], Symbol[],
+            nothing, nothing, Symbol[], nothing, Symbol[], nothing))
+    end
+    nothing
+end
+
 function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         available::Tuple, columns::Dict{Symbol,AbstractVector},
         derived::Vector{_RKDerivedSpec}, taken::Set{Symbol},
         ranef_buckets::Dict{Tuple{Symbol,Symbol,Union{Nothing,Symbol}},
-            Union{_RKRanefBucket,Nothing}})
+            Union{_RKRanefBucket,Nothing}},
+        me_sources::Set{Symbol})
     prefix = "RK backend"
     op = linear_predictor_op(brmi, target)
     _, rhs = getargs(op, 2)
@@ -3026,9 +3193,11 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         (getf(t) === mo || getf(t) === mo1), structured)
     dar_raw = filter(t -> t isa ExprColumn && getf(t) === dar, structured)
     ar_raw = filter(t -> t isa ExprColumn && getf(t) === ar, structured)
+    me_raw = filter(t -> t isa ExprColumn && getf(t) === me, structured)
     other_structured = filter(
         t -> !(t in spline_raw) && !(t in gp_raw) && !(t in hsgp_raw) &&
-            !(t in mo_raw) && !(t in dar_raw) && !(t in ar_raw),
+            !(t in mo_raw) && !(t in dar_raw) && !(t in ar_raw) &&
+            !(t in me_raw),
         structured)
     isempty(other_structured) || error(
         "$prefix: predictor `$target` structured term(s) " *
@@ -3037,11 +3206,12 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
     _rk_gate_spline_term_priors!(brmi, target, spline_raw)
     _rk_gate_hsgp_term_priors!(brmi, target, hsgp_raw)
     _rk_gate_ar_effect_priors!(brmi, target, ar_raw)
+    _rk_gate_me_effect_priors!(brmi, target, me_raw)
     grouped = filter(t -> _brm_is_grouped_term(t), raw_terms)
     ordinary = Tuple(t for t in raw_terms if !(t in structured) && !(t in grouped))
     isempty(ordinary) && isempty(spline_raw) && isempty(gp_raw) &&
         isempty(hsgp_raw) && isempty(mo_raw) && isempty(dar_raw) &&
-        isempty(ar_raw) && error(
+        isempty(ar_raw) && isempty(me_raw) && error(
         "$prefix: predictor `$target` has no terms")
     has_intercept = any(t -> t isa Integer && t == 1, ordinary)
     # Classify before building geometry: fail fast on unknown terms with RK
@@ -3076,7 +3246,7 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         terms, spines, derived, context.data, target, has_intercept)
     any(t -> t.kind !== :offset, terms) || !isempty(spline_raw) ||
         !isempty(gp_raw) || !isempty(hsgp_raw) || !isempty(mo_raw) ||
-        !isempty(dar_raw) || !isempty(ar_raw) ||
+        !isempty(dar_raw) || !isempty(ar_raw) || !isempty(me_raw) ||
         return _rk_plan_offset_only_predictor(
         brmi, context, target, ordinary, available, link, terms, derived)
     geometry = _brm_prepare_predictor_geometry(
@@ -3104,6 +3274,9 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         elseif prepared.callable === ar
             push!(terms, _rk_plan_ar_term!(
                 prepared, target, context.data, columns, taken))
+        elseif prepared.callable === me
+            push!(terms, _rk_plan_me_term!(
+                prepared, target, columns, taken, me_sources))
         else
             error("$prefix: internal: unexpected structured term " *
                 "survived pre-check in `$target`")
@@ -4471,9 +4644,27 @@ function _rk_gate_name_hygiene!(predictor_specs::AbstractVector,
                 "declares derived column `$piece`; rename one of them")
         end
     end
+    menames = Symbol[]
+    for spec in predictor_specs, term in spec.terms
+        term.kind === :me || continue
+        push!(menames, term.options.latent)
+    end
+    length(unique(menames)) == length(menames) || error(
+        "$prefix: internal: duplicate me latent names")
+    for mn in menames
+        mn in both && error(
+            "$prefix: internal: generated me name `$mn` collides with a " *
+            "parameter/assignment name")
+        mn in pnames && error(
+            "$prefix: internal: generated me name `$mn` collides with " *
+            "predictor `$mn`")
+        haskey(columns, mn) && error(
+            "$prefix: internal: generated me name `$mn` collides with " *
+            "raw column `$mn`")
+    end
     for n in sort!(collect(Iterators.flatten(
             (pnames, both, dnames, vnames, snames, gnames, hnames, anames,
-                darnames,
+                darnames, menames,
                 keys(columns)))))
         startswith(string(n), "_ppl_") && error(
             "$prefix: name `$n` uses the reserved `_ppl_` prefix; rename it")
@@ -4920,10 +5111,11 @@ function _brm_rk_plan(brmi::BRMI)
     prior_specs = _RKPopulationPrior[]
     ranef_buckets, ranef_lookup = _rk_plan_ranef_buckets(
         brmi, context, predictor_order, columns, taken)
+    me_sources = Set{Symbol}()
     for target in predictor_order
         spec, priors = _rk_plan_predictor(
             brmi, context, target, available, columns, derived, taken,
-            ranef_lookup)
+            ranef_lookup, me_sources)
         push!(predictor_specs, spec)
         append!(prior_specs, priors)
     end
@@ -5058,6 +5250,9 @@ function _brm_rk_plan(brmi::BRMI)
             leveled.threshold_columns, leveled.threshold_coefs, Symbol[],
             nothing))
     end
+    # Measurement-error observations ride synthetic responses (SB's
+    # `x_obs ~ Normal(x_true, sd)` likelihood per `me` term).
+    _rk_plan_me_observations!(response_specs, predictor_specs)
     # A modeled ordinal scale feeds no other response slot (needs the
     # whole response table, so it runs after the loop).
     _rk_gate_ordinal_scale_slots!(response_specs, predictor_specs)

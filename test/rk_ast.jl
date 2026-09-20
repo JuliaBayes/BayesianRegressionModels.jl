@@ -1108,6 +1108,71 @@ end
     @test Expr(:call, :~, :b2, Expr(:call, :Normal, 0.0, 2.0)) in popefs_body
 end
 
+@testset "me AST shape" begin
+    brmi = @brm df begin
+        mu ~ 1 + me(x, 0.5)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test prog isa BRM._RKEmittedProgram
+    plate = Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
+        Expr(:for, Expr(:(=), :i, Expr(:call, :eachindex, :x)),
+            Expr(:block,
+                Expr(:call, :~,
+                    Expr(:ref, :me_x, :i),
+                    Expr(:call, :Normal, 0.0, 1.0)))))
+    @test prog.defs == Expr[
+        Expr(:(=), Expr(:call, :popefs_mu), Expr(:block,
+            Expr(:call, :~, :b1, Expr(:call, :Normal, 0.0, 1.0)),
+            Expr(:call, :~, :b2, Expr(:call, :Normal, 0.0, 1.0)),
+            Expr(:call, :.+, :b1, Expr(:call, :.*, :b2, :me_x)))),
+        Expr(:(=), Expr(:call, :normal_id_glm, :eta, :sigma), Expr(:block,
+            Expr(:call, :.~, :slot,
+                Expr(:., :Normal, Expr(:tuple, :eta, :sigma))),
+            :slot)),
+    ]
+    @test prog.main == Expr(:block,
+        plate,
+        Expr(:call, :~, :mu, Expr(:call, :popefs_mu)),
+        Expr(:call, :~, :s, Expr(:call, :Exponential, 1.0)),
+        Expr(:call, :~, :y, Expr(:call, :normal_id_glm, :mu, :s)),
+        Expr(:call, :~, :x, Expr(:call, :normal_id_glm, :me_x, 0.5)))
+    # The observation shares the one `normal_id_glm` def with the main
+    # response (same name, same body — no lattice collision).
+    @test rk_def_names(prog) == [:popefs_mu, :normal_id_glm]
+    # The plate block matches the parsed surface spelling exactly.
+    @test rk_strip_lines(prog.main.args[1]) == rk_parsed_surface(
+        "@plate for i in eachindex(x)\n" *
+        "me_x[i] ~ Normal(0.0, 1.0)\n" *
+        "end")
+    # A `latent(...)` override rides the plate's shared-scalar args.
+    brmi = @brm df begin
+        mu ~ 1 + me(x, 0.5)
+        latent(mu, me(x)) ~ Normal(0.5, 1.5)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test prog.main.args[1] == Expr(:macrocall, Symbol("@plate"),
+        LineNumberNode(0),
+        Expr(:for, Expr(:(=), :i, Expr(:call, :eachindex, :x)),
+            Expr(:block,
+                Expr(:call, :~,
+                    Expr(:ref, :me_x, :i),
+                    Expr(:call, :Normal, 0.5, 1.5)))))
+    # A `:`-wide prior rides the beta's submodel-local statement.
+    brmi = @brm df begin
+        mu ~ 1 + me(x, 0.5)
+        effect(mu, :) ~ Normal(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    popefs_body = prog.defs[1].args[2].args
+    @test Expr(:call, :~, :b2, Expr(:call, :Normal, 0.0, 2.0)) in popefs_body
+end
+
 @testset "distributional scale AST" begin
     brmi = @brm df begin
         mu ~ 1 + x
