@@ -2131,6 +2131,43 @@ end
     @test [m.z.level for m in gb.margins[2:3]] == ["b", "c"]
 end
 
+@testset "ranef continuous interaction margins" begin
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + (1 + x & z | g)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    bucket = only(plan.ranef_buckets)
+    @test bucket.kind === :correlated
+    @test [m.coefficient for m in bucket.margins] == [:Intercept, :int_x_x_z]
+    cross = bucket.margins[2]
+    @test cross.z.kind === :column
+    @test cross.z.column === :int_x_x_z
+    defs = filter(d -> d.name === :int_x_x_z, plan.derived)
+    @test length(defs) == 1
+    @test only(defs).expression == Expr(:call, :.*, :x, :z)
+    @test only(defs).label === :int_x_x_z
+    # Shooter shape: the same cross in population and ranef shares one def.
+    both = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + z + x & z + (x + z + x & z | g)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test count(d -> d.name === :int_x_x_z, both.derived) == 1
+    bb = only(both.ranef_buckets)
+    @test bb.kind === :correlated
+    @test [m.coefficient for m in bb.margins] == [:x, :z, :int_x_x_z]
+    # Transformed operands mirror SB's data-materialized crosses.
+    staged = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + (1 + zscale(x) & z | g)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    zb = only(staged.ranef_buckets)
+    @test length(zb.margins) == 2
+    @test zb.margins[2].z.kind === :column
+end
+
 @testset "ranef categorical group codes" begin
     catdf = (; df...,
         g=categorical(["b", "b", "a", "a", "c", "c"]; levels=["b", "a", "c"]))
@@ -2264,10 +2301,35 @@ end
             y ~ Normal(mu, s)
         end)
     end
-    # `&` in a ranef LHS is deferred.
-    rk_throws_admission("draws regime") do
+    # Categorical `&` operands in a ranef LHS stay deferred: SB codes
+    # ranef crosses treatment-coded while the shared recipe is full-rank.
+    rk_throws_admission("categorical") do
         BRM._brm_rk_plan(@brm df begin
-            mu ~ 1 + x + (1 + x & z | g)
+            mu ~ 1 + x + (1 + x & c | g)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    end
+    rk_throws_admission("categorical") do
+        BRM._brm_rk_plan(@brm df begin
+            mu ~ 1 + x + (1 + c & h | g)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    end
+    # The gate recurses through nested crosses.
+    rk_throws_admission("categorical") do
+        BRM._brm_rk_plan(@brm df begin
+            mu ~ 1 + x + (1 + (x & z) & c | g)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    end
+    # `factor()` inside ranef `&` names the ranef respell, not the bare
+    # column the population path suggests (bare categoricals defer here).
+    rk_throws_admission("inside `&` is not in the draws regime") do
+        BRM._brm_rk_plan(@brm df begin
+            mu ~ 1 + x + (1 + x & factor(h; ref=1) | g)
             s ~ Exponential(1)
             y ~ Normal(mu, s)
         end)
