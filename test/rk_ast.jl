@@ -1557,3 +1557,120 @@ end
         u.args[3].args[1] === latdefs[1].args[1].args[1]]
     @test length(uses) == 2
 end
+
+@testset "fused heads opt-in response shapes" begin
+    # Default-off fused-head emission for the six families the thin
+    # layer desugars pre-spine (option-A surface): each fused spelling
+    # rewrites to exactly the decomposed twin asserted beside it (same
+    # roles, same order), and evidence/weights wrappers recurse, so the
+    # lowered plan is identical by construction. The pinned RK revision
+    # carries no fused-head lowering, so these goldens pin the AST
+    # contract only — runtime parity re-runs at landing + pin bump.
+    brmi = @brm df begin
+        eta ~ 1 + x
+        b ~ BernoulliLogit(eta)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    @test BRM._rk_emit_ast(plan, true).main.args[end] ==
+        Expr(:call, :.~, :b,
+            Expr(:., :BernoulliLogit, Expr(:tuple, :eta)))
+    @test BRM._rk_emit_ast(plan).main.args[end] ==
+        Expr(:call, :.~, :b,
+            Expr(:., :Bernoulli, Expr(:tuple,
+                Expr(:., :logistic, Expr(:tuple, :eta)))))
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        c ~ Poisson(mu)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    @test BRM._rk_emit_ast(plan, true).main.args[end] ==
+        Expr(:call, :.~, :c,
+            Expr(:., :PoissonLog, Expr(:tuple, :mu)))
+    @test BRM._rk_emit_ast(plan).main.args[end] ==
+        Expr(:call, :.~, :c,
+            Expr(:., :Poisson, Expr(:tuple,
+                Expr(:., :exp, Expr(:tuple, :mu)))))
+    brmi = @brm df begin
+        logit(p) ~ 1 + x
+        b ~ Binomial(h, p)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    @test BRM._rk_emit_ast(plan, true).main.args[end] ==
+        Expr(:call, :.~, :b,
+            Expr(:., :BinomialLogit, Expr(:tuple, :h, :p)))
+    @test BRM._rk_emit_ast(plan).main.args[end] ==
+        Expr(:call, :.~, :b,
+            Expr(:., :Binomial, Expr(:tuple, :h,
+                Expr(:., :logistic, Expr(:tuple, :p)))))
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        phi ~ Exponential(1)
+        c ~ NegativeBinomial2(mu, phi)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    @test BRM._rk_emit_ast(plan, true).main.args[end] ==
+        Expr(:call, :.~, :c,
+            Expr(:., :NegativeBinomial2Log, Expr(:tuple, :mu, :phi)))
+    @test BRM._rk_emit_ast(plan).main.args[end] ==
+        Expr(:call, :.~, :c,
+            Expr(:., :NegativeBinomial2, Expr(:tuple,
+                Expr(:., :exp, Expr(:tuple, :mu)), :phi)))
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        alpha ~ Exponential(1)
+        z ~ Gamma(alpha, mu / alpha)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    @test BRM._rk_emit_ast(plan, true).main.args[end] ==
+        Expr(:call, :.~, :z,
+            Expr(:., :GammaLog, Expr(:tuple, :alpha, :mu)))
+    @test BRM._rk_emit_ast(plan).main.args[end] ==
+        Expr(:call, :.~, :z,
+            Expr(:., :Gamma, Expr(:tuple, :alpha,
+                Expr(:call, :./, Expr(:., :exp, Expr(:tuple, :mu)),
+                    :alpha))))
+    brmi = @brm dfp begin
+        logit(mu) ~ 1 + x
+        kappa ~ Gamma(2.0, 1000.0)
+        prop ~ Beta(mu * kappa, (1 - mu) * kappa)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    mu_log = Expr(:., :logistic, Expr(:tuple, :mu))
+    @test BRM._rk_emit_ast(plan, true).main.args[end] ==
+        Expr(:call, :.~, :prop,
+            Expr(:., :BetaLogit, Expr(:tuple, :mu, :kappa)))
+    @test BRM._rk_emit_ast(plan).main.args[end] ==
+        Expr(:call, :.~, :prop,
+            Expr(:., :Beta, Expr(:tuple,
+                Expr(:call, :.*, mu_log, :kappa),
+                Expr(:call, :.*, Expr(:call, :.-, 1, mu_log), :kappa))))
+    # Fused heads ride inside evidence/weights wrappers (the desugar
+    # recurses through all four dot-wrappers).
+    brmi = @brm df begin
+        eta ~ 1 + x
+        b ~ weighted(BernoulliLogit(eta), fweights(n))
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    @test BRM._rk_emit_ast(plan, true).main.args[end] ==
+        Expr(:call, :.~, :b,
+            Expr(:., :weighted, Expr(:tuple,
+                Expr(:., :BernoulliLogit, Expr(:tuple, :eta)), :n)))
+    # Families without a fused head ignore the flag entirely.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    fused = BRM._rk_emit_ast(plan, true)
+    plain = BRM._rk_emit_ast(plan)
+    @test fused.main == plain.main && fused.defs == plain.defs
+    brmi = @brm df begin
+        probit(p) ~ 1 + x
+        b ~ Bernoulli(p)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    fused = BRM._rk_emit_ast(plan, true)
+    plain = BRM._rk_emit_ast(plan)
+    @test fused.main == plain.main && fused.defs == plain.defs
+end

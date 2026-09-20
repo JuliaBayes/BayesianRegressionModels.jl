@@ -314,23 +314,36 @@ end
 # `:extra_predictors`/`:count_columns` (tail predictors / tail count
 # columns inline). Evidence and weights STRUCTURE (which wrapper,
 # whether weighted) still read from `response`.
+#
+# With `fused_heads`, the six families the thin layer desugars
+# pre-spine (`BernoulliLogit.(eta)`, `PoissonLog.(eta)`,
+# `BinomialLogit.(n, mu)`, `NegativeBinomial2Log.(eta, phi)`,
+# `GammaLog.(alpha, eta)`, `BetaLogit.(mu, kappa)`) emit the fused
+# spelling; the desugar rewrites each to exactly the decomposed twin
+# below (same roles, same order), and evidence/weights wrappers
+# recurse, so the lowered plan is identical by construction. Default
+# off until the thin-layer surface lands and the test pin carries it.
 function _rk_ast_response_dist(response::_RKLikelihoodSpec,
-        leaf::Dict{Symbol,Any})
+        leaf::Dict{Symbol,Any}, fused_heads::Bool)
     predictor = leaf[:predictor]
     base = if response.family === :gaussian
         _rk_ast_dotted(:Normal, predictor, leaf[:scale])
     elseif response.family === :bernoulli_logit
         # Triple 2 and triple 3 both lower to the T2 shape: the affine
         # value feeds logistic either way.
-        _rk_ast_dotted(:Bernoulli,
-            _rk_ast_dotted(:logistic, predictor))
+        fused_heads ? _rk_ast_dotted(:BernoulliLogit, predictor) :
+            _rk_ast_dotted(:Bernoulli,
+                _rk_ast_dotted(:logistic, predictor))
     elseif response.family === :poisson_log
-        _rk_ast_dotted(:Poisson, _rk_ast_dotted(:exp, predictor))
+        fused_heads ? _rk_ast_dotted(:PoissonLog, predictor) :
+            _rk_ast_dotted(:Poisson, _rk_ast_dotted(:exp, predictor))
     elseif response.family === :binomial_logit
         # Both triples lower to one spelling: `Binomial.(n,
         # logistic.(p))` with a column or literal `n`.
-        _rk_ast_dotted(:Binomial, leaf[:trials],
-            _rk_ast_dotted(:logistic, predictor))
+        fused_heads ?
+            _rk_ast_dotted(:BinomialLogit, leaf[:trials], predictor) :
+            _rk_ast_dotted(:Binomial, leaf[:trials],
+                _rk_ast_dotted(:logistic, predictor))
     elseif response.family === :bernoulli_probit
         _rk_ast_dotted(:Bernoulli,
             _rk_ast_dotted(:probit, predictor))
@@ -351,19 +364,23 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
         # never calls them.
         mu_log = _rk_ast_dotted(:logistic, predictor)
         kappa = leaf[:scale]
-        _rk_ast_dotted(:Beta,
-            Expr(:call, :.*, mu_log, kappa),
-            Expr(:call, :.*, Expr(:call, :.-, 1, mu_log), kappa))
+        fused_heads ? _rk_ast_dotted(:BetaLogit, predictor, kappa) :
+            _rk_ast_dotted(:Beta,
+                Expr(:call, :.*, mu_log, kappa),
+                Expr(:call, :.*, Expr(:call, :.-, 1, mu_log), kappa))
     elseif response.family === :nb2_log
-        _rk_ast_dotted(:NegativeBinomial2,
-            _rk_ast_dotted(:exp, predictor),
-            leaf[:scale])
+        fused_heads ?
+            _rk_ast_dotted(:NegativeBinomial2Log, predictor, leaf[:scale]) :
+            _rk_ast_dotted(:NegativeBinomial2,
+                _rk_ast_dotted(:exp, predictor),
+                leaf[:scale])
     elseif response.family === :gamma_log
         # Mean-shape form: the plan pins both alpha positions identical,
         # so the same value emits twice.
         shape = leaf[:scale]
-        _rk_ast_dotted(:Gamma, shape, Expr(:call, :./,
-            _rk_ast_dotted(:exp, predictor), shape))
+        fused_heads ? _rk_ast_dotted(:GammaLog, shape, predictor) :
+            _rk_ast_dotted(:Gamma, shape, Expr(:call, :./,
+                _rk_ast_dotted(:exp, predictor), shape))
     elseif response.family === :categorical_logit
         # Reference-coded: K−1 non-reference etas, class 1 the implicit
         # zero reference (class order follows predictor order).
@@ -429,7 +446,8 @@ end
 # while the surface stays honest. Missing evidence sides pass ∓Inf
 # floats; the thin layer normalizes them back to nothing at bind.
 function _rk_ast_response_stmt(response::_RKLikelihoodSpec,
-        rename::Dict{Symbol,Symbol}, predictor_link::Dict{Symbol,Symbol})
+        rename::Dict{Symbol,Symbol}, predictor_link::Dict{Symbol,Symbol},
+        fused_heads::Bool)
     family = response.family
     leaf = Dict{Symbol,Any}(
         :predictor => get(rename, response.predictor, response.predictor))
@@ -462,7 +480,7 @@ function _rk_ast_response_stmt(response::_RKLikelihoodSpec,
         leaf[:count_columns] = response.count_columns
     end
     Expr(:call, :.~, response.response,
-        _rk_ast_response_dist(response, leaf))
+        _rk_ast_response_dist(response, leaf, fused_heads))
 end
 
 function _rk_ast_bucket_margin(z::_RKRanefZRecipe)
@@ -647,7 +665,7 @@ function _rk_ast_me_names(plan::_RKStructuralPlan)
     names
 end
 
-function _rk_emit_ast(plan::_RKStructuralPlan)
+function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=false)
     taken = union(Set(keys(plan.columns)),
         Set(p.name for p in plan.parameters),
         Set(a.name for a in plan.assignments),
@@ -929,7 +947,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
             continue
         end
         push!(stmts,
-            _rk_ast_response_stmt(response, rename, predictor_link))
+            _rk_ast_response_stmt(response, rename, predictor_link,
+                fused_heads))
     end
     _RKEmittedProgram(defs, Expr(:block, stmts...))
 end
