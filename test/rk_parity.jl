@@ -111,14 +111,11 @@ function _ref_lkj_k2_eta1(L)
     return c # + (2*1-2) * log(L[2, 2]) == c; L kept for the call shape
 end
 
-# K=2 spherical-Cholesky theta Jacobian: theta = pi*sigmoid(t). The
-# log-sin term is the correlation-matrix (Omega-pullback) volume
-# element the Stan-verbatim `lkj_corr_cholesky_logpdf` is a density
-# against (peer F1 fix `a5b810a`: the hyperspherical exponent dropped
-# it at K=2, and posterior parity vs SBBRMI failed on L until it was
-# restored). Without it theta is uniform / rho arcsine at eta=1;
-# with it rho is uniform.
+# K=2 spherical-Cholesky theta Jacobian: theta = pi*sigmoid(t).
 function _lkj2_theta_jac(t)
+    # theta = pi*sigmoid(t); the (i-j) = 1 Gram exponent keeps one log-sin
+    # term (Omega volume element — peer fix a5b810a, RK 86e5265; the old
+    # (i-1-j) = 0 exponent dropped it, pinning the buggy Jacobian).
     s = 1 / (1 + exp(-t))
     return log(sin(pi * s)) + log(pi) + log(s) + log1p(-s)
 end

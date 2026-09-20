@@ -8,28 +8,46 @@ using ReactiveKernelsPPL
 const BRM = BayesianRegressionModels
 
 # Sole emission path: BRM-side plan (plain data, no RK types) → `@rkppl`
-# AST (`BRM._rk_emit_ast`, total over admitted plans) → thin-layer
-# `StructuralPlan` via `lower_rkppl` + `bind_data` (the same function the
-# macro lowers through). Model execution and the sampler boundary both
-# derive from this one lowering, so the boundary plan is definitionally
-# the plan the model was built from — there is no parallel direct
-# serializer to drift (the retired one did: factor term options and the
-# preserved Binomial triple-3 are both rejected from hand-built plans yet
-# accepted from the AST route). Kernel plans ride the same route; until
-# the thin-layer KernelPlate reader lands, `lower_rkppl`/`build_kernel`
+# program (`BRM._rk_emit_ast`, total over admitted plans: submodel defs
+# + main block) → thin-layer `StructuralPlan` via `lower_rkppl` +
+# `bind_data` (the same function the macro lowers through). Model
+# execution and the sampler boundary both derive from this one
+# lowering, so the boundary plan is definitionally the plan the model
+# was built from — there is no parallel direct serializer to drift
+# (the retired one did: factor term options and the preserved Binomial
+# triple-3 are both rejected from hand-built plans yet accepted from
+# the AST route). Kernel plans ride the same route; until the
+# thin-layer KernelPlate reader lands, `lower_rkppl`/`build_kernel`
 # fail closed with thin-layer attribution (leaf 14bv4nq).
 const _RK_PLAN_TYPES = Union{BRM._RKStructuralPlan,BRM._RKKernelPlan}
+
+# Evaluate the emitted submodel defs through `@rkppl` in a FRESH module
+# per lowering (defs differ per model — a shared module would leak stale
+# bindings across models). The macrocall `Expr` is exactly the parser's
+# shape for `@rkppl sm(args...) = begin ... end`.
+function _rk_emit_module(emitted::BRM._RKEmittedProgram)
+    mod = Module(gensym(:RKEmittedModels))
+    Core.eval(mod, :(using ReactiveKernelsPPL))
+    for d in emitted.defs
+        Core.eval(mod, Expr(:macrocall, Symbol("@rkppl"),
+            LineNumberNode(0), d))
+    end
+    mod
+end
+
 function _rk_translated_plan(plan::BRM._RKStructuralPlan)
-    ast = BRM._rk_emit_ast(plan)
-    unbound = lower_rkppl(ast, Tuple(sort!(collect(keys(plan.columns)))))
+    emitted = BRM._rk_emit_ast(plan)
+    unbound = lower_rkppl(emitted.main,
+        Tuple(sort!(collect(keys(plan.columns)))); mod=_rk_emit_module(emitted))
     bind_data(unbound, plan.columns)
 end
 
 # Kernel plans additionally bind the plate dims (subjects/timepoints) the
 # `subjects=...` key names; the counts live on the kernel spec.
 function _rk_translated_plan(plan::BRM._RKKernelPlan)
-    ast = BRM._rk_emit_ast(plan)
-    unbound = lower_rkppl(ast, Tuple(sort!(collect(keys(plan.columns)))))
+    emitted = BRM._rk_emit_ast(plan)
+    unbound = lower_rkppl(emitted.main,
+        Tuple(sort!(collect(keys(plan.columns)))); mod=_rk_emit_module(emitted))
     bind_data(unbound, plan.columns; dims=BRM._rk_kernel_bind_dims(plan.kernel))
 end
 
@@ -47,7 +65,7 @@ end
 # LogDensityProblems shim over the thin-layer sampler query: the packed
 # unconstrained coordinates are the sampler space, so no transform sits
 # between the sampler and the kernel. The boundary plan re-derives from
-# the AST route (pure lowering, no kernel compile) because
+# the emission route (pure lowering, no kernel compile) because
 # `prepare_sampler` derives its have/bound boundary from it; `model`
 # stays exactly `build_kernel` output.
 struct RKLogDensityProblem{Q<:SamplerQuery}

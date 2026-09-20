@@ -1001,20 +1001,161 @@ end
         end)
 end
 
-@testset "fail closed: SB long tail (me/dar, simplex/LKJ/joint)" begin
-    # `mo1(c)` used to fail here; it plans now (thin-layer monotonic
-    # surface landed, covered in "monotonic plan shape"). `ar` plans
-    # now too (thin-layer scan-ar slice landed, covered in
-    # "ar plan shape").
-    # Measurement-error latent predictor stays closed.
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
-        mu ~ 1 + me(x, 0.5)
+@testset "differenced-AR plan shape" begin
+    # Own frame: `dar` needs a strictly increasing time axis.
+    tdf = (; t=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        u=[0.5, 1.5, 2.5, 3.5, 4.5, 5.5],
+        y=[0.5, -0.2, 0.1, 0.9, 1.4, 1.1])
+    # `dar(t)`: beta-free trajectory summand over the bound axis + SB-named
+    # persistence/scale scalars (thin-layer dar surface).
+    plan = BRM._brm_rk_plan(@brm tdf begin
+        mu ~ 1 + dar(t)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    # Differenced-AR trajectory stays closed.
+    @test [t.kind for t in only(plan.predictors).terms] ==
+        [:intercept, :dar]
+    term = only(t for t in only(plan.predictors).terms if t.kind === :dar)
+    @test (term.columns, term.addressee) == (Symbol[], term.label)
+    @test (term.options.beta, term.options.sigma, term.options.source) ==
+        (:dar_mu_t_beta, :dar_mu_t_sigma, :t)
+    @test (term.options.beta_param.family, term.options.beta_param.args,
+        term.options.beta_param.support_override) ==
+        (:Normal, (0.5, 0.2), :interval)
+    @test (term.options.sigma_param.family, term.options.sigma_param.args,
+        term.options.sigma_param.support_override) ==
+        (:Normal, (0.0, 0.2), :positive)
+    @test plan.columns[:t] == tdf.t
+    @test [(p.addressee, p.location, p.scale)
+        for p in plan.population_priors] == [(:Intercept, 0.0, 1.0)]
+    @test BRM._rk_num_coefficients(plan) == 1
+    # `ar(...)` overrides ride the persistence location/scale.
+    plan = BRM._brm_rk_plan(@brm tdf begin
+        mu ~ 1 + dar(t)
+        ar(mu, dar(t)) ~ Normal(0.6, 0.1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    term = only(t for t in only(plan.predictors).terms if t.kind === :dar)
+    @test term.options.beta_param.args == (0.6, 0.1)
+    # `sd(...)` Normal overrides ride the half-normal scale ...
+    plan = BRM._brm_rk_plan(@brm tdf begin
+        mu ~ 1 + dar(t)
+        sd(mu, dar(t)) ~ Normal(0, 0.5)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    term = only(t for t in only(plan.predictors).terms if t.kind === :dar)
+    @test (term.options.sigma_param.family, term.options.sigma_param.args,
+        term.options.sigma_param.support_override) ==
+        (:Normal, (0.0, 0.5), :positive)
+    # Non-literal hyperparameters stay closed (hyperparameters ride the
+    # AST as literals).
+    @test_throws "must be finite literals" BRM._brm_rk_plan(@brm tdf begin
+        a ~ Normal(0, 1)
+        mu ~ 1 + dar(t)
+        ar(mu, dar(t)) ~ Normal(a, 0.1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test_throws "must be finite literals" BRM._brm_rk_plan(@brm tdf begin
+        a ~ Exponential(1)
+        mu ~ 1 + dar(t)
+        sd(mu, dar(t)) ~ Normal(0, a)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Non-Normal persistence stays closed (thin-layer beta is
+    # truncated-Normal on [0, 1]).
+    @test_throws "out of slice 1" BRM._brm_rk_plan(@brm tdf begin
+        mu ~ 1 + dar(t)
+        ar(mu, dar(t)) ~ Beta(2, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Non-half-normal scales stay closed (thin-layer sigma is
+    # HalfNormal/truncated-positive).
+    @test_throws "out of slice 1" BRM._brm_rk_plan(@brm tdf begin
+        mu ~ 1 + dar(t)
+        sd(mu, dar(t)) ~ Exponential(1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test_throws "must have location 0" BRM._brm_rk_plan(@brm tdf begin
+        mu ~ 1 + dar(t)
+        sd(mu, dar(t)) ~ Normal(0.1, 0.2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # One dar summand per predictor (thin-layer v1 state scoping).
+    @test_throws "one dar summand per predictor" BRM._brm_rk_plan(
+        @brm tdf begin
+            mu ~ 1 + dar(t) + dar(u)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    # Coefficient-free dar predictors stay closed (the surface fails
+    # latent-only shapes — dar needs a sibling coefficient).
+    @test_throws "no estimated coefficients" BRM._brm_rk_plan(@brm tdf begin
+        mu ~ dar(t)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test_throws "no estimated coefficients" BRM._brm_rk_plan(@brm tdf begin
+        mu ~ 0 + dar(t)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # T=1: SB's path is identically 0 — a zeros offset (mo1-K=1 shape).
+    tdf1 = (; t=[1.0], y=[0.5])
+    plan = BRM._brm_rk_plan(@brm tdf1 begin
+        mu ~ 1 + dar(t)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test [t.kind for t in only(plan.predictors).terms] ==
+        [:intercept, :offset]
+    zero = only(t for t in only(plan.predictors).terms
+        if t.kind === :offset)
+    @test plan.columns[only(zero.columns)] == zeros(1)
+    # ... while distinct predictors take distinct trajectories (SB scopes
+    # contrasts per predictor — no mo-style dup gate).
+    plan = BRM._brm_rk_plan(@brm tdf begin
+        mu ~ 1 + dar(t)
+        log(sigma) ~ 1 + dar(t)
+        y ~ Normal(mu, sigma)
+    end)
+    @test [t.options.beta for p in plan.predictors for t in p.terms
+        if t.kind === :dar] == [:dar_mu_t_beta, :dar_sigma_t_beta]
+    # Trajectory scalars are sampled, not population: `effect()` cannot
+    # address them (generated-name precedent).
+    @test_throws "not a population coefficient" BRM._brm_rk_plan(
+        @brm tdf begin
+            mu ~ 1 + dar(t)
+            effect(mu, dar_mu_t_beta) ~ Normal(0, 2)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    # Trajectory names disambiguate against user parameters.
+    plan = BRM._brm_rk_plan(@brm tdf begin
+        mu ~ 1 + dar(t)
+        dar_mu_t_beta ~ Normal(0, 1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    term = only(t for t in only(plan.predictors).terms if t.kind === :dar)
+    @test term.options.beta == :dar_mu_t_beta_2
+end
+
+@testset "fail closed: SB long tail (me, simplex/LKJ/joint)" begin
+    # `mo1(c)` used to fail here; it plans now (thin-layer monotonic
+    # surface landed, covered in "monotonic plan shape"). `dar(t)` used to
+    # fail here too; it plans now (thin-layer dar surface, covered in
+    # "differenced-AR plan shape"). `ar` plans now as well (thin-layer
+    # scan-ar slice landed, covered in "ar plan shape").
+    # Measurement-error latent predictor stays closed.
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
-        mu ~ 1 + dar(x; p=1)
+        mu ~ 1 + me(x, 0.5)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
@@ -2510,10 +2651,13 @@ end
     @test length(plan.columns[:obs]) == 6
     @test length(plan.columns[:dose]) == 2
     @test plan.columns[:t] == [0.0, 1.0, 2.0, 0.0, 1.0, 2.0]   # flat T-blocked
-    # full AST: globals as top-level `~`, then the subject plate as the last stmt
-    ast = BRM._rk_emit_ast(plan)
-    @test Meta.isexpr(ast, :block)
-    stmts = filter(s -> !(s isa LineNumberNode), ast.args)
+    # full program: no submodel defs (a single plate carries no top-level
+    # repeated structure); globals as top-level `~`, then the subject
+    # plate as the last main-block stmt
+    prog = BRM._rk_emit_ast(plan)
+    @test prog isa BRM._RKEmittedProgram && isempty(prog.defs)
+    @test Meta.isexpr(prog.main, :block)
+    stmts = filter(s -> !(s isa LineNumberNode), prog.main.args)
     @test any(s -> Meta.isexpr(s, :call) && s.args[1] === :~ && s.args[2] === :sigma,
               stmts)
     @test any(s -> Meta.isexpr(s, :call) && s.args[1] === :~ && s.args[2] === :b0,
