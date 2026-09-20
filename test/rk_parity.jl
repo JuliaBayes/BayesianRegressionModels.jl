@@ -1,5 +1,5 @@
 # test/rk_parity.jl — BRM→RK end-to-end parity (ranef + P2 kernel +
-# ordinal-extras models).
+# ordinal-extras + hsgp models).
 #
 # Run: julia --project=test test/rk_parity.jl
 #
@@ -33,8 +33,8 @@ using Test
 using BayesianRegressionModels
 using CategoricalArrays: categorical, levelcode
 using DifferentiationInterface: AutoEnzyme
-using Distributions: Beta, Dirichlet, Exponential, Normal, logcdf, logccdf,
-                     logpdf
+using Distributions: Beta, Dirichlet, Exponential, LogNormal, Normal, logcdf,
+                     logccdf, logpdf
 using Enzyme
 using LogDensityProblems
 using ReactiveKernels: prepare
@@ -1237,6 +1237,177 @@ end
     @test _rk_query(backend, :prior, u) ≈ pr
     @test logjac(layout, u) ≈ 0.0
     @test _rk_query(backend, :posterior, u) ≈ pr
+    _check_parity_gradient(backend, u)
+end
+
+# HSGP emission parity (thin-layer Stage B: in-graph basis + floored
+# scales + matmul summand). References re-derive the SB shapes with
+# explicit loops in SB op order (never the thin-layer expressions):
+# `_brm_fit_hsgp` fits, `_brm_apply_hsgp` trig columns,
+# `CartesianIndices` tensor products, `brm_hsgp_sqrt_spd` folds, and
+# the `_sb_hsgp`/`_sb_hsgp_aniso` prior block (scalar lognormals +
+# std-normal beta plate, no truncation normalizer on the floored rhos).
+_parity_cols_hsgp = (;
+    x = [0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
+    z = [-0.25, 0.75, -1.25, 0.5, 1.0, -0.5],
+    y = [1.0, 2.0, 1.5, 2.5, 3.0, 2.0],
+)
+
+const _HSGP_SQRT2PI = 2.5066282746310002
+
+# One axis's 1D trig basis (SB `_brm_apply_hsgp` element order verbatim).
+function _ref_hsgp_axis_basis(x, k, c)
+    n = length(x)
+    mu = sum(x) / n
+    L = c * maximum(abs.(x .- mu))
+    lam = [(kk * pi / (2 * L))^2 for kk in 1:k]
+    P = zeros(n, k)
+    for kk in 1:k, i in 1:n
+        P[i, kk] = (1 / sqrt(L)) * sin(sqrt(lam[kk]) * (x[i] - mu + L))
+    end
+    return P, lam
+end
+
+# Full smooth vector: tensor-product basis + SB `brm_hsgp_sqrt_spd`
+# folds (left-assoc, SB order) + the `PHI * (s .* beta)` summand.
+function _ref_hsgp_muv(xs, Ks, cs, rhos, sigh, beta; iso)
+    d = length(xs)
+    n = length(first(xs))
+    bases = [_ref_hsgp_axis_basis(xs[j], Ks[j], cs[j]) for j in 1:d]
+    K = Tuple(Ks)
+    M = prod(K)
+    PHI = zeros(n, M)
+    o2 = zeros(M, d)
+    for (b, I) in enumerate(CartesianIndices(K))
+        for i in 1:n
+            v = 1.0
+            for j in 1:d
+                v *= bases[j][1][i, I[j]]
+            end
+            PHI[i, b] = v
+        end
+        for j in 1:d
+            o2[b, j] = bases[j][2][I[j]]
+        end
+    end
+    rr = iso ? fill(rhos[1], d) : rhos
+    scale = sigh
+    for j in 1:d
+        scale *= sqrt(rr[j] * _HSGP_SQRT2PI)
+    end
+    s = Vector{Float64}(undef, M)
+    for b in 1:M
+        ex = 0.0
+        for j in 1:d
+            ex += rr[j] * rr[j] * o2[b, j]
+        end
+        s[b] = scale * exp(-0.25 * ex)
+    end
+    return PHI * (s .* beta)
+end
+
+function _ref_hsgp_prior(a, sig, rhos, sigh, beta)
+    return logpdf(Normal(0, 5), a) + logpdf(Exponential(1), sig) +
+        sum(logpdf(LogNormal(0, 1), r) for r in rhos) +
+        logpdf(LogNormal(0, 1), sigh) + sum(logpdf.(Normal(0, 1), beta))
+end
+
+@testset "rk parity hsgp 1d" begin
+    brmi = @brm _parity_cols_hsgp begin
+        mu ~ 1 + hsgp(x; k = 4)
+        y ~ Normal(mu, sigma)
+        effect(mu, Intercept) ~ Normal(0, 5)
+        sigma ~ Exponential(1)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 8
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 1, :identity),
+        (:sampled, :sigma, 1, :exp),
+        (:sampled, :rho_hsgp_x, 1, :floored),
+        (:sampled, :sigma_hsgp_x, 1, :exp),
+        (:hsgp, :beta_raw_hsgp_x, 4, :identity),
+    ]
+    u = collect(range(-0.4, 0.4; length = layout.total))
+    nt = constrain(layout, u)
+    f = _ref_hsgp_muv([_parity_cols_hsgp.x], [4], [1.5], [nt.rho_hsgp_x],
+        nt.sigma_hsgp_x, Vector(nt.beta_raw_hsgp_x); iso = true)
+    ll = sum(logpdf.(Normal.(nt.mu[1] .+ f, nt.sigma), _parity_cols_hsgp.y))
+    pr = _ref_hsgp_prior(nt.mu[1], nt.sigma, [nt.rho_hsgp_x], nt.sigma_hsgp_x,
+        Vector(nt.beta_raw_hsgp_x))
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    jac = u[2] + u[3] + u[4]
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity hsgp aniso" begin
+    brmi = @brm _parity_cols_hsgp begin
+        mu ~ 1 + hsgp(x, z; k = (4, 3), c = (1.5, 2.0), iso = false)
+        y ~ Normal(mu, sigma)
+        effect(mu, Intercept) ~ Normal(0, 5)
+        sigma ~ Exponential(1)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 17
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 1, :identity),
+        (:sampled, :sigma, 1, :exp),
+        (:sampled, :rho_hsgp_x_z_1, 1, :floored),
+        (:sampled, :rho_hsgp_x_z_2, 1, :floored),
+        (:sampled, :sigma_hsgp_x_z, 1, :exp),
+        (:hsgp, :beta_raw_hsgp_x_z, 12, :identity),
+    ]
+    u = collect(range(-0.4, 0.4; length = layout.total))
+    nt = constrain(layout, u)
+    rhos = [nt.rho_hsgp_x_z_1, nt.rho_hsgp_x_z_2]
+    f = _ref_hsgp_muv([_parity_cols_hsgp.x, _parity_cols_hsgp.z], [4, 3],
+        [1.5, 2.0], rhos, nt.sigma_hsgp_x_z, Vector(nt.beta_raw_hsgp_x_z);
+        iso = false)
+    ll = sum(logpdf.(Normal.(nt.mu[1] .+ f, nt.sigma), _parity_cols_hsgp.y))
+    pr = _ref_hsgp_prior(nt.mu[1], nt.sigma, rhos, nt.sigma_hsgp_x_z,
+        Vector(nt.beta_raw_hsgp_x_z))
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    jac = u[2] + u[3] + u[4] + u[5]
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity hsgp k1" begin
+    brmi = @brm _parity_cols_hsgp begin
+        mu ~ 1 + hsgp(x; k = 1)
+        y ~ Normal(mu, sigma)
+        effect(mu, Intercept) ~ Normal(0, 5)
+        sigma ~ Exponential(1)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 5
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 1, :identity),
+        (:sampled, :sigma, 1, :exp),
+        (:sampled, :rho_hsgp_x, 1, :exp),
+        (:sampled, :sigma_hsgp_x, 1, :exp),
+        (:hsgp, :beta_raw_hsgp_x, 1, :identity),
+    ]
+    u = collect(range(-0.4, 0.4; length = layout.total))
+    nt = constrain(layout, u)
+    f = _ref_hsgp_muv([_parity_cols_hsgp.x], [1], [1.5], [nt.rho_hsgp_x],
+        nt.sigma_hsgp_x, Vector(nt.beta_raw_hsgp_x); iso = true)
+    ll = sum(logpdf.(Normal.(nt.mu[1] .+ f, nt.sigma), _parity_cols_hsgp.y))
+    pr = _ref_hsgp_prior(nt.mu[1], nt.sigma, [nt.rho_hsgp_x], nt.sigma_hsgp_x,
+        Vector(nt.beta_raw_hsgp_x))
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    jac = u[2] + u[3] + u[4]
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
 end
 
