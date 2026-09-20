@@ -70,7 +70,10 @@ const PINS = [
     # plate-vector surface (PlateParameter lowering + corpus 34_me,
     # re-cut 8a6c36c) is on GitHub main as of fd1af39; this pin keeps
     # the committed `rk parity me` case on the current main, and the
-    # hierarchical sweep (ranef `&`) on the margins surface.
+    # hierarchical sweep (ranef `&`) on the margins surface. The
+    # correlated-outcomes slice (LKJ factor + MvNormal joint response
+    # eee553b, corpus renumber a48955f) the `rk parity correlated
+    # outcomes` cases target is likewise on main as of fd1af39.
     # (Supersedes the parked 64ccf38 pin, which never reached GitHub;
     # the R2D2 slice itself rode 64ccf38 over the v12 floor 86e5265.)
     ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "d5e8bed5a57cf6af0a73edbecb6cc9bbfd9c0c0b"),  # main
