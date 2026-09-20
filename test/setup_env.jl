@@ -54,14 +54,16 @@ const PINS = [
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
-    # through. 64ccf38 (2026-09-20, main): everything 86e5265 carried
-    # (v12 PPL primitives — ordinal modeled latent scale, mo/mo1 simplex,
-    # non-centered scan/ar, LKJ Cholesky log-Jacobian fix — on top of the
-    # KernelPlate-reader floor with stable RKPPLSubmodel/_expand_submodels)
-    # plus HSGP Stage B (in-graph basis, peer e6f3a8e) plus the flat
-    # whole-predictor R2D2 surface (peer ba0cc25; the surface BRM R2D2
-    # emission targets).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "64ccf38cb83b395004caff712623d89d9f5d31bb"),  # main
+    # through. fd1af39 (2026-09-20, GitHub main): everything 86e5265
+    # carried (v12 PPL primitives — ordinal modeled latent scale, mo/mo1
+    # simplex, non-centered scan/ar, LKJ Cholesky log-Jacobian fix — on
+    # top of the KernelPlate-reader floor with stable
+    # RKPPLSubmodel/_expand_submodels) plus HSGP Stage B, the flat
+    # whole-predictor R2D2 surface (same slice ba0cc25 the BRM R2D2
+    # emission targets, via the RK-side reconcile re-cut), me/vscale,
+    # and the ranef followers. (Supersedes the parked 64ccf38 pin,
+    # which never reached GitHub.)
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "fd1af39961eaffebd150c1b48510951fcddb6919"),  # main
 ]
 
 function main()
