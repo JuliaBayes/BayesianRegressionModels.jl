@@ -95,7 +95,8 @@ struct _RKLikelihoodSpec
                    # :categorical_logit | :ordered_logit | :ordinal |
                    # :multinomial | :categorical | slice-2 group A:
                    # :bernoulli_probit | :bernoulli_cloglog |
-                   # :binomial_probit | :binomial_cloglog | :beta_logit
+                   # :binomial_probit | :binomial_cloglog | :beta_logit |
+                   # longtail: :mvnormal_cholesky (joint correlated outcomes)
     link::Symbol   # effective link: :identity | :logit | :log |
                    # :probit | :cloglog
     response::Symbol
@@ -125,6 +126,10 @@ struct _RKLikelihoodSpec
     discrimination::Union{Nothing,Float64,Symbol} # ordinal literal or column
     threshold_columns::Vector{Symbol} # ordinal per-threshold design columns
     threshold_coefs::Union{Nothing,Symbol} # per-threshold coef vector param
+    # Joint correlated-outcomes trailing fields (thin-layer
+    # LikelihoodSpec mirror); every other family leaves them at defaults.
+    extra_responses::Vector{Symbol} # joint tail outcome columns (K >= 2)
+    factor::Union{Nothing,Symbol} # joint LKJ stem (`L ~ LKJCovarianceFactor`)
 end
 
 struct _RKTermSpec
@@ -156,7 +161,9 @@ end
 
 struct _RKSampledParameter
     name::Symbol
-    family::Symbol
+    family::Symbol # scalar prior family, or :LKJCovarianceFactor for a
+                   # joint factor stem (args `(K::Int, theta, eta)`; the
+                   # thin layer derives `<stem>_scales`/`<stem>_L_corr`)
     args::Tuple # Number literals or Symbol param/assignment refs, positional
     support_override::Union{Nothing,Symbol}
     label::Symbol
@@ -313,8 +320,10 @@ const _RK_ADMITTED_SPELLINGS =
     "link, eta)` + `eta ~ 0 + ...`, `obs ~ Multinomial(N, s)` + " *
     "`s ~ Dirichlet(...)`, `y ~ Categorical(s)` + `s ~ Dirichlet(...)`, " *
     "slice-2 group A: `y ~ Bernoulli(p)` / `H ~ Binomial(n, p)` + " *
-    "`probit(p)` / `cloglog(p) ~ ...`, or `y ~ Beta(mu*kappa, " *
-    "(1-mu)*kappa)` + `logit(mu) ~ ...`"
+    "`probit(p)` / `cloglog(p) ~ ...`, `y ~ Beta(mu*kappa, " *
+    "(1-mu)*kappa)` + `logit(mu) ~ ...`, or `[y1, y2] ~ " *
+    "MvNormalCholesky([mu1, mu2], L)` + `L ~ LKJCovarianceFactor(K; " *
+    "...)` + identity `mu_j ~ ...`"
 
 function _rk_predictor_link(brmi::BRMI, target::Symbol)
     prefix = "RK backend"
@@ -821,6 +830,39 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
             "admits a logit mu link only)")
         return (; family=:beta_logit, link=plink, scale=concentration,
             scale_predictor=nothing, trials=nothing, location=predictor)
+    elseif head === MvNormalCholesky
+        # Joint correlated-outcomes response (SB
+        # `[y1..yK] ~ MvNormalCholesky([mu1..muK], L)`): Phase 4 resolved
+        # the means positionally (`candidates` holds the lead, `extra`
+        # the tail), so only the factor stem and the identity links are
+        # left here. The stem's LKJ shape and width gate in Phase 6
+        # (linkage needs the planned parameters).
+        length(args) == 2 || error(
+            "$prefix: response `$response` `MvNormalCholesky(means, " *
+            "factor)` needs exactly two arguments")
+        means, factor = args
+        means isa AbstractVector || error(
+            "$prefix: response `$response` `MvNormalCholesky` means must " *
+            "use vector syntax `[mu1, mu2, ...]`, got $(typeof(means))")
+        factor isa NamedColumn || error(
+            "$prefix: response `$response` `MvNormalCholesky` factor must " *
+            "name an `LKJCovarianceFactor` declaration, got " *
+            "$(typeof(factor))")
+        stem = name(factor)
+        stem in parameters || error(
+            "$prefix: response `$response` joint factor `$stem` must be " *
+            "a sampled parameter, not observed data; declare it with " *
+            "`$stem ~ LKJCovarianceFactor(K; ...)`")
+        location = first(candidates)
+        linked = Tuple{Symbol,Symbol}[(location, predictor_link[location]);
+            ((p, l) for (p, l) in zip(extra, extra_links))...]
+        bad = [p for (p, l) in linked if l !== :identity]
+        isempty(bad) || error(
+            "$prefix: response `$response` joint mean predictor(s) " *
+            "$(join(bad, ", ")) must be identity-link (joint means " *
+            "enter the MvNormal directly)")
+        return (; family=:mvnormal_cholesky, link=:identity, scale=nothing,
+            scale_predictor=nothing, trials=nothing, location, factor=stem)
     end
     head_name = head isa Function ? nameof(head) :
         head isa Type ? nameof(head) : string(head)
@@ -3213,6 +3255,13 @@ function _rk_plan_parameters!(prepared, data::AbstractDict,
         callable = prior.callable
         # Dirichlet simplexes plan as vector parameters (below), not here.
         callable === Dirichlet && continue
+        # LKJ covariance-factor stems plan as stem declarations (the
+        # thin layer derives `<stem>_scales`/`<stem>_L_corr` itself).
+        if callable === LKJCovarianceFactor
+            push!(specs, _rk_lkj_factor_parameter(parameter.name, prior,
+                consts, aliases, parameters, assign_names))
+            continue
+        end
         family, args, support_override = if callable === truncated
             # Keyword bounds are validated inside the half-normal gate.
             _rk_half_normal_prior(prior, parameter.name)
@@ -3329,6 +3378,72 @@ function _rk_dirichlet_alpha(args, name::Symbol,
     error("$prefix: parameter `$name` `Dirichlet` takes a concentration " *
           "vector `Dirichlet(alpha)` or symmetric `Dirichlet(K, a)`, got " *
           "$(length(args)) arguments")
+end
+
+# LKJ covariance-factor stem (`L ~ LKJCovarianceFactor(K; scale_prior,
+# shape)`): SB's factor-first declaration. The scale prior is
+# Exponential-only in this slice (SB's default; sampled-θ
+# hyperparameters ride the scalar-prior shape) and the shape is a
+# literal hyperparameter (the thin-layer contract); anything else fails
+# closed. Width agreement with the joint response gates in Phase 6.
+function _rk_lkj_factor_parameter(name::Symbol, prior::_BRMPreparedExpr,
+        consts::Dict{Symbol,Float64}, aliases::Dict{Symbol,Symbol},
+        parameters::Set{Symbol}, assign_names::Set{Symbol})
+    prefix = "RK backend"
+    length(prior.args) == 1 || error(
+        "$prefix: `$name ~ LKJCovarianceFactor(K; ...)` needs exactly " *
+        "one dimension argument, got $(length(prior.args))")
+    K = only(prior.args)
+    K isa Integer && !(K isa Bool) && K >= 1 || error(
+        "$prefix: `$name ~ LKJCovarianceFactor(K; ...)` needs an " *
+        "integer dimension >= 1, got $(repr(K))")
+    unknown = Symbol[k for k in keys(prior.kwargs)
+        if !(k in (:scale_prior, :shape))]
+    isempty(unknown) || error(
+        "$prefix: `$name ~ LKJCovarianceFactor(...)` accepts only " *
+        "`scale_prior` and `shape`, got $unknown")
+    scale_expr = get(prior.kwargs, :scale_prior, nothing)
+    theta = if isnothing(scale_expr)
+        1.0
+    else
+        scale_expr isa _BRMPreparedExpr &&
+            scale_expr.callable === Exponential &&
+            isempty(scale_expr.kwargs) &&
+            length(scale_expr.args) == 1 || error(
+            "$prefix: parameter `$name` joint-factor scale prior is " *
+            "`Exponential(θ)` in this slice (SB's default)")
+        raw = only(scale_expr.args)
+        if raw isa Number
+            value = Float64(raw)
+            isfinite(value) && value > 0 || error(
+                "$prefix: parameter `$name` joint-factor `Exponential` " *
+                "scale must be finite and positive")
+            value
+        elseif raw isa _BRMPreparedRef
+            _, resolved = _rk_resolve_use_ref(raw.name, consts, aliases,
+                parameters, assign_names,
+                "parameter `$name` joint-factor scale")
+            resolved isa Number &&
+                (!isfinite(resolved) || resolved <= 0) && error(
+                "$prefix: parameter `$name` joint-factor `Exponential` " *
+                "scale must be finite and positive")
+            resolved
+        else
+            error("$prefix: parameter `$name` joint-factor `Exponential` " *
+                  "scale must be a literal or a scalar reference, not an " *
+                  "expression (precompute into an assignment)")
+        end
+    end
+    shape_raw = get(prior.kwargs, :shape, 1.0)
+    shape_raw isa Number && !(shape_raw isa Bool) || error(
+        "$prefix: parameter `$name` LKJ `shape` must be a finite " *
+        "positive literal (a hyperparameter)")
+    shape = Float64(shape_raw)
+    isfinite(shape) && shape > 0 || error(
+        "$prefix: parameter `$name` LKJ `shape` must be finite and " *
+        "strictly positive, got $(repr(shape_raw))")
+    _RKSampledParameter(name, :LKJCovarianceFactor, (Int(K), theta, shape),
+        nothing, name)
 end
 
 function _rk_plan_vector_parameters!(prepared,
@@ -3522,6 +3637,14 @@ function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
         (eltype(values) <: Real && all(x -> 0 < x < 1, values)) || error(
             "$prefix: response `$response` must hold values strictly " *
             "inside (0, 1)")
+    elseif family === :mvnormal_cholesky
+        # Mirrors the thin layer: one raw numeric column per outcome
+        # (complete aligned rows pack in the peel; the finite check
+        # re-asserts the bind rule here with BRM attribution).
+        eltype(values) <: Real || error(
+            "$prefix: response `$response` must be real-valued")
+        all(isfinite, values) || error(
+            "$prefix: response `$response` must be finite")
     end
     values
 end
@@ -3592,9 +3715,12 @@ function _rk_peel_observation(brmi::BRMI, observation)
     isnothing(missing_response) || error(
         "$prefix: response `$(observation.key)` uses `mi()` (modelled " *
         "missingness); slice 1 has no missingness machinery")
+    observation.lhs isa JointResponseColumn &&
+        return _rk_peel_joint_observation(observation)
     observation.lhs isa NamedColumn || error(
         "$prefix: response `$(observation.key)` is not a plain response " *
-        "column (joint/multivariate responses are out of slice 1)")
+        "column (slice 1 admits plain response columns and `[y1, ...]` " *
+        "joint responses only)")
     parent(observation.lhs) isa DataColumn || error(
         "$prefix: response `$(observation.key)` carries a response " *
         "decorator or link; slice 1 admits plain response columns only")
@@ -3625,7 +3751,38 @@ function _rk_peel_observation(brmi::BRMI, observation)
             "$prefix: response `$(observation.key)` bounded base must be " *
             "a distribution call")
     end
-    (; key=observation.key, rhs, raw_response, weight_plan, modifier)
+    (; key=observation.key, rhs, raw_response, weight_plan, modifier,
+        joint_outcomes=Symbol[])
+end
+
+# Joint correlated-outcomes peel (SB `[y1..yK] ~ MvNormalCholesky(...)`):
+# the vector LHS takes the explicit joint family only (row weights and
+# bounded evidence change the head, so they fail here with attribution),
+# and the outcomes pack to complete aligned row vectors (missingness
+# fails at packing — the joint density never drops or factorizes
+# missing outcome patterns). `raw_response` is the row-vector
+# collection (its length is the observation axis); Phase 5 unpacks one
+# raw numeric column per outcome.
+function _rk_peel_joint_observation(observation)
+    prefix = "RK backend"
+    outcomes = collect(Symbol, joint_response_names(observation.lhs))
+    rhs = observation.rhs
+    rhs isa ExprColumn || error(
+        "$prefix: response `$(observation.key)` likelihood must be a " *
+        "distribution call")
+    head = getf(rhs)
+    head === MvNormalCholesky || error(
+        "$prefix: vector response $outcomes supports the explicit " *
+        "joint family `MvNormalCholesky(means, factor)`; got " *
+        "`$(head isa Function || head isa Type ? nameof(head) : head)`" *
+        (head === weighted ?
+            " (row weights on a joint density are out of slice)" :
+            head === truncated || head === censored ||
+                head === interval_censored ?
+            " (bounded joint responses are out of slice)" : ""))
+    rows = _brm_joint_response_values(observation.lhs; prefix)
+    (; key=observation.key, rhs, raw_response=rows, weight_plan=nothing,
+        modifier=nothing, joint_outcomes=outcomes)
 end
 
 function _rk_referenced_predictors(program, rhs, response::Symbol)
@@ -3666,6 +3823,47 @@ function _rk_categorical_refs(program, rhs::ExprColumn, response::Symbol)
         "$prefix: response `$response` `CategoricalLogit` repeats a " *
         "predictor ($(join(names, ", "))) — one linear predictor per " *
         "non-reference class")
+    names
+end
+
+# Joint correlated-outcomes means resolve positionally (outcome order):
+# one declared linear predictor per outcome. Scalar, data-backed, and
+# expression means are SB-only — the thin layer takes one identity-link
+# predictor per outcome, so anything else fails closed here.
+function _rk_joint_refs(program, rhs::ExprColumn, response::Symbol,
+        outcomes::Vector{Symbol})
+    prefix = "RK backend"
+    isempty(outcomes) && error(
+        "$prefix: response `$response` `MvNormalCholesky` is joint-only; " *
+        "write `[y1, y2] ~ MvNormalCholesky([mu1, mu2], L)` with a " *
+        "vector response")
+    args = getargs(rhs)
+    length(args) == 2 || error(
+        "$prefix: response `$response` `MvNormalCholesky(means, factor)` " *
+        "needs exactly two arguments")
+    means = args[1]
+    means isa AbstractVector || error(
+        "$prefix: response `$response` `MvNormalCholesky` means must use " *
+        "vector syntax `[mu1, mu2, ...]`, got $(typeof(means))")
+    K = length(outcomes)
+    length(means) == K || error(
+        "$prefix: response `$response` has $K outcomes but " *
+        "`MvNormalCholesky` received $(length(means)) means (one mean " *
+        "per outcome, in outcome order)")
+    declared = Set{Symbol}(node.name for node in program.operations
+        if node.role === :predictor)
+    names = Symbol[]
+    for m in means
+        m isa NamedColumn && name(m) in declared || error(
+            "$prefix: response `$response` joint mean " *
+            "`$(m isa NamedColumn ? name(m) : m)` is not a " *
+            "declared linear predictor; the RK slice admits one " *
+            "identity-link predictor per outcome (`mu_j ~ ...`)")
+        push!(names, name(m))
+    end
+    length(unique(names)) == length(names) || error(
+        "$prefix: response `$response` joint means repeat a predictor " *
+        "($(join(names, ", "))) — one linear predictor per outcome)")
     names
 end
 
@@ -3854,6 +4052,92 @@ function _rk_unleveled(entry, predictor::Symbol)
         ordinal_structure=nothing, discrimination=nothing,
         threshold_columns=Symbol[], threshold_coefs=nothing,
         response_values=entry.raw_response, cross_columns=Symbol[])
+end
+
+# The joint factor stem off a classified `MvNormalCholesky` RHS (the
+# classify arm guarantees the two-argument shape with a named factor).
+_rk_joint_stem(rhs::ExprColumn) = name(getargs(rhs)[2])
+
+# Joint correlated-outcomes response spec: the lead outcome takes
+# `response`, the tail `extra_responses`, the tail means ride the
+# reused `extra_predictors`, and the LKJ stem links explicitly. Each
+# outcome crosses as its own raw numeric column (the thin layer binds
+# K columns, row-aligned by the uniform-`n_obs` rule).
+function _rk_plan_joint_response!(entry, link::Symbol, predictor::Symbol,
+        extra::Vector{Symbol}, evidence::_RKResponseEvidence,
+        columns::Dict{Symbol,AbstractVector})
+    prefix = "RK backend"
+    outcomes = entry.joint_outcomes
+    K = length(outcomes)
+    K >= 2 || error(
+        "$prefix: internal: joint response `$(entry.key)` has fewer " *
+        "than two outcomes")
+    length(extra) == K - 1 || error(
+        "$prefix: internal: joint response `$(entry.key)` has $K " *
+        "outcomes but $(1 + length(extra)) mean predictors")
+    stem = _rk_joint_stem(entry.rhs)
+    for (i, outcome) in enumerate(outcomes)
+        column = Float64[row[i] for row in entry.raw_response]
+        columns[outcome] = _rk_gate_response_values!(
+            :mvnormal_cholesky, column, outcome)
+    end
+    _RKLikelihoodSpec(:mvnormal_cholesky, link, first(outcomes), predictor,
+        nothing, nothing, nothing, evidence, entry.key, nothing, nothing,
+        nothing, extra, Symbol[], nothing, nothing, Symbol[], nothing,
+        outcomes[2:end], stem)
+end
+
+# Joint responses link their LKJ factor stem explicitly (SB's
+# factor-first contract): the stem must be a planned
+# `LKJCovarianceFactor` declaration of matching width, feeding exactly
+# one joint response. The thin layer derives `<stem>_scales` /
+# `<stem>_L_corr` and enforces the same linkage — this gate gives BRM
+# attribution instead of a thin-layer error.
+function _rk_gate_joint_factors!(response_specs::AbstractVector,
+        parameters::AbstractVector, assignment_names::Set{Symbol})
+    prefix = "RK backend"
+    stems = Dict{Symbol,Int}()
+    for spec in parameters
+        spec.family === :LKJCovarianceFactor || continue
+        stems[spec.name] = spec.args[1]
+        # A sampled scale hyperparameter θ must be scalar: a
+        # vector-valued θ sails through the name table and fails
+        # thin-side, so it fails here instead.
+        theta = spec.args[2]
+        theta isa Symbol || continue
+        theta in assignment_names && continue
+        any(p -> p.name === theta &&
+            p.family !== :LKJCovarianceFactor, parameters) || error(
+            "$prefix: parameter `$(spec.name)` joint-factor scale " *
+            "`$theta` is not a scalar parameter or assignment " *
+            "(sampled scales ride the scalar-prior shape)")
+    end
+    used = Set{Symbol}()
+    for spec in response_specs
+        spec.family === :mvnormal_cholesky || continue
+        stem = spec.factor
+        K = 1 + length(spec.extra_responses)
+        haskey(stems, stem) || error(
+            "$prefix: response `$(spec.label)` joint factor `$stem` " *
+            "must name an `LKJCovarianceFactor` declaration " *
+            "(`$stem ~ LKJCovarianceFactor($K; ...)` before the response)")
+        stems[stem] == K || error(
+            "$prefix: response `$(spec.label)` has $K ordered outcomes " *
+            "but factor `$stem` has dimension $(stems[stem])")
+        stem in used && error(
+            "$prefix: factor `$stem` feeds two joint responses; one " *
+            "factor per joint response (declare one stem per " *
+            "`[..] ~ MvNormalCholesky(..)` statement)")
+        push!(used, stem)
+    end
+    for stem in keys(stems)
+        stem in used || error(
+            "$prefix: parameter `$stem` is declared " *
+            "`LKJCovarianceFactor`-sampled but no joint response uses " *
+            "it; write `[y1, ...] ~ MvNormalCholesky([mu1, ...], $stem)`, " *
+            "or drop the declaration")
+    end
+    nothing
 end
 
 # Leveled spec fields for one response. Appends implicit threshold
@@ -4156,6 +4440,36 @@ function _rk_gate_name_hygiene!(predictor_specs::AbstractVector,
         haskey(columns, an) && error(
             "$prefix: internal: generated ar name `$an` collides with " *
             "raw column `$an`")
+    end
+    # LKJ factor stems reserve their two derived thin-layer bindings
+    # (`<stem>_scales`, `<stem>_L_corr`); a model binding under either
+    # spelling would collide at lowering — fail here with BRM
+    # attribution instead (SB reserves the same two names).
+    for spec in parameters
+        spec.family === :LKJCovarianceFactor || continue
+        for piece in (Symbol(spec.name, :_scales),
+                Symbol(spec.name, :_L_corr))
+            piece in both && error(
+                "$prefix: `$(spec.name) ~ LKJCovarianceFactor(...)` " *
+                "reserves emitted binding `$piece`, but the model also " *
+                "declares that parameter/assignment; rename one of them")
+            piece in pnames && error(
+                "$prefix: `$(spec.name) ~ LKJCovarianceFactor(...)` " *
+                "reserves emitted binding `$piece`, but the model also " *
+                "declares predictor `$piece`; rename one of them")
+            haskey(columns, piece) && error(
+                "$prefix: `$(spec.name) ~ LKJCovarianceFactor(...)` " *
+                "reserves emitted binding `$piece`, but the data also " *
+                "binds raw column `$piece`; rename one of them")
+            piece in vnames && error(
+                "$prefix: `$(spec.name) ~ LKJCovarianceFactor(...)` " *
+                "reserves emitted binding `$piece`, but the model also " *
+                "declares vector parameter `$piece`; rename one of them")
+            piece in dnames && error(
+                "$prefix: `$(spec.name) ~ LKJCovarianceFactor(...)` " *
+                "reserves emitted binding `$piece`, but the model also " *
+                "declares derived column `$piece`; rename one of them")
+        end
     end
     for n in sort!(collect(Iterators.flatten(
             (pnames, both, dnames, vnames, snames, gnames, hnames, anames,
@@ -4579,6 +4893,17 @@ function _brm_rk_plan(brmi::BRMI)
                 target in predictor_order || push!(predictor_order, target)
             end
             continue
+        elseif head === MvNormalCholesky
+            # Joint means resolve positionally (outcome order); the lead
+            # feeds the location slot, the tail the extra predictors.
+            preds = _rk_joint_refs(program, entry.rhs, entry.key,
+                entry.joint_outcomes)
+            response_predictors[entry.key] = [first(preds)]
+            response_extra_predictors[entry.key] = preds[2:end]
+            for target in preds
+                target in predictor_order || push!(predictor_order, target)
+            end
+            continue
         end
         names = _rk_referenced_predictors(program, entry.rhs, entry.key)
         response_predictors[entry.key] = names
@@ -4703,6 +5028,13 @@ function _brm_rk_plan(brmi::BRMI)
         evidence = _rk_plan_evidence(entry.modifier, family,
             context.data, entry.key, columns, consts, aliases, parameter_names,
             assignment_names)
+        if family === :mvnormal_cholesky
+            # Joint responses cross one raw column per outcome (not the
+            # packed row vectors) and carry the factor stem explicitly.
+            push!(response_specs, _rk_plan_joint_response!(entry, link,
+                predictor, extra, evidence, columns))
+            continue
+        end
         for col in leveled.cross_columns
             raw = get(context.data, col, nothing)
             raw isa AbstractVector || error(
@@ -4723,7 +5055,8 @@ function _brm_rk_plan(brmi::BRMI)
             entry.key, trials, leveled.n_levels, leveled.thresholds,
             leveled.extra_predictors, leveled.count_columns,
             leveled.ordinal_structure, leveled.discrimination,
-            leveled.threshold_columns, leveled.threshold_coefs))
+            leveled.threshold_columns, leveled.threshold_coefs, Symbol[],
+            nothing))
     end
     # A modeled ordinal scale feeds no other response slot (needs the
     # whole response table, so it runs after the loop).
@@ -4756,6 +5089,7 @@ function _brm_rk_plan(brmi::BRMI)
             "uses it; write `Multinomial(N, $(spec.name))` or " *
             "`Categorical($(spec.name))`, or drop the declaration")
     end
+    _rk_gate_joint_factors!(response_specs, parameters, assignment_names)
     _rk_gate_name_hygiene!(predictor_specs, parameters, assignments,
         derived, columns, response_specs,
         [vector_specs; implicit_vectors; mo_vectors])

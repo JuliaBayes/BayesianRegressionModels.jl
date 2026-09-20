@@ -461,7 +461,7 @@ end
         [BRM._RKLikelihoodSpec(:gaussian, :identity, :y, :n, :s, nothing,
             nothing, BRM._RKResponseEvidence(:none, nothing, nothing), :y,
             nothing, nothing, nothing, Symbol[], Symbol[], nothing, nothing,
-            Symbol[], nothing)],
+            Symbol[], nothing, Symbol[], nothing)],
         [BRM._RKPredictorSpec(:n, :identity, BRM._RKTermSpec[
             BRM._RKTermSpec(:intercept, Symbol[], (;), :Intercept, :Intercept),
             BRM._RKTermSpec(:continuous, [:n], (;), :n, :n)], :n)],
@@ -1204,6 +1204,14 @@ end
             s ~ Exponential(1)
             y ~ Normal(mu, s)
         end),
+        @brm((y1=[0.5, -0.2, 0.1, 0.9, 1.4, 1.1],
+                y2=[0.1, 0.3, -0.4, 0.2, 0.8, -0.1],
+                x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5]), begin
+            mu1 ~ 1 + x
+            mu2 ~ 1 + x
+            L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1))
+            [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
+        end),
     ]
     for brmi in models
         prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
@@ -1231,4 +1239,72 @@ end
         end
         @test Set(c.args[1] for c in calls) == Set(keys(arities))
     end
+end
+
+@testset "correlated AST shape" begin
+    dfj = (y1=[0.5, -0.2, 0.1, 0.9, 1.4, 1.1],
+        y2=[0.1, 0.3, -0.4, 0.2, 0.8, -0.1],
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5])
+    brmi = @brm dfj begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1), shape=2)
+        [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    # The joint response emits no stream-submodel def (plain `~`,
+    # row-grouped) — defs hold the two predictor submodels only.
+    @test prog.defs == Expr[
+        Expr(:(=), Expr(:call, :popefs_mu1, :x), Expr(:block,
+            Expr(:call, :~, :b1, Expr(:call, :Normal, 0.0, 1.0)),
+            Expr(:call, :~, :b2, Expr(:call, :Normal, 0.0, 1.0)),
+            Expr(:call, :.+, :b1, Expr(:call, :.*, :b2, :x)))),
+        Expr(:(=), Expr(:call, :popefs_mu2, :x), Expr(:block,
+            Expr(:call, :~, :b1, Expr(:call, :Normal, 0.0, 1.0)),
+            Expr(:call, :~, :b2, Expr(:call, :Normal, 0.0, 1.0)),
+            Expr(:call, :.+, :b1, Expr(:call, :.*, :b2, :x)))),
+    ]
+    @test prog.main == Expr(:block,
+        Expr(:call, :~, :mu1, Expr(:call, :popefs_mu1, :x)),
+        Expr(:call, :~, :mu2, Expr(:call, :popefs_mu2, :x)),
+        Expr(:call, :~, :L_res, Expr(:call, :LKJCovarianceFactor, 2,
+            Expr(:call, :Exponential, 1.0), 2.0)),
+        Expr(:call, :~, Expr(:vect, :y1, :y2),
+            Expr(:call, :MvNormalCholesky, Expr(:vect, :mu1, :mu2),
+                :L_res)))
+    # Both joint spellings match the parsed surface exactly.
+    @test rk_strip_lines(prog.main.args[3]) == rk_parsed_surface(
+        "L_res ~ LKJCovarianceFactor(2, Exponential(1.0), 2.0)")
+    @test rk_strip_lines(prog.main.args[4]) == rk_parsed_surface(
+        "[y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)")
+    # Sampled scale hyperparameters emit as bare names.
+    brmi = @brm dfj begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        tau ~ Exponential(1)
+        L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(tau))
+        [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test prog.main.args[3] == Expr(:call, :~, :tau,
+        Expr(:call, :Exponential, 1.0))
+    @test prog.main.args[4] == Expr(:call, :~, :L_res,
+        Expr(:call, :LKJCovarianceFactor, 2,
+            Expr(:call, :Exponential, :tau), 1.0))
+    @test rk_strip_lines(prog.main.args[4]) == rk_parsed_surface(
+        "L_res ~ LKJCovarianceFactor(2, Exponential(tau), 1.0)")
+    # K=3: three outcomes, three means, width-3 stem.
+    df3 = merge(dfj, (; y3=[-0.3, 0.7, 0.2, -0.1, 0.4, 0.6]))
+    brmi = @brm df3 begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        mu3 ~ 1 + x
+        L3 ~ LKJCovarianceFactor(3; scale_prior=Exponential(1))
+        [y1, y2, y3] ~ MvNormalCholesky([mu1, mu2, mu3], L3)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test prog.main.args[end] ==
+        Expr(:call, :~, Expr(:vect, :y1, :y2, :y3),
+            Expr(:call, :MvNormalCholesky, Expr(:vect, :mu1, :mu2, :mu3),
+                :L3))
 end
