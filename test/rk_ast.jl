@@ -852,12 +852,13 @@ end
         y ~ Normal(mu, s)
     end
     prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
-    @test prog isa BRM._RKEmittedProgram
-    popefs = Expr(:(=), Expr(:call, :popefs_mu), Expr(:block,
-        Expr(:call, :~, :b1, Expr(:call, :Normal, 0.0, 1.0)),
-        Expr(:call, :.+, :b1,
-            Expr(:call, :dar, :dar_mu_t_beta, :dar_mu_t_sigma))))
-    @test prog.defs == Expr[popefs,
+    # The dar summand rides inside the per-predictor submodel (nullary:
+    # it reads no data columns); the trajectory scalars stay top-level.
+    @test prog.defs == Expr[
+        Expr(:(=), Expr(:call, :popefs_mu), Expr(:block,
+            Expr(:call, :~, :b1, Expr(:call, :Normal, 0.0, 1.0)),
+            Expr(:call, :.+,
+                :b1, Expr(:call, :dar, :dar_mu_t_beta, :dar_mu_t_sigma)))),
         Expr(:(=), Expr(:call, :normal_id_glm, :eta, :sigma), Expr(:block,
             Expr(:call, :.~, :slot,
                 Expr(:., :Normal, Expr(:tuple, :eta, :sigma))),
@@ -875,8 +876,8 @@ end
     # Both dar spellings match the parsed surface exactly.
     @test rk_strip_lines(prog.main.args[1]) == rk_parsed_surface(
         "dar_mu_t_beta ~ truncated(Normal(0.5, 0.2), 0, 1)")
-    affine = prog.defs[1].args[2].args[end]
-    @test rk_strip_lines(affine) ==
+    ret = rk_def_body(prog, :popefs_mu).args[end]
+    @test rk_strip_lines(ret) ==
         rk_parsed_surface("b1 .+ dar(dar_mu_t_beta, dar_mu_t_sigma)")
     # Prior overrides ride the preamble statements.
     brmi = @brm tdf begin
