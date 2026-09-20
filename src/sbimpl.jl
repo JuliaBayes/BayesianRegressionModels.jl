@@ -2626,7 +2626,8 @@ end
 
 """
     SBBRMI(brmi::BRMI; mod=@__MODULE__, cv_groups=Set{Symbol}(),
-           centered_groups=Set{Symbol}(), total_groups=:auto, held_out=()) -> SBBRMI
+           centered_groups=Set{Symbol}(), total_groups=:auto,
+           s2z_groups=(), s2z_rho=nothing, held_out=()) -> SBBRMI
 
 StanBlocks backend: walks `brmi`, emits a `StanBlocks.SlicModel`, and
 materialises the data dict. Pass `mod` if you're constructing the model
@@ -2643,6 +2644,19 @@ coefficients and deviations are recovered in generated quantities. Inspect
 representation. Naming a group explicitly requires eligibility and errors
 otherwise. Correlated, crossed, stratified, multi-membership and R2D2 blocks
 retain conventional emission under `:auto`.
+
+`s2z_groups` is an opt-in collection of grouping-factor names (default `()`,
+disabled) emitted in the posterior-preserving sum-to-zero parameterization:
+J-1 free orthonormal contrast coordinates per coefficient with a fixed
+projected partial map, exact Gaussian marginalization of the omitted block
+means into the sampled population coefficients `theta`, and generated
+recovery quantities. `s2z_rho` is required whenever `s2z_groups` is nonempty
+(no public default yet): a scalar in [0,1] or one weight per coefficient
+(0 = noncentered contrasts, 1 = centered). First scope is scalar independent
+blocks with J >= 2, fully matched population design and Flat/Normal
+population priors; anything else errors loudly. Inspect
+[`s2z_effect_blocks`](@ref). S2Z groups are excluded from automatic totals
+and cannot overlap `centered_groups` or `cv_groups`.
 
 `cv_groups` is an opt-in set of grouping-factor names (e.g. `[:subject]`)
 whose per-group random effect should be emitted with **cv-contagious
@@ -3215,9 +3229,11 @@ const _SB_STAN_RESERVED_IDENTIFIERS = Set{Symbol}((
 ))
 
 SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
-       centered_groups=Set{Symbol}(), total_groups=:auto, held_out=(), _frozen_preproc=nothing) = begin
+       centered_groups=Set{Symbol}(), total_groups=:auto,
+       s2z_groups=(), s2z_rho=nothing, held_out=(), _frozen_preproc=nothing) = begin
     cv_groups = cv_groups isa Set ? cv_groups : Set{Symbol}(cv_groups)
     centered_groups = centered_groups isa Set ? centered_groups : Set{Symbol}(centered_groups)
+    s2z_selected = Set(s2z_groups isa Symbol ? (s2z_groups,) : s2z_groups)
     both = intersect(cv_groups, centered_groups)
     isempty(both) || error(
         "sbimpl: group(s) $(join(sort!(collect(both)), ", ")) named in BOTH ",
@@ -3227,6 +3243,16 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
         "parameter, and typed-LHS derives cv from RHS call-args rather than ",
         "the declared size). Emit the CV artifact non-centered, or drop the ",
         "group from `cv_groups`.")
+    both = intersect(s2z_selected, centered_groups)
+    isempty(both) || throw(ArgumentError(
+        "sbimpl: group(s) $(join(sort!(collect(both)), ", ")) named in BOTH " *
+        "`s2z_groups` and `centered_groups`. S2Z carries its own centering " *
+        "weights; name the group in exactly one representation."))
+    both = intersect(s2z_selected, cv_groups)
+    isempty(both) || throw(ArgumentError(
+        "sbimpl: group(s) $(join(sort!(collect(both)), ", ")) named in BOTH " *
+        "`s2z_groups` and `cv_groups`. S2Z contrast coordinates cannot " *
+        "carry a cv taint; drop the group from `cv_groups`."))
     stmts = Any[]
     data = Dict{Symbol,Any}()
     # Side-channel: transform emitters record their fit-time constant + raw
@@ -3267,8 +3293,12 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
                                                     effect_overrides)
     r2d2_overrides = _sb_r2d2_overrides(brmi, id_buckets, effect_overrides)
     total_plans = _sb_plan_totals(brmi,prepared,effect_overrides,id_buckets,
-        ranef_effect_overrides,total_groups; cv_groups,centered_groups,r2d2_overrides,ranef_r2d2_overrides)
+        ranef_effect_overrides,total_groups; cv_groups,centered_groups,r2d2_overrides,ranef_r2d2_overrides,
+        s2z_groups=s2z_selected)
     data[_SB_TOTAL_PLANS_KEY] = total_plans
+    s2z_plans = _sb_plan_s2zs(brmi,prepared,effect_overrides,s2z_selected,s2z_rho;
+                              cv_groups,centered_groups)
+    data[_SB_S2Z_PLANS_KEY] = s2z_plans
     for plan in values(total_plans), key in plan.claimed
         delete!(id_buckets,key)
     end
@@ -3373,6 +3403,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     # pollutes Stan's data dict.
     bindings = pop!(data, _SB_BINDINGS_KEY)
     pop!(data, _SB_TOTAL_PLANS_KEY)
+    pop!(data, _SB_S2Z_PLANS_KEY)
     pop!(data, _SB_HYPER_PLANS_KEY, ())
     pop!(data, _SB_THRESHOLD_LOCATED_KEY)
     preproc_ctx = pop!(data, _SB_PREPROC_KEY, Dict{Symbol,PreprocEntry}())
@@ -3990,13 +4021,15 @@ _generative_plan_centered(plan::GenerativePlan) =
 function generative_plan(builder::Function, df;
                          mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
                          centered_groups=Set{Symbol}(),
-                         total_groups=:auto, held_out=())
+                         total_groups=:auto, s2z_groups=(), s2z_rho=nothing,
+                         held_out=())
     brmi = Base.invokelatest(builder, df)
     brmi isa BRMI || error(
         "generative_plan: builder returned $(typeof(brmi)); expected a BRMI from `@brm begin ... end`")
     cv_groups = cv_groups isa Set ? cv_groups : Set{Symbol}(cv_groups)
     centered_groups = centered_groups isa Set ? centered_groups : Set{Symbol}(centered_groups)
-    _generative_plan(SBBRMI(brmi; mod, cv_groups, centered_groups, total_groups, held_out), builder, cv_groups)
+    _generative_plan(SBBRMI(brmi; mod, cv_groups, centered_groups, total_groups,
+                            s2z_groups, s2z_rho, held_out), builder, cv_groups)
 end
 
 function generative_plan(plan::GenerativePlan, new_df;
@@ -4005,6 +4038,9 @@ function generative_plan(plan::GenerativePlan, new_df;
     isnothing(plan.builder) && error(
         "generative_plan: this plan was built from an SBBRMI and has no reusable `@brm` builder. " *
         "Construct it with `generative_plan(builder, df)` to rebuild the same declarations for new groups.")
+    isempty(s2z_effect_blocks(plan)) || throw(ArgumentError(
+        "generative_plan: S2Z blocks cannot be rebuilt for new groups yet; " *
+        "recovery-aware draw transport is not implemented"))
     # `nothing` infers the source plan's own centered groups off its emitted
     # declarations (after the builder check, so a builder-less plan still
     # reports the missing builder rather than a declaration walk).
@@ -4139,6 +4175,8 @@ end
 function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool)
     isempty(total_effect_blocks(sb)) || throw(ArgumentError(
         "total-coefficient prediction uses generative_plan(plan,new_df) and transport_draws(...;resample=groups) to share one recovered population draw across new groups; resample_groups does not perform this recovery"))
+    isempty(s2z_effect_blocks(sb)) || throw(ArgumentError(
+        "S2Z prediction needs recovery-aware draw transport, which is not implemented yet; resample_groups cannot re-draw S2Z contrast coordinates"))
     # Re-emission cannot safely guess constructor-only geometry that SBBRMI did
     # not historically retain.  The public ergonomic path starts from the
     # ordinary non-centred fit; fail if the supplied artifact used a different
@@ -4151,7 +4189,7 @@ function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool)
     # and false-trigger the geometry check (for a conventionally-built fit) or
     # emit a totals `cv_template` the cv-contagion assertion cannot see.
     baseline = SBBRMI(sb.parent; mod=sb.model.mod, held_out=sb.held_out,
-                      total_groups=())
+                      total_groups=(), s2z_groups=())
     stan_code(baseline) == stan_code(sb) || error(
         "sbimpl: `resample_groups` requires an SBBRMI emitted with the default " *
         "non-centered, non-CV constructor. The supplied model used additional " *
@@ -4162,7 +4200,7 @@ function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool)
     rebound = _sb_rebind_brmi(sb.parent, new_df)
     cv_template = SBBRMI(
         rebound; mod=sb.model.mod, cv_groups=groups,
-        held_out=sb.held_out, total_groups=(),
+        held_out=sb.held_out, total_groups=(), s2z_groups=(),
         _frozen_preproc=freeze ? sb.preproc : nothing)
     _sb_assert_cv_reemission(cv_template, groups)
     preproc = _sb_resample_preproc(sb.preproc, cv_template.preproc, groups)
@@ -4202,6 +4240,13 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
     elseif e.kind === :total_basis
         freeze || throw(ArgumentError("total-coefficient replay requires freeze_constants=true; rebuild the model to fit a different population/random design basis"))
         new_data[key] = copy(e.const_)
+        new_preproc[key] = e
+    elseif e.kind === :s2z_weights
+        freeze || throw(ArgumentError("S2Z replay requires freeze_constants=true; centering weights are fitted-level quantities"))
+        levels = _sb_df_column(df, e.raw_ref)
+        collect(_brm_fit_levels(levels)) == collect(e.const_.levels) ||
+            throw(ArgumentError("S2Z replay needs identical group levels; centering weights cannot be remapped to new levels yet"))
+        new_data[key] = copy(e.const_.rho)
         new_preproc[key] = e
     elseif e.kind === :zscale || e.kind === :standardize ||
            e.kind === :center || e.kind === :protect
@@ -6389,6 +6434,8 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
                                 group_block_lookup=Dict(),
                                 effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2(),
                                 mod::Module=@__MODULE__)
+    s2z = get(get(data,_SB_S2Z_PLANS_KEY,Dict()),brmi_key,nothing)
+    isnothing(s2z) || return _sb_emit_s2z!(stmts,data,target,s2z;mod)
     total = get(get(data,_SB_TOTAL_PLANS_KEY,Dict()),brmi_key,nothing)
     isnothing(total) || return _sb_emit_total!(stmts,data,target,total;mod)
     terms = _sb_terms(rhs)

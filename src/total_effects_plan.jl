@@ -198,7 +198,8 @@ function _sb_total_basis_map(population, columns)
 end
 
 function _sb_total_plan(brmi, prepared, predictor, overrides, buckets, sd_overrides;
-                        cv_groups, centered_groups, r2d2_overrides, ranef_r2d2_overrides)
+                        cv_groups, centered_groups, r2d2_overrides, ranef_r2d2_overrides,
+                        s2z_groups=Set{Symbol}())
     target = predictor.name
     declarations = filter(d -> d.predictor === target, prepared.context.group_declarations)
     isempty(declarations) && return nothing
@@ -211,6 +212,8 @@ function _sb_total_plan(brmi, prepared, predictor, overrides, buckets, sd_overri
     group in cv_groups && return nothing
     # Explicit conventional centered_groups is a request for that representation.
     group in centered_groups && return nothing
+    # An explicit S2Z request is likewise a request for that representation.
+    group in s2z_groups && return nothing
     haskey(r2d2_overrides,target) && return nothing
     pop, ran, direct = Any[], Any[], Any[]
     foreach(t -> _sb_classify_term!(t,pop,ran,direct), _sb_terms(predictor.expression))
@@ -270,7 +273,8 @@ function _sb_total_plan(brmi, prepared, predictor, overrides, buckets, sd_overri
 end
 
 function _sb_plan_totals(brmi,prepared,overrides,buckets,sd_overrides,selection;
-                         cv_groups,centered_groups,r2d2_overrides,ranef_r2d2_overrides)
+                         cv_groups,centered_groups,r2d2_overrides,ranef_r2d2_overrides,
+                         s2z_groups=Set{Symbol}())
     selection === :auto || selection isa Symbol || selection isa Tuple || selection isa AbstractVector || selection isa AbstractSet ||
         throw(ArgumentError("total_groups must be :auto, a grouping-factor name, or a collection (empty disables totals)"))
     requested = selection === :auto ? nothing : Set(selection isa Symbol ? (selection,) : selection)
@@ -278,7 +282,8 @@ function _sb_plan_totals(brmi,prepared,overrides,buckets,sd_overrides,selection;
     out = Dict{Symbol,Any}()
     for predictor in prepared.predictors
         plan = _sb_total_plan(brmi,prepared,predictor,overrides,buckets,sd_overrides;
-                             cv_groups,centered_groups,r2d2_overrides,ranef_r2d2_overrides)
+                             cv_groups,centered_groups,r2d2_overrides,ranef_r2d2_overrides,
+                             s2z_groups)
         isnothing(plan) && continue
         isnothing(requested) || plan.group in requested || continue
         out[predictor.name] = plan
