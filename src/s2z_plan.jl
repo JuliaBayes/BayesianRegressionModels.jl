@@ -37,6 +37,7 @@ struct S2ZEffectBlock
     location::Vector{Float64}
     precision::Vector{Float64}
     rho::Matrix{Float64}
+    design::Matrix{Float64}
 end
 
 """Return the S2Z blocks selected during model construction."""
@@ -47,15 +48,16 @@ s2z_effect_blocks(model) = sort!(
 function _s2z_resolve_rho(rho, J::Int, K::Int, group::Symbol)
     isnothing(rho) && throw(ArgumentError(
         "S2Z block `$group`: pass explicit `s2z_rho` (no public default yet); " *
-        "a scalar in [0,1] or one weight per coefficient"))
+        "a scalar in [0,1], one weight per coefficient, or a J-by-K matrix"))
     weights = rho isa Real ? fill(Float64(rho), J, K) :
         rho isa AbstractVector ? repeat(reshape(collect(Float64, rho), 1, :), J, 1) :
+        rho isa AbstractMatrix ? collect(Float64, rho) :
         throw(ArgumentError(
-            "S2Z block `$group`: `s2z_rho` must be a scalar or a vector with " *
-            "one weight per coefficient; per-cell matrices arrive with the selector"))
+            "S2Z block `$group`: `s2z_rho` must be a scalar, a vector with " *
+            "one weight per coefficient, or a J-by-K matrix"))
     size(weights) == (J, K) || throw(ArgumentError(
-        "S2Z block `$group`: `s2z_rho` has $(length(rho)) coefficients but " *
-        "the block has $K"))
+        "S2Z block `$group`: `s2z_rho` has size $(size(weights)) but the " *
+        "block has J = $J groups and K = $K coefficients"))
     all(w -> isfinite(w) && 0 <= w <= 1, weights) || throw(ArgumentError(
         "S2Z block `$group`: centering weights must lie in [0,1]"))
     weights
@@ -140,7 +142,7 @@ function _sb_s2z_plan(brmi, prepared, predictor, overrides, rho;
         end
         weights = _s2z_resolve_rho(rho, J, K, group)
         return (; target, group, columns, design, B, prior_info, scale_priors,
-                absorbed, remaining, weights,
+                absorbed, remaining, weights, Z,
                 remaining_priors=all_priors[remaining],
                 indices=first(plans).indices, levels=first(plans).levels)
     catch err
@@ -358,7 +360,7 @@ function _sb_emit_s2z!(stmts, data, target, plan; mod::Module=@__MODULE__)
     block = S2ZEffectBlock(plan.target, plan.group, z, Symbol(tau, :_tau), theta, r, mu, b,
         idx, ng, Tuple(c.label for c in plan.columns),
         Tuple(plan.design.columns[c].label for c in plan.absorbed),
-        plan.B, copy(data[loc]), copy(data[prec]), copy(plan.weights))
+        plan.B, copy(data[loc]), copy(data[prec]), copy(plan.weights), copy(plan.Z))
     data[_SB_BINDINGS_KEY][z] = (; role=:s2z_effect, logical=plan.target,
         family=:brm_s2z, s2z=block)
     data[_SB_BINDINGS_KEY][theta] = (; role=:population_effect, logical=plan.target,
