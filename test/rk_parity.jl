@@ -473,10 +473,13 @@ end
     backend = BRM.RKBRMI(brmi)
     layout = backend.model.layout
     @test layout.total == 10
+    # Submodel expansion inlines the popefs body at the call site, which
+    # follows the top-level preamble — so the preamble's phi_raw precedes
+    # the expanded beta in sampled order.
     @test _layout_signature(layout) == [
         (:coefficient, :mu_coef, 1, :identity),
-        (:sampled, :mu_b2, 1, :identity),
         (:sampled, :phi_raw_ar_mu_t, 1, :identity),
+        (:sampled, :mu_b2, 1, :identity),
         (:sampled, :sigma, 1, :exp),
         (:scan, :_ppl_scan_z_ar_mu_t, 6, :identity),
     ]
