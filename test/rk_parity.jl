@@ -18,6 +18,10 @@
 # - LKJ math: the thin-layer `lkj_corr_cholesky_logpdf` is Stan-verbatim
 #   (peer-tested); the K=2 reference below re-derives eta=1 from the
 #   Beta integral, independently of the emitter's LKJ09 port.
+# - Correlated outcomes: the K=2 LKJ(eta) closed form
+#   `-logbeta(1/2,eta) + 2(eta-1)log L22` is re-derived from the LKJ
+#   definition (not imported); the per-row MvNormal ref is Stan
+#   `multi_normal_cholesky_lpdf` verbatim, row constant included.
 # - Joint anchors: the K=2 case pins the Stage-C joint values
 #   (likelihood bit-exact, prior 1 ulp in the live exchange).
 #
@@ -35,7 +39,7 @@ using Enzyme
 using LogDensityProblems
 using ReactiveKernels: prepare
 using ReactiveKernelsPPL: constrain, logjac
-using SpecialFunctions: loggamma
+using SpecialFunctions: logbeta, loggamma
 
 const BRM = BayesianRegressionModels
 const _PARITY_BACKEND = AutoEnzyme(; mode = Enzyme.Reverse)
@@ -150,6 +154,12 @@ _parity_cols_xz = merge(_parity_cols, (; z = [0.1, -0.2, 0.3, 0.4, -0.5, 0.6]))
 _parity_cols_mo = (; c = [1, 2, 3, 1, 2, 3], y = [1.0, 2.0, 1.5, 2.5, 3.0, 2.0])
 _parity_cols_r2d2 = merge(_parity_cols,
     (; z = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]))
+_parity_cols_corr = (;
+    y1 = [0.5, -0.2, 0.1, 0.9, 1.4, 1.1],
+    y2 = [0.1, 0.3, -0.4, 0.2, 0.8, -0.1],
+    y3 = [-0.3, 0.7, 0.2, -0.1, 0.4, 0.6],
+    x = [-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+)
 
 # Sample variance, N−1 normalization (Stan `variance()`); dummy
 # variance without materializing the dummy (SB `brm_cat_variances`).
@@ -198,6 +208,32 @@ function _ref_simplex_logjac(u)
     end
     return jac
 end
+
+# Per-row MvNormalCholesky log-density by forward substitution, full
+# normalizer (Stan `multi_normal_cholesky_lpdf` form). RK keeps the row
+# constant Stan's model-block `~` drops for data hyperparameters — the
+# mo Dirichlet-normalizer precedent: the RK posterior exceeds Stan's by
+# exactly that constant while every gradient agrees.
+function _ref_mvn_chol_row(y, m, L)
+    K = length(y)
+    z = zeros(Float64, K)
+    for i in 1:K
+        acc = y[i] - m[i]
+        for j in 1:(i - 1)
+            acc -= L[i, j] * z[j]
+        end
+        z[i] = acc / L[i, i]
+    end
+    return -0.5 * K * log(2pi) - sum(log(abs(L[i, i])) for i in 1:K) -
+           0.5 * sum(abs2, z)
+end
+
+# K=2 LKJ(eta) from the definition: L = [1 0; rho sqrt(1-rho^2)]
+# with a unit-Jacobian free element rho, so log p =
+# -log B(1/2,eta) + (eta-1)*log(1-rho^2) =
+# -log B(1/2,eta) + 2*(eta-1)*log(L[2,2]). Derived here, not
+# imported from the PPL.
+_ref_lkj_k2(eta, L) = -logbeta(0.5, eta) + 2 * (eta - 1) * log(L[2, 2])
 
 @testset "rk parity mo monotonic" begin
     brmi = @brm _parity_cols_mo begin
@@ -261,6 +297,78 @@ end
     jac = u[2] + _ref_simplex_logjac(u[3:3])
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity correlated outcomes K=2" begin
+    brmi = @brm _parity_cols_corr begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        L_res ~ LKJCovarianceFactor(2; scale_prior = Exponential(1), shape = 2)
+        [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 7
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu1_coef, 2, :identity),
+        (:coefficient, :mu2_coef, 2, :identity),
+        (:vector, :L_res_scales, 2, :exp),
+        (:cholesky_corr, :L_res_L_corr, 1, :lkj),
+    ]
+    u = collect(range(-0.4, 0.4; length = layout.total))
+    nt = constrain(layout, u)
+    cols = _parity_cols_corr
+    m1 = nt.mu1[1] .+ nt.mu1[2] .* cols.x
+    m2 = nt.mu2[1] .+ nt.mu2[2] .* cols.x
+    L = [nt.L_res_scales[i] * nt.L_res_L_corr[i, j] for i in 1:2, j in 1:2]
+    ll = sum(_ref_mvn_chol_row([cols.y1[r], cols.y2[r]], [m1[r], m2[r]], L)
+        for r in 1:6)
+    pr = sum(logpdf(Normal(0, 1), c) for c in (nt.mu1..., nt.mu2...)) +
+        sum(logpdf(Exponential(1), s) for s in nt.L_res_scales) +
+        _ref_lkj_k2(2.0, nt.L_res_L_corr)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    jac = u[5] + u[6] + _lkj2_theta_jac(u[7])
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity correlated outcomes K=3 sampled scale" begin
+    brmi = @brm _parity_cols_corr begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        mu3 ~ 1 + x
+        tau ~ Exponential(1)
+        L3 ~ LKJCovarianceFactor(3; scale_prior = Exponential(tau), shape = 1.5)
+        [y1, y2, y3] ~ MvNormalCholesky([mu1, mu2, mu3], L3)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 13
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu1_coef, 2, :identity),
+        (:coefficient, :mu2_coef, 2, :identity),
+        (:coefficient, :mu3_coef, 2, :identity),
+        (:sampled, :tau, 1, :exp),
+        (:vector, :L3_scales, 3, :exp),
+        (:cholesky_corr, :L3_L_corr, 3, :lkj),
+    ]
+    u = collect(range(-0.3, 0.3; length = layout.total))
+    nt = constrain(layout, u)
+    cols = _parity_cols_corr
+    m = [nt.mu1[1] .+ nt.mu1[2] .* cols.x,
+        nt.mu2[1] .+ nt.mu2[2] .* cols.x,
+        nt.mu3[1] .+ nt.mu3[2] .* cols.x]
+    L = [nt.L3_scales[i] * nt.L3_L_corr[i, j] for i in 1:3, j in 1:3]
+    ll = sum(_ref_mvn_chol_row([cols.y1[r], cols.y2[r], cols.y3[r]],
+            [m[1][r], m[2][r], m[3][r]], L) for r in 1:6)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    # The K=3 LKJ normalizer is peer-tested thin-side; the hand-checked
+    # part here is the likelihood wiring plus the full posterior
+    # gradient (same stem as the K=2 case above).
+    @test isfinite(_rk_query(backend, :prior, u))
     _check_parity_gradient(backend, u)
 end
 
