@@ -312,9 +312,9 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
         # Cutpoints are implicit surface-side (`y_cutpoints`).
         _rk_ast_dotted(:OrderedLogistic, predictor)
     elseif response.family === :ordinal
-        # Plain ordinal only: discrimination/per-threshold fail closed at
-        # plan (the surface spells three positionals only); thresholds
-        # are implicit surface-side (`y_thresholds`).
+        # The surface spells three positionals only; discrimination and
+        # per-threshold design ride plan-level via the extension, and
+        # thresholds are implicit surface-side (`y_thresholds`).
         structure = response.ordinal_structure === :cumulative ?
             :Cumulative : :StoppingRatio
         linktag = response.link === :logit ? :LogitLink :
@@ -591,7 +591,17 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
     for derived in plan.derived
         push!(stmts, Expr(:(=), derived.name, derived.expression))
     end
+    # Modeled ordinal scales skip the AST: a discrimination predictor has
+    # no response use-site (the surface spells `Ordinal` with three
+    # positionals only), so its affine and priors would lower to dead
+    # posterior dimensions — the extension translates it plan-level
+    # instead. Same predictor-first rule as the planner: a discrimination
+    # symbol naming a predictor is a scale (column discriminations match
+    # no predictor and need no AST change).
+    scales = Set{Symbol}(response.discrimination
+        for response in plan.responses if response.discrimination isa Symbol)
     for predictor in plan.predictors
+        predictor.name in scales && continue
         lhs = get(rename, predictor.name, predictor.name)
         # Scalar-coefficient terms (intercept/continuous/free-beta
         # monotonic) become submodel locals inside a per-predictor

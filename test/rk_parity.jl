@@ -1,4 +1,5 @@
-# test/rk_parity.jl — BRM→RK end-to-end parity (ranef + P2 kernel models).
+# test/rk_parity.jl — BRM→RK end-to-end parity (ranef + P2 kernel +
+# ordinal-extras models).
 #
 # Run: julia --project=test test/rk_parity.jl
 #
@@ -27,7 +28,7 @@
 using Test
 using BayesianRegressionModels
 using DifferentiationInterface: AutoEnzyme
-using Distributions: Dirichlet, Exponential, Normal, logpdf
+using Distributions: Dirichlet, Exponential, Normal, logcdf, logccdf, logpdf
 using Enzyme
 using LogDensityProblems
 using ReactiveKernels: prepare
@@ -413,7 +414,7 @@ end
     _check_parity_gradient(backend, u)
 end
 
-# P2 kernel(...) execution parity (peer KernelPlate reader, RK @ 50ef06e).
+# P2 kernel(...) execution parity (peer KernelPlate reader, RK @ 86e5265).
 # Ex1/Ex2 neutral translations from parent todo 14bv4nq; SB oracles
 # re-verified on c13f41c (same numbers the peer pins in PPL test_kernel.jl).
 # Convention: posterior at constrained sigma = 1.0 (u = [0.0]) == SB oracle
@@ -494,5 +495,322 @@ end
     @test _layout_signature(layout) == [(:sampled, :sigma, 1, :exp)]
     _check_kernel_parity(backend, [0.0], -211.80708530040758, 409.2626623351777;
         grad_atol = 1e-7)
+end
+
+# Ordinal discrimination / per_threshold parity (thin-layer 37a1213
+# surface, RK @ 86e5265). The `_ref_ordinal` oracle re-derives SB's
+# `brm_ordinal_*` Stan math (src/sbimpl.jl): cumulative cells take
+# `F(d*(c-eta))` differences, stopping-ratio stages take
+# `d*(c-eta-E)` with the stage effect inside the scaled argument, and a
+# modeled scale is `exp` over its log-link predictor (verified against
+# SBBRMI-emitted Stan: `vector disc = exp(log_disc)`).
+_ord_cols = (;
+    y=[1, 2, 3, 2, 1, 3, 2, 1, 3],
+    x=[0.5, -1.0, 1.5, 0.0, -0.5, 1.0, -0.25, 0.75, -1.25],
+    g=[1, 2, 3, 1, 2, 3, 1, 2, 3],
+    z1=[0.11, 0.23, 0.37, 0.41, 0.53, 0.62, 0.71, 0.83, 0.97],
+    z2=[0.91, 0.82, 0.73, 0.64, 0.55, 0.46, 0.37, 0.28, 0.19],
+    d=[0.5, 1.0, 1.5, 2.0, 1.0, 0.8, 1.2, 0.9, 1.1],
+)
+_ord_cols1 = merge(_ord_cols, (; y=ones(Int, 9)))
+
+_ref_log_inv_logit(z) = z >= 0 ? -log1p(exp(-z)) : z - log1p(exp(z))
+function _ref_ord_logF(z, link)
+    link === :logit && return _ref_log_inv_logit(z)
+    link === :probit && return logcdf(Normal(), z)
+    return log(-expm1(-exp(z)))
+end
+function _ref_ord_logCC(z, link)
+    link === :logit && return _ref_log_inv_logit(-z)
+    link === :probit && return logccdf(Normal(), z)
+    return -exp(z)
+end
+_ref_log_diff_exp(a, b) = a + log1p(-exp(b - a))
+
+# SB `brm_ordinal_lpmf` scalar mirror: `y` in 1..K, scalar `eta`, the K-1
+# thresholds `t`, the positive scale `d`, and the K-1 stage effects `E`
+# (stopping only; `nothing` without per_threshold).
+function _ref_ordinal(y, eta, t, d, structure, link, E=nothing)
+    K = length(t) + 1
+    if structure === :cumulative
+        y == 1 && return _ref_ord_logF(d * (t[1] - eta), link)
+        y == K && return _ref_ord_logCC(d * (t[K-1] - eta), link)
+        hi = _ref_ord_logF(d * (t[y] - eta), link)
+        lo = _ref_ord_logF(d * (t[y-1] - eta), link)
+        return _ref_log_diff_exp(hi, lo)
+    else
+        ll = 0.0
+        for j in 1:K-1
+            eff = E === nothing ? 0.0 : E[j]
+            z = d * (t[j] - eta - eff)
+            j < y && (ll += _ref_ord_logCC(z, link))
+            j == y && (ll += _ref_ord_logF(z, link))
+        end
+        return ll
+    end
+end
+
+@testset "rk parity ordinal cumulative literal scale" begin
+    brmi = @brm _ord_cols begin
+        eta ~ 0 + x
+        y ~ Ordinal(Cumulative(), LogitLink(), eta; discrimination=2.0)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 3
+    @test _layout_signature(layout) == [
+        (:coefficient, :eta_coef, 1, :identity),
+        (:vector, :y_thresholds, 2, :ordered),
+    ]
+    u = [0.4, -0.2, 0.25]
+    nt = constrain(layout, u)
+    eta = only(Vector(nt.eta)) .* _ord_cols.x
+    t = Vector(nt.y_thresholds)
+    ll = sum(_ref_ordinal(y, e, t, 2.0, :cumulative, :logit)
+        for (y, e) in zip(_ord_cols.y, eta))
+    pr = logpdf(Normal(), only(nt.eta)) + sum(logpdf.(Normal(), t))
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ u[3]
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[3]
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity ordinal cumulative modeled scale" begin
+    brmi = @brm _ord_cols begin
+        eta ~ 0 + x
+        log(disc) ~ 1 + x
+        y ~ Ordinal(Cumulative(), LogitLink(), eta; discrimination=disc)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 5
+    @test _layout_signature(layout) == [
+        (:coefficient, :eta_coef, 1, :identity),
+        (:coefficient, :disc_coef, 2, :identity),
+        (:vector, :y_thresholds, 2, :ordered),
+    ]
+    u = [0.4, 0.1, -0.2, 0.25, -0.15]
+    nt = constrain(layout, u)
+    eta = only(Vector(nt.eta)) .* _ord_cols.x
+    a = Vector(nt.disc)
+    d = exp.(a[1] .+ a[2] .* _ord_cols.x)
+    t = Vector(nt.y_thresholds)
+    ll = sum(_ref_ordinal(y, e, t, di, :cumulative, :logit)
+        for (y, e, di) in zip(_ord_cols.y, eta, d))
+    pr = logpdf(Normal(), only(nt.eta)) + sum(logpdf.(Normal(), a)) +
+        sum(logpdf.(Normal(), t))
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ u[5]
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[5]
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity ordinal cumulative grouping scale" begin
+    brmi = @brm _ord_cols begin
+        eta ~ 0 + x
+        log(disc) ~ 0 + g
+        effect(disc, g) ~ Normal(0, 1)
+        y ~ Ordinal(Cumulative(), CloglogLink(), eta; discrimination=disc)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 6
+    @test _layout_signature(layout) == [
+        (:coefficient, :eta_coef, 1, :identity),
+        (:coefficient, :disc_coef, 3, :identity),
+        (:vector, :y_thresholds, 2, :ordered),
+    ]
+    u = [0.4, 0.1, -0.2, 0.3, 0.25, -0.15]
+    nt = constrain(layout, u)
+    eta = only(Vector(nt.eta)) .* _ord_cols.x
+    levs = sort(unique(_ord_cols.g))
+    C = Float64.(_ord_cols.g .== permutedims(levs))
+    d = exp.(C * Vector(nt.disc))
+    t = Vector(nt.y_thresholds)
+    ll = sum(_ref_ordinal(y, e, t, di, :cumulative, :cloglog)
+        for (y, e, di) in zip(_ord_cols.y, eta, d))
+    pr = logpdf(Normal(), only(nt.eta)) +
+        sum(logpdf.(Normal(), nt.disc)) + sum(logpdf.(Normal(), t))
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ u[6]
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[6]
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity ordinal cumulative column scale" begin
+    brmi = @brm _ord_cols begin
+        eta ~ 0 + x
+        y ~ Ordinal(Cumulative(), LogitLink(), eta; discrimination=d)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 3
+    @test _layout_signature(layout) == [
+        (:coefficient, :eta_coef, 1, :identity),
+        (:vector, :y_thresholds, 2, :ordered),
+    ]
+    u = [0.4, -0.2, 0.25]
+    nt = constrain(layout, u)
+    eta = only(Vector(nt.eta)) .* _ord_cols.x
+    t = Vector(nt.y_thresholds)
+    ll = sum(_ref_ordinal(y, e, t, di, :cumulative, :logit)
+        for (y, e, di) in zip(_ord_cols.y, eta, _ord_cols.d))
+    pr = logpdf(Normal(), only(nt.eta)) + sum(logpdf.(Normal(), t))
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ u[3]
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[3]
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity ordinal stopping per_threshold p=1" begin
+    brmi = @brm _ord_cols begin
+        eta ~ 0 + x
+        y ~ Ordinal(StoppingRatio(), LogitLink(), eta; per_threshold=(z1,))
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 5
+    @test _layout_signature(layout) == [
+        (:coefficient, :eta_coef, 1, :identity),
+        (:vector, :y_thresholds, 2, :identity),
+        (:vector, :y_threshold_beta, 2, :identity),
+    ]
+    u = [0.4, 0.1, -0.2, 0.25, -0.15]
+    nt = constrain(layout, u)
+    eta = only(Vector(nt.eta)) .* _ord_cols.x
+    t = Vector(nt.y_thresholds)
+    beta = Vector(nt.y_threshold_beta)
+    E = [_ord_cols.z1[i] * beta[j] for i in 1:9, j in 1:2]
+    ll = sum(_ref_ordinal(y, e, t, 1.0, :stopping, :logit, E[i, :])
+        for (i, (y, e)) in enumerate(zip(_ord_cols.y, eta)))
+    pr = logpdf(Normal(), only(nt.eta)) + sum(logpdf.(Normal(), t)) +
+        sum(logpdf.(Normal(), beta))
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity ordinal stopping per_threshold p=2" begin
+    brmi = @brm _ord_cols begin
+        eta ~ 0 + x
+        y ~ Ordinal(StoppingRatio(), ProbitLink(), eta;
+            per_threshold=(z1, z2))
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 7
+    @test _layout_signature(layout) == [
+        (:coefficient, :eta_coef, 1, :identity),
+        (:vector, :y_thresholds, 2, :identity),
+        (:vector, :y_threshold_beta, 4, :identity),
+    ]
+    u = [0.4, 0.1, -0.2, 0.25, -0.15, 0.05, -0.1]
+    nt = constrain(layout, u)
+    eta = only(Vector(nt.eta)) .* _ord_cols.x
+    t = Vector(nt.y_thresholds)
+    beta = Vector(nt.y_threshold_beta)
+    X = hcat(_ord_cols.z1, _ord_cols.z2)
+    E = [sum(X[i, c] * beta[(j-1)*2+c] for c in 1:2)
+        for i in 1:9, j in 1:2]
+    ll = sum(_ref_ordinal(y, e, t, 1.0, :stopping, :probit, E[i, :])
+        for (i, (y, e)) in enumerate(zip(_ord_cols.y, eta)))
+    pr = logpdf(Normal(), only(nt.eta)) + sum(logpdf.(Normal(), t)) +
+        sum(logpdf.(Normal(), beta))
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity ordinal stopping scale plus stage" begin
+    brmi = @brm _ord_cols begin
+        eta ~ 0 + x
+        log(disc) ~ 1 + x
+        y ~ Ordinal(StoppingRatio(), LogitLink(), eta;
+            discrimination=disc, per_threshold=(z1,))
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 7
+    @test _layout_signature(layout) == [
+        (:coefficient, :eta_coef, 1, :identity),
+        (:coefficient, :disc_coef, 2, :identity),
+        (:vector, :y_thresholds, 2, :identity),
+        (:vector, :y_threshold_beta, 2, :identity),
+    ]
+    u = [0.4, 0.1, -0.2, 0.25, -0.15, 0.05, -0.1]
+    nt = constrain(layout, u)
+    eta = only(Vector(nt.eta)) .* _ord_cols.x
+    a = Vector(nt.disc)
+    d = exp.(a[1] .+ a[2] .* _ord_cols.x)
+    t = Vector(nt.y_thresholds)
+    beta = Vector(nt.y_threshold_beta)
+    E = [_ord_cols.z1[i] * beta[j] for i in 1:9, j in 1:2]
+    ll = sum(_ref_ordinal(_ord_cols.y[i], eta[i], t, d[i], :stopping,
+        :logit, E[i, :]) for i in 1:9)
+    pr = logpdf(Normal(), only(nt.eta)) + sum(logpdf.(Normal(), a)) +
+        sum(logpdf.(Normal(), t)) + sum(logpdf.(Normal(), beta))
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity ordinal K=1 modeled scale" begin
+    brmi = @brm _ord_cols1 begin
+        eta ~ 0 + x
+        log(disc) ~ 1 + x
+        y ~ Ordinal(Cumulative(), LogitLink(), eta; discrimination=disc)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 3
+    @test _layout_signature(layout) == [
+        (:coefficient, :eta_coef, 1, :identity),
+        (:coefficient, :disc_coef, 2, :identity),
+        (:vector, :y_thresholds, 0, :ordered),
+    ]
+    u = [0.4, 0.1, -0.2]
+    nt = constrain(layout, u)
+    # Zero-information likelihood (SB's K=1 degeneration), live prior.
+    @test _rk_query(backend, :likelihood, u) == 0.0
+    pr = logpdf(Normal(), only(nt.eta)) +
+        sum(logpdf.(Normal(), nt.disc))
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ pr
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity ordinal K=1 per_threshold" begin
+    brmi = @brm _ord_cols1 begin
+        eta ~ 0 + x
+        y ~ Ordinal(StoppingRatio(), LogitLink(), eta; per_threshold=(z1,))
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 1
+    @test _layout_signature(layout) == [
+        (:coefficient, :eta_coef, 1, :identity),
+        (:vector, :y_thresholds, 0, :identity),
+        (:vector, :y_threshold_beta, 0, :identity),
+    ]
+    u = [0.4]
+    nt = constrain(layout, u)
+    # Zero stages: zero-information likelihood, eta prior only.
+    @test _rk_query(backend, :likelihood, u) == 0.0
+    pr = logpdf(Normal(), only(nt.eta))
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ pr
+    _check_parity_gradient(backend, u)
 end
 

@@ -55,12 +55,14 @@ const PINS = [
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
     # through. 86e5265 (2026-09-19, main): v12 PPL primitives — ordinal
-    # modeled latent scale, mo/mo1 simplex (peer todo 1d9d0cy; the surface
-    # BRM mo/mo1 emission targets), non-centered scan/ar, LKJ Cholesky
-    # log-Jacobian fix — on top of the KernelPlate-reader floor (50ef06e;
-    # peer todo 1q5mk32, P2 execution-parity gate). The BRM-side
-    # submodel-emission flip (todo 10n4rb4) builds against this pin: the
-    # RKPPLSubmodel/_expand_submodels surface is stable here.
+    # modeled latent scale (the surface the BRM ordinal
+    # discrimination/per_threshold extras target), mo/mo1 simplex (peer
+    # todo 1d9d0cy; the surface BRM mo/mo1 emission targets),
+    # non-centered scan/ar, LKJ Cholesky log-Jacobian fix — on top of the
+    # KernelPlate-reader floor (50ef06e; peer todo 1q5mk32, P2
+    # execution-parity gate). The BRM-side submodel-emission flip (todo
+    # 10n4rb4) builds against this pin: the RKPPLSubmodel/_expand_submodels
+    # surface is stable here.
     ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "86e52656adf70c9c1981d9964cc7278066985f13"),  # main
 ]
 
