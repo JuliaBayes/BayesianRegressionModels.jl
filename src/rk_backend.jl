@@ -3285,8 +3285,8 @@ end
 # The thin layer owns the plate (`x[i]`-ranged `@plate` with the shared
 # args) and lowers `coef .* latent` to a `ContinuousTerm` over the
 # plate; the observation likelihood rides a synthetic gaussian-identity
-# plan response (`_rk_plan_me_observations!`, sharing the
-# `normal_id_glm` lattice with the main responses). SB shares ONE
+# plan response (`_rk_plan_me_observations!`, emitted bare like the
+# main responses). SB shares ONE
 # latent per model across collectors, so a second `me(x)` term fails
 # closed here (dedup is sequenced with the hierarchical row) — never a
 # serialized second exchangeable latent double-counting the evidence.

@@ -276,39 +276,28 @@ function _rk_ast_factor_prior(coef::Symbol, col::Symbol,
         _rk_ast_dotted(:Normal, location, scale))
 end
 
-# The scale-slot formal role per family (Stan/SB-literal where one
-# exists): `normal_id_glm(eta, sigma)` reads like its Stan fused form.
-_rk_ast_glm_scale_role(family::Symbol) =
-    family === :nb2_log ? :phi :
-    family === :gamma_log ? :alpha :
-    family === :beta_logit ? :kappa : :sigma
-
-_rk_ast_glm_uses_scale(family::Symbol) =
+_rk_ast_response_uses_scale(family::Symbol) =
     family === :gaussian || family === :nb2_log ||
     family === :gamma_log || family === :beta_logit
 
-# The scale-slot body spelling inside a stream def. A direct scale
-# (outer name, literal, or the plan-forbidden nothing) passes through
-# the role formal — the call carries the value, so literal and outer
-# scales share one def. A distributional scale predictor inverts its
-# link on the role formal exactly like a location predictor (`exp.` for
-# log), so the response always reads the constrained vector; the link
-# is structural and joins the def name (see `_rk_ast_glm_name`).
-# Returns `(formal, body)`.
-function _rk_ast_glm_scale_leaf(response::_RKLikelihoodSpec,
-        predictor_link::Dict{Symbol,Symbol})
+# The scale-slot body spelling inside a bare response statement. A
+# direct scale (outer name, literal, or the plan-forbidden nothing)
+# passes through inline. A distributional scale predictor inverts its
+# link on the predictor name exactly like a location predictor (`exp.`
+# for log), so the response always reads the constrained vector.
+function _rk_ast_response_scale(response::_RKLikelihoodSpec,
+        rename::Dict{Symbol,Symbol}, predictor_link::Dict{Symbol,Symbol})
     name = response.scale_predictor
-    formal = _rk_ast_glm_scale_role(response.family)
-    name === nothing && return formal, formal
+    name === nothing && return response.scale
     response.scale === nothing || error(
         "RK backend: internal: response `$(response.response)` carries " *
         "both a scalar scale and a scale predictor")
+    actual = get(rename, name, name)
     link = predictor_link[name]
-    body = link === :identity ? formal :
-        link === :log ? _rk_ast_dotted(:exp, formal) :
-        link === :logit ? _rk_ast_dotted(:logistic, formal) :
-        error("RK backend: internal: scale predictor `$name` has link `$link`")
-    formal, body
+    link === :identity && return actual
+    link === :log && return _rk_ast_dotted(:exp, actual)
+    link === :logit && return _rk_ast_dotted(:logistic, actual)
+    error("RK backend: internal: scale predictor `$name` has link `$link`")
 end
 
 # The inverse-link spelling (`Bernoulli.(logistic.(η))`,
@@ -318,13 +307,13 @@ end
 # direct serializer produced, on all six slice-1 families (verified
 # behaviorally against `lower_rkppl`, not assumed).
 #
-# `leaf` maps each role to its stream-def BODY spelling: `:predictor`
-# (`:eta`, or `:p` for simplex responses), `:scale` (the role formal,
-# possibly link-inverted), `:trials`/`:weights`/`:lower`/`:upper`
-# (formals; the call carries columns or literals so defs share across
-# values), `:extra_predictors`/`:count_columns` (tail/count formals).
-# Evidence and weights STRUCTURE (which wrapper, whether weighted)
-# still read from `response`.
+# `leaf` maps each role to its INLINE spelling: `:predictor` (the
+# predictor name, possibly renamed), `:scale` (the scale value or
+# link-inverted scale predictor), `:trials`/`:weights`/`:lower`/`:upper`
+# (columns or literals inline),
+# `:extra_predictors`/`:count_columns` (tail predictors / tail count
+# columns inline). Evidence and weights STRUCTURE (which wrapper,
+# whether weighted) still read from `response`.
 function _rk_ast_response_dist(response::_RKLikelihoodSpec,
         leaf::Dict{Symbol,Any})
     predictor = leaf[:predictor]
@@ -414,42 +403,10 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
         _rk_ast_dotted(:weighted, dist, leaf[:weights])
 end
 
-# The shared stream-submodel lattice name for a response: mechanical
-# `<family>_glm` (+ ordinal structure/link, + distributional-scale
-# link, + evidence, + weights, + leveled class count), except the
-# Gaussian identity plain case, which takes SB's fused name
-# `normal_id_glm` verbatim for cross-backend grep-ability. Every
-# structural body input joins the name; value inputs (columns,
-# literals, outer names) ride arguments, so same name means same body
-# and defs dedupe by name.
-function _rk_ast_glm_name(response::_RKLikelihoodSpec,
-        predictor_link::Dict{Symbol,Symbol})
-    family = response.family
-    if family === :gaussian && response.link === :identity &&
-            response.scale_predictor === nothing &&
-            response.evidence.kind === :none && response.weights === nothing
-        return :normal_id_glm
-    end
-    parts = Any[family]
-    family === :ordinal &&
-        push!(parts, response.ordinal_structure, response.link)
-    if response.scale_predictor !== nothing
-        push!(parts, :dist, predictor_link[response.scale_predictor])
-    end
-    response.evidence.kind !== :none && push!(parts, response.evidence.kind)
-    response.weights !== nothing && push!(parts, :weighted)
-    if family === :categorical_logit || family === :multinomial
-        push!(parts, Symbol(:k, _rk_ast_glm_levels(response)))
-    end
-    push!(parts, :glm)
-    Symbol(join(parts, "_"))
-end
-
 # The class count behind a leveled response: the planned `n_levels`
 # when set, else the tail/count arity implies it (K−2 tails, K−1 tail
-# counts). A mismatch is an internal error — the name must capture
-# the body exactly.
-function _rk_ast_glm_levels(response::_RKLikelihoodSpec)
+# counts). A mismatch is an internal error.
+function _rk_ast_response_levels(response::_RKLikelihoodSpec)
     family = response.family
     implied = family === :categorical_logit ?
         length(response.extra_predictors) + 2 :
@@ -462,78 +419,50 @@ function _rk_ast_glm_levels(response::_RKLikelihoodSpec)
     n
 end
 
-# Build the stream-submodel definition + use-site call for a response.
-# Formal order is fixed — location, scale role, `n`, `weights`,
-# `lower`, `upper`, then categorical tails (`t1..`) or multinomial
-# tail counts (`c1..`) — absent roles skipped, so shared defs agree by
-# construction. Location is `:eta` (pre-link by construction — the body
-# applies the inverse link) or `:p` for simplex responses. Missing
-# evidence sides pass ∓Inf floats; the thin layer normalizes them back
-# to nothing at bind. Returns `(defname, def, call)`.
-function _rk_ast_glm_parts(response::_RKLikelihoodSpec,
+# Build the bare response statement for a response: `resp .~ dist`
+# with every role spelled inline (predictor and scale-predictor names
+# renamed like any other use-site). This is exactly the statement a
+# one-shot stream submodel would expand to (the old `*_glm` shells took
+# a precomputed predictor while borrowing Stan/SB's fused
+# design-matrix-plus-coefficients name, so they were renamed out of
+# existence); emitting it directly keeps the lowered program identical
+# while the surface stays honest. Missing evidence sides pass ∓Inf
+# floats; the thin layer normalizes them back to nothing at bind.
+function _rk_ast_response_stmt(response::_RKLikelihoodSpec,
         rename::Dict{Symbol,Symbol}, predictor_link::Dict{Symbol,Symbol})
     family = response.family
-    loc_formal =
-        (family === :multinomial || family === :categorical) ? :p : :eta
-    formals = Symbol[loc_formal]
-    callargs = Any[get(rename, response.predictor, response.predictor)]
-    leaf = Dict{Symbol,Any}(:predictor => loc_formal)
-    if _rk_ast_glm_uses_scale(family)
-        formal, body = _rk_ast_glm_scale_leaf(response, predictor_link)
-        leaf[:scale] = body
-        push!(formals, formal)
-        push!(callargs, response.scale_predictor === nothing ?
-            response.scale : get(rename, response.scale_predictor,
-                response.scale_predictor))
+    leaf = Dict{Symbol,Any}(
+        :predictor => get(rename, response.predictor, response.predictor))
+    if _rk_ast_response_uses_scale(family)
+        leaf[:scale] =
+            _rk_ast_response_scale(response, rename, predictor_link)
     end
     if family === :binomial_logit || family === :binomial_probit ||
             family === :binomial_cloglog || family === :multinomial
-        leaf[:trials] = :n
-        push!(formals, :n)
-        push!(callargs, response.trials)
+        leaf[:trials] = response.trials
     end
     if response.weights !== nothing
-        leaf[:weights] = :weights
-        push!(formals, :weights)
-        push!(callargs, response.weights)
+        leaf[:weights] = response.weights
     end
     kind = response.evidence.kind
     if kind === :truncated || kind === :censored
-        leaf[:lower] = :lower
-        leaf[:upper] = :upper
-        push!(formals, :lower, :upper)
         lower = response.evidence.lower
         upper = response.evidence.upper
-        push!(callargs, lower === nothing ? -Inf : lower,
-            upper === nothing ? Inf : upper)
+        leaf[:lower] = lower === nothing ? -Inf : lower
+        leaf[:upper] = upper === nothing ? Inf : upper
     elseif kind === :interval_censored
-        leaf[:upper] = :upper
-        push!(formals, :upper)
-        push!(callargs, response.evidence.upper)
+        leaf[:upper] = response.evidence.upper
     end
     if family === :categorical_logit
-        tails = Symbol[Symbol(:t, i)
-            for i in 1:length(response.extra_predictors)]
-        leaf[:extra_predictors] = tails
-        append!(formals, tails)
-        append!(callargs,
-            (get(rename, p, p) for p in response.extra_predictors))
+        _rk_ast_response_levels(response)
+        leaf[:extra_predictors] =
+            Any[get(rename, p, p) for p in response.extra_predictors]
     elseif family === :multinomial
-        counts = Symbol[Symbol(:c, i)
-            for i in 1:length(response.count_columns)]
-        leaf[:count_columns] = counts
-        append!(formals, counts)
-        append!(callargs, response.count_columns)
+        _rk_ast_response_levels(response)
+        leaf[:count_columns] = response.count_columns
     end
-    dist = _rk_ast_response_dist(response, leaf)
-    # The response slot is fixed: bodies reference formals only, so no
-    # free tail/count spelling can clobber it under substitution.
-    defname = _rk_ast_glm_name(response, predictor_link)
-    def = Expr(:(=), Expr(:call, defname, formals...),
-        Expr(:block, Expr(:call, :.~, :slot, dist), :slot))
-    call = Expr(:call, :~, response.response,
-        Expr(:call, defname, callargs...))
-    defname, def, call
+    Expr(:call, :.~, response.response,
+        _rk_ast_response_dist(response, leaf))
 end
 
 function _rk_ast_bucket_margin(z::_RKRanefZRecipe)
@@ -999,17 +928,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan)
             push!(stmts, _rk_ast_joint_response(response, rename))
             continue
         end
-        defname, def, call = _rk_ast_glm_parts(
-            response, rename, predictor_link)
-        if haskey(seen, defname)
-            seen[defname] == def || error(
-                "RK backend: internal: submodel lattice collision on " *
-                "`$defname` (same name, different body)")
-        else
-            seen[defname] = def
-            push!(defs, def)
-        end
-        push!(stmts, call)
+        push!(stmts,
+            _rk_ast_response_stmt(response, rename, predictor_link))
     end
     _RKEmittedProgram(defs, Expr(:block, stmts...))
 end
