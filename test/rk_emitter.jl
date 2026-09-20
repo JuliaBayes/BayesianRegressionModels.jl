@@ -1147,20 +1147,16 @@ end
     @test term.options.beta == :dar_mu_t_beta_2
 end
 
-@testset "fail closed: SB long tail (me, simplex)" begin
+@testset "fail closed: SB long tail (simplex)" begin
     # `mo1(c)` used to fail here; it plans now (thin-layer monotonic
     # surface landed, covered in "monotonic plan shape"). `dar(t)` used to
     # fail here too; it plans now (thin-layer dar surface, covered in
     # "differenced-AR plan shape"). `ar` plans now as well (thin-layer
     # scan-ar slice landed, covered in "ar plan shape"). The LKJ
     # declaration and joint response plan now too (thin-layer correlated
-    # slice landed, covered in "LKJ factor + joint plan shape").
-    # Measurement-error latent predictor stays closed.
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
-        mu ~ 1 + me(x, 0.5)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
-    end)
+    # slice landed, covered in "LKJ factor + joint plan shape"). `me`
+    # plans now as well (thin-layer plate-vector slice landed, covered
+    # in "me plan shape").
     # Unreferenced simplex-valued parameter declaration stays closed
     # (response-linked simplexes are the categorical lane's open shape).
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
@@ -1581,6 +1577,179 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
+end
+
+@testset "me plan shape" begin
+    brmi = @brm df begin
+        mu ~ 1 + me(x, 0.5)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    predictor = only(plan.predictors)
+    @test [t.kind for t in predictor.terms] == [:intercept, :me]
+    term = only(t for t in predictor.terms if t.kind === :me)
+    @test term.columns == [:x]
+    @test term.addressee === :me_x
+    @test term.options.latent === :me_x
+    @test (term.options.loc, term.options.scale) == (0.0, 1.0)
+    @test term.options.sd == 0.5
+    @test plan.columns[:x] == df.x
+    # The latent is preamble-emitted (like gp/ar latents): nothing lands
+    # in plan.parameters for the plate itself.
+    @test [p.name for p in plan.parameters] == [:s]
+    # The observation likelihood rides a synthetic gaussian-identity
+    # response after the formula responses.
+    @test length(plan.responses) == 2
+    obs = plan.responses[2]
+    @test obs.family === :gaussian
+    @test obs.link === :identity
+    @test obs.response === :x
+    @test obs.predictor === :me_x
+    @test obs.scale == 0.5
+    @test obs.weights === nothing
+    @test obs.evidence.kind === :none
+    # Default beta prior matches SB's popefs default.
+    prior = only(p for p in plan.population_priors
+        if p.addressee === :me_x)
+    @test (prior.predictor, prior.location, prior.scale) ===
+        (:mu, 0.0, 1.0)
+    # `:`-wide statements claim the latent beta exactly as SB does.
+    brmi = @brm df begin
+        mu ~ 1 + me(x, 0.5)
+        effect(mu, :) ~ Normal(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    got = Dict(p.addressee => (p.location, p.scale)
+        for p in plan.population_priors)
+    @test got == Dict(:Intercept => (0.0, 2.0), :me_x => (0.0, 2.0))
+    # The predictor-wide default loses to the predictor-specific claim.
+    brmi = @brm df begin
+        mu ~ 1 + me(x, 0.5)
+        effect(:, :) ~ Normal(1, 3)
+        effect(mu, :) ~ Normal(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    prior = only(p for p in plan.population_priors
+        if p.addressee === :me_x)
+    @test (prior.location, prior.scale) == (0.0, 2.0)
+    # A `latent(...)` override rides the plate's shared-scalar args.
+    brmi = @brm df begin
+        mu ~ 1 + me(x, 0.5)
+        latent(mu, me(x)) ~ Normal(0.5, 1.5)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    term = only(t for t in only(plan.predictors).terms if t.kind === :me)
+    @test (term.options.loc, term.options.scale) == (0.5, 1.5)
+    brmi = @brm df begin
+        mu ~ 1 + me(x, 0.5)
+        latent(:, me(x)) ~ Normal(1, 4)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    term = only(t for t in only(plan.predictors).terms if t.kind === :me)
+    @test (term.options.loc, term.options.scale) == (1.0, 4.0)
+    # ... while a non-Normal latent prior stays closed (SB's
+    # arbitrary-prior merge is sequenced).
+    @test_throws "latent prior must be `Normal(location, scale)`" BRM._brm_rk_plan(
+        @brm df begin
+            mu ~ 1 + me(x, 0.5)
+            latent(mu, me(x)) ~ Cauchy(0, 1)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    # Explicit addresses on the latent column stay sequenced (SB's
+    # `popcoefnames` spelling `me_x`).
+    @test_throws "sequenced" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + me(x, 0.5)
+        effect(mu, me_x) ~ Normal(0, 1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test_throws "sequenced" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + me(x, 0.5)
+        effect(:, me_x) ~ Normal(0, 1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Two error sizes mint two latents (and two observations).
+    brmi = @brm df begin
+        mu ~ 1 + me(x, 0.5) + me(z, 0.25)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    latents = [t.options.latent for t in only(plan.predictors).terms
+        if t.kind === :me]
+    @test latents == [:me_x, :me_z]
+    @test [(r.response, r.predictor, r.scale) for r in plan.responses] ==
+        [(:y, :mu, :s), (:x, :me_x, 0.5), (:z, :me_z, 0.25)]
+    # ... but an exact duplicate fails closed (SB shares one latent per
+    # model; the second would double-count the evidence).
+    @test_throws "a second `me(x)` term" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + me(x, 0.5) + me(x, 0.5)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # The same source on a second predictor fails closed too (SB shares
+    # the one latent across predictors as well).
+    @test_throws "a second `me(x)` term" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + me(x, 0.5)
+        nu ~ 1 + me(x, 0.5)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+        n ~ Normal(nu, s)
+    end)
+    # The latent needs no sibling coefficient: `0 + me(x)` is a valid
+    # single-summand scaled design (`b .* me_x` classifies thin-layer
+    # side, unlike the scan summand).
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 0 + me(x, 0.5)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test [t.kind for t in only(plan.predictors).terms] == [:me]
+    # A non-positive sd stays closed (shared preparation).
+    @test_throws "requires finite numeric sd" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + me(x, 0.0)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test_throws "requires finite numeric sd" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + me(x, -0.5)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # A non-numeric source column stays closed (shared preparation).
+    dfg = merge(df, (; gi=["a", "a", "b", "b", "c", "c"]))
+    @test_throws "numeric observations" BRM._brm_rk_plan(@brm dfg begin
+        mu ~ 1 + me(gi, 0.5)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # A sampled parameter holding the latent name fails closed.
+    @test_throws "already taken" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + me(x, 0.5)
+        me_x ~ Normal(0, 1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # The observed column doubles as an ordinary term (SB binds it once;
+    # both the data column and the latent take betas).
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + me(x, 0.5)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test [t.kind for t in only(plan.predictors).terms] ==
+        [:intercept, :continuous, :me]
 end
 
 @testset "exact gp iso plan shape" begin
