@@ -209,7 +209,12 @@ function build_static(row, state)
         return nothing
     end
     state["stan_code_sha256"] = bytes2hex(sha256(code))
-    stan_data = StanBlocks.stan_data(sb.model)
+    # Model construction registers composed families (e.g. `brm_vector_prior_*`)
+    # via `Core.eval`; a trace in this same frame would resolve methods at the
+    # frame's world age and die with "missing `lpxf_expr`" on first use (see the
+    # `stan_code(::SBBRMI)` convention in src/sbimpl.jl). Re-enter in the
+    # current world — there is no `stan_data(::SBBRMI)` wrapper to forward to.
+    stan_data = Base.invokelatest(StanBlocks.stan_data, sb.model)
     state["stan_data_sha256"] = bytes2hex(sha256(repr(sort(collect(stan_data); by=first))))
 
     try
@@ -234,8 +239,10 @@ function run_runtime!(built, state; cache_dir, sample=false, sample_draws=25)
     mkpath(cache_dir)
     path = joinpath(cache_dir, state["stan_code_sha256"] * ".stan")
     problem = try
-        value = StanBlocks.stan_instantiate(
-            built.sb.model;
+        # Same-frame world-age convention as `build_static` above: the BRM
+        # wrapper re-enters `StanBlocks.stan_instantiate` in the current world.
+        value = BayesianRegressionModels.stan_instantiate(
+            built.sb;
             path,
             make_args=["O=0", "STAN_THREADS=true"],
         )

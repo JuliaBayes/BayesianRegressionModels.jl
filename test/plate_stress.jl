@@ -125,7 +125,18 @@ const matrix_cell_gap = StanBlocks.@slic (;n=3, k=2) begin
     end
 end
 
-const constrained_vector = StanBlocks.@slic (;n=3, k=3) begin
+const constrained_vector = StanBlocks.@slic (;n=3, k=3, y=[1, 2, 3]) begin
+    p ~ plate(y; outer=(n,)) do yg
+        cell::simplex[k] ~ dirichlet(rep_vector(1.0, k))
+        yg ~ categorical(cell)
+        cell
+    end
+end
+
+# Fully dead plates lower WHOLE to generated quantities (`parameters {}` empty,
+# stanblocks-use §28) — so the pre-September unobserved simplex spelling below
+# is a GQ-routing pin, not a fitted stress. It keeps its own testset.
+const prior_only_simplex_plate = StanBlocks.@slic (;n=3, k=3) begin
     p ~ plate(; outer=(n,)) do g
         cell::simplex[k] ~ dirichlet(rep_vector(1.0, k))
         cell
@@ -183,6 +194,99 @@ const crossed_local_reuse = StanBlocks.@slic (;
     y ~ normal(b_subject[subject] + b_item[item], 1.0)
 end
 
+# Uniform-but-ragged-typed per-group predictions aggregated downstream: the
+# BRM per-group-prediction-then-aggregate shape through the `as_matrix` cast.
+const as_matrix_agg = StanBlocks.@slic (;
+    nsub=2,
+    tcol=[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+    w=[1.0, 2.0],
+    y=[0.1, 0.2, 0.3],
+) begin
+    a ~ std_normal()
+    pred ~ plate(tcol; outer=(nsub,)) do t
+        a .* t
+    end
+    I_agg = as_matrix(pred) * w
+    y ~ normal(I_agg, 1.0)
+end
+
+# `@plate for` over BRM grouped intercepts: model-scope array plus per-cell
+# observation, the annotated-loop spelling of the scalar-likelihood shape.
+const annotated_plate_groups = StanBlocks.@slic (;
+    y=[0.2, -0.1, 0.3, 0.0, 0.4, -0.2],
+    mu0=0.25,
+) begin
+    sigma ~ normal(0.0, 1.0; lower=0.0)
+    @plate for i in 1:6
+        b[i] ~ normal(mu0, 1.0)
+        y[i] ~ normal(b[i], sigma)
+    end
+end
+
+# `@scan` AR(1) latent with the observation outside: the BRM `ar`-term shape,
+# centered parameterization.
+const annotated_scan_ar1 = StanBlocks.@slic (;
+    y=[0.2, -0.1, 0.3, 0.0, 0.4],
+    T=5,
+) begin
+    phi ~ normal(0.0, 0.5)
+    s ~ exponential(1.0)
+    @scan begin
+        h[1] ~ normal(0.0, 1.0)
+        for t in 2:T
+            h[t] ~ normal(phi * h[t-1], s)
+        end
+    end
+    y ~ normal(h, 1.0)
+end
+
+# `@scan` inside `@plate for`: per-subject AR(1) state space, the BRM
+# hierarchical time-series shape, with per-column observation.
+const annotated_nested_scan = StanBlocks.@slic (;
+    y=[0.2 -0.1; 0.3 0.0; 0.4 -0.2],
+    S=2,
+    T=3,
+) begin
+    phi ~ normal(0.0, 0.5)
+    s ~ exponential(1.0)
+    @plate for j in 1:S
+        @scan begin
+            h[1] ~ normal(0.0, 1.0)
+            for t in 2:T
+                h[t] ~ normal(phi * h[t-1], s)
+            end
+        end
+        y[:, j] ~ normal(h, 1.0)
+    end
+end
+
+# Untyped fresh `~` cells with vector-shaped family arguments infer the
+# broadcast shape, byte-identically to the typed spelling (regression pin for
+# the plate-untyped-vector mis-typing fix).
+const untyped_vector_cell = StanBlocks.@slic (;S=2, T=3) begin
+    hvec ~ normal(0.0, 1.0; n=T)
+    yy ~ plate(; outer=(S,)) do j
+        yj ~ normal(hvec, 1.0)
+        yj
+    end
+end
+
+const typed_vector_cell = StanBlocks.@slic (;S=2, T=3) begin
+    hvec ~ normal(0.0, 1.0; n=T)
+    yy ~ plate(; outer=(S,)) do j
+        yj::vector[T] ~ normal(hvec, 1.0)
+        yj
+    end
+end
+
+const EXPECTED_DIMENSIONS = Dict(
+    "constrained vector" => 6,
+    "as-matrix aggregation" => 1,
+    "annotated plate groups" => 7,
+    "annotated scan AR(1)" => 7,
+    "annotated nested scan" => 8,
+)
+
 
 @info "BRM PLATE stress environment" StanBlocks=Base.pkgversion(StanBlocks) BridgeStan=Base.pkgversion(BridgeStan) RUN_BRIDGESTAN RUN_GAPS STRESS_CASE
 
@@ -197,6 +301,10 @@ end
             "N-D vector" => nd_vector,
             "crossed groups" => crossed_groups,
             "crossed local reuse" => crossed_local_reuse,
+            "as-matrix aggregation" => as_matrix_agg,
+            "annotated plate groups" => annotated_plate_groups,
+            "annotated scan AR(1)" => annotated_scan_ar1,
+            "annotated nested scan" => annotated_nested_scan,
         )
             STRESS_CASE == "all" || STRESS_CASE == name || continue
             @testset "$name" begin
@@ -217,14 +325,42 @@ end
                 "ragged input" => ragged_input,
                 "constrained vector" => constrained_vector,
                 "crossed local reuse" => crossed_local_reuse,
+                "as-matrix aggregation" => as_matrix_agg,
+                "annotated plate groups" => annotated_plate_groups,
+                "annotated scan AR(1)" => annotated_scan_ar1,
+                "annotated nested scan" => annotated_nested_scan,
             )
                 STRESS_CASE == "all" || STRESS_CASE == name || continue
                 @info "Running BRM PLATE BridgeStan case" name
-                expected_dimension = name == "constrained vector" ? 6 : nothing
+                expected_dimension = get(EXPECTED_DIMENSIONS, name, nothing)
                 @test bridgestan_accepts(model; expected_dimension)
             end
         else
             @info "Skipping BridgeStan runtime gate (BRM_PLATE_STRESS_RUNTIME=0)"
+        end
+    end
+
+    @testset "prior-only plate routes to generated quantities" begin
+        if STRESS_CASE == "all" || STRESS_CASE == "prior-only simplex"
+            @info "Running BRM PLATE GQ-routing pin"
+            transpiles = StanBlocks.transpiles(prior_only_simplex_plate; re=false)
+            @test transpiles
+            if transpiles
+                @test stanc_accepts(prior_only_simplex_plate)
+                code = StanBlocks.stan_code(prior_only_simplex_plate)
+                @test occursin(r"parameters\s*\{\s*\}", code)
+                @test occursin("dirichlet_vector_rng", code)
+            end
+        end
+    end
+
+    @testset "untyped vector cell infers broadcast shape" begin
+        if STRESS_CASE == "all" || STRESS_CASE == "untyped vector cell"
+            @info "Running BRM PLATE untyped-cell pin"
+            @test StanBlocks.transpiles(untyped_vector_cell; re=false)
+            @test stanc_accepts(untyped_vector_cell)
+            @test StanBlocks.stan_code(untyped_vector_cell) ==
+                StanBlocks.stan_code(typed_vector_cell)
         end
     end
 
