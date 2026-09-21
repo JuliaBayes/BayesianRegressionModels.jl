@@ -736,6 +736,16 @@ kernel_schedule(n; subject=collect(1:n)) = (;
               constrained_names[loc_coordinates])
     @test_throws ErrorException brm_output_coordinates(d, :loc, ["not_loc.1"])
 
+    # A correlated random-effect carrier is internal and has no logical
+    # target. Once a consumer has discovered the `BRMOutput`, it can still
+    # resolve that carrier without reaching for the private matching helper.
+    L = byname[:b_p_subject_L]
+    @test L.logical === nothing
+    L_coordinates = brm_output_coordinates(L, constrained_names)
+    @test !isempty(L_coordinates)
+    @test all(startswith(string(L.name) * "."), constrained_names[L_coordinates])
+    @test_throws ErrorException brm_output_coordinates(L, ["not_b_p_subject_L.1"])
+
     # A ragged observation left INSIDE the plate cell (`yy ~ normal(...)` above)
     # keeps the observed base through StanBlocks' compiler-owned loop. Its draw
     # is flat over the ragged backing memory, its log likelihood is aggregate per
