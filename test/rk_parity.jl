@@ -33,8 +33,8 @@ using Test
 using BayesianRegressionModels
 using CategoricalArrays: categorical, levelcode
 using DifferentiationInterface: AutoEnzyme
-using Distributions: Beta, Dirichlet, Exponential, LogNormal, Normal, logcdf,
-                     logccdf, logpdf
+using Distributions: Beta, Dirichlet, Exponential, LogNormal, Normal, cdf,
+                     logcdf, logccdf, logpdf
 using Enzyme
 using LogDensityProblems
 using ReactiveKernels: prepare
@@ -142,6 +142,20 @@ function _ref_ar1_path(phi, eps)
     return u
 end
 
+# SB `differenced_ar1_path` verbatim (`x` zero-started, `d[0] = 0`,
+# `d[t] = beta*d[t-1] + sigma*z[t]`, `x[t+1] = x[t] + d[t]`), over the
+# T-1 constrained innovations.
+function _ref_dar_path(beta, sigma, z)
+    n = length(z)
+    x = zeros(Float64, n + 1)
+    inc = 0.0
+    for t in 1:n
+        inc = beta * inc + sigma * z[t]
+        x[t + 1] = x[t] + inc
+    end
+    return x
+end
+
 _parity_cols = (;
     g = [1, 2, 1, 3, 2, 3],
     x = [0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
@@ -160,6 +174,8 @@ _parity_cols_corr = (;
     y3 = [-0.3, 0.7, 0.2, -0.1, 0.4, 0.6],
     x = [-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
 )
+_parity_cols_dar = (; t = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    y = [0.5, -0.2, 0.1, 0.9, 1.4, 1.1])
 
 # Sample variance, N−1 normalization (Stan `variance()`); dummy
 # variance without materializing the dummy (SB `brm_cat_variances`).
@@ -489,6 +505,88 @@ end
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     jac = u[4] + (log(R2) + log1p(-R2)) + u[6] + _ref_simplex_logjac(u[7:8])
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity dar default" begin
+    brmi = @brm _parity_cols_dar begin
+        mu ~ 1 + dar(t)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 9
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 1, :identity),
+        (:sampled, :dar_mu_t_beta, 1, :interval),
+        (:sampled, :dar_mu_t_sigma, 1, :exp),
+        (:sampled, :s, 1, :exp),
+        (:scan, :_ppl_dar_z_dar_mu, 5, :identity),
+    ]
+    u = collect(range(-0.4, 0.4; length = layout.total))
+    nt = constrain(layout, u)
+    beta, sigma = nt.dar_mu_t_beta, nt.dar_mu_t_sigma
+    z = nt._ppl_dar_z_dar_mu
+    path = _ref_dar_path(beta, sigma, z)
+    @test path[1] == 0.0
+    cols = _parity_cols_dar
+    ll = sum(logpdf.(Normal.(nt.mu[1] .+ path, nt.s), cols.y))
+    # Truncated persistence WITH the Stan truncation renormalizer; the
+    # HalfNormal scale carries the thin-layer `:positive` half
+    # renormalizer (+log 2, the R2D2-tau precedent) over SB's
+    # Stan-convention unnormalized half-normal.
+    zn = Normal(0.5, 0.2)
+    pr = logpdf(Normal(0, 1), nt.mu[1]) +
+        logpdf(Exponential(1), nt.s) +
+        (logpdf(zn, beta) - log(cdf(zn, 1) - cdf(zn, 0))) +
+        (logpdf(Normal(0, 0.2), sigma) + log(2)) +
+        sum(logpdf.(Normal(0, 1), z))
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    jac = (log(beta) + log1p(-beta)) + u[3] + u[4]
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity dar prior overrides" begin
+    brmi = @brm _parity_cols_dar begin
+        mu ~ 1 + dar(t)
+        ar(mu, dar(t)) ~ Normal(0.6, 0.1)
+        sd(mu, dar(t)) ~ Normal(0, 0.3)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 9
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 1, :identity),
+        (:sampled, :dar_mu_t_beta, 1, :interval),
+        (:sampled, :dar_mu_t_sigma, 1, :exp),
+        (:sampled, :s, 1, :exp),
+        (:scan, :_ppl_dar_z_dar_mu, 5, :identity),
+    ]
+    u = collect(range(-0.4, 0.4; length = layout.total))
+    nt = constrain(layout, u)
+    beta, sigma = nt.dar_mu_t_beta, nt.dar_mu_t_sigma
+    z = nt._ppl_dar_z_dar_mu
+    path = _ref_dar_path(beta, sigma, z)
+    @test path[1] == 0.0
+    cols = _parity_cols_dar
+    ll = sum(logpdf.(Normal.(nt.mu[1] .+ path, nt.s), cols.y))
+    zn = Normal(0.6, 0.1)
+    pr = logpdf(Normal(0, 1), nt.mu[1]) +
+        logpdf(Exponential(1), nt.s) +
+        (logpdf(zn, beta) - log(cdf(zn, 1) - cdf(zn, 0))) +
+        (logpdf(Normal(0, 0.3), sigma) + log(2)) +
+        sum(logpdf.(Normal(0, 1), z))
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    jac = (log(beta) + log1p(-beta)) + u[3] + u[4]
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
