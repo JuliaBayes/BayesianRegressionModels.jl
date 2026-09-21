@@ -472,8 +472,10 @@ function rk_parsed_surface(str::String)
     parsed = rk_strip_lines(Meta.parse(str))
     parsed.head === :block ? only(parsed.args) : parsed
 end
-rk_bucket_stmts(main) =
-    [a for a in main.args if a isa Expr && a.head === :do]
+rk_varying_stmts(main) = [a for a in main.args if a isa Expr &&
+    a.head === :call && length(a.args) == 3 && a.args[1] === :~ &&
+    a.args[3] isa Expr && a.args[3].args[1] in
+    (:varying_draws, :varying_slice)]
 # Submodel-def helpers: `rk_def_names` lists def names in order;
 # `rk_def_body` fetches one def's body block.
 rk_def_names(prog) = [d.args[1].args[1] for d in prog.defs]
@@ -498,11 +500,16 @@ end
         y ~ Normal(mu, s)
     end)
     prog = BRM._rk_emit_ast(plan)
-    @test length(rk_bucket_stmts(prog.main)) == 1
-    @test rk_strip_lines(only(rk_bucket_stmts(prog.main))) ==
-        rk_parsed_surface("ranef_bucket(:ID, g; eta = 1.0) do\n mu => [1, x]\nend")
+    varying = rk_varying_stmts(prog.main)
+    @test length(varying) == 2
+    @test rk_strip_lines(varying[1]) == rk_parsed_surface(
+        "ranef_draws_ID_g ~ varying_draws(g, [1, x]; eta = 1.0)")
+    @test rk_strip_lines(varying[2]) == rk_parsed_surface(
+        "ranef_mu_ID_g ~ varying_slice(ranef_draws_ID_g, 1:2)")
     ret = rk_def_body(prog, :popefs_normal_i_c_rid).args[end]
-    @test Expr(:call, :ranef, :f1, :x2) in ret.args
+    @test :f1 in ret.args
+    @test Expr(:call, :~, :mu, Expr(:call, :popefs_normal_i_c_rid, :x,
+        :ranef_mu_ID_g, 0.0, 1.0, 0.0, 1.0)) in prog.main.args
 end
 
 @testset "ranef eta iff correlated" begin
@@ -511,27 +518,36 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    correlated = only(rk_bucket_stmts(BRM._rk_emit_ast(kinds).main))
-    @test rk_strip_lines(correlated) ==
-        rk_parsed_surface("ranef_bucket(g; eta = 1.0) do\n mu => [1, x]\nend")
+    correlated = rk_varying_stmts(BRM._rk_emit_ast(kinds).main)
+    @test length(correlated) == 2
+    @test rk_strip_lines(correlated[1]) == rk_parsed_surface(
+        "ranef_draws_g ~ varying_draws(g, [1, x]; eta = 1.0)")
+    @test rk_strip_lines(correlated[2]) == rk_parsed_surface(
+        "ranef_mu_g ~ varying_slice(ranef_draws_g, 1:2)")
     ones = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x + (1 | g)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    intercept1 = only(rk_bucket_stmts(BRM._rk_emit_ast(ones).main))
-    @test rk_strip_lines(intercept1) ==
-        rk_parsed_surface("ranef_bucket(g) do\n mu => [1]\nend")
+    intercept1 = rk_varying_stmts(BRM._rk_emit_ast(ones).main)
+    @test length(intercept1) == 2
+    @test rk_strip_lines(intercept1[1]) ==
+        rk_parsed_surface("ranef_draws_g ~ varying_draws(g, [1])")
+    @test rk_strip_lines(intercept1[2]) ==
+        rk_parsed_surface("ranef_mu_g ~ varying_slice(ranef_draws_g, 1)")
     slopes = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x + (0 + x | g)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    slope1 = only(rk_bucket_stmts(BRM._rk_emit_ast(slopes).main))
-    @test rk_strip_lines(slope1) ==
-        rk_parsed_surface("ranef_bucket(g) do\n mu => [x]\nend")
+    slope1 = rk_varying_stmts(BRM._rk_emit_ast(slopes).main)
+    @test length(slope1) == 2
+    @test rk_strip_lines(slope1[1]) ==
+        rk_parsed_surface("ranef_draws_g ~ varying_draws(g, [x])")
+    @test rk_strip_lines(slope1[2]) ==
+        rk_parsed_surface("ranef_mu_g ~ varying_slice(ranef_draws_g, 1)")
     ret = rk_def_body(BRM._rk_emit_ast(ones), :popefs_normal_i_c_r).args[end]
-    @test Expr(:call, :ranef, :x2) in ret.args
+    @test :f1 in ret.args
 end
 
 @testset "ranef dummy values in AST" begin
@@ -541,9 +557,12 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    @test rk_strip_lines(only(rk_bucket_stmts(BRM._rk_emit_ast(plan).main))) ==
-        rk_parsed_surface("ranef_bucket(g; eta = 1.0) do\n " *
-            "mu => [1, dummy(c, 4), dummy(c, 6)]\nend")
+    varying = rk_varying_stmts(BRM._rk_emit_ast(plan).main)
+    @test length(varying) == 2
+    @test rk_strip_lines(varying[1]) == rk_parsed_surface(
+        "ranef_draws_g ~ varying_draws(g, [1, dummy(c, 4), dummy(c, 6)]; eta = 1.0)")
+    @test rk_strip_lines(varying[2]) == rk_parsed_surface(
+        "ranef_mu_g ~ varying_slice(ranef_draws_g, 1:3)")
 end
 
 @testset "ranef interaction margin references derived def" begin
@@ -554,8 +573,12 @@ end
     end)
     prog = BRM._rk_emit_ast(plan)
     @test Expr(:(=), :int_x_x_z, Expr(:call, :.*, :x, :z)) in prog.main.args
-    @test rk_strip_lines(only(rk_bucket_stmts(prog.main))) ==
-        rk_parsed_surface("ranef_bucket(g; eta = 1.0) do\n mu => [1, int_x_x_z]\nend")
+    varying = rk_varying_stmts(prog.main)
+    @test length(varying) == 2
+    @test rk_strip_lines(varying[1]) == rk_parsed_surface(
+        "ranef_draws_g ~ varying_draws(g, [1, int_x_x_z]; eta = 1.0)")
+    @test rk_strip_lines(varying[2]) == rk_parsed_surface(
+        "ranef_mu_g ~ varying_slice(ranef_draws_g, 1:2)")
 end
 
 @testset "ranef multi-target body order" begin
@@ -571,16 +594,22 @@ end
         y1 ~ Normal(mu1, s1)
         y2 ~ Normal(mu2, s2)
     end)
-    @test rk_strip_lines(only(rk_bucket_stmts(BRM._rk_emit_ast(plan).main))) ==
-        rk_parsed_surface("ranef_bucket(:ID, g; eta = 1.0) do\n " *
-            "mu1 => [1]; mu2 => [x]\nend")
+    varying = rk_varying_stmts(BRM._rk_emit_ast(plan).main)
+    @test length(varying) == 3
+    @test rk_strip_lines(varying[1]) == rk_parsed_surface(
+        "ranef_draws_ID_g ~ varying_draws(g, [1, x]; eta = 1.0)")
+    @test rk_strip_lines(varying[2]) == rk_parsed_surface(
+        "ranef_mu1_ID_g ~ varying_slice(ranef_draws_ID_g, 1)")
+    @test rk_strip_lines(varying[3]) == rk_parsed_surface(
+        "ranef_mu2_ID_g ~ varying_slice(ranef_draws_ID_g, 2)")
     prog = BRM._rk_emit_ast(plan)
     # Both same-skeleton predictors share one latent def.
     ret = rk_def_body(prog, :popefs_normal_i_c_rid).args[end]
-    @test Expr(:call, :ranef, :f1, :x2) in ret.args
-    for target in (:mu1, :mu2)
+    @test :f1 in ret.args
+    for (target, effect) in
+            ((:mu1, :ranef_mu1_ID_g), (:mu2, :ranef_mu2_ID_g))
         @test Expr(:call, :~, target,
-            Expr(:call, :popefs_normal_i_c_rid, :x, :g, QuoteNode(:ID),
+            Expr(:call, :popefs_normal_i_c_rid, :x, effect,
                 0.0, 1.0, 0.0, 1.0)) in prog.main.args
     end
     # Both Gaussian responses emit bare `.~` statements (no stream
@@ -601,13 +630,19 @@ end
     end)
     plan.columns[:mu] = plan.columns[:x]
     prog = BRM._rk_emit_ast(plan)
-    @test rk_strip_lines(only(rk_bucket_stmts(prog.main))) ==
-        rk_parsed_surface("ranef_bucket(:ID, g; eta = 1.0) do\n mu_ => [1, x]\nend")
+    # Effect names use the original predictor (rename-independent);
+    # only the LHS and its call move to `mu_`.
+    varying = rk_varying_stmts(prog.main)
+    @test length(varying) == 2
+    @test rk_strip_lines(varying[1]) == rk_parsed_surface(
+        "ranef_draws_ID_g ~ varying_draws(g, [1, x]; eta = 1.0)")
+    @test rk_strip_lines(varying[2]) == rk_parsed_surface(
+        "ranef_mu_ID_g ~ varying_slice(ranef_draws_ID_g, 1:2)")
     @test Expr(:call, :~, :mu_,
-        Expr(:call, :popefs_normal_i_c_rid, :x, :g, QuoteNode(:ID),
+        Expr(:call, :popefs_normal_i_c_rid, :x, :ranef_mu_ID_g,
             0.0, 1.0, 0.0, 1.0)) in prog.main.args
     ret = rk_def_body(prog, :popefs_normal_i_c_rid).args[end]
-    @test Expr(:call, :ranef, :f1, :x2) in ret.args
+    @test :f1 in ret.args
 end
 
 @testset "leveled AST shapes" begin

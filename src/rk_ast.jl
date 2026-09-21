@@ -106,8 +106,7 @@ function _rk_ast_popefs_slots(predictor::_RKPredictorSpec)
     for (index, term) in enumerate(predictor.terms)
         kind = term.kind
         if kind === :continuous || kind === :factor || kind === :offset ||
-                kind === :ranef_gather || kind === :monotonic ||
-                kind === :monotonic_summand
+                kind === :monotonic || kind === :monotonic_summand
             nx += 1
             colf[index] = Symbol(:x, nx)
         end
@@ -120,7 +119,10 @@ function _rk_ast_popefs_slots(predictor::_RKPredictorSpec)
         elseif kind === :dar
             reff[index] = (Symbol(:f, nf + 1), Symbol(:f, nf + 2))
             nf += 2
-        elseif kind === :ranef_gather && term.options.bucket_id !== nothing
+        elseif kind === :ranef_gather
+            # Varying spelling: the group column is unused in the body
+            # (the effect arrives fully formed); every gather takes one
+            # outer-reference formal bound to its slice effect.
             nf += 1
             reff[index] = Symbol(:f, nf)
         end
@@ -149,9 +151,7 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol},
             # contribute 0.
             push!(summands, Expr(:ref, refref[index], colref[index]))
         elseif term.kind === :ranef_gather
-            push!(summands, term.options.bucket_id === nothing ?
-                Expr(:call, :ranef, colref[index]) :
-                Expr(:call, :ranef, refref[index], colref[index]))
+            push!(summands, refref[index])
         elseif term.kind === :monotonic
             # Free-beta monotonic column: `b .* mo(idx, s)` is the only
             # `mo()` shape the thin layer lowers.
@@ -489,29 +489,49 @@ function _rk_ast_bucket_margin(z::_RKRanefZRecipe)
     Expr(:call, :dummy, z.column, z.level)
 end
 
-# One `ranef_bucket(...) do ... end` block. The do-block shape matches the
-# parser's exactly (committed tests compare against `Meta.parse`), so the
-# thin layer lowers it like hand-written surface. `eta` rides iff
-# `:correlated` (peer rule: K=1 plain buckets take no eta).
-function _rk_ast_bucket(bucket::_RKRanefBucket, rename::Dict{Symbol,Symbol})
-    lines = Any[]
-    for (predictor, cols) in bucket.slices
-        elements = Any[_rk_ast_bucket_margin(m.z)
-            for m in bucket.margins[cols]]
-        push!(lines, Expr(:call, :(=>),
-            get(rename, predictor, predictor), Expr(:vect, elements...)))
+# Varying-name pre-pass (uniform split form): one `ranef_draws_<suffix>`
+# per bucket plus one `ranef_<target>_<suffix>` per slice. The `ranef_`
+# prefix cannot collide with the thin layer's implicit `r_<target>_<group>`
+# term labels; `taken` dedups the rest. Rename-independent (targets use
+# original predictor names), so names pre-mint before predictor emission.
+function _rk_ast_ranef_names!(plan::_RKStructuralPlan, taken::Set{Symbol})
+    draws = Dict{Int,Symbol}()
+    effects = Dict{Tuple{Symbol,Symbol,Union{Symbol,Nothing}},Symbol}()
+    for (bi, bucket) in enumerate(plan.ranef_buckets)
+        suffix = bucket.id === nothing ? string(bucket.group) :
+            string(bucket.id, "_", bucket.group)
+        draws[bi] = _rk_ast_coef_name("ranef_draws_" * suffix, taken)
+        for (target, _) in bucket.slices
+            effect = _rk_ast_coef_name(
+                "ranef_" * string(target) * "_" * suffix, taken)
+            effects[(target, bucket.group, bucket.id)] = effect
+        end
     end
-    call = if bucket.id === nothing
-        args = Any[:ranef_bucket, bucket.group]
-        bucket.kind === :correlated && insert!(args, 2,
+    draws, effects
+end
+
+# One bucket's varying statements (uniform split form): a draws
+# statement plus one slice per target predictor. Shapes match the
+# parser's exactly (committed tests compare against `Meta.parse`), so
+# the thin layer lowers them like hand-written surface. `eta` rides
+# iff `:correlated` (peer rule: K=1 plain buckets take no eta).
+function _rk_ast_bucket_stmts(bucket::_RKRanefBucket, draws::Symbol,
+        effects::Dict{Tuple{Symbol,Symbol,Union{Symbol,Nothing}},Symbol})
+    margins = Any[_rk_ast_bucket_margin(m.z) for m in bucket.margins]
+    call = Expr(:call, :varying_draws, bucket.group, Expr(:vect, margins...))
+    if bucket.kind === :correlated
+        insert!(call.args, 2,
             Expr(:parameters, Expr(:kw, :eta, bucket.lkj_eta)))
-        Expr(:call, args...)
-    else
-        Expr(:call, :ranef_bucket,
-            Expr(:parameters, Expr(:kw, :eta, bucket.lkj_eta)),
-            QuoteNode(bucket.id), bucket.group)
     end
-    Expr(:do, call, Expr(:(->), Expr(:tuple), Expr(:block, lines...)))
+    stmts = Expr[Expr(:call, :~, draws, call)]
+    for (target, cols) in bucket.slices
+        idx = length(cols) == 1 ? first(cols) :
+            Expr(:call, :(:), first(cols), last(cols))
+        effect = effects[(target, bucket.group, bucket.id)]
+        push!(stmts, Expr(:call, :~, effect,
+            Expr(:call, :varying_slice, draws, idx)))
+    end
+    stmts
 end
 
 function _rk_ast_sampled(parameter::_RKSampledParameter)
@@ -693,6 +713,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=false)
         push!(taken, fresh)
         rename[predictor.name] = fresh
     end
+    ranef_draws, ranef_effects = _rk_ast_ranef_names!(plan, taken)
     priors = Dict((p.predictor, p.addressee) => (p.location, p.scale)
         for p in plan.population_priors)
     r2d2s = Dict(rp.predictor => rp for rp in plan.r2d2_priors)
@@ -769,9 +790,9 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=false)
             elseif kind === :dar
                 refactual[index] =
                     (term.options.beta, term.options.sigma)
-            elseif kind === :ranef_gather &&
-                    term.options.bucket_id !== nothing
-                refactual[index] = QuoteNode(term.options.bucket_id)
+            elseif kind === :ranef_gather
+                refactual[index] = ranef_effects[(predictor.name,
+                    term.options.bucket_group, term.options.bucket_id)]
             end
             (kind === :offset || kind === :ranef_gather ||
                 kind === :spline || kind === :hsgp ||
@@ -926,8 +947,9 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=false)
         end
         r2d2 === nothing || push!(stmts, _rk_ast_r2d2_decl(r2d2, lhs))
     end
-    for bucket in plan.ranef_buckets
-        push!(stmts, _rk_ast_bucket(bucket, rename))
+    for (bi, bucket) in enumerate(plan.ranef_buckets)
+        append!(stmts,
+            _rk_ast_bucket_stmts(bucket, ranef_draws[bi], ranef_effects))
     end
     for parameter in plan.parameters
         push!(stmts, _rk_ast_sampled(parameter))
