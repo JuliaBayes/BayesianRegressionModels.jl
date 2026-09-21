@@ -27,6 +27,8 @@ julia --startup-file=no --project=web-macro \
   research/historical_model_inventory/refresh_binomial_logit.jl <expected-brm-sha>
 julia --startup-file=no --project=web-macro \
   research/historical_model_inventory/refresh_beta_binomial.jl <expected-brm-sha>
+julia --startup-file=no --project=test \
+  research/historical_model_inventory/refresh_student_zip.jl <expected-brm-sha>
 julia --startup-file=no research/historical_model_inventory/assemble.jl
 julia --startup-file=no --project=web-macro \
   research/historical_model_inventory/gallery/validate.jl
@@ -66,6 +68,10 @@ source checkout.
 - `beta_binomial_refresh.tsv`: exact two-row receipts for the translated
   historical mean/precision formulas, including prediction/generated
   quantities and pointwise likelihood.
+- `student_zip_refresh.tsv`: exact seven-row receipts for the recovered
+  Student-t `nu` priors and paired ZIP joint declarations (six direct, one
+  inherited-identical-probe), including prediction/generated quantities and
+  pointwise likelihood.
 - `runtime_controls.tsv`: real-data sleepstudy plus executable BRM-kernel and
   StanBlocks-plate controls.
 - `receipts/`: model and dataset retrieval evidence, conservative source
