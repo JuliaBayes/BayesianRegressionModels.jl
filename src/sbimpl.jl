@@ -4576,9 +4576,12 @@ formula-boundary `ragged(response, group)` observations and their data-backed
 flat source column into the kernel's per-subject row order), continuous
 × continuous interaction columns, typed observation weights, categorical
 outcomes, and pass-through raw columns (plain data, `me` obs values, `ar`
-time). Frozen replay errors loudly on an unseen fitted level. Stratified
-`gr(g, by=b)` group-index replay remains correct-or-loud unsupported rather
-than silently copying stale structure.
+time). A derived non-vector key with no preprocessing record is carried through
+when the replay DataFrame supplies its raw column; StanBlocks then retraces the
+derived carrier (for example a vector-of-vectors column becomes the ragged
+`mem`/`ends` data). Frozen replay errors loudly on an unseen fitted level.
+Stratified `gr(g, by=b)` group-index replay remains correct-or-loud unsupported
+rather than silently copying stale structure.
 """
 function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
                    resample_groups=())
@@ -4615,8 +4618,9 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
         v = _sb_reprocess_data_value(sb, k, stored)
         k in handled && continue
         k in interaction_keys && continue
+        has_column = _sb_df_has_column(new_df, k)
         if v isa AbstractVector
-            if _sb_df_has_column(new_df, k)
+            if has_column
                 new_data[k] = _sb_df_column(new_df, k)   # pass-through (plain / me obs / ar time)
             else
                 error(
@@ -4636,10 +4640,20 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
         elseif v isa Number || v isa AbstractString || v isa Bool
             new_data[k] = v   # frozen structural scalar / formula literal (e.g. me `sd_<x>`)
         else
-            error(
-                "sbimpl: reprocess: data key `$k` (::$(typeof(v))) is a derived ",
-                "structure with no preprocessing record. reprocess cannot safely ",
-                "regenerate it on the new DataFrame — rebuild the SBBRMI instead.")
+            if has_column
+                # Externally derived non-vector data (StanBlocks' ragged
+                # `NamedTuple` carrier is the important case). Give the SLIC
+                # retrace the replay design's raw column; it re-makes the
+                # structured carrier, exactly as at the original emission.
+                new_data[k] = _sb_df_column(new_df, k)
+            else
+                error(
+                    "sbimpl: reprocess: data key `$k` (::$(typeof(v))) is a derived ",
+                    "structure with no preprocessing record and is not a column of ",
+                    "the new DataFrame. Include the recomputed raw column `$k` in ",
+                    "`new_df` — for a ragged carrier, a per-group vector of vectors, ",
+                    "not its `mem`/`ends` form — or rebuild the SBBRMI instead.")
+            end
         end
     end
     # 3. Derived interactions depend on operands regenerated in steps 1-2.
