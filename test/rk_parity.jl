@@ -508,7 +508,7 @@ end
         (:coefficient, :mu_coef, 1, :identity),
         (:sampled, :sigma, 1, :exp),
         (:sampled, :log_scale_g, 1, :identity),
-        (:ranef, :xi_g, 3, :identity),
+        (:varying, :xi_g, 3, :identity),
     ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
@@ -568,7 +568,7 @@ end
         (:coefficient, :mu_coef, 1, :identity),
         (:sampled, :sigma, 1, :exp),
         (:sampled, :tau_g, 1, :exp),
-        (:ranef, :xi_g, 3, :identity),
+        (:varying, :xi_g, 3, :identity),
     ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
@@ -599,9 +599,9 @@ end
     @test _layout_signature(layout) == [
         (:coefficient, :mu_coef, 1, :identity),
         (:sampled, :sigma, 1, :exp),
-        (:ranef_corr, :L_g, 1, :lkj),
-        (:ranef, :tau_g, 2, :exp),
-        (:ranef, :z_flat_g, 6, :identity),
+        (:varying_corr, :L_g, 1, :lkj),
+        (:varying, :tau_g, 2, :exp),
+        (:varying, :z_flat_g, 6, :identity),
     ]
     # The joint Stage-C point: the peer built its constrained case from
     # exactly this u, so the live-exchange values pin this leg.
@@ -642,9 +642,9 @@ end
     @test _layout_signature(layout) == [
         (:coefficient, :mu_coef, 1, :identity),
         (:sampled, :sigma, 1, :exp),
-        (:ranef_corr, :L_g, 1, :lkj),
-        (:ranef, :tau_g, 2, :exp),
-        (:ranef, :z_flat_g, 6, :identity),
+        (:varying_corr, :L_g, 1, :lkj),
+        (:varying, :tau_g, 2, :exp),
+        (:varying, :z_flat_g, 6, :identity),
     ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
@@ -677,29 +677,31 @@ end
     backend = BRM.RKBRMI(brmi)
     layout = backend.model.layout
     @test layout.total == 12
+    # Draws mint group-suffixed names (binding on repeats), so the ID
+    # bucket surfaces plain group names.
     @test _layout_signature(layout) == [
         (:coefficient, :mu1_coef, 1, :identity),
         (:coefficient, :mu2_coef, 1, :identity),
         (:sampled, :s, 1, :exp),
-        (:ranef_corr, :L_ID_g, 1, :lkj),
-        (:ranef, :tau_ID_g, 2, :exp),
-        (:ranef, :z_flat_ID_g, 6, :identity),
+        (:varying_corr, :L_g, 1, :lkj),
+        (:varying, :tau_g, 2, :exp),
+        (:varying, :z_flat_g, 6, :identity),
     ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
     Zs = [ones(6), _parity_cols_multi.x]
-    r1 = _ref_corr_r(_parity_cols_multi.g, nt.L_ID_g, nt.tau_ID_g,
-        nt.z_flat_ID_g, Zs, 1:1)
-    r2 = _ref_corr_r(_parity_cols_multi.g, nt.L_ID_g, nt.tau_ID_g,
-        nt.z_flat_ID_g, Zs, 2:2)
+    r1 = _ref_corr_r(_parity_cols_multi.g, nt.L_g, nt.tau_g,
+        nt.z_flat_g, Zs, 1:1)
+    r2 = _ref_corr_r(_parity_cols_multi.g, nt.L_g, nt.tau_g,
+        nt.z_flat_g, Zs, 2:2)
     ll = sum(logpdf.(Normal.(nt.mu1[1] .+ r1, nt.s), _parity_cols_multi.y)) +
         sum(logpdf.(Normal.(nt.mu2[1] .+ r2, nt.s), _parity_cols_multi.y2))
     pr = logpdf(Normal(0, 5), nt.mu1[1]) +
         logpdf(Normal(0, 5), nt.mu2[1]) +
         logpdf(Exponential(1), nt.s) +
-        _ref_lkj_k2_eta1(nt.L_ID_g) +
-        sum(logpdf.(Normal(0, 1), nt.tau_ID_g)) +
-        sum(logpdf.(Normal(0, 1), nt.z_flat_ID_g))
+        _ref_lkj_k2_eta1(nt.L_g) +
+        sum(logpdf.(Normal(0, 1), nt.tau_g)) +
+        sum(logpdf.(Normal(0, 1), nt.z_flat_g))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     jac = u[3] + u[5] + u[6] + _lkj2_theta_jac(u[4])
@@ -725,9 +727,9 @@ end
     @test _layout_signature(layout) == [
         (:coefficient, :mu_coef, 1, :identity),
         (:sampled, :sigma, 1, :exp),
-        (:ranef_corr, :L_g, 1, :lkj),
-        (:ranef, :tau_g, 2, :exp),
-        (:ranef, :z_flat_g, 6, :identity),
+        (:varying_corr, :L_g, 1, :lkj),
+        (:varying, :tau_g, 2, :exp),
+        (:varying, :z_flat_g, 6, :identity),
     ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)

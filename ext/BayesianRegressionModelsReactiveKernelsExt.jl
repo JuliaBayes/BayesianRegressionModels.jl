@@ -164,11 +164,15 @@ function _rk_patch_ordinal_extras(unbound::StructuralPlan,
         unbound.assignments, unbound.columns, unbound.n_obs;
         roles = unbound.roles, derived = unbound.derived,
         levelmaps = levelmaps, plate_parameters = unbound.plate_parameters,
-        scans = unbound.scans, ranef_buckets = unbound.ranef_buckets,
+        scans = unbound.scans, dar_paths = unbound.dar_paths,
+        varying_draws = unbound.varying_draws,
+        varying_slices = unbound.varying_slices,
         vector_parameters = vectors, spline_bases = unbound.spline_bases,
         spline_vectors = unbound.spline_vectors,
         hsgp_bases = unbound.hsgp_bases,
-        kernel_plates = unbound.kernel_plates)
+        kernel_plates = unbound.kernel_plates,
+        r2d2_priors = unbound.r2d2_priors,
+        matrices = unbound.matrices)
 end
 
 # Evaluate the emitted submodel defs through `@rkppl` in a FRESH module

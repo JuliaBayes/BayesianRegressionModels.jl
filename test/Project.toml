@@ -71,15 +71,13 @@ rev = "7aed40b18bd4cdabb75330f285d5c9b355575ab9"
 
 [sources.ReactiveKernels]
 url = "https://github.com/nsiccha/ReactiveKernels.jl"
-# d5e8bed (2026-09-20, main): fd1af39 (ranef `_declared_codes` in-model
-# encoder + coverage validation on top of 64ccf38 = R2D2 over v12
-# 86e5265, incl. the re-cut me plate-vector surface 8a6c36c and the
-# correlated-outcomes slice eee553b + a48955f) plus vector-shaped
-# derived locals as ranef margins (peer todo 1x0g5yb — the surface
-# BRM ranef-`&` emission targets; emitter-baked twin oracle +
-# corpus 44, candidate 9873b0d). Bumped for the me parity +
-# hierarchical sweep + correlated-outcomes parity.
+# 6873a0e (2026-09-21, main): d5e8bed plus the broker-landed dar slice
+# (c34227f, replayed onto b7a53c4 — the surface BRM dar emission
+# targets) and the planner-branch snag. NOTE: also carries the
+# deliberate removal of the LHS-less ranef_bucket spelling (4dc633f);
+# BRM ranef emission migrated to varying_draws/varying_slice in the
+# same landing. Bumped for the dar parity corpus.
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "d5e8bed5a57cf6af0a73edbecb6cc9bbfd9c0c0b"
+rev = "6873a0ee9b4cb8e9789e8da7c0c4e8921fcf1fa8"
