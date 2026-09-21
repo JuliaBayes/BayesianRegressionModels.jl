@@ -1,6 +1,6 @@
 ordinary_brm	finite_density_gradient	dead_source	stanblocks_plate	surface_missing_brm	stanc_accepted	unverifiable	adapted_but_defensible	brm_kernel	mismatch	surface_verbatim	surface_semantic_rewrite	confirmed	source	rows	audit_defensible_semantic_inference	ready_translation	audit_explicit_family_recovery	audit_genuinely_indeterminate	surface_missing_stanblocks	surface_historical_unresolved
 0	0	0	0	0	0	0	0	6	4	0	0	2	action_models	6	0	0	6	0	0	6
-95	50	0	0	11	50	13	2	5	1	34	35	84	bambi	100	0	52	0	0	0	20
+95	53	0	0	11	53	13	2	5	1	34	38	84	bambi	100	0	55	0	0	0	17
 0	0	0	0	0	0	0	0	4	0	0	0	4	bmm	4	0	0	4	0	0	4
 17	11	0	8	0	11	1	1	0	4	4	13	19	brms	25	4	11	16	0	0	8
 10	5	0	2	6	5	7	0	2	0	2	4	7	burkner_papers	14	1	5	3	0	0	2
@@ -10,7 +10,7 @@ ordinary_brm	finite_density_gradient	dead_source	stanblocks_plate	surface_missin
 6	5	0	0	0	5	3	0	0	0	4	1	3	glm_jl	6	0	5	0	0	0	1
 7	0	7	2	0	0	0	0	0	0	0	7	2	glmmtmb	9	0	0	2	0	0	2
 2	1	0	10	0	1	1	2	0	7	1	1	2	inla	12	0	1	6	0	0	10
-39	18	0	0	5	18	41	0	2	0	13	17	0	kruschke	41	0	18	13	1	0	6
+39	22	0	0	5	22	41	0	2	0	13	17	0	kruschke	41	0	22	13	1	0	6
 8	5	0	0	0	5	8	0	0	0	4	2	0	lme4	8	0	5	0	0	0	2
 54	34	3	4	1	34	55	0	0	0	24	26	0	mcelreath	58	0	34	35	0	0	7
 4	0	7	3	0	0	0	0	0	0	0	4	0	mcmcglmm	7	0	0	1	0	0	3

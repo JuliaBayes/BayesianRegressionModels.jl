@@ -162,24 +162,26 @@ finite density/gradient, prediction, and pointwise log likelihood for all three
 families. It was run at validation tip `4d8f565...`; that tip and clean reviewed
 commit `a707af2...` have identical Git tree `309028b...`, and only the clean
 commit was landed. No VBRMI change survived. This shared control is displayed
-beside applicable rows but is never inherited as row validation. Historical ZIP
-cards still need their separately catalogued mean/zero-inflation components
-paired; Student-t rows still need a sourced degrees-of-freedom value/prior; and
-the working census uses the non-log route. The separate
+beside applicable rows but is never inherited as row validation. The three
+historical ZIP cards gained paired joint declarations and the four kruschke
+Student-t rows gained sourced `nu ~ Exponential(29)` priors (see the focused
+receipt below); only `bambi:t_regression_t` still needs a sourced
+degrees-of-freedom value. The working census uses the non-log route. The separate
 `neg_binomial_2_log` trace defect found during the audit was subsequently fixed
 in StanBlocks canonical `144188a808308177807ceb47f08749a335a0ef70`
 (`negative-binomia-fd397aa0`); the corpus run remains pinned to `329a178...`
 because its non-log path is unaffected.
 
-The 175 executable inferred-family rows and 16 executable exact-metadata rows
-collapse to 161 unique normalized bodies/data schemas. The static gate runs
+The 182 executable inferred-family rows and 16 executable exact-metadata rows
+collapse to 167 unique normalized bodies/data schemas. The static gate runs
 BRMI evaluation, SBBRMI lowering, `brm_descriptor`,
 `brm_execute(:transpile)`, and stanc. On the exact landed tree plus the focused
-StanBlocks `277f233...` and Beta-binomial `98d54fb...` refreshes described below,
-160 unique programs pass stanc. Every one of those 160 also instantiates under BridgeStan
+StanBlocks `277f233...`, Beta-binomial `98d54fb...`, and Student-t/ZIP refreshes
+described below,
+166 unique programs pass stanc. Every one of those 166 also instantiates under BridgeStan
 2.9.0 and has finite log density and gradient at the synthetic-data zero point;
 there are no post-stanc runtime failures. Byte-identical evidence fan-out maps
-those programs onto 173 deployed rows. The only remaining executable failure is
+those programs onto 180 deployed rows. The only remaining executable failure is
 one transformed-interaction program shared by two deployed rows. These results
 are capability evidence, not posterior-correctness claims.
 
@@ -206,6 +208,17 @@ finite BridgeStan density/gradient, prediction/generated quantities, and
 pointwise likelihood. Focused direct receipts then run
 `brms:cbpp_beta_binomial` and `mcelreath:ucbadmit_beta_binomial` separately;
 both pass all stages with 12 finite prediction and pointwise values.
+
+The Student-t/ZIP refresh recovers the four kruschke Student-t rows' authoritative
+`nu` prior from ASKurz `f90517976` (brms `exponential(rate=1/29)` renders as Julia
+`Exponential(29)`; fits 17.5/18.1/18.2/18.3) with matching `effect()` coefficient
+priors, and pairs the split `bambi:zip_mu`/`bambi:zip_psi` cards into one joint
+`log(lambda)`/`logit(zi)` declaration (BRM `zi` = 1 − bambi `psi`, per the
+`docs/examples/zip.jl` replication) plus the standalone `bambi:plot_comp_zip`
+form. Six direct receipts pass descriptor, stanc, BridgeStan finite
+density/gradient, 12 finite prediction and 12 finite pointwise values each; the
+psi-submodel card inherits its partner's identical probe. Full per-row evidence
+is in `student_zip_refresh.tsv`.
 
 An earlier probe version bound vector-valued Beta shape expressions to
 intermediate names and exposed a missing `lpxf_expr`. Re-checking the native
@@ -291,9 +304,9 @@ and focused BinomialLogit artifact at
 deployments and were not touched). Root checks returned HTTP 200 with exactly
 359 cards. The focused filters returned 154 confirmed-source cards, 171
 finite-BridgeStan cards, and 51 ordinary unsupported cards, matching the matrix
-at that receipt. The current offline matrix increases the finite count to 173
-and reduces unsupported rows to 48 after the known-SE Student-t correction and
-the two Beta-binomial receipts. The listener contained one
+at that receipt. The current offline matrix increases the finite count to 180
+and reduces unsupported rows to 45 after the known-SE Student-t correction,
+the two Beta-binomial receipts, and the seven Student-t/ZIP receipts. The listener contained one
 `htmxo-semantic-app` and all four option
 controls. Exact UTC times, source/matrix hashes, paths, statuses, and counts are
 in `gallery/served_smoke.tsv`; the final landed listener receipt is also filed
@@ -306,8 +319,8 @@ durably after broker integration.
 - Implement row-specific kernel/plate translations for the 66 structured-route
   candidates; representative substrate controls are not substitutes.
 - Resolve the transformed-interaction failure and row-specific historical
-  choices for Student-t degrees of freedom, ZIP component pairing, ordinal
-  links, binomial trial sizes, and old spline/GP configuration.
+  choices for the remaining Student-t degrees of freedom (`bambi:t_regression_t`
+  only), ordinal links, binomial trial sizes, and old spline/GP configuration.
 - Implement the genuinely missing BRM adapters and route declarations ranked in
   `GAP_RANKING.md`; do not convert route controls into row evidence.
 - Ship the BRMDescriptor→semantic_app adapter, keeping the descriptor as the
