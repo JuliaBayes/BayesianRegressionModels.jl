@@ -98,6 +98,10 @@ include("ppc_kinds.jl")
 include("app_data.jl")
 include("pipeline_routes.jl")
 include("app_context.jl")
+# BRMDescriptor → semantic_app mount (consumer-side adapter, decision 0lqlxi4).
+# A self-contained submodule, also includable standalone (see
+# ../validate_descriptor_mount.jl). Routes nothing on load.
+include("descriptor_mount.jl")
 
 function __init__()
     route!(AppContext())

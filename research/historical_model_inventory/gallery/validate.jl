@@ -45,7 +45,7 @@ using .HistoricalInventoryGallery
     exact = HistoricalInventory(;
         matrix_path=DEFAULT_MATRIX_PATH,
         validation_tier="bridgestan-finite-density-gradient")
-    @test length(filtered_rows(exact)) == 173 == count(
+    @test length(filtered_rows(exact)) == 180 == count(
         row -> row["inferred_capability_tier"] == "bridgestan-finite-density-gradient",
         surface.rows,
     )
@@ -82,6 +82,32 @@ using .HistoricalInventoryGallery
         row["gradient_finite"] == "true" && isempty(row["failure_stage"]),
         beta_binomial,
     )
+    student_zip_keys = Set([
+        "kruschke:income_famsize",
+        "kruschke:guber1999_base",
+        "kruschke:guber1999_complement",
+        "kruschke:guber1999_interaction",
+        "bambi:zip_mu",
+        "bambi:zip_psi",
+        "bambi:plot_comp_zip",
+    ])
+    student_zip = filter(row -> row["row_key"] in student_zip_keys, surface.rows)
+    @test length(student_zip) == length(student_zip_keys)
+    @test all(row ->
+        row["inferred_translation_status"] == "ready" &&
+        row["inferred_capability_tier"] == "bridgestan-finite-density-gradient" &&
+        row["descriptor"] == "pass" && row["stanc"] == "pass" &&
+        row["bridgestan_instantiate"] == "pass" &&
+        row["gradient_finite"] == "true" && isempty(row["failure_stage"]),
+        student_zip,
+    )
+    # The psi-submodel card shares its partner's joint probe rather than
+    # carrying a second direct compilation.
+    psi = only(filter(row -> row["row_key"] == "bambi:zip_psi", surface.rows))
+    mu = only(filter(row -> row["row_key"] == "bambi:zip_mu", surface.rows))
+    @test psi["probe_evidence_kind"] == "inherited-identical-probe"
+    @test psi["probe_evidence_from_row"] == mu["row_index"]
+    @test psi["probe_id"] == mu["probe_id"]
     combined = HistoricalInventory(;
         matrix_path=DEFAULT_MATRIX_PATH,
         translation_route="ordinary_brm", validation_tier="unsupported")

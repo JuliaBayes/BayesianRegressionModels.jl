@@ -496,6 +496,18 @@ end
     @test amplitude.coordinates == workaround_amplitude
     @test weights.coordinates == workaround_weights
 
+    # The monotonic MAGNITUDE is the term's population coefficient under the
+    # same public label — the second half of an mo() level contrast (snag
+    # descriptor-selec-b455334d). It resolves through the population selector,
+    # never through the emitted carrier spelling.
+    magnitude = brm_population_effect_coordinates(
+        d, :log_F, names; coefficient=:mo_op_diet)
+    @test length(magnitude.coordinates) == 1
+    @test magnitude.link === identity && magnitude.inverse_link === identity
+    @test isempty(intersect(magnitude.coordinates, simplex.coordinates))
+    workaround_magnitude = findall(==("pop_log_F_beta_pop.5"), names)
+    @test magnitude.coordinates == workaround_magnitude
+
     @test_throws "available term labels" brm_term_coordinates(
         d, :log_F, names; term=:mo_missing, parameter=:simplex)
     @test_throws "available roles are (:simplex,)" brm_term_coordinates(
