@@ -717,9 +717,11 @@ tb = TuringBRMI(brmi)
 Each shape owns its own per-group hierarchy (two LKJ blocks here):
 parameters correlate within a shape, not across shapes. A model that needs
 the bump and the sigmoid parameters jointly correlated (all six in one
-covariance) wants one joint term with `n_per_group=6` instead — that is what
-bordet's `biomarker_hierarchical_parametric` hatch does today, and what its
-`transient` / `saturating` worked example will decide per fit. Term-internal
+covariance) wants one joint term with `n_per_group=6` instead — formerly
+bordet's `biomarker_hierarchical_parametric` hatch (shed as dead code; the
+shared-bucket + `kernel(...)` composition in `test/kernel_biomarker_cell.jl`
+is the current idiom), and what its `transient` / `saturating` worked example
+will decide per fit. Term-internal
 prior statements (`sd(mu, transient(logt))`) are not addressed yet: the
 hierarchical scales keep their shared defaults, and naming a new term in a
 prior address needs core registration alongside `_TERM_HEADS`.

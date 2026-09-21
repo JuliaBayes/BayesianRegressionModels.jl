@@ -110,8 +110,10 @@ export me, mi, s, t2, ar, dar, rw, cdar, mo, mo1, hsgp, OrderedLogistic, Ordinal
        CategoricalLogit, ZeroInflatedPoisson, HurdlePoisson, NegativeBinomial2,
        BetaBinomial, BetaBinomial2, CircularVonMises, SkewDoubleExponential,
        sb_group_demo, addprop
-# Hierarchical biomarker family — formula-surface markers for custom likelihood + submodel
-export TruncatedNormal, biomarker_hierarchical_parametric, kernel, ragged
+# TruncatedNormal top-level marker + kernel/ragged group-local term surface.
+# (The biomarker_hierarchical_parametric whole-model marker was shed: dead
+# code, superseded by the kernel composition in test/kernel_biomarker_cell.jl.)
+export TruncatedNormal, kernel, ragged
 export brm_multinomial, brm_multinomial_lpmf, brm_multinomial_lpmfs, brm_multinomial_rng
 # Julia-native response-family composition. `truncated` and `censored` are the
 # exact Distributions.jl functions; `interval_censored` is BRM's formula marker
