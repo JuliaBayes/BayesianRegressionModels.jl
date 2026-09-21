@@ -214,17 +214,17 @@ Exact rows: `bambi:ordinal_hr_years`, `mcelreath:trolley_intercept`, `mcelreath:
 
 Recover link, threshold, discrimination and monotonic-predictor conventions. Stock proportional-odds `OrderedLogistic` passing is not evidence for these rows. The four rows needing known non-stock surfaces are separately scored in B6.
 
-### D4. Student-t degrees of freedom and prior -- 5 rows, 5 programs
+### D4. Student-t degrees of freedom and prior -- 5 rows, 5 programs, 4 closed
 
 Exact rows: `bambi:t_regression_t`, `kruschke:income_famsize`, `kruschke:guber1999_base`, `kruschke:guber1999_complement`, `kruschke:guber1999_interaction`.
 
-The `LocationScale` dispatcher and `income_famsize`'s known-SE-plus-residual scale composition are executable, but an arbitrary `nu` inserted by the translator would change the historical model. Recover the exact fixed or prior-modeled degrees of freedom before direct row execution.
+The four kruschke rows are closed: ASKurz `f90517976` fits 17.5/18.1/18.2/18.3 estimate `nu` with a brms `exponential(rate=1/29)` prior, rendered as Julia `nu ~ Exponential(29)` with matching `effect()` coefficient priors, and all four pass the full descriptor/stanc/BridgeStan/predict/pointwise gate. Only `bambi:t_regression_t` keeps a symbolic `nu`: the `LocationScale` dispatcher is executable, but an arbitrary `nu` inserted by the translator would change the historical model, so its authoritative bambi value is still required before direct row execution.
 
-### D5. Split ZIP component pairing -- 3 rows, 2 formulas
+### D5. Closed: split ZIP component pairing -- 3 rows, 2 programs
 
 Exact rows: `bambi:zip_mu`, `bambi:zip_psi`, `bambi:plot_comp_zip`.
 
-The ZIP family surface is landed. Source archaeology still must prove which mean and zero-inflation components form each model; `bambi:zip_mu` and `bambi:plot_comp_zip` share the count formula, hence 2 formulas rather than 3.
+Historical scripts prove `zip_mu` (count submodel) and `zip_psi` (psi submodel) are two halves of one joint bambi model on the fish data; both cards now carry the joint `log(lambda)`/`logit(zi)` declaration and share one probe, with BRM `zi` = 1 − bambi `psi` (sign-flipped submodel coefficients, verified in `docs/examples/zip.jl` model B). `plot_comp_zip` is the standalone count form with intercept-only `logit(zi) ~ 1`. All three pass the full gate; receipts are in `student_zip_refresh.tsv`.
 
 ### D6. Binomial trial denominator -- 3 rows, 3 formulas
 
@@ -253,7 +253,7 @@ This is the only family left genuinely indeterminate after the 122-row family au
 ## Recommended dependency order
 
 1. Preserve the completed A1 receipt and implement the translator-sized A2; rerun only A2's exact probe id plus generated quantities and pointwise log-likelihood.
-2. Preserve the completed `11031f2` family controls, then close D4 and D5 with source evidence so the Student-t and ZIP surfaces gain row-level receipts.
+2. Preserve the completed `11031f2` family controls and the closed D5 / near-closed D4 row receipts (`bambi:t_regression_t` is the one remaining symbolic-`nu` row).
 3. Preserve the completed B14 receipts, then implement B9/B10 before the larger structured-model program: they have clear semantics, existing substrate and broad reuse.
 4. Implement B4 and B5 as focused reusable terms/families; neither requires a new declaration graph.
 5. Recover D2/D3 semantics before building smooth/ordinal surfaces, then implement B6/B8/B12 against those recovered contracts.
