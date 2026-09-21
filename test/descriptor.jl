@@ -496,6 +496,18 @@ end
     @test amplitude.coordinates == workaround_amplitude
     @test weights.coordinates == workaround_weights
 
+    # The monotonic MAGNITUDE is the term's population coefficient under the
+    # same public label — the second half of an mo() level contrast (snag
+    # descriptor-selec-b455334d). It resolves through the population selector,
+    # never through the emitted carrier spelling.
+    magnitude = brm_population_effect_coordinates(
+        d, :log_F, names; coefficient=:mo_op_diet)
+    @test length(magnitude.coordinates) == 1
+    @test magnitude.link === identity && magnitude.inverse_link === identity
+    @test isempty(intersect(magnitude.coordinates, simplex.coordinates))
+    workaround_magnitude = findall(==("pop_log_F_beta_pop.5"), names)
+    @test magnitude.coordinates == workaround_magnitude
+
     @test_throws "available term labels" brm_term_coordinates(
         d, :log_F, names; term=:mo_missing, parameter=:simplex)
     @test_throws "available roles are (:simplex,)" brm_term_coordinates(
@@ -735,6 +747,16 @@ kernel_schedule(n; subject=collect(1:n)) = (;
     @test all(startswith(string(primary.name) * "."),
               constrained_names[loc_coordinates])
     @test_throws ErrorException brm_output_coordinates(d, :loc, ["not_loc.1"])
+
+    # A correlated random-effect carrier is internal and has no logical
+    # target. Once a consumer has discovered the `BRMOutput`, it can still
+    # resolve that carrier without reaching for the private matching helper.
+    L = byname[:b_p_subject_L]
+    @test L.logical === nothing
+    L_coordinates = brm_output_coordinates(L, constrained_names)
+    @test !isempty(L_coordinates)
+    @test all(startswith(string(L.name) * "."), constrained_names[L_coordinates])
+    @test_throws ErrorException brm_output_coordinates(L, ["not_b_p_subject_L.1"])
 
     # A ragged observation left INSIDE the plate cell (`yy ~ normal(...)` above)
     # keeps the observed base through StanBlocks' compiler-owned loop. Its draw

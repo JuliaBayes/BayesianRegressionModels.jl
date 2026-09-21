@@ -57,6 +57,10 @@ bodies; the override TSV has SHA-256
   `BetaBinomial(trials, alpha, beta)` and
   `BetaBinomial2(trials, mean, precision)`; the two historical rows have
   separate direct receipts in `beta_binomial_refresh.tsv`.
+- The Student-t/ZIP refresh recovers the four kruschke `nu` priors from ASKurz
+  `f90517976b2f52cc9b63c7c5e151e85b1d677e63` (fits 17.5/18.1/18.2/18.3) and
+  pairs the split ZIP cards into joint declarations; six direct plus one
+  inherited-identical-probe receipt live in `student_zip_refresh.tsv`.
 - StanBlocks.jl:
   `329a178a7ad7877da0b58ad2c360d417ddd663f9` for the original exhaustive
   census (local active checkout selected by the canonical resolver). The five
@@ -68,7 +72,8 @@ bodies; the override TSV has SHA-256
   (`negative-binomia-fd397aa0`); the inventory's working non-log NB2 route is
   unaffected and the running exact-SHA census was not restarted.
   The Beta-binomial combined and row-specific controls use exact
-  `b77d5b0172970e0eb414f59d746fc2f96b71d363`.
+  `b77d5b0172970e0eb414f59d746fc2f96b71d363`. The Student-t/ZIP row receipts
+  use exact `9607eee6c7e839032f252b91d405007eea6a9021` (the test-env pin).
 - WarmupHMC.jl:
   `b185eedbbeeef6fb3327afb30dc995c98591af02` for this rerun. The independent
   peer sleepstudy control used
@@ -153,5 +158,8 @@ HTMXObjects semantic lock for the recorded SbPMX release:
   The refreshed offline matrix now contains 173 finite-BridgeStan cards and 48
   unsupported ordinary rows after adding the two direct Beta-binomial receipts;
   no new served-deployment receipt is inferred from the offline validation.
+  After the seven Student-t/ZIP receipts the offline matrix contains 180
+  finite-BridgeStan cards and 45 unsupported ordinary rows; again no served
+  deployment is inferred.
 - Row-by-row request times, paths, statuses, and counts:
   `gallery/served_smoke.tsv`.

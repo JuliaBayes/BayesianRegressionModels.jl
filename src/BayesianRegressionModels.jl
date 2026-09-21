@@ -165,7 +165,7 @@ export name, getf, getargs, getkwargs, getbroadcast, getop
 
 # Macro plumbing + compiled-output accessors used by downstream code
 # (web-macro's Formula struct, downstream direct pipeline calls).
-export parse!, _brm, stan_code, stan_model, stan_instantiate,
+export parse!, _brm, stan_code, stan_data, stan_model, stan_instantiate,
        transpiles, compiles,
        reprocess, restan_data, generative_plan
 
