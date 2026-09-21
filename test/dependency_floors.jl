@@ -36,8 +36,8 @@ function require_git_ancestor(name, path, minimum; reason)
     ]) || error("""
         $name checkout $path is too old: HEAD is $head.
         $reason
-        Required minimum: $minimum. Re-run test/bootstrap.jl with
-        BRM_TEST_WARMUPHMC pointing at that commit or a descendant.
+        Required minimum: $minimum. Materialize that commit or a descendant
+        with test/setup_env.jl.
         """)
     head
 end
@@ -103,7 +103,7 @@ function require_git_revision(name, path, revision)
     head = _git_output(["git", "-C", path, "rev-parse", "HEAD"])
     head == revision || error("""
         $name checkout $path is at $head, not the pinned revision $revision.
-        Remove the stale test bootstrap checkout and run test/bootstrap.jl again.
+        Remove the stale test bootstrap checkout and run test/setup_env.jl again.
         """)
     head
 end

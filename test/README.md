@@ -87,36 +87,26 @@ parameter identities.
 
 ## One-time bootstrap
 
-Seven packages have to enter resolution as **develop paths**, and absolute
-paths are machine-specific, so they are not committed. Supply StanBlocks and
-Treebars once:
+Use `test/setup_env.jl` as the single bootstrap entry:
 
 ```sh
-BRM_TEST_STANBLOCKS=/path/to/StanBlocks.jl \
-BRM_TEST_TREEBARS=/path/to/Treebars.jl \
-  julia --project=test test/bootstrap.jl
+julia --project=test test/setup_env.jl
 ```
 
-`BRM_TEST_WARMUPHMC=/path/to/WarmupHMC.jl` is an optional override. A supplied
-checkout is used only when its `HEAD` contains the enforced NativePPL floor. If
-it is unset or stale, `bootstrap.jl` materializes an ignored, versioned checkout
-under `test/.bootstrap/`, preferring the host mirror's `dev`/immutable
-`refs/kb-pins/<sha>` and otherwise cloning public `origin/dev`. This is
-deliberate: a dirty shared `~/github/nsiccha/WarmupHMC.jl` checkout may be
-hundreds of commits behind even though the floor is landed and published.
-`BRM_TEST_WARMUPHMC_MIRROR` and `BRM_TEST_WARMUPHMC_ORIGIN` override those two
-sources for an offline or nonstandard host.
-
-The other three source-only direct dependencies — `MutatingFunctions`,
-`OutputSignatures`, and `TreeArrays` — are materialized under the same ignored
-directory at the exact full-SHA revisions in `test/Project.toml`. Julia 1.10
-ignores those `[sources]` entries, so `bootstrap.jl` reads the committed table
-itself and includes their paths in the single resolve.
+The script materializes every external dependency under the ignored
+`test/.bootstrap/` directory at an exact full-SHA revision. ReactiveKernels
+contributes its monorepo root **and** the nested
+`ReactiveKernelsDistributionKernels` and `ReactiveKernelsPPL` packages from
+that same checkout; those nested packages have no standalone repositories. All
+ten develop paths enter one resolve on Julia 1.10, where `[sources]` in
+`test/Project.toml` is ignored. A dirty shared checkout is never used as the
+source of truth: an exact revision is checked out deliberately, so the
+environment does not drift with local branches.
 
 That writes `test/Manifest.toml`, which is deliberately **not** committed (the
-root `.gitignore` covers `Manifest*.toml`). Re-run `bootstrap.jl` after moving
-a checkout, on a new machine, or when an existing ignored manifest still
-points at an older dependency checkout.
+root `.gitignore` covers `Manifest*.toml`). Re-run `setup_env.jl` on a new
+machine, after changing a pin, or when an existing ignored manifest still points
+at an older dependency checkout.
 
 `BridgeStan` needs the BridgeStan C++ sources in addition to the Julia package.
 `BridgeStan.jl` finds them via `$BRIDGESTAN`, falling back to
@@ -206,11 +196,10 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   `9c642178720d5c294b9cead86fc8c82da5a5db09` or later. That floor retains
   Pathfinder's use of the target's own `logdensity_and_gradient` and admits
   Pathfinder 0.10.7, the first registered release compatible with the test
-  environment's Turing 0.46. `test/bootstrap.jl` and the focused sampler test
+  environment's Turing 0.46. `setup_env.jl` and the focused sampler test
   enforce this ancestry because older and newer checkouts all report version
-  0.2.1. Bootstrap resolves the floor from public `origin/dev` or the host
-  mirror's immutable pin, not from a shared checkout's possibly stale local
-  branch.
+  0.2.1. `setup_env.jl` resolves an exact published revision rather than a
+  shared checkout's possibly stale local branch.
 - **`StanBlocks` must be a checkout, not a release.** BRM does not precompile
   against registered StanBlocks; it fails inside a `@deffun` in `src/sbimpl.jl`.
   Configured `gp` / `hsgp` term priors additionally require StanBlocks
@@ -237,12 +226,14 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   `MutatingFunctions`, `OutputSignatures`, and `TreeArrays` are unregistered
   direct dependencies. On Julia 1.10 their committed source pins are inert, so
   omitting their paths fails with `expected package ... to be registered`.
-- **All seven `develop` paths go in ONE `Pkg.develop` call.** Resolution has to
-  satisfy them together. Developing StanBlocks by itself fails with `expected
-  package BayesianRegressionModels to be registered`, while omitting a
-  source-only direct dependency produces the same error for that dependency.
+- **All ten `develop` paths go in ONE `Pkg.develop` call.** Resolution has to
+  satisfy them together: the unregistered BRM root, the seven external
+  source pins, and the two nested ReactiveKernels packages. Developing
+  StanBlocks by itself fails with `expected package
+  BayesianRegressionModels to be registered`, while omitting a source-only or
+  nested package produces the same error for that dependency.
 - **Pathfinder's Turing extension pair is precompiled serially first.** Both
-  `bootstrap.jl` and `setup_env.jl` suppress the parallel auto-precompile that
+  `setup_env.jl` suppresses the parallel auto-precompile that
   `Pkg.instantiate()` performs, build `Pkg.precompile(["Pathfinder", "Turing"])`
   once under `JULIA_NUM_PRECOMPILE_TASKS=1`, then run the ordinary parallel
   `Pkg.precompile()`. This is not stylistic — it is the same class of Pkg 1.10

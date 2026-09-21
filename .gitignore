@@ -27,7 +27,7 @@ docs/src/public/live-*/
 Manifest*.toml
 !scripts/render_env/Manifest.toml
 
-# Reproducible develop-path checkouts materialized by test/bootstrap.jl.
+# Reproducible develop-path checkouts materialized by test/setup_env.jl.
 test/.bootstrap/
 
 # Reproducible plotting checkouts materialized by
