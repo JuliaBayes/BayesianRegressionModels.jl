@@ -2021,6 +2021,28 @@ function brm_output_coordinates(d::BRMDescriptor, logical::Symbol,
 end
 
 """
+    brm_output_coordinates(output::BRMOutput, constrained_names) -> Vector{Int}
+
+Resolve an already-discovered emitted carrier to its columns in BridgeStan's
+constrained `param_names` (or an equivalent posterior name vector). Matching is
+exactly the logical resolver's: only `output.name` and its documented container
+coordinates (`name.1`, `name.1.1`, …) match; compiler-owned plate suffixes are
+never parsed.
+
+This overload is for internal carriers that have no public logical target, such
+as the Cholesky factor inside a correlated random-effect block. A missing
+carrier remains an error rather than an empty posterior slice.
+"""
+function brm_output_coordinates(output::BRMOutput, constrained_names)
+    coordinates = _brm_emitted_coordinates(output, constrained_names)
+    isempty(coordinates) && error(
+        "brm_descriptor: emitted output `$(output.name)` is absent from the " *
+        "supplied constrained names. Re-reflect the model that produced the " *
+        "posterior draws.")
+    coordinates
+end
+
+"""
     brm_operation(d::BRMDescriptor, name::Symbol) -> BRMOperation
 
 The named operation. **Fails closed**: an operation this model does not offer
