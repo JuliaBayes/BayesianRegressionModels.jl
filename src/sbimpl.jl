@@ -3475,6 +3475,17 @@ emitted before compiling.
 stan_code(sb::SBBRMI) = Base.invokelatest(StanBlocks.stan_code, sb.model)
 
 """
+    stan_data(sb::SBBRMI) -> Dict
+
+Return the prepared Stan data generated from `sb.model`. Forwards to
+`StanBlocks.stan_data` in the current world, for the same lowering-time
+registration reason as [`stan_code`](@ref). Prefer this over
+`StanBlocks.stan_data(sb.model)` when the data may be materialized inside the
+same function that built `sb`.
+"""
+stan_data(sb::SBBRMI) = Base.invokelatest(StanBlocks.stan_data, sb.model)
+
+"""
     stan_model(sb::SBBRMI; kwargs...) -> StanModel
 
 Trace `sb.model` end to end. Forwards to `StanBlocks.stan_model` in the
@@ -4683,8 +4694,7 @@ end
 
 Thin convenience over [`reprocess`](@ref): the prepared Stan **data dict** for
 `new_df`, ready for a `param_constrain!` replay. Equivalent to
-`StanBlocks.stan_data(reprocess(sb, new_df; freeze_constants,
-resample_groups).model)`. Same
+`stan_data(reprocess(sb, new_df; freeze_constants, resample_groups))`. Same
 `freeze_constants` semantics (default `true` = training constants applied to new
 data), and accepts the same `resample_groups` keyword. A non-empty
 `resample_groups` also changes the Stan program; call `reprocess` when you need
@@ -4693,8 +4703,7 @@ See [`reprocess`](@ref) for the covered-terms list and error cases.
 """
 restan_data(sb::SBBRMI, new_df; freeze_constants::Bool=true,
             resample_groups=()) =
-    StanBlocks.stan_data(reprocess(
-        sb, new_df; freeze_constants, resample_groups).model)
+    stan_data(reprocess(sb, new_df; freeze_constants, resample_groups))
 
 # ---- top-level op dispatch ---------------------------------------------------
 
