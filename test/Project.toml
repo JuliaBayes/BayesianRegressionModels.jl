@@ -53,11 +53,12 @@ rev = "c317cc003fc41c2d933c27dc80799141eebd434e"
 
 [sources.StanBlocks]
 url = "https://github.com/nsiccha/StanBlocks.jl"
-# 9607eee6 (2026-09-18): distribution HOFs accept a family call in the token
+# 0421b28 (2026-09-22): distribution HOFs accept a family call in the token
 # position (StanBlocks snag hof-call-form-fa-b2bfce08) — `censored(normal(mu,
 # sigma); ...)` desugars to the token form. Contains 3aba023a (skew_double_
 # exponential vector transpiler fix, stan_instantiate stale-path rewrite).
-rev = "9607eee6c7e839032f252b91d405007eea6a9021"
+# 0421b28 adds constrained-matrix plate cells and plate-outer cv routing.
+rev = "0421b28bdea7697ea28e8875c8a07a4e4a578e6c"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
