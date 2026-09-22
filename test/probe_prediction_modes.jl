@@ -375,7 +375,7 @@ end
     @test st.family === :ranef_correlated_by
     @test st.group === :subject
     @test st.by === :stratum
-    @test st.z === :r_mu_subject__by__stratum_z
+    @test st.z === :r_mu_subject__by__stratum_b_T_z_g
 end
 
 # ---- 2. selector and shape guards (no runtime needed) -----------------------
