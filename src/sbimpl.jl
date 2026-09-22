@@ -3475,6 +3475,20 @@ emitted before compiling.
 stan_code(sb::SBBRMI) = Base.invokelatest(StanBlocks.stan_code, sb.model)
 
 """
+    stan_code(model::StanBlocks.SlicModel) -> String
+
+Return the transpiled Stan source for a SLIC model, using the same
+world-age-safe boundary as `stan_code(::SBBRMI)`. This is the supported trace
+entry for a model rebuilt from an emitted `SBBRMI` after construction — for
+example a `cv_groups` model whose group index was marked with
+`StanBlocks.stan.maybecv` just before tracing. The underlying generated family
+hooks are already registered by lowering; this boundary makes them visible to
+a trace running in the same compiled frame as the build.
+"""
+stan_code(model::StanBlocks.SlicModel) =
+    Base.invokelatest(StanBlocks.stan_code, model)
+
+"""
     stan_data(sb::SBBRMI) -> Dict
 
 Return the prepared Stan data generated from `sb.model`. Forwards to
