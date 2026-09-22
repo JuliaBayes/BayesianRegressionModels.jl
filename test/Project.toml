@@ -72,13 +72,11 @@ rev = "7aed40b18bd4cdabb75330f285d5c9b355575ab9"
 
 [sources.ReactiveKernels]
 url = "https://github.com/nsiccha/ReactiveKernels.jl"
-# 6873a0e (2026-09-21, main): d5e8bed plus the broker-landed dar slice
-# (c34227f, replayed onto b7a53c4 — the surface BRM dar emission
-# targets) and the planner-branch snag. NOTE: also carries the
-# deliberate removal of the LHS-less ranef_bucket spelling (4dc633f);
-# BRM ranef emission migrated to varying_draws/varying_slice in the
-# same landing. Bumped for the dar parity corpus.
+# 45f765e (2026-09-22, canonical): 6873a0e plus the genuine-dataflow GLM
+# object desugar (`NormalIDGLM`, `BernoulliLogitGLM`, `PoissonLogGLM`)
+# and its NA plate-AD fix. This is Digest 2's exact test pin for BRM
+# object emission.
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "6873a0ee9b4cb8e9789e8da7c0c4e8921fcf1fa8"
+rev = "45f765ea15061bfce9bd5991ffbd13a77570fdfa"

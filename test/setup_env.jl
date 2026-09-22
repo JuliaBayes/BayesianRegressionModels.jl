@@ -54,14 +54,11 @@ const PINS = [
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
-    # through. 6873a0e (2026-09-21, GitHub main): d5e8bed plus the
-    # broker-landed dar slice (c34227f, replayed onto b7a53c4 — the
-    # surface BRM dar emission targets) and the planner-branch snag.
-    # NOTE: this pin also carries the deliberate removal of the
-    # LHS-less ranef_bucket spelling (4dc633f) — BRM ranef emission
-    # migrated to varying_draws/varying_slice in the same landing
-    # (uniform split form).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "6873a0ee9b4cb8e9789e8da7c0c4e8921fcf1fa8"),  # main
+    # through. 45f765e (2026-09-22, canonical): 6873a0e plus the
+    # genuine-dataflow GLM object desugar and its NA plate-AD fix. The
+    # pin also retains 6873a0e's ranef varying_draws/varying_slice
+    # migration.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "45f765ea15061bfce9bd5991ffbd13a77570fdfa"),  # main
 ]
 
 function main()
