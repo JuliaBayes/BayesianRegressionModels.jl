@@ -114,8 +114,11 @@ const _RANEF_FAMILIES = Dict{Symbol,NamedTuple}(
     :ranef_intercept_r2d2      => (; z = :xi,     layout = :group,           noncentered = true,  tau = nothing),
     :ranef_correlated_r2d2     => (; z = :z_flat, layout = :flat_term_group, noncentered = true,  tau = :r2d2_tau),
     :ranef_correlated_draws_r2d2 => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :r2d2_tau),
-    :ranef_correlated_by       => (; z = :z,      layout = :group_term,      noncentered = true,  tau = nothing),
-    :ranef_correlated_by_draws => (; z = :z,      layout = :group_term,      noncentered = true,  tau = nothing),
+    # Native constrained-matrix plate emission (StanBlocks 0421b28). The
+    # per-group standardised cell is namespaced under the group plate result
+    # `b_T`; the collected storage remains term-major (`matrix[K, G]`).
+    :ranef_correlated_by       => (; z = :b_T_z_g, layout = :group_term,     noncentered = true,  tau = nothing),
+    :ranef_correlated_by_draws => (; z = :b_T_z_g, layout = :group_term,     noncentered = true,  tau = nothing),
     # Centered emissions — the opt-in `SBBRMI(...; centered_groups = [:g])` path,
     # which SHIPS. The coordinate is the effect ITSELF (unconstrained, so the
     # unconstrained value IS the effect): `population_draws` zeroes it, which is
@@ -466,7 +469,8 @@ function ranef_blocks(model)
                 # coding drifted).
                 n_groups = if haskey(d.keywords, :n_groups) && d.keywords.n_groups isa Symbol
                     ng_key = d.keywords.n_groups
-                    if ng_key === Symbol(d.target, :_n_g)
+                    if ng_key === Symbol(d.target, :_n_g) ||
+                       endswith(String(ng_key), "_n_g")
                         # cv-contagious sizing uses a Stan-side local, not a data key.
                         maximum(idx_val)
                     else

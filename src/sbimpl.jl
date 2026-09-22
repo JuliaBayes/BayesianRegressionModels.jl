@@ -442,13 +442,12 @@ end
 # per-cell calls in a loop.
 #
 # This path WAS a plate (StanBlocks devibe 9210b05). It is not any more. The
-# plate could not carry cv sizing -- StanBlocks' plate branch returns before the
-# `cv ? :quantities : :parameter` decision, so a plate-internal fresh parameter
-# never consults cv at all and fails SILENTLY into a model that still samples
-# per-group effects nothing informs -- which forced a duplicate
-# `ranef_correlated_cv` whose body differed from this one in exactly one size
-# expression. Collapsing to flat deletes that duplicate. It also costs nothing:
-# StanBlocks now hoists loop-invariants out of plate bodies itself (snag
+# pre-`0421b28` plate could not carry cv sizing, which forced a duplicate
+# `ranef_correlated_cv` differing only in one size expression. StanBlocks has
+# since closed that gap, but this flat spelling remains deliberate: the caller
+# supplies the size, one submodel serves ordinary and cv builds, and `z` is
+# sampled in one vectorised statement rather than per-cell calls. StanBlocks
+# now hoists loop-invariants out of plate bodies itself (snag
 # `benchmarked-brm-20aa0361` item 1, landed `94a71a0`), which closed about half
 # of the measured plate gap, and the residual is the per-call Cholesky logdet
 # that a plate cannot avoid at all (item 2, still open).
@@ -481,16 +480,11 @@ end
 # latter case a `maybecv(:<g>_idx)` mark reaches the declared size and the whole
 # block flips to a generated-quantities re-draw. One submodel serves both.
 #
-# A plate CANNOT serve the cv case, which is why this one is flat. StanBlocks'
-# plate branch (`forward.jl`, `forward!(::SamplingExpr{Symbol,<:StanExpr})`)
-# returns before the `cv ? :quantities : :parameter` decision, so a plate-
-# internal fresh parameter never consults cv -- even when the plate's OUTER size
-# is itself cv-tainted the promoted parameter stays in `parameters` while the
-# likelihood is dropped, i.e. it fails SILENTLY into a model that still samples
-# per-group effects nothing informs. Measured, not assumed. Flat is also the
-# faster Stan here: one vectorised `z_flat ~ std_normal()` instead of n_groups
-# per-cell calls in a loop (1.6x fewer us/gradient at n_groups=200, 3.3x at
-# n_groups=1000; identical log-density and gradients to ~1e-14).
+# Flat is deliberate now that plate-outer cv routing works (`0421b28`): the
+# caller-supplied size keeps one submodel for ordinary and cv builds, and the
+# measured flat floor is faster -- one vectorised `z_flat ~ std_normal()`
+# instead of n_groups per-cell calls (1.6x fewer us/gradient at n_groups=200,
+# 3.3x at n_groups=1000; identical log-density and gradients to ~1e-14).
 ranef_correlated_draws = StanBlocks.@slic begin
     L      ~ lkj_corr_cholesky(1.; n=n_terms)
     tau    ~ std_normal(; n=n_terms, lower=0.)
@@ -683,25 +677,14 @@ end
 # It stays OPT-IN via `SBBRMI(...; cv_groups=...)`; a build without it emits the
 # `n_<g>` form.
 #
-# WHY THE DUPLICATES EXISTED, AND WHY THEY DO NOT NOW. A `_cv` sibling was only
-# ever needed where the size expression could not be supplied by the caller --
-# i.e. where the submodel computed it internally because it was a plate. A plate
-# cannot carry cv sizing for a sharper reason than "the taint does not arrive":
-# StanBlocks' `forward!(::SamplingExpr{Symbol,<:StanExpr})` (forward.jl)
-# dispatches to the plate promotion and RETURNS before reaching the
-# `cv ? :quantities : :parameter` decision, so a plate-internal fresh parameter
-# never consults cv AT ALL. Making the plate's OUTER size cv-tainted does not
-# help: the promoted parameter stays in `parameters` while the likelihood is
-# dropped -- a model that still samples per-group effects nothing informs, with
-# no error. Measured, not inferred. Once the non-centered paths stopped being
-# plates, each duplicate collapsed into its sibling.
-#
-# STILL UNSUPPORTED: the typed-LHS `_by`/stratified path
-# (`z::vector[n_groups, n_terms] ~ multi_std_normal()`). StanBlocks' typed-LHS
-# forward (forward.jl:355) derives cv from the RHS call-args, not the declared
-# size, so a cv size there yields a cv *parameter*, not a `:quantities` re-draw.
-# `gr(g, by=b)` in `cv_groups` is rejected loudly rather than emitted wrong.
-# Centered emission is likewise not combinable with cv sizing -- see below.
+# WHY THE DUPLICATES EXISTED, AND WHY MOST DO NOT NOW. A `_cv` sibling was only
+# needed where a submodel computed its size internally and could not receive a
+# tainted caller size. StanBlocks `0421b28` closes the plate-outer routing gap:
+# a cv-tainted outer size now moves the affected plate cells (and their derived
+# result) to generated quantities. The flat correlated floors above remain
+# deliberate for speed and a single ordinary/cv submodel; the former typed-LHS
+# stratified floor is now the native constrained-matrix plate spelling below.
+# Centered emission still cannot carry a cv taint -- see below.
 
 # ---- centered ranef variants (opt-in; for strong per-group likelihoods) ------
 #
@@ -767,17 +750,17 @@ end
 # this whole comment can go with it.
 #
 # Scope: centered emission is NOT combinable with cv-contagious sizing. A
-# centered block's sampled parameter is the per-group effect itself, which under
-# either available spelling (plate cell, or the typed-LHS form below) sits behind
-# the same StanBlocks gap the `_cv` comment above describes -- so there is no
-# centered shape whose size can carry a cv taint. `SBBRMI` rejects the
+# centered block's sampled parameter is the per-group effect itself, so it has
+# no separate non-centered draw whose plate-outer size can carry the cv taint.
+# Stratified centered emission is additionally not built. `SBBRMI` rejects the
 # combination explicitly rather than silently emitting an in-sample block.
 
 # `@stanonly` because `vector[m, n]` (an `array[m] vector[n]`) has no Julia
 # emission; both helpers exist only to be called from the SLIC bodies below,
 # so they are never invoked from Julia. `multi_normal_cholesky0` is the zero-mean
 # array-vectorised MVN-Cholesky the typed-LHS `~` routes to (a distinctly-named
-# `@lhs @lpxf` UDF, exactly as `multi_std_normal` is for `ranef_correlated_by`);
+# `@lhs @lpxf` UDF, alongside the retained `multi_std_normal`/`multi_lkj...`
+# typed-LHS helpers);
 # `ranef_b_matrix` rebuilds the `n_groups × n_terms` matrix the public contract
 # promises. The loop is why it is a `@deffun` -- Stan's `to_matrix` has no
 # `array[] vector` overload, and `@slic` bodies cannot contain control flow.
@@ -1652,31 +1635,8 @@ StanBlocks.@deffun begin
     end
 end
 
-StanBlocks.@deffun begin
-    stratified_correlated_b(L, tau, z, stratum_idx::int[n_groups],
-                            n_groups::int, n_terms::int) = begin
-        b = rep_matrix(0., n_groups, n_terms)
-        for g in 1:n_groups
-            b[g, :] = (diag_pre_multiply(tau[stratum_idx[g], :],
-                                         L[stratum_idx[g], :, :]) * z[g, :])'
-        end
-        b
-    end
-end
-
-# `(expr | gr(g, by=b))` stratified random effects: independent LKJ-Cholesky +
-# tau per level of `b`, so each stratum has its own full covariance structure.
-# `stratum_idx[g]` maps each group-level to its stratum (walker pre-computes it
-# and errors if any group straddles strata).
-#   L   :: array[n_strata] cholesky_factor_corr[n_terms]
-#   tau :: array[n_strata] vector<lower=0>[n_terms]
-#   z   :: array[n_groups] vector[n_terms]
-# Per-group contribution: b[g, :] = (diag_pre_multiply(tau[s], L[s]) * z[g])'
-# where s = stratum_idx[g]. The per-group loop lives in
-# `stratified_correlated_b` (a @deffun helper) because @slic bodies cannot
-# contain control flow.
 # Distinctly-named 2-arg `@lhs @lpxf` UDFs so typed-LHS sampling routes to a
-# user-defined Stan function without clashing with Stan's scalar-only 
+# user-defined Stan function without clashing with Stan's scalar-only
 # built-ins. `@lpxf` creates the base stub + `lpxf_expr` hook so
 # `L ~ multi_lkj_corr_cholesky(1.)` resolves; `@lhs` registers the base
 # tracetype so the 2-arg call dispatches to this lpdf with `m, n` bound from
@@ -1698,24 +1658,66 @@ StanBlocks.@deffun begin
     end
 end
 
+# `(expr | gr(g, by=b))` stratified random effects: independent LKJ-Cholesky +
+# tau per level of `b`, so each stratum has its own full covariance structure.
+# `stratum_idx[g]` maps each group-level to its stratum (walker pre-computes it
+# and errors if any group straddles strata).
+#   L   :: array[n_strata] cholesky_factor_corr[n_terms]
+#   tau :: array[n_strata] vector<lower=0>[n_terms]
+#   z   :: array[n_groups] vector[n_terms]
+# Per-group contribution: b[g, :] = (diag_pre_multiply(tau[s], L[s]) * z[g])'
+# where s = stratum_idx[g].
+#
+# The constrained hyperparameters and the per-group draws are separate plates.
+# StanBlocks now natively collects a fixed constrained-matrix cell as
+# `array[n_strata] cholesky_factor_corr[n_terms]` (StanBlocks `0421b28`), so
+# this is no longer a flat typed-LHS workaround. The group plate takes
+# `stratum_idx[group_idx]` as its positional per-cell scalar: a whole-array
+# gather of a constrained plate result still has no tracetype, while per-cell
+# scalar indexing does. With `n_groups` sized from a cv-marked `group_idx`,
+# only this group plate (z and b) re-draws in generated quantities; the
+# stratum-level L/tau plates stay fitted.
 ranef_correlated_by = StanBlocks.@slic begin
-    L::cholesky_factor_corr[n_strata, n_terms] ~ multi_lkj_corr_cholesky(1.)
-    tau::vector[n_strata, n_terms] ~ multi_std_normal(; lower=0.)
-    # z is the standardised per-GROUP draw (n_groups rows), not per-stratum --
-    # `stratified_correlated_b` indexes z[g, :] for g in 1:n_groups.
-    z::vector[n_groups, n_terms] ~ multi_std_normal()
-    b = stratified_correlated_b(L, tau, z, stratum_idx, n_groups, n_terms)
+    L_s ~ plate(; outer=(n_strata,)) do s
+        L::cholesky_factor_corr[n_terms] ~ lkj_corr_cholesky(1.)
+        L
+    end
+    tau_s ~ plate(; outer=(n_strata,)) do s
+        tau::vector[n_terms] ~ std_normal(; lower=0.)
+        tau
+    end
+    b_T ~ plate(stratum_idx[group_idx]; outer=(n_groups,)) do sidx
+        L_g = L_s[sidx]
+        tau_g = tau_s[:, sidx]
+        z_g::vector[n_terms] ~ std_normal()
+        diag_pre_multiply(tau_g, L_g) * z_g
+    end
+    b = b_T'
     return rows_dot_product(Z, b[group_idx, :])
 end
 
 # Cross-formula stratified correlated ranef draws for brms-style
 # `(e | ID | gr(g, by=b))` buckets. Matrix-returning variant of
 # `ranef_correlated_by` so each sub-formula can slice its own column(s).
+# Use the same three-plate spelling as `ranef_correlated_by`: constrained
+# matrix cells stay stratum-level parameters, while the group plate is the
+# cv-tainted surface. Return in the historical `n_groups x n_terms` layout.
 ranef_correlated_by_draws = StanBlocks.@slic begin
-    L::cholesky_factor_corr[n_strata, n_terms] ~ multi_lkj_corr_cholesky(1.)
-    tau::vector[n_strata, n_terms] ~ multi_std_normal(; lower=0.)
-    z::vector[n_groups, n_terms] ~ multi_std_normal()
-    return stratified_correlated_b(L, tau, z, stratum_idx, n_groups, n_terms)
+    L_s ~ plate(; outer=(n_strata,)) do s
+        L::cholesky_factor_corr[n_terms] ~ lkj_corr_cholesky(1.)
+        L
+    end
+    tau_s ~ plate(; outer=(n_strata,)) do s
+        tau::vector[n_terms] ~ std_normal(; lower=0.)
+        tau
+    end
+    b_T ~ plate(stratum_idx[group_idx]; outer=(n_groups,)) do sidx
+        L_g = L_s[sidx]
+        tau_g = tau_s[:, sidx]
+        z_g::vector[n_terms] ~ std_normal()
+        diag_pre_multiply(tau_g, L_g) * z_g
+    end
+    return b_T'
 end
 
 # Treatment-coded categorical predictor. Allocates K-1 free betas; reference
@@ -3238,11 +3240,9 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     isempty(both) || error(
         "sbimpl: group(s) $(join(sort!(collect(both)), ", ")) named in BOTH ",
         "`cv_groups` and `centered_groups`. A centered block's sampled ",
-        "parameter is the per-group effect itself, whose size cannot carry a ",
-        "cv taint (StanBlocks: cv does not reach a plate-internal fresh ",
-        "parameter, and typed-LHS derives cv from RHS call-args rather than ",
-        "the declared size). Emit the CV artifact non-centered, or drop the ",
-        "group from `cv_groups`.")
+        "parameter is the per-group effect itself. Centered emission has no ",
+        "cv-tainted non-centered draw surface. Emit the CV artifact ",
+        "non-centered, or drop the group from `cv_groups`.")
     both = intersect(s2z_selected, centered_groups)
     isempty(both) || throw(ArgumentError(
         "sbimpl: group(s) $(join(sort!(collect(both)), ", ")) named in BOTH " *
@@ -8441,17 +8441,10 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::Tuple{NamedCo
     isnothing(g_backing) && error("sbimpl: group `$(name(gcol))` must be a raw data column")
     isnothing(b_backing) && error("sbimpl: `by=$(name(bcol))` must be a raw data column")
     g, b = name(gcol), name(bcol)
-    g in cv_groups && error(
-        "sbimpl: cv-contagious sizing requested for group `$g`, but `$g` is a ",
-        "stratified `gr($g, by=$b)` ranef whose `z` is declared via typed-LHS. ",
-        "StanBlocks' typed-LHS forward derives cv from RHS call-args, not the ",
-        "declared size, so a cv size yields a cv *parameter*, not a generated-",
-        "quantities re-draw. Making `by=` blocks cv-contagious needs a bare-`z` ",
-        "rewrite or a StanBlocks typed-LHS fix -- not yet supported.")
     g in centered_groups && error(
         "sbimpl: centered parameterization requested for group `$g`, but `$g` is ",
         "a stratified `gr($g, by=$b)` ranef whose per-group draw goes through the ",
-        "typed-LHS `ranef_correlated_by` path (one Cholesky per stratum). The ",
+        "native plate `ranef_correlated_by` path (one Cholesky per stratum). The ",
         "centered variants emit a plate over a single shared covariance and have ",
         "no per-stratum form -- not yet supported. Use a plain `(… | $g)` or ",
         "`(… |ID| $g)` ranef, or leave `$g` non-centered.")
@@ -8463,6 +8456,14 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::Tuple{NamedCo
     suffix = Symbol(g, :__by__, b)
     idx_name     = Symbol(suffix, :_idx)
     n_name       = Symbol(:n_, suffix)
+    n_groups_name = n_name
+    if g in cv_groups
+        # The group plate's outer size is the cv-tainted surface. The stratum
+        # plates size from `n_strata` and therefore remain fitted parameters.
+        n_cv_name = Symbol(suffix, :_n_g)
+        push!(stmts, :($n_cv_name = maximum($idx_name)))
+        n_groups_name = n_cv_name
+    end
     s_idx_name   = Symbol(suffix, :_stratum_idx)
     n_strata_nm  = Symbol(:n_strata_, suffix)
     data[idx_name]    = g_idx
@@ -8481,7 +8482,7 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::Tuple{NamedCo
     push!(stmts, :($Z_name = $(Expr(:call, :hcat, col_exprs...))))
     push!(stmts, :($r_name ~ ranef_correlated_by(;
         Z=$Z_name, group_idx=$idx_name,
-        n_groups=$n_name, n_terms=$k_name,
+        n_groups=$n_groups_name, n_terms=$k_name,
         stratum_idx=$s_idx_name, n_strata=$n_strata_nm)))
     push!(summands, r_name)
 end
@@ -9683,8 +9684,8 @@ _sb_id_bucket_suffix(id_sym, g::Tuple{NamedColumn,NamedColumn}) =
 # Emit the shared `b_<suffix> ~ …_draws(...)` statement for one ID bucket.
 # Plain group -> `ranef_correlated_draws` (or its `_cv` / `_centered` variant
 # when the group is opted in); `gr(g, by=b)` group -> stratified
-# `ranef_correlated_by_draws`, which has neither variant. Returns the idx_name
-# callers use to slice the draw matrix per sub-formula.
+# `ranef_correlated_by_draws`, with cv support and centered still rejected.
+# Returns the idx_name callers use to slice the draw matrix per sub-formula.
 function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g::NamedColumn;
                                       cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
                                       id_sym=nothing, ranef_effect=nothing, r2d2_tau=nothing,
@@ -9796,14 +9797,6 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name,
     isnothing(ranef_effect) || error(
         "sbimpl: covariance-prior effects for stratified `|$id_str| " *
         "gr($gname, by=$bname)` buckets are not yet supported")
-    gname in cv_groups && error(
-        "sbimpl: cv-contagious sizing requested for group `$gname`, but it ",
-        "appears in a `(… |$id_str| gr($gname, by=$bname))` stratified ID bucket, ",
-        "whose shared draws block goes through the typed-LHS ",
-        "`ranef_correlated_by_draws` path. StanBlocks' typed-LHS forward derives ",
-        "cv from RHS call-args, not the declared size, so a cv size there yields ",
-        "a cv *parameter*, not a generated-quantities re-draw. Use a plain ",
-        "`(… |$id_str| $gname)` bucket for the cv group -- `by=` is not yet supported.")
     gname in centered_groups && error(
         "sbimpl: centered parameterization requested for group `$gname`, but it ",
         "appears in a `(… |$id_str| gr($gname, by=$bname))` stratified ID bucket ",
@@ -9812,8 +9805,17 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name,
         "supported. Use a plain `(… |$id_str| $gname)` bucket, or leave ",
         "`$gname` non-centered.")
     info = _sb_ensure_group_data!(data, g)
+    n_groups_name = info.n_name
+    if gname in cv_groups
+        # The group plate's outer size is the cv-tainted surface. The stratum
+        # L/tau plates remain fitted under a `maybecv(<g>_idx)` mark.
+        n_cv_name = Symbol(bucket_name, :_n_g)
+        push!(stmts, :($n_cv_name = maximum($(info.idx_name))))
+        n_groups_name = n_cv_name
+    end
     push!(stmts, :($bucket_name ~ ranef_correlated_by_draws(;
-        group_idx=$(info.idx_name), n_groups=$(info.n_name),
+        group_idx=$(info.idx_name),
+        n_groups=$n_groups_name,
         n_terms=$n_terms_name,
         stratum_idx=$(info.s_idx_name), n_strata=$(info.n_strata_name))))
     info.idx_name

@@ -272,7 +272,7 @@ end
                  centered_groups=[:othergroup]) isa SBBRMI
 end
 
-@testset "stratified `gr(g, by=b)` stays unsupported for both modes" begin
+@testset "stratified `gr(g, by=b)` supports cv, but not centering" begin
     n_subj, per = 6, 4
     n = n_subj * per
     df = (; subject = repeat(1:n_subj, inner=per),
@@ -288,8 +288,32 @@ end
     # It still emits fine when not opted in.
     @test stanc_ok(StanBlocks.stan_code(SBBRMI(brmi; mod=@__MODULE__).model))
 
-    for (kw, needle) in ((:cv_groups, "cv-contagious"),
-                         (:centered_groups, "centered parameterization"))
+    by_sb = SBBRMI(brmi; mod=@__MODULE__, cv_groups=[:subject])
+    code = StanBlocks.stan_code(by_sb.model)
+    @test stanc_ok(code)
+    @test occursin("subject__by__arm_n_g = max(subject__by__arm_idx)", code)
+    @test occursin("r_mu_subject__by__arm_b_T_z_g", code)
+
+    # The mark must leave the stratum-level covariance/scales fitted while the
+    # group plate re-draws. This is exactly the composition the constrained-
+    # matrix plate capability enables.
+    tainted = Dict{Symbol,Any}(by_sb.data)
+    tainted[:subject__by__arm_idx] =
+        StanBlocks.stan.maybecv(:subject__by__arm_idx, tainted[:subject__by__arm_idx])
+    marked_code = StanBlocks.stan_code(
+        StanBlocks.SlicModel(by_sb.model.model, tainted, by_sb.model.mod))
+    @test stanc_ok(marked_code)
+    pstart = first(findfirst("parameters {", marked_code))
+    params = marked_code[pstart:first(findfirst("model {", marked_code))]
+    gq = marked_code[first(findfirst("generated quantities {", marked_code)):end]
+    @test !occursin("r_mu_subject__by__arm_b_T_z_g", params)
+    @test occursin("r_mu_subject__by__arm_b_T_z_g", gq)
+    @test occursin("array[n_strata_subject__by__arm] cholesky_factor_corr", params)
+    @test occursin("matrix<lower=0.0>[n_terms_mu_subject__by__arm", params)
+
+    # Centering has no stratified form and no non-centered surface for the cv
+    # artifact to ride on.
+    for (kw, needle) in ((:centered_groups, "centered parameterization"),)
         err = try
             SBBRMI(brmi; mod=@__MODULE__, kw => [:subject])
             nothing
@@ -298,6 +322,85 @@ end
         @test occursin(needle, err.msg)
         @test occursin("gr(subject, by=arm)", err.msg)
     end
+end
+
+@testset "stratified `|ID| gr(g, by=b)` bucket supports cv" begin
+    n_subj, per = 6, 4
+    n = n_subj * per
+    df = (; subject = repeat(1:n_subj, inner=per),
+            arm     = repeat([1, 2], inner=n ÷ 2),
+            zage    = collect(range(-1.0, 1.0, length=n)),
+            y       = collect(range(-0.5, 0.5, length=n)))
+    bucket_builder = @brm begin
+        mu ~ 1 + zage + (1 + zage |p| gr(subject, by = arm))
+        y ~ Normal(mu, 1.0)
+    end
+    brmi = bucket_builder(df)
+    sb = SBBRMI(brmi; mod=@__MODULE__, cv_groups=[:subject])
+    code = StanBlocks.stan_code(sb.model)
+    @test stanc_ok(code)
+    @test occursin("b_p_subject__by__arm_n_g = max(subject__by__arm_idx)", code)
+    @test occursin("b_p_subject__by__arm_b_T_z_g", code)
+
+    tainted = Dict{Symbol,Any}(sb.data)
+    tainted[:subject__by__arm_idx] =
+        StanBlocks.stan.maybecv(:subject__by__arm_idx, tainted[:subject__by__arm_idx])
+    marked = SBBRMI(sb.parent,
+                    StanBlocks.SlicModel(sb.model.model, tainted, sb.model.mod),
+                    tainted, sb.preproc)
+    marked_code = StanBlocks.stan_code(marked.model)
+    @test stanc_ok(marked_code)
+    pstart = first(findfirst("parameters {", marked_code))
+    params = marked_code[pstart:first(findfirst("model {", marked_code))]
+    gq = marked_code[first(findfirst("generated quantities {", marked_code)):end]
+    @test !occursin("b_p_subject__by__arm_b_T_z_g", params)
+    @test occursin("b_p_subject__by__arm_b_T_z_g", gq)
+    @test occursin("array[n_strata_subject__by__arm] cholesky_factor_corr", params)
+    @test occursin("matrix<lower=0.0>[n_terms_p_subject__by__arm", params)
+end
+
+@testset "runtime — stratified constrained-matrix plate" begin
+    n_subj, per = 6, 4
+    n = n_subj * per
+    df = (; subject = repeat(1:n_subj, inner=per),
+            arm     = repeat([1, 2], inner=n ÷ 2),
+            zage    = collect(range(-1.0, 1.0, length=n)),
+            y       = collect(range(-0.5, 0.5, length=n)))
+    builder = @brm begin
+        mu ~ 1 + zage + (1 + zage | gr(subject, by = arm))
+        y ~ Normal(mu, 1.0)
+    end
+    brmi = builder(df)
+    sb = SBBRMI(brmi; mod=@__MODULE__)
+    LDP = StanBlocks.LogDensityProblems
+    prob = brm_execute(brm_descriptor(sb), :fit)
+    theta = 0.1 .* collect(range(-1.0, 1.0, length=LDP.dimension(prob)))
+    lp, grad = LDP.logdensity_and_gradient(prob, theta)
+    @test isfinite(lp)
+    @test all(isfinite, grad)
+
+    block = only(ranef_blocks(sb))
+    @test block.family === :ranef_correlated_by
+    @test block.z === :r_mu_subject__by__arm_b_T_z_g
+
+    cv_sb = SBBRMI(brmi; mod=@__MODULE__, cv_groups=[:subject])
+    tainted = Dict{Symbol,Any}(cv_sb.data)
+    tainted[:subject__by__arm_idx] =
+        StanBlocks.stan.maybecv(:subject__by__arm_idx, tainted[:subject__by__arm_idx])
+    held_sb = SBBRMI(cv_sb.parent,
+                     StanBlocks.SlicModel(cv_sb.model.model, tainted, cv_sb.model.mod),
+                     tainted, cv_sb.preproc)
+    held = brm_descriptor(held_sb)
+    offered = [op.name for op in held.operations]
+    @test :predict in offered
+    @test :pointwise_loglik in offered
+    @test !(:fit in offered)
+    outs = Dict(o.name => o for o in held.stan.outputs)
+    @test outs[:r_mu_subject__by__arm_b_T_z_g].kind === :generated_quantity
+    @test outs[:r_mu_subject__by__arm_L_s_L].kind === :parameter
+    @test outs[:r_mu_subject__by__arm_tau_s_tau].kind === :parameter
+    @test outs[:r_mu_subject__by__arm_L_s].kind === :transformed_parameter
+    @test outs[:r_mu_subject__by__arm_tau_s].kind === :transformed_parameter
 end
 
 @testset "runtime — both emissions compile and differentiate" begin
