@@ -322,7 +322,115 @@ end
 # spelling; the desugar rewrites each to exactly the decomposed twin
 # below (same roles, same order), and evidence/weights wrappers
 # recurse, so the lowered plan is identical by construction. Default
-# off until the thin-layer surface lands and the test pin carries it.
+# on at the Digest-2 pin; `false` remains the decomposed-twin pin.
+#
+# Eligible canonical GLMs use the stronger object form:
+# `y ~ NormalIDGLM(X, alpha, beta, sigma)` and its two no-scale heads.
+# They replace the whole predictor spine (the thin side prepends alpha
+# and owns the layout), so they apply only when the planned predictor is
+# exactly intercept + numeric continuous columns with ordinary Normal
+# population priors. The pinned Digest-2 eligibility keeps every other
+# shape — intercept-only, factor/derived/nonlinear terms, transformed
+# predictors, evidence/weights, modeled scales, and R2D2 — on the
+# decomposed-predic path above.
+struct _RKGLMObjectSpec
+    response::Symbol
+    head::Symbol
+    x::Symbol
+    alpha::Symbol
+    beta::Symbol
+    scale::Any
+    columns::Vector{Symbol}
+    alpha_prior::Tuple{Float64,Float64}
+    beta_priors::Vector{Tuple{Float64,Float64}}
+end
+
+function _rk_ast_fresh_name(base::String, taken::Set{Symbol})
+    name = Symbol(base)
+    tail = ""
+    while name in taken
+        tail *= "_"
+        name = Symbol(base, tail)
+    end
+    push!(taken, name)
+    name
+end
+
+function _rk_ast_glm_object_prior(priors::Dict{Tuple{Symbol,Symbol},
+        Tuple{Float64,Float64}}, predictor::Symbol, addressee::Symbol)
+    get(priors, (predictor, addressee), nothing)
+end
+
+function _rk_ast_glm_object_spec(response::_RKLikelihoodSpec,
+        plan::_RKStructuralPlan, taken::Set{Symbol},
+        priors::Dict{Tuple{Symbol,Symbol},Tuple{Float64,Float64}})
+    head = response.family === :gaussian ? :NormalIDGLM :
+        response.family === :bernoulli_logit ? :BernoulliLogitGLM :
+        response.family === :poisson_log ? :PoissonLogGLM : return nothing
+    (response.evidence.kind === :none && response.weights === nothing &&
+        response.trials === nothing && response.scale_predictor === nothing &&
+        isempty(response.extra_predictors) &&
+        isempty(response.count_columns)) || return nothing
+    count(r -> r.predictor === response.predictor, plan.responses) == 1 ||
+        return nothing
+    index = findfirst(p -> p.name === response.predictor, plan.predictors)
+    index === nothing && return nothing
+    predictor = plan.predictors[index]
+    wanted_link = response.family === :gaussian ? :identity :
+        response.family === :bernoulli_logit ? :identity : :log
+    predictor.link === wanted_link || return nothing
+    all(t -> t.kind === :intercept || t.kind === :continuous,
+        predictor.terms) || return nothing
+    intercept_index = findfirst(t -> t.kind === :intercept, predictor.terms)
+    continuous = filter(t -> t.kind === :continuous, predictor.terms)
+    (intercept_index !== nothing && !isempty(continuous)) || return nothing
+    all(t -> length(t.columns) == 1 && haskey(plan.columns, only(t.columns)),
+        continuous) || return nothing
+    all(t -> (length(t.columns) == 1 &&
+        let values = plan.columns[only(t.columns)]
+            all(v -> v isa Real && !(v isa Bool), values)
+        end), continuous) || return nothing
+    intercept = predictor.terms[intercept_index]
+    alpha_prior = _rk_ast_glm_object_prior(
+        priors, predictor.name, intercept.addressee)
+    alpha_prior isa Tuple || return nothing
+    beta_priors = Tuple{Float64,Float64}[]
+    for term in continuous
+        prior = _rk_ast_glm_object_prior(priors, predictor.name,
+            term.addressee)
+        prior isa Tuple || return nothing
+        push!(beta_priors, prior)
+    end
+    _RKGLMObjectSpec(
+        response.response, head,
+        _rk_ast_fresh_name(string(response.response, "_X"), taken),
+        _rk_ast_fresh_name(string(predictor.name, "_alpha"), taken),
+        _rk_ast_fresh_name(string(predictor.name, "_beta"), taken),
+        response.scale, Symbol[only(t.columns) for t in continuous],
+        alpha_prior, beta_priors)
+end
+
+function _rk_ast_glm_object_stmts(spec::_RKGLMObjectSpec)
+    alpha_loc, alpha_scale = spec.alpha_prior
+    locs = Tuple{Float64,Float64}[p for p in spec.beta_priors]
+    locarg = all(p -> p[1] == first(locs)[1], locs) ? first(locs)[1] :
+        Expr(:vect, (p[1] for p in locs)...)
+    scalearg = all(p -> p[2] == first(locs)[2], locs) ? first(locs)[2] :
+        Expr(:vect, (p[2] for p in locs)...)
+    stmts = Expr[
+        Expr(:(=), spec.x, Expr(:call, :hcat, spec.columns...)),
+        Expr(:call, :~, spec.alpha,
+            Expr(:call, :Normal, alpha_loc, alpha_scale)),
+        Expr(:call, :.~, Expr(:ref, spec.beta,
+                Expr(:call, :axes, spec.x, 2)),
+            _rk_ast_dotted(:Normal, locarg, scalearg)),
+        Expr(:call, :~, spec.response,
+            Expr(:call, spec.head, spec.x, spec.alpha, spec.beta,
+                (spec.head === :NormalIDGLM ? (spec.scale,) : ())...)),
+    ]
+    stmts
+end
+
 function _rk_ast_response_dist(response::_RKLikelihoodSpec,
         leaf::Dict{Symbol,Any}, fused_heads::Bool)
     predictor = leaf[:predictor]
@@ -685,7 +793,7 @@ function _rk_ast_me_names(plan::_RKStructuralPlan)
     names
 end
 
-function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=false)
+function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
     taken = union(Set(keys(plan.columns)),
         Set(p.name for p in plan.parameters),
         Set(a.name for a in plan.assignments),
@@ -713,9 +821,22 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=false)
         push!(taken, fresh)
         rename[predictor.name] = fresh
     end
-    ranef_draws, ranef_effects = _rk_ast_ranef_names!(plan, taken)
     priors = Dict((p.predictor, p.addressee) => (p.location, p.scale)
         for p in plan.population_priors)
+    # Reserve X/alpha/beta before any other generated name; an eligible
+    # GLM consumes its predictor entirely, so no affine names follow.
+    glm_objects = Dict{Symbol,_RKGLMObjectSpec}()
+    glm_object_predictors = Set{Symbol}()
+    if fused_heads
+        for response in plan.responses
+            spec = _rk_ast_glm_object_spec(response, plan, taken, priors)
+            if spec !== nothing
+                glm_objects[response.response] = spec
+                push!(glm_object_predictors, response.predictor)
+            end
+        end
+    end
+    ranef_draws, ranef_effects = _rk_ast_ranef_names!(plan, taken)
     r2d2s = Dict(rp.predictor => rp for rp in plan.r2d2_priors)
     response_for = Dict{Symbol,Symbol}()
     for response in plan.responses
@@ -739,6 +860,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=false)
         for response in plan.responses if response.discrimination isa Symbol)
     for predictor in plan.predictors
         predictor.name in scales && continue
+        predictor.name in glm_object_predictors && continue
         lhs = get(rename, predictor.name, predictor.name)
         r2d2 = get(r2d2s, predictor.name, nothing)
         # Scalar-coefficient terms (intercept/continuous/free-beta
@@ -966,6 +1088,11 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=false)
     for response in plan.responses
         if response.family === :mvnormal_cholesky
             push!(stmts, _rk_ast_joint_response(response, rename))
+            continue
+        end
+        object = get(glm_objects, response.response, nothing)
+        if object !== nothing
+            append!(stmts, _rk_ast_glm_object_stmts(object))
             continue
         end
         push!(stmts,

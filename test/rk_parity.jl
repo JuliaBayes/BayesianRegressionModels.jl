@@ -118,13 +118,12 @@ function _ref_lkj_k2_eta1(L)
     return c # + (2*1-2) * log(L[2, 2]) == c; L kept for the call shape
 end
 
-# K=2 spherical-Cholesky theta Jacobian: theta = pi*sigmoid(t).
-function _lkj2_theta_jac(t)
-    # theta = pi*sigmoid(t); the (i-j) = 1 Gram exponent keeps one log-sin
-    # term (Omega volume element — peer fix a5b810a, RK 86e5265; the old
-    # (i-1-j) = 0 exponent dropped it, pinning the buggy Jacobian).
-    s = 1 / (1 + exp(-t))
-    return log(sin(pi * s)) + log(pi) + log(s) + log1p(-s)
+# K=2 Stan partial-correlation-vine Jacobian (Digest-2 RK pin 45f765e):
+# the single packed coordinate is z = tanh(t), with logjac
+# log(1 - z^2).
+function _lkj2_vine_logjac(t)
+    z = tanh(t)
+    return log1p(-z^2)
 end
 
 function _layout_signature(layout)
@@ -345,7 +344,7 @@ end
         _ref_lkj_k2(2.0, nt.L_res_L_corr)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    jac = u[5] + u[6] + _lkj2_theta_jac(u[7])
+    jac = u[5] + u[6] + _lkj2_vine_logjac(u[7])
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
@@ -701,8 +700,8 @@ end
         (:varying, :tau_g, 2, :exp),
         (:varying, :z_flat_g, 6, :identity),
     ]
-    # The joint Stage-C point: the peer built its constrained case from
-    # exactly this u, so the live-exchange values pin this leg.
+    # The joint Stage-C point was re-anchored at the Digest-2 vine LKJ
+    # pin; the self-contained references above still verify the wiring.
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
     r = _ref_corr_r(_parity_cols.g, nt.L_g, nt.tau_g, nt.z_flat_g,
@@ -715,9 +714,9 @@ end
         sum(logpdf.(Normal(0, 1), nt.z_flat_g))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    @test _rk_query(backend, :likelihood, u) ≈ -34.557661700821690 atol = 1e-12
+    @test _rk_query(backend, :likelihood, u) ≈ -34.484707540969616 atol = 1e-12
     @test _rk_query(backend, :prior, u) ≈ -12.267527341929741 atol = 1e-12
-    jac = u[2] + u[4] + u[5] + _lkj2_theta_jac(u[3])
+    jac = u[2] + u[4] + u[5] + _lkj2_vine_logjac(u[3])
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
@@ -756,7 +755,7 @@ end
         sum(logpdf.(Normal(0, 1), nt.z_flat_g))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    jac = u[2] + u[4] + u[5] + _lkj2_theta_jac(u[3])
+    jac = u[2] + u[4] + u[5] + _lkj2_vine_logjac(u[3])
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
@@ -802,7 +801,7 @@ end
         sum(logpdf.(Normal(0, 1), nt.z_flat_g))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    jac = u[3] + u[5] + u[6] + _lkj2_theta_jac(u[4])
+    jac = u[3] + u[5] + u[6] + _lkj2_vine_logjac(u[4])
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
@@ -842,7 +841,7 @@ end
         sum(logpdf.(Normal(0, 1), nt.z_flat_g))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    jac = u[2] + u[4] + u[5] + _lkj2_theta_jac(u[3])
+    jac = u[2] + u[4] + u[5] + _lkj2_vine_logjac(u[3])
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
@@ -1510,4 +1509,3 @@ end
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
 end
-

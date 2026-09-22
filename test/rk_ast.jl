@@ -51,21 +51,65 @@ dfp = merge(df, (; prop=[0.2, 0.7, 0.4, 0.6, 0.3, 0.8]))
     prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
     @test prog isa BRM._RKEmittedProgram
     @test prog.main isa Expr && prog.main.head === :block
-    # Responses emit bare: no stream-submodel def, the `.~` statement
-    # spells the distribution inline over the predictor and scale.
-    @test prog.defs == Expr[
-        Expr(:(=), Expr(:call, :popefs_normal_i_c, :x1, :loc1, :s1,
-            :loc2, :s2), Expr(:block,
-            Expr(:call, :~, :b1, Expr(:call, :Normal, :loc1, :s1)),
-            Expr(:call, :~, :b2, Expr(:call, :Normal, :loc2, :s2)),
-            Expr(:call, :.+, :b1, Expr(:call, :.*, :b2, :x1)))),
-    ]
+    # The eligible canonical GLM replaces the predictor spine entirely:
+    # no popefs def, a bare-name numeric X, alpha/beta priors, and the
+    # object response.
+    @test prog.defs == Expr[]
     @test prog.main == Expr(:block,
-        Expr(:call, :~, :mu, Expr(:call, :popefs_normal_i_c, :x,
-            0.0, 1.0, 0.0, 1.0)),
         Expr(:call, :~, :sigma, Expr(:call, :Exponential, 1.0)),
-        Expr(:call, :.~, :y,
-            Expr(:., :Normal, Expr(:tuple, :mu, :sigma))))
+        Expr(:(=), :y_X, Expr(:call, :hcat, :x)),
+        Expr(:call, :~, :mu_alpha, Expr(:call, :Normal, 0.0, 1.0)),
+        Expr(:call, :.~, Expr(:ref, :mu_beta,
+                Expr(:call, :axes, :y_X, 2)),
+            Expr(:., :Normal, Expr(:tuple, 0.0, 1.0))),
+        Expr(:call, :~, :y,
+            Expr(:call, :NormalIDGLM, :y_X, :mu_alpha, :mu_beta, :sigma)))
+end
+
+@testset "GLM object eligibility and priors" begin
+    # Per-column population priors map positionally onto beta through the
+    # pinned literal-vector broadcast form.
+    brmi = @brm df begin
+        mu ~ 1 + x + z
+        effect(mu, x) ~ Normal(1.0, 2.0)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test prog.main.args[end] == Expr(:call, :~, :y,
+        Expr(:call, :NormalIDGLM, :y_X, :mu_alpha, :mu_beta, :sigma))
+    @test Expr(:call, :.~, Expr(:ref, :mu_beta,
+            Expr(:call, :axes, :y_X, 2)),
+        Expr(:., :Normal, Expr(:tuple,
+            Expr(:vect, 1.0, 0.0), Expr(:vect, 2.0, 1.0)))) in prog.main.args
+
+    # Factor, modeled-scale, and intercept-only shapes stay on the
+    # decomposed path even with the flip on.
+    brmi = @brm df begin
+        mu ~ 1 + factor(g; ref=3)
+        effect(mu, g) ~ Normal(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    @test BRM._rk_emit_ast(plan, true).main.args[end] ==
+        BRM._rk_emit_ast(plan, false).main.args[end]
+    brmi = @brm df begin
+        log(sigma) ~ 1 + x
+        mu ~ 1 + x
+        y ~ Normal(mu, sigma)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    @test BRM._rk_emit_ast(plan, true).main.args[end] ==
+        BRM._rk_emit_ast(plan, false).main.args[end]
+    brmi = @brm df begin
+        mu ~ 1
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    @test BRM._rk_emit_ast(plan, true).main.args[end] ==
+        BRM._rk_emit_ast(plan, false).main.args[end]
 end
 
 @testset "link wrappers and triples" begin
@@ -73,7 +117,7 @@ end
         eta ~ 1 + x
         b ~ BernoulliLogit(eta)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :b,
         Expr(:., :Bernoulli, Expr(:tuple,
             Expr(:., :logistic, Expr(:tuple, :eta)))))
@@ -82,7 +126,7 @@ end
         logit(p) ~ 1 + x
         b ~ Bernoulli(p)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :b,
         Expr(:., :Bernoulli, Expr(:tuple,
             Expr(:., :logistic, Expr(:tuple, :p)))))
@@ -90,7 +134,7 @@ end
         log(mu) ~ 1 + x
         c ~ Poisson(mu)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :c,
         Expr(:., :Poisson, Expr(:tuple,
             Expr(:., :exp, Expr(:tuple, :mu)))))
@@ -101,7 +145,7 @@ end
         logit(p) ~ 1 + x
         b ~ Binomial(h, p)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :b,
         Expr(:., :Binomial, Expr(:tuple, :h,
             Expr(:., :logistic, Expr(:tuple, :p)))))
@@ -110,7 +154,7 @@ end
         phi ~ Exponential(1)
         c ~ NegativeBinomial2(mu, phi)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :c,
         Expr(:., :NegativeBinomial2, Expr(:tuple,
             Expr(:., :exp, Expr(:tuple, :mu)), :phi)))
@@ -119,7 +163,7 @@ end
         alpha ~ Exponential(1)
         z ~ Gamma(alpha, mu / alpha)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :z,
         Expr(:., :Gamma, Expr(:tuple, :alpha,
             Expr(:call, :./, Expr(:., :exp, Expr(:tuple, :mu)),
@@ -131,7 +175,7 @@ end
         probit(p) ~ 1 + x
         b ~ Bernoulli(p)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :b,
         Expr(:., :Bernoulli, Expr(:tuple,
             Expr(:., :probit, Expr(:tuple, :p)))))
@@ -139,7 +183,7 @@ end
         cloglog(p) ~ 1 + x
         b ~ Binomial(h, p)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :b,
         Expr(:., :Binomial, Expr(:tuple, :h,
             Expr(:., :cloglog, Expr(:tuple, :p)))))
@@ -148,7 +192,7 @@ end
         kappa ~ Gamma(2.0, 1000.0)
         prop ~ Beta(mu * kappa, (1 - mu) * kappa)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     mu_log = Expr(:., :logistic, Expr(:tuple, :mu))
     @test prog.main.args[end] == Expr(:call, :.~, :prop,
         Expr(:., :Beta, Expr(:tuple,
@@ -162,7 +206,7 @@ end
         s ~ Exponential(1)
         y ~ weighted(truncated(Normal(mu, s), 0.0, 2.0), fweights(n))
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :y,
         Expr(:., :weighted, Expr(:tuple,
             Expr(:., :truncated, Expr(:tuple,
@@ -173,7 +217,7 @@ end
         s ~ Exponential(1)
         y ~ interval_censored(Normal(mu, s); upper=2.0)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :y,
         Expr(:., :interval_censored, Expr(:tuple,
             Expr(:., :Normal, Expr(:tuple, :mu, :s)), 2.0)))
@@ -183,7 +227,7 @@ end
         s ~ Exponential(1)
         y ~ truncated(Normal(mu, s), 0, Inf)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :y,
         Expr(:., :truncated, Expr(:tuple,
             Expr(:., :Normal, Expr(:tuple, :mu, :s)),
@@ -199,7 +243,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog isa BRM._RKEmittedProgram
     @test Expr(:call, :.~,
         Expr(:ref, :mu_b1, Expr(:call, :levels, :g)),
@@ -220,7 +264,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test Expr(:call, :.~,
         Expr(:ref, :mu_b2, Expr(:ref, Expr(:call, :levels, :g),
             Expr(:call, :(:), 1, 2))),
@@ -237,7 +281,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test Expr(:call, :.~,
         Expr(:ref, :mu_b2, Expr(:ref, Expr(:call, :levels, :g),
             Expr(:vect, 1, 3))),
@@ -249,7 +293,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test Expr(:call, :.~,
         Expr(:ref, :mu_b2, Expr(:ref, Expr(:call, :levels, :gs),
             Expr(:call, :(:), 1, 2))),
@@ -269,7 +313,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[1] == Expr(:(=), :int_x_x_z,
         Expr(:call, :.*, :x, :z))
     @test Expr(:(=), Expr(:call, :popefs_normal_i_c_c, :x1, :x2,
@@ -290,7 +334,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[1] == Expr(:(=), :zscale_x, Expr(:call, :./,
         Expr(:call, :.-, :x, Expr(:call, :mean, :x)),
         Expr(:call, :std, :x)))
@@ -300,7 +344,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[1] == Expr(:(=), :int_x_x_g_lvl_1,
         Expr(:call, :.*, :x, Expr(:call, :.==, :g, 1)))
     @test prog.main.args[2] == Expr(:(=), :int_x_x_g_lvl_2,
@@ -316,7 +360,7 @@ end
         s ~ Gamma(m, 2.0)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     assign = only(a for a in prog.main.args if a isa Expr && a.head === :(=) &&
         a.args[1] === :m)
     @test assign == Expr(:(=), :m, Expr(:call, :sum, :x))
@@ -327,7 +371,7 @@ end
         s ~ truncated(Normal(0, 1), 0, Inf)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test Expr(:call, :~, :s, Expr(:call, :HalfNormal, 1.0)) in prog.main.args
     # Coefficient names disambiguate against user names: the user param
     # `mu_b1` occupies the intercept's natural expansion, so the
@@ -339,7 +383,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test Expr(:call, :~, :mu_, Expr(:call, :popefs_normal_i_c, :x,
         0.0, 1.0, 0.0, 1.0)) in prog.main.args
     @test Expr(:call, :.~, :y,
@@ -362,7 +406,7 @@ end
         y ~ Normal(mu, s)
         z ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     calls = [a for a in prog.main.args if a isa Expr && a.head === :call &&
         length(a.args) == 3 && a.args[1] === :~ && a.args[3] isa Expr &&
         a.args[3].head === :call && a.args[3].args[1] === :popefs_normal_i_c]
@@ -386,7 +430,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     # No predictor def either (offset-only has no scalar statements),
     # so the program carries no defs at all.
     @test isempty(prog.defs)
@@ -401,7 +445,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     affine = only(a for a in prog.main.args if a isa Expr && a.head === :(=) &&
         a.args[1] === :mu)
     @test affine == Expr(:(=), :mu, Expr(:call, :.+, :z, :x))
@@ -410,7 +454,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[1] == Expr(:(=), :rkd_offset_log_z,
         Expr(:., :log, Expr(:tuple, :z)))
     @test prog.main.args[2] == Expr(:(=), :mu, :rkd_offset_log_z)
@@ -440,7 +484,7 @@ end
         BRM._RKRanefBucket[],
         BRM._RKVectorParameter[],
         BRM._RKR2D2Prior[])
-    prog = BRM._rk_emit_ast(plan)
+    prog = BRM._rk_emit_ast(plan, false)
     @test prog.defs == Expr[
         Expr(:(=), Expr(:call, :popefs_normal_i_c, :x1, :loc1, :s1,
             :loc2, :s2), Expr(:block,
@@ -499,7 +543,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    prog = BRM._rk_emit_ast(plan)
+    prog = BRM._rk_emit_ast(plan, false)
     varying = rk_varying_stmts(prog.main)
     @test length(varying) == 2
     @test rk_strip_lines(varying[1]) == rk_parsed_surface(
@@ -518,7 +562,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    correlated = rk_varying_stmts(BRM._rk_emit_ast(kinds).main)
+    correlated = rk_varying_stmts(BRM._rk_emit_ast(kinds, false).main)
     @test length(correlated) == 2
     @test rk_strip_lines(correlated[1]) == rk_parsed_surface(
         "ranef_draws_g ~ varying_draws(g, [1, x]; eta = 1.0)")
@@ -529,7 +573,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    intercept1 = rk_varying_stmts(BRM._rk_emit_ast(ones).main)
+    intercept1 = rk_varying_stmts(BRM._rk_emit_ast(ones, false).main)
     @test length(intercept1) == 2
     @test rk_strip_lines(intercept1[1]) ==
         rk_parsed_surface("ranef_draws_g ~ varying_draws(g, [1])")
@@ -540,13 +584,13 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    slope1 = rk_varying_stmts(BRM._rk_emit_ast(slopes).main)
+    slope1 = rk_varying_stmts(BRM._rk_emit_ast(slopes, false).main)
     @test length(slope1) == 2
     @test rk_strip_lines(slope1[1]) ==
         rk_parsed_surface("ranef_draws_g ~ varying_draws(g, [x])")
     @test rk_strip_lines(slope1[2]) ==
         rk_parsed_surface("ranef_mu_g ~ varying_slice(ranef_draws_g, 1)")
-    ret = rk_def_body(BRM._rk_emit_ast(ones), :popefs_normal_i_c_r).args[end]
+    ret = rk_def_body(BRM._rk_emit_ast(ones, false), :popefs_normal_i_c_r).args[end]
     @test :f1 in ret.args
 end
 
@@ -557,7 +601,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    varying = rk_varying_stmts(BRM._rk_emit_ast(plan).main)
+    varying = rk_varying_stmts(BRM._rk_emit_ast(plan, false).main)
     @test length(varying) == 2
     @test rk_strip_lines(varying[1]) == rk_parsed_surface(
         "ranef_draws_g ~ varying_draws(g, [1, dummy(c, 4), dummy(c, 6)]; eta = 1.0)")
@@ -571,7 +615,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    prog = BRM._rk_emit_ast(plan)
+    prog = BRM._rk_emit_ast(plan, false)
     @test Expr(:(=), :int_x_x_z, Expr(:call, :.*, :x, :z)) in prog.main.args
     varying = rk_varying_stmts(prog.main)
     @test length(varying) == 2
@@ -594,7 +638,7 @@ end
         y1 ~ Normal(mu1, s1)
         y2 ~ Normal(mu2, s2)
     end)
-    varying = rk_varying_stmts(BRM._rk_emit_ast(plan).main)
+    varying = rk_varying_stmts(BRM._rk_emit_ast(plan, false).main)
     @test length(varying) == 3
     @test rk_strip_lines(varying[1]) == rk_parsed_surface(
         "ranef_draws_ID_g ~ varying_draws(g, [1, x]; eta = 1.0)")
@@ -602,7 +646,7 @@ end
         "ranef_mu1_ID_g ~ varying_slice(ranef_draws_ID_g, 1)")
     @test rk_strip_lines(varying[3]) == rk_parsed_surface(
         "ranef_mu2_ID_g ~ varying_slice(ranef_draws_ID_g, 2)")
-    prog = BRM._rk_emit_ast(plan)
+    prog = BRM._rk_emit_ast(plan, false)
     # Both same-skeleton predictors share one latent def.
     ret = rk_def_body(prog, :popefs_normal_i_c_rid).args[end]
     @test :f1 in ret.args
@@ -629,7 +673,7 @@ end
         y ~ Normal(mu, s)
     end)
     plan.columns[:mu] = plan.columns[:x]
-    prog = BRM._rk_emit_ast(plan)
+    prog = BRM._rk_emit_ast(plan, false)
     # Effect names use the original predictor (rename-independent);
     # only the LHS and its call move to `mu_`.
     varying = rk_varying_stmts(prog.main)
@@ -654,7 +698,7 @@ end
         eta3 ~ 1 + x
         c ~ CategoricalLogit(eta1, eta2, eta3)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :c,
         Expr(:., :CategoricalLogit, Expr(:tuple, :eta1, :eta2, :eta3)))
     # Ordered-logit: cutpoints implicit (no cutpoint statement).
@@ -662,7 +706,7 @@ end
         eta ~ 1 + x
         c ~ OrderedLogistic(eta)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :c,
         Expr(:., :OrderedLogistic, Expr(:tuple, :eta)))
     @test all(prog.main.args) do stmt
@@ -680,7 +724,7 @@ end
         eta ~ 0 + x
         c ~ Ordinal(StoppingRatio(), ProbitLink(), eta)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :c,
         Expr(:., :Ordinal, Expr(:tuple,
             Expr(:call, :StoppingRatio), Expr(:call, :ProbitLink),
@@ -693,7 +737,7 @@ end
         c ~ Ordinal(StoppingRatio(), LogitLink(), eta;
             discrimination=2.0, per_threshold=(z,))
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :c,
         Expr(:., :Ordinal, Expr(:tuple,
             Expr(:call, :StoppingRatio), Expr(:call, :LogitLink),
@@ -717,7 +761,7 @@ end
         log(disc) ~ 0 + x
         c ~ Ordinal(Cumulative(), LogitLink(), eta; discrimination=disc)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :c,
         Expr(:., :Ordinal, Expr(:tuple,
             Expr(:call, :Cumulative), Expr(:call, :LogitLink),
@@ -741,7 +785,7 @@ end
         s ~ Dirichlet(3, 1.0)
         obs ~ Multinomial(5, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test Expr(:call, :~, :s, Expr(:call, :Dirichlet,
         Expr(:vect, 1.0, 1.0, 1.0))) in prog.main.args
     @test prog.main.args[end] == Expr(:call, :.~, :obs,
@@ -752,7 +796,7 @@ end
         s ~ Dirichlet([2.0, 5.0])
         b ~ Categorical(s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :b,
         Expr(:., :Categorical, Expr(:tuple, :s)))
 end
@@ -767,7 +811,7 @@ end
         sigma ~ Exponential(1)
         y ~ Normal(mu, sigma)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.defs == Expr[
         Expr(:(=), Expr(:call, :popefs_normal_i_s, :f1, :loc1, :s1),
             Expr(:block,
@@ -792,7 +836,7 @@ end
         sigma ~ Exponential(1)
         y ~ Normal(mu, sigma)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.defs == Expr[
         Expr(:(=), Expr(:call, :popefs_normal_i_s, :f1, :loc1, :s1),
             Expr(:block,
@@ -819,7 +863,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.defs == Expr[
         Expr(:(=), Expr(:call, :popefs_normal_i_mo, :x1, :f1, :loc1,
             :s1, :loc2, :s2), Expr(:block,
@@ -847,7 +891,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.defs == Expr[
         Expr(:(=), Expr(:call, :popefs_normal_i_mo1, :x1, :f1, :loc1,
             :s1), Expr(:block,
@@ -870,7 +914,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test isempty(prog.defs)
     @test prog.main == Expr(:block,
         Expr(:(=), :mu,
@@ -891,7 +935,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     # The dar summand rides inside the shared submodel (the trajectory
     # scalars ride formals); their statements stay top-level.
     @test prog.defs == Expr[
@@ -926,7 +970,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[1] == Expr(:call, :~, :dar_mu_t_beta,
         Expr(:call, :truncated, Expr(:call, :Normal, 0.6, 0.1), 0, 1))
     @test prog.main.args[2] == Expr(:call, :~, :dar_mu_t_sigma,
@@ -943,7 +987,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test isempty(prog.defs)
     @test prog.main == Expr(:block,
         Expr(:(=), :mu, Expr(:call, :.+,
@@ -970,7 +1014,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.defs[1] == Expr(:(=),
         Expr(:call, :popefs_normal_i_c_c_s2, :x1, :x2, :loc2, :s2),
         Expr(:block,
@@ -1006,7 +1050,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     plate = Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
         Expr(:for, Expr(:(=), :i, Expr(:call, :eachindex, :y)),
             Expr(:block, Expr(:call, :~,
@@ -1037,7 +1081,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test Expr(:call, :~, :rho_gp, Expr(:call, :Gamma, 2.0, 1.0)) in prog.main.args
     # Overlap alpha-renames the submodel LHS; the GP preamble is unaffected.
     # (Overlap is unconstructible from formulas — a data-named LHS
@@ -1048,7 +1092,7 @@ end
         y ~ Normal(mu, s)
     end)
     plan.columns[:mu] = plan.columns[:y]
-    prog = BRM._rk_emit_ast(plan)
+    prog = BRM._rk_emit_ast(plan, false)
     @test Expr(:call, :~, :mu_, Expr(:call, :popefs_normal_i_gp,
         :f_gp, 0.0, 1.0)) in prog.main.args
     @test Expr(:call, :.~, :y,
@@ -1064,7 +1108,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.defs == Expr[
         Expr(:(=), Expr(:call, :popefs_normal_i_h, :f1, :loc1, :s1),
             Expr(:block,
@@ -1091,7 +1135,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.defs == Expr[
         Expr(:(=), Expr(:call, :popefs_normal_i_h, :f1, :loc1, :s1),
             Expr(:block,
@@ -1120,7 +1164,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog isa BRM._RKEmittedProgram
     scan = Expr(:macrocall, Symbol("@scan"), LineNumberNode(0),
         Expr(:block,
@@ -1171,7 +1215,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     popefs_body = prog.defs[1].args[2].args
     @test Expr(:call, :~, :b2, Expr(:call, :Normal, :loc2, :s2)) in popefs_body
     @test Expr(:call, :~, :mu, Expr(:call, :popefs_normal_i_ar, :ar_mu_x,
@@ -1184,7 +1228,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog isa BRM._RKEmittedProgram
     plate = Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
         Expr(:for, Expr(:(=), :i, Expr(:call, :eachindex, :x)),
@@ -1223,7 +1267,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[1] == Expr(:macrocall, Symbol("@plate"),
         LineNumberNode(0),
         Expr(:for, Expr(:(=), :i, Expr(:call, :eachindex, :x)),
@@ -1238,7 +1282,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     popefs_body = prog.defs[1].args[2].args
     @test Expr(:call, :~, :b2, Expr(:call, :Normal, :loc2, :s2)) in popefs_body
     @test Expr(:call, :~, :mu, Expr(:call, :popefs_normal_i_me, :me_x,
@@ -1251,7 +1295,7 @@ end
         log(sigma) ~ 1 + z
         y ~ Normal(mu, sigma)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     # Both same-skeleton predictors share one latent def.
     @test prog.defs == Expr[
         Expr(:(=), Expr(:call, :popefs_normal_i_c, :x1, :loc1, :s1,
@@ -1274,7 +1318,7 @@ end
         sigma ~ 1 + z
         y ~ Normal(mu, sigma)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :y,
         Expr(:., :Normal, Expr(:tuple, :mu, :sigma)))
     # NB2 dispersion as a predictor.
@@ -1283,7 +1327,7 @@ end
         log(phi) ~ 1 + z
         c ~ NegativeBinomial2(mu, phi)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :c,
         Expr(:., :NegativeBinomial2, Expr(:tuple,
             Expr(:., :exp, Expr(:tuple, :mu)),
@@ -1294,7 +1338,7 @@ end
         log(alpha) ~ 1 + x
         z ~ Gamma(alpha, mu / alpha)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :z,
         Expr(:., :Gamma, Expr(:tuple,
             Expr(:., :exp, Expr(:tuple, :alpha)),
@@ -1333,7 +1377,7 @@ end
         end),
     ]
     for brmi in models
-        prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+        prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
         @test !isempty(prog.defs)
         arities = Dict{Symbol,Int}()
         for d in prog.defs
@@ -1370,7 +1414,7 @@ end
         L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1), shape=2)
         [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     # The joint response emits bare like every other response
     # (plain `~`, row-grouped) — defs hold the one predictor submodel
     # both same-shape predictors share.
@@ -1404,7 +1448,7 @@ end
         L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(tau))
         [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[3] == Expr(:call, :~, :tau,
         Expr(:call, :Exponential, 1.0))
     @test prog.main.args[4] == Expr(:call, :~, :L_res,
@@ -1421,7 +1465,7 @@ end
         L3 ~ LKJCovarianceFactor(3; scale_prior=Exponential(1))
         [y1, y2, y3] ~ MvNormalCholesky([mu1, mu2, mu3], L3)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] ==
         Expr(:call, :~, Expr(:vect, :y1, :y2, :y3),
             Expr(:call, :MvNormalCholesky, Expr(:vect, :mu1, :mu2, :mu3),
@@ -1525,7 +1569,7 @@ const RK_SHARED_BATTERY = Any[
     # safely. Fails while the emitter mints per-model defs.
     seen = Dict{Symbol,Expr}()
     for m in RK_SHARED_BATTERY
-        prog = BRM._rk_emit_ast(BRM._brm_rk_plan(m))
+        prog = BRM._rk_emit_ast(BRM._brm_rk_plan(m), false)
         for d in prog.defs
             nm = d.args[1].args[1]
             if haskey(seen, nm)
@@ -1540,8 +1584,8 @@ end
 @testset "shared submodels: same skeleton shares one def" begin
     # Same term skeleton, different columns and priors: one shared def,
     # while the use-sites carry the differing values.
-    pa = BRM._rk_emit_ast(BRM._brm_rk_plan(rk_shared_m1))
-    pb = BRM._rk_emit_ast(BRM._brm_rk_plan(rk_shared_m2))
+    pa = BRM._rk_emit_ast(BRM._brm_rk_plan(rk_shared_m1), false)
+    pb = BRM._rk_emit_ast(BRM._brm_rk_plan(rk_shared_m2), false)
     islatent(d) =
         startswith(string(d.args[1].args[1]), "popefs")
     la = only(d for d in pa.defs if islatent(d))
@@ -1563,7 +1607,7 @@ end
     # Every body input rides a formal: no baked Float64 priors, no
     # quoted ids — each body is a pure function of its lattice name.
     for m in RK_SHARED_BATTERY
-        prog = BRM._rk_emit_ast(BRM._brm_rk_plan(m))
+        prog = BRM._rk_emit_ast(BRM._brm_rk_plan(m), false)
         for d in prog.defs
             @test isempty(rk_def_leaves(d.args[2], Float64))
             @test isempty(rk_def_leaves(d.args[2], QuoteNode))
@@ -1583,7 +1627,7 @@ end
         L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1), shape=2)
         [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     latdefs = [d for d in prog.defs
                if startswith(string(d.args[1].args[1]), "popefs")]
     @test length(latdefs) == 1
@@ -1593,23 +1637,22 @@ end
     @test length(uses) == 2
 end
 
-@testset "fused heads opt-in response shapes" begin
-    # Default-off fused-head emission for the six families the thin
-    # layer desugars pre-spine (option-A surface): each fused spelling
-    # rewrites to exactly the decomposed twin asserted beside it (same
-    # roles, same order), and evidence/weights wrappers recurse, so the
-    # lowered plan is identical by construction. The pinned RK revision
-    # carries no fused-head lowering, so these goldens pin the AST
-    # contract only — runtime parity re-runs at landing + pin bump.
+@testset "fused heads and GLM objects response shapes" begin
+    # Fused-head emission is now default-on for the six families the
+    # thin layer desugars pre-spine. Eligible canonical GLMs instead use
+    # the stronger object spelling. Each fused spelling rewrites to
+    # exactly the decomposed twin asserted beside it (same roles, same
+    # order), and evidence/weights wrappers recurse, so the lowered plan
+    # is identical by construction.
     brmi = @brm df begin
         eta ~ 1 + x
         b ~ BernoulliLogit(eta)
     end
     plan = BRM._brm_rk_plan(brmi)
     @test BRM._rk_emit_ast(plan, true).main.args[end] ==
-        Expr(:call, :.~, :b,
-            Expr(:., :BernoulliLogit, Expr(:tuple, :eta)))
-    @test BRM._rk_emit_ast(plan).main.args[end] ==
+        Expr(:call, :~, :b,
+            Expr(:call, :BernoulliLogitGLM, :b_X, :eta_alpha, :eta_beta))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] ==
         Expr(:call, :.~, :b,
             Expr(:., :Bernoulli, Expr(:tuple,
                 Expr(:., :logistic, Expr(:tuple, :eta)))))
@@ -1619,9 +1662,9 @@ end
     end
     plan = BRM._brm_rk_plan(brmi)
     @test BRM._rk_emit_ast(plan, true).main.args[end] ==
-        Expr(:call, :.~, :c,
-            Expr(:., :PoissonLog, Expr(:tuple, :mu)))
-    @test BRM._rk_emit_ast(plan).main.args[end] ==
+        Expr(:call, :~, :c,
+            Expr(:call, :PoissonLogGLM, :c_X, :mu_alpha, :mu_beta))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] ==
         Expr(:call, :.~, :c,
             Expr(:., :Poisson, Expr(:tuple,
                 Expr(:., :exp, Expr(:tuple, :mu)))))
@@ -1633,7 +1676,7 @@ end
     @test BRM._rk_emit_ast(plan, true).main.args[end] ==
         Expr(:call, :.~, :b,
             Expr(:., :BinomialLogit, Expr(:tuple, :h, :p)))
-    @test BRM._rk_emit_ast(plan).main.args[end] ==
+    @test BRM._rk_emit_ast(plan, false).main.args[end] ==
         Expr(:call, :.~, :b,
             Expr(:., :Binomial, Expr(:tuple, :h,
                 Expr(:., :logistic, Expr(:tuple, :p)))))
@@ -1646,7 +1689,7 @@ end
     @test BRM._rk_emit_ast(plan, true).main.args[end] ==
         Expr(:call, :.~, :c,
             Expr(:., :NegativeBinomial2Log, Expr(:tuple, :mu, :phi)))
-    @test BRM._rk_emit_ast(plan).main.args[end] ==
+    @test BRM._rk_emit_ast(plan, false).main.args[end] ==
         Expr(:call, :.~, :c,
             Expr(:., :NegativeBinomial2, Expr(:tuple,
                 Expr(:., :exp, Expr(:tuple, :mu)), :phi)))
@@ -1659,7 +1702,7 @@ end
     @test BRM._rk_emit_ast(plan, true).main.args[end] ==
         Expr(:call, :.~, :z,
             Expr(:., :GammaLog, Expr(:tuple, :alpha, :mu)))
-    @test BRM._rk_emit_ast(plan).main.args[end] ==
+    @test BRM._rk_emit_ast(plan, false).main.args[end] ==
         Expr(:call, :.~, :z,
             Expr(:., :Gamma, Expr(:tuple, :alpha,
                 Expr(:call, :./, Expr(:., :exp, Expr(:tuple, :mu)),
@@ -1674,7 +1717,7 @@ end
     @test BRM._rk_emit_ast(plan, true).main.args[end] ==
         Expr(:call, :.~, :prop,
             Expr(:., :BetaLogit, Expr(:tuple, :mu, :kappa)))
-    @test BRM._rk_emit_ast(plan).main.args[end] ==
+    @test BRM._rk_emit_ast(plan, false).main.args[end] ==
         Expr(:call, :.~, :prop,
             Expr(:., :Beta, Expr(:tuple,
                 Expr(:call, :.*, mu_log, :kappa),
@@ -1690,7 +1733,7 @@ end
         Expr(:call, :.~, :b,
             Expr(:., :weighted, Expr(:tuple,
                 Expr(:., :BernoulliLogit, Expr(:tuple, :eta)), :n)))
-    # Families without a fused head ignore the flag entirely.
+    # A non-object canonical GLM now takes the object arm.
     brmi = @brm df begin
         mu ~ 1 + x
         sigma ~ Exponential(1)
@@ -1698,14 +1741,17 @@ end
     end
     plan = BRM._brm_rk_plan(brmi)
     fused = BRM._rk_emit_ast(plan, true)
-    plain = BRM._rk_emit_ast(plan)
-    @test fused.main == plain.main && fused.defs == plain.defs
+    plain = BRM._rk_emit_ast(plan, false)
+    @test fused.main.args[end] == Expr(:call, :~, :y,
+        Expr(:call, :NormalIDGLM, :y_X, :mu_alpha, :mu_beta, :sigma))
+    @test plain.main.args[end] == Expr(:call, :.~, :y,
+        Expr(:., :Normal, Expr(:tuple, :mu, :sigma)))
     brmi = @brm df begin
         probit(p) ~ 1 + x
         b ~ Bernoulli(p)
     end
     plan = BRM._brm_rk_plan(brmi)
     fused = BRM._rk_emit_ast(plan, true)
-    plain = BRM._rk_emit_ast(plan)
+    plain = BRM._rk_emit_ast(plan, false)
     @test fused.main == plain.main && fused.defs == plain.defs
 end
