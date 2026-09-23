@@ -1776,7 +1776,11 @@ an emitted `pop_*` / `cat_*` name. Returns a named tuple with:
 - `coordinates` — the matching indices in `constrained_names`;
 - `link` — the function applied on the formula LHS (`identity`, `log`, …);
 - `inverse_link` — the transform from the fitted linear-predictor scale back to
-  the declared quantity (`identity`, `exp`, …).
+  the declared quantity (`identity`, `exp`, …);
+- `recovered` — `true` when the coefficient was absorbed by an exact
+  total-coefficient block and the coordinates address its recovered generated
+  carrier rather than a sampled parameter (`false` otherwise; categorical
+  contrast blocks are never absorbed, so the categorical result omits it).
 
 A categorical predictor is addressed by the formula column, just like its
 `effect(logical, column)` prior. Its result additionally contains `predictor`,
@@ -1808,6 +1812,19 @@ this resolves the GQ carrier exactly as it resolves the sampled `:parameter` in
 an ordinary fit — including the coefficient `labels`, so an unconditioned
 descriptor keeps its addressable population coordinates. A sampled carrier is
 preferred when both exist.
+
+Exact-total aware: when an exact total-coefficient block absorbed the requested
+coefficient, the conventional population carrier cannot address it — the
+coefficient was integrated out of the sampled model, not merely moved. The
+compiled model still exposes the recovered coefficient in generated quantities
+(`TotalEffectBlock.population`, indexed like `population_columns`), and this
+query resolves it there: the returned `output` is the recovered carrier, the
+`coordinates` index it, and `recovered` is `true` (a sampled conventional
+resolution carries `recovered=false`). The link pair is the predictor's either
+way. A recovered draw is one exact conditional sample per posterior draw, so it
+carries conditional RNG noise a sampled parameter does not; consumers that need
+sampled-frame quantities must refuse `recovered=true` loudly rather than mix
+the two frames silently.
 """
 function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
                                            constrained_names;
@@ -1842,6 +1859,46 @@ function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
     idxs = _brm_carrier_indices(d.outputs,
                o -> o.role === :population_effect && !isnothing(o.declaration) &&
                     o.declaration.target === entry.block && o.name !== entry.block)
+    # A conventional AMBIGUITY fails closed before any fallback: the recovered
+    # carrier must never mask contradictory conventional metadata. Only ABSENCE
+    # (zero carriers, missing labels, or a missing label) falls through to the
+    # exact-total recovery below.
+    length(idxs) <= 1 || error(
+        "brm_descriptor: logical predictor `$logical` resolves to population " *
+        "block `$(entry.block)`, which owns $(length(idxs)) parameter " *
+        "carriers; expected exactly one.")
+    if length(idxs) == 1
+        output = d.outputs[only(idxs)]
+        labels = output.labels
+        if !isnothing(labels)
+            label_indices = findall(==(coefficient), labels)
+            if length(label_indices) == 1
+                all_coordinates = _brm_emitted_coordinates(output, constrained_names)
+                length(all_coordinates) == length(labels) || error(
+                    "brm_descriptor: population carrier `$(output.name)` has " *
+                    "$(length(labels)) coefficient labels but resolves to " *
+                    "$(length(all_coordinates)) constrained coordinates. Re-reflect the " *
+                    "model that produced the posterior draws.")
+                return (; logical, coefficient, output,
+                           coordinates=all_coordinates[label_indices],
+                           link=entry.link,
+                           inverse_link=InverseFunctions.inverse(entry.link),
+                           recovered=false)
+            end
+        end
+    end
+
+    # Exact-total fallback: the coefficient may have been absorbed by an exact
+    # total-coefficient block, in which case the recovered generated carrier
+    # addresses it. A sampled conventional resolution above always wins.
+    blocks = hasproperty(d.plan, :bindings) ?
+        [b for b in total_effect_blocks(d.plan) if b.predictor === logical] : []
+    recovered = _brm_total_recovered_coordinates(
+        d, logical, coefficient, constrained_names, entry, blocks)
+    isnothing(recovered) || return recovered
+
+    # Neither the conventional carrier nor any exact-total block addresses the
+    # coefficient: the original failures, unchanged.
     length(idxs) == 1 || error(
         "brm_descriptor: logical predictor `$logical` resolves to population " *
         "block `$(entry.block)`, which owns $(length(idxs)) parameter " *
@@ -1854,23 +1911,70 @@ function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
         "predictor `$logical` has no coefficient labels; this formula shape " *
         "does not expose a stable population-coordinate address.")
     label_indices = findall(==(coefficient), labels)
-    available = unique!(vcat(copy(labels), sort!(collect(keys(categorical)))))
+    # Absorbed labels are addressable through the recovery above, so they are
+    # available labels too. Models without a total block for this predictor
+    # report exactly the conventional set, as before.
+    recovered_labels = Symbol[c for b in blocks for c in b.population_columns]
+    available = unique!(vcat(copy(labels), sort!(collect(keys(categorical))),
+                             recovered_labels))
     length(label_indices) == 1 || error(
         "brm_descriptor: coefficient `$coefficient` occurs $(length(label_indices)) " *
         "times on logical predictor `$logical`; available labels are " *
         "$(Tuple(available)).")
+    # Unreachable: one carrier with present labels and exactly one match
+    # returned from the conventional attempt above.
+end
 
-    all_coordinates = _brm_emitted_coordinates(output, constrained_names)
-    length(all_coordinates) == length(labels) || error(
-        "brm_descriptor: population carrier `$(output.name)` has " *
-        "$(length(labels)) coefficient labels but resolves to " *
-        "$(length(all_coordinates)) constrained coordinates. Re-reflect the " *
+# Resolve a coefficient absorbed by an exact total-coefficient block to its
+# recovered generated carrier (`TotalEffectBlock.population`, indexed like
+# `population_columns`). Returns `nothing` when no block of this predictor
+# claims the coefficient, so the caller falls through to its conventional
+# failures; every contradiction (two blocks, a duplicated absorbed label, a
+# missing or ambiguous recovered carrier, labels that disagree with the
+# descriptor, descriptor/artifact coordinate drift) errors rather than guessing.
+function _brm_total_recovered_coordinates(d::BRMDescriptor, logical::Symbol,
+                                          coefficient::Symbol, constrained_names,
+                                          entry, blocks)
+    length(blocks) <= 1 || error(
+        "brm_descriptor: logical predictor `$logical` resolves to " *
+        "$(length(blocks)) exact total-coefficient blocks; expected at most one.")
+    isempty(blocks) && return nothing
+    block = only(blocks)
+    positions = findall(==(coefficient), block.population_columns)
+    isempty(positions) && return nothing
+    length(positions) == 1 || error(
+        "brm_descriptor: coefficient `$coefficient` occurs $(length(positions)) " *
+        "times in the recovered population columns of logical predictor " *
+        "`$logical`; expected exactly one.")
+    ridxs = _brm_carrier_indices(d.outputs,
+                o -> o.role === :population_effect && o.name === block.population)
+    length(ridxs) == 1 || error(
+        "brm_descriptor: logical predictor `$logical` has an exact total block " *
+        "whose recovered carrier `$(block.population)` matches $(length(ridxs)) " *
+        "draw carriers; expected exactly one.")
+    routput = d.outputs[only(ridxs)]
+    rlabels = routput.labels
+    isnothing(rlabels) && error(
+        "brm_descriptor: recovered carrier `$(block.population)` for logical " *
+        "predictor `$logical` has no coefficient labels; re-reflect the model " *
+        "that produced the posterior draws.")
+    rindices = findall(==(coefficient), rlabels)
+    length(rindices) == 1 || error(
+        "brm_descriptor: absorbed coefficient `$coefficient` occurs " *
+        "$(length(rindices)) times on recovered carrier `$(block.population)` " *
+        "(labels are $(Tuple(rlabels))); the descriptor and the total block " *
+        "disagree — re-reflect the model.")
+    rcoordinates = _brm_emitted_coordinates(routput, constrained_names)
+    length(rcoordinates) == length(rlabels) || error(
+        "brm_descriptor: recovered carrier `$(block.population)` has " *
+        "$(length(rlabels)) coefficient labels but resolves to " *
+        "$(length(rcoordinates)) constrained coordinates. Re-reflect the " *
         "model that produced the posterior draws.")
-
-    (; logical, coefficient, output,
-       coordinates=all_coordinates[label_indices],
+    (; logical, coefficient, output=routput,
+       coordinates=rcoordinates[rindices],
        link=entry.link,
-       inverse_link=InverseFunctions.inverse(entry.link))
+       inverse_link=InverseFunctions.inverse(entry.link),
+       recovered=true)
 end
 
 """
