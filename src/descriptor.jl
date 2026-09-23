@@ -642,14 +642,26 @@ function _brm_logical_outputs(stan, by_name, targets, cell_values,
         found
     end
 
+    # Unbound observations whose `<stem>_gen` twin the program emits resolve
+    # through the twin — already claimed via its `source` link above — exactly
+    # as a fitted observation does. The twin is detected WITHOUT parsing the
+    # emitter-owned suffix: it is the `:draw` output StanBlocks sources at the
+    # declaration target (the same `draw_sources` rule the descriptor body
+    # uses). Twinless unbound observations (per-cell unbound, sampled unbound)
+    # keep the bare-target claim below.
+    twin_sources = Set{Symbol}(o.source for o in stan.outputs
+                               if o.generative === :draw && !isnothing(o.source))
     for (resolved, decl) in by_name
         # Bound observations resolve via their twins' `source` link above, so
-        # they are skipped here. UNBOUND observations (response omitted) have
-        # no twins — but their forward simulation is owned by the declaration
-        # all the same, so it is claimed as the `decl.target` carrier. That is
-        # what makes `brm_output(d, :y; role=:posterior_predictive)` resolve
-        # the simulated `y` exactly as it resolves the fitted `y_gen`.
+        # they are skipped here. So are twinned unbound observations (response
+        # omitted, twin emitted): claiming the bare forward-simulated carrier
+        # too would leave `brm_output(...; role=:posterior_predictive)` spanning
+        # two carriers that share a role. Twinless unbound observations claim
+        # the bare `decl.target` carrier as before.
         if decl.role === :observation && !isnothing(decl.data_source)
+            continue
+        end
+        if decl.role === :observation && decl.target in twin_sources
             continue
         end
         owned = owned_by(decl)

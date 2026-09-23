@@ -84,7 +84,7 @@ function _sb_insert_indexed_priors(base::StanBlocks.SlicModel,
     for (offset, stmt) in enumerate(stmts)
         insert!(body.args, at + offset, stmt)
     end
-    StanBlocks.SlicModel(body, deepcopy(base.data), base.mod)
+    StanBlocks.SlicModel(body, deepcopy(base.data), base.mod, base.observations)
 end
 
 const _SB_VECTOR_PRIOR_CACHE = Dict{String,Function}()
@@ -3450,7 +3450,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
         "offending column(s) before building the model — e.g. `lower`/`upper` -> ",
         "`y_lower`/`y_upper` for interval-censored endpoints.")
     body = Expr(:block, stmts...)
-    model = StanBlocks.SlicModel(body, data, mod)
+    model = StanBlocks.SlicModel(body, data, mod, _sb_unbound_observations(body, data, brmi))
     sb = SBBRMI(brmi, model, data, preproc, Set{Symbol}(), bindings)
     _sb_triage_emitted(sb)
     _sb_apply_held_out(sb, held_out)
@@ -3499,6 +3499,26 @@ function _sb_triage_emitted(sb::SBBRMI)
           "without data either. Every `@brm` needs an observation statement; " *
           "for prior draws keep the statement and omit the response column " *
           "from the data — dropping the statement is not supported.")
+end
+
+# Whole-LHS unbound observation stems for the `SlicModel` `observations`
+# declaration (StanBlocks snag `unbound-observat-d32ac924`): top-level `~`
+# targets that bind no data column. StanBlocks emits a `<stem>_gen` alias twin
+# for each declared stem that re-draws in generated quantities and covers it
+# under `:predict`, so prior programs carry the same posterior names as fitted
+# ones. Runs on the EMITTED body for the same reason `_sb_triage_emitted`
+# does — fused statements and kernel-cell sites resolve with the same role
+# logic the plan itself uses. Plate-nested (cell-local) unbound targets are
+# excluded: per-cell unbound is outside the StanBlocks twin scope, so those
+# keep today's twinless behavior.
+function _sb_unbound_observations(body, data, brmi)
+    declarations = GenerativeDeclaration[]
+    data_scope = Dict{Symbol,Union{Nothing,Symbol}}(k => k for k in keys(data))
+    obs_keys = Set{Symbol}(keys(brmi.operations))
+    _sb_plan_collect!(declarations, body, data_scope, (), obs_keys, Set{Symbol}())
+    Tuple(sort!(Symbol[d.target for d in declarations
+                       if d.role === :observation && isnothing(d.data_source) &&
+                          isempty(d.context)]))
 end
 
 _as_data_column(x::DataColumn) = x
@@ -3880,7 +3900,7 @@ _sb_plan_copy(x::Module) = x
 _sb_plan_copy(x::QuoteNode) = QuoteNode(_sb_plan_copy(x.value))
 _sb_plan_copy(x::Expr) = Expr(x.head, map(_sb_plan_copy, x.args)...)
 _sb_plan_copy(x::StanBlocks.SlicModel) = StanBlocks.SlicModel(
-    _sb_plan_copy(x.model), deepcopy(x.data), x.mod)
+    _sb_plan_copy(x.model), deepcopy(x.data), x.mod, x.observations)
 
 # The LHS type annotation, if any: `z::vector[3] ~ rhs` -> `:(vector[3])`.
 _sb_plan_annotation(x::Expr) =
@@ -4040,7 +4060,7 @@ function _generative_plan(sb::SBBRMI, builder, cv_groups)
     data = deepcopy(sb.data)
     preproc = deepcopy(sb.preproc)
     body = _sb_plan_copy(sb.model.model)
-    model = StanBlocks.SlicModel(body, data, sb.model.mod)
+    model = StanBlocks.SlicModel(body, data, sb.model.mod, sb.model.observations)
     declarations = GenerativeDeclaration[]
     data_scope = Dict{Symbol,Union{Nothing,Symbol}}(k => k for k in keys(data))
     obs_keys = Set{Symbol}(keys(parent.operations))
@@ -4141,7 +4161,7 @@ function _sb_apply_held_out(sb::SBBRMI, held_out)
     for source in selected
         marked[source] = StanBlocks.stan.maybecv(source, marked[source])
     end
-    model = StanBlocks.SlicModel(sb.model.model, marked, sb.model.mod)
+    model = StanBlocks.SlicModel(sb.model.model, marked, sb.model.mod, sb.model.observations)
     SBBRMI(sb.parent, model, marked, sb.preproc, selected, sb.bindings)
 end
 
@@ -4340,7 +4360,7 @@ function _sb_mark_resample_groups(sb::SBBRMI, groups)
     seen == groups || error(
         "sbimpl: resample replay: failed to mark group index provenance for " *
         "$(sort!(collect(setdiff(groups, seen))))")
-    model = StanBlocks.SlicModel(sb.model.model, marked, sb.model.mod)
+    model = StanBlocks.SlicModel(sb.model.model, marked, sb.model.mod, sb.model.observations)
     SBBRMI(sb.parent, model, marked, sb.preproc, copy(sb.held_out), sb.bindings)
 end
 
@@ -4833,7 +4853,7 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
         e.kind === :interaction || continue
         _sb_reprocess_entry!(new_data, new_preproc, handled, key, e, new_df, freeze_constants)
     end
-    new_model = StanBlocks.SlicModel(sb.model.model, new_data, sb.model.mod)
+    new_model = StanBlocks.SlicModel(sb.model.model, new_data, sb.model.mod, sb.model.observations)
     _sb_apply_held_out(
         SBBRMI(sb.parent, new_model, new_data, new_preproc, Set{Symbol}(), sb.bindings), sb.held_out)
 end
