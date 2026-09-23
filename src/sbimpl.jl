@@ -256,13 +256,19 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
         drawbody = Any[:(@stan_assert n == $(length(calls))), :(out::vector[n])]
         append!(drawbody, [:(out[$i] = $(draws[i])) for i in eachindex(calls)])
         push!(drawbody, :out)
+        # Companions BEFORE the `@lpxf` density: `@lpxf` registers the
+        # `lpxf_expr`/`rng_expr`/`likelihood_expr` dispatch hooks, and the
+        # companion names must already exist when that registration runs. The
+        # historical order (density first) left `rng_expr` unregistered, which
+        # a likelihood-free program trips over when it re-draws a scale in
+        # generated quantities ("`brm_vector_prior_*` is missing `rng_expr`").
         defs = quote
+            $lpdfs(x::vector[n], $(typed...))::vector[n] = $(Expr(:block, point...))
+            $rng(vector[n], $(typed...))::vector[n] = $(Expr(:block, drawbody...))
             @lhs @lpxf $lpdf(x::vector[n], $(typed...))::real = begin
                 $(guards...)
                 $total
             end
-            $lpdfs(x::vector[n], $(typed...))::vector[n] = $(Expr(:block, point...))
-            $rng(vector[n], $(typed...))::vector[n] = $(Expr(:block, drawbody...))
         end
         Core.eval(home, _sb_anchor_slic_macrocalls!(:(StanBlocks.@deffun $defs)))
         f = getfield(home, stem)
@@ -765,6 +771,17 @@ end
 # promises. The loop is why it is a `@deffun` -- Stan's `to_matrix` has no
 # `array[] vector` overload, and `@slic` bodies cannot contain control flow.
 StanBlocks.@deffun begin
+    # Sized `_rng` companion FIRST: `@lpxf` registers the dispatch hooks, and
+    # the companion names must already exist then. Without it a
+    # likelihood-free program fails re-drawing centered group effects
+    # ("`multi_normal_cholesky0` is missing `rng_expr`").
+    multi_normal_cholesky0_rng(vector[m, n], scale::matrix[n, n])::vector[m, n] = begin
+        rv::vector[m, n]
+        for i in 1:m
+            rv[i] = multi_normal_cholesky_rng(rep_vector(0., n), scale)
+        end
+        rv
+    end
     @lhs @lpxf multi_normal_cholesky0_lpdf(x::vector[m, n], scale::matrix[n, n])::real = begin
         multi_normal_cholesky_lpdf(x, rep_vector(0., n), scale)
     end
@@ -2689,13 +2706,17 @@ rather than silently emitting an in-sample block. Note also that centered and
 non-centered emissions use different unconstrained coordinates, so fitted
 draws are not interchangeable between them.
 
-`held_out` names one response, a collection of responses, or `:all`. Each
-named observation is emitted through StanBlocks' cv activity analysis: its
+`held_out` names one response or a collection of responses — a strict
+subset. Holding out every observation is refused: there would be nothing to
+fit, and held-out likelihoods are not the prior mechanism. Each named
+observation is emitted through StanBlocks' cv activity analysis: its
 likelihood is removed while its predictive draw remains in generated
 quantities. Other likelihoods remain active, so `held_out=:qt_y` fits the rest
-of a joint model while drawing QT-only parameters from their priors;
-`held_out=:all` produces the prior-predictive model. Names resolve against both
-top-level responses and data-backed observations inside `kernel(...)` cells.
+of a joint model while drawing QT-only parameters from their priors. Names
+resolve against both top-level responses and data-backed observations inside
+`kernel(...)` cells. For prior draws, keep the model identical and omit the
+response column from the data — the program lowers to generated quantities
+automatically.
 
 Formula statements `sd(:, ID) ~ Exponential(scale)` and
 `cor(:, ID) ~ LKJCholesky(K, eta)` configure a shared `|ID|` block.
@@ -3430,7 +3451,54 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
         "`y_lower`/`y_upper` for interval-censored endpoints.")
     body = Expr(:block, stmts...)
     model = StanBlocks.SlicModel(body, data, mod)
-    _sb_apply_held_out(SBBRMI(brmi, model, data, preproc, Set{Symbol}(), bindings), held_out)
+    sb = SBBRMI(brmi, model, data, preproc, Set{Symbol}(), bindings)
+    _sb_triage_emitted(sb)
+    _sb_apply_held_out(sb, held_out)
+end
+
+# Post-emission observation triage: run the plan collector over the emitted
+# body (read-only; no deepcopies) and count bound vs unconditioned
+# observations. Fitted (bound, nothing unbound) proceeds silently; a program
+# with unconditioned observations warns once, naming them; a program with no
+# observation at all errors loudly, redirecting to the one supported prior
+# spelling (keep the statement, omit the response column). Running on the
+# EMITTED body — rather than the formula — is what makes kernel-cell
+# observations (`pk_obs`/`qt_obs` inside `kernel(...)`) and fused statements
+# resolve with the same role logic the plan itself uses; synthesized latents
+# (`total`, `tau`, LKJ factors) never match and stay priors.
+function _sb_triage_emitted(sb::SBBRMI)
+    declarations = GenerativeDeclaration[]
+    data_scope = Dict{Symbol,Union{Nothing,Symbol}}(k => k for k in keys(sb.data))
+    obs_keys = Set{Symbol}(keys(sb.parent.operations))
+    _sb_plan_collect!(declarations, sb.model.model, data_scope, (), obs_keys,
+                      Set{Symbol}())
+    bound = count(d -> d.role === :observation && !isnothing(d.data_source),
+                  declarations)
+    unbound = sort!(Symbol[d.target for d in declarations
+                           if d.role === :observation && isnothing(d.data_source)])
+    if !isempty(unbound)
+        names = join(map(s -> "`$s`", unbound), ", ")
+        if bound >= 1
+            @warn("sbimpl: $names bind(s) no data column — fitting on $bound " *
+                  "bound observation(s); the unbound statement(s) lower " *
+                  "unconditionally (forward-simulated unless likelihood-reaching). " *
+                  "If one was meant to be fitted, its data column is missing " *
+                  "or misnamed.")
+        else
+            @warn("sbimpl: $names bind(s) no data column — building the " *
+                  "unconditioned (prior) program: no likelihood reaches the " *
+                  "model block, so parameters and responses forward-simulate " *
+                  "in generated quantities. If you meant to fit, the response " *
+                  "column is missing or misnamed.")
+        end
+        return nothing
+    end
+    bound >= 1 && return nothing
+    error("sbimpl: this `@brm` declares no observation — no `response ~ " *
+          "distribution(...)` statement binds data, and none is present " *
+          "without data either. Every `@brm` needs an observation statement; " *
+          "for prior draws keep the statement and omit the response column " *
+          "from the data — dropping the statement is not supported.")
 end
 
 _as_data_column(x::DataColumn) = x
@@ -3889,10 +3957,32 @@ function _sb_plan_plate_parts(x::Expr)
     (; iterables=Tuple(iterables), params, body=lambda.args[2])
 end
 
-function _sb_plan_collect!(declarations, x, data_scope, context=())
+# Emitted-RHS STRICT check: does this distribution call reference a value (a
+# bare Symbol in argument position), as opposed to bare literals? Call heads
+# are skipped — only argument positions count.
+_sb_plan_value_ref(x::Symbol) = true
+_sb_plan_value_ref(::QuoteNode) = false
+_sb_plan_value_ref(x::Expr) =
+    x.head === :parameters ? any(_sb_plan_kw_ref, x.args) :
+    x.head === :call ? any(_sb_plan_value_ref, x.args[2:end]) :
+    x.head === :kw ? (length(x.args) >= 2 && _sb_plan_value_ref(x.args[2])) :
+    any(_sb_plan_value_ref, x.args)
+_sb_plan_value_ref(x::AbstractVector) = any(_sb_plan_value_ref, x)
+_sb_plan_value_ref(_) = false
+_sb_plan_kw_ref(x::Expr) =
+    x.head === :kw ? (length(x.args) >= 2 && _sb_plan_value_ref(x.args[2])) :
+    _sb_plan_value_ref(x)
+_sb_plan_kw_ref(x) = _sb_plan_value_ref(x)
+_sb_plan_obs_shaped(rhs) = false
+_sb_plan_obs_shaped(rhs::Expr) =
+    rhs.head === :call && length(rhs.args) >= 2 &&
+    any(_sb_plan_value_ref, rhs.args[2:end])
+
+function _sb_plan_collect!(declarations, x, data_scope, context, obs_keys, plate_params)
     x isa Expr || return nothing
     if x.head === :block
-        foreach(stmt -> _sb_plan_collect!(declarations, stmt, data_scope, context), x.args)
+        foreach(stmt -> _sb_plan_collect!(declarations, stmt, data_scope, context,
+                                          obs_keys, plate_params), x.args)
         return nothing
     end
     if x.head === :call && length(x.args) >= 3 && x.args[1] === :~
@@ -3901,7 +3991,22 @@ function _sb_plan_collect!(declarations, x, data_scope, context=())
             "generative_plan: cannot identify emitted sampling LHS `$(x.args[2])`")
         rhs = x.args[3]
         data_source = get(data_scope, target, nothing)
-        role = isnothing(data_source) ? :prior : :observation
+        # Bound data is an observation. So is an UNBOUND formula statement
+        # (top-level, named by the `@brm` program) or plate parameter whose
+        # emitted RHS references a value: that is an unconditioned
+        # observation — the response omitted from the data — not a prior.
+        # Synthesized latents (`total`, `tau`, LKJ factors) have no formula
+        # key and never match; literal priors (`sigma ~ exponential(1)`)
+        # fail the value check. Both stay `:prior`, exactly as before.
+        role = if !isnothing(data_source)
+            :observation
+        elseif !isempty(context) && target in plate_params && _sb_plan_obs_shaped(rhs)
+            :observation
+        elseif isempty(context) && target in obs_keys && _sb_plan_obs_shaped(rhs)
+            :observation
+        else
+            :prior
+        end
         draw = role === :observation ? _sb_plan_generated(context, target) : nothing
         annotation = _sb_plan_annotation(x.args[2])
         arguments, keywords = _sb_plan_call_parts(rhs)
@@ -3914,12 +4019,16 @@ function _sb_plan_collect!(declarations, x, data_scope, context=())
         plate = _sb_plan_plate_parts(rhs)
         if !isnothing(plate)
             nested_scope = copy(data_scope)
+            nested_params = copy(plate_params)
             for (param, iterable) in zip(plate.params, plate.iterables)
+                param isa Symbol || continue
+                push!(nested_params, param)
                 iterable isa Symbol || continue
                 source = get(data_scope, iterable, nothing)
                 isnothing(source) || (nested_scope[param] = source)
             end
-            _sb_plan_collect!(declarations, plate.body, nested_scope, (context..., target))
+            _sb_plan_collect!(declarations, plate.body, nested_scope, (context..., target),
+                              obs_keys, nested_params)
         end
         return nothing
     end
@@ -3934,30 +4043,40 @@ function _generative_plan(sb::SBBRMI, builder, cv_groups)
     model = StanBlocks.SlicModel(body, data, sb.model.mod)
     declarations = GenerativeDeclaration[]
     data_scope = Dict{Symbol,Union{Nothing,Symbol}}(k => k for k in keys(data))
-    _sb_plan_collect!(declarations, body, data_scope)
+    obs_keys = Set{Symbol}(keys(parent.operations))
+    _sb_plan_collect!(declarations, body, data_scope, (), obs_keys, Set{Symbol}())
     GenerativePlan(parent, model, data, preproc, Tuple(declarations), builder,
                    copy(cv_groups), copy(sb.held_out), deepcopy(sb.bindings))
 end
 
+# Shared redirect: holding out every observation leaves nothing to fit, and
+# held-out likelihoods are not the prior mechanism.
+_sb_held_out_all_redirect() =
+    " Holding out every observation leaves nothing to fit, and held-out " *
+    "likelihoods are not the prior mechanism. For prior draws keep the model " *
+    "identical and omit the response column from the data — the program " *
+    "lowers to generated quantities automatically. To cross-validate, hold " *
+    "out a strict subset of the responses."
+
 function _sb_held_out_request(held_out)
-    (held_out === nothing || held_out === ()) &&
-        return (; all=false, names=Set{Symbol}())
-    held_out === :all && return (; all=true, names=Set{Symbol}())
+    (held_out === nothing || held_out === ()) && return (; names=Set{Symbol}())
+    held_out === :all && error(
+        "sbimpl: `held_out=:all` is not supported." * _sb_held_out_all_redirect())
     held_out isa AbstractString && error(
-        "sbimpl: `held_out` expects a response Symbol, a collection of response " *
-        "Symbols, or `:all`; got $(repr(held_out))")
+        "sbimpl: `held_out` expects a response Symbol or a collection of response " *
+        "Symbols; got $(repr(held_out))")
     values = held_out isa Symbol ? (held_out,) : try
         collect(held_out)
     catch
-        error("sbimpl: `held_out` expects a response Symbol, a collection of " *
-              "response Symbols, or `:all`; got $(repr(held_out))")
+        error("sbimpl: `held_out` expects a response Symbol or a collection of " *
+              "response Symbols; got $(repr(held_out))")
     end
     all(x -> x isa Symbol, values) || error(
         "sbimpl: every `held_out` response must be a Symbol; got $(repr(values))")
     names = Set{Symbol}(values)
     :all in names && error(
-        "sbimpl: use `held_out=:all` by itself; do not mix `:all` with response names")
-    (; all=false, names)
+        "sbimpl: `held_out=:all` is not supported." * _sb_held_out_all_redirect())
+    (; names)
 end
 
 # Resolve public response names through the emitted declaration inventory. This
@@ -3966,17 +4085,22 @@ end
 # `data_source=:qt_y`, while StanBlocks must receive the mark on the latter.
 function _sb_apply_held_out(sb::SBBRMI, held_out)
     request = _sb_held_out_request(held_out)
-    !request.all && isempty(request.names) && return sb
+    isempty(request.names) && return sb
 
     plan = _generative_plan(sb, nothing, Set{Symbol}())
     aliases = Dict{Symbol,Set{Symbol}}()
     sources = Set{Symbol}()
+    unbound = Symbol[]
     for declaration in plan.declarations
         declaration.role === :observation || continue
         source = declaration.data_source
-        isnothing(source) && error(
-            "sbimpl: observation `$(declaration.target)` has no data source; " *
-            "cannot apply `held_out`")
+        # Unbound observations (response omitted) are not holdable: there is
+        # no data to mark. They are skipped here, not errored — the coverage
+        # check below turns holding out everything else into the redirect.
+        if isnothing(source)
+            push!(unbound, declaration.target)
+            continue
+        end
         haskey(sb.data, source) || error(
             "sbimpl: observation `$(declaration.target)` resolves to absent Stan " *
             "data key `$source`; cannot apply `held_out`")
@@ -3985,24 +4109,33 @@ function _sb_apply_held_out(sb::SBBRMI, held_out)
             push!(get!(() -> Set{Symbol}(), aliases, alias), source)
         end
     end
-    isempty(sources) && error(
-        "sbimpl: `held_out` was requested, but this BRMI emits no observation likelihoods")
-
-    selected = if request.all
-        sources
-    else
-        unknown = sort!(collect(setdiff(request.names, Set(keys(aliases)))))
-        isempty(unknown) || error(
-            "sbimpl: `held_out` names unknown response(s) $(unknown). Available " *
-            "responses: $(sort!(collect(keys(aliases)))).")
-        ambiguous = sort!(Symbol[name for name in request.names
-                                 if length(aliases[name]) > 1])
-        isempty(ambiguous) || error(
-            "sbimpl: `held_out` alias(es) $(ambiguous) each resolve to several " *
-            "response data sources. Name the dataframe response column instead.")
-        reduce(union, (aliases[name] for name in request.names);
-               init=Set{Symbol}())
+    if isempty(sources)
+        isempty(unbound) && error(
+            "sbimpl: `held_out` was requested, but this BRMI emits no observation likelihoods")
+        error("sbimpl: every observation (`$(join(sort!(unbound), "`, `"))`) is " *
+              "unbound (response omitted from the data); there is no data to hold " *
+              "out. Omit `held_out`: the program already lowers to generated " *
+              "quantities.")
     end
+
+    unknown = sort!(collect(setdiff(request.names, Set(keys(aliases)))))
+    if !isempty(unknown)
+        unbound_hit = sort!(Symbol[n for n in unknown if n in unbound])
+        hint = isempty(unbound_hit) ? "" :
+            " (`$(join(unbound_hit, "`, `"))` is unbound (response omitted), not holdable.)"
+        error("sbimpl: `held_out` names unknown response(s) $(unknown). Available " *
+              "responses: $(sort!(collect(keys(aliases)))).$hint")
+    end
+    ambiguous = sort!(Symbol[name for name in request.names
+                             if length(aliases[name]) > 1])
+    isempty(ambiguous) || error(
+        "sbimpl: `held_out` alias(es) $(ambiguous) each resolve to several " *
+        "response data sources. Name the dataframe response column instead.")
+    selected = reduce(union, (aliases[name] for name in request.names);
+                      init=Set{Symbol}())
+    selected == sources && error(
+        "sbimpl: holding out $(join(sort!(collect(selected)), ", ")) covers every " *
+        "observation." * _sb_held_out_all_redirect())
 
     marked = Dict{Symbol,Any}(sb.data)
     for source in selected
@@ -5028,6 +5161,17 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         if parent(c) isa DataColumn
             v = parent(parent(c))
             data[k] = v
+        elseif parent(c) isa MissingColumn
+            # Unbound kernel positional: no data to bind and no LP bucket to
+            # walk. If this is an OUTCOME, per-cell prior simulation is not
+            # supported yet — StanBlocks plates iterate bound data, so there
+            # is nothing to iterate; a count-form plate emission is future
+            # work (BRM-side, no foreign dependency). Fail here with guidance
+            # instead of the cryptic downstream "Could not find <name>".
+            error("sbimpl: kernel(...) positional arg `$k` has no data column. " *
+                  "If it is an outcome, omitting it for prior draws is not " *
+                  "supported yet: kernel cells iterate bound response data. " *
+                  "If it is an input, the column is missing or misnamed.")
         else
             push!(lp_cols, c)
         end
@@ -5372,6 +5516,27 @@ end
 function _sb_emit_prior!(stmts, target, constructor, op)
     isnothing(brm_distribution_type(constructor)) && return false
     _sb_emit_distribution_prior!(stmts, target, constructor, op)
+end
+
+# A custom `@lpxf`/`@deffun` family on an unbound LHS (`cases ~ nb_cases(...)`
+# with the response column omitted). The FITTED spelling of the same statement
+# lowers through the generic likelihood fallback, so the unconditioned
+# spelling emits the identical statement with prior-arg lowering, and
+# StanBlocks forward-simulates the LHS via the family's `_rng` companion.
+# Detection is SLIC's own sampling dispatch: a registered family resolves
+# `lpxf_expr` to something more specific than the generic fallback, which
+# predictor terms never do. Return `true` to claim the binding, `false` to
+# fall through to the linear-predictor path.
+function _sb_emit_custom_family_prior!(stmts, target, f, rhs_e)
+    f isa Function || return false
+    which(StanBlocks.lpxf_expr, Tuple{typeof(f)}) ===
+        which(StanBlocks.lpxf_expr, Tuple{Any}) && return false
+    call = Expr(:call, nameof(f), map(_sb_prior_arg, getargs(rhs_e))...)
+    kwargs = getkwargs(rhs_e)
+    isempty(kwargs) || insert!(call.args, 2, Expr(:parameters,
+        (Expr(:kw, k, _sb_prior_arg(v)) for (k, v) in pairs(kwargs))...))
+    push!(stmts, Expr(:call, :~, target, call))
+    true
 end
 
 # Mathematical truncation retains its normalizing mass. Unlike declaration
@@ -5837,8 +6002,33 @@ function _sb_prior_arg_named(x, op::ExprColumn{typeof(~)})
        _brm_prior_expression(rhs)
         return name(x)
     end
+    # A reference to an already-declared model value: a linear predictor, a
+    # distributional parameter, a kernel result, or another prior — anything a
+    # `~` declares under a plain (or unary-link-wrapped) name. It is emitted
+    # separately, so the consuming statement references it by name. This is
+    # what lets an observation with unbound response data (`y` omitted from
+    # the dataframe) lower its predictor-backed arguments instead of refusing:
+    # the statement emits verbatim and StanBlocks forward-simulates the
+    # unbound LHS. Data-backed observations referenced as args behave exactly
+    # as in likelihoods. Decorated responses (`mi`/`ragged`/joint) stay
+    # refused: they have no plain emitted name to reference.
+    inner = _sb_prior_arg_declared_name(lhs_raw)
+    if !isnothing(inner) && inner === name(x)
+        return name(x)
+    end
     error(_sb_prior_arg_backing_error(x, op))
 end
+# The plain name a `~` declaration binds, unwrapping one link function
+# (`log(y_scale) ~ 1 + source` binds `y_scale`, recovered after emission).
+# Anything else (decorated or multi-arg LHS) has no such name.
+_sb_prior_arg_declared_name(lhs::NamedColumn) = name(lhs)
+function _sb_prior_arg_declared_name(lhs::ExprColumn)
+    args = getargs(lhs)
+    length(args) == 1 || return nothing
+    inner = only(args)
+    inner isa NamedColumn ? name(inner) : nothing
+end
+_sb_prior_arg_declared_name(_) = nothing
 function _sb_is_scalar_prior(prior::ExprColumn)
     family = getf(prior)
     family === Horseshoe && return true
@@ -6277,6 +6467,7 @@ _sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs;
         # the four-argument scalar seam below.
         _sb_emit_vector_prior!(stmts, data, key, f, rhs_e) && return
         _sb_emit_prior!(stmts, key, f, rhs_e) && return
+        _sb_emit_custom_family_prior!(stmts, key, f, rhs_e) && return
     end
     _sb_linear_predictor!(stmts, data, key, rhs; id_lookup, brmi_key=key, obs_n,
                           cv_groups, centered_groups, group_block_lookup,
@@ -11227,7 +11418,7 @@ _sb_any_data_symbol(data, target=nothing) = begin
     # order does not leak into it: the entries are sorted by length below.
     by_len = Dict{Int,Symbol}()
     for (k, v) in data
-        k === _SB_PREPROC_KEY && continue
+        _sb_is_side_channel_key(k) && continue
         hit = _flat_vec_key(k, v)
         isnothing(hit) && continue
         isnothing(first_hit) && (first_hit = hit)
@@ -11250,8 +11441,26 @@ _sb_any_data_symbol(data, target=nothing) = begin
             "meant to vary across a frame, name a column from that frame so its length is known.")
     end
     isnothing(first_hit) || return first_hit
-    first(k for k in keys(data) if k !== _SB_PREPROC_KEY)
+    # No flat vector anywhere: only side-channels (or nothing) remain, so no
+    # row axis exists to size the intercept from. The historical fallback
+    # returned the first non-preproc key, which an unconditioned program could
+    # resolve to a constructor side-channel (`__brm_emission_bindings__`) that
+    # never reaches Stan's data dict — a cryptic downstream failure. Fail here
+    # with the same guidance as the no-data case above.
+    for k in keys(data)
+        _sb_is_side_channel_key(k) || return k
+    end
+    error("sbimpl: can't emit `rep_vector(1., n)` — no data column seen yet. Make sure an observed `~` comes before the intercept-only predictor, or, if it is a single constant, declare it directly as a scalar parameter with its own prior (`x ~ <distribution>`).")
 end
+
+# Every reserved constructor side-channel keyed in `data` during emission (all
+# popped before the SlicModel is built). Data-iterating helpers must skip all
+# of them, not just the preproc dict: with no observation bound, the fallback
+# tiers above would otherwise mistake a side-channel for a sizing column.
+_sb_is_side_channel_key(k::Symbol) =
+    k === _SB_PREPROC_KEY || k === _SB_BINDINGS_KEY ||
+    k === _SB_THRESHOLD_LOCATED_KEY || k === _SB_HYPER_PLANS_KEY ||
+    k === _SB_TOTAL_PLANS_KEY || k === _SB_S2Z_PLANS_KEY
 
 # Return `k` if `v` is a flat (non-ragged) vector, else `nothing` — replaces
 # the old `_is_flat_vec` Bool predicate so the caller composes via the
@@ -11816,6 +12025,8 @@ _sb_stan_dist_name(::Type{<:NegativeBinomial})    = :neg_binomial
 # per-row `int[n,K]` response form shares `probs` across rows.
 _sb_stan_dist_name(::Type{<:Multinomial})         = :multinomial
 _sb_stan_dist_name(::Type{<:Categorical})         = :categorical
+_sb_stan_dist_name(::Type{<:NegativeBinomial2})   = :neg_binomial_2
+_sb_stan_dist_name(::Type{<:BetaBinomial2})      = :beta_binomial
 _sb_stan_dist_name(::Type) = nothing
 _sb_stan_dist_name(_) = nothing
 
@@ -11836,6 +12047,21 @@ when a factory's keywords or constructor semantics require an AST rewrite;
 the same method is used by scalar priors and observations. Declaration bounds
 are separate and are not passed as constructor keywords.
 """
+# Outcome structure derived from observed data: these families read the
+# response VALUES at lowering time (outcome levels for `Ordinal` /
+# `OrderedLogistic` / `CategoricalLogit`, per-row counts for `Multinomial`,
+# the trials/mean/precision rewrite for `BetaBinomial2`), so they cannot lower
+# for an unconditioned observation (response omitted) — or as a prior, which
+# reaches the same seam. Fail here with guidance instead of the generic
+# "no Stan translation" error or a downstream stanc type error. Their fitted
+# likelihoods use dedicated `_sb_lik_family!` methods and never reach this.
+_sb_stan_distribution_call(::Type{T}, args, kwargs) where
+        {T<:Union{OrderedLogistic,Ordinal,CategoricalLogit,Multinomial,
+                  BetaBinomial2}} =
+    error("sbimpl: `$(nameof(T))` derives outcome structure from observed " *
+          "response values and cannot lower for an unconditioned observation " *
+          "(response omitted from the data). Bind the response column to fit " *
+          "this family; prior draws for it are not supported.")
 _sb_stan_distribution_call(constructor, args, kwargs) =
     _sb_stan_distribution_call_keywords(constructor, args, kwargs)
 function _sb_stan_distribution_call_keywords(constructor, args, ::NamedTuple{()})
@@ -11861,6 +12087,20 @@ _sb_stan_dist_args(::Type{<:Cauchy}, args::Tuple{Any}) = (args[1], 1.0)
 
 # `TDist(nu)` is standard Student-t; Stan requires explicit location/scale.
 _sb_stan_dist_args(::Type{<:TDist}, args::Tuple{Any}) = (args[1], 0, 1)
+
+# `BetaBinomial2(trials, mean, precision)` reparameterizes to native
+# `beta_binomial(trials, mean*precision, (1-mean)*precision)`. Mirrors the
+# likelihood emission exactly (same expressions, same order); untyped `args`
+# so both Tuple (likelihood-side) and Vector (prior-side) callers normalize.
+function _sb_stan_dist_args(::Type{<:BetaBinomial2}, args)
+    length(args) == 3 || error(
+        "sbimpl: `BetaBinomial2` needs `(trials, mean, precision)`; got " *
+        "$(length(args)) argument(s)")
+    trials, mean, precision = args[1], args[2], args[3]
+    alpha = Expr(:call, Symbol(".*"), mean, precision)
+    beta = Expr(:call, Symbol(".*"), Expr(:call, :-, 1, mean), precision)
+    (trials, alpha, beta)
+end
 
 # Composition follows the base distribution's value support. The backend's
 # ordinary translation and StanBlocks' CDF/CCDF dispatch determine whether the

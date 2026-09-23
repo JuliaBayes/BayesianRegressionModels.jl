@@ -98,11 +98,19 @@ end
 # prepass below.
 function _brm_data_vec(col_name::Symbol, raw)
     if eltype(raw) >: Missing
-        any(ismissing, raw) && error(
-            "BRM backend lowering: data column `$col_name` contains `missing` " *
-            "values. BRM never silently drops rows. Either drop/impute them " *
-            "before building the model, or use a response decorator that " *
-            "models missing observations explicitly.")
+        if any(ismissing, raw)
+            redirect = all(ismissing, raw) ?
+                " If `$col_name` is the response and you want prior draws, " *
+                "omit the column from the data instead of filling it with " *
+                "`missing` — an omitted response builds the unconditioned " *
+                "(prior) program with the model unchanged (Stan backend)." : ""
+            error(
+                "BRM backend lowering: data column `$col_name` contains " *
+                "`missing` values. BRM never silently drops rows. Either " *
+                "drop/impute them before building the model, or use a " *
+                "response decorator that models missing observations " *
+                "explicitly." * redirect)
+        end
         return collect(nonmissingtype(eltype(raw)), raw)
     end
     raw

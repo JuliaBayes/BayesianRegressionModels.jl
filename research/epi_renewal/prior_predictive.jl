@@ -1,5 +1,10 @@
 # Wren.jl PR #16 (epi-example @ 6e3fd026) — PRIOR PREDICTIVE checks in native @brm.
 #
+# NOTE (2026-09-23, snag sbbrmi-brmi-mod-a97bf761): `held_out=:all` no longer
+# exists — the prior spelling is the same model with the response column
+# omitted (fixed_param, dim 0). This script is kept as the VERIFIED record of
+# the held-out prior below; re-running it stops at the loud `held_out` refusal.
+#
 # The PR draws every component's return value and the case series from the prior before
 # fitting. In BRM the same program with `held_out=:all` has every observation likelihood off:
 # NUTS on it samples the PRIOR, the named in-cell expectation (`Y` / `Yf`) is the prior

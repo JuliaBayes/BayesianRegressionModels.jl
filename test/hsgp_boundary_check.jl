@@ -46,6 +46,7 @@ hyper_prior_model(df) = @brm df begin
     loc ~ 1 + hsgp(x; k=4, by=g)
     log(length_scale(hsgp(x))) ~ 1 + (1 | g)
     log(sd(hsgp(x))) ~ 1 + (1 | g)
+    y ~ Normal(loc, 1)
 end
 
 @testset "boundary check reports ratios on a bare term" begin
@@ -117,8 +118,9 @@ end
 end
 
 @testset "boundary check survives the prior regime" begin
+    # The prior regime is the same model with the response column omitted.
     df = boundary_df()
-    sb = SBBRMI(hyper_prior_model(df); mod=@__MODULE__)
+    sb = SBBRMI(hyper_prior_model((; df.x, df.x2, df.g)); mod=@__MODULE__)
     d = brm_descriptor(sb)
     names = ["hsgp_x_by_g_beta0_rho", "hsgp_x_by_g_sd_rho",
              "hsgp_x_by_g_z_rho.1", "hsgp_x_by_g_z_rho.2"]

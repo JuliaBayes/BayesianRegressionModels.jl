@@ -165,8 +165,8 @@ flagged, floor_binding)`:
 
 `draws` is draws × coordinates with `names` its constrained axis (the same
 orientation every resolver here takes); carriers resolve through
-[`brm_term_coordinates`](@ref), so a response-free prior program works with
-`include_gq=true` names exactly as a fit does.
+[`brm_term_coordinates`](@ref), so an unconditioned program (response column
+omitted) works with `include_gq=true` names exactly as a fit does.
 
 v1 covers one-dimensional auto-fitted `exp_quad` terms, grouped or not, bare
 or hyper-driven. Periodic, multi-axis, anisotropic, model-derived-axis, and
