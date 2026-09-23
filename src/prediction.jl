@@ -116,9 +116,12 @@ const _RANEF_FAMILIES = Dict{Symbol,NamedTuple}(
     :ranef_correlated_draws_r2d2 => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :r2d2_tau),
     # Native constrained-matrix plate emission (StanBlocks 0421b28). The
     # per-group standardised cell is namespaced under the group plate result
-    # `b_T`; the collected storage remains term-major (`matrix[K, G]`).
-    :ranef_correlated_by       => (; z = :b_T_z_g, layout = :group_term,     noncentered = true,  tau = nothing),
-    :ranef_correlated_by_draws => (; z = :b_T_z_g, layout = :group_term,     noncentered = true,  tau = nothing),
+    # `b_T`; the collected storage is term-major (`matrix[K, G]`), so the
+    # layout is `:term_group` (`<p>.<t>.<g>`) — NOT `:group_term`, which
+    # spells `array[G] vector[K]` names that do not exist on this carrier
+    # (snag stratified-by-la-3d4f05a7).
+    :ranef_correlated_by       => (; z = :b_T_z_g, layout = :term_group,     noncentered = true,  tau = nothing),
+    :ranef_correlated_by_draws => (; z = :b_T_z_g, layout = :term_group,     noncentered = true,  tau = nothing),
     # Centered emissions — the opt-in `SBBRMI(...; centered_groups = [:g])` path,
     # which SHIPS. The coordinate is the effect ITSELF (unconstrained, so the
     # unconstrained value IS the effect): `population_draws` zeroes it, which is
