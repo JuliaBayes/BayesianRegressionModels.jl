@@ -7829,7 +7829,10 @@ function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(mo1), t, su
     prepared = _brm_prepare_term(t, target,
         (; data=Dict{Symbol,Any}(inner_name => raw)))
     n_levels, idx = length(prepared.state.levels), prepared.state.idx
-    col_name = Symbol(:mo1_, inner_name)
+    # Carrier disambiguation follows `mo` (see `_sb_predictor_term!`): the
+    # first `mo1(c)` keeps `mo1_<c>`; repeats take `mo1_<target>_<c>`.
+    col_name = last(_sb_unique_structured_term_names(
+        stmts, :mo1, string(inner_name), target))
     if n_levels < 2
         # Single-level factor: 0 increments -> the monotonic effect is
         # identically 0. Contribute a scalar `0.0` summand and NEVER ask Sb for
@@ -8028,12 +8031,25 @@ end
 # hand omit it; `mm(...)`'s `<mm>_idx` is an n_obs x n_memberships MATRIX, so
 # `num_elements` would give it rows*cols and it is deliberately NOT threaded.
 function _sb_ranef_cols!(cols, data, stmts, t, gterms=(); group_idx=nothing,
-                         term_overrides=Dict{Symbol,Any}())
+                         term_overrides=Dict{Symbol,Any}(), target=nothing)
     _sb_ranef_cols_dispatch!(cols, data, stmts, t, _sb_cat_levels(t), gterms;
-                             group_idx, term_overrides)
+                             group_idx, term_overrides, target)
 end
 _sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(offset)}, gterms=(); kwargs...) =
     error("sbimpl: `offset(...)` is a population-level fixed contribution and cannot appear inside a random-effects term")
+# `dar`/`rw`/`cdar` are population-level direct trajectories: their emitters
+# require the owning predictor (`target::Symbol`), which the random-effect
+# path historically never threaded — so these terms fail here with attribution
+# instead of reaching the emitter's `TypeError: ... expected Symbol, got
+# Nothing`. A trajectory used as a random-effect design column would read as a
+# group-varying amplitude of one shared path, which is not what `(dar(t)|g)`
+# spells; per-group trajectories are unbuilt.
+_sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(dar)}, gterms=(); kwargs...) =
+    error("sbimpl: `dar(...)` is a population-level direct trajectory and cannot appear inside a random-effects term")
+_sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(rw)}, gterms=(); kwargs...) =
+    error("sbimpl: `rw(...)` is a population-level direct trajectory and cannot appear inside a random-effects term")
+_sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(cdar)}, gterms=(); kwargs...) =
+    error("sbimpl: `cdar(...)` is a population-level direct trajectory and cannot appear inside a random-effects term")
 # `a & b` in a random-effects LHS lowers through the SAME interaction expander
 # as the population path (treatment coding; cont×cont / cont×cat / cat×cat).
 # Without this the term falls through to the protect-style materializer, which
@@ -8042,11 +8058,13 @@ _sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(offset)}, gterms=(); kwa
 _sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(&)}, gterms=(); kwargs...) =
     _sb_interaction_cols!(cols, t, data, stmts)
 _sb_ranef_cols_dispatch!(cols, data, stmts, t, ::Nothing, gterms=();
-                         group_idx=nothing, term_overrides=Dict{Symbol,Any}()) =
+                         group_idx=nothing, term_overrides=Dict{Symbol,Any}(),
+                         target=nothing) =
     _sb_maybe_push_col!(cols, _sb_predictor_col(
-        t, data, stmts, gterms; group_idx, term_overrides))
+        t, data, stmts, gterms; group_idx, term_overrides, target))
 function _sb_ranef_cols_dispatch!(cols, data, _stmts, t, levels, _gterms=();
-                                  group_idx=nothing, term_overrides=nothing)
+                                  group_idx=nothing, term_overrides=nothing,
+                                  target=nothing)
     # Single-level factor: `2:n_levels` is empty, so this contributes 0 dummy
     # columns uniformly (no shape special-case) — a `(1 + c | g)` degenerates to
     # intercept-only, matching how the population path drops a K=1 factor.
@@ -8325,7 +8343,7 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, 
         col_exprs = Any[]
         for t in gterms
             _sb_ranef_cols!(col_exprs, data, stmts, t, gterms;
-                            group_idx=idx_name, term_overrides)
+                            group_idx=idx_name, term_overrides, target)
         end
         if isempty(col_exprs)
             # Every slope term degenerated to zero columns (e.g. `(0 + c | g)`
@@ -8426,7 +8444,8 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol,
     else
         col_exprs = Any[]
         for t in gterms
-            _sb_ranef_cols!(col_exprs, data, stmts, t, gterms; term_overrides)
+            _sb_ranef_cols!(col_exprs, data, stmts, t, gterms;
+                            term_overrides, target)
         end
         Z_name = Symbol(:Z_, target, :_, suffix)
         k_name = Symbol(:n_terms_, target, :_, suffix)
@@ -8488,7 +8507,7 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::Tuple{NamedCo
     col_exprs = Any[]
     for t in gterms
         _sb_ranef_cols!(col_exprs, data, stmts, t, gterms;
-                        group_idx=idx_name, term_overrides)
+                        group_idx=idx_name, term_overrides, target)
     end
     Z_name = Symbol(:Z_, target, :_, suffix)
     k_name = Symbol(:n_terms_, target, :_, suffix)
@@ -9924,7 +9943,7 @@ function _sb_emit_id_ranef_block!(stmts, data, target::Symbol, info, gterms, sum
     col_exprs = Any[]
     for t in gterms
         _sb_ranef_cols!(col_exprs, data, stmts, t, gterms;
-                        group_idx=idx_name, term_overrides)
+                        group_idx=idx_name, term_overrides, target)
     end
     length(col_exprs) == length(cols) ||
         error("sbimpl: id-bucket `$suffix` for target `$target`: expanded $(length(col_exprs)) columns but reserved $(length(cols)) — internal mismatch")
@@ -10272,11 +10291,21 @@ function _sb_mo_levels_for_emission(data, idx_name::Symbol, inner_name, raw)
     isnothing(frozen) ? _sb_fit_levels(raw) : frozen.const_
 end
 
-# Monotonic-effect predictor: emit `mo_<c> ~ _sb_mo(; x=<c>_idx)` and return
-# `mo_<c>` as the column. Scope: single NamedColumn inner arg backed by raw
+# Monotonic-effect predictor: emit `<mo> ~ _sb_mo(; x=<c>_idx)` and return
+# `<mo>` as the column. Scope: single NamedColumn inner arg backed by raw
 # data. Other wrapped terms dispatch to their own methods below.
+# Carrier disambiguation follows `s`/`gp`/`hsgp`: the first `mo(c)` keeps the
+# historical `mo_<c>` binding, while a repeat of the same column — in another
+# predictor or twice in one — takes `mo_<target>_<c>` (+ serial), so every
+# occurrence owns an independent increment simplex (brms semantics; snag
+# mo-term-in-sever-fe459870). The `<c>_idx` data key stays shared: it carries
+# the same codes for every occurrence (the categorical `<c>_idx` precedent).
+# `target === nothing` is label-derivation mode (`popcoefnames`, which drives
+# this emitter without a target): the returned `mo_<c>` is the STABLE PUBLIC
+# beta label, never a minted carrier — real emission always passes `target`.
 _sb_predictor_term!(stmts, data, ::typeof(mo), t;
-                    term_overrides=Dict{Symbol,Any}(), kwargs...) = begin
+                    term_overrides=Dict{Symbol,Any}(), target=nothing,
+                    kwargs...) = begin
     inner_name, raw = _sb_inner_data(:mo, only(getargs(t)))
     idx_name = Symbol(inner_name, :_idx)
     # The FITTED level set drives the increment-simplex dimension. On a frozen
@@ -10296,7 +10325,9 @@ _sb_predictor_term!(stmts, data, ::typeof(mo), t;
     end
     levels = prepared.state.levels
     n_levels = length(levels)
-    col_name = Symbol(:mo_, inner_name)
+    col_name = isnothing(target) ? Symbol(:mo_, inner_name) :
+        last(_sb_unique_structured_term_names(
+            stmts, :mo, string(inner_name), target))
     if n_levels < 2
         # Single-level factor: 0 increments -> the free-beta monotonic effect is
         # identically 0. Contribute NO column (returning `nothing`, which

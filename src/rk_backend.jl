@@ -2868,13 +2868,12 @@ end
 # stick-breaking geometry + Dirichlet density + level-gather recipe;
 # BRM ships the bound `<c>_idx` codes (SB's `<c>_idx`) + the declaration.
 # One increments name per monotonic occurrence (exactly-one-use linkage),
-# minted with numeric stems on collision. Unlike smooths (which SB suffixes
-# per occurrence), duplicate (head, source) pairs fail closed in
-# `_rk_gate_monotonic_unique!`: SB emits one `<mo_c>`/`mo1_<c>` contrast
-# per model, so a second `mo(c)` dies in StanBlocks name resolution — RK
-# rejects it here with attribution instead of admitting a model SB cannot
-# express. `mo(c)` + `mo1(c)` coexist (separate contrasts, separate
-# simplexes — SB-accepted, parity-held).
+# minted with numeric stems on collision. SB suffixes `mo`/`mo1` contrasts
+# per occurrence (snag mo-term-in-sever-fe459870), so the same column in two
+# predictors plans two independent increments vectors here; only a repeat
+# within ONE predictor fails closed in `_rk_gate_monotonic_unique!` (RK mints
+# one monotonic label per (predictor, source)). `mo(c)` + `mo1(c)` coexist
+# (separate contrasts, separate simplexes — SB-accepted, parity-held).
 function _rk_plan_monotonic_core!(head::Symbol,
         prepared::_BRMPreparedTerm, target::Symbol,
         columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol})
@@ -3114,10 +3113,11 @@ function _rk_plan_r2d2_prior(brmi::BRMI, design, r2plan::_BRMR2D2Plan,
         scalars, phi)
 end
 
-# SB single-contrast rule (see the section header): duplicate (head, source)
-# pairs fail closed. Runs per-predictor (ahead of population priors, which
-# would otherwise misattribute the second `mo(c)` as an index collision)
-# and model-wide in `_rk_plan_monotonic_vectors!` (cross-predictor pairs).
+# RK single-label rule (see the section header): a repeat (head, source)
+# pair within ONE predictor fails closed, ahead of population priors (which
+# would otherwise misattribute the second `mo(c)` as an index collision).
+# Cross-predictor repeats plan — SB suffixes contrasts per occurrence and the
+# increments mint below is model-wide, so each predictor owns its own vector.
 function _rk_gate_monotonic_unique!(prefix::String, where::String,
         terms::AbstractVector)
     seen = Set{Tuple{Symbol,Symbol}}()
@@ -3128,8 +3128,8 @@ function _rk_gate_monotonic_unique!(prefix::String, where::String,
         key in seen || (push!(seen, key); continue)
         head = term.kind === :monotonic ? "mo" : "mo1"
         error("$prefix: $where two `$head($(term.options.source))` terms; " *
-            "SB emits one `$head` contrast per model, so the second is " *
-            "out of slice 1 (drop it)")
+            "RK addresses one `$head` increments vector per predictor, so " *
+            "the second is out of slice 1 (drop it)")
     end
     nothing
 end
@@ -3257,9 +3257,6 @@ end
 # One `:simplex_dirichlet` vector parameter per monotonic term (SB: one
 # increment simplex per contrast).
 function _rk_plan_monotonic_vectors!(predictor_specs::AbstractVector)
-    prefix = "RK backend"
-    _rk_gate_monotonic_unique!(prefix, "predictors carry",
-        [term for spec in predictor_specs for term in spec.terms])
     specs = _RKVectorParameter[]
     for spec in predictor_specs, term in spec.terms
         (term.kind === :monotonic ||

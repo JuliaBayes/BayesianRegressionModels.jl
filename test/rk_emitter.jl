@@ -919,18 +919,37 @@ end
     zero = only(t for t in only(plan.predictors).terms
         if t.kind === :offset)
     @test plan.columns[only(zero.columns)] == zeros(6)
-    # SB emits one contrast per (head, source): a second `mo(c)` fails closed.
-    @test_throws "one `mo` contrast per model" BRM._brm_rk_plan(@brm df begin
-        mu ~ 1 + mo(c) + mo(c)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
-    end)
-    # ... and across predictors (one `mo(c)` per model, not per predictor).
-    @test_throws "one `mo` contrast per model" BRM._brm_rk_plan(@brm df begin
+    # RK mints one monotonic label per (predictor, source): a second `mo(c)`
+    # on the SAME predictor fails closed.
+    @test_throws "one `mo` increments vector per predictor" BRM._brm_rk_plan(
+        @brm df begin
+            mu ~ 1 + mo(c) + mo(c)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    # ... while the same column across predictors plans two independent
+    # increments vectors (snag mo-term-in-sever-fe459870: SB suffixes `mo`
+    # contrasts per occurrence).
+    plan = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + mo(c)
         log(sigma) ~ 1 + mo(c)
         y ~ Normal(mu, sigma)
     end)
+    @test [(v.name, v.family, v.size) for v in plan.vector_parameters] == [
+        (:mo_c_simplex_incr, :simplex_dirichlet, 3),
+        (:mo_c_simplex_incr_2, :simplex_dirichlet, 3),
+    ]
+    # ... with independent per-predictor concentrations.
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + mo(c)
+        simplex(mu, mo(c)) ~ Dirichlet(1, 2, 3)
+        log(sigma) ~ 1 + mo(c)
+        simplex(sigma, mo(c)) ~ Dirichlet(4, 5, 6)
+        s ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end)
+    @test [only(v.args) for v in plan.vector_parameters] ==
+        [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
     # ... while `mo(c)` + `mo1(c)` coexist (separate SB contrasts).
     plan = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + mo(c) + mo1(c)

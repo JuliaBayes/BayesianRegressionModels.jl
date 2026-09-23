@@ -1323,6 +1323,20 @@ _brm_term_label(::typeof(cdar), t, target) =
     Symbol(:cdar_, target, :_, name(_sb_named_inner(:cdar, only(getargs(t)))))
 
 _brm_term_owner_labels(f, t, target) = (_brm_term_label(f, t, target),)
+# `mo`/`mo1` carriers disambiguate like `s`/`gp`/`hsgp`: the first occurrence
+# keeps the historical `mo_<c>` binding and repeats take `mo_<target>_<c>`
+# (+ serial), while the PUBLIC term label stays `mo_<c>`. Owner lookup tries
+# the predictor-scoped carrier first and falls back to the historical one:
+# each carrying predictor owns exactly one of the two (it owns the base
+# carrier iff its occurrence was emitted first), so first-match resolves the
+# owning predictor's own simplex and never a sibling's (snag
+# mo-term-in-sever-fe459870).
+_brm_term_owner_labels(::typeof(mo), t, target) =
+    (Symbol(:mo_, target, :_, name(_sb_named_inner(:mo, only(getargs(t))))),
+     _brm_term_label(mo, t))
+_brm_term_owner_labels(::typeof(mo1), t, target) =
+    (Symbol(:mo1_, target, :_, name(_sb_named_inner(:mo1, only(getargs(t))))),
+     _brm_term_label(mo1, t))
 function _brm_term_owner_labels(::typeof(hsgp), t, target)
     base = _brm_term_label(hsgp, t)
     axes = Tuple(name(_sb_named_inner(:hsgp, a)) for a in getargs(t))
