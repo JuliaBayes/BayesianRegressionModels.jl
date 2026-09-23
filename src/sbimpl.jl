@@ -3471,7 +3471,7 @@ function _sb_triage_emitted(sb::SBBRMI)
     data_scope = Dict{Symbol,Union{Nothing,Symbol}}(k => k for k in keys(sb.data))
     obs_keys = Set{Symbol}(keys(sb.parent.operations))
     _sb_plan_collect!(declarations, sb.model.model, data_scope, (), obs_keys,
-                      Set{Symbol}())
+                      Set{Symbol}(), _sb_unbound_cell_observations(sb.parent))
     bound = count(d -> d.role === :observation && !isnothing(d.data_source),
                   declarations)
     unbound = sort!(Symbol[d.target for d in declarations
@@ -3515,10 +3515,40 @@ function _sb_unbound_observations(body, data, brmi)
     declarations = GenerativeDeclaration[]
     data_scope = Dict{Symbol,Union{Nothing,Symbol}}(k => k for k in keys(data))
     obs_keys = Set{Symbol}(keys(brmi.operations))
-    _sb_plan_collect!(declarations, body, data_scope, (), obs_keys, Set{Symbol}())
+    _sb_plan_collect!(declarations, body, data_scope, (), obs_keys, Set{Symbol}(),
+                      _sb_unbound_cell_observations(brmi))
     Tuple(sort!(Symbol[d.target for d in declarations
                        if d.role === :observation && isnothing(d.data_source) &&
                           isempty(d.context)]))
+end
+
+# Plate-nested omitted outcomes, read from the FORMULA: `(context, cell target)`
+# pairs whose in-cell `~` is an unconditioned observation. The plan collector
+# cannot infer this from the emitted body — a twinless in-cell `~` is
+# syntactically identical to a per-cell prior (`_sb_plan_value_ref(::Symbol)`
+# is true, so the obs-shaped gate cannot separate them) — so the emitter's own
+# classification (`_sb_kernel_unbound_cell_idx`) is re-derived here from the
+# same body. Kernel doblocks emit at top level, hence the single-element
+# context.
+function _sb_unbound_cell_observations(brmi)
+    found = Set{Tuple{Tuple{Vararg{Symbol}},Symbol}}()
+    for (target, op_nc) in pairs(brmi.operations)
+        op = _as_expr_column(parent(op_nc)); isnothing(op) && continue
+        getf(op) === (~) || continue
+        opargs = getargs(op)
+        length(opargs) == 2 || continue
+        rhs = _as_expr_column(opargs[2]); isnothing(rhs) && continue
+        getf(rhs) === kernel || continue
+        dcols = getargs(rhs)
+        isempty(dcols) && continue
+        parts = _sb_kernel_lambda_parts(first(dcols))
+        isnothing(parts) && continue
+        params, body_stmts = parts
+        for i in _sb_kernel_unbound_cell_idx(dcols[2:end], params, body_stmts)
+            push!(found, ((target,), params[i]))
+        end
+    end
+    found
 end
 
 _as_data_column(x::DataColumn) = x
@@ -3998,11 +4028,12 @@ _sb_plan_obs_shaped(rhs::Expr) =
     rhs.head === :call && length(rhs.args) >= 2 &&
     any(_sb_plan_value_ref, rhs.args[2:end])
 
-function _sb_plan_collect!(declarations, x, data_scope, context, obs_keys, plate_params)
+function _sb_plan_collect!(declarations, x, data_scope, context, obs_keys, plate_params,
+                           unbound_cell)
     x isa Expr || return nothing
     if x.head === :block
         foreach(stmt -> _sb_plan_collect!(declarations, stmt, data_scope, context,
-                                          obs_keys, plate_params), x.args)
+                                          obs_keys, plate_params, unbound_cell), x.args)
         return nothing
     end
     if x.head === :call && length(x.args) >= 3 && x.args[1] === :~
@@ -4021,6 +4052,15 @@ function _sb_plan_collect!(declarations, x, data_scope, context, obs_keys, plate
         role = if !isnothing(data_source)
             :observation
         elseif !isempty(context) && target in plate_params && _sb_plan_obs_shaped(rhs)
+            :observation
+        elseif !isempty(context) && (context, target) in unbound_cell
+            # Omitted kernel outcome: the emitter dropped this cell parameter
+            # from the plate (count form) and its in-cell `~` forward-simulates
+            # twinless. No obs-shaped gate here — the formula-level
+            # classification (a `MissingColumn` positional observed in-cell) is
+            # already as discriminating as `data_source`: per-cell priors and
+            # synthesized latents never match it, while even a literal-RHS
+            # unbound outcome stays an observation like its bound sibling.
             :observation
         elseif isempty(context) && target in obs_keys && _sb_plan_obs_shaped(rhs)
             :observation
@@ -4048,7 +4088,7 @@ function _sb_plan_collect!(declarations, x, data_scope, context, obs_keys, plate
                 isnothing(source) || (nested_scope[param] = source)
             end
             _sb_plan_collect!(declarations, plate.body, nested_scope, (context..., target),
-                              obs_keys, nested_params)
+                              obs_keys, nested_params, unbound_cell)
         end
         return nothing
     end
@@ -4064,7 +4104,8 @@ function _generative_plan(sb::SBBRMI, builder, cv_groups)
     declarations = GenerativeDeclaration[]
     data_scope = Dict{Symbol,Union{Nothing,Symbol}}(k => k for k in keys(data))
     obs_keys = Set{Symbol}(keys(parent.operations))
-    _sb_plan_collect!(declarations, body, data_scope, (), obs_keys, Set{Symbol}())
+    _sb_plan_collect!(declarations, body, data_scope, (), obs_keys, Set{Symbol}(),
+                      _sb_unbound_cell_observations(parent))
     GenerativePlan(parent, model, data, preproc, Tuple(declarations), builder,
                    copy(cv_groups), copy(sb.held_out), deepcopy(sb.bindings))
 end
@@ -5110,6 +5151,58 @@ function _sb_kernel_ragged_rows(data, arg_col, grp_arg, g_vals)
     (prepared.rows, prepared.is_lp)
 end
 
+# Is a kernel cell parameter OBSERVED by the cell body — the LHS of a top-level
+# in-cell `~` statement? The do-block body is captured verbatim (macro.jl `_x`),
+# so observation statements keep their surface `yy ~ family(...)` call form.
+# Only top-level statements count: the shipped contract observes responses with
+# ordinary statements in the inline body, and a nested observation is outside
+# the omission surface (it keeps the loud missing-column error below).
+function _sb_cell_param_observed(body_stmts, param::Symbol)
+    for s in body_stmts
+        s isa Expr || continue
+        s.head === :call && length(s.args) >= 3 && s.args[1] === :~ || continue
+        lhs = s.args[2]
+        name = lhs isa Symbol ? lhs : _sb_plan_lhs_name(lhs)
+        name === param && return true
+    end
+    false
+end
+
+# Split a kernel do-block lambda into its plain-name params and body statements;
+# `nothing` when the lambda is malformed. The emitter validates loudly on
+# `nothing`; formula walkers (which run where emission already succeeded) skip.
+function _sb_kernel_lambda_parts(lam)
+    lam isa Expr && lam.head === :-> && length(lam.args) >= 2 || return nothing
+    ptuple = lam.args[1]
+    params = ptuple isa Symbol ? Symbol[ptuple] :
+        (Meta.isexpr(ptuple, :tuple) && all(p -> p isa Symbol, ptuple.args) ?
+            Symbol[ptuple.args...] : nothing)
+    isnothing(params) && return nothing
+    body = lam.args[2]
+    (params, (Meta.isexpr(body, :block) ? body.args : Any[body]))
+end
+
+# Indexes (1-based into `positionals`, i.e. `dcols[2:end]`) of omitted kernel
+# OUTCOMES: `MissingColumn`-backed positionals whose cell parameter is observed
+# in-cell. The omitted response column is the one prior spelling, so these
+# positionals drop out of the plate (count form) and their in-cell `~`
+# forward-simulates per cell. A `MissingColumn` positional that is never
+# observed is an input problem and stays a loud error at the call site.
+# Shared by the emitter (which drops the positions) and the plan collector
+# (which marks the twinless in-cell `~` an observation); both read the same
+# formula body, so the classification cannot disagree with emission.
+function _sb_kernel_unbound_cell_idx(positionals, params::Vector{Symbol}, body_stmts)
+    found = Int[]
+    length(params) == length(positionals) || return found
+    for (i, c) in enumerate(positionals)
+        c isa NamedColumn || continue
+        parent(c) isa MissingColumn || continue
+        _sb_cell_param_observed(body_stmts, params[i]) || continue
+        push!(found, i)
+    end
+    found
+end
+
 function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     haskey(kw, :by) && error(
         "sbimpl: kernel(...) do-block form no longer accepts `by=`; grouping is ",
@@ -5124,13 +5217,10 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         error("sbimpl: kernel(...) do-block form takes ordinary `~` statements, not `obs=`")
 
     lam = first(dcols)
-    ptuple = lam.args[1]
-    params = ptuple isa Symbol ? Symbol[ptuple] :
-        (Meta.isexpr(ptuple, :tuple) && all(p -> p isa Symbol, ptuple.args) ?
-            Symbol[ptuple.args...] :
-            error("sbimpl: kernel(...) do-block params must be plain names (no types/defaults)"))
-    body = lam.args[2]
-    body_stmts = Meta.isexpr(body, :block) ? body.args : Any[body]
+    parts = _sb_kernel_lambda_parts(lam)
+    isnothing(parts) &&
+        error("sbimpl: kernel(...) do-block params must be plain names (no types/defaults)")
+    params, body_stmts = parts
 
     # positional args (everything after the do-block); sliced in the plate.
     # Three admissible kinds:
@@ -5153,6 +5243,12 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     #     cell parameter is rewritten to `x[<those rows>]`; a data column is
     #     gathered Julia-side into a ragged column and registered under a derived
     #     name, leaving the flat original in place for any term that still needs it.
+    # Omitted outcomes (the one prior spelling for kernel responses): these
+    # positionals drop out of the plate below, leaving a count-form plate over
+    # the known subject count whose in-cell `~` forward-simulates per cell.
+    # Indexes stay aligned with `dcols[2:end]` until after the `ragged(...)`
+    # substitutions, which address `slice_params` positionally.
+    unbound_idx = Set(_sb_kernel_unbound_cell_idx(dcols[2:end], params, body_stmts))
     dcol_names    = Symbol[]
     lp_cols       = Any[]
     ragged_specs  = Any[]
@@ -5183,15 +5279,17 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
             data[k] = v
         elseif parent(c) isa MissingColumn
             # Unbound kernel positional: no data to bind and no LP bucket to
-            # walk. If this is an OUTCOME, per-cell prior simulation is not
-            # supported yet — StanBlocks plates iterate bound data, so there
-            # is nothing to iterate; a count-form plate emission is future
-            # work (BRM-side, no foreign dependency). Fail here with guidance
-            # instead of the cryptic downstream "Could not find <name>".
-            error("sbimpl: kernel(...) positional arg `$k` has no data column. " *
-                  "If it is an outcome, omitting it for prior draws is not " *
-                  "supported yet: kernel cells iterate bound response data. " *
-                  "If it is an input, the column is missing or misnamed.")
+            # walk. An omitted OUTCOME (observed in-cell) drops out of the
+            # plate below — its cell parameter becomes a fresh per-cell `~`
+            # that forward-simulates; anything else is an input whose column
+            # is missing or misnamed (or an outcome observed only in a nested
+            # position the top-level scan cannot see), which stays loud.
+            i in unbound_idx || error(
+                "sbimpl: kernel(...) positional arg `$k` has no data column. " *
+                "If it is an input, the column is missing or misnamed; if it " *
+                "is an outcome, omitting it for prior draws requires a " *
+                "top-level in-cell `~` observation statement over its cell " *
+                "parameter.")
         else
             push!(lp_cols, c)
         end
@@ -5203,6 +5301,11 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         "sbimpl: kernel(...) do-block has $(length(params)) params but expects ",
         "$ndata — exactly one per positional data/LP arg.")
     slice_params = copy(params)
+    # Omitted outcomes leave the plate (count form); everything else stays.
+    # `dcol_names` never changes again, so its kept slice is final here, while
+    # `slice_params` is sliced after the `ragged(...)` substitutions below.
+    kept = [j for j in eachindex(dcol_names) if j ∉ unbound_idx]
+    kept_names = dcol_names[kept]
 
     # n_subjects + long-format guard (pre-grouped: one row per subject).
     #
@@ -5224,14 +5327,15 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
             "event rows against, which a no-random-effects panel does not supply. ",
             "Declare a per-subject linear predictor with a `(1 | ID | group)` term, ",
             "or pass pre-grouped per-subject columns directly (one entry per subject).")
-        isempty(dcol_names) && error(
+        isempty(kept_names) && error(
             "sbimpl: kernel(...) with no per-subject linear predictor needs at least ",
-            "one pre-grouped per-subject data column to derive the subject count from.")
-        col_lens = unique(length(data[k]) for k in dcol_names)
+            "one pre-grouped per-subject data column to derive the subject count from; ",
+            "omitted outcomes cannot supply it.")
+        col_lens = unique(length(data[k]) for k in kept_names)
         length(col_lens) == 1 || error(
             "sbimpl: kernel(...) pre-grouped per-subject columns disagree on the ",
             "subject count: ",
-            join(("$(k)=$(length(data[k]))" for k in dcol_names), ", "),
+            join(("$(k)=$(length(data[k]))" for k in kept_names), ", "),
             ". Every positional column must carry exactly one entry per subject.")
         nsub = only(col_lens)
         # Count only; no group column exists (labels are the implicit 1:nsub row
@@ -5239,7 +5343,7 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         # column length — see the `:kernel_subject_count` reprocess branch.
         data[nsub_sym] = nsub
         _sb_record_preproc!(data, nsub_sym, PreprocEntry(
-            :kernel_subject_count, (; from_data_length = true), first(dcol_names), false))
+            :kernel_subject_count, (; from_data_length = true), first(kept_names), false))
     else
         # ORDER: cells stay in ROW order, deliberately. `_sb_linear_predictor!`
         # returns `popefs(X) + rows_dot_product(Z, b[group_idx,:])`, i.e. a
@@ -5307,13 +5411,16 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
 
     # Per-subject plate: slice params bind the data columns and already-emitted LPs;
     # the user's inline body (obs `~` statements and all) runs inside; its last
-    # expression is collected.
+    # expression is collected. Omitted outcomes are already gone from both lists,
+    # so the plate is count-form over `outer` for them while bound positionals
+    # keep slicing; the dropped cell parameter becomes a fresh per-cell `~`.
+    kept_params = slice_params[kept]
     plate_body = Expr(:block, body_stmts...)
     plate_call = Expr(:call, :plate,
         Expr(:parameters, Expr(:kw, :outer, Expr(:tuple, nsub_sym))),
-        dcol_names...)
+        kept_names...)
     plate_do = Expr(:do, plate_call,
-        Expr(:->, Expr(:tuple, slice_params...), plate_body))
+        Expr(:->, Expr(:tuple, kept_params...), plate_body))
     push!(stmts, :($target ~ $plate_do))
     :done
 end

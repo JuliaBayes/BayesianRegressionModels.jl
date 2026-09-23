@@ -186,6 +186,72 @@ kernel_df = (;
           BayesianRegressionModels.stan_code(pk_only)
 end
 
+@testset "kernel-nested omitted response: count-form plate forward-simulates" begin
+    # The one prior spelling for kernel responses: the model identical, the
+    # outcome columns omitted. The plate drops the unbound positionals (count
+    # form over the known subject count) and each in-cell `~` forward-simulates
+    # its cell through the in-cell family's `_rng`. There is no `_gen` twin —
+    # per-cell unbound is outside the StanBlocks twin scope — so the descriptor
+    # claims the bare forward-simulated carrier under the cell-local name.
+    brmi = kernel_builder((; dose=kernel_df.dose, subject=kernel_df.subject))
+    sb = @test_logs (:warn, r"unconditioned \(prior\) program") SBBRMI(
+        brmi; mod=@__MODULE__)
+    # Nothing top-level is unbound: both unconditioned observations are
+    # plate-nested, hence excluded from the StanBlocks twin declaration.
+    @test sb.model.observations == ()
+    @test :pk_y ∉ keys(sb.data) && :qt_y ∉ keys(sb.data)
+    @test :dose in keys(sb.data)
+    code = BayesianRegressionModels.stan_code(sb)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    @test occursin("kernel_nsub_pred", code)
+    @test occursin(r"parameters\s*\{\s*\}", code)
+    @test occursin(r"pred_qt_obs\[[^\]]+\] = normal_rng\(pred_location", code)
+    problem = StanBlocks.stan_instantiate(sb.model)
+    @test StanBlocks.LogDensityProblems.dimension(problem) == 0
+    @test isfinite(StanBlocks.LogDensityProblems.logdensity(problem, Float64[]))
+
+    d = brm_descriptor(sb)
+    @test :fit ∉ operation_names(d)
+    @test :instantiate in operation_names(d)
+    # No `:predict` operation: the twinless per-cell draws are `:derived`, not
+    # `:draw` outputs, so StanBlocks derives no predict op. The carriers are
+    # still claimed as posterior-predictive outputs below.
+    @test :predict ∉ operation_names(d)
+    @test brm_output(d, :pk_obs; role=:posterior_predictive).name === :pred_pk_obs
+    @test brm_output(d, :qt_obs; role=:posterior_predictive).name === :pred_qt_obs
+
+    # Omitting an INPUT column is not a prior spelling: it stays a loud error
+    # naming the missing column.
+    @test_throws "has no data column" SBBRMI(
+        kernel_builder((; pk_y=kernel_df.pk_y, qt_y=kernel_df.qt_y,
+                         subject=kernel_df.subject)); mod=@__MODULE__)
+end
+
+@testset "kernel-nested mixed bound/unbound: omitted cell simulates beside a fit" begin
+    # `pk_y` stays bound (a real likelihood, sampled parameters) while `qt_y`
+    # is omitted and its cell forward-simulates in generated quantities. The
+    # bound response resolves through its `_gen` twin; the unbound one through
+    # its bare forward-simulated carrier under the cell-local name.
+    brmi = kernel_builder((; dose=kernel_df.dose, pk_y=kernel_df.pk_y,
+                            subject=kernel_df.subject))
+    sb = @test_logs (:warn, r"bind\(s\) no data column") SBBRMI(
+        brmi; mod=@__MODULE__)
+    @test sb.model.observations == ()
+    code = BayesianRegressionModels.stan_code(sb)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    problem = StanBlocks.stan_instantiate(sb.model)
+    dimension = StanBlocks.LogDensityProblems.dimension(problem)
+    @test dimension > 0
+    @test isfinite(StanBlocks.LogDensityProblems.logdensity(
+        problem, fill(0.1, dimension)))
+
+    d = brm_descriptor(sb)
+    @test :fit in operation_names(d)
+    @test :predict in operation_names(d)
+    @test brm_output(d, :pk_y; role=:posterior_predictive).name === :pk_y_gen
+    @test brm_output(d, :qt_obs; role=:posterior_predictive).name === :pred_qt_obs
+end
+
 # A shared `|ID|` block whose marginal scales carry an explicit `sd(...)` prior
 # samples `tau` through the custom `@lpxf brm_ranef_sd` family. The ONE prior
 # spelling keeps the model identical and omits the response column: the
