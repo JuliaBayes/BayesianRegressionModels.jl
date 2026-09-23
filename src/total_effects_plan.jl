@@ -218,8 +218,16 @@ function _sb_total_plan(brmi, prepared, predictor, overrides, buckets, sd_overri
     pop, ran, direct = Any[], Any[], Any[]
     foreach(t -> _sb_classify_term!(t,pop,ran,direct), _sb_terms(predictor.expression))
     isempty(direct) || return nothing
-    design = _brm_population_design(target,Tuple(pop),prepared.context.data,
-                                    get(prepared.context.target_obs,target,nothing))
+    obs_name = get(prepared.context.target_obs,target,nothing)
+    design = _brm_population_design(target,Tuple(pop),prepared.context.data,obs_name)
+    if isnothing(design) && (isnothing(obs_name) || !haskey(prepared.context.data,obs_name))
+        # Prior spelling: the response column is omitted, so an
+        # intercept-only predictor has no observation row axis. The declared
+        # grouping column spans the same rows; resolve the axis from the
+        # declaration so the prior program keeps the posterior's
+        # representation and names instead of dropping every `:auto` plan.
+        design = _brm_population_design(target,Tuple(pop),prepared.context.data,obs_name; row_source=group)
+    end
     (isnothing(design) || isempty(design.columns) || !isempty(design.fixed_terms)) && return nothing
     columns = Tuple(c for p in plans for c in p.columns)
     all(c -> isnothing(c.preprocess) || c.preprocess.kind === :protect,columns) || return nothing

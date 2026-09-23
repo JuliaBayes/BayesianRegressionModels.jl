@@ -281,3 +281,74 @@ end
         "(1.0 ./ 0.6666666666666666));", bruno_code)
     @test !occursin(r"brm_vector_prior_[0-9a-f]+", bruno_code)
 end
+
+# An intercept-only predictor eligible for exact totals keeps the posterior's
+# representation — and names — on the prior spelling (snag
+# building-bruno-s-630a6f8a). The population design resolves its row axis
+# from the declared grouping column when the response column is omitted, so
+# the prior program draws `total_*`/`population_*`/`deviation_*` in generated
+# quantities instead of falling back to conventional `r_*` carriers while the
+# posterior uses totals.
+@testset "omitted response: intercept-only predictor keeps totals" begin
+    builder = @brm begin
+        mu ~ 1 + (1 | g)
+        y ~ Normal(mu, 1)
+    end
+    fitted_df = (; g=[1, 1, 2, 2, 3, 3], y=[0.0, 1.0, 2.0, 3.0, 1.0, 2.0])
+    prior_df = (; g=fitted_df.g)
+
+    post = SBBRMI(builder(fitted_df); mod=@__MODULE__)
+    post_block = only(total_effect_blocks(post))
+    @test post_block.group === :g
+    @test post_block.columns == (:Intercept,)
+
+    sb = @test_logs (:warn, r"unconditioned \(prior\) program") SBBRMI(
+        builder(prior_df); mod=@__MODULE__)
+    prior_block = only(total_effect_blocks(sb))
+    @test (prior_block.predictor, prior_block.group, prior_block.columns) ==
+          (post_block.predictor, post_block.group, post_block.columns)
+    @test prior_block.population_columns == post_block.population_columns
+    @test prior_block.A == post_block.A
+
+    @test StanBlocks.stan.transpiles(sb.model)
+    prior_code = BayesianRegressionModels.stan_code(sb)
+    @test StanBlocks.stanc_check(prior_code; warn_pedantic=false).ok
+    for name in ("total_mu", "population_mu", "deviation_mu",
+                 "total_scale_mu", "total_ng_mu")
+        @test occursin(name, prior_code)
+    end
+    @test !occursin("r_mu", prior_code)
+    @test !occursin("pop_mu", prior_code)
+    @test occursin(r"parameters\s*\{\s*\}", prior_code)
+
+    prior_problem = StanBlocks.stan_instantiate(sb.model)
+    @test StanBlocks.LogDensityProblems.dimension(prior_problem) == 0
+    @test isfinite(StanBlocks.LogDensityProblems.logdensity(prior_problem, Float64[]))
+
+    prior_d = brm_descriptor(sb)
+    @test :fit ∉ operation_names(prior_d)
+    @test :instantiate in operation_names(prior_d)
+
+    # The mixed shape that amplified the bug: an intercept-only predictor
+    # beside a concrete one. One dropped plan used to empty every `:auto`
+    # plan; now both predictors keep the posterior's representation.
+    joint = @brm begin
+        mu ~ 1 + (1 | g)
+        eta ~ 1 + x + (1 + x || g)
+        y1 ~ Normal(mu, 1)
+        y2 ~ Normal(eta, 1)
+    end
+    joint_df = (;
+        x=[0.0, 1.0, 0.0, 1.0, 2.0, 3.0], g=fitted_df.g,
+        y1=fitted_df.y, y2=[1.0, 0.0, 1.0, 2.0, 0.0, 1.0])
+    joint_post = SBBRMI(joint(joint_df); mod=@__MODULE__)
+    @test sort!([b.predictor for b in total_effect_blocks(joint_post)]) ==
+        [:eta, :mu]
+    joint_prior = @test_logs (:warn, r"unconditioned \(prior\) program") SBBRMI(
+        joint((; x=joint_df.x, g=joint_df.g)); mod=@__MODULE__)
+    @test sort!([b.predictor for b in total_effect_blocks(joint_prior)]) ==
+        [:eta, :mu]
+    joint_code = BayesianRegressionModels.stan_code(joint_prior)
+    @test occursin("total_mu", joint_code) && occursin("total_eta", joint_code)
+    @test !occursin("r_mu", joint_code) && !occursin("r_eta", joint_code)
+end
