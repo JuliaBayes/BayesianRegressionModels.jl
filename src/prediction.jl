@@ -42,7 +42,12 @@
 #   * `ranef_coordinates` resolves that block to unconstrained coordinates BY
 #     NAME and refuses (loudly) on any coordinate it cannot account for. A
 #     positional splice misaligns silently the moment a template row drops a
-#     covariate level; a name match cannot.
+#     covariate level; a name match cannot. One carrier qualifies this: for an
+#     `array[n_groups] vector[n_terms]` Stan parameter, Stan's
+#     `unconstrained_param_names` order is NOT the vector's layout order (the
+#     names run array-index-fastest, the vector reads array-element-major —
+#     snag `centered-ranef-u-f7c711d1`), so there the names locate the block's
+#     contiguous segment and positions within it follow the carrier layout.
 #   * `population_draws` / `transport_draws` are the two modes, both built on
 #     those two primitives. `transport_draws` additionally reads a centered
 #     block's fitted hyperparameters BY NAME (the adaptive-centering frame)
@@ -70,7 +75,9 @@
 #              flattens a submodel binding `b` and internal name `z` to the Stan
 #              parameter `b_z`, so the emitted parameter is `<binding>_<z>`.
 #   `layout` — how Stan indexes that parameter, which fixes the coordinate NAME
-#              (never a position):
+#              (never a position — except `:group_term`, where the names fix
+#              only the block's SEGMENT and positions within it follow the
+#              carrier layout; see `ranef_coordinates`):
 #                `:group`            `<p>.<g>`                    (n_groups,)
 #                `:term_group`       `<p>.<t>.<g>`   matrix[n_terms, n_groups]
 #                `:group_term`       `<p>.<g>.<t>`   array[n_groups] vector[n_terms]
@@ -93,7 +100,10 @@
 #
 # Every layout below was measured against BridgeStan's `param_unc_names`, not
 # inferred from the Stan type. Keep this table in lockstep with the `@slic`
-# submodel definitions at the top of sbimpl.jl.
+# submodel definitions at the top of sbimpl.jl. That measurement covers the
+# NAME spelling; for `:group_term` the name ORDER is not the layout order
+# (snag `centered-ranef-u-f7c711d1`), so positions there come from the carrier
+# layout, measured against `param_constrain`, not from the name positions.
 #
 # THAT LOCKSTEP IS NOT FREE, AND IT HAS BROKEN ONCE. Commit 2ffac3c collapsed
 # `ranef_correlated_draws` from a plate (`b_cols_z`, `matrix[K, G]`) to a flat
@@ -128,9 +138,13 @@ const _RANEF_FAMILIES = Dict{Symbol,NamedTuple}(
     # exactly the population mean, and `transport_draws` copies retained levels
     # by label while fresh levels are drawn `b = C * z` with `C` rebuilt per
     # draw from the fitted `tau` / `L` — never bare `N(0, 1)`, which would be
-    # the wrong scale. Layouts measured against `param_unc_names` with
+    # the wrong scale. Name spellings measured against `param_unc_names` with
     # n_terms=3, n_groups=2 so `.g.t` and `.t.g` are distinguishable, against
-    # the `ranef_correlated_by` control in the same capture. `tau` stays
+    # the `ranef_correlated_by` control in the same capture. That measurement
+    # checked the name SET, not positions: the `:group_term` positions come
+    # from the carrier layout instead (see `ranef_coordinates`), because
+    # Stan's unc-name order is not the vector's layout order for arrays of
+    # vectors. `tau` stays
     # directly readable under centering (the b's are centered, the scale is
     # still sampled), so `brm_ranef_sd_coordinates` resolves it regardless of
     # the `noncentered` flag.
@@ -521,9 +535,12 @@ _ranef_data_vec(data, key, target, fam) = begin
     data[key]
 end
 
-# The Stan coordinate name of entry (t, g) of a block. Names, never positions —
-# the flat ORDER of the unconstrained vector is BridgeStan's business and is
-# never assumed here.
+# The Stan coordinate name of entry (t, g) of a block. For vector and matrix
+# carriers the name's position in `unc_names` IS the coordinate's position,
+# and that is all `ranef_coordinates` needs. For `:group_term`
+# (`array[n_groups] vector[n_terms]`) the names only locate the block's
+# segment: Stan's unc-name order is not the vector's layout order there, so
+# positions within the segment follow the carrier layout instead.
 function _ranef_coord_name(b::RanefBlock, layout::Symbol, t::Int, g::Int)
     layout === :group           && return "$(b.z).$(g)"
     layout === :term_group      && return "$(b.z).$(t).$(g)"
@@ -539,11 +556,22 @@ Resolve `block` to positions in the unconstrained parameter vector, returned as
 an `n_terms × n_groups` matrix of 1-based indices into `unc_names`.
 
 `unc_names` is the compiled model's unconstrained parameter names — BridgeStan's
-`param_unc_names(model)`, in its order. Nothing here depends on that order: each
-coordinate is looked up by its Stan NAME. Any coordinate the block expects and
-`unc_names` does not carry is an error listing the missing names, because that
-is exactly the shape a silent misalignment takes (a template that dropped a
-covariate level, or a model rebuilt with a different parameterization).
+`param_unc_names(model)`, in its order. Each coordinate is located by its Stan
+NAME. Any coordinate the block expects and `unc_names` does not carry is an
+error listing the missing names, because that is exactly the shape a silent
+misalignment takes (a template that dropped a covariate level, or a model
+rebuilt with a different parameterization).
+
+One carrier breaks pure name lookup: for an `array[n_groups]
+vector[n_terms]` Stan parameter (`:group_term`), Stan's
+`unconstrained_param_names` lists names array-index-fastest (`.1.1, .2.1, …`)
+while the unconstrained vector itself reads array-element-major (`[s][t]` at
+`(s-1)*n_terms + t`) — a stanc3 asymmetry, measured against
+`param_constrain`, not against the name list. There the names locate only the
+block's contiguous SEGMENT (its start is their minimum resolved position, and
+a non-contiguous name set is a loud error); position `(t, g)` within it is
+`start + (g-1)*n_terms + (t-1)`. This holds under either name order, so a Stan
+that one day lists these names in layout order needs no change here.
 
     ranef_coordinates(blocks, unc_names) -> Vector{Matrix{Int}}
 
@@ -573,6 +601,26 @@ function ranef_coordinates(block::RanefBlock, unc_names)
         join(first(missing_names, 8), ", "),
         length(missing_names) > 8 ? " … ($(length(missing_names)) total)" : "",
         ". The draw matrix and the model do not describe the same emission.")
+    if layout === :group_term
+        # Array-of-vector carrier (snag `centered-ranef-u-f7c711d1`): Stan's
+        # unc-name order (`.1.1, .2.1, …`, array index fastest) is NOT the
+        # vector's layout order (array-element-major), so the name positions
+        # just resolved locate only the block's segment. One Stan parameter
+        # occupies one contiguous segment; a name set that is not exactly one
+        # is a loud error, never a guessed base.
+        K, G = block.n_terms, block.n_groups
+        start = minimum(out)
+        contiguous = length(unique(vec(out))) == K * G &&
+            maximum(out) == start + K * G - 1
+        contiguous || error(
+            "BRM prediction: block `$(block.binding)` (group `$(block.group)`, ",
+            "$(K)×$(G)) resolves to a non-contiguous unconstrained segment; ",
+            "its `array[$G] vector[$K]` parameter should occupy one. The draw ",
+            "matrix and the model do not describe the same emission.")
+        for g in 1:G, t in 1:K
+            out[t, g] = start + (g - 1) * K + (t - 1)
+        end
+    end
     out
 end
 
