@@ -79,11 +79,11 @@ StanBlocks.@deffun begin
     brm_total_rng(matrix[j,k], tau::vector[k], A::matrix[k,p],
                   location::vector[p], precision::vector[p])::matrix[j,k] = begin
         @stan_assert min(precision) > 0.
-        beta = normal_rng(location, rep_vector(1., p) ./ sqrt(precision))
+        beta = to_vector(normal_rng(location, rep_vector(1., p) ./ sqrt(precision)))
         mu = A * beta
         total = rep_matrix(0., j, k)
         for c in 1:k
-            total[:,c] = normal_rng(rep_vector(mu[c], j), tau[c])
+            total[:,c] = to_vector(normal_rng(rep_vector(mu[c], j), tau[c]))
         end
         total
     end

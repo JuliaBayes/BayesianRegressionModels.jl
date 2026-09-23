@@ -214,11 +214,11 @@ axis:
 
 ### A prior predictive check from the same declaration
 
-Building the same model with `SBBRMI(model; held_out=:all)` drops every
-likelihood contribution, so sampling it draws from the prior, and `cases_gen`
-becomes the prior predictive distribution. By day 56 the prior's 95 % band runs
-from a handful of daily cases to more than a million; the counts are what pins
-`R(t)` down.
+Building the same model with the response column omitted from the data drops
+every likelihood contribution, so sampling it (fixed_param) draws from the
+prior, and the forward-simulated `cases` becomes the prior predictive
+distribution. By day 56 the prior's 95 % band runs from a handful of daily
+cases to more than a million; the counts are what pins `R(t)` down.
 
 [![Reproduction number: prior bands against posterior bands](assets/renewal/prior_R.png)](assets/renewal/prior_R.png)
 
