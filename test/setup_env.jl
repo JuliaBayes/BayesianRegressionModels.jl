@@ -50,7 +50,7 @@ const PINS = [
     ("MutatingFunctions", "https://github.com/nsiccha/MutatingFunctions.jl.git", "4fc41b1c7b774133ceaacc4ff3c34c67b15b87b2"),  # main
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "121de3194f02044e00bac0d11019a93458ddb63a"),  # main
     ("TreeArrays",        "https://github.com/nsiccha/TreeArrays.jl.git",        "c317cc003fc41c2d933c27dc80799141eebd434e"),  # main
-    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "74ed796de61702eb3cec7443f8edc073890ce69d"),  # devibe (declared unbound observations emit a _gen twin covered by :predict — StanBlocks snag unbound-observat-d32ac924, BRM snag brm-adopt-unboun-d62eb8ef; contains 0421b28 distribution-HOF token calls + constrained-matrix plate cells and plate-outer cv routing)
+    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "74ed796de61702eb3cec7443f8edc073890ce69d"),  # devibe (declared unbound observations emit a _gen twin covered by :predict — StanBlocks snag unbound-observat-d32ac924, BRM snag brm-adopt-unboun-d62eb8ef; contains 0421b28 distribution-HOF token calls + constrained-matrix plate cells and plate-outer cv routing, and 5e6fc48 scalar-trials beta_binomial_rng companion — BRM snag beta-binomial-fi-dda1fdf2)
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
