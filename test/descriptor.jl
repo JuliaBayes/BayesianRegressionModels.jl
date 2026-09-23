@@ -1093,7 +1093,7 @@ end
     @test brm_output(prior_d, :qt_scale).logical === :qt_scale
 end
 
-@testset "data-folded assignments stay unclaimed, twin names keep their claim" begin
+@testset "data-folded assignments stay unclaimed, twin names are reserved" begin
     # `ld` folds to data and never reaches the outputs: no logical attaches.
     fold_df = (; d=[0.5, 1.0, 1.5, 2.0], y=[0.2, 0.8, 0.5, 0.9])
     fold_builder = @brm begin
@@ -1105,17 +1105,17 @@ end
     @test isempty(brm_outputs(fold_d; logical=:ld))
     @test_throws ErrorException brm_output(fold_d, :ld)
 
-    # An assignment colliding with a twin name must not clobber the existing
-    # claim: previously-describing models keep describing.
+    # An assignment colliding with a twin name fails fast at trace time:
+    # `<stem>_gen` / `<stem>_likelihood` are reserved for the compiler's
+    # predictive twins (StanBlocks snag unbound-observat-d32ac924).
     clash_df = (; y=[0.2, 0.8, 0.5])
     clash_builder = @brm begin
         mu ~ 1
         y_gen = mu * 2
         y ~ Normal(mu, 1.0)
     end
-    clash_d = brm_descriptor(clash_builder, clash_df; mod=@__MODULE__)
-    @test brm_output(clash_d, :y; role=:posterior_predictive).name === :y_gen
-    @test isempty(brm_outputs(clash_d; logical=:y_gen))
+    @test_throws "reserved for the compiler's predictive twins" brm_descriptor(
+        clash_builder, clash_df; mod=@__MODULE__)
 end
 
 @testset "two cells naming one value — ambiguity, not failure" begin
@@ -1231,18 +1231,18 @@ end
     @test_throws ErrorException brm_descriptor(
         hier_builder, df; total_groups=(), mod=@__MODULE__, titles=Dict(:simulate => "nope"))
 
-    # 4. A model with no predictive draw is not offered :predict at all,
-    #    instead of offering one that would return nothing usable. The
-    #    unconditioned program (response column omitted) forward-simulates its
-    #    response in GQ but emits no `*_gen` twin, so StanBlocks derives no
-    #    `:predict` for it.
+    # 4. The unconditioned program (response column omitted) forward-simulates
+    #    its response in GQ behind the declared `y_gen` twin, so `:predict` IS
+    #    offered on a prior program — while `:fit` stays absent, since there is
+    #    nothing to condition on.
     unconditioned = @brm begin
         sigma ~ Exponential(1)
         mu ~ 1 + x
         y ~ Normal(mu, sigma)
     end
     dp = brm_descriptor(unconditioned, (; x=df.x); mod=@__MODULE__)
-    @test :predict ∉ Symbol[op.name for op in dp.operations]
+    @test :predict in Symbol[op.name for op in dp.operations]
+    @test :fit ∉ Symbol[op.name for op in dp.operations]
     @test :transpile in Symbol[op.name for op in dp.operations]
     @test :instantiate in Symbol[op.name for op in dp.operations]
 

@@ -36,7 +36,7 @@ function manual_hold_out(sb, responses)
     end
     SBBRMI(
         parent(sb),
-        StanBlocks.SlicModel(sb.model.model, marked, sb.model.mod),
+        StanBlocks.SlicModel(sb.model.model, marked, sb.model.mod, sb.model.observations),
         marked,
         sb.preproc,
     )
@@ -100,11 +100,15 @@ end
 
 @testset "mixed bound/unbound: omitted response simulates beside a fit" begin
     # `y` stays bound (a real likelihood, sampled parameters) while `z` is
-    # omitted and forward-simulates in generated quantities under its own name.
+    # omitted and forward-simulates in generated quantities. BRM declares the
+    # unbound stem, so StanBlocks emits the `z_gen` alias twin and covers it
+    # under `:predict` — the same posterior names as the fitted program.
     brmi = joint_builder((; x=joint_df.x, y=joint_df.y))
     sb = @test_logs (:warn, r"bind\(s\) no data column") SBBRMI(
         brmi; mod=@__MODULE__)
+    @test sb.model.observations == (:z,)
     code = BayesianRegressionModels.stan_code(sb)
+    @test occursin("z_gen", code)
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
     problem = StanBlocks.stan_instantiate(sb.model)
     dimension = StanBlocks.LogDensityProblems.dimension(problem)
@@ -114,10 +118,14 @@ end
 
     d = brm_descriptor(sb)
     @test :fit in operation_names(d)
-    # The fitted response keeps its `y_gen` twin; the omitted one simulates
-    # under its own name — both resolve as posterior-predictive draws.
+    @test :predict in operation_names(d)
+    # Both responses resolve through their `_gen` twin; `:predict` covers
+    # both, while `:pointwise_loglik` stays bound-only (pointwise needs
+    # observed values, so the unbound stem gets no `_likelihood`).
     @test brm_output(d, :y; role=:posterior_predictive).name === :y_gen
-    @test brm_output(d, :z; role=:posterior_predictive).name === :z
+    @test brm_output(d, :z; role=:posterior_predictive).name === :z_gen
+    @test Set(brm_operation(d, :predict).outputs) == Set((:y_gen, :z_gen))
+    @test brm_operation(d, :pointwise_loglik).outputs == (:y_likelihood,)
 end
 
 # The motivating joint PK/QT shape puts both likelihoods inside a kernel cell.
@@ -234,11 +242,14 @@ end
 
     # The descriptor keeps the observation statement addressable: no `:fit`
     # (nothing sampled), `:instantiate` for fixed_param draws, and the
-    # forward-simulated response under its own name.
+    # forward-simulated response through its `y_gen` twin — with `:predict`
+    # offered on the prior program too.
     prior_d = brm_descriptor(sb)
     @test :fit ∉ operation_names(prior_d)
     @test :instantiate in operation_names(prior_d)
-    @test brm_output(prior_d, :y; role=:posterior_predictive).name === :y
+    @test :predict in operation_names(prior_d)
+    @test brm_output(prior_d, :y; role=:posterior_predictive).name === :y_gen
+    @test brm_operation(prior_d, :predict).outputs == (:y_gen,)
 
     # Dropping the observation STATEMENT (instead of the column) is not a
     # prior spelling: it errors loudly at construction.
