@@ -3500,6 +3500,20 @@ same function that built `sb`.
 stan_data(sb::SBBRMI) = Base.invokelatest(StanBlocks.stan_data, sb.model)
 
 """
+    stan_data(model::StanBlocks.SlicModel) -> Dict
+
+Return the prepared Stan data for a SLIC model, using the same
+world-age-safe boundary as `stan_data(::SBBRMI)`. This is the supported data
+entry for a model rebuilt from an emitted `SBBRMI` after construction — for
+example a `cv_groups` model whose group index was marked with
+`StanBlocks.stan.maybecv` just before tracing. The underlying generated family
+hooks are already registered by lowering; this boundary makes them visible to
+a trace running in the same compiled frame as the build.
+"""
+stan_data(model::StanBlocks.SlicModel) =
+    Base.invokelatest(StanBlocks.stan_data, model)
+
+"""
     stan_model(sb::SBBRMI; kwargs...) -> StanModel
 
 Trace `sb.model` end to end. Forwards to `StanBlocks.stan_model` in the
