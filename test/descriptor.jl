@@ -1085,9 +1085,10 @@ end
     replayed = brm_execute(d, :replay, (; V=3.0, y=[0.1, 0.4, 0.6]))
     @test brm_output(replayed, :qt_scale).logical === :qt_scale
 
-    # Prior regime: the transformed parameter still evaluates from prior
-    # draws, so the logical survives with no observation.
-    prior_sb = SBBRMI(assign_builder(assign_df); mod=@__MODULE__, held_out=:all)
+    # Prior regime (same model, response column omitted): the transformed
+    # parameter still evaluates from prior draws, so the logical survives with
+    # no observation bound.
+    prior_sb = SBBRMI(assign_builder((; V=assign_df.V)); mod=@__MODULE__)
     prior_d = brm_descriptor(prior_sb)
     @test brm_output(prior_d, :qt_scale).logical === :qt_scale
 end
@@ -1231,14 +1232,29 @@ end
         hier_builder, df; total_groups=(), mod=@__MODULE__, titles=Dict(:simulate => "nope"))
 
     # 4. A model with no predictive draw is not offered :predict at all,
-    #    instead of offering one that would return nothing usable.
-    prior_only = @brm begin
+    #    instead of offering one that would return nothing usable. The
+    #    unconditioned program (response column omitted) forward-simulates its
+    #    response in GQ but emits no `*_gen` twin, so StanBlocks derives no
+    #    `:predict` for it.
+    unconditioned = @brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x
+        y ~ Normal(mu, sigma)
+    end
+    dp = brm_descriptor(unconditioned, (; x=df.x); mod=@__MODULE__)
+    @test :predict ∉ Symbol[op.name for op in dp.operations]
+    @test :transpile in Symbol[op.name for op in dp.operations]
+    @test :instantiate in Symbol[op.name for op in dp.operations]
+
+    # 5. A formula with no observation statement at all is a construction
+    #    error, not a descriptor: for prior draws keep the statement and omit
+    #    the response column.
+    dropped = @brm begin
         sigma ~ Exponential(1)
         mu ~ 1 + x
     end
-    dp = brm_descriptor(prior_only, df; mod=@__MODULE__)
-    @test :predict ∉ Symbol[op.name for op in dp.operations]
-    @test :transpile in Symbol[op.name for op in dp.operations]
+    @test_throws "needs an observation" brm_descriptor(
+        dropped, df; mod=@__MODULE__)
 end
 
 @testset "extension points" begin

@@ -435,6 +435,52 @@ end
     @test st.z === :r_mu_subject__by__stratum_b_T_z_g
 end
 
+# The stratified carrier is a collected `matrix[K, G]`, so its Stan names are
+# `<p>.<t>.<g>` — and resolution must spell them WITHOUT consulting the table
+# under test (snag stratified-by-la-3d4f05a7: bd2da02 renamed the carrier but
+# left the `:group_term` tag, so nonsquare blocks errored on `.3.1`-style
+# names no 2-row matrix has, while square ones silently transposed). K=2 ×
+# G=4 throughout: a square fixture cannot discriminate the two layouts.
+strat_by_builder = @brm begin
+    sigma ~ Exponential(1)
+    mu    ~ 1 + x + (1 + x | gr(subject, by = stratum))
+    y     ~ Normal(mu, sigma)
+end
+strat_bucket_builder = @brm begin
+    sigma ~ Exponential(1)
+    mu    ~ 1 + x + (1 + x | p | gr(subject, by = stratum))
+    y     ~ Normal(mu, sigma)
+end
+
+@testset "stratified by-blocks — matrix[K, G] coordinates without compiling" begin
+    strat_df = merge(train_df, (; stratum = repeat([1, 2]; inner = length(train_df.x) ÷ 2)))
+    by_builders = (
+        (strat_by_builder, :ranef_correlated_by, :r_mu_subject__by__stratum),
+        (strat_bucket_builder, :ranef_correlated_by_draws, :b_p_subject__by__stratum),
+    )
+    for (builder, family, binding) in by_builders
+        sb = SBBRMI(builder(strat_df); mod = @__MODULE__)
+        b = only(ranef_blocks(sb))
+        @test b.family === family
+        @test b.binding === binding
+        @test (b.n_terms, b.n_groups) == (2, 4)
+        # Pin the plate-collection TYPE: the next emission change breaks here,
+        # at declaration level, not in a consumer's name lookup.
+        code = StanBlocks.stan_code(sb.model)
+        @test occursin(Regex("matrix\\[[^\\]]*\\] $(b.z);"), code)
+        # TRUE matrix names, spelled from Stan semantics — never from the
+        # table: `<p>.<t>.<g>`, flat column-major.
+        K, G = b.n_terms, b.n_groups
+        unc = String["sigma"]
+        for g in 1:G, t in 1:K
+            push!(unc, "$(b.z).$(t).$(g)")
+        end
+        c = ranef_coordinates(b, unc)
+        @test size(c) == (K, G)
+        @test c == [1 + t + (g - 1) * K for t in 1:K, g in 1:G]
+    end
+end
+
 # ---- 2. selector and shape guards (no runtime needed) -----------------------
 
 @testset "loud edges" begin
@@ -485,6 +531,28 @@ function constrained_by_name(sm, theta_unc)
     names = BS.param_names(sm; include_tp = true, include_gq = false)
     vals = BS.param_constrain(sm, theta_unc; include_tp = true, include_gq = false)
     Dict(n => v for (n, v) in zip(names, vals))
+end
+
+@testset "stratified by-block — coordinates round-trip through the compiled model" begin
+    strat_df = merge(train_df, (; stratum = repeat([1, 2]; inner = length(train_df.x) ÷ 2)))
+    strat_sb = SBBRMI(strat_by_builder(strat_df); mod = @__MODULE__)
+    strat_p = StanBlocks.stan_instantiate(strat_sb.model)
+    strat_sm = strat_p.model
+    unc_strat = BS.param_unc_names(strat_sm)
+    b = only(ranef_blocks(strat_sb))
+    @test (b.n_terms, b.n_groups) == (2, 4)
+    c = ranef_coordinates(b, unc_strat)
+    @test size(c) == (2, 4)
+    # Stanford-style round-trip: write distinctive values through the
+    # coordinates, read the carrier back via the model's own constrain.
+    theta = zeros(BS.param_unc_num(strat_sm))
+    for g in 1:4, t in 1:2
+        theta[c[t, g]] = 100 * g + t
+    end
+    cons = constrained_by_name(strat_sm, theta)
+    for g in 1:4, t in 1:2
+        @test cons["$(b.z).$(t).$(g)"] == 100 * g + t
+    end
 end
 
 @testset "population_draws — the model reports zero random effects" begin

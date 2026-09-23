@@ -463,6 +463,11 @@ function main(; sections=("delay", "single", "prior", "forecast", "patches"))
     end
     if "prior" in sections
         model = "one population, prior only"
+        # NOTE (2026-09-23, snag sbbrmi-brmi-mod-a97bf761): `held_out=:all` no
+        # longer exists; the prior spelling is the same model with `cases`
+        # omitted (fixed_param, dim 0 — this NUTS `fit` needs a fixed_param
+        # sampler when the section is re-run). The checked-in summaries below
+        # are the record of the held-out prior fit.
         r = fit(model, build(renewal_single_model(); held_out=:all).problem; SAMPLER.prior..., tolerate_gq_failures=true)
         save_json("prior_R.json", band_rows(r, "log_R", s.R; transform=exp, keys=j -> (; day=j)))
         save_json("prior_cases.json", band_rows(r, "cases_gen", s.Y_t; keys=j -> (; day=j, observed=s.cases[j])))

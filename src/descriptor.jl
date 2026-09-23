@@ -643,7 +643,15 @@ function _brm_logical_outputs(stan, by_name, targets, cell_values,
     end
 
     for (resolved, decl) in by_name
-        decl.role === :observation && continue
+        # Bound observations resolve via their twins' `source` link above, so
+        # they are skipped here. UNBOUND observations (response omitted) have
+        # no twins — but their forward simulation is owned by the declaration
+        # all the same, so it is claimed as the `decl.target` carrier. That is
+        # what makes `brm_output(d, :y; role=:posterior_predictive)` resolve
+        # the simulated `y` exactly as it resolves the fitted `y_gen`.
+        if decl.role === :observation && !isnothing(decl.data_source)
+            continue
+        end
         owned = owned_by(decl)
         isempty(owned) && continue
         foreach(emitted -> claim!(emitted, decl.target), carriers(resolved, owned))
@@ -717,10 +725,11 @@ end
 # Indices of the SINGLE output that physically carries a formula quantity's
 # constrained draws for a declaration, among `outputs` matching `pred`.
 #
-# In an ordinary fit that carrier is a sampled `:parameter`; in a likelihood-free
-# `regime="prior"` program (no observation `~`) StanBlocks re-draws the same
-# quantity from its prior into generated quantities under the SAME constrained
-# name (the `_rng` companions), so its kind is `:generated_quantity`. Both
+# In an ordinary fit that carrier is a sampled `:parameter`; in an unconditioned
+# program (the same model with the response column omitted from the data)
+# StanBlocks re-draws the same quantity from its prior into generated quantities
+# under the SAME constrained name (the `_rng` companions), so its kind is
+# `:generated_quantity`. Both
 # physically hold the quantity's constrained draws and are addressable against
 # BridgeStan's constrained names.
 #
@@ -813,7 +822,6 @@ hand, so an operation that appears can be executed.
 | `:transpile` | `:stan` | always |
 | `:instantiate` | `:stan` | always |
 | `:fit` | `:stan` | the traced model has ≥1 parameter and ≥1 likelihood term |
-| `:prior_predictive` | `:stan` | every emitted observation is held out; returns the prior-only `StanProblem` for sampling |
 | `:predict` | `:stan` | the Stan program emits ≥1 posterior-predictive draw **and** ≥1 BRM observation resolves to it |
 | `:pointwise_loglik` | `:stan` | the Stan program emits ≥1 pointwise log-likelihood |
 | `:replay` | `:brm` | the descriptor was built from a `@brm` builder (rebuild on a new dataframe, e.g. new subjects) |
@@ -825,13 +833,13 @@ Stan data keys. `:reprocess` forwards both `freeze_constants=` and the checked
 new-population `resample_groups=` CV/GQ re-emission described by
 [`reprocess`](@ref).
 
-The builder form's `held_out` keyword names one response, a collection of
-responses, or `:all`. A partial selection removes only those likelihoods; the
-remaining observations still offer `:fit`. `held_out=:all` removes every
-likelihood, preserves predictive generated quantities, and derives
-`:prior_predictive` instead of mislabelling the result as a fit. Sampling uses
-the returned `StanProblem` exactly as a fitted problem; pass its unconstrained
-draws to `:predict` for prior-predictive observations.
+The builder form's `held_out` keyword names one response or a collection of
+responses — a strict subset; holding out every observation is refused. A
+partial selection removes only those likelihoods; the remaining observations
+still offer `:fit`. For prior draws there is no separate operation: keep the
+model identical, omit the response column from the data, and sample the
+`:instantiate` problem (fixed_param) — the program lowers to generated
+quantities automatically.
 
 # Extension points
 
@@ -963,15 +971,19 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
             # the executable data block altogether: activity analysis retains
             # only its `<source>_n` size for the generated draw. The plan's
             # held-out set is the authoritative provenance in that case.
-            (d.target in input_names ||
-             (!isnothing(d.data_source) &&
-              (d.data_source in input_names || d.data_source in plan.held_out))) || error(
-                "brm_descriptor: observation `$(d.target)` resolves to no data input of " *
-                "the emitted model — the plan and the traced model disagree; " *
-                "re-derive the plan.")
-            (d.target in draw_sources ||
-             (!isnothing(d.data_source) && d.data_source in draw_sources)) ||
-                push!(unpredictable, d.target)
+            # An observation with no data source is UNCONDITIONED (the response
+            # omitted from the data): it binds no input BY DESIGN, and its
+            # forward simulation IS the predictive draw, so it is never
+            # unpredictable. Both checks below are skipped for it.
+            if !isnothing(d.data_source)
+                (d.target in input_names ||
+                 (d.data_source in input_names || d.data_source in plan.held_out)) || error(
+                    "brm_descriptor: observation `$(d.target)` resolves to no data input of " *
+                    "the emitted model — the plan and the traced model disagree; " *
+                    "re-derive the plan.")
+                (d.target in draw_sources || d.data_source in draw_sources) ||
+                    push!(unpredictable, d.target)
+            end
         else
             d.target in input_names && error(
                 "brm_descriptor: `$(d.target)` is both a declared binding and a data input " *
@@ -1010,8 +1022,16 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
     outputs = BRMOutput[]
     for o in stan.outputs
         decl = _brm_owner(o, by_name, targets)
-        role = if !isnothing(decl) && decl.role === :observation
+        # An observation's generated-quantities carrier is its predictive
+        # draw — whether a `y_gen` twin (fitted) or the forward-simulated `y`
+        # (unconditioned program). An observation-shaped declaration that
+        # StanBlocks kept SAMPLED (an unbound response read by a likelihood,
+        # or a hierarchical prior) is a parameter, not a draw.
+        role = if !isnothing(decl) && decl.role === :observation &&
+                  o.kind === :generated_quantity
             o.generative === :pointwise_loglik ? :pointwise_loglik : :posterior_predictive
+        elseif !isnothing(decl) && decl.role === :observation
+            :parameter
         elseif !isnothing(decl)
             _brm_declaration_role(decl, plan.bindings)
         elseif o.name in covariance_factors
@@ -1098,15 +1118,6 @@ function _brm_reprocess_supported(plan, outputs)
     end
 end
 
-function _brm_all_observations_held_out(plan)
-    observations = [d for d in plan.declarations if d.role === :observation]
-    isempty(observations) && return false
-    all(observations) do declaration
-        source = declaration.data_source
-        !isnothing(source) && source in plan.held_out
-    end
-end
-
 function _brm_derive_operations(plan, stan, outputs, columns)
     ops = BRMOperation[]
     predictive = Symbol[o.name for o in outputs if o.role === :posterior_predictive]
@@ -1119,17 +1130,6 @@ function _brm_derive_operations(plan, stan, outputs, columns)
                                 Tuple(so.outputs), :stan,
                                 (d; kwargs...) -> StanBlocks.stan_execute(
                                     d.stan, so.name; kwargs...)))
-    end
-
-    if _brm_all_observations_held_out(plan)
-        instantiate = only(op for op in stan.operations
-                           if op.name === :instantiate)
-        parameters = Tuple(o.name for o in outputs if o.kind === :parameter)
-        push!(ops, BRMOperation(
-            :prior_predictive, "Sample the prior-predictive model",
-            Tuple(instantiate.inputs), parameters, :stan,
-            (d; kwargs...) -> StanBlocks.stan_execute(
-                d.stan, :instantiate; kwargs...)))
     end
 
     if !isnothing(plan.builder)
@@ -1323,6 +1323,20 @@ _brm_term_label(::typeof(cdar), t, target) =
     Symbol(:cdar_, target, :_, name(_sb_named_inner(:cdar, only(getargs(t)))))
 
 _brm_term_owner_labels(f, t, target) = (_brm_term_label(f, t, target),)
+# `mo`/`mo1` carriers disambiguate like `s`/`gp`/`hsgp`: the first occurrence
+# keeps the historical `mo_<c>` binding and repeats take `mo_<target>_<c>`
+# (+ serial), while the PUBLIC term label stays `mo_<c>`. Owner lookup tries
+# the predictor-scoped carrier first and falls back to the historical one:
+# each carrying predictor owns exactly one of the two (it owns the base
+# carrier iff its occurrence was emitted first), so first-match resolves the
+# owning predictor's own simplex and never a sibling's (snag
+# mo-term-in-sever-fe459870).
+_brm_term_owner_labels(::typeof(mo), t, target) =
+    (Symbol(:mo_, target, :_, name(_sb_named_inner(:mo, only(getargs(t))))),
+     _brm_term_label(mo, t))
+_brm_term_owner_labels(::typeof(mo1), t, target) =
+    (Symbol(:mo1_, target, :_, name(_sb_named_inner(:mo1, only(getargs(t))))),
+     _brm_term_label(mo1, t))
 function _brm_term_owner_labels(::typeof(hsgp), t, target)
     base = _brm_term_label(hsgp, t)
     axes = Tuple(name(_sb_named_inner(:hsgp, a)) for a in getargs(t))
@@ -1490,13 +1504,13 @@ On a term whose hyper is predicted (`log(length_scale(...)) ~ ...`), the
 redirecting to the hyper roles above; the per-group hyper values
 (`rho_vec`/`sigma_vec`) are deterministic transforms with no role.
 
-Generated-aware: for a response-free `regime="prior"` program (no observation
-`~`) StanBlocks re-draws every term carrier from its prior into generated
-quantities under the same constrained name, so pass `constrained_names` built
-with `include_gq=true` (`BridgeStan.param_names(prob.model; include_tp=true,
-include_gq=true)`) and this resolves the GQ carrier exactly as it resolves the
-sampled `:parameter` in an ordinary fit; a sampled carrier is preferred when
-both exist.
+Generated-aware: for an unconditioned program (the same model with the
+response column omitted from the data) StanBlocks re-draws every term carrier
+from its prior into generated quantities under the same constrained name, so
+pass `constrained_names` built with `include_gq=true`
+(`BridgeStan.param_names(prob.model; include_tp=true, include_gq=true)`) and
+this resolves the GQ carrier exactly as it resolves the sampled `:parameter` in
+an ordinary fit; a sampled carrier is preferred when both exist.
 """
 function brm_term_coordinates(d::BRMDescriptor, logical::Symbol,
                               constrained_names;
@@ -1773,15 +1787,15 @@ duplicate population carriers, unavailable/duplicate coefficient labels, and
 descriptor/artifact coordinate drift all error rather than selecting by
 descriptor order.
 
-Generated-aware: for a response-free `regime="prior"` program (no observation
-`~`), the numeric coefficient and categorical contrast carriers move from
-`parameters` into generated quantities under the same constrained names, so
-pass `constrained_names` built with `include_gq=true`
+Generated-aware: for an unconditioned program (the same model with the
+response column omitted from the data), the numeric coefficient and categorical
+contrast carriers move from `parameters` into generated quantities under the
+same constrained names, so pass `constrained_names` built with `include_gq=true`
 (`BridgeStan.param_names(prob.model; include_tp=true, include_gq=true)`) and
 this resolves the GQ carrier exactly as it resolves the sampled `:parameter` in
-an ordinary fit — including the coefficient `labels`, so a prior-only descriptor
-keeps its addressable population coordinates. A sampled carrier is preferred
-when both exist.
+an ordinary fit — including the coefficient `labels`, so an unconditioned
+descriptor keeps its addressable population coordinates. A sampled carrier is
+preferred when both exist.
 """
 function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
                                            constrained_names;
@@ -1900,13 +1914,14 @@ whose scale is not a per-margin `tau` vector — a scalar `(1 | g)` intercept
 stratum) — is refused with a message naming the family, rather than returning a
 coordinate of a different quantity.
 
-Generated-aware: for a response-free `regime="prior"` program (no observation
-`~`) StanBlocks re-draws the shared-`|ID|` scale from `brm_ranef_sd_rng` into
-generated quantities under the same `<binding>_tau` name (the resolver already
-follows that name + `:random_effect` role, so no kind branch is needed). Pass
-`constrained_names` with `include_gq=true` (and, as for the R2D2 derived-scale
-family, `include_tp=true`) and it resolves the GQ `tau` carrier exactly as it
-resolves the sampled one in a fit.
+Generated-aware: for an unconditioned program (the same model with the
+response column omitted from the data) StanBlocks re-draws the shared-`|ID|`
+scale from `brm_ranef_sd_rng` into generated quantities under the same
+`<binding>_tau` name (the resolver already follows that name +
+`:random_effect` role, so no kind branch is needed). Pass `constrained_names`
+with `include_gq=true` (and, as for the R2D2 derived-scale family,
+`include_tp=true`) and it resolves the GQ `tau` carrier exactly as it resolves
+the sampled one in a fit.
 """
 function brm_ranef_sd_coordinates(d::BRMDescriptor, logical::Symbol,
                                   constrained_names;
@@ -2065,17 +2080,16 @@ Run a derived operation.
 ```julia
 brm_execute(d, :transpile)                       # the Stan source
 prob = brm_execute(d, :fit)                      # a BridgeStan-backed StanProblem
-prior_prob = brm_execute(prior_d, :prior_predictive) # prior-only StanProblem
 brm_execute(d, :predict; problem=prob, draws=theta_unc, seed=1234)
 brm_execute(d, :replay, new_df)                  # a NEW BRMDescriptor
 ```
 
 `:stan`-origin operations forward to StanBlocks' `stan_execute` (data keywords
-re-bind inputs; `:predict` requires `draws` and `seed`).
-`:prior_predictive` delegates to StanBlocks' `:instantiate`: like `:fit`, it
-returns the `StanProblem` a sampler consumes, without calling a model that has
-no likelihood a fit. `:brm`-origin operations take the new dataframe
-positionally and return a new descriptor.
+re-bind inputs; `:predict` requires `draws` and `seed`). `:brm`-origin
+operations take the new dataframe positionally and return a new descriptor.
+For prior draws, build the descriptor with the response column omitted and
+sample the `:instantiate` problem (fixed_param); there is no separate prior
+operation.
 Unknown names fail closed via [`brm_operation`](@ref).
 """
 brm_execute(d::BRMDescriptor, name::Symbol, args...; kwargs...) =

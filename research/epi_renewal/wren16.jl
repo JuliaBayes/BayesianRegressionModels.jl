@@ -1,4 +1,8 @@
 # Wren.jl PR #16 (multi-patch renewal model, `epi-example @ 6e3fd026`) in native @brm —
+# NOTE (2026-09-23, snag sbbrmi-brmi-mod-a97bf761): the `"prior"` section below
+# uses `held_out=:all`, which no longer exists — the prior spelling is the same
+# model with the response column omitted (fixed_param, dim 0). Kept as the
+# historical record; re-running that section stops at the loud refusal.
 # SELF-CONTAINED: everything needed to simulate, define, fit and summarise the models is in
 # this one file (no includes). It is the consolidated form of research/epi_renewal/
 # {fixtures,single_patch,multi_patch,recover,prior_predictive,delay_model,forecast,vector_params}.jl,
