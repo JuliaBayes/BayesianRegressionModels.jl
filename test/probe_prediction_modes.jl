@@ -165,12 +165,22 @@ end
 # block's effect coordinates spelled per its measured layout, its fitted
 # hyperparameter frame (`tau` / `L`, or `log_scale` for a scalar intercept),
 # plus inert shared names. Same construction the ranef-effect suite uses; no
-# BridgeStan involved. Resolution is by name, so the order is irrelevant.
-function centered_fake_unc(blocks)
+# BridgeStan involved. Resolution is order-independent for a contiguous name
+# set (positions follow the carrier layout), so both spellings below must
+# resolve identically. `stan_order=true` lists `:group_term`
+# (`array[n_groups] vector[n_terms]`) names in TRUE `param_unc_names` order —
+# array index fastest — rather than carrier-layout order (snag
+# `centered-ranef-u-f7c711d1`).
+function centered_fake_unc(blocks; stan_order::Bool=false)
     names = String["sigma", "pop_mu_beta_pop.1"]
     for b in blocks
         layout = BayesianRegressionModels._RANEF_FAMILIES[b.family].layout
-        for g in 1:b.n_groups, t in 1:b.n_terms
+        # NOTE: `for t ..., g ...` is Stan's TRUE name order for
+        # array-of-vector carriers, `for g ..., t ...` the carrier layout.
+        order = (stan_order && layout === :group_term) ?
+            ((t, g) for t in 1:b.n_terms for g in 1:b.n_groups) :
+            ((t, g) for g in 1:b.n_groups for t in 1:b.n_terms)
+        for (t, g) in order
             push!(names, BayesianRegressionModels._ranef_coord_name(b, layout, t, g))
         end
         K = b.n_terms
@@ -214,6 +224,53 @@ end
         keep = setdiff(1:length(unc), coords)
         @test pop[:, keep] == draws[:, keep]
     end
+end
+
+@testset "ranef_coordinates — true Stan name order resolves to layout positions" begin
+    # Snag `centered-ranef-u-f7c711d1`: Stan lists `:group_term` names
+    # array-index-fastest while the vector reads array-element-major, so pure
+    # name lookup returned wrong positions for every centered correlated
+    # block with n_groups > 1 and n_terms > 1. Resolution must return LAYOUT
+    # positions under EITHER name order — pinned here without compiling, with
+    # n_terms = 3 and n_groups = 2 so the two orders differ everywhere but
+    # [1, 1]. The scalar-intercept family is the vector-carrier control.
+    cdf = mixed_df([11, 12])
+    for (builder, family, n_terms) in (
+            (centered_int_builder,     :ranef_intercept_centered,                1),
+            (centered_corr_builder,    :ranef_correlated_centered,               3),
+            (centered_bucket_builder,  :ranef_correlated_draws_centered,         3),
+            (centered_generic_builder, :ranef_correlated_draws_centered_generic, 3),
+        )
+        csb = SBBRMI(builder(cdf); mod = @__MODULE__, centered_groups = [:subject],
+                     total_groups = ())
+        b = only(ranef_blocks(csb))
+        @test b.family === family
+        @test (b.n_terms, b.n_groups) == (n_terms, 2)
+        c_layout = ranef_coordinates(b, centered_fake_unc([b]))
+        c_stan = ranef_coordinates(b, centered_fake_unc([b]; stan_order = true))
+        @test c_layout == c_stan
+        K, G = b.n_terms, b.n_groups
+        start = minimum(c_stan)
+        for g in 1:G, t in 1:K
+            @test c_stan[t, g] == start + (g - 1) * K + (t - 1)
+        end
+    end
+    # The control discriminates: under true Stan order the name positions and
+    # the layout positions genuinely differ for K = 3, N = 2 — if they ever
+    # coincided this test would pass without proving anything.
+    csb = SBBRMI(centered_bucket_builder(cdf); mod = @__MODULE__,
+                 centered_groups = [:subject], total_groups = ())
+    b = only(ranef_blocks(csb))
+    stan_names = centered_fake_unc([b]; stan_order = true)
+    pos = Dict(n => i for (i, n) in enumerate(stan_names))
+    by_name = [pos[BayesianRegressionModels._ranef_coord_name(
+        b, :group_term, t, g)] for t in 1:3, g in 1:2]
+    @test by_name != ranef_coordinates(b, stan_names)
+    # ...and the helper really spells true Stan order (array index fastest),
+    # so a future "simplification" back to layout order fails loudly here
+    # instead of silently un-discriminating the test above.
+    @test stan_names[3:8] ==
+        ["b_p_subject_b.$g.$t" for t in 1:3 for g in 1:2]
 end
 
 @testset "generative_plan — centered_groups carried and inferred" begin
@@ -603,6 +660,18 @@ cint_p = StanBlocks.stan_instantiate(cint_sb.model)
 cint_sm = cint_p.model
 unc_cint = BS.param_unc_names(cint_sm)
 
+# The §7/§8 shared fresh-level target: training subjects [11, 12, 13, 14] go
+# to [12, 13, 90, 91] — 12, 13 retained by label, 90, 91 fresh. Hoisted to
+# file scope so §7 (stream-exactness through the replay helper) and §8
+# (Stan-readback exactness through `param_constrain`) share one compile.
+plan0 = generative_plan(centered_mixed_builder, train_df; mod = @__MODULE__,
+                        centered_groups = [:subject], total_groups = ())
+new_subjects = [12, 13, 90, 91]
+new_df = mixed_df(new_subjects; seed = 5)
+new_plan = generative_plan(plan0, new_df)
+new_p = StanBlocks.stan_instantiate(new_plan.model)
+unc_new = BS.param_unc_names(new_p.model)
+
 @testset "population_draws — centered: the model reports zero random effects" begin
     rng = MersenneTwister(71)
     draws = randn(rng, 3, BS.param_unc_num(cmixed_sm))
@@ -662,14 +731,8 @@ end
 end
 
 @testset "transport_draws — centered fresh levels go through the fitted covariance" begin
-    plan0 = generative_plan(centered_mixed_builder, train_df; mod = @__MODULE__,
-                            centered_groups = [:subject], total_groups = ())
-    new_subjects = [12, 13, 90, 91]
-    new_df = mixed_df(new_subjects; seed = 5)
-    new_plan = generative_plan(plan0, new_df)
-    new_p = StanBlocks.stan_instantiate(new_plan.model)
-    unc_new = BS.param_unc_names(new_p.model)
-
+    # Target (`new_plan` / `new_p` / `unc_new`) is the file-scope §7/§8
+    # shared compile above; this testset only draws and transports.
     draws = randn(MersenneTwister(75), 6, length(unc_mixed))
     moved = transport_draws(cmixed_sb, new_plan, draws, unc_mixed, unc_new;
                             rng = MersenneTwister(77))
@@ -802,6 +865,113 @@ end
     @test_throws ErrorException transport_draws(
         simpler, extra, randn(MersenneTwister(23), 2, length(unc_simpler)),
         unc_simpler, BS.param_unc_names(extra_p.model))
+end
+
+# ---- 8. centered round trip — Stan is the oracle ---------------------------
+#
+# Snag `centered-ranef-u-f7c711d1`: Stan lists `:group_term`
+# (`array[n_groups] vector[n_terms]`) unconstrained names array-index-fastest
+# while the vector reads array-element-major, so pure name lookup returned
+# wrong positions for every centered correlated block with n_groups > 1 and
+# n_terms > 1. Nothing above can see that: §3–§5 resolve non-centered
+# (flat/vector) carriers whose name order IS the layout order, and §6–§7 read
+# centered draws back through the SAME coordinates they wrote — self-consistent
+# under any permutation. These testsets close the loop through Stan's own
+# `param_constrain`, which never touches `ranef_coordinates`.
+
+@testset "ranef_coordinates — centered round trip through param_constrain" begin
+    # K = 2 × N = 4, non-square, so name order and layout order differ
+    # everywhere but [1, 1]. Distinct values per (block, group, term).
+    blocks = [b for b in ranef_blocks(cmixed_sb) if !b.noncentered]
+    @test length(blocks) == 2
+    theta = zeros(BS.param_unc_num(cmixed_sm))
+    for (bi, b) in enumerate(blocks)
+        c = ranef_coordinates(b, unc_mixed)
+        for g in 1:b.n_groups, t in 1:b.n_terms
+            theta[c[t, g]] = 1000 * bi + 100 * g + t
+        end
+    end
+    cons = constrained_by_name(cmixed_sm, theta)
+    for (bi, b) in enumerate(blocks)
+        pname = string(b.z)
+        @test (b.n_terms, b.n_groups) == (2, 4)
+        for g in 1:b.n_groups, t in 1:b.n_terms
+            @test cons["$pname.$g.$t"] == 1000 * bi + 100 * g + t
+        end
+    end
+end
+
+@testset "ranef_coordinates — generic centered round trip" begin
+    # The REPORTED carrier (`<binding>_b_cols_bc`, family
+    # `ranef_correlated_draws_centered_generic`): K = 3 × N = 2, non-square
+    # the other way, on its own small compile.
+    gdf = mixed_df([11, 12])
+    gsb = SBBRMI(centered_generic_builder(gdf); mod = @__MODULE__,
+                 centered_groups = [:subject], total_groups = ())
+    gb = only(ranef_blocks(gsb))
+    @test gb.family === :ranef_correlated_draws_centered_generic
+    @test (gb.n_terms, gb.n_groups) == (3, 2)
+    gp = StanBlocks.stan_instantiate(gsb.model)
+    gsm = gp.model
+    gunc = BS.param_unc_names(gsm)
+    gc = ranef_coordinates(gb, gunc)
+    theta = zeros(BS.param_unc_num(gsm))
+    for g in 1:gb.n_groups, t in 1:gb.n_terms
+        theta[gc[t, g]] = 100 * g + t
+    end
+    gcons = constrained_by_name(gsm, theta)
+    pname = string(gb.z)
+    for g in 1:gb.n_groups, t in 1:gb.n_terms
+        @test gcons["$pname.$g.$t"] == 100 * g + t
+    end
+end
+
+@testset "transport_draws — centered copies land on the right (group, term)" begin
+    # Pre-fix this scattered silently: retained-level copies ran through
+    # name-order positions while Stan reads layout order, so a retained level
+    # received the wrong group's wrong term. Random source draws read back
+    # through the SOURCE model keep both sides independent of the helper.
+    draws = randn(MersenneTwister(83), 4, length(unc_mixed))
+    from_by_binding = Dict(b.binding => b for b in ranef_blocks(cmixed_sb))
+    # Retained cells, read back through Stan on BOTH sides: `src` is the
+    # source model's own constrained carrier, `tgt` the target's. `fresh`
+    # holds the target levels transport re-drew rather than copied.
+    function check_retained(tgt_plan, tgt_sm, moved, fresh)
+        to_blocks = ranef_blocks(tgt_plan)
+        for i in 1:size(draws, 1)
+            src = constrained_by_name(cmixed_sm, draws[i, :])
+            tgt = constrained_by_name(tgt_sm, moved[i, :])
+            for bt in to_blocks
+                bt.group === :subject || continue
+                bf = from_by_binding[bt.binding]
+                from_pos = Dict(l => g for (g, l) in enumerate(bf.levels))
+                for (g, l) in enumerate(bt.levels)
+                    l in fresh && continue
+                    gf = from_pos[l]
+                    for t in 1:bt.n_terms
+                        @test tgt["$(bt.z).$g.$t"] == src["$(bf.z).$gf.$t"]
+                    end
+                end
+            end
+        end
+    end
+    moved = transport_draws(cmixed_sb, new_plan, draws, unc_mixed, unc_new;
+                            rng = MersenneTwister(87))
+    check_retained(new_plan, new_p.model, moved, [90, 91])
+    @test all(i -> isfinite(BS.log_density(new_p.model, moved[i, :])),
+              1:size(moved, 1))
+    # ...and across a group-COUNT change (N = 4 → N = 2), where the two sides
+    # permute differently: the production replay shape, retained-only.
+    sub_plan = generative_plan(plan0, mixed_df([12, 13]; seed = 2))
+    sub_p = StanBlocks.stan_instantiate(sub_plan.model)
+    unc_sub = BS.param_unc_names(sub_p.model)
+    @test [b.levels for b in ranef_blocks(sub_plan) if b.group === :subject] ==
+        [[12, 13], [12, 13]]
+    submoved = transport_draws(cmixed_sb, sub_plan, draws, unc_mixed, unc_sub;
+                               rng = MersenneTwister(87))
+    check_retained(sub_plan, sub_p.model, submoved, [])
+    @test all(i -> isfinite(BS.log_density(sub_p.model, submoved[i, :])),
+              1:size(submoved, 1))
 end
 
 end # PRED_RUNTIME
