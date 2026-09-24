@@ -6446,14 +6446,23 @@ function _sb_ragged_group_rows(key::Symbol, group::Symbol,
     rows
 end
 
+_sb_ragged_response_values(_key, _group, ::MissingColumn) = nothing
+function _sb_ragged_response_values(key, group, response::DataColumn)
+    raw = _brm_data_vec(key, parent(response))
+    raw isa AbstractVector{<:AbstractVector} && error(
+        "sbimpl: `ragged($key, $group)` observation LHS received an " *
+        "ALREADY-ragged response; write `$key ~ <family>(...)` directly.")
+    raw
+end
+
 function _sb_ragged_lhs_layout(key::Symbol, lhs::ExprColumn, rhs)
     args = getargs(lhs)
     length(args) == 2 || error(
         "sbimpl: `ragged(...)` observation LHS takes exactly two arguments — " *
         "the flat response and its grouping column — got $(length(args)).")
     response, group = args
-    response isa NamedColumn && parent(response) isa DataColumn || error(
-        "sbimpl: `ragged(...)` observation LHS needs a flat data-backed response " *
+    response isa NamedColumn && parent(response) isa Union{DataColumn,MissingColumn} || error(
+        "sbimpl: `ragged(...)` observation LHS needs a flat response column " *
         "as its first argument; got $(typeof(response)).")
     name(response) === key || error(
         "sbimpl: `ragged(...)` observation LHS is keyed as `$key` but names " *
@@ -6462,12 +6471,9 @@ function _sb_ragged_lhs_layout(key::Symbol, lhs::ExprColumn, rhs)
         "sbimpl: `ragged($key, ...)` observation LHS needs a raw data grouping " *
         "column as its second argument; got $(typeof(group)).")
 
-    raw = _brm_data_vec(key, parent(parent(response)))
-    raw isa AbstractVector{<:AbstractVector} && error(
-        "sbimpl: `ragged($key, $(name(group)))` observation LHS received an " *
-        "ALREADY-ragged response; write `$key ~ <family>(...)` directly.")
+    raw = _sb_ragged_response_values(key, name(group), parent(response))
     group_values = collect(parent(parent(group)))
-    length(group_values) == length(raw) || error(
+    isnothing(raw) || length(group_values) == length(raw) || error(
         "sbimpl: `ragged($key, $(name(group)))` has $(length(raw)) response rows " *
         "but $(length(group_values)) grouping rows. The grouping column must name " *
         "the subject of every response row.")
@@ -6496,7 +6502,8 @@ function _sb_ragged_lhs_layout(key::Symbol, lhs::ExprColumn, rhs)
         "$(subject_values).")
 
     rows = _sb_ragged_group_rows(key, name(group), group_values, subject_values)
-    (; values=[raw[r] for r in rows], rows, nrows=length(raw),
+    (; values=isnothing(raw) ? nothing : [raw[r] for r in rows],
+       rows, nrows=length(group_values),
        group_col=name(group), subject_col=name(first(producers)[2]))
 end
 
@@ -6508,6 +6515,9 @@ function _sb_ragged_bound(data, key::Symbol, label::Symbol, bound, layout)
     bound isa NamedColumn && parent(bound) isa DataColumn || return bound
     raw = _brm_data_vec(name(bound), parent(parent(bound)))
     grouped = if raw isa AbstractVector{<:AbstractVector}
+        length.(raw) == length.(layout.rows) || error(
+            "sbimpl: `$key` $label bound `$(name(bound))` has " *
+            "group lengths $(length.(raw)); expected $(length.(layout.rows))")
         raw
     else
         length(raw) == layout.nrows || error(
@@ -6558,15 +6568,16 @@ function _sb_sampling!(stmts, data, key,
                        lhs::ExprColumn{typeof(ragged)}, rhs;
                        id_lookup=_sb_empty_id_lookup(), kwargs...)
     layout = _sb_ragged_lhs_layout(key, lhs, rhs)
-    data[key] = layout.values
-    # The gathered ragged response has no raw column of its own on a new
-    # DataFrame — record how to re-gather it from the flat response + grouping
-    # so `reprocess` regenerates it rather than erroring on it or silently
-    # keeping the stale/flat column.
-    _sb_record_preproc!(data, key, PreprocEntry(
-        :ragged_gather,
-        (; group_col=layout.group_col, subject_col=layout.subject_col),
-        key, true))
+    if !isnothing(layout.values)
+        data[key] = layout.values
+        # Only a bound response needs gather provenance. An omitted response
+        # stays absent from both data and replay inputs; its retained kernel
+        # arguments and bounds carry the ragged layout.
+        _sb_record_preproc!(data, key, PreprocEntry(
+            :ragged_gather,
+            (; group_col=layout.group_col, subject_col=layout.subject_col),
+            key, true))
+    end
     grouped_rhs = _sb_ragged_likelihood_rhs(data, key, rhs, layout)
     _sb_likelihood!(stmts, key, grouped_rhs, data)
 end
@@ -12292,14 +12303,17 @@ function _sb_validate_bound_segments(wrapper, target, label, y, b)
 end
 
 function _sb_validate_bounds(wrapper, target, lower, upper, data; check_order=true)
-    raw_y = data[target]
+    # An unbound observation has no response values to validate. Its bounds
+    # still need ordinary type/order checks; ragged LHS layout validation
+    # checks their row and group lengths before reaching this shared path.
+    raw_y = get(data, target, nothing)
     y = _sb_composed_values(raw_y)
     for (label, bound) in ((:lower, lower), (:upper, upper))
         isnothing(bound) && continue
         raw_b = _sb_bound_data(bound, data)
         _sb_validate_bound_segments(wrapper, target, label, raw_y, raw_b)
         b = _sb_composed_values(raw_b)
-        b isa AbstractVector && length(b) != length(y) && error(
+        !isnothing(y) && b isa AbstractVector && length(b) != length(y) && error(
             "sbimpl: `$wrapper` $label bound has $(length(b)) rows but response ",
             "`$target` has $(length(y))")
     end
@@ -12307,10 +12321,7 @@ function _sb_validate_bounds(wrapper, target, lower, upper, data; check_order=tr
         lo = _sb_composed_values(_sb_bound_data(lower, data))
         hi = _sb_composed_values(_sb_bound_data(upper, data))
         ok = if lo isa AbstractVector || hi isa AbstractVector
-            all(eachindex(y)) do i
-                (lo isa AbstractVector ? lo[i] : lo) <=
-                    (hi isa AbstractVector ? hi[i] : hi)
-            end
+            all(lo .<= hi)
         else
             lo <= hi
         end
@@ -12320,13 +12331,13 @@ function _sb_validate_bounds(wrapper, target, lower, upper, data; check_order=tr
 end
 
 function _sb_validate_composed_support(wrapper, target, lower, upper, kind, data)
-    y = _sb_composed_values(data[target])
+    y = _sb_composed_values(get(data, target, nothing))
     lo = isnothing(lower) ? nothing :
         _sb_composed_values(_sb_bound_data(lower, data))
     hi = isnothing(upper) ? nothing :
         _sb_composed_values(_sb_bound_data(upper, data))
     if kind === :discrete
-        (eltype(y) <: Integer && !(eltype(y) <: Bool)) || error(
+        (isnothing(y) || (eltype(y) <: Integer && !(eltype(y) <: Bool))) || error(
             "sbimpl: `$wrapper` discrete base family requires an integer response, ",
             "got $(eltype(y)) for `$target`")
         for (label, bound) in ((:lower, lower), (:upper, upper))
@@ -12336,6 +12347,7 @@ function _sb_validate_composed_support(wrapper, target, lower, upper, kind, data
                 error("sbimpl: `$wrapper` discrete $label bounds must be integers")
         end
     end
+    isnothing(y) && return nothing
     all(eachindex(y)) do i
         lov = lo isa AbstractVector ? lo[i] : lo
         hiv = hi isa AbstractVector ? hi[i] : hi
