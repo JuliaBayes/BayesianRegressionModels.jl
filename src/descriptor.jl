@@ -1306,6 +1306,90 @@ _brm_emitted_coordinates(output::BRMOutput, constrained_names) = begin
         if string(name) == stem || startswith(string(name), prefix)]
 end
 
+# Element-order coordinates for one carrier: the same stem/prefix match as
+# `_brm_emitted_coordinates`, but returned in the carrier's ELEMENT order
+# (column-major over the parsed `.i[.j...]` suffix) instead of the caller's
+# axis order. The label- and margin-indexed resolvers
+# (`brm_population_effect_coordinates`, `brm_term_coordinates`,
+# `brm_ranef_sd_coordinates`, and the categorical path) index the returned
+# vector by element position, so they must use this: with plain axis order a
+# permuted `constrained_names` silently maps a label to the wrong element
+# (snag population-coeff-80eea661). `brm_output_coordinates` keeps axis order
+# by documented contract and stays on `_brm_emitted_coordinates`.
+#
+# Verification is fail-closed. Carrier sizes are symbolic data keys (e.g.
+# `(:pop_mu_n_covariates,)`), so completeness cannot come from `output.size`;
+# instead the parsed keys must form exactly the full rectangle their
+# per-dimension maxima imply (`prod(maxima) == count` proves set equality
+# with that rectangle), which rejects gaps, extras, substitutions,
+# duplicates, mixed scalar/container matches, mixed-arity suffixes, and
+# non-integer suffixes rather than guessing. An unmatched carrier returns
+# empty, exactly as `_brm_emitted_coordinates` does, so callers keep their
+# own absence handling (notably the exact-total fallback).
+function _brm_element_coordinates(output::BRMOutput, constrained_names)
+    stem = String(output.name)
+    prefix = stem * "."
+    axis = Int[]
+    keys = Vector{Int}[]
+    for (i, name) in enumerate(constrained_names)
+        s = string(name)
+        if s == stem
+            push!(axis, i)
+            push!(keys, Int[])
+            continue
+        end
+        startswith(s, prefix) || continue
+        suffix = Int[]
+        for part in split(SubString(s, sizeof(prefix) + 1), ".")
+            n = tryparse(Int, part)
+            if isnothing(n) || n < 1
+                error("brm_descriptor: emitted output `$(output.name)` matches " *
+                      "constrained name `$s`, whose container suffix is not a " *
+                      "positive-integer coordinate. Re-reflect the model that " *
+                      "produced the posterior draws.")
+            end
+            push!(suffix, n)
+        end
+        push!(axis, i)
+        push!(keys, suffix)
+    end
+    isempty(axis) && return Int[]
+    n_scalar = count(isempty, keys)
+    if n_scalar > 0
+        (n_scalar == 1 && length(axis) == 1) || error(
+            "brm_descriptor: emitted output `$(output.name)` matches " *
+            "$(length(axis)) constrained names including its bare scalar name; " *
+            "expected exactly the bare name. Re-reflect the model that " *
+            "produced the posterior draws.")
+        return axis
+    end
+    arity = length(first(keys))
+    all(k -> length(k) == arity, keys) || error(
+        "brm_descriptor: emitted output `$(output.name)` matches container " *
+        "names of mixed coordinate arity. Re-reflect the model that " *
+        "produced the posterior draws.")
+    # Column-major element order: the first index varies fastest, which is
+    # lexicographic order on the reversed index tuple.
+    order = sortperm(keys, by=reverse)
+    sorted_keys = keys[order]
+    for j in 2:length(sorted_keys)
+        sorted_keys[j] == sorted_keys[j - 1] || continue
+        dup = join(string.(sorted_keys[j]), ".")
+        error("brm_descriptor: emitted output `$(output.name)` matches " *
+              "constrained element `$(stem).$(dup)` more than once. " *
+              "Re-reflect the model that produced the posterior draws.")
+    end
+    dims = ntuple(a -> maximum(k -> k[a], sorted_keys), arity)
+    if prod(dims) != length(sorted_keys)
+        matched = [string(constrained_names[i]) for i in axis[order]]
+        error("brm_descriptor: emitted output `$(output.name)` matches " *
+              "$(length(sorted_keys)) constrained elements $(Tuple(matched)), " *
+              "which are not the complete element set of one carrier. " *
+              "Re-reflect the model that produced the posterior draws.")
+    end
+    axis[order]
+end
+
 # Public term labels are derived forwards from the formula term with the same
 # rules as `_sb_predictor_term!` (`sbimpl.jl`), while their configurable
 # parameter vocabulary is the same closed set the term-prior emitter owns. The
@@ -1511,6 +1595,11 @@ compiler-owned carrier name. Missing or duplicate predictors/terms/owners,
 unsupported parameter roles, and descriptor/artifact coordinate drift all
 error rather than selecting by descriptor order.
 
+`coordinates` are in carrier element order regardless of the order of
+`constrained_names`: each element resolves by its emitted `.i` suffix, so a
+reversed or permuted axis returns the same elements a native-ordered axis
+does.
+
 On a term whose hyper is predicted (`log(length_scale(...)) ~ ...`), the
 `:length_scale` / `:sd` role itself names no sampled carrier and errors,
 redirecting to the hyper roles above; the per-group hyper values
@@ -1589,7 +1678,7 @@ function brm_term_coordinates(d::BRMDescriptor, logical::Symbol,
         "produced the posterior draws.")
     output = d.outputs[only(idxs)]
 
-    coordinates = _brm_emitted_coordinates(output, constrained_names)
+    coordinates = _brm_element_coordinates(output, constrained_names)
     expected_count = _brm_term_coordinate_count(
         getf(entry.value), entry.value, Val(parameter), d.plan, output)
     if isnothing(expected_count)
@@ -1730,7 +1819,7 @@ function _brm_categorical_effect_coordinates(d::BRMDescriptor,
         "$(length(idxs)) parameter carriers; expected exactly one.")
     output = d.outputs[only(idxs)]
 
-    coordinates = _brm_emitted_coordinates(output, constrained_names)
+    coordinates = _brm_element_coordinates(output, constrained_names)
     expected_count = length(categorical.nonreference_levels)
     cellmeans = categorical.coding === :cellmeans
     length(coordinates) == expected_count || error(
@@ -1803,6 +1892,12 @@ duplicate population carriers, unavailable/duplicate coefficient labels, and
 descriptor/artifact coordinate drift all error rather than selecting by
 descriptor order.
 
+Axis-order free: `constrained_names` may list the carrier's elements in any
+order — each labelled element resolves by its emitted `.i` suffix, so a
+reversed or permuted axis returns the same elements a native-ordered axis
+does (a single-element carrier is trivially order-free). [`brm_output_coordinates`](@ref)
+is the deliberate exception: a whole-carrier slice preserves axis order.
+
 Generated-aware: for an unconditioned program (the same model with the
 response column omitted from the data), the numeric coefficient and categorical
 contrast carriers move from `parameters` into generated quantities under the
@@ -1873,7 +1968,7 @@ function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
         if !isnothing(labels)
             label_indices = findall(==(coefficient), labels)
             if length(label_indices) == 1
-                all_coordinates = _brm_emitted_coordinates(output, constrained_names)
+                all_coordinates = _brm_element_coordinates(output, constrained_names)
                 length(all_coordinates) == length(labels) || error(
                     "brm_descriptor: population carrier `$(output.name)` has " *
                     "$(length(labels)) coefficient labels but resolves to " *
@@ -1964,7 +2059,7 @@ function _brm_total_recovered_coordinates(d::BRMDescriptor, logical::Symbol,
         "$(length(rindices)) times on recovered carrier `$(block.population)` " *
         "(labels are $(Tuple(rlabels))); the descriptor and the total block " *
         "disagree — re-reflect the model.")
-    rcoordinates = _brm_emitted_coordinates(routput, constrained_names)
+    rcoordinates = _brm_element_coordinates(routput, constrained_names)
     length(rcoordinates) == length(rlabels) || error(
         "brm_descriptor: recovered carrier `$(block.population)` has " *
         "$(length(rlabels)) coefficient labels but resolves to " *
@@ -2029,6 +2124,10 @@ whose scale is not a per-margin `tau` vector — a scalar `(1 | g)` intercept
 (scale `exp(log_scale)`) or a stratified `gr(g, by=b)` block (one `tau` per
 stratum) — is refused with a message naming the family, rather than returning a
 coordinate of a different quantity.
+
+Axis-order free: `constrained_names` may list the `tau` elements in any order —
+the margin resolves by its emitted `.i` suffix, so a reversed or permuted axis
+returns the same coordinate a native-ordered axis does.
 
 Generated-aware: for an unconditioned program (the same model with the
 response column omitted from the data) StanBlocks re-draws the shared-`|ID|`
@@ -2098,7 +2197,7 @@ function brm_ranef_sd_coordinates(d::BRMDescriptor, logical::Symbol,
         "posterior draws.")
     output = only(outputs)
 
-    coordinates = _brm_emitted_coordinates(output, constrained_names)
+    coordinates = _brm_element_coordinates(output, constrained_names)
     length(coordinates) == block.n_terms || error(
         "brm_descriptor: scale carrier `$tau_name` for block `|$id|` owns " *
         "$(block.n_terms) marginal SDs but resolves to $(length(coordinates)) " *
@@ -2135,7 +2234,11 @@ brm_output_coordinates(d, :pk_conc, param_names; role=:posterior_predictive)
 
 The returned integers index `constrained_names` in their existing order. For a
 ragged carrier they compose with that output's `segments`: group `g` is
-`coordinates[segments[g-1]+1 : segments[g]]`.
+`coordinates[segments[g-1]+1 : segments[g]]`. This axis-order preservation is
+deliberate, and is the one ordering contract that differs from the
+label-indexed resolvers ([`brm_population_effect_coordinates`](@ref),
+[`brm_term_coordinates`](@ref), [`brm_ranef_sd_coordinates`](@ref)), which
+return carrier element order under any axis permutation.
 
 A missing carrier is an error, which catches descriptor/artifact drift instead
 of returning an empty posterior slice.
