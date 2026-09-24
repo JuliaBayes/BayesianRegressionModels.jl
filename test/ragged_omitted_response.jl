@@ -3,6 +3,7 @@ using Test
 using BayesianRegressionModels
 using StanBlocks
 using Distributions: Exponential, Normal
+using BridgeStan, LogDensityProblems
 
 omitted_ragged_builder = @brm begin
     sigma_add ~ Exponential(1)
@@ -75,4 +76,45 @@ end
         :censored, :y, "bad", nothing, data)
     @test_throws "bounds must be integers" BRM._sb_validate_composed_support(
         :censored, :y, 0.1, nothing, :discrete, data)
+end
+
+@testset "omitted ragged censored response draws and replay" begin
+    sb = SBBRMI(omitted_ragged_builder(omitted_ragged_data); mod=@__MODULE__)
+    replay_data = merge(omitted_ragged_data, (;
+        obs_subject=["s2", "s1", "s2", "s1", "s2"],
+        obs_idx=collect(1.0:5.0), pk_lloq=[0.21, 0.22, 0.23, 0.24, 0.25]))
+    replayed = reprocess(sb, replay_data)
+    for (label, model, segments, bounds) in (
+        ("original", sb, [4, 7], [0.11, 0.13, 0.14, 0.16, 0.10, 0.12, 0.15]),
+        ("changed layout", replayed, [3, 5], [0.21, 0.23, 0.25, 0.22, 0.24]),
+    )
+        @testset "$label" begin
+            code = BayesianRegressionModels.stan_code(model)
+            @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+            descriptor = brm_descriptor(model)
+            output = brm_output(descriptor, :pk_conc; role=:posterior_predictive)
+            @test output.logical === :pk_conc
+            @test output.source === :pk_conc
+            @test output.segments == segments
+            @test isempty(brm_outputs(descriptor; role=:pointwise_loglik))
+            @test :predict in [op.name for op in descriptor.operations]
+            @test :fit ∉ [op.name for op in descriptor.operations]
+            problem = brm_execute(descriptor, :instantiate)
+            @test LogDensityProblems.dimension(problem) == 0
+            names = BridgeStan.param_names(problem.model; include_tp=true, include_gq=true)
+            coords = brm_output_coordinates(output, names)
+            @test length(coords) == last(segments)
+            draws = map(1:4) do seed
+                constrained = BridgeStan.param_constrain(problem.model, Float64[];
+                    include_tp=true, include_gq=true,
+                    rng=BridgeStan.StanRNG(problem.model, seed))
+                constrained[coords]
+            end
+            @test all(all(isfinite, draw) && all(draw .>= bounds) for draw in draws)
+            @test any(draw != first(draws) for draw in draws[2:end])
+            predicted = brm_execute(descriptor, :predict;
+                problem, draws=Float64[], seed=1)
+            @test getproperty(predicted, output.name) == first(draws)
+        end
+    end
 end
