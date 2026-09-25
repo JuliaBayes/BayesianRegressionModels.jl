@@ -13,8 +13,8 @@ using BayesianRegressionModels
 using CategoricalArrays: categorical
 using Distributions: Bernoulli, Beta, Binomial, Categorical, Cauchy, Dirichlet,
                      Exponential, Gamma, InverseGaussian, LocationScale,
-                     LogNormal, Multinomial, MvNormal, Normal, Poisson, TDist,
-                     Uniform, Weibull, truncated
+                     LogNormal, MixtureModel, Multinomial, MvNormal, Normal,
+                     Poisson, TDist, Uniform, Weibull, truncated
 using LogExpFunctions: logistic, logit
 using Statistics: mean
 
@@ -3644,4 +3644,267 @@ end
     sresult, srhs = only(BRM._rk_kernel_ops(scalar_brmi))
     scalar_spec = BRM._rk_kernel_spec(scalar_brmi, sresult, srhs)
     @test BRM._rk_kernel_bind_dims(scalar_spec) == Dict(:kernel_nsub_pred => 2)
+end
+
+@testset "mixture plan shapes" begin
+    # Gaussian driving case (docs shape, bare-sigma RK spelling): param
+    # locations, one shared log-link scale predictor, literal weights.
+    dfmix = (; y=[-2.0, -1.8, 1.9, 2.2])
+    brmi = @brm dfmix begin
+        mu1 ~ Normal(-2, 0.1)
+        mu2 ~ Normal(2, 0.1)
+        log(sigma) ~ 1
+        y ~ MixtureModel([Normal(mu1, sigma), Normal(mu2, sigma)], [0.4, 0.6])
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    @test plan.n_obs == 4
+    likelihood = only(plan.responses)
+    @test likelihood.family === :mixture
+    @test likelihood.link === :identity
+    @test likelihood.response === :y
+    # Anchor: no location predictor, so the scale predictor.
+    @test likelihood.predictor === :sigma
+    @test isnothing(likelihood.scale)
+    @test isnothing(likelihood.scale_predictor)
+    @test isnothing(likelihood.trials)
+    @test isnothing(likelihood.weights)
+    @test likelihood.evidence.kind === :none
+    @test length(likelihood.mixture_components) == 2
+    c1, c2 = likelihood.mixture_components
+    @test (c1.family, c1.link) === (:gaussian, :identity)
+    @test (c1.location, c1.location_kind) === (:mu1, :param)
+    @test isnothing(c1.scale)
+    @test c1.scale_predictor === :sigma
+    @test (c2.location, c2.location_kind) === (:mu2, :param)
+    @test c2.scale_predictor === :sigma
+    @test likelihood.mixture_weights == [0.4, 0.6]
+    @test [p.name for p in plan.predictors] == [:sigma]
+    @test only(plan.predictors).link === :log
+    @test sort!([p.name for p in plan.parameters]) == [:mu1, :mu2]
+    @test plan.columns[:y] == dfmix.y
+
+    # All-scalar Poisson mixture: zero predictors, param anchor.
+    dfpois = (; y=[0, 1, 3, 5, 2])
+    brmi = @brm dfpois begin
+        lambda1 ~ Exponential(1)
+        lambda2 ~ Exponential(1)
+        y ~ MixtureModel([Poisson(lambda1), Poisson(lambda2)], [0.3, 0.7])
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    likelihood = only(plan.responses)
+    @test likelihood.family === :mixture
+    @test isempty(plan.predictors)
+    @test likelihood.predictor === :lambda1
+    @test [c.family for c in likelihood.mixture_components] ==
+        [:poisson_log, :poisson_log]
+    @test [c.location_kind for c in likelihood.mixture_components] ==
+        [:param, :param]
+
+    # Predictor locations + shared param scale + Dirichlet weights.
+    dfw = (; x=[0.5, -1.0, 1.5, 0.0], y=[1.0, 2.0, 1.5, 2.5])
+    brmi = @brm dfw begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        s ~ Exponential(1)
+        w ~ Dirichlet(2, 1.0)
+        y ~ MixtureModel([Normal(mu1, s), Normal(mu2, s)], w)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    likelihood = only(plan.responses)
+    @test likelihood.predictor === :mu1
+    @test likelihood.mixture_weights === :w
+    @test [c.location_kind for c in likelihood.mixture_components] ==
+        [:predictor, :predictor]
+    @test [c.scale for c in likelihood.mixture_components] == [:s, :s]
+    wspec = only(v for v in plan.vector_parameters if v.name === :w)
+    @test wspec.family === :simplex_dirichlet
+    @test wspec.size == 2
+
+    # K = 1 admits (the general form — no special-casing).
+    brmi = @brm dfmix begin
+        m ~ Normal(0, 1)
+        y ~ MixtureModel([Normal(m, 1)], [1.0])
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    likelihood = only(plan.responses)
+    @test length(likelihood.mixture_components) == 1
+    @test likelihood.mixture_weights == [1.0]
+    @test likelihood.predictor === :m
+
+    # Binomial mixtures share one trials column at the response level.
+    dfbin = (; y=[1, 8, 3, 9], n=[10, 10, 10, 10])
+    brmi = @brm dfbin begin
+        p1 ~ Beta(2, 2)
+        p2 ~ Beta(2, 2)
+        y ~ MixtureModel([Binomial(n, p1), Binomial(n, p2)], [0.5, 0.5])
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    likelihood = only(plan.responses)
+    @test likelihood.trials === :n
+    @test plan.columns[:n] == dfbin.n
+    @test [c.family for c in likelihood.mixture_components] ==
+        [:binomial_logit, :binomial_logit]
+
+    # Bernoulli components admit both spellings per component.
+    dfbern = (; x=[0.5, -1.0, 1.5, 0.0], y=[0, 1, 1, 0])
+    brmi = @brm dfbern begin
+        eta ~ 1 + x
+        e ~ Normal(0, 1)
+        y ~ MixtureModel([BernoulliLogit(eta), BernoulliLogit(e)], [0.5, 0.5])
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    likelihood = only(plan.responses)
+    comps = likelihood.mixture_components
+    @test [c.location_kind for c in comps] == [:predictor, :param]
+    @test likelihood.predictor === :eta
+end
+
+@testset "fail closed: mixture" begin
+    dfmix = (; y=[-2.0, -1.8, 1.9, 2.2])
+    dfcount = (; y=[0, 1, 3, 5, 2])
+    dfbin = (; y=[0, 1, 1, 0])
+    # Heterogeneous families (SB's allequal rule, mirrored).
+    @test_throws "must share one family" BRM._brm_rk_plan((@brm dfmix begin
+        y ~ MixtureModel([Normal(0, 1), Cauchy(0, 1)], [0.5, 0.5])
+    end))
+    # BernoulliLogit/Bernoulli mix: one RK family, two Julia heads —
+    # SB rejects it, so RK rejects it too.
+    @test_throws "must share one family" BRM._brm_rk_plan((@brm dfbin begin
+        eta ~ 1
+        p ~ Beta(2, 2)
+        y ~ MixtureModel([BernoulliLogit(eta), Bernoulli(p)], [0.5, 0.5])
+    end))
+    # Custom / parameter-support / simplex-parameter families.
+    @test_throws "is not admitted" BRM._brm_rk_plan((@brm dfcount begin
+        y ~ MixtureModel(
+            [ZeroInflatedPoisson(1.0, 0.2), ZeroInflatedPoisson(2.0, 0.2)],
+            [0.5, 0.5])
+    end))
+    @test_throws "is not admitted" BRM._brm_rk_plan((@brm dfmix begin
+        y ~ MixtureModel([Uniform(0, 1), Uniform(0, 1)], [0.5, 0.5])
+    end))
+    @test_throws "is not admitted" BRM._brm_rk_plan((@brm dfbin begin
+        s ~ Dirichlet(2, 1.0)
+        y ~ MixtureModel([Categorical(s), Categorical(s)], [0.5, 0.5])
+    end))
+    # BinomialLogit head inherits the single-family rejection.
+    @test_throws "out of mixture v1" BRM._brm_rk_plan((@brm dfbin begin
+        y ~ MixtureModel(
+            [BinomialLogit(10, 0.5), BinomialLogit(10, 0.5)], [0.5, 0.5])
+    end))
+    # Weights: sum, length, nonnegativity, data columns, simplex width.
+    @test_throws "must sum to 1" BRM._brm_rk_plan((@brm dfmix begin
+        m ~ Normal(0, 1)
+        y ~ MixtureModel([Normal(m, 1), Normal(m, 1)], [0.5, 0.6])
+    end))
+    @test_throws "2 components but 3 weights" BRM._brm_rk_plan((@brm dfmix begin
+        m ~ Normal(0, 1)
+        y ~ MixtureModel([Normal(m, 1), Normal(m, 1)], [0.5, 0.3, 0.2])
+    end))
+    @test_throws "must be nonnegative" BRM._brm_rk_plan((@brm dfmix begin
+        m ~ Normal(0, 1)
+        y ~ MixtureModel([Normal(m, 1), Normal(m, 1)], [1.5, -0.5])
+    end))
+    @test_throws "data-column weights" BRM._brm_rk_plan(
+        (@brm begin
+            m ~ Normal(0, 1)
+            y ~ MixtureModel([Normal(m, 1), Normal(m, 1)], w)
+        end)((; y=[1.0, 2.0], w=[0.5, 0.5])))
+    @test_throws "sizes must agree" BRM._brm_rk_plan((@brm dfmix begin
+        w ~ Dirichlet(3, 1.0)
+        m ~ Normal(0, 1)
+        y ~ MixtureModel([Normal(m, 1), Normal(m, 1)], w)
+    end))
+    # An unused Dirichlet names mixture weights only when the model has
+    # a mixture (the guidance stays context-sensitive).
+    @test_throws "or mixture weights use it" BRM._brm_rk_plan((@brm dfmix begin
+        w ~ Dirichlet(2, 1.0)
+        m ~ Normal(0, 1)
+        y ~ MixtureModel([Normal(m, 1), Normal(m, 1)], [0.5, 0.5])
+    end))
+    @test_throws "fully fixed" BRM._brm_rk_plan((@brm dfmix begin
+        y ~ MixtureModel([Normal(-1.0, 0.5), Normal(1.0, 0.5)], [0.4, 0.6])
+    end))
+    # Deterministic wrappers spell as the LP link, like single-family.
+    @test_throws "spell as an LP link" BRM._brm_rk_plan((@brm dfmix begin
+        mu1 ~ Normal(-2, 0.1)
+        mu2 ~ Normal(2, 0.1)
+        log(sigma) ~ 1
+        y ~ MixtureModel([Normal(mu1, exp(log(sigma))),
+            Normal(mu2, exp(log(sigma)))], [0.4, 0.6])
+    end))
+    # Binomial components share one identical trials expression.
+    @test_throws "share one identical" BRM._brm_rk_plan(
+        (@brm begin
+            p1 ~ Beta(2, 2)
+            p2 ~ Beta(2, 2)
+            y ~ MixtureModel([Binomial(n, p1), Binomial(10, p2)], [0.5, 0.5])
+        end)((; y=[1, 8, 3, 9], n=[10, 10, 10, 10])))
+    @test_throws "exceeds its trials" BRM._brm_rk_plan(
+        (@brm begin
+            p1 ~ Beta(2, 2)
+            p2 ~ Beta(2, 2)
+            y ~ MixtureModel([Binomial(n, p1), Binomial(n, p2)], [0.5, 0.5])
+        end)((; y=[1, 80, 3, 9], n=[10, 10, 10, 10])))
+    # Predictor-link rules mirror the single-family triples (mixture v1
+    # admits logit only for Bernoulli/Binomial/Beta locations).
+    @test_throws "logit-link predictor" BRM._brm_rk_plan(
+        (@brm begin
+            logit(p) ~ 1 + x
+            s ~ Exponential(1)
+            y ~ MixtureModel([Normal(p, s), Normal(p, s)], [0.5, 0.5])
+        end)((; x=[0.5, -1.0, 1.5, 0.0], y=[1.0, 2.0, 1.5, 2.5])))
+    @test_throws "mixture v1 admits" BRM._brm_rk_plan(
+        (@brm begin
+            probit(p) ~ 1 + x
+            q ~ Beta(2, 2)
+            y ~ MixtureModel([Bernoulli(p), Bernoulli(q)], [0.5, 0.5])
+        end)((; x=[0.5, -1.0, 1.5, 0.0], y=[0, 1, 1, 0])))
+    # Literal locations validate where the math is certain.
+    @test_throws "must be finite and positive" BRM._brm_rk_plan(
+        (@brm dfcount begin
+            y ~ MixtureModel([Poisson(-1.0), Poisson(2.0)], [0.5, 0.5])
+        end))
+    @test_throws "must be a probability in [0, 1]" BRM._brm_rk_plan(
+        (@brm dfbin begin
+            y ~ MixtureModel([Bernoulli(0.2), Bernoulli(1.5)], [0.5, 0.5])
+        end))
+    # Assignments are scale-only; data columns are never locations.
+    @test_throws "assignments are scale-only" BRM._brm_rk_plan(
+        (@brm begin
+            m = 1.0 + 2.0
+            y ~ MixtureModel([Normal(m, 1), Normal(m, 1)], [0.5, 0.5])
+        end)((; y=[1.0, 2.0])))
+    @test_throws "cannot be a data column" BRM._brm_rk_plan(
+        (@brm begin
+            s ~ Exponential(1)
+            y ~ MixtureModel([Normal(x, s), Normal(x, s)], [0.5, 0.5])
+        end)((; x=[0.5, -1.0], y=[1.0, 2.0])))
+    # Response-value gating dispatches on the component family (SB
+    # coerces float 0/1 — RK rejects, like single-family).
+    @test_throws "Bool or 0/1 integers" BRM._brm_rk_plan(
+        (@brm begin
+            p1 ~ Beta(2, 2)
+            p2 ~ Beta(2, 2)
+            y ~ MixtureModel([Bernoulli(p1), Bernoulli(p2)], [0.5, 0.5])
+        end)((; y=[0.0, 1.0, 1.0, 0.0])))
+    # No response-level weights or bounded evidence in mixture v1.
+    @test_throws "out of mixture v1" BRM._brm_rk_plan(
+        (@brm begin
+            m ~ Normal(0, 1)
+            y ~ weighted(MixtureModel([Normal(m, 1), Normal(m, 1)],
+                [0.5, 0.5]), fweights(w))
+        end)((; y=[1.0, 2.0], w=[1.0, 1.0])))
+    @test_throws "out of mixture v1" BRM._brm_rk_plan(
+        (@brm begin
+            m ~ Normal(0, 1)
+            y ~ truncated(MixtureModel([Normal(m, 1), Normal(m, 1)],
+                [0.5, 0.5]); lower=0.0)
+        end)((; y=[1.0, 2.0])))
+    # gp mixture predictors fail closed (single-predictor plate range).
+    @test_throws "gp mixture predictors" BRM._brm_rk_plan((@brm df begin
+        mu ~ 1 + gp(x)
+        s ~ Exponential(1)
+        y ~ MixtureModel([Normal(mu, s), Normal(mu, s)], [0.5, 0.5])
+    end))
 end

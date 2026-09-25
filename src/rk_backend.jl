@@ -89,6 +89,21 @@ struct _RKResponseEvidence
     upper::Union{Nothing,Float64,Symbol}
 end
 
+# One mixture component: the per-family classification of a single
+# `MixtureModel` distribution call. Locations name a linear predictor, a
+# sampled scalar parameter, or a numeric literal (params/literals ride the
+# constrained scale — no link inversion); scales reuse the scalar-or-
+# predictor scale slot; trials ride the shared response-level field.
+struct _RKMixtureComponent
+    family::Symbol # :gaussian | :bernoulli_logit | :poisson_log |
+                   # :binomial_logit | :nb2_log | :gamma_log | :beta_logit
+    link::Symbol   # effective link: :identity | :logit | :log
+    location::Union{Symbol,Float64}
+    location_kind::Symbol # :predictor | :param | :literal
+    scale::Union{Nothing,Symbol,Float64}
+    scale_predictor::Union{Nothing,Symbol}
+end
+
 struct _RKLikelihoodSpec
     family::Symbol # :gaussian | :bernoulli_logit | :poisson_log |
                    # :binomial_logit | :nb2_log | :gamma_log |
@@ -97,6 +112,7 @@ struct _RKLikelihoodSpec
                    # :bernoulli_probit | :bernoulli_cloglog |
                    # :binomial_probit | :binomial_cloglog | :beta_logit |
                    # longtail: :mvnormal_cholesky (joint correlated outcomes)
+                   # | :mixture (finite MixtureModel response)
     link::Symbol   # effective link: :identity | :logit | :log |
                    # :probit | :cloglog
     response::Symbol
@@ -130,6 +146,11 @@ struct _RKLikelihoodSpec
     # LikelihoodSpec mirror); every other family leaves them at defaults.
     extra_responses::Vector{Symbol} # joint tail outcome columns (K >= 2)
     factor::Union{Nothing,Symbol} # joint LKJ stem (`L ~ LKJCovarianceFactor`)
+    # Finite-mixture trailing fields; every other family leaves them at
+    # defaults. Binomial-mixture trials ride the shared `trials` field.
+    mixture_components::Vector{_RKMixtureComponent}
+    mixture_weights::Union{Nothing,Vector{Float64},Symbol} # frozen
+        # literal or Dirichlet simplex-param name
 end
 
 struct _RKTermSpec
@@ -341,9 +362,11 @@ const _RK_ADMITTED_SPELLINGS =
     "`s ~ Dirichlet(...)`, `y ~ Categorical(s)` + `s ~ Dirichlet(...)`, " *
     "slice-2 group A: `y ~ Bernoulli(p)` / `H ~ Binomial(n, p)` + " *
     "`probit(p)` / `cloglog(p) ~ ...`, `y ~ Beta(mu*kappa, " *
-    "(1-mu)*kappa)` + `logit(mu) ~ ...`, or `[y1, y2] ~ " *
+    "(1-mu)*kappa)` + `logit(mu) ~ ...`, `[y1, y2] ~ " *
     "MvNormalCholesky([mu1, mu2], L)` + `L ~ LKJCovarianceFactor(K; " *
-    "...)` + identity `mu_j ~ ...`"
+    "...)` + identity `mu_j ~ ...`, or `y ~ MixtureModel([D1, ..., " *
+    "DK], w)` (K >= 1 same-family Normal/Bernoulli/Poisson/Binomial/" *
+    "NegativeBinomial2/Gamma/Beta components + literal/Dirichlet weights)"
 
 function _rk_predictor_link(brmi::BRMI, target::Symbol)
     prefix = "RK backend"
@@ -888,6 +911,641 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
         head isa Type ? nameof(head) : string(head)
     error("$prefix: response `$response` family `$head_name` is not " *
           "admitted; admitted spellings: $_RK_ADMITTED_SPELLINGS")
+end
+
+# ---- finite mixtures (MixtureModel responses) ----
+#
+# Each component classifies like a single-family response of its family
+# (same arg shapes, same predictor-link rules), generalized only in the
+# location slot: a linear predictor, a sampled scalar parameter, or a
+# numeric literal. Params/literals ride the constrained scale — no link
+# inversion — so the AST wraps predictor locations and inlines the rest
+# bare. Components share one Julia head (SB's `allequal(Ts)` rule: a
+# `BernoulliLogit`/`Bernoulli` mix is two RK spellings of one RK family
+# but SB rejects it, so RK rejects it too — everything admitted here
+# has an SB number).
+
+# Component args are numeric-or-names all the way down (SB rejects
+# Booleans post-lowering; the planner rejects them pre-lowering).
+function _rk_mixture_no_bool!(node, k::Int, response::Symbol)
+    prefix = "RK backend"
+    node isa Bool && error(
+        "$prefix: response `$response` `MixtureModel` component $k " *
+        "arguments must be numeric, got a Boolean")
+    node isa ExprColumn &&
+        foreach(a -> _rk_mixture_no_bool!(a, k, response), getargs(node))
+    (node isa AbstractVector || node isa Tuple) &&
+        foreach(a -> _rk_mixture_no_bool!(a, k, response), node)
+    nothing
+end
+
+# A mixture location: a referenced linear predictor, a sampled scalar
+# parameter, or a numeric literal. Assignments are scale-only (the
+# surface location slot takes predictor | param | literal). Returns
+# `(kind, value)` with `value::Union{Symbol,Float64}`.
+function _rk_mixture_location_arg(arg, candidates::Vector{Symbol},
+        parameters::Set{Symbol}, assignments::Set{Symbol},
+        consts::Dict{Symbol,Float64}, aliases::Dict{Symbol,Symbol},
+        response::Symbol, what::String)
+    prefix = "RK backend"
+    arg isa NamedColumn && name(arg) in candidates &&
+        return (:predictor, name(arg))
+    arg isa Bool && error(
+        "$prefix: response `$response` $what must be numeric, got a Boolean")
+    arg isa Number && return (:literal, Float64(arg))
+    arg isa NamedColumn && parent(arg) isa DataColumn && error(
+        "$prefix: response `$response` $what cannot be a data column; " *
+        "write a linear predictor, a sampled parameter, or a numeric literal")
+    if arg isa NamedColumn
+        kind, value = _rk_resolve_use_ref(name(arg), consts, aliases,
+            parameters, assignments, "response `$response` $what")
+        kind === :param && return (:param, value)
+        kind === :number && return (:literal, value)
+        error("$prefix: response `$response` $what must be a linear " *
+              "predictor, a sampled parameter, or a numeric literal " *
+              "(assignments are scale-only)")
+    end
+    error("$prefix: response `$response` $what must be a linear " *
+          "predictor, a sampled parameter, or a numeric literal")
+end
+
+# A mixture scalar slot (Bernoulli/Binomial probability once the
+# predictor spellings are excluded): a sampled scalar parameter or a
+# numeric literal. A bare predictor reaching here names a misused
+# predictor (the predictor arms ran first), never a valid spelling.
+function _rk_mixture_scalar_slot(arg, candidates::Vector{Symbol},
+        parameters::Set{Symbol}, assignments::Set{Symbol},
+        consts::Dict{Symbol,Float64}, aliases::Dict{Symbol,Symbol},
+        response::Symbol, what::String, tail::String)
+    prefix = "RK backend"
+    message = "$prefix: response `$response` $what must be $tail"
+    arg isa Bool && error(
+        "$prefix: response `$response` $what must be numeric, got a Boolean")
+    arg isa Number && return (:literal, Float64(arg))
+    arg isa NamedColumn && name(arg) in candidates && error(message)
+    arg isa NamedColumn && parent(arg) isa DataColumn && error(message)
+    arg isa NamedColumn || error(message)
+    kind, value = _rk_resolve_use_ref(name(arg), consts, aliases,
+        parameters, assignments, "response `$response` $what")
+    kind === :param && return (:param, value)
+    kind === :number && return (:literal, value)
+    error(message)
+end
+
+function _rk_mixture_unit_literal(x::Number, response::Symbol, what::String)
+    prefix = "RK backend"
+    value = Float64(x)
+    isfinite(value) && 0 <= value <= 1 || error(
+        "$prefix: response `$response` $what must be a probability in [0, 1]")
+    value
+end
+
+_rk_mixture_head_name(head) =
+    head isa Function ? nameof(head) :
+    head isa Type ? nameof(head) : string(head)
+
+# First-referenced predictor order over the component args (deduped,
+# possibly empty — all-scalar mixtures reference no predictor). Total:
+# malformed shapes collect nothing and fail specifically in Phase 5.
+# Weights never contribute (a predictor-named weight fails in weights
+# validation, it never plans a predictor).
+function _rk_mixture_refs(program, rhs::ExprColumn, response::Symbol)
+    declared = Set{Symbol}(node.name for node in program.operations
+        if node.role === :predictor)
+    names = Symbol[]
+    args = getargs(rhs)
+    isempty(args) || _rk_mixture_walk_refs!(
+        names, Set{Symbol}(), args[1], declared)
+    names
+end
+
+function _rk_mixture_walk_refs!(names::Vector{Symbol}, seen::Set{Symbol},
+        node, declared::Set{Symbol})
+    if node isa NamedColumn
+        name(node) in declared && name(node) ∉ seen &&
+            (push!(names, name(node)); push!(seen, name(node)))
+        return nothing
+    elseif node isa ExprColumn
+        for arg in getargs(node)
+            _rk_mixture_walk_refs!(names, seen, arg, declared)
+        end
+        return nothing
+    elseif node isa AbstractVector || node isa Tuple
+        for el in node
+            _rk_mixture_walk_refs!(names, seen, el, declared)
+        end
+        return nothing
+    end
+    nothing
+end
+
+function _rk_classify_mixture(rhs::ExprColumn, candidates::Vector{Symbol},
+        predictor_link::Dict{Symbol,Symbol}, parameters::Set{Symbol},
+        assignments::Set{Symbol}, consts::Dict{Symbol,Float64},
+        aliases::Dict{Symbol,Symbol},
+        vectors::Dict{Symbol,_RKVectorParameter}, response::Symbol)
+    prefix = "RK backend"
+    args = getargs(rhs)
+    length(args) == 2 || error(
+        "$prefix: response `$response` `MixtureModel` expects " *
+        "`(components, weights)`, got $(length(args)) arguments")
+    isempty(getkwargs(rhs)) || error(
+        "$prefix: response `$response` `MixtureModel` takes no keywords")
+    components, weights_arg = args
+    components isa AbstractVector || error(
+        "$prefix: response `$response` `MixtureModel` components must be " *
+        "a vector of distribution calls, got $(typeof(components))")
+    K = length(components)
+    K >= 1 || error(
+        "$prefix: response `$response` `MixtureModel` needs at least one " *
+        "component")
+    for (k, comp) in enumerate(components)
+        comp isa ExprColumn || error(
+            "$prefix: response `$response` `MixtureModel` component $k " *
+            "must be a distribution call, got $(typeof(comp))")
+    end
+    heads = map(getf, components)
+    allequal(heads) || error(
+        "$prefix: response `$response` `MixtureModel` components must " *
+        "share one family (found " *
+        "$(join(unique!(map(string, heads)), ", "))); heterogeneous " *
+        "mixtures are not supported because Stan rejects out-of-support " *
+        "values where Turing returns `-Inf`)")
+    classified = map(enumerate(components)) do (k, comp)
+        _rk_classify_mixture_component(comp, k, candidates, predictor_link,
+            parameters, assignments, consts, aliases, response)
+    end
+    trials = _rk_mixture_shared_trials(
+        components, first(classified).family, parameters, assignments,
+        consts, aliases, response)
+    weights = _rk_mixture_weights(weights_arg, K, response, vectors)
+    anchor = _rk_mixture_anchor(classified, weights, response)
+    (; family=:mixture, link=first(classified).link,
+        components=classified, weights, trials, anchor,
+        component_family=first(classified).family)
+end
+
+function _rk_classify_mixture_component(comp::ExprColumn, k::Int,
+        candidates::Vector{Symbol}, predictor_link::Dict{Symbol,Symbol},
+        parameters::Set{Symbol}, assignments::Set{Symbol},
+        consts::Dict{Symbol,Float64}, aliases::Dict{Symbol,Symbol},
+        response::Symbol)
+    prefix = "RK backend"
+    head = getf(comp)
+    cargs = getargs(comp)
+    isempty(getkwargs(comp)) || error(
+        "$prefix: response `$response` `MixtureModel` component $k " *
+        "(`$(_rk_mixture_head_name(head))`) takes no constructor keywords")
+    _rk_mixture_no_bool!(comp, k, response)
+    # A predictor location's link, checked per family (params/literals
+    # ride the constrained scale — no link applies).
+    link_of(kind, loc) =
+        kind === :predictor ? predictor_link[loc] : nothing
+    if head === Normal
+        length(cargs) == 2 || error(
+            "$prefix: response `$response` `MixtureModel` component $k " *
+            "`Normal` needs `(location, scale)`")
+        lkind, loc = _rk_mixture_location_arg(cargs[1], candidates,
+            parameters, assignments, consts, aliases, response,
+            "component $k location")
+        plink = link_of(lkind, loc)
+        plink === nothing || plink === :identity || error(
+            "$prefix: response `$response` `MixtureModel` component $k " *
+            "pairs `Normal` with a $plink-link predictor `$loc`; write " *
+            "an identity-link predictor, a sampled parameter, or a literal")
+        scale, scale_predictor = _rk_scale_argument(cargs[2], parameters,
+            assignments, consts, aliases, response, "component $k scale",
+            candidates)
+        return _RKMixtureComponent(
+            :gaussian, :identity, loc, lkind, scale, scale_predictor)
+    elseif head === BernoulliLogit
+        length(cargs) == 1 || error(
+            "$prefix: response `$response` `MixtureModel` component $k " *
+            "`BernoulliLogit` needs one argument")
+        lkind, loc = _rk_mixture_location_arg(only(cargs), candidates,
+            parameters, assignments, consts, aliases, response,
+            "component $k location")
+        plink = link_of(lkind, loc)
+        plink === nothing || plink === :identity || error(
+            "$prefix: response `$response` `MixtureModel` component $k " *
+            "applies `BernoulliLogit` on top of a $plink-link predictor " *
+            "`$loc` (double link); use an identity-link predictor, a " *
+            "sampled parameter, or a literal")
+        return _RKMixtureComponent(
+            :bernoulli_logit, :logit, loc, lkind, nothing, nothing)
+    elseif head === Bernoulli
+        length(cargs) == 1 || error(
+            "$prefix: response `$response` `MixtureModel` component $k " *
+            "`Bernoulli` needs one argument")
+        arg = only(cargs)
+        prob_tail = "a `logit(p)` predictor, `logistic(eta)` over an " *
+            "identity-link predictor, a sampled parameter, or a " *
+            "probability literal in [0, 1]"
+        if _rk_is_predictor_ref(arg, candidates)
+            loc = name(arg)
+            plink = predictor_link[loc]
+            plink === :logit || error(
+                "$prefix: response `$response` `MixtureModel` component " *
+                "$k pairs `Bernoulli` with a $plink-link predictor " *
+                "`$loc`; mixture v1 admits $prob_tail")
+            return _RKMixtureComponent(
+                :bernoulli_logit, :logit, loc, :predictor, nothing, nothing)
+        end
+        stripped = _rk_strip_logistic(arg, candidates)
+        if stripped !== nothing
+            predictor_link[stripped] === :identity || error(
+                "$prefix: response `$response` `MixtureModel` component " *
+                "$k applies `logistic` on top of a " *
+                "$(predictor_link[stripped])-link predictor `$stripped` " *
+                "(double link); mixture v1 admits $prob_tail")
+            return _RKMixtureComponent(:bernoulli_logit, :logit,
+                stripped, :predictor, nothing, nothing)
+        end
+        lkind, loc = _rk_mixture_scalar_slot(arg, candidates, parameters,
+            assignments, consts, aliases, response,
+            "component $k probability", prob_tail)
+        lkind === :literal &&
+            _rk_mixture_unit_literal(loc, response, "component $k probability")
+        return _RKMixtureComponent(
+            :bernoulli_logit, :logit, loc, lkind, nothing, nothing)
+    elseif head === Poisson
+        length(cargs) == 1 || error(
+            "$prefix: response `$response` `MixtureModel` component $k " *
+            "`Poisson` needs one argument")
+        lkind, loc = _rk_mixture_location_arg(only(cargs), candidates,
+            parameters, assignments, consts, aliases, response,
+            "component $k rate")
+        plink = link_of(lkind, loc)
+        if plink !== nothing && plink !== :log
+            error("$prefix: response `$response` `MixtureModel` component " *
+                  "$k pairs `Poisson` with a $plink-link predictor " *
+                  "`$loc`; write `Poisson(mu)` with a `log(mu)` " *
+                  "predictor, a sampled parameter, or a positive literal")
+        end
+        lkind === :literal &&
+            _rk_positive_literal(loc, response, "component $k rate")
+        return _RKMixtureComponent(
+            :poisson_log, :log, loc, lkind, nothing, nothing)
+    elseif head === Binomial
+        length(cargs) == 2 || error(
+            "$prefix: response `$response` `MixtureModel` component $k " *
+            "`Binomial` needs `(trials, probability)`")
+        arg = cargs[2]
+        prob_tail = "a `logit(p)` predictor, `logistic(eta)` over an " *
+            "identity-link predictor, a sampled parameter, or a " *
+            "probability literal in [0, 1]"
+        if _rk_is_predictor_ref(arg, candidates)
+            loc = name(arg)
+            plink = predictor_link[loc]
+            plink === :logit || error(
+                "$prefix: response `$response` `MixtureModel` component " *
+                "$k pairs `Binomial` with a $plink-link predictor " *
+                "`$loc`; mixture v1 admits $prob_tail")
+            return _RKMixtureComponent(
+                :binomial_logit, :logit, loc, :predictor, nothing, nothing)
+        end
+        stripped = _rk_strip_logistic(arg, candidates)
+        if stripped !== nothing
+            predictor_link[stripped] === :identity || error(
+                "$prefix: response `$response` `MixtureModel` component " *
+                "$k applies `logistic` on top of a " *
+                "$(predictor_link[stripped])-link predictor `$stripped` " *
+                "(double link); mixture v1 admits $prob_tail")
+            return _RKMixtureComponent(:binomial_logit, :logit,
+                stripped, :predictor, nothing, nothing)
+        end
+        lkind, loc = _rk_mixture_scalar_slot(arg, candidates, parameters,
+            assignments, consts, aliases, response,
+            "component $k probability", prob_tail)
+        lkind === :literal &&
+            _rk_mixture_unit_literal(loc, response, "component $k probability")
+        return _RKMixtureComponent(
+            :binomial_logit, :logit, loc, lkind, nothing, nothing)
+    elseif head === BinomialLogit
+        error("$prefix: response `$response` `MixtureModel` component $k " *
+              "`BinomialLogit` is out of mixture v1; write `Binomial(n, " *
+              "p)` with a `logit(p)` predictor, `Binomial(n, " *
+              "logistic(eta))` with an identity predictor, or a sampled " *
+              "parameter / literal probability")
+    elseif head === NegativeBinomial2
+        length(cargs) == 2 || error(
+            "$prefix: response `$response` `MixtureModel` component $k " *
+            "`NegativeBinomial2` needs `(mean, dispersion)`; write " *
+            "`NegativeBinomial2(mu, phi)` with a `log(mu)` predictor, a " *
+            "sampled parameter, or a positive literal mean")
+        lkind, loc = _rk_mixture_location_arg(cargs[1], candidates,
+            parameters, assignments, consts, aliases, response,
+            "component $k mean")
+        plink = link_of(lkind, loc)
+        plink === nothing || plink === :log || error(
+            "$prefix: response `$response` `MixtureModel` component $k " *
+            "pairs `NegativeBinomial2` with a $plink-link predictor " *
+            "`$loc`; write a `log(mu)` predictor, a sampled parameter, " *
+            "or a positive literal mean")
+        lkind === :literal &&
+            _rk_positive_literal(loc, response, "component $k mean")
+        dispersion, dispersion_predictor = _rk_scale_argument(cargs[2],
+            parameters, assignments, consts, aliases, response,
+            "component $k dispersion", candidates)
+        return _RKMixtureComponent(:nb2_log, :log, loc, lkind,
+            dispersion, dispersion_predictor)
+    elseif head === Gamma
+        shape, shape_predictor, lkind, loc =
+            _rk_mixture_gamma_args(cargs, k, candidates, predictor_link,
+                parameters, assignments, consts, aliases, response)
+        return _RKMixtureComponent(
+            :gamma_log, :log, loc, lkind, shape, shape_predictor)
+    elseif head === Beta
+        mu_kind, mu_value, concentration = _rk_mixture_beta_args(cargs, k,
+            candidates, predictor_link, parameters, assignments, consts,
+            aliases, response)
+        return _RKMixtureComponent(:beta_logit, :logit, mu_value,
+            mu_kind, concentration, nothing)
+    end
+    error("$prefix: response `$response` `MixtureModel` component $k " *
+          "family `$(_rk_mixture_head_name(head))` is not admitted; " *
+          "mixture v1 admits Normal, Bernoulli/BernoulliLogit, Poisson, " *
+          "Binomial, NegativeBinomial2, Gamma, and Beta components")
+end
+
+# Gamma mean-shape form per mixture component: `Gamma(alpha, mu/alpha)`
+# with the SAME alpha in both positions (mirrors the single-family
+# double-alpha rule); the mean is a `log(mu)` predictor, a sampled
+# parameter, or a positive literal.
+function _rk_mixture_gamma_args(cargs, k::Int, candidates::Vector{Symbol},
+        predictor_link::Dict{Symbol,Symbol}, parameters::Set{Symbol},
+        assignments::Set{Symbol}, consts::Dict{Symbol,Float64},
+        aliases::Dict{Symbol,Symbol}, response::Symbol)
+    prefix = "RK backend"
+    length(cargs) == 2 || error(
+        "$prefix: response `$response` `MixtureModel` component $k " *
+        "`Gamma` needs `(shape, scale)`; write `Gamma(alpha, " *
+        "mu/alpha)` with a `log(mu)` predictor, a sampled parameter, " *
+        "or a positive literal mean")
+    shape, shape_predictor = _rk_scale_argument(cargs[1], parameters,
+        assignments, consts, aliases, response, "component $k shape",
+        candidates)
+    scale = cargs[2]
+    scale isa ExprColumn && getf(scale) === (/) || error(
+        "$prefix: response `$response` `MixtureModel` component $k " *
+        "`Gamma` scale must be `mu/alpha` with the same shape in both " *
+        "positions")
+    isempty(getkwargs(scale)) || error(
+        "$prefix: response `$response` `MixtureModel` component $k " *
+        "`Gamma` scale takes no keywords")
+    sargs = getargs(scale)
+    length(sargs) == 2 || error(
+        "$prefix: response `$response` `MixtureModel` component $k " *
+        "`Gamma` scale must be `mu/alpha` with the same shape in both " *
+        "positions")
+    lkind, loc = _rk_mixture_location_arg(sargs[1], candidates,
+        parameters, assignments, consts, aliases, response,
+        "component $k mean")
+    if lkind === :predictor
+        plink = predictor_link[loc]
+        plink === :log || error(
+            "$prefix: response `$response` `MixtureModel` component $k " *
+            "pairs `Gamma` with a $plink-link predictor `$loc`; write a " *
+            "`log(mu)` predictor, a sampled parameter, or a positive " *
+            "literal mean")
+    elseif lkind === :literal
+        _rk_positive_literal(loc, response, "component $k mean")
+    end
+    _rk_gamma_same_alpha(cargs[1], sargs[2]) || error(
+        "$prefix: response `$response` `MixtureModel` component $k " *
+        "`Gamma` shape and scale divisor must be identical " *
+        "(`Gamma(alpha, mu/alpha)`); distinct shapes are out of " *
+        "mixture v1")
+    shape, shape_predictor, lkind, loc
+end
+
+# Beta mean-concentration form per mixture component:
+# `Beta(mu*kappa, (1-mu)*kappa)` with the SAME mu and the SAME kappa in
+# both positions (mirrors the single-family structural-match rule); mu
+# is a `logit(mu)` predictor, a sampled parameter, or a [0, 1] literal.
+# The concentration stays scalar-only (decision 005dq0u, like
+# single-family). Returns `(mu_kind, mu_value, concentration)`.
+function _rk_mixture_beta_args(cargs, k::Int, candidates::Vector{Symbol},
+        predictor_link::Dict{Symbol,Symbol}, parameters::Set{Symbol},
+        assignments::Set{Symbol}, consts::Dict{Symbol,Float64},
+        aliases::Dict{Symbol,Symbol}, response::Symbol)
+    prefix = "RK backend"
+    form = "`Beta(mu*kappa, (1-mu)*kappa)` with a `logit(mu)` " *
+        "predictor, a sampled parameter, or a [0, 1] literal mean"
+    length(cargs) == 2 || error(
+        "$prefix: response `$response` `MixtureModel` component $k " *
+        "`Beta` needs `(a, b)`; write $form")
+    found = _rk_mixture_beta_split(cargs, k, candidates, parameters,
+        assignments, consts, aliases, response, form)
+    found === nothing && error(
+        "$prefix: response `$response` `MixtureModel` component $k " *
+        "`Beta` arguments must be `mu*kappa` / `(1-mu)*kappa` with " *
+        "the same mu and identical kappa; write $form")
+    mu_kind, mu_value, kappa_raw = found
+    concentration, concentration_predictor = _rk_scale_argument(
+        kappa_raw, parameters, assignments, consts, aliases, response,
+        "component $k concentration", Symbol[])
+    concentration_predictor === nothing || error(
+        "$prefix: response `$response` `MixtureModel` component $k " *
+        "`Beta` concentration cannot be a linear predictor " *
+        "(predictor-fed concentration is not admitted)")
+    if mu_kind === :predictor
+        plink = predictor_link[mu_value]
+        plink === :logit || error(
+            "$prefix: response `$response` `MixtureModel` component $k " *
+            "pairs `Beta` with a $plink-link predictor `$mu_value`; " *
+            "write $form (mixture v1 admits a logit mu link only)")
+    elseif mu_kind === :literal
+        _rk_mixture_unit_literal(mu_value, response, "component $k mean")
+    end
+    mu_kind, mu_value, concentration
+end
+
+# One consistent `(mu, kappa)` split of the two Beta positions (either
+# multiplication order admits): each first-position factor is tried as
+# mu, the second position must carry its `(1-mu)` complement with an
+# identical kappa. Returns `(kind, value, kappa_raw)` or `nothing`.
+function _rk_mixture_beta_split(cargs, k::Int, candidates::Vector{Symbol},
+        parameters::Set{Symbol}, assignments::Set{Symbol},
+        consts::Dict{Symbol,Float64}, aliases::Dict{Symbol,Symbol},
+        response::Symbol, form::String)
+    factors = _rk_mixture_beta_factors(cargs[1])
+    factors === nothing && return nothing
+    f1, f2 = factors
+    for (mu_raw, kappa_raw) in ((f1, f2), (f2, f1))
+        key = _rk_mixture_mu_key(mu_raw, candidates, parameters,
+            assignments, consts, aliases, response)
+        key === nothing && continue
+        other = _rk_mixture_beta_factors(cargs[2])
+        other === nothing && continue
+        g1, g2 = other
+        kappa2 = if _rk_mixture_beta_complement(g1, key)
+            g2
+        elseif _rk_mixture_beta_complement(g2, key)
+            g1
+        else
+            continue
+        end
+        _rk_gamma_same_alpha(kappa_raw, kappa2) || continue
+        return (key[1], key[2], kappa_raw)
+    end
+    nothing
+end
+
+# A bare two-factor product, or `nothing` (the caller reports the form).
+function _rk_mixture_beta_factors(position)
+    position isa ExprColumn && getf(position) === (*) || return nothing
+    isempty(getkwargs(position)) || return nothing
+    pargs = getargs(position)
+    length(pargs) == 2 || return nothing
+    (pargs[1], pargs[2])
+end
+
+# A Beta mu candidate: a referenced predictor, a sampled parameter, or
+# a numeric literal — `(kind, value)` or `nothing` (data columns and
+# assignments never match; unknown names throw with attribution, as in
+# the location slot).
+function _rk_mixture_mu_key(f, candidates::Vector{Symbol},
+        parameters::Set{Symbol}, assignments::Set{Symbol},
+        consts::Dict{Symbol,Float64}, aliases::Dict{Symbol,Symbol},
+        response::Symbol)
+    f isa NamedColumn && name(f) in candidates && return (:predictor, name(f))
+    f isa Bool && return nothing
+    f isa Number && return (:literal, Float64(f))
+    f isa NamedColumn || return nothing
+    parent(f) isa DataColumn && return nothing
+    kind, value = _rk_resolve_use_ref(name(f), consts, aliases,
+        parameters, assignments, "response `$response` mixture mean")
+    kind === :param && return (:param, value)
+    kind === :number && return (:literal, value)
+    nothing
+end
+
+_rk_mixture_beta_complement(g, key) = begin
+    g isa ExprColumn && getf(g) === (-) || return false
+    cargs = getargs(g)
+    length(cargs) == 2 || return false
+    cargs[1] isa Number && cargs[1] == 1 || return false
+    _rk_mixture_mu_equals(cargs[2], key)
+end
+
+function _rk_mixture_mu_equals(f, key)
+    kind, value = key
+    kind === :predictor && return _rk_is_predictor_ref(f, value)
+    kind === :param && return f isa NamedColumn && name(f) === value
+    kind === :literal && return f isa Number && !(f isa Bool) &&
+        Float64(f) == value
+    false
+end
+
+# Binomial-mixture trials: each component resolves independently (an
+# integer data column or a non-negative integer literal), then all
+# components must share one structurally identical expression (SB's
+# rule: value-equal but structurally different counts could diverge on
+# `reprocess` — share one column). Returns the shared trials.
+function _rk_mixture_shared_trials(components, family::Symbol,
+        parameters::Set{Symbol}, assignments::Set{Symbol},
+        consts::Dict{Symbol,Float64}, aliases::Dict{Symbol,Symbol},
+        response::Symbol)
+    family === :binomial_logit || return nothing
+    prefix = "RK backend"
+    raws = map(comp -> getargs(comp)[1], components)
+    resolved = map(raws) do raw
+        _rk_trials_argument(raw, response, parameters, assignments,
+            consts, aliases)
+    end
+    for raw in Iterators.drop(raws, 1)
+        _rk_mixture_same_trials(first(raws), raw) || error(
+            "$prefix: response `$response` `MixtureModel` `Binomial` " *
+            "components must share one identical trial-count expression; " *
+            "value-equal but structurally different counts could " *
+            "diverge on `reprocess` — share one column")
+    end
+    first(resolved)
+end
+
+function _rk_mixture_same_trials(a, b)
+    a isa Number && b isa Number && return isequal(a, b)
+    a isa NamedColumn && b isa NamedColumn &&
+        parent(a) isa DataColumn && parent(b) isa DataColumn &&
+        return name(a) == name(b)
+    false
+end
+
+# Mixture weights: a numeric vector/tuple summing to 1 (frozen), or a
+# Dirichlet-backed simplex parameter of matching width. Data-column
+# weights are out of mixture v1 (they are not n_obs columns, so they
+# cannot cross as data — the thin layer agrees).
+function _rk_mixture_weights(arg, K::Int, response::Symbol,
+        vectors::Dict{Symbol,_RKVectorParameter})
+    prefix = "RK backend"
+    if arg isa Union{AbstractVector,Tuple} &&
+            all(w -> w isa Real && !(w isa Bool), arg)
+        length(arg) == K || error(
+            "$prefix: response `$response` `MixtureModel` has $K " *
+            "components but $(length(arg)) weights")
+        weights = Float64.(collect(arg))
+        all(isfinite, weights) || error(
+            "$prefix: response `$response` `MixtureModel` weights must " *
+            "be finite")
+        all(>=(0), weights) || error(
+            "$prefix: response `$response` `MixtureModel` weights must " *
+            "be nonnegative")
+        total = sum(weights)
+        isapprox(total, 1.0; atol=1e-8) || error(
+            "$prefix: response `$response` `MixtureModel` weights must " *
+            "sum to 1 (got $total)")
+        return weights
+    end
+    arg isa NamedColumn && parent(arg) isa DataColumn && error(
+        "$prefix: response `$response` `MixtureModel` data-column " *
+        "weights are out of mixture v1; write a literal weight vector " *
+        "or a Dirichlet-backed simplex parameter")
+    if arg isa NamedColumn
+        wname = name(arg)
+        haskey(vectors, wname) && vectors[wname].family ===
+                :simplex_dirichlet || error(
+            "$prefix: response `$response` `MixtureModel` weights " *
+            "`$wname` must be a numeric vector or a `~ Dirichlet(...)` " *
+            "simplex parameter")
+        size = vectors[wname].size
+        size == K || error(
+            "$prefix: response `$response` has $K mixture components " *
+            "but simplex `$wname` has $size categories; sizes must agree")
+        return wname
+    end
+    error("$prefix: response `$response` `MixtureModel` weights must be " *
+          "a numeric vector of length $K or a Dirichlet-backed simplex " *
+          "parameter, got $(typeof(arg))")
+end
+
+# The struct predictor anchor for a mixture response: the anchor is
+# never resolved as a predictor (component slots ride dedicated
+# fields), but the struct field is non-nullable, so predictor-less
+# mixtures still anchor it. Order (mirrored thin-side, verbatim):
+# first location predictor, else first scale predictor, else the
+# Dirichlet weights name, else the first location/scale param (a scale
+# assignment anchors only when nothing else names a free value). A
+# fully-fixed mixture (zero free names) has no RK plan.
+function _rk_mixture_anchor(classified::Vector{_RKMixtureComponent},
+        weights::Union{Vector{Float64},Symbol}, response::Symbol)
+    prefix = "RK backend"
+    for comp in classified
+        comp.location_kind === :predictor && return comp.location::Symbol
+    end
+    for comp in classified
+        comp.scale_predictor !== nothing && return comp.scale_predictor
+    end
+    weights isa Symbol && return weights
+    for comp in classified
+        comp.location_kind === :param && return comp.location::Symbol
+    end
+    for comp in classified
+        comp.scale isa Symbol && return comp.scale
+    end
+    error("$prefix: response `$response` `MixtureModel` is fully fixed " *
+          "(every component argument and the weights are literals); a " *
+          "mixture with no free parameters has no RK plan")
 end
 
 function _rk_evidence_bound(bound, data::AbstractDict, response::Symbol,
@@ -3418,7 +4076,8 @@ function _rk_plan_me_observations!(response_specs::Vector{_RKLikelihoodSpec},
             source, term.options.latent, term.options.sd, nothing,
             nothing, _RKResponseEvidence(:none, nothing, nothing),
             source, nothing, nothing, nothing, Symbol[], Symbol[],
-            nothing, nothing, Symbol[], nothing, Symbol[], nothing))
+            nothing, nothing, Symbol[], nothing, Symbol[], nothing,
+            _RKMixtureComponent[], nothing))
     end
     nothing
 end
@@ -4082,7 +4741,8 @@ function _rk_gate_trials_values!(specs::AbstractVector,
     prefix = "RK backend"
     for spec in specs
         spec.family in (:binomial_logit, :binomial_probit,
-            :binomial_cloglog) || continue
+            :binomial_cloglog) ||
+            (spec.family === :mixture && spec.trials !== nothing) || continue
         trials = spec.trials
         n = if trials isa Int
             fill(trials, n_obs)
@@ -4509,7 +5169,7 @@ function _rk_plan_joint_response!(entry, link::Symbol, predictor::Symbol,
     _RKLikelihoodSpec(:mvnormal_cholesky, link, first(outcomes), predictor,
         nothing, nothing, nothing, evidence, entry.key, nothing, nothing,
         nothing, extra, Symbol[], nothing, nothing, Symbol[], nothing,
-        outcomes[2:end], stem)
+        outcomes[2:end], stem, _RKMixtureComponent[], nothing)
 end
 
 # Joint responses link their LKJ factor stem explicitly (SB's
@@ -5347,6 +6007,17 @@ function _brm_rk_plan(brmi::BRMI)
                 target in predictor_order || push!(predictor_order, target)
             end
             continue
+        elseif head === MixtureModel
+            # Component args reference predictors positionally per
+            # component (possibly none — all-scalar mixtures plan with
+            # zero predictors); the claim check in Phase 5 accounts
+            # every referenced predictor to a component slot.
+            preds = _rk_mixture_refs(program, entry.rhs, entry.key)
+            response_predictors[entry.key] = preds
+            for target in preds
+                target in predictor_order || push!(predictor_order, target)
+            end
+            continue
         end
         names = _rk_referenced_predictors(program, entry.rhs, entry.key)
         response_predictors[entry.key] = names
@@ -5386,6 +6057,8 @@ function _brm_rk_plan(brmi::BRMI)
         head = getf(entry.rhs)
         extra = get(response_extra_predictors, entry.key, Symbol[])
         candidates = response_predictors[entry.key]
+        mixture_components = _RKMixtureComponent[]
+        mixture_weights::Union{Nothing,Vector{Float64},Symbol} = nothing
         family, link, scale, scale_predictor, trials, predictor = if head ===
                 Categorical
             length(getargs(entry.rhs)) == 1 || error(
@@ -5400,6 +6073,14 @@ function _brm_rk_plan(brmi::BRMI)
             mtrials = _rk_trials_argument(getargs(entry.rhs)[1], entry.key,
                 parameter_names, assignment_names, consts, aliases)
             (:multinomial, :identity, nothing, nothing, mtrials, nothing)
+        elseif head === MixtureModel
+            mclassified = _rk_classify_mixture(entry.rhs, candidates,
+                predictor_link, parameter_names, assignment_names, consts,
+                aliases, vector_by_name, entry.key)
+            mixture_components = mclassified.components
+            mixture_weights = mclassified.weights
+            (mclassified.family, mclassified.link, nothing, nothing,
+                mclassified.trials, mclassified.anchor)
         else
             if head === CategoricalLogit && isempty(candidates)
                 # Zero-arg shape: K=1 (rejected per 0dteta6) or arity mismatch.
@@ -5430,13 +6111,50 @@ function _brm_rk_plan(brmi::BRMI)
                 implicit_vectors, vector_by_name, context.data,
                 predictor_specs) :
             _rk_unleveled(entry, predictor)
+        # Mixture v1 admits no response-level weights or bounded
+        # evidence (no driving case), and no `gp` mixture predictors
+        # (the AST plate ranges over one response per predictor).
+        if family === :mixture
+            entry.weight_plan === nothing || error(
+                "$prefix: response `$(entry.key)` weights on a " *
+                "`MixtureModel` response are out of mixture v1")
+            entry.modifier === nothing || error(
+                "$prefix: response `$(entry.key)` evidence " *
+                "($(entry.modifier.kind)) on a `MixtureModel` response " *
+                "is out of mixture v1")
+            for pname in candidates
+                spec = only(s for s in predictor_specs if s.name === pname)
+                any(t -> t.kind === :gp, spec.terms) && error(
+                    "$prefix: response `$(entry.key)` mixture predictor " *
+                    "`$pname` carries a `gp` term; gp mixture predictors " *
+                    "are out of mixture v1")
+            end
+        end
         # Every referenced predictor must feed a slot: the scale slot naming
         # the location is degenerate, and anything else unclaimed is a name
         # shadowed across slots (rename one of them). The categorical-logit
         # tail feeds `extra_predictors`, not a slot; an ordinal
-        # discrimination predictor feeds the discrimination slot. Runs
-        # after the leveled plan so the ordinal extras are known.
-        if predictor !== nothing
+        # discrimination predictor feeds the discrimination slot. Mixture
+        # components share slots freely (sharing is unambiguous —
+        # every slot is explicit), so anything referenced feeds at
+        # least one. Runs after the leveled plan so the ordinal extras
+        # are known.
+        if family === :mixture
+            claimed = Set{Symbol}()
+            for comp in mixture_components
+                comp.location_kind === :predictor &&
+                    push!(claimed, comp.location::Symbol)
+                comp.scale_predictor !== nothing &&
+                    push!(claimed, comp.scale_predictor)
+            end
+            unclaimed = filter(name -> name ∉ claimed, candidates)
+            isempty(unclaimed) || error(
+                "$prefix: response `$(entry.key)` references linear " *
+                "predictor(s) $(join(unclaimed, ", ")) outside the " *
+                "mixture component slots; every referenced predictor " *
+                "must feed one slot (if a name shadows a data column, " *
+                "rename one of them)")
+        elseif predictor !== nothing
             scale_predictor === nothing || scale_predictor !== predictor ||
                 error("$prefix: response `$(entry.key)` feeds the location " *
                       "predictor `$predictor` into the scale/shape " *
@@ -5496,7 +6214,12 @@ function _brm_rk_plan(brmi::BRMI)
             _rk_split_multinomial_counts!(columns, entry.key,
                 context.data[entry.key], leveled.count_columns)
         else
-            gated = _rk_gate_response_values!(family,
+            # Mixture responses gate on the shared component family (the
+            # same-family check ran at classification).
+            gate_family = family === :mixture ?
+                only(unique!(map(c -> c.family, mixture_components))) :
+                family
+            gated = _rk_gate_response_values!(gate_family,
                 leveled.response_values, entry.key)
             columns[entry.key] = gated
         end
@@ -5506,7 +6229,7 @@ function _brm_rk_plan(brmi::BRMI)
             leveled.extra_predictors, leveled.count_columns,
             leveled.ordinal_structure, leveled.discrimination,
             leveled.threshold_columns, leveled.threshold_coefs, Symbol[],
-            nothing))
+            nothing, mixture_components, mixture_weights))
     end
     # Measurement-error observations ride synthetic responses (SB's
     # `x_obs ~ Normal(x_true, sd)` likelihood per `me` term).
@@ -5529,18 +6252,28 @@ function _brm_rk_plan(brmi::BRMI)
     _rk_gate_trials_values!(response_specs, columns, n_obs)
     _rk_gate_multinomial_trials!(response_specs, columns, n_obs)
     _rk_gate_evidence_values!(response_specs, columns, n_obs)
-    # A declared simplex must back a multinomial/categorical response —
-    # an unreferenced `s ~ Dirichlet(...)` does nothing (and the longtail
-    # lane pins that shape closed), so it fails here, not silently.
+    # A declared simplex must back a multinomial/categorical response
+    # or mixture weights — an unreferenced `s ~ Dirichlet(...)` does
+    # nothing (and the longtail lane pins that shape closed), so it
+    # fails here, not silently.
     used_simplex = Set{Symbol}(spec.predictor for spec in response_specs
         if spec.family in _RK_SIMPLEX_FAMILIES)
+    for spec in response_specs
+        spec.family === :mixture && spec.mixture_weights isa Symbol &&
+            push!(used_simplex, spec.mixture_weights)
+    end
+    has_mixture = any(spec -> spec.family === :mixture, response_specs)
     for spec in vector_specs
         spec.family === :simplex_dirichlet || continue
         spec.name in used_simplex || error(
             "$prefix: parameter `$(spec.name)` is declared " *
-            "`Dirichlet`-sampled but no multinomial/categorical response " *
-            "uses it; write `Multinomial(N, $(spec.name))` or " *
-            "`Categorical($(spec.name))`, or drop the declaration")
+            "`Dirichlet`-sampled but no multinomial/categorical " *
+            "response" *
+            (has_mixture ? " or mixture weights" : "") *
+            " use$(has_mixture ? "" : "s") it; write `Multinomial(N, " *
+            "$(spec.name))`, `Categorical($(spec.name))`" *
+            (has_mixture ? ", or `MixtureModel(..., $(spec.name))`" : "") *
+            ", or drop the declaration")
     end
     _rk_gate_joint_factors!(response_specs, parameters, assignment_names)
     _rk_gate_name_hygiene!(predictor_specs, parameters, assignments,
