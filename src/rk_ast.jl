@@ -876,6 +876,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
     r2d2s = Dict(rp.predictor => rp for rp in plan.r2d2_priors)
     hs_priors = Dict((p.predictor, p.addressee) =>
         (p.local_scale, p.global_scale) for p in plan.horseshoe_priors)
+    hs_predictors =
+        Set{Symbol}(p.predictor for p in plan.horseshoe_priors)
     response_for = Dict{Symbol,Symbol}()
     for response in plan.responses
         haskey(response_for, response.predictor) ||
@@ -897,7 +899,17 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
     scales = Set{Symbol}(response.discrimination
         for response in plan.responses if response.discrimination isa Symbol)
     for predictor in plan.predictors
-        predictor.name in scales && continue
+        if predictor.name in scales
+            # A discrimination predictor skips the AST (plan-level
+            # translation reads `PopulationPrior` rows only), so a
+            # Horseshoe there would silently drop — fail closed.
+            predictor.name in hs_predictors && error(
+                "RK backend: predictor `$(predictor.name)` is a modeled " *
+                "ordinal scale and carries structured `Horseshoe` " *
+                "priors; Horseshoe on discrimination predictors is out " *
+                "of slice 1 (drop the `Horseshoe` statement)")
+            continue
+        end
         predictor.name in glm_object_predictors && continue
         lhs = get(rename, predictor.name, predictor.name)
         r2d2 = get(r2d2s, predictor.name, nothing)

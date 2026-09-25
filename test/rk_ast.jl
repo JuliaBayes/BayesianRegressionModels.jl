@@ -1121,6 +1121,15 @@ end
     latdefs = [d for d in prog.defs
                if startswith(string(d.args[1].args[1]), "popefs")]
     @test length(latdefs) == 2
+    # A Horseshoe on a discrimination predictor fails closed (it skips
+    # the AST, where the Horseshoe lowers).
+    @test_throws "Horseshoe on discrimination predictors" BRM._rk_emit_ast(
+        BRM._brm_rk_plan(@brm df begin
+            eta ~ 0 + x
+            log(disc) ~ 0 + x
+            effect(disc, x) ~ Horseshoe()
+            c ~ Ordinal(Cumulative(), LogitLink(), eta; discrimination=disc)
+        end), false)
 end
 
 @testset "exact gp AST shape" begin
