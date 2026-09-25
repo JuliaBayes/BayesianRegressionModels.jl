@@ -1812,20 +1812,23 @@ end
                 Expr(:., :Normal, Expr(:tuple, :mu2, :s))),
             :w)))
 
-    # BernoulliLogit components lower to the decomposed twin.
+    # BernoulliLogit components lower to the decomposed twin (both
+    # predictors wrap — logit-scale positions never ride bare).
     dfbern = (; x=[0.5, -1.0, 1.5, 0.0], y=[0, 1, 1, 0])
     brmi = @brm dfbern begin
-        eta ~ 1 + x
-        e ~ Normal(0, 1)
-        y ~ MixtureModel([BernoulliLogit(eta), BernoulliLogit(e)], [0.5, 0.5])
+        eta1 ~ 1 + x
+        eta2 ~ 1 + x
+        y ~ MixtureModel([BernoulliLogit(eta1), BernoulliLogit(eta2)],
+            [0.5, 0.5])
     end
     prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :y,
         Expr(:., :MixtureModel, Expr(:tuple,
             Expr(:vect,
                 Expr(:., :Bernoulli, Expr(:tuple,
-                    Expr(:., :logistic, Expr(:tuple, :eta)))),
-                Expr(:., :Bernoulli, Expr(:tuple, :e))),
+                    Expr(:., :logistic, Expr(:tuple, :eta1)))),
+                Expr(:., :Bernoulli, Expr(:tuple,
+                    Expr(:., :logistic, Expr(:tuple, :eta2))))),
             Expr(:vect, 0.5, 0.5))))
 
     # Binomial components repeat the shared trials expression.

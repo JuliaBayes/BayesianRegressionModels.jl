@@ -1125,12 +1125,23 @@ function _rk_classify_mixture_component(comp::ExprColumn, k::Int,
         lkind, loc = _rk_mixture_location_arg(only(cargs), candidates,
             parameters, assignments, consts, aliases, response,
             "component $k location")
-        plink = link_of(lkind, loc)
-        plink === nothing || plink === :identity || error(
+        # Logit-scale positions never ride bare: a bare parameter or
+        # literal under `BernoulliLogit` is logit-scale, but the
+        # decomposed twin reads its argument as a probability (SB
+        # computes `bernoulli_logit_lpmf` — logistic inside). Only
+        # identity predictors admit (their linear value wraps).
+        lkind === :predictor || error(
+            "$prefix: response `$response` `MixtureModel` component $k " *
+            "`BernoulliLogit` needs an identity-link predictor " *
+            "location (a bare parameter or literal is logit-scale, " *
+            "not a probability); write `Bernoulli(p)` with a sampled " *
+            "parameter or literal probability, or `BernoulliLogit(eta)` " *
+            "with an identity predictor")
+        plink = predictor_link[loc]
+        plink === :identity || error(
             "$prefix: response `$response` `MixtureModel` component $k " *
             "applies `BernoulliLogit` on top of a $plink-link predictor " *
-            "`$loc` (double link); use an identity-link predictor, a " *
-            "sampled parameter, or a literal")
+            "`$loc` (double link); use an identity-link predictor")
         return _RKMixtureComponent(
             :bernoulli_logit, :logit, loc, lkind, nothing, nothing)
     elseif head === Bernoulli

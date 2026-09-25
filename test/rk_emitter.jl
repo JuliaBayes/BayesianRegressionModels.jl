@@ -3745,18 +3745,31 @@ end
     @test [c.family for c in likelihood.mixture_components] ==
         [:binomial_logit, :binomial_logit]
 
-    # Bernoulli components admit both spellings per component.
+    # BernoulliLogit components need predictor locations (logit-scale
+    # positions never ride bare); Bernoulli components take sampled
+    # probabilities (the SB-tested shape).
     dfbern = (; x=[0.5, -1.0, 1.5, 0.0], y=[0, 1, 1, 0])
     brmi = @brm dfbern begin
-        eta ~ 1 + x
-        e ~ Normal(0, 1)
-        y ~ MixtureModel([BernoulliLogit(eta), BernoulliLogit(e)], [0.5, 0.5])
+        eta1 ~ 1 + x
+        eta2 ~ 1 + x
+        y ~ MixtureModel([BernoulliLogit(eta1), BernoulliLogit(eta2)],
+            [0.5, 0.5])
     end
     plan = BRM._brm_rk_plan(brmi)
     likelihood = only(plan.responses)
     comps = likelihood.mixture_components
-    @test [c.location_kind for c in comps] == [:predictor, :param]
-    @test likelihood.predictor === :eta
+    @test [c.location_kind for c in comps] == [:predictor, :predictor]
+    @test likelihood.predictor === :eta1
+    brmi = @brm dfbern begin
+        p1 ~ Beta(2, 2)
+        p2 ~ Beta(2, 2)
+        y ~ MixtureModel([Bernoulli(p1), Bernoulli(p2)], [0.5, 0.5])
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    likelihood = only(plan.responses)
+    @test [c.location_kind for c in likelihood.mixture_components] ==
+        [:param, :param]
+    @test likelihood.predictor === :p1
 end
 
 @testset "fail closed: mixture" begin
@@ -3869,6 +3882,21 @@ end
         (@brm dfbin begin
             y ~ MixtureModel([Bernoulli(0.2), Bernoulli(1.5)], [0.5, 0.5])
         end))
+    # Logit-scale positions never ride bare: BernoulliLogit needs an
+    # identity predictor (a bare parameter would read as a
+    # probability, but SB computes bernoulli_logit_lpmf).
+    @test_throws "needs an identity-link predictor" BRM._brm_rk_plan(
+        (@brm begin
+            e ~ Normal(0, 1)
+            f ~ Normal(0, 1)
+            y ~ MixtureModel([BernoulliLogit(e), BernoulliLogit(f)],
+                [0.5, 0.5])
+        end)((; y=[0, 1, 1, 0])))
+    @test_throws "needs an identity-link predictor" BRM._brm_rk_plan(
+        (@brm begin
+            y ~ MixtureModel([BernoulliLogit(0.5), BernoulliLogit(-0.5)],
+                [0.5, 0.5])
+        end)((; y=[0, 1, 1, 0])))
     # Assignments are scale-only; data columns are never locations.
     @test_throws "assignments are scale-only" BRM._brm_rk_plan(
         (@brm begin
