@@ -201,6 +201,9 @@ end
 end
 
 @testset "group-B student-t AST shape" begin
+    # Dedicated single head (thin-layer decision, pair fam-student):
+    # `LocationScale(mu, s, TDist(nu))` maps to `StudentT.(nu, mu, s)`
+    # by arg reorder (Stan `student_t(nu, mu, sigma)` order).
     brmi = @brm df begin
         mu ~ 1 + x
         s ~ Exponential(1)
@@ -209,18 +212,16 @@ end
     end
     prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :y,
-        Expr(:., :LocationScale, Expr(:tuple, :mu, :s,
-            Expr(:call, :TDist, :nu))))
-    # Literals inline; the fused-heads flag changes nothing (no fused
-    # Student-t head exists).
+        Expr(:., :StudentT, Expr(:tuple, :nu, :mu, :s)))
+    # Literals inline; the fused-heads flag changes nothing (one head
+    # either way).
     brmi = @brm df begin
         mu ~ 1 + x
         y ~ LocationScale(mu, 2.0, TDist(4.0))
     end
     plan = BRM._brm_rk_plan(brmi)
     want = Expr(:call, :.~, :y,
-        Expr(:., :LocationScale, Expr(:tuple, :mu, 2.0,
-            Expr(:call, :TDist, 4.0))))
+        Expr(:., :StudentT, Expr(:tuple, 4.0, :mu, 2.0)))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end

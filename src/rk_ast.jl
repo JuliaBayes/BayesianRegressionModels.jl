@@ -507,12 +507,14 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
             _rk_ast_dotted(:GammaLog, shape, predictor) :
             _rk_ast_dotted(:Gamma, shape, Expr(:call, :./, loc, shape))
     elseif response.family === :student_t
-        # Location-scale form: the base stays a scalar `TDist(nu)`
-        # constructor (literal or sampled-parameter nu) while the outer
-        # call dots over observations. No fused head: the thin-layer
-        # desugar vocabulary has no Student-t whole-vector reduction.
-        _rk_ast_dotted(:LocationScale, predictor, leaf[:scale],
-            Expr(:call, :TDist, leaf[:nu]))
+        # Dedicated single head (thin-layer decision, pair fam-student):
+        # the plan's `LocationScale(mu, s, TDist(nu))` maps to
+        # `StudentT.(nu, mu, sigma)` by arg reorder (Stan
+        # `student_t(nu, mu, sigma)` order), the same class of
+        # normalization as the existing spelling maps. No
+        # `LocationScale` twin: the Normal single-head precedent
+        # governs (no link wrap to bridge).
+        _rk_ast_dotted(:StudentT, leaf[:nu], predictor, leaf[:scale])
     elseif response.family === :categorical_logit
         # Reference-coded: K−1 non-reference etas, class 1 the implicit
         # zero reference (class order follows predictor order).
