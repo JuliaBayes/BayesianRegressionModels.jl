@@ -15,8 +15,8 @@
 using Test
 using BayesianRegressionModels
 using Distributions: Bernoulli, Beta, Binomial, Categorical, Dirichlet,
-                     Exponential, Gamma, Multinomial, Normal, Poisson,
-                     truncated
+                     Exponential, Gamma, MixtureModel, Multinomial, Normal,
+                     Poisson, truncated
 using LogExpFunctions: logistic, logit
 using Statistics: mean
 
@@ -470,7 +470,8 @@ end
         [BRM._RKLikelihoodSpec(:gaussian, :identity, :y, :n, :s, nothing,
             nothing, BRM._RKResponseEvidence(:none, nothing, nothing), :y,
             nothing, nothing, nothing, Symbol[], Symbol[], nothing, nothing,
-            Symbol[], nothing, Symbol[], nothing)],
+            Symbol[], nothing, Symbol[], nothing, BRM._RKMixtureComponent[],
+            nothing)],
         [BRM._RKPredictorSpec(:n, :identity, BRM._RKTermSpec[
             BRM._RKTermSpec(:intercept, Symbol[], (;), :Intercept, :Intercept),
             BRM._RKTermSpec(:continuous, [:n], (;), :n, :n)], :n)],
@@ -1754,4 +1755,112 @@ end
     fused = BRM._rk_emit_ast(plan, true)
     plain = BRM._rk_emit_ast(plan, false)
     @test fused.main == plain.main && fused.defs == plain.defs
+end
+
+@testset "mixture AST shapes" begin
+    # Gaussian driving case: param locations bare, shared log-link scale
+    # predictor wrapped at the use site, literal weights inline.
+    dfmix = (; y=[-2.0, -1.8, 1.9, 2.2])
+    brmi = @brm dfmix begin
+        mu1 ~ Normal(-2, 0.1)
+        mu2 ~ Normal(2, 0.1)
+        log(sigma) ~ 1
+        y ~ MixtureModel([Normal(mu1, sigma), Normal(mu2, sigma)], [0.4, 0.6])
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    exp_sigma = Expr(:., :exp, Expr(:tuple, :sigma))
+    @test prog.main.args[end] == Expr(:call, :.~, :y,
+        Expr(:., :MixtureModel, Expr(:tuple,
+            Expr(:vect,
+                Expr(:., :Normal, Expr(:tuple, :mu1, exp_sigma)),
+                Expr(:., :Normal, Expr(:tuple, :mu2, exp_sigma))),
+            Expr(:vect, 0.4, 0.6))))
+    # Components always spell the decomposed twin (the fused-heads flag
+    # changes nothing for mixtures).
+    fused = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), true)
+    @test fused.main == prog.main && fused.defs == prog.defs
+
+    # All-scalar Poisson mixture: zero predictors, bare params.
+    dfpois = (; y=[0, 1, 3, 5, 2])
+    brmi = @brm dfpois begin
+        lambda1 ~ Exponential(1)
+        lambda2 ~ Exponential(1)
+        y ~ MixtureModel([Poisson(lambda1), Poisson(lambda2)], [0.3, 0.7])
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.main.args[end] == Expr(:call, :.~, :y,
+        Expr(:., :MixtureModel, Expr(:tuple,
+            Expr(:vect,
+                Expr(:., :Poisson, Expr(:tuple, :lambda1)),
+                Expr(:., :Poisson, Expr(:tuple, :lambda2))),
+            Expr(:vect, 0.3, 0.7))))
+
+    # Predictor locations wrap; Dirichlet weights ride bare.
+    dfw = (; x=[0.5, -1.0, 1.5, 0.0], y=[1.0, 2.0, 1.5, 2.5])
+    brmi = @brm dfw begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        s ~ Exponential(1)
+        w ~ Dirichlet(2, 1.0)
+        y ~ MixtureModel([Normal(mu1, s), Normal(mu2, s)], w)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.main.args[end] == Expr(:call, :.~, :y,
+        Expr(:., :MixtureModel, Expr(:tuple,
+            Expr(:vect,
+                Expr(:., :Normal, Expr(:tuple, :mu1, :s)),
+                Expr(:., :Normal, Expr(:tuple, :mu2, :s))),
+            :w)))
+
+    # BernoulliLogit components lower to the decomposed twin (both
+    # predictors wrap — logit-scale positions never ride bare).
+    dfbern = (; x=[0.5, -1.0, 1.5, 0.0], y=[0, 1, 1, 0])
+    brmi = @brm dfbern begin
+        eta1 ~ 1 + x
+        eta2 ~ 1 + x
+        y ~ MixtureModel([BernoulliLogit(eta1), BernoulliLogit(eta2)],
+            [0.5, 0.5])
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.main.args[end] == Expr(:call, :.~, :y,
+        Expr(:., :MixtureModel, Expr(:tuple,
+            Expr(:vect,
+                Expr(:., :Bernoulli, Expr(:tuple,
+                    Expr(:., :logistic, Expr(:tuple, :eta1)))),
+                Expr(:., :Bernoulli, Expr(:tuple,
+                    Expr(:., :logistic, Expr(:tuple, :eta2))))),
+            Expr(:vect, 0.5, 0.5))))
+
+    # Binomial components repeat the shared trials expression.
+    dfbin = (; y=[1, 8, 3, 9], n=[10, 10, 10, 10])
+    brmi = @brm dfbin begin
+        p1 ~ Beta(2, 2)
+        p2 ~ Beta(2, 2)
+        y ~ MixtureModel([Binomial(n, p1), Binomial(n, p2)], [0.5, 0.5])
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.main.args[end] == Expr(:call, :.~, :y,
+        Expr(:., :MixtureModel, Expr(:tuple,
+            Expr(:vect,
+                Expr(:., :Binomial, Expr(:tuple, :n, :p1)),
+                Expr(:., :Binomial, Expr(:tuple, :n, :p2))),
+            Expr(:vect, 0.5, 0.5))))
+
+    # Gamma bare means spell the division form unwrapped.
+    dfgam = (; x=[0.5, -1.0, 1.5, 0.0], y=[1.2, 0.8, 1.1, 2.0])
+    brmi = @brm dfgam begin
+        log(mu) ~ 1 + x
+        a ~ Exponential(1)
+        y ~ MixtureModel([Gamma(a, mu / a), Gamma(2.0, 6.0 / 2.0)],
+            [0.5, 0.5])
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.main.args[end] == Expr(:call, :.~, :y,
+        Expr(:., :MixtureModel, Expr(:tuple,
+            Expr(:vect,
+                Expr(:., :Gamma, Expr(:tuple, :a, Expr(:call, :./,
+                    Expr(:., :exp, Expr(:tuple, :mu)), :a))),
+                Expr(:., :Gamma, Expr(:tuple, 2.0, Expr(:call, :./,
+                    6.0, 2.0)))),
+            Expr(:vect, 0.5, 0.5))))
 end
