@@ -278,7 +278,8 @@ end
 
 _rk_ast_response_uses_scale(family::Symbol) =
     family === :gaussian || family === :nb2_log ||
-    family === :gamma_log || family === :beta_logit
+    family === :gamma_log || family === :beta_logit ||
+    family === :student_t
 
 # The scale-slot body spelling inside a bare response statement. A
 # direct scale (outer name, literal, or the plan-forbidden nothing)
@@ -309,8 +310,9 @@ end
 #
 # `leaf` maps each role to its INLINE spelling: `:predictor` (the
 # predictor name, possibly renamed), `:scale` (the scale value or
-# link-inverted scale predictor), `:trials`/`:weights`/`:lower`/`:upper`
-# (columns or literals inline),
+# link-inverted scale predictor), `:nu` (the Student-t degrees of
+# freedom, literal or name, inline), `:trials`/`:weights`/`:lower`/
+# `:upper` (columns or literals inline),
 # `:extra_predictors`/`:count_columns` (tail predictors / tail count
 # columns inline). Evidence and weights STRUCTURE (which wrapper,
 # whether weighted) still read from `response`.
@@ -504,6 +506,13 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
         fused_heads && wrap_location ?
             _rk_ast_dotted(:GammaLog, shape, predictor) :
             _rk_ast_dotted(:Gamma, shape, Expr(:call, :./, loc, shape))
+    elseif response.family === :student_t
+        # Location-scale form: the base stays a scalar `TDist(nu)`
+        # constructor (literal or sampled-parameter nu) while the outer
+        # call dots over observations. No fused head: the thin-layer
+        # desugar vocabulary has no Student-t whole-vector reduction.
+        _rk_ast_dotted(:LocationScale, predictor, leaf[:scale],
+            Expr(:call, :TDist, leaf[:nu]))
     elseif response.family === :categorical_logit
         # Reference-coded: K−1 non-reference etas, class 1 the implicit
         # zero reference (class order follows predictor order).
@@ -625,6 +634,14 @@ function _rk_ast_response_stmt(response::_RKLikelihoodSpec,
     if _rk_ast_response_uses_scale(family)
         leaf[:scale] =
             _rk_ast_response_scale(response, rename, predictor_link)
+    end
+    if family === :student_t
+        # Scalar-only like the scale slot (sampled/assignment names pass
+        # through; only predictor names alpha-rename).
+        response.nu === nothing && error(
+            "RK backend: internal: response `$(response.response)` plans " *
+            "Student-t without degrees of freedom")
+        leaf[:nu] = response.nu
     end
     if family === :binomial_logit || family === :binomial_probit ||
             family === :binomial_cloglog || family === :multinomial

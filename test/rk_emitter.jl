@@ -543,6 +543,44 @@ end
     @test only(BRM._brm_rk_plan(brmi).responses).scale == 10.0
 end
 
+@testset "group-B student-t plan shapes" begin
+    # The demand-battery shape (t_regression.jl): sampled scale +
+    # sampled nu over an identity predictor.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        s ~ Exponential(1)
+        nu ~ Gamma(2, 0.1)
+        y ~ LocationScale(mu, s, TDist(nu))
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:student_t, :identity)
+    @test likelihood.predictor === :mu
+    @test likelihood.scale === :s
+    @test isnothing(likelihood.scale_predictor)
+    @test likelihood.nu === :nu
+    # Literal scale + literal nu.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        y ~ LocationScale(mu, 2.0, TDist(4.0))
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:student_t, :identity)
+    @test likelihood.scale == 2.0
+    @test likelihood.nu == 4.0
+    # Distributional scale predictor; nu stays scalar.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        log(sigma) ~ 1 + z
+        nu ~ Gamma(2, 0.1)
+        y ~ LocationScale(mu, sigma, TDist(nu))
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:student_t, :identity)
+    @test isnothing(likelihood.scale)
+    @test likelihood.scale_predictor === :sigma
+    @test likelihood.nu === :nu
+end
+
 @testset "weights, evidence, and multi-response" begin
     brmi = @brm df begin
         mu ~ 1 + x
@@ -2250,17 +2288,13 @@ end
 # fail-closed TODAY; later lands flip them one by one into plan-shape
 # testsets above. Group labels match the demand inventory shared with
 # rk:brm (A: links + Beta, now admitted — see "slice-2 group-A plan
-# shapes"; B: robust/survival; C: multivariate/mixture — CategoricalLogit
-# and Ordinal are admitted by the leveled slice, see "leveled plan
-# shapes", so they are not listed here).
+# shapes"; B: survival — robust LocationScale-TDist is admitted, see
+# "group-B student-t plan shapes"; C: multivariate/mixture —
+# CategoricalLogit and Ordinal are admitted by the leveled slice, see
+# "leveled plan shapes", so they are not listed here).
 @testset "fail closed: slice-2 demand (not yet admitted)" begin
-    # Group B: LocationScale-TDist (t_regression.jl).
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
-        mu ~ 1 + x
-        s ~ Exponential(1)
-        nu ~ Gamma(2, 0.1)
-        y ~ LocationScale(mu, s, TDist(nu))
-    end)
+    # Group B: LocationScale-TDist (t_regression.jl) is admitted — see
+    # "group-B student-t plan shapes" above.
     # Group B: censored Weibull/Exponential (surv_cont.jl, surv_model.jl).
     dfu = merge(df, (; u=[1.0, Inf, 0.8, Inf, 1.2, Inf]))
     @test_throws ErrorException BRM._brm_rk_plan(@brm dfu begin
@@ -2351,6 +2385,51 @@ end
         logit(mu) ~ 1 + x
         kappa ~ Gamma(2.0, 1000.0)
         prop ~ Beta(logistic(mu) * kappa, (1 - logistic(mu)) * kappa)
+    end)
+end
+
+# Group-B scope edges: the TDist base is the only admitted
+# `LocationScale` base, the predictor is identity-link only, nu stays
+# scalar (no modeled-nu predictor, no data column), and the new triple
+# carries no weights or evidence.
+@testset "fail closed: group-B scope edges" begin
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        s ~ Exponential(1)
+        y ~ LocationScale(mu, s, Normal(0, 1))
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        s ~ Exponential(1)
+        nu ~ Gamma(2, 0.1)
+        y ~ LocationScale(mu, s, TDist(nu))
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        log(nu_lp) ~ 1
+        s ~ Exponential(1)
+        y ~ LocationScale(mu, s, TDist(nu_lp))
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        s ~ Exponential(1)
+        y ~ LocationScale(mu, s, TDist(n))
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        y ~ LocationScale(mu, 2.0, TDist(0.0))
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        s ~ Exponential(1)
+        nu ~ Gamma(2, 0.1)
+        y ~ weighted(LocationScale(mu, s, TDist(nu)), fweights(n))
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        s ~ Exponential(1)
+        nu ~ Gamma(2, 0.1)
+        y ~ truncated(LocationScale(mu, s, TDist(nu)); lower=0.0)
     end)
 end
 
