@@ -367,6 +367,10 @@ function _rk_ast_glm_object_spec(response::_RKLikelihoodSpec,
     head = response.family === :gaussian ? :NormalIDGLM :
         response.family === :bernoulli_logit ? :BernoulliLogitGLM :
         response.family === :poisson_log ? :PoissonLogGLM : return nothing
+    # `mi()` responses take the plate path (obs-rows-only likelihood over
+    # gathered slices); the whole-vector GLM object has no missingness
+    # machinery.
+    response.mi_jobs === nothing || return nothing
     (response.evidence.kind === :none && response.weights === nothing &&
         response.trials === nothing && response.scale_predictor === nothing &&
         isempty(response.extra_predictors) &&

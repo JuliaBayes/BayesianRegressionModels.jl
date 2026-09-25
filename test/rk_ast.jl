@@ -470,7 +470,7 @@ end
         [BRM._RKLikelihoodSpec(:gaussian, :identity, :y, :n, :s, nothing,
             nothing, BRM._RKResponseEvidence(:none, nothing, nothing), :y,
             nothing, nothing, nothing, Symbol[], Symbol[], nothing, nothing,
-            Symbol[], nothing, Symbol[], nothing)],
+            Symbol[], nothing, Symbol[], nothing, nothing)],
         [BRM._RKPredictorSpec(:n, :identity, BRM._RKTermSpec[
             BRM._RKTermSpec(:intercept, Symbol[], (;), :Intercept, :Intercept),
             BRM._RKTermSpec(:continuous, [:n], (;), :n, :n)], :n)],
