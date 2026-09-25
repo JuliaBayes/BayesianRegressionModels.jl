@@ -5203,6 +5203,50 @@ function _sb_kernel_unbound_cell_idx(positionals, params::Vector{Symbol}, body_s
     found
 end
 
+# A `kernel(...)` positional (or `ragged(...)` first arg) guessing the LINK
+# spelling of a linked linear predictor — `log(Vc)` after `log(Vc) ~ ...`.
+# The classifier below only accepts bare `NamedColumn`s, so that guess fails
+# with a bare-type error; detect it here and redirect to the working spelling
+# instead (snag `linked-lp-kernel-66e54eca`). Returns `(inner_name, link_fn)`
+# on a match, `nothing` otherwise. Fail-closed: the inner name must resolve to
+# a `~` declaration whose LHS link is the SAME function — a `sqrt(Vc)` guess
+# against a `log(Vc)` declaration, or any call over a data column, keeps the
+# generic error.
+function _sb_kernel_link_match(c)
+    c isa ExprColumn || return nothing
+    f = getf(c)
+    f === ragged && return nothing
+    args = getargs(c)
+    length(args) == 1 || return nothing
+    inner = only(args)
+    inner isa NamedColumn || return nothing
+    decl = parent(inner)
+    decl isa ExprColumn && getf(decl) === (~) || return nothing
+    lhs = getargs(decl)[1]
+    lhs isa ExprColumn && getf(lhs) === f || return nothing
+    (name(inner), f)
+end
+
+# Redirect sentence for the classifier errors below; empty when `c` is not a
+# link-spelling guess. The bare public name is bound on the RESPONSE scale
+# (`Vc = exp(log_Vc)`), so the cell must use it directly, not re-apply the
+# inverse link.
+function _sb_kernel_link_advice(c)::String
+    found = _sb_kernel_link_match(c)
+    isnothing(found) && return ""
+    inner_name, f = found
+    inv = try
+        _sb_julia_to_stan_fn(InverseFunctions.inverse(f))
+    catch
+        nothing
+    end
+    binding = isnothing(inv) ? "the response scale" :
+        "the response scale (`$inner_name = $inv($(_sb_lp_emitted_name(inner_name, f)))`)"
+    " If `$inner_name` is the linked predictor declared by `$f($inner_name) ~ ...`, " *
+        "pass the bare name `$inner_name` instead — the plate slices it on " *
+        "$binding, so drop the inverse-link call from the cell."
+end
+
 function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     haskey(kw, :by) && error(
         "sbimpl: kernel(...) do-block form no longer accepts `by=`; grouping is ",
@@ -5262,7 +5306,8 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
             arg_col isa NamedColumn || error(
                 "sbimpl: kernel(...) `ragged(...)`: the first argument must name a ",
                 "linear predictor declared in this @brm block, or a raw data column; ",
-                "got a bare $(typeof(arg_col)).")
+                "got a bare $(typeof(arg_col)).",
+                _sb_kernel_link_advice(arg_col))
             gath_sym = Symbol("kernel_", target, "_", name(arg_col), "_ragged")
             push!(ragged_specs, (i, arg_col, grp_arg, gath_sym))
             push!(dcol_names, gath_sym)
@@ -5272,7 +5317,8 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
             "sbimpl: kernel(...) positional args (after the do-block) must be a data ",
             "column, a per-subject linear predictor declared in this @brm block, or ",
             "a secondary-axis predictor/column wrapped as `ragged(x, group)`; got a ",
-            "bare $(typeof(c)).")
+            "bare $(typeof(c)).",
+            _sb_kernel_link_advice(c))
         k = name(c)
         if parent(c) isa DataColumn
             v = parent(parent(c))
