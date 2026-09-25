@@ -75,16 +75,34 @@ end
 # words, plus the stated scalar-slot pattern (`_s1_3`) when an R2D2
 # predictor states priors on only some slots (unstated slots join the
 # simplex with no statement, so the body differs). Fully-stated bodies
-# — R2D2 or not — share one name.
+# — R2D2 or not — share one name. Horseshoe slots join as `_hs<slot>_…`
+# triples: the thin surface takes literal scales only, so the scales are
+# part of the body identity (unlike Normal `loc`/`s`, which ride formals).
 function _rk_ast_popefs_lattice(predictor::_RKPredictorSpec,
-        stated::Vector{Int}, nscalar::Int)
+        stated::Vector{Int}, nscalar::Int,
+        hs::Dict{Int,Tuple{Float64,Float64}})
     parts = Any["popefs", "normal",
         (_rk_ast_popefs_word(t) for t in predictor.terms)...]
     if !isempty(stated) && length(stated) != nscalar
         push!(parts, "s" * join(sort!(copy(stated)), "_"))
     end
+    if !isempty(hs)
+        words = String[]
+        for slot in sort!(collect(keys(hs)))
+            local_scale, global_scale = hs[slot]
+            push!(words, string(slot, "_",
+                _rk_ast_float_word(local_scale), "_",
+                _rk_ast_float_word(global_scale)))
+        end
+        push!(parts, "hs" * join(words, "_"))
+    end
     Symbol(join(parts, "_"))
 end
+
+# Canonical float rendering for lattice names (Stan-identifier-safe and
+# round-trippable by inspection; `repr` is exact for Float64).
+_rk_ast_float_word(x::Float64) =
+    replace(replace(replace(repr(x), "." => "p"), "-" => "m"), "+" => "")
 
 # Canonical slot assignment (a pure skeleton function): every column
 # slot gets its own `x` formal in term order (sharing a formal across
@@ -201,6 +219,24 @@ end
 # of the surface spelling.
 function _rk_ast_r2d2_decl(r2d2::_RKR2D2Prior, lhs::Symbol)
     Expr(:call, :r2d2, lhs, r2d2.r2, r2d2.phi, r2d2.tau)
+end
+
+# A per-coefficient Horseshoe statement: `b ~ Horseshoe()` at default
+# scales, else `b ~ Horseshoe(local_scale=…, global_scale=…)` with
+# literal scales (the thin surface takes literals only — keywords
+# `local_scale`/`global_scale`, no positionals). The keywords ride
+# BARE (no `:parameters` wrapper): the corpus-55 surface spelling has
+# no semicolon, and the thin lowering only reads bare `:kw` args (a
+# `:parameters` wrapper would silently read as defaults). Shape-verified
+# against `Meta.parse` of the corpus-55 surface spelling.
+function _rk_ast_horseshoe_stmt(coef::Symbol,
+        local_scale::Float64, global_scale::Float64)
+    if local_scale == 1.0 && global_scale == 1.0
+        return Expr(:call, :~, coef, Expr(:call, :Horseshoe))
+    end
+    Expr(:call, :~, coef, Expr(:call, :Horseshoe,
+        Expr(:kw, :local_scale, local_scale),
+        Expr(:kw, :global_scale, global_scale)))
 end
 
 # A spline declaration: `spline_basis(:id, axes...; k=k)` — kind is
@@ -838,6 +874,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
     end
     ranef_draws, ranef_effects = _rk_ast_ranef_names!(plan, taken)
     r2d2s = Dict(rp.predictor => rp for rp in plan.r2d2_priors)
+    hs_priors = Dict((p.predictor, p.addressee) =>
+        (p.local_scale, p.global_scale) for p in plan.horseshoe_priors)
     response_for = Dict{Symbol,Symbol}()
     for response in plan.responses
         haskey(response_for, response.predictor) ||
@@ -874,13 +912,15 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
         # them through an `f` formal. Every other body input — data
         # columns (`x`), outer references (`f`), prior locations/scales
         # (`loc`/`s`) — rides a formal in fixed order, so the body
-        # carries no baked values. An R2D2 predictor states a prior
-        # ONLY for explicit-Normal columns (share-0 overrides); the
-        # rest join the simplex with no statement (their scales derive
-        # at bind), and the stated-slot pattern joins the def name.
-        # Without a scalar statement the affine inlines, so its scalar
-        # coefficients need program-global names; with one the submodel
-        # path namespaces them.
+        # carries no baked values, EXCEPT Horseshoe scales: the thin
+        # surface takes literal scales only, so those bake in and the
+        # horseshoe slot pattern joins the def name. An R2D2 predictor
+        # states a prior ONLY for explicit-Normal columns (share-0
+        # overrides); the rest join the simplex with no statement
+        # (their scales derive at bind), and the stated-slot pattern
+        # joins the def name. Without a scalar statement the affine
+        # inlines, so its scalar coefficients need program-global
+        # names; with one the submodel path namespaces them.
         flat_scalars = r2d2 !== nothing && !any(
             t -> (t.kind === :intercept || t.kind === :continuous ||
                   t.kind === :monotonic) &&
@@ -894,6 +934,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
         scalar_stmts = Expr[]
         stated = Int[]
         stateloc = Dict{Int,Tuple{Float64,Float64}}()
+        hs_slots = Dict{Int,Tuple{Float64,Float64}}()
         for (index, term) in enumerate(predictor.terms)
             kind = term.kind
             if haskey(slots.colf, index)
@@ -921,7 +962,11 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
                 kind === :gp || kind === :dar ||
                 kind === :monotonic_summand) && continue
             slot = slots.number[index]
-            override = if r2d2 === nothing
+            hs_spec = get(hs_priors, (predictor.name, term.addressee),
+                nothing)
+            override = if hs_spec !== nothing
+                nothing
+            elseif r2d2 === nothing
                 key = (predictor.name, term.addressee)
                 haskey(priors, key) || error(
                     "RK backend: internal: no population prior for " *
@@ -947,7 +992,11 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
                 else
                     local_coef = Symbol(:b, slot)
                     coefs[index] = local_coef
-                    if override !== nothing
+                    if hs_spec !== nothing
+                        hs_slots[slot] = hs_spec
+                        push!(scalar_stmts, _rk_ast_horseshoe_stmt(
+                            local_coef, hs_spec[1], hs_spec[2]))
+                    elseif override !== nothing
                         push!(stated, slot)
                         stateloc[slot] = override
                         push!(scalar_stmts, Expr(:call, :~, local_coef,
@@ -1051,8 +1100,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
             for slot in localslots
                 push!(taken, _rk_ast_ns(lhs, Symbol(:b, slot)))
             end
-            defname =
-                _rk_ast_popefs_lattice(predictor, stated, slots.nscalar)
+            defname = _rk_ast_popefs_lattice(
+                predictor, stated, slots.nscalar, hs_slots)
             body = Expr(:block, scalar_stmts...,
                 _rk_ast_affine(predictor, coefs, slots.colf, slots.reff))
             def = Expr(:(=), Expr(:call, defname, formals...), body)

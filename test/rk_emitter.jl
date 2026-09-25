@@ -1109,8 +1109,8 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    # Non-Normal overrides stay closed (Normal-only slice-1 rule).
-    @test_throws "must be `Normal(location, scale)`" BRM._brm_rk_plan(
+    # Non-Normal non-Horseshoe overrides stay closed (slice-1 rule).
+    @test_throws "or `Horseshoe(...)` in slice 1" BRM._brm_rk_plan(
         @brm df begin
             mu ~ 1 + x
             effect(mu, :) ~ r2d2()
@@ -1166,6 +1166,72 @@ end
         @brm df begin
             mu ~ 1 + factor(g; ref=3)
             effect(mu, :) ~ r2d2()
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+end
+
+@testset "horseshoe plan shape" begin
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + z
+        effect(mu, x) ~ Horseshoe()
+        effect(mu, z) ~ Horseshoe(local_scale=0.5, global_scale=0.25)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    hs = plan.horseshoe_priors
+    @test length(hs) == 2
+    @test (hs[1].predictor, hs[1].addressee) == (:mu, :x)
+    @test (hs[1].local_scale, hs[1].global_scale) == (1.0, 1.0)
+    @test (hs[2].predictor, hs[2].addressee) == (:mu, :z)
+    @test (hs[2].local_scale, hs[2].global_scale) == (0.5, 0.25)
+    # Horseshoe addressees carry no PopulationPrior rows (R2D2 precedent);
+    # the intercept keeps its default Normal.
+    @test [(p.predictor, p.addressee) for p in plan.population_priors] ==
+        [(:mu, :Intercept)]
+    @test isempty(plan.r2d2_priors)
+    # r2d2 + Horseshoe on one predictor fails closed (SB mirror).
+    @test_throws "one structured prior" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        effect(mu, :) ~ r2d2()
+        effect(mu, x) ~ Horseshoe()
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Factors fail closed in slice 1 (flatness gate).
+    @test_throws "with a `factor` term" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + factor(g; ref=3)
+        effect(mu, g) ~ Horseshoe()
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # The shared scale validator applies (SB mirror).
+    @test_throws "finite and strictly positive" BRM._brm_rk_plan(
+        @brm df begin
+            mu ~ 1 + x
+            effect(mu, x) ~ Horseshoe(local_scale=0.0)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    @test_throws "accepts no positional arguments" BRM._brm_rk_plan(
+        @brm df begin
+            mu ~ 1 + x
+            effect(mu, x) ~ Horseshoe(0.5)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    # Slice 1 needs literal scales (SB mirror).
+    @test_throws "must be a numeric constant" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        effect(mu, x) ~ Horseshoe(global_scale=s)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Non-flat predictors fail closed (thin flat-slice mirror).
+    @test_throws "intercept/continuous/offset predictors" BRM._brm_rk_plan(
+        @brm df begin
+            mu ~ 1 + x + (1 | g)
+            effect(mu, x) ~ Horseshoe()
             s ~ Exponential(1)
             y ~ Normal(mu, s)
         end)
