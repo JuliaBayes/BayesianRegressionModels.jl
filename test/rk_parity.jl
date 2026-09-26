@@ -35,6 +35,7 @@ using CategoricalArrays: categorical, levelcode
 using DifferentiationInterface: AutoEnzyme
 using Distributions: Beta, Cauchy, Dirichlet, Exponential, Gamma,
                      InverseGaussian, LocationScale, LogNormal, MixtureModel,
+                     NegativeBinomial,
                      Normal, Poisson, TDist, VonMises, cdf, logcdf, logccdf,
                      logpdf
 using Enzyme
@@ -1318,6 +1319,67 @@ end
     b = Vector(nt.lambda)
     lp = exp.(b[1] .+ b[2] .* z_cols.x)
     ll = sum(logpdf.(BRM.ZeroInflatedPoisson.(lp, 0.25), z_cols.c))
+    pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2])
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity negative-binomial sampled p" begin
+    nb_cols = (;
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        c=[1, 3, 0, 2, 5, 1],
+    )
+    brmi = @brm nb_cols begin
+        log(r) ~ 1 + x
+        p ~ Beta(2, 2)
+        c ~ NegativeBinomial(r, p)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 3
+    @test _layout_signature(layout) == [
+        (:coefficient, :r_coef, 2, :identity),
+        (:sampled, :p, 1, :logistic),
+    ]
+    u = [0.2, -0.3, 0.5]
+    nt = constrain(layout, u)
+    b = Vector(nt.r)
+    rr = exp.(b[1] .+ b[2] .* nb_cols.x)
+    ll = sum(logpdf.(NegativeBinomial.(rr, nt.p), nb_cols.c))
+    pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2]) +
+        logpdf(Beta(2, 2), nt.p)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # Jacobian: p's logistic (betas ride identity).
+    @test logjac(layout, u) ≈ log(nt.p) + log1p(-nt.p)
+    @test _rk_query(backend, :posterior, u) ≈
+        ll + pr + log(nt.p) + log1p(-nt.p)
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity negative-binomial literal p" begin
+    nb_cols = (;
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        c=[1, 3, 0, 2, 5, 1],
+    )
+    brmi = @brm nb_cols begin
+        log(r) ~ 1 + x
+        c ~ NegativeBinomial(r, 0.4)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 2
+    @test _layout_signature(layout) == [
+        (:coefficient, :r_coef, 2, :identity),
+    ]
+    u = [0.2, -0.3]
+    nt = constrain(layout, u)
+    b = Vector(nt.r)
+    rr = exp.(b[1] .+ b[2] .* nb_cols.x)
+    ll = sum(logpdf.(NegativeBinomial.(rr, 0.4), nb_cols.c))
     pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2])
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr

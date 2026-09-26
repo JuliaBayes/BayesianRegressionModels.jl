@@ -71,16 +71,15 @@ rev = "7aed40b18bd4cdabb75330f285d5c9b355575ab9"
 
 [sources.ReactiveKernels]
 url = "https://github.com/nsiccha/ReactiveKernels.jl"
-# d94ddcd (2026-09-26, main): the d7fe90f interval stack (the
-# fam-interval slice over the a758d52 betabinom stack: ec0b6a9
-# term-mi over bernoulli-links main 5d6a794, plus the
-# fam-inversegaussian Wald and fam-betabinom BetaBinomial2 response
-# slices) plus the fam-vonmises von-Mises response slice (VonMisesFam
-# + (identity, identity) triple + kappa on the scale/scale-predictor
-# slots + `interval` plan slot + twin heads `VonMises.(mu, kappa)` /
-# `CircularVonMises.(mu, kappa, lo, hi)` + corpus 61_vonmises;
-# includes the 61_interval golden rebless).
+# bb2a2e0 (2026-09-26, main): the 38973ca0 multimembership stack
+# (mm/strata surface + IR + lowering + corpus 62-66 over the d94ddcd
+# vonmises stack with term-monotonic pins) plus the prior-vocab
+# generator+contract+layout (sampled +4, uniform interval, corpus
+# 62-64) and the fam-nb1 NegativeBinomial response slice
+# (NegativeBinomialFam + (LogLink, LogLink) triple + scalar p on the
+# scale slot + twin head `NegativeBinomial.(exp.(eta), p)` + corpus
+# 67_nb1 + N1/N2 SB pins).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "38973ca0ec7cf858ad36032d9c37a2d55fcf299a"
+rev = "bb2a2e0fe05899e1c9af21f858a04338b63510e1"

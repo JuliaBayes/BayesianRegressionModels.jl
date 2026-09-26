@@ -16,7 +16,8 @@ using Test
 using BayesianRegressionModels
 using Distributions: Bernoulli, Beta, Binomial, Categorical, Dirichlet,
                      Exponential, Gamma, InverseGaussian, LocationScale,
-                     LogNormal, MixtureModel, Multinomial, Normal, Poisson,
+                     LogNormal, MixtureModel, Multinomial, NegativeBinomial,
+                     Normal, Poisson,
                      TDist, VonMises, truncated
 using LogExpFunctions: logistic, logit
 using Statistics: mean
@@ -281,6 +282,33 @@ end
     want = Expr(:call, :.~, :c,
         Expr(:., :ZeroInflatedPoisson, Expr(:tuple,
             Expr(:., :exp, Expr(:tuple, :lambda)), 0.25)))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+end
+
+@testset "group-C negative-binomial AST shape" begin
+    # Twin head (thin-layer decision, pair fam-nb1):
+    # `NegativeBinomial(r, p)` maps to
+    # `NegativeBinomial.(exp.(r), p)` (NB2 precedent); no fused head.
+    brmi = @brm df begin
+        log(r) ~ 1 + x
+        p ~ Beta(2, 2)
+        c ~ NegativeBinomial(r, p)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.main.args[end] == Expr(:call, :.~, :c,
+        Expr(:., :NegativeBinomial, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :r)), :p)))
+    # Literals inline; the fused-heads flag changes nothing (one head
+    # either way).
+    brmi = @brm df begin
+        log(r) ~ 1 + x
+        c ~ NegativeBinomial(r, 0.4)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :c,
+        Expr(:., :NegativeBinomial, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :r)), 0.4)))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end

@@ -59,6 +59,11 @@ const _RK_ADMITTED_TRIPLES = Set{Tuple{Symbol,Symbol,Symbol}}([
     # predictor; zi rides its own scalar plan slot (literal /
     # sampled / assignment — no modeled-zi predictor in v1).
     (:zero_inflated_poisson, :log, :log),
+    # Group C (counts): negative-binomial over a log-link shape
+    # predictor; p rides the scalar-only scale slot (literal in
+    # [0, 1] / sampled / assignment — modeled-p and column-p
+    # deferred, ZIP precedent).
+    (:negative_binomial, :log, :log),
     # Group C (wald): inverse-Gaussian over a log-link mean
     # predictor; lambda rides the scalar-only scale slot (literal /
     # sampled / assignment — modeled lambda deferred, Beta-kappa
@@ -78,6 +83,7 @@ const _RK_SLICE2_FAMILIES = Set{Symbol}([
     :bernoulli_probit, :bernoulli_cloglog, :binomial_probit,
     :binomial_cloglog, :beta_logit, :beta_binomial_logit, :student_t,
     :hurdle_poisson, :zero_inflated_poisson, :wald, :von_mises,
+    :negative_binomial,
 ])
 # Leveled simplex responses (multinomial/categorical) name a simplex
 # vector parameter instead of a linear predictor, so they skip the
@@ -148,6 +154,8 @@ struct _RKLikelihoodSpec
                    # group B: :student_t | group C: :hurdle_poisson
                    # (p_zero rides the scale / scale-predictor slots) |
                    # :zero_inflated_poisson |
+                   # :negative_binomial (p rides the scalar-only scale
+                   # slot) |
                    # :wald (lambda rides the scalar-only scale slot) |
                    # :von_mises (kappa rides the
                    # scale / scale-predictor slots, the principal
@@ -660,6 +668,41 @@ function _rk_zero_inflation_argument(arg, parameters::Set{Symbol},
           "assignment")
 end
 
+# Negative-binomial success probability: a literal in [0, 1], a sampled
+# parameter, or a scalar assignment (the ZIP zero-inflation precedent —
+# same gates, `success probability` nouns). A linear predictor in the p
+# slot is a modeled-p response (no driving case); a data column can
+# never be a scalar. Returns the literal value or the resolved name.
+function _rk_nb_probability_argument(arg, parameters::Set{Symbol},
+        assignments::Set{Symbol}, consts::Dict{Symbol,Float64},
+        aliases::Dict{Symbol,Symbol}, response::Symbol,
+        candidates::Vector{Symbol})
+    prefix = "RK backend"
+    arg isa Number && return _rk_probability_literal(arg, response,
+        "success probability")
+    if arg isa NamedColumn
+        name(arg) in candidates && error(
+            "$prefix: response `$response` success probability " *
+            "cannot be the linear predictor `$(name(arg))`; modeled p " *
+            "is out of slice — write a sampled parameter, a literal in " *
+            "[0, 1], or a scalar assignment (if a same-named parameter " *
+            "exists, rename one of them)")
+        parent(arg) isa DataColumn && error(
+            "$prefix: response `$response` success probability " *
+            "cannot be a data column; slice 2 admits a sampled " *
+            "parameter, a scalar assignment, or a literal in [0, 1]")
+        kind, value = _rk_resolve_use_ref(name(arg), consts, aliases,
+            parameters, assignments,
+            "response `$response` success probability")
+        kind === :number && return _rk_probability_literal(value, response,
+            "success probability")
+        return value
+    end
+    error("$prefix: response `$response` success probability must " *
+          "be a sampled parameter, a literal in [0, 1], or a scalar " *
+          "assignment")
+end
+
 # Gamma mean-shape form: `Gamma(alpha, mu/alpha)` with the SAME alpha in
 # both positions (same name, or equal literals) — mirrors the thin
 # layer's double-alpha identity rule. The shape may be a scalar or a
@@ -1074,6 +1117,24 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
             "`NegativeBinomial2(mu, phi)` with a `log(mu)` predictor")
         return (; family=:nb2_log, link=plink, scale=dispersion,
             scale_predictor=dispersion_predictor, trials=nothing, location)
+    elseif head === NegativeBinomial
+        length(args) == 2 || error(
+            "$prefix: response `$response` `NegativeBinomial` needs " *
+            "`(shape, probability)`; write `NegativeBinomial(r, p)` " *
+            "with a `log(r)` predictor")
+        location = _rk_location_arg(args[1], candidates, response, "shape",
+            "itself; write `NegativeBinomial(r, p)` with a `log(r)` " *
+            "predictor (slice 2 has no `NegativeBinomial(exp(..))` spelling)")
+        plink = predictor_link[location]
+        prob = _rk_nb_probability_argument(args[2], parameters, assignments,
+            consts, aliases, response, candidates)
+        triple = (:negative_binomial, plink, plink)
+        triple in _RK_ADMITTED_TRIPLES || error(
+            "$prefix: response `$response` pairs `NegativeBinomial` with " *
+            "a $plink-link predictor; write " *
+            "`NegativeBinomial(r, p)` with a `log(r)` predictor")
+        return (; family=:negative_binomial, link=plink, scale=prob,
+            scale_predictor=nothing, trials=nothing, location)
     elseif head === BinomialLogit
         error("$prefix: response `$response` `BinomialLogit` is out of " *
               "slice 1; write `Binomial(n, p)` with a `logit(p)` " *
@@ -5415,7 +5476,7 @@ function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
     elseif family === :binomial_probit || family === :binomial_cloglog
         (eltype(values) <: Integer && all(>=(0), values)) || error(
             "$prefix: response `$response` must hold non-negative integers")
-    elseif family === :nb2_log
+    elseif family === :nb2_log || family === :negative_binomial
         (eltype(values) <: Integer && all(>=(0), values)) || error(
             "$prefix: response `$response` must hold non-negative integers")
     elseif family === :gamma_log
