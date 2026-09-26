@@ -1073,7 +1073,7 @@ end
         Expr(:call, :~, :mu,
             Expr(:call, :popefs_normal_i_c_c_s1_3_hs2_0p5_1p0, :x,
                 :z, 0.0, 1.0, 0.0, 3.0))
-    # The statement matches the parsed corpus-55 surface spelling exactly.
+    # The statement matches the parsed corpus-56 surface spelling exactly.
     @test rk_strip_lines(prog.defs[1].args[2].args[2]) ==
         rk_parsed_surface("b2 ~ Horseshoe(local_scale=0.5, global_scale=1.0)")
     # Default scales emit the bare `Horseshoe()` call (corpus `b1` shape).

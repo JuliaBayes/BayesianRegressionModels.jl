@@ -54,11 +54,11 @@ const PINS = [
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
-    # through. 45f765e (2026-09-22, canonical): 6873a0e plus the
-    # genuine-dataflow GLM object desugar and its NA plate-AD fix. The
-    # pin also retains 6873a0e's ranef varying_draws/varying_slice
-    # migration.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "45f765ea15061bfce9bd5991ffbd13a77570fdfa"),  # main
+    # through. 4982829 (2026-09-26, canonical): the term-horseshoe
+    # thin-layer slice — per-coefficient `Horseshoe(...)` surface +
+    # `HorseshoePrior` IR + `:positive_stan` Stan-kernel halves — on top
+    # of the 45f765e GLM-object / ranef-migration base.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "49828292f0de223bb38255b996a7602b4a499274"),  # main
 ]
 
 function main()

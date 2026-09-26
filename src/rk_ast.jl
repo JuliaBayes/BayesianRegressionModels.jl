@@ -225,10 +225,10 @@ end
 # scales, else `b ~ Horseshoe(local_scale=…, global_scale=…)` with
 # literal scales (the thin surface takes literals only — keywords
 # `local_scale`/`global_scale`, no positionals). The keywords ride
-# BARE (no `:parameters` wrapper): the corpus-55 surface spelling has
+# BARE (no `:parameters` wrapper): the corpus-56 surface spelling has
 # no semicolon, and the thin lowering only reads bare `:kw` args (a
 # `:parameters` wrapper would silently read as defaults). Shape-verified
-# against `Meta.parse` of the corpus-55 surface spelling.
+# against `Meta.parse` of the corpus-56 surface spelling.
 function _rk_ast_horseshoe_stmt(coef::Symbol,
         local_scale::Float64, global_scale::Float64)
     if local_scale == 1.0 && global_scale == 1.0

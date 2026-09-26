@@ -71,11 +71,12 @@ rev = "7aed40b18bd4cdabb75330f285d5c9b355575ab9"
 
 [sources.ReactiveKernels]
 url = "https://github.com/nsiccha/ReactiveKernels.jl"
-# 45f765e (2026-09-22, canonical): 6873a0e plus the genuine-dataflow GLM
-# object desugar (`NormalIDGLM`, `BernoulliLogitGLM`, `PoissonLogGLM`)
-# and its NA plate-AD fix. This is Digest 2's exact test pin for BRM
-# object emission.
+# 4982829 (2026-09-26, canonical): term-horseshoe thin-layer slice
+# (per-coefficient `Horseshoe(...)` surface + `HorseshoePrior` IR +
+# `:positive_stan` Stan-kernel halves) on the 45f765e GLM-object /
+# ranef-migration base. Digest 2's exact test pin for BRM object
+# emission was 45f765e; horseshoe parity needs this slice.
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "45f765ea15061bfce9bd5991ffbd13a77570fdfa"
+rev = "49828292f0de223bb38255b996a7602b4a499274"

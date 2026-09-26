@@ -33,12 +33,12 @@ using Test
 using BayesianRegressionModels
 using CategoricalArrays: categorical, levelcode
 using DifferentiationInterface: AutoEnzyme
-using Distributions: Beta, Dirichlet, Exponential, LogNormal, Normal, cdf,
-                     logcdf, logccdf, logpdf
+using Distributions: Beta, Cauchy, Dirichlet, Exponential, LogNormal,
+                     Normal, cdf, logcdf, logccdf, logpdf
 using Enzyme
 using LogDensityProblems
 using ReactiveKernels: prepare
-using ReactiveKernelsPPL: constrain, logjac
+using ReactiveKernelsPPL: constrain, coordinate_names, logjac
 using SpecialFunctions: logbeta, loggamma
 
 const BRM = BayesianRegressionModels
@@ -175,6 +175,12 @@ _parity_cols_corr = (;
 )
 _parity_cols_dar = (; t = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
     y = [0.5, -0.2, 0.1, 0.9, 1.4, 1.1])
+# Corpus-56 horseshoe data (thin-layer `test_horseshoe.jl` mirror).
+_parity_cols_hs = (;
+    x1 = [0.5, -1.0, 1.5, 0.0],
+    x2 = [1.0, 0.5, -0.5, 2.0],
+    y = [1.0, 2.0, 1.5, 2.5],
+)
 
 # Sample variance, N−1 normalization (Stan `variance()`); dummy
 # variance without materializing the dummy (SB `brm_cat_variances`).
@@ -506,6 +512,72 @@ end
     jac = u[4] + (log(R2) + log1p(-R2)) + u[6] + _ref_simplex_logjac(u[7:8])
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity horseshoe flat" begin
+    # Thin-layer corpus-56 mirror: per-coefficient triples, no
+    # `:coefficient` block (every coordinate derives in-graph).
+    brmi = @brm _parity_cols_hs begin
+        mu ~ 1 + x1 + x2
+        effect(mu, x1) ~ Horseshoe()
+        effect(mu, x2) ~ Horseshoe(local_scale=0.5, global_scale=0.25)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 8
+    @test _layout_signature(layout) == [
+        (:sampled, :sigma, 1, :exp),
+        (:sampled, :horseshoe_mu_Intercept_normal, 1, :identity),
+        (:sampled, :horseshoe_mu_x1_raw, 1, :identity),
+        (:sampled, :horseshoe_mu_x1_lambda, 1, :exp),
+        (:sampled, :horseshoe_mu_x1_tau, 1, :exp),
+        (:sampled, :horseshoe_mu_x2_raw, 1, :identity),
+        (:sampled, :horseshoe_mu_x2_lambda, 1, :exp),
+        (:sampled, :horseshoe_mu_x2_tau, 1, :exp),
+    ]
+    # Corpus-56 probe by coordinate name (peer's `u` order pinned in
+    # `test_horseshoe.jl`; the map keeps this test order-robust).
+    byname = Dict(
+        :sigma => 0.5, :horseshoe_mu_Intercept_normal => 0.1,
+        :horseshoe_mu_x1_raw => -0.2, :horseshoe_mu_x1_lambda => 0.3,
+        :horseshoe_mu_x1_tau => 0.4, :horseshoe_mu_x2_raw => 0.15,
+        :horseshoe_mu_x2_lambda => -0.35, :horseshoe_mu_x2_tau => 0.25)
+    u = Float64[byname[n] for n in coordinate_names(layout)]
+    nt = constrain(layout, u)
+    sig = nt.sigma
+    b1 = nt.horseshoe_mu_x1_raw * nt.horseshoe_mu_x1_lambda *
+        nt.horseshoe_mu_x1_tau
+    b2 = nt.horseshoe_mu_x2_raw * nt.horseshoe_mu_x2_lambda *
+        nt.horseshoe_mu_x2_tau
+    cols = _parity_cols_hs
+    mu_hat = nt.horseshoe_mu_Intercept_normal .+ b1 .* cols.x1 .+
+        b2 .* cols.x2
+    ll = sum(logpdf.(Normal.(mu_hat, sig), cols.y))
+    # Stan-kernel halves: unnormalized Cauchy + log-Jacobian, NO
+    # truncation renormalizer (SB-settled; the R2D2 `+log(2)` divergence
+    # does NOT apply to the `:positive_stan` horseshoe triples).
+    pr = logpdf(Normal(0, 1), nt.horseshoe_mu_Intercept_normal) +
+        logpdf(Normal(0, 1), nt.horseshoe_mu_x1_raw) +
+        logpdf(Cauchy(0, 1), nt.horseshoe_mu_x1_lambda) +
+        logpdf(Cauchy(0, 1), nt.horseshoe_mu_x1_tau) +
+        logpdf(Normal(0, 1), nt.horseshoe_mu_x2_raw) +
+        logpdf(Cauchy(0, 0.5), nt.horseshoe_mu_x2_lambda) +
+        logpdf(Cauchy(0, 0.25), nt.horseshoe_mu_x2_tau) +
+        logpdf(Exponential(1), sig)
+    jac = log(sig) + log(nt.horseshoe_mu_x1_lambda) +
+        log(nt.horseshoe_mu_x1_tau) + log(nt.horseshoe_mu_x2_lambda) +
+        log(nt.horseshoe_mu_x2_tau)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
+    # SB anchor: BridgeStan full posterior (`propto=false`, Jacobian) at
+    # this point is `-20.29984607289203` (BRM SB structured emission,
+    # StanBlocks `24578c3`, handoff numbers 23:00Z).
+    @test _rk_query(backend, :posterior, u) ≈ -20.29984607289203
     _check_parity_gradient(backend, u)
 end
 
