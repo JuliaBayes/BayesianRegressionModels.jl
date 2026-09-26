@@ -13,7 +13,8 @@ using BayesianRegressionModels
 using CategoricalArrays: categorical
 using Distributions: Bernoulli, Beta, Binomial, Categorical, Cauchy, Dirichlet,
                      Exponential, Gamma, InverseGaussian, LocationScale,
-                     LogNormal, MixtureModel, Multinomial, MvNormal, Normal,
+                     LogNormal, MixtureModel, Multinomial, MvNormal,
+                     NegativeBinomial, Normal,
                      Poisson, TDist, Uniform, VonMises, Weibull, truncated
 using LogExpFunctions: logistic, logit
 using Statistics: mean
@@ -663,6 +664,47 @@ end
     end
     likelihood = only(BRM._brm_rk_plan(brmi).responses)
     @test likelihood.zero_inflation === :zi
+end
+
+@testset "group-C negative-binomial plan shapes" begin
+    # Sampled p over a log-link shape predictor (the SB-established
+    # `NegativeBinomial(r, p)` role, pair fam-nb1).
+    brmi = @brm df begin
+        log(r) ~ 1 + x
+        p ~ Beta(2, 2)
+        c ~ NegativeBinomial(r, p)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:negative_binomial, :log)
+    @test likelihood.predictor === :r
+    @test likelihood.scale === :p
+    @test isnothing(likelihood.scale_predictor)
+    # Literal p inlines.
+    brmi = @brm df begin
+        log(r) ~ 1 + x
+        c ~ NegativeBinomial(r, 0.4)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:negative_binomial, :log)
+    @test likelihood.scale == 0.4
+    @test isnothing(likelihood.scale_predictor)
+    # Bare-literal assignment p folds to a literal; an expression
+    # assignment stays a live name (the thin layer evaluates it).
+    brmi = @brm df begin
+        log(r) ~ 1 + x
+        p = 0.4
+        c ~ NegativeBinomial(r, p)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    @test only(plan.responses).scale == 0.4
+    @test isempty(plan.assignments) # folded literal disappears
+    brmi = @brm df begin
+        log(r) ~ 1 + x
+        p = 2 / 5
+        c ~ NegativeBinomial(r, p)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test likelihood.scale === :p
 end
 
 @testset "group-C wald plan shapes" begin
@@ -2811,6 +2853,46 @@ end
         log(lambda) ~ 1 + x
         zi ~ Beta(2, 2)
         c ~ truncated(ZeroInflatedPoisson(lambda, zi); lower=0, upper=5)
+    end)
+end
+
+@testset "fail closed: group-C negative-binomial scope edges" begin
+    # Identity-link shape predictor (the triple wants log).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        r ~ 1 + x
+        c ~ NegativeBinomial(r, 0.4)
+    end)
+    # Modeled p: out of v1.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(r) ~ 1 + x
+        logit(p) ~ 1 + x
+        c ~ NegativeBinomial(r, p)
+    end)
+    # Data-column p: out of v1 (the SB-established spelling stays
+    # SB-only until the column-p follow-up slice).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(r) ~ 1 + x
+        c ~ NegativeBinomial(r, n)
+    end)
+    # Out-of-range literal p.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(r) ~ 1 + x
+        c ~ NegativeBinomial(r, 1.5)
+    end)
+    # Wrong arity.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(r) ~ 1 + x
+        c ~ NegativeBinomial(r)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(r) ~ 1 + x
+        p ~ Beta(2, 2)
+        c ~ weighted(NegativeBinomial(r, p), fweights(n))
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(r) ~ 1 + x
+        p ~ Beta(2, 2)
+        c ~ truncated(NegativeBinomial(r, p); lower=0, upper=5)
     end)
 end
 
