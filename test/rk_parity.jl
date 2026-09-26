@@ -33,8 +33,9 @@ using Test
 using BayesianRegressionModels
 using CategoricalArrays: categorical, levelcode
 using DifferentiationInterface: AutoEnzyme
-using Distributions: Beta, Dirichlet, Exponential, LogNormal, MixtureModel,
-                     Normal, Poisson, cdf, logcdf, logccdf, logpdf
+using Distributions: Beta, Dirichlet, Exponential, Gamma, LocationScale,
+                     LogNormal, MixtureModel, Normal, Poisson, TDist, cdf,
+                     logcdf, logccdf, logpdf
 using Enzyme
 using LogDensityProblems
 using ReactiveKernels: prepare
@@ -969,6 +970,71 @@ end
     @test _rk_query(backend, :prior, u) ≈ pr
     # Jacobian: sigma's exp only (betas ride identity, the plate
     # carries its Normal args directly with no transform).
+    @test logjac(layout, u) ≈ u[3]
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[3]
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity student-t sampled nu" begin
+    t_cols = (;
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        y=[0.5, -0.2, 0.1, 2.9, 1.4, -1.1],
+    )
+    brmi = @brm t_cols begin
+        mu ~ 1 + x
+        sigma ~ Exponential(1)
+        nu ~ Gamma(2, 0.1)
+        y ~ LocationScale(mu, sigma, TDist(nu))
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 4
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+        (:sampled, :sigma, 1, :exp),
+        (:sampled, :nu, 1, :exp),
+    ]
+    u = [-0.4, 0.3, -0.2, 1.1]
+    nt = constrain(layout, u)
+    b = Vector(nt.mu)
+    lp = b[1] .+ b[2] .* t_cols.x
+    ll = sum(logpdf.(LocationScale.(lp, nt.sigma, TDist(nt.nu)), t_cols.y))
+    pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2]) +
+        logpdf(Exponential(1), nt.sigma) + logpdf(Gamma(2, 0.1), nt.nu)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # Jacobian: sigma's + nu's exp (betas ride identity).
+    @test logjac(layout, u) ≈ u[3] + u[4]
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[3] + u[4]
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity student-t literal nu" begin
+    t_cols = (;
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        y=[0.5, -0.2, 0.1, 2.9, 1.4, -1.1],
+    )
+    brmi = @brm t_cols begin
+        mu ~ 1 + x
+        sigma ~ Exponential(1)
+        y ~ LocationScale(mu, sigma, TDist(4.0))
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 3
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+        (:sampled, :sigma, 1, :exp),
+    ]
+    u = [-0.4, 0.3, -0.2]
+    nt = constrain(layout, u)
+    b = Vector(nt.mu)
+    lp = b[1] .+ b[2] .* t_cols.x
+    ll = sum(logpdf.(LocationScale.(lp, nt.sigma, TDist(4.0)), t_cols.y))
+    pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2]) +
+        logpdf(Exponential(1), nt.sigma)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
     @test logjac(layout, u) ≈ u[3]
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[3]
     _check_parity_gradient(backend, u)

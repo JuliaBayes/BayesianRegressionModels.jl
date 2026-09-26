@@ -54,10 +54,11 @@ const PINS = [
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
-    # through. 49ebaf1 (2026-09-25, main): fam-mixture MixtureModel
-    # log-density admission (MixtureFam contract+generator+twin surface,
-    # corpus 54, intercept-only predictors in scale/location slots).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "49ebaf161af0827af5e1f516cf0de8a2c41d6efd"),  # main
+    # through. 361fd71 (2026-09-26, canonical): the fam-student StudentT
+    # response slice (StudentTFam + identity triple + scalar nu slot +
+    # `StudentT.(nu, mu, sigma)` surface head + corpus 55_student) over
+    # the fam-mixture slice (49ebaf1) and the 45f765e GLM-object base.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "361fd71aaa9711179ffb12465694c0d5c8c881f8"),  # main
 ]
 
 function main()
