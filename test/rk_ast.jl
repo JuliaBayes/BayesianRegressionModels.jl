@@ -510,7 +510,8 @@ end
         6,
         BRM._RKRanefBucket[],
         BRM._RKVectorParameter[],
-        BRM._RKR2D2Prior[])
+        BRM._RKR2D2Prior[],
+        BRM._RKHorseshoePrior[])
     prog = BRM._rk_emit_ast(plan, false)
     @test prog.defs == Expr[
         Expr(:(=), Expr(:call, :popefs_normal_i_c, :x1, :loc1, :s1,
@@ -1069,6 +1070,93 @@ end
     @test prog.main.args[1] == Expr(:(=), :mu, Expr(:call, :.+,
         :mu_b1_, Expr(:call, :.*, :mu_b2, :x),
         Expr(:call, :.*, :mu_b3, :mu_b1)))
+end
+
+@testset "horseshoe AST shape" begin
+    # Mixed Normal/Horseshoe: the Horseshoe slot states a literal-scale
+    # `~ Horseshoe(...)` inside the shared submodel (no loc/s formals);
+    # the hs slot pattern joins the def name (the thin surface takes
+    # literals only, so scales are body identity).
+    brmi = @brm df begin
+        mu ~ 1 + x + z
+        effect(mu, x) ~ Horseshoe(local_scale=0.5)
+        effect(mu, z) ~ Normal(0, 3)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.defs[1] == Expr(:(=),
+        Expr(:call, :popefs_normal_i_c_c_s1_3_hs2_0p5_1p0,
+            :x1, :x2, :loc1, :s1, :loc3, :s3),
+        Expr(:block,
+            Expr(:call, :~, :b1, Expr(:call, :Normal, :loc1, :s1)),
+            Expr(:call, :~, :b2, Expr(:call, :Horseshoe,
+                Expr(:kw, :local_scale, 0.5),
+                Expr(:kw, :global_scale, 1.0))),
+            Expr(:call, :~, :b3, Expr(:call, :Normal, :loc3, :s3)),
+            Expr(:call, :.+, :b1, Expr(:call, :.*, :b2, :x1),
+                Expr(:call, :.*, :b3, :x2))))
+    @test prog.main.args[1] ==
+        Expr(:call, :~, :mu,
+            Expr(:call, :popefs_normal_i_c_c_s1_3_hs2_0p5_1p0, :x,
+                :z, 0.0, 1.0, 0.0, 3.0))
+    # The statement matches the parsed corpus-56 surface spelling exactly.
+    @test rk_strip_lines(prog.defs[1].args[2].args[2]) ==
+        rk_parsed_surface("b2 ~ Horseshoe(local_scale=0.5, global_scale=1.0)")
+    # Default scales emit the bare `Horseshoe()` call (corpus `b1` shape).
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        effect(mu, x) ~ Horseshoe()
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end), false)
+    @test prog.defs[1] == Expr(:(=),
+        Expr(:call, :popefs_normal_i_c_s1_hs2_1p0_1p0,
+            :x1, :loc1, :s1),
+        Expr(:block,
+            Expr(:call, :~, :b1, Expr(:call, :Normal, :loc1, :s1)),
+            Expr(:call, :~, :b2, Expr(:call, :Horseshoe)),
+            Expr(:call, :.+, :b1, Expr(:call, :.*, :b2, :x1))))
+    @test rk_strip_lines(prog.defs[1].args[2].args[2]) ==
+        rk_parsed_surface("b2 ~ Horseshoe()")
+    # Same horseshoe pattern shares one def; different scales split
+    # (the scales are body identity, so they join the lattice name).
+    dfj = (y1=[0.5, -0.2, 0.1], y2=[0.1, 0.3, -0.4], x=[-1.0, 0.0, 1.0])
+    shared = @brm dfj begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        effect(mu1, x) ~ Horseshoe(local_scale=0.5)
+        effect(mu2, x) ~ Horseshoe(local_scale=0.5)
+        s ~ Exponential(1)
+        y1 ~ Normal(mu1, s)
+        y2 ~ Normal(mu2, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(shared), false)
+    latdefs = [d for d in prog.defs
+               if startswith(string(d.args[1].args[1]), "popefs")]
+    @test length(latdefs) == 1
+    split = @brm dfj begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        effect(mu1, x) ~ Horseshoe(local_scale=0.5)
+        effect(mu2, x) ~ Horseshoe(local_scale=0.25)
+        s ~ Exponential(1)
+        y1 ~ Normal(mu1, s)
+        y2 ~ Normal(mu2, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(split), false)
+    latdefs = [d for d in prog.defs
+               if startswith(string(d.args[1].args[1]), "popefs")]
+    @test length(latdefs) == 2
+    # A Horseshoe on a discrimination predictor fails closed (it skips
+    # the AST, where the Horseshoe lowers).
+    @test_throws "Horseshoe on discrimination predictors" BRM._rk_emit_ast(
+        BRM._brm_rk_plan(@brm df begin
+            eta ~ 0 + x
+            log(disc) ~ 0 + x
+            effect(disc, x) ~ Horseshoe()
+            c ~ Ordinal(Cumulative(), LogitLink(), eta; discrimination=disc)
+        end), false)
 end
 
 @testset "exact gp AST shape" begin

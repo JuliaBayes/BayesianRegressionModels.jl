@@ -206,6 +206,18 @@ struct _RKR2D2Prior
     overrides::Dict{Symbol,Tuple{Float64,Float64}}
 end
 
+# Per-coefficient structured Horseshoe (SB `effect(lp, coef) ~ Horseshoe(...)`
+# mirror, SB-literal per-coefficient tau). One per horseshoe addressee; an
+# addressee carrying one has NO `_RKPopulationPrior` row (its prior mass
+# moves here, like the thin-layer `HorseshoePrior`). Scales are validated
+# positive-finite literals (the shared `_brm_horseshoe_spec` rule).
+struct _RKHorseshoePrior
+    predictor::Symbol
+    addressee::Symbol
+    local_scale::Float64
+    global_scale::Float64
+end
+
 struct _RKSampledParameter
     name::Symbol
     family::Symbol # scalar prior family, or :LKJCovarianceFactor for a
@@ -264,6 +276,7 @@ struct _RKStructuralPlan
     ranef_buckets::Vector{_RKRanefBucket}
     vector_parameters::Vector{_RKVectorParameter}
     r2d2_priors::Vector{_RKR2D2Prior}
+    horseshoe_priors::Vector{_RKHorseshoePrior}
 end
 
 # A submodel-bearing emitted program: `defs` are surface-spelling
@@ -2475,34 +2488,47 @@ end
 function _rk_population_priors(brmi::BRMI, design, target::Symbol,
         available::Tuple, factor_addressees::Set{Symbol},
         terms::Vector{_RKTermSpec}, derived::Vector{_RKDerivedSpec},
-        r2d2::Union{Nothing,_BRMR2D2Plan})
+        r2d2::Union{Nothing,_BRMR2D2Plan}, hs_addressees::Set{Symbol})
     prefix = "RK backend"
     overrides = _brm_simple_population_effect_overrides(
         brmi, design; prefix, available_predictors=available)
     # The shared seam resolves (location, scale) without checking the family;
-    # slice 1 admits Normal-only population effects (NativePPL precedent).
+    # slice 1 admits Normal or Horseshoe population effects (Horseshoe cells
+    # are owned by `_rk_horseshoe_priors`, which runs before this function).
     claimed = isnothing(overrides) ? () : overrides
     for expression in claimed
         isnothing(expression) && continue
-        expression isa ExprColumn && getf(expression) === Normal || error(
+        family = expression isa ExprColumn ? getf(expression) : nothing
+        family === Horseshoe && continue
+        family === Normal || error(
             "$prefix: predictor `$target` population-effect priors must " *
-            "be `Normal(location, scale)` in slice 1")
+            "be `Normal(location, scale)` or `Horseshoe(...)` in slice 1")
         isempty(getkwargs(expression)) || error(
             "$prefix: predictor `$target` population-effect `Normal` " *
             "prior cannot have keywords in slice 1")
     end
     # An R2D2 predictor carries its prior mass in the R2D2Prior
     # (explicit Normals ride the overrides map) — no PopulationPrior
-    # rows. The Normal-only validation above still applies.
+    # rows. The family validation above still applies.
     isnothing(r2d2) || return _RKPopulationPrior[]
     n = length(design.columns)
     stated = isnothing(overrides) ? fill(false, n) :
         Bool[!isnothing(cell) for cell in overrides]
-    location, scale = _brm_materialize_normal_effect_priors(overrides, n;
+    # Horseshoe cells carry no Normal (location, scale) — the shared
+    # materializer would misread `Horseshoe()`'s empty args as (0, 1) —
+    # so neutralize them before materializing (their rows are skipped
+    # below; the values are never read).
+    mat_overrides = isnothing(overrides) ? nothing :
+        Any[cell isa ExprColumn && getf(cell) === Horseshoe ? nothing :
+            cell for cell in overrides]
+    location, scale = _brm_materialize_normal_effect_priors(mat_overrides, n;
         prefix)
     groups, order = _rk_design_addressee_groups(design, target; prefix)
     priors = _RKPopulationPrior[]
     for addressee in order
+        # A Horseshoe addressee carries its prior mass in the
+        # HorseshoePrior — no PopulationPrior row (R2D2 precedent).
+        addressee in hs_addressees && continue
         idxs = groups[addressee]
         if addressee in factor_addressees
             all(stated[idxs]) || error(
@@ -3179,14 +3205,17 @@ function _rk_plan_offset_only_predictor(brmi::BRMI, context, target::Symbol,
         get(context.target_obs, target, nothing);
         required=true, row_source,
         implicit_intercept=target in _brm_threshold_located_predictors(brmi))
+    hs_priors = _rk_horseshoe_priors(brmi, design, target, available,
+        terms, nothing)
     priors = _rk_population_priors(brmi, design, target, available,
-        Set{Symbol}(), terms, derived, nothing)
+        Set{Symbol}(), terms, derived, nothing,
+        Set{Symbol}(p.addressee for p in hs_priors))
     r2d2 = _brm_whole_predictor_r2d2(brmi, design, (); prefix,
         available_predictors=available)
     isnothing(r2d2) || error(
         "$prefix: predictor `$target` `r2d2` decomposes nothing (no " *
         "coefficient columns); drop the `r2d2` statement")
-    _RKPredictorSpec(target, link, terms, target), priors, nothing
+    _RKPredictorSpec(target, link, terms, target), priors, nothing, hs_priors
 end
 
 # ---- spline smooth terms (s/t2; mirrors `_sb_s_generic`/`_sb_t2_generic`) ----
@@ -3723,6 +3752,82 @@ function _rk_mo_beta_prior(brmi::BRMI, target::Symbol, addressee::Symbol)
     location, scale = _brm_materialize_normal_effect_priors(
         Any[expression], 1; prefix)
     _RKPopulationPrior(target, addressee, location[1], scale[1])
+end
+
+# Per-coefficient structured Horseshoe (SB `_sb_horseshoe_overrides`
+# mirror): each Horseshoe-addressed population column becomes an
+# `_RKHorseshoePrior` with validated literal scales. Runs BEFORE
+# `_rk_population_priors` (which skips these addressees) and before
+# `_rk_plan_r2d2_prior` (an r2d2 + Horseshoe combination fails closed
+# here, ahead of the R2D2 override composition that would otherwise
+# misread the Horseshoe cells as Normals).
+function _rk_horseshoe_priors(brmi::BRMI, design, target::Symbol,
+        available::Tuple, terms::Vector{_RKTermSpec},
+        r2d2::Union{Nothing,_BRMR2D2Plan})
+    prefix = "RK backend"
+    overrides = _brm_simple_population_effect_overrides(
+        brmi, design; prefix, available_predictors=available)
+    isnothing(overrides) && return _RKHorseshoePrior[]
+    n = length(design.columns)
+    length(overrides) == n || error(
+        "$prefix: internal effect-prior alignment error: " *
+        "$(length(overrides)) priors for $n population columns")
+    hs_cells = [i for i in eachindex(overrides)
+        if overrides[i] isa ExprColumn &&
+            getf(overrides[i]) === Horseshoe]
+    isempty(hs_cells) && return _RKHorseshoePrior[]
+    isnothing(r2d2) || error(
+        "$prefix: predictor `$target` combines " *
+        "`effect($target, :) ~ r2d2(...)` with `~ Horseshoe(...)`; one " *
+        "predictor takes one structured prior in slice 1 (drop one of them)")
+    # The thin flat slice covers intercept/continuous/offset predictors
+    # only (every other term kind fails thin-side); gate it here with
+    # BRM-side attribution.
+    for term in terms
+        term.kind in (:intercept, :continuous, :offset) || error(
+            "$prefix: predictor `$target` carries `~ Horseshoe(...)` " *
+            "with a `$(term.kind)` term; structured Horseshoe covers " *
+            "intercept/continuous/offset predictors in slice 1")
+    end
+    groups, order = _rk_design_addressee_groups(design, target; prefix)
+    labels = Symbol[c.label for c in design.columns]
+    priors = _RKHorseshoePrior[]
+    for addressee in order
+        idxs = groups[addressee]
+        hits = [i for i in idxs if i in hs_cells]
+        isempty(hits) && continue
+        # (Factor addressees are unreachable: the flatness gate above
+        # already fails any Horseshoe predictor containing a factor
+        # term, and factor addressees derive from factor terms.)
+        length(hits) == length(idxs) || error(
+            "$prefix: predictor `$target` addressee `$addressee` mixes " *
+            "Horseshoe columns with non-Horseshoe columns; slice 1 " *
+            "needs one prior per addressee (address the source column, " *
+            "not individual levels)")
+        specs = map(hits) do i
+            _brm_horseshoe_spec("effect($target, $(labels[i]))",
+                getargs(overrides[i]), getkwargs(overrides[i]); prefix)
+        end
+        for (i, spec) in zip(hits, specs)
+            spec.local_scale isa Real || error(
+                "$prefix: `effect($target, $(labels[i])) ~ Horseshoe(...)` " *
+                "`local_scale` must be a numeric constant in slice 1")
+            spec.global_scale isa Real || error(
+                "$prefix: `effect($target, $(labels[i])) ~ Horseshoe(...)` " *
+                "`global_scale` must be a numeric constant in slice 1")
+        end
+        first_local = Float64(specs[1].local_scale)
+        first_global = Float64(specs[1].global_scale)
+        all(s -> Float64(s.local_scale) == first_local &&
+                Float64(s.global_scale) == first_global, specs) || error(
+            "$prefix: predictor `$target` addressee `$addressee` has " *
+            "disagreeing Horseshoe scales across its columns; slice 1 " *
+            "needs one shared Horseshoe per addressee (address the source " *
+            "column, not individual levels)")
+        push!(priors,
+            _RKHorseshoePrior(target, addressee, first_local, first_global))
+    end
+    priors
 end
 
 # Flat whole-predictor R2D2 (SB `_sb_emit_r2d2_params!` /
@@ -4304,12 +4409,15 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
     factor_addressees = Set{Symbol}(t.addressee
         for t in terms if t.kind === :factor)
     r2plan = geometry.r2d2
+    hs_priors = _rk_horseshoe_priors(brmi, design, target, available,
+        terms, r2plan)
     priors = _rk_population_priors(brmi, design, target, available,
-        factor_addressees, terms, derived, r2plan)
+        factor_addressees, terms, derived, r2plan,
+        Set{Symbol}(p.addressee for p in hs_priors))
     r2d2 = isnothing(r2plan) ? nothing :
         _rk_plan_r2d2_prior(brmi, design, r2plan, target, available,
             terms, taken, columns)
-    _RKPredictorSpec(target, link, terms, target), priors, r2d2
+    _RKPredictorSpec(target, link, terms, target), priors, r2d2, hs_priors
 end
 
 function _rk_resolve_use_ref(name::Symbol, consts::Dict{Symbol,Float64},
@@ -6120,16 +6228,18 @@ function _brm_rk_plan(brmi::BRMI)
     predictor_specs = _RKPredictorSpec[]
     prior_specs = _RKPopulationPrior[]
     r2d2_specs = _RKR2D2Prior[]
+    hs_specs = _RKHorseshoePrior[]
     r2d2_vectors = _RKVectorParameter[]
     ranef_buckets, ranef_lookup = _rk_plan_ranef_buckets(
         brmi, context, predictor_order, columns, taken, derived)
     me_sources = Set{Symbol}()
     for target in predictor_order
-        spec, priors, r2d2 = _rk_plan_predictor(
+        spec, priors, r2d2, hs_priors = _rk_plan_predictor(
             brmi, context, target, available, columns, derived, taken,
             ranef_lookup, me_sources)
         push!(predictor_specs, spec)
         append!(prior_specs, priors)
+        append!(hs_specs, hs_priors)
         isnothing(r2d2) && continue
         push!(r2d2_specs, r2d2.prior)
         append!(parameters, r2d2.scalars)
@@ -6371,5 +6481,5 @@ function _brm_rk_plan(brmi::BRMI)
     _RKStructuralPlan(response_specs, predictor_specs, prior_specs,
         parameters, assignments, derived, columns, n_obs, ranef_buckets,
         [vector_specs; implicit_vectors; mo_vectors; r2d2_vectors],
-        r2d2_specs)
+        r2d2_specs, hs_specs)
 end

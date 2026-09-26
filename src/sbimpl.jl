@@ -89,6 +89,8 @@ end
 
 const _SB_VECTOR_PRIOR_CACHE = Dict{String,Function}()
 const _SB_MIXTURE_CACHE = Dict{String,Function}()
+const _SB_HORSESHOE_POPEFS_CACHE = Dict{String,StanBlocks.SlicModel}()
+const _SB_HS_PLANS_KEY = :__brm_hs_plans__
 const _sb_lower_conditioning_rng = StanBlocks.lower_conditioning_rng
 const _sb_upper_conditioning_rng = StanBlocks.upper_conditioning_rng
 const _sb_conditioning_rng = StanBlocks.conditioning_rng
@@ -3313,6 +3315,8 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     ranef_r2d2_overrides = _sb_ranef_r2d2_overrides(brmi, id_buckets,
                                                     effect_overrides)
     r2d2_overrides = _sb_r2d2_overrides(brmi, id_buckets, effect_overrides)
+    hs_overrides = _sb_horseshoe_overrides(brmi, effect_overrides, r2d2_overrides)
+    data[_SB_HS_PLANS_KEY] = hs_overrides
     total_plans = _sb_plan_totals(brmi,prepared,effect_overrides,id_buckets,
         ranef_effect_overrides,total_groups; cv_groups,centered_groups,r2d2_overrides,ranef_r2d2_overrides,
         s2z_groups=s2z_selected)
@@ -3425,6 +3429,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     bindings = pop!(data, _SB_BINDINGS_KEY)
     pop!(data, _SB_TOTAL_PLANS_KEY)
     pop!(data, _SB_S2Z_PLANS_KEY)
+    pop!(data, _SB_HS_PLANS_KEY)
     pop!(data, _SB_HYPER_PLANS_KEY, ())
     pop!(data, _SB_THRESHOLD_LOCATED_KEY)
     preproc_ctx = pop!(data, _SB_PREPROC_KEY, Dict{Symbol,PreprocEntry}())
@@ -6950,6 +6955,11 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
                 _sb_emit_r2d2_popefs!(stmts, data, brmi_key, X_name, pop_name,
                                       length(col_exprs), r2d2_spec,
                                       r2d2.names[brmi_key], overrides)
+            elseif !isnothing(get(get(data, _SB_HS_PLANS_KEY, Dict()),
+                    brmi_key, nothing))
+                hs_spec = data[_SB_HS_PLANS_KEY][brmi_key]
+                _sb_emit_horseshoe_popefs!(stmts, brmi_key, X_name, pop_name,
+                    length(col_exprs), hs_spec, overrides)
             elseif isnothing(overrides)
                 push!(stmts, :($pop_name ~ popefs(; X=$X_name)))
             else
@@ -9847,6 +9857,189 @@ function _sb_emit_r2d2_popefs!(stmts, data, target, X_name, pop_name,
         X=$X_name, beta_loc=$loc_name, beta_scale=$scale_name)))
 end
 
+# ---- structured Horseshoe over population coefficients -----------------------
+#
+# `effect(lp, coef) ~ Horseshoe(...)` lowers each addressed `beta_pop` column
+# to its own bare-form triple (SB-literal per-coefficient tau: the structured
+# form over N columns is exactly N stacked bare scalars). The generic
+# vector-prior path cannot compose it (a hierarchical prior has no
+# `<dist>_lpdf` triad), and StanBlocks rejects hierarchical RHS on indexed
+# targets, so each column gets a scalar temporary inside a generated `popefs`
+# sibling and `beta_pop` assembles them as a transformed vector. Non-Horseshoe
+# siblings keep their own scalar statements (same `_sb_emit_prior!` seam the
+# vector path uses), so mixed Normal/Horseshoe predictors just work. v1 scope:
+# `beta_pop` columns only; categorical contrast blocks and ranef sd/cor
+# addresses fail closed, as does an `r2d2` + Horseshoe combination on one
+# predictor.
+
+# Stan-safe infix for a population label inside generated temporaries
+# (ASCII-only by construction; the column index prefixes it, so collisions
+# across columns are impossible).
+function _sb_hs_temp_infix(label)
+    chars = Char[]
+    for c in String(Symbol(label))
+        if ('a' <= c <= 'z') || ('A' <= c <= 'Z') || c == '_' ||
+                (!isempty(chars) && '0' <= c <= '9')
+            push!(chars, c)
+        else
+            push!(chars, '_')
+        end
+    end
+    isempty(chars) ? "c" : String(chars)
+end
+
+# Structured scales bake into the generated submodel as literals, so model
+# values are refused (the bare form allows them; the RK slice-1 mirror
+# requires literals everywhere, so this gate is cross-side symmetric).
+function _sb_hs_literal_scale(value, what)
+    value isa Real && return Float64(value)
+    error("sbimpl: structured Horseshoe $what must be a numeric constant " *
+          "in v1 (got a model value or expression)")
+end
+
+function _sb_hs_literal_sibling_args!(expr, spelling)
+    for arg in getargs(expr)
+        isnothing(_brm_numeric_constant(arg)) && error(
+            "sbimpl: `$spelling` combines Horseshoe with a sibling prior " *
+            "whose arguments are not numeric constants; structured " *
+            "Horseshoe bakes sibling priors as literals in v1")
+    end
+    for (key, value) in pairs(getkwargs(expr))
+        isnothing(_brm_numeric_constant(value)) && error(
+            "sbimpl: `$spelling` combines Horseshoe with a sibling prior " *
+            "whose `$key` is not a numeric constant; structured Horseshoe " *
+            "bakes sibling priors as literals in v1")
+    end
+    nothing
+end
+
+function _sb_horseshoe_overrides(brmi::BRMI, effect_overrides, r2d2_overrides)
+    for spec in ranef_effect_priors(brmi)
+        spec.family === Horseshoe || continue
+        spelling = spec.class === :sd ? "sd" : "cor"
+        error("sbimpl: `$spelling(...) ~ Horseshoe(...)` is not supported " *
+              "in v1 (structured Horseshoe covers population coefficients " *
+              "only)")
+    end
+    out = Dict{Symbol,NamedTuple}()
+    for lp in sort!(collect(keys(effect_overrides)))
+        pop = _sb_pop_effect_overrides(effect_overrides, lp)
+        for (block, value) in _sb_cat_effect_overrides(effect_overrides, lp)
+            exprs = value isa AbstractVector ? value : (value,)
+            for expr in exprs
+                isnothing(expr) && continue
+                expr isa ExprColumn && getf(expr) === Horseshoe && error(
+                    "sbimpl: `effect($lp, $block) ~ Horseshoe(...)` is not " *
+                    "supported in v1 (structured Horseshoe covers " *
+                    "`beta_pop` columns; categorical contrast blocks fail " *
+                    "closed)")
+            end
+        end
+        isnothing(pop) && continue
+        any(expr -> !isnothing(expr) && expr isa ExprColumn &&
+                getf(expr) === Horseshoe, pop) || continue
+        haskey(r2d2_overrides, lp) && error(
+            "sbimpl: predictor `$lp` combines `effect($lp, :) ~ r2d2(...)` " *
+            "with `~ Horseshoe(...)`; one predictor takes one structured " *
+            "prior in v1 (drop one of them)")
+        labels = try popcoefnames(brmi, lp) catch; nothing end
+        isnothing(labels) && error(
+            "sbimpl: `effect($lp, ...) ~ Horseshoe(...)` names no linear " *
+            "predictor with population coefficients")
+        length(pop) == length(labels) || error(
+            "sbimpl: internal effect-prior alignment error for `$lp`: " *
+            "$(length(pop)) priors for $(length(labels)) population labels")
+        hs = Vector{Union{Nothing,Tuple{Float64,Float64}}}(nothing, length(pop))
+        for (i, expr) in pairs(pop)
+            isnothing(expr) && continue
+            spelling = "effect($lp, $(labels[i]))"
+            if expr isa ExprColumn && getf(expr) === Horseshoe
+                spec = _brm_horseshoe_spec(spelling, getargs(expr),
+                    getkwargs(expr); prefix="sbimpl")
+                hs[i] = (_sb_hs_literal_scale(spec.local_scale,
+                        "`$spelling` `local_scale`"),
+                    _sb_hs_literal_scale(spec.global_scale,
+                        "`$spelling` `global_scale`"))
+            else
+                (expr isa ExprColumn && _sb_is_scalar_prior(expr)) || error(
+                    "sbimpl: `$spelling` combines Horseshoe with a sibling " *
+                    "prior family that has no scalar Stan translation in " *
+                    "v1 (got `$(expr isa ExprColumn ? getf(expr) : typeof(expr))`)")
+                _sb_hs_literal_sibling_args!(expr, spelling)
+            end
+        end
+        out[lp] = (; labels, hs)
+    end
+    out
+end
+
+# One generated `popefs` sibling per distinct column pattern (the
+# `_sb_vector_prior_family` fingerprinted-cache precedent). Scalar temporaries
+# reuse the bare `_sb_horseshoe[_scaled]` submodels verbatim (same unscaled /
+# scaled rule as `_sb_emit_prior!`), so the per-column Stan is the familiar
+# bare expansion; `beta_pop` assembles them in column order. No
+# `n_covariates`: the vector length is fixed by construction, not by data.
+function _sb_horseshoe_popefs_model(specs, overrides)
+    key = repr([(isnothing(hspec) ?
+                 (isnothing(expr) ? (:default,) :
+                  (:plain, getf(expr), getargs(expr), getkwargs(expr))) :
+                 (:hs, hspec[1], hspec[2]))
+                for (hspec, expr) in zip(specs.hs, overrides)])
+    get!(_SB_HORSESHOE_POPEFS_CACHE, key) do
+        temps = Symbol[]
+        body = Any[]
+        for (i, (hspec, expr)) in enumerate(zip(specs.hs, overrides))
+            infix = _sb_hs_temp_infix(specs.labels[i])
+            if !isnothing(hspec)
+                temp = Symbol(:hs_, i, :_, infix)
+                local_scale, global_scale = hspec
+                stmt = if local_scale == 1.0 && global_scale == 1.0
+                    :($temp ~ _sb_horseshoe())
+                else
+                    :($temp ~ _sb_horseshoe_scaled(;
+                        local_scale=$local_scale, global_scale=$global_scale))
+                end
+                push!(body, stmt)
+                push!(temps, temp)
+            elseif isnothing(expr)
+                temp = Symbol(:b_, i, :_, infix)
+                push!(body, :($temp ~ normal(0.0, 1.0)))
+                push!(temps, temp)
+            else
+                temp = Symbol(:b_, i, :_, infix)
+                emitted = Any[]
+                _sb_emit_prior!(emitted, temp, getf(expr), expr) ||
+                    error("sbimpl: internal: sibling prior `$(getf(expr))` " *
+                          "has no Stan translation")
+                length(emitted) == 1 || error(
+                    "sbimpl: internal: sibling prior `$(getf(expr))` " *
+                    "emitted $(length(emitted)) statements, expected one")
+                push!(body, only(emitted))
+                push!(temps, temp)
+            end
+        end
+        push!(body, Expr(:(=), :beta_pop, Expr(:vect, temps...)))
+        push!(body, Expr(:return, :(X * beta_pop)))
+        block = Expr(:block, body...)
+        Core.eval(@__MODULE__,
+            _sb_anchor_slic_macrocalls!(:(StanBlocks.@slic $block)))
+    end
+end
+
+function _sb_emit_horseshoe_popefs!(stmts, target, X_name, pop_name,
+        n_cols, specs, overrides)
+    n_cols == length(specs.labels) || error(
+        "sbimpl: internal horseshoe alignment error for `$target`: " *
+        "$(length(specs.labels)) population labels for $n_cols design columns")
+    length(overrides) == length(specs.labels) || error(
+        "sbimpl: internal horseshoe alignment error for `$target`: " *
+        "$(length(overrides)) priors for $(length(specs.labels)) " *
+        "population labels")
+    model = _sb_horseshoe_popefs_model(specs, overrides)
+    push!(stmts, Expr(:call, :~, pop_name,
+        Expr(:call, model, Expr(:parameters, Expr(:kw, :X, X_name)))))
+end
+
 # ---- group-block prepass (Prepass 2.5) ---------------------------------------
 #
 # Scan brmi.operations for declaring terms anywhere in the model: a term `f`
@@ -11644,7 +11837,8 @@ end
 _sb_is_side_channel_key(k::Symbol) =
     k === _SB_PREPROC_KEY || k === _SB_BINDINGS_KEY ||
     k === _SB_THRESHOLD_LOCATED_KEY || k === _SB_HYPER_PLANS_KEY ||
-    k === _SB_TOTAL_PLANS_KEY || k === _SB_S2Z_PLANS_KEY
+    k === _SB_TOTAL_PLANS_KEY || k === _SB_S2Z_PLANS_KEY ||
+    k === _SB_HS_PLANS_KEY
 
 # Return `k` if `v` is a flat (non-ragged) vector, else `nothing` — replaces
 # the old `_is_flat_vec` Bool predicate so the caller composes via the
