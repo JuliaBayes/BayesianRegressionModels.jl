@@ -256,6 +256,34 @@ end
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end
 
+@testset "group-C ZIP AST shape" begin
+    # Dedicated single head (thin-layer decision, pair fam-zip):
+    # `ZeroInflatedPoisson(lambda, zi)` maps to
+    # `ZeroInflatedPoisson.(exp.(lambda), zi)` (Julia/Stan
+    # `(lambda, zi)` order).
+    brmi = @brm df begin
+        log(lambda) ~ 1 + x
+        zi ~ Beta(2, 2)
+        c ~ ZeroInflatedPoisson(lambda, zi)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.main.args[end] == Expr(:call, :.~, :c,
+        Expr(:., :ZeroInflatedPoisson, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :lambda)), :zi)))
+    # Literals inline; the fused-heads flag changes nothing (one head
+    # either way).
+    brmi = @brm df begin
+        log(lambda) ~ 1 + x
+        c ~ ZeroInflatedPoisson(lambda, 0.25)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :c,
+        Expr(:., :ZeroInflatedPoisson, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :lambda)), 0.25)))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+end
+
 @testset "evidence and weights shapes" begin
     brmi = @brm df begin
         mu ~ 1 + x
@@ -527,7 +555,7 @@ end
             nothing, BRM._RKResponseEvidence(:none, nothing, nothing), :y,
             nothing, nothing, nothing, Symbol[], Symbol[], nothing, nothing,
             Symbol[], nothing, Symbol[], nothing, BRM._RKMixtureComponent[],
-            nothing, nothing, nothing)],
+            nothing, nothing, nothing, nothing)],
         [BRM._RKPredictorSpec(:n, :identity, BRM._RKTermSpec[
             BRM._RKTermSpec(:intercept, Symbol[], (;), :Intercept, :Intercept),
             BRM._RKTermSpec(:continuous, [:n], (;), :n, :n)], :n)],

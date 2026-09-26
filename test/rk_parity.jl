@@ -1216,6 +1216,67 @@ end
     _check_parity_gradient(backend, u)
 end
 
+@testset "rk parity ZIP sampled zi" begin
+    z_cols = (;
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        c=[0, 2, 0, 3, 1, 0],
+    )
+    brmi = @brm z_cols begin
+        log(lambda) ~ 1 + x
+        zi ~ Beta(2, 2)
+        c ~ ZeroInflatedPoisson(lambda, zi)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 3
+    @test _layout_signature(layout) == [
+        (:coefficient, :lambda_coef, 2, :identity),
+        (:sampled, :zi, 1, :logistic),
+    ]
+    u = [0.2, -0.3, 0.5]
+    nt = constrain(layout, u)
+    b = Vector(nt.lambda)
+    lp = exp.(b[1] .+ b[2] .* z_cols.x)
+    ll = sum(logpdf.(BRM.ZeroInflatedPoisson.(lp, nt.zi), z_cols.c))
+    pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2]) +
+        logpdf(Beta(2, 2), nt.zi)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # Jacobian: zi's logistic (betas ride identity).
+    @test logjac(layout, u) ≈ log(nt.zi) + log1p(-nt.zi)
+    @test _rk_query(backend, :posterior, u) ≈
+        ll + pr + log(nt.zi) + log1p(-nt.zi)
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity ZIP literal zi" begin
+    z_cols = (;
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        c=[0, 2, 0, 3, 1, 0],
+    )
+    brmi = @brm z_cols begin
+        log(lambda) ~ 1 + x
+        c ~ ZeroInflatedPoisson(lambda, 0.25)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 2
+    @test _layout_signature(layout) == [
+        (:coefficient, :lambda_coef, 2, :identity),
+    ]
+    u = [0.2, -0.3]
+    nt = constrain(layout, u)
+    b = Vector(nt.lambda)
+    lp = exp.(b[1] .+ b[2] .* z_cols.x)
+    ll = sum(logpdf.(BRM.ZeroInflatedPoisson.(lp, 0.25), z_cols.c))
+    pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2])
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    _check_parity_gradient(backend, u)
+end
+
 @testset "rk parity kernel Ex1 pk1cmt" begin
     brmi = @brm _kernel_pk1cmt_cols begin
         sigma ~ Exponential(1)

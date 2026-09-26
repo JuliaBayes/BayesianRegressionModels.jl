@@ -61,6 +61,9 @@ const PINS = [
     # HurdlePoisson response slice (HurdlePoissonFam + (log, log) triple +
     # p_zero on the scale slot / ScalePredictorRef +
     # `HurdlePoisson.(exp.(eta), p_zero)` surface head + corpus 57_hurdle)
+    # plus the fam-zip ZIP response slice (ZeroInflatedPoissonFam +
+    # (:zero_inflated_poisson,:log,:log) triple + scalar zi slot +
+    # `ZeroInflatedPoisson.(exp.(lambda), zi)` surface head + corpus 58_zip)
     # plus the term-mi Case-A missingness slice (packed obs + Jobs gathers,
     # `mi_jobs` on LikelihoodSpec, managed exemption, bind_data n_obs fix).
     ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "ec0b6a9d90ddefaa41353a039227ff50bb9aefe3"),  # main
