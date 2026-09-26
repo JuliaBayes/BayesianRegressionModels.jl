@@ -75,16 +75,34 @@ end
 # words, plus the stated scalar-slot pattern (`_s1_3`) when an R2D2
 # predictor states priors on only some slots (unstated slots join the
 # simplex with no statement, so the body differs). Fully-stated bodies
-# — R2D2 or not — share one name.
+# — R2D2 or not — share one name. Horseshoe slots join as `_hs<slot>_…`
+# triples: the thin surface takes literal scales only, so the scales are
+# part of the body identity (unlike Normal `loc`/`s`, which ride formals).
 function _rk_ast_popefs_lattice(predictor::_RKPredictorSpec,
-        stated::Vector{Int}, nscalar::Int)
+        stated::Vector{Int}, nscalar::Int,
+        hs::Dict{Int,Tuple{Float64,Float64}})
     parts = Any["popefs", "normal",
         (_rk_ast_popefs_word(t) for t in predictor.terms)...]
     if !isempty(stated) && length(stated) != nscalar
         push!(parts, "s" * join(sort!(copy(stated)), "_"))
     end
+    if !isempty(hs)
+        words = String[]
+        for slot in sort!(collect(keys(hs)))
+            local_scale, global_scale = hs[slot]
+            push!(words, string(slot, "_",
+                _rk_ast_float_word(local_scale), "_",
+                _rk_ast_float_word(global_scale)))
+        end
+        push!(parts, "hs" * join(words, "_"))
+    end
     Symbol(join(parts, "_"))
 end
+
+# Canonical float rendering for lattice names (Stan-identifier-safe and
+# round-trippable by inspection; `repr` is exact for Float64).
+_rk_ast_float_word(x::Float64) =
+    replace(replace(replace(repr(x), "." => "p"), "-" => "m"), "+" => "")
 
 # Canonical slot assignment (a pure skeleton function): every column
 # slot gets its own `x` formal in term order (sharing a formal across
@@ -203,6 +221,24 @@ function _rk_ast_r2d2_decl(r2d2::_RKR2D2Prior, lhs::Symbol)
     Expr(:call, :r2d2, lhs, r2d2.r2, r2d2.phi, r2d2.tau)
 end
 
+# A per-coefficient Horseshoe statement: `b ~ Horseshoe()` at default
+# scales, else `b ~ Horseshoe(local_scale=…, global_scale=…)` with
+# literal scales (the thin surface takes literals only — keywords
+# `local_scale`/`global_scale`, no positionals). The keywords ride
+# BARE (no `:parameters` wrapper): the corpus-56 surface spelling has
+# no semicolon, and the thin lowering only reads bare `:kw` args (a
+# `:parameters` wrapper would silently read as defaults). Shape-verified
+# against `Meta.parse` of the corpus-56 surface spelling.
+function _rk_ast_horseshoe_stmt(coef::Symbol,
+        local_scale::Float64, global_scale::Float64)
+    if local_scale == 1.0 && global_scale == 1.0
+        return Expr(:call, :~, coef, Expr(:call, :Horseshoe))
+    end
+    Expr(:call, :~, coef, Expr(:call, :Horseshoe,
+        Expr(:kw, :local_scale, local_scale),
+        Expr(:kw, :global_scale, global_scale)))
+end
+
 # A spline declaration: `spline_basis(:id, axes...; k=k)` — kind is
 # inferred thin-layer-side from the axis count (1 → `:tps`, 2 → `:t2`),
 # so BRM states only the literal `k` (`Int` for `s`, `(Int, Int)` for
@@ -278,7 +314,8 @@ end
 
 _rk_ast_response_uses_scale(family::Symbol) =
     family === :gaussian || family === :nb2_log ||
-    family === :gamma_log || family === :beta_logit
+    family === :gamma_log || family === :beta_logit ||
+    family === :student_t || family === :hurdle_poisson
 
 # The scale-slot body spelling inside a bare response statement. A
 # direct scale (outer name, literal, or the plan-forbidden nothing)
@@ -309,8 +346,9 @@ end
 #
 # `leaf` maps each role to its INLINE spelling: `:predictor` (the
 # predictor name, possibly renamed), `:scale` (the scale value or
-# link-inverted scale predictor), `:trials`/`:weights`/`:lower`/`:upper`
-# (columns or literals inline),
+# link-inverted scale predictor), `:nu` (the Student-t degrees of
+# freedom, literal or name, inline), `:trials`/`:weights`/`:lower`/
+# `:upper` (columns or literals inline),
 # `:extra_predictors`/`:count_columns` (tail predictors / tail count
 # columns inline). Evidence and weights STRUCTURE (which wrapper,
 # whether weighted) still read from `response`.
@@ -436,26 +474,38 @@ function _rk_ast_glm_object_stmts(spec::_RKGLMObjectSpec)
 end
 
 function _rk_ast_response_dist(response::_RKLikelihoodSpec,
-        leaf::Dict{Symbol,Any}, fused_heads::Bool)
+        leaf::Dict{Symbol,Any}, fused_heads::Bool,
+        wrap_location::Bool=true)
     predictor = leaf[:predictor]
+    # Mixture components reuse these branches per component: predictor
+    # locations wrap (the decomposed twin — fused heads desugar
+    # pre-spine on whole responses only, so components always spell
+    # the wrapper form), while param/literal locations ride the
+    # constrained scale bare. Single-family responses always wrap.
     base = if response.family === :gaussian
         _rk_ast_dotted(:Normal, predictor, leaf[:scale])
     elseif response.family === :bernoulli_logit
         # Triple 2 and triple 3 both lower to the T2 shape: the affine
         # value feeds logistic either way.
-        fused_heads ? _rk_ast_dotted(:BernoulliLogit, predictor) :
-            _rk_ast_dotted(:Bernoulli,
-                _rk_ast_dotted(:logistic, predictor))
+        fused_heads && wrap_location ?
+            _rk_ast_dotted(:BernoulliLogit, predictor) :
+            wrap_location ? _rk_ast_dotted(:Bernoulli,
+                _rk_ast_dotted(:logistic, predictor)) :
+            _rk_ast_dotted(:Bernoulli, predictor)
     elseif response.family === :poisson_log
-        fused_heads ? _rk_ast_dotted(:PoissonLog, predictor) :
-            _rk_ast_dotted(:Poisson, _rk_ast_dotted(:exp, predictor))
+        fused_heads && wrap_location ?
+            _rk_ast_dotted(:PoissonLog, predictor) :
+            wrap_location ? _rk_ast_dotted(:Poisson,
+                _rk_ast_dotted(:exp, predictor)) :
+            _rk_ast_dotted(:Poisson, predictor)
     elseif response.family === :binomial_logit
         # Both triples lower to one spelling: `Binomial.(n,
         # logistic.(p))` with a column or literal `n`.
-        fused_heads ?
+        fused_heads && wrap_location ?
             _rk_ast_dotted(:BinomialLogit, leaf[:trials], predictor) :
-            _rk_ast_dotted(:Binomial, leaf[:trials],
-                _rk_ast_dotted(:logistic, predictor))
+            wrap_location ? _rk_ast_dotted(:Binomial, leaf[:trials],
+                _rk_ast_dotted(:logistic, predictor)) :
+            _rk_ast_dotted(:Binomial, leaf[:trials], predictor)
     elseif response.family === :bernoulli_probit
         _rk_ast_dotted(:Bernoulli,
             _rk_ast_dotted(:probit, predictor))
@@ -474,25 +524,47 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
         # values emit twice. `probit`/`cloglog` are thin-layer link
         # words (peel-and-discard, like `logistic`/`exp`); the AST
         # never calls them.
-        mu_log = _rk_ast_dotted(:logistic, predictor)
+        mu = wrap_location ? _rk_ast_dotted(:logistic, predictor) : predictor
         kappa = leaf[:scale]
-        fused_heads ? _rk_ast_dotted(:BetaLogit, predictor, kappa) :
+        fused_heads && wrap_location ?
+            _rk_ast_dotted(:BetaLogit, predictor, kappa) :
             _rk_ast_dotted(:Beta,
-                Expr(:call, :.*, mu_log, kappa),
-                Expr(:call, :.*, Expr(:call, :.-, 1, mu_log), kappa))
+                Expr(:call, :.*, mu, kappa),
+                Expr(:call, :.*, Expr(:call, :.-, 1, mu), kappa))
     elseif response.family === :nb2_log
-        fused_heads ?
+        fused_heads && wrap_location ?
             _rk_ast_dotted(:NegativeBinomial2Log, predictor, leaf[:scale]) :
-            _rk_ast_dotted(:NegativeBinomial2,
+            wrap_location ? _rk_ast_dotted(:NegativeBinomial2,
                 _rk_ast_dotted(:exp, predictor),
-                leaf[:scale])
+                leaf[:scale]) :
+            _rk_ast_dotted(:NegativeBinomial2, predictor, leaf[:scale])
+    elseif response.family === :hurdle_poisson
+        # Twin head (thin-layer decision, pair fam-hurdle): the plan's
+        # `HurdlePoisson(lambda, p_zero)` maps to
+        # `HurdlePoisson.(exp.(eta), p_zero)` (NB2 precedent); the hu
+        # submodel rides the scale slot under `logistic.`, scalars
+        # inline bare. No fused head: one spelling either way.
+        wrap_location ? _rk_ast_dotted(:HurdlePoisson,
+            _rk_ast_dotted(:exp, predictor),
+            leaf[:scale]) :
+        _rk_ast_dotted(:HurdlePoisson, predictor, leaf[:scale])
     elseif response.family === :gamma_log
         # Mean-shape form: the plan pins both alpha positions identical,
         # so the same value emits twice.
         shape = leaf[:scale]
-        fused_heads ? _rk_ast_dotted(:GammaLog, shape, predictor) :
-            _rk_ast_dotted(:Gamma, shape, Expr(:call, :./,
-                _rk_ast_dotted(:exp, predictor), shape))
+        loc = wrap_location ? _rk_ast_dotted(:exp, predictor) : predictor
+        fused_heads && wrap_location ?
+            _rk_ast_dotted(:GammaLog, shape, predictor) :
+            _rk_ast_dotted(:Gamma, shape, Expr(:call, :./, loc, shape))
+    elseif response.family === :student_t
+        # Dedicated single head (thin-layer decision, pair fam-student):
+        # the plan's `LocationScale(mu, s, TDist(nu))` maps to
+        # `StudentT.(nu, mu, sigma)` by arg reorder (Stan
+        # `student_t(nu, mu, sigma)` order), the same class of
+        # normalization as the existing spelling maps. No
+        # `LocationScale` twin: the Normal single-head precedent
+        # governs (no link wrap to bridge).
+        _rk_ast_dotted(:StudentT, leaf[:nu], predictor, leaf[:scale])
     elseif response.family === :categorical_logit
         # Reference-coded: K−1 non-reference etas, class 1 the implicit
         # zero reference (class order follows predictor order).
@@ -517,6 +589,8 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
             leaf[:count_columns]...)
     elseif response.family === :categorical
         _rk_ast_dotted(:Categorical, predictor)
+    elseif response.family === :mixture
+        _rk_ast_mixture_dist(response, leaf)
     end
     evidence = response.evidence
     dist = if evidence.kind === :truncated
@@ -548,6 +622,52 @@ function _rk_ast_response_levels(response::_RKLikelihoodSpec)
     n
 end
 
+# One mixture component's inline spelling: a synthesized single-family
+# spec (the dist branches read family/evidence/weights from the spec —
+# evidence/weights are always none here — and every role from the leaf,
+# so the spec's own predictor slot is unread) plus that leaf plus the
+# wrap flag (predictor locations wrap, params/literals ride bare).
+function _rk_ast_mixture_leaves(response::_RKLikelihoodSpec,
+        rename::Dict{Symbol,Symbol}, predictor_link::Dict{Symbol,Symbol})
+    map(response.mixture_components) do comp
+        wrap = comp.location_kind === :predictor
+        loc = wrap ? get(rename, comp.location::Symbol, comp.location) :
+            comp.location
+        cspec = _RKLikelihoodSpec(comp.family, comp.link, response.response,
+            response.response, comp.scale, comp.scale_predictor, nothing,
+            _RKResponseEvidence(:none, nothing, nothing), response.label,
+            response.trials, nothing, nothing, Symbol[], Symbol[], nothing,
+            nothing, Symbol[], nothing, Symbol[], nothing,
+            _RKMixtureComponent[], nothing, nothing)
+        cleaf = Dict{Symbol,Any}(:predictor => loc)
+        if _rk_ast_response_uses_scale(comp.family)
+            cleaf[:scale] =
+                _rk_ast_response_scale(cspec, rename, predictor_link)
+        end
+        comp.family === :binomial_logit &&
+            (cleaf[:trials] = response.trials)
+        (cspec, cleaf, wrap)
+    end
+end
+
+# A finite mixture over the planned components: each component emits
+# its decomposed twin (fused heads desugar pre-spine on whole
+# responses only — components always spell the wrapper form), with
+# predictor locations link-wrapped and param/literal locations bare.
+# Literal weights inline; a Dirichlet simplex name rides bare.
+function _rk_ast_mixture_dist(response::_RKLikelihoodSpec,
+        leaf::Dict{Symbol,Any})
+    comp_exprs = map(leaf[:mixture]) do (cspec, cleaf, wrap)
+        _rk_ast_response_dist(cspec, cleaf, false, wrap)
+    end
+    weights = response.mixture_weights
+    weights_expr = weights isa Vector ? Expr(:vect, weights...) :
+        weights isa Symbol ? weights :
+        error("RK backend: internal: response `$(response.response)` " *
+              "mixture has no planned weights")
+    _rk_ast_dotted(:MixtureModel, Expr(:vect, comp_exprs...), weights_expr)
+end
+
 # Build the bare response statement for a response: `resp .~ dist`
 # with every role spelled inline (predictor and scale-predictor names
 # renamed like any other use-site). This is exactly the statement a
@@ -566,6 +686,14 @@ function _rk_ast_response_stmt(response::_RKLikelihoodSpec,
     if _rk_ast_response_uses_scale(family)
         leaf[:scale] =
             _rk_ast_response_scale(response, rename, predictor_link)
+    end
+    if family === :student_t
+        # Scalar-only like the scale slot (sampled/assignment names pass
+        # through; only predictor names alpha-rename).
+        response.nu === nothing && error(
+            "RK backend: internal: response `$(response.response)` plans " *
+            "Student-t without degrees of freedom")
+        leaf[:nu] = response.nu
     end
     if family === :binomial_logit || family === :binomial_probit ||
             family === :binomial_cloglog || family === :multinomial
@@ -590,6 +718,9 @@ function _rk_ast_response_stmt(response::_RKLikelihoodSpec,
     elseif family === :multinomial
         _rk_ast_response_levels(response)
         leaf[:count_columns] = response.count_columns
+    elseif family === :mixture
+        leaf[:mixture] =
+            _rk_ast_mixture_leaves(response, rename, predictor_link)
     end
     Expr(:call, :.~, response.response,
         _rk_ast_response_dist(response, leaf, fused_heads))
@@ -842,6 +973,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
     end
     ranef_draws, ranef_effects = _rk_ast_ranef_names!(plan, taken)
     r2d2s = Dict(rp.predictor => rp for rp in plan.r2d2_priors)
+    hs_priors = Dict((p.predictor, p.addressee) =>
+        (p.local_scale, p.global_scale) for p in plan.horseshoe_priors)
+    hs_predictors =
+        Set{Symbol}(p.predictor for p in plan.horseshoe_priors)
     response_for = Dict{Symbol,Symbol}()
     for response in plan.responses
         haskey(response_for, response.predictor) ||
@@ -863,7 +998,17 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
     scales = Set{Symbol}(response.discrimination
         for response in plan.responses if response.discrimination isa Symbol)
     for predictor in plan.predictors
-        predictor.name in scales && continue
+        if predictor.name in scales
+            # A discrimination predictor skips the AST (plan-level
+            # translation reads `PopulationPrior` rows only), so a
+            # Horseshoe there would silently drop — fail closed.
+            predictor.name in hs_predictors && error(
+                "RK backend: predictor `$(predictor.name)` is a modeled " *
+                "ordinal scale and carries structured `Horseshoe` " *
+                "priors; Horseshoe on discrimination predictors is out " *
+                "of slice 1 (drop the `Horseshoe` statement)")
+            continue
+        end
         predictor.name in glm_object_predictors && continue
         lhs = get(rename, predictor.name, predictor.name)
         r2d2 = get(r2d2s, predictor.name, nothing)
@@ -878,13 +1023,15 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
         # them through an `f` formal. Every other body input — data
         # columns (`x`), outer references (`f`), prior locations/scales
         # (`loc`/`s`) — rides a formal in fixed order, so the body
-        # carries no baked values. An R2D2 predictor states a prior
-        # ONLY for explicit-Normal columns (share-0 overrides); the
-        # rest join the simplex with no statement (their scales derive
-        # at bind), and the stated-slot pattern joins the def name.
-        # Without a scalar statement the affine inlines, so its scalar
-        # coefficients need program-global names; with one the submodel
-        # path namespaces them.
+        # carries no baked values, EXCEPT Horseshoe scales: the thin
+        # surface takes literal scales only, so those bake in and the
+        # horseshoe slot pattern joins the def name. An R2D2 predictor
+        # states a prior ONLY for explicit-Normal columns (share-0
+        # overrides); the rest join the simplex with no statement
+        # (their scales derive at bind), and the stated-slot pattern
+        # joins the def name. Without a scalar statement the affine
+        # inlines, so its scalar coefficients need program-global
+        # names; with one the submodel path namespaces them.
         flat_scalars = r2d2 !== nothing && !any(
             t -> (t.kind === :intercept || t.kind === :continuous ||
                   t.kind === :monotonic) &&
@@ -898,6 +1045,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
         scalar_stmts = Expr[]
         stated = Int[]
         stateloc = Dict{Int,Tuple{Float64,Float64}}()
+        hs_slots = Dict{Int,Tuple{Float64,Float64}}()
         for (index, term) in enumerate(predictor.terms)
             kind = term.kind
             if haskey(slots.colf, index)
@@ -925,7 +1073,11 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
                 kind === :gp || kind === :dar ||
                 kind === :monotonic_summand) && continue
             slot = slots.number[index]
-            override = if r2d2 === nothing
+            hs_spec = get(hs_priors, (predictor.name, term.addressee),
+                nothing)
+            override = if hs_spec !== nothing
+                nothing
+            elseif r2d2 === nothing
                 key = (predictor.name, term.addressee)
                 haskey(priors, key) || error(
                     "RK backend: internal: no population prior for " *
@@ -951,7 +1103,11 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
                 else
                     local_coef = Symbol(:b, slot)
                     coefs[index] = local_coef
-                    if override !== nothing
+                    if hs_spec !== nothing
+                        hs_slots[slot] = hs_spec
+                        push!(scalar_stmts, _rk_ast_horseshoe_stmt(
+                            local_coef, hs_spec[1], hs_spec[2]))
+                    elseif override !== nothing
                         push!(stated, slot)
                         stateloc[slot] = override
                         push!(scalar_stmts, Expr(:call, :~, local_coef,
@@ -1055,8 +1211,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
             for slot in localslots
                 push!(taken, _rk_ast_ns(lhs, Symbol(:b, slot)))
             end
-            defname =
-                _rk_ast_popefs_lattice(predictor, stated, slots.nscalar)
+            defname = _rk_ast_popefs_lattice(
+                predictor, stated, slots.nscalar, hs_slots)
             body = Expr(:block, scalar_stmts...,
                 _rk_ast_affine(predictor, coefs, slots.colf, slots.reff))
             def = Expr(:(=), Expr(:call, defname, formals...), body)

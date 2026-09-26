@@ -15,8 +15,8 @@
 using Test
 using BayesianRegressionModels
 using Distributions: Bernoulli, Beta, Binomial, Categorical, Dirichlet,
-                     Exponential, Gamma, Multinomial, Normal, Poisson,
-                     truncated
+                     Exponential, Gamma, LocationScale, MixtureModel,
+                     Multinomial, Normal, Poisson, TDist, truncated
 using LogExpFunctions: logistic, logit
 using Statistics: mean
 
@@ -198,6 +198,62 @@ end
         Expr(:., :Beta, Expr(:tuple,
             Expr(:call, :.*, mu_log, :kappa),
             Expr(:call, :.*, Expr(:call, :.-, 1, mu_log), :kappa))))
+end
+
+@testset "group-B student-t AST shape" begin
+    # Dedicated single head (thin-layer decision, pair fam-student):
+    # `LocationScale(mu, s, TDist(nu))` maps to `StudentT.(nu, mu, s)`
+    # by arg reorder (Stan `student_t(nu, mu, sigma)` order).
+    brmi = @brm df begin
+        mu ~ 1 + x
+        s ~ Exponential(1)
+        nu ~ Gamma(2, 0.1)
+        y ~ LocationScale(mu, s, TDist(nu))
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.main.args[end] == Expr(:call, :.~, :y,
+        Expr(:., :StudentT, Expr(:tuple, :nu, :mu, :s)))
+    # Literals inline; the fused-heads flag changes nothing (one head
+    # either way).
+    brmi = @brm df begin
+        mu ~ 1 + x
+        y ~ LocationScale(mu, 2.0, TDist(4.0))
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :y,
+        Expr(:., :StudentT, Expr(:tuple, 4.0, :mu, 2.0)))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+end
+
+@testset "group-C hurdle-poisson AST shape" begin
+    # Twin head (thin-layer decision, pair fam-hurdle):
+    # `HurdlePoisson(lambda, p_zero)` maps to
+    # `HurdlePoisson.(exp.(lambda), logistic.(p_zero))` (NB2
+    # precedent); no fused head.
+    brmi = @brm df begin
+        log(lambda) ~ 1 + x
+        logit(p_zero) ~ 1 + x
+        c ~ HurdlePoisson(lambda, p_zero)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.main.args[end] == Expr(:call, :.~, :c,
+        Expr(:., :HurdlePoisson, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :lambda)),
+            Expr(:., :logistic, Expr(:tuple, :p_zero)))))
+    # Scalar p_zero inlines bare; the fused-heads flag changes nothing
+    # (one head either way).
+    brmi = @brm df begin
+        log(lambda) ~ 1 + x
+        p0 ~ Beta(2, 2)
+        c ~ HurdlePoisson(lambda, p0)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :c,
+        Expr(:., :HurdlePoisson, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :lambda)), :p0)))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end
 
 @testset "evidence and weights shapes" begin
@@ -470,7 +526,8 @@ end
         [BRM._RKLikelihoodSpec(:gaussian, :identity, :y, :n, :s, nothing,
             nothing, BRM._RKResponseEvidence(:none, nothing, nothing), :y,
             nothing, nothing, nothing, Symbol[], Symbol[], nothing, nothing,
-            Symbol[], nothing, Symbol[], nothing, nothing)],
+            Symbol[], nothing, Symbol[], nothing, BRM._RKMixtureComponent[],
+            nothing, nothing, nothing)],
         [BRM._RKPredictorSpec(:n, :identity, BRM._RKTermSpec[
             BRM._RKTermSpec(:intercept, Symbol[], (;), :Intercept, :Intercept),
             BRM._RKTermSpec(:continuous, [:n], (;), :n, :n)], :n)],
@@ -483,7 +540,8 @@ end
         6,
         BRM._RKRanefBucket[],
         BRM._RKVectorParameter[],
-        BRM._RKR2D2Prior[])
+        BRM._RKR2D2Prior[],
+        BRM._RKHorseshoePrior[])
     prog = BRM._rk_emit_ast(plan, false)
     @test prog.defs == Expr[
         Expr(:(=), Expr(:call, :popefs_normal_i_c, :x1, :loc1, :s1,
@@ -1042,6 +1100,93 @@ end
     @test prog.main.args[1] == Expr(:(=), :mu, Expr(:call, :.+,
         :mu_b1_, Expr(:call, :.*, :mu_b2, :x),
         Expr(:call, :.*, :mu_b3, :mu_b1)))
+end
+
+@testset "horseshoe AST shape" begin
+    # Mixed Normal/Horseshoe: the Horseshoe slot states a literal-scale
+    # `~ Horseshoe(...)` inside the shared submodel (no loc/s formals);
+    # the hs slot pattern joins the def name (the thin surface takes
+    # literals only, so scales are body identity).
+    brmi = @brm df begin
+        mu ~ 1 + x + z
+        effect(mu, x) ~ Horseshoe(local_scale=0.5)
+        effect(mu, z) ~ Normal(0, 3)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.defs[1] == Expr(:(=),
+        Expr(:call, :popefs_normal_i_c_c_s1_3_hs2_0p5_1p0,
+            :x1, :x2, :loc1, :s1, :loc3, :s3),
+        Expr(:block,
+            Expr(:call, :~, :b1, Expr(:call, :Normal, :loc1, :s1)),
+            Expr(:call, :~, :b2, Expr(:call, :Horseshoe,
+                Expr(:kw, :local_scale, 0.5),
+                Expr(:kw, :global_scale, 1.0))),
+            Expr(:call, :~, :b3, Expr(:call, :Normal, :loc3, :s3)),
+            Expr(:call, :.+, :b1, Expr(:call, :.*, :b2, :x1),
+                Expr(:call, :.*, :b3, :x2))))
+    @test prog.main.args[1] ==
+        Expr(:call, :~, :mu,
+            Expr(:call, :popefs_normal_i_c_c_s1_3_hs2_0p5_1p0, :x,
+                :z, 0.0, 1.0, 0.0, 3.0))
+    # The statement matches the parsed corpus-56 surface spelling exactly.
+    @test rk_strip_lines(prog.defs[1].args[2].args[2]) ==
+        rk_parsed_surface("b2 ~ Horseshoe(local_scale=0.5, global_scale=1.0)")
+    # Default scales emit the bare `Horseshoe()` call (corpus `b1` shape).
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        effect(mu, x) ~ Horseshoe()
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end), false)
+    @test prog.defs[1] == Expr(:(=),
+        Expr(:call, :popefs_normal_i_c_s1_hs2_1p0_1p0,
+            :x1, :loc1, :s1),
+        Expr(:block,
+            Expr(:call, :~, :b1, Expr(:call, :Normal, :loc1, :s1)),
+            Expr(:call, :~, :b2, Expr(:call, :Horseshoe)),
+            Expr(:call, :.+, :b1, Expr(:call, :.*, :b2, :x1))))
+    @test rk_strip_lines(prog.defs[1].args[2].args[2]) ==
+        rk_parsed_surface("b2 ~ Horseshoe()")
+    # Same horseshoe pattern shares one def; different scales split
+    # (the scales are body identity, so they join the lattice name).
+    dfj = (y1=[0.5, -0.2, 0.1], y2=[0.1, 0.3, -0.4], x=[-1.0, 0.0, 1.0])
+    shared = @brm dfj begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        effect(mu1, x) ~ Horseshoe(local_scale=0.5)
+        effect(mu2, x) ~ Horseshoe(local_scale=0.5)
+        s ~ Exponential(1)
+        y1 ~ Normal(mu1, s)
+        y2 ~ Normal(mu2, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(shared), false)
+    latdefs = [d for d in prog.defs
+               if startswith(string(d.args[1].args[1]), "popefs")]
+    @test length(latdefs) == 1
+    split = @brm dfj begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        effect(mu1, x) ~ Horseshoe(local_scale=0.5)
+        effect(mu2, x) ~ Horseshoe(local_scale=0.25)
+        s ~ Exponential(1)
+        y1 ~ Normal(mu1, s)
+        y2 ~ Normal(mu2, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(split), false)
+    latdefs = [d for d in prog.defs
+               if startswith(string(d.args[1].args[1]), "popefs")]
+    @test length(latdefs) == 2
+    # A Horseshoe on a discrimination predictor fails closed (it skips
+    # the AST, where the Horseshoe lowers).
+    @test_throws "Horseshoe on discrimination predictors" BRM._rk_emit_ast(
+        BRM._brm_rk_plan(@brm df begin
+            eta ~ 0 + x
+            log(disc) ~ 0 + x
+            effect(disc, x) ~ Horseshoe()
+            c ~ Ordinal(Cumulative(), LogitLink(), eta; discrimination=disc)
+        end), false)
 end
 
 @testset "exact gp AST shape" begin
@@ -1781,4 +1926,110 @@ end
     @test BRM._rk_emit_ast(plain_plan, true).main.args[end] ==
         Expr(:call, :~, :y,
             Expr(:call, :NormalIDGLM, :y_X, :mu_alpha, :mu_beta, :s))
+@testset "mixture AST shapes" begin
+    # Gaussian driving case: param locations bare, shared log-link scale
+    # predictor wrapped at the use site, literal weights inline.
+    dfmix = (; y=[-2.0, -1.8, 1.9, 2.2])
+    brmi = @brm dfmix begin
+        mu1 ~ Normal(-2, 0.1)
+        mu2 ~ Normal(2, 0.1)
+        log(sigma) ~ 1
+        y ~ MixtureModel([Normal(mu1, sigma), Normal(mu2, sigma)], [0.4, 0.6])
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    exp_sigma = Expr(:., :exp, Expr(:tuple, :sigma))
+    @test prog.main.args[end] == Expr(:call, :.~, :y,
+        Expr(:., :MixtureModel, Expr(:tuple,
+            Expr(:vect,
+                Expr(:., :Normal, Expr(:tuple, :mu1, exp_sigma)),
+                Expr(:., :Normal, Expr(:tuple, :mu2, exp_sigma))),
+            Expr(:vect, 0.4, 0.6))))
+    # Components always spell the decomposed twin (the fused-heads flag
+    # changes nothing for mixtures).
+    fused = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), true)
+    @test fused.main == prog.main && fused.defs == prog.defs
+
+    # All-scalar Poisson mixture: zero predictors, bare params.
+    dfpois = (; y=[0, 1, 3, 5, 2])
+    brmi = @brm dfpois begin
+        lambda1 ~ Exponential(1)
+        lambda2 ~ Exponential(1)
+        y ~ MixtureModel([Poisson(lambda1), Poisson(lambda2)], [0.3, 0.7])
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.main.args[end] == Expr(:call, :.~, :y,
+        Expr(:., :MixtureModel, Expr(:tuple,
+            Expr(:vect,
+                Expr(:., :Poisson, Expr(:tuple, :lambda1)),
+                Expr(:., :Poisson, Expr(:tuple, :lambda2))),
+            Expr(:vect, 0.3, 0.7))))
+
+    # Predictor locations wrap; Dirichlet weights ride bare.
+    dfw = (; x=[0.5, -1.0, 1.5, 0.0], y=[1.0, 2.0, 1.5, 2.5])
+    brmi = @brm dfw begin
+        mu1 ~ 1 + x
+        mu2 ~ 1 + x
+        s ~ Exponential(1)
+        w ~ Dirichlet(2, 1.0)
+        y ~ MixtureModel([Normal(mu1, s), Normal(mu2, s)], w)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.main.args[end] == Expr(:call, :.~, :y,
+        Expr(:., :MixtureModel, Expr(:tuple,
+            Expr(:vect,
+                Expr(:., :Normal, Expr(:tuple, :mu1, :s)),
+                Expr(:., :Normal, Expr(:tuple, :mu2, :s))),
+            :w)))
+
+    # BernoulliLogit components lower to the decomposed twin (both
+    # predictors wrap — logit-scale positions never ride bare).
+    dfbern = (; x=[0.5, -1.0, 1.5, 0.0], y=[0, 1, 1, 0])
+    brmi = @brm dfbern begin
+        eta1 ~ 1 + x
+        eta2 ~ 1 + x
+        y ~ MixtureModel([BernoulliLogit(eta1), BernoulliLogit(eta2)],
+            [0.5, 0.5])
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.main.args[end] == Expr(:call, :.~, :y,
+        Expr(:., :MixtureModel, Expr(:tuple,
+            Expr(:vect,
+                Expr(:., :Bernoulli, Expr(:tuple,
+                    Expr(:., :logistic, Expr(:tuple, :eta1)))),
+                Expr(:., :Bernoulli, Expr(:tuple,
+                    Expr(:., :logistic, Expr(:tuple, :eta2))))),
+            Expr(:vect, 0.5, 0.5))))
+
+    # Binomial components repeat the shared trials expression.
+    dfbin = (; y=[1, 8, 3, 9], n=[10, 10, 10, 10])
+    brmi = @brm dfbin begin
+        p1 ~ Beta(2, 2)
+        p2 ~ Beta(2, 2)
+        y ~ MixtureModel([Binomial(n, p1), Binomial(n, p2)], [0.5, 0.5])
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.main.args[end] == Expr(:call, :.~, :y,
+        Expr(:., :MixtureModel, Expr(:tuple,
+            Expr(:vect,
+                Expr(:., :Binomial, Expr(:tuple, :n, :p1)),
+                Expr(:., :Binomial, Expr(:tuple, :n, :p2))),
+            Expr(:vect, 0.5, 0.5))))
+
+    # Gamma bare means spell the division form unwrapped.
+    dfgam = (; x=[0.5, -1.0, 1.5, 0.0], y=[1.2, 0.8, 1.1, 2.0])
+    brmi = @brm dfgam begin
+        log(mu) ~ 1 + x
+        a ~ Exponential(1)
+        y ~ MixtureModel([Gamma(a, mu / a), Gamma(2.0, 6.0 / 2.0)],
+            [0.5, 0.5])
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.main.args[end] == Expr(:call, :.~, :y,
+        Expr(:., :MixtureModel, Expr(:tuple,
+            Expr(:vect,
+                Expr(:., :Gamma, Expr(:tuple, :a, Expr(:call, :./,
+                    Expr(:., :exp, Expr(:tuple, :mu)), :a))),
+                Expr(:., :Gamma, Expr(:tuple, 2.0, Expr(:call, :./,
+                    6.0, 2.0)))),
+            Expr(:vect, 0.5, 0.5))))
 end

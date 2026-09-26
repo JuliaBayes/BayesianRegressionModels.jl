@@ -54,11 +54,14 @@ const PINS = [
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
-    # through. 45f765e (2026-09-22, canonical): 6873a0e plus the
-    # genuine-dataflow GLM object desugar and its NA plate-AD fix. The
-    # pin also retains 6873a0e's ranef varying_draws/varying_slice
-    # migration.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "45f765ea15061bfce9bd5991ffbd13a77570fdfa"),  # main
+    # through. 8dfe240 (2026-09-26, main): the term-horseshoe thin-layer
+    # slice (canonical 4982829: per-coefficient `Horseshoe(...)` surface +
+    # `HorseshoePrior` IR + `:positive_stan` Stan-kernel halves, over the
+    # 361fd71 fam-student slice and the 45f765e GLM-object base) plus the
+    # HurdlePoisson response slice (HurdlePoissonFam + (log, log) triple +
+    # p_zero on the scale slot / ScalePredictorRef +
+    # `HurdlePoisson.(exp.(eta), p_zero)` surface head + corpus 57_hurdle).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "8dfe240fc637421967da869d72af4e5b4ec66764"),  # main
 ]
 
 function main()

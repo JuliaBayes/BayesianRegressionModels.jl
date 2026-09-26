@@ -33,12 +33,14 @@ using Test
 using BayesianRegressionModels
 using CategoricalArrays: categorical, levelcode
 using DifferentiationInterface: AutoEnzyme
-using Distributions: Beta, Dirichlet, Exponential, LogNormal, Normal, cdf,
-                     logcdf, logccdf, logpdf
+using Distributions: Beta, Cauchy, Dirichlet, Exponential, Gamma,
+                     LocationScale, LogNormal, MixtureModel, Normal, Poisson,
+                     TDist, cdf, logcdf, logccdf, logpdf
 using Enzyme
 using LogDensityProblems
+using LogExpFunctions: logistic, logit
 using ReactiveKernels: prepare
-using ReactiveKernelsPPL: constrain, logjac
+using ReactiveKernelsPPL: constrain, coordinate_names, logjac
 using SpecialFunctions: logbeta, loggamma
 
 const BRM = BayesianRegressionModels
@@ -175,6 +177,12 @@ _parity_cols_corr = (;
 )
 _parity_cols_dar = (; t = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
     y = [0.5, -0.2, 0.1, 0.9, 1.4, 1.1])
+# Corpus-56 horseshoe data (thin-layer `test_horseshoe.jl` mirror).
+_parity_cols_hs = (;
+    x1 = [0.5, -1.0, 1.5, 0.0],
+    x2 = [1.0, 0.5, -0.5, 2.0],
+    y = [1.0, 2.0, 1.5, 2.5],
+)
 
 # Sample variance, N−1 normalization (Stan `variance()`); dummy
 # variance without materializing the dummy (SB `brm_cat_variances`).
@@ -506,6 +514,72 @@ end
     jac = u[4] + (log(R2) + log1p(-R2)) + u[6] + _ref_simplex_logjac(u[7:8])
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity horseshoe flat" begin
+    # Thin-layer corpus-56 mirror: per-coefficient triples, no
+    # `:coefficient` block (every coordinate derives in-graph).
+    brmi = @brm _parity_cols_hs begin
+        mu ~ 1 + x1 + x2
+        effect(mu, x1) ~ Horseshoe()
+        effect(mu, x2) ~ Horseshoe(local_scale=0.5, global_scale=0.25)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 8
+    @test _layout_signature(layout) == [
+        (:sampled, :sigma, 1, :exp),
+        (:sampled, :horseshoe_mu_Intercept_normal, 1, :identity),
+        (:sampled, :horseshoe_mu_x1_raw, 1, :identity),
+        (:sampled, :horseshoe_mu_x1_lambda, 1, :exp),
+        (:sampled, :horseshoe_mu_x1_tau, 1, :exp),
+        (:sampled, :horseshoe_mu_x2_raw, 1, :identity),
+        (:sampled, :horseshoe_mu_x2_lambda, 1, :exp),
+        (:sampled, :horseshoe_mu_x2_tau, 1, :exp),
+    ]
+    # Corpus-56 probe by coordinate name (peer's `u` order pinned in
+    # `test_horseshoe.jl`; the map keeps this test order-robust).
+    byname = Dict(
+        :sigma => 0.5, :horseshoe_mu_Intercept_normal => 0.1,
+        :horseshoe_mu_x1_raw => -0.2, :horseshoe_mu_x1_lambda => 0.3,
+        :horseshoe_mu_x1_tau => 0.4, :horseshoe_mu_x2_raw => 0.15,
+        :horseshoe_mu_x2_lambda => -0.35, :horseshoe_mu_x2_tau => 0.25)
+    u = Float64[byname[n] for n in coordinate_names(layout)]
+    nt = constrain(layout, u)
+    sig = nt.sigma
+    b1 = nt.horseshoe_mu_x1_raw * nt.horseshoe_mu_x1_lambda *
+        nt.horseshoe_mu_x1_tau
+    b2 = nt.horseshoe_mu_x2_raw * nt.horseshoe_mu_x2_lambda *
+        nt.horseshoe_mu_x2_tau
+    cols = _parity_cols_hs
+    mu_hat = nt.horseshoe_mu_Intercept_normal .+ b1 .* cols.x1 .+
+        b2 .* cols.x2
+    ll = sum(logpdf.(Normal.(mu_hat, sig), cols.y))
+    # Stan-kernel halves: unnormalized Cauchy + log-Jacobian, NO
+    # truncation renormalizer (SB-settled; the R2D2 `+log(2)` divergence
+    # does NOT apply to the `:positive_stan` horseshoe triples).
+    pr = logpdf(Normal(0, 1), nt.horseshoe_mu_Intercept_normal) +
+        logpdf(Normal(0, 1), nt.horseshoe_mu_x1_raw) +
+        logpdf(Cauchy(0, 1), nt.horseshoe_mu_x1_lambda) +
+        logpdf(Cauchy(0, 1), nt.horseshoe_mu_x1_tau) +
+        logpdf(Normal(0, 1), nt.horseshoe_mu_x2_raw) +
+        logpdf(Cauchy(0, 0.5), nt.horseshoe_mu_x2_lambda) +
+        logpdf(Cauchy(0, 0.25), nt.horseshoe_mu_x2_tau) +
+        logpdf(Exponential(1), sig)
+    jac = log(sig) + log(nt.horseshoe_mu_x1_lambda) +
+        log(nt.horseshoe_mu_x1_tau) + log(nt.horseshoe_mu_x2_lambda) +
+        log(nt.horseshoe_mu_x2_tau)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
+    # SB anchor: BridgeStan full posterior (`propto=false`, Jacobian) at
+    # this point is `-20.29984607289203` (BRM SB structured emission,
+    # StanBlocks `24578c3`, handoff numbers 23:00Z).
+    @test _rk_query(backend, :posterior, u) ≈ -20.29984607289203
     _check_parity_gradient(backend, u)
 end
 
@@ -971,6 +1045,174 @@ end
     # carries its Normal args directly with no transform).
     @test logjac(layout, u) ≈ u[3]
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[3]
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity student-t sampled nu" begin
+    t_cols = (;
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        y=[0.5, -0.2, 0.1, 2.9, 1.4, -1.1],
+    )
+    brmi = @brm t_cols begin
+        mu ~ 1 + x
+        sigma ~ Exponential(1)
+        nu ~ Gamma(2, 0.1)
+        y ~ LocationScale(mu, sigma, TDist(nu))
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 4
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+        (:sampled, :sigma, 1, :exp),
+        (:sampled, :nu, 1, :exp),
+    ]
+    u = [-0.4, 0.3, -0.2, 1.1]
+    nt = constrain(layout, u)
+    b = Vector(nt.mu)
+    lp = b[1] .+ b[2] .* t_cols.x
+    ll = sum(logpdf.(LocationScale.(lp, nt.sigma, TDist(nt.nu)), t_cols.y))
+    pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2]) +
+        logpdf(Exponential(1), nt.sigma) + logpdf(Gamma(2, 0.1), nt.nu)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # Jacobian: sigma's + nu's exp (betas ride identity).
+    @test logjac(layout, u) ≈ u[3] + u[4]
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[3] + u[4]
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity student-t literal nu" begin
+    t_cols = (;
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        y=[0.5, -0.2, 0.1, 2.9, 1.4, -1.1],
+    )
+    brmi = @brm t_cols begin
+        mu ~ 1 + x
+        sigma ~ Exponential(1)
+        y ~ LocationScale(mu, sigma, TDist(4.0))
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 3
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+        (:sampled, :sigma, 1, :exp),
+    ]
+    u = [-0.4, 0.3, -0.2]
+    nt = constrain(layout, u)
+    b = Vector(nt.mu)
+    lp = b[1] .+ b[2] .* t_cols.x
+    ll = sum(logpdf.(LocationScale.(lp, nt.sigma, TDist(4.0)), t_cols.y))
+    pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2]) +
+        logpdf(Exponential(1), nt.sigma)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ u[3]
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[3]
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity hurdle-poisson hu submodel" begin
+    h_cols = (;
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        c=[0, 1, 3, 0, 4, 2],
+    )
+    brmi = @brm h_cols begin
+        log(lambda) ~ 1 + x
+        effect(lambda, Intercept) ~ Normal(0, 5)
+        effect(lambda, x) ~ Normal(0, 2.5)
+        logit(p_zero) ~ 1 + x
+        effect(p_zero, Intercept) ~ Normal(0, 2)
+        effect(p_zero, x) ~ Normal(0, 1)
+        c ~ HurdlePoisson(lambda, p_zero)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 4
+    @test _layout_signature(layout) == [
+        (:coefficient, :lambda_coef, 2, :identity),
+        (:coefficient, :p_zero_coef, 2, :identity),
+    ]
+    u = [0.5, -0.25, 0.1, 0.2]
+    nt = constrain(layout, u)
+    bl = Vector(nt.lambda)
+    bh = Vector(nt.p_zero)
+    lam = exp.(bl[1] .+ bl[2] .* h_cols.x)
+    p = logistic.(bh[1] .+ bh[2] .* h_cols.x)
+    ll = sum(logpdf.(HurdlePoisson.(lam, p), h_cols.c))
+    pr = logpdf(Normal(0, 5), bl[1]) + logpdf(Normal(0, 2.5), bl[2]) +
+        logpdf(Normal(0, 2), bh[1]) + logpdf(Normal(0, 1), bh[2])
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # All-identity layout: no Jacobian.
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity hurdle-poisson scalar p0" begin
+    h_cols = (;
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        c=[0, 1, 3, 0, 4, 2],
+    )
+    brmi = @brm h_cols begin
+        log(lambda) ~ 1 + x
+        effect(lambda, Intercept) ~ Normal(0, 5)
+        effect(lambda, x) ~ Normal(0, 2.5)
+        p0 ~ Beta(2, 2)
+        c ~ HurdlePoisson(lambda, p0)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 3
+    @test _layout_signature(layout) == [
+        (:coefficient, :lambda_coef, 2, :identity),
+        (:sampled, :p0, 1, :logistic),
+    ]
+    u = [0.5, -0.25, 0.3]
+    nt = constrain(layout, u)
+    bl = Vector(nt.lambda)
+    lam = exp.(bl[1] .+ bl[2] .* h_cols.x)
+    ll = sum(logpdf.(HurdlePoisson.(lam, nt.p0), h_cols.c))
+    pr = logpdf(Normal(0, 5), bl[1]) + logpdf(Normal(0, 2.5), bl[2]) +
+        logpdf(Beta(2, 2), nt.p0)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # Jacobian: the logit-constrained p0 only (betas ride identity).
+    jac = log(nt.p0 * (1 - nt.p0))
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity hurdle-poisson literal p0" begin
+    h_cols = (;
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        c=[0, 1, 3, 0, 4, 2],
+    )
+    brmi = @brm h_cols begin
+        log(lambda) ~ 1 + x
+        effect(lambda, Intercept) ~ Normal(0, 5)
+        effect(lambda, x) ~ Normal(0, 2.5)
+        c ~ HurdlePoisson(lambda, 0.35)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 2
+    @test _layout_signature(layout) == [
+        (:coefficient, :lambda_coef, 2, :identity),
+    ]
+    u = [0.5, -0.25]
+    nt = constrain(layout, u)
+    bl = Vector(nt.lambda)
+    lam = exp.(bl[1] .+ bl[2] .* h_cols.x)
+    ll = sum(logpdf.(HurdlePoisson.(lam, 0.35), h_cols.c))
+    pr = logpdf(Normal(0, 5), bl[1]) + logpdf(Normal(0, 2.5), bl[2])
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
     _check_parity_gradient(backend, u)
 end
 
@@ -1505,6 +1747,70 @@ end
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     jac = u[2] + u[3] + u[4]
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
+    _check_parity_gradient(backend, u)
+end
+
+# Mixture parity cases (pair fam-mixture, RK 49ebaf1): the committed
+# oracles are Distributions.jl loops over the constrained point; the
+# SB-point comparison (same models, SB brief values) rides the verdict
+# probe, not the committed suite.
+@testset "rk parity mixture gaussian" begin
+    df = (; y=[-2.0, -1.8, 1.9, 2.2])
+    brmi = @brm df begin
+        mu1 ~ Normal(-2, 0.1)
+        mu2 ~ Normal(2, 0.1)
+        log(sigma) ~ 1
+        y ~ MixtureModel([Normal(mu1, sigma), Normal(mu2, sigma)], [0.4, 0.6])
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 3
+    @test _layout_signature(layout) == [
+        (:coefficient, :sigma_coef, 1, :identity),
+        (:sampled, :mu1, 1, :identity),
+        (:sampled, :mu2, 1, :identity),
+    ]
+    u = collect(range(-0.4, 0.4; length = layout.total))
+    nt = constrain(layout, u)
+    mixture = MixtureModel(
+        [Normal(nt.mu1, exp(nt.sigma[1])), Normal(nt.mu2, exp(nt.sigma[1]))],
+        [0.4, 0.6])
+    ll = sum(logpdf.(mixture, df.y))
+    pr = logpdf(Normal(-2, 0.1), nt.mu1) + logpdf(Normal(2, 0.1), nt.mu2) +
+        logpdf(Normal(), nt.sigma[1])
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity mixture poisson" begin
+    df = (; y=[0, 1, 3, 5, 2])
+    brmi = @brm df begin
+        lambda1 ~ Exponential(1)
+        lambda2 ~ Exponential(1)
+        y ~ MixtureModel([Poisson(lambda1), Poisson(lambda2)], [0.3, 0.7])
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 2
+    @test _layout_signature(layout) == [
+        (:sampled, :lambda1, 1, :exp),
+        (:sampled, :lambda2, 1, :exp),
+    ]
+    u = collect(range(-0.4, 0.4; length = layout.total))
+    nt = constrain(layout, u)
+    mixture = MixtureModel([Poisson(nt.lambda1), Poisson(nt.lambda2)],
+        [0.3, 0.7])
+    ll = sum(logpdf.(mixture, df.y))
+    pr = logpdf(Exponential(1), nt.lambda1) +
+        logpdf(Exponential(1), nt.lambda2)
+    jac = u[1] + u[2]
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)

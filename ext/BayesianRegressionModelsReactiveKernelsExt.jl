@@ -225,6 +225,7 @@ function _rk_patch_ordinal_extras(unbound::StructuralPlan,
         hsgp_bases = unbound.hsgp_bases,
         kernel_plates = unbound.kernel_plates,
         r2d2_priors = unbound.r2d2_priors,
+        horseshoe_priors = unbound.horseshoe_priors,
         matrices = unbound.matrices)
 end
 
