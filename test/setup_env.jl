@@ -54,19 +54,16 @@ const PINS = [
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
-    # through. ec0b6a9 (2026-09-26, main): the term-horseshoe thin-layer
-    # slice (canonical 4982829: per-coefficient `Horseshoe(...)` surface +
-    # `HorseshoePrior` IR + `:positive_stan` Stan-kernel halves, over the
-    # 361fd71 fam-student slice and the 45f765e GLM-object base) plus the
-    # HurdlePoisson response slice (HurdlePoissonFam + (log, log) triple +
-    # p_zero on the scale slot / ScalePredictorRef +
-    # `HurdlePoisson.(exp.(eta), p_zero)` surface head + corpus 57_hurdle)
-    # plus the fam-zip ZIP response slice (ZeroInflatedPoissonFam +
-    # (:zero_inflated_poisson,:log,:log) triple + scalar zi slot +
-    # `ZeroInflatedPoisson.(exp.(lambda), zi)` surface head + corpus 58_zip)
-    # plus the term-mi Case-A missingness slice (packed obs + Jobs gathers,
-    # `mi_jobs` on LikelihoodSpec, managed exemption, bind_data n_obs fix).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "ec0b6a9d90ddefaa41353a039227ff50bb9aefe3"),  # main
+    # through. 0411861 (2026-09-26, main): the fam-inversegaussian
+    # thin-layer slice (InverseGaussianFam + (log, log) triple + scalar
+    # lambda scale slot + `InverseGaussian.(exp.(eta), lambda)` surface
+    # head + corpus 59_inversegaussian; rebased over the d625939 fam-zip
+    # and term-mi-v2 landings), over the ec0b6a9 stack (term-horseshoe
+    # slice over the 361fd71 fam-student slice and the 45f765e GLM-object
+    # base, plus the HurdlePoisson response slice with corpus 57_hurdle,
+    # the fam-zip ZIP response slice with corpus 58_zip, and the term-mi
+    # Case-A missingness slice).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "04118619fc88cf4ecb945d1986189d6d33d7754b"),  # main
 ]
 
 function main()
