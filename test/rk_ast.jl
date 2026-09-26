@@ -226,6 +226,36 @@ end
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end
 
+@testset "group-C hurdle-poisson AST shape" begin
+    # Twin head (thin-layer decision, pair fam-hurdle):
+    # `HurdlePoisson(lambda, p_zero)` maps to
+    # `HurdlePoisson.(exp.(lambda), logistic.(p_zero))` (NB2
+    # precedent); no fused head.
+    brmi = @brm df begin
+        log(lambda) ~ 1 + x
+        logit(p_zero) ~ 1 + x
+        c ~ HurdlePoisson(lambda, p_zero)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.main.args[end] == Expr(:call, :.~, :c,
+        Expr(:., :HurdlePoisson, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :lambda)),
+            Expr(:., :logistic, Expr(:tuple, :p_zero)))))
+    # Scalar p_zero inlines bare; the fused-heads flag changes nothing
+    # (one head either way).
+    brmi = @brm df begin
+        log(lambda) ~ 1 + x
+        p0 ~ Beta(2, 2)
+        c ~ HurdlePoisson(lambda, p0)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :c,
+        Expr(:., :HurdlePoisson, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :lambda)), :p0)))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+end
+
 @testset "evidence and weights shapes" begin
     brmi = @brm df begin
         mu ~ 1 + x

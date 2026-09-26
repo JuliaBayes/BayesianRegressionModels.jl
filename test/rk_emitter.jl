@@ -581,6 +581,49 @@ end
     @test likelihood.nu === :nu
 end
 
+@testset "group-C hurdle-poisson plan shapes" begin
+    # The demand-battery shape (hurdle_only.jl model C): log-link rate
+    # + logit-link hu submodel; p_zero rides the scale-predictor slot.
+    brmi = @brm df begin
+        log(lambda) ~ 1 + x
+        logit(p_zero) ~ 1 + x
+        c ~ HurdlePoisson(lambda, p_zero)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:hurdle_poisson, :log)
+    @test likelihood.predictor === :lambda
+    @test isnothing(likelihood.scale)
+    @test likelihood.scale_predictor === :p_zero
+    # Intercept-only hu submodel (H2 probe shape).
+    brmi = @brm df begin
+        log(lambda) ~ 1 + x
+        logit(p_zero) ~ 1
+        c ~ HurdlePoisson(lambda, p_zero)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:hurdle_poisson, :log)
+    @test likelihood.scale_predictor === :p_zero
+    # Scalar sampled p_zero rides the scale slot.
+    brmi = @brm df begin
+        log(lambda) ~ 1 + x
+        p0 ~ Beta(2, 2)
+        c ~ HurdlePoisson(lambda, p0)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:hurdle_poisson, :log)
+    @test likelihood.scale === :p0
+    @test isnothing(likelihood.scale_predictor)
+    # Literal p_zero inlines.
+    brmi = @brm df begin
+        log(lambda) ~ 1 + x
+        c ~ HurdlePoisson(lambda, 0.35)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:hurdle_poisson, :log)
+    @test likelihood.scale == 0.35
+    @test isnothing(likelihood.scale_predictor)
+end
+
 @testset "weights, evidence, and multi-response" begin
     brmi = @brm df begin
         mu ~ 1 + x
@@ -2372,12 +2415,9 @@ end
         log(mu) ~ 1 + x
         y ~ censored(Exponential(mu); upper=u)
     end)
-    # Group C: hurdle / zero-inflated Poisson (hurdle_only.jl, zip.jl).
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
-        log(lambda) ~ 1 + x
-        logit(p_zero) ~ 1 + x
-        c ~ HurdlePoisson(lambda, p_zero)
-    end)
+    # Group C: hurdle Poisson (hurdle_only.jl) is admitted — see
+    # "group-C hurdle-poisson plan shapes" above.
+    # Group C: zero-inflated Poisson (zip.jl; sibling pair fam-zip).
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         log(lambda) ~ 1 + x
         logit(zi) ~ 1 + x
@@ -2496,6 +2536,57 @@ end
         s ~ Exponential(1)
         nu ~ Gamma(2, 0.1)
         y ~ truncated(LocationScale(mu, s, TDist(nu)); lower=0.0)
+    end)
+end
+
+@testset "fail closed: group-C hurdle scope edges" begin
+    # Rate predictor must be log-link.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        logit(p_zero) ~ 1 + x
+        c ~ HurdlePoisson(mu, p_zero)
+    end)
+    # Hu submodel must be logit-link (only logit inverts into (0, 1)).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(lambda) ~ 1 + x
+        log(p_zero) ~ 1 + x
+        c ~ HurdlePoisson(lambda, p_zero)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(lambda) ~ 1 + x
+        p_zero ~ 1 + x
+        c ~ HurdlePoisson(lambda, p_zero)
+    end)
+    # Literals admit (0, 1]: above 1 fails here, 0.0 via positivity.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(lambda) ~ 1 + x
+        c ~ HurdlePoisson(lambda, 1.5)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(lambda) ~ 1 + x
+        c ~ HurdlePoisson(lambda, 0.0)
+    end)
+    # A data column is never a scalar p_zero.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(lambda) ~ 1 + x
+        c ~ HurdlePoisson(lambda, z)
+    end)
+    # The location predictor cannot feed the p_zero slot too (the
+    # logit-link pin fires first).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(lambda) ~ 1 + x
+        c ~ HurdlePoisson(lambda, lambda)
+    end)
+    # No weights or evidence on the group-C triple (no driving case).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(lambda) ~ 1 + x
+        logit(p_zero) ~ 1 + x
+        c ~ weighted(HurdlePoisson(lambda, p_zero), fweights(n))
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(lambda) ~ 1 + x
+        logit(p_zero) ~ 1 + x
+        c ~ censored(HurdlePoisson(lambda, p_zero); upper=5)
     end)
 end
 

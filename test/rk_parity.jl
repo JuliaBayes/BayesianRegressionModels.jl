@@ -38,6 +38,7 @@ using Distributions: Beta, Cauchy, Dirichlet, Exponential, Gamma,
                      TDist, cdf, logcdf, logccdf, logpdf
 using Enzyme
 using LogDensityProblems
+using LogExpFunctions: logistic, logit
 using ReactiveKernels: prepare
 using ReactiveKernelsPPL: constrain, coordinate_names, logjac
 using SpecialFunctions: logbeta, loggamma
@@ -1109,6 +1110,109 @@ end
     @test _rk_query(backend, :prior, u) ≈ pr
     @test logjac(layout, u) ≈ u[3]
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[3]
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity hurdle-poisson hu submodel" begin
+    h_cols = (;
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        c=[0, 1, 3, 0, 4, 2],
+    )
+    brmi = @brm h_cols begin
+        log(lambda) ~ 1 + x
+        effect(lambda, Intercept) ~ Normal(0, 5)
+        effect(lambda, x) ~ Normal(0, 2.5)
+        logit(p_zero) ~ 1 + x
+        effect(p_zero, Intercept) ~ Normal(0, 2)
+        effect(p_zero, x) ~ Normal(0, 1)
+        c ~ HurdlePoisson(lambda, p_zero)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 4
+    @test _layout_signature(layout) == [
+        (:coefficient, :lambda_coef, 2, :identity),
+        (:coefficient, :p_zero_coef, 2, :identity),
+    ]
+    u = [0.5, -0.25, 0.1, 0.2]
+    nt = constrain(layout, u)
+    bl = Vector(nt.lambda)
+    bh = Vector(nt.p_zero)
+    lam = exp.(bl[1] .+ bl[2] .* h_cols.x)
+    p = logistic.(bh[1] .+ bh[2] .* h_cols.x)
+    ll = sum(logpdf.(HurdlePoisson.(lam, p), h_cols.c))
+    pr = logpdf(Normal(0, 5), bl[1]) + logpdf(Normal(0, 2.5), bl[2]) +
+        logpdf(Normal(0, 2), bh[1]) + logpdf(Normal(0, 1), bh[2])
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # All-identity layout: no Jacobian.
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity hurdle-poisson scalar p0" begin
+    h_cols = (;
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        c=[0, 1, 3, 0, 4, 2],
+    )
+    brmi = @brm h_cols begin
+        log(lambda) ~ 1 + x
+        effect(lambda, Intercept) ~ Normal(0, 5)
+        effect(lambda, x) ~ Normal(0, 2.5)
+        p0 ~ Beta(2, 2)
+        c ~ HurdlePoisson(lambda, p0)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 3
+    @test _layout_signature(layout) == [
+        (:coefficient, :lambda_coef, 2, :identity),
+        (:sampled, :p0, 1, :logistic),
+    ]
+    u = [0.5, -0.25, 0.3]
+    nt = constrain(layout, u)
+    bl = Vector(nt.lambda)
+    lam = exp.(bl[1] .+ bl[2] .* h_cols.x)
+    ll = sum(logpdf.(HurdlePoisson.(lam, nt.p0), h_cols.c))
+    pr = logpdf(Normal(0, 5), bl[1]) + logpdf(Normal(0, 2.5), bl[2]) +
+        logpdf(Beta(2, 2), nt.p0)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # Jacobian: the logit-constrained p0 only (betas ride identity).
+    jac = log(nt.p0 * (1 - nt.p0))
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity hurdle-poisson literal p0" begin
+    h_cols = (;
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        c=[0, 1, 3, 0, 4, 2],
+    )
+    brmi = @brm h_cols begin
+        log(lambda) ~ 1 + x
+        effect(lambda, Intercept) ~ Normal(0, 5)
+        effect(lambda, x) ~ Normal(0, 2.5)
+        c ~ HurdlePoisson(lambda, 0.35)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 2
+    @test _layout_signature(layout) == [
+        (:coefficient, :lambda_coef, 2, :identity),
+    ]
+    u = [0.5, -0.25]
+    nt = constrain(layout, u)
+    bl = Vector(nt.lambda)
+    lam = exp.(bl[1] .+ bl[2] .* h_cols.x)
+    ll = sum(logpdf.(HurdlePoisson.(lam, 0.35), h_cols.c))
+    pr = logpdf(Normal(0, 5), bl[1]) + logpdf(Normal(0, 2.5), bl[2])
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
     _check_parity_gradient(backend, u)
 end
 
