@@ -315,7 +315,8 @@ end
 _rk_ast_response_uses_scale(family::Symbol) =
     family === :gaussian || family === :nb2_log ||
     family === :gamma_log || family === :beta_logit ||
-    family === :student_t || family === :hurdle_poisson
+    family === :student_t || family === :hurdle_poisson ||
+    family === :wald
 
 # The scale-slot body spelling inside a bare response statement. A
 # direct scale (outer name, literal, or the plan-forbidden nothing)
@@ -549,6 +550,15 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
             _rk_ast_dotted(:exp, predictor),
             leaf[:scale]) :
         _rk_ast_dotted(:HurdlePoisson, predictor, leaf[:scale])
+    elseif response.family === :wald
+        # Twin head (thin-layer decision, pair fam-inversegaussian):
+        # the plan's `InverseGaussian(mu, lam)` maps to
+        # `InverseGaussian.(exp.(eta), lam)` (NB2 precedent); scalars
+        # inline bare. No fused head: one spelling either way.
+        wrap_location ? _rk_ast_dotted(:InverseGaussian,
+            _rk_ast_dotted(:exp, predictor),
+            leaf[:scale]) :
+        _rk_ast_dotted(:InverseGaussian, predictor, leaf[:scale])
     elseif response.family === :gamma_log
         # Mean-shape form: the plan pins both alpha positions identical,
         # so the same value emits twice.

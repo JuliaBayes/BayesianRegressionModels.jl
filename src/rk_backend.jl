@@ -53,13 +53,18 @@ const _RK_ADMITTED_TRIPLES = Set{Tuple{Symbol,Symbol,Symbol}}([
     # predictor; zi rides its own scalar plan slot (literal /
     # sampled / assignment — no modeled-zi predictor in v1).
     (:zero_inflated_poisson, :log, :log),
+    # Group C (wald): inverse-Gaussian over a log-link mean
+    # predictor; lambda rides the scalar-only scale slot (literal /
+    # sampled / assignment — modeled lambda deferred, Beta-kappa
+    # precedent).
+    (:wald, :log, :log),
 ])
 # Slice-2 families: no weights or evidence (no driving case — the thin
 # layer admits neither on the new triples, so the planner fails closed).
 const _RK_SLICE2_FAMILIES = Set{Symbol}([
     :bernoulli_probit, :bernoulli_cloglog, :binomial_probit,
     :binomial_cloglog, :beta_logit, :student_t, :hurdle_poisson,
-    :zero_inflated_poisson,
+    :zero_inflated_poisson, :wald,
 ])
 # Leveled simplex responses (multinomial/categorical) name a simplex
 # vector parameter instead of a linear predictor, so they skip the
@@ -128,6 +133,7 @@ struct _RKLikelihoodSpec
                    # group B: :student_t | group C: :hurdle_poisson
                    # (p_zero rides the scale / scale-predictor slots) |
                    # :zero_inflated_poisson |
+                   # :wald (lambda rides the scalar-only scale slot) |
                    # longtail: :mvnormal_cholesky (joint correlated outcomes)
                    # | :mixture (finite MixtureModel response)
     link::Symbol   # effective link: :identity | :logit | :log |
@@ -412,7 +418,9 @@ const _RK_ADMITTED_SPELLINGS =
     "NegativeBinomial2/Gamma/Beta components + literal/Dirichlet " *
     "weights), or group C: `c ~ HurdlePoisson(lambda, p0)` + " *
     "`log(lambda) ~ ...` (`p0` a `logit(p0) ~ ...` predictor, sampled " *
-    "parameter, or (0, 1] literal)"
+    "parameter, or (0, 1] literal) or `y ~ InverseGaussian(mu, lam)` + " *
+    "`log(mu) ~ ...` (`lam` a sampled parameter, scalar assignment, " *
+    "or positive literal)"
 
 function _rk_predictor_link(brmi::BRMI, target::Symbol)
     prefix = "RK backend"
@@ -882,6 +890,36 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
             "predictor")
         return (; family=:hurdle_poisson, link=plink, scale=p_zero,
             scale_predictor=p_zero_predictor, trials=nothing, location)
+    elseif head === InverseGaussian
+        length(args) == 2 || error(
+            "$prefix: response `$response` `InverseGaussian` needs " *
+            "`(mean, shape)`; write `InverseGaussian(mu, lam)` " *
+            "with a `log(mu)` predictor")
+        location = _rk_location_arg(args[1], candidates, response, "mean",
+            "itself; write `InverseGaussian(mu, lam)` with a `log(mu)` " *
+            "predictor (slice 2 has no `InverseGaussian(exp(..))` spelling)")
+        plink = predictor_link[location]
+        # Scalar-only (Beta-kappa precedent): modeled lambda is
+        # deferred thin-side too, so a predictor in the shape slot
+        # fails closed here with attribution instead of crossing.
+        _rk_is_predictor_ref(args[2], candidates) && error(
+            "$prefix: response `$response` `InverseGaussian` shape cannot " *
+            "be the linear predictor `$(name(args[2]))`; modeled lambda " *
+            "is out of slice — write a sampled parameter, a positive " *
+            "literal, or a scalar assignment")
+        lam, lam_predictor = _rk_scale_argument(args[2], parameters,
+            assignments, consts, aliases, response, "shape",
+            Symbol[])
+        lam_predictor === nothing || error(
+            "$prefix: response `$response` `InverseGaussian` shape cannot " *
+            "be a linear predictor (predictor-fed shape is not admitted)")
+        triple = (:wald, plink, plink)
+        triple in _RK_ADMITTED_TRIPLES || error(
+            "$prefix: response `$response` pairs `InverseGaussian` with " *
+            "a $plink-link predictor; write " *
+            "`InverseGaussian(mu, lam)` with a `log(mu)` predictor")
+        return (; family=:wald, link=plink, scale=lam,
+            scale_predictor=nothing, trials=nothing, location)
     elseif head === Binomial
         length(args) == 2 || error(
             "$prefix: response `$response` `Binomial` needs `(trials, " *
@@ -4999,6 +5037,11 @@ function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
     elseif family === :hurdle_poisson
         (eltype(values) <: Integer && all(>=(0), values)) || error(
             "$prefix: response `$response` must hold non-negative integers")
+    elseif family === :wald
+        # Mirrors the thin layer: strictly positive (y = 0 fails
+        # validation there, so it fails here with BRM-side attribution).
+        (eltype(values) <: Real && all(>(0), values)) || error(
+            "$prefix: response `$response` must hold strictly positive values")
     elseif family === :binomial_logit
         # Rowwise y <= n is checked once trials cross (below): trials may
         # be a column or a literal, and neither is visible here.

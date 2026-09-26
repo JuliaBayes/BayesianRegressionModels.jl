@@ -665,6 +665,40 @@ end
     @test likelihood.zero_inflation === :zi
 end
 
+@testset "group-C wald plan shapes" begin
+    # The demand-battery shape (wald_only.jl): log-link mean +
+    # sampled shape over a strictly positive response.
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        lam ~ LogNormal(-0.3, 1.0)
+        z ~ InverseGaussian(mu, lam)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:wald, :log)
+    @test likelihood.predictor === :mu
+    @test likelihood.scale === :lam
+    @test isnothing(likelihood.scale_predictor)
+    # Literal shape inlines.
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        z ~ InverseGaussian(mu, 2.0)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:wald, :log)
+    @test likelihood.scale == 2.0
+    @test isnothing(likelihood.scale_predictor)
+    # Scalar assignment shape resolves.
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        lam = 1.5
+        z ~ InverseGaussian(mu, lam)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:wald, :log)
+    @test likelihood.scale == 1.5
+    @test isnothing(likelihood.scale_predictor)
+end
+
 @testset "weights, evidence, and multi-response" begin
     brmi = @brm df begin
         mu ~ 1 + x
@@ -2469,11 +2503,13 @@ end
         logit(zi) ~ 1 + x
         c ~ ZeroInflatedPoisson(lambda, zi)
     end)
-    # Group C: InverseGaussian (wald_only.jl).
+    # Group C: InverseGaussian (wald_only.jl) is admitted — see
+    # "group-C wald plan shapes" above. The `exp` spelling stays
+    # closed (positive response, so the throw is the spelling).
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         eta ~ 1 + x
         lam ~ LogNormal(-0.3, 1.0)
-        y ~ InverseGaussian(exp(eta), lam)
+        z ~ InverseGaussian(exp(eta), lam)
     end)
     # Group C: SkewDoubleExponential (quantile.jl).
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
@@ -2672,6 +2708,78 @@ end
         log(lambda) ~ 1 + x
         zi ~ Beta(2, 2)
         c ~ truncated(ZeroInflatedPoisson(lambda, zi); lower=0, upper=5)
+    end)
+end
+
+@testset "fail closed: group-C wald scope edges" begin
+    # Mean predictor must be log-link (bare or wrapped).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        lam ~ LogNormal(-0.3, 1.0)
+        z ~ InverseGaussian(mu, lam)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        logit(mu) ~ 1 + x
+        lam ~ LogNormal(-0.3, 1.0)
+        z ~ InverseGaussian(mu, lam)
+    end)
+    # Modeled lambda is deferred (Beta-kappa precedent): a shape
+    # predictor fails closed with attribution, whatever its link.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        log(lam) ~ 1 + x
+        z ~ InverseGaussian(mu, lam)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        lam ~ 1 + x
+        z ~ InverseGaussian(mu, lam)
+    end)
+    # The location predictor cannot feed the shape slot too.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        z ~ InverseGaussian(mu, mu)
+    end)
+    # Shape literals must be strictly positive.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        z ~ InverseGaussian(mu, 0.0)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        z ~ InverseGaussian(mu, -2.0)
+    end)
+    # A data column is never a scalar shape.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        z ~ InverseGaussian(mu, n)
+    end)
+    # Arity: the 1- and 3-argument Distributions spellings stay closed.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        z ~ InverseGaussian(mu)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        lam ~ LogNormal(-0.3, 1.0)
+        z ~ InverseGaussian(mu, lam, 1.0)
+    end)
+    # Response values must be strictly positive (gamma precedent).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        lam ~ LogNormal(-0.3, 1.0)
+        y ~ InverseGaussian(mu, lam)
+    end)
+    # No weights or evidence on the group-C triple (no driving case).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        lam ~ LogNormal(-0.3, 1.0)
+        z ~ weighted(InverseGaussian(mu, lam), fweights(n))
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        lam ~ LogNormal(-0.3, 1.0)
+        z ~ censored(InverseGaussian(mu, lam); upper=5)
     end)
 end
 
