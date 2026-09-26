@@ -1876,3 +1876,47 @@ end
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
 end
+
+@testset "rk parity mi() missing-response obs-only likelihood" begin
+    # Case A (decision 05aemvx): packed obs slices; the likelihood sees
+    # observed rows only while predictors stay full-length. Reference is
+    # an independent Distributions.jl hand oracle; the plain obs-only twin
+    # (GLM-fused, remapped probe) cross-checks across lowering paths.
+    cols = (; x=[-1.0, 0.5, 2.0, 0.25],
+              y=Union{Missing,Float64}[0.2, missing, -0.4, missing])
+    brmi = @brm cols begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x
+        mi(y) ~ Normal(mu, sigma)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 3
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+        (:sampled, :sigma, 1, :exp),
+    ]
+    u = [0.0, 0.05, -0.05]
+    nt = constrain(layout, u)
+    mu_o = nt.mu[1] .+ nt.mu[2] .* [-1.0, 2.0]
+    ll = sum(logpdf.(Normal.(mu_o, nt.sigma), [0.2, -0.4]))
+    pr = logpdf(Normal(0, 1), nt.mu[1]) +
+        logpdf(Normal(0, 1), nt.mu[2]) +
+        logpdf(Exponential(2), nt.sigma)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ u[3]
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[3]
+    _check_parity_gradient(backend, u)
+    twin = BRM.RKBRMI(@brm (; x=[-1.0, 2.0], y=[0.2, -0.4]) begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x
+        y ~ Normal(mu, sigma)
+    end)
+    # The plain twin fuses to the GLM object (layout [beta, sigma, alpha]);
+    # remap the probe and compare across lowering paths (fused reduction vs
+    # plate sum agree to 1 ulp, not bit-exact).
+    u_twin = [u[2], u[3], u[1]]
+    @test _rk_query(twin, :posterior, u_twin) ≈
+        _rk_query(backend, :posterior, u)
+end

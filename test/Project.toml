@@ -71,12 +71,20 @@ rev = "7aed40b18bd4cdabb75330f285d5c9b355575ab9"
 
 [sources.ReactiveKernels]
 url = "https://github.com/nsiccha/ReactiveKernels.jl"
-# d625939 (2026-09-26, main): the fam-zip ZIP response slice
+# ec0b6a9 (2026-09-26, main): term-horseshoe thin-layer slice (canonical
+# 4982829: per-coefficient `Horseshoe(...)` surface + `HorseshoePrior` IR +
+# `:positive_stan` Stan-kernel halves, over the 361fd71 fam-student slice
+# and the 45f765e GLM-object base; Digest 2's exact test pin for BRM
+# object emission was 45f765e) plus the HurdlePoisson response slice
+# (HurdlePoissonFam + (log, log) triple + p_zero on the scale slot /
+# ScalePredictorRef + `HurdlePoisson.(exp.(eta), p_zero)` surface head +
+# corpus 57_hurdle) plus the fam-zip ZIP response slice
 # (ZeroInflatedPoissonFam + (:zero_inflated_poisson,:log,:log) triple +
 # scalar zi slot + `ZeroInflatedPoisson.(exp.(lambda), zi)` surface head +
-# corpus 58_zip) over the 8dfe240 hurdle slice, the 4982829 term-horseshoe
-# slice, the 361fd71 fam-student slice, and the 45f765e GLM-object base.
+# corpus 58_zip) plus the term-mi Case-A missingness slice (packed obs
+# + Jobs gathers, `mi_jobs` on LikelihoodSpec, managed exemption,
+# bind_data n_obs fix).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "d62593967c031599b8e1dec8e0547eb3d1437784"
+rev = "ec0b6a9d90ddefaa41353a039227ff50bb9aefe3"

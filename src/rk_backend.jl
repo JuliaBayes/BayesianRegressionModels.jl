@@ -174,6 +174,11 @@ struct _RKLikelihoodSpec
     # Zero-inflated-Poisson trailing field (thin-layer LikelihoodSpec
     # mirror); every other family leaves it at default.
     zero_inflation::Union{Nothing,Float64,Symbol} # literal or sampled/assignment name
+    # Modelled-missingness trailing field (thin-layer LikelihoodSpec
+    # mirror): the `Jobs_<response>` observed-row index column when the
+    # response is `mi(...)` (Case A obs-rows-only likelihood over the
+    # packed `y_obs` column); every other response leaves it `nothing`.
+    mi_jobs::Union{Nothing,Symbol}
 end
 
 struct _RKTermSpec
@@ -4382,7 +4387,7 @@ function _rk_plan_me_observations!(response_specs::Vector{_RKLikelihoodSpec},
             nothing, _RKResponseEvidence(:none, nothing, nothing),
             source, nothing, nothing, nothing, Symbol[], Symbol[],
             nothing, nothing, Symbol[], nothing, Symbol[], nothing,
-            _RKMixtureComponent[], nothing, nothing, nothing))
+            _RKMixtureComponent[], nothing, nothing, nothing, nothing))
     end
     nothing
 end
@@ -4971,8 +4976,8 @@ function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
         response::Symbol)
     prefix = "RK backend"
     any(ismissing, values) && error(
-        "$prefix: response `$response` has missing values; slice 1 has no " *
-        "missingness machinery (modelled `mi` fails closed)")
+        "$prefix: response `$response` has missing values; wrap it in " *
+        "`mi()` to model them")
     if family === :gaussian || family === :student_t
         eltype(values) <: Real || error(
             "$prefix: response `$response` must be real-valued")
@@ -5108,9 +5113,9 @@ end
 function _rk_peel_observation(brmi::BRMI, observation)
     prefix = "RK backend"
     missing_response = _brm_missing_response_plan(observation.lhs; prefix)
-    isnothing(missing_response) || error(
-        "$prefix: response `$(observation.key)` uses `mi()` (modelled " *
-        "missingness); slice 1 has no missingness machinery")
+    if !isnothing(missing_response)
+        return _rk_peel_mi_observation(brmi, observation, missing_response)
+    end
     observation.lhs isa JointResponseColumn &&
         return _rk_peel_joint_observation(observation)
     observation.lhs isa NamedColumn || error(
@@ -5148,8 +5153,72 @@ function _rk_peel_observation(brmi::BRMI, observation)
             "a distribution call")
     end
     (; key=observation.key, rhs, raw_response, weight_plan, modifier,
-        joint_outcomes=Symbol[])
+        joint_outcomes=Symbol[], missing_response=nothing)
 end
+
+# `mi(y)` peel (Case A only — the merged response feeds no downstream
+# likelihood; `_rk_gate_mi_case_a!` enforces that). The plan's
+# full-length `values` keep the observation axis (predictors and levels
+# stay full-length — a group level seen only in missing rows keeps its
+# prior-only coefficient, exactly as in SB); Phase 5 crosses the packed
+# `observed_values` under the response name plus the `Jobs_<response>`
+# index column, and the thin layer restricts the likelihood to
+# observed rows. Compositions SB never tested (weights, evidence) fail
+# closed, mirroring the Turing backend.
+function _rk_peel_mi_observation(brmi::BRMI, observation, plan)
+    prefix = "RK backend"
+    _rk_gate_mi_case_a!(brmi, observation.key, plan.source)
+    rhs = observation.rhs
+    rhs isa ExprColumn || error(
+        "$prefix: response `$(observation.key)` likelihood must be a " *
+        "distribution call")
+    _brm_distribution_shape(rhs) == (Univariate, Continuous) || error(
+        "$prefix: response `$(observation.key)` `mi()` needs an " *
+        "elementwise continuous distribution (SB admits the same shapes)")
+    raw_response = plan.values
+    weight_plan = _brm_observation_weight_plan(
+        rhs, observation.key, raw_response; prefix)
+    isnothing(weight_plan) || error(
+        "$prefix: response `$(observation.key)` `mi()` cannot be composed " *
+        "with observation weights")
+    modifier = _brm_response_modifier_plan(rhs; prefix)
+    isnothing(modifier) || error(
+        "$prefix: response `$(observation.key)` `mi()` cannot be composed " *
+        "with response modifiers (`$(modifier.kind)` is out of v1)")
+    (; key=observation.key, rhs, raw_response, weight_plan, modifier,
+        joint_outcomes=Symbol[], missing_response=plan)
+end
+
+# Case-B soundness gate (decision 05aemvx P3): any formula outside the
+# `mi()` observation itself that references the merged response name
+# means StanBlocks would promote `y_mis` to parameters (Case B); v1
+# lowers Case A only, so that reference fails closed here with the
+# offending operation named.
+function _rk_gate_mi_case_a!(brmi::BRMI, mi_key::Symbol, inner::Symbol)
+    prefix = "RK backend"
+    for (key, op_nc) in pairs(brmi.operations)
+        key === mi_key && continue
+        op_nc isa NamedColumn || continue
+        _rk_refs_name(parent(op_nc), inner) || continue
+        error("$prefix: response `$mi_key` is `mi()`-modelled but " *
+              "`$inner` is also referenced by `$key`; Case B " *
+              "(downstream use of the merged response) is out of v1 — " *
+              "the merged response must feed no other formula")
+    end
+    nothing
+end
+
+_rk_refs_name(_x, _target) = false
+_rk_refs_name(x::NamedColumn, target::Symbol) =
+    name(x) === target || _rk_refs_name(parent(x), target)
+function _rk_refs_name(x::ExprColumn, target::Symbol)
+    any(a -> _rk_refs_name(a, target), getargs(x)) ||
+        any(v -> _rk_refs_name(v, target), values(getkwargs(x)))
+end
+_rk_refs_name(x::Union{Tuple,AbstractVector}, target::Symbol) =
+    any(a -> _rk_refs_name(a, target), x)
+_rk_refs_name(x::JointResponseColumn, target::Symbol) =
+    any(a -> _rk_refs_name(a, target), joint_response_columns(x))
 
 # Joint correlated-outcomes peel (SB `[y1..yK] ~ MvNormalCholesky(...)`):
 # the vector LHS takes the explicit joint family only (row weights and
@@ -5178,7 +5247,7 @@ function _rk_peel_joint_observation(observation)
             " (bounded joint responses are out of slice)" : ""))
     rows = _brm_joint_response_values(observation.lhs; prefix)
     (; key=observation.key, rhs, raw_response=rows, weight_plan=nothing,
-        modifier=nothing, joint_outcomes=outcomes)
+        modifier=nothing, joint_outcomes=outcomes, missing_response=nothing)
 end
 
 function _rk_referenced_predictors(program, rhs, response::Symbol)
@@ -5481,7 +5550,7 @@ function _rk_plan_joint_response!(entry, link::Symbol, predictor::Symbol,
         nothing, nothing, nothing, evidence, entry.key, nothing, nothing,
         nothing, extra, Symbol[], nothing, nothing, Symbol[], nothing,
         outcomes[2:end], stem, _RKMixtureComponent[], nothing, nothing,
-        nothing)
+        nothing, nothing)
 end
 
 # Joint responses link their LKJ factor stem explicitly (SB's
@@ -5638,16 +5707,20 @@ function _rk_split_multinomial_counts!(columns::Dict{Symbol,AbstractVector},
 end
 
 function _rk_gate_crossed_columns!(columns::Dict{Symbol,AbstractVector},
-        n_obs::Int)
+        n_obs::Int, mi_packed::Set{Symbol}=Set{Symbol}())
     prefix = "RK backend"
     for key in sort!(collect(keys(columns)))
         values = columns[key]
-        length(values) == n_obs || error(
+        # Packed `mi()` columns (observed values + `Jobs` indices) are
+        # shorter than `n_obs` by construction (the thin-layer managed
+        # exemption); everything else keeps the uniform axis. Pair
+        # agreement gates at the call site; finiteness below still applies.
+        key in mi_packed || length(values) == n_obs || error(
             "$prefix: column `$key` has $(length(values)) rows, expected " *
             "$n_obs (one observation axis in slice 1)")
         any(ismissing, values) && error(
-            "$prefix: column `$key` has missing values; slice 1 has no " *
-            "missingness machinery")
+            "$prefix: column `$key` has missing values; v1 models " *
+            "missingness for `mi()` responses only")
         eltype(values) <: Real || continue
         all(isfinite, values) || error(
             "$prefix: column `$key` must be finite")
@@ -6243,7 +6316,7 @@ function _brm_rk_plan(brmi::BRMI)
     overrides = Dict(entry.key => (;
         distribution=entry.rhs, response=entry.raw_response,
         modifier=entry.modifier, weight=entry.weight_plan,
-        missing_response=nothing) for entry in peeled)
+        missing_response=entry.missing_response) for entry in peeled)
     prepared = _brm_prepare_model(brmi; program,
         additional_parameters=(), observation_overrides=overrides)
     roots = Set{Symbol}()
@@ -6423,6 +6496,12 @@ function _brm_rk_plan(brmi::BRMI)
                 classified.location, get(classified, :nu, nothing),
                 get(classified, :zero_inflation, nothing))
         end
+        if entry.missing_response !== nothing &&
+                family ∉ (:gaussian, :gamma_log, :beta_logit)
+            error("$prefix: response `$(entry.key)` `mi()` admits " *
+                  "Gaussian/Gamma/Beta likelihoods in v1; family " *
+                  "`$family` is out of scope")
+        end
         leveled = family in _RK_LEVELED_FAMILIES ?
             _rk_plan_leveled!(entry, family, predictor, extra,
                 implicit_vectors, vector_by_name, context.data,
@@ -6527,9 +6606,24 @@ function _brm_rk_plan(brmi::BRMI)
                 "is not a vector")
             columns[col] = raw
         end
+        mi_plan = entry.missing_response
+        mi_jobs = nothing
         if family === :multinomial
             _rk_split_multinomial_counts!(columns, entry.key,
                 context.data[entry.key], leveled.count_columns)
+        elseif mi_plan !== nothing
+            # Packed crossing (decision 05aemvx P2): observed values under
+            # the response name plus the `Jobs_<response>` observed-row
+            # indices. Everything else (predictors, levels, `n_obs`) stays
+            # full-length — only the likelihood restricts to observed rows.
+            gated = _rk_gate_response_values!(family,
+                mi_plan.observed_values, entry.key)
+            columns[entry.key] = gated
+            mi_jobs = Symbol(:Jobs_, entry.key)
+            haskey(columns, mi_jobs) && error(
+                "$prefix: response `$(entry.key)` `mi()` index column " *
+                "`$mi_jobs` collides with existing data; rename it")
+            columns[mi_jobs] = mi_plan.observed_indices
         else
             # Mixture responses gate on the shared component family (the
             # same-family check ran at classification).
@@ -6547,7 +6641,7 @@ function _brm_rk_plan(brmi::BRMI)
             leveled.ordinal_structure, leveled.discrimination,
             leveled.threshold_columns, leveled.threshold_coefs, Symbol[],
             nothing, mixture_components, mixture_weights, nu,
-            zero_inflation))
+            zero_inflation, mi_jobs))
     end
     # Measurement-error observations ride synthetic responses (SB's
     # `x_obs ~ Normal(x_true, sd)` likelihood per `me` term).
@@ -6566,7 +6660,17 @@ function _brm_rk_plan(brmi::BRMI)
             "$(length(entry.raw_response)) rows, expected $n_obs (one " *
             "observation axis in slice 1)")
     end
-    _rk_gate_crossed_columns!(columns, n_obs)
+    # Packed `mi()` columns ride the managed exemption (uniform-axis rule
+    # does not apply); each packed pair must still agree in length.
+    mi_packed = Set{Symbol}()
+    for spec in response_specs
+        spec.mi_jobs === nothing && continue
+        push!(mi_packed, spec.response, spec.mi_jobs)
+        length(columns[spec.response]) == length(columns[spec.mi_jobs]) ||
+            error("$prefix: internal: `mi()` packed columns for " *
+                  "response `$(spec.response)` disagree in length")
+    end
+    _rk_gate_crossed_columns!(columns, n_obs, mi_packed)
     _rk_gate_trials_values!(response_specs, columns, n_obs)
     _rk_gate_multinomial_trials!(response_specs, columns, n_obs)
     _rk_gate_evidence_values!(response_specs, columns, n_obs)

@@ -2814,14 +2814,82 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    @test_throws ErrorException BRM._brm_rk_plan(@brm missing_df begin
+    cyclic_a = BRM._RKSampledParameter(:a, :Normal, (:b,), nothing, :a)
+    cyclic_b = BRM._RKSampledParameter(:b, :Normal, (:a,), nothing, :b)
+    @test_throws ErrorException BRM._rk_gate_acyclic!([cyclic_a, cyclic_b], [])
+end
+
+@testset "mi() missing-response plans packed obs slices" begin
+    # Case A (decision 05aemvx): the likelihood restricts to observed rows
+    # while predictors, levels, and `n_obs` stay full-length.
+    missing_df = (; df..., y=[0.5, missing, 0.1, 0.9, 1.4, 1.1])
+    plan = BRM._brm_rk_plan(@brm missing_df begin
         mu ~ 1 + x
         s ~ Exponential(1)
         mi(y) ~ Normal(mu, s)
     end)
-    cyclic_a = BRM._RKSampledParameter(:a, :Normal, (:b,), nothing, :a)
-    cyclic_b = BRM._RKSampledParameter(:b, :Normal, (:a,), nothing, :b)
-    @test_throws ErrorException BRM._rk_gate_acyclic!([cyclic_a, cyclic_b], [])
+    spec = only(plan.responses)
+    @test (spec.family, spec.link) === (:gaussian, :identity)
+    @test spec.mi_jobs === :Jobs_y
+    @test plan.n_obs == 6
+    @test plan.columns[:y] == [0.5, 0.1, 0.9, 1.4, 1.1]
+    @test plan.columns[:Jobs_y] == [1, 3, 4, 5, 6]
+    @test plan.columns[:x] == df.x
+    # Distributional scale takes the same packed route.
+    dist_plan = BRM._brm_rk_plan(@brm missing_df begin
+        mu ~ 1 + x
+        log(s) ~ 1 + x
+        mi(y) ~ Normal(mu, s)
+    end)
+    dist_spec = only(dist_plan.responses)
+    @test (dist_spec.family, dist_spec.link) === (:gaussian, :identity)
+    @test dist_spec.mi_jobs === :Jobs_y
+    @test dist_plan.columns[:y] == [0.5, 0.1, 0.9, 1.4, 1.1]
+    # RK-admitted Gamma/Beta spellings take the same packed route.
+    gdf = (; df..., y=[0.5, missing, 0.1, 0.9, 1.4, 1.1])
+    gplan = BRM._brm_rk_plan(@brm gdf begin
+        log(mu) ~ 1 + x
+        mi(y) ~ Gamma(2.0, mu / 2.0)
+    end)
+    gspec = only(gplan.responses)
+    @test (gspec.family, gspec.link) === (:gamma_log, :log)
+    @test gspec.mi_jobs === :Jobs_y
+    @test gplan.columns[:y] == [0.5, 0.1, 0.9, 1.4, 1.1]
+    udf = (; df..., y=[0.2, missing, 0.7, 0.3, 0.6, 0.5])
+    uplan = BRM._brm_rk_plan(@brm udf begin
+        logit(mu) ~ 1 + x
+        mi(y) ~ Beta(mu * 5.0, (1 - mu) * 5.0)
+    end)
+    uspec = only(uplan.responses)
+    @test (uspec.family, uspec.link) === (:beta_logit, :logit)
+    @test uspec.mi_jobs === :Jobs_y
+    @test uplan.columns[:y] == [0.2, 0.7, 0.3, 0.6, 0.5]
+    # Fail-closed surface: compositions, discrete families, and Case-B
+    # downstream uses of the merged response.
+    wdf = (; missing_df..., w=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+    @test_throws ErrorException BRM._brm_rk_plan(@brm wdf begin
+        mu ~ 1 + x
+        s ~ Exponential(1)
+        mi(y) ~ weighted(Normal(mu, s), w)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm missing_df begin
+        mu ~ 1 + x
+        s ~ Exponential(1)
+        mi(y) ~ censored(Normal(mu, s), -1.0, 2.0)
+    end)
+    bdf = (; df..., b=[0, missing, 1, 0, 1, 1])
+    @test_throws ErrorException BRM._brm_rk_plan(@brm bdf begin
+        mu ~ 1 + x
+        mi(b) ~ Bernoulli(mu)
+    end)
+    zdf = (; missing_df..., z=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    @test_throws ErrorException BRM._brm_rk_plan(@brm zdf begin
+        mu ~ 1 + x
+        s ~ Exponential(1)
+        mi(y) ~ Normal(mu, s)
+        loc2 ~ 1 + x + y
+        z ~ Normal(loc2, s)
+    end)
 end
 
 @testset "distributional scale/shape predictors" begin

@@ -132,6 +132,59 @@ function _rk_patch_threshold_coefs!(vectors::Vector{VectorParameter},
     nothing
 end
 
+# `mi()` plan-level patch (no surface syntax in v1, decision 05aemvx
+# P4): the AST lowers the ordinary response statement, and the planned
+# `Jobs` column rides `mi_jobs` onto the thin-layer spec here — the
+# same plan-level route as the ordinal extras. Plans without `mi()`
+# responses pass through untouched.
+function _rk_patch_mi_response(lowered::LikelihoodSpec,
+        planned::BRM._RKLikelihoodSpec)
+    LikelihoodSpec(lowered.family, lowered.link, lowered.response,
+        lowered.predictor, lowered.scale, lowered.weights, lowered.evidence,
+        lowered.label, lowered.trials, lowered.range;
+        n_levels = lowered.n_levels, thresholds = lowered.thresholds,
+        extra_predictors = lowered.extra_predictors,
+        count_columns = lowered.count_columns,
+        ordinal_structure = lowered.ordinal_structure,
+        discrimination = lowered.discrimination,
+        threshold_columns = lowered.threshold_columns,
+        threshold_coefs = lowered.threshold_coefs,
+        extra_responses = lowered.extra_responses,
+        factor_scales = lowered.factor_scales,
+        factor_corr = lowered.factor_corr,
+        glm_alpha = lowered.glm_alpha, glm_beta = lowered.glm_beta,
+        mi_jobs = planned.mi_jobs)
+end
+
+function _rk_patch_mi_jobs(unbound::StructuralPlan,
+        plan::BRM._RKStructuralPlan)
+    any(r -> r.mi_jobs !== nothing, plan.responses) || return unbound
+    by_response = Dict{Symbol,BRM._RKLikelihoodSpec}(
+        spec.response => spec for spec in plan.responses)
+    responses = map(unbound.responses) do lowered
+        planned = get(by_response, lowered.response, nothing)
+        planned === nothing &&
+            error("RK backend: internal: lowered response " *
+                  "`$(lowered.response)` matches no planned response")
+        planned.mi_jobs === nothing && return lowered
+        _rk_patch_mi_response(lowered, planned)
+    end
+    StructuralPlan(responses, unbound.predictors, unbound.population_priors,
+        unbound.parameters, unbound.assignments, unbound.columns,
+        unbound.n_obs; roles = unbound.roles, derived = unbound.derived,
+        levelmaps = unbound.levelmaps,
+        plate_parameters = unbound.plate_parameters, scans = unbound.scans,
+        dar_paths = unbound.dar_paths,
+        varying_draws = unbound.varying_draws,
+        varying_slices = unbound.varying_slices,
+        vector_parameters = unbound.vector_parameters,
+        spline_bases = unbound.spline_bases,
+        spline_vectors = unbound.spline_vectors,
+        hsgp_bases = unbound.hsgp_bases,
+        kernel_plates = unbound.kernel_plates,
+        r2d2_priors = unbound.r2d2_priors, matrices = unbound.matrices)
+end
+
 function _rk_patch_ordinal_extras(unbound::StructuralPlan,
         plan::BRM._RKStructuralPlan)
     scales = _rk_ordinal_scale_names(plan)
@@ -195,7 +248,8 @@ function _rk_translated_plan(plan::BRM._RKStructuralPlan)
     emitted = BRM._rk_emit_ast(plan)
     unbound = lower_rkppl(emitted.main,
         Tuple(sort!(collect(keys(plan.columns)))); mod=_rk_emit_module(emitted))
-    bind_data(_rk_patch_ordinal_extras(unbound, plan), plan.columns)
+    bind_data(_rk_patch_mi_jobs(
+        _rk_patch_ordinal_extras(unbound, plan), plan), plan.columns)
 end
 
 # Kernel plans additionally bind the plate dims (subjects/timepoints) the

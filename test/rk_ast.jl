@@ -555,7 +555,7 @@ end
             nothing, BRM._RKResponseEvidence(:none, nothing, nothing), :y,
             nothing, nothing, nothing, Symbol[], Symbol[], nothing, nothing,
             Symbol[], nothing, Symbol[], nothing, BRM._RKMixtureComponent[],
-            nothing, nothing, nothing)],
+            nothing, nothing, nothing, nothing)],
         [BRM._RKPredictorSpec(:n, :identity, BRM._RKTermSpec[
             BRM._RKTermSpec(:intercept, Symbol[], (;), :Intercept, :Intercept),
             BRM._RKTermSpec(:continuous, [:n], (;), :n, :n)], :n)],
@@ -1927,6 +1927,33 @@ end
     fused = BRM._rk_emit_ast(plan, true)
     plain = BRM._rk_emit_ast(plan, false)
     @test fused.main == plain.main && fused.defs == plain.defs
+end
+
+@testset "mi() responses skip GLM fusion" begin
+    # The whole-vector GLM object has no missingness machinery: an `mi()`
+    # response that would otherwise fuse (identity link, scalar scale)
+    # takes the plate path under both head modes. The plain twin fuses
+    # (control: the exclusion is mi-specific).
+    mdf = (; df..., y=[0.5, missing, 0.1, 0.9, 1.4, 1.1])
+    mi_plan = BRM._brm_rk_plan(@brm mdf begin
+        mu ~ 1 + x
+        s ~ Exponential(1)
+        mi(y) ~ Normal(mu, s)
+    end)
+    @test BRM._rk_emit_ast(mi_plan, true).main.args[end] ==
+        Expr(:call, :.~, :y,
+            Expr(:., :Normal, Expr(:tuple, :mu, :s)))
+    @test BRM._rk_emit_ast(mi_plan, false).main.args[end] ==
+        Expr(:call, :.~, :y,
+            Expr(:., :Normal, Expr(:tuple, :mu, :s)))
+    plain_plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test BRM._rk_emit_ast(plain_plan, true).main.args[end] ==
+        Expr(:call, :~, :y,
+            Expr(:call, :NormalIDGLM, :y_X, :mu_alpha, :mu_beta, :s))
 end
 
 @testset "mixture AST shapes" begin
