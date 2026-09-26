@@ -12,9 +12,9 @@ using Test
 using BayesianRegressionModels
 using CategoricalArrays: categorical
 using Distributions: Bernoulli, Beta, Binomial, Categorical, Cauchy, Dirichlet,
-                     Exponential, Gamma, InverseGaussian, LocationScale,
-                     LogNormal, MixtureModel, Multinomial, MvNormal,
-                     NegativeBinomial, Normal,
+                     Exponential, Gamma, InverseGaussian, Laplace,
+                     LocationScale, Logistic, LogNormal, MixtureModel,
+                     Multinomial, MvNormal, NegativeBinomial, Normal,
                      Poisson, TDist, Uniform, VonMises, Weibull, truncated
 using LogExpFunctions: logistic, logit
 using Statistics: mean
@@ -76,10 +76,10 @@ dfp = merge(df, (; prop=[0.2, 0.7, 0.4, 0.6, 0.3, 0.8]))
     @test sort!([p.addressee for p in plan.population_priors]) ==
         [:g, :x]
     x_prior = only(p for p in plan.population_priors if p.addressee === :x)
-    @test (x_prior.location, x_prior.scale) == (0.0, 2.0)
+    @test (x_prior.family, x_prior.args) == (:Normal, (0.0, 2.0))
     g_prior = only(
         p for p in plan.population_priors if p.addressee === :g)
-    @test (g_prior.location, g_prior.scale) == (0.0, 2.0)
+    @test (g_prior.family, g_prior.args) == (:Normal, (0.0, 2.0))
     @test length(plan.parameters) == 1
     @test only(plan.parameters).name === :s
     @test only(plan.parameters).family === :Exponential
@@ -194,7 +194,7 @@ end
     @test sort!([p.addressee for p in global_prior.population_priors]) ==
         [:g, :x]
     @test only(p for p in global_prior.population_priors
-        if p.addressee === :g).scale == 3.0
+        if p.addressee === :g).args == (0.0, 3.0)
     # Two reference subsets share one intercept (neither spans it).
     two = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + factor(g; ref=1) + factor(h; ref=1)
@@ -248,7 +248,7 @@ end
         [:Intercept, :int_x_x_z, :x]
     prior = only(
         p for p in plan.population_priors if p.addressee === :int_x_x_z)
-    @test (prior.location, prior.scale) == (0.0, 5.0)
+    @test (prior.family, prior.args) == (:Normal, (0.0, 5.0))
     @test sort!(collect(keys(plan.columns))) == [:x, :y, :z]
 end
 
@@ -274,7 +274,7 @@ end
     # treatment-coded), so it takes the emitter default.
     defaulted = only(p for p in plan.population_priors
         if p.addressee === :int_x_x_g_lvl_1)
-    @test (defaulted.location, defaulted.scale) == (0.0, 1.0)
+    @test (defaulted.family, defaulted.args) == (:Normal, (0.0, 1.0))
     # `factor()` is not admitted inside `&` operands (coding there is
     # always full-rank); the bare column spells it.
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
@@ -359,7 +359,7 @@ end
     @test term.addressee === derived.name
     prior = only(
         p for p in plan.population_priors if p.addressee === derived.name)
-    @test (prior.location, prior.scale) == (0.0, 1.0)
+    @test (prior.family, prior.args) == (:Normal, (0.0, 1.0))
     @test sort!(collect(keys(plan.columns))) == [:y, :z]
     arithmetic = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x * 2
@@ -1134,9 +1134,9 @@ end
     @test (vec.name, vec.family, vec.size) ==
         (:mo_c_simplex_incr, :simplex_dirichlet, 3)
     @test only(vec.args) == [1.0, 1.0, 1.0]
-    @test [(p.addressee, p.location, p.scale)
+    @test [(p.addressee, p.family, p.args)
         for p in plan.population_priors] ==
-        [(:Intercept, 0.0, 1.0), (:c_idx, 0.0, 1.0)]
+        [(:Intercept, :Normal, (0.0, 1.0)), (:c_idx, :Normal, (0.0, 1.0))]
     @test [p.name for p in plan.parameters] == [:s]
     @test BRM._rk_num_coefficients(plan) == 2
     # `mo1(c)`: beta-free direct summand — self-addressed, no beta prior.
@@ -1151,8 +1151,8 @@ end
         if t.kind === :monotonic_summand)
     @test (term.columns, term.addressee) == ([:c_idx], term.label)
     @test term.options.increments == :mo1_c_simplex_incr
-    @test [(p.addressee, p.location, p.scale)
-        for p in plan.population_priors] == [(:Intercept, 0.0, 1.0)]
+    @test [(p.addressee, p.family, p.args)
+        for p in plan.population_priors] == [(:Intercept, :Normal, (0.0, 1.0))]
     @test only(plan.vector_parameters).name == :mo1_c_simplex_incr
     # Beta-free `mo1` plans without an intercept (coefficient-free LP).
     plan = BRM._brm_rk_plan(@brm df begin
@@ -1271,9 +1271,10 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    @test [(p.addressee, p.location, p.scale)
+    @test [(p.addressee, p.family, p.args)
         for p in plan.population_priors] ==
-        [(:Intercept, 0.0, 2.0), (:x, 0.0, 2.0), (:c_idx, 0.0, 2.0)]
+        [(:Intercept, :Normal, (0.0, 2.0)), (:x, :Normal, (0.0, 2.0)),
+            (:c_idx, :Normal, (0.0, 2.0))]
     # ... but a column-specific claim leaves the mo beta at its default.
     plan = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x + mo(c)
@@ -1281,9 +1282,10 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    @test [(p.addressee, p.location, p.scale)
+    @test [(p.addressee, p.family, p.args)
         for p in plan.population_priors] ==
-        [(:Intercept, 0.0, 1.0), (:x, 0.0, 2.0), (:c_idx, 0.0, 1.0)]
+        [(:Intercept, :Normal, (0.0, 1.0)), (:x, :Normal, (0.0, 2.0)),
+            (:c_idx, :Normal, (0.0, 1.0))]
     # Generated-name `effect(mu, mo_c)` stays unaddressable
     # (interaction-label precedent): the colon is the mainline spelling.
     @test_throws "not a population coefficient" BRM._brm_rk_plan(@brm df begin
@@ -1413,8 +1415,9 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    # Non-Normal non-Horseshoe overrides stay closed (slice-1 rule).
-    @test_throws "or `Horseshoe(...)` in slice 1" BRM._brm_rk_plan(
+    # Non-Normal overrides stay closed under a decomposition (R2D2
+    # override columns are Normal-only, thin-layer rule).
+    @test_throws "R2D2 override columns stay" BRM._brm_rk_plan(
         @brm df begin
             mu ~ 1 + x
             effect(mu, :) ~ r2d2()
@@ -1566,8 +1569,8 @@ end
         term.options.sigma_param.support_override) ==
         (:Normal, (0.0, 0.2), :positive)
     @test plan.columns[:t] == tdf.t
-    @test [(p.addressee, p.location, p.scale)
-        for p in plan.population_priors] == [(:Intercept, 0.0, 1.0)]
+    @test [(p.addressee, p.family, p.args)
+        for p in plan.population_priors] == [(:Intercept, :Normal, (0.0, 1.0))]
     @test BRM._rk_num_coefficients(plan) == 1
     # `ar(...)` overrides ride the persistence location/scale.
     plan = BRM._brm_rk_plan(@brm tdf begin
@@ -2006,7 +2009,7 @@ end
     # Default beta prior matches SB's popefs default.
     prior = only(p for p in plan.population_priors
         if p.addressee === :ar_mu_x)
-    @test (prior.location, prior.scale) == (0.0, 1.0)
+    @test (prior.family, prior.args) == (:Normal, (0.0, 1.0))
     # `:`-wide statements claim the latent beta exactly as SB does.
     brmi = @brm df begin
         mu ~ 1 + ar(x; p=1)
@@ -2015,9 +2018,10 @@ end
         y ~ Normal(mu, s)
     end
     plan = BRM._brm_rk_plan(brmi)
-    got = Dict(p.addressee => (p.location, p.scale)
+    got = Dict(p.addressee => (p.family, p.args)
         for p in plan.population_priors)
-    @test got == Dict(:Intercept => (0.0, 2.0), :ar_mu_x => (0.0, 2.0))
+    @test got == Dict(:Intercept => (:Normal, (0.0, 2.0)),
+        :ar_mu_x => (:Normal, (0.0, 2.0)))
     # The predictor-wide default loses to the predictor-specific claim.
     brmi = @brm df begin
         mu ~ 1 + ar(x; p=1)
@@ -2029,7 +2033,7 @@ end
     plan = BRM._brm_rk_plan(brmi)
     prior = only(p for p in plan.population_priors
         if p.addressee === :ar_mu_x)
-    @test (prior.location, prior.scale) == (0.0, 2.0)
+    @test (prior.family, prior.args) == (:Normal, (0.0, 2.0))
     # Explicit addresses on the latent column stay sequenced (SB's
     # `popcoefnames` spelling `ar_x`; the predictor-namespaced Stan
     # spelling is not a coefficient on either side).
@@ -2152,8 +2156,8 @@ end
     # Default beta prior matches SB's popefs default.
     prior = only(p for p in plan.population_priors
         if p.addressee === :me_x)
-    @test (prior.predictor, prior.location, prior.scale) ===
-        (:mu, 0.0, 1.0)
+    @test (prior.predictor, prior.family, prior.args) ===
+        (:mu, :Normal, (0.0, 1.0))
     # `:`-wide statements claim the latent beta exactly as SB does.
     brmi = @brm df begin
         mu ~ 1 + me(x, 0.5)
@@ -2162,9 +2166,10 @@ end
         y ~ Normal(mu, s)
     end
     plan = BRM._brm_rk_plan(brmi)
-    got = Dict(p.addressee => (p.location, p.scale)
+    got = Dict(p.addressee => (p.family, p.args)
         for p in plan.population_priors)
-    @test got == Dict(:Intercept => (0.0, 2.0), :me_x => (0.0, 2.0))
+    @test got == Dict(:Intercept => (:Normal, (0.0, 2.0)),
+        :me_x => (:Normal, (0.0, 2.0)))
     # The predictor-wide default loses to the predictor-specific claim.
     brmi = @brm df begin
         mu ~ 1 + me(x, 0.5)
@@ -2176,7 +2181,7 @@ end
     plan = BRM._brm_rk_plan(brmi)
     prior = only(p for p in plan.population_priors
         if p.addressee === :me_x)
-    @test (prior.location, prior.scale) == (0.0, 2.0)
+    @test (prior.family, prior.args) == (:Normal, (0.0, 2.0))
     # A `latent(...)` override rides the plate's shared-scalar args.
     brmi = @brm df begin
         mu ~ 1 + me(x, 0.5)
@@ -3260,9 +3265,12 @@ end
 end
 
 @testset "fail closed: priors, data, and cycles" begin
+    # Positive-support families stay closed as population priors
+    # (prior-vocab v1 admits real-line families + Flat only; Cauchy is
+    # admitted — see the prior-vocab testset below).
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
-        effect(mu, x) ~ Cauchy(0, 1)
+        effect(mu, x) ~ Exponential(1)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
@@ -4945,4 +4953,214 @@ end
         s ~ Exponential(1)
         y ~ MixtureModel([Normal(mu, s), Normal(mu, s)], [0.5, 0.5])
     end))
+end
+
+@testset "prior vocab v1: sampled families" begin
+    # Laplace / Logistic / StudentT / Uniform plan with Stan-order args.
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        a ~ Laplace(0, 2)
+        q ~ Logistic(1, 3)
+        t ~ LocationScale(0, 2, TDist(4))
+        u ~ Uniform(0.5, 1.5)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    got = Dict(p.name => (p.family, p.args, p.support_override)
+        for p in plan.parameters)
+    @test got[:a] == (:Laplace, (0.0, 2.0), nothing)
+    @test got[:q] == (:Logistic, (1.0, 3.0), nothing)
+    @test got[:t] == (:StudentT, (4.0, 0.0, 2.0), nothing)
+    @test got[:u] == (:Uniform, (0.5, 1.5), nothing)
+    # A sampled StudentT nu rides a param ref (response-nu precedent).
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        k ~ Exponential(1)
+        t ~ LocationScale(0, 2, TDist(k))
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test only(p for p in plan.parameters if p.name === :t).args ==
+        (:k, 0.0, 2.0)
+    # A bare `TDist` stays rejected (no location/scale to unwrap).
+    @test_throws "out of slice 1" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        t ~ TDist(4)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # A non-TDist LocationScale base stays rejected.
+    @test_throws "must be `TDist(nu)`" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        t ~ LocationScale(0, 2, Normal(0, 1))
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    # Uniform bounds must be finite literals with lower < upper (the
+    # thin-layer layout derives support from values).
+    @test_throws "must be finite" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        u ~ Uniform(1.5, 0.5)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test_throws "must be numeric literals" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        s ~ Exponential(1)
+        u ~ Uniform(0.5, s)
+        y ~ Normal(mu, s)
+    end)
+end
+
+@testset "prior vocab v1: symmetric-half truncated" begin
+    # New symmetric halves ride the general Tuple splice; Normal/Cauchy
+    # halves keep the legacy `:positive` override (byte-identical
+    # `HalfNormal`/`HalfCauchy` emission).
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        h1 ~ truncated(Laplace(0, 2), 0, Inf)
+        h2 ~ truncated(LocationScale(0, 3, TDist(5)), 0, Inf)
+        h3 ~ truncated(Logistic(0, 1); lower=0.0)
+        hn ~ truncated(Normal(0, 2), 0, Inf)
+        hc ~ truncated(Cauchy(0, 2), 0, Inf)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    got = Dict(p.name => (p.family, p.args, p.support_override)
+        for p in plan.parameters)
+    @test got[:h1] == (:Laplace, (0.0, 2.0), (:truncated, 0.0, Inf))
+    @test got[:h2] == (:StudentT, (5.0, 0.0, 3.0), (:truncated, 0.0, Inf))
+    @test got[:h3] == (:Logistic, (0.0, 1.0), (:truncated, 0.0, Inf))
+    @test got[:hn] == (:Normal, (0.0, 2.0), :positive)
+    @test got[:hc] == (:Cauchy, (0.0, 2.0), :positive)
+    # Nonzero locations still fail closed (the +log(2) is exact only
+    # at 0), as do asymmetric bases and general bounds (sequenced).
+    @test_throws "must be the literal 0" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        hh ~ truncated(Laplace(0.5, 1), 0, Inf)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test_throws "out of slice 1" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        hh ~ truncated(Exponential(1), 0, Inf)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test_throws "out of slice 1" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        hh ~ truncated(Laplace(0, 1), 1, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+end
+
+@testset "prior vocab v1: per-addressee population families" begin
+    # Mixed real-line families share one predictor (per-addressee
+    # granularity; the thin layer owns the wide-block rule).
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + z
+        effect(mu, Intercept) ~ Cauchy(0, 1)
+        effect(mu, x) ~ Laplace(0, 2)
+        effect(mu, z) ~ LocationScale(1, 3, TDist(4))
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    got = Dict(p.addressee => (p.family, p.args)
+        for p in plan.population_priors)
+    @test got == Dict(
+        :Intercept => (:Cauchy, (0.0, 1.0)),
+        :x => (:Laplace, (0.0, 2.0)),
+        :z => (:StudentT, (4.0, 1.0, 3.0)))
+    # Logistic scalars + Flat factor blocks (Flat contributes 0.0
+    # density thin-layer-side; explicit opt-in only).
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 0 + x + g
+        effect(mu, x) ~ Logistic(0, 1)
+        effect(mu, g) ~ Flat()
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    got = Dict(p.addressee => (p.family, p.args)
+        for p in plan.population_priors)
+    @test got == Dict(
+        :x => (:Logistic, (0.0, 1.0)), :g => (:Flat, ()))
+    # `:`-wide non-Normal claims reach the ar/mo/me latent betas
+    # through the same rewrite.
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + ar(x; p=1)
+        effect(mu, :) ~ Cauchy(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    got = Dict(p.addressee => (p.family, p.args)
+        for p in plan.population_priors)
+    @test got == Dict(:Intercept => (:Cauchy, (0.0, 2.0)),
+        :ar_mu_x => (:Cauchy, (0.0, 2.0)))
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x + mo(c)
+        effect(mu, :) ~ Laplace(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test only(p for p in plan.population_priors
+        if p.addressee === :c_idx).args == (0.0, 2.0)
+    @test only(p for p in plan.population_priors
+        if p.addressee === :c_idx).family === :Laplace
+    plan = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + me(x, 0.5)
+        effect(mu, :) ~ LocationScale(0, 2, TDist(3))
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test only(p for p in plan.population_priors
+        if p.addressee === :me_x).args == (3.0, 0.0, 2.0)
+    # Positive-support and bounded families stay closed as population
+    # priors (real-line + Flat only in v1).
+    @test_throws "population-effect priors must be" BRM._brm_rk_plan(
+        @brm df begin
+            mu ~ 1 + x
+            effect(mu, x) ~ Gamma(2, 1)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    @test_throws "population-effect priors must be" BRM._brm_rk_plan(
+        @brm df begin
+            mu ~ 1 + x
+            effect(mu, x) ~ Uniform(0, 1)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    # Laplace/Logistic need both args (no SB-mirrored defaults);
+    # Flat takes none; a bare TDist stays rejected.
+    @test_throws "needs exactly `(location, scale)`" BRM._brm_rk_plan(
+        @brm df begin
+            mu ~ 1 + x
+            effect(mu, x) ~ Laplace(0)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    @test_throws "takes no arguments" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        effect(mu, x) ~ Flat(1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test_throws "population-effect priors must be" BRM._brm_rk_plan(
+        @brm df begin
+            mu ~ 1 + x
+            effect(mu, x) ~ TDist(4)
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
+    # Flat under a decomposition stays closed (R2D2 overrides are
+    # Normal-only, like every other non-Normal family).
+    @test_throws "R2D2 override columns stay" BRM._brm_rk_plan(
+        @brm df begin
+            mu ~ 1 + x
+            effect(mu, :) ~ r2d2()
+            effect(mu, x) ~ Flat()
+            s ~ Exponential(1)
+            y ~ Normal(mu, s)
+        end)
 end

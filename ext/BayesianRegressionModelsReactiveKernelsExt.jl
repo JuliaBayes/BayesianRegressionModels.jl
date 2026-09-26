@@ -101,8 +101,18 @@ function _rk_patch_scale_predictor!(predictors::Vector{PredictorSpec},
     push!(predictors, PredictorSpec(spec.name, LogLink, terms, spec.label))
     for prior in plan.population_priors
         prior.predictor === sname || continue
+        # Family-carrying translation rides the thin-layer prior-vocab
+        # land (pin bump); until then only Normal crosses this patch.
+        # (Main-predictor priors cross via the AST, never here.)
+        prior.family === :Normal || error(
+            "RK backend: scale predictor `$sname` addressee " *
+            "`$(prior.addressee)` carries a `$(prior.family)` " *
+            "population prior, which needs the landed thin-layer " *
+            "prior-vocab surface (this extension still targets the " *
+            "Normal-only `PopulationPrior` shape)")
+        location, scale = prior.args
         push!(priors, PopulationPrior(prior.predictor, prior.addressee,
-            prior.location, prior.scale))
+            location, scale))
     end
     for term in spec.terms
         term.kind === :factor || continue
