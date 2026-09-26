@@ -638,7 +638,7 @@ function _rk_ast_mixture_leaves(response::_RKLikelihoodSpec,
             _RKResponseEvidence(:none, nothing, nothing), response.label,
             response.trials, nothing, nothing, Symbol[], Symbol[], nothing,
             nothing, Symbol[], nothing, Symbol[], nothing,
-            _RKMixtureComponent[], nothing, nothing)
+            _RKMixtureComponent[], nothing, nothing, nothing)
         cleaf = Dict{Symbol,Any}(:predictor => loc)
         if _rk_ast_response_uses_scale(comp.family)
             cleaf[:scale] =

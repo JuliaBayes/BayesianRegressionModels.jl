@@ -1926,6 +1926,8 @@ end
     @test BRM._rk_emit_ast(plain_plan, true).main.args[end] ==
         Expr(:call, :~, :y,
             Expr(:call, :NormalIDGLM, :y_X, :mu_alpha, :mu_beta, :s))
+end
+
 @testset "mixture AST shapes" begin
     # Gaussian driving case: param locations bare, shared log-link scale
     # predictor wrapped at the use site, literal weights inline.
