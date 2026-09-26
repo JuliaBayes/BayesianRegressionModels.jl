@@ -315,7 +315,7 @@ end
 _rk_ast_response_uses_scale(family::Symbol) =
     family === :gaussian || family === :nb2_log ||
     family === :gamma_log || family === :beta_logit ||
-    family === :student_t
+    family === :student_t || family === :hurdle_poisson
 
 # The scale-slot body spelling inside a bare response statement. A
 # direct scale (outer name, literal, or the plan-forbidden nothing)
@@ -534,6 +534,16 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
                 _rk_ast_dotted(:exp, predictor),
                 leaf[:scale]) :
             _rk_ast_dotted(:NegativeBinomial2, predictor, leaf[:scale])
+    elseif response.family === :hurdle_poisson
+        # Twin head (thin-layer decision, pair fam-hurdle): the plan's
+        # `HurdlePoisson(lambda, p_zero)` maps to
+        # `HurdlePoisson.(exp.(eta), p_zero)` (NB2 precedent); the hu
+        # submodel rides the scale slot under `logistic.`, scalars
+        # inline bare. No fused head: one spelling either way.
+        wrap_location ? _rk_ast_dotted(:HurdlePoisson,
+            _rk_ast_dotted(:exp, predictor),
+            leaf[:scale]) :
+        _rk_ast_dotted(:HurdlePoisson, predictor, leaf[:scale])
     elseif response.family === :gamma_log
         # Mean-shape form: the plan pins both alpha positions identical,
         # so the same value emits twice.

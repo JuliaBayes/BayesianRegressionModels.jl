@@ -44,12 +44,17 @@ const _RK_ADMITTED_TRIPLES = Set{Tuple{Symbol,Symbol,Symbol}}([
     # predictor; nu rides its own plan slot (literal / sampled /
     # assignment — no modeled-nu predictor).
     (:student_t, :identity, :identity),
+    # Group C (hurdle): hurdle-Poisson over a log-link rate
+    # predictor; p_zero rides the scale slot (scalar literal /
+    # sampled / assignment) or the scale-predictor slot (a
+    # `logit(p_zero)` hu submodel — the vscale precedent).
+    (:hurdle_poisson, :log, :log),
 ])
 # Slice-2 families: no weights or evidence (no driving case — the thin
 # layer admits neither on the new triples, so the planner fails closed).
 const _RK_SLICE2_FAMILIES = Set{Symbol}([
     :bernoulli_probit, :bernoulli_cloglog, :binomial_probit,
-    :binomial_cloglog, :beta_logit, :student_t,
+    :binomial_cloglog, :beta_logit, :student_t, :hurdle_poisson,
 ])
 # Leveled simplex responses (multinomial/categorical) name a simplex
 # vector parameter instead of a linear predictor, so they skip the
@@ -115,7 +120,8 @@ struct _RKLikelihoodSpec
                    # :multinomial | :categorical | slice-2 group A:
                    # :bernoulli_probit | :bernoulli_cloglog |
                    # :binomial_probit | :binomial_cloglog | :beta_logit |
-                   # group B: :student_t |
+                   # group B: :student_t | group C: :hurdle_poisson
+                   # (p_zero rides the scale / scale-predictor slots) |
                    # longtail: :mvnormal_cholesky (joint correlated outcomes)
                    # | :mixture (finite MixtureModel response)
     link::Symbol   # effective link: :identity | :logit | :log |
@@ -386,9 +392,12 @@ const _RK_ADMITTED_SPELLINGS =
     "(1-mu)*kappa)` + `logit(mu) ~ ...`, group B: `y ~ LocationScale(mu, " *
     "s, TDist(nu))` + `mu ~ ...`, `[y1, y2] ~ " *
     "MvNormalCholesky([mu1, mu2], L)` + `L ~ LKJCovarianceFactor(K; " *
-    "...)` + identity `mu_j ~ ...`, or `y ~ MixtureModel([D1, ..., " *
+    "...)` + identity `mu_j ~ ...`, `y ~ MixtureModel([D1, ..., " *
     "DK], w)` (K >= 1 same-family Normal/Bernoulli/Poisson/Binomial/" *
-    "NegativeBinomial2/Gamma/Beta components + literal/Dirichlet weights)"
+    "NegativeBinomial2/Gamma/Beta components + literal/Dirichlet " *
+    "weights), or group C: `c ~ HurdlePoisson(lambda, p0)` + " *
+    "`log(lambda) ~ ...` (`p0` a `logit(p0) ~ ...` predictor, sampled " *
+    "parameter, or (0, 1] literal)"
 
 function _rk_predictor_link(brmi::BRMI, target::Symbol)
     prefix = "RK backend"
@@ -784,6 +793,37 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
             "`log(mu)` predictor")
         return (; family=:poisson_log, link=plink, scale=nothing,
             scale_predictor=nothing, trials=nothing, location)
+    elseif head === HurdlePoisson
+        length(args) == 2 || error(
+            "$prefix: response `$response` `HurdlePoisson` needs " *
+            "`(rate, p_zero)`; write `HurdlePoisson(lambda, p_zero)` " *
+            "with a `log(lambda)` predictor")
+        location = _rk_location_arg(args[1], candidates, response, "rate",
+            "itself; write `HurdlePoisson(lambda, p_zero)` with a " *
+            "`log(lambda)` predictor (slice 2 has no " *
+            "`HurdlePoisson(exp(..))` spelling)")
+        plink = predictor_link[location]
+        # p_zero rides the scale slot (scalar sampled parameter /
+        # assignment / literal) or the scale-predictor slot (a
+        # `logit(p_zero)` hu submodel — the vscale precedent).
+        p_zero, p_zero_predictor = _rk_scale_argument(args[2], parameters,
+            assignments, consts, aliases, response, "p_zero", candidates)
+        p_zero isa Number && p_zero > 1 && error(
+            "$prefix: response `$response` `HurdlePoisson` p_zero " *
+            "literal must lie in (0, 1], got $p_zero")
+        p_zero_predictor !== nothing &&
+            predictor_link[p_zero_predictor] !== :logit && error(
+                "$prefix: response `$response` `HurdlePoisson` p_zero " *
+                "predictor `$(p_zero_predictor)` must be logit-link; " *
+                "write a `logit(p_zero) ~ ...` hu submodel")
+        triple = (:hurdle_poisson, plink, plink)
+        triple in _RK_ADMITTED_TRIPLES || error(
+            "$prefix: response `$response` pairs `HurdlePoisson` with " *
+            "a $plink-link predictor; write " *
+            "`HurdlePoisson(lambda, p_zero)` with a `log(lambda)` " *
+            "predictor")
+        return (; family=:hurdle_poisson, link=plink, scale=p_zero,
+            scale_predictor=p_zero_predictor, trials=nothing, location)
     elseif head === Binomial
         length(args) == 2 || error(
             "$prefix: response `$response` `Binomial` needs `(trials, " *
@@ -4876,6 +4916,9 @@ function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
          all(x -> x == 0 || x == 1, values)) || error(
             "$prefix: response `$response` must be Bool or 0/1 integers")
     elseif family === :poisson_log
+        (eltype(values) <: Integer && all(>=(0), values)) || error(
+            "$prefix: response `$response` must hold non-negative integers")
+    elseif family === :hurdle_poisson
         (eltype(values) <: Integer && all(>=(0), values)) || error(
             "$prefix: response `$response` must hold non-negative integers")
     elseif family === :binomial_logit
