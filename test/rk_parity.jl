@@ -33,8 +33,9 @@ using Test
 using BayesianRegressionModels
 using CategoricalArrays: categorical, levelcode
 using DifferentiationInterface: AutoEnzyme
-using Distributions: Beta, Cauchy, Dirichlet, Exponential, LogNormal,
-                     Normal, cdf, logcdf, logccdf, logpdf
+using Distributions: Beta, Cauchy, Dirichlet, Exponential, Gamma,
+                     LocationScale, LogNormal, MixtureModel, Normal, Poisson,
+                     TDist, cdf, logcdf, logccdf, logpdf
 using Enzyme
 using LogDensityProblems
 using ReactiveKernels: prepare
@@ -1046,6 +1047,71 @@ end
     _check_parity_gradient(backend, u)
 end
 
+@testset "rk parity student-t sampled nu" begin
+    t_cols = (;
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        y=[0.5, -0.2, 0.1, 2.9, 1.4, -1.1],
+    )
+    brmi = @brm t_cols begin
+        mu ~ 1 + x
+        sigma ~ Exponential(1)
+        nu ~ Gamma(2, 0.1)
+        y ~ LocationScale(mu, sigma, TDist(nu))
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 4
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+        (:sampled, :sigma, 1, :exp),
+        (:sampled, :nu, 1, :exp),
+    ]
+    u = [-0.4, 0.3, -0.2, 1.1]
+    nt = constrain(layout, u)
+    b = Vector(nt.mu)
+    lp = b[1] .+ b[2] .* t_cols.x
+    ll = sum(logpdf.(LocationScale.(lp, nt.sigma, TDist(nt.nu)), t_cols.y))
+    pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2]) +
+        logpdf(Exponential(1), nt.sigma) + logpdf(Gamma(2, 0.1), nt.nu)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # Jacobian: sigma's + nu's exp (betas ride identity).
+    @test logjac(layout, u) ≈ u[3] + u[4]
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[3] + u[4]
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity student-t literal nu" begin
+    t_cols = (;
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        y=[0.5, -0.2, 0.1, 2.9, 1.4, -1.1],
+    )
+    brmi = @brm t_cols begin
+        mu ~ 1 + x
+        sigma ~ Exponential(1)
+        y ~ LocationScale(mu, sigma, TDist(4.0))
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 3
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+        (:sampled, :sigma, 1, :exp),
+    ]
+    u = [-0.4, 0.3, -0.2]
+    nt = constrain(layout, u)
+    b = Vector(nt.mu)
+    lp = b[1] .+ b[2] .* t_cols.x
+    ll = sum(logpdf.(LocationScale.(lp, nt.sigma, TDist(4.0)), t_cols.y))
+    pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2]) +
+        logpdf(Exponential(1), nt.sigma)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ u[3]
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[3]
+    _check_parity_gradient(backend, u)
+end
+
 @testset "rk parity kernel Ex1 pk1cmt" begin
     brmi = @brm _kernel_pk1cmt_cols begin
         sigma ~ Exponential(1)
@@ -1577,6 +1643,70 @@ end
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     jac = u[2] + u[3] + u[4]
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
+    _check_parity_gradient(backend, u)
+end
+
+# Mixture parity cases (pair fam-mixture, RK 49ebaf1): the committed
+# oracles are Distributions.jl loops over the constrained point; the
+# SB-point comparison (same models, SB brief values) rides the verdict
+# probe, not the committed suite.
+@testset "rk parity mixture gaussian" begin
+    df = (; y=[-2.0, -1.8, 1.9, 2.2])
+    brmi = @brm df begin
+        mu1 ~ Normal(-2, 0.1)
+        mu2 ~ Normal(2, 0.1)
+        log(sigma) ~ 1
+        y ~ MixtureModel([Normal(mu1, sigma), Normal(mu2, sigma)], [0.4, 0.6])
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 3
+    @test _layout_signature(layout) == [
+        (:coefficient, :sigma_coef, 1, :identity),
+        (:sampled, :mu1, 1, :identity),
+        (:sampled, :mu2, 1, :identity),
+    ]
+    u = collect(range(-0.4, 0.4; length = layout.total))
+    nt = constrain(layout, u)
+    mixture = MixtureModel(
+        [Normal(nt.mu1, exp(nt.sigma[1])), Normal(nt.mu2, exp(nt.sigma[1]))],
+        [0.4, 0.6])
+    ll = sum(logpdf.(mixture, df.y))
+    pr = logpdf(Normal(-2, 0.1), nt.mu1) + logpdf(Normal(2, 0.1), nt.mu2) +
+        logpdf(Normal(), nt.sigma[1])
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity mixture poisson" begin
+    df = (; y=[0, 1, 3, 5, 2])
+    brmi = @brm df begin
+        lambda1 ~ Exponential(1)
+        lambda2 ~ Exponential(1)
+        y ~ MixtureModel([Poisson(lambda1), Poisson(lambda2)], [0.3, 0.7])
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 2
+    @test _layout_signature(layout) == [
+        (:sampled, :lambda1, 1, :exp),
+        (:sampled, :lambda2, 1, :exp),
+    ]
+    u = collect(range(-0.4, 0.4; length = layout.total))
+    nt = constrain(layout, u)
+    mixture = MixtureModel([Poisson(nt.lambda1), Poisson(nt.lambda2)],
+        [0.3, 0.7])
+    ll = sum(logpdf.(mixture, df.y))
+    pr = logpdf(Exponential(1), nt.lambda1) +
+        logpdf(Exponential(1), nt.lambda2)
+    jac = u[1] + u[2]
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)

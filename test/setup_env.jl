@@ -56,8 +56,8 @@ const PINS = [
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
     # through. 4982829 (2026-09-26, canonical): the term-horseshoe
     # thin-layer slice — per-coefficient `Horseshoe(...)` surface +
-    # `HorseshoePrior` IR + `:positive_stan` Stan-kernel halves — on top
-    # of the 45f765e GLM-object / ranef-migration base.
+    # `HorseshoePrior` IR + `:positive_stan` Stan-kernel halves — over
+    # the 361fd71 fam-student slice and the 45f765e GLM-object base.
     ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "49828292f0de223bb38255b996a7602b4a499274"),  # main
 ]
 
