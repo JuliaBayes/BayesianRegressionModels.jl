@@ -15,8 +15,9 @@
 using Test
 using BayesianRegressionModels
 using Distributions: Bernoulli, Beta, Binomial, Categorical, Dirichlet,
-                     Exponential, Gamma, LocationScale, MixtureModel,
-                     Multinomial, Normal, Poisson, TDist, truncated
+                     Exponential, Gamma, InverseGaussian, LocationScale,
+                     LogNormal, MixtureModel, Multinomial, Normal, Poisson,
+                     TDist, truncated
 using LogExpFunctions: logistic, logit
 using Statistics: mean
 
@@ -280,6 +281,35 @@ end
     want = Expr(:call, :.~, :c,
         Expr(:., :ZeroInflatedPoisson, Expr(:tuple,
             Expr(:., :exp, Expr(:tuple, :lambda)), 0.25)))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+end
+
+@testset "group-C wald AST shape" begin
+    # Twin head (thin-layer decision, pair fam-inversegaussian):
+    # `InverseGaussian(mu, lam)` maps to
+    # `InverseGaussian.(exp.(mu), lam)` (NB2 precedent); no fused head.
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        lam ~ LogNormal(-0.3, 1.0)
+        z ~ InverseGaussian(mu, lam)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :z,
+        Expr(:., :InverseGaussian, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :mu)), :lam)))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+    # Literal shape inlines; the fused-heads flag changes nothing
+    # (one head either way).
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        z ~ InverseGaussian(mu, 2.0)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :z,
+        Expr(:., :InverseGaussian, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :mu)), 2.0)))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end

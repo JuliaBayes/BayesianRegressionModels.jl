@@ -34,8 +34,8 @@ using BayesianRegressionModels
 using CategoricalArrays: categorical, levelcode
 using DifferentiationInterface: AutoEnzyme
 using Distributions: Beta, Cauchy, Dirichlet, Exponential, Gamma,
-                     LocationScale, LogNormal, MixtureModel, Normal, Poisson,
-                     TDist, cdf, logcdf, logccdf, logpdf
+                     InverseGaussian, LocationScale, LogNormal, MixtureModel,
+                     Normal, Poisson, TDist, cdf, logcdf, logccdf, logpdf
 using Enzyme
 using LogDensityProblems
 using LogExpFunctions: logistic, logit
@@ -1249,6 +1249,37 @@ end
     _check_parity_gradient(backend, u)
 end
 
+@testset "rk parity wald sampled lambda" begin
+    w_cols = (;
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        z=[1.2, 0.8, 1.1, 2.3, 0.7, 1.9],
+    )
+    brmi = @brm w_cols begin
+        log(mu) ~ 1 + x
+        lam ~ Exponential(1)
+        z ~ InverseGaussian(mu, lam)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 3
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+        (:sampled, :lam, 1, :exp),
+    ]
+    u = [0.5, -0.25, 0.3]
+    nt = constrain(layout, u)
+    b = Vector(nt.mu)
+    mm = exp.(b[1] .+ b[2] .* w_cols.x)
+    ll = sum(logpdf.(InverseGaussian.(mm, nt.lam), w_cols.z))
+    pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2]) +
+        logpdf(Exponential(1), nt.lam)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ u[3]
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[3]
+    _check_parity_gradient(backend, u)
+end
+
 @testset "rk parity ZIP literal zi" begin
     z_cols = (;
         x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
@@ -1269,6 +1300,34 @@ end
     b = Vector(nt.lambda)
     lp = exp.(b[1] .+ b[2] .* z_cols.x)
     ll = sum(logpdf.(BRM.ZeroInflatedPoisson.(lp, 0.25), z_cols.c))
+    pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2])
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity wald literal lambda" begin
+    w_cols = (;
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        z=[1.2, 0.8, 1.1, 2.3, 0.7, 1.9],
+    )
+    brmi = @brm w_cols begin
+        log(mu) ~ 1 + x
+        z ~ InverseGaussian(mu, 2.0)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 2
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+    ]
+    u = [0.5, -0.25]
+    nt = constrain(layout, u)
+    b = Vector(nt.mu)
+    mm = exp.(b[1] .+ b[2] .* w_cols.x)
+    ll = sum(logpdf.(InverseGaussian.(mm, 2.0), w_cols.z))
     pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2])
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
