@@ -624,6 +624,47 @@ end
     @test isnothing(likelihood.scale_predictor)
 end
 
+@testset "group-C ZIP plan shapes" begin
+    # The demand-battery shape (zip.jl model A): sampled zi over a
+    # log-link rate predictor.
+    brmi = @brm df begin
+        log(lambda) ~ 1 + x
+        zi ~ Beta(2, 2)
+        c ~ ZeroInflatedPoisson(lambda, zi)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) ===
+        (:zero_inflated_poisson, :log)
+    @test likelihood.predictor === :lambda
+    @test likelihood.zero_inflation === :zi
+    # Literal zi.
+    brmi = @brm df begin
+        log(lambda) ~ 1 + x
+        c ~ ZeroInflatedPoisson(lambda, 0.25)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) ===
+        (:zero_inflated_poisson, :log)
+    @test likelihood.zero_inflation == 0.25
+    # Bare-literal assignment zi folds to a literal; an expression
+    # assignment stays a live name (the thin layer evaluates it).
+    brmi = @brm df begin
+        log(lambda) ~ 1 + x
+        zi = 0.25
+        c ~ ZeroInflatedPoisson(lambda, zi)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    @test only(plan.responses).zero_inflation == 0.25
+    @test isempty(plan.assignments) # folded literal disappears
+    brmi = @brm df begin
+        log(lambda) ~ 1 + x
+        zi = 1 / 4
+        c ~ ZeroInflatedPoisson(lambda, zi)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test likelihood.zero_inflation === :zi
+end
+
 @testset "weights, evidence, and multi-response" begin
     brmi = @brm df begin
         mu ~ 1 + x
@@ -2400,7 +2441,9 @@ end
 # shapes"; B: survival — robust LocationScale-TDist is admitted, see
 # "group-B student-t plan shapes"; C: multivariate/mixture —
 # CategoricalLogit and Ordinal are admitted by the leveled slice, see
-# "leveled plan shapes", so they are not listed here).
+# "leveled plan shapes", so they are not listed here; hurdle Poisson
+# is admitted, see "group-C hurdle-poisson plan shapes"; scalar-zi ZIP
+# is admitted, see "group-C ZIP plan shapes").
 @testset "fail closed: slice-2 demand (not yet admitted)" begin
     # Group B: LocationScale-TDist (t_regression.jl) is admitted — see
     # "group-B student-t plan shapes" above.
@@ -2417,7 +2460,10 @@ end
     end)
     # Group C: hurdle Poisson (hurdle_only.jl) is admitted — see
     # "group-C hurdle-poisson plan shapes" above.
-    # Group C: zero-inflated Poisson (zip.jl; sibling pair fam-zip).
+    # Group C: scalar-zi zero-inflated Poisson (zip.jl model A) is
+    # admitted — see "group-C ZIP plan shapes" above; the logit(zi)
+    # submodel shape stays fail-closed (here and in "fail closed:
+    # group-C ZIP scope edges").
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         log(lambda) ~ 1 + x
         logit(zi) ~ 1 + x
@@ -2587,6 +2633,45 @@ end
         log(lambda) ~ 1 + x
         logit(p_zero) ~ 1 + x
         c ~ censored(HurdlePoisson(lambda, p_zero); upper=5)
+    end)
+end
+
+@testset "fail closed: group-C ZIP scope edges" begin
+    # Identity-link rate predictor (the triple wants log).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        c ~ ZeroInflatedPoisson(mu, 0.25)
+    end)
+    # Modeled zi (zip.jl model B): out of v1.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(lambda) ~ 1 + x
+        logit(zi) ~ 1 + x
+        c ~ ZeroInflatedPoisson(lambda, zi)
+    end)
+    # Data-column zi.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(lambda) ~ 1 + x
+        c ~ ZeroInflatedPoisson(lambda, n)
+    end)
+    # Out-of-range literal zi.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(lambda) ~ 1 + x
+        c ~ ZeroInflatedPoisson(lambda, 1.5)
+    end)
+    # Wrong arity.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(lambda) ~ 1 + x
+        c ~ ZeroInflatedPoisson(lambda)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(lambda) ~ 1 + x
+        zi ~ Beta(2, 2)
+        c ~ weighted(ZeroInflatedPoisson(lambda, zi), fweights(n))
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(lambda) ~ 1 + x
+        zi ~ Beta(2, 2)
+        c ~ truncated(ZeroInflatedPoisson(lambda, zi); lower=0, upper=5)
     end)
 end
 

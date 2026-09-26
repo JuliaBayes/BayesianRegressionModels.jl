@@ -49,12 +49,17 @@ const _RK_ADMITTED_TRIPLES = Set{Tuple{Symbol,Symbol,Symbol}}([
     # sampled / assignment) or the scale-predictor slot (a
     # `logit(p_zero)` hu submodel — the vscale precedent).
     (:hurdle_poisson, :log, :log),
+    # Group C (counts): zero-inflated Poisson over a log-link rate
+    # predictor; zi rides its own scalar plan slot (literal /
+    # sampled / assignment — no modeled-zi predictor in v1).
+    (:zero_inflated_poisson, :log, :log),
 ])
 # Slice-2 families: no weights or evidence (no driving case — the thin
 # layer admits neither on the new triples, so the planner fails closed).
 const _RK_SLICE2_FAMILIES = Set{Symbol}([
     :bernoulli_probit, :bernoulli_cloglog, :binomial_probit,
     :binomial_cloglog, :beta_logit, :student_t, :hurdle_poisson,
+    :zero_inflated_poisson,
 ])
 # Leveled simplex responses (multinomial/categorical) name a simplex
 # vector parameter instead of a linear predictor, so they skip the
@@ -122,6 +127,7 @@ struct _RKLikelihoodSpec
                    # :binomial_probit | :binomial_cloglog | :beta_logit |
                    # group B: :student_t | group C: :hurdle_poisson
                    # (p_zero rides the scale / scale-predictor slots) |
+                   # :zero_inflated_poisson |
                    # longtail: :mvnormal_cholesky (joint correlated outcomes)
                    # | :mixture (finite MixtureModel response)
     link::Symbol   # effective link: :identity | :logit | :log |
@@ -165,6 +171,9 @@ struct _RKLikelihoodSpec
     # Student-t trailing field (thin-layer LikelihoodSpec mirror once the
     # nu slot lands there); every other family leaves it at default.
     nu::Union{Nothing,Float64,Symbol} # literal or sampled/assignment name
+    # Zero-inflated-Poisson trailing field (thin-layer LikelihoodSpec
+    # mirror); every other family leaves it at default.
+    zero_inflation::Union{Nothing,Float64,Symbol} # literal or sampled/assignment name
 end
 
 struct _RKTermSpec
@@ -390,7 +399,8 @@ const _RK_ADMITTED_SPELLINGS =
     "slice-2 group A: `y ~ Bernoulli(p)` / `H ~ Binomial(n, p)` + " *
     "`probit(p)` / `cloglog(p) ~ ...`, `y ~ Beta(mu*kappa, " *
     "(1-mu)*kappa)` + `logit(mu) ~ ...`, group B: `y ~ LocationScale(mu, " *
-    "s, TDist(nu))` + `mu ~ ...`, `[y1, y2] ~ " *
+    "s, TDist(nu))` + `mu ~ ...`, group C: `c ~ ZeroInflatedPoisson(lambda, " *
+    "zi)` + `log(lambda) ~ ...`, `[y1, y2] ~ " *
     "MvNormalCholesky([mu1, mu2], L)` + `L ~ LKJCovarianceFactor(K; " *
     "...)` + identity `mu_j ~ ...`, `y ~ MixtureModel([D1, ..., " *
     "DK], w)` (K >= 1 same-family Normal/Bernoulli/Poisson/Binomial/" *
@@ -563,6 +573,40 @@ function _rk_nu_argument(base, parameters::Set{Symbol},
           "assignment")
 end
 
+# Zero-inflated-Poisson zero probability: a literal in [0, 1], a sampled
+# parameter, or a scalar assignment. A linear predictor in the zi slot is
+# a modeled-zi response (no driving case in v1); a data column can never
+# be a scalar. Returns the literal value or the resolved name.
+function _rk_zero_inflation_argument(arg, parameters::Set{Symbol},
+        assignments::Set{Symbol}, consts::Dict{Symbol,Float64},
+        aliases::Dict{Symbol,Symbol}, response::Symbol,
+        candidates::Vector{Symbol})
+    prefix = "RK backend"
+    arg isa Number && return _rk_probability_literal(arg, response,
+        "zero-inflation probability")
+    if arg isa NamedColumn
+        name(arg) in candidates && error(
+            "$prefix: response `$response` zero-inflation probability " *
+            "cannot be the linear predictor `$(name(arg))`; modeled zi " *
+            "is out of slice — write a sampled parameter, a literal in " *
+            "[0, 1], or a scalar assignment (if a same-named parameter " *
+            "exists, rename one of them)")
+        parent(arg) isa DataColumn && error(
+            "$prefix: response `$response` zero-inflation probability " *
+            "cannot be a data column; slice 1 admits a sampled " *
+            "parameter, a scalar assignment, or a literal in [0, 1]")
+        kind, value = _rk_resolve_use_ref(name(arg), consts, aliases,
+            parameters, assignments,
+            "response `$response` zero-inflation probability")
+        kind === :number && return _rk_probability_literal(value, response,
+            "zero-inflation probability")
+        return value
+    end
+    error("$prefix: response `$response` zero-inflation probability must " *
+          "be a sampled parameter, a literal in [0, 1], or a scalar " *
+          "assignment")
+end
+
 # Gamma mean-shape form: `Gamma(alpha, mu/alpha)` with the SAME alpha in
 # both positions (same name, or equal literals) — mirrors the thin
 # layer's double-alpha identity rule. The shape may be a scalar or a
@@ -690,6 +734,14 @@ function _rk_positive_literal(x::Number, response::Symbol, what::String)
     value
 end
 
+function _rk_probability_literal(x::Number, response::Symbol, what::String)
+    prefix = "RK backend"
+    value = Float64(x)
+    isfinite(value) && 0 <= value <= 1 || error(
+        "$prefix: response `$response` $what must lie in [0, 1]")
+    value
+end
+
 # Classifies the peeled distribution call against the response's
 # referenced predictors (one, or two for a distributional response). The
 # location predictor is identified positionally per family; a second
@@ -697,7 +749,8 @@ end
 # families return the same shape (location is the lead predictor; the
 # categorical-logit tail arrives via `extra`). Returns
 # `(; family, link, scale, scale_predictor, trials, location)` plus a `nu`
-# key on the Student-t arm only; the caller rejects unclaimed candidates
+# key on the Student-t arm and a `zero_inflation` key on the
+# zero-inflated-Poisson arm only; the caller rejects unclaimed candidates
 # and a scale slot naming the location.
 function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
         predictor_link::Dict{Symbol,Symbol}, parameters::Set{Symbol},
@@ -1002,6 +1055,26 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
             "TDist(nu))` with an identity-link predictor")
         return (; family=:student_t, link=plink, scale, scale_predictor,
             trials=nothing, location, nu)
+    elseif head === ZeroInflatedPoisson
+        length(args) == 2 || error(
+            "$prefix: response `$response` `ZeroInflatedPoisson` needs " *
+            "`(rate, zi)`; write `ZeroInflatedPoisson(lambda, zi)` with " *
+            "a `log(lambda)` predictor and a scalar zi")
+        location = _rk_location_arg(args[1], candidates, response, "rate",
+            "itself, not a deterministic transform; write the transform " *
+            "into the predictor formula")
+        plink = predictor_link[location]
+        zi = _rk_zero_inflation_argument(args[2], parameters, assignments,
+            consts, aliases, response, candidates)
+        triple = (:zero_inflated_poisson, plink, plink)
+        triple in _RK_ADMITTED_TRIPLES || error(
+            "$prefix: response `$response` pairs `ZeroInflatedPoisson` " *
+            "with a $plink-link predictor; write " *
+            "`ZeroInflatedPoisson(lambda, zi)` with a `log(lambda)` " *
+            "predictor")
+        return (; family=:zero_inflated_poisson, link=plink, scale=nothing,
+            scale_predictor=nothing, trials=nothing, location,
+            zero_inflation=zi)
     elseif head === MvNormalCholesky
         # Joint correlated-outcomes response (SB
         # `[y1..yK] ~ MvNormalCholesky([mu1..muK], L)`): Phase 4 resolved
@@ -4309,7 +4382,7 @@ function _rk_plan_me_observations!(response_specs::Vector{_RKLikelihoodSpec},
             nothing, _RKResponseEvidence(:none, nothing, nothing),
             source, nothing, nothing, nothing, Symbol[], Symbol[],
             nothing, nothing, Symbol[], nothing, Symbol[], nothing,
-            _RKMixtureComponent[], nothing, nothing))
+            _RKMixtureComponent[], nothing, nothing, nothing))
     end
     nothing
 end
@@ -4915,7 +4988,7 @@ function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
         (eltype(values) <: Integer &&
          all(x -> x == 0 || x == 1, values)) || error(
             "$prefix: response `$response` must be Bool or 0/1 integers")
-    elseif family === :poisson_log
+    elseif family === :poisson_log || family === :zero_inflated_poisson
         (eltype(values) <: Integer && all(>=(0), values)) || error(
             "$prefix: response `$response` must hold non-negative integers")
     elseif family === :hurdle_poisson
@@ -5407,7 +5480,8 @@ function _rk_plan_joint_response!(entry, link::Symbol, predictor::Symbol,
     _RKLikelihoodSpec(:mvnormal_cholesky, link, first(outcomes), predictor,
         nothing, nothing, nothing, evidence, entry.key, nothing, nothing,
         nothing, extra, Symbol[], nothing, nothing, Symbol[], nothing,
-        outcomes[2:end], stem, _RKMixtureComponent[], nothing, nothing)
+        outcomes[2:end], stem, _RKMixtureComponent[], nothing, nothing,
+        nothing)
 end
 
 # Joint responses link their LKJ factor stem explicitly (SB's
@@ -6299,13 +6373,13 @@ function _brm_rk_plan(brmi::BRMI)
         candidates = response_predictors[entry.key]
         mixture_components = _RKMixtureComponent[]
         mixture_weights::Union{Nothing,Vector{Float64},Symbol} = nothing
-        family, link, scale, scale_predictor, trials, predictor, nu = if head ===
-                Categorical
+        family, link, scale, scale_predictor, trials, predictor, nu,
+        zero_inflation = if head === Categorical
             length(getargs(entry.rhs)) == 1 || error(
                 "$prefix: response `$(entry.key)` `Categorical` needs " *
                 "`Categorical(s)` with a `Dirichlet`-sampled `s`")
             (:categorical, :identity, nothing, nothing, nothing, nothing,
-                nothing)
+                nothing, nothing)
         elseif head === Multinomial
             length(getargs(entry.rhs)) == 2 || error(
                 "$prefix: response `$(entry.key)` `Multinomial` needs " *
@@ -6314,7 +6388,7 @@ function _brm_rk_plan(brmi::BRMI)
             mtrials = _rk_trials_argument(getargs(entry.rhs)[1], entry.key,
                 parameter_names, assignment_names, consts, aliases)
             (:multinomial, :identity, nothing, nothing, mtrials, nothing,
-                nothing)
+                nothing, nothing)
         elseif head === MixtureModel
             mclassified = _rk_classify_mixture(entry.rhs, candidates,
                 predictor_link, parameter_names, assignment_names, consts,
@@ -6322,7 +6396,7 @@ function _brm_rk_plan(brmi::BRMI)
             mixture_components = mclassified.components
             mixture_weights = mclassified.weights
             (mclassified.family, mclassified.link, nothing, nothing,
-                mclassified.trials, mclassified.anchor, nothing)
+                mclassified.trials, mclassified.anchor, nothing, nothing)
         else
             if head === CategoricalLogit && isempty(candidates)
                 # Zero-arg shape: K=1 (rejected per 0dteta6) or arity mismatch.
@@ -6346,7 +6420,8 @@ function _brm_rk_plan(brmi::BRMI)
                 aliases, entry.key, extra, extra_links)
             (classified.family, classified.link, classified.scale,
                 classified.scale_predictor, classified.trials,
-                classified.location, get(classified, :nu, nothing))
+                classified.location, get(classified, :nu, nothing),
+                get(classified, :zero_inflation, nothing))
         end
         leveled = family in _RK_LEVELED_FAMILIES ?
             _rk_plan_leveled!(entry, family, predictor, extra,
@@ -6471,7 +6546,8 @@ function _brm_rk_plan(brmi::BRMI)
             leveled.extra_predictors, leveled.count_columns,
             leveled.ordinal_structure, leveled.discrimination,
             leveled.threshold_columns, leveled.threshold_coefs, Symbol[],
-            nothing, mixture_components, mixture_weights, nu))
+            nothing, mixture_components, mixture_weights, nu,
+            zero_inflation))
     end
     # Measurement-error observations ride synthetic responses (SB's
     # `x_obs ~ Normal(x_true, sd)` likelihood per `me` term).

@@ -347,7 +347,8 @@ end
 # `leaf` maps each role to its INLINE spelling: `:predictor` (the
 # predictor name, possibly renamed), `:scale` (the scale value or
 # link-inverted scale predictor), `:nu` (the Student-t degrees of
-# freedom, literal or name, inline), `:trials`/`:weights`/`:lower`/
+# freedom, literal or name, inline), `:zero_inflation` (the ZIP zero
+# probability, literal or name, inline), `:trials`/`:weights`/`:lower`/
 # `:upper` (columns or literals inline),
 # `:extra_predictors`/`:count_columns` (tail predictors / tail count
 # columns inline). Evidence and weights STRUCTURE (which wrapper,
@@ -561,6 +562,15 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
         # `LocationScale` twin: the Normal single-head precedent
         # governs (no link wrap to bridge).
         _rk_ast_dotted(:StudentT, leaf[:nu], predictor, leaf[:scale])
+    elseif response.family === :zero_inflated_poisson
+        # Dedicated single head (thin-layer decision, pair fam-zip):
+        # the plan's `ZeroInflatedPoisson(lambda, zi)` maps to
+        # `ZeroInflatedPoisson.(exp.(lambda), zi)` (Julia/Stan
+        # `(lambda, zi)` order). No fused head and no decomposed
+        # twin: the zi slot is scalar-only in v1, so the fused flag
+        # changes nothing.
+        _rk_ast_dotted(:ZeroInflatedPoisson,
+            _rk_ast_dotted(:exp, predictor), leaf[:zero_inflation])
     elseif response.family === :categorical_logit
         # Reference-coded: K−1 non-reference etas, class 1 the implicit
         # zero reference (class order follows predictor order).
@@ -634,7 +644,7 @@ function _rk_ast_mixture_leaves(response::_RKLikelihoodSpec,
             _RKResponseEvidence(:none, nothing, nothing), response.label,
             response.trials, nothing, nothing, Symbol[], Symbol[], nothing,
             nothing, Symbol[], nothing, Symbol[], nothing,
-            _RKMixtureComponent[], nothing, nothing)
+            _RKMixtureComponent[], nothing, nothing, nothing)
         cleaf = Dict{Symbol,Any}(:predictor => loc)
         if _rk_ast_response_uses_scale(comp.family)
             cleaf[:scale] =
@@ -690,6 +700,14 @@ function _rk_ast_response_stmt(response::_RKLikelihoodSpec,
             "RK backend: internal: response `$(response.response)` plans " *
             "Student-t without degrees of freedom")
         leaf[:nu] = response.nu
+    end
+    if family === :zero_inflated_poisson
+        # Scalar-only like the nu slot (sampled/assignment names pass
+        # through; only predictor names alpha-rename).
+        response.zero_inflation === nothing && error(
+            "RK backend: internal: response `$(response.response)` plans " *
+            "zero-inflated Poisson without a zero probability")
+        leaf[:zero_inflation] = response.zero_inflation
     end
     if family === :binomial_logit || family === :binomial_probit ||
             family === :binomial_cloglog || family === :multinomial
