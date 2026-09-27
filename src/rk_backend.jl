@@ -76,6 +76,12 @@ const _RK_ADMITTED_TRIPLES = Set{Tuple{Symbol,Symbol,Symbol}}([
     # `VonMises` and `CircularVonMises` share the triple; the
     # principal interval rides the plan's `interval` slot.
     (:von_mises, :identity, :identity),
+    # Group C (positive continuous): log-Normal over an
+    # identity-link location predictor; sigma rides the
+    # scalar-only scale slot (sampled / positive literal /
+    # scalar assignment — modeled sigma is term-nuisance
+    # scope, so a predictor fails closed here).
+    (:lognormal, :identity, :identity),
     # Group C (exponential): exponential over a log-link mean
     # predictor; the single-argument head takes no scale slot
     # (Poisson-shaped — the location IS the scale).
@@ -87,7 +93,7 @@ const _RK_SLICE2_FAMILIES = Set{Symbol}([
     :bernoulli_probit, :bernoulli_cloglog, :binomial_probit,
     :binomial_cloglog, :beta_logit, :beta_binomial_logit, :student_t,
     :hurdle_poisson, :zero_inflated_poisson, :wald, :von_mises,
-    :negative_binomial, :exponential_log,
+    :negative_binomial, :lognormal, :exponential_log,
 ])
 # Leveled simplex responses (multinomial/categorical) name a simplex
 # vector parameter instead of a linear predictor, so they skip the
@@ -171,6 +177,8 @@ struct _RKLikelihoodSpec
                    # :von_mises (kappa rides the
                    # scale / scale-predictor slots, the principal
                    # interval the `interval` slot) |
+                   # :lognormal (sigma rides the scalar-only scale
+                   # slot) |
                    # :exponential_log (single-argument head, no scale
                    # slot — Poisson-shaped) |
                    # longtail: :mvnormal_cholesky (joint correlated outcomes)
@@ -484,6 +492,8 @@ const _RK_ADMITTED_SPELLINGS =
     "or group C: `y ~ VonMises(mu, kappa)` / `y ~ CircularVonMises(mu, " *
     "kappa; interval=(lo, hi))` + `mu ~ ...` (`kappa` a `log(kappa) ~ ...` " *
     "predictor, sampled parameter, or positive literal), or group C: " *
+    "`y ~ LogNormal(mu, sigma)` + `mu ~ ...` (`sigma` a sampled " *
+    "parameter, scalar assignment, or positive literal), or group C: " *
     "`y ~ Exponential(mu)` + `log(mu) ~ ...`"
 
 function _rk_predictor_link(brmi::BRMI, target::Symbol)
@@ -1340,6 +1350,37 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
         return (; family=:von_mises, link=plink, scale=kappa,
             scale_predictor=kappa_predictor, trials=nothing, location,
             interval)
+    elseif head === LogNormal
+        length(args) == 2 || error(
+            "$prefix: response `$response` `LogNormal` needs " *
+            "`(location, scale)`; write `LogNormal(mu, sigma)` " *
+            "with a `mu ~ ...` predictor")
+        location = _rk_location_arg(args[1], candidates, response, "location",
+            "itself, not a deterministic transform; write the transform " *
+            "into the predictor formula")
+        plink = predictor_link[location]
+        # Scalar-only sigma (the wald arm's Beta-kappa rule):
+        # modeled sigma is term-nuisance scope, so a predictor in
+        # the scale slot fails closed here with attribution
+        # instead of crossing.
+        _rk_is_predictor_ref(args[2], candidates) && error(
+            "$prefix: response `$response` `LogNormal` scale cannot " *
+            "be the linear predictor `$(name(args[2]))`; modeled sigma " *
+            "is out of slice — write a sampled parameter, a positive " *
+            "literal, or a scalar assignment")
+        sigma, sigma_predictor = _rk_scale_argument(args[2], parameters,
+            assignments, consts, aliases, response, "scale",
+            Symbol[])
+        sigma_predictor === nothing || error(
+            "$prefix: response `$response` `LogNormal` scale cannot " *
+            "be a linear predictor (predictor-fed scale is not admitted)")
+        triple = (:lognormal, plink, plink)
+        triple in _RK_ADMITTED_TRIPLES || error(
+            "$prefix: response `$response` pairs `LogNormal` with a " *
+            "$plink-link predictor; write `LogNormal(mu, sigma)` " *
+            "with an identity-link predictor")
+        return (; family=:lognormal, link=plink, scale=sigma,
+            scale_predictor=nothing, trials=nothing, location)
     elseif head === MvNormalCholesky
         # Joint correlated-outcomes response (SB
         # `[y1..yK] ~ MvNormalCholesky([mu1..muK], L)`): Phase 4 resolved
@@ -4121,11 +4162,13 @@ end
 # A `:hsgp` term carries its thin-layer declaration in `options`:
 # `(; id, k, c, iso)` with `k`/`c` scalars (one axis) or per-axis
 # tuples (variadic axes), normalized from the prepared state's
-# per-axis tuples. The thin layer owns every parameter
-# (`beta_raw_<id>`, `rho_<id>`/`rho_<id>_1..d`, `sigma_<id>`) and
-# evaluates the basis in-graph from the raw axes: BRM ships the
-# recipe, never materialized `PHI`/`omega2` (user-GO'd in-graph
-# contract, decision `02e64eo`). One id per smooth occurrence
+# per-axis tuples — or `(; id, k, cov=:periodic, period)` for the
+# periodic cosine/sine basis (single axis; no `c`/`iso`, mirroring
+# SB's `_sb_hsgp_periodic_term!` refusal set). The thin layer owns
+# every parameter (`beta_raw_<id>`, `rho_<id>`/`rho_<id>_1..d`,
+# `sigma_<id>`) and evaluates the basis in-graph from the raw axes:
+# BRM ships the recipe, never materialized `PHI`/`omega2` (user-GO'd
+# in-graph contract, decision `02e64eo`). One id per smooth occurrence
 # (exactly-one-use linkage), minted with numeric stems on collision.
 
 # `length_scale(...)`/`sd(...)` hyper overrides are sequenced: the
@@ -4149,6 +4192,29 @@ function _rk_gate_hsgp_term_priors!(brmi::BRMI, target::Symbol,
     nothing
 end
 
+# Periodic HSGP admits exactly the SB spelling
+# (`_sb_hsgp_periodic_term!`): `c`/`domain`/`orthogonal_to`/`by` are
+# meaningless on the cosine/sine basis and refused here with RK
+# attribution. Preparation already refuses `by=` and partial centering
+# for periodic, but it silently ignores `c`/`domain`/`orthogonal_to`,
+# so the raw-kw gate — which runs before geometry preparation — is the
+# only loud site for those three.
+function _rk_gate_hsgp_periodic_kw!(target::Symbol, hsgp_raw::AbstractVector)
+    prefix = "RK backend"
+    for t in hsgp_raw
+        kw = getkwargs(t)
+        get(kw, :cov, :exp_quad) === :periodic || continue
+        for key in (:c, :domain, :orthogonal_to, :by)
+            haskey(kw, key) && error(
+                "$prefix: predictor `$target` `hsgp(...; cov=:periodic)` " *
+                "does not accept `$key=`: the periodic cosine/sine basis " *
+                "has no boundary factor and needs no domain, and its " *
+                "grouped/projected spellings are not implemented")
+        end
+    end
+    nothing
+end
+
 function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         target::Symbol, data::AbstractDict,
         columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol})
@@ -4158,10 +4224,14 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         "$prefix: predictor `$target` model-derived `hsgp(...)` axis " *
         "is out of slice 1 (the thin-layer surface binds raw data " *
         "columns; latent axes are sequenced)")
-    state.cov === :exp_quad || error(
+    state.cov === :exp_quad || state.cov === :periodic || error(
         "$prefix: predictor `$target` `hsgp(...; cov=$(repr(state.cov)))` " *
-        "is out of slice 1 (the thin-layer surface is exp_quad; " *
-        "periodic is sequenced)")
+        "is out of slice 1 (the thin-layer surface is exp_quad + periodic)")
+    if state.cov === :periodic
+        (state.iso && length(prepared.source) == 1) || error(
+            "$prefix: predictor `$target` periodic `hsgp(...)` needs one " *
+            "isotropic axis (the thin-layer periodic surface is 1D isotropic)")
+    end
     isnothing(state.by) || error(
         "$prefix: predictor `$target` grouped `hsgp(...; by=...)` " *
         "is out of slice 1 (the thin-layer surface is ungrouped; " *
@@ -4174,7 +4244,9 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         "$prefix: predictor `$target` `hsgp(...; domain=...)` " *
         "is out of slice 1 (the thin-layer surface fits the boundary " *
         "from raw columns; explicit domains are sequenced)")
-    state.orthogonal === nothing || error(
+    # The periodic prepared state carries no `orthogonal` field (the
+    # raw-kw gate above refuses `orthogonal_to=` for periodic first).
+    get(state, :orthogonal, nothing) === nothing || error(
         "$prefix: predictor `$target` `hsgp(...; orthogonal_to=:linear)` " *
         "is out of slice 1 (the thin-layer surface takes the raw " *
         "tensor-product basis; orthogonalization is sequenced)")
@@ -4184,6 +4256,10 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
     end
     base = "hsgp_" * join(string.(axes), "_")
     id = _rk_mint_smooth_id!(taken, columns, base)
+    if state.cov === :periodic
+        return _RKTermSpec(:hsgp, collect(axes),
+            (; id, k=only(state.K), cov=:periodic, period=state.period), id, id)
+    end
     k = length(state.K) == 1 ? only(state.K) : state.K
     c = length(state.c) == 1 ? only(state.c) : state.c
     _RKTermSpec(:hsgp, collect(axes), (; id, k, c, iso=state.iso), id, id)
@@ -4999,6 +5075,7 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         "are out of slice 1 (population GLMs only)")
     _rk_gate_spline_term_priors!(brmi, target, spline_raw)
     _rk_gate_hsgp_term_priors!(brmi, target, hsgp_raw)
+    _rk_gate_hsgp_periodic_kw!(target, hsgp_raw)
     _rk_gate_ar_effect_priors!(brmi, target, ar_raw)
     _rk_gate_me_effect_priors!(brmi, target, me_raw)
     grouped = filter(t -> _brm_is_grouped_term(t), raw_terms)
@@ -5692,7 +5769,7 @@ function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
     elseif family === :nb2_log || family === :negative_binomial
         (eltype(values) <: Integer && all(>=(0), values)) || error(
             "$prefix: response `$response` must hold non-negative integers")
-    elseif family === :gamma_log
+    elseif family === :gamma_log || family === :lognormal
         # Mirrors the thin layer: strictly positive (y = 0 fails
         # validation there, so it fails here with BRM-side attribution).
         (eltype(values) <: Real && all(>(0), values)) || error(
