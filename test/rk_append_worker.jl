@@ -441,7 +441,7 @@ function _run_case_loaded(spec, probe, outdir::AbstractString;
     backend = AutoEnzyme(; mode=Enzyme.Reverse)
     # The v2 artifact object (not the .jls path) crosses to the
     # reporter (call shape verified against landed RK a715d41a).
-    rep = reporter_v2(artifact; u_probes, backend)
+    rep = Base.invokelatest(reporter_v2, artifact; u_probes, backend)
     rk_rows = _check_reporter_rows(case_id, rep, u_probes)
     sb_vec, prepared_sb = if no_sb
         ([(; sb_value=nothing, sb_grad_maxdiff=nothing,
@@ -465,7 +465,8 @@ function _run_case_loaded(spec, probe, outdir::AbstractString;
         shim = BRM.rk_logdensity_problem(live;
             ad_backend=backend, u0=zeros(Float64, dim))
         map(1:length(u_probes)) do i
-            _, g = LogDensityProblems.logdensity_and_gradient(
+            _, g = Base.invokelatest(
+                LogDensityProblems.logdensity_and_gradient,
                 shim, Vector{Float64}(u_probes[i]))
             all(isfinite, g) || error(
                 "worker: case `$case_id`: probe $i RK gradient " *
@@ -553,8 +554,10 @@ function _assert_live_equal(case_id, live, rt_model, columns, u)
     have = (:unconstrained, names...)
     klive = prepare(live.model.spec; have, want, bound=bound)
     krt = prepare(rt_model.spec; have, want, bound=bound)
-    v_live = klive(Vector{Float64}(u))
-    v_rt = krt(Vector{Float64}(u))
+    # Call-site invokelatest: prepare() eval'd these kernel methods after
+    # this extent started, so only latest-at-call sees them.
+    v_live = Base.invokelatest(klive, Vector{Float64}(u))
+    v_rt = Base.invokelatest(krt, Vector{Float64}(u))
     v_rt == v_live || error(
         "worker: case `$case_id`: artifact route posterior $v_rt != " *
         "live RKBRMI route $v_live at the origin (emit/translate skew)")
