@@ -94,7 +94,14 @@ const _RK_ORDINAL_LINKS = Dict{Symbol,Symbol}(
     :LogitLink => :logit, :ProbitLink => :probit, :CloglogLink => :cloglog)
 const _RK_SLICE1_PRIOR_ARITY = Dict{Symbol,Int}(
     :Normal => 2, :Cauchy => 2, :Exponential => 1, :Gamma => 2,
-    :LogNormal => 2, :Beta => 2, :InverseGamma => 2, :Flat => 0)
+    :LogNormal => 2, :Beta => 2, :InverseGamma => 2, :Flat => 0,
+    :Laplace => 2, :Logistic => 2, :Uniform => 2, :StudentT => 3)
+# `:StudentT` has no bare formula head (no such Distributions.jl type — a
+# bare `TDist(nu)` stays rejected); it is produced only by the
+# `LocationScale(mu, s, TDist(nu))` unwrap, in Stan `(nu, mu, sigma)` order.
+# Sampled families whose args must be static literals (no sampled/
+# assignment refs): the thin-layer layout derives support from values.
+const _RK_SAMPLED_LITERAL_ARGS = Set{Symbol}([:Uniform])
 const _RK_ASSIGNMENT_CALLABLES = Set{Any}([+, -, *, /, ^, log, log10, log1p,
     exp, expm1, sqrt, abs, sum, mean, std, var, minimum, maximum, length])
 const _RK_ASSIGNMENT_REDUCTIONS = Set{Any}(
@@ -240,8 +247,8 @@ end
 struct _RKPopulationPrior
     predictor::Symbol
     addressee::Symbol
-    location::Float64
-    scale::Float64
+    family::Symbol # :Normal | :Cauchy | :Laplace | :Logistic | :StudentT | :Flat
+    args::Tuple # Float64 literals: (location, scale) | (nu, mu, sigma) | ()
 end
 
 # Flat whole-predictor R2D2 variance decomposition (SB
@@ -280,7 +287,9 @@ struct _RKSampledParameter
                    # joint factor stem (args `(K::Int, theta, eta)`; the
                    # thin layer derives `<stem>_scales`/`<stem>_L_corr`)
     args::Tuple # Number literals or Symbol param/assignment refs, positional
-    support_override::Union{Nothing,Symbol}
+    support_override::Union{Nothing,Symbol,Tuple} # a `(:truncated, lo, hi)`
+        # Tuple splices a general `truncated(Base(args...), lo, hi)` AST
+        # (v1 admits symmetric halves only; the planner gates the bounds)
     label::Symbol
 end
 
@@ -2833,6 +2842,131 @@ function _rk_design_addressee_groups(design, target::Symbol;
     groups, order
 end
 
+# Per-addressee population-effect families (prior-vocab v1, peer contract):
+# real-line Normal/Cauchy/Laplace/Logistic/StudentT + Flat, every arg a
+# numeric literal. StudentT unwraps from `LocationScale(mu, s, TDist(nu))`
+# into Stan `(nu, mu, sigma)` order (a bare `TDist` stays rejected);
+# `Flat()` takes no args. `Normal`/`Cauchy` keep the historical (0, 1)
+# defaulting (SB mirrors it); Laplace/Logistic need both args (SB has no
+# defaults there either). Design cells and the mo/ar/me latent cells share
+# this one rewrite; anything else fails closed naming the admitted set.
+function _rk_materialize_effect_prior(expression, target::Symbol, label::Symbol;
+        prefix="RK backend")
+    expression isa ExprColumn || error(
+        "$prefix: predictor `$target` population-effect prior for " *
+        "`$label` must be a callable prior expression")
+    head = getf(expression)
+    head === Flat && return _rk_effect_flat_args(
+        expression, target, label; prefix)
+    head === LocationScale && return _rk_effect_studentt_args(
+        expression, target, label; prefix)
+    head in (Normal, Cauchy, Laplace, Logistic) || error(
+        "$prefix: predictor `$target` population-effect priors must be " *
+        "`Normal`/`Cauchy`/`Laplace`/`Logistic(location, scale)`, " *
+        "`LocationScale(mu, s, TDist(nu))`, or `Flat()` in slice 1")
+    isempty(getkwargs(expression)) || error(
+        "$prefix: predictor `$target` population-effect `$head` prior " *
+        "cannot have keywords in slice 1")
+    args = getargs(expression)
+    raw = if head === Normal || head === Cauchy
+        length(args) <= 2 || error(
+            "$prefix: predictor `$target` population-effect prior for " *
+            "`$label` must lower to exactly location and scale " *
+            "arguments, got $(length(args))")
+        isempty(args) ? (0.0, 1.0) :
+            length(args) == 1 ? (only(args), 1.0) : args
+    else
+        length(args) == 2 || error(
+            "$prefix: predictor `$target` population-effect `$head` " *
+            "prior for `$label` needs exactly `(location, scale)` " *
+            "in slice 1")
+        args
+    end
+    any(_brm_is_array_value, raw) && error(
+        "$prefix: predictor `$target` population-effect prior for " *
+        "`$label` needs scalar location and scale; index or reduce an " *
+        "array-valued argument explicitly")
+    location = _brm_numeric_constant(raw[1])
+    scale = _brm_numeric_constant(raw[2])
+    isnothing(location) && error(
+        "$prefix: predictor `$target` population-effect `$head` " *
+        "location for `$label` must be a numeric constant")
+    isnothing(scale) && error(
+        "$prefix: predictor `$target` population-effect `$head` scale " *
+        "for `$label` must be a numeric constant")
+    isfinite(location) || error(
+        "$prefix: predictor `$target` population-effect `$head` " *
+        "location for `$label` must be finite")
+    isfinite(scale) && scale > 0 || error(
+        "$prefix: predictor `$target` population-effect `$head` scale " *
+        "for `$label` must be finite and positive")
+    (nameof(head), (location, scale))
+end
+
+function _rk_effect_studentt_args(expression::ExprColumn, target::Symbol,
+        label::Symbol; prefix="RK backend")
+    isempty(getkwargs(expression)) || error(
+        "$prefix: predictor `$target` population-effect `LocationScale` " *
+        "prior cannot have keywords in slice 1")
+    args = getargs(expression)
+    length(args) == 3 || error(
+        "$prefix: predictor `$target` population-effect prior for " *
+        "`$label` must be `LocationScale(mu, s, TDist(nu))`; a bare " *
+        "`TDist` stays rejected in slice 1")
+    mu_raw, s_raw, base = args
+    base isa ExprColumn && getf(base) === TDist || error(
+        "$prefix: predictor `$target` population-effect prior for " *
+        "`$label` `LocationScale` base must be `TDist(nu)` in slice 1")
+    isempty(getkwargs(base)) || error(
+        "$prefix: predictor `$target` population-effect prior for " *
+        "`$label` `TDist` base takes no keywords in slice 1")
+    bargs = getargs(base)
+    length(bargs) == 1 || error(
+        "$prefix: predictor `$target` population-effect prior for " *
+        "`$label` `TDist` base needs one argument; write `TDist(nu)`")
+    nu = _brm_numeric_constant(only(bargs))
+    mu = _brm_numeric_constant(mu_raw)
+    s = _brm_numeric_constant(s_raw)
+    (isnothing(nu) || isnothing(mu) || isnothing(s)) && error(
+        "$prefix: predictor `$target` population-effect StudentT " *
+        "arguments for `$label` must be numeric constants")
+    isfinite(nu) && nu > 0 || error(
+        "$prefix: predictor `$target` population-effect StudentT " *
+        "degrees of freedom for `$label` must be finite and positive")
+    isfinite(mu) || error(
+        "$prefix: predictor `$target` population-effect StudentT " *
+        "location for `$label` must be finite")
+    isfinite(s) && s > 0 || error(
+        "$prefix: predictor `$target` population-effect StudentT " *
+        "scale for `$label` must be finite and positive")
+    (:StudentT, (nu, mu, s))
+end
+
+function _rk_effect_flat_args(expression::ExprColumn, target::Symbol,
+        label::Symbol; prefix="RK backend")
+    isempty(getargs(expression)) && isempty(getkwargs(expression)) || error(
+        "$prefix: predictor `$target` population-effect `Flat()` prior " *
+        "for `$label` takes no arguments in slice 1")
+    (:Flat, ())
+end
+
+# One rewrite for a whole design column vector: stated cells materialize
+# to `(family, args)`, unstated cells take the Normal(0, 1) default.
+function _rk_materialize_effect_prior_cells(overrides, n::Integer,
+        target::Symbol, labels::Vector{Symbol}; prefix="RK backend")
+    cells = Tuple{Symbol,Tuple}[(:Normal, (0.0, 1.0)) for _ in 1:n]
+    isnothing(overrides) && return cells
+    length(overrides) == n || error(
+        "$prefix: internal effect-prior alignment error: " *
+        "$(length(overrides)) priors for $n population columns")
+    for i in eachindex(overrides)
+        isnothing(overrides[i]) && continue
+        cells[i] = _rk_materialize_effect_prior(
+            overrides[i], target, labels[i]; prefix)
+    end
+    cells
+end
+
 function _rk_population_priors(brmi::BRMI, design, target::Symbol,
         available::Tuple, factor_addressees::Set{Symbol},
         terms::Vector{_RKTermSpec}, derived::Vector{_RKDerivedSpec},
@@ -2840,37 +2974,25 @@ function _rk_population_priors(brmi::BRMI, design, target::Symbol,
     prefix = "RK backend"
     overrides = _brm_simple_population_effect_overrides(
         brmi, design; prefix, available_predictors=available)
-    # The shared seam resolves (location, scale) without checking the family;
-    # slice 1 admits Normal or Horseshoe population effects (Horseshoe cells
-    # are owned by `_rk_horseshoe_priors`, which runs before this function).
-    claimed = isnothing(overrides) ? () : overrides
-    for expression in claimed
-        isnothing(expression) && continue
-        family = expression isa ExprColumn ? getf(expression) : nothing
-        family === Horseshoe && continue
-        family === Normal || error(
-            "$prefix: predictor `$target` population-effect priors must " *
-            "be `Normal(location, scale)` or `Horseshoe(...)` in slice 1")
-        isempty(getkwargs(expression)) || error(
-            "$prefix: predictor `$target` population-effect `Normal` " *
-            "prior cannot have keywords in slice 1")
-    end
     # An R2D2 predictor carries its prior mass in the R2D2Prior
     # (explicit Normals ride the overrides map) — no PopulationPrior
-    # rows. The family validation above still applies.
+    # rows. Family validation still applies (it runs in the R2D2
+    # composition, which additionally requires Normal-only).
     isnothing(r2d2) || return _RKPopulationPrior[]
     n = length(design.columns)
     stated = isnothing(overrides) ? fill(false, n) :
         Bool[!isnothing(cell) for cell in overrides]
-    # Horseshoe cells carry no Normal (location, scale) — the shared
-    # materializer would misread `Horseshoe()`'s empty args as (0, 1) —
-    # so neutralize them before materializing (their rows are skipped
-    # below; the values are never read).
+    # Horseshoe cells carry no (family, args) — the materializer would
+    # reject the `Horseshoe` head — so neutralize them before
+    # materializing (their rows are skipped below; the values are never
+    # read). Horseshoe ownership lives in `_rk_horseshoe_priors`, which
+    # runs before this function.
     mat_overrides = isnothing(overrides) ? nothing :
         Any[cell isa ExprColumn && getf(cell) === Horseshoe ? nothing :
             cell for cell in overrides]
-    location, scale = _brm_materialize_normal_effect_priors(mat_overrides, n;
-        prefix)
+    labels = Symbol[c.label for c in design.columns]
+    cells = _rk_materialize_effect_prior_cells(
+        mat_overrides, n, target, labels; prefix)
     groups, order = _rk_design_addressee_groups(design, target; prefix)
     priors = _RKPopulationPrior[]
     for addressee in order
@@ -2881,20 +3003,19 @@ function _rk_population_priors(brmi::BRMI, design, target::Symbol,
         if addressee in factor_addressees
             all(stated[idxs]) || error(
                 "$prefix: predictor `$target` factor `$addressee` " *
-                "needs one explicit Normal prior on the whole block " *
+                "needs one explicit prior on the whole block " *
                 "(e.g. `effect($target, $addressee) ~ Normal(0, 2)`); " *
                 "slice 1 has no default factor prior (the stated " *
                 "prior sizes the thin-layer block)")
         end
-        first_loc, first_scale = location[first(idxs)], scale[first(idxs)]
-        all(i -> location[i] == first_loc && scale[i] == first_scale,
-            idxs) || error(
+        agreed = cells[first(idxs)]
+        all(i -> cells[i] == agreed, idxs) || error(
             "$prefix: predictor `$target` addressee `$addressee` has " *
             "disagreeing population priors across its columns; slice 1 " *
-            "needs one shared Normal per addressee (address the source " *
+            "needs one shared prior per addressee (address the source " *
             "column, not individual levels)")
         push!(priors, _RKPopulationPrior(
-            target, addressee, first_loc, first_scale))
+            target, addressee, agreed[1], agreed[2]))
     end
     known = Set(order)
     for term in terms
@@ -2910,7 +3031,8 @@ function _rk_population_priors(brmi::BRMI, design, target::Symbol,
         # bridge them, since the thin layer takes per-addressee priors
         # for every block.
         push!(known, term.addressee)
-        push!(priors, _RKPopulationPrior(target, term.addressee, 0.0, 1.0))
+        push!(priors, _RKPopulationPrior(
+            target, term.addressee, :Normal, (0.0, 1.0)))
     end
     for term in terms
         term.kind === :monotonic || continue
@@ -2933,8 +3055,8 @@ function _rk_population_priors(brmi::BRMI, design, target::Symbol,
         term.kind === :ar || continue
         term.addressee in seen_ar && continue
         push!(seen_ar, term.addressee)
-        location, scale = _rk_ar_beta_prior(brmi, target, term.addressee)
-        push!(priors, _RKPopulationPrior(target, term.addressee, location, scale))
+        family, args = _rk_ar_beta_prior(brmi, target, term.addressee)
+        push!(priors, _RKPopulationPrior(target, term.addressee, family, args))
     end
     # Latent `me` columns are not design columns, so their betas resolve
     # through the dedicated cell (default Normal(0, 1), `:`-wide claims
@@ -4177,26 +4299,8 @@ function _rk_ar_beta_prior(brmi::BRMI, target::Symbol, addressee::Symbol)
             "`$target`'s `$addressee` column"; prefix)
     end
     held = cell[]
-    isnothing(held) && return (0.0, 1.0)
-    expression = held.expression
-    expression isa ExprColumn && getf(expression) === Normal || error(
-        "$prefix: predictor `$target` population-effect priors must " *
-        "be `Normal(location, scale)` in slice 1")
-    isempty(getkwargs(expression)) || error(
-        "$prefix: predictor `$target` population-effect `Normal` " *
-        "prior cannot have keywords in slice 1")
-    raw_location, raw_scale = _brm_normal_effect_args(expression; prefix)
-    location = _brm_numeric_constant(raw_location)
-    scale = _brm_numeric_constant(raw_scale)
-    isnothing(location) && error(
-        "$prefix: population-effect Normal location must be a numeric constant")
-    isnothing(scale) && error(
-        "$prefix: population-effect Normal scale must be a numeric constant")
-    isfinite(location) || error(
-        "$prefix: population-effect Normal location must be finite")
-    isfinite(scale) && scale > 0 || error(
-        "$prefix: population-effect Normal scale must be finite and positive")
-    location, scale
+    isnothing(held) && return (:Normal, (0.0, 1.0))
+    _rk_materialize_effect_prior(held.expression, target, addressee; prefix)
 end
 
 # ---- monotonic terms (mo/mo1; mirrors `_sb_mo`) ----
@@ -4308,17 +4412,9 @@ function _rk_mo_beta_prior(brmi::BRMI, target::Symbol, addressee::Symbol)
             "`$target`'s monotonic `$addressee` column"; prefix)
     end
     expression = isnothing(won[]) ? nothing : won[].expression
-    if !isnothing(expression)
-        expression isa ExprColumn && getf(expression) === Normal || error(
-            "$prefix: predictor `$target` population-effect priors must " *
-            "be `Normal(location, scale)` in slice 1")
-        isempty(getkwargs(expression)) || error(
-            "$prefix: predictor `$target` population-effect `Normal` " *
-            "prior cannot have keywords in slice 1")
-    end
-    location, scale = _brm_materialize_normal_effect_priors(
-        Any[expression], 1; prefix)
-    _RKPopulationPrior(target, addressee, location[1], scale[1])
+    family, args = isnothing(expression) ? (:Normal, (0.0, 1.0)) :
+        _rk_materialize_effect_prior(expression, target, addressee; prefix)
+    _RKPopulationPrior(target, addressee, family, args)
 end
 
 # Per-coefficient structured Horseshoe (SB `_sb_horseshoe_overrides`
@@ -4430,6 +4526,22 @@ function _rk_plan_r2d2_prior(brmi::BRMI, design, r2plan::_BRMR2D2Plan,
         brmi, design; prefix, available_predictors=available)
     stated = isnothing(cell_overrides) ? fill(false, n) :
         Bool[!isnothing(cell) for cell in cell_overrides]
+    # R2D2 override columns stay Normal-only (thin-layer rule): a
+    # non-Normal explicit claim under a decomposition fails closed here
+    # rather than silently materializing as Normal below.
+    if !isnothing(cell_overrides)
+        r2labels = Symbol[c.label for c in design.columns]
+        for i in eachindex(cell_overrides)
+            isnothing(cell_overrides[i]) && continue
+            family, _ = _rk_materialize_effect_prior(
+                cell_overrides[i], target, r2labels[i]; prefix)
+            family === :Normal || error(
+                "$prefix: predictor `$target` combines `r2d2` with an " *
+                "explicit `$family` prior on `$(r2labels[i])`; R2D2 " *
+                "override columns stay `Normal(location, scale)` in " *
+                "slice 1 (thin-layer rule)")
+        end
+    end
     n_shares = count(!iszero, r2plan.share_indices)
     if n_shares == 0
         # SB mirror (`_sb_r2d2_overrides`): zero shares is a legitimate
@@ -4808,17 +4920,9 @@ function _rk_me_beta_prior(brmi::BRMI, target::Symbol, addressee::Symbol)
             "`$target`'s measurement-error `$addressee` column"; prefix)
     end
     expression = isnothing(won[]) ? nothing : won[].expression
-    if !isnothing(expression)
-        expression isa ExprColumn && getf(expression) === Normal || error(
-            "$prefix: predictor `$target` population-effect priors must " *
-            "be `Normal(location, scale)` in slice 1")
-        isempty(getkwargs(expression)) || error(
-            "$prefix: predictor `$target` population-effect `Normal` " *
-            "prior cannot have keywords in slice 1")
-    end
-    location, scale = _brm_materialize_normal_effect_priors(
-        Any[expression], 1; prefix)
-    _RKPopulationPrior(target, addressee, location[1], scale[1])
+    family, args = isnothing(expression) ? (:Normal, (0.0, 1.0)) :
+        _rk_materialize_effect_prior(expression, target, addressee; prefix)
+    _RKPopulationPrior(target, addressee, family, args)
 end
 
 # One synthetic gaussian-identity observation per `:me` term: the SB
@@ -5106,8 +5210,10 @@ function _rk_plan_parameters!(prepared, data::AbstractDict,
             continue
         end
         family, args, support_override = if callable === truncated
-            # Keyword bounds are validated inside the half-normal gate.
-            _rk_half_normal_prior(prior, parameter.name)
+            # Keyword bounds are validated inside the truncated gate.
+            _rk_truncated_prior(prior, parameter.name)
+        elseif callable === LocationScale
+            _rk_locationscale_studentt(prior, parameter.name)
         else
             callable isa Type || error(
                 "$prefix: parameter `$(parameter.name)` prior " *
@@ -5140,6 +5246,11 @@ function _rk_plan_parameters!(prepared, data::AbstractDict,
                     parameters, assign_names,
                     "parameter `$(parameter.name)` prior")
                 kind === :number && (push!(resolved, value); continue)
+                family in _RK_SAMPLED_LITERAL_ARGS && error(
+                    "$prefix: parameter `$(parameter.name)` prior " *
+                    "`$family` bounds must be numeric literals in slice 1 " *
+                    "(the thin-layer layout derives support from values; " *
+                    "sampled or assigned bounds are out of slice 1)")
                 push!(resolved, value)
             else
                 error("$prefix: parameter `$(parameter.name)` prior " *
@@ -5148,15 +5259,19 @@ function _rk_plan_parameters!(prepared, data::AbstractDict,
                       "assignment)")
             end
         end
-        # Mirrors the thin layer: :positive adds log(2), exact only at
-        # location 0 — nonzero literals and references fail closed here
-        # with BRM attribution instead of silently wrong densities.
-        if support_override === :positive
-            location = first(resolved)
+        family === :Uniform &&
+            _rk_check_uniform_bounds(resolved, parameter.name)
+        # Mirrors the thin layer: a symmetric half adds log(2), exact
+        # only at location 0 — nonzero literals and references fail
+        # closed here with BRM attribution instead of silently wrong
+        # densities. The location slot is second for StudentT's
+        # `(nu, mu, sigma)` order, first for every other symmetric base.
+        if support_override === :positive || support_override == (:truncated, 0.0, Inf)
+            location = resolved[family === :StudentT ? 2 : 1]
             location isa Number && location == 0 || error(
-                "$prefix: parameter `$(parameter.name)` half-normal " *
+                "$prefix: parameter `$(parameter.name)` symmetric-half " *
                 "location must be the literal 0 (slice 1 supports " *
-                "zero-location half-normals only)")
+                "zero-location halves only)")
         end
         push!(specs, _RKSampledParameter(
             parameter.name, family, Tuple(resolved), support_override,
@@ -5307,10 +5422,62 @@ function _rk_plan_vector_parameters!(prepared,
     specs
 end
 
-function _rk_half_normal_prior(prior::_BRMPreparedExpr, name::Symbol)
+# `LocationScale(mu, s, TDist(nu))` unwraps to the 3-arg Stan-order
+# `:StudentT` plan (`TDist` stays rejected as a bare head). Args stay
+# unresolved here (literals or scalar refs); the generic resolution loop
+# folds them.
+function _rk_locationscale_studentt(prior::_BRMPreparedExpr, name::Symbol)
     prefix = "RK backend"
-    spelled = "`truncated(Normal(location, scale), 0[, Inf])` or the " *
-              "keyword form with `lower=0`"
+    spelled = "`LocationScale(mu, s, TDist(nu))`"
+    isempty(prior.kwargs) || error(
+        "$prefix: parameter `$name` prior must be $spelled; " *
+        "keywords are out of slice 1")
+    length(prior.args) == 3 || error(
+        "$prefix: parameter `$name` prior must be $spelled; a bare " *
+        "`TDist` stays rejected in slice 1")
+    mu, s, base = prior.args
+    base isa _BRMPreparedExpr && base.callable === TDist || error(
+        "$prefix: parameter `$name` prior $spelled base must be " *
+        "`TDist(nu)` in slice 1")
+    isempty(base.kwargs) || error(
+        "$prefix: parameter `$name` prior `TDist` base takes no " *
+        "keywords in slice 1")
+    length(base.args) == 1 || error(
+        "$prefix: parameter `$name` prior `TDist` base needs one " *
+        "argument; write `TDist(nu)`")
+    (:StudentT, (only(base.args), mu, s), nothing)
+end
+
+function _rk_check_uniform_bounds(resolved::Vector{Any}, name::Symbol)
+    prefix = "RK backend"
+    all(v -> v isa Number, resolved) || error(
+        "$prefix: parameter `$name` prior `Uniform` bounds must be " *
+        "numeric literals in slice 1 (the thin-layer layout derives " *
+        "support from values; sampled or assigned bounds are out " *
+        "of slice 1)")
+    lower, upper = Float64(resolved[1]), Float64(resolved[2])
+    all(isfinite, (lower, upper)) && lower < upper || error(
+        "$prefix: parameter `$name` prior `Uniform` bounds must be " *
+        "finite with `lower < upper` in slice 1")
+    nothing
+end
+
+# General truncated rewrite: `truncated(Base(args...), lo, hi)` plans the
+# base family with its unresolved args plus a `(:truncated, lo, hi)`
+# support Tuple, which the AST splices back verbatim. v1 admits
+# symmetric halves only — a symmetric base
+# (Normal/Cauchy/Laplace/Logistic/StudentT) at literal location 0 with
+# bounds (0, Inf); general bounds and asymmetric bases fail closed
+# (sequenced follow-up). Normal/Cauchy halves keep the legacy
+# `:positive` override (byte-identical `HalfNormal`/`HalfCauchy`
+# emission); the newer halves ride the general Tuple.
+const _RK_TRUNCATED_SYMMETRIC_BASES = Set{Symbol}(
+    [:Normal, :Cauchy, :Laplace, :Logistic, :StudentT])
+
+function _rk_truncated_prior(prior::_BRMPreparedExpr, name::Symbol)
+    prefix = "RK backend"
+    spelled = "`truncated(Base(location, scale), 0[, Inf])` over a " *
+              "symmetric base, or the keyword form with `lower=0`"
     args, kwargs = prior.args, prior.kwargs
     lower, upper = if length(args) == 3 && isempty(kwargs)
         args[2], args[3]
@@ -5319,26 +5486,51 @@ function _rk_half_normal_prior(prior::_BRMPreparedExpr, name::Symbol)
         get(kwargs, :lower, nothing), get(kwargs, :upper, nothing)
     else
         error("$prefix: parameter `$name` truncated prior must be " *
-              "$spelled for a half-Normal; other truncated priors are " *
-              "out of slice 1")
+              "$spelled for a symmetric half; other truncated priors " *
+              "are out of slice 1")
     end
     inner = args[1]
-    inner isa _BRMPreparedExpr && inner.callable === Normal || error(
-        "$prefix: parameter `$name` truncated prior must wrap `Normal` " *
-        "for a half-Normal; other truncated priors are out of slice 1")
+    inner isa _BRMPreparedExpr || error(
+        "$prefix: parameter `$name` truncated prior must wrap a " *
+        "distribution call in slice 1")
+    family, base_args = if inner.callable === LocationScale
+        fam, unwrapped, _ = _rk_locationscale_studentt(inner, name)
+        (fam, unwrapped)
+    else
+        inner.callable isa Type || error(
+            "$prefix: parameter `$name` truncated prior base " *
+            "`$(string(inner.callable))` is out of slice 1 (admitted: " *
+            "symmetric halves over Normal, Cauchy, Laplace, Logistic, " *
+            "or LocationScale StudentT)")
+        base = nameof(inner.callable)
+        base in _RK_TRUNCATED_SYMMETRIC_BASES || error(
+            "$prefix: parameter `$name` truncated prior base `$base` " *
+            "is out of slice 1 (admitted: symmetric halves over " *
+            "Normal, Cauchy, Laplace, Logistic, or LocationScale " *
+            "StudentT)")
+        isempty(inner.kwargs) || error(
+            "$prefix: parameter `$name` prior keywords are out of slice 1")
+        expected = _RK_SLICE1_PRIOR_ARITY[base]
+        length(inner.args) == expected || error(
+            "$prefix: parameter `$name` truncated prior base `$base` " *
+            "needs $expected argument(s), got $(length(inner.args))")
+        (base, inner.args)
+    end
     lower isa Number && lower == 0 || error(
         "$prefix: parameter `$name` truncated prior must have lower " *
-        "bound 0 for a half-Normal")
+        "bound 0 for a symmetric half in slice 1 (general bounds are " *
+        "out of slice 1)")
     # `Inf` arrives as a name (Julia global), not a literal — same as
     # evidence bounds.
     upper_is_inf = upper isa Number && upper == Inf ||
         upper isa _BRMPreparedRef && upper.name === :Inf
     (isnothing(upper) || upper_is_inf) || error(
         "$prefix: parameter `$name` truncated prior must have upper " *
-        "bound Inf (or omit it) for a half-Normal")
-    isempty(inner.kwargs) || error(
-        "$prefix: parameter `$name` prior keywords are out of slice 1")
-    (:Normal, inner.args, :positive)
+        "bound Inf (or omit it) for a symmetric half in slice 1 " *
+        "(general bounds are out of slice 1)")
+    override = family === :Normal || family === :Cauchy ? :positive :
+        (:truncated, 0.0, Inf)
+    (family, base_args, override)
 end
 
 function _rk_fold_assignment_consts!(kept, data::AbstractDict,

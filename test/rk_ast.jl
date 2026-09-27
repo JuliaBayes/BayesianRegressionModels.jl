@@ -14,11 +14,11 @@
 
 using Test
 using BayesianRegressionModels
-using Distributions: Bernoulli, Beta, Binomial, Categorical, Dirichlet,
-                     Exponential, Gamma, InverseGaussian, LocationScale,
-                     LogNormal, MixtureModel, Multinomial, NegativeBinomial,
-                     Normal, Poisson,
-                     TDist, VonMises, truncated
+using Distributions: Bernoulli, Beta, Binomial, Categorical, Cauchy, Dirichlet,
+                     Exponential, Gamma, InverseGaussian, Laplace,
+                     LocationScale, Logistic, LogNormal, MixtureModel,
+                     Multinomial, NegativeBinomial, Normal, Poisson, TDist,
+                     Uniform, VonMises, truncated
 using LogExpFunctions: logistic, logit
 using Statistics: mean
 
@@ -678,8 +678,8 @@ end
         [BRM._RKPredictorSpec(:n, :identity, BRM._RKTermSpec[
             BRM._RKTermSpec(:intercept, Symbol[], (;), :Intercept, :Intercept),
             BRM._RKTermSpec(:continuous, [:n], (;), :n, :n)], :n)],
-        [BRM._RKPopulationPrior(:n, :Intercept, 0.0, 1.0),
-            BRM._RKPopulationPrior(:n, :n, 0.0, 1.0)],
+        [BRM._RKPopulationPrior(:n, :Intercept, :Normal, (0.0, 1.0)),
+            BRM._RKPopulationPrior(:n, :n, :Normal, (0.0, 1.0))],
         [BRM._RKSampledParameter(:s, :Exponential, (1.0,), nothing, :s)],
         BRM._RKAssignmentSpec[],
         BRM._RKDerivedSpec[],
@@ -2256,4 +2256,120 @@ end
                 Expr(:., :Gamma, Expr(:tuple, 2.0, Expr(:call, :./,
                     6.0, 2.0)))),
             Expr(:vect, 0.5, 0.5))))
+end
+
+@testset "prior vocab v1: mixed-family scalar emission" begin
+    # A Cauchy addressee keys the shared def by family (`f2cauchy`;
+    # values ride callargs, never the name) and splices its head with
+    # the same 2-formal shape as Normal.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        effect(mu, Intercept) ~ Normal(0, 1)
+        effect(mu, x) ~ Cauchy(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.defs == Expr[
+        Expr(:(=), Expr(:call, :popefs_normal_i_c_f2cauchy, :x1,
+                :loc1, :s1, :loc2, :s2), Expr(:block,
+            Expr(:call, :~, :b1, Expr(:call, :Normal, :loc1, :s1)),
+            Expr(:call, :~, :b2, Expr(:call, :Cauchy, :loc2, :s2)),
+            Expr(:call, :.+, :b1, Expr(:call, :.*, :b2, :x1)))),
+    ]
+    @test Expr(:call, :~, :mu, Expr(:call, :popefs_normal_i_c_f2cauchy,
+        :x, 0.0, 1.0, 0.0, 2.0)) in prog.main.args
+    # StudentT takes a df formal ahead of (loc, s), in Stan arg order.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        effect(mu, x) ~ LocationScale(1, 2, TDist(3))
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test Expr(:(=), Expr(:call, :popefs_normal_i_c_f2studentt, :x1,
+            :loc1, :s1, :nu2, :loc2, :s2), Expr(:block,
+        Expr(:call, :~, :b1, Expr(:call, :Normal, :loc1, :s1)),
+        Expr(:call, :~, :b2, Expr(:call, :StudentT, :nu2, :loc2, :s2)),
+        Expr(:call, :.+, :b1, Expr(:call, :.*, :b2, :x1)))) in prog.defs
+    @test Expr(:call, :~, :mu, Expr(:call, :popefs_normal_i_c_f2studentt,
+        :x, 0.0, 1.0, 3.0, 1.0, 2.0)) in prog.main.args
+    # Flat takes no formals (density 0.0 thin-layer-side).
+    brmi = @brm df begin
+        mu ~ 1 + x
+        effect(mu, x) ~ Flat()
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test Expr(:(=), Expr(:call, :popefs_normal_i_c_f2flat, :x1,
+            :loc1, :s1), Expr(:block,
+        Expr(:call, :~, :b1, Expr(:call, :Normal, :loc1, :s1)),
+        Expr(:call, :~, :b2, Expr(:call, :Flat)),
+        Expr(:call, :.+, :b1, Expr(:call, :.*, :b2, :x1)))) in prog.defs
+    @test Expr(:call, :~, :mu, Expr(:call, :popefs_normal_i_c_f2flat,
+        :x, 0.0, 1.0)) in prog.main.args
+    # Factor blocks broadcast the stated head over the LevelMap block.
+    brmi = @brm df begin
+        mu ~ 1 + factor(g; ref=3)
+        effect(mu, g) ~ Laplace(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test Expr(:call, :.~,
+        Expr(:ref, :mu_b2, Expr(:ref, Expr(:call, :levels, :g),
+            Expr(:call, :(:), 1, 2))),
+        Expr(:., :Laplace, Expr(:tuple, 0.0, 2.0))) in prog.main.args
+    # A non-Normal addressee forces the decomposed path (GLM objects
+    # stay Normal-only): a popefs def plus the dotted response, no
+    # object head.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        effect(mu, x) ~ Cauchy(0, 2)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test any(d -> d.args[1].args[1] === :popefs_normal_i_c_f2cauchy,
+        prog.defs)
+    @test prog.main.args[end] == Expr(:call, :.~, :y,
+        Expr(:., :Normal, Expr(:tuple, :mu, :s)))
+end
+
+@testset "prior vocab v1: sampled splices" begin
+    # New sampled heads splice generically; StudentT arrives in Stan
+    # order; Uniform carries literal bounds.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        a ~ Laplace(0, 2)
+        t ~ LocationScale(0, 2, TDist(4))
+        u ~ Uniform(0.5, 1.5)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test Expr(:call, :~, :a, Expr(:call, :Laplace, 0.0, 2.0)) in
+        prog.main.args
+    @test Expr(:call, :~, :t, Expr(:call, :StudentT, 4.0, 0.0, 2.0)) in
+        prog.main.args
+    @test Expr(:call, :~, :u, Expr(:call, :Uniform, 0.5, 1.5)) in
+        prog.main.args
+    # New symmetric halves splice `truncated` verbatim; legacy halves
+    # keep their `HalfNormal`/`HalfCauchy` heads byte-identically.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        h1 ~ truncated(Logistic(0, 1), 0, Inf)
+        hn ~ truncated(Normal(0, 2), 0, Inf)
+        hc ~ truncated(Cauchy(0, 2), 0, Inf)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test Expr(:call, :~, :h1, Expr(:call, :truncated,
+        Expr(:call, :Logistic, 0.0, 1.0), 0.0, Inf)) in prog.main.args
+    @test Expr(:call, :~, :hn, Expr(:call, :HalfNormal, 2.0)) in
+        prog.main.args
+    @test Expr(:call, :~, :hc, Expr(:call, :HalfCauchy, 2.0)) in
+        prog.main.args
 end

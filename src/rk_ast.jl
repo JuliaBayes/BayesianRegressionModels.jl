@@ -80,11 +80,22 @@ end
 # part of the body identity (unlike Normal `loc`/`s`, which ride formals).
 function _rk_ast_popefs_lattice(predictor::_RKPredictorSpec,
         stated::Vector{Int}, nscalar::Int,
-        hs::Dict{Int,Tuple{Float64,Float64}})
+        hs::Dict{Int,Tuple{Float64,Float64}},
+        families::Dict{Int,Symbol}=Dict{Int,Symbol}())
     parts = Any["popefs", "normal",
         (_rk_ast_popefs_word(t) for t in predictor.terms)...]
     if !isempty(stated) && length(stated) != nscalar
         push!(parts, "s" * join(sort!(copy(stated)), "_"))
+    end
+    # Non-Normal stated slots key the shared def by family (values ride
+    # callargs, so values never enter the name). All-Normal predictors
+    # keep their exact historical name.
+    mixed = sort!(Int[s for s in stated
+        if get(families, s, :Normal) !== :Normal])
+    if !isempty(mixed)
+        words = String[string(s, lowercase(string(families[s])))
+            for s in mixed]
+        push!(parts, "f" * join(words, "_"))
     end
     if !isempty(hs)
         words = String[]
@@ -229,6 +240,19 @@ end
 # no semicolon, and the thin lowering only reads bare `:kw` args (a
 # `:parameters` wrapper would silently read as defaults). Shape-verified
 # against `Meta.parse` of the corpus-56 surface spelling.
+# Scalar population-prior splice: the plan family symbol IS the surface
+# head, so one splice serves every family. Normal keeps its exact
+# historical `b ~ Normal(loc_i, s_i)` form; the other 2-arg families
+# share the formal shape; StudentT takes a df formal; Flat takes none.
+function _rk_ast_scalar_prior_stmt(coef::Symbol, family::Symbol, slot::Int)
+    family === :Flat &&
+        return Expr(:call, :~, coef, Expr(:call, :Flat))
+    formals = family === :StudentT ?
+        (Symbol(:nu, slot), Symbol(:loc, slot), Symbol(:s, slot)) :
+        (Symbol(:loc, slot), Symbol(:s, slot))
+    Expr(:call, :~, coef, Expr(:call, family, formals...))
+end
+
 function _rk_ast_horseshoe_stmt(coef::Symbol,
         local_scale::Float64, global_scale::Float64)
     if local_scale == 1.0 && global_scale == 1.0
@@ -296,12 +320,13 @@ function _rk_ast_subset_literal(p::Int, K::Int)
     Expr(:vect, [1:p-1; p+1:K]...)
 end
 
-# A factor coefficient's broadcast prior: `c[levels(g)] .~ Normal.(...)`
-# full-rank, `c[levels(g)[S]] .~ Normal.(...)` for a reference subset.
-# Always stated (factors have no default prior); the scalar location and
-# scale broadcast over the LevelMap block.
+# A factor coefficient's broadcast prior: `c[levels(g)] .~ Fam.(...)`
+# full-rank, `c[levels(g)[S]] .~ Fam.(...)` for a reference subset.
+# Always stated (factors have no default prior); the scalar args
+# broadcast over the LevelMap block. One family per block (the
+# thin-layer wide-block rule); the plan family symbol is the head.
 function _rk_ast_factor_prior(coef::Symbol, col::Symbol,
-        options::NamedTuple, K::Int, location::Float64, scale::Float64)
+        options::NamedTuple, K::Int, family::Symbol, args::Tuple)
     index = if options.coding === :fullrank
         Expr(:call, :levels, col)
     else
@@ -309,7 +334,7 @@ function _rk_ast_factor_prior(coef::Symbol, col::Symbol,
             _rk_ast_subset_literal(options.drop, K))
     end
     Expr(:call, :.~, Expr(:ref, coef, index),
-        _rk_ast_dotted(:Normal, location, scale))
+        _rk_ast_dotted(family, args...))
 end
 
 _rk_ast_response_uses_scale(family::Symbol) =
@@ -399,13 +424,19 @@ function _rk_ast_fresh_name(base::String, taken::Set{Symbol})
 end
 
 function _rk_ast_glm_object_prior(priors::Dict{Tuple{Symbol,Symbol},
-        Tuple{Float64,Float64}}, predictor::Symbol, addressee::Symbol)
-    get(priors, (predictor, addressee), nothing)
+        <:Tuple{Symbol,<:Tuple}}, predictor::Symbol, addressee::Symbol)
+    prior = get(priors, (predictor, addressee), nothing)
+    # GLM objects stay Normal-only (R2D2 precedent): any other family
+    # takes the decomposed-predictor path.
+    prior === nothing && return nothing
+    family, args = prior
+    family === :Normal || return nothing
+    args::Tuple{Float64,Float64}
 end
 
 function _rk_ast_glm_object_spec(response::_RKLikelihoodSpec,
         plan::_RKStructuralPlan, taken::Set{Symbol},
-        priors::Dict{Tuple{Symbol,Symbol},Tuple{Float64,Float64}})
+        priors::Dict{Tuple{Symbol,Symbol},<:Tuple{Symbol,<:Tuple}})
     head = response.family === :gaussian ? :NormalIDGLM :
         response.family === :bernoulli_logit ? :BernoulliLogitGLM :
         response.family === :poisson_log ? :PoissonLogGLM : return nothing
@@ -887,6 +918,17 @@ function _rk_ast_sampled(parameter::_RKSampledParameter)
                     parameter.args[1], parameter.args[2]),
                 0, 1))
     end
+    if override isa Tuple && first(override) === :truncated
+        # General truncated splice: the base head + args and the bounds
+        # splice back verbatim (v1 plans symmetric halves only; the
+        # planner gates the bounds, so this arm never conditions on
+        # which family or which bounds it carries).
+        _, lower, upper = override
+        return Expr(:call, :~, name,
+            Expr(:call, :truncated,
+                Expr(:call, family, parameter.args...),
+                lower, upper))
+    end
     family === :Flat && return Expr(:call, :~, name, Expr(:call, :Flat))
     if family === :LKJCovarianceFactor
         # SB's covariance-factor declaration, decomposed thin-side into
@@ -1049,7 +1091,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
         push!(taken, fresh)
         rename[predictor.name] = fresh
     end
-    priors = Dict((p.predictor, p.addressee) => (p.location, p.scale)
+    priors = Dict{Tuple{Symbol,Symbol},Tuple{Symbol,Tuple}}(
+        (p.predictor, p.addressee) => (p.family, p.args)
         for p in plan.population_priors)
     # Reserve X/alpha/beta before any other generated name; an eligible
     # GLM consumes its predictor entirely, so no affine names follow.
@@ -1137,7 +1180,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
         refactual = Dict{Int,Any}()
         scalar_stmts = Expr[]
         stated = Int[]
-        stateloc = Dict{Int,Tuple{Float64,Float64}}()
+        stateloc = Dict{Int,Tuple{Symbol,Tuple}}()
         hs_slots = Dict{Int,Tuple{Float64,Float64}}()
         for (index, term) in enumerate(predictor.terms)
             kind = term.kind
@@ -1177,7 +1220,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
                     "`$(predictor.name)` addressee `$(term.addressee)`")
                 priors[key]
             else
-                get(r2d2.overrides, term.addressee, nothing)
+                # R2D2 overrides are Normal-only by construction
+                # (planner gate); normalize to the family shape here.
+                r2 = get(r2d2.overrides, term.addressee, nothing)
+                r2 === nothing ? nothing : (:Normal, r2)
             end
             if kind === :factor
                 col = only(term.columns)
@@ -1203,9 +1249,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
                     elseif override !== nothing
                         push!(stated, slot)
                         stateloc[slot] = override
-                        push!(scalar_stmts, Expr(:call, :~, local_coef,
-                            Expr(:call, :Normal, Symbol(:loc, slot),
-                                Symbol(:s, slot))))
+                        push!(scalar_stmts, _rk_ast_scalar_prior_stmt(
+                            local_coef, override[1], slot))
                     end
                 end
             end
@@ -1277,9 +1322,17 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
                 end
             end
             for slot in sort!(stated)
+                family, vals = stateloc[slot]
+                # Formal shape mirrors `_rk_ast_scalar_prior_stmt`:
+                # StudentT takes a df formal, Flat takes none, the
+                # 2-arg families share `(loc, s)`.
+                family === :Flat && continue
+                if family === :StudentT
+                    push!(formals, Symbol(:nu, slot))
+                    push!(callargs, vals[1])
+                end
                 push!(formals, Symbol(:loc, slot), Symbol(:s, slot))
-                loc, scale = stateloc[slot]
-                push!(callargs, loc, scale)
+                push!(callargs, vals[end-1], vals[end])
             end
             # Expanded locals must avoid `taken`; on collision the LHS
             # is alpha-renamed (the def's canonical locals never move,
@@ -1305,7 +1358,9 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
                 push!(taken, _rk_ast_ns(lhs, Symbol(:b, slot)))
             end
             defname = _rk_ast_popefs_lattice(
-                predictor, stated, slots.nscalar, hs_slots)
+                predictor, stated, slots.nscalar, hs_slots,
+                Dict{Int,Symbol}(
+                    slot => stateloc[slot][1] for slot in stated))
             body = Expr(:block, scalar_stmts...,
                 _rk_ast_affine(predictor, coefs, slots.colf, slots.reff))
             def = Expr(:(=), Expr(:call, defname, formals...), body)

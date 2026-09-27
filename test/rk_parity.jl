@@ -34,10 +34,10 @@ using BayesianRegressionModels
 using CategoricalArrays: categorical, levelcode
 using DifferentiationInterface: AutoEnzyme
 using Distributions: Beta, Cauchy, Dirichlet, Exponential, Gamma,
-                     InverseGaussian, LocationScale, LogNormal, MixtureModel,
-                     NegativeBinomial,
-                     Normal, Poisson, TDist, VonMises, cdf, logcdf, logccdf,
-                     logpdf
+                     InverseGaussian, Laplace, LocationScale, LogNormal,
+                     MixtureModel, NegativeBinomial,
+                     Normal, Poisson, TDist, Uniform, VonMises, cdf, logcdf,
+                     logccdf, logpdf, truncated
 using Enzyme
 using LogDensityProblems
 using LogExpFunctions: logistic, logit
@@ -2666,5 +2666,169 @@ end
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + logjac(layout, u)
+    _check_parity_gradient(backend, u)
+end
+
+# Prior-vocab v1 corpus (P1-P5): per-addressee population families +
+# widened sampled vocabulary through the full BRM→RK build path. SB
+# literals pinned from brief 8yw5i7 (BRM ff5e589 / StanBlocks 24578c3 /
+# BridgeStan 2.9.0, propto=false); the RK legs were compared there to
+# ≤2e-15 (P3/P4 bit-exact).
+
+@testset "rk parity prior vocab P1 mixed StudentT+Laplace" begin
+    p_cols = (;
+        x=[0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
+        y=[1.0, 2.0, 1.5, 2.5, 3.0, 2.0],
+    )
+    brmi = @brm p_cols begin
+        mu ~ 1 + x
+        effect(mu, Intercept) ~ LocationScale(0, 2, TDist(4))
+        effect(mu, x) ~ Laplace(0, 1)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test coordinate_names(layout) ==
+        [Symbol("mu.Intercept"), Symbol("mu.x"), :s]
+    u = [0.5, -0.25, log(1.3)]
+    nt = constrain(layout, u)
+    a, b, s = nt.mu[1], nt.mu[2], nt.s
+    lp = a .+ b .* p_cols.x
+    ll = sum(logpdf.(Normal.(lp, s), p_cols.y))
+    pr = logpdf(LocationScale(0, 2, TDist(4)), a) +
+        logpdf(Laplace(0, 1), b) + logpdf(Exponential(1), s)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ log(s)
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + log(s)
+    @test _rk_query(backend, :posterior, u) ≈ -15.676861749966013
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity prior vocab P2 Cauchy+Flat" begin
+    p_cols = (;
+        x=[0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
+        y=[1.0, 2.0, 1.5, 2.5, 3.0, 2.0],
+    )
+    brmi = @brm p_cols begin
+        mu ~ 1 + x
+        effect(mu, Intercept) ~ Cauchy(0, 1)
+        effect(mu, x) ~ Flat()
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test coordinate_names(layout) ==
+        [Symbol("mu.Intercept"), Symbol("mu.x"), :s]
+    u = [0.5, -0.25, log(1.3)]
+    nt = constrain(layout, u)
+    a, b, s = nt.mu[1], nt.mu[2], nt.s
+    lp = a .+ b .* p_cols.x
+    ll = sum(logpdf.(Normal.(lp, s), p_cols.y))
+    # Flat contributes exactly 0.0.
+    pr = logpdf(Cauchy(0, 1), a) + 0.0 + logpdf(Exponential(1), s)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ log(s)
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + log(s)
+    @test _rk_query(backend, :posterior, u) ≈ -14.388851106658095
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity prior vocab P3 factor StudentT" begin
+    p_cols = (;
+        x=[0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
+        y=[1.0, 2.0, 1.5, 2.5, 3.0, 2.0],
+        g=[1, 2, 1, 3, 2, 3],
+    )
+    brmi = @brm p_cols begin
+        mu ~ 0 + g + x
+        effect(mu, g) ~ LocationScale(0, 2, TDist(3))
+        effect(mu, x) ~ Cauchy(0, 1)
+        y ~ Normal(mu, 1.5)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test coordinate_names(layout) == [Symbol("mu.g_1"), Symbol("mu.g_2"),
+        Symbol("mu.g_3"), Symbol("mu.x")]
+    u = [0.3, -0.4, 0.1, 0.75]
+    nt = constrain(layout, u)
+    c, b = nt.mu[1:3], nt.mu[4]
+    lp = [c[gi] + b * xi for (gi, xi) in zip(p_cols.g, p_cols.x)]
+    ll = sum(logpdf.(Normal.(lp, 1.5), p_cols.y))
+    t3 = LocationScale(0, 2, TDist(3))
+    pr = sum(logpdf(t3, ci) for ci in c) + logpdf(Cauchy(0, 1), b)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    @test _rk_query(backend, :posterior, u) ≈ -21.633064049357102
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity prior vocab P4 Uniform scale" begin
+    # All-Normal population priors fuse to the GLM object (layout
+    # [beta, sigma, alpha]); the Uniform sampled scale rides the
+    # affine-logit interval, same as SB's declared bounds.
+    p_cols = (;
+        x=[0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
+        y=[1.0, 2.0, 1.5, 2.5, 3.0, 2.0],
+    )
+    brmi = @brm p_cols begin
+        mu ~ 1 + x
+        s ~ Uniform(0.5, 1.5)
+        y ~ Normal(mu, s)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test coordinate_names(layout) ==
+        [Symbol("mu_beta.1"), :s, :mu_alpha]
+    lo, hi = 0.5, 1.5
+    u = [-0.25, log((1.3 - lo) / (hi - 1.3)), 0.5]
+    nt = constrain(layout, u)
+    b, s, a = only(nt.mu_beta), nt.s, nt.mu_alpha
+    lp = a .+ b .* p_cols.x
+    ll = sum(logpdf.(Normal.(lp, s), p_cols.y))
+    pr = logpdf(Normal(0, 1), a) + logpdf(Normal(0, 1), b) +
+        logpdf(Uniform(lo, hi), s)
+    jac = log(s - lo) + log(hi - s)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
+    @test _rk_query(backend, :posterior, u) ≈ -15.810050464119632
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity prior vocab P5 half-StudentT scale" begin
+    # GLM layout as in P4; the half-StudentT sampled scale rides the
+    # exact +log(2) `:positive` leg (SB `truncated(; lower)` matches).
+    p_cols = (;
+        x=[0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
+        y=[1.0, 2.0, 1.5, 2.5, 3.0, 2.0],
+    )
+    brmi = @brm p_cols begin
+        mu ~ 1 + x
+        s ~ truncated(LocationScale(0, 1, TDist(4)); lower=0.0)
+        y ~ Normal(mu, s)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test coordinate_names(layout) ==
+        [Symbol("mu_beta.1"), :s, :mu_alpha]
+    u = [-0.25, log(1.3), 0.5]
+    nt = constrain(layout, u)
+    b, s, a = only(nt.mu_beta), nt.s, nt.mu_alpha
+    lp = a .+ b .* p_cols.x
+    ll = sum(logpdf.(Normal.(lp, s), p_cols.y))
+    pr = logpdf(Normal(0, 1), a) + logpdf(Normal(0, 1), b) +
+        logpdf(LocationScale(0, 1, TDist(4)), s) + log(2)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ log(s)
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + log(s)
+    @test _rk_query(backend, :posterior, u) ≈ -14.883826525901483
     _check_parity_gradient(backend, u)
 end
