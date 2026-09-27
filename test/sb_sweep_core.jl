@@ -11,7 +11,7 @@
 
 include(joinpath(@__DIR__, "sb_sweep_common.jl"))
 
-using Distributions: Normal, Cauchy, Uniform, truncated, Beta, Gamma, StudentT
+using Distributions: Normal, Cauchy, Uniform, truncated, Beta, Gamma, TDist, LocationScale, Binomial
 using Statistics: mean, std
 using ReactiveKernelsPPLExamples:
     RadonCountyExample, RadonCountyInterceptExample,
@@ -1066,11 +1066,13 @@ function diamonds_sb()
     cols = ntuple(j -> Xc[:, j], size(Xc, 2))
     df = (; y=M.DIAMONDS_Y, ntuple(j -> Symbol(:x, j) => cols[j], 24)...)
     builder = @brm begin
-        sigma ~ truncated(StudentT(3, 0, 10), 0.0, Inf)
+        # Normalized half-t: Stan `T[0,]` adds +log(2), matching the RK
+        # model's explicit `log(2) + student_t(3,0,10).logpdf(sigma)`.
+        sigma ~ truncated(LocationScale(0, 10, TDist(3)), 0.0, Inf)
         mu ~ 1 + x1 + x2 + x3 + x4 + x5 + x6 + x7 + x8 + x9 + x10 +
             x11 + x12 + x13 + x14 + x15 + x16 + x17 + x18 + x19 + x20 +
             x21 + x22 + x23 + x24
-        effect(mu, Intercept) ~ StudentT(3, 8, 10)
+        effect(mu, Intercept) ~ LocationScale(8, 10, TDist(3))
         effect(mu, :) ~ Normal(0, 1)
         y ~ Normal(mu, sigma)
     end
