@@ -54,15 +54,12 @@ const PINS = [
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
-    # through. bb2a2e0 (2026-09-26, main): the 38973ca0 multimembership
-    # stack (mm/strata surface + IR + lowering + corpus 62-66 over the
-    # d94ddcd vonmises stack with term-monotonic pins) plus the
-    # prior-vocab generator+contract+layout (sampled +4, uniform
-    # interval, corpus 62-64) and the fam-nb1 NegativeBinomial response
-    # slice (NegativeBinomialFam + (LogLink, LogLink) triple + scalar p
-    # on the scale slot + twin head `NegativeBinomial.(exp.(eta), p)` +
-    # corpus 67_nb1 + N1/N2 SB pins).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "bb2a2e0fe05899e1c9af21f858a04338b63510e1"),  # main
+    # through. 6cf678f (2026-09-27, main): the b247aad stack plus the
+    # fam-exp Exponential response slice (ExponentialLogFam + (LogLink,
+    # LogLink) triple + twin head `Exponential.(exp.(eta))` + corpus
+    # 69_exponential + E1 SB pins) plus the fam-lognormal LogNormal
+    # response slice.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "6cf678f37acec6cb34fd0abcf7b990e74707dea4"),  # main
 ]
 
 function main()
