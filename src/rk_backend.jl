@@ -76,6 +76,10 @@ const _RK_ADMITTED_TRIPLES = Set{Tuple{Symbol,Symbol,Symbol}}([
     # `VonMises` and `CircularVonMises` share the triple; the
     # principal interval rides the plan's `interval` slot.
     (:von_mises, :identity, :identity),
+    # Group C (exponential): exponential over a log-link mean
+    # predictor; the single-argument head takes no scale slot
+    # (Poisson-shaped — the location IS the scale).
+    (:exponential_log, :log, :log),
 ])
 # Slice-2 families: no weights or evidence (no driving case — the thin
 # layer admits neither on the new triples, so the planner fails closed).
@@ -83,7 +87,7 @@ const _RK_SLICE2_FAMILIES = Set{Symbol}([
     :bernoulli_probit, :bernoulli_cloglog, :binomial_probit,
     :binomial_cloglog, :beta_logit, :beta_binomial_logit, :student_t,
     :hurdle_poisson, :zero_inflated_poisson, :wald, :von_mises,
-    :negative_binomial,
+    :negative_binomial, :exponential_log,
 ])
 # Leveled simplex responses (multinomial/categorical) name a simplex
 # vector parameter instead of a linear predictor, so they skip the
@@ -167,6 +171,8 @@ struct _RKLikelihoodSpec
                    # :von_mises (kappa rides the
                    # scale / scale-predictor slots, the principal
                    # interval the `interval` slot) |
+                   # :exponential_log (single-argument head, no scale
+                   # slot — Poisson-shaped) |
                    # longtail: :mvnormal_cholesky (joint correlated outcomes)
                    # | :mixture (finite MixtureModel response)
     link::Symbol   # effective link: :identity | :logit | :log |
@@ -477,7 +483,8 @@ const _RK_ADMITTED_SPELLINGS =
     "`phi` a sampled parameter, scalar assignment, or positive literal), " *
     "or group C: `y ~ VonMises(mu, kappa)` / `y ~ CircularVonMises(mu, " *
     "kappa; interval=(lo, hi))` + `mu ~ ...` (`kappa` a `log(kappa) ~ ...` " *
-    "predictor, sampled parameter, or positive literal)"
+    "predictor, sampled parameter, or positive literal), or group C: " *
+    "`y ~ Exponential(mu)` + `log(mu) ~ ...`"
 
 function _rk_predictor_link(brmi::BRMI, target::Symbol)
     prefix = "RK backend"
@@ -968,6 +975,20 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
             "$plink-link predictor; write `Poisson(mu)` with a " *
             "`log(mu)` predictor")
         return (; family=:poisson_log, link=plink, scale=nothing,
+            scale_predictor=nothing, trials=nothing, location)
+    elseif head === Exponential
+        length(args) == 1 || error(
+            "$prefix: response `$response` `Exponential` needs one argument")
+        location = _rk_location_arg(only(args), candidates, response, "scale",
+            "itself; write `Exponential(mu)` with a `log(mu)` predictor " *
+            "(slice 2 has no `Exponential(exp(..))` spelling)")
+        plink = predictor_link[location]
+        triple = (:exponential_log, plink, plink)
+        triple in _RK_ADMITTED_TRIPLES || error(
+            "$prefix: response `$response` pairs `Exponential` with a " *
+            "$plink-link predictor; write `Exponential(mu)` with a " *
+            "`log(mu)` predictor")
+        return (; family=:exponential_log, link=plink, scale=nothing,
             scale_predictor=nothing, trials=nothing, location)
     elseif head === HurdlePoisson
         length(args) == 2 || error(
@@ -5654,7 +5675,7 @@ function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
     elseif family === :hurdle_poisson
         (eltype(values) <: Integer && all(>=(0), values)) || error(
             "$prefix: response `$response` must hold non-negative integers")
-    elseif family === :wald
+    elseif family === :wald || family === :exponential_log
         # Mirrors the thin layer: strictly positive (y = 0 fails
         # validation there, so it fails here with BRM-side attribution).
         (eltype(values) <: Real && all(>(0), values)) || error(

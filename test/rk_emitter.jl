@@ -741,6 +741,21 @@ end
     @test isnothing(likelihood.scale_predictor)
 end
 
+@testset "group-C exponential plan shapes" begin
+    # Single-argument head over a log-link mean (Poisson-shaped):
+    # no scale slot at all — the location IS the scale.
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        z ~ Exponential(mu)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:exponential_log, :log)
+    @test likelihood.predictor === :mu
+    @test likelihood.scale === nothing
+    @test isnothing(likelihood.scale_predictor)
+    @test isnothing(likelihood.trials)
+end
+
 @testset "group-D beta-binomial plan shapes" begin
     # The pair-probe B1 shape (peer todo 1nefktn): logit-link mean +
     # column trials + sampled precision, explicit effect priors.
@@ -2665,6 +2680,13 @@ end
         lam ~ LogNormal(-0.3, 1.0)
         z ~ InverseGaussian(exp(eta), lam)
     end)
+    # Group C: Exponential is admitted — see "group-C exponential
+    # plan shapes" above. The `exp` spelling stays closed
+    # (positive response, so the throw is the spelling).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        eta ~ 1 + x
+        z ~ Exponential(exp(eta))
+    end)
     # Group C: SkewDoubleExponential (quantile.jl).
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
@@ -2970,6 +2992,47 @@ end
         log(mu) ~ 1 + x
         lam ~ LogNormal(-0.3, 1.0)
         z ~ censored(InverseGaussian(mu, lam); upper=5)
+    end)
+end
+
+@testset "fail closed: group-C exponential scope edges" begin
+    # Mean predictor must be log-link.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        z ~ Exponential(mu)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        logit(mu) ~ 1 + x
+        z ~ Exponential(mu)
+    end)
+    # The `exp` spelling stays closed (Poisson precedent — the
+    # demand-battery entry below pins it too).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        eta ~ 1 + x
+        z ~ Exponential(exp(eta))
+    end)
+    # Arity: the 0- and 2-argument spellings stay closed.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        z ~ Exponential()
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        z ~ Exponential(mu, 2.0)
+    end)
+    # Response values must be strictly positive (gamma precedent).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        y ~ Exponential(mu)
+    end)
+    # No weights or evidence on the group-C triple (no driving case).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        z ~ weighted(Exponential(mu), fweights(n))
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        z ~ censored(Exponential(mu); upper=5)
     end)
 end
 
