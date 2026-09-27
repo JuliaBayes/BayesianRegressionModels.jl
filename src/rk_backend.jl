@@ -160,7 +160,9 @@ struct _RKLikelihoodSpec
                    # scalar-only precision on the scale slot) |
                    # group B: :student_t | group C: :hurdle_poisson
                    # (p_zero rides the scale / scale-predictor slots) |
-                   # :zero_inflated_poisson |
+                   # :zero_inflated_poisson (zi rides the scalar
+                   # `zero_inflation` slot, or the `scale_predictor`
+                   # slot under a logit pin when modeled) |
                    # :negative_binomial (p rides the scalar-only scale
                    # slot) |
                    # :wald (lambda rides the scalar-only scale slot) |
@@ -213,6 +215,7 @@ struct _RKLikelihoodSpec
     # Zero-inflated-Poisson trailing field (thin-layer LikelihoodSpec
     # mirror); every other family leaves it at default.
     zero_inflation::Union{Nothing,Float64,Symbol} # literal or sampled/assignment name
+        # (`nothing` when a `logit(zi)` submodel rides `scale_predictor`)
     # Modelled-missingness trailing field (thin-layer LikelihoodSpec
     # mirror): the `Jobs_<response>` observed-row index column when the
     # response is `mi(...)` (Case A obs-rows-only likelihood over the
@@ -643,24 +646,22 @@ function _rk_nu_argument(base, parameters::Set{Symbol},
           "assignment")
 end
 
-# Zero-inflated-Poisson zero probability: a literal in [0, 1], a sampled
-# parameter, or a scalar assignment. A linear predictor in the zi slot is
-# a modeled-zi response (no driving case in v1); a data column can never
-# be a scalar. Returns the literal value or the resolved name.
+# Zero-inflated-Poisson zero probability. Returns `(zi, zi_predictor)`
+# with exactly one side non-nothing: a scalar (parameter/assignment /
+# literal in [0, 1]) or a distributional bare-predictor reference (a
+# modeled-zi response — the hurdle p_zero precedent; the call site pins
+# the logit link). A predictor shadows a same-named data column here,
+# matching the location slot; a data column can never be a scalar.
 function _rk_zero_inflation_argument(arg, parameters::Set{Symbol},
         assignments::Set{Symbol}, consts::Dict{Symbol,Float64},
         aliases::Dict{Symbol,Symbol}, response::Symbol,
         candidates::Vector{Symbol})
     prefix = "RK backend"
-    arg isa Number && return _rk_probability_literal(arg, response,
-        "zero-inflation probability")
+    arg isa NamedColumn && name(arg) in candidates &&
+        return (nothing, name(arg))
+    arg isa Number && return (_rk_probability_literal(arg, response,
+        "zero-inflation probability"), nothing)
     if arg isa NamedColumn
-        name(arg) in candidates && error(
-            "$prefix: response `$response` zero-inflation probability " *
-            "cannot be the linear predictor `$(name(arg))`; modeled zi " *
-            "is out of slice — write a sampled parameter, a literal in " *
-            "[0, 1], or a scalar assignment (if a same-named parameter " *
-            "exists, rename one of them)")
         parent(arg) isa DataColumn && error(
             "$prefix: response `$response` zero-inflation probability " *
             "cannot be a data column; slice 1 admits a sampled " *
@@ -668,13 +669,14 @@ function _rk_zero_inflation_argument(arg, parameters::Set{Symbol},
         kind, value = _rk_resolve_use_ref(name(arg), consts, aliases,
             parameters, assignments,
             "response `$response` zero-inflation probability")
-        kind === :number && return _rk_probability_literal(value, response,
-            "zero-inflation probability")
-        return value
+        kind === :number && return (_rk_probability_literal(value, response,
+            "zero-inflation probability"), nothing)
+        return (value, nothing)
     end
     error("$prefix: response `$response` zero-inflation probability must " *
-          "be a sampled parameter, a literal in [0, 1], or a scalar " *
-          "assignment")
+          "be a sampled parameter, a literal in [0, 1], a scalar " *
+          "assignment, or the second linear predictor " *
+          "(`logit(zi) ~ ...` + bare `zi`)")
 end
 
 # Negative-binomial success probability: a literal in [0, 1], a sampled
@@ -1271,13 +1273,21 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
         length(args) == 2 || error(
             "$prefix: response `$response` `ZeroInflatedPoisson` needs " *
             "`(rate, zi)`; write `ZeroInflatedPoisson(lambda, zi)` with " *
-            "a `log(lambda)` predictor and a scalar zi")
+            "a `log(lambda)` predictor")
         location = _rk_location_arg(args[1], candidates, response, "rate",
             "itself, not a deterministic transform; write the transform " *
             "into the predictor formula")
         plink = predictor_link[location]
-        zi = _rk_zero_inflation_argument(args[2], parameters, assignments,
-            consts, aliases, response, candidates)
+        # zi rides the scalar slot (sampled parameter / assignment /
+        # literal) or the scale-predictor slot (a `logit(zi)`
+        # submodel — the hurdle p_zero precedent).
+        zi, zi_predictor = _rk_zero_inflation_argument(args[2], parameters,
+            assignments, consts, aliases, response, candidates)
+        zi_predictor !== nothing &&
+            predictor_link[zi_predictor] !== :logit && error(
+                "$prefix: response `$response` `ZeroInflatedPoisson` zi " *
+                "predictor `$(zi_predictor)` must be logit-link; " *
+                "write a `logit(zi) ~ ...` submodel")
         triple = (:zero_inflated_poisson, plink, plink)
         triple in _RK_ADMITTED_TRIPLES || error(
             "$prefix: response `$response` pairs `ZeroInflatedPoisson` " *
@@ -1285,7 +1295,7 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
             "`ZeroInflatedPoisson(lambda, zi)` with a `log(lambda)` " *
             "predictor")
         return (; family=:zero_inflated_poisson, link=plink, scale=nothing,
-            scale_predictor=nothing, trials=nothing, location,
+            scale_predictor=zi_predictor, trials=nothing, location,
             zero_inflation=zi)
     elseif head === VonMises || head === CircularVonMises
         circular = head === CircularVonMises

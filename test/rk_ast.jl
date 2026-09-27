@@ -272,6 +272,18 @@ end
     @test prog.main.args[end] == Expr(:call, :.~, :c,
         Expr(:., :ZeroInflatedPoisson, Expr(:tuple,
             Expr(:., :exp, Expr(:tuple, :lambda)), :zi)))
+    # Modeled zi (zip.jl model B): the `logit(zi)` submodel inverts
+    # under `logistic.` (the hurdle hu precedent).
+    brmi = @brm df begin
+        log(lambda) ~ 1 + x
+        logit(zi) ~ 1 + x
+        c ~ ZeroInflatedPoisson(lambda, zi)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.main.args[end] == Expr(:call, :.~, :c,
+        Expr(:., :ZeroInflatedPoisson, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :lambda)),
+            Expr(:., :logistic, Expr(:tuple, :zi)))))
     # Literals inline; the fused-heads flag changes nothing (one head
     # either way).
     brmi = @brm df begin

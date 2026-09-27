@@ -664,6 +664,19 @@ end
     end
     likelihood = only(BRM._brm_rk_plan(brmi).responses)
     @test likelihood.zero_inflation === :zi
+    # Modeled zi (zip.jl model B): the `logit(zi)` submodel rides the
+    # scale-predictor slot (the hurdle hu precedent).
+    brmi = @brm df begin
+        log(lambda) ~ 1 + x
+        logit(zi) ~ 1 + x
+        c ~ ZeroInflatedPoisson(lambda, zi)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) ===
+        (:zero_inflated_poisson, :log)
+    @test likelihood.predictor === :lambda
+    @test likelihood.scale_predictor === :zi
+    @test isnothing(likelihood.zero_inflation)
 end
 
 @testset "group-C negative-binomial plan shapes" begin
@@ -2678,15 +2691,9 @@ end
     end)
     # Group C: hurdle Poisson (hurdle_only.jl) is admitted — see
     # "group-C hurdle-poisson plan shapes" above.
-    # Group C: scalar-zi zero-inflated Poisson (zip.jl model A) is
-    # admitted — see "group-C ZIP plan shapes" above; the logit(zi)
-    # submodel shape stays fail-closed (here and in "fail closed:
-    # group-C ZIP scope edges").
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
-        log(lambda) ~ 1 + x
-        logit(zi) ~ 1 + x
-        c ~ ZeroInflatedPoisson(lambda, zi)
-    end)
+    # Group C: scalar-zi zero-inflated Poisson (zip.jl model A) and the
+    # logit(zi) submodel shape (model B) are admitted — see "group-C
+    # ZIP plan shapes" above.
     # Group C: InverseGaussian (wald_only.jl) is admitted — see
     # "group-C wald plan shapes" above. The `exp` spelling stays
     # closed (positive response, so the throw is the spelling).
@@ -2858,11 +2865,22 @@ end
         mu ~ 1 + x
         c ~ ZeroInflatedPoisson(mu, 0.25)
     end)
-    # Modeled zi (zip.jl model B): out of v1.
+    # Zi submodel must be logit-link (only logit inverts into (0, 1)).
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         log(lambda) ~ 1 + x
-        logit(zi) ~ 1 + x
+        log(zi) ~ 1 + x
         c ~ ZeroInflatedPoisson(lambda, zi)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(lambda) ~ 1 + x
+        zi ~ 1 + x
+        c ~ ZeroInflatedPoisson(lambda, zi)
+    end)
+    # The location predictor cannot feed the zi slot too (the
+    # logit-link pin fires first).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(lambda) ~ 1 + x
+        c ~ ZeroInflatedPoisson(lambda, lambda)
     end)
     # Data-column zi.
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin

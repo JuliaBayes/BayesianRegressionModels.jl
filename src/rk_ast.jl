@@ -352,7 +352,7 @@ _rk_ast_response_uses_scale(family::Symbol) =
     family === :beta_binomial_logit ||
     family === :student_t || family === :hurdle_poisson ||
     family === :wald || family === :von_mises ||
-    family === :negative_binomial
+    family === :negative_binomial || family === :zero_inflated_poisson
 
 # The scale-slot body spelling inside a bare response statement. A
 # direct scale (outer name, literal, or the plan-forbidden nothing)
@@ -385,7 +385,8 @@ end
 # predictor name, possibly renamed), `:scale` (the scale value or
 # link-inverted scale predictor), `:nu` (the Student-t degrees of
 # freedom, literal or name, inline), `:zero_inflation` (the ZIP zero
-# probability, literal or name, inline), `:trials`/`:weights`/`:lower`/
+# probability, literal or name, inline; a modeled-zi submodel rides
+# `:scale` under `logistic.` instead), `:trials`/`:weights`/`:lower`/
 # `:upper` (columns or literals inline),
 # `:extra_predictors`/`:count_columns` (tail predictors / tail count
 # columns inline). Evidence and weights STRUCTURE (which wrapper,
@@ -642,11 +643,14 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
         # Dedicated single head (thin-layer decision, pair fam-zip):
         # the plan's `ZeroInflatedPoisson(lambda, zi)` maps to
         # `ZeroInflatedPoisson.(exp.(lambda), zi)` (Julia/Stan
-        # `(lambda, zi)` order). No fused head and no decomposed
-        # twin: the zi slot is scalar-only in v1, so the fused flag
-        # changes nothing.
+        # `(lambda, zi)` order); a modeled `logit(zi)` submodel rides
+        # the scale slot under `logistic.` instead (the hurdle hu
+        # precedent). No fused head and no decomposed twin: one
+        # spelling either way, so the fused flag changes nothing.
+        zi = response.scale_predictor === nothing ?
+            leaf[:zero_inflation] : leaf[:scale]
         _rk_ast_dotted(:ZeroInflatedPoisson,
-            _rk_ast_dotted(:exp, predictor), leaf[:zero_inflation])
+            _rk_ast_dotted(:exp, predictor), zi)
     elseif response.family === :von_mises
         # Twin heads (thin-layer decision, pair fam-vonmises): exact
         # `VonMises(mu, kappa)` maps to `VonMises.(mu, kappa)` and
@@ -793,8 +797,11 @@ function _rk_ast_response_stmt(response::_RKLikelihoodSpec,
     end
     if family === :zero_inflated_poisson
         # Scalar-only like the nu slot (sampled/assignment names pass
-        # through; only predictor names alpha-rename).
-        response.zero_inflation === nothing && error(
+        # through; only predictor names alpha-rename) — except a
+        # modeled-zi submodel, which rides the scale slot
+        # (`leaf[:scale]`) instead and leaves this `nothing`.
+        response.zero_inflation === nothing &&
+            response.scale_predictor === nothing && error(
             "RK backend: internal: response `$(response.response)` plans " *
             "zero-inflated Poisson without a zero probability")
         leaf[:zero_inflation] = response.zero_inflation
