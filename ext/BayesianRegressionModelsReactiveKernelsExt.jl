@@ -80,6 +80,29 @@ function _rk_patch_ordinal_response(lowered::LikelihoodSpec,
         threshold_coefs = planned.threshold_coefs)
 end
 
+# BRM plan family (CamelCase) to thin-layer `POPULATION_FAMILIES` token.
+const _RK_THIN_POPULATION_FAMILIES = Dict{Symbol,Symbol}(
+    :Normal => :normal, :Cauchy => :cauchy, :Laplace => :laplace,
+    :Logistic => :logistic, :StudentT => :student_t, :Flat => :flat)
+
+# Plan prior to thin-layer `PopulationPrior`: the family crosses by
+# table, the arg shape by arity — a 3-tuple is `(nu, mu, sigma)` and
+# rotates to `(mu, sigma, nu)`; an empty tuple is `Flat` (whose
+# location/scale/nu the thin layer ignores); anything else passes
+# through as `(location, scale)`.
+function _rk_thin_population_prior(prior::BRM._RKPopulationPrior)
+    family = _RK_THIN_POPULATION_FAMILIES[prior.family]
+    args = prior.args
+    length(args) == 3 &&
+        return PopulationPrior(prior.predictor, prior.addressee, family,
+            args[2], args[3], args[1])
+    isempty(args) &&
+        return PopulationPrior(prior.predictor, prior.addressee, family,
+            0.0, 1.0, NaN)
+    PopulationPrior(prior.predictor, prior.addressee, family,
+        args[1], args[2])
+end
+
 function _rk_patch_scale_predictor!(predictors::Vector{PredictorSpec},
         priors::Vector{PopulationPrior}, levelmaps::Vector{LevelMap},
         plan::BRM._RKStructuralPlan, sname::Symbol)
@@ -101,18 +124,8 @@ function _rk_patch_scale_predictor!(predictors::Vector{PredictorSpec},
     push!(predictors, PredictorSpec(spec.name, LogLink, terms, spec.label))
     for prior in plan.population_priors
         prior.predictor === sname || continue
-        # Family-carrying translation rides the thin-layer prior-vocab
-        # land (pin bump); until then only Normal crosses this patch.
-        # (Main-predictor priors cross via the AST, never here.)
-        prior.family === :Normal || error(
-            "RK backend: scale predictor `$sname` addressee " *
-            "`$(prior.addressee)` carries a `$(prior.family)` " *
-            "population prior, which needs the landed thin-layer " *
-            "prior-vocab surface (this extension still targets the " *
-            "Normal-only `PopulationPrior` shape)")
-        location, scale = prior.args
-        push!(priors, PopulationPrior(prior.predictor, prior.addressee,
-            location, scale))
+        # Main-predictor priors cross via the AST, never here.
+        push!(priors, _rk_thin_population_prior(prior))
     end
     for term in spec.terms
         term.kind === :factor || continue
