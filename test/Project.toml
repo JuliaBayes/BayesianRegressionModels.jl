@@ -71,15 +71,15 @@ rev = "7aed40b18bd4cdabb75330f285d5c9b355575ab9"
 
 [sources.ReactiveKernels]
 url = "https://github.com/nsiccha/ReactiveKernels.jl"
-# bb2a2e0 (2026-09-26, main): the 38973ca0 multimembership stack
-# (mm/strata surface + IR + lowering + corpus 62-66 over the d94ddcd
-# vonmises stack with term-monotonic pins) plus the prior-vocab
-# generator+contract+layout (sampled +4, uniform interval, corpus
-# 62-64) and the fam-nb1 NegativeBinomial response slice
-# (NegativeBinomialFam + (LogLink, LogLink) triple + scalar p on the
-# scale slot + twin head `NegativeBinomial.(exp.(eta), p)` + corpus
-# 67_nb1 + N1/N2 SB pins).
+# b247aad (2026-09-27, main): seven merges over the bb2a2e0 nb1 stack —
+# term-monotonic (ad82c02), term-hsgp-periodic (c83c14c), mod-weights
+# (c0d400e), term-gp (45dc05c), closeout-appends (a715d41, fusion sweep
+# driver + reporter v2), kernel-robust (58460ea, mixture-simplex XLA
+# §7r reindex pin) and term-splines-stan (spline sd `:positive` ->
+# `:positive_stan`, Stan lower-bound kernel without the `+log(2)` half
+# renormalizer; test_spline re-pin + corpus 24-25 rebless + M1/M2
+# SB-parity pins + XLA leg).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "bb2a2e0fe05899e1c9af21f858a04338b63510e1"
+rev = "b247aade70084c685dd3b265793c74273058c77d"
