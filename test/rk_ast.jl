@@ -1523,6 +1523,26 @@ end
             Expr(:., :Normal, Expr(:tuple, :mu, :s))))
     @test prog.main.args[1] == Meta.parse("hsgp_basis(:hsgp_x_z, x, z; " *
         "k = (4, 3), c = (1.5, 2.0), iso = false)")
+    # Periodic: k/cov/period declaration, same summand shape.
+    brmi = @brm df begin
+        mu ~ 1 + hsgp(x; k=4, cov=:periodic, period=2.0)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.main == Expr(:block,
+        Expr(:call, :hsgp_basis,
+            Expr(:parameters, Expr(:kw, :k, 4),
+                Expr(:kw, :cov, QuoteNode(:periodic)),
+                Expr(:kw, :period, 2.0)),
+            QuoteNode(:hsgp_x), :x),
+        Expr(:call, :~, :mu, Expr(:call, :popefs_normal_i_h,
+            QuoteNode(:hsgp_x), 0.0, 1.0)),
+        Expr(:call, :~, :s, Expr(:call, :Exponential, 1.0)),
+        Expr(:call, :.~, :y,
+            Expr(:., :Normal, Expr(:tuple, :mu, :s))))
+    @test prog.main.args[1] == Meta.parse(
+        "hsgp_basis(:hsgp_x, x; k = 4, cov = :periodic, period = 2.0)")
 end
 
 @testset "ar AST shape" begin
