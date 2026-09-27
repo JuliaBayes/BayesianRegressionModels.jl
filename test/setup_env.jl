@@ -54,15 +54,15 @@ const PINS = [
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
-    # through. b247aad (2026-09-27, main): seven merges over the bb2a2e0
-    # nb1 stack — term-monotonic (ad82c02), term-hsgp-periodic (c83c14c),
-    # mod-weights (c0d400e), term-gp (45dc05c), closeout-appends (a715d41,
-    # fusion sweep driver + reporter v2), kernel-robust (58460ea,
-    # mixture-simplex XLA §7r reindex pin) and term-splines-stan
-    # (spline sd `:positive` -> `:positive_stan`, Stan lower-bound
-    # kernel without the `+log(2)` half renormalizer; test_spline
-    # re-pin + corpus 24-25 rebless + M1/M2 SB-parity pins + XLA leg).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "b247aade70084c685dd3b265793c74273058c77d"),  # main
+    # through. 6cf678f (2026-09-27, main): the c83c14c0 stack (bb2a2e0 +
+    # term-monotonic + term-hsgp-periodic) plus mod-weights, term-gp,
+    # closeout-appends, kernel-robust, splines-stan (spline sd
+    # :positive_stan), the fam-exp Exponential response slice
+    # (ExponentialFam + corpus 69_exp), and the fam-lognormal LogNormal
+    # response slice (LogNormalFam + (IdentityLink, IdentityLink) triple +
+    # scalar sigma on the scale slot + head `LogNormal.(mu, sigma)` +
+    # corpus 70_lognormal + L1 SB pin).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "6cf678f37acec6cb34fd0abcf7b990e74707dea4"),  # main
 ]
 
 function main()

@@ -286,10 +286,19 @@ end
 
 # A hsgp declaration: `hsgp_basis(:id, axes...; k=k, c=c, iso=iso)` —
 # `k`/`c` scalars for one axis, per-axis tuples otherwise (the thin
-# layer broadcasts scalars). Shape-verified against `Meta.parse` of
-# the surface spelling.
+# layer broadcasts scalars). Periodic:
+# `hsgp_basis(:id, x; k=k, cov=:periodic, period=P)` (single axis; no
+# `c`/`iso` — SB refuses them on the periodic basis). Shape-verified
+# against `Meta.parse` of the surface spelling.
 function _rk_ast_hsgp_basis(term)
     options = term.options
+    if get(options, :cov, :exp_quad) === :periodic
+        return Expr(:call, :hsgp_basis,
+            Expr(:parameters, Expr(:kw, :k, options.k),
+                Expr(:kw, :cov, QuoteNode(:periodic)),
+                Expr(:kw, :period, options.period)),
+            QuoteNode(options.id), term.columns...)
+    end
     kval = options.k isa Tuple ? Expr(:tuple, options.k...) : options.k
     cval = options.c isa Tuple ? Expr(:tuple, options.c...) : options.c
     Expr(:call, :hsgp_basis,
@@ -343,7 +352,7 @@ _rk_ast_response_uses_scale(family::Symbol) =
     family === :beta_binomial_logit ||
     family === :student_t || family === :hurdle_poisson ||
     family === :wald || family === :von_mises ||
-    family === :negative_binomial
+    family === :negative_binomial || family === :lognormal
 
 # The scale-slot body spelling inside a bare response statement. A
 # direct scale (outer name, literal, or the plan-forbidden nothing)
@@ -651,6 +660,13 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
             _rk_ast_dotted(:VonMises, predictor, leaf[:scale]) :
             _rk_ast_dotted(:CircularVonMises, predictor, leaf[:scale],
                 interval[1], interval[2])
+    elseif response.family === :lognormal
+        # Single head (thin-layer decision, pair fam-lognormal): the
+        # plan's `LogNormal(mu, sigma)` maps to
+        # `LogNormal.(mu, sigma)` (Distributions `(mu, sigma)`
+        # order); sigma rides the scalar-only scale slot. No fused
+        # head: one spelling either way.
+        _rk_ast_dotted(:LogNormal, predictor, leaf[:scale])
     elseif response.family === :categorical_logit
         # Reference-coded: K−1 non-reference etas, class 1 the implicit
         # zero reference (class order follows predictor order).
