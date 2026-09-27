@@ -61,6 +61,7 @@ using LogDensityProblems: LogDensityProblems
 using Pkg
 using ReactiveKernels: prepare
 using ReactiveKernelsPPL: build_kernel, coordinate_names
+import ReactiveKernelsPPL # bind the module name for pathof (selective using does not)
 using TOML
 using UUIDs: UUID
 
