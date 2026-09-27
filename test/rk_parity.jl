@@ -43,7 +43,7 @@ using LogDensityProblems
 using LogExpFunctions: logistic, logit
 using ReactiveKernels: prepare
 using ReactiveKernelsPPL: constrain, coordinate_names, logjac
-using SpecialFunctions: logbeta, loggamma
+using SpecialFunctions: besselix, logbeta, loggamma
 
 const BRM = BayesianRegressionModels
 const _PARITY_BACKEND = AutoEnzyme(; mode = Enzyme.Reverse)
@@ -1948,6 +1948,23 @@ function _ref_hsgp_prior(a, sig, rhos, sigh, beta)
         logpdf(LogNormal(0, 1), sigh) + sum(logpdf.(Normal(0, 1), beta))
 end
 
+# Periodic smooth vector: cos/sine columns at harmonics of `2pi/P`
+# (SB `_brm_apply_hsgp_periodic` element order verbatim) + the Stan
+# `brm_hsgp_periodic_sqrt_spd` weights in the never-overflow scaled
+# form `sigma*sqrt(2*besselix(j, a))`, `a = 1/rho^2`.
+function _ref_hsgp_periodic_muv(x, K, period, rho, sigh, beta)
+    n = length(x)
+    w0 = 2pi / period
+    PHI = zeros(n, 2K)
+    for j in 1:K, i in 1:n
+        PHI[i, j] = cos(w0 * j * x[i])
+        PHI[i, K + j] = sin(w0 * j * x[i])
+    end
+    a = 1 / (rho * rho)
+    s = [sigh * sqrt(2 * besselix(j, a)) for j in [1:K; 1:K]]
+    return PHI * (s .* beta)
+end
+
 @testset "rk parity hsgp 1d" begin
     brmi = @brm _parity_cols_hsgp begin
         mu ~ 1 + hsgp(x; k = 4)
@@ -2036,6 +2053,38 @@ end
     nt = constrain(layout, u)
     f = _ref_hsgp_muv([_parity_cols_hsgp.x], [1], [1.5], [nt.rho_hsgp_x],
         nt.sigma_hsgp_x, Vector(nt.beta_raw_hsgp_x); iso = true)
+    ll = sum(logpdf.(Normal.(nt.mu[1] .+ f, nt.sigma), _parity_cols_hsgp.y))
+    pr = _ref_hsgp_prior(nt.mu[1], nt.sigma, [nt.rho_hsgp_x], nt.sigma_hsgp_x,
+        Vector(nt.beta_raw_hsgp_x))
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    jac = u[2] + u[3] + u[4]
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity hsgp periodic" begin
+    brmi = @brm _parity_cols_hsgp begin
+        mu ~ 1 + hsgp(x; k = 4, cov = :periodic, period = 2.0)
+        y ~ Normal(mu, sigma)
+        effect(mu, Intercept) ~ Normal(0, 5)
+        sigma ~ Exponential(1)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 12
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 1, :identity),
+        (:sampled, :sigma, 1, :exp),
+        (:sampled, :rho_hsgp_x, 1, :floored),
+        (:sampled, :sigma_hsgp_x, 1, :exp),
+        (:hsgp, :beta_raw_hsgp_x, 8, :identity),
+    ]
+    u = collect(range(-0.4, 0.4; length = layout.total))
+    nt = constrain(layout, u)
+    f = _ref_hsgp_periodic_muv(_parity_cols_hsgp.x, 4, 2.0, nt.rho_hsgp_x,
+        nt.sigma_hsgp_x, Vector(nt.beta_raw_hsgp_x))
     ll = sum(logpdf.(Normal.(nt.mu[1] .+ f, nt.sigma), _parity_cols_hsgp.y))
     pr = _ref_hsgp_prior(nt.mu[1], nt.sigma, [nt.rho_hsgp_x], nt.sigma_hsgp_x,
         Vector(nt.beta_raw_hsgp_x))
@@ -2830,5 +2879,64 @@ end
     @test logjac(layout, u) ≈ log(s)
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + log(s)
     @test _rk_query(backend, :posterior, u) ≈ -14.883826525901483
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity lognormal sampled sigma" begin
+    ln_cols = (;
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        z=[1.2, 0.8, 1.1, 2.3, 0.7, 1.9],
+    )
+    brmi = @brm ln_cols begin
+        mu ~ 1 + x
+        sigma ~ Exponential(1)
+        z ~ LogNormal(mu, sigma)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 3
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+        (:sampled, :sigma, 1, :exp),
+    ]
+    u = [0.5, -0.25, 0.3]
+    nt = constrain(layout, u)
+    b = Vector(nt.mu)
+    mm = b[1] .+ b[2] .* ln_cols.x
+    ll = sum(logpdf.(LogNormal.(mm, nt.sigma), ln_cols.z))
+    pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2]) +
+        logpdf(Exponential(1), nt.sigma)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ u[3]
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[3]
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity lognormal literal sigma" begin
+    ln_cols = (;
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        z=[1.2, 0.8, 1.1, 2.3, 0.7, 1.9],
+    )
+    brmi = @brm ln_cols begin
+        mu ~ 1 + x
+        z ~ LogNormal(mu, 0.5)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 2
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+    ]
+    u = [0.5, -0.25]
+    nt = constrain(layout, u)
+    b = Vector(nt.mu)
+    mm = b[1] .+ b[2] .* ln_cols.x
+    ll = sum(logpdf.(LogNormal.(mm, 0.5), ln_cols.z))
+    pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2])
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
     _check_parity_gradient(backend, u)
 end
