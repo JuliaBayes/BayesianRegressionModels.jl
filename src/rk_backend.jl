@@ -42,9 +42,9 @@ const _RK_ADMITTED_TRIPLES = Set{Tuple{Symbol,Symbol,Symbol}}([
     (:beta_logit, :logit, :logit),
     # Group D (beta-binomial): BetaBinomial2 over a logit-link mean
     # predictor; trials ride the trials slot (Int column or literal,
-    # Binomial rule) and precision rides the scalar-only scale slot
-    # (sampled / assignment / positive literal — predictor-fed
-    # precision is deferred, the Beta-kappa precedent).
+    # Binomial rule) and precision rides the scale slot (scalar
+    # sampled / assignment / positive literal) or the scale-predictor
+    # slot (a `log(precision)` submodel — the VonMises precedent).
     (:beta_binomial_logit, :logit, :logit),
     # Group B (robust): location-scale Student-t over an identity
     # predictor; nu rides its own plan slot (literal / sampled /
@@ -157,7 +157,7 @@ struct _RKLikelihoodSpec
                    # :bernoulli_probit | :bernoulli_cloglog |
                    # :binomial_probit | :binomial_cloglog | :beta_logit |
                    # group D: :beta_binomial_logit (trials slot +
-                   # scalar-only precision on the scale slot) |
+                   # precision on the scale / scale-predictor slots) |
                    # group B: :student_t | group C: :hurdle_poisson
                    # (p_zero rides the scale / scale-predictor slots) |
                    # :zero_inflated_poisson |
@@ -474,7 +474,8 @@ const _RK_ADMITTED_SPELLINGS =
     "`log(mu) ~ ...` (`lam` a sampled parameter, scalar assignment, " *
     "or positive literal), or group D: `c ~ BetaBinomial2(n, " *
     "mu, phi)` + `logit(mu) ~ ...` (`n` an integer column or literal; " *
-    "`phi` a sampled parameter, scalar assignment, or positive literal), " *
+    "`phi` a `log(phi) ~ ...` predictor, sampled parameter, scalar " *
+    "assignment, or positive literal), " *
     "or group C: `y ~ VonMises(mu, kappa)` / `y ~ CircularVonMises(mu, " *
     "kappa; interval=(lo, hi))` + `mu ~ ...` (`kappa` a `log(kappa) ~ ...` " *
     "predictor, sampled parameter, or positive literal)"
@@ -1078,27 +1079,19 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
             "`logit(mu)` predictor (group D has no " *
             "`BetaBinomial2(n, logistic(..), phi)` spelling)")
         plink = predictor_link[location]
-        # Scalar-only precision (the Beta `_rk_beta_shape_args`
-        # rule): a linear predictor fails closed here with a plain
-        # error (predictor-fed precision is deferred), and the
-        # empty-candidates `_rk_scale_argument` call below admits a
-        # sampled parameter, a scalar assignment, or a positive
-        # literal only — never a data column.
-        precision_arg = args[3]
-        precision_arg isa NamedColumn &&
-            name(precision_arg) in candidates && error(
-                "$prefix: response `$response` `BetaBinomial2` precision " *
-                "cannot be the linear predictor " *
-                "`$(name(precision_arg))`; predictor-fed precision is " *
-                "not admitted — write a sampled parameter, a positive " *
-                "literal, or a scalar assignment")
-        precision, precision_predictor = _rk_scale_argument(precision_arg,
+        # Precision rides the scale slot (scalar sampled parameter /
+        # assignment / positive literal) or the scale-predictor slot (a
+        # `log(precision)` submodel — the VonMises precedent).
+        precision, precision_predictor = _rk_scale_argument(args[3],
             parameters, assignments, consts, aliases, response,
-            "precision", Symbol[])
-        precision_predictor === nothing || error(
-            "$prefix: response `$response` `BetaBinomial2` precision " *
-            "cannot be a linear predictor (predictor-fed precision is " *
-            "not admitted)")
+            "precision", candidates)
+        # Log-only precision predictor (the VonMises precedent): a
+        # precision is positive, so only the `log` link inverts.
+        precision_predictor !== nothing &&
+            predictor_link[precision_predictor] !== :log && error(
+                "$prefix: response `$response` `BetaBinomial2` precision " *
+                "predictor `$(precision_predictor)` must be log-link; " *
+                "write a `log(precision) ~ ...` submodel")
         triple = (:beta_binomial_logit, plink, plink)
         triple in _RK_ADMITTED_TRIPLES || error(
             "$prefix: response `$response` pairs `BetaBinomial2` with " *
@@ -1106,7 +1099,7 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
             "`BetaBinomial2(n, mu, phi)` with a `logit(mu)` predictor " *
             "(group D admits a logit mu link only)")
         return (; family=:beta_binomial_logit, link=plink, scale=precision,
-            scale_predictor=nothing, trials, location)
+            scale_predictor=precision_predictor, trials, location)
     elseif head === NegativeBinomial2
         length(args) == 2 || error(
             "$prefix: response `$response` `NegativeBinomial2` needs " *
