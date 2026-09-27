@@ -10,11 +10,12 @@
 # `dev`/`devibe` branch rather than `main`; the commit only has to be pushed to
 # GitHub, which every pin below is.
 #
-# ReactiveKernels contributes three developed paths from ONE pinned checkout
-# (the monorepo root plus the nested `ReactiveKernelsDistributionKernels` and
-# `ReactiveKernelsPPL` packages, which have no standalone repos).
+# ReactiveKernels contributes four developed paths from ONE pinned checkout
+# (the monorepo root plus the nested `ReactiveKernelsDistributionKernels`,
+# `ReactiveKernelsPPL`, and `ReactiveKernelsPPLExamples` packages, which have
+# no standalone repos).
 #
-# All ten paths enter ONE `Pkg.develop` call on EVERY Julia version we run.
+# All eleven paths enter ONE `Pkg.develop` call on EVERY Julia version we run.
 # On 1.11+ the `[sources]` blocks in `test/Project.toml` (which mirror these
 # revisions) would also resolve them; on **1.10, which is what this suite runs
 # on, `[sources]` is IGNORED**, so a bare `Pkg.resolve()` fails with
@@ -82,6 +83,10 @@ function main()
         joinpath(rk_root, "packages", "ReactiveKernelsDistributionKernels")
     paths["ReactiveKernelsPPL"] =
         joinpath(rk_root, "packages", "ReactiveKernelsPPL")
+    # The v1 SB-parity sweep (test/sb_sweep_*.jl) consumes the inventory
+    # models' exact data bindings from here — no transcription.
+    paths["ReactiveKernelsPPLExamples"] =
+        joinpath(rk_root, "packages", "ReactiveKernelsPPLExamples")
 
     Pkg.activate(TESTENV)
     Pkg.develop(PackageSpec[
