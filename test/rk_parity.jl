@@ -42,7 +42,8 @@ using Enzyme
 using LogDensityProblems
 using LogExpFunctions: logistic, logit
 using ReactiveKernels: prepare
-using ReactiveKernelsPPL: constrain, coordinate_names, logjac
+using ReactiveKernelsPPL: constrain, coordinate_names, logjac, prepare_query
+using Random: Xoshiro, randn
 using SpecialFunctions: logbeta, loggamma
 
 const BRM = BayesianRegressionModels
@@ -84,6 +85,21 @@ function _check_parity_gradient(backend::BRM.RKBRMI, u)
     @test grad ≈
         _findiff_grad(w -> _rk_query(backend, :posterior, w), u) rtol = 1e-5 atol = 1e-7
     return value
+end
+
+# Bound-plan value query for models whose kernel inputs exceed
+# `plan.columns` (spline bases are host-materialized at `bind_data`,
+# so the plain `_rk_query` cannot bind them): the same lowering the
+# sampler shim queries through, then the thin-layer query preset
+# (`:sampler` is the posterior, `:likelihood`/`:prior` the legs).
+function _rk_translated(backend::BRM.RKBRMI)
+    ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
+    return ext._rk_translated_plan(backend.plan)
+end
+
+function _rk_query_translated(backend::BRM.RKBRMI, translated, want::Symbol, u)
+    kern = prepare_query(backend.model, translated, want)
+    return Base.invokelatest(kern, Vector{Float64}(u))
 end
 
 _group_index(gcol) = [findfirst(==(v), sort!(unique(gcol))) for v in gcol]
@@ -2045,6 +2061,131 @@ end
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
+end
+
+# Spline parity cases (pair term-splines-stan, RK b247aad): the
+# thin-layer spline sd follows the Stan-kernel convention
+# (`:positive_stan`: plain Normal(0,1) lpdf + bare-u Jacobian, NO
+# `+log(2)` half renormalizer). The committed oracles below use that
+# convention, so they fail at the pre-fix `:positive` value (exactly
+# `n_sd * log(2)` above); the SB anchors pin the cross-backend point.
+@testset "rk parity spline s default" begin
+    # Pair-agreed Xoshiro(7207) n=80 probe, default k=10 basis.
+    rng = Xoshiro(7207)
+    x = 5 .* randn(rng, 80)
+    y = sin.(x) .+ 0.3 .* randn(rng, 80)
+    df = (; x, y)
+    brmi = @brm df begin
+        mu ~ 1 + s(x)
+        y ~ Normal(mu, sigma)
+        effect(mu, Intercept) ~ Normal(0, 5)
+        sigma ~ Exponential(1)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 13
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 1, :identity),
+        (:sampled, :sigma, 1, :exp),
+        (:spline, :b_s_x_fixed, 2, :identity),
+        (:spline, :b_s_x_raw, 8, :identity),
+        (:spline, :sd_s_x, 1, :exp),
+    ]
+    # Probe in layout order (pinned by the signature above):
+    # [mu.Intercept, log(sigma), b_fixed.1..2, b_raw.1..8, log(sd)].
+    u = [-0.3, -0.25, -0.2, -0.15, -0.1, -0.05, 0.0, 0.05, 0.1,
+        0.15, 0.2, 0.25, 0.3]
+    # Values route through the bound translated plan (see the helper):
+    # the kernel takes host-materialized basis columns.
+    translated = _rk_translated(backend)
+    nt = constrain(layout, u)
+    sig = nt.sigma
+    sd = only(nt.sd_s_x)
+    Xnull, Zpen = BRM._brm_apply_spline(BRM._brm_fit_spline(x; k=10), x)
+    mu_hat = nt.mu[1] .+ Xnull * nt.b_s_x_fixed .+ Zpen * (sd .* nt.b_s_x_raw)
+    ll = sum(logpdf.(Normal.(mu_hat, sig), y))
+    pr = logpdf(Normal(0, 5), nt.mu[1]) + logpdf(Normal(), sd) +
+        sum(logpdf.(Normal(), nt.b_s_x_raw)) + logpdf(Exponential(1), sig)
+    jac = log(sd) + log(sig)
+    @test _rk_query_translated(backend, translated, :likelihood, u) ≈ ll
+    @test _rk_query_translated(backend, translated, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query_translated(backend, translated, :sampler, u) ≈ ll + pr + jac
+    # SB anchor: BridgeStan full posterior (`propto=false`, Jacobian) at
+    # this point is `-2037.0040124507998` (BRM SB emission, StanBlocks
+    # `24578c3`, term-splines-stan SB brief).
+    @test _rk_query_translated(backend, translated, :sampler, u) ≈ -2037.0040124507998
+    problem = BRM.rk_logdensity_problem(backend;
+        ad_backend = _PARITY_BACKEND, u0 = u)
+    value, grad = LogDensityProblems.logdensity_and_gradient(problem, u)
+    @test value ≈ _rk_query_translated(backend, translated, :sampler, u)
+    @test all(isfinite, grad)
+    @test grad ≈
+        _findiff_grad(w -> LogDensityProblems.logdensity(problem, w), u) rtol = 1e-5 atol = 1e-7
+end
+
+@testset "rk parity spline t2 k33" begin
+    # Pair-agreed Xoshiro(7208) n=80 probe, k=(3,3) tensor basis.
+    rng = Xoshiro(7208)
+    x = 4 .* randn(rng, 80)
+    z = 3 .* randn(rng, 80) .+ 1.0
+    y = 0.5 .* x .- 0.25 .* z .+ 0.3 .* randn(rng, 80)
+    df = (; x, z, y)
+    brmi = @brm df begin
+        mu ~ 1 + t2(x, z; k=(3, 3))
+        y ~ Normal(mu, sigma)
+        effect(mu, Intercept) ~ Normal(0, 5)
+        sigma ~ Exponential(1)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 13
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 1, :identity),
+        (:sampled, :sigma, 1, :exp),
+        (:spline, :b_t2_x_z_fixed, 3, :identity),
+        (:spline, :b_t2_x_z_rr_raw, 1, :identity),
+        (:spline, :b_t2_x_z_rn_raw, 2, :identity),
+        (:spline, :b_t2_x_z_nr_raw, 2, :identity),
+        (:spline, :sd_t2_x_z, 3, :exp),
+    ]
+    # Probe in layout order (pinned by the signature above).
+    u = [-0.3, -0.25, -0.2, -0.15, -0.1, -0.05, 0.0, 0.05, 0.1,
+        0.15, 0.2, 0.25, 0.3]
+    # Values route through the bound translated plan (see the helper):
+    # the kernel takes host-materialized basis columns.
+    translated = _rk_translated(backend)
+    nt = constrain(layout, u)
+    sig = nt.sigma
+    sd = nt.sd_t2_x_z
+    Xfixed, Zrr, Zrn, Znr = BRM._brm_apply_t2(
+        BRM._brm_fit_t2(x, z; k=(3, 3)), x, z)
+    mu_hat = nt.mu[1] .+ Xfixed * nt.b_t2_x_z_fixed .+
+        Zrr * (sd[1] .* nt.b_t2_x_z_rr_raw) .+
+        Zrn * (sd[2] .* nt.b_t2_x_z_rn_raw) .+
+        Znr * (sd[3] .* nt.b_t2_x_z_nr_raw)
+    ll = sum(logpdf.(Normal.(mu_hat, sig), y))
+    pr = logpdf(Normal(0, 5), nt.mu[1]) + sum(logpdf.(Normal(), sd)) +
+        sum(logpdf.(Normal(), nt.b_t2_x_z_rr_raw)) +
+        sum(logpdf.(Normal(), nt.b_t2_x_z_rn_raw)) +
+        sum(logpdf.(Normal(), nt.b_t2_x_z_nr_raw)) +
+        logpdf(Exponential(1), sig)
+    jac = sum(log.(sd)) + log(sig)
+    @test _rk_query_translated(backend, translated, :likelihood, u) ≈ ll
+    @test _rk_query_translated(backend, translated, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query_translated(backend, translated, :sampler, u) ≈ ll + pr + jac
+    # SB anchor: BridgeStan full posterior (`propto=false`, Jacobian) at
+    # this point is `-359.94318407167754` (BRM SB emission, StanBlocks
+    # `24578c3`, term-splines-stan SB brief).
+    @test _rk_query_translated(backend, translated, :sampler, u) ≈ -359.94318407167754
+    problem = BRM.rk_logdensity_problem(backend;
+        ad_backend = _PARITY_BACKEND, u0 = u)
+    value, grad = LogDensityProblems.logdensity_and_gradient(problem, u)
+    @test value ≈ _rk_query_translated(backend, translated, :sampler, u)
+    @test all(isfinite, grad)
+    @test grad ≈
+        _findiff_grad(w -> LogDensityProblems.logdensity(problem, w), u) rtol = 1e-5 atol = 1e-7
 end
 
 # Mixture parity cases (pair fam-mixture, RK 49ebaf1): the committed
