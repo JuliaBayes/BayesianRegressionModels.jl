@@ -1416,6 +1416,46 @@ end
     _check_parity_gradient(backend, u)
 end
 
+@testset "rk parity wald modeled lambda" begin
+    # Pair nuisance-lam I1 (spec: term-nuisance verdict brief
+    # 1mcop44): `log(mu) ~ 1+x` + `log(lam) ~ 1+z` over the shared
+    # N=6 probe columns. The posterior pin is the SB full-posterior
+    # value at u (propto=false, jacobian=true), re-verified fresh on
+    # this lane's SB leg.
+    w_cols = (;
+        x=[0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
+        z=[1.0, 0.5, -0.5, 1.5, 0.0, -1.0],
+        y=[1.2, 0.8, 2.1, 1.5, 0.6, 1.9],
+    )
+    brmi = @brm w_cols begin
+        log(mu) ~ 1 + x
+        log(lam) ~ 1 + z
+        y ~ InverseGaussian(mu, lam)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 4
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+        (:coefficient, :lam_coef, 2, :identity),
+    ]
+    u = [0.2, -0.1, 0.5, 0.1]
+    nt = constrain(layout, u)
+    b_mu = Vector(nt.mu)
+    b_lam = Vector(nt.lam)
+    mm = exp.(b_mu[1] .+ b_mu[2] .* w_cols.x)
+    ll_lam = exp.(b_lam[1] .+ b_lam[2] .* w_cols.z)
+    ll = sum(logpdf.(InverseGaussian.(mm, ll_lam), w_cols.y))
+    pr = sum(logpdf(Normal(0, 1), b) for b in
+        (b_mu[1], b_mu[2], b_lam[1], b_lam[2]))
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    @test _rk_query(backend, :posterior, u) ≈ -10.804159781573498
+    _check_parity_gradient(backend, u)
+end
+
 @testset "rk parity beta-binomial sampled precision" begin
     bb_cols = (;
         x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
