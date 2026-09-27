@@ -2479,6 +2479,20 @@ end
     end
     plan = BRM._brm_rk_plan(brmi)
     @test [t.kind for t in only(plan.predictors).terms] == [:hsgp]
+    # Periodic: single axis, scalar k, no c/iso (SB refusal set).
+    brmi = @brm df begin
+        mu ~ 1 + hsgp(x; k=4, cov=:periodic, period=2.0)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    term = only(t for t in only(plan.predictors).terms if t.kind === :hsgp)
+    @test term.columns == [:x]
+    @test (term.options.id, term.options.k, term.options.cov,
+        term.options.period) == (:hsgp_x, 4, :periodic, 2.0)
+    @test !hasproperty(term.options, :c)
+    @test !hasproperty(term.options, :iso)
+    @test [p.name for p in plan.parameters] == [:s]
 end
 
 @testset "fail closed: hsgp sequenced spellings" begin
@@ -2503,9 +2517,25 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    # Periodic stays closed (exp_quad surface only).
-    @test_throws "cov=:periodic" BRM._brm_rk_plan(@brm df begin
-        mu ~ 1 + hsgp(x; cov=:periodic, period=1.0)
+    # Periodic admits the SB spelling only: c/domain/orthogonal_to/by
+    # are refused with RK attribution (mirrors `_sb_hsgp_periodic_term!`).
+    @test_throws "does not accept `c=`" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + hsgp(x; k=4, c=1.5, cov=:periodic, period=1.0)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test_throws "does not accept `domain=`" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + hsgp(x; k=4, domain=(0.0, 2.0), cov=:periodic, period=1.0)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test_throws "does not accept `orthogonal_to=`" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + hsgp(x; k=4, orthogonal_to=:linear, cov=:periodic, period=1.0)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end)
+    @test_throws "does not accept `by=`" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + hsgp(x; k=4, by=g, cov=:periodic, period=1.0)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)

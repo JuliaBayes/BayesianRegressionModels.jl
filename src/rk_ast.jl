@@ -286,10 +286,19 @@ end
 
 # A hsgp declaration: `hsgp_basis(:id, axes...; k=k, c=c, iso=iso)` —
 # `k`/`c` scalars for one axis, per-axis tuples otherwise (the thin
-# layer broadcasts scalars). Shape-verified against `Meta.parse` of
-# the surface spelling.
+# layer broadcasts scalars). Periodic:
+# `hsgp_basis(:id, x; k=k, cov=:periodic, period=P)` (single axis; no
+# `c`/`iso` — SB refuses them on the periodic basis). Shape-verified
+# against `Meta.parse` of the surface spelling.
 function _rk_ast_hsgp_basis(term)
     options = term.options
+    if get(options, :cov, :exp_quad) === :periodic
+        return Expr(:call, :hsgp_basis,
+            Expr(:parameters, Expr(:kw, :k, options.k),
+                Expr(:kw, :cov, QuoteNode(:periodic)),
+                Expr(:kw, :period, options.period)),
+            QuoteNode(options.id), term.columns...)
+    end
     kval = options.k isa Tuple ? Expr(:tuple, options.k...) : options.k
     cval = options.c isa Tuple ? Expr(:tuple, options.c...) : options.c
     Expr(:call, :hsgp_basis,
