@@ -385,9 +385,18 @@ end
 function _run_case(spec_path::AbstractString, outdir::AbstractString;
         no_sb::Bool, print_coords::Bool, no_token::Bool=false)
     spec = _read_spec(spec_path)
-    case_id = spec.id
     probe = _load_probe(spec.probe)
-    brmi = Base.invokelatest(probe.builder, probe.data)
+    # World age: the probe include() defined builder methods newer than this
+    # running frame. Everything downstream (kernels, reporter, oracle) runs
+    # at latest world so generated-model calls resolve.
+    return Base.invokelatest(_run_case_loaded, spec, probe, outdir;
+        no_sb, print_coords, no_token)
+end
+
+function _run_case_loaded(spec, probe, outdir::AbstractString;
+        no_sb::Bool, print_coords::Bool, no_token::Bool)
+    case_id = spec.id
+    brmi = probe.builder(probe.data)
     brmi isa BRM.BRMI || error(
         "worker: case `$case_id`: builder(data) did not return a BRMI")
     artifact = BRM.emit_rk_artifact(brmi;
