@@ -758,32 +758,6 @@ function WarmupHMC.restore_reparam_controls!(t::BRMS2ZMapReparametrization, cont
     t
 end
 
-# Evidence for Sean's rule: a weighted reservoir (A-Res, log keys) of source
-# positions. With `:linear_pool` evidence and a capacity at least the pool size,
-# every pool state is kept; with streamed leaves it is a weight-proportional
-# sample of bounded size. Plain arrays, so it serializes with checkpoints.
-mutable struct BRMS2ZFisherEvidence
-    capacity::Int
-    keys::Vector{Float64}
-    positions::Vector{Vector{Float64}}
-    rng::BRM.Random.Xoshiro
-end
-
-function _s2z_observe!(acc::BRMS2ZFisherEvidence, ir, position, gradient, weight)
-    weight > 0 || return nothing
-    key = log(rand(acc.rng)) / weight
-    if length(acc.keys) < acc.capacity
-        push!(acc.keys, key)
-        push!(acc.positions, collect(Float64, position))
-    else
-        i = argmin(acc.keys)
-        key > acc.keys[i] || return nothing
-        acc.keys[i] = key
-        acc.positions[i] = collect(Float64, position)
-    end
-    nothing
-end
-
 # Base-name index of BridgeStan's constrained output, e.g. "mu.3" -> :mu.
 function _s2z_constrained_index(model)
     names = BRM.StanBlocks.BridgeStan.param_names(model; include_tp=true)
@@ -794,15 +768,15 @@ function _s2z_constrained_index(model)
     index
 end
 
-function _s2z_select!(ir::BRMS2ZMapReparametrization, acc::BRMS2ZFisherEvidence,
-                      plans, model, data, index)
-    isempty(acc.positions) && return false
+function _s2z_select!(ir::BRMS2ZMapReparametrization, positions, plans, model, data, index)
+    size(positions, 2) > 0 || return false
     draws = [Matrix{Float64}[] for _ in plans]
-    for x in acc.positions
-        _, y = ir(x)
+    for x in eachcol(positions)
+        _, y = ir(collect(Float64, x))   # BridgeStan takes a plain Vector{Float64}
         values = try
             BRM.StanBlocks.BridgeStan.param_constrain(model, y; include_tp=true)
-        catch
+        catch err
+            err isa MethodError && rethrow()
             continue
         end
         lookup(name) = haskey(index, name) ? (length(index[name]) == 1 ?
@@ -833,8 +807,7 @@ function _s2z_select!(ir::BRMS2ZMapReparametrization, acc::BRMS2ZFisherEvidence,
     changed
 end
 
-function _adaptive_s2z_fisher_problem(model, problem, ad_backend, names;
-                                      centeredness, capacity)
+function _adaptive_s2z_fisher_problem(model, problem, ad_backend, names; centeredness)
     all(b -> b.coordinates === :contrasts, BRM.s2z_effect_blocks(model)) ||
         throw(ArgumentError("S2Z Fisher selection applies Sean's map to contrast " *
             "coordinates; compile without `s2z_coordinates=:groups`"))
@@ -860,11 +833,7 @@ function _adaptive_s2z_fisher_problem(model, problem, ad_backend, names;
     index = _s2z_constrained_index(stan)
     data = model.data
     plan = WarmupHMC.WindowSelectionPlan(
-        ir_ -> BRMS2ZFisherEvidence(capacity, Float64[], Vector{Float64}[],
-                                    BRM.Random.Xoshiro(20260926)),
-        _s2z_observe!,
-        (ir_, acc) -> _s2z_select!(ir_, acc, plans, stan, data, index),
-    )
+        (ir_, positions, _) -> _s2z_select!(ir_, positions, plans, stan, data, index))
     WarmupHMC.ReparametrizedProblem(ir, problem, ad_backend; scoring_plan=plan)
 end
 
@@ -925,9 +894,10 @@ share one wrapper with ordinary, HSGP, or cdar cells.
 `s2z_rule=:fisher` instead applies Sean's rule (brms PR #1919) at every
 restarting warm-up window. The sampler uses Sean's projected per-group partial
 map over the contrasts, with one weight per group and coefficient. At each
-window boundary, every evidence draw (the replayed pool by default; weighted
-leaves with `nonlinear_evidence=:nuts_weighted` or `:all_good_leaves`, sampled
-into a reservoir of `s2z_evidence` draws) is mapped to the compiled frame. There
+window boundary, every evidence draw WarmupHMC hands over (the retained pool by
+default; with `nonlinear_evidence=:nuts_weighted` or `:all_good_leaves`, an
+equally sized weight-proportional sample of the window's leaves) is mapped to
+the compiled frame. There
 the per-row expected information is evaluated at the draw's fitted values
 through BridgeStan, accumulated per group, and turned into Sean's per-draw
 weights, rescaled at that draw's `tau`. The new weights are the per-cell median.
@@ -960,8 +930,7 @@ with covariance `A(c) * A(c)'` whenever the block innovation is standard normal;
 the wrapped density and Jacobian still represent the original BRM prior exactly.
 """
 function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=nothing,
-                                       centeredness=nothing, s2z_rule=:cells,
-                                       s2z_evidence=1000)
+                                       centeredness=nothing, s2z_rule=:cells)
     names = isnothing(unc_names) ? _problem_unc_names(problem) : unc_names
     s2z_rule in (:cells, :fisher) ||
         throw(ArgumentError("s2z_rule must be :cells or :fisher"))
@@ -974,8 +943,7 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
             isempty(BRM._adaptive_cdar_centering_blocks(model, names)) ||
             throw(ArgumentError("s2z_rule=:fisher cannot yet be combined with " *
                 "totals, ordinary, HSGP or cdar blocks"))
-        return _adaptive_s2z_fisher_problem(model, problem, ad_backend, names;
-            centeredness, capacity=s2z_evidence)
+        return _adaptive_s2z_fisher_problem(model, problem, ad_backend, names; centeredness)
     end
     blocks = BRM.adaptive_centering_blocks(model, names)
     hsgp_blocks = BRM._adaptive_hsgp_centering_blocks(model, names)

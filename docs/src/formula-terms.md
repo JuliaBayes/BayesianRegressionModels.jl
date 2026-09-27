@@ -544,8 +544,9 @@ weights, rescaled at that draw's `tau`, and the new weight of each cell is the
 median across draws.
 
 The evidence is the retained pool by default. With
-`nonlinear_evidence=:nuts_weighted` or `:all_good_leaves`, weighted NUTS leaves
-are sampled into a reservoir of `s2z_evidence` draws (default 1000). No Pathfinder
+`nonlinear_evidence=:nuts_weighted` or `:all_good_leaves`, WarmupHMC hands over
+an equally sized (`recording_target`) weight-proportional sample of the window's
+NUTS leaves. No Pathfinder
 precursor or importance sampling is involved. The compiled `s2z_rho` is the
 target frame and the starting point, and `centeredness` (a scalar, or one `J × K`
 matrix per block) overrides the start. The rule currently supports Gaussian

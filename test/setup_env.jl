@@ -52,11 +52,11 @@ const PINS = [
     ("TreeArrays",        "https://github.com/nsiccha/TreeArrays.jl.git",        "c317cc003fc41c2d933c27dc80799141eebd434e"),  # main
     ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "24578c34eb90928791319ef9ef2b49a28e0d4a51"),  # devibe (declared-unbound ragged/censored draw shape, twins and segments; BRM snag ragged-omitted-r-198ea038; contains 74ed796d and its dependency floors)
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
-    # 71f01e4 (2026-09-26, claude/window-selector over the dev tip 4aab7e7):
-    # WindowSelectionPlan and the controls interface for custom reparametrizers,
+    # 0194dce (2026-09-27, dev): WindowSelectionPlan (WarmupHMC-held evidence)
+    # and the controls interface for custom reparametrizers,
     # which the per-window S2Z Fisher rule needs. Contains 7aed40b (active-state
     # preservation, nonfinite-transport rejection). Matches test/Project.toml.
-    ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "71f01e4aed700ac0f74dc9b07c865f119bab7fc5"),  # claude/window-selector (contains exact sampling-counter floor 913da79)
+    ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "0194dce08e986ff17fd5a788bb315c6431b7858e"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
     # through. d625939 (2026-09-26, main): the fam-zip ZIP response slice
     # (ZeroInflatedPoissonFam + (:zero_inflated_poisson,:log,:log) triple +
