@@ -3020,10 +3020,23 @@ end
         log(mu) ~ 1 + x
         z ~ Exponential(mu, 2.0)
     end)
-    # Response values must be strictly positive (gamma precedent).
+    # Response values must be non-negative (thin-layer mirror: y = 0
+    # is valid there, so a zero row plans here).
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         log(mu) ~ 1 + x
         y ~ Exponential(mu)
+    end)
+    dfz = merge(df, (; z=[0.0, 0.2, 0.3, 0.4, 0.5, 0.6]))
+    likelihood = only(BRM._brm_rk_plan(@brm dfz begin
+        log(mu) ~ 1 + x
+        z ~ Exponential(mu)
+    end).responses)
+    @test likelihood.family === :exponential_log
+    # Bool responses are not real-valued (thin-layer bind rule).
+    dfb = merge(df, (; z=[true, false, true, false, true, false]))
+    @test_throws ErrorException BRM._brm_rk_plan(@brm dfb begin
+        log(mu) ~ 1 + x
+        z ~ Exponential(mu)
     end)
     # No weights or evidence on the group-C triple (no driving case).
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin

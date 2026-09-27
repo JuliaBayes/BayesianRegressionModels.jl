@@ -5675,7 +5675,7 @@ function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
     elseif family === :hurdle_poisson
         (eltype(values) <: Integer && all(>=(0), values)) || error(
             "$prefix: response `$response` must hold non-negative integers")
-    elseif family === :wald || family === :exponential_log
+    elseif family === :wald
         # Mirrors the thin layer: strictly positive (y = 0 fails
         # validation there, so it fails here with BRM-side attribution).
         (eltype(values) <: Real && all(>(0), values)) || error(
@@ -5697,6 +5697,15 @@ function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
         # validation there, so it fails here with BRM-side attribution).
         (eltype(values) <: Real && all(>(0), values)) || error(
             "$prefix: response `$response` must hold strictly positive values")
+    elseif family === :exponential_log
+        # Mirrors the thin layer: non-negative reals, Bool excluded
+        # (y = 0 is valid there — the density is finite — so it is
+        # valid here; only negatives and Bool fail, with BRM-side
+        # attribution).
+        (eltype(values) <: Real && eltype(values) !== Bool) || error(
+            "$prefix: response `$response` must be real-valued")
+        all(>=(0), values) || error(
+            "$prefix: response `$response` must hold non-negative values")
     elseif family === :categorical_logit || family === :ordinal ||
             family === :categorical
         # Recoded 1..K by construction (`_rk_leveled_levels`); assert the
