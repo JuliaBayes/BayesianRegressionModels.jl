@@ -54,13 +54,13 @@ const PINS = [
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
-    # through. c83c14c0 (2026-09-27, main): the bb2a2e0 stack (38973ca0
-    # multimembership, prior-vocab generator+contract+layout, fam-nb1
-    # slice) plus the term-monotonic merge (ad82c02) and the
-    # term-hsgp-periodic slice (thin-layer cov=:periodic as an SB
-    # _sb_hsgp_periodic mirror + corpus 68 + committed XLA testset,
-    # ec82973 reviewed, user GO 03cl1rn).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "c83c14c0f8474b157eab36a75c256096aaeec7e5"),  # main
+    # through. 3c419bde (2026-09-27, main): the c83c14c0 stack plus the
+    # closeout-appends, fam-exp, splines-stan, kernel-robust, and
+    # fam-lognormal merges, the bernoulli-int plate fix (3cfe180b),
+    # and the nuisance-kappa slice (log-link Beta kappa scale
+    # predictor + test_betakappa trio + corpus 70_vscale_beta,
+    # peer verdict 22is3x).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "3c419bde38857b423f2fae76aa4c80ecbeb875a5"),  # main
 ]
 
 function main()
