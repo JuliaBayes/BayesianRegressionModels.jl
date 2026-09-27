@@ -665,6 +665,209 @@ function _adaptive_scalar_centering_reparametrizer(model,names)
     state,WarmupHMC.IndexedReparametrization(pairs)
 end
 
+# Sean's projected partial map over S2Z contrast coordinates (brms PR #1919),
+# as a coupled block reparametrization: every group of a coefficient has its
+# own weight, all J weights act on the J-1 contrasts together, so it cannot be
+# written as per-coordinate pairs. The compiled model is any S2Z frame
+# (`target`, its `s2z_rho`); the sampler works under the adapted `source`
+# weights. Source contrasts map to physical deviations with the source weights
+# and back to target contrasts with the target weights; the (J-1)*log(tau)
+# terms of the two restricted Jacobians cancel.
+struct BRMS2ZMapBlock
+    contrasts::Matrix{Int}
+    scales::Vector{Int}
+end
+
+struct BRMS2ZMapReparametrization <: WarmupHMC.AbstractReparametrization
+    blocks::Vector{BRMS2ZMapBlock}
+    source::Vector{Matrix{Float64}}
+    target::Vector{Matrix{Float64}}
+    direction::Int
+end
+
+# One coefficient's contrasts from the `from` frame to the `to` frame, and the
+# log-Jacobian. Same math as `_s2z_partial_forward` / `_s2z_partial_inverse` /
+# `_s2z_partial_logjac`, written as scalar loops over the weight matrices: this
+# runs under Enzyme on every gradient, and views of the (constant) weights
+# stored into active temporaries trip its activity analysis.
+function _s2z_map_column(x, contrasts::Matrix{Int}, k::Int, tau,
+                         from::Matrix{Float64}, to::Matrix{Float64})
+    J = size(from, 1)
+    T = promote_type(eltype(x), typeof(tau))
+    v = Vector{T}(undef, J - 1)
+    for r in 1:J-1
+        v[r] = x[contrasts[r, k]]
+    end
+    u = BRM._s2z_helmert_mul(v)
+    # Physical deviations over tau: w .- mean(w), w = u ./ d_from.
+    w = Vector{T}(undef, J)
+    sum_w = zero(T); log_from = zero(T); sum_from = zero(T)
+    for j in 1:J
+        d = 1 - from[j, k] + from[j, k] * tau
+        w[j] = u[j] / d
+        sum_w += w[j]; log_from += log(d); sum_from += d
+    end
+    mean_w = sum_w / J
+    # Target contrasts: d_to .* (z .- dot(d_to, z) / sum(d_to)).
+    d_to = Vector{T}(undef, J)
+    weighted = zero(T); log_to = zero(T); sum_to = zero(T)
+    for j in 1:J
+        d_to[j] = 1 - to[j, k] + to[j, k] * tau
+        weighted += d_to[j] * (w[j] - mean_w)
+        log_to += log(d_to[j]); sum_to += d_to[j]
+    end
+    shift = weighted / sum_to
+    u_to = Vector{T}(undef, J)
+    for j in 1:J
+        u_to[j] = d_to[j] * (w[j] - mean_w - shift)
+    end
+    ljac = (log(sum_from / J) - log_from) - (log(sum_to / J) - log_to)
+    BRM._s2z_helmert_transpose_mul(u_to), ljac
+end
+
+function WarmupHMC.with_logabsdet_jacobian!(y::AbstractVector,
+        t::BRMS2ZMapReparametrization, x::AbstractVector)
+    ljac = zero(eltype(x))
+    for (b, block) in enumerate(t.blocks)
+        from, to = t.direction > 0 ? (t.source[b], t.target[b]) : (t.target[b], t.source[b])
+        for k in axes(block.contrasts, 2)
+            tau = exp(x[block.scales[k]])
+            z, l = _s2z_map_column(x, block.contrasts, k, tau, from, to)
+            for r in eachindex(z)
+                y[block.contrasts[r, k]] = z[r]
+            end
+            ljac += l
+        end
+    end
+    ljac, y
+end
+
+WarmupHMC.InverseFunctions.inverse(t::BRMS2ZMapReparametrization) =
+    BRMS2ZMapReparametrization(t.blocks, t.source, t.target, -t.direction)
+WarmupHMC.reparam_controls(t::BRMS2ZMapReparametrization) = [copy(m) for m in t.source]
+WarmupHMC.snapshot_reparametrization(t::BRMS2ZMapReparametrization) =
+    BRMS2ZMapReparametrization(t.blocks, [copy(m) for m in t.source], t.target, t.direction)
+function WarmupHMC.restore_reparam_controls!(t::BRMS2ZMapReparametrization, controls)
+    controls isa AbstractVector && length(controls) == length(t.source) &&
+        all(i -> controls[i] isa AbstractMatrix && size(controls[i]) == size(t.source[i]),
+            eachindex(t.source)) || throw(ArgumentError(
+        "S2Z centering controls must be one J-by-K weight matrix per S2Z block"))
+    all(c -> all(w -> isfinite(w) && 0 <= w <= 1, c), controls) ||
+        throw(ArgumentError("S2Z centering weights must lie in [0, 1]"))
+    foreach((m, c) -> m .= c, t.source, controls)
+    t
+end
+
+# Evidence for Sean's rule: a weighted reservoir (A-Res, log keys) of source
+# positions. With `:linear_pool` evidence and a capacity at least the pool size,
+# every pool state is kept; with streamed leaves it is a weight-proportional
+# sample of bounded size. Plain arrays, so it serializes with checkpoints.
+mutable struct BRMS2ZFisherEvidence
+    capacity::Int
+    keys::Vector{Float64}
+    positions::Vector{Vector{Float64}}
+    rng::BRM.Random.Xoshiro
+end
+
+function _s2z_observe!(acc::BRMS2ZFisherEvidence, ir, position, gradient, weight)
+    weight > 0 || return nothing
+    key = log(rand(acc.rng)) / weight
+    if length(acc.keys) < acc.capacity
+        push!(acc.keys, key)
+        push!(acc.positions, collect(Float64, position))
+    else
+        i = argmin(acc.keys)
+        key > acc.keys[i] || return nothing
+        acc.keys[i] = key
+        acc.positions[i] = collect(Float64, position)
+    end
+    nothing
+end
+
+# Base-name index of BridgeStan's constrained output, e.g. "mu.3" -> :mu.
+function _s2z_constrained_index(model)
+    names = BRM.StanBlocks.BridgeStan.param_names(model; include_tp=true)
+    index = Dict{Symbol,Vector{Int}}()
+    for (i, n) in enumerate(names)
+        push!(get!(index, Symbol(first(split(n, '.'))), Int[]), i)
+    end
+    index
+end
+
+function _s2z_select!(ir::BRMS2ZMapReparametrization, acc::BRMS2ZFisherEvidence,
+                      plans, model, data, index)
+    isempty(acc.positions) && return false
+    draws = [Matrix{Float64}[] for _ in plans]
+    for x in acc.positions
+        _, y = ir(x)
+        values = try
+            BRM.StanBlocks.BridgeStan.param_constrain(model, y; include_tp=true)
+        catch
+            continue
+        end
+        lookup(name) = haskey(index, name) ? (length(index[name]) == 1 ?
+            values[only(index[name])] : values[index[name]]) :
+            haskey(data, name) ? data[name] :
+            throw(ArgumentError("S2Z Fisher selection: no value named `$name`"))
+        for (b, plan) in enumerate(plans)
+            tau = exp.(y[ir.blocks[b].scales])
+            rho = try
+                BRM._s2z_fisher_draw(plan, BRM._s2z_row_information(plan, lookup), tau)
+            catch err
+                err isa Union{ArgumentError,DomainError,BRM.LinearAlgebra.PosDefException} ||
+                    rethrow()
+                continue
+            end
+            all(isfinite, rho) && push!(draws[b], rho)
+        end
+    end
+    changed = false
+    for (b, rhos) in enumerate(draws)
+        isempty(rhos) && continue
+        new = [BRM.Statistics.median(r[j, k] for r in rhos) for j in axes(first(rhos), 1),
+               k in axes(first(rhos), 2)]
+        clamp!(new, 0.0, 1.0)
+        changed |= new != ir.source[b]
+        ir.source[b] .= new
+    end
+    changed
+end
+
+function _adaptive_s2z_fisher_problem(model, problem, ad_backend, names;
+                                      centeredness, capacity)
+    all(b -> b.coordinates === :contrasts, BRM.s2z_effect_blocks(model)) ||
+        throw(ArgumentError("S2Z Fisher selection applies Sean's map to contrast " *
+            "coordinates; compile without `s2z_coordinates=:groups`"))
+    hasproperty(problem, :model) || throw(ArgumentError(
+        "S2Z Fisher selection evaluates per-row information through BridgeStan; " *
+        "pass StanBlocks' StanProblem"))
+    plans = BRM._s2z_information_plans(model)
+    blocks = map(plans) do plan
+        coords = BRM._s2z_coordinates(model, plan.block, names)
+        BRMS2ZMapBlock(coords.contrasts, coords.scales)
+    end
+    target = [copy(plan.block.rho) for plan in plans]
+    source = if isnothing(centeredness)
+        [copy(t) for t in target]
+    elseif centeredness isa Real
+        [fill(Float64(centeredness), size(t)) for t in target]
+    else
+        [Matrix{Float64}(c) for c in centeredness]
+    end
+    ir = BRMS2ZMapReparametrization(blocks, [copy(t) for t in target], target, 1)
+    WarmupHMC.restore_reparam_controls!(ir, source)
+    stan = problem.model
+    index = _s2z_constrained_index(stan)
+    data = model.data
+    plan = WarmupHMC.WindowSelectionPlan(
+        ir_ -> BRMS2ZFisherEvidence(capacity, Float64[], Vector{Float64}[],
+                                    BRM.Random.Xoshiro(20260926)),
+        _s2z_observe!,
+        (ir_, acc) -> _s2z_select!(ir_, acc, plans, stan, data, index),
+    )
+    WarmupHMC.ReparametrizedProblem(ir, problem, ad_backend; scoring_plan=plan)
+end
+
 function _initial_centering!(state,ir,centeredness)
     isnothing(centeredness) && return ir
     values = centeredness isa Real ? fill(centeredness,length(ir.pairs)) : collect(centeredness)
@@ -719,6 +922,20 @@ stay untouched, and `recover_s2z_draws` applies to the returned compiled-frame
 draws. Totals cells precede S2Z cells in the pair order. Neither can currently
 share one wrapper with ordinary, HSGP, or cdar cells.
 
+`s2z_rule=:fisher` instead applies Sean's rule (brms PR #1919) at every
+restarting warm-up window. The sampler uses Sean's projected per-group partial
+map over the contrasts, with one weight per group and coefficient. At each
+window boundary, every evidence draw (the replayed pool by default; weighted
+leaves with `nonlinear_evidence=:nuts_weighted` or `:all_good_leaves`, sampled
+into a reservoir of `s2z_evidence` draws) is mapped to the compiled frame. There
+the per-row expected information is evaluated at the draw's fitted values
+through BridgeStan, accumulated per group, and turned into Sean's per-draw
+weights, rescaled at that draw's `tau`. The new weights are the per-cell median.
+Any compiled `s2z_rho` is the target frame and the starting point; `centeredness`
+(a scalar or one J-by-K matrix per block) overrides the start. Supported
+likelihoods are Gaussian identity, Bernoulli/binomial logit and Poisson log.
+This rule cannot yet share a wrapper with totals, ordinary, HSGP or cdar blocks.
+
 For an HSGP, each basis weight is one scalar cell with zero location and
 per-basis scale `brm_hsgp_sqrt_spd(omega2, sigma, rho)[basis]`; `c=0` is the
 emitted standardized coordinate, while `c=1` is its literal
@@ -743,8 +960,23 @@ with covariance `A(c) * A(c)'` whenever the block innovation is standard normal;
 the wrapped density and Jacobian still represent the original BRM prior exactly.
 """
 function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=nothing,
-                                       centeredness=nothing)
+                                       centeredness=nothing, s2z_rule=:cells,
+                                       s2z_evidence=1000)
     names = isnothing(unc_names) ? _problem_unc_names(problem) : unc_names
+    s2z_rule in (:cells, :fisher) ||
+        throw(ArgumentError("s2z_rule must be :cells or :fisher"))
+    if s2z_rule === :fisher
+        isempty(BRM.s2z_effect_blocks(model)) &&
+            throw(ArgumentError("s2z_rule=:fisher needs S2Z blocks"))
+        isempty(BRM.total_effect_blocks(model)) &&
+            isempty(BRM.adaptive_centering_blocks(model, names)) &&
+            isempty(BRM._adaptive_hsgp_centering_blocks(model, names)) &&
+            isempty(BRM._adaptive_cdar_centering_blocks(model, names)) ||
+            throw(ArgumentError("s2z_rule=:fisher cannot yet be combined with " *
+                "totals, ordinary, HSGP or cdar blocks"))
+        return _adaptive_s2z_fisher_problem(model, problem, ad_backend, names;
+            centeredness, capacity=s2z_evidence)
+    end
     blocks = BRM.adaptive_centering_blocks(model, names)
     hsgp_blocks = BRM._adaptive_hsgp_centering_blocks(model, names)
     cdar_blocks = BRM._adaptive_cdar_centering_blocks(model, names)

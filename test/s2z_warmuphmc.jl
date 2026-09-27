@@ -252,3 +252,114 @@ end
     @test all(isfinite, recovered.effects)
     @test maximum(abs, sum(recovered.deviations; dims=2)) < 1e-9
 end
+
+# ---- Sean's rule per window (s2z_rule=:fisher) ----
+
+@testset "Sean-map reparametrization is exact" begin
+    # An interior compiled frame: the map goes source -> physical -> target.
+    ctarget = 0.3
+    sbr = SBBRMI(builder(data); mod=@__MODULE__, s2z_groups=[:g], s2z_rho=ctarget,
+        total_groups=())
+    problem = compile(sbr, :interior)
+    names = BridgeStan.param_unc_names(problem.model)
+    csource = reshape(collect(range(0.05, 0.95; length=J * K)), J, K)
+    rp = adaptive_centering_problem(sbr, problem, AutoEnzyme(); s2z_rule=:fisher,
+        centeredness=[csource])
+    ir = WarmupHMC.reparametrizer(rp)
+    @test WarmupHMC.reparam_sources(rp) == [csource]
+    x, coords = physical_point(sbr, names; seed=9)
+    ljac, y = ir(x)
+    _, back = WarmupHMC._inverse_with_logabsdet_jacobian(ir, y)
+    @test back ≈ x atol = 1e-10
+    tau = exp.(x[coords.scales])
+    expected = 0.0
+    for k in 1:K
+        # Same physical deviations from both frames.
+        from = BRM._s2z_partial_forward(BRM._s2z_helmert_mul(x[coords.contrasts[:, k]]),
+            tau[k], csource[:, k])
+        to = BRM._s2z_partial_forward(BRM._s2z_helmert_mul(y[coords.contrasts[:, k]]),
+            tau[k], fill(ctarget, J))
+        @test from ≈ to atol = 1e-10
+        expected += BRM._s2z_partial_logjac(tau[k], csource[:, k]) -
+                    BRM._s2z_partial_logjac(tau[k], fill(ctarget, J))
+    end
+    @test ljac ≈ expected atol = 1e-10
+    rest = setdiff(eachindex(x), vec(coords.contrasts))
+    @test y[rest] == x[rest]
+    lp, g = LogDensityProblems.logdensity_and_gradient(rp, x)
+    @test lp ≈ LogDensityProblems.logdensity(problem, y) + ljac atol = 1e-9
+    fd = map(eachindex(x)) do i
+        h = zeros(length(x)); h[i] = 1e-5
+        (LogDensityProblems.logdensity(rp, x + h) - LogDensityProblems.logdensity(rp, x - h)) / 2e-5
+    end
+    @test g ≈ fd atol = 1e-6 rtol = 1e-6
+    @test_throws ArgumentError adaptive_centering_problem(sbg, problemg, AutoEnzyme();
+        s2z_rule=:fisher)
+end
+
+@testset "Sean's per-draw candidate and likelihood plans" begin
+    plan = only(BRM._s2z_information_plans(sb0))
+    @test plan.family === :gaussian
+    info = BRM._s2z_row_information(plan, name -> error("no lookup needed"))
+    @test info ≈ fill(4.0, length(data.y))           # Normal(mu, 0.5)
+    tau = [1.3, 0.4]
+    infos = [zeros(K, K) for _ in 1:J]
+    for n in eachindex(data.g)
+        z = [1.0, data.x[n]]
+        infos[data.g[n]] .+= 4.0 .* (z * z')
+    end
+    @test BRM._s2z_fisher_draw(plan, info, tau) ≈ BRM._s2z_fisher_candidate(infos, tau)
+    df = (; x=data.x, g=data.g, b=Int.(data.y .> 1), c=round.(Int, exp.(data.y ./ 2)),
+        sigma_data=fill(0.7, length(data.y)), y=data.y)
+    bern = @brm begin
+        eta ~ 1 + x + (1 + x || g)
+        b ~ BernoulliLogit(eta)
+    end
+    pois = @brm begin
+        lam ~ 1 + x + (1 + x || g)
+        c ~ Poisson(exp(lam))
+    end
+    datascale = @brm begin
+        mu ~ 1 + x + (1 + x || g)
+        y ~ Normal(mu, sigma_data)
+    end
+    shifted = @brm begin
+        mu ~ 1 + x + (1 + x || g)
+        y ~ Normal(mu + 1.0, 0.5)
+    end
+    s2z(b) = SBBRMI(b(df); mod=@__MODULE__, s2z_groups=[:g], s2z_rho=0.0, total_groups=())
+    pb = only(BRM._s2z_information_plans(s2z(bern)))
+    @test pb.family === :bernoulli_logit
+    eta = collect(range(-2, 2; length=length(df.b)))
+    @test BRM._s2z_row_information(pb, n -> n === :eta ? eta : error()) ≈
+        BRM.logistic.(eta) .* (1 .- BRM.logistic.(eta))
+    pp = only(BRM._s2z_information_plans(s2z(pois)))
+    @test pp.family === :poisson_log
+    @test BRM._s2z_row_information(pp, n -> n === :lam ? eta : error()) ≈ exp.(eta)
+    pd = only(BRM._s2z_information_plans(s2z(datascale)))
+    @test BRM._s2z_row_information(pd, n -> n === :sigma_data ? df.sigma_data : error()) ≈
+        fill(1 / 0.49, length(df.y))
+    # A predictor inside another expression is not a supported pattern.
+    @test_throws ArgumentError BRM._s2z_information_plans(s2z(shifted))
+end
+
+@testset "Per-window Sean rule on unbalanced groups ($evidence)" for evidence in
+        (:linear_pool, :nuts_weighted)
+    rp = adaptive_centering_problem(sb0, problem0, AutoEnzyme(); s2z_rule=:fisher)
+    fit = adaptive_warmup_mcmc(Xoshiro(27), rp; n_draws=2000, nonlinear_adapt=true,
+        monitor_ess=false, nonlinear_evidence=evidence)
+    weights = only(WarmupHMC.reparam_sources(rp))
+    println("S2Z_FISHER ", evidence, " divergent=", fit.n_divergent_samples,
+        " sampling_gradients=", fit.sampling_evaluation_counter,
+        " intercept_rho=", round.(weights[:, 1]; digits=2),
+        " slope_rho=", round.(weights[:, 2]; digits=2)); flush(stdout)
+    @test all(isfinite, fit.posterior_position)
+    @test all(w -> 0 <= w <= 1, weights)
+    @test weights != zeros(J, K)                          # the rule selected
+    # Better-informed intercept levels get more centered weights.
+    @test weights[J, 1] > weights[1, 1]
+    recovered = recover_s2z_draws(sb0, permutedims(fit.posterior_position), names0;
+        rng=Xoshiro(4))[:mu]
+    @test all(isfinite, recovered.effects)
+    @test abs(mean(recovered.population[:, 1]) - 1.0) < 0.6
+end

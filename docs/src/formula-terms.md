@@ -531,6 +531,34 @@ per coefficient, or a `J × K` matrix in `[0, 1]`. Intermediate values use Sean'
 projected partial map. `select_s2z_rho` chooses these weights from a pilot with
 brms's Fisher rule.
 
+#### Sean's rule at every warm-up window
+
+`adaptive_centering_problem(sb, problem, backend; s2z_rule=:fisher)` keeps the
+contrast coordinates and Sean's projected partial map, with one weight per group
+and coefficient, and re-selects those weights at every restarting WarmupHMC
+window using Sean's rule from brms PR #1919. At each window boundary, every
+evidence draw is mapped to the compiled frame. The per-row expected information
+is evaluated there at the draw's fitted values through BridgeStan and
+accumulated per group through the design. It is turned into Sean's per-draw
+weights, rescaled at that draw's `tau`, and the new weight of each cell is the
+median across draws.
+
+The evidence is the retained pool by default. With
+`nonlinear_evidence=:nuts_weighted` or `:all_good_leaves`, weighted NUTS leaves
+are sampled into a reservoir of `s2z_evidence` draws (default 1000). No Pathfinder
+precursor or importance sampling is involved. The compiled `s2z_rho` is the
+target frame and the starting point, and `centeredness` (a scalar, or one `J × K`
+matrix per block) overrides the start. The rule currently supports Gaussian
+identity, Bernoulli or binomial logit, and Poisson log likelihoods. It cannot yet
+share a wrapper with totals, ordinary, HSGP or `cdar` blocks.
+
+```julia
+sb = SBBRMI(brmi; s2z_groups=[:g], s2z_rho=0.0)
+problem = StanBlocks.stan_instantiate(sb.model)
+adaptive = adaptive_centering_problem(sb, problem, AutoEnzyme(); s2z_rule=:fisher)
+fit = WarmupHMC.adaptive_warmup_mcmc(Xoshiro(1), adaptive; n_draws=2000)
+```
+
 #### Per-group coordinates and WarmupHMC
 
 `s2z_coordinates=:groups` samples one coordinate per group instead of the `J - 1`
