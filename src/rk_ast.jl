@@ -615,8 +615,10 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
     elseif response.family === :negative_binomial
         # Twin head (thin-layer decision, pair fam-nb1): the plan's
         # `NegativeBinomial(r, p)` maps to
-        # `NegativeBinomial.(exp.(eta), p)` (NB2 precedent); scalars
-        # inline bare. No fused head: one spelling either way.
+        # `NegativeBinomial.(exp.(eta), p)` (NB2 precedent); the
+        # modeled-p submodel rides the scale slot under `logistic.`
+        # (pair nuisance-nb1p), scalars inline bare. No fused head:
+        # one spelling either way.
         wrap_location ? _rk_ast_dotted(:NegativeBinomial,
             _rk_ast_dotted(:exp, predictor),
             leaf[:scale]) :

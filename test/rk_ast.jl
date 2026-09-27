@@ -311,6 +311,20 @@ end
             Expr(:., :exp, Expr(:tuple, :r)), 0.4)))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+    # Modeled p: the `logit(p)` submodel rides the scale slot under
+    # `logistic.` (pair nuisance-nb1p; the hurdle twin precedent).
+    brmi = @brm df begin
+        log(r) ~ 1 + x
+        logit(p) ~ 1 + x
+        c ~ NegativeBinomial(r, p)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :c,
+        Expr(:., :NegativeBinomial, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :r)),
+            Expr(:., :logistic, Expr(:tuple, :p)))))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end
 
 @testset "group-C wald AST shape" begin
