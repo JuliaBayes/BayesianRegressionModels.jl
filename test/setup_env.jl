@@ -50,7 +50,7 @@ const PINS = [
     ("MutatingFunctions", "https://github.com/nsiccha/MutatingFunctions.jl.git", "4fc41b1c7b774133ceaacc4ff3c34c67b15b87b2"),  # main
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "121de3194f02044e00bac0d11019a93458ddb63a"),  # main
     ("TreeArrays",        "https://github.com/nsiccha/TreeArrays.jl.git",        "c317cc003fc41c2d933c27dc80799141eebd434e"),  # main
-    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "24578c34eb90928791319ef9ef2b49a28e0d4a51"),  # devibe (declared-unbound ragged/censored draw shape, twins and segments; BRM snag ragged-omitted-r-198ea038; contains 74ed796d and its dependency floors)
+    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "342436de359eb43879ddcef4956cfd5fd6502995"),  # devibe (K>=3 mixture RNG else-if rendering 5aed3df; BRM matrix-b snag k-5-mixturemodel-6105de92; supersedes 24578c34)
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
