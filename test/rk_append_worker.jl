@@ -404,8 +404,10 @@ function _run_case_loaded(spec, probe, outdir::AbstractString;
     translated = BRM.rk_translate_artifact(artifact)
     # In-production skew tripwire: the artifact route must reproduce the
     # live RKBRMI route bit-equal at the origin.
-    live = BRM.RKBRMI(brmi)
-    rt_model = build_kernel(translated)
+    # invokelatest throughout: these lower/compile stages eval generated
+    # model code and call it internally; only latest-at-call sees it.
+    live = Base.invokelatest(BRM.RKBRMI, brmi)
+    rt_model = Base.invokelatest(build_kernel, translated)
     origin = zeros(Float64, rt_model.layout.total)
     _assert_live_equal(case_id, live, rt_model, artifact.plan.columns, origin)
     rk_names = Vector{Symbol}(coordinate_names(rt_model.layout))
@@ -426,7 +428,7 @@ function _run_case_loaded(spec, probe, outdir::AbstractString;
     if print_coords
         fd = no_token ? nothing : _acquire_compute_token()
         try
-            prepared = BRM.sb_prepare_model(brmi;
+            prepared = Base.invokelatest(BRM.sb_prepare_model, brmi;
                 mod=Main, case_id, stan_path=joinpath(outdir, "coords.stan"))
             println("rk_names = $(repr(rk_names))")
             println("stan_names = $(repr(prepared.stan_names))")
@@ -462,7 +464,7 @@ function _run_case_loaded(spec, probe, outdir::AbstractString;
     rk_grads = if no_sb
         [nothing for _ in u_probes]
     else
-        shim = BRM.rk_logdensity_problem(live;
+        shim = Base.invokelatest(BRM.rk_logdensity_problem, live;
             ad_backend=backend, u0=zeros(Float64, dim))
         map(1:length(u_probes)) do i
             _, g = Base.invokelatest(
@@ -552,8 +554,8 @@ function _assert_live_equal(case_id, live, rt_model, columns, u)
     bound = NamedTuple{Tuple(names)}(Tuple(columns[k] for k in names))
     want = :posterior
     have = (:unconstrained, names...)
-    klive = prepare(live.model.spec; have, want, bound=bound)
-    krt = prepare(rt_model.spec; have, want, bound=bound)
+    klive = Base.invokelatest(prepare, live.model.spec; have, want, bound=bound)
+    krt = Base.invokelatest(prepare, rt_model.spec; have, want, bound=bound)
     # Call-site invokelatest: prepare() eval'd these kernel methods after
     # this extent started, so only latest-at-call sees them.
     v_live = Base.invokelatest(klive, Vector{Float64}(u))
@@ -565,12 +567,12 @@ function _assert_live_equal(case_id, live, rt_model, columns, u)
 end
 
 function _run_sb(case_id, brmi, probe, rk_names, u_probes, outdir)
-    prepared = BRM.sb_prepare_model(brmi;
+    prepared = Base.invokelatest(BRM.sb_prepare_model, brmi;
         mod=Main, case_id, stan_path=joinpath(outdir, "sb_model.stan"))
     out = map(1:length(u_probes)) do i
         u = Vector{Float64}(u_probes[i])
-        nums = BRM.sb_probe_numbers(prepared, u, probe.sb_map, rk_names;
-            case_id, oracle=probe.oracle)
+        nums = Base.invokelatest(BRM.sb_probe_numbers, prepared, u,
+            probe.sb_map, rk_names; case_id, oracle=probe.oracle)
         oracle = nums.oracle_value === nothing ? nothing :
             (; value=nums.oracle_value, diff_vs_sb=nums.oracle_diff)
         (; sb_value=nums.value, gradient=nums.gradient,
@@ -587,6 +589,8 @@ function main(argv::Vector{String}=ARGS)
             no_token=opts.no_token)
     catch e
         println(stderr, "worker: ERROR: $(sprint(showerror, e))")
+        Base.show_backtrace(stderr, catch_backtrace())
+        println(stderr)
         return 1
     end
 end

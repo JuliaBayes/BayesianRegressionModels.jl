@@ -349,7 +349,10 @@ end
         # Pre-landing seam: the worker must fail closed LOUDLY on the
         # missing reporter v2 (never a silent or divergent render), and
         # the RK-free prefix (emit) must already have produced the
-        # artifact.
+        # artifact. The backtrace prints so a non-seam failure is
+        # diagnosable from the log.
+        showerror(stderr, e, catch_backtrace())
+        println(stderr)
         @test occursin("transpile_report_v2", sprint(showerror, e))
         @test isfile(joinpath(outdir, "artifact.jls"))
     end
