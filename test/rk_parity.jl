@@ -1149,6 +1149,79 @@ end
     _check_parity_gradient(backend, u)
 end
 
+# Modeled-nu twins (pair nuisance-nu, RK 99d278db): the N1/N1b probe
+# shapes with the term-nuisance SB pins committed (SB brief values at
+# BRM 97bb538 / SB 24578c3, reproduced bit-exact at lane tip).
+@testset "rk parity student-t modeled nu" begin
+    nu_cols = (;
+        x=[0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
+        z=[1.0, 0.5, -0.5, 1.5, 0.0, -1.0],
+        y=[1.0, 2.0, 1.5, 2.5, 3.0, 2.0],
+    )
+    brmi = @brm nu_cols begin
+        mu ~ 1 + x
+        log(nu) ~ 1 + z
+        y ~ LocationScale(mu, 2.0, TDist(nu))
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 4
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+        (:coefficient, :nu_coef, 2, :identity),
+    ]
+    u = [0.5, -0.25, 1.2, 0.2]
+    nt = constrain(layout, u)
+    b = Vector(nt.mu)
+    c = Vector(nt.nu)
+    lp = b[1] .+ b[2] .* nu_cols.x
+    nu = exp.(c[1] .+ c[2] .* nu_cols.z)
+    ll = sum(logpdf.(LocationScale.(lp, 2.0, TDist.(nu)), nu_cols.y))
+    pr = sum(logpdf.(Normal(0, 1), u))
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    @test _rk_query(backend, :posterior, u) ≈ -17.041416962231473
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity student-t modeled nu sampled scale" begin
+    nu_cols = (;
+        x=[0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
+        z=[1.0, 0.5, -0.5, 1.5, 0.0, -1.0],
+        y=[1.0, 2.0, 1.5, 2.5, 3.0, 2.0],
+    )
+    brmi = @brm nu_cols begin
+        mu ~ 1 + x
+        s ~ Exponential(1)
+        log(nu) ~ 1 + z
+        y ~ LocationScale(mu, s, TDist(nu))
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 5
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+        (:coefficient, :nu_coef, 2, :identity),
+        (:sampled, :s, 1, :exp),
+    ]
+    u = [0.5, -0.25, 1.2, 0.2, 0.7]
+    nt = constrain(layout, u)
+    b = Vector(nt.mu)
+    c = Vector(nt.nu)
+    lp = b[1] .+ b[2] .* nu_cols.x
+    nu = exp.(c[1] .+ c[2] .* nu_cols.z)
+    ll = sum(logpdf.(LocationScale.(lp, nt.s, TDist.(nu)), nu_cols.y))
+    pr = sum(logpdf.(Normal(0, 1), u[1:4])) + logpdf(Exponential(1), nt.s)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ u[5]
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[5]
+    @test _rk_query(backend, :posterior, u) ≈ -18.367541834521536
+    _check_parity_gradient(backend, u)
+end
+
 @testset "rk parity hurdle-poisson hu submodel" begin
     h_cols = (;
         x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
@@ -2710,6 +2783,42 @@ end
     ll = sum(logpdf.(BRM.CircularVonMises.(mu, 1.7;
         interval=(0.0, 6.283185307179586)), v_cols.y))
     pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2])
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # All-identity layout: no Jacobian.
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity beta modeled kappa" begin
+    # The nuisance-kappa P2 shape: logit-link location + log-link kappa
+    # submodel over the shared N=6 probe columns.
+    p2_cols = (;
+        x=[0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
+        z=[1.0, 0.5, -0.5, 1.5, 0.0, -1.0],
+        prop=[0.2, 0.7, 0.4, 0.6, 0.3, 0.5],
+    )
+    brmi = @brm p2_cols begin
+        logit(mu) ~ 1 + x
+        log(kappa) ~ 1 + z
+        prop ~ Beta(mu * kappa, (1 - mu) * kappa)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 4
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+        (:coefficient, :kappa_coef, 2, :identity),
+    ]
+    u = [0.2, -0.1, 0.3, 0.15]
+    nt = constrain(layout, u)
+    b = Vector(nt.mu)
+    c = Vector(nt.kappa)
+    mu = logistic.(b[1] .+ b[2] .* p2_cols.x)
+    kap = exp.(c[1] .+ c[2] .* p2_cols.z)
+    ll = sum(logpdf.(Beta.(mu .* kap, (1 .- mu) .* kap), p2_cols.prop))
+    pr = sum(logpdf.(Normal(0, 1), u))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     # All-identity layout: no Jacobian.

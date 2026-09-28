@@ -54,17 +54,15 @@ const PINS = [
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
-    # through. 6cf678f (2026-09-27, main): the c83c14c0 stack (bb2a2e0 +
-    # term-monotonic + term-hsgp-periodic) plus mod-weights, term-gp,
-    # closeout-appends, kernel-robust, splines-stan (spline sd
-    # :positive_stan), the fam-exp Exponential response slice
-    # (ExponentialLogFam + (LogLink, LogLink) triple + twin head
-    # `Exponential.(exp.(eta))` + corpus 69_exponential + E1 SB pins),
-    # and the fam-lognormal LogNormal response slice (LogNormalFam +
-    # (IdentityLink, IdentityLink) triple + scalar sigma on the scale
-    # slot + head `LogNormal.(mu, sigma)` + corpus 70_lognormal + L1 SB
-    # pin).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "6cf678f37acec6cb34fd0abcf7b990e74707dea4"),  # main
+    # through. 99d278db (2026-09-27, main): the 3c419bde stack
+    # (c83c14c0 + mod-weights, term-gp, closeout-appends, fam-exp,
+    # splines-stan, kernel-robust, fam-lognormal merges, bernoulli-int
+    # plate fix 3cfe180b, nuisance-kappa slice) plus the fam-weibull
+    # response slice and the nuisance-nu modeled-StudentT-nu slice
+    # (nu `ScalePredictorRef` gate + `StudentT.(exp.(nu), mu, sigma)`
+    # surface + nu plate node + N1/N1b vscale tests + SB pins;
+    # peer verdict 1d7vuvf PASS).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "99d278db2d01d7a74b9c8bf3554cf6300cf8ec8c"),  # main
 ]
 
 function main()
