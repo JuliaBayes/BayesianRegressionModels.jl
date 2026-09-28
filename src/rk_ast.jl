@@ -286,10 +286,19 @@ end
 
 # A hsgp declaration: `hsgp_basis(:id, axes...; k=k, c=c, iso=iso)` —
 # `k`/`c` scalars for one axis, per-axis tuples otherwise (the thin
-# layer broadcasts scalars). Shape-verified against `Meta.parse` of
-# the surface spelling.
+# layer broadcasts scalars). Periodic:
+# `hsgp_basis(:id, x; k=k, cov=:periodic, period=P)` (single axis; no
+# `c`/`iso` — SB refuses them on the periodic basis). Shape-verified
+# against `Meta.parse` of the surface spelling.
 function _rk_ast_hsgp_basis(term)
     options = term.options
+    if get(options, :cov, :exp_quad) === :periodic
+        return Expr(:call, :hsgp_basis,
+            Expr(:parameters, Expr(:kw, :k, options.k),
+                Expr(:kw, :cov, QuoteNode(:periodic)),
+                Expr(:kw, :period, options.period)),
+            QuoteNode(options.id), term.columns...)
+    end
     kval = options.k isa Tuple ? Expr(:tuple, options.k...) : options.k
     cval = options.c isa Tuple ? Expr(:tuple, options.c...) : options.c
     Expr(:call, :hsgp_basis,
@@ -343,7 +352,8 @@ _rk_ast_response_uses_scale(family::Symbol) =
     family === :beta_binomial_logit ||
     family === :student_t || family === :hurdle_poisson ||
     family === :wald || family === :von_mises ||
-    family === :negative_binomial
+    family === :negative_binomial || family === :zero_inflated_poisson ||
+    family === :lognormal || family === :weibull
 
 # The scale-slot body spelling inside a bare response statement. A
 # direct scale (outer name, literal, or the plan-forbidden nothing)
@@ -365,6 +375,27 @@ function _rk_ast_response_scale(response::_RKLikelihoodSpec,
     error("RK backend: internal: scale predictor `$name` has link `$link`")
 end
 
+# The Student-t degrees of freedom inside a bare response statement: a
+# direct nu (outer name or literal) passes through inline, exactly one
+# of the scalar/predictor pair set (the planner guarantees it). A
+# modeled nu inverts its link on the predictor name exactly like a
+# scale predictor (`exp.` for log), so the head always reads the
+# constrained vector.
+function _rk_ast_response_nu(response::_RKLikelihoodSpec,
+        rename::Dict{Symbol,Symbol}, predictor_link::Dict{Symbol,Symbol})
+    name = response.nu_predictor
+    name === nothing || response.nu === nothing || error(
+        "RK backend: internal: response `$(response.response)` carries " *
+        "both a scalar nu and a nu predictor")
+    name === nothing && return response.nu
+    actual = get(rename, name, name)
+    link = predictor_link[name]
+    link === :identity && return actual
+    link === :log && return _rk_ast_dotted(:exp, actual)
+    link === :logit && return _rk_ast_dotted(:logistic, actual)
+    error("RK backend: internal: nu predictor `$name` has link `$link`")
+end
+
 # The inverse-link spelling (`Bernoulli.(logistic.(η))`,
 # `Poisson.(exp.(η))`, …) is what the `@rkppl` surface takes; the thin
 # layer recovers the link-native HAVE from it — the lowered
@@ -375,8 +406,10 @@ end
 # `leaf` maps each role to its INLINE spelling: `:predictor` (the
 # predictor name, possibly renamed), `:scale` (the scale value or
 # link-inverted scale predictor), `:nu` (the Student-t degrees of
-# freedom, literal or name, inline), `:zero_inflation` (the ZIP zero
-# probability, literal or name, inline), `:trials`/`:weights`/`:lower`/
+# freedom: the scalar value or the link-inverted nu predictor),
+# `:zero_inflation` (the ZIP zero
+# probability, literal or name, inline; a modeled-zi submodel rides
+# `:scale` under `logistic.` instead), `:trials`/`:weights`/`:lower`/
 # `:upper` (columns or literals inline),
 # `:extra_predictors`/`:count_columns` (tail predictors / tail count
 # columns inline). Evidence and weights STRUCTURE (which wrapper,
@@ -606,12 +639,32 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
     elseif response.family === :negative_binomial
         # Twin head (thin-layer decision, pair fam-nb1): the plan's
         # `NegativeBinomial(r, p)` maps to
-        # `NegativeBinomial.(exp.(eta), p)` (NB2 precedent); scalars
-        # inline bare. No fused head: one spelling either way.
+        # `NegativeBinomial.(exp.(eta), p)` (NB2 precedent); the
+        # modeled-p submodel rides the scale slot under `logistic.`
+        # (pair nuisance-nb1p), scalars inline bare. No fused head:
+        # one spelling either way.
         wrap_location ? _rk_ast_dotted(:NegativeBinomial,
             _rk_ast_dotted(:exp, predictor),
             leaf[:scale]) :
         _rk_ast_dotted(:NegativeBinomial, predictor, leaf[:scale])
+    elseif response.family === :weibull
+        # Twin head (thin-layer decision, pair fam-weibull): the
+        # plan's `Weibull(k, theta)` maps to
+        # `Weibull.(k, exp.(eta))` (Distributions `(shape, scale)`
+        # order, NB2 precedent); scalars inline bare. No fused
+        # head: one spelling either way.
+        wrap_location ? _rk_ast_dotted(:Weibull,
+            leaf[:scale],
+            _rk_ast_dotted(:exp, predictor)) :
+        _rk_ast_dotted(:Weibull, leaf[:scale], predictor)
+    elseif response.family === :exponential_log
+        # Twin head (thin-layer decision, pair fam-exp): the plan's
+        # `Exponential(mu)` maps to `Exponential.(exp.(eta))`
+        # (Poisson-shaped single-arg twin); no scale slot. No fused
+        # head: one spelling either way.
+        wrap_location ? _rk_ast_dotted(:Exponential,
+            _rk_ast_dotted(:exp, predictor)) :
+        _rk_ast_dotted(:Exponential, predictor)
     elseif response.family === :gamma_log
         # Mean-shape form: the plan pins both alpha positions identical,
         # so the same value emits twice.
@@ -625,7 +678,8 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
         # the plan's `LocationScale(mu, s, TDist(nu))` maps to
         # `StudentT.(nu, mu, sigma)` by arg reorder (Stan
         # `student_t(nu, mu, sigma)` order), the same class of
-        # normalization as the existing spelling maps. No
+        # normalization as the existing spelling maps. A modeled nu
+        # rides under `exp.` (the scale-predictor precedent). No
         # `LocationScale` twin: the Normal single-head precedent
         # governs (no link wrap to bridge).
         _rk_ast_dotted(:StudentT, leaf[:nu], predictor, leaf[:scale])
@@ -633,11 +687,14 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
         # Dedicated single head (thin-layer decision, pair fam-zip):
         # the plan's `ZeroInflatedPoisson(lambda, zi)` maps to
         # `ZeroInflatedPoisson.(exp.(lambda), zi)` (Julia/Stan
-        # `(lambda, zi)` order). No fused head and no decomposed
-        # twin: the zi slot is scalar-only in v1, so the fused flag
-        # changes nothing.
+        # `(lambda, zi)` order); a modeled `logit(zi)` submodel rides
+        # the scale slot under `logistic.` instead (the hurdle hu
+        # precedent). No fused head and no decomposed twin: one
+        # spelling either way, so the fused flag changes nothing.
+        zi = response.scale_predictor === nothing ?
+            leaf[:zero_inflation] : leaf[:scale]
         _rk_ast_dotted(:ZeroInflatedPoisson,
-            _rk_ast_dotted(:exp, predictor), leaf[:zero_inflation])
+            _rk_ast_dotted(:exp, predictor), zi)
     elseif response.family === :von_mises
         # Twin heads (thin-layer decision, pair fam-vonmises): exact
         # `VonMises(mu, kappa)` maps to `VonMises.(mu, kappa)` and
@@ -651,6 +708,13 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
             _rk_ast_dotted(:VonMises, predictor, leaf[:scale]) :
             _rk_ast_dotted(:CircularVonMises, predictor, leaf[:scale],
                 interval[1], interval[2])
+    elseif response.family === :lognormal
+        # Single head (thin-layer decision, pair fam-lognormal): the
+        # plan's `LogNormal(mu, sigma)` maps to
+        # `LogNormal.(mu, sigma)` (Distributions `(mu, sigma)`
+        # order); sigma rides the scalar-only scale slot. No fused
+        # head: one spelling either way.
+        _rk_ast_dotted(:LogNormal, predictor, leaf[:scale])
     elseif response.family === :categorical_logit
         # Reference-coded: K−1 non-reference etas, class 1 the implicit
         # zero reference (class order follows predictor order).
@@ -725,7 +789,7 @@ function _rk_ast_mixture_leaves(response::_RKLikelihoodSpec,
             response.trials, nothing, nothing, Symbol[], Symbol[], nothing,
             nothing, Symbol[], nothing, Symbol[], nothing,
             _RKMixtureComponent[], nothing, nothing, nothing, nothing,
-            nothing)
+            nothing, nothing)
         cleaf = Dict{Symbol,Any}(:predictor => loc)
         if _rk_ast_response_uses_scale(comp.family)
             cleaf[:scale] =
@@ -775,17 +839,20 @@ function _rk_ast_response_stmt(response::_RKLikelihoodSpec,
             _rk_ast_response_scale(response, rename, predictor_link)
     end
     if family === :student_t
-        # Scalar-only like the scale slot (sampled/assignment names pass
-        # through; only predictor names alpha-rename).
-        response.nu === nothing && error(
-            "RK backend: internal: response `$(response.response)` plans " *
-            "Student-t without degrees of freedom")
-        leaf[:nu] = response.nu
+        # Scalar or modeled (sampled/assignment names pass through;
+        # only predictor names alpha-rename and invert their link).
+        response.nu === nothing && response.nu_predictor === nothing &&
+            error("RK backend: internal: response `$(response.response)` " *
+                  "plans Student-t without degrees of freedom")
+        leaf[:nu] = _rk_ast_response_nu(response, rename, predictor_link)
     end
     if family === :zero_inflated_poisson
-        # Scalar-only like the nu slot (sampled/assignment names pass
-        # through; only predictor names alpha-rename).
-        response.zero_inflation === nothing && error(
+        # Scalar-only (sampled/assignment names pass through; only
+        # predictor names alpha-rename) — except a modeled-zi
+        # submodel, which rides the scale slot (`leaf[:scale]`)
+        # instead and leaves this `nothing`.
+        response.zero_inflation === nothing &&
+            response.scale_predictor === nothing && error(
             "RK backend: internal: response `$(response.response)` plans " *
             "zero-inflated Poisson without a zero probability")
         leaf[:zero_inflation] = response.zero_inflation
@@ -965,14 +1032,20 @@ function _rk_ast_plate(name::Symbol, range::Symbol,
     Expr(:macrocall, Symbol("@plate"), LineNumberNode(0), loop)
 end
 
-# `gp_chol_latent(gp_exp_quad_cov(x, sigma, rho, jitter), z)`: arg order
-# is (locations, sigma, rho, jitter) per the thin-layer contract.
+# `gp_chol_latent(gp_exp_quad_cov(x, sigma, rho, jitter), z)` /
+# `gp_chol_latent(gp_periodic_cov(x, sigma, rho, period, jitter), z)`:
+# arg order is (locations, sigma, rho, [period,] jitter) per the
+# thin-layer contract.
 function _rk_ast_gp_latent(term)
     options = term.options
-    Expr(:call, :gp_chol_latent,
+    cov = if options.cov === :periodic
+        Expr(:call, :gp_periodic_cov, only(term.columns),
+            options.sigma, options.rho, options.period, options.jitter)
+    else
         Expr(:call, :gp_exp_quad_cov, only(term.columns),
-            options.sigma, options.rho, options.jitter),
-        options.z)
+            options.sigma, options.rho, options.jitter)
+    end
+    Expr(:call, :gp_chol_latent, cov, options.z)
 end
 
 function _rk_ast_gp_names(plan::_RKStructuralPlan)

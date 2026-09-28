@@ -18,7 +18,7 @@ using Distributions: Bernoulli, Beta, Binomial, Categorical, Cauchy, Dirichlet,
                      Exponential, Gamma, InverseGaussian, Laplace,
                      LocationScale, Logistic, LogNormal, MixtureModel,
                      Multinomial, NegativeBinomial, Normal, Poisson, TDist,
-                     Uniform, VonMises, truncated
+                     Uniform, VonMises, Weibull, truncated
 using LogExpFunctions: logistic, logit
 using Statistics: mean
 
@@ -226,6 +226,19 @@ end
         Expr(:., :StudentT, Expr(:tuple, 4.0, :mu, 2.0)))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+    # Modeled nu (N1 probe shape): the `log(nu)` submodel rides under
+    # `exp.`, the scale-predictor precedent.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        log(nu) ~ 1 + z
+        y ~ LocationScale(mu, 2.0, TDist(nu))
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :y,
+        Expr(:., :StudentT, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :nu)), :mu, 2.0)))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end
 
 @testset "group-C hurdle-poisson AST shape" begin
@@ -272,6 +285,18 @@ end
     @test prog.main.args[end] == Expr(:call, :.~, :c,
         Expr(:., :ZeroInflatedPoisson, Expr(:tuple,
             Expr(:., :exp, Expr(:tuple, :lambda)), :zi)))
+    # Modeled zi (zip.jl model B): the `logit(zi)` submodel inverts
+    # under `logistic.` (the hurdle hu precedent).
+    brmi = @brm df begin
+        log(lambda) ~ 1 + x
+        logit(zi) ~ 1 + x
+        c ~ ZeroInflatedPoisson(lambda, zi)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.main.args[end] == Expr(:call, :.~, :c,
+        Expr(:., :ZeroInflatedPoisson, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :lambda)),
+            Expr(:., :logistic, Expr(:tuple, :zi)))))
     # Literals inline; the fused-heads flag changes nothing (one head
     # either way).
     brmi = @brm df begin
@@ -311,6 +336,50 @@ end
             Expr(:., :exp, Expr(:tuple, :r)), 0.4)))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+    # Modeled p: the `logit(p)` submodel rides the scale slot under
+    # `logistic.` (pair nuisance-nb1p; the hurdle twin precedent).
+    brmi = @brm df begin
+        log(r) ~ 1 + x
+        logit(p) ~ 1 + x
+        c ~ NegativeBinomial(r, p)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :c,
+        Expr(:., :NegativeBinomial, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :r)),
+            Expr(:., :logistic, Expr(:tuple, :p)))))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+end
+
+@testset "group-C weibull AST shape" begin
+    # Twin head (thin-layer decision, pair fam-weibull):
+    # `Weibull(k, theta)` maps to `Weibull.(k, exp.(theta))`
+    # (Distributions `(shape, scale)` order, NB2 precedent); no
+    # fused head.
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        k ~ LogNormal(0, 0.3)
+        z ~ Weibull(k, mu)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :z,
+        Expr(:., :Weibull, Expr(:tuple, :k,
+            Expr(:., :exp, Expr(:tuple, :mu)))))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+    # Literal shape inlines; the fused-heads flag changes nothing
+    # (one head either way).
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        z ~ Weibull(2.0, mu)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :z,
+        Expr(:., :Weibull, Expr(:tuple, 2.0,
+            Expr(:., :exp, Expr(:tuple, :mu)))))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end
 
 @testset "group-C wald AST shape" begin
@@ -338,6 +407,38 @@ end
     want = Expr(:call, :.~, :z,
         Expr(:., :InverseGaussian, Expr(:tuple,
             Expr(:., :exp, Expr(:tuple, :mu)), 2.0)))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+    # Modeled lambda (pair nuisance-lam): the `log(lam)` scale
+    # predictor inverts under `exp.` like any scale predictor (the
+    # von-Mises precedent); the fused-heads flag changes nothing (one
+    # head either way).
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        log(lam) ~ 1 + x
+        z ~ InverseGaussian(mu, lam)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :z,
+        Expr(:., :InverseGaussian, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :mu)),
+            Expr(:., :exp, Expr(:tuple, :lam)))))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+end
+
+@testset "group-C exponential AST shape" begin
+    # Twin head (thin-layer decision, pair fam-exp):
+    # `Exponential(mu)` maps to `Exponential.(exp.(mu))`
+    # (Poisson-shaped single-arg twin); no fused head.
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        z ~ Exponential(mu)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :z,
+        Expr(:., :Exponential, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :mu)))))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end
@@ -372,6 +473,19 @@ end
             5.0)))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+    # A `log(precision)` submodel inverts under `exp.` like any scale
+    # predictor (pair nuisance-precision).
+    brmi = @brm df begin
+        logit(mu) ~ 1 + x
+        log(precision) ~ 1 + z
+        b ~ BetaBinomial2(h, mu, precision)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.main.args[end] == Expr(:call, :.~, :b,
+        Expr(:., :BetaBinomial2, Expr(:tuple,
+            :h,
+            Expr(:., :logistic, Expr(:tuple, :mu)),
+            Expr(:., :exp, Expr(:tuple, :precision)))))
 end
 
 @testset "group-C von-Mises AST shape" begin
@@ -399,6 +513,33 @@ end
     want = Expr(:call, :.~, :y,
         Expr(:., :CircularVonMises, Expr(:tuple, :mu, 1.7,
             -Float64(pi), Float64(pi))))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+end
+
+@testset "group-C lognormal AST shape" begin
+    # Single head (thin-layer decision, pair fam-lognormal):
+    # `LogNormal(mu, sigma)` maps to `LogNormal.(mu, sigma)`
+    # (Distributions order); no fused head.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        sigma ~ Exponential(1)
+        z ~ LogNormal(mu, sigma)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :z,
+        Expr(:., :LogNormal, Expr(:tuple, :mu, :sigma)))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+    # Literal scale inlines; the fused-heads flag changes nothing
+    # (one head either way).
+    brmi = @brm df begin
+        mu ~ 1 + x
+        z ~ LogNormal(mu, 0.5)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :z,
+        Expr(:., :LogNormal, Expr(:tuple, :mu, 0.5)))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end
@@ -674,7 +815,7 @@ end
             nothing, BRM._RKResponseEvidence(:none, nothing, nothing), :y,
             nothing, nothing, nothing, Symbol[], Symbol[], nothing, nothing,
             Symbol[], nothing, Symbol[], nothing, BRM._RKMixtureComponent[],
-            nothing, nothing, nothing, nothing, nothing)],
+            nothing, nothing, nothing, nothing, nothing, nothing)],
         [BRM._RKPredictorSpec(:n, :identity, BRM._RKTermSpec[
             BRM._RKTermSpec(:intercept, Symbol[], (;), :Intercept, :Intercept),
             BRM._RKTermSpec(:continuous, [:n], (;), :n, :n)], :n)],
@@ -1469,6 +1610,26 @@ end
         :z_gp)) in prog.main.args
 end
 
+@testset "periodic gp AST shape" begin
+    brmi = @brm df begin
+        mu ~ 1 + gp(x; cov=:periodic, period=2.0)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    # Same submodel lattice as exp_quad (the latent rides the `f1`
+    # formal); only the covariance call gains `period`.
+    @test prog.defs == Expr[
+        Expr(:(=), Expr(:call, :popefs_normal_i_gp, :f1, :loc1, :s1),
+            Expr(:block,
+                Expr(:call, :~, :b1, Expr(:call, :Normal, :loc1, :s1)),
+                Expr(:call, :.+, :b1, :f1))),
+    ]
+    @test Expr(:(=), :f_gp, Expr(:call, :gp_chol_latent,
+        Expr(:call, :gp_periodic_cov, :x, :sigma_gp, :rho_gp, 2.0, 1e-9),
+        :z_gp)) in prog.main.args
+end
+
 @testset "hsgp AST shape" begin
     brmi = @brm df begin
         mu ~ 1 + hsgp(x; k=4)
@@ -1523,6 +1684,26 @@ end
             Expr(:., :Normal, Expr(:tuple, :mu, :s))))
     @test prog.main.args[1] == Meta.parse("hsgp_basis(:hsgp_x_z, x, z; " *
         "k = (4, 3), c = (1.5, 2.0), iso = false)")
+    # Periodic: k/cov/period declaration, same summand shape.
+    brmi = @brm df begin
+        mu ~ 1 + hsgp(x; k=4, cov=:periodic, period=2.0)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.main == Expr(:block,
+        Expr(:call, :hsgp_basis,
+            Expr(:parameters, Expr(:kw, :k, 4),
+                Expr(:kw, :cov, QuoteNode(:periodic)),
+                Expr(:kw, :period, 2.0)),
+            QuoteNode(:hsgp_x), :x),
+        Expr(:call, :~, :mu, Expr(:call, :popefs_normal_i_h,
+            QuoteNode(:hsgp_x), 0.0, 1.0)),
+        Expr(:call, :~, :s, Expr(:call, :Exponential, 1.0)),
+        Expr(:call, :.~, :y,
+            Expr(:., :Normal, Expr(:tuple, :mu, :s))))
+    @test prog.main.args[1] == Meta.parse(
+        "hsgp_basis(:hsgp_x, x; k = 4, cov = :periodic, period = 2.0)")
 end
 
 @testset "ar AST shape" begin
@@ -1712,6 +1893,24 @@ end
             Expr(:call, :./,
                 Expr(:., :exp, Expr(:tuple, :mu)),
                 Expr(:., :exp, Expr(:tuple, :alpha))))))
+    # Beta concentration inverts at both use positions; the fused head
+    # takes the bare location with the inverted concentration.
+    brmi = @brm dfp begin
+        logit(mu) ~ 1 + x
+        log(kappa) ~ 1 + z
+        prop ~ Beta(mu * kappa, (1 - mu) * kappa)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    mu_log = Expr(:., :logistic, Expr(:tuple, :mu))
+    kap = Expr(:., :exp, Expr(:tuple, :kappa))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] ==
+        Expr(:call, :.~, :prop,
+            Expr(:., :Beta, Expr(:tuple,
+                Expr(:call, :.*, mu_log, kap),
+                Expr(:call, :.*, Expr(:call, :.-, 1, mu_log), kap))))
+    @test BRM._rk_emit_ast(plan, true).main.args[end] ==
+        Expr(:call, :.~, :prop,
+            Expr(:., :BetaLogit, Expr(:tuple, :mu, kap)))
 end
 
 @testset "submodel defs resolve at every call" begin

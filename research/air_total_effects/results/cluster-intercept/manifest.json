@@ -1,0 +1,58 @@
+[
+  {
+    "archive": "s2z_pairs.aov.json",
+    "sha256": "334ba379d3f3ab0f5cfc9ba6086b4d0d9c09854eaccb7340539d37fb03004fce",
+    "bytes": 2603637,
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/543ac2c4093dc929.bin",
+        "bytes": 2603637,
+        "sha256": "334ba379d3f3ab0f5cfc9ba6086b4d0d9c09854eaccb7340539d37fb03004fce"
+      }
+    ],
+    "complete": true
+  },
+  {
+    "archive": "s2z_pairs.tsv",
+    "sha256": "ada41940aef480a407cfca431ea144bbc873deab5c14d3d177d4cd1d30eae3d5",
+    "bytes": 1558846,
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/8075ff4ba6745b50.bin",
+        "bytes": 1558846,
+        "sha256": "ada41940aef480a407cfca431ea144bbc873deab5c14d3d177d4cd1d30eae3d5"
+      }
+    ],
+    "complete": true
+  },
+  {
+    "archive": "total_pairs.aov.json",
+    "sha256": "7d2cd9a9e862c2c226c9d3b22b4ba3761b0b28cdbdaa620a8724a5f084bd367c",
+    "bytes": 2551406,
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/dfa877c1bcc348d5.bin",
+        "bytes": 2551406,
+        "sha256": "7d2cd9a9e862c2c226c9d3b22b4ba3761b0b28cdbdaa620a8724a5f084bd367c"
+      }
+    ],
+    "complete": true
+  },
+  {
+    "archive": "total_pairs.tsv",
+    "sha256": "6ce67e055a6a924bb9bfd0acc02d097926af5d15a808304d70884339e2ebbac4",
+    "bytes": 1506615,
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/dc80f57dc7ea6cc5.bin",
+        "bytes": 1506615,
+        "sha256": "6ce67e055a6a924bb9bfd0acc02d097926af5d15a808304d70884339e2ebbac4"
+      }
+    ],
+    "complete": true
+  }
+]

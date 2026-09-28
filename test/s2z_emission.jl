@@ -214,3 +214,67 @@ end
         reshape(recovered.means, 4000, 1, 2)) < 1e-12
     @test maximum(abs, sum(recovered.deviations; dims=2)) < 1e-10
 end
+
+@testset "S2Z group coordinates match contrasts plus an auxiliary mean" begin
+    brmi = normal_builder(data)
+    cmat = [0.0 0.3; 0.7 1.0; 0.25 0.5]
+    sbg = SBBRMI(brmi; mod=@__MODULE__, s2z_groups=[:g], s2z_coordinates=:groups,
+        s2z_rho=cmat, total_groups=())
+    block = only(s2z_effect_blocks(sbg))
+    @test block.coordinates === :groups
+    @test block.rho == cmat
+    @test s2z_stanc_ok(sbg)
+    # Group coordinates default to the noncentered frame.
+    default = SBBRMI(brmi; mod=@__MODULE__, s2z_groups=[:g], s2z_coordinates=:groups,
+        total_groups=())
+    @test only(s2z_effect_blocks(default)).rho == zeros(3, 2)
+    @test_throws ArgumentError SBBRMI(brmi; mod=@__MODULE__, s2z_groups=[:g],
+        s2z_coordinates=:bogus, s2z_rho=0.0, total_groups=())
+    sbc = SBBRMI(brmi; mod=@__MODULE__, s2z_groups=[:g], s2z_rho=0.0, total_groups=())
+    pg = StanBlocks.stan_instantiate(sbg.model; path=joinpath(mktempdir(), "s2z_groups.stan"))
+    pc = StanBlocks.stan_instantiate(sbc.model; path=joinpath(mktempdir(), "s2z_ncp.stan"))
+    ng, nc = BridgeStan.param_unc_names(pg.model), BridgeStan.param_unc_names(pc.model)
+    cg = BRM._s2z_coordinates(sbg, block, ng)
+    cc = BRM._s2z_coordinates(sbc, only(s2z_effect_blocks(sbc)), nc)
+    @test size(cg.contrasts) == (3, 2) && size(cc.contrasts) == (2, 2)
+    @test all(n -> startswith(n, "s2z_level_mu."), ng[vec(cg.contrasts)])
+    for trial in 1:4
+        x = 0.5 .* randn(Xoshiro(200 + trial), length(ng))
+        x[cg.scales] .+= log.([1.5, 0.6])
+        tau = exp.(x[cg.scales])
+        xc = zeros(length(nc))
+        xc[cc.scales] = x[cg.scales]
+        xc[cc.theta] = x[cg.theta]
+        # Contrast target at w, plus the independent N(0, 1) auxiliary mean and
+        # the s -> w Jacobian.
+        extra = 0.0
+        for k in 1:2
+            w = x[cg.contrasts[:, k]] .* exp.(-cmat[:, k] .* log(tau[k]))
+            xc[cc.contrasts[:, k]] = BRM._s2z_helmert_transpose_mul(w)
+            extra += logpdf(Normal(), sum(w) / sqrt(3)) - sum(cmat[:, k]) * log(tau[k])
+        end
+        @test BridgeStan.log_density(pg.model, x; propto=false) ≈
+            BridgeStan.log_density(pc.model, xc; propto=false) + extra atol = 1e-9
+        dg = recover_s2z_draws(sbg, reshape(x, 1, :), ng; rng=Xoshiro(1))[:mu]
+        dc = recover_s2z_draws(sbc, reshape(xc, 1, :), nc; rng=Xoshiro(1))[:mu]
+        @test dg.deviations ≈ dc.deviations atol = 1e-12
+        @test dg.population ≈ dc.population atol = 1e-12
+        # Julia recovery matches Stan's transformed deviations.
+        constrained = BridgeStan.param_constrain(pg.model, x; include_tp=true)
+        tp = BridgeStan.param_names(pg.model; include_tp=true)
+        dev = [constrained[only(findall(==("s2z_deviation_mu.$j.$k"), tp))] for j in 1:3, k in 1:2]
+        @test dev ≈ dg.deviations[1, :, :] atol = 1e-12
+    end
+    q = 0.3 .* randn(Xoshiro(7), length(ng))
+    _, grad = BridgeStan.log_density_gradient(pg.model, q; propto=false)
+    fd = map(eachindex(q)) do i
+        qp, qm = copy(q), copy(q)
+        qp[i] += 1e-6; qm[i] -= 1e-6
+        (BridgeStan.log_density(pg.model, qp; propto=false) -
+         BridgeStan.log_density(pg.model, qm; propto=false)) / 2e-6
+    end
+    @test fd ≈ grad atol = 1e-5
+    # Fisher weights parameterize the contrast map only.
+    @test_throws ArgumentError select_s2z_rho(sbg, sbc, zeros(3, 1), ["a"];
+        obs_prec=ones(3, 6), group=:g)
+end
