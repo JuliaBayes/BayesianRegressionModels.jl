@@ -58,15 +58,14 @@ const PINS = [
     # preservation, nonfinite-transport rejection). Matches test/Project.toml.
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "0194dce08e986ff17fd5a788bb315c6431b7858e"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
-    # through. 908349ff (2026-09-27, main): the 6cf678f stack plus
-    # nuisance-nu-v2, nuisance-zi, the intercept1-logno K=1 sd-geometry
-    # SB mirror, bernoulli-int-la, nuisance-kappa-v2, fam-weibull
-    # (Weibull response + W1 SB pins), nuisance-precision-v2,
-    # kernel-matrix-b-v2 (bare-rate locations, StudentT evidence,
-    # complement-pair mixture weights, occupancy vocab), and
-    # term-dar-stan (dar Stan-convention priors: :interval_stan beta +
-    # :positive_stan sigma, surface spellings unchanged).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "908349ffcba76fb663abdad1c14e37420ffa21d7"),  # main
+    # through. 805e0306 (2026-09-28, main): the 6cf678f stack plus
+    # nuisance-kappa, bernoulli-int, fam-weibull, nuisance-nu v2,
+    # nuisance-zi, intercept1-lognormal, nuisance-precision v2,
+    # term-dar-stan priors, kernel-matrix-b v2, and the nuisance-nb1p NB1
+    # modeled-p slice (NegativeBinomialFam logit-only scale predictor +
+    # B1 trio + corpus 72_nb1_modeled_p; reviewed 21eb670a, land GO
+    # 1ormug2).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "805e0306f0f3c3a93d74fd15ee0ba6f5118fe8e2"),  # main
 ]
 
 function main()
