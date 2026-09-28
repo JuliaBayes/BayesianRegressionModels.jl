@@ -642,6 +642,18 @@ end
     likelihood = only(BRM._brm_rk_plan(brmi).responses)
     @test (likelihood.family, likelihood.link) === (:hurdle_poisson, :log)
     @test likelihood.scale_predictor === :p_zero
+    # Z2 shape (pair nuisance-hurdle-p0): the hu submodel rides a
+    # DISTINCT column from the rate predictor.
+    brmi = @brm df begin
+        log(lambda) ~ 1 + x
+        logit(p_zero) ~ 1 + z
+        c ~ HurdlePoisson(lambda, p_zero)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:hurdle_poisson, :log)
+    @test likelihood.predictor === :lambda
+    @test isnothing(likelihood.scale)
+    @test likelihood.scale_predictor === :p_zero
     # Scalar sampled p_zero rides the scale slot.
     brmi = @brm df begin
         log(lambda) ~ 1 + x
