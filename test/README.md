@@ -18,6 +18,26 @@ differentiates with Enzyme only — every gradient in this suite goes through
 so there is nothing here to work around; do not add it back to make a new
 gradient site easier.
 
+## Chunking heavy suites
+
+Files with dozens of testsets (`rk_parity.jl`, `rk_emitter.jl`) OOM a squeezed
+host single-process. Those files spell their blocks `@stestset` (defined in
+`testset_filter.jl`, covered by `testset_filter_check.jl`) instead of
+`@testset`, so lanes can run them in fresh-process chunks: pass substring
+filters matching testset names as trailing args, or comma-separated via
+`BRM_TEST_FILTER` (union). An empty filter runs everything, exactly as before;
+a non-empty filter that matches nothing exits 1 rather than reporting a
+hollow green.
+
+```sh
+julia --project=test test/rk_emitter.jl "group-C" "fail closed: group-C"
+BRM_TEST_FILTER="von-Mises,mixture" julia --project=test test/rk_parity.jl
+```
+
+A new heavy file adopts the same contract with one `include` plus the macro:
+`include(joinpath(@__DIR__, "testset_filter.jl"))` after `using Test`, then
+`@stestset "name" begin ... end` per chunkable block.
+
 ## Shared preparation and Turing lowering
 
 The focused preparation gates are `preparation_program.jl`,

@@ -1,0 +1,44 @@
+[
+  {
+    "archive": "native_ncp.jls.gz",
+    "sha256": "e4213d1aff93fdbd52dc5ff49b8af0279b1c2e79a96eefad27f2c4c1107522fc",
+    "bytes": 1378146,
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/0f84e8337d185321.bin",
+        "bytes": 1378146,
+        "sha256": "e4213d1aff93fdbd52dc5ff49b8af0279b1c2e79a96eefad27f2c4c1107522fc"
+      }
+    ],
+    "complete": true
+  },
+  {
+    "archive": "pupil-1.csv.gz",
+    "sha256": "f98ce95a7c7f78c63e02b20b426f21f17633dfa9fcd7bd2321707edc3474bba9",
+    "bytes": 2645107,
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/7c59a613dd69cc5e.bin",
+        "bytes": 2645107,
+        "sha256": "f98ce95a7c7f78c63e02b20b426f21f17633dfa9fcd7bd2321707edc3474bba9"
+      }
+    ],
+    "complete": true
+  },
+  {
+    "archive": "sampling.tsv.gz",
+    "sha256": "7bc469f9f67e2008edbad13c09f66df02facf175ab0561478095075e33519832",
+    "bytes": 1600367,
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/0bd973363f0e26a8.bin",
+        "bytes": 1600367,
+        "sha256": "7bc469f9f67e2008edbad13c09f66df02facf175ab0561478095075e33519832"
+      }
+    ],
+    "complete": true
+  }
+]

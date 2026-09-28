@@ -2651,7 +2651,8 @@ end
 """
     SBBRMI(brmi::BRMI; mod=@__MODULE__, cv_groups=Set{Symbol}(),
            centered_groups=Set{Symbol}(), total_groups=:auto,
-           s2z_groups=(), s2z_rho=nothing, held_out=()) -> SBBRMI
+           s2z_groups=(), s2z_rho=nothing, s2z_coordinates=:contrasts,
+           held_out=()) -> SBBRMI
 
 StanBlocks backend: walks `brmi`, emits a `StanBlocks.SlicModel`, and
 materialises the data dict. Pass `mod` if you're constructing the model
@@ -2681,6 +2682,16 @@ blocks with J >= 2, fully matched population design and Flat/Normal
 population priors; anything else errors loudly. Inspect
 [`s2z_effect_blocks`](@ref). S2Z groups are excluded from automatic totals
 and cannot overlap `centered_groups` or `cv_groups`.
+
+`s2z_coordinates=:groups` instead samples J group coordinates per coefficient:
+independent `s_j ~ N(0, tau^(2c_j))` cells with deviations
+`tau * (w - mean(w))`, `w = s ./ tau.^c`. The extra dimension `mean(w)` is an
+independent auxiliary that leaves the posterior unchanged. There `s2z_rho` is
+each group's power-interpolation centeredness `c` (default `0`), and every
+group is one scalar cell for `adaptive_centering_problem`.
+!!! warning "Deprecated"
+    `:groups` is unrequested and unvalidated, kept working only pending
+    further exploration/research; prefer the default `:contrasts`.
 
 `cv_groups` is an opt-in set of grouping-factor names (e.g. `[:subject]`)
 whose per-group random effect should be emitted with **cv-contagious
@@ -3258,7 +3269,8 @@ const _SB_STAN_RESERVED_IDENTIFIERS = Set{Symbol}((
 
 SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
        centered_groups=Set{Symbol}(), total_groups=:auto,
-       s2z_groups=(), s2z_rho=nothing, held_out=(), _frozen_preproc=nothing) = begin
+       s2z_groups=(), s2z_rho=nothing, s2z_coordinates=:contrasts, held_out=(),
+       _frozen_preproc=nothing) = begin
     cv_groups = cv_groups isa Set ? cv_groups : Set{Symbol}(cv_groups)
     centered_groups = centered_groups isa Set ? centered_groups : Set{Symbol}(centered_groups)
     s2z_selected = Set(s2z_groups isa Symbol ? (s2z_groups,) : s2z_groups)
@@ -3325,7 +3337,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
         s2z_groups=s2z_selected)
     data[_SB_TOTAL_PLANS_KEY] = total_plans
     s2z_plans = _sb_plan_s2zs(brmi,prepared,effect_overrides,s2z_selected,s2z_rho;
-                              cv_groups,centered_groups)
+                              cv_groups,centered_groups,coordinates=s2z_coordinates)
     data[_SB_S2Z_PLANS_KEY] = s2z_plans
     for plan in values(total_plans), key in plan.claimed
         delete!(id_buckets,key)
@@ -4263,14 +4275,15 @@ function generative_plan(builder::Function, df;
                          mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
                          centered_groups=Set{Symbol}(),
                          total_groups=:auto, s2z_groups=(), s2z_rho=nothing,
-                         held_out=())
+                         s2z_coordinates=:contrasts, held_out=())
     brmi = Base.invokelatest(builder, df)
     brmi isa BRMI || error(
         "generative_plan: builder returned $(typeof(brmi)); expected a BRMI from `@brm begin ... end`")
     cv_groups = cv_groups isa Set ? cv_groups : Set{Symbol}(cv_groups)
     centered_groups = centered_groups isa Set ? centered_groups : Set{Symbol}(centered_groups)
     _generative_plan(SBBRMI(brmi; mod, cv_groups, centered_groups, total_groups,
-                            s2z_groups, s2z_rho, held_out), builder, cv_groups)
+                            s2z_groups, s2z_rho, s2z_coordinates, held_out),
+                      builder, cv_groups)
 end
 
 function generative_plan(plan::GenerativePlan, new_df;
@@ -11254,7 +11267,8 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     cov = _sb_gp_cov(kw, :hsgp)
     period = _sb_gp_period(kw, :hsgp, cov)
     cov === :periodic && return _sb_hsgp_periodic_term!(
-        stmts, data, t, names, raw, is_raw, K, kw, period, term_overrides)
+        stmts, data, t, names, raw, is_raw, K, kw, period, term_overrides,
+        target)
     suffix, col_name = _sb_unique_structured_term_names(
         stmts, :hsgp, join(string.(names), "_"), target)
     centeredness = _brm_hsgp_centeredness(kw, prod(K))
@@ -11418,7 +11432,7 @@ end
 # spelling is not implemented, so every such keyword is refused by name rather
 # than silently ignored.
 function _sb_hsgp_periodic_term!(stmts, data, t, names, raw, is_raw, K, kw,
-                                 period, term_overrides)
+                                 period, term_overrides, target=nothing)
     n_axes = length(names)
     n_axes == 1 || error(
         "sbimpl: `hsgp(...; cov=:periodic)` supports exactly one axis, got $n_axes")
@@ -11442,9 +11456,14 @@ function _sb_hsgp_periodic_term!(stmts, data, t, names, raw, is_raw, K, kw,
     isempty(axis) && error("sbimpl: `hsgp($x)` cannot use an empty axis")
     all(isfinite, axis) || error("sbimpl: `hsgp($x)` requires finite values")
 
-    PHI_name = Symbol(:PHI_hsgp_, x)
-    harmonics_name = Symbol(:harmonics_hsgp_, x)
-    rho_lower_name = Symbol(:rho_lower_hsgp_, x)
+    # Carrier disambiguation follows the mainline `hsgp` path: the first
+    # `hsgp(x; cov=:periodic)` keeps `hsgp_<x>`; a repeat over the same axis
+    # takes `hsgp_<target>_<x>` (snag periodic-hsgp-sh-2b41252b).
+    suffix, col_name = _sb_unique_structured_term_names(
+        stmts, :hsgp, string(x), target)
+    PHI_name = Symbol(:PHI_hsgp_, suffix)
+    harmonics_name = Symbol(:harmonics_hsgp_, suffix)
+    rho_lower_name = Symbol(:rho_lower_hsgp_, suffix)
     _sb_hsgp_periodic_frozen_check(data, PHI_name, names, K1, period)
     basis = _brm_hsgp_basis_state(
         (axis,), (K1,), :periodic, true, period)
@@ -11455,7 +11474,6 @@ function _sb_hsgp_periodic_term!(stmts, data, t, names, raw, is_raw, K, kw,
         (; cov=:periodic, period, K=K1, iso=true,
          harmonics_key=harmonics_name, rho_lower_key=rho_lower_name),
         names, false))
-    col_name = Symbol(:hsgp_, x)
     submodel = _sb_gp_submodel_expr(:_sb_hsgp_periodic, term_overrides, t)
     push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
         submodel, term_overrides, t; PHI=PHI_name,
