@@ -5,6 +5,8 @@
 # bindings). Split out so transpile probes can include the builders without
 # running the record loop.
 
+using SHA, Statistics  # batch 8: sha-pinned mcycle.csv data prep
+
 # rate_2: two independent Beta-Binomials. (@brm refused: vector-of-sampled-
 # params likelihood arg cannot lift to Stan.)
 function rate_2_s()
@@ -1554,4 +1556,87 @@ function mnist_logistic_s()
         y ~ mnist_cat(W, Xt, b, C)
     end
 end
+
+# Batch 8: the one portable model among RK examples/ (6) — brm_hsgp (the
+# other five are sampler/stats/AD infrastructure with no posterior, hence
+# documented no-counterparts: manual_derivative_rule, nutpie adaptation,
+# nuts workflow + runtime, online_stats).
+#
+# HSGP weight family: the z-prior (weights pulled back through the
+# centering) plus the centering Jacobian live on the fresh-sampled v, since
+# densities over the computed z have no `~` spelling.
+@deffun begin
+    @lpxf hsgp_v_lpdf(v::vector[K], ls::vector[K], c::vector[K])::real = begin
+        rv = 0.0
+        for k in 1:K
+            z = v[k] * exp(-c[k] * ls[k])
+            rv += normal_lpdf(z, 0.0, 1.0) - c[k] * ls[k]
+        end
+        rv
+    end
+    hsgp_v_lpdfs(v::vector[K], ls::vector[K], c::vector[K])::real =
+        hsgp_v_lpdf(v, ls, c)
+    hsgp_v_rng(vector[K], ls::vector[K], c::vector[K])::vector[K] = begin
+        out::vector[K]
+        for k in 1:K
+            out[k] = normal_rng(0.0, 1.0)
+        end
+        out
+    end
+end
+
+# Motorcycle data prep mirroring BRMHSGPExample.motorcycle_data exactly
+# (same bytes: sha-pinned CSV under the committed RK pin).
+function _mcycle_data()
+    path = joinpath(@__DIR__, ".bootstrap", "reactivekernels-bb2a2e0fe058",
+        "examples", "data", "mcycle.csv")
+    bytes2hex(sha256(read(path))) ==
+        "b89a1e4eb0391a982b32be3e378df00e8593ff9971e9425e9c5d7929b74f9801" ||
+        error("mcycle data hash mismatch")
+    lines = readlines(path)
+    first(lines) == "rownames,times,accel" || error("unexpected mcycle header")
+    rows = split.(lines[2:end], ',')
+    times = parse.(Float64, getindex.(rows, 2))
+    accel = parse.(Float64, getindex.(rows, 3))
+    length(times) == 133 || error("expected 133 observations")
+    lo, hi = extrema(times)
+    x = @. -1 + 2 * (times - lo) / (hi - lo)
+    y = accel ./ std(accel)
+    modes = collect(1.0:20.0)
+    half_width = 1.5
+    freq = modes .* (pi / (2 * half_width))
+    basis = sin.((x .+ half_width) * transpose(freq)) ./ sqrt(half_width)
+    (; y=y, basis=basis, fsq=freq .^ 2)
+end
+
+# brm_hsgp: heteroscedastic HSGP with online-selected centeredness, at a
+# FIXED centering (the source's live HAVE c rides as data; the two endpoint
+# cases pin both centerings). LogNormal(0,4) hypers native (Stan adds the
+# Jacobian exactly as the source's hand term).
+function _brm_hsgp_s(cfill::Float64)
+    d = _mcycle_data()
+    cmu = fill(cfill, 20)
+    csg = fill(cfill, 20)
+    return @slic (; y=d.y, basis=d.basis, fsq=d.fsq, cmu=cmu, csg=csg,
+        K=20, N=length(d.y)) begin
+        rho_mu ~ lognormal(0, 4; lower=0.0)
+        sd_mu ~ lognormal(0, 4; lower=0.0)
+        rho_sg ~ lognormal(0, 4; lower=0.0)
+        sd_sg ~ lognormal(0, 4; lower=0.0)
+        ls_mu = log(sd_mu) + 0.5 * log(rho_mu) + 0.25 * log(2 * pi) -
+            0.25 * exp(2 * log(rho_mu)) * fsq
+        ls_sg = log(sd_sg) + 0.5 * log(rho_sg) + 0.25 * log(2 * pi) -
+            0.25 * exp(2 * log(rho_sg)) * fsq
+        v_mu::vector[K] ~ hsgp_v(ls_mu, cmu)
+        v_sg::vector[K] ~ hsgp_v(ls_sg, csg)
+        w_mu = v_mu .* exp((1 .- cmu) .* ls_mu)
+        w_sg = v_sg .* exp((1 .- csg) .* ls_sg)
+        mu = basis * w_mu
+        lsg = basis * w_sg
+        y ~ normal(mu, exp(lsg))
+    end
+end
+
+brm_hsgp_nc_s() = _brm_hsgp_s(0.0)
+brm_hsgp_c_s() = _brm_hsgp_s(1.0)
 

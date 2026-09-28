@@ -134,10 +134,15 @@ const _S_BATCH7 = (
     ("mnist_logistic", mnist_logistic_s, 0.0, ""),
 )
 
+const _S_BATCH8 = (
+    ("brm_hsgp_nc", brm_hsgp_nc_s, 0.0, ""),
+    ("brm_hsgp_c", brm_hsgp_c_s, 0.0, ""),
+)
+
 for (_label, _cases) in (("s/batch1", _S_BATCH1), ("s/batch2", _S_BATCH2),
         ("s/batch3", _S_BATCH3), ("s/batch4", _S_BATCH4),
         ("s/batch5", _S_BATCH5), ("s/batch6", _S_BATCH6),
-        ("s/batch7", _S_BATCH7))
+        ("s/batch7", _S_BATCH7), ("s/batch8", _S_BATCH8))
     open(OUT, "a") do io
         for t in _cases
             (case, build, offset, reason) = t[1:4]
