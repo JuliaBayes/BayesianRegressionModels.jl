@@ -469,7 +469,9 @@ const _RK_ADMITTED_SPELLINGS =
     "`s ~ Dirichlet(...)`, `y ~ Categorical(s)` + `s ~ Dirichlet(...)`, " *
     "slice-2 group A: `y ~ Bernoulli(p)` / `H ~ Binomial(n, p)` + " *
     "`probit(p)` / `cloglog(p) ~ ...`, `y ~ Beta(mu*kappa, " *
-    "(1-mu)*kappa)` + `logit(mu) ~ ...`, group B: `y ~ LocationScale(mu, " *
+    "(1-mu)*kappa)` + `logit(mu) ~ ...` (`kappa` a `log(kappa) ~ ...` " *
+    "predictor, sampled parameter, scalar assignment, or positive " *
+    "literal), group B: `y ~ LocationScale(mu, " *
     "s, TDist(nu))` + `mu ~ ...`, group C: `c ~ ZeroInflatedPoisson(lambda, " *
     "zi)` + `log(lambda) ~ ...`, `[y1, y2] ~ " *
     "MvNormalCholesky([mu1, mu2], L)` + `L ~ LKJCovarianceFactor(K; " *
@@ -769,46 +771,55 @@ end
 # Beta mean-concentration form: `Beta(mu*kappa, (1-mu)*kappa)` with the
 # SAME mu (the linear predictor itself) and the SAME kappa in both
 # positions — mirrors the thin layer's structural-match rule. Either
-# multiplication order admits; anything else fails closed. Returns the
-# concentration value.
-function _rk_beta_shape_args(args, predictor::Symbol, response::Symbol,
-        parameters::Set{Symbol}, assignments::Set{Symbol},
+# multiplication order admits; anything else fails closed. The
+# concentration is a scalar (sampled parameter / scalar assignment /
+# positive literal) or a `log(kappa)` scale predictor (the VonMises
+# precedent). Returns `(concentration, concentration_predictor,
+# location)`.
+function _rk_beta_shape_args(args, candidates::Vector{Symbol},
+        response::Symbol, parameters::Set{Symbol}, assignments::Set{Symbol},
         consts::Dict{Symbol,Float64}, aliases::Dict{Symbol,Symbol})
     prefix = "RK backend"
+    length(candidates) == 1 || length(candidates) == 2 || error(
+        "$prefix: response `$response` `Beta` takes one location " *
+        "predictor plus an optional concentration predictor")
+    # One candidate renders exactly the old messages; two spell the location
+    # as a metavariable (it is identified by the complement check below).
+    loc = length(candidates) == 1 ? string(only(candidates)) : "<location>"
     length(args) == 2 || error(
         "$prefix: response `$response` `Beta` needs `(a, b)`; write " *
-        "`Beta($predictor*kappa, (1-$predictor)*kappa)` with a " *
-        "`logit($predictor)` predictor")
+        "`Beta($loc*kappa, (1-$loc)*kappa)` with a " *
+        "`logit($loc)` predictor")
     main_factors = _rk_beta_split_product(
-        args[1], predictor, response, "first")
+        args[1], loc, response, "first")
     comp_factors = _rk_beta_split_product(
-        args[2], predictor, response, "second")
+        args[2], loc, response, "second")
+    location = length(candidates) == 1 ? only(candidates) :
+        _rk_beta_location_candidate(main_factors, comp_factors,
+            candidates, response)
     main_mu, main_kappa = _rk_beta_orient_factors(main_factors,
-        f -> _rk_is_predictor_ref(f, predictor), predictor, response,
-        "first", "`$predictor*kappa`")
+        f -> _rk_is_predictor_ref(f, location), location, response,
+        "first", "`$location*kappa`")
     comp_mu, comp_kappa = _rk_beta_orient_factors(comp_factors,
-        f -> _rk_beta_is_complement(f, predictor), predictor, response,
-        "second", "`(1-$predictor)*kappa`")
+        f -> _rk_beta_is_complement(f, location), location, response,
+        "second", "`(1-$location)*kappa`")
     _rk_gamma_same_alpha(main_kappa, comp_kappa) || error(
         "$prefix: response `$response` `Beta` concentration must be " *
-        "identical in both positions (`Beta($predictor*kappa, " *
-        "(1-$predictor)*kappa)`); distinct concentrations are out of " *
+        "identical in both positions (`Beta($location*kappa, " *
+        "(1-$location)*kappa)`); distinct concentrations are out of " *
         "slice 2")
-    # Scalar-only: Beta-kappa predictors are deferred (decision 005dq0u),
-    # so the concentration never resolves against predictor candidates.
     concentration, concentration_predictor = _rk_scale_argument(
         main_kappa, parameters, assignments, consts,
-        aliases, response, "concentration", Symbol[])
-    concentration_predictor === nothing || error(
-        "$prefix: response `$response` `Beta` concentration cannot be a " *
-        "linear predictor (predictor-fed concentration is not admitted)")
-    concentration
+        aliases, response, "concentration", candidates)
+    concentration, concentration_predictor, location
 end
 
 # Split one `Beta` position into its two factors: a bare product, no
 # keywords. Orientation (which factor is mu-side) happens in
-# `_rk_beta_orient_factors`, so either multiplication order admits.
-function _rk_beta_split_product(position, predictor::Symbol,
+# `_rk_beta_orient_factors`, so either multiplication order admits. The
+# spelling takes a metavariable when two candidates leave the location
+# unidentified (the Gamma `<location>` precedent).
+function _rk_beta_split_product(position, predictor::Union{Symbol,AbstractString},
         response::Symbol, which::String)
     position isa ExprColumn && getf(position) === (*) ||
         error("RK backend: response `$response` `Beta` $which argument " *
@@ -840,6 +851,22 @@ _rk_beta_is_complement(factor, predictor::Symbol) =
         length(cargs) == 2 && cargs[1] isa Number && cargs[1] == 1 &&
             _rk_is_predictor_ref(cargs[2], predictor)
     end
+
+# Two-candidate Beta: the location is the candidate appearing bare in the
+# first position with its `(1-.)` complement in the second (the kappa
+# predictor rides the other factor in both). Anything else fails closed
+# naming the admitted form.
+function _rk_beta_location_candidate(main_factors, comp_factors,
+        candidates::Vector{Symbol}, response::Symbol)
+    found = Symbol[c for c in candidates
+        if any(f -> _rk_is_predictor_ref(f, c), main_factors) &&
+            any(f -> _rk_beta_is_complement(f, c), comp_factors)]
+    length(found) == 1 || error(
+        "RK backend: response `$response` `Beta` arguments must be " *
+        "`<location>*kappa` / `(1-<location>)*kappa` with the same " *
+        "location and identical kappa")
+    only(found)
+end
 
 function _rk_positive_literal(x::Number, response::Symbol, what::String)
     prefix = "RK backend"
@@ -1239,15 +1266,16 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
         return (; family=:categorical_logit, link=:logit, scale=nothing,
             scale_predictor=nothing, trials=nothing, location=lead)
     elseif head === Beta
-        # Beta-kappa predictors are deferred (decision 005dq0u): one
-        # location predictor only — a second LP fails closed here with a
-        # plain error, not an uninterpretable `only` throw.
-        length(candidates) == 1 || error(
-            "$prefix: response `$response` `Beta` takes one location " *
-            "predictor; predictor-fed concentration is not admitted")
-        predictor = only(candidates)
-        concentration = _rk_beta_shape_args(args, predictor, response,
-            parameters, assignments, consts, aliases)
+        concentration, concentration_predictor, predictor =
+            _rk_beta_shape_args(args, candidates, response,
+                parameters, assignments, consts, aliases)
+        # Log-only concentration predictor (the VonMises precedent): a
+        # concentration is positive, so only the `log` link inverts.
+        concentration_predictor !== nothing &&
+            predictor_link[concentration_predictor] !== :log && error(
+                "$prefix: response `$response` `Beta` concentration " *
+                "predictor `$(concentration_predictor)` must be log-link; " *
+                "write a `log(kappa) ~ ...` submodel")
         plink = predictor_link[predictor]
         triple = (:beta_logit, plink, plink)
         triple in _RK_ADMITTED_TRIPLES || error(
@@ -1256,7 +1284,8 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
             "(1-mu)*kappa)` with a `logit(mu)` predictor (slice 2 " *
             "admits a logit mu link only)")
         return (; family=:beta_logit, link=plink, scale=concentration,
-            scale_predictor=nothing, trials=nothing, location=predictor)
+            scale_predictor=concentration_predictor, trials=nothing,
+            location=predictor)
     elseif head === LocationScale
         length(args) == 3 || error(
             "$prefix: response `$response` `LocationScale` needs " *
@@ -1821,8 +1850,9 @@ end
 # `Beta(mu*kappa, (1-mu)*kappa)` with the SAME mu and the SAME kappa in
 # both positions (mirrors the single-family structural-match rule); mu
 # is a `logit(mu)` predictor, a sampled parameter, or a [0, 1] literal.
-# The concentration stays scalar-only (decision 005dq0u, like
-# single-family). Returns `(mu_kind, mu_value, concentration)`.
+# The concentration stays scalar-only in mixture v1 (predictor-fed
+# mixture concentration is out of scope; single-family `Beta` admits a
+# `log(kappa)` predictor). Returns `(mu_kind, mu_value, concentration)`.
 function _rk_mixture_beta_args(cargs, k::Int, candidates::Vector{Symbol},
         predictor_link::Dict{Symbol,Symbol}, parameters::Set{Symbol},
         assignments::Set{Symbol}, consts::Dict{Symbol,Float64},

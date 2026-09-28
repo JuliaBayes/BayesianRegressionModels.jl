@@ -847,6 +847,33 @@ end
     @test likelihood.interval == (0.0, 6.283185307179586)
 end
 
+@testset "Beta modeled-kappa plan shapes" begin
+    # The nuisance-kappa P2 shape: logit-link location + log-link kappa
+    # submodel; kappa rides the scale-predictor slot (the VonMises
+    # precedent).
+    brmi = @brm dfp begin
+        logit(mu) ~ 1 + x
+        log(kappa) ~ 1 + z
+        prop ~ Beta(mu * kappa, (1 - mu) * kappa)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:beta_logit, :logit)
+    @test likelihood.predictor === :mu
+    @test isnothing(likelihood.scale)
+    @test likelihood.scale_predictor === :kappa
+    # Either multiplication order admits; the plan normalizes.
+    brmi = @brm dfp begin
+        logit(mu) ~ 1 + x
+        log(kappa) ~ 1 + z
+        prop ~ Beta(kappa * mu, kappa * (1 - mu))
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:beta_logit, :logit)
+    @test likelihood.predictor === :mu
+    @test isnothing(likelihood.scale)
+    @test likelihood.scale_predictor === :kappa
+end
+
 @testset "group-C lognormal plan shapes" begin
     # The pair-probe L1 shape: identity-link location + sampled
     # scale over a strictly positive response.
@@ -2761,10 +2788,10 @@ end
 end
 
 # Slice-2 group-A scope edges (per the rk:brm scoping answer): no
-# weights/evidence on the new triples, logit-only Beta mu, no inline
-# cloglog, identical kappa in both Beta positions, and no
-# identity-predictor `Bernoulli(probit(eta))` spelling (LHS-link form
-# only — the thin-layer link words are peel-and-discard).
+# weights/evidence on the new triples, logit-only Beta mu, log-only Beta
+# kappa predictor, no inline cloglog, identical kappa in both Beta
+# positions, and no identity-predictor `Bernoulli(probit(eta))` spelling
+# (LHS-link form only — the thin-layer link words are peel-and-discard).
 @testset "fail closed: group-A scope edges" begin
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         probit(p) ~ 1 + x
@@ -2807,6 +2834,36 @@ end
         logit(mu) ~ 1 + x
         kappa ~ Gamma(2.0, 1000.0)
         prop ~ Beta(logistic(mu) * kappa, (1 - logistic(mu)) * kappa)
+    end)
+    # Kappa submodel must be log-link (only log inverts into (0, Inf)).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm dfp begin
+        logit(mu) ~ 1 + x
+        kappa ~ 1 + z
+        prop ~ Beta(mu * kappa, (1 - mu) * kappa)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm dfp begin
+        logit(mu) ~ 1 + x
+        logit(kappa) ~ 1 + z
+        prop ~ Beta(mu * kappa, (1 - mu) * kappa)
+    end)
+    # The complement names the location: a swapped complement fails closed.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm dfp begin
+        logit(mu) ~ 1 + x
+        log(kappa) ~ 1 + z
+        prop ~ Beta(mu * kappa, (1 - kappa) * kappa)
+    end)
+    # The location predictor cannot feed the kappa slot too (the
+    # log-link pin fires first).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm dfp begin
+        logit(mu) ~ 1 + x
+        prop ~ Beta(mu * mu, (1 - mu) * mu)
+    end)
+    # A third referenced predictor fits neither slot.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm dfp begin
+        logit(mu) ~ 1 + x
+        log(kappa) ~ 1 + z
+        log(extra) ~ 1 + x
+        prop ~ Beta(mu * kappa, (1 - extra) * kappa)
     end)
 end
 

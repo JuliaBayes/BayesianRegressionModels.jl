@@ -2689,6 +2689,42 @@ end
     @test _rk_query(backend, :posterior, u) ≈ ll + pr
     _check_parity_gradient(backend, u)
 end
+
+@testset "rk parity beta modeled kappa" begin
+    # The nuisance-kappa P2 shape: logit-link location + log-link kappa
+    # submodel over the shared N=6 probe columns.
+    p2_cols = (;
+        x=[0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
+        z=[1.0, 0.5, -0.5, 1.5, 0.0, -1.0],
+        prop=[0.2, 0.7, 0.4, 0.6, 0.3, 0.5],
+    )
+    brmi = @brm p2_cols begin
+        logit(mu) ~ 1 + x
+        log(kappa) ~ 1 + z
+        prop ~ Beta(mu * kappa, (1 - mu) * kappa)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 4
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+        (:coefficient, :kappa_coef, 2, :identity),
+    ]
+    u = [0.2, -0.1, 0.3, 0.15]
+    nt = constrain(layout, u)
+    b = Vector(nt.mu)
+    c = Vector(nt.kappa)
+    mu = logistic.(b[1] .+ b[2] .* p2_cols.x)
+    kap = exp.(c[1] .+ c[2] .* p2_cols.z)
+    ll = sum(logpdf.(Beta.(mu .* kap, (1 .- mu) .* kap), p2_cols.prop))
+    pr = sum(logpdf.(Normal(0, 1), u))
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # All-identity layout: no Jacobian.
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    _check_parity_gradient(backend, u)
+end
 # term-multimembership oracles (re-derived from the SB submodels, never
 # the emitter): flat row-major mm index/weights over the sort-ordered
 # union [a,b,c]; per-group gr strata [1,1,2,2].

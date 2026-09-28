@@ -1779,6 +1779,24 @@ end
             Expr(:call, :./,
                 Expr(:., :exp, Expr(:tuple, :mu)),
                 Expr(:., :exp, Expr(:tuple, :alpha))))))
+    # Beta concentration inverts at both use positions; the fused head
+    # takes the bare location with the inverted concentration.
+    brmi = @brm dfp begin
+        logit(mu) ~ 1 + x
+        log(kappa) ~ 1 + z
+        prop ~ Beta(mu * kappa, (1 - mu) * kappa)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    mu_log = Expr(:., :logistic, Expr(:tuple, :mu))
+    kap = Expr(:., :exp, Expr(:tuple, :kappa))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] ==
+        Expr(:call, :.~, :prop,
+            Expr(:., :Beta, Expr(:tuple,
+                Expr(:call, :.*, mu_log, kap),
+                Expr(:call, :.*, Expr(:call, :.-, 1, mu_log), kap))))
+    @test BRM._rk_emit_ast(plan, true).main.args[end] ==
+        Expr(:call, :.~, :prop,
+            Expr(:., :BetaLogit, Expr(:tuple, :mu, kap)))
 end
 
 @testset "submodel defs resolve at every call" begin
