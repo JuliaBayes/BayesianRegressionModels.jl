@@ -39,6 +39,7 @@ using Distributions: Beta, Cauchy, Dirichlet, Exponential, Gamma,
                      Normal, Poisson, TDist, Uniform, VonMises, cdf, logcdf,
                      logccdf, logpdf, truncated
 using Enzyme
+using LinearAlgebra: cholesky, Symmetric
 using LogDensityProblems
 using LogExpFunctions: logistic, logit
 using ReactiveKernels: prepare
@@ -2238,6 +2239,121 @@ end
     @test all(isfinite, grad)
     @test grad ≈
         _findiff_grad(w -> LogDensityProblems.logdensity(problem, w), u) rtol = 1e-5 atol = 1e-7
+end
+
+# Exact-GP parity cases (pair term-gp): the committed oracles are
+# Distributions.jl loops over the constrained point; the SB-point
+# comparison (same models, SB brief values) rides the verdict probe,
+# not the committed suite.
+_parity_cols_gp = (;
+    x = [0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
+    y = [1.0, 2.0, 1.5, 2.5, 3.0, 2.0],
+)
+
+# Exact-GP reference: Stan `gp_exp_quad_cov` + diagonal jitter verbatim
+# (1d iso): K[i,j] = s^2 exp(-(x_i-x_j)^2/(2 rho^2)), f = L z.
+function _ref_gp_exp_quad_f(x, rho, sigma_gp, z; jitter=1e-9)
+    n = length(x)
+    K = Matrix{Float64}(undef, n, n)
+    for i in 1:n, j in 1:n
+        K[i, j] = sigma_gp^2 * exp(-(x[i] - x[j])^2 / (2 * rho^2))
+    end
+    for i in 1:n
+        K[i, i] += jitter
+    end
+    return cholesky(Symmetric(K)).L * z
+end
+
+@testset "rk parity exact gp iso" begin
+    brmi = @brm _parity_cols_gp begin
+        mu ~ 1 + gp(x)
+        y ~ Normal(mu, sigma)
+        effect(mu, Intercept) ~ Normal(0, 5)
+        sigma ~ Exponential(1)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 10
+    # The intercept rides the `popefs_normal_i_gp` submodel, which the
+    # thin layer expands to a sampled `mu_b1` (corpus-18 shape); the
+    # empty `y_loc_coef` is the fused-heads no-GLM-object artifact.
+    @test _layout_signature(layout) == [
+        (:coefficient, :y_loc_coef, 0, :identity),
+        (:sampled, :rho_gp, 1, :exp),
+        (:sampled, :sigma_gp, 1, :exp),
+        (:sampled, :mu_b1, 1, :identity),
+        (:sampled, :sigma, 1, :exp),
+        (:plate, :z_gp, 6, :identity),
+    ]
+    u = collect(range(-0.4, 0.4; length = layout.total))
+    nt = constrain(layout, u)
+    @test isempty(nt.y_loc)
+    f = _ref_gp_exp_quad_f(_parity_cols_gp.x, nt.rho_gp, nt.sigma_gp,
+        Vector(nt.z_gp))
+    ll = sum(logpdf.(Normal.(nt.mu_b1 .+ f, nt.sigma), _parity_cols_gp.y))
+    pr = logpdf(Normal(0, 5), nt.mu_b1) +
+        logpdf(Exponential(1), nt.sigma) +
+        logpdf(LogNormal(0, 1), nt.rho_gp) +
+        logpdf(LogNormal(0, 1), nt.sigma_gp) +
+        sum(logpdf.(Normal(0, 1), nt.z_gp))
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # Jacobian: rho/sigma_gp/sigma exps (u[1], u[2], u[4]); the empty
+    # coefficient and identity mu_b1/z_gp contribute nothing.
+    @test logjac(layout, u) ≈ u[1] + u[2] + u[4]
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[1] + u[2] + u[4]
+    _check_parity_gradient(backend, u)
+end
+
+# Periodic-GP reference: Stan `gp_periodic_cov` + diagonal jitter verbatim
+# (1d iso): K[i,j] = s^2 exp(-2 sin^2(pi |x_i-x_j|/period)/rho^2), f = L z.
+function _ref_gp_periodic_f(x, rho, sigma_gp, z; period=1.0, jitter=1e-9)
+    n = length(x)
+    K = Matrix{Float64}(undef, n, n)
+    for i in 1:n, j in 1:n
+        d = abs(x[i] - x[j])
+        K[i, j] = sigma_gp^2 * exp(-2 * sin(pi * d / period)^2 / rho^2)
+    end
+    for i in 1:n
+        K[i, i] += jitter
+    end
+    return cholesky(Symmetric(K)).L * z
+end
+
+@testset "rk parity periodic gp iso" begin
+    brmi = @brm _parity_cols_gp begin
+        mu ~ 1 + gp(x; cov=:periodic, period=1.0)
+        y ~ Normal(mu, sigma)
+        effect(mu, Intercept) ~ Normal(0, 5)
+        sigma ~ Exponential(1)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 10
+    @test _layout_signature(layout) == [
+        (:coefficient, :y_loc_coef, 0, :identity),
+        (:sampled, :rho_gp, 1, :exp),
+        (:sampled, :sigma_gp, 1, :exp),
+        (:sampled, :mu_b1, 1, :identity),
+        (:sampled, :sigma, 1, :exp),
+        (:plate, :z_gp, 6, :identity),
+    ]
+    u = collect(range(-0.4, 0.4; length = layout.total))
+    nt = constrain(layout, u)
+    @test isempty(nt.y_loc)
+    f = _ref_gp_periodic_f(_parity_cols_gp.x, nt.rho_gp, nt.sigma_gp,
+        Vector(nt.z_gp); period=1.0)
+    ll = sum(logpdf.(Normal.(nt.mu_b1 .+ f, nt.sigma), _parity_cols_gp.y))
+    pr = logpdf(Normal(0, 5), nt.mu_b1) +
+        logpdf(Exponential(1), nt.sigma) +
+        logpdf(LogNormal(0, 1), nt.rho_gp) +
+        logpdf(LogNormal(0, 1), nt.sigma_gp) +
+        sum(logpdf.(Normal(0, 1), nt.z_gp))
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ u[1] + u[2] + u[4]
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[1] + u[2] + u[4]
+    _check_parity_gradient(backend, u)
 end
 
 # Mixture parity cases (pair fam-mixture, RK 49ebaf1): the committed
