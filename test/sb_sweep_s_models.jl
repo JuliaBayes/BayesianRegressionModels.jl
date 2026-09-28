@@ -929,3 +929,293 @@ function prophet_s()
     end
 end
 
+# Batch 6: marginalized/exact GPs + brms HSGP/splines + BYM2 spatial Poisson.
+#
+# GP covariance helpers (loop-form exp-quad + nugget/jitter, then Cholesky).
+# (@brm refused: latent-`gp` only, no marginalized/GP-algebra surface; note
+# StanBlocks' `gp_exp_quad_cov` call returns an UNTYPED matrix, so even the
+# simple case spells the kernel out — same formula, ~1ulp vs BLAS blocking.)
+@deffun begin
+    gp_regr_chol(x::vector[N], alpha::real, rho::real, sigma::real)::matrix[N,N] = begin
+        K::matrix[N,N]
+        for i in 1:N
+            for j in 1:N
+                d = x[i] - x[j]
+                sq = d * d
+                K[i, j] = alpha * alpha * exp(-0.5 * sq / (rho * rho)) + (i == j ? sigma : 0.0)
+            end
+        end
+        cholesky_decompose(K)
+    end
+    hgp_cov(sq::matrix[Y,Y], s_long::real, l_long::real, s_short::real, l_short::real)::matrix[Y,Y] = begin
+        out::matrix[Y,Y]
+        for i in 1:Y
+            for j in 1:Y
+                out[i, j] = s_long * s_long * exp(-0.5 * sq[i, j] / (l_long * l_long)) +
+                    s_short * s_short * exp(-0.5 * sq[i, j] / (l_short * l_short)) +
+                    (i == j ? 1e-6 : 0.0)
+            end
+        end
+        out
+    end
+    hgp_gpmat(cov::matrix[Y,Y], std::matrix[Y,K])::matrix[Y,K] = begin
+        cholesky_decompose(cov) * std
+    end
+    hgp_state_re(vars::vector[V], sr_ind::int[St], state_std::vector[St])::vector[St] = begin
+        out::vector[St]
+        for i in 1:St
+            out[i] = sqrt(vars[2 + sr_ind[i]]) * state_std[i]
+        end
+        out
+    end
+    hgp_obs_mu(mu::real, year_re::vector[Yo], state_re::vector[St], region_re::vector[Rg], GPr::matrix[Y,Rg], GPs::matrix[Y,St], yi::int[N], si::int[N], ri::int[N])::vector[N] = begin
+        out::vector[N]
+        for n in 1:N
+            out[n] = mu + year_re[yi[n]] + state_re[si[n]] + region_re[ri[n]] +
+                GPr[yi[n], ri[n]] + GPs[yi[n], si[n]]
+        end
+        out
+    end
+    # Kronecker eigenspace marginal (whiten -> scale -> rotate back ->
+    # contract; column-major accumulation to match the source; the Julia-eigen
+    # vs Stan-eigen decompositions differ ~1ulp internally — inside any parity
+    # tolerance, noted here). The _rng is a GQ-only zero draw (unused).
+    @lpxf kron_marg_lpdf(yf::vector[V], x1::vector[n1], var1::real, bw1::real, sigma1::real, L::cholesky_factor_corr[n2])::real = begin
+        Y::matrix[n2,n1]
+        for j in 1:n1
+            for i in 1:n2
+                Y[i, j] = yf[(j - 1) * n2 + i]
+            end
+        end
+        S1::matrix[n1,n1]
+        for i in 1:n1
+            for j in 1:n1
+                d = x1[i] - x1[j]
+                xd = -(d * d)
+                S1[i, j] = var1 * exp(xd * bw1) + (i == j ? 1e-5 : 0.0)
+            end
+        end
+        Q1 = eigenvectors_sym(S1)
+        R1 = eigenvalues_sym(S1)
+        Lam = L * transpose(L)
+        Q2 = eigenvectors_sym(Lam)
+        R2 = eigenvalues_sym(Lam)
+        E::matrix[n2,n1]
+        for j in 1:n1
+            for i in 1:n2
+                E[i, j] = R2[i] * R1[j] + sigma1
+            end
+        end
+        W1 = transpose(Q2) * Y
+        W2 = transpose(Q1) * transpose(W1)
+        Wh = transpose(W2)
+        Sc::matrix[n2,n1]
+        for j in 1:n1
+            for i in 1:n2
+                Sc[i, j] = Wh[i, j] / E[i, j]
+            end
+        end
+        Rt1 = Q2 * Sc
+        Rt2 = Q1 * transpose(Rt1)
+        Rt = transpose(Rt2)
+        acc = 0.0
+        lacc = 0.0
+        for j in 1:n1
+            for i in 1:n2
+                acc += Y[i, j] * Rt[i, j]
+                lacc += log(E[i, j])
+            end
+        end
+        -0.5 * acc - 0.5 * lacc
+    end
+    kron_marg_lpdfs(yf::vector[V], x1::vector[n1], var1::real, bw1::real, sigma1::real, L::cholesky_factor_corr[n2])::real =
+        kron_marg_lpdf(yf, x1, var1, bw1, sigma1, L)
+    kron_marg_rng(vector[V], x1::vector[n1], var1::real, bw1::real, sigma1::real, L::cholesky_factor_corr[n2])::vector[V] =
+        rep_vector(0.0, V)
+    # brms 1-D HSGP contribution: gp = Xgp * (sqrt(spd) .* zgp) with the
+    # exp-quad spectral density at the Laplacian sqrt-eigenvalues. (`pi` is
+    # StanBlocks' bare constant — `pi()` is rejected.)
+    accel_contrib(Xgp::matrix[N,NB], slambda::vector[NB], sdgp::real, lscale::real, zgp::vector[NB])::vector[N] = begin
+        w::vector[NB]
+        for m in 1:NB
+            spd = sdgp * sdgp * sqrt(2 * pi) * lscale * exp(-0.5 * lscale * lscale * slambda[m] * slambda[m])
+            w[m] = sqrt(spd) * zgp[m]
+        end
+        out::vector[N]
+        for i in 1:N
+            acc = 0.0
+            for m in 1:NB
+                acc += Xgp[i, m] * w[m]
+            end
+            out[i] = acc
+        end
+        out
+    end
+    # BYM2: ICAR pairwise-difference prior + soft sum-to-zero over phi.
+    @lpxf icar_s2z_lpdf(phi::vector[N], node1::int[E], node2::int[E], s2z_scale::real)::real = begin
+        acc = 0.0
+        for e in 1:E
+            d = phi[node1[e]] - phi[node2[e]]
+            acc += d * d
+        end
+        -0.5 * acc + normal_lpdf(sum(phi), 0.0, s2z_scale)
+    end
+    icar_s2z_lpdfs(phi::vector[N], node1::int[E], node2::int[E], s2z_scale::real)::real =
+        icar_s2z_lpdf(phi, node1, node2, s2z_scale)
+    icar_s2z_rng(vector[N], node1::int[E], node2::int[E], s2z_scale::real)::vector[N] = begin
+        out::vector[N]
+        for i in 1:N
+            out[i] = normal_rng(0.0, 1.0)
+        end
+        out
+    end
+end
+
+# gp_regr: marginalized exact GP (exp-quad + sigma nugget — sigma, NOT
+# sigma^2), Gamma/Normal/Normal hyperpriors PLAIN.
+function gp_regr_s()
+    M = GPRegrExample
+    y = M.GP_REGR_Y
+    return @slic (; x=M.GP_REGR_X, y=y, N=length(y)) begin
+        rho ~ gamma(25, 4; lower=0.0)
+        alpha ~ normal(0, 2; lower=0.0)
+        sigma ~ normal(0, 1; lower=0.0)
+        L = gp_regr_chol(x, alpha, rho, sigma)
+        y ~ multi_normal_cholesky(rep_vector(0.0, N), L)
+    end
+end
+
+# hierarchical_gp: per-year region/state latent GPs (long+short exp-quad,
+# Cholesky-noncentered) + REs + Dirichlet variance split. GP coefficient
+# matrices sampled via 2-D @plate (Stan-native matrix params).
+function hierarchical_gp_s()
+    M = HierarchicalGPExample
+    Y, Rg, St, Yo = M.HGP_N_YEARS, M.HGP_N_REGIONS, M.HGP_N_STATES, M.HGP_N_YEARS_OBS
+    yrs = collect(1.0:Y)
+    sq = [(yrs[i] - yrs[j])^2 for i in 1:Y, j in 1:Y]
+    return @slic (; y=M.HGP_Y, year_ind=M.HGP_YEAR_IND, state_ind=M.HGP_STATE_IND,
+        region_ind=M.HGP_REGION_IND, state_region_ind=M.HGP_STATE_REGION_IND,
+        sq=sq, Y=Y, Rg=Rg, St=St, Yo=Yo, N=length(M.HGP_Y)) begin
+        @plate for i in 1:Y, r in 1:Rg
+            GP_region_std[i, r] ~ normal(0, 1)
+        end
+        @plate for i in 1:Y, s in 1:St
+            GP_state_std[i, s] ~ normal(0, 1)
+        end
+        year_std::vector[Yo] ~ normal(0, 1)
+        state_std::vector[St] ~ normal(0, 1)
+        region_std::vector[Rg] ~ normal(0, 1)
+        tot_var ~ gamma(3, 3; lower=0.0)
+        prop_var::simplex[17] ~ dirichlet(rep_vector(2.0, 17))
+        mu ~ normal(0.5, 0.5)
+        len_rl ~ weibull(30, 8; lower=0.0)
+        len_sl ~ weibull(30, 8; lower=0.0)
+        len_rs ~ weibull(30, 3; lower=0.0)
+        len_ss ~ weibull(30, 3; lower=0.0)
+        vars = 17.0 * tot_var * prop_var
+        year_re = sqrt(vars[1]) * year_std
+        region_re = sqrt(vars[2]) * region_std
+        state_re = hgp_state_re(vars, state_region_ind, state_std)
+        cov_region = hgp_cov(sq, sqrt(vars[13]), len_rl, sqrt(vars[15]), len_rs)
+        cov_state = hgp_cov(sq, sqrt(vars[14]), len_sl, sqrt(vars[16]), len_ss)
+        GP_region = hgp_gpmat(cov_region, GP_region_std)
+        GP_state = hgp_gpmat(cov_state, GP_state_std)
+        obs_mu = hgp_obs_mu(mu, year_re, state_re, region_re, GP_region, GP_state,
+            year_ind, state_ind, region_ind)
+        y ~ normal(obs_mu, sqrt(vars[17]))
+    end
+end
+
+# kronecker_gp: RBF x LKJ-corr Kronecker marginal via both margins'
+# eigendecompositions (see family note on eigen parity).
+function kronecker_gp_s()
+    M = KroneckerGpExample
+    yf = vec(M.KRON_Y)
+    n1 = length(M.KRON_X1)
+    n2 = size(M.KRON_Y, 1)
+    @assert size(M.KRON_Y, 2) == n1
+    return @slic (; yf=yf, x1=M.KRON_X1, n2=n2) begin
+        var1 ~ lognormal(0, 1; lower=0.0)
+        bw1 ~ cauchy(0, 2.5; lower=0.0)
+        sigma1 ~ lognormal(0, 1; lower=1e-5)
+        L::cholesky_factor_corr[n2] ~ lkj_corr_cholesky(2)
+        yf ~ kron_marg(x1, var1, bw1, sigma1, L)
+    end
+end
+
+# accel_gp: brms HSGP on mu + log-sigma; sdgp half-Student-t NORMALIZED
+# (truncated form: lpdf - log(0.5)). prior_only must be 0.
+function accel_gp_s()
+    M = AccelGPExample
+    @assert !M.ACCEL_GP_PRIOR_ONLY
+    y = M.ACCEL_GP_Y
+    nb1 = size(M.ACCEL_GP_XGP, 2)
+    nbs = size(M.ACCEL_GP_XGP_SIGMA, 2)
+    return @slic (; Y=y, Xgp_1=M.ACCEL_GP_XGP, slambda_1=M.ACCEL_GP_SLAMBDA,
+        Xgp_sigma_1=M.ACCEL_GP_XGP_SIGMA, slambda_sigma_1=M.ACCEL_GP_SLAMBDA_SIGMA,
+        nb1=nb1, nbs=nbs) begin
+        intercept ~ student_t(3, -13, 36)
+        sdgp_1 ~ truncated(student_t, 3, 0, 36; lower=0.0)
+        lscale_1 ~ inv_gamma(1.124909, 0.0177; lower=0.0)
+        zgp_1::vector[nb1] ~ normal(0, 1)
+        intercept_sigma ~ student_t(3, 0, 10)
+        sdgp_s ~ truncated(student_t, 3, 0, 36; lower=0.0)
+        lscale_s ~ inv_gamma(1.124909, 0.0177; lower=0.0)
+        zgp_s::vector[nbs] ~ normal(0, 1)
+        gp_mu = accel_contrib(Xgp_1, slambda_1, sdgp_1, lscale_1, zgp_1)
+        mu = intercept + gp_mu
+        gp_logsigma = accel_contrib(Xgp_sigma_1, slambda_sigma_1, sdgp_s, lscale_s, zgp_s)
+        sigma = exp(intercept_sigma + gp_logsigma)
+        Y ~ normal(mu, sigma)
+    end
+end
+
+# accel_splines: brms penalized splines on mu + log-sigma; sds half-t
+# NORMALIZED, linear effects flat.
+function accel_splines_s()
+    M = AccelSplinesExample
+    @assert !M.ACCEL_PRIOR_ONLY
+    Ks = size(M.ACCEL_XS, 2)
+    knots_1 = size(M.ACCEL_ZS_1_1, 2)
+    Ks_sigma = size(M.ACCEL_XS_SIGMA, 2)
+    knots_sigma_1 = size(M.ACCEL_ZS_SIGMA_1_1, 2)
+    return @slic (; Y=M.ACCEL_Y, Xs=M.ACCEL_XS, Zs_1_1=M.ACCEL_ZS_1_1,
+        Xs_sigma=M.ACCEL_XS_SIGMA, Zs_sigma_1_1=M.ACCEL_ZS_SIGMA_1_1,
+        Ks=Ks, knots_1=knots_1, Ks_sigma=Ks_sigma, knots_sigma_1=knots_sigma_1) begin
+        Intercept ~ student_t(3, -13, 36)
+        bs::vector[Ks] ~ flat()
+        zs_1_1::vector[knots_1] ~ normal(0, 1)
+        sds_1_1 ~ truncated(student_t, 3, 0, 36; lower=0.0)
+        Intercept_sigma ~ student_t(3, 0, 10)
+        bs_sigma::vector[Ks_sigma] ~ flat()
+        zs_sigma_1_1::vector[knots_sigma_1] ~ normal(0, 1)
+        sds_sigma_1_1 ~ truncated(student_t, 3, 0, 36; lower=0.0)
+        s_1_1 = sds_1_1 * zs_1_1
+        s_sigma_1_1 = sds_sigma_1_1 * zs_sigma_1_1
+        mu = Intercept + Xs * bs + Zs_1_1 * s_1_1
+        sigma = exp(Intercept_sigma + Xs_sigma * bs_sigma + Zs_sigma_1_1 * s_sigma_1_1)
+        Y ~ normal(mu, sigma)
+    end
+end
+
+# bym2: Morris/Riebler BYM2 spatial Poisson; ICAR + soft s2z via the custom
+# joint family (densities over param gathers have no `~` spelling); rho ~
+# Beta(0.5,0.5), sigma half-normal PLAIN.
+function bym2_s()
+    M = Bym2OffsetOnlyExample
+    @assert all(M.BYM2_E .> 0)
+    N = length(M.BYM2_Y)
+    return @slic (; y=M.BYM2_Y, node1=M.BYM2_NODE1, node2=M.BYM2_NODE2,
+        log_E=log.(M.BYM2_E), scaling_factor=M.BYM2_SCALING_FACTOR,
+        s2z_scale=0.001 * N, N=N) begin
+        beta0 ~ normal(0, 1)
+        sigma ~ normal(0, 1; lower=0.0)
+        rho ~ beta(0.5, 0.5; lower=0.0, upper=1.0)
+        theta::vector[N] ~ normal(0, 1)
+        phi::vector[N] ~ icar_s2z(node1, node2, s2z_scale)
+        convolved = sqrt(1 - rho) * theta + sqrt(rho / scaling_factor) * phi
+        eta = log_E + beta0 + convolved * sigma
+        y ~ poisson_log(eta)
+    end
+end
+

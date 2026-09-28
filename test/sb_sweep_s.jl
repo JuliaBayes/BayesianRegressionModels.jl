@@ -20,7 +20,9 @@ using ReactiveKernelsPPLExamples: Rate2Example, Rate4Example, DugongsGrowthExamp
     MbExample, MhExample, MtExample, MthModelExample, MtbhModelExample,
     LsatExample, Irt2plExample, Hier2plExample, TwoplLatentRegIrtExample,
     DogsHierarchicalExample, DogsNonhierarchicalExample,
-    LogisticRegressionRHSExample, StateSpaceStochasticExample, ProphetExample
+    LogisticRegressionRHSExample, StateSpaceStochasticExample, ProphetExample,
+    GPRegrExample, HierarchicalGPExample, KroneckerGpExample, AccelGPExample,
+    AccelSplinesExample, Bym2OffsetOnlyExample
 
 # Builders + custom families live in sb_sweep_s_models.jl so transpile probes
 # can include them without running the record loop below.
@@ -112,9 +114,18 @@ const _S_BATCH5 = (
     ("prophet", prophet_s, 0.0, ""),
 )
 
+const _S_BATCH6 = (
+    ("gp_regr", gp_regr_s, 0.0, ""),
+    ("hierarchical_gp", hierarchical_gp_s, 0.0, ""),
+    ("kronecker_gp", kronecker_gp_s, 0.0, ""),
+    ("accel_gp", accel_gp_s, 0.0, ""),
+    ("accel_splines", accel_splines_s, 0.0, ""),
+    ("bym2", bym2_s, 0.0, ""),
+)
+
 for (_label, _cases) in (("s/batch1", _S_BATCH1), ("s/batch2", _S_BATCH2),
         ("s/batch3", _S_BATCH3), ("s/batch4", _S_BATCH4),
-        ("s/batch5", _S_BATCH5))
+        ("s/batch5", _S_BATCH5), ("s/batch6", _S_BATCH6))
     open(OUT, "a") do io
         for t in _cases
             (case, build, offset, reason) = t[1:4]
