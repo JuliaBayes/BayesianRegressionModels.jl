@@ -14,7 +14,9 @@ include(joinpath(@__DIR__, "sb_sweep_common.jl"))
 
 using ReactiveKernelsPPLExamples: Rate2Example, Rate4Example, DugongsGrowthExample,
     PilotsExample, GLMMPoissonExample, SumToZeroExample, MVNormalRegressionExample,
-    EightSchoolsExample
+    EightSchoolsExample, NormalMixtureExample, NormalMixtureKExample,
+    LowDimGaussMixExample, LowDimGaussMixCollapseExample, SeedsExample,
+    SeedsCenteredExample, SurgicalExample, SurveyModelExample
 
 # Builders + custom families live in sb_sweep_s_models.jl so transpile probes
 # can include them without running the record loop below.
@@ -74,7 +76,19 @@ const _S_BATCH2 = (
     ("mvnormal_prec_chol", mvnormal_prec_chol_s, 0.0, ""),
 )
 
-for (_label, _cases) in (("s/batch1", _S_BATCH1), ("s/batch2", _S_BATCH2))
+const _S_BATCH3 = (
+    ("normal_mixture", normal_mixture_s, 0.0, ""),
+    ("normal_mixture_k", normal_mixture_k_s, 0.0, ""),
+    ("low_dim_gauss_mix", low_dim_gauss_mix_s, 0.0, ""),
+    ("low_dim_gauss_mix_collapse", low_dim_gauss_mix_collapse_s, 0.0, ""),
+    ("seeds", seeds_s, 0.0, ""),
+    ("seeds_centered", seeds_centered_s, 0.0, ""),
+    ("surgical", surgical_s, 0.0, ""),
+    ("survey", survey_s, 0.0, ""),
+)
+
+for (_label, _cases) in (("s/batch1", _S_BATCH1), ("s/batch2", _S_BATCH2),
+        ("s/batch3", _S_BATCH3))
     open(OUT, "a") do io
         for t in _cases
             (case, build, offset, reason) = t[1:4]

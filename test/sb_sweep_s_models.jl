@@ -161,9 +161,9 @@ function sum_to_zero_s()
 end
 
 # mvnormal: GLS with KNOWN AR(1) covariance, 4 data-form variants × beta ~
-# N(0,10). The precision-chol variant forms Omega = Lc*Lc' host-side (same
-# IEEE mults either side would do; ~1e-14 vs a direct-triangular path —
-# inside any parity tolerance; the record pins the exact program).
+# N(0,10). The precision-chol variant forms Omega = Lc*Lc' host-side; all
+# four forms agree BITWISE at the zeros point (-16.705053677430385), so no
+# tolerance question arises — the record pins the exact program.
 # (@brm refused: no known-covariance GLS surface.)
 #
 # The precision forms route through a thin custom family: StanBlocks ships
@@ -222,5 +222,215 @@ mvnormal_prec_s() = _mvnormal_s(zeros(0, 0), zeros(0, 0),
 function mvnormal_prec_chol_s()
     Lc = MVNormalRegressionExample.MVREG_PRECISION_CHOL
     return _mvnormal_s(zeros(0, 0), zeros(0, 0), zeros(0, 0), Lc * Lc', :prechol)
+end
+
+# Batch 3: marginalized mixtures + BUGS GLMMs + survey.
+#
+# Mixture families (scalar-observation, @plate-driven; the per-observation
+# label marginal is a stable log_mix / K-way log-sum-exp, exactly Stan's).
+# (@brm refused: no mixture-density spelling.)
+@deffun begin
+    @lpxf mix2u_lpdf(y::real, mu::vector[2], theta::real)::real =
+        log_mix(theta, normal_lpdf(y, mu[1], 1.0), normal_lpdf(y, mu[2], 1.0))
+    mix2u_lpdfs(y::real, mu::vector[2], theta::real)::real =
+        log_mix(theta, normal_lpdf(y, mu[1], 1.0), normal_lpdf(y, mu[2], 1.0))
+    mix2u_rng(mu::vector[2], theta::real)::real = begin
+        z = bernoulli_rng(theta)
+        if (z == 1)
+            normal_rng(mu[1], 1.0)
+        else
+            normal_rng(mu[2], 1.0)
+        end
+    end
+    @lpxf mix2s_lpdf(y::real, mu::vector[2], sigma::vector[2], theta::real)::real =
+        log_mix(theta, normal_lpdf(y, mu[1], sigma[1]), normal_lpdf(y, mu[2], sigma[2]))
+    mix2s_lpdfs(y::real, mu::vector[2], sigma::vector[2], theta::real)::real =
+        log_mix(theta, normal_lpdf(y, mu[1], sigma[1]), normal_lpdf(y, mu[2], sigma[2]))
+    mix2s_rng(mu::vector[2], sigma::vector[2], theta::real)::real = begin
+        z = bernoulli_rng(theta)
+        if (z == 1)
+            normal_rng(mu[1], sigma[1])
+        else
+            normal_rng(mu[2], sigma[2])
+        end
+    end
+    @lpxf mixk_lpdf(y::real, mu::vector[K], sigma::vector[K], theta::vector[K])::real = begin
+        rv = log(theta[1]) + normal_lpdf(y, mu[1], sigma[1])
+        for k in 2:K
+            rv = log_sum_exp(rv, log(theta[k]) + normal_lpdf(y, mu[k], sigma[k]))
+        end
+        rv
+    end
+    mixk_lpdfs(y::real, mu::vector[K], sigma::vector[K], theta::vector[K])::real =
+        mixk_lpdf(y, mu, sigma, theta)
+    mixk_rng(mu::vector[K], sigma::vector[K], theta::vector[K])::real = begin
+        z = categorical_rng(theta)
+        normal_rng(mu[z], sigma[z])
+    end
+    # Survey: the discrete survey-count n marginalizes to ONE scalar density
+    # over the returns vector k (log_sum_exp over n = 1..nmax of
+    # log(1/nmax) + binomial_lpmf(k|n,theta)). lchoose is spelled via lgamma
+    # (StanBlocks has no lchoose builtin); the k[i] > n cells carry -Inf via
+    # negative_infinity(), contributing exp(-Inf) = 0 exactly as the source.
+    @lpxf survey_mix_lpmf(k::int[m], theta::real, sk::real, m::int, nmax::int, log_1_nmax::real)::real = begin
+        lt = log(theta)
+        l1t = log1m(theta)
+        lp_parts::vector[nmax]
+        for n in 1:nmax
+            lc_n = 0.0
+            bad = 0
+            for i in 1:m
+                if (k[i] > n)
+                    bad = 1
+                else
+                    lc_n += lgamma(n + 1) - lgamma(k[i] + 1) - lgamma(n - k[i] + 1)
+                end
+            end
+            if (bad == 1)
+                lp_parts[n] = negative_infinity()
+            else
+                lp_parts[n] = log_1_nmax + lc_n + sk * lt + (n * m - sk) * l1t
+            end
+        end
+        log_sum_exp(lp_parts)
+    end
+    survey_mix_lpmfs(k::int[m], theta::real, sk::real, m::int, nmax::int, log_1_nmax::real)::real =
+        survey_mix_lpmf(k, theta, sk, m, nmax, log_1_nmax)
+    survey_mix_rng(int[m], theta::real, sk::real, m::int, nmax::int, log_1_nmax::real)::int[m] = begin
+        probs = rep_vector(1.0 / nmax, nmax)
+        n = categorical_rng(probs)
+        out::int[m]
+        for i in 1:m
+            out[i] = binomial_rng(n, theta)
+        end
+        out
+    end
+end
+
+# normal_mixture: 2-comp N mixture, KNOWN unit variance, theta flat (the
+# uniform(0,1) density is exactly 0), mu ~ N(0,10).
+function normal_mixture_s()
+    M = NormalMixtureExample
+    y = M.NORMAL_MIXTURE_Y
+    return @slic (; y=y, n=length(y)) begin
+        theta ~ uniform(0.0, 1.0; lower=0.0, upper=1.0)
+        mu::vector[2] ~ normal(0, 10)
+        @plate for i in 1:n
+            y[i] ~ mix2u(mu, theta)
+        end
+    end
+end
+
+# normal_mixture_k: K-comp mixture, simplex theta + bounded sigma both
+# IMPLICIT-uniform (Jacobian-only: flat() with/without decl bounds), mu ~ N(0,10).
+function normal_mixture_k_s()
+    M = NormalMixtureKExample
+    y = M.NORMAL_MIXTURE_K_Y
+    K = M.NORMAL_MIXTURE_K_K
+    return @slic (; y=y, n=length(y), K=K) begin
+        theta::simplex[K] ~ flat()
+        mu::vector[K] ~ normal(0, 10)
+        sigma::vector[K] ~ flat(; lower=0.0, upper=10.0)
+        @plate for i in 1:n
+            y[i] ~ mixk(mu, sigma, theta)
+        end
+    end
+end
+
+# low_dim_gauss_mix: ordered[2] mu (label-switching break), sigma ~ N(0,2)
+# PLAIN (half-normal, no log2 — kwargs bounds are unnormalized), theta ~ Beta(5,5).
+function low_dim_gauss_mix_s()
+    M = LowDimGaussMixExample
+    y = M.LOW_DIM_GAUSS_MIX_Y
+    return @slic (; y=y, n=length(y)) begin
+        mu::ordered[2] ~ normal(0, 2)
+        sigma::vector[2] ~ normal(0, 2; lower=0.0)
+        theta ~ beta(5, 5; lower=0.0, upper=1.0)
+        @plate for i in 1:n
+            y[i] ~ mix2s(mu, sigma, theta)
+        end
+    end
+end
+
+# low_dim_gauss_mix_collapse: same, free mu.
+function low_dim_gauss_mix_collapse_s()
+    M = LowDimGaussMixCollapseExample
+    y = M.LOW_DIM_GAUSS_MIX_COLLAPSE_Y
+    return @slic (; y=y, n=length(y)) begin
+        mu::vector[2] ~ normal(0, 2)
+        sigma::vector[2] ~ normal(0, 2; lower=0.0)
+        theta ~ beta(5, 5; lower=0.0, upper=1.0)
+        @plate for i in 1:n
+            y[i] ~ mix2s(mu, sigma, theta)
+        end
+    end
+end
+
+# seeds: BUGS binomial GLMM; tau ~ Gamma(1e-3,1e-3) on the PRECISION
+# (@brm refused: priors are sd-scale), sigma = 1/sqrt(tau), per-plate RE.
+function seeds_s()
+    M = SeedsExample
+    counts, totals, x1, x2 = M.SEEDS_COUNTS, M.SEEDS_TOTALS, M.SEEDS_X1, M.SEEDS_X2
+    I = length(counts)
+    return @slic (; counts=counts, totals=totals, x1=x1, x2=x2, I=I) begin
+        alpha0 ~ normal(0, 1000)
+        alpha1 ~ normal(0, 1000)
+        alpha12 ~ normal(0, 1000)
+        alpha2 ~ normal(0, 1000)
+        tau ~ gamma(0.001, 0.001; lower=0.0)
+        sigma = 1.0 / sqrt(tau)
+        b::vector[I] ~ normal(0, sigma)
+        eta = alpha0 + alpha1 * x1 + alpha2 * x2 + alpha12 * (x1 .* x2) + b
+        counts ~ binomial_logit(totals, eta)
+    end
+end
+
+# seeds_centered: N(0,1) fixed effects, sigma ~ Cauchy(0,1) PLAIN half-Cauchy
+# (no log2), mean-centered RE b = c - mean(c); likelihood spelled
+# binomial(totals, inv_logit(eta)) exactly as the source authors it.
+# (@brm refused: exact-structure + variance-scale-adjacent prior.)
+function seeds_centered_s()
+    M = SeedsCenteredExample
+    counts = M.SEEDS_CENTERED_COUNTS
+    totals = M.SEEDS_CENTERED_TOTALS
+    x1 = M.SEEDS_CENTERED_X1
+    x2 = M.SEEDS_CENTERED_X2
+    I = length(counts)
+    return @slic (; counts=counts, totals=totals, x1=x1, x2=x2, I=I) begin
+        alpha0 ~ normal(0, 1)
+        alpha1 ~ normal(0, 1)
+        alpha12 ~ normal(0, 1)
+        alpha2 ~ normal(0, 1)
+        sigma ~ cauchy(0, 1; lower=0.0)
+        c::vector[I] ~ normal(0, sigma)
+        eta = alpha0 + alpha1 * x1 + alpha2 * x2 + alpha12 * (x1 .* x2) + (c - sum(c) / I)
+        counts ~ binomial(totals, inv_logit(eta))
+    end
+end
+
+# surgical: hierarchical binomial-logit; sigmasq ~ InvGamma(1e-3,1e-3) on the
+# VARIANCE (@brm refused: sd-scale priors), b ~ N(mu, sigma) centered on mu.
+function surgical_s()
+    M = SurgicalExample
+    successes, totals = M.SURGICAL_SUCCESSES, M.SURGICAL_TOTALS
+    N = length(successes)
+    return @slic (; successes=successes, totals=totals, N=N) begin
+        mu ~ normal(0, 1000)
+        sigmasq ~ inv_gamma(0.001, 0.001; lower=0.0)
+        sigma = sqrt(sigmasq)
+        b::vector[N] ~ normal(mu, sigma)
+        successes ~ binomial_logit(totals, b)
+    end
+end
+
+# survey: returns vector k observes the n-marginalized family; theta
+# implicit-uniform (flat, Jacobian-only). dim = 1.
+function survey_s()
+    M = SurveyModelExample
+    return @slic (; k=M.SURVEY_K, sk=M.SURVEY_SK, m=M.SURVEY_M, nmax=M.SURVEY_NMAX,
+        log_1_nmax=M.SURVEY_LOG1NMAX) begin
+        theta ~ flat(; lower=0.0, upper=1.0)
+        k ~ survey_mix(theta, sk, m, nmax, log_1_nmax)
+    end
 end
 
