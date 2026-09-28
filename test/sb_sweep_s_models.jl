@@ -657,3 +657,275 @@ function irt_2pl_s()
     end
 end
 
+# Batch 5: hierarchical 2PL IRT + Dogs + regularized horseshoe + structural
+# DLM + Prophet.
+#
+# Gather-eta helpers (long-form IRT linear predictors via concrete-index
+# gathers — plain Stan loops, exactly the source's gather structure) and the
+# structural-DLM transition densities (custom joint families: transition
+# priors are densities over param slices, which have no `~` spelling).
+# (@brm refused: gathers, LKJ item hierarchies, slab, recurrences.)
+@deffun begin
+    irt_eta_2pl(alpha::vector[I], beta::vector[I], theta::vector[J], ii::int[N], jj::int[N])::vector[N] = begin
+        out::vector[N]
+        for n in 1:N
+            out[n] = alpha[ii[n]] * (theta[jj[n]] - beta[ii[n]])
+        end
+        out
+    end
+    # Twopl sum-to-zero beta prior: N(0,s) over all I incl. derived beta[I].
+    # (A prior on the COMPUTED beta has no `~` spelling — the bare-decl
+    # pre-binding lesson — so the free vector carries the full prior mass.)
+    @lpxf s2z_beta_lpdf(bf::vector[F], s::real)::real = begin
+        rv = normal_lpdf(-sum(bf), 0.0, s)
+        for i in 1:F
+            rv += normal_lpdf(bf[i], 0.0, s)
+        end
+        rv
+    end
+    s2z_beta_lpdfs(bf::vector[F], s::real)::real = s2z_beta_lpdf(bf, s)
+    s2z_beta_rng(vector[F], s::real)::vector[F] = begin
+        out::vector[F]
+        for i in 1:F
+            out[i] = normal_rng(0.0, s)
+        end
+        out
+    end
+    lat_eta(alpha::vector[I], bf::vector[F], theta::vector[J], ii::int[N], jj::int[N])::vector[N] = begin
+        bI = -sum(bf)
+        out::vector[N]
+        for n in 1:N
+            bi = ii[n] == I ? bI : bf[ii[n]]
+            out[n] = alpha[ii[n]] * theta[jj[n]] - bi
+        end
+        out
+    end
+    @lpxf rw_level_lpdf(mu::vector[n], sigma2::real)::real = begin
+        rv = 0.0
+        for t in 2:n
+            rv += normal_lpdf(mu[t], mu[t - 1], sigma2)
+        end
+        rv
+    end
+    rw_level_lpdfs(mu::vector[n], sigma2::real)::real = rw_level_lpdf(mu, sigma2)
+    rw_level_rng(vector[n], sigma2::real)::vector[n] = begin
+        out::vector[n]
+        out[1] = normal_rng(0.0, 1.0)
+        for t in 2:n
+            out[t] = normal_rng(out[t - 1], sigma2)
+        end
+        out
+    end
+    @lpxf seas_window_lpdf(se::vector[n], sigma1::real)::real = begin
+        rv = 0.0
+        for t in 12:n
+            acc = 0.0
+            for k in (t - 11):t
+                acc += se[k]
+            end
+            rv += normal_lpdf(acc, 0.0, sigma1)
+        end
+        rv
+    end
+    seas_window_lpdfs(se::vector[n], sigma1::real)::real = seas_window_lpdf(se, sigma1)
+    seas_window_rng(vector[n], sigma1::real)::vector[n] = begin
+        out::vector[n]
+        for t in 1:n
+            out[t] = normal_rng(0.0, sigma1)
+        end
+        out
+    end
+end
+
+# Verbatim port of the twopl source's _obtain_W_adj (data-only; same Julia,
+# same ops — including the dead range-branch quirk for J > 1).
+function _twopl_w_adj(W::Matrix{Float64})
+    J, K = size(W)
+    W_adj = similar(W)
+    for k in 1:K
+        col = @view W[:, k]
+        if k == 1
+            a1, a2 = 0.0, 1.0
+        else
+            mn, mx = minimum(col), maximum(col)
+            a1 = sum(col) / J
+            minmax_count = 0
+            for j in 1:J
+                minmax_count = (((minmax_count + col[j]) == mn) || (col[j] == mx)) ? 1 : 0
+            end
+            sd = sqrt(sum(abs2, col .- a1) / (J - 1))
+            a2 = minmax_count == J ? (mx - mn) : 2 * sd
+        end
+        @views @. W_adj[:, k] = (col - a1) / a2
+    end
+    W_adj
+end
+
+# Dogs running-count design in matrix form (same recurrence as _dogs_design).
+function _dogs_mats(y::AbstractMatrix)
+    J, T = size(y)
+    ps = zeros(Float64, J, T)
+    pa = zeros(Float64, J, T)
+    for j in 1:J, t in 1:T
+        t == 1 && continue
+        ps[j, t] = ps[j, t - 1] + y[j, t - 1]
+        pa[j, t] = pa[j, t - 1] + (1 - y[j, t - 1])
+    end
+    ps, pa
+end
+
+# hier_2pl: LKJ item hierarchy via the EXACT conditional decomposition
+# (xi1 ~ N(mu1,tau1); xi2|xi1 normal — same density as the joint
+# multi_normal_cholesky up to ~1ulp; array-of-vector cells have no @slic
+# spelling); long-form eta via the gather helper.
+function hier_2pl_s()
+    M = Hier2plExample
+    y = Int.(M.HIER_2PL_Y)
+    I, J = M.HIER_2PL_I, M.HIER_2PL_J
+    return @slic (; y=y, ii=M.HIER_2PL_II, jj=M.HIER_2PL_JJ, I=I, J=J, N=length(y)) begin
+        theta::vector[J] ~ normal(0, 1)
+        mu1 ~ normal(0, 1)
+        mu2 ~ normal(0, 5)
+        tau::vector[2] ~ exponential(0.1; lower=0.0)
+        L::cholesky_factor_corr[2] ~ lkj_corr_cholesky(4)
+        xi1::vector[I] ~ normal(mu1, tau[1])
+        mu2c = mu2 + (tau[2] * L[2, 1] / tau[1]) * (xi1 - mu1)
+        xi2::vector[I] ~ normal(mu2c, tau[2] * L[2, 2])
+        alpha = exp(xi1)
+        eta = irt_eta_2pl(alpha, xi2, theta, ii, jj)
+        y ~ bernoulli_logit(eta)
+    end
+end
+
+# twopl_latent_reg: 2PL + latent regression + sum-to-zero beta (custom prior
+# family, see above); W_adj host-ported verbatim from the source recipe.
+function twopl_latent_reg_s()
+    M = TwoplLatentRegIrtExample
+    y = Int.(M.TWOPL_LR_Y)
+    I = M.TWOPL_LR_I
+    Wadj = _twopl_w_adj(M.TWOPL_LR_W)
+    J, K = size(Wadj)
+    return @slic (; y=y, ii=M.TWOPL_LR_II, jj=M.TWOPL_LR_JJ, Wadj=Wadj,
+        I=I, J=J, K=K, N=length(y)) begin
+        alpha::vector[I] ~ lognormal(1, 1; lower=0.0)
+        beta_free::vector[I - 1] ~ s2z_beta(3.0)
+        lambda_adj::vector[K] ~ student_t(3, 0, 1)
+        mu_theta = Wadj * lambda_adj
+        theta::vector[J] ~ normal(mu_theta, 1)
+        eta = lat_eta(alpha, beta_free, theta, ii, jj)
+        y ~ bernoulli_logit(eta)
+    end
+end
+
+# dogs_hierarchical: multiplicative a/b Bernoulli, a/b implicit-uniform
+# (flat, Jacobian-only); vectorized probability form.
+function dogs_hierarchical_s()
+    M = DogsHierarchicalExample
+    yf = Int.(M.DOGS_HIER_Y_FLAT)
+    return @slic (; y=yf, ps=M.DOGS_HIER_PREV_SHOCK, pa=M.DOGS_HIER_PREV_AVOID) begin
+        a ~ flat(; lower=0.0, upper=1.0)
+        b ~ flat(; lower=0.0, upper=1.0)
+        p = exp(ps * log(a) + pa * log(b))
+        y ~ bernoulli(p)
+    end
+end
+
+# dogs_nonhierarchical: correlated per-dog logit-normal (LKJ cholesky,
+# flop-exact per-component form with precomputed sL21/sL22) + multiplicative
+# Bernoulli on the 2-D dog/trial grid.
+function dogs_nonhierarchical_s()
+    M = DogsNonhierarchicalExample
+    y = Int.(M.DOGS_NH_Y)
+    J, T = size(y)
+    ps, pa = _dogs_mats(y)
+    return @slic (; y=y, ps=ps, pa=pa, J=J, T=T) begin
+        mu::vector[2] ~ logistic(0, 1)
+        sg::vector[2] ~ normal(0, 1; lower=0.0)
+        L::cholesky_factor_corr[2] ~ lkj_corr_cholesky(2)
+        z1::vector[J] ~ normal(0, 1)
+        z2::vector[J] ~ normal(0, 1)
+        sL21 = sg[2] * L[2, 1]
+        sL22 = sg[2] * L[2, 2]
+        logit_a = mu[1] + z1 * sg[1] + z2 * sL21
+        logit_b = mu[2] + z2 * sL22
+        @plate for j in 1:J, t in 1:T
+            y[j, t] ~ bernoulli(exp(ps[j, t] * (-log1p_exp(-logit_a[j])) + pa[j, t] * (-log1p_exp(-logit_b[j]))))
+        end
+    end
+end
+
+# logistic_rhs: regularized (Finnish) horseshoe with the c/caux slab
+# (@brm refused: Horseshoe has no slab spelling); half-t priors PLAIN.
+function logistic_rhs_s()
+    M = LogisticRegressionRHSExample
+    H = M.LOGISTIC_RHS_HYPER
+    y = Int.(M.LOGISTIC_RHS_Y)
+    d = size(M.LOGISTIC_RHS_X, 2)
+    return @slic (; x=M.LOGISTIC_RHS_X, y=y, d=d, scale_icept=H.scale_icept,
+        scale_global=H.scale_global, nu_global=H.nu_global, nu_local=H.nu_local,
+        slab_scale=H.slab_scale, slab_df=H.slab_df) begin
+        beta0 ~ normal(0, scale_icept)
+        z::vector[d] ~ normal(0, 1)
+        tau ~ student_t(nu_global, 0, scale_global * 2; lower=0.0)
+        lambda::vector[d] ~ student_t(nu_local, 0, 1; lower=0.0)
+        caux ~ inv_gamma(0.5 * slab_df, 0.5 * slab_df; lower=0.0)
+        c = slab_scale * sqrt(caux)
+        c2 = c * c
+        tau2 = tau * tau
+        lambda2 = lambda .^ 2
+        lambda_tilde = sqrt(c2 * lambda2 ./ (c2 .+ tau2 * lambda2))
+        beta = (z .* lambda_tilde) * tau
+        f = beta0 + x * beta
+        y ~ bernoulli_logit(f)
+    end
+end
+
+# state_space: UK-drivers structural DLM. Level ~ rw_level (custom joint
+# family WITH data-directed decl bounds — kwargs compose with families),
+# seasonal ~ seas_window, beta/lambda flat, sigma positive_ordered ~ t(4).
+# (lobnd/upbnd: `lower`/`upper` are Stan reserved words.)
+function state_space_s()
+    M = StateSpaceStochasticExample
+    y, x, w = M.STATE_SPACE_Y, M.STATE_SPACE_X, M.STATE_SPACE_W
+    n = length(y)
+    ybar = sum(y) / n
+    ysd = sqrt(sum((y .- ybar) .^ 2) / (n - 1))
+    lobnd, upbnd = ybar - 3 * ysd, ybar + 3 * ysd
+    return @slic (; y=y, x=x, w=w, n=n, lobnd=lobnd, upbnd=upbnd) begin
+        sg::positive_ordered[3] ~ student_t(4, 0, 1)
+        mu::vector[n] ~ rw_level(sg[2]; lower=lobnd, upper=upbnd)
+        seasonal::vector[n] ~ seas_window(sg[1])
+        beta ~ flat()
+        lambda ~ flat()
+        yhat = mu + beta * x + lambda * w
+        y ~ normal(yhat + seasonal, sg[3])
+    end
+end
+
+# prophet: piecewise trend x multiplicative + additive seasonality (LINEAR
+# mode only — the data selects trend_indicator == 0; logistic is a
+# separately-scoped deliverable on the RK side too). Laplace is Stan's
+# double_exponential.
+function prophet_s()
+    M = ProphetExample
+    t, t_change = M.PROPHET_T, M.PROPHET_T_CHANGE
+    A = (t .>= t_change') .* 1.0
+    @assert M.PROPHET_TREND_INDICATOR == 0 "logistic trend out of scope"
+    return @slic (; y=M.PROPHET_Y, t=t, A=A, t_change=t_change, X=M.PROPHET_X,
+        sigmas=M.PROPHET_SIGMAS, tau=M.PROPHET_TAU, s_a=M.PROPHET_S_A,
+        s_m=M.PROPHET_S_M, S=length(t_change), K=size(M.PROPHET_X, 2)) begin
+        k ~ normal(0, 5)
+        m ~ normal(0, 5)
+        delta::vector[S] ~ double_exponential(0, tau)
+        sigma_obs ~ normal(0, 0.5; lower=0.0)
+        beta::vector[K] ~ normal(0, sigmas)
+        Ad = A * delta
+        td = t_change .* delta
+        trend = (k + Ad) .* t + (m - A * td)
+        seasonal_mult = 1.0 + X * (beta .* s_m)
+        seasonal_add = X * (beta .* s_a)
+        mean_response = trend .* seasonal_mult + seasonal_add
+        y ~ normal(mean_response, sigma_obs)
+    end
+end
+
