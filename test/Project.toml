@@ -71,15 +71,15 @@ rev = "0194dce08e986ff17fd5a788bb315c6431b7858e"
 
 [sources.ReactiveKernels]
 url = "https://github.com/nsiccha/ReactiveKernels.jl"
-# 99d278db (2026-09-27, main): the 3c419bde stack (c83c14c0 +
-# mod-weights, term-gp, closeout-appends, fam-exp, splines-stan,
-# kernel-robust, fam-lognormal merges, bernoulli-int plate fix
-# 3cfe180b, nuisance-kappa slice) plus the fam-weibull response
-# slice and the nuisance-nu modeled-StudentT-nu slice (nu
-# `ScalePredictorRef` gate + `StudentT.(exp.(nu), mu, sigma)`
-# surface + nu plate node + N1/N1b vscale tests + SB pins;
-# peer verdict 1d7vuvf PASS).
+# 908349ff (2026-09-27, main): the 6cf678f stack plus
+# nuisance-nu-v2, nuisance-zi, the intercept1-logno K=1 sd-geometry
+# SB mirror, bernoulli-int-la, nuisance-kappa-v2, fam-weibull
+# (Weibull response + W1 SB pins), nuisance-precision-v2,
+# kernel-matrix-b-v2 (bare-rate locations, StudentT evidence,
+# complement-pair mixture weights, occupancy vocab), and
+# term-dar-stan (dar Stan-convention priors: :interval_stan beta +
+# :positive_stan sigma, surface spellings unchanged).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "99d278db2d01d7a74b9c8bf3554cf6300cf8ec8c"
+rev = "908349ffcba76fb663abdad1c14e37420ffa21d7"
