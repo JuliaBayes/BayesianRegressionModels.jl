@@ -54,13 +54,15 @@ const PINS = [
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
-    # through. 3c419bde (2026-09-27, main): the c83c14c0 stack plus
-    # mod-weights, term-gp, closeout-appends, fam-exp, splines-stan,
-    # kernel-robust, and fam-lognormal merges, the bernoulli-int
-    # plate fix (3cfe180b), and the nuisance-kappa slice (log-link
-    # Beta kappa scale predictor + test_betakappa trio + corpus
-    # 70_vscale_beta, peer verdict 22is3x).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "3c419bde38857b423f2fae76aa4c80ecbeb875a5"),  # main
+    # through. 99d278db (2026-09-27, main): the 3c419bde stack
+    # (c83c14c0 + mod-weights, term-gp, closeout-appends, fam-exp,
+    # splines-stan, kernel-robust, fam-lognormal merges, bernoulli-int
+    # plate fix 3cfe180b, nuisance-kappa slice) plus the fam-weibull
+    # response slice and the nuisance-nu modeled-StudentT-nu slice
+    # (nu `ScalePredictorRef` gate + `StudentT.(exp.(nu), mu, sigma)`
+    # surface + nu plate node + N1/N1b vscale tests + SB pins;
+    # peer verdict 1d7vuvf PASS).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "99d278db2d01d7a74b9c8bf3554cf6300cf8ec8c"),  # main
 ]
 
 function main()
