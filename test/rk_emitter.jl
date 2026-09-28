@@ -2345,6 +2345,8 @@ end
     @test (term.options.rho, term.options.sigma, term.options.z,
         term.options.f) == (:rho_gp, :sigma_gp, :z_gp, :f_gp)
     @test term.options.jitter == 1e-9
+    @test term.options.cov === :exp_quad
+    @test term.options.period === nothing
     @test term.options.rho_param.family === :LogNormal
     @test term.options.rho_param.args == (0.0, 1.0)
     @test term.options.sigma_param.family === :LogNormal
@@ -2388,9 +2390,32 @@ end
     @test [t.kind for t in only(plan.predictors).terms] == [:gp]
 end
 
+@testset "periodic gp iso plan shape" begin
+    brmi = @brm df begin
+        mu ~ 1 + gp(x; cov=:periodic, period=2.0)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    predictor = only(plan.predictors)
+    @test [t.kind for t in predictor.terms] == [:intercept, :gp]
+    term = only(t for t in predictor.terms if t.kind === :gp)
+    @test term.columns == [:x]
+    @test (term.options.rho, term.options.sigma, term.options.z,
+        term.options.f) == (:rho_gp, :sigma_gp, :z_gp, :f_gp)
+    @test term.options.cov === :periodic
+    @test term.options.period == 2.0
+    @test term.options.jitter == 1e-9
+    @test term.options.rho_param.family === :LogNormal
+    @test term.options.sigma_param.family === :LogNormal
+    @test [p.name for p in plan.parameters] == [:s]
+end
+
 @testset "fail closed: exact gp sequenced spellings" begin
-    # Aniso, multi-axis, periodic, and Uniform hyper priors stay closed
-    # until the thin-layer surface sequences them.
+    # Aniso, multi-axis, and Uniform hyper priors stay closed until the
+    # thin-layer surface sequences them. (Periodic 1d-iso is admitted;
+    # periodic aniso/multi-axis never reaches the planner — preparation
+    # rejects it at formula level.)
     @test_throws "anisotropic or multi-axis" BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + gp(x, z; iso=false)
         s ~ Exponential(1)
@@ -2398,11 +2423,6 @@ end
     end)
     @test_throws "anisotropic or multi-axis" BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + gp(x, z)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
-    end)
-    @test_throws "cov=:periodic" BRM._brm_rk_plan(@brm df begin
-        mu ~ 1 + gp(x; cov=:periodic, period=1.0)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
