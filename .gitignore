@@ -65,4 +65,11 @@ research/**/*.tar.gz
 research/**/*.jls
 research/**/*.jls.gz
 research/**/*.csv.gz
+research/**/*.rds.gz
+research/**/*.tsv.gz
+research/**/*_pairs.tsv
+research/**/*_pairs.aov.json
+research/**/*_pairs.png
+research/**/selection_losses.tsv
+research/**/ppc_intervals.tsv
 docs/**/*.csv.gz
