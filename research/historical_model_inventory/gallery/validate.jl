@@ -159,10 +159,10 @@ using .HistoricalInventoryGallery
     # fragment sequence and proves that later filters reach the same
     # authoritative graph.
     route!(graph)
+    router = HTMXObjects.ROUTER
     drive(path; headers=Pair{String,String}[]) = begin
         request = HTTP.Request("GET", path, headers)
-        handler = first(HTTP.Handlers.gethandler(
-            HTMXObjects.CONTEXT[].service.router, request))
+        handler = first(HTTP.Handlers.gethandler(router, request))
         handler(request)
     end
     try
@@ -178,22 +178,22 @@ using .HistoricalInventoryGallery
             initial_body,
         )
         @test !occursin("var htmx=function()", initial_body)
-        @test isempty(findall(
-            "<article class=\"htmxo-semantic-card-body\"", initial_body))
-        @test occursin("data-htmxo-operation-load", initial_body)
-        @test occursin("hx-trigger=\"load\"", initial_body)
-        @test occursin("hx-get=\"/\"", initial_body)
+        @test length(findall(
+            "<article class=\"htmxo-semantic-card-body\"", initial_body)) == 359
+        @test !occursin("data-htmxo-operation-load", initial_body)
+        @test !occursin("hx-trigger=\"load\"", initial_body)
+        @test !occursin("hx-get=\"/\"", initial_body)
 
         prefixed = drive("/"; headers=vcat(browser_headers, [
             "X-Forwarded-Prefix" => "/p/HistoricalBRM",
         ]))
         prefixed_body = String(prefixed.body)
         @test prefixed.status == 200
-        @test isempty(findall(
-            "<article class=\"htmxo-semantic-card-body\"", prefixed_body))
-        @test occursin("data-htmxo-operation-load", prefixed_body)
-        @test occursin("hx-trigger=\"load\"", prefixed_body)
-        @test occursin("hx-get=\"/p/HistoricalBRM/\"", prefixed_body)
+        @test length(findall(
+            "<article class=\"htmxo-semantic-card-body\"", prefixed_body)) == 359
+        @test !occursin("data-htmxo-operation-load", prefixed_body)
+        @test !occursin("hx-trigger=\"load\"", prefixed_body)
+        @test !occursin("hx-get=\"/p/HistoricalBRM/\"", prefixed_body)
 
         full = drive("/"; headers=vcat(browser_headers, ["HX-Request" => "true"]))
         full_body = String(full.body)
