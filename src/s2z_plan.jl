@@ -175,6 +175,12 @@ function _sb_plan_s2zs(brmi, prepared, overrides, selection, rho;
         throw(ArgumentError("s2z_groups must be a grouping-factor name or a collection (empty disables S2Z)"))
     requested = Set(selection isa Symbol ? (selection,) : selection)
     isempty(requested) && return Dict{Symbol,Any}()
+    if coordinates === :groups
+        @warn("sbimpl: `s2z_coordinates=:groups` is deprecated: per-group S2Z " *
+              "coordinates are unrequested and unvalidated, pending further " *
+              "research; they keep working, but prefer the default `:contrasts`."
+              ) maxlog=1 _id=:sbimpl_s2z_coordinates_groups
+    end
     out = Dict{Symbol,Any}()
     for predictor in prepared.predictors
         # Selection probe only; the throwing planner below gives the reason.

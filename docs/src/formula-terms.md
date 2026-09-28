@@ -562,6 +562,11 @@ fit = WarmupHMC.adaptive_warmup_mcmc(Xoshiro(1), adaptive; n_draws=2000)
 
 #### Per-group coordinates and WarmupHMC
 
+!!! warning "Deprecated"
+    `s2z_coordinates=:groups` is unrequested and unvalidated — it keeps
+    working, but only pending further exploration/research. (An Opus model
+    came up with it in a fever dream.) Prefer the default `:contrasts`.
+
 `s2z_coordinates=:groups` samples one coordinate per group instead of the `J - 1`
 contrasts: independent cells `s_j ~ N(0, tau^(2c_j))`, with `w = s ./ tau.^c`
 and deviations `tau * (w - mean(w))`. This is Sean's per-group projected map

@@ -2689,6 +2689,9 @@ independent `s_j ~ N(0, tau^(2c_j))` cells with deviations
 independent auxiliary that leaves the posterior unchanged. There `s2z_rho` is
 each group's power-interpolation centeredness `c` (default `0`), and every
 group is one scalar cell for `adaptive_centering_problem`.
+!!! warning "Deprecated"
+    `:groups` is unrequested and unvalidated, kept working only pending
+    further exploration/research; prefer the default `:contrasts`.
 
 `cv_groups` is an opt-in set of grouping-factor names (e.g. `[:subject]`)
 whose per-group random effect should be emitted with **cv-contagious
