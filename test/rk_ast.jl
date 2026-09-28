@@ -403,6 +403,33 @@ end
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end
 
+@testset "group-C lognormal AST shape" begin
+    # Single head (thin-layer decision, pair fam-lognormal):
+    # `LogNormal(mu, sigma)` maps to `LogNormal.(mu, sigma)`
+    # (Distributions order); no fused head.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        sigma ~ Exponential(1)
+        z ~ LogNormal(mu, sigma)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :z,
+        Expr(:., :LogNormal, Expr(:tuple, :mu, :sigma)))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+    # Literal scale inlines; the fused-heads flag changes nothing
+    # (one head either way).
+    brmi = @brm df begin
+        mu ~ 1 + x
+        z ~ LogNormal(mu, 0.5)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :z,
+        Expr(:., :LogNormal, Expr(:tuple, :mu, 0.5)))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+end
+
 @testset "evidence and weights shapes" begin
     brmi = @brm df begin
         mu ~ 1 + x

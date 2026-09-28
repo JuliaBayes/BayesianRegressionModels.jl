@@ -53,11 +53,10 @@ rev = "c317cc003fc41c2d933c27dc80799141eebd434e"
 
 [sources.StanBlocks]
 url = "https://github.com/nsiccha/StanBlocks.jl"
-# 24578c34 (2026-09-24): declared unbound ragged/censored observations infer
-# retained layout and forward-simulate with predictive twins and segments
-# (StanBlocks snag declared-unbound-35cd933e; BRM ragged-omitted-r-198ea038).
-# Contains 74ed796d's declared-observation `:predict` support and its floors.
-rev = "24578c34eb90928791319ef9ef2b49a28e0d4a51"
+# 342436de (2026-09-27): K>=3 mixture RNG else-if rendering (StanBlocks
+# 5aed3df; BRM matrix-b snag k-5-mixturemodel-6105de92). Supersedes 24578c34
+# (declared-unbound ragged/censored draw shape, twins and segments).
+rev = "342436de359eb43879ddcef4956cfd5fd6502995"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
@@ -71,9 +70,9 @@ rev = "7aed40b18bd4cdabb75330f285d5c9b355575ab9"
 
 [sources.ReactiveKernels]
 url = "https://github.com/nsiccha/ReactiveKernels.jl"
-# 3c419bde (2026-09-27, main): the c83c14c0 stack plus the
-# closeout-appends, fam-exp, splines-stan, kernel-robust, and
-# fam-lognormal merges, the bernoulli-int plate fix (3cfe180b),
+# 3c419bde (2026-09-27, main): the c83c14c0 stack plus mod-weights,
+# term-gp, closeout-appends, fam-exp, splines-stan, kernel-robust,
+# and fam-lognormal merges, the bernoulli-int plate fix (3cfe180b),
 # and the nuisance-kappa slice (log-link Beta kappa scale
 # predictor + test_betakappa trio + corpus 70_vscale_beta,
 # peer verdict 22is3x).
