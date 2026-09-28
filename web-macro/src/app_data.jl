@@ -560,7 +560,7 @@
         # instance per record run -- each is per-request anyway.
         app = AppContext()
         HTMXObjects.route!(app; record_dir, record_base)
-        router = HTMXObjects.CONTEXT[].service.router
+        router = HTMXObjects.ROUTER
         try
             for (path, phase) in zip(static_paths, phases[1:length(static_paths)])
                 with_prepared_progress(phase) do _
