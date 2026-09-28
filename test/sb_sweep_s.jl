@@ -210,8 +210,7 @@ function sum_to_zero_s()
         tau ~ truncated(cauchy, 0.0, 5.0; lower=0.0)
         ascale = sqrt(25.0 + tau * tau / 8.0)
         alpha ~ normal(0, ascale)
-        free::vector[7]
-        free ~ s2z_free(tau)
+        free::vector[7] ~ s2z_free(tau)
         effects = s2z_pivot_vec(free)
         y ~ normal(alpha + effects, se)
     end
