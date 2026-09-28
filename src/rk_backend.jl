@@ -7144,11 +7144,13 @@ end
     rk_varyingsource_raw(stan_data) -> NamedTuple
 
 Build the raw-column bundle the native varying-source schedule binds
-from (`obs_time`, `dose_time`, `dose_treatment`, `discretization`,
-`placebo_lo`, `placebo_hi`). `stan_data` is the reference dict the twin
-is derived from (keys `:subject`, `:ts`, `:assay`, `:dosing_subject`,
-`:dosing_times`, `:doses`, `:treatment`, `:dosing_diet`,
-`:discretization_times`, `:placebo_lo_time`, `:placebo_hi_time`).
+from (`obs_subject`, `obs_time`, `obs_assay`, `obs_value`, `obs_lloq`,
+`dose_subject`, `dose_time`, `dose_amount`, `dose_treatment`,
+`discretization`, `placebo_lo`, `placebo_hi`). `stan_data` is the
+reference dict the twin is derived from (keys `:subject`, `:ts`,
+`:assay`, `:obs`, `:lloq`, `:dosing_subject`, `:dosing_times`, `:doses`,
+`:treatment`, `:dosing_diet`, `:discretization_times`,
+`:placebo_lo_time`, `:placebo_hi_time`).
 
 Validates the twin's own ordering invariants (observation subjects in
 first-appearance `1:n` order, dosing rows sorted by subject, vessel
@@ -7157,13 +7159,16 @@ codes `1:5`, diet codes `1:4`) plus the native recipe's preconditions
 positive amounts, assay codes `1:3`, nonnegative nondecreasing lags,
 `lo < hi`). The treatment key is `treatment + 100*diet` (the twin's
 `_vs_treatment_map` combination; the native recipe renumbers per
-subject by first appearance).
+subject by first appearance). The planner cross-checks the bundle
+against the BRMI-bound twin data (exact equality on every shared
+column), so a row-misaligned bundle fails loudly instead of binding a
+wrong density.
 """
 function rk_varyingsource_raw(stan_data::AbstractDict)
     prefix = "RK backend"
-    required = (:subject, :ts, :assay, :dosing_subject, :dosing_times,
-        :doses, :treatment, :dosing_diet, :discretization_times,
-        :placebo_lo_time, :placebo_hi_time)
+    required = (:subject, :ts, :assay, :obs, :lloq, :dosing_subject,
+        :dosing_times, :doses, :treatment, :dosing_diet,
+        :discretization_times, :placebo_lo_time, :placebo_hi_time)
     missing_keys = [k for k in required if !haskey(stan_data, k)]
     isempty(missing_keys) || error(
         "$prefix: varying-source raw bundle is missing stan_data key(s) " *
@@ -7171,16 +7176,20 @@ function rk_varyingsource_raw(stan_data::AbstractDict)
     subject = stan_data[:subject]
     ts = stan_data[:ts]
     assay = stan_data[:assay]
+    obs = stan_data[:obs]
+    lloq = stan_data[:lloq]
     dosing_subject = stan_data[:dosing_subject]
     dosing_times = stan_data[:dosing_times]
     doses = stan_data[:doses]
     treatment = stan_data[:treatment]
     dosing_diet = stan_data[:dosing_diet]
     discretization = stan_data[:discretization_times]
-    length(subject) == length(ts) == length(assay) || error(
+    length(subject) == length(ts) == length(assay) == length(obs) ==
+        length(lloq) || error(
         "$prefix: varying-source observation columns `:subject`/`:ts`/" *
-        "`:assay` disagree on lengths " *
-        "($(length(subject))/$(length(ts))/$(length(assay)))")
+        "`:assay`/`:obs`/`:lloq` disagree on lengths " *
+        "($(length(subject))/$(length(ts))/$(length(assay))/" *
+        "$(length(obs))/$(length(lloq)))")
     length(dosing_subject) == length(dosing_times) == length(doses) ==
         length(treatment) == length(dosing_diet) || error(
         "$prefix: varying-source dose columns `:dosing_subject`/" *
@@ -7226,6 +7235,10 @@ function rk_varyingsource_raw(stan_data::AbstractDict)
     all(x -> x isa Real && isfinite(x) && isinteger(x) && 1 <= x <= 3,
         assay) || error(
         "$prefix: varying-source assay codes must be integers in 1:3")
+    all(x -> x isa Real && isfinite(x), obs) || error(
+        "$prefix: varying-source observation values must be finite")
+    all(x -> x isa Real && isfinite(x), lloq) || error(
+        "$prefix: varying-source lloq bounds must be finite")
     all(x -> x isa Real && isfinite(x) && x > 0, doses) || error(
         "$prefix: varying-source dose amounts must be finite and positive")
     all(x -> x isa Real && isfinite(x) && isinteger(x) && 1 <= x <= 5,
@@ -7244,7 +7257,9 @@ function rk_varyingsource_raw(stan_data::AbstractDict)
         lo < hi) || error(
         "$prefix: varying-source placebo window `:placebo_lo_time` < " *
         "`:placebo_hi_time` must be finite with lo < hi")
-    (; obs_time=times, dose_time=dtimes,
+    (; obs_subject=subjects, obs_time=times, obs_assay=Int.(assay),
+     obs_value=Float64.(obs), obs_lloq=Float64.(lloq),
+     dose_subject=dsubjects, dose_time=dtimes, dose_amount=Float64.(doses),
      dose_treatment=Int.(treatment) .+ 100 .* Int.(dosing_diet),
      discretization=Float64.(discretization),
      placebo_lo=Float64(lo), placebo_hi=Float64(hi))

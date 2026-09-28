@@ -5670,6 +5670,8 @@ end
         :subject => [1, 1, 2, 2],
         :ts => [0.0, 4.0, 0.0, 8.0],
         :assay => [1, 2, 1, 3],
+        :obs => [8.0, 120.0, 6.0, 55.0],
+        :lloq => [1.0, 5.0, 1.0, 5.0],
         :dosing_subject => [1, 2, 2],
         :dosing_times => [0.0, 0.0, 4.0],
         :doses => [50.0, 50.0, 20.0],
@@ -5680,8 +5682,14 @@ end
         :placebo_hi_time => 24.0,
     )
     raw = rk_varyingsource_raw(stan)
+    @test raw.obs_subject == [1, 1, 2, 2]
     @test raw.obs_time == [0.0, 4.0, 0.0, 8.0]
+    @test raw.obs_assay == [1, 2, 1, 3]
+    @test raw.obs_value == [8.0, 120.0, 6.0, 55.0]
+    @test raw.obs_lloq == [1.0, 5.0, 1.0, 5.0]
+    @test raw.dose_subject == [1, 2, 2]
     @test raw.dose_time == [0.0, 0.0, 4.0]
+    @test raw.dose_amount == [50.0, 50.0, 20.0]
     @test raw.dose_treatment == [101, 202, 304]
     @test raw.discretization == [1.0, 2.0, 4.0]
     @test raw.placebo_lo == 0.0 && raw.placebo_hi == 24.0
@@ -5695,7 +5703,8 @@ end
     @test_throws "disagree on lengths" rk_varyingsource_raw(
         tweak(:doses, [50.0, 50.0]))
     @test_throws "at least one observation" rk_varyingsource_raw(merge(stan,
-        Dict(:subject => Int[], :ts => Float64[], :assay => Int[])))
+        Dict(:subject => Int[], :ts => Float64[], :assay => Int[],
+            :obs => Float64[], :lloq => Float64[])))
     @test_throws "must be positive integers" rk_varyingsource_raw(
         tweak(:subject, [0, 0, 2, 2]))
     @test_throws "must first appear in order" rk_varyingsource_raw(
@@ -5710,6 +5719,10 @@ end
         tweak(:dosing_times, [0.0, 4.0, 0.0]))
     @test_throws "assay codes must be integers in 1:3" rk_varyingsource_raw(
         tweak(:assay, [1, 2, 1, 4]))
+    @test_throws "observation values must be finite" rk_varyingsource_raw(
+        tweak(:obs, [8.0, 120.0, 6.0, NaN]))
+    @test_throws "lloq bounds must be finite" rk_varyingsource_raw(
+        tweak(:lloq, [1.0, 5.0, 1.0, Inf]))
     @test_throws "must be finite and positive" rk_varyingsource_raw(
         tweak(:doses, [50.0, 50.0, 0.0]))
     @test_throws "vessel codes must be integers in 1:5" rk_varyingsource_raw(
