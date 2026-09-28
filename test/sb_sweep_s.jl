@@ -16,7 +16,9 @@ using ReactiveKernelsPPLExamples: Rate2Example, Rate4Example, DugongsGrowthExamp
     PilotsExample, GLMMPoissonExample, SumToZeroExample, MVNormalRegressionExample,
     EightSchoolsExample, NormalMixtureExample, NormalMixtureKExample,
     LowDimGaussMixExample, LowDimGaussMixCollapseExample, SeedsExample,
-    SeedsCenteredExample, SurgicalExample, SurveyModelExample
+    SeedsCenteredExample, SurgicalExample, SurveyModelExample, M0Example,
+    MbExample, MhExample, MtExample, MthModelExample, MtbhModelExample,
+    LsatExample, Irt2plExample
 
 # Builders + custom families live in sb_sweep_s_models.jl so transpile probes
 # can include them without running the record loop below.
@@ -87,8 +89,19 @@ const _S_BATCH3 = (
     ("survey", survey_s, 0.0, ""),
 )
 
+const _S_BATCH4 = (
+    ("m0", m0_s, 0.0, ""),
+    ("mb", mb_s, 0.0, ""),
+    ("mh", mh_s, 0.0, ""),
+    ("mt", mt_s, 0.0, ""),
+    ("mth", mth_s, 0.0, ""),
+    ("mtbh", mtbh_s, 0.0, ""),
+    ("lsat", lsat_s, 0.0, ""),
+    ("irt_2pl", irt_2pl_s, 0.0, ""),
+)
+
 for (_label, _cases) in (("s/batch1", _S_BATCH1), ("s/batch2", _S_BATCH2),
-        ("s/batch3", _S_BATCH3))
+        ("s/batch3", _S_BATCH3), ("s/batch4", _S_BATCH4))
     open(OUT, "a") do io
         for t in _cases
             (case, build, offset, reason) = t[1:4]

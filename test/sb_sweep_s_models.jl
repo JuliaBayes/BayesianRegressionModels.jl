@@ -434,3 +434,226 @@ function survey_s()
     end
 end
 
+# Batch 4: capture-recapture augmentation marginals + binary IRT.
+#
+# M-family augmentation families: per-individual detection log-likelihood
+# plus the inclusion-indicator marginal (s>0: log(omega) + bern; s==0:
+# log_sum_exp(log(omega) + bern, log(1-omega))). All box priors are
+# implicit-uniform (flat, Jacobian-only). (@brm refused: augmentation
+# marginals have no GLM spelling.)
+@deffun begin
+    @lpxf aug0_lpmf(si::int, lc::real, omega::real, p::real, T::int)::real = begin
+        obs = log(omega) + lc + si * log(p) + (T - si) * log1m(p)
+        if (si > 0)
+            obs
+        else
+            log_sum_exp(obs, log1m(omega))
+        end
+    end
+    aug0_lpmfs(si::int, lc::real, omega::real, p::real, T::int)::real =
+        aug0_lpmf(si, lc, omega, p, T)
+    aug0_rng(lc::real, omega::real, p::real, T::int)::int = bernoulli_rng(omega)
+    @lpxf augb_counts_lpmf(si::int, ai::real, bi::real, ei::real, fi::real, omega::real, p::real, c::real)::real = begin
+        bern = ai * log(p) + bi * log1m(p) + ei * log(c) + fi * log1m(c)
+        obs = log(omega) + bern
+        if (si > 0)
+            obs
+        else
+            log_sum_exp(obs, log1m(omega))
+        end
+    end
+    augb_counts_lpmfs(si::int, ai::real, bi::real, ei::real, fi::real, omega::real, p::real, c::real)::real =
+        augb_counts_lpmf(si, ai, bi, ei, fi, omega, p, c)
+    augb_counts_rng(ai::real, bi::real, ei::real, fi::real, omega::real, p::real, c::real)::int =
+        bernoulli_rng(omega)
+    @lpxf augh_lpmf(yi::int, lc::real, ep::real, omega::real, T::int)::real = begin
+        obs = log(omega) + binomial_logit_lpmf(yi, T, ep)
+        if (yi > 0)
+            obs
+        else
+            log_sum_exp(obs, log1m(omega))
+        end
+    end
+    augh_lpmfs(yi::int, lc::real, ep::real, omega::real, T::int)::real =
+        augh_lpmf(yi, lc, ep, omega, T)
+    augh_rng(lc::real, ep::real, omega::real, T::int)::int = bernoulli_rng(omega)
+    # Shared marginal over a precomputed per-individual bern (Mt/Mth/Mtbh).
+    @lpxf augb_lpmf(si::int, bi::real, omega::real)::real = begin
+        obs = log(omega) + bi
+        if (si > 0)
+            obs
+        else
+            log_sum_exp(obs, log1m(omega))
+        end
+    end
+    augb_lpmfs(si::int, bi::real, omega::real)::real = augb_lpmf(si, bi, omega)
+    augb_rng(bi::real, omega::real)::int = bernoulli_rng(omega)
+    # Mt bern[i] = (Y . logit_p)[i] + bern0, bern0 = SUM log1m(p). Loop form
+    # (same IEEE op sequence as the source's matvec + reduction up to BLAS
+    # blocking — ~1ulp, inside any parity tolerance).
+    mt_bern(Y::matrix[M,T], p::vector[T])::vector[M] = begin
+        bern0 = 0.0
+        for j in 1:T
+            bern0 += log1m(p[j])
+        end
+        out::vector[M]
+        for i in 1:M
+            acc = 0.0
+            for j in 1:T
+                acc += Y[i, j] * logit(p[j])
+            end
+            out[i] = acc + bern0
+        end
+        out
+    end
+    # Mth bern[i] = SUM_j (Y*lp - log1p_exp(lp)), lp = logit(mean_p) + eps.
+    mth_bern(Y::matrix[M,T], mean_p::vector[T], eps::vector[M])::vector[M] = begin
+        out::vector[M]
+        for i in 1:M
+            acc = 0.0
+            for j in 1:T
+                lp = logit(mean_p[j]) + eps[i]
+                acc += Y[i, j] * lp - log1p_exp(lp)
+            end
+            out[i] = acc
+        end
+        out
+    end
+    # Mtbh: same + the behavioural gamma*Yprev coefficient.
+    mtbh_bern(Y::matrix[M,T], Yprev::matrix[M,T], mean_p::vector[T], eps::vector[M], gamma::real)::vector[M] = begin
+        out::vector[M]
+        for i in 1:M
+            acc = 0.0
+            for j in 1:T
+                lp = logit(mean_p[j]) + eps[i] + gamma * Yprev[i, j]
+                acc += Y[i, j] * lp - log1p_exp(lp)
+            end
+            out[i] = acc
+        end
+        out
+    end
+end
+
+# m0: single detection probability + augmentation marginal. dim = 2.
+function m0_s()
+    M = M0Example
+    return @slic (; s=M.M0_S, lchoose=M.M0_LCHOOSE, T=M.M0_T, MM=M.M0_M) begin
+        omega ~ flat(; lower=0.0, upper=1.0)
+        p ~ flat(; lower=0.0, upper=1.0)
+        @plate for i in 1:MM
+            s[i] ~ aug0(lchoose[i], omega, p, T)
+        end
+    end
+end
+
+# mb: behavioural (trap) response via the 4-count collapse. dim = 3.
+function mb_s()
+    M = MbExample
+    return @slic (; s=M.MB_S, a=M.MB_A, b=M.MB_B, e=M.MB_E, f=M.MB_F, T=M.MB_T, MM=M.MB_M) begin
+        omega ~ flat(; lower=0.0, upper=1.0)
+        p ~ flat(; lower=0.0, upper=1.0)
+        c ~ flat(; lower=0.0, upper=1.0)
+        @plate for i in 1:MM
+            s[i] ~ augb_counts(a[i], b[i], e[i], f[i], omega, p, c)
+        end
+    end
+end
+
+# mh: individual-heterogeneity RE (noncentered, sigma in [0,5]) +
+# binomial-logit + augmentation marginal.
+function mh_s()
+    M = MhExample
+    return @slic (; y=M.MH_Y, lchoose=M.MH_LCHOOSE, T=M.MH_T, MM=M.MH_M) begin
+        omega ~ flat(; lower=0.0, upper=1.0)
+        mean_p ~ flat(; lower=0.0, upper=1.0)
+        sigma ~ flat(; lower=0.0, upper=5.0)
+        eps_raw::vector[MM] ~ normal(0, 1)
+        ep = logit(mean_p) + sigma * eps_raw
+        @plate for i in 1:MM
+            y[i] ~ augh(lchoose[i], ep[i], omega, T)
+        end
+    end
+end
+
+# mt: per-occasion p[j] + augmentation marginal.
+function mt_s()
+    M = MtExample
+    return @slic (; Y=M.MT_Y, s=M.MT_S, T=M.MT_T, MM=M.MT_M) begin
+        omega ~ flat(; lower=0.0, upper=1.0)
+        p::vector[T] ~ flat(; lower=0.0, upper=1.0)
+        bern = mt_bern(Y, p)
+        @plate for i in 1:MM
+            s[i] ~ augb(bern[i], omega)
+        end
+    end
+end
+
+# mth: occasion + RE outer-sum logit + augmentation marginal.
+function mth_s()
+    M = MthModelExample
+    return @slic (; Y=M.MTH_Y, s=M.MTH_S, T=M.MTH_T, MM=M.MTH_M) begin
+        omega ~ flat(; lower=0.0, upper=1.0)
+        mean_p::vector[T] ~ flat(; lower=0.0, upper=1.0)
+        sigma ~ flat(; lower=0.0, upper=5.0)
+        eps_raw::vector[MM] ~ normal(0, 1)
+        eps = sigma * eps_raw
+        bern = mth_bern(Y, mean_p, eps)
+        @plate for i in 1:MM
+            s[i] ~ augb(bern[i], omega)
+        end
+    end
+end
+
+# mtbh: full occasion + RE + behavioural logit + augmentation marginal.
+function mtbh_s()
+    M = MtbhModelExample
+    return @slic (; Y=M.MTBH_Y, Yprev=M.MTBH_YPREV, s=M.MTBH_S, T=M.MTBH_T, MM=M.MTBH_M) begin
+        omega ~ flat(; lower=0.0, upper=1.0)
+        mean_p::vector[T] ~ flat(; lower=0.0, upper=1.0)
+        gamma ~ normal(0, 10)
+        sigma ~ flat(; lower=0.0, upper=3.0)
+        eps_raw::vector[MM] ~ normal(0, 1)
+        eps = sigma * eps_raw
+        bern = mtbh_bern(Y, Yprev, mean_p, eps, gamma)
+        @plate for i in 1:MM
+            s[i] ~ augb(bern[i], omega)
+        end
+    end
+end
+
+# lsat: Rasch 1PL on the 5x32 pattern matrix (2-D @plate; the flat binding
+# reshapes question-outer/student-inner with zero transcription). beta > 0
+# half-normal, PLAIN (no log2).
+function lsat_s()
+    M = LsatExample
+    rmat = reshape(M.LSAT_RESP_FLAT, (5, 32))
+    return @slic (; r=rmat, T=5, N=32) begin
+        alpha::vector[T] ~ normal(0, 100)
+        theta::vector[N] ~ normal(0, 1)
+        beta ~ normal(0, 100; lower=0.0)
+        @plate for k in 1:T, j in 1:N
+            r[k, j] ~ bernoulli_logit(beta * theta[j] - alpha[k])
+        end
+    end
+end
+
+# irt_2pl: a[i]*(theta[j]-b[i]) on the IxJ matrix (2-D @plate); Cauchy
+# hyperpriors PLAIN (no log2), a lognormal on vector<lower=0>.
+function irt_2pl_s()
+    M = Irt2plExample
+    y = Int.(M.IRT_2PL_Y)
+    I, J = size(y)
+    return @slic (; y=y, I=I, J=J) begin
+        sigma_theta ~ cauchy(0, 2; lower=0.0)
+        theta::vector[J] ~ normal(0, sigma_theta)
+        sigma_a ~ cauchy(0, 2; lower=0.0)
+        a::vector[I] ~ lognormal(0, sigma_a; lower=0.0)
+        mu_b ~ normal(0, 5)
+        sigma_b ~ cauchy(0, 2; lower=0.0)
+        b::vector[I] ~ normal(mu_b, sigma_b)
+        @plate for i in 1:I, j in 1:J
+            y[i, j] ~ bernoulli_logit(a[i] * (theta[j] - b[i]))
+        end
+    end
+end
+
