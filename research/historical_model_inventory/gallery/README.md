@@ -69,10 +69,9 @@ developed from local checkouts (here `MutatingFunctions` and
 `web-macro/Project.toml` carries no comments: Pkg rewrites that file and
 would strip them, dirtying the service checkout.
 
-`validate.jl` currently reports 8 stale lazy-shell failures on top of a
-healthy serve (todo `2026-09-25T11-10-01-587-0ms5fwg` tracks the update to
-HTMXObjects' single-render contract); until it lands, the recovery gate is
-the remaining 64 assertions plus a live boot with 200s on `/` and a
+`validate.jl` passes 72/72 against HTMXObjects' single-render contract
+(direct visits render inline; only a grace timeout defers). The recovery
+gate is the full file plus a live boot with 200s on `/` and a
 `source_fidelity=confirmed` filter at 154 cards.
 
 The unit carries `StartLimitIntervalSec=300` / `StartLimitBurst=5` so a boot
