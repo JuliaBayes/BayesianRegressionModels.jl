@@ -58,14 +58,13 @@ const PINS = [
     # preservation, nonfinite-transport rejection). Matches test/Project.toml.
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "0194dce08e986ff17fd5a788bb315c6431b7858e"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
-    # through. 805e0306 (2026-09-28, main): the 6cf678f stack plus
-    # nuisance-kappa, bernoulli-int, fam-weibull, nuisance-nu v2,
-    # nuisance-zi, intercept1-lognormal, nuisance-precision v2,
-    # term-dar-stan priors, kernel-matrix-b v2, and the nuisance-nb1p NB1
-    # modeled-p slice (NegativeBinomialFam logit-only scale predictor +
-    # B1 trio + corpus 72_nb1_modeled_p; reviewed 21eb670a, land GO
-    # 1ormug2).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "805e0306f0f3c3a93d74fd15ee0ba6f5118fe8e2"),  # main
+    # through. 0c9ebb4d (2026-09-28, main): the 99d278db stack plus
+    # the nuisance-zi ZIP slice, the intercept1-lognormal SB-mirror
+    # doc, nuisance-precision-v2 (BetaBinomial2), dar
+    # Stan-convention priors, nuisance-nb1p v2, matrix-b v2 (+SB
+    # legs), the term-dar-stan merge, and the nuisance-lam IG
+    # modeled-lambda slice (peer verdict 1kt8qci PASS).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "0c9ebb4d89b82274f19bbe8534d205a0b527d2b5"),  # main
 ]
 
 function main()

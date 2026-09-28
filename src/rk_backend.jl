@@ -67,9 +67,9 @@ const _RK_ADMITTED_TRIPLES = Set{Tuple{Symbol,Symbol,Symbol}}([
     # column-p still deferred, ZIP precedent).
     (:negative_binomial, :log, :log),
     # Group C (wald): inverse-Gaussian over a log-link mean
-    # predictor; lambda rides the scalar-only scale slot (literal /
-    # sampled / assignment — modeled lambda deferred, Beta-kappa
-    # precedent).
+    # predictor; lambda rides the scale slot (scalar literal /
+    # sampled / assignment) or the scale-predictor slot (a
+    # `log(lam)` submodel — the von-Mises vscale precedent).
     (:wald, :log, :log),
     # Group C (circular): von-Mises over an identity-link location
     # predictor; kappa rides the scale slot (scalar literal /
@@ -182,7 +182,8 @@ struct _RKLikelihoodSpec
                    # slot under a logit pin when modeled) |
                    # :negative_binomial (p rides the scale /
                    # scale-predictor slots) |
-                   # :wald (lambda rides the scalar-only scale slot) |
+                   # :wald (lambda rides the scale /
+                   # scale-predictor slots) |
                    # :von_mises (kappa rides the
                    # scale / scale-predictor slots, the principal
                    # interval the `interval` slot) |
@@ -504,8 +505,9 @@ const _RK_ADMITTED_SPELLINGS =
     "weights), or group C: `c ~ HurdlePoisson(lambda, p0)` + " *
     "`log(lambda) ~ ...` (`p0` a `logit(p0) ~ ...` predictor, sampled " *
     "parameter, or (0, 1] literal) or `y ~ InverseGaussian(mu, lam)` + " *
-    "`log(mu) ~ ...` (`lam` a sampled parameter, scalar assignment, " *
-    "or positive literal), or group D: `c ~ BetaBinomial2(n, " *
+    "`log(mu) ~ ...` (`lam` a `log(lam) ~ ...` predictor, sampled " *
+    "parameter, scalar assignment, or positive literal), or group D: " *
+    "`c ~ BetaBinomial2(n, " *
     "mu, phi)` + `logit(mu) ~ ...` (`n` an integer column or literal; " *
     "`phi` a sampled parameter, scalar assignment, or positive literal), " *
     "or group C: `y ~ VonMises(mu, kappa)` / `y ~ CircularVonMises(mu, " *
@@ -1082,27 +1084,23 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
             "itself; write `InverseGaussian(mu, lam)` with a `log(mu)` " *
             "predictor (slice 2 has no `InverseGaussian(exp(..))` spelling)")
         plink = predictor_link[location]
-        # Scalar-only (Beta-kappa precedent): modeled lambda is
-        # deferred thin-side too, so a predictor in the shape slot
-        # fails closed here with attribution instead of crossing.
-        _rk_is_predictor_ref(args[2], candidates) && error(
-            "$prefix: response `$response` `InverseGaussian` shape cannot " *
-            "be the linear predictor `$(name(args[2]))`; modeled lambda " *
-            "is out of slice — write a sampled parameter, a positive " *
-            "literal, or a scalar assignment")
+        # lam rides the scale slot (scalar sampled parameter /
+        # assignment / positive literal) or the scale-predictor slot (a
+        # `log(lam)` submodel — the von-Mises vscale precedent).
         lam, lam_predictor = _rk_scale_argument(args[2], parameters,
-            assignments, consts, aliases, response, "shape",
-            Symbol[])
-        lam_predictor === nothing || error(
-            "$prefix: response `$response` `InverseGaussian` shape cannot " *
-            "be a linear predictor (predictor-fed shape is not admitted)")
+            assignments, consts, aliases, response, "shape", candidates)
+        lam_predictor !== nothing &&
+            predictor_link[lam_predictor] !== :log && error(
+                "$prefix: response `$response` `InverseGaussian` shape " *
+                "predictor `$(lam_predictor)` must be log-link; " *
+                "write a `log(lam) ~ ...` submodel")
         triple = (:wald, plink, plink)
         triple in _RK_ADMITTED_TRIPLES || error(
             "$prefix: response `$response` pairs `InverseGaussian` with " *
             "a $plink-link predictor; write " *
             "`InverseGaussian(mu, lam)` with a `log(mu)` predictor")
         return (; family=:wald, link=plink, scale=lam,
-            scale_predictor=nothing, trials=nothing, location)
+            scale_predictor=lam_predictor, trials=nothing, location)
     elseif head === Binomial
         length(args) == 2 || error(
             "$prefix: response `$response` `Binomial` needs `(trials, " *
