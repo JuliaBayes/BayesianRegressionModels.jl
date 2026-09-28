@@ -456,8 +456,9 @@ R2D2 blocks use the conventional representation. A request for totals on an
 unsupported group raises an error.
 
 Automatic selection retains the conventional representation if some ordinary
-group blocks require it. A single adaptive wrapper currently uses one geometry
-family: totals, ordinary random effects, or HSGP weights.
+group blocks require it. A single adaptive wrapper currently combines totals
+with S2Z contrasts, or ordinary random effects with HSGP weights, but not both
+pairs.
 
 #### WarmupHMC and recovery
 
@@ -513,6 +514,107 @@ one recovered population draw per posterior draw. `resample=:subject` redraws
 existing groups too. Total blocks require frozen preprocessing for replay and use
 this transport route for resampling; `reprocess(...; resample_groups=...)` is not
 supported for them. Improper population priors have no prior-predictive distribution.
+
+### Posterior-preserving sum-to-zero (S2Z) effects
+
+`SBBRMI(brmi; s2z_groups=[:g], s2z_rho=...)` opts a grouping factor into the
+S2Z construction of brms PR #1919. Each coefficient's `J` group effects become
+`J - 1` free orthonormal (Helmert) contrasts plus a block mean. The mean is
+integrated into the population coefficients exactly, as for totals, and is
+recovered afterwards. The current scope is one independent Gaussian grouping
+structure per predictor with `J >= 2`, a population column for every group
+column, and Normal or `Flat()` population priors (Student-t priors are not yet
+supported).
+
+`s2z_rho` sets the compiled frame per group and coefficient: a scalar, one weight
+per coefficient, or a `J × K` matrix in `[0, 1]`. Intermediate values use Sean's
+projected partial map. `select_s2z_rho` chooses these weights from a pilot with
+brms's Fisher rule.
+
+#### Sean's rule at every warm-up window
+
+`adaptive_centering_problem(sb, problem, backend; s2z_rule=:fisher)` keeps the
+contrast coordinates and Sean's projected partial map, with one weight per group
+and coefficient, and re-selects those weights at every restarting WarmupHMC
+window using Sean's rule from brms PR #1919. At each window boundary, every
+evidence draw is mapped to the compiled frame. The per-row expected information
+is evaluated there at the draw's fitted values through BridgeStan and
+accumulated per group through the design. It is turned into Sean's per-draw
+weights, rescaled at that draw's `tau`, and the new weight of each cell is the
+median across draws.
+
+The evidence is the retained pool by default. With
+`nonlinear_evidence=:nuts_weighted` or `:all_good_leaves`, WarmupHMC hands over
+an equally sized (`recording_target`) weight-proportional sample of the window's
+NUTS leaves. No Pathfinder
+precursor or importance sampling is involved. The compiled `s2z_rho` is the
+target frame and the starting point, and `centeredness` (a scalar, or one `J × K`
+matrix per block) overrides the start. The rule currently supports Gaussian
+identity, Bernoulli or binomial logit, and Poisson log likelihoods. It cannot yet
+share a wrapper with totals, ordinary, HSGP or `cdar` blocks.
+
+```julia
+sb = SBBRMI(brmi; s2z_groups=[:g], s2z_rho=0.0)
+problem = StanBlocks.stan_instantiate(sb.model)
+adaptive = adaptive_centering_problem(sb, problem, AutoEnzyme(); s2z_rule=:fisher)
+fit = WarmupHMC.adaptive_warmup_mcmc(Xoshiro(1), adaptive; n_draws=2000)
+```
+
+#### Per-group coordinates and WarmupHMC
+
+!!! warning "Deprecated"
+    `s2z_coordinates=:groups` is unrequested and unvalidated — it keeps
+    working, but only pending further exploration/research. (An Opus model
+    came up with it in a fever dream.) Prefer the default `:contrasts`.
+
+`s2z_coordinates=:groups` samples one coordinate per group instead of the `J - 1`
+contrasts: independent cells `s_j ~ N(0, tau^(2c_j))`, with `w = s ./ tau.^c`
+and deviations `tau * (w - mean(w))`. This is Sean's per-group projected map
+with one extra dimension: `mean(w)` is an independent `N(0, 1/J)` auxiliary
+that never reaches the likelihood, so the posterior is unchanged. Here
+`s2z_rho` is each group's power-interpolation centeredness `c` (0 =
+noncentered, 1 = centered; default 0).
+
+Because every group is an independent scalar cell, `adaptive_centering_problem`
+gives each group and coefficient its own online centering control, starting
+from the compiled `c`:
+
+```julia
+sb = SBBRMI(brmi; s2z_groups=[:g], s2z_coordinates=:groups)
+problem = StanBlocks.stan_instantiate(sb.model)
+adaptive = adaptive_centering_problem(sb, problem, AutoEnzyme())
+fit = WarmupHMC.adaptive_warmup_mcmc(Xoshiro(1), adaptive;
+    n_draws=2000, nonlinear_adapt=true)
+names = BridgeStan.param_unc_names(problem.model)
+recovered = recover_s2z_draws(sb, permutedims(fit.posterior_position), names)
+```
+
+For a post-hoc refit, `select_s2z_centeredness(sb, draws, names; criterion)` scores
+the same cells from compiled-frame pilot draws, using the same losses as
+`select_total_centeredness`. Pass its `centeredness` to a fresh
+`adaptive_centering_problem` and fit with `nonlinear_adapt=false`, or recompile
+with `s2z_rho=reshape(centeredness, J, K)`.
+
+Starting from the noncentered frame is the robust default. A fully centered
+start on a weakly identified scale can spend warmup in the funnel before
+adaptation moves away from it.
+
+#### Contrast coordinates and WarmupHMC
+
+With the default contrast coordinates, compile an endpoint frame: `s2z_rho=0`
+(standard-normal contrasts) or `s2z_rho=1` (centered contrasts); a vector such
+as `[0, 1]` sets the endpoint per coefficient. The same wrapper and selector
+then treat every free contrast as a scalar cell with zero location and scale
+`tau_k`. Interior weights have no per-contrast equivalent and are refused.
+
+These controls belong to contrasts, not groups. Contrast `r` puts weight
+`r/(r+1)` on group `r+1` and the remainder on groups `1:r`. With unbalanced
+groups and a weakly identified scale, a contrast that mixes data-rich and
+data-poor groups can settle between their preferred centerings and leave
+divergent transitions that per-group coordinates avoid.
+
+S2Z and total cells can share one wrapper, with totals first. Neither can yet be
+combined with ordinary, HSGP or `cdar` cells.
 
 ### Response-level wrappers
 

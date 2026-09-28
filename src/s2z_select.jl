@@ -48,6 +48,10 @@ function select_s2z_rho(s2z_model, pilot_model, draws::AbstractMatrix, names;
             "for predictor `$predictor`"))
         block = only(hits)
     end
+    block.coordinates === :groups && throw(ArgumentError(
+        "select_s2z_rho: Fisher weights parameterize Sean's linear interpolation " *
+        "of contrast coordinates, but group `$group` uses `s2z_coordinates=:groups`; " *
+        "use select_s2z_centeredness instead"))
     size(draws, 2) == length(names) ||
         throw(DimensionMismatch("select_s2z_rho: draws columns must match names"))
     n_draws = size(draws, 1)
@@ -211,4 +215,221 @@ function _s2z_carrier_is_scalar(block, group)
         "select_s2z_rho: pilot block `$(block.binding)` family `$(block.family)` " *
         "is outside the supported scope"))
     isnothing(_RANEF_FAMILIES[block.family].tau)
+end
+
+# Scalar S2Z centering cells. With `s2z_coordinates=:groups` every group
+# coordinate is already an independent zero-location cell `tau^c * w_j`, at any
+# compiled `c`. With contrast coordinates (design note §2) only an endpoint
+# frame is scalar: `s2z_rho = 0` samples `z ~ N(0, 1)` (c = 0) and `s2z_rho = 1`
+# samples `tau * z ~ N(0, tau^2)` (c = 1). Any power-interpolated source
+# `tau^c * z` is then an exact coordinate change on the same collapsed target.
+# Contrast controls are not group controls: contrast `r` puts squared weight
+# `r/(r+1)` on group `r + 1` and `1/(r+1)` on groups `1:r` together.
+
+"""
+    _s2z_centering_cells(model, unc_names)
+
+Scalar centering cells of every S2Z block, ordered by block, then coefficient,
+then contrast or group: `indices` (sampled coordinates), `scales` (the
+matching `log(tau_k)` coordinates), zero `locations` and the compiled frame
+`targets`. Group coordinates accept any compiled centeredness. For contrast
+coordinates, a coefficient whose compiled `s2z_rho` column is not uniformly 0
+or 1 is refused: Sean's interior map `delta = tau * P * D^-1 * u` is not a
+per-contrast power interpolation, so no scalar source frame reproduces it.
+"""
+function _s2z_centering_cells(model, names)
+    indices, scales, targets = Int[], Int[], Float64[]
+    for block in s2z_effect_blocks(model)
+        coords = _s2z_coordinates(model, block, names)
+        for k in axes(coords.contrasts, 2)
+            weights = view(block.rho, :, k)
+            groups = block.coordinates === :groups
+            groups || all(iszero, weights) || all(isone, weights) ||
+                throw(ArgumentError(
+                    "S2Z block `$(block.group)` coefficient `$(block.columns[k])` " *
+                    "was compiled with interior centering weights; contrast " *
+                    "centering needs an endpoint frame, so compile it with " *
+                    "`s2z_rho = 0` (noncentered) or `s2z_rho = 1` (centered), " *
+                    "or use `s2z_coordinates = :groups`"))
+            for r in axes(coords.contrasts, 1)
+                push!(indices, coords.contrasts[r, k])
+                push!(scales, coords.scales[k])
+                push!(targets, groups ? weights[r] : first(weights))
+            end
+        end
+    end
+    (; indices, scales, locations=zeros(length(indices)), targets)
+end
+
+"""
+    select_s2z_centeredness(model, draws, unc_names;
+        criterion=:position, gradients=nothing, grid=0:0.1:1)
+
+Select one centering per S2Z cell from a saved pilot. With
+`s2z_coordinates=:groups` the cells are groups (any compiled centeredness);
+with contrast coordinates they are the free Helmert contrasts of an endpoint
+model (`s2z_rho=0` or `1`). `draws` and optional `gradients` are draws ×
+coordinates in the COMPILED model frame; no density or gradient calls are
+made. Each cell `tau_k^c * w` has location zero: `:position` minimizes log SD
+minus mean log Jacobian, `:gradient` minimizes the position-gradient
+correlation and needs matching exact gradients.
+
+The returned `centeredness` vector is ordered by block, coefficient and then
+group or contrast. Pass it to `adaptive_centering_problem(model, problem,
+backend; centeredness)`, with `nonlinear_adapt=false` for a fixed post-hoc
+refit. For group coordinates, `reshape(centeredness, J, K)` is also a valid
+`s2z_rho` for a recompiled fixed model. When the model also has
+total-coefficient blocks, their cells come first:
+`vcat(select_total_centeredness(...).centeredness, s2z.centeredness)`.
+
+[`select_s2z_rho`](@ref) instead gives Sean's Fisher-rule weights for the
+linear interpolation of contrast coordinates.
+"""
+function select_s2z_centeredness(model, draws::AbstractMatrix, names;
+        criterion=:position, gradients=nothing, grid=0.:0.1:1.)
+    isempty(s2z_effect_blocks(model)) &&
+        throw(ArgumentError("model has no S2Z blocks"))
+    _select_scalar_centeredness(_s2z_centering_cells(model, names), draws, names;
+        criterion, gradients, grid)
+end
+
+# ---- Sean's per-draw centering candidate, for per-window online selection ----
+#
+# brms PR #1919 (`stan_re_s2z_fisher_comp`) evaluates, at each precursor draw,
+# the response-free expected information of every row on the linear-predictor
+# scale at that draw's fitted values, accumulates it per group through the
+# design, and maps it to a centering weight with `_s2z_fisher_candidate`
+# (restricted reliability, then the per-draw chart rescale at that draw's
+# scale). The plans below hold what that needs for one S2Z block; the WarmupHMC
+# extension evaluates them at every window's evidence draws.
+
+"""Per-row expected-information source for one S2Z block's likelihood."""
+struct S2ZInformationPlan
+    block::S2ZEffectBlock
+    family::Symbol
+    scale::Any
+    trials::Any
+    groups::Vector{Int}
+end
+
+_s2z_mentions(x, name::Symbol) = false
+_s2z_mentions(x::_BRMPreparedRef, name::Symbol) = x.name === name
+_s2z_mentions(x::_BRMPreparedExpr, name::Symbol) =
+    any(a -> _s2z_mentions(a, name), x.args) ||
+    any(a -> _s2z_mentions(a, name), values(x.kwargs))
+
+_s2z_is_predictor(x, name) = x isa _BRMPreparedRef && x.name === name
+_s2z_wraps(x, f, name) = x isa _BRMPreparedExpr && x.callable === f &&
+    isempty(x.kwargs) && length(x.args) == 1 && _s2z_is_predictor(only(x.args), name)
+
+const _S2Z_INFORMATION_FAMILIES =
+    "`Normal(lp, sigma)`, `BernoulliLogit(lp)`, `Bernoulli(logistic(lp))`, " *
+    "`BinomialLogit(n, lp)`, `Binomial(n, logistic(lp))` or `Poisson(exp(lp))`"
+
+"""
+    _s2z_information_plans(sb) -> Vector{S2ZInformationPlan}
+
+Classify the one likelihood that consumes each S2Z block's linear predictor.
+Fails closed for other families, weighted or modified likelihoods, several
+consuming likelihoods, or a predictor that also enters the scale.
+"""
+function _s2z_information_plans(sb)
+    blocks = s2z_effect_blocks(sb)
+    isempty(blocks) && throw(ArgumentError("model has no S2Z blocks"))
+    prepared = _brm_prepare_model(parent(sb))
+    map(blocks) do block
+        name = block.predictor
+        hits = filter(o -> _s2z_mentions(o.distribution, name), prepared.observations)
+        fail(why) = throw(ArgumentError(
+            "S2Z Fisher selection for `$name` (group `$(block.group)`): $why; " *
+            "supported likelihoods are " * _S2Z_INFORMATION_FAMILIES))
+        length(hits) == 1 || fail("found $(length(hits)) likelihoods using the predictor")
+        obs = only(hits)
+        isnothing(obs.weight) && isnothing(obs.modifier) ||
+            fail("weighted or modified likelihoods are not supported yet")
+        d = obs.distribution
+        f, args = d.callable, d.args
+        isempty(d.kwargs) || fail("keyword arguments are not supported")
+        family, scale, trials = if f === Normal && length(args) == 2 &&
+                _s2z_is_predictor(args[1], name) && !_s2z_mentions(args[2], name)
+            (:gaussian, args[2], nothing)
+        elseif f === BernoulliLogit && length(args) == 1 && _s2z_is_predictor(args[1], name)
+            (:bernoulli_logit, nothing, nothing)
+        elseif f === Bernoulli && length(args) == 1 && _s2z_wraps(args[1], logistic, name)
+            (:bernoulli_logit, nothing, nothing)
+        elseif f === BinomialLogit && length(args) == 2 &&
+                _s2z_is_predictor(args[2], name) && !_s2z_mentions(args[1], name)
+            (:binomial_logit, nothing, args[1])
+        elseif f === Binomial && length(args) == 2 &&
+                _s2z_wraps(args[2], logistic, name) && !_s2z_mentions(args[1], name)
+            (:binomial_logit, nothing, args[1])
+        elseif f === Poisson && length(args) == 1 && _s2z_wraps(args[1], exp, name)
+            (:poisson_log, nothing, nothing)
+        else
+            fail("`$(f)` with this argument pattern is not supported")
+        end
+        groups = Vector{Int}(vec(sb.data[block.group_index]))
+        length(groups) == size(block.design, 1) ||
+            fail("the predictor rows do not match the grouping rows")
+        S2ZInformationPlan(block, family, scale, trials, groups)
+    end
+end
+
+# Resolve a likelihood argument at one draw: a literal, compiled data, or a
+# sampled / transformed parameter looked up by its Stan base name.
+_s2z_argument(x::Real, lookup, N) = fill(Float64(x), N)
+function _s2z_argument(x::_BRMPreparedRef, lookup, N)
+    value = lookup(x.name)
+    value isa Real && return fill(Float64(value), N)
+    length(value) == N || throw(DimensionMismatch(
+        "S2Z Fisher selection: `$(x.name)` has $(length(value)) values for $N rows"))
+    Vector{Float64}(vec(value))
+end
+_s2z_argument(x, lookup, N) = throw(ArgumentError(
+    "S2Z Fisher selection: likelihood argument $(x) is not a literal or a named value"))
+
+"""
+    _s2z_row_information(plan, lookup) -> Vector{Float64}
+
+Expected information of every predictor row on the linear-predictor scale at
+one draw, response free: `1/sigma^2` (Gaussian), `trials * p * (1 - p)`
+(logit) or `exp(eta)` (Poisson log). `lookup(name)` returns a named value at
+that draw.
+"""
+function _s2z_row_information(plan::S2ZInformationPlan, lookup)
+    N = length(plan.groups)
+    if plan.family === :gaussian
+        return inv.(_s2z_argument(plan.scale, lookup, N) .^ 2)
+    end
+    eta = _s2z_argument(_BRMPreparedRef(plan.block.predictor, :observation), lookup, N)
+    plan.family === :poisson_log && return exp.(eta)
+    p = logistic.(eta)
+    info = p .* (1 .- p)
+    plan.family === :binomial_logit || return info
+    info .* _s2z_argument(plan.trials, lookup, N)
+end
+
+"""
+    _s2z_fisher_draw(plan, info, tau) -> Matrix
+
+Sean's per-draw J-by-K centering weights from per-row information `info` and
+the block scales `tau` of the same draw.
+"""
+function _s2z_fisher_draw(plan::S2ZInformationPlan, info::AbstractVector, tau::AbstractVector)
+    design = plan.block.design
+    J, K = size(plan.block.rho)
+    infos = [zeros(K, K) for _ in 1:J]
+    # Rank-1 accumulation without the per-row `z * z'` matrix (a `mul!` scratch
+    # buffer is NOT used: on a row view it falls into an allocating generic
+    # fallback, ~100x worse than the expression it replaced). Element order
+    # matches the original `info[n] .* (z * z')` exactly.
+    for n in eachindex(plan.groups)
+        z = view(design, n, :)
+        w = info[n]
+        acc = infos[plan.groups[n]]
+        @inbounds for a in 1:K, b in 1:K
+            acc[a, b] += (z[a] * z[b]) * w
+        end
+    end
+    _s2z_fisher_candidate(infos, tau)
 end

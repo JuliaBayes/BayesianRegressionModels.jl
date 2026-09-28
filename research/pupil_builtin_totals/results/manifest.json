@@ -1,0 +1,30 @@
+[
+  {
+    "archive": "total_pairs.aov.json",
+    "sha256": "c24b942e3fa34be78561bd46d590438c45e166ccd628f5ee7bdbe9f8430b7195",
+    "bytes": 2371766,
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/6944b04f3a35f1e8.bin",
+        "bytes": 2371766,
+        "sha256": "c24b942e3fa34be78561bd46d590438c45e166ccd628f5ee7bdbe9f8430b7195"
+      }
+    ],
+    "complete": true
+  },
+  {
+    "archive": "total_pairs.tsv",
+    "sha256": "670c6f46c7c5afbd704091a8456c84bd99242a874229b38b71ac1a144062e2aa",
+    "bytes": 1326975,
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/d465076978bf4fd2.bin",
+        "bytes": 1326975,
+        "sha256": "670c6f46c7c5afbd704091a8456c84bd99242a874229b38b71ac1a144062e2aa"
+      }
+    ],
+    "complete": true
+  }
+]
