@@ -52,7 +52,11 @@ const PINS = [
     ("TreeArrays",        "https://github.com/nsiccha/TreeArrays.jl.git",        "c317cc003fc41c2d933c27dc80799141eebd434e"),  # main
     ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "342436de359eb43879ddcef4956cfd5fd6502995"),  # devibe (K>=3 mixture RNG else-if rendering 5aed3df; BRM matrix-b snag k-5-mixturemodel-6105de92; supersedes 24578c34)
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
-    ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
+    # 0194dce (2026-09-27, dev): WindowSelectionPlan (WarmupHMC-held evidence)
+    # and the controls interface for custom reparametrizers,
+    # which the per-window S2Z Fisher rule needs. Contains 7aed40b (active-state
+    # preservation, nonfinite-transport rejection). Matches test/Project.toml.
+    ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "0194dce08e986ff17fd5a788bb315c6431b7858e"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
     # through. 031006ac (2026-09-27, main): the 3c419bde stack
     # (closeout-appends, fam-exp, splines-stan, kernel-robust,
