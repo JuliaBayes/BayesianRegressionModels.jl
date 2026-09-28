@@ -54,12 +54,14 @@ const PINS = [
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
-    # through. 805e0306 (2026-09-28, main): the c83c14c0 stack plus
+    # through. 0f08695c (2026-09-27, main): the c83c14c0 stack plus
     # kernel-robust, splines-stan, fam-exp, fam-lognormal,
-    # nuisance-kappa-v2, fam-weibull, nuisance-nu-v2, nuisance-zi
-    # (predictor-fed ZIP zi, 40544576 reviewed), nuisance-precision-v2,
-    # kernel-matrix-b-v2, dar-stan, and nuisance-nb1p.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "805e0306f0f3c3a93d74fd15ee0ba6f5118fe8e2"),  # main
+    # nuisance-kappa-v2, fam-weibull, nuisance-nu-v2, and nuisance-zi
+    # (predictor-fed ZIP zi, 40544576 reviewed). Pinned AT the zi
+    # merge on purpose: the next slices (dar-stan prior migration,
+    # nuisance-nb1p/precision, matrix-b-v2) each re-pin their own
+    # corpus, so this lane does not ride them.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "0f08695c12cfec85cbc2d318400af5f9b97d4c43"),  # main
 ]
 
 function main()
