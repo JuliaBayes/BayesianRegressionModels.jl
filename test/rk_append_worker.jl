@@ -353,6 +353,8 @@ function _write_numbers(path::AbstractString, case_id::AbstractString,
                 "sb_value = $(_toml_float(row.sb_value))")
             row.sb_grad_maxdiff === nothing || println(io,
                 "sb_grad_maxdiff = $(_toml_float(row.sb_grad_maxdiff))")
+            row.sb_fd_maxdiff === nothing || println(io,
+                "sb_fd_maxdiff = $(_toml_float(row.sb_fd_maxdiff))")
             if row.oracle !== nothing
                 println(io, "[probe.oracle]")
                 println(io, "value = $(_toml_float(row.oracle.value))")

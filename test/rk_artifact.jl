@@ -311,6 +311,7 @@ end
     @test p["grad"] == "PASS"
     @test p["grad_maxdiff"] == 1.2e-16
     @test p["sb_value"] == -15.5000000001
+    @test p["sb_fd_maxdiff"] == 1e-9
     @test p["oracle"]["diff_vs_sb"] == 1e-10
     @test back["pins"]["brm"] == "abc"
 end
