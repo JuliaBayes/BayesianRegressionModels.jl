@@ -1,0 +1,16 @@
+[
+  {
+    "archive": "ppc_intervals.tsv",
+    "sha256": "d43446009113b8dd01de25809480c8f9a035f2c98a05ca5d078a984938b4760f",
+    "bytes": 2070352,
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/6e3576a18fcdb0c7.bin",
+        "bytes": 2070352,
+        "sha256": "d43446009113b8dd01de25809480c8f9a035f2c98a05ca5d078a984938b4760f"
+      }
+    ],
+    "complete": true
+  }
+]
