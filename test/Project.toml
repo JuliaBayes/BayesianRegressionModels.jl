@@ -53,11 +53,10 @@ rev = "c317cc003fc41c2d933c27dc80799141eebd434e"
 
 [sources.StanBlocks]
 url = "https://github.com/nsiccha/StanBlocks.jl"
-# 24578c34 (2026-09-24): declared unbound ragged/censored observations infer
-# retained layout and forward-simulate with predictive twins and segments
-# (StanBlocks snag declared-unbound-35cd933e; BRM ragged-omitted-r-198ea038).
-# Contains 74ed796d's declared-observation `:predict` support and its floors.
-rev = "24578c34eb90928791319ef9ef2b49a28e0d4a51"
+# 342436de (2026-09-27): K>=3 mixture RNG else-if rendering (StanBlocks
+# 5aed3df; BRM matrix-b snag k-5-mixturemodel-6105de92). Supersedes 24578c34
+# (declared-unbound ragged/censored draw shape, twins and segments).
+rev = "342436de359eb43879ddcef4956cfd5fd6502995"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
@@ -71,12 +70,15 @@ rev = "7aed40b18bd4cdabb75330f285d5c9b355575ab9"
 
 [sources.ReactiveKernels]
 url = "https://github.com/nsiccha/ReactiveKernels.jl"
-# c83c14c0 (2026-09-27, main): the bb2a2e0 stack (38973ca0
-# multimembership, prior-vocab generator+contract+layout, fam-nb1
-# slice) plus the term-monotonic merge (ad82c02) and the
-# term-hsgp-periodic slice (thin-layer cov=:periodic + corpus 68 +
-# committed XLA testset, ec82973 reviewed, user GO 03cl1rn).
+# 99d278db (2026-09-27, main): the 3c419bde stack (c83c14c0 +
+# mod-weights, term-gp, closeout-appends, fam-exp, splines-stan,
+# kernel-robust, fam-lognormal merges, bernoulli-int plate fix
+# 3cfe180b, nuisance-kappa slice) plus the fam-weibull response
+# slice and the nuisance-nu modeled-StudentT-nu slice (nu
+# `ScalePredictorRef` gate + `StudentT.(exp.(nu), mu, sigma)`
+# surface + nu plate node + N1/N1b vscale tests + SB pins;
+# peer verdict 1d7vuvf PASS).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "c83c14c0f8474b157eab36a75c256096aaeec7e5"
+rev = "99d278db2d01d7a74b9c8bf3554cf6300cf8ec8c"

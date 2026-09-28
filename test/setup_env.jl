@@ -50,17 +50,19 @@ const PINS = [
     ("MutatingFunctions", "https://github.com/nsiccha/MutatingFunctions.jl.git", "4fc41b1c7b774133ceaacc4ff3c34c67b15b87b2"),  # main
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "121de3194f02044e00bac0d11019a93458ddb63a"),  # main
     ("TreeArrays",        "https://github.com/nsiccha/TreeArrays.jl.git",        "c317cc003fc41c2d933c27dc80799141eebd434e"),  # main
-    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "24578c34eb90928791319ef9ef2b49a28e0d4a51"),  # devibe (declared-unbound ragged/censored draw shape, twins and segments; BRM snag ragged-omitted-r-198ea038; contains 74ed796d and its dependency floors)
+    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "342436de359eb43879ddcef4956cfd5fd6502995"),  # devibe (K>=3 mixture RNG else-if rendering 5aed3df; BRM matrix-b snag k-5-mixturemodel-6105de92; supersedes 24578c34)
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
-    # through. c83c14c0 (2026-09-27, main): the bb2a2e0 stack (38973ca0
-    # multimembership, prior-vocab generator+contract+layout, fam-nb1
-    # slice) plus the term-monotonic merge (ad82c02) and the
-    # term-hsgp-periodic slice (thin-layer cov=:periodic as an SB
-    # _sb_hsgp_periodic mirror + corpus 68 + committed XLA testset,
-    # ec82973 reviewed, user GO 03cl1rn).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "c83c14c0f8474b157eab36a75c256096aaeec7e5"),  # main
+    # through. 99d278db (2026-09-27, main): the 3c419bde stack
+    # (c83c14c0 + mod-weights, term-gp, closeout-appends, fam-exp,
+    # splines-stan, kernel-robust, fam-lognormal merges, bernoulli-int
+    # plate fix 3cfe180b, nuisance-kappa slice) plus the fam-weibull
+    # response slice and the nuisance-nu modeled-StudentT-nu slice
+    # (nu `ScalePredictorRef` gate + `StudentT.(exp.(nu), mu, sigma)`
+    # surface + nu plate node + N1/N1b vscale tests + SB pins;
+    # peer verdict 1d7vuvf PASS).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "99d278db2d01d7a74b9c8bf3554cf6300cf8ec8c"),  # main
 ]
 
 function main()

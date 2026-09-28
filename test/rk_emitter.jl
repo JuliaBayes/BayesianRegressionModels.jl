@@ -580,6 +580,34 @@ end
     @test isnothing(likelihood.scale)
     @test likelihood.scale_predictor === :sigma
     @test likelihood.nu === :nu
+    # Modeled nu (N1 probe shape): literal scale, `log(nu)` submodel.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        log(nu) ~ 1 + z
+        y ~ LocationScale(mu, 2.0, TDist(nu))
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    likelihood = only(plan.responses)
+    @test (likelihood.family, likelihood.link) === (:student_t, :identity)
+    @test likelihood.predictor === :mu
+    @test likelihood.scale == 2.0
+    @test isnothing(likelihood.scale_predictor)
+    @test isnothing(likelihood.nu)
+    @test likelihood.nu_predictor === :nu
+    @test [p.name for p in plan.predictors] == [:mu, :nu]
+    @test [p.link for p in plan.predictors] == [:identity, :log]
+    # Modeled nu + sampled scale (N1b probe shape).
+    brmi = @brm df begin
+        mu ~ 1 + x
+        s ~ Exponential(1)
+        log(nu) ~ 1 + z
+        y ~ LocationScale(mu, s, TDist(nu))
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:student_t, :identity)
+    @test likelihood.scale === :s
+    @test isnothing(likelihood.nu)
+    @test likelihood.nu_predictor === :nu
 end
 
 @testset "group-C hurdle-poisson plan shapes" begin
@@ -857,6 +885,67 @@ end
     end
     likelihood = only(BRM._brm_rk_plan(brmi).responses)
     @test likelihood.interval == (0.0, 6.283185307179586)
+end
+
+@testset "Beta modeled-kappa plan shapes" begin
+    # The nuisance-kappa P2 shape: logit-link location + log-link kappa
+    # submodel; kappa rides the scale-predictor slot (the VonMises
+    # precedent).
+    brmi = @brm dfp begin
+        logit(mu) ~ 1 + x
+        log(kappa) ~ 1 + z
+        prop ~ Beta(mu * kappa, (1 - mu) * kappa)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:beta_logit, :logit)
+    @test likelihood.predictor === :mu
+    @test isnothing(likelihood.scale)
+    @test likelihood.scale_predictor === :kappa
+    # Either multiplication order admits; the plan normalizes.
+    brmi = @brm dfp begin
+        logit(mu) ~ 1 + x
+        log(kappa) ~ 1 + z
+        prop ~ Beta(kappa * mu, kappa * (1 - mu))
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:beta_logit, :logit)
+    @test likelihood.predictor === :mu
+    @test isnothing(likelihood.scale)
+    @test likelihood.scale_predictor === :kappa
+end
+
+@testset "group-C lognormal plan shapes" begin
+    # The pair-probe L1 shape: identity-link location + sampled
+    # scale over a strictly positive response.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        sigma ~ Exponential(1)
+        z ~ LogNormal(mu, sigma)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:lognormal, :identity)
+    @test likelihood.predictor === :mu
+    @test likelihood.scale === :sigma
+    @test isnothing(likelihood.scale_predictor)
+    # Literal scale inlines.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        z ~ LogNormal(mu, 0.5)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:lognormal, :identity)
+    @test likelihood.scale == 0.5
+    @test isnothing(likelihood.scale_predictor)
+    # Scalar assignment scale resolves.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        sigma = 1.5
+        z ~ LogNormal(mu, sigma)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:lognormal, :identity)
+    @test likelihood.scale == 1.5
+    @test isnothing(likelihood.scale_predictor)
 end
 
 @testset "weights, evidence, and multi-response" begin
@@ -2323,6 +2412,8 @@ end
     @test (term.options.rho, term.options.sigma, term.options.z,
         term.options.f) == (:rho_gp, :sigma_gp, :z_gp, :f_gp)
     @test term.options.jitter == 1e-9
+    @test term.options.cov === :exp_quad
+    @test term.options.period === nothing
     @test term.options.rho_param.family === :LogNormal
     @test term.options.rho_param.args == (0.0, 1.0)
     @test term.options.sigma_param.family === :LogNormal
@@ -2366,9 +2457,32 @@ end
     @test [t.kind for t in only(plan.predictors).terms] == [:gp]
 end
 
+@testset "periodic gp iso plan shape" begin
+    brmi = @brm df begin
+        mu ~ 1 + gp(x; cov=:periodic, period=2.0)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    predictor = only(plan.predictors)
+    @test [t.kind for t in predictor.terms] == [:intercept, :gp]
+    term = only(t for t in predictor.terms if t.kind === :gp)
+    @test term.columns == [:x]
+    @test (term.options.rho, term.options.sigma, term.options.z,
+        term.options.f) == (:rho_gp, :sigma_gp, :z_gp, :f_gp)
+    @test term.options.cov === :periodic
+    @test term.options.period == 2.0
+    @test term.options.jitter == 1e-9
+    @test term.options.rho_param.family === :LogNormal
+    @test term.options.sigma_param.family === :LogNormal
+    @test [p.name for p in plan.parameters] == [:s]
+end
+
 @testset "fail closed: exact gp sequenced spellings" begin
-    # Aniso, multi-axis, periodic, and Uniform hyper priors stay closed
-    # until the thin-layer surface sequences them.
+    # Aniso, multi-axis, and Uniform hyper priors stay closed until the
+    # thin-layer surface sequences them. (Periodic 1d-iso is admitted;
+    # periodic aniso/multi-axis never reaches the planner — preparation
+    # rejects it at formula level.)
     @test_throws "anisotropic or multi-axis" BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + gp(x, z; iso=false)
         s ~ Exponential(1)
@@ -2376,11 +2490,6 @@ end
     end)
     @test_throws "anisotropic or multi-axis" BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + gp(x, z)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
-    end)
-    @test_throws "cov=:periodic" BRM._brm_rk_plan(@brm df begin
-        mu ~ 1 + gp(x; cov=:periodic, period=1.0)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
@@ -2719,10 +2828,10 @@ end
 end
 
 # Slice-2 group-A scope edges (per the rk:brm scoping answer): no
-# weights/evidence on the new triples, logit-only Beta mu, no inline
-# cloglog, identical kappa in both Beta positions, and no
-# identity-predictor `Bernoulli(probit(eta))` spelling (LHS-link form
-# only — the thin-layer link words are peel-and-discard).
+# weights/evidence on the new triples, logit-only Beta mu, log-only Beta
+# kappa predictor, no inline cloglog, identical kappa in both Beta
+# positions, and no identity-predictor `Bernoulli(probit(eta))` spelling
+# (LHS-link form only — the thin-layer link words are peel-and-discard).
 @testset "fail closed: group-A scope edges" begin
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         probit(p) ~ 1 + x
@@ -2766,6 +2875,36 @@ end
         kappa ~ Gamma(2.0, 1000.0)
         prop ~ Beta(logistic(mu) * kappa, (1 - logistic(mu)) * kappa)
     end)
+    # Kappa submodel must be log-link (only log inverts into (0, Inf)).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm dfp begin
+        logit(mu) ~ 1 + x
+        kappa ~ 1 + z
+        prop ~ Beta(mu * kappa, (1 - mu) * kappa)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm dfp begin
+        logit(mu) ~ 1 + x
+        logit(kappa) ~ 1 + z
+        prop ~ Beta(mu * kappa, (1 - mu) * kappa)
+    end)
+    # The complement names the location: a swapped complement fails closed.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm dfp begin
+        logit(mu) ~ 1 + x
+        log(kappa) ~ 1 + z
+        prop ~ Beta(mu * kappa, (1 - kappa) * kappa)
+    end)
+    # The location predictor cannot feed the kappa slot too (the
+    # log-link pin fires first).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm dfp begin
+        logit(mu) ~ 1 + x
+        prop ~ Beta(mu * mu, (1 - mu) * mu)
+    end)
+    # A third referenced predictor fits neither slot.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm dfp begin
+        logit(mu) ~ 1 + x
+        log(kappa) ~ 1 + z
+        log(extra) ~ 1 + x
+        prop ~ Beta(mu * kappa, (1 - extra) * kappa)
+    end)
 end
 
 # Group-B scope edges: the TDist base is the only admitted
@@ -2784,11 +2923,18 @@ end
         nu ~ Gamma(2, 0.1)
         y ~ LocationScale(mu, s, TDist(nu))
     end)
+    # Nu submodel must be log-link (only log inverts into (0, Inf)).
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
-        log(nu_lp) ~ 1
+        nu ~ 1 + z
         s ~ Exponential(1)
-        y ~ LocationScale(mu, s, TDist(nu_lp))
+        y ~ LocationScale(mu, s, TDist(nu))
+    end)
+    # The location predictor cannot feed the nu slot too (the log-link
+    # pin fires first).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        y ~ LocationScale(mu, 2.0, TDist(mu))
     end)
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
@@ -3178,6 +3324,78 @@ end
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
         y ~ censored(VonMises(mu, 1.7); upper=1.0)
+    end)
+end
+
+@testset "fail closed: group-C lognormal scope edges" begin
+    # Location predictor must be identity-link (bare or wrapped).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        sigma ~ Exponential(1)
+        z ~ LogNormal(mu, sigma)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        logit(mu) ~ 1 + x
+        sigma ~ Exponential(1)
+        z ~ LogNormal(mu, sigma)
+    end)
+    # Modeled sigma is term-nuisance scope: a scale predictor fails
+    # closed with attribution, whatever its link.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        log(sigma) ~ 1 + x
+        z ~ LogNormal(mu, sigma)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        sigma ~ 1 + x
+        z ~ LogNormal(mu, sigma)
+    end)
+    # The location predictor cannot feed the scale slot too.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        z ~ LogNormal(mu, mu)
+    end)
+    # Scale literals must be strictly positive.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        z ~ LogNormal(mu, 0.0)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        z ~ LogNormal(mu, -2.0)
+    end)
+    # A data column is never a scalar scale.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        z ~ LogNormal(mu, n)
+    end)
+    # Arity: the 1- and 3-argument Distributions spellings stay closed.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        z ~ LogNormal(mu)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        sigma ~ Exponential(1)
+        z ~ LogNormal(mu, sigma, 1.0)
+    end)
+    # Response values must be strictly positive (gamma precedent).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        sigma ~ Exponential(1)
+        y ~ LogNormal(mu, sigma)
+    end)
+    # No weights or evidence on the group-C triple (no driving case).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        sigma ~ Exponential(1)
+        z ~ weighted(LogNormal(mu, sigma), fweights(n))
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        sigma ~ Exponential(1)
+        z ~ censored(LogNormal(mu, sigma); upper=5)
     end)
 end
 
