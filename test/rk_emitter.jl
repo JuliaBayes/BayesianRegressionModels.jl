@@ -936,6 +936,23 @@ end
     @test likelihood.scale == 4.0
 end
 
+@stestset "BetaBinomial2 modeled-precision plan shapes" begin
+    # The nuisance-precision P3 shape: logit-link mean + log-link
+    # precision submodel; precision rides the scale-predictor slot
+    # (the VonMises precedent).
+    brmi = @brm df begin
+        logit(mu) ~ 1 + x
+        log(precision) ~ 1 + z
+        b ~ BetaBinomial2(h, mu, precision)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:beta_binomial_logit, :logit)
+    @test likelihood.predictor === :mu
+    @test likelihood.trials === :h
+    @test isnothing(likelihood.scale)
+    @test likelihood.scale_predictor === :precision
+end
+
 @stestset "group-C von-Mises plan shapes" begin
     # The demand-battery shape (circular.jl): identity-link location +
     # log-link kappa submodel; kappa rides the scale-predictor slot
@@ -3414,16 +3431,23 @@ end
         logit(mu) ~ 1 + x
         b ~ BetaBinomial2(h, mu, z)
     end)
-    # Predictor-fed precision is deferred (Beta-kappa precedent): the
-    # location predictor itself and a second predictor both fail here.
+    # Precision submodel must be log-link (only log inverts into
+    # (0, Inf)).
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         logit(mu) ~ 1 + x
-        b ~ BetaBinomial2(h, mu, mu)
+        phi ~ 1 + z
+        b ~ BetaBinomial2(h, mu, phi)
     end)
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         logit(mu) ~ 1 + x
-        log(phi) ~ 1 + z
+        logit(phi) ~ 1 + z
         b ~ BetaBinomial2(h, mu, phi)
+    end)
+    # The location predictor cannot feed the precision slot too (the
+    # log-link pin fires first).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        logit(mu) ~ 1 + x
+        b ~ BetaBinomial2(h, mu, mu)
     end)
     # Trials: integer column or non-negative integer literal only.
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin

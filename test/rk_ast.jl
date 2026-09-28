@@ -473,6 +473,19 @@ end
             5.0)))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+    # A `log(precision)` submodel inverts under `exp.` like any scale
+    # predictor (pair nuisance-precision).
+    brmi = @brm df begin
+        logit(mu) ~ 1 + x
+        log(precision) ~ 1 + z
+        b ~ BetaBinomial2(h, mu, precision)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.main.args[end] == Expr(:call, :.~, :b,
+        Expr(:., :BetaBinomial2, Expr(:tuple,
+            :h,
+            Expr(:., :logistic, Expr(:tuple, :mu)),
+            Expr(:., :exp, Expr(:tuple, :precision)))))
 end
 
 @testset "group-C von-Mises AST shape" begin
