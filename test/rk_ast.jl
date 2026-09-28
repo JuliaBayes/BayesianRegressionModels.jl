@@ -324,6 +324,20 @@ end
             Expr(:., :exp, Expr(:tuple, :r)), 0.4)))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+    # Modeled p: the `logit(p)` submodel rides the scale slot under
+    # `logistic.` (pair nuisance-nb1p; the hurdle twin precedent).
+    brmi = @brm df begin
+        log(r) ~ 1 + x
+        logit(p) ~ 1 + x
+        c ~ NegativeBinomial(r, p)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :c,
+        Expr(:., :NegativeBinomial, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :r)),
+            Expr(:., :logistic, Expr(:tuple, :p)))))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end
 
 @testset "group-C weibull AST shape" begin
@@ -381,6 +395,22 @@ end
     want = Expr(:call, :.~, :z,
         Expr(:., :InverseGaussian, Expr(:tuple,
             Expr(:., :exp, Expr(:tuple, :mu)), 2.0)))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+    # Modeled lambda (pair nuisance-lam): the `log(lam)` scale
+    # predictor inverts under `exp.` like any scale predictor (the
+    # von-Mises precedent); the fused-heads flag changes nothing (one
+    # head either way).
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        log(lam) ~ 1 + x
+        z ~ InverseGaussian(mu, lam)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :z,
+        Expr(:., :InverseGaussian, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :mu)),
+            Expr(:., :exp, Expr(:tuple, :lam)))))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end

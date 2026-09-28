@@ -755,6 +755,18 @@ end
     end
     likelihood = only(BRM._brm_rk_plan(brmi).responses)
     @test likelihood.scale === :p
+    # Modeled p: a `logit(p)` submodel rides the scale-predictor
+    # slot (pair nuisance-nb1p; the hurdle hu-submodel precedent).
+    brmi = @brm df begin
+        log(r) ~ 1 + x
+        logit(p) ~ 1 + x
+        c ~ NegativeBinomial(r, p)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:negative_binomial, :log)
+    @test likelihood.predictor === :r
+    @test isnothing(likelihood.scale)
+    @test likelihood.scale_predictor === :p
 end
 
 @stestset "group-C weibull plan shapes" begin
@@ -830,6 +842,18 @@ end
     @test (likelihood.family, likelihood.link) === (:wald, :log)
     @test likelihood.scale == 1.5
     @test isnothing(likelihood.scale_predictor)
+    # Modeled lambda (pair nuisance-lam): a `log(lam)` submodel rides
+    # the scale-predictor slot (the von-Mises vscale precedent).
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        log(lam) ~ 1 + x
+        z ~ InverseGaussian(mu, lam)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:wald, :log)
+    @test likelihood.predictor === :mu
+    @test isnothing(likelihood.scale)
+    @test likelihood.scale_predictor === :lam
 end
 
 @stestset "group-C exponential plan shapes" begin
@@ -3128,10 +3152,16 @@ end
         r ~ 1 + x
         c ~ NegativeBinomial(r, 0.4)
     end)
-    # Modeled p: out of v1.
+    # Modeled-p submodel must be logit-link (only logit inverts
+    # into (0, 1); pair nuisance-nb1p).
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         log(r) ~ 1 + x
-        logit(p) ~ 1 + x
+        log(p) ~ 1 + x
+        c ~ NegativeBinomial(r, p)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(r) ~ 1 + x
+        p ~ 1 + x
         c ~ NegativeBinomial(r, p)
     end)
     # Data-column p: out of v1 (the SB-established spelling stays
@@ -3215,13 +3245,9 @@ end
         lam ~ LogNormal(-0.3, 1.0)
         z ~ InverseGaussian(mu, lam)
     end)
-    # Modeled lambda is deferred (Beta-kappa precedent): a shape
-    # predictor fails closed with attribution, whatever its link.
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
-        log(mu) ~ 1 + x
-        log(lam) ~ 1 + x
-        z ~ InverseGaussian(mu, lam)
-    end)
+    # A non-log-link shape predictor still fails closed (the
+    # admitted `log(lam)` submodel lives in "group-C wald plan
+    # shapes").
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         log(mu) ~ 1 + x
         lam ~ 1 + x

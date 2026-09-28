@@ -61,14 +61,15 @@ const _RK_ADMITTED_TRIPLES = Set{Tuple{Symbol,Symbol,Symbol}}([
     # sampled / assignment — no modeled-zi predictor in v1).
     (:zero_inflated_poisson, :log, :log),
     # Group C (counts): negative-binomial over a log-link shape
-    # predictor; p rides the scalar-only scale slot (literal in
-    # [0, 1] / sampled / assignment — modeled-p and column-p
-    # deferred, ZIP precedent).
+    # predictor; p rides the scale slot (literal in [0, 1] /
+    # sampled / assignment) or the scale-predictor slot (a
+    # `logit(p)` submodel — the hurdle p_zero precedent;
+    # column-p still deferred, ZIP precedent).
     (:negative_binomial, :log, :log),
     # Group C (wald): inverse-Gaussian over a log-link mean
-    # predictor; lambda rides the scalar-only scale slot (literal /
-    # sampled / assignment — modeled lambda deferred, Beta-kappa
-    # precedent).
+    # predictor; lambda rides the scale slot (scalar literal /
+    # sampled / assignment) or the scale-predictor slot (a
+    # `log(lam)` submodel — the von-Mises vscale precedent).
     (:wald, :log, :log),
     # Group C (circular): von-Mises over an identity-link location
     # predictor; kappa rides the scale slot (scalar literal /
@@ -177,9 +178,10 @@ struct _RKLikelihoodSpec
                    # group B: :student_t | group C: :hurdle_poisson
                    # (p_zero rides the scale / scale-predictor slots) |
                    # :zero_inflated_poisson |
-                   # :negative_binomial (p rides the scalar-only scale
-                   # slot) |
-                   # :wald (lambda rides the scalar-only scale slot) |
+                   # :negative_binomial (p rides the scale /
+                   # scale-predictor slots) |
+                   # :wald (lambda rides the scale /
+                   # scale-predictor slots) |
                    # :von_mises (kappa rides the
                    # scale / scale-predictor slots, the principal
                    # interval the `interval` slot) |
@@ -500,8 +502,9 @@ const _RK_ADMITTED_SPELLINGS =
     "weights), or group C: `c ~ HurdlePoisson(lambda, p0)` + " *
     "`log(lambda) ~ ...` (`p0` a `logit(p0) ~ ...` predictor, sampled " *
     "parameter, or (0, 1] literal) or `y ~ InverseGaussian(mu, lam)` + " *
-    "`log(mu) ~ ...` (`lam` a sampled parameter, scalar assignment, " *
-    "or positive literal), or group D: `c ~ BetaBinomial2(n, " *
+    "`log(mu) ~ ...` (`lam` a `log(lam) ~ ...` predictor, sampled " *
+    "parameter, scalar assignment, or positive literal), or group D: " *
+    "`c ~ BetaBinomial2(n, " *
     "mu, phi)` + `logit(mu) ~ ...` (`n` an integer column or literal; " *
     "`phi` a sampled parameter, scalar assignment, or positive literal), " *
     "or group C: `y ~ VonMises(mu, kappa)` / `y ~ CircularVonMises(mu, " *
@@ -711,24 +714,22 @@ function _rk_zero_inflation_argument(arg, parameters::Set{Symbol},
 end
 
 # Negative-binomial success probability: a literal in [0, 1], a sampled
-# parameter, or a scalar assignment (the ZIP zero-inflation precedent —
-# same gates, `success probability` nouns). A linear predictor in the p
-# slot is a modeled-p response (no driving case); a data column can
-# never be a scalar. Returns the literal value or the resolved name.
+# parameter, a scalar assignment (the ZIP zero-inflation precedent —
+# same gates, `success probability` nouns), or a distributional
+# bare-predictor reference (a `logit(p)` submodel — the hurdle p_zero
+# precedent; the caller gates the logit link). A data column can never
+# be a scalar. Returns `(prob, prob_predictor)` with exactly one side
+# non-nothing.
 function _rk_nb_probability_argument(arg, parameters::Set{Symbol},
         assignments::Set{Symbol}, consts::Dict{Symbol,Float64},
         aliases::Dict{Symbol,Symbol}, response::Symbol,
         candidates::Vector{Symbol})
     prefix = "RK backend"
-    arg isa Number && return _rk_probability_literal(arg, response,
-        "success probability")
+    arg isa NamedColumn && name(arg) in candidates &&
+        return (nothing, name(arg))
+    arg isa Number && return (_rk_probability_literal(arg, response,
+        "success probability"), nothing)
     if arg isa NamedColumn
-        name(arg) in candidates && error(
-            "$prefix: response `$response` success probability " *
-            "cannot be the linear predictor `$(name(arg))`; modeled p " *
-            "is out of slice — write a sampled parameter, a literal in " *
-            "[0, 1], or a scalar assignment (if a same-named parameter " *
-            "exists, rename one of them)")
         parent(arg) isa DataColumn && error(
             "$prefix: response `$response` success probability " *
             "cannot be a data column; slice 2 admits a sampled " *
@@ -736,13 +737,13 @@ function _rk_nb_probability_argument(arg, parameters::Set{Symbol},
         kind, value = _rk_resolve_use_ref(name(arg), consts, aliases,
             parameters, assignments,
             "response `$response` success probability")
-        kind === :number && return _rk_probability_literal(value, response,
-            "success probability")
-        return value
+        kind === :number && return (_rk_probability_literal(value, response,
+            "success probability"), nothing)
+        return (value, nothing)
     end
     error("$prefix: response `$response` success probability must " *
-          "be a sampled parameter, a literal in [0, 1], or a scalar " *
-          "assignment")
+          "be a sampled parameter, a literal in [0, 1], a scalar " *
+          "assignment, or the second linear predictor")
 end
 
 # Gamma mean-shape form: `Gamma(alpha, mu/alpha)` with the SAME alpha in
@@ -1081,27 +1082,23 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
             "itself; write `InverseGaussian(mu, lam)` with a `log(mu)` " *
             "predictor (slice 2 has no `InverseGaussian(exp(..))` spelling)")
         plink = predictor_link[location]
-        # Scalar-only (Beta-kappa precedent): modeled lambda is
-        # deferred thin-side too, so a predictor in the shape slot
-        # fails closed here with attribution instead of crossing.
-        _rk_is_predictor_ref(args[2], candidates) && error(
-            "$prefix: response `$response` `InverseGaussian` shape cannot " *
-            "be the linear predictor `$(name(args[2]))`; modeled lambda " *
-            "is out of slice — write a sampled parameter, a positive " *
-            "literal, or a scalar assignment")
+        # lam rides the scale slot (scalar sampled parameter /
+        # assignment / positive literal) or the scale-predictor slot (a
+        # `log(lam)` submodel — the von-Mises vscale precedent).
         lam, lam_predictor = _rk_scale_argument(args[2], parameters,
-            assignments, consts, aliases, response, "shape",
-            Symbol[])
-        lam_predictor === nothing || error(
-            "$prefix: response `$response` `InverseGaussian` shape cannot " *
-            "be a linear predictor (predictor-fed shape is not admitted)")
+            assignments, consts, aliases, response, "shape", candidates)
+        lam_predictor !== nothing &&
+            predictor_link[lam_predictor] !== :log && error(
+                "$prefix: response `$response` `InverseGaussian` shape " *
+                "predictor `$(lam_predictor)` must be log-link; " *
+                "write a `log(lam) ~ ...` submodel")
         triple = (:wald, plink, plink)
         triple in _RK_ADMITTED_TRIPLES || error(
             "$prefix: response `$response` pairs `InverseGaussian` with " *
             "a $plink-link predictor; write " *
             "`InverseGaussian(mu, lam)` with a `log(mu)` predictor")
         return (; family=:wald, link=plink, scale=lam,
-            scale_predictor=nothing, trials=nothing, location)
+            scale_predictor=lam_predictor, trials=nothing, location)
     elseif head === Binomial
         length(args) == 2 || error(
             "$prefix: response `$response` `Binomial` needs `(trials, " *
@@ -1207,15 +1204,23 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
             "itself; write `NegativeBinomial(r, p)` with a `log(r)` " *
             "predictor (slice 2 has no `NegativeBinomial(exp(..))` spelling)")
         plink = predictor_link[location]
-        prob = _rk_nb_probability_argument(args[2], parameters, assignments,
-            consts, aliases, response, candidates)
+        # p rides the scale slot (scalar sampled parameter /
+        # assignment / literal) or the scale-predictor slot (a
+        # `logit(p)` submodel — the hurdle p_zero precedent).
+        prob, prob_predictor = _rk_nb_probability_argument(args[2],
+            parameters, assignments, consts, aliases, response, candidates)
+        prob_predictor !== nothing &&
+            predictor_link[prob_predictor] !== :logit && error(
+                "$prefix: response `$response` `NegativeBinomial` success " *
+                "probability predictor `$(prob_predictor)` must be " *
+                "logit-link; write a `logit(p) ~ ...` submodel")
         triple = (:negative_binomial, plink, plink)
         triple in _RK_ADMITTED_TRIPLES || error(
             "$prefix: response `$response` pairs `NegativeBinomial` with " *
             "a $plink-link predictor; write " *
             "`NegativeBinomial(r, p)` with a `log(r)` predictor")
         return (; family=:negative_binomial, link=plink, scale=prob,
-            scale_predictor=nothing, trials=nothing, location)
+            scale_predictor=prob_predictor, trials=nothing, location)
     elseif head === BinomialLogit
         error("$prefix: response `$response` `BinomialLogit` is out of " *
               "slice 1; write `Binomial(n, p)` with a `logit(p)` " *
