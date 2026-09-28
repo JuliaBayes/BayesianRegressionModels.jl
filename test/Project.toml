@@ -53,11 +53,10 @@ rev = "c317cc003fc41c2d933c27dc80799141eebd434e"
 
 [sources.StanBlocks]
 url = "https://github.com/nsiccha/StanBlocks.jl"
-# 24578c34 (2026-09-24): declared unbound ragged/censored observations infer
-# retained layout and forward-simulate with predictive twins and segments
-# (StanBlocks snag declared-unbound-35cd933e; BRM ragged-omitted-r-198ea038).
-# Contains 74ed796d's declared-observation `:predict` support and its floors.
-rev = "24578c34eb90928791319ef9ef2b49a28e0d4a51"
+# 342436de (2026-09-27): K>=3 mixture RNG else-if rendering (StanBlocks
+# 5aed3df; BRM matrix-b snag k-5-mixturemodel-6105de92). Supersedes 24578c34
+# (declared-unbound ragged/censored draw shape, twins and segments).
+rev = "342436de359eb43879ddcef4956cfd5fd6502995"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
@@ -71,12 +70,15 @@ rev = "7aed40b18bd4cdabb75330f285d5c9b355575ab9"
 
 [sources.ReactiveKernels]
 url = "https://github.com/nsiccha/ReactiveKernels.jl"
-# c83c14c0 (2026-09-27, main): the bb2a2e0 stack (38973ca0
-# multimembership, prior-vocab generator+contract+layout, fam-nb1
-# slice) plus the term-monotonic merge (ad82c02) and the
-# term-hsgp-periodic slice (thin-layer cov=:periodic + corpus 68 +
-# committed XLA testset, ec82973 reviewed, user GO 03cl1rn).
+# 6cf678f (2026-09-27, main): the c83c14c0 stack (bb2a2e0 +
+# term-monotonic + term-hsgp-periodic) plus mod-weights, term-gp,
+# closeout-appends, kernel-robust, splines-stan (spline sd
+# :positive_stan), the fam-exp Exponential response slice
+# (ExponentialFam + corpus 69_exp), and the fam-lognormal LogNormal
+# response slice (LogNormalFam + (IdentityLink, IdentityLink) triple +
+# scalar sigma on the scale slot + head `LogNormal.(mu, sigma)` +
+# corpus 70_lognormal + L1 SB pin).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "c83c14c0f8474b157eab36a75c256096aaeec7e5"
+rev = "6cf678f37acec6cb34fd0abcf7b990e74707dea4"

@@ -77,6 +77,12 @@ const _RK_ADMITTED_TRIPLES = Set{Tuple{Symbol,Symbol,Symbol}}([
     # `VonMises` and `CircularVonMises` share the triple; the
     # principal interval rides the plan's `interval` slot.
     (:von_mises, :identity, :identity),
+    # Group C (positive continuous): log-Normal over an
+    # identity-link location predictor; sigma rides the
+    # scalar-only scale slot (sampled / positive literal /
+    # scalar assignment — modeled sigma is term-nuisance
+    # scope, so a predictor fails closed here).
+    (:lognormal, :identity, :identity),
 ])
 # Slice-2 families: no weights or evidence (no driving case — the thin
 # layer admits neither on the new triples, so the planner fails closed).
@@ -84,7 +90,7 @@ const _RK_SLICE2_FAMILIES = Set{Symbol}([
     :bernoulli_probit, :bernoulli_cloglog, :binomial_probit,
     :binomial_cloglog, :beta_logit, :beta_binomial_logit, :student_t,
     :hurdle_poisson, :zero_inflated_poisson, :wald, :von_mises,
-    :negative_binomial,
+    :negative_binomial, :lognormal,
 ])
 # Leveled simplex responses (multinomial/categorical) name a simplex
 # vector parameter instead of a linear predictor, so they skip the
@@ -168,6 +174,8 @@ struct _RKLikelihoodSpec
                    # :von_mises (kappa rides the
                    # scale / scale-predictor slots, the principal
                    # interval the `interval` slot) |
+                   # :lognormal (sigma rides the scalar-only scale
+                   # slot) |
                    # longtail: :mvnormal_cholesky (joint correlated outcomes)
                    # | :mixture (finite MixtureModel response)
     link::Symbol   # effective link: :identity | :logit | :log |
@@ -478,7 +486,9 @@ const _RK_ADMITTED_SPELLINGS =
     "`phi` a sampled parameter, scalar assignment, or positive literal), " *
     "or group C: `y ~ VonMises(mu, kappa)` / `y ~ CircularVonMises(mu, " *
     "kappa; interval=(lo, hi))` + `mu ~ ...` (`kappa` a `log(kappa) ~ ...` " *
-    "predictor, sampled parameter, or positive literal)"
+    "predictor, sampled parameter, or positive literal), or group C: " *
+    "`y ~ LogNormal(mu, sigma)` + `mu ~ ...` (`sigma` a sampled " *
+    "parameter, scalar assignment, or positive literal)"
 
 function _rk_predictor_link(brmi::BRMI, target::Symbol)
     prefix = "RK backend"
@@ -1326,6 +1336,37 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
         return (; family=:von_mises, link=plink, scale=kappa,
             scale_predictor=kappa_predictor, trials=nothing, location,
             interval)
+    elseif head === LogNormal
+        length(args) == 2 || error(
+            "$prefix: response `$response` `LogNormal` needs " *
+            "`(location, scale)`; write `LogNormal(mu, sigma)` " *
+            "with a `mu ~ ...` predictor")
+        location = _rk_location_arg(args[1], candidates, response, "location",
+            "itself, not a deterministic transform; write the transform " *
+            "into the predictor formula")
+        plink = predictor_link[location]
+        # Scalar-only sigma (the wald arm's Beta-kappa rule):
+        # modeled sigma is term-nuisance scope, so a predictor in
+        # the scale slot fails closed here with attribution
+        # instead of crossing.
+        _rk_is_predictor_ref(args[2], candidates) && error(
+            "$prefix: response `$response` `LogNormal` scale cannot " *
+            "be the linear predictor `$(name(args[2]))`; modeled sigma " *
+            "is out of slice — write a sampled parameter, a positive " *
+            "literal, or a scalar assignment")
+        sigma, sigma_predictor = _rk_scale_argument(args[2], parameters,
+            assignments, consts, aliases, response, "scale",
+            Symbol[])
+        sigma_predictor === nothing || error(
+            "$prefix: response `$response` `LogNormal` scale cannot " *
+            "be a linear predictor (predictor-fed scale is not admitted)")
+        triple = (:lognormal, plink, plink)
+        triple in _RK_ADMITTED_TRIPLES || error(
+            "$prefix: response `$response` pairs `LogNormal` with a " *
+            "$plink-link predictor; write `LogNormal(mu, sigma)` " *
+            "with an identity-link predictor")
+        return (; family=:lognormal, link=plink, scale=sigma,
+            scale_predictor=nothing, trials=nothing, location)
     elseif head === MvNormalCholesky
         # Joint correlated-outcomes response (SB
         # `[y1..yK] ~ MvNormalCholesky([mu1..muK], L)`): Phase 4 resolved
@@ -5714,7 +5755,7 @@ function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
     elseif family === :nb2_log || family === :negative_binomial
         (eltype(values) <: Integer && all(>=(0), values)) || error(
             "$prefix: response `$response` must hold non-negative integers")
-    elseif family === :gamma_log
+    elseif family === :gamma_log || family === :lognormal
         # Mirrors the thin layer: strictly positive (y = 0 fails
         # validation there, so it fails here with BRM-side attribution).
         (eltype(values) <: Real && all(>(0), values)) || error(
