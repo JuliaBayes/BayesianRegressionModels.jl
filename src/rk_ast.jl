@@ -989,14 +989,20 @@ function _rk_ast_plate(name::Symbol, range::Symbol,
     Expr(:macrocall, Symbol("@plate"), LineNumberNode(0), loop)
 end
 
-# `gp_chol_latent(gp_exp_quad_cov(x, sigma, rho, jitter), z)`: arg order
-# is (locations, sigma, rho, jitter) per the thin-layer contract.
+# `gp_chol_latent(gp_exp_quad_cov(x, sigma, rho, jitter), z)` /
+# `gp_chol_latent(gp_periodic_cov(x, sigma, rho, period, jitter), z)`:
+# arg order is (locations, sigma, rho, [period,] jitter) per the
+# thin-layer contract.
 function _rk_ast_gp_latent(term)
     options = term.options
-    Expr(:call, :gp_chol_latent,
+    cov = if options.cov === :periodic
+        Expr(:call, :gp_periodic_cov, only(term.columns),
+            options.sigma, options.rho, options.period, options.jitter)
+    else
         Expr(:call, :gp_exp_quad_cov, only(term.columns),
-            options.sigma, options.rho, options.jitter),
-        options.z)
+            options.sigma, options.rho, options.jitter)
+    end
+    Expr(:call, :gp_chol_latent, cov, options.z)
 end
 
 function _rk_ast_gp_names(plan::_RKStructuralPlan)

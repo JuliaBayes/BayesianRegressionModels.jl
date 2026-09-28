@@ -4057,7 +4057,10 @@ end
 # ---- exact-GP latent terms (iso single-axis; mirrors `_sb_gp`) ----
 #
 # A `:gp` term carries its thin-layer names + hyper priors in `options`:
-# `(; rho, sigma, z, f, jitter, rho_param, sigma_param)`. The hypers are
+# `(; rho, sigma, z, f, cov, period, jitter, rho_param, sigma_param)`.
+# `cov` is `:exp_quad` or `:periodic` (1d-iso, Stan `gp_periodic_cov`
+# verbatim); `period` is the positive formula constant for `:periodic`
+# and `nothing` otherwise. The hypers are
 # `_RKSampledParameter`s emitted by the AST preamble (before the predictor
 # affine that uses `f`), NOT entries of `plan.parameters` — the parameters
 # loop emits after predictors, which would violate topo order. The AST is
@@ -4129,10 +4132,10 @@ function _rk_plan_gp_term!(prepared::_BRMPreparedTerm{typeof(gp)},
         columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol})
     prefix = "RK backend"
     state = prepared.state
-    state.cov === :exp_quad || error(
+    (state.cov === :exp_quad || state.cov === :periodic) || error(
         "$prefix: predictor `$target` `gp(...; cov=$(repr(state.cov)))` " *
-        "is out of slice 1 (the thin-layer surface is exp_quad; " *
-        "periodic is sequenced)")
+        "is out of slice 1 (the thin-layer surface is exp_quad + " *
+        "1d-iso periodic)")
     (state.iso && length(prepared.source) == 1) || error(
         "$prefix: predictor `$target` anisotropic or multi-axis `gp(...)` " *
         "is out of slice 1 (the thin-layer surface is iso single-axis; " *
@@ -4149,7 +4152,9 @@ function _rk_plan_gp_term!(prepared::_BRMPreparedTerm{typeof(gp)},
     sig_family, sig_args, sig_support = _rk_gp_hyper_prior(
         state.sigma_prior, "marginal-scale", target, axis)
     _RKTermSpec(:gp, [axis],
-        (; rho, sigma, z, f, jitter=Float64(state.jitter),
+        (; rho, sigma, z, f, cov=state.cov,
+         period=state.cov === :periodic ? Float64(state.period) : nothing,
+         jitter=Float64(state.jitter),
          rho_param=_RKSampledParameter(
              rho, rho_family, rho_args, rho_support, rho),
          sigma_param=_RKSampledParameter(
