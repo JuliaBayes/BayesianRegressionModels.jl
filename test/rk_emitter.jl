@@ -580,6 +580,34 @@ end
     @test isnothing(likelihood.scale)
     @test likelihood.scale_predictor === :sigma
     @test likelihood.nu === :nu
+    # Modeled nu (N1 probe shape): literal scale, `log(nu)` submodel.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        log(nu) ~ 1 + z
+        y ~ LocationScale(mu, 2.0, TDist(nu))
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    likelihood = only(plan.responses)
+    @test (likelihood.family, likelihood.link) === (:student_t, :identity)
+    @test likelihood.predictor === :mu
+    @test likelihood.scale == 2.0
+    @test isnothing(likelihood.scale_predictor)
+    @test isnothing(likelihood.nu)
+    @test likelihood.nu_predictor === :nu
+    @test [p.name for p in plan.predictors] == [:mu, :nu]
+    @test [p.link for p in plan.predictors] == [:identity, :log]
+    # Modeled nu + sampled scale (N1b probe shape).
+    brmi = @brm df begin
+        mu ~ 1 + x
+        s ~ Exponential(1)
+        log(nu) ~ 1 + z
+        y ~ LocationScale(mu, s, TDist(nu))
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:student_t, :identity)
+    @test likelihood.scale === :s
+    @test isnothing(likelihood.nu)
+    @test likelihood.nu_predictor === :nu
 end
 
 @testset "group-C hurdle-poisson plan shapes" begin
@@ -2883,11 +2911,18 @@ end
         nu ~ Gamma(2, 0.1)
         y ~ LocationScale(mu, s, TDist(nu))
     end)
+    # Nu submodel must be log-link (only log inverts into (0, Inf)).
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
-        log(nu_lp) ~ 1
+        nu ~ 1 + z
         s ~ Exponential(1)
-        y ~ LocationScale(mu, s, TDist(nu_lp))
+        y ~ LocationScale(mu, s, TDist(nu))
+    end)
+    # The location predictor cannot feed the nu slot too (the log-link
+    # pin fires first).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        y ~ LocationScale(mu, 2.0, TDist(mu))
     end)
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x

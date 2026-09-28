@@ -374,6 +374,27 @@ function _rk_ast_response_scale(response::_RKLikelihoodSpec,
     error("RK backend: internal: scale predictor `$name` has link `$link`")
 end
 
+# The Student-t degrees of freedom inside a bare response statement: a
+# direct nu (outer name or literal) passes through inline, exactly one
+# of the scalar/predictor pair set (the planner guarantees it). A
+# modeled nu inverts its link on the predictor name exactly like a
+# scale predictor (`exp.` for log), so the head always reads the
+# constrained vector.
+function _rk_ast_response_nu(response::_RKLikelihoodSpec,
+        rename::Dict{Symbol,Symbol}, predictor_link::Dict{Symbol,Symbol})
+    name = response.nu_predictor
+    name === nothing || response.nu === nothing || error(
+        "RK backend: internal: response `$(response.response)` carries " *
+        "both a scalar nu and a nu predictor")
+    name === nothing && return response.nu
+    actual = get(rename, name, name)
+    link = predictor_link[name]
+    link === :identity && return actual
+    link === :log && return _rk_ast_dotted(:exp, actual)
+    link === :logit && return _rk_ast_dotted(:logistic, actual)
+    error("RK backend: internal: nu predictor `$name` has link `$link`")
+end
+
 # The inverse-link spelling (`Bernoulli.(logistic.(η))`,
 # `Poisson.(exp.(η))`, …) is what the `@rkppl` surface takes; the thin
 # layer recovers the link-native HAVE from it — the lowered
@@ -384,7 +405,8 @@ end
 # `leaf` maps each role to its INLINE spelling: `:predictor` (the
 # predictor name, possibly renamed), `:scale` (the scale value or
 # link-inverted scale predictor), `:nu` (the Student-t degrees of
-# freedom, literal or name, inline), `:zero_inflation` (the ZIP zero
+# freedom: the scalar value or the link-inverted nu predictor),
+# `:zero_inflation` (the ZIP zero
 # probability, literal or name, inline), `:trials`/`:weights`/`:lower`/
 # `:upper` (columns or literals inline),
 # `:extra_predictors`/`:count_columns` (tail predictors / tail count
@@ -634,7 +656,8 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
         # the plan's `LocationScale(mu, s, TDist(nu))` maps to
         # `StudentT.(nu, mu, sigma)` by arg reorder (Stan
         # `student_t(nu, mu, sigma)` order), the same class of
-        # normalization as the existing spelling maps. No
+        # normalization as the existing spelling maps. A modeled nu
+        # rides under `exp.` (the scale-predictor precedent). No
         # `LocationScale` twin: the Normal single-head precedent
         # governs (no link wrap to bridge).
         _rk_ast_dotted(:StudentT, leaf[:nu], predictor, leaf[:scale])
@@ -741,7 +764,7 @@ function _rk_ast_mixture_leaves(response::_RKLikelihoodSpec,
             response.trials, nothing, nothing, Symbol[], Symbol[], nothing,
             nothing, Symbol[], nothing, Symbol[], nothing,
             _RKMixtureComponent[], nothing, nothing, nothing, nothing,
-            nothing)
+            nothing, nothing)
         cleaf = Dict{Symbol,Any}(:predictor => loc)
         if _rk_ast_response_uses_scale(comp.family)
             cleaf[:scale] =
@@ -791,16 +814,16 @@ function _rk_ast_response_stmt(response::_RKLikelihoodSpec,
             _rk_ast_response_scale(response, rename, predictor_link)
     end
     if family === :student_t
-        # Scalar-only like the scale slot (sampled/assignment names pass
-        # through; only predictor names alpha-rename).
-        response.nu === nothing && error(
-            "RK backend: internal: response `$(response.response)` plans " *
-            "Student-t without degrees of freedom")
-        leaf[:nu] = response.nu
+        # Scalar or modeled (sampled/assignment names pass through;
+        # only predictor names alpha-rename and invert their link).
+        response.nu === nothing && response.nu_predictor === nothing &&
+            error("RK backend: internal: response `$(response.response)` " *
+                  "plans Student-t without degrees of freedom")
+        leaf[:nu] = _rk_ast_response_nu(response, rename, predictor_link)
     end
     if family === :zero_inflated_poisson
-        # Scalar-only like the nu slot (sampled/assignment names pass
-        # through; only predictor names alpha-rename).
+        # Scalar-only (sampled/assignment names pass through; only
+        # predictor names alpha-rename).
         response.zero_inflation === nothing && error(
             "RK backend: internal: response `$(response.response)` plans " *
             "zero-inflated Poisson without a zero probability")

@@ -226,6 +226,19 @@ end
         Expr(:., :StudentT, Expr(:tuple, 4.0, :mu, 2.0)))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+    # Modeled nu (N1 probe shape): the `log(nu)` submodel rides under
+    # `exp.`, the scale-predictor precedent.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        log(nu) ~ 1 + z
+        y ~ LocationScale(mu, 2.0, TDist(nu))
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :y,
+        Expr(:., :StudentT, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :nu)), :mu, 2.0)))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end
 
 @testset "group-C hurdle-poisson AST shape" begin
@@ -701,7 +714,7 @@ end
             nothing, BRM._RKResponseEvidence(:none, nothing, nothing), :y,
             nothing, nothing, nothing, Symbol[], Symbol[], nothing, nothing,
             Symbol[], nothing, Symbol[], nothing, BRM._RKMixtureComponent[],
-            nothing, nothing, nothing, nothing, nothing)],
+            nothing, nothing, nothing, nothing, nothing, nothing)],
         [BRM._RKPredictorSpec(:n, :identity, BRM._RKTermSpec[
             BRM._RKTermSpec(:intercept, Symbol[], (;), :Intercept, :Intercept),
             BRM._RKTermSpec(:continuous, [:n], (;), :n, :n)], :n)],

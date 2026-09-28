@@ -48,7 +48,8 @@ const _RK_ADMITTED_TRIPLES = Set{Tuple{Symbol,Symbol,Symbol}}([
     (:beta_binomial_logit, :logit, :logit),
     # Group B (robust): location-scale Student-t over an identity
     # predictor; nu rides its own plan slot (literal / sampled /
-    # assignment — no modeled-nu predictor).
+    # assignment) or the nu-predictor slot (a `log(nu)` submodel —
+    # the hurdle vscale precedent).
     (:student_t, :identity, :identity),
     # Group C (hurdle): hurdle-Poisson over a log-link rate
     # predictor; p_zero rides the scale slot (scalar literal /
@@ -215,9 +216,12 @@ struct _RKLikelihoodSpec
     mixture_components::Vector{_RKMixtureComponent}
     mixture_weights::Union{Nothing,Vector{Float64},Symbol} # frozen
         # literal or Dirichlet simplex-param name
-    # Student-t trailing field (thin-layer LikelihoodSpec mirror once the
-    # nu slot lands there); every other family leaves it at default.
+    # Student-t trailing fields (thin-layer LikelihoodSpec mirror once
+    # the nu slot lands there); every other family leaves them at
+    # default. Exactly one of `nu` / `nu_predictor` is non-nothing; a
+    # modeled nu inverts its log link at the AST use-site.
     nu::Union{Nothing,Float64,Symbol} # literal or sampled/assignment name
+    nu_predictor::Union{Nothing,Symbol}
     # Zero-inflated-Poisson trailing field (thin-layer LikelihoodSpec
     # mirror); every other family leaves it at default.
     zero_inflation::Union{Nothing,Float64,Symbol} # literal or sampled/assignment name
@@ -472,7 +476,9 @@ const _RK_ADMITTED_SPELLINGS =
     "(1-mu)*kappa)` + `logit(mu) ~ ...` (`kappa` a `log(kappa) ~ ...` " *
     "predictor, sampled parameter, scalar assignment, or positive " *
     "literal), group B: `y ~ LocationScale(mu, " *
-    "s, TDist(nu))` + `mu ~ ...`, group C: `c ~ ZeroInflatedPoisson(lambda, " *
+    "s, TDist(nu))` + `mu ~ ...` (`nu` a `log(nu) ~ ...` predictor, " *
+    "sampled parameter, or positive literal), group C: " *
+    "`c ~ ZeroInflatedPoisson(lambda, " *
     "zi)` + `log(lambda) ~ ...`, `[y1, y2] ~ " *
     "MvNormalCholesky([mu1, mu2], L)` + `L ~ LKJCovarianceFactor(K; " *
     "...)` + identity `mu_j ~ ...`, `y ~ MixtureModel([D1, ..., " *
@@ -611,9 +617,11 @@ end
 
 # Student-t degrees of freedom: the `LocationScale` base must be a
 # `TDist(nu)` call whose nu is a positive literal, a sampled parameter,
-# or a scalar assignment. A linear predictor in the nu slot is a
-# modeled-nu response (no driving case); a data column can never be a
-# scalar. Returns the literal value or the resolved name.
+# a scalar assignment, or a distributional bare-predictor reference (a
+# `log(nu) ~ ...` submodel — the hurdle vscale precedent; a predictor
+# shadows a same-named data column here, matching the scale slot). A
+# data column can never be a scalar. Returns `(nu, nu_predictor)`
+# with exactly one side non-nothing.
 function _rk_nu_argument(base, parameters::Set{Symbol},
         assignments::Set{Symbol}, consts::Dict{Symbol,Float64},
         aliases::Dict{Symbol,Symbol}, response::Symbol,
@@ -631,28 +639,27 @@ function _rk_nu_argument(base, parameters::Set{Symbol},
         "$prefix: response `$response` `LocationScale` base `TDist` " *
         "takes no keywords")
     arg = only(bargs)
-    arg isa Number && return _rk_positive_literal(arg, response,
-        "degrees of freedom")
+    arg isa NamedColumn && name(arg) in candidates &&
+        return (nothing, name(arg))
+    arg isa Number && return (_rk_positive_literal(arg, response,
+        "degrees of freedom"), nothing)
     if arg isa NamedColumn
-        name(arg) in candidates && error(
-            "$prefix: response `$response` degrees of freedom cannot be " *
-            "the linear predictor `$(name(arg))`; modeled nu is out of " *
-            "slice — write a sampled parameter, a positive literal, or " *
-            "a scalar assignment (if a same-named parameter exists, " *
-            "rename one of them)")
         parent(arg) isa DataColumn && error(
             "$prefix: response `$response` degrees of freedom cannot be " *
             "a data column; slice 1 admits a sampled parameter, a " *
-            "scalar assignment, or a positive numeric literal")
+            "scalar assignment, a positive numeric literal, or the " *
+            "second linear predictor")
         kind, value = _rk_resolve_use_ref(name(arg), consts, aliases,
             parameters, assignments, "response `$response` degrees of freedom")
-        kind === :number && return _rk_positive_literal(value, response,
-            "degrees of freedom")
-        return value
+        kind === :number && return (_rk_positive_literal(value, response,
+            "degrees of freedom"), nothing)
+        return (value, nothing)
     end
     error("$prefix: response `$response` degrees of freedom must be a " *
-          "sampled parameter, a positive numeric literal, or a scalar " *
-          "assignment")
+          "sampled parameter, a positive numeric literal, a scalar " *
+          "assignment, or the second linear predictor (`log(nu) ~ ...` " *
+          "+ bare `nu`; deterministic wrappers such as `exp(...)` " *
+          "spell as an LP link instead)")
 end
 
 # Zero-inflated-Poisson zero probability: a literal in [0, 1], a sampled
@@ -905,11 +912,11 @@ end
 # candidate in the scale/shape slot becomes `scale_predictor`. Leveled
 # families return the same shape (location is the lead predictor; the
 # categorical-logit tail arrives via `extra`). Returns
-# `(; family, link, scale, scale_predictor, trials, location)` plus a `nu`
-# key on the Student-t arm, a `zero_inflation` key on the
-# zero-inflated-Poisson arm, and an `interval` key on the von-Mises arm
-# only; the caller rejects unclaimed candidates and a scale slot naming
-# the location.
+# `(; family, link, scale, scale_predictor, trials, location)` plus a
+# `nu`/`nu_predictor` pair on the Student-t arm, a `zero_inflation`
+# key on the zero-inflated-Poisson arm, and an `interval` key on the
+# von-Mises arm only; the caller rejects unclaimed candidates and a
+# scale/nu slot naming the location.
 function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
         predictor_link::Dict{Symbol,Symbol}, parameters::Set{Symbol},
         assignments::Set{Symbol}, consts::Dict{Symbol,Float64},
@@ -1297,15 +1304,20 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
         plink = predictor_link[location]
         scale, scale_predictor = _rk_scale_argument(args[2], parameters,
             assignments, consts, aliases, response, "scale", candidates)
-        nu = _rk_nu_argument(args[3], parameters, assignments, consts,
-            aliases, response, candidates)
+        nu, nu_predictor = _rk_nu_argument(args[3], parameters, assignments,
+            consts, aliases, response, candidates)
+        nu_predictor !== nothing &&
+            predictor_link[nu_predictor] !== :log && error(
+                "$prefix: response `$response` `LocationScale` degrees " *
+                "of freedom predictor `$(nu_predictor)` must be " *
+                "log-link; write a `log(nu) ~ ...` submodel")
         triple = (:student_t, plink, plink)
         triple in _RK_ADMITTED_TRIPLES || error(
             "$prefix: response `$response` pairs `LocationScale` with a " *
             "$plink-link predictor; write `LocationScale(mu, s, " *
             "TDist(nu))` with an identity-link predictor")
         return (; family=:student_t, link=plink, scale, scale_predictor,
-            trials=nothing, location, nu)
+            trials=nothing, location, nu, nu_predictor)
     elseif head === ZeroInflatedPoisson
         length(args) == 2 || error(
             "$prefix: response `$response` `ZeroInflatedPoisson` needs " *
@@ -5052,7 +5064,7 @@ function _rk_plan_me_observations!(response_specs::Vector{_RKLikelihoodSpec},
             source, nothing, nothing, nothing, Symbol[], Symbol[],
             nothing, nothing, Symbol[], nothing, Symbol[], nothing,
             _RKMixtureComponent[], nothing, nothing, nothing, nothing,
-            nothing))
+            nothing, nothing))
     end
     nothing
 end
@@ -6325,7 +6337,7 @@ function _rk_plan_joint_response!(entry, link::Symbol, predictor::Symbol,
         nothing, nothing, nothing, evidence, entry.key, nothing, nothing,
         nothing, extra, Symbol[], nothing, nothing, Symbol[], nothing,
         outcomes[2:end], stem, _RKMixtureComponent[], nothing, nothing,
-        nothing, nothing, nothing)
+        nothing, nothing, nothing, nothing)
 end
 
 # Joint responses link their LKJ factor stem explicitly (SB's
@@ -7047,6 +7059,8 @@ function _rk_gate_ordinal_scale_slots!(response_specs::AbstractVector,
             push!(occupied, spec.predictor)
         spec.scale_predictor === nothing ||
             push!(occupied, spec.scale_predictor)
+        spec.nu_predictor === nothing ||
+            push!(occupied, spec.nu_predictor)
         union!(occupied, spec.extra_predictors)
     end
     for spec in response_specs
@@ -7135,8 +7149,9 @@ function _brm_rk_plan(brmi::BRMI)
         context.data, consts, aliases, parameter_names, assignment_names)
     _rk_gate_acyclic!(parameters, assignments)
     # Phase 4: discover and plan predictors (deduped, first-referenced order).
-    # A distributional response references two (location + scale/shape); both
-    # plan here so the scale predictor gets terms, priors, and validation.
+    # A distributional response references two (location + scale/shape;
+    # three with a Student-t nu submodel); all plan here so non-location
+    # predictors get terms, priors, and validation.
     predictor_order = Symbol[]
     response_predictors = Dict{Symbol,Vector{Symbol}}()
     response_extra_predictors = Dict{Symbol,Vector{Symbol}}()
@@ -7222,12 +7237,12 @@ function _brm_rk_plan(brmi::BRMI)
         mixture_components = _RKMixtureComponent[]
         mixture_weights::Union{Nothing,Vector{Float64},Symbol} = nothing
         family, link, scale, scale_predictor, trials, predictor, nu,
-        zero_inflation, interval = if head === Categorical
+        nu_predictor, zero_inflation, interval = if head === Categorical
             length(getargs(entry.rhs)) == 1 || error(
                 "$prefix: response `$(entry.key)` `Categorical` needs " *
                 "`Categorical(s)` with a `Dirichlet`-sampled `s`")
             (:categorical, :identity, nothing, nothing, nothing, nothing,
-                nothing, nothing, nothing)
+                nothing, nothing, nothing, nothing)
         elseif head === Multinomial
             length(getargs(entry.rhs)) == 2 || error(
                 "$prefix: response `$(entry.key)` `Multinomial` needs " *
@@ -7236,7 +7251,7 @@ function _brm_rk_plan(brmi::BRMI)
             mtrials = _rk_trials_argument(getargs(entry.rhs)[1], entry.key,
                 parameter_names, assignment_names, consts, aliases)
             (:multinomial, :identity, nothing, nothing, mtrials, nothing,
-                nothing, nothing, nothing)
+                nothing, nothing, nothing, nothing)
         elseif head === MixtureModel
             mclassified = _rk_classify_mixture(entry.rhs, candidates,
                 predictor_link, parameter_names, assignment_names, consts,
@@ -7245,7 +7260,7 @@ function _brm_rk_plan(brmi::BRMI)
             mixture_weights = mclassified.weights
             (mclassified.family, mclassified.link, nothing, nothing,
                 mclassified.trials, mclassified.anchor, nothing, nothing,
-                nothing)
+                nothing, nothing)
         else
             if head === CategoricalLogit && isempty(candidates)
                 # Zero-arg shape: K=1 (rejected per 0dteta6) or arity mismatch.
@@ -7270,6 +7285,7 @@ function _brm_rk_plan(brmi::BRMI)
             (classified.family, classified.link, classified.scale,
                 classified.scale_predictor, classified.trials,
                 classified.location, get(classified, :nu, nothing),
+                get(classified, :nu_predictor, nothing),
                 get(classified, :zero_inflation, nothing),
                 get(classified, :interval, nothing))
         end
@@ -7303,15 +7319,15 @@ function _brm_rk_plan(brmi::BRMI)
                     "are out of mixture v1")
             end
         end
-        # Every referenced predictor must feed a slot: the scale slot naming
-        # the location is degenerate, and anything else unclaimed is a name
-        # shadowed across slots (rename one of them). The categorical-logit
-        # tail feeds `extra_predictors`, not a slot; an ordinal
-        # discrimination predictor feeds the discrimination slot. Mixture
-        # components share slots freely (sharing is unambiguous —
-        # every slot is explicit), so anything referenced feeds at
-        # least one. Runs after the leveled plan so the ordinal extras
-        # are known.
+        # Every referenced predictor must feed a slot: the scale or nu
+        # slot naming the location is degenerate, and anything else
+        # unclaimed is a name shadowed across slots (rename one of
+        # them). The categorical-logit tail feeds `extra_predictors`,
+        # not a slot; an ordinal discrimination predictor feeds the
+        # discrimination slot. Mixture components share slots freely
+        # (sharing is unambiguous — every slot is explicit), so
+        # anything referenced feeds at least one. Runs after the
+        # leveled plan so the ordinal extras are known.
         if family === :mixture
             claimed = Set{Symbol}()
             for comp in mixture_components
@@ -7332,9 +7348,14 @@ function _brm_rk_plan(brmi::BRMI)
                 error("$prefix: response `$(entry.key)` feeds the location " *
                       "predictor `$predictor` into the scale/shape " *
                       "slot too; the two slots take distinct predictors")
-            claimed = scale_predictor === nothing ?
-                Set([predictor]) :
-                Set([predictor, scale_predictor])
+            nu_predictor === nothing || nu_predictor !== predictor ||
+                error("$prefix: response `$(entry.key)` feeds the location " *
+                      "predictor `$predictor` into the nu " *
+                      "slot too; the two slots take distinct predictors")
+            claimed = Set([predictor])
+            scale_predictor === nothing ||
+                push!(claimed, scale_predictor)
+            nu_predictor === nothing || push!(claimed, nu_predictor)
             union!(claimed, extra)
             disc = leveled.discrimination
             disc isa Symbol && haskey(predictor_link, disc) &&
@@ -7342,9 +7363,10 @@ function _brm_rk_plan(brmi::BRMI)
             unclaimed = filter(name -> name ∉ claimed, candidates)
             isempty(unclaimed) || error(
                 "$prefix: response `$(entry.key)` references linear " *
-                "predictor(s) $(join(unclaimed, ", ")) outside the location " *
-                "and scale/shape slots; every referenced predictor must feed " *
-                "one slot (if a name shadows a data column, rename one of them)")
+                "predictor(s) $(join(unclaimed, ", ")) outside the location, " *
+                "scale/shape, and nu slots; every referenced predictor " *
+                "must feed one slot (if a name shadows a data column, " *
+                "rename one of them)")
         end
         if trials isa Symbol
             raw = get(context.data, trials, nothing)
@@ -7418,7 +7440,7 @@ function _brm_rk_plan(brmi::BRMI)
             leveled.ordinal_structure, leveled.discrimination,
             leveled.threshold_columns, leveled.threshold_coefs, Symbol[],
             nothing, mixture_components, mixture_weights, nu,
-            zero_inflation, mi_jobs, interval))
+            nu_predictor, zero_inflation, mi_jobs, interval))
     end
     # Measurement-error observations ride synthetic responses (SB's
     # `x_obs ~ Normal(x_true, sd)` likelihood per `me` term).
