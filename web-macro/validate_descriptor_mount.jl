@@ -172,10 +172,10 @@ end # module SmokeModel
         scope=:job, key=req -> "smoke",
     )
     route!(page; root_provider=provider)
+    router = HTMXObjects.ROUTER
     drive(path; headers=Pair{String,String}[]) = begin
         request = HTTP.Request("GET", path, headers)
-        handler = first(HTTP.Handlers.gethandler(
-            HTMXObjects.CONTEXT[].service.router, request))
+        handler = first(HTTP.Handlers.gethandler(router, request))
         handler(request)
     end
     try
@@ -190,8 +190,9 @@ end # module SmokeModel
             "https://cdn.jsdelivr.net/npm/htmx.org@2.0.8/dist/htmx.min.js",
             index_body,
         )
-        @test occursin("data-htmxo-operation-load", index_body)
-        @test occursin("hx-trigger=\"load\"", index_body)
+        @test occursin("name=\"operation\"", index_body)
+        @test !occursin("data-htmxo-operation-load", index_body)
+        @test !occursin("hx-trigger=\"load\"", index_body)
 
         htmx_headers = vcat(browser_headers, ["HX-Request" => "true"])
         full = drive("/"; headers=htmx_headers)
