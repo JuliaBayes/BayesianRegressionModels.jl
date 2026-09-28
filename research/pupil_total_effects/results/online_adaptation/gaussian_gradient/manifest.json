@@ -1,0 +1,16 @@
+[
+  {
+    "archive": "checkpoint_final.jls.gz",
+    "sha256": "7773a82aac4b1698ef5ae29bcedbbefdff4c16b3e19f2ee46bf68a574b6656c4",
+    "bytes": 2062549,
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/c8e1894401ef25dc.bin",
+        "bytes": 2062549,
+        "sha256": "7773a82aac4b1698ef5ae29bcedbbefdff4c16b3e19f2ee46bf68a574b6656c4"
+      }
+    ],
+    "complete": true
+  }
+]
