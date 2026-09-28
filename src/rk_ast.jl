@@ -655,6 +655,14 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
             leaf[:scale],
             _rk_ast_dotted(:exp, predictor)) :
         _rk_ast_dotted(:Weibull, leaf[:scale], predictor)
+    elseif response.family === :exponential_log
+        # Twin head (thin-layer decision, pair fam-exp): the plan's
+        # `Exponential(mu)` maps to `Exponential.(exp.(eta))`
+        # (Poisson-shaped single-arg twin); no scale slot. No fused
+        # head: one spelling either way.
+        wrap_location ? _rk_ast_dotted(:Exponential,
+            _rk_ast_dotted(:exp, predictor)) :
+        _rk_ast_dotted(:Exponential, predictor)
     elseif response.family === :gamma_log
         # Mean-shape form: the plan pins both alpha positions identical,
         # so the same value emits twice.
