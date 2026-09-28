@@ -654,15 +654,18 @@ end
     @test path[1] == 0.0
     cols = _parity_cols_dar
     ll = sum(logpdf.(Normal.(nt.mu[1] .+ path, nt.s), cols.y))
-    # Truncated persistence WITH the Stan truncation renormalizer; the
-    # HalfNormal scale carries the thin-layer `:positive` half
-    # renormalizer (+log 2, the R2D2-tau precedent) over SB's
-    # Stan-convention unnormalized half-normal.
+    # Stan-convention UNNORMALIZED dar priors (term-dar-stan, RK
+    # 908349ff): the truncated persistence carries no
+    # `-log(cdf(hi) - cdf(lo))` renormalizer (`:interval_stan`) and the
+    # HalfNormal scale no `+log(2)` (`:positive_stan`) — bare `logpdf`
+    # on both, exactly SB's unnormalized half-normal. The committed
+    # oracle below uses that convention, so it fails at the pre-fix
+    # normalized value (exactly `-log(dcdf) + log(2)` above).
     zn = Normal(0.5, 0.2)
     pr = logpdf(Normal(0, 1), nt.mu[1]) +
         logpdf(Exponential(1), nt.s) +
-        (logpdf(zn, beta) - log(cdf(zn, 1) - cdf(zn, 0))) +
-        (logpdf(Normal(0, 0.2), sigma) + log(2)) +
+        logpdf(zn, beta) +
+        logpdf(Normal(0, 0.2), sigma) +
         sum(logpdf.(Normal(0, 1), z))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
@@ -701,8 +704,8 @@ end
     zn = Normal(0.6, 0.1)
     pr = logpdf(Normal(0, 1), nt.mu[1]) +
         logpdf(Exponential(1), nt.s) +
-        (logpdf(zn, beta) - log(cdf(zn, 1) - cdf(zn, 0))) +
-        (logpdf(Normal(0, 0.3), sigma) + log(2)) +
+        logpdf(zn, beta) +
+        logpdf(Normal(0, 0.3), sigma) +
         sum(logpdf.(Normal(0, 1), z))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
@@ -1268,6 +1271,46 @@ end
     # All-identity layout: no Jacobian.
     @test logjac(layout, u) ≈ 0.0
     @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    _check_parity_gradient(backend, u)
+end
+
+@stestset "rk parity hurdle-poisson Z2 two-column hu submodel" begin
+    # Z2 shape (term-nuisance spec brief 1mcop44, pair
+    # nuisance-hurdle-p0): the hu submodel rides a DISTINCT column
+    # from the rate predictor, under default Normal(0, 1) popefs
+    # priors. The pinned posterior is the SB full-posterior value at
+    # the spec u (SB leg of this pair's verdict brief).
+    z2_cols = (;
+        x=[0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
+        z=[1.0, 0.5, -0.5, 1.5, 0.0, -1.0],
+        c=[0, 1, 3, 0, 2, 1],
+    )
+    brmi = @brm z2_cols begin
+        log(lambda) ~ 1 + x
+        logit(p_zero) ~ 1 + z
+        c ~ HurdlePoisson(lambda, p_zero)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 4
+    @test _layout_signature(layout) == [
+        (:coefficient, :lambda_coef, 2, :identity),
+        (:coefficient, :p_zero_coef, 2, :identity),
+    ]
+    u = [0.2, -0.1, -0.5, 0.3]
+    nt = constrain(layout, u)
+    bl = Vector(nt.lambda)
+    bh = Vector(nt.p_zero)
+    lam = exp.(bl[1] .+ bl[2] .* z2_cols.x)
+    p = logistic.(bh[1] .+ bh[2] .* z2_cols.z)
+    ll = sum(logpdf.(HurdlePoisson.(lam, p), z2_cols.c))
+    pr = sum(logpdf(Normal(0, 1), c) for c in u)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # All-identity layout: no Jacobian.
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    @test _rk_query(backend, :posterior, u) ≈ -11.954631019953592
     _check_parity_gradient(backend, u)
 end
 
