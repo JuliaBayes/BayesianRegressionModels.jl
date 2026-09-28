@@ -88,6 +88,10 @@ const _RK_ADMITTED_TRIPLES = Set{Tuple{Symbol,Symbol,Symbol}}([
     # positive literal — modeled shape deferred, the Beta-kappa
     # precedent). Arguments are Distributions `(shape, scale)` order.
     (:weibull, :log, :log),
+    # Group C (exponential): exponential over a log-link mean
+    # predictor; the single-argument head takes no scale slot
+    # (Poisson-shaped — the location IS the scale).
+    (:exponential_log, :log, :log),
 ])
 # Slice-2 families: no weights or evidence (no driving case — the thin
 # layer admits neither on the new triples, so the planner fails closed).
@@ -95,7 +99,7 @@ const _RK_SLICE2_FAMILIES = Set{Symbol}([
     :bernoulli_probit, :bernoulli_cloglog, :binomial_probit,
     :binomial_cloglog, :beta_logit, :beta_binomial_logit, :student_t,
     :hurdle_poisson, :zero_inflated_poisson, :wald, :von_mises,
-    :negative_binomial, :lognormal, :weibull,
+    :negative_binomial, :lognormal, :weibull, :exponential_log,
 ])
 # Leveled simplex responses (multinomial/categorical) name a simplex
 # vector parameter instead of a linear predictor, so they skip the
@@ -184,6 +188,8 @@ struct _RKLikelihoodSpec
                    # slot) |
                    # :weibull (shape rides the scalar-only scale slot;
                    # the scale predictor is the location) |
+                   # :exponential_log (single-argument head, no scale
+                   # slot — Poisson-shaped) |
                    # longtail: :mvnormal_cholesky (joint correlated outcomes)
                    # | :mixture (finite MixtureModel response)
     link::Symbol   # effective link: :identity | :logit | :log |
@@ -504,7 +510,8 @@ const _RK_ADMITTED_SPELLINGS =
     "kappa; interval=(lo, hi))` + `mu ~ ...` (`kappa` a `log(kappa) ~ ...` " *
     "predictor, sampled parameter, or positive literal), or group C: " *
     "`y ~ LogNormal(mu, sigma)` + `mu ~ ...` (`sigma` a sampled " *
-    "parameter, scalar assignment, or positive literal)"
+    "parameter, scalar assignment, or positive literal), or group C: " *
+    "`y ~ Exponential(mu)` + `log(mu) ~ ...`"
 
 function _rk_predictor_link(brmi::BRMI, target::Symbol)
     prefix = "RK backend"
@@ -1021,6 +1028,20 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
             "$plink-link predictor; write `Poisson(mu)` with a " *
             "`log(mu)` predictor")
         return (; family=:poisson_log, link=plink, scale=nothing,
+            scale_predictor=nothing, trials=nothing, location)
+    elseif head === Exponential
+        length(args) == 1 || error(
+            "$prefix: response `$response` `Exponential` needs one argument")
+        location = _rk_location_arg(only(args), candidates, response, "scale",
+            "itself; write `Exponential(mu)` with a `log(mu)` predictor " *
+            "(slice 2 has no `Exponential(exp(..))` spelling)")
+        plink = predictor_link[location]
+        triple = (:exponential_log, plink, plink)
+        triple in _RK_ADMITTED_TRIPLES || error(
+            "$prefix: response `$response` pairs `Exponential` with a " *
+            "$plink-link predictor; write `Exponential(mu)` with a " *
+            "`log(mu)` predictor")
+        return (; family=:exponential_log, link=plink, scale=nothing,
             scale_predictor=nothing, trials=nothing, location)
     elseif head === HurdlePoisson
         length(args) == 2 || error(
@@ -5841,6 +5862,15 @@ function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
         # validation there, so it fails here with BRM-side attribution).
         (eltype(values) <: Real && all(>(0), values)) || error(
             "$prefix: response `$response` must hold strictly positive values")
+    elseif family === :exponential_log
+        # Mirrors the thin layer: non-negative reals, Bool excluded
+        # (y = 0 is valid there — the density is finite — so it is
+        # valid here; only negatives and Bool fail, with BRM-side
+        # attribution).
+        (eltype(values) <: Real && eltype(values) !== Bool) || error(
+            "$prefix: response `$response` must be real-valued")
+        all(>=(0), values) || error(
+            "$prefix: response `$response` must hold non-negative values")
     elseif family === :categorical_logit || family === :ordinal ||
             family === :categorical
         # Recoded 1..K by construction (`_rk_leveled_levels`); assert the

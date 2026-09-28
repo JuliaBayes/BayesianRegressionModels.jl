@@ -401,6 +401,22 @@ end
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end
 
+@testset "group-C exponential AST shape" begin
+    # Twin head (thin-layer decision, pair fam-exp):
+    # `Exponential(mu)` maps to `Exponential.(exp.(mu))`
+    # (Poisson-shaped single-arg twin); no fused head.
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        z ~ Exponential(mu)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :z,
+        Expr(:., :Exponential, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :mu)))))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+end
+
 @testset "group-D beta-binomial AST shape" begin
     # Twin head (thin-layer decision, pair fam-betabinom):
     # `BetaBinomial2(n, mu, phi)` maps to
