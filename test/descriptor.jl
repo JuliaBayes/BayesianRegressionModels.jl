@@ -1085,14 +1085,15 @@ end
     replayed = brm_execute(d, :replay, (; V=3.0, y=[0.1, 0.4, 0.6]))
     @test brm_output(replayed, :qt_scale).logical === :qt_scale
 
-    # Prior regime: the transformed parameter still evaluates from prior
-    # draws, so the logical survives with no observation.
-    prior_sb = SBBRMI(assign_builder(assign_df); mod=@__MODULE__, held_out=:all)
+    # Prior regime (same model, response column omitted): the transformed
+    # parameter still evaluates from prior draws, so the logical survives with
+    # no observation bound.
+    prior_sb = SBBRMI(assign_builder((; V=assign_df.V)); mod=@__MODULE__)
     prior_d = brm_descriptor(prior_sb)
     @test brm_output(prior_d, :qt_scale).logical === :qt_scale
 end
 
-@testset "data-folded assignments stay unclaimed, twin names keep their claim" begin
+@testset "data-folded assignments stay unclaimed, twin names are reserved" begin
     # `ld` folds to data and never reaches the outputs: no logical attaches.
     fold_df = (; d=[0.5, 1.0, 1.5, 2.0], y=[0.2, 0.8, 0.5, 0.9])
     fold_builder = @brm begin
@@ -1104,17 +1105,17 @@ end
     @test isempty(brm_outputs(fold_d; logical=:ld))
     @test_throws ErrorException brm_output(fold_d, :ld)
 
-    # An assignment colliding with a twin name must not clobber the existing
-    # claim: previously-describing models keep describing.
+    # An assignment colliding with a twin name fails fast at trace time:
+    # `<stem>_gen` / `<stem>_likelihood` are reserved for the compiler's
+    # predictive twins (StanBlocks snag unbound-observat-d32ac924).
     clash_df = (; y=[0.2, 0.8, 0.5])
     clash_builder = @brm begin
         mu ~ 1
         y_gen = mu * 2
         y ~ Normal(mu, 1.0)
     end
-    clash_d = brm_descriptor(clash_builder, clash_df; mod=@__MODULE__)
-    @test brm_output(clash_d, :y; role=:posterior_predictive).name === :y_gen
-    @test isempty(brm_outputs(clash_d; logical=:y_gen))
+    @test_throws "reserved for the compiler's predictive twins" brm_descriptor(
+        clash_builder, clash_df; mod=@__MODULE__)
 end
 
 @testset "two cells naming one value — ambiguity, not failure" begin
@@ -1230,15 +1231,30 @@ end
     @test_throws ErrorException brm_descriptor(
         hier_builder, df; total_groups=(), mod=@__MODULE__, titles=Dict(:simulate => "nope"))
 
-    # 4. A model with no predictive draw is not offered :predict at all,
-    #    instead of offering one that would return nothing usable.
-    prior_only = @brm begin
+    # 4. The unconditioned program (response column omitted) forward-simulates
+    #    its response in GQ behind the declared `y_gen` twin, so `:predict` IS
+    #    offered on a prior program — while `:fit` stays absent, since there is
+    #    nothing to condition on.
+    unconditioned = @brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x
+        y ~ Normal(mu, sigma)
+    end
+    dp = brm_descriptor(unconditioned, (; x=df.x); mod=@__MODULE__)
+    @test :predict in Symbol[op.name for op in dp.operations]
+    @test :fit ∉ Symbol[op.name for op in dp.operations]
+    @test :transpile in Symbol[op.name for op in dp.operations]
+    @test :instantiate in Symbol[op.name for op in dp.operations]
+
+    # 5. A formula with no observation statement at all is a construction
+    #    error, not a descriptor: for prior draws keep the statement and omit
+    #    the response column.
+    dropped = @brm begin
         sigma ~ Exponential(1)
         mu ~ 1 + x
     end
-    dp = brm_descriptor(prior_only, df; mod=@__MODULE__)
-    @test :predict ∉ Symbol[op.name for op in dp.operations]
-    @test :transpile in Symbol[op.name for op in dp.operations]
+    @test_throws "needs an observation" brm_descriptor(
+        dropped, df; mod=@__MODULE__)
 end
 
 @testset "extension points" begin

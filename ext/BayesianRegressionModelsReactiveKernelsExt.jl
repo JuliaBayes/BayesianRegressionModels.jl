@@ -80,6 +80,29 @@ function _rk_patch_ordinal_response(lowered::LikelihoodSpec,
         threshold_coefs = planned.threshold_coefs)
 end
 
+# BRM plan family (CamelCase) to thin-layer `POPULATION_FAMILIES` token.
+const _RK_THIN_POPULATION_FAMILIES = Dict{Symbol,Symbol}(
+    :Normal => :normal, :Cauchy => :cauchy, :Laplace => :laplace,
+    :Logistic => :logistic, :StudentT => :student_t, :Flat => :flat)
+
+# Plan prior to thin-layer `PopulationPrior`: the family crosses by
+# table, the arg shape by arity — a 3-tuple is `(nu, mu, sigma)` and
+# rotates to `(mu, sigma, nu)`; an empty tuple is `Flat` (whose
+# location/scale/nu the thin layer ignores); anything else passes
+# through as `(location, scale)`.
+function _rk_thin_population_prior(prior::BRM._RKPopulationPrior)
+    family = _RK_THIN_POPULATION_FAMILIES[prior.family]
+    args = prior.args
+    length(args) == 3 &&
+        return PopulationPrior(prior.predictor, prior.addressee, family,
+            args[2], args[3], args[1])
+    isempty(args) &&
+        return PopulationPrior(prior.predictor, prior.addressee, family,
+            0.0, 1.0, NaN)
+    PopulationPrior(prior.predictor, prior.addressee, family,
+        args[1], args[2])
+end
+
 function _rk_patch_scale_predictor!(predictors::Vector{PredictorSpec},
         priors::Vector{PopulationPrior}, levelmaps::Vector{LevelMap},
         plan::BRM._RKStructuralPlan, sname::Symbol)
@@ -101,8 +124,8 @@ function _rk_patch_scale_predictor!(predictors::Vector{PredictorSpec},
     push!(predictors, PredictorSpec(spec.name, LogLink, terms, spec.label))
     for prior in plan.population_priors
         prior.predictor === sname || continue
-        push!(priors, PopulationPrior(prior.predictor, prior.addressee,
-            prior.location, prior.scale))
+        # Main-predictor priors cross via the AST, never here.
+        push!(priors, _rk_thin_population_prior(prior))
     end
     for term in spec.terms
         term.kind === :factor || continue
@@ -130,6 +153,59 @@ function _rk_patch_threshold_coefs!(vectors::Vector{VectorParameter},
     push!(vectors, VectorParameter(
         spec.name, spec.family, args, spec.size, spec.label))
     nothing
+end
+
+# `mi()` plan-level patch (no surface syntax in v1, decision 05aemvx
+# P4): the AST lowers the ordinary response statement, and the planned
+# `Jobs` column rides `mi_jobs` onto the thin-layer spec here — the
+# same plan-level route as the ordinal extras. Plans without `mi()`
+# responses pass through untouched.
+function _rk_patch_mi_response(lowered::LikelihoodSpec,
+        planned::BRM._RKLikelihoodSpec)
+    LikelihoodSpec(lowered.family, lowered.link, lowered.response,
+        lowered.predictor, lowered.scale, lowered.weights, lowered.evidence,
+        lowered.label, lowered.trials, lowered.range;
+        n_levels = lowered.n_levels, thresholds = lowered.thresholds,
+        extra_predictors = lowered.extra_predictors,
+        count_columns = lowered.count_columns,
+        ordinal_structure = lowered.ordinal_structure,
+        discrimination = lowered.discrimination,
+        threshold_columns = lowered.threshold_columns,
+        threshold_coefs = lowered.threshold_coefs,
+        extra_responses = lowered.extra_responses,
+        factor_scales = lowered.factor_scales,
+        factor_corr = lowered.factor_corr,
+        glm_alpha = lowered.glm_alpha, glm_beta = lowered.glm_beta,
+        mi_jobs = planned.mi_jobs)
+end
+
+function _rk_patch_mi_jobs(unbound::StructuralPlan,
+        plan::BRM._RKStructuralPlan)
+    any(r -> r.mi_jobs !== nothing, plan.responses) || return unbound
+    by_response = Dict{Symbol,BRM._RKLikelihoodSpec}(
+        spec.response => spec for spec in plan.responses)
+    responses = map(unbound.responses) do lowered
+        planned = get(by_response, lowered.response, nothing)
+        planned === nothing &&
+            error("RK backend: internal: lowered response " *
+                  "`$(lowered.response)` matches no planned response")
+        planned.mi_jobs === nothing && return lowered
+        _rk_patch_mi_response(lowered, planned)
+    end
+    StructuralPlan(responses, unbound.predictors, unbound.population_priors,
+        unbound.parameters, unbound.assignments, unbound.columns,
+        unbound.n_obs; roles = unbound.roles, derived = unbound.derived,
+        levelmaps = unbound.levelmaps,
+        plate_parameters = unbound.plate_parameters, scans = unbound.scans,
+        dar_paths = unbound.dar_paths,
+        varying_draws = unbound.varying_draws,
+        varying_slices = unbound.varying_slices,
+        vector_parameters = unbound.vector_parameters,
+        spline_bases = unbound.spline_bases,
+        spline_vectors = unbound.spline_vectors,
+        hsgp_bases = unbound.hsgp_bases,
+        kernel_plates = unbound.kernel_plates,
+        r2d2_priors = unbound.r2d2_priors, matrices = unbound.matrices)
 end
 
 function _rk_patch_ordinal_extras(unbound::StructuralPlan,
@@ -172,6 +248,7 @@ function _rk_patch_ordinal_extras(unbound::StructuralPlan,
         hsgp_bases = unbound.hsgp_bases,
         kernel_plates = unbound.kernel_plates,
         r2d2_priors = unbound.r2d2_priors,
+        horseshoe_priors = unbound.horseshoe_priors,
         matrices = unbound.matrices)
 end
 
@@ -194,7 +271,8 @@ function _rk_translated_plan(plan::BRM._RKStructuralPlan)
     emitted = BRM._rk_emit_ast(plan)
     unbound = lower_rkppl(emitted.main,
         Tuple(sort!(collect(keys(plan.columns)))); mod=_rk_emit_module(emitted))
-    bind_data(_rk_patch_ordinal_extras(unbound, plan), plan.columns)
+    bind_data(_rk_patch_mi_jobs(
+        _rk_patch_ordinal_extras(unbound, plan), plan), plan.columns)
 end
 
 # Kernel plans additionally bind the plate dims (subjects/timepoints) the

@@ -73,6 +73,7 @@ hyper_prior_model(df) = @brm df begin
     loc ~ 1 + hsgp(x; k=4, by=g)
     log(length_scale(hsgp(x))) ~ 1 + (1 | g)
     log(sd(hsgp(x))) ~ 1 + (1 | g)
+    y ~ Normal(loc, 1)
 end
 
 # Hand-built constrained axes, as in test/prior_only_coordinates.jl: the
@@ -293,8 +294,9 @@ end
 end
 
 @testset "hyper-predictor prior-regime coordinates survive" begin
+    # The prior regime is the same model with the response column omitted.
     df = hyper_df()
-    sb = SBBRMI(hyper_prior_model(df); mod=@__MODULE__)
+    sb = SBBRMI(hyper_prior_model((; df.x, df.g)); mod=@__MODULE__)
     @test transpiles(sb.model)
     d = brm_descriptor(sb)
     names = hyper_grouped_names()

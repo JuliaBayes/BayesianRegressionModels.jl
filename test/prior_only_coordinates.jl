@@ -1,5 +1,6 @@
 # test/prior_only_coordinates.jl — descriptor coordinate resolvers are
-# generated-aware: a response-free (regime="prior") `@brm` program moves every
+# generated-aware: an unconditioned `@brm` program (the same model with the
+# response column omitted from the data) moves every
 # population/categorical/term/shared-|ID|-scale carrier from `parameters` into
 # generated quantities (StanBlocks' prior-predictive `_rng` lowering), and the
 # public resolvers must still address them against BridgeStan CONSTRAINED names.
@@ -45,21 +46,24 @@ _mk(name, kind) = BRM.BRMOutput(
 end
 
 @testset "prior-only joint R2D2 categorical coordinates select beta, not scale" begin
-    # Inciting Bruno regime: with no observations, both the categorical beta
-    # and its joint-R2D2 derived scale move to generated quantities under the
-    # same declaration. Declaration ownership alone therefore finds two GQ
-    # internals; the public address must follow the categorical `beta` binding.
+    # Inciting Bruno regime: with the response column omitted, both the
+    # categorical beta and its joint-R2D2 derived scale move to generated
+    # quantities under the same declaration. Declaration ownership alone
+    # therefore finds two GQ internals; the public address must follow the
+    # categorical `beta` binding.
     df = (;
         weight=[-1.2, -0.5, 0.1, 0.8, 1.5, -0.3, 0.4, 1.1],
         arm=[1, 2, 3, 1, 2, 3, 1, 2],
         subject=[1, 1, 2, 2, 3, 3, 4, 4],
     )
     builder = @brm begin
+        sigma ~ Exponential(1)
         log_CL ~ 1 + weight + factor(arm) + (1 | p | subject)
         log_V  ~ 1 + weight + (1 | p | subject)
         sd(:, p) ~ r2d2(reference_scale=1.0,
                         include=(:population, :contrasts))
         cor(:, p) ~ LKJCholesky(2, 2)
+        y ~ Normal(log_CL, sigma)
     end
     d = brm_descriptor(SBBRMI(builder(df); mod=_MOD))
     block = :cat_log_CL_arm
@@ -98,12 +102,9 @@ fitted = @brm begin
     y ~ Normal(log_CL, sigma)
 end
 
-# Prior: SAME structure, NO observation `~` — `parameters {}` empty, all in GQ.
-prior = @brm begin
-    log_CL ~ 1 + weight + factor(arm) + hsgp(conc; k=5) + (1 + weight | p | subject)
-    sd(:, p)  ~ Exponential(2/3)
-    cor(:, p) ~ LKJCholesky(2, 2)
-end
+# Prior: the IDENTICAL formula — `parameters {}` empty, all in GQ, because the
+# response column is omitted from the data, not because the statement is gone.
+prior = fitted
 
 @testset "prior-only coordinate resolution (generated-aware)" begin
     fitted_sb = SBBRMI(fitted(fitted_df); mod=_MOD)

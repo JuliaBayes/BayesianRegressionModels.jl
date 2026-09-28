@@ -642,8 +642,28 @@ function _brm_logical_outputs(stan, by_name, targets, cell_values,
         found
     end
 
+    # Unbound observations whose `<stem>_gen` twin the program emits resolve
+    # through the twin — already claimed via its `source` link above — exactly
+    # as a fitted observation does. The twin is detected WITHOUT parsing the
+    # emitter-owned suffix: it is the `:draw` output StanBlocks sources at the
+    # declaration target (the same `draw_sources` rule the descriptor body
+    # uses). Twinless unbound observations (per-cell unbound, sampled unbound)
+    # keep the bare-target claim below.
+    twin_sources = Set{Symbol}(o.source for o in stan.outputs
+                               if o.generative === :draw && !isnothing(o.source))
     for (resolved, decl) in by_name
-        decl.role === :observation && continue
+        # Bound observations resolve via their twins' `source` link above, so
+        # they are skipped here. So are twinned unbound observations (response
+        # omitted, twin emitted): claiming the bare forward-simulated carrier
+        # too would leave `brm_output(...; role=:posterior_predictive)` spanning
+        # two carriers that share a role. Twinless unbound observations claim
+        # the bare `decl.target` carrier as before.
+        if decl.role === :observation && !isnothing(decl.data_source)
+            continue
+        end
+        if decl.role === :observation && decl.target in twin_sources
+            continue
+        end
         owned = owned_by(decl)
         isempty(owned) && continue
         foreach(emitted -> claim!(emitted, decl.target), carriers(resolved, owned))
@@ -717,10 +737,11 @@ end
 # Indices of the SINGLE output that physically carries a formula quantity's
 # constrained draws for a declaration, among `outputs` matching `pred`.
 #
-# In an ordinary fit that carrier is a sampled `:parameter`; in a likelihood-free
-# `regime="prior"` program (no observation `~`) StanBlocks re-draws the same
-# quantity from its prior into generated quantities under the SAME constrained
-# name (the `_rng` companions), so its kind is `:generated_quantity`. Both
+# In an ordinary fit that carrier is a sampled `:parameter`; in an unconditioned
+# program (the same model with the response column omitted from the data)
+# StanBlocks re-draws the same quantity from its prior into generated quantities
+# under the SAME constrained name (the `_rng` companions), so its kind is
+# `:generated_quantity`. Both
 # physically hold the quantity's constrained draws and are addressable against
 # BridgeStan's constrained names.
 #
@@ -813,7 +834,6 @@ hand, so an operation that appears can be executed.
 | `:transpile` | `:stan` | always |
 | `:instantiate` | `:stan` | always |
 | `:fit` | `:stan` | the traced model has ≥1 parameter and ≥1 likelihood term |
-| `:prior_predictive` | `:stan` | every emitted observation is held out; returns the prior-only `StanProblem` for sampling |
 | `:predict` | `:stan` | the Stan program emits ≥1 posterior-predictive draw **and** ≥1 BRM observation resolves to it |
 | `:pointwise_loglik` | `:stan` | the Stan program emits ≥1 pointwise log-likelihood |
 | `:replay` | `:brm` | the descriptor was built from a `@brm` builder (rebuild on a new dataframe, e.g. new subjects) |
@@ -825,13 +845,13 @@ Stan data keys. `:reprocess` forwards both `freeze_constants=` and the checked
 new-population `resample_groups=` CV/GQ re-emission described by
 [`reprocess`](@ref).
 
-The builder form's `held_out` keyword names one response, a collection of
-responses, or `:all`. A partial selection removes only those likelihoods; the
-remaining observations still offer `:fit`. `held_out=:all` removes every
-likelihood, preserves predictive generated quantities, and derives
-`:prior_predictive` instead of mislabelling the result as a fit. Sampling uses
-the returned `StanProblem` exactly as a fitted problem; pass its unconstrained
-draws to `:predict` for prior-predictive observations.
+The builder form's `held_out` keyword names one response or a collection of
+responses — a strict subset; holding out every observation is refused. A
+partial selection removes only those likelihoods; the remaining observations
+still offer `:fit`. For prior draws there is no separate operation: keep the
+model identical, omit the response column from the data, and sample the
+`:instantiate` problem (fixed_param) — the program lowers to generated
+quantities automatically.
 
 # Extension points
 
@@ -963,15 +983,19 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
             # the executable data block altogether: activity analysis retains
             # only its `<source>_n` size for the generated draw. The plan's
             # held-out set is the authoritative provenance in that case.
-            (d.target in input_names ||
-             (!isnothing(d.data_source) &&
-              (d.data_source in input_names || d.data_source in plan.held_out))) || error(
-                "brm_descriptor: observation `$(d.target)` resolves to no data input of " *
-                "the emitted model — the plan and the traced model disagree; " *
-                "re-derive the plan.")
-            (d.target in draw_sources ||
-             (!isnothing(d.data_source) && d.data_source in draw_sources)) ||
-                push!(unpredictable, d.target)
+            # An observation with no data source is UNCONDITIONED (the response
+            # omitted from the data): it binds no input BY DESIGN, and its
+            # forward simulation IS the predictive draw, so it is never
+            # unpredictable. Both checks below are skipped for it.
+            if !isnothing(d.data_source)
+                (d.target in input_names ||
+                 (d.data_source in input_names || d.data_source in plan.held_out)) || error(
+                    "brm_descriptor: observation `$(d.target)` resolves to no data input of " *
+                    "the emitted model — the plan and the traced model disagree; " *
+                    "re-derive the plan.")
+                (d.target in draw_sources || d.data_source in draw_sources) ||
+                    push!(unpredictable, d.target)
+            end
         else
             d.target in input_names && error(
                 "brm_descriptor: `$(d.target)` is both a declared binding and a data input " *
@@ -1010,8 +1034,16 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
     outputs = BRMOutput[]
     for o in stan.outputs
         decl = _brm_owner(o, by_name, targets)
-        role = if !isnothing(decl) && decl.role === :observation
+        # An observation's generated-quantities carrier is its predictive
+        # draw — whether a `y_gen` twin (fitted) or the forward-simulated `y`
+        # (unconditioned program). An observation-shaped declaration that
+        # StanBlocks kept SAMPLED (an unbound response read by a likelihood,
+        # or a hierarchical prior) is a parameter, not a draw.
+        role = if !isnothing(decl) && decl.role === :observation &&
+                  o.kind === :generated_quantity
             o.generative === :pointwise_loglik ? :pointwise_loglik : :posterior_predictive
+        elseif !isnothing(decl) && decl.role === :observation
+            :parameter
         elseif !isnothing(decl)
             _brm_declaration_role(decl, plan.bindings)
         elseif o.name in covariance_factors
@@ -1098,15 +1130,6 @@ function _brm_reprocess_supported(plan, outputs)
     end
 end
 
-function _brm_all_observations_held_out(plan)
-    observations = [d for d in plan.declarations if d.role === :observation]
-    isempty(observations) && return false
-    all(observations) do declaration
-        source = declaration.data_source
-        !isnothing(source) && source in plan.held_out
-    end
-end
-
 function _brm_derive_operations(plan, stan, outputs, columns)
     ops = BRMOperation[]
     predictive = Symbol[o.name for o in outputs if o.role === :posterior_predictive]
@@ -1119,17 +1142,6 @@ function _brm_derive_operations(plan, stan, outputs, columns)
                                 Tuple(so.outputs), :stan,
                                 (d; kwargs...) -> StanBlocks.stan_execute(
                                     d.stan, so.name; kwargs...)))
-    end
-
-    if _brm_all_observations_held_out(plan)
-        instantiate = only(op for op in stan.operations
-                           if op.name === :instantiate)
-        parameters = Tuple(o.name for o in outputs if o.kind === :parameter)
-        push!(ops, BRMOperation(
-            :prior_predictive, "Sample the prior-predictive model",
-            Tuple(instantiate.inputs), parameters, :stan,
-            (d; kwargs...) -> StanBlocks.stan_execute(
-                d.stan, :instantiate; kwargs...)))
     end
 
     if !isnothing(plan.builder)
@@ -1294,6 +1306,90 @@ _brm_emitted_coordinates(output::BRMOutput, constrained_names) = begin
         if string(name) == stem || startswith(string(name), prefix)]
 end
 
+# Element-order coordinates for one carrier: the same stem/prefix match as
+# `_brm_emitted_coordinates`, but returned in the carrier's ELEMENT order
+# (column-major over the parsed `.i[.j...]` suffix) instead of the caller's
+# axis order. The label- and margin-indexed resolvers
+# (`brm_population_effect_coordinates`, `brm_term_coordinates`,
+# `brm_ranef_sd_coordinates`, and the categorical path) index the returned
+# vector by element position, so they must use this: with plain axis order a
+# permuted `constrained_names` silently maps a label to the wrong element
+# (snag population-coeff-80eea661). `brm_output_coordinates` keeps axis order
+# by documented contract and stays on `_brm_emitted_coordinates`.
+#
+# Verification is fail-closed. Carrier sizes are symbolic data keys (e.g.
+# `(:pop_mu_n_covariates,)`), so completeness cannot come from `output.size`;
+# instead the parsed keys must form exactly the full rectangle their
+# per-dimension maxima imply (`prod(maxima) == count` proves set equality
+# with that rectangle), which rejects gaps, extras, substitutions,
+# duplicates, mixed scalar/container matches, mixed-arity suffixes, and
+# non-integer suffixes rather than guessing. An unmatched carrier returns
+# empty, exactly as `_brm_emitted_coordinates` does, so callers keep their
+# own absence handling (notably the exact-total fallback).
+function _brm_element_coordinates(output::BRMOutput, constrained_names)
+    stem = String(output.name)
+    prefix = stem * "."
+    axis = Int[]
+    keys = Vector{Int}[]
+    for (i, name) in enumerate(constrained_names)
+        s = string(name)
+        if s == stem
+            push!(axis, i)
+            push!(keys, Int[])
+            continue
+        end
+        startswith(s, prefix) || continue
+        suffix = Int[]
+        for part in split(SubString(s, sizeof(prefix) + 1), ".")
+            n = tryparse(Int, part)
+            if isnothing(n) || n < 1
+                error("brm_descriptor: emitted output `$(output.name)` matches " *
+                      "constrained name `$s`, whose container suffix is not a " *
+                      "positive-integer coordinate. Re-reflect the model that " *
+                      "produced the posterior draws.")
+            end
+            push!(suffix, n)
+        end
+        push!(axis, i)
+        push!(keys, suffix)
+    end
+    isempty(axis) && return Int[]
+    n_scalar = count(isempty, keys)
+    if n_scalar > 0
+        (n_scalar == 1 && length(axis) == 1) || error(
+            "brm_descriptor: emitted output `$(output.name)` matches " *
+            "$(length(axis)) constrained names including its bare scalar name; " *
+            "expected exactly the bare name. Re-reflect the model that " *
+            "produced the posterior draws.")
+        return axis
+    end
+    arity = length(first(keys))
+    all(k -> length(k) == arity, keys) || error(
+        "brm_descriptor: emitted output `$(output.name)` matches container " *
+        "names of mixed coordinate arity. Re-reflect the model that " *
+        "produced the posterior draws.")
+    # Column-major element order: the first index varies fastest, which is
+    # lexicographic order on the reversed index tuple.
+    order = sortperm(keys, by=reverse)
+    sorted_keys = keys[order]
+    for j in 2:length(sorted_keys)
+        sorted_keys[j] == sorted_keys[j - 1] || continue
+        dup = join(string.(sorted_keys[j]), ".")
+        error("brm_descriptor: emitted output `$(output.name)` matches " *
+              "constrained element `$(stem).$(dup)` more than once. " *
+              "Re-reflect the model that produced the posterior draws.")
+    end
+    dims = ntuple(a -> maximum(k -> k[a], sorted_keys), arity)
+    if prod(dims) != length(sorted_keys)
+        matched = [string(constrained_names[i]) for i in axis[order]]
+        error("brm_descriptor: emitted output `$(output.name)` matches " *
+              "$(length(sorted_keys)) constrained elements $(Tuple(matched)), " *
+              "which are not the complete element set of one carrier. " *
+              "Re-reflect the model that produced the posterior draws.")
+    end
+    axis[order]
+end
+
 # Public term labels are derived forwards from the formula term with the same
 # rules as `_sb_predictor_term!` (`sbimpl.jl`), while their configurable
 # parameter vocabulary is the same closed set the term-prior emitter owns. The
@@ -1323,6 +1419,20 @@ _brm_term_label(::typeof(cdar), t, target) =
     Symbol(:cdar_, target, :_, name(_sb_named_inner(:cdar, only(getargs(t)))))
 
 _brm_term_owner_labels(f, t, target) = (_brm_term_label(f, t, target),)
+# `mo`/`mo1` carriers disambiguate like `s`/`gp`/`hsgp`: the first occurrence
+# keeps the historical `mo_<c>` binding and repeats take `mo_<target>_<c>`
+# (+ serial), while the PUBLIC term label stays `mo_<c>`. Owner lookup tries
+# the predictor-scoped carrier first and falls back to the historical one:
+# each carrying predictor owns exactly one of the two (it owns the base
+# carrier iff its occurrence was emitted first), so first-match resolves the
+# owning predictor's own simplex and never a sibling's (snag
+# mo-term-in-sever-fe459870).
+_brm_term_owner_labels(::typeof(mo), t, target) =
+    (Symbol(:mo_, target, :_, name(_sb_named_inner(:mo, only(getargs(t))))),
+     _brm_term_label(mo, t))
+_brm_term_owner_labels(::typeof(mo1), t, target) =
+    (Symbol(:mo1_, target, :_, name(_sb_named_inner(:mo1, only(getargs(t))))),
+     _brm_term_label(mo1, t))
 function _brm_term_owner_labels(::typeof(hsgp), t, target)
     base = _brm_term_label(hsgp, t)
     axes = Tuple(name(_sb_named_inner(:hsgp, a)) for a in getargs(t))
@@ -1485,18 +1595,23 @@ compiler-owned carrier name. Missing or duplicate predictors/terms/owners,
 unsupported parameter roles, and descriptor/artifact coordinate drift all
 error rather than selecting by descriptor order.
 
+`coordinates` are in carrier element order regardless of the order of
+`constrained_names`: each element resolves by its emitted `.i` suffix, so a
+reversed or permuted axis returns the same elements a native-ordered axis
+does.
+
 On a term whose hyper is predicted (`log(length_scale(...)) ~ ...`), the
 `:length_scale` / `:sd` role itself names no sampled carrier and errors,
 redirecting to the hyper roles above; the per-group hyper values
 (`rho_vec`/`sigma_vec`) are deterministic transforms with no role.
 
-Generated-aware: for a response-free `regime="prior"` program (no observation
-`~`) StanBlocks re-draws every term carrier from its prior into generated
-quantities under the same constrained name, so pass `constrained_names` built
-with `include_gq=true` (`BridgeStan.param_names(prob.model; include_tp=true,
-include_gq=true)`) and this resolves the GQ carrier exactly as it resolves the
-sampled `:parameter` in an ordinary fit; a sampled carrier is preferred when
-both exist.
+Generated-aware: for an unconditioned program (the same model with the
+response column omitted from the data) StanBlocks re-draws every term carrier
+from its prior into generated quantities under the same constrained name, so
+pass `constrained_names` built with `include_gq=true`
+(`BridgeStan.param_names(prob.model; include_tp=true, include_gq=true)`) and
+this resolves the GQ carrier exactly as it resolves the sampled `:parameter` in
+an ordinary fit; a sampled carrier is preferred when both exist.
 """
 function brm_term_coordinates(d::BRMDescriptor, logical::Symbol,
                               constrained_names;
@@ -1563,7 +1678,7 @@ function brm_term_coordinates(d::BRMDescriptor, logical::Symbol,
         "produced the posterior draws.")
     output = d.outputs[only(idxs)]
 
-    coordinates = _brm_emitted_coordinates(output, constrained_names)
+    coordinates = _brm_element_coordinates(output, constrained_names)
     expected_count = _brm_term_coordinate_count(
         getf(entry.value), entry.value, Val(parameter), d.plan, output)
     if isnothing(expected_count)
@@ -1704,7 +1819,7 @@ function _brm_categorical_effect_coordinates(d::BRMDescriptor,
         "$(length(idxs)) parameter carriers; expected exactly one.")
     output = d.outputs[only(idxs)]
 
-    coordinates = _brm_emitted_coordinates(output, constrained_names)
+    coordinates = _brm_element_coordinates(output, constrained_names)
     expected_count = length(categorical.nonreference_levels)
     cellmeans = categorical.coding === :cellmeans
     length(coordinates) == expected_count || error(
@@ -1750,7 +1865,11 @@ an emitted `pop_*` / `cat_*` name. Returns a named tuple with:
 - `coordinates` — the matching indices in `constrained_names`;
 - `link` — the function applied on the formula LHS (`identity`, `log`, …);
 - `inverse_link` — the transform from the fitted linear-predictor scale back to
-  the declared quantity (`identity`, `exp`, …).
+  the declared quantity (`identity`, `exp`, …);
+- `recovered` — `true` when the coefficient was absorbed by an exact
+  total-coefficient block and the coordinates address its recovered generated
+  carrier rather than a sampled parameter (`false` otherwise; categorical
+  contrast blocks are never absorbed, so the categorical result omits it).
 
 A categorical predictor is addressed by the formula column, just like its
 `effect(logical, column)` prior. Its result additionally contains `predictor`,
@@ -1773,15 +1892,34 @@ duplicate population carriers, unavailable/duplicate coefficient labels, and
 descriptor/artifact coordinate drift all error rather than selecting by
 descriptor order.
 
-Generated-aware: for a response-free `regime="prior"` program (no observation
-`~`), the numeric coefficient and categorical contrast carriers move from
-`parameters` into generated quantities under the same constrained names, so
-pass `constrained_names` built with `include_gq=true`
+Axis-order free: `constrained_names` may list the carrier's elements in any
+order — each labelled element resolves by its emitted `.i` suffix, so a
+reversed or permuted axis returns the same elements a native-ordered axis
+does (a single-element carrier is trivially order-free). [`brm_output_coordinates`](@ref)
+is the deliberate exception: a whole-carrier slice preserves axis order.
+
+Generated-aware: for an unconditioned program (the same model with the
+response column omitted from the data), the numeric coefficient and categorical
+contrast carriers move from `parameters` into generated quantities under the
+same constrained names, so pass `constrained_names` built with `include_gq=true`
 (`BridgeStan.param_names(prob.model; include_tp=true, include_gq=true)`) and
 this resolves the GQ carrier exactly as it resolves the sampled `:parameter` in
-an ordinary fit — including the coefficient `labels`, so a prior-only descriptor
-keeps its addressable population coordinates. A sampled carrier is preferred
-when both exist.
+an ordinary fit — including the coefficient `labels`, so an unconditioned
+descriptor keeps its addressable population coordinates. A sampled carrier is
+preferred when both exist.
+
+Exact-total aware: when an exact total-coefficient block absorbed the requested
+coefficient, the conventional population carrier cannot address it — the
+coefficient was integrated out of the sampled model, not merely moved. The
+compiled model still exposes the recovered coefficient in generated quantities
+(`TotalEffectBlock.population`, indexed like `population_columns`), and this
+query resolves it there: the returned `output` is the recovered carrier, the
+`coordinates` index it, and `recovered` is `true` (a sampled conventional
+resolution carries `recovered=false`). The link pair is the predictor's either
+way. A recovered draw is one exact conditional sample per posterior draw, so it
+carries conditional RNG noise a sampled parameter does not; consumers that need
+sampled-frame quantities must refuse `recovered=true` loudly rather than mix
+the two frames silently.
 """
 function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
                                            constrained_names;
@@ -1816,6 +1954,46 @@ function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
     idxs = _brm_carrier_indices(d.outputs,
                o -> o.role === :population_effect && !isnothing(o.declaration) &&
                     o.declaration.target === entry.block && o.name !== entry.block)
+    # A conventional AMBIGUITY fails closed before any fallback: the recovered
+    # carrier must never mask contradictory conventional metadata. Only ABSENCE
+    # (zero carriers, missing labels, or a missing label) falls through to the
+    # exact-total recovery below.
+    length(idxs) <= 1 || error(
+        "brm_descriptor: logical predictor `$logical` resolves to population " *
+        "block `$(entry.block)`, which owns $(length(idxs)) parameter " *
+        "carriers; expected exactly one.")
+    if length(idxs) == 1
+        output = d.outputs[only(idxs)]
+        labels = output.labels
+        if !isnothing(labels)
+            label_indices = findall(==(coefficient), labels)
+            if length(label_indices) == 1
+                all_coordinates = _brm_element_coordinates(output, constrained_names)
+                length(all_coordinates) == length(labels) || error(
+                    "brm_descriptor: population carrier `$(output.name)` has " *
+                    "$(length(labels)) coefficient labels but resolves to " *
+                    "$(length(all_coordinates)) constrained coordinates. Re-reflect the " *
+                    "model that produced the posterior draws.")
+                return (; logical, coefficient, output,
+                           coordinates=all_coordinates[label_indices],
+                           link=entry.link,
+                           inverse_link=InverseFunctions.inverse(entry.link),
+                           recovered=false)
+            end
+        end
+    end
+
+    # Exact-total fallback: the coefficient may have been absorbed by an exact
+    # total-coefficient block, in which case the recovered generated carrier
+    # addresses it. A sampled conventional resolution above always wins.
+    blocks = hasproperty(d.plan, :bindings) ?
+        [b for b in total_effect_blocks(d.plan) if b.predictor === logical] : []
+    recovered = _brm_total_recovered_coordinates(
+        d, logical, coefficient, constrained_names, entry, blocks)
+    isnothing(recovered) || return recovered
+
+    # Neither the conventional carrier nor any exact-total block addresses the
+    # coefficient: the original failures, unchanged.
     length(idxs) == 1 || error(
         "brm_descriptor: logical predictor `$logical` resolves to population " *
         "block `$(entry.block)`, which owns $(length(idxs)) parameter " *
@@ -1828,23 +2006,70 @@ function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
         "predictor `$logical` has no coefficient labels; this formula shape " *
         "does not expose a stable population-coordinate address.")
     label_indices = findall(==(coefficient), labels)
-    available = unique!(vcat(copy(labels), sort!(collect(keys(categorical)))))
+    # Absorbed labels are addressable through the recovery above, so they are
+    # available labels too. Models without a total block for this predictor
+    # report exactly the conventional set, as before.
+    recovered_labels = Symbol[c for b in blocks for c in b.population_columns]
+    available = unique!(vcat(copy(labels), sort!(collect(keys(categorical))),
+                             recovered_labels))
     length(label_indices) == 1 || error(
         "brm_descriptor: coefficient `$coefficient` occurs $(length(label_indices)) " *
         "times on logical predictor `$logical`; available labels are " *
         "$(Tuple(available)).")
+    # Unreachable: one carrier with present labels and exactly one match
+    # returned from the conventional attempt above.
+end
 
-    all_coordinates = _brm_emitted_coordinates(output, constrained_names)
-    length(all_coordinates) == length(labels) || error(
-        "brm_descriptor: population carrier `$(output.name)` has " *
-        "$(length(labels)) coefficient labels but resolves to " *
-        "$(length(all_coordinates)) constrained coordinates. Re-reflect the " *
+# Resolve a coefficient absorbed by an exact total-coefficient block to its
+# recovered generated carrier (`TotalEffectBlock.population`, indexed like
+# `population_columns`). Returns `nothing` when no block of this predictor
+# claims the coefficient, so the caller falls through to its conventional
+# failures; every contradiction (two blocks, a duplicated absorbed label, a
+# missing or ambiguous recovered carrier, labels that disagree with the
+# descriptor, descriptor/artifact coordinate drift) errors rather than guessing.
+function _brm_total_recovered_coordinates(d::BRMDescriptor, logical::Symbol,
+                                          coefficient::Symbol, constrained_names,
+                                          entry, blocks)
+    length(blocks) <= 1 || error(
+        "brm_descriptor: logical predictor `$logical` resolves to " *
+        "$(length(blocks)) exact total-coefficient blocks; expected at most one.")
+    isempty(blocks) && return nothing
+    block = only(blocks)
+    positions = findall(==(coefficient), block.population_columns)
+    isempty(positions) && return nothing
+    length(positions) == 1 || error(
+        "brm_descriptor: coefficient `$coefficient` occurs $(length(positions)) " *
+        "times in the recovered population columns of logical predictor " *
+        "`$logical`; expected exactly one.")
+    ridxs = _brm_carrier_indices(d.outputs,
+                o -> o.role === :population_effect && o.name === block.population)
+    length(ridxs) == 1 || error(
+        "brm_descriptor: logical predictor `$logical` has an exact total block " *
+        "whose recovered carrier `$(block.population)` matches $(length(ridxs)) " *
+        "draw carriers; expected exactly one.")
+    routput = d.outputs[only(ridxs)]
+    rlabels = routput.labels
+    isnothing(rlabels) && error(
+        "brm_descriptor: recovered carrier `$(block.population)` for logical " *
+        "predictor `$logical` has no coefficient labels; re-reflect the model " *
+        "that produced the posterior draws.")
+    rindices = findall(==(coefficient), rlabels)
+    length(rindices) == 1 || error(
+        "brm_descriptor: absorbed coefficient `$coefficient` occurs " *
+        "$(length(rindices)) times on recovered carrier `$(block.population)` " *
+        "(labels are $(Tuple(rlabels))); the descriptor and the total block " *
+        "disagree — re-reflect the model.")
+    rcoordinates = _brm_element_coordinates(routput, constrained_names)
+    length(rcoordinates) == length(rlabels) || error(
+        "brm_descriptor: recovered carrier `$(block.population)` has " *
+        "$(length(rlabels)) coefficient labels but resolves to " *
+        "$(length(rcoordinates)) constrained coordinates. Re-reflect the " *
         "model that produced the posterior draws.")
-
-    (; logical, coefficient, output,
-       coordinates=all_coordinates[label_indices],
+    (; logical, coefficient, output=routput,
+       coordinates=rcoordinates[rindices],
        link=entry.link,
-       inverse_link=InverseFunctions.inverse(entry.link))
+       inverse_link=InverseFunctions.inverse(entry.link),
+       recovered=true)
 end
 
 """
@@ -1900,13 +2125,18 @@ whose scale is not a per-margin `tau` vector — a scalar `(1 | g)` intercept
 stratum) — is refused with a message naming the family, rather than returning a
 coordinate of a different quantity.
 
-Generated-aware: for a response-free `regime="prior"` program (no observation
-`~`) StanBlocks re-draws the shared-`|ID|` scale from `brm_ranef_sd_rng` into
-generated quantities under the same `<binding>_tau` name (the resolver already
-follows that name + `:random_effect` role, so no kind branch is needed). Pass
-`constrained_names` with `include_gq=true` (and, as for the R2D2 derived-scale
-family, `include_tp=true`) and it resolves the GQ `tau` carrier exactly as it
-resolves the sampled one in a fit.
+Axis-order free: `constrained_names` may list the `tau` elements in any order —
+the margin resolves by its emitted `.i` suffix, so a reversed or permuted axis
+returns the same coordinate a native-ordered axis does.
+
+Generated-aware: for an unconditioned program (the same model with the
+response column omitted from the data) StanBlocks re-draws the shared-`|ID|`
+scale from `brm_ranef_sd_rng` into generated quantities under the same
+`<binding>_tau` name (the resolver already follows that name +
+`:random_effect` role, so no kind branch is needed). Pass `constrained_names`
+with `include_gq=true` (and, as for the R2D2 derived-scale family,
+`include_tp=true`) and it resolves the GQ `tau` carrier exactly as it resolves
+the sampled one in a fit.
 """
 function brm_ranef_sd_coordinates(d::BRMDescriptor, logical::Symbol,
                                   constrained_names;
@@ -1967,7 +2197,7 @@ function brm_ranef_sd_coordinates(d::BRMDescriptor, logical::Symbol,
         "posterior draws.")
     output = only(outputs)
 
-    coordinates = _brm_emitted_coordinates(output, constrained_names)
+    coordinates = _brm_element_coordinates(output, constrained_names)
     length(coordinates) == block.n_terms || error(
         "brm_descriptor: scale carrier `$tau_name` for block `|$id|` owns " *
         "$(block.n_terms) marginal SDs but resolves to $(length(coordinates)) " *
@@ -2004,7 +2234,11 @@ brm_output_coordinates(d, :pk_conc, param_names; role=:posterior_predictive)
 
 The returned integers index `constrained_names` in their existing order. For a
 ragged carrier they compose with that output's `segments`: group `g` is
-`coordinates[segments[g-1]+1 : segments[g]]`.
+`coordinates[segments[g-1]+1 : segments[g]]`. This axis-order preservation is
+deliberate, and is the one ordering contract that differs from the
+label-indexed resolvers ([`brm_population_effect_coordinates`](@ref),
+[`brm_term_coordinates`](@ref), [`brm_ranef_sd_coordinates`](@ref)), which
+return carrier element order under any axis permutation.
 
 A missing carrier is an error, which catches descriptor/artifact drift instead
 of returning an empty posterior slice.
@@ -2065,17 +2299,16 @@ Run a derived operation.
 ```julia
 brm_execute(d, :transpile)                       # the Stan source
 prob = brm_execute(d, :fit)                      # a BridgeStan-backed StanProblem
-prior_prob = brm_execute(prior_d, :prior_predictive) # prior-only StanProblem
 brm_execute(d, :predict; problem=prob, draws=theta_unc, seed=1234)
 brm_execute(d, :replay, new_df)                  # a NEW BRMDescriptor
 ```
 
 `:stan`-origin operations forward to StanBlocks' `stan_execute` (data keywords
-re-bind inputs; `:predict` requires `draws` and `seed`).
-`:prior_predictive` delegates to StanBlocks' `:instantiate`: like `:fit`, it
-returns the `StanProblem` a sampler consumes, without calling a model that has
-no likelihood a fit. `:brm`-origin operations take the new dataframe
-positionally and return a new descriptor.
+re-bind inputs; `:predict` requires `draws` and `seed`). `:brm`-origin
+operations take the new dataframe positionally and return a new descriptor.
+For prior draws, build the descriptor with the response column omitted and
+sample the `:instantiate` problem (fixed_param); there is no separate prior
+operation.
 Unknown names fail closed via [`brm_operation`](@ref).
 """
 brm_execute(d::BRMDescriptor, name::Symbol, args...; kwargs...) =

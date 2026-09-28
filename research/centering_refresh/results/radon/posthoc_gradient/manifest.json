@@ -1,0 +1,16 @@
+[
+  {
+    "archive": "selection_losses.tsv",
+    "sha256": "e13db8380de8e18dc258fb8f3c91694fe42adf934d795e8f28f1e9e1da8f848d",
+    "bytes": 2621722,
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/11c436b2758982c8.bin",
+        "bytes": 2621722,
+        "sha256": "e13db8380de8e18dc258fb8f3c91694fe42adf934d795e8f28f1e9e1da8f848d"
+      }
+    ],
+    "complete": true
+  }
+]

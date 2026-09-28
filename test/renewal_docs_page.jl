@@ -64,24 +64,42 @@ end
 @testset "renewal models: finite BridgeStan density and gradient" begin
     models = Module(gensym(:RenewalModels))
     Base.include(models, RENEWAL_SOURCE)                 # `main()` is guarded by PROGRAM_FILE
+    # The prior-only program is the same model with the response column
+    # omitted — a custom `@lpxf` family forward-simulates through its `_rng`
+    # companion exactly like a Distributions.jl family.
+    prior_df = Base.invokelatest(() -> begin
+        d = models.renewal_single_data()
+        (; time=d.time, observed=d.observed, gen_pmf=d.gen_pmf, delay_pmf=d.delay_pmf)
+    end)
     cases = (
-        ("reporting delay", () -> models.reporting_delay_model(), (), 2),
-        ("one population", () -> models.renewal_single_model(), (), 59),
-        ("one population, prior only", () -> models.renewal_single_model(), :all, 59),
+        ("reporting delay", () -> models.reporting_delay_model(), 2),
+        ("one population", () -> models.renewal_single_model(), 59),
+        ("one population, prior only",
+         () -> models.renewal_single_model(prior_df), 0),
         ("one population, days 1-42",
-         () -> models.renewal_single_model(models.renewal_single_data(; observed_through=42)), (), 59),
-        ("six patches", () -> models.renewal_patch_model(), (), 115),
+         () -> models.renewal_single_model(models.renewal_single_data(; observed_through=42)), 59),
+        ("six patches", () -> models.renewal_patch_model(), 115),
     )
-    for (name, construct, held_out, dimension) in cases
+    for (name, construct, dimension) in cases
         @testset "$name" begin
-            built = Base.invokelatest(() -> models.build(construct(); held_out))
+            built = Base.invokelatest(() -> models.build(construct()))
             @test LogDensityProblems.dimension(built.problem) == dimension
             q = 0.1 .* randn(Xoshiro(1), dimension)
-            lp, gradient = LogDensityProblems.logdensity_and_gradient(built.problem, q)
-            @test isfinite(lp)
-            @test all(isfinite, gradient)
+            if dimension == 0
+                @test isfinite(LogDensityProblems.logdensity(built.problem, q))
+            else
+                lp, gradient = LogDensityProblems.logdensity_and_gradient(built.problem, q)
+                @test isfinite(lp)
+                @test all(isfinite, gradient)
+            end
         end
     end
+    # The prior-only program is the fixed_param regime: empty parameters, the
+    # custom family re-drawn in generated quantities.
+    prior_built = Base.invokelatest(
+        () -> models.build(models.renewal_single_model(prior_df)))
+    @test occursin(r"parameters\s*\{\s*\}", prior_built.code)
+    @test occursin("nb_cases_rng", prior_built.code)
     # masking rows removes exactly their likelihood terms: the masked density is larger
     full = Base.invokelatest(() -> models.build(models.renewal_single_model()))
     masked = Base.invokelatest(() -> models.build(

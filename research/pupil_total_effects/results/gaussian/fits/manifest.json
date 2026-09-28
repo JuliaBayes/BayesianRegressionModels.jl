@@ -26,5 +26,19 @@
     "compressed_sha256": "ab774d2cd1f71341b51637eaa4b42f82cd60f1494993915c3c8e527156088719",
     "bytes": 2067652,
     "source": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil-brms-baseline-v3/brms_ncp.jls"
+  },
+  {
+    "archive": "brms_ncp.jls.gz",
+    "sha256": "ab774d2cd1f71341b51637eaa4b42f82cd60f1494993915c3c8e527156088719",
+    "bytes": 2067652,
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/7de4c48a9820fdd0.bin",
+        "bytes": 2067652,
+        "sha256": "ab774d2cd1f71341b51637eaa4b42f82cd60f1494993915c3c8e527156088719"
+      }
+    ],
+    "complete": true
   }
 ]

@@ -81,8 +81,10 @@ end
     # a forecast is a row mask, exactly as on the page
     masked = Page.renewal_single_data(; observed_through=42)
     same_posterior(build(epirenewal_single_model(masked)), Page.build(Page.renewal_single_model(masked)).problem)
-    # prior-only build
-    @test LogDensityProblems.dimension(build(epirenewal_single_model(data); held_out=:all)) == 59
+    # prior-only build: same model, response column omitted -> fixed_param, dim 0
+    prior_data = (; time=data.time, observed=data.observed,
+                    gen_pmf=data.gen_pmf, delay_pmf=data.delay_pmf)
+    @test LogDensityProblems.dimension(build(epirenewal_single_model(prior_data))) == 0
 end
 
 @testset "six coupled patches: gravity mixing and per-patch seeds" begin

@@ -121,7 +121,17 @@ end
 end
 
 @testset "prior-only build, printing, and the other backends" begin
-    @test stanc_ok(stan(do_block; held_out=:all))
+    # The prior spelling keeps the model identical and omits the response
+    # column: the closure-backed observation forward-simulates.
+    do_block_prior = @brm (; time=closure_df.time) begin
+        rate ~ Normal(1.0, 0.5; lower=0.0)
+        log_mu ~ 1 + rw(time)
+        Y = lagged(exp(log_mu), 3) do l
+            exp(-rate * l)
+        end
+        y ~ Poisson(Y)
+    end
+    @test stanc_ok(stan(do_block_prior))
     @test occursin("lagged", sprint(show, do_block))          # the statement prints
     # the callee is a Stan function: Turing refuses by name rather than lowering row-wise
     @test_throws "Y" TuringBRMI(do_block)

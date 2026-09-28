@@ -505,8 +505,10 @@ ev_lesion_model(df) = @brm df begin
     sigma     ~ Exponential(1)
     log(tgi_kg) ~ 1 + (1 | tg | tgi_obs_subject) + (1 | tgl | subject_lesion)
     log_CL    ~ 1 + weight + (1 | p | subject)
-    pred ~ kernel(t_obs, dv, ragged(tgi_kg, tgi_obs_subject), log_CL) do ts, yy, lkg, lCL
-        kg_total = sum(exp(lkg))
+    pred ~ kernel(t_obs, dv, ragged(tgi_kg, tgi_obs_subject), log_CL) do ts, yy, kg, lCL
+        # `tgi_kg` arrives on the RESPONSE scale (`tgi_kg = exp(log_tgi_kg)`):
+        # no `exp` in the cell (snag `linked-lp-kernel-66e54eca`).
+        kg_total = sum(kg)
         mu = kg_total .* exp(-exp(lCL) .* ts)
         yy ~ normal(mu, sigma)
         mu
@@ -519,8 +521,8 @@ ev_lesion_subjectcol_model(df) = @brm df begin
     sigma     ~ Exponential(1)
     log(tgi_kg) ~ 1 + (1 | tg | subject) + (1 | tgl | subject_lesion)
     log_CL    ~ 1 + weight + (1 | p | subject)
-    pred ~ kernel(t_obs, dv, ragged(tgi_kg, tgi_obs_subject), log_CL) do ts, yy, lkg, lCL
-        kg_total = sum(exp(lkg))
+    pred ~ kernel(t_obs, dv, ragged(tgi_kg, tgi_obs_subject), log_CL) do ts, yy, kg, lCL
+        kg_total = sum(kg)
         mu = kg_total .* exp(-exp(lCL) .* ts)
         yy ~ normal(mu, sigma)
         mu

@@ -84,11 +84,13 @@ function _sb_insert_indexed_priors(base::StanBlocks.SlicModel,
     for (offset, stmt) in enumerate(stmts)
         insert!(body.args, at + offset, stmt)
     end
-    StanBlocks.SlicModel(body, deepcopy(base.data), base.mod)
+    StanBlocks.SlicModel(body, deepcopy(base.data), base.mod, base.observations)
 end
 
 const _SB_VECTOR_PRIOR_CACHE = Dict{String,Function}()
 const _SB_MIXTURE_CACHE = Dict{String,Function}()
+const _SB_HORSESHOE_POPEFS_CACHE = Dict{String,StanBlocks.SlicModel}()
+const _SB_HS_PLANS_KEY = :__brm_hs_plans__
 const _sb_lower_conditioning_rng = StanBlocks.lower_conditioning_rng
 const _sb_upper_conditioning_rng = StanBlocks.upper_conditioning_rng
 const _sb_conditioning_rng = StanBlocks.conditioning_rng
@@ -256,13 +258,19 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
         drawbody = Any[:(@stan_assert n == $(length(calls))), :(out::vector[n])]
         append!(drawbody, [:(out[$i] = $(draws[i])) for i in eachindex(calls)])
         push!(drawbody, :out)
+        # Companions BEFORE the `@lpxf` density: `@lpxf` registers the
+        # `lpxf_expr`/`rng_expr`/`likelihood_expr` dispatch hooks, and the
+        # companion names must already exist when that registration runs. The
+        # historical order (density first) left `rng_expr` unregistered, which
+        # a likelihood-free program trips over when it re-draws a scale in
+        # generated quantities ("`brm_vector_prior_*` is missing `rng_expr`").
         defs = quote
+            $lpdfs(x::vector[n], $(typed...))::vector[n] = $(Expr(:block, point...))
+            $rng(vector[n], $(typed...))::vector[n] = $(Expr(:block, drawbody...))
             @lhs @lpxf $lpdf(x::vector[n], $(typed...))::real = begin
                 $(guards...)
                 $total
             end
-            $lpdfs(x::vector[n], $(typed...))::vector[n] = $(Expr(:block, point...))
-            $rng(vector[n], $(typed...))::vector[n] = $(Expr(:block, drawbody...))
         end
         Core.eval(home, _sb_anchor_slic_macrocalls!(:(StanBlocks.@deffun $defs)))
         f = getfield(home, stem)
@@ -765,6 +773,17 @@ end
 # promises. The loop is why it is a `@deffun` -- Stan's `to_matrix` has no
 # `array[] vector` overload, and `@slic` bodies cannot contain control flow.
 StanBlocks.@deffun begin
+    # Sized `_rng` companion FIRST: `@lpxf` registers the dispatch hooks, and
+    # the companion names must already exist then. Without it a
+    # likelihood-free program fails re-drawing centered group effects
+    # ("`multi_normal_cholesky0` is missing `rng_expr`").
+    multi_normal_cholesky0_rng(vector[m, n], scale::matrix[n, n])::vector[m, n] = begin
+        rv::vector[m, n]
+        for i in 1:m
+            rv[i] = multi_normal_cholesky_rng(rep_vector(0., n), scale)
+        end
+        rv
+    end
     @lhs @lpxf multi_normal_cholesky0_lpdf(x::vector[m, n], scale::matrix[n, n])::real = begin
         multi_normal_cholesky_lpdf(x, rep_vector(0., n), scale)
     end
@@ -1671,12 +1690,15 @@ end
 # The constrained hyperparameters and the per-group draws are separate plates.
 # StanBlocks now natively collects a fixed constrained-matrix cell as
 # `array[n_strata] cholesky_factor_corr[n_terms]` (StanBlocks `0421b28`), so
-# this is no longer a flat typed-LHS workaround. The group plate takes
-# `stratum_idx[group_idx]` as its positional per-cell scalar: a whole-array
-# gather of a constrained plate result still has no tracetype, while per-cell
-# scalar indexing does. With `n_groups` sized from a cv-marked `group_idx`,
-# only this group plate (z and b) re-draws in generated quantities; the
-# stratum-level L/tau plates stay fitted.
+# this is no longer a flat typed-LHS workaround. The group plate takes the
+# per-GROUP `stratum_idx` vector as its positional per-cell scalar (cell `g`
+# reads element `g`): a whole-array gather of a constrained plate result
+# still has no tracetype, while per-cell scalar indexing does. Do NOT gather
+# it through `group_idx` here — `stratum_idx[group_idx]` is per-observation
+# (length `n_obs`), and cell-indexing that into `n_groups` cells silently
+# truncates to the first `n_groups` rows' strata. With `n_groups` sized from
+# a cv-marked `group_idx`, only this group plate (z and b) re-draws in
+# generated quantities; the stratum-level L/tau plates stay fitted.
 ranef_correlated_by = StanBlocks.@slic begin
     L_s ~ plate(; outer=(n_strata,)) do s
         L::cholesky_factor_corr[n_terms] ~ lkj_corr_cholesky(1.)
@@ -1686,7 +1708,7 @@ ranef_correlated_by = StanBlocks.@slic begin
         tau::vector[n_terms] ~ std_normal(; lower=0.)
         tau
     end
-    b_T ~ plate(stratum_idx[group_idx]; outer=(n_groups,)) do sidx
+    b_T ~ plate(stratum_idx; outer=(n_groups,)) do sidx
         L_g = L_s[sidx]
         tau_g = tau_s[:, sidx]
         z_g::vector[n_terms] ~ std_normal()
@@ -1711,7 +1733,7 @@ ranef_correlated_by_draws = StanBlocks.@slic begin
         tau::vector[n_terms] ~ std_normal(; lower=0.)
         tau
     end
-    b_T ~ plate(stratum_idx[group_idx]; outer=(n_groups,)) do sidx
+    b_T ~ plate(stratum_idx; outer=(n_groups,)) do sidx
         L_g = L_s[sidx]
         tau_g = tau_s[:, sidx]
         z_g::vector[n_terms] ~ std_normal()
@@ -2629,7 +2651,8 @@ end
 """
     SBBRMI(brmi::BRMI; mod=@__MODULE__, cv_groups=Set{Symbol}(),
            centered_groups=Set{Symbol}(), total_groups=:auto,
-           s2z_groups=(), s2z_rho=nothing, held_out=()) -> SBBRMI
+           s2z_groups=(), s2z_rho=nothing, s2z_coordinates=:contrasts,
+           held_out=()) -> SBBRMI
 
 StanBlocks backend: walks `brmi`, emits a `StanBlocks.SlicModel`, and
 materialises the data dict. Pass `mod` if you're constructing the model
@@ -2660,6 +2683,16 @@ population priors; anything else errors loudly. Inspect
 [`s2z_effect_blocks`](@ref). S2Z groups are excluded from automatic totals
 and cannot overlap `centered_groups` or `cv_groups`.
 
+`s2z_coordinates=:groups` instead samples J group coordinates per coefficient:
+independent `s_j ~ N(0, tau^(2c_j))` cells with deviations
+`tau * (w - mean(w))`, `w = s ./ tau.^c`. The extra dimension `mean(w)` is an
+independent auxiliary that leaves the posterior unchanged. There `s2z_rho` is
+each group's power-interpolation centeredness `c` (default `0`), and every
+group is one scalar cell for `adaptive_centering_problem`.
+!!! warning "Deprecated"
+    `:groups` is unrequested and unvalidated, kept working only pending
+    further exploration/research; prefer the default `:contrasts`.
+
 `cv_groups` is an opt-in set of grouping-factor names (e.g. `[:subject]`)
 whose per-group random effect should be emitted with **cv-contagious
 sizing** -- the std-normal draw is sized from `maximum(<g>_idx)` instead of
@@ -2689,13 +2722,17 @@ rather than silently emitting an in-sample block. Note also that centered and
 non-centered emissions use different unconstrained coordinates, so fitted
 draws are not interchangeable between them.
 
-`held_out` names one response, a collection of responses, or `:all`. Each
-named observation is emitted through StanBlocks' cv activity analysis: its
+`held_out` names one response or a collection of responses — a strict
+subset. Holding out every observation is refused: there would be nothing to
+fit, and held-out likelihoods are not the prior mechanism. Each named
+observation is emitted through StanBlocks' cv activity analysis: its
 likelihood is removed while its predictive draw remains in generated
 quantities. Other likelihoods remain active, so `held_out=:qt_y` fits the rest
-of a joint model while drawing QT-only parameters from their priors;
-`held_out=:all` produces the prior-predictive model. Names resolve against both
-top-level responses and data-backed observations inside `kernel(...)` cells.
+of a joint model while drawing QT-only parameters from their priors. Names
+resolve against both top-level responses and data-backed observations inside
+`kernel(...)` cells. For prior draws, keep the model identical and omit the
+response column from the data — the program lowers to generated quantities
+automatically.
 
 Formula statements `sd(:, ID) ~ Exponential(scale)` and
 `cor(:, ID) ~ LKJCholesky(K, eta)` configure a shared `|ID|` block.
@@ -3232,7 +3269,8 @@ const _SB_STAN_RESERVED_IDENTIFIERS = Set{Symbol}((
 
 SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
        centered_groups=Set{Symbol}(), total_groups=:auto,
-       s2z_groups=(), s2z_rho=nothing, held_out=(), _frozen_preproc=nothing) = begin
+       s2z_groups=(), s2z_rho=nothing, s2z_coordinates=:contrasts, held_out=(),
+       _frozen_preproc=nothing) = begin
     cv_groups = cv_groups isa Set ? cv_groups : Set{Symbol}(cv_groups)
     centered_groups = centered_groups isa Set ? centered_groups : Set{Symbol}(centered_groups)
     s2z_selected = Set(s2z_groups isa Symbol ? (s2z_groups,) : s2z_groups)
@@ -3292,12 +3330,14 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     ranef_r2d2_overrides = _sb_ranef_r2d2_overrides(brmi, id_buckets,
                                                     effect_overrides)
     r2d2_overrides = _sb_r2d2_overrides(brmi, id_buckets, effect_overrides)
+    hs_overrides = _sb_horseshoe_overrides(brmi, effect_overrides, r2d2_overrides)
+    data[_SB_HS_PLANS_KEY] = hs_overrides
     total_plans = _sb_plan_totals(brmi,prepared,effect_overrides,id_buckets,
         ranef_effect_overrides,total_groups; cv_groups,centered_groups,r2d2_overrides,ranef_r2d2_overrides,
         s2z_groups=s2z_selected)
     data[_SB_TOTAL_PLANS_KEY] = total_plans
     s2z_plans = _sb_plan_s2zs(brmi,prepared,effect_overrides,s2z_selected,s2z_rho;
-                              cv_groups,centered_groups)
+                              cv_groups,centered_groups,coordinates=s2z_coordinates)
     data[_SB_S2Z_PLANS_KEY] = s2z_plans
     for plan in values(total_plans), key in plan.claimed
         delete!(id_buckets,key)
@@ -3404,6 +3444,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     bindings = pop!(data, _SB_BINDINGS_KEY)
     pop!(data, _SB_TOTAL_PLANS_KEY)
     pop!(data, _SB_S2Z_PLANS_KEY)
+    pop!(data, _SB_HS_PLANS_KEY)
     pop!(data, _SB_HYPER_PLANS_KEY, ())
     pop!(data, _SB_THRESHOLD_LOCATED_KEY)
     preproc_ctx = pop!(data, _SB_PREPROC_KEY, Dict{Symbol,PreprocEntry}())
@@ -3429,8 +3470,105 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
         "offending column(s) before building the model — e.g. `lower`/`upper` -> ",
         "`y_lower`/`y_upper` for interval-censored endpoints.")
     body = Expr(:block, stmts...)
-    model = StanBlocks.SlicModel(body, data, mod)
-    _sb_apply_held_out(SBBRMI(brmi, model, data, preproc, Set{Symbol}(), bindings), held_out)
+    model = StanBlocks.SlicModel(body, data, mod, _sb_unbound_observations(body, data, brmi))
+    sb = SBBRMI(brmi, model, data, preproc, Set{Symbol}(), bindings)
+    _sb_triage_emitted(sb)
+    _sb_apply_held_out(sb, held_out)
+end
+
+# Post-emission observation triage: run the plan collector over the emitted
+# body (read-only; no deepcopies) and count bound vs unconditioned
+# observations. Fitted (bound, nothing unbound) proceeds silently; a program
+# with unconditioned observations warns once, naming them; a program with no
+# observation at all errors loudly, redirecting to the one supported prior
+# spelling (keep the statement, omit the response column). Running on the
+# EMITTED body — rather than the formula — is what makes kernel-cell
+# observations (`pk_obs`/`qt_obs` inside `kernel(...)`) and fused statements
+# resolve with the same role logic the plan itself uses; synthesized latents
+# (`total`, `tau`, LKJ factors) never match and stay priors.
+function _sb_triage_emitted(sb::SBBRMI)
+    declarations = GenerativeDeclaration[]
+    data_scope = Dict{Symbol,Union{Nothing,Symbol}}(k => k for k in keys(sb.data))
+    obs_keys = Set{Symbol}(keys(sb.parent.operations))
+    _sb_plan_collect!(declarations, sb.model.model, data_scope, (), obs_keys,
+                      Set{Symbol}(), _sb_unbound_cell_observations(sb.parent))
+    bound = count(d -> d.role === :observation && !isnothing(d.data_source),
+                  declarations)
+    unbound = sort!(Symbol[d.target for d in declarations
+                           if d.role === :observation && isnothing(d.data_source)])
+    if !isempty(unbound)
+        names = join(map(s -> "`$s`", unbound), ", ")
+        if bound >= 1
+            @warn("sbimpl: $names bind(s) no data column — fitting on $bound " *
+                  "bound observation(s); the unbound statement(s) lower " *
+                  "unconditionally (forward-simulated unless likelihood-reaching). " *
+                  "If one was meant to be fitted, its data column is missing " *
+                  "or misnamed.")
+        else
+            @warn("sbimpl: $names bind(s) no data column — building the " *
+                  "unconditioned (prior) program: no likelihood reaches the " *
+                  "model block, so parameters and responses forward-simulate " *
+                  "in generated quantities. If you meant to fit, the response " *
+                  "column is missing or misnamed.")
+        end
+        return nothing
+    end
+    bound >= 1 && return nothing
+    error("sbimpl: this `@brm` declares no observation — no `response ~ " *
+          "distribution(...)` statement binds data, and none is present " *
+          "without data either. Every `@brm` needs an observation statement; " *
+          "for prior draws keep the statement and omit the response column " *
+          "from the data — dropping the statement is not supported.")
+end
+
+# Whole-LHS unbound observation stems for the `SlicModel` `observations`
+# declaration (StanBlocks snag `unbound-observat-d32ac924`): top-level `~`
+# targets that bind no data column. StanBlocks emits a `<stem>_gen` alias twin
+# for each declared stem that re-draws in generated quantities and covers it
+# under `:predict`, so prior programs carry the same posterior names as fitted
+# ones. Runs on the EMITTED body for the same reason `_sb_triage_emitted`
+# does — fused statements and kernel-cell sites resolve with the same role
+# logic the plan itself uses. Plate-nested (cell-local) unbound targets are
+# excluded: per-cell unbound is outside the StanBlocks twin scope, so those
+# keep today's twinless behavior.
+function _sb_unbound_observations(body, data, brmi)
+    declarations = GenerativeDeclaration[]
+    data_scope = Dict{Symbol,Union{Nothing,Symbol}}(k => k for k in keys(data))
+    obs_keys = Set{Symbol}(keys(brmi.operations))
+    _sb_plan_collect!(declarations, body, data_scope, (), obs_keys, Set{Symbol}(),
+                      _sb_unbound_cell_observations(brmi))
+    Tuple(sort!(Symbol[d.target for d in declarations
+                       if d.role === :observation && isnothing(d.data_source) &&
+                          isempty(d.context)]))
+end
+
+# Plate-nested omitted outcomes, read from the FORMULA: `(context, cell target)`
+# pairs whose in-cell `~` is an unconditioned observation. The plan collector
+# cannot infer this from the emitted body — a twinless in-cell `~` is
+# syntactically identical to a per-cell prior (`_sb_plan_value_ref(::Symbol)`
+# is true, so the obs-shaped gate cannot separate them) — so the emitter's own
+# classification (`_sb_kernel_unbound_cell_idx`) is re-derived here from the
+# same body. Kernel doblocks emit at top level, hence the single-element
+# context.
+function _sb_unbound_cell_observations(brmi)
+    found = Set{Tuple{Tuple{Vararg{Symbol}},Symbol}}()
+    for (target, op_nc) in pairs(brmi.operations)
+        op = _as_expr_column(parent(op_nc)); isnothing(op) && continue
+        getf(op) === (~) || continue
+        opargs = getargs(op)
+        length(opargs) == 2 || continue
+        rhs = _as_expr_column(opargs[2]); isnothing(rhs) && continue
+        getf(rhs) === kernel || continue
+        dcols = getargs(rhs)
+        isempty(dcols) && continue
+        parts = _sb_kernel_lambda_parts(first(dcols))
+        isnothing(parts) && continue
+        params, body_stmts = parts
+        for i in _sb_kernel_unbound_cell_idx(dcols[2:end], params, body_stmts)
+            push!(found, ((target,), params[i]))
+        end
+    end
+    found
 end
 
 _as_data_column(x::DataColumn) = x
@@ -3498,6 +3636,20 @@ registration reason as [`stan_code`](@ref). Prefer this over
 same function that built `sb`.
 """
 stan_data(sb::SBBRMI) = Base.invokelatest(StanBlocks.stan_data, sb.model)
+
+"""
+    stan_data(model::StanBlocks.SlicModel) -> Dict
+
+Return the prepared Stan data for a SLIC model, using the same
+world-age-safe boundary as `stan_data(::SBBRMI)`. This is the supported data
+entry for a model rebuilt from an emitted `SBBRMI` after construction — for
+example a `cv_groups` model whose group index was marked with
+`StanBlocks.stan.maybecv` just before tracing. The underlying generated family
+hooks are already registered by lowering; this boundary makes them visible to
+a trace running in the same compiled frame as the build.
+"""
+stan_data(model::StanBlocks.SlicModel) =
+    Base.invokelatest(StanBlocks.stan_data, model)
 
 """
     stan_model(sb::SBBRMI; kwargs...) -> StanModel
@@ -3798,7 +3950,7 @@ _sb_plan_copy(x::Module) = x
 _sb_plan_copy(x::QuoteNode) = QuoteNode(_sb_plan_copy(x.value))
 _sb_plan_copy(x::Expr) = Expr(x.head, map(_sb_plan_copy, x.args)...)
 _sb_plan_copy(x::StanBlocks.SlicModel) = StanBlocks.SlicModel(
-    _sb_plan_copy(x.model), deepcopy(x.data), x.mod)
+    _sb_plan_copy(x.model), deepcopy(x.data), x.mod, x.observations)
 
 # The LHS type annotation, if any: `z::vector[3] ~ rhs` -> `:(vector[3])`.
 _sb_plan_annotation(x::Expr) =
@@ -3875,10 +4027,33 @@ function _sb_plan_plate_parts(x::Expr)
     (; iterables=Tuple(iterables), params, body=lambda.args[2])
 end
 
-function _sb_plan_collect!(declarations, x, data_scope, context=())
+# Emitted-RHS STRICT check: does this distribution call reference a value (a
+# bare Symbol in argument position), as opposed to bare literals? Call heads
+# are skipped — only argument positions count.
+_sb_plan_value_ref(x::Symbol) = true
+_sb_plan_value_ref(::QuoteNode) = false
+_sb_plan_value_ref(x::Expr) =
+    x.head === :parameters ? any(_sb_plan_kw_ref, x.args) :
+    x.head === :call ? any(_sb_plan_value_ref, x.args[2:end]) :
+    x.head === :kw ? (length(x.args) >= 2 && _sb_plan_value_ref(x.args[2])) :
+    any(_sb_plan_value_ref, x.args)
+_sb_plan_value_ref(x::AbstractVector) = any(_sb_plan_value_ref, x)
+_sb_plan_value_ref(_) = false
+_sb_plan_kw_ref(x::Expr) =
+    x.head === :kw ? (length(x.args) >= 2 && _sb_plan_value_ref(x.args[2])) :
+    _sb_plan_value_ref(x)
+_sb_plan_kw_ref(x) = _sb_plan_value_ref(x)
+_sb_plan_obs_shaped(rhs) = false
+_sb_plan_obs_shaped(rhs::Expr) =
+    rhs.head === :call && length(rhs.args) >= 2 &&
+    any(_sb_plan_value_ref, rhs.args[2:end])
+
+function _sb_plan_collect!(declarations, x, data_scope, context, obs_keys, plate_params,
+                           unbound_cell)
     x isa Expr || return nothing
     if x.head === :block
-        foreach(stmt -> _sb_plan_collect!(declarations, stmt, data_scope, context), x.args)
+        foreach(stmt -> _sb_plan_collect!(declarations, stmt, data_scope, context,
+                                          obs_keys, plate_params, unbound_cell), x.args)
         return nothing
     end
     if x.head === :call && length(x.args) >= 3 && x.args[1] === :~
@@ -3887,7 +4062,31 @@ function _sb_plan_collect!(declarations, x, data_scope, context=())
             "generative_plan: cannot identify emitted sampling LHS `$(x.args[2])`")
         rhs = x.args[3]
         data_source = get(data_scope, target, nothing)
-        role = isnothing(data_source) ? :prior : :observation
+        # Bound data is an observation. So is an UNBOUND formula statement
+        # (top-level, named by the `@brm` program) or plate parameter whose
+        # emitted RHS references a value: that is an unconditioned
+        # observation — the response omitted from the data — not a prior.
+        # Synthesized latents (`total`, `tau`, LKJ factors) have no formula
+        # key and never match; literal priors (`sigma ~ exponential(1)`)
+        # fail the value check. Both stay `:prior`, exactly as before.
+        role = if !isnothing(data_source)
+            :observation
+        elseif !isempty(context) && target in plate_params && _sb_plan_obs_shaped(rhs)
+            :observation
+        elseif !isempty(context) && (context, target) in unbound_cell
+            # Omitted kernel outcome: the emitter dropped this cell parameter
+            # from the plate (count form) and its in-cell `~` forward-simulates
+            # twinless. No obs-shaped gate here — the formula-level
+            # classification (a `MissingColumn` positional observed in-cell) is
+            # already as discriminating as `data_source`: per-cell priors and
+            # synthesized latents never match it, while even a literal-RHS
+            # unbound outcome stays an observation like its bound sibling.
+            :observation
+        elseif isempty(context) && target in obs_keys && _sb_plan_obs_shaped(rhs)
+            :observation
+        else
+            :prior
+        end
         draw = role === :observation ? _sb_plan_generated(context, target) : nothing
         annotation = _sb_plan_annotation(x.args[2])
         arguments, keywords = _sb_plan_call_parts(rhs)
@@ -3900,12 +4099,16 @@ function _sb_plan_collect!(declarations, x, data_scope, context=())
         plate = _sb_plan_plate_parts(rhs)
         if !isnothing(plate)
             nested_scope = copy(data_scope)
+            nested_params = copy(plate_params)
             for (param, iterable) in zip(plate.params, plate.iterables)
+                param isa Symbol || continue
+                push!(nested_params, param)
                 iterable isa Symbol || continue
                 source = get(data_scope, iterable, nothing)
                 isnothing(source) || (nested_scope[param] = source)
             end
-            _sb_plan_collect!(declarations, plate.body, nested_scope, (context..., target))
+            _sb_plan_collect!(declarations, plate.body, nested_scope, (context..., target),
+                              obs_keys, nested_params, unbound_cell)
         end
         return nothing
     end
@@ -3917,33 +4120,44 @@ function _generative_plan(sb::SBBRMI, builder, cv_groups)
     data = deepcopy(sb.data)
     preproc = deepcopy(sb.preproc)
     body = _sb_plan_copy(sb.model.model)
-    model = StanBlocks.SlicModel(body, data, sb.model.mod)
+    model = StanBlocks.SlicModel(body, data, sb.model.mod, sb.model.observations)
     declarations = GenerativeDeclaration[]
     data_scope = Dict{Symbol,Union{Nothing,Symbol}}(k => k for k in keys(data))
-    _sb_plan_collect!(declarations, body, data_scope)
+    obs_keys = Set{Symbol}(keys(parent.operations))
+    _sb_plan_collect!(declarations, body, data_scope, (), obs_keys, Set{Symbol}(),
+                      _sb_unbound_cell_observations(parent))
     GenerativePlan(parent, model, data, preproc, Tuple(declarations), builder,
                    copy(cv_groups), copy(sb.held_out), deepcopy(sb.bindings))
 end
 
+# Shared redirect: holding out every observation leaves nothing to fit, and
+# held-out likelihoods are not the prior mechanism.
+_sb_held_out_all_redirect() =
+    " Holding out every observation leaves nothing to fit, and held-out " *
+    "likelihoods are not the prior mechanism. For prior draws keep the model " *
+    "identical and omit the response column from the data — the program " *
+    "lowers to generated quantities automatically. To cross-validate, hold " *
+    "out a strict subset of the responses."
+
 function _sb_held_out_request(held_out)
-    (held_out === nothing || held_out === ()) &&
-        return (; all=false, names=Set{Symbol}())
-    held_out === :all && return (; all=true, names=Set{Symbol}())
+    (held_out === nothing || held_out === ()) && return (; names=Set{Symbol}())
+    held_out === :all && error(
+        "sbimpl: `held_out=:all` is not supported." * _sb_held_out_all_redirect())
     held_out isa AbstractString && error(
-        "sbimpl: `held_out` expects a response Symbol, a collection of response " *
-        "Symbols, or `:all`; got $(repr(held_out))")
+        "sbimpl: `held_out` expects a response Symbol or a collection of response " *
+        "Symbols; got $(repr(held_out))")
     values = held_out isa Symbol ? (held_out,) : try
         collect(held_out)
     catch
-        error("sbimpl: `held_out` expects a response Symbol, a collection of " *
-              "response Symbols, or `:all`; got $(repr(held_out))")
+        error("sbimpl: `held_out` expects a response Symbol or a collection of " *
+              "response Symbols; got $(repr(held_out))")
     end
     all(x -> x isa Symbol, values) || error(
         "sbimpl: every `held_out` response must be a Symbol; got $(repr(values))")
     names = Set{Symbol}(values)
     :all in names && error(
-        "sbimpl: use `held_out=:all` by itself; do not mix `:all` with response names")
-    (; all=false, names)
+        "sbimpl: `held_out=:all` is not supported." * _sb_held_out_all_redirect())
+    (; names)
 end
 
 # Resolve public response names through the emitted declaration inventory. This
@@ -3952,17 +4166,22 @@ end
 # `data_source=:qt_y`, while StanBlocks must receive the mark on the latter.
 function _sb_apply_held_out(sb::SBBRMI, held_out)
     request = _sb_held_out_request(held_out)
-    !request.all && isempty(request.names) && return sb
+    isempty(request.names) && return sb
 
     plan = _generative_plan(sb, nothing, Set{Symbol}())
     aliases = Dict{Symbol,Set{Symbol}}()
     sources = Set{Symbol}()
+    unbound = Symbol[]
     for declaration in plan.declarations
         declaration.role === :observation || continue
         source = declaration.data_source
-        isnothing(source) && error(
-            "sbimpl: observation `$(declaration.target)` has no data source; " *
-            "cannot apply `held_out`")
+        # Unbound observations (response omitted) are not holdable: there is
+        # no data to mark. They are skipped here, not errored — the coverage
+        # check below turns holding out everything else into the redirect.
+        if isnothing(source)
+            push!(unbound, declaration.target)
+            continue
+        end
         haskey(sb.data, source) || error(
             "sbimpl: observation `$(declaration.target)` resolves to absent Stan " *
             "data key `$source`; cannot apply `held_out`")
@@ -3971,30 +4190,39 @@ function _sb_apply_held_out(sb::SBBRMI, held_out)
             push!(get!(() -> Set{Symbol}(), aliases, alias), source)
         end
     end
-    isempty(sources) && error(
-        "sbimpl: `held_out` was requested, but this BRMI emits no observation likelihoods")
-
-    selected = if request.all
-        sources
-    else
-        unknown = sort!(collect(setdiff(request.names, Set(keys(aliases)))))
-        isempty(unknown) || error(
-            "sbimpl: `held_out` names unknown response(s) $(unknown). Available " *
-            "responses: $(sort!(collect(keys(aliases)))).")
-        ambiguous = sort!(Symbol[name for name in request.names
-                                 if length(aliases[name]) > 1])
-        isempty(ambiguous) || error(
-            "sbimpl: `held_out` alias(es) $(ambiguous) each resolve to several " *
-            "response data sources. Name the dataframe response column instead.")
-        reduce(union, (aliases[name] for name in request.names);
-               init=Set{Symbol}())
+    if isempty(sources)
+        isempty(unbound) && error(
+            "sbimpl: `held_out` was requested, but this BRMI emits no observation likelihoods")
+        error("sbimpl: every observation (`$(join(sort!(unbound), "`, `"))`) is " *
+              "unbound (response omitted from the data); there is no data to hold " *
+              "out. Omit `held_out`: the program already lowers to generated " *
+              "quantities.")
     end
+
+    unknown = sort!(collect(setdiff(request.names, Set(keys(aliases)))))
+    if !isempty(unknown)
+        unbound_hit = sort!(Symbol[n for n in unknown if n in unbound])
+        hint = isempty(unbound_hit) ? "" :
+            " (`$(join(unbound_hit, "`, `"))` is unbound (response omitted), not holdable.)"
+        error("sbimpl: `held_out` names unknown response(s) $(unknown). Available " *
+              "responses: $(sort!(collect(keys(aliases)))).$hint")
+    end
+    ambiguous = sort!(Symbol[name for name in request.names
+                             if length(aliases[name]) > 1])
+    isempty(ambiguous) || error(
+        "sbimpl: `held_out` alias(es) $(ambiguous) each resolve to several " *
+        "response data sources. Name the dataframe response column instead.")
+    selected = reduce(union, (aliases[name] for name in request.names);
+                      init=Set{Symbol}())
+    selected == sources && error(
+        "sbimpl: holding out $(join(sort!(collect(selected)), ", ")) covers every " *
+        "observation." * _sb_held_out_all_redirect())
 
     marked = Dict{Symbol,Any}(sb.data)
     for source in selected
         marked[source] = StanBlocks.stan.maybecv(source, marked[source])
     end
-    model = StanBlocks.SlicModel(sb.model.model, marked, sb.model.mod)
+    model = StanBlocks.SlicModel(sb.model.model, marked, sb.model.mod, sb.model.observations)
     SBBRMI(sb.parent, model, marked, sb.preproc, selected, sb.bindings)
 end
 
@@ -4047,14 +4275,15 @@ function generative_plan(builder::Function, df;
                          mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
                          centered_groups=Set{Symbol}(),
                          total_groups=:auto, s2z_groups=(), s2z_rho=nothing,
-                         held_out=())
+                         s2z_coordinates=:contrasts, held_out=())
     brmi = Base.invokelatest(builder, df)
     brmi isa BRMI || error(
         "generative_plan: builder returned $(typeof(brmi)); expected a BRMI from `@brm begin ... end`")
     cv_groups = cv_groups isa Set ? cv_groups : Set{Symbol}(cv_groups)
     centered_groups = centered_groups isa Set ? centered_groups : Set{Symbol}(centered_groups)
     _generative_plan(SBBRMI(brmi; mod, cv_groups, centered_groups, total_groups,
-                            s2z_groups, s2z_rho, held_out), builder, cv_groups)
+                            s2z_groups, s2z_rho, s2z_coordinates, held_out),
+                      builder, cv_groups)
 end
 
 function generative_plan(plan::GenerativePlan, new_df;
@@ -4193,7 +4422,7 @@ function _sb_mark_resample_groups(sb::SBBRMI, groups)
     seen == groups || error(
         "sbimpl: resample replay: failed to mark group index provenance for " *
         "$(sort!(collect(setdiff(groups, seen))))")
-    model = StanBlocks.SlicModel(sb.model.model, marked, sb.model.mod)
+    model = StanBlocks.SlicModel(sb.model.model, marked, sb.model.mod, sb.model.observations)
     SBBRMI(sb.parent, model, marked, sb.preproc, copy(sb.held_out), sb.bindings)
 end
 
@@ -4686,7 +4915,7 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
         e.kind === :interaction || continue
         _sb_reprocess_entry!(new_data, new_preproc, handled, key, e, new_df, freeze_constants)
     end
-    new_model = StanBlocks.SlicModel(sb.model.model, new_data, sb.model.mod)
+    new_model = StanBlocks.SlicModel(sb.model.model, new_data, sb.model.mod, sb.model.observations)
     _sb_apply_held_out(
         SBBRMI(sb.parent, new_model, new_data, new_preproc, Set{Symbol}(), sb.bindings), sb.held_out)
 end
@@ -4943,6 +5172,102 @@ function _sb_kernel_ragged_rows(data, arg_col, grp_arg, g_vals)
     (prepared.rows, prepared.is_lp)
 end
 
+# Is a kernel cell parameter OBSERVED by the cell body — the LHS of a top-level
+# in-cell `~` statement? The do-block body is captured verbatim (macro.jl `_x`),
+# so observation statements keep their surface `yy ~ family(...)` call form.
+# Only top-level statements count: the shipped contract observes responses with
+# ordinary statements in the inline body, and a nested observation is outside
+# the omission surface (it keeps the loud missing-column error below).
+function _sb_cell_param_observed(body_stmts, param::Symbol)
+    for s in body_stmts
+        s isa Expr || continue
+        s.head === :call && length(s.args) >= 3 && s.args[1] === :~ || continue
+        lhs = s.args[2]
+        name = lhs isa Symbol ? lhs : _sb_plan_lhs_name(lhs)
+        name === param && return true
+    end
+    false
+end
+
+# Split a kernel do-block lambda into its plain-name params and body statements;
+# `nothing` when the lambda is malformed. The emitter validates loudly on
+# `nothing`; formula walkers (which run where emission already succeeded) skip.
+function _sb_kernel_lambda_parts(lam)
+    lam isa Expr && lam.head === :-> && length(lam.args) >= 2 || return nothing
+    ptuple = lam.args[1]
+    params = ptuple isa Symbol ? Symbol[ptuple] :
+        (Meta.isexpr(ptuple, :tuple) && all(p -> p isa Symbol, ptuple.args) ?
+            Symbol[ptuple.args...] : nothing)
+    isnothing(params) && return nothing
+    body = lam.args[2]
+    (params, (Meta.isexpr(body, :block) ? body.args : Any[body]))
+end
+
+# Indexes (1-based into `positionals`, i.e. `dcols[2:end]`) of omitted kernel
+# OUTCOMES: `MissingColumn`-backed positionals whose cell parameter is observed
+# in-cell. The omitted response column is the one prior spelling, so these
+# positionals drop out of the plate (count form) and their in-cell `~`
+# forward-simulates per cell. A `MissingColumn` positional that is never
+# observed is an input problem and stays a loud error at the call site.
+# Shared by the emitter (which drops the positions) and the plan collector
+# (which marks the twinless in-cell `~` an observation); both read the same
+# formula body, so the classification cannot disagree with emission.
+function _sb_kernel_unbound_cell_idx(positionals, params::Vector{Symbol}, body_stmts)
+    found = Int[]
+    length(params) == length(positionals) || return found
+    for (i, c) in enumerate(positionals)
+        c isa NamedColumn || continue
+        parent(c) isa MissingColumn || continue
+        _sb_cell_param_observed(body_stmts, params[i]) || continue
+        push!(found, i)
+    end
+    found
+end
+
+# A `kernel(...)` positional (or `ragged(...)` first arg) guessing the LINK
+# spelling of a linked linear predictor — `log(Vc)` after `log(Vc) ~ ...`.
+# The classifier below only accepts bare `NamedColumn`s, so that guess fails
+# with a bare-type error; detect it here and redirect to the working spelling
+# instead (snag `linked-lp-kernel-66e54eca`). Returns `(inner_name, link_fn)`
+# on a match, `nothing` otherwise. Fail-closed: the inner name must resolve to
+# a `~` declaration whose LHS link is the SAME function — a `sqrt(Vc)` guess
+# against a `log(Vc)` declaration, or any call over a data column, keeps the
+# generic error.
+function _sb_kernel_link_match(c)
+    c isa ExprColumn || return nothing
+    f = getf(c)
+    f === ragged && return nothing
+    args = getargs(c)
+    length(args) == 1 || return nothing
+    inner = only(args)
+    inner isa NamedColumn || return nothing
+    decl = parent(inner)
+    decl isa ExprColumn && getf(decl) === (~) || return nothing
+    lhs = getargs(decl)[1]
+    lhs isa ExprColumn && getf(lhs) === f || return nothing
+    (name(inner), f)
+end
+
+# Redirect sentence for the classifier errors below; empty when `c` is not a
+# link-spelling guess. The bare public name is bound on the RESPONSE scale
+# (`Vc = exp(log_Vc)`), so the cell must use it directly, not re-apply the
+# inverse link.
+function _sb_kernel_link_advice(c)::String
+    found = _sb_kernel_link_match(c)
+    isnothing(found) && return ""
+    inner_name, f = found
+    inv = try
+        _sb_julia_to_stan_fn(InverseFunctions.inverse(f))
+    catch
+        nothing
+    end
+    binding = isnothing(inv) ? "the response scale" :
+        "the response scale (`$inner_name = $inv($(_sb_lp_emitted_name(inner_name, f)))`)"
+    " If `$inner_name` is the linked predictor declared by `$f($inner_name) ~ ...`, " *
+        "pass the bare name `$inner_name` instead — the plate slices it on " *
+        "$binding, so drop the inverse-link call from the cell."
+end
+
 function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     haskey(kw, :by) && error(
         "sbimpl: kernel(...) do-block form no longer accepts `by=`; grouping is ",
@@ -4957,13 +5282,10 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         error("sbimpl: kernel(...) do-block form takes ordinary `~` statements, not `obs=`")
 
     lam = first(dcols)
-    ptuple = lam.args[1]
-    params = ptuple isa Symbol ? Symbol[ptuple] :
-        (Meta.isexpr(ptuple, :tuple) && all(p -> p isa Symbol, ptuple.args) ?
-            Symbol[ptuple.args...] :
-            error("sbimpl: kernel(...) do-block params must be plain names (no types/defaults)"))
-    body = lam.args[2]
-    body_stmts = Meta.isexpr(body, :block) ? body.args : Any[body]
+    parts = _sb_kernel_lambda_parts(lam)
+    isnothing(parts) &&
+        error("sbimpl: kernel(...) do-block params must be plain names (no types/defaults)")
+    params, body_stmts = parts
 
     # positional args (everything after the do-block); sliced in the plate.
     # Three admissible kinds:
@@ -4986,6 +5308,12 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     #     cell parameter is rewritten to `x[<those rows>]`; a data column is
     #     gathered Julia-side into a ragged column and registered under a derived
     #     name, leaving the flat original in place for any term that still needs it.
+    # Omitted outcomes (the one prior spelling for kernel responses): these
+    # positionals drop out of the plate below, leaving a count-form plate over
+    # the known subject count whose in-cell `~` forward-simulates per cell.
+    # Indexes stay aligned with `dcols[2:end]` until after the `ragged(...)`
+    # substitutions, which address `slice_params` positionally.
+    unbound_idx = Set(_sb_kernel_unbound_cell_idx(dcols[2:end], params, body_stmts))
     dcol_names    = Symbol[]
     lp_cols       = Any[]
     ragged_specs  = Any[]
@@ -4999,7 +5327,8 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
             arg_col isa NamedColumn || error(
                 "sbimpl: kernel(...) `ragged(...)`: the first argument must name a ",
                 "linear predictor declared in this @brm block, or a raw data column; ",
-                "got a bare $(typeof(arg_col)).")
+                "got a bare $(typeof(arg_col)).",
+                _sb_kernel_link_advice(arg_col))
             gath_sym = Symbol("kernel_", target, "_", name(arg_col), "_ragged")
             push!(ragged_specs, (i, arg_col, grp_arg, gath_sym))
             push!(dcol_names, gath_sym)
@@ -5009,11 +5338,25 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
             "sbimpl: kernel(...) positional args (after the do-block) must be a data ",
             "column, a per-subject linear predictor declared in this @brm block, or ",
             "a secondary-axis predictor/column wrapped as `ragged(x, group)`; got a ",
-            "bare $(typeof(c)).")
+            "bare $(typeof(c)).",
+            _sb_kernel_link_advice(c))
         k = name(c)
         if parent(c) isa DataColumn
             v = parent(parent(c))
             data[k] = v
+        elseif parent(c) isa MissingColumn
+            # Unbound kernel positional: no data to bind and no LP bucket to
+            # walk. An omitted OUTCOME (observed in-cell) drops out of the
+            # plate below — its cell parameter becomes a fresh per-cell `~`
+            # that forward-simulates; anything else is an input whose column
+            # is missing or misnamed (or an outcome observed only in a nested
+            # position the top-level scan cannot see), which stays loud.
+            i in unbound_idx || error(
+                "sbimpl: kernel(...) positional arg `$k` has no data column. " *
+                "If it is an input, the column is missing or misnamed; if it " *
+                "is an outcome, omitting it for prior draws requires a " *
+                "top-level in-cell `~` observation statement over its cell " *
+                "parameter.")
         else
             push!(lp_cols, c)
         end
@@ -5025,6 +5368,11 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         "sbimpl: kernel(...) do-block has $(length(params)) params but expects ",
         "$ndata — exactly one per positional data/LP arg.")
     slice_params = copy(params)
+    # Omitted outcomes leave the plate (count form); everything else stays.
+    # `dcol_names` never changes again, so its kept slice is final here, while
+    # `slice_params` is sliced after the `ragged(...)` substitutions below.
+    kept = [j for j in eachindex(dcol_names) if j ∉ unbound_idx]
+    kept_names = dcol_names[kept]
 
     # n_subjects + long-format guard (pre-grouped: one row per subject).
     #
@@ -5046,14 +5394,15 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
             "event rows against, which a no-random-effects panel does not supply. ",
             "Declare a per-subject linear predictor with a `(1 | ID | group)` term, ",
             "or pass pre-grouped per-subject columns directly (one entry per subject).")
-        isempty(dcol_names) && error(
+        isempty(kept_names) && error(
             "sbimpl: kernel(...) with no per-subject linear predictor needs at least ",
-            "one pre-grouped per-subject data column to derive the subject count from.")
-        col_lens = unique(length(data[k]) for k in dcol_names)
+            "one pre-grouped per-subject data column to derive the subject count from; ",
+            "omitted outcomes cannot supply it.")
+        col_lens = unique(length(data[k]) for k in kept_names)
         length(col_lens) == 1 || error(
             "sbimpl: kernel(...) pre-grouped per-subject columns disagree on the ",
             "subject count: ",
-            join(("$(k)=$(length(data[k]))" for k in dcol_names), ", "),
+            join(("$(k)=$(length(data[k]))" for k in kept_names), ", "),
             ". Every positional column must carry exactly one entry per subject.")
         nsub = only(col_lens)
         # Count only; no group column exists (labels are the implicit 1:nsub row
@@ -5061,7 +5410,7 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         # column length — see the `:kernel_subject_count` reprocess branch.
         data[nsub_sym] = nsub
         _sb_record_preproc!(data, nsub_sym, PreprocEntry(
-            :kernel_subject_count, (; from_data_length = true), first(dcol_names), false))
+            :kernel_subject_count, (; from_data_length = true), first(kept_names), false))
     else
         # ORDER: cells stay in ROW order, deliberately. `_sb_linear_predictor!`
         # returns `popefs(X) + rows_dot_product(Z, b[group_idx,:])`, i.e. a
@@ -5129,13 +5478,16 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
 
     # Per-subject plate: slice params bind the data columns and already-emitted LPs;
     # the user's inline body (obs `~` statements and all) runs inside; its last
-    # expression is collected.
+    # expression is collected. Omitted outcomes are already gone from both lists,
+    # so the plate is count-form over `outer` for them while bound positionals
+    # keep slicing; the dropped cell parameter becomes a fresh per-cell `~`.
+    kept_params = slice_params[kept]
     plate_body = Expr(:block, body_stmts...)
     plate_call = Expr(:call, :plate,
         Expr(:parameters, Expr(:kw, :outer, Expr(:tuple, nsub_sym))),
-        dcol_names...)
+        kept_names...)
     plate_do = Expr(:do, plate_call,
-        Expr(:->, Expr(:tuple, slice_params...), plate_body))
+        Expr(:->, Expr(:tuple, kept_params...), plate_body))
     push!(stmts, :($target ~ $plate_do))
     :done
 end
@@ -5358,6 +5710,27 @@ end
 function _sb_emit_prior!(stmts, target, constructor, op)
     isnothing(brm_distribution_type(constructor)) && return false
     _sb_emit_distribution_prior!(stmts, target, constructor, op)
+end
+
+# A custom `@lpxf`/`@deffun` family on an unbound LHS (`cases ~ nb_cases(...)`
+# with the response column omitted). The FITTED spelling of the same statement
+# lowers through the generic likelihood fallback, so the unconditioned
+# spelling emits the identical statement with prior-arg lowering, and
+# StanBlocks forward-simulates the LHS via the family's `_rng` companion.
+# Detection is SLIC's own sampling dispatch: a registered family resolves
+# `lpxf_expr` to something more specific than the generic fallback, which
+# predictor terms never do. Return `true` to claim the binding, `false` to
+# fall through to the linear-predictor path.
+function _sb_emit_custom_family_prior!(stmts, target, f, rhs_e)
+    f isa Function || return false
+    which(StanBlocks.lpxf_expr, Tuple{typeof(f)}) ===
+        which(StanBlocks.lpxf_expr, Tuple{Any}) && return false
+    call = Expr(:call, nameof(f), map(_sb_prior_arg, getargs(rhs_e))...)
+    kwargs = getkwargs(rhs_e)
+    isempty(kwargs) || insert!(call.args, 2, Expr(:parameters,
+        (Expr(:kw, k, _sb_prior_arg(v)) for (k, v) in pairs(kwargs))...))
+    push!(stmts, Expr(:call, :~, target, call))
+    true
 end
 
 # Mathematical truncation retains its normalizing mass. Unlike declaration
@@ -5823,8 +6196,33 @@ function _sb_prior_arg_named(x, op::ExprColumn{typeof(~)})
        _brm_prior_expression(rhs)
         return name(x)
     end
+    # A reference to an already-declared model value: a linear predictor, a
+    # distributional parameter, a kernel result, or another prior — anything a
+    # `~` declares under a plain (or unary-link-wrapped) name. It is emitted
+    # separately, so the consuming statement references it by name. This is
+    # what lets an observation with unbound response data (`y` omitted from
+    # the dataframe) lower its predictor-backed arguments instead of refusing:
+    # the statement emits verbatim and StanBlocks forward-simulates the
+    # unbound LHS. Data-backed observations referenced as args behave exactly
+    # as in likelihoods. Decorated responses (`mi`/`ragged`/joint) stay
+    # refused: they have no plain emitted name to reference.
+    inner = _sb_prior_arg_declared_name(lhs_raw)
+    if !isnothing(inner) && inner === name(x)
+        return name(x)
+    end
     error(_sb_prior_arg_backing_error(x, op))
 end
+# The plain name a `~` declaration binds, unwrapping one link function
+# (`log(y_scale) ~ 1 + source` binds `y_scale`, recovered after emission).
+# Anything else (decorated or multi-arg LHS) has no such name.
+_sb_prior_arg_declared_name(lhs::NamedColumn) = name(lhs)
+function _sb_prior_arg_declared_name(lhs::ExprColumn)
+    args = getargs(lhs)
+    length(args) == 1 || return nothing
+    inner = only(args)
+    inner isa NamedColumn ? name(inner) : nothing
+end
+_sb_prior_arg_declared_name(_) = nothing
 function _sb_is_scalar_prior(prior::ExprColumn)
     family = getf(prior)
     family === Horseshoe && return true
@@ -6115,14 +6513,23 @@ function _sb_ragged_group_rows(key::Symbol, group::Symbol,
     rows
 end
 
+_sb_ragged_response_values(_key, _group, ::MissingColumn) = nothing
+function _sb_ragged_response_values(key, group, response::DataColumn)
+    raw = _brm_data_vec(key, parent(response))
+    raw isa AbstractVector{<:AbstractVector} && error(
+        "sbimpl: `ragged($key, $group)` observation LHS received an " *
+        "ALREADY-ragged response; write `$key ~ <family>(...)` directly.")
+    raw
+end
+
 function _sb_ragged_lhs_layout(key::Symbol, lhs::ExprColumn, rhs)
     args = getargs(lhs)
     length(args) == 2 || error(
         "sbimpl: `ragged(...)` observation LHS takes exactly two arguments — " *
         "the flat response and its grouping column — got $(length(args)).")
     response, group = args
-    response isa NamedColumn && parent(response) isa DataColumn || error(
-        "sbimpl: `ragged(...)` observation LHS needs a flat data-backed response " *
+    response isa NamedColumn && parent(response) isa Union{DataColumn,MissingColumn} || error(
+        "sbimpl: `ragged(...)` observation LHS needs a flat response column " *
         "as its first argument; got $(typeof(response)).")
     name(response) === key || error(
         "sbimpl: `ragged(...)` observation LHS is keyed as `$key` but names " *
@@ -6131,12 +6538,9 @@ function _sb_ragged_lhs_layout(key::Symbol, lhs::ExprColumn, rhs)
         "sbimpl: `ragged($key, ...)` observation LHS needs a raw data grouping " *
         "column as its second argument; got $(typeof(group)).")
 
-    raw = _brm_data_vec(key, parent(parent(response)))
-    raw isa AbstractVector{<:AbstractVector} && error(
-        "sbimpl: `ragged($key, $(name(group)))` observation LHS received an " *
-        "ALREADY-ragged response; write `$key ~ <family>(...)` directly.")
+    raw = _sb_ragged_response_values(key, name(group), parent(response))
     group_values = collect(parent(parent(group)))
-    length(group_values) == length(raw) || error(
+    isnothing(raw) || length(group_values) == length(raw) || error(
         "sbimpl: `ragged($key, $(name(group)))` has $(length(raw)) response rows " *
         "but $(length(group_values)) grouping rows. The grouping column must name " *
         "the subject of every response row.")
@@ -6165,7 +6569,8 @@ function _sb_ragged_lhs_layout(key::Symbol, lhs::ExprColumn, rhs)
         "$(subject_values).")
 
     rows = _sb_ragged_group_rows(key, name(group), group_values, subject_values)
-    (; values=[raw[r] for r in rows], rows, nrows=length(raw),
+    (; values=isnothing(raw) ? nothing : [raw[r] for r in rows],
+       rows, nrows=length(group_values),
        group_col=name(group), subject_col=name(first(producers)[2]))
 end
 
@@ -6177,6 +6582,9 @@ function _sb_ragged_bound(data, key::Symbol, label::Symbol, bound, layout)
     bound isa NamedColumn && parent(bound) isa DataColumn || return bound
     raw = _brm_data_vec(name(bound), parent(parent(bound)))
     grouped = if raw isa AbstractVector{<:AbstractVector}
+        length.(raw) == length.(layout.rows) || error(
+            "sbimpl: `$key` $label bound `$(name(bound))` has " *
+            "group lengths $(length.(raw)); expected $(length.(layout.rows))")
         raw
     else
         length(raw) == layout.nrows || error(
@@ -6227,15 +6635,16 @@ function _sb_sampling!(stmts, data, key,
                        lhs::ExprColumn{typeof(ragged)}, rhs;
                        id_lookup=_sb_empty_id_lookup(), kwargs...)
     layout = _sb_ragged_lhs_layout(key, lhs, rhs)
-    data[key] = layout.values
-    # The gathered ragged response has no raw column of its own on a new
-    # DataFrame — record how to re-gather it from the flat response + grouping
-    # so `reprocess` regenerates it rather than erroring on it or silently
-    # keeping the stale/flat column.
-    _sb_record_preproc!(data, key, PreprocEntry(
-        :ragged_gather,
-        (; group_col=layout.group_col, subject_col=layout.subject_col),
-        key, true))
+    if !isnothing(layout.values)
+        data[key] = layout.values
+        # Only a bound response needs gather provenance. An omitted response
+        # stays absent from both data and replay inputs; its retained kernel
+        # arguments and bounds carry the ragged layout.
+        _sb_record_preproc!(data, key, PreprocEntry(
+            :ragged_gather,
+            (; group_col=layout.group_col, subject_col=layout.subject_col),
+            key, true))
+    end
     grouped_rhs = _sb_ragged_likelihood_rhs(data, key, rhs, layout)
     _sb_likelihood!(stmts, key, grouped_rhs, data)
 end
@@ -6263,6 +6672,7 @@ _sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs;
         # the four-argument scalar seam below.
         _sb_emit_vector_prior!(stmts, data, key, f, rhs_e) && return
         _sb_emit_prior!(stmts, key, f, rhs_e) && return
+        _sb_emit_custom_family_prior!(stmts, key, f, rhs_e) && return
     end
     _sb_linear_predictor!(stmts, data, key, rhs; id_lookup, brmi_key=key, obs_n,
                           cv_groups, centered_groups, group_block_lookup,
@@ -6561,6 +6971,11 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
                 _sb_emit_r2d2_popefs!(stmts, data, brmi_key, X_name, pop_name,
                                       length(col_exprs), r2d2_spec,
                                       r2d2.names[brmi_key], overrides)
+            elseif !isnothing(get(get(data, _SB_HS_PLANS_KEY, Dict()),
+                    brmi_key, nothing))
+                hs_spec = data[_SB_HS_PLANS_KEY][brmi_key]
+                _sb_emit_horseshoe_popefs!(stmts, brmi_key, X_name, pop_name,
+                    length(col_exprs), hs_spec, overrides)
             elseif isnothing(overrides)
                 push!(stmts, :($pop_name ~ popefs(; X=$X_name)))
             else
@@ -7829,7 +8244,10 @@ function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(mo1), t, su
     prepared = _brm_prepare_term(t, target,
         (; data=Dict{Symbol,Any}(inner_name => raw)))
     n_levels, idx = length(prepared.state.levels), prepared.state.idx
-    col_name = Symbol(:mo1_, inner_name)
+    # Carrier disambiguation follows `mo` (see `_sb_predictor_term!`): the
+    # first `mo1(c)` keeps `mo1_<c>`; repeats take `mo1_<target>_<c>`.
+    col_name = last(_sb_unique_structured_term_names(
+        stmts, :mo1, string(inner_name), target))
     if n_levels < 2
         # Single-level factor: 0 increments -> the monotonic effect is
         # identically 0. Contribute a scalar `0.0` summand and NEVER ask Sb for
@@ -8028,12 +8446,25 @@ end
 # hand omit it; `mm(...)`'s `<mm>_idx` is an n_obs x n_memberships MATRIX, so
 # `num_elements` would give it rows*cols and it is deliberately NOT threaded.
 function _sb_ranef_cols!(cols, data, stmts, t, gterms=(); group_idx=nothing,
-                         term_overrides=Dict{Symbol,Any}())
+                         term_overrides=Dict{Symbol,Any}(), target=nothing)
     _sb_ranef_cols_dispatch!(cols, data, stmts, t, _sb_cat_levels(t), gterms;
-                             group_idx, term_overrides)
+                             group_idx, term_overrides, target)
 end
 _sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(offset)}, gterms=(); kwargs...) =
     error("sbimpl: `offset(...)` is a population-level fixed contribution and cannot appear inside a random-effects term")
+# `dar`/`rw`/`cdar` are population-level direct trajectories: their emitters
+# require the owning predictor (`target::Symbol`), which the random-effect
+# path historically never threaded — so these terms fail here with attribution
+# instead of reaching the emitter's `TypeError: ... expected Symbol, got
+# Nothing`. A trajectory used as a random-effect design column would read as a
+# group-varying amplitude of one shared path, which is not what `(dar(t)|g)`
+# spells; per-group trajectories are unbuilt.
+_sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(dar)}, gterms=(); kwargs...) =
+    error("sbimpl: `dar(...)` is a population-level direct trajectory and cannot appear inside a random-effects term")
+_sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(rw)}, gterms=(); kwargs...) =
+    error("sbimpl: `rw(...)` is a population-level direct trajectory and cannot appear inside a random-effects term")
+_sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(cdar)}, gterms=(); kwargs...) =
+    error("sbimpl: `cdar(...)` is a population-level direct trajectory and cannot appear inside a random-effects term")
 # `a & b` in a random-effects LHS lowers through the SAME interaction expander
 # as the population path (treatment coding; cont×cont / cont×cat / cat×cat).
 # Without this the term falls through to the protect-style materializer, which
@@ -8042,11 +8473,13 @@ _sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(offset)}, gterms=(); kwa
 _sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(&)}, gterms=(); kwargs...) =
     _sb_interaction_cols!(cols, t, data, stmts)
 _sb_ranef_cols_dispatch!(cols, data, stmts, t, ::Nothing, gterms=();
-                         group_idx=nothing, term_overrides=Dict{Symbol,Any}()) =
+                         group_idx=nothing, term_overrides=Dict{Symbol,Any}(),
+                         target=nothing) =
     _sb_maybe_push_col!(cols, _sb_predictor_col(
-        t, data, stmts, gterms; group_idx, term_overrides))
+        t, data, stmts, gterms; group_idx, term_overrides, target))
 function _sb_ranef_cols_dispatch!(cols, data, _stmts, t, levels, _gterms=();
-                                  group_idx=nothing, term_overrides=nothing)
+                                  group_idx=nothing, term_overrides=nothing,
+                                  target=nothing)
     # Single-level factor: `2:n_levels` is empty, so this contributes 0 dummy
     # columns uniformly (no shape special-case) — a `(1 + c | g)` degenerates to
     # intercept-only, matching how the population path drops a K=1 factor.
@@ -8325,7 +8758,7 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, 
         col_exprs = Any[]
         for t in gterms
             _sb_ranef_cols!(col_exprs, data, stmts, t, gterms;
-                            group_idx=idx_name, term_overrides)
+                            group_idx=idx_name, term_overrides, target)
         end
         if isempty(col_exprs)
             # Every slope term degenerated to zero columns (e.g. `(0 + c | g)`
@@ -8426,7 +8859,8 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol,
     else
         col_exprs = Any[]
         for t in gterms
-            _sb_ranef_cols!(col_exprs, data, stmts, t, gterms; term_overrides)
+            _sb_ranef_cols!(col_exprs, data, stmts, t, gterms;
+                            term_overrides, target)
         end
         Z_name = Symbol(:Z_, target, :_, suffix)
         k_name = Symbol(:n_terms_, target, :_, suffix)
@@ -8488,7 +8922,7 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::Tuple{NamedCo
     col_exprs = Any[]
     for t in gterms
         _sb_ranef_cols!(col_exprs, data, stmts, t, gterms;
-                        group_idx=idx_name, term_overrides)
+                        group_idx=idx_name, term_overrides, target)
     end
     Z_name = Symbol(:Z_, target, :_, suffix)
     k_name = Symbol(:n_terms_, target, :_, suffix)
@@ -9439,6 +9873,189 @@ function _sb_emit_r2d2_popefs!(stmts, data, target, X_name, pop_name,
         X=$X_name, beta_loc=$loc_name, beta_scale=$scale_name)))
 end
 
+# ---- structured Horseshoe over population coefficients -----------------------
+#
+# `effect(lp, coef) ~ Horseshoe(...)` lowers each addressed `beta_pop` column
+# to its own bare-form triple (SB-literal per-coefficient tau: the structured
+# form over N columns is exactly N stacked bare scalars). The generic
+# vector-prior path cannot compose it (a hierarchical prior has no
+# `<dist>_lpdf` triad), and StanBlocks rejects hierarchical RHS on indexed
+# targets, so each column gets a scalar temporary inside a generated `popefs`
+# sibling and `beta_pop` assembles them as a transformed vector. Non-Horseshoe
+# siblings keep their own scalar statements (same `_sb_emit_prior!` seam the
+# vector path uses), so mixed Normal/Horseshoe predictors just work. v1 scope:
+# `beta_pop` columns only; categorical contrast blocks and ranef sd/cor
+# addresses fail closed, as does an `r2d2` + Horseshoe combination on one
+# predictor.
+
+# Stan-safe infix for a population label inside generated temporaries
+# (ASCII-only by construction; the column index prefixes it, so collisions
+# across columns are impossible).
+function _sb_hs_temp_infix(label)
+    chars = Char[]
+    for c in String(Symbol(label))
+        if ('a' <= c <= 'z') || ('A' <= c <= 'Z') || c == '_' ||
+                (!isempty(chars) && '0' <= c <= '9')
+            push!(chars, c)
+        else
+            push!(chars, '_')
+        end
+    end
+    isempty(chars) ? "c" : String(chars)
+end
+
+# Structured scales bake into the generated submodel as literals, so model
+# values are refused (the bare form allows them; the RK slice-1 mirror
+# requires literals everywhere, so this gate is cross-side symmetric).
+function _sb_hs_literal_scale(value, what)
+    value isa Real && return Float64(value)
+    error("sbimpl: structured Horseshoe $what must be a numeric constant " *
+          "in v1 (got a model value or expression)")
+end
+
+function _sb_hs_literal_sibling_args!(expr, spelling)
+    for arg in getargs(expr)
+        isnothing(_brm_numeric_constant(arg)) && error(
+            "sbimpl: `$spelling` combines Horseshoe with a sibling prior " *
+            "whose arguments are not numeric constants; structured " *
+            "Horseshoe bakes sibling priors as literals in v1")
+    end
+    for (key, value) in pairs(getkwargs(expr))
+        isnothing(_brm_numeric_constant(value)) && error(
+            "sbimpl: `$spelling` combines Horseshoe with a sibling prior " *
+            "whose `$key` is not a numeric constant; structured Horseshoe " *
+            "bakes sibling priors as literals in v1")
+    end
+    nothing
+end
+
+function _sb_horseshoe_overrides(brmi::BRMI, effect_overrides, r2d2_overrides)
+    for spec in ranef_effect_priors(brmi)
+        spec.family === Horseshoe || continue
+        spelling = spec.class === :sd ? "sd" : "cor"
+        error("sbimpl: `$spelling(...) ~ Horseshoe(...)` is not supported " *
+              "in v1 (structured Horseshoe covers population coefficients " *
+              "only)")
+    end
+    out = Dict{Symbol,NamedTuple}()
+    for lp in sort!(collect(keys(effect_overrides)))
+        pop = _sb_pop_effect_overrides(effect_overrides, lp)
+        for (block, value) in _sb_cat_effect_overrides(effect_overrides, lp)
+            exprs = value isa AbstractVector ? value : (value,)
+            for expr in exprs
+                isnothing(expr) && continue
+                expr isa ExprColumn && getf(expr) === Horseshoe && error(
+                    "sbimpl: `effect($lp, $block) ~ Horseshoe(...)` is not " *
+                    "supported in v1 (structured Horseshoe covers " *
+                    "`beta_pop` columns; categorical contrast blocks fail " *
+                    "closed)")
+            end
+        end
+        isnothing(pop) && continue
+        any(expr -> !isnothing(expr) && expr isa ExprColumn &&
+                getf(expr) === Horseshoe, pop) || continue
+        haskey(r2d2_overrides, lp) && error(
+            "sbimpl: predictor `$lp` combines `effect($lp, :) ~ r2d2(...)` " *
+            "with `~ Horseshoe(...)`; one predictor takes one structured " *
+            "prior in v1 (drop one of them)")
+        labels = try popcoefnames(brmi, lp) catch; nothing end
+        isnothing(labels) && error(
+            "sbimpl: `effect($lp, ...) ~ Horseshoe(...)` names no linear " *
+            "predictor with population coefficients")
+        length(pop) == length(labels) || error(
+            "sbimpl: internal effect-prior alignment error for `$lp`: " *
+            "$(length(pop)) priors for $(length(labels)) population labels")
+        hs = Vector{Union{Nothing,Tuple{Float64,Float64}}}(nothing, length(pop))
+        for (i, expr) in pairs(pop)
+            isnothing(expr) && continue
+            spelling = "effect($lp, $(labels[i]))"
+            if expr isa ExprColumn && getf(expr) === Horseshoe
+                spec = _brm_horseshoe_spec(spelling, getargs(expr),
+                    getkwargs(expr); prefix="sbimpl")
+                hs[i] = (_sb_hs_literal_scale(spec.local_scale,
+                        "`$spelling` `local_scale`"),
+                    _sb_hs_literal_scale(spec.global_scale,
+                        "`$spelling` `global_scale`"))
+            else
+                (expr isa ExprColumn && _sb_is_scalar_prior(expr)) || error(
+                    "sbimpl: `$spelling` combines Horseshoe with a sibling " *
+                    "prior family that has no scalar Stan translation in " *
+                    "v1 (got `$(expr isa ExprColumn ? getf(expr) : typeof(expr))`)")
+                _sb_hs_literal_sibling_args!(expr, spelling)
+            end
+        end
+        out[lp] = (; labels, hs)
+    end
+    out
+end
+
+# One generated `popefs` sibling per distinct column pattern (the
+# `_sb_vector_prior_family` fingerprinted-cache precedent). Scalar temporaries
+# reuse the bare `_sb_horseshoe[_scaled]` submodels verbatim (same unscaled /
+# scaled rule as `_sb_emit_prior!`), so the per-column Stan is the familiar
+# bare expansion; `beta_pop` assembles them in column order. No
+# `n_covariates`: the vector length is fixed by construction, not by data.
+function _sb_horseshoe_popefs_model(specs, overrides)
+    key = repr([(isnothing(hspec) ?
+                 (isnothing(expr) ? (:default,) :
+                  (:plain, getf(expr), getargs(expr), getkwargs(expr))) :
+                 (:hs, hspec[1], hspec[2]))
+                for (hspec, expr) in zip(specs.hs, overrides)])
+    get!(_SB_HORSESHOE_POPEFS_CACHE, key) do
+        temps = Symbol[]
+        body = Any[]
+        for (i, (hspec, expr)) in enumerate(zip(specs.hs, overrides))
+            infix = _sb_hs_temp_infix(specs.labels[i])
+            if !isnothing(hspec)
+                temp = Symbol(:hs_, i, :_, infix)
+                local_scale, global_scale = hspec
+                stmt = if local_scale == 1.0 && global_scale == 1.0
+                    :($temp ~ _sb_horseshoe())
+                else
+                    :($temp ~ _sb_horseshoe_scaled(;
+                        local_scale=$local_scale, global_scale=$global_scale))
+                end
+                push!(body, stmt)
+                push!(temps, temp)
+            elseif isnothing(expr)
+                temp = Symbol(:b_, i, :_, infix)
+                push!(body, :($temp ~ normal(0.0, 1.0)))
+                push!(temps, temp)
+            else
+                temp = Symbol(:b_, i, :_, infix)
+                emitted = Any[]
+                _sb_emit_prior!(emitted, temp, getf(expr), expr) ||
+                    error("sbimpl: internal: sibling prior `$(getf(expr))` " *
+                          "has no Stan translation")
+                length(emitted) == 1 || error(
+                    "sbimpl: internal: sibling prior `$(getf(expr))` " *
+                    "emitted $(length(emitted)) statements, expected one")
+                push!(body, only(emitted))
+                push!(temps, temp)
+            end
+        end
+        push!(body, Expr(:(=), :beta_pop, Expr(:vect, temps...)))
+        push!(body, Expr(:return, :(X * beta_pop)))
+        block = Expr(:block, body...)
+        Core.eval(@__MODULE__,
+            _sb_anchor_slic_macrocalls!(:(StanBlocks.@slic $block)))
+    end
+end
+
+function _sb_emit_horseshoe_popefs!(stmts, target, X_name, pop_name,
+        n_cols, specs, overrides)
+    n_cols == length(specs.labels) || error(
+        "sbimpl: internal horseshoe alignment error for `$target`: " *
+        "$(length(specs.labels)) population labels for $n_cols design columns")
+    length(overrides) == length(specs.labels) || error(
+        "sbimpl: internal horseshoe alignment error for `$target`: " *
+        "$(length(overrides)) priors for $(length(specs.labels)) " *
+        "population labels")
+    model = _sb_horseshoe_popefs_model(specs, overrides)
+    push!(stmts, Expr(:call, :~, pop_name,
+        Expr(:call, model, Expr(:parameters, Expr(:kw, :X, X_name)))))
+end
+
 # ---- group-block prepass (Prepass 2.5) ---------------------------------------
 #
 # Scan brmi.operations for declaring terms anywhere in the model: a term `f`
@@ -9924,7 +10541,7 @@ function _sb_emit_id_ranef_block!(stmts, data, target::Symbol, info, gterms, sum
     col_exprs = Any[]
     for t in gterms
         _sb_ranef_cols!(col_exprs, data, stmts, t, gterms;
-                        group_idx=idx_name, term_overrides)
+                        group_idx=idx_name, term_overrides, target)
     end
     length(col_exprs) == length(cols) ||
         error("sbimpl: id-bucket `$suffix` for target `$target`: expanded $(length(col_exprs)) columns but reserved $(length(cols)) — internal mismatch")
@@ -10272,11 +10889,21 @@ function _sb_mo_levels_for_emission(data, idx_name::Symbol, inner_name, raw)
     isnothing(frozen) ? _sb_fit_levels(raw) : frozen.const_
 end
 
-# Monotonic-effect predictor: emit `mo_<c> ~ _sb_mo(; x=<c>_idx)` and return
-# `mo_<c>` as the column. Scope: single NamedColumn inner arg backed by raw
+# Monotonic-effect predictor: emit `<mo> ~ _sb_mo(; x=<c>_idx)` and return
+# `<mo>` as the column. Scope: single NamedColumn inner arg backed by raw
 # data. Other wrapped terms dispatch to their own methods below.
+# Carrier disambiguation follows `s`/`gp`/`hsgp`: the first `mo(c)` keeps the
+# historical `mo_<c>` binding, while a repeat of the same column — in another
+# predictor or twice in one — takes `mo_<target>_<c>` (+ serial), so every
+# occurrence owns an independent increment simplex (brms semantics; snag
+# mo-term-in-sever-fe459870). The `<c>_idx` data key stays shared: it carries
+# the same codes for every occurrence (the categorical `<c>_idx` precedent).
+# `target === nothing` is label-derivation mode (`popcoefnames`, which drives
+# this emitter without a target): the returned `mo_<c>` is the STABLE PUBLIC
+# beta label, never a minted carrier — real emission always passes `target`.
 _sb_predictor_term!(stmts, data, ::typeof(mo), t;
-                    term_overrides=Dict{Symbol,Any}(), kwargs...) = begin
+                    term_overrides=Dict{Symbol,Any}(), target=nothing,
+                    kwargs...) = begin
     inner_name, raw = _sb_inner_data(:mo, only(getargs(t)))
     idx_name = Symbol(inner_name, :_idx)
     # The FITTED level set drives the increment-simplex dimension. On a frozen
@@ -10296,7 +10923,9 @@ _sb_predictor_term!(stmts, data, ::typeof(mo), t;
     end
     levels = prepared.state.levels
     n_levels = length(levels)
-    col_name = Symbol(:mo_, inner_name)
+    col_name = isnothing(target) ? Symbol(:mo_, inner_name) :
+        last(_sb_unique_structured_term_names(
+            stmts, :mo, string(inner_name), target))
     if n_levels < 2
         # Single-level factor: 0 increments -> the free-beta monotonic effect is
         # identically 0. Contribute NO column (returning `nothing`, which
@@ -11187,7 +11816,7 @@ _sb_any_data_symbol(data, target=nothing) = begin
     # order does not leak into it: the entries are sorted by length below.
     by_len = Dict{Int,Symbol}()
     for (k, v) in data
-        k === _SB_PREPROC_KEY && continue
+        _sb_is_side_channel_key(k) && continue
         hit = _flat_vec_key(k, v)
         isnothing(hit) && continue
         isnothing(first_hit) && (first_hit = hit)
@@ -11210,8 +11839,27 @@ _sb_any_data_symbol(data, target=nothing) = begin
             "meant to vary across a frame, name a column from that frame so its length is known.")
     end
     isnothing(first_hit) || return first_hit
-    first(k for k in keys(data) if k !== _SB_PREPROC_KEY)
+    # No flat vector anywhere: only side-channels (or nothing) remain, so no
+    # row axis exists to size the intercept from. The historical fallback
+    # returned the first non-preproc key, which an unconditioned program could
+    # resolve to a constructor side-channel (`__brm_emission_bindings__`) that
+    # never reaches Stan's data dict — a cryptic downstream failure. Fail here
+    # with the same guidance as the no-data case above.
+    for k in keys(data)
+        _sb_is_side_channel_key(k) || return k
+    end
+    error("sbimpl: can't emit `rep_vector(1., n)` — no data column seen yet. Make sure an observed `~` comes before the intercept-only predictor, or, if it is a single constant, declare it directly as a scalar parameter with its own prior (`x ~ <distribution>`).")
 end
+
+# Every reserved constructor side-channel keyed in `data` during emission (all
+# popped before the SlicModel is built). Data-iterating helpers must skip all
+# of them, not just the preproc dict: with no observation bound, the fallback
+# tiers above would otherwise mistake a side-channel for a sizing column.
+_sb_is_side_channel_key(k::Symbol) =
+    k === _SB_PREPROC_KEY || k === _SB_BINDINGS_KEY ||
+    k === _SB_THRESHOLD_LOCATED_KEY || k === _SB_HYPER_PLANS_KEY ||
+    k === _SB_TOTAL_PLANS_KEY || k === _SB_S2Z_PLANS_KEY ||
+    k === _SB_HS_PLANS_KEY
 
 # Return `k` if `v` is a flat (non-ragged) vector, else `nothing` — replaces
 # the old `_is_flat_vec` Bool predicate so the caller composes via the
@@ -11776,6 +12424,8 @@ _sb_stan_dist_name(::Type{<:NegativeBinomial})    = :neg_binomial
 # per-row `int[n,K]` response form shares `probs` across rows.
 _sb_stan_dist_name(::Type{<:Multinomial})         = :multinomial
 _sb_stan_dist_name(::Type{<:Categorical})         = :categorical
+_sb_stan_dist_name(::Type{<:NegativeBinomial2})   = :neg_binomial_2
+_sb_stan_dist_name(::Type{<:BetaBinomial2})      = :beta_binomial
 _sb_stan_dist_name(::Type) = nothing
 _sb_stan_dist_name(_) = nothing
 
@@ -11796,6 +12446,21 @@ when a factory's keywords or constructor semantics require an AST rewrite;
 the same method is used by scalar priors and observations. Declaration bounds
 are separate and are not passed as constructor keywords.
 """
+# Outcome structure derived from observed data: these families read the
+# response VALUES at lowering time (outcome levels for `Ordinal` /
+# `OrderedLogistic` / `CategoricalLogit`, per-row counts for `Multinomial`,
+# the trials/mean/precision rewrite for `BetaBinomial2`), so they cannot lower
+# for an unconditioned observation (response omitted) — or as a prior, which
+# reaches the same seam. Fail here with guidance instead of the generic
+# "no Stan translation" error or a downstream stanc type error. Their fitted
+# likelihoods use dedicated `_sb_lik_family!` methods and never reach this.
+_sb_stan_distribution_call(::Type{T}, args, kwargs) where
+        {T<:Union{OrderedLogistic,Ordinal,CategoricalLogit,Multinomial,
+                  BetaBinomial2}} =
+    error("sbimpl: `$(nameof(T))` derives outcome structure from observed " *
+          "response values and cannot lower for an unconditioned observation " *
+          "(response omitted from the data). Bind the response column to fit " *
+          "this family; prior draws for it are not supported.")
 _sb_stan_distribution_call(constructor, args, kwargs) =
     _sb_stan_distribution_call_keywords(constructor, args, kwargs)
 function _sb_stan_distribution_call_keywords(constructor, args, ::NamedTuple{()})
@@ -11821,6 +12486,20 @@ _sb_stan_dist_args(::Type{<:Cauchy}, args::Tuple{Any}) = (args[1], 1.0)
 
 # `TDist(nu)` is standard Student-t; Stan requires explicit location/scale.
 _sb_stan_dist_args(::Type{<:TDist}, args::Tuple{Any}) = (args[1], 0, 1)
+
+# `BetaBinomial2(trials, mean, precision)` reparameterizes to native
+# `beta_binomial(trials, mean*precision, (1-mean)*precision)`. Mirrors the
+# likelihood emission exactly (same expressions, same order); untyped `args`
+# so both Tuple (likelihood-side) and Vector (prior-side) callers normalize.
+function _sb_stan_dist_args(::Type{<:BetaBinomial2}, args)
+    length(args) == 3 || error(
+        "sbimpl: `BetaBinomial2` needs `(trials, mean, precision)`; got " *
+        "$(length(args)) argument(s)")
+    trials, mean, precision = args[1], args[2], args[3]
+    alpha = Expr(:call, Symbol(".*"), mean, precision)
+    beta = Expr(:call, Symbol(".*"), Expr(:call, :-, 1, mean), precision)
+    (trials, alpha, beta)
+end
 
 # Composition follows the base distribution's value support. The backend's
 # ordinary translation and StanBlocks' CDF/CCDF dispatch determine whether the
@@ -11885,14 +12564,17 @@ function _sb_validate_bound_segments(wrapper, target, label, y, b)
 end
 
 function _sb_validate_bounds(wrapper, target, lower, upper, data; check_order=true)
-    raw_y = data[target]
+    # An unbound observation has no response values to validate. Its bounds
+    # still need ordinary type/order checks; ragged LHS layout validation
+    # checks their row and group lengths before reaching this shared path.
+    raw_y = get(data, target, nothing)
     y = _sb_composed_values(raw_y)
     for (label, bound) in ((:lower, lower), (:upper, upper))
         isnothing(bound) && continue
         raw_b = _sb_bound_data(bound, data)
         _sb_validate_bound_segments(wrapper, target, label, raw_y, raw_b)
         b = _sb_composed_values(raw_b)
-        b isa AbstractVector && length(b) != length(y) && error(
+        !isnothing(y) && b isa AbstractVector && length(b) != length(y) && error(
             "sbimpl: `$wrapper` $label bound has $(length(b)) rows but response ",
             "`$target` has $(length(y))")
     end
@@ -11900,10 +12582,7 @@ function _sb_validate_bounds(wrapper, target, lower, upper, data; check_order=tr
         lo = _sb_composed_values(_sb_bound_data(lower, data))
         hi = _sb_composed_values(_sb_bound_data(upper, data))
         ok = if lo isa AbstractVector || hi isa AbstractVector
-            all(eachindex(y)) do i
-                (lo isa AbstractVector ? lo[i] : lo) <=
-                    (hi isa AbstractVector ? hi[i] : hi)
-            end
+            all(lo .<= hi)
         else
             lo <= hi
         end
@@ -11913,13 +12592,13 @@ function _sb_validate_bounds(wrapper, target, lower, upper, data; check_order=tr
 end
 
 function _sb_validate_composed_support(wrapper, target, lower, upper, kind, data)
-    y = _sb_composed_values(data[target])
+    y = _sb_composed_values(get(data, target, nothing))
     lo = isnothing(lower) ? nothing :
         _sb_composed_values(_sb_bound_data(lower, data))
     hi = isnothing(upper) ? nothing :
         _sb_composed_values(_sb_bound_data(upper, data))
     if kind === :discrete
-        (eltype(y) <: Integer && !(eltype(y) <: Bool)) || error(
+        (isnothing(y) || (eltype(y) <: Integer && !(eltype(y) <: Bool))) || error(
             "sbimpl: `$wrapper` discrete base family requires an integer response, ",
             "got $(eltype(y)) for `$target`")
         for (label, bound) in ((:lower, lower), (:upper, upper))
@@ -11929,6 +12608,7 @@ function _sb_validate_composed_support(wrapper, target, lower, upper, kind, data
                 error("sbimpl: `$wrapper` discrete $label bounds must be integers")
         end
     end
+    isnothing(y) && return nothing
     all(eachindex(y)) do i
         lov = lo isa AbstractVector ? lo[i] : lo
         hiv = hi isa AbstractVector ? hi[i] : hi

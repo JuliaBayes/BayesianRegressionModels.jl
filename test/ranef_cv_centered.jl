@@ -20,8 +20,9 @@
 
 using Test
 using BayesianRegressionModels
+using BridgeStan
 using StanBlocks
-using Distributions: Normal
+using Distributions: Exponential, Normal, logpdf
 
 stanc_ok(code) = StanBlocks.stanc_check(code; warn_pedantic=false).ok
 blocks(code) = code[first(findfirst("data {", code)):end]
@@ -477,4 +478,84 @@ end
               BayesianRegressionModels.stan_code(sb)
         @test any(d -> d.role === :observation && d.target === :y, plan.declarations)
     end
+end
+
+@testset "stratified `gr(g, by=b)` routes per-group strata (numeric)" begin
+    # Regression test for the bd2da02 plate-unification bug: the group plate
+    # took `stratum_idx[group_idx]` (per-observation) as its per-cell scalar,
+    # so cell `g` read the stratum of ROW `g` instead of GROUP `g` — correct
+    # only when the first `n_groups` rows are groups `1:n_groups` in order.
+    # This data deliberately violates that (`g[2] == "s1"`, and group `s3`
+    # sits in stratum B while row 3's group `s2` sits in A), so the buggy
+    # routing evaluates a different posterior (Δ ≈ 0.0033 here).
+    df = (; g = ["s1", "s1", "s2", "s3", "s3", "s4"],
+            b = ["A", "A", "A", "B", "B", "B"],
+            x = [0.2, -0.1, 0.4, 0.3, -0.5, 0.1],
+            y = [0.1, 0.2, 0.3, -0.2, 0.15, 0.05])
+    builder = @brm begin
+        loc ~ 1 + (1 | gr(g, by = b))
+        y ~ Normal(loc, sigma)
+        effect(loc, Intercept) ~ Normal(0, 5)
+        sigma ~ Exponential(1)
+    end
+    sb = SBBRMI(builder(df); mod=@__MODULE__)
+    code = StanBlocks.stan_code(sb.model)
+    @test stanc_ok(code)
+    # The plate cell must index the per-group stratum vector directly; a
+    # gather through the per-observation group index is the bug shape.
+    @test !occursin(r"_stratum_idx\[\w+_idx\]\[", code)
+    d = sb.data
+    @test Vector{Int}(d[:g__by__b_idx]) == [1, 1, 2, 3, 3, 4]
+    @test Vector{Int}(d[:g__by__b_stratum_idx]) == [1, 1, 2, 2]
+
+    model = BayesianRegressionModels.stan_instantiate(sb).model
+    u = collect(range(-0.4, 0.4; length=8))
+    @test BridgeStan.param_unc_names(model) ==
+        ["pop_loc_beta_pop.1", "r_loc_g__by__b_tau_s_tau.1.1",
+         "r_loc_g__by__b_tau_s_tau.1.2", "r_loc_g__by__b_b_T_z_g.1.1",
+         "r_loc_g__by__b_b_T_z_g.1.2", "r_loc_g__by__b_b_T_z_g.1.3",
+         "r_loc_g__by__b_b_T_z_g.1.4", "sigma"]
+    vT = BridgeStan.log_density(model, u; propto=false, jacobian=true)
+    vF = BridgeStan.log_density(model, u; propto=false, jacobian=false)
+    grad = Vector{Float64}(undef, length(u))
+    BridgeStan.log_density_gradient!(model, u, grad; propto=false, jacobian=true)
+    fd = similar(u)
+    h = cbrt(eps(Float64))
+    for i in eachindex(u)
+        up, dn = copy(u), copy(u)
+        up[i] += h
+        dn[i] -= h
+        fd[i] = (BridgeStan.log_density(model, up; propto=false, jacobian=true) -
+                 BridgeStan.log_density(model, dn; propto=false, jacobian=true)) / (2h)
+    end
+    @test grad ≈ fd rtol = 1e-6 atol = 1e-6
+
+    # Independent per-group-strata oracle: b[g] = tau[s[g]] * z[g].
+    theta = BridgeStan.param_constrain(model, u)
+    con = BridgeStan.param_names(model)
+    at(base) = theta[findfirst(==(base), con)]
+    avec(base) = [theta[i] for (i, n) in enumerate(con) if startswith(n, base * ".")]
+    beta = only(avec("pop_loc_beta_pop"))
+    sigma = at("sigma")
+    tau = avec("r_loc_g__by__b_tau_s_tau")
+    z = avec("r_loc_g__by__b_b_T_z_g")
+    gidx, sidx = [1, 1, 2, 3, 3, 4], [1, 1, 2, 2]
+    b = [tau[sidx[g]] * z[g] for g in 1:4]
+    r = [b[gidx[i]] for i in 1:6]
+    ll = sum(logpdf(Normal(beta + r[i], sigma), df.y[i]) for i in 1:6)
+    # K = 1: the two vacuous 1x1 LKJs contribute 0 (pinned by value match).
+    pr = logpdf(Normal(0, 5), beta) + logpdf(Exponential(1), sigma) +
+        sum(logpdf(Normal(0, 1), v) for v in tau) +
+        sum(logpdf(Normal(0, 1), v) for v in z)
+    unc = BridgeStan.param_unc_names(model)
+    u_at(base) = u[findfirst(==(base), unc)]
+    uvec(base) = [u[i] for (i, n) in enumerate(unc) if startswith(n, base * ".")]
+    @test sigma ≈ exp(u_at("sigma"))
+    @test tau ≈ exp.(uvec("r_loc_g__by__b_tau_s_tau"))
+    jac = u_at("sigma") + sum(uvec("r_loc_g__by__b_tau_s_tau"))
+    @test ll + pr ≈ vF rtol = 1e-12
+    @test ll + pr + jac ≈ vT rtol = 1e-12
+    # The pre-fix obs-truncated routing evaluates -18.510735026553707 here;
+    # the per-group model is exactly this far away — fail if we drift back.
+    @test vT ≈ -18.507393826337786 rtol = 1e-12
 end

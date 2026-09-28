@@ -50,15 +50,23 @@ const PINS = [
     ("MutatingFunctions", "https://github.com/nsiccha/MutatingFunctions.jl.git", "4fc41b1c7b774133ceaacc4ff3c34c67b15b87b2"),  # main
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "121de3194f02044e00bac0d11019a93458ddb63a"),  # main
     ("TreeArrays",        "https://github.com/nsiccha/TreeArrays.jl.git",        "c317cc003fc41c2d933c27dc80799141eebd434e"),  # main
-    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "0421b28bdea7697ea28e8875c8a07a4e4a578e6c"),  # devibe (distribution HOFs accept a family call in the token position — snag hof-call-form-fa-b2bfce08 — BRM snag censored-in-kern-87b50f51; contains 3aba023a skew_double_exponential vector transpiler fix + stan_instantiate stale-path rewrite+warn; 0421b28 adds constrained-matrix plate cells and plate-outer cv routing)
+    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "342436de359eb43879ddcef4956cfd5fd6502995"),  # devibe (K>=3 mixture RNG else-if rendering 5aed3df; BRM matrix-b snag k-5-mixturemodel-6105de92; supersedes 24578c34)
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
-    ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
+    # 0194dce (2026-09-27, dev): WindowSelectionPlan (WarmupHMC-held evidence)
+    # and the controls interface for custom reparametrizers,
+    # which the per-window S2Z Fisher rule needs. Contains 7aed40b (active-state
+    # preservation, nonfinite-transport rejection). Matches test/Project.toml.
+    ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "0194dce08e986ff17fd5a788bb315c6431b7858e"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
-    # through. 45f765e (2026-09-22, canonical): 6873a0e plus the
-    # genuine-dataflow GLM object desugar and its NA plate-AD fix. The
-    # pin also retains 6873a0e's ranef varying_draws/varying_slice
-    # migration.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "45f765ea15061bfce9bd5991ffbd13a77570fdfa"),  # main
+    # through. 99d278db (2026-09-27, main): the 3c419bde stack
+    # (c83c14c0 + mod-weights, term-gp, closeout-appends, fam-exp,
+    # splines-stan, kernel-robust, fam-lognormal merges, bernoulli-int
+    # plate fix 3cfe180b, nuisance-kappa slice) plus the fam-weibull
+    # response slice and the nuisance-nu modeled-StudentT-nu slice
+    # (nu `ScalePredictorRef` gate + `StudentT.(exp.(nu), mu, sigma)`
+    # surface + nu plate node + N1/N1b vscale tests + SB pins;
+    # peer verdict 1d7vuvf PASS).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "99d278db2d01d7a74b9c8bf3554cf6300cf8ec8c"),  # main
 ]
 
 function main()

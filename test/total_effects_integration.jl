@@ -71,7 +71,7 @@ try
                 x = q .+ 0.25randn(Xoshiro(32+trial),length(q))
                 @test BridgeStan.log_density(problem.model,x;propto=false) ≈ original_marginal(x) atol=1e-10
             end
-            prior = SBBRMI(brmi;held_out=(:y,))
+            prior = SBBRMI(builder((;x=data.x,g=data.g)))
             @test StanBlocks.stanc_check(BRM.stan_code(prior);warn_pedantic=false).ok
         end
         replay = reprocess(sb,(;data...,x=data.x.+0.7))
