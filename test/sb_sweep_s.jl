@@ -128,8 +128,8 @@ end
 # glmm_poisson: cubic trend + per-obs RE, Poisson_log. Box uniforms with
 # Stan lub transforms matching RK term-by-term; beta2's declaration
 # [-10,20] is WIDER than its prior U(-10,10) (the .stan idiom) — spelled
-# via split decl/prior bounds. AUDIT POINT: emitted decl must read
-# [lower=-10, upper=20] for beta2 (else the Jacobian mismatches).
+# via split decl/prior bounds. AUDITED 2026-09-28: emitted decl reads
+# [lower=-10, upper=20], prior uniform(-10, 10); Jacobian matches.
 # (@brm refused: cannot express the decl/prior-bound split.)
 function glmm_poisson_s()
     M = GLMMPoissonExample

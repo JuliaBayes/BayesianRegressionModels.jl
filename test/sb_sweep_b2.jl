@@ -67,8 +67,9 @@ end
 # with D = 90). sd_* implicit-U[0,100] spelled explicit (-log(100) each).
 # Groups ride CategoricalVectors with DECLARED full levels so SB keeps the
 # 25 unobserved levels as prior-only coefficients (plain Int vectors size
-# by observed levels: 65 params, wrong model — first B2 run). AUDIT POINT:
-# stan_names must size 4/4/16/51/5 (else the case moves to S).
+# by observed levels: 65 params, wrong model — first B2 run). AUDITED
+# 2026-09-28: stan_names sizes 4/4/16/51/5 + 5 taus + 5 betas = 90; priors
+# cover all declared levels, likelihood indexes observed rows only.
 function election88_sb()
     M = Election88FullExample
     df = (; y=M.E88_Y, black=M.E88_BLACK, female=M.E88_FEMALE,
