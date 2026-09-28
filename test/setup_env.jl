@@ -54,15 +54,13 @@ const PINS = [
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
-    # through. 6cf678f (2026-09-27, main): the c83c14c0 stack (bb2a2e0 +
-    # term-monotonic + term-hsgp-periodic) plus mod-weights, term-gp,
-    # closeout-appends, kernel-robust, splines-stan (spline sd
-    # :positive_stan), the fam-exp Exponential response slice
-    # (ExponentialFam + corpus 69_exp), and the fam-lognormal LogNormal
-    # response slice (LogNormalFam + (IdentityLink, IdentityLink) triple +
-    # scalar sigma on the scale slot + head `LogNormal.(mu, sigma)` +
-    # corpus 70_lognormal + L1 SB pin).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "6cf678f37acec6cb34fd0abcf7b990e74707dea4"),  # main
+    # through. ac249731 (2026-09-27, main): the 6cf678f lognormal stack
+    # plus the bernoulli-v2 bind-folded Bool recipe, the nuisance-kappa
+    # log-link Beta kappa predictor, and the fam-weibull Weibull response
+    # slice (WeibullFam + (LogLink, LogLink) triple + scalar k on the
+    # scale slot + twin head `Weibull.(k, exp.(eta))` + new weibull
+    # DistributionKernel + corpus 69_weibull + W1 SB pin).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "ac249731f90da13da5a65152a5651230cbbdd338"),  # main
 ]
 
 function main()
