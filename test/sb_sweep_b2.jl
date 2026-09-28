@@ -17,6 +17,7 @@
 include(joinpath(@__DIR__, "sb_sweep_common.jl"))
 
 using Distributions: Normal, Uniform, Gamma
+using CategoricalArrays: categorical
 using ReactiveKernelsPPLExamples:
     RatsModelExample, GLMM1ModelExample, Election88FullExample, GPPoisRegrExample
 
@@ -62,15 +63,21 @@ function glmm1_sb()
 end
 
 # election88: 5 crossed zero-mean RE blocks + beta[5] fixed effects
-# (beta1 = intercept), N = 11566. sd_* implicit-U[0,100] spelled explicit
-# (-log(100) each). AUDIT POINT: 2 states + region 5 are unobserved — the
-# run's stan_names must still size 51 + 5 (else the case moves to S).
+# (beta1 = intercept) over a 60-row subset (group dims FIXED at 4/4/16/51/5
+# with D = 90). sd_* implicit-U[0,100] spelled explicit (-log(100) each).
+# Groups ride CategoricalVectors with DECLARED full levels so SB keeps the
+# 25 unobserved levels as prior-only coefficients (plain Int vectors size
+# by observed levels: 65 params, wrong model — first B2 run). AUDIT POINT:
+# stan_names must size 4/4/16/51/5 (else the case moves to S).
 function election88_sb()
     M = Election88FullExample
     df = (; y=M.E88_Y, black=M.E88_BLACK, female=M.E88_FEMALE,
         inter=M.E88_FEMALE .* M.E88_BLACK, v_prev=M.E88_VPREV,
-        age=M.E88_AGE, edu=M.E88_EDU, age_edu=M.E88_AGE_EDU,
-        state=M.E88_STATE, region=M.E88_REGION)
+        age=categorical(M.E88_AGE; levels=collect(1:4), ordered=false),
+        edu=categorical(M.E88_EDU; levels=collect(1:4), ordered=false),
+        age_edu=categorical(M.E88_AGE_EDU; levels=collect(1:16), ordered=false),
+        state=categorical(M.E88_STATE; levels=collect(1:51), ordered=false),
+        region=categorical(M.E88_REGION; levels=collect(1:5), ordered=false))
     builder = @brm begin
         mu ~ 1 + black + female + inter + v_prev +
             (1 | pa | age) + (1 | pb | edu) + (1 | pc | age_edu) +
