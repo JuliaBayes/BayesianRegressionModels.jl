@@ -189,10 +189,14 @@ function _s2z_fisher_raw(
     L = cholesky!(Symmetric(Matrix{Float64}(total))).L
     prior_fraction = 1 - inv(J)
     out = Matrix{Float64}(undef, J, M)
-    for j in 1:J, k in 1:M
+    for j in 1:J
+        # One triangular solve per group, shared by all K coefficients
+        # (was: recomputed inside the k loop, O(J*K^4)).
         G = L \ white[j]
-        restricted = white[j][k, k] - dot(view(G, :, k), view(G, :, k))
-        out[j, k] = clamp(1 - restricted / prior_fraction, 0.0, 1.0)
+        for k in 1:M
+            restricted = white[j][k, k] - dot(view(G, :, k), view(G, :, k))
+            out[j, k] = clamp(1 - restricted / prior_fraction, 0.0, 1.0)
+        end
     end
     out
 end

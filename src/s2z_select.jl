@@ -419,9 +419,13 @@ function _s2z_fisher_draw(plan::S2ZInformationPlan, info::AbstractVector, tau::A
     design = plan.block.design
     J, K = size(plan.block.rho)
     infos = [zeros(K, K) for _ in 1:J]
+    # One scratch outer-product buffer shared by all rows (was: `z * z'`
+    # allocated a K-by-K matrix per row); the accumulation order is unchanged.
+    outer = Matrix{Float64}(undef, K, K)
     for n in eachindex(plan.groups)
         z = view(design, n, :)
-        infos[plan.groups[n]] .+= info[n] .* (z * z')
+        mul!(outer, z, z')
+        infos[plan.groups[n]] .+= info[n] .* outer
     end
     _s2z_fisher_candidate(infos, tau)
 end
