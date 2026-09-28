@@ -22,6 +22,7 @@
 include(joinpath(@__DIR__, "sb_sweep_common.jl"))
 
 using Distributions: Beta, Binomial, Normal, Cauchy
+import Distributions
 
 const PROBE_OUT = get(ENV, "SB_PROBE_OUT",
     joinpath(tempdir(), "sb-sweep-probes.jsonl"))
