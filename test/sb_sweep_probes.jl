@@ -11,17 +11,19 @@
 # carries an independent Distributions.jl hand oracle (transcribed from the
 # partner's own want formulas) asserted at rtol 1e-9.
 #
-# R1/R3/ARK now. R2/R4/DUG follow with the S driver: R2's vector-of-params
+# R1/R3/ARK via @brm; R2/R4/DUG via inline @slic (R2's vector-of-params
 # likelihood arg is refused at Stan lifting, R4's prior-only thetaprior is
-# demoted to generated quantities, and DUG is nonlinear — all three need
-# @slic ports (see sb_sweep_core.jl MOVED notes).
+# demoted to GQ, DUG is nonlinear — see sb_sweep_core.jl MOVED notes).
+# DUG data discrepancy: the header REQUEST names ages=[0.5,1,2],
+# lengths=[0.8,1.6,2.1] but _sr_dug_cols() uses [1,5,9]/[1,2,1.5] — pinned
+# BOTH (DUG0/DUG1 on code data, DUGh on header data).
 #
 # Run: julia --project=test test/sb_sweep_probes.jl
 # Records append to $SB_PROBE_OUT (default: tempdir()/sb-sweep-probes.jsonl).
 
 include(joinpath(@__DIR__, "sb_sweep_common.jl"))
 
-using Distributions: Beta, Binomial, Normal, Cauchy
+using Distributions: Beta, Binomial, Normal, Cauchy, Exponential
 import Distributions
 
 const PROBE_OUT = get(ENV, "SB_PROBE_OUT",
@@ -118,6 +120,87 @@ function probe_ark()
     return sb, x, oracle
 end
 
+# R2: two independent Beta-Binomials; probe (0.6, 0.7).
+function probe_r2()
+    df = (; k1=[6], n1=[10], k2=[8], n2=[12])
+    model = @slic (; k1=df.k1, n1=df.n1, k2=df.k2, n2=df.n2) begin
+        theta1 ~ beta(1, 1)
+        theta2 ~ beta(1, 1)
+        k1 ~ binomial(n1, theta1)
+        k2 ~ binomial(n2, theta2)
+    end
+    oracle = DL(Beta(1.0, 1.0), 0.6) + DL(Binomial(10, 0.6), 6) +
+        log(0.6 * 0.4) + DL(Beta(1.0, 1.0), 0.7) +
+        DL(Binomial(12, 0.7), 8) + log(0.7 * 0.3)
+    return model, [0.6, 0.7], oracle
+end
+
+# R4: R1 + prior-only thetaprior (stays sampled here); probe (0.6, 0.4).
+function probe_r4()
+    df = (; k=[6], n=[10])
+    model = @slic (; k=df.k, n=df.n) begin
+        theta ~ beta(1, 1)
+        thetaprior ~ beta(1, 1)
+        k ~ binomial(n, theta)
+    end
+    oracle = DL(Beta(1.0, 1.0), 0.6) + DL(Binomial(10, 0.6), 6) +
+        log(0.6 * 0.4) + DL(Beta(1.0, 1.0), 0.4) + log(0.4 * 0.6)
+    return model, [0.6, 0.4], oracle
+end
+
+# DUG: von-Bertalanffy (the partner's probe model — NOT the inventory
+# BUGS-form dugongs). mu = Linf*(1-exp(-kk*(age-t0))), y ~ Normal(mu,sigma).
+function _dug_model(y, age)
+    return @slic (; y=y, age=age) begin
+        Linf ~ normal(2.0, 1.0)
+        kk ~ normal(0.0, 1.0)
+        t0 ~ normal(0.0, 1.0)
+        sigma ~ exponential(1.0)
+        mu = Linf * (1 - exp(-kk * (age - t0)))
+        y ~ normal(mu, sigma)
+    end
+end
+
+function _dug_oracle(y, age, Linf, kk, t0, sigma, u_sigma)
+    mu = Linf .* (1 .- exp.(-kk .* (age .- t0)))
+    return sum(DL(Normal(m, sigma), v) for (m, v) in zip(mu, y)) +
+        DL(Normal(2.0, 1.0), Linf) + DL(Normal(0.0, 1.0), kk) +
+        DL(Normal(0.0, 1.0), t0) + DL(Exponential(1.0), sigma) + u_sigma
+end
+
+# probe_case for SlicModel probes (mirrors the SBBRMI twin).
+function probe_scase(io::IO, probe::AbstractString, model,
+        x_phys::AbstractVector, oracle::Float64,
+        expect_names::AbstractVector{<:AbstractString})
+    code = StanBlocks.stan_code(model)
+    stan_sha = _short_sha(code)
+    mkpath(_SWEEP_CACHE)
+    path = joinpath(_SWEEP_CACHE, "probe-$(probe)-$(stan_sha).stan")
+    isfile(path) || write(path, code)
+    problem = Base.invokelatest(StanBlocks.stan_instantiate, model; path=path)
+    names = BS.param_unc_names(problem.model)
+    @assert names == expect_names "probe $probe: names $(names) != " *
+        "expected $(expect_names) — physical probe mis-mapped?"
+    u = BS.param_unconstrain(problem.model, Vector{Float64}(x_phys))
+    grad = zeros(length(u))
+    lp, _ = BS.log_density_gradient!(problem.model, Vector{Float64}(u), grad;
+        propto=false, jacobian=true)
+    @assert isfinite(lp) "non-finite lp for probe $probe"
+    match = isapprox(lp, oracle; rtol=1e-9)
+    @assert match "probe $probe: SB lp $lp != oracle $oracle"
+    data = StanBlocks.stan_data(model)
+    rec = Dict(
+        "probe" => String(probe), "brm_tip" => _brm_tip(),
+        "stan_sha" => stan_sha, "data_hash" => _short_sha(_canonical_data(data)),
+        "stan_names" => names, "x_phys" => Vector{Float64}(x_phys),
+        "u" => Vector{Float64}(u), "lp" => lp, "grad" => grad,
+        "oracle" => oracle,
+    )
+    println(io, JSON.json(rec))
+    println("SB_PROBE probe=$probe lp=$lp oracle=$oracle grad=$grad")
+    return rec
+end
+
 open(PROBE_OUT, "a") do io
     for (probe, build, names) in (
         ("R1", probe_r1, ["theta"]),
@@ -127,6 +210,25 @@ open(PROBE_OUT, "a") do io
     )
         sb, x, oracle = build()
         probe_case(io, probe, sb, x, oracle, names)
+    end
+    for (probe, build, names) in (
+        ("R2", probe_r2, ["theta1", "theta2"]),
+        ("R4", probe_r4, ["theta", "thetaprior"]),
+    )
+        model, x, oracle = build()
+        probe_scase(io, probe, model, x, oracle, names)
+    end
+    # DUG on code data (u0 + u1) and header data (u1 physical).
+    dug_names = ["Linf", "kk", "t0", "sigma"]
+    let y = [1.0, 2.0, 1.5], age = [1.0, 5.0, 9.0]
+        probe_scase(io, "DUG0", _dug_model(y, age), [0.0, 0.0, 0.0, 1.0],
+            _dug_oracle(y, age, 0.0, 0.0, 0.0, 1.0, 0.0), dug_names)
+        probe_scase(io, "DUG1", _dug_model(y, age), [1.0, 1.0, 1.0, exp(1.0)],
+            _dug_oracle(y, age, 1.0, 1.0, 1.0, exp(1.0), 1.0), dug_names)
+    end
+    let y = [0.8, 1.6, 2.1], age = [0.5, 1.0, 2.0]
+        probe_scase(io, "DUGh", _dug_model(y, age), [1.0, 1.0, 1.0, exp(1.0)],
+            _dug_oracle(y, age, 1.0, 1.0, 1.0, exp(1.0), 1.0), dug_names)
     end
 end
 println("SB_PROBE wrote $PROBE_OUT")
