@@ -83,6 +83,11 @@ const _RK_ADMITTED_TRIPLES = Set{Tuple{Symbol,Symbol,Symbol}}([
     # scalar assignment — modeled sigma is term-nuisance
     # scope, so a predictor fails closed here).
     (:lognormal, :identity, :identity),
+    # Group C (survival): Weibull over a log-link scale predictor;
+    # shape rides the scalar-only scale slot (sampled / assignment /
+    # positive literal — modeled shape deferred, the Beta-kappa
+    # precedent). Arguments are Distributions `(shape, scale)` order.
+    (:weibull, :log, :log),
 ])
 # Slice-2 families: no weights or evidence (no driving case — the thin
 # layer admits neither on the new triples, so the planner fails closed).
@@ -90,7 +95,7 @@ const _RK_SLICE2_FAMILIES = Set{Symbol}([
     :bernoulli_probit, :bernoulli_cloglog, :binomial_probit,
     :binomial_cloglog, :beta_logit, :beta_binomial_logit, :student_t,
     :hurdle_poisson, :zero_inflated_poisson, :wald, :von_mises,
-    :negative_binomial, :lognormal,
+    :negative_binomial, :lognormal, :weibull,
 ])
 # Leveled simplex responses (multinomial/categorical) name a simplex
 # vector parameter instead of a linear predictor, so they skip the
@@ -176,6 +181,8 @@ struct _RKLikelihoodSpec
                    # interval the `interval` slot) |
                    # :lognormal (sigma rides the scalar-only scale
                    # slot) |
+                   # :weibull (shape rides the scalar-only scale slot;
+                   # the scale predictor is the location) |
                    # longtail: :mvnormal_cholesky (joint correlated outcomes)
                    # | :mixture (finite MixtureModel response)
     link::Symbol   # effective link: :identity | :logit | :log |
@@ -1205,6 +1212,37 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
             "mu/alpha)` with a `log(mu)` predictor")
         return (; family=:gamma_log, link=plink, scale=shape,
             scale_predictor=shape_predictor, trials=nothing, location)
+    elseif head === Weibull
+        length(args) == 2 || error(
+            "$prefix: response `$response` `Weibull` needs " *
+            "`(shape, scale)`; write `Weibull(k, theta)` " *
+            "with a `log(theta)` predictor")
+        # Distributions `(shape, scale)` order: the shape rides the
+        # scalar-only slot (the wald/Beta-kappa precedent — modeled
+        # shape is deferred, term-nuisance owns it) and the scale is
+        # the location predictor.
+        _rk_is_predictor_ref(args[1], candidates) && error(
+            "$prefix: response `$response` `Weibull` shape cannot " *
+            "be the linear predictor `$(name(args[1]))`; modeled shape " *
+            "is out of slice — write a sampled parameter, a positive " *
+            "literal, or a scalar assignment")
+        shape, shape_predictor = _rk_scale_argument(args[1], parameters,
+            assignments, consts, aliases, response, "shape",
+            Symbol[])
+        shape_predictor === nothing || error(
+            "$prefix: response `$response` `Weibull` shape cannot " *
+            "be a linear predictor (predictor-fed shape is not admitted)")
+        location = _rk_location_arg(args[2], candidates, response, "scale",
+            "itself; write `Weibull(k, theta)` with a `log(theta)` " *
+            "predictor (slice 2 has no `Weibull(k, exp(..))` spelling)")
+        plink = predictor_link[location]
+        triple = (:weibull, plink, plink)
+        triple in _RK_ADMITTED_TRIPLES || error(
+            "$prefix: response `$response` pairs `Weibull` with " *
+            "a $plink-link predictor; write " *
+            "`Weibull(k, theta)` with a `log(theta)` predictor")
+        return (; family=:weibull, link=plink, scale=shape,
+            scale_predictor=nothing, trials=nothing, location)
     elseif head === OrderedLogistic
         length(args) == 1 || error(
             "$prefix: response `$response` `OrderedLogistic` needs one " *
@@ -5796,6 +5834,11 @@ function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
         (eltype(values) <: Integer && all(>=(0), values)) || error(
             "$prefix: response `$response` must hold non-negative integers")
     elseif family === :gamma_log || family === :lognormal
+        # Mirrors the thin layer: strictly positive (y = 0 fails
+        # validation there, so it fails here with BRM-side attribution).
+        (eltype(values) <: Real && all(>(0), values)) || error(
+            "$prefix: response `$response` must hold strictly positive values")
+    elseif family === :weibull
         # Mirrors the thin layer: strictly positive (y = 0 fails
         # validation there, so it fails here with BRM-side attribution).
         (eltype(values) <: Real && all(>(0), values)) || error(

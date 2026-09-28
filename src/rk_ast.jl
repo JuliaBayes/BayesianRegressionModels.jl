@@ -352,7 +352,8 @@ _rk_ast_response_uses_scale(family::Symbol) =
     family === :beta_binomial_logit ||
     family === :student_t || family === :hurdle_poisson ||
     family === :wald || family === :von_mises ||
-    family === :negative_binomial || family === :lognormal
+    family === :negative_binomial || family === :lognormal ||
+    family === :weibull
 
 # The scale-slot body spelling inside a bare response statement. A
 # direct scale (outer name, literal, or the plan-forbidden nothing)
@@ -643,6 +644,16 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
             _rk_ast_dotted(:exp, predictor),
             leaf[:scale]) :
         _rk_ast_dotted(:NegativeBinomial, predictor, leaf[:scale])
+    elseif response.family === :weibull
+        # Twin head (thin-layer decision, pair fam-weibull): the
+        # plan's `Weibull(k, theta)` maps to
+        # `Weibull.(k, exp.(eta))` (Distributions `(shape, scale)`
+        # order, NB2 precedent); scalars inline bare. No fused
+        # head: one spelling either way.
+        wrap_location ? _rk_ast_dotted(:Weibull,
+            leaf[:scale],
+            _rk_ast_dotted(:exp, predictor)) :
+        _rk_ast_dotted(:Weibull, leaf[:scale], predictor)
     elseif response.family === :gamma_log
         # Mean-shape form: the plan pins both alpha positions identical,
         # so the same value emits twice.

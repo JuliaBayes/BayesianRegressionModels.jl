@@ -18,7 +18,7 @@ using Distributions: Bernoulli, Beta, Binomial, Categorical, Cauchy, Dirichlet,
                      Exponential, Gamma, InverseGaussian, Laplace,
                      LocationScale, Logistic, LogNormal, MixtureModel,
                      Multinomial, NegativeBinomial, Normal, Poisson, TDist,
-                     Uniform, VonMises, truncated
+                     Uniform, VonMises, Weibull, truncated
 using LogExpFunctions: logistic, logit
 using Statistics: mean
 
@@ -322,6 +322,36 @@ end
     want = Expr(:call, :.~, :c,
         Expr(:., :NegativeBinomial, Expr(:tuple,
             Expr(:., :exp, Expr(:tuple, :r)), 0.4)))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+end
+
+@testset "group-C weibull AST shape" begin
+    # Twin head (thin-layer decision, pair fam-weibull):
+    # `Weibull(k, theta)` maps to `Weibull.(k, exp.(theta))`
+    # (Distributions `(shape, scale)` order, NB2 precedent); no
+    # fused head.
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        k ~ LogNormal(0, 0.3)
+        z ~ Weibull(k, mu)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :z,
+        Expr(:., :Weibull, Expr(:tuple, :k,
+            Expr(:., :exp, Expr(:tuple, :mu)))))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+    # Literal shape inlines; the fused-heads flag changes nothing
+    # (one head either way).
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        z ~ Weibull(2.0, mu)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :z,
+        Expr(:., :Weibull, Expr(:tuple, 2.0,
+            Expr(:., :exp, Expr(:tuple, :mu)))))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end
