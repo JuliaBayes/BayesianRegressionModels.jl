@@ -12,7 +12,9 @@
 
 include(joinpath(@__DIR__, "sb_sweep_common.jl"))
 
-using ReactiveKernelsPPLExamples: Rate2Example, Rate4Example, DugongsGrowthExample
+using ReactiveKernelsPPLExamples: Rate2Example, Rate4Example, DugongsGrowthExample,
+    PilotsExample, GLMMPoissonExample, SumToZeroExample, MVNormalRegressionExample,
+    EightSchoolsExample
 
 const OUT = get(ENV, "SB_SWEEP_OUT",
     joinpath(tempdir(), "sb-sweep-s.jsonl"))
@@ -102,17 +104,191 @@ const _S_BATCH1 = (
     ("dugongs", dugongs_s, 0.0, ""),
 )
 
-open(OUT, "a") do io
-    for t in _S_BATCH1
-        (case, build, offset, reason) = t[1:4]
-        if (case, "zeros") in _DONE && (case, "seeded") in _DONE
-            println("SB_SWEEP skip $case (already recorded)")
-            continue
+# pilots: crossed REs, mu = a[group] + b[scenario]; a ~ N(10*mua, sa),
+# b ~ N(10*mub, sb); mua/mub ~ N(0,1); sa/sb/sy implicit-U[0,100] spelled
+# explicit (-log(100) each; same [0,100] declaration both sides).
+# (@brm refused: two hierarchical means, one population intercept.)
+function pilots_s()
+    M = PilotsExample
+    g, s, y = M.PILOTS_GROUP_ID, M.PILOTS_SCENARIO_ID, M.PILOTS_Y
+    @assert maximum(g) == 5 && maximum(s) == 8 && length(y) == 40
+    return @slic (; group=g, scenario=s, y=y, ng=5, ns=8) begin
+        mua ~ normal(0, 1)
+        mub ~ normal(0, 1)
+        sa ~ uniform(0, 100; lower=0, upper=100)
+        sb ~ uniform(0, 100; lower=0, upper=100)
+        sy ~ uniform(0, 100; lower=0, upper=100)
+        a::vector[ng] ~ normal(10 * mua, sa)
+        b::vector[ns] ~ normal(10 * mub, sb)
+        mu = a[group] + b[scenario]
+        y ~ normal(mu, sy)
+    end
+end
+
+# glmm_poisson: cubic trend + per-obs RE, Poisson_log. Box uniforms with
+# Stan lub transforms matching RK term-by-term; beta2's declaration
+# [-10,20] is WIDER than its prior U(-10,10) (the .stan idiom) — spelled
+# via split decl/prior bounds. AUDIT POINT: emitted decl must read
+# [lower=-10, upper=20] for beta2 (else the Jacobian mismatches).
+# (@brm refused: cannot express the decl/prior-bound split.)
+function glmm_poisson_s()
+    M = GLMMPoissonExample
+    yr, c = M.GLMM_POISSON_YEAR, M.GLMM_POISSON_C
+    n = length(c)
+    return @slic (; year=yr, year2=yr .* yr, year3=yr .* yr .* yr, counts=c, n=n) begin
+        alpha ~ uniform(-20, 20; lower=-20, upper=20)
+        beta1 ~ uniform(-10, 10; lower=-10, upper=10)
+        beta2 ~ uniform(-10, 10; lower=-10, upper=20)
+        beta3 ~ uniform(-10, 10; lower=-10, upper=10)
+        sigma ~ uniform(0, 5; lower=0, upper=5)
+        eps::vector[n] ~ normal(0, sigma)
+        mu = alpha + beta1 * year + beta2 * year2 + beta3 * year3 + eps
+        counts ~ poisson(exp(mu))
+    end
+end
+
+# sum_to_zero helpers: verbatim S2Z pivot (loop form, same IEEE op sequence
+# as the source's vectorized form) + the effects family (K N(0,tau) terms +
+# the +log(tau) subspace normalization, which has no native spelling).
+@deffun begin
+    s2z_pivot_vec(free::vector[7])::vector[8] = begin
+        w::vector[7]
+        for i in 1:7
+            w[i] = free[i] / sqrt(i * (i + 1.0))
         end
-        recs = sweep_scase(io, case, build; offset=offset, offset_reason=reason)
-        for r in recs
-            println("SB_SWEEP case=$(r["case"]) label=$(r["label"]) lp=$(r["lp"]) offset=$(r["offset"])")
+        S = 0.0
+        for i in 1:7
+            S += w[i]
+        end
+        out::vector[8]
+        out[1] = S
+        prefix = 0.0
+        for i in 1:7
+            prefix += w[i]
+            out[i + 1] = S - prefix + w[i] - (i + 1) * w[i]
+        end
+        out
+    end
+    @lpxf s2z_free_lpdf(free::vector[7], tau::real)::real = begin
+        eff = s2z_pivot_vec(free)
+        rv = log(tau)
+        for i in 1:8
+            rv += normal_lpdf(eff[i], 0.0, tau)
+        end
+        rv
+    end
+    s2z_free_lpdfs(free::vector[7], tau::real)::vector[7] = begin
+        eff = s2z_pivot_vec(free)
+        tot = log(tau)
+        for i in 1:8
+            tot += normal_lpdf(eff[i], 0.0, tau)
+        end
+        out::vector[7]
+        for i in 1:7
+            out[i] = tot / 7
+        end
+        out
+    end
+    s2z_free_rng(vector[7], tau::real)::vector[7] = begin
+        out::vector[7]
+        for i in 1:7
+            out[i] = normal_rng(0.0, tau)
+        end
+        out
+    end
+end
+
+# sum_to_zero: 8-schools S2Z model. alpha ~ N(0, sqrt(25 + tau^2/8)),
+# tau ~ truncated-Cauchy(0,5) normalized, effects via the pivot with the
+# +log(tau) subspace term (custom family), y ~ N(alpha + effect, se).
+# (@brm refused: S2Z-exactness doubt; verbatim port is cheaper + certain.)
+function sum_to_zero_s()
+    M = EightSchoolsExample
+    y, se = M.EIGHT_SCHOOLS_Y, M.EIGHT_SCHOOLS_SIGMA
+    @assert length(y) == 8 && length(se) == 8
+    return @slic (; y=y, se=se) begin
+        tau ~ truncated(cauchy, 0.0, 5.0; lower=0.0)
+        ascale = sqrt(25.0 + tau * tau / 8.0)
+        alpha ~ normal(0, ascale)
+        free::vector[7]
+        free ~ s2z_free(tau)
+        effects = s2z_pivot_vec(free)
+        y ~ normal(alpha + effects, se)
+    end
+end
+
+# mvnormal: GLS with KNOWN AR(1) covariance, 4 data-form variants × beta ~
+# N(0,10). The precision-chol variant forms Omega = Lc*Lc' host-side (same
+# IEEE mults either side would do; ~1e-14 vs a direct-triangular path —
+# inside any parity tolerance; the record pins the exact program).
+# (@brm refused: no known-covariance GLS surface.)
+function _mvnormal_s(Sigma, L, Omega, Omegah, form::Symbol)
+    M = MVNormalRegressionExample
+    X, y = M.MVREG_X, M.MVREG_Y
+    k = size(X, 2)
+    @assert length(y) == size(X, 1)
+    base = (; X=X, y=y, k=k)
+    if form === :cov
+        return @slic (; X=X, y=y, k=k, Sigma=Sigma) begin
+            beta::vector[k] ~ normal(0, 10)
+            mu = X * beta
+            y ~ multi_normal(mu, Sigma)
+        end
+    elseif form === :chol
+        return @slic (; X=X, y=y, k=k, L=L) begin
+            beta::vector[k] ~ normal(0, 10)
+            mu = X * beta
+            y ~ multi_normal_cholesky(mu, L)
+        end
+    elseif form === :prec
+        return @slic (; X=X, y=y, k=k, Omega=Omega) begin
+            beta::vector[k] ~ normal(0, 10)
+            mu = X * beta
+            y ~ multi_normal_prec(mu, Omega)
+        end
+    else
+        return @slic (; X=X, y=y, k=k, Omega=Omegah) begin
+            beta::vector[k] ~ normal(0, 10)
+            mu = X * beta
+            y ~ multi_normal_prec(mu, Omega)
         end
     end
 end
-println("SB_SWEEP s/batch1 done -> $OUT")
+mvnormal_cov_s() = _mvnormal_s(MVNormalRegressionExample.MVREG_COVARIANCE,
+    zeros(0, 0), zeros(0, 0), zeros(0, 0), :cov)
+mvnormal_chol_s() = _mvnormal_s(zeros(0, 0),
+    MVNormalRegressionExample.MVREG_CHOL, zeros(0, 0), zeros(0, 0), :chol)
+mvnormal_prec_s() = _mvnormal_s(zeros(0, 0), zeros(0, 0),
+    MVNormalRegressionExample.MVREG_PRECISION, zeros(0, 0), :prec)
+function mvnormal_prec_chol_s()
+    Lc = MVNormalRegressionExample.MVREG_PRECISION_CHOL
+    return _mvnormal_s(zeros(0, 0), zeros(0, 0), zeros(0, 0), Lc * Lc', :prechol)
+end
+
+const _S_BATCH2 = (
+    ("pilots", pilots_s, -3 * log(100),
+        "explicit U[0,100] sa/sb/sy vs implicit-uniform .stan (0)"),
+    ("glmm_poisson", glmm_poisson_s, 0.0, ""),
+    ("sum_to_zero", sum_to_zero_s, 0.0, ""),
+    ("mvnormal_cov", mvnormal_cov_s, 0.0, ""),
+    ("mvnormal_chol", mvnormal_chol_s, 0.0, ""),
+    ("mvnormal_prec", mvnormal_prec_s, 0.0, ""),
+    ("mvnormal_prec_chol", mvnormal_prec_chol_s, 0.0, ""),
+)
+
+for (_label, _cases) in (("s/batch1", _S_BATCH1), ("s/batch2", _S_BATCH2))
+    open(OUT, "a") do io
+        for t in _cases
+            (case, build, offset, reason) = t[1:4]
+            if (case, "zeros") in _DONE && (case, "seeded") in _DONE
+                println("SB_SWEEP skip $case (already recorded)")
+                continue
+            end
+            recs = sweep_scase(io, case, build; offset=offset, offset_reason=reason)
+            for r in recs
+                println("SB_SWEEP case=$(r["case"]) label=$(r["label"]) lp=$(r["lp"]) offset=$(r["offset"])")
+            end
+        end
+    end
+    println("SB_SWEEP $_label done -> $OUT")
+end
