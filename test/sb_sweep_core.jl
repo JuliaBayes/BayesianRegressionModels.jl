@@ -896,16 +896,10 @@ function rate_1_sb()
     return SBBRMI(builder(df); mod=@__MODULE__)
 end
 
-function rate_2_sb()
-    M = Rate2Example
-    df = (; k=[M.RATE2_K1, M.RATE2_K2], n=[M.RATE2_N1, M.RATE2_N2])
-    builder = @brm begin
-        theta1 ~ Beta(1, 1)
-        theta2 ~ Beta(1, 1)
-        k ~ Binomial(n, [theta1, theta2])
-    end
-    return SBBRMI(builder(df); mod=@__MODULE__)
-end
+# rate_2 MOVED to the S driver (trivial @slic port): the vector-of-sampled-
+# params likelihood arg `Binomial(n, [theta1, theta2])` is refused at Stan
+# lifting ("cannot lift to Stan expression ... [theta1, theta2]", core run 5).
+# The joint density (two independent Binomials + Beta priors) ports exactly.
 
 function rate_3_sb()
     M = Rate3Example
@@ -940,7 +934,6 @@ end
 
 const _RATE_CASES = (
     ("rate_1", rate_1_sb, 0.0, ""),
-    ("rate_2", rate_2_sb, 0.0, ""),
     ("rate_3", rate_3_sb, 0.0, ""),
     ("rate_4", rate_4_sb, 0.0, ""),
     ("rate_5", rate_5_sb, 0.0, ""),
