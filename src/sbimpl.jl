@@ -2651,7 +2651,8 @@ end
 """
     SBBRMI(brmi::BRMI; mod=@__MODULE__, cv_groups=Set{Symbol}(),
            centered_groups=Set{Symbol}(), total_groups=:auto,
-           s2z_groups=(), s2z_rho=nothing, held_out=()) -> SBBRMI
+           s2z_groups=(), s2z_rho=nothing, s2z_coordinates=:contrasts,
+           held_out=()) -> SBBRMI
 
 StanBlocks backend: walks `brmi`, emits a `StanBlocks.SlicModel`, and
 materialises the data dict. Pass `mod` if you're constructing the model
@@ -2681,6 +2682,16 @@ blocks with J >= 2, fully matched population design and Flat/Normal
 population priors; anything else errors loudly. Inspect
 [`s2z_effect_blocks`](@ref). S2Z groups are excluded from automatic totals
 and cannot overlap `centered_groups` or `cv_groups`.
+
+`s2z_coordinates=:groups` instead samples J group coordinates per coefficient:
+independent `s_j ~ N(0, tau^(2c_j))` cells with deviations
+`tau * (w - mean(w))`, `w = s ./ tau.^c`. The extra dimension `mean(w)` is an
+independent auxiliary that leaves the posterior unchanged. There `s2z_rho` is
+each group's power-interpolation centeredness `c` (default `0`), and every
+group is one scalar cell for `adaptive_centering_problem`.
+!!! warning "Deprecated"
+    `:groups` is unrequested and unvalidated, kept working only pending
+    further exploration/research; prefer the default `:contrasts`.
 
 `cv_groups` is an opt-in set of grouping-factor names (e.g. `[:subject]`)
 whose per-group random effect should be emitted with **cv-contagious
@@ -3258,7 +3269,8 @@ const _SB_STAN_RESERVED_IDENTIFIERS = Set{Symbol}((
 
 SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
        centered_groups=Set{Symbol}(), total_groups=:auto,
-       s2z_groups=(), s2z_rho=nothing, held_out=(), _frozen_preproc=nothing) = begin
+       s2z_groups=(), s2z_rho=nothing, s2z_coordinates=:contrasts, held_out=(),
+       _frozen_preproc=nothing) = begin
     cv_groups = cv_groups isa Set ? cv_groups : Set{Symbol}(cv_groups)
     centered_groups = centered_groups isa Set ? centered_groups : Set{Symbol}(centered_groups)
     s2z_selected = Set(s2z_groups isa Symbol ? (s2z_groups,) : s2z_groups)
@@ -3325,7 +3337,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
         s2z_groups=s2z_selected)
     data[_SB_TOTAL_PLANS_KEY] = total_plans
     s2z_plans = _sb_plan_s2zs(brmi,prepared,effect_overrides,s2z_selected,s2z_rho;
-                              cv_groups,centered_groups)
+                              cv_groups,centered_groups,coordinates=s2z_coordinates)
     data[_SB_S2Z_PLANS_KEY] = s2z_plans
     for plan in values(total_plans), key in plan.claimed
         delete!(id_buckets,key)
@@ -4263,14 +4275,15 @@ function generative_plan(builder::Function, df;
                          mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
                          centered_groups=Set{Symbol}(),
                          total_groups=:auto, s2z_groups=(), s2z_rho=nothing,
-                         held_out=())
+                         s2z_coordinates=:contrasts, held_out=())
     brmi = Base.invokelatest(builder, df)
     brmi isa BRMI || error(
         "generative_plan: builder returned $(typeof(brmi)); expected a BRMI from `@brm begin ... end`")
     cv_groups = cv_groups isa Set ? cv_groups : Set{Symbol}(cv_groups)
     centered_groups = centered_groups isa Set ? centered_groups : Set{Symbol}(centered_groups)
     _generative_plan(SBBRMI(brmi; mod, cv_groups, centered_groups, total_groups,
-                            s2z_groups, s2z_rho, held_out), builder, cv_groups)
+                            s2z_groups, s2z_rho, s2z_coordinates, held_out),
+                      builder, cv_groups)
 end
 
 function generative_plan(plan::GenerativePlan, new_df;

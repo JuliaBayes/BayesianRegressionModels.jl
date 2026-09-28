@@ -153,11 +153,11 @@ observation information: the whitened projected posterior-vs-prior fraction
 rescale. `infos[j]` is group `j`'s `M x M` expected-information matrix and
 `sd` the `M` prior scales of that draw.
 
-The offline selector aggregates THIS quantity across posterior draws (median
-of within-draw group means) and rescales once at the posterior-median scale
-via [`_s2z_rescale_rho`](@ref): rescaling per draw and then taking the median
-mixes the chart nonlinearity with per-draw scale variation, which is fragile
-when the pilot is approximate (brms precursor pareto_k 1.71 / ESS 1.88).
+The offline selector aggregates THIS quantity per cell across draws (median or
+mean) and rescales once at the aggregated scale via
+[`_s2z_rescale_rho`](@ref). brms instead rescales each draw at its own scale
+and then takes the median, which mixes the nonlinearity of the rescale with
+the draw-to-draw variation of the scale.
 """
 function _s2z_fisher_raw(
         infos::AbstractVector{<:AbstractMatrix{<:Real}}, sd::AbstractVector{<:Real})
@@ -189,10 +189,14 @@ function _s2z_fisher_raw(
     L = cholesky!(Symmetric(Matrix{Float64}(total))).L
     prior_fraction = 1 - inv(J)
     out = Matrix{Float64}(undef, J, M)
-    for j in 1:J, k in 1:M
+    for j in 1:J
+        # One triangular solve per group, shared by all K coefficients
+        # (was: recomputed inside the k loop, O(J*K^4)).
         G = L \ white[j]
-        restricted = white[j][k, k] - dot(view(G, :, k), view(G, :, k))
-        out[j, k] = clamp(1 - restricted / prior_fraction, 0.0, 1.0)
+        for k in 1:M
+            restricted = white[j][k, k] - dot(view(G, :, k), view(G, :, k))
+            out[j, k] = clamp(1 - restricted / prior_fraction, 0.0, 1.0)
+        end
     end
     out
 end

@@ -64,9 +64,10 @@ rev = "c02aa16ab1b08e4f5283597fe678a88e69555cd1"
 
 [sources.WarmupHMC]
 url = "https://github.com/nsiccha/WarmupHMC.jl"
-# 7aed40b (2026-09-15): preserve the active physical position and reject
-# nonfinite centering transports; includes the retained-sampling gradient counter.
-rev = "7aed40b18bd4cdabb75330f285d5c9b355575ab9"
+# 0194dce (2026-09-27, dev): WindowSelectionPlan (WarmupHMC-held evidence) and
+# the custom-reparametrizer controls interface; contains 7aed40b
+# (active-position preservation, nonfinite-transport rejection).
+rev = "0194dce08e986ff17fd5a788bb315c6431b7858e"
 
 [sources.ReactiveKernels]
 url = "https://github.com/nsiccha/ReactiveKernels.jl"
