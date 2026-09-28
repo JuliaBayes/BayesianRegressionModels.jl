@@ -65,13 +65,16 @@ function rate_2_s()
 end
 
 # rate_4: rate + prior-only thetaprior. (@brm refused: SBBRMI demotes the
-# prior-only param to generated quantities; here both stay sampled.)
+# prior-only param to generated quantities.) StanBlocks demotes
+# observation-unreached params in @slic too, so thetaprior rides `0 *` into
+# the likelihood — density- and gradient-exact, keeping both sampled.
 function rate_4_s()
     M = Rate4Example
     return @slic (; k=M.RATE4_K, n=M.RATE4_N) begin
         theta ~ beta(1, 1)
         thetaprior ~ beta(1, 1)
-        k ~ binomial(n, theta)
+        theta_eff = theta + 0 * thetaprior
+        k ~ binomial(n, theta_eff)
     end
 end
 

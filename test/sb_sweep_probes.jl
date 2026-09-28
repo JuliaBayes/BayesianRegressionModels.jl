@@ -135,13 +135,17 @@ function probe_r2()
     return model, [0.6, 0.7], oracle
 end
 
-# R4: R1 + prior-only thetaprior (stays sampled here); probe (0.6, 0.4).
+# R4: R1 + prior-only thetaprior; probe (0.6, 0.4). StanBlocks demotes
+# observation-unreached params to GQ (§34 activity analysis), so thetaprior
+# rides `0 *` into the likelihood: density- and gradient-exact (0*x == 0 for
+# finite x), keeping it a sampled parameter with exactly its Beta terms.
 function probe_r4()
     df = (; k=[6], n=[10])
     model = @slic (; k=df.k, n=df.n) begin
         theta ~ beta(1, 1)
         thetaprior ~ beta(1, 1)
-        k ~ binomial(n, theta)
+        theta_eff = theta + 0 * thetaprior
+        k ~ binomial(n, theta_eff)
     end
     oracle = DL(Beta(1.0, 1.0), 0.6) + DL(Binomial(10, 0.6), 6) +
         log(0.6 * 0.4) + DL(Beta(1.0, 1.0), 0.4) + log(0.4 * 0.6)
