@@ -36,7 +36,8 @@ using DifferentiationInterface: AutoEnzyme
 using Distributions: Beta, Cauchy, Dirichlet, Exponential, Gamma,
                      InverseGaussian, Laplace, LocationScale, LogNormal,
                      MixtureModel, NegativeBinomial,
-                     Normal, Poisson, TDist, Uniform, VonMises, cdf, logcdf,
+                     Normal, Poisson, TDist, Uniform, VonMises, Weibull, cdf,
+                     logcdf,
                      logccdf, logpdf, truncated
 using Enzyme
 using LinearAlgebra: cholesky, Symmetric
@@ -3339,6 +3340,69 @@ end
     b = Vector(nt.mu)
     mm = b[1] .+ b[2] .* ln_cols.x
     ll = sum(logpdf.(LogNormal.(mm, 0.5), ln_cols.z))
+    pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2])
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    _check_parity_gradient(backend, u)
+end
+
+# Weibull twins (pair fam-weibull): tail placement is permanent
+# (the lognormal precedent) — a red mid-file testset would abort
+# the tail, so family twins append here.
+@testset "rk parity weibull sampled shape" begin
+    w_cols = (;
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        y=[0.5, 1.2, 0.8, 2.1, 1.7, 0.3],
+    )
+    brmi = @brm w_cols begin
+        log(mu) ~ 1 + x
+        k ~ LogNormal(0, 0.3)
+        y ~ Weibull(k, mu)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 3
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+        (:sampled, :k, 1, :exp),
+    ]
+    u = [0.2, -0.3, 0.5]
+    nt = constrain(layout, u)
+    b = Vector(nt.mu)
+    th = exp.(b[1] .+ b[2] .* w_cols.x)
+    ll = sum(logpdf.(Weibull.(nt.k, th), w_cols.y))
+    pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2]) +
+        logpdf(LogNormal(0, 0.3), nt.k)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # Jacobian: k's exp (betas ride identity).
+    @test logjac(layout, u) ≈ u[3]
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[3]
+    _check_parity_gradient(backend, u)
+end
+
+@testset "rk parity weibull literal shape" begin
+    w_cols = (;
+        x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
+        y=[0.5, 1.2, 0.8, 2.1, 1.7, 0.3],
+    )
+    brmi = @brm w_cols begin
+        log(mu) ~ 1 + x
+        y ~ Weibull(2.0, mu)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 2
+    @test _layout_signature(layout) == [
+        (:coefficient, :mu_coef, 2, :identity),
+    ]
+    u = [0.2, -0.3]
+    nt = constrain(layout, u)
+    b = Vector(nt.mu)
+    th = exp.(b[1] .+ b[2] .* w_cols.x)
+    ll = sum(logpdf.(Weibull.(2.0, th), w_cols.y))
     pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2])
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr

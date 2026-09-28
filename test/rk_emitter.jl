@@ -735,6 +735,47 @@ end
     @test likelihood.scale === :p
 end
 
+@testset "group-C weibull plan shapes" begin
+    # Sampled shape over a log-link scale predictor (the
+    # SB-established `Weibull(k, theta)` role, pair fam-weibull).
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        k ~ LogNormal(0, 0.3)
+        z ~ Weibull(k, mu)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:weibull, :log)
+    @test likelihood.predictor === :mu
+    @test likelihood.scale === :k
+    @test isnothing(likelihood.scale_predictor)
+    # Literal shape inlines.
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        z ~ Weibull(2.0, mu)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:weibull, :log)
+    @test likelihood.scale == 2.0
+    @test isnothing(likelihood.scale_predictor)
+    # Bare-literal assignment shape folds to a literal; an expression
+    # assignment stays a live name (the thin layer evaluates it).
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        k = 2.0
+        z ~ Weibull(k, mu)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    @test only(plan.responses).scale == 2.0
+    @test isempty(plan.assignments) # folded literal disappears
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        k = 4 / 2
+        z ~ Weibull(k, mu)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test likelihood.scale === :k
+end
+
 @testset "group-C wald plan shapes" begin
     # The demand-battery shape (wald_only.jl): log-link mean +
     # sampled shape over a strictly positive response.
@@ -3086,6 +3127,47 @@ end
         log(r) ~ 1 + x
         p ~ Beta(2, 2)
         c ~ truncated(NegativeBinomial(r, p); lower=0, upper=5)
+    end)
+end
+
+@testset "fail closed: group-C weibull scope edges" begin
+    # Identity-link scale predictor (the triple wants log).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        z ~ Weibull(2.0, mu)
+    end)
+    # Modeled shape: out of slice (term-nuisance owns it).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        log(k) ~ 1 + x
+        z ~ Weibull(k, mu)
+    end)
+    # Data-column shape: out of slice.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        z ~ Weibull(n, mu)
+    end)
+    # Non-positive literal shape.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        z ~ Weibull(0.0, mu)
+    end)
+    # Wrong arity.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        z ~ Weibull(mu)
+    end)
+    # Weights: slice-2 families fail closed (no driving case).
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        k ~ LogNormal(0, 0.3)
+        z ~ weighted(Weibull(k, mu), fweights(n))
+    end)
+    # Truncation: out of slice.
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(mu) ~ 1 + x
+        k ~ LogNormal(0, 0.3)
+        z ~ truncated(Weibull(k, mu); lower=0, upper=5)
     end)
 end
 
