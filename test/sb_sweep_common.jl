@@ -97,6 +97,24 @@ function sweep_record(io::IO, case::AbstractString, sb::BRM.SBBRMI, label, q;
     return rec
 end
 
+# Cases already recorded in OUT (for crash-resume: drivers skip these instead
+# of wiping + re-running everything). Returns Set{Tuple{String,String}} of
+# (case, label); missing/empty file -> empty set.
+function _sweep_done_cases(path::AbstractString)
+    done = Set{Tuple{String,String}}()
+    isfile(path) || return done
+    for line in eachline(path)
+        isempty(strip(line)) && continue
+        rec = try
+            JSON.parse(line)
+        catch
+            continue
+        end
+        push!(done, (String(rec["case"]), String(rec["label"])))
+    end
+    return done
+end
+
 # Emit + record both parity points for one case. `build()` returns the SBBRMI;
 # `dim()` its unconstrained dimension (names come from the compiled model, so
 # build first, then size the points from the evaluated names).
