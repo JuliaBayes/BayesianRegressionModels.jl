@@ -352,7 +352,7 @@ _rk_ast_response_uses_scale(family::Symbol) =
     family === :beta_binomial_logit ||
     family === :student_t || family === :hurdle_poisson ||
     family === :wald || family === :von_mises ||
-    family === :negative_binomial
+    family === :negative_binomial || family === :lognormal
 
 # The scale-slot body spelling inside a bare response statement. A
 # direct scale (outer name, literal, or the plan-forbidden nothing)
@@ -660,6 +660,13 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
             _rk_ast_dotted(:VonMises, predictor, leaf[:scale]) :
             _rk_ast_dotted(:CircularVonMises, predictor, leaf[:scale],
                 interval[1], interval[2])
+    elseif response.family === :lognormal
+        # Single head (thin-layer decision, pair fam-lognormal): the
+        # plan's `LogNormal(mu, sigma)` maps to
+        # `LogNormal.(mu, sigma)` (Distributions `(mu, sigma)`
+        # order); sigma rides the scalar-only scale slot. No fused
+        # head: one spelling either way.
+        _rk_ast_dotted(:LogNormal, predictor, leaf[:scale])
     elseif response.family === :categorical_logit
         # Reference-coded: K−1 non-reference etas, class 1 the implicit
         # zero reference (class order follows predictor order).
@@ -974,14 +981,20 @@ function _rk_ast_plate(name::Symbol, range::Symbol,
     Expr(:macrocall, Symbol("@plate"), LineNumberNode(0), loop)
 end
 
-# `gp_chol_latent(gp_exp_quad_cov(x, sigma, rho, jitter), z)`: arg order
-# is (locations, sigma, rho, jitter) per the thin-layer contract.
+# `gp_chol_latent(gp_exp_quad_cov(x, sigma, rho, jitter), z)` /
+# `gp_chol_latent(gp_periodic_cov(x, sigma, rho, period, jitter), z)`:
+# arg order is (locations, sigma, rho, [period,] jitter) per the
+# thin-layer contract.
 function _rk_ast_gp_latent(term)
     options = term.options
-    Expr(:call, :gp_chol_latent,
+    cov = if options.cov === :periodic
+        Expr(:call, :gp_periodic_cov, only(term.columns),
+            options.sigma, options.rho, options.period, options.jitter)
+    else
         Expr(:call, :gp_exp_quad_cov, only(term.columns),
-            options.sigma, options.rho, options.jitter),
-        options.z)
+            options.sigma, options.rho, options.jitter)
+    end
+    Expr(:call, :gp_chol_latent, cov, options.z)
 end
 
 function _rk_ast_gp_names(plan::_RKStructuralPlan)
