@@ -1471,6 +1471,44 @@ end
     _check_parity_gradient(backend, u)
 end
 
+@stestset "rk parity ZIP zi submodel" begin
+    # Z1 columns (spec brief 1mcop44): the posterior pin below is the
+    # SB number (brief ff47x8), so this entry is the e2e SB-parity
+    # check at the bumped RK pin. Hurdle hu-submodel twin.
+    z_cols = (;
+        x=[0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
+        z=[1.0, 0.5, -0.5, 1.5, 0.0, -1.0],
+        c=[0, 1, 3, 0, 2, 1],
+    )
+    brmi = @brm z_cols begin
+        log(lambda) ~ 1 + x
+        logit(zi) ~ 1 + z
+        c ~ ZeroInflatedPoisson(lambda, zi)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 4
+    @test _layout_signature(layout) == [
+        (:coefficient, :lambda_coef, 2, :identity),
+        (:coefficient, :zi_coef, 2, :identity),
+    ]
+    u = [0.2, -0.1, -0.5, 0.3]
+    nt = constrain(layout, u)
+    bl = Vector(nt.lambda)
+    bz = Vector(nt.zi)
+    lam = exp.(bl[1] .+ bl[2] .* z_cols.x)
+    p = logistic.(bz[1] .+ bz[2] .* z_cols.z)
+    ll = sum(logpdf.(BRM.ZeroInflatedPoisson.(lam, p), z_cols.c))
+    pr = sum(logpdf.(Normal(0, 1), u))
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # All-identity layout: no Jacobian.
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    @test _rk_query(backend, :posterior, u) ≈ -12.817555472510582
+    _check_parity_gradient(backend, u)
+end
+
 @stestset "rk parity negative-binomial sampled p" begin
     nb_cols = (;
         x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
