@@ -1532,6 +1532,44 @@ end
     _check_parity_gradient(backend, u)
 end
 
+@stestset "rk parity negative-binomial modeled p" begin
+    # Pair nuisance-nb1p B1 shape: `log(r) ~ 1+x`, `logit(p) ~ 1+z`
+    # over the term-nuisance probe columns (the hurdle hu-submodel
+    # twin: p rides the scale-predictor slot under `logistic.`).
+    nb_cols = (;
+        x=[0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
+        z=[1.0, 0.5, -0.5, 1.5, 0.0, -1.0],
+        c=[3, 1, 6, 2, 1, 4],
+    )
+    brmi = @brm nb_cols begin
+        log(r) ~ 1 + x
+        logit(p) ~ 1 + z
+        c ~ NegativeBinomial(r, p)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 4
+    @test _layout_signature(layout) == [
+        (:coefficient, :r_coef, 2, :identity),
+        (:coefficient, :p_coef, 2, :identity),
+    ]
+    u = [0.2, -0.1, -0.5, 0.3]
+    nt = constrain(layout, u)
+    b = Vector(nt.r)
+    g = Vector(nt.p)
+    rr = exp.(b[1] .+ b[2] .* nb_cols.x)
+    pp = logistic.(g[1] .+ g[2] .* nb_cols.z)
+    ll = sum(logpdf.(NegativeBinomial.(rr, pp), nb_cols.c))
+    pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2]) +
+        logpdf(Normal(0, 1), g[1]) + logpdf(Normal(0, 1), g[2])
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # All-identity layout: no Jacobian.
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    _check_parity_gradient(backend, u)
+end
+
 @stestset "rk parity wald literal lambda" begin
     w_cols = (;
         x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],

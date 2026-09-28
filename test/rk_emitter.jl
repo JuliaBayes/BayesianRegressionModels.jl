@@ -755,6 +755,18 @@ end
     end
     likelihood = only(BRM._brm_rk_plan(brmi).responses)
     @test likelihood.scale === :p
+    # Modeled p: a `logit(p)` submodel rides the scale-predictor
+    # slot (pair nuisance-nb1p; the hurdle hu-submodel precedent).
+    brmi = @brm df begin
+        log(r) ~ 1 + x
+        logit(p) ~ 1 + x
+        c ~ NegativeBinomial(r, p)
+    end
+    likelihood = only(BRM._brm_rk_plan(brmi).responses)
+    @test (likelihood.family, likelihood.link) === (:negative_binomial, :log)
+    @test likelihood.predictor === :r
+    @test isnothing(likelihood.scale)
+    @test likelihood.scale_predictor === :p
 end
 
 @stestset "group-C weibull plan shapes" begin
@@ -3145,10 +3157,16 @@ end
         r ~ 1 + x
         c ~ NegativeBinomial(r, 0.4)
     end)
-    # Modeled p: out of v1.
+    # Modeled-p submodel must be logit-link (only logit inverts
+    # into (0, 1); pair nuisance-nb1p).
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         log(r) ~ 1 + x
-        logit(p) ~ 1 + x
+        log(p) ~ 1 + x
+        c ~ NegativeBinomial(r, p)
+    end)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        log(r) ~ 1 + x
+        p ~ 1 + x
         c ~ NegativeBinomial(r, p)
     end)
     # Data-column p: out of v1 (the SB-established spelling stays
