@@ -124,6 +124,8 @@ export brm_multinomial, brm_multinomial_lpmf, brm_multinomial_lpmfs, brm_multino
 # exact Distributions.jl functions; `interval_censored` is BRM's formula marker
 # for row-wise interval evidence on either a response or a predictor.
 export truncated, censored, interval_censored
+# Fusion append API (cross-package: the RK reporter resolves this by name).
+export rk_translate_artifact
 # A julianic `@jmodel` body is ordinary Julia, so the distributions it names must
 # be real `Distributions` objects resolved in the AUTHOR's scope. Re-export the
 # ones a model body actually writes so `using BayesianRegressionModels` is the
