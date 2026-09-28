@@ -419,13 +419,17 @@ function _s2z_fisher_draw(plan::S2ZInformationPlan, info::AbstractVector, tau::A
     design = plan.block.design
     J, K = size(plan.block.rho)
     infos = [zeros(K, K) for _ in 1:J]
-    # One scratch outer-product buffer shared by all rows (was: `z * z'`
-    # allocated a K-by-K matrix per row); the accumulation order is unchanged.
-    outer = Matrix{Float64}(undef, K, K)
+    # Rank-1 accumulation without the per-row `z * z'` matrix (a `mul!` scratch
+    # buffer is NOT used: on a row view it falls into an allocating generic
+    # fallback, ~100x worse than the expression it replaced). Element order
+    # matches the original `info[n] .* (z * z')` exactly.
     for n in eachindex(plan.groups)
         z = view(design, n, :)
-        mul!(outer, z, z')
-        infos[plan.groups[n]] .+= info[n] .* outer
+        w = info[n]
+        acc = infos[plan.groups[n]]
+        @inbounds for a in 1:K, b in 1:K
+            acc[a, b] += (z[a] * z[b]) * w
+        end
     end
     _s2z_fisher_candidate(infos, tau)
 end
