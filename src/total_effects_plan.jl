@@ -106,6 +106,31 @@ be passed to `adaptive_centering_problem`; `losses` preserves every grid score.
 """
 function select_total_centeredness(model,draws::AbstractMatrix,names;
         criterion=:position,gradients=nothing,grid=0.:0.1:1.)
+    isempty(total_effect_blocks(model)) && throw(ArgumentError("model has no exact total-coefficient blocks"))
+    _select_scalar_centeredness(_total_centering_cells(model,names),draws,names;
+        criterion,gradients,grid)
+end
+
+# One scalar cell per total (group, coefficient), column-major. Each has a
+# constant location (its prior total), a log-scale coordinate and the compiled
+# frame c = 1. The WarmupHMC wrapper and the pilot selector share this order.
+function _total_centering_cells(model,names)
+    indices,scales,locations = Int[],Int[],Float64[]
+    for block in total_effect_blocks(model)
+        coords = _total_coordinates(model,block,names)
+        mu = block.A*block.location
+        for k in axes(coords.totals,2), g in axes(coords.totals,1)
+            push!(indices,coords.totals[g,k]);push!(scales,coords.scales[k]);push!(locations,mu[k])
+        end
+    end
+    (;indices,scales,locations,targets=ones(length(indices)))
+end
+
+# Pilot scorer shared by every scalar-cell family (totals, S2Z contrasts).
+# A cell compiled at frame `t` maps to candidate `c` by
+# `c*mu + (x - t*mu)*exp((c-t)*ell)`, whose log-Jacobian is `(c-t)*ell`.
+function _select_scalar_centeredness(cells,draws::AbstractMatrix,names;
+        criterion=:position,gradients=nothing,grid=0.:0.1:1.)
     criterion in (:position,:gradient) || throw(ArgumentError("criterion must be :position or :gradient"))
     size(draws,2) == length(names) && size(draws,1) > 2 ||
         throw(DimensionMismatch("expected at least three draws, with one column per model coordinate"))
@@ -116,31 +141,25 @@ function select_total_centeredness(model,draws::AbstractMatrix,names;
     candidates = Float64.(collect(grid))
     !isempty(candidates) && all(c->isfinite(c) && 0<=c<=1,candidates) ||
         throw(ArgumentError("centering grid must contain finite values in [0,1]"))
-    centeredness,indices,losses = Float64[],Int[],Vector{Float64}[]
-    blocks = total_effect_blocks(model)
-    isempty(blocks) && throw(ArgumentError("model has no exact total-coefficient blocks"))
-    for block in blocks
-        coords = _total_coordinates(model,block,names)
-        mu = block.A*block.location
-        for k in axes(coords.totals,2), g in axes(coords.totals,1)
-            index = coords.totals[g,k]
-            ell = view(draws,:,coords.scales[k])
-            physical = view(draws,:,index)
-            scores = map(candidates) do c
-                candidate = c*mu[k] .+ (physical .- mu[k]).*exp.((c-1).*ell)
-                if criterion === :position
-                    log(std(candidate)) + mean((1-c).*ell)
-                else
-                    candidate_gradient = view(gradients,:,index).*exp.((1-c).*ell)
-                    cor(candidate,candidate_gradient)
-                end
+    centeredness,losses = Float64[],Vector{Float64}[]
+    for (index,scale,mu,t) in zip(cells.indices,cells.scales,cells.locations,cells.targets)
+        ell = view(draws,:,scale)
+        physical = view(draws,:,index)
+        scores = map(candidates) do c
+            candidate = c*mu .+ (physical .- t*mu).*exp.((c-t).*ell)
+            if criterion === :position
+                log(std(candidate)) + mean((t-c).*ell)
+            else
+                candidate_gradient = view(gradients,:,index).*exp.((t-c).*ell)
+                cor(candidate,candidate_gradient)
             end
-            all(isfinite,scores) || throw(ArgumentError("pilot gives degenerate/nonfinite centering scores for $(names[index])"))
-            push!(centeredness,candidates[argmin(scores)])
-            push!(indices,index);push!(losses,scores)
         end
+        all(isfinite,scores) || throw(ArgumentError("pilot gives degenerate/nonfinite centering scores for $(names[index])"))
+        push!(centeredness,candidates[argmin(scores)])
+        push!(losses,scores)
     end
-    (;centeredness,indices,grid=candidates,losses=permutedims(hcat(losses...)),criterion)
+    (;centeredness,indices=copy(cells.indices),grid=candidates,
+     losses=permutedims(hcat(losses...)),criterion)
 end
 
 function _sb_total_population_prior(prior)
