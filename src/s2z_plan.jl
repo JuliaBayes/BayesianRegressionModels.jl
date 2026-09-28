@@ -14,6 +14,15 @@
 # J >= 2 levels, fully matched square population design, Flat/Normal
 # population priors (no Student-t mixture yet), fixed scalar or per-coefficient
 # `rho`, no shared `|ID|` buckets, no stratified/cv/centered/totals overlap.
+#
+# `s2z_coordinates=:groups` samples J group coordinates per coefficient instead
+# of the J-1 contrasts: `s_j ~ N(0, tau^(2 c_j))`, `w = s ./ tau.^c` and
+# `delta = tau * (w - mean(w))`. This is Sean's projected per-group map plus one
+# auxiliary dimension along the direction the projection removes: `mean(w)` is
+# an independent N(0, 1/J) that never reaches the likelihood, so the collapsed
+# posterior is unchanged. Every group is then an independent scalar cell, which
+# is what per-group WarmupHMC centering needs. `s2z_rho` holds the per-group
+# power-interpolation centeredness `c` here (0 = noncentered, 1 = centered).
 
 const _SB_S2Z_PLANS_KEY = :__brm_s2z_plans__
 
@@ -38,6 +47,7 @@ struct S2ZEffectBlock
     precision::Vector{Float64}
     rho::Matrix{Float64}
     design::Matrix{Float64}
+    coordinates::Symbol
 end
 
 """Return the S2Z blocks selected during model construction."""
@@ -45,7 +55,9 @@ s2z_effect_blocks(model) = sort!(
     [b.s2z for b in values(model.bindings) if hasproperty(b, :s2z)];
     by=b->String(b.predictor))
 
-function _s2z_resolve_rho(rho, J::Int, K::Int, group::Symbol)
+function _s2z_resolve_rho(rho, J::Int, K::Int, group::Symbol;
+                          coordinates::Symbol=:contrasts)
+    isnothing(rho) && coordinates === :groups && (rho = 0.0)
     isnothing(rho) && throw(ArgumentError(
         "S2Z block `$group`: pass explicit `s2z_rho` (no public default yet); " *
         "a scalar in [0,1], one weight per coefficient, or a J-by-K matrix"))
@@ -64,7 +76,7 @@ function _s2z_resolve_rho(rho, J::Int, K::Int, group::Symbol)
 end
 
 function _sb_s2z_plan(brmi, prepared, predictor, overrides, rho;
-                      cv_groups, centered_groups)
+                      cv_groups, centered_groups, coordinates::Symbol=:contrasts)
     target = predictor.name
     declarations = filter(d -> d.predictor === target, prepared.context.group_declarations)
     isempty(declarations) && return nothing
@@ -140,9 +152,9 @@ function _sb_s2z_plan(brmi, prepared, predictor, overrides, rho;
             isempty(_sb_prior_references(_sb_effect_prior_arg(prior))) ||
                 throw(ArgumentError("symbolic scale prior"))
         end
-        weights = _s2z_resolve_rho(rho, J, K, group)
+        weights = _s2z_resolve_rho(rho, J, K, group; coordinates)
         return (; target, group, columns, design, B, prior_info, scale_priors,
-                absorbed, remaining, weights, Z,
+                absorbed, remaining, weights, Z, coordinates,
                 remaining_priors=all_priors[remaining],
                 indices=first(plans).indices, levels=first(plans).levels)
     catch err
@@ -155,7 +167,9 @@ function _sb_s2z_plan(brmi, prepared, predictor, overrides, rho;
 end
 
 function _sb_plan_s2zs(brmi, prepared, overrides, selection, rho;
-                       cv_groups, centered_groups)
+                       cv_groups, centered_groups, coordinates::Symbol=:contrasts)
+    coordinates in (:contrasts, :groups) || throw(ArgumentError(
+        "s2z_coordinates must be :contrasts or :groups, got $(repr(coordinates))"))
     selection isa Symbol || selection isa Tuple || selection isa AbstractVector ||
         selection isa AbstractSet ||
         throw(ArgumentError("s2z_groups must be a grouping-factor name or a collection (empty disables S2Z)"))
@@ -168,7 +182,7 @@ function _sb_plan_s2zs(brmi, prepared, overrides, selection, rho;
         (isnothing(probe) || isempty(probe)) && continue
         any(p -> p.group in requested, probe) || continue
         plan = _sb_s2z_plan(brmi, prepared, predictor, overrides, rho;
-                            cv_groups, centered_groups)
+                            cv_groups, centered_groups, coordinates)
         isnothing(plan) && continue
         out[predictor.name] = plan
     end
@@ -209,6 +223,32 @@ StanBlocks.@deffun begin
             out[:, c] = tau[c] * (w - rep_vector(mean(w), j))
         end
         out
+    end
+
+    # Group coordinates (`s2z_coordinates=:groups`): `w = s ./ tau.^c` is iid
+    # N(0, 1) under the prior and `delta = tau * (w - mean(w))` has the exact
+    # zero-sum N(0, tau^2 * P) law; `mean(w)` is the auxiliary dimension.
+    brm_s2z_group_deviations(s::matrix[j, m], tau::vector[m],
+                             c::matrix[j, m])::matrix[j, m] = begin
+        out = rep_matrix(0., j, m)
+        w = rep_vector(0., j)
+        for col in 1:m
+            w = s[:, col] .* exp(-c[:, col] * log(tau[col]))
+            out[:, col] = tau[col] * (w - rep_vector(mean(w), j))
+        end
+        out
+    end
+
+    # Independent per-group N(0, tau^(2c)) cells, the J-dimensional standard
+    # normal of `w` pulled back through `s = w .* tau.^c`.
+    @lpxf brm_s2z_group_lpdf(s::matrix[j, m], tau::vector[m],
+                            c::matrix[j, m])::real = begin
+        lp = -0.5 * j * m * 1.8378770664093453
+        for col in 1:m
+            lp += -0.5 * dot_self(s[:, col] .* exp(-c[:, col] * log(tau[col]))) -
+                sum(c[:, col]) * log(tau[col])
+        end
+        lp
     end
 
     brm_s2z_effects(r::matrix[j, m], mu::vector[m])::matrix[j, m] = begin
@@ -300,7 +340,8 @@ end
 
 function _sb_emit_s2z!(stmts, data, target, plan; mod::Module=@__MODULE__)
     suffix = plan.target
-    z, tau = Symbol(:s2z_contrast_, suffix), Symbol(:s2z_scale_, suffix)
+    z = Symbol(plan.coordinates === :groups ? :s2z_level_ : :s2z_contrast_, suffix)
+    tau = Symbol(:s2z_scale_, suffix)
     theta, r = Symbol(:s2z_theta_, suffix), Symbol(:s2z_deviation_, suffix)
     mu, beta = Symbol(:s2z_mean_, suffix), Symbol(:s2z_population_, suffix)
     b = Symbol(:s2z_effect_, suffix)
@@ -325,9 +366,15 @@ function _sb_emit_s2z!(stmts, data, target, plan; mod::Module=@__MODULE__)
         (; levels=plan.levels, rho=copy(plan.weights)), plan.group, true))
     prior = _sb_vector_positive_priors(_brm_total_scales, :tau, plan.scale_priors)
     push!(stmts, :($tau ~ $(prior.model)(; n=$nk)))
-    push!(stmts, :($z::matrix[$jm1, $nk] ~ brm_s2z_contrast($tau, $rhon)))
+    if plan.coordinates === :groups
+        push!(stmts, :($z::matrix[$ng, $nk] ~ brm_s2z_group($tau, $rhon)))
+    else
+        push!(stmts, :($z::matrix[$jm1, $nk] ~ brm_s2z_contrast($tau, $rhon)))
+    end
     push!(stmts, :($theta::vector[$np] ~ brm_s2z_theta($tau, $bn, $loc, $prec, $ng)))
-    push!(stmts, :($r = brm_s2z_deviations($z, $tau, $rhon)))
+    push!(stmts, plan.coordinates === :groups ?
+        :($r = brm_s2z_group_deviations($z, $tau, $rhon)) :
+        :($r = brm_s2z_deviations($z, $tau, $rhon)))
     push!(stmts, :($mu = brm_s2z_recover_rng($theta, $tau, $bn, $loc, $prec, $ng)))
     push!(stmts, :($beta = $theta - $bn * $mu))
     push!(stmts, :($b = brm_s2z_effects($r, $mu)))
@@ -360,7 +407,8 @@ function _sb_emit_s2z!(stmts, data, target, plan; mod::Module=@__MODULE__)
     block = S2ZEffectBlock(plan.target, plan.group, z, Symbol(tau, :_tau), theta, r, mu, b,
         idx, ng, Tuple(c.label for c in plan.columns),
         Tuple(plan.design.columns[c].label for c in plan.absorbed),
-        plan.B, copy(data[loc]), copy(data[prec]), copy(plan.weights), copy(plan.Z))
+        plan.B, copy(data[loc]), copy(data[prec]), copy(plan.weights), copy(plan.Z),
+        plan.coordinates)
     data[_SB_BINDINGS_KEY][z] = (; role=:s2z_effect, logical=plan.target,
         family=:brm_s2z, s2z=block)
     data[_SB_BINDINGS_KEY][theta] = (; role=:population_effect, logical=plan.target,
@@ -377,15 +425,16 @@ function _s2z_coordinates(model, block, names)
     end
     J = model.data[block.group_count]
     K = length(block.columns)
-    contrasts = [lookup("$(block.binding).$r.$k") for r in 1:J-1, k in 1:K]
+    # One row per free contrast, or per group for `s2z_coordinates=:groups`.
+    rows = block.coordinates === :groups ? J : J - 1
+    contrasts = [lookup("$(block.binding).$r.$k") for r in 1:rows, k in 1:K]
     theta = [lookup("$(block.population).$p") for p in 1:length(block.population_columns)]
     scales = [lookup("$(block.scales).$k") for k in 1:K]
     (; contrasts, theta, scales)
 end
 
 function _s2z_conditional(block, coordinates, draw)
-    J = size(coordinates.contrasts, 1) + 1
-    K = size(coordinates.contrasts, 2)
+    J, K = size(block.rho)
     tau = exp.(draw[coordinates.scales])
     theta = draw[coordinates.theta]
     prior_var = tau .^ 2 ./ J
@@ -403,6 +452,15 @@ function _s2z_conditional(block, coordinates, draw)
     (; mean, factor, gain, B1, prior_var, sd=tau, theta)
 end
 
+# Zero-sum deviations of coefficient `k` from its sampled coordinates: Sean's
+# partial map over Helmert contrasts, or the centered group coordinates.
+function _s2z_block_deviations(block, values, tau, k)
+    block.coordinates === :groups || return _s2z_partial_forward(
+        _s2z_helmert_mul(values), tau, view(block.rho, :, k))
+    w = values .* exp.(-view(block.rho, :, k) .* log(tau))
+    tau .* (w .- sum(w) / length(w))
+end
+
 """
     recover_s2z_draws(model, draws, unc_names; rng=Random.default_rng())
 
@@ -418,8 +476,7 @@ function recover_s2z_draws(model, draws::AbstractMatrix, names;
     out = Dict{Symbol,NamedTuple}()
     for block in s2z_effect_blocks(model)
         coordinates = _s2z_coordinates(model, block, names)
-        n, J, K = size(draws, 1), size(coordinates.contrasts, 1) + 1,
-        size(coordinates.contrasts, 2)
+        n, (J, K) = size(draws, 1), size(block.rho)
         P = length(block.population_columns)
         population = Matrix{Float64}(undef, n, P)
         means = Matrix{Float64}(undef, n, K)
@@ -429,10 +486,9 @@ function recover_s2z_draws(model, draws::AbstractMatrix, names;
             row = view(draws, i, :)
             conditional = _s2z_conditional(block, coordinates, row)
             tau = conditional.sd
-            rho = block.rho
             for k in 1:K
-                u = _s2z_helmert_mul(Vector{Float64}(row[coordinates.contrasts[:, k]]))
-                deviations[i, :, k] = _s2z_partial_forward(u, tau[k], rho[:, k])
+                deviations[i, :, k] = _s2z_block_deviations(block,
+                    Vector{Float64}(row[coordinates.contrasts[:, k]]), tau[k], k)
             end
             m = if hasproperty(conditional, :gain)
                 cov = Diagonal(conditional.prior_var) -
