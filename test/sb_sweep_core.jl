@@ -911,16 +911,12 @@ function rate_3_sb()
     return SBBRMI(builder(df); mod=@__MODULE__)
 end
 
-function rate_4_sb()
-    M = Rate4Example
-    df = (; k=M.RATE4_K, n=M.RATE4_N)
-    builder = @brm begin
-        theta ~ Beta(1, 1)
-        thetaprior ~ Beta(1, 1)
-        k ~ Binomial(n, theta)
-    end
-    return SBBRMI(builder(df); mod=@__MODULE__)
-end
+# rate_4 MOVED to the S driver (trivial @slic port): SBBRMI demotes the
+# prior-only `thetaprior` to generated quantities (`beta_rng` — no density,
+# not a sampler param), so the @brm counterpart cannot represent the RK
+# model's 2-parameter density. The 2 banked rate_4 records are VOID
+# (wrong model) and removed from the scratch file. The @slic port declares
+# both params exactly.
 
 function rate_5_sb()
     M = Rate5Example
@@ -935,7 +931,6 @@ end
 const _RATE_CASES = (
     ("rate_1", rate_1_sb, 0.0, ""),
     ("rate_3", rate_3_sb, 0.0, ""),
-    ("rate_4", rate_4_sb, 0.0, ""),
     ("rate_5", rate_5_sb, 0.0, ""),
 )
 
