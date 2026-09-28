@@ -64,18 +64,22 @@ rev = "c02aa16ab1b08e4f5283597fe678a88e69555cd1"
 
 [sources.WarmupHMC]
 url = "https://github.com/nsiccha/WarmupHMC.jl"
-# 7aed40b (2026-09-15): preserve the active physical position and reject
-# nonfinite centering transports; includes the retained-sampling gradient counter.
-rev = "7aed40b18bd4cdabb75330f285d5c9b355575ab9"
+# 0194dce (2026-09-27, dev): WindowSelectionPlan (WarmupHMC-held evidence) and
+# the custom-reparametrizer controls interface; contains 7aed40b
+# (active-position preservation, nonfinite-transport rejection).
+rev = "0194dce08e986ff17fd5a788bb315c6431b7858e"
 
 [sources.ReactiveKernels]
 url = "https://github.com/nsiccha/ReactiveKernels.jl"
-# 0f08695c (2026-09-27, main): the 99d278db stack (3c419bde +
-# fam-weibull response slice + nuisance-nu modeled-StudentT-nu slice)
-# plus nuisance-zi (predictor-fed ZIP zi, 40544576 reviewed). Pinned
-# AT the zi merge: later slices (dar-stan, nuisance-nb1p/precision,
-# matrix-b-v2) re-pin their own corpus.
+# 908349ff (2026-09-27, main): the 6cf678f stack plus
+# nuisance-nu-v2, nuisance-zi, the intercept1-logno K=1 sd-geometry
+# SB mirror, bernoulli-int-la, nuisance-kappa-v2, fam-weibull
+# (Weibull response + W1 SB pins), nuisance-precision-v2,
+# kernel-matrix-b-v2 (bare-rate locations, StudentT evidence,
+# complement-pair mixture weights, occupancy vocab), and
+# term-dar-stan (dar Stan-convention priors: :interval_stan beta +
+# :positive_stan sigma, surface spellings unchanged).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "0f08695c12cfec85cbc2d318400af5f9b97d4c43"
+rev = "908349ffcba76fb663abdad1c14e37420ffa21d7"
