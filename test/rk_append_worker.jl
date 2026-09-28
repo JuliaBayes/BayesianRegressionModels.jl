@@ -227,6 +227,15 @@ function _worker_pins()
             info = get(deps, uuid, nothing)
             info === nothing && continue
             rev = info.git_revision
+            if rev === nothing && hasproperty(info, :source)
+                # Path/dev deps (the .bootstrap RK checkout) carry no
+                # git_revision; resolve the clone's HEAD directly.
+                try
+                    rev = readchomp(`git -C $(info.source) rev-parse HEAD`)
+                catch
+                    rev = nothing
+                end
+            end
             pins[name] = rev === nothing ? "v$(info.version)" : string(rev)
         end
         pins["julia"] = string(VERSION)
