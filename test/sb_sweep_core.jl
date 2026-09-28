@@ -250,8 +250,11 @@ const _RADON_CASES = (
 
 function _run_batch(cases)
     open(OUT, "a") do io
-        for (case, build, offset, reason) in cases
-            recs = sweep_case(io, case, build; offset=offset, offset_reason=reason)
+        for t in cases
+            (case, build, offset, reason) = t[1:4]
+            seeded = length(t) >= 5 ? t[5] : nothing
+            recs = sweep_case(io, case, build; offset=offset, offset_reason=reason,
+                seeded_q=seeded)
             for r in recs
                 println("SB_SWEEP case=$(r["case"]) label=$(r["label"]) lp=$(r["lp"]) offset=$(r["offset"])")
             end
@@ -834,7 +837,11 @@ end
 
 const _DOGS_CASES = (
     ("dogs", dogs_sb, 0.0, ""),
-    ("dogs_log", dogs_log_sb, 0.0, ""),
+    # Seeded point hand-placed interior ([na, ns] order): the coefficients
+    # are declared unbounded with Uniform bounds enforced by a rejecting
+    # _lpdf, so a generic 0.25*randn draw lands outside [-100,0]x[0,100]
+    # 75% of the time (-Inf lp). [-1, 1] is safely interior.
+    ("dogs_log", dogs_log_sb, 0.0, "", [-1.0, 1.0]),
 )
 
 _run_batch(_DOGS_CASES)

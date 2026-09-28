@@ -37,7 +37,9 @@ const _SWEEP_CACHE = joinpath(tempdir(), "brm-sb-sweep")
 # q1 = zeros(d) (always valid unconstrained), q2 = seeded randn (generic).
 function sweep_points(case::AbstractString, d::Int)
     q1 = zeros(d)
-    rng = Xoshiro(hash(String(case)))
+    # Explicit zero hash seed: bare hash() is per-process random, which would
+    # make the seeded point unreproducible across runs.
+    rng = Xoshiro(hash(String(case), UInt(0)))
     q2 = 0.25 .* randn(rng, d)
     return ("zeros" => q1, "seeded" => q2)
 end
@@ -79,6 +81,8 @@ end
 function sweep_record(io::IO, case::AbstractString, sb::BRM.SBBRMI, label, q;
         offset::Float64=0.0, offset_reason::String="")
     ev = sweep_eval(sb, q; case=case)
+    @assert isfinite(ev.lp) "non-finite lp for $case/$label at q=$q " *
+        "(names=$(ev.names)): parity point outside model support?"
     rec = Dict(
         "case" => String(case), "label" => String(label),
         "brm_tip" => _brm_tip(), "stan_sha" => ev.stan_sha,
@@ -97,7 +101,8 @@ end
 # `dim()` its unconstrained dimension (names come from the compiled model, so
 # build first, then size the points from the evaluated names).
 function sweep_case(io::IO, case::AbstractString, build::Function;
-        offset::Float64=0.0, offset_reason::String="")
+        offset::Float64=0.0, offset_reason::String="",
+        seeded_q::Union{Nothing,AbstractVector}=nothing)
     sb = build()
     code = BRM.stan_code(sb)
     mkpath(_SWEEP_CACHE)
@@ -105,8 +110,17 @@ function sweep_case(io::IO, case::AbstractString, build::Function;
     isfile(path) || write(path, code)
     problem = Base.invokelatest(StanBlocks.stan_instantiate, sb.model; path=path)
     names = BS.param_unc_names(problem.model)
+    # Optional explicit seeded point (in stan_names order) for cases whose
+    # support rejects the generic draw (e.g. unbounded-declared params with
+    # bound-enforcing priors). The published q is the convention of record.
+    pts = collect(sweep_points(case, length(names)))
+    if !isnothing(seeded_q)
+        @assert length(seeded_q) == length(names) "seeded_q length " *
+            "$(length(seeded_q)) != $(length(names)) for $case"
+        pts[2] = ("seeded" => Vector{Float64}(seeded_q))
+    end
     recs = []
-    for (label, q) in sweep_points(case, length(names))
+    for (label, q) in pts
         push!(recs, sweep_record(io, case, sb, label, q;
             offset=offset, offset_reason=offset_reason))
     end
