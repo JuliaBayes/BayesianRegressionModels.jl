@@ -857,7 +857,7 @@ function eight_schools_sb()
     builder = @brm begin
         mu ~ 1 + (1 | es | school)
         effect(mu, Intercept) ~ Normal(0, 5)
-        sd(:, es) ~ truncated(Cauchy(0, 5), 0.0, Inf)
+        sd(:, es) ~ truncated(Cauchy(0, 5); lower=0.0)
         y ~ Normal(mu, se)
     end
     return SBBRMI(builder(df); mod=@__MODULE__, centered_groups=[:school])
@@ -955,7 +955,7 @@ function linear_regression_sb()
     M = LinearRegressionExample
     df = (; y=M.LINREG_Y, x=vec(M.LINREG_X))
     builder = @brm begin
-        sigma ~ truncated(Normal(0, 5), 0.0, Inf)
+        sigma ~ truncated(Normal(0, 5); lower=0.0)
         mu ~ 1 + x
         effect(mu, Intercept) ~ Normal(0, 10)
         effect(mu, x) ~ Normal(0, 10)
@@ -973,7 +973,7 @@ function bound_regression_sb()
     Z = (X .- cm') ./ csd'
     df = (; y=M.BOUND_Y, z1=Z[:, 1], z2=Z[:, 2])
     builder = @brm begin
-        sigma ~ truncated(Normal(0, 5), 0.0, Inf)
+        sigma ~ truncated(Normal(0, 5); lower=0.0)
         mu ~ 1 + z1 + z2
         effect(mu, Intercept) ~ Normal(0, 10)
         effect(mu, z1) ~ Normal(0, 5)
@@ -1077,7 +1077,7 @@ function diamonds_sb()
     builder = @brm begin
         # Normalized half-t: Stan `T[0,]` adds +log(2), matching the RK
         # model's explicit `log(2) + student_t(3,0,10).logpdf(sigma)`.
-        sigma ~ truncated(LocationScale(0, 10, TDist(3)), 0.0, Inf)
+        sigma ~ truncated(LocationScale(0, 10, TDist(3)); lower=0.0)
         mu ~ 1 + x1 + x2 + x3 + x4 + x5 + x6 + x7 + x8 + x9 + x10 +
             x11 + x12 + x13 + x14 + x15 + x16 + x17 + x18 + x19 + x20 +
             x21 + x22 + x23 + x24
