@@ -243,10 +243,11 @@ function resolve_sb_map(sb_map::AbstractVector, rk_names::AbstractVector,
             "mapped twice")
         haskey(rk_pos, rk_name) || error(
             "SB numbers: case `$(case_id)`: RK name `$(rk_name)` " *
-            "matches no layout coordinate")
+            "matches no layout coordinate (have [$(join(rk_names, ", "))])")
         haskey(stan_pos, stan_name) || error(
             "SB numbers: case `$(case_id)`: Stan name `$(stan_name)` " *
-            "matches no unconstrained parameter")
+            "matches no unconstrained parameter " *
+            "(have [$(join(stan_names, ", "))])")
         push!(seen_rk, rk_name)
         push!(seen_stan, stan_name)
         perm[stan_pos[stan_name]] = rk_pos[rk_name]
