@@ -1511,6 +1511,44 @@ end
     _check_parity_gradient(backend, u)
 end
 
+@testset "rk parity beta-binomial modeled precision" begin
+    # P3 (pair nuisance-precision, spec 1mcop44): logit-link mean +
+    # log-link precision submodel over column trials; default
+    # Normal(0, 1) popefs priors.
+    bb_cols = (;
+        x=[0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
+        z=[1.0, 0.5, -0.5, 1.5, 0.0, -1.0],
+        n=[8, 6, 10, 5, 4, 9],
+        c=[3, 1, 6, 2, 1, 4],
+    )
+    brmi = @brm bb_cols begin
+        logit(mean) ~ 1 + x
+        log(precision) ~ 1 + z
+        c ~ BetaBinomial2(n, mean, precision)
+    end
+    backend = BRM.RKBRMI(brmi)
+    layout = backend.model.layout
+    @test layout.total == 4
+    @test _layout_signature(layout) == [
+        (:coefficient, :mean_coef, 2, :identity),
+        (:coefficient, :precision_coef, 2, :identity),
+    ]
+    u = [0.2, -0.1, 1.0, 0.15]
+    nt = constrain(layout, u)
+    bm = Vector(nt.mean)
+    bp = Vector(nt.precision)
+    mu = logistic.(bm[1] .+ bm[2] .* bb_cols.x)
+    phi = exp.(bp[1] .+ bp[2] .* bb_cols.z)
+    ll = sum(logpdf.(BetaBinomial2.(bb_cols.n, mu, phi), bb_cols.c))
+    pr = sum(logpdf(Normal(0, 1), ui) for ui in u)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # All-identity layout: no Jacobian.
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    _check_parity_gradient(backend, u)
+end
+
 @testset "rk parity kernel Ex1 pk1cmt" begin
     brmi = @brm _kernel_pk1cmt_cols begin
         sigma ~ Exponential(1)
