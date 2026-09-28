@@ -7126,6 +7126,130 @@ function _rk_emit_ast(plan::_RKKernelPlan)
     _RKEmittedProgram(Expr[], Expr(:block, stmts...))
 end
 
+# Varying-source twin raw-data bridge. The twin (`varyingsource3_brm`,
+# Bruno `web-pkpd/src/brm_varyingsource.jl`) binds SBBRMI over PRECOMPUTED
+# per-subject design arrays (`treatment_map`, `pk_unique_dts`, `conc_idxs`,
+# ...); the native RK schedule rebuilds all grids from RAW columns at bind
+# time, so those design products must never cross (`_vs_subject_design` is
+# the SB-side recipe; the RK-side recipe is the peer's
+# `build_varyingsource_pkpd_schedule`). The raw times/lags never enter the
+# twin's data container, so they travel as an explicit bundle built HERE
+# from the same reference `stan_data` dict the twin is derived from
+# (`Bruno.prepare_pkpd_stan_data` output): obs/dose times, the combined
+# treatment-diet key, the cumulative discretization lags, and the placebo
+# window. The planner cross-validates the bundle against the BRMI-bound
+# twin data (axis lengths, subject ranges) and merges it into the plan's
+# bind columns; the emitted schedule decl references the merged columns.
+"""
+    rk_varyingsource_raw(stan_data) -> NamedTuple
+
+Build the raw-column bundle the native varying-source schedule binds
+from (`obs_time`, `dose_time`, `dose_treatment`, `discretization`,
+`placebo_lo`, `placebo_hi`). `stan_data` is the reference dict the twin
+is derived from (keys `:subject`, `:ts`, `:assay`, `:dosing_subject`,
+`:dosing_times`, `:doses`, `:treatment`, `:dosing_diet`,
+`:discretization_times`, `:placebo_lo_time`, `:placebo_hi_time`).
+
+Validates the twin's own ordering invariants (observation subjects in
+first-appearance `1:n` order, dosing rows sorted by subject, vessel
+codes `1:5`, diet codes `1:4`) plus the native recipe's preconditions
+(contiguous subjects, per-subject nondecreasing dose times, finite
+positive amounts, assay codes `1:3`, nonnegative nondecreasing lags,
+`lo < hi`). The treatment key is `treatment + 100*diet` (the twin's
+`_vs_treatment_map` combination; the native recipe renumbers per
+subject by first appearance).
+"""
+function rk_varyingsource_raw(stan_data::AbstractDict)
+    prefix = "RK backend"
+    required = (:subject, :ts, :assay, :dosing_subject, :dosing_times,
+        :doses, :treatment, :dosing_diet, :discretization_times,
+        :placebo_lo_time, :placebo_hi_time)
+    missing_keys = [k for k in required if !haskey(stan_data, k)]
+    isempty(missing_keys) || error(
+        "$prefix: varying-source raw bundle is missing stan_data key(s) " *
+        "$(join(missing_keys, ", "))")
+    subject = stan_data[:subject]
+    ts = stan_data[:ts]
+    assay = stan_data[:assay]
+    dosing_subject = stan_data[:dosing_subject]
+    dosing_times = stan_data[:dosing_times]
+    doses = stan_data[:doses]
+    treatment = stan_data[:treatment]
+    dosing_diet = stan_data[:dosing_diet]
+    discretization = stan_data[:discretization_times]
+    length(subject) == length(ts) == length(assay) || error(
+        "$prefix: varying-source observation columns `:subject`/`:ts`/" *
+        "`:assay` disagree on lengths " *
+        "($(length(subject))/$(length(ts))/$(length(assay)))")
+    length(dosing_subject) == length(dosing_times) == length(doses) ==
+        length(treatment) == length(dosing_diet) || error(
+        "$prefix: varying-source dose columns `:dosing_subject`/" *
+        "`:dosing_times`/`:doses`/`:treatment`/`:dosing_diet` disagree " *
+        "on lengths ($(length(dosing_subject))/$(length(dosing_times))/" *
+        "$(length(doses))/$(length(treatment))/$(length(dosing_diet)))")
+    isempty(subject) && error(
+        "$prefix: varying-source raw bundle needs at least one observation")
+    for (label, ids) in (("observation", subject), ("dose", dosing_subject))
+        all(x -> x isa Real && isfinite(x) && isinteger(x) && x > 0, ids) ||
+            error("$prefix: varying-source $label subject IDs must be " *
+                  "positive integers")
+    end
+    subjects = Int.(subject)
+    dsubjects = Int.(dosing_subject)
+    n_subjects = maximum(subjects)
+    # First-appearance order 1:n (the twin's own precondition:
+    # varyingsource3 conflates grouping order and subject id otherwise).
+    seen = Int[]
+    for s in subjects
+        s in seen || push!(seen, s)
+    end
+    seen == collect(1:n_subjects) || error(
+        "$prefix: varying-source observation subjects must first appear " *
+        "in order 1:$n_subjects")
+    issorted(dsubjects) || error(
+        "$prefix: varying-source dosing rows must be sorted by subject")
+    all(s -> 1 <= s <= n_subjects, dsubjects) || error(
+        "$prefix: varying-source dosing rows must refer to observed " *
+        "subjects 1:$n_subjects")
+    for (label, times) in (("observation", ts), ("dose", dosing_times))
+        all(x -> x isa Real && isfinite(x), times) || error(
+            "$prefix: varying-source $label times must be finite")
+    end
+    times = Float64.(ts)
+    dtimes = Float64.(dosing_times)
+    for s in 1:n_subjects
+        ds = dtimes[dsubjects .== s]
+        issorted(ds) || error(
+            "$prefix: varying-source dose times must be nondecreasing " *
+            "within subject $s")
+    end
+    all(x -> x isa Real && isfinite(x) && isinteger(x) && 1 <= x <= 3,
+        assay) || error(
+        "$prefix: varying-source assay codes must be integers in 1:3")
+    all(x -> x isa Real && isfinite(x) && x > 0, doses) || error(
+        "$prefix: varying-source dose amounts must be finite and positive")
+    all(x -> x isa Real && isfinite(x) && isinteger(x) && 1 <= x <= 5,
+        treatment) || error(
+        "$prefix: varying-source vessel codes must be integers in 1:5")
+    all(x -> x isa Real && isfinite(x) && isinteger(x) && 1 <= x <= 4,
+        dosing_diet) || error(
+        "$prefix: varying-source diet codes must be integers in 1:4")
+    all(x -> x isa Real && isfinite(x) && x >= 0, discretization) &&
+        issorted(Float64.(discretization)) || error(
+        "$prefix: varying-source discretization lags must be finite, " *
+        "nonnegative and nondecreasing")
+    lo = stan_data[:placebo_lo_time]
+    hi = stan_data[:placebo_hi_time]
+    (lo isa Real && hi isa Real && isfinite(lo) && isfinite(hi) &&
+        lo < hi) || error(
+        "$prefix: varying-source placebo window `:placebo_lo_time` < " *
+        "`:placebo_hi_time` must be finite with lo < hi")
+    (; obs_time=times, dose_time=dtimes,
+     dose_treatment=Int.(treatment) .+ 100 .* Int.(dosing_diet),
+     discretization=Float64.(discretization),
+     placebo_lo=Float64(lo), placebo_hi=Float64(hi))
+end
+
 # A modeled ordinal scale feeds nothing else: a discrimination
 # predictor that also fills a location, scale/shape, or categorical-logit
 # tail slot would need two links at once (the scale is `log` by

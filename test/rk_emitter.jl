@@ -5660,3 +5660,64 @@ end
             y ~ Normal(mu, s)
         end)
 end
+
+@stestset "varyingsource raw-data bridge" begin
+    # The native schedule rebuilds every grid from RAW columns; the twin's
+    # precomputed design arrays never cross. `rk_varyingsource_raw` builds
+    # the raw bundle from the reference stan_data dict (validating the
+    # twin's ordering invariants + the native recipe's preconditions).
+    stan = Dict{Symbol,Any}(
+        :subject => [1, 1, 2, 2],
+        :ts => [0.0, 4.0, 0.0, 8.0],
+        :assay => [1, 2, 1, 3],
+        :dosing_subject => [1, 2, 2],
+        :dosing_times => [0.0, 0.0, 4.0],
+        :doses => [50.0, 50.0, 20.0],
+        :treatment => [1, 2, 4],
+        :dosing_diet => [1, 2, 3],
+        :discretization_times => [1.0, 2.0, 4.0],
+        :placebo_lo_time => 0.0,
+        :placebo_hi_time => 24.0,
+    )
+    raw = rk_varyingsource_raw(stan)
+    @test raw.obs_time == [0.0, 4.0, 0.0, 8.0]
+    @test raw.dose_time == [0.0, 0.0, 4.0]
+    @test raw.dose_treatment == [101, 202, 304]
+    @test raw.discretization == [1.0, 2.0, 4.0]
+    @test raw.placebo_lo == 0.0 && raw.placebo_hi == 24.0
+    @test eltype(raw.obs_time) === Float64
+    @test eltype(raw.dose_treatment) === Int
+    tweak(key, value) = merge(stan, Dict(key => value))
+    drop(key) = Dict(k => v for (k, v) in stan if k !== key)
+    @test_throws "missing stan_data key(s)" rk_varyingsource_raw(drop(:doses))
+    @test_throws "disagree on lengths" rk_varyingsource_raw(
+        tweak(:ts, [0.0, 4.0, 0.0]))
+    @test_throws "disagree on lengths" rk_varyingsource_raw(
+        tweak(:doses, [50.0, 50.0]))
+    @test_throws "at least one observation" rk_varyingsource_raw(merge(stan,
+        Dict(:subject => Int[], :ts => Float64[], :assay => Int[])))
+    @test_throws "must be positive integers" rk_varyingsource_raw(
+        tweak(:subject, [0, 0, 2, 2]))
+    @test_throws "must first appear in order" rk_varyingsource_raw(
+        tweak(:subject, [2, 2, 1, 1]))
+    @test_throws "must be sorted by subject" rk_varyingsource_raw(
+        tweak(:dosing_subject, [2, 1, 2]))
+    @test_throws "must refer to observed subjects" rk_varyingsource_raw(
+        tweak(:dosing_subject, [1, 2, 3]))
+    @test_throws "times must be finite" rk_varyingsource_raw(
+        tweak(:ts, [0.0, 4.0, 0.0, Inf]))
+    @test_throws "must be nondecreasing within subject" rk_varyingsource_raw(
+        tweak(:dosing_times, [0.0, 4.0, 0.0]))
+    @test_throws "assay codes must be integers in 1:3" rk_varyingsource_raw(
+        tweak(:assay, [1, 2, 1, 4]))
+    @test_throws "must be finite and positive" rk_varyingsource_raw(
+        tweak(:doses, [50.0, 50.0, 0.0]))
+    @test_throws "vessel codes must be integers in 1:5" rk_varyingsource_raw(
+        tweak(:treatment, [1, 2, 6]))
+    @test_throws "diet codes must be integers in 1:4" rk_varyingsource_raw(
+        tweak(:dosing_diet, [1, 2, 5]))
+    @test_throws "discretization lags must be" rk_varyingsource_raw(
+        tweak(:discretization_times, [2.0, 1.0, 4.0]))
+    @test_throws "must be finite with lo < hi" rk_varyingsource_raw(
+        tweak(:placebo_hi_time, 0.0))
+end
