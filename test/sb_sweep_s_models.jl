@@ -1219,3 +1219,339 @@ function bym2_s()
     end
 end
 
+# Batch 7: time series + actuarial + occupancy + renewal + MNIST.
+#
+# Recurrence/marginal families (the scan/recurrence bodies are plain-Stan
+# loops inside @deffun — @slic model bodies admit no `for`; @deffun ranges
+# must ASCEND, hence the index-arithmetic buffer shift in covid_edmat).
+# (@brm refused throughout: recurrences, augmentation marginals, renewal
+# scans, reference-logit multinomials.)
+@deffun begin
+    # ARMA(1,1): exact error recursion from the fixed (mu, 0) seed.
+    @lpxf arma11_lpdf(y::vector[T], mu::real, phi::real, theta::real, sigma::real)::real = begin
+        acc = 0.0
+        y_prev = mu
+        err_prev = 0.0
+        for t in 1:T
+            nu = mu + phi * y_prev + theta * err_prev
+            e = y[t] - nu
+            acc += normal_lpdf(e, 0.0, sigma)
+            y_prev = y[t]
+            err_prev = e
+        end
+        acc
+    end
+    arma11_lpdfs(y::vector[T], mu::real, phi::real, theta::real, sigma::real)::real =
+        arma11_lpdf(y, mu, phi, theta, sigma)
+    arma11_rng(vector[T], mu::real, phi::real, theta::real, sigma::real)::vector[T] = begin
+        out::vector[T]
+        y_prev = mu
+        err_prev = 0.0
+        for t in 1:T
+            nu = mu + phi * y_prev + theta * err_prev
+            e = normal_rng(0.0, sigma)
+            out[t] = nu + e
+            y_prev = out[t]
+            err_prev = e
+        end
+        out
+    end
+    # GARCH(1,1) conditional-sd path (explicit squares — no `^` in @deffun).
+    garch_sigma(y::vector[T], sigma1::real, mu::real, alpha0::real, alpha1::real, beta1::real)::vector[T] = begin
+        out::vector[T]
+        out[1] = sigma1
+        sprev = sigma1
+        for t in 2:T
+            dm = y[t - 1] - mu
+            st = sqrt(alpha0 + alpha1 * dm * dm + beta1 * sprev * sprev)
+            out[t] = st
+            sprev = st
+        end
+        out
+    end
+    # SiS-lob growth curve, both closed forms live behind the data flag.
+    loss_gf(t_value::vector[T], omega::real, theta::real, gid::int)::vector[T] = begin
+        out::vector[T]
+        for i in 1:T
+            t = t_value[i]
+            if (gid == 1)
+                out[i] = 1.0 - exp(-((t / theta)^omega))
+            else
+                out[i] = exp(-log1p_exp(omega * log(theta / t)))
+            end
+        end
+        out
+    end
+    loss_lm(LR::vector[C], gf::vector[T], prem::vector[D], cohort_id::int[D], t_idx::int[D])::vector[D] = begin
+        out::vector[D]
+        for i in 1:D
+            out[i] = LR[cohort_id[i]] * prem[i] * gf[t_idx[i]]
+        end
+        out
+    end
+    # Multi-occupancy: the (rho+1)/2 ~ Beta(2,2) density on a [-1,1] param
+    # (kwargs bounds compose with custom families).
+    @lpxf rho_beta2_lpdf(rho::real)::real = beta_lpdf((rho + 1.0) / 2.0, 2.0, 2.0)
+    rho_beta2_lpdfs(rho::real)::real = rho_beta2_lpdf(rho)
+    rho_beta2_rng()::real = 2.0 * beta_rng(2.0, 2.0) - 1.0
+    # Multi-occupancy joint marginal: detected/undetected site terms over the
+    # n x J grid + the never-detected augmentation tail (declared temps are
+    # function-scoped — a second loop cannot reuse first-loop Stan locals).
+    @lpxf occ_marg_lpmf(Xflat::int[M], spec::int[M], uv1::vector[S], uv2::vector[S], alpha::real, beta_::real, Omega::real, K::int, J::int, n::int)::real = begin
+        acc = n * log(Omega)
+        psi = 0.0
+        theta = 0.0
+        for m in 1:M
+            psi = uv1[spec[m]] + alpha
+            theta = uv2[spec[m]] + beta_
+            x = Xflat[m]
+            lp_obs = log_inv_logit(psi) + binomial_logit_lpmf(x, K, theta)
+            lp_unobs = log_sum_exp(log_inv_logit(psi) + K * log_inv_logit(-theta), log_inv_logit(-psi))
+            if (x > 0)
+                acc += lp_obs
+            else
+                acc += lp_unobs
+            end
+        end
+        lo = log(Omega)
+        l1o = log1m(Omega)
+        S = length(uv1)
+        for i in (n + 1):S
+            psi = uv1[i] + alpha
+            theta = uv2[i] + beta_
+            lu = log_sum_exp(log_inv_logit(psi) + K * log_inv_logit(-theta), log_inv_logit(-psi))
+            acc += log_sum_exp(l1o, lo + J * lu)
+        end
+        acc
+    end
+    occ_marg_lpmfs(Xflat::int[M], spec::int[M], uv1::vector[S], uv2::vector[S], alpha::real, beta_::real, Omega::real, K::int, J::int, n::int)::real =
+        occ_marg_lpmf(Xflat, spec, uv1, uv2, alpha, beta_, Omega, K, J, n)
+    occ_marg_rng(int[M], spec::int[M], uv1::vector[S], uv2::vector[S], alpha::real, beta_::real, Omega::real, K::int, J::int, n::int)::int[M] = begin
+        out::int[M]
+        for m in 1:M
+            out[m] = binomial_rng(K, 0.5)
+        end
+        out
+    end
+    # Covid E_deaths grid: day-1 special case + closed-form imputation days +
+    # renewal scan with an explicit shift-register buffer.
+    covid_edmat(Rt::matrix[N2,M], SI::vector[N2], fmat::matrix[N2,M], pop::vector[M], y::vector[M], ifr::vector[M], M::int, N0::int, N2::int)::matrix[N2,M] = begin
+        ed::matrix[N2,M]
+        for m in 1:M
+            ed[1, m] = 1e-15 * y[m]
+            fp = 0.0
+            for i in 2:N0
+                fp += fmat[i - 1, m]
+                ed[i, m] = ifr[m] * y[m] * fp
+            end
+        end
+        buf::matrix[N2,M]
+        for m in 1:M
+            for d in 1:N2
+                if (d <= N0)
+                    buf[d, m] = y[m]
+                else
+                    buf[d, m] = 0.0
+                end
+            end
+        end
+        cum::vector[M]
+        for m in 1:M
+            cum[m] = (N0 - 1) * y[m]
+        end
+        for i in (N0 + 1):N2
+            for m in 1:M
+                conv = 0.0
+                conv_f = 0.0
+                for d in 1:N2
+                    conv += buf[d, m] * SI[d]
+                    conv_f += buf[d, m] * fmat[d, m]
+                end
+                cum[m] += buf[1, m]
+                susc = (pop[m] - cum[m]) / pop[m]
+                pred = susc * Rt[i, m] * conv
+                ed[i, m] = ifr[m] * conv_f
+                for k in 1:(N2 - 1)
+                    buf[N2 - k + 1, m] = buf[N2 - k, m]
+                end
+                buf[1, m] = pred
+            end
+        end
+        ed
+    end
+    # Covid joint marginal: hierarchical Rt + E_deaths grid + the VERBATIM
+    # neg_binomial_2 expansion (same terms, same masked accumulation order).
+    @lpxf covid_marg_lpmf(dflat::int[G], XX::matrix[G,P], ES::int[M], Ns::int[M], SI::vector[N2], fmat::matrix[N2,M], pop::vector[M], M::int, P::int, N0::int, N2::int, mu::vector[M], alpha_hier::vector[P], kappa::real, y::vector[M], phi::real, tau::real, ifr::vector[M])::real = begin
+        alpha::vector[P]
+        for p in 1:P
+            alpha[p] = alpha_hier[p] - log(1.05) / 6.0
+        end
+        Lv = XX * alpha
+        L = to_matrix(Lv, N2, M)
+        Rt::matrix[N2,M]
+        for m in 1:M
+            for i in 1:N2
+                Rt[i, m] = mu[m] * exp(-L[i, m])
+            end
+        end
+        ed = covid_edmat(Rt, SI, fmat, pop, y, ifr, M, N0, N2)
+        acc = 0.0
+        lg_phi = lgamma(phi)
+        phi_log_phi = phi * log(phi)
+        for m in 1:M
+            for i in ES[m]:Ns[m]
+                d = dflat[(m - 1) * N2 + i]
+                e = ed[i, m]
+                lpd = log(phi + e)
+                acc += lgamma(d + phi) - lg_phi - lgamma(d + 1) + phi_log_phi - phi * lpd - d * lpd
+                if (d > 0)
+                    acc += d * log(e)
+                end
+            end
+        end
+        acc
+    end
+    covid_marg_lpmfs(dflat::int[G], XX::matrix[G,P], ES::int[M], Ns::int[M], SI::vector[N2], fmat::matrix[N2,M], pop::vector[M], M::int, P::int, N0::int, N2::int, mu::vector[M], alpha_hier::vector[P], kappa::real, y::vector[M], phi::real, tau::real, ifr::vector[M])::real =
+        covid_marg_lpmf(dflat, XX, ES, Ns, SI, fmat, pop, M, P, N0, N2, mu, alpha_hier, kappa, y, phi, tau, ifr)
+    covid_marg_rng(int[G], XX::matrix[G,P], ES::int[M], Ns::int[M], SI::vector[N2], fmat::matrix[N2,M], pop::vector[M], M::int, P::int, N0::int, N2::int, mu::vector[M], alpha_hier::vector[P], kappa::real, y::vector[M], phi::real, tau::real, ifr::vector[M])::int[G] =
+        rep_array(0, G)
+    # MNIST reference-logit multinomial (explicit loops; ~1ulp vs BLAS).
+    @lpxf mnist_cat_lpmf(y::int[N], W::matrix[Cm,F], Xt::matrix[F,N], b::vector[Cm], C::int)::real = begin
+        acc = 0.0
+        for n in 1:N
+            lg::vector[C]
+            lg[1] = 0.0
+            for i in 1:Cm
+                e = b[i]
+                for f in 1:F
+                    e += W[i, f] * Xt[f, n]
+                end
+                lg[i + 1] = e
+            end
+            acc += categorical_logit_lpmf(y[n], lg)
+        end
+        acc
+    end
+    mnist_cat_lpmfs(y::int[N], W::matrix[Cm,F], Xt::matrix[F,N], b::vector[Cm], C::int)::real =
+        mnist_cat_lpmf(y, W, Xt, b, C)
+    mnist_cat_rng(int[N], W::matrix[Cm,F], Xt::matrix[F,N], b::vector[Cm], C::int)::int[N] = begin
+        out::int[N]
+        for n in 1:N
+            out[n] = categorical_rng(rep_vector(1.0 / C, C))
+        end
+        out
+    end
+end
+
+# arma11: Gaussian ARMA(1,1) with the exact error recursion; sigma
+# half-Cauchy NORMALIZED (truncated form carries the +log 2).
+function arma11_s()
+    M = ARMA11Example
+    y = M.ARMA_SERIES
+    return @slic (; y=y) begin
+        mu ~ normal(0, 10)
+        phi ~ normal(0, 2)
+        theta ~ normal(0, 2)
+        sigma ~ truncated(cauchy, 0, 2.5; lower=0.0)
+        y ~ arma11(mu, phi, theta, sigma)
+    end
+end
+
+# garch11: flat mu/alpha0/alpha1 + beta1 on [0, 1-alpha1] (param-dependent
+# decl bounds ARE supported); deterministic sd path, native observation.
+function garch11_s()
+    M = GARCH11Example
+    return @slic (; y=M.GARCH11_Y, sigma1=M.GARCH11_SIGMA1) begin
+        mu ~ flat()
+        alpha0 ~ flat(; lower=0.0)
+        alpha1 ~ flat(; lower=0.0, upper=1.0)
+        beta1 ~ flat(; lower=0.0, upper=1 - alpha1)
+        sg = garch_sigma(y, sigma1, mu, alpha0, alpha1, beta1)
+        y ~ normal(mu, sg)
+    end
+end
+
+# losscurve: SiS-lob triangle; LR/mu_LR/sd_LR lognormal hierarchy, both
+# growth forms live behind the data flag, premium gathered host-side.
+function losscurve_s()
+    M = LosscurveSislobExample
+    prem_datum = M.LOSSCURVE_PREMIUM[M.LOSSCURVE_COHORT_ID]
+    return @slic (; gid=M.LOSSCURVE_GROWTHMODEL_ID, cohort_id=M.LOSSCURVE_COHORT_ID,
+        t_idx=M.LOSSCURVE_T_IDX, t_value=M.LOSSCURVE_T_VALUE,
+        prem_datum=prem_datum, loss=M.LOSSCURVE_LOSS, C=length(M.LOSSCURVE_PREMIUM)) begin
+        omega ~ lognormal(0, 0.5; lower=0.0)
+        theta ~ lognormal(0, 0.5; lower=0.0)
+        mu_LR ~ normal(0, 0.5)
+        sd_LR ~ lognormal(0, 0.5; lower=0.0)
+        LR::vector[C] ~ lognormal(mu_LR, sd_LR)
+        loss_sd ~ lognormal(0, 0.7; lower=0.0)
+        gf = loss_gf(t_value, omega, theta, gid)
+        lm = loss_lm(LR, gf, prem_datum, cohort_id, t_idx)
+        loss ~ normal(lm, loss_sd * prem_datum)
+    end
+end
+
+# multi_occupancy: Dorazio-Royle multispecies occupancy. Correlated (uv1,uv2)
+# via the EXACT conditional decomposition (hier_2pl precedent); Beta(2,2) on
+# (rho+1)/2 as a custom density on the [-1,1] param; full joint marginal.
+function multi_occupancy_s()
+    M = MultiOccupancyExample
+    Xflat = vec(M.MULTI_OCC_X)
+    spec = repeat(1:M.MULTI_OCC_N, M.MULTI_OCC_J)
+    S = M.MULTI_OCC_S
+    return @slic (; Xflat=Xflat, spec=spec, K=M.MULTI_OCC_K, J=M.MULTI_OCC_J,
+        n=M.MULTI_OCC_N, S=S) begin
+        alpha ~ cauchy(0, 2.5)
+        beta_ ~ cauchy(0, 2.5)
+        s1 ~ cauchy(0, 2.5; lower=0.0)
+        s2 ~ cauchy(0, 2.5; lower=0.0)
+        rho ~ rho_beta2(; lower=-1.0, upper=1.0)
+        Omega ~ beta(2, 2; lower=0.0, upper=1.0)
+        uv2::vector[S] ~ normal(0, s2)
+        uv1::vector[S] ~ normal(rho * s1 / s2 * uv2, s1 * sqrt(1 - rho * rho))
+        Xflat ~ occ_marg(spec, uv1, uv2, alpha, beta_, Omega, K, J, n)
+    end
+end
+
+# covid19: Imperial renewal model. The scan is a plain-Stan shift-register
+# loop; the NB2 is the verbatim expansion; X arrives preprocessed host-side
+# (3-D arrays have no @slic spelling — same Julia ops, same bytes).
+function covid19_s()
+    M = Covid19ImperialExample
+    XX = reshape(permutedims(M.COVID19IMPERIAL_X, (2, 1, 3)),
+        M.COVID19IMPERIAL_N2 * M.COVID19IMPERIAL_M, M.COVID19IMPERIAL_P)
+    dflat = vec(M.COVID19IMPERIAL_DEATHS)
+    return @slic (; dflat=dflat, XX=XX, ES=M.COVID19IMPERIAL_EPIDEMICSTART,
+        Ns=M.COVID19IMPERIAL_N, SI=M.COVID19IMPERIAL_SI, fmat=M.COVID19IMPERIAL_F,
+        pop=M.COVID19IMPERIAL_POP, M=M.COVID19IMPERIAL_M, P=M.COVID19IMPERIAL_P,
+        N0=M.COVID19IMPERIAL_N0, N2=M.COVID19IMPERIAL_N2) begin
+        kappa ~ normal(0, 0.5; lower=0.0)
+        tau ~ exponential(0.03; lower=0.0)
+        mu::vector[M] ~ normal(3.28, kappa)
+        alpha_hier::vector[P] ~ gamma(0.1667, 1; lower=0.0)
+        y::vector[M] ~ exponential(1 / tau; lower=0.0)
+        phi ~ normal(0, 5; lower=0.0)
+        ifr::vector[M] ~ normal(1.0, 0.1; lower=0.0)
+        dflat ~ covid_marg(XX, ES, Ns, SI, fmat, pop, M, P, N0, N2, mu,
+            alpha_hier, kappa, y, phi, tau, ifr)
+    end
+end
+
+# mnist_logistic: reference-logit softmax on the 8-image fixture; W sampled
+# via 2-D @plate (Stan-native matrix, column-major q order matches the
+# source's packed layout); X transposed host-side.
+function mnist_logistic_s()
+    M = MNISTLogisticExample
+    Xt = Matrix(transpose(M.MNIST_LOGISTIC_X))
+    F = size(Xt, 1)
+    Cm = M.NUM_CLASSES - 1
+    return @slic (; y=M.MNIST_LOGISTIC_Y, Xt=Xt, F=F, Cm=Cm, C=M.NUM_CLASSES,
+        N=length(M.MNIST_LOGISTIC_Y)) begin
+        @plate for i in 1:Cm, f in 1:F
+            W[i, f] ~ normal(0, 1)
+        end
+        b::vector[Cm] ~ normal(0, 1)
+        y ~ mnist_cat(W, Xt, b, C)
+    end
+end
+
