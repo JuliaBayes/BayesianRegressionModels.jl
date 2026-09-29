@@ -3641,3 +3641,114 @@ end
     @test length(gradient) == backend.model.layout.total
     @test all(isfinite, gradient)
 end
+
+@stestset "varyingsource exact native/Stan-reference parity" begin
+    # The peer's public 3-subject model is the committed Stan-reference
+    # receipt carrier: its tight BDF reference is byte-identical to the
+    # original varyingsource3 source, and the native query/gradient were
+    # verified against it at pin `3cdba95c`. Compare BRM's emitted 232
+    # coordinates through an explicit name map (term order differs), then
+    # anchor the absolute peer/Stan density for case 1.
+    peer_root = joinpath(@__DIR__, ".bootstrap",
+        "reactivekernels-3cdba95c143a")
+    include(joinpath(peer_root, "benchmark", "varyingsource_pkpd",
+        "model.jl"))
+    cols = pkpd_columns()
+
+    peer_plan = pkpd_plan()
+    peer_bound = bind_data(peer_plan, pkpd_bound_columns(cols);
+        dims=Dict(:kernel_nsub_loc => 3))
+    peer_built = build_kernel(peer_bound)
+
+    brmi = vs_reference_brmi(cols)
+    plan = vs_reference_plan(cols)
+    ext = Base.get_extension(BRM,
+        :BayesianRegressionModelsReactiveKernelsExt)
+    bound = ext._rk_translated_plan(plan)
+    built = build_kernel(bound)
+    @test built.layout.total == peer_built.layout.total == 232
+
+    coef_map = Dict(
+        :rate_mod => :rate_mod, :mode_mod => :mode_mod,
+        :f_mod => :f_mod, :lp1 => :log_Vc, :lp2 => :log_k10,
+        :lp3 => :log_k12, :lp4 => :log_k21,
+        :lp5 => :log_baseline_pbmc, :lp6 => :log_kout,
+        :lp7 => :log_theta1_pbmc, :lp8 => :log_theta2_pbmc,
+        :lp9 => :log_baseline_csf, :lp10 => :log_theta1_csf,
+        :lp11 => :log_theta2_csf, :lp12 => :log_absorption_rate,
+        :lp13 => :log_absorption_mode)
+    label_map = Dict(:diet_idx => :diet,
+        :vessel_bottle => :bottle, :vessel_bottle_20 => :bottle_20,
+        :vessel_tablet => :tablet, :vessel_tablet_60 => :tablet_60)
+    simplex_map = Dict(:mo_diet_simplex_incr => :inc_rate_mod,
+        :mo_diet_simplex_incr_2 => :inc_mode_mod,
+        :mo_diet_simplex_incr_3 => :inc_f_mod)
+    scale_map = Dict(:a1 => :s_add1, :a2 => :s_add2, :a3 => :s_add3,
+        :r1 => :s_prop1, :r2 => :s_prop2, :r3 => :s_prop3)
+    peer_names = coordinate_names(peer_built.layout)
+    peer_index = Dict(name => i for (i, name) in enumerate(peer_names))
+    coordinate_map = Vector{Int}(undef, built.layout.total)
+    for entry in built.layout.entries
+        for j in 1:entry.size
+            label = j <= length(entry.labels) ? entry.labels[j] : entry.name
+            target = if entry.kind === :coefficient
+                Symbol(coef_map[entry.predictor], ".",
+                    get(label_map, label, label))
+            elseif entry.kind === :vector && entry.transform === :simplex
+                Symbol(simplex_map[entry.name], ".", j)
+            elseif entry.name in (:gp_w, :p_w, :c_w)
+                Symbol(entry.name, ".", j)
+            elseif entry.name === :tau_subject
+                Symbol(:tau_sid, ".", j)
+            elseif entry.name === :b_flat_subject
+                Symbol(:b_flat_sid, ".", j)
+            elseif entry.kind === :varying_corr
+                Symbol(:L_sid, ".", j)
+            else
+                get(scale_map, entry.name, entry.name)
+            end
+            coordinate_map[entry.offset + j - 1] = peer_index[target]
+        end
+    end
+    @test sort(coordinate_map) == collect(1:232)
+
+    peer_u = pkpd_point(peer_built.layout; case=1)
+    u = peer_u[coordinate_map]
+    ours = (likelihood=Base.invokelatest(
+                prepare_query(built, bound, :likelihood), u),
+        prior=Base.invokelatest(prepare_query(built, bound, :prior), u),
+        posterior=Base.invokelatest(
+            prepare_query(built, bound, :sampler), u))
+    peer = (likelihood=Base.invokelatest(
+                prepare_query(peer_built, peer_bound, :likelihood), peer_u),
+        prior=Base.invokelatest(
+            prepare_query(peer_built, peer_bound, :prior), peer_u),
+        posterior=Base.invokelatest(
+            prepare_query(peer_built, peer_bound, :sampler), peer_u))
+    # Stan's lower-bound kernel is unnormalized; BRM's user-facing
+    # `HalfNormal` is the proper half and adds the constant `log(2)`.
+    # The constant has zero gradient, so likelihood and reverse parity
+    # remain exact.
+    @test ours.likelihood ≈ peer.likelihood rtol = 2e-12 atol = 2e-9
+    @test ours.prior ≈ peer.prior + log(2) rtol = 2e-12 atol = 2e-9
+    @test ours.posterior ≈ peer.posterior + log(2) rtol = 2e-12 atol = 2e-9
+    stan_receipt = -1169.488817795463
+    @test ours.posterior ≈ stan_receipt + log(2) rtol = 2e-12
+
+    backend = AutoEnzyme(; mode = Enzyme.Reverse)
+    peer_sampler = prepare_sampler(peer_built, peer_bound, peer_u;
+        backend)
+    peer_gradient = zeros(Float64, length(peer_u))
+    peer_value, _ = sampler_value_and_gradient!(
+        peer_sampler, peer_gradient, peer_u)
+    ours_sampler = prepare_sampler(built, bound, u; backend)
+    our_gradient = zeros(Float64, length(u))
+    our_value, _ = sampler_value_and_gradient!(
+        ours_sampler, our_gradient, u)
+    @test our_value ≈ peer_value + log(2) rtol = 2e-12
+    @test our_gradient ≈ peer_gradient[coordinate_map] rtol = 1e-5 atol = 2e-4
+
+    expected_offset = ReactiveKernelsPPL.lkj_logconst(13, 2.0) -
+        sum(log, _VS_REFERENCE_SCALE0) - 6log(0.1) - 1.5log(3.0)
+    @test expected_offset ≈ 32.769510870131754 rtol = 1e-12
+end

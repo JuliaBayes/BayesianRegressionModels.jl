@@ -148,3 +148,122 @@ vs_test_brmi(data=vs_test_data(), body=vs_test_body()) =
 vs_test_raw(stan=vs_test_stan_data()) = rk_varyingsource_raw(stan)
 vs_test_plan(brmi=vs_test_brmi(), raw=vs_test_raw()) =
     BRM._brm_rk_plan(brmi; centered_groups=[:subject], varyingsource_raw=raw)
+
+# Public 3-subject source-equivalent twin used by the peer's
+# Stan-reference benchmark: 13 centered margins, k=4 GP, k=10 placebo
+# HSGPs, original covariates/priors, and no disease term on either
+# absorption margin. Its 232 coordinates match the peer's 232-coordinate
+# Stan comparison.
+const _VS_REFERENCE_SUBJECT_LPS = (:lp1, :lp2, :lp3, :lp4, :lp5, :lp6,
+    :lp7, :lp8, :lp9, :lp10, :lp11, :lp12, :lp13)
+const _VS_REFERENCE_LOC0 = vcat(
+    log.([10.0, 0.01, sqrt(0.01 * 50), sqrt(0.001 * 5)]) .+
+        [0.0, 3.2, 0.0, 0.0],
+    [log(130.0) - 1, -4.0, -4.0, 2.0, log(80.0) - 1, -4.0, 2.0],
+    [log(1 / 8), 0.0])
+const _VS_REFERENCE_SCALE0 = [0.8, 0.8, 2.0, 2.0, 0.8, 0.8, 0.8, 0.8,
+    0.8, 0.8, 0.8, 0.8, 0.8]
+const _VS_REFERENCE_RHO_LOWER = (6 / pi) *
+    sqrt(log(100.0) / ((10^2) - 1))
+
+function vs_reference_data(cols)
+    (;
+        subject=cols[:sid], diseased=cols[:diseased], male=cols[:male],
+        age_std=cols[:age_std], weight_std=cols[:weight_std],
+        obs_subject=cols[:subj], obs=cols[:dv], obs_assay=cols[:assay],
+        obs_lloq=cols[:lloq], treatment_map=[101, 202, 104],
+        pk_unique_dts=fill(length(cols[:disc]), length(cols[:sid])),
+        dose_subject=cols[:dsubj], dose_amount=cols[:damt],
+        vessel_bottle=cols[:bottle], vessel_bottle_20=cols[:bottle_20],
+        vessel_tablet=cols[:tablet], vessel_tablet_60=cols[:tablet_60],
+        diet=categorical(cols[:diet]; levels=1:4, ordered=true),
+        placebo_subject=[1, 1, 2, 2, 3],
+        placebo_time=[-1.0, 0.0, -0.5, 0.5, 0.0],
+        placebo_time_csf=[-0.8, 0.2, -0.3, 0.6, 0.1],
+    )
+end
+
+function vs_reference_stan_data(cols)
+    Dict{Symbol,Any}(
+        :subject=>cols[:subj], :ts=>cols[:time], :assay=>cols[:assay],
+        :obs=>cols[:dv], :lloq=>cols[:lloq],
+        :dosing_subject=>cols[:dsubj], :dosing_times=>cols[:dtime],
+        :doses=>cols[:damt], :treatment=>cols[:vessel],
+        :dosing_diet=>cols[:diet],
+        :discretization_times=>cols[:disc],
+        :placebo_lo_time=>0.0, :placebo_hi_time=>24.0)
+end
+
+function vs_reference_body()
+    subject_rhs(i) = i <= 2 ?
+        "1 + diseased + male + age_std + weight_std + (1 | p | subject)" :
+        (i <= 11 ? "1 + diseased + (1 | p | subject)" :
+            "1 + (1 | p | subject)")
+    subject_formulas = join(["$lp ~ $(subject_rhs(i))"
+        for (i, lp) in enumerate(_VS_REFERENCE_SUBJECT_LPS)], "\n")
+    dose_formulas = join([
+        "$lp ~ 0 + vessel_bottle + vessel_bottle_20 + vessel_tablet + " *
+            "vessel_tablet_60 + mo(diet)" for lp in (:d1, :d2, :d3)], "\n")
+    placebo_formulas = join([
+        "p1 ~ 0 + hsgp(placebo_time; k = 10, domain = (-1.5, 1.5))",
+        "p2 ~ 0 + hsgp(placebo_time_csf; k = 10, domain = (-1.5, 1.5))",
+    ], "\n")
+    subj_args = join(_VS_REFERENCE_SUBJECT_LPS, ", ")
+    subj_cells = join(["$(lp)_i" for lp in _VS_REFERENCE_SUBJECT_LPS], ", ")
+    intercept_priors = join([
+        "effect($lp, Intercept) ~ Normal($(_VS_REFERENCE_LOC0[i]), " *
+            "$(_VS_REFERENCE_SCALE0[i]))"
+        for (i, lp) in enumerate(_VS_REFERENCE_SUBJECT_LPS)], "\n")
+    priors = join([
+        intercept_priors,
+        "effect(:, diseased) ~ Normal(0.0, 1.0)",
+        "effect(:, male) ~ Normal(0.0, 0.1)",
+        "effect(:, age_std) ~ Normal(0.0, 0.1)",
+        "effect(:, weight_std) ~ Normal(0.0, 0.1)",
+        "sd(:, p) ~ Exponential(0.6666666666666666)",
+        "cor(:, p) ~ LKJCholesky(13, 2.0)",
+        ["effect($lp, :) ~ Normal(0.0, 0.5)" for lp in (:d1, :d2, :d3)]...,
+        "length_scale(:, hsgp(placebo_time)) ~ " *
+            "Uniform($(_VS_REFERENCE_RHO_LOWER), 2.0)",
+        "sd(:, hsgp(placebo_time)) ~ LogNormal(0.0, 1.0)",
+        "length_scale(:, hsgp(placebo_time_csf)) ~ " *
+            "Uniform($(_VS_REFERENCE_RHO_LOWER), 2.0)",
+        "sd(:, hsgp(placebo_time_csf)) ~ LogNormal(0.0, 1.0)",
+    ], "\n")
+    """
+    $subject_formulas
+    $dose_formulas
+    $placebo_formulas
+    effectiveness ~ dose_concentration_gp(; k = 4, dose_slope_scale = 1.0,
+        conc_slope_scale = 1.0, amplitude_scale = 1.0)
+    a1 ~ Exponential(0.25)
+    a2 ~ Exponential(0.25)
+    a3 ~ Exponential(0.25)
+    r1 ~ Exponential(0.25)
+    r2 ~ Exponential(0.25)
+    r3 ~ Exponential(0.25)
+    loc ~ kernel(ragged(obs, obs_subject), ragged(obs_assay, obs_subject),
+        ragged(obs_lloq, obs_subject), ragged(dose_amount, dose_subject),
+        treatment_map, pk_unique_dts, ragged(d1, dose_subject),
+        ragged(d2, dose_subject), ragged(d3, dose_subject),
+        ragged(p1, placebo_subject), ragged(p2, placebo_subject),
+        $subj_args) do y_i, assay_i, lloq_i, dose_i, tm_i, pkd_i,
+            d1_i, d2_i, d3_i, p1_i, p2_i, $subj_cells
+        mu = varyingsource_subject_locs(assay_i, dose_i, tm_i, pkd_i,
+            d1_i, d2_i, d3_i, p1_i, p2_i, effectiveness, $subj_cells)
+        y_i ~ censored_addpropnormal(mu, assay_scale(assay_i, a1, a2, a3),
+            assay_scale(assay_i, r1, r2, r3), lloq_i)
+        mu
+    end
+    $priors
+    """
+end
+
+vs_reference_brmi(cols) = Core.eval(Main, BRM._brm(vs_reference_body();
+    df=vs_reference_data(cols)))
+function vs_reference_plan(cols)
+    brmi = vs_reference_brmi(cols)
+    BRM._brm_rk_plan(brmi; centered_groups=[:subject],
+        varyingsource_raw=rk_varyingsource_raw(
+            vs_reference_stan_data(cols)))
+end

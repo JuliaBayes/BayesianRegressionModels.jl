@@ -426,6 +426,15 @@ function _brm_prepare_predictor_geometry(
         haskey(context.data, candidate) ? candidate :
             get(context.target_obs, name, nothing)
     end
+    # A grouped intercept-only LP has no ordinary design source, but its
+    # declared group is the row axis: one LP value per group level. This
+    # is the varying-source subject-predictor shape (and the prior-only
+    # total-effects path already resolves the same axis explicitly).
+    if isnothing(row_source)
+        groups = unique(plan.group for plan in random_effects)
+        length(groups) == 1 && haskey(context.data, only(groups)) &&
+            (row_source = only(groups))
+    end
     design = _brm_population_design(
         name, ordinary_terms, context.data, get(context.target_obs, name, nothing);
         required=true, row_source,
