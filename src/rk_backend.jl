@@ -3120,10 +3120,12 @@ end
 function _rk_population_priors(brmi::BRMI, design, target::Symbol,
         available::Tuple, factor_addressees::Set{Symbol},
         terms::Vector{_RKTermSpec}, derived::Vector{_RKDerivedSpec},
-        r2d2::Union{Nothing,_BRMR2D2Plan}, hs_addressees::Set{Symbol})
+        r2d2::Union{Nothing,_BRMR2D2Plan}, hs_addressees::Set{Symbol};
+        tolerant_default::Bool=false)
     prefix = "RK backend"
     overrides = _brm_simple_population_effect_overrides(
-        brmi, design; prefix, available_predictors=available)
+        brmi, design; prefix, available_predictors=available,
+        tolerant_default)
     # An R2D2 predictor carries its prior mass in the R2D2Prior
     # (explicit Normals ride the overrides map) — no PopulationPrior
     # rows. Family validation still applies (it runs in the R2D2
@@ -4616,10 +4618,11 @@ end
 # misread the Horseshoe cells as Normals).
 function _rk_horseshoe_priors(brmi::BRMI, design, target::Symbol,
         available::Tuple, terms::Vector{_RKTermSpec},
-        r2d2::Union{Nothing,_BRMR2D2Plan})
+        r2d2::Union{Nothing,_BRMR2D2Plan}; tolerant_default::Bool=false)
     prefix = "RK backend"
     overrides = _brm_simple_population_effect_overrides(
-        brmi, design; prefix, available_predictors=available)
+        brmi, design; prefix, available_predictors=available,
+        tolerant_default)
     isnothing(overrides) && return _RKHorseshoePrior[]
     n = length(design.columns)
     length(overrides) == n || error(
@@ -5141,7 +5144,7 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         derived::Vector{_RKDerivedSpec}, taken::Set{Symbol},
         ranef_buckets::Dict{Tuple{Symbol,Symbol,Union{Nothing,Symbol}},
             Union{_RKRanefBucket,Nothing}},
-        me_sources::Set{Symbol})
+        me_sources::Set{Symbol}; tolerant_default::Bool=false)
     prefix = "RK backend"
     op = linear_predictor_op(brmi, target)
     _, rhs = getargs(op, 2)
@@ -5210,7 +5213,8 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         return _rk_plan_offset_only_predictor(
         brmi, context, target, ordinary, available, link, terms, derived)
     geometry = _brm_prepare_predictor_geometry(
-        brmi, context, target; available_predictors=available)
+        brmi, context, target; available_predictors=available,
+        tolerant_default)
     for prepared in geometry.terms
         if prepared.callable === gp
             push!(terms, _rk_plan_gp_term!(
@@ -5269,10 +5273,11 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         for t in terms if t.kind === :factor)
     r2plan = geometry.r2d2
     hs_priors = _rk_horseshoe_priors(brmi, design, target, available,
-        terms, r2plan)
+        terms, r2plan; tolerant_default)
     priors = _rk_population_priors(brmi, design, target, available,
         factor_addressees, terms, derived, r2plan,
-        Set{Symbol}(p.addressee for p in hs_priors))
+        Set{Symbol}(p.addressee for p in hs_priors);
+        tolerant_default)
     r2d2 = isnothing(r2plan) ? nothing :
         _rk_plan_r2d2_prior(brmi, design, r2plan, target, available,
             terms, taken, columns)
@@ -7065,13 +7070,24 @@ _rk_plan_summary(plan::_RKKernelPlan) = string(
     plan.kernel.n_subjects, "-subject kernel plate and ",
     length(plan.parameters), " parameters")
 
-function _brm_rk_kernel_plan(brmi::BRMI)
+function _brm_rk_kernel_plan(brmi::BRMI; centered_groups=(),
+        varyingsource_raw=nothing)
     prefix = "RK backend"
     kops = _rk_kernel_ops(brmi)
     length(kops) == 1 || error(
         "$prefix: RK panel mode admits exactly one kernel(...) per model; " *
         "got $(length(kops))")
     result, rhs = only(kops)
+    if _rk_is_varyingsource_kernel(rhs)
+        return _brm_rk_varyingsource_plan(brmi, result, rhs;
+            centered_groups, varyingsource_raw)
+    end
+    isempty(centered_groups) || error(
+        "$prefix: `centered_groups` is admitted only for varying-source " *
+        "kernel models (panel kernels are ranef-free)")
+    varyingsource_raw === nothing || error(
+        "$prefix: `varyingsource_raw` is admitted only for " *
+        "varying-source kernel models")
     spec = _rk_kernel_spec(brmi, result, rhs)
     # Classify the in-cell family up front (Gaussian v1); an unadmitted family
     # fails at plan time, not only at emission. The plan carries the STRUCTURED
@@ -7265,6 +7281,1126 @@ function rk_varyingsource_raw(stan_data::AbstractDict)
      placebo_lo=Float64(lo), placebo_hi=Float64(hi))
 end
 
+# ---- Varying-source grouped kernel (full-twin) extraction ----
+#
+# The `varyingsource3_brm` report twin (Bruno
+# `web-pkpd/src/brm_varyingsource.jl`) as a native RK program: its kernel
+# cell calls the twin's documented cell entry `varyingsource_subject_locs`
+# (that callee is the narrow recognition trigger — every other grouped
+# kernel keeps today's fail-closed errors), and the planner extracts the
+# twin's shape structurally around it:
+#
+# - the subject LPs (bare positionals) in locations-call order, sharing
+#   one correlated `|id|` block over the subject group; the call order
+#   must match formula order (the LKJ margin pairing is positional);
+# - the dose-axis LPs (`ragged` over the dose axis, population-only)
+#   in kernel-positional order (rate, mode, F);
+# - the placebo HSGP LPs (`ragged` over the placebo axis, `0 + hsgp`)
+#   in kernel-positional order (primary, CSF), decomposed to
+#   innovations + rho/sd (native expands the basis);
+# - the `dose_concentration_gp` submodel target (a cell global, not a
+#   slice), decomposed to the square GP innovations + slopes + scales;
+# - the per-assay censored observation
+#   `censored_addpropnormal(mu, assay_scale(...), assay_scale(...), lloq)`
+#   (location must be the cell locations); the per-assay scales emit as
+#   lazy `ifelse.(...)` selectors over bound per-assay Boolean masks
+#   (a literal `[s_1, ..., s_n][assay]` gather is not admitted
+#   thin-layer-side), so the likelihood stays one observation over
+#   caller-order obs;
+# - the precomputed per-subject design positionals, recognized and
+#   DROPPED (the native schedule rebuilds every grid from the raw
+#   bridge; foreign design products never cross).
+#
+# Fixed native arity (peer's `varyingsource_pkpd_read_locs`, 31 args):
+# 13 subject logs, 3 dose modifiers, 2 placebo HSGPs, 1 effectiveness
+# submodel. Assay count (1-3) is generic. When the native call
+# generalizes, the count gates below generalize with it.
+const _RK_VARYINGSOURCE_LOCS = :varyingsource_subject_locs
+const _RK_VARYINGSOURCE_GP = :dose_concentration_gp
+const _RK_VARYINGSOURCE_OBS = :censored_addpropnormal
+const _RK_VARYINGSOURCE_PICK = :assay_scale
+const _RK_VARYINGSOURCE_N_SUBJECT = 13
+const _RK_VARYINGSOURCE_N_DOSE = 3
+const _RK_VARYINGSOURCE_N_PLACEBO = 2
+# `gp_effectiveness` Uniform-lower formula (Bruno `src/pkpd_models.jl`;
+# L = 1.5, weight threshold 100), mirrored like the twin's own
+# `_vs_hsgp_lower_x_scale`.
+_rk_varyingsource_gp_lower(k::Int) =
+    (4 * 1.5 / pi) * sqrt(log(100.0) / (k^2 - 1.0))
+
+struct _RKVaryingSourceAssay
+    code::Int
+    add::Symbol             # per-assay additive-scale sampled param
+    prop::Symbol            # per-assay proportional-scale sampled param
+    add_scale::Float64      # Exponential scales (twin literals)
+    prop_scale::Float64
+end
+
+struct _RKVaryingSourceCentered
+    id::Symbol              # shared |id| bucket
+    group::Symbol           # subject group column
+    margins::Vector{Symbol} # subject LPs in native row order
+    lkj_eta::Float64
+    sd_scale::Float64       # shared Exponential scale (block-wide sd)
+end
+
+struct _RKVaryingSourceSpec
+    result::Symbol
+    subject_count::Symbol   # kernel_nsub_<result> dims key
+    n_subjects::Int
+    group::Symbol           # subject group column (bind data)
+    subject_lps::Vector{Symbol}
+    dose_lps::Vector{Symbol}
+    placebo_primary::Symbol
+    placebo_csf::Symbol
+    placebo_k_primary::Int
+    placebo_k_csf::Int
+    effectiveness::Symbol
+    gp_k::Int
+    gp_slope_scales::Vector{Float64} # [dose, conc] Normal scales
+    gp_amplitude_scale::Float64      # half-Normal scale
+    centered::_RKVaryingSourceCentered
+    assays::Vector{_RKVaryingSourceAssay}
+    # Raw bind-namespace columns (vs_-prefixed; values from the bridge):
+    obs_subject::Symbol
+    obs_time::Symbol
+    obs_assay::Symbol
+    obs_value::Symbol
+    obs_lloq::Symbol
+    dose_subject::Symbol
+    dose_time::Symbol
+    dose_amount::Symbol
+    dose_treatment::Symbol
+    discretization::Symbol
+    placebo_lo::Float64
+    placebo_hi::Float64
+    dropped_design::Vector{Symbol}  # precomputed columns seen + dropped
+end
+
+struct _RKVaryingSourcePlan
+    spec::_RKVaryingSourceSpec
+    ranef_buckets::Vector{_RKRanefBucket} # one: the shared centered block
+    subject_predictors::Vector{_RKPredictorSpec}
+    subject_priors::Vector{_RKPopulationPrior}
+    dose_predictors::Vector{_RKPredictorSpec}
+    dose_priors::Vector{_RKPopulationPrior}
+    vector_parameters::Vector{_RKVectorParameter}
+    parameters::Vector{_RKSampledParameter}
+    columns::Dict{Symbol,AbstractVector}
+end
+
+_rk_plan_summary(plan::_RKVaryingSourcePlan) = string(
+    plan.spec.n_subjects, "-subject varying-source twin plate, ",
+    length(plan.spec.subject_lps), " subject LPs, ",
+    length(plan.spec.assays), " assays")
+
+# Narrow recognition: the cell assigns its locations from the twin's
+# documented cell entry. Anything else routes to the panel planner
+# (which fails closed on grouped shapes as before).
+function _rk_is_varyingsource_kernel(rhs)
+    dcols = getargs(rhs)
+    (isempty(dcols) || !(first(dcols) isa Expr) ||
+        first(dcols).head !== :->) && return false
+    body = first(dcols).args[2]
+    stmts = Meta.isexpr(body, :block) ? body.args : Any[body]
+    for s in stmts
+        s isa LineNumberNode && continue
+        if Meta.isexpr(s, :(=)) && length(s.args) == 2
+            call = s.args[2]
+            if call isa Expr && call.head === :call && !isempty(call.args) &&
+                    call.args[1] === _RK_VARYINGSOURCE_LOCS
+                return true
+            end
+        end
+    end
+    false
+end
+
+# Parse the twin cell: exactly one locations assignment from the twin
+# entry, exactly one censored observation centered on it, collecting
+# the locations. Anything else is out of the twin contract.
+function _rk_varyingsource_cell(result::Symbol, rhs)
+    prefix = "RK backend"
+    dcols = getargs(rhs)
+    (isempty(dcols) || !(first(dcols) isa Expr) ||
+        first(dcols).head !== :->) && error(
+        "$prefix: kernel(...) `$result` is missing its inline do-block cell")
+    lam = first(dcols)
+    ptuple = lam.args[1]
+    params = ptuple isa Symbol ? Symbol[ptuple] :
+        (Meta.isexpr(ptuple, :tuple) && all(p -> p isa Symbol, ptuple.args) ?
+            Symbol[ptuple.args...] :
+            error("$prefix: kernel(...) `$result` cell params must be " *
+                  "plain names"))
+    body = lam.args[2]
+    stmts = Meta.isexpr(body, :block) ?
+        Any[s for s in body.args if !(s isa LineNumberNode)] : Any[body]
+    posargs = collect(dcols[2:end])
+    length(posargs) == length(params) || error(
+        "$prefix: kernel(...) `$result` has $(length(params)) cell params " *
+        "but $(length(posargs)) positional args")
+    loc_name = nothing
+    loc_args = nothing
+    obs = nothing
+    for s in stmts
+        if Meta.isexpr(s, :(=)) && length(s.args) == 2 && s.args[1] isa Symbol
+            nm, call = s.args
+            (call isa Expr && call.head === :call && !isempty(call.args) &&
+                call.args[1] === _RK_VARYINGSOURCE_LOCS) || error(
+                "$prefix: kernel(...) `$result` varying-source cell " *
+                "assignment `$nm` is not the `$(_RK_VARYINGSOURCE_LOCS)` " *
+                "locations call (the cell admits exactly that assignment)")
+            loc_name === nothing || error(
+                "$prefix: kernel(...) `$result` varying-source cell has " *
+                "more than one locations call")
+            loc_name = nm
+            loc_args = collect(call.args[2:end])
+        elseif Meta.isexpr(s, :call) && length(s.args) == 3 && s.args[1] === :~
+            obs === nothing || error(
+                "$prefix: kernel(...) `$result` varying-source cell has " *
+                "more than one `~` observation")
+            obs = (response=s.args[2], dist=s.args[3])
+        end
+    end
+    loc_name === nothing && error(
+        "$prefix: kernel(...) `$result` varying-source cell has no " *
+        "`$(_RK_VARYINGSOURCE_LOCS)` locations call")
+    obs === nothing && error(
+        "$prefix: kernel(...) `$result` varying-source cell has no `~` " *
+        "observation")
+    obs.response isa Symbol || error(
+        "$prefix: kernel(...) `$result` observation LHS must be a plain " *
+        "cell name; got $(obs.response)")
+    dist = obs.dist
+    (dist isa Expr && dist.head === :call && length(dist.args) == 5 &&
+        dist.args[1] === _RK_VARYINGSOURCE_OBS) || error(
+        "$prefix: kernel(...) `$result` varying-source observation must " *
+        "be `censored_addpropnormal(mu, add, prop, lloq)`; got " *
+        "$(repr(dist))")
+    dist.args[2] === loc_name || error(
+        "$prefix: kernel(...) `$result` varying-source observation must " *
+        "be centered on the cell locations `$loc_name`")
+    last(stmts) === loc_name || error(
+        "$prefix: kernel(...) `$result` varying-source cell must collect " *
+        "the locations `$loc_name`")
+    for a in loc_args
+        a isa Symbol || error(
+            "$prefix: kernel(...) `$result` locations call takes cell " *
+            "names only; got $(repr(a))")
+    end
+    (; params, posargs, loc_name, loc_args=Symbol[loc_args...],
+     obs_response=obs.response, obs_dist=dist)
+end
+
+# Classify the kernel positionals (parallel to the cell params): bare
+# subject LP refs, `ragged` LP refs (dose/placebo, split later by LP
+# form), `ragged` data slices, and bare per-subject design columns
+# (dropped later).
+function _rk_varyingsource_positionals(brmi::BRMI, result::Symbol,
+        params::Vector{Symbol}, posargs::Vector, ctx)
+    prefix = "RK backend"
+    subject = NamedTuple[]
+    lp_ragged = NamedTuple[]
+    data_ragged = NamedTuple[]
+    design = NamedTuple[]
+    for (param, c) in zip(params, posargs)
+        if c isa ExprColumn && getf(c) === ragged
+            args = getargs(c)
+            length(args) == 2 || error(
+                "$prefix: kernel(...) `$result` `ragged(...)` takes " *
+                "exactly two positional args; got $(length(args))")
+            inner, grp = args
+            inner isa NamedColumn || error(
+                "$prefix: kernel(...) `$result` `ragged(...)` inner must " *
+                "name a linear predictor or a data column; got a bare " *
+                "$(typeof(inner))")
+            grp isa NamedColumn || error(
+                "$prefix: kernel(...) `$result` `ragged(...)` group must " *
+                "be a plain column; got a bare $(typeof(grp))")
+            gname = name(grp)
+            gcol = get(ctx.data, gname, nothing)
+            gcol isa AbstractVector || error(
+                "$prefix: kernel(...) `$result` `ragged(...)` group " *
+                "column `$gname` must be a bound data vector")
+            iname = name(inner)
+            if parent(inner) isa DataColumn
+                push!(data_ragged,
+                    (; param, inner=iname, group=gname,
+                     data=parent(parent(inner))))
+            elseif parent(inner) isa MissingColumn
+                error("$prefix: kernel(...) `$result` `ragged(...)` " *
+                      "inner `$iname` names nothing (no data column, no " *
+                      "linear predictor)")
+            else
+                linear_predictor_op(brmi, iname) === nothing && error(
+                    "$prefix: kernel(...) `$result` `ragged(...)` inner " *
+                    "`$iname` is not a declared linear predictor")
+                push!(lp_ragged, (; param, target=iname, group=gname))
+            end
+        elseif c isa NamedColumn
+            k = name(c)
+            if parent(c) isa DataColumn
+                push!(design,
+                    (; param, column=k, data=parent(parent(c))))
+            elseif parent(c) isa MissingColumn
+                error("$prefix: kernel(...) `$result` positional arg " *
+                      "`$k` names nothing (no data column, no linear " *
+                      "predictor)")
+            else
+                linear_predictor_op(brmi, k) === nothing && error(
+                    "$prefix: kernel(...) `$result` positional arg `$k` " *
+                    "is not a declared linear predictor")
+                push!(subject, (; param, target=k))
+            end
+        else
+            error("$prefix: kernel(...) `$result` positional args must " *
+                  "be data columns, linear predictors, or " *
+                  "`ragged(x, group)`; got a bare $(typeof(c))")
+        end
+    end
+    (; subject, lp_ragged, data_ragged, design)
+end
+
+# Read the `dose_concentration_gp` submodel op behind the cell's
+# effectiveness global: `(k, slope_scales, amplitude_scale)`. Mirrors
+# the twin hook's own validation (Bruno `brm_varyingsource.jl`).
+function _rk_varyingsource_effectiveness(brmi::BRMI, result::Symbol, eff::Symbol)
+    prefix = "RK backend"
+    op = linear_predictor_op(brmi, eff)
+    op === nothing && error(
+        "$prefix: kernel(...) `$result` effectiveness `$eff` is not a " *
+        "model operation")
+    _, erhs = getargs(op, 2)
+    erhs isa ExprColumn || error(
+        "$prefix: kernel(...) `$result` effectiveness `$eff` must be " *
+        "a `dose_concentration_gp(...)` submodel")
+    nameof(getf(erhs)) === _RK_VARYINGSOURCE_GP || error(
+        "$prefix: kernel(...) `$result` effectiveness `$eff` must be " *
+        "a `$(_RK_VARYINGSOURCE_GP)(...)` submodel; got " *
+        "`$(nameof(getf(erhs)))(...)`")
+    kw = getkwargs(erhs)
+    allowed = (:k, :dose_slope_scale, :conc_slope_scale, :amplitude_scale)
+    unknown = Symbol[key for key in keys(kw) if !(key in allowed)]
+    isempty(unknown) || error(
+        "$prefix: `$(_RK_VARYINGSOURCE_GP)` got unknown keywords $unknown")
+    missing_keys = Symbol[key for key in allowed if !haskey(kw, key)]
+    isempty(missing_keys) || error(
+        "$prefix: `$(_RK_VARYINGSOURCE_GP)` needs keywords $missing_keys")
+    k = _brm_numeric_constant(kw[:k])
+    (k isa Real && isinteger(k) && k >= 2) || error(
+        "$prefix: `$(_RK_VARYINGSOURCE_GP)` needs `k >= 2` basis " *
+        "functions; got $(repr(kw[:k]))")
+    # The original `gp_effectiveness` priors put the GP length scales
+    # on `Uniform(lower(k), 2)`; k = 2 gives lower ≈ 2.37 — an EMPTY
+    # interval (peer contract note: k = 2 is not an original-prior
+    # model; use the original default k = 4 or a valid higher rank).
+    _rk_varyingsource_gp_lower(Int(k)) < 2.0 || error(
+        "$prefix: `$(_RK_VARYINGSOURCE_GP)` with k = $(Int(k)) gives " *
+        "an empty GP length-scale prior interval " *
+        "`Uniform($(_rk_varyingsource_gp_lower(Int(k))), 2)`; use " *
+        "k >= 3 (original default k = 4)")
+    scales = Float64[]
+    for key in (:dose_slope_scale, :conc_slope_scale, :amplitude_scale)
+        s = _brm_numeric_constant(kw[key])
+        (s isa Real && isfinite(s) && s > 0) || error(
+            "$prefix: `$(_RK_VARYINGSOURCE_GP)` prior scale `$key` " *
+            "must be finite and positive; got $(repr(kw[key]))")
+        push!(scales, Float64(s))
+    end
+    (Int(k), scales[1:2], scales[3])
+end
+
+# Read one placebo HSGP LP (`0 + hsgp(axis; k, domain)`): `(axis, k)`.
+# Requires the twin's explicit `domain = (-1.5, 1.5)` (the native HSGP
+# mirror fixes L = 1.5); anything else breaks parity and fails closed.
+function _rk_varyingsource_hsgp(brmi::BRMI, ctx, result::Symbol,
+        target::Symbol, available::Tuple)
+    prefix = "RK backend"
+    geometry = _brm_prepare_predictor_geometry(brmi, ctx, target;
+        available_predictors=available, tolerant_default=true)
+    length(geometry.terms) == 1 || error(
+        "$prefix: kernel(...) `$result` placebo `$target` must be " *
+        "`0 + hsgp(...)` with one HSGP term")
+    prepared = only(geometry.terms)
+    prepared.callable === hsgp || error(
+        "$prefix: kernel(...) `$result` placebo `$target` must be " *
+        "`0 + hsgp(...)`")
+    state = prepared.state
+    state.latent && error(
+        "$prefix: kernel(...) `$result` placebo `$target` model-derived " *
+        "`hsgp` axis is out of the twin slice (binds raw data columns)")
+    state.cov === :exp_quad || error(
+        "$prefix: kernel(...) `$result` placebo `$target` `hsgp(...; " *
+        "cov=$(repr(state.cov)))` is out of the twin slice (native " *
+        "mirror is exp_quad)")
+    (state.iso && length(prepared.source) == 1) || error(
+        "$prefix: kernel(...) `$result` placebo `$target` needs one " *
+        "isotropic `hsgp` axis")
+    isnothing(state.by) || error(
+        "$prefix: kernel(...) `$result` placebo `$target` grouped " *
+        "`hsgp(...; by=...)` is out of the twin slice")
+    any(!iszero, state.centeredness) && error(
+        "$prefix: kernel(...) `$result` placebo `$target` partially-" *
+        "centered `hsgp` is out of the twin slice (native innovations " *
+        "are non-centered)")
+    get(state, :orthogonal, nothing) === nothing || error(
+        "$prefix: kernel(...) `$result` placebo `$target` " *
+        "`hsgp(...; orthogonal_to=:linear)` is out of the twin slice")
+    state.explicit_domain || error(
+        "$prefix: kernel(...) `$result` placebo `$target` needs an " *
+        "explicit `hsgp(...; domain=(-1.5, 1.5))` (the native mirror " *
+        "fixes the basis boundary)")
+    only(state.fits) == (0.0, 1.5) || error(
+        "$prefix: kernel(...) `$result` placebo `$target` needs " *
+        "`domain=(-1.5, 1.5)`; got fits $(repr(state.fits))")
+    length(state.K) == 1 || error(
+        "$prefix: kernel(...) `$result` placebo `$target` needs one " *
+        "`k`; got $(repr(state.K))")
+    (only(prepared.source), Int(only(state.K)))
+end
+
+# Resolve one HSGP hyperprior (length_scale Uniform / sd LogNormal)
+# for a placebo term key: specific beats default, duplicates fail.
+function _rk_varyingsource_term_prior(brmi::BRMI, result::Symbol,
+        target::Symbol, key::Symbol, class::Symbol)
+    prefix = "RK backend"
+    cands = [s for s in term_priors(brmi)
+        if s.class === class && s.term === key &&
+            (isnothing(s.predictor) || s.predictor === target)]
+    isempty(cands) && error(
+        "$prefix: kernel(...) `$result` placebo `$target` has no " *
+        "`$(class === :term_length_scale ? "length_scale" : "sd")` " *
+        "prior on `$key`")
+    lengths = length(cands)
+    spec = if lengths == 1
+        only(cands)
+    elseif lengths == 2 && count(isnothing(s.predictor) for s in cands) == 1
+        only(s for s in cands if !isnothing(s.predictor))
+    else
+        error("$prefix: kernel(...) `$result` placebo `$target` has " *
+              "$lengths competing `$key` priors (specific beats " *
+              "default; duplicates fail)")
+    end
+    isempty(spec.keywords) || error(
+        "$prefix: kernel(...) `$result` placebo `$target` `$key` " *
+        "prior takes no keywords")
+    if class === :term_length_scale
+        spec.family === Uniform || error(
+            "$prefix: kernel(...) `$result` placebo `$target` " *
+            "length_scale prior must be `Uniform`; got `$(spec.family)`")
+        length(spec.arguments) == 2 || error(
+            "$prefix: kernel(...) `$result` placebo `$target` " *
+            "length_scale prior must be `Uniform(lo, hi)`")
+        lo = _brm_numeric_constant(spec.arguments[1])
+        hi = _brm_numeric_constant(spec.arguments[2])
+        (lo isa Real && hi isa Real && isfinite(lo) && isfinite(hi) &&
+            lo < hi) || error(
+            "$prefix: kernel(...) `$result` placebo `$target` " *
+            "length_scale `Uniform` bounds must be finite with lo < hi")
+        return (Float64(lo), Float64(hi))
+    else
+        spec.family === LogNormal || error(
+            "$prefix: kernel(...) `$result` placebo `$target` sd prior " *
+            "must be `LogNormal`; got `$(spec.family)`")
+        length(spec.arguments) == 2 || error(
+            "$prefix: kernel(...) `$result` placebo `$target` sd prior " *
+            "must be `LogNormal(mu, sigma)`")
+        mu = _brm_numeric_constant(spec.arguments[1])
+        sg = _brm_numeric_constant(spec.arguments[2])
+        (mu isa Real && sg isa Real && isfinite(mu) && isfinite(sg) &&
+            sg > 0) || error(
+            "$prefix: kernel(...) `$result` placebo `$target` sd " *
+            "`LogNormal` needs finite mu and positive sigma")
+        return (Float64(mu), Float64(sg))
+    end
+end
+
+# Is this LP a placebo HSGP (`0 + hsgp(...)`, single term, ungrouped)?
+function _rk_varyingsource_is_placebo(brmi::BRMI, target::Symbol)
+    op = linear_predictor_op(brmi, target)
+    op === nothing && return false
+    _, rhs = getargs(op, 2)
+    terms = _brm_additive_terms(rhs)
+    any(t -> _brm_is_grouped_term(t), terms) && return false
+    hsgp_terms = [t for t in terms
+        if t isa ExprColumn && getf(t) === hsgp]
+    length(hsgp_terms) == 1 || return false
+    rest = [t for t in terms if !(t in hsgp_terms)]
+    all(t -> t isa Integer && t == 0, rest)
+end
+
+# Read one per-assay `assay_scale` scale op (`s ~ Exponential(lit)`):
+# the twin's direct scale statements. Returns the scale literal.
+function _rk_varyingsource_scale_param(brmi::BRMI, result::Symbol,
+        name::Symbol, what::String, code::Int)
+    prefix = "RK backend"
+    op = linear_predictor_op(brmi, name)
+    op === nothing && error(
+        "$prefix: kernel(...) `$result` $what assay-$code scale " *
+        "`$name` is not a model operation")
+    _, srhs = getargs(op, 2)
+    (srhs isa ExprColumn && getf(srhs) === Exponential) || error(
+        "$prefix: kernel(...) `$result` $what assay-$code scale " *
+        "`$name` must be `Exponential(scale)`")
+    isempty(getkwargs(srhs)) || error(
+        "$prefix: kernel(...) `$result` $what assay-$code scale " *
+        "`$name` takes no keywords")
+    length(getargs(srhs)) == 1 || error(
+        "$prefix: kernel(...) `$result` $what assay-$code scale " *
+        "`$name` must be `Exponential(scale)`")
+    scale = _brm_numeric_constant(only(getargs(srhs)))
+    (scale isa Real && isfinite(scale) && scale > 0) || error(
+        "$prefix: kernel(...) `$result` $what assay-$code scale " *
+        "`$name` `Exponential` scale must be finite and positive")
+    Float64(scale)
+end
+
+function _brm_rk_varyingsource_plan(brmi::BRMI, result::Symbol, rhs;
+        centered_groups, varyingsource_raw)
+    prefix = "RK backend"
+    ctx = _brm_backend_context(brmi; retain_mm_sources=true)
+    cell = _rk_varyingsource_cell(result, rhs)
+    pos = _rk_varyingsource_positionals(
+        brmi, result, cell.params, cell.posargs, ctx)
+    params = Set(cell.params)
+    # Subject LPs (bare positionals) in locations-call order; the call
+    # order is the native row order and must match formula order (the
+    # LKJ margin pairing is positional on both sides).
+    length(pos.subject) == _RK_VARYINGSOURCE_N_SUBJECT || error(
+        "$prefix: kernel(...) `$result` varying-source model needs " *
+        "$_RK_VARYINGSOURCE_N_SUBJECT subject linear predictors " *
+        "(bare positionals); got $(length(pos.subject))")
+    subj_by_param = Dict(entry.param => entry.target for entry in pos.subject)
+    call_subject = Symbol[subj_by_param[a] for a in cell.loc_args
+        if haskey(subj_by_param, a)]
+    sort(call_subject) == sort(collect(values(subj_by_param))) &&
+        length(call_subject) == length(pos.subject) || error(
+        "$prefix: kernel(...) `$result` locations call must pass " *
+        "every subject LP exactly once")
+    subject_set = Set(values(subj_by_param))
+    formula_subject = Symbol[k for k in keys(brmi.operations)
+        if k in subject_set]
+    formula_subject == call_subject || error(
+        "$prefix: kernel(...) `$result` subject LP call order " *
+        "$call_subject must match formula order $formula_subject " *
+        "(the LKJ margin pairing is positional)")
+    subject_lps = call_subject
+    # One shared correlated block: every subject LP carries exactly
+    # one plain intercept-only `(1 | id | group)` declaration, same id
+    # and group throughout.
+    decls = Dict{Symbol,Any}()
+    for lp in subject_lps
+        lp_decls = [d for d in ctx.group_declarations if d.predictor === lp]
+        length(lp_decls) == 1 || error(
+            "$prefix: kernel(...) `$result` subject `$lp` must carry " *
+            "exactly one random-effect block (the shared correlated " *
+            "block); got $(length(lp_decls))")
+        decls[lp] = only(lp_decls)
+    end
+    first_decl = decls[first(subject_lps)]
+    bucket_id = first_decl.id
+    bucket_id === nothing && error(
+        "$prefix: kernel(...) `$result` subject blocks must share one " *
+        "`|id|` (plain `(1 | group)` blocks are separate 1-dim blocks, " *
+        "not the correlated block)")
+    for lp in subject_lps
+        d = decls[lp]
+        d.uncorrelated && error(
+            "$prefix: kernel(...) `$result` subject `$lp` uses `||` " *
+            "(the twin slice needs the correlated `|` block)")
+        d.id === bucket_id || error(
+            "$prefix: kernel(...) `$result` subject `$lp` joins " *
+            "`|$(d.id)|`, not the shared `|$bucket_id|` block")
+        d.descriptor isa NamedColumn || error(
+            "$prefix: kernel(...) `$result` subject `$lp` needs a " *
+            "plain grouping column (no `mm(...)`/`gr(...)`)")
+        name(d.descriptor) === name(first_decl.descriptor) || error(
+            "$prefix: kernel(...) `$result` subject `$lp` groups by " *
+            "`$(name(d.descriptor))`, not the shared " *
+            "`$(name(first_decl.descriptor))` group")
+        det = Tuple(e for e in d.effects
+            if !(e isa Integer && e == 0))
+        (length(det) == 1 && det[1] isa Integer && det[1] == 1) || error(
+            "$prefix: kernel(...) `$result` subject `$lp` block must " *
+            "be intercept-only `(1 | $bucket_id | " *
+            "$(name(d.descriptor)))`; got effects $(d.effects)")
+    end
+    group = name(first_decl.descriptor)
+    # No other grouped terms anywhere: unplanned ranef must never
+    # silently drop.
+    for d in ctx.group_declarations
+        d.predictor in subject_lps || error(
+            "$prefix: kernel(...) `$result` random effect on " *
+            "`$(d.predictor)` is outside the twin slice (only the " *
+            "shared subject block is planned)")
+    end
+    group_data = get(ctx.data, group, nothing)
+    group_data isa AbstractVector || error(
+        "$prefix: kernel(...) `$result` subject group `$group` must " *
+        "be a bound data vector")
+    n_subjects = length(group_data)
+    group_data == collect(1:n_subjects) || error(
+        "$prefix: kernel(...) `$result` subject group `$group` must " *
+        "be exactly `1:$n_subjects` in order (subject rows index " *
+        "subjects positionally)")
+    cgroups = collect(centered_groups)
+    (length(cgroups) == 1 && first(cgroups) === group) || error(
+        "$prefix: kernel(...) `$result` varying-source model needs " *
+        "`centered_groups=[:$group]` (the twin's centered subject " *
+        "block); got `$cgroups`")
+    # Shared-block priors: one block-wide `sd` (Exponential) + one
+    # `cor` (LKJCholesky, K = block width). Anything else dangles.
+    ranef_specs = ranef_effect_priors(brmi)
+    for spec in ranef_specs
+        spec.id === bucket_id || error(
+            "$prefix: kernel(...) `$result` `$(spec.class)` prior on " *
+            "`|$(spec.id)|` is outside the twin slice (only the " *
+            "shared `|$bucket_id|` block is planned)")
+    end
+    sd_specs = [s for s in ranef_specs if s.class === :sd]
+    length(sd_specs) == 1 || error(
+        "$prefix: kernel(...) `$result` needs one block-wide " *
+        "`sd(:, $bucket_id)` prior; got $(length(sd_specs))")
+    sd_spec = only(sd_specs)
+    (isnothing(sd_spec.predictor) && isnothing(sd_spec.coefficient)) ||
+        error("$prefix: kernel(...) `$result` `sd` prior must be " *
+              "block-wide `sd(:, $bucket_id)`")
+    sd_spec.family === Exponential || error(
+        "$prefix: kernel(...) `$result` `sd(:, $bucket_id)` prior " *
+        "must be `Exponential`; got `$(sd_spec.family)`")
+    isempty(sd_spec.keywords) || error(
+        "$prefix: kernel(...) `$result` `sd(:, $bucket_id)` prior " *
+        "takes no keywords")
+    length(sd_spec.arguments) == 1 || error(
+        "$prefix: kernel(...) `$result` `sd(:, $bucket_id)` prior " *
+        "must be `Exponential(scale)`")
+    sd_scale = _brm_numeric_constant(only(sd_spec.arguments))
+    (sd_scale isa Real && isfinite(sd_scale) && sd_scale > 0) || error(
+        "$prefix: kernel(...) `$result` `sd(:, $bucket_id)` " *
+        "`Exponential` scale must be finite and positive")
+    cor_specs = [s for s in ranef_specs if s.class === :cor]
+    length(cor_specs) == 1 || error(
+        "$prefix: kernel(...) `$result` needs one `cor(:, $bucket_id)` " *
+        "prior; got $(length(cor_specs))")
+    eta = _brm_ranef_lkj_eta(only(cor_specs),
+        _RK_VARYINGSOURCE_N_SUBJECT; prefix)
+    centered = _RKVaryingSourceCentered(
+        bucket_id, group, subject_lps, eta, Float64(sd_scale))
+    # Dose vs placebo `ragged` LPs, by LP form (population vs `0 +
+    # hsgp`); kernel-positional order maps to native slots.
+    dose_entries = [e for e in pos.lp_ragged
+        if !_rk_varyingsource_is_placebo(brmi, e.target)]
+    placebo_entries = [e for e in pos.lp_ragged
+        if _rk_varyingsource_is_placebo(brmi, e.target)]
+    length(dose_entries) == _RK_VARYINGSOURCE_N_DOSE || error(
+        "$prefix: kernel(...) `$result` varying-source model needs " *
+        "$_RK_VARYINGSOURCE_N_DOSE dose-axis linear predictors; got " *
+        "$(length(dose_entries))")
+    length(placebo_entries) == _RK_VARYINGSOURCE_N_PLACEBO || error(
+        "$prefix: kernel(...) `$result` varying-source model needs " *
+        "$_RK_VARYINGSOURCE_N_PLACEBO placebo HSGP predictors; got " *
+        "$(length(placebo_entries))")
+    dose_groups = unique(e.group for e in dose_entries)
+    length(dose_groups) == 1 || error(
+        "$prefix: kernel(...) `$result` dose predictors group by " *
+        "different columns $dose_groups (one dose axis)")
+    placebo_groups = unique(e.group for e in placebo_entries)
+    length(placebo_groups) == 1 || error(
+        "$prefix: kernel(...) `$result` placebo predictors group by " *
+        "different columns $placebo_groups (one placebo axis)")
+    dose_group, placebo_group = only(dose_groups), only(placebo_groups)
+    dose_lps = Symbol[e.target for e in dose_entries]
+    placebo_lps = Symbol[e.target for e in placebo_entries]
+    dose_group_data = ctx.data[dose_group]
+    n_dose = length(dose_group_data)
+    # Effectiveness: the one non-slice name in the locations call.
+    globals_in_call = Symbol[a for a in cell.loc_args if !(a in params)]
+    length(globals_in_call) == 1 || error(
+        "$prefix: kernel(...) `$result` locations call must reference " *
+        "exactly one model global (the effectiveness submodel); got " *
+        "$globals_in_call")
+    effectiveness = only(globals_in_call)
+    gp_k, gp_slope_scales, gp_amplitude_scale =
+        _rk_varyingsource_effectiveness(brmi, result, effectiveness)
+    # Observation roles, anchored in the cell: values = obs LHS,
+    # assay = `assay_scale` selector, lloq = 4th arg. Both scale
+    # calls share the assay slice and arity (1 + n_assays).
+    values_idx = findfirst(e -> e.param === cell.obs_response, pos.data_ragged)
+    values_idx === nothing && error(
+        "$prefix: kernel(...) `$result` observation response " *
+        "`$(cell.obs_response)` must be a `ragged` data slice")
+    values_entry = pos.data_ragged[values_idx]
+    obs_group = values_entry.group
+    obs_group_data = ctx.data[obs_group]
+    n_obs_axis = length(obs_group_data)
+    add_call, prop_call = cell.obs_dist.args[3], cell.obs_dist.args[4]
+    for (nm, call) in (("additive", add_call), ("proportional", prop_call))
+        (call isa Expr && call.head === :call && length(call.args) >= 2 &&
+            call.args[1] === _RK_VARYINGSOURCE_PICK) || error(
+            "$prefix: kernel(...) `$result` $nm scale must be " *
+            "`assay_scale(assay, s_1, ...)`; got $(repr(call))")
+    end
+    add_call.args[2] === prop_call.args[2] || error(
+        "$prefix: kernel(...) `$result` additive/proportional " *
+        "`assay_scale` calls select different assays")
+    assay_param = add_call.args[2]
+    assay_param isa Symbol || error(
+        "$prefix: kernel(...) `$result` `assay_scale` selector must " *
+        "be a cell name; got $(repr(assay_param))")
+    assay_idx = findfirst(e -> e.param === assay_param, pos.data_ragged)
+    assay_idx === nothing && error(
+        "$prefix: kernel(...) `$result` `assay_scale` selector " *
+        "`$assay_param` must be a `ragged` data slice")
+    assay_entry = pos.data_ragged[assay_idx]
+    assay_entry.group === obs_group || error(
+        "$prefix: kernel(...) `$result` assay slice groups by " *
+        "`$(assay_entry.group)`, not the observation axis `$obs_group`")
+    lloq_param = cell.obs_dist.args[5]
+    lloq_param isa Symbol || error(
+        "$prefix: kernel(...) `$result` censoring bound must be a " *
+        "cell name; got $(repr(lloq_param))")
+    lloq_idx = findfirst(e -> e.param === lloq_param, pos.data_ragged)
+    lloq_idx === nothing && error(
+        "$prefix: kernel(...) `$result` censoring bound `$lloq_param` " *
+        "must be a `ragged` data slice")
+    lloq_entry = pos.data_ragged[lloq_idx]
+    lloq_entry.group === obs_group || error(
+        "$prefix: kernel(...) `$result` lloq slice groups by " *
+        "`$(lloq_entry.group)`, not the observation axis `$obs_group`")
+    obs_assay_data = assay_entry.data
+    all(x -> x isa Real && isfinite(x) && isinteger(x) && 1 <= x <= 3,
+        obs_assay_data) || error(
+        "$prefix: kernel(...) `$result` assay codes must be integers " *
+        "in 1:3")
+    present = sort(unique(Int.(obs_assay_data)))
+    present == collect(1:maximum(present)) || error(
+        "$prefix: kernel(...) `$result` assay codes must be contiguous " *
+        "1:n; got $present")
+    n_assays = maximum(present)
+    length(add_call.args) == 1 + 1 + n_assays || error(
+        "$prefix: kernel(...) `$result` additive `assay_scale` needs " *
+        "$n_assays scales (one per assay); got " *
+        "$(length(add_call.args) - 2)")
+    length(prop_call.args) == 1 + 1 + n_assays || error(
+        "$prefix: kernel(...) `$result` proportional `assay_scale` " *
+        "needs $n_assays scales (one per assay); got " *
+        "$(length(prop_call.args) - 2)")
+    assays = _RKVaryingSourceAssay[]
+    for (code, add_nm, prop_nm) in zip(
+            present, add_call.args[3:end], prop_call.args[3:end])
+        for (nm, what) in ((add_nm, "additive"), (prop_nm, "proportional"))
+            nm isa Symbol || error(
+                "$prefix: kernel(...) `$result` $what assay-$code " *
+                "scale must be a parameter name; got $(repr(nm))")
+        end
+        add_scale = _rk_varyingsource_scale_param(
+            brmi, result, add_nm, "additive", code)
+        prop_scale = _rk_varyingsource_scale_param(
+            brmi, result, prop_nm, "proportional", code)
+        push!(assays, _RKVaryingSourceAssay(
+            code, add_nm, prop_nm, add_scale, prop_scale))
+    end
+    # Data-slice roles: the obs axis carries exactly values/assay/lloq,
+    # the dose axis exactly the amounts slice, the placebo axis none.
+    for entry in pos.data_ragged
+        if entry.group === obs_group
+            entry.param in (cell.obs_response, assay_param, lloq_param) ||
+                error("$prefix: kernel(...) `$result` observation-axis " *
+                      "slice `$(entry.param)` is not the values, assay, " *
+                      "or lloq slice")
+        elseif entry.group === dose_group
+            entry.param in Set(a for a in cell.loc_args) || error(
+                "$prefix: kernel(...) `$result` dose slice " *
+                "`$(entry.param)` is never read by the cell")
+        elseif entry.group === placebo_group
+            error("$prefix: kernel(...) `$result` placebo-axis data " *
+                  "slice `$(entry.param)` is out of the twin slice " *
+                  "(the placebo axis carries HSGP predictors only)")
+        else
+            error("$prefix: kernel(...) `$result` data slice " *
+                  "`$(entry.param)` groups by `$(entry.group)` " *
+                  "(outside the observation/dose/placebo axes)")
+        end
+    end
+    dose_slices = [e for e in pos.data_ragged if e.group === dose_group]
+    length(dose_slices) == 1 || error(
+        "$prefix: kernel(...) `$result` needs exactly one dose-axis " *
+        "data slice (the amounts); got $(length(dose_slices))")
+    dose_amounts_entry = only(dose_slices)
+    # Every slice param is read (locations call or observation); every
+    # call arg is a slice param or the effectiveness global. Dead or
+    # unknown cell inputs fail closed.
+    read_params = Set(cell.loc_args)
+    push!(read_params, cell.obs_response, assay_param, lloq_param)
+    for param in cell.params
+        param in read_params || error(
+            "$prefix: kernel(...) `$result` slice `$(param)` is never " *
+            "read by the cell")
+    end
+    for a in cell.loc_args
+        (a in params || a === effectiveness) || error(
+            "$prefix: kernel(...) `$result` locations call arg `$a` " *
+            "is neither a slice param nor `$effectiveness`")
+    end
+    # Design positionals: per-subject precomputed grids — length-checked,
+    # then DROPPED (the native schedule rebuilds every grid).
+    for entry in pos.design
+        length(entry.data) == n_subjects || error(
+            "$prefix: kernel(...) `$result` design column " *
+            "`$(entry.column)` has length $(length(entry.data)) for " *
+            "$n_subjects subjects")
+    end
+    dropped_design = Symbol[e.column for e in pos.design]
+    # Raw bridge: required, then cross-checked exactly against the
+    # BRMI-bound twin data on every shared column.
+    varyingsource_raw === nothing && error(
+        "$prefix: kernel(...) `$result` varying-source model needs " *
+        "`varyingsource_raw=rk_varyingsource_raw(stan_data)` (the raw " *
+        "times/keys/lags never enter the twin data container)")
+    raw = varyingsource_raw
+    length(raw.obs_time) == n_obs_axis || error(
+        "$prefix: kernel(...) `$result` raw bundle has " *
+        "$(length(raw.obs_time)) observation times for $n_obs_axis " *
+        "observation rows")
+    length(raw.dose_time) == n_dose || error(
+        "$prefix: kernel(...) `$result` raw bundle has " *
+        "$(length(raw.dose_time)) dose times for $n_dose dose rows")
+    raw.obs_subject == collect(obs_group_data) || error(
+        "$prefix: kernel(...) `$result` raw bundle observation " *
+        "subjects differ from the twin data (row misalignment)")
+    raw.dose_subject == collect(dose_group_data) || error(
+        "$prefix: kernel(...) `$result` raw bundle dose subjects " *
+        "differ from the twin data (row misalignment)")
+    raw.obs_assay == Int.(obs_assay_data) || error(
+        "$prefix: kernel(...) `$result` raw bundle assay codes " *
+        "differ from the twin data (row misalignment)")
+    raw.obs_value == Float64.(values_entry.data) || error(
+        "$prefix: kernel(...) `$result` raw bundle observation values " *
+        "differ from the twin data (row misalignment)")
+    raw.obs_lloq == Float64.(lloq_entry.data) || error(
+        "$prefix: kernel(...) `$result` raw bundle lloq bounds " *
+        "differ from the twin data (row misalignment)")
+    raw.dose_amount == Float64.(dose_amounts_entry.data) || error(
+        "$prefix: kernel(...) `$result` raw bundle dose amounts " *
+        "differ from the twin data (row misalignment)")
+    maximum(raw.obs_subject) == n_subjects || error(
+        "$prefix: kernel(...) `$result` observations cover subjects " *
+        "1:$(maximum(raw.obs_subject)) but the subject axis has " *
+        "$n_subjects subjects")
+    # ---- predictor planning (subject + dose population parts) ----
+    isempty(r2d2_priors(brmi)) || error(
+        "$prefix: kernel(...) `$result` `r2d2` priors are out of the " *
+        "twin slice")
+    any(s -> s.family === Horseshoe, effect_priors(brmi)) && error(
+        "$prefix: kernel(...) `$result` `Horseshoe` priors are out of " *
+        "the twin slice")
+    planned_lps = Set([subject_lps; dose_lps; placebo_lps])
+    for spec in effect_priors(brmi)
+        spec.predictor === _EFFECT_COLON || spec.predictor in planned_lps ||
+            error("$prefix: kernel(...) `$result` population prior on " *
+                  "unknown predictor `$(spec.predictor)`")
+    end
+    available = Tuple([subject_lps; dose_lps; placebo_lps])
+    # SB-mirror tolerant fan-out needs the global half: a `:` predictor
+    # layer that matches no planned LP is a typo, not a skip (else it
+    # silently vanishes). Matchability uses the same designs the seam
+    # consumes (placebo LPs take no population priors).
+    for spec in effect_priors(brmi)
+        spec.predictor === _EFFECT_COLON || continue
+        spec.coefficient === _EFFECT_COLON && continue
+        matched = false
+        for lp in [subject_lps; dose_lps]
+            design = _brm_prepare_predictor_geometry(brmi, ctx, lp;
+                available_predictors=available,
+                tolerant_default=true).component.design
+            if any(c -> spec.coefficient in c.effect_addresses,
+                    design.columns)
+                matched = true
+                break
+            end
+        end
+        matched || error(
+            "$prefix: kernel(...) `$result` " *
+            "`effect(:, $(spec.coefficient))` matches no population " *
+            "coefficient of the twin's linear predictors")
+    end
+    columns = Dict{Symbol,AbstractVector}()
+    derived = _RKDerivedSpec[]
+    taken = Set{Symbol}([subject_lps; dose_lps; placebo_lps;
+        effectiveness; result; group])
+    for a in assays
+        push!(taken, a.add, a.prop)
+    end
+    for nm in (:dose_slope, :conc_slope, :eff_sd, :rho_d, :rho_c,
+            :rho_p, :sd_p, :rho_csf, :sd_csf, :gp_w, :p_w, :c_w)
+        (nm in taken || haskey(ctx.data, nm)) && error(
+            "$prefix: kernel(...) `$result` joint-vocabulary name `$nm` " *
+            "collides with a model or data name")
+        push!(taken, nm)
+    end
+    margins = _RKRanefMargin[_RKRanefMargin(lp, :Intercept,
+        _RKRanefZRecipe(:ones, :none, nothing)) for lp in subject_lps]
+    slices = Tuple{Symbol,UnitRange{Int}}[(lp, i:i)
+        for (i, lp) in enumerate(subject_lps)]
+    bucket = _RKRanefBucket(centered.id, group, :correlated, margins,
+        slices, centered.lkj_eta,
+        _rk_ranef_bucket_label(centered.id, group),
+        _rk_plain_grouping(group))
+    lookup = Dict{Tuple{Symbol,Symbol,Union{Nothing,Symbol}},
+        Union{_RKRanefBucket,Nothing}}()
+    for lp in subject_lps
+        lookup[(lp, group, centered.id)] = bucket
+    end
+    me_sources = Set{Symbol}()
+    subject_predictors = _RKPredictorSpec[]
+    subject_priors = _RKPopulationPrior[]
+    for lp in subject_lps
+        _rk_predictor_link(brmi, lp) === :identity || error(
+            "$prefix: kernel(...) `$result` subject `$lp` must be " *
+            "unlinked (identity); linked subject LPs are out of the " *
+            "twin slice")
+        spec, priors, r2d2, hs = _rk_plan_predictor(brmi, ctx, lp,
+            available, columns, derived, taken, lookup, me_sources;
+            tolerant_default=true)
+        r2d2 === nothing || error(
+            "$prefix: kernel(...) `$result` subject `$lp` `r2d2` is " *
+            "out of the twin slice")
+        isempty(hs) || error(
+            "$prefix: kernel(...) `$result` subject `$lp` `Horseshoe` " *
+            "is out of the twin slice")
+        # Exactly one `:ranef_gather` per subject LP is guaranteed: the
+        # group-declaration gate above admits exactly one grouped term
+        # per subject LP, and the lookup below carries the shared
+        # bucket for every one of them.
+        for term in spec.terms
+            term.kind in (:intercept, :continuous, :factor, :offset,
+                :monotonic, :monotonic_summand, :ranef_gather) || error(
+                "$prefix: kernel(...) `$result` subject `$lp` term " *
+                "kind `$(term.kind)` is out of the twin slice")
+        end
+        push!(subject_predictors, spec)
+        append!(subject_priors, priors)
+    end
+    empty_lookup = Dict{Tuple{Symbol,Symbol,Union{Nothing,Symbol}},
+        Union{_RKRanefBucket,Nothing}}()
+    dose_predictors = _RKPredictorSpec[]
+    dose_priors = _RKPopulationPrior[]
+    for lp in dose_lps
+        _rk_predictor_link(brmi, lp) === :identity || error(
+            "$prefix: kernel(...) `$result` dose `$lp` must be " *
+            "unlinked (identity); linked dose LPs are out of the twin " *
+            "slice")
+        # Population-only is guaranteed: the group-declaration gate
+        # above rejects any grouped term outside the subject LPs.
+        spec, priors, r2d2, hs = _rk_plan_predictor(brmi, ctx, lp,
+            available, columns, derived, taken, empty_lookup, me_sources;
+            tolerant_default=true)
+        r2d2 === nothing || error(
+            "$prefix: kernel(...) `$result` dose `$lp` `r2d2` is out " *
+            "of the twin slice")
+        isempty(hs) || error(
+            "$prefix: kernel(...) `$result` dose `$lp` `Horseshoe` is " *
+            "out of the twin slice")
+        for term in spec.terms
+            # Mirrors the native dose role (call args 3:5): no
+            # intercept — the twin's dose LPs are `0 + ...`.
+            term.kind in (:continuous, :factor, :offset,
+                :monotonic, :monotonic_summand) || error(
+                "$prefix: kernel(...) `$result` dose `$lp` term kind " *
+                "`$(term.kind)` is out of the twin slice (the native " *
+                "dose role admits continuous/factor/offset/MO terms)")
+        end
+        push!(dose_predictors, spec)
+        append!(dose_priors, priors)
+    end
+    # Mixed dose/subject column use rejects native-side (one name
+    # binds one vector); fail closed here with BRM attribution.
+    subject_cols = Set{Symbol}()
+    for spec in subject_predictors, term in spec.terms
+        term.kind === :ranef_gather && continue
+        union!(subject_cols, term.columns)
+    end
+    dose_cols = Set{Symbol}()
+    for spec in dose_predictors, term in spec.terms
+        union!(dose_cols, term.columns)
+    end
+    mixed = intersect(subject_cols, dose_cols)
+    isempty(mixed) || error(
+        "$prefix: kernel(...) `$result` column(s) $(sort!(collect(mixed))) " *
+        "feed both subject and dose predictors (mixed dose/subject use " *
+        "rejects; one name binds one vector)")
+    # Placebo HSGP axes + hyperpriors (native expands from innovations).
+    placebo_axes = Symbol[]
+    placebo_ks = Int[]
+    for lp in placebo_lps
+        _rk_predictor_link(brmi, lp) === :identity || error(
+            "$prefix: kernel(...) `$result` placebo `$lp` must be " *
+            "unlinked (identity)")
+        axis, k = _rk_varyingsource_hsgp(
+            brmi, ctx, result, lp, available)
+        push!(placebo_axes, axis)
+        push!(placebo_ks, k)
+    end
+    length(unique(placebo_axes)) == _RK_VARYINGSOURCE_N_PLACEBO || error(
+        "$prefix: kernel(...) `$result` placebo HSGPs must run on " *
+        "distinct axes; got $placebo_axes")
+    placebo_group_data = ctx.data[placebo_group]
+    placebo_hypers = NamedTuple[]
+    for (lp, axis) in zip(placebo_lps, placebo_axes)
+        axis_data = get(ctx.data, axis, nothing)
+        axis_data isa AbstractVector || error(
+            "$prefix: kernel(...) `$result` placebo `$lp` axis " *
+            "`$axis` must be a bound data vector")
+        length(axis_data) == length(placebo_group_data) || error(
+            "$prefix: kernel(...) `$result` placebo `$lp` axis " *
+            "`$axis` has length $(length(axis_data)) for " *
+            "$(length(placebo_group_data)) placebo rows")
+        key = Symbol("hsgp($(axis))")
+        rho = _rk_varyingsource_term_prior(
+            brmi, result, lp, key, :term_length_scale)
+        sd = _rk_varyingsource_term_prior(
+            brmi, result, lp, key, :term_sd)
+        push!(placebo_hypers, (; rho, sd))
+    end
+    # No term-prior leftover sweep: shared preparation validates every
+    # term prior against an existing term (nonexistent terms and
+    # inapplicable classes fail loudly there), structured terms in
+    # subject/dose LPs trip the kind gates above, and `mo` simplex
+    # priors are consumed by mo planning (a sweep here would wrongly
+    # reject them). The resolver above requires exactly the placebo
+    # hyperprior pair per HSGP.
+    # Sampled parameters (all prior-only; no assignments on this path,
+    # so no acyclicity gate). Hyper names are the joint peer-fixture
+    # vocabulary (positional at the native boundary).
+    parameters = _RKSampledParameter[]
+    for a in assays
+        push!(parameters, _RKSampledParameter(
+            a.add, :Exponential, (a.add_scale,), nothing, a.add))
+        push!(parameters, _RKSampledParameter(
+            a.prop, :Exponential, (a.prop_scale,), nothing, a.prop))
+    end
+    gp_lower = _rk_varyingsource_gp_lower(gp_k)
+    push!(parameters, _RKSampledParameter(
+        :dose_slope, :Normal, (0.0, gp_slope_scales[1]), nothing, :dose_slope))
+    push!(parameters, _RKSampledParameter(
+        :conc_slope, :Normal, (0.0, gp_slope_scales[2]), nothing, :conc_slope))
+    push!(parameters, _RKSampledParameter(
+        :eff_sd, :Normal, (0.0, gp_amplitude_scale), :positive, :eff_sd))
+    push!(parameters, _RKSampledParameter(
+        :rho_d, :Uniform, (gp_lower, 2.0), nothing, :rho_d))
+    push!(parameters, _RKSampledParameter(
+        :rho_c, :Uniform, (gp_lower, 2.0), nothing, :rho_c))
+    for (lp, (nm_rho, nm_sd), hyper) in zip(placebo_lps,
+            ((:rho_p, :sd_p), (:rho_csf, :sd_csf)), placebo_hypers)
+        push!(parameters, _RKSampledParameter(
+            nm_rho, :Uniform, hyper.rho, nothing, nm_rho))
+        push!(parameters, _RKSampledParameter(
+            nm_sd, :LogNormal, hyper.sd, nothing, nm_sd))
+    end
+    vectors = _RKVectorParameter[
+        _RKVectorParameter(:gp_w, :vector_normal, (0.0, 1.0),
+            gp_k * gp_k, :gp_w),
+        _RKVectorParameter(:p_w, :vector_normal, (0.0, 1.0),
+            placebo_ks[1], :p_w),
+        _RKVectorParameter(:c_w, :vector_normal, (0.0, 1.0),
+            placebo_ks[2], :c_w),
+    ]
+    append!(vectors, _rk_plan_monotonic_vectors!(
+        [subject_predictors; dose_predictors]))
+    # Columns: group + raw vs_ namespace + per-assay splits (design
+    # columns are already in — term planners wrote them). No planned
+    # term may consume a grouping column as design (the bind namespace
+    # is flat; one name binds one vector).
+    for spec in [subject_predictors; dose_predictors], term in spec.terms
+        term.kind === :ranef_gather && continue
+        for gcol in (group, dose_group, placebo_group)
+            gcol in term.columns && error(
+                "$prefix: kernel(...) `$result` predictor `$(spec.name)` " *
+                "consumes grouping column `$gcol` as design (one name " *
+                "binds one vector)")
+        end
+    end
+    columns[group] = group_data
+    vs_names = (:vs_obs_subject, :vs_obs_time, :vs_obs_assay,
+        :vs_obs_value, :vs_obs_lloq,
+        :vs_dose_subject, :vs_dose_time, :vs_dose_amount,
+        :vs_dose_treatment, :vs_discretization)
+    for nm in vs_names
+        (nm in taken || haskey(columns, nm) ||
+            haskey(ctx.data, nm)) && error(
+            "$prefix: kernel(...) `$result` raw column `$nm` collides " *
+            "with a model or data name")
+        push!(taken, nm)
+    end
+    columns[:vs_obs_subject] = raw.obs_subject
+    columns[:vs_obs_time] = raw.obs_time
+    columns[:vs_obs_assay] = raw.obs_assay
+    columns[:vs_obs_value] = raw.obs_value
+    columns[:vs_obs_lloq] = raw.obs_lloq
+    columns[:vs_dose_subject] = raw.dose_subject
+    columns[:vs_dose_time] = raw.dose_time
+    columns[:vs_dose_amount] = raw.dose_amount
+    columns[:vs_dose_treatment] = raw.dose_treatment
+    columns[:vs_discretization] = raw.discretization
+    # Per-assay Boolean masks for the lazy `ifelse.(...)` scale
+    # selectors (codes 1..n-1; the last assay is the else branch).
+    # A literal `[s_1, ..., s_n][assay]` gather is not admitted
+    # thin-layer-side (grouped gather sources are Symbols only), so
+    # the selectors branch on bound masks instead.
+    for a in assays[1:max(length(assays) - 1, 0)]
+        mcol = Symbol(:vs_assay_is_, a.code)
+        (mcol in taken || haskey(columns, mcol) ||
+            haskey(ctx.data, mcol)) && error(
+            "$prefix: kernel(...) `$result` assay mask `$mcol` " *
+            "collides with a model or data name")
+        push!(taken, mcol)
+        columns[mcol] = Vector{Bool}(raw.obs_assay .== a.code)
+    end
+    for spec in subject_predictors, term in spec.terms, col in term.columns
+        length(columns[col]) == n_subjects || error(
+            "$prefix: kernel(...) `$result` subject `$(spec.name)` " *
+            "column `$col` has length $(length(columns[col])) for " *
+            "$n_subjects subjects")
+    end
+    for spec in dose_predictors, term in spec.terms, col in term.columns
+        length(columns[col]) == n_dose || error(
+            "$prefix: kernel(...) `$result` dose `$(spec.name)` column " *
+            "`$col` has length $(length(columns[col])) for $n_dose " *
+            "dose rows")
+    end
+    # No-leftover operations: every non-prior op is planned.
+    planned = Set([subject_lps; dose_lps; placebo_lps; effectiveness;
+        [a.add for a in assays]; [a.prop for a in assays]; result])
+    for (key, op_nc) in pairs(brmi.operations)
+        key in planned && continue
+        op_nc isa NamedColumn || error(
+            "$prefix: kernel(...) `$result` operation `$key` is " *
+            "outside the twin slice")
+        op = parent(op_nc)
+        op isa DataColumn && continue # raw data columns are not operations
+        is_prior = op isa ExprColumn && getf(op) === (~) &&
+            let lhs_e = _as_expr_column(getargs(op, 2)[1])
+                lhs_e !== nothing && getf(lhs_e) === effect
+            end
+        is_prior && continue
+        error("$prefix: kernel(...) `$result` operation `$key` is " *
+              "outside the twin slice (only the twin's LPs, submodel, " *
+              "scales, priors, and kernel are planned)")
+    end
+    spec = _RKVaryingSourceSpec(result, Symbol("kernel_nsub_", result),
+        n_subjects, group, subject_lps, dose_lps,
+        placebo_lps[1], placebo_lps[2], placebo_ks[1], placebo_ks[2],
+        effectiveness, gp_k, gp_slope_scales, gp_amplitude_scale,
+        centered, assays,
+        :vs_obs_subject, :vs_obs_time, :vs_obs_assay,
+        :vs_obs_value, :vs_obs_lloq,
+        :vs_dose_subject, :vs_dose_time, :vs_dose_amount,
+        :vs_dose_treatment, :vs_discretization,
+        raw.placebo_lo, raw.placebo_hi, dropped_design)
+    _RKVaryingSourcePlan(spec, [bucket], subject_predictors, subject_priors,
+        dose_predictors, dose_priors, vectors, parameters, columns)
+end
+
 # A modeled ordinal scale feeds nothing else: a discrimination
 # predictor that also fills a location, scale/shape, or categorical-logit
 # tail slot would need two links at once (the scale is `log` by
@@ -7304,12 +8440,20 @@ everything else fails closed. The package extension translates the
 returned [`_RKStructuralPlan`](@ref) to the thin-layer contract at the
 boundary.
 """
-function _brm_rk_plan(brmi::BRMI)
+function _brm_rk_plan(brmi::BRMI; centered_groups=(),
+        varyingsource_raw=nothing)
     prefix = "RK backend"
-    # A kernel(...) model routes to the panel-kernel planner (which admits the
-    # ranef-free panel case and fails closed on the rest); it has no top-level
+    # A kernel(...) model routes to the kernel planner (panel or
+    # varying-source by cell recognition); it has no top-level
     # observation, so it must not enter the GLM flow below.
-    isempty(_rk_kernel_ops(brmi)) || return _brm_rk_kernel_plan(brmi)
+    isempty(_rk_kernel_ops(brmi)) || return _brm_rk_kernel_plan(brmi;
+        centered_groups, varyingsource_raw)
+    isempty(centered_groups) || error(
+        "$prefix: `centered_groups` is admitted only for varying-source " *
+        "kernel models (centered GLM blocks are out of slice 1)")
+    varyingsource_raw === nothing || error(
+        "$prefix: `varyingsource_raw` is admitted only for " *
+        "varying-source kernel models")
     observations = _brm_direct_observations(brmi; prefix)
     keys = Tuple(observation.key for observation in observations)
     length(unique(keys)) == length(keys) || error(

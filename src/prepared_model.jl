@@ -395,7 +395,8 @@ end
 
 function _brm_prepare_predictor_geometry(
         brmi::BRMI, context::_BRMBackendContext, predictor::Symbol;
-        available_predictors=(predictor,), training=nothing)
+        available_predictors=(predictor,), training=nothing,
+        tolerant_default::Bool=false)
     random_effects = _brm_simple_random_effect_plans(
         brmi, predictor, context; required=true)
     op = linear_predictor_op(brmi, predictor)
@@ -432,7 +433,8 @@ function _brm_prepare_predictor_geometry(
     predictor_plan = _BRMPopulationPredictor(
         name, link_lhs_fn, _brm_lp_emitted_name(name, link_lhs_fn), design)
     priors = _brm_simple_population_effect_overrides(
-        brmi, design; prefix="BRM preparation", available_predictors)
+        brmi, design; prefix="BRM preparation", available_predictors,
+        tolerant_default)
     isnothing(priors) && (priors = Any[nothing for _ in design.columns])
     defaults = zeros(Float64, length(priors)), ones(Float64, length(priors))
     component = _BRMPopulationComponent(

@@ -2266,7 +2266,8 @@ prior targeting no member still fails loudly.
 function _brm_simple_population_effect_overrides(brmi::BRMI,
                                                  design::_BRMPopulationDesign;
                                                  prefix="BRM backend lowering",
-                                                 available_predictors=(design.target,))
+                                                 available_predictors=(design.target,),
+                                                 tolerant_default::Bool=false)
     specs = effect_priors(brmi)
     isempty(specs) && return nothing
 
@@ -2301,10 +2302,19 @@ function _brm_simple_population_effect_overrides(brmi::BRMI,
             end
             idxs = findall(c -> spec.coefficient in c.effect_addresses,
                            design.columns)
-            isempty(idxs) && error(
-                "$prefix: `$(spec.coefficient)` is not a population coefficient " *
-                "of `$(design.target)`. Available labels: " *
-                "$(join(sort!(available), ", ")).")
+            if isempty(idxs)
+                # SB-mirror tolerant fan-out (opt-in per call): a `:`
+                # predictor layer skips the predictors that lack the
+                # coefficient instead of failing on them. The caller
+                # must prove the statement matched somewhere (else a
+                # typo silently vanishes); explicit addresses still
+                # fail loudly here.
+                all_predictors && tolerant_default && continue
+                error(
+                    "$prefix: `$(spec.coefficient)` is not a population " *
+                    "coefficient of `$(design.target)`. Available labels: " *
+                    "$(join(sort!(available), ", ")).")
+            end
             idxs
         end
         for idx in indices

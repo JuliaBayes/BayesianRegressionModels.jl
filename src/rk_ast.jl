@@ -900,7 +900,9 @@ end
 # prefix cannot collide with the thin layer's implicit `r_<target>_<group>`
 # term labels; `taken` dedups the rest. Rename-independent (targets use
 # original predictor names), so names pre-mint before predictor emission.
-function _rk_ast_ranef_names!(plan::_RKStructuralPlan, taken::Set{Symbol})
+function _rk_ast_ranef_names!(
+        plan::Union{_RKStructuralPlan,_RKVaryingSourcePlan},
+        taken::Set{Symbol})
     draws = Dict{Int,Symbol}()
     effects = Dict{Tuple{Symbol,Symbol,Union{Symbol,Nothing}},Symbol}()
     for (bi, bucket) in enumerate(plan.ranef_buckets)
