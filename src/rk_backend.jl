@@ -8229,6 +8229,15 @@ function _brm_rk_varyingsource_plan(brmi::BRMI, result::Symbol, rhs;
         "$prefix: kernel(...) `$result` column(s) $(sort!(collect(mixed))) " *
         "feed both subject and dose predictors (mixed dose/subject use " *
         "rejects; one name binds one vector)")
+    # Flat coefs emit `b ~ Normal(loc, scale)` only (the twin states
+    # Normal throughout).
+    for prior in [subject_priors; dose_priors]
+        prior.family === :Normal || error(
+            "$prefix: kernel(...) `$result` population prior on " *
+            "`$(prior.predictor)`/`$(prior.addressee)` must be `Normal` " *
+            "(the twin slice emits flat Normal coefs); got " *
+            "`$(prior.family)`")
+    end
     # Placebo HSGP axes + hyperpriors (native expands from innovations).
     placebo_axes = Symbol[]
     placebo_ks = Int[]

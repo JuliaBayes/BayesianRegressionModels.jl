@@ -14,6 +14,7 @@
 
 using Test
 using BayesianRegressionModels
+using CategoricalArrays: categorical
 using Distributions: Bernoulli, Beta, Binomial, Categorical, Cauchy, Dirichlet,
                      Exponential, Gamma, InverseGaussian, Laplace,
                      LocationScale, Logistic, LogNormal, MixtureModel,
@@ -23,6 +24,8 @@ using LogExpFunctions: logistic, logit
 using Statistics: mean
 
 const BRM = BayesianRegressionModels
+
+include(joinpath(@__DIR__, "varyingsource_fixture.jl"))
 
 df = (;
     x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
@@ -2571,4 +2574,151 @@ end
         prog.main.args
     @test Expr(:call, :~, :hc, Expr(:call, :HalfCauchy, 2.0)) in
         prog.main.args
+end
+
+@testset "varyingsource AST flat program" begin
+    # The twin emits a flat joint-fixture program: schedule, sampled
+    # scales/slopes, weight broadcasts, one centered `varying_draws`
+    # block, outer LP assignments, and one grouped `@plate`. No
+    # submodel defs — every name is top-level.
+    plan = vs_test_plan()
+    prog = BRM._rk_emit_ast(plan)
+    @test prog isa BRM._RKEmittedProgram
+    @test prog.defs == Expr[]
+    @test prog.main isa Expr && prog.main.head === :block
+    stmts = prog.main.args
+    # 1 schedule + 15 sampled + 6 vector + 1 draws + 13 slices +
+    # 45 subject + 18 dose + 1 plate.
+    @test length(stmts) == 100
+    @test stmts[1] == Expr(:(=), :vs,
+        Expr(:call, :varyingsource_pkpd_schedule,
+            Expr(:kw, :obs, Expr(:tuple,
+                :vs_obs_subject, :vs_obs_time, :vs_obs_assay)),
+            Expr(:kw, :dose, Expr(:tuple,
+                :vs_dose_subject, :vs_dose_time, :vs_dose_amount,
+                :vs_dose_treatment)),
+            Expr(:kw, :discretization, :vs_discretization)))
+    @test Expr(:call, :~, :a1, Expr(:call, :Exponential, 1.0)) in stmts
+    @test Expr(:call, :~, :r3, Expr(:call, :Exponential, 6.0)) in stmts
+    @test Expr(:call, :~, :dose_slope,
+        Expr(:call, :Normal, 0.0, 1.5)) in stmts
+    @test Expr(:call, :~, :rho_p,
+        Expr(:call, :Uniform, 0.5, 2.0)) in stmts
+    for w in (:gp_w, :p_w, :c_w)
+        @test Expr(:call, :.~, w,
+            Expr(:., :Normal, Expr(:tuple, 0.0, 1.0))) in stmts
+    end
+    @test Expr(:call, :~, :mo_diet_simplex_incr,
+        Expr(:call, :Dirichlet,
+            Expr(:vect, 1.0, 1.0, 1.0))) in stmts
+    draws = Expr(:call, :varying_draws,
+        Expr(:parameters,
+            Expr(:kw, :eta, 2.0),
+            Expr(:kw, :sd, Expr(:call, :Exponential, 0.5)),
+            Expr(:kw, :centered, true)),
+        :subject, Expr(:vect, fill(1, 13)...))
+    @test Expr(:call, :~, :ranef_draws_p_subject, draws) in stmts
+    for (i, lp) in enumerate(_VS_FIX_SUBJECT_LPS)
+        @test Expr(:call, :~, Symbol(:ranef_, lp, :_p_subject),
+            Expr(:call, :varying_slice,
+                :ranef_draws_p_subject, i)) in stmts
+    end
+    @test Expr(:call, :~, :lp1_b1,
+        Expr(:call, :Normal, 0.1, 1.0)) in stmts
+    @test Expr(:(=), :lp1, Expr(:call, :.+,
+        :lp1_b1,
+        Expr(:call, :.*, :lp1_b2, :diseased),
+        Expr(:call, :.*, :lp1_b3, :male),
+        Expr(:call, :.*, :lp1_b4, :age_std),
+        Expr(:call, :.*, :lp1_b5, :weight_std),
+        :ranef_lp1_p_subject)) in stmts
+    # Lean LPs (intercept + one covariate + gather) assign likewise.
+    @test Expr(:(=), :lp3, Expr(:call, :.+,
+        :lp3_b1,
+        Expr(:call, :.*, :lp3_b2, :diseased),
+        :ranef_lp3_p_subject)) in stmts
+    # Dose LPs assign the joint modifier names over dose columns
+    # (`mo()` evaluates outside the plate).
+    @test Expr(:(=), :rate_mod, Expr(:call, :.+,
+        Expr(:call, :.*, :d1_b1, :vessel_bottle),
+        Expr(:call, :.*, :d1_b2, :vessel_bottle_20),
+        Expr(:call, :.*, :d1_b3, :vessel_tablet),
+        Expr(:call, :.*, :d1_b4, :vessel_tablet_60),
+        Expr(:call, :.*, :d1_b5, Expr(:call, :mo,
+            :diet_idx, :mo_diet_simplex_incr)))) in stmts
+    for lhs in (:mode_mod, :f_mod)
+        @test any(stmts) do stmt
+            stmt isa Expr && stmt.head === :(=) && stmt.args[1] === lhs
+        end
+    end
+    read = Expr(:(=), :reads,
+        Expr(:call, :varyingsource_pkpd_read_locs, :vs,
+            :rate_mod, :mode_mod, :f_mod,
+            :gp_w, :dose_slope, :conc_slope, :rho_d, :rho_c, :eff_sd,
+            :p_w, :rho_p, :sd_p,
+            :c_w, :rho_csf, :sd_csf,
+            0.0, 24.0, _VS_FIX_SUBJECT_LPS...))
+    @test length(read.args[2].args) == 32
+    gather = Expr(:(=), :mu,
+        Expr(:ref, :reads, Expr(:., :vs, QuoteNode(:obs_map))))
+    add = Expr(:(=), :vs_add, Expr(:., :ifelse, Expr(:tuple,
+        :vs_assay_is_1, :a1, Expr(:., :ifelse, Expr(:tuple,
+            :vs_assay_is_2, :a2, :a3)))))
+    prop = Expr(:(=), :vs_prop, Expr(:., :ifelse, Expr(:tuple,
+        :vs_assay_is_1, :r1, Expr(:., :ifelse, Expr(:tuple,
+            :vs_assay_is_2, :r2, :r3)))))
+    obs = Expr(:call, :.~, :vs_obs_value,
+        Expr(:., :CensoredAddpropnormal, Expr(:tuple,
+            :mu, :vs_add, :vs_prop, :vs_obs_lloq)))
+    loop = Expr(:for,
+        Expr(:(=), :s, Expr(:call, :(:), 1, :kernel_nsub_loc)),
+        Expr(:block, read, gather, add, prop, obs, :mu))
+    @test stmts[end] == Expr(:macrocall, Symbol("@plate"),
+        LineNumberNode(0), :loc, loop)
+end
+
+@testset "varyingsource AST single assay" begin
+    # One assay: the selectors alias the single scale pair directly
+    # (no `ifelse`, no masks); the read keeps all 31 args.
+    stan = vs_test_stan_data()
+    stan1 = merge(stan, Dict(:assay => fill(1, 7)))
+    data1 = merge(vs_test_data(stan), (; obs_assay=fill(1, 7)))
+    raw1 = vs_test_raw(stan1)
+    body1 = replace(vs_test_body(),
+        "assay_scale(assay_i, a1, a2, a3)" => "assay_scale(assay_i, a1)")
+    body1 = replace(body1,
+        "assay_scale(assay_i, r1, r2, r3)" => "assay_scale(assay_i, r1)")
+    for line in ("a2 ~ Exponential(2.0)\n", "a3 ~ Exponential(3.0)\n",
+            "r2 ~ Exponential(5.0)\n", "r3 ~ Exponential(6.0)\n")
+        body1 = replace(body1, line => "")
+    end
+    plan = BRM._brm_rk_plan(Core.eval(Main, BRM._brm(body1; df=data1));
+        centered_groups=[:subject], varyingsource_raw=raw1)
+    prog = BRM._rk_emit_ast(plan)
+    @test prog.defs == Expr[]
+    plate = prog.main.args[end]
+    @test plate.head === :macrocall && plate.args[1] === Symbol("@plate")
+    @test plate.args[3] === :loc
+    cell = plate.args[4].args[2].args
+    @test Expr(:(=), :vs_add, :a1) in cell
+    @test Expr(:(=), :vs_prop, :r1) in cell
+    @test !any(cell) do stmt
+        stmt isa Expr && Meta.isexpr(stmt.args[end], :.) &&
+            stmt.args[end].args[1] === :ifelse
+    end
+    read = only(filter(cell) do stmt
+        stmt isa Expr && stmt.head === :(=) && stmt.args[1] === :reads
+    end)
+    @test length(read.args[2].args) == 32
+end
+
+@testset "varyingsource AST joint-vocabulary collision" begin
+    # Fixed joint names (`vs`, `reads`, `mu`, modifiers, selectors) -
+    # a model/data name clash fails loud, never dedups silently.
+    data = merge(vs_test_data(), (; mu=vs_test_data().male))
+    body = replace(vs_test_body(), "male" => "mu")
+    brmi = Core.eval(Main, BRM._brm(body; df=data))
+    plan = BRM._brm_rk_plan(brmi;
+        centered_groups=[:subject], varyingsource_raw=vs_test_raw())
+    @test_throws "joint-vocabulary name `mu` collides" BRM._rk_emit_ast(plan)
 end

@@ -24,8 +24,13 @@ const BRM = BayesianRegressionModels
 # vectors; `bind_data` then validates the patched plan with the full
 # thin-layer suite. Kernel plans ride the same route; until
 # the thin-layer KernelPlate reader lands, `lower_rkppl`/`build_kernel`
-# fail closed with thin-layer attribution (leaf 14bv4nq).
-const _RK_PLAN_TYPES = Union{BRM._RKStructuralPlan,BRM._RKKernelPlan}
+# fail closed with thin-layer attribution (leaf 14bv4nq). Varying-source
+# twin plans ride it too; until the peer publishes the
+# `varyingsource_pkpd_*` native contract (`phaseIII`), lowering fails
+# closed thin-layer-side — the `rk_parity.jl` publication tripwire pins
+# that rejection and trips (goes red) exactly when it lifts.
+const _RK_PLAN_TYPES =
+    Union{BRM._RKStructuralPlan,BRM._RKKernelPlan,BRM._RKVaryingSourcePlan}
 
 # Population term kinds a modeled ordinal scale admits (the planner gates
 # the same set; anything else is an internal error here).
@@ -282,6 +287,17 @@ function _rk_translated_plan(plan::BRM._RKKernelPlan)
     unbound = lower_rkppl(emitted.main,
         Tuple(sort!(collect(keys(plan.columns)))); mod=_rk_emit_module(emitted))
     bind_data(unbound, plan.columns; dims=BRM._rk_kernel_bind_dims(plan.kernel))
+end
+
+# Varying-source twin plans: flat program (no defs lattice, no
+# ordinal/MI patching — the plate carries its own observation); the
+# subject count binds as dims like kernel plans.
+function _rk_translated_plan(plan::BRM._RKVaryingSourcePlan)
+    emitted = BRM._rk_emit_ast(plan)
+    unbound = lower_rkppl(emitted.main,
+        Tuple(sort!(collect(keys(plan.columns)))); mod=_rk_emit_module(emitted))
+    bind_data(unbound, plan.columns;
+        dims=Dict(plan.spec.subject_count => plan.spec.n_subjects))
 end
 
 # The executable `model` of an `RKBRMI` is the thin-layer `(; spec, layout)`

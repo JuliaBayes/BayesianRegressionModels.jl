@@ -1484,3 +1484,252 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
     end
     _RKEmittedProgram(defs, Expr(:block, stmts...))
 end
+
+# ---- Varying-source twin emission (flat joint-fixture shape) ----
+#
+# The program mirrors the peer's verified emitter fixture: a schedule
+# declaration, flat `x ~ Dist(...)` sampled statements, flat Normal
+# population coefs, one centered `varying_draws` block, outer LP
+# assignments (subject LPs over subject columns, dose modifiers over
+# dose columns — `mo()` is not in the grouped-cell vocabulary, so dose
+# modifiers evaluate outside the plate and are referenced by name),
+# and one grouped `@plate` (native read call + `obs_map` gather +
+# `ifelse` scale selectors + one censored observation). No submodel
+# lattice: every name is top-level (defs stay empty). Assay scales
+# select through bound Boolean masks (a literal
+# `[s_1, ..., s_n][assay]` gather is not admitted thin-layer-side).
+#
+# Contract gaps vs the `phaseIII` native publication (living tracker:
+# the `varyingsource publication tripwire` in test/rk_parity.jl, which
+# ratchets as each boundary lands):
+# - draws `sd=`/`centered=` keywords: our guess; the pin's
+#   `varying_draws` takes `eta`/`levels` only, and the IR carries
+#   `sd_priors` but no centering (no surface spelling exists either).
+# - `varyingsource_pkpd_schedule` obs-3/dose-4/`discretization`
+#   arities: our guess from the twin's axes (the `linear_pk_schedule`
+#   precedent takes obs-2/dose-3 + ecg/tgi).
+# - weight-vector declaration: `w .~ Normal` fails the needs-data
+#   rule and `@plate` fails bind's n_obs cover rule (both verified);
+#   needs a phaseIII spelling or native-read-side allocation.
+# - `varyingsource_pkpd_read_locs` 31-arg schedule-first shape: our
+#   guess from the CELL_FNS convention (sampled scalars/vectors and
+#   placebo bounds as value args need walker support).
+# - single `reads[vs.obs_map]` gather: our guess (the linear
+#   precedent gathers conc_map then obs_map).
+# Verified lowerable at pin 0c9ebb4d: `ifelse` selectors, the
+# `CensoredAddpropnormal.(mu, add, prop, lloq)` order, whole-column
+# in-cell `.~`, LP refs by name, `for s in 1:kernel_nsub_<result>`.
+const _RK_VARYINGSOURCE_MODIFIERS = (:rate_mod, :mode_mod, :f_mod)
+
+# Centered draws block: `draws ~ varying_draws(group, [1 x K];
+# eta, sd, centered=true)` + one `varying_slice` per margin (the
+# slices gather the centered draws without L/tau re-scaling).
+function _rk_ast_centered_bucket_stmts(bucket::_RKRanefBucket,
+        draws::Symbol, effects::Dict, sd_scale::Float64)
+    margins = Any[_rk_ast_bucket_margin(m.z) for m in bucket.margins]
+    call = Expr(:call, :varying_draws,
+        _rk_ast_group_expr(bucket.grouping), Expr(:vect, margins...))
+    insert!(call.args, 2, Expr(:parameters,
+        Expr(:kw, :eta, bucket.lkj_eta),
+        Expr(:kw, :sd, Expr(:call, :Exponential, sd_scale)),
+        Expr(:kw, :centered, true)))
+    stmts = Expr[Expr(:call, :~, draws, call)]
+    for (target, range) in bucket.slices
+        effect = effects[(target, bucket.group, bucket.id)]
+        idx = length(range) == 1 ? first(range) :
+            Expr(:call, :(:), first(range), last(range))
+        push!(stmts, Expr(:call, :~, effect,
+            Expr(:call, :varying_slice, draws, idx)))
+    end
+    stmts
+end
+
+# Flat coef priors + affine assignment for one twin predictor
+# (subject LPs assign their own name; dose LPs assign the joint
+# modifier names). Priors key `(predictor, addressee)` like the GLM
+# path; every addressee needs its row (the planner guarantees it).
+function _rk_emit_varyingsource_predictor(predictor::_RKPredictorSpec,
+        priors::Dict, effects::Dict, taken::Set{Symbol},
+        columns::Dict{Symbol,AbstractVector}, lhs::Symbol)
+    prefix = "RK backend"
+    stmts = Expr[]
+    coefs = Dict{Int,Symbol}()
+    colactual = Dict{Int,Any}()
+    refactual = Dict{Int,Any}()
+    slot = 0
+    for (index, term) in enumerate(predictor.terms)
+        kind = term.kind
+        if kind === :continuous || kind === :factor || kind === :offset ||
+                kind === :monotonic || kind === :monotonic_summand
+            colactual[index] = only(term.columns)
+        end
+        if kind === :monotonic || kind === :monotonic_summand
+            refactual[index] = term.options.increments
+        elseif kind === :ranef_gather
+            refactual[index] = effects[(predictor.name,
+                term.options.bucket_group, term.options.bucket_id)]
+        end
+        (kind === :offset || kind === :ranef_gather ||
+            kind === :monotonic_summand) && continue
+        slot += 1
+        key = (predictor.name, term.addressee)
+        haskey(priors, key) || error(
+            "$prefix: internal: no population prior for " *
+            "`$(predictor.name)` addressee `$(term.addressee)`")
+        family, args = priors[key]
+        if kind === :factor
+            col = only(term.columns)
+            K = length(_rk_grouping_levels(columns[col]))
+            coef = _rk_ast_coef_name(
+                string(predictor.name, "_b", slot), taken)
+            refactual[index] = coef
+            push!(stmts, _rk_ast_factor_prior(
+                coef, col, term.options, K, family, args))
+        else
+            coef = _rk_ast_coef_name(
+                string(predictor.name, "_b", slot), taken)
+            coefs[index] = coef
+            push!(stmts, Expr(:call, :~, coef,
+                Expr(:call, family, args...)))
+        end
+    end
+    push!(stmts, Expr(:(=), lhs,
+        _rk_ast_affine(predictor, coefs, colactual, refactual)))
+    stmts
+end
+
+# Twin weight-vector prior: `w .~ Normal(0, 1)` in the response
+# broadcast spelling (bare name, dotted distribution). Only the
+# standardized family the planner mints reaches here.
+function _rk_emit_varyingsource_weights(parameter::_RKVectorParameter)
+    parameter.family === :vector_normal || error(
+        "RK backend: internal: twin weight vector " *
+        "`$(parameter.name)` has family `$(parameter.family)`")
+    loc, scale = parameter.args
+    Expr(:call, :.~, parameter.name,
+        Expr(:., :Normal, Expr(:tuple, loc, scale)))
+end
+
+# `vs = varyingsource_pkpd_schedule(obs=(...), dose=(...),
+# discretization=...)` over the raw bridge columns.
+function _rk_emit_varyingsource_schedule(spec::_RKVaryingSourceSpec)
+    Expr(:(=), :vs, Expr(:call, :varyingsource_pkpd_schedule,
+        Expr(:kw, :obs, Expr(:tuple,
+            spec.obs_subject, spec.obs_time, spec.obs_assay)),
+        Expr(:kw, :dose, Expr(:tuple,
+            spec.dose_subject, spec.dose_time, spec.dose_amount,
+            spec.dose_treatment)),
+        Expr(:kw, :discretization, spec.discretization)))
+end
+
+# The 31-arg native read: schedule + 3 dose modifiers + shared GP
+# (port + 2 slopes + 3 scales) + primary HSGP (port + rho + sd) + CSF
+# HSGP (port + rho + sd) + placebo lo/hi + 13 subject logs.
+function _rk_emit_varyingsource_reads(spec::_RKVaryingSourceSpec)
+    Expr(:(=), :reads, Expr(:call, :varyingsource_pkpd_read_locs,
+        :vs, _RK_VARYINGSOURCE_MODIFIERS...,
+        :gp_w, :dose_slope, :conc_slope, :rho_d, :rho_c, :eff_sd,
+        :p_w, :rho_p, :sd_p,
+        :c_w, :rho_csf, :sd_csf,
+        spec.placebo_lo, spec.placebo_hi,
+        spec.subject_lps...))
+end
+
+# One lazy per-assay scale selector: nested `ifelse.(mask, s, ...)`
+# over the bound Boolean masks (last assay is the else branch; a
+# single assay aliases its scale directly).
+function _rk_emit_varyingsource_selector(name::Symbol,
+        scales::Vector{Symbol}, masks::Vector{Symbol})
+    rhs = scales[end]
+    for (mask, scale) in reverse(collect(zip(masks, scales[1:end-1])))
+        rhs = Expr(:., :ifelse, Expr(:tuple, mask, scale, rhs))
+    end
+    Expr(:(=), name, rhs)
+end
+
+# The grouped plate: native read + `obs_map` gather + scale
+# selectors + one censored observation over caller-order obs,
+# collecting the gathered locations.
+function _rk_emit_varyingsource_plate(spec::_RKVaryingSourceSpec)
+    adds = Symbol[a.add for a in spec.assays]
+    props = Symbol[a.prop for a in spec.assays]
+    masks = Symbol[Symbol(:vs_assay_is_, a.code)
+        for a in spec.assays[1:max(length(spec.assays) - 1, 0)]]
+    read_stmt = _rk_emit_varyingsource_reads(spec)
+    gather_stmt = Expr(:(=), :mu, Expr(:ref, :reads,
+        Expr(:., :vs, QuoteNode(:obs_map))))
+    add_stmt = _rk_emit_varyingsource_selector(:vs_add, adds, masks)
+    prop_stmt = _rk_emit_varyingsource_selector(:vs_prop, props, masks)
+    obs_stmt = Expr(:call, :.~, spec.obs_value,
+        Expr(:., :CensoredAddpropnormal,
+            Expr(:tuple, :mu, :vs_add, :vs_prop, spec.obs_lloq)))
+    loop = Expr(:for, Expr(:(=), :s,
+            Expr(:call, :(:), 1, spec.subject_count)),
+        Expr(:block, read_stmt, gather_stmt, add_stmt, prop_stmt,
+            obs_stmt, :mu))
+    Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
+        spec.result, loop)
+end
+
+function _rk_emit_ast(plan::_RKVaryingSourcePlan)
+    prefix = "RK backend"
+    spec = plan.spec
+    taken = Set{Symbol}(keys(plan.columns))
+    for nm in [spec.subject_lps; spec.dose_lps;
+            [spec.placebo_primary, spec.placebo_csf]; spec.effectiveness;
+            spec.result; spec.group]
+        push!(taken, nm)
+    end
+    for p in plan.parameters
+        push!(taken, p.name)
+    end
+    for v in plan.vector_parameters
+        push!(taken, v.name)
+    end
+    # Fixed joint-vocabulary names (peer fixture): a collision is a
+    # model/data name clash to resolve explicitly, never a silent
+    # dedup (both the assignments and the native call use them).
+    for nm in (:vs, :reads, :mu, :rate_mod, :mode_mod, :f_mod,
+            :vs_add, :vs_prop)
+        nm in taken && error(
+            "$prefix: joint-vocabulary name `$nm` collides with a " *
+            "model or data name")
+        push!(taken, nm)
+    end
+    stmts = Expr[]
+    push!(stmts, _rk_emit_varyingsource_schedule(spec))
+    for parameter in plan.parameters
+        push!(stmts, _rk_ast_sampled(parameter))
+    end
+    for vector_parameter in plan.vector_parameters
+        stmt = _rk_ast_vector_parameter(vector_parameter)
+        if stmt === nothing
+            # The twin has no leaf machinery to keep weight vectors
+            # implicit (the GLM path's choice, pinned there), so the
+            # native read's `gp_w`/`p_w`/`c_w` sample explicitly in the
+            # broadcast spelling. Sizing rides plan-side (`size`); how
+            # the thin layer binds that length is open contract (see
+            # the publication tripwire) — the statement pins the prior
+            # the peer's fixture verifies, not the bind mechanism.
+            stmt = _rk_emit_varyingsource_weights(vector_parameter)
+        end
+        push!(stmts, stmt)
+    end
+    priors = Dict((p.predictor, p.addressee) => (p.family, p.args)
+        for p in [plan.subject_priors; plan.dose_priors])
+    ranef_draws, ranef_effects = _rk_ast_ranef_names!(plan, taken)
+    bucket = only(plan.ranef_buckets)
+    append!(stmts, _rk_ast_centered_bucket_stmts(bucket, ranef_draws[1],
+        ranef_effects, spec.centered.sd_scale))
+    for predictor in plan.subject_predictors
+        append!(stmts, _rk_emit_varyingsource_predictor(predictor,
+            priors, ranef_effects, taken, plan.columns, predictor.name))
+    end
+    for (predictor, modifier) in
+            zip(plan.dose_predictors, _RK_VARYINGSOURCE_MODIFIERS)
+        append!(stmts, _rk_emit_varyingsource_predictor(predictor,
+            priors, ranef_effects, taken, plan.columns, modifier))
+    end
+    push!(stmts, _rk_emit_varyingsource_plate(spec))
+    _RKEmittedProgram(Expr[], Expr(:block, stmts...))
+end

@@ -5992,6 +5992,9 @@ end
     @test_throws "unknown predictor" planof(dangling_ep)
     dangling_def = body * "effect(:, nosuchcoef) ~ Normal(0.0, 1.0)\n"
     @test_throws "matches no population coefficient" planof(dangling_def)
+    cauchy_prior = replace(body, "effect(lp1, Intercept) ~ Normal(0.1, 1.0)" =>
+        "effect(lp1, Intercept) ~ Cauchy(0.0, 1.0)")
+    @test_throws "must be `Normal`" planof(cauchy_prior)
     @test_throws "r2d2` priors are out of the twin slice" planof(
         body * "effect(lp1, :) ~ r2d2(R2=Beta(2, 5), alpha=0.5)\n")
     @test_throws "Horseshoe` priors are out of the twin slice" planof(

@@ -40,7 +40,8 @@ using BayesianRegressionModels
 using CategoricalArrays: categorical, levelcode
 using DifferentiationInterface: AutoEnzyme
 using Distributions: Beta, Cauchy, Dirichlet, Exponential, Gamma,
-                     InverseGaussian, Laplace, LocationScale, LogNormal,
+                     InverseGaussian, Laplace, LKJCholesky, LocationScale,
+                     LogNormal,
                      MixtureModel, NegativeBinomial,
                      Normal, Poisson, TDist, Uniform, VonMises, Weibull, cdf,
                      logcdf,
@@ -57,6 +58,7 @@ using SpecialFunctions: besselix, logbeta, loggamma
 # Substring subset contract for chunked runs (see testset_filter.jl): blocks
 # below are `@stestset`, selectable via trailing ARGS or `BRM_TEST_FILTER`.
 include(joinpath(@__DIR__, "testset_filter.jl"))
+include(joinpath(@__DIR__, "varyingsource_fixture.jl"))
 
 const BRM = BayesianRegressionModels
 const _PARITY_BACKEND = AutoEnzyme(; mode = Enzyme.Reverse)
@@ -3604,4 +3606,41 @@ end
     @test logjac(layout, u) ≈ 0.0
     @test _rk_query(backend, :posterior, u) ≈ ll + pr
     _check_parity_gradient(backend, u)
+end
+
+@stestset "varyingsource publication tripwire" begin
+    # Ratchet, not a skip: pins the CURRENT thin-layer rejection
+    # boundary for the twin program. Each `phaseIII` publication moves
+    # the boundary — this test goes red, and the pin advances to the
+    # next boundary — until the full parity check replaces it. A red
+    # tripwire with an UNEXPECTED message is likewise a signal (the
+    # peer's spelling landed differently than the emission guesses).
+    #
+    # Boundary map (verified 2026-09-29 against pin 0c9ebb4d; order
+    # past the first is unverified — lowering is not
+    # statement-ordered):
+    #   1. draws `sd=`/`centered=` keywords (current pin: eta/levels
+    #      only; IR has sd_priors but no centering) ......... YOU ARE HERE
+    #   2. `varyingsource_pkpd_schedule` head (slice-1 value vocab;
+    #      obs-3/dose-4/discretization arities are our guess — the
+    #      `linear_pk_schedule` precedent takes obs-2/dose-3).
+    #   3. weight-vector declaration (`gp_w .~ Normal` fails the
+    #      needs-data rule; `@plate` fails bind's n_obs cover rule).
+    #   4. `varyingsource_pkpd_read_locs` cell fn (CELL_FNS +
+    #      contract cell walker value args: sampled scalars/vectors
+    #      and the placebo bounds as read args).
+    #   5. full parity: likelihood/prior/posterior + Enzyme gradient
+    #      vs the Stan reference (peer's pinned 13-block density
+    #      constant 32.76951087 anchors the prior leg).
+    #
+    # Already verified lowerable at the pin (no tripwire needed):
+    # `ifelse` selectors over bound masks, `reads[vs.obs_map]` gather
+    # shape, whole-column in-cell `.~ CensoredAddpropnormal.(mu, add,
+    # prop, lloq)`, cell-locals-not-shadowing-data, outer-LP refs.
+    plan = vs_test_plan()
+    @test plan isa BRM._RKVaryingSourcePlan
+    ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
+    @test ext !== nothing
+    @test_throws "takes keywords `eta`/`levels` only, got `sd`" ext._rk_translated_plan(
+        plan)
 end
