@@ -3608,41 +3608,36 @@ end
     _check_parity_gradient(backend, u)
 end
 
-@stestset "varyingsource publication tripwire" begin
-    # Ratchet, not a skip: pins the CURRENT thin-layer rejection
-    # boundary for the twin program. Each `phaseIII` publication moves
-    # the boundary — this test goes red, and the pin advances to the
-    # next boundary — until the full parity check replaces it. A red
-    # tripwire with an UNEXPECTED message is likewise a signal (the
-    # peer's spelling landed differently than the emission guesses).
-    #
-    # Boundary map (verified 2026-09-29 against pin 0c9ebb4d; order
-    # past the first is unverified — lowering is not
-    # statement-ordered). All program spellings are peer-verified
-    # (brief 1h1a2ug + dispatch 03:13); the weight ports ride the
-    # extension (typed IR `VectorParameter`, appended at publication
-    # per the peer's recipe — not implemented until the pin lands,
-    # since it consumes the unpublished native API):
-    #   1. draws `sd=`/`centered=` keywords (current pin: eta/levels
-    #      only) ........................................... YOU ARE HERE
-    #   2. `varyingsource_pkpd_schedule` head (slice-1 value vocab).
-    #   3. `varyingsource_pkpd_read_locs` cell fn (CELL_FNS +
-    #      contract cell walker value args: sampled scalars/vectors
-    #      and the placebo bounds as read args).
-    #   4. ext `VectorParameter` port patch (declare-as-data at lower,
-    #      drop slice entries, rebuild plate, never bind as columns).
-    #   5. full parity: likelihood/prior/posterior + Enzyme gradient
-    #      vs the Stan reference (peer's pinned 13-block density
-    #      constant 32.76951087 anchors the prior leg).
-    #
-    # Already verified lowerable at the pin (no tripwire needed):
-    # `ifelse` selectors over bound masks, `reads[vs.obs_map]` gather
-    # shape, whole-column in-cell `.~ CensoredAddpropnormal.(mu, add,
-    # prop, lloq)`, cell-locals-not-shadowing-data, outer-LP refs.
-    plan = vs_test_plan()
+@stestset "varyingsource native publication consumption" begin
+    # The peer's phase-III pin lifts the old rejection boundary. The
+    # planner fixture exercises the full boundary route: GP/HSGP
+    # innovations are declared for the first lowering, their inferred
+    # plate slices are removed, typed `VectorParameter` ports are
+    # appended, and final binding never sees them as data columns.
+    brmi = vs_test_brmi()
+    plan = vs_test_plan(brmi)
     @test plan isa BRM._RKVaryingSourcePlan
     ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
     @test ext !== nothing
-    @test_throws "takes keywords `eta`/`levels` only, got `sd`" ext._rk_translated_plan(
-        plan)
+    translated = ext._rk_translated_plan(plan)
+    @test only(translated.kernel_plates).slices == [
+        (:vs_obs_value, :vs_obs_value, :response),
+        (:vs_assay_is_1, :vs_assay_is_1, :response),
+        (:vs_assay_is_2, :vs_assay_is_2, :response),
+        (:vs_obs_lloq, :vs_obs_lloq, :response),
+    ]
+    vector_sizes = Dict(p.name => p.size for p in translated.vector_parameters)
+    @test vector_sizes[:gp_w] == plan.spec.gp_k^2
+    @test vector_sizes[:p_w] == plan.spec.placebo_k_primary
+    @test vector_sizes[:c_w] == plan.spec.placebo_k_csf
+    @test !any(p -> p in (:gp_w, :p_w, :c_w), keys(plan.columns))
+
+    backend = BRM.RKBRMI(brmi, plan, BRM._brm_rk_model(plan))
+    u = zeros(Float64, backend.model.layout.total)
+    problem = BRM.rk_logdensity_problem(backend; ad_backend=_PARITY_BACKEND,
+        u0=u)
+    value, gradient = LogDensityProblems.logdensity_and_gradient(problem, u)
+    @test isfinite(value)
+    @test length(gradient) == backend.model.layout.total
+    @test all(isfinite, gradient)
 end

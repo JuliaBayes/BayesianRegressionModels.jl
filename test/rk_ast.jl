@@ -2591,7 +2591,7 @@ end
     # 45 subject + 18 dose + 1 plate (weight vectors emit nothing —
     # typed IR ports, not program statements).
     @test length(stmts) == 97
-    @test stmts[1] == Expr(:(=), :vs,
+    @test stmts[1] == Expr(:(=), :vs_sched,
         Expr(:call, :varyingsource_pkpd_schedule,
             Expr(:kw, :obs, Expr(:tuple,
                 :vs_obs_subject, :vs_obs_time, :vs_obs_assay)),
@@ -2659,7 +2659,7 @@ end
         end
     end
     read = Expr(:(=), :reads,
-        Expr(:call, :varyingsource_pkpd_read_locs, :vs,
+        Expr(:call, :varyingsource_pkpd_read_locs, :vs_sched,
             :rate_mod, :mode_mod, :f_mod,
             :gp_w, :dose_slope, :conc_slope, :rho_d, :rho_c, :eff_sd,
             :p_w, :rho_p, :sd_p,
@@ -2667,7 +2667,7 @@ end
             0.0, 24.0, _VS_FIX_SUBJECT_LPS...))
     @test length(read.args[2].args) == 32
     gather = Expr(:(=), :mu,
-        Expr(:ref, :reads, Expr(:., :vs, QuoteNode(:obs_map))))
+        Expr(:ref, :reads, Expr(:., :vs_sched, QuoteNode(:obs_map))))
     add = Expr(:(=), :vs_add, Expr(:., :ifelse, Expr(:tuple,
         :vs_assay_is_1, :a1, Expr(:., :ifelse, Expr(:tuple,
             :vs_assay_is_2, :a2, :a3)))))
@@ -2741,7 +2741,7 @@ end
 end
 
 @testset "varyingsource AST joint-vocabulary collision" begin
-    # Fixed joint names (`vs`, `reads`, `mu`, modifiers, selectors) -
+    # Fixed joint names (`vs_sched`, `reads`, `mu`, modifiers, selectors) -
     # a model/data name clash fails loud, never dedups silently.
     data = merge(vs_test_data(), (; mu=vs_test_data().male))
     body = replace(vs_test_body(), "male" => "mu")

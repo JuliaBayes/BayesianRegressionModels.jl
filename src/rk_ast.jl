@@ -1595,7 +1595,7 @@ end
 # `vs = varyingsource_pkpd_schedule(obs=(...), dose=(...),
 # discretization=...)` over the raw bridge columns.
 function _rk_emit_varyingsource_schedule(spec::_RKVaryingSourceSpec)
-    Expr(:(=), :vs, Expr(:call, :varyingsource_pkpd_schedule,
+    Expr(:(=), :vs_sched, Expr(:call, :varyingsource_pkpd_schedule,
         Expr(:kw, :obs, Expr(:tuple,
             spec.obs_subject, spec.obs_time, spec.obs_assay)),
         Expr(:kw, :dose, Expr(:tuple,
@@ -1609,7 +1609,7 @@ end
 # HSGP (port + rho + sd) + placebo lo/hi + 13 subject logs.
 function _rk_emit_varyingsource_reads(spec::_RKVaryingSourceSpec)
     Expr(:(=), :reads, Expr(:call, :varyingsource_pkpd_read_locs,
-        :vs, _RK_VARYINGSOURCE_MODIFIERS...,
+        :vs_sched, _RK_VARYINGSOURCE_MODIFIERS...,
         :gp_w, :dose_slope, :conc_slope, :rho_d, :rho_c, :eff_sd,
         :p_w, :rho_p, :sd_p,
         :c_w, :rho_csf, :sd_csf,
@@ -1639,7 +1639,7 @@ function _rk_emit_varyingsource_plate(spec::_RKVaryingSourceSpec)
         for a in spec.assays[1:max(length(spec.assays) - 1, 0)]]
     read_stmt = _rk_emit_varyingsource_reads(spec)
     gather_stmt = Expr(:(=), :mu, Expr(:ref, :reads,
-        Expr(:., :vs, QuoteNode(:obs_map))))
+        Expr(:., :vs_sched, QuoteNode(:obs_map))))
     add_stmt = _rk_emit_varyingsource_selector(:vs_add, adds, masks)
     prop_stmt = _rk_emit_varyingsource_selector(:vs_prop, props, masks)
     obs_stmt = Expr(:call, :.~, spec.obs_value,
@@ -1671,7 +1671,7 @@ function _rk_emit_ast(plan::_RKVaryingSourcePlan)
     # Fixed joint-vocabulary names (peer fixture): a collision is a
     # model/data name clash to resolve explicitly, never a silent
     # dedup (both the assignments and the native call use them).
-    for nm in (:vs, :reads, :mu, :rate_mod, :mode_mod, :f_mod,
+    for nm in (:vs_sched, :reads, :mu, :rate_mod, :mode_mod, :f_mod,
             :vs_add, :vs_prop)
         nm in taken && error(
             "$prefix: joint-vocabulary name `$nm` collides with a " *
