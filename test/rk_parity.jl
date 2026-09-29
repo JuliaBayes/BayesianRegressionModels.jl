@@ -3618,12 +3618,12 @@ end
     #
     # Boundary map (verified 2026-09-29 against pin 0c9ebb4d; order
     # past the first is unverified — lowering is not
-    # statement-ordered):
+    # statement-ordered). Schedule/read/gather shapes are peer-pinned
+    # (brief 1h1a2ug); only the draws keywords and weight spelling
+    # are our guesses:
     #   1. draws `sd=`/`centered=` keywords (current pin: eta/levels
     #      only; IR has sd_priors but no centering) ......... YOU ARE HERE
-    #   2. `varyingsource_pkpd_schedule` head (slice-1 value vocab;
-    #      obs-3/dose-4/discretization arities are our guess — the
-    #      `linear_pk_schedule` precedent takes obs-2/dose-3).
+    #   2. `varyingsource_pkpd_schedule` head (slice-1 value vocab).
     #   3. weight-vector declaration (`gp_w .~ Normal` fails the
     #      needs-data rule; `@plate` fails bind's n_obs cover rule).
     #   4. `varyingsource_pkpd_read_locs` cell fn (CELL_FNS +

@@ -1501,21 +1501,14 @@ end
 #
 # Contract gaps vs the `phaseIII` native publication (living tracker:
 # the `varyingsource publication tripwire` in test/rk_parity.jl, which
-# ratchets as each boundary lands):
-# - draws `sd=`/`centered=` keywords: our guess; the pin's
-#   `varying_draws` takes `eta`/`levels` only, and the IR carries
-#   `sd_priors` but no centering (no surface spelling exists either).
-# - `varyingsource_pkpd_schedule` obs-3/dose-4/`discretization`
-#   arities: our guess from the twin's axes (the `linear_pk_schedule`
-#   precedent takes obs-2/dose-3 + ecg/tgi).
+# ratchets as each boundary lands). Schedule/read/gather shapes are
+# peer-pinned (brief 1h1a2ug); only these two are our guesses:
+# - draws `sd=`/`centered=` keywords: the pin's `varying_draws`
+#   takes `eta`/`levels` only, and the IR carries `sd_priors` but no
+#   centering (no surface spelling exists either).
 # - weight-vector declaration: `w .~ Normal` fails the needs-data
 #   rule and `@plate` fails bind's n_obs cover rule (both verified);
 #   needs a phaseIII spelling or native-read-side allocation.
-# - `varyingsource_pkpd_read_locs` 31-arg schedule-first shape: our
-#   guess from the CELL_FNS convention (sampled scalars/vectors and
-#   placebo bounds as value args need walker support).
-# - single `reads[vs.obs_map]` gather: our guess (the linear
-#   precedent gathers conc_map then obs_map).
 # Verified lowerable at pin 0c9ebb4d: `ifelse` selectors, the
 # `CensoredAddpropnormal.(mu, add, prop, lloq)` order, whole-column
 # in-cell `.~`, LP refs by name, `for s in 1:kernel_nsub_<result>`.
