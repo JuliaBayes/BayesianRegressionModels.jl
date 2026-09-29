@@ -1498,17 +1498,15 @@ end
 # lattice: every name is top-level (defs stay empty). Assay scales
 # select through bound Boolean masks (a literal
 # `[s_1, ..., s_n][assay]` gather is not admitted thin-layer-side).
+# GP/HSGP weight vectors emit no statement (typed IR ports).
 #
-# Contract gaps vs the `phaseIII` native publication (living tracker:
-# the `varyingsource publication tripwire` in test/rk_parity.jl, which
-# ratchets as each boundary lands). Schedule/read/gather shapes are
-# peer-pinned (brief 1h1a2ug); only these two are our guesses:
-# - draws `sd=`/`centered=` keywords: the pin's `varying_draws`
-#   takes `eta`/`levels` only, and the IR carries `sd_priors` but no
-#   centering (no surface spelling exists either).
-# - weight-vector declaration: `w .~ Normal` fails the needs-data
-#   rule and `@plate` fails bind's n_obs cover rule (both verified);
-#   needs a phaseIII spelling or native-read-side allocation.
+# Publication status vs the `phaseIII` native (living tracker: the
+# `varyingsource publication tripwire` in test/rk_parity.jl, which
+# ratchets as each boundary lands). Schedule/read/gather/draws
+# spellings are peer-verified (brief 1h1a2ug + dispatch 03:13);
+# weight vectors ride the typed IR `VectorParameter` port, which the
+# extension appends at publication (declare-as-data at lower, drop
+# their slice entries, rebuild the plate, never bind as columns).
 # Verified lowerable at pin 0c9ebb4d: `ifelse` selectors, the
 # `CensoredAddpropnormal.(mu, add, prop, lloq)` order, whole-column
 # in-cell `.~`, LP refs by name, `for s in 1:kernel_nsub_<result>`.
@@ -1516,7 +1514,11 @@ const _RK_VARYINGSOURCE_MODIFIERS = (:rate_mod, :mode_mod, :f_mod)
 
 # Centered draws block: `draws ~ varying_draws(group, [1 x K];
 # eta, sd, centered=true)` + one `varying_slice` per margin (the
-# slices gather the centered draws without L/tau re-scaling).
+# slices gather the centered draws without L/tau re-scaling). Slices
+# always take range form (`i:i`, the peer-verified spelling — never
+# the bare-int 1-wide shorthand of the non-centered path). The `sd`
+# arg is a folded literal (the planner const-folds e.g. `2/3`; a
+# call-valued arg is rejected thin-layer-side).
 function _rk_ast_centered_bucket_stmts(bucket::_RKRanefBucket,
         draws::Symbol, effects::Dict, sd_scale::Float64)
     margins = Any[_rk_ast_bucket_margin(m.z) for m in bucket.margins]
@@ -1529,8 +1531,7 @@ function _rk_ast_centered_bucket_stmts(bucket::_RKRanefBucket,
     stmts = Expr[Expr(:call, :~, draws, call)]
     for (target, range) in bucket.slices
         effect = effects[(target, bucket.group, bucket.id)]
-        idx = length(range) == 1 ? first(range) :
-            Expr(:call, :(:), first(range), last(range))
+        idx = Expr(:call, :(:), first(range), last(range))
         push!(stmts, Expr(:call, :~, effect,
             Expr(:call, :varying_slice, draws, idx)))
     end
@@ -1589,18 +1590,6 @@ function _rk_emit_varyingsource_predictor(predictor::_RKPredictorSpec,
     push!(stmts, Expr(:(=), lhs,
         _rk_ast_affine(predictor, coefs, colactual, refactual)))
     stmts
-end
-
-# Twin weight-vector prior: `w .~ Normal(0, 1)` in the response
-# broadcast spelling (bare name, dotted distribution). Only the
-# standardized family the planner mints reaches here.
-function _rk_emit_varyingsource_weights(parameter::_RKVectorParameter)
-    parameter.family === :vector_normal || error(
-        "RK backend: internal: twin weight vector " *
-        "`$(parameter.name)` has family `$(parameter.family)`")
-    loc, scale = parameter.args
-    Expr(:call, :.~, parameter.name,
-        Expr(:., :Normal, Expr(:tuple, loc, scale)))
 end
 
 # `vs = varyingsource_pkpd_schedule(obs=(...), dose=(...),
@@ -1695,18 +1684,15 @@ function _rk_emit_ast(plan::_RKVaryingSourcePlan)
         push!(stmts, _rk_ast_sampled(parameter))
     end
     for vector_parameter in plan.vector_parameters
+        # Simplexes sample explicitly; weight vectors stay implicit
+        # like the GLM path (no program statement lowers for a
+        # non-data-sized latent: broadcast fails the needs-data rule,
+        # `@plate` fails bind's n_obs cover rule). At publication the
+        # extension appends them as typed IR `VectorParameter` ports
+        # (peer's verified recipe: drop their slice entries, rebuild
+        # the plate, never bind them as raw columns).
         stmt = _rk_ast_vector_parameter(vector_parameter)
-        if stmt === nothing
-            # The twin has no leaf machinery to keep weight vectors
-            # implicit (the GLM path's choice, pinned there), so the
-            # native read's `gp_w`/`p_w`/`c_w` sample explicitly in the
-            # broadcast spelling. Sizing rides plan-side (`size`); how
-            # the thin layer binds that length is open contract (see
-            # the publication tripwire) — the statement pins the prior
-            # the peer's fixture verifies, not the bind mechanism.
-            stmt = _rk_emit_varyingsource_weights(vector_parameter)
-        end
-        push!(stmts, stmt)
+        stmt === nothing || push!(stmts, stmt)
     end
     priors = Dict((p.predictor, p.addressee) => (p.family, p.args)
         for p in [plan.subject_priors; plan.dose_priors])

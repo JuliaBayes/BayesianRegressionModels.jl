@@ -3618,17 +3618,19 @@ end
     #
     # Boundary map (verified 2026-09-29 against pin 0c9ebb4d; order
     # past the first is unverified — lowering is not
-    # statement-ordered). Schedule/read/gather shapes are peer-pinned
-    # (brief 1h1a2ug); only the draws keywords and weight spelling
-    # are our guesses:
+    # statement-ordered). All program spellings are peer-verified
+    # (brief 1h1a2ug + dispatch 03:13); the weight ports ride the
+    # extension (typed IR `VectorParameter`, appended at publication
+    # per the peer's recipe — not implemented until the pin lands,
+    # since it consumes the unpublished native API):
     #   1. draws `sd=`/`centered=` keywords (current pin: eta/levels
-    #      only; IR has sd_priors but no centering) ......... YOU ARE HERE
+    #      only) ........................................... YOU ARE HERE
     #   2. `varyingsource_pkpd_schedule` head (slice-1 value vocab).
-    #   3. weight-vector declaration (`gp_w .~ Normal` fails the
-    #      needs-data rule; `@plate` fails bind's n_obs cover rule).
-    #   4. `varyingsource_pkpd_read_locs` cell fn (CELL_FNS +
+    #   3. `varyingsource_pkpd_read_locs` cell fn (CELL_FNS +
     #      contract cell walker value args: sampled scalars/vectors
     #      and the placebo bounds as read args).
+    #   4. ext `VectorParameter` port patch (declare-as-data at lower,
+    #      drop slice entries, rebuild plate, never bind as columns).
     #   5. full parity: likelihood/prior/posterior + Enzyme gradient
     #      vs the Stan reference (peer's pinned 13-block density
     #      constant 32.76951087 anchors the prior leg).

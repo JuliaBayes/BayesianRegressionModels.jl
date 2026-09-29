@@ -2587,9 +2587,10 @@ end
     @test prog.defs == Expr[]
     @test prog.main isa Expr && prog.main.head === :block
     stmts = prog.main.args
-    # 1 schedule + 15 sampled + 6 vector + 1 draws + 13 slices +
-    # 45 subject + 18 dose + 1 plate.
-    @test length(stmts) == 100
+    # 1 schedule + 15 sampled + 3 simplex + 1 draws + 13 slices +
+    # 45 subject + 18 dose + 1 plate (weight vectors emit nothing —
+    # typed IR ports, not program statements).
+    @test length(stmts) == 97
     @test stmts[1] == Expr(:(=), :vs,
         Expr(:call, :varyingsource_pkpd_schedule,
             Expr(:kw, :obs, Expr(:tuple,
@@ -2605,8 +2606,14 @@ end
     @test Expr(:call, :~, :rho_p,
         Expr(:call, :Uniform, 0.5, 2.0)) in stmts
     for w in (:gp_w, :p_w, :c_w)
-        @test Expr(:call, :.~, w,
-            Expr(:., :Normal, Expr(:tuple, 0.0, 1.0))) in stmts
+        @test !any(stmts) do stmt
+            stmt isa Expr || return false
+            stmt.head === :(=) && return stmt.args[1] === w
+            stmt.head === :call && !isempty(stmt.args) &&
+                stmt.args[1] in (:~, :.~) &&
+                return stmt.args[2] === w
+            false
+        end
     end
     @test Expr(:call, :~, :mo_diet_simplex_incr,
         Expr(:call, :Dirichlet,
@@ -2620,8 +2627,8 @@ end
     @test Expr(:call, :~, :ranef_draws_p_subject, draws) in stmts
     for (i, lp) in enumerate(_VS_FIX_SUBJECT_LPS)
         @test Expr(:call, :~, Symbol(:ranef_, lp, :_p_subject),
-            Expr(:call, :varying_slice,
-                :ranef_draws_p_subject, i)) in stmts
+            Expr(:call, :varying_slice, :ranef_draws_p_subject,
+                Expr(:call, :(:), i, i))) in stmts
     end
     @test Expr(:call, :~, :lp1_b1,
         Expr(:call, :Normal, 0.1, 1.0)) in stmts
@@ -2675,6 +2682,27 @@ end
         Expr(:block, read, gather, add, prop, obs, :mu))
     @test stmts[end] == Expr(:macrocall, Symbol("@plate"),
         LineNumberNode(0), :loc, loop)
+end
+
+@testset "varyingsource AST sd literal folding" begin
+    # The draws `sd=` arg must be a literal (thin-layer-side rejects
+    # call-valued args): `Exponential(2/3)` folds to the Float64.
+    body = replace(vs_test_body(),
+        "sd(:, p) ~ Exponential(0.5)" => "sd(:, p) ~ Exponential(2/3)")
+    plan = BRM._brm_rk_plan(Core.eval(Main, BRM._brm(body; df=vs_test_data()));
+        centered_groups=[:subject], varyingsource_raw=vs_test_raw())
+    @test plan.spec.centered.sd_scale == 2 / 3
+    prog = BRM._rk_emit_ast(plan)
+    draws = only(filter(prog.main.args) do stmt
+        stmt isa Expr && stmt.head === :call && stmt.args[1] === :(~) &&
+            stmt.args[2] === :ranef_draws_p_subject
+    end)
+    sd_kw = only(filter(draws.args[3].args[2].args) do kw
+        kw.args[1] === :sd
+    end)
+    @test sd_kw == Expr(:kw, :sd,
+        Expr(:call, :Exponential, 0.6666666666666666))
+    @test sd_kw.args[2].args[2] isa Float64
 end
 
 @testset "varyingsource AST single assay" begin
