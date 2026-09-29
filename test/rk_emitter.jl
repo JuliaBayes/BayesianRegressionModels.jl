@@ -31,6 +31,11 @@ include(joinpath(@__DIR__, "testset_filter.jl"))
 
 const BRM = BayesianRegressionModels
 
+# Synthetic varyingsource twin (plan tests below; AST tests in
+# test/rk_ast.jl and the publication tripwire in test/rk_parity.jl share
+# this fixture).
+include(joinpath(@__DIR__, "varyingsource_fixture.jl"))
+
 df = (;
     x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
     z=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
@@ -5659,4 +5664,365 @@ end
             s ~ Exponential(1)
             y ~ Normal(mu, s)
         end)
+end
+
+@stestset "varyingsource raw-data bridge" begin
+    # The native schedule rebuilds every grid from RAW columns; the twin's
+    # precomputed design arrays never cross. `rk_varyingsource_raw` builds
+    # the raw bundle from the reference stan_data dict (validating the
+    # twin's ordering invariants + the native recipe's preconditions).
+    stan = Dict{Symbol,Any}(
+        :subject => [1, 1, 2, 2],
+        :ts => [0.0, 4.0, 0.0, 8.0],
+        :assay => [1, 2, 1, 3],
+        :obs => [8.0, 120.0, 6.0, 55.0],
+        :lloq => [1.0, 5.0, 1.0, 5.0],
+        :dosing_subject => [1, 2, 2],
+        :dosing_times => [0.0, 0.0, 4.0],
+        :doses => [50.0, 50.0, 20.0],
+        :treatment => [1, 2, 4],
+        :dosing_diet => [1, 2, 3],
+        :discretization_times => [1.0, 2.0, 4.0],
+        :placebo_lo_time => 0.0,
+        :placebo_hi_time => 24.0,
+    )
+    raw = rk_varyingsource_raw(stan)
+    @test raw.obs_subject == [1, 1, 2, 2]
+    @test raw.obs_time == [0.0, 4.0, 0.0, 8.0]
+    @test raw.obs_assay == [1, 2, 1, 3]
+    @test raw.obs_value == [8.0, 120.0, 6.0, 55.0]
+    @test raw.obs_lloq == [1.0, 5.0, 1.0, 5.0]
+    @test raw.dose_subject == [1, 2, 2]
+    @test raw.dose_time == [0.0, 0.0, 4.0]
+    @test raw.dose_amount == [50.0, 50.0, 20.0]
+    @test raw.dose_treatment == [101, 202, 304]
+    @test raw.discretization == [1.0, 2.0, 4.0]
+    @test raw.placebo_lo == 0.0 && raw.placebo_hi == 24.0
+    @test eltype(raw.obs_time) === Float64
+    @test eltype(raw.dose_treatment) === Int
+    tweak(key, value) = merge(stan, Dict(key => value))
+    drop(key) = Dict(k => v for (k, v) in stan if k !== key)
+    @test_throws "missing stan_data key(s)" rk_varyingsource_raw(drop(:doses))
+    @test_throws "disagree on lengths" rk_varyingsource_raw(
+        tweak(:ts, [0.0, 4.0, 0.0]))
+    @test_throws "disagree on lengths" rk_varyingsource_raw(
+        tweak(:doses, [50.0, 50.0]))
+    @test_throws "at least one observation" rk_varyingsource_raw(merge(stan,
+        Dict(:subject => Int[], :ts => Float64[], :assay => Int[],
+            :obs => Float64[], :lloq => Float64[])))
+    @test_throws "must be positive integers" rk_varyingsource_raw(
+        tweak(:subject, [0, 0, 2, 2]))
+    @test_throws "must first appear in order" rk_varyingsource_raw(
+        tweak(:subject, [2, 2, 1, 1]))
+    @test_throws "must be sorted by subject" rk_varyingsource_raw(
+        tweak(:dosing_subject, [2, 1, 2]))
+    @test_throws "must refer to observed subjects" rk_varyingsource_raw(
+        tweak(:dosing_subject, [1, 2, 3]))
+    @test_throws "times must be finite" rk_varyingsource_raw(
+        tweak(:ts, [0.0, 4.0, 0.0, Inf]))
+    @test_throws "must be nondecreasing within subject" rk_varyingsource_raw(
+        tweak(:dosing_times, [0.0, 4.0, 0.0]))
+    @test_throws "assay codes must be integers in 1:3" rk_varyingsource_raw(
+        tweak(:assay, [1, 2, 1, 4]))
+    @test_throws "observation values must be finite" rk_varyingsource_raw(
+        tweak(:obs, [8.0, 120.0, 6.0, NaN]))
+    @test_throws "lloq bounds must be finite" rk_varyingsource_raw(
+        tweak(:lloq, [1.0, 5.0, 1.0, Inf]))
+    @test_throws "must be finite and positive" rk_varyingsource_raw(
+        tweak(:doses, [50.0, 50.0, 0.0]))
+    @test_throws "vessel codes must be integers in 1:5" rk_varyingsource_raw(
+        tweak(:treatment, [1, 2, 6]))
+    @test_throws "diet codes must be integers in 1:4" rk_varyingsource_raw(
+        tweak(:dosing_diet, [1, 2, 5]))
+    @test_throws "discretization lags must be" rk_varyingsource_raw(
+        tweak(:discretization_times, [2.0, 1.0, 4.0]))
+    @test_throws "must be finite with lo < hi" rk_varyingsource_raw(
+        tweak(:placebo_hi_time, 0.0))
+end
+
+@stestset "varyingsource plan extraction" begin
+    # Positive control: the synthetic twin plans to a full
+    # `_RKVaryingSourcePlan` (subject/dose/placebo LPs, effectiveness,
+    # centered block, per-assay scales, raw columns; design dropped).
+    brmi = vs_test_brmi()
+    raw = vs_test_raw()
+    plan = BRM._brm_rk_plan(brmi;
+        centered_groups=[:subject], varyingsource_raw=raw)
+    @test plan isa BRM._RKVaryingSourcePlan
+    spec = plan.spec
+    @test spec.result === :loc
+    @test spec.subject_count === :kernel_nsub_loc
+    @test spec.n_subjects == 3
+    @test spec.group === :subject
+    @test spec.subject_lps == collect(_VS_FIX_SUBJECT_LPS)
+    @test spec.dose_lps == [:d1, :d2, :d3]
+    @test spec.placebo_primary === :p1
+    @test spec.placebo_csf === :p2
+    @test spec.placebo_k_primary == 3
+    @test spec.placebo_k_csf == 3
+    @test spec.effectiveness === :effectiveness
+    @test spec.gp_k == 4
+    @test spec.gp_slope_scales == [1.5, 2.5]
+    @test spec.gp_amplitude_scale == 2.0
+    @test spec.centered.id === :p
+    @test spec.centered.group === :subject
+    @test spec.centered.margins == collect(_VS_FIX_SUBJECT_LPS)
+    @test spec.centered.lkj_eta == 2.0
+    @test spec.centered.sd_scale == 0.5
+    @test [(a.code, a.add, a.prop, a.add_scale, a.prop_scale)
+        for a in spec.assays] ==
+        [(1, :a1, :r1, 1.0, 4.0), (2, :a2, :r2, 2.0, 5.0),
+            (3, :a3, :r3, 3.0, 6.0)]
+    @test spec.placebo_lo == 0.0
+    @test spec.placebo_hi == 24.0
+    @test sort(spec.dropped_design) == [:pk_unique_dts, :treatment_map]
+    @test length(plan.ranef_buckets) == 1
+    bucket = only(plan.ranef_buckets)
+    @test bucket.kind === :correlated
+    @test bucket.group === :subject
+    @test [m.predictor for m in bucket.margins] ==
+        collect(_VS_FIX_SUBJECT_LPS)
+    @test bucket.slices == [(lp, i:i)
+        for (i, lp) in enumerate(_VS_FIX_SUBJECT_LPS)]
+    @test bucket.lkj_eta == 2.0
+    @test length(plan.subject_predictors) == 13
+    @test [s.name for s in plan.subject_predictors] ==
+        collect(_VS_FIX_SUBJECT_LPS)
+    @test all(s -> any(t -> t.kind === :ranef_gather, s.terms),
+        plan.subject_predictors)
+    @test length(plan.dose_predictors) == 3
+    @test all(s -> any(t -> t.kind === :monotonic, s.terms),
+        plan.dose_predictors)
+    @test !isempty(plan.subject_priors)
+    @test !isempty(plan.dose_priors)
+    vecs = Dict(v.name => v for v in plan.vector_parameters)
+    @test vecs[:gp_w].family === :vector_normal
+    @test vecs[:gp_w].size == 16
+    @test vecs[:p_w].size == 3
+    @test vecs[:c_w].size == 3
+    @test count(v -> v.family === :simplex_dirichlet,
+        plan.vector_parameters) == 3
+    pars = Dict(p.name => p for p in plan.parameters)
+    @test length(plan.parameters) == 15
+    @test pars[:a1].family === :Exponential
+    @test pars[:a1].args == (1.0,)
+    @test pars[:r3].args == (6.0,)
+    @test pars[:dose_slope].args == (0.0, 1.5)
+    @test pars[:conc_slope].args == (0.0, 2.5)
+    @test pars[:eff_sd].support_override === :positive
+    @test pars[:eff_sd].args == (0.0, 2.0)
+    @test pars[:rho_d].family === :Uniform
+    @test pars[:rho_d].args == pars[:rho_c].args
+    @test pars[:rho_d].args[1] < 2.0
+    @test pars[:rho_p].args == (0.5, 2.0)
+    @test pars[:sd_p].args == (0.0, 1.0)
+    @test pars[:rho_csf].args == (0.7, 1.8)
+    @test pars[:sd_csf].args == (0.1, 0.9)
+    @test plan.columns[:subject] == [1, 2, 3]
+    @test plan.columns[:vs_obs_subject] == raw.obs_subject
+    @test plan.columns[:vs_obs_time] == raw.obs_time
+    @test plan.columns[:vs_obs_assay] == raw.obs_assay
+    @test plan.columns[:vs_obs_value] == raw.obs_value
+    @test plan.columns[:vs_obs_lloq] == raw.obs_lloq
+    @test plan.columns[:vs_dose_subject] == raw.dose_subject
+    @test plan.columns[:vs_dose_time] == raw.dose_time
+    @test plan.columns[:vs_dose_amount] == raw.dose_amount
+    @test plan.columns[:vs_dose_treatment] == raw.dose_treatment
+    @test plan.columns[:vs_discretization] == raw.discretization
+    @test plan.columns[:vs_assay_is_1] ==
+        Vector{Bool}([true, false, true, false, false, true, false])
+    @test plan.columns[:vs_assay_is_2] ==
+        Vector{Bool}([false, true, false, false, true, false, false])
+    @test !haskey(plan.columns, :vs_assay_is_3)
+    for col in (:diseased, :male, :age_std, :weight_std)
+        @test haskey(plan.columns, col)
+    end
+    for col in (:vessel_bottle, :vessel_bottle_20, :vessel_tablet,
+            :vessel_tablet_60)
+        @test haskey(plan.columns, col)
+    end
+    for col in (:treatment_map, :pk_unique_dts)
+        @test !haskey(plan.columns, col)
+    end
+    @test occursin("varying-source", BRM._rk_plan_summary(plan))
+end
+
+@stestset "varyingsource fail closed battery" begin
+    body = vs_test_body()
+    data = vs_test_data()
+    stan = vs_test_stan_data()
+    raw = vs_test_raw(stan)
+    planof(b, d=data, r=raw; cg=[:subject]) = BRM._brm_rk_plan(
+        Core.eval(Main, BRM._brm(b; df=d));
+        centered_groups=cg, varyingsource_raw=r)
+    # Missing/wrong lane kwargs.
+    brmi = Core.eval(Main, BRM._brm(body; df=data))
+    @test_throws "needs `varyingsource_raw=" BRM._brm_rk_plan(brmi;
+        centered_groups=[:subject])
+    @test_throws "needs `centered_groups=[:subject]`" BRM._brm_rk_plan(
+        brmi; centered_groups=[:dose], varyingsource_raw=raw)
+    @test_throws "needs `centered_groups=[:subject]`" BRM._brm_rk_plan(
+        brmi; varyingsource_raw=raw)
+    # kwargs on non-varying-source models.
+    glm = @brm df begin
+        mu ~ 1 + x + (1 | g)
+        effect(mu, :) ~ Normal(0.0, 5.0)
+        s ~ Exponential(1.0)
+        y ~ Normal(mu, s)
+    end
+    @test_throws "admitted only for varying-source" BRM._brm_rk_plan(glm;
+        centered_groups=[:g])
+    @test_throws "admitted only for varying-source" BRM._brm_rk_plan(glm;
+        varyingsource_raw=raw)
+    kdf = (;
+        t=[[0.0, 1.0, 2.0], [0.0, 1.0, 2.0]],
+        dose=[10.0, 20.0],
+        obs=[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+    )
+    panel = @brm kdf begin
+        pred ~ kernel(t, dose, obs) do ts, d, yy
+            mu = ts .+ d
+            yy ~ Normal(mu, 1.0)
+            mu
+        end
+    end
+    @test_throws "admitted only for varying-source" BRM._brm_rk_plan(panel;
+        centered_groups=[:subject])
+    @test_throws "admitted only for varying-source" BRM._brm_rk_plan(panel;
+        varyingsource_raw=raw)
+    # Subject count (drop lp13 everywhere it is referenced).
+    drop13 = replace(body,
+        "lp13 ~ 1 + diseased + (1 | p | subject)\n" => "")
+    drop13 = replace(drop13, ", lp13) do" => ") do")
+    drop13 = replace(drop13, ", lp13_i" => "")
+    drop13 = replace(drop13,
+        r"effect\(lp13, Intercept\) ~ Normal\([^)]+\)\n" => "")
+    @test_throws "needs 13 subject linear predictors (bare positionals); got 12" planof(
+        drop13)
+    # Call order must match formula order (swap lp1/lp2 in the call).
+    swapped = replace(body, "effectiveness, lp1_i, lp2_i" =>
+        "effectiveness, lp2_i, lp1_i")
+    @test_throws "must match formula order" planof(swapped)
+    # Unshared subject block.
+    unshared = replace(body, "(1 | p | subject)" => "(1 | subject)"; count=1)
+    @test_throws "must share one `|id|`" planof(unshared)
+    # Grouped term outside the subject LPs.
+    dose_ranef = replace(body, "vessel_tablet_60 + mo(diet)" =>
+        "vessel_tablet_60 + mo(diet) + (1 | q | dose_subject)"; count=1)
+    @test_throws "is outside the twin slice" planof(dose_ranef)
+    # Dose intercept (native dose role has none).
+    dose_intercept = replace(body, "d1 ~ 0 + vessel_bottle" =>
+        "d1 ~ 1 + vessel_bottle")
+    @test_throws "term kind `intercept` is out of the twin slice" planof(
+        dose_intercept)
+    # Mixed dose/subject column use (equal axis lengths, so geometry
+    # cannot see it: 3 dose rows for 3 subjects).
+    stan3 = merge(stan, Dict(:dosing_subject => [1, 2, 2],
+        :dosing_times => [0.0, 0.0, 4.0], :doses => [50.0, 50.0, 20.0],
+        :treatment => [1, 2, 4], :dosing_diet => [1, 2, 3]))
+    data3 = merge(data, (; dose_subject=[1, 2, 2],
+        dose_amount=[50.0, 50.0, 20.0], vessel_bottle=[1.0, 0.0, 0.0],
+        vessel_bottle_20=[0.0, 1.0, 0.0], vessel_tablet=[0.0, 0.0, 1.0],
+        vessel_tablet_60=[0.0, 0.0, 0.0],
+        diet=categorical([1, 2, 3]; levels=1:4, ordered=true)))
+    mixed_use = replace(body, "d1 ~ 0 + vessel_bottle" =>
+        "d1 ~ 0 + vessel_bottle + diseased")
+    mixed_use = replace(mixed_use,
+        "effect(:, diseased) ~ Normal(0.0, 1.0)\n" => "")
+    @test_throws "feed both subject and dose predictors" planof(
+        mixed_use, data3, vs_test_raw(stan3))
+    # Cross-axis design columns (geometry sees single-axis LPs; the
+    # planner's length gates catch the axis mismatch).
+    cross_subj = replace(body, "lp3 ~ 1 + diseased + (1 | p | subject)" =>
+        "lp3 ~ 0 + obs + (1 | p | subject)")
+    cross_subj = replace(cross_subj,
+        r"effect\(lp3, Intercept\) ~ Normal\([^)]+\)\n" => "")
+    @test_throws "has length 7 for 3 subjects" planof(cross_subj)
+    cross_dose = replace(body,
+        "d1 ~ 0 + vessel_bottle + vessel_bottle_20 + vessel_tablet + " *
+        "vessel_tablet_60 + mo(diet)" => "d1 ~ 0 + obs")
+    @test_throws "has length 7 for 4 dose rows" planof(cross_dose)
+    # Structured term in a subject LP (default hyperpriors, so GLM
+    # planning succeeds and the twin kind gate fires).
+    hsgp_subj = replace(body, "lp3 ~ 1 + diseased + (1" =>
+        "lp3 ~ 1 + diseased + hsgp(age_std; k = 2) + (1")
+    @test_throws "term kind `hsgp` is out of the twin slice" planof(hsgp_subj)
+    # Linked subject LP.
+    linked = replace(body, "lp3 ~ 1 + diseased" => "log(lp3) ~ 1 + diseased")
+    @test_throws "must be unlinked" planof(linked)
+    # Effectiveness: wrong head, bad k, empty prior interval.
+    wronghead = replace(body, "dose_concentration_gp(; k" =>
+        "other_gp(; k")
+    @test_throws "must be a `dose_concentration_gp" planof(wronghead)
+    badk = replace(body, "k = 4" => "k = 1")
+    @test_throws "needs `k >= 2`" planof(badk)
+    emptyk = replace(body, "k = 4" => "k = 2")
+    @test_throws "empty GP length-scale prior interval" planof(emptyk)
+    # Placebo: wrong domain.
+    baddom = replace(body, "domain = (-1.5, 1.5)" => "domain = (-2.0, 2.0)";
+        count=1)
+    @test_throws "needs `domain=(-1.5, 1.5)`" planof(baddom)
+    # Observation: off-location center, wrong scale arity.
+    offloc = replace(body, "censored_addpropnormal(mu," =>
+        "censored_addpropnormal(y_i,")
+    @test_throws "must be centered on the cell locations" planof(offloc)
+    badarity = replace(body, "assay_scale(assay_i, a1, a2, a3)" =>
+        "assay_scale(assay_i, a1, a2)"; count=1)
+    @test_throws "needs 3 scales (one per assay); got 2" planof(badarity)
+    # Noncontiguous assay codes.
+    stan_nc = merge(stan, Dict(:assay => [1, 3, 1, 3, 3, 1, 3]))
+    data_nc = merge(data, (; obs_assay=stan_nc[:assay]))
+    raw_nc = vs_test_raw(stan_nc)
+    @test_throws "must be contiguous" planof(body, data_nc, raw_nc)
+    # Bundle/twin row misalignment (each shared column).
+    stan_mis = merge(stan, Dict(:obs => [7.0, 120.0, 6.0, 55.0, 90.0, 7.0, 60.0]))
+    @test_throws "row misalignment" planof(body, data, vs_test_raw(stan_mis))
+    stan_mis2 = merge(stan, Dict(:doses => [9.0, 50.0, 20.0, 50.0]))
+    @test_throws "row misalignment" planof(body, data, vs_test_raw(stan_mis2))
+    # Design column with the wrong axis length.
+    data_wl = merge(data, (; treatment_map=[101, 202]))
+    @test_throws "has length 2 for 3 subjects" planof(body, data_wl)
+    # Dangling priors and leftover operations.
+    dangling_sd = body * "sd(:, q) ~ Exponential(1.0)\n"
+    @test_throws "is outside the twin slice" planof(dangling_sd)
+    missing_tp = replace(body,
+        "length_scale(:, hsgp(placebo_time)) ~ Uniform(0.5, 2.0)\n" => "")
+    @test_throws "has no `length_scale` prior" planof(missing_tp)
+    dangling_ep = body * "effect(nosuchlp, Intercept) ~ Normal(0.0, 1.0)\n"
+    @test_throws "unknown predictor" planof(dangling_ep)
+    dangling_def = body * "effect(:, nosuchcoef) ~ Normal(0.0, 1.0)\n"
+    @test_throws "matches no population coefficient" planof(dangling_def)
+    cauchy_prior = replace(body, "effect(lp1, Intercept) ~ Normal(0.1, 1.0)" =>
+        "effect(lp1, Intercept) ~ Cauchy(0.0, 1.0)")
+    @test_throws "must be `Normal`" planof(cauchy_prior)
+    @test_throws "r2d2` priors are out of the twin slice" planof(
+        body * "effect(lp1, :) ~ r2d2(R2=Beta(2, 5), alpha=0.5)\n")
+    @test_throws "Horseshoe` priors are out of the twin slice" planof(
+        body * "effect(lp1, diseased) ~ Horseshoe()\n")
+    @test_throws "is outside the twin slice" planof(
+        body * "junk ~ Normal(0.0, 1.0)\n")
+end
+
+@stestset "varyingsource single-assay twin" begin
+    # Assay count is generic: the PK-only shape (one assay, one scale
+    # pair) plans with one assay entry.
+    stan = vs_test_stan_data()
+    stan1 = merge(stan, Dict(:assay => fill(1, 7)))
+    data1 = merge(vs_test_data(stan), (; obs_assay=fill(1, 7)))
+    raw1 = vs_test_raw(stan1)
+    body1 = replace(vs_test_body(),
+        "assay_scale(assay_i, a1, a2, a3)" => "assay_scale(assay_i, a1)")
+    body1 = replace(body1,
+        "assay_scale(assay_i, r1, r2, r3)" => "assay_scale(assay_i, r1)")
+    for line in ("a2 ~ Exponential(2.0)\n", "a3 ~ Exponential(3.0)\n",
+            "r2 ~ Exponential(5.0)\n", "r3 ~ Exponential(6.0)\n")
+        body1 = replace(body1, line => "")
+    end
+    plan = BRM._brm_rk_plan(Core.eval(Main, BRM._brm(body1; df=data1));
+        centered_groups=[:subject], varyingsource_raw=raw1)
+    @test plan isa BRM._RKVaryingSourcePlan
+    @test [(a.code, a.add, a.prop) for a in plan.spec.assays] ==
+        [(1, :a1, :r1)]
+    @test length(plan.parameters) == 11
+    @test !haskey(plan.columns, :vs_assay_is_1)
 end

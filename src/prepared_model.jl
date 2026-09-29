@@ -395,7 +395,8 @@ end
 
 function _brm_prepare_predictor_geometry(
         brmi::BRMI, context::_BRMBackendContext, predictor::Symbol;
-        available_predictors=(predictor,), training=nothing)
+        available_predictors=(predictor,), training=nothing,
+        tolerant_default::Bool=false)
     random_effects = _brm_simple_random_effect_plans(
         brmi, predictor, context; required=true)
     op = linear_predictor_op(brmi, predictor)
@@ -425,6 +426,15 @@ function _brm_prepare_predictor_geometry(
         haskey(context.data, candidate) ? candidate :
             get(context.target_obs, name, nothing)
     end
+    # A grouped intercept-only LP has no ordinary design source, but its
+    # declared group is the row axis: one LP value per group level. This
+    # is the varying-source subject-predictor shape (and the prior-only
+    # total-effects path already resolves the same axis explicitly).
+    if isnothing(row_source)
+        groups = unique(plan.group for plan in random_effects)
+        length(groups) == 1 && haskey(context.data, only(groups)) &&
+            (row_source = only(groups))
+    end
     design = _brm_population_design(
         name, ordinary_terms, context.data, get(context.target_obs, name, nothing);
         required=true, row_source,
@@ -432,7 +442,8 @@ function _brm_prepare_predictor_geometry(
     predictor_plan = _BRMPopulationPredictor(
         name, link_lhs_fn, _brm_lp_emitted_name(name, link_lhs_fn), design)
     priors = _brm_simple_population_effect_overrides(
-        brmi, design; prefix="BRM preparation", available_predictors)
+        brmi, design; prefix="BRM preparation", available_predictors,
+        tolerant_default)
     isnothing(priors) && (priors = Any[nothing for _ in design.columns])
     defaults = zeros(Float64, length(priors)), ones(Float64, length(priors))
     component = _BRMPopulationComponent(
