@@ -53,6 +53,10 @@ callable likelihoods and priors, while `turing_backend.jl` retains the existing
 grouping, conditioning, replay, prediction, and parameterization contracts.
 `turing_world_age.jl` constructs and evaluates models inside compiled callers
 and checks that generated-model caching distinguishes prior literals.
+`model_source_ownership.jl` checks concurrent Turing construction, source-AST
+isolation, and non-mutating Julianic lowering of shared input syntax. Run it in
+a fresh process with `julia --threads=4 --project=test
+test/model_source_ownership.jl` to exercise the concurrent paths.
 `turing_natural_emission.jl` checks direct observation ASTs and named model
 inputs against an independently written Turing model. It executes the emitted
 source again, checks input-name hygiene and closure captures, and verifies

@@ -249,14 +249,16 @@ function _brm_generic_model_ast(plan::BRM._TuringGenericPlan)
     _brm_generic_response_graph_ast(graph; single=true)
 end
 
-const _BRM_GENERIC_MODEL_CACHE = Dict{Any,Tuple{Function,Expr}}()
+# Only compiled evaluators are shared. Each plan owns its source expression;
+# caching that mutable Expr would alias otherwise independent model builds.
+const _BRM_GENERIC_MODEL_CACHE = Dict{Any,Function}()
 const _BRM_GENERIC_MODEL_CACHE_LOCK = ReentrantLock()
 
 function _brm_cached_generic_evaluator(lowered)
     key = _brm_generic_structure_key(lowered.definition)
     lock(_BRM_GENERIC_MODEL_CACHE_LOCK) do
         get!(_BRM_GENERIC_MODEL_CACHE, key) do
-            (_brm_staged_turing_evaluator(lowered.definition), lowered.definition)
+            _brm_staged_turing_evaluator(lowered.definition)
         end
     end
 end
@@ -637,9 +639,9 @@ end
 function BRM._brm_turing_model(plan::BRM._TuringGenericPlan)
     _brm_validate_turing_term_rows(plan)
     lowered = _brm_generic_model_ast(plan)
-    evaluator, definition = _brm_cached_generic_evaluator(lowered)
+    evaluator = _brm_cached_generic_evaluator(lowered)
     model = Turing.DynamicPPL.Model{false}(evaluator, lowered.inputs)
-    plan.source_ast = definition
+    plan.source_ast = lowered.definition
     model
 end
 function _zero_correlation_scales(intercept_index, intercept_scale,
@@ -1199,8 +1201,8 @@ function BRM._brm_turing_model(plan::BRM._TuringMultiResponsePlan)
     _brm_validate_turing_term_rows(plan)
     if all(child -> child isa BRM._TuringGenericPlan, plan.plans)
         lowered = _brm_generic_multi_model_ast(plan)
-        evaluator, definition = _brm_cached_generic_evaluator(lowered)
-        plan.source_ast = definition
+        evaluator = _brm_cached_generic_evaluator(lowered)
+        plan.source_ast = lowered.definition
         return Turing.DynamicPPL.Model{false}(evaluator, lowered.inputs)
     end
     error("Turing backend: internal non-generic multi-response plan")

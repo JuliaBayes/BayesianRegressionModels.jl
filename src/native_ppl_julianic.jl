@@ -1814,6 +1814,9 @@ end
 function _julianic_model_syntax(definition)
     definition isa Expr && definition.head === :function ||
         throw(ArgumentError("julianic @jmodel must wrap a function definition"))
+    # Index lowering rewrites nested Expr nodes. Own the complete syntax tree,
+    # including the signature returned below, before touching any of them.
+    definition = deepcopy(definition)
     signature, body = definition.args
     signature isa Expr && signature.head === :call ||
         throw(ArgumentError("julianic @jmodel requires a named function definition"))
