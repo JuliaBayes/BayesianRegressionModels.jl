@@ -1,13 +1,14 @@
 # test/sbimpl_cache_concurrency.jl — gate for serialised generated-function
 # cache misses in sbimpl (snag sbimpl-generated-54b0af30).
 #
-# `_sb_vector_prior_family` / `_sb_mixture_family` / `_sb_horseshoe_popefs_model`
+# `_sb_vector_prior_family` / `_sb_mixture_family`
 # generate brand-new top-level functions via `Core.eval` on a cache miss. Two
 # tasks missing the same key concurrently both eval'd the same names into the
 # same module, and the second thread's distinct generic collided with the
 # first's (`invalid redefinition of constant #<name>`). Every miss path is now
 # serialised by `_SB_GEN_LOCK`, so one task defines the family and the rest
 # read the cached value.
+# Horseshoe submodels now construct private AST values without registration.
 #
 # The race needs true thread parallelism to manifest; the hammer below only
 # stresses it with more than one thread:

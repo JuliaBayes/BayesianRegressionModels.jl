@@ -87,15 +87,14 @@ function _sb_insert_indexed_priors(base::StanBlocks.SlicModel,
     StanBlocks.SlicModel(body, deepcopy(base.data), base.mod, base.observations)
 end
 
-const _SB_VECTOR_PRIOR_CACHE = Dict{String,Function}()
+const _SB_VECTOR_PRIOR_CACHE = Dict{Tuple{String,Tuple},Function}()
 const _SB_MIXTURE_CACHE = Dict{String,Function}()
-const _SB_HORSESHOE_POPEFS_CACHE = Dict{String,StanBlocks.SlicModel}()
 # Serialises every generated-function cache miss path below. Two tasks missing
 # the same key concurrently would both `Core.eval` the same brand-new top-level
 # functions into the same module, and the second thread's distinct generic
 # collides with the first's (`invalid redefinition of constant #<name>`).
 # Reentrant so a nested generation never self-deadlocks. One lock for all
-# three caches avoids lock-ordering hazards.
+# generated-family caches avoids lock-ordering hazards.
 const _SB_GEN_LOCK = ReentrantLock()
 const _SB_HS_PLANS_KEY = :__brm_hs_plans__
 const _sb_lower_conditioning_rng = StanBlocks.lower_conditioning_rng
@@ -209,6 +208,10 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
     # consumer modules.
     owner_key = map(s -> (nameof(s), Symbol(parentmodule(s))), selectors)
     key = repr((positive, shape, owner_key))
+    # Printed module names are not identities: separate module objects can
+    # share a name. Keep the stable spelling for emitted names, but cache by
+    # the actual callable values as well.
+    cache_key = (key, Tuple(selectors))
     # The generated UDF must live where its density companions resolve:
     # StanBlocks traces a generated function's body in its DEFINING module's
     # context (builtin -> defining-mod -> Main), so a density head naming a
@@ -232,7 +235,7 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
         "(StanBlocks builtins compose with anything).")
     home = isempty(required) ? (@__MODULE__) : (only(required))
     family = lock(_SB_GEN_LOCK) do
-        get!(_SB_VECTOR_PRIOR_CACHE, key) do
+        get!(_SB_VECTOR_PRIOR_CACHE, cache_key) do
         stem = Symbol(:brm_vector_prior_, _sb_stable_fingerprint(key))
         lpdf, lpdfs, rng = Symbol(stem, :_lpdf), Symbol(stem, :_lpdfs), Symbol(stem, :_rng)
         Core.eval(home, :(function $stem end))
@@ -9998,59 +10001,49 @@ function _sb_horseshoe_overrides(brmi::BRMI, effect_overrides, r2d2_overrides)
     out
 end
 
-# One generated `popefs` sibling per distinct column pattern (the
-# `_sb_vector_prior_family` fingerprinted-cache precedent). Scalar temporaries
+# Construct a private `popefs` value from the column pattern. Scalar temporaries
 # reuse the bare `_sb_horseshoe[_scaled]` submodels verbatim (same unscaled /
 # scaled rule as `_sb_emit_prior!`), so the per-column Stan is the familiar
 # bare expansion; `beta_pop` assembles them in column order. No
 # `n_covariates`: the vector length is fixed by construction, not by data.
 function _sb_horseshoe_popefs_model(specs, overrides)
-    key = repr([(isnothing(hspec) ?
-                 (isnothing(expr) ? (:default,) :
-                  (:plain, getf(expr), getargs(expr), getkwargs(expr))) :
-                 (:hs, hspec[1], hspec[2]))
-                for (hspec, expr) in zip(specs.hs, overrides)])
-    lock(_SB_GEN_LOCK) do
-        get!(_SB_HORSESHOE_POPEFS_CACHE, key) do
-        temps = Symbol[]
-        body = Any[]
-        for (i, (hspec, expr)) in enumerate(zip(specs.hs, overrides))
-            infix = _sb_hs_temp_infix(specs.labels[i])
-            if !isnothing(hspec)
-                temp = Symbol(:hs_, i, :_, infix)
-                local_scale, global_scale = hspec
-                stmt = if local_scale == 1.0 && global_scale == 1.0
-                    :($temp ~ _sb_horseshoe())
-                else
-                    :($temp ~ _sb_horseshoe_scaled(;
-                        local_scale=$local_scale, global_scale=$global_scale))
-                end
-                push!(body, stmt)
-                push!(temps, temp)
-            elseif isnothing(expr)
-                temp = Symbol(:b_, i, :_, infix)
-                push!(body, :($temp ~ normal(0.0, 1.0)))
-                push!(temps, temp)
+    temps = Symbol[]
+    body = Any[]
+    for (i, (hspec, expr)) in enumerate(zip(specs.hs, overrides))
+        infix = _sb_hs_temp_infix(specs.labels[i])
+        if !isnothing(hspec)
+            temp = Symbol(:hs_, i, :_, infix)
+            local_scale, global_scale = hspec
+            stmt = if local_scale == 1.0 && global_scale == 1.0
+                :($temp ~ _sb_horseshoe())
             else
-                temp = Symbol(:b_, i, :_, infix)
-                emitted = Any[]
-                _sb_emit_prior!(emitted, temp, getf(expr), expr) ||
-                    error("sbimpl: internal: sibling prior `$(getf(expr))` " *
-                          "has no Stan translation")
-                length(emitted) == 1 || error(
-                    "sbimpl: internal: sibling prior `$(getf(expr))` " *
-                    "emitted $(length(emitted)) statements, expected one")
-                push!(body, only(emitted))
-                push!(temps, temp)
+                :($temp ~ _sb_horseshoe_scaled(;
+                    local_scale=$local_scale, global_scale=$global_scale))
             end
-        end
-        push!(body, Expr(:(=), :beta_pop, Expr(:vect, temps...)))
-        push!(body, Expr(:return, :(X * beta_pop)))
-        block = Expr(:block, body...)
-        Core.eval(@__MODULE__,
-            _sb_anchor_slic_macrocalls!(:(StanBlocks.@slic $block)))
+            push!(body, stmt)
+            push!(temps, temp)
+        elseif isnothing(expr)
+            temp = Symbol(:b_, i, :_, infix)
+            push!(body, :($temp ~ normal(0.0, 1.0)))
+            push!(temps, temp)
+        else
+            temp = Symbol(:b_, i, :_, infix)
+            emitted = Any[]
+            _sb_emit_prior!(emitted, temp, getf(expr), expr) ||
+                error("sbimpl: internal: sibling prior `$(getf(expr))` " *
+                      "has no Stan translation")
+            length(emitted) == 1 || error(
+                "sbimpl: internal: sibling prior `$(getf(expr))` " *
+                "emitted $(length(emitted)) statements, expected one")
+            push!(body, only(emitted))
+            push!(temps, temp)
         end
     end
+    push!(body, Expr(:(=), :beta_pop, Expr(:vect, temps...)))
+    push!(body, Expr(:return, :(X * beta_pop)))
+    # No runtime definition is needed for an anonymous submodel. Returning a
+    # fresh value also keeps label-dependent names and mutable ASTs private.
+    StanBlocks.SlicModel(Expr(:block, body...), Dict{Symbol,Any}(), @__MODULE__)
 end
 
 function _sb_emit_horseshoe_popefs!(stmts, target, X_name, pop_name,
