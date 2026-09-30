@@ -59,11 +59,10 @@ const PINS = [
     # preservation, nonfinite-transport rejection). Matches test/Project.toml.
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "0194dce08e986ff17fd5a788bb315c6431b7858e"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
-    # through. 3cdba95c (2026-09-29, main): the phase-III full
-    # varying-source PK/PD native cell, grouped schedule/emitter,
-    # centered 13-margin hierarchy, six-case Stan comparison, and
-    # consumer skill update (peer GO 1vgh5nh).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "3cdba95c143a4b48afb4281b62a4ddd328e03e3c"),  # main
+    # through. cb9f9ab7 (2026-09-30, main): serializes build_kernel's
+    # generated-model binding assignment (peer GO 1tddu2a), retaining
+    # the phase-III full varying-source PK/PD support from 3cdba95c.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "cb9f9ab75c65df33c9c23e175f5fbdbb521c5fa4"),  # main
 ]
 
 function main()

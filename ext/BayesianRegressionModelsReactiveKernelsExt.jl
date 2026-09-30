@@ -304,9 +304,8 @@ function _rk_patch_ordinal_extras(unbound::StructuralPlan,
 end
 
 # Evaluate the emitted submodel defs through `@rkppl` in a FRESH module
-# per lowering. Defs are canonical lattice-named (same name means same
-# body across all programs), so a shared module would be safe too; the
-# fresh module is retained as evaluation hygiene. The macrocall `Expr`
+# per lowering. Each build owns its definition namespace even when different
+# programs use the same canonical lattice names. The macrocall `Expr`
 # is exactly the parser's shape for `@rkppl sm(args...) = begin ... end`.
 function _rk_emit_module(emitted::BRM._RKEmittedProgram)
     mod = Module(gensym(:RKEmittedModels))

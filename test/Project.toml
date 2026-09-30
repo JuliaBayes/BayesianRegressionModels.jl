@@ -72,11 +72,10 @@ rev = "0194dce08e986ff17fd5a788bb315c6431b7858e"
 
 [sources.ReactiveKernels]
 url = "https://github.com/nsiccha/ReactiveKernels.jl"
-# 3cdba95c (2026-09-29, main): the phase-III full varying-source
-# PK/PD native cell, grouped schedule/emitter, centered 13-margin
-# hierarchy, six-case Stan comparison, and consumer skill update
-# (peer GO 1vgh5nh).
+# cb9f9ab7 (2026-09-30, main): serializes generated-model binding
+# assignment during concurrent build_kernel calls (peer GO 1tddu2a).
+# Retains the phase-III full varying-source PK/PD support from 3cdba95c.
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "3cdba95c143a4b48afb4281b62a4ddd328e03e3c"
+rev = "cb9f9ab75c65df33c9c23e175f5fbdbb521c5fa4"

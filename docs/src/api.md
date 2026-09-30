@@ -149,6 +149,12 @@ Keep each build's backend and mutable preparation state private to its task,
 and use BRM's `stan_code(sb)`, `stan_data(sb)`, and `stan_model(sb)` entries
 when immediately consuming an `SBBRMI` inside the same compiled caller.
 
+`RKBRMI` follows the same ownership rules. Concurrent builds require the RK
+fix for generated model bindings, included in revision
+`cb9f9ab75c65df33c9c23e175f5fbdbb521c5fa4` and pinned in the test environment.
+Prepare a separate `rk_logdensity_problem` for each task; that interface also
+provides the world-age boundary for immediate first execution.
+
 `turing_model_source(backend)` returns an independent expression that can be
 edited without changing any backend. Give each inference task its own sampler
 state, mutable density/AD workspace, and explicit RNG; keep input arrays
