@@ -90,6 +90,13 @@ end
 const _SB_VECTOR_PRIOR_CACHE = Dict{String,Function}()
 const _SB_MIXTURE_CACHE = Dict{String,Function}()
 const _SB_HORSESHOE_POPEFS_CACHE = Dict{String,StanBlocks.SlicModel}()
+# Serialises every generated-function cache miss path below. Two tasks missing
+# the same key concurrently would both `Core.eval` the same brand-new top-level
+# functions into the same module, and the second thread's distinct generic
+# collides with the first's (`invalid redefinition of constant #<name>`).
+# Reentrant so a nested generation never self-deadlocks. One lock for all
+# three caches avoids lock-ordering hazards.
+const _SB_GEN_LOCK = ReentrantLock()
 const _SB_HS_PLANS_KEY = :__brm_hs_plans__
 const _sb_lower_conditioning_rng = StanBlocks.lower_conditioning_rng
 const _sb_upper_conditioning_rng = StanBlocks.upper_conditioning_rng
@@ -224,7 +231,8 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
         "vector prior cannot mix custom families from different modules ",
         "(StanBlocks builtins compose with anything).")
     home = isempty(required) ? (@__MODULE__) : (only(required))
-    family = get!(_SB_VECTOR_PRIOR_CACHE, key) do
+    family = lock(_SB_GEN_LOCK) do
+        get!(_SB_VECTOR_PRIOR_CACHE, key) do
         stem = Symbol(:brm_vector_prior_, _sb_stable_fingerprint(key))
         lpdf, lpdfs, rng = Symbol(stem, :_lpdf), Symbol(stem, :_lpdfs), Symbol(stem, :_rng)
         Core.eval(home, :(function $stem end))
@@ -285,6 +293,7 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
         isempty(autokws) || Core.eval(@__MODULE__, :(StanBlocks.autokwargs(
             ::StanBlocks.CanonicalExpr{typeof($f)}) = $(Expr(:tuple, Expr(:parameters, autokws...)))))
         f
+        end
     end
     family, actuals
 end
@@ -10001,7 +10010,8 @@ function _sb_horseshoe_popefs_model(specs, overrides)
                   (:plain, getf(expr), getargs(expr), getkwargs(expr))) :
                  (:hs, hspec[1], hspec[2]))
                 for (hspec, expr) in zip(specs.hs, overrides)])
-    get!(_SB_HORSESHOE_POPEFS_CACHE, key) do
+    lock(_SB_GEN_LOCK) do
+        get!(_SB_HORSESHOE_POPEFS_CACHE, key) do
         temps = Symbol[]
         body = Any[]
         for (i, (hspec, expr)) in enumerate(zip(specs.hs, overrides))
@@ -10039,6 +10049,7 @@ function _sb_horseshoe_popefs_model(specs, overrides)
         block = Expr(:block, body...)
         Core.eval(@__MODULE__,
             _sb_anchor_slic_macrocalls!(:(StanBlocks.@slic $block)))
+        end
     end
 end
 
@@ -12981,7 +12992,8 @@ end
 function _sb_mixture_family(stan_name::Symbol, n_args::Int, int_positions::Tuple,
                             K::Int, discrete::Bool)
     key = repr((:mixture, stan_name, n_args, int_positions, K, discrete))
-    get!(_SB_MIXTURE_CACHE, key) do
+    lock(_SB_GEN_LOCK) do
+        get!(_SB_MIXTURE_CACHE, key) do
         stem = Symbol(:brm_mixture_, _sb_stable_fingerprint(key))
         suffix = discrete ? :lpmf : :lpdf
         density = Symbol(stem, :_, suffix)
@@ -13094,6 +13106,7 @@ function _sb_mixture_family(stan_name::Symbol, n_args::Int, int_positions::Tuple
         Core.eval(@__MODULE__,
                   _sb_anchor_slic_macrocalls!(:(StanBlocks.@deffun $defs)))
         getfield(@__MODULE__, stem)
+        end
     end
 end
 
