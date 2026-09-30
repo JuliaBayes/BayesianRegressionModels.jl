@@ -139,6 +139,21 @@ BayesianRegressionModels.select_s2z_centeredness
 `stan_code` is re-exported from StanBlocks.jl. BRM extends that binding with
 `stan_code(sb::SBBRMI)`, which returns the transpiled Stan source for `sb.model`.
 
+### Concurrent construction and ownership
+
+After loading the backend packages and defining custom distribution families,
+tasks can independently construct `TuringBRMI(builder(data))` and
+`SBBRMI(builder(data))`. A formula builder and read-only input arrays may be
+shared; custom callables used during construction must support concurrent calls.
+Keep each build's backend and mutable preparation state private to its task,
+and use BRM's `stan_code(sb)`, `stan_data(sb)`, and `stan_model(sb)` entries
+when immediately consuming an `SBBRMI` inside the same compiled caller.
+
+`turing_model_source(backend)` returns an independent expression that can be
+edited without changing any backend. Give each inference task its own sampler
+state, mutable density/AD workspace, and explicit RNG; keep input arrays
+unchanged while another task uses them.
+
 ## Executable descriptors
 
 ```@docs
