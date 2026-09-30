@@ -51,7 +51,7 @@ const PINS = [
     ("MutatingFunctions", "https://github.com/nsiccha/MutatingFunctions.jl.git", "4fc41b1c7b774133ceaacc4ff3c34c67b15b87b2"),  # main
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "121de3194f02044e00bac0d11019a93458ddb63a"),  # main
     ("TreeArrays",        "https://github.com/nsiccha/TreeArrays.jl.git",        "c317cc003fc41c2d933c27dc80799141eebd434e"),  # main
-    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "342436de359eb43879ddcef4956cfd5fd6502995"),  # devibe (K>=3 mixture RNG else-if rendering 5aed3df; BRM matrix-b snag k-5-mixturemodel-6105de92; supersedes 24578c34)
+    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "eeee3bad6333ecffb08b45769df809b1aa21f18a"),  # devibe (ValueFamily/ValueUDF + observation-only sizes + concurrent tracing/publication; retains earlier mixture/draw fixes)
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     # 0194dce (2026-09-27, dev): WindowSelectionPlan (WarmupHMC-held evidence)
     # and the controls interface for custom reparametrizers,
@@ -59,11 +59,10 @@ const PINS = [
     # preservation, nonfinite-transport rejection). Matches test/Project.toml.
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "0194dce08e986ff17fd5a788bb315c6431b7858e"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
-    # through. 3cdba95c (2026-09-29, main): the phase-III full
-    # varying-source PK/PD native cell, grouped schedule/emitter,
-    # centered 13-margin hierarchy, six-case Stan comparison, and
-    # consumer skill update (peer GO 1vgh5nh).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "3cdba95c143a4b48afb4281b62a4ddd328e03e3c"),  # main
+    # through. cb9f9ab7 (2026-09-30, main): serializes build_kernel's
+    # generated-model binding assignment (peer GO 1tddu2a), retaining
+    # the phase-III full varying-source PK/PD support from 3cdba95c.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "cb9f9ab75c65df33c9c23e175f5fbdbb521c5fa4"),  # main
 ]
 
 function main()

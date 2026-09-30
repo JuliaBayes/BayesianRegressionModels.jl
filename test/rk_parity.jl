@@ -50,6 +50,7 @@ using Enzyme
 using LinearAlgebra: cholesky, Symmetric
 using LogDensityProblems
 using LogExpFunctions: logistic, logit
+import ReactiveKernels
 using ReactiveKernels: prepare
 using ReactiveKernelsPPL: constrain, coordinate_names, logjac, prepare_query
 using Random: Xoshiro, randn
@@ -3649,8 +3650,7 @@ end
     # verified against it at pin `3cdba95c`. Compare BRM's emitted 232
     # coordinates through an explicit name map (term order differs), then
     # anchor the absolute peer/Stan density for case 1.
-    peer_root = joinpath(@__DIR__, ".bootstrap",
-        "reactivekernels-3cdba95c143a")
+    peer_root = pkgdir(ReactiveKernels)
     include(joinpath(peer_root, "benchmark", "varyingsource_pkpd",
         "model.jl"))
     cols = pkpd_columns()

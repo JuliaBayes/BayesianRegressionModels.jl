@@ -249,14 +249,16 @@ function _brm_generic_model_ast(plan::BRM._TuringGenericPlan)
     _brm_generic_response_graph_ast(graph; single=true)
 end
 
-const _BRM_GENERIC_MODEL_CACHE = Dict{Any,Tuple{Function,Expr}}()
+# Only compiled evaluators are shared. Each plan owns its source expression;
+# caching that mutable Expr would alias otherwise independent model builds.
+const _BRM_GENERIC_MODEL_CACHE = Dict{Any,Function}()
 const _BRM_GENERIC_MODEL_CACHE_LOCK = ReentrantLock()
 
 function _brm_cached_generic_evaluator(lowered)
     key = _brm_generic_structure_key(lowered.definition)
     lock(_BRM_GENERIC_MODEL_CACHE_LOCK) do
         get!(_BRM_GENERIC_MODEL_CACHE, key) do
-            (_brm_staged_turing_evaluator(lowered.definition), lowered.definition)
+            _brm_staged_turing_evaluator(lowered.definition)
         end
     end
 end
@@ -275,7 +277,8 @@ function _brm_staged_turing_evaluator(definition)
 end
 
 function _brm_generic_response_graph_ast(multi; single::Bool=false)
-    row = _brm_fresh_model_name(:i, _brm_model_binding_names(multi.plans))
+    private_names = _brm_model_binding_names(multi.plans)
+    row = _brm_reserve_model_name!(:i, private_names)
     body = Expr(:block)
     node_statements = Dict{Symbol,Vector{Any}}()
     parameters = Dict{Symbol,Any}()
@@ -303,9 +306,15 @@ function _brm_generic_response_graph_ast(multi; single::Bool=false)
         for shared in shared_groups for member in shared.members)
     shared_predictors = Set(member.predictor
         for shared in shared_groups for member in shared.members)
-    predictor_bases = Dict(name => gensym(Symbol(:predictor_base_, name))
-                          for name in shared_predictors)
-    shared_barriers = [gensym(:shared_group) for _ in shared_groups]
+    # These names appear in the structural cache key. Deterministic, reserved
+    # locals preserve hygiene without turning every shared-group build into a
+    # new evaluator merely because its gensym counters differ.
+    predictor_bases = Dict(name => _brm_reserve_model_name!(
+                              Symbol(:__brm_predictor_base_, name), private_names)
+                          for name in sort!(collect(shared_predictors)))
+    shared_barriers = [_brm_reserve_model_name!(
+                          Symbol(:__brm_shared_group_, i), private_names)
+                       for i in eachindex(shared_groups)]
     predictor_shared_nodes = Dict(name => Symbol[] for name in shared_predictors)
     residual_scales = Dict{Symbol,Any}()
     block_residual_scales = Dict{Tuple{Symbol,Int},Any}()
@@ -637,9 +646,9 @@ end
 function BRM._brm_turing_model(plan::BRM._TuringGenericPlan)
     _brm_validate_turing_term_rows(plan)
     lowered = _brm_generic_model_ast(plan)
-    evaluator, definition = _brm_cached_generic_evaluator(lowered)
+    evaluator = _brm_cached_generic_evaluator(lowered)
     model = Turing.DynamicPPL.Model{false}(evaluator, lowered.inputs)
-    plan.source_ast = definition
+    plan.source_ast = lowered.definition
     model
 end
 function _zero_correlation_scales(intercept_index, intercept_scale,
@@ -1199,8 +1208,8 @@ function BRM._brm_turing_model(plan::BRM._TuringMultiResponsePlan)
     _brm_validate_turing_term_rows(plan)
     if all(child -> child isa BRM._TuringGenericPlan, plan.plans)
         lowered = _brm_generic_multi_model_ast(plan)
-        evaluator, definition = _brm_cached_generic_evaluator(lowered)
-        plan.source_ast = definition
+        evaluator = _brm_cached_generic_evaluator(lowered)
+        plan.source_ast = lowered.definition
         return Turing.DynamicPPL.Model{false}(evaluator, lowered.inputs)
     end
     error("Turing backend: internal non-generic multi-response plan")

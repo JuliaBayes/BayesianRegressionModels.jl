@@ -87,15 +87,11 @@ function _sb_insert_indexed_priors(base::StanBlocks.SlicModel,
     StanBlocks.SlicModel(body, deepcopy(base.data), base.mod, base.observations)
 end
 
-const _SB_VECTOR_PRIOR_CACHE = Dict{String,Function}()
-const _SB_MIXTURE_CACHE = Dict{String,Function}()
-const _SB_HORSESHOE_POPEFS_CACHE = Dict{String,StanBlocks.SlicModel}()
-# Serialises every generated-function cache miss path below. Two tasks missing
-# the same key concurrently would both `Core.eval` the same brand-new top-level
-# functions into the same module, and the second thread's distinct generic
-# collides with the first's (`invalid redefinition of constant #<name>`).
-# Reentrant so a nested generation never self-deadlocks. One lock for all
-# three caches avoids lock-ordering hazards.
+const _SB_VECTOR_PRIOR_CACHE = Dict{Tuple{String,Tuple},StanBlocks.ValueFamily}()
+const _SB_MIXTURE_CACHE = Dict{String,StanBlocks.ValueFamily}()
+# Synchronize every cache lookup and publication. Generated families own their
+# syntax and are read-only after construction; they install no Julia bindings
+# or methods. One reentrant lock also permits nested family construction.
 const _SB_GEN_LOCK = ReentrantLock()
 const _SB_HS_PLANS_KEY = :__brm_hs_plans__
 const _sb_lower_conditioning_rng = StanBlocks.lower_conditioning_rng
@@ -184,17 +180,13 @@ function _sb_vector_prior_selector(dist::Symbol, mod::Module)
 end
 _sb_vector_prior_selector(dist, _mod) = dist
 
-# Anchor every SLIC macrocall head in a generated-family definition to the
-# StanBlocks module VALUE, so the definition evaluates in ANY consumer module
-# — even one with no `StanBlocks` binding (selective
-# `import StanBlocks: @deffun` imports the macro but not the name) or without
-# inner `@lhs` imported (triads only ever need `@lpxf`). Expansion still runs
-# in the eval module, so `__fundef_mod__` — the trace-context module for the
-# generated body — stays the resolving module.
+# Resolve SLIC macros in fresh generated syntax without requiring the caller's
+# module to import their names. ValueFamily still traces the bodies in the
+# caller's actual module, where custom density companions resolve.
 _sb_anchor_slic_macrohead(s::Symbol) =
-    Expr(:., QuoteNode(StanBlocks), QuoteNode(s))
+    GlobalRef(StanBlocks, s)
 _sb_anchor_slic_macrohead(d::Expr) =
-    d.head === :. ? Expr(:., QuoteNode(StanBlocks), d.args[2]) : d
+    d.head === :. ? GlobalRef(StanBlocks, d.args[2].value) : d
 function _sb_anchor_slic_macrocalls!(ex::Expr)
     ex.head === :macrocall && (ex.args[1] = _sb_anchor_slic_macrohead(ex.args[1]))
     foreach(a -> a isa Expr && _sb_anchor_slic_macrocalls!(a), ex.args)
@@ -209,8 +201,12 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
     # consumer modules.
     owner_key = map(s -> (nameof(s), Symbol(parentmodule(s))), selectors)
     key = repr((positive, shape, owner_key))
-    # The generated UDF must live where its density companions resolve:
-    # StanBlocks traces a generated function's body in its DEFINING module's
+    # Printed module names are not identities: separate module objects can
+    # share a name. Keep the stable spelling for emitted names, but cache by
+    # the actual callable values as well.
+    cache_key = (key, Tuple(selectors))
+    # The generated UDF must trace where its density companions resolve:
+    # StanBlocks traces a value family's body in its defining module's
     # context (builtin -> defining-mod -> Main), so a density head naming a
     # consumer `@deffun` triad resolves only in the triad's module, while a
     # head naming a BRM-owned composed family (e.g. `brm_affine`) resolves
@@ -232,10 +228,9 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
         "(StanBlocks builtins compose with anything).")
     home = isempty(required) ? (@__MODULE__) : (only(required))
     family = lock(_SB_GEN_LOCK) do
-        get!(_SB_VECTOR_PRIOR_CACHE, key) do
+        get!(_SB_VECTOR_PRIOR_CACHE, cache_key) do
         stem = Symbol(:brm_vector_prior_, _sb_stable_fingerprint(key))
         lpdf, lpdfs, rng = Symbol(stem, :_lpdf), Symbol(stem, :_lpdfs), Symbol(stem, :_rng)
-        Core.eval(home, :(function $stem end))
         typed = [argkinds[i] === :selector ? Symbol(:arg_, i) :
                  Expr(:(::), Symbol(:arg_, i), :real) for i in eachindex(actuals)]
         densities = Any[]; draws = Any[]; guards = Any[]
@@ -266,33 +261,26 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
         drawbody = Any[:(@stan_assert n == $(length(calls))), :(out::vector[n])]
         append!(drawbody, [:(out[$i] = $(draws[i])) for i in eachindex(calls)])
         push!(drawbody, :out)
-        # Companions BEFORE the `@lpxf` density: `@lpxf` registers the
-        # `lpxf_expr`/`rng_expr`/`likelihood_expr` dispatch hooks, and the
-        # companion names must already exist when that registration runs. The
-        # historical order (density first) left `rng_expr` unregistered, which
-        # a likelihood-free program trips over when it re-draws a scale in
-        # generated quantities ("`brm_vector_prior_*` is missing `rng_expr`").
-        defs = quote
-            $lpdfs(x::vector[n], $(typed...))::vector[n] = $(Expr(:block, point...))
-            $rng(vector[n], $(typed...))::vector[n] = $(Expr(:block, drawbody...))
-            @lhs @lpxf $lpdf(x::vector[n], $(typed...))::real = begin
-                $(guards...)
-                $total
-            end
-        end
-        Core.eval(home, _sb_anchor_slic_macrocalls!(:(StanBlocks.@deffun $defs)))
-        f = getfield(home, stem)
-        autokws = Any[]
-        positive && push!(autokws, Expr(:kw, :lower, 0.0))
+        density_def = :($lpdf(x::vector[n], $(typed...))::real = begin
+            $(guards...)
+            $total
+        end)
+        pointwise_def = :($lpdfs(x::vector[n], $(typed...))::vector[n] =
+            $(Expr(:block, point...)))
+        rng_def = :($rng(vector[n], $(typed...))::vector[n] =
+            $(Expr(:block, drawbody...)))
+        support = Pair{Symbol,Any}[]
+        positive && push!(support, :lower => 0.0)
         lowers = [c.lower for c in calls]
         uppers = [c.upper for c in calls]
         !positive && all(!isnothing, lowers) && allequal(lowers) &&
-            push!(autokws, Expr(:kw, :lower, first(lowers)))
+            push!(support, :lower => first(lowers))
         !positive && all(!isnothing, uppers) && allequal(uppers) &&
-            push!(autokws, Expr(:kw, :upper, first(uppers)))
-        isempty(autokws) || Core.eval(@__MODULE__, :(StanBlocks.autokwargs(
-            ::StanBlocks.CanonicalExpr{typeof($f)}) = $(Expr(:tuple, Expr(:parameters, autokws...)))))
-        f
+            push!(support, :upper => first(uppers))
+        StanBlocks.ValueFamily(stem, :lpdf,
+            _sb_anchor_slic_macrocalls!(density_def),
+            _sb_anchor_slic_macrocalls!(pointwise_def),
+            _sb_anchor_slic_macrocalls!(rng_def), home; support=(; support...))
         end
     end
     family, actuals
@@ -364,8 +352,9 @@ function _sb_vector_positive_priors(base::StanBlocks.SlicModel,
         end
     end
     family, args = _sb_vector_prior_family(priors; mod)
-    rhs = Expr(:call, family, Expr(:parameters, Expr(:kw, :n, nvalue),
-                                  Expr(:kw, :lower, 0.0)), args...)
+    # Intrinsic bounds belong to the value family, including when this
+    # parameter is redrawn in generated quantities.
+    rhs = Expr(:call, family, Expr(:parameters, Expr(:kw, :n, nvalue)), args...)
     model = Base.merge(base, Expr(:call, :~, lhs, rhs))
     dependencies = Set{Symbol}()
     foreach(arg -> _sb_vector_prior_dependencies!(dependencies, arg), args)
@@ -3611,14 +3600,10 @@ Return the transpiled Stan source generated from `sb.model`. Forwards
 to `StanBlocks.stan_code`. Useful for inspecting what the sbimpl walker
 emitted before compiling.
 """
-# Model construction can register composed Stan families (e.g. the
-# `brm_vector_prior_*` triad behind a totals scale prior) via `Core.eval`.
-# A trace that runs in the SAME compiled caller frame resolves methods at
-# that frame's world age, so the fresh hooks are invisible there and tracing
-# dies with "`brm_vector_prior_*` is missing `lpxf_expr`" — while an identical
-# top-level call succeeds. Enter the compiler in the current world so the
-# hooks are visible in the same calling function. This boundary is used only
-# while compiling a model, never during sampling.
+# BRM-generated families are values and need no new method world. Preserve
+# the public newest-world entry for consumer-defined method-based families
+# and extensions. This boundary is used only while compiling a model,
+# never during sampling.
 stan_code(sb::SBBRMI) = Base.invokelatest(StanBlocks.stan_code, sb.model)
 
 """
@@ -3628,9 +3613,8 @@ Return the transpiled Stan source for a SLIC model, using the same
 world-age-safe boundary as `stan_code(::SBBRMI)`. This is the supported trace
 entry for a model rebuilt from an emitted `SBBRMI` after construction — for
 example a `cv_groups` model whose group index was marked with
-`StanBlocks.stan.maybecv` just before tracing. The underlying generated family
-hooks are already registered by lowering; this boundary makes them visible to
-a trace running in the same compiled frame as the build.
+`StanBlocks.stan.maybecv` just before tracing. This boundary also preserves
+visibility of consumer-defined family hooks in an older compiled caller.
 """
 stan_code(model::StanBlocks.SlicModel) =
     Base.invokelatest(StanBlocks.stan_code, model)
@@ -3639,8 +3623,8 @@ stan_code(model::StanBlocks.SlicModel) =
     stan_data(sb::SBBRMI) -> Dict
 
 Return the prepared Stan data generated from `sb.model`. Forwards to
-`StanBlocks.stan_data` in the current world, for the same lowering-time
-registration reason as [`stan_code`](@ref). Prefer this over
+`StanBlocks.stan_data` in the current world, preserving visibility of
+consumer-defined hooks as in [`stan_code`](@ref). Prefer this over
 `StanBlocks.stan_data(sb.model)` when the data may be materialized inside the
 same function that built `sb`.
 """
@@ -3653,9 +3637,8 @@ Return the prepared Stan data for a SLIC model, using the same
 world-age-safe boundary as `stan_data(::SBBRMI)`. This is the supported data
 entry for a model rebuilt from an emitted `SBBRMI` after construction — for
 example a `cv_groups` model whose group index was marked with
-`StanBlocks.stan.maybecv` just before tracing. The underlying generated family
-hooks are already registered by lowering; this boundary makes them visible to
-a trace running in the same compiled frame as the build.
+`StanBlocks.stan.maybecv` just before tracing. This boundary also preserves
+visibility of consumer-defined family hooks in an older compiled caller.
 """
 stan_data(model::StanBlocks.SlicModel) =
     Base.invokelatest(StanBlocks.stan_data, model)
@@ -3664,7 +3647,7 @@ stan_data(model::StanBlocks.SlicModel) =
     stan_model(sb::SBBRMI; kwargs...) -> StanModel
 
 Trace `sb.model` end to end. Forwards to `StanBlocks.stan_model` in the
-current world, for the same lowering-time registration reason as `stan_code`
+current world, preserving visibility of consumer-defined hooks as in `stan_code`
 above. Prefer this over `StanBlocks.stan_model(sb.model)` when the trace may
 run inside a function that also built `sb`.
 """
@@ -3867,7 +3850,8 @@ against `plan.data`.
 `constraints` reports only the constraints spelled **on this declaration**.
 Families carry their own implied support (`exponential` is positive,
 `beta` lives on `[0, 1]`) — that is a property of `family`, held in StanBlocks'
-`autokwargs` table, and BRM deliberately does not duplicate it here.
+`autokwargs` table or a `ValueFamily`'s intrinsic support, and BRM deliberately
+does not duplicate it here.
 
 The declaration is intentionally backend-level: it describes what BRM really
 emitted after formula terms introduced their latent blocks, rather than a
@@ -3953,9 +3937,12 @@ _sb_plan_generated(context, target) =
 # value.  Its `mod` field is the stable namespace where the submodel was
 # defined, not mutable model state, and Julia deliberately refuses to
 # `deepcopy` a `Module`.  Copy the model payload while retaining that namespace
-# by identity; ordinary emitted leaves keep the historical `deepcopy` path.
+# by identity. Value families likewise own immutable definitions and retain
+# their namespace/callable identities; copy the surrounding syntax, not the
+# family. Ordinary emitted leaves keep the historical `deepcopy` path.
 _sb_plan_copy(x) = deepcopy(x)
 _sb_plan_copy(x::Module) = x
+_sb_plan_copy(x::Union{StanBlocks.ValueFamily,StanBlocks.ValueUDF}) = x
 _sb_plan_copy(x::QuoteNode) = QuoteNode(_sb_plan_copy(x.value))
 _sb_plan_copy(x::Expr) = Expr(x.head, map(_sb_plan_copy, x.args)...)
 _sb_plan_copy(x::StanBlocks.SlicModel) = StanBlocks.SlicModel(
@@ -9998,59 +9985,49 @@ function _sb_horseshoe_overrides(brmi::BRMI, effect_overrides, r2d2_overrides)
     out
 end
 
-# One generated `popefs` sibling per distinct column pattern (the
-# `_sb_vector_prior_family` fingerprinted-cache precedent). Scalar temporaries
+# Construct a private `popefs` value from the column pattern. Scalar temporaries
 # reuse the bare `_sb_horseshoe[_scaled]` submodels verbatim (same unscaled /
 # scaled rule as `_sb_emit_prior!`), so the per-column Stan is the familiar
 # bare expansion; `beta_pop` assembles them in column order. No
 # `n_covariates`: the vector length is fixed by construction, not by data.
 function _sb_horseshoe_popefs_model(specs, overrides)
-    key = repr([(isnothing(hspec) ?
-                 (isnothing(expr) ? (:default,) :
-                  (:plain, getf(expr), getargs(expr), getkwargs(expr))) :
-                 (:hs, hspec[1], hspec[2]))
-                for (hspec, expr) in zip(specs.hs, overrides)])
-    lock(_SB_GEN_LOCK) do
-        get!(_SB_HORSESHOE_POPEFS_CACHE, key) do
-        temps = Symbol[]
-        body = Any[]
-        for (i, (hspec, expr)) in enumerate(zip(specs.hs, overrides))
-            infix = _sb_hs_temp_infix(specs.labels[i])
-            if !isnothing(hspec)
-                temp = Symbol(:hs_, i, :_, infix)
-                local_scale, global_scale = hspec
-                stmt = if local_scale == 1.0 && global_scale == 1.0
-                    :($temp ~ _sb_horseshoe())
-                else
-                    :($temp ~ _sb_horseshoe_scaled(;
-                        local_scale=$local_scale, global_scale=$global_scale))
-                end
-                push!(body, stmt)
-                push!(temps, temp)
-            elseif isnothing(expr)
-                temp = Symbol(:b_, i, :_, infix)
-                push!(body, :($temp ~ normal(0.0, 1.0)))
-                push!(temps, temp)
+    temps = Symbol[]
+    body = Any[]
+    for (i, (hspec, expr)) in enumerate(zip(specs.hs, overrides))
+        infix = _sb_hs_temp_infix(specs.labels[i])
+        if !isnothing(hspec)
+            temp = Symbol(:hs_, i, :_, infix)
+            local_scale, global_scale = hspec
+            stmt = if local_scale == 1.0 && global_scale == 1.0
+                :($temp ~ _sb_horseshoe())
             else
-                temp = Symbol(:b_, i, :_, infix)
-                emitted = Any[]
-                _sb_emit_prior!(emitted, temp, getf(expr), expr) ||
-                    error("sbimpl: internal: sibling prior `$(getf(expr))` " *
-                          "has no Stan translation")
-                length(emitted) == 1 || error(
-                    "sbimpl: internal: sibling prior `$(getf(expr))` " *
-                    "emitted $(length(emitted)) statements, expected one")
-                push!(body, only(emitted))
-                push!(temps, temp)
+                :($temp ~ _sb_horseshoe_scaled(;
+                    local_scale=$local_scale, global_scale=$global_scale))
             end
-        end
-        push!(body, Expr(:(=), :beta_pop, Expr(:vect, temps...)))
-        push!(body, Expr(:return, :(X * beta_pop)))
-        block = Expr(:block, body...)
-        Core.eval(@__MODULE__,
-            _sb_anchor_slic_macrocalls!(:(StanBlocks.@slic $block)))
+            push!(body, stmt)
+            push!(temps, temp)
+        elseif isnothing(expr)
+            temp = Symbol(:b_, i, :_, infix)
+            push!(body, :($temp ~ normal(0.0, 1.0)))
+            push!(temps, temp)
+        else
+            temp = Symbol(:b_, i, :_, infix)
+            emitted = Any[]
+            _sb_emit_prior!(emitted, temp, getf(expr), expr) ||
+                error("sbimpl: internal: sibling prior `$(getf(expr))` " *
+                      "has no Stan translation")
+            length(emitted) == 1 || error(
+                "sbimpl: internal: sibling prior `$(getf(expr))` " *
+                "emitted $(length(emitted)) statements, expected one")
+            push!(body, only(emitted))
+            push!(temps, temp)
         end
     end
+    push!(body, Expr(:(=), :beta_pop, Expr(:vect, temps...)))
+    push!(body, Expr(:return, :(X * beta_pop)))
+    # No runtime definition is needed for an anonymous submodel. Returning a
+    # fresh value also keeps label-dependent names and mutable ASTs private.
+    StanBlocks.SlicModel(Expr(:block, body...), Dict{Symbol,Any}(), @__MODULE__)
 end
 
 function _sb_emit_horseshoe_popefs!(stmts, target, X_name, pop_name,
@@ -12839,7 +12816,7 @@ end
 # ---- generic MixtureModel likelihood -----------------------------------------
 #
 # `y ~ MixtureModel([D1(th1), ..., DK(thK)], weights)` with K same-family
-# scalar components lowers to a generated `@lpxf` triad (model density,
+# scalar components lowers to a generated ValueFamily triad (model density,
 # pointwise log-likelihood, posterior-predictive RNG), following the
 # `_sb_vector_prior_family` precedent: one fingerprinted `brm_mixture_<hash>`
 # family per (component Stan family, arity, K, discrete/continuous) shape,
@@ -12999,7 +12976,6 @@ function _sb_mixture_family(stan_name::Symbol, n_args::Int, int_positions::Tuple
         density = Symbol(stem, :_, suffix)
         pointwise = Symbol(density, :s)
         rng = Symbol(stem, :_rng)
-        Core.eval(@__MODULE__, :(function $stem end))
         density_fn = Symbol(stan_name, :_, suffix)
         rng_fn = Symbol(stan_name, :_rng)
         y_scalar = discrete ? :int : :real
@@ -13083,29 +13059,32 @@ function _sb_mixture_family(stan_name::Symbol, n_args::Int, int_positions::Tuple
                               Expr(:call, rng, Expr(:ref, y_vector, :n),
                                    vector_formals[2:end]...),
                               Expr(:ref, y_vector, :n))
-        defs = quote
-            @lpxf $scalar_sig = begin
+        density_defs = [
+            :($scalar_sig = begin
                 $(nobroadcast(scalar_body)...)
-            end
-            $vector_sig = begin
+            end),
+            :($vector_sig = begin
                 $(nobroadcast(vector_body)...)
-            end
-            $(Expr(:call, pointwise, splat)) = begin
+            end),
+        ]
+        pointwise_defs = [
+            :($(Expr(:call, pointwise, splat)) = begin
                 $(Expr(:call, density, splat))
-            end
-            $pointwise_sig = begin
+            end),
+            :($pointwise_sig = begin
                 $(nobroadcast(pointwise_body)...)
-            end
-            $scalar_rng_sig = begin
+            end),
+        ]
+        rng_defs = [
+            :($scalar_rng_sig = begin
                 $(nobroadcast(scalar_rng_body)...)
-            end
-            $vector_rng_sig = begin
+            end),
+            :($vector_rng_sig = begin
                 $(nobroadcast(vector_rng_body)...)
-            end
-        end
-        Core.eval(@__MODULE__,
-                  _sb_anchor_slic_macrocalls!(:(StanBlocks.@deffun $defs)))
-        getfield(@__MODULE__, stem)
+            end),
+        ]
+        StanBlocks.ValueFamily(stem, suffix, density_defs, pointwise_defs, rng_defs,
+            @__MODULE__)
         end
     end
 end
