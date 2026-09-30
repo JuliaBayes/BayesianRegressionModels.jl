@@ -149,6 +149,13 @@ Keep each build's backend and mutable preparation state private to its task,
 and use BRM's `stan_code(sb)`, `stan_data(sb)`, and `stan_model(sb)` entries
 when immediately consuming an `SBBRMI` inside the same compiled caller.
 
+SBBRMI requires StanBlocks' `ValueFamily` API. Its generated vector priors
+and mixtures carry density, pointwise, RNG and intrinsic-support definitions
+as values. Synchronized caches share these read-only families; model
+construction does not install Julia methods or module bindings for them.
+Use the StanBlocks revision recorded in `test/setup_env.jl` when preparing
+a downstream environment.
+
 `RKBRMI` follows the same ownership rules. Concurrent builds require the RK
 fix for generated model bindings, included in revision
 `cb9f9ab75c65df33c9c23e175f5fbdbb521c5fa4` and pinned in the test environment.

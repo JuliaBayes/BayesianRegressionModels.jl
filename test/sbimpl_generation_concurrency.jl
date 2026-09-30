@@ -7,7 +7,7 @@ include("concurrent_builds.jl")
 include("testset_filter.jl")
 
 const GENERATION_DATA = (; x=[-1.0, 0.0, 1.0], z=[-1.0, 0.0, 1.0],
-                         y=[-0.4, 0.1, 0.7])
+                         y=[-0.4, 0.1, 0.7], counts=[0, 2, 1])
 const VECTOR_X = @brm begin
     mu ~ 1 + x
     effect(mu, Intercept) ~ TDist(7)
@@ -24,9 +24,11 @@ function check_same_named_modules()
     # printed module name. Only model construction below runs concurrently.
     owners = map((0.25, 1.75)) do shift
         mod = Module(:RepeatedPriorOwner)
-        Core.eval(mod, :(using StanBlocks))
+        # No StanBlocks module or @stan_assert binding is needed by the
+        # generated family's syntax. Import only the fixture's two macros.
+        Core.eval(mod, :(import StanBlocks: @deffun, @lpxf))
         Core.eval(mod, quote
-            StanBlocks.@deffun begin
+            @deffun begin
                 same_owner_family_rng(location::real, scale::real)::real =
                     normal_rng(location + $shift, scale)
                 @lpxf same_owner_family_lpdf(y::real, location::real,
@@ -38,14 +40,14 @@ function check_same_named_modules()
     end
     @test owners[1] !== owners[2]
     @test string(owners[1]) == string(owners[2])
+    owner_bindings = map(owner -> names(owner; all=true, imported=true), owners)
     priors = [BRM.ExprColumn(same_owner_prior, 0.0, 1.0),
               BRM.ExprColumn(Normal, 0.0, 2.0)]
     families = concurrent_builds(repeat(collect(owners), 4)) do owner
         first(BRM._sb_vector_prior_family(priors; positive=false, mod=owner))
     end
     @test families[1] !== families[2]
-    @test all(parentmodule(family) === owner
-              for (family, owner) in zip(families, repeat(collect(owners), 4)))
+    @test all(family isa StanBlocks.ValueFamily for family in families)
     @test all(family === families[1] for family in families[1:2:end])
     @test all(family === families[2] for family in families[2:2:end])
 
@@ -64,6 +66,8 @@ function check_same_named_modules()
     @test occursin("1.75", codes[2]) && !occursin("0.25", codes[2])
     @test StanBlocks.stanc_check(codes[1]; warn_pedantic=false).ok
     @test StanBlocks.stanc_check(codes[2]; warn_pedantic=false).ok
+    @test all(names(owner; all=true, imported=true) == bindings
+              for (owner, bindings) in zip(owners, owner_bindings))
 end
 const VECTOR_Z = @brm begin
     mu ~ 1 + z
@@ -83,6 +87,10 @@ const MIXTURE_THREE = @brm begin
     y ~ MixtureModel([Normal(mu1, 0.9), Normal(0, 0.9), Normal(mu2, 0.9)],
                     [0.2, 0.3, 0.5])
 end
+const MIXTURE_DISCRETE = @brm begin
+    counts ~ MixtureModel([Binomial(5, 0.2), Binomial(5, 0.5), Binomial(5, 0.8)],
+                          [0.2, 0.3, 0.5])
+end
 const HORSESHOE_X = @brm begin
     mu ~ 1 + x
     effect(mu, x) ~ Horseshoe()
@@ -94,13 +102,13 @@ const HORSESHOE_Z = @brm begin
     y ~ Normal(mu, 0.9)
 end
 const GENERATION_BUILDERS = (VECTOR_X, VECTOR_Z, MIXTURE_TWO, MIXTURE_THREE,
-                             HORSESHOE_X, HORSESHOE_Z)
+                             HORSESHOE_X, HORSESHOE_Z, MIXTURE_DISCRETE)
 
 generation_result(index) = generation_result_for(GENERATION_BUILDERS[index])
 
 @noinline function generation_result_for(builder)
     # Construction and consumption deliberately share a compiled caller. Tasks
-    # waiting at the barrier predate other tasks' first family registration.
+    # waiting at the barrier predate other tasks' first family construction.
     sb = SBBRMI(builder(GENERATION_DATA); mod=@__MODULE__)
     descriptor = brm_descriptor(sb)
     # Symbolic dimensions such as num_elements(y) carry fresh trace objects;
@@ -131,6 +139,8 @@ end
 
 @stestset "cold and warm SBBRMI construction preserves code, data and outputs" begin
     input_snapshot = deepcopy(GENERATION_DATA)
+    bindings_before = names(BRM; all=true, imported=true)
+    autokwargs_methods_before = length(methods(StanBlocks.autokwargs))
     # One warm key overlaps other first-use keys; repeats also contend on each
     # initially cold key. The serial oracle is built AFTER that contention.
     warm = generation_result(1)
@@ -156,6 +166,8 @@ end
     repeated = concurrent_builds(generation_result, reversed)
     @test generation_mismatches(reversed, repeated, references) == []
     @test GENERATION_DATA == input_snapshot
+    @test names(BRM; all=true, imported=true) == bindings_before
+    @test length(methods(StanBlocks.autokwargs)) == autokwargs_methods_before
 end
 
 @stestset "same-named custom modules retain distinct family identities" begin
@@ -178,7 +190,7 @@ end
 end
 
 @stestset "invalid construction leaves later builds usable" begin
-    # Empty vectors fail validation before family registration. Repeated
+    # Empty vectors fail validation before family construction. Repeated
     # invalid input must keep failing while valid concurrent builds succeed.
     for _ in 1:2
         @test_throws ErrorException BRM._sb_vector_prior_family(BRM.ExprColumn[])

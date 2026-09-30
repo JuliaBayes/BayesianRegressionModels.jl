@@ -58,9 +58,10 @@ isolation, stable shared-group source, and non-mutating Julianic lowering of
 shared input syntax. Run it in a fresh process with `julia --threads=4 --project=test
 test/model_source_ownership.jl` to exercise the concurrent paths.
 `sbimpl_generation_concurrency.jl` checks concurrent SBBRMI construction and
-immediate consumption in compiled callers, including cold and warm vector and
-mixture families, horseshoe labels and source ownership, same-named custom
-modules, and valid construction after rejected input. Run
+immediate consumption in compiled callers, including cold and warm vector
+priors, continuous and discrete mixtures, horseshoe labels and source ownership,
+same-named custom modules, and valid construction after rejected input. It also
+checks that generated families add no module bindings or support methods. Run
 `julia --threads=4 --project=test test/sbimpl_generation_concurrency.jl` in a
 fresh process.
 `rk_construction_concurrency.jl` checks independent RK builds with distinct
