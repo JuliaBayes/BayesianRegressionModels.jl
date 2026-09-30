@@ -277,7 +277,8 @@ function _brm_staged_turing_evaluator(definition)
 end
 
 function _brm_generic_response_graph_ast(multi; single::Bool=false)
-    row = _brm_fresh_model_name(:i, _brm_model_binding_names(multi.plans))
+    private_names = _brm_model_binding_names(multi.plans)
+    row = _brm_reserve_model_name!(:i, private_names)
     body = Expr(:block)
     node_statements = Dict{Symbol,Vector{Any}}()
     parameters = Dict{Symbol,Any}()
@@ -305,9 +306,15 @@ function _brm_generic_response_graph_ast(multi; single::Bool=false)
         for shared in shared_groups for member in shared.members)
     shared_predictors = Set(member.predictor
         for shared in shared_groups for member in shared.members)
-    predictor_bases = Dict(name => gensym(Symbol(:predictor_base_, name))
-                          for name in shared_predictors)
-    shared_barriers = [gensym(:shared_group) for _ in shared_groups]
+    # These names appear in the structural cache key. Deterministic, reserved
+    # locals preserve hygiene without turning every shared-group build into a
+    # new evaluator merely because its gensym counters differ.
+    predictor_bases = Dict(name => _brm_reserve_model_name!(
+                              Symbol(:__brm_predictor_base_, name), private_names)
+                          for name in sort!(collect(shared_predictors)))
+    shared_barriers = [_brm_reserve_model_name!(
+                          Symbol(:__brm_shared_group_, i), private_names)
+                       for i in eachindex(shared_groups)]
     predictor_shared_nodes = Dict(name => Symbol[] for name in shared_predictors)
     residual_scales = Dict{Symbol,Any}()
     block_residual_scales = Dict{Tuple{Symbol,Int},Any}()

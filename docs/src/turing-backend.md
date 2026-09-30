@@ -36,8 +36,11 @@ captured callables as ordinary arguments with meaningful names. A Gaussian obser
 calls directly. Observation structure is resolved while constructing the AST,
 so the sampled body does not dispatch on BRM response metadata. Weighted
 densities and interval evidence retain their dedicated mathematical adapters.
-`turing_model_source` returns this executable definition, with explicit module
-bindings; it can be evaluated with `values(backend.model.args)...` as inputs.
+`turing_model_source` returns an independent copy of this executable definition,
+with explicit module bindings; it can be evaluated with
+`values(backend.model.args)...` as inputs. Editing that expression does not
+change the backend or another model built from the same formula. Concurrent
+builds share compiled evaluators while keeping their generated source private.
 An unsupported operation reports the missing capability. For example, a custom
 distribution may supply density evaluation but lack predictive RNG or a latent
 support transform; these are separate requirements.

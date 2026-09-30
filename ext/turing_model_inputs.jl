@@ -37,6 +37,12 @@ function _brm_fresh_model_name(preferred, used)
     name
 end
 
+function _brm_reserve_model_name!(preferred, used)
+    name = _brm_fresh_model_name(preferred, used)
+    push!(used, name)
+    name
+end
+
 function _brm_response_symbols(plans; single=false)
     used = _brm_model_binding_names(plans)
     setdiff!(used, (plan.response_name for plan in plans))

@@ -1,5 +1,5 @@
 # Run with --threads=4 to exercise simultaneous construction in a fresh process.
-using Test, BayesianRegressionModels, Turing, Distributions
+using Test, BayesianRegressionModels, Turing, Distributions, LinearAlgebra
 
 const BRM = BayesianRegressionModels
 const NP = BRM.NativePPL
@@ -61,4 +61,38 @@ end
               for expansion in expansions[2:end])
     @test_throws ArgumentError NP._julianic_model_syntax(:(x + 1))
     @test definition == original
+end
+
+@testset "shared-group source is stable and keeps caller names distinct" begin
+    data = (; x=[-1.0, 0.5, 2.0], g=["a", "b", "a"], y=[0, 1, 3],
+        __brm_predictor_base_mu=[0.1, 0.2, 0.3],
+        __brm_shared_group_1=[-0.1, -0.2, -0.3])
+    builder = @brm begin
+        log(mu) ~ 1 + x + offset(__brm_predictor_base_mu) + (1 | joint | g)
+        log(phi) ~ 1 + x + offset(__brm_shared_group_1) + (1 | joint | g)
+        y ~ BRM.NegativeBinomial2(mu, phi)
+    end
+    backends = concurrent_builds(_ -> TuringBRMI(builder(data)), 1:16)
+    sources = turing_model_source.(backends)
+    @test all(source == first(sources) for source in sources)
+    @test all(source !== first(sources) for source in sources[2:end])
+
+    L = cholesky(Symmetric([1.0 0.2; 0.2 1.0]))
+    parameters = (; beta_pop=[0.2, -0.1], beta_pop_phi=[0.4, 0.15],
+        shared_group_1=(; L, tau=[0.5, 0.3], z_flat=[-0.2, 0.4, 0.1, -0.3]))
+    group = parameters.shared_group_1
+    coefficients = transpose(Diagonal(group.tau) * Matrix(L.L) *
+                             reshape(group.z_flat, 2, 2))
+    design = hcat(ones(3), data.x)
+    mu = exp.(design * parameters.beta_pop + coefficients[[1, 2, 1], 1] +
+              data.__brm_predictor_base_mu)
+    phi = exp.(design * parameters.beta_pop_phi + coefficients[[1, 2, 1], 2] +
+               data.__brm_shared_group_1)
+    expected = sum(logpdf.(Normal(), parameters.beta_pop)) +
+        sum(logpdf.(Normal(), parameters.beta_pop_phi)) +
+        logpdf(LKJCholesky(2, 1), L) + sum(logpdf.(Normal(), group.tau)) +
+        sum(logpdf.(Normal(), group.z_flat)) +
+        sum(logpdf.(BRM.NegativeBinomial2.(mu, phi), data.y))
+    @test all(Turing.logjoint(backend.model, parameters) ≈ expected
+              for backend in backends)
 end
