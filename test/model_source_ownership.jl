@@ -61,6 +61,19 @@ end
               for expansion in expansions[2:end])
     @test_throws ArgumentError NP._julianic_model_syntax(:(x + 1))
     @test definition == original
+
+    # Ownership applies to syntax, not to literal values captured by that
+    # syntax. Deepcopy would silently change the identity of this reference.
+    captured = Ref(0.25)
+    captured_ref = Expr(:ref, captured)
+    literal_definition = :(function literal_prior()
+        y ~ Normal($captured_ref, 1.0)
+    end)
+    contains_capture(node) = node === captured ||
+        (node isa Expr && any(contains_capture, node.args))
+    literal_expansions = concurrent_builds(
+        _ -> NP._julianic_model_syntax(literal_definition), 1:16)
+    @test all(contains_capture, literal_expansions)
 end
 
 @testset "shared-group source is stable and keeps caller names distinct" begin
