@@ -156,22 +156,22 @@ model:
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
 latent_hsgp_model = (@brm begin
-    log(x) ~ 1 + factor(nominal_time) + (1 | assay | subject)
-    sigma_assay_log ~ Exponential(0.5)
-    c_obs ~ censored(LogNormal(log(x), sigma_assay_log); lower=lloq)
+    log(x) ~ 1 + factor(visit) + (1 | xg | subject)
+    obs_sd ~ Exponential(0.5)
+    x_obs ~ censored(LogNormal(log(x), obs_sd); lower=lod)
 
-    mu ~ 1 + factor(nominal_time) + zbl + x +
-         hsgp(x; k=5, domain=(0.01, 5.0), orthogonal_to=:linear) +
-         (1 + x | qt | subject)
+    mu ~ 1 + factor(visit) + below_lod + x +
+         hsgp(x; k=6, domain=(0.02, 4.0), orthogonal_to=:linear) +
+         (1 + x | grp | subject)
     sigma ~ Exponential(1)
-    qtc ~ Normal(mu, sigma)
+    y ~ Normal(mu, sigma)
 end)((;
-    nominal_time=repeat([1, 2]; outer=4),
+    visit=repeat([1, 2]; outer=4),
     subject=repeat(1:4; inner=2),
-    zbl=[1., 1., 1., 1., 0., 0., 0., 0.],
-    c_obs=[0.3, 0.3, 0.3, 0.3, 0.31, 0.37, 0.44, 0.54],
-    lloq=fill(0.3, 8),
-    qtc=[1.1, 1.2, 1.4, 1.5, 1.7, 1.8, 2.0, 2.1],
+    below_lod=[1., 1., 1., 1., 0., 0., 0., 0.],
+    x_obs=[0.25, 0.25, 0.25, 0.25, 0.29, 0.33, 0.41, 0.5],
+    lod=fill(0.25, 8),
+    y=[0.9, 1.1, 1.2, 1.4, 1.5, 1.7, 1.9, 2.0],
 ))
 """, :latent_hsgp_model; title="Latent concentration with linear and HSGP effects")
 ```
@@ -201,7 +201,7 @@ rows or referring to emitted Stan names:
 ```julia
 curve = hsgp_population_curve(
     descriptor, constrained_draws, constrained_names,
-    collect(range(0.01, 5.0; length=100));
+    collect(range(0.02, 4.0; length=100));
     predictor=:mu, coefficient=:x, term=:hsgp_x)
 
 curve.linear  # beta_x * x, draws × grid
@@ -255,13 +255,13 @@ random-effect design matrix:
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
 interval_censored_predictor_model = (@brm begin
-    qtc ~ Normal(mu, sigma)
+    y ~ Normal(mu, sigma)
     mu ~ 1 + interval_censored(conc; upper=lloq)
     effect(mu, conc) ~ Normal(0, 2)
     latent(mu, interval_censored(conc)) ~ Normal(0, 5)
     sigma ~ Exponential(1)
 end)((;
-    qtc=[401.0, 408.0, 415.0],
+    y=[2.1, 2.4, 2.9],
     conc=[0.7, 0.25, 1.2],
     lloq=[0.25, 0.25, 0.4],
 ))

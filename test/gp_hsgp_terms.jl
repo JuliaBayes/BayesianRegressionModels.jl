@@ -18,24 +18,24 @@ end
 
 function latent_hsgp_df(; shift=0.0)
     t = collect(range(-1.0, 1.0; length=GP_TERM_N)) .+ shift
-    latent_conc = exp.(-1.4 .+ 0.8 .* t)
-    lloq = fill(0.3, GP_TERM_N)
-    c_obs = max.(latent_conc, lloq)
-    zbl = Float64.(latent_conc .<= lloq)
-    nominal_time = repeat([1, 2], outer=GP_TERM_N ÷ 2)
+    latent_x = exp.(-1.2 .+ 0.7 .* t)
+    lod = fill(0.25, GP_TERM_N)
+    x_obs = max.(latent_x, lod)
+    below_lod = Float64.(latent_x .<= lod)
+    visit = repeat([1, 2], outer=GP_TERM_N ÷ 2)
     subject = repeat(1:(GP_TERM_N ÷ 2), inner=2)
-    y = 0.2 .* latent_conc
-    (; t, nominal_time, subject, zbl, c_obs, lloq, y)
+    y = 0.2 .* latent_x
+    (; t, visit, subject, below_lod, x_obs, lod, y)
 end
 
 latent_hsgp_model(df) = @brm df begin
-    log(x) ~ 1 + factor(nominal_time) + (1 | assay | subject)
-    assay_sd ~ Exponential(1)
-    c_obs ~ censored(LogNormal(log(x), assay_sd); lower=lloq)
-    mu ~ 1 + factor(nominal_time) + zbl + x +
-         hsgp(x; k=5, domain=(0.01, 5.0), orthogonal_to=:linear) +
-         (1 + x | qt | subject)
-    length_scale(:, hsgp(x)) ~ Uniform(1.5, 4.0)
+    log(x) ~ 1 + factor(visit) + (1 | xg | subject)
+    obs_sd ~ Exponential(1)
+    x_obs ~ censored(LogNormal(log(x), obs_sd); lower=lod)
+    mu ~ 1 + factor(visit) + below_lod + x +
+         hsgp(x; k=6, domain=(0.02, 4.0), orthogonal_to=:linear) +
+         (1 + x | grp | subject)
+    length_scale(:, hsgp(x)) ~ Uniform(1.2, 3.0)
     sd(:, hsgp(x)) ~ Normal(0, 0.5)
     sigma ~ Exponential(1)
     y ~ Normal(mu, sigma)
@@ -45,8 +45,8 @@ end
     df = latent_hsgp_df()
     brmi = latent_hsgp_model(df)
     @test :x in popcoefnames(brmi, :mu)
-    @test :zbl in popcoefnames(brmi, :mu)
-    @test ranefcoefnames(brmi, :qt) == [
+    @test :below_lod in popcoefnames(brmi, :mu)
+    @test ranefcoefnames(brmi, :grp) == [
         (predictor=:mu, coefficient=:Intercept),
         (predictor=:mu, coefficient=:x),
     ]
@@ -54,13 +54,13 @@ end
     sb = SBBRMI(brmi; mod=@__MODULE__)
     code = StanBlocks.stan_code(sb.model)
     @test !haskey(sb.data, :PHI_hsgp_x)
-    @test size(sb.data[:omega2_hsgp_x]) == (5, 1)
+    @test size(sb.data[:omega2_hsgp_x]) == (6, 1)
     @test sb.preproc[:omega2_hsgp_x].kind === :static
     @test occursin("brm_hsgp_basis_1d", code)
     @test occursin("brm_hsgp_orthogonalize_linear", code)
     @test occursin(r"vector\[[^]]+\] hsgp_x =", code)
     @test occursin("x = exp(log_x);", code)
-    @test occursin("hsgp_x_rho_iso ~ uniform(1.5, 4.0);", code)
+    @test occursin("hsgp_x_rho_iso ~ uniform(1.2, 3.0);", code)
     @test occursin("hsgp_x_sigma ~ normal(0.0, 0.5);", code)
     @test StanBlocks.stan.transpiles(sb.model)
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
@@ -94,7 +94,7 @@ end
             @test maximum(abs, curve.hsgp) > 0
             @test vec(curve.linear) ≈ constrained[beta_coordinate] .* grid atol=1e-12
             @test curve.total ≈ curve.linear + curve.hsgp atol=1e-12
-            @test collect(curve.domain) ≈ [0.01, 5.0]
+            @test collect(curve.domain) ≈ [0.02, 4.0]
             @test_throws "outside its fitted HSGP domain" hsgp_population_curve(
                 descriptor, reshape(constrained, 1, :), names, [0.0];
                 predictor=:mu, coefficient=:x, term=:hsgp_x)
@@ -110,7 +110,7 @@ end
     missing_domain = @brm df begin
         log_x ~ 1 + t
         x = exp(log_x)
-        mu ~ 1 + x + hsgp(x; k=5, orthogonal_to=:linear)
+        mu ~ 1 + x + hsgp(x; k=6, orthogonal_to=:linear)
         y ~ Normal(mu, 1)
     end
     @test_throws "requires an explicit fixed `domain" SBBRMI(
@@ -119,7 +119,7 @@ end
     domain_and_c = @brm df begin
         log_x ~ 1 + t
         x = exp(log_x)
-        mu ~ 1 + hsgp(x; k=5, c=1.5, domain=(0.01, 5.0))
+        mu ~ 1 + hsgp(x; k=6, c=1.5, domain=(0.02, 4.0))
         y ~ Normal(mu, 1)
     end
     @test_throws "cannot also specify" SBBRMI(domain_and_c; mod=@__MODULE__)
@@ -127,7 +127,7 @@ end
     invalid_domain = @brm df begin
         log_x ~ 1 + t
         x = exp(log_x)
-        mu ~ 1 + hsgp(x; k=5, domain=(5.0, 0.01))
+        mu ~ 1 + hsgp(x; k=6, domain=(4.0, 0.02))
         y ~ Normal(mu, 1)
     end
     @test_throws "needs lower < upper" SBBRMI(invalid_domain; mod=@__MODULE__)
@@ -327,17 +327,17 @@ end
 end
 
 @testset "model-derived HSGP with bounded scales resolves online adaptation" begin
-    # `Uniform(1.5, 4.0)` declares `<lower=1.5, upper=4.0>`; the cells read it
+    # `Uniform(1.2, 3.0)` declares `<lower=1.2, upper=3.0>`; the cells read it
     # through Stan's lub transform (snag adaptive-centeri-fadd03fd; BridgeStan
     # coverage in `test/adaptive_bounded_scales.jl`).
     sb = SBBRMI(latent_hsgp_model(latent_hsgp_df()); mod=@__MODULE__)
     names = vcat(
         ["hsgp_x_rho_iso", "hsgp_x_sigma"],
-        ["hsgp_x_beta_raw.$b" for b in 1:5],
+        ["hsgp_x_beta_raw.$b" for b in 1:6],
     )
     block = only(BayesianRegressionModels._adaptive_hsgp_centering_blocks(
         sb, names))
-    @test block.length_scale_lower == [1.5]
-    @test block.length_scale_upper == [4.0]
+    @test block.length_scale_lower == [1.2]
+    @test block.length_scale_upper == [3.0]
     @test (block.sd_lower, block.sd_upper) == (0.0, Inf)
 end
