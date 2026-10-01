@@ -99,6 +99,14 @@ BridgeStan and prior-only RNG draws, alongside unchanged Dirichlet spellings.
 `turing_shared_assignments.jl` checks that shared group effects reach dependent
 assignments before their consumers are evaluated.
 
+`adaptive_centering_public_api.jl` exercises ordinary scalar, shared-ID `K=1`,
+and correlated `K=3` blocks through the public wrapper at both compiled endpoints.
+It checks scalar/per-cell controls, independent BridgeStan scale/correlation
+queries, map/Jacobian/inverse/density and all gradients, restoration/copy isolation,
+and every cell's 11 candidate losses against an independent weighted-correlation
+oracle at zero, mixed and one source controls. It tests the fixed-frame scoring
+proxy; it does not measure online window winners or sampler convergence.
+
 `adaptive_hsgp_centering.jl` checks pilot-selection under spectral underflow,
 the partial-coordinate Jacobian, Turing/Enzyme versus StanBlocks/BridgeStan
 density and gradient parity, physical constrained quantities, and the
