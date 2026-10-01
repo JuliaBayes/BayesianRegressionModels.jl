@@ -31,6 +31,21 @@ const BRM = BayesianRegressionModels
 const _RK_PLAN_TYPES =
     Union{BRM._RKStructuralPlan,BRM._RKKernelPlan,BRM._RKVaryingSourcePlan}
 
+# Field-preserving copy of a thin-layer struct with named overrides. Every
+# field not overridden is carried through the struct's full positional
+# constructor by name, so a field the thin layer adds later can never be
+# dropped by a patch here (hand-copied keyword lists did: `mi()` dropped
+# `horseshoe_priors`, snag rk-ext-patch-dro-46d976f3). An override naming
+# no field is an internal error.
+function _rk_with(x::T; overrides...) where {T}
+    names = fieldnames(T)
+    for name in keys(overrides)
+        name in names ||
+            error("RK backend: internal: `$T` has no field `$name`")
+    end
+    T((get(overrides, name, getfield(x, name)) for name in names)...)
+end
+
 # Population term kinds a modeled ordinal scale admits (the planner gates
 # the same set; anything else is an internal error here).
 const _RK_PPL_TERM = Dict{Symbol,TermKind}(
@@ -70,19 +85,11 @@ _rk_response_wants_extras(response::BRM._RKLikelihoodSpec) =
     !isempty(response.threshold_columns) ||
     response.threshold_coefs !== nothing
 
-function _rk_patch_ordinal_response(lowered::LikelihoodSpec,
-        planned::BRM._RKLikelihoodSpec)
-    LikelihoodSpec(lowered.family, lowered.link, lowered.response,
-        lowered.predictor, lowered.scale, lowered.weights, lowered.evidence,
-        lowered.label, lowered.trials, lowered.range;
-        n_levels = lowered.n_levels, thresholds = lowered.thresholds,
-        extra_predictors = lowered.extra_predictors,
-        count_columns = lowered.count_columns,
-        ordinal_structure = lowered.ordinal_structure,
-        discrimination = planned.discrimination,
+_rk_patch_ordinal_response(lowered::LikelihoodSpec,
+        planned::BRM._RKLikelihoodSpec) =
+    _rk_with(lowered; discrimination = planned.discrimination,
         threshold_columns = planned.threshold_columns,
         threshold_coefs = planned.threshold_coefs)
-end
 
 # BRM plan family (CamelCase) to thin-layer `POPULATION_FAMILIES` token.
 const _RK_THIN_POPULATION_FAMILIES = Dict{Symbol,Symbol}(
@@ -176,10 +183,8 @@ function _rk_patch_varyingsource_vector_ports(unbound::StructuralPlan,
     removed == length(ports) || error(
         "RK backend: internal: varying-source innovation ports " *
         "expected slices for `$(sort!(collect(ports)))`, got $removed")
-    plate = KernelPlate(kp.result, kp.subjects, kp.timepoints,
-        [slice for slice in kp.slices if !(slice[2] in ports)],
-        kp.assignments, kp.obs, kp.collected, kp.label, kp.lp_args,
-        kp.schedules)
+    plate = _rk_with(kp;
+        slices = [slice for slice in kp.slices if !(slice[2] in ports)])
     vectors = copy(unbound.vector_parameters)
     for spec in specs
         any(p -> p.name === spec.name, vectors) && error(
@@ -190,20 +195,7 @@ function _rk_patch_varyingsource_vector_ports(unbound::StructuralPlan,
         push!(vectors, VectorParameter(
             spec.name, spec.family, args, spec.size, spec.label))
     end
-    StructuralPlan(unbound.responses, unbound.predictors,
-        unbound.population_priors, unbound.parameters, unbound.assignments,
-        unbound.columns, unbound.n_obs; roles = unbound.roles,
-        derived = unbound.derived, levelmaps = unbound.levelmaps,
-        plate_parameters = unbound.plate_parameters, scans = unbound.scans,
-        dar_paths = unbound.dar_paths,
-        varying_draws = unbound.varying_draws,
-        varying_slices = unbound.varying_slices,
-        vector_parameters = vectors, spline_bases = unbound.spline_bases,
-        spline_vectors = unbound.spline_vectors,
-        hsgp_bases = unbound.hsgp_bases,
-        kernel_plates = [plate], r2d2_priors = unbound.r2d2_priors,
-        horseshoe_priors = unbound.horseshoe_priors,
-        matrices = unbound.matrices)
+    _rk_with(unbound; vector_parameters = vectors, kernel_plates = [plate])
 end
 
 # `mi()` plan-level patch (no surface syntax in v1, decision 05aemvx
@@ -211,24 +203,9 @@ end
 # `Jobs` column rides `mi_jobs` onto the thin-layer spec here — the
 # same plan-level route as the ordinal extras. Plans without `mi()`
 # responses pass through untouched.
-function _rk_patch_mi_response(lowered::LikelihoodSpec,
-        planned::BRM._RKLikelihoodSpec)
-    LikelihoodSpec(lowered.family, lowered.link, lowered.response,
-        lowered.predictor, lowered.scale, lowered.weights, lowered.evidence,
-        lowered.label, lowered.trials, lowered.range;
-        n_levels = lowered.n_levels, thresholds = lowered.thresholds,
-        extra_predictors = lowered.extra_predictors,
-        count_columns = lowered.count_columns,
-        ordinal_structure = lowered.ordinal_structure,
-        discrimination = lowered.discrimination,
-        threshold_columns = lowered.threshold_columns,
-        threshold_coefs = lowered.threshold_coefs,
-        extra_responses = lowered.extra_responses,
-        factor_scales = lowered.factor_scales,
-        factor_corr = lowered.factor_corr,
-        glm_alpha = lowered.glm_alpha, glm_beta = lowered.glm_beta,
-        mi_jobs = planned.mi_jobs)
-end
+_rk_patch_mi_response(lowered::LikelihoodSpec,
+        planned::BRM._RKLikelihoodSpec) =
+    _rk_with(lowered; mi_jobs = planned.mi_jobs)
 
 function _rk_patch_mi_jobs(unbound::StructuralPlan,
         plan::BRM._RKStructuralPlan)
@@ -243,20 +220,7 @@ function _rk_patch_mi_jobs(unbound::StructuralPlan,
         planned.mi_jobs === nothing && return lowered
         _rk_patch_mi_response(lowered, planned)
     end
-    StructuralPlan(responses, unbound.predictors, unbound.population_priors,
-        unbound.parameters, unbound.assignments, unbound.columns,
-        unbound.n_obs; roles = unbound.roles, derived = unbound.derived,
-        levelmaps = unbound.levelmaps,
-        plate_parameters = unbound.plate_parameters, scans = unbound.scans,
-        dar_paths = unbound.dar_paths,
-        varying_draws = unbound.varying_draws,
-        varying_slices = unbound.varying_slices,
-        vector_parameters = unbound.vector_parameters,
-        spline_bases = unbound.spline_bases,
-        spline_vectors = unbound.spline_vectors,
-        hsgp_bases = unbound.hsgp_bases,
-        kernel_plates = unbound.kernel_plates,
-        r2d2_priors = unbound.r2d2_priors, matrices = unbound.matrices)
+    _rk_with(unbound; responses)
 end
 
 function _rk_patch_ordinal_extras(unbound::StructuralPlan,
@@ -287,20 +251,8 @@ function _rk_patch_ordinal_extras(unbound::StructuralPlan,
     for spec in plan.responses
         _rk_patch_threshold_coefs!(vectors, plan, spec)
     end
-    StructuralPlan(responses, predictors, priors, unbound.parameters,
-        unbound.assignments, unbound.columns, unbound.n_obs;
-        roles = unbound.roles, derived = unbound.derived,
-        levelmaps = levelmaps, plate_parameters = unbound.plate_parameters,
-        scans = unbound.scans, dar_paths = unbound.dar_paths,
-        varying_draws = unbound.varying_draws,
-        varying_slices = unbound.varying_slices,
-        vector_parameters = vectors, spline_bases = unbound.spline_bases,
-        spline_vectors = unbound.spline_vectors,
-        hsgp_bases = unbound.hsgp_bases,
-        kernel_plates = unbound.kernel_plates,
-        r2d2_priors = unbound.r2d2_priors,
-        horseshoe_priors = unbound.horseshoe_priors,
-        matrices = unbound.matrices)
+    _rk_with(unbound; responses, predictors, population_priors = priors,
+        levelmaps, vector_parameters = vectors)
 end
 
 # Evaluate the emitted submodel defs through `@rkppl` in a FRESH module
@@ -317,8 +269,8 @@ function _rk_emit_module(emitted::BRM._RKEmittedProgram)
     mod
 end
 
-function _rk_translated_plan(plan::BRM._RKStructuralPlan)
-    emitted = BRM._rk_emit_ast(plan)
+function _rk_translate_from_emitted(plan::BRM._RKStructuralPlan,
+        emitted::BRM._RKEmittedProgram)
     unbound = lower_rkppl(emitted.main,
         Tuple(sort!(collect(keys(plan.columns)))); mod=_rk_emit_module(emitted))
     bind_data(_rk_patch_mi_jobs(
@@ -327,8 +279,8 @@ end
 
 # Kernel plans additionally bind the plate dims (subjects/timepoints) the
 # `subjects=...` key names; the counts live on the kernel spec.
-function _rk_translated_plan(plan::BRM._RKKernelPlan)
-    emitted = BRM._rk_emit_ast(plan)
+function _rk_translate_from_emitted(plan::BRM._RKKernelPlan,
+        emitted::BRM._RKEmittedProgram)
     unbound = lower_rkppl(emitted.main,
         Tuple(sort!(collect(keys(plan.columns)))); mod=_rk_emit_module(emitted))
     bind_data(unbound, plan.columns; dims=BRM._rk_kernel_bind_dims(plan.kernel))
@@ -337,17 +289,44 @@ end
 # Varying-source twin plans: flat program (no defs lattice, no
 # ordinal/MI patching — the plate carries its own observation); the
 # subject count binds as dims like kernel plans.
-function _rk_translated_plan(plan::BRM._RKVaryingSourcePlan)
-    emitted = BRM._rk_emit_ast(plan)
+function _rk_translate_from_emitted(plan::BRM._RKVaryingSourcePlan,
+        emitted::BRM._RKEmittedProgram)
     names = union(keys(plan.columns),
         (spec.name for spec in plan.vector_parameters
          if spec.family === :vector_normal))
     unbound = lower_rkppl(emitted.main,
         Tuple(sort!(collect(names))); mod=_rk_emit_module(emitted))
-    bound = bind_data(_rk_patch_varyingsource_vector_ports(unbound, plan),
+    bind_data(_rk_patch_varyingsource_vector_ports(unbound, plan),
         plan.columns;
         dims=Dict(plan.spec.subject_count => plan.spec.n_subjects))
-    bound
+end
+
+function _rk_translated_plan(plan::_RK_PLAN_TYPES)
+    _rk_translate_from_emitted(plan, BRM._rk_emit_ast(plan))
+end
+
+"""
+    rk_translate_artifact(artifact) -> bound `StructuralPlan`
+
+Translate a v2 append artifact (`BRM.emit_rk_artifact` shape) through the
+PRODUCTION route — defs-module lowering plus the BRM-side mi/ordinal
+patches and kernel bind dims — via `_rk_translate_from_emitted`, the
+same function the live `RKBRMI` path uses. The append driver must call
+this (never a bare `lower_rkppl` → `bind_data`, which diverges from
+production on patched models). Fails closed on shape/version skew.
+"""
+function BRM.rk_translate_artifact(artifact)
+    keys(artifact) == (:case_id, :ast, :defs, :plan, :meta) || error(
+        "RK artifact: not a v2 artifact (keys $(keys(artifact)))")
+    artifact.meta.generator_version == BRM.rk_artifact_version() || error(
+        "RK artifact: case `$(artifact.case_id)` has generator_version " *
+        "$(artifact.meta.generator_version); this BRM translates " *
+        "$(BRM.rk_artifact_version())")
+    artifact.plan isa BRM._RK_ARTIFACT_PLAN_TYPES || error(
+        "RK artifact: case `$(artifact.case_id)` carries a " *
+        "$(typeof(artifact.plan)), not an RK plan")
+    emitted = BRM._RKEmittedProgram(artifact.defs, artifact.ast)
+    return _rk_translate_from_emitted(artifact.plan, emitted)
 end
 
 # The executable `model` of an `RKBRMI` is the thin-layer `(; spec, layout)`
