@@ -25,6 +25,21 @@ const BRM = BayesianRegressionModels
 # thin-layer suite. Kernel plans ride the same route.
 const _RK_PLAN_TYPES = Union{BRM._RKStructuralPlan,BRM._RKKernelPlan}
 
+# Field-preserving copy of a thin-layer struct with named overrides. Every
+# field not overridden is carried through the struct's full positional
+# constructor by name, so a field the thin layer adds later can never be
+# dropped by a patch here (hand-copied keyword lists did: `mi()` dropped
+# `horseshoe_priors`, snag rk-ext-patch-dro-46d976f3). An override naming
+# no field is an internal error.
+function _rk_with(x::T; overrides...) where {T}
+    names = fieldnames(T)
+    for name in keys(overrides)
+        name in names ||
+            error("RK backend: internal: `$T` has no field `$name`")
+    end
+    T((get(overrides, name, getfield(x, name)) for name in names)...)
+end
+
 # Population term kinds a modeled ordinal scale admits (the planner gates
 # the same set; anything else is an internal error here).
 const _RK_PPL_TERM = Dict{Symbol,TermKind}(
@@ -64,19 +79,11 @@ _rk_response_wants_extras(response::BRM._RKLikelihoodSpec) =
     !isempty(response.threshold_columns) ||
     response.threshold_coefs !== nothing
 
-function _rk_patch_ordinal_response(lowered::LikelihoodSpec,
-        planned::BRM._RKLikelihoodSpec)
-    LikelihoodSpec(lowered.family, lowered.link, lowered.response,
-        lowered.predictor, lowered.scale, lowered.weights, lowered.evidence,
-        lowered.label, lowered.trials, lowered.range;
-        n_levels = lowered.n_levels, thresholds = lowered.thresholds,
-        extra_predictors = lowered.extra_predictors,
-        count_columns = lowered.count_columns,
-        ordinal_structure = lowered.ordinal_structure,
-        discrimination = planned.discrimination,
+_rk_patch_ordinal_response(lowered::LikelihoodSpec,
+        planned::BRM._RKLikelihoodSpec) =
+    _rk_with(lowered; discrimination = planned.discrimination,
         threshold_columns = planned.threshold_columns,
         threshold_coefs = planned.threshold_coefs)
-end
 
 # BRM plan family (CamelCase) to thin-layer `POPULATION_FAMILIES` token.
 const _RK_THIN_POPULATION_FAMILIES = Dict{Symbol,Symbol}(
@@ -158,24 +165,9 @@ end
 # `Jobs` column rides `mi_jobs` onto the thin-layer spec here — the
 # same plan-level route as the ordinal extras. Plans without `mi()`
 # responses pass through untouched.
-function _rk_patch_mi_response(lowered::LikelihoodSpec,
-        planned::BRM._RKLikelihoodSpec)
-    LikelihoodSpec(lowered.family, lowered.link, lowered.response,
-        lowered.predictor, lowered.scale, lowered.weights, lowered.evidence,
-        lowered.label, lowered.trials, lowered.range;
-        n_levels = lowered.n_levels, thresholds = lowered.thresholds,
-        extra_predictors = lowered.extra_predictors,
-        count_columns = lowered.count_columns,
-        ordinal_structure = lowered.ordinal_structure,
-        discrimination = lowered.discrimination,
-        threshold_columns = lowered.threshold_columns,
-        threshold_coefs = lowered.threshold_coefs,
-        extra_responses = lowered.extra_responses,
-        factor_scales = lowered.factor_scales,
-        factor_corr = lowered.factor_corr,
-        glm_alpha = lowered.glm_alpha, glm_beta = lowered.glm_beta,
-        mi_jobs = planned.mi_jobs)
-end
+_rk_patch_mi_response(lowered::LikelihoodSpec,
+        planned::BRM._RKLikelihoodSpec) =
+    _rk_with(lowered; mi_jobs = planned.mi_jobs)
 
 function _rk_patch_mi_jobs(unbound::StructuralPlan,
         plan::BRM._RKStructuralPlan)
@@ -190,20 +182,7 @@ function _rk_patch_mi_jobs(unbound::StructuralPlan,
         planned.mi_jobs === nothing && return lowered
         _rk_patch_mi_response(lowered, planned)
     end
-    StructuralPlan(responses, unbound.predictors, unbound.population_priors,
-        unbound.parameters, unbound.assignments, unbound.columns,
-        unbound.n_obs; roles = unbound.roles, derived = unbound.derived,
-        levelmaps = unbound.levelmaps,
-        plate_parameters = unbound.plate_parameters, scans = unbound.scans,
-        dar_paths = unbound.dar_paths,
-        varying_draws = unbound.varying_draws,
-        varying_slices = unbound.varying_slices,
-        vector_parameters = unbound.vector_parameters,
-        spline_bases = unbound.spline_bases,
-        spline_vectors = unbound.spline_vectors,
-        hsgp_bases = unbound.hsgp_bases,
-        kernel_plates = unbound.kernel_plates,
-        r2d2_priors = unbound.r2d2_priors, matrices = unbound.matrices)
+    _rk_with(unbound; responses)
 end
 
 function _rk_patch_ordinal_extras(unbound::StructuralPlan,
@@ -234,20 +213,8 @@ function _rk_patch_ordinal_extras(unbound::StructuralPlan,
     for spec in plan.responses
         _rk_patch_threshold_coefs!(vectors, plan, spec)
     end
-    StructuralPlan(responses, predictors, priors, unbound.parameters,
-        unbound.assignments, unbound.columns, unbound.n_obs;
-        roles = unbound.roles, derived = unbound.derived,
-        levelmaps = levelmaps, plate_parameters = unbound.plate_parameters,
-        scans = unbound.scans, dar_paths = unbound.dar_paths,
-        varying_draws = unbound.varying_draws,
-        varying_slices = unbound.varying_slices,
-        vector_parameters = vectors, spline_bases = unbound.spline_bases,
-        spline_vectors = unbound.spline_vectors,
-        hsgp_bases = unbound.hsgp_bases,
-        kernel_plates = unbound.kernel_plates,
-        r2d2_priors = unbound.r2d2_priors,
-        horseshoe_priors = unbound.horseshoe_priors,
-        matrices = unbound.matrices)
+    _rk_with(unbound; responses, predictors, population_priors = priors,
+        levelmaps, vector_parameters = vectors)
 end
 
 # Evaluate the emitted submodel defs through `@rkppl` in a FRESH module
