@@ -89,5 +89,19 @@
       }
     ],
     "complete": true
+  },
+  {
+    "archive": "fit.jls.gz",
+    "sha256": "9b45f0b3d5b851e345d666b99066f298b92c5529981d1bd9639e39d218275046",
+    "bytes": 4955015,
+    "parts": [
+      {
+        "index": 0,
+        "path": "/home/niko/.local/state/kb-agents/uploads/3cc20af5bf95cf87.bin",
+        "bytes": 4955015,
+        "sha256": "9b45f0b3d5b851e345d666b99066f298b92c5529981d1bd9639e39d218275046"
+      }
+    ],
+    "complete": true
   }
 ]

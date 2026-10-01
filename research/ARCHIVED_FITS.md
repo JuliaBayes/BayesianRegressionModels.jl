@@ -29,9 +29,11 @@ or fetch it from the GitHub mirror at that SHA
 `git log --all -- <path>` finds the same bytes if the pin above ever moves.
 
 Do NOT re-commit fit artifacts to these directories: `.gitignore` now
-blocks `research/**/*.tar.gz`, `research/**/*.jls{,.gz}`, and
-`research/**/*.csv.gz`. Keep new archives in the producing run's scratch
-or artifact store.
+blocks `research/**/*.tar.gz`, `research/**/*.jls{,.gz}`,
+`research/**/*.csv.gz`, `research/**/*.rds.gz`, `research/**/*.tsv.gz`,
+and the `*_pairs.{tsv,aov.json,png}` / `selection_losses.tsv` /
+`ppc_intervals.tsv` result classes (see the 2026-09-28 migration below).
+Keep new archives in the producing run's scratch or artifact store.
 
 
 ## KB capsule retrieval (migrated fit archives)
@@ -137,3 +139,139 @@ concatenate in `index` order, and SHA-256 the result against the
   - part 0: `/home/niko/.local/state/kb-agents/uploads/e26420f055c6e8a3.bin` (3945641 B, sha256 `db4cb5e47cc2114e21e996932406330fe6eb0780f889b21fc83e0b7d86d482c1`)
 - `research/rbest_centering/results/fits/rbest-native-crohn-v1-stan_ncp.tar.gz` (3973606 B, sha256 `1d86a863b578154ed2be9419d2c37f93921b9208e602829775e5d5c926c15b44`)
   - part 0: `/home/niko/.local/state/kb-agents/uploads/e3b3564db04cd962.bin` (3973606 B, sha256 `1d86a863b578154ed2be9419d2c37f93921b9208e602829775e5d5c926c15b44`)
+
+## HEAD-only big-file migration (2026-09-28, todo `19vta7w`)
+
+The 56 files ≥1 MB below (149.4 MB: serialized draws, pairs tables,
+plot specs/figures, selection-loss tables) were untracked from HEAD and
+migrated to verified KB-upload capsules (same `research/capsule_upload.py`
+flow: 20 MB chunks, read-back SHA verify). Per-directory `manifest.json`
+files carry `parts: [{index, path, bytes, sha256}]`; re-download with
+`GET /code?path=<part>&raw=1`, concatenate in `index` order, and SHA-256
+the result against the `sha256` beside it. Last tracked commit:
+
+```sh
+git show 3db139b0e6ee900915cd4802eefddc342d723b26:<path-inside-repo> > <local-path>
+```
+
+Small twins stay tracked (all ≤887 KB, some relatively linked from
+research notes or GitHub blob-linked from docs pages): 18 small `*.jls.gz`,
+3 small `*.rds.gz`, 3 small `*.tsv.gz`, all 8 `*.json.gz`, 10 small
+`*_pairs.png`, 6 small `selection_losses.tsv`, 1 tiny `ppc_intervals.tsv`.
+`.gitignore` blocks the migrated name classes for NEW files; tracked small
+twins are unaffected. Research `plot.jl`/`prepare_*.jl` scripts regenerate
+the pairs tables/figures from retrieved capsules; nothing under `docs/`,
+`test/`, `src/`, or `examples/` reads the migrated files at build time.
+
+- `research/air_total_effects/results/cluster-independent/s2z_pairs.aov.json` (2576410 B, sha256 `148f4f0e6244211cae7a278ca085a8b4824fea639f05f3da4cdaa2c022da1e49`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/546567ae2fbd5223.bin` (2576410 B, sha256 `148f4f0e6244211cae7a278ca085a8b4824fea639f05f3da4cdaa2c022da1e49`)
+- `research/air_total_effects/results/cluster-independent/s2z_pairs.tsv` (1531619 B, sha256 `a58f39cded901639fea1f22fb4b60886b3b0d9dec81d156ec3a4523062cb14d4`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/6c390f3be27e5fce.bin` (1531619 B, sha256 `a58f39cded901639fea1f22fb4b60886b3b0d9dec81d156ec3a4523062cb14d4`)
+- `research/air_total_effects/results/cluster-independent/total_pairs.aov.json` (2552577 B, sha256 `db5499fb99e09923051b824dcb99cdac2e770b49f47603cd09148af3106181ba`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/c0d5099ad9f75e62.bin` (2552577 B, sha256 `db5499fb99e09923051b824dcb99cdac2e770b49f47603cd09148af3106181ba`)
+- `research/air_total_effects/results/cluster-independent/total_pairs.tsv` (1507786 B, sha256 `c35b8a0885c622be594c0aaae1a3a0f03df19be6053d1495dfac9406bf0ea0f1`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/f1a617b65e5f2973.bin` (1507786 B, sha256 `c35b8a0885c622be594c0aaae1a3a0f03df19be6053d1495dfac9406bf0ea0f1`)
+- `research/air_total_effects/results/cluster-intercept/s2z_pairs.aov.json` (2603637 B, sha256 `334ba379d3f3ab0f5cfc9ba6086b4d0d9c09854eaccb7340539d37fb03004fce`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/543ac2c4093dc929.bin` (2603637 B, sha256 `334ba379d3f3ab0f5cfc9ba6086b4d0d9c09854eaccb7340539d37fb03004fce`)
+- `research/air_total_effects/results/cluster-intercept/s2z_pairs.tsv` (1558846 B, sha256 `ada41940aef480a407cfca431ea144bbc873deab5c14d3d177d4cd1d30eae3d5`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/8075ff4ba6745b50.bin` (1558846 B, sha256 `ada41940aef480a407cfca431ea144bbc873deab5c14d3d177d4cd1d30eae3d5`)
+- `research/air_total_effects/results/cluster-intercept/total_pairs.aov.json` (2551406 B, sha256 `7d2cd9a9e862c2c226c9d3b22b4ba3761b0b28cdbdaa620a8724a5f084bd367c`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/dfa877c1bcc348d5.bin` (2551406 B, sha256 `7d2cd9a9e862c2c226c9d3b22b4ba3761b0b28cdbdaa620a8724a5f084bd367c`)
+- `research/air_total_effects/results/cluster-intercept/total_pairs.tsv` (1506615 B, sha256 `6ce67e055a6a924bb9bfd0acc02d097926af5d15a808304d70884339e2ebbac4`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/dc80f57dc7ea6cc5.bin` (1506615 B, sha256 `6ce67e055a6a924bb9bfd0acc02d097926af5d15a808304d70884339e2ebbac4`)
+- `research/centering_refresh/results/radon/posthoc_gradient/selection_losses.tsv` (2621722 B, sha256 `e13db8380de8e18dc258fb8f3c91694fe42adf934d795e8f28f1e9e1da8f848d`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/11c436b2758982c8.bin` (2621722 B, sha256 `e13db8380de8e18dc258fb8f3c91694fe42adf934d795e8f28f1e9e1da8f848d`)
+- `research/centering_refresh/results/radon/posthoc_position/selection_losses.tsv` (2653307 B, sha256 `3d1b426e8b42a86efb38ee5ba0cc42a1c3b4df4988ac3ad7d57760cb19c22790`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/fb131485ae8a9539.bin` (2653307 B, sha256 `3d1b426e8b42a86efb38ee5ba0cc42a1c3b4df4988ac3ad7d57760cb19c22790`)
+- `research/pupil_builtin_totals/results/total_pairs.aov.json` (2371766 B, sha256 `c24b942e3fa34be78561bd46d590438c45e166ccd628f5ee7bdbe9f8430b7195`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/6944b04f3a35f1e8.bin` (2371766 B, sha256 `c24b942e3fa34be78561bd46d590438c45e166ccd628f5ee7bdbe9f8430b7195`)
+- `research/pupil_builtin_totals/results/total_pairs.tsv` (1326975 B, sha256 `670c6f46c7c5afbd704091a8456c84bd99242a874229b38b71ac1a144062e2aa`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/d465076978bf4fd2.bin` (1326975 B, sha256 `670c6f46c7c5afbd704091a8456c84bd99242a874229b38b71ac1a144062e2aa`)
+- `research/pupil_scale_totals/results/s2z_pairs.aov.json` (2413881 B, sha256 `cb0ec81fe7927c512a4879db0a1a9c9bc1a391a18ebc10e70e33caa8937e3ba5`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/331f064b94b50fb6.bin` (2413881 B, sha256 `cb0ec81fe7927c512a4879db0a1a9c9bc1a391a18ebc10e70e33caa8937e3ba5`)
+- `research/pupil_scale_totals/results/s2z_pairs.tsv` (1369090 B, sha256 `3dcd0d85e288eff331f3fc990d9c2418cab835007ec05cc2f88c9784193df4ec`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/269b9858b955eaad.bin` (1369090 B, sha256 `3dcd0d85e288eff331f3fc990d9c2418cab835007ec05cc2f88c9784193df4ec`)
+- `research/pupil_scale_totals/results/total_pairs.aov.json` (2370491 B, sha256 `f06e65a18ee1c6579f3845f6c9f81f88a67a769c06ac2622993097cda0c9f97a`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/0f47866d7df19892.bin` (2370491 B, sha256 `f06e65a18ee1c6579f3845f6c9f81f88a67a769c06ac2622993097cda0c9f97a`)
+- `research/pupil_scale_totals/results/total_pairs.tsv` (1325700 B, sha256 `935663cacd5f1f42b21304f0cac79a3e8cdc2bb1633fca0b30ca88c8c68cab95`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/f5b82dfa6dcce155.bin` (1325700 B, sha256 `935663cacd5f1f42b21304f0cac79a3e8cdc2bb1633fca0b30ca88c8c68cab95`)
+- `research/pupil_total_effects/results/gaussian/fits/brms_ncp.jls.gz` (2067652 B, sha256 `ab774d2cd1f71341b51637eaa4b42f82cd60f1494993915c3c8e527156088719`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/7de4c48a9820fdd0.bin` (2067652 B, sha256 `ab774d2cd1f71341b51637eaa4b42f82cd60f1494993915c3c8e527156088719`)
+- `research/pupil_total_effects/results/gaussian/native_ncp/native_ncp.jls.gz` (1378146 B, sha256 `e4213d1aff93fdbd52dc5ff49b8af0279b1c2e79a96eefad27f2c4c1107522fc`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/0f84e8337d185321.bin` (1378146 B, sha256 `e4213d1aff93fdbd52dc5ff49b8af0279b1c2e79a96eefad27f2c4c1107522fc`)
+- `research/pupil_total_effects/results/gaussian/native_ncp/pupil-1.csv.gz` (2645107 B, sha256 `f98ce95a7c7f78c63e02b20b426f21f17633dfa9fcd7bd2321707edc3474bba9`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/7c59a613dd69cc5e.bin` (2645107 B, sha256 `f98ce95a7c7f78c63e02b20b426f21f17633dfa9fcd7bd2321707edc3474bba9`)
+- `research/pupil_total_effects/results/gaussian/native_ncp/sampling.tsv.gz` (1600367 B, sha256 `7bc469f9f67e2008edbad13c09f66df02facf175ab0561478095075e33519832`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/0bd973363f0e26a8.bin` (1600367 B, sha256 `7bc469f9f67e2008edbad13c09f66df02facf175ab0561478095075e33519832`)
+- `research/pupil_total_effects/results/online_adaptation/gaussian_gradient/checkpoint_final.jls.gz` (2062549 B, sha256 `7773a82aac4b1698ef5ae29bcedbbefdff4c16b3e19f2ee46bf68a574b6656c4`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/c8e1894401ef25dc.bin` (2062549 B, sha256 `7773a82aac4b1698ef5ae29bcedbbefdff4c16b3e19f2ee46bf68a574b6656c4`)
+- `research/pupil_total_effects/results/online_adaptation/gaussian_position/checkpoint_final.jls.gz` (2061870 B, sha256 `ba8356d6d4d0835683536f4aa677bf67e242f0da072c5fda591d85afdb1dd684`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/90a39cb94d121108.bin` (2061870 B, sha256 `ba8356d6d4d0835683536f4aa677bf67e242f0da072c5fda591d85afdb1dd684`)
+- `research/pupil_total_effects/results/online_adaptation/gaussian_posthoc_gradient/checkpoint_final.jls.gz` (2039621 B, sha256 `2397de8b6df7e7249a8d05f8f7650eb361ea77144a6194e07351e3f926a598d1`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/29c630cdb1b26276.bin` (2039621 B, sha256 `2397de8b6df7e7249a8d05f8f7650eb361ea77144a6194e07351e3f926a598d1`)
+- `research/pupil_total_effects/results/online_adaptation/student_gradient/checkpoint_final.jls.gz` (2088468 B, sha256 `1f364057d1027564edb9885bb9dbd4feb8aaba545f0c18dd0d28a45988c5fe9f`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/5bab304c399f448b.bin` (2088468 B, sha256 `1f364057d1027564edb9885bb9dbd4feb8aaba545f0c18dd0d28a45988c5fe9f`)
+- `research/pupil_total_effects/results/online_adaptation/student_position/checkpoint_final.jls.gz` (2091715 B, sha256 `03f87f95920a89d8182446359a73936a79229f16819e87c0445c3e3870ef51ec`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/28f6cd7b33623f5a.bin` (2091715 B, sha256 `03f87f95920a89d8182446359a73936a79229f16819e87c0445c3e3870ef51ec`)
+- `research/pupil_total_effects/results/online_adaptation/student_posthoc_gradient/checkpoint_final.jls.gz` (2108120 B, sha256 `199cb6cc77045b5304e1bb06e4e04d9b4a74d17b7ff05951dbb139756c8705e9`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/4eb4e138545ff2a6.bin` (2108120 B, sha256 `199cb6cc77045b5304e1bb06e4e04d9b4a74d17b7ff05951dbb139756c8705e9`)
+- `research/pupil_total_effects/results/student_mixture/fits/brms_ncp.jls.gz` (2087853 B, sha256 `c1b4cf4fa407408042af70d62ab433be5c20f5256c07afa2697462201ed96f9f`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/0b147826f260488a.bin` (2087853 B, sha256 `c1b4cf4fa407408042af70d62ab433be5c20f5256c07afa2697462201ed96f9f`)
+- `research/pupil_total_effects/results/student_mixture/native_ncp/native_ncp.jls.gz` (1378241 B, sha256 `0ad4978adee387a72a938035a0d7014ebbe6dcc8cb4f93f5f671a2f846c37fee`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/ef7b165efa6aeac3.bin` (1378241 B, sha256 `0ad4978adee387a72a938035a0d7014ebbe6dcc8cb4f93f5f671a2f846c37fee`)
+- `research/pupil_total_effects/results/student_mixture/native_ncp/pupil-1.csv.gz` (2648150 B, sha256 `d00dbec9b4cc99a12cff0bc2b119b6f19f0281afe78cebccb828dd6e1f258a9e`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/6169d5e637a62e00.bin` (2648150 B, sha256 `d00dbec9b4cc99a12cff0bc2b119b6f19f0281afe78cebccb828dd6e1f258a9e`)
+- `research/pupil_total_effects/results/student_mixture/native_ncp/sampling.tsv.gz` (1600658 B, sha256 `600915914dff5aa460d9e31489e4ef5272dfb22890896087251c16a9d6ca0587`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/458c0722ebe9ee3e.bin` (1600658 B, sha256 `600915914dff5aa460d9e31489e4ef5272dfb22890896087251c16a9d6ca0587`)
+- `research/pupil_total_effects/results/student_mixture/ordinary_cp/brms_cp.jls.gz` (2078585 B, sha256 `f8909b374769c68e6268c87ce6a4d044050875adaca014af30551cc0687be370`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/539e03a01d9a4e8a.bin` (2078585 B, sha256 `f8909b374769c68e6268c87ce6a4d044050875adaca014af30551cc0687be370`)
+- `research/pupil_total_effects/results/student_mixture/s2z_auto/native/fit.jls.gz` (4360132 B, sha256 `b69f6dfa9937b250af21023a8127d74cf607af09b7447d830de2351be0c31738`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/3aea0c429934d790.bin` (4360132 B, sha256 `b69f6dfa9937b250af21023a8127d74cf607af09b7447d830de2351be0c31738`)
+- `research/pupil_total_effects/results/student_mixture/s2z_auto/native/fit.rds.gz` (1282362 B, sha256 `ffcb76ad92b68de9d83c994a5df9755595620e3cfaade8e0cb59a40691be0042`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/2e7ddbc10c1ea6c6.bin` (1282362 B, sha256 `ffcb76ad92b68de9d83c994a5df9755595620e3cfaade8e0cb59a40691be0042`)
+- `research/pupil_total_effects/results/student_mixture/s2z_auto/native/pupil-1.csv.gz` (4234522 B, sha256 `e1f48399c5acf53a87a0fd5ba5f3e9f79925e500e51436d3e8877d66518a7486`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/ed187367f42e13ae.bin` (4234522 B, sha256 `e1f48399c5acf53a87a0fd5ba5f3e9f79925e500e51436d3e8877d66518a7486`)
+- `research/pupil_total_effects/results/student_mixture/s2z_auto/whmc/fit.jls.gz` (4987608 B, sha256 `e07fb62d519db83c6f5f724445e5ec9179c261fbf94329fe193c7fb9171f3cc6`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/0620e6f00197cc52.bin` (4987608 B, sha256 `e07fb62d519db83c6f5f724445e5ec9179c261fbf94329fe193c7fb9171f3cc6`)
+- `research/pupil_total_effects/results/student_mixture/s2z_cp/native/fit.jls.gz` (4330190 B, sha256 `ba389f12ec728dcbd30a9fc0d442571a480c81b303e068ec873e9e3e9bc1af09`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/2d3e0983be9f64d0.bin` (4330190 B, sha256 `ba389f12ec728dcbd30a9fc0d442571a480c81b303e068ec873e9e3e9bc1af09`)
+- `research/pupil_total_effects/results/student_mixture/s2z_cp/native/fit.rds.gz` (1270221 B, sha256 `0f5fe60e33dbfcac6247896369b02b94ed18ca258911c92dff4cf64a0185b15f`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/6cc8bf06795df86c.bin` (1270221 B, sha256 `0f5fe60e33dbfcac6247896369b02b94ed18ca258911c92dff4cf64a0185b15f`)
+- `research/pupil_total_effects/results/student_mixture/s2z_cp/native/pupil-1.csv.gz` (4091621 B, sha256 `597f21c95f1411164ca0ceed554868529106ed74cb865722ca2495e29556fd28`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/59575ae43b3c08a8.bin` (4091621 B, sha256 `597f21c95f1411164ca0ceed554868529106ed74cb865722ca2495e29556fd28`)
+- `research/pupil_total_effects/results/student_mixture/s2z_cp/whmc/fit.jls.gz` (4955015 B, sha256 `9b45f0b3d5b851e345d666b99066f298b92c5529981d1bd9639e39d218275046`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/3cc20af5bf95cf87.bin` (4955015 B, sha256 `9b45f0b3d5b851e345d666b99066f298b92c5529981d1bd9639e39d218275046`)
+- `research/pupil_total_effects/results/student_mixture/s2z_ncp/native/fit.jls.gz` (4352161 B, sha256 `ee989fb1120245cb0eb58635249944f8a9adde95f494b234a3593e7967905a3f`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/b23c8e8d779c5404.bin` (4352161 B, sha256 `ee989fb1120245cb0eb58635249944f8a9adde95f494b234a3593e7967905a3f`)
+- `research/pupil_total_effects/results/student_mixture/s2z_ncp/native/fit.rds.gz` (1260835 B, sha256 `854c2448fd84b4e646ac3b77b261af46ce496fc81bfdbc4cde897e1c90086e33`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/4ee894447014cc98.bin` (1260835 B, sha256 `854c2448fd84b4e646ac3b77b261af46ce496fc81bfdbc4cde897e1c90086e33`)
+- `research/pupil_total_effects/results/student_mixture/s2z_ncp/native/pupil-1.csv.gz` (4099462 B, sha256 `a675c7f4b7f3b94ae066c667ba732de61475b4282f03c3e201861ca1fdb0f543`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/055a3dfed3101fce.bin` (4099462 B, sha256 `a675c7f4b7f3b94ae066c667ba732de61475b4282f03c3e201861ca1fdb0f543`)
+- `research/pupil_total_effects/results/student_mixture/s2z_ncp/whmc/fit.jls.gz` (4979201 B, sha256 `77e625577813278c01042207ab2be6465f1445990fe7549a64bb4b7a32ae8057`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/530f07a50a3a8ecf.bin` (4979201 B, sha256 `77e625577813278c01042207ab2be6465f1445990fe7549a64bb4b7a32ae8057`)
+- `research/radon_centering/results/ppc_intervals.tsv` (2070352 B, sha256 `d43446009113b8dd01de25809480c8f9a035f2c98a05ca5d078a984938b4760f`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/6e3576a18fcdb0c7.bin` (2070352 B, sha256 `d43446009113b8dd01de25809480c8f9a035f2c98a05ca5d078a984938b4760f`)
+- `research/rbest_centering/results/AS/ordinary_pairs.aov.json` (2378142 B, sha256 `bb4301c253c57d476c3bf4b46d15179eb6f6dd33c9709c7d2be328e79ddfddb1`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/2142bbe0052d01d8.bin` (2378142 B, sha256 `bb4301c253c57d476c3bf4b46d15179eb6f6dd33c9709c7d2be328e79ddfddb1`)
+- `research/rbest_centering/results/AS/ordinary_pairs.png` (1054863 B, sha256 `3eb39b479c3ffbf9d5a88dfc11e8ac5e1ffaef010836edb5e44a47f1e2201fd9`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/abaebd131756fc52.bin` (1054863 B, sha256 `3eb39b479c3ffbf9d5a88dfc11e8ac5e1ffaef010836edb5e44a47f1e2201fd9`)
+- `research/rbest_centering/results/AS/ordinary_pairs.tsv` (6665836 B, sha256 `f0825f1c7b9b7fcaee74bb6ba16adcd06dba56365c6509d58bf6ffaf661023d2`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/a3d7ec5ff1ee6e3d.bin` (6665836 B, sha256 `f0825f1c7b9b7fcaee74bb6ba16adcd06dba56365c6509d58bf6ffaf661023d2`)
+- `research/rbest_centering/results/AS/total_pairs.aov.json` (2372065 B, sha256 `b81b8dcb412abb09da738841ac27ac7650fa3c507428bb8fc80d5e5e9b786e36`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/611929c43911ab28.bin` (2372065 B, sha256 `b81b8dcb412abb09da738841ac27ac7650fa3c507428bb8fc80d5e5e9b786e36`)
+- `research/rbest_centering/results/AS/total_pairs.png` (1303966 B, sha256 `00a312f9938faa034e401964f716c35dc5c746d578483fc29bdf5e43b13f7893`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/105291385acd145a.bin` (1303966 B, sha256 `00a312f9938faa034e401964f716c35dc5c746d578483fc29bdf5e43b13f7893`)
+- `research/rbest_centering/results/AS/total_pairs.tsv` (6634755 B, sha256 `71b817673622589269312beb4e898193cd42c923190101d4940b8bbb46301758`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/a613f0bbb47dbbe5.bin` (6634755 B, sha256 `71b817673622589269312beb4e898193cd42c923190101d4940b8bbb46301758`)
+- `research/rbest_centering/results/crohn/ordinary_pairs.aov.json` (2337446 B, sha256 `0f94447876ef2d4e7c7d7103e2f78595617b3b57e1211a4207a3635970572d1e`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/1d1da2b72aa12f24.bin` (2337446 B, sha256 `0f94447876ef2d4e7c7d7103e2f78595617b3b57e1211a4207a3635970572d1e`)
+- `research/rbest_centering/results/crohn/ordinary_pairs.png` (1138001 B, sha256 `c57445b00260d83e6d56133cfa85f1416fd852491901857669238729f52e2a27`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/76faf586882d3709.bin` (1138001 B, sha256 `c57445b00260d83e6d56133cfa85f1416fd852491901857669238729f52e2a27`)
+- `research/rbest_centering/results/crohn/ordinary_pairs.tsv` (6462964 B, sha256 `89c6f5ac1d07c3572c60aad5b24c9811604f2d7e82ea70798a4cf566233897a4`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/09ecc178175c526b.bin` (6462964 B, sha256 `89c6f5ac1d07c3572c60aad5b24c9811604f2d7e82ea70798a4cf566233897a4`)
+- `research/rbest_centering/results/crohn/total_pairs.aov.json` (2347177 B, sha256 `69179a7c25d785d21873d441e773db51a450d7cb9d63976ff2d693d346916eed`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/0f76ee4c3a34b36d.bin` (2347177 B, sha256 `69179a7c25d785d21873d441e773db51a450d7cb9d63976ff2d693d346916eed`)
+- `research/rbest_centering/results/crohn/total_pairs.png` (1189867 B, sha256 `7c5517710ea4e5bec31cbaa9281789f2e26b2a37041ce5ffa0cb166130a7e6ab`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/4b2058de6b3d13f9.bin` (1189867 B, sha256 `7c5517710ea4e5bec31cbaa9281789f2e26b2a37041ce5ffa0cb166130a7e6ab`)
+- `research/rbest_centering/results/crohn/total_pairs.tsv` (6511391 B, sha256 `7bbf666573f37662ac3c1e4879a7fa7e7174cc5c7710352559e9c9f10f319179`)
+  - part 0: `/home/niko/.local/state/kb-agents/uploads/ac8f28212e30e5a5.bin` (6511391 B, sha256 `7bbf666573f37662ac3c1e4879a7fa7e7174cc5c7710352559e9c9f10f319179`)

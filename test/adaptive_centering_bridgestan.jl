@@ -288,6 +288,82 @@ end
     @test roundtrip ≈ x atol=2e-12
 end
 
+# Multi-membership intercepts reuse the scalar path above (snag
+# adaptive-centeri-953d87e0). `test/adaptive_r2d2_mm.jl` checks the metadata
+# against hand-spelled names; this resolves the block against the COMPILED
+# model's names and runs the public wrapper end to end.
+const MM_INTERCEPT_BUILDER = @brm begin
+    sigma ~ Exponential(1)
+    loc ~ 1 + (1 | mm(g1, g2; weights=(w1, w2)))
+    y ~ Normal(loc, sigma)
+end
+
+const MM_DF = (;
+    g1=["a", "a", "b"],
+    g2=["b", "c", "c"],
+    w1=[2.0, 1.0, 0.0],
+    w2=[1.0, 1.0, 3.0],
+    y=[0.1, 0.2, 0.3],
+)
+
+@testset "BridgeStan multi-membership intercept adapts through the public wrapper" begin
+    sb = SBBRMI(MM_INTERCEPT_BUILDER(MM_DF); total_groups=(), mod=@__MODULE__)
+    problem = StanBlocks.stan_instantiate(sb.model)
+    unc_names = StanBlocks.BridgeStan.param_unc_names(problem.model)
+    block = only(adaptive_centering_blocks(sb, unc_names))
+    @test block.ranef.family === :ranef_intercept_draws
+    @test (block.ranef.n_terms, block.ranef.n_groups) == (1, 3)
+    @test unc_names[only(block.log_scales)] ==
+          "$(block.ranef.binding)_log_scale"
+    @test isempty(block.cholesky_free)
+    @test block.target_c == 0.0
+
+    backend = AutoEnzyme()
+    wrapped = adaptive_centering_problem(sb, problem, backend)
+    ir = WarmupHMC.reparametrizer(wrapped)
+    @test first.(ir.pairs) == vec(block.effects)
+
+    x = zeros(length(unc_names))
+    x[only(block.log_scales)] = log(1.6)
+    x[vec(block.effects)] .= [-0.5, 0.1, 0.7]
+    # At the compiled endpoint the wrapper is the identity.
+    plain = LogDensityProblems.logdensity_and_gradient(problem, x)
+    adaptive = LogDensityProblems.logdensity_and_gradient(wrapped, x)
+    @test adaptive[1] ≈ plain[1] atol=2e-12
+    @test adaptive[2] ≈ plain[2] atol=2e-12
+
+    state = ir.pairs[1][2].args[1].state
+    controls = [0.2, 0.5, 0.8]
+    set_adaptive_sources!(state, ir, controls)
+    ljac, model_position = ir(x)
+    expected_ljac, expected_position = manual_adaptive_map(x, block, controls)
+    @test ljac ≈ expected_ljac atol=2e-12
+    @test model_position ≈ expected_position atol=2e-12
+
+    lp, gradient = LogDensityProblems.logdensity_and_gradient(wrapped, x)
+    @test isfinite(lp)
+    @test all(isfinite, gradient)
+    inner_lp, _ = LogDensityProblems.logdensity_and_gradient(
+        problem, model_position)
+    @test lp ≈ ljac + inner_lp atol=2e-12
+
+    step = 1e-5
+    finite_difference = [begin
+        plus, minus = copy(x), copy(x)
+        plus[i] += step
+        minus[i] -= step
+        (LogDensityProblems.logdensity(wrapped, plus) -
+         LogDensityProblems.logdensity(wrapped, minus)) / (2step)
+    end for i in eachindex(x)]
+    @test gradient ≈ finite_difference atol=2e-5 rtol=2e-5
+
+    inverse_ljac, roundtrip = WarmupHMC._inverse_with_logabsdet_jacobian(
+        ir, model_position,
+    )
+    @test inverse_ljac ≈ -ljac atol=2e-12
+    @test roundtrip ≈ x atol=2e-12
+end
+
 const JOINT_HSGP_BUILDER = @brm begin
     loc ~ 1 + x + hsgp(x; k=3, by=g) + (1 + x | subject)
     y ~ Normal(loc, 1)
@@ -385,4 +461,92 @@ end
     # The joint accessors are new differentiated code: stress them past the
     # historical GC-corruption threshold like the family accessors.
     @test isfinite(enzyme_gradient_stress(wrapped, x; n=2000))
+end
+
+const JOINT_PERIODIC_BUILDER = @brm begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + (1 | subject) + hsgp(t; k=2, cov=:periodic, period=24.0) +
+        hsgp(x; k=2, c=1.5)
+    y ~ Normal(mu, sigma)
+end
+
+function joint_periodic_df()
+    x = collect(range(-1.0, 1.0; length=8))
+    t = collect(range(0.0, 20.0; length=8))
+    y = sin.(range(0.0, 1.0; length=8))
+    subject = repeat([11, 12], inner=4)
+    (; x, y, subject, t)
+end
+
+@testset "joint ordinary+periodic HSGP wrapper adapts a mixed BridgeStan model" begin
+    # Snag adaptive-centeri-96a06b1f: a periodic term used to refuse the whole
+    # wrapper even when the model also had ordinary blocks. Periodic terms now
+    # contribute one cell per cosine/sine weight with the per-harmonic Bessel
+    # spectrum, in the same HSGP pair order as squared-exponential cells.
+    sb = SBBRMI(JOINT_PERIODIC_BUILDER(joint_periodic_df()); total_groups=(),
+                mod=@__MODULE__)
+    problem = StanBlocks.stan_instantiate(sb.model)
+    unc_names = StanBlocks.BridgeStan.param_unc_names(problem.model)
+    blocks = adaptive_centering_blocks(sb, unc_names)
+    hsgp_blocks = BayesianRegressionModels._adaptive_hsgp_centering_blocks(
+        sb, unc_names)
+    @test length(blocks) == 1
+    @test length(hsgp_blocks) == 2
+    by_term = Dict(b.term => b for b in hsgp_blocks)
+    periodic, exp_quad = by_term[:hsgp_t], by_term[:hsgp_x]
+    @test periodic.harmonics == [1.0, 2.0, 1.0, 2.0]
+    @test isempty(exp_quad.harmonics)
+
+    backend = AutoEnzyme()
+    wrapped = adaptive_centering_problem(sb, problem, backend)
+    wir = WarmupHMC.reparametrizer(wrapped)
+    ranef_pairs = vec(blocks[1].effects)
+    @test length(wir.pairs) ==
+        length(ranef_pairs) + length(periodic.effects) + length(exp_quad.effects)
+    @test first.(wir.pairs)[1:length(ranef_pairs)] == ranef_pairs
+    hsgp_positions = first.(wir.pairs)[length(ranef_pairs)+1:end]
+    @test sort(hsgp_positions) ==
+        sort(vcat(periodic.effects, exp_quad.effects))
+    @test WarmupHMC.candidate_scoring_plan(wrapped) isa
+          WarmupHMC.CandidateScoringPlan
+
+    x = zeros(length(unc_names))
+    x[blocks[1].log_scales] .= -0.31
+    x[ranef_pairs] .= [-0.5, 0.7]
+    x[periodic.length_scales] .= -0.2
+    x[periodic.sd] = -0.4
+    x[periodic.effects] .= [-0.5, 0.1, 0.7, -0.3]
+    x[exp_quad.length_scales] .= -0.25
+    x[exp_quad.sd] = 0.15
+    x[exp_quad.effects] .= [0.4, -0.6]
+    plain = LogDensityProblems.logdensity_and_gradient(problem, x)
+    adaptive = LogDensityProblems.logdensity_and_gradient(wrapped, x)
+    @test adaptive[1] ≈ plain[1] atol=2e-12
+    @test adaptive[2] ≈ plain[2] atol=2e-12
+
+    controls = collect(range(0.15, 0.85, length=length(wir.pairs)))
+    wir.pairs .= map(wir.pairs, controls) do (idx, value), c
+        idx => WarmupHMC.Reparametrization(
+            value.target, WarmupHMC.PartiallyCentered(c), value.args...)
+    end
+    wstate = wir.pairs[1][2].args[1].state
+    AC_EXT._sync_sources!(wstate, wir)
+    @test vcat(wstate.ranef.sources, wstate.hsgp.sources) == controls
+    lp, gradient = LogDensityProblems.logdensity_and_gradient(wrapped, x)
+    @test isfinite(lp)
+    @test all(isfinite, gradient)
+    ljac, model_position = wir(x)
+    inner_lp, _ = LogDensityProblems.logdensity_and_gradient(
+        problem, model_position)
+    @test lp ≈ ljac + inner_lp atol=2e-12
+
+    step = 1e-5
+    finite_difference = [begin
+        plus, minus = copy(x), copy(x)
+        plus[i] += step
+        minus[i] -= step
+        (LogDensityProblems.logdensity(wrapped, plus) -
+         LogDensityProblems.logdensity(wrapped, minus)) / (2step)
+    end for i in eachindex(x)]
+    @test gradient ≈ finite_difference atol=2e-5 rtol=2e-5
 end

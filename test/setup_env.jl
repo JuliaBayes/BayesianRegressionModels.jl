@@ -10,11 +10,12 @@
 # `dev`/`devibe` branch rather than `main`; the commit only has to be pushed to
 # GitHub, which every pin below is.
 #
-# ReactiveKernels contributes three developed paths from ONE pinned checkout
-# (the monorepo root plus the nested `ReactiveKernelsDistributionKernels` and
-# `ReactiveKernelsPPL` packages, which have no standalone repos).
+# ReactiveKernels contributes four developed paths from ONE pinned checkout
+# (the monorepo root plus the nested `ReactiveKernelsDistributionKernels`,
+# `ReactiveKernelsPPL`, and `ReactiveKernelsPPLExamples` packages, which have
+# no standalone repos).
 #
-# All ten paths enter ONE `Pkg.develop` call on EVERY Julia version we run.
+# All eleven paths enter ONE `Pkg.develop` call on EVERY Julia version we run.
 # On 1.11+ the `[sources]` blocks in `test/Project.toml` (which mirror these
 # revisions) would also resolve them; on **1.10, which is what this suite runs
 # on, `[sources]` is IGNORED**, so a bare `Pkg.resolve()` fails with
@@ -50,19 +51,18 @@ const PINS = [
     ("MutatingFunctions", "https://github.com/nsiccha/MutatingFunctions.jl.git", "4fc41b1c7b774133ceaacc4ff3c34c67b15b87b2"),  # main
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "121de3194f02044e00bac0d11019a93458ddb63a"),  # main
     ("TreeArrays",        "https://github.com/nsiccha/TreeArrays.jl.git",        "c317cc003fc41c2d933c27dc80799141eebd434e"),  # main
-    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "24578c34eb90928791319ef9ef2b49a28e0d4a51"),  # devibe (declared-unbound ragged/censored draw shape, twins and segments; BRM snag ragged-omitted-r-198ea038; contains 74ed796d and its dependency floors)
+    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "eeee3bad6333ecffb08b45769df809b1aa21f18a"),  # devibe (ValueFamily/ValueUDF + observation-only sizes + concurrent tracing/publication; retains earlier mixture/draw fixes)
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
-    ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "deeea1d128d5235ad0ecb2fd911a6d881f1ac2c2"),  # dev (contains exact sampling-counter floor 913da79)
+    # 0194dce (2026-09-27, dev): WindowSelectionPlan (WarmupHMC-held evidence)
+    # and the controls interface for custom reparametrizers,
+    # which the per-window S2Z Fisher rule needs. Contains 7aed40b (active-state
+    # preservation, nonfinite-transport rejection). Matches test/Project.toml.
+    ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "0194dce08e986ff17fd5a788bb315c6431b7858e"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
-    # through. bb2a2e0 (2026-09-26, main): the 38973ca0 multimembership
-    # stack (mm/strata surface + IR + lowering + corpus 62-66 over the
-    # d94ddcd vonmises stack with term-monotonic pins) plus the
-    # prior-vocab generator+contract+layout (sampled +4, uniform
-    # interval, corpus 62-64) and the fam-nb1 NegativeBinomial response
-    # slice (NegativeBinomialFam + (LogLink, LogLink) triple + scalar p
-    # on the scale slot + twin head `NegativeBinomial.(exp.(eta), p)` +
-    # corpus 67_nb1 + N1/N2 SB pins).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "bb2a2e0fe05899e1c9af21f858a04338b63510e1"),  # main
+    # through. cb9f9ab7 (2026-09-30, main): serializes build_kernel's
+    # generated-model binding assignment (peer GO 1tddu2a), retaining
+    # the phase-III full varying-source PK/PD support from 3cdba95c.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "cb9f9ab75c65df33c9c23e175f5fbdbb521c5fa4"),  # main
 ]
 
 function main()
@@ -82,6 +82,10 @@ function main()
         joinpath(rk_root, "packages", "ReactiveKernelsDistributionKernels")
     paths["ReactiveKernelsPPL"] =
         joinpath(rk_root, "packages", "ReactiveKernelsPPL")
+    # The v1 SB-parity sweep (test/sb_sweep_*.jl) consumes the inventory
+    # models' exact data bindings from here — no transcription.
+    paths["ReactiveKernelsPPLExamples"] =
+        joinpath(rk_root, "packages", "ReactiveKernelsPPLExamples")
 
     Pkg.activate(TESTENV)
     Pkg.develop(PackageSpec[

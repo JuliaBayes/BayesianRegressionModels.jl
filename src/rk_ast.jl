@@ -286,10 +286,19 @@ end
 
 # A hsgp declaration: `hsgp_basis(:id, axes...; k=k, c=c, iso=iso)` —
 # `k`/`c` scalars for one axis, per-axis tuples otherwise (the thin
-# layer broadcasts scalars). Shape-verified against `Meta.parse` of
-# the surface spelling.
+# layer broadcasts scalars). Periodic:
+# `hsgp_basis(:id, x; k=k, cov=:periodic, period=P)` (single axis; no
+# `c`/`iso` — SB refuses them on the periodic basis). Shape-verified
+# against `Meta.parse` of the surface spelling.
 function _rk_ast_hsgp_basis(term)
     options = term.options
+    if get(options, :cov, :exp_quad) === :periodic
+        return Expr(:call, :hsgp_basis,
+            Expr(:parameters, Expr(:kw, :k, options.k),
+                Expr(:kw, :cov, QuoteNode(:periodic)),
+                Expr(:kw, :period, options.period)),
+            QuoteNode(options.id), term.columns...)
+    end
     kval = options.k isa Tuple ? Expr(:tuple, options.k...) : options.k
     cval = options.c isa Tuple ? Expr(:tuple, options.c...) : options.c
     Expr(:call, :hsgp_basis,
@@ -343,7 +352,8 @@ _rk_ast_response_uses_scale(family::Symbol) =
     family === :beta_binomial_logit ||
     family === :student_t || family === :hurdle_poisson ||
     family === :wald || family === :von_mises ||
-    family === :negative_binomial
+    family === :negative_binomial || family === :zero_inflated_poisson ||
+    family === :lognormal || family === :weibull
 
 # The scale-slot body spelling inside a bare response statement. A
 # direct scale (outer name, literal, or the plan-forbidden nothing)
@@ -365,6 +375,27 @@ function _rk_ast_response_scale(response::_RKLikelihoodSpec,
     error("RK backend: internal: scale predictor `$name` has link `$link`")
 end
 
+# The Student-t degrees of freedom inside a bare response statement: a
+# direct nu (outer name or literal) passes through inline, exactly one
+# of the scalar/predictor pair set (the planner guarantees it). A
+# modeled nu inverts its link on the predictor name exactly like a
+# scale predictor (`exp.` for log), so the head always reads the
+# constrained vector.
+function _rk_ast_response_nu(response::_RKLikelihoodSpec,
+        rename::Dict{Symbol,Symbol}, predictor_link::Dict{Symbol,Symbol})
+    name = response.nu_predictor
+    name === nothing || response.nu === nothing || error(
+        "RK backend: internal: response `$(response.response)` carries " *
+        "both a scalar nu and a nu predictor")
+    name === nothing && return response.nu
+    actual = get(rename, name, name)
+    link = predictor_link[name]
+    link === :identity && return actual
+    link === :log && return _rk_ast_dotted(:exp, actual)
+    link === :logit && return _rk_ast_dotted(:logistic, actual)
+    error("RK backend: internal: nu predictor `$name` has link `$link`")
+end
+
 # The inverse-link spelling (`Bernoulli.(logistic.(η))`,
 # `Poisson.(exp.(η))`, …) is what the `@rkppl` surface takes; the thin
 # layer recovers the link-native HAVE from it — the lowered
@@ -375,8 +406,10 @@ end
 # `leaf` maps each role to its INLINE spelling: `:predictor` (the
 # predictor name, possibly renamed), `:scale` (the scale value or
 # link-inverted scale predictor), `:nu` (the Student-t degrees of
-# freedom, literal or name, inline), `:zero_inflation` (the ZIP zero
-# probability, literal or name, inline), `:trials`/`:weights`/`:lower`/
+# freedom: the scalar value or the link-inverted nu predictor),
+# `:zero_inflation` (the ZIP zero
+# probability, literal or name, inline; a modeled-zi submodel rides
+# `:scale` under `logistic.` instead), `:trials`/`:weights`/`:lower`/
 # `:upper` (columns or literals inline),
 # `:extra_predictors`/`:count_columns` (tail predictors / tail count
 # columns inline). Evidence and weights STRUCTURE (which wrapper,
@@ -606,12 +639,32 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
     elseif response.family === :negative_binomial
         # Twin head (thin-layer decision, pair fam-nb1): the plan's
         # `NegativeBinomial(r, p)` maps to
-        # `NegativeBinomial.(exp.(eta), p)` (NB2 precedent); scalars
-        # inline bare. No fused head: one spelling either way.
+        # `NegativeBinomial.(exp.(eta), p)` (NB2 precedent); the
+        # modeled-p submodel rides the scale slot under `logistic.`
+        # (pair nuisance-nb1p), scalars inline bare. No fused head:
+        # one spelling either way.
         wrap_location ? _rk_ast_dotted(:NegativeBinomial,
             _rk_ast_dotted(:exp, predictor),
             leaf[:scale]) :
         _rk_ast_dotted(:NegativeBinomial, predictor, leaf[:scale])
+    elseif response.family === :weibull
+        # Twin head (thin-layer decision, pair fam-weibull): the
+        # plan's `Weibull(k, theta)` maps to
+        # `Weibull.(k, exp.(eta))` (Distributions `(shape, scale)`
+        # order, NB2 precedent); scalars inline bare. No fused
+        # head: one spelling either way.
+        wrap_location ? _rk_ast_dotted(:Weibull,
+            leaf[:scale],
+            _rk_ast_dotted(:exp, predictor)) :
+        _rk_ast_dotted(:Weibull, leaf[:scale], predictor)
+    elseif response.family === :exponential_log
+        # Twin head (thin-layer decision, pair fam-exp): the plan's
+        # `Exponential(mu)` maps to `Exponential.(exp.(eta))`
+        # (Poisson-shaped single-arg twin); no scale slot. No fused
+        # head: one spelling either way.
+        wrap_location ? _rk_ast_dotted(:Exponential,
+            _rk_ast_dotted(:exp, predictor)) :
+        _rk_ast_dotted(:Exponential, predictor)
     elseif response.family === :gamma_log
         # Mean-shape form: the plan pins both alpha positions identical,
         # so the same value emits twice.
@@ -625,7 +678,8 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
         # the plan's `LocationScale(mu, s, TDist(nu))` maps to
         # `StudentT.(nu, mu, sigma)` by arg reorder (Stan
         # `student_t(nu, mu, sigma)` order), the same class of
-        # normalization as the existing spelling maps. No
+        # normalization as the existing spelling maps. A modeled nu
+        # rides under `exp.` (the scale-predictor precedent). No
         # `LocationScale` twin: the Normal single-head precedent
         # governs (no link wrap to bridge).
         _rk_ast_dotted(:StudentT, leaf[:nu], predictor, leaf[:scale])
@@ -633,11 +687,14 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
         # Dedicated single head (thin-layer decision, pair fam-zip):
         # the plan's `ZeroInflatedPoisson(lambda, zi)` maps to
         # `ZeroInflatedPoisson.(exp.(lambda), zi)` (Julia/Stan
-        # `(lambda, zi)` order). No fused head and no decomposed
-        # twin: the zi slot is scalar-only in v1, so the fused flag
-        # changes nothing.
+        # `(lambda, zi)` order); a modeled `logit(zi)` submodel rides
+        # the scale slot under `logistic.` instead (the hurdle hu
+        # precedent). No fused head and no decomposed twin: one
+        # spelling either way, so the fused flag changes nothing.
+        zi = response.scale_predictor === nothing ?
+            leaf[:zero_inflation] : leaf[:scale]
         _rk_ast_dotted(:ZeroInflatedPoisson,
-            _rk_ast_dotted(:exp, predictor), leaf[:zero_inflation])
+            _rk_ast_dotted(:exp, predictor), zi)
     elseif response.family === :von_mises
         # Twin heads (thin-layer decision, pair fam-vonmises): exact
         # `VonMises(mu, kappa)` maps to `VonMises.(mu, kappa)` and
@@ -651,6 +708,13 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
             _rk_ast_dotted(:VonMises, predictor, leaf[:scale]) :
             _rk_ast_dotted(:CircularVonMises, predictor, leaf[:scale],
                 interval[1], interval[2])
+    elseif response.family === :lognormal
+        # Single head (thin-layer decision, pair fam-lognormal): the
+        # plan's `LogNormal(mu, sigma)` maps to
+        # `LogNormal.(mu, sigma)` (Distributions `(mu, sigma)`
+        # order); sigma rides the scalar-only scale slot. No fused
+        # head: one spelling either way.
+        _rk_ast_dotted(:LogNormal, predictor, leaf[:scale])
     elseif response.family === :categorical_logit
         # Reference-coded: K−1 non-reference etas, class 1 the implicit
         # zero reference (class order follows predictor order).
@@ -725,7 +789,7 @@ function _rk_ast_mixture_leaves(response::_RKLikelihoodSpec,
             response.trials, nothing, nothing, Symbol[], Symbol[], nothing,
             nothing, Symbol[], nothing, Symbol[], nothing,
             _RKMixtureComponent[], nothing, nothing, nothing, nothing,
-            nothing)
+            nothing, nothing)
         cleaf = Dict{Symbol,Any}(:predictor => loc)
         if _rk_ast_response_uses_scale(comp.family)
             cleaf[:scale] =
@@ -775,17 +839,20 @@ function _rk_ast_response_stmt(response::_RKLikelihoodSpec,
             _rk_ast_response_scale(response, rename, predictor_link)
     end
     if family === :student_t
-        # Scalar-only like the scale slot (sampled/assignment names pass
-        # through; only predictor names alpha-rename).
-        response.nu === nothing && error(
-            "RK backend: internal: response `$(response.response)` plans " *
-            "Student-t without degrees of freedom")
-        leaf[:nu] = response.nu
+        # Scalar or modeled (sampled/assignment names pass through;
+        # only predictor names alpha-rename and invert their link).
+        response.nu === nothing && response.nu_predictor === nothing &&
+            error("RK backend: internal: response `$(response.response)` " *
+                  "plans Student-t without degrees of freedom")
+        leaf[:nu] = _rk_ast_response_nu(response, rename, predictor_link)
     end
     if family === :zero_inflated_poisson
-        # Scalar-only like the nu slot (sampled/assignment names pass
-        # through; only predictor names alpha-rename).
-        response.zero_inflation === nothing && error(
+        # Scalar-only (sampled/assignment names pass through; only
+        # predictor names alpha-rename) — except a modeled-zi
+        # submodel, which rides the scale slot (`leaf[:scale]`)
+        # instead and leaves this `nothing`.
+        response.zero_inflation === nothing &&
+            response.scale_predictor === nothing && error(
             "RK backend: internal: response `$(response.response)` plans " *
             "zero-inflated Poisson without a zero probability")
         leaf[:zero_inflation] = response.zero_inflation
@@ -833,7 +900,9 @@ end
 # prefix cannot collide with the thin layer's implicit `r_<target>_<group>`
 # term labels; `taken` dedups the rest. Rename-independent (targets use
 # original predictor names), so names pre-mint before predictor emission.
-function _rk_ast_ranef_names!(plan::_RKStructuralPlan, taken::Set{Symbol})
+function _rk_ast_ranef_names!(
+        plan::Union{_RKStructuralPlan,_RKVaryingSourcePlan},
+        taken::Set{Symbol})
     draws = Dict{Int,Symbol}()
     effects = Dict{Tuple{Symbol,Symbol,Union{Symbol,Nothing}},Symbol}()
     for (bi, bucket) in enumerate(plan.ranef_buckets)
@@ -965,14 +1034,20 @@ function _rk_ast_plate(name::Symbol, range::Symbol,
     Expr(:macrocall, Symbol("@plate"), LineNumberNode(0), loop)
 end
 
-# `gp_chol_latent(gp_exp_quad_cov(x, sigma, rho, jitter), z)`: arg order
-# is (locations, sigma, rho, jitter) per the thin-layer contract.
+# `gp_chol_latent(gp_exp_quad_cov(x, sigma, rho, jitter), z)` /
+# `gp_chol_latent(gp_periodic_cov(x, sigma, rho, period, jitter), z)`:
+# arg order is (locations, sigma, rho, [period,] jitter) per the
+# thin-layer contract.
 function _rk_ast_gp_latent(term)
     options = term.options
-    Expr(:call, :gp_chol_latent,
+    cov = if options.cov === :periodic
+        Expr(:call, :gp_periodic_cov, only(term.columns),
+            options.sigma, options.rho, options.period, options.jitter)
+    else
         Expr(:call, :gp_exp_quad_cov, only(term.columns),
-            options.sigma, options.rho, options.jitter),
-        options.z)
+            options.sigma, options.rho, options.jitter)
+    end
+    Expr(:call, :gp_chol_latent, cov, options.z)
 end
 
 function _rk_ast_gp_names(plan::_RKStructuralPlan)
@@ -1408,4 +1483,232 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
                 fused_heads))
     end
     _RKEmittedProgram(defs, Expr(:block, stmts...))
+end
+
+# ---- Varying-source twin emission (flat joint-fixture shape) ----
+#
+# The program mirrors the peer's verified emitter fixture: a schedule
+# declaration, flat `x ~ Dist(...)` sampled statements, flat Normal
+# population coefs, one centered `varying_draws` block, outer LP
+# assignments (subject LPs over subject columns, dose modifiers over
+# dose columns — `mo()` is not in the grouped-cell vocabulary, so dose
+# modifiers evaluate outside the plate and are referenced by name),
+# and one grouped `@plate` (native read call + `obs_map` gather +
+# `ifelse` scale selectors + one censored observation). No submodel
+# lattice: every name is top-level (defs stay empty). Assay scales
+# select through bound Boolean masks (a literal
+# `[s_1, ..., s_n][assay]` gather is not admitted thin-layer-side).
+# GP/HSGP weight vectors emit no statement (typed IR ports).
+#
+# Publication status vs the `phaseIII` native (living tracker: the
+# `varyingsource publication tripwire` in test/rk_parity.jl, which
+# ratchets as each boundary lands). Schedule/read/gather/draws
+# spellings are peer-verified (brief 1h1a2ug + dispatch 03:13);
+# weight vectors ride the typed IR `VectorParameter` port, which the
+# extension appends at publication (declare-as-data at lower, drop
+# their slice entries, rebuild the plate, never bind as columns).
+# Verified lowerable at pin 0c9ebb4d: `ifelse` selectors, the
+# `CensoredAddpropnormal.(mu, add, prop, lloq)` order, whole-column
+# in-cell `.~`, LP refs by name, `for s in 1:kernel_nsub_<result>`.
+const _RK_VARYINGSOURCE_MODIFIERS = (:rate_mod, :mode_mod, :f_mod)
+
+# Centered draws block: `draws ~ varying_draws(group, [1 x K];
+# eta, sd, centered=true)` + one `varying_slice` per margin (the
+# slices gather the centered draws without L/tau re-scaling). Slices
+# always take range form (`i:i`, the peer-verified spelling — never
+# the bare-int 1-wide shorthand of the non-centered path). The `sd`
+# arg is a folded literal (the planner const-folds e.g. `2/3`; a
+# call-valued arg is rejected thin-layer-side).
+function _rk_ast_centered_bucket_stmts(bucket::_RKRanefBucket,
+        draws::Symbol, effects::Dict, sd_scale::Float64)
+    margins = Any[_rk_ast_bucket_margin(m.z) for m in bucket.margins]
+    call = Expr(:call, :varying_draws,
+        _rk_ast_group_expr(bucket.grouping), Expr(:vect, margins...))
+    insert!(call.args, 2, Expr(:parameters,
+        Expr(:kw, :eta, bucket.lkj_eta),
+        Expr(:kw, :sd, Expr(:call, :Exponential, sd_scale)),
+        Expr(:kw, :centered, true)))
+    stmts = Expr[Expr(:call, :~, draws, call)]
+    for (target, range) in bucket.slices
+        effect = effects[(target, bucket.group, bucket.id)]
+        idx = Expr(:call, :(:), first(range), last(range))
+        push!(stmts, Expr(:call, :~, effect,
+            Expr(:call, :varying_slice, draws, idx)))
+    end
+    stmts
+end
+
+# Flat coef priors + affine assignment for one twin predictor
+# (subject LPs assign their own name; dose LPs assign the joint
+# modifier names). Priors key `(predictor, addressee)` like the GLM
+# path; every addressee needs its row (the planner guarantees it).
+function _rk_emit_varyingsource_predictor(predictor::_RKPredictorSpec,
+        priors::Dict, effects::Dict, taken::Set{Symbol},
+        columns::Dict{Symbol,AbstractVector}, lhs::Symbol)
+    prefix = "RK backend"
+    stmts = Expr[]
+    coefs = Dict{Int,Symbol}()
+    colactual = Dict{Int,Any}()
+    refactual = Dict{Int,Any}()
+    slot = 0
+    for (index, term) in enumerate(predictor.terms)
+        kind = term.kind
+        if kind === :continuous || kind === :factor || kind === :offset ||
+                kind === :monotonic || kind === :monotonic_summand
+            colactual[index] = only(term.columns)
+        end
+        if kind === :monotonic || kind === :monotonic_summand
+            refactual[index] = term.options.increments
+        elseif kind === :ranef_gather
+            refactual[index] = effects[(predictor.name,
+                term.options.bucket_group, term.options.bucket_id)]
+        end
+        (kind === :offset || kind === :ranef_gather ||
+            kind === :monotonic_summand) && continue
+        slot += 1
+        key = (predictor.name, term.addressee)
+        haskey(priors, key) || error(
+            "$prefix: internal: no population prior for " *
+            "`$(predictor.name)` addressee `$(term.addressee)`")
+        family, args = priors[key]
+        if kind === :factor
+            col = only(term.columns)
+            K = length(_rk_grouping_levels(columns[col]))
+            coef = _rk_ast_coef_name(
+                string(predictor.name, "_b", slot), taken)
+            refactual[index] = coef
+            push!(stmts, _rk_ast_factor_prior(
+                coef, col, term.options, K, family, args))
+        else
+            coef = _rk_ast_coef_name(
+                string(predictor.name, "_b", slot), taken)
+            coefs[index] = coef
+            push!(stmts, Expr(:call, :~, coef,
+                Expr(:call, family, args...)))
+        end
+    end
+    push!(stmts, Expr(:(=), lhs,
+        _rk_ast_affine(predictor, coefs, colactual, refactual)))
+    stmts
+end
+
+# `vs = varyingsource_pkpd_schedule(obs=(...), dose=(...),
+# discretization=...)` over the raw bridge columns.
+function _rk_emit_varyingsource_schedule(spec::_RKVaryingSourceSpec)
+    Expr(:(=), :vs_sched, Expr(:call, :varyingsource_pkpd_schedule,
+        Expr(:kw, :obs, Expr(:tuple,
+            spec.obs_subject, spec.obs_time, spec.obs_assay)),
+        Expr(:kw, :dose, Expr(:tuple,
+            spec.dose_subject, spec.dose_time, spec.dose_amount,
+            spec.dose_treatment)),
+        Expr(:kw, :discretization, spec.discretization)))
+end
+
+# The 31-arg native read: schedule + 3 dose modifiers + shared GP
+# (port + 2 slopes + 3 scales) + primary HSGP (port + rho + sd) + CSF
+# HSGP (port + rho + sd) + placebo lo/hi + 13 subject logs.
+function _rk_emit_varyingsource_reads(spec::_RKVaryingSourceSpec)
+    Expr(:(=), :reads, Expr(:call, :varyingsource_pkpd_read_locs,
+        :vs_sched, _RK_VARYINGSOURCE_MODIFIERS...,
+        :gp_w, :dose_slope, :conc_slope, :rho_d, :rho_c, :eff_sd,
+        :p_w, :rho_p, :sd_p,
+        :c_w, :rho_csf, :sd_csf,
+        spec.placebo_lo, spec.placebo_hi,
+        spec.subject_lps...))
+end
+
+# One lazy per-assay scale selector: nested `ifelse.(mask, s, ...)`
+# over the bound Boolean masks (last assay is the else branch; a
+# single assay aliases its scale directly).
+function _rk_emit_varyingsource_selector(name::Symbol,
+        scales::Vector{Symbol}, masks::Vector{Symbol})
+    rhs = scales[end]
+    for (mask, scale) in reverse(collect(zip(masks, scales[1:end-1])))
+        rhs = Expr(:., :ifelse, Expr(:tuple, mask, scale, rhs))
+    end
+    Expr(:(=), name, rhs)
+end
+
+# The grouped plate: native read + `obs_map` gather + scale
+# selectors + one censored observation over caller-order obs,
+# collecting the gathered locations.
+function _rk_emit_varyingsource_plate(spec::_RKVaryingSourceSpec)
+    adds = Symbol[a.add for a in spec.assays]
+    props = Symbol[a.prop for a in spec.assays]
+    masks = Symbol[Symbol(:vs_assay_is_, a.code)
+        for a in spec.assays[1:max(length(spec.assays) - 1, 0)]]
+    read_stmt = _rk_emit_varyingsource_reads(spec)
+    gather_stmt = Expr(:(=), :mu, Expr(:ref, :reads,
+        Expr(:., :vs_sched, QuoteNode(:obs_map))))
+    add_stmt = _rk_emit_varyingsource_selector(:vs_add, adds, masks)
+    prop_stmt = _rk_emit_varyingsource_selector(:vs_prop, props, masks)
+    obs_stmt = Expr(:call, :.~, spec.obs_value,
+        Expr(:., :CensoredAddpropnormal,
+            Expr(:tuple, :mu, :vs_add, :vs_prop, spec.obs_lloq)))
+    loop = Expr(:for, Expr(:(=), :s,
+            Expr(:call, :(:), 1, spec.subject_count)),
+        Expr(:block, read_stmt, gather_stmt, add_stmt, prop_stmt,
+            obs_stmt, :mu))
+    Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
+        spec.result, loop)
+end
+
+function _rk_emit_ast(plan::_RKVaryingSourcePlan)
+    prefix = "RK backend"
+    spec = plan.spec
+    taken = Set{Symbol}(keys(plan.columns))
+    for nm in [spec.subject_lps; spec.dose_lps;
+            [spec.placebo_primary, spec.placebo_csf]; spec.effectiveness;
+            spec.result; spec.group]
+        push!(taken, nm)
+    end
+    for p in plan.parameters
+        push!(taken, p.name)
+    end
+    for v in plan.vector_parameters
+        push!(taken, v.name)
+    end
+    # Fixed joint-vocabulary names (peer fixture): a collision is a
+    # model/data name clash to resolve explicitly, never a silent
+    # dedup (both the assignments and the native call use them).
+    for nm in (:vs_sched, :reads, :mu, :rate_mod, :mode_mod, :f_mod,
+            :vs_add, :vs_prop)
+        nm in taken && error(
+            "$prefix: joint-vocabulary name `$nm` collides with a " *
+            "model or data name")
+        push!(taken, nm)
+    end
+    stmts = Expr[]
+    push!(stmts, _rk_emit_varyingsource_schedule(spec))
+    for parameter in plan.parameters
+        push!(stmts, _rk_ast_sampled(parameter))
+    end
+    for vector_parameter in plan.vector_parameters
+        # Simplexes sample explicitly; weight vectors stay implicit
+        # like the GLM path (no program statement lowers for a
+        # non-data-sized latent: broadcast fails the needs-data rule,
+        # `@plate` fails bind's n_obs cover rule). At publication the
+        # extension appends them as typed IR `VectorParameter` ports
+        # (peer's verified recipe: drop their slice entries, rebuild
+        # the plate, never bind them as raw columns).
+        stmt = _rk_ast_vector_parameter(vector_parameter)
+        stmt === nothing || push!(stmts, stmt)
+    end
+    priors = Dict((p.predictor, p.addressee) => (p.family, p.args)
+        for p in [plan.subject_priors; plan.dose_priors])
+    ranef_draws, ranef_effects = _rk_ast_ranef_names!(plan, taken)
+    bucket = only(plan.ranef_buckets)
+    append!(stmts, _rk_ast_centered_bucket_stmts(bucket, ranef_draws[1],
+        ranef_effects, spec.centered.sd_scale))
+    for predictor in plan.subject_predictors
+        append!(stmts, _rk_emit_varyingsource_predictor(predictor,
+            priors, ranef_effects, taken, plan.columns, predictor.name))
+    end
+    for (predictor, modifier) in
+            zip(plan.dose_predictors, _RK_VARYINGSOURCE_MODIFIERS)
+        append!(stmts, _rk_emit_varyingsource_predictor(predictor,
+            priors, ranef_effects, taken, plan.columns, modifier))
+    end
+    push!(stmts, _rk_emit_varyingsource_plate(spec))
+    _RKEmittedProgram(Expr[], Expr(:block, stmts...))
 end

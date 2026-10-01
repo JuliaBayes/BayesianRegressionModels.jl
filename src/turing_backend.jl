@@ -188,10 +188,8 @@ is regenerated.
 """
 function turing_posterior_predictive end
 
-"""Return the generated Turing model AST used by `backend.model`."""
-turing_model_source(backend::TuringBRMI) = backend.plan.source_ast
-turing_model_source(backend::TuringBRMI{<:BRMI,<:_TuringMultiResponsePlan}) =
-    backend.plan.source_ast
+"""Return an independent copy of the generated Turing model AST used by `backend.model`."""
+turing_model_source(backend::TuringBRMI) = deepcopy(backend.plan.source_ast)
 
 """Build the native Turing submodel for one backend-neutral group block."""
 function turing_group_effect end

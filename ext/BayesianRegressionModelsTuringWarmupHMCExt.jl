@@ -201,6 +201,7 @@ function _hsgp_gradient_component(
         only(sd_indices),
         0.0,
         omega2,
+        Float64[],
     )
     _hsgp_prior_scale(state.rho_prior, logical, "length-scale")
     _hsgp_prior_scale(state.sigma_prior, logical, "marginal-SD")

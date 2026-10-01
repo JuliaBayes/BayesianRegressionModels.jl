@@ -14,15 +14,18 @@
 
 using Test
 using BayesianRegressionModels
+using CategoricalArrays: categorical
 using Distributions: Bernoulli, Beta, Binomial, Categorical, Cauchy, Dirichlet,
                      Exponential, Gamma, InverseGaussian, Laplace,
                      LocationScale, Logistic, LogNormal, MixtureModel,
                      Multinomial, NegativeBinomial, Normal, Poisson, TDist,
-                     Uniform, VonMises, truncated
+                     Uniform, VonMises, Weibull, truncated
 using LogExpFunctions: logistic, logit
 using Statistics: mean
 
 const BRM = BayesianRegressionModels
+
+include(joinpath(@__DIR__, "varyingsource_fixture.jl"))
 
 df = (;
     x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
@@ -226,6 +229,19 @@ end
         Expr(:., :StudentT, Expr(:tuple, 4.0, :mu, 2.0)))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+    # Modeled nu (N1 probe shape): the `log(nu)` submodel rides under
+    # `exp.`, the scale-predictor precedent.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        log(nu) ~ 1 + z
+        y ~ LocationScale(mu, 2.0, TDist(nu))
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :y,
+        Expr(:., :StudentT, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :nu)), :mu, 2.0)))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end
 
 @testset "group-C hurdle-poisson AST shape" begin
@@ -272,6 +288,18 @@ end
     @test prog.main.args[end] == Expr(:call, :.~, :c,
         Expr(:., :ZeroInflatedPoisson, Expr(:tuple,
             Expr(:., :exp, Expr(:tuple, :lambda)), :zi)))
+    # Modeled zi (zip.jl model B): the `logit(zi)` submodel inverts
+    # under `logistic.` (the hurdle hu precedent).
+    brmi = @brm df begin
+        log(lambda) ~ 1 + x
+        logit(zi) ~ 1 + x
+        c ~ ZeroInflatedPoisson(lambda, zi)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.main.args[end] == Expr(:call, :.~, :c,
+        Expr(:., :ZeroInflatedPoisson, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :lambda)),
+            Expr(:., :logistic, Expr(:tuple, :zi)))))
     # Literals inline; the fused-heads flag changes nothing (one head
     # either way).
     brmi = @brm df begin
@@ -311,6 +339,50 @@ end
             Expr(:., :exp, Expr(:tuple, :r)), 0.4)))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+    # Modeled p: the `logit(p)` submodel rides the scale slot under
+    # `logistic.` (pair nuisance-nb1p; the hurdle twin precedent).
+    brmi = @brm df begin
+        log(r) ~ 1 + x
+        logit(p) ~ 1 + x
+        c ~ NegativeBinomial(r, p)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :c,
+        Expr(:., :NegativeBinomial, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :r)),
+            Expr(:., :logistic, Expr(:tuple, :p)))))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+end
+
+@testset "group-C weibull AST shape" begin
+    # Twin head (thin-layer decision, pair fam-weibull):
+    # `Weibull(k, theta)` maps to `Weibull.(k, exp.(theta))`
+    # (Distributions `(shape, scale)` order, NB2 precedent); no
+    # fused head.
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        k ~ LogNormal(0, 0.3)
+        z ~ Weibull(k, mu)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :z,
+        Expr(:., :Weibull, Expr(:tuple, :k,
+            Expr(:., :exp, Expr(:tuple, :mu)))))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+    # Literal shape inlines; the fused-heads flag changes nothing
+    # (one head either way).
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        z ~ Weibull(2.0, mu)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :z,
+        Expr(:., :Weibull, Expr(:tuple, 2.0,
+            Expr(:., :exp, Expr(:tuple, :mu)))))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end
 
 @testset "group-C wald AST shape" begin
@@ -338,6 +410,38 @@ end
     want = Expr(:call, :.~, :z,
         Expr(:., :InverseGaussian, Expr(:tuple,
             Expr(:., :exp, Expr(:tuple, :mu)), 2.0)))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+    # Modeled lambda (pair nuisance-lam): the `log(lam)` scale
+    # predictor inverts under `exp.` like any scale predictor (the
+    # von-Mises precedent); the fused-heads flag changes nothing (one
+    # head either way).
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        log(lam) ~ 1 + x
+        z ~ InverseGaussian(mu, lam)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :z,
+        Expr(:., :InverseGaussian, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :mu)),
+            Expr(:., :exp, Expr(:tuple, :lam)))))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+end
+
+@testset "group-C exponential AST shape" begin
+    # Twin head (thin-layer decision, pair fam-exp):
+    # `Exponential(mu)` maps to `Exponential.(exp.(mu))`
+    # (Poisson-shaped single-arg twin); no fused head.
+    brmi = @brm df begin
+        log(mu) ~ 1 + x
+        z ~ Exponential(mu)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :z,
+        Expr(:., :Exponential, Expr(:tuple,
+            Expr(:., :exp, Expr(:tuple, :mu)))))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end
@@ -372,6 +476,19 @@ end
             5.0)))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+    # A `log(precision)` submodel inverts under `exp.` like any scale
+    # predictor (pair nuisance-precision).
+    brmi = @brm df begin
+        logit(mu) ~ 1 + x
+        log(precision) ~ 1 + z
+        b ~ BetaBinomial2(h, mu, precision)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.main.args[end] == Expr(:call, :.~, :b,
+        Expr(:., :BetaBinomial2, Expr(:tuple,
+            :h,
+            Expr(:., :logistic, Expr(:tuple, :mu)),
+            Expr(:., :exp, Expr(:tuple, :precision)))))
 end
 
 @testset "group-C von-Mises AST shape" begin
@@ -399,6 +516,33 @@ end
     want = Expr(:call, :.~, :y,
         Expr(:., :CircularVonMises, Expr(:tuple, :mu, 1.7,
             -Float64(pi), Float64(pi))))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+end
+
+@testset "group-C lognormal AST shape" begin
+    # Single head (thin-layer decision, pair fam-lognormal):
+    # `LogNormal(mu, sigma)` maps to `LogNormal.(mu, sigma)`
+    # (Distributions order); no fused head.
+    brmi = @brm df begin
+        mu ~ 1 + x
+        sigma ~ Exponential(1)
+        z ~ LogNormal(mu, sigma)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :z,
+        Expr(:., :LogNormal, Expr(:tuple, :mu, :sigma)))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] == want
+    @test BRM._rk_emit_ast(plan, true).main.args[end] == want
+    # Literal scale inlines; the fused-heads flag changes nothing
+    # (one head either way).
+    brmi = @brm df begin
+        mu ~ 1 + x
+        z ~ LogNormal(mu, 0.5)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    want = Expr(:call, :.~, :z,
+        Expr(:., :LogNormal, Expr(:tuple, :mu, 0.5)))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end
@@ -674,7 +818,7 @@ end
             nothing, BRM._RKResponseEvidence(:none, nothing, nothing), :y,
             nothing, nothing, nothing, Symbol[], Symbol[], nothing, nothing,
             Symbol[], nothing, Symbol[], nothing, BRM._RKMixtureComponent[],
-            nothing, nothing, nothing, nothing, nothing)],
+            nothing, nothing, nothing, nothing, nothing, nothing)],
         [BRM._RKPredictorSpec(:n, :identity, BRM._RKTermSpec[
             BRM._RKTermSpec(:intercept, Symbol[], (;), :Intercept, :Intercept),
             BRM._RKTermSpec(:continuous, [:n], (;), :n, :n)], :n)],
@@ -1469,6 +1613,26 @@ end
         :z_gp)) in prog.main.args
 end
 
+@testset "periodic gp AST shape" begin
+    brmi = @brm df begin
+        mu ~ 1 + gp(x; cov=:periodic, period=2.0)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    # Same submodel lattice as exp_quad (the latent rides the `f1`
+    # formal); only the covariance call gains `period`.
+    @test prog.defs == Expr[
+        Expr(:(=), Expr(:call, :popefs_normal_i_gp, :f1, :loc1, :s1),
+            Expr(:block,
+                Expr(:call, :~, :b1, Expr(:call, :Normal, :loc1, :s1)),
+                Expr(:call, :.+, :b1, :f1))),
+    ]
+    @test Expr(:(=), :f_gp, Expr(:call, :gp_chol_latent,
+        Expr(:call, :gp_periodic_cov, :x, :sigma_gp, :rho_gp, 2.0, 1e-9),
+        :z_gp)) in prog.main.args
+end
+
 @testset "hsgp AST shape" begin
     brmi = @brm df begin
         mu ~ 1 + hsgp(x; k=4)
@@ -1523,6 +1687,26 @@ end
             Expr(:., :Normal, Expr(:tuple, :mu, :s))))
     @test prog.main.args[1] == Meta.parse("hsgp_basis(:hsgp_x_z, x, z; " *
         "k = (4, 3), c = (1.5, 2.0), iso = false)")
+    # Periodic: k/cov/period declaration, same summand shape.
+    brmi = @brm df begin
+        mu ~ 1 + hsgp(x; k=4, cov=:periodic, period=2.0)
+        s ~ Exponential(1)
+        y ~ Normal(mu, s)
+    end
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    @test prog.main == Expr(:block,
+        Expr(:call, :hsgp_basis,
+            Expr(:parameters, Expr(:kw, :k, 4),
+                Expr(:kw, :cov, QuoteNode(:periodic)),
+                Expr(:kw, :period, 2.0)),
+            QuoteNode(:hsgp_x), :x),
+        Expr(:call, :~, :mu, Expr(:call, :popefs_normal_i_h,
+            QuoteNode(:hsgp_x), 0.0, 1.0)),
+        Expr(:call, :~, :s, Expr(:call, :Exponential, 1.0)),
+        Expr(:call, :.~, :y,
+            Expr(:., :Normal, Expr(:tuple, :mu, :s))))
+    @test prog.main.args[1] == Meta.parse(
+        "hsgp_basis(:hsgp_x, x; k = 4, cov = :periodic, period = 2.0)")
 end
 
 @testset "ar AST shape" begin
@@ -1712,6 +1896,24 @@ end
             Expr(:call, :./,
                 Expr(:., :exp, Expr(:tuple, :mu)),
                 Expr(:., :exp, Expr(:tuple, :alpha))))))
+    # Beta concentration inverts at both use positions; the fused head
+    # takes the bare location with the inverted concentration.
+    brmi = @brm dfp begin
+        logit(mu) ~ 1 + x
+        log(kappa) ~ 1 + z
+        prop ~ Beta(mu * kappa, (1 - mu) * kappa)
+    end
+    plan = BRM._brm_rk_plan(brmi)
+    mu_log = Expr(:., :logistic, Expr(:tuple, :mu))
+    kap = Expr(:., :exp, Expr(:tuple, :kappa))
+    @test BRM._rk_emit_ast(plan, false).main.args[end] ==
+        Expr(:call, :.~, :prop,
+            Expr(:., :Beta, Expr(:tuple,
+                Expr(:call, :.*, mu_log, kap),
+                Expr(:call, :.*, Expr(:call, :.-, 1, mu_log), kap))))
+    @test BRM._rk_emit_ast(plan, true).main.args[end] ==
+        Expr(:call, :.~, :prop,
+            Expr(:., :BetaLogit, Expr(:tuple, :mu, kap)))
 end
 
 @testset "submodel defs resolve at every call" begin
@@ -2372,4 +2574,179 @@ end
         prog.main.args
     @test Expr(:call, :~, :hc, Expr(:call, :HalfCauchy, 2.0)) in
         prog.main.args
+end
+
+@testset "varyingsource AST flat program" begin
+    # The twin emits a flat joint-fixture program: schedule, sampled
+    # scales/slopes, weight broadcasts, one centered `varying_draws`
+    # block, outer LP assignments, and one grouped `@plate`. No
+    # submodel defs — every name is top-level.
+    plan = vs_test_plan()
+    prog = BRM._rk_emit_ast(plan)
+    @test prog isa BRM._RKEmittedProgram
+    @test prog.defs == Expr[]
+    @test prog.main isa Expr && prog.main.head === :block
+    stmts = prog.main.args
+    # 1 schedule + 15 sampled + 3 simplex + 1 draws + 13 slices +
+    # 45 subject + 18 dose + 1 plate (weight vectors emit nothing —
+    # typed IR ports, not program statements).
+    @test length(stmts) == 97
+    @test stmts[1] == Expr(:(=), :vs_sched,
+        Expr(:call, :varyingsource_pkpd_schedule,
+            Expr(:kw, :obs, Expr(:tuple,
+                :vs_obs_subject, :vs_obs_time, :vs_obs_assay)),
+            Expr(:kw, :dose, Expr(:tuple,
+                :vs_dose_subject, :vs_dose_time, :vs_dose_amount,
+                :vs_dose_treatment)),
+            Expr(:kw, :discretization, :vs_discretization)))
+    @test Expr(:call, :~, :a1, Expr(:call, :Exponential, 1.0)) in stmts
+    @test Expr(:call, :~, :r3, Expr(:call, :Exponential, 6.0)) in stmts
+    @test Expr(:call, :~, :dose_slope,
+        Expr(:call, :Normal, 0.0, 1.5)) in stmts
+    @test Expr(:call, :~, :rho_p,
+        Expr(:call, :Uniform, 0.5, 2.0)) in stmts
+    for w in (:gp_w, :p_w, :c_w)
+        @test !any(stmts) do stmt
+            stmt isa Expr || return false
+            stmt.head === :(=) && return stmt.args[1] === w
+            stmt.head === :call && !isempty(stmt.args) &&
+                stmt.args[1] in (:~, :.~) &&
+                return stmt.args[2] === w
+            false
+        end
+    end
+    @test Expr(:call, :~, :mo_diet_simplex_incr,
+        Expr(:call, :Dirichlet,
+            Expr(:vect, 1.0, 1.0, 1.0))) in stmts
+    draws = Expr(:call, :varying_draws,
+        Expr(:parameters,
+            Expr(:kw, :eta, 2.0),
+            Expr(:kw, :sd, Expr(:call, :Exponential, 0.5)),
+            Expr(:kw, :centered, true)),
+        :subject, Expr(:vect, fill(1, 13)...))
+    @test Expr(:call, :~, :ranef_draws_p_subject, draws) in stmts
+    for (i, lp) in enumerate(_VS_FIX_SUBJECT_LPS)
+        @test Expr(:call, :~, Symbol(:ranef_, lp, :_p_subject),
+            Expr(:call, :varying_slice, :ranef_draws_p_subject,
+                Expr(:call, :(:), i, i))) in stmts
+    end
+    @test Expr(:call, :~, :lp1_b1,
+        Expr(:call, :Normal, 0.1, 1.0)) in stmts
+    @test Expr(:(=), :lp1, Expr(:call, :.+,
+        :lp1_b1,
+        Expr(:call, :.*, :lp1_b2, :diseased),
+        Expr(:call, :.*, :lp1_b3, :male),
+        Expr(:call, :.*, :lp1_b4, :age_std),
+        Expr(:call, :.*, :lp1_b5, :weight_std),
+        :ranef_lp1_p_subject)) in stmts
+    # Lean LPs (intercept + one covariate + gather) assign likewise.
+    @test Expr(:(=), :lp3, Expr(:call, :.+,
+        :lp3_b1,
+        Expr(:call, :.*, :lp3_b2, :diseased),
+        :ranef_lp3_p_subject)) in stmts
+    # Dose LPs assign the joint modifier names over dose columns
+    # (`mo()` evaluates outside the plate).
+    @test Expr(:(=), :rate_mod, Expr(:call, :.+,
+        Expr(:call, :.*, :d1_b1, :vessel_bottle),
+        Expr(:call, :.*, :d1_b2, :vessel_bottle_20),
+        Expr(:call, :.*, :d1_b3, :vessel_tablet),
+        Expr(:call, :.*, :d1_b4, :vessel_tablet_60),
+        Expr(:call, :.*, :d1_b5, Expr(:call, :mo,
+            :diet_idx, :mo_diet_simplex_incr)))) in stmts
+    for lhs in (:mode_mod, :f_mod)
+        @test any(stmts) do stmt
+            stmt isa Expr && stmt.head === :(=) && stmt.args[1] === lhs
+        end
+    end
+    read = Expr(:(=), :reads,
+        Expr(:call, :varyingsource_pkpd_read_locs, :vs_sched,
+            :rate_mod, :mode_mod, :f_mod,
+            :gp_w, :dose_slope, :conc_slope, :rho_d, :rho_c, :eff_sd,
+            :p_w, :rho_p, :sd_p,
+            :c_w, :rho_csf, :sd_csf,
+            0.0, 24.0, _VS_FIX_SUBJECT_LPS...))
+    @test length(read.args[2].args) == 32
+    gather = Expr(:(=), :mu,
+        Expr(:ref, :reads, Expr(:., :vs_sched, QuoteNode(:obs_map))))
+    add = Expr(:(=), :vs_add, Expr(:., :ifelse, Expr(:tuple,
+        :vs_assay_is_1, :a1, Expr(:., :ifelse, Expr(:tuple,
+            :vs_assay_is_2, :a2, :a3)))))
+    prop = Expr(:(=), :vs_prop, Expr(:., :ifelse, Expr(:tuple,
+        :vs_assay_is_1, :r1, Expr(:., :ifelse, Expr(:tuple,
+            :vs_assay_is_2, :r2, :r3)))))
+    obs = Expr(:call, :.~, :vs_obs_value,
+        Expr(:., :CensoredAddpropnormal, Expr(:tuple,
+            :mu, :vs_add, :vs_prop, :vs_obs_lloq)))
+    loop = Expr(:for,
+        Expr(:(=), :s, Expr(:call, :(:), 1, :kernel_nsub_loc)),
+        Expr(:block, read, gather, add, prop, obs, :mu))
+    @test stmts[end] == Expr(:macrocall, Symbol("@plate"),
+        LineNumberNode(0), :loc, loop)
+end
+
+@testset "varyingsource AST sd literal folding" begin
+    # The draws `sd=` arg must be a literal (thin-layer-side rejects
+    # call-valued args): `Exponential(2/3)` folds to the Float64.
+    body = replace(vs_test_body(),
+        "sd(:, p) ~ Exponential(0.5)" => "sd(:, p) ~ Exponential(2/3)")
+    plan = BRM._brm_rk_plan(Core.eval(Main, BRM._brm(body; df=vs_test_data()));
+        centered_groups=[:subject], varyingsource_raw=vs_test_raw())
+    @test plan.spec.centered.sd_scale == 2 / 3
+    prog = BRM._rk_emit_ast(plan)
+    draws = only(filter(prog.main.args) do stmt
+        stmt isa Expr && stmt.head === :call && stmt.args[1] === :(~) &&
+            stmt.args[2] === :ranef_draws_p_subject
+    end)
+    sd_kw = only(filter(draws.args[3].args[2].args) do kw
+        kw.args[1] === :sd
+    end)
+    @test sd_kw == Expr(:kw, :sd,
+        Expr(:call, :Exponential, 0.6666666666666666))
+    @test sd_kw.args[2].args[2] isa Float64
+end
+
+@testset "varyingsource AST single assay" begin
+    # One assay: the selectors alias the single scale pair directly
+    # (no `ifelse`, no masks); the read keeps all 31 args.
+    stan = vs_test_stan_data()
+    stan1 = merge(stan, Dict(:assay => fill(1, 7)))
+    data1 = merge(vs_test_data(stan), (; obs_assay=fill(1, 7)))
+    raw1 = vs_test_raw(stan1)
+    body1 = replace(vs_test_body(),
+        "assay_scale(assay_i, a1, a2, a3)" => "assay_scale(assay_i, a1)")
+    body1 = replace(body1,
+        "assay_scale(assay_i, r1, r2, r3)" => "assay_scale(assay_i, r1)")
+    for line in ("a2 ~ Exponential(2.0)\n", "a3 ~ Exponential(3.0)\n",
+            "r2 ~ Exponential(5.0)\n", "r3 ~ Exponential(6.0)\n")
+        body1 = replace(body1, line => "")
+    end
+    plan = BRM._brm_rk_plan(Core.eval(Main, BRM._brm(body1; df=data1));
+        centered_groups=[:subject], varyingsource_raw=raw1)
+    prog = BRM._rk_emit_ast(plan)
+    @test prog.defs == Expr[]
+    plate = prog.main.args[end]
+    @test plate.head === :macrocall && plate.args[1] === Symbol("@plate")
+    @test plate.args[3] === :loc
+    cell = plate.args[4].args[2].args
+    @test Expr(:(=), :vs_add, :a1) in cell
+    @test Expr(:(=), :vs_prop, :r1) in cell
+    @test !any(cell) do stmt
+        stmt isa Expr && Meta.isexpr(stmt.args[end], :.) &&
+            stmt.args[end].args[1] === :ifelse
+    end
+    read = only(filter(cell) do stmt
+        stmt isa Expr && stmt.head === :(=) && stmt.args[1] === :reads
+    end)
+    @test length(read.args[2].args) == 32
+end
+
+@testset "varyingsource AST joint-vocabulary collision" begin
+    # Fixed joint names (`vs_sched`, `reads`, `mu`, modifiers, selectors) -
+    # a model/data name clash fails loud, never dedups silently.
+    data = merge(vs_test_data(), (; mu=vs_test_data().male))
+    body = replace(vs_test_body(), "male" => "mu")
+    brmi = Core.eval(Main, BRM._brm(body; df=data))
+    plan = BRM._brm_rk_plan(brmi;
+        centered_groups=[:subject], varyingsource_raw=vs_test_raw())
+    @test_throws "joint-vocabulary name `mu` collides" BRM._rk_emit_ast(plan)
 end

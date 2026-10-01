@@ -18,6 +18,26 @@ differentiates with Enzyme only — every gradient in this suite goes through
 so there is nothing here to work around; do not add it back to make a new
 gradient site easier.
 
+## Chunking heavy suites
+
+Files with dozens of testsets (`rk_parity.jl`, `rk_emitter.jl`) OOM a squeezed
+host single-process. Those files spell their blocks `@stestset` (defined in
+`testset_filter.jl`, covered by `testset_filter_check.jl`) instead of
+`@testset`, so lanes can run them in fresh-process chunks: pass substring
+filters matching testset names as trailing args, or comma-separated via
+`BRM_TEST_FILTER` (union). An empty filter runs everything, exactly as before;
+a non-empty filter that matches nothing exits 1 rather than reporting a
+hollow green.
+
+```sh
+julia --project=test test/rk_emitter.jl "group-C" "fail closed: group-C"
+BRM_TEST_FILTER="von-Mises,mixture" julia --project=test test/rk_parity.jl
+```
+
+A new heavy file adopts the same contract with one `include` plus the macro:
+`include(joinpath(@__DIR__, "testset_filter.jl"))` after `using Test`, then
+`@stestset "name" begin ... end` per chunkable block.
+
 ## Shared preparation and Turing lowering
 
 The focused preparation gates are `preparation_program.jl`,
@@ -33,6 +53,21 @@ callable likelihoods and priors, while `turing_backend.jl` retains the existing
 grouping, conditioning, replay, prediction, and parameterization contracts.
 `turing_world_age.jl` constructs and evaluates models inside compiled callers
 and checks that generated-model caching distinguishes prior literals.
+`model_source_ownership.jl` checks concurrent Turing construction, source-AST
+isolation, stable shared-group source, and non-mutating Julianic lowering of
+shared input syntax. Run it in a fresh process with `julia --threads=4 --project=test
+test/model_source_ownership.jl` to exercise the concurrent paths.
+`sbimpl_generation_concurrency.jl` checks concurrent SBBRMI construction and
+immediate consumption in compiled callers, including cold and warm vector
+priors, continuous and discrete mixtures, horseshoe labels and source ownership,
+same-named custom modules, and valid construction after rejected input. It also
+checks that generated families add no module bindings or support methods. Run
+`julia --threads=4 --project=test test/sbimpl_generation_concurrency.jl` in a
+fresh process.
+`rk_construction_concurrency.jl` checks independent RK builds with distinct
+data and layouts, then compares their first executions against analytic
+densities. Run `test/setup_env.jl` to install the fixed RK pin, then
+`julia --threads=4 --project=test test/rk_construction_concurrency.jl`.
 `turing_natural_emission.jl` checks direct observation ASTs and named model
 inputs against an independently written Turing model. It executes the emitted
 source again, checks input-name hygiene and closure captures, and verifies

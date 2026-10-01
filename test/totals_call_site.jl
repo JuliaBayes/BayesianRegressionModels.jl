@@ -4,22 +4,16 @@ const BRM = BayesianRegressionModels
 
 # Regression gate for snag brm-totals-lower-a47c6227.
 #
-# A totals-path model registers its composed scale-prior family
-# (`brm_vector_prior_*` @deffun triad + `lpxf_expr` hook) via `Core.eval`
-# DURING `SBBRMI` construction. Tracing the model in the SAME compiled caller
-# frame resolves methods at that frame's world age, so the fresh hooks are
-# invisible there and tracing dies with
-# "`brm_vector_prior_*` is missing `lpxf_expr`" — while an identical top-level
-# trace succeeds. The supported trace/compile entries (`stan_code`,
-# `stan_model`, `stan_instantiate` on the `SBBRMI`) re-enter the compiler in
-# the current world via `Base.invokelatest`; direct
-# `StanBlocks.stan_code(sb.model)` / `StanBlocks.stan_instantiate(sb.model)`
-# from inside such a frame remains a world-age error by Julia semantics.
+# Previously, totals construction installed a scale-prior family through
+# Core.eval, and a same-frame trace could miss its fresh dispatch hooks.
+# Composed priors now use ValueFamily data. Both direct StanBlocks tracing
+# and BRM's supported newest-world wrappers must work in the constructing
+# frame, including the very first use of a positive vector-prior shape.
 #
 # Order is load-bearing: the in-function traces below MUST run before any
 # top-level trace of this shape in this process. A prior top-level trace
-# populates `_SB_VECTOR_PRIOR_CACHE`, so no new family is registered and the
-# staleness never manifests.
+# populates `_SB_VECTOR_PRIOR_CACHE` and would miss a cold-construction
+# regression.
 
 function build_radonlike()
     rng = Xoshiro(1234)
@@ -54,7 +48,9 @@ end
 function build_and_trace_in_function(builder, data)
     sb = SBBRMI(builder(data); mod=@__MODULE__)
     @test !isempty(total_effect_blocks(sb))
+    direct_src = StanBlocks.stan_code(sb.model)
     src = BRM.stan_code(sb)
+    @test direct_src == src
     traced = BRM.stan_model(sb)
     (; sb, src, traced)
 end

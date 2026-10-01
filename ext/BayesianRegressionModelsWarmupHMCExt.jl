@@ -609,30 +609,35 @@ function _adaptive_cdar_centering_reparametrizer(blocks)
     state, WarmupHMC.IndexedReparametrization(pairs)
 end
 
-mutable struct BRMTotalCenteringState
+# Scalar cells with a constant location and a raw log-scale coordinate: exact
+# totals (location = prior total, compiled at c = 1) and S2Z free contrasts
+# (location 0, compiled at c = 0 or 1). Cells enumerate totals first, then S2Z
+# contrasts, each in its family's cell order (`BRM._total_centering_cells`,
+# `BRM._s2z_centering_cells`), which the post-hoc selectors share.
+mutable struct BRMScalarCenteringState
     indices::Vector{Int}
     scales::Vector{Int}
     locations::Vector{Float64}
     sources::Vector{Float64}
 end
 
-struct BRMTotalCenteringArgument{KIND} <: Function
-    state::BRMTotalCenteringState
+struct BRMScalarCenteringArgument{KIND} <: Function
+    state::BRMScalarCenteringState
     pair_number::Int
 end
-(arg::BRMTotalCenteringArgument{:location})(x) = arg.state.locations[arg.pair_number]
-(arg::BRMTotalCenteringArgument{:log_scale})(x) = x[arg.state.scales[arg.pair_number]]
+(arg::BRMScalarCenteringArgument{:location})(x) = arg.state.locations[arg.pair_number]
+(arg::BRMScalarCenteringArgument{:log_scale})(x) = x[arg.state.scales[arg.pair_number]]
 
-function _sync_sources!(state::BRMTotalCenteringState,ir)
-    length(state.sources) == length(ir.pairs) || throw(DimensionMismatch("total centering pair count changed"))
+function _sync_sources!(state::BRMScalarCenteringState,ir)
+    length(state.sources) == length(ir.pairs) || throw(DimensionMismatch("scalar centering pair count changed"))
     for (p,(index,value)) in enumerate(ir.pairs)
-        index == state.indices[p] || throw(ArgumentError("total centering pair order changed"))
+        index == state.indices[p] || throw(ArgumentError("scalar centering pair order changed"))
         state.sources[p] = value.source.c
     end
     ir
 end
 
-function _prepare_frame(state::BRMTotalCenteringState,ir,position,gradient)
+function _prepare_frame(state::BRMScalarCenteringState,ir,position,gradient)
     _sync_sources!(state,ir)
     source = copy(state.sources)
     location = copy(state.locations)
@@ -646,23 +651,190 @@ function _prepare_frame(state::BRMTotalCenteringState,ir,position,gradient)
     BRMAdaptiveCenteringFrame(source,location,scale,innovation,invariant_gradient)
 end
 
-function _adaptive_total_centering_reparametrizer(model,blocks,names)
-    indices,scales,locations = Int[],Int[],Float64[]
-    for block in blocks
-        coords = BRM._total_coordinates(model,block,names)
-        mu = block.A*block.location
-        for k in axes(coords.totals,2), g in axes(coords.totals,1)
-            push!(indices,coords.totals[g,k])
-            push!(scales,coords.scales[k])
-            push!(locations,mu[k])
+function _adaptive_scalar_centering_reparametrizer(model,names)
+    totals = BRM._total_centering_cells(model,names)
+    s2z = BRM._s2z_centering_cells(model,names)
+    indices = vcat(totals.indices,s2z.indices)
+    targets = vcat(totals.targets,s2z.targets)
+    state = BRMScalarCenteringState(indices,vcat(totals.scales,s2z.scales),
+        vcat(totals.locations,s2z.locations),copy(targets))
+    pairs = [indices[p] => WarmupHMC.Reparametrization(
+        WarmupHMC.PartiallyCentered(targets[p]),WarmupHMC.PartiallyCentered(targets[p]),
+        BRMScalarCenteringArgument{:location}(state,p),
+        BRMScalarCenteringArgument{:log_scale}(state,p)) for p in eachindex(indices)]
+    state,WarmupHMC.IndexedReparametrization(pairs)
+end
+
+# Sean's projected partial map over S2Z contrast coordinates (brms PR #1919),
+# as a coupled block reparametrization: every group of a coefficient has its
+# own weight, all J weights act on the J-1 contrasts together, so it cannot be
+# written as per-coordinate pairs. The compiled model is any S2Z frame
+# (`target`, its `s2z_rho`); the sampler works under the adapted `source`
+# weights. Source contrasts map to physical deviations with the source weights
+# and back to target contrasts with the target weights; the (J-1)*log(tau)
+# terms of the two restricted Jacobians cancel.
+struct BRMS2ZMapBlock
+    contrasts::Matrix{Int}
+    scales::Vector{Int}
+end
+
+struct BRMS2ZMapReparametrization <: WarmupHMC.AbstractReparametrization
+    blocks::Vector{BRMS2ZMapBlock}
+    source::Vector{Matrix{Float64}}
+    target::Vector{Matrix{Float64}}
+    direction::Int
+end
+
+# One coefficient's contrasts from the `from` frame to the `to` frame, and the
+# log-Jacobian. Same math as `_s2z_partial_forward` / `_s2z_partial_inverse` /
+# `_s2z_partial_logjac`, written as scalar loops over the weight matrices: this
+# runs under Enzyme on every gradient, and views of the (constant) weights
+# stored into active temporaries trip its activity analysis.
+function _s2z_map_column(x, contrasts::Matrix{Int}, k::Int, tau,
+                         from::Matrix{Float64}, to::Matrix{Float64})
+    J = size(from, 1)
+    T = promote_type(eltype(x), typeof(tau))
+    v = Vector{T}(undef, J - 1)
+    for r in 1:J-1
+        v[r] = x[contrasts[r, k]]
+    end
+    u = BRM._s2z_helmert_mul(v)
+    # Physical deviations over tau: w .- mean(w), w = u ./ d_from.
+    w = Vector{T}(undef, J)
+    sum_w = zero(T); log_from = zero(T); sum_from = zero(T)
+    for j in 1:J
+        d = 1 - from[j, k] + from[j, k] * tau
+        w[j] = u[j] / d
+        sum_w += w[j]; log_from += log(d); sum_from += d
+    end
+    mean_w = sum_w / J
+    # Target contrasts: d_to .* (z .- dot(d_to, z) / sum(d_to)).
+    d_to = Vector{T}(undef, J)
+    weighted = zero(T); log_to = zero(T); sum_to = zero(T)
+    for j in 1:J
+        d_to[j] = 1 - to[j, k] + to[j, k] * tau
+        weighted += d_to[j] * (w[j] - mean_w)
+        log_to += log(d_to[j]); sum_to += d_to[j]
+    end
+    shift = weighted / sum_to
+    u_to = Vector{T}(undef, J)
+    for j in 1:J
+        u_to[j] = d_to[j] * (w[j] - mean_w - shift)
+    end
+    ljac = (log(sum_from / J) - log_from) - (log(sum_to / J) - log_to)
+    BRM._s2z_helmert_transpose_mul(u_to), ljac
+end
+
+function WarmupHMC.with_logabsdet_jacobian!(y::AbstractVector,
+        t::BRMS2ZMapReparametrization, x::AbstractVector)
+    ljac = zero(eltype(x))
+    for (b, block) in enumerate(t.blocks)
+        from, to = t.direction > 0 ? (t.source[b], t.target[b]) : (t.target[b], t.source[b])
+        for k in axes(block.contrasts, 2)
+            tau = exp(x[block.scales[k]])
+            z, l = _s2z_map_column(x, block.contrasts, k, tau, from, to)
+            for r in eachindex(z)
+                y[block.contrasts[r, k]] = z[r]
+            end
+            ljac += l
         end
     end
-    state = BRMTotalCenteringState(indices,scales,locations,ones(length(indices)))
-    pairs = [indices[p] => WarmupHMC.Reparametrization(
-        WarmupHMC.PartiallyCentered(1.),WarmupHMC.PartiallyCentered(1.),
-        BRMTotalCenteringArgument{:location}(state,p),
-        BRMTotalCenteringArgument{:log_scale}(state,p)) for p in eachindex(indices)]
-    state,WarmupHMC.IndexedReparametrization(pairs)
+    ljac, y
+end
+
+WarmupHMC.InverseFunctions.inverse(t::BRMS2ZMapReparametrization) =
+    BRMS2ZMapReparametrization(t.blocks, t.source, t.target, -t.direction)
+WarmupHMC.reparam_controls(t::BRMS2ZMapReparametrization) = [copy(m) for m in t.source]
+WarmupHMC.snapshot_reparametrization(t::BRMS2ZMapReparametrization) =
+    BRMS2ZMapReparametrization(t.blocks, [copy(m) for m in t.source], t.target, t.direction)
+function WarmupHMC.restore_reparam_controls!(t::BRMS2ZMapReparametrization, controls)
+    controls isa AbstractVector && length(controls) == length(t.source) &&
+        all(i -> controls[i] isa AbstractMatrix && size(controls[i]) == size(t.source[i]),
+            eachindex(t.source)) || throw(ArgumentError(
+        "S2Z centering controls must be one J-by-K weight matrix per S2Z block"))
+    all(c -> all(w -> isfinite(w) && 0 <= w <= 1, c), controls) ||
+        throw(ArgumentError("S2Z centering weights must lie in [0, 1]"))
+    foreach((m, c) -> m .= c, t.source, controls)
+    t
+end
+
+# Base-name index of BridgeStan's constrained output, e.g. "mu.3" -> :mu.
+function _s2z_constrained_index(model)
+    names = BRM.StanBlocks.BridgeStan.param_names(model; include_tp=true)
+    index = Dict{Symbol,Vector{Int}}()
+    for (i, n) in enumerate(names)
+        push!(get!(index, Symbol(first(split(n, '.'))), Int[]), i)
+    end
+    index
+end
+
+function _s2z_select!(ir::BRMS2ZMapReparametrization, positions, plans, model, data, index)
+    size(positions, 2) > 0 || return false
+    draws = [Matrix{Float64}[] for _ in plans]
+    for x in eachcol(positions)
+        _, y = ir(collect(Float64, x))   # BridgeStan takes a plain Vector{Float64}
+        values = try
+            BRM.StanBlocks.BridgeStan.param_constrain(model, y; include_tp=true)
+        catch err
+            err isa MethodError && rethrow()
+            continue
+        end
+        lookup(name) = haskey(index, name) ? (length(index[name]) == 1 ?
+            values[only(index[name])] : values[index[name]]) :
+            haskey(data, name) ? data[name] :
+            throw(ArgumentError("S2Z Fisher selection: no value named `$name`"))
+        for (b, plan) in enumerate(plans)
+            tau = exp.(y[ir.blocks[b].scales])
+            rho = try
+                BRM._s2z_fisher_draw(plan, BRM._s2z_row_information(plan, lookup), tau)
+            catch err
+                err isa Union{ArgumentError,DomainError,BRM.LinearAlgebra.PosDefException} ||
+                    rethrow()
+                continue
+            end
+            all(isfinite, rho) && push!(draws[b], rho)
+        end
+    end
+    changed = false
+    for (b, rhos) in enumerate(draws)
+        isempty(rhos) && continue
+        new = [BRM.Statistics.median(r[j, k] for r in rhos) for j in axes(first(rhos), 1),
+               k in axes(first(rhos), 2)]
+        clamp!(new, 0.0, 1.0)
+        changed |= new != ir.source[b]
+        ir.source[b] .= new
+    end
+    changed
+end
+
+function _adaptive_s2z_fisher_problem(model, problem, ad_backend, names; centeredness)
+    all(b -> b.coordinates === :contrasts, BRM.s2z_effect_blocks(model)) ||
+        throw(ArgumentError("S2Z Fisher selection applies Sean's map to contrast " *
+            "coordinates; compile without `s2z_coordinates=:groups`"))
+    hasproperty(problem, :model) || throw(ArgumentError(
+        "S2Z Fisher selection evaluates per-row information through BridgeStan; " *
+        "pass StanBlocks' StanProblem"))
+    plans = BRM._s2z_information_plans(model)
+    blocks = map(plans) do plan
+        coords = BRM._s2z_coordinates(model, plan.block, names)
+        BRMS2ZMapBlock(coords.contrasts, coords.scales)
+    end
+    target = [copy(plan.block.rho) for plan in plans]
+    source = if isnothing(centeredness)
+        [copy(t) for t in target]
+    elseif centeredness isa Real
+        [fill(Float64(centeredness), size(t)) for t in target]
+    else
+        [Matrix{Float64}(c) for c in centeredness]
+    end
+    ir = BRMS2ZMapReparametrization(blocks, [copy(t) for t in target], target, 1)
+    WarmupHMC.restore_reparam_controls!(ir, source)
+    stan = problem.model
+    index = _s2z_constrained_index(stan)
+    data = model.data
+    plan = WarmupHMC.WindowSelectionPlan(
+        (ir_, positions, _) -> _s2z_select!(ir_, positions, plans, stan, data, index))
+    WarmupHMC.ReparametrizedProblem(ir, problem, ad_backend; scoring_plan=plan)
 end
 
 function _initial_centering!(state,ir,centeredness)
@@ -682,11 +854,12 @@ end
         unc_names=nothing, centeredness=nothing)
 
 Wrap a compiled BRM log-density in WarmupHMC's strictly-online adaptive
-centering for exact total-coefficient blocks, ordinary scalar or correlated
-random-effect blocks, squared-exponential HSGP basis weights (ungrouped or
-grouped), or `cdar` correlated-walk cells. Ordinary and HSGP cells adapt
-together in one wrapper; `cdar` cells form a separate plan and mix with
-neither family.
+centering for exact total-coefficient blocks, S2Z free contrasts, ordinary
+scalar or correlated random-effect blocks, HSGP basis weights
+(squared-exponential ungrouped or grouped, or ungrouped periodic), or `cdar`
+correlated-walk cells. Ordinary and HSGP cells adapt together in one wrapper,
+as do totals and S2Z contrasts; `cdar` cells form a separate plan and mix
+with neither family.
 
 `model` is the `SBBRMI` or `GenerativePlan` that emitted `problem`. When
 `problem` is StanBlocks' `StanProblem`, unconstrained names are read from its
@@ -705,15 +878,44 @@ exact. Literal endpoints are preserved: `c=0` is BRM's standardised draw and
 For exact totals, `c=1` is the sampled group total and `c=0` is the total
 scaled around its prior location. The exact marginal prior remains correlated
 at either endpoint. Each group/term cell receives its own control automatically.
-Totals cannot currently share one wrapper with ordinary, HSGP, or cdar cells.
+
+For an S2Z block compiled with `s2z_coordinates=:groups`, each group of each
+coefficient is one scalar cell with zero location and scale `tau_k`: `c=0` is
+the standard-normal group coordinate `w_j` and `c=1` the centered `tau_k * w_j`.
+The compiled per-group `s2z_rho` is the starting frame. This is the per-group
+analogue of Sean's partial map; the extra auxiliary mean dimension is sampled
+too but never reaches the likelihood. With the default contrast coordinates,
+each of the `J-1` free Helmert contrasts is a cell instead. There the compiled
+model must be an endpoint frame (`s2z_rho` uniformly `0` or `1` per
+coefficient), and controls mix groups. The collapsed population coefficients
+stay untouched, and `recover_s2z_draws` applies to the returned compiled-frame
+draws. Totals cells precede S2Z cells in the pair order. Neither can currently
+share one wrapper with ordinary, HSGP, or cdar cells.
+
+`s2z_rule=:fisher` instead applies Sean's rule (brms PR #1919) at every
+restarting warm-up window. The sampler uses Sean's projected per-group partial
+map over the contrasts, with one weight per group and coefficient. At each
+window boundary, every evidence draw WarmupHMC hands over (the retained pool by
+default; with `nonlinear_evidence=:nuts_weighted` or `:all_good_leaves`, an
+equally sized weight-proportional sample of the window's leaves) is mapped to
+the compiled frame. There
+the per-row expected information is evaluated at the draw's fitted values
+through BridgeStan, accumulated per group, and turned into Sean's per-draw
+weights, rescaled at that draw's `tau`. The new weights are the per-cell median.
+Any compiled `s2z_rho` is the target frame and the starting point; `centeredness`
+(a scalar or one J-by-K matrix per block) overrides the start. Supported
+likelihoods are Gaussian identity, Bernoulli/binomial logit and Poisson log.
+This rule cannot yet share a wrapper with totals, ordinary, HSGP or cdar blocks.
 
 For an HSGP, each basis weight is one scalar cell with zero location and
-per-basis scale `brm_hsgp_sqrt_spd(omega2, sigma, rho)[basis]`; `c=0` is the
-emitted standardized coordinate, while `c=1` is its literal
-spectral/model-scale coefficient. A compiled fixed-partial model starts at its
-declared per-basis `centeredness` values, not at zero. Grouped HSGPs adapt one
-cell per (group, basis) weight around the same shared per-basis frame;
-periodic HSGPs fail before construction. Ordinary random-effect cells and HSGP
+per-basis scale `brm_hsgp_sqrt_spd(omega2, sigma, rho)[basis]`
+(`brm_hsgp_periodic_sqrt_spd(harmonics, sigma, rho)[basis]` for a periodic
+term); `c=0` is the emitted standardized coordinate, while `c=1` is its
+literal spectral/model-scale coefficient. A compiled fixed-partial model
+starts at its declared per-basis `centeredness` values, not at zero. Grouped
+HSGPs adapt one cell per (group, basis) weight around the same shared
+per-basis frame; periodic terms contribute one cell per cosine/sine weight
+and join the same HSGP pair order. Ordinary random-effect cells and HSGP
 basis-weight cells adapt together in one wrapper: pairs enumerate ordinary
 cells first, then HSGP cells, each in the family's own deterministic order
 (that order is load-bearing across checkpoint/resume).
@@ -731,16 +933,30 @@ with covariance `A(c) * A(c)'` whenever the block innovation is standard normal;
 the wrapped density and Jacobian still represent the original BRM prior exactly.
 """
 function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=nothing,
-                                       centeredness=nothing)
+                                       centeredness=nothing, s2z_rule=:cells)
     names = isnothing(unc_names) ? _problem_unc_names(problem) : unc_names
+    s2z_rule in (:cells, :fisher) ||
+        throw(ArgumentError("s2z_rule must be :cells or :fisher"))
+    if s2z_rule === :fisher
+        isempty(BRM.s2z_effect_blocks(model)) &&
+            throw(ArgumentError("s2z_rule=:fisher needs S2Z blocks"))
+        isempty(BRM.total_effect_blocks(model)) &&
+            isempty(BRM.adaptive_centering_blocks(model, names)) &&
+            isempty(BRM._adaptive_hsgp_centering_blocks(model, names)) &&
+            isempty(BRM._adaptive_cdar_centering_blocks(model, names)) ||
+            throw(ArgumentError("s2z_rule=:fisher cannot yet be combined with " *
+                "totals, ordinary, HSGP or cdar blocks"))
+        return _adaptive_s2z_fisher_problem(model, problem, ad_backend, names; centeredness)
+    end
     blocks = BRM.adaptive_centering_blocks(model, names)
     hsgp_blocks = BRM._adaptive_hsgp_centering_blocks(model, names)
     cdar_blocks = BRM._adaptive_cdar_centering_blocks(model, names)
     total_blocks = BRM.total_effect_blocks(model)
-    if !isempty(total_blocks)
+    s2z_blocks = BRM.s2z_effect_blocks(model)
+    if !isempty(total_blocks) || !isempty(s2z_blocks)
         isempty(blocks) && isempty(hsgp_blocks) && isempty(cdar_blocks) || throw(ArgumentError(
-            "adaptive total coefficients cannot yet be mixed with ordinary, HSGP, or cdar blocks; use total_groups=() for the conventional model"))
-        state,ir = _adaptive_total_centering_reparametrizer(model,total_blocks,names)
+            "adaptive total coefficients and S2Z contrasts cannot yet be mixed with ordinary, HSGP, or cdar blocks; use total_groups=() and s2z_groups=() for the conventional model"))
+        state,ir = _adaptive_scalar_centering_reparametrizer(model,names)
         _initial_centering!(state,ir,centeredness)
         scoring = WarmupHMC.CandidateScoringPlan(
             (ir_,q,g) -> _prepare_frame(state,ir_,q,g), _score_candidate;
@@ -749,8 +965,8 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
     end
     isempty(blocks) && isempty(hsgp_blocks) && isempty(cdar_blocks) && error(
         "BRM adaptive centering: this model has no supported ordinary " *
-        "random-effect blocks, squared-exponential HSGPs, or cdar " *
-        "correlated walks.",
+        "random-effect blocks, squared-exponential or periodic HSGPs, or " *
+        "cdar correlated walks.",
     )
     state, ir = if !isempty(cdar_blocks)
         (isempty(blocks) && isempty(hsgp_blocks)) || error(
