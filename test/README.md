@@ -104,6 +104,13 @@ the partial-coordinate Jacobian, Turing/Enzyme versus StanBlocks/BridgeStan
 density and gradient parity, physical constrained quantities, and the
 distributional model's two distinct zero-mean HSGP bindings.
 
+`adaptive_bounded_scales.jl` checks that online adaptive centering reads
+`Uniform(a, b)`-bounded HSGP length scales and SDs, and cdar SDs and
+persistences, through Stan's own `lb`/`lub` transform. Because the wrapper's
+density identities hold for any function of those coordinates, each of its
+four compiled models first compares the physical value every cell reads with
+BridgeStan's `param_constrain`, then checks the wrapper identities.
+
 `stanblocks_preservation_corpus.jl` compares fourteen representative models'
 emitted SLIC/Stan, prepared data, metadata, and frozen replay against an external
 baseline artifact. Capture the artifact on the implementation base, then use

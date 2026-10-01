@@ -71,6 +71,8 @@ end
     @test block.sigma == 2
     @test block.rho == 3
     @test block.sigma_lower == 0.0
+    @test block.sigma_upper == Inf
+    @test (block.rho_lower, block.rho_upper) == (0.0, 1.0)
     @test block.cdiag ≈ [1.0, 2.0] atol=2e-14
     @test sb.data[:cdar_mu_week_L] ≈ Matrix(cholesky(Symmetric(CDAR_AC_C)).L)
 
