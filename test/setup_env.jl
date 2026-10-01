@@ -60,8 +60,7 @@ const PINS = [
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "0194dce08e986ff17fd5a788bb315c6431b7858e"),  # dev (contains exact sampling-counter floor 913da79)
     # ReactiveKernels carries the thin-layer PPL surface the RK backend builds
     # through. cb9f9ab7 (2026-09-30, main): serializes build_kernel's
-    # generated-model binding assignment (peer GO 1tddu2a), retaining
-    # the phase-III full varying-source PK/PD support from 3cdba95c.
+    # generated-model binding assignment (peer GO 1tddu2a).
     ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "cb9f9ab75c65df33c9c23e175f5fbdbb521c5fa4"),  # main
 ]
 

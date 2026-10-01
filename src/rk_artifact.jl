@@ -26,9 +26,9 @@ rk_artifact_version() = 2
 
 # The plan kinds a v2 artifact may carry — the one predicate both the core
 # read check (`_check_artifact`) and the extension translate check
-# (`rk_translate_artifact`) consult. Narrower than the extension's
-# `_RK_PLAN_TYPES`: varying-source plans need `varyingsource_raw=`, which
-# `emit_rk_artifact` never passes, so no artifact can carry one.
+# (`rk_translate_artifact`) consult. It currently equals the extension's
+# `_RK_PLAN_TYPES`; it is kept as its own predicate so a future plan kind
+# can join the RK backend without silently becoming an artifact kind.
 const _RK_ARTIFACT_PLAN_TYPES = Union{_RKStructuralPlan,_RKKernelPlan}
 
 """

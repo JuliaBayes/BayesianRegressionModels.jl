@@ -9,7 +9,7 @@
 # `_brm_native_structured_effect` (pure-Julia row math), and
 # `_sb_predictor_term!` (Stan emit reusing StanBlocks builtins). No BRM
 # vocabulary change, no custom @slic/@deffun. This file ACTS as that
-# downstream module with a bordet-inspired pair — `transient` (single-peak
+# downstream module with an example pair — `transient` (single-peak
 # bump, 3 per-group params) and `saturating` (0-to-1 dose multiplier, 2
 # per-group params) — plus their additive and multiplicative compositions,
 # and pins exact behavior on BOTH executable backends:

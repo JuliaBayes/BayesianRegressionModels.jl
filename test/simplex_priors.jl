@@ -106,8 +106,7 @@ end
 
 # The ORIGIN shape the simplex path was asked for: a MONOTONIC per-level effect,
 # `beta * cumulative_sum(simplex)`, ported from Stan's `simo ~ dirichlet(...)` plus
-# `beta * append_row(0.0, cumulative_sum(simo))` (Buerkner & Charpentier 2018;
-# `varyingsource4.stan`). There is no separate monotonic surface to reach for: the
+# `beta * append_row(0.0, cumulative_sum(simo))` (Buerkner & Charpentier 2018). There is no separate monotonic surface to reach for: the
 # declared `simplex[K]` is an ordinary Stan `vector` at every use site, so the cell
 # composes it with `cumulative_sum` / `append_row` exactly as the hand-written Stan
 # program does. These two spellings pin that.
@@ -128,7 +127,7 @@ simplex_kernel_monotonic(df) = @brm df begin
 end
 
 # `Dirichlet(K - 1, 1.0)` + `append_row(0.0, ...)`: the same three levels with an
-# explicit ZERO reference level, which is the exact `varyingsource4` construction.
+# explicit ZERO reference level (the Buerkner & Charpentier construction).
 # A K-level monotonic effect needs a (K-1)-simplex under this spelling.
 simplex_kernel_monotonic_ref(df) = @brm df begin
     sigma                ~ Exponential(1)

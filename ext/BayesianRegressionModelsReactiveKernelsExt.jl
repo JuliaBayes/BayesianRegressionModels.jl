@@ -22,14 +22,8 @@ const BRM = BayesianRegressionModels
 # translates modeled-scale predictors (which the AST skips — they have
 # no response use-site), and appends the per-threshold coefficient
 # vectors; `bind_data` then validates the patched plan with the full
-# thin-layer suite. Kernel plans ride the same route. Varying-source
-# innovations likewise enter the AST as native-read arguments, so
-# `lower_rkppl` sees their names as data; after lowering the extension
-# removes exactly those plate slices, rebuilds the plate, and appends
-# the typed `VectorParameter` ports. Final binding never treats them
-# as raw columns.
-const _RK_PLAN_TYPES =
-    Union{BRM._RKStructuralPlan,BRM._RKKernelPlan,BRM._RKVaryingSourcePlan}
+# thin-layer suite. Kernel plans ride the same route.
+const _RK_PLAN_TYPES = Union{BRM._RKStructuralPlan,BRM._RKKernelPlan}
 
 # Field-preserving copy of a thin-layer struct with named overrides. Every
 # field not overridden is carried through the struct's full positional
@@ -166,38 +160,6 @@ function _rk_patch_threshold_coefs!(vectors::Vector{VectorParameter},
     nothing
 end
 
-# Varying-source innovation vectors enter the AST as native-read
-# arguments, so they must be declared as data for the first lowering.
-# After lowering, convert their planned `:vector_normal` specs to typed
-# IR ports and remove their inferred plate slices. The plan deliberately
-# carries no data columns for these names: they stay latent parameters
-# at final `bind_data`.
-function _rk_patch_varyingsource_vector_ports(unbound::StructuralPlan,
-        plan::BRM._RKVaryingSourcePlan)
-    specs = [spec for spec in plan.vector_parameters
-             if spec.family === :vector_normal]
-    isempty(specs) && return unbound
-    ports = Set(spec.name for spec in specs)
-    kp = only(unbound.kernel_plates)
-    removed = count(x -> x[2] in ports, kp.slices)
-    removed == length(ports) || error(
-        "RK backend: internal: varying-source innovation ports " *
-        "expected slices for `$(sort!(collect(ports)))`, got $removed")
-    plate = _rk_with(kp;
-        slices = [slice for slice in kp.slices if !(slice[2] in ports)])
-    vectors = copy(unbound.vector_parameters)
-    for spec in specs
-        any(p -> p.name === spec.name, vectors) && error(
-            "RK backend: internal: innovation port `$(spec.name)` " *
-            "already lowered")
-        args = NamedTuple(
-            Symbol(:arg, i) => value for (i, value) in enumerate(spec.args))
-        push!(vectors, VectorParameter(
-            spec.name, spec.family, args, spec.size, spec.label))
-    end
-    _rk_with(unbound; vector_parameters = vectors, kernel_plates = [plate])
-end
-
 # `mi()` plan-level patch (no surface syntax in v1, decision 05aemvx
 # P4): the AST lowers the ordinary response statement, and the planned
 # `Jobs` column rides `mi_jobs` onto the thin-layer spec here — the
@@ -284,21 +246,6 @@ function _rk_translate_from_emitted(plan::BRM._RKKernelPlan,
     unbound = lower_rkppl(emitted.main,
         Tuple(sort!(collect(keys(plan.columns)))); mod=_rk_emit_module(emitted))
     bind_data(unbound, plan.columns; dims=BRM._rk_kernel_bind_dims(plan.kernel))
-end
-
-# Varying-source twin plans: flat program (no defs lattice, no
-# ordinal/MI patching — the plate carries its own observation); the
-# subject count binds as dims like kernel plans.
-function _rk_translate_from_emitted(plan::BRM._RKVaryingSourcePlan,
-        emitted::BRM._RKEmittedProgram)
-    names = union(keys(plan.columns),
-        (spec.name for spec in plan.vector_parameters
-         if spec.family === :vector_normal))
-    unbound = lower_rkppl(emitted.main,
-        Tuple(sort!(collect(names))); mod=_rk_emit_module(emitted))
-    bind_data(_rk_patch_varyingsource_vector_ports(unbound, plan),
-        plan.columns;
-        dims=Dict(plan.spec.subject_count => plan.spec.n_subjects))
 end
 
 function _rk_translated_plan(plan::_RK_PLAN_TYPES)

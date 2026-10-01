@@ -646,8 +646,8 @@ saturating sigmoid — belongs in the downstream package whose science needs it,
 not in BRM core. BRM core promotes such a term only once two or more
 downstream packages have shipped the same curves; until then the package ships
 its own term through the supported group-block seams, first-class rather than
-as an escape hatch. The worked example is bordet's `transient` /
-`saturating` pair (in the bordet tree, not here).
+as an escape hatch. The worked example below is a `transient` /
+`saturating` pair.
 
 The recipe, for a term used in nested predictor position
 (`mu ~ 1 + transient(logt; series)`), where it runs on both backends:
@@ -798,7 +798,7 @@ Shapes compose two ways. Additively, as ordinary predictor summands:
 mu ~ 1 + transient(logt; series) + saturating(logd; series)
 ```
 
-Multiplicatively — baseline plus bump times response, the bordet mean shape —
+Multiplicatively — baseline plus bump times response —
 through intercept-free named predictors combined by assignment (write `*`:
 the formula layer is element-wise by intent and sbimpl dots it — a literal
 `.*` is evaluated at parse time and fails):
@@ -819,11 +819,9 @@ tb = TuringBRMI(brmi)
 Each shape owns its own per-group hierarchy (two LKJ blocks here):
 parameters correlate within a shape, not across shapes. A model that needs
 the bump and the sigmoid parameters jointly correlated (all six in one
-covariance) wants one joint term with `n_per_group=6` instead — formerly
-bordet's `biomarker_hierarchical_parametric` hatch (shed as dead code; the
-shared-bucket + `kernel(...)` composition in `test/kernel_biomarker_cell.jl`
-is the current idiom), and what its `transient` / `saturating` worked example
-will decide per fit. Term-internal
+covariance) wants one joint term with `n_per_group=6` instead, or the
+shared-bucket + `kernel(...)` composition; which one fits is decided per
+model. Term-internal
 prior statements (`sd(mu, transient(logt))`) are not addressed yet: the
 hierarchical scales keep their shared defaults, and naming a new term in a
 prior address needs core registration alongside `_TERM_HEADS`.

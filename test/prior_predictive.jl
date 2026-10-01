@@ -328,29 +328,29 @@ end
     @test_throws "needs an observation" SBBRMI(
         dropped(ranef_sd_df); mod=@__MODULE__)
 
-    # Bruno ARV-393 exact shape: a block-wide `sd(:, p) ~ Exponential(2/3)`
+    # A block-wide `sd(:, p) ~ Exponential(2/3)`
     # emits Exponential with rate = 1.5 (the Distributions
     # `Exponential(scale=2/3)` -> Stan rate-1.5 conversion) for every margin.
     # Each is re-drawn per element as `exponential(rate[i])`, matching the
     # density's own `exponential_lpdf(tau[i], rate[i])` -- the per-family
     # rng<->lpdf agreement the consumer requires.
-    bruno = @brm begin
+    blockwide = @brm begin
         eta ~ 1 + x + z + (1 + x + z | p | subject)
         sd(:, p) ~ Exponential(2 / 3)
         y ~ Normal(eta, 1)
     end
-    bruno_code = BayesianRegressionModels.stan_code(@test_logs (:warn, r"unconditioned") SBBRMI(
-        bruno(ranef_sd_df); mod=@__MODULE__))
-    @test StanBlocks.stanc_check(bruno_code; warn_pedantic=false).ok
+    blockwide_code = BayesianRegressionModels.stan_code(@test_logs (:warn, r"unconditioned") SBBRMI(
+        blockwide(ranef_sd_df); mod=@__MODULE__))
+    @test StanBlocks.stanc_check(blockwide_code; warn_pedantic=false).ok
     @test occursin(
         "b_p_subject_tau = exponential_vector_rng(n_terms_p_subject, " *
-        "(1.0 ./ 0.6666666666666666));", bruno_code)
-    @test !occursin(r"brm_vector_prior_[0-9a-f]+", bruno_code)
+        "(1.0 ./ 0.6666666666666666));", blockwide_code)
+    @test !occursin(r"brm_vector_prior_[0-9a-f]+", blockwide_code)
 end
 
 # An intercept-only predictor eligible for exact totals keeps the posterior's
 # representation — and names — on the prior spelling (snag
-# building-bruno-s-630a6f8a). The population design resolves its row axis
+# `630a6f8a`). The population design resolves its row axis
 # from the declared grouping column when the response column is omitted, so
 # the prior program draws `total_*`/`population_*`/`deviation_*` in generated
 # quantities instead of falling back to conventional `r_*` carriers while the
