@@ -1,6 +1,6 @@
-# Adaptive partial centering for ordinary random-effect blocks and ungrouped
-# squared-exponential HSGP basis weights, grouped squared-exponential HSGP
-# basis weights, and ungrouped periodic HSGP cosine/sine weights.
+# Adaptive partial centering for ordinary and R2D2-scaled random-effect blocks,
+# ungrouped and grouped squared-exponential HSGP basis weights, and ungrouped
+# periodic HSGP cosine/sine weights.
 #
 # This file owns only BRM/Stan emission semantics: which unconstrained
 # coordinates are one block's effects, optional LKJ-Cholesky free values, and
@@ -136,15 +136,27 @@ const _ADAPTIVE_STRATIFIED_FAMILIES = Set((
 
 # R2D2 blocks DERIVE their marginal scales (`tau[j] = reference_scale[j] *
 # sqrt(phi[j] * R2 / (1 - R2))`) instead of sampling them, so the compiled
-# model has no unconstrained `tau`/`log_scale` coordinates for the online
-# wrapper to read. They refuse loudly in `_adaptive_block` — the same contract
-# as the stratified set — rather than being silently left fixed (snag
-# adaptive-centeri-953d87e0). Derived-tau support is the tracked follow-up.
+# model has no unconstrained `tau`/`log_scale` coordinates. They become
+# `R2D2AdaptiveCenteringBlock`s whose scales are compiled from the emitted
+# assignment (`_adaptive_r2d2_block`), never silently left fixed (snag
+# adaptive-centeri-953d87e0).
 const _ADAPTIVE_R2D2_FAMILIES = Set((
     :ranef_intercept_r2d2,
     :ranef_correlated_r2d2,
     :ranef_correlated_draws_r2d2,
 ))
+
+"""
+    AbstractAdaptiveCenteringBlock
+
+Supertype of the random-effect blocks [`adaptive_centering_blocks`](@ref)
+returns: [`AdaptiveCenteringBlock`](@ref) for a block whose marginal scales are
+sampled coordinates, [`R2D2AdaptiveCenteringBlock`](@ref) for one whose scales
+an R2D2 prior derives. Both carry `ranef`, `target_c`, `effects` and
+`cholesky_free` with the same meaning, and
+`_adaptive_block_cholesky(x, block)` rebuilds `diag(tau) * L` for either.
+"""
+abstract type AbstractAdaptiveCenteringBlock end
 
 """
     AdaptiveCenteringBlock
@@ -166,7 +178,7 @@ Construct with [`adaptive_centering_blocks`](@ref).  Indices are resolved by
 name against the caller-supplied unconstrained-name vector; no ordering of the
 whole parameter vector is assumed.
 """
-struct AdaptiveCenteringBlock
+struct AdaptiveCenteringBlock <: AbstractAdaptiveCenteringBlock
     ranef::RanefBlock
     target_c::Float64
     effects::Matrix{Int}
@@ -180,6 +192,385 @@ Base.show(io::IO, b::AdaptiveCenteringBlock) = print(
     ", target_c=", b.target_c,
     ", ", b.ranef.n_terms, "×", b.ranef.n_groups, ")",
 )
+
+# ---- R2D2: derived marginal scales -----------------------------------------
+#
+# An R2D2 block's `tau[k]` is not a coordinate: the emitted model assigns it
+# from other parameters (`ref * sqrt(phi[j] * R2 / (1 - R2))` for the
+# `sd(...) ~ r2d2(...)` grammar, `sqrt((1 - R2) * tau_bsv^2)` for the
+# whole-predictor form, a free half-normal for a margin a partial ICC statement
+# leaves unaddressed). Every such assignment is a product of powers of positive
+# quantities, so its LOG is linear in a handful of log-atoms of unconstrained
+# coordinates. `_AdaptiveLogScale` is that normal form, compiled once from the
+# emitted assignment and evaluated on every gradient call:
+#
+#     log tau = constant
+#             + sum(w * x[i])                                  # log of a lower=0 parameter
+#             + sum(a * log(inv_logit(x[i])) + b * log1m(inv_logit(x[i])))  # unit-interval parameter
+#             + sum(w * log(simplex(x[coords])[j]))            # Dirichlet share
+#
+# Three loops over concrete vectors: no recursion, no closures, no per-call
+# dispatch, so the generic Enzyme path differentiates it directly.
+
+struct _AdaptiveSimplexLog
+    weight::Float64
+    # The simplex's `n - 1` unconstrained coordinates, in Stan order.
+    coordinates::Vector{Int}
+    entry::Int
+end
+
+struct _AdaptiveLogScale
+    constant::Float64
+    linear::Vector{Tuple{Float64,Int}}
+    unit::Vector{Tuple{Float64,Float64,Int}}
+    simplex::Vector{_AdaptiveSimplexLog}
+end
+
+"""
+    R2D2AdaptiveCenteringBlock
+
+An R2D2-scaled random-effect block (`ranef_intercept_r2d2`,
+`ranef_correlated_r2d2`, `ranef_correlated_draws_r2d2`) described for adaptive
+partial centering. `ranef`, `target_c`, `effects` and `cholesky_free` mean
+exactly what they mean on [`AdaptiveCenteringBlock`](@ref). There is no
+`log_scales` coordinate vector: the marginal scales are derived, so `scales[k]`
+is the compiled log-scale of term `k` as a function of the unconstrained
+vector — the model's own `R2`, Dirichlet share and reference/total scale
+coordinates. Those coordinates are read, never transformed.
+
+Construct with [`adaptive_centering_blocks`](@ref).
+"""
+struct R2D2AdaptiveCenteringBlock <: AbstractAdaptiveCenteringBlock
+    ranef::RanefBlock
+    target_c::Float64
+    effects::Matrix{Int}
+    cholesky_free::Vector{Int}
+    scales::Vector{_AdaptiveLogScale}
+end
+
+Base.show(io::IO, b::R2D2AdaptiveCenteringBlock) = print(
+    io,
+    "R2D2AdaptiveCenteringBlock(", b.ranef.binding,
+    ", target_c=", b.target_c,
+    ", ", b.ranef.n_terms, "×", b.ranef.n_groups, ")",
+)
+
+# `log1p(exp(y))` without overflow on either side.
+_adaptive_softplus(y) = y > zero(y) ? y + log1p(exp(-y)) : log1p(exp(y))
+
+# `log(simplex_constrain(y)[entry])` for Stan's (>= 2.37) simplex transform:
+# the isometric log-ratio sum-to-zero vector of `y`, then softmax. The loop is
+# `stan::math::simplex_constrain` index for index.
+function _adaptive_log_simplex(x::AbstractVector, coordinates, entry)
+    T = eltype(x)
+    N = length(coordinates)
+    N == 0 && return zero(T)
+    z = zeros(T, N + 1)
+    sum_w = zero(T)
+    for i in N:-1:1
+        w = x[coordinates[i]] * inv(sqrt(T(i * (i + 1))))
+        sum_w += w
+        z[i] += sum_w
+        z[i + 1] -= w * i
+    end
+    m = maximum(z)
+    total = zero(T)
+    for zi in z
+        total += exp(zi - m)
+    end
+    z[entry] - (m + log(total))
+end
+
+function _adaptive_log_scale(x::AbstractVector, s::_AdaptiveLogScale)
+    acc = convert(eltype(x), s.constant)
+    for (w, i) in s.linear
+        acc += w * x[i]
+    end
+    for (a, b, i) in s.unit
+        # log(inv_logit(y)) = -softplus(-y); log(1 - inv_logit(y)) = -softplus(y)
+        y = x[i]
+        acc -= a * _adaptive_softplus(-y) + b * _adaptive_softplus(y)
+    end
+    for atom in s.simplex
+        acc += atom.weight * _adaptive_log_simplex(x, atom.coordinates, atom.entry)
+    end
+    acc
+end
+
+# Every unconstrained coordinate a compiled scale reads.
+function _adaptive_scale_coordinates(s::_AdaptiveLogScale)
+    out = Int[]
+    append!(out, (i for (_, i) in s.linear))
+    append!(out, (i for (_, _, i) in s.unit))
+    for atom in s.simplex
+        append!(out, atom.coordinates)
+    end
+    out
+end
+
+# What the emitted model knows, gathered once per `adaptive_centering_blocks`
+# call and only when an R2D2 block is present (every other model keeps its
+# historical metadata path untouched). `parameters` are the descriptor's
+# parameter outputs — their `type`/`constraints` are StanBlocks' declared Stan
+# types, family-implied supports included — and `assignments` the emitted
+# body's top-level `name = rhs` statements, where the derived `tau` lives.
+function _adaptive_r2d2_context(model, pos)
+    descriptor = brm_descriptor(model)
+    plan = descriptor.plan
+    parameters = Dict{Symbol,BRMOutput}(
+        o.name => o for o in descriptor.outputs if o.kind === :parameter)
+    assignments = Dict{Symbol,Any}()
+    ambiguous = Set{Symbol}()
+    body = plan.model.model
+    body isa Expr && body.head === :block || error(
+        "BRM adaptive centering: the emitted model body is not a statement " *
+        "block; R2D2 scales cannot be resolved.")
+    for st in body.args
+        st isa Expr && st.head === :(=) && st.args[1] isa Symbol || continue
+        lhs = st.args[1]
+        haskey(assignments, lhs) && push!(ambiguous, lhs)
+        assignments[lhs] = st.args[2]
+    end
+    for lhs in ambiguous
+        delete!(assignments, lhs)
+    end
+    (; plan, data=plan.data, parameters, assignments, ambiguous, pos)
+end
+
+# Accumulates `w * log(expr)` while compiling; `_adaptive_log_scale_program`
+# freezes it into the sorted, concrete `_AdaptiveLogScale`.
+mutable struct _AdaptiveLogScaleBuilder
+    constant::Float64
+    linear::Dict{Int,Float64}
+    unit::Dict{Int,Tuple{Float64,Float64}}
+    simplex::Dict{Tuple{Vector{Int},Int},Float64}
+end
+
+_AdaptiveLogScaleBuilder() = _AdaptiveLogScaleBuilder(
+    0.0, Dict{Int,Float64}(), Dict{Int,Tuple{Float64,Float64}}(),
+    Dict{Tuple{Vector{Int},Int},Float64}())
+
+function _adaptive_r2d2_refuse(owner, expr, why)
+    error("BRM adaptive centering: R2D2 block `$owner` derives its scale as ",
+          "`$expr`; $why. Only products, quotients, square roots and literal ",
+          "powers of positive scalars, `1 - R2`, and Dirichlet shares compile ",
+          "to an online log-scale.")
+end
+
+function _adaptive_unc_index(ctx, owner, name)
+    i = get(ctx.pos, name, 0)
+    i == 0 && error(
+        "BRM adaptive centering: R2D2 block `$owner` reads the unconstrained ",
+        "coordinate `$name`, which this compiled model does not have. The ",
+        "model and `unc_names` do not describe the same emission.")
+    i
+end
+
+function _adaptive_scalar_constraint(ctx, owner, o::BRMOutput)
+    extra = setdiff(collect(keys(o.constraints)), [:lower, :upper])
+    isempty(extra) || error(
+        "BRM adaptive centering: R2D2 block `$owner` reads `$(o.name)`, whose ",
+        "Stan type carries $(Tuple(extra)); only lower/upper bounds are ",
+        "supported.")
+    bound(key) = haskey(o.constraints, key) ?
+        Float64(_adaptive_constraint_value(ctx.plan, o.constraints[key],
+                                           owner, "R2D2 scale input")) : nothing
+    (bound(:lower), bound(:upper))
+end
+
+# Add `w * log(sym)` for a scalar the scale reads by name.
+function _adaptive_log_symbol!(acc, sym::Symbol, w, ctx, owner, depth)
+    sym in ctx.ambiguous && _adaptive_r2d2_refuse(owner, sym,
+        "`$sym` is assigned more than once in the emitted body")
+    if haskey(ctx.data, sym)
+        v = ctx.data[sym]
+        v isa Real || _adaptive_r2d2_refuse(owner, sym,
+            "data `$sym` is not a scalar")
+        return _adaptive_log_form!(acc, v, w, ctx, owner, depth)
+    end
+    haskey(ctx.assignments, sym) &&
+        return _adaptive_log_form!(acc, ctx.assignments[sym], w, ctx, owner, depth + 1)
+    o = get(ctx.parameters, sym, nothing)
+    isnothing(o) && _adaptive_r2d2_refuse(owner, sym,
+        "`$sym` is neither data, a top-level assignment, nor a parameter")
+    o.type === :real && isempty(o.size) || _adaptive_r2d2_refuse(owner, sym,
+        "parameter `$sym` is a `$(o.type)`, not a scalar")
+    lower, upper = _adaptive_scalar_constraint(ctx, owner, o)
+    unit = lower == 0.0 && upper == 1.0
+    lower == 0.0 && (isnothing(upper) || unit) || _adaptive_r2d2_refuse(
+        owner, sym,
+        "parameter `$sym` has bounds ($(something(lower, "none")), " *
+        "$(something(upper, "none"))); only `lower=0` and the unit interval " *
+        "are supported")
+    i = _adaptive_unc_index(ctx, owner, String(sym))
+    if unit
+        a, b = get(acc.unit, i, (0.0, 0.0))
+        acc.unit[i] = (a + w, b)
+    else
+        acc.linear[i] = get(acc.linear, i, 0.0) + w
+    end
+    acc
+end
+
+# Add `w * log(expr)` to `acc`.
+function _adaptive_log_form!(acc, expr, w, ctx, owner, depth)
+    depth <= 16 || _adaptive_r2d2_refuse(owner, expr,
+        "its assignment chain is deeper than 16")
+    expr = _adaptive_stan_expr_value(expr)
+    if expr isa Real
+        isfinite(expr) && expr > 0 || _adaptive_r2d2_refuse(owner, expr,
+            "the constant $expr is not finite and positive")
+        acc.constant += w * log(Float64(expr))
+        return acc
+    end
+    expr isa Symbol && return _adaptive_log_symbol!(acc, expr, w, ctx, owner, depth)
+    expr isa Expr || _adaptive_r2d2_refuse(owner, expr, "it is not an expression")
+    if expr.head === :call
+        f, args = expr.args[1], expr.args[2:end]
+        if f === :* && !isempty(args)
+            for a in args
+                _adaptive_log_form!(acc, a, w, ctx, owner, depth)
+            end
+            return acc
+        elseif f === :/ && length(args) == 2
+            _adaptive_log_form!(acc, args[1], w, ctx, owner, depth)
+            return _adaptive_log_form!(acc, args[2], -w, ctx, owner, depth)
+        elseif f === :sqrt && length(args) == 1
+            return _adaptive_log_form!(acc, args[1], w / 2, ctx, owner, depth)
+        elseif f === :^ && length(args) == 2 && _adaptive_stan_expr_value(args[2]) isa Real
+            p = Float64(_adaptive_stan_expr_value(args[2]))
+            return _adaptive_log_form!(acc, args[1], w * p, ctx, owner, depth)
+        elseif f === :- && length(args) == 2
+            return _adaptive_log1m!(acc, args[1], args[2], w, ctx, owner)
+        end
+    elseif expr.head === :ref && length(expr.args) == 2
+        return _adaptive_log_entry!(acc, expr.args[1], expr.args[2], w, ctx, owner)
+    end
+    _adaptive_r2d2_refuse(owner, expr, "this operation is not supported")
+end
+
+# `w * log(1 - s)` for a unit-interval parameter `s`: the residual share of R2.
+function _adaptive_log1m!(acc, one_, s, w, ctx, owner)
+    c = _adaptive_stan_expr_value(one_)
+    s = _adaptive_stan_expr_value(s)
+    expr = :($one_ - $s)
+    c isa Real && c == 1 || _adaptive_r2d2_refuse(owner, expr,
+        "only `1 - R2` subtracts")
+    o = s isa Symbol ? get(ctx.parameters, s, nothing) : nothing
+    (isnothing(o) || s in ctx.ambiguous) && _adaptive_r2d2_refuse(owner, expr,
+        "`$s` is not a parameter")
+    o.type === :real && isempty(o.size) &&
+        _adaptive_scalar_constraint(ctx, owner, o) == (0.0, 1.0) ||
+        _adaptive_r2d2_refuse(owner, expr, "`$s` is not a unit-interval scalar")
+    i = _adaptive_unc_index(ctx, owner, String(s))
+    a, b = get(acc.unit, i, (0.0, 0.0))
+    acc.unit[i] = (a, b + w)
+    acc
+end
+
+# `w * log(v[j])`: a Dirichlet share, an entry of a positive vector parameter,
+# or a data entry.
+function _adaptive_log_entry!(acc, v, j, w, ctx, owner)
+    v = _adaptive_stan_expr_value(v)
+    j = _adaptive_stan_expr_value(j)
+    expr = :($v[$j])
+    v isa Symbol && j isa Integer && j >= 1 || _adaptive_r2d2_refuse(owner, expr,
+        "only a literal index into a named vector is supported")
+    v in ctx.ambiguous && _adaptive_r2d2_refuse(owner, expr,
+        "`$v` is assigned more than once in the emitted body")
+    if haskey(ctx.data, v)
+        d = ctx.data[v]
+        d isa AbstractVector{<:Real} && j <= length(d) ||
+            _adaptive_r2d2_refuse(owner, expr, "data `$v` has no real entry $j")
+        return _adaptive_log_form!(acc, d[j], w, ctx, owner, 0)
+    end
+    o = get(ctx.parameters, v, nothing)
+    isnothing(o) && _adaptive_r2d2_refuse(owner, expr, "`$v` is not a parameter")
+    if o.type === :simplex
+        n = _adaptive_simplex_length(ctx, owner, v)
+        j <= n || _adaptive_r2d2_refuse(owner, expr, "`$v` has $n entries")
+        coords = [_adaptive_unc_index(ctx, owner, "$v.$i") for i in 1:n-1]
+        haskey(ctx.pos, "$v.$n") && _adaptive_r2d2_refuse(owner, expr,
+            "simplex `$v` has more unconstrained coordinates than its $n-entry " *
+            "Dirichlet declaration")
+        key = (coords, Int(j))
+        acc.simplex[key] = get(acc.simplex, key, 0.0) + w
+    elseif o.type === :vector
+        lower, upper = _adaptive_scalar_constraint(ctx, owner, o)
+        lower == 0.0 && isnothing(upper) || _adaptive_r2d2_refuse(owner, expr,
+            "vector `$v` is not `lower=0`")
+        i = _adaptive_unc_index(ctx, owner, "$v.$j")
+        acc.linear[i] = get(acc.linear, i, 0.0) + w
+    else
+        _adaptive_r2d2_refuse(owner, expr, "parameter `$v` is a `$(o.type)`")
+    end
+    acc
+end
+
+# A simplex's length, read from the Dirichlet declaration that samples it.
+function _adaptive_simplex_length(ctx, owner, v)
+    decls = [d for d in ctx.plan.declarations
+             if d.role === :prior && d.target === v]
+    length(decls) == 1 && decls[1].family === :dirichlet &&
+        length(decls[1].arguments) == 1 || _adaptive_r2d2_refuse(owner, v,
+        "simplex `$v` is not sampled by exactly one `dirichlet(alpha)` declaration")
+    alpha = _adaptive_stan_expr_value(only(decls[1].arguments))
+    alpha = alpha isa Symbol ? get(ctx.data, alpha, nothing) : alpha
+    alpha isa AbstractVector{<:Real} || _adaptive_r2d2_refuse(owner, v,
+        "the Dirichlet concentration of `$v` is not a data vector")
+    length(alpha)
+end
+
+function _adaptive_log_scale_program(expr, ctx, owner)
+    acc = _adaptive_log_form!(_AdaptiveLogScaleBuilder(), expr, 1.0, ctx, owner, 0)
+    _AdaptiveLogScale(
+        acc.constant,
+        [(acc.linear[i], i) for i in sort!(collect(keys(acc.linear)))],
+        [(acc.unit[i]..., i) for i in sort!(collect(keys(acc.unit)))],
+        [_AdaptiveSimplexLog(acc.simplex[k], k[1], k[2])
+         for k in sort!(collect(keys(acc.simplex)))],
+    )
+end
+
+const _ADAPTIVE_R2D2_SCALE_KEYWORD = Dict(
+    :ranef_intercept_r2d2 => :scale,
+    :ranef_correlated_r2d2 => :tau,
+    :ranef_correlated_draws_r2d2 => :tau,
+)
+
+function _adaptive_r2d2_block(ranef::RanefBlock, unc_names, pos, ctx)
+    binding = ranef.binding
+    decls = [d for d in ctx.plan.declarations
+             if d.role === :prior && d.target === binding]
+    length(decls) == 1 || error(
+        "BRM adaptive centering: R2D2 block `$binding` has $(length(decls)) ",
+        "prior declarations in the emitted body; expected exactly one.")
+    key = _ADAPTIVE_R2D2_SCALE_KEYWORD[ranef.family]
+    sym = get(only(decls).keywords, key, nothing)
+    sym isa Symbol && haskey(ctx.assignments, sym) || error(
+        "BRM adaptive centering: R2D2 block `$binding` passes `$key=$(repr(sym))`, ",
+        "which is not a top-level assignment of the emitted body; its derived ",
+        "scale cannot be resolved.")
+    rhs = ctx.assignments[sym]
+    margins = key === :scale ? Any[rhs] :
+        (rhs isa Expr && rhs.head === :vect ? rhs.args : error(
+            "BRM adaptive centering: R2D2 block `$binding` assigns `$sym = $rhs`; ",
+            "expected one derived expression per margin."))
+    K = ranef.n_terms
+    length(margins) == K || error(
+        "BRM adaptive centering: R2D2 block `$binding` has $K terms but `$sym` ",
+        "derives $(length(margins)) scales.")
+    scales = [_adaptive_log_scale_program(m, ctx, binding) for m in margins]
+    cholesky_names = ranef.family === :ranef_intercept_r2d2 ? String[] :
+        ["$(binding)_L.$i" for i in 1:(K * (K - 1) ÷ 2)]
+    R2D2AdaptiveCenteringBlock(
+        ranef,
+        ranef.noncentered ? 0.0 : 1.0,
+        ranef_coordinates(ranef, unc_names),
+        _adaptive_named_indices(pos, cholesky_names, binding, "Cholesky"),
+        scales,
+    )
+end
 
 function _adaptive_named_indices(pos, names, binding, role)
     missing = String[]
@@ -197,46 +588,15 @@ function _adaptive_named_indices(pos, names, binding, role)
     out
 end
 
-"""
-    adaptive_centering_blocks(model, unc_names) -> Vector{AdaptiveCenteringBlock}
-
-Describe every ordinary random-effect block in `model` for adaptive partial
-centering. `model` is an [`SBBRMI`](@ref) or [`GenerativePlan`](@ref),
-and `unc_names` is the compiled model's unconstrained parameter-name vector
-(for example BridgeStan's `param_unc_names`).
-
-The result supports both BRM endpoints: the default noncentered emission is the
-compiled target `c=0`, while `SBBRMI(...; centered_groups=...)` is target `c=1`.
-Every intermediate source uses the triangular term-wise map
-
-```
-u[k] = c[k] * sum(C[k,l] * z[l] for l < k) + C[k,k]^c[k] * z[k]
-```
-
-with `C = diag(tau) * L`. At `K=1`, this reduces to `u = s^c * z` with
-`s = exp(log_scale)` and no Cholesky coordinates. Consequently `c=0` is the
-literal standardised draw and `c=1` is the literal model-scale effect.
-
-Stratified `gr(g, by=b)` blocks currently raise rather than being silently
-left fixed: they carry one `L,tau` frame per stratum and need a separate indexed
-metadata contract. R2D2 blocks raise the same way: their marginal scales are
-derived, so the compiled model has no unconstrained scale coordinates for the
-wrapper to read. Intercept-only `(1 | mm(...))` blocks adapt through the
-ordinary scalar path (their downstream gather is linear); an `mm` block with
-any slope term, including a slope-only `(0 + x | mm(...))`, shares the ordinary
-correlated emission and adapts with it.
-
-Correlated `cdar(step; by=group, cor=C)` walks are not ordinary random-effect
-blocks either; they have their own metadata contract in
-[`_adaptive_cdar_centering_blocks`](@ref) and join the online plan through the
-WarmupHMC extension exactly like the ungrouped-HSGP companion below.
-"""
 # One block's frame: the same name spells the whole-file loop uses, factored
 # so centered replay (prediction.jl) resolves ONE block's hyperparameters
 # without tripping over a sibling this contract skips or refuses. Returns
-# `nothing` for a family outside every set below; stratified and R2D2 blocks
-# raise rather than being silently left fixed.
-function _adaptive_block(ranef::RanefBlock, unc_names, pos)
+# `nothing` for a family outside every set below; stratified blocks raise
+# rather than being silently left fixed. An R2D2 block needs the emitted
+# model's scale context `r2d2` (`_adaptive_r2d2_context`), which only
+# `adaptive_centering_blocks` builds: R2D2 blocks are never centered, so the
+# replay caller never reaches one.
+function _adaptive_block(ranef::RanefBlock, unc_names, pos; r2d2=nothing)
     ranef.family in _ADAPTIVE_STRATIFIED_FAMILIES && error(
         "BRM adaptive centering: stratified block `$(ranef.binding)` ",
         "(`$(ranef.family)`, group `$(ranef.group)`, by `$(ranef.by)`) is ",
@@ -244,16 +604,13 @@ function _adaptive_block(ranef::RanefBlock, unc_names, pos)
         "Cholesky/scale frame per stratum and must not be treated as an ",
         "ordinary single-frame block.",
     )
-    ranef.family in _ADAPTIVE_R2D2_FAMILIES && error(
-        "BRM adaptive centering: R2D2 block `$(ranef.binding)` ",
-        "(`$(ranef.family)`, group `$(ranef.group)`) is not supported by ",
-        "the first correlated-block contract. Its marginal scales are ",
-        "DERIVED (`tau[j] = reference_scale[j] * sqrt(phi[j] * R2 / ",
-        "(1 - R2))`), so the compiled model has no unconstrained `tau` / ",
-        "`log_scale` coordinates for the online wrapper to read; leaving ",
-        "the block fixed while adapting the rest would silently change ",
-        "which parameters the sampler sees.",
-    )
+    if ranef.family in _ADAPTIVE_R2D2_FAMILIES
+        isnothing(r2d2) && error(
+            "BRM adaptive centering: R2D2 block `$(ranef.binding)` derives its ",
+            "scales from the emitted model; resolve it through ",
+            "`adaptive_centering_blocks(model, unc_names)`.")
+        return _adaptive_r2d2_block(ranef, unc_names, pos, r2d2)
+    end
     is_intercept = ranef.family in _ADAPTIVE_INTERCEPT_FAMILIES
     is_correlated = ranef.family in _ADAPTIVE_CORRELATED_FAMILIES
     (is_intercept || is_correlated) || return nothing
@@ -274,11 +631,59 @@ function _adaptive_block(ranef::RanefBlock, unc_names, pos)
     )
 end
 
+"""
+    adaptive_centering_blocks(model, unc_names) -> Vector{AbstractAdaptiveCenteringBlock}
+
+Describe every random-effect block in `model` for adaptive partial centering:
+an [`AdaptiveCenteringBlock`](@ref) for each block whose marginal scales are
+sampled, and an [`R2D2AdaptiveCenteringBlock`](@ref) for each block whose
+scales an R2D2 prior derives. `model` is an [`SBBRMI`](@ref) or
+[`GenerativePlan`](@ref), and `unc_names` is the compiled model's unconstrained
+parameter-name vector (for example BridgeStan's `param_unc_names`).
+
+The result supports both BRM endpoints: the default noncentered emission is the
+compiled target `c=0`, while `SBBRMI(...; centered_groups=...)` is target `c=1`.
+Every intermediate source uses the triangular term-wise map
+
+```
+u[k] = c[k] * sum(C[k,l] * z[l] for l < k) + C[k,k]^c[k] * z[k]
+```
+
+with `C = diag(tau) * L`. At `K=1`, this reduces to `u = s^c * z` with
+`s = exp(log_scale)` and no Cholesky coordinates. Consequently `c=0` is the
+literal standardised draw and `c=1` is the literal model-scale effect.
+
+R2D2 blocks use the same map; only `tau` differs. It is not a coordinate but the
+emitted model's own derived scale — `ref * sqrt(phi[j] * R2 / (1 - R2))` for
+`sd(...) ~ r2d2(...)` (block-wide, per-margin ICC, or joint `include=`), with
+a free half-normal for a margin a partial ICC statement leaves unaddressed, and
+`sqrt((1 - R2) * tau_bsv^2)` for the whole-predictor `effect(lp, :) ~ r2d2(...)`
+form — re-derived from the `R2`, Dirichlet share and reference/total scale
+coordinates on every evaluation. Those coordinates are read, never transformed.
+A reference scale must be a positive constant, data scalar, or `lower=0`
+parameter (or a product, quotient, square root or literal power of them);
+anything else raises naming the block and the expression.
+
+Stratified `gr(g, by=b)` blocks currently raise rather than being silently
+left fixed: they carry one `L,tau` frame per stratum and need a separate indexed
+metadata contract. Intercept-only `(1 | mm(...))` blocks adapt through the
+ordinary scalar path (their downstream gather is linear); an `mm` block with
+any slope term, including a slope-only `(0 + x | mm(...))`, shares the ordinary
+correlated emission and adapts with it.
+
+Correlated `cdar(step; by=group, cor=C)` walks are not ordinary random-effect
+blocks either; they have their own metadata contract in
+[`_adaptive_cdar_centering_blocks`](@ref) and join the online plan through the
+WarmupHMC extension exactly like the ungrouped-HSGP companion below.
+"""
 function adaptive_centering_blocks(model, unc_names)
     pos = _ranef_name_positions(unc_names)
-    out = AdaptiveCenteringBlock[]
-    for ranef in ranef_blocks(model)
-        blk = _adaptive_block(ranef, unc_names, pos)
+    ranefs = ranef_blocks(model)
+    r2d2 = any(r -> r.family in _ADAPTIVE_R2D2_FAMILIES, ranefs) ?
+        _adaptive_r2d2_context(model, pos) : nothing
+    out = AbstractAdaptiveCenteringBlock[]
+    for ranef in ranefs
+        blk = _adaptive_block(ranef, unc_names, pos; r2d2)
         isnothing(blk) || push!(out, blk)
     end
 
@@ -286,12 +691,26 @@ function adaptive_centering_blocks(model, unc_names)
     for block in out
         append!(claimed, vec(block.effects))
         append!(claimed, block.cholesky_free)
-        append!(claimed, block.log_scales)
+        block isa AdaptiveCenteringBlock && append!(claimed, block.log_scales)
     end
     length(unique(claimed)) == length(claimed) || error(
         "BRM adaptive centering: emitted correlated blocks claim overlapping ",
         "unconstrained coordinates; refusing an ambiguous transform.",
     )
+    # A derived scale must not read a coordinate the transform rewrites:
+    # the map's triangular Jacobian assumes every block's scale is constant
+    # in every block's effects. Scale inputs may be shared (one `R2` or
+    # reference across margins), so they are checked against effects only.
+    effects = Set{Int}(Iterators.flatten(vec(b.effects) for b in out))
+    for block in out
+        block isa R2D2AdaptiveCenteringBlock || continue
+        for s in block.scales
+            isdisjoint(_adaptive_scale_coordinates(s), effects) || error(
+                "BRM adaptive centering: R2D2 block `$(block.ranef.binding)` ",
+                "derives its scale from a random-effect coordinate this ",
+                "transform rewrites; refusing an inexact transform.")
+        end
+    end
     out
 end
 
@@ -308,9 +727,13 @@ struct _HSGPAdaptiveCenteringBlock
     target_c::Vector{Float64}
     effects::Vector{Int}
     length_scales::Vector{Int}
+    # Compiler-declared bounds of each length scale and the marginal SD; an
+    # upper bound is `Inf` unless declared (`_adaptive_bounds`).
     length_scale_lower::Vector{Float64}
+    length_scale_upper::Vector{Float64}
     sd::Int
     sd_lower::Float64
+    sd_upper::Float64
     omega2::Matrix{Float64}
     # Periodic spectral geometry: the compiler-owned harmonic index of each
     # basis column (`[1, 2, ..., K, 1, 2, ..., K]` for cosine/sine pairs).
@@ -345,29 +768,70 @@ function _adaptive_constraint_value(plan, raw, owner, role)
     value
 end
 
-function _adaptive_lower_bounds(plan, output::BRMOutput, n::Int, owner, role)
+# The scalar hyperparameters an adaptive cell's spread reads (HSGP length
+# scales and marginal SDs, cdar marginal SDs and persistences) are declared by
+# the compiler in exactly two shapes: `<lower=a>` (a default or non-Uniform
+# scale prior) and `<lower=a, upper=b>` (an explicit `Uniform(a, b)` prior, see
+# `_sb_gp_scale_prior` / `_sb_dar_ar_prior`, and every cdar persistence). Both
+# are Stan's ordinary scalar transforms, so the physical value is a closed-form
+# function of the unconstrained coordinate, reproduced by
+# `_adaptive_constrain`. An absent upper bound reads as `Inf`. A declaration
+# without a finite lower bound, or with an offset/multiplier, still raises.
+function _adaptive_bounds(plan, output::BRMOutput, n::Int, owner, role)
     constraints = output.constraints
-    unsupported = setdiff(collect(keys(constraints)), [:lower])
+    unsupported = setdiff(collect(keys(constraints)), [:lower, :upper])
     isempty(unsupported) || error(
-        "BRM adaptive centering: HSGP `$owner` $role uses unsupported Stan " *
-        "constraint(s) $(Tuple(unsupported)); this first contract supports a " *
-        "finite lower bound and no upper/offset/multiplier transform.",
+        "BRM adaptive centering: `$owner` $role uses unsupported Stan " *
+        "constraint(s) $(Tuple(unsupported)); this contract supports a finite " *
+        "lower bound, an optional finite upper bound, and no " *
+        "offset/multiplier transform.",
     )
     haskey(constraints, :lower) || error(
-        "BRM adaptive centering: HSGP `$owner` $role is not lower-bounded; " *
+        "BRM adaptive centering: `$owner` $role is not lower-bounded; " *
         "the compiled unconstrained-to-physical transform is unsupported.",
     )
-    raw = _adaptive_constraint_value(plan, constraints.lower, owner, role)
-    values = raw isa Real ? fill(Float64(raw), n) : collect(Float64, raw)
+    lower = _adaptive_bound_values(plan, constraints.lower, n, owner, role, "lower")
+    upper = haskey(constraints, :upper) ?
+        _adaptive_bound_values(plan, constraints.upper, n, owner, role, "upper") :
+        fill(Inf, n)
+    all(lower .< upper) || error(
+        "BRM adaptive centering: `$owner` $role has lower bounds $lower not " *
+        "strictly below its upper bounds $upper.",
+    )
+    lower, upper
+end
+
+function _adaptive_bound_values(plan, raw, n::Int, owner, role, side)
+    value = _adaptive_constraint_value(plan, raw, owner, role)
+    values = value isa Real ? fill(Float64(value), n) : collect(Float64, value)
     length(values) == n || error(
-        "BRM adaptive centering: HSGP `$owner` $role has $(length(values)) " *
-        "lower bounds for $n compiler-owned coordinates.",
+        "BRM adaptive centering: `$owner` $role has $(length(values)) " *
+        "$side bounds for $n compiler-owned coordinates.",
     )
     all(isfinite, values) || error(
-        "BRM adaptive centering: HSGP `$owner` $role lower bounds must be finite.",
+        "BRM adaptive centering: `$owner` $role $side bounds must be finite.",
     )
     values
 end
+
+# Stan Math's `inv_logit` (`stan/math/prim/fun/inv_logit.hpp`), so a
+# lower-upper-bounded coordinate reads the value the compiled model constrains
+# to rather than a reassociated approximation of it.
+const _ADAPTIVE_LOG_EPSILON = log(eps(Float64))
+function _adaptive_inv_logit(x)
+    if x < 0
+        e = exp(x)
+        x < _ADAPTIVE_LOG_EPSILON && return e
+        return e / (1 + e)
+    end
+    inv(1 + exp(-x))
+end
+
+# Stan's `lb_constrain` (`exp(x) + lower`) and finite `lub_constrain`
+# (`(upper - lower) * inv_logit(x) + lower`) for a `_adaptive_bounds` pair.
+_adaptive_constrain(x, lower, upper) =
+    isfinite(upper) ? (upper - lower) * _adaptive_inv_logit(x) + lower :
+                      exp(x) + lower
 
 function _adaptive_same_hsgp_owner(resolved, owner, role)
     declaration = resolved.output.declaration
@@ -394,10 +858,12 @@ This is the backend-internal companion to [`adaptive_centering_blocks`](@ref).
 It follows BRM's formula-term descriptor to declaration-owned parameter roles,
 then reads the declaration's compiler-owned spectral data binding (`omega2`
 for squared-exponential terms, `harmonics` for periodic ones).  It never
-parses generated Stan or assumes a global parameter order.  The metadata is
-intentionally fail-closed: unknown covariances, grouped periodic terms,
-bounded transforms, and declaration/artifact coordinate drift raise before a
-reparametrizer is built.
+parses generated Stan or assumes a global parameter order.  Length scales and
+marginal SDs may be `<lower=a>` or `<lower=a, upper=b>` (an explicit
+`Uniform(a, b)` prior); the cells read them through Stan's own transform. The
+metadata is intentionally fail-closed: unknown covariances, grouped periodic
+terms, a scale without a finite lower bound or with an offset/multiplier, and
+declaration/artifact coordinate drift raise before a reparametrizer is built.
 """
 function _adaptive_hsgp_centering_blocks(model, unc_names)
     descriptor = brm_descriptor(model)
@@ -486,19 +952,20 @@ function _adaptive_hsgp_centering_blocks(model, unc_names)
                     "has size $(size(omega2)).",
                 )
 
-            rho_lower = _adaptive_lower_bounds(
+            rho_lower, rho_upper = _adaptive_bounds(
                 plan, rho.output, length(rho.coordinates), entry.term,
                 "length scale",
             )
-            sigma_lower = only(_adaptive_lower_bounds(
+            sigma_lower, sigma_upper = only.(_adaptive_bounds(
                 plan, sigma.output, 1, entry.term, "marginal SD",
             ))
             push!(out, _HSGPAdaptiveCenteringBlock(
                 logical, entry.term,
                 _brm_hsgp_centeredness(kw, length(weights.coordinates)),
                 collect(weights.coordinates),
-                collect(rho.coordinates), rho_lower, only(sigma.coordinates),
-                sigma_lower, omega2, Float64[],
+                collect(rho.coordinates), rho_lower, rho_upper,
+                only(sigma.coordinates), sigma_lower, sigma_upper,
+                omega2, Float64[],
             ))
         end
     end
@@ -609,11 +1076,11 @@ function _adaptive_periodic_hsgp_block!(
         "refusing crossed term metadata.",
     )
 
-    rho_lower = _adaptive_lower_bounds(
+    rho_lower, rho_upper = _adaptive_bounds(
         plan, rho.output, length(rho.coordinates), entry.term,
         "length scale",
     )
-    sigma_lower = only(_adaptive_lower_bounds(
+    sigma_lower, sigma_upper = only.(_adaptive_bounds(
         plan, sigma.output, 1, entry.term, "marginal SD",
     ))
     target_c = _brm_hsgp_centeredness(kw, n_weights)
@@ -625,8 +1092,9 @@ function _adaptive_periodic_hsgp_block!(
     push!(out, _HSGPAdaptiveCenteringBlock(
         logical, entry.term, target_c,
         collect(weights.coordinates),
-        collect(rho.coordinates), rho_lower, only(sigma.coordinates),
-        sigma_lower, Matrix{Float64}(undef, 0, 0), harmonics,
+        collect(rho.coordinates), rho_lower, rho_upper,
+        only(sigma.coordinates), sigma_lower, sigma_upper,
+        Matrix{Float64}(undef, 0, 0), harmonics,
     ))
     out
 end
@@ -706,11 +1174,11 @@ function _adaptive_grouped_hsgp_blocks!(
         "$B basis weights and $(length(rho.coordinates)) length scales, but " *
         "`$omega_key` has size $(size(omega2)).",
     )
-    rho_lower = _adaptive_lower_bounds(
+    rho_lower, rho_upper = _adaptive_bounds(
         plan, rho.output, length(rho.coordinates), entry.term,
         "length scale",
     )
-    sigma_lower = only(_adaptive_lower_bounds(
+    sigma_lower, sigma_upper = only.(_adaptive_bounds(
         plan, sigma.output, 1, entry.term, "marginal SD",
     ))
     target_c = _brm_hsgp_centeredness(kw, B)
@@ -720,7 +1188,8 @@ function _adaptive_grouped_hsgp_blocks!(
         push!(out, _HSGPAdaptiveCenteringBlock(
             logical, entry.term, target_c,
             flat[(g-1)*B+1:g*B],
-            rho_idx, rho_lower, sd_idx, sigma_lower, omega2, Float64[],
+            rho_idx, rho_lower, rho_upper, sd_idx, sigma_lower, sigma_upper,
+            omega2, Float64[],
         ))
     end
     out
@@ -736,14 +1205,16 @@ function _adaptive_hsgp_log_scale(x::AbstractVector,
             "$(length(block.length_scales)) length scales; the cosine/sine " *
             "spectrum needs exactly one.",
         )
-        sigma = block.sd_lower + exp(x[block.sd])
-        rho = block.length_scale_lower[1] + exp(x[block.length_scales[1]])
+        sigma = _adaptive_constrain(x[block.sd], block.sd_lower, block.sd_upper)
+        rho = _adaptive_constrain(x[block.length_scales[1]],
+            block.length_scale_lower[1], block.length_scale_upper[1])
         return _brm_hsgp_periodic_log_scale(block.harmonics[basis], sigma, rho)
     end
-    sigma = block.sd_lower + exp(x[block.sd])
+    sigma = _adaptive_constrain(x[block.sd], block.sd_lower, block.sd_upper)
     value = log(sigma)
     for axis in eachindex(block.length_scales)
-        rho = block.length_scale_lower[axis] + exp(x[block.length_scales[axis]])
+        rho = _adaptive_constrain(x[block.length_scales[axis]],
+            block.length_scale_lower[axis], block.length_scale_upper[axis])
         value += 0.5 * log(rho * 2.5066282746310002)
         value -= 0.25 * rho * rho * block.omega2[basis, axis]
     end
@@ -765,9 +1236,15 @@ struct _CDARAdaptiveCenteringBlock
     # Column-major `eta` unconstrained indices: position `p + (w - 1) * P`
     # addresses group `p`, step `w`, matching the emitted `eta.1`, ... order.
     effects::Vector{Int}
+    # Compiler-declared bounds (`_adaptive_bounds`): the marginal SD's upper
+    # bound is `Inf` unless declared; the persistence is always an interval
+    # inside `[0, 1]`.
     sigma::Int
     sigma_lower::Float64
+    sigma_upper::Float64
     rho::Int
+    rho_lower::Float64
+    rho_upper::Float64
     # Frozen per-group marginal variances `C[p, p]` of `C = L * L'`.
     cdiag::Vector{Float64}
 end
@@ -779,8 +1256,8 @@ Base.show(io::IO, b::_CDARAdaptiveCenteringBlock) = print(
 )
 
 function _adaptive_cdar_physical(block::_CDARAdaptiveCenteringBlock, x::AbstractVector)
-    sigma = block.sigma_lower + exp(x[block.sigma])
-    rho = 1 / (1 + exp(-x[block.rho]))
+    sigma = _adaptive_constrain(x[block.sigma], block.sigma_lower, block.sigma_upper)
+    rho = _adaptive_constrain(x[block.rho], block.rho_lower, block.rho_upper)
     sigma, rho
 end
 
@@ -809,24 +1286,12 @@ function _adaptive_cdar_log_scale(x::AbstractVector,
 end
 
 function _adaptive_cdar_rho_bounds(plan, output::BRMOutput, owner)
-    constraints = output.constraints
-    unsupported = setdiff(collect(keys(constraints)), (:lower, :upper))
-    isempty(unsupported) || error(
-        "BRM adaptive centering: cdar `$owner` persistence uses unsupported Stan " *
-        "constraint(s) $(Tuple(unsupported)); this contract supports a " *
-        "[0, 1] interval and no offset/multiplier transform.",
+    lower, upper = only.(_adaptive_bounds(plan, output, 1, owner, "persistence"))
+    0 <= lower && upper <= 1 || error(
+        "BRM adaptive centering: cdar `$owner` persistence is declared on " *
+        "[$lower, $upper], outside the stationary interval [0, 1].",
     )
-    lower = _adaptive_constraint_value(plan, get(constraints, :lower, nothing), owner, "persistence")
-    upper = _adaptive_constraint_value(plan, get(constraints, :upper, nothing), owner, "persistence")
-    lower == 0.0 || error(
-        "BRM adaptive centering: cdar `$owner` persistence lower bound is " *
-        "$lower, not 0; the compiled logit transform is unsupported.",
-    )
-    upper == 1.0 || error(
-        "BRM adaptive centering: cdar `$owner` persistence upper bound is " *
-        "$upper, not 1; the compiled logit transform is unsupported.",
-    )
-    nothing
+    lower, upper
 end
 
 """
@@ -840,10 +1305,13 @@ following the same descriptor-to-declaration route as
 [`_adaptive_hsgp_centering_blocks`](@ref). Each of the `P * W` innovations is
 one scalar cell with zero location and its marginal prior spread
 `sigma * sqrt(C[p, p] * (1 - rho^(2w)) / (1 - rho^2))`; `c=0` is the emitted
-`eta` frame. The metadata is intentionally fail-closed: a non-`[0, 1]`
-persistence transform, a non-lower-bounded scale, a missing or misshapen
-frozen factor, and declaration/artifact coordinate drift all raise before a
-reparametrizer is built.
+`eta` frame. The marginal SD may be `<lower=a>` or `<lower=a, upper=b>` and the
+persistence any declared interval inside `[0, 1]` (an explicit `Uniform(a, b)`
+prior narrows either); the cells read both through Stan's own transform. The
+metadata is intentionally fail-closed: a persistence interval leaving `[0, 1]`,
+a scale without a finite lower bound, a missing or misshapen frozen factor, and
+declaration/artifact coordinate drift all raise before a reparametrizer is
+built.
 """
 function _adaptive_cdar_centering_blocks(model, unc_names)
     descriptor = brm_descriptor(model)
@@ -926,14 +1394,16 @@ function _adaptive_cdar_centering_blocks(model, unc_names)
                 "has a non-finite or non-positive marginal variance.",
             )
 
-            sigma_lower = only(_adaptive_lower_bounds(
+            sigma_lower, sigma_upper = only.(_adaptive_bounds(
                 plan, sigma.output, 1, entry.term, "marginal SD",
             ))
-            _adaptive_cdar_rho_bounds(plan, rho.output, entry.term)
+            rho_lower, rho_upper =
+                _adaptive_cdar_rho_bounds(plan, rho.output, entry.term)
             push!(out, _CDARAdaptiveCenteringBlock(
                 logical, entry.term, P, W,
                 collect(innovations.coordinates),
-                only(sigma.coordinates), sigma_lower, only(rho.coordinates),
+                only(sigma.coordinates), sigma_lower, sigma_upper,
+                only(rho.coordinates), rho_lower, rho_upper,
                 cdiag,
             ))
         end
@@ -978,10 +1448,15 @@ function _adaptive_cholesky_corr(raw::AbstractVector, K::Int)
     L
 end
 
-function _adaptive_block_cholesky(x::AbstractVector, block::AdaptiveCenteringBlock)
+_adaptive_block_taus(x::AbstractVector, block::AdaptiveCenteringBlock) =
+    exp.(x[block.log_scales])
+_adaptive_block_taus(x::AbstractVector, block::R2D2AdaptiveCenteringBlock) =
+    [exp(_adaptive_log_scale(x, s)) for s in block.scales]
+
+function _adaptive_block_cholesky(x::AbstractVector, block::AbstractAdaptiveCenteringBlock)
     K = block.ranef.n_terms
     L = _adaptive_cholesky_corr(x[block.cholesky_free], K)
-    tau = exp.(x[block.log_scales])
+    tau = _adaptive_block_taus(x, block)
     tau .* L
 end
 

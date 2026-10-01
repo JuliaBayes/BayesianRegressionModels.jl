@@ -1,13 +1,14 @@
 # Adaptive-centering coverage for R2D2 and multi-membership blocks
-# (snag adaptive-centeri-953d87e0).
+# (snag adaptive-centeri-953d87e0, derived-tau follow-up on decision
+# 2026-10-01T11-33-23-658-13ne7ae).
 #
-# R2D2 blocks derive their marginal scales (`tau[j] = reference_scale[j] *
-# sqrt(phi[j] * R2 / (1 - R2))`) instead of sampling them, so the online
-# wrapper's unconstrained `tau`/`log_scale` coordinates do not exist for them.
-# Leaving such a block out of `adaptive_centering_blocks` silently is a wrong
-# answer: a joint model would adapt every other cell and leave the R2D2 block
-# at its compiled endpoint with nothing saying so. These blocks refuse loudly,
-# naming the block — the same contract as stratified `gr(g, by=b)`.
+# R2D2 blocks derive their marginal scales instead of sampling them, so there
+# is no unconstrained `tau`/`log_scale` coordinate to read. They resolve to
+# `R2D2AdaptiveCenteringBlock`s whose per-term scale is compiled from the
+# emitted assignment into a log-linear normal form over the model's own R2,
+# Dirichlet-share and reference/total-scale coordinates. This file checks that
+# metadata against hand-spelled unconstrained names (no BridgeStan); the
+# compiled-model exactness checks live in `adaptive_centering_bridgestan.jl`.
 #
 # Multi-membership intercepts sample their scale (`log_scale`) exactly like an
 # ordinary `(1 | g)` — only the downstream gather differs, and it is linear —
@@ -21,6 +22,8 @@
 using Test
 using BayesianRegressionModels
 using Distributions: Beta, Exponential, LKJCholesky, Normal
+
+const BRM = BayesianRegressionModels
 
 # --- R2D2 fixtures ------------------------------------------------------
 
@@ -44,11 +47,31 @@ r2d2_joint_builder = @brm begin
     y ~ Normal(log_Vc + log_k10, sigma)
 end
 
+r2d2_icc_builder = @brm begin
+    sigma ~ Exponential(1)
+    log_Vc ~ 1 + (1 | p | subject)
+    log_k10 ~ 1 + (1 | p | subject)
+    sd(log_Vc, p) ~ r2d2(reference_scale=sigma)
+    cor(:, p) ~ LKJCholesky(2, 2)
+    y ~ Normal(log_Vc + log_k10, sigma)
+end
+
 r2d2_flat_builder = @brm begin
     sigma ~ Exponential(1)
     mu ~ 1 + x + (1 | subject)
     effect(mu, :) ~ r2d2(R2=Beta(1, 1), tau_bsv=0.5, alpha=1)
     y ~ Normal(mu, sigma)
+end
+
+r2d2_unbounded_reference_builder = @brm begin
+    sigma ~ Exponential(1)
+    s0 ~ Normal(0, 1)
+    log_Vc ~ 1 + (1 | p | subject)
+    log_k10 ~ 1 + (1 | p | subject)
+    sd(:, p) ~ r2d2(mean_R2=0.5, prec_R2=2, concentration=1,
+                    reference_scale=s0)
+    cor(:, p) ~ LKJCholesky(2, 2)
+    y ~ Normal(log_Vc + log_k10, sigma)
 end
 
 r2d2_df = (;
@@ -58,7 +81,102 @@ r2d2_df = (;
     y=zeros(6),
 )
 
-function adaptive_refusal(sb)
+# The compiled bucket's unconstrained names (BridgeStan order; only the set
+# matters to resolution, the order fixes the expected indices below).
+bucket_names(extra...) = vcat(
+    ["sigma", "b_p_subject_r2d2_1_R2", "b_p_subject_r2d2_1_phi.1",
+     "b_p_subject_L.1"],
+    ["b_p_subject_z_flat.$i" for i in 1:6],
+    ["pop_log_Vc_beta_pop.1", "pop_log_k10_beta_pop.1"],
+    collect(extra),
+)
+
+simplex_atoms(s) = [(a.weight, a.coordinates, a.entry) for a in s.simplex]
+logistic(y) = inv(1 + exp(-y))
+
+@testset "R2D2 bucket resolves its derived scales" begin
+    sb = SBBRMI(r2d2_bucket_builder(r2d2_df); total_groups=(), mod=@__MODULE__)
+    rblock = only(ranef_blocks(sb))
+    @test rblock.family === :ranef_correlated_draws_r2d2
+    block = only(adaptive_centering_blocks(sb, bucket_names()))
+    @test block isa R2D2AdaptiveCenteringBlock
+    @test block.ranef.binding === rblock.binding
+    @test block.target_c == 0.0
+    @test block.effects == reshape(5:10, 2, 3)
+    @test block.cholesky_free == [4]
+    # tau[j] = sigma * sqrt(phi[j] * R2 / (1 - R2))
+    for (j, s) in enumerate(block.scales)
+        @test s.constant == 0.0
+        @test s.linear == [(1.0, 1)]
+        @test s.unit == [(0.5, -0.5, 2)]
+        @test simplex_atoms(s) == [(0.5, [3], j)]
+    end
+    # Two-entry Stan simplex: phi = softmax([w, -w]), w = y / sqrt(2).
+    x = [0.3, -0.4, 0.7, 0.1, zeros(8)...]
+    phi1 = logistic(sqrt(2) * x[3])
+    expected = exp(x[1]) .* sqrt.([phi1, 1 - phi1] .* logistic(x[2]) ./
+                                  (1 - logistic(x[2])))
+    @test BRM._adaptive_block_taus(x, block) ≈ expected rtol=1e-14
+    C = BRM._adaptive_block_cholesky(x, block)
+    @test [C[1, 1], hypot(C[2, 1], C[2, 2])] ≈ expected rtol=1e-14
+end
+
+@testset "R2D2 bucket and an ordinary block resolve together" begin
+    sb = SBBRMI(r2d2_joint_builder(r2d2_df); total_groups=(), mod=@__MODULE__)
+    names = bucket_names("r_log_Vc_site_log_scale", "r_log_Vc_site_xi.1",
+                         "r_log_Vc_site_xi.2")
+    blocks = adaptive_centering_blocks(sb, names)
+    @test length(blocks) == 2
+    @test count(b -> b isa R2D2AdaptiveCenteringBlock, blocks) == 1
+    ordinary = only(b for b in blocks if b isa AdaptiveCenteringBlock)
+    @test ordinary.ranef.group === :site
+    @test ordinary.log_scales == [13]
+    @test ordinary.effects == reshape(14:15, 1, 2)
+end
+
+@testset "R2D2 partial ICC leaves the unaddressed margin a free scale" begin
+    sb = SBBRMI(r2d2_icc_builder(r2d2_df); total_groups=(), mod=@__MODULE__)
+    names = vcat(
+        ["sigma", "b_p_subject_r2d2_1_R2", "b_p_subject_r2d2_free_tau_2",
+         "b_p_subject_L.1"],
+        ["b_p_subject_z_flat.$i" for i in 1:6],
+        ["pop_log_Vc_beta_pop.1", "pop_log_k10_beta_pop.1"],
+    )
+    block = only(adaptive_centering_blocks(sb, names))
+    @test block isa R2D2AdaptiveCenteringBlock
+    # One-margin ICC: a `simplex[1]` share is identically 1 (no coordinates).
+    @test simplex_atoms(block.scales[1]) == [(0.5, Int[], 1)]
+    @test block.scales[1].linear == [(1.0, 1)]
+    @test block.scales[1].unit == [(0.5, -0.5, 2)]
+    @test block.scales[2].linear == [(1.0, 3)]
+    @test isempty(block.scales[2].unit) && isempty(block.scales[2].simplex)
+    x = [0.2, 0.5, -0.3, zeros(9)...]
+    @test BRM._adaptive_block_taus(x, block) ≈
+          [exp(0.2) * sqrt(logistic(0.5) / (1 - logistic(0.5))), exp(-0.3)] rtol=1e-14
+end
+
+@testset "R2D2 flat-form intercept resolves sqrt((1 - R2) * tau_bsv^2)" begin
+    sb = SBBRMI(r2d2_flat_builder(r2d2_df); total_groups=(), mod=@__MODULE__)
+    rblock = only(ranef_blocks(sb))
+    @test rblock.family === :ranef_intercept_r2d2
+    names = ["r2d2_mu_R2", "sigma", "pop_mu_beta_pop.1", "pop_mu_beta_pop.2",
+             "r_mu_subject_xi.1", "r_mu_subject_xi.2", "r_mu_subject_xi.3"]
+    block = only(adaptive_centering_blocks(sb, names))
+    @test block isa R2D2AdaptiveCenteringBlock
+    @test block.effects == reshape(5:7, 1, 3)
+    @test isempty(block.cholesky_free)
+    s = only(block.scales)
+    @test s.constant ≈ log(0.5)
+    @test isempty(s.linear) && isempty(s.simplex)
+    @test s.unit == [(0.0, 0.5, 1)]
+    x = [0.4, zeros(6)...]
+    @test only(BRM._adaptive_block_taus(x, block)) ≈
+          sqrt((1 - logistic(0.4)) * 0.5^2) rtol=1e-14
+end
+
+@testset "R2D2 with an unbounded reference scale refuses naming it" begin
+    sb = SBBRMI(r2d2_unbounded_reference_builder(r2d2_df); total_groups=(),
+                mod=@__MODULE__)
     err = try
         adaptive_centering_blocks(sb, String[])
         nothing
@@ -66,36 +184,9 @@ function adaptive_refusal(sb)
         e
     end
     @test err isa ErrorException
-    err
-end
-
-@testset "R2D2 correlated bucket refuses adaptive centering loudly" begin
-    sb = SBBRMI(r2d2_bucket_builder(r2d2_df); total_groups=(), mod=@__MODULE__)
-    block = only(ranef_blocks(sb))
-    @test block.family === :ranef_correlated_draws_r2d2
-    err = adaptive_refusal(sb)
-    @test occursin("r2d2", lowercase(err.msg))
-    @test occursin(string(block.binding), err.msg)
-end
-
-@testset "R2D2 joint model names the R2D2 block, not the ordinary one" begin
-    sb = SBBRMI(r2d2_joint_builder(r2d2_df); total_groups=(), mod=@__MODULE__)
-    blocks = ranef_blocks(sb)
-    @test length(blocks) == 2
-    r2d2_block = only(b for b in blocks if occursin("r2d2", string(b.family)))
-    @test r2d2_block.family === :ranef_correlated_draws_r2d2
-    err = adaptive_refusal(sb)
-    @test occursin("r2d2", lowercase(err.msg))
-    @test occursin(string(r2d2_block.binding), err.msg)
-end
-
-@testset "R2D2 flat-form intercept refuses adaptive centering loudly" begin
-    sb = SBBRMI(r2d2_flat_builder(r2d2_df); total_groups=(), mod=@__MODULE__)
-    block = only(ranef_blocks(sb))
-    @test block.family === :ranef_intercept_r2d2
-    err = adaptive_refusal(sb)
-    @test occursin("r2d2", lowercase(err.msg))
-    @test occursin(string(block.binding), err.msg)
+    @test occursin("b_p_subject", err.msg)
+    @test occursin("s0", err.msg)
+    @test occursin("bounds", err.msg)
 end
 
 # --- multi-membership fixtures -------------------------------------------

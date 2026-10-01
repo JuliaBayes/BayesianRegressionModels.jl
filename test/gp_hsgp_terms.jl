@@ -326,12 +326,18 @@ end
     end
 end
 
-@testset "model-derived HSGP with bounded scales refuses online adaptation" begin
+@testset "model-derived HSGP with bounded scales resolves online adaptation" begin
+    # `Uniform(1.5, 4.0)` declares `<lower=1.5, upper=4.0>`; the cells read it
+    # through Stan's lub transform (snag adaptive-centeri-fadd03fd; BridgeStan
+    # coverage in `test/adaptive_bounded_scales.jl`).
     sb = SBBRMI(latent_hsgp_model(latent_hsgp_df()); mod=@__MODULE__)
     names = vcat(
         ["hsgp_x_rho_iso", "hsgp_x_sigma"],
         ["hsgp_x_beta_raw.$b" for b in 1:5],
     )
-    @test_throws "unsupported Stan constraint" BayesianRegressionModels._adaptive_hsgp_centering_blocks(
-        sb, names)
+    block = only(BayesianRegressionModels._adaptive_hsgp_centering_blocks(
+        sb, names))
+    @test block.length_scale_lower == [1.5]
+    @test block.length_scale_upper == [4.0]
+    @test (block.sd_lower, block.sd_upper) == (0.0, Inf)
 end
