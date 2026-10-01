@@ -288,6 +288,82 @@ end
     @test roundtrip ≈ x atol=2e-12
 end
 
+# Multi-membership intercepts reuse the scalar path above (snag
+# adaptive-centeri-953d87e0). `test/adaptive_r2d2_mm.jl` checks the metadata
+# against hand-spelled names; this resolves the block against the COMPILED
+# model's names and runs the public wrapper end to end.
+const MM_INTERCEPT_BUILDER = @brm begin
+    sigma ~ Exponential(1)
+    loc ~ 1 + (1 | mm(g1, g2; weights=(w1, w2)))
+    y ~ Normal(loc, sigma)
+end
+
+const MM_DF = (;
+    g1=["a", "a", "b"],
+    g2=["b", "c", "c"],
+    w1=[2.0, 1.0, 0.0],
+    w2=[1.0, 1.0, 3.0],
+    y=[0.1, 0.2, 0.3],
+)
+
+@testset "BridgeStan multi-membership intercept adapts through the public wrapper" begin
+    sb = SBBRMI(MM_INTERCEPT_BUILDER(MM_DF); total_groups=(), mod=@__MODULE__)
+    problem = StanBlocks.stan_instantiate(sb.model)
+    unc_names = StanBlocks.BridgeStan.param_unc_names(problem.model)
+    block = only(adaptive_centering_blocks(sb, unc_names))
+    @test block.ranef.family === :ranef_intercept_draws
+    @test (block.ranef.n_terms, block.ranef.n_groups) == (1, 3)
+    @test unc_names[only(block.log_scales)] ==
+          "$(block.ranef.binding)_log_scale"
+    @test isempty(block.cholesky_free)
+    @test block.target_c == 0.0
+
+    backend = AutoEnzyme()
+    wrapped = adaptive_centering_problem(sb, problem, backend)
+    ir = WarmupHMC.reparametrizer(wrapped)
+    @test first.(ir.pairs) == vec(block.effects)
+
+    x = zeros(length(unc_names))
+    x[only(block.log_scales)] = log(1.6)
+    x[vec(block.effects)] .= [-0.5, 0.1, 0.7]
+    # At the compiled endpoint the wrapper is the identity.
+    plain = LogDensityProblems.logdensity_and_gradient(problem, x)
+    adaptive = LogDensityProblems.logdensity_and_gradient(wrapped, x)
+    @test adaptive[1] ≈ plain[1] atol=2e-12
+    @test adaptive[2] ≈ plain[2] atol=2e-12
+
+    state = ir.pairs[1][2].args[1].state
+    controls = [0.2, 0.5, 0.8]
+    set_adaptive_sources!(state, ir, controls)
+    ljac, model_position = ir(x)
+    expected_ljac, expected_position = manual_adaptive_map(x, block, controls)
+    @test ljac ≈ expected_ljac atol=2e-12
+    @test model_position ≈ expected_position atol=2e-12
+
+    lp, gradient = LogDensityProblems.logdensity_and_gradient(wrapped, x)
+    @test isfinite(lp)
+    @test all(isfinite, gradient)
+    inner_lp, _ = LogDensityProblems.logdensity_and_gradient(
+        problem, model_position)
+    @test lp ≈ ljac + inner_lp atol=2e-12
+
+    step = 1e-5
+    finite_difference = [begin
+        plus, minus = copy(x), copy(x)
+        plus[i] += step
+        minus[i] -= step
+        (LogDensityProblems.logdensity(wrapped, plus) -
+         LogDensityProblems.logdensity(wrapped, minus)) / (2step)
+    end for i in eachindex(x)]
+    @test gradient ≈ finite_difference atol=2e-5 rtol=2e-5
+
+    inverse_ljac, roundtrip = WarmupHMC._inverse_with_logabsdet_jacobian(
+        ir, model_position,
+    )
+    @test inverse_ljac ≈ -ljac atol=2e-12
+    @test roundtrip ≈ x atol=2e-12
+end
+
 const JOINT_HSGP_BUILDER = @brm begin
     loc ~ 1 + x + hsgp(x; k=3, by=g) + (1 + x | subject)
     y ~ Normal(loc, 1)

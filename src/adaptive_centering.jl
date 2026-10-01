@@ -122,11 +122,28 @@ const _ADAPTIVE_CORRELATED_FAMILIES = Set((
 const _ADAPTIVE_INTERCEPT_FAMILIES = Set((
     :ranef_intercept,
     :ranef_intercept_centered,
+    # Multi-membership intercepts sample `log_scale` exactly like an ordinary
+    # `(1 | g)`; only the downstream gather differs, and it is linear in the
+    # draws, so the scalar `u = s^c * z` path is exact here (snag
+    # adaptive-centeri-953d87e0).
+    :ranef_intercept_draws,
 ))
 
 const _ADAPTIVE_STRATIFIED_FAMILIES = Set((
     :ranef_correlated_by,
     :ranef_correlated_by_draws,
+))
+
+# R2D2 blocks DERIVE their marginal scales (`tau[j] = reference_scale[j] *
+# sqrt(phi[j] * R2 / (1 - R2))`) instead of sampling them, so the compiled
+# model has no unconstrained `tau`/`log_scale` coordinates for the online
+# wrapper to read. They refuse loudly in `_adaptive_block` — the same contract
+# as the stratified set — rather than being silently left fixed (snag
+# adaptive-centeri-953d87e0). Derived-tau support is the tracked follow-up.
+const _ADAPTIVE_R2D2_FAMILIES = Set((
+    :ranef_intercept_r2d2,
+    :ranef_correlated_r2d2,
+    :ranef_correlated_draws_r2d2,
 ))
 
 """
@@ -202,7 +219,12 @@ literal standardised draw and `c=1` is the literal model-scale effect.
 
 Stratified `gr(g, by=b)` blocks currently raise rather than being silently
 left fixed: they carry one `L,tau` frame per stratum and need a separate indexed
-metadata contract.
+metadata contract. R2D2 blocks raise the same way: their marginal scales are
+derived, so the compiled model has no unconstrained scale coordinates for the
+wrapper to read. Intercept-only `(1 | mm(...))` blocks adapt through the
+ordinary scalar path (their downstream gather is linear); an `mm` block with
+any slope term, including a slope-only `(0 + x | mm(...))`, shares the ordinary
+correlated emission and adapts with it.
 
 Correlated `cdar(step; by=group, cor=C)` walks are not ordinary random-effect
 blocks either; they have their own metadata contract in
@@ -212,8 +234,8 @@ WarmupHMC extension exactly like the ungrouped-HSGP companion below.
 # One block's frame: the same name spells the whole-file loop uses, factored
 # so centered replay (prediction.jl) resolves ONE block's hyperparameters
 # without tripping over a sibling this contract skips or refuses. Returns
-# `nothing` for a family outside both sets; stratified blocks raise rather
-# than being silently left fixed.
+# `nothing` for a family outside every set below; stratified and R2D2 blocks
+# raise rather than being silently left fixed.
 function _adaptive_block(ranef::RanefBlock, unc_names, pos)
     ranef.family in _ADAPTIVE_STRATIFIED_FAMILIES && error(
         "BRM adaptive centering: stratified block `$(ranef.binding)` ",
@@ -221,6 +243,16 @@ function _adaptive_block(ranef::RanefBlock, unc_names, pos)
         "not supported by the first correlated-block contract. It has one ",
         "Cholesky/scale frame per stratum and must not be treated as an ",
         "ordinary single-frame block.",
+    )
+    ranef.family in _ADAPTIVE_R2D2_FAMILIES && error(
+        "BRM adaptive centering: R2D2 block `$(ranef.binding)` ",
+        "(`$(ranef.family)`, group `$(ranef.group)`) is not supported by ",
+        "the first correlated-block contract. Its marginal scales are ",
+        "DERIVED (`tau[j] = reference_scale[j] * sqrt(phi[j] * R2 / ",
+        "(1 - R2))`), so the compiled model has no unconstrained `tau` / ",
+        "`log_scale` coordinates for the online wrapper to read; leaving ",
+        "the block fixed while adapting the rest would silently change ",
+        "which parameters the sampler sees.",
     )
     is_intercept = ranef.family in _ADAPTIVE_INTERCEPT_FAMILIES
     is_correlated = ranef.family in _ADAPTIVE_CORRELATED_FAMILIES
