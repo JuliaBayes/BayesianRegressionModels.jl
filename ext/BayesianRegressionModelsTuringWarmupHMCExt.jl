@@ -198,8 +198,10 @@ function _hsgp_gradient_component(
         effect_indices,
         rho_indices,
         [Float64(state.rho_lower)],
+        [Inf],
         only(sd_indices),
         0.0,
+        Inf,
         omega2,
         Float64[],
     )

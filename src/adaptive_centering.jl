@@ -727,9 +727,13 @@ struct _HSGPAdaptiveCenteringBlock
     target_c::Vector{Float64}
     effects::Vector{Int}
     length_scales::Vector{Int}
+    # Compiler-declared bounds of each length scale and the marginal SD; an
+    # upper bound is `Inf` unless declared (`_adaptive_bounds`).
     length_scale_lower::Vector{Float64}
+    length_scale_upper::Vector{Float64}
     sd::Int
     sd_lower::Float64
+    sd_upper::Float64
     omega2::Matrix{Float64}
     # Periodic spectral geometry: the compiler-owned harmonic index of each
     # basis column (`[1, 2, ..., K, 1, 2, ..., K]` for cosine/sine pairs).
@@ -764,29 +768,70 @@ function _adaptive_constraint_value(plan, raw, owner, role)
     value
 end
 
-function _adaptive_lower_bounds(plan, output::BRMOutput, n::Int, owner, role)
+# The scalar hyperparameters an adaptive cell's spread reads (HSGP length
+# scales and marginal SDs, cdar marginal SDs and persistences) are declared by
+# the compiler in exactly two shapes: `<lower=a>` (a default or non-Uniform
+# scale prior) and `<lower=a, upper=b>` (an explicit `Uniform(a, b)` prior, see
+# `_sb_gp_scale_prior` / `_sb_dar_ar_prior`, and every cdar persistence). Both
+# are Stan's ordinary scalar transforms, so the physical value is a closed-form
+# function of the unconstrained coordinate, reproduced by
+# `_adaptive_constrain`. An absent upper bound reads as `Inf`. A declaration
+# without a finite lower bound, or with an offset/multiplier, still raises.
+function _adaptive_bounds(plan, output::BRMOutput, n::Int, owner, role)
     constraints = output.constraints
-    unsupported = setdiff(collect(keys(constraints)), [:lower])
+    unsupported = setdiff(collect(keys(constraints)), [:lower, :upper])
     isempty(unsupported) || error(
-        "BRM adaptive centering: HSGP `$owner` $role uses unsupported Stan " *
-        "constraint(s) $(Tuple(unsupported)); this first contract supports a " *
-        "finite lower bound and no upper/offset/multiplier transform.",
+        "BRM adaptive centering: `$owner` $role uses unsupported Stan " *
+        "constraint(s) $(Tuple(unsupported)); this contract supports a finite " *
+        "lower bound, an optional finite upper bound, and no " *
+        "offset/multiplier transform.",
     )
     haskey(constraints, :lower) || error(
-        "BRM adaptive centering: HSGP `$owner` $role is not lower-bounded; " *
+        "BRM adaptive centering: `$owner` $role is not lower-bounded; " *
         "the compiled unconstrained-to-physical transform is unsupported.",
     )
-    raw = _adaptive_constraint_value(plan, constraints.lower, owner, role)
-    values = raw isa Real ? fill(Float64(raw), n) : collect(Float64, raw)
+    lower = _adaptive_bound_values(plan, constraints.lower, n, owner, role, "lower")
+    upper = haskey(constraints, :upper) ?
+        _adaptive_bound_values(plan, constraints.upper, n, owner, role, "upper") :
+        fill(Inf, n)
+    all(lower .< upper) || error(
+        "BRM adaptive centering: `$owner` $role has lower bounds $lower not " *
+        "strictly below its upper bounds $upper.",
+    )
+    lower, upper
+end
+
+function _adaptive_bound_values(plan, raw, n::Int, owner, role, side)
+    value = _adaptive_constraint_value(plan, raw, owner, role)
+    values = value isa Real ? fill(Float64(value), n) : collect(Float64, value)
     length(values) == n || error(
-        "BRM adaptive centering: HSGP `$owner` $role has $(length(values)) " *
-        "lower bounds for $n compiler-owned coordinates.",
+        "BRM adaptive centering: `$owner` $role has $(length(values)) " *
+        "$side bounds for $n compiler-owned coordinates.",
     )
     all(isfinite, values) || error(
-        "BRM adaptive centering: HSGP `$owner` $role lower bounds must be finite.",
+        "BRM adaptive centering: `$owner` $role $side bounds must be finite.",
     )
     values
 end
+
+# Stan Math's `inv_logit` (`stan/math/prim/fun/inv_logit.hpp`), so a
+# lower-upper-bounded coordinate reads the value the compiled model constrains
+# to rather than a reassociated approximation of it.
+const _ADAPTIVE_LOG_EPSILON = log(eps(Float64))
+function _adaptive_inv_logit(x)
+    if x < 0
+        e = exp(x)
+        x < _ADAPTIVE_LOG_EPSILON && return e
+        return e / (1 + e)
+    end
+    inv(1 + exp(-x))
+end
+
+# Stan's `lb_constrain` (`exp(x) + lower`) and finite `lub_constrain`
+# (`(upper - lower) * inv_logit(x) + lower`) for a `_adaptive_bounds` pair.
+_adaptive_constrain(x, lower, upper) =
+    isfinite(upper) ? (upper - lower) * _adaptive_inv_logit(x) + lower :
+                      exp(x) + lower
 
 function _adaptive_same_hsgp_owner(resolved, owner, role)
     declaration = resolved.output.declaration
@@ -813,10 +858,12 @@ This is the backend-internal companion to [`adaptive_centering_blocks`](@ref).
 It follows BRM's formula-term descriptor to declaration-owned parameter roles,
 then reads the declaration's compiler-owned spectral data binding (`omega2`
 for squared-exponential terms, `harmonics` for periodic ones).  It never
-parses generated Stan or assumes a global parameter order.  The metadata is
-intentionally fail-closed: unknown covariances, grouped periodic terms,
-bounded transforms, and declaration/artifact coordinate drift raise before a
-reparametrizer is built.
+parses generated Stan or assumes a global parameter order.  Length scales and
+marginal SDs may be `<lower=a>` or `<lower=a, upper=b>` (an explicit
+`Uniform(a, b)` prior); the cells read them through Stan's own transform. The
+metadata is intentionally fail-closed: unknown covariances, grouped periodic
+terms, a scale without a finite lower bound or with an offset/multiplier, and
+declaration/artifact coordinate drift raise before a reparametrizer is built.
 """
 function _adaptive_hsgp_centering_blocks(model, unc_names)
     descriptor = brm_descriptor(model)
@@ -905,19 +952,20 @@ function _adaptive_hsgp_centering_blocks(model, unc_names)
                     "has size $(size(omega2)).",
                 )
 
-            rho_lower = _adaptive_lower_bounds(
+            rho_lower, rho_upper = _adaptive_bounds(
                 plan, rho.output, length(rho.coordinates), entry.term,
                 "length scale",
             )
-            sigma_lower = only(_adaptive_lower_bounds(
+            sigma_lower, sigma_upper = only.(_adaptive_bounds(
                 plan, sigma.output, 1, entry.term, "marginal SD",
             ))
             push!(out, _HSGPAdaptiveCenteringBlock(
                 logical, entry.term,
                 _brm_hsgp_centeredness(kw, length(weights.coordinates)),
                 collect(weights.coordinates),
-                collect(rho.coordinates), rho_lower, only(sigma.coordinates),
-                sigma_lower, omega2, Float64[],
+                collect(rho.coordinates), rho_lower, rho_upper,
+                only(sigma.coordinates), sigma_lower, sigma_upper,
+                omega2, Float64[],
             ))
         end
     end
@@ -1028,11 +1076,11 @@ function _adaptive_periodic_hsgp_block!(
         "refusing crossed term metadata.",
     )
 
-    rho_lower = _adaptive_lower_bounds(
+    rho_lower, rho_upper = _adaptive_bounds(
         plan, rho.output, length(rho.coordinates), entry.term,
         "length scale",
     )
-    sigma_lower = only(_adaptive_lower_bounds(
+    sigma_lower, sigma_upper = only.(_adaptive_bounds(
         plan, sigma.output, 1, entry.term, "marginal SD",
     ))
     target_c = _brm_hsgp_centeredness(kw, n_weights)
@@ -1044,8 +1092,9 @@ function _adaptive_periodic_hsgp_block!(
     push!(out, _HSGPAdaptiveCenteringBlock(
         logical, entry.term, target_c,
         collect(weights.coordinates),
-        collect(rho.coordinates), rho_lower, only(sigma.coordinates),
-        sigma_lower, Matrix{Float64}(undef, 0, 0), harmonics,
+        collect(rho.coordinates), rho_lower, rho_upper,
+        only(sigma.coordinates), sigma_lower, sigma_upper,
+        Matrix{Float64}(undef, 0, 0), harmonics,
     ))
     out
 end
@@ -1125,11 +1174,11 @@ function _adaptive_grouped_hsgp_blocks!(
         "$B basis weights and $(length(rho.coordinates)) length scales, but " *
         "`$omega_key` has size $(size(omega2)).",
     )
-    rho_lower = _adaptive_lower_bounds(
+    rho_lower, rho_upper = _adaptive_bounds(
         plan, rho.output, length(rho.coordinates), entry.term,
         "length scale",
     )
-    sigma_lower = only(_adaptive_lower_bounds(
+    sigma_lower, sigma_upper = only.(_adaptive_bounds(
         plan, sigma.output, 1, entry.term, "marginal SD",
     ))
     target_c = _brm_hsgp_centeredness(kw, B)
@@ -1139,7 +1188,8 @@ function _adaptive_grouped_hsgp_blocks!(
         push!(out, _HSGPAdaptiveCenteringBlock(
             logical, entry.term, target_c,
             flat[(g-1)*B+1:g*B],
-            rho_idx, rho_lower, sd_idx, sigma_lower, omega2, Float64[],
+            rho_idx, rho_lower, rho_upper, sd_idx, sigma_lower, sigma_upper,
+            omega2, Float64[],
         ))
     end
     out
@@ -1155,14 +1205,16 @@ function _adaptive_hsgp_log_scale(x::AbstractVector,
             "$(length(block.length_scales)) length scales; the cosine/sine " *
             "spectrum needs exactly one.",
         )
-        sigma = block.sd_lower + exp(x[block.sd])
-        rho = block.length_scale_lower[1] + exp(x[block.length_scales[1]])
+        sigma = _adaptive_constrain(x[block.sd], block.sd_lower, block.sd_upper)
+        rho = _adaptive_constrain(x[block.length_scales[1]],
+            block.length_scale_lower[1], block.length_scale_upper[1])
         return _brm_hsgp_periodic_log_scale(block.harmonics[basis], sigma, rho)
     end
-    sigma = block.sd_lower + exp(x[block.sd])
+    sigma = _adaptive_constrain(x[block.sd], block.sd_lower, block.sd_upper)
     value = log(sigma)
     for axis in eachindex(block.length_scales)
-        rho = block.length_scale_lower[axis] + exp(x[block.length_scales[axis]])
+        rho = _adaptive_constrain(x[block.length_scales[axis]],
+            block.length_scale_lower[axis], block.length_scale_upper[axis])
         value += 0.5 * log(rho * 2.5066282746310002)
         value -= 0.25 * rho * rho * block.omega2[basis, axis]
     end
@@ -1184,9 +1236,15 @@ struct _CDARAdaptiveCenteringBlock
     # Column-major `eta` unconstrained indices: position `p + (w - 1) * P`
     # addresses group `p`, step `w`, matching the emitted `eta.1`, ... order.
     effects::Vector{Int}
+    # Compiler-declared bounds (`_adaptive_bounds`): the marginal SD's upper
+    # bound is `Inf` unless declared; the persistence is always an interval
+    # inside `[0, 1]`.
     sigma::Int
     sigma_lower::Float64
+    sigma_upper::Float64
     rho::Int
+    rho_lower::Float64
+    rho_upper::Float64
     # Frozen per-group marginal variances `C[p, p]` of `C = L * L'`.
     cdiag::Vector{Float64}
 end
@@ -1198,8 +1256,8 @@ Base.show(io::IO, b::_CDARAdaptiveCenteringBlock) = print(
 )
 
 function _adaptive_cdar_physical(block::_CDARAdaptiveCenteringBlock, x::AbstractVector)
-    sigma = block.sigma_lower + exp(x[block.sigma])
-    rho = 1 / (1 + exp(-x[block.rho]))
+    sigma = _adaptive_constrain(x[block.sigma], block.sigma_lower, block.sigma_upper)
+    rho = _adaptive_constrain(x[block.rho], block.rho_lower, block.rho_upper)
     sigma, rho
 end
 
@@ -1228,24 +1286,12 @@ function _adaptive_cdar_log_scale(x::AbstractVector,
 end
 
 function _adaptive_cdar_rho_bounds(plan, output::BRMOutput, owner)
-    constraints = output.constraints
-    unsupported = setdiff(collect(keys(constraints)), (:lower, :upper))
-    isempty(unsupported) || error(
-        "BRM adaptive centering: cdar `$owner` persistence uses unsupported Stan " *
-        "constraint(s) $(Tuple(unsupported)); this contract supports a " *
-        "[0, 1] interval and no offset/multiplier transform.",
+    lower, upper = only.(_adaptive_bounds(plan, output, 1, owner, "persistence"))
+    0 <= lower && upper <= 1 || error(
+        "BRM adaptive centering: cdar `$owner` persistence is declared on " *
+        "[$lower, $upper], outside the stationary interval [0, 1].",
     )
-    lower = _adaptive_constraint_value(plan, get(constraints, :lower, nothing), owner, "persistence")
-    upper = _adaptive_constraint_value(plan, get(constraints, :upper, nothing), owner, "persistence")
-    lower == 0.0 || error(
-        "BRM adaptive centering: cdar `$owner` persistence lower bound is " *
-        "$lower, not 0; the compiled logit transform is unsupported.",
-    )
-    upper == 1.0 || error(
-        "BRM adaptive centering: cdar `$owner` persistence upper bound is " *
-        "$upper, not 1; the compiled logit transform is unsupported.",
-    )
-    nothing
+    lower, upper
 end
 
 """
@@ -1259,10 +1305,13 @@ following the same descriptor-to-declaration route as
 [`_adaptive_hsgp_centering_blocks`](@ref). Each of the `P * W` innovations is
 one scalar cell with zero location and its marginal prior spread
 `sigma * sqrt(C[p, p] * (1 - rho^(2w)) / (1 - rho^2))`; `c=0` is the emitted
-`eta` frame. The metadata is intentionally fail-closed: a non-`[0, 1]`
-persistence transform, a non-lower-bounded scale, a missing or misshapen
-frozen factor, and declaration/artifact coordinate drift all raise before a
-reparametrizer is built.
+`eta` frame. The marginal SD may be `<lower=a>` or `<lower=a, upper=b>` and the
+persistence any declared interval inside `[0, 1]` (an explicit `Uniform(a, b)`
+prior narrows either); the cells read both through Stan's own transform. The
+metadata is intentionally fail-closed: a persistence interval leaving `[0, 1]`,
+a scale without a finite lower bound, a missing or misshapen frozen factor, and
+declaration/artifact coordinate drift all raise before a reparametrizer is
+built.
 """
 function _adaptive_cdar_centering_blocks(model, unc_names)
     descriptor = brm_descriptor(model)
@@ -1345,14 +1394,16 @@ function _adaptive_cdar_centering_blocks(model, unc_names)
                 "has a non-finite or non-positive marginal variance.",
             )
 
-            sigma_lower = only(_adaptive_lower_bounds(
+            sigma_lower, sigma_upper = only.(_adaptive_bounds(
                 plan, sigma.output, 1, entry.term, "marginal SD",
             ))
-            _adaptive_cdar_rho_bounds(plan, rho.output, entry.term)
+            rho_lower, rho_upper =
+                _adaptive_cdar_rho_bounds(plan, rho.output, entry.term)
             push!(out, _CDARAdaptiveCenteringBlock(
                 logical, entry.term, P, W,
                 collect(innovations.coordinates),
-                only(sigma.coordinates), sigma_lower, only(rho.coordinates),
+                only(sigma.coordinates), sigma_lower, sigma_upper,
+                only(rho.coordinates), rho_lower, rho_upper,
                 cdiag,
             ))
         end

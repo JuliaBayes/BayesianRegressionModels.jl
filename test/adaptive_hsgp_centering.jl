@@ -466,9 +466,16 @@ LogDensityProblems.logdensity_and_gradient(target::HSGPQuadraticTarget, x) =
         ["hsgp_time_rho_iso", "hsgp_time_sigma"],
         ["hsgp_time_beta_raw.$basis" for basis in 1:3],
     )
-    @test_throws "unsupported Stan constraint" BRM._adaptive_hsgp_centering_blocks(
+    # A `Uniform(a, b)` length scale declares `<lower=a, upper=b>`; the cells
+    # read it through Stan's lub transform instead of refusing the wrapper
+    # (snag adaptive-centeri-fadd03fd; full coverage in
+    # `test/adaptive_bounded_scales.jl`).
+    bounded_block = only(BRM._adaptive_hsgp_centering_blocks(
         bounded_sb, bounded_names,
-    )
+    ))
+    @test bounded_block.length_scale_lower == [0.5]
+    @test bounded_block.length_scale_upper == [2.0]
+    @test (bounded_block.sd_lower, bounded_block.sd_upper) == (0.0, Inf)
 end
 
 @testset "per-basis HSGP transform, Jacobian, scores, and Enzyme gradient" begin
