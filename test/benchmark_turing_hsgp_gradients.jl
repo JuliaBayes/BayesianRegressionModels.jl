@@ -345,6 +345,7 @@ function benchmark_hsgp_blocks(turing, c)
             only(property_range(:sigma)),
             0.0,
             Matrix{Float64}(term.state.omega2),
+            Float64[],
         ))
     end
     blocks
