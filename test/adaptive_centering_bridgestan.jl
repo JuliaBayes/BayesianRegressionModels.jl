@@ -4,6 +4,7 @@ using Enzyme
 using DifferentiationInterface: AutoEnzyme
 using LogDensityProblems
 using StanBlocks
+using Distributions: Beta, LKJCholesky
 
 function enzyme_gradient_stress(problem, initial; n=5_000)
     x = copy(initial)
@@ -461,4 +462,218 @@ end
     # The joint accessors are new differentiated code: stress them past the
     # historical GC-corruption threshold like the family accessors.
     @test isfinite(enzyme_gradient_stress(wrapped, x; n=2000))
+end
+
+# --- R2D2-scaled random-effect blocks ----------------------------------------
+#
+# Derived-tau follow-up to snag adaptive-centeri-953d87e0. An R2D2 block's
+# marginal scale is the emitted model's own transformed parameter; the
+# metadata compiles it into a log-linear form over the R2 / Dirichlet-share /
+# reference-scale coordinates. One contract per R2D2 recipe: that compiled
+# scale reproduces Stan's transformed parameter, and the public wrapper is
+# exact (identity at the compiled endpoint, the manual triangular map, lp =
+# ljac + inner lp, finite differences, inverse round trip).
+
+const R2D2_DF = (;
+    subject=repeat([1, 2, 3, 4], inner=2),
+    site=repeat(["a", "b"], 4),
+    x=collect(range(-1.0, 1.0, length=8)),
+    y=sin.(1:8) ./ 3,
+)
+
+const R2D2_VARIANTS = [
+    "block-wide M2 bucket" => @brm(begin
+        sigma ~ Exponential(1)
+        log_Vc ~ 1 + (1 | p | subject)
+        log_k10 ~ 1 + (1 | p | subject)
+        sd(:, p) ~ r2d2(mean_R2=0.5, prec_R2=2, concentration=1,
+                        reference_scale=sigma)
+        cor(:, p) ~ LKJCholesky(2, 2)
+        y ~ Normal(log_Vc + log_k10, sigma)
+    end),
+    "partial per-margin ICC" => @brm(begin
+        sigma ~ Exponential(1)
+        log_Vc ~ 1 + (1 | p | subject)
+        log_k10 ~ 1 + (1 | p | subject)
+        sd(log_Vc, p) ~ r2d2(reference_scale=sigma)
+        cor(:, p) ~ LKJCholesky(2, 2)
+        y ~ Normal(log_Vc + log_k10, sigma)
+    end),
+    "joint include= budget beside an ordinary block" => @brm(begin
+        sigma ~ Exponential(1)
+        log_Vc ~ 1 + x + (1 | p | subject) + (1 | site)
+        log_k10 ~ 1 + (1 | p | subject)
+        sd(:, p) ~ r2d2(mean_R2=0.5, prec_R2=2, concentration=1,
+                        include=(:population, :contrasts))
+        cor(:, p) ~ LKJCholesky(2, 2)
+        y ~ Normal(log_Vc + log_k10, sigma)
+    end),
+    "whole-predictor intercept, constant tau_bsv" => @brm(begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 | subject)
+        effect(mu, :) ~ r2d2(R2=Beta(1, 1), tau_bsv=0.5, alpha=1)
+        y ~ Normal(mu, sigma)
+    end),
+    "whole-predictor intercept, sampled tau_bsv" => @brm(begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 | subject)
+        effect(mu, :) ~ r2d2(R2=Beta(1, 1), alpha=1)
+        y ~ Normal(mu, sigma)
+    end),
+]
+
+# Stan's own value of a block's derived scale, from the emitted transformed
+# parameter (`<binding>_r2d2_tau` vector or `<binding>_r2d2_scale` scalar).
+function r2d2_stan_tau(problem, x, block)
+    name = block.ranef.family === :ranef_intercept_r2d2 ?
+        "$(block.ranef.binding)_r2d2_scale" : "$(block.ranef.binding)_r2d2_tau"
+    names = StanBlocks.BridgeStan.param_names(problem.model; include_tp=true)
+    values = StanBlocks.BridgeStan.param_constrain(problem.model, x; include_tp=true)
+    idx = findall(n -> n == name || startswith(n, name * "."), names)
+    length(idx) == block.ranef.n_terms || error("no transformed parameter `$name`")
+    values[idx]
+end
+
+# The independent per-block reference map, composed over blocks in pair order
+# (every block's scale is constant in every block's effects).
+function manual_blocks_map(x, blocks, controls)
+    ljac = zero(eltype(x))
+    y = copy(x)
+    p = 0
+    for block in blocks
+        n = block.ranef.n_terms * block.ranef.n_groups
+        j, yb = manual_adaptive_map(x, block, controls[p+1:p+n])
+        ljac += j
+        y[vec(block.effects)] .= yb[vec(block.effects)]
+        p += n
+    end
+    ljac, y
+end
+
+function check_r2d2_wrapper(sb)
+    problem = StanBlocks.stan_instantiate(sb.model)
+    unc_names = StanBlocks.BridgeStan.param_unc_names(problem.model)
+    blocks = adaptive_centering_blocks(sb, unc_names)
+    r2d2 = [b for b in blocks if b isa R2D2AdaptiveCenteringBlock]
+    @test !isempty(r2d2)
+    n = length(unc_names)
+    x = 0.6 .* sin.(1:n) .+ 0.1 .* cos.(3 .* (1:n))
+    for block in r2d2
+        @test BayesianRegressionModels._adaptive_block_taus(x, block) ≈
+              r2d2_stan_tau(problem, x, block) rtol=1e-12
+    end
+
+    wrapped = adaptive_centering_problem(sb, problem, AutoEnzyme())
+    ir = WarmupHMC.reparametrizer(wrapped)
+    # Pair order: ordinary cells, then R2D2 cells, each block-major.
+    ordered = vcat([b for b in blocks if b isa AdaptiveCenteringBlock], r2d2)
+    @test first.(ir.pairs) == reduce(vcat, [vec(b.effects) for b in ordered])
+
+    plain = LogDensityProblems.logdensity_and_gradient(problem, x)
+    adaptive = LogDensityProblems.logdensity_and_gradient(wrapped, x)
+    @test adaptive[1] ≈ plain[1] atol=2e-12
+    @test adaptive[2] ≈ plain[2] atol=2e-12
+
+    state = ir.pairs[1][2].args[1].state
+    controls = collect(range(0.15, 0.85, length=length(ir.pairs)))
+    set_adaptive_sources!(state, ir, controls)
+    ljac, position = ir(x)
+    expected_ljac, expected_position = manual_blocks_map(x, ordered, controls)
+    @test ljac ≈ expected_ljac atol=1e-12
+    @test position ≈ expected_position atol=1e-12
+
+    lp, gradient = LogDensityProblems.logdensity_and_gradient(wrapped, x)
+    @test isfinite(lp)
+    inner_lp, _ = LogDensityProblems.logdensity_and_gradient(problem, position)
+    @test lp ≈ ljac + inner_lp atol=2e-12
+    step = 1e-5
+    finite_difference = [begin
+        plus, minus = copy(x), copy(x)
+        plus[i] += step
+        minus[i] -= step
+        (LogDensityProblems.logdensity(wrapped, plus) -
+         LogDensityProblems.logdensity(wrapped, minus)) / (2step)
+    end for i in eachindex(x)]
+    @test gradient ≈ finite_difference atol=2e-5 rtol=2e-5
+
+    inverse_ljac, roundtrip = WarmupHMC._inverse_with_logabsdet_jacobian(
+        ir, position,
+    )
+    @test inverse_ljac ≈ -ljac atol=2e-12
+    @test roundtrip ≈ x atol=2e-12
+
+    # The candidate-scoring frame reads each R2D2 cell's derived scale.
+    frame = AC_EXT._prepare_frame(state, ir, x, gradient)
+    @test frame.source == controls
+    p = sum(b.ranef.n_terms * b.ranef.n_groups for b in ordered
+            if b isa AdaptiveCenteringBlock; init=0)
+    for block in r2d2
+        C = BayesianRegressionModels._adaptive_block_cholesky(x, block)
+        for g in 1:block.ranef.n_groups, k in 1:block.ranef.n_terms
+            p += 1
+            @test frame.scale[p] ≈ C[k, k] rtol=1e-14
+        end
+    end
+    @test WarmupHMC.candidate_scoring_plan(wrapped) isa
+          WarmupHMC.CandidateScoringPlan
+    # The derived-scale accessors are new differentiated code.
+    @test isfinite(enzyme_gradient_stress(wrapped, x; n=2000))
+end
+
+@testset "BridgeStan R2D2 $label adapts exactly" for (label, builder) in R2D2_VARIANTS
+    check_r2d2_wrapper(SBBRMI(builder(R2D2_DF); total_groups=(), mod=@__MODULE__))
+end
+
+const R2D2_HSGP_BUILDER = @brm begin
+    loc ~ 1 + x + hsgp(x; k=3, by=g) + (1 + x | p | subject)
+    sd(:, p) ~ r2d2(mean_R2=0.5, prec_R2=2, concentration=1, reference_scale=1.0)
+    cor(:, p) ~ LKJCholesky(2, 2)
+    y ~ Normal(loc, 1)
+end
+
+@testset "joint R2D2+HSGP wrapper orders R2D2 cells before HSGP cells" begin
+    sb = SBBRMI(R2D2_HSGP_BUILDER(joint_hsgp_df()); total_groups=(),
+                mod=@__MODULE__)
+    problem = StanBlocks.stan_instantiate(sb.model)
+    unc_names = StanBlocks.BridgeStan.param_unc_names(problem.model)
+    block = only(adaptive_centering_blocks(sb, unc_names))
+    @test block isa R2D2AdaptiveCenteringBlock
+    hsgp_blocks = BayesianRegressionModels._adaptive_hsgp_centering_blocks(
+        sb, unc_names)
+    @test length(hsgp_blocks) == 2
+
+    wrapped = adaptive_centering_problem(sb, problem, AutoEnzyme())
+    ir = WarmupHMC.reparametrizer(wrapped)
+    @test first.(ir.pairs) ==
+          vcat(vec(block.effects), (b.effects for b in hsgp_blocks)...)
+    n = length(unc_names)
+    x = 0.5 .* sin.(1:n)
+    plain = LogDensityProblems.logdensity_and_gradient(problem, x)
+    adaptive = LogDensityProblems.logdensity_and_gradient(wrapped, x)
+    @test adaptive[1] ≈ plain[1] atol=2e-12
+    @test adaptive[2] ≈ plain[2] atol=2e-12
+
+    state = ir.pairs[1][2].args[1].state
+    controls = collect(range(0.15, 0.85, length=length(ir.pairs)))
+    set_adaptive_sources!(state, ir, controls)
+    @test vcat(state.ranef.sources, state.r2d2.sources, state.hsgp.sources) ==
+          controls
+    lp, gradient = LogDensityProblems.logdensity_and_gradient(wrapped, x)
+    ljac, position = ir(x)
+    inner_lp, _ = LogDensityProblems.logdensity_and_gradient(problem, position)
+    @test lp ≈ ljac + inner_lp atol=2e-12
+    step = 1e-5
+    finite_difference = [begin
+        plus, minus = copy(x), copy(x)
+        plus[i] += step
+        minus[i] -= step
+        (LogDensityProblems.logdensity(wrapped, plus) -
+         LogDensityProblems.logdensity(wrapped, minus)) / (2step)
+    end for i in eachindex(x)]
+    @test gradient ≈ finite_difference atol=2e-5 rtol=2e-5
+    inverse_ljac, roundtrip = WarmupHMC._inverse_with_logabsdet_jacobian(
+        ir, position,
+    )
+    @test inverse_ljac ≈ -ljac atol=2e-12
+    @test roundtrip ≈ x atol=2e-12
 end
