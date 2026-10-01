@@ -370,7 +370,7 @@ function BRM.rk_translate_artifact(artifact)
         "RK artifact: case `$(artifact.case_id)` has generator_version " *
         "$(artifact.meta.generator_version); this BRM translates " *
         "$(BRM.rk_artifact_version())")
-    artifact.plan isa _RK_PLAN_TYPES || error(
+    artifact.plan isa BRM._RK_ARTIFACT_PLAN_TYPES || error(
         "RK artifact: case `$(artifact.case_id)` carries a " *
         "$(typeof(artifact.plan)), not an RK plan")
     emitted = BRM._RKEmittedProgram(artifact.defs, artifact.ast)

@@ -24,6 +24,13 @@ BRM-side thin-layer patches, which need the plan; v2 carries
 """
 rk_artifact_version() = 2
 
+# The plan kinds a v2 artifact may carry — the one predicate both the core
+# read check (`_check_artifact`) and the extension translate check
+# (`rk_translate_artifact`) consult. Narrower than the extension's
+# `_RK_PLAN_TYPES`: varying-source plans need `varyingsource_raw=`, which
+# `emit_rk_artifact` never passes, so no artifact can carry one.
+const _RK_ARTIFACT_PLAN_TYPES = Union{_RKStructuralPlan,_RKKernelPlan}
+
 """
     emit_rk_artifact(brmi::BRMI; case_id, provenance=nothing, brm_pin=nothing)
 
@@ -120,8 +127,7 @@ function _check_artifact(artifact, path)
         "RK artifact: `$(path)` has generator_version " *
         "$(artifact.meta.generator_version); this BRM reads " *
         "$(rk_artifact_version())")
-    artifact.plan isa _RKStructuralPlan ||
-        artifact.plan isa _RKKernelPlan || error(
+    artifact.plan isa _RK_ARTIFACT_PLAN_TYPES || error(
         "RK artifact: `$(path)` carries a $(typeof(artifact.plan)), " *
         "not an RK plan")
     _check_emitted(
