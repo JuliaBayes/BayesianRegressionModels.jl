@@ -48,6 +48,11 @@ include("vimpl.jl")
 # so it can be compiled by BridgeStan / fit via Stan.
 using StanBlocks
 include("sbimpl.jl")
+# Fusion-append artifacts + SB reference numbers (RK-side driver inputs).
+# After sbimpl (SBBRMI) and the RK planner/AST above; RK-free — the
+# bound-plan translation lives in the ReactiveKernels extension.
+using Serialization
+include("rk_artifact.jl")
 include("sb_affine.jl")
 include("total_effects.jl")
 include("total_effects_plan.jl")
@@ -121,6 +126,8 @@ export brm_multinomial, brm_multinomial_lpmf, brm_multinomial_lpmfs, brm_multino
 # exact Distributions.jl functions; `interval_censored` is BRM's formula marker
 # for row-wise interval evidence on either a response or a predictor.
 export truncated, censored, interval_censored
+# Fusion append API (cross-package: the RK reporter resolves this by name).
+export rk_translate_artifact
 # A julianic `@jmodel` body is ordinary Julia, so the distributions it names must
 # be real `Distributions` objects resolved in the AUTHOR's scope. Re-export the
 # ones a model body actually writes so `using BayesianRegressionModels` is the
