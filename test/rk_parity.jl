@@ -2773,6 +2773,52 @@ end
         _rk_query(backend, :posterior, u)
 end
 
+@stestset "rk parity mi() + horseshoe keeps the shrinkage rows" begin
+    # The `mi()` plan patch once rebuilt the thin-layer plan from a
+    # hand-copied keyword list that omitted `horseshoe_priors`, so bind
+    # failed with `[plan] no prior for (mu, Intercept)` (snag
+    # rk-ext-patch-dro-46d976f3). Reference: the obs-only twin with the
+    # same horseshoe, compared by coordinate name.
+    cols = (; x=[-1.0, -0.5, 0.0, 0.5, 1.0], z=[0.3, -0.2, 0.9, -0.7, 0.1],
+              y=Union{Missing,Float64}[0.2, missing, -0.4, missing, 0.7])
+    brmi = @brm cols begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x + z
+        effect(mu, x) ~ Horseshoe()
+        mi(y) ~ Normal(mu, sigma)
+    end
+    backend = BRM.RKBRMI(brmi)
+    translated = _rk_translated(backend)
+    @test [(h.predictor, h.addressee) for h in translated.horseshoe_priors] ==
+        [(:mu, :x)]
+    @test only(translated.responses).mi_jobs === :Jobs_y
+    obs = [1, 3, 5]
+    twin = BRM.RKBRMI(@brm (; x=cols.x[obs], z=cols.z[obs],
+            y=Float64[0.2, -0.4, 0.7]) begin
+        sigma ~ Exponential(2)
+        mu ~ 1 + x + z
+        effect(mu, x) ~ Horseshoe()
+        y ~ Normal(mu, sigma)
+    end)
+    names = coordinate_names(backend.model.layout)
+    twin_names = coordinate_names(twin.model.layout)
+    @test sort(names) == sort(twin_names)
+    byname = Dict(n => 0.1 * i - 0.25 for (i, n) in enumerate(sort(names)))
+    u = Float64[byname[n] for n in names]
+    u_twin = Float64[byname[n] for n in twin_names]
+    @test _rk_query(backend, :posterior, u) ≈
+        _rk_query(twin, :posterior, u_twin)
+    _check_parity_gradient(backend, u)
+    # The copy behind every plan patch carries each unpatched field
+    # through unchanged and refuses a field the thin layer lacks.
+    ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
+    copied = ext._rk_with(translated; n_obs = translated.n_obs)
+    @test all(f -> getfield(copied, f) === getfield(translated, f),
+        fieldnames(typeof(translated)))
+    @test_throws "has no field `not_a_field`" ext._rk_with(translated;
+        not_a_field = 1)
+end
+
 @stestset "rk parity interval-gaussian literal upper" begin
     # Interval-censored Gaussian: each row contributes
     # log(Phi(hi) - Phi(y)) (the response is the lower endpoint).
