@@ -317,8 +317,8 @@ function _rk_emit_module(emitted::BRM._RKEmittedProgram)
     mod
 end
 
-function _rk_translated_plan(plan::BRM._RKStructuralPlan)
-    emitted = BRM._rk_emit_ast(plan)
+function _rk_translate_from_emitted(plan::BRM._RKStructuralPlan,
+        emitted::BRM._RKEmittedProgram)
     unbound = lower_rkppl(emitted.main,
         Tuple(sort!(collect(keys(plan.columns)))); mod=_rk_emit_module(emitted))
     bind_data(_rk_patch_mi_jobs(
@@ -327,8 +327,8 @@ end
 
 # Kernel plans additionally bind the plate dims (subjects/timepoints) the
 # `subjects=...` key names; the counts live on the kernel spec.
-function _rk_translated_plan(plan::BRM._RKKernelPlan)
-    emitted = BRM._rk_emit_ast(plan)
+function _rk_translate_from_emitted(plan::BRM._RKKernelPlan,
+        emitted::BRM._RKEmittedProgram)
     unbound = lower_rkppl(emitted.main,
         Tuple(sort!(collect(keys(plan.columns)))); mod=_rk_emit_module(emitted))
     bind_data(unbound, plan.columns; dims=BRM._rk_kernel_bind_dims(plan.kernel))
@@ -337,17 +337,44 @@ end
 # Varying-source twin plans: flat program (no defs lattice, no
 # ordinal/MI patching — the plate carries its own observation); the
 # subject count binds as dims like kernel plans.
-function _rk_translated_plan(plan::BRM._RKVaryingSourcePlan)
-    emitted = BRM._rk_emit_ast(plan)
+function _rk_translate_from_emitted(plan::BRM._RKVaryingSourcePlan,
+        emitted::BRM._RKEmittedProgram)
     names = union(keys(plan.columns),
         (spec.name for spec in plan.vector_parameters
          if spec.family === :vector_normal))
     unbound = lower_rkppl(emitted.main,
         Tuple(sort!(collect(names))); mod=_rk_emit_module(emitted))
-    bound = bind_data(_rk_patch_varyingsource_vector_ports(unbound, plan),
+    bind_data(_rk_patch_varyingsource_vector_ports(unbound, plan),
         plan.columns;
         dims=Dict(plan.spec.subject_count => plan.spec.n_subjects))
-    bound
+end
+
+function _rk_translated_plan(plan::_RK_PLAN_TYPES)
+    _rk_translate_from_emitted(plan, BRM._rk_emit_ast(plan))
+end
+
+"""
+    rk_translate_artifact(artifact) -> bound `StructuralPlan`
+
+Translate a v2 append artifact (`BRM.emit_rk_artifact` shape) through the
+PRODUCTION route — defs-module lowering plus the BRM-side mi/ordinal
+patches and kernel bind dims — via `_rk_translate_from_emitted`, the
+same function the live `RKBRMI` path uses. The append driver must call
+this (never a bare `lower_rkppl` → `bind_data`, which diverges from
+production on patched models). Fails closed on shape/version skew.
+"""
+function BRM.rk_translate_artifact(artifact)
+    keys(artifact) == (:case_id, :ast, :defs, :plan, :meta) || error(
+        "RK artifact: not a v2 artifact (keys $(keys(artifact)))")
+    artifact.meta.generator_version == BRM.rk_artifact_version() || error(
+        "RK artifact: case `$(artifact.case_id)` has generator_version " *
+        "$(artifact.meta.generator_version); this BRM translates " *
+        "$(BRM.rk_artifact_version())")
+    artifact.plan isa BRM._RK_ARTIFACT_PLAN_TYPES || error(
+        "RK artifact: case `$(artifact.case_id)` carries a " *
+        "$(typeof(artifact.plan)), not an RK plan")
+    emitted = BRM._RKEmittedProgram(artifact.defs, artifact.ast)
+    return _rk_translate_from_emitted(artifact.plan, emitted)
 end
 
 # The executable `model` of an `RKBRMI` is the thin-layer `(; spec, layout)`
