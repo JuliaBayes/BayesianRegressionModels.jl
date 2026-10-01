@@ -11,9 +11,10 @@
 #
 # Multi-membership intercepts sample their scale (`log_scale`) exactly like an
 # ordinary `(1 | g)` — only the downstream gather differs, and it is linear —
-# so they adapt through the ordinary scalar path. Multi-term `mm` already
-# shares the `:ranef_correlated_draws` emission and adapts; that is locked in
-# here rather than left as an undocumented accident.
+# so they adapt through the ordinary scalar path. An `mm` block with any slope
+# term — multi-term, or a slope-only `(0 + x | mm(...))` — already shares the
+# `:ranef_correlated_draws` emission and adapts; that is locked in here rather
+# than left as an undocumented accident.
 #
 # Run: julia --project=test test/adaptive_r2d2_mm.jl
 
@@ -120,7 +121,13 @@ mm_slope_builder = @brm begin
     y ~ Normal(loc, sigma)
 end
 
-@testset "one-term mm blocks adapt like ordinary intercepts" begin
+mm_slope_only_builder = @brm begin
+    sigma ~ Exponential(1)
+    loc ~ 1 + (0 + x | mm(g1, g2; weights=(w1, w2)))
+    y ~ Normal(loc, sigma)
+end
+
+@testset "intercept-only mm blocks adapt like ordinary intercepts" begin
     sb = SBBRMI(mm_intercept_builder(mm_df); total_groups=(), mod=@__MODULE__)
     rblock = only(ranef_blocks(sb))
     @test rblock.family === :ranef_intercept_draws
@@ -137,12 +144,15 @@ end
     @test isempty(block.cholesky_free)
 end
 
-@testset "multi-term mm blocks adapt like ordinary correlated blocks" begin
-    sb = SBBRMI(mm_slope_builder(mm_df); total_groups=(), mod=@__MODULE__)
+@testset "$label mm blocks adapt like ordinary correlated blocks" for (label, mm_builder, expected_K) in (
+    ("multi-term", mm_slope_builder, 2),
+    ("slope-only", mm_slope_only_builder, 1),
+)
+    sb = SBBRMI(mm_builder(mm_df); total_groups=(), mod=@__MODULE__)
     rblock = only(ranef_blocks(sb))
     @test rblock.family === :ranef_correlated_draws
     K, G = rblock.n_terms, rblock.n_groups
-    @test (K, G) == (2, 3)
+    @test (K, G) == (expected_K, 3)
     n_cholesky = K * (K - 1) ÷ 2
     unc = vcat(
         ["$(rblock.binding)_L.$i" for i in 1:n_cholesky],

@@ -220,8 +220,9 @@ Stratified `gr(g, by=b)` blocks currently raise rather than being silently
 left fixed: they carry one `L,tau` frame per stratum and need a separate indexed
 metadata contract. R2D2 blocks raise the same way: their marginal scales are
 derived, so the compiled model has no unconstrained scale coordinates for the
-wrapper to read. Multi-membership intercepts adapt through the ordinary scalar
-path (their downstream gather is linear); multi-term `mm` shares the ordinary
+wrapper to read. Intercept-only `(1 | mm(...))` blocks adapt through the
+ordinary scalar path (their downstream gather is linear); an `mm` block with
+any slope term, including a slope-only `(0 + x | mm(...))`, shares the ordinary
 correlated emission and adapts with it.
 
 Correlated `cdar(step; by=group, cor=C)` walks are not ordinary random-effect
