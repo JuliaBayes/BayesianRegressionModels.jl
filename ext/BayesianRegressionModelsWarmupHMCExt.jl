@@ -921,10 +921,10 @@ end
 Wrap a compiled BRM log-density in WarmupHMC's strictly-online adaptive
 centering for exact total-coefficient blocks, S2Z free contrasts, ordinary
 scalar or correlated random-effect blocks, R2D2-scaled random-effect blocks,
-squared-exponential HSGP basis weights (ungrouped or grouped), or `cdar`
-correlated-walk cells. Ordinary, R2D2 and HSGP cells adapt together in one
-wrapper, as do totals and S2Z contrasts; `cdar` cells form a separate plan and
-mix with neither family.
+HSGP basis weights (squared-exponential ungrouped or grouped, or ungrouped
+periodic), or `cdar` correlated-walk cells. Ordinary, R2D2 and HSGP cells
+adapt together in one wrapper, as do totals and S2Z contrasts; `cdar` cells
+form a separate plan and mix with neither family.
 
 `model` is the `SBBRMI` or `GenerativePlan` that emitted `problem`. When
 `problem` is StanBlocks' `StanProblem`, unconstrained names are read from its
@@ -973,17 +973,18 @@ likelihoods are Gaussian identity, Bernoulli/binomial logit and Poisson log.
 This rule cannot yet share a wrapper with totals, ordinary, HSGP or cdar blocks.
 
 For an HSGP, each basis weight is one scalar cell with zero location and
-per-basis scale `brm_hsgp_sqrt_spd(omega2, sigma, rho)[basis]`; `c=0` is the
-emitted standardized coordinate, while `c=1` is its literal
-spectral/model-scale coefficient. A compiled fixed-partial model starts at its
-declared per-basis `centeredness` values, not at zero. Grouped HSGPs adapt one
-cell per (group, basis) weight around the same shared per-basis frame;
-periodic HSGPs fail before construction. Ordinary random-effect cells, R2D2
-cells and HSGP basis-weight cells adapt together in one wrapper: pairs
-enumerate ordinary cells first, then R2D2 cells, then HSGP cells, each in the
-family's own deterministic order (that order is load-bearing across
-checkpoint/resume; a model without R2D2 blocks keeps the historical
-ordinary-then-HSGP order).
+per-basis scale `brm_hsgp_sqrt_spd(omega2, sigma, rho)[basis]`
+(`brm_hsgp_periodic_sqrt_spd(harmonics, sigma, rho)[basis]` for a periodic
+term); `c=0` is the emitted standardized coordinate, while `c=1` is its
+literal spectral/model-scale coefficient. A compiled fixed-partial model
+starts at its declared per-basis `centeredness` values, not at zero. Grouped
+HSGPs adapt one cell per (group, basis) weight around the same shared
+per-basis frame; periodic terms contribute one cell per cosine/sine weight
+and join the same HSGP pair order. Ordinary random-effect cells, R2D2 cells
+and HSGP basis-weight cells adapt together in one wrapper: pairs enumerate
+ordinary cells first, then R2D2 cells, then HSGP cells, each in the family's
+own deterministic order (that order is load-bearing across checkpoint/resume;
+a model without R2D2 blocks keeps the historical ordinary-then-HSGP order).
 
 An R2D2 block (`sd(...) ~ r2d2(...)` in any of its block-wide, per-margin ICC
 or joint `include=` forms, or the whole-predictor `effect(lp, :) ~ r2d2(...)`)
@@ -1038,8 +1039,8 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
     end
     isempty(blocks) && isempty(hsgp_blocks) && isempty(cdar_blocks) && error(
         "BRM adaptive centering: this model has no supported random-effect " *
-        "blocks (ordinary or R2D2), squared-exponential HSGPs, or cdar " *
-        "correlated walks.",
+        "blocks (ordinary or R2D2), squared-exponential or periodic HSGPs, or " *
+        "cdar correlated walks.",
     )
     ordinary = BRM.AdaptiveCenteringBlock[
         b for b in blocks if b isa BRM.AdaptiveCenteringBlock]

@@ -62,9 +62,7 @@ end
 
 function _brm_hsgp_log_sqrt_spd(state, sigma, rho)
     if state.cov === :periodic
-        a = inv(rho^2)
-        return [log(sigma) + 0.5 * (log(2) - a +
-                    log(BRM.SpecialFunctions.besselix(Int(j), a)))
+        return [BRM._brm_hsgp_periodic_log_scale(j, sigma, rho)
                 for j in state.harmonics]
     end
     _brm_hsgp_exp_quad_log_sqrt_spd(state, sigma, rho)

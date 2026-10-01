@@ -1,5 +1,6 @@
-# Adaptive partial centering for ordinary random-effect blocks and ungrouped
-# squared-exponential HSGP basis weights.
+# Adaptive partial centering for ordinary and R2D2-scaled random-effect blocks,
+# ungrouped and grouped squared-exponential HSGP basis weights, and ungrouped
+# periodic HSGP cosine/sine weights.
 #
 # This file owns only BRM/Stan emission semantics: which unconstrained
 # coordinates are one block's effects, optional LKJ-Cholesky free values, and
@@ -728,12 +729,20 @@ struct _HSGPAdaptiveCenteringBlock
     sd::Int
     sd_lower::Float64
     omega2::Matrix{Float64}
+    # Periodic spectral geometry: the compiler-owned harmonic index of each
+    # basis column (`[1, 2, ..., K, 1, 2, ..., K]` for cosine/sine pairs).
+    # Empty for squared-exponential blocks, whose geometry is `omega2` (which
+    # is in turn empty for periodic blocks); the two are never populated
+    # together, and `_adaptive_hsgp_log_scale` selects the spectrum on this
+    # field.
+    harmonics::Vector{Float64}
 end
 
 Base.show(io::IO, b::_HSGPAdaptiveCenteringBlock) = print(
     io,
     "HSGPAdaptiveCenteringBlock(", b.logical, ", ", b.term,
-    ", target_c=", b.target_c, ", ", length(b.effects), " basis weights)",
+    ", target_c=", b.target_c, ", ", length(b.effects), " basis weights",
+    isempty(b.harmonics) ? ")" : ", periodic)",
 )
 
 _adaptive_stan_expr_value(x::StanBlocks.StanExpr) =
@@ -790,17 +799,22 @@ end
     _adaptive_hsgp_centering_blocks(model, unc_names)
 
 Resolve the compiled coordinates and fixed spectral geometry for every
-ungrouped and grouped squared-exponential HSGP in an `SBBRMI` or
-`GenerativePlan`. A grouped term contributes one block per group level; all of
-them share the term's spectral scales, so each level's basis weights adapt as
-independent scalar cells around the same per-basis frame.
+ungrouped and grouped squared-exponential HSGP and every ungrouped periodic
+HSGP in an `SBBRMI` or `GenerativePlan`. A grouped term contributes one block
+per group level; all of them share the term's spectral scales, so each
+level's basis weights adapt as independent scalar cells around the same
+per-basis frame. A periodic term contributes one block whose `harmonics`
+carry the cosine/sine spectrum; its cells join the same HSGP pair order as
+squared-exponential cells.
 
 This is the backend-internal companion to [`adaptive_centering_blocks`](@ref).
 It follows BRM's formula-term descriptor to declaration-owned parameter roles,
-then reads the declaration's compiler-owned `omega2` data binding.  It never
+then reads the declaration's compiler-owned spectral data binding (`omega2`
+for squared-exponential terms, `harmonics` for periodic ones).  It never
 parses generated Stan or assumes a global parameter order.  The metadata is
-intentionally fail-closed: periodic HSGPs, bounded transforms, and
-declaration/artifact coordinate drift raise before a reparametrizer is built.
+intentionally fail-closed: unknown covariances, grouped periodic terms,
+bounded transforms, and declaration/artifact coordinate drift raise before a
+reparametrizer is built.
 """
 function _adaptive_hsgp_centering_blocks(model, unc_names)
     descriptor = brm_descriptor(model)
@@ -814,10 +828,15 @@ function _adaptive_hsgp_centering_blocks(model, unc_names)
             getf(entry.value) === hsgp || continue
             kw = getkwargs(entry.value)
             covariance = _sb_gp_cov(kw, :hsgp)
+            if covariance === :periodic
+                _adaptive_periodic_hsgp_block!(
+                    out, descriptor, plan, unc_names, logical, entry, kw)
+                continue
+            end
             covariance === :exp_quad || error(
                 "BRM adaptive centering: HSGP `$(entry.term)` on predictor " *
-                "`$logical` uses covariance `$covariance`; this first contract " *
-                "supports only the non-periodic squared-exponential geometry.",
+                "`$logical` uses covariance `$covariance`; this contract " *
+                "supports the squared-exponential and periodic geometries.",
             )
             if haskey(kw, :by)
                 _adaptive_grouped_hsgp_blocks!(
@@ -896,7 +915,7 @@ function _adaptive_hsgp_centering_blocks(model, unc_names)
                 _brm_hsgp_centeredness(kw, length(weights.coordinates)),
                 collect(weights.coordinates),
                 collect(rho.coordinates), rho_lower, only(sigma.coordinates),
-                sigma_lower, omega2,
+                sigma_lower, omega2, Float64[],
             ))
         end
     end
@@ -920,6 +939,112 @@ function _adaptive_hsgp_centering_blocks(model, unc_names)
         "BRM adaptive centering: emitted HSGP blocks claim overlapping " *
         "unconstrained coordinates; refusing an ambiguous transform.",
     )
+    out
+end
+
+# Ungrouped periodic HSGP weights for online adaptation. The cosine/sine
+# basis weights are conditionally independent given their spectral scales
+# exactly like squared-exponential weights, so one term contributes one
+# ordinary `_HSGPAdaptiveCenteringBlock` with `harmonics` populated and
+# `omega2` empty; `_adaptive_hsgp_log_scale` selects the Bessel spectrum on
+# that field. The compiled periodic emission is always fully non-centered
+# (sbimpl refuses a periodic `centeredness`), so `target_c` is zeros by
+# construction and checked here. Grouped periodic HSGP is not emitted by the
+# compiler; a `by=` keyword reaching this path refuses rather than
+# misrouting into the grouped squared-exponential layout.
+function _adaptive_periodic_hsgp_block!(
+        out, descriptor, plan, unc_names, logical, entry, kw)
+    haskey(kw, :by) && error(
+        "BRM adaptive centering: periodic HSGP `$(entry.term)` on predictor " *
+        "`$logical` carries `by=`; the grouped periodic basis is not " *
+        "implemented.",
+    )
+
+    weights = brm_term_coordinates(
+        descriptor, logical, unc_names;
+        term=entry.term, parameter=:basis_weights,
+    )
+    owner = weights.output.declaration
+    isnothing(owner) && error(
+        "BRM adaptive centering: periodic HSGP `$(entry.term)` basis weights " *
+        "have no compiler declaration owner.",
+    )
+    if owner.family isa Symbol
+        owner.family === :_sb_hsgp_periodic || error(
+            "BRM adaptive centering: periodic HSGP `$(entry.term)` resolved " *
+            "to unsupported emitted family `$(owner.family)`.",
+        )
+    end
+    isempty(weights.output.constraints) || error(
+        "BRM adaptive centering: periodic HSGP `$(entry.term)` basis weights " *
+        "are constrained, so they are not the emitted standard-normal " *
+        "`beta_raw` coordinates this transform requires.",
+    )
+
+    rho = _adaptive_same_hsgp_owner(brm_term_coordinates(
+        descriptor, logical, unc_names;
+        term=entry.term, parameter=:length_scale,
+    ), owner, "length scale")
+    sigma = _adaptive_same_hsgp_owner(brm_term_coordinates(
+        descriptor, logical, unc_names;
+        term=entry.term, parameter=:sd,
+    ), owner, "marginal SD")
+    length(rho.coordinates) == 1 || error(
+        "BRM adaptive centering: periodic HSGP `$(entry.term)` owns " *
+        "$(length(rho.coordinates)) length-scale coordinates; the cosine/sine " *
+        "spectrum needs exactly one.",
+    )
+    length(sigma.coordinates) == 1 || error(
+        "BRM adaptive centering: periodic HSGP `$(entry.term)` must have one " *
+        "marginal-SD coordinate.",
+    )
+
+    harmonics_key = get(owner.keywords, :harmonics, nothing)
+    harmonics_key isa Symbol || error(
+        "BRM adaptive centering: periodic HSGP `$(entry.term)` declaration " *
+        "does not expose its compiler-owned `harmonics` data binding.",
+    )
+    harmonics_raw = get(plan.data, harmonics_key, nothing)
+    harmonics_raw isa AbstractVector{<:Real} || error(
+        "BRM adaptive centering: periodic HSGP `$(entry.term)` compiler data " *
+        "`$harmonics_key` is not a real harmonic-index vector.",
+    )
+    harmonics = Vector{Float64}(harmonics_raw)
+    n_weights = length(weights.coordinates)
+    length(harmonics) == n_weights || error(
+        "BRM adaptive centering: periodic HSGP `$(entry.term)` owns " *
+        "$n_weights basis weights, but `$harmonics_key` carries " *
+        "$(length(harmonics)) harmonic indices.",
+    )
+    iseven(n_weights) || error(
+        "BRM adaptive centering: periodic HSGP `$(entry.term)` owns " *
+        "$n_weights basis weights; the cosine/sine basis needs an even count.",
+    )
+    harmonics == _brm_hsgp_periodic_harmonics(n_weights ÷ 2) || error(
+        "BRM adaptive centering: periodic HSGP `$(entry.term)` compiler data " *
+        "`$harmonics_key` is not the cosine/sine harmonic index vector; " *
+        "refusing crossed term metadata.",
+    )
+
+    rho_lower = _adaptive_lower_bounds(
+        plan, rho.output, length(rho.coordinates), entry.term,
+        "length scale",
+    )
+    sigma_lower = only(_adaptive_lower_bounds(
+        plan, sigma.output, 1, entry.term, "marginal SD",
+    ))
+    target_c = _brm_hsgp_centeredness(kw, n_weights)
+    all(iszero, target_c) || error(
+        "BRM adaptive centering: periodic HSGP `$(entry.term)` carries a " *
+        "non-zero compiled centeredness; partial centering supports only " *
+        "the exp_quad HSGP spectrum.",
+    )
+    push!(out, _HSGPAdaptiveCenteringBlock(
+        logical, entry.term, target_c,
+        collect(weights.coordinates),
+        collect(rho.coordinates), rho_lower, only(sigma.coordinates),
+        sigma_lower, Matrix{Float64}(undef, 0, 0), harmonics,
+    ))
     out
 end
 
@@ -1012,7 +1137,7 @@ function _adaptive_grouped_hsgp_blocks!(
         push!(out, _HSGPAdaptiveCenteringBlock(
             logical, entry.term, target_c,
             flat[(g-1)*B+1:g*B],
-            rho_idx, rho_lower, sd_idx, sigma_lower, omega2,
+            rho_idx, rho_lower, sd_idx, sigma_lower, omega2, Float64[],
         ))
     end
     out
@@ -1022,6 +1147,16 @@ function _adaptive_hsgp_log_scale(x::AbstractVector,
                                   block::_HSGPAdaptiveCenteringBlock,
                                   basis::Int)
     1 <= basis <= length(block.effects) || throw(BoundsError(block.effects, basis))
+    if !isempty(block.harmonics)
+        length(block.length_scales) == 1 || error(
+            "BRM adaptive centering: periodic HSGP `$(block.term)` owns " *
+            "$(length(block.length_scales)) length scales; the cosine/sine " *
+            "spectrum needs exactly one.",
+        )
+        sigma = block.sd_lower + exp(x[block.sd])
+        rho = block.length_scale_lower[1] + exp(x[block.length_scales[1]])
+        return _brm_hsgp_periodic_log_scale(block.harmonics[basis], sigma, rho)
+    end
     sigma = block.sd_lower + exp(x[block.sd])
     value = log(sigma)
     for axis in eachindex(block.length_scales)

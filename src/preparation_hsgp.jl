@@ -269,6 +269,21 @@ function _brm_hsgp_periodic_rho_lower(K::Integer)
     1 / sqrt(exp((lo + hi) / 2))
 end
 
+# Periodic HSGP spectral scale in log domain: `s_j = sigma * sqrt(2 *
+# exp(-a) * I_j(a))` with `a = 1 / rho^2` (Riutort-Mayol et al. 2023,
+# "periodic kernel"). `besselix` IS the exponentially scaled `exp(-a) *
+# I_j(a)`, so the Stan emission's `-a/2 + log(I_j(a))/2` pair collapses to
+# `log(besselix(j, a))/2` with no overflow at small `rho` (large `a`); the
+# BridgeStan gate in `test/gp_hsgp_periodic.jl` pins the Stan side to this
+# value at 1e-9. The online adaptive-centering path differentiates through
+# this (Enzyme 0.13 ships the `besselix` recurrence rule), and the Turing
+# ext's `_brm_hsgp_log_sqrt_spd` maps it over its harmonics: one formula,
+# every consumer.
+function _brm_hsgp_periodic_log_scale(harmonic::Real, sigma::Real, rho::Real)
+    a = inv(rho^2)
+    log(sigma) + (log(2) + log(SpecialFunctions.besselix(harmonic, a))) / 2
+end
+
 function _brm_orthogonalize_hsgp_linear(PHI::AbstractMatrix,
                                        x::AbstractVector{<:Real})
     size(PHI, 1) == length(x) || error(
