@@ -441,7 +441,7 @@ end
     @test_throws "matches no random-effect margin" SBBRMI(unknown(df); mod=@__MODULE__, total_groups=())
 end
 
-# The observed-cQTc shape (Bruno:arv393, snag `ranef-sd-lpdf-el-a190739d`):
+# The reported shape (snag `ranef-sd-lpdf-el-a190739d`):
 # one intercept-only random effect in a NAMED bucket with an explicit
 # block-level SD prior. It is the smallest model that pins the generated
 # native vector density/RNG family and the stable tau coordinate.

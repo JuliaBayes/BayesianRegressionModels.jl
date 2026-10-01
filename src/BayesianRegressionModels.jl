@@ -113,8 +113,8 @@ export me, mi, s, t2, ar, dar, rw, cdar, mo, mo1, hsgp, OrderedLogistic, Ordinal
        BetaBinomial, BetaBinomial2, CircularVonMises, SkewDoubleExponential,
        sb_group_demo, addprop
 # TruncatedNormal top-level marker + kernel/ragged group-local term surface.
-# (The biomarker_hierarchical_parametric whole-model marker was shed: dead
-# code, superseded by the kernel composition in test/kernel_biomarker_cell.jl.)
+# (A former whole-model parametric response marker was shed as dead code;
+# the shared-bucket + `kernel(...)` composition is the current idiom.)
 export TruncatedNormal, kernel, ragged
 export brm_multinomial, brm_multinomial_lpmf, brm_multinomial_lpmfs, brm_multinomial_rng
 # Julia-native response-family composition. `truncated` and `censored` are the

@@ -517,8 +517,8 @@ end
     end
 end
 
-# The consumer shape the snag was reported for (a downstream PKPD web app,
-# `linear_pk_brm5`): the PK model declares its per-subject quantities with LHS
+# The consumer shape the snag was reported for (a downstream PKPD web app):
+# the PK model declares its per-subject quantities with LHS
 # links so the cell no longer spells `exp(...)` itself, and `kernel(...)` is fed
 # the NATURAL-scale bindings. The population priors stay on the log scale and
 # keep their bare-name addresses.

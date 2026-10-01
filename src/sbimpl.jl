@@ -3,10 +3,9 @@ import StanBlocks: RaggedVector
 
 
 # ==============================================================================
-# SlicModel helpers (ported verbatim from an external PKPD codebase's qt.jl,
-# `popefs`/`ranefs`/`popranefs`/`cdirichlet` family, lines 303-344). Kept here
-# as module-local bindings so the walker can emit calls to them by name without
-# depending on that package. Duplication is intentional for now.
+# SlicModel helpers (the `popefs`/`ranefs`/`popranefs`/`cdirichlet` family).
+# Kept here as module-local bindings so the walker can emit calls to them by
+# name.
 # ==============================================================================
 
 _sb_interval_literal(x::Real) = _brm_interval_literal(x)
@@ -905,8 +904,8 @@ end
 # sb_group_clamped_demo: proves the general structured-latent floor's
 # clamped / non-normal element-wise prior path (decision 10uz10q, the obs_scale
 # shape). Declares a `matrix<lower=0>[n_groups, 2]` latent with an element-wise
-# Exponential prior — exactly varyingsource2's `matrix<lower=0>[n_assays,2]`
-# obs_scale. Not a wired consumer; it exists so a transpile probe can confirm
+# Exponential prior — the per-assay `matrix<lower=0>[n_assays,2]` observation
+# scale shape. Not a wired consumer; it exists so a transpile probe can confirm
 # the floor emits a valid positively-constrained matrix param with a non-normal
 # prior. Returns the per-obs sum of both clamped per-group params.
 # No docstring (docstring → @deffun AssertionError gotcha; see primer).
@@ -4998,7 +4997,7 @@ _sb_empty_id_lookup() = Dict{Tuple{Symbol,Tuple{Symbol,Any}}, Any}()
 
 sbimpl extension hook. Override (e.g. in a downstream `-ext.jl`) to route
 `target ~ f(...)` where `f` is a known SLIC submodel family
-(`logistic_dr`, `gamma_time`, …) straight to `target ~ <slic>(; kwargs)`,
+(a dose-response or time-course submodel, …) straight to `target ~ <slic>(; kwargs)`,
 bypassing the population-linear-predictor wrap (which would otherwise
 multiply the submodel output by a fresh β).
 
@@ -10852,7 +10851,7 @@ end
 _sb_predictor_col(t::NamedColumn, data, _stmts, _pop_terms=(); kwargs...) = _predictor_col_for(t, parent(t), data)
 
 # If the named column was already bound earlier in the walker (e.g.
-# `ftime ~ gamma_time(...)` emitted a `ftime ~ _sb_gamma_time(...)` stmt),
+# `ftime ~ time_course(...)` emitted a `ftime ~ _sb_time_course(...)` stmt),
 # its parent is the sampling ExprColumn rather than a raw data column --
 # just reference the Stan variable by name.
 _predictor_col_for(t, ::ExprColumn, _) = name(t)

@@ -2,8 +2,8 @@
 # test/probe_kwarg_seam.jl — seam-regression probe for option-(ii) param-feed seam
 #
 # Verifies that existing BRM + StanBlocks machinery already supports the
-# per-obs LP kwargs end-to-end (option ii), so a downstream PKPD lane can implement the
-# `twocmt_superposition` term without requiring BRM-core additions.
+# per-obs LP kwargs end-to-end (option ii), so a downstream PKPD package can implement
+# its own kernel term without requiring BRM-core additions.
 #
 # Three checks:
 #   (1) @brm latent LP sub-formulas (log_X ~ 1 + covariates + (1|p|subject))
@@ -14,7 +14,7 @@
 #       threads them as @slic kwargs pointing at the correct Stan variable.
 #
 # SCOPE: BRM-side seam only. Cross-module @slic mod-reachability of the
-# real co-located `_sb_twocmt_superposition` is the downstream package's kernel-wiring check.
+# a real co-located downstream kernel is the downstream package's kernel-wiring check.
 
 using BayesianRegressionModels, StanBlocks
 using Distributions: Normal
@@ -35,7 +35,7 @@ probe_slic = StanBlocks.@slic begin
 end
 
 # Emitter: reads LP column names via getkwargs(rhs), threads as @slic kwargs.
-# Mirrors the _sb_logistic_dr emitter pattern in the downstream PKPD integration.
+# Mirrors the emitter pattern a downstream PKPD integration uses.
 function _sb_submodel_rhs!(stmts, data, target::Symbol,
                             ::typeof(probe_kwarg_consumer), rhs)
     kw = getkwargs(rhs)

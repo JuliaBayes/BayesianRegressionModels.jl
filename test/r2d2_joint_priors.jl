@@ -4,7 +4,7 @@
 # Run: julia --project=test test/r2d2_joint_priors.jl
 # Set BRM_R2D2_RUNTIME=0 to skip the BridgeStan density/gradient probe.
 #
-# The inciting case (snag `request-joint-r2`, reporter Bruno:brm) is a joint
+# The inciting case (snag `request-joint-r2`, a downstream PKPD consumer) is a joint
 # PK/QT model whose seven subject-level parameters share one correlated `|p|`
 # block and one covariate RHS with continuous AND categorical terms, and wants
 # ONE global R² and ONE Dirichlet over the union of: every scoped predictor's

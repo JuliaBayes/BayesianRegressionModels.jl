@@ -46,7 +46,7 @@ _mk(name, kind) = BRM.BRMOutput(
 end
 
 @testset "prior-only joint R2D2 categorical coordinates select beta, not scale" begin
-    # Inciting Bruno regime: with the response column omitted, both the
+    # Inciting regime: with the response column omitted, both the
     # categorical beta and its joint-R2D2 derived scale move to generated
     # quantities under the same declaration. Declaration ownership alone
     # therefore finds two GQ internals; the public address must follow the

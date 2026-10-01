@@ -540,7 +540,7 @@ ev_lesion_wide_df() = merge(ev_lesion_df(), (;
     df = ev_lesion_df()
     sb = SBBRMI(ev_lesion_model(df); mod = @__MODULE__)
     descriptor = brm_descriptor(
-        sb; name = :joint_pk_tgi_brm1_direct_linear, highlights = ())
+        sb; name = :ragged_lesion_ranef, highlights = ())
 
     @testset "the lesion ranef lowers onto the tumor frame" begin
         @test !haskey(sb.data, :tgi_kg)

@@ -139,7 +139,7 @@ end
 # lazy-fit regression in `_sb_hsgp_fit_for_emission` (eager `fresh = _sb_fit_hsgp`
 # ahead of the frozen-entry early return) made this crash `hsgp: degenerate
 # input`; plain frozen `reprocess` was always lazy and unaffected. Snag
-# `reprocess-freeze-c4ac8241` (reporter Bruno:arv393); the entangled kernel/ragged
+# `reprocess-freeze-c4ac8241` (a downstream PKPD consumer); the entangled kernel/ragged
 # twin of this lock lives in test/kernel_ragged_reprocess_snag.jl.
 @testset "frozen HSGP basis survives resample onto a constant axis" begin
     hsgp_train = (; subject = repeat([1, 2, 3], inner=2),

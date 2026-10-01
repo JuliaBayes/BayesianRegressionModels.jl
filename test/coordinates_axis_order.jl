@@ -7,8 +7,8 @@
 # reversed or permuted `constrained_names` returns the same elements a
 # native-ordered axis does. They used to index axis-ordered matches by label
 # position, so reversing the axis silently mapped `:Intercept` to the LAST
-# beta element (`pop_loc_slope_beta_pop.5` instead of `.1` on Bruno's
-# five-coefficient QT model). `brm_output_coordinates` is the deliberate
+# beta element (`pop_loc_slope_beta_pop.5` instead of `.1` on a
+# five-coefficient model). `brm_output_coordinates` is the deliberate
 # exception: a whole-carrier slice preserves axis order by contract.
 #
 # Constrained names are BridgeStan-spelled (`stem.i` per element): the
@@ -29,7 +29,7 @@ const _MOD = @__MODULE__
 _rotated(names) = circshift(names, 2)
 
 @testset "population coefficients resolve under any axis order" begin
-    # Bruno's QT shape: five numeric covariates plus a grouping factor, with
+    # Five numeric covariates plus a grouping factor, with
     # conventional emission (`total_groups=()`).
     df = (;
         zage=Float64[-1.2, -0.5, 0.1, 0.8, 1.5, -0.3, 0.4, 1.1],
@@ -69,7 +69,7 @@ _rotated(names) = circshift(names, 2)
 end
 
 @testset "single-coefficient carriers are trivially order-free" begin
-    # Why Bruno's reversed `loc_loc` probe passed while `loc_slope` failed: a
+    # Why a reversed `loc_loc` probe passed while `loc_slope` failed: a
     # one-element permutation is the identity.
     df = (;
         y=Float64[0.1, -0.2, 0.4, 0.7, 1.1, -0.1],

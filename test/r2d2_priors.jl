@@ -260,7 +260,7 @@ end
 end
 
 @testset "explicit per-column Normal priors compose with r2d2 -- until they exclude every column" begin
-    # Snag `sbimpl-r2d2-expl-33fca9c1` (reporter Bruno:brm). A population
+    # Snag `sbimpl-r2d2-expl-33fca9c1` (a downstream consumer). A population
     # column with its own `effect(...) ~ Normal(...)` keeps that loc/scale and
     # leaves the Dirichlet allocation; the REMAINING columns and the
     # random-effect residual are still decomposed. The default-layer
