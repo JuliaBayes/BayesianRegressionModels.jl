@@ -396,16 +396,18 @@ function _adaptive_log_symbol!(acc, sym::Symbol, w, ctx, owner, depth)
     o.type === :real && isempty(o.size) || _adaptive_r2d2_refuse(owner, sym,
         "parameter `$sym` is a `$(o.type)`, not a scalar")
     lower, upper = _adaptive_scalar_constraint(ctx, owner, o)
+    unit = lower == 0.0 && upper == 1.0
+    lower == 0.0 && (isnothing(upper) || unit) || _adaptive_r2d2_refuse(
+        owner, sym,
+        "parameter `$sym` has bounds ($(something(lower, "none")), " *
+        "$(something(upper, "none"))); only `lower=0` and the unit interval " *
+        "are supported")
     i = _adaptive_unc_index(ctx, owner, String(sym))
-    if lower == 0.0 && isnothing(upper)
-        acc.linear[i] = get(acc.linear, i, 0.0) + w
-    elseif lower == 0.0 && upper == 1.0
+    if unit
         a, b = get(acc.unit, i, (0.0, 0.0))
         acc.unit[i] = (a + w, b)
     else
-        _adaptive_r2d2_refuse(owner, sym,
-            "parameter `$sym` has bounds ($lower, $upper); only `lower=0` " *
-            "and the unit interval are supported")
+        acc.linear[i] = get(acc.linear, i, 0.0) + w
     end
     acc
 end
