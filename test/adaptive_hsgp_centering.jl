@@ -416,15 +416,21 @@ LogDensityProblems.logdensity_and_gradient(target::HSGPQuadraticTarget, x) =
     @test blocks[1].length_scale_lower == [sb.data[:rho_lower_hsgp_time]]
     @test blocks[2].length_scale_lower == [sb.data[:rho_lower_hsgp_time_noise]]
 
+    # The descriptor refuses an incomplete basis-weight carrier before the
+    # adaptive metadata reaches its own name check; either way it names the
+    # emitted output and fails closed.
     missing = filter(!=("hsgp_time_beta_raw.2"), names)
-    @test_throws "basis_weights" BRM._adaptive_hsgp_centering_blocks(sb, missing)
+    @test_throws "hsgp_time_beta_raw" BRM._adaptive_hsgp_centering_blocks(sb, missing)
 
     periodic = @brm HSGP_ONLINE_DATA begin
         mu ~ 1 + hsgp(time; k=3, cov=:periodic, period=2.5)
         y ~ Normal(mu, 1)
     end
     periodic_sb = SBBRMI(periodic; mod=@__MODULE__)
-    @test_throws "covariance `periodic`" BRM._adaptive_hsgp_centering_blocks(
+    # Periodic HSGPs adapt since snag adaptive-centeri-96a06b1f (covered by
+    # `test/adaptive_periodic_hsgp_centering.jl`); against names that do not
+    # describe the emission they still fail closed on the basis weights.
+    @test_throws "basis_weights" BRM._adaptive_hsgp_centering_blocks(
         periodic_sb, String[],
     )
 
