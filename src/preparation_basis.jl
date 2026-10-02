@@ -4,6 +4,21 @@
 # side constraint, and diagonalize the resulting range-space penalty. Applying
 # the fitted object to new x values needs only the frozen training centers,
 # shift, and penalty-whitened range projection.
+# LAPACK fixes eigenvectors only up to sign. Orient each penalized column by
+# its first significant entry so the fitted coordinates agree across machines.
+# Keep this rule identical to ReactiveKernelsPPL's _rk_canonical_column_signs.
+function _brm_canonical_column_signs(M::AbstractMatrix{<:Real})
+    out = Matrix{Float64}(M)
+    for j in axes(out, 2)
+        col = view(out, :, j)
+        peak = maximum(abs, col)
+        peak > 0 || continue
+        i = findfirst(v -> abs(v) > 1e-8 * peak, col)
+        col[i] < 0 && (col .= .-col)
+    end
+    out
+end
+
 function _brm_tps_kernel(x::AbstractVector{<:Real}, centers::AbstractVector{<:Real})
     E = Matrix{Float64}(undef, length(x), length(centers))
     for j in eachindex(centers), i in eachindex(x)
@@ -42,7 +57,7 @@ function _brm_fit_spline(x::AbstractVector{<:Real}; k::Int=10)
         "sbimpl: `s(x)` produced a non-positive range-space penalty")
     penalty_values = max.(eig_S.values, tol)
     penalty_whitener = eig_S.vectors * Diagonal(inv.(sqrt.(penalty_values)))
-    range_projection = U * Z * penalty_whitener
+    range_projection = _brm_canonical_column_signs(U * Z * penalty_whitener)
 
     (; shift, centers, range_projection, k)
 end
@@ -168,8 +183,8 @@ function _brm_fit_cr_spline(x::AbstractVector{<:Real}; k::Int=5)
         "sbimpl: `t2` cubic-regression-spline penalty is not positive semidefinite")
     minimum(eig_penalty.values[keep]) > tol || error(
         "sbimpl: `t2` could not isolate the two-dimensional marginal null space")
-    range_projection = eig_penalty.vectors[:, keep] *
-                       Diagonal(inv.(sqrt.(eig_penalty.values[keep])))
+    range_projection = _brm_canonical_column_signs(eig_penalty.vectors[:, keep] *
+                       Diagonal(inv.(sqrt.(eig_penalty.values[keep]))))
 
     null_const_scale = inv(sqrt(length(xs)))
     slope_norm = norm(normalized)

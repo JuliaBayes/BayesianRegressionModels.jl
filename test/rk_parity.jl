@@ -59,6 +59,7 @@ using SpecialFunctions: besselix, logbeta, loggamma
 # Substring subset contract for chunked runs (see testset_filter.jl): blocks
 # below are `@stestset`, selectable via trailing ARGS or `BRM_TEST_FILTER`.
 include(joinpath(@__DIR__, "testset_filter.jl"))
+include(joinpath(@__DIR__, "spline_parity_models.jl"))
 
 const BRM = BayesianRegressionModels
 const _PARITY_BACKEND = AutoEnzyme(; mode = Enzyme.Reverse)
@@ -2432,29 +2433,21 @@ end
 # `n_sd * log(2)` above); the SB anchors pin the cross-backend point.
 @stestset "rk parity spline s default" begin
     # Pair-agreed Xoshiro(7207) n=80 probe, default k=10 basis.
-    rng = Xoshiro(7207)
-    x = 5 .* randn(rng, 80)
-    y = sin.(x) .+ 0.3 .* randn(rng, 80)
-    df = (; x, y)
-    brmi = @brm df begin
-        mu ~ 1 + s(x)
-        y ~ Normal(mu, sigma)
-        effect(mu, Intercept) ~ Normal(0, 5)
-        sigma ~ Exponential(1)
-    end
+    (; brmi, x, y) = spline_s_parity_case()
     backend = BRM.RKBRMI(brmi)
     layout = backend.model.layout
-    @test layout.total == 13
+    @test layout.total == 12
     @test _layout_signature(layout) == [
         (:coefficient, :mu_coef, 1, :identity),
         (:sampled, :sigma, 1, :exp),
-        (:spline, :b_s_x_fixed, 2, :identity),
+        (:spline, :b_s_x_fixed, 1, :identity),
         (:spline, :b_s_x_raw, 8, :identity),
         (:spline, :sd_s_x, 1, :exp),
     ]
     # Probe in layout order (pinned by the signature above):
-    # [mu.Intercept, log(sigma), b_fixed.1..2, b_raw.1..8, log(sd)].
-    u = [-0.3, -0.25, -0.2, -0.15, -0.1, -0.05, 0.0, 0.05, 0.1,
+    # [mu.Intercept, log(sigma), b_fixed.1, b_raw.1..8, log(sd)].
+    # Fold SB's flat constant coefficient (-0.2) into its intercept (-0.3).
+    u = [-0.5, -0.25, -0.15, -0.1, -0.05, 0.0, 0.05, 0.1,
         0.15, 0.2, 0.25, 0.3]
     # Values route through the bound translated plan (see the helper):
     # the kernel takes host-materialized basis columns.
@@ -2463,7 +2456,7 @@ end
     sig = nt.sigma
     sd = only(nt.sd_s_x)
     Xnull, Zpen = BRM._brm_apply_spline(BRM._brm_fit_spline(x; k=10), x)
-    mu_hat = nt.mu[1] .+ Xnull * nt.b_s_x_fixed .+ Zpen * (sd .* nt.b_s_x_raw)
+    mu_hat = nt.mu[1] .+ Xnull[:, 2:2] * nt.b_s_x_fixed .+ Zpen * (sd .* nt.b_s_x_raw)
     ll = sum(logpdf.(Normal.(mu_hat, sig), y))
     pr = logpdf(Normal(0, 5), nt.mu[1]) + logpdf(Normal(), sd) +
         sum(logpdf.(Normal(), nt.b_s_x_raw)) + logpdf(Exponential(1), sig)
@@ -2472,10 +2465,12 @@ end
     @test _rk_query_translated(backend, translated, :prior, u) ≈ pr
     @test logjac(layout, u) ≈ jac
     @test _rk_query_translated(backend, translated, :sampler, u) ≈ ll + pr + jac
-    # SB anchor: BridgeStan full posterior (`propto=false`, Jacobian) at
-    # this point is `-2037.0040124507998` (BRM SB emission, StanBlocks
-    # `24578c3`, term-splines-stan SB brief).
-    @test _rk_query_translated(backend, translated, :sampler, u) ≈ -2037.0040124507998
+    # Independent BridgeStan anchor at SB's original 13-coordinate point
+    # (test/spline_sb_parity.jl). Folding its constant into the intercept
+    # preserves the likelihood; only the Normal(0,5) intercept prior moves.
+    intercept_bridge = logpdf(Normal(0, 5), u[1]) - logpdf(Normal(0, 5), -0.3)
+    @test _rk_query_translated(backend, translated, :sampler, u) ≈
+        SPLINE_S_SB_ANCHOR + intercept_bridge atol=1e-9
     problem = BRM.rk_logdensity_problem(backend;
         ad_backend = _PARITY_BACKEND, u0 = u)
     value, grad = LogDensityProblems.logdensity_and_gradient(problem, u)
@@ -2487,17 +2482,7 @@ end
 
 @stestset "rk parity spline t2 k33" begin
     # Pair-agreed Xoshiro(7208) n=80 probe, k=(3,3) tensor basis.
-    rng = Xoshiro(7208)
-    x = 4 .* randn(rng, 80)
-    z = 3 .* randn(rng, 80) .+ 1.0
-    y = 0.5 .* x .- 0.25 .* z .+ 0.3 .* randn(rng, 80)
-    df = (; x, z, y)
-    brmi = @brm df begin
-        mu ~ 1 + t2(x, z; k=(3, 3))
-        y ~ Normal(mu, sigma)
-        effect(mu, Intercept) ~ Normal(0, 5)
-        sigma ~ Exponential(1)
-    end
+    (; brmi, x, z, y) = spline_t2_parity_case()
     backend = BRM.RKBRMI(brmi)
     layout = backend.model.layout
     @test layout.total == 13
@@ -2536,10 +2521,10 @@ end
     @test _rk_query_translated(backend, translated, :prior, u) ≈ pr
     @test logjac(layout, u) ≈ jac
     @test _rk_query_translated(backend, translated, :sampler, u) ≈ ll + pr + jac
-    # SB anchor: BridgeStan full posterior (`propto=false`, Jacobian) at
-    # this point is `-359.94318407167754` (BRM SB emission, StanBlocks
-    # `24578c3`, term-splines-stan SB brief).
-    @test _rk_query_translated(backend, translated, :sampler, u) ≈ -359.94318407167754
+    # Re-derived with canonical signs by test/spline_sb_parity.jl; t2 has
+    # the same layout in both backends and needs no intercept-prior bridge.
+    @test _rk_query_translated(backend, translated, :sampler, u) ≈
+        SPLINE_T2_SB_ANCHOR atol=1e-9
     problem = BRM.rk_logdensity_problem(backend;
         ad_backend = _PARITY_BACKEND, u0 = u)
     value, grad = LogDensityProblems.logdensity_and_gradient(problem, u)

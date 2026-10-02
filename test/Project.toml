@@ -72,9 +72,9 @@ rev = "0194dce08e986ff17fd5a788bb315c6431b7858e"
 
 [sources.ReactiveKernels]
 url = "https://github.com/nsiccha/ReactiveKernels.jl"
-# cb9f9ab7 (2026-09-30, main): serializes generated-model binding
-# assignment during concurrent build_kernel calls (peer GO 1tddu2a).
+# 639e4e38 (2026-10-02, main): canonical TPS/t2 projection signs;
+# includes TPS fixed width 1 (the constant column is dropped).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "cb9f9ab75c65df33c9c23e175f5fbdbb521c5fa4"
+rev = "639e4e389c47d276169a3c64d47f2c89fb9bb454"

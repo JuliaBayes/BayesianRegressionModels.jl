@@ -40,6 +40,13 @@ A new heavy file adopts the same contract with one `include` plus the macro:
 
 ## Shared preparation and Turing lowering
 
+`spline_basis_signs.jl` checks canonical TPS/t2 projection signs, input
+ownership, and frozen projections directly. The spline blocks in
+`rk_parity.jl` compare RK densities and Enzyme gradients with independent
+oracles; `spline_parity_models.jl` holds their shared BridgeStan fixtures.
+`spline_sb_parity.jl` compiles those fixtures independently and checks the
+full-posterior anchors and gradients, including the distributional spline toy.
+
 The focused preparation gates are `preparation_program.jl`,
 `preparation_replay.jl`, `preparation_assignments.jl`, and `backend_plan.jl`.
 The assignment gate checks dependency ordering and distinct response row axes.
