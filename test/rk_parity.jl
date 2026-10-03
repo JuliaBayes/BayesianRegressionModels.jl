@@ -667,7 +667,7 @@ end
     ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ r, nt.sigma), _parity_cols.y))
     pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) +
         logpdf(Exponential(1), nt.sigma) +
-        logpdf(Normal(0, 1), only(_parity_ranef(nt, backend).sd)) + log(2) +
+        logpdf(LogNormal(0, 1), only(_parity_ranef(nt, backend).sd)) +
         sum(logpdf.(Normal(0, 1), _parity_ranef(nt, backend).zflat))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
@@ -696,7 +696,7 @@ end
     ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ r, nt.sigma), _parity_cols_cat.y))
     pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) +
         logpdf(Exponential(1), nt.sigma) +
-        logpdf(Normal(0, 1), only(_parity_ranef(nt, backend).sd)) + log(2) +
+        logpdf(LogNormal(0, 1), only(_parity_ranef(nt, backend).sd)) +
         sum(logpdf.(Normal(0, 1), _parity_ranef(nt, backend).zflat))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
@@ -2795,7 +2795,7 @@ _ref_mm_gather(b, gidx, w) =
     ll = sum(logpdf(Normal(beta + r[i], sigma), _parity_cols_mm.y[i])
         for i in 1:6)
     pr = logpdf(Normal(0, 5), beta) + logpdf(Exponential(1), sigma) +
-        logpdf(Normal(), only(_parity_ranef(nt, backend).sd)) + log(2) +
+        logpdf(LogNormal(), only(_parity_ranef(nt, backend).sd)) +
         sum(logpdf(Normal(0, 1), v) for v in _parity_ranef(nt, backend).zflat)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
@@ -2822,7 +2822,7 @@ end
     ll = sum(logpdf(Normal(beta + r[i], sigma), _parity_cols_mm.y[i])
         for i in 1:6)
     pr = logpdf(Normal(0, 5), beta) + logpdf(Exponential(1), sigma) +
-        logpdf(Normal(), only(_parity_ranef(nt, backend).sd)) + log(2) +
+        logpdf(LogNormal(), only(_parity_ranef(nt, backend).sd)) +
         sum(logpdf(Normal(0, 1), v) for v in _parity_ranef(nt, backend).zflat)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
@@ -2849,7 +2849,7 @@ end
     ll = sum(logpdf(Normal(beta + r[i], sigma), _parity_cols_mm.y[i])
         for i in 1:6)
     pr = logpdf(Normal(0, 5), beta) + logpdf(Exponential(1), sigma) +
-        logpdf(Normal(), only(_parity_ranef(nt, backend).sd)) + log(2) +
+        logpdf(LogNormal(), only(_parity_ranef(nt, backend).sd)) +
         sum(logpdf(Normal(0, 1), v)
             for v in _parity_ranef(nt, backend).zflat)
     @test _rk_query(backend, :likelihood, u) ≈ ll
