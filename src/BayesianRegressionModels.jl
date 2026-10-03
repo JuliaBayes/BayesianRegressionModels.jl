@@ -80,6 +80,7 @@ include("turing_descriptor.jl")
 # the emitted random-effect parameterization, so they live next to the emitter
 # rather than being re-derived (differently) in every consumer.
 include("prediction.jl")
+include("description.jl")
 include("adaptive_centering.jl")
 include("posterior_diagnostics.jl")
 
@@ -166,6 +167,12 @@ export BRMI, VBRMI, SBBRMI, TuringBRMI, RKBRMI, GenerativeDeclaration, Generativ
        rk_logdensity_problem, rk_restore_draws
 export NativePPL
 export BRMDescriptor, BRMInput, BRMOutput, BRMOperation, BRMHighlight
+export BRMDescription, BRMDescriptionComponent, BRMDescriptionContext,
+       BRMDescriptionFragment, BRMDescriptionReference, BRMPriorDescription,
+       BRMDescriptionCoverage, brm_description, brm_describe_component,
+       brm_description_components, brm_description_markdown
+export brm_description_math, brm_description_symbol
+export brm_description_binding, brm_description_prior
 export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
        brm_population_effect_coordinates, brm_term_coordinates,
        brm_ranef_sd_coordinates,

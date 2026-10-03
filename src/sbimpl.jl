@@ -2804,9 +2804,9 @@ SBBRMI(parent::BRMI, model, data::AbstractDict, preproc::AbstractDict,
 # Stan data dictionary and carried with the emitted artifact through replay.
 const _SB_BINDINGS_KEY = :__brm_emission_bindings__
 const _SB_THRESHOLD_LOCATED_KEY = :__brm_threshold_located__
-function _sb_record_binding!(data, key, role, logical; family=nothing)
+function _sb_record_binding!(data, key, role, logical; family=nothing, metadata...)
     bindings = get(data, _SB_BINDINGS_KEY, nothing)
-    isnothing(bindings) || (bindings[key] = (; role, logical, family))
+    isnothing(bindings) || (bindings[key] = (; role, logical, family, metadata...))
     nothing
 end
 
@@ -2863,7 +2863,7 @@ _sb_effect_unresolved_note(unresolved) =
     "such a coefficient explicitly with `effect(linear_predictor, coefficient)` " *
     "to see why."
 
-function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing)
+function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing, provenance::Bool=false)
     specs = effect_priors(brmi)
     isempty(specs) && return Dict{Symbol,Any}()
 
@@ -3123,7 +3123,7 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing)
     # `beta_pop` keeps the plain `popefs` emission byte for byte. The winning
     # expression is unwrapped here so every downstream consumer keeps seeing a
     # bare expression-or-`nothing`, unaware of the precedence bookkeeping.
-    _unwrap(cell) = isnothing(cell) ? nothing : cell.expression
+    _unwrap(cell) = isnothing(cell) ? nothing : provenance ? cell : cell.expression
     out = Dict{Symbol,Any}()
     for lp in union(keys(pop_overrides), keys(cat_overrides))
         pop = get(pop_overrides, lp, nothing)
@@ -7063,12 +7063,29 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
         else
             X_name = Symbol(:X_, target)
             pop_name = Symbol(:pop_, target)
-            _sb_record_binding!(data, pop_name, :population_effect, brmi_key)
+            # Preserve the producer's already prepared design semantics for
+            # reporting. Values stay in Stan data; metadata retains the fitted
+            # transforms and column identities without rebuilding the design.
+            design_columns=isnothing(shared_design) ? nothing : Tuple(
+                (;label=c.label,source=c.source,effect_addresses=c.effect_addresses,
+                   effect_block=c.effect_block,preprocess=c.preprocess)
+                for c in shared_design.columns)
+            _sb_record_binding!(data, pop_name, :population_effect, brmi_key;design_columns)
             # StanBlocks `hcat` promotes a lone vector to matrix[n,1] and folds to
             # append_col for two-or-more columns, so we can always just emit hcat.
             push!(stmts, :($X_name = $(Expr(:call, :hcat, col_exprs...))))
             overrides = _sb_pop_effect_overrides(effect_overrides, brmi_key)
             r2d2_spec = get(r2d2.overrides, brmi_key, nothing)
+            scheme = if !isnothing(joint_spec) && joint_spec.n_shares>0
+                (;kind=:r2d2m2,spec=joint_spec)
+            elseif !isnothing(r2d2_spec) && r2d2_spec.n_shares>0
+                (;kind=:r2d2,spec=r2d2_spec,names=r2d2.names[brmi_key])
+            elseif !isnothing(get(get(data,_SB_HS_PLANS_KEY,Dict()),brmi_key,nothing))
+                (;kind=:horseshoe,spec=data[_SB_HS_PLANS_KEY][brmi_key])
+            else
+                (;kind=:ordinary)
+            end
+            _sb_record_binding!(data,pop_name,:population_effect,brmi_key;design_columns,prior_scheme=scheme)
             if !isnothing(joint_spec) && joint_spec.n_shares > 0
                 # Joint block-wide budget: the same `_popefs_normal` emission
                 # as the whole-predictor form, indexing the block's ONE global
