@@ -596,10 +596,10 @@ function _brm_materialize_bounded_response(
         lo = isnothing(lower) ? nothing : _brm_response_bound_at(lower, i)
         hi = isnothing(upper) ? nothing : _brm_response_bound_at(upper, i)
         (isnothing(lo) || isnothing(hi) || lo <= hi) || error(
-            "$prefix: `$(spec.kind)` lower bounds must not exceed upper bounds")
+            "$prefix: `$(spec.kind)` response `$target` row $i: lower bounds must not exceed upper bounds")
         (isnothing(lo) || lo <= response[i]) &&
         (isnothing(hi) || response[i] <= hi) || error(
-            "$prefix: `$(spec.kind)` response `$target` contains values outside its bounds")
+            "$prefix: `$(spec.kind)` response `$target` contains values outside its bounds at row $i")
     end
     _BRMResponseModifierPlan(spec.kind, spec.base, lower, upper)
 end
