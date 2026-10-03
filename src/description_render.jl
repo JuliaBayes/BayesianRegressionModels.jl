@@ -54,6 +54,40 @@ _brmd_call_math(::typeof(StanBlocks.stan.builtin.dims),args,_kwargs,_c) =
     "\\operatorname{shape}\\left("*only(args)*"\\right)"
 _brmd_builtin_call(::typeof(StanBlocks.stan.builtin.dims),c)=BRMDescriptionFragment(
     prose=("The shape vector lists the size of each declared array axis; indexing it selects that axis's extent.",),covers=(c.id,))
+_brmd_call_math(::typeof(StanBlocks.stan.builtin.to_vector),args,_kwargs,_c) =
+    "\\operatorname{vec}_{\\mathrm{col}}\\left("*only(args)*"\\right)"
+_brmd_builtin_call(::typeof(StanBlocks.stan.builtin.to_vector),c)=BRMDescriptionFragment(
+    prose=("Vector conversion preserves values; a matrix is flattened in column-major order, a row vector becomes a column vector, and a vector is unchanged.",),covers=(c.id,))
+function _brmd_call_math(::typeof(StanBlocks.stan.builtin.to_matrix),args,_kwargs,_c)
+    length(args)==1 && return "\\operatorname{matrix}\\left("*only(args)*"\\right)"
+    order=length(args)==3 ? "\\mathrm{col}" : last(args)=="0" ? "\\mathrm{row}" :
+        "\\mathrm{order}("*last(args)*")"
+    "\\operatorname{reshape}_{"*args[2]*"\\times "*args[3]*","*order*"}\\left("*first(args)*"\\right)"
+end
+_brmd_builtin_call(::typeof(StanBlocks.stan.builtin.to_matrix),c)=BRMDescriptionFragment(
+    prose=("Matrix conversion preserves entries. With explicit row and column counts, filling is column-major by default; an optional fourth argument selects row-major order when zero and column-major order otherwise. A single matrix or two-dimensional array retains its indexing; a single vector retains its row/column orientation.",),covers=(c.id,))
+function _brmd_call_math(::typeof(StanBlocks.stan.builtin.rep_matrix),args,_kwargs,_c)
+    length(args)==3 && return first(args)*"\\,\\mathbf1_{"*args[2]*"\\times "*args[3]*"}"
+    "\\operatorname{rep}_{\\mathrm{matrix}}\\left("*join(args,",")*"\\right)"
+end
+_brmd_builtin_call(::typeof(StanBlocks.stan.builtin.rep_matrix),c)=BRMDescriptionFragment(
+    prose=("Matrix replication fills every cell with its scalar argument when row and column counts are supplied. With one replication count, a column vector is repeated as columns and a row vector as rows.",),covers=(c.id,))
+for f in (adjoint,transpose)
+    @eval _brmd_call_math(::$(typeof(f)),args,_kwargs,_c) =
+        "\\left("*only(args)*"\\right)^{\\mathsf T}"
+    @eval _brmd_builtin_call(::$(typeof(f)),c)=BRMDescriptionFragment(
+        prose=("Transposition exchanges row and column axes. For the real-valued model quantities, adjoint and transpose have the same values.",),covers=(c.id,))
+end
+function _brmd_call_math(::typeof(range),args,kwargs,c)
+    "\\operatorname{range}\\left("*join((args...,
+        (_brmd_identifier(k)*"="*brm_description_math(c,v) for (k,v) in pairs(kwargs))...),",")*"\\right)"
+end
+_brmd_builtin_call(::typeof(range),c)=BRMDescriptionFragment(
+    prose=("The range is the declared arithmetic grid: start plus successive multiples of its step. Without an explicit step or length its step is one; a supplied length determines the number of elements. A stop is reached only when it lies on that grid.",),
+    equations=("r_k=a+(k-1)d,\\quad k=1,\\ldots,n",),covers=(c.id,))
+_brmd_call_math(::Colon,args,_kwargs,_c)="\\operatorname{range}\\left("*join(args,",")*"\\right)"
+_brmd_builtin_call(::Colon,c)=BRMDescriptionFragment(
+    prose=("The colon range uses the declared start and stop with unit step, or the explicit middle step in its three-argument form; it includes the stop only when reached.",),covers=(c.id,))
 brm_description_math(_c::BRMDescriptionContext, x::Number) = string(x)
 brm_description_math(_c::BRMDescriptionContext, x::AbstractString) =
     "\\text{" * _brmd_escape(x) * "}"
@@ -65,7 +99,8 @@ function brm_description_math(c::BRMDescriptionContext,x::NamedTuple)
         brm_description_math(c,x.values)*","*join(x.size,",")*"\\right)"
     haskey(x,:callable) && return _brmd_call_math(x.callable,
         map(a->brm_description_math(c,a),x.arguments),x.keywords,c)
-    _brmd_identifier(string(x))
+    haskey(x,:columns) && return brm_description_math(c,x.columns)
+    "\\left\\{"*join((_brmd_identifier(k)*"="*brm_description_math(c,v) for (k,v) in pairs(x)),";\\,")*"\\right\\}"
 end
 brm_description_math(_c::BRMDescriptionContext, x) = _brmd_identifier(string(x))
 _brmd_callable_name(f::Symbol) = f
@@ -146,6 +181,7 @@ _brmd_law(::Type{<:LKJCholesky}) = :lkj
 _brmd_law(::Type{<:Weibull}) = :weibull
 _brmd_law(::Type{<:Uniform}) = :uniform
 _brmd_law(::typeof(MvNormalCholesky)) = :mvnormal_cholesky
+_brmd_law(::typeof(StanBlocks.stan.builtin.dummy)) = :allocation_only
 # These are exact producer-owned StanBlocks bindings, never a name heuristic
 # applied to arbitrary user callables.
 for (name,law) in ((:normal,:normal_sd),(:std_normal,:standard_normal),
@@ -163,6 +199,7 @@ _brmd_law_math(::Val{:normal_sd},a) = "\\mathcal N\\left(" *
     (isempty(a) ? "0,1" : first(a)*","*(length(a)<2 ? "1" : "{"*a[2]*"}^{2}")) * "\\right)"
 _brmd_law_math(::Val{:standard_normal},_a) = "\\mathcal N(0,1)"
 _brmd_law_math(::Val{:improper_flat},_a) = "\\operatorname{Flat}_{\\mathrm{improper}}"
+_brmd_law_math(::Val{:allocation_only},_a) = "1\\quad\\text{(no additional density)}"
 _brmd_law_math(::Val{:exponential_scale},a) = "\\operatorname{Exponential}_{\\mathrm{scale}}(" *
     (isempty(a) ? "1" : only(a)) * ")"
 _brmd_law_math(::Val{:exponential_rate},a) = "\\operatorname{Exponential}_{\\mathrm{rate}}(" * only(a) * ")"
@@ -180,6 +217,7 @@ _brmd_law_math(::Val{L},a) where L = "\\operatorname{" * _brmd_escape(L) * "}(" 
 _brmd_law_prose(::Val{:normal_sd}) = "Gaussian distribution; the second argument is the residual standard deviation."
 _brmd_law_prose(::Val{:standard_normal}) = "Standard Gaussian distribution."
 _brmd_law_prose(::Val{:improper_flat}) = "Unpenalized coefficient with an improper flat prior (constant log density)."
+_brmd_law_prose(::Val{:allocation_only}) = "This declaration allocates latent coordinates with constant log density; the separately declared joint model supplies their substantive density."
 _brmd_law_prose(::Val{:exponential_rate}) = "Exponential distribution parameterized by rate; its mean/scale is the reciprocal of that rate."
 _brmd_law_prose(::Val{:exponential_scale}) = "Exponential distribution parameterized by scale (its mean), not rate."
 _brmd_law_prose(::Val{:gamma_rate}) = "Gamma distribution parameterized by shape and rate."
@@ -456,6 +494,28 @@ function _brmd_builtin_call(::typeof(me),c)
 end
 _brmd_builtin_call(::typeof(mi),c) = BRMDescriptionFragment(
     prose=("Missing entries are inferred from the declared joint model; observed entries remain conditioned data. No deterministic substitution is implied.",),covers=(c.id,))
+function _brmd_builtin_call(::typeof(LKJCovarianceFactor),c)
+    binding=get(c.provenance,:covariance_factor,nothing)
+    isnothing(binding) && return nothing
+    owner=c.provenance.owner
+    scales=any(n->n.name==binding.scales,c.notation) ? brm_description_symbol(c,binding.scales) :
+        "s_{"*_brmd_escape(owner)*"}"
+    correlation=any(n->n.name==binding.correlation,c.notation) ? brm_description_symbol(c,binding.correlation) :
+        "L_{"*_brmd_escape(owner)*",\\mathrm{corr}}"
+    factor=brm_description_symbol(c,owner)
+    BRMDescriptionFragment(
+        prose=("The covariance factor combines positive marginal SDs with an LKJ correlation Cholesky factor. Their actual scale and correlation priors are in the effective inventory; the covariance is the factor times its transpose.",),
+        equations=(factor*"=\\operatorname{diag}("*scales*")"*correlation,
+            "\\Sigma_{"*_brmd_escape(owner)*"}="*factor*factor*"^{\\mathsf T}"),
+        notation=((;name=binding.scales,symbol=scales,meaning="Positive marginal SD vector for covariance factor `$(owner)`."),
+            (;name=binding.correlation,symbol=correlation,meaning="Lower Cholesky correlation factor for `$(owner)`.")),
+        covers=(c.id,))
+end
+function _brmd_call_math(::typeof(brm_joint_column),args,_kwargs,_c)
+    "\\operatorname{column}_{"*args[2]*";"*args[3]*"\\times "*args[4]*"}\\left("*args[1]*"\\right)"
+end
+_brmd_builtin_call(::typeof(brm_joint_column),c)=BRMDescriptionFragment(
+    prose=("The completed column selects its declared coordinate from each row-major joint response: coordinate (row−1) × block width + column. Observed coordinates stay fixed and missing coordinates are the joint model's latent values.",),covers=(c.id,))
 for f in (mo,mo1)
     @eval _brmd_builtin_call(::$(typeof(f)),c) = BRMDescriptionFragment(
         prose=("The ordered predictor uses cumulative simplex shares over the fitted level order. `mo` has a sampled population coefficient; `mo1` adds the unit-amplitude contrast directly. Simplex priors are listed separately.",),
@@ -631,6 +691,7 @@ function _brmd_builtin_kind(::Val{:observation},c)
     role=c.provenance.observation_role
     prose= role===:conditioned ? "`$(c.provenance.owner)` contributes an observation likelihood." :
            role===:held_out ? "`$(c.provenance.owner)` is held out: its density does not contribute to this fit." :
+           role===:partially_observed ? "`$(c.provenance.owner)` is partially observed: $(c.provenance.observed_entries) entries remain fixed data and $(c.provenance.missing_entries) missing entries are latent coordinates. The declared family supplies their joint density; the entire completed vector is not an unconditioned draw." :
            "`$(c.provenance.owner)` is unconditioned and is generated from the declared model."
     law=rhs isa BRMDescriptionComponent ? _brmd_law(rhs.callable) : nothing
     isnothing(law) || (prose*=" "*_brmd_law_prose(Val(law)))

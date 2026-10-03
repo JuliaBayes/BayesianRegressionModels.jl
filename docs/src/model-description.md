@@ -153,6 +153,17 @@ extent. Lowered `max` and `min` describe vector reductions or scalar extrema.
 Categorical fitted values retain their labels without pool or pointer state.
 Embedded likelihood contexts include the response's actual descriptor outputs,
 including its posterior-predictive quantity and selected conditioning role.
+Conditioning follows prepared response provenance through ragged input aliases
+and joint-completion carriers. A partially observed vector has
+`observation_role=:partially_observed`, `observation_sources`, and exact
+`observed_entries`/`missing_entries` counts; observed entries stay fixed.
+Joint covariance factors retain their actual marginal-scale and LKJ prior IDs.
+The joint completion's allocation-only declaration has constant log density;
+its substantive density comes from the declared multivariate model.
+Array conversions, matrix replication, ranges, transposition and joint-column
+selection retain their actual callable identities and explicit semantics.
+Vector/matrix conversion order follows the
+[Stan mixed operations reference](https://mc-stan.org/docs/functions-reference/mixed_operations.html).
 
 Covariance blocks use compact, distinct numbers within each result. The notation
 table maps each number to its full logical ID and ordered margins; predictor

@@ -162,6 +162,8 @@ function brm_description_prior_references(c::BRMDescriptionContext)
     Tuple(p.id for p in c.priors if p.id in ids)
 end
 function _brmd_prior_references!(ids,c::BRMDescriptionComponent)
+    factor=get(c.provenance,:covariance_factor,nothing)
+    isnothing(factor) || union!(ids,(factor.scales,factor.correlation))
     for b in c.bindings
         union!(ids,b.prior_ids)
     end

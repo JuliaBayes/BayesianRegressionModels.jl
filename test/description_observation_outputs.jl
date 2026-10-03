@@ -25,6 +25,31 @@ import StanBlocks
     end
 end
 
+@testset "ragged observed aliases retain conditioning provenance" begin
+    data=(;subject=["A","B"],event_subject=["A","A","B","B"],
+        time=[.1,.3,.2,.4],response=[.2,.5,.3,.6],other=[.1,.2])
+    model=@brm data begin
+        eta ~ 1+(1|subject)
+        state ~ kernel(ragged(time,event_subject),ragged(response,event_subject),eta) do ts,yy,m
+            signal=ts.+m
+            yy ~ normal(signal,0.2)
+            signal
+        end
+        other ~ Normal(0,1)
+    end
+    for held in ((),(:yy,))
+        d=brm_descriptor(SBBRMI(model;mod=@__MODULE__,held_out=held,total_groups=()))
+        r=brm_description(d)
+        @test r.complete
+        obs=only(filter(c->c.kind===:observation && c.provenance.owner===:yy,brm_description_components(r)))
+        @test obs.provenance.observation_sources==(:response,)
+        @test obs.provenance.observation_role== (isempty(held) ? :conditioned : :held_out)
+        @test all(p->!occursin("`yy` is unconditioned",p),r.prose)
+        law=only(filter(c->c.callable===StanBlocks.stan.builtin.normal,obs.children))
+        @test law.provenance.observation_role===obs.provenance.observation_role
+    end
+end
+
 @testset "categorical snapshots retain labels rather than pool state" begin
     data=(;tier=categorical(["A","B","A","B","A","B"];ordered=true),
         y=[.3,.6,.4,.7,.5,.8])

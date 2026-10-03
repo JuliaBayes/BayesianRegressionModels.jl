@@ -75,6 +75,8 @@ _brmd_value(xs::Union{Tuple,AbstractArray}, env, id) =
     Tuple(_brmd_value(x, env, (id..., i)) for (i,x) in enumerate(xs))
 _brmd_value(xs::NamedTuple, env, id) = NamedTuple{keys(xs)}(
     Tuple(_brmd_value(x, env, (id..., k)) for (k,x) in pairs(xs)))
+_brmd_value(x::JointResponseColumn,env,id) =
+    (;columns=_brmd_value(joint_response_columns(x),env,(id...,:columns)),impute=x.impute)
 
 function _brmd_value(x::ExprColumn, env, id)
     args = Tuple(_brmd_value(x, env, (id..., :argument, i))
@@ -222,6 +224,10 @@ end
 function _brmd_value(x::Expr, env, id)
     declaration=_brmd_documented(x)
     declaration===x || return _brmd_value(declaration,env,(id...,:documented))
+    if x.head===Symbol("'") && length(x.args)==1
+        args=(_brmd_value(only(x.args),env,(id...,:argument,1)),)
+        return _brmd_component(env,id,:call,adjoint,args)
+    end
     if x.head===:(=) && first(x.args) isa Symbol
         lhs=first(x.args)
         out=(;name=lhs,logical=lhs,role=:deterministic,kind=:cell_assignment,segments=nothing)
@@ -251,19 +257,15 @@ function _brmd_value(x::Expr, env, id)
         if head===:~ && length(args)==2
             lhs=first(rawargs)
             aliases=filter(b->b.name===lhs && b.role===:alias,env.bindings)
-            observed=!isempty(aliases) && only(aliases).value isa BRMDescriptionReference &&
-                     only(aliases).value.name in env.observed
-            heldout=!isempty(aliases) && only(aliases).value isa BRMDescriptionReference &&
-                    only(aliases).value.name in env.heldout
-            role=observed || heldout || !isempty(aliases) ? :observation : :parameter
+            sources=isempty(aliases) ? () : _brmd_response_sources(only(aliases).value,env.bindings)
+            attribution=_brmd_response_provenance(env.descriptor,lhs,sources,env.observed,env.heldout)
+            role=attribution.observation_role!==:unconditioned || !isempty(aliases) ? :observation : :parameter
             localenv=merge(env,(;provenance=merge(env.provenance,(;owner=lhs,
-                observation_role=heldout ? :held_out : observed ? :conditioned : :unconditioned))))
+                attribution...))))
             if role===:observation
-                source=!isempty(aliases) && only(aliases).value isa BRMDescriptionReference ?
-                    only(aliases).value.name : lhs
                 outputs=Tuple((;name=o.name,logical=o.logical,role=o.role,kind=o.kind,
                     segments=_brmd_snapshot(o.segments)) for o in env.descriptor.outputs
-                    if o.logical===source)
+                    if o.logical in sources)
                 localenv=merge(localenv,(;outputs))
                 # Likelihood hooks and their observation parent share the
                 # actual response outputs, including held-out predictive twins.
@@ -295,6 +297,83 @@ function _brmd_value(x::Expr, env, id)
     _brmd_component(env, id, :syntax, x.head, args)
 end
 
+function _brmd_response_sources(value,bindings,seen=())
+    if value isa BRMDescriptionReference
+        value.name in seen && return (value.name,)
+        aliases=filter(b->b.name===value.name && b.role===:alias,bindings)
+        isempty(aliases) && return (value.name,)
+        return _brmd_response_sources(only(aliases).value,bindings,(seen...,value.name))
+    elseif value isa BRMDescriptionComponent && value.callable===ragged
+        # The second argument identifies groups, not observed responses.
+        return _brmd_response_sources(first(value.arguments),bindings,seen)
+    end
+    ()
+end
+
+function _brmd_observation_sets(d)
+    observed=Set{Symbol}(); heldout=Set{Symbol}(d.plan.held_out)
+    for input in d.inputs
+        sources=Symbol[input.name]
+        isnothing(input.column) || push!(sources,input.column)
+        entry=get(d.plan.preproc,input.name,nothing)
+        if entry isa PreprocEntry
+            if entry.kind in (:joint_response,:joint_missing_response)
+                append!(sources,entry.raw_ref)
+            elseif entry.kind===:kernel_ragged
+                source=first(entry.raw_ref)
+                source isa Symbol && push!(sources,source)
+            elseif entry.kind===:missing_response
+                push!(sources,entry.raw_ref)
+            end
+        end
+        input.held_out && union!(heldout,sources)
+        input.observed && !input.held_out && union!(observed,sources)
+    end
+    observed,heldout
+end
+
+function _brmd_response_provenance(d,owner,sources,observed,heldout)
+    for (key,entry) in d.plan.preproc
+        entry isa PreprocEntry || continue
+        joint=entry.kind in (:joint_response,:joint_missing_response)
+        scalar=entry.kind===:missing_response
+        joint || scalar || continue
+        members=joint ? Tuple(entry.raw_ref) : (entry.raw_ref,)
+        matches=owner===key || scalar && owner===entry.raw_ref ||
+            joint && (owner===get(entry.const_,:completion_key,nothing) ||
+                      owner===_joint_response_operation_key(members))
+        matches || continue
+        missing=length(get(entry.const_,:missing_indices,()))
+        total=joint ? length(members)*get(entry.const_,:nobs,length(d.plan.data[key])) :
+            missing+length(entry.const_.observed_indices)
+        fixed=total-missing
+        held=key in heldout || any(s->s in heldout,members)
+        bound=key in observed || any(s->s in observed,members)
+        role=held ? :held_out : !bound || fixed==0 ? :unconditioned :
+            missing>0 ? :partially_observed : :conditioned
+        return (;observation_role=role,observation_sources=members,
+            observed_entries=fixed,missing_entries=missing,joint_width=joint ? length(members) : 1)
+    end
+    isempty(sources) && owner isa Symbol && (sources=(owner,))
+    role=any(s->s in heldout,sources) ? :held_out :
+        any(s->s in observed,sources) ? :conditioned : :unconditioned
+    (;observation_role=role,observation_sources=sources)
+end
+
+function _brmd_covariance_factor_binding(d,owner)
+    d.plan.model.model isa Expr && d.plan.model.model.head===:block || return nothing
+    for stmt in d.plan.model.model.args
+        stmt isa Expr && stmt.head===:(=) && first(stmt.args)===owner || continue
+        rhs=last(stmt.args)
+        rhs isa Expr && rhs.head===:call && length(rhs.args)==3 || continue
+        _brmd_binding(first(rhs.args),d.plan.model.mod)===StanBlocks.stan.builtin.diag_pre_multiply || continue
+        scales,correlation=rhs.args[2:3]
+        scales isa Symbol && correlation isa Symbol || continue
+        return (;scales=(:parameter,scales),correlation=(:parameter,correlation))
+    end
+    nothing
+end
+
 function _brmd_constants(plan)
     Tuple((; input=key, kind=entry.kind, source=_brmd_snapshot(entry.raw_ref),
              value=_brmd_snapshot(entry.const_), dimension_coupled=entry.dim_coupled)
@@ -319,12 +398,12 @@ function _brmd_environment(d, owner, kind, priors, constants, notation=();groups
                            segments=_brmd_snapshot(o.segments)) for o in outputs)
     axes = (axes..., ((; kind=:output, owner, size=o.size, segments=_brmd_snapshot(o.segments))
                        for o in outputs)...)
-    observed = any(i -> i.column === owner && i.observed && !i.held_out,d.inputs)
-    held_out = owner in d.plan.held_out || any(i -> i.column === owner && i.held_out,d.inputs)
-    observation_role = held_out ? :held_out : observed ? :conditioned : :unconditioned
+    observed,heldout=_brmd_observation_sets(d)
+    attribution=_brmd_response_provenance(d,owner,(),observed,heldout)
     population=filter(b->b.role===:population_effect && b.logical===owner,collect(values(d.plan.bindings)))
     design_columns=length(population)==1 ? get(only(population),:design_columns,nothing) : nothing
-    provenance = (; model_id=d.id, owner, declaration=kind, observation_role,
+    provenance = (; model_id=d.id, owner, declaration=kind, attribution...,
+        covariance_factor=_brmd_covariance_factor_binding(d,owner),
         design_columns=isnothing(design_columns) ? nothing : map(c->_brmd_design_column(d,c),design_columns),
         random_effects=Tuple((;id=g.key,group=g.block.group,shared_id=g.block.id,margins=g.margins) for g in groups))
     bindings=Tuple((;name=last(p.id),role=:parameter,
@@ -333,8 +412,7 @@ function _brmd_environment(d, owner, kind, priors, constants, notation=();groups
                    owner in p.id && first(p.id) in (:parameter,:kernel))
     (; mod=d.plan.model.mod, references=refs, axes, priors, constants, provenance,
        notation,bindings,outputs=public_outputs,descriptor=d,
-       observed=Set(i.column for i in d.inputs if i.observed && !i.held_out),
-       heldout=union(d.plan.held_out,Set(i.column for i in d.inputs if i.held_out)))
+       observed,heldout)
 end
 
 function _brmd_design_column(d,c)
