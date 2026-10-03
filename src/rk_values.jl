@@ -360,6 +360,9 @@ _rk_value_expr!(bindings, value, taken) = value
 _rk_value_expr!(bindings, value::_BRMPreparedRef, taken) = value.name
 _rk_value_expr!(bindings, values::Tuple, taken) =
     Expr(:tuple, (_rk_value_expr!(bindings, value, taken) for value in values)...)
+_rk_value_expr!(bindings, values::AbstractVector, taken) =
+    Expr(:vect, (_rk_value_expr!(bindings, _brm_prepare_expr(value), taken)
+        for value in values)...)
 function _rk_value_expr!(bindings, expression::_BRMPreparedExpr, taken)
     args = map(arg -> _rk_value_expr!(bindings, arg, taken), expression.args)
     expression.callable === getindex && return Expr(:ref, args...)
