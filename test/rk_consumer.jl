@@ -173,6 +173,32 @@ const censored_assignment_builder = @brm begin
     y ~ censored(Normal(mu,1);lower=lower,upper=hi)
 end
 
+module ConsumerCensorStan
+using BayesianRegressionModels,StanBlocks
+@deffun consumer_shift(x::vector[n],beta::real)::vector[n]=x+beta
+const lower=@brm begin
+    beta ~ Normal(0,1)
+    mu=consumer_shift(x,beta)
+    y ~ censored(Normal(mu,1);lower=lo)
+end
+const upper=@brm begin
+    beta ~ Normal(0,1)
+    mu=consumer_shift(x,beta)
+    y ~ censored(Normal(mu,1);upper=hi)
+end
+const both=@brm begin
+    beta ~ Normal(0,1)
+    mu=consumer_shift(x,beta)
+    y ~ censored(Normal(mu,1);lower=lo,upper=hi)
+end
+const assigned=@brm begin
+    beta ~ Normal(0,1)
+    mu=consumer_shift(x,beta)
+    lower=consumer_shift(lo,0.0)
+    y ~ censored(Normal(mu,1);lower=lower,upper=hi)
+end
+end
+
 @stestset "reader censoring carries threshold masses and bound dependencies" begin
     for (label, data, model) in (
             ("original",(;x=[-.2,.2],y=[.1,.3],lo=[0.,0.]),censored_lower_builder),
@@ -184,6 +210,10 @@ end
         before=deepcopy(data)
         backend, problem=consumer_problem(model(data))
         @test LogDensityProblems.dimension(problem)==1
+        stan_builder=label=="assigned-bound" ? ConsumerCensorStan.assigned :
+            label=="mixed" ? ConsumerCensorStan.both :
+            occursin("upper",label) ? ConsumerCensorStan.upper : ConsumerCensorStan.lower
+        stan=consumer_stan(stan_builder(data),"reader-censor-"*label;mod=ConsumerCensorStan)
         oracle(u)=logpdf(Normal(),u[1])+sum(eachindex(data.y)) do i
             mu=data.x[i]+u[1]
             lo=hasproperty(data,:lo) ? (data.lo isa Number ? data.lo : data.lo[i]) : -Inf
@@ -193,6 +223,7 @@ end
         end
         for u in ([0.],[-.5],[.5])
             check_consumer_point(problem,u,oracle)
+            check_consumer_stan(problem,stan,[:beta=>"beta"],backend,u)
         end
         @test isequal(data,before)
     end
