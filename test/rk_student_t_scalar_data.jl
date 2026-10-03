@@ -68,7 +68,7 @@ end
 
 function scalar_t_observation_oracle(backend, data, u, evidence)
     physical = constrain(backend.model.layout, u)
-    mu = physical.mu.b1 .+ physical.mu.b2 .* data.x
+    mu = physical.mu_Intercept .+ physical.mu_x .* data.x
     map(eachindex(data.y)) do j
         distribution = LocationScale(mu[j], 1, TDist(data.nu))
         if evidence === :censored && data.y[j] == data.lo[j]
@@ -131,8 +131,8 @@ end
                 cache = mktempdir(; prefix="brm-scalar-student-t-")
                 stan_problem = BRM.stan_instantiate(sb; path=joinpath(cache, "model.stan"))
                 names = BridgeStan.param_unc_names(stan_problem.model)
-                mapping = Dict(Symbol("mu.b1") => "pop_mu_beta_pop.1",
-                    Symbol("mu.b2") => "pop_mu_beta_pop.2")
+                mapping = Dict(:mu_Intercept => "pop_mu_beta_pop.1",
+                    :mu_x => "pop_mu_beta_pop.2")
                 indices = Int.(indexin(map(n -> mapping[n],
                     coordinate_names(backend.model.layout)), names))
                 @test length(names) == length(unique(indices)) == 2
