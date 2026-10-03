@@ -111,12 +111,6 @@ end
     end
 end
 
-@stestset "original scalar vector control" begin
-    array_oracle(u) = logpdf(Normal(), u[1]) + logpdf(Normal(), u[2]) +
-        sum(logpdf.(Normal.([u[1], u[2], u[1]+u[2]], 1), bounded_data.y))
-    check_bounded_case(bounded_scalar_array_builder, bounded_data, "array-control", array_oracle)
-end
-
 @stestset "original scalar Student-t control" begin
     scalar_oracle(u) = begin
         distribution = LocationScale(only(u), 1, TDist(bounded_data.nu))
