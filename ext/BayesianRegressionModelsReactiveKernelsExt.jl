@@ -7,225 +7,24 @@ using ReactiveKernelsPPL
 
 const BRM = BayesianRegressionModels
 
-# Sole emission path: BRM-side plan (plain data, no RK types) → `@rkppl`
-# program (`BRM._rk_emit_ast`, total over admitted plans: submodel defs
-# + main block) → thin-layer `StructuralPlan` via `lower_rkppl` +
-# `bind_data` (the same function the macro lowers through). Model
-# execution and the sampler boundary both derive from this one
-# lowering, so the boundary plan is definitionally the plan the model
-# was built from — there is no parallel direct serializer to drift
-# (the retired one did: factor term options and the preserved Binomial
-# triple-3 are both rejected from hand-built plans yet accepted from
-# the AST route). Ordinal extras are the one plan-level patch: the
-# surface spells `Ordinal` with three positionals only, so after
-# lowering the extension rebuilds ordinal responses carrying extras,
-# translates modeled-scale predictors (which the AST skips — they have
-# no response use-site), and appends the per-threshold coefficient
-# vectors; `bind_data` then validates the patched plan with the full
-# thin-layer suite. Kernel plans ride the same route.
+# The emitted source is the executable contract. Every statistical prior and
+# observation role lowers through the public RKPPL surface; binding supplies
+# the data, with no ordinal or missing-response plan mutations.
 const _RK_PLAN_TYPES = Union{BRM._RKStructuralPlan,BRM._RKKernelPlan,BRM._RKValuePlan}
-
-# Field-preserving copy of a thin-layer struct with named overrides. Every
-# field not overridden is carried through the struct's full positional
-# constructor by name, so a field the thin layer adds later can never be
-# dropped by a patch here (hand-copied keyword lists did: `mi()` dropped
-# `horseshoe_priors`, snag rk-ext-patch-dro-46d976f3). An override naming
-# no field is an internal error.
-function _rk_with(x::T; overrides...) where {T}
-    names = fieldnames(T)
-    for name in keys(overrides)
-        name in names ||
-            error("RK backend: internal: `$T` has no field `$name`")
-    end
-    T((get(overrides, name, getfield(x, name)) for name in names)...)
-end
-
-# Population term kinds a modeled ordinal scale admits (the planner gates
-# the same set; anything else is an internal error here).
-const _RK_PPL_TERM = Dict{Symbol,TermKind}(
-    :intercept => InterceptTerm,
-    :continuous => ContinuousTerm,
-    :factor => FactorTerm,
-    :offset => OffsetTerm,
-)
-
-# The LevelMap subset a scale factor term's options select: full cover,
-# or every observed position but the reference drop (edge drops as
-# ranges, middle drops as index lists — the same values the surface
-# parses from the AST subset literals).
-function _rk_ppl_levelsubset(options::NamedTuple, K::Int)
-    options.coding === :fullrank && return Colon()
-    p = options.drop
-    p == 1 && return UnitRange(2, K)
-    p == K && return UnitRange(1, K - 1)
-    return Vector{Int}([1:p-1; p+1:K])
-end
-
-# Discrimination symbols naming a planned predictor (predictor-first,
-# mirroring the planner): the modeled scales, deduped in plan order.
-function _rk_ordinal_scale_names(plan::BRM._RKStructuralPlan)
-    scales = Symbol[]
-    for response in plan.responses
-        d = response.discrimination
-        d isa Symbol || continue
-        any(p -> p.name === d, plan.predictors) || continue
-        d in scales || push!(scales, d)
-    end
-    scales
-end
-
-_rk_response_wants_extras(response::BRM._RKLikelihoodSpec) =
-    response.discrimination !== nothing ||
-    !isempty(response.threshold_columns) ||
-    response.threshold_coefs !== nothing
-
-_rk_patch_ordinal_response(lowered::LikelihoodSpec,
-        planned::BRM._RKLikelihoodSpec) =
-    _rk_with(lowered; discrimination = planned.discrimination,
-        threshold_columns = planned.threshold_columns,
-        threshold_coefs = planned.threshold_coefs)
-
-# BRM plan family (CamelCase) to thin-layer `POPULATION_FAMILIES` token.
-const _RK_THIN_POPULATION_FAMILIES = Dict{Symbol,Symbol}(
-    :Normal => :normal, :Cauchy => :cauchy, :Laplace => :laplace,
-    :Logistic => :logistic, :StudentT => :student_t, :Flat => :flat)
-
-# Plan prior to thin-layer `PopulationPrior`: the family crosses by
-# table, the arg shape by arity — a 3-tuple is `(nu, mu, sigma)` and
-# rotates to `(mu, sigma, nu)`; an empty tuple is `Flat` (whose
-# location/scale/nu the thin layer ignores); anything else passes
-# through as `(location, scale)`.
-function _rk_thin_population_prior(prior::BRM._RKPopulationPrior)
-    family = _RK_THIN_POPULATION_FAMILIES[prior.family]
-    args = prior.args
-    length(args) == 3 &&
-        return PopulationPrior(prior.predictor, prior.addressee, family,
-            args[2], args[3], args[1])
-    isempty(args) &&
-        return PopulationPrior(prior.predictor, prior.addressee, family,
-            0.0, 1.0, NaN)
-    PopulationPrior(prior.predictor, prior.addressee, family,
-        args[1], args[2])
-end
-
-function _rk_patch_scale_predictor!(predictors::Vector{PredictorSpec},
-        priors::Vector{PopulationPrior}, levelmaps::Vector{LevelMap},
-        plan::BRM._RKStructuralPlan, sname::Symbol)
-    any(p -> p.name === sname, predictors) &&
-        error("RK backend: internal: scale predictor `$sname` already " *
-              "lowered (a modeled scale feeds no response slot)")
-    spec = only(p for p in plan.predictors if p.name === sname)
-    spec.link === :log ||
-        error("RK backend: internal: scale predictor `$sname` has link " *
-              "`$(spec.link)` (the planner gates `log`)")
-    terms = map(spec.terms) do term
-        kind = get(_RK_PPL_TERM, term.kind, nothing)
-        kind === nothing &&
-            error("RK backend: internal: scale predictor `$sname` term " *
-                  "kind `$(term.kind)` (the planner gates population terms)")
-        # Factor sizing lives in the LevelMap; terms take no options.
-        TermSpec(kind, term.columns, NamedTuple(), term.addressee, term.label)
-    end
-    push!(predictors, PredictorSpec(spec.name, LogLink, terms, spec.label))
-    for prior in plan.population_priors
-        prior.predictor === sname || continue
-        # Main-predictor priors cross via the AST, never here.
-        push!(priors, _rk_thin_population_prior(prior))
-    end
-    for term in spec.terms
-        term.kind === :factor || continue
-        col = only(term.columns)
-        K = length(BRM._rk_grouping_levels(plan.columns[col]))
-        push!(levelmaps, LevelMap(sname, col, [], :levels,
-            _rk_ppl_levelsubset(term.options, K)))
-    end
-    nothing
-end
-
-function _rk_patch_threshold_coefs!(vectors::Vector{VectorParameter},
-        plan::BRM._RKStructuralPlan, response::BRM._RKLikelihoodSpec)
-    response.threshold_coefs === nothing && return nothing
-    spec = only(v for v in plan.vector_parameters
-        if v.name === response.threshold_coefs)
-    spec.family === :vector_normal ||
-        error("RK backend: internal: threshold coefs `$(spec.name)` " *
-              "family `$(spec.family)` (the planner gates `:vector_normal`)")
-    any(p -> p.name === spec.name, vectors) &&
-        error("RK backend: internal: threshold coefs `$(spec.name)` " *
-              "already lowered")
-    args = NamedTuple(
-        Symbol(:arg, i) => value for (i, value) in enumerate(spec.args))
-    push!(vectors, VectorParameter(
-        spec.name, spec.family, args, spec.size, spec.label))
-    nothing
-end
-
-# `mi()` plan-level patch (no surface syntax in v1, decision 05aemvx
-# P4): the AST lowers the ordinary response statement, and the planned
-# `Jobs` column rides `mi_jobs` onto the thin-layer spec here — the
-# same plan-level route as the ordinal extras. Plans without `mi()`
-# responses pass through untouched.
-_rk_patch_mi_response(lowered::LikelihoodSpec,
-        planned::BRM._RKLikelihoodSpec) =
-    _rk_with(lowered; mi_jobs = planned.mi_jobs)
-
-function _rk_patch_mi_jobs(unbound::StructuralPlan,
-        plan::BRM._RKStructuralPlan)
-    any(r -> r.mi_jobs !== nothing, plan.responses) || return unbound
-    by_response = Dict{Symbol,BRM._RKLikelihoodSpec}(
-        spec.response => spec for spec in plan.responses)
-    responses = map(unbound.responses) do lowered
-        planned = get(by_response, lowered.response, nothing)
-        planned === nothing &&
-            error("RK backend: internal: lowered response " *
-                  "`$(lowered.response)` matches no planned response")
-        planned.mi_jobs === nothing && return lowered
-        _rk_patch_mi_response(lowered, planned)
-    end
-    _rk_with(unbound; responses)
-end
-
-function _rk_patch_ordinal_extras(unbound::StructuralPlan,
-        plan::BRM._RKStructuralPlan)
-    scales = _rk_ordinal_scale_names(plan)
-    any(_rk_response_wants_extras, plan.responses) || begin
-        isempty(scales) ||
-            error("RK backend: internal: scales without extras")
-        return unbound
-    end
-    by_response = Dict{Symbol,BRM._RKLikelihoodSpec}(
-        spec.response => spec for spec in plan.responses)
-    responses = map(unbound.responses) do lowered
-        planned = get(by_response, lowered.response, nothing)
-        planned === nothing &&
-            error("RK backend: internal: lowered response " *
-                  "`$(lowered.response)` matches no planned response")
-        _rk_response_wants_extras(planned) || return lowered
-        _rk_patch_ordinal_response(lowered, planned)
-    end
-    predictors = copy(unbound.predictors)
-    priors = copy(unbound.population_priors)
-    levelmaps = copy(unbound.levelmaps)
-    for sname in scales
-        _rk_patch_scale_predictor!(predictors, priors, levelmaps, plan, sname)
-    end
-    vectors = copy(unbound.vector_parameters)
-    for spec in plan.responses
-        _rk_patch_threshold_coefs!(vectors, plan, spec)
-    end
-    _rk_with(unbound; responses, predictors, population_priors = priors,
-        levelmaps, vector_parameters = vectors)
-end
 
 # Evaluate the emitted submodel defs through `@rkppl` in a FRESH module
 # per lowering. Each build owns its definition namespace even when different
-# programs use the same canonical lattice names. The macrocall `Expr`
+# programs use the same authored names. The macrocall `Expr`
 # is exactly the parser's shape for `@rkppl sm(args...) = begin ... end`.
 function _rk_emit_module(emitted::BRM._RKEmittedProgram)
     mod = Module(gensym(:RKEmittedModels))
     Core.eval(mod, :(using ReactiveKernelsPPL))
-    Core.eval(mod, :(import ReactiveKernelsPPL:
-        gp_exp_quad_cov, gp_periodic_cov, gp_chol_latent))
+    Core.eval(mod, :(import BayesianRegressionModels:
+        brm_tps_basis, brm_t2_basis, brm_hsgp_basis, brm_hsgp_periodic_basis,
+        brm_hsgp_sqrt_spd, brm_hsgp_periodic_sqrt_spd,
+        brm_gp_covariance, brm_gp_latent, brm_level_indices, brm_ranef_column,
+        brm_dummy, brm_panel_slice,
+        brm_invprobit, brm_invcloglog))
     for (name, value) in emitted.bindings
         Core.eval(mod, Expr(:const, Expr(:(=), name, QuoteNode(value))))
     end
@@ -242,19 +41,16 @@ function _rk_translate_from_emitted(plan::BRM._RKStructuralPlan,
         Tuple(sort!(collect(keys(plan.columns)))); mod=_rk_emit_module(emitted),
         conditioned=Tuple(unique([name for response in plan.responses
             for name in (response.response, response.extra_responses...)])))
-    bind_data(_rk_patch_mi_jobs(
-        _rk_patch_ordinal_extras(unbound, plan), plan), plan.columns)
+    bind_data(unbound, plan.columns)
 end
 
-# Kernel plans additionally bind the plate dims (subjects/timepoints) the
-# `subjects=...` key names; the counts live on the kernel spec.
 function _rk_translate_from_emitted(plan::BRM._RKKernelPlan,
         emitted::BRM._RKEmittedProgram)
     unbound = lower_rkppl(emitted.main,
         Tuple(sort!(collect(keys(plan.columns)))); mod=_rk_emit_module(emitted),
         conditioned=(plan.kernel.data_columns[
             findfirst(==(plan.kernel.obs_response), plan.kernel.slice_params)],))
-    bind_data(unbound, plan.columns; dims=BRM._rk_kernel_bind_dims(plan.kernel))
+    bind_data(unbound, plan.columns)
 end
 
 function _rk_translate_from_emitted(plan::BRM._RKValuePlan,
@@ -269,19 +65,40 @@ function _rk_translated_plan(plan::_RK_PLAN_TYPES)
     _rk_translate_from_emitted(plan, BRM._rk_emit_ast(plan))
 end
 
+const _RK_STATISTICAL_MODEL_MODULE = Ref{Union{Nothing,Module}}(nothing)
+const _RK_STATISTICAL_MODEL_LOCK = ReentrantLock()
+
+function _rk_statistical_model_module()
+    lock(_RK_STATISTICAL_MODEL_LOCK) do
+        cached = _RK_STATISTICAL_MODEL_MODULE[]
+        cached === nothing || return cached
+        prep = BRM.StatisticalPreparation
+        helpers = (:tps_basis, :cr_basis, :t2_basis, :hsgp_basis, :hsgp_periodic_basis,
+            :hsgp_matern_sqrt_spd, :hsgp_sqrt_spd, :hsgp_grouped_sqrt_spd,
+            :hsgp_periodic_sqrt_spd, :hsgp_periodic_grouped_sqrt_spd,
+            :hsgp_rho_floors, :hsgp_periodic_rho_floor)
+        bindings = Pair{Symbol,Any}[name => getproperty(prep, name) for name in helpers]
+        mod = _rk_emit_module(BRM._RKEmittedProgram(collect(values(BRM._BRM_STATISTICAL_MODELS)),
+            Expr(:block), bindings))
+        _RK_STATISTICAL_MODEL_MODULE[] = mod
+        mod
+    end
+end
+
+BRM.rkppl_model(name::Symbol) = hasproperty(BRM._BRM_STATISTICAL_MODELS, name) ?
+    getproperty(_rk_statistical_model_module(), name) :
+    throw(ArgumentError("unknown BRM statistical model `$name`"))
+
 """
     rk_translate_artifact(artifact) -> bound `StructuralPlan`
 
-Translate a v2 append artifact (`BRM.emit_rk_artifact` shape) through the
-PRODUCTION route — defs-module lowering plus the BRM-side mi/ordinal
-patches and kernel bind dims — via `_rk_translate_from_emitted`, the
-same function the live `RKBRMI` path uses. The append driver must call
-this (never a bare `lower_rkppl` → `bind_data`, which diverges from
-production on patched models). Fails closed on shape/version skew.
+Translate a v3 append artifact (`BRM.emit_rk_artifact` shape) through the
+production route, using the same definition module and data bindings as
+live `RKBRMI` builds. Fails closed on shape/version skew.
 """
 function BRM.rk_translate_artifact(artifact)
     keys(artifact) == (:case_id, :ast, :defs, :plan, :meta) || error(
-        "RK artifact: not a v2 artifact (keys $(keys(artifact)))")
+        "RK artifact: not a v3 artifact (keys $(keys(artifact)))")
     artifact.meta.generator_version == BRM.rk_artifact_version() || error(
         "RK artifact: case `$(artifact.case_id)` has generator_version " *
         "$(artifact.meta.generator_version); this BRM translates " *
@@ -289,8 +106,7 @@ function BRM.rk_translate_artifact(artifact)
     artifact.plan isa BRM._RK_ARTIFACT_PLAN_TYPES || error(
         "RK artifact: case `$(artifact.case_id)` carries a " *
         "$(typeof(artifact.plan)), not an RK plan")
-    bindings = artifact.plan isa BRM._RKValuePlan ?
-        BRM._rk_emit_ast(artifact.plan).bindings : Pair{Symbol,Any}[]
+    bindings = BRM._rk_emit_ast(artifact.plan).bindings
     emitted = BRM._RKEmittedProgram(artifact.defs, artifact.ast, bindings)
     return _rk_translate_from_emitted(artifact.plan, emitted)
 end

@@ -96,6 +96,23 @@ fresh process.
 data and layouts, then compares their first executions against analytic
 densities. Run `test/setup_env.jl` to install the fixed RK pin, then
 `julia --threads=4 --project=test test/rk_construction_concurrency.jl`.
+
+`rk_plain.jl` and `rk_statistical_library.jl` exercise BRM-owned statistical
+declarations through ordinary RKPPL lowering. `rk_leveled.jl` adds independent
+categorical-reference and multinomial row-density, Jacobian and ordinary
+reverse-gradient oracles. `rk_values.jl` checks whole
+predictor arrays, callable readers and distinct predictor/observation axes.
+`rk_source_roundtrip.jl` supplies the shared complete-program replay check:
+definitions and model source are printed, reparsed and built afresh, then
+compared bit-exactly for likelihood, prior and full density at three points.
+`rk_parity.jl` adds independent statistical density and Jacobian references,
+standard Enzyme reverse gradients and finite-difference checks.
+`rk_stan_priors.jl` compares explicit shared scale/LKJ priors with emitted Stan
+using a complete named coordinate map. `rk_gaussian.jl` checks the actual
+ordinary Gaussian emission against analytic and mapped Stan densities and
+gradients at three points and three data sizes, then reports warmed native
+density and preallocated reverse allocations without machine-specific limits.
+
 `turing_natural_emission.jl` checks direct observation ASTs and named model
 inputs against an independently written Turing model. It executes the emitted
 source again, checks input-name hygiene and closure captures, and verifies

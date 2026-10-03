@@ -272,7 +272,9 @@ struct _RKPredictorSpec
     link::Symbol
     terms::Vector{_RKTermSpec}
     label::Symbol
+    row_source::Union{Nothing,Symbol}
 end
+_RKPredictorSpec(name, link, terms, label) = _RKPredictorSpec(name, link, terms, label, nothing)
 
 struct _RKPopulationPrior
     predictor::Symbol
@@ -297,7 +299,11 @@ struct _RKR2D2Prior
     phi::Symbol
     tau::Union{Symbol,Float64}
     overrides::Dict{Symbol,Tuple{Float64,Float64}}
+    allocation::Dict{Symbol,Tuple{Vector{Int},Vector{Float64}}}
 end
+_RKR2D2Prior(predictor, r2, phi, tau, overrides) =
+    _RKR2D2Prior(predictor, r2, phi, tau, overrides,
+        Dict{Symbol,Tuple{Vector{Int},Vector{Float64}}}())
 
 # Per-coefficient structured Horseshoe (SB `effect(lp, coef) ~ Horseshoe(...)`
 # mirror, SB-literal per-coefficient tau). One per horseshoe addressee; an
@@ -362,7 +368,11 @@ struct _RKRanefBucket
     lkj_eta::Float64 # correlated only; NaN otherwise
     label::Symbol # :bucket_<suffix>
     grouping::_RKRanefGrouping
+    sd_priors::Vector{Any}
 end
+_RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping) =
+    _RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping,
+        Any[nothing for _ in margins])
 
 struct _RKVectorParameter
     name::Symbol
@@ -420,17 +430,10 @@ Base.parent(x::RKBRMI) = x.parent
 structure_of(x::RKBRMI) = structure_of(parent(x))
 priors_of(x::RKBRMI) = priors_of(parent(x))
 
-# Thin-layer `levels(g)` order, mirrored exactly (sort of observed values;
-# `CategoricalValue`/non-`String` rows string-normalize, as in the thin
-# layer's `_grouping_levels`). Every position below (subset drops,
-# coefficient counts) is a position in THIS order.
+# Julia's declared level order, shared with the emitted `levels(g)` axes.
+# Categorical pools retain their order and unobserved declared levels.
 function _rk_grouping_levels(col::AbstractVector)
-    v = first(col)
-    if v isa CA.CategoricalValue ||
-            (v isa AbstractString && !isa(v, String))
-        return sort!(unique!(string.(col)))
-    end
-    return sort(unique(col))
+    collect(CA.levels(col))
 end
 
 function _rk_num_coefficients(plan::_RKStructuralPlan)
@@ -641,11 +644,11 @@ end
 
 # Student-t degrees of freedom: the `LocationScale` base must be a
 # `TDist(nu)` call whose nu is a positive literal, a sampled parameter,
-# a scalar assignment, or a distributional bare-predictor reference (a
+# numeric scalar data, a scalar assignment, or a bare-predictor reference (a
 # `log(nu) ~ ...` submodel — the hurdle vscale precedent; a predictor
 # shadows a same-named data column here, matching the scale slot). A
-# data column can never be a scalar. Returns `(nu, nu_predictor)`
-# with exactly one side non-nothing.
+# fixed data value follows the literal's positive-finite normalization.
+# Returns `(nu, nu_predictor)` with exactly one side non-nothing.
 function _rk_nu_argument(base, parameters::Set{Symbol},
         assignments::Set{Symbol}, consts::Dict{Symbol,Float64},
         aliases::Dict{Symbol,Symbol}, response::Symbol,
@@ -668,11 +671,8 @@ function _rk_nu_argument(base, parameters::Set{Symbol},
     arg isa Number && return (_rk_positive_literal(arg, response,
         "degrees of freedom"), nothing)
     if arg isa NamedColumn
-        parent(arg) isa DataColumn && error(
-            "$prefix: response `$response` degrees of freedom cannot be " *
-            "a data column; slice 1 admits a sampled parameter, a " *
-            "scalar assignment, a positive numeric literal, or the " *
-            "second linear predictor")
+        parent(arg) isa DataColumn &&
+            return (_rk_nu_data(parent(arg), response), nothing)
         kind, value = _rk_resolve_use_ref(name(arg), consts, aliases,
             parameters, assignments, "response `$response` degrees of freedom")
         kind === :number && return (_rk_positive_literal(value, response,
@@ -680,11 +680,19 @@ function _rk_nu_argument(base, parameters::Set{Symbol},
         return (value, nothing)
     end
     error("$prefix: response `$response` degrees of freedom must be a " *
-          "sampled parameter, a positive numeric literal, a scalar " *
+          "sampled parameter, positive numeric scalar data or literal, " *
+          "a scalar " *
           "assignment, or the second linear predictor (`log(nu) ~ ...` " *
           "+ bare `nu`; deterministic wrappers such as `exp(...)` " *
           "spell as an LP link instead)")
 end
+
+_rk_nu_data(column::DataColumn{<:Real}, response::Symbol) =
+    _rk_positive_literal(parent(column), response, "degrees of freedom")
+
+_rk_nu_data(::DataColumn, response::Symbol) = error(
+    "RK backend: response `$response` degrees of freedom data must be " *
+    "a numeric scalar; per-observation degrees of freedom data are not yet supported")
 
 # Zero-inflated-Poisson zero probability. Returns `(zi, zi_predictor)`
 # with exactly one side non-nothing: a scalar (parameter/assignment /
@@ -2212,9 +2220,9 @@ function _rk_plan_evidence(modifier, family::Symbol, data::AbstractDict,
         parameters::Set{Symbol}, assign_names::Set{Symbol})
     prefix = "RK backend"
     isnothing(modifier) && return _RKResponseEvidence(:none, nothing, nothing)
-    family in (:gaussian, :poisson_log) || error(
+    family in (:gaussian, :poisson_log, :student_t) || error(
         "$prefix: response `$response` evidence ($(modifier.kind)) is out " *
-        "of slice 1 (evidence is admitted on Gaussian and Poisson " *
+        "of slice 1 (evidence is admitted on Gaussian, Poisson and Student-t " *
         "responses only)")
     lower = _rk_evidence_bound(modifier.lower, data, response, "lower",
         columns, consts, aliases, parameters, assign_names)
@@ -3474,37 +3482,7 @@ _rk_ranef_gather_label(target, id, group) =
 
 function _rk_ranef_group_column!(columns::Dict{Symbol,AbstractVector},
         taken::Set{Symbol}, gname::Symbol, raw::AbstractVector, what::String)
-    prefix = "RK backend"
-    raw isa CA.CategoricalVector || begin
-        columns[gname] = raw
-        return gname
-    end
-    # Categorical groupings bind factor-crossed strings (todo 14pgdwz/P1,
-    # DONE): the thin layer numbers them by bind-derived sort order (peer
-    # `_declared_codes`, RK >= fd1af39) — no outside-model codes, so the
-    # last REAL outside-model computation on the RK side is gone. SB
-    # numbers `CA.levels` order instead, so two shapes fail closed: a
-    # custom-ordered declaration would silently misnumber groups (fixed
-    # by the peer P2 declared-levels surface spelling,
-    # ReactiveKernels:brm todo 15a8se2), and distinct levels sharing one
-    # string form would collapse (same rule as the slope dummies below).
-    # Unobserved declared levels keep today's drop behavior on both
-    # sides (no regression, same P2).
-    crossed = _rk_factor_crossed(raw)
-    mask = .!ismissing.(raw)
-    obs_strs = Set(crossed[mask])
-    obs_lvls = Set(CA.levelcode.(raw)[mask])
-    length(obs_strs) == length(obs_lvls) || error(
-        "$prefix: $what grouping `$gname` has distinct levels with the " *
-        "same string form; the draws regime needs unambiguous levels")
-    sb_order = filter(lv -> lv in obs_strs, string.(CA.levels(raw)))
-    issorted(sb_order) || error(
-        "$prefix: $what grouping `$gname` declares custom-ordered " *
-        "levels ($(join(repr.(CA.levels(raw)), ", "))); the thin layer " *
-        "numbers groupings by sorted crossed strings — reorder the " *
-        "declaration to sorted order or await the peer declared-levels " *
-        "surface spelling (ReactiveKernels:brm P2 15a8se2)")
-    columns[gname] = crossed
+    columns[gname] = raw
     gname
 end
 
@@ -3910,11 +3888,6 @@ function _rk_plan_ranef_buckets(brmi::BRMI, context,
         isempty(d.effects) && error(
             "$prefix: $what has no terms after dropping `0` (mirrors SB)")
     end
-    if !isempty(ranef_effect_priors(brmi))
-        error("$prefix: `sd(...)`/`cor(...)` random-effect priors are not " *
-            "in the draws regime (buckets take LKJ(1.0) + half-normal " *
-            "scales); drop the statements")
-    end
     plain_keys = Tuple{Symbol,Symbol}[]
     plain_decls = Dict{Tuple{Symbol,Symbol},Any}()
     id_keys = Tuple{Symbol,Symbol}[]
@@ -4023,6 +3996,21 @@ function _rk_plan_ranef_buckets(brmi::BRMI, context,
         lookup[(target, sym, nothing)] = bucket
         isnothing(bucket) || push!(buckets, bucket)
     end
+    overrides = _brm_resolve_ranef_effect_overrides(ranef_effect_priors(brmi),
+        Dict((bucket.id, bucket.group) => bucket.margins for bucket in buckets
+            if bucket.id !== nothing); prefix)
+    for i in eachindex(buckets)
+        bucket = buckets[i]
+        override = get(overrides, (bucket.id, bucket.group), nothing)
+        override === nothing && continue
+        replacement = _RKRanefBucket(bucket.id, bucket.group, bucket.kind,
+            bucket.margins, bucket.slices, override.lkj_eta, bucket.label,
+            bucket.grouping, override.sd_prior)
+        buckets[i] = replacement
+        for (key, value) in lookup
+            value === bucket && (lookup[key] = replacement)
+        end
+    end
     buckets, lookup
 end
 
@@ -4059,7 +4047,7 @@ function _rk_plan_offset_only_predictor(brmi::BRMI, context, target::Symbol,
     isnothing(r2d2) || error(
         "$prefix: predictor `$target` `r2d2` decomposes nothing (no " *
         "coefficient columns); drop the `r2d2` statement")
-    _RKPredictorSpec(target, link, terms, target), priors, nothing, hs_priors
+    _RKPredictorSpec(target, link, terms, target, design.row_source), priors, nothing, hs_priors
 end
 
 # ---- spline smooth terms (s/t2; mirrors `_sb_s_generic`/`_sb_t2_generic`) ----
@@ -4834,7 +4822,10 @@ function _rk_plan_r2d2_prior(brmi::BRMI, design, r2plan::_BRMR2D2Plan,
             "`effect($target, $(term.addressee)) ~ Normal(0, s)` " *
             "(share-0 override) or use full-rank coding")
     end
-    (; prior=_RKR2D2Prior(target, r2_name, phi_name, tau, overrides),
+    allocation = Dict(addressee => (r2plan.share_indices[idxs],
+        Float64[var(design.columns[i].values) for i in idxs])
+        for (addressee, idxs) in groups)
+    (; prior=_RKR2D2Prior(target, r2_name, phi_name, tau, overrides, allocation),
         scalars, phi)
 end
 
@@ -5284,7 +5275,17 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
     r2d2 = isnothing(r2plan) ? nothing :
         _rk_plan_r2d2_prior(brmi, design, r2plan, target, available,
             terms, taken, columns)
-    _RKPredictorSpec(target, link, terms, target), priors, r2d2, hs_priors
+    row_source = design.row_source
+    if !haskey(columns, row_source)
+        raw = get(context.data, row_source, nothing)
+        if raw isa AbstractVector
+            columns[row_source] = raw
+        else
+            row_source = _rk_mint_generated!(taken, columns, string(target, "_rows"))
+            columns[row_source] = ones(size(design.matrix, 1))
+        end
+    end
+    _RKPredictorSpec(target, link, terms, target, row_source), priors, r2d2, hs_priors
 end
 
 function _rk_resolve_use_ref(name::Symbol, consts::Dict{Symbol,Float64},
@@ -6594,6 +6595,7 @@ function _rk_gate_crossed_columns!(columns::Dict{Symbol,AbstractVector},
         key in mi_packed || length(values) == n_obs || error(
             "$prefix: column `$key` has $(length(values)) rows, expected " *
             "$n_obs (one observation axis in slice 1)")
+        key in mi_packed && any(ismissing, values) && continue
         any(ismissing, values) && error(
             "$prefix: column `$key` has missing values; v1 models " *
             "missingness for `mi()` responses only")
@@ -6873,8 +6875,6 @@ end
 # linear-predictor args (grouped kernels) and `ragged(...)` are out of panel v1.
 struct _RKKernelSpec
     result::Symbol
-    subject_count::Symbol            # bound-dims key for n subjects (kernel_nsub_<result>)
-    timepoint_count::Union{Nothing,Symbol} # bound-dims key for T (kernel_T_<result>), or nothing
     n_timepoints::Union{Nothing,Int} # T = common inner length of vector slices (nothing if none)
     slice_params::Vector{Symbol}     # cell do-block params, in order
     data_columns::Vector{Symbol}     # per-subject data columns, parallel to params
@@ -6884,18 +6884,6 @@ struct _RKKernelSpec
     obs_dist::Any                    # raw distribution Expr (classified later)
     collected::Any                   # final cell expression = per-subject result
     n_subjects::Int
-end
-
-# Plate dims the extension binds (`bind_data(..., dims)`): the subjects
-# key always, the timepoint key only when vector slices name one
-# (all-scalar plates leave both timepoint fields `nothing`).
-function _rk_kernel_bind_dims(kernel::_RKKernelSpec)
-    dims = Dict{Symbol,Int}()
-    dims[kernel.subject_count] = kernel.n_subjects
-    if kernel.timepoint_count !== nothing && kernel.n_timepoints !== nothing
-        dims[kernel.timepoint_count] = kernel.n_timepoints
-    end
-    dims
 end
 
 function _rk_kernel_spec(brmi::BRMI, result::Symbol, rhs)
@@ -6997,9 +6985,7 @@ function _rk_kernel_spec(brmi::BRMI, result::Symbol, rhs)
         "$prefix: kernel(...) `$result` cell must end with a collected result " *
         "expression (the per-subject value bound to `$result`)")
 
-    _RKKernelSpec(result, Symbol("kernel_nsub_", result),
-        isnothing(n_timepoints) ? nothing : Symbol("kernel_T_", result),
-        n_timepoints, params, data_columns, slice_kinds,
+    _RKKernelSpec(result, n_timepoints, params, data_columns, slice_kinds,
         assignments, obs.response, obs.dist, collected, nsub)
 end
 
@@ -7025,33 +7011,50 @@ function _rk_classify_cell_obs(result::Symbol, response::Symbol, dist)
     _RKKernelObs(response, :gaussian, dist.args[2], dist.args[3])
 end
 
-# Emit the panel kernel as an `@rkppl` subject-plate carrying a REAL cell
-# subgraph (NOT the thin layer's desugar-to-flat): local assignments feeding one
-# in-cell observation, then the collected per-subject result. The thin layer
-# lowers `plate(cols...; subjects=N) do slices... <cell> end` by mapping the cell
-# subgraph over N subjects (per-subject sliced HAVE ports; globals stay HAVE
-# ports visible in-cell; the vector observation reduces over the subject's
-# timepoints). Contract co-designed with peer `ReactiveKernels:brm`.
-function _rk_emit_kernel_ast(spec::_RKKernelSpec)
+# Emit a generic array cell for each subject, then observe the collected
+# location/scale arrays. Data are rectangular, flattened in subject order.
+# Both the subject range and vector slices are ordinary source expressions.
+function _rk_emit_kernel_ast(spec::_RKKernelSpec, taken=Set{Symbol}())
     obs = _rk_classify_cell_obs(spec.result, spec.obs_response, spec.obs_dist)
+    union!(taken, spec.slice_params, spec.data_columns, first.(spec.assignments), (spec.result,))
+    subject = _rk_ast_fresh_name("brm_subject", taken)
+    subjects = _rk_ast_fresh_name(string(spec.result, "_subjects"), taken)
+    locations = _rk_ast_fresh_name(string(spec.result, "_location"), taken)
+    scales = _rk_ast_fresh_name(string(spec.result, "_scale"), taken)
     cell = Any[]
+    for (param, column, kind) in zip(spec.slice_params, spec.data_columns, spec.slice_kinds)
+        slice = kind === :vector ? Expr(:call, :brm_panel_slice, column, spec.n_timepoints, subject) :
+            Expr(:ref, column, subject)
+        push!(cell, Expr(:(=), param, slice))
+    end
     for (nm, ex) in spec.assignments
         push!(cell, Expr(:(=), nm, ex))
     end
-    # The in-cell observation is a VECTOR obs over the subject's timepoints and
-    # MUST be emitted dotted (`yy .~ Normal.(mu, sigma)`): RK rejects a scalar `~`
-    # over vectors (explicit-dots ruling) and the thin-layer desugar never invents
-    # dots (peer `ReactiveKernels:brm` CellSpec scoping, 2026-09-19). One obs per
-    # cell, reduced in-cell.
-    push!(cell, Expr(:call, :.~, obs.response,
-        _rk_ast_dotted(:Normal, obs.location, obs.scale)))
-    push!(cell, spec.collected)
-    plate_call = Expr(:call, :plate,
-        Expr(:parameters, Expr(:kw, :subjects, spec.subject_count)),
-        spec.data_columns...)
-    Expr(:call, :~, spec.result,
-        Expr(:do, plate_call,
-            Expr(:->, Expr(:tuple, spec.slice_params...), Expr(:block, cell...))))
+    rectangular = spec.n_timepoints !== nothing
+    index = rectangular ? (subject, Expr(:call, :(:), 1, spec.n_timepoints)) : (subject,)
+    vectorize(value) = rectangular ? Expr(:call, :.*, Expr(:call, :ones, spec.n_timepoints), value) : value
+    push!(cell, Expr(:(=), Expr(:ref, locations, index...), vectorize(obs.location)))
+    push!(cell, Expr(:(=), Expr(:ref, scales, index...), vectorize(obs.scale)))
+    push!(cell, Expr(:(=), Expr(:ref, spec.result, index...), spec.collected))
+    source = first(spec.data_columns)
+    count = Expr(:call, :length, source)
+    first(spec.slice_kinds) === :vector && (count = Expr(:call, :div, count, spec.n_timepoints))
+    setup = Expr(:(=), subjects, Expr(:call, :(:), 1, count))
+    plate = Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
+        Expr(:for, Expr(:(=), subject, Expr(:call, :eachindex, subjects)), Expr(:block, cell...)))
+    if rectangular
+        flat_locations = _rk_ast_fresh_name(string(locations, "_flat"), taken)
+        flat_scales = _rk_ast_fresh_name(string(scales, "_flat"), taken)
+        flatten(value) = Expr(:call, :vec, Expr(:call, :permutedims, value))
+        observation = Expr(:call, :.~, spec.data_columns[findfirst(==(obs.response), spec.slice_params)],
+            _rk_ast_dotted(:Normal, flat_locations, flat_scales))
+        return Expr(:block, setup, plate,
+            Expr(:(=), flat_locations, flatten(locations)),
+            Expr(:(=), flat_scales, flatten(scales)), observation)
+    end
+    observation = Expr(:call, :.~, spec.data_columns[findfirst(==(obs.response), spec.slice_params)],
+        _rk_ast_dotted(:Normal, locations, scales))
+    Expr(:block, setup, plate, observation)
 end
 
 # A panel kernel model's plan. Deliberately a SEPARATE type from the GLM
@@ -7130,7 +7133,8 @@ function _rk_emit_ast(plan::_RKKernelPlan)
         push!(stmts, Expr(:(=), assignment.name,
             _rk_lower_assignment_expr(assignment.expression, assignment.name)))
     end
-    push!(stmts, _rk_emit_kernel_ast(plan.kernel))
+    append!(stmts, _rk_emit_kernel_ast(plan.kernel, union(Set(keys(plan.columns)),
+        Set(p.name for p in plan.parameters), Set(a.name for a in plan.assignments))).args)
     _RKEmittedProgram(Expr[], Expr(:block, stmts...))
 end
 
@@ -7489,7 +7493,7 @@ function _brm_rk_plan(brmi::BRMI)
             # full-length — only the likelihood restricts to observed rows.
             gated = _rk_gate_response_values!(family,
                 mi_plan.observed_values, entry.key, interval)
-            columns[entry.key] = gated
+            columns[entry.key] = entry.raw_response
             mi_jobs = Symbol(:Jobs_, entry.key)
             haskey(columns, mi_jobs) && error(
                 "$prefix: response `$(entry.key)` `mi()` index column " *
@@ -7537,9 +7541,9 @@ function _brm_rk_plan(brmi::BRMI)
     for spec in response_specs
         spec.mi_jobs === nothing && continue
         push!(mi_packed, spec.response, spec.mi_jobs)
-        length(columns[spec.response]) == length(columns[spec.mi_jobs]) ||
+        length(columns[spec.response]) == n_obs ||
             error("$prefix: internal: `mi()` packed columns for " *
-                  "response `$(spec.response)` disagree in length")
+                  "response `$(spec.response)` does not retain the full row axis")
     end
     _rk_gate_crossed_columns!(columns, n_obs, mi_packed)
     _rk_gate_trials_values!(response_specs, columns, n_obs)
