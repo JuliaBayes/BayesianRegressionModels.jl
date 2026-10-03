@@ -154,6 +154,11 @@ const censored_both_builder = @brm begin
     mu=consumer_shift(x,beta)
     y ~ censored(Normal(mu,1);lower=lo,upper=hi)
 end
+const censored_upper_builder = @brm begin
+    beta ~ Normal(0,1)
+    mu=consumer_shift(x,beta)
+    y ~ censored(Normal(mu,1);upper=hi)
+end
 const censored_assignment_builder = @brm begin
     beta ~ Normal(0,1)
     mu=consumer_shift(x,beta)
@@ -164,13 +169,18 @@ end
 @stestset "reader censoring carries threshold masses and bound dependencies" begin
     for (label, data, model) in (
             ("original",(;x=[-.2,.2],y=[.1,.3],lo=[0.,0.]),censored_lower_builder),
+            ("scalar-lower",(;x=[-.2,.2],y=[0.,.3],lo=0.),censored_lower_builder),
+            ("scalar-upper",(;x=[-.2,.2],y=[.1,.5],hi=.5),censored_upper_builder),
+            ("row-upper",(;x=[-.2,.2],y=[.1,.7],hi=[.5,.7]),censored_upper_builder),
             ("mixed",(;x=[-.2,.2,.4],y=[0.,1.,.3],lo=zeros(3),hi=ones(3)),censored_both_builder),
             ("assigned-bound",(;x=[-.2,.2,.4],y=[0.,1.,.3],lo=zeros(3),hi=ones(3)),censored_assignment_builder))
         before=deepcopy(data)
         backend, problem=consumer_problem(model(data))
         @test LogDensityProblems.dimension(problem)==1
         oracle(u)=logpdf(Normal(),u[1])+sum(eachindex(data.y)) do i
-            mu=data.x[i]+u[1]; lo=data.lo[i]; hi=hasproperty(data,:hi) ? data.hi[i] : Inf
+            mu=data.x[i]+u[1]
+            lo=hasproperty(data,:lo) ? (data.lo isa Number ? data.lo : data.lo[i]) : -Inf
+            hi=hasproperty(data,:hi) ? (data.hi isa Number ? data.hi : data.hi[i]) : Inf
             data.y[i]==lo ? logcdf(Normal(mu,1),lo) :
                 data.y[i]==hi ? logccdf(Normal(mu,1),hi) : logpdf(Normal(mu,1),data.y[i])
         end
@@ -178,5 +188,41 @@ end
             check_consumer_point(problem,u,oracle)
         end
         @test isequal(data,before)
+    end
+end
+
+const censored_multiple_builder=@brm begin
+    beta ~ Normal(0,1)
+    a=consumer_shift(x,beta)
+    b=consumer_shift(x2,beta)
+    y ~ censored(Normal(a,1);lower=lo)
+    y2 ~ censored(Normal(b,1);upper=hi)
+end
+
+@stestset "reader evidence independent row axes and attributed invalid data" begin
+    data=(;x=[-.2,.2],y=[0.,.3],lo=0.,x2=[-.1,.3,.5],y2=[.1,.7,.2],hi=.7)
+    before=deepcopy(data)
+    backend,problem=consumer_problem(censored_multiple_builder(data))
+    oracle(u)=logpdf(Normal(),u[1])+
+        sum(y==0 ? logcdf(Normal(x+u[1],1),0) : logpdf(Normal(x+u[1],1),y)
+            for (x,y) in zip(data.x,data.y))+
+        sum(y==.7 ? logccdf(Normal(x+u[1],1),.7) : logpdf(Normal(x+u[1],1),y)
+            for (x,y) in zip(data.x2,data.y2))
+    for u in ([0.],[-.5],[.5])
+        check_consumer_point(problem,u,oracle)
+    end
+    @test isequal(data,before)
+    for invalid in ((;x=[-.2,.2],y=[-.1,.3],lo=zeros(2),hi=ones(2)),
+            (;x=[-.2,.2],y=[.1,.3],lo=[0.,.8],hi=[1.,.2]))
+        saved=deepcopy(invalid)
+        try
+            RKBRMI(censored_both_builder(invalid))
+            @test false
+        catch err
+            message=sprint(showerror,err)
+            @test occursin("y",message)
+            @test occursin("row",message)
+        end
+        @test isequal(invalid,saved)
     end
 end
