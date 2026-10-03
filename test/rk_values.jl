@@ -255,3 +255,20 @@ blend_values(p, q, r, rows) = p[rows] .+ q[rows] .+ r[rows]
     expected = p[df.rows] .+ q[df.rows] .+ r[df.rows]
     @test value_query(backend, :pointwise, u).y ≈ logpdf.(Normal.(expected, 1), df.y)
 end
+
+@stestset "ordinary categorical random slopes" begin
+    df = (; g=[2, 1, 3, 1, 2], c=[2, 4, 2, 6, 4],
+        rows=[1, 5, 2, 4], y=[0.1, -0.2, 0.4, 0.3])
+    backend = RKBRMI(@brm df begin
+        mu ~ 1 + (1 + c | g)
+        reads = read_rows(mu, rows)
+        y ~ Normal(reads, 1)
+    end)
+    u = check_value_gradient(backend)
+    nt = constrain(backend.model.layout, u)
+    C = nt.ranef_draws_g_z * (nt.ranef_draws_g_sd .* nt.ranef_draws_g_L)'
+    gi = [2, 1, 3, 1, 2]
+    mu = nt.mu.b1 .+ C[gi, 1] .+ (df.c .== 4) .* C[gi, 2] .+ (df.c .== 6) .* C[gi, 3]
+    @test value_query(backend, :pointwise, u).y ≈
+        logpdf.(Normal.(mu[df.rows], 1), df.y)
+end

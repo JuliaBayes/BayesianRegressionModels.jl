@@ -35,8 +35,7 @@ function _rk_ast_value_bucket(bucket, draws, effects, taken, bindings)
     group = first(grouping.columns)
     stmts = Expr[]
     if grouping.form === :mm
-        group = _rk_ast_fresh_name(string(draws, "_groups"), taken)
-        push!(stmts, Expr(:(=), group, Expr(:call, :vcat, grouping.columns...)))
+        group = bucket.group
     end
     tau = _rk_ast_fresh_name(string(draws, "_sd"), taken)
     z = _rk_ast_fresh_name(string(draws, "_z"), taken)
@@ -264,6 +263,11 @@ function _brm_rk_value_plan(brmi, program, observations)
     # Regression columns each keep their own row axis. The PPL binder checks
     # their consumers; neither a subject nor a secondary axis is resized to y.
     value_columns = Dict{Symbol,Any}(columns)
+    for bucket in components.buckets
+        bucket.grouping.form === :mm || continue
+        value_columns[bucket.group] = vcat(
+            (columns[name] for name in bucket.grouping.columns)...)
+    end
     for key in referenced
         haskey(context.data, key) || continue
         haskey(value_columns, key) || (value_columns[key] = context.data[key])
@@ -316,7 +320,9 @@ function _rk_value_expr!(bindings, expression::_BRMPreparedExpr, taken)
 end
 
 function _rk_emit_ast(plan::_RKValuePlan)
-    regression = _rk_emit_ast(plan.regression, false; values=true)
+    reserved = Set{Symbol}(keys(plan.columns))
+    union!(reserved, (a.name for a in plan.assignments))
+    regression = _rk_emit_ast(plan.regression, false; values=true, reserved)
     stmts = copy(regression.main.args)
     bindings = copy(regression.bindings)
     taken = Set{Symbol}(keys(plan.columns))

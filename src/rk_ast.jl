@@ -1140,7 +1140,7 @@ function _rk_ast_me_names(plan::_RKStructuralPlan)
 end
 
 function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
-        values::Bool=false)
+        values::Bool=false, reserved=())
     taken = union(Set(keys(plan.columns)),
         Set(p.name for p in plan.parameters),
         Set(a.name for a in plan.assignments),
@@ -1153,6 +1153,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         _rk_ast_dar_names(plan),
         _rk_ast_ar_names(plan),
         _rk_ast_me_names(plan))
+    union!(taken, reserved)
     # A predictor sharing its name with a data column cannot keep it:
     # the program has one namespace, so the affine (definition and
     # response uses) is alpha-renamed. Unreachable via `@brm`
