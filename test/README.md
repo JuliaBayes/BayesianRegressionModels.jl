@@ -97,6 +97,12 @@ data and layouts, then compares their first executions against analytic
 densities. Run `test/setup_env.jl` to install the fixed RK pin, then
 `julia --threads=4 --project=test test/rk_construction_concurrency.jl`.
 
+`rk_bounded_source.jl` checks scalar declaration bounds and ordinary value
+observations. `rk_bounded_runtime.jl` compares the original family kernels,
+coordinate Jacobians, standard Enzyme gradients and full printed-source replay
+with independent oracles and emitted Stan. These use the exact published
+`restricted` capability pinned by `setup_env.jl`.
+
 `rk_plain.jl` and `rk_statistical_library.jl` exercise BRM-owned statistical
 declarations through ordinary RKPPL lowering. `rk_leveled.jl` adds independent
 categorical-reference and multinomial row-density, Jacobian and ordinary
