@@ -84,6 +84,8 @@ include("turing_descriptor.jl")
 # the emitted random-effect parameterization, so they live next to the emitter
 # rather than being re-derived (differently) in every consumer.
 include("prediction.jl")
+include("covariate_resampling.jl")
+export modeled_covariates
 include("adaptive_centering.jl")
 include("posterior_diagnostics.jl")
 
