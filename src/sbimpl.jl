@@ -2065,6 +2065,38 @@ _sb_mi_response = StanBlocks.@slic begin
                     num_elements(Jobs) + n_mis)
 end
 
+# Joint blocks allocate only their missing entries. Their single joint density
+# is emitted separately, after completing the full row vectors.
+_sb_joint_completion = StanBlocks.@slic begin
+    n_mis = num_elements(Jmis)
+    y_mis :: vector[n_mis] ~ dummy()
+    return mi_merge(y_obs, y_mis, Jobs, Jmis, num_elements(Jobs) + n_mis)
+end
+
+StanBlocks.@deffun begin
+    brm_joint_column(values::vector[n], column::int, width::int,
+                     rows::int)::vector[rows] = begin
+        @stan_assert n == width * rows
+        out = rep_vector(0., rows)
+        for row in 1:rows
+            out[row] = values[(row - 1) * width + column]
+        end
+        out
+    end
+    # The observed carrier fixes the row axis. `completed` includes those
+    # observations and the missing coordinates; each row contributes exactly
+    # one multivariate density, never an independent observed/missing split.
+    @lhs @lpxf brm_joint_observed_lpdf(observed::vector[k], completed::vector[k],
+                                      location::vector[k], factor::matrix[k,k])::real =
+        multi_normal_cholesky_lpdf(completed, location, factor)
+    brm_joint_observed_lpdfs(observed::vector[k], completed::vector[k],
+                            location::vector[k], factor::matrix[k,k])::real =
+        multi_normal_cholesky_lpdf(completed, location, factor)
+    brm_joint_observed_rng(vector[k], completed::vector[k], location::vector[k],
+                          factor::matrix[k,k])::vector[k] =
+        multi_normal_cholesky_rng(location, factor)
+end
+
 # Squared-exponential GP helpers. The data-layout conversion loop lives in a
 # Stan function because top-level @slic bodies are deliberately control-flow
 # free.
@@ -3489,8 +3521,11 @@ function _sb_triage_emitted(sb::SBBRMI)
     obs_keys = Set{Symbol}(keys(sb.parent.operations))
     _sb_plan_collect!(declarations, sb.model.model, data_scope, (), obs_keys,
                       Set{Symbol}(), _sb_unbound_cell_observations(sb.parent))
-    missing_sources = Set(e.raw_ref for e in values(sb.preproc)
-                          if e.kind === :missing_response)
+    missing_sources = Set{Symbol}()
+    for e in values(sb.preproc)
+        e.kind === :missing_response && push!(missing_sources, e.raw_ref)
+        e.kind === :joint_missing_response && push!(missing_sources, e.const_.completion_key)
+    end
     bound = count(d -> d.role === :observation &&
                   (!isnothing(d.data_source) || d.target in missing_sources),
                   declarations)
@@ -4339,6 +4374,9 @@ end
 
 _sb_same_raw_ref(a, b) = isequal(a, b)
 _sb_same_raw_ref(::DataColumn, ::DataColumn) = true
+_sb_same_raw_ref(a::JointResponseColumn, b::JointResponseColumn) =
+    a.impute == b.impute &&
+    _sb_same_raw_ref(joint_response_columns(a), joint_response_columns(b))
 _sb_same_raw_ref(a::NamedColumn, b::NamedColumn) =
     name(a) === name(b) && _sb_same_raw_ref(parent(a), parent(b))
 _sb_same_raw_ref(a::ExprColumn, b::ExprColumn) =
@@ -4346,6 +4384,8 @@ _sb_same_raw_ref(a::ExprColumn, b::ExprColumn) =
     _sb_same_raw_ref(getkwargs(a), getkwargs(b))
 _sb_same_raw_ref(a::Tuple, b::Tuple) =
     length(a) == length(b) && all(ab -> _sb_same_raw_ref(ab...), zip(a, b))
+_sb_same_raw_ref(a::AbstractArray, b::AbstractArray) =
+    axes(a) == axes(b) && all(ab -> _sb_same_raw_ref(ab...), zip(a, b))
 _sb_same_raw_ref(a::NamedTuple, b::NamedTuple) =
     keys(a) == keys(b) && all(
         ab -> _sb_same_raw_ref(ab...), zip(values(a), values(b)))
@@ -4568,7 +4608,7 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             :ranef_factor_dummy,
             (; levels, level=e.const_.level, n_levels=e.const_.n_levels),
             e.raw_ref, true)
-    elseif e.kind === :joint_response
+    elseif e.kind in (:joint_response, :joint_missing_response)
         names = Tuple(e.raw_ref)
         names == Tuple(e.const_.outcomes) || error(
             "sbimpl: reprocess: joint-response provenance for `$key` changed " *
@@ -4576,9 +4616,24 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         columns = map(names) do outcome
             NamedColumn(outcome, DataColumn(_sb_df_column(df, outcome)))
         end
-        joint = JointResponseColumn(columns)
-        values = _brm_joint_response_values(joint; prefix="sbimpl: reprocess")
+        impute = e.kind === :joint_missing_response
+        joint = JointResponseColumn(columns, impute)
+        values = _brm_joint_response_values(joint; prefix="sbimpl: reprocess", allow_imputation=impute)
         nobs = length(values)
+        if impute
+            plan = _brm_joint_missing_plan(joint; prefix="sbimpl: reprocess")
+            if freeze && (nobs != e.const_.nobs ||
+                          plan.missing_indices != e.const_.missing_indices)
+                throw(ArgumentError("sbimpl: reprocess: imputed joint block needs the " *
+                    "same fitted missing-row positions and row count when freeze_constants=true"))
+            end
+            new_data[e.const_.obs_key] = plan.observed_values
+            new_data[e.const_.jobs_key] = plan.observed_indices
+            new_data[e.const_.jmis_key] = plan.missing_indices
+            union!(handled, (e.const_.obs_key, e.const_.jobs_key, e.const_.jmis_key))
+            updated = merge(e.const_, (; nobs, missing_indices=copy(plan.missing_indices)))
+            new_preproc[key] = PreprocEntry(e.kind, updated, e.raw_ref, true)
+        end
         for source in e.const_.mean_sources
             source_values = _sb_df_column(df, source)
             source_values isa AbstractVector || error(
@@ -4592,7 +4647,7 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         new_data[key] = values
         new_data[e.const_.n_key] = nobs
         push!(handled, e.const_.n_key)
-        new_preproc[key] = e
+        impute || (new_preproc[key] = e)
     elseif e.kind === :kernel_subject_count
         if e.const_ isa NamedTuple && get(e.const_, :from_data_length, false)
             # No-random-effects panel: the subject count is the pre-grouped
@@ -6358,9 +6413,9 @@ function _sb_joint_mean_reference(target::Symbol, outcome::Symbol, mean_arg,
             _brm_prior_expression(rhs_e))
             shape = _brm_distribution_shape(rhs_e)
             (getf(rhs_e) === LKJCovarianceFactor ||
-             (!isnothing(shape) && first(shape) !== Distributions.Univariate)) && error(
-                "sbimpl: mean for joint outcome `$outcome` must be scalar; " *
-                "index the vector or matrix parameter `$(name(mean_arg))` explicitly")
+             (!isnothing(shape) && first(shape) === Distributions.Matrixvariate)) && error(
+                "sbimpl: mean for joint outcome `$outcome` must be scalar or a " *
+                "row-aligned vector; index matrix parameter `$(name(mean_arg))` explicitly")
             return (; expression=_sb_joint_mean_rows_expr(target, mean_arg, data), sources=())
         end
     elseif !(backing isa ExprColumn)
@@ -6438,8 +6493,22 @@ function _sb_sampling!(stmts, data, key, lhs::JointResponseColumn, rhs;
 
     # Record one row-grouped observation input with all source columns in stable
     # formula order. Replay regenerates the row vectors and their row count.
+    provenance = (; n_key, outcomes, mean_sources)
+    if lhs.impute
+        plan = _brm_joint_missing_plan(lhs; prefix="sbimpl")
+        obs_key, jobs_key, jmis_key = Symbol(key, :_obs), Symbol(key, :_Jobs), Symbol(key, :_Jmis)
+        data[obs_key], data[jobs_key], data[jmis_key] =
+            plan.observed_values, plan.observed_indices, plan.missing_indices
+        push!(stmts, Expr(:call, :~, key,
+            Expr(:call, _sb_joint_completion, Expr(:parameters,
+                Expr(:kw, :y_obs, obs_key), Expr(:kw, :Jobs, jobs_key),
+                Expr(:kw, :Jmis, jmis_key)))))
+        provenance = merge(provenance, (; obs_key, jobs_key, jmis_key, completion_key=key,
+            nobs, missing_indices=copy(plan.missing_indices)))
+    end
     _sb_record_preproc!(data, data_key, PreprocEntry(
-        :joint_response, (; n_key, outcomes, mean_sources), outcomes, true))
+        lhs.impute ? :joint_missing_response : :joint_response,
+        provenance, outcomes, true))
 
     # Build a row-grouped mean collection first, then apply the likelihood at
     # top level. StanBlocks' ragged-observation path owns the full observation
@@ -6447,26 +6516,40 @@ function _sb_sampling!(stmts, data, key, lhs::JointResponseColumn, rhs;
     # aggregate pointwise likelihood scalar per row. A dense observation slice
     # inside `plate` is intentionally predictive-only under its general contract.
     mean_key = Symbol(key, :_means)
-    observed_cell = Symbol(key, :_observed_cell)
-    mean_cells = ntuple(i -> Symbol(key, :_mean_cell_, i), K)
-    mean_cell = Symbol(key, :_mean_vector)
-    raw_mean_vector = Expr(:vect, mean_cells...)
+    _sb_emit_joint_rows!(stmts, mean_key, data_key, n_key, mean_exprs; stem=key)
+    if lhs.impute
+        completed_key = Symbol(key, :_completed)
+        completed_exprs = ntuple(i -> Expr(:call, :brm_joint_column, key, i, K, n_key), K)
+        _sb_emit_joint_rows!(stmts, completed_key, data_key, n_key, completed_exprs)
+        push!(stmts, Expr(:call, :~, data_key,
+            Expr(:call, :brm_joint_observed, completed_key, mean_key, factor_name)))
+    else
+        push!(stmts, Expr(:call, :~, data_key,
+            Expr(:call, :multi_normal_cholesky, mean_key, factor_name)))
+    end
+    nothing
+end
+
+# One row-collection lowering for both the ordinary and imputed joint family.
+function _sb_emit_joint_rows!(stmts, key, data_key, n_key, expressions; stem=key)
+    observed_cell = Symbol(stem, :_observed_cell)
+    cells = ntuple(i -> Symbol(stem, :_mean_cell_, i), length(expressions))
+    cell = Symbol(stem, :_mean_vector)
+    raw_vector = Expr(:vect, cells...)
     # Tie the result's dimension to the ragged observation cell. The zero term
     # is algebraically inert; its symbolic size is what makes the collected
     # plate result a RaggedVector rather than a dense matrix.
     sized_mean_vector = Expr(:call, :+,
-        Expr(:call, :.*, 0.0, observed_cell), raw_mean_vector)
+        Expr(:call, :.*, 0.0, observed_cell), raw_vector)
     cell_body = Expr(:block,
-        Expr(:(=), mean_cell, sized_mean_vector),
-        mean_cell)
+        Expr(:(=), cell, sized_mean_vector),
+        cell)
     plate_call = Expr(:call, :plate,
         Expr(:parameters, Expr(:kw, :outer, Expr(:tuple, n_key))),
-        data_key, mean_exprs...)
+        data_key, expressions...)
     plate_do = Expr(:do, plate_call,
-        Expr(:->, Expr(:tuple, observed_cell, mean_cells...), cell_body))
-    push!(stmts, Expr(:call, :~, mean_key, plate_do))
-    push!(stmts, Expr(:call, :~, data_key,
-        Expr(:call, :multi_normal_cholesky, mean_key, factor_name)))
+        Expr(:->, Expr(:tuple, observed_cell, cells...), cell_body))
+    push!(stmts, Expr(:call, :~, key, plate_do))
     nothing
 end
 
@@ -11687,6 +11770,18 @@ _sb_term_refs_param(_) = false
 # mean or SD may depend on a posterior imputation.
 function _sb_mi_predictor_plan(x::NamedColumn)
     op = parent(x)
+    if op isa ExprColumn && getf(op) === assign
+        projection = last(getargs(op, 2))
+        if projection isa ExprColumn && getf(projection) === brm_joint_column
+            block, column = getargs(projection)[1:2]
+            joint = first(getargs(parent(block), 2))
+            raw_column = joint_response_columns(joint)[column]
+            raw = parent(parent(raw_column))
+            observed = findall(!ismissing, raw)
+            return _BRMMissingResponsePlan(name(raw_column), collect(raw), observed,
+                findall(ismissing, raw), Float64[raw[i] for i in observed])
+        end
+    end
     op isa ExprColumn && getf(op) === (~) || return nothing
     _brm_missing_response_plan(first(getargs(op, 2)); prefix="sbimpl")
 end

@@ -458,6 +458,10 @@ function factor end
 Missing-data marker. Wrap a response LHS (`mi(y) ~ Normal(...)`) to opt
 into the brms-style observed/imputed split: observed rows feed the
 likelihood, missing rows become parameters drawn from the same family.
+For a correlated continuous block, use
+`mi([x, z]) ~ MvNormalCholesky([x_loc, z_loc], L)` with an earlier
+`L ~ LKJCovarianceFactor(2; ...)` declaration. Rows may have different
+missing patterns; later formulas read completed `x` and `z` columns.
 See `_sb_emit_mi!` (sbimpl) for backend dispatch.
 """
 function mi end
@@ -486,6 +490,7 @@ Formula-only multivariate Normal family whose second argument is already the
 lower Cholesky factor of the covariance. A vector response such as
 `[y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)` is one row-wise joint
 likelihood, not two conditionally independent scalar likelihoods.
+Wrap the vector LHS in `mi(...)` for explicit joint missing-value completion.
 """
 function MvNormalCholesky end
 
@@ -584,6 +589,10 @@ elseif isxcall(x, :~) && _is_effect_lhs(x.args[2])
 elseif isxcall(x, :~) && Meta.isexpr(x.args[2], :vect)
     _, lhs, rhs = x.args
     _parse_joint_response!(lhs, rhs; info)
+elseif isxcall(x, :~) && isxcall(x.args[2], :mi) &&
+       length(x.args[2].args) == 2 && Meta.isexpr(x.args[2].args[2], :vect)
+    _, lhs, rhs = x.args
+    _parse_joint_response!(lhs.args[2], rhs; info, impute=true)
 elseif isxcall(x, :~) && Meta.isexpr(x.args[2], :tuple)
     _, lhs, rhs = x.args
     _parse_broadcast_lhs!(lhs, rhs; info)
@@ -622,12 +631,12 @@ function _joint_response_symbols(lhs::Expr)
     names
 end
 
-function _parse_joint_response!(lhs::Expr, rhs; info)
+function _parse_joint_response!(lhs::Expr, rhs; info, impute=false)
     names = _joint_response_symbols(lhs)
     parselocals!(rhs; info, val=:nonlocal)
 
     key = _joint_response_operation_key(names)
-    reserved = _joint_response_reserved_keys(names)
+    reserved = _joint_response_reserved_keys(names; impute)
     collision = findfirst(k -> haskey(info.alllocals, k), reserved)
     isnothing(collision) || error(
         "@brm: generated joint-response binding `$(reserved[collision])` " *
@@ -642,10 +651,24 @@ function _parse_joint_response!(lhs::Expr, rhs; info)
             hasproperty(__df__, $qn) ?
                 $DataColumn(getproperty(__df__, $qn)) : $MissingColumn()))
     end...)
-    joint = :($JointResponseColumn($columns))
+    joint = :($JointResponseColumn($columns, $impute))
     parsed_rhs = _x(rhs)
-    :($key = $NamedColumn($(QuoteNode(key)),
+    declaration = :($key = $NamedColumn($(QuoteNode(key)),
         $ExprColumn(~, $joint, $parsed_rhs)))
+    impute || return declaration
+    # Completed columns are deterministic projections of ONE joint draw.
+    # Retain the joint declaration on each reference for dependency ordering,
+    # observed-only transform anchors, and frozen replay.
+    aliases = map(enumerate(names)) do (i, n)
+        haskey(info.alllocals, n) && info.alllocals[n] !== :nonlocal && error(
+            "@brm: imputed joint column `$n` already has a model declaration")
+        info.alllocals[n] = :local
+        :($n = $NamedColumn($(QuoteNode(n)), $ExprColumn($assign,
+            $NamedColumn($(QuoteNode(n)), $MissingColumn()),
+            $ExprColumn($brm_joint_column, $key, $i, $(length(names)),
+                        $(QuoteNode(Symbol(key, :_n)))))))
+    end
+    Expr(:block, declaration, aliases...)
 end
 
 function _parse_broadcast_lhs!(lhs::Expr, rhs; info)
@@ -1320,7 +1343,8 @@ mistake the declaration for several independent scalar likelihoods.
 """
 struct JointResponseColumn{C<:Tuple} <: AbstractColumn
     columns::C
-    function JointResponseColumn(columns::C) where {C<:Tuple}
+    impute::Bool
+    function JointResponseColumn(columns::C, impute::Bool=false) where {C<:Tuple}
         length(columns) >= 2 || throw(ArgumentError(
             "a joint response needs at least two columns"))
         all(c -> c isa NamedColumn, columns) || throw(ArgumentError(
@@ -1328,7 +1352,7 @@ struct JointResponseColumn{C<:Tuple} <: AbstractColumn
         names = map(name, columns)
         length(unique(names)) == length(names) || throw(ArgumentError(
             "joint-response columns must be unique"))
-        new{C}(columns)
+        new{C}(columns, impute)
     end
 end
 
@@ -1336,9 +1360,12 @@ joint_response_columns(x::JointResponseColumn) = getfield(x, :columns)
 joint_response_names(x::JointResponseColumn) = map(name, joint_response_columns(x))
 _joint_response_operation_key(names) =
     Symbol("brm_joint_", join(string.(names), "__"))
-function _joint_response_reserved_keys(names)
+function _joint_response_reserved_keys(names; impute=false)
     key = _joint_response_operation_key(names)
-    (key, Symbol(key, :_observed), Symbol(key, :_n), Symbol(key, :_means))
+    base = (key, Symbol(key, :_observed), Symbol(key, :_n), Symbol(key, :_means))
+    impute || return base
+    (base..., Symbol(key, :_obs), Symbol(key, :_Jobs), Symbol(key, :_Jmis),
+     Symbol(key, :_completed))
 end
 _joint_response_data_key(x::JointResponseColumn) =
     Symbol(_joint_response_operation_key(joint_response_names(x)), :_observed)
@@ -1716,12 +1743,14 @@ Base.show(io::IO, x::MultiMembershipTerm) = begin
 end
 Base.show(io::IO, x::NamedColumn) = print(io, name(x))
 Base.show(io::IO, x::JointResponseColumn) = begin
+    getfield(x, :impute) && print(io, "mi(")
     print(io, "[")
     for (i, n) in enumerate(joint_response_names(x))
         i == 1 || print(io, ", ")
         print(io, n)
     end
     print(io, "]")
+    getfield(x, :impute) && print(io, ")")
 end
 
 end

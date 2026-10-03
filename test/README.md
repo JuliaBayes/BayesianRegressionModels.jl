@@ -49,6 +49,16 @@ of fitted missing coordinates during subject kernel CV. It uses only root
 dependencies, so `julia --project=. test/missing_covariates.jl` also works;
 trailing filters such as `anchors` or `kernel CV` select focused blocks.
 
+`missing_joint_covariates.jl` checks the native correlated
+`mi([x, z]) ~ MvNormalCholesky(...)` block. Independent normalized density,
+all-coordinate gradient and pointwise likelihood oracles cover all four
+bivariate row-specific missing patterns, formula priors and frozen replay.
+Other blocks check positive log-space assignments, same-named dataframe
+columns, observed-only anchors, complete or entirely missing columns,
+row-aligned vector locations, and fitted completion during group resampling.
+Run `julia --project=. test/missing_joint_covariates.jl`; trailing filters
+such as `independent` or `log-space` select focused blocks.
+
 ## Shared preparation and Turing lowering
 
 `spline_basis_signs.jl` checks canonical TPS/t2 projection signs, input
