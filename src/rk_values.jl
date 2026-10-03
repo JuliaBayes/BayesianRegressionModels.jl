@@ -32,10 +32,32 @@ _rk_value_dummy(values, level) = Float64.(isequal.(values, level))
 function _rk_ast_positive_prior(prior, bindings, taken; default=:HalfNormal)
     prior === nothing && return default === :LogNormal ?
         Expr(:call, :LogNormal, 0, 1) : Expr(:call, :HalfNormal, 1)
-    expression = _rk_value_expr!(bindings, _brm_prepare_expr(prior), taken)
+    prepared = _brm_prepare_expr(prior)
+    if prepared.callable === truncated
+        all(key -> key in (:lower, :upper), keys(prepared.kwargs)) || error(
+            "RK backend: a truncated positive prior accepts only lower/upper bounds")
+        args = prepared.args
+        if length(args) == 1
+            lower = get(prepared.kwargs, :lower, -Inf)
+            upper = get(prepared.kwargs, :upper, Inf)
+        elseif length(args) == 3 && isempty(prepared.kwargs)
+            lower, upper = args[2:3]
+        else
+            error("RK backend: a truncated positive prior needs a base law and lower/upper bounds")
+        end
+        lower === nothing && (lower = -Inf)
+        upper === nothing && (upper = Inf)
+        return Expr(:call, :truncated,
+            _rk_value_expr!(bindings, first(args), taken),
+            _rk_value_expr!(bindings, lower, taken),
+            _rk_value_expr!(bindings, upper, taken))
+    end
+    expression = _rk_value_expr!(bindings, prepared, taken)
     family = nameof(getf(prior))
     family in (:Exponential, :Gamma, :InverseGamma, :LogNormal, :Weibull,
         :HalfNormal, :HalfCauchy, :truncated) && return expression
+    family === :Uniform && first(prepared.args) isa Real &&
+        first(prepared.args) >= 0 && return expression
     Expr(:call, :truncated, expression, 0.0, Inf)
 end
 
