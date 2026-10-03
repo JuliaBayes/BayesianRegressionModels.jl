@@ -149,4 +149,22 @@ end
         "effect(:, x) ~ Normal(0,.3)\neffect(a, :) ~ Normal(0,.7)"))
     @test_throws "equally specific" RKBRMI(tie)
     @test_throws "equally specific" SBBRMI(tie; mod=@__MODULE__,total_groups=())
+
+    # Whole-coefficient defaults also reach scalar latent coefficients that
+    # have no ordinary design column. Genuine prior-only models have none.
+    latent_data = (; rank=[1,2,3], y=[.1,.2,.3])
+    latent = @brm latent_data begin
+        mu ~ 0 + mo(rank)
+        effect(:, :) ~ Normal(0,.3)
+        y ~ Normal(mu,1)
+    end
+    latent_plan = BRM._brm_rk_plan(latent)
+    @test only(latent_plan.population_priors).args == (0.,.3)
+    prior_only = @brm (; y=[.1,.2,.3]) begin
+        theta ~ Normal(0,1)
+        effect(:, :) ~ Normal(0,.3)
+        y ~ Normal(theta,1)
+    end
+    @test_throws "matches no population coefficient" RKBRMI(prior_only)
+    @test_throws "matches no population coefficient" SBBRMI(prior_only; mod=@__MODULE__,total_groups=())
 end
