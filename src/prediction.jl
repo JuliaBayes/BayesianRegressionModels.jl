@@ -182,15 +182,16 @@ address its draws without reading the generated Stan.
   `transport_draws` copies retained levels by label under either while drawing
   fresh centered levels through the fitted covariance (`b = C * z` per draw)
   rather than bare `N(0, 1)`.
-- `generated` — true iff `resample_groups` moved this block's standardised draws
-  to GENERATED QUANTITIES (a `reprocess(model, new_df; resample_groups = [g])`
-  re-draw target; [`transport_draws`](@ref)). Such a block is re-drawn Stan-side
+- `generated` — true iff the traced model emits this block's effect carrier
+  in GENERATED QUANTITIES. This includes `resample_groups` re-draw targets and
+  blocks with no downstream observed likelihood, even when other parts of the
+  model remain sampled. Such a block is re-drawn Stan-side
   per draw, so it has NO coordinate in `param_unc_names`: it is DESCRIBED (shape,
-  `levels`, group count all read off the preprocessing record) but
+  `levels`, group count read from group data and fitted preprocessing) but
   [`ranef_coordinates`](@ref) refuses it and `transport_draws` skips it — its
   `L` / `tau` hyperparameters are the transportable state, and they are copied by
-  name. `false` for an ordinary fit (including a plain `cv_groups` build, whose
-  block is still a sampled parameter).
+  name when they remain sampled. The flag comes from the emitted carrier's
+  descriptor kind, independently of the supplied coordinate names.
 
 Obtain with [`ranef_blocks`](@ref); resolve to unconstrained coordinates with
 [`ranef_coordinates`](@ref).
@@ -397,6 +398,7 @@ function ranef_blocks(model)
     data = plan.data
     out = RanefBlock[]
     seen = Set{Symbol}()
+    output_kinds = nothing
     for d in plan.declarations
         d.role === :prior || continue
         binding = get(plan.bindings, d.target, nothing)
@@ -432,7 +434,6 @@ function ranef_blocks(model)
             # stale) `raw_group` from the ordinary branch.
             raw_group = group
             by = nothing
-            generated = false
             levels = collect(mm_entry.const_.levels)
             n_groups = _ranef_data_int(data, mm_entry.const_.n_groups_key,
                                        d.target, fam)
@@ -470,15 +471,11 @@ function ranef_blocks(model)
                 # vector) and the block's standardised draws were flipped to
                 # generated quantities. Its group count is NOT recoverable by
                 # iterating the expression — read it off the `:group_index`
-                # preprocessing record required above, and flag the block
-                # `generated` so `ranef_coordinates` / `transport_draws` treat
-                # it as a re-drawn non-parameter rather than looking for
-                # coordinates that no longer exist in `param_unc_names`.
-                generated = true
+                # preprocessing record required above. Actual sampled/generated
+                # activity is read from the traced carrier below.
                 n_groups = _ranef_data_int(data, gi_entry.const_.n_groups_key,
                                            d.target, fam)
             else
-                generated = false
                 # CONTROL. `levels` is reconstructed from the training column with
                 # the same fit/apply split the emitter used; the emitted `n_groups`
                 # is the count the Stan program was built with. If those disagree,
@@ -507,12 +504,21 @@ function ranef_blocks(model)
         else
             1
         end
+        z = Symbol(d.target, :_, spec.z)
+        if isnothing(output_kinds)
+            output_kinds = Dict(o.name => o.kind for o in
+                Base.invokelatest(StanBlocks.stan_descriptor, plan.model).outputs)
+        end
+        kind = get(output_kinds, z, nothing)
+        kind in (:parameter, :generated_quantity) || error(
+            "BRM prediction: effect carrier `$z` for block `$(d.target)` has ",
+            "descriptor kind `$kind`; expected a sampled parameter or generated ",
+            "quantity. The random-effect emission table and traced model disagree.")
         push!(seen, d.target)
         push!(out, RanefBlock(d.target, fam, raw_group,
                               _ranef_id_of_binding(d.target, raw_group, by), by,
                               levels, n_terms, n_groups,
-                              Symbol(d.target, :_, spec.z), spec.noncentered,
-                              generated))
+                              z, spec.noncentered, kind === :generated_quantity))
     end
     out
 end
@@ -580,9 +586,9 @@ maps over several blocks.
 function ranef_coordinates(block::RanefBlock, unc_names)
     block.generated && error(
         "BRM prediction: block `$(block.binding)` (group `$(block.group)`) was ",
-        "moved to generated quantities by `resample_groups`; its draws are ",
+        "emitted in generated quantities; its draws are ",
         "re-generated Stan-side, so it has no unconstrained coordinates to ",
-        "resolve against `param_unc_names`. Transport copies its `L` / `tau` ",
+        "resolve against `param_unc_names`. Transport copies any sampled ",
         "hyperparameters by name and lets the target re-draw the effects; ",
         "`transport_draws` skips such a block rather than calling this.")
     layout = _RANEF_FAMILIES[block.family].layout
@@ -869,6 +875,14 @@ the new levels are not the fitted ones. This is the intended consumption path
 for a resample target; a positional splice of the fitted levels' draws would be
 the exact wrong answer.
 
+The same rule applies to blocks emitted in generated quantities because no
+observed likelihood reaches them. A prior program may still have nonzero
+dimension, for example from observed covariate likelihoods and fitted missing
+covariates. Transport retains those sampled coordinates by name and leaves
+generated effects and any generated covariance inputs to Stan. Activity comes
+from the traced carrier's descriptor kind, not from missing caller-supplied
+coordinate names: an incomplete sampled block still raises.
+
 # Example
 
 ```julia
@@ -944,11 +958,11 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
         "total prediction cannot change to a conventional parameterization"))
 
     for bt in blocks_to
-        # A resample target's block is re-drawn in the target's generated
+        # A generated block is re-drawn in the target's generated
         # quantities (see the resample-target paragraph above): it has no
-        # coordinate in `unc_to`, so there is nothing to align. Its `L` / `tau`
-        # hyperparameters and every population coordinate remain parameters and
-        # are copied by name in the fall-through below.
+        # coordinate in `unc_to`, so there is nothing to align. Any covariance
+        # or population coordinates that remain parameters are copied by name
+        # in the fall-through below.
         bt.generated && continue
         key = (bt.id, bt.group, bt.by)
         bf = get(by_key, key, nothing)
