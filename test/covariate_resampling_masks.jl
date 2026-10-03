@@ -13,6 +13,40 @@ function mask_values(sb,problem,q,seed,logical)
         role=name in selected ? :covariate_draw : nothing)] for name in logical)
 end
 
+@stestset "prior to endpoints retains the observed covariate likelihood" begin
+    data=(;x=[.3,.6,.9,1.2],y=[.1,.2,-.1,.3])
+    builder=@brm begin
+        mx ~ Normal(0,1)
+        sx ~ LogNormal(0,.3)
+        x ~ Normal(mx,sx)
+        mu ~ 1+x
+        y ~ Normal(mu,1)
+    end
+    baseline=SBBRMI(builder(data);mod=@__MODULE__,total_groups=(),held_out=:y)
+    problem=StanBlocks.stan_instantiate(baseline.model)
+    names=BridgeStan.param_unc_names(problem.model)
+    descriptor=brm_descriptor(baseline)
+    coefficient_coordinates=[only(brm_population_effect_coordinates(
+        descriptor,:mu,names;coefficient).coordinates) for coefficient in (:Intercept,:x)]
+    mx_coordinate=findfirst(==("mx"),names)
+    sx_coordinate=findfirst(==("sx"),names)
+    @test sort(vcat([mx_coordinate,sx_coordinate],coefficient_coordinates))==collect(eachindex(names))
+    @test any(input->input.column===:x && input.observed,descriptor.inputs)
+    @test any(input->input.column===:y && input.held_out,descriptor.inputs)
+    for (mx,logsx) in ((0.,0.),(.25,-.1))
+        q=fill(.1,length(names));q[mx_coordinate]=mx;q[sx_coordinate]=logsx
+        sx=exp(logsx)
+        expected=logpdf(Normal(),mx)+logpdf(LogNormal(0,.3),sx)+logsx+
+            sum(logpdf.(Normal(mx,sx),data.x))+sum(logpdf.(Normal(),q[coefficient_coordinates]))
+        gradient=-q
+        gradient[mx_coordinate]=-mx+sum(data.x.-mx)/sx^2
+        gradient[sx_coordinate]=-logsx/.3^2-length(data.x)+sum(abs2,(data.x.-mx)./sx)
+        lp,g=BridgeStan.log_density_gradient(problem.model,q;propto=false,jacobian=true)
+        @test lp≈expected atol=1e-12
+        @test g≈gradient atol=1e-12
+    end
+end
+
 @stestset "fresh covariates cover fully observed and fully missing fitted declarations" begin
     for observed in (true,false),family in (Normal,LogNormal)
         x=observed ? [.3,.6,.9,1.2] : Union{Missing,Float64}[missing,missing,missing,missing]
