@@ -29,8 +29,9 @@ end
 
 _rk_value_dummy(values, level) = Float64.(isequal.(values, level))
 
-function _rk_ast_positive_prior(prior, bindings, taken)
-    prior === nothing && return Expr(:call, :HalfNormal, 1)
+function _rk_ast_positive_prior(prior, bindings, taken; default=:HalfNormal)
+    prior === nothing && return default === :LogNormal ?
+        Expr(:call, :LogNormal, 0, 1) : Expr(:call, :HalfNormal, 1)
     expression = _rk_value_expr!(bindings, _brm_prepare_expr(prior), taken)
     family = nameof(getf(prior))
     family in (:Exponential, :Gamma, :InverseGamma, :LogNormal, :Weibull,
@@ -73,8 +74,12 @@ function _rk_ast_value_bucket(bucket, draws, effects, taken, bindings)
         push!(stmts, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
             Expr(:for, Expr(:(=), :i, Expr(:call, :eachindex, group)), Expr(:block, cell))))
     else
+        # Stan's ordinary unnamed intercept and multi-membership intercept
+        # families sample log_scale ~ Normal(0,1). Shared-ID, slope and
+        # stratified families keep their half-normal scale default.
+        default = bucket.kind === :intercept1 ? :LogNormal : :HalfNormal
         if all(isequal(first(bucket.sd_priors)), bucket.sd_priors)
-            prior = _rk_ast_positive_prior(first(bucket.sd_priors), bindings, taken)
+            prior = _rk_ast_positive_prior(first(bucket.sd_priors), bindings, taken; default)
             push!(stmts, Expr(:call, :.~, Expr(:ref, tau, index),
                 _rk_ast_dotted(prior.args[1], prior.args[2:end]...)))
         else
@@ -312,8 +317,17 @@ function _brm_rk_value_plan(brmi, program, observations)
             "RK backend: value-based response `$(o.name)` needs explicit observed values")
         o.weight === nothing || error(
             "RK backend: value-based response `$(o.name)` weights need an authored response")
-        o.modifier === nothing || error(
-            "RK backend: value-based response `$(o.name)` evidence needs an authored response")
+        if o.modifier !== nothing
+            bounds = (o.modifier.lower, o.modifier.upper)
+            if all(b -> b === nothing || b isa Real ||
+                    (b isa NamedColumn && parent(b) isa DataColumn), bounds)
+                # The same response/row attribution as structural observations.
+                materialize = o.modifier.kind === :interval_censored ?
+                    _brm_materialize_interval_response : _brm_materialize_bounded_response
+                materialize(o.modifier, o.name,
+                    o.response, context.data; prefix="RK backend")
+            end
+        end
         value_columns[o.name] = o.response
     end
     regression = _RKStructuralPlan(_RKLikelihoodSpec[], components.predictors,
@@ -368,15 +382,24 @@ function _rk_emit_ast(plan::_RKValuePlan)
             _rk_value_expr!(bindings, assignment.expression, taken)))
     end
     for observation in plan.observations
-        distribution = observation.distribution
+        modifier = observation.modifier
+        distribution = modifier === nothing ? observation.distribution :
+            _brm_prepare_expr(modifier.base)
         distribution isa _BRMPreparedExpr || error(
             "RK backend: response `$(observation.name)` needs a distribution call")
         isempty(distribution.kwargs) || error(
             "RK backend: response `$(observation.name)` distribution keywords are unsupported")
         callee = _rk_value_callee!(bindings, distribution.callable, taken)
         args = map(arg -> _rk_value_expr!(bindings, arg, taken), distribution.args)
-        push!(stmts, Expr(:call, :.~, observation.name,
-            _rk_ast_dotted(callee, args...)))
+        base = _rk_ast_dotted(callee, args...)
+        if modifier !== nothing
+            lower = modifier.lower === nothing ? -Inf :
+                _rk_value_expr!(bindings, _brm_prepare_expr(modifier.lower), taken)
+            upper = modifier.upper === nothing ? Inf :
+                _rk_value_expr!(bindings, _brm_prepare_expr(modifier.upper), taken)
+            base = _rk_ast_response_modifier(base, modifier.kind, lower, upper)
+        end
+        push!(stmts, Expr(:call, :.~, observation.name, base))
     end
     _RKEmittedProgram(regression.defs, Expr(:block, stmts...), bindings)
 end

@@ -444,6 +444,10 @@ function _rk_num_coefficients(plan::_RKStructuralPlan)
                 term.kind === :me
             total += 1
         elseif term.kind === :factor
+            if haskey(term.options, :design_columns)
+                total += length(term.options.design_columns)
+                continue
+            end
             width = length(_rk_grouping_levels(
                 plan.columns[only(term.columns)]))
             total += term.options.coding === :fullrank ? width : width - 1
@@ -3158,14 +3162,6 @@ function _rk_population_priors(brmi::BRMI, design, target::Symbol,
         # HorseshoePrior — no PopulationPrior row (R2D2 precedent).
         addressee in hs_addressees && continue
         idxs = groups[addressee]
-        if addressee in factor_addressees
-            all(stated[idxs]) || error(
-                "$prefix: predictor `$target` factor `$addressee` " *
-                "needs one explicit prior on the whole block " *
-                "(e.g. `effect($target, $addressee) ~ Normal(0, 2)`); " *
-                "slice 1 has no default factor prior (the stated " *
-                "prior sizes the thin-layer block)")
-        end
         agreed = cells[first(idxs)]
         all(i -> cells[i] == agreed, idxs) || error(
             "$prefix: predictor `$target` addressee `$addressee` has " *
@@ -3227,6 +3223,29 @@ function _rk_population_priors(brmi::BRMI, design, target::Symbol,
         push!(priors, _rk_me_beta_prior(brmi, target, term.addressee))
     end
     priors
+end
+
+# Categorical preparation is shared with the other BRM backends. Each fitted
+# dummy is ordinary bound data; the emitted vector prior and matrix product
+# preserve declared levels, reference swaps, and the first cell-mean block.
+function _rk_shared_factor_spec(term, target, columns, taken; cellmeans)
+    shared = _brm_population_columns(term; cellmeans)
+    shared === nothing && error(
+        "RK backend: predictor `$target` categorical term `$term` has unsupported geometry")
+    isempty(shared) && return _RKTermSpec[]
+    source = first(shared).source
+    backing = term isa NamedColumn ? parent(term) : parent(only(getargs(term)))
+    columns[source] = parent(backing)
+    names = Symbol[]
+    for column in shared
+        key = _rk_mint_generated!(taken, columns, string(target, "_", column.label, "_data"))
+        columns[key] = column.values
+        push!(names, key)
+    end
+    block = source
+    options = (; coding=cellmeans ? :fullrank : :subset, levels=:shared,
+        design_columns=Tuple(names), labels=Tuple(c.label for c in shared))
+    [_RKTermSpec(:factor, [source], options, block, block)]
 end
 
 # Structural identifiability over full-cover groups: a bare (full-rank)
@@ -5167,7 +5186,7 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
     ordinary = Tuple(t for t in raw_terms if !(t in structured) && !(t in grouped))
     isempty(ordinary) && isempty(spline_raw) && isempty(gp_raw) &&
         isempty(hsgp_raw) && isempty(mo_raw) && isempty(dar_raw) &&
-        isempty(ar_raw) && isempty(me_raw) && error(
+        isempty(ar_raw) && isempty(me_raw) && isempty(grouped) && error(
         "$prefix: predictor `$target` has no terms")
     has_intercept = any(t -> t isa Integer && t == 1, ordinary)
     # Classify before building geometry: fail fast on unknown terms with RK
@@ -5175,7 +5194,15 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
     # One term can lower to several specs (multi-column interactions).
     terms = _RKTermSpec[]
     spines = Dict{Symbol,Any}()
+    cellmeans_block = _brm_predictor_cellmeans_block(brmi, target)
     for term in ordinary
+        block = _brm_categorical_term_block(term)
+        if block !== nothing
+            cellmeans = block === cellmeans_block && !_brm_requests_treatment_coding(term)
+            cellmeans && (cellmeans_block = nothing)
+            append!(terms, _rk_shared_factor_spec(term, target, columns, taken; cellmeans))
+            continue
+        end
         append!(terms, _rk_term_specs(term, target, context.data,
             columns, derived, taken, has_intercept, spines))
     end

@@ -48,6 +48,11 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol},
         elseif term.kind === :continuous
             push!(summands, Expr(:call, :.*, coefs[index], colref[index]))
         elseif term.kind === :factor
+            if haskey(term.options, :design_columns)
+                push!(summands, Expr(:call, :*,
+                    Expr(:call, :hcat, term.options.design_columns...), refref[index]))
+                continue
+            end
             # Factor use is always bare `c[g]`; the LevelMap (full cover
             # or subset) rides the broadcast prior, and unmapped rows
             # contribute 0.
@@ -136,7 +141,9 @@ end
 # thin-layer wide-block rule); the plan family symbol is the head.
 function _rk_ast_factor_prior(coef::Symbol, col::Symbol,
         options::NamedTuple, K::Int, family::Symbol, args::Tuple)
-    index = if options.coding === :fullrank
+    index = if haskey(options, :design_columns)
+        Expr(:call, :(:), 1, length(options.design_columns))
+    elseif options.coding === :fullrank
         Expr(:call, :levels, col)
     else
         Expr(:ref, Expr(:call, :levels, col),
@@ -437,17 +444,17 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
         _rk_ast_mixture_dist(response, leaf)
     end
     evidence = response.evidence
-    dist = if evidence.kind === :truncated
-        _rk_ast_dotted(:truncated, base, leaf[:lower], leaf[:upper])
-    elseif evidence.kind === :censored
-        _rk_ast_dotted(:censored, base, leaf[:lower], leaf[:upper])
-    elseif evidence.kind === :interval_censored
-        _rk_ast_dotted(:interval_censored, base, leaf[:upper])
-    else
-        base
-    end
+    dist = _rk_ast_response_modifier(base, evidence.kind,
+        get(leaf, :lower, -Inf), get(leaf, :upper, Inf))
     response.weights === nothing ? dist :
         _rk_ast_dotted(:weighted, dist, leaf[:weights])
+end
+
+function _rk_ast_response_modifier(base, kind, lower, upper)
+    kind === :none && return base
+    kind in (:truncated, :censored) && return _rk_ast_dotted(kind, base, lower, upper)
+    kind === :interval_censored && return _rk_ast_dotted(kind, base, upper)
+    error("RK backend: unsupported response evidence `$kind`")
 end
 
 # The class count behind a leveled response: the planned `n_levels`

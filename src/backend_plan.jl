@@ -1671,7 +1671,7 @@ function _brm_categorical_population_columns(
     n_levels, indices = _brm_level_index(raw)
     # Treatment coding drops a single-level factor (its lone level is the
     # reference); cell means keep its one coefficient.
-    n_levels >= (cellmeans ? 1 : 2) || return nothing
+    n_levels >= (cellmeans ? 1 : 2) || return ()
     # `levels` carries the fitted level values when `raw` is already recoded
     # (string `factor(...; ref=...)` recodes to integer codes); otherwise the
     # levels are derived from `raw` exactly as before.
