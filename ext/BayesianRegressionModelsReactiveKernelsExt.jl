@@ -23,7 +23,7 @@ const BRM = BayesianRegressionModels
 # no response use-site), and appends the per-threshold coefficient
 # vectors; `bind_data` then validates the patched plan with the full
 # thin-layer suite. Kernel plans ride the same route.
-const _RK_PLAN_TYPES = Union{BRM._RKStructuralPlan,BRM._RKKernelPlan}
+const _RK_PLAN_TYPES = Union{BRM._RKStructuralPlan,BRM._RKKernelPlan,BRM._RKValuePlan}
 
 # Field-preserving copy of a thin-layer struct with named overrides. Every
 # field not overridden is carried through the struct's full positional
@@ -224,6 +224,11 @@ end
 function _rk_emit_module(emitted::BRM._RKEmittedProgram)
     mod = Module(gensym(:RKEmittedModels))
     Core.eval(mod, :(using ReactiveKernelsPPL))
+    Core.eval(mod, :(import ReactiveKernelsPPL:
+        gp_exp_quad_cov, gp_periodic_cov, gp_chol_latent))
+    for (name, value) in emitted.bindings
+        Core.eval(mod, Expr(:const, Expr(:(=), name, QuoteNode(value))))
+    end
     for d in emitted.defs
         Core.eval(mod, Expr(:macrocall, Symbol("@rkppl"),
             LineNumberNode(0), d))
@@ -234,7 +239,9 @@ end
 function _rk_translate_from_emitted(plan::BRM._RKStructuralPlan,
         emitted::BRM._RKEmittedProgram)
     unbound = lower_rkppl(emitted.main,
-        Tuple(sort!(collect(keys(plan.columns)))); mod=_rk_emit_module(emitted))
+        Tuple(sort!(collect(keys(plan.columns)))); mod=_rk_emit_module(emitted),
+        conditioned=Tuple(unique([name for response in plan.responses
+            for name in (response.response, response.extra_responses...)])))
     bind_data(_rk_patch_mi_jobs(
         _rk_patch_ordinal_extras(unbound, plan), plan), plan.columns)
 end
@@ -244,8 +251,18 @@ end
 function _rk_translate_from_emitted(plan::BRM._RKKernelPlan,
         emitted::BRM._RKEmittedProgram)
     unbound = lower_rkppl(emitted.main,
-        Tuple(sort!(collect(keys(plan.columns)))); mod=_rk_emit_module(emitted))
+        Tuple(sort!(collect(keys(plan.columns)))); mod=_rk_emit_module(emitted),
+        conditioned=(plan.kernel.data_columns[
+            findfirst(==(plan.kernel.obs_response), plan.kernel.slice_params)],))
     bind_data(unbound, plan.columns; dims=BRM._rk_kernel_bind_dims(plan.kernel))
+end
+
+function _rk_translate_from_emitted(plan::BRM._RKValuePlan,
+        emitted::BRM._RKEmittedProgram)
+    unbound = lower_rkppl(emitted.main,
+        Tuple(sort!(collect(keys(plan.columns)))); mod=_rk_emit_module(emitted),
+        conditioned=Tuple(o.name for o in plan.observations))
+    bind_data(unbound, plan.columns)
 end
 
 function _rk_translated_plan(plan::_RK_PLAN_TYPES)
@@ -272,7 +289,9 @@ function BRM.rk_translate_artifact(artifact)
     artifact.plan isa BRM._RK_ARTIFACT_PLAN_TYPES || error(
         "RK artifact: case `$(artifact.case_id)` carries a " *
         "$(typeof(artifact.plan)), not an RK plan")
-    emitted = BRM._RKEmittedProgram(artifact.defs, artifact.ast)
+    bindings = artifact.plan isa BRM._RKValuePlan ?
+        BRM._rk_emit_ast(artifact.plan).bindings : Pair{Symbol,Any}[]
+    emitted = BRM._RKEmittedProgram(artifact.defs, artifact.ast, bindings)
     return _rk_translate_from_emitted(artifact.plan, emitted)
 end
 

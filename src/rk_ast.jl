@@ -167,7 +167,7 @@ function _rk_ast_popefs_slots(predictor::_RKPredictorSpec)
 end
 
 function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol},
-        colref::Dict{Int}, refref::Dict{Int})
+        colref::Dict{Int}, refref::Dict{Int}; values::Bool=false)
     summands = Any[]
     for (index, term) in enumerate(predictor.terms)
         if term.kind === :intercept
@@ -200,11 +200,13 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol},
         elseif term.kind === :spline
             # Direct summand, always inline: the thin layer fails an
             # assigned-then-used `spline(...)` closed (no gather alias).
-            push!(summands, Expr(:call, :spline, refref[index]))
+            push!(summands, values ? refref[index] :
+                Expr(:call, :spline, refref[index]))
         elseif term.kind === :hsgp
             # Direct summand, always inline: the thin layer fails an
             # assigned-then-used `hsgp(...)` closed (no gather alias).
-            push!(summands, Expr(:call, :hsgp, refref[index]))
+            push!(summands, values ? refref[index] :
+                Expr(:call, :hsgp, refref[index]))
         elseif term.kind === :gp
             push!(summands, refref[index])
         elseif term.kind === :ar
@@ -1137,7 +1139,8 @@ function _rk_ast_me_names(plan::_RKStructuralPlan)
     names
 end
 
-function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
+function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
+        values::Bool=false, reserved=())
     taken = union(Set(keys(plan.columns)),
         Set(p.name for p in plan.parameters),
         Set(a.name for a in plan.assignments),
@@ -1150,6 +1153,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
         _rk_ast_dar_names(plan),
         _rk_ast_ar_names(plan),
         _rk_ast_me_names(plan))
+    union!(taken, reserved)
     # A predictor sharing its name with a data column cannot keep it:
     # the program has one namespace, so the affine (definition and
     # response uses) is alpha-renamed. Unreachable via `@brm`
@@ -1157,7 +1161,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
     # is observed data), but programmatic plans can still overlap.
     rename = Dict{Symbol,Symbol}()
     for predictor in plan.predictors
-        haskey(plan.columns, predictor.name) || continue
+        (haskey(plan.columns, predictor.name) ||
+            (values && predictor.link !== :identity)) || continue
         fresh = Symbol(string(predictor.name), "_")
         while fresh in taken
             fresh = Symbol(string(fresh), "_")
@@ -1193,6 +1198,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
             (response_for[response.predictor] = response.response)
     end
     defs = Expr[]
+    bindings = Pair{Symbol,Any}[]
     seen = Dict{Symbol,Expr}()
     stmts = Expr[]
     for derived in plan.derived
@@ -1264,7 +1270,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
             if kind === :monotonic || kind === :monotonic_summand
                 refactual[index] = term.options.increments
             elseif kind === :spline || kind === :hsgp
-                refactual[index] = QuoteNode(term.options.id)
+                refactual[index] = values ? term.options.id : QuoteNode(term.options.id)
             elseif kind === :gp
                 refactual[index] = term.options.f
             elseif kind === :ar
@@ -1331,11 +1337,13 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
         end
         for term in predictor.terms
             term.kind === :spline || continue
-            push!(stmts, _rk_ast_spline_basis(term))
+            values ? append!(stmts, _rk_ast_value_spline(term, taken)) :
+                push!(stmts, _rk_ast_spline_basis(term))
         end
         for term in predictor.terms
             term.kind === :hsgp || continue
-            push!(stmts, _rk_ast_hsgp_basis(term))
+            values ? append!(stmts, _rk_ast_value_hsgp(term, taken)) :
+                push!(stmts, _rk_ast_hsgp_basis(term))
         end
         for term in predictor.terms
             term.kind === :dar || continue
@@ -1348,11 +1356,19 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
             options = term.options
             push!(stmts, _rk_ast_sampled(options.rho_param))
             push!(stmts, _rk_ast_sampled(options.sigma_param))
-            response = get(response_for, predictor.name, nothing)
+            response = values ? only(term.columns) :
+                get(response_for, predictor.name, nothing)
             isnothing(response) && error(
                 "RK backend: internal: gp predictor `$(predictor.name)` " *
                 "feeds no response")
-            push!(stmts, _rk_ast_plate(options.z, response))
+            if values
+                axis = _rk_ast_fresh_name(string(options.z, "_axis"), taken)
+                push!(stmts, Expr(:(=), axis, Expr(:call, :eachindex, response)))
+                push!(stmts, Expr(:call, :.~, Expr(:ref, options.z, axis),
+                    _rk_ast_dotted(:Normal, 0, 1)))
+            else
+                push!(stmts, _rk_ast_plate(options.z, response))
+            end
             push!(stmts, Expr(:(=), options.f, _rk_ast_gp_latent(term)))
         end
         for term in predictor.terms
@@ -1371,7 +1387,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
             # coefficients all join the simplex): the affine stays
             # inline over program-global names exactly as before.
             push!(stmts, Expr(:(=), lhs,
-                _rk_ast_affine(predictor, coefs, colactual, refactual)))
+                _rk_ast_affine(predictor, coefs, colactual, refactual; values)))
         else
             # Canonical use-site: columns, then outer references, then
             # prior locations/scales — the callarg order mirrors the
@@ -1435,8 +1451,9 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
                 predictor, stated, slots.nscalar, hs_slots,
                 Dict{Int,Symbol}(
                     slot => stateloc[slot][1] for slot in stated))
+            values && (defname = Symbol(defname, :_values))
             body = Expr(:block, scalar_stmts...,
-                _rk_ast_affine(predictor, coefs, slots.colf, slots.reff))
+                _rk_ast_affine(predictor, coefs, slots.colf, slots.reff; values))
             def = Expr(:(=), Expr(:call, defname, formals...), body)
             if haskey(seen, defname)
                 seen[defname] == def || error(
@@ -1450,10 +1467,15 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
                 Expr(:call, defname, callargs...)))
         end
         r2d2 === nothing || push!(stmts, _rk_ast_r2d2_decl(r2d2, lhs))
+        if values && (lhs !== predictor.name || predictor.link !== :identity)
+            value = _rk_value_link!(bindings, predictor.link, lhs, taken)
+            push!(stmts, Expr(:(=), predictor.name, value))
+        end
     end
     for (bi, bucket) in enumerate(plan.ranef_buckets)
         append!(stmts,
-            _rk_ast_bucket_stmts(bucket, ranef_draws[bi], ranef_effects))
+            values ? _rk_ast_value_bucket(bucket, ranef_draws[bi], ranef_effects, taken, bindings) :
+                _rk_ast_bucket_stmts(bucket, ranef_draws[bi], ranef_effects))
     end
     for parameter in plan.parameters
         push!(stmts, _rk_ast_sampled(parameter))
@@ -1481,5 +1503,5 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true)
             _rk_ast_response_stmt(response, rename, predictor_link,
                 fused_heads))
     end
-    _RKEmittedProgram(defs, Expr(:block, stmts...))
+    _RKEmittedProgram(defs, Expr(:block, stmts...), bindings)
 end
