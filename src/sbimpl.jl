@@ -4878,7 +4878,7 @@ end
 
 """
     reprocess(sb::SBBRMI, new_df; freeze_constants=true,
-              resample_groups=()) -> SBBRMI
+              resample_groups=(), resample_covariates=()) -> SBBRMI
 
 Re-materialise the SBBRMI's Stan data dict against `new_df`, **re-running** the
 Julia-side preprocessing (decision nr3v8n A) — so the silent-stale-constant bug
@@ -4900,6 +4900,16 @@ of a naive per-column `sb.model(; col=…)` rebind is avoided. Returns a NEW
   constants remain frozen unless `freeze_constants=false` is also requested.
   This changes Stan source by construction; it is the new-population/CV twin
   of the default same-group replay.
+- `resample_covariates=()` (default): retain fitted covariate completions.
+  Select logical modeled continuous members to redraw all their rows inside
+  the emitted program, conditional on retained posterior hyperparameters.
+  Selecting a joint member selects its whole block. Dependent modeled
+  declarations must be selected together. This opt-in path requires frozen
+  training anchors and a conventional non-centered `total_groups=()` fit;
+  it composes with `resample_groups` and removes selected missing-cell
+  coordinates. Discover members and consumed output roles with
+  [`modeled_covariates`](@ref), then use [`transport_draws`](@ref) with the
+  actual compiled coordinate names.
 
 Covered: the Julia-side transforms (`zscale`/`standardize`/`center`/`factor`/
 `mo`/`s`/`t2`/`gp`/`hsgp`), interval-censored predictor splits,
@@ -5019,7 +5029,7 @@ end
 
 """
     restan_data(sb::SBBRMI, new_df; freeze_constants=true,
-                resample_groups=()) -> Dict
+                resample_groups=(), resample_covariates=()) -> Dict
 
 Thin convenience over [`reprocess`](@ref): the prepared Stan **data dict** for
 `new_df`, ready for a `param_constrain!` replay. Equivalent to

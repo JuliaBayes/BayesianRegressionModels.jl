@@ -45,6 +45,11 @@ end
         @test StanBlocks.stanc_check(BRM.stan_code(cv);warn_pedantic=false).ok
         @test BRM.stan_code(reprocess(cv,FRESH_SCALAR_DATA))==BRM.stan_code(cv)
         @test only(ranef_blocks(reprocess(cv,FRESH_SCALAR_DATA))).generated
+        plan_target=reprocess(generative_plan(source),FRESH_SCALAR_DATA;
+            resample_covariates=selected,resample_groups=[:subject])
+        @test BRM.stan_code(plan_target)==BRM.stan_code(cv)
+        @test modeled_covariates(plan_target)==modeled_covariates(cv)
+        @test restan_data(source,FRESH_SCALAR_DATA;resample_covariates=selected)==BRM.stan_data(target)
         @test_throws "frozen observed training anchors" reprocess(source,FRESH_SCALAR_DATA;
             resample_covariates=selected,freeze_constants=false)
     end
