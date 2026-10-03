@@ -89,7 +89,7 @@ end
         end
     end
     data=(;x=Union{Missing,Float64}[.2,missing,.8,missing],
-        subject=[1,1,2,2],y=[.1,.2,-.1,.3])
+        subject=[1,2,3,4],y=[.1,.2,-.1,.3])
     fitted=SBBRMI(builder(data);mod=@__MODULE__,total_groups=())
     prediction=reprocess(fitted,data;resample_covariates=[:x],resample_groups=[:subject])
     source=StanBlocks.stan_instantiate(fitted.model)
