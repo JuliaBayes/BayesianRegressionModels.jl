@@ -52,7 +52,11 @@ end
         names = coordinate_names(backend.model.layout)
         @test Set(names) == Set(intercept ? [:a_Intercept, :a_x] : [:a_x])
         stan = consumer_stan(brmi, "computed-predictor-$intercept-$same_axis")
-        mapping = [name => string(name) for name in names]
+        # Stan stores the shared population block as a vector in its
+        # Intercept/x design-column order; RK retains semantic scalar names.
+        mapping = intercept ? [:a_Intercept => "pop_a_beta_pop.1",
+            :a_x => "pop_a_beta_pop.2"] : [:a_x => "pop_a_beta_pop.1"]
+        @test Set(BridgeStan.param_unc_names(stan.model)) == Set(last.(mapping))
         rebuilt, plan = computed_public_replay(backend)
         original = Base.get_extension(BRM,
             :BayesianRegressionModelsReactiveKernelsExt)._rk_translated_plan(backend.plan)
