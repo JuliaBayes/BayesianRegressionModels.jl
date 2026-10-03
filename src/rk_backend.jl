@@ -6624,7 +6624,8 @@ function _rk_split_multinomial_counts!(columns::Dict{Symbol,AbstractVector},
 end
 
 function _rk_gate_crossed_columns!(columns::Dict{Symbol,AbstractVector},
-        n_obs::Int, mi_packed::Set{Symbol}=Set{Symbol}())
+        n_obs::Int, mi_packed::Set{Symbol}=Set{Symbol}();
+        statistical_inputs::Set{Symbol}=Set{Symbol}())
     prefix = "RK backend"
     for key in sort!(collect(keys(columns)))
         values = columns[key]
@@ -6632,7 +6633,9 @@ function _rk_gate_crossed_columns!(columns::Dict{Symbol,AbstractVector},
         # shorter than `n_obs` by construction (the thin-layer managed
         # exemption); everything else keeps the uniform axis. Pair
         # agreement gates at the call site; finiteness below still applies.
-        key in mi_packed || length(values) == n_obs || error(
+        # Fitted term containers are whole statistical inputs, rather than
+        # row-aligned observation columns. Their role comes from the term.
+        key in mi_packed || key in statistical_inputs || length(values) == n_obs || error(
             "$prefix: column `$key` has $(length(values)) rows, expected " *
             "$n_obs (one observation axis in slice 1)")
         key in mi_packed && any(ismissing, values) && continue
@@ -7585,7 +7588,9 @@ function _brm_rk_plan(brmi::BRMI)
             error("$prefix: internal: `mi()` packed columns for " *
                   "response `$(spec.response)` does not retain the full row axis")
     end
-    _rk_gate_crossed_columns!(columns, n_obs, mi_packed)
+    statistical_inputs = Set(t.options.prepared_data for p in predictor_specs
+        for t in p.terms if t.kind === :structured)
+    _rk_gate_crossed_columns!(columns, n_obs, mi_packed; statistical_inputs)
     _rk_gate_trials_values!(response_specs, columns, n_obs)
     _rk_gate_multinomial_trials!(response_specs, columns, n_obs)
     _rk_gate_evidence_values!(response_specs, columns, n_obs)

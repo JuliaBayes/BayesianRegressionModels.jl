@@ -11,16 +11,34 @@ end
 # Hilbert basis. Shared hypers remain scalars; authored hyper predictors are
 # vectors with one value per declared group, and rho floors act per group.
 function brm_hsgp_grouped(PHI, omega2, z, group_index, rho, sigma)
+    values = similar(z, size(PHI,1))
     if rho isa Number && sigma isa Number
         spectrum = brm_hsgp_sqrt_spd(omega2, sigma, rho)
-        return [sum(PHI[i,j] * z[group_index[i],j] * spectrum[j]
-            for j in axes(PHI,2)) for i in axes(PHI,1)]
+        for i in axes(PHI,1)
+            value = zero(eltype(z))
+            for j in axes(PHI,2)
+                value += PHI[i,j] * z[group_index[i],j] * spectrum[j]
+            end
+            values[i] = value
+        end
+        return values
     end
-    spectra = [brm_hsgp_sqrt_spd(omega2,
-        sigma isa Number ? sigma : sigma[g], rho isa Number ? rho : rho[g])
-        for g in axes(z,1)]
-    [sum(PHI[i,j] * z[group_index[i],j] * spectra[group_index[i]][j]
-        for j in axes(PHI,2)) for i in axes(PHI,1)]
+    spectra = similar(z)
+    for g in axes(z,1)
+        spectrum = brm_hsgp_sqrt_spd(omega2,
+            sigma isa Number ? sigma : sigma[g], rho isa Number ? rho : rho[g])
+        for j in axes(z,2)
+            spectra[g,j] = spectrum[j]
+        end
+    end
+    for i in axes(PHI,1)
+        value = zero(eltype(z))
+        for j in axes(PHI,2)
+            value += PHI[i,j] * z[group_index[i],j] * spectra[group_index[i],j]
+        end
+        values[i] = value
+    end
+    values
 end
 
 function _rk_ast_hsgp_hyper!(stmts, options, hyper, floors, taken, bindings, G)

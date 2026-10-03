@@ -117,7 +117,7 @@ end
     factor_term = only(plan.predictors).terms[2]
     @test factor_term.kind === :factor
     @test factor_term.options.coding === :subset
-    @test factor_design(plan,factor_term) == hcat(df.g .== 1, df.g .== 2)
+    @test factor_design(plan,factor_term) == hcat(df.g .== 2, df.g .== 1)
     # String groupings code exactly like integer levels: sort(unique)
     # order, ref by level value.
     bare = BRM._brm_rk_plan(@brm df begin
@@ -155,7 +155,7 @@ end
     pinned_term = only(pinned.predictors).terms[1]
     @test pinned_term.kind === :factor
     @test pinned_term.options.coding === :subset
-    @test factor_design(pinned,pinned_term) == hcat(df.g .== 1,df.g .== 2)
+    @test factor_design(pinned,pinned_term) == hcat(df.g .== 2,df.g .== 1)
     @test sort!([p.addressee for p in pinned.population_priors]) == [:g]
     # A non-string non-integer ref still fails closed with attribution.
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
@@ -171,7 +171,7 @@ end
         y ~ Normal(mu, s)
     end)
     @test factor_design(releveled,only(only(releveled.predictors).terms)) ==
-        hcat(df.g .== 3,df.g .== 1,df.g .== 2)
+        hcat(df.g .== 3,df.g .== 2,df.g .== 1)
     # A bare factor with an intercept uses default treatment coding.
     defaulted = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + g
@@ -197,7 +197,7 @@ end
         y ~ Normal(mu, s)
     end)
     inert_term = only(inert.predictors).terms[2]
-    @test factor_design(inert,inert_term) == hcat(df.g .== 1,df.g .== 2)
+    @test factor_design(inert,inert_term) == hcat(df.g .== 2,df.g .== 1)
     # `factor()` without `ref` under `0 +` is full-rank like the bare column.
     noref = BRM._brm_rk_plan(@brm df begin
         mu ~ 0 + factor(g)
