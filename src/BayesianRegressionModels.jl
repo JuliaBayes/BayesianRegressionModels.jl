@@ -41,6 +41,9 @@ include("preparation_structured.jl")
 include("turing_backend.jl")
 include("rk_backend.jl")
 include("rk_ast.jl")
+include("rk_statistical.jl")
+include("statistical_preparation.jl")
+include("statistical_models.jl")
 include("rk_values.jl")
 include("native_ppl.jl")
 include("vimpl.jl")
@@ -129,6 +132,7 @@ export brm_multinomial, brm_multinomial_lpmf, brm_multinomial_lpmfs, brm_multino
 export truncated, censored, interval_censored
 # Fusion append API (cross-package: the RK reporter resolves this by name).
 export rk_translate_artifact
+export rkppl_model
 # A julianic `@jmodel` body is ordinary Julia, so the distributions it names must
 # be real `Distributions` objects resolved in the AUTHOR's scope. Re-export the
 # ones a model body actually writes so `using BayesianRegressionModels` is the

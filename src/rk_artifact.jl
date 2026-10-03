@@ -2,7 +2,7 @@
 #
 # The BRM-side library for the parity-closeout append sweep (pair
 # closeout-appends; coordinator lock brief 14oeobv + rulings on peer todo
-# 1womb1l + the twin's worker-contract reply): v2 RK artifacts
+# 1womb1l + the twin's worker-contract reply): v3 RK artifacts
 # (`emit_rk_artifact`: BRMI → `(; case_id, ast, defs, plan, meta)` → `.jls`)
 # consumed by the RK append driver, and SBBRMI-side reference numbers
 # (`sb_prepare_model` + `sb_probe_numbers`: full-posterior value +
@@ -10,21 +10,21 @@
 #
 # RK-free: translation of an artifact to the bound thin-layer plan lives in
 # `BayesianRegressionModelsReactiveKernelsExt` (`rk_translate_artifact`),
-# which shares the production patch code with `_rk_translated_plan` — the
+# which shares the emitted-source lowering with `_rk_translated_plan` — the
 # single source of truth. The append worker (`test/rk_append_worker.jl`)
 # orchestrates emit → translate → SB legs per case.
 
 """
     rk_artifact_version()
 
-The append-artifact shape version this BRM reads and writes (`2`). The
+The append-artifact shape version this BRM reads and writes (`3`). The
 September `(; ast, data, meta)` triple predates submodel `defs` and the
-BRM-side thin-layer patches, which need the plan; v2 carries
+data crossings; v3 carries
 `(; case_id, ast, defs, plan, meta)` with `data === plan.columns`.
 """
-rk_artifact_version() = 2
+rk_artifact_version() = 3
 
-# The plan kinds a v2 artifact may carry — the one predicate both the core
+# The plan kinds a v3 artifact may carry — the one predicate both the core
 # read check (`_check_artifact`) and the extension translate check
 # (`rk_translate_artifact`) consult. It currently equals the extension's
 # `_RK_PLAN_TYPES`; it is kept as its own predicate so a future plan kind
@@ -35,7 +35,7 @@ const _RK_ARTIFACT_PLAN_TYPES = Union{_RKStructuralPlan,_RKKernelPlan,_RKValuePl
     emit_rk_artifact(brmi::BRMI; case_id, provenance=nothing, brm_pin=nothing)
 
 Lower `brmi` through the production RK route (`_brm_rk_plan` →
-`_rk_emit_ast` with production defaults) and pack the v2 append artifact
+`_rk_emit_ast` with production defaults) and pack the v3 append artifact
 `(; case_id, ast, defs, plan, meta)`. `meta` is
 `(; case_id, provenance, brm_pin, generator_version, emitted_at,
 julia_version)`; `emitted_at` is a unix-epoch-UTC `Int`
@@ -85,7 +85,7 @@ function _check_emitted(emitted::_RKEmittedProgram, case_id)
 end
 
 # Implemented only by the ReactiveKernels package extension
-# (`rk_translate_artifact`), which shares the production patch code with
+# (`rk_translate_artifact`), which shares the emitted-source lowering with
 # `_rk_translated_plan`. Keeping the generic here lets the core emit
 # artifacts without loading RK.
 function rk_translate_artifact end
@@ -107,7 +107,7 @@ end
 """
     read_rk_artifact(path) -> artifact
 
-Deserialize a v2 artifact, failing closed on shape or version skew (a
+Deserialize a v3 artifact, failing closed on shape or version skew (a
 `generator_version` other than `rk_artifact_version()` is a loud error,
 never a silent read).
 """
@@ -121,7 +121,7 @@ end
 
 function _check_artifact(artifact, path)
     keys(artifact) == (:case_id, :ast, :defs, :plan, :meta) || error(
-        "RK artifact: `$(path)` does not hold a v2 artifact " *
+        "RK artifact: `$(path)` does not hold a v3 artifact " *
         "(keys $(keys(artifact)))")
     artifact.meta.generator_version == rk_artifact_version() || error(
         "RK artifact: `$(path)` has generator_version " *

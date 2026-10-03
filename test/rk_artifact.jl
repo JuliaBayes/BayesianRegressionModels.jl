@@ -3,7 +3,7 @@
 # Run: julia --project=test test/rk_artifact.jl
 #
 # Fixture-tests the BRM side of the parity-closeout append sweep (pair
-# closeout-appends): v2 artifact emit → serialize → read (RK-free),
+# closeout-appends): v3 artifact emit → serialize → read (RK-free),
 # artifact → bound-plan translation through the production route
 # (behavioral equivalence with the live RKBRMI path), the Layer-2 plan
 # dump, the explicit SB name-map machinery (pure), and the SB Stan
@@ -86,7 +86,7 @@ end
     @test a.plan.n_obs == 6
     @test sort!(collect(keys(a.plan.columns))) == [:x, :y]
     @test a.meta.case_id == "fixture-gauss"
-    @test a.meta.generator_version == BRM.rk_artifact_version() == 2
+    @test a.meta.generator_version == BRM.rk_artifact_version() == 3
     @test a.meta.brm_pin == "test-pin"
     @test a.meta.emitted_at isa Int && a.meta.emitted_at > 0
     @test a.meta.julia_version == string(VERSION)
@@ -118,7 +118,7 @@ end
         y ~ weighted(Normal(mu, sigma), fweights(n))
     end
     a = BRM.emit_rk_artifact(brmi; case_id="fixture-weighted")
-    @test !isempty(a.defs)
+    @test isempty(a.defs)
     b = BRM.read_rk_artifact(
         BRM.write_rk_artifact(joinpath(mktempdir(), "w.jls"), a))
     @test b.defs == a.defs
@@ -231,8 +231,8 @@ end
 # ---------------------------------------------------------------- worker
 # The worker script is includable (main() runs only as a script); its
 # pure machinery is fixture-tested here, and the end-to-end path adapts:
-# full outputs when the twin's transpile_report_v2 has landed, else the
-# loud missing-v2 error (never a silent skip).
+# full outputs when the twin's transpile_report_v3 has landed, else the
+# loud missing-v3 error (never a silent skip).
 
 include("rk_append_worker.jl")
 
@@ -316,7 +316,7 @@ end
     @test back["pins"]["brm"] == "abc"
 end
 
-@testset "worker end-to-end (--no-sb, adaptive on reporter v2)" begin
+@testset "worker end-to-end (--no-sb, adaptive on reporter v3)" begin
     dir = mktempdir()
     probe_path = _write_probe(dir)
     spec_path = joinpath(dir, "in.toml")
@@ -330,7 +330,7 @@ end
     try
         ret = _run_case(spec_path, outdir; no_sb=true, print_coords=false)
         @test ret == 0
-        # Full path (reporter v2 landed): all three outputs, machine
+        # Full path (reporter v3 landed): all three outputs, machine
         # readable, posterior finite.
         for f in ("artifact.jls", "sections.md", "numbers.toml")
             @test isfile(joinpath(outdir, f))
@@ -348,13 +348,13 @@ end
         @test nums["probe"][1]["grad"] in ("PASS", "FAIL", "not run")
     catch e
         # Pre-landing seam: the worker must fail closed LOUDLY on the
-        # missing reporter v2 (never a silent or divergent render), and
+        # missing reporter v3 (never a silent or divergent render), and
         # the RK-free prefix (emit) must already have produced the
         # artifact. The backtrace prints so a non-seam failure is
         # diagnosable from the log.
         showerror(stderr, e, catch_backtrace())
         println(stderr)
-        @test occursin("transpile_report_v2", sprint(showerror, e))
+        @test occursin("transpile_report_v3", sprint(showerror, e))
         @test isfile(joinpath(outdir, "artifact.jls"))
     end
 end

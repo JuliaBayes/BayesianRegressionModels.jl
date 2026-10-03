@@ -3786,7 +3786,7 @@ end
     @test_throws ErrorException BRM._rk_gate_acyclic!([cyclic_a, cyclic_b], [])
 end
 
-@stestset "mi() missing-response plans packed obs slices" begin
+@stestset "mi() full response values with observed-row indices" begin
     # Case A (decision 05aemvx): the likelihood restricts to observed rows
     # while predictors, levels, and `n_obs` stay full-length.
     missing_df = (; df..., y=[0.5, missing, 0.1, 0.9, 1.4, 1.1])
@@ -3799,7 +3799,7 @@ end
     @test (spec.family, spec.link) === (:gaussian, :identity)
     @test spec.mi_jobs === :Jobs_y
     @test plan.n_obs == 6
-    @test plan.columns[:y] == [0.5, 0.1, 0.9, 1.4, 1.1]
+    @test isequal(plan.columns[:y], missing_df.y)
     @test plan.columns[:Jobs_y] == [1, 3, 4, 5, 6]
     @test plan.columns[:x] == df.x
     # Distributional scale takes the same packed route.
@@ -3811,7 +3811,7 @@ end
     dist_spec = only(dist_plan.responses)
     @test (dist_spec.family, dist_spec.link) === (:gaussian, :identity)
     @test dist_spec.mi_jobs === :Jobs_y
-    @test dist_plan.columns[:y] == [0.5, 0.1, 0.9, 1.4, 1.1]
+    @test isequal(dist_plan.columns[:y], missing_df.y)
     # RK-admitted Gamma/Beta spellings take the same packed route.
     gdf = (; df..., y=[0.5, missing, 0.1, 0.9, 1.4, 1.1])
     gplan = BRM._brm_rk_plan(@brm gdf begin
@@ -3821,7 +3821,7 @@ end
     gspec = only(gplan.responses)
     @test (gspec.family, gspec.link) === (:gamma_log, :log)
     @test gspec.mi_jobs === :Jobs_y
-    @test gplan.columns[:y] == [0.5, 0.1, 0.9, 1.4, 1.1]
+    @test isequal(gplan.columns[:y], gdf.y)
     udf = (; df..., y=[0.2, missing, 0.7, 0.3, 0.6, 0.5])
     uplan = BRM._brm_rk_plan(@brm udf begin
         logit(mu) ~ 1 + x
@@ -3830,7 +3830,7 @@ end
     uspec = only(uplan.responses)
     @test (uspec.family, uspec.link) === (:beta_logit, :logit)
     @test uspec.mi_jobs === :Jobs_y
-    @test uplan.columns[:y] == [0.2, 0.7, 0.3, 0.6, 0.5]
+    @test isequal(uplan.columns[:y], udf.y)
     # Fail-closed surface: compositions, discrete families, and Case-B
     # downstream uses of the merged response.
     wdf = (; missing_df..., w=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
@@ -4927,15 +4927,16 @@ end
             y ~ Normal(mu, s)
         end)
     end
-    # sd()/cor() statements are deferred (buckets take defaults).
-    rk_throws_admission("sd(...)") do
-        BRM._brm_rk_plan(@brm df begin
+    # Explicit shared-block priors are resolved by the same address checks
+    # as the Stan backend, then emitted as ordinary declarations.
+    explicit_prior_plan = BRM._brm_rk_plan(@brm df begin
             mu ~ 1 + x + (1 + x | p | g)
             sd(:, p) ~ Exponential(0.3)
             s ~ Exponential(1)
             y ~ Normal(mu, s)
         end)
-    end
+    @test all(prior == :(Exponential(0.3))
+        for prior in only(explicit_prior_plan.buckets).sd_priors)
     # Duplicate blocks mirror SB's rejection.
     rk_throws_admission("repeats") do
         BRM._brm_rk_plan(@brm df begin
