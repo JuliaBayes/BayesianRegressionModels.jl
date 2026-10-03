@@ -98,7 +98,9 @@ densities. Run `test/setup_env.jl` to install the fixed RK pin, then
 `julia --threads=4 --project=test test/rk_construction_concurrency.jl`.
 
 `rk_plain.jl` and `rk_statistical_library.jl` exercise BRM-owned statistical
-declarations through ordinary RKPPL lowering. `rk_values.jl` checks whole
+declarations through ordinary RKPPL lowering. `rk_leveled.jl` adds independent
+categorical-reference and multinomial row-density, Jacobian and ordinary
+reverse-gradient oracles. `rk_values.jl` checks whole
 predictor arrays, callable readers and distinct predictor/observation axes.
 `rk_source_roundtrip.jl` supplies the shared complete-program replay check:
 definitions and model source are printed, reparsed and built afresh, then

@@ -7,27 +7,12 @@ using Enzyme, LogDensityProblems, LinearAlgebra
 using DifferentiationInterface: AutoEnzyme
 include(joinpath(@__DIR__, "testset_filter.jl"))
 const BRM = BayesianRegressionModels
+include(joinpath(@__DIR__, "rk_source_roundtrip.jl"))
 
 function check_printed_roundtrip(backend)
+    check_rk_source_roundtrip(backend)
     emitted = BRM._rk_emit_ast(backend.plan)
-    ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
-    printed = sprint(Base.show_unquoted, emitted.main)
-    parsed = Meta.parse(printed)
-    rebound = ext._rk_translate_from_emitted(backend.plan,
-        BRM._RKEmittedProgram(Meta.parse.(sprint.(Base.show_unquoted, emitted.defs)), parsed,
-            emitted.bindings))
-    original = ext._rk_translated_plan(backend.plan)
-    built = Base.invokelatest(build_kernel, rebound)
-    @test coordinate_names(built.layout) == coordinate_names(backend.model.layout)
-    N = length(coordinate_names(backend.model.layout))
-    for u in (zeros(N), fill(0.13, N), collect(range(-0.2, 0.3; length=N)))
-        for preset in (:sampler, :prior, :likelihood)
-            a = Base.invokelatest(prepare_query(backend.model, original, preset), u)
-            b = Base.invokelatest(prepare_query(built, rebound, preset), u)
-            @test isequal(a, b)
-        end
-    end
-    printed
+    sprint(Base.show_unquoted, emitted.main)
 end
 
 function check_plain_gradient(backend)
@@ -217,6 +202,7 @@ public_prior_reader(a, b, row) = a[row] .+ b[row]
         y ~ Normal(reads, 1.0)
     end
     default_backend, backend = RKBRMI(control), RKBRMI(explicit)
+    check_printed_roundtrip(default_backend)
     source = check_printed_roundtrip(backend)
     @test occursin("Exponential.(0.7)", source)
     @test occursin("LKJCholesky(2, 3.0)", source)

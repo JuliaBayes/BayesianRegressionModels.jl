@@ -12,9 +12,8 @@
 
 using Test
 using BayesianRegressionModels
-using Distributions: Exponential, Normal
-using ReactiveKernels: prepare
-using ReactiveKernelsPPL: build_kernel
+using Distributions: Exponential, Normal, logpdf
+using ReactiveKernelsPPL: build_kernel, prepare_query
 using StanBlocks
 
 const BRM = BayesianRegressionModels
@@ -63,15 +62,10 @@ function _structural_equal(a, b)
     end
 end
 
-# Posterior value of a kernel spec at `u`: prepare + call (the same
-# query shape the parity corpus uses, without the AD shim).
-function _spec_posterior(spec, columns, u)
-    names = sort!(collect(keys(columns)))
-    bound =
-        NamedTuple{Tuple(names)}(Tuple(columns[k] for k in names))
-    kern = prepare(spec;
-        have=(:unconstrained, names...), want=:posterior, bound=bound)
-    return kern(Vector{Float64}(u))
+# Use the bound plan: it carries the emitted data-only definitions as well
+# as the original columns, exactly as the production sampler does.
+function _spec_posterior(model, translated, u)
+    Base.invokelatest(prepare_query(model, translated, :sampler), Vector{Float64}(u))
 end
 
 @testset "artifact emit shape" begin
@@ -107,10 +101,8 @@ end
     @test b.meta == a.meta
 end
 
-@testset "artifact defs round-trip (non-GLM predictor)" begin
-    # GLM-eligible responses consume their predictor whole (no defs); a
-    # weighted gaussian keeps scalar submodel defs, which must survive
-    # serialization and lower.
+@testset "artifact weighted predictor round-trip" begin
+    # The complete ordinary program owns its matrix product and weighting.
     wdf = merge(_DF, (; n=[1, 2, 1, 2, 1, 2]))
     brmi = @brm wdf begin
         mu ~ 1 + x
@@ -123,10 +115,13 @@ end
         BRM.write_rk_artifact(joinpath(mktempdir(), "w.jls"), a))
     @test b.defs == a.defs
     translated = BRM.rk_translate_artifact(b)
-    @test translated.n_obs == 6
-    v = _spec_posterior(build_kernel(translated).spec, a.plan.columns,
-        [0.5, -0.25, 0.1])
-    @test isfinite(v)
+    @test b.plan.n_obs == 6
+    u = [0.5, -0.25, 0.1]
+    v = _spec_posterior(build_kernel(translated), translated, u)
+    sigma = exp(u[3])
+    oracle = sum(wdf.n .* logpdf.(Normal.(u[1] .+ u[2] .* wdf.x, sigma), wdf.y)) +
+        sum(logpdf.(Normal(), u[1:2])) + logpdf(Exponential(1), sigma) + u[3]
+    @test v ≈ oracle atol=1e-12
 end
 
 @testset "artifact read fails closed on skew" begin
@@ -158,7 +153,7 @@ end
     roundtripped = BRM.read_rk_artifact(
         BRM.write_rk_artifact(joinpath(mktempdir(), "rt.jls"), a))
     translated = BRM.rk_translate_artifact(roundtripped)
-    @test translated.n_obs == 6
+    @test roundtripped.plan.n_obs == 6
     # Behavioral equivalence with the live RKBRMI production path
     # (`_brm_rk_plan` → fresh emit → `_rk_translated_plan` →
     # `build_kernel`): same posterior, bit-equal, at the origin and a
@@ -166,8 +161,9 @@ end
     backend = BRM.RKBRMI(brmi)
     rt_model = build_kernel(translated)
     for u in (zeros(3), [0.5, -0.25, 0.1])
-        v_live = _spec_posterior(backend.model.spec, a.plan.columns, u)
-        v_rt = _spec_posterior(rt_model.spec, a.plan.columns, u)
+        live = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)._rk_translated_plan(backend.plan)
+        v_live = _spec_posterior(backend.model, live, u)
+        v_rt = _spec_posterior(rt_model, translated, u)
         @test v_rt == v_live
         @test isfinite(v_rt)
     end
@@ -316,7 +312,7 @@ end
     @test back["pins"]["brm"] == "abc"
 end
 
-@testset "worker end-to-end (--no-sb, adaptive on reporter v3)" begin
+@testset "worker end-to-end (--no-sb, reporter v2 interface)" begin
     dir = mktempdir()
     probe_path = _write_probe(dir)
     spec_path = joinpath(dir, "in.toml")
@@ -330,7 +326,7 @@ end
     try
         ret = _run_case(spec_path, outdir; no_sb=true, print_coords=false)
         @test ret == 0
-        # Full path (reporter v3 landed): all three outputs, machine
+        # Full path: all three outputs, machine
         # readable, posterior finite.
         for f in ("artifact.jls", "sections.md", "numbers.toml")
             @test isfile(joinpath(outdir, f))
@@ -345,16 +341,18 @@ end
         nums = TOML.parsefile(joinpath(outdir, "numbers.toml"))
         @test length(nums["probe"]) == 1
         @test isfinite(nums["probe"][1]["posterior"])
-        @test nums["probe"][1]["grad"] in ("PASS", "FAIL", "not run")
+        @test nums["probe"][1]["grad"] == "PASS"
+        println("ARTIFACT_REPORTER posterior=", nums["probe"][1]["posterior"],
+            " gradient=", nums["probe"][1]["grad"])
     catch e
         # Pre-landing seam: the worker must fail closed LOUDLY on the
-        # missing reporter v3 (never a silent or divergent render), and
+        # missing reporter v2 interface (never a silent or divergent render), and
         # the RK-free prefix (emit) must already have produced the
         # artifact. The backtrace prints so a non-seam failure is
         # diagnosable from the log.
         showerror(stderr, e, catch_backtrace())
         println(stderr)
-        @test occursin("transpile_report_v3", sprint(showerror, e))
+        @test occursin("transpile_report_v2", sprint(showerror, e))
         @test isfile(joinpath(outdir, "artifact.jls"))
     end
 end
