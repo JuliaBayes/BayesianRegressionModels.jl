@@ -70,6 +70,8 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol},
             push!(summands, refref[index])
         elseif term.kind === :offset
             push!(summands, colref[index])
+        elseif term.kind === :structured
+            push!(summands, refref[index])
         elseif term.kind === :spline
             # The ordinary fitted-basis product is a predictor summand.
             push!(summands, refref[index])
@@ -835,6 +837,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         _rk_ast_dar_names(plan),
         _rk_ast_ar_names(plan),
         _rk_ast_me_names(plan))
+    union!(taken, (t.options.id for p in plan.predictors for t in p.terms
+        if t.kind === :structured))
     union!(taken, reserved)
     # A predictor sharing its name with a data column cannot keep it:
     # the program has one namespace, so the affine (definition and
@@ -869,6 +873,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     defs = Expr[]
     bindings = Pair{Symbol,Any}[]
     stmts = Expr[]
+    structured_blocks = Dict{Tuple{Symbol,Symbol},Any}()
     for derived in plan.derived
         push!(stmts, Expr(:(=), derived.name, derived.expression))
     end
@@ -887,7 +892,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         coefs = Dict{Int,Symbol}()
         colactual = Dict{Int,Any}()
         refactual = Dict{Int,Any}()
-        scalar_stmts = Expr[]
+    scalar_stmts = Expr[]
         for (index, term) in enumerate(predictor.terms)
             kind = term.kind
             if kind in (:continuous, :factor, :monotonic, :monotonic_summand, :offset, :ar, :me)
@@ -900,6 +905,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 refactual[index] = Expr(:ref, cumulative, only(term.columns))
             elseif kind === :spline || kind === :hsgp
                 refactual[index] = term.options.id
+            elseif kind === :structured
+                refactual[index] = term.options.id
+                append!(stmts, _rk_ast_structured_term(term, structured_blocks,
+                    taken, bindings))
             elseif kind === :gp
                 refactual[index] = term.options.f
             elseif kind === :ar
@@ -916,6 +925,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             end
             (kind === :offset || kind === :ranef_gather ||
                 kind === :spline || kind === :hsgp ||
+                kind === :structured ||
                 kind === :gp || kind === :dar ||
                 kind === :monotonic_summand) && continue
             hs_spec = get(hs_priors, (predictor.name, term.addressee),
@@ -969,7 +979,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         end
         for term in predictor.terms
             term.kind === :hsgp || continue
-            append!(stmts, _rk_ast_value_hsgp(term, taken))
+            append!(stmts, _rk_ast_value_hsgp(term, taken, bindings))
         end
         for term in predictor.terms
             term.kind === :dar || continue

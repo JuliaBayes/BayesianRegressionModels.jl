@@ -4317,7 +4317,8 @@ end
 
 function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         target::Symbol, data::AbstractDict,
-        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol})
+        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol}; hyper_plans=(),
+        rho_stated=false, sigma_stated=false)
     prefix = "RK backend"
     state = prepared.state
     state.latent && error(
@@ -4332,10 +4333,8 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
             "$prefix: predictor `$target` periodic `hsgp(...)` needs one " *
             "isotropic axis (the thin-layer periodic surface is 1D isotropic)")
     end
-    isnothing(state.by) || error(
-        "$prefix: predictor `$target` grouped `hsgp(...; by=...)` " *
-        "is out of slice 1 (the thin-layer surface is ungrouped; " *
-        "`by=` weights are sequenced)")
+    state.by === nothing || state.iso || error(
+        "$prefix: grouped HSGP currently requires one isotropic length scale")
     any(!iszero, state.centeredness) && error(
         "$prefix: predictor `$target` partially-centered `hsgp(...)` " *
         "is out of slice 1 (the thin-layer surface is non-centered; " *
@@ -4356,13 +4355,23 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
     end
     base = "hsgp_" * join(string.(axes), "_")
     id = _rk_mint_smooth_id!(taken, columns, base)
+    common = (; rho_prior=state.rho_prior, sigma_prior=state.sigma_prior,
+        rho_truncated=any(>(0), state.rho_lower isa Real ? (state.rho_lower,) : state.rho_lower),
+        hyper_plans, rho_stated, sigma_stated)
     if state.cov === :periodic
         return _RKTermSpec(:hsgp, collect(axes),
-            (; id, k=only(state.K), cov=:periodic, period=state.period), id, id)
+            (; id, k=only(state.K), cov=:periodic, period=state.period, common...), id, id)
     end
     k = length(state.K) == 1 ? only(state.K) : state.K
     c = length(state.c) == 1 ? only(state.c) : state.c
-    _RKTermSpec(:hsgp, collect(axes), (; id, k, c, iso=state.iso), id, id)
+    grouped = if state.by === nothing
+        (;)
+    else
+        idx = _rk_mint_generated!(taken, columns, string(id, "_group_index"))
+        columns[idx] = state.by.idx
+        (; group_index=idx, n_groups=length(state.by.levels))
+    end
+    _RKTermSpec(:hsgp, collect(axes), (; id, k, c, iso=state.iso, common..., grouped...), id, id)
 end
 
 # ---- AR(1) latent-path terms (mirrors `_sb_ar1`) ----
@@ -5174,12 +5183,7 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
             !(t in mo_raw) && !(t in dar_raw) && !(t in ar_raw) &&
             !(t in me_raw),
         structured)
-    isempty(other_structured) || error(
-        "$prefix: predictor `$target` structured term(s) " *
-        "$(join(unique!(string.(getf.(filter(t -> t isa ExprColumn, other_structured)))), ", ")) " *
-        "are out of slice 1 (population GLMs only)")
     _rk_gate_spline_term_priors!(brmi, target, spline_raw)
-    _rk_gate_hsgp_term_priors!(brmi, target, hsgp_raw)
     _rk_gate_hsgp_periodic_kw!(target, hsgp_raw)
     _rk_gate_ar_effect_priors!(brmi, target, ar_raw)
     _rk_gate_me_effect_priors!(brmi, target, me_raw)
@@ -5187,7 +5191,8 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
     ordinary = Tuple(t for t in raw_terms if !(t in structured) && !(t in grouped))
     isempty(ordinary) && isempty(spline_raw) && isempty(gp_raw) &&
         isempty(hsgp_raw) && isempty(mo_raw) && isempty(dar_raw) &&
-        isempty(ar_raw) && isempty(me_raw) && isempty(grouped) && error(
+        isempty(ar_raw) && isempty(me_raw) && isempty(grouped) &&
+        isempty(other_structured) && error(
         "$prefix: predictor `$target` has no terms")
     has_intercept = any(t -> t isa Integer && t == 1, ordinary)
     # Classify before building geometry: fail fast on unknown terms with RK
@@ -5227,12 +5232,13 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
     any(t -> t.kind !== :offset, terms) || !isempty(spline_raw) ||
         !isempty(gp_raw) || !isempty(hsgp_raw) || !isempty(mo_raw) ||
         !isempty(dar_raw) || !isempty(ar_raw) || !isempty(me_raw) ||
+        !isempty(other_structured) ||
         return _rk_plan_offset_only_predictor(
         brmi, context, target, ordinary, available, link, terms, derived)
     geometry = _brm_prepare_predictor_geometry(
         brmi, context, target; available_predictors=available,
         tolerant_default)
-    for prepared in geometry.terms
+    for (raw, prepared) in zip(structured, geometry.terms)
         if prepared.callable === gp
             push!(terms, _rk_plan_gp_term!(
                 prepared, target, context.data, columns, taken))
@@ -5241,7 +5247,11 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
                 prepared, target, context.data, columns, taken))
         elseif prepared.callable === hsgp
             push!(terms, _rk_plan_hsgp_term!(
-                prepared, target, context.data, columns, taken))
+                prepared, target, context.data, columns, taken;
+                hyper_plans=Tuple(p for p in _sb_collect_hyper_plans(brmi; prefix)
+                    if p.lp === target && p.term_key === _brm_prepared_term_key(raw)),
+                rho_stated=_brm_term_prior_spec(raw, target, context, :term_length_scale) !== nothing,
+                sigma_stated=_brm_term_prior_spec(raw, target, context, :term_sd) !== nothing))
         elseif prepared.callable === mo
             spec = _rk_plan_mo_term!(
                 prepared, target, columns, taken)
@@ -5259,8 +5269,12 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
             push!(terms, _rk_plan_me_term!(
                 prepared, target, columns, taken, me_sources))
         else
-            error("$prefix: internal: unexpected structured term " *
-                "survived pre-check in `$target`")
+            haskey(prepared.state, :fields) || error(
+                "$prefix: predictor `$target` structured term `$(nameof(prepared.callable))` " *
+                "needs prepared group fields and a native Julia effect")
+            id = _rk_mint_smooth_id!(taken, columns,
+                string("structured_", target, "_", nameof(prepared.callable)))
+            push!(terms, _RKTermSpec(:structured, Symbol[], (; id, prepared), id, id))
         end
     end
     if isempty(terms)

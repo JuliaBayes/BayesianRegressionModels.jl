@@ -181,7 +181,7 @@ function _rk_ast_value_spline(term, taken)
     stmts
 end
 
-function _rk_ast_value_hsgp(term, taken)
+function _rk_ast_value_hsgp(term, taken, bindings)
     options = term.options
     PHI = _rk_ast_fresh_name(string(options.id, "_PHI"), taken)
     lambda = _rk_ast_fresh_name(string(options.id, "_lambda"), taken)
@@ -195,24 +195,31 @@ function _rk_ast_value_hsgp(term, taken)
         Expr(:call, :brm_hsgp_basis, Expr(:tuple, term.columns...), k, c, options.iso)
     end
     stmts = Expr[Expr(:(=), Expr(:tuple, PHI, lambda, floors), call)]
+    if haskey(options, :group_index) || !isempty(get(options, :hyper_plans, ()))
+        append!(stmts, _rk_ast_hsgp_grouped(term, PHI, lambda, floors, taken, bindings))
+        return stmts
+    end
     rho_value = if periodic || options.iso
         rho = _rk_ast_fresh_name(string(options.id, "_rho"), taken)
-        push!(stmts, Expr(:call, :~, rho, Expr(:call, :truncated,
-            Expr(:call, :LogNormal, 0, 1), floors, Inf)))
+        prior = _rk_ast_positive_prior(options.rho_prior, bindings, taken)
+        options.rho_truncated && (prior = Expr(:call, :truncated, prior, floors, Inf))
+        push!(stmts, Expr(:call, :~, rho, prior))
         rho
     else
         rhos = Symbol[]
         for j in eachindex(term.columns)
             rho = _rk_ast_fresh_name(string(options.id, "_rho", j), taken)
             push!(rhos, rho)
-            push!(stmts, Expr(:call, :~, rho, Expr(:call, :truncated,
-                Expr(:call, :LogNormal, 0, 1), Expr(:ref, floors, j), Inf)))
+            prior = _rk_ast_positive_prior(options.rho_prior, bindings, taken)
+            options.rho_truncated && (prior = Expr(:call, :truncated, prior, Expr(:ref, floors, j), Inf))
+            push!(stmts, Expr(:call, :~, rho, prior))
         end
         Expr(:vect, rhos...)
     end
     sigma = _rk_ast_fresh_name(string(options.id, "_sigma"), taken)
     z = _rk_ast_fresh_name(string(options.id, "_z"), taken)
-    push!(stmts, Expr(:call, :~, sigma, Expr(:call, :LogNormal, 0, 1)))
+    push!(stmts, Expr(:call, :~, sigma,
+        _rk_ast_positive_prior(options.sigma_prior, bindings, taken)))
     push!(stmts, Expr(:call, :.~, Expr(:ref, z, Expr(:call, :axes, PHI, 2)),
         _rk_ast_dotted(:Normal, 0, 1)))
     spectral = periodic ? :brm_hsgp_periodic_sqrt_spd : :brm_hsgp_sqrt_spd
