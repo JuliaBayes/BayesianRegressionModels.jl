@@ -4276,27 +4276,6 @@ end
 # in-graph contract, decision `02e64eo`). One id per smooth occurrence
 # (exactly-one-use linkage), minted with numeric stems on collision.
 
-# `length_scale(...)`/`sd(...)` hyper overrides are sequenced: the
-# thin-layer hsgp surface is self-priored with `LogNormal(0, 1)`
-# defaults (the floor-zeroing override surface is a peer follow-up),
-# so BRM rejects them here with RK attribution instead of emitting a
-# default the formula did not ask for.
-function _rk_gate_hsgp_term_priors!(brmi::BRMI, target::Symbol,
-        hsgp_raw::AbstractVector)
-    prefix = "RK backend"
-    isempty(hsgp_raw) && return nothing
-    per_target = get(_brm_resolve_term_priors(brmi), target, Dict())
-    for t in hsgp_raw
-        key = _brm_prepared_term_key(t)
-        isempty(get(per_target, key, Dict())) || error(
-            "$prefix: predictor `$target` hyper priors on " *
-            "`$key` are out of slice 1 (the thin-layer hsgp surface " *
-            "is self-priored with LogNormal(0, 1) defaults; " *
-            "`length_scale(...)`/`sd(...)` overrides are sequenced)")
-    end
-    nothing
-end
-
 # Periodic HSGP admits exactly the SB spelling
 # (`_sb_hsgp_periodic_term!`): `c`/`domain`/`orthogonal_to`/`by` are
 # meaningless on the cosine/sine basis and refused here with RK

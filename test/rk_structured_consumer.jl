@@ -177,3 +177,64 @@ end
     end
     end
 end
+
+@stestset "original explicit HSGP hyperpriors preserve support and normalized kernels" begin
+    data=(;x=[-.5,-.1,.4,.9],y=[.2,-.1,.4,.3])
+    before=deepcopy(data)
+    builders=(
+        "default" => @brm(begin
+            mu ~ 1+hsgp(x;k=3)
+            y ~ Normal(mu,1)
+        end),
+        "lognormal" => @brm(begin
+            mu ~ 1+hsgp(x;k=3)
+            length_scale(:,hsgp(x)) ~ LogNormal(0.,1.)
+            sd(:,hsgp(x)) ~ LogNormal(0.,1.)
+            y ~ Normal(mu,1)
+        end),
+        "bounded" => @brm(begin
+            mu ~ 1+hsgp(x;k=3)
+            length_scale(:,hsgp(x)) ~ Uniform(.2,2.)
+            sd(:,hsgp(x)) ~ truncated(Normal(0.,1.);lower=0.)
+            y ~ Normal(mu,1)
+        end))
+    for (label,builder) in builders
+        model=builder(data)
+        backend,problem=consumer_problem(model)
+        names=coordinate_names(backend.model.layout)
+        index(n)=something(findfirst(==(Symbol(n)),names))
+        a=index("mu_Intercept");r=index("hsgp_x_rho");s=index("hsgp_x_sigma")
+        z=[index("hsgp_x_z.$j") for j in 1:3]
+        term=only(filter(t->t.kind===:hsgp,only(backend.plan.predictors).terms))
+        phi,frequencies,floor=independent_hsgp_basis(data.x,3,term.options.c)
+        @test term.options.rho_truncated == (label=="default")
+        @test term.options.rho_stated == (label!="default")
+        @test length(names)==6
+        oracle(u)=begin
+            p=1/(1+exp(-u[r]))
+            rho=label=="bounded" ? .2+1.8p :
+                (label=="default" ? floor : 0.)+exp(u[r])
+            sigma=exp(u[s])
+            rho_law=label=="bounded" ? Uniform(.2,2.) : label=="default" ?
+                truncated(LogNormal(),floor,Inf) : LogNormal()
+            sigma_law=label=="bounded" ? truncated(Normal(),0,Inf) : LogNormal()
+            jac=label=="bounded" ? log(1.8)+log(p)+log1p(-p) : u[r]
+            prior=logpdf(Normal(),u[a])+sum(logpdf.(Normal(),u[z]))+
+                logpdf(rho_law,rho)+logpdf(sigma_law,sigma)+jac+u[s]
+            mu=[u[a]+sum(phi[i,k]*u[z[k]]*sigma*sqrt(rho*sqrt(2pi))*
+                exp(-rho^2*frequencies[k]/4) for k in 1:3) for i in eachindex(data.y)]
+            prior+sum(logpdf.(Normal.(mu,1),data.y))
+        end
+        stan=consumer_stan(model,"hsgp-explicit-"*label)
+        mapping=[:mu_Intercept=>"pop_mu_beta_pop.1",
+            :hsgp_x_rho=>"rho_hsgpw_x",:hsgp_x_sigma=>"sigma_hsgpw_x"]
+        append!(mapping,[names[z[k]]=>"z_hsgpw_x.$k" for k in 1:3])
+        for u in (zeros(6),fill(.13,6),collect(range(-.2,.3;length=6)))
+            check_consumer_point(problem,u,oracle)
+            offset=label=="default" ? -logccdf(LogNormal(),floor) : 0.
+            check_consumer_stan(problem,stan,mapping,backend,u;density_offset=offset)
+        end
+        @test isequal(data,before)
+    end
+end
+
