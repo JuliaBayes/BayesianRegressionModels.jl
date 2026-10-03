@@ -59,6 +59,7 @@ value_array_kw(x,a;offset=0.)=x .+ a .+ offset
         end), a->log(exp(a)/(1+exp(a))))
     )
     for (label,model,location) in cases
+      @testset "$label" begin
         before=deepcopy(data)
         backend,problem=consumer_problem(model)
         @test coordinate_names(backend.model.layout)==[:a]
@@ -67,6 +68,7 @@ value_array_kw(x,a;offset=0.)=x .+ a .+ offset
             check_consumer_point(problem,u,oracle)
         end
         @test isequal(data,before)
+      end
     end
     scalar=(;x=.7,y=[.1,-.2,.3])
     model=@brm scalar begin
