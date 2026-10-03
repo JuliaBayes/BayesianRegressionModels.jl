@@ -210,8 +210,10 @@ end
         before=deepcopy(data)
         backend, problem=consumer_problem(model(data))
         @test LogDensityProblems.dimension(problem)==1
-        stan_builder=label=="assigned-bound" ? ConsumerCensorStan.assigned :
-            label=="mixed" ? ConsumerCensorStan.both :
+        # The independent Stan oracle uses the original raw bounds. BRM's
+        # Stan bound validator presently accepts data-backed bounds only;
+        # the native named bound assignment is the exact identity lo+0.
+        stan_builder=label in ("assigned-bound","mixed") ? ConsumerCensorStan.both :
             occursin("upper",label) ? ConsumerCensorStan.upper : ConsumerCensorStan.lower
         stan=consumer_stan(stan_builder(data),"reader-censor-"*label;mod=ConsumerCensorStan)
         oracle(u)=logpdf(Normal(),u[1])+sum(eachindex(data.y)) do i
