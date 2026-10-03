@@ -328,18 +328,29 @@ function _rk_predictor_components(brmi, context, predictor_order, columns,
     buckets, lookup = _rk_plan_ranef_buckets(
         brmi, context, predictor_order, columns, taken, derived)
     me_sources = Set{Symbol}()
+    matched_defaults = Set{Int}()
     for target in predictor_order
         spec, term_priors, r2d2, hs = _rk_plan_predictor(
             brmi, context, target, Tuple(predictor_order), columns, derived,
-            taken, lookup, me_sources)
+            taken, lookup, me_sources; tolerant_default=true, matched_defaults)
         push!(predictors, spec)
         append!(priors, term_priors)
         append!(horseshoe_priors, hs)
+        # Structured latent coefficients use dedicated prior cells rather
+        # than design columns, but still own a whole-coefficient default.
+        if !isempty(term_priors) || !isempty(hs) || r2d2 !== nothing
+            for (index, prior) in enumerate(effect_priors(brmi))
+                prior.predictor === _EFFECT_COLON &&
+                    prior.coefficient === _EFFECT_COLON &&
+                    push!(matched_defaults, index)
+            end
+        end
         r2d2 === nothing && continue
         push!(r2d2_priors, r2d2.prior)
         append!(parameters, r2d2.scalars)
         push!(r2d2_vectors, r2d2.phi)
     end
+    _brm_validate_population_effect_defaults(brmi, matched_defaults)
     vectors = [_rk_plan_monotonic_vectors!(predictors); r2d2_vectors]
     (; predictors, priors, r2d2_priors, horseshoe_priors, buckets, vectors)
 end

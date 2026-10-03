@@ -5145,7 +5145,8 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         derived::Vector{_RKDerivedSpec}, taken::Set{Symbol},
         ranef_buckets::Dict{Tuple{Symbol,Symbol,Union{Nothing,Symbol}},
             Union{_RKRanefBucket,Nothing}},
-        me_sources::Set{Symbol}; tolerant_default::Bool=false)
+        me_sources::Set{Symbol}; tolerant_default::Bool=false,
+        matched_defaults=nothing)
     prefix = "RK backend"
     op = linear_predictor_op(brmi, target)
     _, rhs = getargs(op, 2)
@@ -5220,7 +5221,7 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         brmi, context, target, ordinary, available, link, terms, derived)
     geometry = _brm_prepare_predictor_geometry(
         brmi, context, target; available_predictors=available,
-        tolerant_default)
+        tolerant_default, matched_defaults)
     for (raw, prepared) in zip(structured, geometry.terms)
         if prepared.callable === gp
             push!(terms, _rk_plan_gp_term!(
