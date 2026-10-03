@@ -28,13 +28,12 @@ rk_construction_result(index) = rk_construction_result_for(
     layout = backend.model.layout
     position = collect(range(-0.3, 0.2; length=layout.total))
     parameters = ReactiveKernelsPPL.constrain(layout, position)
-    # These all-Normal population priors use BRM's fused GLM lowering:
-    # intercept and slope vector are separate constrained parameters.
-    mu = parameters.mu_alpha .+ parameters.mu_beta[1] .* data.x
-    iseven(index) && (mu .+= parameters.mu_beta[2] .* data.z)
+    mu = parameters.mu_Intercept .+ parameters.mu_x .* data.x
+    iseven(index) && (mu .+= parameters.mu_z .* data.z)
     expected = sum(logpdf.(Normal.(mu, parameters.s), data.y)) +
-        logpdf(Normal(), parameters.mu_alpha) +
-        sum(logpdf.(Normal(), parameters.mu_beta)) +
+        logpdf(Normal(), parameters.mu_Intercept) +
+        logpdf(Normal(), parameters.mu_x) +
+        (iseven(index) ? logpdf(Normal(), parameters.mu_z) : 0.0) +
         logpdf(Exponential(1), parameters.s) + log(parameters.s)
 
     # Construction and first execution share a compiled frame. Each task owns

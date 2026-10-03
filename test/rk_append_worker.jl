@@ -29,7 +29,7 @@
 #
 # OUTPUTS (all into --out, all required; nonzero exit or missing outputs
 # => driver ERROR row):
-# - artifact.jls: v2 artifact (opaque to the driver).
+# - artifact.jls: v3 artifact (opaque to the driver).
 # - sections.md: Layer 1, Layer 2, Layer 3, Boundary, Layer 4,
 #   Verification, Layer SB bodies (spliced verbatim under the driver's
 #   closeout header). RK sections render through the twin's
@@ -59,8 +59,7 @@ using DifferentiationInterface: AutoEnzyme
 using Enzyme
 using LogDensityProblems: LogDensityProblems
 using Pkg
-using ReactiveKernels: prepare
-using ReactiveKernelsPPL: build_kernel, coordinate_names
+using ReactiveKernelsPPL: build_kernel, coordinate_names, prepare_query
 import ReactiveKernelsPPL # bind the module name for pathof (selective using does not)
 using TOML
 using UUIDs: UUID
@@ -421,7 +420,7 @@ function _run_case_loaded(spec, probe, outdir::AbstractString;
     live = Base.invokelatest(BRM.RKBRMI, brmi)
     rt_model = Base.invokelatest(build_kernel, translated)
     origin = zeros(Float64, rt_model.layout.total)
-    _assert_live_equal(case_id, live, rt_model, artifact.plan.columns, origin)
+    _assert_live_equal(case_id, live, rt_model, translated, origin)
     rk_names = Vector{Symbol}(coordinate_names(rt_model.layout))
     dim = rt_model.layout.total
     u_probes = if spec.u_probes === nothing
@@ -453,7 +452,7 @@ function _run_case_loaded(spec, probe, outdir::AbstractString;
     BRM.write_rk_artifact(joinpath(outdir, "artifact.jls"), artifact)
     reporter_v2 = _resolve_reporter_v2()
     backend = AutoEnzyme(; mode=Enzyme.Reverse)
-    # The v2 artifact object (not the .jls path) crosses to the
+    # The current artifact object (not the .jls path) crosses to the
     # reporter (call shape verified against landed RK a715d41a).
     rep = Base.invokelatest(reporter_v2, artifact; u_probes, backend)
     rk_rows = _check_reporter_rows(case_id, rep, u_probes)
@@ -561,13 +560,11 @@ function _check_reporter_rows(case_id, rep, u_probes)
     end
 end
 
-function _assert_live_equal(case_id, live, rt_model, columns, u)
-    names = sort!(collect(keys(columns)))
-    bound = NamedTuple{Tuple(names)}(Tuple(columns[k] for k in names))
-    want = :posterior
-    have = (:unconstrained, names...)
-    klive = Base.invokelatest(prepare, live.model.spec; have, want, bound=bound)
-    krt = Base.invokelatest(prepare, rt_model.spec; have, want, bound=bound)
+function _assert_live_equal(case_id, live, rt_model, translated, u)
+    ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
+    live_plan = Base.invokelatest(ext._rk_translated_plan, live.plan)
+    klive = Base.invokelatest(prepare_query, live.model, live_plan, :sampler)
+    krt = Base.invokelatest(prepare_query, rt_model, translated, :sampler)
     # Call-site invokelatest: prepare() eval'd these kernel methods after
     # this extent started, so only latest-at-call sees them.
     v_live = Base.invokelatest(klive, Vector{Float64}(u))
