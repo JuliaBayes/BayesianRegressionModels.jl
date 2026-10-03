@@ -9,15 +9,15 @@ struct _RKValuePlan
 end
 
 _rk_value_invlogit(x) = logistic(x)
-_rk_value_invprobit(x) = 0.5erfc(-x / sqrt(2))
-_rk_value_invcloglog(x) = -expm1(-exp(x))
+brm_invprobit(x) = 0.5erfc(-x / sqrt(2))
+brm_invcloglog(x) = -expm1(-exp(x))
 
 function _rk_value_link!(bindings, link, lhs, taken)
     link === :identity && return lhs
-    callable = link === :log ? exp : link === :logit ? _rk_value_invlogit :
-        link === :probit ? _rk_value_invprobit :
-        link === :cloglog ? _rk_value_invcloglog : error("RK backend: unknown link `$link`")
-    _rk_ast_dotted(_rk_value_callee!(bindings, callable, taken), lhs)
+    head = link === :log ? :exp : link === :logit ? :logistic :
+        link === :probit ? :brm_invprobit :
+        link === :cloglog ? :brm_invcloglog : error("RK backend: unknown link `$link`")
+    _rk_ast_dotted(head, lhs)
 end
 
 # Arrays, rather than the retired structural varying/smooth summands, let
@@ -28,6 +28,15 @@ function _rk_value_level_indices(labels, source)
 end
 
 _rk_value_dummy(values, level) = Float64.(isequal.(values, level))
+
+function _rk_ast_positive_prior(prior, bindings, taken)
+    prior === nothing && return Expr(:call, :HalfNormal, 1)
+    expression = _rk_value_expr!(bindings, _brm_prepare_expr(prior), taken)
+    family = nameof(getf(prior))
+    family in (:Exponential, :Gamma, :InverseGamma, :LogNormal, :Weibull,
+        :HalfNormal, :HalfCauchy, :truncated) && return expression
+    Expr(:call, :truncated, expression, 0.0, Inf)
+end
 
 function _rk_ast_value_bucket(bucket, draws, effects, taken, bindings)
     grouping = bucket.grouping
@@ -64,8 +73,20 @@ function _rk_ast_value_bucket(bucket, draws, effects, taken, bindings)
         push!(stmts, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
             Expr(:for, Expr(:(=), :i, Expr(:call, :eachindex, group)), Expr(:block, cell))))
     else
-        push!(stmts, Expr(:call, :.~, Expr(:ref, tau, index),
-            _rk_ast_dotted(:HalfNormal, 1)))
+        if all(isequal(first(bucket.sd_priors)), bucket.sd_priors)
+            prior = _rk_ast_positive_prior(first(bucket.sd_priors), bindings, taken)
+            push!(stmts, Expr(:call, :.~, Expr(:ref, tau, index),
+                _rk_ast_dotted(prior.args[1], prior.args[2:end]...)))
+        else
+            scales = Symbol[]
+            for (j, prior) in enumerate(bucket.sd_priors)
+                scale = _rk_ast_fresh_name(string(tau, "_", j), taken)
+                push!(scales, scale)
+                push!(stmts, Expr(:call, :~, scale,
+                    _rk_ast_positive_prior(prior, bindings, taken)))
+            end
+            push!(stmts, Expr(:(=), tau, Expr(:vect, scales...)))
+        end
         push!(stmts, Expr(:call, :.~, Expr(:ref, z,
             Expr(:call, :levels, group), index), _rk_ast_dotted(:Normal, 0, 1)))
         value = if K == 1
@@ -79,7 +100,7 @@ function _rk_ast_value_bucket(bucket, draws, effects, taken, bindings)
     end
     indices = Dict{Symbol,Symbol}()
     if grouping.form !== :gr
-        callee = _rk_value_callee!(bindings, _rk_value_level_indices, taken)
+        callee = :brm_level_indices
         for col in grouping.columns
             idx = _rk_ast_fresh_name(string(draws, "_index_", col), taken)
             push!(stmts, Expr(:(=), idx,
@@ -87,6 +108,8 @@ function _rk_ast_value_bucket(bucket, draws, effects, taken, bindings)
             indices[col] = idx
         end
     end
+    gather_margin(col, margin) =
+        Expr(:call, :brm_ranef_column, draws, indices[col], margin)
     for (target, margins) in bucket.slices
         summands = Any[]
         for margin in margins
@@ -95,7 +118,7 @@ function _rk_ast_value_bucket(bucket, draws, effects, taken, bindings)
             elseif grouping.form === :mm
                 members = Any[]
                 for (j, col) in enumerate(grouping.columns)
-                    gather = Expr(:ref, draws, indices[col], margin)
+                    gather = gather_margin(col, margin)
                     grouping.weights === nothing ||
                         (gather = Expr(:call, :.*, grouping.weights[j], gather))
                     push!(members, gather)
@@ -108,12 +131,12 @@ function _rk_ast_value_bucket(bucket, draws, effects, taken, bindings)
                 end
                 result
             else
-                Expr(:ref, draws, indices[group], margin)
+                gather_margin(group, margin)
             end
             recipe = bucket.margins[margin].z
             if recipe.kind !== :ones
                 value = if recipe.kind === :dummy
-                    callee = _rk_value_callee!(bindings, _rk_value_dummy, taken)
+                    callee = :brm_dummy
                     Expr(:call, callee, recipe.column, recipe.level)
                 else
                     recipe.column
@@ -134,11 +157,23 @@ function _rk_ast_value_spline(term, taken)
     Z = [_rk_ast_fresh_name(string(term.options.id, "_Z", j), taken) for j in 1:nblocks]
     k = term.options.k
     kval = k isa Tuple ? Expr(:tuple, k...) : k
-    basis = term.options.kind === :t2 ? :t2_basis : :tps_basis
-    call = Expr(:call, basis, Expr(:parameters, Expr(:kw, :k, kval)), term.columns...)
-    head = term.options.kind === :t2 ? :t2_smooth : :penalized_smooth
-    Expr[Expr(:(=), Expr(:tuple, X, Z...), call),
-        Expr(:call, :~, term.options.id, Expr(:call, head, X, Z...))]
+    basis = term.options.kind === :t2 ? :brm_t2_basis : :brm_tps_basis
+    call = Expr(:call, basis, term.columns..., kval)
+    b = _rk_ast_fresh_name(string(term.options.id, "_fixed"), taken)
+    stmts = Expr[Expr(:(=), Expr(:tuple, X, Z...), call),
+        Expr(:call, :.~, Expr(:ref, b, Expr(:call, :axes, X, 2)),
+            _rk_ast_dotted(:Flat))]
+    parts = Any[Expr(:call, :*, X, b)]
+    for (j, block) in enumerate(Z)
+        sd = _rk_ast_fresh_name(string(term.options.id, "_sd", j), taken)
+        raw = _rk_ast_fresh_name(string(term.options.id, "_raw", j), taken)
+        push!(stmts, Expr(:call, :~, sd, Expr(:call, :HalfNormal, 1)))
+        push!(stmts, Expr(:call, :.~, Expr(:ref, raw, Expr(:call, :axes, block, 2)),
+            _rk_ast_dotted(:Normal, 0, 1)))
+        push!(parts, Expr(:call, :*, block, Expr(:call, :.*, sd, raw)))
+    end
+    push!(stmts, Expr(:(=), term.options.id, Expr(:call, :.+, parts...)))
+    stmts
 end
 
 function _rk_ast_value_hsgp(term, taken)
@@ -147,22 +182,20 @@ function _rk_ast_value_hsgp(term, taken)
     lambda = _rk_ast_fresh_name(string(options.id, "_lambda"), taken)
     periodic = get(options, :cov, :exp_quad) === :periodic
     k = options.k isa Tuple ? Expr(:tuple, options.k...) : options.k
-    kws = Expr[Expr(:kw, :k, k)]
-    if periodic
-        push!(kws, Expr(:kw, :period, options.period))
+    floors = _rk_ast_fresh_name(string(options.id, "_floors"), taken)
+    call = if periodic
+        Expr(:call, :brm_hsgp_periodic_basis, only(term.columns), k, options.period)
     else
         c = options.c isa Tuple ? Expr(:tuple, options.c...) : options.c
-        push!(kws, Expr(:kw, :c, c))
+        Expr(:call, :brm_hsgp_basis, Expr(:tuple, term.columns...), k, c, options.iso)
     end
-    call = Expr(:call, periodic ? :hsgp_periodic_basis : :hsgp_basis,
-        Expr(:parameters, kws...), term.columns...)
-    stmts = Expr[Expr(:(=), Expr(:tuple, PHI, lambda), call)]
-    if periodic || options.iso
-        push!(stmts, Expr(:call, :~, options.id, Expr(:call,
-            periodic ? :hsgp_periodic_effect : :hsgp_effect, PHI, lambda)))
+    stmts = Expr[Expr(:(=), Expr(:tuple, PHI, lambda, floors), call)]
+    rho_value = if periodic || options.iso
+        rho = _rk_ast_fresh_name(string(options.id, "_rho"), taken)
+        push!(stmts, Expr(:call, :~, rho, Expr(:call, :truncated,
+            Expr(:call, :LogNormal, 0, 1), floors, Inf)))
+        rho
     else
-        floors = _rk_ast_fresh_name(string(options.id, "_floors"), taken)
-        push!(stmts, Expr(:(=), floors, Expr(:call, :hsgp_rho_floors, lambda)))
         rhos = Symbol[]
         for j in eachindex(term.columns)
             rho = _rk_ast_fresh_name(string(options.id, "_rho", j), taken)
@@ -170,15 +203,16 @@ function _rk_ast_value_hsgp(term, taken)
             push!(stmts, Expr(:call, :~, rho, Expr(:call, :truncated,
                 Expr(:call, :LogNormal, 0, 1), Expr(:ref, floors, j), Inf)))
         end
-        sigma = _rk_ast_fresh_name(string(options.id, "_sigma"), taken)
-        z = _rk_ast_fresh_name(string(options.id, "_z"), taken)
-        push!(stmts, Expr(:call, :~, sigma, Expr(:call, :LogNormal, 0, 1)))
-        push!(stmts, Expr(:call, :.~, Expr(:ref, z, Expr(:call, :axes, PHI, 2)),
-            _rk_ast_dotted(:Normal, 0, 1)))
-        push!(stmts, Expr(:(=), options.id, Expr(:call, :*, PHI,
-            Expr(:call, :.*, Expr(:call, :hsgp_sqrt_spd, lambda, sigma,
-                Expr(:vect, rhos...)), z))))
+        Expr(:vect, rhos...)
     end
+    sigma = _rk_ast_fresh_name(string(options.id, "_sigma"), taken)
+    z = _rk_ast_fresh_name(string(options.id, "_z"), taken)
+    push!(stmts, Expr(:call, :~, sigma, Expr(:call, :LogNormal, 0, 1)))
+    push!(stmts, Expr(:call, :.~, Expr(:ref, z, Expr(:call, :axes, PHI, 2)),
+        _rk_ast_dotted(:Normal, 0, 1)))
+    spectral = periodic ? :brm_hsgp_periodic_sqrt_spd : :brm_hsgp_sqrt_spd
+    push!(stmts, Expr(:(=), options.id, Expr(:call, :*, PHI,
+        Expr(:call, :.*, Expr(:call, spectral, lambda, sigma, rho_value), z))))
     stmts
 end
 
@@ -200,6 +234,10 @@ function _rk_needs_value_plan(program, observations)
         rhs isa ExprColumn || continue
         args = getargs(rhs)
         isempty(args) && continue
+        # A formula response may put a shape before its location (Weibull,
+        # Student-t, binomial trials). An assignment in that slot does not
+        # make the formula location an arbitrary whole-array reader.
+        any(arg -> arg isa NamedColumn && name(arg) in predictors, args) && continue
         first(args) isa NamedColumn && name(first(args)) in assignments && return true
     end
     false

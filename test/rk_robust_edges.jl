@@ -182,12 +182,10 @@ end
 end
 
 @testset "robust edges kernel plate nsub=1 T=1" begin
-    brmi = @brm (; t=[[1.0]], dose=[100.0], dv=[[1.0]],
-        CL=[5.0], Vc=[50.0], Ka=[1.0]) begin
+    brmi = @brm (; t=[[1.0]], y=[[1.0]], intercept=[0.2], slope=[0.1]) begin
         sigma ~ Exponential(1)
-        pred ~ kernel(t, dose, dv, CL, Vc, Ka) do ts, d, yy, CLi, Vci, Kai
-            ke = CLi / Vci
-            mu = d * Kai / (Vci * (Kai - ke)) * (exp(-ke * ts) - exp(-Kai * ts))
+        pred ~ kernel(t, intercept, slope, y) do ts, a, b, yy
+            mu = a + b * ts
             yy ~ normal(mu, sigma)
             mu
         end
@@ -196,18 +194,17 @@ end
     if RUN_BRIDGESTAN
         d, lp, g, problem = robust_value(sb, "E-k1/nsub1-T1")
         @test d == 1
-        mu_k1 = 100.0 * 1.0 / (50.0 * (1.0 - 0.1)) * (exp(-0.1) - exp(-1.0))
-        oracle = logpdf(Normal(mu_k1, 1.0), 1.0) + _EXP1
+        oracle = logpdf(Normal(0.3, 1.0), 1.0) + _EXP1
         @test lp ≈ oracle atol = 1e-9
         @test g ≈ robust_findiff(problem, d) rtol = 1e-5 atol = 1e-7
     end
 end
 
 @testset "robust edges kernel plate nsub=1 all-scalar" begin
-    brmi = @brm (dose=[100.0], dv=[0.5], ls=[0.1]) begin
+    brmi = @brm (x=[0.1], y=[0.5], intercept=[0.3]) begin
         sigma ~ Exponential(1)
-        pred ~ kernel(dose, dv, ls) do dd, yy, lsi
-            mu = (dd / 10.0) * exp(lsi)
+        pred ~ kernel(x, intercept, y) do xx, a, yy
+            mu = a + 2xx
             yy ~ normal(mu, sigma)
             mu
         end
@@ -216,7 +213,7 @@ end
     if RUN_BRIDGESTAN
         d, lp, g, problem = robust_value(sb, "E-k2/nsub1")
         @test d == 1
-        oracle = logpdf(Normal(10.0 * exp(0.1), 1.0), 0.5) + _EXP1
+        oracle = logpdf(Normal(0.5, 1.0), 0.5) + _EXP1
         @test lp ≈ oracle atol = 1e-9
         @test g ≈ robust_findiff(problem, d) rtol = 1e-5 atol = 1e-7
     end
@@ -255,89 +252,81 @@ end
     end
 end
 
-# P2 kernel oracles re-verified on the SB side (baseline for KernelPlate
-# re-verification). The SB cell keeps its undotted SLIC spelling
-# (`normal`, scalar `exp`) per decision 0qf6vi2 — the dotted neutral body
-# is RK-only. Convention: value at constrained sigma=1.0 (u=[0.0])
+# General kernel oracles on the SB side use the same public linear panel
+# fixtures as RK parity. Historical PK implementations remain in Git and
+# belong to downstream RKPPLBench. SB cells use undotted SLIC arithmetic.
+# Convention: value at constrained sigma=1.0 (u=[0.0])
 # equals the oracle; the unconstrained gradient equals the constrained
 # oracle gradient + 1 (exp-Jacobian).
-const _PK1CMT_COLS = (;
+const _VECTOR_CELL_COLS = (;
     t=[[0.5, 1.0, 2.0, 4.0] for _ in 1:3],
-    dose=fill(100.0, 3),
-    dv=[[1.0, 2.0, 1.5, 0.8] for _ in 1:3],
-    CL=[5.0, 6.0, 4.5],
-    Vc=[50.0, 55.0, 48.0],
-    Ka=[1.0, 1.2, 0.9],
+    y=[[0.1, 0.4, -0.2, 0.8] for _ in 1:3],
+    intercept=[0.2, -0.3, 0.7], slope=[0.1, -0.2, 0.05],
 )
-const _DOSEPLATE_COLS = (;
-    dose=fill(100.0, 4),
-    dv=[0.5, 1.2, 2.1, 3.3],
-    ls=[0.1, 0.2, 0.15, 0.25],
+const _SCALAR_CELL_COLS = (;
+    x=[0.1, 0.2, 0.15, 0.25],
+    intercept=[0.3, -0.2, 0.6, 0.4], y=[0.5, 1.2, 0.2, -0.3],
 )
 
-@testset "robust baseline SB Ex1 pk1cmt oracle" begin
-    brmi = @brm _PK1CMT_COLS begin
+@testset "robust baseline SB ordinary vector-cell oracle" begin
+    brmi = @brm _VECTOR_CELL_COLS begin
         sigma ~ Exponential(1)
-        pred ~ kernel(t, dose, dv, CL, Vc, Ka) do ts, d, yy, CLi, Vci, Kai
-            ke = CLi / Vci
-            mu = d * Kai / (Vci * (Kai - ke)) * (exp(-ke * ts) - exp(-Kai * ts))
+        pred ~ kernel(t, intercept, slope, y) do ts, a, b, yy
+            mu = a + b * ts
             yy ~ normal(mu, sigma)
             mu
         end
     end
     sb = robust_build(brmi)
-    # Independent Bateman hand oracle at sigma=1.0 (constrained d/dσ).
+    # Independent scalar-loop oracle at sigma=1.0 (constrained d/dσ).
     ll, sq, n = 0.0, 0.0, 0
     for s in 1:3
-        CL, Vc, Ka, d =
-            _PK1CMT_COLS.CL[s], _PK1CMT_COLS.Vc[s], _PK1CMT_COLS.Ka[s],
-            _PK1CMT_COLS.dose[s]
-        ke = CL / Vc
-        for (t, y) in zip(_PK1CMT_COLS.t[s], _PK1CMT_COLS.dv[s])
-            mu = d * Ka / (Vc * (Ka - ke)) * (exp(-ke * t) - exp(-Ka * t))
+        a, b = _VECTOR_CELL_COLS.intercept[s], _VECTOR_CELL_COLS.slope[s]
+        for (t, y) in zip(_VECTOR_CELL_COLS.t[s], _VECTOR_CELL_COLS.y[s])
+            mu = a + b * t
             ll += logpdf(Normal(mu, 1.0), y)
             sq += abs2(y - mu)
             n += 1
         end
     end
     hand_v, hand_g = ll + _EXP1, sq - n - 1.0
-    @test hand_v ≈ -13.703526816545866 atol = 1e-9
-    @test hand_g ≈ -9.647471163820416 atol = 1e-8
+    @test hand_v ≈ -15.465074898456072 atol = 1e-9
+    @test hand_g ≈ -6.124375 atol = 1e-8
     if RUN_BRIDGESTAN
-        d, lp, g, problem = robust_value(sb, "SB-Ex1/pk1cmt")
+        d, lp, g, problem = robust_value(sb, "SB-ordinary-vector")
         @test d == 1
-        @test lp ≈ -13.703526816545866 atol = 1e-9
-        @test g[1] ≈ -9.647471163820416 + 1.0 atol = 1e-8
+        @test lp ≈ hand_v atol = 1e-9
+        @test g[1] ≈ hand_g + 1.0 atol = 1e-8
         @test g ≈ robust_findiff(problem, d) rtol = 1e-5 atol = 1e-7
     end
 end
 
-@testset "robust baseline SB Ex2 doseplate oracle" begin
-    brmi = @brm _DOSEPLATE_COLS begin
+@testset "robust baseline SB ordinary scalar-cell oracle" begin
+    brmi = @brm _SCALAR_CELL_COLS begin
         sigma ~ Exponential(1)
-        pred ~ kernel(dose, dv, ls) do dd, yy, lsi
-            mu = (dd / 10.0) * exp(lsi)
+        pred ~ kernel(x, intercept, y) do xx, a, yy
+            mu = a + 2xx
             yy ~ normal(mu, sigma)
             mu
         end
     end
     sb = robust_build(brmi)
     ll, sq, n = 0.0, 0.0, 0
-    for i in eachindex(_DOSEPLATE_COLS.dv)
-        mu = (_DOSEPLATE_COLS.dose[i] / 10.0) * exp(_DOSEPLATE_COLS.ls[i])
-        y = _DOSEPLATE_COLS.dv[i]
+    for i in eachindex(_SCALAR_CELL_COLS.y)
+        mu = _SCALAR_CELL_COLS.intercept[i] + 2 * _SCALAR_CELL_COLS.x[i]
+        y = _SCALAR_CELL_COLS.y[i]
         ll += logpdf(Normal(mu, 1.0), y)
         sq += abs2(y - mu)
         n += 1
     end
     hand_v, hand_g = ll + _EXP1, sq - n - 1.0
-    @test hand_v ≈ -211.80708530040758 atol = 1e-9
-    @test hand_g ≈ 409.2626623351777 atol = 1e-8
+    @test hand_v ≈ -6.140754132818691 atol = 1e-9
+    @test hand_g ≈ -2.07 atol = 1e-8
     if RUN_BRIDGESTAN
-        d, lp, g, problem = robust_value(sb, "SB-Ex2/doseplate")
+        d, lp, g, problem = robust_value(sb, "SB-ordinary-scalar")
         @test d == 1
-        @test lp ≈ -211.80708530040758 atol = 1e-9
-        @test g[1] ≈ 409.2626623351777 + 1.0 atol = 1e-8
+        @test lp ≈ hand_v atol = 1e-9
+        @test g[1] ≈ hand_g + 1.0 atol = 1e-8
         @test g ≈ robust_findiff(problem, d) rtol = 1e-5 atol = 1e-7
     end
 end
@@ -348,10 +337,9 @@ end
 #
 # Truncation convention (verified empirically 2026-09-27): a bare Stan `~`
 # with declaration bounds does NOT normalize (only explicit `T[,]` does),
-# so bounded priors enter oracles as PLAIN densities (sans-log2). SB and RK
-# share this convention — parity holds exactly under it, and a unilateral
-# normalization change on either side would BREAK parity by the truncation
-# constants. Do not "fix" the oracles below to add normalizers.
+# so these SB bounded-prior references use plain densities (sans-log2).
+# BRM's explicit RK declarations normalize positive/truncated priors; a
+# mapped comparison must account for their stated normalization constants.
 #
 # Mapping rule: unbounded location-scale priors map u=0 to constrained 0,
 # NOT to the prior location (matters for the mixture means below).
@@ -565,4 +553,3 @@ end
         end
     end
 end
-
