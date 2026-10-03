@@ -720,11 +720,11 @@ end
 # An AR(1) latent path: the sampled `phi_raw ~ Normal(0, 1)`, the
 # non-centered `@scan` block the thin layer folds through RK-core
 # `scan(...)`, and the `phi = tanh(phi_raw)` stationarity map. The
-# loop bound `T` is the thin-layer data-length name (binds `n_obs`);
+# loop bound is the authored term's explicit data-axis length;
 # the seed + innovation shape is SB's `ar1_recurse` verbatim
 # (`u[1] = eps[1]`, `u[t] = phi*u[t-1] + eps[t]`). Shape-verified
 # against `Meta.parse` of the surface spelling.
-function _rk_ast_ar_preamble(term)
+function _rk_ast_ar_preamble(term, nsteps)
     options = term.options
     state, phi, phi_raw, eps =
         options.state, options.phi, options.phi_raw, options.eps
@@ -737,7 +737,7 @@ function _rk_ast_ar_preamble(term)
             Expr(:call, :*, phi,
                 Expr(:ref, state, Expr(:call, :-, :t, 1))),
             eps))
-    loop = Expr(:for, Expr(:(=), :t, Expr(:call, :(:), 2, :T)),
+    loop = Expr(:for, Expr(:(=), :t, Expr(:call, :(:), 2, nsteps)),
         Expr(:block, innov, carry))
     scan = Expr(:macrocall, Symbol("@scan"), LineNumberNode(0),
         Expr(:block, setup, loop))
@@ -757,10 +757,9 @@ function _rk_ast_ar_names(plan::_RKStructuralPlan)
     names
 end
 
-function _rk_ast_dar_scan(term, level, taken)
+function _rk_ast_dar_scan(term, level, taken, nsteps)
     options = term.options
     increment = _rk_ast_fresh_name(string(term.label, "_increment"), taken)
-    horizon = _rk_ast_fresh_name(string(term.label, "_T"), taken)
     innovation = _rk_ast_fresh_name(string(term.label, "_innovation"), taken)
     previous = Expr(:call, :-, :t, 1)
     body = Expr(:block,
@@ -773,8 +772,8 @@ function _rk_ast_dar_scan(term, level, taken)
     scan = Expr(:macrocall, Symbol("@scan"), LineNumberNode(0), Expr(:block,
         Expr(:(=), Expr(:ref, level, 1), 0.0),
         Expr(:(=), Expr(:ref, increment, 1), 0.0),
-        Expr(:for, Expr(:(=), :t, Expr(:call, :(:), 2, horizon)), body)))
-    Expr[Expr(:(=), horizon, Expr(:call, :length, options.source)), scan]
+        Expr(:for, Expr(:(=), :t, Expr(:call, :(:), 2, nsteps)), body)))
+    Expr[scan]
 end
 
 function _rk_ast_dar_names(plan::_RKStructuralPlan)
@@ -902,7 +901,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 refactual[index] = term.options.latent
             elseif kind === :dar
                 refactual[index] = _rk_ast_fresh_name(string(term.label, "_level"), taken)
-                append!(stmts, _rk_ast_dar_scan(term, refactual[index], taken))
+                append!(stmts, _rk_ast_dar_scan(term, refactual[index], taken,
+                    length(plan.columns[term.options.source])))
             elseif kind === :ranef_gather
                 refactual[index] = ranef_effects[(predictor.name,
                     term.options.bucket_group, term.options.bucket_id)]
@@ -987,7 +987,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         end
         for term in predictor.terms
             term.kind === :ar || continue
-            append!(stmts, _rk_ast_ar_preamble(term))
+            append!(stmts, _rk_ast_ar_preamble(term, length(plan.columns[only(term.columns)])))
         end
         for term in predictor.terms
             term.kind === :me || continue
@@ -996,8 +996,22 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 only(term.columns), options.loc, options.scale))
         end
         append!(stmts, scalar_stmts)
-        push!(stmts, Expr(:(=), lhs,
-            _rk_ast_affine(predictor, coefs, colactual, refactual; values)))
+        affine = if r2d2 === nothing && hs_tau === nothing &&
+                predictor.row_source !== nothing &&
+                all(term -> term.kind in (:intercept, :continuous), predictor.terms)
+            design = _rk_ast_fresh_name(string(lhs, "_X"), taken)
+            coefficients = _rk_ast_fresh_name(string(lhs, "_coefficients"), taken)
+            columns = Any[term.kind === :intercept ?
+                Expr(:call, :ones, Expr(:call, :length, predictor.row_source)) :
+                colactual[i] for (i, term) in enumerate(predictor.terms)]
+            push!(stmts, Expr(:(=), design, Expr(:call, :hcat, columns...)))
+            push!(stmts, Expr(:(=), coefficients, Expr(:vect,
+                [coefs[i] for i in eachindex(predictor.terms)]...)))
+            Expr(:call, :*, design, coefficients)
+        else
+            _rk_ast_affine(predictor, coefs, colactual, refactual; values)
+        end
+        push!(stmts, Expr(:(=), lhs, affine))
         if values && (lhs !== predictor.name || predictor.link !== :identity)
             value = _rk_value_link!(bindings, predictor.link, lhs, taken)
             push!(stmts, Expr(:(=), predictor.name, value))

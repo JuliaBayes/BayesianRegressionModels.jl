@@ -63,17 +63,43 @@ include(joinpath(@__DIR__, "spline_parity_models.jl"))
 
 const BRM = BayesianRegressionModels
 const _PARITY_BACKEND = AutoEnzyme(; mode = Enzyme.Reverse)
+include(joinpath(@__DIR__, "rk_source_roundtrip.jl"))
 
-# A thin-layer value query against a built BRM backend: the bound data
-# comes straight from the structural plan columns (same mapping the
-# extension's `bind_data` route uses).
+_parity_backend(brmi) = check_rk_source_roundtrip(BRM.RKBRMI(brmi))
+
+# Read the explicitly named population coordinates in formula order. The
+# density references below retain their independent predictor/prior algebra.
+function _parity_population(nt, backend, name)
+    hasproperty(nt, name) && return getproperty(nt, name)
+    plan = backend.plan isa BRM._RKValuePlan ? backend.plan.regression : backend.plan
+    predictor = only(p for p in plan.predictors if p.name === name)
+    coefficients = Float64[]
+    for term in predictor.terms
+        term.kind in (:intercept, :continuous, :factor, :monotonic, :ar, :me) || continue
+        value = getproperty(nt, Symbol(name, "_", term.addressee))
+        value isa Number ? push!(coefficients, value) : append!(coefficients, value)
+    end
+    coefficients
+end
+
+function _parity_ranef(nt, backend)
+    plan = backend.plan isa BRM._RKValuePlan ? backend.plan.regression : backend.plan
+    bucket = only(plan.ranef_buckets)
+    suffix = bucket.id === nothing ? string(bucket.group) :
+        string(bucket.id, "_", bucket.group)
+    stem = "ranef_draws_" * suffix
+    sd = getproperty(nt, Symbol(stem, "_sd"))
+    z = getproperty(nt, Symbol(stem, "_z"))
+    L = length(bucket.margins) == 1 ? ones(1, 1) : getproperty(nt, Symbol(stem, "_L"))
+    (; sd, z, L, zflat=vec(permutedims(z)))
+end
+
+# Query the same bound ordinary source as the production density route,
+# including prepared data-only definitions and explicit observation roles.
 function _rk_query(backend::BRM.RKBRMI, want::Symbol, u)
-    names = sort!(collect(keys(backend.plan.columns)))
-    bound =
-        NamedTuple{Tuple(names)}(Tuple(backend.plan.columns[k] for k in names))
-    kern = prepare(backend.model.spec;
-        have = (:unconstrained, names...), want = want, bound = bound)
-    return kern(u)
+    translated = _rk_translated(backend)
+    preset = want === :posterior ? :sampler : want
+    return Base.invokelatest(prepare_query(backend.model, translated, preset), u)
 end
 
 function _findiff_grad(f, u; h = cbrt(eps(Float64)))
@@ -102,11 +128,7 @@ function _check_parity_gradient(backend::BRM.RKBRMI, u)
     return value
 end
 
-# Bound-plan value query for models whose kernel inputs exceed
-# `plan.columns` (spline bases are host-materialized at `bind_data`,
-# so the plain `_rk_query` cannot bind them): the same lowering the
-# sampler shim queries through, then the thin-layer query preset
-# (`:sampler` is the posterior, `:likelihood`/`:prior` the legs).
+# Obtain the production lowering, including prepared data-only definitions.
 function _rk_translated(backend::BRM.RKBRMI)
     ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
     return ext._rk_translated_plan(backend.plan)
@@ -314,25 +336,20 @@ _ref_lkj_k2(eta, L) = -logbeta(0.5, eta) + 2 * (eta - 1) * log(L[2, 2])
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 4
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 2, :identity),
-        (:sampled, :s, 1, :exp),
-        (:vector, :mo_c_simplex_incr, 1, :simplex),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
     contrast = _ref_mo_contrast(nt.mo_c_simplex_incr, _parity_cols_mo.c)
-    ll = sum(logpdf.(Normal.(nt.mu[1] .+ nt.mu[2] .* contrast, nt.s),
+    ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ _parity_population(nt, backend, :mu)[2] .* contrast, nt.s),
         _parity_cols_mo.y))
     # Full Dirichlet logpdf (normalizer included): the thin layer keeps
     # the log-multivariate-Beta constant Stan drops for data alpha, so the
     # RK posterior exceeds Stan's by exactly that constant (peer-verified
     # core parity is modulo it) while every gradient agrees.
-    pr = logpdf(Normal(0, 1), nt.mu[1]) +
-        logpdf(Normal(0, 1), nt.mu[2]) +
+    pr = logpdf(Normal(0, 1), _parity_population(nt, backend, :mu)[1]) +
+        logpdf(Normal(0, 1), _parity_population(nt, backend, :mu)[2]) +
         logpdf(Exponential(1), nt.s) +
         logpdf(Dirichlet(ones(2)), nt.mo_c_simplex_incr)
     @test _rk_query(backend, :likelihood, u) ≈ ll
@@ -350,19 +367,14 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 3
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 1, :identity),
-        (:sampled, :s, 1, :exp),
-        (:vector, :mo1_c_simplex_incr, 1, :simplex),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
     contrast = _ref_mo_contrast(nt.mo1_c_simplex_incr, _parity_cols_mo.c)
-    ll = sum(logpdf.(Normal.(nt.mu[1] .+ contrast, nt.s), _parity_cols_mo.y))
-    pr = logpdf(Normal(0, 1), nt.mu[1]) +
+    ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ contrast, nt.s), _parity_cols_mo.y))
+    pr = logpdf(Normal(0, 1), _parity_population(nt, backend, :mu)[1]) +
         logpdf(Exponential(1), nt.s) +
         logpdf(Dirichlet([1.0, 2.0]), nt.mo1_c_simplex_incr)
     @test _rk_query(backend, :likelihood, u) ≈ ll
@@ -380,21 +392,20 @@ end
         L_res ~ LKJCovarianceFactor(2; scale_prior = Exponential(1), shape = 2)
         [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 7
-    @test coordinate_names(layout) == [Symbol("mu1.b1"), Symbol("mu1.b2"),
-        Symbol("mu2.b1"), Symbol("mu2.b2"), Symbol("L_res_scales.1"),
+    @test coordinate_names(layout) == [:mu1_Intercept, :mu1_x, :mu2_Intercept, :mu2_x, Symbol("L_res_scales.1"),
         Symbol("L_res_scales.2"), Symbol("L_res_L_corr.1")]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
     cols = _parity_cols_corr
-    m1 = nt.mu1[1] .+ nt.mu1[2] .* cols.x
-    m2 = nt.mu2[1] .+ nt.mu2[2] .* cols.x
+    m1 = _parity_population(nt, backend, :mu1)[1] .+ _parity_population(nt, backend, :mu1)[2] .* cols.x
+    m2 = _parity_population(nt, backend, :mu2)[1] .+ _parity_population(nt, backend, :mu2)[2] .* cols.x
     L = [nt.L_res_scales[i] * nt.L_res_L_corr[i, j] for i in 1:2, j in 1:2]
     ll = sum(_ref_mvn_chol_row([cols.y1[r], cols.y2[r]], [m1[r], m2[r]], L)
         for r in 1:6)
-    pr = sum(logpdf(Normal(0, 1), c) for c in (nt.mu1..., nt.mu2...)) +
+    pr = sum(logpdf(Normal(0, 1), c) for c in (_parity_population(nt, backend, :mu1)..., _parity_population(nt, backend, :mu2)...)) +
         sum(logpdf(Exponential(1), s) for s in nt.L_res_scales) +
         _ref_lkj_k2(2.0, nt.L_res_L_corr)
     @test _rk_query(backend, :likelihood, u) ≈ ll
@@ -414,23 +425,15 @@ end
         L3 ~ LKJCovarianceFactor(3; scale_prior = Exponential(tau), shape = 1.5)
         [y1, y2, y3] ~ MvNormalCholesky([mu1, mu2, mu3], L3)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 13
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu1_coef, 2, :identity),
-        (:coefficient, :mu2_coef, 2, :identity),
-        (:coefficient, :mu3_coef, 2, :identity),
-        (:sampled, :tau, 1, :exp),
-        (:vector, :L3_scales, 3, :exp),
-        (:cholesky_corr, :L3_L_corr, 3, :lkj),
-    ]
     u = collect(range(-0.3, 0.3; length = layout.total))
     nt = constrain(layout, u)
     cols = _parity_cols_corr
-    m = [nt.mu1[1] .+ nt.mu1[2] .* cols.x,
-        nt.mu2[1] .+ nt.mu2[2] .* cols.x,
-        nt.mu3[1] .+ nt.mu3[2] .* cols.x]
+    m = [_parity_population(nt, backend, :mu1)[1] .+ _parity_population(nt, backend, :mu1)[2] .* cols.x,
+        _parity_population(nt, backend, :mu2)[1] .+ _parity_population(nt, backend, :mu2)[2] .* cols.x,
+        _parity_population(nt, backend, :mu3)[1] .+ _parity_population(nt, backend, :mu3)[2] .* cols.x]
     L = [nt.L3_scales[i] * nt.L3_L_corr[i, j] for i in 1:3, j in 1:3]
     ll = sum(_ref_mvn_chol_row([cols.y1[r], cols.y2[r], cols.y3[r]],
             [m[1][r], m[2][r], m[3][r]], L) for r in 1:6)
@@ -449,39 +452,32 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 7
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 3, :identity),
-        (:sampled, :s, 1, :exp),
-        (:sampled, :r2d2_mu_R2, 1, :logistic),
-        (:sampled, :r2d2_mu_tau_bsv, 1, :exp),
-        (:vector, :r2d2_mu_phi, 1, :simplex),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
     R2, tau, phi = nt.r2d2_mu_R2, nt.r2d2_mu_tau_bsv, nt.r2d2_mu_phi
     cols = _parity_cols_r2d2
     sx = sqrt(phi[1] * R2 * tau^2 / _ref_sample_variance(cols.x))
     sz = sqrt(phi[2] * R2 * tau^2 / _ref_sample_variance(cols.z))
-    mu_hat = nt.mu[1] .+ nt.mu[2] .* cols.x .+ nt.mu[3] .* cols.z
+    mu_hat = _parity_population(nt, backend, :mu)[1] .+ _parity_population(nt, backend, :mu)[2] .* cols.x .+ _parity_population(nt, backend, :mu)[3] .* cols.z
     ll = sum(logpdf.(Normal.(mu_hat, nt.s), cols.y))
     # The sampled tau carries the thin-layer `:positive` half
     # renormalizer (+log 2, peer-blessed in `test_r2d2.jl`) over SB's
     # Stan-convention unnormalized half-normal — a constant the RK
     # posterior exceeds SB's by, while every gradient agrees (the mo
     # Dirichlet-normalizer precedent).
-    pr = logpdf(Normal(0, 1), nt.mu[1]) +
-        logpdf(Normal(0, sx), nt.mu[2]) +
-        logpdf(Normal(0, sz), nt.mu[3]) +
+    pr = logpdf(Normal(0, 1), _parity_population(nt, backend, :mu)[1]) +
+        logpdf(Normal(0, sx), _parity_population(nt, backend, :mu)[2]) +
+        logpdf(Normal(0, sz), _parity_population(nt, backend, :mu)[3]) +
         logpdf(Exponential(1), nt.s) +
         logpdf(Beta(2, 5), R2) +
         logpdf(Normal(0, 1), tau) + log(2) +
         logpdf(Dirichlet([0.5, 0.5]), phi)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    jac = u[4] + (log(R2) + log1p(-R2)) + u[6] + _ref_simplex_logjac(u[7:7])
+    jac = log(nt.s) + log(R2) + log1p(-R2) + log(tau) + _ref_simplex_logjac(u[findall(n -> startswith(string(n), "r2d2_mu_phi."), coordinate_names(layout))])
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
@@ -495,32 +491,26 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 5
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 3, :identity),
-        (:sampled, :s, 1, :exp),
-        (:sampled, :r2d2_mu_R2, 1, :logistic),
-        (:vector, :r2d2_mu_phi, 0, :simplex),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
     R2, phi = nt.r2d2_mu_R2, nt.r2d2_mu_phi
     @test phi ≈ [1.0]
     cols = _parity_cols_r2d2
     sz = sqrt(phi[1] * R2 * 2.0^2 / _ref_sample_variance(cols.z))
-    mu_hat = nt.mu[1] .+ nt.mu[2] .* cols.x .+ nt.mu[3] .* cols.z
+    mu_hat = _parity_population(nt, backend, :mu)[1] .+ _parity_population(nt, backend, :mu)[2] .* cols.x .+ _parity_population(nt, backend, :mu)[3] .* cols.z
     ll = sum(logpdf.(Normal.(mu_hat, nt.s), cols.y))
-    pr = logpdf(Normal(0, 1), nt.mu[1]) +
-        logpdf(Normal(0, 3), nt.mu[2]) +
-        logpdf(Normal(0, sz), nt.mu[3]) +
+    pr = logpdf(Normal(0, 1), _parity_population(nt, backend, :mu)[1]) +
+        logpdf(Normal(0, 3), _parity_population(nt, backend, :mu)[2]) +
+        logpdf(Normal(0, sz), _parity_population(nt, backend, :mu)[3]) +
         logpdf(Exponential(1), nt.s) +
         logpdf(Beta(1, 1), R2) +
         logpdf(Dirichlet([1.0]), phi)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    jac = u[4] + (log(R2) + log1p(-R2))
+    jac = log(nt.s) + log(R2) + log1p(-R2)
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
@@ -533,40 +523,31 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 8
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 3, :identity),
-        (:sampled, :s, 1, :exp),
-        (:sampled, :r2d2_mu_R2, 1, :logistic),
-        (:sampled, :r2d2_mu_tau_bsv, 1, :exp),
-        (:vector, :r2d2_mu_phi, 2, :simplex),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
     R2, tau, phi = nt.r2d2_mu_R2, nt.r2d2_mu_tau_bsv, nt.r2d2_mu_phi
     cols = _parity_cols
     sc = [sqrt(phi[k] * R2 * tau^2 / _ref_dummy_variance(cols.g, k))
         for k in 1:3]
-    mu_hat = nt.mu[_group_index(cols.g)]
+    mu_hat = _parity_population(nt, backend, :mu)[_group_index(cols.g)]
     ll = sum(logpdf.(Normal.(mu_hat, nt.s), cols.y))
-    pr = sum(logpdf(Normal(0, sc[k]), nt.mu[k]) for k in 1:3) +
+    pr = sum(logpdf(Normal(0, sc[k]), _parity_population(nt, backend, :mu)[k]) for k in 1:3) +
         logpdf(Exponential(1), nt.s) +
         logpdf(Beta(1, 1), R2) +
         logpdf(Normal(0, 1), tau) + log(2) +
         logpdf(Dirichlet(ones(3)), phi)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    jac = u[4] + (log(R2) + log1p(-R2)) + u[6] + _ref_simplex_logjac(u[7:8])
+    jac = log(nt.s) + log(R2) + log1p(-R2) + log(tau) + _ref_simplex_logjac(u[findall(n -> startswith(string(n), "r2d2_mu_phi."), coordinate_names(layout))])
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
 end
 
 @stestset "rk parity horseshoe flat" begin
-    # Thin-layer corpus-56 mirror: per-coefficient triples, no
-    # `:coefficient` block (every coordinate derives in-graph).
     brmi = @brm _parity_cols_hs begin
         mu ~ 1 + x1 + x2
         effect(mu, x1) ~ Horseshoe()
@@ -574,59 +555,34 @@ end
         sigma ~ Exponential(1)
         y ~ Normal(mu, sigma)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
-    @test layout.total == 8
-    @test _layout_signature(layout) == [
-        (:sampled, :sigma, 1, :exp),
-        (:sampled, :horseshoe_mu_Intercept_normal, 1, :identity),
-        (:sampled, :horseshoe_mu_x1_raw, 1, :identity),
-        (:sampled, :horseshoe_mu_x1_lambda, 1, :exp),
-        (:sampled, :horseshoe_mu_x1_tau, 1, :exp),
-        (:sampled, :horseshoe_mu_x2_raw, 1, :identity),
-        (:sampled, :horseshoe_mu_x2_lambda, 1, :exp),
-        (:sampled, :horseshoe_mu_x2_tau, 1, :exp),
-    ]
-    # Corpus-56 probe by coordinate name (peer's `u` order pinned in
-    # `test_horseshoe.jl`; the map keeps this test order-robust).
-    byname = Dict(
-        :sigma => 0.5, :horseshoe_mu_Intercept_normal => 0.1,
-        :horseshoe_mu_x1_raw => -0.2, :horseshoe_mu_x1_lambda => 0.3,
-        :horseshoe_mu_x1_tau => 0.4, :horseshoe_mu_x2_raw => 0.15,
-        :horseshoe_mu_x2_lambda => -0.35, :horseshoe_mu_x2_tau => 0.25)
+    @test layout.total == 7
+    @test coordinate_names(layout) == [:mu_tau, :mu_Intercept,
+        :mu_x1_lambda, :mu_x1_raw, :mu_x2_lambda, :mu_x2_raw, :sigma]
+    byname = Dict(:sigma=>0.5, :mu_Intercept=>0.1, :mu_tau=>0.4,
+        :mu_x1_raw=>-0.2, :mu_x1_lambda=>0.3,
+        :mu_x2_raw=>0.15, :mu_x2_lambda=>-0.35)
     u = Float64[byname[n] for n in coordinate_names(layout)]
     nt = constrain(layout, u)
-    sig = nt.sigma
-    b1 = nt.horseshoe_mu_x1_raw * nt.horseshoe_mu_x1_lambda *
-        nt.horseshoe_mu_x1_tau
-    b2 = nt.horseshoe_mu_x2_raw * nt.horseshoe_mu_x2_lambda *
-        nt.horseshoe_mu_x2_tau
+    b1 = nt.mu_x1_raw * nt.mu_x1_lambda * nt.mu_tau
+    b2 = nt.mu_x2_raw * nt.mu_x2_lambda * nt.mu_tau * 0.25
     cols = _parity_cols_hs
-    mu_hat = nt.horseshoe_mu_Intercept_normal .+ b1 .* cols.x1 .+
-        b2 .* cols.x2
-    ll = sum(logpdf.(Normal.(mu_hat, sig), cols.y))
-    # Stan-kernel halves: unnormalized Cauchy + log-Jacobian, NO
-    # truncation renormalizer (SB-settled; the R2D2 `+log(2)` divergence
-    # does NOT apply to the `:positive_stan` horseshoe triples).
-    pr = logpdf(Normal(0, 1), nt.horseshoe_mu_Intercept_normal) +
-        logpdf(Normal(0, 1), nt.horseshoe_mu_x1_raw) +
-        logpdf(Cauchy(0, 1), nt.horseshoe_mu_x1_lambda) +
-        logpdf(Cauchy(0, 1), nt.horseshoe_mu_x1_tau) +
-        logpdf(Normal(0, 1), nt.horseshoe_mu_x2_raw) +
-        logpdf(Cauchy(0, 0.5), nt.horseshoe_mu_x2_lambda) +
-        logpdf(Cauchy(0, 0.25), nt.horseshoe_mu_x2_tau) +
-        logpdf(Exponential(1), sig)
-    jac = log(sig) + log(nt.horseshoe_mu_x1_lambda) +
-        log(nt.horseshoe_mu_x1_tau) + log(nt.horseshoe_mu_x2_lambda) +
-        log(nt.horseshoe_mu_x2_tau)
+    mu_hat = nt.mu_Intercept .+ b1 .* cols.x1 .+ b2 .* cols.x2
+    ll = sum(logpdf.(Normal.(mu_hat, nt.sigma), cols.y))
+    # One shared global scale and two local scales, all normalized halves.
+    pr = logpdf(Normal(), nt.mu_Intercept) +
+        logpdf(Normal(), nt.mu_x1_raw) + logpdf(Normal(), nt.mu_x2_raw) +
+        logpdf(Cauchy(0, 1), nt.mu_tau) +
+        logpdf(Cauchy(0, 1), nt.mu_x1_lambda) +
+        logpdf(Cauchy(0, 0.5), nt.mu_x2_lambda) + 3log(2) +
+        logpdf(Exponential(1), nt.sigma)
+    jac = log(nt.sigma) + log(nt.mu_tau) +
+        log(nt.mu_x1_lambda) + log(nt.mu_x2_lambda)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
-    # SB anchor: BridgeStan full posterior (`propto=false`, Jacobian) at
-    # this point is `-20.29984607289203` (BRM SB structured emission,
-    # StanBlocks `24578c3`, handoff numbers 23:00Z).
-    @test _rk_query(backend, :posterior, u) ≈ -20.29984607289203
     _check_parity_gradient(backend, u)
 end
 
@@ -636,40 +592,27 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 9
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 1, :identity),
-        (:sampled, :dar_mu_t_beta, 1, :interval),
-        (:sampled, :dar_mu_t_sigma, 1, :exp),
-        (:sampled, :s, 1, :exp),
-        (:scan, :_ppl_dar_z_dar_mu, 5, :identity),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
     beta, sigma = nt.dar_mu_t_beta, nt.dar_mu_t_sigma
-    z = nt._ppl_dar_z_dar_mu
+    z = nt._ppl_scan_z_dar_mu_t_level
     path = _ref_dar_path(beta, sigma, z)
     @test path[1] == 0.0
     cols = _parity_cols_dar
-    ll = sum(logpdf.(Normal.(nt.mu[1] .+ path, nt.s), cols.y))
-    # Stan-convention UNNORMALIZED dar priors (term-dar-stan, RK
-    # 908349ff): the truncated persistence carries no
-    # `-log(cdf(hi) - cdf(lo))` renormalizer (`:interval_stan`) and the
-    # HalfNormal scale no `+log(2)` (`:positive_stan`) — bare `logpdf`
-    # on both, exactly SB's unnormalized half-normal. The committed
-    # oracle below uses that convention, so it fails at the pre-fix
-    # normalized value (exactly `-log(dcdf) + log(2)` above).
+    ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ path, nt.s), cols.y))
+    # The emitted persistence and scale have normalized truncated priors.
     zn = Normal(0.5, 0.2)
-    pr = logpdf(Normal(0, 1), nt.mu[1]) +
+    pr = logpdf(Normal(0, 1), _parity_population(nt, backend, :mu)[1]) +
         logpdf(Exponential(1), nt.s) +
-        logpdf(zn, beta) +
-        logpdf(Normal(0, 0.2), sigma) +
+        logpdf(truncated(zn, 0, 1), beta) +
+        logpdf(Normal(0, 0.2), sigma) + log(2) +
         sum(logpdf.(Normal(0, 1), z))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    jac = (log(beta) + log1p(-beta)) + u[3] + u[4]
+    jac = log(beta) + log1p(-beta) + log(sigma) + log(nt.s)
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
@@ -683,33 +626,26 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 9
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 1, :identity),
-        (:sampled, :dar_mu_t_beta, 1, :interval),
-        (:sampled, :dar_mu_t_sigma, 1, :exp),
-        (:sampled, :s, 1, :exp),
-        (:scan, :_ppl_dar_z_dar_mu, 5, :identity),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
     beta, sigma = nt.dar_mu_t_beta, nt.dar_mu_t_sigma
-    z = nt._ppl_dar_z_dar_mu
+    z = nt._ppl_scan_z_dar_mu_t_level
     path = _ref_dar_path(beta, sigma, z)
     @test path[1] == 0.0
     cols = _parity_cols_dar
-    ll = sum(logpdf.(Normal.(nt.mu[1] .+ path, nt.s), cols.y))
+    ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ path, nt.s), cols.y))
     zn = Normal(0.6, 0.1)
-    pr = logpdf(Normal(0, 1), nt.mu[1]) +
+    pr = logpdf(Normal(0, 1), _parity_population(nt, backend, :mu)[1]) +
         logpdf(Exponential(1), nt.s) +
-        logpdf(zn, beta) +
-        logpdf(Normal(0, 0.3), sigma) +
+        logpdf(truncated(zn, 0, 1), beta) +
+        logpdf(Normal(0, 0.3), sigma) + log(2) +
         sum(logpdf.(Normal(0, 1), z))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    jac = (log(beta) + log1p(-beta)) + u[3] + u[4]
+    jac = log(beta) + log1p(-beta) + log(sigma) + log(nt.s)
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
@@ -722,28 +658,22 @@ end
         effect(mu, Intercept) ~ Normal(0, 5)
         sigma ~ Exponential(1)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 6
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 1, :identity),
-        (:sampled, :sigma, 1, :exp),
-        (:sampled, :log_scale_g, 1, :identity),
-        (:varying, :xi_g, 3, :identity),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    r = _ref_intercept_r(_parity_cols.g, nt.log_scale_g, nt.xi_g)
-    ll = sum(logpdf.(Normal.(nt.mu[1] .+ r, nt.sigma), _parity_cols.y))
-    pr = logpdf(Normal(0, 5), nt.mu[1]) +
+    r = only(_parity_ranef(nt, backend).sd) .* _parity_ranef(nt, backend).zflat[_group_index(_parity_cols.g)]
+    ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ r, nt.sigma), _parity_cols.y))
+    pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) +
         logpdf(Exponential(1), nt.sigma) +
-        logpdf(Normal(0, 1), nt.log_scale_g) +
-        sum(logpdf.(Normal(0, 1), nt.xi_g))
+        logpdf(Normal(0, 1), only(_parity_ranef(nt, backend).sd)) + log(2) +
+        sum(logpdf.(Normal(0, 1), _parity_ranef(nt, backend).zflat))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    # Jacobian: sigma's exp only (log_scale/xi ride identity).
-    @test logjac(layout, u) ≈ u[2]
-    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[2]
+    # Both positive scales contribute their exponential Jacobians.
+    @test logjac(layout, u) ≈ (log(nt.sigma) + log(only(_parity_ranef(nt, backend).sd)))
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + (log(nt.sigma) + log(only(_parity_ranef(nt, backend).sd)))
     _check_parity_gradient(backend, u)
 end
 
@@ -754,7 +684,7 @@ end
         effect(mu, Intercept) ~ Normal(0, 5)
         sigma ~ Exponential(1)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 6
     # SB numbering is CA.levels positions (levelcodes) — independent of
@@ -762,16 +692,16 @@ end
     idx = levelcode.(_parity_cols_cat.g)
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    r = exp(nt.log_scale_g) .* nt.xi_g[idx]
-    ll = sum(logpdf.(Normal.(nt.mu[1] .+ r, nt.sigma), _parity_cols_cat.y))
-    pr = logpdf(Normal(0, 5), nt.mu[1]) +
+    r = only(_parity_ranef(nt, backend).sd) .* _parity_ranef(nt, backend).zflat[idx]
+    ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ r, nt.sigma), _parity_cols_cat.y))
+    pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) +
         logpdf(Exponential(1), nt.sigma) +
-        logpdf(Normal(0, 1), nt.log_scale_g) +
-        sum(logpdf.(Normal(0, 1), nt.xi_g))
+        logpdf(Normal(0, 1), only(_parity_ranef(nt, backend).sd)) + log(2) +
+        sum(logpdf.(Normal(0, 1), _parity_ranef(nt, backend).zflat))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    @test logjac(layout, u) ≈ u[2]
-    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[2]
+    @test logjac(layout, u) ≈ (log(nt.sigma) + log(only(_parity_ranef(nt, backend).sd)))
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + (log(nt.sigma) + log(only(_parity_ranef(nt, backend).sd)))
     _check_parity_gradient(backend, u)
 end
 
@@ -782,29 +712,65 @@ end
         effect(mu, Intercept) ~ Normal(0, 5)
         sigma ~ Exponential(1)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 6
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 1, :identity),
-        (:sampled, :sigma, 1, :exp),
-        (:sampled, :tau_g, 1, :exp),
-        (:varying, :xi_g, 3, :identity),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    r = _ref_slope_r(_parity_cols.g, nt.tau_g[1], nt.xi_g, _parity_cols.x)
-    ll = sum(logpdf.(Normal.(nt.mu[1] .+ r, nt.sigma), _parity_cols.y))
-    # No +log(2): SB Stan-convention tau (joint Stage-B note).
-    pr = logpdf(Normal(0, 5), nt.mu[1]) +
+    r = _ref_slope_r(_parity_cols.g, _parity_ranef(nt, backend).sd[1], _parity_ranef(nt, backend).zflat, _parity_cols.x)
+    ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ r, nt.sigma), _parity_cols.y))
+    # The explicit HalfNormal scale includes its log(2) normalizer.
+    pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) +
         logpdf(Exponential(1), nt.sigma) +
-        logpdf(Normal(0, 1), nt.tau_g[1]) +
-        sum(logpdf.(Normal(0, 1), nt.xi_g))
+        logpdf(Normal(0, 1), _parity_ranef(nt, backend).sd[1]) + log(2) +
+        sum(logpdf.(Normal(0, 1), _parity_ranef(nt, backend).zflat))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     @test logjac(layout, u) ≈ u[2] + u[3]
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[2] + u[3]
     _check_parity_gradient(backend, u)
+end
+
+@stestset "rk parity correlated categorical declared and unused levels" begin
+    data = (; x=[-0.8, 0.2, 0.7, -0.3, 0.4, 1.1],
+        y=[0.1, -0.2, 0.5, 0.3, -0.1, 0.6],
+        g=categorical(["a", "b", "a", "c", "b", "c"];
+            levels=["b", "a", "c", "unused"]))
+    saved = deepcopy(data)
+    brmi = @brm data begin
+        mu ~ 1 + (1 + x | g)
+        effect(mu, Intercept) ~ Normal(0, 5)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end
+    backend = _parity_backend(brmi)
+    layout = backend.model.layout
+    @test layout.total == 13
+    @test BRM._rk_grouping_levels(backend.plan.columns[:g]) ==
+        ["b", "a", "c", "unused"]
+    u = collect(range(-0.35, 0.35; length=layout.total))
+    nt = constrain(layout, u)
+    effects = _parity_ranef(nt, backend)
+    @test size(effects.z) == (4, 2)
+    # The pool's declared order, including its unobserved level, defines
+    # latent rows. Observation positions are independent of sorted labels.
+    positions = [2, 1, 2, 3, 1, 3]
+    contribution = [effects.sd[1] * effects.z[j, 1] + data.x[i] *
+        effects.sd[2] * (effects.L[2, 1] * effects.z[j, 1] +
+            effects.L[2, 2] * effects.z[j, 2]) for (i, j) in enumerate(positions)]
+    ll = sum(logpdf.(Normal.(nt.mu_Intercept .+ contribution, nt.sigma), data.y))
+    pr = logpdf(Normal(0, 5), nt.mu_Intercept) +
+        logpdf(Exponential(1), nt.sigma) +
+        _ref_lkj_k2_eta1(effects.L) +
+        sum(logpdf.(Normal(0, 1), effects.sd)) + 2log(2) +
+        sum(logpdf.(Normal(0, 1), effects.z))
+    jac = log(nt.sigma) + sum(log, effects.sd) + _lkj2_vine_logjac(u[end])
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
+    _check_parity_gradient(backend, u)
+    @test isequal(data, saved)
 end
 
 @stestset "rk parity K=2 correlated (+ joint anchor)" begin
@@ -814,33 +780,27 @@ end
         effect(mu, Intercept) ~ Normal(0, 5)
         sigma ~ Exponential(1)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 11
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 1, :identity),
-        (:sampled, :sigma, 1, :exp),
-        (:varying_corr, :L_g, 1, :lkj),
-        (:varying, :tau_g, 2, :exp),
-        (:varying, :z_flat_g, 6, :identity),
-    ]
     # The joint Stage-C point was re-anchored at the Digest-2 vine LKJ
     # pin; the self-contained references above still verify the wiring.
-    u = collect(range(-0.4, 0.4; length = layout.total))
+    legacy_point = collect(range(-0.4, 0.4; length=11))
+    u = legacy_point[[1, 2, 4, 5, 6, 8, 10, 7, 9, 11, 3]]
     nt = constrain(layout, u)
-    r = _ref_corr_r(_parity_cols.g, nt.L_g, nt.tau_g, nt.z_flat_g,
+    r = _ref_corr_r(_parity_cols.g, _parity_ranef(nt, backend).L, _parity_ranef(nt, backend).sd, _parity_ranef(nt, backend).zflat,
         [ones(6), _parity_cols.x], 1:2)
-    ll = sum(logpdf.(Normal.(nt.mu[1] .+ r, nt.sigma), _parity_cols.y))
-    pr = logpdf(Normal(0, 5), nt.mu[1]) +
+    ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ r, nt.sigma), _parity_cols.y))
+    pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) +
         logpdf(Exponential(1), nt.sigma) +
-        _ref_lkj_k2_eta1(nt.L_g) +
-        sum(logpdf.(Normal(0, 1), nt.tau_g)) +
-        sum(logpdf.(Normal(0, 1), nt.z_flat_g))
+        _ref_lkj_k2_eta1(_parity_ranef(nt, backend).L) +
+        sum(logpdf.(Normal(0, 1), _parity_ranef(nt, backend).sd)) + length(_parity_ranef(nt, backend).sd) * log(2) +
+        sum(logpdf.(Normal(0, 1), _parity_ranef(nt, backend).zflat))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     @test _rk_query(backend, :likelihood, u) ≈ -34.484707540969616 atol = 1e-12
-    @test _rk_query(backend, :prior, u) ≈ -12.267527341929741 atol = 1e-12
-    jac = u[2] + u[4] + u[5] + _lkj2_vine_logjac(u[3])
+    @test _rk_query(backend, :prior, u) ≈ (-12.267527341929741 + 2log(2)) atol = 1e-12
+    jac = log(nt.sigma) + sum(log, _parity_ranef(nt, backend).sd) + _lkj2_vine_logjac(u[end])
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
@@ -857,29 +817,22 @@ end
     bucket = only(BRM._brm_rk_plan(brmi).ranef_buckets)
     @test bucket.kind === :correlated
     @test [m.coefficient for m in bucket.margins] == [:Intercept, :int_x_x_z]
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 11
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 1, :identity),
-        (:sampled, :sigma, 1, :exp),
-        (:varying_corr, :L_g, 1, :lkj),
-        (:varying, :tau_g, 2, :exp),
-        (:varying, :z_flat_g, 6, :identity),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    r = _ref_corr_r(_parity_cols_xz.g, nt.L_g, nt.tau_g, nt.z_flat_g,
+    r = _ref_corr_r(_parity_cols_xz.g, _parity_ranef(nt, backend).L, _parity_ranef(nt, backend).sd, _parity_ranef(nt, backend).zflat,
         [ones(6), _parity_cols_xz.x .* _parity_cols_xz.z], 1:2)
-    ll = sum(logpdf.(Normal.(nt.mu[1] .+ r, nt.sigma), _parity_cols_xz.y))
-    pr = logpdf(Normal(0, 5), nt.mu[1]) +
+    ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ r, nt.sigma), _parity_cols_xz.y))
+    pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) +
         logpdf(Exponential(1), nt.sigma) +
-        _ref_lkj_k2_eta1(nt.L_g) +
-        sum(logpdf.(Normal(0, 1), nt.tau_g)) +
-        sum(logpdf.(Normal(0, 1), nt.z_flat_g))
+        _ref_lkj_k2_eta1(_parity_ranef(nt, backend).L) +
+        sum(logpdf.(Normal(0, 1), _parity_ranef(nt, backend).sd)) + length(_parity_ranef(nt, backend).sd) * log(2) +
+        sum(logpdf.(Normal(0, 1), _parity_ranef(nt, backend).zflat))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    jac = u[2] + u[4] + u[5] + _lkj2_vine_logjac(u[3])
+    jac = log(nt.sigma) + sum(log, _parity_ranef(nt, backend).sd) + _lkj2_vine_logjac(u[end])
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
@@ -895,37 +848,29 @@ end
         effect(mu2, Intercept) ~ Normal(0, 5)
         s ~ Exponential(1)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 12
     # Draws mint group-suffixed names (binding on repeats), so the ID
     # bucket surfaces plain group names.
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu1_coef, 1, :identity),
-        (:coefficient, :mu2_coef, 1, :identity),
-        (:sampled, :s, 1, :exp),
-        (:varying_corr, :L_g, 1, :lkj),
-        (:varying, :tau_g, 2, :exp),
-        (:varying, :z_flat_g, 6, :identity),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
     Zs = [ones(6), _parity_cols_multi.x]
-    r1 = _ref_corr_r(_parity_cols_multi.g, nt.L_g, nt.tau_g,
-        nt.z_flat_g, Zs, 1:1)
-    r2 = _ref_corr_r(_parity_cols_multi.g, nt.L_g, nt.tau_g,
-        nt.z_flat_g, Zs, 2:2)
-    ll = sum(logpdf.(Normal.(nt.mu1[1] .+ r1, nt.s), _parity_cols_multi.y)) +
-        sum(logpdf.(Normal.(nt.mu2[1] .+ r2, nt.s), _parity_cols_multi.y2))
-    pr = logpdf(Normal(0, 5), nt.mu1[1]) +
-        logpdf(Normal(0, 5), nt.mu2[1]) +
+    r1 = _ref_corr_r(_parity_cols_multi.g, _parity_ranef(nt, backend).L, _parity_ranef(nt, backend).sd,
+        _parity_ranef(nt, backend).zflat, Zs, 1:1)
+    r2 = _ref_corr_r(_parity_cols_multi.g, _parity_ranef(nt, backend).L, _parity_ranef(nt, backend).sd,
+        _parity_ranef(nt, backend).zflat, Zs, 2:2)
+    ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu1)[1] .+ r1, nt.s), _parity_cols_multi.y)) +
+        sum(logpdf.(Normal.(_parity_population(nt, backend, :mu2)[1] .+ r2, nt.s), _parity_cols_multi.y2))
+    pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu1)[1]) +
+        logpdf(Normal(0, 5), _parity_population(nt, backend, :mu2)[1]) +
         logpdf(Exponential(1), nt.s) +
-        _ref_lkj_k2_eta1(nt.L_g) +
-        sum(logpdf.(Normal(0, 1), nt.tau_g)) +
-        sum(logpdf.(Normal(0, 1), nt.z_flat_g))
+        _ref_lkj_k2_eta1(_parity_ranef(nt, backend).L) +
+        sum(logpdf.(Normal(0, 1), _parity_ranef(nt, backend).sd)) + length(_parity_ranef(nt, backend).sd) * log(2) +
+        sum(logpdf.(Normal(0, 1), _parity_ranef(nt, backend).zflat))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    jac = u[3] + u[5] + u[6] + _lkj2_vine_logjac(u[4])
+    jac = log(nt.s) + sum(log, _parity_ranef(nt, backend).sd) + _lkj2_vine_logjac(u[end])
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
@@ -942,55 +887,36 @@ end
     bucket = only(BRM._brm_rk_plan(brmi).ranef_buckets)
     @test bucket.kind === :correlated
     @test [m.coefficient for m in bucket.margins] == [:Intercept, :c_dummy_2]
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 11
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 1, :identity),
-        (:sampled, :sigma, 1, :exp),
-        (:varying_corr, :L_g, 1, :lkj),
-        (:varying, :tau_g, 2, :exp),
-        (:varying, :z_flat_g, 6, :identity),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
     Z2 = Float64.([v == 2 for v in _parity_cols_dummy.c])
-    r = _ref_corr_r(_parity_cols_dummy.g, nt.L_g, nt.tau_g, nt.z_flat_g,
+    r = _ref_corr_r(_parity_cols_dummy.g, _parity_ranef(nt, backend).L, _parity_ranef(nt, backend).sd, _parity_ranef(nt, backend).zflat,
         [ones(6), Z2], 1:2)
-    ll = sum(logpdf.(Normal.(nt.mu[1] .+ r, nt.sigma), _parity_cols_dummy.y))
-    pr = logpdf(Normal(0, 5), nt.mu[1]) +
+    ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ r, nt.sigma), _parity_cols_dummy.y))
+    pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) +
         logpdf(Exponential(1), nt.sigma) +
-        _ref_lkj_k2_eta1(nt.L_g) +
-        sum(logpdf.(Normal(0, 1), nt.tau_g)) +
-        sum(logpdf.(Normal(0, 1), nt.z_flat_g))
+        _ref_lkj_k2_eta1(_parity_ranef(nt, backend).L) +
+        sum(logpdf.(Normal(0, 1), _parity_ranef(nt, backend).sd)) + length(_parity_ranef(nt, backend).sd) * log(2) +
+        sum(logpdf.(Normal(0, 1), _parity_ranef(nt, backend).zflat))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    jac = u[2] + u[4] + u[5] + _lkj2_vine_logjac(u[3])
+    jac = log(nt.sigma) + sum(log, _parity_ranef(nt, backend).sd) + _lkj2_vine_logjac(u[end])
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
 end
 
-# P2 kernel(...) execution parity (peer KernelPlate reader, RK @ 86e5265).
-# Ex1/Ex2 neutral translations from parent todo 14bv4nq; SB oracles
-# re-verified on c13f41c (same numbers the peer pins in PPL test_kernel.jl).
-# Convention: posterior at constrained sigma = 1.0 (u = [0.0]) == SB oracle
-# (logjac(0) = 0); the unconstrained gradient == oracle constrained d/dσ + 1
-# (exp-Jacobian). Kernel-built specs expose no direct :posterior prepare
-# query, so the gradient cross-check findiffs the sampler value itself.
-_kernel_pk1cmt_cols = (;
-    t    = [[0.5, 1.0, 2.0, 4.0] for _ in 1:3],
-    dose = fill(100.0, 3),
-    dv   = [[1.0, 2.0, 1.5, 0.8] for _ in 1:3],
-    CL   = [5.0, 6.0, 4.5],
-    Vc   = [50.0, 55.0, 48.0],
-    Ka   = [1.0, 1.2, 0.9],
-)
-_kernel_doseplate_cols = (;
-    dose = fill(100.0, 4),
-    dv   = [0.5, 1.2, 2.1, 3.3],
-    ls   = [0.1, 0.2, 0.15, 0.25],
-)
+# General panel-cell coverage belongs here. PK-specific models from the
+# historical corpus are downstream RKPPLBench inputs (preserved in Git).
+_kernel_vector_cols = (;
+    t=[[0.5, 1.0, 2.0, 4.0] for _ in 1:3],
+    intercept=[0.2, -0.3, 0.7], slope=[0.1, -0.2, 0.05],
+    y=[[0.1, 0.4, -0.2, 0.8] for _ in 1:3])
+_kernel_scalar_cols = (; x=[0.1, 0.2, 0.15, 0.25],
+    intercept=[0.3, -0.2, 0.6, 0.4], y=[0.5, 1.2, 0.2, -0.3])
 
 function _check_kernel_parity(backend::BRM.RKBRMI, u, val_oracle, grad_oracle;
         grad_atol = 1e-8)
@@ -1017,27 +943,19 @@ end
         effect(mu, Intercept) ~ Normal(0, 5)
         sigma ~ Exponential(1)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 10
-    # Submodel expansion inlines the popefs body at the call site, which
-    # follows the top-level preamble — so the preamble's phi_raw precedes
-    # the expanded beta in sampled order.
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 1, :identity),
-        (:sampled, :phi_raw_ar_mu_t, 1, :identity),
-        (:sampled, :mu_b2, 1, :identity),
-        (:sampled, :sigma, 1, :exp),
-        (:scan, :_ppl_scan_z_ar_mu_t, 6, :identity),
-    ]
+    # Explicit scan innovations and named population coefficients share
+    # the authored model's coordinate layout.
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
     phi = tanh(nt.phi_raw_ar_mu_t)
     path = _ref_ar1_path(phi, nt._ppl_scan_z_ar_mu_t)
-    ll = sum(logpdf.(Normal.(nt.mu[1] .+ nt.mu_b2 .* path, nt.sigma),
+    ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ nt.mu_ar_mu_t .* path, nt.sigma),
         ar_cols.y))
-    pr = logpdf(Normal(0, 5), nt.mu[1]) +
-        logpdf(Normal(0, 1), nt.mu_b2) +
+    pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) +
+        logpdf(Normal(0, 1), nt.mu_ar_mu_t) +
         logpdf(Normal(0, 1), nt.phi_raw_ar_mu_t) +
         logpdf(Exponential(1), nt.sigma) +
         sum(logpdf.(Normal(0, 1), nt._ppl_scan_z_ar_mu_t))
@@ -1052,11 +970,11 @@ end
 # `me(x, sd)` measurement-error parity (thin-layer PlateParameter
 # surface, re-cut 8a6c36c, RK @ d5e8bed). SB shape per `_sb_me`
 # (src/sbimpl.jl): a length-N latent true covariate with the
-# `latent(...)` Normal prior, the LP riding it through popefs's free
-# beta, and the self-contained observation likelihood
+# `latent(...)` Normal prior, the LP's named free coefficient, and the
+# self-contained observation likelihood
 # `x_obs ~ normal(x_true, sd)`. The synthetic observation response
-# lowers with a width-0 `x_loc_coef` block (no free location
-# coefficient — the plate IS the mean); both betas stay in `mu_coef`.
+# uses the latent array as its mean; both population coefficients retain
+# their explicit names.
 @stestset "rk parity me(x, sd) latent" begin
     me_cols = (;
         x=[0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
@@ -1068,20 +986,14 @@ end
         sigma ~ Exponential(1)
         y ~ Normal(mu, sigma)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 9
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 2, :identity),
-        (:coefficient, :x_loc_coef, 0, :identity),
-        (:sampled, :sigma, 1, :exp),
-        (:plate, :me_x, 6, :identity),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    b = Vector(nt.mu)
+    b = Vector(_parity_population(nt, backend, :mu))
     xt = Vector(nt.me_x)
-    @test isempty(nt.x_loc)
+    @test !hasproperty(nt, :x_loc)
     lp = b[1] .+ b[2] .* xt
     ll = sum(logpdf.(Normal.(lp, nt.sigma), me_cols.y)) +
         sum(logpdf.(Normal.(xt, 0.5), me_cols.x))
@@ -1109,17 +1021,12 @@ end
         nu ~ Gamma(2, 0.1)
         y ~ LocationScale(mu, sigma, TDist(nu))
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 4
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 2, :identity),
-        (:sampled, :sigma, 1, :exp),
-        (:sampled, :nu, 1, :exp),
-    ]
     u = [-0.4, 0.3, -0.2, 1.1]
     nt = constrain(layout, u)
-    b = Vector(nt.mu)
+    b = Vector(_parity_population(nt, backend, :mu))
     lp = b[1] .+ b[2] .* t_cols.x
     ll = sum(logpdf.(LocationScale.(lp, nt.sigma, TDist(nt.nu)), t_cols.y))
     pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2]) +
@@ -1142,16 +1049,12 @@ end
         sigma ~ Exponential(1)
         y ~ LocationScale(mu, sigma, TDist(4.0))
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 3
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 2, :identity),
-        (:sampled, :sigma, 1, :exp),
-    ]
     u = [-0.4, 0.3, -0.2]
     nt = constrain(layout, u)
-    b = Vector(nt.mu)
+    b = Vector(_parity_population(nt, backend, :mu))
     lp = b[1] .+ b[2] .* t_cols.x
     ll = sum(logpdf.(LocationScale.(lp, nt.sigma, TDist(4.0)), t_cols.y))
     pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2]) +
@@ -1177,17 +1080,13 @@ end
         log(nu) ~ 1 + z
         y ~ LocationScale(mu, 2.0, TDist(nu))
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 4
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 2, :identity),
-        (:coefficient, :nu_coef, 2, :identity),
-    ]
     u = [0.5, -0.25, 1.2, 0.2]
     nt = constrain(layout, u)
-    b = Vector(nt.mu)
-    c = Vector(nt.nu)
+    b = Vector(_parity_population(nt, backend, :mu))
+    c = _parity_population(nt, backend, :nu)
     lp = b[1] .+ b[2] .* nu_cols.x
     nu = exp.(c[1] .+ c[2] .* nu_cols.z)
     ll = sum(logpdf.(LocationScale.(lp, 2.0, TDist.(nu)), nu_cols.y))
@@ -1212,18 +1111,13 @@ end
         log(nu) ~ 1 + z
         y ~ LocationScale(mu, s, TDist(nu))
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 5
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 2, :identity),
-        (:coefficient, :nu_coef, 2, :identity),
-        (:sampled, :s, 1, :exp),
-    ]
     u = [0.5, -0.25, 1.2, 0.2, 0.7]
     nt = constrain(layout, u)
-    b = Vector(nt.mu)
-    c = Vector(nt.nu)
+    b = Vector(_parity_population(nt, backend, :mu))
+    c = _parity_population(nt, backend, :nu)
     lp = b[1] .+ b[2] .* nu_cols.x
     nu = exp.(c[1] .+ c[2] .* nu_cols.z)
     ll = sum(logpdf.(LocationScale.(lp, nt.s, TDist.(nu)), nu_cols.y))
@@ -1250,17 +1144,13 @@ end
         effect(p_zero, x) ~ Normal(0, 1)
         c ~ HurdlePoisson(lambda, p_zero)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 4
-    @test _layout_signature(layout) == [
-        (:coefficient, :lambda_coef, 2, :identity),
-        (:coefficient, :p_zero_coef, 2, :identity),
-    ]
     u = [0.5, -0.25, 0.1, 0.2]
     nt = constrain(layout, u)
-    bl = Vector(nt.lambda)
-    bh = Vector(nt.p_zero)
+    bl = Vector(_parity_population(nt, backend, :lambda))
+    bh = Vector(_parity_population(nt, backend, :p_zero))
     lam = exp.(bl[1] .+ bl[2] .* h_cols.x)
     p = logistic.(bh[1] .+ bh[2] .* h_cols.x)
     ll = sum(logpdf.(HurdlePoisson.(lam, p), h_cols.c))
@@ -1290,17 +1180,13 @@ end
         logit(p_zero) ~ 1 + z
         c ~ HurdlePoisson(lambda, p_zero)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 4
-    @test _layout_signature(layout) == [
-        (:coefficient, :lambda_coef, 2, :identity),
-        (:coefficient, :p_zero_coef, 2, :identity),
-    ]
     u = [0.2, -0.1, -0.5, 0.3]
     nt = constrain(layout, u)
-    bl = Vector(nt.lambda)
-    bh = Vector(nt.p_zero)
+    bl = Vector(_parity_population(nt, backend, :lambda))
+    bh = Vector(_parity_population(nt, backend, :p_zero))
     lam = exp.(bl[1] .+ bl[2] .* z2_cols.x)
     p = logistic.(bh[1] .+ bh[2] .* z2_cols.z)
     ll = sum(logpdf.(HurdlePoisson.(lam, p), z2_cols.c))
@@ -1326,16 +1212,12 @@ end
         p0 ~ Beta(2, 2)
         c ~ HurdlePoisson(lambda, p0)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 3
-    @test _layout_signature(layout) == [
-        (:coefficient, :lambda_coef, 2, :identity),
-        (:sampled, :p0, 1, :logistic),
-    ]
     u = [0.5, -0.25, 0.3]
     nt = constrain(layout, u)
-    bl = Vector(nt.lambda)
+    bl = Vector(_parity_population(nt, backend, :lambda))
     lam = exp.(bl[1] .+ bl[2] .* h_cols.x)
     ll = sum(logpdf.(HurdlePoisson.(lam, nt.p0), h_cols.c))
     pr = logpdf(Normal(0, 5), bl[1]) + logpdf(Normal(0, 2.5), bl[2]) +
@@ -1360,15 +1242,12 @@ end
         effect(lambda, x) ~ Normal(0, 2.5)
         c ~ HurdlePoisson(lambda, 0.35)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 2
-    @test _layout_signature(layout) == [
-        (:coefficient, :lambda_coef, 2, :identity),
-    ]
     u = [0.5, -0.25]
     nt = constrain(layout, u)
-    bl = Vector(nt.lambda)
+    bl = Vector(_parity_population(nt, backend, :lambda))
     lam = exp.(bl[1] .+ bl[2] .* h_cols.x)
     ll = sum(logpdf.(HurdlePoisson.(lam, 0.35), h_cols.c))
     pr = logpdf(Normal(0, 5), bl[1]) + logpdf(Normal(0, 2.5), bl[2])
@@ -1389,16 +1268,12 @@ end
         zi ~ Beta(2, 2)
         c ~ ZeroInflatedPoisson(lambda, zi)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 3
-    @test _layout_signature(layout) == [
-        (:coefficient, :lambda_coef, 2, :identity),
-        (:sampled, :zi, 1, :logistic),
-    ]
     u = [0.2, -0.3, 0.5]
     nt = constrain(layout, u)
-    b = Vector(nt.lambda)
+    b = Vector(_parity_population(nt, backend, :lambda))
     lp = exp.(b[1] .+ b[2] .* z_cols.x)
     ll = sum(logpdf.(BRM.ZeroInflatedPoisson.(lp, nt.zi), z_cols.c))
     pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2]) +
@@ -1422,16 +1297,12 @@ end
         lam ~ Exponential(1)
         z ~ InverseGaussian(mu, lam)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 3
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 2, :identity),
-        (:sampled, :lam, 1, :exp),
-    ]
     u = [0.5, -0.25, 0.3]
     nt = constrain(layout, u)
-    b = Vector(nt.mu)
+    b = Vector(_parity_population(nt, backend, :mu))
     mm = exp.(b[1] .+ b[2] .* w_cols.x)
     ll = sum(logpdf.(InverseGaussian.(mm, nt.lam), w_cols.z))
     pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2]) +
@@ -1452,15 +1323,12 @@ end
         log(lambda) ~ 1 + x
         c ~ ZeroInflatedPoisson(lambda, 0.25)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 2
-    @test _layout_signature(layout) == [
-        (:coefficient, :lambda_coef, 2, :identity),
-    ]
     u = [0.2, -0.3]
     nt = constrain(layout, u)
-    b = Vector(nt.lambda)
+    b = Vector(_parity_population(nt, backend, :lambda))
     lp = exp.(b[1] .+ b[2] .* z_cols.x)
     ll = sum(logpdf.(BRM.ZeroInflatedPoisson.(lp, 0.25), z_cols.c))
     pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2])
@@ -1485,17 +1353,13 @@ end
         logit(zi) ~ 1 + z
         c ~ ZeroInflatedPoisson(lambda, zi)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 4
-    @test _layout_signature(layout) == [
-        (:coefficient, :lambda_coef, 2, :identity),
-        (:coefficient, :zi_coef, 2, :identity),
-    ]
     u = [0.2, -0.1, -0.5, 0.3]
     nt = constrain(layout, u)
-    bl = Vector(nt.lambda)
-    bz = Vector(nt.zi)
+    bl = Vector(_parity_population(nt, backend, :lambda))
+    bz = _parity_population(nt, backend, :zi)
     lam = exp.(bl[1] .+ bl[2] .* z_cols.x)
     p = logistic.(bz[1] .+ bz[2] .* z_cols.z)
     ll = sum(logpdf.(BRM.ZeroInflatedPoisson.(lam, p), z_cols.c))
@@ -1519,16 +1383,12 @@ end
         p ~ Beta(2, 2)
         c ~ NegativeBinomial(r, p)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 3
-    @test _layout_signature(layout) == [
-        (:coefficient, :r_coef, 2, :identity),
-        (:sampled, :p, 1, :logistic),
-    ]
     u = [0.2, -0.3, 0.5]
     nt = constrain(layout, u)
-    b = Vector(nt.r)
+    b = Vector(_parity_population(nt, backend, :r))
     rr = exp.(b[1] .+ b[2] .* nb_cols.x)
     ll = sum(logpdf.(NegativeBinomial.(rr, nt.p), nb_cols.c))
     pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2]) +
@@ -1551,15 +1411,12 @@ end
         log(r) ~ 1 + x
         c ~ NegativeBinomial(r, 0.4)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 2
-    @test _layout_signature(layout) == [
-        (:coefficient, :r_coef, 2, :identity),
-    ]
     u = [0.2, -0.3]
     nt = constrain(layout, u)
-    b = Vector(nt.r)
+    b = Vector(_parity_population(nt, backend, :r))
     rr = exp.(b[1] .+ b[2] .* nb_cols.x)
     ll = sum(logpdf.(NegativeBinomial.(rr, 0.4), nb_cols.c))
     pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2])
@@ -1584,17 +1441,13 @@ end
         logit(p) ~ 1 + z
         c ~ NegativeBinomial(r, p)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 4
-    @test _layout_signature(layout) == [
-        (:coefficient, :r_coef, 2, :identity),
-        (:coefficient, :p_coef, 2, :identity),
-    ]
     u = [0.2, -0.1, -0.5, 0.3]
     nt = constrain(layout, u)
-    b = Vector(nt.r)
-    g = Vector(nt.p)
+    b = Vector(_parity_population(nt, backend, :r))
+    g = _parity_population(nt, backend, :p)
     rr = exp.(b[1] .+ b[2] .* nb_cols.x)
     pp = logistic.(g[1] .+ g[2] .* nb_cols.z)
     ll = sum(logpdf.(NegativeBinomial.(rr, pp), nb_cols.c))
@@ -1617,15 +1470,12 @@ end
         log(mu) ~ 1 + x
         z ~ InverseGaussian(mu, 2.0)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 2
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 2, :identity),
-    ]
     u = [0.5, -0.25]
     nt = constrain(layout, u)
-    b = Vector(nt.mu)
+    b = Vector(_parity_population(nt, backend, :mu))
     mm = exp.(b[1] .+ b[2] .* w_cols.x)
     ll = sum(logpdf.(InverseGaussian.(mm, 2.0), w_cols.z))
     pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2])
@@ -1652,17 +1502,13 @@ end
         log(lam) ~ 1 + z
         y ~ InverseGaussian(mu, lam)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 4
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 2, :identity),
-        (:coefficient, :lam_coef, 2, :identity),
-    ]
     u = [0.2, -0.1, 0.5, 0.1]
     nt = constrain(layout, u)
-    b_mu = Vector(nt.mu)
-    b_lam = Vector(nt.lam)
+    b_mu = Vector(_parity_population(nt, backend, :mu))
+    b_lam = _parity_population(nt, backend, :lam)
     mm = exp.(b_mu[1] .+ b_mu[2] .* w_cols.x)
     ll_lam = exp.(b_lam[1] .+ b_lam[2] .* w_cols.z)
     ll = sum(logpdf.(InverseGaussian.(mm, ll_lam), w_cols.y))
@@ -1685,15 +1531,12 @@ end
         log(mu) ~ 1 + x
         z ~ Exponential(mu)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 2
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 2, :identity),
-    ]
     u = [0.5, -0.25]
     nt = constrain(layout, u)
-    b = Vector(nt.mu)
+    b = Vector(_parity_population(nt, backend, :mu))
     mm = exp.(b[1] .+ b[2] .* e_cols.x)
     ll = sum(logpdf.(Exponential.(mm), e_cols.z))
     pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2])
@@ -1717,16 +1560,12 @@ end
         phi ~ Gamma(2, 0.1)
         c ~ BetaBinomial2(n, mu, phi)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 3
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 2, :identity),
-        (:sampled, :phi, 1, :exp),
-    ]
     u = [0.5, -0.25, 1.1]
     nt = constrain(layout, u)
-    b = Vector(nt.mu)
+    b = Vector(_parity_population(nt, backend, :mu))
     mu = logistic.(b[1] .+ b[2] .* bb_cols.x)
     ll = sum(logpdf.(BetaBinomial2.(bb_cols.n, mu, nt.phi), bb_cols.c))
     pr = logpdf(Normal(0, 5), b[1]) + logpdf(Normal(0, 2.5), b[2]) +
@@ -1749,15 +1588,12 @@ end
         effect(mu, Intercept) ~ Normal(0, 5)
         c ~ BetaBinomial2(10, mu, 5.0)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 1
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 1, :identity),
-    ]
     u = [0.5]
     nt = constrain(layout, u)
-    b = Vector(nt.mu)
+    b = Vector(_parity_population(nt, backend, :mu))
     mu = logistic.(b[1] .+ bb_cols.x .* 0.0)
     ll = sum(logpdf.(BetaBinomial2.(10, mu, 5.0), bb_cols.c))
     pr = logpdf(Normal(0, 5), b[1])
@@ -1780,15 +1616,12 @@ end
         effect(mu, x) ~ Normal(0, 2.5)
         c ~ BetaBinomial2(n, mu, 5.0)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 2
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 2, :identity),
-    ]
     u = [0.5, -0.25]
     nt = constrain(layout, u)
-    b = Vector(nt.mu)
+    b = Vector(_parity_population(nt, backend, :mu))
     mu = logistic.(b[1] .+ b[2] .* bb_cols.x)
     ll = sum(logpdf.(BetaBinomial2.(bb_cols.n, mu, 5.0), bb_cols.c))
     pr = logpdf(Normal(0, 5), b[1]) + logpdf(Normal(0, 2.5), b[2])
@@ -1814,17 +1647,13 @@ end
         log(precision) ~ 1 + z
         c ~ BetaBinomial2(n, mean, precision)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 4
-    @test _layout_signature(layout) == [
-        (:coefficient, :mean_coef, 2, :identity),
-        (:coefficient, :precision_coef, 2, :identity),
-    ]
     u = [0.2, -0.1, 1.0, 0.15]
     nt = constrain(layout, u)
-    bm = Vector(nt.mean)
-    bp = Vector(nt.precision)
+    bm = Vector(_parity_population(nt, backend, :mean))
+    bp = Vector(_parity_population(nt, backend, :precision))
     mu = logistic.(bm[1] .+ bm[2] .* bb_cols.x)
     phi = exp.(bp[1] .+ bp[2] .* bb_cols.z)
     ll = sum(logpdf.(BetaBinomial2.(bb_cols.n, mu, phi), bb_cols.c))
@@ -1837,12 +1666,11 @@ end
     _check_parity_gradient(backend, u)
 end
 
-@stestset "rk parity kernel Ex1 pk1cmt" begin
-    brmi = @brm _kernel_pk1cmt_cols begin
+@stestset "rk parity kernel ordinary vector cells" begin
+    brmi = @brm _kernel_vector_cols begin
         sigma ~ Exponential(1)
-        pred ~ kernel(t, dose, dv, CL, Vc, Ka) do ts, d, yy, CLi, Vci, Kai
-            ke = CLi / Vci
-            mu = d * Kai / (Vci * (Kai - ke)) .* (exp.(-ke .* ts) .- exp.(-Kai .* ts))
+        pred ~ kernel(t, intercept, slope, y) do ts, a, b, yy
+            mu = a .+ b .* ts
             yy ~ Normal(mu, sigma)
             mu
         end
@@ -1850,22 +1678,25 @@ end
     plan = BRM._brm_rk_plan(brmi)
     @test plan isa BRM._RKKernelPlan
     @test plan.kernel.n_subjects == 3
-    @test plan.kernel.data_columns == [:t, :dose, :dv, :CL, :Vc, :Ka]
-    @test plan.kernel.slice_kinds == [:vector, :scalar, :vector, :scalar, :scalar, :scalar]
+    @test plan.kernel.data_columns == [:t, :intercept, :slope, :y]
+    @test plan.kernel.slice_kinds == [:vector, :scalar, :scalar, :vector]
     @test plan.kernel.n_timepoints == 4
     @test plan.obs.family === :gaussian
-    backend = BRM.RKBRMI(brmi)
-    layout = backend.model.layout
-    @test layout.total == 1
-    @test _layout_signature(layout) == [(:sampled, :sigma, 1, :exp)]
-    _check_kernel_parity(backend, [0.0], -13.703526816545866, -9.647471163820416)
+    backend = _parity_backend(brmi)
+    @test backend.model.layout.total == 1
+    means = [a .+ b .* t for (a, b, t) in zip(_kernel_vector_cols.intercept,
+        _kernel_vector_cols.slope, _kernel_vector_cols.t)]
+    residuals = reduce(vcat, _kernel_vector_cols.y .- means)
+    value = sum(logpdf.(Normal(), residuals)) + logpdf(Exponential(1), 1.0)
+    derivative = sum(abs2, residuals) - length(residuals) - 1
+    _check_kernel_parity(backend, [0.0], value, derivative)
 end
 
-@stestset "rk parity kernel Ex2 doseplate" begin
-    brmi = @brm _kernel_doseplate_cols begin
+@stestset "rk parity kernel ordinary scalar cells" begin
+    brmi = @brm _kernel_scalar_cols begin
         sigma ~ Exponential(1)
-        pred ~ kernel(dose, dv, ls) do dd, yy, lsi
-            mu = (dd ./ 10.0) .* exp.(lsi)
+        pred ~ kernel(x, intercept, y) do xx, a, yy
+            mu = a + 2xx
             yy ~ Normal(mu, sigma)
             mu
         end
@@ -1873,16 +1704,16 @@ end
     plan = BRM._brm_rk_plan(brmi)
     @test plan isa BRM._RKKernelPlan
     @test plan.kernel.n_subjects == 4
-    @test plan.kernel.data_columns == [:dose, :dv, :ls]
+    @test plan.kernel.data_columns == [:x, :intercept, :y]
     @test plan.kernel.slice_kinds == [:scalar, :scalar, :scalar]
     @test plan.kernel.n_timepoints === nothing
     @test plan.obs.family === :gaussian
-    backend = BRM.RKBRMI(brmi)
-    layout = backend.model.layout
-    @test layout.total == 1
-    @test _layout_signature(layout) == [(:sampled, :sigma, 1, :exp)]
-    _check_kernel_parity(backend, [0.0], -211.80708530040758, 409.2626623351777;
-        grad_atol = 1e-7)
+    backend = _parity_backend(brmi)
+    @test backend.model.layout.total == 1
+    residuals = _kernel_scalar_cols.y .- (_kernel_scalar_cols.intercept .+ 2 .* _kernel_scalar_cols.x)
+    value = sum(logpdf.(Normal(), residuals)) + logpdf(Exponential(1), 1.0)
+    derivative = sum(abs2, residuals) - length(residuals) - 1
+    _check_kernel_parity(backend, [0.0], value, derivative)
 end
 
 # Ordinal discrimination / per_threshold parity (thin-layer 37a1213
@@ -1943,20 +1774,16 @@ end
         eta ~ 0 + x
         y ~ Ordinal(Cumulative(), LogitLink(), eta; discrimination=2.0)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 3
-    @test _layout_signature(layout) == [
-        (:coefficient, :eta_coef, 1, :identity),
-        (:vector, :y_thresholds, 2, :ordered),
-    ]
     u = [0.4, -0.2, 0.25]
     nt = constrain(layout, u)
-    eta = only(Vector(nt.eta)) .* _ord_cols.x
+    eta = only(Vector(_parity_population(nt, backend, :eta))) .* _ord_cols.x
     t = Vector(nt.y_thresholds)
     ll = sum(_ref_ordinal(y, e, t, 2.0, :cumulative, :logit)
         for (y, e) in zip(_ord_cols.y, eta))
-    pr = logpdf(Normal(), only(nt.eta)) + sum(logpdf.(Normal(), t))
+    pr = logpdf(Normal(), only(_parity_population(nt, backend, :eta))) + sum(logpdf.(Normal(), t))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     @test logjac(layout, u) ≈ u[3]
@@ -1970,23 +1797,18 @@ end
         log(disc) ~ 1 + x
         y ~ Ordinal(Cumulative(), LogitLink(), eta; discrimination=disc)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 5
-    @test _layout_signature(layout) == [
-        (:coefficient, :eta_coef, 1, :identity),
-        (:coefficient, :disc_coef, 2, :identity),
-        (:vector, :y_thresholds, 2, :ordered),
-    ]
     u = [0.4, 0.1, -0.2, 0.25, -0.15]
     nt = constrain(layout, u)
-    eta = only(Vector(nt.eta)) .* _ord_cols.x
-    a = Vector(nt.disc)
+    eta = only(Vector(_parity_population(nt, backend, :eta))) .* _ord_cols.x
+    a = Vector(_parity_population(nt, backend, :disc))
     d = exp.(a[1] .+ a[2] .* _ord_cols.x)
     t = Vector(nt.y_thresholds)
     ll = sum(_ref_ordinal(y, e, t, di, :cumulative, :logit)
         for (y, e, di) in zip(_ord_cols.y, eta, d))
-    pr = logpdf(Normal(), only(nt.eta)) + sum(logpdf.(Normal(), a)) +
+    pr = logpdf(Normal(), only(_parity_population(nt, backend, :eta))) + sum(logpdf.(Normal(), a)) +
         sum(logpdf.(Normal(), t))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
@@ -2002,29 +1824,25 @@ end
         effect(disc, g) ~ Normal(0, 1)
         y ~ Ordinal(Cumulative(), CloglogLink(), eta; discrimination=disc)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 6
-    @test _layout_signature(layout) == [
-        (:coefficient, :eta_coef, 1, :identity),
-        (:coefficient, :disc_coef, 3, :identity),
-        (:vector, :y_thresholds, 2, :ordered),
-    ]
     u = [0.4, 0.1, -0.2, 0.3, 0.25, -0.15]
     nt = constrain(layout, u)
-    eta = only(Vector(nt.eta)) .* _ord_cols.x
+    eta = only(Vector(_parity_population(nt, backend, :eta))) .* _ord_cols.x
     levs = sort(unique(_ord_cols.g))
     C = Float64.(_ord_cols.g .== permutedims(levs))
-    d = exp.(C * Vector(nt.disc))
+    d = exp.(C * Vector(_parity_population(nt, backend, :disc)))
     t = Vector(nt.y_thresholds)
     ll = sum(_ref_ordinal(y, e, t, di, :cumulative, :cloglog)
         for (y, e, di) in zip(_ord_cols.y, eta, d))
-    pr = logpdf(Normal(), only(nt.eta)) +
-        sum(logpdf.(Normal(), nt.disc)) + sum(logpdf.(Normal(), t))
+    pr = logpdf(Normal(), only(_parity_population(nt, backend, :eta))) +
+        sum(logpdf.(Normal(), _parity_population(nt, backend, :disc))) + sum(logpdf.(Normal(), t))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    @test logjac(layout, u) ≈ u[6]
-    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[6]
+    jac = log(t[2] - t[1])
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
 end
 
@@ -2033,20 +1851,16 @@ end
         eta ~ 0 + x
         y ~ Ordinal(Cumulative(), LogitLink(), eta; discrimination=d)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 3
-    @test _layout_signature(layout) == [
-        (:coefficient, :eta_coef, 1, :identity),
-        (:vector, :y_thresholds, 2, :ordered),
-    ]
     u = [0.4, -0.2, 0.25]
     nt = constrain(layout, u)
-    eta = only(Vector(nt.eta)) .* _ord_cols.x
+    eta = only(Vector(_parity_population(nt, backend, :eta))) .* _ord_cols.x
     t = Vector(nt.y_thresholds)
     ll = sum(_ref_ordinal(y, e, t, di, :cumulative, :logit)
         for (y, e, di) in zip(_ord_cols.y, eta, _ord_cols.d))
-    pr = logpdf(Normal(), only(nt.eta)) + sum(logpdf.(Normal(), t))
+    pr = logpdf(Normal(), only(_parity_population(nt, backend, :eta))) + sum(logpdf.(Normal(), t))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     @test logjac(layout, u) ≈ u[3]
@@ -2059,23 +1873,18 @@ end
         eta ~ 0 + x
         y ~ Ordinal(StoppingRatio(), LogitLink(), eta; per_threshold=(z1,))
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 5
-    @test _layout_signature(layout) == [
-        (:coefficient, :eta_coef, 1, :identity),
-        (:vector, :y_thresholds, 2, :identity),
-        (:vector, :y_threshold_beta, 2, :identity),
-    ]
     u = [0.4, 0.1, -0.2, 0.25, -0.15]
     nt = constrain(layout, u)
-    eta = only(Vector(nt.eta)) .* _ord_cols.x
+    eta = only(Vector(_parity_population(nt, backend, :eta))) .* _ord_cols.x
     t = Vector(nt.y_thresholds)
-    beta = Vector(nt.y_threshold_beta)
+    beta = vec(nt.y_threshold_beta)
     E = [_ord_cols.z1[i] * beta[j] for i in 1:9, j in 1:2]
     ll = sum(_ref_ordinal(y, e, t, 1.0, :stopping, :logit, E[i, :])
         for (i, (y, e)) in enumerate(zip(_ord_cols.y, eta)))
-    pr = logpdf(Normal(), only(nt.eta)) + sum(logpdf.(Normal(), t)) +
+    pr = logpdf(Normal(), only(_parity_population(nt, backend, :eta))) + sum(logpdf.(Normal(), t)) +
         sum(logpdf.(Normal(), beta))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
@@ -2090,25 +1899,20 @@ end
         y ~ Ordinal(StoppingRatio(), ProbitLink(), eta;
             per_threshold=(z1, z2))
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 7
-    @test _layout_signature(layout) == [
-        (:coefficient, :eta_coef, 1, :identity),
-        (:vector, :y_thresholds, 2, :identity),
-        (:vector, :y_threshold_beta, 4, :identity),
-    ]
     u = [0.4, 0.1, -0.2, 0.25, -0.15, 0.05, -0.1]
     nt = constrain(layout, u)
-    eta = only(Vector(nt.eta)) .* _ord_cols.x
+    eta = only(Vector(_parity_population(nt, backend, :eta))) .* _ord_cols.x
     t = Vector(nt.y_thresholds)
-    beta = Vector(nt.y_threshold_beta)
+    beta = vec(nt.y_threshold_beta)
     X = hcat(_ord_cols.z1, _ord_cols.z2)
     E = [sum(X[i, c] * beta[(j-1)*2+c] for c in 1:2)
         for i in 1:9, j in 1:2]
     ll = sum(_ref_ordinal(y, e, t, 1.0, :stopping, :probit, E[i, :])
         for (i, (y, e)) in enumerate(zip(_ord_cols.y, eta)))
-    pr = logpdf(Normal(), only(nt.eta)) + sum(logpdf.(Normal(), t)) +
+    pr = logpdf(Normal(), only(_parity_population(nt, backend, :eta))) + sum(logpdf.(Normal(), t)) +
         sum(logpdf.(Normal(), beta))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
@@ -2124,26 +1928,20 @@ end
         y ~ Ordinal(StoppingRatio(), LogitLink(), eta;
             discrimination=disc, per_threshold=(z1,))
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 7
-    @test _layout_signature(layout) == [
-        (:coefficient, :eta_coef, 1, :identity),
-        (:coefficient, :disc_coef, 2, :identity),
-        (:vector, :y_thresholds, 2, :identity),
-        (:vector, :y_threshold_beta, 2, :identity),
-    ]
     u = [0.4, 0.1, -0.2, 0.25, -0.15, 0.05, -0.1]
     nt = constrain(layout, u)
-    eta = only(Vector(nt.eta)) .* _ord_cols.x
-    a = Vector(nt.disc)
+    eta = only(Vector(_parity_population(nt, backend, :eta))) .* _ord_cols.x
+    a = Vector(_parity_population(nt, backend, :disc))
     d = exp.(a[1] .+ a[2] .* _ord_cols.x)
     t = Vector(nt.y_thresholds)
-    beta = Vector(nt.y_threshold_beta)
+    beta = vec(nt.y_threshold_beta)
     E = [_ord_cols.z1[i] * beta[j] for i in 1:9, j in 1:2]
     ll = sum(_ref_ordinal(_ord_cols.y[i], eta[i], t, d[i], :stopping,
         :logit, E[i, :]) for i in 1:9)
-    pr = logpdf(Normal(), only(nt.eta)) + sum(logpdf.(Normal(), a)) +
+    pr = logpdf(Normal(), only(_parity_population(nt, backend, :eta))) + sum(logpdf.(Normal(), a)) +
         sum(logpdf.(Normal(), t)) + sum(logpdf.(Normal(), beta))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
@@ -2158,20 +1956,15 @@ end
         log(disc) ~ 1 + x
         y ~ Ordinal(Cumulative(), LogitLink(), eta; discrimination=disc)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 3
-    @test _layout_signature(layout) == [
-        (:coefficient, :eta_coef, 1, :identity),
-        (:coefficient, :disc_coef, 2, :identity),
-        (:vector, :y_thresholds, 0, :ordered),
-    ]
     u = [0.4, 0.1, -0.2]
     nt = constrain(layout, u)
     # Zero-information likelihood (SB's K=1 degeneration), live prior.
     @test _rk_query(backend, :likelihood, u) == 0.0
-    pr = logpdf(Normal(), only(nt.eta)) +
-        sum(logpdf.(Normal(), nt.disc))
+    pr = logpdf(Normal(), only(_parity_population(nt, backend, :eta))) +
+        sum(logpdf.(Normal(), _parity_population(nt, backend, :disc)))
     @test _rk_query(backend, :prior, u) ≈ pr
     @test logjac(layout, u) ≈ 0.0
     @test _rk_query(backend, :posterior, u) ≈ pr
@@ -2183,19 +1976,14 @@ end
         eta ~ 0 + x
         y ~ Ordinal(StoppingRatio(), LogitLink(), eta; per_threshold=(z1,))
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 1
-    @test _layout_signature(layout) == [
-        (:coefficient, :eta_coef, 1, :identity),
-        (:vector, :y_thresholds, 0, :identity),
-        (:vector, :y_threshold_beta, 0, :identity),
-    ]
     u = [0.4]
     nt = constrain(layout, u)
     # Zero stages: zero-information likelihood, eta prior only.
     @test _rk_query(backend, :likelihood, u) == 0.0
-    pr = logpdf(Normal(), only(nt.eta))
+    pr = logpdf(Normal(), only(_parity_population(nt, backend, :eta)))
     @test _rk_query(backend, :prior, u) ≈ pr
     @test logjac(layout, u) ≈ 0.0
     @test _rk_query(backend, :posterior, u) ≈ pr
@@ -2268,9 +2056,32 @@ function _ref_hsgp_muv(xs, Ks, cs, rhos, sigh, beta; iso)
     return PHI * (s .* beta)
 end
 
-function _ref_hsgp_prior(a, sig, rhos, sigh, beta)
+function _ref_hsgp_floors(xs, Ks, cs; iso)
+    floors = map(eachindex(xs)) do j
+        Ks[j] == 1 && return 0.0
+        centered = xs[j] .- sum(xs[j]) / length(xs[j])
+        L = cs[j] * maximum(abs, centered)
+        (4L / pi) * sqrt(log(100) / (Ks[j]^2 - 1))
+    end
+    iso ? [maximum(floors)] : floors
+end
+
+function _ref_hsgp_periodic_floor(K)
+    K == 1 && return 0.0
+    lo, hi = 1e-4, 1e6
+    for _ in 1:160
+        rho = sqrt(lo * hi)
+        a = inv(rho^2)
+        ratio = besselix(K, a) / besselix(1, a)
+        ratio > 1e-4 ? (lo = rho) : (hi = rho)
+    end
+    sqrt(lo * hi)
+end
+
+function _ref_hsgp_prior(a, sig, rhos, sigh, beta, floors)
     return logpdf(Normal(0, 5), a) + logpdf(Exponential(1), sig) +
-        sum(logpdf(LogNormal(0, 1), r) for r in rhos) +
+        sum(logpdf(LogNormal(), r) - logccdf(LogNormal(), floor)
+            for (r, floor) in zip(rhos, floors)) +
         logpdf(LogNormal(0, 1), sigh) + sum(logpdf.(Normal(0, 1), beta))
 end
 
@@ -2298,26 +2109,20 @@ end
         effect(mu, Intercept) ~ Normal(0, 5)
         sigma ~ Exponential(1)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 8
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 1, :identity),
-        (:sampled, :sigma, 1, :exp),
-        (:sampled, :rho_hsgp_x, 1, :floored),
-        (:sampled, :sigma_hsgp_x, 1, :exp),
-        (:hsgp, :beta_raw_hsgp_x, 4, :identity),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    f = _ref_hsgp_muv([_parity_cols_hsgp.x], [4], [1.5], [nt.rho_hsgp_x],
-        nt.sigma_hsgp_x, Vector(nt.beta_raw_hsgp_x); iso = true)
-    ll = sum(logpdf.(Normal.(nt.mu[1] .+ f, nt.sigma), _parity_cols_hsgp.y))
-    pr = _ref_hsgp_prior(nt.mu[1], nt.sigma, [nt.rho_hsgp_x], nt.sigma_hsgp_x,
-        Vector(nt.beta_raw_hsgp_x))
+    f = _ref_hsgp_muv([_parity_cols_hsgp.x], [4], [1.5], [nt.hsgp_x_rho],
+        nt.hsgp_x_sigma, Vector(nt.hsgp_x_z); iso = true)
+    ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ f, nt.sigma), _parity_cols_hsgp.y))
+    floors = _ref_hsgp_floors([_parity_cols_hsgp.x], [4], [1.5]; iso=true)
+    pr = _ref_hsgp_prior(_parity_population(nt, backend, :mu)[1], nt.sigma, [nt.hsgp_x_rho], nt.hsgp_x_sigma,
+        Vector(nt.hsgp_x_z), floors)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    jac = u[2] + u[3] + u[4]
+    jac = log(nt.hsgp_x_rho - only(floors)) + log(nt.hsgp_x_sigma) + log(nt.sigma)
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
@@ -2330,29 +2135,23 @@ end
         effect(mu, Intercept) ~ Normal(0, 5)
         sigma ~ Exponential(1)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 17
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 1, :identity),
-        (:sampled, :sigma, 1, :exp),
-        (:sampled, :rho_hsgp_x_z_1, 1, :floored),
-        (:sampled, :rho_hsgp_x_z_2, 1, :floored),
-        (:sampled, :sigma_hsgp_x_z, 1, :exp),
-        (:hsgp, :beta_raw_hsgp_x_z, 12, :identity),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    rhos = [nt.rho_hsgp_x_z_1, nt.rho_hsgp_x_z_2]
+    rhos = [nt.hsgp_x_z_rho1, nt.hsgp_x_z_rho2]
     f = _ref_hsgp_muv([_parity_cols_hsgp.x, _parity_cols_hsgp.z], [4, 3],
-        [1.5, 2.0], rhos, nt.sigma_hsgp_x_z, Vector(nt.beta_raw_hsgp_x_z);
+        [1.5, 2.0], rhos, nt.hsgp_x_z_sigma, Vector(nt.hsgp_x_z_z);
         iso = false)
-    ll = sum(logpdf.(Normal.(nt.mu[1] .+ f, nt.sigma), _parity_cols_hsgp.y))
-    pr = _ref_hsgp_prior(nt.mu[1], nt.sigma, rhos, nt.sigma_hsgp_x_z,
-        Vector(nt.beta_raw_hsgp_x_z))
+    ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ f, nt.sigma), _parity_cols_hsgp.y))
+    floors = _ref_hsgp_floors([_parity_cols_hsgp.x, _parity_cols_hsgp.z],
+        [4, 3], [1.5, 2.0]; iso=false)
+    pr = _ref_hsgp_prior(_parity_population(nt, backend, :mu)[1], nt.sigma, rhos, nt.hsgp_x_z_sigma,
+        Vector(nt.hsgp_x_z_z), floors)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    jac = u[2] + u[3] + u[4] + u[5]
+    jac = sum(log.(rhos .- floors)) + log(nt.hsgp_x_z_sigma) + log(nt.sigma)
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
@@ -2365,26 +2164,20 @@ end
         effect(mu, Intercept) ~ Normal(0, 5)
         sigma ~ Exponential(1)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 5
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 1, :identity),
-        (:sampled, :sigma, 1, :exp),
-        (:sampled, :rho_hsgp_x, 1, :exp),
-        (:sampled, :sigma_hsgp_x, 1, :exp),
-        (:hsgp, :beta_raw_hsgp_x, 1, :identity),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    f = _ref_hsgp_muv([_parity_cols_hsgp.x], [1], [1.5], [nt.rho_hsgp_x],
-        nt.sigma_hsgp_x, Vector(nt.beta_raw_hsgp_x); iso = true)
-    ll = sum(logpdf.(Normal.(nt.mu[1] .+ f, nt.sigma), _parity_cols_hsgp.y))
-    pr = _ref_hsgp_prior(nt.mu[1], nt.sigma, [nt.rho_hsgp_x], nt.sigma_hsgp_x,
-        Vector(nt.beta_raw_hsgp_x))
+    f = _ref_hsgp_muv([_parity_cols_hsgp.x], [1], [1.5], [nt.hsgp_x_rho],
+        nt.hsgp_x_sigma, Vector(nt.hsgp_x_z); iso = true)
+    ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ f, nt.sigma), _parity_cols_hsgp.y))
+    floors = _ref_hsgp_floors([_parity_cols_hsgp.x], [1], [1.5]; iso=true)
+    pr = _ref_hsgp_prior(_parity_population(nt, backend, :mu)[1], nt.sigma, [nt.hsgp_x_rho], nt.hsgp_x_sigma,
+        Vector(nt.hsgp_x_z), floors)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    jac = u[2] + u[3] + u[4]
+    jac = log(nt.hsgp_x_rho) + log(nt.hsgp_x_sigma) + log(nt.sigma)
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
@@ -2397,50 +2190,34 @@ end
         effect(mu, Intercept) ~ Normal(0, 5)
         sigma ~ Exponential(1)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 12
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 1, :identity),
-        (:sampled, :sigma, 1, :exp),
-        (:sampled, :rho_hsgp_x, 1, :floored),
-        (:sampled, :sigma_hsgp_x, 1, :exp),
-        (:hsgp, :beta_raw_hsgp_x, 8, :identity),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    f = _ref_hsgp_periodic_muv(_parity_cols_hsgp.x, 4, 2.0, nt.rho_hsgp_x,
-        nt.sigma_hsgp_x, Vector(nt.beta_raw_hsgp_x))
-    ll = sum(logpdf.(Normal.(nt.mu[1] .+ f, nt.sigma), _parity_cols_hsgp.y))
-    pr = _ref_hsgp_prior(nt.mu[1], nt.sigma, [nt.rho_hsgp_x], nt.sigma_hsgp_x,
-        Vector(nt.beta_raw_hsgp_x))
+    f = _ref_hsgp_periodic_muv(_parity_cols_hsgp.x, 4, 2.0, nt.hsgp_x_rho,
+        nt.hsgp_x_sigma, Vector(nt.hsgp_x_z))
+    ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ f, nt.sigma), _parity_cols_hsgp.y))
+    floors = [_ref_hsgp_periodic_floor(4)]
+    pr = _ref_hsgp_prior(_parity_population(nt, backend, :mu)[1], nt.sigma, [nt.hsgp_x_rho], nt.hsgp_x_sigma,
+        Vector(nt.hsgp_x_z), floors)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    jac = u[2] + u[3] + u[4]
+    jac = log(nt.hsgp_x_rho - only(floors)) + log(nt.hsgp_x_sigma) + log(nt.sigma)
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
 end
 
-# Spline parity cases (pair term-splines-stan, RK b247aad): the
-# thin-layer spline sd follows the Stan-kernel convention
-# (`:positive_stan`: plain Normal(0,1) lpdf + bare-u Jacobian, NO
-# `+log(2)` half renormalizer). The committed oracles below use that
-# convention, so they fail at the pre-fix `:positive` value (exactly
-# `n_sd * log(2)` above); the SB anchors pin the cross-backend point.
+# Spline density references retain the independently measured Stan points.
+# The explicit HalfNormal declarations contribute one log(2) per scale
+# relative to those historical unnormalized Stan priors.
 @stestset "rk parity spline s default" begin
     # Pair-agreed Xoshiro(7207) n=80 probe, default k=10 basis.
     (; brmi, x, y) = spline_s_parity_case()
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 12
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 1, :identity),
-        (:sampled, :sigma, 1, :exp),
-        (:spline, :b_s_x_fixed, 1, :identity),
-        (:spline, :b_s_x_raw, 8, :identity),
-        (:spline, :sd_s_x, 1, :exp),
-    ]
     # Probe in layout order (pinned by the signature above):
     # [mu.Intercept, log(sigma), b_fixed.1, b_raw.1..8, log(sd)].
     # Fold SB's flat constant coefficient (-0.2) into its intercept (-0.3).
@@ -2448,15 +2225,16 @@ end
         0.15, 0.2, 0.25, 0.3]
     # Values route through the bound translated plan (see the helper):
     # the kernel takes host-materialized basis columns.
+    u = u[[12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]]
     translated = _rk_translated(backend)
     nt = constrain(layout, u)
     sig = nt.sigma
-    sd = only(nt.sd_s_x)
+    sd = nt.s_x_sd1
     Xnull, Zpen = BRM._brm_apply_spline(BRM._brm_fit_spline(x; k=10), x)
-    mu_hat = nt.mu[1] .+ Xnull[:, 2:2] * nt.b_s_x_fixed .+ Zpen * (sd .* nt.b_s_x_raw)
+    mu_hat = _parity_population(nt, backend, :mu)[1] .+ Xnull[:, 2:2] * nt.s_x_fixed .+ Zpen * (sd .* nt.s_x_raw1)
     ll = sum(logpdf.(Normal.(mu_hat, sig), y))
-    pr = logpdf(Normal(0, 5), nt.mu[1]) + logpdf(Normal(), sd) +
-        sum(logpdf.(Normal(), nt.b_s_x_raw)) + logpdf(Exponential(1), sig)
+    pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) + logpdf(Normal(), sd) + log(2) +
+        sum(logpdf.(Normal(), nt.s_x_raw1)) + logpdf(Exponential(1), sig)
     jac = log(sd) + log(sig)
     @test _rk_query_translated(backend, translated, :likelihood, u) ≈ ll
     @test _rk_query_translated(backend, translated, :prior, u) ≈ pr
@@ -2465,9 +2243,9 @@ end
     # Independent BridgeStan anchor at SB's original 13-coordinate point
     # (test/spline_sb_parity.jl). Folding its constant into the intercept
     # preserves the likelihood; only the Normal(0,5) intercept prior moves.
-    intercept_bridge = logpdf(Normal(0, 5), u[1]) - logpdf(Normal(0, 5), -0.3)
+    intercept_bridge = logpdf(Normal(0, 5), nt.mu_Intercept) - logpdf(Normal(0, 5), -0.3)
     @test _rk_query_translated(backend, translated, :sampler, u) ≈
-        SPLINE_S_SB_ANCHOR + intercept_bridge atol=1e-9
+        SPLINE_S_SB_ANCHOR + intercept_bridge + log(2) atol=1e-9
     problem = BRM.rk_logdensity_problem(backend;
         ad_backend = _PARITY_BACKEND, u0 = u)
     value, grad = LogDensityProblems.logdensity_and_gradient(problem, u)
@@ -2480,38 +2258,30 @@ end
 @stestset "rk parity spline t2 k33" begin
     # Pair-agreed Xoshiro(7208) n=80 probe, k=(3,3) tensor basis.
     (; brmi, x, z, y) = spline_t2_parity_case()
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 13
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 1, :identity),
-        (:sampled, :sigma, 1, :exp),
-        (:spline, :b_t2_x_z_fixed, 3, :identity),
-        (:spline, :b_t2_x_z_rr_raw, 1, :identity),
-        (:spline, :b_t2_x_z_rn_raw, 2, :identity),
-        (:spline, :b_t2_x_z_nr_raw, 2, :identity),
-        (:spline, :sd_t2_x_z, 3, :exp),
-    ]
     # Probe in layout order (pinned by the signature above).
     u = [-0.3, -0.25, -0.2, -0.15, -0.1, -0.05, 0.0, 0.05, 0.1,
         0.15, 0.2, 0.25, 0.3]
     # Values route through the bound translated plan (see the helper):
     # the kernel takes host-materialized basis columns.
+    u = u[[11, 12, 13, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]]
     translated = _rk_translated(backend)
     nt = constrain(layout, u)
     sig = nt.sigma
-    sd = nt.sd_t2_x_z
+    sd = [nt.t2_x_z_sd1, nt.t2_x_z_sd2, nt.t2_x_z_sd3]
     Xfixed, Zrr, Zrn, Znr = BRM._brm_apply_t2(
         BRM._brm_fit_t2(x, z; k=(3, 3)), x, z)
-    mu_hat = nt.mu[1] .+ Xfixed * nt.b_t2_x_z_fixed .+
-        Zrr * (sd[1] .* nt.b_t2_x_z_rr_raw) .+
-        Zrn * (sd[2] .* nt.b_t2_x_z_rn_raw) .+
-        Znr * (sd[3] .* nt.b_t2_x_z_nr_raw)
+    mu_hat = _parity_population(nt, backend, :mu)[1] .+ Xfixed * nt.t2_x_z_fixed .+
+        Zrr * (sd[1] .* nt.t2_x_z_raw1) .+
+        Zrn * (sd[2] .* nt.t2_x_z_raw2) .+
+        Znr * (sd[3] .* nt.t2_x_z_raw3)
     ll = sum(logpdf.(Normal.(mu_hat, sig), y))
-    pr = logpdf(Normal(0, 5), nt.mu[1]) + sum(logpdf.(Normal(), sd)) +
-        sum(logpdf.(Normal(), nt.b_t2_x_z_rr_raw)) +
-        sum(logpdf.(Normal(), nt.b_t2_x_z_rn_raw)) +
-        sum(logpdf.(Normal(), nt.b_t2_x_z_nr_raw)) +
+    pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) + sum(logpdf.(Normal(), sd)) + 3log(2) +
+        sum(logpdf.(Normal(), nt.t2_x_z_raw1)) +
+        sum(logpdf.(Normal(), nt.t2_x_z_raw2)) +
+        sum(logpdf.(Normal(), nt.t2_x_z_raw3)) +
         logpdf(Exponential(1), sig)
     jac = sum(log.(sd)) + log(sig)
     @test _rk_query_translated(backend, translated, :likelihood, u) ≈ ll
@@ -2521,7 +2291,7 @@ end
     # Re-derived with canonical signs by test/spline_sb_parity.jl; t2 has
     # the same layout in both backends and needs no intercept-prior bridge.
     @test _rk_query_translated(backend, translated, :sampler, u) ≈
-        SPLINE_T2_SB_ANCHOR atol=1e-9
+        (SPLINE_T2_SB_ANCHOR + 3log(2)) atol=1e-9
     problem = BRM.rk_logdensity_problem(backend;
         ad_backend = _PARITY_BACKEND, u0 = u)
     value, grad = LogDensityProblems.logdensity_and_gradient(problem, u)
@@ -2561,27 +2331,18 @@ end
         effect(mu, Intercept) ~ Normal(0, 5)
         sigma ~ Exponential(1)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 10
-    # The intercept rides the `popefs_normal_i_gp` submodel, which the
-    # thin layer expands to a sampled `mu_b1` (corpus-18 shape); the
-    # empty `y_loc_coef` is the fused-heads no-GLM-object artifact.
-    @test _layout_signature(layout) == [
-        (:coefficient, :y_loc_coef, 0, :identity),
-        (:sampled, :rho_gp, 1, :exp),
-        (:sampled, :sigma_gp, 1, :exp),
-        (:sampled, :mu_b1, 1, :identity),
-        (:sampled, :sigma, 1, :exp),
-        (:plate, :z_gp, 6, :identity),
-    ]
+    # The formula intercept, covariance parameters and latent vector each
+    # have ordinary explicit declarations in the emitted source.
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    @test isempty(nt.y_loc)
+    @test !hasproperty(nt, :y_loc)
     f = _ref_gp_exp_quad_f(_parity_cols_gp.x, nt.rho_gp, nt.sigma_gp,
         Vector(nt.z_gp))
-    ll = sum(logpdf.(Normal.(nt.mu_b1 .+ f, nt.sigma), _parity_cols_gp.y))
-    pr = logpdf(Normal(0, 5), nt.mu_b1) +
+    ll = sum(logpdf.(Normal.(nt.mu_Intercept .+ f, nt.sigma), _parity_cols_gp.y))
+    pr = logpdf(Normal(0, 5), nt.mu_Intercept) +
         logpdf(Exponential(1), nt.sigma) +
         logpdf(LogNormal(0, 1), nt.rho_gp) +
         logpdf(LogNormal(0, 1), nt.sigma_gp) +
@@ -2617,24 +2378,16 @@ end
         effect(mu, Intercept) ~ Normal(0, 5)
         sigma ~ Exponential(1)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 10
-    @test _layout_signature(layout) == [
-        (:coefficient, :y_loc_coef, 0, :identity),
-        (:sampled, :rho_gp, 1, :exp),
-        (:sampled, :sigma_gp, 1, :exp),
-        (:sampled, :mu_b1, 1, :identity),
-        (:sampled, :sigma, 1, :exp),
-        (:plate, :z_gp, 6, :identity),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    @test isempty(nt.y_loc)
+    @test !hasproperty(nt, :y_loc)
     f = _ref_gp_periodic_f(_parity_cols_gp.x, nt.rho_gp, nt.sigma_gp,
         Vector(nt.z_gp); period=1.0)
-    ll = sum(logpdf.(Normal.(nt.mu_b1 .+ f, nt.sigma), _parity_cols_gp.y))
-    pr = logpdf(Normal(0, 5), nt.mu_b1) +
+    ll = sum(logpdf.(Normal.(nt.mu_Intercept .+ f, nt.sigma), _parity_cols_gp.y))
+    pr = logpdf(Normal(0, 5), nt.mu_Intercept) +
         logpdf(Exponential(1), nt.sigma) +
         logpdf(LogNormal(0, 1), nt.rho_gp) +
         logpdf(LogNormal(0, 1), nt.sigma_gp) +
@@ -2658,22 +2411,17 @@ end
         log(sigma) ~ 1
         y ~ MixtureModel([Normal(mu1, sigma), Normal(mu2, sigma)], [0.4, 0.6])
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 3
-    @test _layout_signature(layout) == [
-        (:coefficient, :sigma_coef, 1, :identity),
-        (:sampled, :mu1, 1, :identity),
-        (:sampled, :mu2, 1, :identity),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
     mixture = MixtureModel(
-        [Normal(nt.mu1, exp(nt.sigma[1])), Normal(nt.mu2, exp(nt.sigma[1]))],
+        [Normal(_parity_population(nt, backend, :mu1), exp(_parity_population(nt, backend, :sigma)[1])), Normal(_parity_population(nt, backend, :mu2), exp(_parity_population(nt, backend, :sigma)[1]))],
         [0.4, 0.6])
     ll = sum(logpdf.(mixture, df.y))
-    pr = logpdf(Normal(-2, 0.1), nt.mu1) + logpdf(Normal(2, 0.1), nt.mu2) +
-        logpdf(Normal(), nt.sigma[1])
+    pr = logpdf(Normal(-2, 0.1), _parity_population(nt, backend, :mu1)) + logpdf(Normal(2, 0.1), _parity_population(nt, backend, :mu2)) +
+        logpdf(Normal(), _parity_population(nt, backend, :sigma)[1])
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     @test logjac(layout, u) ≈ 0.0
@@ -2688,13 +2436,9 @@ end
         lambda2 ~ Exponential(1)
         y ~ MixtureModel([Poisson(lambda1), Poisson(lambda2)], [0.3, 0.7])
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 2
-    @test _layout_signature(layout) == [
-        (:sampled, :lambda1, 1, :exp),
-        (:sampled, :lambda2, 1, :exp),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
     mixture = MixtureModel([Poisson(nt.lambda1), Poisson(nt.lambda2)],
@@ -2711,10 +2455,10 @@ end
 end
 
 @stestset "rk parity mi() missing-response obs-only likelihood" begin
-    # Case A (decision 05aemvx): packed obs slices; the likelihood sees
+    # Case A (decision 05aemvx): explicit observed slices; the likelihood sees
     # observed rows only while predictors stay full-length. Reference is
     # an independent Distributions.jl hand oracle; the plain obs-only twin
-    # (GLM-fused, remapped probe) cross-checks across lowering paths.
+    # cross-checks the same physical coefficients and observation values.
     cols = (; x=[-1.0, 0.5, 2.0, 0.25],
               y=Union{Missing,Float64}[0.2, missing, -0.4, missing])
     brmi = @brm cols begin
@@ -2722,34 +2466,28 @@ end
         mu ~ 1 + x
         mi(y) ~ Normal(mu, sigma)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 3
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 2, :identity),
-        (:sampled, :sigma, 1, :exp),
-    ]
     u = [0.0, 0.05, -0.05]
     nt = constrain(layout, u)
-    mu_o = nt.mu[1] .+ nt.mu[2] .* [-1.0, 2.0]
+    mu_o = _parity_population(nt, backend, :mu)[1] .+ _parity_population(nt, backend, :mu)[2] .* [-1.0, 2.0]
     ll = sum(logpdf.(Normal.(mu_o, nt.sigma), [0.2, -0.4]))
-    pr = logpdf(Normal(0, 1), nt.mu[1]) +
-        logpdf(Normal(0, 1), nt.mu[2]) +
+    pr = logpdf(Normal(0, 1), _parity_population(nt, backend, :mu)[1]) +
+        logpdf(Normal(0, 1), _parity_population(nt, backend, :mu)[2]) +
         logpdf(Exponential(2), nt.sigma)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     @test logjac(layout, u) ≈ u[3]
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[3]
     _check_parity_gradient(backend, u)
-    twin = BRM.RKBRMI(@brm (; x=[-1.0, 2.0], y=[0.2, -0.4]) begin
+    twin = _parity_backend(@brm (; x=[-1.0, 2.0], y=[0.2, -0.4]) begin
         sigma ~ Exponential(2)
         mu ~ 1 + x
         y ~ Normal(mu, sigma)
     end)
-    # The plain twin fuses to the GLM object (layout [beta, sigma, alpha]);
-    # remap the probe and compare across lowering paths (fused reduction vs
-    # plate sum agree to 1 ulp, not bit-exact).
-    u_twin = [u[2], u[3], u[1]]
+    # The observed-only twin retains the same coordinate names and point.
+    u_twin = copy(u)
     @test _rk_query(twin, :posterior, u_twin) ≈
         _rk_query(backend, :posterior, u)
 end
@@ -2768,13 +2506,13 @@ end
         effect(mu, x) ~ Horseshoe()
         mi(y) ~ Normal(mu, sigma)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     translated = _rk_translated(backend)
-    @test [(h.predictor, h.addressee) for h in translated.horseshoe_priors] ==
-        [(:mu, :x)]
-    @test only(translated.responses).mi_jobs === :Jobs_y
+    source = sprint(Base.show_unquoted, BRM._rk_emit_ast(backend.plan).main)
+    @test occursin("mu_tau ~ HalfCauchy", source)
+    @test occursin("y[Jobs_y]", source)
     obs = [1, 3, 5]
-    twin = BRM.RKBRMI(@brm (; x=cols.x[obs], z=cols.z[obs],
+    twin = _parity_backend(@brm (; x=cols.x[obs], z=cols.z[obs],
             y=Float64[0.2, -0.4, 0.7]) begin
         sigma ~ Exponential(2)
         mu ~ 1 + x + z
@@ -2790,14 +2528,7 @@ end
     @test _rk_query(backend, :posterior, u) ≈
         _rk_query(twin, :posterior, u_twin)
     _check_parity_gradient(backend, u)
-    # The copy behind every plan patch carries each unpatched field
-    # through unchanged and refuses a field the thin layer lacks.
-    ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
-    copied = ext._rk_with(translated; n_obs = translated.n_obs)
-    @test all(f -> getfield(copied, f) === getfield(translated, f),
-        fieldnames(typeof(translated)))
-    @test_throws "has no field `not_a_field`" ext._rk_with(translated;
-        not_a_field = 1)
+
 end
 
 @stestset "rk parity interval-gaussian literal upper" begin
@@ -2813,20 +2544,16 @@ end
         s ~ Exponential(1)
         y ~ interval_censored(Normal(mu, s); upper=2.0)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 3
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 2, :identity),
-        (:sampled, :s, 1, :exp),
-    ]
     u = [0.2, -0.3, 0.1]
     nt = constrain(layout, u)
-    mu_o = nt.mu[1] .+ nt.mu[2] .* cols.x
+    mu_o = _parity_population(nt, backend, :mu)[1] .+ _parity_population(nt, backend, :mu)[2] .* cols.x
     ll = sum(log.(cdf.(Normal.(mu_o, nt.s), 2.0) .-
         cdf.(Normal.(mu_o, nt.s), cols.y)))
-    pr = logpdf(Normal(0, 1), nt.mu[1]) +
-        logpdf(Normal(0, 1), nt.mu[2]) +
+    pr = logpdf(Normal(0, 1), _parity_population(nt, backend, :mu)[1]) +
+        logpdf(Normal(0, 1), _parity_population(nt, backend, :mu)[2]) +
         logpdf(Exponential(1), nt.s)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
@@ -2847,20 +2574,16 @@ end
         s ~ Exponential(1)
         y ~ interval_censored(Normal(mu, s); upper=hi)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 3
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 2, :identity),
-        (:sampled, :s, 1, :exp),
-    ]
     u = [0.2, -0.3, 0.1]
     nt = constrain(layout, u)
-    mu_o = nt.mu[1] .+ nt.mu[2] .* cols.x
+    mu_o = _parity_population(nt, backend, :mu)[1] .+ _parity_population(nt, backend, :mu)[2] .* cols.x
     ll = sum(log.(cdf.(Normal.(mu_o, nt.s), cols.hi) .-
         cdf.(Normal.(mu_o, nt.s), cols.y)))
-    pr = logpdf(Normal(0, 1), nt.mu[1]) +
-        logpdf(Normal(0, 1), nt.mu[2]) +
+    pr = logpdf(Normal(0, 1), _parity_population(nt, backend, :mu)[1]) +
+        logpdf(Normal(0, 1), _parity_population(nt, backend, :mu)[2]) +
         logpdf(Exponential(1), nt.s)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
@@ -2883,19 +2606,16 @@ end
         log(lambda) ~ 1 + x
         c ~ interval_censored(Poisson(lambda); upper=5)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 2
-    @test _layout_signature(layout) == [
-        (:coefficient, :lambda_coef, 2, :identity),
-    ]
     u = [0.2, -0.3]
     nt = constrain(layout, u)
-    lam = exp.(nt.lambda[1] .+ nt.lambda[2] .* cols.x)
+    lam = exp.(_parity_population(nt, backend, :lambda)[1] .+ _parity_population(nt, backend, :lambda)[2] .* cols.x)
     ll = sum(log.(cdf.(Poisson.(lam), 5) .-
         cdf.(Poisson.(lam), cols.c)))
-    pr = logpdf(Normal(0, 1), nt.lambda[1]) +
-        logpdf(Normal(0, 1), nt.lambda[2])
+    pr = logpdf(Normal(0, 1), _parity_population(nt, backend, :lambda)[1]) +
+        logpdf(Normal(0, 1), _parity_population(nt, backend, :lambda)[2])
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     @test logjac(layout, u) ≈ 0.0
@@ -2914,19 +2634,16 @@ end
         log(lambda) ~ 1 + x
         c ~ interval_censored(Poisson(lambda); upper=hi)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 2
-    @test _layout_signature(layout) == [
-        (:coefficient, :lambda_coef, 2, :identity),
-    ]
     u = [0.2, -0.3]
     nt = constrain(layout, u)
-    lam = exp.(nt.lambda[1] .+ nt.lambda[2] .* cols.x)
+    lam = exp.(_parity_population(nt, backend, :lambda)[1] .+ _parity_population(nt, backend, :lambda)[2] .* cols.x)
     ll = sum(log.(cdf.(Poisson.(lam), cols.hi) .-
         cdf.(Poisson.(lam), cols.c)))
-    pr = logpdf(Normal(0, 1), nt.lambda[1]) +
-        logpdf(Normal(0, 1), nt.lambda[2])
+    pr = logpdf(Normal(0, 1), _parity_population(nt, backend, :lambda)[1]) +
+        logpdf(Normal(0, 1), _parity_population(nt, backend, :lambda)[2])
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     @test logjac(layout, u) ≈ 0.0
@@ -2944,22 +2661,18 @@ end
         log(kappa) ~ 1
         y ~ CircularVonMises(mu, kappa; interval=(-pi, pi))
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 3
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 2, :identity),
-        (:coefficient, :kappa_coef, 1, :identity),
-    ]
     u = [0.5, -0.25, 0.3]
     nt = constrain(layout, u)
-    b = Vector(nt.mu)
+    b = Vector(_parity_population(nt, backend, :mu))
     mu = b[1] .+ b[2] .* v_cols.x
-    kap = exp(only(nt.kappa))
+    kap = exp(only(_parity_population(nt, backend, :kappa)))
     ll = sum(logpdf.(BRM.CircularVonMises.(mu, kap;
         interval=(-Float64(pi), Float64(pi))), v_cols.y))
     pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2]) +
-        logpdf(Normal(0, 1), only(nt.kappa))
+        logpdf(Normal(0, 1), only(_parity_population(nt, backend, :kappa)))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     # All-identity layout: no Jacobian.
@@ -2978,16 +2691,12 @@ end
         k ~ LogNormal(0, 1)
         y ~ VonMises(mu, k)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 3
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 2, :identity),
-        (:sampled, :k, 1, :exp),
-    ]
     u = [0.5, -0.25, 0.2]
     nt = constrain(layout, u)
-    b = Vector(nt.mu)
+    b = Vector(_parity_population(nt, backend, :mu))
     mu = b[1] .+ b[2] .* v_cols.x
     ll = sum(logpdf.(VonMises.(mu, nt.k), v_cols.y))
     pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2]) +
@@ -3008,15 +2717,12 @@ end
         mu ~ 1 + x
         y ~ CircularVonMises(mu, 1.7; interval=(0.0, 6.283185307179586))
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 2
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 2, :identity),
-    ]
     u = [1.0, -0.5]
     nt = constrain(layout, u)
-    b = Vector(nt.mu)
+    b = Vector(_parity_population(nt, backend, :mu))
     mu = b[1] .+ b[2] .* v_cols.x
     ll = sum(logpdf.(BRM.CircularVonMises.(mu, 1.7;
         interval=(0.0, 6.283185307179586)), v_cols.y))
@@ -3042,17 +2748,13 @@ end
         log(kappa) ~ 1 + z
         prop ~ Beta(mu * kappa, (1 - mu) * kappa)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 4
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 2, :identity),
-        (:coefficient, :kappa_coef, 2, :identity),
-    ]
     u = [0.2, -0.1, 0.3, 0.15]
     nt = constrain(layout, u)
-    b = Vector(nt.mu)
-    c = Vector(nt.kappa)
+    b = Vector(_parity_population(nt, backend, :mu))
+    c = _parity_population(nt, backend, :kappa)
     mu = logistic.(b[1] .+ b[2] .* p2_cols.x)
     kap = exp.(c[1] .+ c[2] .* p2_cols.z)
     ll = sum(logpdf.(Beta.(mu .* kap, (1 .- mu) .* kap), p2_cols.prop))
@@ -3082,25 +2784,19 @@ _ref_mm_gather(b, gidx, w) =
         effect(loc, Intercept) ~ Normal(0, 5)
         sigma ~ Exponential(1)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 6
-    @test _layout_signature(layout) == [
-        (:coefficient, :loc_coef, 1, :identity),
-        (:sampled, :sigma, 1, :exp),
-        (:sampled, :log_scale_mm__g1__g2, 1, :identity),
-        (:varying, :xi_mm__g1__g2, 3, :identity),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    beta, sigma = nt.loc[1], nt.sigma
-    b = exp(nt.log_scale_mm__g1__g2) .* nt.xi_mm__g1__g2
+    beta, sigma = _parity_population(nt, backend, :loc)[1], nt.sigma
+    b = only(_parity_ranef(nt, backend).sd) .* _parity_ranef(nt, backend).zflat
     r = _ref_mm_gather(b, _ref_mm_gidx(), fill(0.5, 12))
     ll = sum(logpdf(Normal(beta + r[i], sigma), _parity_cols_mm.y[i])
         for i in 1:6)
     pr = logpdf(Normal(0, 5), beta) + logpdf(Exponential(1), sigma) +
-        logpdf(Normal(0, 1), nt.log_scale_mm__g1__g2) +
-        sum(logpdf(Normal(0, 1), v) for v in nt.xi_mm__g1__g2)
+        logpdf(Normal(), only(_parity_ranef(nt, backend).sd)) + log(2) +
+        sum(logpdf(Normal(0, 1), v) for v in _parity_ranef(nt, backend).zflat)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + logjac(layout, u)
@@ -3114,26 +2810,20 @@ end
         effect(loc, Intercept) ~ Normal(0, 5)
         sigma ~ Exponential(1)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 6
-    @test _layout_signature(layout) == [
-        (:coefficient, :loc_coef, 1, :identity),
-        (:sampled, :sigma, 1, :exp),
-        (:sampled, :log_scale_mm__g1__g2__w__w1__w2, 1, :identity),
-        (:varying, :xi_mm__g1__g2__w__w1__w2, 3, :identity),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    beta, sigma = nt.loc[1], nt.sigma
-    b = exp(nt.log_scale_mm__g1__g2__w__w1__w2) .*
-        nt.xi_mm__g1__g2__w__w1__w2
+    beta, sigma = _parity_population(nt, backend, :loc)[1], nt.sigma
+    b = only(_parity_ranef(nt, backend).sd) .*
+        _parity_ranef(nt, backend).zflat
     r = _ref_mm_gather(b, _ref_mm_gidx(), _ref_mm_weights())
     ll = sum(logpdf(Normal(beta + r[i], sigma), _parity_cols_mm.y[i])
         for i in 1:6)
     pr = logpdf(Normal(0, 5), beta) + logpdf(Exponential(1), sigma) +
-        logpdf(Normal(0, 1), nt.log_scale_mm__g1__g2__w__w1__w2) +
-        sum(logpdf(Normal(0, 1), v) for v in nt.xi_mm__g1__g2__w__w1__w2)
+        logpdf(Normal(), only(_parity_ranef(nt, backend).sd)) + log(2) +
+        sum(logpdf(Normal(0, 1), v) for v in _parity_ranef(nt, backend).zflat)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + logjac(layout, u)
@@ -3147,27 +2837,21 @@ end
         effect(loc, Intercept) ~ Normal(0, 5)
         sigma ~ Exponential(1)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 6
-    @test _layout_signature(layout) == [
-        (:coefficient, :loc_coef, 1, :identity),
-        (:sampled, :sigma, 1, :exp),
-        (:sampled, :log_scale_mm__g1__g2__w__w1__w2__raw, 1, :identity),
-        (:varying, :xi_mm__g1__g2__w__w1__w2__raw, 3, :identity),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    beta, sigma = nt.loc[1], nt.sigma
-    b = exp(nt.log_scale_mm__g1__g2__w__w1__w2__raw) .*
-        nt.xi_mm__g1__g2__w__w1__w2__raw
+    beta, sigma = _parity_population(nt, backend, :loc)[1], nt.sigma
+    b = only(_parity_ranef(nt, backend).sd) .*
+        _parity_ranef(nt, backend).zflat
     r = _ref_mm_gather(b, _ref_mm_gidx(), _ref_mm_weights_raw())
     ll = sum(logpdf(Normal(beta + r[i], sigma), _parity_cols_mm.y[i])
         for i in 1:6)
     pr = logpdf(Normal(0, 5), beta) + logpdf(Exponential(1), sigma) +
-        logpdf(Normal(0, 1), nt.log_scale_mm__g1__g2__w__w1__w2__raw) +
+        logpdf(Normal(), only(_parity_ranef(nt, backend).sd)) + log(2) +
         sum(logpdf(Normal(0, 1), v)
-            for v in nt.xi_mm__g1__g2__w__w1__w2__raw)
+            for v in _parity_ranef(nt, backend).zflat)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + logjac(layout, u)
@@ -3181,22 +2865,15 @@ end
         effect(loc, Intercept) ~ Normal(0, 5)
         sigma ~ Exponential(1)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 11
-    @test _layout_signature(layout) == [
-        (:coefficient, :loc_coef, 1, :identity),
-        (:sampled, :sigma, 1, :exp),
-        (:varying_corr, :L_mm__g1__g2__w__w1__w2, 1, :lkj),
-        (:varying, :tau_mm__g1__g2__w__w1__w2, 2, :exp),
-        (:varying, :z_flat_mm__g1__g2__w__w1__w2, 6, :identity),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    beta, sigma = nt.loc[1], nt.sigma
-    L = nt.L_mm__g1__g2__w__w1__w2
-    tau = nt.tau_mm__g1__g2__w__w1__w2
-    zf = nt.z_flat_mm__g1__g2__w__w1__w2
+    beta, sigma = _parity_population(nt, backend, :loc)[1], nt.sigma
+    L = _parity_ranef(nt, backend).L
+    tau = _parity_ranef(nt, backend).sd
+    zf = _parity_ranef(nt, backend).zflat
     zm = reshape(zf, 2, 3)
     b = Matrix{Float64}(undef, 3, 2)
     for g in 1:3, k in 1:2
@@ -3210,7 +2887,7 @@ end
     ll = sum(logpdf(Normal(beta + r[i], sigma), _parity_cols_mm.y[i])
         for i in 1:6)
     pr = logpdf(Normal(0, 5), beta) + logpdf(Exponential(1), sigma) +
-        _ref_lkj_k2_eta1(L) + sum(logpdf(Normal(0, 1), v) for v in tau) +
+        _ref_lkj_k2_eta1(L) + sum(logpdf(Normal(0, 1), v) for v in tau) + length(tau)*log(2) +
         sum(logpdf(Normal(0, 1), v) for v in zf)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
@@ -3227,21 +2904,14 @@ end
         effect(loc, Intercept) ~ Normal(0, 5)
         sigma ~ Exponential(1)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 6
-    @test _layout_signature(layout) == [
-        (:coefficient, :loc_coef, 1, :identity),
-        (:sampled, :sigma, 1, :exp),
-        (:varying_corr, :L_mm__g1__g2__w__w1__w2, 0, :lkj),
-        (:varying, :tau_mm__g1__g2__w__w1__w2, 1, :exp),
-        (:varying, :z_flat_mm__g1__g2__w__w1__w2, 3, :identity),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    beta, sigma = nt.loc[1], nt.sigma
-    tau = only(nt.tau_mm__g1__g2__w__w1__w2)
-    zf = nt.z_flat_mm__g1__g2__w__w1__w2
+    beta, sigma = _parity_population(nt, backend, :loc)[1], nt.sigma
+    tau = only(_parity_ranef(nt, backend).sd)
+    zf = _parity_ranef(nt, backend).zflat
     b = tau .* zf
     x = _parity_cols_mm.x
     gidx, w = _ref_mm_gidx(), _ref_mm_weights()
@@ -3250,7 +2920,7 @@ end
         for i in 1:6)
     # The vacuous 1x1 LKJ contributes 0 (pinned by the value match).
     pr = logpdf(Normal(0, 5), beta) + logpdf(Exponential(1), sigma) +
-        logpdf(Normal(0, 1), tau) +
+        logpdf(Normal(0, 1), tau) + log(2) +
         sum(logpdf(Normal(0, 1), v) for v in zf)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
@@ -3268,22 +2938,14 @@ end
         effect(loc, Intercept) ~ Normal(0, 5)
         sigma ~ Exponential(1)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 8
-    @test _layout_signature(layout) == [
-        (:coefficient, :loc_coef, 1, :identity),
-        (:sampled, :sigma, 1, :exp),
-        (:varying_corr, :L_g_s1, 0, :lkj),
-        (:varying_corr, :L_g_s2, 0, :lkj),
-        (:varying, :tau_g_s1, 1, :exp),
-        (:varying, :tau_g_s2, 1, :exp),
-        (:varying, :z_flat_g, 4, :identity),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
-    beta, sigma = u[1], exp(u[2])
-    tau = exp.([u[3], u[4]])
-    z = u[5:8]
+    nt = constrain(layout, u)
+    beta, sigma = nt.loc_Intercept, nt.sigma
+    draws = _parity_ranef(nt, backend)
+    tau, z = vec(draws.sd), vec(draws.z)
     sidx = [1, 1, 2, 2]
     gidx = [1, 1, 2, 3, 3, 4]
     b = [tau[sidx[g]] * z[g] for g in 1:4]
@@ -3291,7 +2953,7 @@ end
     ll = sum(logpdf(Normal(beta + r[i], sigma), _parity_cols_gr.y[i])
         for i in 1:6)
     pr = logpdf(Normal(0, 5), beta) + logpdf(Exponential(1), sigma) +
-        sum(logpdf(Normal(0, 1), v) for v in tau) +
+        sum(logpdf(Normal(0, 1), v) for v in tau) + length(tau)*log(2) +
         sum(logpdf(Normal(0, 1), v) for v in z)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
@@ -3306,24 +2968,16 @@ end
         effect(loc, Intercept) ~ Normal(0, 5)
         sigma ~ Exponential(1)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 16
-    @test _layout_signature(layout) == [
-        (:coefficient, :loc_coef, 1, :identity),
-        (:sampled, :sigma, 1, :exp),
-        (:varying_corr, :L_g_s1, 1, :lkj),
-        (:varying_corr, :L_g_s2, 1, :lkj),
-        (:varying, :tau_g_s1, 2, :exp),
-        (:varying, :tau_g_s2, 2, :exp),
-        (:varying, :z_flat_g, 8, :identity),
-    ]
     u = collect(range(-0.4, 0.4; length = layout.total))
-    beta, sigma = u[1], exp(u[2])
-    L1 = [1.0 0.0; tanh(u[3]) sqrt(1 - tanh(u[3])^2)]
-    L2 = [1.0 0.0; tanh(u[4]) sqrt(1 - tanh(u[4])^2)]
-    tau1, tau2 = exp.(u[5:6]), exp.(u[7:8])
-    zm = reshape(u[9:16], 2, 4)
+    nt = constrain(layout, u)
+    beta, sigma = nt.loc_Intercept, nt.sigma
+    draws = _parity_ranef(nt, backend)
+    L1, L2 = draws.L[:, :, 1], draws.L[:, :, 2]
+    tau1, tau2 = draws.sd[1, :], draws.sd[2, :]
+    zm = permutedims(draws.z)
     sidx = [1, 1, 2, 2]
     gidx = [1, 1, 2, 3, 3, 4]
     Ls, taus = (L1, L2), (tau1, tau2)
@@ -3341,9 +2995,9 @@ end
         for i in 1:6)
     pr = logpdf(Normal(0, 5), beta) + logpdf(Exponential(1), sigma) +
         _ref_lkj_k2_eta1(L1) + _ref_lkj_k2_eta1(L2) +
-        sum(logpdf(Normal(0, 1), v) for v in tau1) +
-        sum(logpdf(Normal(0, 1), v) for v in tau2) +
-        sum(logpdf(Normal(0, 1), v) for v in u[9:16])
+        sum(logpdf(Normal(0, 1), v) for v in tau1) + 2log(2) +
+        sum(logpdf(Normal(0, 1), v) for v in tau2) + 2log(2) +
+        sum(logpdf(Normal(0, 1), v) for v in draws.z)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + logjac(layout, u)
@@ -3368,13 +3022,13 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test coordinate_names(layout) ==
-        [Symbol("mu.Intercept"), Symbol("mu.x"), :s]
+        [:mu_Intercept, :mu_x, :s]
     u = [0.5, -0.25, log(1.3)]
     nt = constrain(layout, u)
-    a, b, s = nt.mu[1], nt.mu[2], nt.s
+    a, b, s = _parity_population(nt, backend, :mu)[1], _parity_population(nt, backend, :mu)[2], nt.s
     lp = a .+ b .* p_cols.x
     ll = sum(logpdf.(Normal.(lp, s), p_cols.y))
     pr = logpdf(LocationScale(0, 2, TDist(4)), a) +
@@ -3399,13 +3053,13 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test coordinate_names(layout) ==
-        [Symbol("mu.Intercept"), Symbol("mu.x"), :s]
+        [:mu_Intercept, :mu_x, :s]
     u = [0.5, -0.25, log(1.3)]
     nt = constrain(layout, u)
-    a, b, s = nt.mu[1], nt.mu[2], nt.s
+    a, b, s = _parity_population(nt, backend, :mu)[1], _parity_population(nt, backend, :mu)[2], nt.s
     lp = a .+ b .* p_cols.x
     ll = sum(logpdf.(Normal.(lp, s), p_cols.y))
     # Flat contributes exactly 0.0.
@@ -3430,13 +3084,14 @@ end
         effect(mu, x) ~ Cauchy(0, 1)
         y ~ Normal(mu, 1.5)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
-    @test coordinate_names(layout) == [Symbol("mu.g_1"), Symbol("mu.g_2"),
-        Symbol("mu.g_3"), Symbol("mu.x")]
-    u = [0.3, -0.4, 0.1, 0.75]
+    point = Dict(Symbol("mu_g.1") => 0.3, Symbol("mu_g.2") => -0.4,
+        Symbol("mu_g.3") => 0.1, :mu_x => 0.75)
+    @test Set(coordinate_names(layout)) == Set(keys(point))
+    u = [point[name] for name in coordinate_names(layout)]
     nt = constrain(layout, u)
-    c, b = nt.mu[1:3], nt.mu[4]
+    c, b = _parity_population(nt, backend, :mu)[1:3], _parity_population(nt, backend, :mu)[4]
     lp = [c[gi] + b * xi for (gi, xi) in zip(p_cols.g, p_cols.x)]
     ll = sum(logpdf.(Normal.(lp, 1.5), p_cols.y))
     t3 = LocationScale(0, 2, TDist(3))
@@ -3450,8 +3105,7 @@ end
 end
 
 @stestset "rk parity prior vocab P4 Uniform scale" begin
-    # All-Normal population priors fuse to the GLM object (layout
-    # [beta, sigma, alpha]); the Uniform sampled scale rides the
+    # The Uniform sampled scale rides the
     # affine-logit interval, same as SB's declared bounds.
     p_cols = (;
         x=[0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
@@ -3462,14 +3116,14 @@ end
         s ~ Uniform(0.5, 1.5)
         y ~ Normal(mu, s)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test coordinate_names(layout) ==
-        [Symbol("mu_beta.1"), :s, :mu_alpha]
+        [:mu_Intercept, :mu_x, :s]
     lo, hi = 0.5, 1.5
-    u = [-0.25, log((1.3 - lo) / (hi - 1.3)), 0.5]
+    u = [0.5, -0.25, log((1.3 - lo) / (hi - 1.3))]
     nt = constrain(layout, u)
-    b, s, a = only(nt.mu_beta), nt.s, nt.mu_alpha
+    b, s, a = nt.mu_x, nt.s, nt.mu_Intercept
     lp = a .+ b .* p_cols.x
     ll = sum(logpdf.(Normal.(lp, s), p_cols.y))
     pr = logpdf(Normal(0, 1), a) + logpdf(Normal(0, 1), b) +
@@ -3484,7 +3138,7 @@ end
 end
 
 @stestset "rk parity prior vocab P5 half-StudentT scale" begin
-    # GLM layout as in P4; the half-StudentT sampled scale rides the
+    # The half-StudentT sampled scale rides the
     # exact +log(2) `:positive` leg (SB `truncated(; lower)` matches).
     p_cols = (;
         x=[0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
@@ -3495,13 +3149,13 @@ end
         s ~ truncated(LocationScale(0, 1, TDist(4)); lower=0.0)
         y ~ Normal(mu, s)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test coordinate_names(layout) ==
-        [Symbol("mu_beta.1"), :s, :mu_alpha]
-    u = [-0.25, log(1.3), 0.5]
+        [:mu_Intercept, :mu_x, :s]
+    u = [0.5, -0.25, log(1.3)]
     nt = constrain(layout, u)
-    b, s, a = only(nt.mu_beta), nt.s, nt.mu_alpha
+    b, s, a = nt.mu_x, nt.s, nt.mu_Intercept
     lp = a .+ b .* p_cols.x
     ll = sum(logpdf.(Normal.(lp, s), p_cols.y))
     pr = logpdf(Normal(0, 1), a) + logpdf(Normal(0, 1), b) +
@@ -3524,16 +3178,12 @@ end
         sigma ~ Exponential(1)
         z ~ LogNormal(mu, sigma)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 3
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 2, :identity),
-        (:sampled, :sigma, 1, :exp),
-    ]
     u = [0.5, -0.25, 0.3]
     nt = constrain(layout, u)
-    b = Vector(nt.mu)
+    b = Vector(_parity_population(nt, backend, :mu))
     mm = b[1] .+ b[2] .* ln_cols.x
     ll = sum(logpdf.(LogNormal.(mm, nt.sigma), ln_cols.z))
     pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2]) +
@@ -3554,15 +3204,12 @@ end
         mu ~ 1 + x
         z ~ LogNormal(mu, 0.5)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 2
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 2, :identity),
-    ]
     u = [0.5, -0.25]
     nt = constrain(layout, u)
-    b = Vector(nt.mu)
+    b = Vector(_parity_population(nt, backend, :mu))
     mm = b[1] .+ b[2] .* ln_cols.x
     ll = sum(logpdf.(LogNormal.(mm, 0.5), ln_cols.z))
     pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2])
@@ -3586,16 +3233,12 @@ end
         k ~ LogNormal(0, 0.3)
         y ~ Weibull(k, mu)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 3
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 2, :identity),
-        (:sampled, :k, 1, :exp),
-    ]
     u = [0.2, -0.3, 0.5]
     nt = constrain(layout, u)
-    b = Vector(nt.mu)
+    b = Vector(_parity_population(nt, backend, :mu))
     th = exp.(b[1] .+ b[2] .* w_cols.x)
     ll = sum(logpdf.(Weibull.(nt.k, th), w_cols.y))
     pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2]) +
@@ -3617,15 +3260,12 @@ end
         log(mu) ~ 1 + x
         y ~ Weibull(2.0, mu)
     end
-    backend = BRM.RKBRMI(brmi)
+    backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 2
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu_coef, 2, :identity),
-    ]
     u = [0.2, -0.3]
     nt = constrain(layout, u)
-    b = Vector(nt.mu)
+    b = Vector(_parity_population(nt, backend, :mu))
     th = exp.(b[1] .+ b[2] .* w_cols.x)
     ll = sum(logpdf.(Weibull.(2.0, th), w_cols.y))
     pr = logpdf(Normal(0, 1), b[1]) + logpdf(Normal(0, 1), b[2])

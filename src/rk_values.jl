@@ -108,6 +108,8 @@ function _rk_ast_value_bucket(bucket, draws, effects, taken, bindings)
             indices[col] = idx
         end
     end
+    gather_margin(col, margin) =
+        Expr(:call, :brm_ranef_column, draws, indices[col], margin)
     for (target, margins) in bucket.slices
         summands = Any[]
         for margin in margins
@@ -116,7 +118,7 @@ function _rk_ast_value_bucket(bucket, draws, effects, taken, bindings)
             elseif grouping.form === :mm
                 members = Any[]
                 for (j, col) in enumerate(grouping.columns)
-                    gather = Expr(:ref, draws, indices[col], margin)
+                    gather = gather_margin(col, margin)
                     grouping.weights === nothing ||
                         (gather = Expr(:call, :.*, grouping.weights[j], gather))
                     push!(members, gather)
@@ -129,7 +131,7 @@ function _rk_ast_value_bucket(bucket, draws, effects, taken, bindings)
                 end
                 result
             else
-                Expr(:ref, draws, indices[group], margin)
+                gather_margin(group, margin)
             end
             recipe = bucket.margins[margin].z
             if recipe.kind !== :ones

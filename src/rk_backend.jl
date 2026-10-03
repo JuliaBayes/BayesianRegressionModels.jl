@@ -430,17 +430,10 @@ Base.parent(x::RKBRMI) = x.parent
 structure_of(x::RKBRMI) = structure_of(parent(x))
 priors_of(x::RKBRMI) = priors_of(parent(x))
 
-# Thin-layer `levels(g)` order, mirrored exactly (sort of observed values;
-# `CategoricalValue`/non-`String` rows string-normalize, as in the thin
-# layer's `_grouping_levels`). Every position below (subset drops,
-# coefficient counts) is a position in THIS order.
+# Julia's declared level order, shared with the emitted `levels(g)` axes.
+# Categorical pools retain their order and unobserved declared levels.
 function _rk_grouping_levels(col::AbstractVector)
-    v = first(col)
-    if v isa CA.CategoricalValue ||
-            (v isa AbstractString && !isa(v, String))
-        return sort!(unique!(string.(col)))
-    end
-    return sort(unique(col))
+    collect(CA.levels(col))
 end
 
 function _rk_num_coefficients(plan::_RKStructuralPlan)
@@ -3484,37 +3477,7 @@ _rk_ranef_gather_label(target, id, group) =
 
 function _rk_ranef_group_column!(columns::Dict{Symbol,AbstractVector},
         taken::Set{Symbol}, gname::Symbol, raw::AbstractVector, what::String)
-    prefix = "RK backend"
-    raw isa CA.CategoricalVector || begin
-        columns[gname] = raw
-        return gname
-    end
-    # Categorical groupings bind factor-crossed strings (todo 14pgdwz/P1,
-    # DONE): the thin layer numbers them by bind-derived sort order (peer
-    # `_declared_codes`, RK >= fd1af39) — no outside-model codes, so the
-    # last REAL outside-model computation on the RK side is gone. SB
-    # numbers `CA.levels` order instead, so two shapes fail closed: a
-    # custom-ordered declaration would silently misnumber groups (fixed
-    # by the peer P2 declared-levels surface spelling,
-    # ReactiveKernels:brm todo 15a8se2), and distinct levels sharing one
-    # string form would collapse (same rule as the slope dummies below).
-    # Unobserved declared levels keep today's drop behavior on both
-    # sides (no regression, same P2).
-    crossed = _rk_factor_crossed(raw)
-    mask = .!ismissing.(raw)
-    obs_strs = Set(crossed[mask])
-    obs_lvls = Set(CA.levelcode.(raw)[mask])
-    length(obs_strs) == length(obs_lvls) || error(
-        "$prefix: $what grouping `$gname` has distinct levels with the " *
-        "same string form; the draws regime needs unambiguous levels")
-    sb_order = filter(lv -> lv in obs_strs, string.(CA.levels(raw)))
-    issorted(sb_order) || error(
-        "$prefix: $what grouping `$gname` declares custom-ordered " *
-        "levels ($(join(repr.(CA.levels(raw)), ", "))); the thin layer " *
-        "numbers groupings by sorted crossed strings — reorder the " *
-        "declaration to sorted order or await the peer declared-levels " *
-        "surface spelling (ReactiveKernels:brm P2 15a8se2)")
-    columns[gname] = crossed
+    columns[gname] = raw
     gname
 end
 
@@ -6907,8 +6870,6 @@ end
 # linear-predictor args (grouped kernels) and `ragged(...)` are out of panel v1.
 struct _RKKernelSpec
     result::Symbol
-    subject_count::Symbol            # bound-dims key for n subjects (kernel_nsub_<result>)
-    timepoint_count::Union{Nothing,Symbol} # bound-dims key for T (kernel_T_<result>), or nothing
     n_timepoints::Union{Nothing,Int} # T = common inner length of vector slices (nothing if none)
     slice_params::Vector{Symbol}     # cell do-block params, in order
     data_columns::Vector{Symbol}     # per-subject data columns, parallel to params
@@ -6918,18 +6879,6 @@ struct _RKKernelSpec
     obs_dist::Any                    # raw distribution Expr (classified later)
     collected::Any                   # final cell expression = per-subject result
     n_subjects::Int
-end
-
-# Plate dims the extension binds (`bind_data(..., dims)`): the subjects
-# key always, the timepoint key only when vector slices name one
-# (all-scalar plates leave both timepoint fields `nothing`).
-function _rk_kernel_bind_dims(kernel::_RKKernelSpec)
-    dims = Dict{Symbol,Int}()
-    dims[kernel.subject_count] = kernel.n_subjects
-    if kernel.timepoint_count !== nothing && kernel.n_timepoints !== nothing
-        dims[kernel.timepoint_count] = kernel.n_timepoints
-    end
-    dims
 end
 
 function _rk_kernel_spec(brmi::BRMI, result::Symbol, rhs)
@@ -7031,9 +6980,7 @@ function _rk_kernel_spec(brmi::BRMI, result::Symbol, rhs)
         "$prefix: kernel(...) `$result` cell must end with a collected result " *
         "expression (the per-subject value bound to `$result`)")
 
-    _RKKernelSpec(result, Symbol("kernel_nsub_", result),
-        isnothing(n_timepoints) ? nothing : Symbol("kernel_T_", result),
-        n_timepoints, params, data_columns, slice_kinds,
+    _RKKernelSpec(result, n_timepoints, params, data_columns, slice_kinds,
         assignments, obs.response, obs.dist, collected, nsub)
 end
 

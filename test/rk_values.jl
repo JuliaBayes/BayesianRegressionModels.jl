@@ -10,6 +10,7 @@ using Statistics: mean
 using LogExpFunctions: logit
 include(joinpath(@__DIR__, "testset_filter.jl"))
 const BRM = BayesianRegressionModels
+include(joinpath(@__DIR__, "rk_source_roundtrip.jl"))
 
 function value_query(backend, name, u)
     ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
@@ -18,6 +19,7 @@ function value_query(backend, name, u)
 end
 
 function check_value_gradient(backend)
+    check_rk_source_roundtrip(backend)
     problem = rk_logdensity_problem(backend; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
     N = dimension(problem)
     u = N <= 1 ? fill(0.13, N) : collect(range(-0.18, 0.22; length=N))
@@ -180,6 +182,55 @@ end
 end
 
 read_rows(value, rows) = value[rows]
+
+@stestset "ordinary AR and DAR arrays on a different observation axis" begin
+    df = (; t=collect(1.0:5.0), rows=[5, 2, 4], y=[0.4, -0.2, 0.7])
+    saved = deepcopy(df)
+    for kind in (:ar, :dar)
+        brmi = kind === :ar ? (@brm df begin
+            mu ~ 1 + ar(t; p=1)
+            reads = read_rows(mu, rows)
+            y ~ Normal(reads, 1)
+        end) : (@brm df begin
+            mu ~ 1 + dar(t)
+            reads = read_rows(mu, rows)
+            y ~ Normal(reads, 1)
+        end)
+        backend = RKBRMI(brmi)
+        u = check_value_gradient(backend)
+        nt = constrain(backend.model.layout, u)
+        path = zeros(5)
+        prior, jac = if kind === :ar
+            z = nt._ppl_scan_z_ar_mu_t
+            path[1] = z[1]
+            for i in 2:5
+                path[i] = tanh(nt.phi_raw_ar_mu_t) * path[i - 1] + z[i]
+            end
+            path .*= nt.mu_ar_mu_t
+            @test length(u) == 8
+            (logpdf(Normal(), nt.mu_Intercept) + logpdf(Normal(), nt.mu_ar_mu_t) +
+                logpdf(Normal(), nt.phi_raw_ar_mu_t) + sum(logpdf.(Normal(), z)), 0.0)
+        else
+            z = nt._ppl_scan_z_dar_mu_t_level
+            increment = 0.0
+            for i in 2:5
+                increment = nt.dar_mu_t_beta * increment + nt.dar_mu_t_sigma * z[i - 1]
+                path[i] = path[i - 1] + increment
+            end
+            @test length(u) == 7
+            (logpdf(Normal(), nt.mu_Intercept) +
+                logpdf(truncated(Normal(0.5, 0.2), 0, 1), nt.dar_mu_t_beta) +
+                logpdf(truncated(Normal(0, 0.2), 0, Inf), nt.dar_mu_t_sigma) +
+                sum(logpdf.(Normal(), z)),
+                log(nt.dar_mu_t_beta) + log1p(-nt.dar_mu_t_beta) + log(nt.dar_mu_t_sigma))
+        end
+        likelihood = sum(logpdf.(Normal.(nt.mu_Intercept .+ path[df.rows], 1), df.y))
+        @test value_query(backend, :likelihood, u) ≈ likelihood
+        @test value_query(backend, :prior, u) ≈ prior
+        @test value_query(backend, :sampler, u) ≈ likelihood + prior + jac
+        @test isequal(df, saved)
+    end
+end
 
 @stestset "ordinary smooth arrays on a different observation axis" begin
     df = (; x=collect(range(-1.3, 1.5; length=12)), z=sin.((1:12) ./ 2),

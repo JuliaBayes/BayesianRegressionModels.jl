@@ -4694,20 +4694,19 @@ end
     @test zb.margins[2].z.kind === :column
 end
 
-@stestset "ranef custom-order categorical grouping fails closed" begin
+@stestset "ranef categorical grouping preserves declared pool order" begin
     catdf = (; df...,
         g=categorical(["b", "b", "a", "a", "c", "c"]; levels=["b", "a", "c"]))
-    err = rk_plan_error(@brm catdf begin
+    plan = BRM._brm_rk_plan(@brm catdf begin
         mu ~ 1 + x + (1 + x | ID | g)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    @test err isa ErrorException
-    @test occursin("custom-ordered", err.msg)
-    @test occursin("15a8se2", err.msg)
+    @test BRM._rk_grouping_levels(plan.columns[:g]) == ["b", "a", "c"]
+    @test plan.columns[:g] === catdf.g
 end
 
-@stestset "ranef categorical grouping binds crossed strings" begin
+@stestset "ranef categorical grouping retains observed labels" begin
     catdf = (; df...,
         g=categorical(["b", "b", "a", "a", "c", "c"]))
     plan = BRM._brm_rk_plan(@brm catdf begin
@@ -4718,6 +4717,7 @@ end
     bucket = only(plan.ranef_buckets)
     @test bucket.group === :g
     @test plan.columns[:g] == ["b", "b", "a", "a", "c", "c"]
+    @test plan.columns[:g] === catdf.g
     @test !haskey(plan.columns, :g_idx)
     @test bucket.label === :bucket_ID_g
     gather = only(plan.predictors).terms[end]
@@ -4935,8 +4935,8 @@ end
             s ~ Exponential(1)
             y ~ Normal(mu, s)
         end)
-    @test all(prior == :(Exponential(0.3))
-        for prior in only(explicit_prior_plan.buckets).sd_priors)
+    @test all(BRM.getf(prior) === Exponential && BRM.getargs(prior) == (0.3,)
+        for prior in only(explicit_prior_plan.ranef_buckets).sd_priors)
     # Duplicate blocks mirror SB's rejection.
     rk_throws_admission("repeats") do
         BRM._brm_rk_plan(@brm df begin
@@ -5030,16 +5030,18 @@ end
               stmts)
     @test any(s -> Meta.isexpr(s, :call) && s.args[1] === :~ && s.args[2] === :b0,
               stmts)
-    plate_stmt = last(stmts)
-    @test Meta.isexpr(plate_stmt, :call) && plate_stmt.args[1] === :~ &&
-        plate_stmt.args[2] === :pred
+    source = sprint(Base.show_unquoted, prog.main)
+    @test occursin("@plate", source)
+    @test occursin("obs .~ Normal.", source)
+    @test !occursin("kernel_nsub_pred", source)
+    @test !occursin("kernel_T_pred", source)
 
     # grouped (LP-arg) kernel still fails closed via _brm_rk_plan
     gbrmi = @brm df begin
         sigma ~ Exponential(1)
-        log_CL ~ 1 + (1 | pk | g)
-        pred ~ kernel(x, log_CL) do xs, lCL
-            mu = exp(lCL) .* xs
+        log_slope ~ 1 + (1 | shared | g)
+        pred ~ kernel(x, log_slope) do xs, lslope
+            mu = exp(lslope) .* xs
             yy ~ Normal(mu, sigma)
             mu
         end
@@ -5073,7 +5075,6 @@ end
     @test result === :pred
     spec = BRM._rk_kernel_spec(brmi, result, rhs)
     @test spec.result === :pred
-    @test spec.subject_count === :kernel_nsub_pred
     @test spec.n_subjects == 2
     @test spec.slice_params == [:ts, :d, :yy]
     @test spec.data_columns == [:t, :dose, :obs]
@@ -5083,28 +5084,20 @@ end
     # per-slice kind (vector T-blocked vs scalar-per-subject) + T
     @test spec.slice_kinds == [:vector, :scalar, :vector]  # t, dose, obs
     @test spec.n_timepoints == 3
-    @test spec.timepoint_count === :kernel_T_pred
 
-    # AST emission: `pred ~ plate(t, dose, obs; subjects=kernel_nsub_pred) do ...`
+    # The source states its axis, slices and collected arrays directly.
     ast = BRM._rk_emit_kernel_ast(spec)
-    @test Meta.isexpr(ast, :call) && ast.args[1] === :~ && ast.args[2] === :pred
-    do_expr = ast.args[3]
-    @test Meta.isexpr(do_expr, :do)
-    plate_call = do_expr.args[1]
-    @test Meta.isexpr(plate_call, :call) && plate_call.args[1] === :plate
-    @test plate_call.args[2] == Expr(:parameters,
-        Expr(:kw, :subjects, :kernel_nsub_pred))
-    @test collect(plate_call.args[3:end]) == [:t, :dose, :obs]
-    lam = do_expr.args[2]
-    @test lam.args[1] == Expr(:tuple, :ts, :d, :yy)
-    cellbody = filter(s -> !(s isa LineNumberNode), lam.args[2].args)
-    @test any(s -> Meta.isexpr(s, :(=)) && s.args[1] === :mu, cellbody)
-    # vector obs is emitted DOTTED: `yy .~ Normal.(mu, sigma)`
-    obs_stmt = only(s for s in cellbody
-                    if Meta.isexpr(s, :call) && s.args[1] === :.~)
-    @test obs_stmt.args[2] === :yy
-    @test Meta.isexpr(obs_stmt.args[3], :.) && obs_stmt.args[3].args[1] === :Normal
-    @test cellbody[end] === :mu
+    @test Meta.isexpr(ast, :block)
+    source = sprint(Base.show_unquoted, ast)
+    @test occursin("pred_subjects = 1:div(length(t), 3)", source)
+    @test occursin("@plate", source)
+    @test occursin("ts = brm_panel_slice(t, 3, brm_subject)", source)
+    @test occursin("d = dose[brm_subject]", source)
+    @test occursin("pred[brm_subject, 1:3] = mu", source)
+    @test occursin("vec(permutedims(pred_location))", source)
+    @test occursin("obs .~ Normal.(pred_location_flat, pred_scale_flat)", source)
+    @test !occursin("kernel_nsub_pred", source)
+    @test !occursin("kernel_T_pred", source)
 
     # non-Gaussian in-cell family is a follow-up (fail closed)
     poisson_brmi = @brm kdf begin
@@ -5121,9 +5114,9 @@ end
     # a linear-predictor (grouped) arg is out of panel mode
     gbrmi = @brm df begin
         sigma ~ Exponential(1)
-        log_CL ~ 1 + (1 | pk | g)
-        pred ~ kernel(x, log_CL) do xs, lCL
-            mu = exp(lCL) .* xs
+        log_slope ~ 1 + (1 | shared | g)
+        pred ~ kernel(x, log_slope) do xs, lslope
+            mu = exp(lslope) .* xs
             yy = mu
             mu
         end
@@ -5145,10 +5138,7 @@ end
     rresult, rrhs = only(BRM._rk_kernel_ops(rbrmi))
     @test_throws "varying timepoint counts" BRM._rk_kernel_spec(rbrmi, rresult, rrhs)
 
-    # bind dims for the extension: subjects key always, timepoint key only
-    # when vector slices name one (all-scalar plates omit it).
-    @test BRM._rk_kernel_bind_dims(spec) ==
-        Dict(:kernel_nsub_pred => 2, :kernel_T_pred => 3)
+    # Scalar cells state the ordinary subject axis without a time axis.
     scalar_brmi = @brm (; dose=[10.0, 20.0], obs=[0.1, 0.2]) begin
         pred ~ kernel(dose, obs) do dd, yy
             mu = dd .* 0.1
@@ -5158,7 +5148,9 @@ end
     end
     sresult, srhs = only(BRM._rk_kernel_ops(scalar_brmi))
     scalar_spec = BRM._rk_kernel_spec(scalar_brmi, sresult, srhs)
-    @test BRM._rk_kernel_bind_dims(scalar_spec) == Dict(:kernel_nsub_pred => 2)
+    scalar_source = sprint(Base.show_unquoted, BRM._rk_emit_kernel_ast(scalar_spec))
+    @test occursin("pred_subjects = 1:length(dose)", scalar_source)
+    @test occursin("pred[brm_subject] = mu", scalar_source)
 end
 
 @stestset "mixture plan shapes" begin

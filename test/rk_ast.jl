@@ -594,7 +594,9 @@ strip_source_lines(x::Expr) = Expr(x.head,
     @test strip_source_lines(emitted.main) == strip_source_lines(:(begin
         mu_Intercept ~ Normal(0.0, 1.0)
         mu_x ~ Normal(0.0, 1.0)
-        mu = mu_Intercept .* ones(length(x)) .+ mu_x .* x
+        mu_X = hcat(ones(length(x)), x)
+        mu_coefficients = [mu_Intercept, mu_x]
+        mu = mu_X * mu_coefficients
         sigma ~ Exponential(1.0)
         y .~ Normal.(mu, sigma)
     end))

@@ -92,9 +92,8 @@ dimension `k` (`k > 2`, at least `k` distinct values of `x`).
 - `Z` (`n × (k - 2)`): the penalized range space, whitened so that an iid
   `Normal(0, sd)` coefficient prior is the smoothing penalty.
 
-These are the columns the built-in `spline_basis(:id, x; k)` binds as
-`<id>_Xnull_1` and `<id>_Zpen_j`. Use them with
-[`penalized_smooth`](@ref).
+Use these matrices with BRM's `rkppl_model(:penalized_smooth)` or
+explicit coefficient declarations and ordinary matrix multiplication.
 """
 function tps_basis(x::AbstractVector{<:Real}; k::Integer = 10)
     X, Z = _rk_apply_spline(_rk_fit_spline(x; k = Int(k)), x)
@@ -160,8 +159,8 @@ For two margins:
   null, null × range), of widths `(k1-2)(k2-2)`, `2(k1-2)` and `2(k2-2)`,
   each penalized by its own smoothing sd.
 
-For two margins these are the columns the built-in
-`spline_basis(:id, x, z; k)` binds. Use them with [`t2_smooth`](@ref).
+Use these matrices with BRM's `rkppl_model(:t2_smooth)` or explicit
+coefficient declarations, giving each penalized block its own scale.
 """
 function t2_basis(axes_::AbstractVector{<:Real}...; k = 5)
     isempty(axes_) && throw(ArgumentError("t2_basis takes at least one margin"))
@@ -238,7 +237,7 @@ function hsgp_basis(axes_::AbstractVector{<:Real}...; k = 20, c = 1.5,
             fits[j] = ((lo + hi) / 2, (hi - lo) / 2)
         end
     end
-    # Per-axis sines (SB `_brm_apply_hsgp`, the built-in's in-graph form):
+    # Per-axis sines, shared with SB's `_brm_apply_hsgp` preparation:
     # `inv(sqrt(L)) * sin(sqrt(lambda_k) * (x - mu + L))`.
     cols = map(1:d) do j
         mu, L = fits[j]
