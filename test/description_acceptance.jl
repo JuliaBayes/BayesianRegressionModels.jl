@@ -8,6 +8,34 @@ if !isdefined(@__MODULE__,:DESCRIPTION_DATA)
         y=[0.4,0.1,1.1,1.7,2.4,2.8],z=[1.4,1.1,2.1,2.7,3.4,3.8])
 end
 
+@testset "completed products preserve canonical model semantics" begin
+    data=(;x=Union{Missing,Float64}[.4,missing,-.8,1.3,missing],
+        z=[1.1,.6,1.4,.5,.9],y=[.2,-.3,.7,.1,-.6])
+    products=@brm data begin
+        mi(x) ~ Normal(0,1)
+        squared=x*x
+        mu ~ 1+x*z+squared
+        y ~ Normal(mu,1)
+    end
+    interactions=@brm data begin
+        mi(x) ~ Normal(0,1)
+        squared=x*x
+        mu ~ 1+x&z+squared
+        y ~ Normal(mu,1)
+    end
+    for model in (products,interactions)
+        sb=SBBRMI(model;mod=@__MODULE__,total_groups=())
+        before=stan_code(sb)
+        r=brm_description(sb)
+        @test r.complete
+        @test StanBlocks.stanc_check(before;warn_pedantic=false).ok
+        @test stan_code(sb)==before
+        @test any(e->startswith(e,"\\mathrm{squared}=") && occursin("\\mathrm{x}",e),r.equations)
+        @test any(e->startswith(e,"\\mathrm{mu}=") && occursin("\\mathrm{x}",e) &&
+            occursin("\\mathrm{z}",e) && occursin("\\mathrm{squared}",e),r.equations)
+    end
+end
+
 @testset "producer helper calls and affine Student-t scale" begin
     m=@brm DESCRIPTION_DATA begin
         mu ~ 1 + mo(g) + hsgp(x;k=3)

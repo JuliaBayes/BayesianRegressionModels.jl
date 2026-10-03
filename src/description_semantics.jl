@@ -115,6 +115,18 @@ function _brmd_included_model(env,model,kwargs,id,path)
     end
     subenv=merge(env,(;mod=model.mod,bindings=Tuple(bindings),included_path=path))
     body=model.model
+    if body isa Expr && body.head===:block
+        supplied=Set(b.name for b in bindings if b.role===:alias)
+        # Fixed declarations are defaults when the included call supplies
+        # that name. Sampling statements still contribute their conditioned
+        # density and must remain in the semantic body.
+        statements=filter(body.args) do authored
+            stmt=_brmd_documented(authored)
+            !(stmt isa Expr && stmt.head===:(=) &&
+                first(stmt.args) isa Symbol && first(stmt.args) in supplied)
+        end
+        body=Expr(:block,statements...)
+    end
     # Preserve authored fixed/deterministic bindings without evaluating code.
     # Literal assignments expose their value; composed RHSs expose the same
     # public semantic representation used by ordinary arguments.

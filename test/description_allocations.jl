@@ -1,5 +1,6 @@
 using Test, BayesianRegressionModels, Distributions
 import StanBlocks
+import Markdown
 
 const ALLOCATION_DATA=(;x=[-1.,0.,1.,2.,3.,4.],g=[1,1,2,2,3,3],y=[.2,.3,.5,.6,.9,1.1])
 @testset "R2D2 allocations and unsupported Horseshoe retain actual priors" begin
@@ -117,4 +118,8 @@ end
     @test pr.complete
     @test any(e->occursin("I_k(a)",e),pr.equations)
     @test any(e->occursin("/4.0",e),pr.equations)
+    for result in (r,pr)
+        axis_prose=only(filter(p->occursin("declared axes:",p),result.prose))
+        @test occursin(raw"$\mathrm{x}$",Markdown.latex(Markdown.parse(axis_prose)))
+    end
 end

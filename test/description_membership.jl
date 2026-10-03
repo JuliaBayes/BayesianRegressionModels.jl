@@ -1,4 +1,5 @@
 using Test, BayesianRegressionModels, Distributions
+import Markdown
 @testset "weighted pooled multi-membership axes" begin
     data=(;g1=["a","a","b"],g2=["b","c","c"],
         w1=[2.,1.,0.],w2=[1.,1.,3.],y=[.2,.5,.7])
@@ -14,6 +15,8 @@ using Test, BayesianRegressionModels, Distributions
     @test block.keywords.n_groups==3
     @test block.keywords.group==(:g1,:g2)
     @test block.keywords.margins==((predictor=:mu,coefficient=:Intercept),)
+    weights_prose=only(filter(p->occursin("Declared weight inputs:",p),r.prose))
+    @test occursin(raw"$\left[",Markdown.latex(Markdown.parse(weights_prose)))
     raw=@brm data begin
         mu ~ 1+(1|mm(g1,g2;weights=(w1,w2),normalize=false))
         y ~ Normal(mu,1.0)

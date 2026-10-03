@@ -28,6 +28,55 @@ end
 end
 const nested_term=DescriptionNestedBinding.nested_term
 
+module DescriptionKeywordDefault
+using BayesianRegressionModels, StanBlocks
+function default_term end
+const cell=@slic begin
+    "Number of functions"
+    n_functions=8
+    offsets::vector[n_functions] ~ std_normal()
+    dimension=n_functions+1
+    return offsets[1]+input+dimension
+end
+function BayesianRegressionModels._sb_submodel_rhs!(stmts,data,target::Symbol,::typeof(default_term),rhs)
+    input=only(getargs(rhs)); key=name(input)
+    data[key]=collect(parent(parent(input)))
+    count=get(getkwargs(rhs),:n_functions,8)
+    push!(stmts,Expr(:call,:~,target,Expr(:call,cell,Expr(:parameters,
+        Expr(:kw,:input,key),Expr(:kw,:n_functions,count)))))
+    :done
+end
+end
+const default_term=DescriptionKeywordDefault.default_term
+
+@testset "supplied included keyword overrides documented fixed default" begin
+    data=(;input=[.2,.5,1.2],y=[.3,.6,1.1])
+    model=@brm data begin
+        mu ~ default_term(input;n_functions=3)
+        y ~ Normal(mu,1.0)
+    end
+    sb=SBBRMI(model;mod=@__MODULE__,total_groups=())
+    # Inventory/render without a scientific hook must return precise gaps,
+    # rather than throwing on a duplicate fixed/default name.
+    gap=brm_description(sb)
+    @test !gap.complete
+    @test occursin("Incomplete",brm_description_markdown(gap))
+    hook=c->begin
+        @test brm_description_binding(c,:n_functions).value==3
+        BRMDescriptionFragment(covers=(c.id,))
+    end
+    r=brm_description(sb;hooks=(default_term=>hook,))
+    @test r.complete
+    cell=only(filter(c->c.kind===:submodel,brm_description_components(r)))
+    @test count(b->b.name===:n_functions,cell.bindings)==1
+    @test brm_description_math(cell,BRMDescriptionReference(:n_functions,:local))=="3"
+    prior=brm_description_prior(cell,only(brm_description_binding(cell,:offsets).prior_ids))
+    @test prior.source.dimension==(3,)
+    @test any(e->startswith(e,"\\mathrm{dimension}=") && occursin("3 + 1",e),r.equations)
+    @test !any(e->startswith(e,"\\mathrm{n\\_functions}="),r.equations)
+    @test StanBlocks.stanc_check(stan_code(sb);warn_pedantic=false).ok
+end
+
 @testset "nested authored bindings and identical formal aliases" begin
     data=(;input=[0.2,0.5,1.2],y=[0.3,0.6,1.1])
     m=@brm data begin

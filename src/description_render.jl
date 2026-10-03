@@ -303,7 +303,7 @@ function _brmd_builtin_call(::typeof(mm),c)
     n=length(c.arguments)
     definition=isnothing(weights) ? (normalized ? "\\widetilde w_{jm}=1/"*string(n) : "\\widetilde w_{jm}=1") :
         normalized ? "\\widetilde w_{jm}=w_{jm}/\\sum_h w_{jh}" : "\\widetilde w_{jm}=w_{jm}"
-    BRMDescriptionFragment(prose=("Multi-membership effects use one pooled fitted group-level set across $(join((a.name for a in c.arguments),", ")). Each row sums its membership-specific group deviations with $(normalized ? "row-normalized" : "unscaled") weights. Declared weight inputs: $(isnothing(weights) ? "equal weights" : brm_description_math(c,weights)).",),
+    BRMDescriptionFragment(prose=("Multi-membership effects use one pooled fitted group-level set across $(join((a.name for a in c.arguments),", ")). Each row sums its membership-specific group deviations with $(normalized ? "row-normalized" : "unscaled") weights. Declared weight inputs: $(isnothing(weights) ? "equal weights" : "\$"*brm_description_math(c,weights)*"\$").",),
         equations=(definition,),covers=(c.id,))
 end
 function _brmd_builtin_call(::Type{<:LocationScale},c)
@@ -404,7 +404,8 @@ end
 function _brmd_gp_fragment(c,approximate)
     covariance=get(c.keywords,:cov,:exp_quad)
     covname=covariance isa BRMDescriptionReference ? covariance.name : covariance
-    prose=String["The $(approximate ? "Hilbert-space approximation to a Gaussian process" : "Gaussian process") uses covariance $(covname). Here τ is its marginal SD, ℓ is its length scale, and x denotes its declared axes: $(join((brm_description_math(c,a) for a in c.arguments),", ")). Their effective priors are listed separately."]
+    axes=join(("\$"*brm_description_math(c,a)*"\$" for a in c.arguments),", ")
+    prose=String["The $(approximate ? "Hilbert-space approximation to a Gaussian process" : "Gaussian process") uses covariance $(covname). Here τ is its marginal SD, ℓ is its length scale, and x denotes its declared axes: $(axes). Their effective priors are listed separately."]
     equations=String[]
     if !approximate
         jitter=brm_description_math(c,get(c.keywords,:jitter,1e-9))

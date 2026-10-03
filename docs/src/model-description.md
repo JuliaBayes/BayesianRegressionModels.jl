@@ -128,7 +128,9 @@ to their kernel owner (for example, `pred.state`) unless notation overrides them
 Authored literal assignments have `role=:constant` and expose their value;
 composed assignments have `role=:deterministic` and expose a public expression.
 This includes assignments preceded by documentation strings in an included
-SlicModel. Supplied data arguments retain their prepared bindings.
+SlicModel. Supplied data arguments retain their prepared bindings. A supplied
+keyword wins over an authored fixed default in that same included scope,
+including documented defaults; nested scopes remain distinct.
 References to deterministic quantities render as symbols; render the binding's
 `value` explicitly to expand its defining expression.
 Actual higher-order callable arguments retain their identity and render through
@@ -152,6 +154,7 @@ table maps each number to its full logical ID and ordered margins; predictor
 designs and covariance factors use that same number. Logical IDs and prior
 anchors keep their exact identities. Prior table math shows the distribution
 and support; the neighboring logical-parameter cell names the parameter.
+GP axis and multiple-membership weight references use inline math in prose.
 
 Included scientific SlicModels expose their parameter declarations,
 deterministic expressions and nested calls as children. A top-level caption
