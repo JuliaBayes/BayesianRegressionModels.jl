@@ -4500,6 +4500,22 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
     elseif e.kind === :zscale || e.kind === :standardize ||
            e.kind === :center || e.kind === :protect
         replay_and_bind(_sb_rematerialize_vec(e.raw_ref, df), :primary => key)
+    elseif e.kind === :missing_response
+        plan = _brm_missing_response_plan(e.raw_ref, _sb_df_column(df, e.raw_ref);
+                                          prefix="sbimpl: reprocess")
+        fitted = e.const_
+        if freeze && (plan.observed_indices != fitted.observed_indices ||
+                      plan.missing_indices != fitted.missing_indices)
+            throw(ArgumentError("sbimpl: reprocess: `mi($(e.raw_ref))` needs the " *
+                "same fitted missing-row positions when freeze_constants=true; " *
+                "reordering or changing the mask would reassign fitted missing " *
+                "coordinates. Rebuild for a new fit or use freeze_constants=false."))
+        end
+        new_data[key] = plan.observed_values
+        new_data[fitted.observed_key] = plan.observed_indices
+        new_data[fitted.missing_key] = plan.missing_indices
+        union!(handled, (fitted.observed_key, fitted.missing_key))
+        new_preproc[key] = _sb_missing_preproc(plan, fitted.observed_key, fitted.missing_key)
     elseif e.kind === :interaction
         left_key, right_key = e.raw_ref
         haskey(new_data, left_key) || error(
@@ -6777,6 +6793,7 @@ function _sb_emit_mi!(stmts, data, key, lhs::ExprColumn, rhs)
     data[obs_key] = plan.observed_values
     data[Jobs_key] = plan.observed_indices
     data[Jmis_key] = plan.missing_indices
+    _sb_record_preproc!(data, obs_key, _sb_missing_preproc(plan, Jobs_key, Jmis_key))
     call_kwargs = Expr(:parameters,
         Expr(:kw, :y_obs, obs_key),
         Expr(:kw, :Jobs, Jobs_key),
@@ -6785,6 +6802,11 @@ function _sb_emit_mi!(stmts, data, key, lhs::ExprColumn, rhs)
     push!(stmts, Expr(:call, :~, inner_name,
                      Expr(:call, submodel, call_kwargs)))
 end
+
+_sb_missing_preproc(plan, observed_key, missing_key) = PreprocEntry(
+    :missing_response,
+    (; observed_indices=copy(plan.observed_indices), missing_indices=copy(plan.missing_indices),
+       observed_key, missing_key), plan.source, true)
 
 # Map a Julia function (typically the result of `InverseFunctions.inverse(...)`
 # for a link transform) to the Stan-side function name. Stan ships
