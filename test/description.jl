@@ -30,6 +30,32 @@ end
 const curve=DescriptionScientificComponent.curve
 const toy_term=DescriptionScientificComponent.toy_term
 
+@testset "canonical variadic products retain scientific quantities" begin
+    model=@brm DESCRIPTION_DATA begin
+        b ~ Normal(0,1)
+        r ~ Uniform(-1,1)
+        s ~ Exponential(1)
+        u ~ Exponential(1)
+        z ~ Normal(0,1)
+        mu = b+r*(s/u)*z*x
+        y ~ Normal(mu,1)
+    end
+    sb=SBBRMI(model;mod=@__MODULE__,total_groups=())
+    code=stan_code(sb); frozen=deepcopy(sb.data)
+    @test StanBlocks.stanc_check(code;warn_pedantic=false).ok
+    result=brm_description(sb)
+    @test result.complete
+    assignment=only(filter(c->c.kind===:assignment && c.provenance.owner===:mu,result.components))
+    product=only(filter(c->c.callable===(*) && length(c.arguments)==4,brm_description_components(assignment)))
+    @test brm_description_math(product,product.arguments[1])=="\\mathrm{r}"
+    @test brm_description_math(product,product.arguments[3])=="\\mathrm{z}"
+    @test brm_description_math(product,product.arguments[4])=="\\mathrm{x}"
+    @test Set(p.id for p in result.priors)==Set((:parameter,k) for k in (:b,:r,:s,:u,:z))
+    @test any(e->occursin("\\frac{\\mathrm{s}}{\\mathrm{u}}",e) &&
+        occursin("\\mathrm{r}",e) && occursin("\\mathrm{z}",e) && occursin("\\mathrm{x}",e),result.equations)
+    @test stan_code(sb)==code && isequal(sb.data,frozen)
+end
+
 @testset "public reference-valued keywords terminate alias cycles" begin
     data=merge(DESCRIPTION_DATA,(;input=DESCRIPTION_DATA.x))
     m=@brm data begin
