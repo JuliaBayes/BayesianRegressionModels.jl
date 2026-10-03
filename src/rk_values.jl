@@ -35,7 +35,8 @@ function _rk_ast_value_bucket(bucket, draws, effects, taken, bindings)
     group = first(grouping.columns)
     stmts = Expr[]
     if grouping.form === :mm
-        group = bucket.group
+        group = _rk_ast_fresh_name(string(draws, "_groups"), taken)
+        push!(stmts, Expr(:(=), group, Expr(:call, :vcat, grouping.columns...)))
     end
     tau = _rk_ast_fresh_name(string(draws, "_sd"), taken)
     z = _rk_ast_fresh_name(string(draws, "_z"), taken)
@@ -263,11 +264,6 @@ function _brm_rk_value_plan(brmi, program, observations)
     # Regression columns each keep their own row axis. The PPL binder checks
     # their consumers; neither a subject nor a secondary axis is resized to y.
     value_columns = Dict{Symbol,Any}(columns)
-    for bucket in components.buckets
-        bucket.grouping.form === :mm || continue
-        value_columns[bucket.group] = vcat(
-            (columns[name] for name in bucket.grouping.columns)...)
-    end
     for key in referenced
         haskey(context.data, key) || continue
         haskey(value_columns, key) || (value_columns[key] = context.data[key])
