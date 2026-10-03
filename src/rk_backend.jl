@@ -7588,7 +7588,7 @@ function _brm_rk_plan(brmi::BRMI)
             error("$prefix: internal: `mi()` packed columns for " *
                   "response `$(spec.response)` does not retain the full row axis")
     end
-    statistical_inputs = Set(t.options.prepared_data for p in predictor_specs
+    statistical_inputs = Set{Symbol}(t.options.prepared_data for p in predictor_specs
         for t in p.terms if t.kind === :structured)
     _rk_gate_crossed_columns!(columns, n_obs, mi_packed; statistical_inputs)
     _rk_gate_trials_values!(response_specs, columns, n_obs)
