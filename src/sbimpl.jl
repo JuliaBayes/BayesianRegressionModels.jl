@@ -13586,6 +13586,12 @@ _sb_scalar_expr(x::ExprColumn, data) = begin
     op = f === (*) ? Symbol(".*") :
          f === (/) ? Symbol("./") :
          f
+    # Julia parses a flat product as one variadic call. StanBlocks' dotted
+    # arithmetic is binary, so retain the original operand order in a left fold.
+    if f === (*) && isempty(getkwargs(x)) && length(getargs(x)) > 2
+        args = map(a -> _sb_scalar_expr(a, data), getargs(x))
+        return foldl((left, right) -> Expr(:call, op, left, right), args)
+    end
     call = Expr(:call, op, (_sb_scalar_expr(a, data) for a in getargs(x))...)
     isempty(getkwargs(x)) || insert!(call.args, 2,
         Expr(:parameters, (Expr(:kw, key, _sb_scalar_expr(value, data))
