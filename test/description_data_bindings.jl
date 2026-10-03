@@ -8,7 +8,9 @@ function prepared_term end
 const captured_mix=opaque_mix
 const cell=@slic begin
     offset ~ normal(anchor,1.0)
-    return captured_mix(log_input .+ offset,mask,observed)
+    largest=max(mask)
+    n_input=dims(log_input)[1]
+    return captured_mix(log_input .+ offset .+ largest .+ n_input,mask,observed)
 end
 function BayesianRegressionModels._sb_submodel_rhs!(stmts,data,target::Symbol,::typeof(prepared_term),rhs)
     input,observed=getargs(rhs)
@@ -52,9 +54,13 @@ const prepared_term=DescriptionPreparedInputs.prepared_term
     opaque=only(filter(c->c.callable===DescriptionPreparedInputs.opaque_mix,brm_description_components(r)))
     @test brm_description_math(opaque,opaque.arguments[2])==brm_description_math(cell,mask)
     @test brm_description_math(opaque,opaque.arguments[3])=="\\mathrm{observed}"
-    @test length(brm_description_math(opaque,opaque.arguments[1]))<120
+    @test length(brm_description_math(opaque,opaque.arguments[1]))<220
     @test !occursin("\\left[",brm_description_math(opaque,opaque.arguments[2]))
     @test brm_description_math(cell,(0.5,1.5))=="\\left[0.5, 1.5\\right]"
+    @test any(c->c.callable===StanBlocks.stan.builtin.max,brm_description_components(r))
+    @test any(e->startswith(e,"\\mathrm{largest}=") && occursin("\\operatorname{max}",e),r.equations)
+    @test any(c->c.callable===StanBlocks.stan.builtin.dims,brm_description_components(r))
+    @test any(e->startswith(e,"\\mathrm{n\\_input}=") && occursin("\\operatorname{shape}",e) && endswith(e,"}_{1}"),r.equations)
     # Exercise a captured global value in the same prepared included context.
     globalref=GlobalRef(DescriptionPreparedInputs,:opaque_mix)
     @test BayesianRegressionModels._brmd_snapshot(globalref)===globalref

@@ -5,6 +5,7 @@ _brmd_snapshot(x::Union{Function,Type,Module,Symbol,Nothing,AbstractString}) = x
 # GlobalRef holds an internal Core.Binding which can point back at the ref.
 # Retain this static identity; never reflect through Julia's binding machinery.
 _brmd_snapshot(x::GlobalRef) = x
+_brmd_snapshot(x::CA.CategoricalValue) = _brmd_snapshot(CA.unwrap(x))
 _brmd_snapshot(x::Union{StanBlocks.ValueUDF,StanBlocks.ValueFamily,StanBlocks.SlicModel}) = x
 _brmd_snapshot(x::Tuple) = map(_brmd_snapshot,x)
 _brmd_snapshot(x::NamedColumn) = BRMDescriptionReference(name(x), :observation)
@@ -39,6 +40,11 @@ _brmd_value(x::AbstractString, _env, _id) = String(x)
 _brmd_value(x::QuoteNode, _env, _id) = _brmd_snapshot(x.value)
 _brmd_value(x::LineNumberNode, _env, _id) = nothing
 _brmd_value(x::BRMDescriptionReference,_env,_id)=x
+
+# Julia parses a string immediately before a declaration as Core.@doc.
+# Documentation does not change the declared value or introduce a model call.
+_brmd_documented(x)=x isa Expr && x.head===:macrocall &&
+    first(x.args)==GlobalRef(Core,Symbol("@doc")) ? last(x.args) : x
 function _brmd_value(x::GlobalRef,env,id)
     bound=_brmd_binding(x,env.mod)
     bound===x ? _brmd_snapshot(x) : _brmd_value(bound,env,id)
@@ -108,11 +114,13 @@ function _brmd_included_model(env,model,kwargs,id,path)
             value=BRMDescriptionReference(last(logical),:scalar,logical),prior_ids=Tuple(ids),path=localpath))
     end
     subenv=merge(env,(;mod=model.mod,bindings=Tuple(bindings),included_path=path))
+    body=model.model
     # Preserve authored fixed/deterministic bindings without evaluating code.
     # Literal assignments expose their value; composed RHSs expose the same
     # public semantic representation used by ordinary arguments.
-    if model.model isa Expr && model.model.head===:block
-        for stmt in model.model.args
+    if body isa Expr && body.head===:block
+        for authored in body.args
+            stmt=_brmd_documented(authored)
             stmt isa Expr && stmt.head===:(=) && first(stmt.args) isa Symbol || continue
             name,rhs=stmt.args
             value=_brmd_value(rhs,subenv,(id...,:binding,name))
@@ -121,8 +129,8 @@ function _brmd_included_model(env,model,kwargs,id,path)
             subenv=merge(subenv,(;bindings=Tuple(bindings)))
         end
     end
-    body=_brmd_value(model.model,subenv,(id...,:body))
-    _brmd_component(subenv,id,:submodel,model,(body,))
+    publicbody=_brmd_value(body,subenv,(id...,:body))
+    _brmd_component(subenv,id,:submodel,model,(publicbody,))
 end
 
 function _brmd_included_input(value,env,id)
@@ -200,6 +208,8 @@ function _brmd_binding(x::Expr, mod)
 end
 
 function _brmd_value(x::Expr, env, id)
+    declaration=_brmd_documented(x)
+    declaration===x || return _brmd_value(declaration,env,(id...,:documented))
     if x.head===:(=) && first(x.args) isa Symbol
         lhs=first(x.args)
         out=(;name=lhs,logical=lhs,role=:deterministic,kind=:cell_assignment,segments=nothing)
@@ -236,6 +246,17 @@ function _brmd_value(x::Expr, env, id)
             role=observed || heldout || !isempty(aliases) ? :observation : :parameter
             localenv=merge(env,(;provenance=merge(env.provenance,(;owner=lhs,
                 observation_role=heldout ? :held_out : observed ? :conditioned : :unconditioned))))
+            if role===:observation
+                source=!isempty(aliases) && only(aliases).value isa BRMDescriptionReference ?
+                    only(aliases).value.name : lhs
+                outputs=Tuple((;name=o.name,logical=o.logical,role=o.role,kind=o.kind,
+                    segments=_brmd_snapshot(o.segments)) for o in env.descriptor.outputs
+                    if o.logical===source)
+                localenv=merge(localenv,(;outputs))
+                # Likelihood hooks and their observation parent share the
+                # actual response outputs, including held-out predictive twins.
+                args=Tuple(_brmd_value(a,localenv,(id...,:argument,i)) for (i,a) in enumerate(rawargs))
+            end
             included=()
             rhs=last(rawargs)
             f=rhs isa Expr && rhs.head===:call ? _brmd_binding(first(rhs.args),env.mod) : nothing

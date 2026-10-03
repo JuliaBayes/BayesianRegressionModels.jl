@@ -9665,7 +9665,8 @@ end
 # empty, so every other predictor's emission is untouched.
 function _sb_emit_ranef_r2d2_tau!(stmts, data, bucket_name, n_terms,
                                    decomposition;
-                                   joint_out=Dict{Symbol,NamedTuple}())
+                                   joint_out=Dict{Symbol,NamedTuple}(),
+                                   description_block=nothing)
     tau = Any[nothing for _ in 1:n_terms]
     joint = decomposition.joint
     for (group_index, group) in enumerate(decomposition.groups)
@@ -9693,6 +9694,11 @@ function _sb_emit_ranef_r2d2_tau!(stmts, data, bucket_name, n_terms,
             push!(refs, ref)
             tau[margin_index] = :($ref * sqrt(
                 ($phi_name[$local_index] * $r2_name) / (1. - $r2_name)))
+        end
+        if !isnothing(description_block)
+            _sb_record_binding!(data,r2_name,:parameter,r2_name;
+                allocation_scheme=(;kind=:r2d2m2,block=description_block,budget=group_index,
+                    r2_name,phi_name,n_phi,indices=Tuple(group.indices),references=Tuple(refs)))
         end
         isnothing(joint) && continue
         for (lp, p) in joint.predictors
@@ -10408,7 +10414,7 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
                 "direct sampled SD prior; choose one scale prior")
             r2d2_tau = _sb_emit_ranef_r2d2_tau!(
                 stmts, data, bucket_name, n_terms_total, bucket_r2d2;
-                joint_out=r2d2_joint)
+                joint_out=r2d2_joint,description_block=(:random_effect,id_sym,name(desc)))
         elseif !isempty(r2d2_names) &&
            all(m -> haskey(r2d2_names, m.predictor), margins)
             (!isnothing(ranef_effect) && ranef_effect.has_sd) && error(

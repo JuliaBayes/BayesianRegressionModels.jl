@@ -127,6 +127,8 @@ mapping connects to the cell's returned quantity. Cell-local names are scoped
 to their kernel owner (for example, `pred.state`) unless notation overrides them.
 Authored literal assignments have `role=:constant` and expose their value;
 composed assignments have `role=:deterministic` and expose a public expression.
+This includes assignments preceded by documentation strings in an included
+SlicModel. Supplied data arguments retain their prepared bindings.
 References to deterministic quantities render as symbols; render the binding's
 `value` explicitly to expand its defining expression.
 Actual higher-order callable arguments retain their identity and render through
@@ -139,6 +141,17 @@ bound data symbol. This preserves observation, mask and transformed-input
 identities without printing the dataset into an equation. Actual literal prior
 shapes and limits still retain their numeric values. Static global callable
 bindings retain their actual identity without traversing Julia's binding objects.
+The lowered `dims` call describes the array shape; indexing selects an axis
+extent. Lowered `max` and `min` describe vector reductions or scalar extrema.
+Categorical fitted values retain their labels without pool or pointer state.
+Embedded likelihood contexts include the response's actual descriptor outputs,
+including its posterior-predictive quantity and selected conditioning role.
+
+Covariance blocks use compact, distinct numbers within each result. The notation
+table maps each number to its full logical ID and ordered margins; predictor
+designs and covariance factors use that same number. Logical IDs and prior
+anchors keep their exact identities. Prior table math shows the distribution
+and support; the neighboring logical-parameter cell names the parameter.
 
 Included scientific SlicModels expose their parameter declarations,
 deterministic expressions and nested calls as children. A top-level caption
@@ -150,6 +163,41 @@ Claims outside that subtree or for nonexistent IDs raise an error.
 for independent scientific review of its handwritten hooks. Unsupported calls
 and syntax retain precise `coverage` records and `diagnostics`; the Markdown
 renderer labels such a result **incomplete**.
-Structured allocation nodes, including R2D2 and population Horseshoe schemes,
-currently retain explicit gaps until their allocation equations are supplied.
-Their Gaussian conditionals do not establish coverage of the allocation.
+Population Horseshoe allocation nodes currently retain explicit gaps. Their
+Gaussian conditionals do not establish coverage of the allocation.
+
+## R2D2 allocation conventions
+
+Whole-predictor `effect(mu, :) ~ r2d2(...)` and shared-block
+`sd(:, id) ~ r2d2(...)` use different scale conventions. Descriptions bind their
+actual R² prior, simplex concentration, share indices and reference scales from
+the prepared emitter; these quantities also appear in the effective prior
+inventory.
+
+For the whole-predictor form, T is the total latent scale, Vⱼ is the sample
+variance of prepared design column j, and k(j) is its selected simplex share:
+
+$$
+s_j=T\sqrt{\phi_{k(j)}R^2/V_j},\qquad
+\operatorname{SD}_{\mathrm{group}}=T\sqrt{1-R^2}.
+$$
+
+The intercept and population columns with their own explicit priors stay
+outside the allocation. With no non-intercept columns, no R² or simplex is
+introduced and the group SD is T. A one-component simplex equals [1].
+
+The shared-block R2D2M2/ICC form uses each margin's reference scale rₘ:
+
+$$
+\operatorname{SD}_m=r_m\sqrt{\phi_{k(m)}R^2/(1-R^2)}.
+$$
+
+With `include=(:population, :contrasts)`, the same budget additionally allocates
+population and contrast scales. Each predictor uses its own selected margin
+reference; its total-scale expression is r/√(1−R²). Its population and contrast
+scales therefore also contain R²/(1−R²), divided by their prepared design-column
+variance. Treatment indicators use V=m(n−m)/(n(n−1)), for m selected rows among
+n rows. Completed covariates stay inside their model-dependent variance.
+Margins outside a selected budget retain their separately inventoried free
+scale priors. Correlations keep their declared priors; allocated marginal SDs
+do not receive an invented independent SD prior.

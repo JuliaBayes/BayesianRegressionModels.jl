@@ -201,3 +201,4 @@ brm_description_components(description::BRMDescription) =
 include("description_semantics.jl")
 include("description_priors.jl")
 include("description_render.jl")
+include("description_allocations.jl")

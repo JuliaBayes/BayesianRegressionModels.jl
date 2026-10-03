@@ -230,10 +230,9 @@ function _brmd_submodel_priors!(priors,d,model,values,path,anchors,notation,stac
     end
 end
 
-function _brmd_priors(d, anchors, notation)
+function _brmd_priors(d, anchors, notation;groups=_brmd_ranef_metadata(d))
     priors = BRMPriorDescription[]
     _brmd_population_priors!(priors,d,anchors,notation)
-    groups = _brmd_ranef_metadata(d)
     _brmd_ranef_priors!(priors,d,groups,anchors,notation)
     categories=Set(cat.emitted for entry in _brm_population_effect_entries(d.plan.parent)
         for cat in _brm_categorical_effect_entries(d,entry.logical,entry.link))

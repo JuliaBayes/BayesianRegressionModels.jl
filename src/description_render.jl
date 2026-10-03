@@ -37,10 +37,23 @@ function brm_description_math(c::BRMDescriptionContext,x::BRMDescriptionReferenc
     end
     x.logical isa Tuple && any(n -> n.name==x.logical,c.notation) &&
         return brm_description_symbol(c,x.logical)
+    any(n->n.name==x.name && haskey(n,:symbol),c.notation) &&
+        return brm_description_symbol(c,x.name)
+    x.logical isa Symbol && any(n->n.name==(:parameter,x.logical),c.notation) &&
+        return brm_description_symbol(c,(:parameter,x.logical))
+    x.logical isa Symbol && any(n->n.name==(:prepared_data,x.logical),c.notation) &&
+        return brm_description_symbol(c,(:prepared_data,x.logical))
+    x.logical isa Tuple && first(x.logical)===:allocation && length(x.logical)>=4 &&
+        return _brmd_allocation_scale_math(x.logical)
     x.axis===:covariance && x.logical isa Tuple && last(x.logical)===:cholesky_scale &&
-        return "C_{"*_brmd_escape(x.logical[1:end-1])*"}"
+        return "C_{"*_brmd_block_math(c,x.logical[1:end-1])*"}"
     brm_description_symbol(c,x.name)
 end
+
+_brmd_call_math(::typeof(StanBlocks.stan.builtin.dims),args,_kwargs,_c) =
+    "\\operatorname{shape}\\left("*only(args)*"\\right)"
+_brmd_builtin_call(::typeof(StanBlocks.stan.builtin.dims),c)=BRMDescriptionFragment(
+    prose=("The shape vector lists the size of each declared array axis; indexing it selects that axis's extent.",),covers=(c.id,))
 brm_description_math(_c::BRMDescriptionContext, x::Number) = string(x)
 brm_description_math(_c::BRMDescriptionContext, x::AbstractString) =
     "\\text{" * _brmd_escape(x) * "}"
@@ -66,7 +79,7 @@ function brm_description_math(c::BRMDescriptionContext, x::BRMDescriptionCompone
     x.callable===kernel && return _brmd_kernel_math(c,x)
     if x.kind===:syntax
         if x.callable===:ref
-            return brm_description_math(c,first(x.arguments))*"_{"*
+            return "{"*brm_description_math(c,first(x.arguments))*"}_{"*
                 join((brm_description_math(c,a) for a in x.arguments[2:end]),",")*"}"
         elseif x.callable in (:tuple,:vect)
             return "\\left["*join((brm_description_math(c,a) for a in x.arguments),", ")*"\\right]"
@@ -101,6 +114,13 @@ _brmd_call_math(::typeof(logistic), args, _kwargs, _c) = "\\operatorname{logit}^
 _brmd_call_math(::typeof(StanBlocks.stan.builtin.inv_logit),args,_kwargs,_c) =
     "\\frac{1}{1+\\exp\\left(-"*only(args)*"\\right)}"
 _brmd_builtin_call(::typeof(StanBlocks.stan.builtin.inv_logit),c)=BRMDescriptionFragment(covers=(c.id,))
+for f in (StanBlocks.stan.builtin.max,StanBlocks.stan.builtin.min)
+    op=f===StanBlocks.stan.builtin.max ? "max" : "min"
+    @eval _brmd_call_math(::$(typeof(f)),args,_kwargs,_c) =
+        "\\operatorname{"*$op*"}\\left("*join(args,",")*"\\right)"
+    @eval _brmd_builtin_call(::$(typeof(f)),c)=BRMDescriptionFragment(
+        prose=("The declared "*$op*" selects the extremum of its vector argument or scalar arguments.",),covers=(c.id,))
+end
 
 # Distribution equations use explicit parameter conventions. A normal's second
 # constructor argument is an SD; the conventional Gaussian equation uses variance.
@@ -260,8 +280,8 @@ function _brmd_group_term_math(c,x)
     isempty(blocks) && return "\\mathbf z_{"*_brmd_escape(c.provenance.owner)*","*_brmd_escape(group_name)*",j}^{\\mathsf T}\\mathbf b_{"*
         _brmd_escape(c.provenance.owner)*","*_brmd_escape(group_name)*",g_j}"
     join(((membership ? "\\sum_m\\widetilde w_{jm}\\," : "")*
-        "\\mathbf z_{"*_brmd_escape(c.provenance.owner)*","*_brmd_escape(g.id)*",j}^{\\mathsf T}\\mathbf b_{"*
-        _brmd_escape(g.id)*(membership ? ",g_{jm}}" : ",g_j}") for g in blocks)," + ")
+        "\\mathbf z_{"*_brmd_escape(c.provenance.owner)*","*_brmd_block_math(c,g.id)*",j}^{\\mathsf T}\\mathbf b_{"*
+        _brmd_block_math(c,g.id)*(membership ? ",g_{jm}}" : ",g_j}") for g in blocks)," + ")
 end
 _brmd_term_call_math(::typeof(|),c,x) = _brmd_group_term_math(c,x)
 _brmd_term_call_math(::typeof(doublepipe),c,x) = _brmd_group_term_math(c,x)
@@ -356,7 +376,7 @@ function _brmd_call_math(::typeof(StanBlocks.stan.builtin.maybe_index),args,_kwa
 end
 function _brmd_builtin_call(::typeof(kernel),c)
     aliases=filter(b->b.role===:alias,c.bindings)
-    names=join((string(b.name)*" ← "*brm_description_math(c,b.value) for b in aliases),", ")
+    names=join(("`"*string(b.name)*"` ← \$"*brm_description_math(c,b.value)*"\$" for b in aliases),", ")
     body=last(first(c.arguments).arguments)
     final=body isa BRMDescriptionComponent && body.callable===:block && !isempty(body.arguments) ? last(body.arguments) : body
     readable=!(final isa BRMDescriptionComponent && final.kind===:syntax &&
@@ -545,7 +565,7 @@ function _brmd_builtin_kind(::Val{:observation},c)
 end
 function _brmd_builtin_kind(::Val{:random_effect},c)
     k=c.keywords
-    id=_brmd_escape(c.id)
+    id=_brmd_block_math(c,c.id)
     subscript=k.by===nothing ? id : id*",s(i)"
     D="D_{"*subscript*"}"; omega="\\Omega_{"*subscript*"}"; L="L_{"*subscript*"}"; C="C_{"*subscript*"}"
     covariance=k.correlated ? D*omega*D : D*"^2"
@@ -576,6 +596,20 @@ function _brmd_notation(d,labels)
     Tuple(result)
 end
 
+_brmd_block_math(c,key)=brm_description_symbol(c,key)
+function _brmd_block_notation(notation,groups,labels)
+    result=NamedTuple[notation...]
+    for (index,group) in enumerate(sort!(collect(groups);by=g->string(g.key)))
+        supplied=get(labels,group.key,NamedTuple())
+        supplied isa AbstractString && (supplied=(;meaning=String(supplied)))
+        note=merge((;name=group.key,symbol=string(index),axis=:covariance_block,
+            meaning="Covariance block $(index): logical ID $(group.key); margins $(Tuple((m.predictor,m.coefficient) for m in group.margins))."),supplied)
+        filter!(n->n.name!=group.key,result)
+        push!(result,note)
+    end
+    Tuple(result)
+end
+
 function _brmd_hook(c,hooks)
     matches=filter(p -> first(p) === c.callable,hooks)
     length(matches)>1 && throw(ArgumentError("description: duplicate hooks for $(c.callable)"))
@@ -596,18 +630,15 @@ incomplete result is never labeled a complete model description.
 """
 function brm_description(d::BRMDescriptor; hooks=(),labels=Dict(),prior_anchors=Dict())
     notation=_brmd_notation(d,labels)
+    groups=_brmd_ranef_metadata(d)
+    notation=_brmd_block_notation(notation,groups,labels)
+    notation=_brmd_allocation_notation(d,notation,labels)
     constants=_brmd_constants(d.plan)
-    priors,groups=_brmd_priors(d,prior_anchors,notation)
+    priors,groups=_brmd_priors(d,prior_anchors,notation;groups)
     roots=collect(_brmd_components(d,priors,constants,notation;groups))
     # Inventory allocation semantics explicitly; a Gaussian conditional prior
     # alone must never establish coverage of an unexplained hierarchical scale.
-    for (target,binding) in sort!(collect(d.plan.bindings);by=p->string(first(p)))
-        scheme=get(binding,:prior_scheme,(;kind=:ordinary))
-        scheme.kind===:ordinary && continue
-        env=_brmd_environment(d,binding.logical,:prior_allocation,priors,constants,notation)
-        push!(roots,_brmd_component(env,(:allocation,binding.logical),:prior_allocation,
-            nothing,(_brmd_snapshot(scheme),)))
-    end
+    append!(roots,_brmd_allocation_components(d,priors,constants,notation,groups))
     for group in groups
         env=_brmd_environment(d,group.key,:random_effect,priors,constants,notation)
         b=group.block
@@ -615,11 +646,6 @@ function brm_description(d::BRMDescriptor; hooks=(),labels=Dict(),prior_anchors=
             levels=_brmd_snapshot(b.levels),margins=group.margins,
             correlated=group.correlated,shared=group.shared,noncentered=b.noncentered,by=b.by)
         push!(roots,_brmd_component(env,group.key,:random_effect,nothing,(),kwargs))
-        if b.family in (:ranef_intercept_r2d2,:ranef_correlated_r2d2,:ranef_correlated_draws_r2d2) &&
-           !any(c->c.kind===:prior_allocation,roots)
-            push!(roots,_brmd_component(env,(:allocation,group.key...),:prior_allocation,nothing,
-                ((;kind=:derived_group_scales,family=b.family),)))
-        end
     end
     for prior in priors
         prior.distribution isa BRMDescriptionComponent && push!(roots,prior.distribution)
@@ -657,7 +683,7 @@ function _brmd_prior_equation(p)
     c isa BRMDescriptionComponent || return string(p.distribution)
     support=isempty(p.support) ? "" : "\\quad " * join(
         (_brmd_identifier(k)*"="*brm_description_math(c,v) for (k,v) in pairs(p.support)),", ")
-    _brmd_identifier(join(string.(p.id)," / "))*"\\sim"*_brmd_distribution_math(c,c)*support
+    _brmd_distribution_math(c,c)*support
 end
 
 """
@@ -699,9 +725,10 @@ function brm_description_markdown(description::BRMDescription;prefix=nothing)
         end
     end
     if !isempty(description.notation)
-        println(io,"\nNotation:\n\n| Quantity | Meaning | Axis | Supplied unit |\n| --- | --- | --- | --- |")
+        println(io,"\nNotation:\n\n| Quantity | Symbol | Meaning | Axis | Supplied unit |\n| --- | --- | --- | --- | --- |")
         for n in description.notation
-            println(io,"| `",n.name,"` | ",get(n,:meaning,string(n.name))," | ",get(n,:axis,:declared)," | ",get(n,:unit,"")," |")
+            symbol=haskey(n,:symbol) ? "\$"*n.symbol*"\$" : ""
+            println(io,"| `",n.name,"` | ",symbol," | ",get(n,:meaning,string(n.name))," | ",get(n,:axis,:declared)," | ",get(n,:unit,"")," |")
         end
     end
     if !description.complete
