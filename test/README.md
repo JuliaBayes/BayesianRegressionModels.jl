@@ -103,6 +103,12 @@ coordinate Jacobians, standard Enzyme gradients and full printed-source replay
 with independent oracles and emitted Stan. These use the exact published
 `restricted` capability pinned by `setup_env.jl`.
 
+`rk_computed_predictor.jl` covers ordinary formula predictors consumed by a
+whole-array gather, with and without an intercept and with equal or distinct
+predictor/observation row axes. It checks full normalized densities, analytic
+and finite-difference gradients, mapped compiled Stan, caller ownership and
+complete printed-source replay on the published computed-matrix repair.
+
 `rk_plain.jl` and `rk_statistical_library.jl` exercise BRM-owned statistical
 declarations through ordinary RKPPL lowering. `rk_leveled.jl` adds independent
 categorical-reference and multinomial row-density, Jacobian and ordinary
