@@ -97,6 +97,7 @@ BRM adds:
   | `:parameter` | an ordinary declared prior (`sigma ~ Exponential(1)`) |
   | `:linear_predictor` | a formula linear predictor (`mu ~ 1 + x + (1\\|g)`) — an assignment, so no `~` declaration binds it |
   | `:posterior_predictive` | a predictive draw of an observation |
+  | `:covariate_draw` | the selected modeled covariate value consumed by later operations |
   | `:pointwise_loglik` | an observation's per-element log-likelihood |
   | `:stan_derived` | a Stan-level output no BRM declaration owns |
 
@@ -1036,6 +1037,7 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
 
     # --- outputs ------------------------------------------------------------
     outputs = BRMOutput[]
+    fresh_covariates = _sb_existing_covariates(plan.preproc)
     for o in stan.outputs
         decl = _brm_owner(o, by_name, targets)
         # An observation's generated-quantities carrier is its predictive
@@ -1043,7 +1045,9 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
         # (unconditioned program). An observation-shaped declaration that
         # StanBlocks kept SAMPLED (an unbound response read by a likelihood,
         # or a hierarchical prior) is a parameter, not a draw.
-        role = if !isnothing(decl) && decl.role === :observation &&
+        role = if o.name in fresh_covariates && o.kind === :generated_quantity
+            :covariate_draw
+        elseif !isnothing(decl) && decl.role === :observation &&
                   o.kind === :generated_quantity
             o.generative === :pointwise_loglik ? :pointwise_loglik : :posterior_predictive
         elseif !isnothing(decl) && decl.role === :observation
@@ -1063,7 +1067,7 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
         end
         push!(outputs, BRMOutput(o.name, o.kind, o.type, o.size, o.constraints,
                                  o.generative, o.source, role, decl,
-                                 get(logical_outputs, o.name, nothing), nothing,
+                                 o.name in fresh_covariates ? o.name : get(logical_outputs, o.name, nothing), nothing,
                                  _brm_output_segments(o)))
     end
     outputs = _brm_label_population!(outputs, brmi, pop_lp)
