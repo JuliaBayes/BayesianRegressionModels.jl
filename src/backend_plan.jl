@@ -47,6 +47,8 @@ end
 _brm_rebind_value(x, _df) = x
 _brm_rebind_value(x::Tuple, df) =
     map(value -> _brm_rebind_value(value, df), x)
+_brm_rebind_value(x::AbstractArray, df) =
+    map(value -> _brm_rebind_value(value, df), x)
 _brm_rebind_value(x::NamedTuple, df) = NamedTuple{keys(x)}(
     map(value -> _brm_rebind_value(value, df), values(x)))
 _brm_rebind_value(x::NestedPredictorFormula, df) =
@@ -239,10 +241,10 @@ end
 function _brm_joint_missing_plan(x::JointResponseColumn; prefix="BRM")
     rows = _brm_joint_response_values(x; prefix, allow_imputation=true)
     raw = map(c -> parent(parent(c)), joint_response_columns(x))
-    indices = [(row - 1) * length(raw) + column
+    indices = Int[(row - 1) * length(raw) + column
                for row in eachindex(rows) for column in eachindex(raw)
                if ismissing(raw[column][row])]
-    observed = [(row - 1) * length(raw) + column
+    observed = Int[(row - 1) * length(raw) + column
                 for row in eachindex(rows) for column in eachindex(raw)
                 if !ismissing(raw[column][row])]
     values = Float64[value for row in rows for value in row]
@@ -372,7 +374,9 @@ end
 
 function _brm_missing_response_plan(lhs; prefix="BRM backend lowering")
     lhs isa ExprColumn && getf(lhs) === mi || return nothing
-    isempty(getkwargs(lhs)) || error(
+    kwargs = getkwargs(lhs)
+    population_value = kwargs == (; _brm_population_value=Val(:fresh_covariate))
+    (isempty(kwargs) || population_value) || error(
         "$prefix: `mi(response)` accepts no keywords")
     args = getargs(lhs)
     length(args) == 1 || error(
@@ -386,10 +390,10 @@ function _brm_missing_response_plan(lhs; prefix="BRM backend lowering")
         "$prefix: `mi($(name(inner)))` requires a raw data column with " *
         "missing values, got backing $(typeof(backing))")
     raw = parent(backing)
-    _brm_missing_response_plan(name(inner), raw; prefix)
+    _brm_missing_response_plan(name(inner), raw; prefix,allow_complete=population_value)
 end
 
-function _brm_missing_response_plan(source::Symbol, raw; prefix="BRM backend lowering")
+function _brm_missing_response_plan(source::Symbol, raw; prefix="BRM backend lowering",allow_complete=false)
     raw isa AbstractVector || error(
         "$prefix: `mi($source)` requires a vector response")
     Missing <: eltype(raw) || error(
@@ -401,7 +405,7 @@ function _brm_missing_response_plan(source::Symbol, raw; prefix="BRM backend low
         "got non-missing element type $value_type")
     observed_indices = findall(!ismissing, raw)
     missing_indices = findall(ismissing, raw)
-    isempty(missing_indices) && error(
+    isempty(missing_indices) && !allow_complete && error(
         "$prefix: `mi($source)` found no missing values; drop the wrapper")
     observed_values = collect(value_type, raw[observed_indices])
     _BRMMissingResponsePlan(

@@ -3299,7 +3299,10 @@ const _SB_STAN_RESERVED_IDENTIFIERS = Set{Symbol}((
 SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
        centered_groups=Set{Symbol}(), total_groups=:auto,
        s2z_groups=(), s2z_rho=nothing, s2z_coordinates=:contrasts, held_out=(),
-       _frozen_preproc=nothing) = begin
+       resample_covariates=(), _frozen_preproc=nothing) = begin
+    source_parent = brmi
+    fresh_covariates = _sb_covariate_selection(brmi,resample_covariates)
+    isempty(fresh_covariates) || (brmi = _sb_covariate_brmi(brmi,fresh_covariates))
     cv_groups = cv_groups isa Set ? cv_groups : Set{Symbol}(cv_groups)
     centered_groups = centered_groups isa Set ? centered_groups : Set{Symbol}(centered_groups)
     s2z_selected = Set(s2z_groups isa Symbol ? (s2z_groups,) : s2z_groups)
@@ -3322,6 +3325,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
         "carry a cv taint; drop the group from `cv_groups`."))
     stmts = Any[]
     data = Dict{Symbol,Any}()
+    isempty(fresh_covariates) || (data[_SB_FRESH_COVARIATES_KEY] = fresh_covariates)
     # Side-channel: transform emitters record their fit-time constant + raw
     # reference here (via `_sb_record_preproc!`); popped before `SlicModel` below
     # so it never reaches Stan's data dict. See `PreprocEntry` / `reprocess`.
@@ -3476,6 +3480,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     pop!(data, _SB_HS_PLANS_KEY)
     pop!(data, _SB_HYPER_PLANS_KEY, ())
     pop!(data, _SB_THRESHOLD_LOCATED_KEY)
+    pop!(data, _SB_FRESH_COVARIATES_KEY, nothing)
     preproc_ctx = pop!(data, _SB_PREPROC_KEY, Dict{Symbol,PreprocEntry}())
     preproc = preproc_ctx isa _SBPreprocContext ? preproc_ctx.recorded : preproc_ctx
     # Drop leaked non-Stan data (raw `CategoricalVector`/string predictor columns
@@ -3500,7 +3505,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
         "`y_lower`/`y_upper` for interval-censored endpoints.")
     body = Expr(:block, stmts...)
     model = StanBlocks.SlicModel(body, data, mod, _sb_declared_observations(body, data, brmi))
-    sb = SBBRMI(brmi, model, data, preproc, Set{Symbol}(), bindings)
+    sb = SBBRMI(source_parent, model, data, preproc, Set{Symbol}(), bindings)
     _sb_triage_emitted(sb)
     _sb_apply_held_out(sb, held_out)
 end
@@ -3522,6 +3527,7 @@ function _sb_triage_emitted(sb::SBBRMI)
     _sb_plan_collect!(declarations, sb.model.model, data_scope, (), obs_keys,
                       Set{Symbol}(), _sb_unbound_cell_observations(sb.parent))
     missing_sources = Set{Symbol}()
+    fresh_sources = _sb_existing_covariates(sb.preproc)
     for e in values(sb.preproc)
         e.kind === :missing_response && push!(missing_sources, e.raw_ref)
         e.kind === :joint_missing_response && push!(missing_sources, e.const_.completion_key)
@@ -3531,7 +3537,7 @@ function _sb_triage_emitted(sb::SBBRMI)
                   declarations)
     unbound = sort!(Symbol[d.target for d in declarations
                            if d.role === :observation && isnothing(d.data_source) &&
-                              !(d.target in missing_sources)])
+                              !(d.target in missing_sources) && !(d.target in fresh_sources)])
     if !isempty(unbound)
         names = join(map(s -> "`$s`", unbound), ", ")
         if bound >= 1
@@ -3549,7 +3555,7 @@ function _sb_triage_emitted(sb::SBBRMI)
         end
         return nothing
     end
-    bound >= 1 && return nothing
+    (bound >= 1 || !isempty(fresh_sources)) && return nothing
     error("sbimpl: this `@brm` declares no observation — no `response ~ " *
           "distribution(...)` statement binds data, and none is present " *
           "without data either. Every `@brm` needs an observation statement; " *
@@ -4872,7 +4878,7 @@ end
 
 """
     reprocess(sb::SBBRMI, new_df; freeze_constants=true,
-              resample_groups=()) -> SBBRMI
+              resample_groups=(), resample_covariates=()) -> SBBRMI
 
 Re-materialise the SBBRMI's Stan data dict against `new_df`, **re-running** the
 Julia-side preprocessing (decision nr3v8n A) — so the silent-stale-constant bug
@@ -4894,6 +4900,16 @@ of a naive per-column `sb.model(; col=…)` rebind is avoided. Returns a NEW
   constants remain frozen unless `freeze_constants=false` is also requested.
   This changes Stan source by construction; it is the new-population/CV twin
   of the default same-group replay.
+- `resample_covariates=()` (default): retain fitted covariate completions.
+  Select logical modeled continuous members to redraw all their rows inside
+  the emitted program, conditional on retained posterior hyperparameters.
+  Selecting a joint member selects its whole block. Dependent modeled
+  declarations must be selected together. This opt-in path requires frozen
+  training anchors and a conventional non-centered `total_groups=()` fit;
+  it composes with `resample_groups` and removes selected missing-cell
+  coordinates. Discover members and consumed output roles with
+  [`modeled_covariates`](@ref), then use [`transport_draws`](@ref) with the
+  actual compiled coordinate names.
 
 Covered: the Julia-side transforms (`zscale`/`standardize`/`center`/`factor`/
 `mo`/`s`/`t2`/`gp`/`hsgp`), interval-censored predictor splits,
@@ -4913,8 +4929,13 @@ Stratified `gr(g, by=b)` group-index replay remains correct-or-loud unsupported
 rather than silently copying stale structure.
 """
 function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
-                   resample_groups=())
+                   resample_groups=(),resample_covariates=())
     groups = _sb_resample_group_set(resample_groups)
+    covariates = union(_sb_existing_covariates(sb.preproc),
+        _sb_covariate_selection(sb.parent,resample_covariates))
+    isempty(covariates) || union!(groups,_sb_covariate_resample_groups(sb.preproc))
+    isempty(covariates) || return _sb_reprocess_covariates(
+        sb,new_df,covariates,groups,freeze_constants)
     isempty(groups) || return _sb_reprocess_resample(
         sb, new_df, groups, freeze_constants)
     # Current kernel(...) emitters record each gathered/index ragged input, but
@@ -4996,19 +5017,19 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
 end
 
 function reprocess(plan::GenerativePlan, new_df; freeze_constants::Bool=true,
-                   resample_groups=())
+                   resample_groups=(),resample_covariates=())
     sb = SBBRMI(plan.parent, plan.model, plan.data, plan.preproc,
                 copy(plan.held_out), plan.bindings)
     groups = _sb_resample_group_set(resample_groups)
     replayed = reprocess(sb, new_df; freeze_constants,
-                         resample_groups=groups)
+                         resample_groups=groups,resample_covariates)
     _generative_plan(replayed, plan.builder,
                      isempty(groups) ? plan.cv_groups : groups)
 end
 
 """
     restan_data(sb::SBBRMI, new_df; freeze_constants=true,
-                resample_groups=()) -> Dict
+                resample_groups=(), resample_covariates=()) -> Dict
 
 Thin convenience over [`reprocess`](@ref): the prepared Stan **data dict** for
 `new_df`, ready for a `param_constrain!` replay. Equivalent to
@@ -5020,8 +5041,8 @@ the corresponding `SBBRMI`/source as well as this data-only convenience result.
 See [`reprocess`](@ref) for the covered-terms list and error cases.
 """
 restan_data(sb::SBBRMI, new_df; freeze_constants::Bool=true,
-            resample_groups=()) =
-    stan_data(reprocess(sb, new_df; freeze_constants, resample_groups))
+            resample_groups=(),resample_covariates=()) =
+    stan_data(reprocess(sb, new_df; freeze_constants, resample_groups,resample_covariates))
 
 # ---- top-level op dispatch ---------------------------------------------------
 
@@ -6452,6 +6473,8 @@ end
 
 function _sb_sampling!(stmts, data, key, lhs::JointResponseColumn, rhs;
                        id_lookup=_sb_empty_id_lookup(), kwargs...)
+    fresh = get(data,_SB_FRESH_COVARIATES_KEY,Set{Symbol}())
+    any(in(fresh),joint_response_names(lhs)) && return _sb_emit_fresh_joint!(stmts,data,key,lhs,rhs)
     rhs isa ExprColumn && getf(rhs) === MvNormalCholesky || error(
         "sbimpl: vector response $(collect(joint_response_names(lhs))) supports " *
         "the explicit joint family `MvNormalCholesky(means, factor)`; got " *
@@ -6851,6 +6874,8 @@ function _sb_emit_mi!(stmts, data, key, lhs::ExprColumn, rhs)
     plan = _brm_missing_response_plan(lhs; prefix="sbimpl")
     isnothing(plan) && error("sbimpl: internal `mi(...)` response was not planned")
     inner_name = plan.source
+    inner_name in get(data,_SB_FRESH_COVARIATES_KEY,Set{Symbol}()) &&
+        return _sb_emit_fresh_scalar!(stmts,data,key,plan,rhs)
     rhs_e = _as_expr_column(rhs)
     isnothing(rhs_e) && error(
         "sbimpl: `mi($inner_name)` requires a distribution call")
@@ -11986,6 +12011,13 @@ end
 _sb_materialize_vec(x::Number) = x
 _sb_materialize_vec(x::NamedColumn) = _materialize_named(x, parent(x))
 _materialize_named(_, d::DataColumn) = parent(d)
+function _materialize_named(x, declaration::ExprColumn)
+    if getf(declaration) === (~)
+        lhs = first(getargs(declaration))
+        lhs isa NamedColumn && parent(lhs) isa DataColumn && return parent(parent(lhs))
+    end
+    error("sbimpl: cannot materialize NamedColumn `$(name(x))` -- only raw data columns supported inside `protect` / `zscale` / `center` / `standardize`")
+end
 _materialize_named(x, _) = error(
     "sbimpl: cannot materialize NamedColumn `$(name(x))` -- only raw data columns supported inside `protect` / `zscale` / `center` / `standardize`")
 _sb_materialize_vec(x::ExprColumn) = _brm_broadcast_data_call(
