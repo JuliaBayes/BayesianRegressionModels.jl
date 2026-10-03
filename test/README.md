@@ -38,6 +38,17 @@ A new heavy file adopts the same contract with one `include` plus the macro:
 `include(joinpath(@__DIR__, "testset_filter.jl"))` after `using Test`, then
 `@stestset "name" begin ... end` per chunkable block.
 
+`missing_covariates.jl` checks joint continuous `mi(x)` predictors through
+StanBlocks. It compiles Normal and LogNormal models and compares normalized
+densities and all unconstrained gradients with an independent explicit
+observed/missing split, then resolves completed covariates and derived values
+through public logical output coordinates. Separate blocks cover complete
+conditional observations, observed-only transform anchors and their degenerate
+cases, frozen row masks, and retention
+of fitted missing coordinates during subject kernel CV. It uses only root
+dependencies, so `julia --project=. test/missing_covariates.jl` also works;
+trailing filters such as `anchors` or `kernel CV` select focused blocks.
+
 ## Shared preparation and Turing lowering
 
 `spline_basis_signs.jl` checks canonical TPS/t2 projection signs, input

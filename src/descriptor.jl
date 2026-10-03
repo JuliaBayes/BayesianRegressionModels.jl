@@ -983,13 +983,17 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
             # the executable data block altogether: activity analysis retains
             # only its `<source>_n` size for the generated draw. The plan's
             # held-out set is the authoritative provenance in that case.
+            # Group CV can likewise eliminate the outcome input after its
+            # structural predictor moves to GQ. Its declared observation stem
+            # retains the predictive carrier's source even without an input.
             # An observation with no data source is UNCONDITIONED (the response
             # omitted from the data): it binds no input BY DESIGN, and its
             # forward simulation IS the predictive draw, so it is never
             # unpredictable. Both checks below are skipped for it.
             if !isnothing(d.data_source)
                 (d.target in input_names ||
-                 (d.data_source in input_names || d.data_source in plan.held_out)) || error(
+                 (d.data_source in input_names || d.data_source in plan.held_out ||
+                  d.data_source in draw_sources)) || error(
                     "brm_descriptor: observation `$(d.target)` resolves to no data input of " *
                     "the emitted model — the plan and the traced model disagree; " *
                     "re-derive the plan.")

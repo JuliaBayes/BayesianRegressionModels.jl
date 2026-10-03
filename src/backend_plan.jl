@@ -359,22 +359,26 @@ function _brm_missing_response_plan(lhs; prefix="BRM backend lowering")
         "$prefix: `mi($(name(inner)))` requires a raw data column with " *
         "missing values, got backing $(typeof(backing))")
     raw = parent(backing)
+    _brm_missing_response_plan(name(inner), raw; prefix)
+end
+
+function _brm_missing_response_plan(source::Symbol, raw; prefix="BRM backend lowering")
     raw isa AbstractVector || error(
-        "$prefix: `mi($(name(inner)))` requires a vector response")
+        "$prefix: `mi($source)` requires a vector response")
     Missing <: eltype(raw) || error(
-        "$prefix: `mi($(name(inner)))` requires a column whose element type " *
+        "$prefix: `mi($source)` requires a column whose element type " *
         "admits `missing` (got $(eltype(raw))); drop `mi(...)` when there are no NAs")
     value_type = nonmissingtype(eltype(raw))
     value_type <: Real || error(
-        "$prefix: `mi($(name(inner)))` currently requires a real-valued response; " *
+        "$prefix: `mi($source)` currently requires a real-valued response; " *
         "got non-missing element type $value_type")
     observed_indices = findall(!ismissing, raw)
     missing_indices = findall(ismissing, raw)
     isempty(missing_indices) && error(
-        "$prefix: `mi($(name(inner)))` found no missing values; drop the wrapper")
+        "$prefix: `mi($source)` found no missing values; drop the wrapper")
     observed_values = collect(value_type, raw[observed_indices])
     _BRMMissingResponsePlan(
-        name(inner), collect(raw), observed_indices, missing_indices,
+        source, collect(raw), observed_indices, missing_indices,
         observed_values)
 end
 

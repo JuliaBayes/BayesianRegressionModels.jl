@@ -3467,7 +3467,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
         "offending column(s) before building the model — e.g. `lower`/`upper` -> ",
         "`y_lower`/`y_upper` for interval-censored endpoints.")
     body = Expr(:block, stmts...)
-    model = StanBlocks.SlicModel(body, data, mod, _sb_unbound_observations(body, data, brmi))
+    model = StanBlocks.SlicModel(body, data, mod, _sb_declared_observations(body, data, brmi))
     sb = SBBRMI(brmi, model, data, preproc, Set{Symbol}(), bindings)
     _sb_triage_emitted(sb)
     _sb_apply_held_out(sb, held_out)
@@ -3489,10 +3489,14 @@ function _sb_triage_emitted(sb::SBBRMI)
     obs_keys = Set{Symbol}(keys(sb.parent.operations))
     _sb_plan_collect!(declarations, sb.model.model, data_scope, (), obs_keys,
                       Set{Symbol}(), _sb_unbound_cell_observations(sb.parent))
-    bound = count(d -> d.role === :observation && !isnothing(d.data_source),
+    missing_sources = Set(e.raw_ref for e in values(sb.preproc)
+                          if e.kind === :missing_response)
+    bound = count(d -> d.role === :observation &&
+                  (!isnothing(d.data_source) || d.target in missing_sources),
                   declarations)
     unbound = sort!(Symbol[d.target for d in declarations
-                           if d.role === :observation && isnothing(d.data_source)])
+                           if d.role === :observation && isnothing(d.data_source) &&
+                              !(d.target in missing_sources)])
     if !isempty(unbound)
         names = join(map(s -> "`$s`", unbound), ", ")
         if bound >= 1
@@ -3518,25 +3522,21 @@ function _sb_triage_emitted(sb::SBBRMI)
           "from the data — dropping the statement is not supported.")
 end
 
-# Whole-LHS unbound observation stems for the `SlicModel` `observations`
-# declaration (StanBlocks snag `unbound-observat-d32ac924`): top-level `~`
-# targets that bind no data column. StanBlocks emits a `<stem>_gen` alias twin
-# for each declared stem that re-draws in generated quantities and covers it
-# under `:predict`, so prior programs carry the same posterior names as fitted
-# ones. Runs on the EMITTED body for the same reason `_sb_triage_emitted`
-# does — fused statements and kernel-cell sites resolve with the same role
-# logic the plan itself uses. Plate-nested (cell-local) unbound targets are
-# excluded: per-cell unbound is outside the StanBlocks twin scope, so those
-# keep today's twinless behavior.
-function _sb_unbound_observations(body, data, brmi)
+# Declare observation stems to SLIC from the same emitted-body roles as the
+# plan. Bound observations use their source column, including kernel aliases:
+# group CV can eliminate their data inputs, while predictive carriers still
+# need that source identity. Whole-LHS unbound observations use their target;
+# StanBlocks emits an alias twin when they redraw in GQ. Cell-local unbound
+# targets stay excluded because they lie outside that twin scope.
+function _sb_declared_observations(body, data, brmi)
     declarations = GenerativeDeclaration[]
     data_scope = Dict{Symbol,Union{Nothing,Symbol}}(k => k for k in keys(data))
     obs_keys = Set{Symbol}(keys(brmi.operations))
     _sb_plan_collect!(declarations, body, data_scope, (), obs_keys, Set{Symbol}(),
                       _sb_unbound_cell_observations(brmi))
-    Tuple(sort!(Symbol[d.target for d in declarations
-                       if d.role === :observation && isnothing(d.data_source) &&
-                          isempty(d.context)]))
+    Tuple(sort!(unique(Symbol[isnothing(d.data_source) ? d.target : d.data_source
+        for d in declarations if d.role === :observation &&
+            (!isnothing(d.data_source) || isempty(d.context))])))
 end
 
 # Plate-nested omitted outcomes, read from the FORMULA: `(context, cell target)`
@@ -4500,6 +4500,31 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
     elseif e.kind === :zscale || e.kind === :standardize ||
            e.kind === :center || e.kind === :protect
         replay_and_bind(_sb_rematerialize_vec(e.raw_ref, df), :primary => key)
+    elseif e.kind === :missing_response
+        plan = _brm_missing_response_plan(e.raw_ref, _sb_df_column(df, e.raw_ref);
+                                          prefix="sbimpl: reprocess")
+        fitted = e.const_
+        if freeze && (plan.observed_indices != fitted.observed_indices ||
+                      plan.missing_indices != fitted.missing_indices)
+            throw(ArgumentError("sbimpl: reprocess: `mi($(e.raw_ref))` needs the " *
+                "same fitted missing-row positions when freeze_constants=true; " *
+                "reordering or changing the mask would reassign fitted missing " *
+                "coordinates. Rebuild for a new fit or use freeze_constants=false."))
+        end
+        new_data[key] = plan.observed_values
+        new_data[fitted.observed_key] = plan.observed_indices
+        new_data[fitted.missing_key] = plan.missing_indices
+        union!(handled, (fitted.observed_key, fitted.missing_key))
+        new_preproc[key] = _sb_missing_preproc(plan, fitted.observed_key, fitted.missing_key)
+    elseif e.kind === :missing_center || e.kind === :missing_standardize ||
+           e.kind === :missing_zscale
+        fit = freeze ? e.const_.fit : _sb_mi_transform_constants(
+            e.kind, _sb_rematerialize_vec(e.raw_ref, df))
+        new_data[key] = fit.mean
+        new_data[e.const_.scale_key] = fit.scale
+        push!(handled, e.const_.scale_key)
+        new_preproc[key] = PreprocEntry(e.kind,
+            (; fit, scale_key=e.const_.scale_key), e.raw_ref, false)
     elseif e.kind === :interaction
         left_key, right_key = e.raw_ref
         haskey(new_data, left_key) || error(
@@ -6777,6 +6802,7 @@ function _sb_emit_mi!(stmts, data, key, lhs::ExprColumn, rhs)
     data[obs_key] = plan.observed_values
     data[Jobs_key] = plan.observed_indices
     data[Jmis_key] = plan.missing_indices
+    _sb_record_preproc!(data, obs_key, _sb_missing_preproc(plan, Jobs_key, Jmis_key))
     call_kwargs = Expr(:parameters,
         Expr(:kw, :y_obs, obs_key),
         Expr(:kw, :Jobs, Jobs_key),
@@ -6785,6 +6811,11 @@ function _sb_emit_mi!(stmts, data, key, lhs::ExprColumn, rhs)
     push!(stmts, Expr(:call, :~, inner_name,
                      Expr(:call, submodel, call_kwargs)))
 end
+
+_sb_missing_preproc(plan, observed_key, missing_key) = PreprocEntry(
+    :missing_response,
+    (; observed_indices=copy(plan.observed_indices), missing_indices=copy(plan.missing_indices),
+       observed_key, missing_key), plan.source, true)
 
 # Map a Julia function (typically the result of `InverseFunctions.inverse(...)`
 # for a link transform) to the Stan-side function name. Stan ships
@@ -11603,6 +11634,11 @@ for (fn, kind, fitf, applyf) in (
     # inner column-node tree, re-materialised on the new df at reprocess time.
     @eval function _sb_predictor_term!(stmts, data, ::typeof($fn), t; kwargs...)
         inner = only(getargs(t))
+        if _sb_term_refs_mi(inner)
+            cn = _sb_wrapper_col_name($(QuoteNode(fn)), inner)
+            return _sb_emit_mi_transform!(stmts, data,
+                $(QuoteNode(Symbol(:missing_, kind))), inner, cn)
+        end
         v = collect(Float64, _sb_materialize_vec(inner))
         c = $fitf(v)
         v_t = $applyf(c, v)
@@ -11619,6 +11655,11 @@ end
 # if any leaf isn't a raw data column (e.g. references a sampled parameter
 # directly), preserving the old "unsupported" diagnostic.
 function _sb_materialize_protect_term!(stmts, data, f, t)
+    if _sb_term_refs_mi(t)
+        cn = _sb_wrapper_col_name(Symbol(f), t)
+        push!(stmts, Expr(:(=), cn, _sb_scalar_expr(t, data)))
+        return cn
+    end
     try
         v = collect(Float64, _sb_materialize_vec(t))
         cn = _sb_wrapper_col_name(Symbol(f), t)
@@ -11640,6 +11681,53 @@ _sb_predictor_term!(stmts, data, f::Function, t; kwargs...) =
 _sb_term_refs_param(t::NamedColumn) = !(parent(t) isa DataColumn)
 _sb_term_refs_param(t::ExprColumn) = any(_sb_term_refs_param, getargs(t))
 _sb_term_refs_param(_) = false
+
+# A completed mi() column is a model value, while its observed training rows
+# provide fixed transform constants. Keep those two uses separate: no fitted
+# mean or SD may depend on a posterior imputation.
+function _sb_mi_predictor_plan(x::NamedColumn)
+    op = parent(x)
+    op isa ExprColumn && getf(op) === (~) || return nothing
+    _brm_missing_response_plan(first(getargs(op, 2)); prefix="sbimpl")
+end
+_sb_term_refs_mi(x::NamedColumn) = !isnothing(_sb_mi_predictor_plan(x))
+_sb_term_refs_mi(x::ExprColumn) = any(_sb_term_refs_mi, getargs(x))
+_sb_term_refs_mi(_) = false
+
+_sb_mi_training_values(x::Number) = x
+function _sb_mi_training_values(x::NamedColumn)
+    plan = _sb_mi_predictor_plan(x)
+    isnothing(plan) ? _sb_materialize_vec(x) : plan.values
+end
+_sb_mi_training_values(x::ExprColumn) = _brm_broadcast_data_call(
+    getf(x), map(_sb_mi_training_values, getargs(x)),
+    map(_sb_mi_training_values, getkwargs(x)))
+
+function _sb_mi_transform_constants(kind::Symbol, raw)
+    observed = collect(Float64, skipmissing(raw))
+    make_error = message -> ArgumentError("sbimpl: missing covariate transform: $message")
+    kind === :missing_center && return (;
+        mean=_brm_fit_mean_numeric(observed, :predictor, :center, make_error), scale=1.0)
+    _brm_fit_zscale_numeric(observed, :predictor, make_error)
+end
+
+function _sb_emit_mi_transform!(stmts, data, kind::Symbol, inner, cn::Symbol)
+    mean_key, scale_key = Symbol(cn, :_mean), Symbol(cn, :_scale)
+    ctx = get(data, _SB_PREPROC_KEY, nothing)
+    frozen = ctx isa _SBPreprocContext ? get(ctx.frozen, mean_key, nothing) : nothing
+    isnothing(frozen) || frozen.kind === kind || error(
+        "sbimpl: fitted missing covariate transform `$cn` changed kind")
+    fit = isnothing(frozen) ? _sb_mi_transform_constants(kind, _sb_mi_training_values(inner)) :
+                             frozen.const_.fit
+    data[mean_key], data[scale_key] = fit.mean, fit.scale
+    _sb_record_preproc!(data, mean_key,
+        PreprocEntry(kind, (; fit, scale_key), inner, false))
+    value = _sb_scalar_expr(inner, data)
+    transformed = kind === :missing_center ? :($value - $mean_key) :
+        :(($value - $mean_key) / $scale_key)
+    push!(stmts, Expr(:(=), cn, transformed))
+    cn
+end
 
 # `coef * col` under `~`: a sampled coefficient times a data column is an
 # ASSIGNMENT-path expression (`lp = coef * col`, emitted as `.*`), not a `~`
