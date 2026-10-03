@@ -54,7 +54,7 @@ _brm_rebind_value(x::NestedPredictorFormula, df) =
 _brm_rebind_value(x::LikelihoodColumn, df) = LikelihoodColumn(
     _brm_rebind_value(parent(x), df), _brm_rebind_value(rhs(x), df))
 _brm_rebind_value(x::JointResponseColumn, df) = JointResponseColumn(
-    map(value -> _brm_rebind_value(value, df), joint_response_columns(x)))
+    map(value -> _brm_rebind_value(value, df), joint_response_columns(x)), x.impute)
 function _brm_rebind_value(x::NamedColumn, df)
     column_name = name(x)
     payload = parent(x)
@@ -76,6 +76,15 @@ function _brm_rebind_value(x::ExprColumn, df)
     rebound_kwargs = NamedTuple{keys(kwargs)}(
         map(value -> _brm_rebind_value(value, df), values(kwargs)))
     ExprColumn(getf(x), args...; rebound_kwargs...)
+end
+function _brm_rebind_value(x::ExprColumn{typeof(assign)}, df)
+    lhs, rhs = getargs(x, 2)
+    # The assignment target is a declaration, even when a same-named raw
+    # column exists. Only its inputs acquire the replay dataframe's values.
+    kwargs = getkwargs(x)
+    rebound_kwargs = NamedTuple{keys(kwargs)}(
+        map(value -> _brm_rebind_value(value, df), values(kwargs)))
+    ExprColumn(assign, lhs, _brm_rebind_value(rhs, df); rebound_kwargs...)
 end
 function _brm_rebind_value(x::MultiMembershipTerm, df)
     groups = map(
@@ -185,7 +194,9 @@ function _brm_collect_data!(data, x::MultiMembershipTerm; skip=Set{Symbol}())
     isnothing(weights) || foreach(a -> _brm_collect_data!(data, a; skip), weights)
 end
 function _brm_joint_response_values(x::JointResponseColumn;
-                                    prefix="BRM backend lowering")
+                                    prefix="BRM backend lowering", allow_imputation=false)
+    x.impute && !allow_imputation && error(
+        "$prefix: joint `mi([...])` completion is supported by the StanBlocks backend only")
     columns = joint_response_columns(x)
     names = joint_response_names(x)
     all(c -> parent(c) isa DataColumn, columns) || error(
@@ -200,12 +211,12 @@ function _brm_joint_response_values(x::JointResponseColumn;
         value_type <: Real || error(
             "$prefix: joint outcome `$(name(column))` must be real-valued, got " *
             "element type $(eltype(values))")
-        any(ismissing, values) && error(
+        !x.impute && any(ismissing, values) && error(
             "$prefix: joint outcome `$(name(column))` contains `missing`. " *
             "`MvNormalCholesky` uses an aligned complete-row likelihood and " *
             "never silently drops or factorizes missing outcome patterns. " *
-            "Supply complete aligned rows or model the outcomes separately.")
-        collected = collect(Float64, values)
+            "Use `mi([$(join(string.(names), ", "))])` for a partially observed joint block.")
+        collected = Float64[ismissing(value) ? 0.0 : value for value in values]
         all(isfinite, collected) || error(
             "$prefix: joint outcome `$(name(column))` contains non-finite values")
         collected
@@ -223,12 +234,28 @@ function _brm_joint_response_values(x::JointResponseColumn;
     [Float64[values[row] for values in raw] for row in eachindex(first(raw))]
 end
 
+# Row-major flat positions are the public block's ordered (row, column) axis.
+# Packing never mutates the caller's columns and permits every missing pattern.
+function _brm_joint_missing_plan(x::JointResponseColumn; prefix="BRM")
+    rows = _brm_joint_response_values(x; prefix, allow_imputation=true)
+    raw = map(c -> parent(parent(c)), joint_response_columns(x))
+    indices = [(row - 1) * length(raw) + column
+               for row in eachindex(rows) for column in eachindex(raw)
+               if ismissing(raw[column][row])]
+    observed = [(row - 1) * length(raw) + column
+                for row in eachindex(rows) for column in eachindex(raw)
+                if !ismissing(raw[column][row])]
+    values = Float64[value for row in rows for value in row]
+    (; rows, missing_indices=indices, observed_indices=observed,
+       observed_values=values[observed])
+end
+
 # Pack one ordered response vector per aligned row before concrete emission.
 # The target-to-observation map sizes intercept-only mean predictors from the
 # explicit scalar row count, while StanBlocks sees a top-level RaggedVector and
 # therefore emits one joint density / predictive vector per row.
 function _brm_collect_data!(data, x::JointResponseColumn; skip=Set{Symbol}())
-    values = _brm_joint_response_values(x)
+    values = _brm_joint_response_values(x; allow_imputation=x.impute)
     data[_joint_response_data_key(x)] = values
     data[_joint_response_n_key(x)] = length(values)
     nothing

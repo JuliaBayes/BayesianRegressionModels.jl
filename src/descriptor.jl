@@ -937,7 +937,7 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
     for d in plan.declarations
         d.role === :observation && !isnothing(d.data_source) || continue
         entry = get(plan.preproc, d.data_source, nothing)
-        if entry isa PreprocEntry && entry.kind === :joint_response
+        if entry isa PreprocEntry && entry.kind in (:joint_response, :joint_missing_response)
             union!(df_columns, Symbol.(entry.raw_ref))
         else
             push!(df_columns, d.data_source)
