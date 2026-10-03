@@ -101,16 +101,21 @@ const grouped_hsgp_explicit_builder=@brm begin
 end
 
 @stestset "grouped HSGP shared and authored hyper predictors native acceptance" begin
+    pool=categorical(["b","b","a","a"])
+    levels!(pool,["b","unused","a"])
+    for groups in ([1,1,2,2],[2,2,5,5],pool)
     for (label,builder) in (("default",grouped_hsgp_default_builder),
             ("hyper",grouped_hsgp_hyper_builder),("explicit",grouped_hsgp_explicit_builder))
-        data=(;x=[-.5,0.,.5,1.],g=[1,1,2,2],y=[-1.,.1,1.,.4])
+        data=(;x=[-.5,0.,.5,1.],g=groups,y=[-1.,.1,1.,.4])
+        group_levels=groups isa CategoricalArray ? collect(levels(groups)) : sort(unique(groups))
+        group_index=Int.(indexin(groups,group_levels));G=length(group_levels)
         before=deepcopy(data)
         model=builder(data)
         backend,problem=consumer_problem(model)
         names=coordinate_names(backend.model.layout)
         index(n)=something(findfirst(==(Symbol(n)),names))
         a=index("mu_Intercept")
-        weights=[index("hsgp_x_z.$g.$k") for g in 1:2,k in 1:3]
+        weights=[index("hsgp_x_z.$g.$k") for g in 1:G,k in 1:3]
         phi,frequencies,floor=independent_hsgp_basis(data.x,3,1.5)
         # Prepared geometry supplies only its immutable fitted c, never the
         # statistical density or a backend result used as a reference.
@@ -118,14 +123,14 @@ end
         phi,frequencies,floor=independent_hsgp_basis(data.x,3,term.options.c)
         stan=consumer_stan(model,"grouped-hsgp-"*label)
         mapping=[:mu_Intercept=>"pop_mu_beta_pop.1"]
-        for g in 1:2,k in 1:3
+        for g in 1:G,k in 1:3
             push!(mapping,names[weights[g,k]]=>"zflat_hsgpw_x_g.$((g-1)*3+k)")
         end
         for (stem,stan_stem) in (("rho","rho_iso"),("sigma","sigma"))
             if label=="hyper"
                 push!(mapping,Symbol("hsgp_x_$(stem)_Intercept")=>"hsgp_x_by_g_beta0_$stem")
                 push!(mapping,Symbol("hsgp_x_$(stem)_sd")=>"hsgp_x_by_g_sd_$stem")
-                for g in 1:2
+                for g in 1:G
                     push!(mapping,Symbol("hsgp_x_$(stem)_z.$g")=>"hsgp_x_by_g_z_$stem.$g")
                 end
             else
@@ -138,7 +143,7 @@ end
                 if label=="hyper"
                     beta=index("hsgp_x_$(stem)_Intercept")
                     sd=index("hsgp_x_$(stem)_sd")
-                    zs=[index("hsgp_x_$(stem)_z.$g") for g in 1:2]
+                    zs=[index("hsgp_x_$(stem)_z.$g") for g in 1:G]
                     prior+=logpdf(Normal(),u[beta])+sum(logpdf.(Normal(),u[zs]))+
                         logpdf(truncated(Normal(),0,Inf),exp(u[sd]))+u[sd]
                     value=exp.(u[beta].+exp(u[sd]).*u[zs])
@@ -150,13 +155,13 @@ end
                     law=label=="explicit" ? Exponential(stem=="rho" ? .7 : 1.3) :
                         (stem=="rho" ? truncated(LogNormal(),floor,Inf) : LogNormal())
                     prior+=logpdf(law,value)+u[q]
-                    fill(value,2)
+                    fill(value,G)
                 end
             end
             rho,sigma=hypers
-            mu=[u[a]+sum(phi[i,k]*u[weights[data.g[i],k]]*
-                sigma[data.g[i]]*sqrt(rho[data.g[i]]*sqrt(2pi))*
-                exp(-rho[data.g[i]]^2*frequencies[k]/4) for k in 1:3)
+            mu=[u[a]+sum(phi[i,k]*u[weights[group_index[i],k]]*
+                sigma[group_index[i]]*sqrt(rho[group_index[i]]*sqrt(2pi))*
+                exp(-rho[group_index[i]]^2*frequencies[k]/4) for k in 1:3)
                 for i in eachindex(data.y)]
             prior+sum(logpdf.(Normal.(mu,1),data.y))
         end
@@ -169,5 +174,6 @@ end
             check_consumer_stan(problem,stan,mapping,backend,u;density_offset=offset)
         end
         @test isequal(data,before)
+    end
     end
 end
