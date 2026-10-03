@@ -364,6 +364,18 @@ function _rk_value_expr!(bindings, expression::_BRMPreparedExpr, taken)
     args = map(arg -> _rk_value_expr!(bindings, arg, taken), expression.args)
     expression.callable === getindex && return Expr(:ref, args...)
     expression.callable === Base.vect && return Expr(:vect, args...)
+    # BRM expression arithmetic is elementwise. Ordinary RKPPL source must
+    # state that explicitly, while reductions and authored whole-array calls
+    # keep their own Julia semantics and exact callable bindings.
+    if isempty(expression.kwargs)
+        if haskey(_RK_DERIVED_BINOPS, expression.callable)
+            return Expr(:call, _RK_DERIVED_BINOPS[expression.callable], args...)
+        elseif haskey(_RK_DERIVED_CMP, expression.callable)
+            return Expr(:call, _RK_DERIVED_CMP[expression.callable], args...)
+        elseif haskey(_RK_DERIVED_MATH, expression.callable)
+            return _rk_ast_dotted(_RK_DERIVED_MATH[expression.callable], args...)
+        end
+    end
     callee = _rk_value_callee!(bindings, expression.callable, taken)
     call = Expr(:call, callee, args...)
     if !isempty(expression.kwargs)

@@ -38,7 +38,7 @@ end
 function _rk_translate_from_emitted(plan::BRM._RKStructuralPlan,
         emitted::BRM._RKEmittedProgram)
     unbound = lower_rkppl(emitted.main,
-        Tuple(sort!(collect(keys(plan.columns)))); mod=_rk_emit_module(emitted),
+        plan.columns; mod=_rk_emit_module(emitted),
         conditioned=Tuple(unique([name for response in plan.responses
             for name in (response.response, response.extra_responses...)])))
     bind_data(unbound, plan.columns)
@@ -47,7 +47,7 @@ end
 function _rk_translate_from_emitted(plan::BRM._RKKernelPlan,
         emitted::BRM._RKEmittedProgram)
     unbound = lower_rkppl(emitted.main,
-        Tuple(sort!(collect(keys(plan.columns)))); mod=_rk_emit_module(emitted),
+        plan.columns; mod=_rk_emit_module(emitted),
         conditioned=(plan.kernel.data_columns[
             findfirst(==(plan.kernel.obs_response), plan.kernel.slice_params)],))
     bind_data(unbound, plan.columns)
@@ -56,7 +56,7 @@ end
 function _rk_translate_from_emitted(plan::BRM._RKValuePlan,
         emitted::BRM._RKEmittedProgram)
     unbound = lower_rkppl(emitted.main,
-        Tuple(sort!(collect(keys(plan.columns)))); mod=_rk_emit_module(emitted),
+        plan.columns; mod=_rk_emit_module(emitted),
         conditioned=Tuple(o.name for o in plan.observations))
     bind_data(unbound, plan.columns)
 end

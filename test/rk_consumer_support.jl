@@ -15,8 +15,8 @@ function consumer_problem(brmi)
     backend, rk_logdensity_problem(backend; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
 end
 
-function consumer_stan(brmi, name)
-    sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
+function consumer_stan(brmi, name; mod=@__MODULE__)
+    sb = SBBRMI(brmi; mod, total_groups=())
     folder = joinpath(tempdir(), "brm-rk-consumer")
     mkpath(folder)
     problem = BRM.stan_instantiate(sb; path=joinpath(folder, name * ".stan"))
@@ -39,7 +39,7 @@ function check_consumer_point(problem, u, oracle)
     value, gradient
 end
 
-function check_consumer_stan(problem, stan, mapping, backend, u)
+function check_consumer_stan(problem, stan, mapping, backend, u; density_offset=0.)
     permutation = BRM.resolve_sb_map(mapping, coordinate_names(backend.model.layout),
         BridgeStan.param_unc_names(stan.model); case_id="public-consumer")
     stan_u = BRM.apply_sb_map(u, permutation)
@@ -47,7 +47,6 @@ function check_consumer_stan(problem, stan, mapping, backend, u)
     value, _ = BridgeStan.log_density_gradient!(stan.model, stan_u, gradient;
         propto=false, jacobian=true)
     rk_value, rk_gradient = LogDensityProblems.logdensity_and_gradient(problem, u)
-    @test rk_value ≈ value atol=2e-11 rtol=2e-11
+    @test rk_value ≈ value+density_offset atol=2e-11 rtol=2e-11
     @test rk_gradient ≈ BRM.unmap_sb_grad(gradient, permutation) atol=2e-10 rtol=2e-10
 end
-

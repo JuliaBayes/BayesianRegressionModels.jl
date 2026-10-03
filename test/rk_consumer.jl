@@ -136,8 +136,15 @@ end
                 logpdf(Normal(),t)+log(2)+u[scale]
             sum(logpdf.(Normal.(mu,1),data.y))+sum(logpdf.(Normal(),u[z]))+scale_prior
         end
+        stan=consumer_stan(model,"random-only-"*label)
+        prefix=label=="named" ? "b_p_subject" : "r_eta_subject"
+        stan_scale=label=="unnamed" ? "$(prefix)_log_scale" : "$(prefix)_tau.1"
+        stan_z=label=="named" ? "$(prefix)_z_flat" : "$(prefix)_xi"
+        mapping=[names[scale]=>stan_scale; [names[z[i]]=>"$stan_z.$i" for i in 1:2]]
         for u in (zeros(length(names)),collect(range(-.2,.3;length=length(names))))
             check_consumer_point(problem,u,oracle)
+            check_consumer_stan(problem,stan,mapping,backend,u;
+                density_offset=label=="unnamed" ? 0. : log(2))
         end
         @test bucket.kind == (label=="named" ? :correlated : label=="slope" ? :slope1 : :intercept1)
     end
