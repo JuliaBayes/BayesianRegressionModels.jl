@@ -21,6 +21,34 @@ const MISSING_PLAIN = @brm begin
     y ~ Normal(mu, 1)
 end
 
+const MISSING_TRANSFORMS = @brm begin
+    mi(x) ~ LogNormal(0, 0.7)
+    mu ~ 1 + standardize(x) + center(x) + zscale(log(x)) + log(x)
+    y ~ Normal(mu, 1)
+end
+
+@stestset "missing covariate transforms use observed fixed constants" begin
+    sb = SBBRMI(MISSING_TRANSFORMS(MISSING_TOY); mod=@__MODULE__)
+    observed = collect(skipmissing(MISSING_TOY.x))
+    @test sb.data[:standardize_x_mean] ≈ mean(observed)
+    @test sb.data[:standardize_x_scale] ≈ std(observed)
+    @test sb.data[:center_x_mean] ≈ mean(observed)
+    @test !haskey(sb.data, :standardize_x)
+    @test popcoefnames(sb.parent, :mu)[1:3] == [:Intercept, :standardize_x, :center_x]
+    code = BayesianRegressionModels.stan_code(sb)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    @test occursin("vector<lower=0.0>[x_n_mis] x_y_mis;", code)
+    same_mask = merge(MISSING_TOY, (;
+        x=Union{Missing,Float64}[1.3, missing, 2.7, missing, 1.8],))
+    replay = reprocess(sb, same_mask)
+    @test replay.data[:standardize_x_mean] == sb.data[:standardize_x_mean]
+    @test replay.data[:standardize_x_scale] == sb.data[:standardize_x_scale]
+    @test BayesianRegressionModels.stan_code(replay) == code
+    fresh = reprocess(sb, same_mask; freeze_constants=false)
+    @test fresh.data[:standardize_x_mean] ≈ mean(skipmissing(same_mask.x))
+    @test fresh.data[:standardize_x_scale] ≈ std(collect(skipmissing(same_mask.x)))
+end
+
 @stestset "missing covariate replay preserves fitted row positions" begin
     original = deepcopy(MISSING_TOY)
     sb = SBBRMI(MISSING_PLAIN(MISSING_TOY); mod=@__MODULE__)

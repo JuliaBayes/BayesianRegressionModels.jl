@@ -4516,6 +4516,15 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         new_data[fitted.missing_key] = plan.missing_indices
         union!(handled, (fitted.observed_key, fitted.missing_key))
         new_preproc[key] = _sb_missing_preproc(plan, fitted.observed_key, fitted.missing_key)
+    elseif e.kind === :missing_center || e.kind === :missing_standardize ||
+           e.kind === :missing_zscale
+        fit = freeze ? e.const_.fit : _sb_mi_transform_constants(
+            e.kind, _sb_rematerialize_vec(e.raw_ref, df))
+        new_data[key] = fit.mean
+        new_data[e.const_.scale_key] = fit.scale
+        push!(handled, e.const_.scale_key)
+        new_preproc[key] = PreprocEntry(e.kind,
+            (; fit, scale_key=e.const_.scale_key), e.raw_ref, false)
     elseif e.kind === :interaction
         left_key, right_key = e.raw_ref
         haskey(new_data, left_key) || error(
@@ -11625,6 +11634,11 @@ for (fn, kind, fitf, applyf) in (
     # inner column-node tree, re-materialised on the new df at reprocess time.
     @eval function _sb_predictor_term!(stmts, data, ::typeof($fn), t; kwargs...)
         inner = only(getargs(t))
+        if _sb_term_refs_mi(inner)
+            cn = _sb_wrapper_col_name($(QuoteNode(fn)), inner)
+            return _sb_emit_mi_transform!(stmts, data,
+                $(QuoteNode(Symbol(:missing_, kind))), inner, cn)
+        end
         v = collect(Float64, _sb_materialize_vec(inner))
         c = $fitf(v)
         v_t = $applyf(c, v)
@@ -11641,6 +11655,11 @@ end
 # if any leaf isn't a raw data column (e.g. references a sampled parameter
 # directly), preserving the old "unsupported" diagnostic.
 function _sb_materialize_protect_term!(stmts, data, f, t)
+    if _sb_term_refs_mi(t)
+        cn = _sb_wrapper_col_name(Symbol(f), t)
+        push!(stmts, Expr(:(=), cn, _sb_scalar_expr(t, data)))
+        return cn
+    end
     try
         v = collect(Float64, _sb_materialize_vec(t))
         cn = _sb_wrapper_col_name(Symbol(f), t)
@@ -11662,6 +11681,53 @@ _sb_predictor_term!(stmts, data, f::Function, t; kwargs...) =
 _sb_term_refs_param(t::NamedColumn) = !(parent(t) isa DataColumn)
 _sb_term_refs_param(t::ExprColumn) = any(_sb_term_refs_param, getargs(t))
 _sb_term_refs_param(_) = false
+
+# A completed mi() column is a model value, while its observed training rows
+# provide fixed transform constants. Keep those two uses separate: no fitted
+# mean or SD may depend on a posterior imputation.
+function _sb_mi_predictor_plan(x::NamedColumn)
+    op = parent(x)
+    op isa ExprColumn && getf(op) === (~) || return nothing
+    _brm_missing_response_plan(first(getargs(op, 2)); prefix="sbimpl")
+end
+_sb_term_refs_mi(x::NamedColumn) = !isnothing(_sb_mi_predictor_plan(x))
+_sb_term_refs_mi(x::ExprColumn) = any(_sb_term_refs_mi, getargs(x))
+_sb_term_refs_mi(_) = false
+
+_sb_mi_training_values(x::Number) = x
+function _sb_mi_training_values(x::NamedColumn)
+    plan = _sb_mi_predictor_plan(x)
+    isnothing(plan) ? _sb_materialize_vec(x) : plan.values
+end
+_sb_mi_training_values(x::ExprColumn) = _brm_broadcast_data_call(
+    getf(x), map(_sb_mi_training_values, getargs(x)),
+    map(_sb_mi_training_values, getkwargs(x)))
+
+function _sb_mi_transform_constants(kind::Symbol, raw)
+    observed = collect(Float64, skipmissing(raw))
+    make_error = message -> ArgumentError("sbimpl: missing covariate transform: $message")
+    kind === :missing_center && return (;
+        mean=_brm_fit_mean_numeric(observed, :predictor, :center, make_error), scale=1.0)
+    _brm_fit_zscale_numeric(observed, :predictor, make_error)
+end
+
+function _sb_emit_mi_transform!(stmts, data, kind::Symbol, inner, cn::Symbol)
+    mean_key, scale_key = Symbol(cn, :_mean), Symbol(cn, :_scale)
+    ctx = get(data, _SB_PREPROC_KEY, nothing)
+    frozen = ctx isa _SBPreprocContext ? get(ctx.frozen, mean_key, nothing) : nothing
+    isnothing(frozen) || frozen.kind === kind || error(
+        "sbimpl: fitted missing covariate transform `$cn` changed kind")
+    fit = isnothing(frozen) ? _sb_mi_transform_constants(kind, _sb_mi_training_values(inner)) :
+                             frozen.const_.fit
+    data[mean_key], data[scale_key] = fit.mean, fit.scale
+    _sb_record_preproc!(data, mean_key,
+        PreprocEntry(kind, (; fit, scale_key), inner, false))
+    value = _sb_scalar_expr(inner, data)
+    transformed = kind === :missing_center ? :($value - $mean_key) :
+        :(($value - $mean_key) / $scale_key)
+    push!(stmts, Expr(:(=), cn, transformed))
+    cn
+end
 
 # `coef * col` under `~`: a sampled coefficient times a data column is an
 # ASSIGNMENT-path expression (`lp = coef * col`, emitted as `.*`), not a `~`
