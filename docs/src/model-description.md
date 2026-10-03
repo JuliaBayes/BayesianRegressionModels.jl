@@ -56,6 +56,8 @@ logical tuple `id`, `kind`, actual `callable`, `arguments`, `keywords`, `childre
 Arguments contain literals, [`BRMDescriptionReference`](@ref) values, tuples
 and recursive components. Keyword arguments are a named tuple. Collections
 and fitted values are read-only snapshots.
+Vectors use tuples; matrices and higher-dimensional arrays use
+`(size=..., values=...)`, with values in Julia's column-major order.
 
 Output records expose `name`, `logical`, `role`, `kind` and `segments`.
 `logical` is a symbol or `nothing`; component and prior IDs are tuples.
@@ -70,6 +72,10 @@ producer's precedence resolver. Generated latent priors, scalar hyperpriors,
 positive scales and improper unpenalized coefficients are inventoried too.
 Gaussian equations square the SD argument; Exponential scale and rate
 parameterizations are stated explicitly.
+Affine Student-t observations retain their location and scale: for degrees of
+freedom ν > 2, their SD is scale × √(ν/(ν−2)). Scale is not their SD.
+Declared support bounds describe the prepared parameter constraints; the
+inventory retains the actual density factor on that support.
 
 The Markdown renderer creates a stable target for each row of its complete
 effective-prior table and links component prior references to those targets.
@@ -77,6 +83,8 @@ effective-prior table and links component prior references to those targets.
 `brm_description_prior_references(context)` returns the related logical prior IDs.
 Targets are scoped to `model_id`. For repeated instances of one model artifact,
 pass a unique `prefix` to both `brm_description_markdown` and the anchor helper.
+This also applies when separate data or fitted constants share one source
+identity; the adapter should give each model mount its own prefix.
 The optional `prior_anchors` map adds outbound links to targets owned by the
 calling report; it does not create those external targets.
 
@@ -111,10 +119,26 @@ authored internal parameter. Its record contains `name`, `role`, `value`,
 ID. Repeated nested names can be addressed by an authored tuple path.
 Kernel lambda aliases point to actual model arguments. No generated prefix or
 declaration-order assumption is needed.
+Reference-valued keywords use the same math API, including identity aliases.
+Kernel equations show the grouped input mapping; scientific child hooks provide
+their recurrences without inserting lambda or block syntax into the equation.
+Cell assignments emit separate indexing and arithmetic relations, and the
+mapping connects to the cell's returned quantity. Cell-local names are scoped
+to their kernel owner (for example, `pred.state`) unless notation overrides them.
 Authored literal assignments have `role=:constant` and expose their value;
 composed assignments have `role=:deterministic` and expose a public expression.
+References to deterministic quantities render as symbols; render the binding's
+`value` explicitly to expand its defining expression.
 Actual higher-order callable arguments retain their identity and render through
 the same escaped math helper.
+
+Included-model inputs backed by known prepared arrays retain
+`BRMDescriptionReference` values rather than anonymous numeric tuples. Generated
+prepared inputs have logical IDs `(:prepared_data, key)`; their math uses the
+bound data symbol. This preserves observation, mask and transformed-input
+identities without printing the dataset into an equation. Actual literal prior
+shapes and limits still retain their numeric values. Static global callable
+bindings retain their actual identity without traversing Julia's binding objects.
 
 Included scientific SlicModels expose their parameter declarations,
 deterministic expressions and nested calls as children. A top-level caption
@@ -126,3 +150,6 @@ Claims outside that subtree or for nonexistent IDs raise an error.
 for independent scientific review of its handwritten hooks. Unsupported calls
 and syntax retain precise `coverage` records and `diagnostics`; the Markdown
 renderer labels such a result **incomplete**.
+Structured allocation nodes, including R2D2 and population Horseshoe schemes,
+currently retain explicit gaps until their allocation equations are supplied.
+Their Gaussian conditionals do not establish coverage of the allocation.

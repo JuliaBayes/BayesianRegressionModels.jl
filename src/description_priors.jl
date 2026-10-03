@@ -8,6 +8,10 @@ function _brmd_prior(d, id, expression, support, source, anchors, notation;bindi
             if k in (:lower,:upper))...))
     end
     value = _brmd_value(expression, env, (:prior, id...))
+    if value isa BRMDescriptionComponent && _brmd_law(value.callable)===:uniform
+        a=value.arguments
+        support=merge((;lower=isempty(a) ? 0.0 : first(a),upper=isempty(a) ? 1.0 : a[2]),support)
+    end
     anchor = get(anchors,id,nothing)
     BRMPriorDescription(id, value, support, source,
         isnothing(anchor) ? nothing : String(anchor), env.provenance)
@@ -19,9 +23,10 @@ _brmd_support(f::StanBlocks.ValueFamily) = _brmd_snapshot(f.support)
 _brmd_support(::Type{<:Exponential}) = (; lower=0.0)
 _brmd_support(::Type{<:LogNormal}) = (; lower=0.0)
 _brmd_support(::Type{<:Gamma}) = (; lower=0.0)
+_brmd_support(::Type{<:InverseGamma}) = (; lower=0.0)
 _brmd_support(::Type{<:Beta}) = (; lower=0.0, upper=1.0)
 _brmd_support(::Type{<:Dirichlet}) = (; domain=:simplex)
-for (name,support) in ((:exponential,(;lower=0.0)),(:gamma,(;lower=0.0)),
+for (name,support) in ((:exponential,(;lower=0.0)),(:gamma,(;lower=0.0)),(:inv_gamma,(;lower=0.0)),
         (:lognormal,(;lower=0.0)),(:beta,(;lower=0.0,upper=1.0)),
         (:dirichlet,(;domain=:simplex)),(:lkj_corr_cholesky,(;domain=:cholesky_correlation)))
     if isdefined(StanBlocks.stan.builtin,name)
@@ -40,6 +45,13 @@ function _brmd_population_priors!(priors,d,anchors,notation)
         settings = _sb_pop_effect_overrides(overrides,entry.logical)
         binding=get(d.plan.bindings,entry.block,nothing)
         scheme=isnothing(binding) ? (;kind=:ordinary) : get(binding,:prior_scheme,(;kind=:ordinary))
+        if scheme.kind===:horseshoe
+            site=only(filter(p->p.target===entry.block && isempty(p.context),d.plan.declarations))
+            model=_brmd_binding(site.family,d.plan.model.mod)
+            values=Dict(k=>_brmd_substitute(v,d.plan.data) for (k,v) in pairs(site.keywords))
+            _brmd_submodel_priors!(priors,d,model,values,
+                (:population_internal,entry.logical),anchors,notation)
+        end
         for (i,label) in enumerate(labels)
             configured = isnothing(settings) ? nothing : settings[i]
             expression = isnothing(configured) ? _brmd_default_normal() : configured.expression
@@ -64,6 +76,13 @@ function _brmd_population_priors!(priors,d,anchors,notation)
                     specificity=isnothing(configured) ? nothing : configured.rank,
                     predictor=cat.predictor, level=_brmd_snapshot(level),
                     reference=_brmd_snapshot(cat.reference_level), coding=cat.coding)
+                allocated=scheme.kind===:r2d2m2 ? get(scheme.spec.cat_lookup,cat.emitted,nothing) : nothing
+                if !isnothing(allocated)
+                    expression=ExprColumn(Normal,0.0,BRMDescriptionReference(:allocated_sd,:scalar,
+                        (:allocation,entry.logical,:categorical_scale,cat.address,i)))
+                    source=merge(source,(;kind=:conditional,allocation=(:allocation,entry.logical),
+                        share=allocated.phi_start+i-1))
+                end
                 push!(priors,_brmd_prior(d,(:population,entry.logical,cat.address,:level,i),
                     expression,_brmd_support(getf(expression)),source,anchors,notation))
             end
@@ -79,8 +98,10 @@ function _brmd_ranef_metadata(d)
         key = (:random_effect, isnothing(block.id) ? (:independent,index) : block.id, block.group)
         declarations = filter(x -> x.target === block.binding,d.plan.declarations)
         declaration = only(declarations)
+        binding=get(d.plan.bindings,block.binding,NamedTuple())
         margins = if isnothing(block.id)
-            Tuple((; predictor=x.logical, coefficient=label)
+            haskey(binding,:columns) ? Tuple((;predictor=binding.predictor,coefficient=label)
+                for label in binding.columns) : Tuple((; predictor=x.logical, coefficient=label)
                   for x in d.outputs if x.declaration !== nothing &&
                       x.declaration.target === block.binding && x.labels !== nothing
                   for label in x.labels)
@@ -104,6 +125,13 @@ end
 function _brmd_ranef_priors!(priors,d,groups,anchors,notation)
     for group in groups
         cfg = group.configuration
+        if !isnothing(group.block.by)
+            site=group.declaration
+            model=_brmd_binding(site.family,d.plan.model.mod)
+            values=Dict(k=>_brmd_substitute(v,d.plan.data) for (k,v) in pairs(site.keywords))
+            _brmd_submodel_priors!(priors,d,model,values,group.key,anchors,notation)
+            continue
+        end
         # R2D2 derives these scales. Its emitted hyperpriors are inventoried
         # below; never substitute an independent half-normal prior for them.
         spec = get(_RANEF_FAMILIES,group.block.family,nothing)
@@ -130,6 +158,11 @@ function _brmd_ranef_priors!(priors,d,groups,anchors,notation)
             push!(priors,_brmd_prior(d,(group.key...,:standardized_deviations),
                 ExprColumn(Normal,0.0,1.0),NamedTuple(),
                 (;kind=:generated,dimension=(group.block.n_terms,group.block.n_groups)),anchors,notation))
+        else
+            push!(priors,_brmd_prior(d,(group.key...,:deviations),
+                ExprColumn(MvNormalCholesky,zeros(group.block.n_terms),
+                    BRMDescriptionReference(:C,:covariance,(group.key...,:cholesky_scale))),NamedTuple(),
+                (;kind=:conditional,dimension=(group.block.n_groups,group.block.n_terms),covariance=group.key),anchors,notation))
         end
         if group.correlated
             eta = isnothing(cfg) ? 1.0 : cfg.lkj_eta

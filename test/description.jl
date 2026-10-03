@@ -30,6 +30,33 @@ end
 const curve=DescriptionScientificComponent.curve
 const toy_term=DescriptionScientificComponent.toy_term
 
+@testset "public reference-valued keywords terminate alias cycles" begin
+    data=merge(DESCRIPTION_DATA,(;input=DESCRIPTION_DATA.x))
+    m=@brm data begin
+        mu ~ toy_term(input;anchor=1.7,input=input)
+        y ~ Normal(mu,0.5)
+    end
+    r=brm_description(SBBRMI(m;mod=@__MODULE__,total_groups=()))
+    c=only(filter(c->c.callable===toy_term,brm_description_components(r)))
+    @test c.keywords.input isa BRMDescriptionReference
+    @test brm_description_binding(c,:input).value.name===:input
+    @test brm_description_math(c,c.keywords.input)=="\\mathrm{input}"
+    bindings=c.bindings
+    withbindings(bs)=BRMDescriptionContext(c.id,c.kind,c.callable,c.arguments,c.keywords,
+        c.axes,c.outputs,c.priors,c.fitted_constants,c.children,c.provenance,c.notation,bs)
+    a=BRMDescriptionReference(:a,:local)
+    b=BRMDescriptionReference(:b,:local)
+    cyclic=withbindings(((;name=:a,role=:alias,value=b,prior_ids=()),
+        (;name=:b,role=:alias,value=a,prior_ids=())))
+    @test brm_description_math(cyclic,a)=="\\mathrm{a}"
+    expression=BRMDescriptionComponent((:cycle,),:call,+,(b,1),NamedTuple(),(),(),(),(),(),c.provenance,(),())
+    composed=withbindings(((;name=:a,role=:deterministic,value=expression,prior_ids=()),
+        (;name=:b,role=:alias,value=a,prior_ids=())))
+    @test brm_description_math(composed,a)=="\\mathrm{a}"
+    @test brm_description_math(composed,brm_description_binding(composed,:a).value)=="\\left(\\mathrm{a} + 1\\right)"
+    @test c.bindings===bindings
+end
+
 @testset "prepared hierarchical description and effective priors" begin
     m=@brm DESCRIPTION_DATA begin
         sigma ~ Exponential(2)
@@ -48,7 +75,7 @@ const toy_term=DescriptionScientificComponent.toy_term
     @test r.complete
     @test isempty(r.diagnostics)
     @test all(c -> c.status===:covered,r.coverage)
-    @test any(e -> occursin("D\\Omega D",e),r.equations)
+    @test any(e -> occursin("\\Omega_{",e),r.equations)
     @test any(e -> occursin("\\mathcal N",e) && occursin("sigma",e) && occursin("}^{2}",e),r.equations)
     ps=only(filter(p -> p.id===(:population,:mu,:x),r.priors))
     @test ps.distribution.arguments==(1.2,0.4)
@@ -145,6 +172,7 @@ end
     @test r.complete
     @test isempty(r.diagnostics)
     @test length(contexts)==2
+    @test all(e->!occursin("\\mathrm{block}",e) && !occursin("\\mathrm{->}",e),r.equations)
     @test occursin("t\\_grid",brm_description_math(last(contexts),only(last(contexts).arguments)))
     unrelated=first(filter(c -> c.kind===:parameter || c.kind===:predictor,r.components))
     @test_throws ArgumentError brm_description(d;hooks=(curve=>c->BRMDescriptionFragment(covers=(unrelated.id,)),))
@@ -159,7 +187,7 @@ end
     end
     r=brm_description(SBBRMI(independent;total_groups=()))
     @test r.complete
-    @test !any(e -> occursin("D\\Omega D",e),r.equations)
+    @test !any(e -> occursin("\\Omega_{",e),r.equations)
     @test count(c -> c.kind===:random_effect,r.components)==2
     @test !any(p -> :correlation in p.id,r.priors)
 end

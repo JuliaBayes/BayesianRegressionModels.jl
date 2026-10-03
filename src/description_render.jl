@@ -11,9 +11,11 @@ Return the LaTeX notation bound to an actual logical name. Default identifiers
 are escaped. An explicit notation `symbol` is trusted caller-supplied LaTeX.
 """
 function brm_description_symbol(context::BRMDescriptionContext, name::Union{Symbol,Tuple})
+    fallback=name isa Symbol && name in get(context.provenance,:cell_names,()) ?
+        _brmd_identifier(string(context.provenance.cell_owner)*"."*string(name)) : _brmd_identifier(name)
     found = filter(n -> n.name == name, context.notation)
-    isempty(found) || return get(only(found), :symbol, _brmd_identifier(name))
-    _brmd_identifier(name)
+    isempty(found) || return get(only(found), :symbol, fallback)
+    fallback
 end
 
 """
@@ -23,13 +25,20 @@ Render any public argument/reference/component as escaped LaTeX using the
 context's notation. Rendering an unknown call does not establish coverage.
 """
 function brm_description_math(c::BRMDescriptionContext,x::BRMDescriptionReference)
-    aliases=filter(b -> b.name===x.name && b.role in (:alias,:constant,:deterministic),c.bindings)
+    aliases=filter(b -> x.axis!==:cell && b.name===x.name && b.role in (:alias,:constant),c.bindings)
     if !isempty(aliases)
         value=only(aliases).value
-        isequal(value,x) || return brm_description_math(c,value)
+        # Drop this alias before following it. This terminates identity aliases,
+        # longer alias cycles and cycles through deterministic expressions.
+        remaining=Tuple(b for b in c.bindings if b.name!==x.name)
+        localcontext=BRMDescriptionComponent(c.id,c.kind,c.callable,c.arguments,c.keywords,
+            c.axes,c.outputs,c.priors,c.fitted_constants,c.children,c.provenance,c.notation,remaining)
+        isequal(value,x) || return brm_description_math(localcontext,value)
     end
     x.logical isa Tuple && any(n -> n.name==x.logical,c.notation) &&
         return brm_description_symbol(c,x.logical)
+    x.axis===:covariance && x.logical isa Tuple && last(x.logical)===:cholesky_scale &&
+        return "C_{"*_brmd_escape(x.logical[1:end-1])*"}"
     brm_description_symbol(c,x.name)
 end
 brm_description_math(_c::BRMDescriptionContext, x::Number) = string(x)
@@ -54,6 +63,19 @@ brm_description_math(_c::BRMDescriptionContext,x::Union{Function,Type,StanBlocks
     _brmd_identifier(_brmd_callable_name(x))
 
 function brm_description_math(c::BRMDescriptionContext, x::BRMDescriptionComponent)
+    x.callable===kernel && return _brmd_kernel_math(c,x)
+    if x.kind===:syntax
+        if x.callable===:ref
+            return brm_description_math(c,first(x.arguments))*"_{"*
+                join((brm_description_math(c,a) for a in x.arguments[2:end]),",")*"}"
+        elseif x.callable in (:tuple,:vect)
+            return "\\left["*join((brm_description_math(c,a) for a in x.arguments),", ")*"\\right]"
+        elseif x.callable===:(=) && first(x.arguments) isa BRMDescriptionReference
+            return brm_description_symbol(c,first(x.arguments).name)*"="*brm_description_math(c,last(x.arguments))
+        elseif x.callable===:return
+            return brm_description_math(c,only(x.arguments))
+        end
+    end
     if x.callable===StanBlocks.stan.builtin.maybe_index
         value=first(x.arguments)
         (value isa Number || value isa BRMDescriptionReference && value.axis===:scalar) &&
@@ -76,6 +98,9 @@ _brmd_call_math(::typeof(exp), args, _kwargs, _c) = "\\exp\\left(" * only(args) 
 _brmd_call_math(::typeof(log), args, _kwargs, _c) = "\\log\\left(" * only(args) * "\\right)"
 _brmd_call_math(::typeof(sqrt), args, _kwargs, _c) = "\\sqrt{" * only(args) * "}"
 _brmd_call_math(::typeof(logistic), args, _kwargs, _c) = "\\operatorname{logit}^{-1}\\left(" * only(args) * "\\right)"
+_brmd_call_math(::typeof(StanBlocks.stan.builtin.inv_logit),args,_kwargs,_c) =
+    "\\frac{1}{1+\\exp\\left(-"*only(args)*"\\right)}"
+_brmd_builtin_call(::typeof(StanBlocks.stan.builtin.inv_logit),c)=BRMDescriptionFragment(covers=(c.id,))
 
 # Distribution equations use explicit parameter conventions. A normal's second
 # constructor argument is an SD; the conventional Gaussian equation uses variance.
@@ -87,7 +112,9 @@ _brmd_law(::Type{<:LogNormal}) = :lognormal_sd
 _brmd_law(::Type{<:Gamma}) = :gamma_scale
 _brmd_law(::Type{<:Beta}) = :beta
 _brmd_law(::Type{<:Cauchy}) = :cauchy
-_brmd_law(::Type{<:TDist}) = :student_t
+_brmd_law(::Type{<:TDist}) = :student_t_standard
+_brmd_law(::Type{<:LocationScale}) = :affine
+_brmd_law(::Type{<:InverseGamma}) = :inverse_gamma
 _brmd_law(::Type{<:Bernoulli}) = :bernoulli
 _brmd_law(::Type{<:BernoulliLogit}) = :bernoulli_logit
 _brmd_law(::Type{<:Binomial}) = :binomial
@@ -97,15 +124,16 @@ _brmd_law(::Type{<:NegativeBinomial}) = :negative_binomial
 _brmd_law(::Type{<:Dirichlet}) = :dirichlet
 _brmd_law(::Type{<:LKJCholesky}) = :lkj
 _brmd_law(::Type{<:Weibull}) = :weibull
+_brmd_law(::Type{<:Uniform}) = :uniform
 _brmd_law(::typeof(MvNormalCholesky)) = :mvnormal_cholesky
 # These are exact producer-owned StanBlocks bindings, never a name heuristic
 # applied to arbitrary user callables.
 for (name,law) in ((:normal,:normal_sd),(:std_normal,:standard_normal),
         (:exponential,:exponential_rate),(:lognormal,:lognormal_sd),
-        (:gamma,:gamma_rate),(:beta,:beta),(:cauchy,:cauchy),(:student_t,:student_t),
+        (:gamma,:gamma_rate),(:beta,:beta),(:cauchy,:cauchy),(:student_t,:student_t_location_scale),
         (:bernoulli,:bernoulli),(:bernoulli_logit,:bernoulli_logit),
         (:binomial,:binomial),(:binomial_logit,:binomial_logit),(:poisson,:poisson),
-        (:dirichlet,:dirichlet),(:lkj_corr_cholesky,:lkj),(:weibull,:weibull))
+        (:dirichlet,:dirichlet),(:lkj_corr_cholesky,:lkj),(:weibull,:weibull),(:uniform,:uniform),(:inv_gamma,:inverse_gamma))
     if isdefined(StanBlocks.stan.builtin,name)
         f=getfield(StanBlocks.stan.builtin,name)
         @eval _brmd_law(::$(typeof(f))) = $(QuoteNode(law))
@@ -124,6 +152,9 @@ _brmd_law_math(::Val{:lognormal_sd},a) = "\\operatorname{LogNormal}_{\\mathrm{lo
 _brmd_law_math(::Val{:bernoulli_logit},a) = "\\operatorname{Bernoulli}(\\operatorname{logit}^{-1}(" * only(a) * "))"
 _brmd_law_math(::Val{:binomial_logit},a) = "\\operatorname{Binomial}(" * a[1] * ",\\operatorname{logit}^{-1}(" * a[2] * "))"
 _brmd_law_math(::Val{:lkj},a) = "\\operatorname{LKJCholesky}(" * join(a,",") * ")"
+_brmd_law_math(::Val{:uniform},a) = "\\operatorname{Uniform}(" * (isempty(a) ? "0,1" : join(a,",")) * ")"
+_brmd_law_math(::Val{:student_t_standard},a) = "t_{"*only(a)*"}(0,1)"
+_brmd_law_math(::Val{:student_t_location_scale},a) = "t_{"*a[1]*"}("*join(a[2:3],",")*")"
 _brmd_law_math(::Val{:mvnormal_cholesky},a) = "\\mathcal N(" * a[1] * "," * a[2] * a[2] * "^{\\mathsf T})"
 _brmd_law_math(::Val{L},a) where L = "\\operatorname{" * _brmd_escape(L) * "}(" * join(a,",") * ")"
 _brmd_law_prose(::Val{:normal_sd}) = "Gaussian distribution; the second argument is the residual standard deviation."
@@ -134,16 +165,24 @@ _brmd_law_prose(::Val{:exponential_scale}) = "Exponential distribution parameter
 _brmd_law_prose(::Val{:gamma_rate}) = "Gamma distribution parameterized by shape and rate."
 _brmd_law_prose(::Val{:gamma_scale}) = "Gamma distribution parameterized by shape and scale."
 _brmd_law_prose(::Val{:lognormal_sd}) = "Lognormal distribution; location and standard deviation are on the log scale."
+_brmd_law_prose(::Val{:student_t_standard}) = "Standard Student-t distribution with the declared degrees of freedom, zero location and unit scale."
+_brmd_law_prose(::Val{:student_t_location_scale}) = "Student-t distribution with degrees of freedom, location and scale in that order; scale is not its standard deviation."
+_brmd_law_prose(::Val{:affine}) = "Affine location-scale distribution of the declared base family."
 _brmd_law_prose(::Val{L}) where L = "$(L) distribution with the declared arguments."
 
 function _brmd_distribution_math(c,x::BRMDescriptionComponent)
     law = _brmd_law(x.callable)
     isnothing(law) && return brm_description_math(c,x)
+    law===:affine && return "\\operatorname{LocationScale}("*
+        brm_description_math(c,x.arguments[1])*","*brm_description_math(c,x.arguments[2])*","*
+        _brmd_distribution_math(c,x.arguments[3])*")"
     _brmd_law_math(Val(law),map(a -> brm_description_math(c,a),x.arguments))
 end
 _brmd_distribution_math(c,x) = brm_description_math(c,x)
 
 _brmd_covariate_math(c,x) = brm_description_math(c,x)
+_brmd_covariate_math(c,x::NamedTuple)=haskey(x,:callable) ?
+    _brmd_transformed_math(x.callable,c,x) : brm_description_math(c,x)
 function _brmd_covariate_math(c,x::BRMDescriptionComponent)
     _brmd_transformed_math(x.callable,c,x)
 end
@@ -151,9 +190,13 @@ _brmd_transformed_math(_f,c,x) = brm_description_math(c,x)
 function _brmd_transform_constant(c,x,kind)
     source = isempty(x.arguments) ? nothing : first(x.arguments)
     source isa BRMDescriptionReference || return nothing
-    entries = filter(e -> e.kind === kind && e.source isa BRMDescriptionReference &&
+    entries = filter(e -> e.kind in (kind,Symbol(:missing_,kind)) && e.source isa BRMDescriptionReference &&
                            e.source.name === source.name,c.fitted_constants)
-    length(entries)==1 ? only(entries).value : nothing
+    length(entries)==1 || return nothing
+    entry=only(entries)
+    entry.kind===kind && return entry.value
+    fit=entry.value.fit
+    kind===:center ? fit.mean : (fit.mean,fit.scale)
 end
 function _brmd_transformed_math(::typeof(center),c,x)
     anchor=_brmd_transform_constant(c,x,:center)
@@ -196,17 +239,29 @@ function _brmd_term_call_math(::typeof(factor),c,x)
     a isa BRMDescriptionReference || return brm_description_math(c,x)
     something(_brmd_factor_math(c,a.name),"0")
 end
-for f in (s,t2,gp,hsgp,me,mi,mo,mo1,ar,dar,rw,cdar,interval_censored,kernel)
+for f in (s,t2,gp,hsgp,me,mi,mo,mo1,ar,dar,rw,cdar,interval_censored)
     @eval _brmd_term_call_math(::$(typeof(f)),c,x) = brm_description_math(c,x)
+end
+_brmd_term_call_math(::typeof(kernel),c,x) = _brmd_kernel_math(c,x)
+function _brmd_kernel_math(c,x)
+    inputs=map(a->brm_description_math(x,a),x.arguments[2:end])
+    "\\mathcal K_{"*_brmd_escape(x.provenance.owner)*",g_j}\\left("*join(inputs,",")*"\\right)"
 end
 function _brmd_group_term_math(c,x)
     effects=first(x.arguments)
-    args=effects isa BRMDescriptionComponent && effects.callable === (+) ? effects.arguments : (effects,)
     group=last(x.arguments)
-    group_name=group isa BRMDescriptionReference ? group.name : :group
-    join((a==1 ? "b_{"*_brmd_escape(c.provenance.owner)*",0,"*_brmd_escape(group_name)*"}" :
-          "b_{"*_brmd_escape(c.provenance.owner)*","*_brmd_escape(group_name)*"}\\,"*brm_description_math(c,a)
-          for a in args if a!=0)," + ")
+    membership=group isa BRMDescriptionComponent && group.callable===mm
+    group isa BRMDescriptionComponent && group.callable===gr && (group=first(group.arguments))
+    group_name=membership ? Tuple(a.name for a in group.arguments) : group isa BRMDescriptionReference ? group.name : :group
+    shared=length(x.arguments)==3 ? x.arguments[2] : nothing
+    shared_id=shared isa BRMDescriptionReference ? shared.name : shared
+    blocks=filter(g->g.group==group_name && g.shared_id==shared_id &&
+        any(m->m.predictor===c.provenance.owner,g.margins),c.provenance.random_effects)
+    isempty(blocks) && return "\\mathbf z_{"*_brmd_escape(c.provenance.owner)*","*_brmd_escape(group_name)*",j}^{\\mathsf T}\\mathbf b_{"*
+        _brmd_escape(c.provenance.owner)*","*_brmd_escape(group_name)*",g_j}"
+    join(((membership ? "\\sum_m\\widetilde w_{jm}\\," : "")*
+        "\\mathbf z_{"*_brmd_escape(c.provenance.owner)*","*_brmd_escape(g.id)*",j}^{\\mathsf T}\\mathbf b_{"*
+        _brmd_escape(g.id)*(membership ? ",g_{jm}}" : ",g_j}") for g in blocks)," + ")
 end
 _brmd_term_call_math(::typeof(|),c,x) = _brmd_group_term_math(c,x)
 _brmd_term_call_math(::typeof(doublepipe),c,x) = _brmd_group_term_math(c,x)
@@ -222,8 +277,28 @@ for f in (+,-,*,/,^,exp,log,sqrt,logistic,log1pexp,abs,sum,cumsum,maximum,minimu
     @eval _brmd_builtin_call(::$(typeof(f)),c) = BRMDescriptionFragment(covers=(c.id,))
 end
 _brmd_builtin_call(::StanBlocks.SlicModel,c)=BRMDescriptionFragment(covers=(c.id,))
+function _brmd_builtin_call(::typeof(mm),c)
+    normalized=c.keywords.normalize
+    weights=c.keywords.weights
+    n=length(c.arguments)
+    definition=isnothing(weights) ? (normalized ? "\\widetilde w_{jm}=1/"*string(n) : "\\widetilde w_{jm}=1") :
+        normalized ? "\\widetilde w_{jm}=w_{jm}/\\sum_h w_{jh}" : "\\widetilde w_{jm}=w_{jm}"
+    BRMDescriptionFragment(prose=("Multi-membership effects use one pooled fitted group-level set across $(join((a.name for a in c.arguments),", ")). Each row sums its membership-specific group deviations with $(normalized ? "row-normalized" : "unscaled") weights. Declared weight inputs: $(isnothing(weights) ? "equal weights" : brm_description_math(c,weights)).",),
+        equations=(definition,),covers=(c.id,))
+end
+function _brmd_builtin_call(::Type{<:LocationScale},c)
+    location,scale,base=c.arguments
+    loc=brm_description_math(c,location); s=brm_description_math(c,scale)
+    prose="For positive scale s, the affine outcome is location + sZ with Z drawn from the declared base distribution; the density includes the 1/s Jacobian."
+    base isa BRMDescriptionComponent && _brmd_law(base.callable)===:student_t_standard &&
+        (prose*=" For a Student-t base, s is the Student-t scale; its SD is s√(ν/(ν−2)) when ν>2, and no finite variance exists when ν≤2.")
+    BRMDescriptionFragment(prose=(prose,),equations=("Z\\sim"*_brmd_distribution_math(c,base),
+        "p_Y(y)=\\frac{1}{"*s*"}f_Z\\left(\\frac{y-"*loc*"}{"*s*"}\\right)"),covers=(c.id,))
+end
 function _brmd_bound_math(c,key,position,fallback)
+    !haskey(c.keywords,key) && length(c.arguments)<position && return fallback
     value=get(c.keywords,key,length(c.arguments)>=position ? c.arguments[position] : fallback)
+    value isa Real && isinf(value) && return value<0 ? "-\\infty" : "\\infty"
     value===nothing ? fallback : brm_description_math(c,value)
 end
 function _brmd_builtin_call(::typeof(truncated),c)
@@ -235,8 +310,14 @@ end
 function _brmd_builtin_call(::typeof(censored),c)
     lower=_brmd_bound_math(c,:lower,2,"-\\infty")
     upper=_brmd_bound_math(c,:upper,3,"\\infty")
-    BRMDescriptionFragment(prose=("Censoring contributes tail probability at a reported boundary and the base density or mass for exact interior values. F is the base CDF; its left limit handles discrete upper boundaries.",),
-        equations=("p(y)=\\begin{cases}F("*lower*")&y="*lower*"\\\\f(y)&"*lower*"<y<"*upper*"\\\\1-F("*upper*"^-)&y="*upper*"\\end{cases}",),covers=(c.id,))
+    rows=String[]
+    lower!="-\\infty" && push!(rows,"F("*lower*")&y="*lower)
+    condition=(lower=="-\\infty" ? "y" : lower*"<y")*(upper=="\\infty" ? "" : "<"*upper)
+    lower=="-\\infty" && upper=="\\infty" && (condition="y\\in\\mathbb R")
+    push!(rows,"f(y)&"*condition)
+    upper!="\\infty" && push!(rows,"1-F("*upper*"^-)&y="*upper)
+    BRMDescriptionFragment(prose=("Censoring contributes tail probability at a finite reported boundary and the base density or mass for exact interior values. F is the base CDF; its left limit handles discrete upper boundaries.",),
+        equations=("p(y)=\\begin{cases}"*join(rows,"\\\\")*"\\end{cases}",),covers=(c.id,))
 end
 function _brmd_builtin_call(::typeof(interval_censored),c)
     base=first(c.arguments)
@@ -252,8 +333,14 @@ function _brmd_builtin_call(::typeof(weighted),c)
     w=weight isa BRMDescriptionComponent && !isempty(weight.arguments) ?
         brm_description_math(c,first(weight.arguments)) : brm_description_math(c,weight)
     if weight isa BRMDescriptionComponent && weight.callable===aweights
+        base=first(c.arguments)
+        base isa BRMDescriptionComponent && _brmd_law(base.callable)===:normal_sd || return nothing
+        a=map(x->brm_description_math(c,x),base.arguments)
+        mean=isempty(a) ? "0" : first(a)
+        sd=length(a)<2 ? "1" : a[2]
+        output=brm_description_math(c,BRMDescriptionReference(c.provenance.owner,:observation))
         return BRMDescriptionFragment(prose=("Analytic weights modify Gaussian precision: the residual SD for row j is σ divided by √wⱼ. This includes the Gaussian normalization for that adjusted SD.",),
-            equations=("y_j\\sim\\mathcal N(\\mu_j,\\sigma^2/"*w*")",),covers=(c.id,))
+            equations=(output*"\\sim\\mathcal N("*mean*",{"*sd*"}^{2}/"*w*")",),covers=(c.id,))
     end
     BRMDescriptionFragment(prose=("Each declared observation weight multiplies its pointwise log likelihood; weights do not replace the response distribution.",),
         equations=("\\log\\mathcal L=\\sum_j "*w*"\\log p(y_j\\mid\\theta)",),covers=(c.id,))
@@ -268,8 +355,24 @@ function _brmd_call_math(::typeof(StanBlocks.stan.builtin.maybe_index),args,_kwa
     "\\operatorname{select}_{\\mathrm{scalar/vector}}\\left("*join(args,",")*"\\right)"
 end
 function _brmd_builtin_call(::typeof(kernel),c)
-    BRMDescriptionFragment(prose=("The kernel runs once per declared group; its arguments preserve their own row or event axes. Its scientific calls and cell statements are covered separately.",),covers=(c.id,))
+    aliases=filter(b->b.role===:alias,c.bindings)
+    names=join((string(b.name)*" ← "*brm_description_math(c,b.value) for b in aliases),", ")
+    body=last(first(c.arguments).arguments)
+    final=body isa BRMDescriptionComponent && body.callable===:block && !isempty(body.arguments) ? last(body.arguments) : body
+    readable=!(final isa BRMDescriptionComponent && final.kind===:syntax &&
+        final.callable in (:if,:for,:while,:block))
+    equations=readable ? (_brmd_kernel_math(c,c)*"="*brm_description_math(c,final),) : ()
+    BRMDescriptionFragment(prose=("The kernel mapping K for `$(c.provenance.owner)` runs once per declared group; gⱼ selects the group of output row j. Its arguments preserve their row or event axes. The cell input bindings are: $(names). Its scientific calls and cell statements are covered separately.",),equations=equations,covers=(c.id,))
 end
+function _brmd_call_math(::typeof(StanBlocks.stan.builtin.rep_vector),args,_kwargs,_c)
+    first(args)*"\\,\\mathbf1_{"*args[2]*"}"
+end
+_brmd_builtin_call(::typeof(StanBlocks.stan.builtin.rep_vector),c)=BRMDescriptionFragment(covers=(c.id,))
+function _brmd_call_math(::typeof(addprop),args,_kwargs,_c)
+    "\\sqrt{"*args[2]*"^2+("*args[1]*"\\,"*args[3]*")^2}"
+end
+_brmd_builtin_call(::typeof(addprop),c)=BRMDescriptionFragment(
+    prose=("The observation SD combines additive and proportional error in quadrature; the proportional term scales the declared location, row by row.",),covers=(c.id,))
 function _brmd_builtin_call(::typeof(s),c)
     BRMDescriptionFragment(prose=("A thin-plate spline uses the fitted basis and penalized coefficients, with a separately declared smoothing scale.",),
         equations=("f(x_j)=X_{\\mathrm{null},j}\\beta+Z_{\\mathrm{pen},j}u,\\quad u\\mid\\tau\\sim\\mathcal N(0,\\tau^2 I)",),covers=(c.id,))
@@ -281,11 +384,49 @@ end
 function _brmd_gp_fragment(c,approximate)
     covariance=get(c.keywords,:cov,:exp_quad)
     covname=covariance isa BRMDescriptionReference ? covariance.name : covariance
-    prose=("The $(approximate ? "Hilbert-space approximation to a Gaussian process" : "Gaussian process") uses covariance $(covname), the selected fitted domain and declared length-scale and marginal-SD parameters. Grouping and options are retained in the component context.",)
-    equation=approximate ?
-        "f(x_j)=\\sum_{k=1}^{M}\\phi_k(x_j;\\mathcal D_{\\mathrm{fit}})\\sqrt{S(\\omega_k;\\ell,\\tau)}z_k,\\quad z_k\\sim\\mathcal N(0,1)" :
-        "f\\mid\\ell,\\tau\\sim\\mathcal N(0,K),\\quad K_{ab}=k(x_a,x_b;\\ell,\\tau)"
-    BRMDescriptionFragment(; prose,equations=(equation,),covers=(c.id,))
+    prose=String["The $(approximate ? "Hilbert-space approximation to a Gaussian process" : "Gaussian process") uses covariance $(covname). Here τ is its marginal SD, ℓ is its length scale, and x denotes its declared axes: $(join((brm_description_math(c,a) for a in c.arguments),", ")). Their effective priors are listed separately."]
+    equations=String[]
+    if !approximate
+        jitter=brm_description_math(c,get(c.keywords,:jitter,1e-9))
+        push!(equations,"f\\mid\\ell,\\tau\\sim\\mathcal N(0,K)")
+        if covname===:periodic
+            period=brm_description_math(c,c.keywords.period)
+            push!(equations,"K_{ab}=\\tau^2\\exp\\left(-\\frac{2\\sin^2(\\pi(x_a-x_b)/"*period*")}{\\ell^2}\\right)+"*jitter*"\\,\\mathbf1\\{a=b\\}")
+        elseif covname===:exp_quad
+            push!(equations,"K_{ab}=\\tau^2\\exp\\left(-\\frac12\\sum_r\\frac{(x_{ar}-x_{br})^2}{\\ell_r^2}\\right)+"*jitter*"\\,\\mathbf1\\{a=b\\}")
+            push!(prose,get(c.keywords,:iso,true)===true ? "All axes share the isotropic length scale." : "Each axis has its own anisotropic length scale.")
+        else
+            return nothing
+        end
+    elseif covname===:periodic
+        period=brm_description_math(c,c.keywords.period)
+        push!(equations,"f(x)=\\sum_{k=1}^{M}q_k\\left[z_{k,c}\\cos(2\\pi kx/"*period*")+z_{k,s}\\sin(2\\pi kx/"*period*")\\right]")
+        push!(equations,"q_k=\\tau\\sqrt{2e^{-a}I_k(a)},\\quad a=\\ell^{-2},\\quad z_{k,c},z_{k,s}\\sim\\mathcal N(0,1)")
+        push!(prose,"Iₖ is the modified Bessel function. The constant harmonic is omitted; the formula intercept supplies that direction.")
+    elseif covname===:exp_quad
+        grouped=haskey(c.keywords,:by)
+        z=grouped ? "z_{g(j),k}" : "z_k"
+        push!(equations,"f(x_j)=\\sum_{k=1}^{M}\\phi_k(x_j)q_k"*z*",\\quad "*z*"\\sim\\mathcal N(0,1)")
+        push!(equations,"q_k=\\tau\\prod_r(\\sqrt{2\\pi}\\ell_r)^{1/2}\\exp\\left(-\\frac14\\sum_r\\ell_r^2\\omega_{kr}^2\\right)")
+        push!(equations,"\\phi_k(x)=\\prod_r L_r^{-1/2}\\sin[\\omega_{kr}(x_r-c_r+L_r)],\\quad\\omega_{kr}=\\frac{k_r\\pi}{2L_r}")
+        sources=Tuple(a.name for a in c.arguments if a isa BRMDescriptionReference)
+        fitted=filter(e->e.kind===:hsgp && e.source isa Tuple &&
+            Tuple(a.name for a in e.source if a isa BRMDescriptionReference)==sources,c.fitted_constants)
+        for e in fitted
+            fits=get(e.value,:fits,nothing)
+            isnothing(fits) || push!(prose,"The selected approximation domain has fitted (center, half-width) values $(fits). Basis sizes are $(get(e.value,:K,())).")
+        end
+        get(c.keywords,:iso,true)===true && push!(prose,"All axes share the isotropic length scale.")
+        grouped && push!(prose,"Basis weights are separate for each fitted group. Shared length-scale and SD priors remain shared unless explicitly modeled through group hyperpredictors.")
+        if get(c.keywords,:orthogonal_to,nothing)!==nothing
+            push!(equations,"\\Phi_{\\mathrm{used}}=(I-P_{[1,x]})\\Phi_{\\mathrm{raw}}")
+            push!(prose,"The declared linear projection removes intercept and linear-axis directions. At a constant axis, only the intercept direction is removed.")
+        end
+        push!(prose,"Declared partial centering changes the sampled coordinates while preserving these model-scale spectral weights; the actual coordinate priors are in the effective inventory.")
+    else
+        return nothing
+    end
+    BRMDescriptionFragment(; prose=Tuple(prose),equations=Tuple(equations),covers=(c.id,))
 end
 _brmd_builtin_call(::typeof(gp),c) = _brmd_gp_fragment(c,false)
 _brmd_builtin_call(::typeof(hsgp),c) = _brmd_gp_fragment(c,true)
@@ -309,7 +450,7 @@ _brmd_builtin_call(::typeof(cdar),c)=BRMDescriptionFragment(
 # Temporal terms require their recurrence, rather than just a term caption.
 _brmd_builtin_call(::typeof(rw),c) = BRMDescriptionFragment(
     prose=("A random walk adds innovations on the declared ordered time axis.",),
-    equations=("f_{t+1}=f_t+\\sigma z_t,\\quad z_t\\sim\\mathcal N(0,1)",),covers=(c.id,))
+    equations=("f_1=0,\\quad f_{t+1}=f_t+\\sigma z_t,\\quad z_t\\sim\\mathcal N(0,1)",),covers=(c.id,))
 _brmd_builtin_call(::typeof(dar),c) = BRMDescriptionFragment(
     prose=("The first differences follow AR(1); the formula intercept supplies the initial level, and the integrated trajectory has no additional population coefficient.",),
     equations=("d_t=\\rho d_{t-1}+\\sigma z_t,\\quad f_{t+1}=f_t+d_t,\\quad z_t\\sim\\mathcal N(0,1)",),covers=(c.id,))
@@ -321,8 +462,12 @@ _brmd_builtin_kind(::Val{:call},c) = _brmd_builtin_call(c.callable,c)
 _brmd_builtin_kind(::Val{:submodel},c) = BRMDescriptionFragment(covers=(c.id,))
 _brmd_builtin_kind(::Val{:submodel_output},c)=BRMDescriptionFragment(
     prose=("`$(c.provenance.owner)` is the returned value of its included scientific submodel, whose internal parameters and calls are described separately.",),covers=(c.id,))
-_brmd_builtin_kind(::Val{:syntax},c) = c.callable in (:block,:tuple,:vect,:ref,:(=),:return,:->,:.,:(::),:kw,:parameters) ?
-    BRMDescriptionFragment(covers=(c.id,)) : nothing
+function _brmd_builtin_kind(::Val{:syntax},c)
+    c.callable in (:block,:tuple,:vect,:ref,:(=),:return,:->,:.,:(::),:kw,:parameters) || return nothing
+    equation=c.callable===:(=) && first(c.arguments) isa BRMDescriptionReference ?
+        (brm_description_symbol(c,first(c.arguments).name)*"="*brm_description_math(c,last(c.arguments)),) : ()
+    BRMDescriptionFragment(equations=equation,covers=(c.id,))
+end
 _brmd_builtin_kind(::Val{:parameter},c) = BRMDescriptionFragment(covers=(c.id,))
 _brmd_builtin_kind(::Val{:assignment},c) = BRMDescriptionFragment(
     prose=("`$(c.provenance.owner)` is a deterministic assignment of its declared arguments.",),
@@ -334,11 +479,11 @@ function _brmd_builtin_kind(::Val{:predictor},c)
         body=_brmd_term_math(c,rhs)
         hasintercept=occursin("Intercept",body)
     else
-        fixed=Tuple(_brmd_beta(c,col.label)*(col.source===nothing ? "" : "\\,"*_brmd_column_math(c,col)) for col in columns)
+        fixed=Tuple(_brmd_beta(c,col.label)*(col.label===:Intercept ? "" : "\\,"*_brmd_column_math(c,col)) for col in columns)
         extras=_brmd_extra_terms(c,rhs)
         body=join((fixed...,extras...)," + ")
         isempty(body) && (body="0")
-        hasintercept=any(col->col.source===nothing,columns)
+        hasintercept=any(col->col.label===:Intercept,columns)
     end
     equation=brm_description_math(c,lhs)*"="*body
     prose="`$(c.provenance.owner)` combines the declared population, group and structured terms. " *
@@ -348,14 +493,15 @@ end
 
 function _brmd_column_math(c,column)
     p=column.preprocess
-    isnothing(p) && return column.source===nothing ? "1" : brm_description_symbol(c,column.source)
+    isnothing(p) && return get(column,:term,nothing)!==nothing ?
+        _brmd_covariate_math(c,column.term) : column.source===nothing ? "1" : brm_description_symbol(c,column.source)
     if p.kind===:interaction
         operands=map(p.raw_ref) do label
             found=filter(dep->dep.label===label,p.dependencies)
             isempty(found) ? brm_description_symbol(c,label) : _brmd_column_math(c,only(found))
         end
         return join(operands,"\\,")
-    elseif p.kind===:population_factor_dummy
+    elseif p.kind in (:population_factor_dummy,:ranef_factor_dummy)
         k=p.const_
         level=k.levels[k.level]
         if k.ref isa Integer
@@ -370,6 +516,10 @@ function _brmd_column_math(c,column)
         return "\\frac{"*brm_description_math(c,p.raw_ref)*"-"*string(fitted[1])*"}{"*string(fitted[2])*"}"
     elseif p.kind===:protect
         return brm_description_math(c,p.raw_ref)
+    elseif p.kind in (:missing_center,:missing_zscale,:missing_standardize)
+        fit=p.const_.fit
+        centered="("*brm_description_math(c,p.raw_ref)*"-"*string(fit.mean)*")"
+        return p.kind===:missing_center ? centered : "\\frac{"*centered*"}{"*string(fit.scale)*"}"
     end
     "X_{"*_brmd_escape(column.label)*",j}"
 end
@@ -395,12 +545,21 @@ function _brmd_builtin_kind(::Val{:observation},c)
 end
 function _brmd_builtin_kind(::Val{:random_effect},c)
     k=c.keywords
-    id=_brmd_identifier(k.group)
-    covariance=k.correlated ? "D\\Omega D" : "D^2"
+    id=_brmd_escape(c.id)
+    subscript=k.by===nothing ? id : id*",s(i)"
+    D="D_{"*subscript*"}"; omega="\\Omega_{"*subscript*"}"; L="L_{"*subscript*"}"; C="C_{"*subscript*"}"
+    covariance=k.correlated ? D*omega*D : D*"^2"
     prose="Group deviations for `$(k.group)` have $(k.n_terms) margin(s) across $(k.n_groups) fitted levels. " *
         (k.shared ? "The declared ID shares one covariance block across its predictors." : "This block is independent of separately declared blocks.") *
         (k.correlated ? " Its margins are correlated." : " It has no estimated correlation.")
-    BRMDescriptionFragment(prose=(prose,),equations=("b_{"*id*",i}\\sim\\mathcal N_{"*string(k.n_terms)*"}(0,"*covariance*")",),covers=(c.id,))
+    k.by===nothing || (prose*=" Covariance factors are separate for each declared stratum; s(i) is the fitted group-to-stratum map.")
+    margins=Tuple(m for m in k.margins if m.predictor isa Symbol)
+    design=Tuple("\\mathbf z_{"*_brmd_escape(owner)*","*id*",j}=["*
+        join((m.predictor!==owner ? "0" : m.coefficient===:Intercept ? "1" : brm_description_symbol(c,m.coefficient)
+            for m in margins),",")*"]" for owner in unique(m.predictor for m in margins))
+    definition=k.correlated ? omega*"="*L*L*"^{\\mathsf T},\\quad "*C*"="*D*L : C*"="*D
+    BRMDescriptionFragment(prose=(prose,),equations=("\\mathbf b_{"*id*",i}\\sim\\mathcal N_{"*string(k.n_terms)*"}(0,"*covariance*")",
+        definition*",\\quad "*D*"=\\operatorname{diag}(\\mathrm{SD}_{"*subscript*"})",design...),covers=(c.id,))
 end
 _brmd_builtin_kind(::Val{K},_c) where K = nothing
 
@@ -439,7 +598,7 @@ function brm_description(d::BRMDescriptor; hooks=(),labels=Dict(),prior_anchors=
     notation=_brmd_notation(d,labels)
     constants=_brmd_constants(d.plan)
     priors,groups=_brmd_priors(d,prior_anchors,notation)
-    roots=collect(_brmd_components(d,priors,constants,notation))
+    roots=collect(_brmd_components(d,priors,constants,notation;groups))
     # Inventory allocation semantics explicitly; a Gaussian conditional prior
     # alone must never establish coverage of an unexplained hierarchical scale.
     for (target,binding) in sort!(collect(d.plan.bindings);by=p->string(first(p)))
@@ -454,8 +613,13 @@ function brm_description(d::BRMDescriptor; hooks=(),labels=Dict(),prior_anchors=
         b=group.block
         kwargs=(; group=b.group,id=b.id,n_terms=b.n_terms,n_groups=b.n_groups,
             levels=_brmd_snapshot(b.levels),margins=group.margins,
-            correlated=group.correlated,shared=group.shared,noncentered=b.noncentered)
+            correlated=group.correlated,shared=group.shared,noncentered=b.noncentered,by=b.by)
         push!(roots,_brmd_component(env,group.key,:random_effect,nothing,(),kwargs))
+        if b.family in (:ranef_intercept_r2d2,:ranef_correlated_r2d2,:ranef_correlated_draws_r2d2) &&
+           !any(c->c.kind===:prior_allocation,roots)
+            push!(roots,_brmd_component(env,(:allocation,group.key...),:prior_allocation,nothing,
+                ((;kind=:derived_group_scales,family=b.family),)))
+        end
     end
     for prior in priors
         prior.distribution isa BRMDescriptionComponent && push!(roots,prior.distribution)
@@ -500,8 +664,9 @@ end
     brm_description_markdown(description)
 
 Render deterministic Markdown with display LaTeX, an effective prior table,
-notation and explicit coverage diagnostics. Report links come only from the
-supplied logical `prior_anchors` map. No generated-name parsing is required.
+notation and explicit coverage diagnostics. Every prior row owns a model-scoped
+anchor; component references link to these targets by default. `prior_anchors`
+remain additional outbound links. Use `prefix` for repeated model instances.
 """
 function brm_description_markdown(description::BRMDescription;prefix=nothing)
     io=IOBuffer()

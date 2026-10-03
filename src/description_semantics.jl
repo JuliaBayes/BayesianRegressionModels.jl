@@ -2,6 +2,9 @@
 _brmd_snapshot(x) = isbitstype(typeof(x)) ? x :
     (; (key => _brmd_snapshot(getfield(x,key)) for key in fieldnames(typeof(x)))...)
 _brmd_snapshot(x::Union{Function,Type,Module,Symbol,Nothing,AbstractString}) = x
+# GlobalRef holds an internal Core.Binding which can point back at the ref.
+# Retain this static identity; never reflect through Julia's binding machinery.
+_brmd_snapshot(x::GlobalRef) = x
 _brmd_snapshot(x::Union{StanBlocks.ValueUDF,StanBlocks.ValueFamily,StanBlocks.SlicModel}) = x
 _brmd_snapshot(x::Tuple) = map(_brmd_snapshot,x)
 _brmd_snapshot(x::NamedColumn) = BRMDescriptionReference(name(x), :observation)
@@ -36,11 +39,19 @@ _brmd_value(x::AbstractString, _env, _id) = String(x)
 _brmd_value(x::QuoteNode, _env, _id) = _brmd_snapshot(x.value)
 _brmd_value(x::LineNumberNode, _env, _id) = nothing
 _brmd_value(x::BRMDescriptionReference,_env,_id)=x
+function _brmd_value(x::GlobalRef,env,id)
+    bound=_brmd_binding(x,env.mod)
+    bound===x ? _brmd_snapshot(x) : _brmd_value(bound,env,id)
+end
 function _brmd_value(x::Symbol, env, _id)
     parameters=filter(b->b.name===x && b.role===:parameter &&
         length(get(b,:path,(x,)))==1,env.bindings)
     length(parameters)==1 && return only(parameters).value
-    x in keys(env.references) && return BRMDescriptionReference(x,env.references[x])
+    if x in keys(env.references)
+        axis=env.references[x]
+        logical=axis===:cell ? (:cell,env.provenance.cell_owner,x) : x
+        return BRMDescriptionReference(x,axis,logical)
+    end
     any(b->b.name===x,env.bindings) && return BRMDescriptionReference(x,:local)
     bound=_brmd_binding(x,env.mod)
     bound isa Union{Function,Type,StanBlocks.ValueUDF,StanBlocks.ValueFamily,StanBlocks.SlicModel} && return bound
@@ -49,6 +60,11 @@ end
 _brmd_value(x::NamedColumn, env, _id) =
     BRMDescriptionReference(name(x), get(env.references, name(x), :observation))
 _brmd_value(x, _env, _id) = _brmd_snapshot(x)
+function _brmd_value(x::MultiMembershipTerm,env,id)
+    args=_brmd_value(x.groups,env,(id...,:memberships))
+    kwargs=(;weights=_brmd_value(x.weights,env,(id...,:weights)),normalize=x.normalize)
+    _brmd_component(env,id,:call,mm,args,kwargs)
+end
 _brmd_value(xs::Union{Tuple,AbstractArray}, env, id) =
     Tuple(_brmd_value(x, env, (id..., i)) for (i,x) in enumerate(xs))
 _brmd_value(xs::NamedTuple, env, id) = NamedTuple{keys(xs)}(
@@ -76,12 +92,7 @@ end
 function _brmd_included_model(env,model,kwargs,id,path)
     bindings=NamedTuple[]
     for (name,value) in sort!(collect(pairs(merge(model.data,Dict(pairs(kwargs)))));by=p->string(first(p)))
-        public=if value isa Symbol && haskey(env.descriptor.plan.data,value) &&
-                  !(value in env.descriptor.columns)
-            _brmd_snapshot(env.descriptor.plan.data[value])
-        else
-            _brmd_value(value,env,(id...,:binding,name))
-        end
+        public=_brmd_included_input(value,env,(id...,:binding,name))
         public=_brmd_resolve_alias(public,env.bindings)
         push!(bindings,(;name,role=:alias,value=public,prior_ids=(),path=(name,)))
     end
@@ -114,6 +125,25 @@ function _brmd_included_model(env,model,kwargs,id,path)
     _brmd_component(subenv,id,:submodel,model,(body,))
 end
 
+function _brmd_included_input(value,env,id)
+    data=env.descriptor.plan.data
+    key=value isa Symbol && haskey(data,value) ? value : nothing
+    if isnothing(key) && value isa AbstractArray
+        matches=sort!([k for (k,v) in pairs(data) if v===value];by=string)
+        isempty(matches) || (key=first(matches))
+    end
+    if !isnothing(key)
+        prepared=data[key]
+        if prepared isa AbstractArray
+            axis=get(env.references,key,eltype(prepared)<:AbstractArray ? :ragged : :observation)
+            logical=key in env.descriptor.columns ? key : (:prepared_data,key)
+            return BRMDescriptionReference(key,axis,logical)
+        end
+        return _brmd_snapshot(prepared)
+    end
+    _brmd_value(value,env,id)
+end
+
 _brmd_resolve_alias(x,_bindings,_seen=())=x
 function _brmd_resolve_alias(x::BRMDescriptionReference,bindings,seen=())
     x.logical isa Tuple && return x
@@ -132,9 +162,19 @@ function _brmd_value(x::ExprColumn{typeof(kernel)},env,id)
     params=lambda.args[1] isa Expr && lambda.args[1].head===:tuple ? lambda.args[1].args : (lambda.args[1],)
     length(params)==length(outer) || error("description: kernel argument binding mismatch")
     aliases=Tuple((; name=p,role=:alias,value=v,prior_ids=()) for (p,v) in zip(params,outer))
-    localenv=merge(env,(; bindings=(env.bindings...,aliases...)))
+    names=Symbol[]
+    _brmd_cell_assignments!(names,lambda.args[2])
+    refs=copy(env.references)
+    foreach(n->refs[n]=:cell,names)
+    localenv=merge(env,(; references=refs,bindings=(env.bindings...,aliases...),
+        provenance=merge(env.provenance,(;cell_owner=env.provenance.owner,cell_names=Tuple(unique(names))))))
     body=_brmd_value(lambda,localenv,(id...,:cell))
     _brmd_component(localenv,id,:call,kernel,(body,outer...),_brmd_value(getkwargs(x),localenv,(id...,:keyword)))
+end
+_brmd_cell_assignments!(_names,_x)=nothing
+function _brmd_cell_assignments!(names,x::Expr)
+    x.head===:(=) && first(x.args) isa Symbol && push!(names,first(x.args))
+    foreach(a->_brmd_cell_assignments!(names,a),x.args)
 end
 
 # Resolve only static bindings, never eval an expression or invoke user code.
@@ -228,8 +268,12 @@ function _brmd_constants(plan)
           for (key,entry) in sort!(collect(plan.preproc); by=p -> string(first(p))))
 end
 
-function _brmd_environment(d, owner, kind, priors, constants, notation=())
-    refs = Dict{Symbol,Symbol}(key => :observation for key in d.columns)
+function _brmd_environment(d, owner, kind, priors, constants, notation=();groups=())
+    refs = Dict{Symbol,Symbol}(key => get(d.plan.data,key,nothing) isa Number ? :scalar : :observation for key in d.columns)
+    for i in d.inputs
+        isnothing(i.column) && continue
+        i.transform===:kernel_ragged && (refs[i.column]=:ragged)
+    end
     for o in d.outputs
         isnothing(o.logical) || (refs[o.logical] = o.role === :parameter ? :scalar : :observation)
     end
@@ -248,7 +292,8 @@ function _brmd_environment(d, owner, kind, priors, constants, notation=())
     population=filter(b->b.role===:population_effect && b.logical===owner,collect(values(d.plan.bindings)))
     design_columns=length(population)==1 ? get(only(population),:design_columns,nothing) : nothing
     provenance = (; model_id=d.id, owner, declaration=kind, observation_role,
-        design_columns=isnothing(design_columns) ? nothing : map(c->_brmd_design_column(d,c),design_columns))
+        design_columns=isnothing(design_columns) ? nothing : map(c->_brmd_design_column(d,c),design_columns),
+        random_effects=Tuple((;id=g.key,group=g.block.group,shared_id=g.block.id,margins=g.margins) for g in groups))
     bindings=Tuple((;name=last(p.id),role=:parameter,
                     value=BRMDescriptionReference(last(p.id),:scalar,p.id),prior_ids=(p.id,))
                    for p in priors if last(p.id) isa Symbol &&
@@ -262,7 +307,10 @@ end
 function _brmd_design_column(d,c)
     p=c.preprocess
     prepared=get(d.plan.preproc,c.label,nothing)
-    preprocess=if isnothing(p)
+    preprocess=if isnothing(p) && !isnothing(prepared)
+        (;kind=prepared.kind,const_=_brmd_snapshot(prepared.const_),
+          raw_ref=_brmd_snapshot(prepared.raw_ref),dependencies=())
+    elseif isnothing(p)
         nothing
     else
         (;kind=isnothing(prepared) ? p.kind : prepared.kind,
@@ -271,10 +319,10 @@ function _brmd_design_column(d,c)
           dependencies=Tuple(_brmd_design_column(d,dep) for dep in p.dependencies))
     end
     (;label=c.label,source=c.source,effect_addresses=c.effect_addresses,
-      effect_block=c.effect_block,preprocess)
+      effect_block=c.effect_block,preprocess,term=_brmd_snapshot(get(c,:term,nothing)))
 end
 
-function _brmd_components(d, priors, constants, notation=())
+function _brmd_components(d, priors, constants, notation=();groups=())
     program = _brm_prepare_program(d.plan.parent)
     byname = Dict(op.name => op for op in program.operations)
     result = BRMDescriptionComponent[]
@@ -297,7 +345,7 @@ function _brmd_components(d, priors, constants, notation=())
             f=_brmd_binding(only(sites).family,d.plan.model.mod)
             f isa StanBlocks.SlicModel && f.mod !== (@__MODULE__) && (role=:submodel_output)
         end
-        env = _brmd_environment(d, owner, role, priors, constants, notation)
+        env = _brmd_environment(d, owner, role, priors, constants, notation;groups)
         expr = _brmd_value(rhs, env, (role, owner, :expression))
         outputs = Tuple((; name=o.name, logical=o.logical, role=o.role,
                           kind=o.kind, segments=_brmd_snapshot(o.segments))

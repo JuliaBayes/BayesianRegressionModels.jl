@@ -1,10 +1,30 @@
 # Independent public fixtures for the scientific reporting contract. No fit or
 # executable model build is needed; the selected SBBRMI descriptor is reused.
 using Test, Statistics, BayesianRegressionModels, Distributions
+import StanBlocks
 using BayesianRegressionModels: aweights, fweights
 if !isdefined(@__MODULE__,:DESCRIPTION_DATA)
     const DESCRIPTION_DATA=(;x=[-2.0,-0.5,0.7,2.5,3.0,4.2],g=[1,1,2,2,3,3],
         y=[0.4,0.1,1.1,1.7,2.4,2.8],z=[1.4,1.1,2.1,2.7,3.4,3.8])
+end
+
+@testset "producer helper calls and affine Student-t scale" begin
+    m=@brm DESCRIPTION_DATA begin
+        mu ~ 1 + mo(g) + hsgp(x;k=3)
+        length_scale(:,hsgp(x)) ~ Uniform(0.8,2.0)
+        y ~ LocationScale(mu,addprop(mu,0.5,0.2),TDist(5.0))
+    end
+    r=brm_description(SBBRMI(m;mod=@__MODULE__,total_groups=()))
+    @test r.complete
+    @test isempty(r.diagnostics)
+    prior=only(filter(p->last(p.id)===:rho_iso,r.priors))
+    @test prior.distribution.arguments==(0.8,2.0)
+    @test prior.support.lower==0.8 && prior.support.upper==2.0
+    @test any(c->c.callable===StanBlocks.stan.builtin.rep_vector,brm_description_components(r))
+    @test any(e->occursin("\\beta_{mu,mo",e),r.equations)
+    @test any(e->occursin("\\sqrt{0.5^2+",e),r.equations)
+    @test any(e->occursin("f_Z",e) && occursin("\\frac{1}",e),r.equations)
+    @test any(p->occursin("ν/(ν−2)",p),r.prose)
 end
 
 @testset "fitted design, contrasts, interactions and explicit link" begin
@@ -59,7 +79,7 @@ end
     @test only(filter(c->c.provenance.owner===:y,obs)).provenance.observation_role===:conditioned
     @test only(filter(c->c.provenance.owner===:z,obs)).provenance.observation_role===:held_out
     @test count(c->c.kind===:random_effect,r.components)==1
-    @test any(e->occursin("D\\Omega D",e),r.equations)
+    @test any(e->occursin("\\Omega_{",e),r.equations)
     prior_only=builder((;x=DESCRIPTION_DATA.x,g=DESCRIPTION_DATA.g))
     pr=brm_description(SBBRMI(prior_only;total_groups=()))
     @test pr.complete
@@ -77,7 +97,7 @@ end
     r=brm_description(SBBRMI(m;total_groups=()))
     @test r.complete
     @test isempty(r.diagnostics)
-    @test any(e->occursin("\\sigma^2/",e),r.equations)
+    @test any(e->occursin("{1.5}^{2}/\\mathrm{w}",e),r.equations)
     @test any(e->occursin("F(L_j-1)",e),r.equations)
     wrappers=@brm DESCRIPTION_DATA begin
         mu ~ 1 + x
