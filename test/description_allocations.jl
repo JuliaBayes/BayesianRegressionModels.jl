@@ -122,4 +122,17 @@ end
         axis_prose=only(filter(p->occursin("declared axes:",p),result.prose))
         @test occursin(raw"$\mathrm{x}$",Markdown.latex(Markdown.parse(axis_prose)))
     end
+    data=(;axis_time=ALLOCATION_DATA.x,y=ALLOCATION_DATA.y)
+    underscored=@brm data begin
+        mu ~ 1+hsgp(axis_time;k=3,cov=:exp_quad)
+        y ~ Normal(mu,1.0)
+    end
+    ur=brm_description(SBBRMI(underscored;mod=@__MODULE__,total_groups=()))
+    @test ur.complete
+    axis_prose=only(filter(p->occursin("declared axes:",p),ur.prose))
+    parsed=Markdown.parse(axis_prose)
+    @test count(node->node isa Markdown.LaTeX,only(parsed.content).content)==1
+    @test occursin("<code>exp_quad</code>",Markdown.html(parsed))
+    @test !occursin("<em>",Markdown.html(parsed))
+    @test occursin(raw"$\mathrm{axis\_time}$",Markdown.latex(parsed))
 end

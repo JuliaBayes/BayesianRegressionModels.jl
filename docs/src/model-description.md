@@ -125,9 +125,11 @@ their recurrences without inserting lambda or block syntax into the equation.
 Cell assignments emit separate indexing and arithmetic relations, and the
 mapping connects to the cell's returned quantity. Cell-local names are scoped
 to their kernel owner (for example, `pred.state`) unless notation overrides them.
-The compact grouped map symbol refers to the separately listed exact input
-bindings. Long call assignments and additive population relations use aligned
-lines. Wide transformed designs use named prepared coordinates, with their
+The compact grouped map symbol refers to separately defined exact input
+bindings. Each authored cell alias has a short symbol and its own binding
+relation. Long record arguments receive short symbols with aligned definitions
+of all their named fields. Long call assignments and additive population
+relations use aligned lines. Wide transformed designs use named prepared coordinates, with their
 fitted centering/scaling definitions and logical column mappings listed
 separately; values and scientific child coverage are preserved.
 Long likelihood arguments use compact intermediate symbols with separate exact
@@ -176,14 +178,16 @@ Vector/matrix conversion order follows the
 [Stan mixed operations reference](https://mc-stan.org/docs/functions-reference/mixed_operations.html).
 
 Covariance blocks use compact, distinct numbers within each result. The notation
-table maps each number to its full logical ID and ordered margins; predictor
+entries map each number to its full logical ID and ordered margins; predictor
 designs and covariance factors use that same number. Logical IDs and prior
-anchors keep their exact identities. Prior table math shows the distribution
-and support; the neighboring logical-parameter cell names the parameter.
-Density and support facts use separate inline math spans so rows can wrap.
-Long logical IDs use short table row keys, with their complete path components
-in a full-width directory after the table. The original prior anchors remain
-in their table cells; exact logical IDs remain in the public prior records.
+anchors keep their exact identities. The prior table uses short P1, P2 row keys
+and names the distribution family. Complete logical IDs, distribution equations
+and individual support facts follow in full-width definitions. Component prior
+links use those same P keys; their C keys have separate complete logical paths.
+Notation uses individual metadata entries, preserving supplied meanings and
+units without repeating an unsupplied identifier as its meaning. The original
+prior anchors remain in their table cells; exact logical IDs remain in the
+public prior records. These presentation keys do not change logical identity.
 GP axis and multiple-membership weight references use inline math in prose.
 
 Included scientific SlicModels expose their parameter declarations,

@@ -13,7 +13,9 @@ const cell=@slic begin
     upper=5.0
     parameters=(;lower,upper,offset,multiplier,prepared_values=input,
         weights=exp(offset),normalizer=0.0)
-    return opaque_record(parameters,input)
+    state=opaque_record((;lower,upper,offset,multiplier,prepared_values=input,
+        weights=exp(offset),normalizer=0.0),input)
+    return state
 end
 function BayesianRegressionModels._sb_submodel_rhs!(stmts,data,target::Symbol,::typeof(record_term),rhs)
     input=only(getargs(rhs)); key=name(input)
@@ -54,6 +56,12 @@ const record_term=DescriptionNamedRecords.record_term
     @test_throws ArgumentError brm_description_record(context,context.arguments[2])
     relation=only(filter(e->startswith(e,"\\begin{aligned}\\mathrm{parameters}&="),r.equations))
     @test all(name->occursin(replace(string(name),"_"=>"\\_"),relation),keys(fields))
+    call_relation=only(filter(e->occursin("opaque\\_record",e),r.equations))
+    @test occursin("\\xi_{",call_relation)
+    @test !occursin("\\mathrm{prepared\\_values}=",call_relation)
+    record_definition=only(filter(e->occursin("\\xi_{",e) && occursin("\\mathrm{prepared\\_values}=",e),r.equations))
+    @test occursin("\\begin{aligned}",record_definition)
+    @test all(name->occursin(replace(string(name),"_"=>"\\_"),record_definition),keys(fields))
     @test !any(e->occursin("\\mathrm{parameters}\\left(",e) || occursin("\\mathrm{kw}",e),r.equations)
     @test stan_code(sb)==code && isequal(sb.data,frozen)
     @test StanBlocks.stanc_check(code;warn_pedantic=false).ok

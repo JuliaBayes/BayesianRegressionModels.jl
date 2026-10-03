@@ -40,8 +40,9 @@ const opaque_state=DescriptionStateCoupling.opaque_state
     mean=observation.arguments[2].arguments[1]
     @test mean isa BRMDescriptionReference && mean.axis===:cell && mean.name===:mean
     @test brm_description_math(observation,mean)=="\\mathrm{pred.mean}"
-    binding_prose=only(filter(p->occursin("cell input bindings",p),r.prose))
+    binding_prose=only(filter(p->startswith(p,"Cell input `lookup_idx`"),r.prose))
     markdown=Markdown.parse(binding_prose)
     @test occursin("<code>lookup_idx</code>",Markdown.html(markdown))
-    @test occursin(raw"$\mathrm{index\_grid}$",Markdown.latex(markdown))
+    @test occursin(raw"$a_{",Markdown.latex(markdown))
+    @test any(e->startswith(e,"a_{") && endswith(e,"=\\mathrm{index\\_grid}"),r.equations)
 end

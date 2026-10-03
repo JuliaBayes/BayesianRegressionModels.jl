@@ -114,7 +114,7 @@ end
     notes=filter(n->n.axis===:covariance_block,r.notation)
     @test Set(n.name for n in notes)==Set(c.id for c in blocks)
     @test Set(n.symbol for n in notes)==Set(("1","2"))
-    @test all(n->occursin(string(n.name),n.meaning),notes)
+    @test all(n->occursin("Covariance block "*n.symbol,n.meaning) && occursin("margins",n.meaning),notes)
     @test all(c->any(e->startswith(e,"\\mathbf b_{"*brm_description_symbol(c,c.id)*",i}"),r.equations),blocks)
     @test all(e->!occursin("random\\_effect",e) && !occursin("first\\_block",e) && !occursin("second\\_block",e),r.equations)
     @test any(e->occursin("\\mathbf b_{1,g_j}",e) && occursin("\\mathbf b_{2,g_j}",e),r.equations)

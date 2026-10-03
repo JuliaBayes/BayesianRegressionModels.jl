@@ -345,7 +345,7 @@ function _brmd_builtin_call(::typeof(mm),c)
     n=length(c.arguments)
     definition=isnothing(weights) ? (normalized ? "\\widetilde w_{jm}=1/"*string(n) : "\\widetilde w_{jm}=1") :
         normalized ? "\\widetilde w_{jm}=w_{jm}/\\sum_h w_{jh}" : "\\widetilde w_{jm}=w_{jm}"
-    BRMDescriptionFragment(prose=("Multi-membership effects use one pooled fitted group-level set across $(join((a.name for a in c.arguments),", ")). Each row sums its membership-specific group deviations with $(normalized ? "row-normalized" : "unscaled") weights. Declared weight inputs: $(isnothing(weights) ? "equal weights" : "\$"*brm_description_math(c,weights)*"\$").",),
+    BRMDescriptionFragment(prose=("Multi-membership effects use one pooled fitted group-level set across $(join((_brmd_path_markdown(a.name) for a in c.arguments),", ")). Each row sums its membership-specific group deviations with $(normalized ? "row-normalized" : "unscaled") weights. Declared weight inputs: $(isnothing(weights) ? "equal weights" : "\$"*brm_description_math(c,weights)*"\$").",),
         equations=(definition,),covers=(c.id,))
 end
 function _brmd_builtin_call(::Type{<:LocationScale},c)
@@ -418,13 +418,24 @@ function _brmd_call_math(::typeof(StanBlocks.stan.builtin.maybe_index),args,_kwa
 end
 function _brmd_builtin_call(::typeof(kernel),c)
     aliases=filter(b->b.role===:alias,c.bindings)
-    names=join(("`"*string(b.name)*"` ← \$"*brm_description_math(c,b.value)*"\$" for b in aliases),", ")
+    definitions=String[]; notes=NamedTuple[]; counter=Ref(0)
+    binding_prose=String[]
+    for (index,b) in enumerate(aliases)
+        symbol="a_{"*string(c.provenance.description_number)*","*string(index)*"}"
+        push!(notes,(;name=(:kernel_binding,c.id,b.name),symbol,
+            meaning="Cell input `$(b.name)` for kernel `$(c.provenance.owner)`."))
+        value=_brmd_compact_expression(c,b.value,definitions,notes,counter;root=true)
+        localcontext=_brmd_render_context(c;notation=(c.notation...,notes...))
+        push!(definitions,_brmd_assignment_equation(localcontext,symbol,value))
+        push!(binding_prose,"Cell input `$(b.name)` is \$"*symbol*"\$; its binding is defined separately.")
+    end
     body=last(first(c.arguments).arguments)
     final=body isa BRMDescriptionComponent && body.callable===:block && !isempty(body.arguments) ? last(body.arguments) : body
     readable=!(final isa BRMDescriptionComponent && final.kind===:syntax &&
         final.callable in (:if,:for,:while,:block))
     equations=readable ? (_brmd_assignment_equation(c,_brmd_kernel_math(c,c),final),) : ()
-    BRMDescriptionFragment(prose=("The kernel mapping K for `$(c.provenance.owner)` runs once per declared group; gⱼ selects the group of output row j. Its arguments preserve their row or event axes. The cell input bindings are: $(names). Its scientific calls and cell statements are covered separately.",),equations=equations,covers=(c.id,))
+    BRMDescriptionFragment(prose=("The kernel mapping K for `$(c.provenance.owner)` runs once per declared group; gⱼ selects the group of output row j. Its arguments preserve their row or event axes. The cell input bindings follow, with separate defining relations. Its scientific calls and cell statements are covered separately.",binding_prose...),
+        equations=(equations...,definitions...),notation=Tuple(notes),covers=(c.id,))
 end
 function _brmd_call_math(::typeof(StanBlocks.stan.builtin.rep_vector),args,_kwargs,_c)
     first(args)*"\\,\\mathbf1_{"*args[2]*"}"
@@ -447,7 +458,7 @@ function _brmd_gp_fragment(c,approximate)
     covariance=get(c.keywords,:cov,:exp_quad)
     covname=covariance isa BRMDescriptionReference ? covariance.name : covariance
     axes=join(("\$"*brm_description_math(c,a)*"\$" for a in c.arguments),", ")
-    prose=String["The $(approximate ? "Hilbert-space approximation to a Gaussian process" : "Gaussian process") uses covariance $(covname). Here τ is its marginal SD, ℓ is its length scale, and x denotes its declared axes: $(axes). Their effective priors are listed separately."]
+    prose=String["The $(approximate ? "Hilbert-space approximation to a Gaussian process" : "Gaussian process") uses covariance `$(covname)`. Here τ is its marginal SD, ℓ is its length scale, and x denotes its declared axes: $(axes). Their effective priors are listed separately."]
     equations=String[]
     if !approximate
         jitter=brm_description_math(c,get(c.keywords,:jitter,1e-9))
@@ -549,14 +560,24 @@ _brmd_builtin_kind(::Val{:submodel_output},c)=BRMDescriptionFragment(
     prose=("`$(c.provenance.owner)` is the returned value of its included scientific submodel, whose internal parameters and calls are described separately.",),covers=(c.id,))
 function _brmd_builtin_kind(::Val{:syntax},c)
     c.callable in (:block,:tuple,:vect,:ref,:(=),:return,:->,:.,:(::),:kw,:parameters) || return nothing
-    equation=c.callable===:(=) && first(c.arguments) isa BRMDescriptionReference ?
-        (_brmd_assignment_equation(c,brm_description_symbol(c,first(c.arguments).name),last(c.arguments)),) : ()
-    BRMDescriptionFragment(equations=equation,covers=(c.id,))
+    c.callable===:(=) && first(c.arguments) isa BRMDescriptionReference &&
+        return _brmd_assignment_fragment(c,brm_description_symbol(c,first(c.arguments).name),last(c.arguments))
+    BRMDescriptionFragment(covers=(c.id,))
 end
 _brmd_builtin_kind(::Val{:parameter},c) = BRMDescriptionFragment(covers=(c.id,))
-_brmd_builtin_kind(::Val{:assignment},c) = BRMDescriptionFragment(
-    prose=("`$(c.provenance.owner)` is a deterministic assignment of its declared arguments.",),
-    equations=(_brmd_assignment_equation(c,brm_description_math(c,c.arguments[1]),c.arguments[2]),),covers=(c.id,))
+_brmd_builtin_kind(::Val{:assignment},c) = _brmd_assignment_fragment(c,
+    brm_description_math(c,c.arguments[1]),c.arguments[2];
+    prose=("`$(c.provenance.owner)` is a deterministic assignment of its declared arguments.",))
+
+function _brmd_assignment_fragment(c,lhs,rhs;prose=())
+    definitions=String[]; notes=NamedTuple[]; counter=Ref(0)
+    reduced=length(lhs*brm_description_math(c,rhs))<=160 ? rhs :
+        _brmd_compact_expression(c,rhs,definitions,notes,counter;root=true)
+    localcontext=_brmd_render_context(c;notation=(c.notation...,notes...))
+    BRMDescriptionFragment(prose=prose,
+        equations=(_brmd_assignment_equation(localcontext,lhs,reduced),definitions...),
+        notation=Tuple(notes),covers=(c.id,))
+end
 
 # Line breaks follow the public expression structure. No labels, arguments or
 # fitted values are clipped, and these relations never cover a scientific child.
@@ -647,7 +668,7 @@ function _brmd_prepared_coordinate(c,column,k,definitions,notation)
     push!(definitions,x*"="*(scaled ? "\\frac{"*raw*"-"*center*"}{"*scale*"}" : raw*"-"*center))
     push!(definitions,center*"="*brm_description_math(c,mean))
     scaled && push!(definitions,scale*"="*brm_description_math(c,sd))
-    meaning="Prepared $(p.kind) design column `$(column.label)` for predictor `$(owner)`, with its fitted constants defined separately."
+    meaning="Prepared `$(p.kind)` design column `$(column.label)` for predictor `$(owner)`, with its fitted constants defined separately."
     push!(notation,(;name=(:prepared_column,owner,column.label),symbol=x,meaning,axis=:observation))
     push!(notation,(;name=(:fitted,owner,column.label,:center),symbol=center,meaning="Fitted centering constant for `$(column.label)` in `$(owner)`."))
     scaled && push!(notation,(;name=(:fitted,owner,column.label,:scale),symbol=scale,meaning="Fitted scaling constant for `$(column.label)` in `$(owner)`."))
@@ -742,9 +763,9 @@ function _brmd_compact_expression(c,x,definitions,notes,counter;root=false,seen=
     root && return reduced
     counter[]+=1
     key=(:description_expression,c.id,counter[])
-    symbol="\\xi_{"*string(c.provenance.description_number)*","*string(counter[])*"}"
-    path=x isa BRMDescriptionComponent ? x.id : c.id
-    push!(notes,(;name=key,symbol,meaning="Intermediate expression at $(path); its exact defining relation is listed separately."))
+    scope=get(c.provenance,:description_expression_scope,string(get(c.provenance,:description_number,0)))
+    symbol="\\xi_{"*scope*","*string(counter[])*"}"
+    push!(notes,(;name=key,symbol,meaning="Intermediate expression; its exact defining relation is listed separately."))
     localcontext=_brmd_render_context(c;notation=(c.notation...,notes...))
     push!(definitions,_brmd_assignment_equation(localcontext,symbol,reduced))
     BRMDescriptionReference(:intermediate_expression,:local,key)
@@ -777,7 +798,8 @@ function _brmd_notation(d,labels)
         label=get(labels,name,NamedTuple())
         label isa AbstractString && (label=(; meaning=String(label)))
         label isa NamedTuple || throw(ArgumentError("labels[$name] must be text or a notation NamedTuple"))
-        push!(result,merge((; name,meaning=string(name),axis=:declared),_brmd_snapshot(label)))
+        push!(result,merge((; name,meaning=string(name),axis=:declared,
+            meaning_supplied=haskey(label,:meaning)),_brmd_snapshot(label)))
     end
     Tuple(result)
 end
@@ -788,8 +810,9 @@ function _brmd_block_notation(notation,groups,labels)
     for (index,group) in enumerate(sort!(collect(groups);by=g->string(g.key)))
         supplied=get(labels,group.key,NamedTuple())
         supplied isa AbstractString && (supplied=(;meaning=String(supplied)))
+        margins=join((_brmd_path_markdown((m.predictor,m.coefficient)) for m in group.margins),"; ")
         note=merge((;name=group.key,symbol=string(index),axis=:covariance_block,
-            meaning="Covariance block $(index): logical ID $(group.key); margins $(Tuple((m.predictor,m.coefficient) for m in group.margins))."),supplied)
+            meaning="Covariance block $(index); ordered margins: $(margins)."),supplied)
         filter!(n->n.name!=group.key,result)
         push!(result,note)
     end
@@ -874,21 +897,30 @@ function _brmd_prior_equation(p)
         (_brmd_identifier(k)*"="*brm_description_math(c,v) for (k,v) in pairs(p.support)),", ")
     _brmd_distribution_math(c,c)*support
 end
-_brmd_prior_id_markdown(id)=join(("`"*replace(string(part),"|"=>"\\|")*"`" for part in id)," / ")
-function _brmd_prior_cell_math(p)
+_brmd_path_markdown(id::Tuple)=join((part isa Tuple ? "("*_brmd_path_markdown(part)*")" : _brmd_path_markdown(part) for part in id)," / ")
+_brmd_path_markdown(part)="`"*replace(string(part),"|"=>"\\|")*"`"
+_brmd_prior_id_markdown(id)=_brmd_path_markdown(id)
+function _brmd_prior_definition(p,index)
     c=p.distribution
-    c isa BRMDescriptionComponent || return string(p.distribution)
-    fields=(_brmd_distribution_math(c,c),
-        (_brmd_identifier(k)*"="*brm_description_math(c,v) for (k,v) in pairs(p.support))...)
-    # Separate inline spans allow wrapping between density and support facts.
-    join(("\$"*replace(field,"|"=>"\\|")*"\$" for field in fields),"; ")
+    c isa BRMDescriptionComponent || return (string(p.distribution),)
+    definitions=String[]; notes=NamedTuple[]; counter=Ref(0)
+    context=_brmd_render_context(c;provenance=merge(c.provenance,
+        (;description_expression_scope="P"*string(index))))
+    reduced=_brmd_compact_expression(context,c,definitions,notes,counter;root=true)
+    support=map(Tuple(pairs(p.support))) do (k,v)
+        value=_brmd_compact_expression(context,v,definitions,notes,counter;root=true)
+        localcontext=_brmd_render_context(context;notation=(context.notation...,notes...))
+        _brmd_assignment_equation(localcontext,_brmd_identifier(k),value)
+    end
+    localcontext=_brmd_render_context(context;notation=(context.notation...,notes...))
+    (_brmd_distribution_math(localcontext,reduced),support...,definitions...)
 end
 
 """
     brm_description_markdown(description)
 
 Render deterministic Markdown with display LaTeX, an effective prior table,
-notation and explicit coverage diagnostics. Every prior row owns a model-scoped
+notation entries and explicit coverage diagnostics. Every prior row owns a model-scoped
 anchor; component references link to these targets by default. `prior_anchors`
 remain additional outbound links. Use `prefix` for repeated model instances.
 """
@@ -903,41 +935,51 @@ function brm_description_markdown(description::BRMDescription;prefix=nothing)
     end
     if !isempty(description.priors)
         println(io,"\nEffective priors:\n\n| Logical parameter | Distribution and support | Prior listing |\n| --- | --- | --- |")
-        long_ids=Tuple{Int,Tuple}[]
         for (index,p) in enumerate(description.priors)
-            label=_brmd_prior_id_markdown(p.id)
-            if length(join(string.(p.id)," / "))>80 || any(part->length(string(part))>36,p.id)
-                push!(long_ids,(index,p.id))
-                label="P"*string(index)
-            end
-            equation=_brmd_prior_cell_math(p)
+            label="P"*string(index)
+            family=p.distribution isa BRMDescriptionComponent ? "`"*string(_brmd_callable_name(p.distribution.callable))*"`" : "Declared prior"
             link=isnothing(p.anchor) ? "" : "[prior listing]("*replace(p.anchor," "=>"%20")*")"
-            println(io,"| <a id=\"",brm_description_prior_anchor(p;prefix),"\"></a>",label," | ",equation," | ",link," |")
+            println(io,"| <a id=\"",brm_description_prior_anchor(p;prefix),"\"></a>",label," | ",family,"; definition ",label," below | ",link," |")
         end
-        if !isempty(long_ids)
-            println(io,"\nLong logical parameter IDs (prior table row keys):")
-            for (index,id) in long_ids
-                println(io,"\nP",index,": ",_brmd_prior_id_markdown(id),".")
+        println(io,"\nPrior definitions (complete logical IDs, distributions and support):")
+        for (index,p) in enumerate(description.priors)
+            println(io,"\n**P",index,".** Logical parameter: ",_brmd_prior_id_markdown(p.id),".")
+            for equation in _brmd_prior_definition(p,index)
+                println(io,"\n\$\$\n",equation,"\n\$\$")
             end
         end
+        prior_keys=Dict(p.id=>"P"*string(index) for (index,p) in enumerate(description.priors))
         seen=Set{Tuple}()
         links=Tuple(c=>brm_description_prior_references(c) for c in description.components
             if c.provenance.declaration!==:prior)
         any(p->!isempty(last(p)),links) && println(io,"\nComponent prior references:\n\n| Component | Effective priors |\n| --- | --- |")
+        component_ids=Tuple{Int,Tuple}[]
         for (c,ids) in links
             isempty(ids) && continue
             ids in seen && continue
             push!(seen,ids)
-            references=join(("["*replace(join(string.(id)," / "),"|"=>"\\|")*"](#"*
+            index=length(component_ids)+1
+            push!(component_ids,(index,c.id))
+            references=join(("["*prior_keys[id]*"](#"*
                 brm_description_prior_anchor(description,id;prefix)*")" for id in ids),", ")
-            println(io,"| `",replace(repr(c.id),"|"=>"\\|"),"` | ",references," |")
+            println(io,"| C",index," | ",references," |")
+        end
+        if !isempty(component_ids)
+            println(io,"\nComponent reference keys (complete logical IDs):")
+            for (index,id) in component_ids
+                println(io,"\n**C",index,".** ",_brmd_path_markdown(id),".")
+            end
         end
     end
     if !isempty(description.notation)
-        println(io,"\nNotation:\n\n| Quantity | Symbol | Meaning | Axis | Supplied unit |\n| --- | --- | --- | --- | --- |")
-        for n in description.notation
-            symbol=haskey(n,:symbol) ? "\$"*n.symbol*"\$" : ""
-            println(io,"| `",n.name,"` | ",symbol," | ",get(n,:meaning,string(n.name))," | ",get(n,:axis,:declared)," | ",get(n,:unit,"")," |")
+        println(io,"\nNotation:")
+        for (index,n) in enumerate(description.notation)
+            println(io,"\n**N",index,".** Quantity: ",_brmd_path_markdown(n.name),".")
+            haskey(n,:symbol) && println(io,"\nSymbol: \$",n.symbol,"\$.")
+            meaning=get(n,:meaning,string(n.name))
+            get(n,:meaning_supplied,haskey(n,:meaning)) && println(io,"\nMeaning: ",meaning)
+            println(io,"\nAxis: ",_brmd_path_markdown(get(n,:axis,:declared)),".")
+            haskey(n,:unit) && println(io,"\nSupplied unit: ",n.unit)
         end
     end
     if !description.complete
