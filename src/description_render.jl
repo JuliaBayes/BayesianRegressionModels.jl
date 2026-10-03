@@ -24,7 +24,10 @@ context's notation. Rendering an unknown call does not establish coverage.
 """
 function brm_description_math(c::BRMDescriptionContext,x::BRMDescriptionReference)
     aliases=filter(b -> b.name===x.name && b.role in (:alias,:constant,:deterministic),c.bindings)
-    isempty(aliases) || return brm_description_math(c,only(aliases).value)
+    if !isempty(aliases)
+        value=only(aliases).value
+        isequal(value,x) || return brm_description_math(c,value)
+    end
     x.logical isa Tuple && any(n -> n.name==x.logical,c.notation) &&
         return brm_description_symbol(c,x.logical)
     brm_description_symbol(c,x.name)
@@ -36,6 +39,8 @@ brm_description_math(c::BRMDescriptionContext, xs::Tuple) =
     "\\left[" * join((brm_description_math(c,x) for x in xs), ", ") * "\\right]"
 brm_description_math(_c::BRMDescriptionContext, x::Symbol) = _brmd_identifier(x)
 function brm_description_math(c::BRMDescriptionContext,x::NamedTuple)
+    haskey(x,:size) && haskey(x,:values) && return "\\operatorname{reshape}\\left("*
+        brm_description_math(c,x.values)*","*join(x.size,",")*"\\right)"
     haskey(x,:callable) && return _brmd_call_math(x.callable,
         map(a->brm_description_math(c,a),x.arguments),x.keywords,c)
     _brmd_identifier(string(x))
@@ -49,6 +54,11 @@ brm_description_math(_c::BRMDescriptionContext,x::Union{Function,Type,StanBlocks
     _brmd_identifier(_brmd_callable_name(x))
 
 function brm_description_math(c::BRMDescriptionContext, x::BRMDescriptionComponent)
+    if x.callable===StanBlocks.stan.builtin.maybe_index
+        value=first(x.arguments)
+        (value isa Number || value isa BRMDescriptionReference && value.axis===:scalar) &&
+            return brm_description_math(c,value)
+    end
     args = map(a -> brm_description_math(c,a), x.arguments)
     _brmd_call_math(x.callable,args,x.keywords,c)
 end
@@ -250,6 +260,12 @@ function _brmd_builtin_call(::typeof(weighted),c)
 end
 for f in (aweights,fweights,weights)
     @eval _brmd_builtin_call(::$(typeof(f)),c)=BRMDescriptionFragment(covers=(c.id,))
+end
+function _brmd_builtin_call(::typeof(StanBlocks.stan.builtin.maybe_index),c)
+    BRMDescriptionFragment(prose=("The imputation split uses scalar distribution parameters unchanged and selects the missing-row indices from vector parameters.",),covers=(c.id,))
+end
+function _brmd_call_math(::typeof(StanBlocks.stan.builtin.maybe_index),args,_kwargs,c)
+    "\\operatorname{select}_{\\mathrm{scalar/vector}}\\left("*join(args,",")*"\\right)"
 end
 function _brmd_builtin_call(::typeof(kernel),c)
     BRMDescriptionFragment(prose=("The kernel runs once per declared group; its arguments preserve their own row or event axes. Its scientific calls and cell statements are covered separately.",),covers=(c.id,))
@@ -487,7 +503,7 @@ Render deterministic Markdown with display LaTeX, an effective prior table,
 notation and explicit coverage diagnostics. Report links come only from the
 supplied logical `prior_anchors` map. No generated-name parsing is required.
 """
-function brm_description_markdown(description::BRMDescription)
+function brm_description_markdown(description::BRMDescription;prefix=nothing)
     io=IOBuffer()
     println(io,description.complete ? "Complete model description." : "Incomplete model description: semantic coverage gaps remain.")
     for paragraph in description.prose
@@ -502,7 +518,19 @@ function brm_description_markdown(description::BRMDescription)
             label=replace(join(string.(p.id)," / "),"|"=>"\\|")
             equation=replace(_brmd_prior_equation(p),"|"=>"\\|")
             link=isnothing(p.anchor) ? "" : "[prior listing]("*replace(p.anchor," "=>"%20")*")"
-            println(io,"| `",label,"` | \$",equation,"\$ | ",link," |")
+            println(io,"| <a id=\"",brm_description_prior_anchor(p;prefix),"\"></a>`",label,"` | \$",equation,"\$ | ",link," |")
+        end
+        seen=Set{Tuple}()
+        links=Tuple(c=>brm_description_prior_references(c) for c in description.components
+            if c.provenance.declaration!==:prior)
+        any(p->!isempty(last(p)),links) && println(io,"\nComponent prior references:\n\n| Component | Effective priors |\n| --- | --- |")
+        for (c,ids) in links
+            isempty(ids) && continue
+            ids in seen && continue
+            push!(seen,ids)
+            references=join(("["*replace(join(string.(id)," / "),"|"=>"\\|")*"](#"*
+                brm_description_prior_anchor(description,id;prefix)*")" for id in ids),", ")
+            println(io,"| `",replace(repr(c.id),"|"=>"\\|"),"` | ",references," |")
         end
     end
     if !isempty(description.notation)

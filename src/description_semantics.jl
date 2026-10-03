@@ -7,7 +7,8 @@ _brmd_snapshot(x::Tuple) = map(_brmd_snapshot,x)
 _brmd_snapshot(x::NamedColumn) = BRMDescriptionReference(name(x), :observation)
 _brmd_snapshot(x::ExprColumn) = (; callable=getf(x),
     arguments=map(_brmd_snapshot,getargs(x)), keywords=map(_brmd_snapshot,getkwargs(x)))
-_brmd_snapshot(x::AbstractArray) = Tuple(_brmd_snapshot(v) for v in x)
+_brmd_snapshot(x::AbstractArray{T,N}) where {T,N} = N==1 ?
+    Tuple(_brmd_snapshot(v) for v in x) : (;size=size(x),values=Tuple(_brmd_snapshot(v) for v in x))
 _brmd_snapshot(x::NamedTuple) = map(_brmd_snapshot, x)
 _brmd_snapshot(x::AbstractDict) = Tuple(
     key => _brmd_snapshot(x[key]) for key in sort!(collect(keys(x)); by=string))
@@ -81,6 +82,7 @@ function _brmd_included_model(env,model,kwargs,id,path)
         else
             _brmd_value(value,env,(id...,:binding,name))
         end
+        public=_brmd_resolve_alias(public,env.bindings)
         push!(bindings,(;name,role=:alias,value=public,prior_ids=(),path=(name,)))
     end
     parameters=Dict{Tuple,Vector{Tuple}}()
@@ -110,6 +112,17 @@ function _brmd_included_model(env,model,kwargs,id,path)
     end
     body=_brmd_value(model.model,subenv,(id...,:body))
     _brmd_component(subenv,id,:submodel,model,(body,))
+end
+
+_brmd_resolve_alias(x,_bindings,_seen=())=x
+function _brmd_resolve_alias(x::BRMDescriptionReference,bindings,seen=())
+    x.logical isa Tuple && return x
+    x.name in seen && return x
+    matches=filter(b->b.name===x.name && b.role in (:alias,:constant,:deterministic),bindings)
+    length(matches)==1 || return x
+    value=only(matches).value
+    value isa BRMDescriptionComponent && return x
+    _brmd_resolve_alias(value,bindings,(seen...,x.name))
 end
 
 function _brmd_value(x::ExprColumn{typeof(kernel)},env,id)

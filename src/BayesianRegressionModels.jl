@@ -173,6 +173,7 @@ export BRMDescription, BRMDescriptionComponent, BRMDescriptionContext,
        brm_description_components, brm_description_markdown
 export brm_description_math, brm_description_symbol
 export brm_description_binding, brm_description_prior
+export brm_description_prior_anchor, brm_description_prior_references
 export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
        brm_population_effect_coordinates, brm_term_coordinates,
        brm_ranef_sd_coordinates,

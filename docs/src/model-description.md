@@ -71,6 +71,15 @@ positive scales and improper unpenalized coefficients are inventoried too.
 Gaussian equations square the SD argument; Exponential scale and rate
 parameterizations are stated explicitly.
 
+The Markdown renderer creates a stable target for each row of its complete
+effective-prior table and links component prior references to those targets.
+`brm_description_prior_anchor(result_or_context, prior.id)` returns the target ID;
+`brm_description_prior_references(context)` returns the related logical prior IDs.
+Targets are scoped to `model_id`. For repeated instances of one model artifact,
+pass a unique `prefix` to both `brm_description_markdown` and the anchor helper.
+The optional `prior_anchors` map adds outbound links to targets owned by the
+calling report; it does not create those external targets.
+
 ## Scientific extensions
 
 An unknown callable leaves a coverage gap. Add a reusable
@@ -102,6 +111,10 @@ authored internal parameter. Its record contains `name`, `role`, `value`,
 ID. Repeated nested names can be addressed by an authored tuple path.
 Kernel lambda aliases point to actual model arguments. No generated prefix or
 declaration-order assumption is needed.
+Authored literal assignments have `role=:constant` and expose their value;
+composed assignments have `role=:deterministic` and expose a public expression.
+Actual higher-order callable arguments retain their identity and render through
+the same escaped math helper.
 
 Included scientific SlicModels expose their parameter declarations,
 deterministic expressions and nested calls as children. A top-level caption

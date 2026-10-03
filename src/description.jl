@@ -133,6 +133,62 @@ function brm_description_prior(c::BRMDescriptionContext,id::Tuple)
     only(hits)
 end
 
+"""
+    brm_description_prior_anchor(description_or_context, id::Tuple; prefix=nothing)
+
+Stable HTML target for an exact logical prior, scoped to the model identity.
+Supply a unique `prefix` when mounting repeated instances of one model artifact.
+The Markdown renderer creates this target in its complete effective-prior table.
+"""
+_brmd_prior_anchor(prefix::AbstractString,id::Tuple) =
+    "brm-prior-"*bytes2hex(codeunits(prefix))*"-"*bytes2hex(codeunits(repr(id)))
+brm_description_prior_anchor(d::BRMDescription,id::Tuple;prefix=nothing) =
+    _brmd_prior_anchor(isnothing(prefix) ? d.model_id : String(prefix),id)
+brm_description_prior_anchor(c::BRMDescriptionContext,id::Tuple;prefix=nothing) =
+    _brmd_prior_anchor(isnothing(prefix) ? c.provenance.model_id : String(prefix),id)
+brm_description_prior_anchor(p::BRMPriorDescription;prefix=nothing) =
+    _brmd_prior_anchor(isnothing(prefix) ? p.provenance.model_id : String(prefix),p.id)
+
+"""
+    brm_description_prior_references(context)
+
+Ordered logical prior IDs bound to this component, its quantities and descendants.
+Resolve them with `brm_description_prior`; link their default rendered targets with
+`brm_description_prior_anchor`. This does not parse generated parameter names.
+"""
+function brm_description_prior_references(c::BRMDescriptionContext)
+    ids=Set{Tuple}()
+    _brmd_prior_references!(ids,c)
+    Tuple(p.id for p in c.priors if p.id in ids)
+end
+function _brmd_prior_references!(ids,c::BRMDescriptionComponent)
+    for b in c.bindings
+        union!(ids,b.prior_ids)
+    end
+    for p in c.priors
+        if first(c.id)===:random_effect && length(p.id)>=length(c.id) && p.id[1:length(c.id)]==c.id ||
+           first(p.id)===:population && length(p.id)>=2 && p.id[2]===c.provenance.owner
+            push!(ids,p.id)
+        end
+    end
+    foreach(x->_brmd_prior_references!(ids,c,x),(c.arguments...,values(c.keywords)...))
+    foreach(x->_brmd_prior_references!(ids,x),c.children)
+end
+_brmd_prior_references!(_ids,_c,_x)=nothing
+_brmd_prior_references!(_ids,_c,_x::BRMDescriptionComponent)=nothing
+_brmd_prior_references!(ids,c,x::Union{Tuple,NamedTuple})=foreach(v->_brmd_prior_references!(ids,c,v),x)
+function _brmd_prior_references!(ids,c,x::BRMDescriptionReference)
+    resolved=_brmd_resolve_alias(x,c.bindings)
+    resolved isa BRMDescriptionReference || return
+    for p in c.priors
+        if p.id==resolved.logical || get(p.source,:binding_id,nothing)==resolved.logical ||
+           p.id==(:parameter,resolved.logical) ||
+           first(p.id)===:population && length(p.id)>=2 && p.id[2]===resolved.logical
+            push!(ids,p.id)
+        end
+    end
+end
+
 """Return the complete, ordered recursive semantic inventory."""
 function brm_description_components(component::BRMDescriptionComponent)
     (component, (node for child in component.children

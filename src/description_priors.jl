@@ -1,7 +1,12 @@
 # Effective priors share the emitter's selector resolver. Never reinterpret
 # selector precedence in a reporting consumer.
-function _brmd_prior(d, id, expression, support, source, anchors, notation)
+function _brmd_prior(d, id, expression, support, source, anchors, notation;bindings=())
     env = _brmd_environment(d, id, :prior, (), _brmd_constants(d.plan), notation)
+    isempty(bindings) || (env=merge(env,(;bindings)))
+    if expression isa ExprColumn
+        support=merge(support,(; (k=>_brmd_snapshot(v) for (k,v) in pairs(getkwargs(expression))
+            if k in (:lower,:upper))...))
+    end
     value = _brmd_value(expression, env, (:prior, id...))
     anchor = get(anchors,id,nothing)
     BRMPriorDescription(id, value, support, source,
@@ -164,8 +169,12 @@ function _brmd_submodel_priors!(priors,d,model,values,path,anchors,notation,stac
     declarations = GenerativeDeclaration[]
     _sb_plan_collect!(declarations,model.model,Dict{Symbol,Symbol}(k=>k for k in keys(values)),(),Set{Symbol}(),Set{Symbol}(),Set())
     _brmd_flat_priors!(priors,d,model,values,path,declarations,anchors,notation)
+    bindings=Tuple((;name=p.target,role=:parameter,path=(p.context...,p.target),
+        value=BRMDescriptionReference(p.target,:scalar,(path...,p.context...,p.target)),prior_ids=())
+        for p in declarations if p.role===:prior && p.family!==:plate)
     for p in declarations
         p.role === :prior || continue
+        p.family===:plate && continue
         f = _brmd_binding(p.family,model.mod)
         args = map(x -> _brmd_substitute(x,values),p.arguments)
         kwargs = map(x -> _brmd_substitute(x,values),p.keywords)
@@ -182,7 +191,8 @@ function _brmd_submodel_priors!(priors,d,model,values,path,anchors,notation,stac
             raw = ExprColumn(f,args...;kwargs...)
             support = merge(_brmd_support(f),map(x -> _brmd_substitute(x,values),p.constraints))
             push!(priors,_brmd_prior(d,logical,raw,support,
-                (; kind=:generated, family=f, dimension=_brmd_snapshot(p.dimension),binding_id),anchors,notation))
+                (; kind=:generated, family=f, dimension=_brmd_snapshot(map(a->_brmd_substitute(a,values),p.dimension)),binding_id),
+                anchors,notation;bindings))
         end
     end
 end
@@ -192,9 +202,12 @@ function _brmd_priors(d, anchors, notation)
     _brmd_population_priors!(priors,d,anchors,notation)
     groups = _brmd_ranef_metadata(d)
     _brmd_ranef_priors!(priors,d,groups,anchors,notation)
+    categories=Set(cat.emitted for entry in _brm_population_effect_entries(d.plan.parent)
+        for cat in _brm_categorical_effect_entries(d,entry.logical,entry.link))
     for declaration in d.plan.declarations
         role = _brm_declaration_role(declaration,d.plan.bindings)
         role in (:population_effect,:random_effect) && continue
+        declaration.target in categories && continue
         # A plate declares a grouped computation, not a distribution on its
         # returned value. Its cell priors are already separate declarations.
         declaration.family === :plate && continue

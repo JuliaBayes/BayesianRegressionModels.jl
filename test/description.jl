@@ -60,6 +60,17 @@ const toy_term=DescriptionScientificComponent.toy_term
     @test count(p -> :correlation in p.id,r.priors)==1
     @test all(p -> p.support.lower==0.0,filter(p -> :sd in p.id,r.priors))
     @test occursin("[prior listing](#slope-prior)",brm_description_markdown(r))
+    anchor=brm_description_prior_anchor(r,ps.id)
+    @test occursin("id=\""*anchor*"\"",brm_description_markdown(r))
+    @test occursin("](#"*anchor*")",brm_description_markdown(r))
+    @test brm_description_prior_anchor(ps)==anchor
+    predictor=only(filter(c->c.kind===:predictor,r.components))
+    @test ps.id in brm_description_prior_references(predictor)
+    @test brm_description_prior_anchor(predictor,ps.id)==anchor
+    @test brm_description_prior_anchor(r,ps.id;prefix="model-A")!=
+          brm_description_prior_anchor(r,ps.id;prefix="model-B")
+    @test occursin(brm_description_prior_anchor(r,ps.id;prefix="model-A"),
+        brm_description_markdown(r;prefix="model-A"))
     @test stan_code(sb)==source
     @test isequal(sb.data,data)
     @test brm_descriptor(sb).id==d.id
