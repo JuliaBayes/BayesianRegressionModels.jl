@@ -13510,6 +13510,11 @@ _sb_lik_family!(stmts, target, fam, args, data) =
 
 _sb_scalar_expr(x::Symbol, _) = x
 _sb_scalar_expr(x::Real, _) = x
+# @brm evaluates vector literals into ordinary Julia containers. Restore the
+# literal AST recursively so model references keep their Stan dependencies and
+# data leaves use the same registration path as any other expression argument.
+_sb_scalar_expr(x::AbstractVector, data) =
+    Expr(:vect, (_sb_scalar_expr(value, data) for value in x)...)
 _sb_scalar_expr(x::NamedColumn, data) = begin
     _record_scalar_data!(data, name(x), parent(x))
     name(x)
