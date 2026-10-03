@@ -2,7 +2,7 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 include(joinpath(@__DIR__, "rk_structured_fixture.jl"))
 using LinearAlgebra
 
-@stestset "downstream prepared structured block native density gradients and source" begin
+@stestset "downstream prepared structured block primal density Stan and source" begin
     data=(;x=[-.5,0.,.5,1.],g=[1,1,2,2],y=[-1.,.1,1.,.4])
     before=deepcopy(data)
     model=@brm data begin
@@ -28,7 +28,7 @@ using LinearAlgebra
             log(2) + log1p(-corr^2)
     end
     for u in (zeros(8),fill(.13,8),collect(range(-.2,.3;length=8)))
-        check_consumer_point(problem,u,oracle)
+        @test LogDensityProblems.logdensity(problem,u) ≈ oracle(u) atol=2e-11 rtol=2e-11
     end
     @test isequal(data,before)
     stan=consumer_stan(model,"downstream-group-line")
@@ -47,10 +47,31 @@ using LinearAlgebra
             case_id="downstream-group-line")
         su=BRM.apply_sb_map(u,permutation); sg=similar(su)
         sv,_=BridgeStan.log_density_gradient!(stan.model,su,sg;propto=false,jacobian=true)
-        rv,rg=LogDensityProblems.logdensity_and_gradient(problem,u)
+        rv=LogDensityProblems.logdensity(problem,u)
         @test rv ≈ sv+2log(2) atol=2e-11 rtol=2e-11
-        @test rg ≈ BRM.unmap_sb_grad(sg,permutation) atol=2e-10 rtol=2e-10
+        h=1e-5
+        independent_gradient=map(eachindex(u)) do j
+            plus,minus=copy(u),copy(u);plus[j]+=h;minus[j]-=h
+            (oracle(plus)-oracle(minus))/(2h)
+        end
+        @test independent_gradient ≈ BRM.unmap_sb_grad(sg,permutation) atol=2e-8 rtol=2e-8
     end
+end
+
+@stestset "downstream original native hook ordinary Enzyme reverse acceptance" begin
+    # Strict delivery gate: the consumer's exact authored hook is preserved.
+    # Generic Enzyme activity support is tracked by generic-array-re-b298e503.
+    data=(;x=[-.5,0.,.5,1.],g=[1,1,2,2],y=[-1.,.1,1.,.4])
+    model=@brm data begin
+        mu ~ 1 + group_line(x;group=g)
+        y ~ Normal(mu,1)
+    end
+    backend,problem=consumer_problem(model)
+    u=zeros(backend.model.layout.total);before=copy(u)
+    value,gradient=LogDensityProblems.logdensity_and_gradient(problem,u)
+    @test isfinite(value)
+    @test all(isfinite,gradient)
+    @test isequal(u,before)
 end
 
 function independent_hsgp_basis(x,k,c)
@@ -95,6 +116,22 @@ end
         # statistical density or a backend result used as a reference.
         term=only(filter(t->t.kind===:hsgp,only(backend.plan.predictors).terms))
         phi,frequencies,floor=independent_hsgp_basis(data.x,3,term.options.c)
+        stan=consumer_stan(model,"grouped-hsgp-"*label)
+        mapping=[:mu_Intercept=>"pop_mu_beta_pop.1"]
+        for g in 1:2,k in 1:3
+            push!(mapping,names[weights[g,k]]=>"b_hsgp_x_g_z_flat.$((g-1)*3+k)")
+        end
+        for (stem,stan_stem) in (("rho","rho_iso"),("sigma","sigma"))
+            if label=="hyper"
+                push!(mapping,Symbol("hsgp_x_$(stem)_Intercept")=>"hsgp_x_by_g_beta0_$stem")
+                push!(mapping,Symbol("hsgp_x_$(stem)_sd")=>"hsgp_x_by_g_sd_$stem")
+                for g in 1:2
+                    push!(mapping,Symbol("hsgp_x_$(stem)_z.$g")=>"hsgp_x_by_g_z_$stem.$g")
+                end
+            else
+                push!(mapping,Symbol("hsgp_x_$stem")=>"hsgp_x_by_g_$stan_stem")
+            end
+        end
         oracle(u)=begin
             prior=logpdf(Normal(),u[a])+sum(logpdf.(Normal(),u[weights]))
             hypers=map(("rho","sigma")) do stem
@@ -126,6 +163,10 @@ end
         for u in (zeros(length(names)),fill(.13,length(names)),
                 collect(range(-.2,.3;length=length(names))))
             check_consumer_point(problem,u,oracle)
+            # Historical Stan lower bounds omit conditional normalizers.
+            offset=label=="hyper" ? 2log(2) : label=="default" ?
+                -logccdf(LogNormal(),floor) : 0.
+            check_consumer_stan(problem,stan,mapping,backend,u;density_offset=offset)
         end
         @test isequal(data,before)
     end
