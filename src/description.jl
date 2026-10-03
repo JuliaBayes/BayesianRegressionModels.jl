@@ -126,6 +126,20 @@ function brm_description_binding(c::BRMDescriptionContext,path::Tuple)
     only(hits)
 end
 
+"""
+    brm_description_record(context, argument)
+
+Return the named public fields of a statically declared record argument.
+References resolve through authoritative local bindings; field values retain
+their parameter/data references and expression components. No code is executed.
+An unresolved, cyclic or non-record argument raises an ArgumentError.
+"""
+function brm_description_record(c::BRMDescriptionContext,x)
+    value=_brmd_resolve_alias(x,c.bindings)
+    value isa NamedTuple || throw(ArgumentError("description argument is not a statically bound named record in $(c.id)"))
+    value
+end
+
 """Resolve the exact logical prior ID returned by a component binding."""
 function brm_description_prior(c::BRMDescriptionContext,id::Tuple)
     hits=filter(p -> p.id==id,c.priors)

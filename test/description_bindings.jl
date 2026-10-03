@@ -122,7 +122,7 @@ end
     rows=filter(row->startswith(row,"| <a id="),split(md,'\n'))
     @test length(rows)==length(r.priors)
     @test all(row->!occursin("\\sim",split(row," | ")[2]),rows)
-    @test all(p->occursin("`"*join(string.(p.id)," / ")*"`",md),r.priors)
+    @test all(p->all(part->occursin("`"*string(part)*"`",md),p.id),r.priors)
 end
 
 @testset "stratified and centered group covariance" begin

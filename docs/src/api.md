@@ -10,6 +10,7 @@ brm_description_components
 brm_description_math
 brm_description_symbol
 brm_description_binding
+brm_description_record
 brm_description_prior
 brm_description_prior_anchor
 brm_description_prior_references

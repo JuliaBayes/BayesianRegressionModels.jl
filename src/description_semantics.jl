@@ -224,6 +224,18 @@ end
 function _brmd_value(x::Expr, env, id)
     declaration=_brmd_documented(x)
     declaration===x || return _brmd_value(declaration,env,(id...,:documented))
+    if x.head===:tuple && length(x.args)==1 &&
+       only(x.args) isa Expr && only(x.args).head===:parameters
+        fields=only(x.args).args
+        names=Tuple(a isa Symbol ? a :
+            a isa Expr && a.head in (:kw,:(=)) && first(a.args) isa Symbol ?
+            first(a.args) : nothing for a in fields)
+        if all(n->n isa Symbol,names) && length(unique(names))==length(names)
+            values_=Tuple(_brmd_value(a isa Symbol ? a : last(a.args),env,(id...,:field,n))
+                for (n,a) in zip(names,fields))
+            return NamedTuple{names}(values_)
+        end
+    end
     if x.head===Symbol("'") && length(x.args)==1
         args=(_brmd_value(only(x.args),env,(id...,:argument,1)),)
         return _brmd_component(env,id,:call,adjoint,args)

@@ -86,3 +86,63 @@ end
     @test stan_code(sb)==code && isequal(sb.data,prepared)
     @test brm_description(sb).equations==r.equations
 end
+
+@testset "long likelihood arguments have exact separately defined quantities" begin
+    data=(;event_times=[[.1,.2],[.3,.4]],baseline_values=[1.,2.],
+        amplitude_values=[.2,.3],lower_boundary=[0.,0.],upper_boundary=[4.,5.],
+        decay_rate_values=[.5,.7],event_onset_times=[0.,.1],normalization_values=[1.,1.],
+        observed_values=[[1.,2.],[2.,3.]])
+    model=@brm data begin
+        prediction ~ kernel(event_times,baseline_values,amplitude_values,
+            lower_boundary,upper_boundary,decay_rate_values,event_onset_times,
+            normalization_values,observed_values) do ts,b,a,l,u,d,o,n,yy
+            yy ~ normal(combine_state(ts,b,a,l,u,d,o,n),
+                addprop(combine_state(ts,b,a,l,u,d,o,n),.1,.2)+
+                addprop(combine_state(ts,b,a,l,u,d,o,n),.2,.3))
+            ts
+        end
+    end
+    sb=SBBRMI(model;mod=@__MODULE__,total_groups=())
+    code=stan_code(sb); frozen=deepcopy(sb.data)
+    @test !brm_description(sb).complete
+    hook=c->BRMDescriptionFragment(covers=(c.id,))
+    r=brm_description(sb;hooks=(combine_state=>hook,))
+    @test r.complete
+    likelihood=only(filter(e->occursin("\\sim",e),r.equations))
+    @test length(likelihood)<160
+    @test occursin("\\xi_{",likelihood) && occursin("}^{2}",likelihood)
+    quantities=filter(n->n.name isa Tuple && first(n.name)===:description_expression,r.notation)
+    @test !isempty(quantities)
+    @test length(unique(n.symbol for n in quantities))==length(quantities)
+    @test all(n->any(e->occursin(n.symbol*"=",e) || occursin(n.symbol*"&=",e),r.equations),quantities)
+    definitions=join(r.equations,"\n")
+    @test all(key->occursin(replace(string(key),"_"=>"\\_"),definitions),keys(data)[1:8])
+    @test any(e->occursin("combine\\_state",e) && occursin("\\begin{aligned}",e),r.equations)
+    @test !any(e->occursin("BRMDescription",e),r.equations)
+    @test stan_code(sb)==code && isequal(sb.data,frozen)
+end
+
+@testset "prior rows wrap support and retain complete long logical IDs" begin
+    data=(;y=[.2,.4,.6])
+    model=@brm data begin
+        extraordinarily_long_authored_parameter_name ~ Exponential(.7)
+        y ~ Normal(extraordinarily_long_authored_parameter_name,1)
+    end
+    r=brm_description(SBBRMI(model;mod=@__MODULE__,total_groups=()))
+    @test r.complete
+    prior=only(r.priors)
+    md=brm_description_markdown(r;prefix="wide priors")
+    target=brm_description_prior_anchor(r,prior.id;prefix="wide priors")
+    rows=filter(row->startswith(row,"| <a id="),split(md,'\n'))
+    @test length(rows)==1 && occursin("></a>P1 |",only(rows))
+    @test count(target,md)>=1
+    @test count("<a id=\""*target*"\"",md)==1
+    @test occursin("Long logical parameter IDs",md)
+    @test all(part->occursin("`"*string(part)*"`",md),prior.id)
+    lawcell=split(only(rows)," | ")[2]
+    @test occursin("\$; \$",lawcell)
+    @test !occursin(string(last(prior.id)),lawcell)
+    parsed=Markdown.parse(md)
+    @test occursin("extraordinarily_long_authored_parameter_name",Markdown.html(parsed))
+    @test !occursin("\\sim",lawcell)
+end

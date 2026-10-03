@@ -25,6 +25,8 @@ Render any public argument/reference/component as escaped LaTeX using the
 context's notation. Rendering an unknown call does not establish coverage.
 """
 function brm_description_math(c::BRMDescriptionContext,x::BRMDescriptionReference)
+    x.logical isa Tuple && any(n -> n.name==x.logical,c.notation) &&
+        return brm_description_symbol(c,x.logical)
     aliases=filter(b -> x.axis!==:cell && b.name===x.name && b.role in (:alias,:constant),c.bindings)
     if !isempty(aliases)
         value=only(aliases).value
@@ -35,8 +37,6 @@ function brm_description_math(c::BRMDescriptionContext,x::BRMDescriptionReferenc
             c.axes,c.outputs,c.priors,c.fitted_constants,c.children,c.provenance,c.notation,remaining)
         isequal(value,x) || return brm_description_math(localcontext,value)
     end
-    x.logical isa Tuple && any(n -> n.name==x.logical,c.notation) &&
-        return brm_description_symbol(c,x.logical)
     any(n->n.name==x.name && haskey(n,:symbol),c.notation) &&
         return brm_description_symbol(c,x.name)
     x.logical isa Symbol && any(n->n.name==(:parameter,x.logical),c.notation) &&
@@ -97,7 +97,7 @@ brm_description_math(_c::BRMDescriptionContext, x::Symbol) = _brmd_identifier(x)
 function brm_description_math(c::BRMDescriptionContext,x::NamedTuple)
     haskey(x,:size) && haskey(x,:values) && return "\\operatorname{reshape}\\left("*
         brm_description_math(c,x.values)*","*join(x.size,",")*"\\right)"
-    haskey(x,:callable) && return _brmd_call_math(x.callable,
+    all(k->haskey(x,k),(:callable,:arguments,:keywords)) && return _brmd_call_math(x.callable,
         map(a->brm_description_math(c,a),x.arguments),x.keywords,c)
     haskey(x,:columns) && return brm_description_math(c,x.columns)
     "\\left\\{"*join((_brmd_identifier(k)*"="*brm_description_math(c,v) for (k,v) in pairs(x)),";\\,")*"\\right\\}"
@@ -122,6 +122,11 @@ function brm_description_math(c::BRMDescriptionContext, x::BRMDescriptionCompone
             return brm_description_symbol(c,first(x.arguments).name)*"="*brm_description_math(c,last(x.arguments))
         elseif x.callable===:return
             return brm_description_math(c,only(x.arguments))
+        elseif x.callable===:. && length(x.arguments)==2
+            base,field=x.arguments
+            base isa NamedTuple && field isa Symbol && haskey(base,field) &&
+                return brm_description_math(c,base[field])
+            return brm_description_math(c,base)*"."*brm_description_math(c,field)
         end
     end
     if x.callable===StanBlocks.stan.builtin.maybe_index
@@ -568,6 +573,11 @@ end
 function _brmd_assignment_equation(c,lhs,rhs)
     ordinary=lhs*"="*brm_description_math(c,rhs)
     length(ordinary)<=160 && return ordinary
+    if rhs isa NamedTuple
+        args=Tuple(_brmd_identifier(k)*"="*brm_description_math(c,v) for (k,v) in pairs(rhs))
+        rows=(lhs*"&=\\bigl\\{",("&\\quad "*a*(i==length(args) ? "\\bigr\\}" : ";") for (i,a) in enumerate(args))...)
+        return "\\begin{aligned}"*join(rows,"\\\\\n")*"\\end{aligned}"
+    end
     rhs isa BRMDescriptionComponent || return ordinary
     rhs.callable===(+) && return _brmd_sum_equation(lhs,_brmd_addends(c,rhs))
     if rhs.kind===:syntax && rhs.callable in (:tuple,:vect)
@@ -695,7 +705,49 @@ function _brmd_builtin_kind(::Val{:observation},c)
            "`$(c.provenance.owner)` is unconditioned and is generated from the declared model."
     law=rhs isa BRMDescriptionComponent ? _brmd_law(rhs.callable) : nothing
     isnothing(law) || (prose*=" "*_brmd_law_prose(Val(law)))
-    BRMDescriptionFragment(prose=(prose,),equations=(brm_description_math(c,lhs)*"\\sim"*_brmd_distribution_math(c,rhs),),covers=(c.id,))
+    equation=brm_description_math(c,lhs)*"\\sim"*_brmd_distribution_math(c,rhs)
+    if length(equation)<=160
+        return BRMDescriptionFragment(prose=(prose,),equations=(equation,),covers=(c.id,))
+    end
+    definitions=String[]; notes=NamedTuple[]; counter=Ref(0)
+    reduced=_brmd_compact_expression(c,rhs,definitions,notes,counter;root=true)
+    localcontext=_brmd_render_context(c;notation=(c.notation...,notes...))
+    equation=brm_description_math(localcontext,lhs)*"\\sim"*_brmd_distribution_math(localcontext,reduced)
+    BRMDescriptionFragment(prose=(prose,),equations=(equation,definitions...),notation=Tuple(notes),covers=(c.id,))
+end
+
+function _brmd_render_context(c;notation=c.notation,provenance=c.provenance)
+    BRMDescriptionComponent(c.id,c.kind,c.callable,c.arguments,c.keywords,c.axes,
+        c.outputs,c.priors,c.fitted_constants,c.children,provenance,notation,c.bindings)
+end
+function _brmd_compact_expression(c,x,definitions,notes,counter;root=false,seen=())
+    length(brm_description_math(c,x))<=100 && return x
+    if x isa BRMDescriptionReference && x.axis!==:cell && !(x.name in seen)
+        aliases=filter(b->b.name===x.name && b.role in (:alias,:constant),c.bindings)
+        if length(aliases)==1 && !isequal(only(aliases).value,x)
+            return _brmd_compact_expression(c,only(aliases).value,definitions,notes,counter;
+                root,seen=(seen...,x.name))
+        end
+    end
+    if x isa BRMDescriptionComponent
+        args=map(a->_brmd_compact_expression(c,a,definitions,notes,counter;seen),x.arguments)
+        kwargs=map(a->_brmd_compact_expression(c,a,definitions,notes,counter;seen),x.keywords)
+        reduced=BRMDescriptionComponent(x.id,x.kind,x.callable,args,kwargs,x.axes,
+            x.outputs,x.priors,x.fitted_constants,x.children,x.provenance,x.notation,x.bindings)
+    elseif x isa Union{Tuple,NamedTuple}
+        reduced=map(a->_brmd_compact_expression(c,a,definitions,notes,counter;seen),x)
+    else
+        return x
+    end
+    root && return reduced
+    counter[]+=1
+    key=(:description_expression,c.id,counter[])
+    symbol="\\xi_{"*string(c.provenance.description_number)*","*string(counter[])*"}"
+    path=x isa BRMDescriptionComponent ? x.id : c.id
+    push!(notes,(;name=key,symbol,meaning="Intermediate expression at $(path); its exact defining relation is listed separately."))
+    localcontext=_brmd_render_context(c;notation=(c.notation...,notes...))
+    push!(definitions,_brmd_assignment_equation(localcontext,symbol,reduced))
+    BRMDescriptionReference(:intermediate_expression,:local,key)
 end
 function _brmd_builtin_kind(::Val{:random_effect},c)
     k=c.keywords
@@ -789,9 +841,12 @@ function brm_description(d::BRMDescriptor; hooks=(),labels=Dict(),prior_anchors=
     length(ids)==length(inventory) || error("description: duplicate logical semantic component IDs")
     covered=Set{Tuple}()
     prose=String[]; equations=String[]; added_notation=NamedTuple[]
-    for c in inventory
+    for (index,c) in enumerate(inventory)
         fragment=_brmd_hook(c,hooks)
-        isnothing(fragment) && (fragment=_brmd_builtin_fragment(c))
+        if isnothing(fragment)
+            rendered=_brmd_render_context(c;provenance=merge(c.provenance,(;description_number=index)))
+            fragment=_brmd_builtin_fragment(rendered)
+        end
         isnothing(fragment) && continue
         subtree=Set(node.id for node in brm_description_components(c))
         for id in fragment.covers
@@ -819,6 +874,15 @@ function _brmd_prior_equation(p)
         (_brmd_identifier(k)*"="*brm_description_math(c,v) for (k,v) in pairs(p.support)),", ")
     _brmd_distribution_math(c,c)*support
 end
+_brmd_prior_id_markdown(id)=join(("`"*replace(string(part),"|"=>"\\|")*"`" for part in id)," / ")
+function _brmd_prior_cell_math(p)
+    c=p.distribution
+    c isa BRMDescriptionComponent || return string(p.distribution)
+    fields=(_brmd_distribution_math(c,c),
+        (_brmd_identifier(k)*"="*brm_description_math(c,v) for (k,v) in pairs(p.support))...)
+    # Separate inline spans allow wrapping between density and support facts.
+    join(("\$"*replace(field,"|"=>"\\|")*"\$" for field in fields),"; ")
+end
 
 """
     brm_description_markdown(description)
@@ -839,11 +903,22 @@ function brm_description_markdown(description::BRMDescription;prefix=nothing)
     end
     if !isempty(description.priors)
         println(io,"\nEffective priors:\n\n| Logical parameter | Distribution and support | Prior listing |\n| --- | --- | --- |")
-        for p in description.priors
-            label=replace(join(string.(p.id)," / "),"|"=>"\\|")
-            equation=replace(_brmd_prior_equation(p),"|"=>"\\|")
+        long_ids=Tuple{Int,Tuple}[]
+        for (index,p) in enumerate(description.priors)
+            label=_brmd_prior_id_markdown(p.id)
+            if length(join(string.(p.id)," / "))>80 || any(part->length(string(part))>36,p.id)
+                push!(long_ids,(index,p.id))
+                label="P"*string(index)
+            end
+            equation=_brmd_prior_cell_math(p)
             link=isnothing(p.anchor) ? "" : "[prior listing]("*replace(p.anchor," "=>"%20")*")"
-            println(io,"| <a id=\"",brm_description_prior_anchor(p;prefix),"\"></a>`",label,"` | \$",equation,"\$ | ",link," |")
+            println(io,"| <a id=\"",brm_description_prior_anchor(p;prefix),"\"></a>",label," | ",equation," | ",link," |")
+        end
+        if !isempty(long_ids)
+            println(io,"\nLong logical parameter IDs (prior table row keys):")
+            for (index,id) in long_ids
+                println(io,"\nP",index,": ",_brmd_prior_id_markdown(id),".")
+            end
         end
         seen=Set{Tuple}()
         links=Tuple(c=>brm_description_prior_references(c) for c in description.components

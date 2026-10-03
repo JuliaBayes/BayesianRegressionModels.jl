@@ -130,6 +130,9 @@ bindings. Long call assignments and additive population relations use aligned
 lines. Wide transformed designs use named prepared coordinates, with their
 fitted centering/scaling definitions and logical column mappings listed
 separately; values and scientific child coverage are preserved.
+Long likelihood arguments use compact intermediate symbols with separate exact
+definitions and notation tied to their source component IDs. Distribution
+conventions, input bindings and child coverage are preserved.
 Authored literal assignments have `role=:constant` and expose their value;
 composed assignments have `role=:deterministic` and expose a public expression.
 This includes assignments preceded by documentation strings in an included
@@ -140,6 +143,13 @@ References to deterministic quantities render as symbols; render the binding's
 `value` explicitly to expand its defining expression.
 Actual higher-order callable arguments retain their identity and render through
 the same escaped math helper.
+Statically named records such as `(; lower, upper, weights=exp(offset))`
+retain public named field values. Use
+[`brm_description_record`](@ref)`(context, argument)` to resolve a record
+argument through its authoritative local bindings. The returned NamedTuple
+contains literal values, parameter/data references and expression components;
+render individual fields with `brm_description_math`. Unresolved, cyclic or
+non-record arguments fail rather than guessing a scope or evaluating code.
 
 Included-model inputs backed by known prepared arrays retain
 `BRMDescriptionReference` values rather than anonymous numeric tuples. Generated
@@ -170,6 +180,10 @@ table maps each number to its full logical ID and ordered margins; predictor
 designs and covariance factors use that same number. Logical IDs and prior
 anchors keep their exact identities. Prior table math shows the distribution
 and support; the neighboring logical-parameter cell names the parameter.
+Density and support facts use separate inline math spans so rows can wrap.
+Long logical IDs use short table row keys, with their complete path components
+in a full-width directory after the table. The original prior anchors remain
+in their table cells; exact logical IDs remain in the public prior records.
 GP axis and multiple-membership weight references use inline math in prose.
 
 Included scientific SlicModels expose their parameter declarations,
