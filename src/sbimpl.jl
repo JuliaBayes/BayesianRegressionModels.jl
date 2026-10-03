@@ -4519,7 +4519,7 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
     elseif e.kind === :missing_center || e.kind === :missing_standardize ||
            e.kind === :missing_zscale
         fit = freeze ? e.const_.fit : _sb_mi_transform_constants(
-            e.kind, _sb_rematerialize_vec(e.raw_ref, df))
+            e.kind, _sb_mi_training_values(e.raw_ref, df))
         new_data[key] = fit.mean
         new_data[e.const_.scale_key] = fit.scale
         push!(handled, e.const_.scale_key)
@@ -11635,7 +11635,7 @@ for (fn, kind, fitf, applyf) in (
     @eval function _sb_predictor_term!(stmts, data, ::typeof($fn), t; kwargs...)
         inner = only(getargs(t))
         if _sb_term_refs_mi(inner)
-            cn = _sb_wrapper_col_name($(QuoteNode(fn)), inner)
+            cn = _sb_mi_wrapper_col_name($(QuoteNode(fn)), inner)
             return _sb_emit_mi_transform!(stmts, data,
                 $(QuoteNode(Symbol(:missing_, kind))), inner, cn)
         end
@@ -11656,8 +11656,8 @@ end
 # directly), preserving the old "unsupported" diagnostic.
 function _sb_materialize_protect_term!(stmts, data, f, t)
     if _sb_term_refs_mi(t)
-        cn = _sb_wrapper_col_name(Symbol(f), t)
-        push!(stmts, Expr(:(=), cn, _sb_scalar_expr(t, data)))
+        cn = _sb_mi_wrapper_col_name(Symbol(f), t)
+        _sb_mi_predictor_assignment!(stmts, cn, _sb_scalar_expr(t, data))
         return cn
     end
     try
@@ -11690,18 +11690,57 @@ function _sb_mi_predictor_plan(x::NamedColumn)
     op isa ExprColumn && getf(op) === (~) || return nothing
     _brm_missing_response_plan(first(getargs(op, 2)); prefix="sbimpl")
 end
-_sb_term_refs_mi(x::NamedColumn) = !isnothing(_sb_mi_predictor_plan(x))
+# Named assignments retain their defining operation. Follow only its RHS:
+# walking a sampling declaration's location would conflate the sampled value
+# with a deterministic transform of its inputs.
+function _sb_mi_assignment_rhs(x::NamedColumn)
+    op = parent(x)
+    op isa ExprColumn && getf(op) === assign ? last(getargs(op, 2)) : nothing
+end
+function _sb_term_refs_mi(x::NamedColumn)
+    !isnothing(_sb_mi_predictor_plan(x)) && return true
+    rhs = _sb_mi_assignment_rhs(x)
+    !isnothing(rhs) && _sb_term_refs_mi(rhs)
+end
 _sb_term_refs_mi(x::ExprColumn) = any(_sb_term_refs_mi, getargs(x))
 _sb_term_refs_mi(_) = false
 
-_sb_mi_training_values(x::Number) = x
-function _sb_mi_training_values(x::NamedColumn)
+# Runtime transform names describe the formula, not its current data values.
+# Hashing a bound column's full parent tree changes the name when observed
+# values are refreshed, so frozen replay cannot find its fitted anchors.
+_sb_mi_term_key(x::NamedColumn) = (:column, name(x))
+_sb_mi_term_key(x::ExprColumn) =
+    (:call, getf(x), map(_sb_mi_term_key, getargs(x)), map(_sb_mi_term_key, getkwargs(x)))
+_sb_mi_term_key(x) = x
+_sb_mi_wrapper_col_name(prefix::Symbol, inner::NamedColumn) =
+    _sb_wrapper_col_name(prefix, inner)
+_sb_mi_wrapper_col_name(prefix::Symbol, inner) =
+    Symbol(prefix, :_expr_, string(hash(_sb_mi_term_key(inner)); base=16)[1:8])
+
+_sb_mi_training_values(x::Number, _df=nothing) = x
+function _sb_mi_training_values(x::NamedColumn, df=nothing)
     plan = _sb_mi_predictor_plan(x)
-    isnothing(plan) ? _sb_materialize_vec(x) : plan.values
+    !isnothing(plan) && return isnothing(df) ? plan.values : _sb_df_column(df, plan.source)
+    rhs = _sb_mi_assignment_rhs(x)
+    !isnothing(rhs) && return _sb_mi_training_values(rhs, df)
+    if parent(x) isa DataColumn
+        return isnothing(df) ? _sb_materialize_vec(x) : _sb_df_column(df, name(x))
+    end
+    # A complete observed likelihood retains its original data-backed LHS.
+    # Its distribution parameters are not inputs to the observed values.
+    op = parent(x)
+    if op isa ExprColumn && getf(op) === (~)
+        lhs = first(getargs(op, 2))
+        if lhs isa NamedColumn && parent(lhs) isa DataColumn
+            return isnothing(df) ? _sb_materialize_vec(lhs) : _sb_df_column(df, name(lhs))
+        end
+    end
+    throw(ArgumentError("sbimpl: cannot fit fixed observed-only transform anchors " *
+                        "through model value `$(name(x))`"))
 end
-_sb_mi_training_values(x::ExprColumn) = _brm_broadcast_data_call(
-    getf(x), map(_sb_mi_training_values, getargs(x)),
-    map(_sb_mi_training_values, getkwargs(x)))
+_sb_mi_training_values(x::ExprColumn, df=nothing) = _brm_broadcast_data_call(
+    getf(x), map(a -> _sb_mi_training_values(a, df), getargs(x)),
+    map(a -> _sb_mi_training_values(a, df), getkwargs(x)))
 
 function _sb_mi_transform_constants(kind::Symbol, raw)
     observed = collect(Float64, skipmissing(raw))
@@ -11709,6 +11748,20 @@ function _sb_mi_transform_constants(kind::Symbol, raw)
     kind === :missing_center && return (;
         mean=_brm_fit_mean_numeric(observed, :predictor, :center, make_error), scale=1.0)
     _brm_fit_zscale_numeric(observed, :predictor, make_error)
+end
+
+# A predictor transform is shared across LPs using the same logical term.
+# StanBlocks requires a single definition, including when the column is a
+# runtime transform rather than a precomputed data vector.
+function _sb_mi_predictor_assignment!(stmts, cn::Symbol, rhs)
+    statement = Expr(:(=), cn, rhs)
+    for held in stmts
+        held isa Expr && held.head === :(=) && first(held.args) === cn || continue
+        held == statement || error("sbimpl: conflicting definitions for predictor transform `$cn`")
+        return cn
+    end
+    push!(stmts, statement)
+    cn
 end
 
 function _sb_emit_mi_transform!(stmts, data, kind::Symbol, inner, cn::Symbol)
@@ -11725,8 +11778,7 @@ function _sb_emit_mi_transform!(stmts, data, kind::Symbol, inner, cn::Symbol)
     value = _sb_scalar_expr(inner, data)
     transformed = kind === :missing_center ? :($value - $mean_key) :
         :(($value - $mean_key) / $scale_key)
-    push!(stmts, Expr(:(=), cn, transformed))
-    cn
+    _sb_mi_predictor_assignment!(stmts, cn, transformed)
 end
 
 # `coef * col` under `~`: a sampled coefficient times a data column is an
