@@ -58,9 +58,9 @@ const PINS = [
     # which the per-window S2Z Fisher rule needs. Contains 7aed40b (active-state
     # preservation, nonfinite-transport rejection). Matches test/Project.toml.
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "0194dce08e986ff17fd5a788bb315c6431b7858e"),  # dev (contains exact sampling-counter floor 913da79)
-    # Current plain-function/array PPL surface, including scalar varying margins
-    # and the documented centered correlated coefficient submodel.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "bbcf171143c568af80faec5ba4e607ea8ae5dd4a"),  # main
+    # Current plain-function/array PPL surface, with data-only declaration inputs
+    # retained before predictor inlining (computed membership axes; 606d76d0).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "e005f231c1feb93e4eb1c636f238ccb02fc1cb9e"),  # main
 ]
 
 function main()

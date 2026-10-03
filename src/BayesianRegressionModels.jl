@@ -260,7 +260,9 @@ export popefs, _popefs_normal, _popefs_coefs, _popefs_normal_coefs,
        brm_von_mises_lpdfs, brm_von_mises_rng,
        brm_inverse_gaussian, brm_inverse_gaussian_lpdf,
        brm_inverse_gaussian_lpdfs, brm_inverse_gaussian_rng,
-       brm_joint_mean_rows, brm_mixture_rows_int,
+       brm_joint_mean_rows, brm_joint_column, brm_joint_observed,
+       brm_joint_observed_lpdf, brm_joint_observed_lpdfs, brm_joint_observed_rng,
+       brm_mixture_rows_int,
        sb_group_demo_slic, sb_group_clamped_demo, sb_group_clamped_demo_slic
 
 end # module
