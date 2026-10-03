@@ -10792,19 +10792,28 @@ _sb_pop_cols_expr!(cols, ::typeof(&), t, data, stmts, _pop_terms=(); kwargs...) 
 #   cont x cat  -> K-1 columns (a .* (c == k ? 1 : 0) for k=2..K)
 #   cat  x cat  -> (K1-1)*(K2-1) columns (product of level-k1, level-k2 dummies)
 # Reference level is always 1 (treatment coding; matches brms / vimpl).
-# Columns are materialised at walker time (indicator math only uses data
-# columns), stashed in `data` under a `int_<name...>` key, and pushed as
-# Symbol refs for hcat downstream.
+# Observed operands are materialised at walker time. Completed covariates
+# remain Stan expressions, multiplied by observed vectors or factor contrasts
+# before their column references enter the downstream design matrix.
 function _sb_interaction_cols!(cols, t::ExprColumn, data, stmts)
     args = getargs(t)
     length(args) == 2 ||
         error("sbimpl: interaction `&` expects exactly 2 operands, got $(length(args))")
     l = _sb_interaction_operand(args[1], data, stmts)
     r = _sb_interaction_operand(args[2], data, stmts)
-    _sb_interaction_expand!(cols, data, l, r)
+    _sb_interaction_expand!(cols, data, stmts, l, r)
+end
+
+struct _SBInteractionValue{T}
+    expression::T
 end
 
 _sb_interaction_operand(t::NamedColumn, _data, _stmts) = begin
+    if _sb_term_refs_mi(t)
+        _sb_term_refs_param(t) && error(
+            "sbimpl: interaction operand `$(name(t))` references a sampled coefficient")
+        return (; kind=:cont, name=name(t), vec=_SBInteractionValue(name(t)))
+    end
     d_raw = parent(t)
     d = _as_data_column(d_raw)
     isnothing(d) && error(
@@ -10820,6 +10829,12 @@ end
 # transformed interactions on the same fit/reprocess constants as their
 # standalone term without ever snapshotting a latent parameter as data.
 _sb_interaction_operand(t::ExprColumn, data, stmts) = begin
+    if _sb_term_refs_mi(t)
+        _sb_term_refs_param(t) && error(
+            "sbimpl: interaction operand `$(getf(t))(...)` references a sampled coefficient")
+        col_name = _sb_predictor_col(t, data, stmts)
+        return (; kind=:cont, name=col_name, vec=_SBInteractionValue(col_name))
+    end
     col_name = _sb_predictor_col(t, data, stmts)
     haskey(data, col_name) || error(
         "sbimpl: interaction operand `$(getf(t))(...)` is parameter-owning, not a data-materialized transform; ",
@@ -10850,23 +10865,22 @@ _sb_interaction_operand(t, _data, _stmts) = error(
 )
 
 # cont x cont
-_sb_interaction_expand!(cols, data, l::NamedTuple{<:Any,<:Tuple}, r::NamedTuple{<:Any,<:Tuple}) = begin
+_sb_interaction_expand!(cols, data, stmts, l::NamedTuple{<:Any,<:Tuple}, r::NamedTuple{<:Any,<:Tuple}) = begin
     if l.kind === :cont && r.kind === :cont
         col_name = Symbol(:int_, l.name, :_x_, r.name)
-        data[col_name] = l.vec .* r.vec
-        _sb_record_preproc!(data, col_name,
-            PreprocEntry(:interaction, nothing, (l.name, r.name), false))
-        push!(cols, col_name)
+        _sb_interaction_product!(cols, data, stmts, col_name,
+            l.name, l.vec, r.name, r.vec; continuous=true)
     elseif l.kind === :cont && r.kind === :cat
         for lvl in 2:r.n_levels
             col_name = Symbol(:int_, l.name, :_x_, r.name, :_lvl_, lvl)
-            data[col_name] = Float64[l.vec[i] * (r.idx[i] == lvl ? 1.0 : 0.0) for i in eachindex(l.vec)]
-            push!(cols, col_name)
+            dummy = Float64.(r.idx .== lvl)
+            _sb_interaction_product!(cols, data, stmts, col_name,
+                l.name, l.vec, Symbol(r.name, :_lvl_, lvl), dummy)
         end
     elseif l.kind === :cat && r.kind === :cont
         # Symmetric: reuse the :cont × :cat branch with swapped operands so
         # column names consistently put the cont term first.
-        _sb_interaction_expand!(cols, data, r, l)
+        _sb_interaction_expand!(cols, data, stmts, r, l)
     elseif l.kind === :cat && r.kind === :cat
         n = length(l.idx)
         length(r.idx) == n || error(
@@ -10881,6 +10895,25 @@ _sb_interaction_expand!(cols, data, l::NamedTuple{<:Any,<:Tuple}, r::NamedTuple{
         error("sbimpl: unsupported interaction operand combination (`$(l.kind)` x `$(r.kind)`)")
     end
 end
+
+# Static interactions retain their fitted preprocessing. Completed operands
+# stay model expressions; only an observed operand or contrast enters data.
+function _sb_interaction_product!(cols, data, _stmts, cn,
+        left, l::AbstractVector, right, r::AbstractVector; continuous=false)
+    data[cn] = l .* r
+    continuous && _sb_record_preproc!(data, cn,
+        PreprocEntry(:interaction, nothing, (left, right), false))
+    push!(cols, cn)
+end
+function _sb_interaction_product!(cols, data, stmts, cn, left, l, right, r;
+        continuous=false)
+    lhs = _sb_interaction_value!(data, left, l)
+    rhs = _sb_interaction_value!(data, right, r)
+    _sb_mi_predictor_assignment!(stmts, cn, Expr(:call, Symbol(".*"), lhs, rhs))
+    push!(cols, cn)
+end
+_sb_interaction_value!(_data, _name, v::_SBInteractionValue) = v.expression
+_sb_interaction_value!(data, name, v::AbstractVector) = (data[name] = v; name)
 
 # Predictor column emitter. `stmts` is threaded in so terms that need their own
 # `~` statement (e.g. `mo(c)`) can push before returning their column symbol.
@@ -11759,9 +11792,21 @@ end
 _sb_predictor_term!(stmts, data, f::Function, t; kwargs...) =
     _sb_materialize_protect_term!(stmts, data, f, t)
 
-# Does term `t` reference a sampled parameter (a NamedColumn NOT backed by a raw
-# data column)? Mirrors `_materialize_named`'s DataColumn / not-DataColumn split.
-_sb_term_refs_param(t::NamedColumn) = !(parent(t) isa DataColumn)
+# Completed covariates and deterministic data/completion expressions are
+# predictor values, not explicit coefficients. Follow assignment RHSs so a
+# product cannot hide a sampled coefficient behind a completed-value alias.
+function _sb_term_refs_param(t::NamedColumn)
+    parent(t) isa DataColumn && return false
+    !isnothing(_sb_mi_predictor_plan(t)) && return false
+    rhs = _sb_mi_assignment_rhs(t)
+    !isnothing(rhs) && return _sb_term_refs_param(rhs)
+    op = parent(t)
+    if op isa ExprColumn && getf(op) === (~)
+        lhs = first(getargs(op, 2))
+        lhs isa NamedColumn && parent(lhs) isa DataColumn && return false
+    end
+    true
+end
 _sb_term_refs_param(t::ExprColumn) = any(_sb_term_refs_param, getargs(t))
 _sb_term_refs_param(_) = false
 
@@ -11810,7 +11855,7 @@ _sb_mi_term_key(x) = x
 _sb_mi_wrapper_col_name(prefix::Symbol, inner::NamedColumn) =
     _sb_wrapper_col_name(prefix, inner)
 _sb_mi_wrapper_col_name(prefix::Symbol, inner) =
-    Symbol(prefix, :_expr_, string(hash(_sb_mi_term_key(inner)); base=16)[1:8])
+    Symbol(_brm_wrapper_prefix(Val(prefix)), :_expr_, string(hash(_sb_mi_term_key(inner)); base=16)[1:8])
 
 _sb_mi_training_values(x::Number, _df=nothing) = x
 function _sb_mi_training_values(x::NamedColumn, df=nothing)
@@ -11880,8 +11925,8 @@ end
 # ASSIGNMENT-path expression (`lp = coef * col`, emitted as `.*`), not a `~`
 # formula summand -- the `scalar*data` LP escape hatch was dropped in 84434c7 so
 # the product has exactly one spelling. Reject that shape with the exact remedy;
-# a `*` over raw data columns only is still a valid protect-style materialised
-# term and falls through to the generic path above.
+# Products of data/completed covariates remain formula summands with their own
+# population coefficient; completed values are evaluated inside the model.
 function _sb_predictor_term!(stmts, data, ::typeof(*), t; target=nothing, kwargs...)
     if _sb_term_refs_param(t)
         lp = isnothing(target) ? "<lp>" : string(target)
