@@ -54,10 +54,9 @@ rev = "c317cc003fc41c2d933c27dc80799141eebd434e"
 
 [sources.StanBlocks]
 url = "https://github.com/nsiccha/StanBlocks.jl"
-# eeee3bad (2026-09-30): ValueFamily/ValueUDF generation, observation-only
-# vector sizes, and the concurrent tracing/publication protocol. Retains
-# the earlier K>=3 mixture RNG and declared-unbound draw fixes.
-rev = "eeee3bad6333ecffb08b45769df809b1aa21f18a"
+# Published empty integer-index ingestion and mixed derived-record routing.
+# Retains ValueFamily/ValueUDF, observation sizes and tracing/publication.
+rev = "215bae44bd2a830f98ec071f8d3bc8faa117ca58"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"

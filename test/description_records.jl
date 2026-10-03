@@ -12,9 +12,9 @@ const cell=@slic begin
     lower=0.1
     upper=5.0
     parameters=(;lower,upper,offset,multiplier,prepared_values=input,
-        weights=exp(offset),normalizer=0.0)
+        weights=exp(offset),normalizer=0)
     state=opaque_record((;lower,upper,offset,multiplier,prepared_values=input,
-        weights=exp(offset),normalizer=0.0),input)
+        weights=exp(offset),normalizer=0),input)
     return state
 end
 function BayesianRegressionModels._sb_submodel_rhs!(stmts,data,target::Symbol,::typeof(record_term),rhs)
@@ -45,7 +45,7 @@ const record_term=DescriptionNamedRecords.record_term
     @test brm_description_math(context,fields.lower)=="0.1"
     @test brm_description_math(context,fields.upper)=="5.0"
     @test brm_description_math(context,fields.multiplier)=="2.0"
-    @test fields.normalizer==0
+    @test fields.normalizer===0
     @test brm_description_record(context,(;normalizer=0)).normalizer===0
     @test fields.offset.logical==(:parameter,:mu,:offset)
     @test brm_description_math(context,fields.prepared_values)=="\\mathrm{input}"

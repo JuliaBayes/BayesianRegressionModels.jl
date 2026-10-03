@@ -87,6 +87,10 @@ This also applies when separate data or fitted constants share one source
 identity; the adapter should give each model mount its own prefix.
 The optional `prior_anchors` map adds outbound links to targets owned by the
 calling report; it does not create those external targets.
+Unobserved declarations that remain sampled parameters retain their actual
+conditional density in this inventory, including parameter-dependent families.
+Their contexts use `observation_role=:latent_parameter`; the prose identifies
+the sampled quantity and its contribution to the joint model.
 
 ## Scientific extensions
 
@@ -169,6 +173,11 @@ Conditioning follows prepared response provenance through ragged input aliases
 and joint-completion carriers. A partially observed vector has
 `observation_role=:partially_observed`, `observation_sources`, and exact
 `observed_entries`/`missing_entries` counts; observed entries stay fixed.
+Fresh modeled covariate replay uses `observation_role=:covariate_draw` with
+`generated_entries` counting the newly drawn values. Every selected prediction
+row is drawn conditional on retained model parameters; it adds no sampled
+missing coordinates. Multivariate Gaussian Cholesky families retain the actual
+lower covariance factor and describe covariance as its product with its transpose.
 Joint covariance factors retain their actual marginal-scale and LKJ prior IDs.
 The joint completion's allocation-only declaration has constant log density;
 its substantive density comes from the declared multivariate model.

@@ -74,9 +74,10 @@ end
         mu ~ 1+x+z
         y ~ Normal(mu,1)
     end
-    for (model,role,fixed,missing_) in (
-        (builder(data),:partially_observed,4,4),
-        (complete(merge(data,(;x=[.2,.4,.5,.6],z=[1.,.7,.9,.8]))),:conditioned,8,0))
+    for (model,role,fixed,missing_,allocation) in (
+        (builder(data),:partially_observed,4,4,true),
+        (builder(merge(data,(;x=[.2,.4,.5,.6],z=[1.,.7,.9,.8]))),:conditioned,8,0,true),
+        (complete(merge(data,(;x=[.2,.4,.5,.6],z=[1.,.7,.9,.8]))),:conditioned,8,0,false))
         sb=SBBRMI(model;mod=@__MODULE__,total_groups=())
         before=stan_code(sb)
         r=brm_description(sb)
@@ -95,8 +96,10 @@ end
         @test all(e->!occursin("BRMDescriptionReference",e) && !occursin("BRMDescriptionComponent",e),r.equations)
         @test all(p->!occursin("brm_joint_x__z` is unconditioned",p),r.prose)
         @test any(p->occursin("partially observed",p),r.prose)==(missing_>0)
-        @test any(p->p.distribution.callable===StanBlocks.stan.builtin.dummy,r.priors)==(missing_>0)
-        @test occursin("no additional density",brm_description_markdown(r))==(missing_>0)
+        @test any(p->p.distribution.callable===StanBlocks.stan.builtin.dummy,r.priors)==allocation
+        @test occursin("no additional density",brm_description_markdown(r))==allocation
+        @test StanBlocks.stanc_check(before;warn_pedantic=false).ok
+        @test all(v->!(v isa AbstractVector && eltype(v)===Union{}),values(sb.data))
         @test stan_code(sb)==before
     end
 end

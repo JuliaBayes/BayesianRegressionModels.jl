@@ -345,6 +345,14 @@ function _brmd_observation_sets(d)
 end
 
 function _brmd_response_provenance(d,owner,sources,observed,heldout)
+    for entry in values(d.plan.preproc)
+        entry isa PreprocEntry && entry.kind===:fresh_covariate || continue
+        members=Tuple(entry.raw_ref)
+        (owner in members || owner===_joint_response_operation_key(members)) || continue
+        return (;observation_role=:covariate_draw,observation_sources=members,
+            observed_entries=0,missing_entries=0,
+            generated_entries=entry.const_.rows*length(members),joint_width=length(members))
+    end
     for (key,entry) in d.plan.preproc
         entry isa PreprocEntry || continue
         joint=entry.kind in (:joint_response,:joint_missing_response)
@@ -369,6 +377,8 @@ function _brmd_response_provenance(d,owner,sources,observed,heldout)
     isempty(sources) && owner isa Symbol && (sources=(owner,))
     role=any(s->s in heldout,sources) ? :held_out :
         any(s->s in observed,sources) ? :conditioned : :unconditioned
+    role===:unconditioned && any(o->o.role===:parameter && o.logical===owner,d.outputs) &&
+        (role=:latent_parameter)
     (;observation_role=role,observation_sources=sources)
 end
 

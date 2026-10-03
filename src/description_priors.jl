@@ -251,7 +251,10 @@ function _brmd_priors(d, anchors, notation;groups=_brmd_ranef_metadata(d))
                                      for (k,v) in pairs(declaration.keywords))
             _brmd_submodel_priors!(priors,d,f,values,logical,anchors,notation)
         else
-            declaration.role === :prior || continue
+            sampled=any(o->o.role===:parameter && !isnothing(o.declaration) &&
+                o.declaration.target===declaration.target &&
+                o.declaration.context==declaration.context,d.outputs)
+            declaration.role === :prior || sampled || continue
             raw = Expr(:call,declaration.family,Expr(:parameters,
                 (Expr(:kw,k,_brmd_substitute(v,d.plan.data)) for (k,v) in pairs(declaration.keywords))...),
                 (_brmd_substitute(a,d.plan.data) for a in declaration.arguments)...)

@@ -194,7 +194,8 @@ for (name,law) in ((:normal,:normal_sd),(:std_normal,:standard_normal),
         (:gamma,:gamma_rate),(:beta,:beta),(:cauchy,:cauchy),(:student_t,:student_t_location_scale),
         (:bernoulli,:bernoulli),(:bernoulli_logit,:bernoulli_logit),
         (:binomial,:binomial),(:binomial_logit,:binomial_logit),(:poisson,:poisson),
-        (:dirichlet,:dirichlet),(:lkj_corr_cholesky,:lkj),(:weibull,:weibull),(:uniform,:uniform),(:inv_gamma,:inverse_gamma))
+        (:dirichlet,:dirichlet),(:lkj_corr_cholesky,:lkj),(:weibull,:weibull),(:uniform,:uniform),(:inv_gamma,:inverse_gamma),
+        (:multi_normal_cholesky,:mvnormal_cholesky))
     if isdefined(StanBlocks.stan.builtin,name)
         f=getfield(StanBlocks.stan.builtin,name)
         @eval _brmd_law(::$(typeof(f))) = $(QuoteNode(law))
@@ -231,6 +232,7 @@ _brmd_law_prose(::Val{:lognormal_sd}) = "Lognormal distribution; location and st
 _brmd_law_prose(::Val{:student_t_standard}) = "Standard Student-t distribution with the declared degrees of freedom, zero location and unit scale."
 _brmd_law_prose(::Val{:student_t_location_scale}) = "Student-t distribution with degrees of freedom, location and scale in that order; scale is not its standard deviation."
 _brmd_law_prose(::Val{:affine}) = "Affine location-scale distribution of the declared base family."
+_brmd_law_prose(::Val{:mvnormal_cholesky}) = "Multivariate Gaussian distribution; the second argument is the lower covariance Cholesky factor, whose product with its transpose gives the covariance."
 _brmd_law_prose(::Val{L}) where L = "$(L) distribution with the declared arguments."
 
 function _brmd_distribution_math(c,x::BRMDescriptionComponent)
@@ -509,7 +511,9 @@ function _brmd_builtin_call(::typeof(me),c)
         equations=(brm_description_math(c,c.arguments[1])*"\\mid x^*\\sim\\mathcal N(x^*,{"*brm_description_math(c,c.arguments[2])*"}^2)",),covers=(c.id,))
 end
 _brmd_builtin_call(::typeof(mi),c) = BRMDescriptionFragment(
-    prose=("Missing entries are inferred from the declared joint model; observed entries remain conditioned data. No deterministic substitution is implied.",),covers=(c.id,))
+    prose=(c.provenance.observation_role===:covariate_draw ?
+        "The selected completion declaration supplies fresh conditional draws for every prediction row." :
+        "Missing entries are inferred from the declared joint model; observed entries remain conditioned data. No deterministic substitution is implied.",),covers=(c.id,))
 function _brmd_builtin_call(::typeof(LKJCovarianceFactor),c)
     binding=get(c.provenance,:covariance_factor,nothing)
     isnothing(binding) && return nothing
@@ -531,7 +535,10 @@ function _brmd_call_math(::typeof(brm_joint_column),args,_kwargs,_c)
     "\\operatorname{column}_{"*args[2]*";"*args[3]*"\\times "*args[4]*"}\\left("*args[1]*"\\right)"
 end
 _brmd_builtin_call(::typeof(brm_joint_column),c)=BRMDescriptionFragment(
-    prose=("The completed column selects its declared coordinate from each row-major joint response: coordinate (row−1) × block width + column. Observed coordinates stay fixed and missing coordinates are the joint model's latent values.",),covers=(c.id,))
+    prose=("The column selects its declared coordinate from each row-major joint response: coordinate (row−1) × block width + column. " *
+        (c.provenance.observation_role===:covariate_draw ?
+            "Each selected coordinate is a fresh conditional prediction draw." :
+            "Observed coordinates stay fixed and missing coordinates are the joint model's latent values."),),covers=(c.id,))
 for f in (mo,mo1)
     @eval _brmd_builtin_call(::$(typeof(f)),c) = BRMDescriptionFragment(
         prose=("The ordered predictor uses cumulative simplex shares over the fitted level order. `mo` has a sampled population coefficient; `mo1` adds the unit-amplitude contrast directly. Simplex priors are listed separately.",),
@@ -722,6 +729,8 @@ function _brmd_builtin_kind(::Val{:observation},c)
     role=c.provenance.observation_role
     prose= role===:conditioned ? "`$(c.provenance.owner)` contributes an observation likelihood." :
            role===:held_out ? "`$(c.provenance.owner)` is held out: its density does not contribute to this fit." :
+           role===:latent_parameter ? "`$(c.provenance.owner)` is an unobserved sampled parameter. Its declared conditional density contributes to the joint model and is included in the effective prior inventory." :
+           role===:covariate_draw ? "`$(c.provenance.owner)` is redrawn for every prediction row from its declared conditional distribution, using the retained model parameters." :
            role===:partially_observed ? "`$(c.provenance.owner)` is partially observed: $(c.provenance.observed_entries) entries remain fixed data and $(c.provenance.missing_entries) missing entries are latent coordinates. The declared family supplies their joint density; the entire completed vector is not an unconditioned draw." :
            "`$(c.provenance.owner)` is unconditioned and is generated from the declared model."
     law=rhs isa BRMDescriptionComponent ? _brmd_law(rhs.callable) : nothing

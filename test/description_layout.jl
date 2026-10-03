@@ -25,6 +25,10 @@ end
     id=(:parameter,:wide_parameter)
     r=brm_description(sb;prior_anchors=Dict(id=>"https://example.org/prior"))
     @test r.complete
+    latent=only(filter(c->c.provenance.owner===:wide_parameter,r.components))
+    @test latent.provenance.observation_role===:latent_parameter
+    @test any(o->o.role===:parameter,latent.outputs)
+    @test any(p->startswith(p,"`wide_parameter` is an unobserved sampled parameter"),r.prose)
     index=only(findall(p->p.id==id,r.priors))
     md=brm_description_markdown(r;prefix="wide prior law")
     prior_rows=filter(row->startswith(row,"| <a id="),split(md,'\n'))
@@ -174,7 +178,11 @@ end
     lawcell=split(only(rows)," | ")[2]
     @test occursin("definition P1 below",lawcell) && !occursin("\$",lawcell)
     @test occursin("\\mathrm{lower}=0",md)
-    @test occursin("\\operatorname{Exponential}_{\\mathrm{scale}}(0.7)",md)
+    rate=only(prior.distribution.arguments)
+    @test rate isa BRMDescriptionComponent && rate.callable===(/)
+    @test rate.arguments==(1,.7)
+    @test occursin("\\operatorname{Exponential}_{\\mathrm{rate}}",md)
+    @test occursin(brm_description_math(prior.distribution,rate),md)
     @test !occursin(string(last(prior.id)),lawcell)
     parsed=Markdown.parse(md)
     @test occursin("extraordinarily_long_authored_parameter_name",Markdown.html(parsed))
