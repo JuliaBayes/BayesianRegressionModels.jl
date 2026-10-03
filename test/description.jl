@@ -31,7 +31,8 @@ const curve=DescriptionScientificComponent.curve
 const toy_term=DescriptionScientificComponent.toy_term
 
 @testset "canonical variadic products retain scientific quantities" begin
-    model=@brm DESCRIPTION_DATA begin
+    product_data=(;x=DESCRIPTION_DATA.x,y=DESCRIPTION_DATA.y)
+    model=@brm product_data begin
         b ~ Normal(0,1)
         r ~ Uniform(-1,1)
         s ~ Exponential(1)
