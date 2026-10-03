@@ -383,12 +383,9 @@ end
     backend = BRM.RKBRMI(brmi)
     layout = backend.model.layout
     @test layout.total == 7
-    @test _layout_signature(layout) == [
-        (:coefficient, :mu1_coef, 2, :identity),
-        (:coefficient, :mu2_coef, 2, :identity),
-        (:vector, :L_res_scales, 2, :exp),
-        (:cholesky_corr, :L_res_L_corr, 1, :lkj),
-    ]
+    @test coordinate_names(layout) == [Symbol("mu1.b1"), Symbol("mu1.b2"),
+        Symbol("mu2.b1"), Symbol("mu2.b2"), Symbol("L_res_scales.1"),
+        Symbol("L_res_scales.2"), Symbol("L_res_L_corr.1")]
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
     cols = _parity_cols_corr

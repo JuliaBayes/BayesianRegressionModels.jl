@@ -1,0 +1,342 @@
+# Ordinary model values beside regression formulas. Regression geometry and
+# priors use the same planner/emitter as the GLM route; calls cross as values,
+# with their exact callable captured in the build's private module.
+struct _RKValuePlan
+    regression::_RKStructuralPlan
+    assignments::Tuple
+    observations::Tuple
+    columns::Dict{Symbol,Any}
+end
+
+_rk_value_invlogit(x) = logistic(x)
+_rk_value_invprobit(x) = 0.5erfc(-x / sqrt(2))
+_rk_value_invcloglog(x) = -expm1(-exp(x))
+
+function _rk_value_link!(bindings, link, lhs, taken)
+    link === :identity && return lhs
+    callable = link === :log ? exp : link === :logit ? _rk_value_invlogit :
+        link === :probit ? _rk_value_invprobit :
+        link === :cloglog ? _rk_value_invcloglog : error("RK backend: unknown link `$link`")
+    _rk_ast_dotted(_rk_value_callee!(bindings, callable, taken), lhs)
+end
+
+# Arrays, rather than the retired structural varying/smooth summands, let
+# a named predictor be read by ordinary Julia functions on its own axis.
+function _rk_value_level_indices(labels, source)
+    levels = _rk_grouping_levels(source)
+    Int[findfirst(isequal(label), levels) for label in labels]
+end
+
+_rk_value_dummy(values, level) = Float64.(isequal.(values, level))
+
+function _rk_ast_value_bucket(bucket, draws, effects, taken, bindings)
+    grouping = bucket.grouping
+    K = length(bucket.margins)
+    group = first(grouping.columns)
+    stmts = Expr[]
+    if grouping.form === :mm
+        group = _rk_ast_fresh_name(string(draws, "_groups"), taken)
+        push!(stmts, Expr(:(=), group, Expr(:call, :vcat, grouping.columns...)))
+    end
+    tau = _rk_ast_fresh_name(string(draws, "_sd"), taken)
+    z = _rk_ast_fresh_name(string(draws, "_z"), taken)
+    index = Expr(:call, :(:), 1, K)
+    if grouping.form === :gr
+        stratum = grouping.by
+        L = _rk_ast_fresh_name(string(draws, "_L"), taken)
+        push!(stmts, Expr(:call, :.~, Expr(:ref, tau,
+            Expr(:call, :levels, stratum), index), _rk_ast_dotted(:HalfNormal, 1)))
+        if K > 1
+            cell = Expr(:call, :~, Expr(:ref, L, :k),
+                Expr(:call, :LKJCholesky, K, bucket.lkj_eta))
+            push!(stmts, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
+                Expr(:for, Expr(:(=), :k, Expr(:call, :levels, stratum)),
+                    Expr(:block, cell))))
+        end
+        push!(stmts, Expr(:call, :.~, Expr(:ref, z,
+            Expr(:call, :levels, group), index), _rk_ast_dotted(:Normal, 0, 1)))
+        scale = Expr(:ref, tau, Expr(:ref, stratum, :i), :(:))
+        raw = Expr(:ref, z, Expr(:ref, group, :i), :(:))
+        value = K == 1 ? Expr(:call, :.*, scale, raw) :
+            Expr(:call, :*, Expr(:call, :.*, scale,
+                Expr(:ref, L, Expr(:ref, stratum, :i))), raw)
+        cell = Expr(:(=), Expr(:ref, draws, :i, index), value)
+        push!(stmts, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
+            Expr(:for, Expr(:(=), :i, Expr(:call, :eachindex, group)), Expr(:block, cell))))
+    else
+        push!(stmts, Expr(:call, :.~, Expr(:ref, tau, index),
+            _rk_ast_dotted(:HalfNormal, 1)))
+        push!(stmts, Expr(:call, :.~, Expr(:ref, z,
+            Expr(:call, :levels, group), index), _rk_ast_dotted(:Normal, 0, 1)))
+        value = if K == 1
+            Expr(:call, :.*, z, Expr(:ref, tau, 1))
+        else
+            L = _rk_ast_fresh_name(string(draws, "_L"), taken)
+            push!(stmts, Expr(:call, :~, L, Expr(:call, :LKJCholesky, K, bucket.lkj_eta)))
+            Expr(:call, :*, z, Expr(:call, :transpose, Expr(:call, :.*, tau, L)))
+        end
+        push!(stmts, Expr(:(=), draws, value))
+    end
+    indices = Dict{Symbol,Symbol}()
+    if grouping.form !== :gr
+        callee = _rk_value_callee!(bindings, _rk_value_level_indices, taken)
+        for col in grouping.columns
+            idx = _rk_ast_fresh_name(string(draws, "_index_", col), taken)
+            push!(stmts, Expr(:(=), idx,
+                Expr(:call, callee, col, group)))
+            indices[col] = idx
+        end
+    end
+    for (target, margins) in bucket.slices
+        summands = Any[]
+        for margin in margins
+            coef = if grouping.form === :gr
+                Expr(:ref, draws, :(:), margin)
+            elseif grouping.form === :mm
+                members = Any[]
+                for (j, col) in enumerate(grouping.columns)
+                    gather = Expr(:ref, draws, indices[col], margin)
+                    grouping.weights === nothing ||
+                        (gather = Expr(:call, :.*, grouping.weights[j], gather))
+                    push!(members, gather)
+                end
+                result = Expr(:call, :.+, members...)
+                if grouping.normalize
+                    denom = grouping.weights === nothing ? length(members) :
+                        Expr(:call, :.+, grouping.weights...)
+                    result = Expr(:call, :./, result, denom)
+                end
+                result
+            else
+                Expr(:ref, draws, indices[group], margin)
+            end
+            recipe = bucket.margins[margin].z
+            if recipe.kind !== :ones
+                value = if recipe.kind === :dummy
+                    callee = _rk_value_callee!(bindings, _rk_value_dummy, taken)
+                    Expr(:call, callee, recipe.column, recipe.level)
+                else
+                    recipe.column
+                end
+                coef = Expr(:call, :.*, coef, value)
+            end
+            push!(summands, coef)
+        end
+        value = length(summands) == 1 ? only(summands) : Expr(:call, :.+, summands...)
+        push!(stmts, Expr(:(=), effects[(target, bucket.group, bucket.id)], value))
+    end
+    stmts
+end
+
+function _rk_ast_value_spline(term, taken)
+    X = _rk_ast_fresh_name(string(term.options.id, "_X"), taken)
+    nblocks = term.options.kind === :t2 ? 3 : 1
+    Z = [_rk_ast_fresh_name(string(term.options.id, "_Z", j), taken) for j in 1:nblocks]
+    k = term.options.k
+    kval = k isa Tuple ? Expr(:tuple, k...) : k
+    basis = term.options.kind === :t2 ? :t2_basis : :tps_basis
+    call = Expr(:call, basis, Expr(:parameters, Expr(:kw, :k, kval)), term.columns...)
+    head = term.options.kind === :t2 ? :t2_smooth : :penalized_smooth
+    Expr[Expr(:(=), Expr(:tuple, X, Z...), call),
+        Expr(:call, :~, term.options.id, Expr(:call, head, X, Z...))]
+end
+
+function _rk_ast_value_hsgp(term, taken)
+    options = term.options
+    PHI = _rk_ast_fresh_name(string(options.id, "_PHI"), taken)
+    lambda = _rk_ast_fresh_name(string(options.id, "_lambda"), taken)
+    periodic = get(options, :cov, :exp_quad) === :periodic
+    k = options.k isa Tuple ? Expr(:tuple, options.k...) : options.k
+    kws = Expr[Expr(:kw, :k, k)]
+    if periodic
+        push!(kws, Expr(:kw, :period, options.period))
+    else
+        c = options.c isa Tuple ? Expr(:tuple, options.c...) : options.c
+        push!(kws, Expr(:kw, :c, c))
+    end
+    call = Expr(:call, periodic ? :hsgp_periodic_basis : :hsgp_basis,
+        Expr(:parameters, kws...), term.columns...)
+    stmts = Expr[Expr(:(=), Expr(:tuple, PHI, lambda), call)]
+    if periodic || options.iso
+        push!(stmts, Expr(:call, :~, options.id, Expr(:call,
+            periodic ? :hsgp_periodic_effect : :hsgp_effect, PHI, lambda)))
+    else
+        floors = _rk_ast_fresh_name(string(options.id, "_floors"), taken)
+        push!(stmts, Expr(:(=), floors, Expr(:call, :hsgp_rho_floors, lambda)))
+        rhos = Symbol[]
+        for j in eachindex(term.columns)
+            rho = _rk_ast_fresh_name(string(options.id, "_rho", j), taken)
+            push!(rhos, rho)
+            push!(stmts, Expr(:call, :~, rho, Expr(:call, :truncated,
+                Expr(:call, :LogNormal, 0, 1), Expr(:ref, floors, j), Inf)))
+        end
+        sigma = _rk_ast_fresh_name(string(options.id, "_sigma"), taken)
+        z = _rk_ast_fresh_name(string(options.id, "_z"), taken)
+        push!(stmts, Expr(:call, :~, sigma, Expr(:call, :LogNormal, 0, 1)))
+        push!(stmts, Expr(:call, :.~, Expr(:ref, z, Expr(:call, :axes, PHI, 2)),
+            _rk_ast_dotted(:Normal, 0, 1)))
+        push!(stmts, Expr(:(=), options.id, Expr(:call, :*, PHI,
+            Expr(:call, :.*, Expr(:call, :hsgp_sqrt_spd, lambda, sigma,
+                Expr(:vect, rhos...)), z))))
+    end
+    stmts
+end
+
+_rk_plan_summary(plan::_RKValuePlan) = string(
+    _rk_num_coefficients(plan.regression), " population coefficients and ",
+    length(plan.observations), " value-based responses")
+
+function _rk_needs_value_plan(program, observations)
+    assignments = Set(op.name for op in program.operations if op.role === :assignment)
+    predictors = Set(op.name for op in program.operations if op.role === :predictor)
+    for op in program.operations
+        op.role === :assignment || continue
+        any(in(predictors), op.dependencies) && return true
+        expression = _brm_prepare_expr(last(getargs(op.expression)))
+        _rk_has_value_call(expression) && return true
+    end
+    for observation in observations
+        rhs = observation.rhs
+        rhs isa ExprColumn || continue
+        args = getargs(rhs)
+        isempty(args) && continue
+        first(args) isa NamedColumn && name(first(args)) in assignments && return true
+    end
+    false
+end
+
+_rk_has_value_call(_) = false
+function _rk_has_value_call(expression::_BRMPreparedExpr)
+    expression.callable in _RK_ASSIGNMENT_CALLABLES || return true
+    any(_rk_has_value_call, expression.args) ||
+        any(_rk_has_value_call, values(expression.kwargs))
+end
+
+function _rk_predictor_components(brmi, context, predictor_order, columns,
+        derived, taken, parameters)
+    predictors = _RKPredictorSpec[]
+    priors = _RKPopulationPrior[]
+    r2d2_priors = _RKR2D2Prior[]
+    horseshoe_priors = _RKHorseshoePrior[]
+    r2d2_vectors = _RKVectorParameter[]
+    buckets, lookup = _rk_plan_ranef_buckets(
+        brmi, context, predictor_order, columns, taken, derived)
+    me_sources = Set{Symbol}()
+    for target in predictor_order
+        spec, term_priors, r2d2, hs = _rk_plan_predictor(
+            brmi, context, target, Tuple(predictor_order), columns, derived,
+            taken, lookup, me_sources)
+        push!(predictors, spec)
+        append!(priors, term_priors)
+        append!(horseshoe_priors, hs)
+        r2d2 === nothing && continue
+        push!(r2d2_priors, r2d2.prior)
+        append!(parameters, r2d2.scalars)
+        push!(r2d2_vectors, r2d2.phi)
+    end
+    vectors = [_rk_plan_monotonic_vectors!(predictors); r2d2_vectors]
+    (; predictors, priors, r2d2_priors, horseshoe_priors, buckets, vectors)
+end
+
+function _brm_rk_value_plan(brmi, program, observations)
+    context = program.context
+    prepared = _brm_prepare_model(brmi; program)
+    roots = Set(observation.key for observation in observations)
+    union!(roots, (parameter.name for parameter in prepared.parameters))
+    referenced = _brm_reachable_operations(program, roots)
+    assignments = Tuple(a for a in prepared.assignments if a.name in referenced)
+    parameter_names = Set{Symbol}(p.name for p in prepared.parameters)
+    assignment_names = Set{Symbol}(a.name for a in assignments)
+    consts = Dict{Symbol,Float64}(a.name => Float64(a.expression)
+        for a in assignments if a.expression isa Number)
+    parameters = _rk_plan_parameters!(prepared, context.data, consts,
+        Dict{Symbol,Symbol}(), parameter_names, assignment_names)
+    vectors = _rk_plan_vector_parameters!(prepared, consts)
+    predictor_order = Symbol[op.name for op in program.operations
+        if op.role === :predictor && op.name in referenced]
+    columns = Dict{Symbol,AbstractVector}()
+    derived = _RKDerivedSpec[]
+    taken = union(Set(predictor_order), parameter_names, assignment_names,
+        Set(v.name for v in vectors), Set(keys(context.data)))
+    components = _rk_predictor_components(brmi, context, predictor_order,
+        columns, derived, taken, parameters)
+    append!(vectors, components.vectors)
+    # Regression columns each keep their own row axis. The PPL binder checks
+    # their consumers; neither a subject nor a secondary axis is resized to y.
+    value_columns = Dict{Symbol,Any}(columns)
+    for key in referenced
+        haskey(context.data, key) || continue
+        haskey(value_columns, key) || (value_columns[key] = context.data[key])
+    end
+    obs = Tuple(o for o in prepared.observations if o.name in roots)
+    for o in obs
+        o.missing_response === nothing || error(
+            "RK backend: value-based response `$(o.name)` needs explicit observed values")
+        o.weight === nothing || error(
+            "RK backend: value-based response `$(o.name)` weights need an authored response")
+        o.modifier === nothing || error(
+            "RK backend: value-based response `$(o.name)` evidence needs an authored response")
+        value_columns[o.name] = o.response
+    end
+    regression = _RKStructuralPlan(_RKLikelihoodSpec[], components.predictors,
+        components.priors, parameters, _RKAssignmentSpec[], derived, columns,
+        0, components.buckets, vectors, components.r2d2_priors,
+        components.horseshoe_priors)
+    _RKValuePlan(regression, assignments, obs, value_columns)
+end
+
+function _rk_value_callee!(bindings, callable, taken)
+    # Surface-owned heads use the same canonical names as the GLM emitter.
+    if callable in _RK_ASSIGNMENT_CALLABLES || callable isa Type{<:Distribution}
+        return nameof(callable)
+    end
+    index = findfirst(pair -> last(pair) === callable, bindings)
+    index === nothing || return first(bindings[index])
+    name = _rk_ast_fresh_name("brm_value_function", taken)
+    push!(bindings, name => callable)
+    name
+end
+
+_rk_value_expr!(bindings, value, taken) = value
+_rk_value_expr!(bindings, value::_BRMPreparedRef, taken) = value.name
+_rk_value_expr!(bindings, values::Tuple, taken) =
+    Expr(:tuple, (_rk_value_expr!(bindings, value, taken) for value in values)...)
+function _rk_value_expr!(bindings, expression::_BRMPreparedExpr, taken)
+    args = map(arg -> _rk_value_expr!(bindings, arg, taken), expression.args)
+    expression.callable === getindex && return Expr(:ref, args...)
+    expression.callable === Base.vect && return Expr(:vect, args...)
+    callee = _rk_value_callee!(bindings, expression.callable, taken)
+    call = Expr(:call, callee, args...)
+    if !isempty(expression.kwargs)
+        kws = (Expr(:kw, key, _rk_value_expr!(bindings, value, taken))
+            for (key, value) in pairs(expression.kwargs))
+        insert!(call.args, 2, Expr(:parameters, kws...))
+    end
+    call
+end
+
+function _rk_emit_ast(plan::_RKValuePlan)
+    regression = _rk_emit_ast(plan.regression, false; values=true)
+    stmts = copy(regression.main.args)
+    bindings = copy(regression.bindings)
+    taken = Set{Symbol}(keys(plan.columns))
+    union!(taken, first.(bindings), (a.name for a in plan.assignments),
+        (p.name for p in plan.regression.parameters),
+        (p.name for p in plan.regression.predictors))
+    for assignment in plan.assignments
+        push!(stmts, Expr(:(=), assignment.name,
+            _rk_value_expr!(bindings, assignment.expression, taken)))
+    end
+    for observation in plan.observations
+        distribution = observation.distribution
+        distribution isa _BRMPreparedExpr || error(
+            "RK backend: response `$(observation.name)` needs a distribution call")
+        isempty(distribution.kwargs) || error(
+            "RK backend: response `$(observation.name)` distribution keywords are unsupported")
+        callee = _rk_value_callee!(bindings, distribution.callable, taken)
+        args = map(arg -> _rk_value_expr!(bindings, arg, taken), distribution.args)
+        push!(stmts, Expr(:call, :.~, observation.name,
+            _rk_ast_dotted(callee, args...)))
+    end
+    _RKEmittedProgram(regression.defs, Expr(:block, stmts...), bindings)
+end

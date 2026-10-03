@@ -396,7 +396,10 @@ end
 struct _RKEmittedProgram
     defs::Vector{Expr}
     main::Expr
+    bindings::Vector{Pair{Symbol,Any}}
 end
+_RKEmittedProgram(defs::Vector{Expr}, main::Expr) =
+    _RKEmittedProgram(defs, main, Pair{Symbol,Any}[])
 
 """
     RKBRMI(brmi; kwargs...)
@@ -7163,12 +7166,11 @@ end
 """
     _brm_rk_plan(brmi::BRMI)
 
-Lower a data-bound [`BRMI`](@ref) to the backend-neutral RK structural plan.
-Slice-1 admission (population GLMs plus the random-effects draws regime,
-density+gradient contract) is enforced here with RK-attributed errors;
-everything else fails closed. The package extension translates the
-returned [`_RKStructuralPlan`](@ref) to the thin-layer contract at the
-boundary.
+Lower a data-bound [`BRMI`](@ref) to an RK-independent regression, value,
+or panel plan. Ordinary callable assignments read formula predictors as
+arrays on their own row axes. Regression geometry and priors use the same
+preparation on both regression routes. The extension emits and binds the
+current RKPPL surface; unsupported formula terms fail with RK attribution.
 """
 function _brm_rk_plan(brmi::BRMI)
     prefix = "RK backend"
@@ -7181,6 +7183,8 @@ function _brm_rk_plan(brmi::BRMI)
         "$prefix: multi-response observation names must be unique")
     program = _brm_prepare_program(
         brmi; context=_brm_backend_context(brmi; retain_mm_sources=true))
+    _rk_needs_value_plan(program, observations) &&
+        return _brm_rk_value_plan(brmi, program, observations)
     context = program.context
     # Phase 1: peel weights/modifiers and materialize responses.
     peeled = map(observations) do observation
@@ -7285,32 +7289,15 @@ function _brm_rk_plan(brmi::BRMI)
             target in predictor_order || push!(predictor_order, target)
         end
     end
-    available = Tuple(predictor_order)
     columns = Dict{Symbol,AbstractVector}()
     derived = _RKDerivedSpec[]
     taken = union(Set{Symbol}(predictor_order), parameter_names,
         assignment_names, Set{Symbol}(spec.name for spec in vector_specs))
-    predictor_specs = _RKPredictorSpec[]
-    prior_specs = _RKPopulationPrior[]
-    r2d2_specs = _RKR2D2Prior[]
-    hs_specs = _RKHorseshoePrior[]
-    r2d2_vectors = _RKVectorParameter[]
-    ranef_buckets, ranef_lookup = _rk_plan_ranef_buckets(
-        brmi, context, predictor_order, columns, taken, derived)
-    me_sources = Set{Symbol}()
-    for target in predictor_order
-        spec, priors, r2d2, hs_priors = _rk_plan_predictor(
-            brmi, context, target, available, columns, derived, taken,
-            ranef_lookup, me_sources)
-        push!(predictor_specs, spec)
-        append!(prior_specs, priors)
-        append!(hs_specs, hs_priors)
-        isnothing(r2d2) && continue
-        push!(r2d2_specs, r2d2.prior)
-        append!(parameters, r2d2.scalars)
-        push!(r2d2_vectors, r2d2.phi)
-    end
-    mo_vectors = _rk_plan_monotonic_vectors!(predictor_specs)
+    components = _rk_predictor_components(brmi, context, predictor_order,
+        columns, derived, taken, parameters)
+    predictor_specs, prior_specs = components.predictors, components.priors
+    r2d2_specs, hs_specs = components.r2d2_priors, components.horseshoe_priors
+    ranef_buckets = components.buckets
     predictor_link = Dict(spec.name => spec.link for spec in predictor_specs)
     # Phase 5: response specs (triples need predictor links and name tables).
     response_specs = _RKLikelihoodSpec[]
@@ -7584,9 +7571,9 @@ function _brm_rk_plan(brmi::BRMI)
     _rk_gate_joint_factors!(response_specs, parameters, assignment_names)
     _rk_gate_name_hygiene!(predictor_specs, parameters, assignments,
         derived, columns, response_specs,
-        [vector_specs; implicit_vectors; mo_vectors; r2d2_vectors])
+        [vector_specs; implicit_vectors; components.vectors])
     _RKStructuralPlan(response_specs, predictor_specs, prior_specs,
         parameters, assignments, derived, columns, n_obs, ranef_buckets,
-        [vector_specs; implicit_vectors; mo_vectors; r2d2_vectors],
+        [vector_specs; implicit_vectors; components.vectors],
         r2d2_specs, hs_specs)
 end

@@ -29,7 +29,7 @@ rk_artifact_version() = 2
 # (`rk_translate_artifact`) consult. It currently equals the extension's
 # `_RK_PLAN_TYPES`; it is kept as its own predicate so a future plan kind
 # can join the RK backend without silently becoming an artifact kind.
-const _RK_ARTIFACT_PLAN_TYPES = Union{_RKStructuralPlan,_RKKernelPlan}
+const _RK_ARTIFACT_PLAN_TYPES = Union{_RKStructuralPlan,_RKKernelPlan,_RKValuePlan}
 
 """
     emit_rk_artifact(brmi::BRMI; case_id, provenance=nothing, brm_pin=nothing)
@@ -184,6 +184,12 @@ function show_rk_plan(plan::_RKKernelPlan)
         "assignments = [$(join(as, ", "))]",
         "columns     = [$(join(cols, ", "))]",
     ], "\n") * "\n"
+end
+
+function show_rk_plan(plan::_RKValuePlan)
+    "values      = ordinary callable assignments\n" *
+        "observations = [$(join((string(o.name) for o in plan.observations), ", "))]\n" *
+        show_rk_plan(plan.regression)
 end
 
 function _rk_show_terms(terms)
