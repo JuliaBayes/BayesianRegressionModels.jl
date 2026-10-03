@@ -3028,10 +3028,26 @@ end
     end)
 end
 
+@stestset "Student-t numeric scalar data degrees of freedom" begin
+    builder = @brm begin
+        mu ~ 1 + x
+        y ~ LocationScale(mu, 1, TDist(nu))
+    end
+    for nu in (1, 6.0, Float32(7.5), 9 // 2)
+        plan = BRM._brm_rk_plan(builder(merge(df, (; nu))))
+        @test only(plan.responses).nu == Float64(nu)
+        @test isnothing(only(plan.responses).nu_predictor)
+        @test isempty(plan.parameters)
+    end
+    for nu in (0, -1, NaN, Inf, -Inf)
+        @test_throws "degrees of freedom must be finite and positive" BRM._brm_rk_plan(
+            builder(merge(df, (; nu))))
+    end
+end
+
 # Group-B scope edges: the TDist base is the only admitted
-# `LocationScale` base, the predictor is identity-link only, nu stays
-# scalar (no modeled-nu predictor, no data column), and the new triple
-# carries no weights or evidence.
+# `LocationScale` base, the location predictor is identity-link only,
+# and degrees-of-freedom predictors require a log link.
 @stestset "fail closed: group-B scope edges" begin
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
@@ -3072,12 +3088,13 @@ end
         nu ~ Gamma(2, 0.1)
         y ~ weighted(LocationScale(mu, s, TDist(nu)), fweights(n))
     end)
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    truncated_plan = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
         s ~ Exponential(1)
         nu ~ Gamma(2, 0.1)
         y ~ truncated(LocationScale(mu, s, TDist(nu)); lower=0.0)
     end)
+    @test only(truncated_plan.responses).evidence.kind === :truncated
 end
 
 @stestset "fail closed: group-C hurdle scope edges" begin
