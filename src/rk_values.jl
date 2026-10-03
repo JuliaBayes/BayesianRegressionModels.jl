@@ -268,6 +268,20 @@ function _rk_needs_value_plan(program, observations)
         rhs isa ExprColumn || continue
         args = getargs(rhs)
         isempty(args) && continue
+        # A scalar family can consume constants or sampled values without a
+        # regression formula. It uses the same ordinary value observation as
+        # an authored array reader; no population intercept is synthesized.
+        family = rhs
+        while family isa ExprColumn && getf(family) in
+                (censored, truncated, interval_censored) && !isempty(getargs(family))
+            family = first(getargs(family))
+        end
+        head = family isa ExprColumn ? getf(family) : nothing
+        if head === LocationScale || (head isa Type && head <: UnivariateDistribution)
+            reachable = _brm_reachable_operations(program,
+                _brm_prepared_references(_brm_prepare_expr(family)))
+            isempty(intersect(predictors, reachable)) && return true
+        end
         # A formula response may put a shape before its location (Weibull,
         # Student-t, binomial trials). An assignment in that slot does not
         # make the formula location an arbitrary whole-array reader.
@@ -275,6 +289,26 @@ function _rk_needs_value_plan(program, observations)
         first(args) isa NamedColumn && name(first(args)) in assignments && return true
     end
     false
+end
+
+function _rk_ast_value_distribution(distribution, bindings, taken)
+    # BRM authors Julia's LocationScale/TDist composition; RKPPL authors the
+    # same family in Stan argument order as StudentT(nu, location, scale).
+    if distribution.callable === LocationScale
+        isempty(distribution.kwargs) && length(distribution.args) == 3 || error(
+            "RK backend: a Student-t response needs LocationScale(mu, scale, TDist(nu))")
+        location, scale, base = distribution.args
+        base isa _BRMPreparedExpr && base.callable === TDist &&
+            isempty(base.kwargs) && length(base.args) == 1 || error(
+            "RK backend: a LocationScale response must wrap TDist(nu)")
+        return _rk_ast_dotted(:StudentT,
+            _rk_value_expr!(bindings, only(base.args), taken),
+            _rk_value_expr!(bindings, location, taken),
+            _rk_value_expr!(bindings, scale, taken))
+    end
+    callee = _rk_value_callee!(bindings, distribution.callable, taken)
+    args = map(arg -> _rk_value_expr!(bindings, arg, taken), distribution.args)
+    _rk_ast_dotted(callee, args...)
 end
 
 _rk_has_value_call(_) = false
@@ -294,18 +328,29 @@ function _rk_predictor_components(brmi, context, predictor_order, columns,
     buckets, lookup = _rk_plan_ranef_buckets(
         brmi, context, predictor_order, columns, taken, derived)
     me_sources = Set{Symbol}()
+    matched_defaults = Set{Int}()
     for target in predictor_order
         spec, term_priors, r2d2, hs = _rk_plan_predictor(
             brmi, context, target, Tuple(predictor_order), columns, derived,
-            taken, lookup, me_sources)
+            taken, lookup, me_sources; tolerant_default=true, matched_defaults)
         push!(predictors, spec)
         append!(priors, term_priors)
         append!(horseshoe_priors, hs)
+        # Structured latent coefficients use dedicated prior cells rather
+        # than design columns, but still own a whole-coefficient default.
+        if !isempty(term_priors) || !isempty(hs) || r2d2 !== nothing
+            for (index, prior) in enumerate(effect_priors(brmi))
+                prior.predictor === _EFFECT_COLON &&
+                    prior.coefficient === _EFFECT_COLON &&
+                    push!(matched_defaults, index)
+            end
+        end
         r2d2 === nothing && continue
         push!(r2d2_priors, r2d2.prior)
         append!(parameters, r2d2.scalars)
         push!(r2d2_vectors, r2d2.phi)
     end
+    _brm_validate_population_effect_defaults(brmi, matched_defaults)
     vectors = [_rk_plan_monotonic_vectors!(predictors); r2d2_vectors]
     (; predictors, priors, r2d2_priors, horseshoe_priors, buckets, vectors)
 end
@@ -430,9 +475,7 @@ function _rk_emit_ast(plan::_RKValuePlan)
             "RK backend: response `$(observation.name)` needs a distribution call")
         isempty(distribution.kwargs) || error(
             "RK backend: response `$(observation.name)` distribution keywords are unsupported")
-        callee = _rk_value_callee!(bindings, distribution.callable, taken)
-        args = map(arg -> _rk_value_expr!(bindings, arg, taken), distribution.args)
-        base = _rk_ast_dotted(callee, args...)
+        base = _rk_ast_value_distribution(distribution, bindings, taken)
         if modifier !== nothing
             lower = modifier.lower === nothing ? -Inf :
                 _rk_value_expr!(bindings, _brm_prepare_expr(modifier.lower), taken)

@@ -97,6 +97,24 @@ data and layouts, then compares their first executions against analytic
 densities. Run `test/setup_env.jl` to install the fixed RK pin, then
 `julia --threads=4 --project=test test/rk_construction_concurrency.jl`.
 
+`rk_bounded_source.jl` checks scalar declaration bounds and ordinary value
+observations. `rk_bounded_runtime.jl` compares the original family kernels,
+coordinate Jacobians, standard Enzyme gradients and full printed-source replay
+with independent oracles and emitted Stan. These use the exact published
+`restricted` capability pinned by `setup_env.jl`.
+
+`rk_computed_predictor.jl` covers ordinary formula predictors consumed by a
+whole-array gather, with and without an intercept and with equal or distinct
+predictor/observation row axes. It checks full normalized densities, analytic
+and finite-difference gradients, mapped compiled Stan, caller ownership and
+complete printed-source replay on the published computed-matrix repair.
+
+`rk_wildcard_ownership.jl` checks that wildcard coefficient defaults reach
+owning predictors, skip nonowners, and retain unmatched-target and equal-
+specificity errors. Its unchanged linked multi-axis model compares normalized
+Normal/censored densities, standard native Enzyme gradients, mapped compiled
+Stan and complete public printed-source replay.
+
 `rk_plain.jl` and `rk_statistical_library.jl` exercise BRM-owned statistical
 declarations through ordinary RKPPL lowering. `rk_leveled.jl` adds independent
 categorical-reference and multinomial row-density, Jacobian and ordinary

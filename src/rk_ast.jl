@@ -658,14 +658,12 @@ function _rk_ast_sampled(parameter::_RKSampledParameter)
                     parameter.args[1], parameter.args[2]),
                 0, 1))
     end
-    if override isa Tuple && first(override) === :truncated
-        # General truncated splice: the base head + args and the bounds
-        # splice back verbatim (v1 plans symmetric halves only; the
-        # planner gates the bounds, so this arm never conditions on
-        # which family or which bounds it carries).
-        _, lower, upper = override
+    if override isa Tuple && first(override) in (:truncated, :restricted)
+        # Explicit normalized truncation and declaration-only support bounds
+        # use different ordinary source forms, preserving absolute densities.
+        wrapper, lower, upper = override
         return Expr(:call, :~, name,
-            Expr(:call, :truncated,
+            Expr(:call, wrapper,
                 Expr(:call, family, parameter.args...),
                 lower, upper))
     end

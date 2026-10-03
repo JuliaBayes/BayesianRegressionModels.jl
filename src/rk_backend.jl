@@ -323,9 +323,8 @@ struct _RKSampledParameter
                    # joint factor stem (args `(K::Int, theta, eta)`; the
                    # thin layer derives `<stem>_scales`/`<stem>_L_corr`)
     args::Tuple # Number literals or Symbol param/assignment refs, positional
-    support_override::Union{Nothing,Symbol,Tuple} # a `(:truncated, lo, hi)`
-        # Tuple splices a general `truncated(Base(args...), lo, hi)` AST
-        # (v1 admits symmetric halves only; the planner gates the bounds)
+    support_override::Union{Nothing,Symbol,Tuple} # `(:truncated, lo, hi)`
+        # normalizes the family; `(:restricted, lo, hi)` retains its kernel.
     label::Symbol
 end
 
@@ -5146,7 +5145,8 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         derived::Vector{_RKDerivedSpec}, taken::Set{Symbol},
         ranef_buckets::Dict{Tuple{Symbol,Symbol,Union{Nothing,Symbol}},
             Union{_RKRanefBucket,Nothing}},
-        me_sources::Set{Symbol}; tolerant_default::Bool=false)
+        me_sources::Set{Symbol}; tolerant_default::Bool=false,
+        matched_defaults=nothing)
     prefix = "RK backend"
     op = linear_predictor_op(brmi, target)
     _, rhs = getargs(op, 2)
@@ -5221,7 +5221,7 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         brmi, context, target, ordinary, available, link, terms, derived)
     geometry = _brm_prepare_predictor_geometry(
         brmi, context, target; available_predictors=available,
-        tolerant_default)
+        tolerant_default, matched_defaults)
     for (raw, prepared) in zip(structured, geometry.terms)
         if prepared.callable === gp
             push!(terms, _rk_plan_gp_term!(
@@ -5433,11 +5433,16 @@ function _rk_plan_parameters!(prepared, data::AbstractDict,
                 consts, aliases, parameters, assign_names))
             continue
         end
+        declaration_bounds = callable !== truncated &&
+            any(key -> key in (:lower, :upper), keys(prior.kwargs))
+        family_prior = declaration_bounds ? _BRMPreparedExpr(callable,
+            prior.args, (; (key => value for (key, value) in pairs(prior.kwargs)
+                if !(key in (:lower, :upper)))...)) : prior
         family, args, support_override = if callable === truncated
             # Keyword bounds are validated inside the truncated gate.
             _rk_truncated_prior(prior, parameter.name)
         elseif callable === LocationScale
-            _rk_locationscale_studentt(prior, parameter.name)
+            _rk_locationscale_studentt(family_prior, parameter.name)
         else
             callable isa Type || error(
                 "$prefix: parameter `$(parameter.name)` prior " *
@@ -5448,10 +5453,21 @@ function _rk_plan_parameters!(prepared, data::AbstractDict,
                 "$prefix: parameter `$(parameter.name)` prior `$name` is " *
                 "out of slice 1 (admitted: " *
                 "$(join(_RK_SLICE1_PRIOR_ARITY_KEYS, ", ")))")
-            isempty(prior.kwargs) || error(
+            isempty(family_prior.kwargs) || error(
                 "$prefix: parameter `$(parameter.name)` prior keywords " *
                 "are out of slice 1")
             (name, prior.args, nothing)
+        end
+        if declaration_bounds
+            lower = _rk_parameter_bound(get(prior.kwargs, :lower, -Inf),
+                parameter.name, :lower, data, consts, aliases, parameters, assign_names)
+            upper = _rk_parameter_bound(get(prior.kwargs, :upper, Inf),
+                parameter.name, :upper, data, consts, aliases, parameters, assign_names)
+            if lower isa Number && upper isa Number
+                lower < upper || error("$prefix: parameter `$(parameter.name)` " *
+                    "declaration bounds require lower < upper")
+            end
+            support_override = (:restricted, lower, upper)
         end
         expected = _RK_SLICE1_PRIOR_ARITY[family]
         length(args) == expected || error(
@@ -5502,6 +5518,30 @@ function _rk_plan_parameters!(prepared, data::AbstractDict,
             parameter.name))
     end
     specs
+end
+
+# Declaration bounds constrain coordinates separately from the family kernel.
+# Data scalars and constant assignments keep the existing frozen-bound
+# contract. Live coordinate bounds need separate BRM preparation acceptance.
+function _rk_parameter_bound(bound, name, side, data, consts, aliases,
+        parameters, assign_names)
+    bound === nothing && return side === :lower ? -Inf : Inf
+    if bound isa _BRMPreparedRef
+        bound.name === :Inf && return Inf
+        if haskey(data, bound.name)
+            bound = data[bound.name]
+        else
+            _, bound = _rk_resolve_use_ref(bound.name, consts, aliases,
+                parameters, assign_names, "parameter `$name` $side bound")
+        end
+    end
+    bound isa Real && !(bound isa Bool) && !isnan(bound) || error(
+        "RK backend: parameter `$name` $side bound must be a numeric scalar " *
+        "or a frozen scalar reference (sampled or assigned live bounds are unsupported)")
+    value = Float64(bound)
+    (side === :lower ? value < Inf : value > -Inf) || error(
+        "RK backend: parameter `$name` $side bound has the wrong infinity")
+    value
 end
 
 const _RK_SLICE1_PRIOR_ARITY_KEYS =

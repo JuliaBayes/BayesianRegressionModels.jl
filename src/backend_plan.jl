@@ -2299,12 +2299,16 @@ the interaction term emits, refined per column by a direct `int_…` label addre
 For a distributional likelihood, `available_predictors` names its complete
 predictor set: a prior targeting a peer is ignored by this component, while a
 prior targeting no member still fails loudly.
+With `tolerant_default=true`, wildcard predictor addresses skip nonowners.
+The complete-set caller passes `matched_defaults` and validates it with
+`_brm_validate_population_effect_defaults` after preparing all predictors.
 """
 function _brm_simple_population_effect_overrides(brmi::BRMI,
                                                  design::_BRMPopulationDesign;
                                                  prefix="BRM backend lowering",
                                                  available_predictors=(design.target,),
-                                                 tolerant_default::Bool=false)
+                                                 tolerant_default::Bool=false,
+                                                 matched_defaults=nothing)
     specs = effect_priors(brmi)
     isempty(specs) && return nothing
 
@@ -2318,7 +2322,7 @@ function _brm_simple_population_effect_overrides(brmi::BRMI,
     available = Symbol[address for (address, blocks) in address_blocks
                        if length(blocks) == 1]
     cells = Any[nothing for _ in labels]
-    for spec in specs
+    for (spec_index, spec) in enumerate(specs)
         _brm_validate_population_effect_spec(spec; prefix)
         all_predictors = spec.predictor === _EFFECT_COLON
         if !all_predictors && spec.predictor !== design.target
@@ -2354,6 +2358,9 @@ function _brm_simple_population_effect_overrides(brmi::BRMI,
             end
             idxs
         end
+        if all_predictors && matched_defaults !== nothing && !isempty(indices)
+            push!(matched_defaults, spec_index)
+        end
         for idx in indices
             column = design.columns[idx]
             level_address = spec.coefficient === column.label &&
@@ -2365,6 +2372,21 @@ function _brm_simple_population_effect_overrides(brmi::BRMI,
         end
     end
     Any[isnothing(cell) ? nothing : cell.expression for cell in cells]
+end
+
+# Tolerant wildcard fan-out is valid only when the address reaches at least
+# one coefficient across the complete prepared predictor set. Keep this
+# check separate from per-predictor claiming so nonowners can be skipped
+# without suppressing misspelled addresses or changing precedence.
+function _brm_validate_population_effect_defaults(brmi::BRMI, matched_defaults;
+                                                  prefix="BRM preparation")
+    for (index, spec) in enumerate(effect_priors(brmi))
+        spec.predictor === _EFFECT_COLON || continue
+        index in matched_defaults && continue
+        error("$prefix: `$(_brm_effect_spelling(spec))` matches no population " *
+              "coefficient in any prepared linear predictor.")
+    end
+    nothing
 end
 
 function _brm_materialize_normal_effect_priors(overrides, n::Integer;
