@@ -157,7 +157,7 @@ end
 const censored_assignment_builder = @brm begin
     beta ~ Normal(0,1)
     mu=consumer_shift(x,beta)
-    lower=lo .+ 0.0
+    lower=consumer_shift(lo,0.0)
     y ~ censored(Normal(mu,1);lower=lower,upper=hi)
 end
 
