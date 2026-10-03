@@ -11635,7 +11635,7 @@ for (fn, kind, fitf, applyf) in (
     @eval function _sb_predictor_term!(stmts, data, ::typeof($fn), t; kwargs...)
         inner = only(getargs(t))
         if _sb_term_refs_mi(inner)
-            cn = _sb_wrapper_col_name($(QuoteNode(fn)), inner)
+            cn = _sb_mi_wrapper_col_name($(QuoteNode(fn)), inner)
             return _sb_emit_mi_transform!(stmts, data,
                 $(QuoteNode(Symbol(:missing_, kind))), inner, cn)
         end
@@ -11656,7 +11656,7 @@ end
 # directly), preserving the old "unsupported" diagnostic.
 function _sb_materialize_protect_term!(stmts, data, f, t)
     if _sb_term_refs_mi(t)
-        cn = _sb_wrapper_col_name(Symbol(f), t)
+        cn = _sb_mi_wrapper_col_name(Symbol(f), t)
         _sb_mi_predictor_assignment!(stmts, cn, _sb_scalar_expr(t, data))
         return cn
     end
@@ -11704,6 +11704,18 @@ function _sb_term_refs_mi(x::NamedColumn)
 end
 _sb_term_refs_mi(x::ExprColumn) = any(_sb_term_refs_mi, getargs(x))
 _sb_term_refs_mi(_) = false
+
+# Runtime transform names describe the formula, not its current data values.
+# Hashing a bound column's full parent tree changes the name when observed
+# values are refreshed, so frozen replay cannot find its fitted anchors.
+_sb_mi_term_key(x::NamedColumn) = (:column, name(x))
+_sb_mi_term_key(x::ExprColumn) =
+    (:call, getf(x), map(_sb_mi_term_key, getargs(x)), map(_sb_mi_term_key, getkwargs(x)))
+_sb_mi_term_key(x) = x
+_sb_mi_wrapper_col_name(prefix::Symbol, inner::NamedColumn) =
+    _sb_wrapper_col_name(prefix, inner)
+_sb_mi_wrapper_col_name(prefix::Symbol, inner) =
+    Symbol(prefix, :_expr_, string(hash(_sb_mi_term_key(inner)); base=16)[1:8])
 
 _sb_mi_training_values(x::Number, _df=nothing) = x
 function _sb_mi_training_values(x::NamedColumn, df=nothing)

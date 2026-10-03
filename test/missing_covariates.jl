@@ -433,6 +433,23 @@ end
     @test brm_output(brm_descriptor(cv), :y; role=:posterior_predictive).source === :y
 end
 
+@stestset "frozen derived transform anchors survive group replay with new observations" begin
+    sb = SBBRMI(MISSING_DERIVED_SHARED_KERNEL(MISSING_DERIVED_TOY); mod=@__MODULE__)
+    changed = merge(MISSING_DERIVED_TOY, (;
+        x=Union{Missing,Float64}[1.3, missing, 2.7, missing, 1.8],
+        z=Union{Missing,Float64}[1.6, missing, 1.0, missing, 1.2],))
+    cv = reprocess(sb, changed; resample_groups=[:subject])
+    @test cv.data[:x_obs] == [1.3, 2.7, 1.8]
+    @test cv.data[:z_obs] == [1.6, 1.0, 1.2]
+    @test popcoefnames(cv.parent, :mu1) == popcoefnames(sb.parent, :mu1)
+    for (key, entry) in sb.preproc
+        entry.kind in (:missing_standardize, :missing_center, :missing_zscale) || continue
+        @test haskey(cv.data, key)
+        @test cv.data[key] == sb.data[key]
+        @test cv.data[entry.const_.scale_key] == sb.data[entry.const_.scale_key]
+    end
+end
+
 const MISSING_COMPLETE_CONDITIONAL = @brm begin
     mi(z) ~ LogNormal(0.1, 0.4)
     x ~ LogNormal(0.2 + 0.3 * z, 0.5)
