@@ -119,7 +119,7 @@ end
         stan=consumer_stan(model,"grouped-hsgp-"*label)
         mapping=[:mu_Intercept=>"pop_mu_beta_pop.1"]
         for g in 1:2,k in 1:3
-            push!(mapping,names[weights[g,k]]=>"b_hsgp_x_g_z_flat.$((g-1)*3+k)")
+            push!(mapping,names[weights[g,k]]=>"zflat_hsgpw_x_g.$((g-1)*3+k)")
         end
         for (stem,stan_stem) in (("rho","rho_iso"),("sigma","sigma"))
             if label=="hyper"
