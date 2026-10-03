@@ -139,6 +139,9 @@ separately; values and scientific child coverage are preserved.
 Long likelihood arguments use compact intermediate symbols with separate exact
 definitions and notation tied to their source component IDs. Distribution
 conventions, input bindings and child coverage are preserved.
+Long opaque observation-family relations place each actual argument on its own
+aligned row, in authored order, including keyword bindings. The family still
+needs independent scientific hook coverage.
 Authored literal assignments have `role=:constant` and expose their value;
 composed assignments have `role=:deterministic` and expose a public expression.
 This includes assignments preceded by documentation strings in an included

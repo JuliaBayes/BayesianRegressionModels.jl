@@ -10,6 +10,106 @@ using StanBlocks
     decay_rate .+ onset_time .+ normalization
 end
 
+module DescriptionOpaqueLaw
+using StanBlocks
+# This public toy has no producer-known law. Both arities retain their complete
+# authored family arguments and require an independent scientific hook.
+@deffun begin
+    @lhs @lpxf category_law_lpdf(y::vector[n],signal::vector[n],reference::vector[n],
+        cutoff::real,next_cutoff::real,last_cutoff::real,scale::real,epsilon::real)::real =
+        normal_lpdf(y,signal+reference+cutoff+next_cutoff+last_cutoff+epsilon,scale)
+    category_law_lpdfs(y::vector[n],signal::vector[n],reference::vector[n],
+        cutoff::real,next_cutoff::real,last_cutoff::real,scale::real,epsilon::real)::vector[n] = begin
+        out::vector[n]
+        for i in 1:n
+            out[i]=normal_lpdf(y[i],signal[i]+reference[i]+cutoff+next_cutoff+last_cutoff+epsilon,scale)
+        end
+        out
+    end
+    category_law_rng(vector[n],signal::vector[n],reference::vector[n],
+        cutoff::real,next_cutoff::real,last_cutoff::real,scale::real,epsilon::real)::vector[n] = begin
+        out::vector[n]
+        for i in 1:n
+            out[i]=normal_rng(signal[i]+reference[i]+cutoff+next_cutoff+last_cutoff+epsilon,scale)
+        end
+        out
+    end
+    @lhs category_law_lpdf(y::vector[n],signal::vector[n],reference::vector[n],
+        next_cutoff::real,last_cutoff::real,scale::real,epsilon::real)::real =
+        normal_lpdf(y,signal+reference+next_cutoff+last_cutoff+epsilon,scale)
+    category_law_lpdfs(y::vector[n],signal::vector[n],reference::vector[n],
+        next_cutoff::real,last_cutoff::real,scale::real,epsilon::real)::vector[n] = begin
+        out::vector[n]
+        for i in 1:n
+            out[i]=normal_lpdf(y[i],signal[i]+reference[i]+next_cutoff+last_cutoff+epsilon,scale)
+        end
+        out
+    end
+    category_law_rng(vector[n],signal::vector[n],reference::vector[n],
+        next_cutoff::real,last_cutoff::real,scale::real,epsilon::real)::vector[n] = begin
+        out::vector[n]
+        for i in 1:n
+            out[i]=normal_rng(signal[i]+reference[i]+next_cutoff+last_cutoff+epsilon,scale)
+        end
+        out
+    end
+end
+end
+const category_law=DescriptionOpaqueLaw.category_law
+
+@testset "opaque observation laws align six and seven exact arguments" begin
+    data=(;scientific_signal_values=[.1,.3,.5],reference_response_values=[.2,.4,.6],
+        y_seven=[.3,.6,.9],y_six=[.4,.7,1.0])
+    model=@brm data begin
+        initial_category_cutoff ~ Normal(0,1)
+        first_category_step ~ Exponential(1)
+        second_category_step ~ Exponential(1)
+        response_scale ~ Exponential(1)
+        y_seven ~ category_law(scientific_signal_values,reference_response_values,
+            initial_category_cutoff,initial_category_cutoff+first_category_step,
+            initial_category_cutoff+first_category_step+second_category_step,
+            sqrt(2)*response_scale,.01)
+        y_six ~ category_law(scientific_signal_values,reference_response_values,
+            initial_category_cutoff+first_category_step,
+            initial_category_cutoff+first_category_step+second_category_step,
+            sqrt(2)*response_scale,.01)
+    end
+    sb=SBBRMI(model;mod=@__MODULE__,total_groups=())
+    code=stan_code(sb); frozen=deepcopy(sb.data)
+    gap=brm_description(sb)
+    @test !gap.complete
+    observations=filter(c->c.kind===:observation && last(c.arguments).callable===category_law,gap.components)
+    @test length(observations)==2
+    parent_hook=context->BRMDescriptionFragment(covers=(context.id,))
+    # Hooking the generic observation container cannot cover the opaque family.
+    @test !brm_description(sb;hooks=(first(observations).callable=>parent_hook,)).complete
+    hook=context->BRMDescriptionFragment(prose=("The toy family retains its supplied arguments.",),covers=(context.id,))
+    r=brm_description(sb;hooks=(category_law=>hook,))
+    @test r.complete
+    calls=filter(c->c.callable===category_law,brm_description_components(r))
+    @test sort([length(c.arguments) for c in calls])==[6,7]
+    for call in calls
+        observation=only(filter(c->c.kind===:observation && last(c.arguments).id==call.id,r.components))
+        @test observation.provenance.observation_role===:conditioned
+        lhs=brm_description_math(observation,first(observation.arguments))
+        relation=only(filter(e->occursin(lhs*"&\\sim",e),r.equations))
+        @test startswith(relation,"\\begin{aligned}"*lhs*"&\\sim\\mathrm{category\\_law}\\bigl(")
+        rows=split(relation,'\n')
+        @test count(row->startswith(row,"&\\quad "),rows)==length(call.arguments)
+        @test maximum(length.(rows))<160
+        @test occursin("\\bigr)\\end{aligned}",last(rows))
+        all_math=join(r.equations,"\n")
+        for argument in call.arguments
+            @test occursin(brm_description_math(call,argument),all_math)
+        end
+        @test occursin("0.01",relation)
+    end
+    @test !any(e->occursin("BRMDescription",e),r.equations)
+    @test brm_description(sb;hooks=(category_law=>hook,)).equations==r.equations
+    @test stan_code(sb)==code && isequal(sb.data,frozen)
+    @test StanBlocks.stanc_check(code;warn_pedantic=false).ok
+end
+
 @testset "wide prior laws keep complete definitions outside index cells" begin
     data=(;y=[.2,.4,.6])
     model=@brm data begin

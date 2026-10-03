@@ -615,12 +615,23 @@ function _brmd_assignment_equation(c,lhs,rhs)
     end
     rhs.kind===:call && !(rhs.callable in (+,-,*,/,^,exp,log,sqrt,logistic,
         StanBlocks.stan.builtin.inv_logit)) && _brmd_law(rhs.callable)===nothing || return ordinary
+    _brmd_call_equation(c,lhs,rhs,"=")
+end
+function _brmd_call_equation(c,lhs,rhs,relation)
+    ordinary=lhs*relation*brm_description_math(c,rhs)
     args=(map(a->brm_description_math(c,a),rhs.arguments)...,
         (_brmd_identifier(k)*"="*brm_description_math(c,v) for (k,v) in pairs(rhs.keywords))...)
     isempty(args) && return ordinary
-    rows=String[lhs*"&="*_brmd_identifier(_brmd_callable_name(rhs.callable))*"\\bigl("]
+    rows=String[lhs*"&"*relation*_brmd_identifier(_brmd_callable_name(rhs.callable))*"\\bigl("]
     append!(rows,("&\\quad "*a*(i==length(args) ? "\\bigr)" : ",") for (i,a) in enumerate(args)))
     "\\begin{aligned}"*join(rows,"\\\\\n")*"\\end{aligned}"
+end
+function _brmd_distribution_equation(c,lhs,rhs)
+    ordinary=lhs*"\\sim"*_brmd_distribution_math(c,rhs)
+    length(ordinary)<=160 && return ordinary
+    rhs isa BRMDescriptionComponent && rhs.kind===:call &&
+        _brmd_law(rhs.callable)===nothing || return ordinary
+    _brmd_call_equation(c,lhs,rhs,"\\sim")
 end
 _brmd_population_addends(c,x)=x isa BRMDescriptionComponent && x.callable===(+) ?
     Tuple(t for a in x.arguments for t in _brmd_population_addends(c,a)) : (_brmd_term_math(c,x),)
@@ -742,7 +753,7 @@ function _brmd_builtin_kind(::Val{:observation},c)
     definitions=String[]; notes=NamedTuple[]; counter=Ref(0)
     reduced=_brmd_compact_expression(c,rhs,definitions,notes,counter;root=true)
     localcontext=_brmd_render_context(c;notation=(c.notation...,notes...))
-    equation=brm_description_math(localcontext,lhs)*"\\sim"*_brmd_distribution_math(localcontext,reduced)
+    equation=_brmd_distribution_equation(localcontext,brm_description_math(localcontext,lhs),reduced)
     BRMDescriptionFragment(prose=(prose,),equations=(equation,definitions...),notation=Tuple(notes),covers=(c.id,))
 end
 
