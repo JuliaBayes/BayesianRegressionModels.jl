@@ -648,11 +648,11 @@ end
 
 # Student-t degrees of freedom: the `LocationScale` base must be a
 # `TDist(nu)` call whose nu is a positive literal, a sampled parameter,
-# a scalar assignment, or a distributional bare-predictor reference (a
+# numeric scalar data, a scalar assignment, or a bare-predictor reference (a
 # `log(nu) ~ ...` submodel — the hurdle vscale precedent; a predictor
 # shadows a same-named data column here, matching the scale slot). A
-# data column can never be a scalar. Returns `(nu, nu_predictor)`
-# with exactly one side non-nothing.
+# fixed data value follows the literal's positive-finite normalization.
+# Returns `(nu, nu_predictor)` with exactly one side non-nothing.
 function _rk_nu_argument(base, parameters::Set{Symbol},
         assignments::Set{Symbol}, consts::Dict{Symbol,Float64},
         aliases::Dict{Symbol,Symbol}, response::Symbol,
@@ -675,11 +675,8 @@ function _rk_nu_argument(base, parameters::Set{Symbol},
     arg isa Number && return (_rk_positive_literal(arg, response,
         "degrees of freedom"), nothing)
     if arg isa NamedColumn
-        parent(arg) isa DataColumn && error(
-            "$prefix: response `$response` degrees of freedom cannot be " *
-            "a data column; slice 1 admits a sampled parameter, a " *
-            "scalar assignment, a positive numeric literal, or the " *
-            "second linear predictor")
+        parent(arg) isa DataColumn &&
+            return (_rk_nu_data(parent(arg), response), nothing)
         kind, value = _rk_resolve_use_ref(name(arg), consts, aliases,
             parameters, assignments, "response `$response` degrees of freedom")
         kind === :number && return (_rk_positive_literal(value, response,
@@ -687,11 +684,19 @@ function _rk_nu_argument(base, parameters::Set{Symbol},
         return (value, nothing)
     end
     error("$prefix: response `$response` degrees of freedom must be a " *
-          "sampled parameter, a positive numeric literal, a scalar " *
+          "sampled parameter, positive numeric scalar data or literal, " *
+          "a scalar " *
           "assignment, or the second linear predictor (`log(nu) ~ ...` " *
           "+ bare `nu`; deterministic wrappers such as `exp(...)` " *
           "spell as an LP link instead)")
 end
+
+_rk_nu_data(column::DataColumn{<:Real}, response::Symbol) =
+    _rk_positive_literal(parent(column), response, "degrees of freedom")
+
+_rk_nu_data(::DataColumn, response::Symbol) = error(
+    "RK backend: response `$response` degrees of freedom data must be " *
+    "a numeric scalar; per-observation degrees of freedom data are not yet supported")
 
 # Zero-inflated-Poisson zero probability. Returns `(zi, zi_predictor)`
 # with exactly one side non-nothing: a scalar (parameter/assignment /
@@ -2219,9 +2224,9 @@ function _rk_plan_evidence(modifier, family::Symbol, data::AbstractDict,
         parameters::Set{Symbol}, assign_names::Set{Symbol})
     prefix = "RK backend"
     isnothing(modifier) && return _RKResponseEvidence(:none, nothing, nothing)
-    family in (:gaussian, :poisson_log) || error(
+    family in (:gaussian, :poisson_log, :student_t) || error(
         "$prefix: response `$response` evidence ($(modifier.kind)) is out " *
-        "of slice 1 (evidence is admitted on Gaussian and Poisson " *
+        "of slice 1 (evidence is admitted on Gaussian, Poisson and Student-t " *
         "responses only)")
     lower = _rk_evidence_bound(modifier.lower, data, response, "lower",
         columns, consts, aliases, parameters, assign_names)
