@@ -241,10 +241,10 @@ end
 function _brm_joint_missing_plan(x::JointResponseColumn; prefix="BRM")
     rows = _brm_joint_response_values(x; prefix, allow_imputation=true)
     raw = map(c -> parent(parent(c)), joint_response_columns(x))
-    indices = [(row - 1) * length(raw) + column
+    indices = Int[(row - 1) * length(raw) + column
                for row in eachindex(rows) for column in eachindex(raw)
                if ismissing(raw[column][row])]
-    observed = [(row - 1) * length(raw) + column
+    observed = Int[(row - 1) * length(raw) + column
                 for row in eachindex(rows) for column in eachindex(raw)
                 if !ismissing(raw[column][row])]
     values = Float64[value for row in rows for value in row]

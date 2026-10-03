@@ -42,8 +42,8 @@ end
         end
         @test length(to_names)<length(from_names)
         @test all(block->block.generated,ranef_blocks(prediction))
-        logical=label===:scalar ? (:x,:z,:physical,:mu,:mx,:sx,:zloc) :
-            (:x,:z,:physical,:mu,:xloc,:zloc,:L)
+        logical=label===:scalar ? (:x,:z,:physical,:log_physical,:mu,:mx,:sx,:zloc,:zscale) :
+            (:x,:z,:physical,:log_physical,:mu,:xloc,:zloc,:L)
         source_values=fresh_outputs(fitted,source,q,41,logical)
         observed_x=findall(!ismissing,FRESH_SCALAR_DATA.x)
         observed_z=findall(!ismissing,FRESH_SCALAR_DATA.z)
@@ -54,6 +54,7 @@ end
         first_draw=first(samples)
         @test length(first_draw[:x])==6 && length(first_draw[:z])==6
         @test all(sample->sample[:physical]≈exp.(sample[:x]),samples)
+        @test all(sample->sample[:log_physical]≈sample[:x],samples)
         @test first_draw[:x]!=samples[2][:x] && first_draw[:z]!=samples[2][:z]
         @test first_draw[:mu]!=samples[2][:mu]
         if label===:scalar
@@ -62,11 +63,12 @@ end
             @test mean(xs)≈mx atol=.1*sx
             @test std(xs)≈sx rtol=.1
             @test all(sample->sample[:zloc]≈.2 .+.3 .*sample[:x],samples)
-            residual=reduce(vcat,[(log.(sample[:z]).-(.2 .+.3 .*sample[:x]))./.4 for sample in samples])
+            @test all(sample->sample[:zscale]≈exp.(.1 .+.2 .*sample[:x]),samples)
+            residual=reduce(vcat,[(log.(sample[:z]).-(.2 .+.3 .*sample[:x]))./sample[:zscale] for sample in samples])
             @test abs(mean(residual))<.1
             @test std(residual)≈1 rtol=.1
             covariate_lp=sum(logpdf.(Normal(mx,sx),source_values[:x]))+
-                sum(logpdf.(LogNormal.(source_values[:zloc],.4),source_values[:z]))
+                sum(logpdf.(LogNormal.(source_values[:zloc],source_values[:zscale]),source_values[:z]))
             missing_jacobian=sum(log,source_values[:z][findall(ismissing,FRESH_SCALAR_DATA.z)])
         else
             L=reshape(first_draw[:L],2,2)

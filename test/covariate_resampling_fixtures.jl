@@ -6,8 +6,10 @@ const FRESH_SCALAR_BUILDER=@brm begin
     sx ~ LogNormal(0,.3)
     mi(x) ~ Normal(mx,sx)
     zloc=.2+.3*x
-    mi(z) ~ LogNormal(zloc,.4)
+    zscale=exp(.1+.2*x)
+    mi(z) ~ LogNormal(zloc,zscale)
     physical=exp(x)
+    log_physical=log(physical)
     mu ~ 1+standardize(x)+center(log(z))+physical+(1|subject)
     y ~ Normal(mu,1)
 end
@@ -17,7 +19,7 @@ const FRESH_JOINT_BUILDER=@brm begin
     zloc ~ 1+u
     mi([x,z]) ~ MvNormalCholesky([xloc,zloc],L)
     physical=exp(x)
+    log_physical=log(physical)
     mu ~ 1+standardize(physical)+z+(1|subject)
     y ~ Normal(mu,1)
 end
-
