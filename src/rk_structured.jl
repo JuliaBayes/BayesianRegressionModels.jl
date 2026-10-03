@@ -1,9 +1,10 @@
 # General prepared group fields: BRM owns prior declarations and block algebra;
 # the consumer's existing native effect owns how each block enters the term.
-# This callable holds one prepared term/field, never a BRMI or compiler plan.
-struct _RKStructuredEffect{T,F} <: Function
-    term::T
-    field::F
+# One term's fitted statistical inputs cross through an ordinary data port.
+# Capturing its arrays in a callable would hide them from the AD interface.
+function brm_structured_effect(block, prepared_inputs, field_index)
+    prepared = only(prepared_inputs)
+    _brm_native_structured_effect(prepared, block, prepared.state.fields[field_index])
 end
 
 # The statistical reader applies each group's weights to the same fitted
@@ -85,9 +86,6 @@ function _rk_ast_hsgp_grouped(term, PHI, lambda, floors, taken, bindings)
     end
     stmts
 end
-(effect::_RKStructuredEffect)(block) =
-    _brm_native_structured_effect(effect.term, block, effect.field)
-
 function _rk_ast_structured_block(field, taken, bindings)
     K, G = field.n_per_group, length(field.levels)
     K isa Integer && K > 0 || error("RK backend: structured field needs a positive width")
@@ -129,7 +127,7 @@ function _rk_ast_structured_term(term, blocks, taken, bindings)
     prepared = term.options.prepared
     stmts = Expr[]
     parts = Symbol[]
-    for field in prepared.state.fields
+    for (field_index, field) in enumerate(prepared.state.fields)
         key = (field.name, field.source)
         signature = (field.n_per_group, field.levels, field.prior)
         block = if haskey(blocks, key)
@@ -144,9 +142,10 @@ function _rk_ast_structured_term(term, blocks, taken, bindings)
             blocks[key] = (; name, signature)
             name
         end
-        callee = _rk_value_callee!(bindings, _RKStructuredEffect(prepared, field), taken)
+        callee = _rk_value_callee!(bindings, brm_structured_effect, taken)
         value = _rk_ast_fresh_name(string(term.options.id, "_", field.name), taken)
-        push!(stmts, Expr(:(=), value, Expr(:call, callee, block)))
+        push!(stmts, Expr(:(=), value, Expr(:call, callee, block,
+            term.options.prepared_data, field_index)))
         push!(parts, value)
     end
     isempty(parts) && error("RK backend: structured term has no prepared fields")

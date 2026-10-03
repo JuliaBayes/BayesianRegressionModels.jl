@@ -5274,7 +5274,10 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
                 "needs prepared group fields and a native Julia effect")
             id = _rk_mint_smooth_id!(taken, columns,
                 string("structured_", target, "_", nameof(prepared.callable)))
-            push!(terms, _RKTermSpec(:structured, Symbol[], (; id, prepared), id, id))
+            prepared_data = _rk_mint_generated!(taken, columns, string(id, "_inputs"))
+            columns[prepared_data] = [prepared]
+            push!(terms, _RKTermSpec(:structured, Symbol[],
+                (; id, prepared, prepared_data), id, id))
         end
     end
     if isempty(terms)

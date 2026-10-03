@@ -53,6 +53,8 @@ probit(p) = quantile(Normal(), p)
 cloglog(p) = log(-log1p(-p))
 dfp = merge(df, (; prop=[0.2, 0.7, 0.4, 0.6, 0.3, 0.8]))
 
+factor_design(plan,term) = hcat((plan.columns[c] for c in term.options.design_columns)...)
+
 @stestset "gaussian identity plan shape" begin
     brmi = @brm df begin
         mu ~ 0 + x + g + offset(z)
@@ -80,7 +82,8 @@ dfp = merge(df, (; prop=[0.2, 0.7, 0.4, 0.6, 0.3, 0.8]))
         [:continuous, :factor, :offset]
     factor_term = predictor.terms[2]
     @test factor_term.columns == [:g]
-    @test factor_term.options == (coding=:fullrank, levels=:observed)
+    @test factor_term.options.coding === :fullrank
+    @test factor_design(plan,factor_term) == hcat((df.g .== j for j in 1:3)...)
     @test factor_term.addressee === :g
     @test plan.columns[:g] == [1, 1, 2, 2, 3, 3]
     @test sort!([p.addressee for p in plan.population_priors]) ==
@@ -103,7 +106,7 @@ dfp = merge(df, (; prop=[0.2, 0.7, 0.4, 0.6, 0.3, 0.8]))
     @test priors_of(backend) == priors_of(brmi)
 end
 
-@stestset "factor subsets translate refs to sort-order drops" begin
+@stestset "factor subsets use shared reference and cell-mean geometry" begin
     brmi = @brm df begin
         mu ~ 1 + factor(g; ref=3)
         effect(mu, g) ~ Normal(0, 2)
@@ -113,7 +116,8 @@ end
     plan = BRM._brm_rk_plan(brmi)
     factor_term = only(plan.predictors).terms[2]
     @test factor_term.kind === :factor
-    @test factor_term.options == (coding=:subset, drop=3, levels=:observed)
+    @test factor_term.options.coding === :subset
+    @test factor_design(plan,factor_term) == hcat(df.g .== 1, df.g .== 2)
     # String groupings code exactly like integer levels: sort(unique)
     # order, ref by level value.
     bare = BRM._brm_rk_plan(@brm df begin
@@ -124,7 +128,8 @@ end
     end)
     bare_term = only(bare.predictors).terms[1]
     @test bare_term.kind === :factor
-    @test bare_term.options == (coding=:fullrank, levels=:observed)
+    @test bare_term.options.coding === :fullrank
+    @test factor_design(bare,bare_term) == hcat((df.gs .== j for j in ("a","b","c"))...)
     @test bare_term.addressee === :gs
     @test bare.columns[:gs] == ["a", "a", "b", "b", "c", "c"]
     @test sort!([p.addressee for p in bare.population_priors]) ==
@@ -137,7 +142,8 @@ end
     end)
     explicit_term = only(explicit.predictors).terms[2]
     @test explicit_term.kind === :factor
-    @test explicit_term.options == (coding=:subset, drop=2, levels=:observed)
+    @test explicit_term.options.coding === :subset
+    @test factor_design(explicit,explicit_term) == hcat(df.gs .== "a",df.gs .== "c")
     # `cmc=false` without an intercept pins the reference at zero: a
     # subset with no intercept.
     pinned = BRM._brm_rk_plan(@brm df begin
@@ -148,7 +154,8 @@ end
     end)
     pinned_term = only(pinned.predictors).terms[1]
     @test pinned_term.kind === :factor
-    @test pinned_term.options == (coding=:subset, drop=3, levels=:observed)
+    @test pinned_term.options.coding === :subset
+    @test factor_design(pinned,pinned_term) == hcat(df.g .== 1,df.g .== 2)
     @test sort!([p.addressee for p in pinned.population_priors]) == [:g]
     # A non-string non-integer ref still fails closed with attribution.
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
@@ -156,26 +163,32 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    # An explicit ref under `0 +` (cell means) is meaningless.
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    # Under `0 +`, the declared reference moves its cell mean first.
+    releveled = BRM._brm_rk_plan(@brm df begin
         mu ~ 0 + factor(g; ref=3)
         effect(mu, g) ~ Normal(0, 2)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    # A bare factor under an intercept is unidentified.
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    @test factor_design(releveled,only(only(releveled.predictors).terms)) ==
+        hcat(df.g .== 3,df.g .== 1,df.g .== 2)
+    # A bare factor with an intercept uses default treatment coding.
+    defaulted = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + g
         effect(mu, g) ~ Normal(0, 2)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    # Factor blocks need an explicit prior (no default).
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    @test factor_design(defaulted,only(defaulted.predictors).terms[2]) ==
+        hcat(df.g .== 2,df.g .== 3)
+    # Unstated factor coefficients share the normalized Normal(0,1) default.
+    default_prior = BRM._brm_rk_plan(@brm df begin
         mu ~ 0 + g
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
+    @test only(default_prior.population_priors).family === :Normal
+    @test only(default_prior.population_priors).args == (0.,1.)
     # `cmc` is inert under an intercept: still a reference subset.
     inert = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + factor(g; ref=3, cmc=false)
@@ -184,7 +197,7 @@ end
         y ~ Normal(mu, s)
     end)
     inert_term = only(inert.predictors).terms[2]
-    @test inert_term.options == (coding=:subset, drop=3, levels=:observed)
+    @test factor_design(inert,inert_term) == hcat(df.g .== 1,df.g .== 2)
     # `factor()` without `ref` under `0 +` is full-rank like the bare column.
     noref = BRM._brm_rk_plan(@brm df begin
         mu ~ 0 + factor(g)
@@ -192,8 +205,8 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    @test only(noref.predictors).terms[1].options ==
-        (coding=:fullrank, levels=:observed)
+    @test factor_design(noref,only(noref.predictors).terms[1]) ==
+        hcat((df.g .== j for j in 1:3)...)
     # A global population prior also satisfies the explicit-prior rule.
     global_prior = BRM._brm_rk_plan(@brm df begin
         mu ~ 0 + x + g
@@ -213,9 +226,8 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    @test [t.options for t in only(two.predictors).terms[2:3]] ==
-        [(coding=:subset, drop=1, levels=:observed),
-         (coding=:subset, drop=1, levels=:observed)]
+    @test factor_design(two,only(two.predictors).terms[2]) == hcat(df.g .== 2,df.g .== 3)
+    @test factor_design(two,only(two.predictors).terms[3]) == reshape(df.h .== 2,:,1)
     @test sort!([p.addressee for p in two.population_priors]) ==
         [:Intercept, :g, :h]
     # A single observed level subsets to nothing (fail closed), but
@@ -232,8 +244,7 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    @test only(one.predictors).terms[1].options ==
-        (coding=:fullrank, levels=:observed)
+    @test factor_design(one,only(one.predictors).terms[1]) == ones(6,1)
     @test sort!([p.addressee for p in one.population_priors]) == [:k1]
 end
 
@@ -1200,29 +1211,20 @@ end
     end)
 end
 
-@stestset "fail closed: scope" begin
-    # `(1|g)` used to fail here; the draws regime admits it now (ranef
-    # buckets, covered below). `s(x)`/`t2(x, z)` used to fail here too;
-    # they plan now (thin-layer spline surface landed, covered below).
-    # `&` interactions used to fail here; they are provisionally admitted
-    # now (derived lowering, covered above). `mo(x)` used to fail here too;
-    # it plans now (thin-layer monotonic surface landed, covered below).
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+@stestset "shared categorical geometry admission" begin
+    treatment = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + g
-        effect(mu, g) ~ Normal(0, 2)
         s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        y ~ Normal(mu,s)
     end)
-    # Two full-cover groups without an intercept are mutually collinear.
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    @test BRM._rk_num_coefficients(treatment) == 3
+    cellmeans = BRM._brm_rk_plan(@brm df begin
         mu ~ 0 + g + h
-        effect(mu, g) ~ Normal(0, 2)
-        effect(mu, h) ~ Normal(0, 2)
         s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        y ~ Normal(mu,s)
     end)
-    # `r2d2` used to fail here too; it plans now (thin-layer R2D2
-    # surface landed, covered below).
+    @test BRM._rk_num_coefficients(cellmeans) == 4
+    @test [t.options.coding for t in only(cellmeans.predictors).terms] == [:fullrank,:subset]
 end
 
 @stestset "spline plan shape" begin
@@ -1688,15 +1690,14 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    # An unstated subset-coded factor would join under full cover,
-    # changing the coding — it must ride share 0 or go full-rank.
-    @test_throws "subset-coded but carries no explicit" BRM._brm_rk_plan(
-        @brm df begin
+    # Shared contrast geometry supplies the exact R2D2 design width.
+    subset = BRM._brm_rk_plan(@brm df begin
             mu ~ 1 + factor(g; ref=3)
             effect(mu, :) ~ r2d2()
             s ~ Exponential(1)
             y ~ Normal(mu, s)
         end)
+    @test BRM._rk_num_coefficients(subset) == 3
 end
 
 @stestset "horseshoe plan shape" begin
@@ -2736,28 +2737,25 @@ end
     @test [p.name for p in plan.parameters] == [:s]
 end
 
-@stestset "fail closed: hsgp sequenced spellings" begin
-    # Hyper overrides stay closed until the thin-layer surface
-    # sequences them (self-priored LogNormal(0, 1) defaults only).
-    # The gate precedes the basis fit, so the shared 6-row df suffices.
-    @test_throws "hyper priors" BRM._brm_rk_plan(@brm df begin
-        mu ~ 1 + hsgp(x; k=4)
-        length_scale(:, hsgp(x)) ~ Gamma(2, 1)
+@stestset "hsgp stated priors grouped preparation and remaining boundaries" begin
+    override = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + hsgp(x;k=4)
+        length_scale(:,hsgp(x)) ~ Gamma(2,1)
+        sd(:,hsgp(x)) ~ Exponential(2)
         s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        y ~ Normal(mu,s)
     end)
-    @test_throws "hyper priors" BRM._brm_rk_plan(@brm df begin
-        mu ~ 1 + hsgp(x; k=4)
-        sd(:, hsgp(x)) ~ Exponential(2)
+    term = only(t for t in only(override.predictors).terms if t.kind===:hsgp)
+    @test term.options.rho_stated && term.options.sigma_stated
+    @test !term.options.rho_truncated
+    grouped = BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + hsgp(x;k=4,by=g)
         s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        y ~ Normal(mu,s)
     end)
-    # Grouped weights stay closed (ungrouped surface only).
-    @test_throws "by=" BRM._brm_rk_plan(@brm df begin
-        mu ~ 1 + hsgp(x; k=4, by=g)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
-    end)
+    term = only(t for t in only(grouped.predictors).terms if t.kind===:hsgp)
+    @test term.options.n_groups == 3
+    @test grouped.columns[term.options.group_index] == [1,1,2,2,3,3]
     # Periodic admits the SB spelling only: c/domain/orthogonal_to/by
     # are refused with RK attribution (mirrors `_sb_hsgp_periodic_term!`).
     @test_throws "does not accept `c=`" BRM._brm_rk_plan(@brm df begin
@@ -4979,14 +4977,14 @@ end
             y ~ Normal(mu, s)
         end)
     end
-    # Ranef-only predictors stay out of scope.
-    rk_throws_admission("has no terms") do
-        BRM._brm_rk_plan(@brm df begin
+    # Ranef-only predictors have no population coefficient.
+    random_only = BRM._brm_rk_plan(@brm df begin
             mu ~ (1 | g)
             s ~ Exponential(1)
             y ~ Normal(mu, s)
         end)
-    end
+    @test BRM._rk_num_coefficients(random_only) == 0
+    @test length(random_only.ranef_buckets) == 1
 end
 
 @stestset "kernel(...) end-to-end via _brm_rk_plan" begin
