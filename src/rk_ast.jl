@@ -1248,11 +1248,6 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         # joins the def name. Without a scalar statement the affine
         # inlines, so its scalar coefficients need program-global
         # names; with one the submodel path namespaces them.
-        flat_scalars = r2d2 !== nothing && !any(
-            t -> (t.kind === :intercept || t.kind === :continuous ||
-                  t.kind === :monotonic) &&
-                haskey(r2d2.overrides, t.addressee),
-            predictor.terms)
         slots = _rk_ast_popefs_slots(predictor)
         coefs = Dict{Int,Symbol}()
         factorcoef = Dict{Int,Symbol}()
@@ -1309,29 +1304,22 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 col = only(term.columns)
                 K = length(_rk_grouping_levels(plan.columns[col]))
                 coef = _rk_ast_coef_name(
-                    string(predictor.name, "_b", slot), taken)
+                    string(predictor.name, "_", term.addressee), taken)
                 factorcoef[index] = coef
                 refactual[index] = coef
                 override === nothing || push!(stmts,
                     _rk_ast_factor_prior(coef, col, term.options, K,
                         override[1], override[2]))
             else
-                if flat_scalars
-                    coefs[index] = _rk_ast_coef_name(
-                        string(predictor.name, "_b", slot), taken)
-                else
-                    local_coef = Symbol(:b, slot)
-                    coefs[index] = local_coef
-                    if hs_spec !== nothing
-                        hs_slots[slot] = hs_spec
-                        push!(scalar_stmts, _rk_ast_horseshoe_stmt(
-                            local_coef, hs_spec[1], hs_spec[2]))
-                    elseif override !== nothing
-                        push!(stated, slot)
-                        stateloc[slot] = override
-                        push!(scalar_stmts, _rk_ast_scalar_prior_stmt(
-                            local_coef, override[1], slot))
-                    end
+                coef = _rk_ast_coef_name(
+                    string(predictor.name, "_", term.addressee), taken)
+                coefs[index] = coef
+                if hs_spec !== nothing
+                    push!(scalar_stmts, _rk_ast_horseshoe_stmt(
+                        coef, hs_spec[1], hs_spec[2]))
+                elseif override !== nothing
+                    push!(scalar_stmts, Expr(:call, :~, coef,
+                        Expr(:call, override[1], override[2]...)))
                 end
             end
         end
@@ -1381,91 +1369,9 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             push!(stmts, _rk_ast_plate(options.latent,
                 only(term.columns), options.loc, options.scale))
         end
-        if isempty(scalar_stmts)
-            # No scalar statements (offset-only, gp-only,
-            # factor-only — or an override-free R2D2 predictor, whose
-            # coefficients all join the simplex): the affine stays
-            # inline over program-global names exactly as before.
-            push!(stmts, Expr(:(=), lhs,
-                _rk_ast_affine(predictor, coefs, colactual, refactual; values)))
-        else
-            # Canonical use-site: columns, then outer references, then
-            # prior locations/scales — the callarg order mirrors the
-            # formal order slot by slot (term order, like the
-            # assignment).
-            formals = Symbol[]
-            callargs = Any[]
-            for (index, term) in enumerate(predictor.terms)
-                haskey(slots.colf, index) || continue
-                push!(formals, slots.colf[index])
-                push!(callargs, colactual[index])
-            end
-            for (index, term) in enumerate(predictor.terms)
-                haskey(slots.reff, index) || continue
-                formal = slots.reff[index]
-                if formal isa Tuple
-                    append!(formals, formal)
-                    append!(callargs, refactual[index])
-                else
-                    push!(formals, formal)
-                    push!(callargs, refactual[index])
-                end
-            end
-            for slot in sort!(stated)
-                family, vals = stateloc[slot]
-                # Formal shape mirrors `_rk_ast_scalar_prior_stmt`:
-                # StudentT takes a df formal, Flat takes none, the
-                # 2-arg families share `(loc, s)`.
-                family === :Flat && continue
-                if family === :StudentT
-                    push!(formals, Symbol(:nu, slot))
-                    push!(callargs, vals[1])
-                end
-                push!(formals, Symbol(:loc, slot), Symbol(:s, slot))
-                push!(callargs, vals[end-1], vals[end])
-            end
-            # Expanded locals must avoid `taken`; on collision the LHS
-            # is alpha-renamed (the def's canonical locals never move,
-            # so the def stays shared).
-            localslots = sort!([slots.number[index]
-                for (index, term) in enumerate(predictor.terms)
-                if term.kind === :intercept || term.kind === :continuous ||
-                    term.kind === :monotonic || term.kind === :ar ||
-                    term.kind === :me])
-            if any(slot -> _rk_ast_ns(lhs, Symbol(:b, slot)) in taken,
-                    localslots)
-                fresh = Symbol(string(lhs), "_")
-                while fresh in taken || any(slot ->
-                        _rk_ast_ns(fresh, Symbol(:b, slot)) in taken,
-                        localslots)
-                    fresh = Symbol(string(fresh), "_")
-                end
-                push!(taken, fresh)
-                rename[predictor.name] = fresh
-                lhs = fresh
-            end
-            for slot in localslots
-                push!(taken, _rk_ast_ns(lhs, Symbol(:b, slot)))
-            end
-            defname = _rk_ast_popefs_lattice(
-                predictor, stated, slots.nscalar, hs_slots,
-                Dict{Int,Symbol}(
-                    slot => stateloc[slot][1] for slot in stated))
-            values && (defname = Symbol(defname, :_values))
-            body = Expr(:block, scalar_stmts...,
-                _rk_ast_affine(predictor, coefs, slots.colf, slots.reff; values))
-            def = Expr(:(=), Expr(:call, defname, formals...), body)
-            if haskey(seen, defname)
-                seen[defname] == def || error(
-                    "RK backend: internal: submodel lattice collision " *
-                    "on `$defname` (same name, different body)")
-            else
-                seen[defname] = def
-                push!(defs, def)
-            end
-            push!(stmts, Expr(:call, :~, lhs,
-                Expr(:call, defname, callargs...)))
-        end
+        append!(stmts, scalar_stmts)
+        push!(stmts, Expr(:(=), lhs,
+            _rk_ast_affine(predictor, coefs, colactual, refactual; values)))
         r2d2 === nothing || push!(stmts, _rk_ast_r2d2_decl(r2d2, lhs))
         if values && (lhs !== predictor.name || predictor.link !== :identity)
             value = _rk_value_link!(bindings, predictor.link, lhs, taken)
