@@ -444,6 +444,10 @@ function _rk_num_coefficients(plan::_RKStructuralPlan)
                 term.kind === :me
             total += 1
         elseif term.kind === :factor
+            if haskey(term.options, :design_columns)
+                total += length(term.options.design_columns)
+                continue
+            end
             width = length(_rk_grouping_levels(
                 plan.columns[only(term.columns)]))
             total += term.options.coding === :fullrank ? width : width - 1
@@ -3163,14 +3167,6 @@ function _rk_population_priors(brmi::BRMI, design, target::Symbol,
         # HorseshoePrior — no PopulationPrior row (R2D2 precedent).
         addressee in hs_addressees && continue
         idxs = groups[addressee]
-        if addressee in factor_addressees
-            all(stated[idxs]) || error(
-                "$prefix: predictor `$target` factor `$addressee` " *
-                "needs one explicit prior on the whole block " *
-                "(e.g. `effect($target, $addressee) ~ Normal(0, 2)`); " *
-                "slice 1 has no default factor prior (the stated " *
-                "prior sizes the thin-layer block)")
-        end
         agreed = cells[first(idxs)]
         all(i -> cells[i] == agreed, idxs) || error(
             "$prefix: predictor `$target` addressee `$addressee` has " *
@@ -3232,6 +3228,29 @@ function _rk_population_priors(brmi::BRMI, design, target::Symbol,
         push!(priors, _rk_me_beta_prior(brmi, target, term.addressee))
     end
     priors
+end
+
+# Categorical preparation is shared with the other BRM backends. Each fitted
+# dummy is ordinary bound data; the emitted vector prior and matrix product
+# preserve declared levels, reference swaps, and the first cell-mean block.
+function _rk_shared_factor_spec(term, target, columns, taken; cellmeans)
+    shared = _brm_population_columns(term; cellmeans)
+    shared === nothing && error(
+        "RK backend: predictor `$target` categorical term `$term` has unsupported geometry")
+    isempty(shared) && return _RKTermSpec[]
+    source = first(shared).source
+    backing = term isa NamedColumn ? parent(term) : parent(only(getargs(term)))
+    columns[source] = parent(backing)
+    names = Symbol[]
+    for column in shared
+        key = _rk_mint_generated!(taken, columns, string(target, "_", column.label, "_data"))
+        columns[key] = column.values
+        push!(names, key)
+    end
+    block = source
+    options = (; coding=cellmeans ? :fullrank : :subset, levels=:shared,
+        design_columns=Tuple(names), labels=Tuple(c.label for c in shared))
+    [_RKTermSpec(:factor, [source], options, block, block)]
 end
 
 # Structural identifiability over full-cover groups: a bare (full-rank)
@@ -4257,27 +4276,6 @@ end
 # in-graph contract, decision `02e64eo`). One id per smooth occurrence
 # (exactly-one-use linkage), minted with numeric stems on collision.
 
-# `length_scale(...)`/`sd(...)` hyper overrides are sequenced: the
-# thin-layer hsgp surface is self-priored with `LogNormal(0, 1)`
-# defaults (the floor-zeroing override surface is a peer follow-up),
-# so BRM rejects them here with RK attribution instead of emitting a
-# default the formula did not ask for.
-function _rk_gate_hsgp_term_priors!(brmi::BRMI, target::Symbol,
-        hsgp_raw::AbstractVector)
-    prefix = "RK backend"
-    isempty(hsgp_raw) && return nothing
-    per_target = get(_brm_resolve_term_priors(brmi), target, Dict())
-    for t in hsgp_raw
-        key = _brm_prepared_term_key(t)
-        isempty(get(per_target, key, Dict())) || error(
-            "$prefix: predictor `$target` hyper priors on " *
-            "`$key` are out of slice 1 (the thin-layer hsgp surface " *
-            "is self-priored with LogNormal(0, 1) defaults; " *
-            "`length_scale(...)`/`sd(...)` overrides are sequenced)")
-    end
-    nothing
-end
-
 # Periodic HSGP admits exactly the SB spelling
 # (`_sb_hsgp_periodic_term!`): `c`/`domain`/`orthogonal_to`/`by` are
 # meaningless on the cosine/sine basis and refused here with RK
@@ -4303,7 +4301,8 @@ end
 
 function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         target::Symbol, data::AbstractDict,
-        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol})
+        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol}; hyper_plans=(),
+        rho_stated=false, sigma_stated=false)
     prefix = "RK backend"
     state = prepared.state
     state.latent && error(
@@ -4318,10 +4317,8 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
             "$prefix: predictor `$target` periodic `hsgp(...)` needs one " *
             "isotropic axis (the thin-layer periodic surface is 1D isotropic)")
     end
-    isnothing(state.by) || error(
-        "$prefix: predictor `$target` grouped `hsgp(...; by=...)` " *
-        "is out of slice 1 (the thin-layer surface is ungrouped; " *
-        "`by=` weights are sequenced)")
+    state.by === nothing || state.iso || error(
+        "$prefix: grouped HSGP currently requires one isotropic length scale")
     any(!iszero, state.centeredness) && error(
         "$prefix: predictor `$target` partially-centered `hsgp(...)` " *
         "is out of slice 1 (the thin-layer surface is non-centered; " *
@@ -4342,13 +4339,23 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
     end
     base = "hsgp_" * join(string.(axes), "_")
     id = _rk_mint_smooth_id!(taken, columns, base)
+    common = (; rho_prior=state.rho_prior, sigma_prior=state.sigma_prior,
+        rho_truncated=any(>(0), state.rho_lower isa Real ? (state.rho_lower,) : state.rho_lower),
+        hyper_plans, rho_stated, sigma_stated)
     if state.cov === :periodic
         return _RKTermSpec(:hsgp, collect(axes),
-            (; id, k=only(state.K), cov=:periodic, period=state.period), id, id)
+            (; id, k=only(state.K), cov=:periodic, period=state.period, common...), id, id)
     end
     k = length(state.K) == 1 ? only(state.K) : state.K
     c = length(state.c) == 1 ? only(state.c) : state.c
-    _RKTermSpec(:hsgp, collect(axes), (; id, k, c, iso=state.iso), id, id)
+    grouped = if state.by === nothing
+        (;)
+    else
+        idx = _rk_mint_generated!(taken, columns, string(id, "_group_index"))
+        columns[idx] = state.by.idx
+        (; group_index=idx, n_groups=length(state.by.levels))
+    end
+    _RKTermSpec(:hsgp, collect(axes), (; id, k, c, iso=state.iso, common..., grouped...), id, id)
 end
 
 # ---- AR(1) latent-path terms (mirrors `_sb_ar1`) ----
@@ -4813,6 +4820,7 @@ function _rk_plan_r2d2_prior(brmi::BRMI, design, r2plan::_BRMR2D2Plan,
         # must ride share 0 with an explicit Normal (which keeps the
         # subset, like the PopulationPrior path).
         term.kind === :factor || continue
+        haskey(term.options, :design_columns) && continue
         term.options.coding === :subset || continue
         haskey(overrides, term.addressee) && continue
         error("$prefix: predictor `$target` factor `$(term.addressee)` " *
@@ -5159,12 +5167,7 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
             !(t in mo_raw) && !(t in dar_raw) && !(t in ar_raw) &&
             !(t in me_raw),
         structured)
-    isempty(other_structured) || error(
-        "$prefix: predictor `$target` structured term(s) " *
-        "$(join(unique!(string.(getf.(filter(t -> t isa ExprColumn, other_structured)))), ", ")) " *
-        "are out of slice 1 (population GLMs only)")
     _rk_gate_spline_term_priors!(brmi, target, spline_raw)
-    _rk_gate_hsgp_term_priors!(brmi, target, hsgp_raw)
     _rk_gate_hsgp_periodic_kw!(target, hsgp_raw)
     _rk_gate_ar_effect_priors!(brmi, target, ar_raw)
     _rk_gate_me_effect_priors!(brmi, target, me_raw)
@@ -5172,7 +5175,8 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
     ordinary = Tuple(t for t in raw_terms if !(t in structured) && !(t in grouped))
     isempty(ordinary) && isempty(spline_raw) && isempty(gp_raw) &&
         isempty(hsgp_raw) && isempty(mo_raw) && isempty(dar_raw) &&
-        isempty(ar_raw) && isempty(me_raw) && error(
+        isempty(ar_raw) && isempty(me_raw) && isempty(grouped) &&
+        isempty(other_structured) && error(
         "$prefix: predictor `$target` has no terms")
     has_intercept = any(t -> t isa Integer && t == 1, ordinary)
     # Classify before building geometry: fail fast on unknown terms with RK
@@ -5180,7 +5184,15 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
     # One term can lower to several specs (multi-column interactions).
     terms = _RKTermSpec[]
     spines = Dict{Symbol,Any}()
+    cellmeans_block = _brm_predictor_cellmeans_block(brmi, target)
     for term in ordinary
+        block = _brm_categorical_term_block(term)
+        if block !== nothing
+            cellmeans = block === cellmeans_block && !_brm_requests_treatment_coding(term)
+            cellmeans && (cellmeans_block = nothing)
+            append!(terms, _rk_shared_factor_spec(term, target, columns, taken; cellmeans))
+            continue
+        end
         append!(terms, _rk_term_specs(term, target, context.data,
             columns, derived, taken, has_intercept, spines))
     end
@@ -5204,12 +5216,13 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
     any(t -> t.kind !== :offset, terms) || !isempty(spline_raw) ||
         !isempty(gp_raw) || !isempty(hsgp_raw) || !isempty(mo_raw) ||
         !isempty(dar_raw) || !isempty(ar_raw) || !isempty(me_raw) ||
+        !isempty(other_structured) ||
         return _rk_plan_offset_only_predictor(
         brmi, context, target, ordinary, available, link, terms, derived)
     geometry = _brm_prepare_predictor_geometry(
         brmi, context, target; available_predictors=available,
         tolerant_default)
-    for prepared in geometry.terms
+    for (raw, prepared) in zip(structured, geometry.terms)
         if prepared.callable === gp
             push!(terms, _rk_plan_gp_term!(
                 prepared, target, context.data, columns, taken))
@@ -5218,7 +5231,11 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
                 prepared, target, context.data, columns, taken))
         elseif prepared.callable === hsgp
             push!(terms, _rk_plan_hsgp_term!(
-                prepared, target, context.data, columns, taken))
+                prepared, target, context.data, columns, taken;
+                hyper_plans=Tuple(p for p in _sb_collect_hyper_plans(brmi; prefix)
+                    if p.lp === target && p.term_key === _brm_prepared_term_key(raw)),
+                rho_stated=_brm_term_prior_spec(raw, target, context, :term_length_scale) !== nothing,
+                sigma_stated=_brm_term_prior_spec(raw, target, context, :term_sd) !== nothing))
         elseif prepared.callable === mo
             spec = _rk_plan_mo_term!(
                 prepared, target, columns, taken)
@@ -5236,8 +5253,15 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
             push!(terms, _rk_plan_me_term!(
                 prepared, target, columns, taken, me_sources))
         else
-            error("$prefix: internal: unexpected structured term " *
-                "survived pre-check in `$target`")
+            haskey(prepared.state, :fields) || error(
+                "$prefix: predictor `$target` structured term `$(nameof(prepared.callable))` " *
+                "needs prepared group fields and a native Julia effect")
+            id = _rk_mint_smooth_id!(taken, columns,
+                string("structured_", target, "_", nameof(prepared.callable)))
+            prepared_data = _rk_mint_generated!(taken, columns, string(id, "_inputs"))
+            columns[prepared_data] = [prepared]
+            push!(terms, _RKTermSpec(:structured, Symbol[],
+                (; id, prepared, prepared_data), id, id))
         end
     end
     if isempty(terms)
@@ -6584,7 +6608,8 @@ function _rk_split_multinomial_counts!(columns::Dict{Symbol,AbstractVector},
 end
 
 function _rk_gate_crossed_columns!(columns::Dict{Symbol,AbstractVector},
-        n_obs::Int, mi_packed::Set{Symbol}=Set{Symbol}())
+        n_obs::Int, mi_packed::Set{Symbol}=Set{Symbol}();
+        statistical_inputs::Set{Symbol}=Set{Symbol}())
     prefix = "RK backend"
     for key in sort!(collect(keys(columns)))
         values = columns[key]
@@ -6592,7 +6617,9 @@ function _rk_gate_crossed_columns!(columns::Dict{Symbol,AbstractVector},
         # shorter than `n_obs` by construction (the thin-layer managed
         # exemption); everything else keeps the uniform axis. Pair
         # agreement gates at the call site; finiteness below still applies.
-        key in mi_packed || length(values) == n_obs || error(
+        # Fitted term containers are whole statistical inputs, rather than
+        # row-aligned observation columns. Their role comes from the term.
+        key in mi_packed || key in statistical_inputs || length(values) == n_obs || error(
             "$prefix: column `$key` has $(length(values)) rows, expected " *
             "$n_obs (one observation axis in slice 1)")
         key in mi_packed && any(ismissing, values) && continue
@@ -7545,7 +7572,9 @@ function _brm_rk_plan(brmi::BRMI)
             error("$prefix: internal: `mi()` packed columns for " *
                   "response `$(spec.response)` does not retain the full row axis")
     end
-    _rk_gate_crossed_columns!(columns, n_obs, mi_packed)
+    statistical_inputs = Set{Symbol}(t.options.prepared_data for p in predictor_specs
+        for t in p.terms if t.kind === :structured)
+    _rk_gate_crossed_columns!(columns, n_obs, mi_packed; statistical_inputs)
     _rk_gate_trials_values!(response_specs, columns, n_obs)
     _rk_gate_multinomial_trials!(response_specs, columns, n_obs)
     _rk_gate_evidence_values!(response_specs, columns, n_obs)

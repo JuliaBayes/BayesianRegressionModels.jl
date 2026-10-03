@@ -29,12 +29,35 @@ end
 
 _rk_value_dummy(values, level) = Float64.(isequal.(values, level))
 
-function _rk_ast_positive_prior(prior, bindings, taken)
-    prior === nothing && return Expr(:call, :HalfNormal, 1)
-    expression = _rk_value_expr!(bindings, _brm_prepare_expr(prior), taken)
+function _rk_ast_positive_prior(prior, bindings, taken; default=:HalfNormal)
+    prior === nothing && return default === :LogNormal ?
+        Expr(:call, :LogNormal, 0, 1) : Expr(:call, :HalfNormal, 1)
+    prepared = _brm_prepare_expr(prior)
+    if prepared.callable === truncated
+        all(key -> key in (:lower, :upper), keys(prepared.kwargs)) || error(
+            "RK backend: a truncated positive prior accepts only lower/upper bounds")
+        args = prepared.args
+        if length(args) == 1
+            lower = get(prepared.kwargs, :lower, -Inf)
+            upper = get(prepared.kwargs, :upper, Inf)
+        elseif length(args) == 3 && isempty(prepared.kwargs)
+            lower, upper = args[2:3]
+        else
+            error("RK backend: a truncated positive prior needs a base law and lower/upper bounds")
+        end
+        lower === nothing && (lower = -Inf)
+        upper === nothing && (upper = Inf)
+        return Expr(:call, :truncated,
+            _rk_value_expr!(bindings, first(args), taken),
+            _rk_value_expr!(bindings, lower, taken),
+            _rk_value_expr!(bindings, upper, taken))
+    end
+    expression = _rk_value_expr!(bindings, prepared, taken)
     family = nameof(getf(prior))
     family in (:Exponential, :Gamma, :InverseGamma, :LogNormal, :Weibull,
         :HalfNormal, :HalfCauchy, :truncated) && return expression
+    family === :Uniform && first(prepared.args) isa Real &&
+        first(prepared.args) >= 0 && return expression
     Expr(:call, :truncated, expression, 0.0, Inf)
 end
 
@@ -73,8 +96,12 @@ function _rk_ast_value_bucket(bucket, draws, effects, taken, bindings)
         push!(stmts, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
             Expr(:for, Expr(:(=), :i, Expr(:call, :eachindex, group)), Expr(:block, cell))))
     else
+        # Stan's ordinary unnamed intercept and multi-membership intercept
+        # families sample log_scale ~ Normal(0,1). Shared-ID, slope and
+        # stratified families keep their half-normal scale default.
+        default = bucket.kind === :intercept1 ? :LogNormal : :HalfNormal
         if all(isequal(first(bucket.sd_priors)), bucket.sd_priors)
-            prior = _rk_ast_positive_prior(first(bucket.sd_priors), bindings, taken)
+            prior = _rk_ast_positive_prior(first(bucket.sd_priors), bindings, taken; default)
             push!(stmts, Expr(:call, :.~, Expr(:ref, tau, index),
                 _rk_ast_dotted(prior.args[1], prior.args[2:end]...)))
         else
@@ -176,7 +203,7 @@ function _rk_ast_value_spline(term, taken)
     stmts
 end
 
-function _rk_ast_value_hsgp(term, taken)
+function _rk_ast_value_hsgp(term, taken, bindings)
     options = term.options
     PHI = _rk_ast_fresh_name(string(options.id, "_PHI"), taken)
     lambda = _rk_ast_fresh_name(string(options.id, "_lambda"), taken)
@@ -190,24 +217,31 @@ function _rk_ast_value_hsgp(term, taken)
         Expr(:call, :brm_hsgp_basis, Expr(:tuple, term.columns...), k, c, options.iso)
     end
     stmts = Expr[Expr(:(=), Expr(:tuple, PHI, lambda, floors), call)]
+    if haskey(options, :group_index) || !isempty(get(options, :hyper_plans, ()))
+        append!(stmts, _rk_ast_hsgp_grouped(term, PHI, lambda, floors, taken, bindings))
+        return stmts
+    end
     rho_value = if periodic || options.iso
         rho = _rk_ast_fresh_name(string(options.id, "_rho"), taken)
-        push!(stmts, Expr(:call, :~, rho, Expr(:call, :truncated,
-            Expr(:call, :LogNormal, 0, 1), floors, Inf)))
+        prior = _rk_ast_positive_prior(options.rho_prior, bindings, taken)
+        options.rho_truncated && (prior = Expr(:call, :truncated, prior, floors, Inf))
+        push!(stmts, Expr(:call, :~, rho, prior))
         rho
     else
         rhos = Symbol[]
         for j in eachindex(term.columns)
             rho = _rk_ast_fresh_name(string(options.id, "_rho", j), taken)
             push!(rhos, rho)
-            push!(stmts, Expr(:call, :~, rho, Expr(:call, :truncated,
-                Expr(:call, :LogNormal, 0, 1), Expr(:ref, floors, j), Inf)))
+            prior = _rk_ast_positive_prior(options.rho_prior, bindings, taken)
+            options.rho_truncated && (prior = Expr(:call, :truncated, prior, Expr(:ref, floors, j), Inf))
+            push!(stmts, Expr(:call, :~, rho, prior))
         end
         Expr(:vect, rhos...)
     end
     sigma = _rk_ast_fresh_name(string(options.id, "_sigma"), taken)
     z = _rk_ast_fresh_name(string(options.id, "_z"), taken)
-    push!(stmts, Expr(:call, :~, sigma, Expr(:call, :LogNormal, 0, 1)))
+    push!(stmts, Expr(:call, :~, sigma,
+        _rk_ast_positive_prior(options.sigma_prior, bindings, taken)))
     push!(stmts, Expr(:call, :.~, Expr(:ref, z, Expr(:call, :axes, PHI, 2)),
         _rk_ast_dotted(:Normal, 0, 1)))
     spectral = periodic ? :brm_hsgp_periodic_sqrt_spd : :brm_hsgp_sqrt_spd
@@ -312,8 +346,17 @@ function _brm_rk_value_plan(brmi, program, observations)
             "RK backend: value-based response `$(o.name)` needs explicit observed values")
         o.weight === nothing || error(
             "RK backend: value-based response `$(o.name)` weights need an authored response")
-        o.modifier === nothing || error(
-            "RK backend: value-based response `$(o.name)` evidence needs an authored response")
+        if o.modifier !== nothing
+            bounds = (o.modifier.lower, o.modifier.upper)
+            if all(b -> b === nothing || b isa Real ||
+                    (b isa NamedColumn && parent(b) isa DataColumn), bounds)
+                # The same response/row attribution as structural observations.
+                materialize = o.modifier.kind === :interval_censored ?
+                    _brm_materialize_interval_response : _brm_materialize_bounded_response
+                materialize(o.modifier, o.name,
+                    o.response, context.data; prefix="RK backend")
+            end
+        end
         value_columns[o.name] = o.response
     end
     regression = _RKStructuralPlan(_RKLikelihoodSpec[], components.predictors,
@@ -343,6 +386,18 @@ function _rk_value_expr!(bindings, expression::_BRMPreparedExpr, taken)
     args = map(arg -> _rk_value_expr!(bindings, arg, taken), expression.args)
     expression.callable === getindex && return Expr(:ref, args...)
     expression.callable === Base.vect && return Expr(:vect, args...)
+    # BRM expression arithmetic is elementwise. Ordinary RKPPL source must
+    # state that explicitly, while reductions and authored whole-array calls
+    # keep their own Julia semantics and exact callable bindings.
+    if isempty(expression.kwargs)
+        if haskey(_RK_DERIVED_BINOPS, expression.callable)
+            return Expr(:call, _RK_DERIVED_BINOPS[expression.callable], args...)
+        elseif haskey(_RK_DERIVED_CMP, expression.callable)
+            return Expr(:call, _RK_DERIVED_CMP[expression.callable], args...)
+        elseif haskey(_RK_DERIVED_MATH, expression.callable)
+            return _rk_ast_dotted(_RK_DERIVED_MATH[expression.callable], args...)
+        end
+    end
     callee = _rk_value_callee!(bindings, expression.callable, taken)
     call = Expr(:call, callee, args...)
     if !isempty(expression.kwargs)
@@ -368,15 +423,24 @@ function _rk_emit_ast(plan::_RKValuePlan)
             _rk_value_expr!(bindings, assignment.expression, taken)))
     end
     for observation in plan.observations
-        distribution = observation.distribution
+        modifier = observation.modifier
+        distribution = modifier === nothing ? observation.distribution :
+            _brm_prepare_expr(modifier.base)
         distribution isa _BRMPreparedExpr || error(
             "RK backend: response `$(observation.name)` needs a distribution call")
         isempty(distribution.kwargs) || error(
             "RK backend: response `$(observation.name)` distribution keywords are unsupported")
         callee = _rk_value_callee!(bindings, distribution.callable, taken)
         args = map(arg -> _rk_value_expr!(bindings, arg, taken), distribution.args)
-        push!(stmts, Expr(:call, :.~, observation.name,
-            _rk_ast_dotted(callee, args...)))
+        base = _rk_ast_dotted(callee, args...)
+        if modifier !== nothing
+            lower = modifier.lower === nothing ? -Inf :
+                _rk_value_expr!(bindings, _brm_prepare_expr(modifier.lower), taken)
+            upper = modifier.upper === nothing ? Inf :
+                _rk_value_expr!(bindings, _brm_prepare_expr(modifier.upper), taken)
+            base = _rk_ast_response_modifier(base, modifier.kind, lower, upper)
+        end
+        push!(stmts, Expr(:call, :.~, observation.name, base))
     end
     _RKEmittedProgram(regression.defs, Expr(:block, stmts...), bindings)
 end

@@ -45,6 +45,7 @@ include("rk_statistical.jl")
 include("statistical_preparation.jl")
 include("statistical_models.jl")
 include("rk_values.jl")
+include("rk_structured.jl")
 include("native_ppl.jl")
 include("vimpl.jl")
 
