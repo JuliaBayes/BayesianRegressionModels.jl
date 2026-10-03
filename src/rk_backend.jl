@@ -4827,6 +4827,7 @@ function _rk_plan_r2d2_prior(brmi::BRMI, design, r2plan::_BRMR2D2Plan,
         # must ride share 0 with an explicit Normal (which keeps the
         # subset, like the PopulationPrior path).
         term.kind === :factor || continue
+        haskey(term.options, :design_columns) && continue
         term.options.coding === :subset || continue
         haskey(overrides, term.addressee) && continue
         error("$prefix: predictor `$target` factor `$(term.addressee)` " *

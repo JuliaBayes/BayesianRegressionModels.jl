@@ -99,7 +99,8 @@ end
         ib=findall(n->startswith(string(n),"mu_g."),names)
         oracle(u)=sum(logpdf.(Normal.(u[ia] .+ rows*u[ib],1),data.y)) +
             sum(logpdf.(Normal(),u))
-        for u in (zeros(length(names)), collect(range(-0.2,0.3;length=length(names))))
+        for u in (zeros(length(names)), length(names)==1 ? [-.2] :
+                collect(range(-0.2,0.3;length=length(names))))
             check_consumer_point(problem,u,oracle)
         end
         @test isequal(data,before)
