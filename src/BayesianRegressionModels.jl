@@ -41,6 +41,7 @@ include("preparation_structured.jl")
 include("turing_backend.jl")
 include("rk_backend.jl")
 include("rk_ast.jl")
+include("rk_values.jl")
 include("native_ppl.jl")
 include("vimpl.jl")
 
