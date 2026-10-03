@@ -264,8 +264,7 @@ for f in (s,t2,gp,hsgp,me,mi,mo,mo1,ar,dar,rw,cdar,interval_censored)
 end
 _brmd_term_call_math(::typeof(kernel),c,x) = _brmd_kernel_math(c,x)
 function _brmd_kernel_math(c,x)
-    inputs=map(a->brm_description_math(x,a),x.arguments[2:end])
-    "\\mathcal K_{"*_brmd_escape(x.provenance.owner)*",g_j}\\left("*join(inputs,",")*"\\right)"
+    "\\mathcal K_{"*_brmd_escape(x.provenance.owner)*",g_j}"
 end
 function _brmd_group_term_math(c,x)
     effects=first(x.arguments)
@@ -381,7 +380,7 @@ function _brmd_builtin_call(::typeof(kernel),c)
     final=body isa BRMDescriptionComponent && body.callable===:block && !isempty(body.arguments) ? last(body.arguments) : body
     readable=!(final isa BRMDescriptionComponent && final.kind===:syntax &&
         final.callable in (:if,:for,:while,:block))
-    equations=readable ? (_brmd_kernel_math(c,c)*"="*brm_description_math(c,final),) : ()
+    equations=readable ? (_brmd_assignment_equation(c,_brmd_kernel_math(c,c),final),) : ()
     BRMDescriptionFragment(prose=("The kernel mapping K for `$(c.provenance.owner)` runs once per declared group; gⱼ selects the group of output row j. Its arguments preserve their row or event axes. The cell input bindings are: $(names). Its scientific calls and cell statements are covered separately.",),equations=equations,covers=(c.id,))
 end
 function _brmd_call_math(::typeof(StanBlocks.stan.builtin.rep_vector),args,_kwargs,_c)
@@ -486,30 +485,103 @@ _brmd_builtin_kind(::Val{:submodel_output},c)=BRMDescriptionFragment(
 function _brmd_builtin_kind(::Val{:syntax},c)
     c.callable in (:block,:tuple,:vect,:ref,:(=),:return,:->,:.,:(::),:kw,:parameters) || return nothing
     equation=c.callable===:(=) && first(c.arguments) isa BRMDescriptionReference ?
-        (brm_description_symbol(c,first(c.arguments).name)*"="*brm_description_math(c,last(c.arguments)),) : ()
+        (_brmd_assignment_equation(c,brm_description_symbol(c,first(c.arguments).name),last(c.arguments)),) : ()
     BRMDescriptionFragment(equations=equation,covers=(c.id,))
 end
 _brmd_builtin_kind(::Val{:parameter},c) = BRMDescriptionFragment(covers=(c.id,))
 _brmd_builtin_kind(::Val{:assignment},c) = BRMDescriptionFragment(
     prose=("`$(c.provenance.owner)` is a deterministic assignment of its declared arguments.",),
-    equations=(brm_description_math(c,c.arguments[1])*"="*brm_description_math(c,c.arguments[2]),),covers=(c.id,))
+    equations=(_brmd_assignment_equation(c,brm_description_math(c,c.arguments[1]),c.arguments[2]),),covers=(c.id,))
+
+# Line breaks follow the public expression structure. No labels, arguments or
+# fitted values are clipped, and these relations never cover a scientific child.
+function _brmd_sum_equation(lhs,terms)
+    body=isempty(terms) ? "0" : join(terms," + ")
+    length(lhs*body)<=160 && return lhs*"="*body
+    rows=(lhs*"&="*first(terms),("&\\quad + "*t for t in terms[2:end])...)
+    "\\begin{aligned}"*join(rows,"\\\\\n")*"\\end{aligned}"
+end
+function _brmd_addends(c,x)
+    x isa BRMDescriptionComponent && x.callable===(+) ?
+        Tuple(t for a in x.arguments for t in _brmd_addends(c,a)) : (brm_description_math(c,x),)
+end
+function _brmd_assignment_equation(c,lhs,rhs)
+    ordinary=lhs*"="*brm_description_math(c,rhs)
+    length(ordinary)<=160 && return ordinary
+    rhs isa BRMDescriptionComponent || return ordinary
+    rhs.callable===(+) && return _brmd_sum_equation(lhs,_brmd_addends(c,rhs))
+    if rhs.kind===:syntax && rhs.callable in (:tuple,:vect)
+        args=map(a->brm_description_math(c,a),rhs.arguments)
+        rows=(lhs*"&=\\bigl[",("&\\quad "*a*(i==length(args) ? "\\bigr]" : ",") for (i,a) in enumerate(args))...)
+        return "\\begin{aligned}"*join(rows,"\\\\\n")*"\\end{aligned}"
+    end
+    rhs.kind===:call && !(rhs.callable in (+,-,*,/,^,exp,log,sqrt,logistic,
+        StanBlocks.stan.builtin.inv_logit)) && _brmd_law(rhs.callable)===nothing || return ordinary
+    args=(map(a->brm_description_math(c,a),rhs.arguments)...,
+        (_brmd_identifier(k)*"="*brm_description_math(c,v) for (k,v) in pairs(rhs.keywords))...)
+    isempty(args) && return ordinary
+    rows=String[lhs*"&="*_brmd_identifier(_brmd_callable_name(rhs.callable))*"\\bigl("]
+    append!(rows,("&\\quad "*a*(i==length(args) ? "\\bigr)" : ",") for (i,a) in enumerate(args)))
+    "\\begin{aligned}"*join(rows,"\\\\\n")*"\\end{aligned}"
+end
+_brmd_population_addends(c,x)=x isa BRMDescriptionComponent && x.callable===(+) ?
+    Tuple(t for a in x.arguments for t in _brmd_population_addends(c,a)) : (_brmd_term_math(c,x),)
 function _brmd_builtin_kind(::Val{:predictor},c)
     lhs,rhs=c.arguments
     columns=c.provenance.design_columns
+    definitions=String[]
+    notation=NamedTuple[]
     if columns===nothing
         body=_brmd_term_math(c,rhs)
         hasintercept=occursin("Intercept",body)
+        terms=_brmd_population_addends(c,rhs)
     else
-        fixed=Tuple(_brmd_beta(c,col.label)*(col.label===:Intercept ? "" : "\\,"*_brmd_column_math(c,col)) for col in columns)
+        expanded=Tuple(_brmd_beta(c,col.label)*(col.label===:Intercept ? "" : "\\,"*_brmd_column_math(c,col)) for col in columns)
+        compact=length(join(expanded," + "))>160
+        fixed=Tuple(begin
+            coordinate=compact ? _brmd_prepared_coordinate(c,col,k,definitions,notation) : _brmd_column_math(c,col)
+            _brmd_beta(c,col.label)*(col.label===:Intercept ? "" : "\\,"*coordinate)
+        end for (k,col) in enumerate(columns))
         extras=_brmd_extra_terms(c,rhs)
-        body=join((fixed...,extras...)," + ")
-        isempty(body) && (body="0")
+        terms=(fixed...,extras...)
         hasintercept=any(col->col.label===:Intercept,columns)
     end
-    equation=brm_description_math(c,lhs)*"="*body
+    equation=_brmd_sum_equation(brm_description_math(c,lhs),terms)
     prose="`$(c.provenance.owner)` combines the declared population, group and structured terms. " *
         (hasintercept ? "It includes a population intercept." : "It has no population intercept.")
-    BRMDescriptionFragment(prose=(prose,),equations=(equation,),covers=(c.id,))
+    BRMDescriptionFragment(prose=(prose,),equations=(equation,definitions...),notation=Tuple(notation),covers=(c.id,))
+end
+
+function _brmd_prepared_coordinate(c,column,k,definitions,notation)
+    p=column.preprocess
+    isnothing(p) && return _brmd_column_math(c,column)
+    p.kind in (:center,:zscale,:standardize,:missing_center,:missing_zscale,:missing_standardize) ||
+        return _brmd_column_math(c,column)
+    owner=c.provenance.owner
+    sub=_brmd_escape(owner)*","*string(k)
+    x="\\widetilde X_{"*sub*",j}"
+    center="c_{"*sub*"}"
+    scale="s_{"*sub*"}"
+    scaled=!(p.kind in (:center,:missing_center))
+    if p.kind in (:missing_center,:missing_zscale,:missing_standardize)
+        mean=p.const_.fit.mean
+        sd=p.const_.fit.scale
+    elseif scaled
+        fitted=p.const_ isa NamedTuple ? Tuple(values(p.const_)) : p.const_
+        mean,sd=fitted
+    else
+        mean=p.const_
+        sd=nothing
+    end
+    raw=brm_description_math(c,p.raw_ref)
+    push!(definitions,x*"="*(scaled ? "\\frac{"*raw*"-"*center*"}{"*scale*"}" : raw*"-"*center))
+    push!(definitions,center*"="*brm_description_math(c,mean))
+    scaled && push!(definitions,scale*"="*brm_description_math(c,sd))
+    meaning="Prepared $(p.kind) design column `$(column.label)` for predictor `$(owner)`, with its fitted constants defined separately."
+    push!(notation,(;name=(:prepared_column,owner,column.label),symbol=x,meaning,axis=:observation))
+    push!(notation,(;name=(:fitted,owner,column.label,:center),symbol=center,meaning="Fitted centering constant for `$(column.label)` in `$(owner)`."))
+    scaled && push!(notation,(;name=(:fitted,owner,column.label,:scale),symbol=scale,meaning="Fitted scaling constant for `$(column.label)` in `$(owner)`."))
+    x
 end
 
 function _brmd_column_math(c,column)

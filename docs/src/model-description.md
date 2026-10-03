@@ -125,6 +125,11 @@ their recurrences without inserting lambda or block syntax into the equation.
 Cell assignments emit separate indexing and arithmetic relations, and the
 mapping connects to the cell's returned quantity. Cell-local names are scoped
 to their kernel owner (for example, `pred.state`) unless notation overrides them.
+The compact grouped map symbol refers to the separately listed exact input
+bindings. Long call assignments and additive population relations use aligned
+lines. Wide transformed designs use named prepared coordinates, with their
+fitted centering/scaling definitions and logical column mappings listed
+separately; values and scientific child coverage are preserved.
 Authored literal assignments have `role=:constant` and expose their value;
 composed assignments have `role=:deterministic` and expose a public expression.
 This includes assignments preceded by documentation strings in an included

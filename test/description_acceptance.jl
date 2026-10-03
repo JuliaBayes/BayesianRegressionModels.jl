@@ -69,7 +69,10 @@ end
     predictor=only(filter(c->c.kind===:predictor,r.components))
     @test any(c->c.label===:zscale_x,predictor.provenance.design_columns)
     @test isapprox(only(filter(k->k.kind===:zscale,predictor.fitted_constants)).value[1],mean(DESCRIPTION_DATA.x))
-    @test any(e->occursin("\\log",e) && occursin("\\frac",e),r.equations)
+    coordinate=only(filter(n->n.name==(:prepared_column,:mu,:zscale_x),r.notation))
+    @test any(e->occursin("\\log",e) && occursin(coordinate.symbol,e),r.equations)
+    @test any(e->startswith(e,coordinate.symbol*"=") && occursin("\\frac",e) &&
+        occursin("\\mathrm{x}",e),r.equations)
     @test any(e->occursin("int\\_x\\_x\\_g\\_lvl",e) && occursin("\\mathbf1",e),r.equations)
     cats=filter(p->get(p.source,:predictor,nothing)===:g,r.priors)
     @test length(cats)==2
