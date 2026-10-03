@@ -109,6 +109,12 @@ predictor/observation row axes. It checks full normalized densities, analytic
 and finite-difference gradients, mapped compiled Stan, caller ownership and
 complete printed-source replay on the published computed-matrix repair.
 
+`rk_wildcard_ownership.jl` checks that wildcard coefficient defaults reach
+owning predictors, skip nonowners, and retain unmatched-target and equal-
+specificity errors. Its unchanged linked multi-axis model compares normalized
+Normal/censored densities, standard native Enzyme gradients, mapped compiled
+Stan and complete public printed-source replay.
+
 `rk_plain.jl` and `rk_statistical_library.jl` exercise BRM-owned statistical
 declarations through ordinary RKPPL lowering. `rk_leveled.jl` adds independent
 categorical-reference and multinomial row-density, Jacobian and ordinary
