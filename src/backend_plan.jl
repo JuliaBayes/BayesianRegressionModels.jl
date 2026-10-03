@@ -1457,10 +1457,12 @@ function _brm_validate_binomial_response(response::AbstractVector, trials,
     Int.(response)
 end
 
+_brm_wrapper_prefix(::Val{prefix}) where {prefix} = prefix
+_brm_wrapper_prefix(::Val{:*}) = :product
 _brm_wrapper_col_name(prefix::Symbol, inner::NamedColumn) =
-    Symbol(prefix, :_, name(inner))
+    Symbol(_brm_wrapper_prefix(Val(prefix)), :_, name(inner))
 _brm_wrapper_col_name(prefix::Symbol, inner) =
-    Symbol(prefix, :_expr_, string(hash(inner); base=16)[1:8])
+    Symbol(_brm_wrapper_prefix(Val(prefix)), :_expr_, string(hash(inner); base=16)[1:8])
 
 function _brm_population_column(term::ExprColumn)
     f = getf(term)
