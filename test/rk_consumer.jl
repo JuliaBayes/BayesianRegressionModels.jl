@@ -172,6 +172,16 @@ const censored_assignment_builder = @brm begin
     lower=consumer_shift(lo,0.0)
     y ~ censored(Normal(mu,1);lower=lower,upper=hi)
 end
+const truncated_reader_builder=@brm begin
+    beta ~ Normal(0,1)
+    mu=consumer_shift(x,beta)
+    y ~ truncated(Normal(mu,1);lower=lo,upper=hi)
+end
+const interval_reader_builder=@brm begin
+    beta ~ Normal(0,1)
+    mu=consumer_shift(x,beta)
+    y ~ interval_censored(Normal(mu,1);upper=hi)
+end
 
 module ConsumerCensorStan
 using BayesianRegressionModels,StanBlocks
@@ -197,6 +207,16 @@ const assigned=@brm begin
     lower=consumer_shift(lo,0.0)
     y ~ censored(Normal(mu,1);lower=lower,upper=hi)
 end
+const truncated_reader=@brm begin
+    beta ~ Normal(0,1)
+    mu=consumer_shift(x,beta)
+    y ~ truncated(Normal(mu,1);lower=lo,upper=hi)
+end
+const interval_reader=@brm begin
+    beta ~ Normal(0,1)
+    mu=consumer_shift(x,beta)
+    y ~ interval_censored(Normal(mu,1);upper=hi)
+end
 end
 
 @stestset "reader censoring carries threshold masses and bound dependencies" begin
@@ -206,21 +226,27 @@ end
             ("scalar-upper",(;x=[-.2,.2],y=[.1,.5],hi=.5),censored_upper_builder),
             ("row-upper",(;x=[-.2,.2],y=[.1,.7],hi=[.5,.7]),censored_upper_builder),
             ("mixed",(;x=[-.2,.2,.4],y=[0.,1.,.3],lo=zeros(3),hi=ones(3)),censored_both_builder),
-            ("assigned-bound",(;x=[-.2,.2,.4],y=[0.,1.,.3],lo=zeros(3),hi=ones(3)),censored_assignment_builder))
+            ("assigned-bound",(;x=[-.2,.2,.4],y=[0.,1.,.3],lo=zeros(3),hi=ones(3)),censored_assignment_builder),
+            ("truncated",(;x=[-.2,.2,.4],y=[.1,.3,.5],lo=zeros(3),hi=ones(3)),truncated_reader_builder),
+            ("interval",(;x=[-.2,.2,.4],y=[0.,.2,.4],hi=[.5,.5,.8]),interval_reader_builder))
         before=deepcopy(data)
         backend, problem=consumer_problem(model(data))
         @test LogDensityProblems.dimension(problem)==1
         # The independent Stan oracle uses the original raw bounds. BRM's
         # Stan bound validator presently accepts data-backed bounds only;
         # the native named bound assignment is the exact identity lo+0.
-        stan_builder=label in ("assigned-bound","mixed") ? ConsumerCensorStan.both :
+        stan_builder=label=="truncated" ? ConsumerCensorStan.truncated_reader :
+            label=="interval" ? ConsumerCensorStan.interval_reader :
+            label in ("assigned-bound","mixed") ? ConsumerCensorStan.both :
             occursin("upper",label) ? ConsumerCensorStan.upper : ConsumerCensorStan.lower
         stan=consumer_stan(stan_builder(data),"reader-censor-"*label;mod=ConsumerCensorStan)
         oracle(u)=logpdf(Normal(),u[1])+sum(eachindex(data.y)) do i
             mu=data.x[i]+u[1]
             lo=hasproperty(data,:lo) ? (data.lo isa Number ? data.lo : data.lo[i]) : -Inf
             hi=hasproperty(data,:hi) ? (data.hi isa Number ? data.hi : data.hi[i]) : Inf
-            data.y[i]==lo ? logcdf(Normal(mu,1),lo) :
+            label=="truncated" ? logpdf(truncated(Normal(mu,1),lo,hi),data.y[i]) :
+                label=="interval" ? log(cdf(Normal(mu,1),hi)-cdf(Normal(mu,1),data.y[i])) :
+                data.y[i]==lo ? logcdf(Normal(mu,1),lo) :
                 data.y[i]==hi ? logccdf(Normal(mu,1),hi) : logpdf(Normal(mu,1),data.y[i])
         end
         for u in ([0.],[-.5],[.5])
