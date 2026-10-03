@@ -227,8 +227,8 @@ end
         end
         stan=consumer_stan(model,"hsgp-explicit-"*label)
         mapping=[:mu_Intercept=>"pop_mu_beta_pop.1",
-            :hsgp_x_rho=>"rho_hsgpw_x",:hsgp_x_sigma=>"sigma_hsgpw_x"]
-        append!(mapping,[names[z[k]]=>"z_hsgpw_x.$k" for k in 1:3])
+            :hsgp_x_rho=>"hsgp_x_rho_iso",:hsgp_x_sigma=>"hsgp_x_sigma"]
+        append!(mapping,[names[z[k]]=>"hsgp_x_beta_raw.$k" for k in 1:3])
         for u in (zeros(6),fill(.13,6),collect(range(-.2,.3;length=6)))
             check_consumer_point(problem,u,oracle)
             offset=label=="default" ? -logccdf(LogNormal(),floor) : 0.
@@ -237,4 +237,3 @@ end
         @test isequal(data,before)
     end
 end
-
