@@ -3467,7 +3467,7 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
         "offending column(s) before building the model — e.g. `lower`/`upper` -> ",
         "`y_lower`/`y_upper` for interval-censored endpoints.")
     body = Expr(:block, stmts...)
-    model = StanBlocks.SlicModel(body, data, mod, _sb_unbound_observations(body, data, brmi))
+    model = StanBlocks.SlicModel(body, data, mod, _sb_declared_observations(body, data, brmi))
     sb = SBBRMI(brmi, model, data, preproc, Set{Symbol}(), bindings)
     _sb_triage_emitted(sb)
     _sb_apply_held_out(sb, held_out)
@@ -3489,10 +3489,14 @@ function _sb_triage_emitted(sb::SBBRMI)
     obs_keys = Set{Symbol}(keys(sb.parent.operations))
     _sb_plan_collect!(declarations, sb.model.model, data_scope, (), obs_keys,
                       Set{Symbol}(), _sb_unbound_cell_observations(sb.parent))
-    bound = count(d -> d.role === :observation && !isnothing(d.data_source),
+    missing_sources = Set(e.raw_ref for e in values(sb.preproc)
+                          if e.kind === :missing_response)
+    bound = count(d -> d.role === :observation &&
+                  (!isnothing(d.data_source) || d.target in missing_sources),
                   declarations)
     unbound = sort!(Symbol[d.target for d in declarations
-                           if d.role === :observation && isnothing(d.data_source)])
+                           if d.role === :observation && isnothing(d.data_source) &&
+                              !(d.target in missing_sources)])
     if !isempty(unbound)
         names = join(map(s -> "`$s`", unbound), ", ")
         if bound >= 1
@@ -3518,25 +3522,21 @@ function _sb_triage_emitted(sb::SBBRMI)
           "from the data — dropping the statement is not supported.")
 end
 
-# Whole-LHS unbound observation stems for the `SlicModel` `observations`
-# declaration (StanBlocks snag `unbound-observat-d32ac924`): top-level `~`
-# targets that bind no data column. StanBlocks emits a `<stem>_gen` alias twin
-# for each declared stem that re-draws in generated quantities and covers it
-# under `:predict`, so prior programs carry the same posterior names as fitted
-# ones. Runs on the EMITTED body for the same reason `_sb_triage_emitted`
-# does — fused statements and kernel-cell sites resolve with the same role
-# logic the plan itself uses. Plate-nested (cell-local) unbound targets are
-# excluded: per-cell unbound is outside the StanBlocks twin scope, so those
-# keep today's twinless behavior.
-function _sb_unbound_observations(body, data, brmi)
+# Declare observation stems to SLIC from the same emitted-body roles as the
+# plan. Bound observations use their source column, including kernel aliases:
+# group CV can eliminate their data inputs, while predictive carriers still
+# need that source identity. Whole-LHS unbound observations use their target;
+# StanBlocks emits an alias twin when they redraw in GQ. Cell-local unbound
+# targets stay excluded because they lie outside that twin scope.
+function _sb_declared_observations(body, data, brmi)
     declarations = GenerativeDeclaration[]
     data_scope = Dict{Symbol,Union{Nothing,Symbol}}(k => k for k in keys(data))
     obs_keys = Set{Symbol}(keys(brmi.operations))
     _sb_plan_collect!(declarations, body, data_scope, (), obs_keys, Set{Symbol}(),
                       _sb_unbound_cell_observations(brmi))
-    Tuple(sort!(Symbol[d.target for d in declarations
-                       if d.role === :observation && isnothing(d.data_source) &&
-                          isempty(d.context)]))
+    Tuple(sort!(unique(Symbol[isnothing(d.data_source) ? d.target : d.data_source
+        for d in declarations if d.role === :observation &&
+            (!isnothing(d.data_source) || isempty(d.context))])))
 end
 
 # Plate-nested omitted outcomes, read from the FORMULA: `(context, cell target)`
