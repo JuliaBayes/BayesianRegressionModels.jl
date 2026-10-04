@@ -143,6 +143,9 @@ compares emitted reusable block algebra with the former ordinary inline
 source: sampled names, physical coordinates, prior/likelihood/full densities,
 all standard Reverse coordinates, caller ownership and complete source replay
 must agree bit-exactly. Priors remain explicit at their existing paths.
+`rk_source_composition.jl` additionally combines those statistical definitions
+with identity-resolved native entries and live keywords, retaining both kinds
+of definitions in the ordinary source reference and complete printed replay.
 `rk_leveled.jl` adds independent
 categorical-reference and multinomial row-density, Jacobian and ordinary
 reverse-gradient oracles. `rk_values.jl` checks whole

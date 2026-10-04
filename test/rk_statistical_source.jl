@@ -22,7 +22,9 @@ function inline_statistical_source(emitted)
         replacements = Dict(zip(parameters, call.args[2:end]))
         Expr(:(=), statement.args[2], substitute(only(expressions), replacements))
     end
-    BRM._RKEmittedProgram(Expr[], Expr(:block, map(inline, emitted.main.args)...), emitted.bindings)
+    retained = filter(d -> !Meta.isexpr(d, :(=), 2), emitted.defs)
+    BRM._RKEmittedProgram(retained,
+        Expr(:block, map(inline, emitted.main.args)...), emitted.bindings)
 end
 
 function check_statistical_source(brmi, data; repeated=false, collision=false)
