@@ -5,6 +5,35 @@ include_string(@__MODULE__, first(split(read(family_fixture, String),
     "\n@stestset"; limit=2)), family_fixture)
 
 @eval PublicKernelObservationFamilies begin
+# The integer control supplies the corresponding caller-owned Stan methods;
+# the original law's vector signatures only accept real-valued reference rows.
+StanBlocks.@deffun begin
+    @lhs @lpxf relative_normal_lpdf(y::vector[n], location::vector[n],
+            reference::int[n], scale::real)::real = begin
+        result::real = 0.0
+        for i in 1:n
+            result += normal_lpdf(y[i], location[i] - reference[i], scale)
+        end
+        return result
+    end
+    relative_normal_lpdfs(y::vector[n], location::vector[n],
+            reference::int[n], scale::real)::vector[n] = begin
+        result::vector[n]
+        for i in 1:n
+            result[i] = normal_lpdf(y[i], location[i] - reference[i], scale)
+        end
+        return result
+    end
+    relative_normal_rng(vector[n], location::vector[n],
+            reference::int[n], scale::real)::vector[n] = begin
+        result::vector[n]
+        for i in 1:n
+            result[i] = normal_rng(location[i] - reference[i], scale)
+        end
+        return result
+    end
+end
+
 function grouped_outside(data; arithmetic=false, ordinary=false)
     if ordinary
         return @brm data begin
