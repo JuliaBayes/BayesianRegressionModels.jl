@@ -94,15 +94,14 @@ function _rk_ast_hsgp_grouped(definitions, term, PHI, lambda, floors, taken, bin
     if haskey(options, :group_index)
         push!(stmts, Expr(:call, :.~, Expr(:ref, z, Expr(:call, :(:), 1, G),
             Expr(:call, :axes, PHI, 2)), _rk_ast_dotted(:Normal, 0, 1)))
-        callee = _rk_value_callee!(bindings, brm_hsgp_grouped, taken)
         push!(stmts, Expr(:call, :~, options.id,
-            _rk_ast_statistical_call!(definitions, taken, :brm_grouped_hsgp_summand,
-                PHI, lambda, z, options.group_index, rho, sigma, callee)))
+            _rk_ast_hsgp_value_graph!(definitions, term, taken,
+                PHI, lambda, sigma, rho, z; group_index=options.group_index)))
     else
         push!(stmts, Expr(:call, :.~, Expr(:ref, z, Expr(:call, :axes, PHI, 2)),
             _rk_ast_dotted(:Normal, 0, 1)))
         push!(stmts, Expr(:call, :~, options.id,
-            _rk_ast_statistical_call!(definitions, taken, :brm_hsgp_summand,
+            _rk_ast_hsgp_value_graph!(definitions, term, taken,
                 PHI, lambda, sigma, rho, z)))
     end
     stmts

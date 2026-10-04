@@ -221,13 +221,13 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
     periodic = get(options, :cov, :exp_quad) === :periodic
     k = options.k isa Tuple ? Expr(:tuple, options.k...) : options.k
     floors = _rk_ast_fresh_name(string(options.id, "_floors"), taken)
-    call = if periodic
+    stmts = if periodic
+        call =
         Expr(:call, :brm_hsgp_periodic_basis, only(term.columns), k, options.period)
+        Expr[Expr(:(=), Expr(:tuple, PHI, lambda, floors), call)]
     else
-        c = options.c isa Tuple ? Expr(:tuple, options.c...) : options.c
-        Expr(:call, :brm_hsgp_basis, Expr(:tuple, term.columns...), k, c, options.iso)
+        _rk_ast_hsgp_basis_graph!(definitions, term, taken, PHI, lambda, floors)
     end
-    stmts = Expr[Expr(:(=), Expr(:tuple, PHI, lambda, floors), call)]
     if haskey(options, :group_index) || !isempty(get(options, :hyper_plans, ()))
         append!(stmts, _rk_ast_hsgp_grouped(definitions, term, PHI, lambda, floors, taken, bindings))
         return stmts
@@ -255,10 +255,12 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
         _rk_ast_positive_prior(options.sigma_prior, bindings, taken)))
     push!(stmts, Expr(:call, :.~, Expr(:ref, z, Expr(:call, :axes, PHI, 2)),
         _rk_ast_dotted(:Normal, 0, 1)))
-    model = periodic ? :brm_periodic_hsgp_summand : :brm_hsgp_summand
+    call = periodic ? _rk_ast_statistical_call!(definitions, taken,
+        :brm_periodic_hsgp_summand, PHI, lambda, sigma, rho_value, z) :
+        _rk_ast_hsgp_value_graph!(definitions, term, taken,
+            PHI, lambda, sigma, rho_value, z)
     push!(stmts, Expr(:call, :~, options.id,
-        _rk_ast_statistical_call!(definitions, taken, model,
-            PHI, lambda, sigma, rho_value, z)))
+        call))
     stmts
 end
 
