@@ -179,7 +179,7 @@ end
 
 function _brmd_value(x::ExprColumn{typeof(kernel)},env,id)
     raw=getargs(x)
-    lambda=first(raw)
+    lambda=_brm_inline_expr(first(raw))
     outer=Tuple(_brmd_value(a,env,(id...,:argument,i)) for (i,a) in enumerate(raw[2:end]))
     params=lambda.args[1] isa Expr && lambda.args[1].head===:tuple ? lambda.args[1].args : (lambda.args[1],)
     length(params)==length(outer) || error("description: kernel argument binding mismatch")
