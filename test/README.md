@@ -86,6 +86,16 @@ test/rk_completed_covariate_axes.jl`. The verified native closure is RK/PPL
 `3bdbfbbbb1c82caf4acf7b6ecb5fa28e3a089c58`, StanBlocks
 `e355994384d44b86108105264ae3e34e0f2a0625`, and Enzyme 0.13.209.
 
+`rk_modeled_transform_predictors.jl` checks named pointwise assignments from
+modeled and completed columns as formula predictors. It retains the original
+subject axis across ragged kernel likelihoods and checks independent normalized
+densities, every ordinary Reverse coordinate, compiled same-model Stan, named
+graph values, row permutations, bit-exact printed-source values, and
+all-coordinate Reverse agreement (absolute/relative tolerance `2e-13`). A second model covers assignment chains, scalar sampled parents and
+an explicit transformed-coefficient prior without completion. Run
+`julia --project=test test/rk_modeled_transform_predictors.jl`; trailing filters
+select the standalone blocks. It uses the same native closure listed above.
+
 `missing_joint_covariates.jl` checks the native correlated
 `mi([x, z]) ~ MvNormalCholesky(...)` block. Independent normalized density,
 all-coordinate gradient and pointwise likelihood oracles cover all four
