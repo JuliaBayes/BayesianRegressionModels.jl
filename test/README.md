@@ -238,6 +238,12 @@ compares emitted reusable block algebra with the former ordinary inline
 source: sampled names, physical coordinates, prior/likelihood/full densities,
 all standard Reverse coordinates, caller ownership and complete source replay
 must agree bit-exactly. Priors remain explicit at their existing paths.
+`rk_hsgp_domains.jl` checks fixed one-dimensional and tensor HSGP domains
+against independent basis/frequency/floor calculations and normalized
+same-BRMI compiled Stan values and every mapped ordinary Reverse coordinate.
+It covers K=1, isotropic/anisotropic geometry, explicit normalized or bounded
+hyperpriors, unchanged fixed boundaries under row rebinding, caller ownership,
+actual built graph inspection, and complete printed-source fresh-module replay.
 `rk_source_composition.jl` additionally combines those statistical definitions
 with identity-resolved native entries and live keywords, retaining both kinds
 of definitions in the ordinary source reference and complete printed replay.
