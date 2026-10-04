@@ -1642,13 +1642,27 @@ end
 
 function addprop end
 
-StanBlocks.@deffun begin
+# One variance law serves the typed Stan declaration and the native graph.
+# Stan's vector sqrt is intrinsic; native Julia spells it as a broadcast.
+const _BRM_ADDPROP_VARIANCE = :(add^2 .+ (loc .* prop).^2)
+
+@eval StanBlocks.@deffun begin
     addprop(loc::vector[n], add::real, prop::real)::vector[n] = begin
-        sqrt(add^2 .+ (loc .* prop).^2)
+        sqrt($(_BRM_ADDPROP_VARIANCE))
     end
     @inline addprop(loc::RaggedVector, add::real, prop::real) = begin
         RaggedVector(addprop(loc.mem, add, prop), loc.ends)
     end
+end
+
+function _rk_callable_source!(definitions, bindings, entry, ::typeof(addprop))
+    definition = Expr(:(=), Expr(:call, entry, :loc, :add, :prop),
+        Expr(:block, Expr(:return,
+            _rk_ast_dotted(:sqrt, deepcopy(_BRM_ADDPROP_VARIANCE)))))
+    push!(definitions, Expr(:macrocall,
+        Expr(:., :ReactiveKernels, QuoteNode(Symbol("@kernel"))),
+        LineNumberNode(0), definition))
+    :done
 end
 
 # Distinctly-named 2-arg `@lhs @lpxf` UDFs so typed-LHS sampling routes to a
