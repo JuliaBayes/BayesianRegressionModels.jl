@@ -356,7 +356,7 @@ function _brmd_builtin_call(::Type{<:LocationScale},c)
     prose="For positive scale s, the affine outcome is location + sZ with Z drawn from the declared base distribution; the density includes the 1/s Jacobian."
     base isa BRMDescriptionComponent && _brmd_law(base.callable)===:student_t_standard &&
         (prose*=" For a Student-t base, s is the Student-t scale; its SD is s√(ν/(ν−2)) when ν>2, and no finite variance exists when ν≤2.")
-    BRMDescriptionFragment(prose=(prose,),equations=("Z\\sim"*_brmd_distribution_math(c,base),
+    BRMDescriptionFragment(prose=(prose,),equations=("Z\\sim{}"*_brmd_distribution_math(c,base),
         "p_Y(y)=\\frac{1}{"*s*"}f_Z\\left(\\frac{y-"*loc*"}{"*s*"}\\right)"),covers=(c.id,))
 end
 function _brmd_bound_math(c,key,position,fallback)
@@ -627,7 +627,8 @@ function _brmd_call_equation(c,lhs,rhs,relation)
     "\\begin{aligned}"*join(rows,"\\\\\n")*"\\end{aligned}"
 end
 function _brmd_distribution_equation(c,lhs,rhs)
-    ordinary=lhs*"\\sim"*_brmd_distribution_math(c,rhs)
+    # End the control word even when the following law starts with a letter.
+    ordinary=lhs*"\\sim{}"*_brmd_distribution_math(c,rhs)
     length(ordinary)<=160 && return ordinary
     rhs isa BRMDescriptionComponent && rhs.kind===:call &&
         _brmd_law(rhs.callable)===nothing || return ordinary
@@ -746,7 +747,7 @@ function _brmd_builtin_kind(::Val{:observation},c)
            "`$(c.provenance.owner)` is unconditioned and is generated from the declared model."
     law=rhs isa BRMDescriptionComponent ? _brmd_law(rhs.callable) : nothing
     isnothing(law) || (prose*=" "*_brmd_law_prose(Val(law)))
-    equation=brm_description_math(c,lhs)*"\\sim"*_brmd_distribution_math(c,rhs)
+    equation=brm_description_math(c,lhs)*"\\sim{}"*_brmd_distribution_math(c,rhs)
     if length(equation)<=160
         return BRMDescriptionFragment(prose=(prose,),equations=(equation,),covers=(c.id,))
     end

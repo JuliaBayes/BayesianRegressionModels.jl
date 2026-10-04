@@ -12,7 +12,7 @@ const BRM = BayesianRegressionModels
 # the data, with no ordinal or missing-response plan mutations.
 const _RK_PLAN_TYPES = Union{BRM._RKStructuralPlan,BRM._RKKernelPlan,BRM._RKValuePlan,BRM._RKHeldOutPlan}
 
-# Evaluate ordinary native functions and `@rkppl` definitions in a fresh module
+# Evaluate native functions and explicit `@kernel`/`@rkppl` definitions in a fresh module
 # per lowering. Each build owns its definition namespace even when different
 # programs use the same authored names. The macrocall `Expr`
 # is exactly the parser's shape for `@rkppl sm(args...) = begin ... end`.
@@ -20,6 +20,8 @@ function _rk_emit_module(emitted::BRM._RKEmittedProgram)
     BRM._rk_validate_source_definitions(emitted)
     mod = Module(gensym(:RKEmittedModels))
     Core.eval(mod, :(using ReactiveKernelsPPL))
+    Core.eval(mod, :(import ReactiveKernels))
+    Core.eval(mod, :(import ReactiveKernels: @kernel))
     Core.eval(mod, :(import BayesianRegressionModels:
         brm_tps_basis, brm_t2_basis, brm_hsgp_basis, brm_hsgp_periodic_basis,
         brm_hsgp_sqrt_spd, brm_hsgp_periodic_sqrt_spd,
@@ -30,7 +32,7 @@ function _rk_emit_module(emitted::BRM._RKEmittedProgram)
         Core.eval(mod, Expr(:const, Expr(:(=), name, QuoteNode(value))))
     end
     for d in emitted.defs
-        if d.head === :function
+        if BRM._rk_source_definition(d).kind in (:function, :kernel)
             Core.eval(mod, d)
         else
             Core.eval(mod, Expr(:macrocall, Symbol("@rkppl"),

@@ -11,15 +11,38 @@
 # namespace cannot hold both bindings). The AST is the sole emission
 # path; the extension holds no fallback serializer.
 
+# Explicit graph definitions keep their macro in the source and replay. Bare
+# assignment definitions retain the existing @rkppl submodel convention.
+function _rk_source_definition(definition)
+    kind = :rkppl
+    body = definition
+    if Meta.isexpr(definition, :macrocall)
+        head = first(definition.args)
+        kernel = head === Symbol("@kernel") ||
+            (head isa GlobalRef && nameof(head.mod) === :ReactiveKernels &&
+                head.name === Symbol("@kernel")) ||
+            isequal(head, Expr(:., :ReactiveKernels, QuoteNode(Symbol("@kernel"))))
+        kernel || error("RK source: explicit definitions must use ReactiveKernels.@kernel")
+        values = filter(arg -> !(arg isa LineNumberNode), definition.args[2:end])
+        length(values) == 1 || error("RK source: graph definition needs one named body")
+        body = only(values)
+        kind = :kernel
+    elseif Meta.isexpr(definition, :function)
+        kind = :function
+    end
+    body isa Expr && body.head in (:(=), :function) &&
+        length(body.args) == 2 && Meta.isexpr(first(body.args), :call) ||
+        error("RK source: definition must be an ordinary function, @rkppl or @kernel definition")
+    name = first(first(body.args).args)
+    name isa Symbol || error("RK source: definition requires a plain local callable name")
+    (; name, kind)
+end
+
 function _rk_validate_source_definitions(emitted)
     bound = Set{Symbol}(first(binding) for binding in emitted.bindings)
     defined = Set{Symbol}()
     for definition in emitted.defs
-        definition isa Expr && definition.head in (:(=), :function) &&
-            length(definition.args) == 2 && Meta.isexpr(first(definition.args), :call) ||
-            error("RK source: definition must be an ordinary function or @rkppl definition")
-        name = first(first(definition.args).args)
-        name isa Symbol || error("RK source: definition requires a plain local callable name")
+        name = _rk_source_definition(definition).name
         name in defined && error("RK source: callable `$name` is defined more than once")
         push!(defined, name)
         name in bound && error(

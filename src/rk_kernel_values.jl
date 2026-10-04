@@ -1,4 +1,4 @@
-# Ordinary whole-array readers for group-local deterministic kernels. Each
+# Whole-array source graphs for group-local deterministic kernels. Each
 # positional input retains its own inner axis; latent inputs are sliced from
 # their original predictor, and explicit ragged joins use prepared row indices.
 struct _RKPreparedKernelAssignment
@@ -245,22 +245,39 @@ function _rk_emit_kernel_reader!(defs, statements, bindings, taken, kernel, name
         for statement in kernel.body]
     push!(cell_body, Expr(:return,
         _rk_kernel_bind_calls(collected, kernel.scope, bindings, taken)))
-    push!(defs, Expr(:function, Expr(:call, cell_name, cell_params...), Expr(:block, cell_body...)))
+    cell_definition = Expr(:(=), Expr(:call, cell_name, cell_params...),
+        Expr(:block, cell_body...))
+    push!(defs, Expr(:macrocall,
+        Expr(:., :ReactiveKernels, QuoteNode(Symbol("@kernel"))),
+        LineNumberNode(0), cell_definition))
     subject = _rk_ast_fresh_name("subject", Set(source_names))
-    value, result = :cell_value, :result
-    cell_args = [input.kind === :gather ?
+    plate_names = Set([source_names; subject])
+    cell_args = [_rk_ast_fresh_name("cell_input_$i", plate_names)
+        for i in eachindex(kernel.inputs)]
+    cell_inputs = [Expr(:(=), argument, input.kind === :gather ?
         Expr(:ref, input.source, Expr(:ref, input.rows, subject)) :
-        Expr(:ref, input.source, subject) for input in kernel.inputs]
+        Expr(:ref, input.source, subject))
+        for (argument, input) in zip(cell_args, kernel.inputs)]
     call = Expr(:call, cell_name, cell_args..., kernel.globals...)
-    append = :(if $value isa Number
-        push!($result, $value)
-    else
-        append!($result, $value)
-    end)
-    loop = Expr(:for, Expr(:(=), subject, Expr(:call, :(:), 1, kernel.count)),
-        Expr(:block, Expr(:(=), value, call), append))
-    body = Expr(:block, :($result = Float64[]), loop, Expr(:return, result))
-    push!(defs, Expr(:function, Expr(:call, reader_name, source_names...), body))
+    # The subject plate and its child cell are authored graph recipes. A
+    # downstream @kernel entry's scan remains inside this retained child.
+    sequence = Expr(:call, :(:), 1, kernel.count)
+    plate_args = [Expr(:call, :Ref, source) for source in source_names]
+    plate = Expr(:do, Expr(:call,
+        Expr(:., :ReactiveKernels, QuoteNode(:plate)), sequence, plate_args...),
+        Expr(:->, Expr(:tuple, subject, source_names...),
+            Expr(:block, cell_inputs..., call)))
+    reader_names = Set(source_names)
+    values = _rk_ast_fresh_name("cell_values", reader_names)
+    result = _rk_ast_fresh_name("result", reader_names)
+    body = Expr(:block,
+        Expr(:(=), values, plate),
+        :($result = convert(Vector{Float64}, reduce(vcat, $values; init=Float64[]))),
+        Expr(:return, result))
+    reader_definition = Expr(:(=), Expr(:call, reader_name, source_names...), body)
+    push!(defs, Expr(:macrocall,
+        Expr(:., :ReactiveKernels, QuoteNode(Symbol("@kernel"))),
+        LineNumberNode(0), reader_definition))
     push!(statements, Expr(:(=), name, Expr(:call, reader_name, source_names...)))
 end
 

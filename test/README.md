@@ -18,6 +18,21 @@ differentiates with Enzyme only — every gradient in this suite goes through
 so there is nothing here to work around; do not add it back to make a new
 gradient site easier.
 
+## Description PDF rendering
+
+`description_tex.jl` checks Student-t sampling equations for standard, affine,
+long-expression and embedded kernel models while preserving their source,
+data, priors and model identity. It also runs under the root project. Add
+`--pdf` to compile the complete public Markdown through Quarto and LuaLaTeX:
+
+```sh
+julia --project=. test/description_tex.jl --pdf
+```
+
+This explicit PDF mode requires Quarto and a working LuaLaTeX installation;
+render failures propagate. Outputs use a temporary directory, or the directory
+specified by `BRM_DESCRIPTION_TEX_OUTPUT`.
+
 ## Chunking heavy suites
 
 Files with dozens of testsets (`rk_parity.jl`, `rk_emitter.jl`) OOM a squeezed
@@ -148,6 +163,26 @@ source replay are covered. Both ordinary assignments and uneven/empty ragged
 nested helpers compare with compiled same-BRMI Stan on the published
 StanBlocks caller-dimension fix `65cabef`, pinned by `setup_env.jl`.
 These scoped checks do not certify complete application performance.
+
+`rk_graph_source.jl` supplies explicit `@kernel` entries through the callable
+source provider. It inspects the actual bound posterior for subject plates and
+child scans, then checks complete printed and artifact replay, ordinary Reverse
+and independent normalized oracles against compiled same-BRMI Stan. The
+computed grouped predictor case retains an empty subject's prior and all five
+coordinates while passing separately sliced inputs to the child object graph.
+The pinned RK revision also supports those computed graph arguments; source
+definitions or a separately prepared reader alone do not prove posterior
+visibility.
+
+`rk_graph_source.jl` checks explicit `@kernel` provider definitions and graph
+adapters for `KernelObjectSpec` endpoints. It distinguishes a retained scan in
+the provider/subject-reader graph from a retained scan in the actual PPL
+posterior. Printed definitions must recreate the subject plate and child scan;
+posterior acceptance also requires complete source/artifact replay, independent
+densities, standard Reverse, caller ownership and compiled same-BRMI Stan.
+Published RK `999451c` loses module-resolved graph calls in PPL; the posterior
+checks remain failed until the producer repair `ppl-transparent-654ba0aa` is
+delivered. Provider-only controls are not posterior or application acceptance.
 
 `rk_plain.jl` and `rk_statistical_library.jl` exercise BRM-owned statistical
 declarations through ordinary RKPPL lowering. `rk_statistical_source.jl`

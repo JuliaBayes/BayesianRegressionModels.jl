@@ -119,7 +119,7 @@ end
         end
         artifact = BRM.emit_rk_artifact(brmi; case_id="ragged-reader-$mode")
         @test length(artifact.defs) >= 2
-        @test all(d -> d.head in (:function, :(=)), artifact.defs)
+        @test all(d -> BRM._rk_source_definition(d).kind in (:function, :kernel, :rkppl), artifact.defs)
         @test isequal(data, saved)
     end
 end
