@@ -33,30 +33,51 @@ end
 
 _rk_value_dummy(values, level) = Float64.(isequal.(values, level))
 
+# Native prior source spells declaration bounds as a support restriction,
+# preserving the original family kernel. Mathematical truncation keeps its
+# own normalized wrapper. This also applies when a prior addresses a log
+# hyper-intercept rather than a shared positive scale.
+function _rk_ast_declared_prior(prior, bindings, taken)
+    prepared = _brm_prepare_expr(prior)
+    prepared.callable === truncated &&
+        return _rk_ast_truncated_prior(prepared, bindings, taken)
+    !any(key -> key in (:lower, :upper), keys(prepared.kwargs)) &&
+        return _rk_value_expr!(bindings, prepared, taken)
+    base = _BRMPreparedExpr(prepared.callable, prepared.args,
+        (; (key => value for (key, value) in pairs(prepared.kwargs)
+            if !(key in (:lower, :upper)))...))
+    lower = _rk_value_expr!(bindings, get(prepared.kwargs, :lower, -Inf), taken)
+    upper = _rk_value_expr!(bindings, get(prepared.kwargs, :upper, Inf), taken)
+    Expr(:call, :restricted, _rk_value_expr!(bindings, base, taken), lower, upper)
+end
+
+function _rk_ast_truncated_prior(prepared, bindings, taken)
+    all(key -> key in (:lower, :upper), keys(prepared.kwargs)) || error(
+        "RK backend: a truncated prior accepts only lower/upper bounds")
+    args = prepared.args
+    if length(args) == 1
+        lower = get(prepared.kwargs, :lower, -Inf)
+        upper = get(prepared.kwargs, :upper, Inf)
+    elseif length(args) == 3 && isempty(prepared.kwargs)
+        lower, upper = args[2:3]
+    else
+        error("RK backend: a truncated prior needs a base law and lower/upper bounds")
+    end
+    lower === nothing && (lower = -Inf)
+    upper === nothing && (upper = Inf)
+    Expr(:call, :truncated,
+        _rk_value_expr!(bindings, first(args), taken),
+        _rk_value_expr!(bindings, lower, taken),
+        _rk_value_expr!(bindings, upper, taken))
+end
+
 function _rk_ast_positive_prior(prior, bindings, taken; default=:HalfNormal)
     prior === nothing && return default === :LogNormal ?
         Expr(:call, :LogNormal, 0, 1) :
         Expr(:call, :restricted, Expr(:call, :Normal, 0, 1), 0.0, Inf)
     prepared = _brm_prepare_expr(prior)
-    if prepared.callable === truncated
-        all(key -> key in (:lower, :upper), keys(prepared.kwargs)) || error(
-            "RK backend: a truncated positive prior accepts only lower/upper bounds")
-        args = prepared.args
-        if length(args) == 1
-            lower = get(prepared.kwargs, :lower, -Inf)
-            upper = get(prepared.kwargs, :upper, Inf)
-        elseif length(args) == 3 && isempty(prepared.kwargs)
-            lower, upper = args[2:3]
-        else
-            error("RK backend: a truncated positive prior needs a base law and lower/upper bounds")
-        end
-        lower === nothing && (lower = -Inf)
-        upper === nothing && (upper = Inf)
-        return Expr(:call, :truncated,
-            _rk_value_expr!(bindings, first(args), taken),
-            _rk_value_expr!(bindings, lower, taken),
-            _rk_value_expr!(bindings, upper, taken))
-    end
+    prepared.callable === truncated &&
+        return _rk_ast_truncated_prior(prepared, bindings, taken)
     expression = _rk_value_expr!(bindings, prepared, taken)
     family = nameof(getf(prior))
     family in (:Exponential, :Gamma, :InverseGamma, :LogNormal, :Weibull,
