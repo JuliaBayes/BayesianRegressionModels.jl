@@ -107,7 +107,7 @@ function _rk_prepare_missing_value!(columns, taken, observation, program, comple
         nothing, observation.weight, nothing)
 end
 
-function _rk_emit_missing_value!(statements, bindings, taken, completion)
+function _rk_emit_missing_value!(definitions, statements, bindings, taken, completion)
     if completion.nmissing == 0
         push!(statements, Expr(:(=), completion.source, completion.observed_component))
         return nothing
@@ -119,11 +119,13 @@ function _rk_emit_missing_value!(statements, bindings, taken, completion)
     shape = Expr(:call, :axes, completion.missing_rows, 1)
     push!(statements, Expr(:call, Symbol(".~"),
         Expr(:ref, completion.missing, shape), law))
-    # A gather and scalar mask keep one row-sized active value without a tuple
-    # containing constant and active arrays in vcat's ordinary Julia lowering.
-    drawn = Expr(:ref, completion.missing, completion.missing_lookup)
-    expression = Expr(:call, :.+, completion.observed_component,
-        Expr(:call, :.*, completion.missing_mask, drawn))
+    # Completion is a whole covariate value on its original row axis. Keep
+    # the gather and mask in an explicit graph when downstream likelihoods
+    # have different observation axes, rather than inferring a scalar recipe.
+    expression = _rk_ast_statistical_call!(definitions, taken,
+        :brm_completed_covariate, completion.observed_component,
+        completion.missing, completion.missing_lookup, completion.missing_mask;
+        kernel=true)
     push!(statements, Expr(:(=), completion.source, expression))
 end
 

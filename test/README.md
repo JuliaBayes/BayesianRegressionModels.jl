@@ -75,6 +75,17 @@ test/rk_missing_value_predictors.jl`; trailing filters select individual
 blocks. These are public producer controls, not original application or
 performance acceptance.
 
+`rk_completed_covariate_axes.jl` checks a completed subject covariate feeding
+ragged kernel cells with their own likelihood, scalar covariate hyperpriors,
+and two correlated subject predictors. It compares normalized densities and
+all native Reverse gradients with an independent oracle and compiled
+same-BRMI Stan, including cell-row permutations and separate pointwise terms.
+Printed source replay, completion graph ports, multiple missing entries and
+callable name collisions are included. Run `julia --project=test
+test/rk_completed_covariate_axes.jl`. The verified native closure is RK/PPL
+`3bdbfbbbb1c82caf4acf7b6ecb5fa28e3a089c58`, StanBlocks
+`e355994384d44b86108105264ae3e34e0f2a0625`, and Enzyme 0.13.209.
+
 `missing_joint_covariates.jl` checks the native correlated
 `mi([x, z]) ~ MvNormalCholesky(...)` block. Independent normalized density,
 all-coordinate gradient and pointwise likelihood oracles cover all four
