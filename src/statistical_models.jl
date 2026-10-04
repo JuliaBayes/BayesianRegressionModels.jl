@@ -161,6 +161,12 @@ function rkppl_model end
 # The emitter keeps prior statements at their current author paths, and uses
 # these ordinary submodels to make repeated block composition readable.
 const _BRM_STATISTICAL_VALUES = (
+    # An ordinary whole-value contrast composes with whole-value smooths.
+    # Reuse the statistical model's law rather than maintaining a second one.
+    brm_monotonic_contrast = let definition = deepcopy(_BRM_STATISTICAL_MODELS.monotonic)
+        first(definition.args).args[1] = :brm_monotonic_contrast
+        Expr(:function, definition.args...)
+    end,
     brm_scaled_random_coefficients = :(
 brm_scaled_random_coefficients(sd, z) = begin
     z .* sd[1]

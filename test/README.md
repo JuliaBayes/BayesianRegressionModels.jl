@@ -87,6 +87,13 @@ such as `independent` or `log-space` select focused blocks.
 
 ## Shared preparation and Turing lowering
 
+`rk_addprop.jl` checks the shared additive/proportional scale law as visible
+native graph source. Unequal grouped responses, empty subjects, callable
+aliases, top-level assignments and in-cell calls retain normalized densities,
+all ordinary Reverse gradients, censoring and row order against independent
+oracles and compiled same-BRMI Stan. Complete printed source and artifact
+re-entry are included; a scalar native-location control is checked separately.
+
 `spline_basis_signs.jl` checks canonical TPS/t2 projection signs, input
 ownership, and frozen projections directly. The spline blocks in
 `rk_parity.jl` compare RK densities and Enzyme gradients with independent
@@ -102,6 +109,10 @@ Its observed model compares complete printed RK replay, ordinary Reverse and
 an independent normalized oracle with compiled same-BRMI Stan on distinct
 subject, ECG-row and response axes. Omitted-data geometry checks do not claim
 native prior-draw execution.
+`rk_monotonic_consumer.jl` combines sampled monotonic contrasts and an HSGP
+on operation rows consumed by a subject kernel. It checks complete source and
+artifact replay, independent density/all-gradient oracles, compiled same-BRMI
+Stan at physical simplex parameters, and an empty subject's retained prior.
 The assignment gate checks dependency ordering and distinct response row axes.
 `preparation_replay.jl` compares the shared fitted transform contract across
 StanBlocks and Turing. Callable-specific frozen replay is covered by
@@ -185,15 +196,30 @@ The pinned RK revision also supports those computed graph arguments; source
 definitions or a separately prepared reader alone do not prove posterior
 visibility.
 
-`rk_graph_source.jl` checks explicit `@kernel` provider definitions and graph
-adapters for `KernelObjectSpec` endpoints. It distinguishes a retained scan in
-the provider/subject-reader graph from a retained scan in the actual PPL
-posterior. Printed definitions must recreate the subject plate and child scan;
-posterior acceptance also requires complete source/artifact replay, independent
-densities, standard Reverse, caller ownership and compiled same-BRMI Stan.
-Published RK `999451c` loses module-resolved graph calls in PPL; the posterior
-checks remain failed until the producer repair `ppl-transparent-654ba0aa` is
-delivered. Provider-only controls are not posterior or application acceptance.
+`kernel_expr(bound, assign_layout(bound))` is pre-build replay text. Its calls
+to qualified `KernelSpec` readers compose when `build_kernel` runs; textual
+plate/scan counts therefore do not count the complete built graph. Use public
+`kernel_graph(built.spec)`, `plate_body` and `scan_body` entry/body accessors.
+The fixtures explicitly qualify their internal recipe predicates as frozen
+revision diagnostics. The former `999451c` composition failure is repaired
+on the pinned published RK `5184fe62`; provider-only controls still do not
+certify the complete original application.
+
+`rk_kernel_observation_families.jl` checks exact in-cell Student-t and
+caller-owned scalar observation graphs through the original constructor
+identity. Direct, grouped and separately bound child `KernelSpec` forms retain
+two aligned vector arguments and a live shared scale, with normalized
+independent values/gradients, ordinary Reverse, strict same-BRMI Stan,
+complete source/data replay, original geometry/ownership and scalar algebra
+inside the actual built observation plate. A Bernoulli-logit case preserves
+integer response rows across uneven/empty cells.
+`rk_observed_graph_law.jl` checks the public inclusive threshold law's lower
+and upper branches and normalized interior in that built graph, against
+independent native values/gradients. The retained ordinary-constructor fixture
+`rk_observed_callable_law.jl` has three strict Stan-gradient failures caused
+by the independently attributed upstream `normal_lcdf` derivative
+approximation (`inclusive-normal-eff38407`, StanBlocks issue #59); this
+source/graph bridge does not repair or relax that scientific comparison.
 
 `rk_plain.jl` and `rk_statistical_library.jl` exercise BRM-owned statistical
 declarations through ordinary RKPPL lowering. `rk_statistical_source.jl`
