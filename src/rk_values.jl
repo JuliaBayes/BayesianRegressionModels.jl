@@ -31,7 +31,8 @@ _rk_value_dummy(values, level) = Float64.(isequal.(values, level))
 
 function _rk_ast_positive_prior(prior, bindings, taken; default=:HalfNormal)
     prior === nothing && return default === :LogNormal ?
-        Expr(:call, :LogNormal, 0, 1) : Expr(:call, :HalfNormal, 1)
+        Expr(:call, :LogNormal, 0, 1) :
+        Expr(:call, :restricted, Expr(:call, :Normal, 0, 1), 0.0, Inf)
     prepared = _brm_prepare_expr(prior)
     if prepared.callable === truncated
         all(key -> key in (:lower, :upper), keys(prepared.kwargs)) || error(
@@ -58,7 +59,9 @@ function _rk_ast_positive_prior(prior, bindings, taken; default=:HalfNormal)
         :HalfNormal, :HalfCauchy, :truncated) && return expression
     family === :Uniform && first(prepared.args) isa Real &&
         first(prepared.args) >= 0 && return expression
-    Expr(:call, :truncated, expression, 0.0, Inf)
+    # A BRM scale declaration constrains support without renormalizing its
+    # authored family. Explicit `truncated` above retains its own normalizer.
+    Expr(:call, :restricted, expression, 0.0, Inf)
 end
 
 function _rk_ast_value_bucket(bucket, draws, effects, taken, bindings)
@@ -77,7 +80,8 @@ function _rk_ast_value_bucket(bucket, draws, effects, taken, bindings)
         stratum = grouping.by
         L = _rk_ast_fresh_name(string(draws, "_L"), taken)
         push!(stmts, Expr(:call, :.~, Expr(:ref, tau,
-            Expr(:call, :levels, stratum), index), _rk_ast_dotted(:HalfNormal, 1)))
+            Expr(:call, :levels, stratum), index),
+            _rk_ast_dotted(:restricted, Expr(:call, :Normal, 0, 1), 0.0, Inf)))
         if K > 1
             cell = Expr(:call, :~, Expr(:ref, L, :k),
                 Expr(:call, :LKJCholesky, K, bucket.lkj_eta))
@@ -194,7 +198,8 @@ function _rk_ast_value_spline(term, taken)
     for (j, block) in enumerate(Z)
         sd = _rk_ast_fresh_name(string(term.options.id, "_sd", j), taken)
         raw = _rk_ast_fresh_name(string(term.options.id, "_raw", j), taken)
-        push!(stmts, Expr(:call, :~, sd, Expr(:call, :HalfNormal, 1)))
+        push!(stmts, Expr(:call, :~, sd,
+            Expr(:call, :restricted, Expr(:call, :Normal, 0, 1), 0.0, Inf)))
         push!(stmts, Expr(:call, :.~, Expr(:ref, raw, Expr(:call, :axes, block, 2)),
             _rk_ast_dotted(:Normal, 0, 1)))
         push!(parts, Expr(:call, :*, block, Expr(:call, :.*, sd, raw)))
@@ -224,7 +229,7 @@ function _rk_ast_value_hsgp(term, taken, bindings)
     rho_value = if periodic || options.iso
         rho = _rk_ast_fresh_name(string(options.id, "_rho"), taken)
         prior = _rk_ast_positive_prior(options.rho_prior, bindings, taken)
-        options.rho_truncated && (prior = Expr(:call, :truncated, prior, floors, Inf))
+        options.rho_truncated && (prior = Expr(:call, :restricted, prior, floors, Inf))
         push!(stmts, Expr(:call, :~, rho, prior))
         rho
     else
@@ -233,7 +238,7 @@ function _rk_ast_value_hsgp(term, taken, bindings)
             rho = _rk_ast_fresh_name(string(options.id, "_rho", j), taken)
             push!(rhos, rho)
             prior = _rk_ast_positive_prior(options.rho_prior, bindings, taken)
-            options.rho_truncated && (prior = Expr(:call, :truncated, prior, Expr(:ref, floors, j), Inf))
+            options.rho_truncated && (prior = Expr(:call, :restricted, prior, Expr(:ref, floors, j), Inf))
             push!(stmts, Expr(:call, :~, rho, prior))
         end
         Expr(:vect, rhos...)
@@ -355,22 +360,30 @@ function _rk_predictor_components(brmi, context, predictor_order, columns,
     (; predictors, priors, r2d2_priors, horseshoe_priors, buckets, vectors)
 end
 
-function _brm_rk_value_plan(brmi, program, observations)
+function _brm_rk_value_plan(brmi, program, observations; kernels=(), submodels=())
     context = program.context
     prepared = _brm_prepare_model(brmi; program)
-    roots = Set(observation.key for observation in observations)
+    roots = Set{Symbol}(observation.key for observation in observations)
+    routes = (kernels..., submodels...)
+    for route in routes
+        push!(roots, route.name)
+        union!(roots, route.globals)
+    end
     union!(roots, (parameter.name for parameter in prepared.parameters))
     referenced = _brm_reachable_operations(program, roots)
-    assignments = Tuple(a for a in prepared.assignments if a.name in referenced)
+    ordinary_assignments = Tuple(a for a in prepared.assignments if a.name in referenced)
+    operations = Dict(a.name => a for a in (ordinary_assignments..., routes...))
+    assignments = Tuple(operations[name] for name in program.order if haskey(operations, name))
     parameter_names = Set{Symbol}(p.name for p in prepared.parameters)
     assignment_names = Set{Symbol}(a.name for a in assignments)
     consts = Dict{Symbol,Float64}(a.name => Float64(a.expression)
-        for a in assignments if a.expression isa Number)
+        for a in ordinary_assignments if a.expression isa Number)
     parameters = _rk_plan_parameters!(prepared, context.data, consts,
         Dict{Symbol,Symbol}(), parameter_names, assignment_names)
     vectors = _rk_plan_vector_parameters!(prepared, consts)
     predictor_order = Symbol[op.name for op in program.operations
-        if op.role === :predictor && op.name in referenced]
+        if op.role === :predictor && op.name in referenced &&
+            !any(route -> route.name === op.name, routes)]
     columns = Dict{Symbol,AbstractVector}()
     derived = _RKDerivedSpec[]
     taken = union(Set(predictor_order), parameter_names, assignment_names,
@@ -381,6 +394,9 @@ function _brm_rk_value_plan(brmi, program, observations)
     # Regression columns each keep their own row axis. The PPL binder checks
     # their consumers; neither a subject nor a secondary axis is resized to y.
     value_columns = Dict{Symbol,Any}(columns)
+    for route in routes
+        merge!(value_columns, route.columns)
+    end
     for key in referenced
         haskey(context.data, key) || continue
         haskey(value_columns, key) || (value_columns[key] = context.data[key])
@@ -402,13 +418,20 @@ function _brm_rk_value_plan(brmi, program, observations)
                     o.response, context.data; prefix="RK backend")
             end
         end
-        value_columns[o.name] = o.response
+        value_columns[o.name] = isempty(kernels) ? o.response :
+            _rk_kernel_observed_values(o, kernels)
     end
     regression = _RKStructuralPlan(_RKLikelihoodSpec[], components.predictors,
         components.priors, parameters, _RKAssignmentSpec[], derived, columns,
         0, components.buckets, vectors, components.r2d2_priors,
         components.horseshoe_priors)
     _RKValuePlan(regression, assignments, obs, value_columns)
+end
+
+function _rk_emit_value_assignment!(defs, statements, bindings, taken,
+        assignment::_BRMPreparedAssignment)
+    push!(statements, Expr(:(=), assignment.name,
+        _rk_value_expr!(bindings, assignment.expression, taken)))
 end
 
 function _rk_value_callee!(bindings, callable, taken)
@@ -458,14 +481,14 @@ function _rk_emit_ast(plan::_RKValuePlan)
     union!(reserved, (a.name for a in plan.assignments))
     regression = _rk_emit_ast(plan.regression, false; values=true, reserved)
     stmts = copy(regression.main.args)
+    defs = copy(regression.defs)
     bindings = copy(regression.bindings)
     taken = Set{Symbol}(keys(plan.columns))
     union!(taken, first.(bindings), (a.name for a in plan.assignments),
         (p.name for p in plan.regression.parameters),
         (p.name for p in plan.regression.predictors))
     for assignment in plan.assignments
-        push!(stmts, Expr(:(=), assignment.name,
-            _rk_value_expr!(bindings, assignment.expression, taken)))
+        _rk_emit_value_assignment!(defs, stmts, bindings, taken, assignment)
     end
     for observation in plan.observations
         modifier = observation.modifier
@@ -485,5 +508,6 @@ function _rk_emit_ast(plan::_RKValuePlan)
         end
         push!(stmts, Expr(:call, :.~, observation.name, base))
     end
-    _RKEmittedProgram(regression.defs, Expr(:block, stmts...), bindings)
+    _rk_fitted_source(_RKEmittedProgram(defs, Expr(:block, stmts...), bindings),
+        _rk_observed_names(plan))
 end

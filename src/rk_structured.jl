@@ -52,7 +52,7 @@ function _rk_ast_hsgp_hyper!(stmts, options, hyper, floors, taken, bindings, G)
         value = _rk_ast_fresh_name(string(id, "_", stem), taken)
         expression = _rk_ast_positive_prior(prior, bindings, taken)
         hyper === :length_scale && options.rho_truncated &&
-            (expression = Expr(:call, :truncated, expression, floors, Inf))
+            (expression = Expr(:call, :restricted, expression, floors, Inf))
         push!(stmts, Expr(:call, :~, value, expression))
         return value
     end
@@ -70,7 +70,8 @@ function _rk_ast_hsgp_hyper!(stmts, options, hyper, floors, taken, bindings, G)
     if !isempty(plan.ranefs)
         sd = _rk_ast_fresh_name(string(id, "_", stem, "_sd"), taken)
         z = _rk_ast_fresh_name(string(id, "_", stem, "_z"), taken)
-        push!(stmts, Expr(:call, :~, sd, Expr(:call, :HalfNormal, 1)))
+        push!(stmts, Expr(:call, :~, sd,
+            Expr(:call, :restricted, Expr(:call, :Normal, 0, 1), 0.0, Inf)))
         push!(stmts, Expr(:call, :.~, Expr(:ref, z, Expr(:call, :(:), 1, G)),
             _rk_ast_dotted(:Normal, 0, 1)))
         push!(parts, Expr(:call, :.*, sd, z))
@@ -115,7 +116,7 @@ function _rk_ast_structured_block(field, taken, bindings)
     if field.prior === :correlated_normal
         tau = _rk_ast_fresh_name(string(block, "_sd"), taken)
         push!(stmts, Expr(:call, :.~, Expr(:ref, tau, last(axes)),
-            _rk_ast_dotted(:HalfNormal, 1)))
+            _rk_ast_dotted(:restricted, Expr(:call, :Normal, 0, 1), 0.0, Inf)))
         push!(stmts, Expr(:call, :.~, Expr(:ref, z, axes...), _rk_ast_dotted(:Normal, 0, 1)))
         value = if K == 1
             Expr(:call, :.*, z, Expr(:ref, tau, 1))

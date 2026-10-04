@@ -719,10 +719,10 @@ end
     nt = constrain(layout, u)
     r = _ref_slope_r(_parity_cols.g, _parity_ranef(nt, backend).sd[1], _parity_ranef(nt, backend).zflat, _parity_cols.x)
     ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ r, nt.sigma), _parity_cols.y))
-    # The explicit HalfNormal scale includes its log(2) normalizer.
+    # The original positive Normal kernel is restricted without renormalization.
     pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) +
         logpdf(Exponential(1), nt.sigma) +
-        logpdf(Normal(0, 1), _parity_ranef(nt, backend).sd[1]) + log(2) +
+        logpdf(Normal(0, 1), _parity_ranef(nt, backend).sd[1]) +
         sum(logpdf.(Normal(0, 1), _parity_ranef(nt, backend).zflat))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
@@ -762,7 +762,7 @@ end
     pr = logpdf(Normal(0, 5), nt.mu_Intercept) +
         logpdf(Exponential(1), nt.sigma) +
         _ref_lkj_k2_eta1(effects.L) +
-        sum(logpdf.(Normal(0, 1), effects.sd)) + 2log(2) +
+        sum(logpdf.(Normal(0, 1), effects.sd)) +
         sum(logpdf.(Normal(0, 1), effects.z))
     jac = log(nt.sigma) + sum(log, effects.sd) + _lkj2_vine_logjac(u[end])
     @test _rk_query(backend, :likelihood, u) ≈ ll
@@ -794,12 +794,12 @@ end
     pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) +
         logpdf(Exponential(1), nt.sigma) +
         _ref_lkj_k2_eta1(_parity_ranef(nt, backend).L) +
-        sum(logpdf.(Normal(0, 1), _parity_ranef(nt, backend).sd)) + length(_parity_ranef(nt, backend).sd) * log(2) +
+        sum(logpdf.(Normal(0, 1), _parity_ranef(nt, backend).sd)) +
         sum(logpdf.(Normal(0, 1), _parity_ranef(nt, backend).zflat))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     @test _rk_query(backend, :likelihood, u) ≈ -34.484707540969616 atol = 1e-12
-    @test _rk_query(backend, :prior, u) ≈ (-12.267527341929741 + 2log(2)) atol = 1e-12
+    @test _rk_query(backend, :prior, u) ≈ -12.267527341929741 atol = 1e-12
     jac = log(nt.sigma) + sum(log, _parity_ranef(nt, backend).sd) + _lkj2_vine_logjac(u[end])
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
@@ -828,7 +828,7 @@ end
     pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) +
         logpdf(Exponential(1), nt.sigma) +
         _ref_lkj_k2_eta1(_parity_ranef(nt, backend).L) +
-        sum(logpdf.(Normal(0, 1), _parity_ranef(nt, backend).sd)) + length(_parity_ranef(nt, backend).sd) * log(2) +
+        sum(logpdf.(Normal(0, 1), _parity_ranef(nt, backend).sd)) +
         sum(logpdf.(Normal(0, 1), _parity_ranef(nt, backend).zflat))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
@@ -866,7 +866,7 @@ end
         logpdf(Normal(0, 5), _parity_population(nt, backend, :mu2)[1]) +
         logpdf(Exponential(1), nt.s) +
         _ref_lkj_k2_eta1(_parity_ranef(nt, backend).L) +
-        sum(logpdf.(Normal(0, 1), _parity_ranef(nt, backend).sd)) + length(_parity_ranef(nt, backend).sd) * log(2) +
+        sum(logpdf.(Normal(0, 1), _parity_ranef(nt, backend).sd)) +
         sum(logpdf.(Normal(0, 1), _parity_ranef(nt, backend).zflat))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
@@ -899,7 +899,7 @@ end
     pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) +
         logpdf(Exponential(1), nt.sigma) +
         _ref_lkj_k2_eta1(_parity_ranef(nt, backend).L) +
-        sum(logpdf.(Normal(0, 1), _parity_ranef(nt, backend).sd)) + length(_parity_ranef(nt, backend).sd) * log(2) +
+        sum(logpdf.(Normal(0, 1), _parity_ranef(nt, backend).sd)) +
         sum(logpdf.(Normal(0, 1), _parity_ranef(nt, backend).zflat))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
@@ -2080,8 +2080,7 @@ end
 
 function _ref_hsgp_prior(a, sig, rhos, sigh, beta, floors)
     return logpdf(Normal(0, 5), a) + logpdf(Exponential(1), sig) +
-        sum(logpdf(LogNormal(), r) - logccdf(LogNormal(), floor)
-            for (r, floor) in zip(rhos, floors)) +
+        sum(logpdf(LogNormal(), r) for r in rhos) +
         logpdf(LogNormal(0, 1), sigh) + sum(logpdf.(Normal(0, 1), beta))
 end
 
@@ -2210,8 +2209,7 @@ end
 end
 
 # Spline density references retain the independently measured Stan points.
-# The explicit HalfNormal declarations contribute one log(2) per scale
-# relative to those historical unnormalized Stan priors.
+# Default scales retain the original support-restricted Normal density.
 @stestset "rk parity spline s default" begin
     # Pair-agreed Xoshiro(7207) n=80 probe, default k=10 basis.
     (; brmi, x, y) = spline_s_parity_case()
@@ -2233,7 +2231,7 @@ end
     Xnull, Zpen = BRM._brm_apply_spline(BRM._brm_fit_spline(x; k=10), x)
     mu_hat = _parity_population(nt, backend, :mu)[1] .+ Xnull[:, 2:2] * nt.s_x_fixed .+ Zpen * (sd .* nt.s_x_raw1)
     ll = sum(logpdf.(Normal.(mu_hat, sig), y))
-    pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) + logpdf(Normal(), sd) + log(2) +
+    pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) + logpdf(Normal(), sd) +
         sum(logpdf.(Normal(), nt.s_x_raw1)) + logpdf(Exponential(1), sig)
     jac = log(sd) + log(sig)
     @test _rk_query_translated(backend, translated, :likelihood, u) ≈ ll
@@ -2245,7 +2243,7 @@ end
     # preserves the likelihood; only the Normal(0,5) intercept prior moves.
     intercept_bridge = logpdf(Normal(0, 5), nt.mu_Intercept) - logpdf(Normal(0, 5), -0.3)
     @test _rk_query_translated(backend, translated, :sampler, u) ≈
-        SPLINE_S_SB_ANCHOR + intercept_bridge + log(2) atol=1e-9
+        SPLINE_S_SB_ANCHOR + intercept_bridge atol=1e-9
     problem = BRM.rk_logdensity_problem(backend;
         ad_backend = _PARITY_BACKEND, u0 = u)
     value, grad = LogDensityProblems.logdensity_and_gradient(problem, u)
@@ -2278,7 +2276,7 @@ end
         Zrn * (sd[2] .* nt.t2_x_z_raw2) .+
         Znr * (sd[3] .* nt.t2_x_z_raw3)
     ll = sum(logpdf.(Normal.(mu_hat, sig), y))
-    pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) + sum(logpdf.(Normal(), sd)) + 3log(2) +
+    pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) + sum(logpdf.(Normal(), sd)) +
         sum(logpdf.(Normal(), nt.t2_x_z_raw1)) +
         sum(logpdf.(Normal(), nt.t2_x_z_raw2)) +
         sum(logpdf.(Normal(), nt.t2_x_z_raw3)) +
@@ -2291,7 +2289,7 @@ end
     # Re-derived with canonical signs by test/spline_sb_parity.jl; t2 has
     # the same layout in both backends and needs no intercept-prior bridge.
     @test _rk_query_translated(backend, translated, :sampler, u) ≈
-        (SPLINE_T2_SB_ANCHOR + 3log(2)) atol=1e-9
+        SPLINE_T2_SB_ANCHOR atol=1e-9
     problem = BRM.rk_logdensity_problem(backend;
         ad_backend = _PARITY_BACKEND, u0 = u)
     value, grad = LogDensityProblems.logdensity_and_gradient(problem, u)
@@ -2887,7 +2885,7 @@ end
     ll = sum(logpdf(Normal(beta + r[i], sigma), _parity_cols_mm.y[i])
         for i in 1:6)
     pr = logpdf(Normal(0, 5), beta) + logpdf(Exponential(1), sigma) +
-        _ref_lkj_k2_eta1(L) + sum(logpdf(Normal(0, 1), v) for v in tau) + length(tau)*log(2) +
+        _ref_lkj_k2_eta1(L) + sum(logpdf(Normal(0, 1), v) for v in tau) +
         sum(logpdf(Normal(0, 1), v) for v in zf)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
@@ -2920,7 +2918,7 @@ end
         for i in 1:6)
     # The vacuous 1x1 LKJ contributes 0 (pinned by the value match).
     pr = logpdf(Normal(0, 5), beta) + logpdf(Exponential(1), sigma) +
-        logpdf(Normal(0, 1), tau) + log(2) +
+        logpdf(Normal(0, 1), tau) +
         sum(logpdf(Normal(0, 1), v) for v in zf)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
@@ -2953,7 +2951,7 @@ end
     ll = sum(logpdf(Normal(beta + r[i], sigma), _parity_cols_gr.y[i])
         for i in 1:6)
     pr = logpdf(Normal(0, 5), beta) + logpdf(Exponential(1), sigma) +
-        sum(logpdf(Normal(0, 1), v) for v in tau) + length(tau)*log(2) +
+        sum(logpdf(Normal(0, 1), v) for v in tau) +
         sum(logpdf(Normal(0, 1), v) for v in z)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
@@ -2995,8 +2993,8 @@ end
         for i in 1:6)
     pr = logpdf(Normal(0, 5), beta) + logpdf(Exponential(1), sigma) +
         _ref_lkj_k2_eta1(L1) + _ref_lkj_k2_eta1(L2) +
-        sum(logpdf(Normal(0, 1), v) for v in tau1) + 2log(2) +
-        sum(logpdf(Normal(0, 1), v) for v in tau2) + 2log(2) +
+        sum(logpdf(Normal(0, 1), v) for v in tau1) +
+        sum(logpdf(Normal(0, 1), v) for v in tau2) +
         sum(logpdf(Normal(0, 1), v) for v in draws.z)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr

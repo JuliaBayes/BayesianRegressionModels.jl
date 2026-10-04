@@ -29,10 +29,10 @@ rk_artifact_version() = 3
 # (`rk_translate_artifact`) consult. It currently equals the extension's
 # `_RK_PLAN_TYPES`; it is kept as its own predicate so a future plan kind
 # can join the RK backend without silently becoming an artifact kind.
-const _RK_ARTIFACT_PLAN_TYPES = Union{_RKStructuralPlan,_RKKernelPlan,_RKValuePlan}
+const _RK_ARTIFACT_PLAN_TYPES = Union{_RKStructuralPlan,_RKKernelPlan,_RKValuePlan,_RKHeldOutPlan}
 
 """
-    emit_rk_artifact(brmi::BRMI; case_id, provenance=nothing, brm_pin=nothing)
+    emit_rk_artifact(brmi::BRMI; case_id, provenance=nothing, brm_pin=nothing, held_out=())
 
 Lower `brmi` through the production RK route (`_brm_rk_plan` →
 `_rk_emit_ast` with production defaults) and pack the v3 append artifact
@@ -44,10 +44,10 @@ caller-supplied (the worker resolves the pin from its checkout; nothing
 here shells out). Fails closed on a malformed emission.
 """
 function emit_rk_artifact(brmi::BRMI; case_id::AbstractString,
-        provenance=nothing, brm_pin=nothing)
+        provenance=nothing, brm_pin=nothing, held_out=())
     isempty(case_id) && error(
         "RK artifact: case_id must be non-empty")
-    plan = _brm_rk_plan(brmi)
+    plan = _brm_rk_plan(brmi; held_out)
     emitted = _rk_emit_ast(plan)
     _check_emitted(emitted, case_id)
     columns = plan.columns
@@ -69,17 +69,18 @@ function emit_rk_artifact(brmi::BRMI; case_id::AbstractString,
 end
 
 function _check_emitted(emitted::_RKEmittedProgram, case_id)
+    _rk_validate_source_definitions(emitted)
     main = emitted.main
     main isa Expr && main.head === :block || error(
         "RK artifact: case `$(case_id)` emitted a non-block main " *
         "($(typeof(main))) — refusing to pack an artifact the thin " *
         "layer cannot lower")
     for (i, d) in enumerate(emitted.defs)
-        d isa Expr && d.head === :(=) &&
+        d isa Expr && d.head in (:(=), :function) &&
             length(d.args) == 2 && d.args[1] isa Expr &&
             d.args[1].head === :call || error(
             "RK artifact: case `$(case_id)` def $i is not a " *
-            "`name(args...) = begin ... end` form — refusing to pack")
+            "ordinary function or `@rkppl` definition — refusing to pack")
     end
     return nothing
 end
@@ -190,6 +191,11 @@ function show_rk_plan(plan::_RKValuePlan)
     "values      = ordinary callable assignments\n" *
         "observations = [$(join((string(o.name) for o in plan.observations), ", "))]\n" *
         show_rk_plan(plan.regression)
+end
+
+function show_rk_plan(plan::_RKHeldOutPlan)
+    "held_out    = [$(join(sort!(string.(collect(plan.held_out))), ", "))]\n" *
+        show_rk_plan(plan.parent)
 end
 
 function _rk_show_terms(terms)

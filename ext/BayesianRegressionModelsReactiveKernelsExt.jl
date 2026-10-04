@@ -10,13 +10,14 @@ const BRM = BayesianRegressionModels
 # The emitted source is the executable contract. Every statistical prior and
 # observation role lowers through the public RKPPL surface; binding supplies
 # the data, with no ordinal or missing-response plan mutations.
-const _RK_PLAN_TYPES = Union{BRM._RKStructuralPlan,BRM._RKKernelPlan,BRM._RKValuePlan}
+const _RK_PLAN_TYPES = Union{BRM._RKStructuralPlan,BRM._RKKernelPlan,BRM._RKValuePlan,BRM._RKHeldOutPlan}
 
-# Evaluate the emitted submodel defs through `@rkppl` in a FRESH module
+# Evaluate ordinary native functions and `@rkppl` definitions in a fresh module
 # per lowering. Each build owns its definition namespace even when different
 # programs use the same authored names. The macrocall `Expr`
 # is exactly the parser's shape for `@rkppl sm(args...) = begin ... end`.
 function _rk_emit_module(emitted::BRM._RKEmittedProgram)
+    BRM._rk_validate_source_definitions(emitted)
     mod = Module(gensym(:RKEmittedModels))
     Core.eval(mod, :(using ReactiveKernelsPPL))
     Core.eval(mod, :(import BayesianRegressionModels:
@@ -29,35 +30,21 @@ function _rk_emit_module(emitted::BRM._RKEmittedProgram)
         Core.eval(mod, Expr(:const, Expr(:(=), name, QuoteNode(value))))
     end
     for d in emitted.defs
-        Core.eval(mod, Expr(:macrocall, Symbol("@rkppl"),
-            LineNumberNode(0), d))
+        if d.head === :function
+            Core.eval(mod, d)
+        else
+            Core.eval(mod, Expr(:macrocall, Symbol("@rkppl"),
+                LineNumberNode(0), d))
+        end
     end
     mod
 end
 
-function _rk_translate_from_emitted(plan::BRM._RKStructuralPlan,
+function _rk_translate_from_emitted(plan::_RK_PLAN_TYPES,
         emitted::BRM._RKEmittedProgram)
     unbound = lower_rkppl(emitted.main,
         plan.columns; mod=_rk_emit_module(emitted),
-        conditioned=Tuple(unique([name for response in plan.responses
-            for name in (response.response, response.extra_responses...)])))
-    bind_data(unbound, plan.columns)
-end
-
-function _rk_translate_from_emitted(plan::BRM._RKKernelPlan,
-        emitted::BRM._RKEmittedProgram)
-    unbound = lower_rkppl(emitted.main,
-        plan.columns; mod=_rk_emit_module(emitted),
-        conditioned=(plan.kernel.data_columns[
-            findfirst(==(plan.kernel.obs_response), plan.kernel.slice_params)],))
-    bind_data(unbound, plan.columns)
-end
-
-function _rk_translate_from_emitted(plan::BRM._RKValuePlan,
-        emitted::BRM._RKEmittedProgram)
-    unbound = lower_rkppl(emitted.main,
-        plan.columns; mod=_rk_emit_module(emitted),
-        conditioned=Tuple(o.name for o in plan.observations))
+        conditioned=BRM._rk_observed_names(plan))
     bind_data(unbound, plan.columns)
 end
 
@@ -117,8 +104,8 @@ function BRM._brm_rk_model(plan::_RK_PLAN_TYPES)
     build_kernel(_rk_translated_plan(plan))
 end
 
-function BRM.RKBRMI(brmi::BRM.BRMI)
-    plan = BRM._brm_rk_plan(brmi)
+function BRM.RKBRMI(brmi::BRM.BRMI; held_out=())
+    plan = BRM._brm_rk_plan(brmi; held_out)
     BRM.RKBRMI(brmi, plan, BRM._brm_rk_model(plan))
 end
 

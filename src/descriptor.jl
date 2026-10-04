@@ -544,7 +544,7 @@ function _brm_kernel_cell_values(brmi)
         getf(rhs) === kernel || continue
         args = getargs(rhs)
         isempty(args) && continue
-        lam = first(args)
+        lam = _brm_inline_expr(first(args))
         (lam isa Expr && length(lam.args) >= 2) || continue
         body = lam.args[2]
         stmts = Meta.isexpr(body, :block) ? body.args : Any[body]

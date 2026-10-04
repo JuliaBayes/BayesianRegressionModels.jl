@@ -24,7 +24,7 @@ using LinearAlgebra
         mu=[u[a]+block[data.g[i],1]+block[data.g[i],2]*data.x[i] for i in eachindex(data.y)]
         sum(logpdf.(Normal.(mu,1),data.y)) + logpdf(Normal(),u[a]) +
             sum(logpdf.(Normal(),u[z])) +
-            sum(logpdf.(truncated(Normal(),0,Inf),scales)) + sum(u[tau]) -
+            sum(logpdf.(Normal(),scales)) + sum(u[tau]) -
             log(2) + log1p(-corr^2)
     end
     for u in (zeros(8),fill(.13,8),collect(range(-.2,.3;length=8)))
@@ -40,15 +40,15 @@ using LinearAlgebra
         Symbol("b_line_g_z.1.2")=>"b_line_g_z_flat.2",
         Symbol("b_line_g_z.2.1")=>"b_line_g_z_flat.3",
         Symbol("b_line_g_z.2.2")=>"b_line_g_z_flat.4"]
-    # USER 0m1j3iz chose normalized positive laws. Historical constrained
-    # Stan Normal kernels omit the two half-Normal log(2) constants.
+    # Exact original-model acceptance retains the constrained family kernel;
+    # no positive-support normalizer is added or subtracted by the comparison.
     for u in (zeros(8),collect(range(-.2,.3;length=8)))
         permutation=BRM.resolve_sb_map(mapping,names,BridgeStan.param_unc_names(stan.model);
             case_id="downstream-group-line")
         su=BRM.apply_sb_map(u,permutation); sg=similar(su)
         sv,_=BridgeStan.log_density_gradient!(stan.model,su,sg;propto=false,jacobian=true)
         rv=LogDensityProblems.logdensity(problem,u)
-        @test rv ≈ sv+2log(2) atol=2e-11 rtol=2e-11
+        @test rv ≈ sv atol=2e-11 rtol=2e-11
         h=1e-5
         independent_gradient=map(eachindex(u)) do j
             plus,minus=copy(u),copy(u);plus[j]+=h;minus[j]-=h
@@ -145,15 +145,14 @@ end
                     sd=index("hsgp_x_$(stem)_sd")
                     zs=[index("hsgp_x_$(stem)_z.$g") for g in 1:G]
                     prior+=logpdf(Normal(),u[beta])+sum(logpdf.(Normal(),u[zs]))+
-                        logpdf(truncated(Normal(),0,Inf),exp(u[sd]))+u[sd]
+                        logpdf(Normal(),exp(u[sd]))+u[sd]
                     value=exp.(u[beta].+exp(u[sd]).*u[zs])
                     stem=="rho" ? max.(value,floor) : value
                 else
                     q=index("hsgp_x_$(stem)")
                     bound=label=="default" && stem=="rho" ? floor : 0.
                     value=bound+exp(u[q])
-                    law=label=="explicit" ? Exponential(stem=="rho" ? .7 : 1.3) :
-                        (stem=="rho" ? truncated(LogNormal(),floor,Inf) : LogNormal())
+                    law=label=="explicit" ? Exponential(stem=="rho" ? .7 : 1.3) : LogNormal()
                     prior+=logpdf(law,value)+u[q]
                     fill(value,G)
                 end
@@ -168,10 +167,7 @@ end
         for u in (zeros(length(names)),fill(.13,length(names)),
                 collect(range(-.2,.3;length=length(names))))
             check_consumer_point(problem,u,oracle)
-            # Historical Stan lower bounds omit conditional normalizers.
-            offset=label=="hyper" ? 2log(2) : label=="default" ?
-                -logccdf(LogNormal(),floor) : 0.
-            check_consumer_stan(problem,stan,mapping,backend,u;density_offset=offset)
+            check_consumer_stan(problem,stan,mapping,backend,u)
         end
         @test isequal(data,before)
     end
@@ -215,8 +211,7 @@ end
             rho=label=="bounded" ? .2+1.8p :
                 (label=="default" ? floor : 0.)+exp(u[r])
             sigma=exp(u[s])
-            rho_law=label=="bounded" ? Uniform(.2,2.) : label=="default" ?
-                truncated(LogNormal(),floor,Inf) : LogNormal()
+            rho_law=label=="bounded" ? Uniform(.2,2.) : LogNormal()
             sigma_law=label=="bounded" ? truncated(Normal(),0,Inf) : LogNormal()
             jac=label=="bounded" ? log(1.8)+log(p)+log1p(-p) : u[r]
             prior=logpdf(Normal(),u[a])+sum(logpdf.(Normal(),u[z]))+
@@ -231,8 +226,7 @@ end
         append!(mapping,[names[z[k]]=>"hsgp_x_beta_raw.$k" for k in 1:3])
         for u in (zeros(6),fill(.13,6),collect(range(-.2,.3;length=6)))
             check_consumer_point(problem,u,oracle)
-            offset=label=="default" ? -logccdf(LogNormal(),floor) : 0.
-            check_consumer_stan(problem,stan,mapping,backend,u;density_offset=offset)
+            check_consumer_stan(problem,stan,mapping,backend,u)
         end
         @test isequal(data,before)
     end

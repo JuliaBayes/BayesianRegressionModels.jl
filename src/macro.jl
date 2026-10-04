@@ -1102,6 +1102,21 @@ else
     # dump(x)
     # error("Don't know how to handle xname($x)!")
 end
+# The inline kernel body remains ordinary source. Retain its lexical module
+# alongside it so a native emitter resolves the same authored callables that
+# the Stan emitter resolves, including definitions outside Main.
+struct _BRMInlineBody
+    expression::Expr
+    scope::Module
+end
+_brm_inline_expr(x) = x
+_brm_inline_expr(x::_BRMInlineBody) = x.expression
+_brm_inline_scope(x) = Main
+_brm_inline_scope(x::_BRMInlineBody) = x.scope
+Base.show(io::IO, x::_BRMInlineBody) = show(io, x.expression)
+Base.deepcopy_internal(x::_BRMInlineBody, stack::IdDict) =
+    _BRMInlineBody(Base.deepcopy_internal(x.expression, stack), x.scope)
+
 _x(x) = x
 _x(x::Symbol) = x
 _x(x::Expr) = if x.head == :call
@@ -1128,7 +1143,8 @@ elseif x.head == :->
     # The folded-in do-block lambda: capture it VERBATIM as an Expr rather than
     # recursing — its body is SLIC to splice into the emitted plate, NOT more @brm
     # formula. No existing formula uses a bare lambda (regression-safe).
-    Meta.quot(x)
+    Expr(:call, _BRMInlineBody, Meta.quot(x),
+        Expr(:macrocall, Symbol("@__MODULE__"), LineNumberNode(0)))
 else
     Expr(x.head, _x.(x.args)...)
 end

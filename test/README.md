@@ -115,6 +115,20 @@ specificity errors. Its unchanged linked multi-axis model compares normalized
 Normal/censored densities, standard native Enzyme gradients, mapped compiled
 Stan and complete public printed-source replay.
 
+`rk_held_out.jl` checks response-level likelihood withholding with shared and
+separate parameter branches. It preserves every fitted prior and coordinate,
+compares normalized native densities and reverse gradients against independent
+oracles and compiled Stan, and replays the complete emitted source and artifact.
+
+`rk_callable_terms.jl` checks positional/keyword formula broadcasting, including
+singleton input axes, against independent and compiled Stan targets.
+`rk_kernel_values.jl` checks unequal and empty grouped cells, explicit ragged
+joins, lexical native callables, distinct catalogue/response axes and in-cell
+held-out aliases without rewriting the original BRMI. `rk_submodel_values.jl`
+checks paired source hooks for an empty marker with active predictor keywords,
+no extra result coefficient, exact callable bindings and fresh-module replay;
+an emitted entry and a bound leaf cannot share the same symbol.
+
 `rk_plain.jl` and `rk_statistical_library.jl` exercise BRM-owned statistical
 declarations through ordinary RKPPL lowering. `rk_leveled.jl` adds independent
 categorical-reference and multinomial row-density, Jacobian and ordinary

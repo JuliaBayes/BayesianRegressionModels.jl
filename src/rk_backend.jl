@@ -139,6 +139,15 @@ const _RK_DERIVED_REDNAME = Dict{Function,Symbol}(
     sum => :sum, mean => :mean, std => :std, var => :var,
     minimum => :minimum, maximum => :maximum, length => :length)
 
+# A data formula call keeps the exact callable and records which positional
+# and keyword inputs broadcast. The emitter exposes that call in a submodel.
+struct _RKDataCall{F,K<:Tuple,V<:Tuple}
+    callable::F
+    npos::Int
+    keywords::K
+    vector_inputs::V
+end
+
 struct _RKDerivedSpec
     name::Symbol
     expression::Expr # dotted thin-layer body (VectorAssignmentSpec vocabulary)
@@ -411,13 +420,15 @@ _RKEmittedProgram(defs::Vector{Expr}, main::Expr) =
     _RKEmittedProgram(defs, main, Pair{Symbol,Any}[])
 
 """
-    RKBRMI(brmi; kwargs...)
+    RKBRMI(brmi; held_out=())
 
 A [`BRMI`](@ref) lowered to the ReactiveKernels backend. `plan` is the strict,
 RK-independent structural plan; `model` is the executable thin-layer program
 provided by `BayesianRegressionModelsReactiveKernelsExt` when ReactiveKernels
 is loaded. Implemented only by that extension; the generic here lets the core
 validate and materialise plans without loading RK.
+`held_out` selects a strict subset of response names whose likelihoods are
+withheld. Authored priors and sampled coordinates remain in the program.
 """
 struct RKBRMI{P<:BRMI,PL,M}
     parent::P
@@ -2427,6 +2438,12 @@ function _rk_eval_dotted(value, data::AbstractDict,
                             "derived value `$(repr(value))`")
     if value.head === :call && !isempty(value.args)
         fn = value.args[1]
+        if fn isa _RKDataCall
+            args = map(a -> _rk_eval_dotted(a, data, derived, memo),
+                value.args[2:end])
+            return _brm_broadcast_data_call(fn.callable, Tuple(args[1:fn.npos]),
+                NamedTuple{fn.keywords}(Tuple(args[fn.npos+1:end])))
+        end
         fn isa Symbol || error("RK backend: internal: cannot evaluate " *
                                "derived call `$(repr(value))`")
         args = map(a -> _rk_eval_dotted(a, data, derived, memo),
@@ -2493,9 +2510,7 @@ function _rk_lower_data_expr(node, target::Symbol, origin::String,
     node isa ExprColumn || error(
         "$prefix: predictor `$target` $origin is not supported in slice 1")
     f = getf(node)
-    isempty(getkwargs(node)) || error(
-        "$prefix: predictor `$target` $origin call keywords are out of " *
-        "slice 1")
+    kwargs = getkwargs(node)
     args = getargs(node)
     if _brm_is_term_head(f) || f === (&) || f === (|) || f === factor ||
             f === offset || f === (~) || f === zscale || f === center ||
@@ -2504,7 +2519,7 @@ function _rk_lower_data_expr(node, target::Symbol, origin::String,
         error("$prefix: predictor `$target` $origin nests `$head`, which " *
               "is not admittable inside a data expression in slice 1")
     end
-    if f isa Function && f in _RK_ASSIGNMENT_REDUCTIONS
+    if isempty(kwargs) && f isa Function && f in _RK_ASSIGNMENT_REDUCTIONS
         length(args) == 1 || error(
             "$prefix: predictor `$target` $origin reduction " *
             "`$(nameof(f))` takes exactly one argument")
@@ -2518,7 +2533,7 @@ function _rk_lower_data_expr(node, target::Symbol, origin::String,
         _rk_cross_derived_refs!(lowered, data, columns)
         return Expr(:call, _RK_DERIVED_REDNAME[f], staged), false
     end
-    if f isa Function && haskey(_RK_DERIVED_MATH, f)
+    if isempty(kwargs) && f isa Function && haskey(_RK_DERIVED_MATH, f)
         length(args) == 1 || error(
             "$prefix: predictor `$target` $origin `$(nameof(f))` takes " *
             "exactly one argument")
@@ -2526,7 +2541,7 @@ function _rk_lower_data_expr(node, target::Symbol, origin::String,
             data, columns, derived, taken)
         return Expr(:., _RK_DERIVED_MATH[f], Expr(:tuple, lowered)), true
     end
-    if f isa Function && haskey(_RK_DERIVED_BINOPS, f)
+    if isempty(kwargs) && f isa Function && haskey(_RK_DERIVED_BINOPS, f)
         if length(args) == 1
             f === (-) || error(
                 "$prefix: predictor `$target` $origin unary " *
@@ -2547,7 +2562,7 @@ function _rk_lower_data_expr(node, target::Symbol, origin::String,
             data, columns, derived, taken)
         return Expr(:call, _RK_DERIVED_BINOPS[f], left, right), true
     end
-    if f isa Function && haskey(_RK_DERIVED_CMP, f)
+    if isempty(kwargs) && f isa Function && haskey(_RK_DERIVED_CMP, f)
         length(args) == 2 || error(
             "$prefix: predictor `$target` $origin `$(nameof(f))` takes " *
             "exactly two arguments")
@@ -2557,11 +2572,12 @@ function _rk_lower_data_expr(node, target::Symbol, origin::String,
             data, columns, derived, taken)
         return Expr(:call, _RK_DERIVED_CMP[f], left, right), true
     end
-    head = f isa Function ? nameof(f) : string(f)
-    error("$prefix: predictor `$target` $origin calls `$head`, which is " *
-          "out of slice 1 (admitted: +, -, *, /, ^, %, comparisons, " *
-          "log, log10, log1p, exp, expm1, sqrt, abs, sum, mean, std, " *
-          "var, minimum, maximum, length)")
+    inputs = (args..., values(kwargs)...)
+    lowered = map(value -> _rk_lower_data_expr(value, target, origin,
+        data, columns, derived, taken), inputs)
+    vector_inputs = Tuple(last(value) for value in lowered)
+    call = _RKDataCall(f, length(args), keys(kwargs), vector_inputs)
+    Expr(:call, call, (first(value) for value in lowered)...), any(vector_inputs)
 end
 
 # Comparison atoms for one categorical operand: `(group .== value)` per
@@ -3348,6 +3364,9 @@ function _rk_gate_norm_inner(node, data::AbstractDict,
     node.head === :call || error(
         "$prefix: internal: cannot normalize `$(repr(node))`")
     fn, args = node.args[1], node.args[2:end]
+    # An opaque callable has no proven affine simplification. Compare its
+    # complete recipe, including literals and keyword arguments, conservatively.
+    fn isa _RKDataCall && return (:data_call, fn.callable, fn.keywords, args...)
     fn isa Symbol || error(
         "$prefix: internal: cannot normalize `$(repr(node))`")
     haskey(_RK_DERIVED_RED_FN, fn) && return _RK_GATE_CONST
@@ -6956,9 +6975,9 @@ end
 function _rk_kernel_spec(brmi::BRMI, result::Symbol, rhs)
     prefix = "RK backend"
     dcols = getargs(rhs)
-    (!isempty(dcols) && first(dcols) isa Expr && first(dcols).head === :->) || error(
+    (!isempty(dcols) && _sb_kernel_lambda_parts(first(dcols)) !== nothing) || error(
         "$prefix: kernel(...) `$result` is missing its inline do-block cell")
-    lam = first(dcols)
+    lam = _brm_inline_expr(first(dcols))
     ptuple = lam.args[1]
     params = ptuple isa Symbol ? Symbol[ptuple] :
         (Meta.isexpr(ptuple, :tuple) && all(p -> p isa Symbol, ptuple.args) ?
@@ -7243,17 +7262,19 @@ arrays on their own row axes. Regression geometry and priors use the same
 preparation on both regression routes. The extension emits and binds the
 current RKPPL surface; unsupported formula terms fail with RK attribution.
 """
-function _brm_rk_plan(brmi::BRMI)
+function _brm_rk_unselected_plan(brmi::BRMI)
     prefix = "RK backend"
     # A kernel(...) model routes to the panel kernel planner; it has no
     # top-level observation, so it must not enter the GLM flow below.
-    isempty(_rk_kernel_ops(brmi)) || return _brm_rk_kernel_plan(brmi)
+    isempty(_rk_kernel_ops(brmi)) || return _brm_rk_composed_kernel_plan(brmi)
     observations = _brm_direct_observations(brmi; prefix)
     keys = Tuple(observation.key for observation in observations)
     length(unique(keys)) == length(keys) || error(
         "$prefix: multi-response observation names must be unique")
     program = _brm_prepare_program(
         brmi; context=_brm_backend_context(brmi; retain_mm_sources=true))
+    submodels = _rk_prepare_submodel_values(program)
+    !isempty(submodels) && return _brm_rk_value_plan(brmi, program, observations; submodels)
     _rk_needs_value_plan(program, observations) &&
         return _brm_rk_value_plan(brmi, program, observations)
     context = program.context
@@ -7614,6 +7635,8 @@ function _brm_rk_plan(brmi::BRMI)
     end
     statistical_inputs = Set{Symbol}(t.options.prepared_data for p in predictor_specs
         for t in p.terms if t.kind === :structured)
+    union!(statistical_inputs, _rk_callable_broadcast_columns(
+        predictor_specs, response_specs, derived, columns))
     _rk_gate_crossed_columns!(columns, n_obs, mi_packed; statistical_inputs)
     _rk_gate_trials_values!(response_specs, columns, n_obs)
     _rk_gate_multinomial_trials!(response_specs, columns, n_obs)

@@ -228,7 +228,7 @@ public_prior_reader(a, b, row) = a[row] .+ b[row]
         @test value ≈ expected_prior + expected_ll + logjac(backend.model.layout, u)
         @test isequal(u, saved)
         @test all(isfinite, gradient)
-        delta = sum(logpdf.(Exponential(0.7), sd) .- logpdf.(truncated(Normal(), 0, Inf), sd)) + lk(3) - lk(1)
+        delta = sum(logpdf.(Exponential(0.7), sd) .- logpdf.(Normal(), sd)) + lk(3) - lk(1)
         @test Base.invokelatest(prepare_query(backend.model, bound, :sampler), u) -
             Base.invokelatest(prepare_query(default_backend.model, default_bound, :sampler), u) ≈ delta
     end

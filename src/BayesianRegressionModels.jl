@@ -28,6 +28,7 @@ include("prepared_metadata.jl")
 include("preparation_replay.jl")
 include("preparation_numeric.jl")
 include("backend_plan.jl")
+include("observation_selection.jl")
 include("preparation_program.jl")
 include("preparation_priors.jl")
 include("prepared_model.jl")
@@ -45,7 +46,11 @@ include("rk_statistical.jl")
 include("statistical_preparation.jl")
 include("statistical_models.jl")
 include("rk_values.jl")
+include("rk_callable_terms.jl")
+include("rk_kernel_values.jl")
+include("rk_submodel_values.jl")
 include("rk_structured.jl")
+include("rk_observations.jl")
 include("native_ppl.jl")
 include("vimpl.jl")
 
@@ -229,7 +234,7 @@ export outcomes, linear_predictor_op, linear_predictors, predictors,
 # vimpl side. `vbroadcasted` is the materializer they call to resolve
 # column args inside those method bodies.
 export Part, push_parts!!, nparams, lprior!
-export vbroadcasted, vmeta_sampling_rhs, _sb_submodel_rhs!
+export vbroadcasted, vmeta_sampling_rhs, _sb_submodel_rhs!, _rk_submodel_rhs!
 export _sb_term_group_block, _sb_emit_group_block_term!
 
 # Internal @slic submodels from sbimpl.jl — exported so downstream
