@@ -161,6 +161,13 @@ function rkppl_model end
 # The emitter keeps prior statements at their current author paths, and uses
 # these ordinary submodels to make repeated block composition readable.
 const _BRM_STATISTICAL_VALUES = (
+    brm_completed_covariate = :(
+brm_completed_covariate(observed, missing, lookup, mask) = begin
+    drawn = missing[lookup]
+    completed = observed .+ mask .* drawn
+    return completed
+end
+    ),
     # An ordinary whole-value contrast composes with whole-value smooths.
     # Reuse the statistical model's law rather than maintaining a second one.
     brm_monotonic_contrast = let definition = deepcopy(_BRM_STATISTICAL_MODELS.monotonic)

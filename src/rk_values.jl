@@ -519,7 +519,7 @@ function _rk_emit_ast(plan::_RKValuePlan)
         _rk_emit_value_assignment!(defs, stmts, bindings, taken, assignment)
     end
     for completion in plan.completions
-        _rk_emit_missing_value!(stmts, bindings, taken, completion)
+        _rk_emit_missing_value!(defs, stmts, bindings, taken, completion)
     end
     for observation in plan.observations
         modifier = observation.modifier

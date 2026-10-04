@@ -77,12 +77,14 @@ function _rk_ast_coef_name(base::String, taken::Set{Symbol})
     name
 end
 
-function _rk_ast_statistical_call!(definitions, taken, name, args...)
+function _rk_ast_statistical_call!(definitions, taken, name, args...; kernel=false)
     template = getproperty(_BRM_STATISTICAL_VALUES, name)
     signature, body = template.args
     # Reuse a definition across distinct statistical blocks. A collision with
     # authored data, parameters or callable names only renames the definition.
     for definition in definitions
+        kernel == Meta.isexpr(definition, :macrocall) || continue
+        definition = kernel ? last(definition.args) : definition
         Meta.isexpr(definition, template.head, 2) || continue
         call = first(definition.args)
         Meta.isexpr(call, :call) || continue
@@ -93,6 +95,11 @@ function _rk_ast_statistical_call!(definitions, taken, name, args...)
     definition = deepcopy(template)
     callee = _rk_ast_fresh_name(string(name), taken)
     first(definition.args).args[1] = callee
+    if kernel
+        definition = Expr(:macrocall,
+            Expr(:., :ReactiveKernels, QuoteNode(Symbol("@kernel"))),
+            LineNumberNode(0), definition)
+    end
     push!(definitions, definition)
     Expr(:call, callee, args...)
 end
