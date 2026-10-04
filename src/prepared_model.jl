@@ -420,7 +420,7 @@ function _brm_prepare_predictor_geometry(
     end
     ordinary_terms = Tuple(term for term in raw_terms
                            if !(term in structured_terms))
-    row_source = isempty(prepared_terms) ? nothing : begin
+    row_source = isempty(prepared_terms) ? _brm_declared_row_axis(context, name) : begin
         source = first(prepared_terms).source
         candidate = source isa Tuple ? first(source) : source
         haskey(context.data, candidate) ? candidate :
