@@ -91,6 +91,10 @@ Its observed model compares complete printed RK replay, ordinary Reverse and
 an independent normalized oracle with compiled same-BRMI Stan on distinct
 subject, ECG-row and response axes. Omitted-data geometry checks do not claim
 native prior-draw execution.
+`rk_monotonic_consumer.jl` combines sampled monotonic contrasts and an HSGP
+on operation rows consumed by a subject kernel. It checks complete source and
+artifact replay, independent density/all-gradient oracles, compiled same-BRMI
+Stan at physical simplex parameters, and an empty subject's retained prior.
 The assignment gate checks dependency ordering and distinct response row axes.
 `preparation_replay.jl` compares the shared fitted transform contract across
 StanBlocks and Turing. Callable-specific frozen replay is covered by

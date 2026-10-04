@@ -83,7 +83,7 @@ function _rk_ast_statistical_call!(definitions, taken, name, args...)
     # Reuse a definition across distinct statistical blocks. A collision with
     # authored data, parameters or callable names only renames the definition.
     for definition in definitions
-        Meta.isexpr(definition, :(=), 2) || continue
+        Meta.isexpr(definition, template.head, 2) || continue
         call = first(definition.args)
         Meta.isexpr(call, :call) || continue
         isequal(call.args[2:end], signature.args[2:end]) || continue
@@ -958,10 +958,11 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 colactual[index] = only(term.columns)
             end
             if kind === :monotonic || kind === :monotonic_summand
-                cumulative = _rk_ast_fresh_name(string(term.label, "_cumulative"), taken)
-                push!(stmts, Expr(:(=), cumulative, Expr(:call, :cumsum,
-                    Expr(:call, :vcat, 0.0, term.options.increments))))
-                refactual[index] = Expr(:ref, cumulative, only(term.columns))
+                contrast = _rk_ast_fresh_name(string(term.label, "_contrast"), taken)
+                value = _rk_ast_statistical_call!(defs, taken,
+                    :brm_monotonic_contrast, only(term.columns), term.options.increments)
+                push!(stmts, Expr(:(=), contrast, value))
+                refactual[index] = contrast
             elseif kind === :spline || kind === :hsgp
                 refactual[index] = term.options.id
             elseif kind === :structured
