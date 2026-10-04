@@ -76,6 +76,13 @@ such as `independent` or `log-space` select focused blocks.
 
 ## Shared preparation and Turing lowering
 
+`rk_addprop.jl` checks the shared additive/proportional scale law as visible
+native graph source. Unequal grouped responses, empty subjects, callable
+aliases, top-level assignments and in-cell calls retain normalized densities,
+all ordinary Reverse gradients, censoring and row order against independent
+oracles and compiled same-BRMI Stan. Complete printed source and artifact
+re-entry are included; a scalar native-location control is checked separately.
+
 `spline_basis_signs.jl` checks canonical TPS/t2 projection signs, input
 ownership, and frozen projections directly. The spline blocks in
 `rk_parity.jl` compare RK densities and Enzyme gradients with independent
