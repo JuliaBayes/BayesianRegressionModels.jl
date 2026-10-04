@@ -184,6 +184,101 @@ function _rk_kernel_observed_layout(observation, kernels)
     (; values=response, rows=nothing, lengths=nothing)
 end
 
+# Only the likelihood receives these row views. Keep original data ports for
+# kernels, readers and other responses, and perform the gather in printed RK
+# source rather than replacing their bound values during preparation.
+_rk_observation_argument_rows!(defs, statements, taken, observation, layout,
+    argument, raw) = argument
+
+function _rk_observation_argument_rows!(defs, statements, taken, observation, layout,
+        argument, raw::AbstractVector{<:AbstractVector})
+    lengths = length.(raw)
+    length(lengths) == length(layout.lengths) &&
+        all(pair -> first(pair) == last(pair) || first(pair) == 1,
+            zip(lengths, layout.lengths)) || error(
+        "RK backend: response `$(observation.name)` argument `$(argument.name)` " *
+        "has group lengths $(length.(raw)); expected $(layout.lengths)")
+    name = _rk_ast_fresh_name("$(observation.name)_rows_$(argument.name)", taken)
+    source = argument.name
+    if lengths == layout.lengths
+        push!(statements, :($name = reduce(vcat, $source; init=eltype(eltype($source))[])))
+    else
+        reader = _rk_ast_fresh_name("$(name)_reader", taken)
+        push!(defs, :(ReactiveKernels.@kernel $reader(raw, lengths) = begin
+            cells = ReactiveKernels.plate(eachindex(lengths), Ref(raw), Ref(lengths)) do group, raw, lengths
+                ones(lengths[group]) .* raw[group]
+            end
+            values = reduce(vcat, cells; init=Float64[])
+            return values
+        end))
+        push!(statements, Expr(:(=), name,
+            Expr(:call, reader, source, Expr(:vect, layout.lengths...))))
+    end
+    _BRMPreparedRef(name, :whole)
+end
+
+function _rk_observation_argument_rows!(defs, statements, taken, observation, layout,
+        argument, raw::AbstractVector)
+    layout.rows === nothing && return argument
+    length(raw) == 1 && return argument
+    length(raw) == length(layout.values) || error(
+        "RK backend: response `$(observation.name)` argument `$(argument.name)` " *
+        "has $(length(raw)) rows; expected $(length(layout.values))")
+    name = _rk_ast_fresh_name("$(observation.name)_rows_$(argument.name)", taken)
+    # The partition is already determined by the original response join. Its
+    # indices are metadata; the actual argument gather stays in the graph.
+    indices = reduce(vcat, layout.rows; init=Int[])
+    reader = _rk_ast_fresh_name("$(name)_reader", taken)
+    push!(defs, :(ReactiveKernels.@kernel $reader(raw, rows) = begin
+        values = raw[rows]
+        return values
+    end))
+    push!(statements, Expr(:(=), name,
+        Expr(:call, reader, argument.name, Expr(:vect, indices...))))
+    _BRMPreparedRef(name, :whole)
+end
+
+_rk_align_observation_argument!(defs, statements, taken, columns, observation, layout,
+    aligned, argument) = argument
+
+function _rk_align_observation_argument!(defs, statements, taken, columns, observation,
+        layout, aligned, argument::_BRMPreparedRef)
+    argument.axis in (:observation, :observation_row) || return argument
+    argument.name === observation.name && return argument
+    get!(aligned, argument.name) do
+        _rk_observation_argument_rows!(defs, statements, taken, observation, layout,
+            argument, get(columns, argument.name, nothing))
+    end
+end
+
+function _rk_align_observation_argument!(defs, statements, taken, columns, observation,
+        layout, aligned, argument::_BRMPreparedExpr)
+    # BRM arithmetic is elementwise. Whole-array reader calls retain their
+    # original input axes and remain responsible for their returned row values.
+    callable = argument.callable
+    (haskey(_RK_DERIVED_BINOPS, callable) || haskey(_RK_DERIVED_CMP, callable) ||
+        haskey(_RK_DERIVED_MATH, callable)) || return argument
+    args = map(argument.args) do value
+        _rk_align_observation_argument!(defs, statements, taken, columns, observation,
+            layout, aligned, value)
+    end
+    _BRMPreparedExpr(callable, args, argument.kwargs)
+end
+
+function _rk_align_kernel_observation_arguments!(defs, statements, taken, plan,
+        observation, distribution)
+    kernels = Tuple(a for a in plan.assignments if a isa _RKPreparedKernelAssignment)
+    isempty(kernels) && return distribution
+    layout = _rk_kernel_observed_layout(observation, kernels)
+    layout.lengths === nothing && return distribution
+    aligned = Dict{Symbol,_BRMPreparedRef}()
+    args = map(distribution.args) do argument
+        _rk_align_observation_argument!(defs, statements, taken, plan.columns,
+            observation, layout, aligned, argument)
+    end
+    _BRMPreparedExpr(distribution.callable, args, distribution.kwargs)
+end
+
 function _rk_kernel_response_modifier!(columns, taken, observation, layout)
     modifier = observation.modifier
     (modifier === nothing || layout.lengths === nothing) && return modifier

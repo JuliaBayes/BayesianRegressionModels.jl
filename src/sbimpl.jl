@@ -6730,20 +6730,39 @@ function _sb_ragged_bound(data, key::Symbol, label::Symbol, bound, layout)
     NamedColumn(derived, DataColumn(grouped))
 end
 
+_sb_ragged_argument(data, key, argument, layout) = argument
+function _sb_ragged_argument(data, key, argument::NamedColumn, layout)
+    parent(argument) isa DataColumn || return argument
+    raw = parent(parent(argument))
+    raw isa Real && return argument
+    raw isa AbstractVector && length(raw) == 1 && return argument
+    _sb_ragged_bound(data, key, :argument, argument, layout)
+end
+function _sb_ragged_argument(data, key, argument::ExprColumn, layout)
+    f = getf(argument)
+    (haskey(_RK_DERIVED_BINOPS, f) || haskey(_RK_DERIVED_CMP, f) ||
+        haskey(_RK_DERIVED_MATH, f)) || return argument
+    ExprColumn(f, map(a -> _sb_ragged_argument(data, key, a, layout),
+        getargs(argument))...; getkwargs(argument)...)
+end
+
 function _sb_ragged_likelihood_rhs(data, key::Symbol, rhs::ExprColumn, layout)
     f = getf(rhs)
     if f === truncated || f === censored
         lower, upper = _sb_wrapper_bounds(f, getargs(rhs), getkwargs(rhs))
         lower = _sb_ragged_bound(data, key, :lower, lower, layout)
         upper = _sb_ragged_bound(data, key, :upper, upper, layout)
-        return ExprColumn(f, first(getargs(rhs)); lower, upper)
+        base = _sb_ragged_likelihood_rhs(data, key, first(getargs(rhs)), layout)
+        return ExprColumn(f, base; lower, upper)
     elseif f === interval_censored && length(getargs(rhs)) == 1 &&
            keys(getkwargs(rhs)) == (:upper,)
         upper = _sb_ragged_bound(
             data, key, :upper, getkwargs(rhs).upper, layout)
-        return ExprColumn(f, first(getargs(rhs)); upper)
+        base = _sb_ragged_likelihood_rhs(data, key, first(getargs(rhs)), layout)
+        return ExprColumn(f, base; upper)
     end
-    rhs
+    ExprColumn(f, map(a -> _sb_ragged_argument(data, key, a, layout),
+        getargs(rhs))...; getkwargs(rhs)...)
 end
 _sb_ragged_likelihood_rhs(_data, _key, rhs, _layout) = rhs
 
@@ -12206,9 +12225,67 @@ _flat_vec_key(_k, _v) = nothing
 
 # ---- likelihood emitters: `y ~ Normal(loc, sigma)` etc. ----------------------
 
+function _sb_grouped_argument_ports!(ports, argument::NamedColumn, lengths)
+    backing = parent(argument)
+    if backing isa DataColumn
+        raw = parent(backing)
+        raw isa AbstractVector{<:AbstractVector} || return false
+        actual = length.(raw)
+        length(actual) == length(lengths) &&
+            all(pair -> first(pair) == last(pair) || first(pair) == 1,
+                zip(actual, lengths)) || error(
+            "sbimpl: observation argument `$(name(argument))` has group lengths " *
+            "$actual; expected $lengths")
+        ports[name(argument)] = argument
+        return actual != lengths
+    end
+    producers = Any[]
+    _sb_ragged_rhs_kernel_groups!(producers, argument)
+    isempty(producers) || (ports[name(argument)] = argument)
+    false
+end
+_sb_grouped_argument_ports!(_ports, _argument, _lengths) = false
+function _sb_grouped_argument_ports!(ports, argument::ExprColumn, lengths)
+    f = getf(argument)
+    (haskey(_RK_DERIVED_BINOPS, f) || haskey(_RK_DERIVED_CMP, f) ||
+        haskey(_RK_DERIVED_MATH, f)) || return false
+    foreach(a -> _sb_grouped_argument_ports!(ports, a, lengths), getargs(argument))
+    !isempty(ports)
+end
+
+function _sb_grouped_argument!(stmts, data, target, argument, index)
+    response = get(data, target, nothing)
+    response isa AbstractVector{<:AbstractVector} || return argument
+    ports = Dict{Symbol,NamedColumn}()
+    stage = _sb_grouped_argument_ports!(ports, argument, length.(response))
+    stage && !isempty(ports) || return argument
+    expression = _sb_scalar_expr(argument, data)
+    names = sort!(collect(keys(ports)))
+    taken = Set{Symbol}(keys(data))
+    _rk_kernel_value_refs!(taken, Expr(:block, stmts...))
+    _rk_kernel_value_refs!(taken, expression)
+    entry = _rk_ast_fresh_name("$(target)_argument_$index", taken)
+    params = [_rk_ast_fresh_name("$(entry)_cell_$i", taken) for i in eachindex(names)]
+    observed = _rk_ast_fresh_name("$(entry)_observed", taken)
+    for (name, param) in zip(names, params)
+        # Materialize singleton cells on the observed cell's row axis before
+        # applying elementwise arithmetic or calling an exact vector law.
+        rows = :(num_elements($param) == 1 ?
+            rep_vector($param[1], num_elements($observed)) : $param)
+        expression = _sb_subst_sym(expression, name, rows)
+    end
+    plate = Expr(:do, Expr(:call, :plate, target, names...),
+        Expr(:->, Expr(:tuple, observed, params...), Expr(:block, expression)))
+    push!(stmts, Expr(:call, :~, entry, plate))
+    NamedColumn(entry, MissingColumn())
+end
+
 function _sb_likelihood!(stmts, target::Symbol, rhs::ExprColumn, data)
     f = getf(rhs)
-    _sb_lik_family!(stmts, target, f, getargs(rhs), getkwargs(rhs), data)
+    args = Tuple(map(enumerate(getargs(rhs))) do (index, argument)
+        _sb_grouped_argument!(stmts, data, target, argument, index)
+    end)
+    _sb_lik_family!(stmts, target, f, args, getkwargs(rhs), data)
 end
 
 _sb_weight_data_key(target::Symbol) = Symbol(:brm_weight_, target)
