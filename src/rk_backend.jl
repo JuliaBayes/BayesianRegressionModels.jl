@@ -3012,9 +3012,9 @@ function _rk_design_addressee_groups(design, target::Symbol;
         kind = isnothing(column.preprocess) ? nothing :
             column.preprocess.kind
         addressee = if kind in (:interaction, :zscale, :standardize,
-                :center, :protect)
+                :center, :protect, :model_value)
             column.label
-        elseif kind in (:population_factor_dummy, :model_value) || isnothing(kind)
+        elseif kind === :population_factor_dummy || isnothing(kind)
             isnothing(column.source) ? column.label : column.source
         else
             error("$prefix: internal: design column `$(column.label)` in " *
