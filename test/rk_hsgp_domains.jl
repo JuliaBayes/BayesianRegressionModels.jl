@@ -29,11 +29,39 @@ function hsgp_plate_depths(graph; depth=0)
     result
 end
 
+# Replay the complete printed definitions and body, preserving explicit
+# bindings and observation metadata, in a fresh defining namespace.
+function printed_hsgp_replay(backend)
+    emitted=BRM._rk_emit_ast(backend.plan)
+    namespace=Module(gensym(:PrintedHSGP))
+    Core.eval(namespace,:(using ReactiveKernelsPPL))
+    Core.eval(namespace,:(import ReactiveKernels))
+    for (name,value) in emitted.bindings
+        Core.eval(namespace,Expr(:const,Expr(:(=),name,QuoteNode(value))))
+    end
+    definitions=join(map(emitted.defs) do definition
+        prefix=BRM._rk_source_definition(definition).kind === :rkppl ? "@rkppl " : ""
+        prefix*sprint(Base.show_unquoted,definition)
+    end,"\n")
+    Core.eval(namespace,Meta.parseall(definitions))
+    body=Meta.parse(sprint(Base.show_unquoted,emitted.main))
+    bound=bind_data(lower_rkppl(body,backend.plan.columns;mod=namespace,
+        conditioned=BRM._rk_observed_names(backend.plan)),backend.plan.columns)
+    built=build_kernel(bound)
+    sampler=prepare_sampler(built,bound,zeros(built.layout.total);
+        backend=AutoEnzyme(;mode=Enzyme.Reverse))
+    built,sampler
+end
+
 @stestset "fixed HSGP domain graphs retain basis, priors and normalized Stan density" begin
     data = (; x=[-0.7,0.0,0.6], w=[0.4,-0.2,0.7], y=[0.2,-0.1,0.4])
     cases = (
         ("original", (3,), ((-2.0,2.0),), true, @brm(data, begin
             location ~ 0 + hsgp(x;k=3,domain=(-2.0,2.0))
+            y ~ Normal(location,1.0)
+        end)),
+        ("single-mode", (1,), ((-2.0,2.0),), true, @brm(data, begin
+            location ~ 0 + hsgp(x;k=1,domain=(-2.0,2.0))
             y ~ Normal(location,1.0)
         end)),
         ("tensor-isotropic", (2,3), ((-2.0,2.0),(-1.5,2.5)), true, @brm(data, begin
@@ -94,13 +122,80 @@ end
         mapping = Pair{Symbol,String}[names[spos]=>id*"_sigma"]
         append!(mapping,[names[zpos[b]]=>id*"_beta_raw.$b" for b in eachindex(zpos)])
         append!(mapping,[names[rpos[j]]=>(iso ? id*"_rho_iso" : id*"_rho.$j") for j in eachindex(rpos)])
+        replayed,sampler=printed_hsgp_replay(backend)
+        @test coordinate_names(replayed.layout)==names
+        @test hsgp_plate_depths(kernel_graph(replayed.spec))==inventory
         for u in (zeros(length(names)),fill(0.13,length(names)),collect(range(-0.2,0.3;length=length(names))))
             check_consumer_point(problem,u,oracle)
             check_consumer_stan(problem,stan,mapping,backend,u)
+            gradient=zeros(length(u))
+            value,_=sampler_value_and_gradient!(sampler,gradient,u)
+            expected,expected_gradient=LogDensityProblems.logdensity_and_gradient(problem,u)
+            @test value≈expected atol=2e-12 rtol=2e-12
+            @test gradient≈expected_gradient atol=2e-10 rtol=2e-10
         end
         artifact = BRM.emit_rk_artifact(brmi;case_id=label)
         rebuilt = build_kernel(BRM.rk_translate_artifact(artifact))
         @test hsgp_plate_depths(kernel_graph(rebuilt.spec)) == inventory
         @test isequal(data,original_data)
     end
+end
+
+@stestset "fixed HSGP explicit hyperpriors preserve stated support and Jacobians" begin
+    data=(;x=[-.5,-.1,.4,.9],y=[.2,-.1,.4,.3])
+    before=deepcopy(data)
+    builders=(
+        "lognormal"=>@brm(begin
+            location ~ 0+hsgp(x;k=3,domain=(-2.,2.))
+            length_scale(:,hsgp(x)) ~ LogNormal(0.,1.)
+            sd(:,hsgp(x)) ~ LogNormal(0.,1.)
+            y ~ Normal(location,1.)
+        end),
+        "bounded"=>@brm(begin
+            location ~ 0+hsgp(x;k=3,domain=(-2.,2.))
+            length_scale(:,hsgp(x)) ~ Uniform(.2,2.)
+            sd(:,hsgp(x)) ~ truncated(Normal(0.,1.);lower=0.)
+            y ~ Normal(location,1.)
+        end))
+    PHI,omega2,_=fixed_hsgp_oracle((data.x,),(3,),((-2.,2.),))
+    for (label,builder) in builders
+        brmi=builder(data)
+        backend,problem=consumer_problem(brmi)
+        names=coordinate_names(backend.model.layout)
+        index(name)=only(findall(==(Symbol(name)),names))
+        r=index("hsgp_x_rho");s=index("hsgp_x_sigma")
+        z=[index("hsgp_x_z.$b") for b in 1:3]
+        term=only(filter(t->t.kind===:hsgp,only(backend.plan.predictors).terms))
+        @test !term.options.rho_truncated
+        @test term.options.rho_stated && term.options.sigma_stated
+        function oracle(u)
+            p=1/(1+exp(-u[r]))
+            rho=label=="bounded" ? .2+1.8p : exp(u[r])
+            sigma=exp(u[s])
+            rho_law=label=="bounded" ? Uniform(.2,2.) : LogNormal()
+            sigma_law=label=="bounded" ? truncated(Normal(),0,Inf) : LogNormal()
+            jac=label=="bounded" ? log(1.8)+log(p)+log1p(-p) : u[r]
+            weights=[sigma*sqrt(rho*sqrt(2pi))*exp(-rho^2*omega2[b,1]/4) for b in 1:3]
+            locations=PHI*(weights.*u[z])
+            logpdf(rho_law,rho)+logpdf(sigma_law,sigma)+jac+u[s]+
+                sum(logpdf.(Normal(),u[z]))+sum(logpdf.(Normal.(locations,1.),data.y))
+        end
+        stan=consumer_stan(brmi,"fixed-hsgp-"*label)
+        mapping=Pair{Symbol,String}[:hsgp_x_rho=>"hsgp_x_rho_iso",
+            :hsgp_x_sigma=>"hsgp_x_sigma"]
+        append!(mapping,[names[z[b]]=>"hsgp_x_beta_raw.$b" for b in 1:3])
+        replayed,sampler=printed_hsgp_replay(backend)
+        @test coordinate_names(replayed.layout)==names
+        for u in (zeros(length(names)),fill(.13,length(names)),
+                collect(range(-.2,.3;length=length(names))))
+            check_consumer_point(problem,u,oracle)
+            check_consumer_stan(problem,stan,mapping,backend,u)
+            gradient=zeros(length(u))
+            value,_=sampler_value_and_gradient!(sampler,gradient,u)
+            expected,expected_gradient=LogDensityProblems.logdensity_and_gradient(problem,u)
+            @test value≈expected atol=2e-12 rtol=2e-12
+            @test gradient≈expected_gradient atol=2e-10 rtol=2e-10
+        end
+    end
+    @test isequal(data,before)
 end
