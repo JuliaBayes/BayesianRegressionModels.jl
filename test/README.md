@@ -64,6 +64,17 @@ of fitted missing coordinates during subject kernel CV. It uses only root
 dependencies, so `julia --project=. test/missing_covariates.jl` also works;
 trailing filters such as `anchors` or `kernel CV` select focused blocks.
 
+`rk_missing_value_predictors.jl` checks native completed covariates with fixed
+observed-only standardization anchors, shared correlated subject effects and
+subject-kernel composition. It compares full normalized densities and all
+inference gradients with independent and compiled same-BRMI Stan controls,
+and replays complete printed definitions/data. Observed-only declarations and
+complete real columns retain their modeled observations without missing
+inference coordinates. Run `julia --project=test
+test/rk_missing_value_predictors.jl`; trailing filters select individual
+blocks. These are public producer controls, not original application or
+performance acceptance.
+
 `missing_joint_covariates.jl` checks the native correlated
 `mi([x, z]) ~ MvNormalCholesky(...)` block. Independent normalized density,
 all-coordinate gradient and pointwise likelihood oracles cover all four

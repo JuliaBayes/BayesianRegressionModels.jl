@@ -459,9 +459,17 @@ end
 
 @stestset "complete observed covariate conditional on an imputed predictor" begin
     complete = merge(MISSING_TOY, (; x=[0.8, 1.2, 2.1, 1.7, 1.4],))
-    # Complete observations use the ordinary likelihood spelling. mi() is
-    # deliberately reserved for columns containing missing entries.
-    @test_throws r"drop `mi" SBBRMI(MISSING_PLAIN(complete); mod=@__MODULE__)
+    # A complete real column retains the authored observed law and has no
+    # missing coordinates; the model body need not change with its mask.
+    complete_mi = SBBRMI(MISSING_PLAIN(complete); mod=@__MODULE__)
+    @test complete_mi.data[:x_obs] == complete.x
+    @test isempty(complete_mi.data[:Jmis_x])
+    @test StanBlocks.stanc_check(BayesianRegressionModels.stan_code(complete_mi)).ok
+    replay_mi = reprocess(complete_mi, complete)
+    @test replay_mi.data[:x_obs] == complete.x
+    @test isempty(replay_mi.data[:Jmis_x])
+    changed_mask = merge(complete, (;x=Union{Missing,Float64}[missing, 1.2, 2.1, 1.7, 1.4],))
+    @test_throws r"same fitted missing-row positions" reprocess(complete_mi, changed_mask)
     sb = SBBRMI(MISSING_COMPLETE_CONDITIONAL(complete); mod=@__MODULE__)
     descriptor = brm_descriptor(sb)
     @test sb.data[:x] == complete.x

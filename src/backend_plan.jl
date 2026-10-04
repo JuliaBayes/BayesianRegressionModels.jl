@@ -426,13 +426,16 @@ function _brm_missing_response_plan(lhs; prefix="BRM backend lowering")
         "$prefix: `mi($(name(inner)))` requires a raw data column with " *
         "missing values, got backing $(typeof(backing))")
     raw = parent(backing)
-    _brm_missing_response_plan(name(inner), raw; prefix,allow_complete=population_value)
+    # A complete real column has the same observed law and an empty missing
+    # coordinate set. Reusing the declaration must not depend on its eltype
+    # admitting Missing or force the caller to rewrite its scientific body.
+    _brm_missing_response_plan(name(inner), raw; prefix,allow_complete=true)
 end
 
-function _brm_missing_response_plan(source::Symbol, raw; prefix="BRM backend lowering",allow_complete=false)
+function _brm_missing_response_plan(source::Symbol, raw; prefix="BRM backend lowering",allow_complete=true)
     raw isa AbstractVector || error(
         "$prefix: `mi($source)` requires a vector response")
-    Missing <: eltype(raw) || error(
+    (allow_complete || Missing <: eltype(raw)) || error(
         "$prefix: `mi($source)` requires a column whose element type " *
         "admits `missing` (got $(eltype(raw))); drop `mi(...)` when there are no NAs")
     value_type = nonmissingtype(eltype(raw))
@@ -1939,7 +1942,8 @@ function _brm_population_design(target::Symbol, terms::Tuple,
                                 obs_name::Union{Nothing,Symbol};
                                 required::Bool=false,
                                 row_source::Union{Nothing,Symbol}=nothing,
-                                implicit_intercept::Bool=false)
+                                implicit_intercept::Bool=false,
+                                population_columns=_brm_population_columns)
     raw_columns = Any[]
     fixed_terms = _BRMPopulationFixedTerm[]
     # At most one term is cell-mean coded, and only the FIRST term carrying that
@@ -1958,7 +1962,7 @@ function _brm_population_design(target::Symbol, terms::Tuple,
             _brm_categorical_term_block(term) === cellmeans_block &&
             !_brm_requests_treatment_coding(term)
         cellmeans && (cellmeans_block = nothing)
-        columns = _brm_population_columns(term; cellmeans)
+        columns = population_columns(term; cellmeans)
         if isnothing(columns)
             required && error(
                 "BRM backend lowering: predictor `$target` contains unsupported " *
