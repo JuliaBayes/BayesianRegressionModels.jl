@@ -160,10 +160,10 @@ function check_grouped_arguments(label, data)
         @test occursin("y_rows_reference_reader(reference, [3, 0, 4])", main)
         @test occursin("lengths[group]", sources)
     else
-        @test occursin("reduce(vcat, reference", main)
+        @test occursin("y_rows_reference_reader(reference)", main)
         @test any(source -> Meta.isexpr(source, :call) &&
             argument_callee_is(first(source.args), :reduce) &&
-            :reference in source.args, graph_sources)
+            :raw in source.args, graph_sources)
     end
     if label !== :ordinary
         @test occursin("relative_residual", sources)

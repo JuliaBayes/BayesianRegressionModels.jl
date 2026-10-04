@@ -200,10 +200,14 @@ function _rk_observation_argument_rows!(defs, statements, taken, observation, la
         "has group lengths $(length.(raw)); expected $(layout.lengths)")
     name = _rk_ast_fresh_name("$(observation.name)_rows_$(argument.name)", taken)
     source = argument.name
+    reader = _rk_ast_fresh_name("$(name)_reader", taken)
     if lengths == layout.lengths
-        push!(statements, :($name = reduce(vcat, $source; init=eltype(eltype($source))[])))
+        push!(defs, :(ReactiveKernels.@kernel $reader(raw) = begin
+            values = reduce(vcat, raw; init=eltype(eltype(raw))[])
+            return values
+        end))
+        push!(statements, :($name = $reader($source)))
     else
-        reader = _rk_ast_fresh_name("$(name)_reader", taken)
         push!(defs, :(ReactiveKernels.@kernel $reader(raw, lengths) = begin
             cells = ReactiveKernels.plate(eachindex(lengths), Ref(raw), Ref(lengths)) do group, raw, lengths
                 ones(lengths[group]) .* raw[group]
