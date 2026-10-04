@@ -124,7 +124,13 @@ oracles and compiled Stan, and replays the complete emitted source and artifact.
 singleton input axes, against independent and compiled Stan targets.
 `rk_kernel_values.jl` checks unequal and empty grouped cells, explicit ragged
 joins, lexical native callables, distinct catalogue/response axes and in-cell
-held-out aliases without rewriting the original BRMI. `rk_submodel_values.jl`
+held-out aliases without rewriting the original BRMI.
+`rk_grouped_bounded_response.jl` gathers observed rows before bounded-response
+validation and keeps scalar or row-specific censoring, truncation and interval
+bounds aligned with uneven/empty subject cells. Complete source replay,
+ordinary Reverse, independent densities and gradients, compiled same-BRMI
+Stan, invalid evidence and original bound-column ownership are covered.
+`rk_submodel_values.jl`
 checks paired source hooks for an empty marker with active predictor keywords,
 no extra result coefficient, exact callable bindings and fresh-module replay;
 an emitted entry and a bound leaf cannot share the same symbol.

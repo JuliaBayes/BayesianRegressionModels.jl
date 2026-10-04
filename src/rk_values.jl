@@ -405,24 +405,29 @@ function _brm_rk_value_plan(brmi, program, observations; kernels=(), submodels=(
         haskey(value_columns, key) || (value_columns[key] = context.data[key])
     end
     obs = Tuple(o for o in prepared.observations if o.name in roots)
-    for o in obs
+    obs = map(obs) do o
         o.missing_response === nothing || error(
             "RK backend: value-based response `$(o.name)` needs explicit observed values")
         o.weight === nothing || error(
             "RK backend: value-based response `$(o.name)` weights need an authored response")
-        if o.modifier !== nothing
-            bounds = (o.modifier.lower, o.modifier.upper)
+        layout = isempty(kernels) ?
+            (; values=o.response, rows=nothing, lengths=nothing) :
+            _rk_kernel_observed_layout(o, kernels)
+        modifier = _rk_kernel_response_modifier!(value_columns, taken, o, layout)
+        if modifier !== nothing
+            bounds = (modifier.lower, modifier.upper)
             if all(b -> b === nothing || b isa Real ||
                     (b isa NamedColumn && parent(b) isa DataColumn), bounds)
                 # The same response/row attribution as structural observations.
-                materialize = o.modifier.kind === :interval_censored ?
+                materialize = modifier.kind === :interval_censored ?
                     _brm_materialize_interval_response : _brm_materialize_bounded_response
-                materialize(o.modifier, o.name,
-                    o.response, context.data; prefix="RK backend")
+                materialize(modifier, o.name,
+                    layout.values, context.data; prefix="RK backend")
             end
         end
-        value_columns[o.name] = isempty(kernels) ? o.response :
-            _rk_kernel_observed_values(o, kernels)
+        value_columns[o.name] = layout.values
+        _BRMPreparedObservation(o.name, o.lhs, o.distribution, o.response,
+            modifier, o.weight, o.missing_response)
     end
     regression = _RKStructuralPlan(_RKLikelihoodSpec[], components.predictors,
         components.priors, parameters, _RKAssignmentSpec[], derived, columns,

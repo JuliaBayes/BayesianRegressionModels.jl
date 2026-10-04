@@ -6665,6 +6665,7 @@ end
 # still be used by another formula term on its native axis.
 function _sb_ragged_bound(data, key::Symbol, label::Symbol, bound, layout)
     bound isa NamedColumn && parent(bound) isa DataColumn || return bound
+    parent(parent(bound)) isa Real && return bound
     raw = _brm_data_vec(name(bound), parent(parent(bound)))
     grouped = if raw isa AbstractVector{<:AbstractVector}
         length.(raw) == length.(layout.rows) || error(

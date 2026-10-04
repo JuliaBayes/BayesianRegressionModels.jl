@@ -132,7 +132,7 @@ function _rk_prepare_kernel_value(brmi, program, name, rhs)
         globals, count, columns, group_values, Tuple(observations))
 end
 
-function _rk_kernel_observed_values(observation, kernels)
+function _rk_kernel_observed_layout(observation, kernels)
     lhs = observation.lhs
     if lhs isa ExprColumn && getf(lhs) === ragged
         value, group = getargs(lhs)
@@ -142,11 +142,47 @@ function _rk_kernel_observed_values(observation, kernels)
             "RK backend: response `$(observation.name)` needs one kernel subject axis for its ragged join")
         partition = _brm_kernel_ragged_rows(value, group, only(matches).group_values; prefix="RK backend")
         raw = parent(parent(value))
-        return reduce(vcat, (raw[rows] for rows in partition.rows); init=eltype(raw)[])
+        values = reduce(vcat, (raw[rows] for rows in partition.rows); init=eltype(raw)[])
+        return (; values, rows=partition.rows, lengths=length.(partition.rows))
     end
     response = observation.response
-    response isa AbstractVector{<:AbstractVector} ?
-        reduce(vcat, response; init=Float64[]) : response
+    if response isa AbstractVector{<:AbstractVector}
+        return (; values=reduce(vcat, response; init=Float64[]),
+            rows=nothing, lengths=length.(response))
+    end
+    (; values=response, rows=nothing, lengths=nothing)
+end
+
+function _rk_kernel_response_modifier!(columns, taken, observation, layout)
+    modifier = observation.modifier
+    (modifier === nothing || layout.lengths === nothing) && return modifier
+    function gather(bound, label)
+        bound isa NamedColumn && parent(bound) isa DataColumn || return bound
+        raw = parent(parent(bound))
+        raw isa Real && return bound
+        grouped = if raw isa AbstractVector{<:AbstractVector}
+            length.(raw) == layout.lengths || error(
+                "RK backend: response `$(observation.name)` $label bound `$(name(bound))` " *
+                "has group lengths $(length.(raw)); expected $(layout.lengths)")
+            reduce(vcat, raw; init=Float64[])
+        else
+            raw isa AbstractVector{<:Real} || error(
+                "RK backend: response `$(observation.name)` $label bound must be numeric")
+            length(raw) == length(layout.values) || error(
+                "RK backend: response `$(observation.name)` $label bound has " *
+                "$(length(raw)) rows; expected $(length(layout.values))")
+            layout.rows === nothing ? collect(raw) :
+                reduce(vcat, (raw[rows] for rows in layout.rows); init=eltype(raw)[])
+        end
+        # Keep the flat bound available on its original axis for other formula
+        # terms. Only this likelihood consumes the gathered bound column.
+        key = _rk_ast_fresh_name(
+            "$(observation.name)_$(label)_$(name(bound))_grouped", taken)
+        columns[key] = grouped
+        NamedColumn(key, DataColumn(grouped))
+    end
+    _BRMResponseModifierPlan(modifier.kind, modifier.base,
+        gather(modifier.lower, :lower), gather(modifier.upper, :upper))
 end
 
 function _brm_rk_composed_kernel_plan(brmi)
