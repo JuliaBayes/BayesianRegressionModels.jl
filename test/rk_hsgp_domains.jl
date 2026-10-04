@@ -29,6 +29,19 @@ function hsgp_plate_depths(graph; depth=0)
     result
 end
 
+function hsgp_graph_outputs(graph)
+    outputs=String[]
+    for recipe in graph.recipes
+        push!(outputs,repr(recipe.outputs))
+        if recipe.op isa ReactiveKernels._AuthoredPlateOp
+            append!(outputs,hsgp_graph_outputs(plate_body(recipe)))
+        elseif recipe.op isa ReactiveKernels._AuthoredScanOp
+            append!(outputs,hsgp_graph_outputs(scan_body(recipe)))
+        end
+    end
+    outputs
+end
+
 # Replay the complete printed definitions and body, preserving explicit
 # bindings and observation metadata, in a fresh defining namespace.
 function printed_hsgp_replay(backend)
@@ -82,6 +95,15 @@ end
         inventory = hsgp_plate_depths(kernel_graph(backend.model.spec))
         @test !isempty(inventory)
         @test any(>(0),inventory)
+        actual_outputs=join(hsgp_graph_outputs(kernel_graph(backend.model.spec)),"\n")
+        # These are numerical intermediates in the built posterior, not
+        # merely definitions in the emitted provider source.
+        for intermediate in ("basis_rows","omega2","weights")
+            @test occursin(intermediate,actual_outputs)
+        end
+        for j in eachindex(K)
+            @test occursin("frequency_$j",actual_outputs)
+        end
         PHI, omega2, floors = fixed_hsgp_oracle((data.x,data.w)[1:length(K)],K,domains)
         ext = Base.get_extension(BRM,:BayesianRegressionModelsReactiveKernelsExt)
         mod = ext._rk_emit_module(emitted)
@@ -198,4 +220,95 @@ end
         end
     end
     @test isequal(data,before)
+end
+
+@stestset "fixed grouped HSGP domains retain group weights and authored hypers" begin
+    data=(;x=[-.5,-.1,.4,.9],w=[.2,.7,-.3,.4],g=[1,2,1,2],y=[.2,-.1,.4,.3])
+    before=deepcopy(data)
+    cases=(
+        ("shared",(3,),((-2.,2.),),false,@brm(data,begin
+            location ~ 0+hsgp(x;k=3,by=g,domain=(-2.,2.))
+            y ~ Normal(location,1.)
+        end)),
+        ("authored",(3,),((-2.,2.),),true,@brm(data,begin
+            location ~ 0+hsgp(x;k=3,by=g,domain=(-2.,2.))
+            log(length_scale(hsgp(x))) ~ 1+(1|g)
+            log(sd(hsgp(x))) ~ 1+(1|g)
+            y ~ Normal(location,1.)
+        end)),
+        ("tensor",(2,3),((-2.,2.),(-1.5,2.5)),false,@brm(data,begin
+            location ~ 0+hsgp(x,w;k=(2,3),by=g,domain=((-2.,2.),(-1.5,2.5)))
+            y ~ Normal(location,1.)
+        end)))
+    for (label,K,domains,authored,brmi) in cases
+        backend,problem=consumer_problem(brmi)
+        names=coordinate_names(backend.model.layout)
+        id=length(K)==1 ? "hsgp_x" : "hsgp_x_w"
+        index(name)=only(findall(==(Symbol(name)),names))
+        B=prod(K);G=2
+        actual_outputs=join(hsgp_graph_outputs(kernel_graph(backend.model.spec)),"\n")
+        for intermediate in ("basis_rows","omega2",authored ? "spectra" : "weights")
+            @test occursin(intermediate,actual_outputs)
+        end
+        weights=[index("$(id)_z.$g.$b") for g in 1:G,b in 1:B]
+        PHI,omega2,floors=fixed_hsgp_oracle((data.x,data.w)[1:length(K)],K,domains)
+        floor=maximum(floors)
+        function oracle(u)
+            prior=sum(logpdf.(Normal(),u[weights]))
+            hypers=map(("rho","sigma")) do stem
+                if authored
+                    beta=index("$(id)_$(stem)_Intercept")
+                    sd=index("$(id)_$(stem)_sd")
+                    zs=[index("$(id)_$(stem)_z.$g") for g in 1:G]
+                    prior+=logpdf(Normal(),u[beta])+sum(logpdf.(Normal(),u[zs]))+
+                        logpdf(Normal(),exp(u[sd]))+u[sd]
+                    value=exp.(u[beta].+exp(u[sd]).*u[zs])
+                    stem=="rho" ? max.(value,floor) : value
+                else
+                    q=index("$(id)_$stem")
+                    value=(stem=="rho" ? floor : 0.)+exp(u[q])
+                    prior+=logpdf(LogNormal(),value)+u[q]
+                    fill(value,G)
+                end
+            end
+            rhos,sigmas=hypers
+            locations=[sum(PHI[i,b]*u[weights[data.g[i],b]]*
+                sigmas[data.g[i]]*(rhos[data.g[i]]*sqrt(2pi))^(length(K)/2)*
+                exp(-rhos[data.g[i]]^2*sum(omega2[b,:])/4) for b in 1:B)
+                for i in eachindex(data.y)]
+            prior+sum(logpdf.(Normal.(locations,1.),data.y))
+        end
+        stan=consumer_stan(brmi,"fixed-grouped-hsgp-"*label)
+        mapping=Pair{Symbol,String}[]
+        stem=length(K)==1 ? "x" : "x_w"
+        for g in 1:G,b in 1:B
+            push!(mapping,names[weights[g,b]]=>"zflat_hsgpw_$(stem)_g.$((g-1)*B+b)")
+        end
+        for (hyper,shared_name) in (("rho","rho_iso"),("sigma","sigma"))
+            if authored
+                push!(mapping,Symbol("$(id)_$(hyper)_Intercept")=>"$(id)_by_g_beta0_$hyper")
+                push!(mapping,Symbol("$(id)_$(hyper)_sd")=>"$(id)_by_g_sd_$hyper")
+                for g in 1:G
+                    push!(mapping,Symbol("$(id)_$(hyper)_z.$g")=>"$(id)_by_g_z_$hyper.$g")
+                end
+            else
+                push!(mapping,Symbol("$(id)_$hyper")=>"$(id)_by_g_$shared_name")
+            end
+        end
+        replayed,sampler=printed_hsgp_replay(backend)
+        @test coordinate_names(replayed.layout)==names
+        @test hsgp_plate_depths(kernel_graph(replayed.spec))==
+            hsgp_plate_depths(kernel_graph(backend.model.spec))
+        for u in (zeros(length(names)),fill(.13,length(names)),
+                collect(range(-.2,.3;length=length(names))))
+            check_consumer_point(problem,u,oracle)
+            check_consumer_stan(problem,stan,mapping,backend,u)
+            gradient=zeros(length(u))
+            value,_=sampler_value_and_gradient!(sampler,gradient,u)
+            expected,expected_gradient=LogDensityProblems.logdensity_and_gradient(problem,u)
+            @test value≈expected atol=2e-12 rtol=2e-12
+            @test gradient≈expected_gradient atol=2e-10 rtol=2e-10
+        end
+        @test isequal(data,before)
+    end
 end

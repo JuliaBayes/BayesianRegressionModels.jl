@@ -115,17 +115,11 @@ function _rk_ast_hsgp_value_graph!(definitions, term, taken,
                 scaled_z = z .* transpose(weights)
             end
         else
-            group_body = quote
-                s = $(sigma_by_group ? :(sigmas[g]) : :sigmas)
-                r = $(rho_by_group ? :(rhos[g]) : :rhos)
-                weights = $weight_plate
-                weights
-            end
-            group_plate = _rk_ast_graph_plate([:(axes(z,1)), :(Ref(omega2)),
-                :(Ref(sigma)), :(Ref(rho))], [:g, :omega2, :sigmas, :rhos], group_body)
             quote
-                group_weights = $group_plate
-                spectra = stack(group_weights; dims=1)
+                frequencies = transpose(vec(sum(omega2; dims=2)))
+                scale = sigma .* (rho .* sqrt(2pi)).^($D / 2)
+                exponent = (rho .^ 2) .* frequencies
+                spectra = scale .* exp.(-0.25 .* exponent)
                 scaled_z = z .* spectra
             end
         end
