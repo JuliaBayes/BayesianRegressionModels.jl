@@ -269,18 +269,70 @@ function _rk_align_observation_argument!(defs, statements, taken, columns, obser
     _BRMPreparedExpr(callable, args, argument.kwargs)
 end
 
-function _rk_align_kernel_observation_arguments!(defs, statements, taken, plan,
+function _rk_align_kernel_observation_arguments!(defs, statements, bindings, taken, plan,
         observation, distribution)
     kernels = Tuple(a for a in plan.assignments if a isa _RKPreparedKernelAssignment)
     isempty(kernels) && return distribution
     layout = _rk_kernel_observed_layout(observation, kernels)
     layout.lengths === nothing && return distribution
+    # Prepare the constructor's arguments together in authored source. A
+    # data-only model assignment is evaluated by RKPPL at binding; keeping
+    # these operations in the argument readers retains the complete source
+    # graph beside the live location/scale and avoids that preprocessing path.
+    inputs = Any[]
+    params = Symbol[]
+    columns = Dict{Symbol,Any}()
+    refs = Dict{Symbol,_BRMPreparedRef}()
+    function local_argument(argument)
+        if argument isa _BRMPreparedExpr &&
+                (haskey(_RK_DERIVED_BINOPS, argument.callable) ||
+                 haskey(_RK_DERIVED_CMP, argument.callable) ||
+                 haskey(_RK_DERIVED_MATH, argument.callable))
+            return _BRMPreparedExpr(argument.callable,
+                map(local_argument, argument.args), argument.kwargs)
+        elseif argument isa _BRMPreparedRef || argument isa _BRMPreparedExpr
+            argument isa _BRMPreparedRef && haskey(refs, argument.name) &&
+                return refs[argument.name]
+            param = _rk_ast_fresh_name("$(observation.name)_input_$(length(params) + 1)", taken)
+            push!(params, param)
+            push!(inputs, _rk_value_expr!(bindings, argument, taken))
+            axis = argument isa _BRMPreparedRef ? argument.axis : :whole
+            local_ref = _BRMPreparedRef(param, axis)
+            if argument isa _BRMPreparedRef
+                columns[param] = get(plan.columns, argument.name, nothing)
+                argument.name === observation.name &&
+                    (local_ref = _BRMPreparedRef(param, :whole))
+                refs[argument.name] = local_ref
+            end
+            return local_ref
+        end
+        argument
+    end
+    local_args = map(local_argument, distribution.args)
+    body = Any[]
     aligned = Dict{Symbol,_BRMPreparedRef}()
-    args = map(distribution.args) do argument
-        _rk_align_observation_argument!(defs, statements, taken, plan.columns,
+    args = map(local_args) do argument
+        _rk_align_observation_argument!(defs, body, taken, columns,
             observation, layout, aligned, argument)
     end
-    _BRMPreparedExpr(distribution.callable, args, distribution.kwargs)
+    isempty(body) && return distribution
+    prepared = map(args) do argument
+        value = _rk_ast_fresh_name("$(observation.name)_prepared_argument", taken)
+        push!(body, Expr(:(=), value, _rk_value_expr!(bindings, argument, taken)))
+        value
+    end
+    outputs = map(eachindex(args)) do i
+        reader = _rk_ast_fresh_name("$(observation.name)_observation_argument_$i", taken)
+        definition = Expr(:(=), Expr(:call, reader, params...),
+            Expr(:block, body..., Expr(:return, prepared[i])))
+        push!(defs, Expr(:macrocall,
+            Expr(:., :ReactiveKernels, QuoteNode(Symbol("@kernel"))),
+            LineNumberNode(0), definition))
+        value = _rk_ast_fresh_name("$(observation.name)_argument_$i", taken)
+        push!(statements, Expr(:(=), value, Expr(:call, reader, inputs...)))
+        _BRMPreparedRef(value, :whole)
+    end
+    _BRMPreparedExpr(distribution.callable, Tuple(outputs), distribution.kwargs)
 end
 
 function _rk_kernel_response_modifier!(columns, taken, observation, layout)

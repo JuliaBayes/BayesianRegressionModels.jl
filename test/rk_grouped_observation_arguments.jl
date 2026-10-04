@@ -151,16 +151,17 @@ function check_grouped_arguments(label, data)
         end
     end
     main = sprint(Base.show_unquoted, BRM._rk_emit_ast(backend.plan).main)
+    definitions = sprint(show, BRM._rk_emit_ast(backend.plan).defs)
     graph_sources = argument_graph_sources(kernel_graph(backend.model.spec))
     sources = sprint(show, graph_sources)
     if label === :joined
-        @test occursin("y_rows_reference_reader(reference, [2, 3, 5, 1, 4, 6, 7])", main)
+        @test occursin("[2, 3, 5, 1, 4, 6, 7]", definitions)
         @test :(raw[rows]) in graph_sources
     elseif label === :singleton
-        @test occursin("y_rows_reference_reader(reference, [3, 0, 4])", main)
+        @test occursin("[3, 0, 4]", definitions)
         @test occursin("lengths[group]", sources)
     else
-        @test occursin("y_rows_reference_reader(reference)", main)
+        @test occursin("y_observation_argument_1(loc, reference, sigma)", main)
         @test any(source -> Meta.isexpr(source, :call) &&
             argument_callee_is(first(source.args), :reduce) &&
             :raw in source.args, graph_sources)

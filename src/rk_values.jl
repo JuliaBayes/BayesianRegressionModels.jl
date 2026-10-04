@@ -529,7 +529,7 @@ function _rk_emit_ast(plan::_RKValuePlan)
             "RK backend: response `$(observation.name)` needs a distribution call")
         isempty(distribution.kwargs) || error(
             "RK backend: response `$(observation.name)` distribution keywords are unsupported")
-        distribution = _rk_align_kernel_observation_arguments!(defs, stmts, taken,
+        distribution = _rk_align_kernel_observation_arguments!(defs, stmts, bindings, taken,
             plan, observation, distribution)
         _rk_emit_observation_source!(defs, stmts, bindings, taken,
             observation, distribution, plan.columns[observation.name]) && continue
