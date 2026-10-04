@@ -238,7 +238,8 @@ function _brm_rk_composed_kernel_plan(brmi)
             distribution, plan.columns[observation.source], nothing, nothing))
     end
     isempty(observations) && error("RK backend: kernel program needs at least one observed likelihood")
-    _RKValuePlan(plan.regression, plan.assignments, Tuple(observations), plan.columns)
+    _RKValuePlan(plan.regression, plan.assignments, Tuple(observations), plan.columns,
+        plan.completions)
 end
 
 function _rk_kernel_bind_calls(value, scope, bindings, taken)

@@ -2797,6 +2797,14 @@ function _rk_term_specs(term, target::Symbol, data::AbstractDict,
     prefix = "RK backend"
     term isa Integer && term == 1 && return _RKTermSpec[_RKTermSpec(
         :intercept, Symbol[], (;), :Intercept, :Intercept)]
+    model_column = _rk_model_population_column(term)
+    if model_column !== nothing
+        value = model_column.runtime_expression
+        column_name = value isa Symbol ? value : _rk_push_derived!(
+            derived, model_column.label, value, model_column.label, target)
+        return _RKTermSpec[_RKTermSpec(:continuous, [column_name], (;),
+            model_column.label, model_column.label)]
+    end
     if term isa ExprColumn && getf(term) === offset
         args = getargs(term)
         length(args) == 1 || error(
@@ -3006,7 +3014,7 @@ function _rk_design_addressee_groups(design, target::Symbol;
         addressee = if kind in (:interaction, :zscale, :standardize,
                 :center, :protect)
             column.label
-        elseif kind === :population_factor_dummy || isnothing(kind)
+        elseif kind in (:population_factor_dummy, :model_value) || isnothing(kind)
             isnothing(column.source) ? column.label : column.source
         else
             error("$prefix: internal: design column `$(column.label)` in " *
@@ -5240,7 +5248,8 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         brmi, context, target, ordinary, available, link, terms, derived)
     geometry = _brm_prepare_predictor_geometry(
         brmi, context, target; available_predictors=available,
-        tolerant_default, matched_defaults)
+        tolerant_default, matched_defaults,
+        population_columns=_rk_model_population_columns)
     for (raw, prepared) in zip(structured, geometry.terms)
         if prepared.callable === gp
             push!(terms, _rk_plan_gp_term!(

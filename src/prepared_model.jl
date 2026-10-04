@@ -396,7 +396,8 @@ end
 function _brm_prepare_predictor_geometry(
         brmi::BRMI, context::_BRMBackendContext, predictor::Symbol;
         available_predictors=(predictor,), training=nothing,
-        tolerant_default::Bool=false, matched_defaults=nothing)
+        tolerant_default::Bool=false, matched_defaults=nothing,
+        population_columns=_brm_population_columns)
     random_effects = _brm_simple_random_effect_plans(
         brmi, predictor, context; required=true)
     op = linear_predictor_op(brmi, predictor)
@@ -437,7 +438,7 @@ function _brm_prepare_predictor_geometry(
     end
     design = _brm_population_design(
         name, ordinary_terms, context.data, get(context.target_obs, name, nothing);
-        required=true, row_source,
+        required=true, row_source, population_columns,
         implicit_intercept=name in _brm_threshold_located_predictors(brmi))
     predictor_plan = _BRMPopulationPredictor(
         name, link_lhs_fn, _brm_lp_emitted_name(name, link_lhs_fn), design)
