@@ -7,8 +7,10 @@ the scalar graph route, define a fresh explicit `ReactiveKernels.@kernel`
 `entry(value, args...)` returning the normalized scalar log density, append
 any preceding child graph definitions and separately named numerical leaves,
 and return a non-`nothing` value. `args` are the original constructor's
-arguments on the observation cell's axis. A subject-shared scalar broadcasts;
-a row vector keeps its original order. Prepare history-dependent row values
+arguments on the observation cell's axis. A shared scalar broadcasts; grouped
+row arguments follow their response's subject partition, and flat row arguments
+follow an explicit ragged response join. Original data ports remain available
+to other consumers. Prepare history-dependent row values
 before invoking this entry. The provider receives no model values or AD state.
 
 The emitted observation plate composes this graph before scoring its returned
@@ -20,7 +22,7 @@ Extend with `import BayesianRegressionModels: _rk_observation_source!`.
 _rk_observation_source!(definitions, bindings, entry, family) = nothing
 
 function _rk_emit_observation_source!(defs, statements, bindings, taken,
-        observation, distribution)
+        observation, distribution, response)
     entry = _rk_ast_fresh_name(string(observation.name, "_scalar_logdensity"), taken)
     supplied_defs = Expr[]
     supplied_bindings = Pair{Symbol,Any}[]
@@ -44,7 +46,7 @@ function _rk_emit_observation_source!(defs, statements, bindings, taken,
     union!(taken, (source.name for source in sources), first.(supplied_bindings))
 
     values = _rk_ast_fresh_name(string(observation.name, "_law_values"), taken)
-    row_values = observation.response isa AbstractVector ? observation.name :
+    row_values = response isa AbstractVector ? observation.name :
         Expr(:vect, observation.name)
     push!(statements, Expr(:(=), values, row_values))
     arguments = Symbol[]

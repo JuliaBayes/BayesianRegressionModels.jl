@@ -224,6 +224,12 @@ independent values/gradients, ordinary Reverse, strict same-BRMI Stan,
 complete source/data replay, original geometry/ownership and scalar algebra
 inside the actual built observation plate. A Bernoulli-logit case preserves
 integer response rows across uneven/empty cells.
+`rk_grouped_observation_arguments.jl` checks the equivalent outside-cell law,
+grouped argument collection, explicit ragged joins, empty cells, broadcasting,
+elementwise argument expressions and unchanged data ports. Each case checks
+normalized independent values and every ordinary Reverse coordinate, strict
+same-model compiled Stan parity, printed source replay and actual graph gathers.
+Run the standalone file with optional case filters such as `joined` or `integer`.
 `rk_observed_graph_law.jl` checks the public inclusive threshold law's lower
 and upper branches and normalized interior in that built graph, against
 independent native values/gradients. The retained ordinary-constructor fixture
