@@ -10,7 +10,7 @@ const BRM = BayesianRegressionModels
 # The emitted source is the executable contract. Every statistical prior and
 # observation role lowers through the public RKPPL surface; binding supplies
 # the data, with no ordinal or missing-response plan mutations.
-const _RK_PLAN_TYPES = Union{BRM._RKStructuralPlan,BRM._RKKernelPlan,BRM._RKValuePlan,BRM._RKHeldOutPlan}
+const _RK_PLAN_TYPES = Union{BRM._RKStructuralPlan,BRM._RKKernelPlan,BRM._RKValuePlan,BRM._RKHeldOutPlan,BRM._RKUnconditionedPlan}
 
 # Evaluate native functions and explicit `@kernel`/`@rkppl` definitions in a fresh module
 # per lowering. Each build owns its definition namespace even when different

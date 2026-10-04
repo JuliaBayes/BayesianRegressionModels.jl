@@ -379,8 +379,10 @@ function _brm_rk_value_plan(brmi, program, observations; kernels=(), submodels=(
         push!(roots, route.name)
         union!(roots, route.globals)
     end
-    union!(roots, (parameter.name for parameter in prepared.parameters))
     referenced = _brm_reachable_operations(program, roots)
+    prepared = _BRMPreparedModel(prepared.program,
+        Tuple(p for p in prepared.parameters if p.name in referenced),
+        prepared.predictors, prepared.assignments, prepared.observations)
     ordinary_assignments = Tuple(a for a in prepared.assignments if a.name in referenced)
     operations = Dict(a.name => a for a in (ordinary_assignments..., routes...))
     assignments = Tuple(operations[name] for name in program.order if haskey(operations, name))
