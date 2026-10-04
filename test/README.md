@@ -18,6 +18,21 @@ differentiates with Enzyme only — every gradient in this suite goes through
 so there is nothing here to work around; do not add it back to make a new
 gradient site easier.
 
+## Description PDF rendering
+
+`description_tex.jl` checks Student-t sampling equations for standard, affine,
+long-expression and embedded kernel models while preserving their source,
+data, priors and model identity. It also runs under the root project. Add
+`--pdf` to compile the complete public Markdown through Quarto and LuaLaTeX:
+
+```sh
+julia --project=. test/description_tex.jl --pdf
+```
+
+This explicit PDF mode requires Quarto and a working LuaLaTeX installation;
+render failures propagate. Outputs use a temporary directory, or the directory
+specified by `BRM_DESCRIPTION_TEX_OUTPUT`.
+
 ## Chunking heavy suites
 
 Files with dozens of testsets (`rk_parity.jl`, `rk_emitter.jl`) OOM a squeezed
