@@ -426,13 +426,16 @@ function _brm_missing_response_plan(lhs; prefix="BRM backend lowering")
         "$prefix: `mi($(name(inner)))` requires a raw data column with " *
         "missing values, got backing $(typeof(backing))")
     raw = parent(backing)
-    _brm_missing_response_plan(name(inner), raw; prefix,allow_complete=population_value)
+    # A complete real column has the same observed law and an empty missing
+    # coordinate set. Reusing the declaration must not depend on its eltype
+    # admitting Missing or force the caller to rewrite its scientific body.
+    _brm_missing_response_plan(name(inner), raw; prefix,allow_complete=true)
 end
 
 function _brm_missing_response_plan(source::Symbol, raw; prefix="BRM backend lowering",allow_complete=false)
     raw isa AbstractVector || error(
         "$prefix: `mi($source)` requires a vector response")
-    Missing <: eltype(raw) || error(
+    (allow_complete || Missing <: eltype(raw)) || error(
         "$prefix: `mi($source)` requires a column whose element type " *
         "admits `missing` (got $(eltype(raw))); drop `mi(...)` when there are no NAs")
     value_type = nonmissingtype(eltype(raw))
