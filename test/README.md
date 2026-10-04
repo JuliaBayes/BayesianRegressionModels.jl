@@ -138,7 +138,12 @@ tracked separately as `ragged-plate-typ-e33e4e9e`; native checks do not certify
 that reference or complete application performance.
 
 `rk_plain.jl` and `rk_statistical_library.jl` exercise BRM-owned statistical
-declarations through ordinary RKPPL lowering. `rk_leveled.jl` adds independent
+declarations through ordinary RKPPL lowering. `rk_statistical_source.jl`
+compares emitted reusable block algebra with the former ordinary inline
+source: sampled names, physical coordinates, prior/likelihood/full densities,
+all standard Reverse coordinates, caller ownership and complete source replay
+must agree bit-exactly. Priors remain explicit at their existing paths.
+`rk_leveled.jl` adds independent
 categorical-reference and multinomial row-density, Jacobian and ordinary
 reverse-gradient oracles. `rk_values.jl` checks whole
 predictor arrays, callable readers and distinct predictor/observation axes.
