@@ -107,23 +107,19 @@ function _rk_ast_hsgp_value_graph!(definitions, term, taken,
         end
     else
         push!(arguments, :group_index)
-        group_body = quote
+        row_body = quote
             s = $(sigma_by_group ? :(sigmas[g]) : :sigmas)
             r = $(rho_by_group ? :(rhos[g]) : :rhos)
-            weights = $weight_plate
-            weights
         end
-        group_plate = _rk_ast_graph_plate([:(axes(z, 1)), :(Ref(omega2)),
-            :(Ref(sigma)), :(Ref(rho))], [:g, :omega2, :sigmas, :rhos], group_body)
         terms = _rk_ast_graph_plate([:(axes(PHI,2)), :(Ref(i)), :(Ref(g)),
-            :(Ref(PHI)), :(Ref(spectra)), :(Ref(z))],
-            [:b, :i, :g, :PHI, :spectra, :z], :(PHI[i,b] * spectra[g,b] * z[g,b]))
+            :(Ref(PHI)), :(Ref(omega2)), :(Ref(s)), :(Ref(r)), :(Ref(z))],
+            [:b, :i, :g, :PHI, :omega2, :s, :r, :z],
+            Expr(:block, :(weight = $weight_cell), :(PHI[i,b] * weight * z[g,b])))
+        push!(row_body.args, :(terms = $terms), :(sum(terms)))
         value_plate = _rk_ast_graph_plate([:(axes(PHI,1)), :group_index,
-            :(Ref(PHI)), :(Ref(spectra)), :(Ref(z))], [:i, :g, :PHI, :spectra, :z],
-            Expr(:block, :(terms = $terms), :(sum(terms))))
+            :(Ref(PHI)), :(Ref(omega2)), :(Ref(sigma)), :(Ref(rho)), :(Ref(z))],
+            [:i, :g, :PHI, :omega2, :sigmas, :rhos, :z], row_body)
         body = quote
-            group_weights = $group_plate
-            spectra = stack(group_weights; dims=1)
             value = $value_plate
             return value
         end
