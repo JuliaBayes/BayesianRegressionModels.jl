@@ -3371,12 +3371,12 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     end
     nodes = Dict(node.name => node for node in _brm_prepared_nodes(prepared))
     prepass = context.prepass
-    effect_overrides = _sb_prior_overrides(brmi; term_priors=context.term_priors,
-                                           frozen_preproc=_frozen_preproc)
     # Hyper-predictor statements validate here (they need the term context)
     # and ride the `data` side-channel to their term's emitter; the statement
     # emitter skips them below.
     data[_SB_HYPER_PLANS_KEY] = _sb_collect_hyper_plans(brmi)
+    effect_overrides = _sb_prior_overrides(brmi; term_priors=context.term_priors,
+        hyper_plans=data[_SB_HYPER_PLANS_KEY], frozen_preproc=_frozen_preproc)
     # Prepass 2: collect brms-style `|ID|` ranef buckets across all sub-formulas,
     # emit one shared ranef_correlated_draws per bucket, and build a lookup
     # `(brmi_key, (id_sym, group_key)) => (bucket_name, col_range, idx_name, suffix)`
@@ -5866,7 +5866,7 @@ function _sb_bound_intersection(f, a, b)
 end
 
 function _sb_apply_prior_bounds!(stmt, prior::ExprColumn;
-                                 lower::Real, upper::Union{Nothing,Real}=nothing)
+                                 lower::Union{Nothing,Real}, upper::Union{Nothing,Real}=nothing)
     rhs = stmt.args[3]
     parameters = length(rhs.args) >= 2 && rhs.args[2] isa Expr &&
                  rhs.args[2].head === :parameters ? rhs.args[2] : nothing
@@ -5877,7 +5877,10 @@ function _sb_apply_prior_bounds!(stmt, prior::ExprColumn;
             bounds[kw.args[1]] = kw.args[2]
         end
     end
-    lower = _sb_bound_intersection(max, Float64(lower), get(bounds, :lower, Float64(lower)))
+    existing_lower = get(bounds, :lower, nothing)
+    lower = isnothing(lower) ? existing_lower :
+        (isnothing(existing_lower) ? Float64(lower) :
+         _sb_bound_intersection(max, Float64(lower), existing_lower))
     existing_upper = get(bounds, :upper, nothing)
     upper = isnothing(upper) ? existing_upper :
             (isnothing(existing_upper) ? Float64(upper) :
@@ -5888,13 +5891,15 @@ function _sb_apply_prior_bounds!(stmt, prior::ExprColumn;
         length(args) == 2 || error("sbimpl: Uniform prior needs two support endpoints")
         all(x -> !(x isa Real) || isfinite(x), args) || error(
             "sbimpl: Uniform prior support endpoints must be finite")
-        lower = _sb_bound_intersection(max, lower, args[1])
+        lower = isnothing(lower) ? args[1] : _sb_bound_intersection(max, lower, args[1])
         upper = isnothing(upper) ? args[2] : _sb_bound_intersection(min, upper, args[2])
     end
     lower isa Real && upper isa Real && lower >= upper && error(
-        "sbimpl: prior bounds have empty intersection with positive support")
-    kws = Any[Expr(:kw, :lower, lower)]
+        "sbimpl: prior bounds have empty support intersection")
+    kws = Any[]
+    isnothing(lower) || push!(kws, Expr(:kw, :lower, lower))
     isnothing(upper) || push!(kws, Expr(:kw, :upper, upper))
+    isempty(kws) && return stmt
     if isnothing(parameters)
         insert!(rhs.args, 2, Expr(:parameters, kws...))
     else
@@ -7881,11 +7886,20 @@ _sb_term_slot_config(::Val{:simplex}, entry) =
 _sb_term_slot_config(::Val{:latent}, entry) = (; prior=entry.spec.expression)
 
 function _sb_term_prior_overrides(brmi::BRMI;
-        resolved=_brm_resolve_term_priors(brmi; prefix="sbimpl"))
+        resolved=_brm_resolve_term_priors(brmi; prefix="sbimpl"),
+        hyper_plans=_sb_collect_hyper_plans(brmi))
+    # An authored hyper-predictor retargets its override to a log intercept.
+    # Determine that target before preparing support: positive shared-scale
+    # bounds must not leak onto the intercept, and negative Uniform endpoints
+    # are valid there. Explicit prior support still travels with the expression.
+    intercepts = Set((plan.lp, plan.term_key,
+        plan.hyper === :sd ? :sigma : plan.hyper) for plan in hyper_plans)
     Dict{Symbol,Dict{Symbol,Any}}(
         lp => Dict{Symbol,Any}(
             key => Dict{Symbol,Any}(
-                slot => _sb_term_slot_config(Val(slot), entry)
+                slot => ((lp, key, slot) in intercepts ?
+                    _sb_gp_scale_prior(entry.spec, _sb_term_prior_spelling(entry);
+                        positive=false) : _sb_term_slot_config(Val(slot), entry))
                 for (slot, entry) in slots)
             for (key, slots) in terms)
         for (lp, terms) in resolved)
@@ -8084,13 +8098,13 @@ end
 # replaces a matching-named statement wholesale, so a dropped `lower=` leaves
 # the parameter unconstrained and a `Uniform` density whose declaration does
 # not match its support is -Inf everywhere the sampler starts.
-function _sb_gp_scale_prior(spec, spelling::AbstractString;
+function _sb_gp_scale_prior(spec, spelling::AbstractString; positive::Bool=true,
                             default="`LogNormal(0, 1)` truncated to be positive")
     T = _as_distribution_type(spec.family)
     if isnothing(T) || !(T <: Uniform)
         args = map(x -> x isa Real ? Float64(x) : x, spec.arguments)
         prior = ExprColumn(spec.family, args...; spec.keywords...)
-        return (; prior, lower=0.0, upper=nothing)
+        return (; prior, lower=positive ? 0.0 : nothing, upper=nothing)
     end
     args = map(_sb_effect_prior_arg, spec.arguments)
     stan_args = _sb_stan_dist_args(T, Tuple(args))
@@ -8098,10 +8112,10 @@ function _sb_gp_scale_prior(spec, spelling::AbstractString;
         "sbimpl: `$spelling ~ Uniform(...)` requires lower and upper bounds")
     lower, upper = stan_args
     (lower isa Real && upper isa Real) || return (
-        prior=spec.expression, lower=0.0, upper=nothing)
-    (lower >= 0 && upper > lower) || error(
-        "sbimpl: `$spelling ~ Uniform($lower, $upper)` bounds a positive scale, " *
-        "so it needs `0 <= lower < upper`.")
+        prior=spec.expression, lower=positive ? 0.0 : nothing, upper=nothing)
+    upper > lower && (!positive || lower >= 0) || error(
+        "sbimpl: `$spelling ~ Uniform($lower, $upper)` needs " *
+        (positive ? "`0 <= lower < upper` for a positive scale." : "`lower < upper`."))
     (; prior=spec.expression, lower=Float64(lower), upper=Float64(upper))
 end
 
@@ -8220,9 +8234,10 @@ end
 # `_sb_linear_predictor!`.
 function _sb_prior_overrides(brmi::BRMI;
         term_priors=_brm_resolve_term_priors(brmi; prefix="sbimpl"),
+        hyper_plans=_sb_collect_hyper_plans(brmi),
         frozen_preproc=nothing)
     effects = _sb_effect_prior_overrides(brmi; frozen_preproc)
-    terms = _sb_term_prior_overrides(brmi; resolved=term_priors)
+    terms = _sb_term_prior_overrides(brmi; resolved=term_priors, hyper_plans)
     isempty(terms) && return effects
     out = Dict{Symbol,Any}()
     for lp in union(keys(effects), keys(terms))
