@@ -149,6 +149,16 @@ nested helpers compare with compiled same-BRMI Stan on the published
 StanBlocks caller-dimension fix `65cabef`, pinned by `setup_env.jl`.
 These scoped checks do not certify complete application performance.
 
+`rk_graph_source.jl` checks explicit `@kernel` provider definitions and graph
+adapters for `KernelObjectSpec` endpoints. It distinguishes a retained scan in
+the provider/subject-reader graph from a retained scan in the actual PPL
+posterior. Printed definitions must recreate the subject plate and child scan;
+posterior acceptance also requires complete source/artifact replay, independent
+densities, standard Reverse, caller ownership and compiled same-BRMI Stan.
+Published RK `999451c` loses module-resolved graph calls in PPL; the posterior
+checks remain failed until the producer repair `ppl-transparent-654ba0aa` is
+delivered. Provider-only controls are not posterior or application acceptance.
+
 `rk_plain.jl` and `rk_statistical_library.jl` exercise BRM-owned statistical
 declarations through ordinary RKPPL lowering. `rk_statistical_source.jl`
 compares emitted reusable block algebra with the former ordinary inline
