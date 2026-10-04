@@ -70,6 +70,12 @@ full-posterior anchors and gradients, including the distributional spline toy.
 
 The focused preparation gates are `preparation_program.jl`,
 `preparation_replay.jl`, `preparation_assignments.jl`, and `backend_plan.jl`.
+`rk_declared_consumer_axes.jl` checks that an explicit ragged consumer supplies
+an intercept predictor's row axis even when its endpoint data are omitted.
+Its observed model compares complete printed RK replay, ordinary Reverse and
+an independent normalized oracle with compiled same-BRMI Stan on distinct
+subject, ECG-row and response axes. Omitted-data geometry checks do not claim
+native prior-draw execution.
 The assignment gate checks dependency ordering and distinct response row axes.
 `preparation_replay.jl` compares the shared fitted transform contract across
 StanBlocks and Turing. Callable-specific frozen replay is covered by

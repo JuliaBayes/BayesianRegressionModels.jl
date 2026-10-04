@@ -18,15 +18,16 @@ end
     _BRMBackendContext
 
 Backend-neutral facts collected from a data-bound [`BRMI`](@ref): raw data,
-likelihood-decorator prepass state, and the observation row axis associated with
-each referenced target. It also caches grouped-term source declarations in
+likelihood-decorator prepass state, observed row axes and explicit gather
+consumer axes. It also caches grouped-term source declarations in
 formula order. Concrete backends own all later representation choices.
 """
-struct _BRMBackendContext{P<:BRMI,D<:AbstractDict,PP<:AbstractDict,TO<:AbstractDict,TP,GD}
+struct _BRMBackendContext{P<:BRMI,D<:AbstractDict,PP<:AbstractDict,TO<:AbstractDict,RA<:AbstractDict,TP,GD}
     parent::P
     data::D
     prepass::PP
     target_obs::TO
+    target_axes::RA
     term_priors::TP
     group_declarations::GD
 end
@@ -306,6 +307,41 @@ function _brm_collect_target_obs(brmi::BRMI)
         _brm_collect_rhs_refs!(target_obs, rhs, obs_name)
     end
     target_obs
+end
+
+# A declared gather supplies a predictor's row axis even when its response is
+# absent or withheld. Keep this distinct from observed-likelihood activity.
+_brm_collect_target_axes!(axes, _) = nothing
+function _brm_collect_target_axes!(axes, node::NamedColumn)
+    _brm_collect_target_axes!(axes, parent(node))
+end
+function _brm_collect_target_axes!(axes, node::ExprColumn)
+    args = getargs(node)
+    if getf(node) === ragged && length(args) == 2
+        value, group = args
+        if value isa NamedColumn && group isa NamedColumn && parent(group) isa DataColumn
+            sources = get!(axes, name(value), Symbol[])
+            name(group) in sources || push!(sources, name(group))
+        end
+    end
+    foreach(arg -> _brm_collect_target_axes!(axes, arg), args)
+    foreach(arg -> _brm_collect_target_axes!(axes, arg), values(getkwargs(node)))
+end
+function _brm_collect_target_axes(brmi::BRMI)
+    axes = Dict{Symbol,Vector{Symbol}}()
+    foreach(node -> _brm_collect_target_axes!(axes, node), values(brmi.operations))
+    axes
+end
+function _brm_declared_row_axis(context::_BRMBackendContext, target::Symbol)
+    sources = get(context.target_axes, target, Symbol[])
+    isempty(sources) && return nothing
+    all(source -> haskey(context.data, source), sources) || error(
+        "BRM preparation: declared row-axis data for predictor `$target` are absent")
+    lengths = length.([context.data[source] for source in sources])
+    all(==(first(lengths)), lengths) || error(
+        "BRM preparation: predictor `$target` has declared consumer axes of " *
+        "different lengths: $(collect(zip(sources, lengths)))")
+    first(sources)
 end
 
 """
@@ -662,6 +698,7 @@ function _brm_backend_context(brmi::BRMI;
     end
 
     _BRMBackendContext(brmi, data, prepass, _brm_collect_target_obs(brmi),
+                       _brm_collect_target_axes(brmi),
                        _brm_resolve_term_priors(brmi),
                        _brm_group_declarations(brmi))
 end

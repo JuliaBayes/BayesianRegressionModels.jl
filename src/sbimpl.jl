@@ -3461,7 +3461,17 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
         op = brmi.operations[key]
         nc = _as_named_column(op)
         isnothing(nc) && error("sbimpl: top-level op `$key` is not a NamedColumn")
-        obs_n = get(target_obs, key, nothing)
+        declared_axis = _brm_declared_row_axis(context, key)
+        obs_n = if isnothing(declared_axis)
+            get(target_obs, key, nothing)
+        else
+            # The declared frame can be categorical and need not have been
+            # emitted yet. Bind its extent without exposing a string column
+            # as Stan data or borrowing another likelihood's row count.
+            extent_name = Symbol(:n_rows_, key, :_, declared_axis)
+            data[extent_name] = length(context.data[declared_axis])
+            extent_name
+        end
         _sb_emit_prepared!(stmts, data, get(nodes, key, nothing), key, parent(nc); id_lookup, obs_n, cv_groups,
                   centered_groups, group_block_lookup, effect_overrides, mod,
                   r2d2=(; overrides=r2d2_overrides, names=r2d2_names,
