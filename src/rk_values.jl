@@ -285,6 +285,13 @@ function _rk_needs_value_plan(program, observations)
             family = first(getargs(family))
         end
         head = family isa ExprColumn ? getf(family) : nothing
+        # Caller-owned scalar RHS constructors use the ordinary value/source
+        # protocol. Their sampled parents need no synthetic formula predictor.
+        if head !== nothing && head !== LocationScale &&
+                !(head isa Type && head <: Distribution) &&
+                !(head in _RK_ASSIGNMENT_CALLABLES)
+            return true
+        end
         if head === LocationScale || (head isa Type && head <: UnivariateDistribution)
             reachable = _brm_reachable_operations(program,
                 _brm_prepared_references(_brm_prepare_expr(family)))
@@ -506,6 +513,8 @@ function _rk_emit_ast(plan::_RKValuePlan)
             "RK backend: response `$(observation.name)` needs a distribution call")
         isempty(distribution.kwargs) || error(
             "RK backend: response `$(observation.name)` distribution keywords are unsupported")
+        _rk_emit_observation_source!(defs, stmts, bindings, taken,
+            observation, distribution) && continue
         base = _rk_ast_value_distribution(distribution, bindings, taken)
         if modifier !== nothing
             lower = modifier.lower === nothing ? -Inf :
