@@ -131,6 +131,12 @@ full-posterior anchors and gradients, including the distributional spline toy.
 
 The focused preparation gates are `preparation_program.jl`,
 `preparation_replay.jl`, `preparation_assignments.jl`, and `backend_plan.jl`.
+`rk_modeled_random_slopes.jl` keeps modeled formula values active in both
+population and subject slope designs. It covers six rows from three subjects,
+censored LogNormal and Normal observations, sampled covariance and authored
+priors, row permutations, independent full-density/native Reverse oracles,
+compiled same-BRMI Stan, and complete source/artifact replay. Direct formula
+slopes and partially completed covariates also keep their original row axes.
 `rk_declared_consumer_axes.jl` checks that an explicit ragged consumer supplies
 an intercept predictor's row axis even when its endpoint data are omitted.
 Its observed model compares complete printed RK replay, ordinary Reverse and

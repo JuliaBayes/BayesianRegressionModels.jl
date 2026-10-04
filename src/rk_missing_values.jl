@@ -25,7 +25,7 @@ _rk_mi_predictor_plan(_) = nothing
 # invented parameter values. Track pointwise assignment dependencies back to
 # their actual data/observation axes; scalar sampled parents add no row axis.
 _rk_model_value_axis(::Number, _context) = ()
-_rk_model_value_axis(_value, _context) = nothing
+_rk_model_value_axis(_value, _context=nothing) = nothing
 _rk_model_value_axis(value::NamedColumn, context) =
     _rk_model_value_axis(value, parent(value), context)
 function _rk_model_value_axis(value::NamedColumn, backing::DataColumn, _context)

@@ -21,14 +21,6 @@ function build(data)
 end
 end
 
-function random_slope_named_query(model, translated)
-    spec = model.spec
-    fixed_names = Tuple(n for n in spec.have_names if n !== :unconstrained)
-    fixed = NamedTuple{fixed_names}(Tuple(translated.columns[n] for n in fixed_names))
-    Base.invokelatest(prepare, spec; have=spec.have_names,
-        want=(:eta, :x, :mu), bound=fixed)
-end
-
 @stestset "modeled random slopes preserve sampled design and conditional laws" begin
     original = (; subject=[1,1,2,2,3,3],
         assay=[0.2,0.7,0.5,0.2,0.8,0.9], limit=fill(0.2,6),
@@ -112,6 +104,67 @@ end
             replay_value, _ = sampler_value_and_gradient!(replay,replay_gradient,u)
             @test isequal(value,replay_value)
             @test gradient ≈ replay_gradient atol=2e-13 rtol=2e-13
+        end
+        @test isequal(data,saved)
+    end
+end
+
+@stestset "direct formula and completed values remain active random slopes" begin
+    data = (; subject=["b","a","b","c","a","c"],
+        x=Union{Missing,Float64}[0.2,missing,-0.4,0.7,0.1,-0.2],
+        y=[0.1,-0.2,0.5,0.2,-0.1,0.4])
+    groups = [2,1,2,3,1,3]
+    direct = @brm begin
+        eta ~ 1 + (1 | location | subject)
+        effect(eta, :) ~ Normal(-0.4,0.7)
+        sd(:, location) ~ Exponential(0.8)
+        mu ~ 0 + eta + (0 + eta | effect | subject)
+        effect(mu, eta) ~ Normal(0,1.2)
+        sd(:, effect) ~ Exponential(0.9)
+        y ~ Normal(mu,1)
+    end
+    completed = @brm begin
+        mi(x) ~ Normal(0,1)
+        mu ~ 0 + x + (0 + x | effect | subject)
+        effect(mu, x) ~ Normal(0,1.2)
+        sd(:, effect) ~ Exponential(0.9)
+        y ~ Normal(mu,1)
+    end
+    for (builder, slope) in ((direct,:eta), (completed,:x))
+        saved = deepcopy(data)
+        backend, problem = consumer_problem(builder(data))
+        names = coordinate_names(backend.model.layout)
+        index(n) = only(findall(==(Symbol(n)),names))
+        beta = index("mu_$slope")
+        scale = index("ranef_draws_effect_subject_sd.1")
+        draws = [index("ranef_draws_effect_subject_z.$j.1") for j in 1:3]
+        @test !haskey(backend.plan.columns,slope)
+        @test length(backend.plan.columns[:subject]) == 6
+        @test backend.plan isa BRM._RKValuePlan
+        function oracle(u)
+            prior = logpdf(Normal(0,1.2),u[beta]) +
+                logpdf(Exponential(0.9),exp(u[scale])) + u[scale] +
+                sum(logpdf.(Normal(),u[draws]))
+            value = if slope === :eta
+                intercept = index("eta_Intercept")
+                location_scale = index("ranef_draws_location_subject_sd.1")
+                location_z = [index("ranef_draws_location_subject_z.$j.1") for j in 1:3]
+                prior += logpdf(Normal(-0.4,0.7),u[intercept]) +
+                    logpdf(Exponential(0.8),exp(u[location_scale])) + u[location_scale] +
+                    sum(logpdf.(Normal(),u[location_z]))
+                u[intercept] .+ exp(u[location_scale]) .* u[location_z][groups]
+            else
+                value = Float64[ismissing(data.x[j]) ? u[index("x_y_mis.1")] :
+                    data.x[j] for j in 1:6]
+                prior += sum(logpdf.(Normal(),value))
+                value
+            end
+            mu = (u[beta] .+ exp(u[scale]) .* u[draws][groups]) .* value
+            prior + sum(logpdf.(Normal.(mu,1),data.y))
+        end
+        for u in (zeros(length(names)),fill(0.13,length(names)),
+                collect(range(-0.2,0.3;length=length(names))))
+            check_consumer_point(problem,u,oracle)
         end
         @test isequal(data,saved)
     end
