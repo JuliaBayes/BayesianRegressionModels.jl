@@ -1939,7 +1939,8 @@ function _brm_population_design(target::Symbol, terms::Tuple,
                                 obs_name::Union{Nothing,Symbol};
                                 required::Bool=false,
                                 row_source::Union{Nothing,Symbol}=nothing,
-                                implicit_intercept::Bool=false)
+                                implicit_intercept::Bool=false,
+                                population_columns=_brm_population_columns)
     raw_columns = Any[]
     fixed_terms = _BRMPopulationFixedTerm[]
     # At most one term is cell-mean coded, and only the FIRST term carrying that
@@ -1958,7 +1959,7 @@ function _brm_population_design(target::Symbol, terms::Tuple,
             _brm_categorical_term_block(term) === cellmeans_block &&
             !_brm_requests_treatment_coding(term)
         cellmeans && (cellmeans_block = nothing)
-        columns = _brm_population_columns(term; cellmeans)
+        columns = population_columns(term; cellmeans)
         if isnothing(columns)
             required && error(
                 "BRM backend lowering: predictor `$target` contains unsupported " *

@@ -6,7 +6,11 @@ struct _RKValuePlan
     assignments::Tuple
     observations::Tuple
     columns::Dict{Symbol,Any}
+    completions::Tuple
 end
+
+_RKValuePlan(regression, assignments, observations, columns) =
+    _RKValuePlan(regression, assignments, observations, columns, ())
 
 _rk_value_invlogit(x) = logistic(x)
 brm_invprobit(x) = 0.5erfc(-x / sqrt(2))
@@ -263,6 +267,11 @@ _rk_plan_summary(plan::_RKValuePlan) = string(
     length(plan.observations), " value-based responses")
 
 function _rk_needs_value_plan(program, observations)
+    for observation in observations
+        plan = _brm_missing_response_plan(observation.lhs; prefix="RK backend")
+        plan === nothing && continue
+        _rk_mi_downstream(program, observation.key, plan.source) && return true
+    end
     assignments = Set(op.name for op in program.operations if op.role === :assignment)
     predictors = Set(op.name for op in program.operations if op.role === :predictor)
     for op in program.operations
@@ -405,9 +414,9 @@ function _brm_rk_value_plan(brmi, program, observations; kernels=(), submodels=(
         haskey(value_columns, key) || (value_columns[key] = context.data[key])
     end
     obs = Tuple(o for o in prepared.observations if o.name in roots)
-    obs = map(obs) do o
-        o.missing_response === nothing || error(
-            "RK backend: value-based response `$(o.name)` needs explicit observed values")
+    completions = _RKMissingValueSpec[]
+    obs = map(obs) do original
+        o = _rk_prepare_missing_value!(value_columns, taken, original, program, completions)
         o.weight === nothing || error(
             "RK backend: value-based response `$(o.name)` weights need an authored response")
         layout = isempty(kernels) ?
@@ -433,7 +442,7 @@ function _brm_rk_value_plan(brmi, program, observations; kernels=(), submodels=(
         components.priors, parameters, _RKAssignmentSpec[], derived, columns,
         0, components.buckets, vectors, components.r2d2_priors,
         components.horseshoe_priors)
-    _RKValuePlan(regression, assignments, obs, value_columns)
+    _RKValuePlan(regression, assignments, obs, value_columns, Tuple(completions))
 end
 
 function _rk_emit_value_assignment!(defs, statements, bindings, taken,
@@ -498,6 +507,9 @@ function _rk_emit_ast(plan::_RKValuePlan)
     for assignment in plan.assignments
         _rk_emit_value_assignment!(defs, stmts, bindings, taken, assignment)
     end
+    for completion in plan.completions
+        _rk_emit_missing_value!(stmts, bindings, taken, completion)
+    end
     for observation in plan.observations
         modifier = observation.modifier
         distribution = modifier === nothing ? observation.distribution :
@@ -516,6 +528,7 @@ function _rk_emit_ast(plan::_RKValuePlan)
         end
         push!(stmts, Expr(:call, :.~, observation.name, base))
     end
+    isempty(plan.completions) || (stmts = _rk_order_value_statements(stmts, keys(plan.columns)))
     _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings),
         _rk_observed_names(plan))
 end
