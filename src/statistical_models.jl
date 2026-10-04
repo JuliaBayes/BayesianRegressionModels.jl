@@ -156,3 +156,34 @@ end
 
 """Return a BRM-owned statistical RKPPL submodel after loading ReactiveKernelsPPL."""
 function rkppl_model end
+
+# Shared statistical algebra over explicitly declared random coordinates.
+# The emitter keeps prior statements at their current author paths, and uses
+# these ordinary submodels to make repeated block composition readable.
+const _BRM_STATISTICAL_VALUES = (
+    brm_scaled_random_coefficients = :(
+brm_scaled_random_coefficients(sd, z) = begin
+    z .* sd[1]
+end
+    ),
+    brm_correlated_random_coefficients = :(
+brm_correlated_random_coefficients(sd, L, z) = begin
+    z * transpose(sd .* L)
+end
+    ),
+    brm_hsgp_summand = :(
+brm_hsgp_summand(PHI, omega2, sigma, rho, z) = begin
+    PHI * (brm_hsgp_sqrt_spd(omega2, sigma, rho) .* z)
+end
+    ),
+    brm_periodic_hsgp_summand = :(
+brm_periodic_hsgp_summand(PHI, harmonics, sigma, rho, z) = begin
+    PHI * (brm_hsgp_periodic_sqrt_spd(harmonics, sigma, rho) .* z)
+end
+    ),
+    brm_grouped_hsgp_summand = :(
+brm_grouped_hsgp_summand(PHI, omega2, z, group_index, rho, sigma, reader) = begin
+    reader(PHI, omega2, z, group_index, rho, sigma)
+end
+    ),
+)

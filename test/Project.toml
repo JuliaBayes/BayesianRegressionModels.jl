@@ -54,9 +54,9 @@ rev = "c317cc003fc41c2d933c27dc80799141eebd434e"
 
 [sources.StanBlocks]
 url = "https://github.com/nsiccha/StanBlocks.jl"
-# Published empty integer-index ingestion and mixed derived-record routing.
-# Retains ValueFamily/ValueUDF, observation sizes and tracing/publication.
-rev = "215bae44bd2a830f98ec071f8d3bc8faa117ca58"
+# Published caller-dimension substitution for uneven/empty nested ragged
+# helpers. Retains mixed derived records, empty indices and ValueFamily/UDF.
+rev = "65cabefda5a9345993c7e0343739e9f8e363611f"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"

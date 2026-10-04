@@ -129,8 +129,24 @@ checks paired source hooks for an empty marker with active predictor keywords,
 no extra result coefficient, exact callable bindings and fresh-module replay;
 an emitted entry and a bound leaf cannot share the same symbol.
 
+`rk_callable_source.jl` checks original nested callable identities supplied by
+ordinary native source definitions. Ragged cells, live keyword arguments,
+native Reverse, independent density/gradient oracles, ownership and complete
+source replay are covered. Both ordinary assignments and uneven/empty ragged
+nested helpers compare with compiled same-BRMI Stan on the published
+StanBlocks caller-dimension fix `65cabef`, pinned by `setup_env.jl`.
+These scoped checks do not certify complete application performance.
+
 `rk_plain.jl` and `rk_statistical_library.jl` exercise BRM-owned statistical
-declarations through ordinary RKPPL lowering. `rk_leveled.jl` adds independent
+declarations through ordinary RKPPL lowering. `rk_statistical_source.jl`
+compares emitted reusable block algebra with the former ordinary inline
+source: sampled names, physical coordinates, prior/likelihood/full densities,
+all standard Reverse coordinates, caller ownership and complete source replay
+must agree bit-exactly. Priors remain explicit at their existing paths.
+`rk_source_composition.jl` additionally combines those statistical definitions
+with identity-resolved native entries and live keywords, retaining both kinds
+of definitions in the ordinary source reference and complete printed replay.
+`rk_leveled.jl` adds independent
 categorical-reference and multinomial row-density, Jacobian and ordinary
 reverse-gradient oracles. `rk_values.jl` checks whole
 predictor arrays, callable readers and distinct predictor/observation axes.

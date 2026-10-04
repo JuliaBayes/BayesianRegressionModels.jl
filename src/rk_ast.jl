@@ -13,12 +13,15 @@
 
 function _rk_validate_source_definitions(emitted)
     bound = Set{Symbol}(first(binding) for binding in emitted.bindings)
+    defined = Set{Symbol}()
     for definition in emitted.defs
         definition isa Expr && definition.head in (:(=), :function) &&
             length(definition.args) == 2 && Meta.isexpr(first(definition.args), :call) ||
             error("RK source: definition must be an ordinary function or @rkppl definition")
         name = first(first(definition.args).args)
         name isa Symbol || error("RK source: definition requires a plain local callable name")
+        name in defined && error("RK source: callable `$name` is defined more than once")
+        push!(defined, name)
         name in bound && error(
             "RK source: callable `$name` is both bound and defined; use separate entry and leaf names")
     end
@@ -49,6 +52,26 @@ function _rk_ast_coef_name(base::String, taken::Set{Symbol})
     end
     push!(taken, name)
     name
+end
+
+function _rk_ast_statistical_call!(definitions, taken, name, args...)
+    template = getproperty(_BRM_STATISTICAL_VALUES, name)
+    signature, body = template.args
+    # Reuse a definition across distinct statistical blocks. A collision with
+    # authored data, parameters or callable names only renames the definition.
+    for definition in definitions
+        Meta.isexpr(definition, :(=), 2) || continue
+        call = first(definition.args)
+        Meta.isexpr(call, :call) || continue
+        isequal(call.args[2:end], signature.args[2:end]) || continue
+        isequal(last(definition.args), body) || continue
+        return Expr(:call, first(call.args), args...)
+    end
+    definition = deepcopy(template)
+    callee = _rk_ast_fresh_name(string(name), taken)
+    first(definition.args).args[1] = callee
+    push!(definitions, definition)
+    Expr(:call, callee, args...)
 end
 
 function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol},
@@ -992,7 +1015,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         end
         for term in predictor.terms
             term.kind === :hsgp || continue
-            append!(stmts, _rk_ast_value_hsgp(term, taken, bindings))
+            append!(stmts, _rk_ast_value_hsgp(defs, term, taken, bindings))
         end
         for term in predictor.terms
             term.kind === :dar || continue
@@ -1048,7 +1071,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         end
     end
     for (bi, bucket) in enumerate(plan.ranef_buckets)
-        append!(stmts, _rk_ast_value_bucket(bucket, ranef_draws[bi], ranef_effects, taken, bindings))
+        append!(stmts, _rk_ast_value_bucket(defs, bucket, ranef_draws[bi], ranef_effects, taken, bindings))
     end
     for parameter in plan.parameters
         if parameter.family === :LKJCovarianceFactor
@@ -1100,6 +1123,6 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 fused_heads, union(Set(keys(plan.columns)), Set(Base.values(rename)),
                     Set(p.name for p in plan.predictors)), effects_name))
     end
-    _rk_fitted_source(_RKEmittedProgram(defs, Expr(:block, stmts...), bindings),
+    _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings),
         _rk_observed_names(plan))
 end

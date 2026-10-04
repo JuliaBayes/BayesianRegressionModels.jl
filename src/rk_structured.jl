@@ -84,7 +84,7 @@ function _rk_ast_hsgp_hyper!(stmts, options, hyper, floors, taken, bindings, G)
     value
 end
 
-function _rk_ast_hsgp_grouped(term, PHI, lambda, floors, taken, bindings)
+function _rk_ast_hsgp_grouped(definitions, term, PHI, lambda, floors, taken, bindings)
     options = term.options
     G = get(options, :n_groups, 1)
     stmts = Expr[]
@@ -95,13 +95,15 @@ function _rk_ast_hsgp_grouped(term, PHI, lambda, floors, taken, bindings)
         push!(stmts, Expr(:call, :.~, Expr(:ref, z, Expr(:call, :(:), 1, G),
             Expr(:call, :axes, PHI, 2)), _rk_ast_dotted(:Normal, 0, 1)))
         callee = _rk_value_callee!(bindings, brm_hsgp_grouped, taken)
-        push!(stmts, Expr(:(=), options.id, Expr(:call, callee,
-            PHI, lambda, z, options.group_index, rho, sigma)))
+        push!(stmts, Expr(:call, :~, options.id,
+            _rk_ast_statistical_call!(definitions, taken, :brm_grouped_hsgp_summand,
+                PHI, lambda, z, options.group_index, rho, sigma, callee)))
     else
         push!(stmts, Expr(:call, :.~, Expr(:ref, z, Expr(:call, :axes, PHI, 2)),
             _rk_ast_dotted(:Normal, 0, 1)))
-        push!(stmts, Expr(:(=), options.id, Expr(:call, :*, PHI,
-            Expr(:call, :.*, Expr(:call, :brm_hsgp_sqrt_spd, lambda, sigma, rho), z))))
+        push!(stmts, Expr(:call, :~, options.id,
+            _rk_ast_statistical_call!(definitions, taken, :brm_hsgp_summand,
+                PHI, lambda, sigma, rho, z)))
     end
     stmts
 end

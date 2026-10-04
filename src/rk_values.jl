@@ -64,7 +64,7 @@ function _rk_ast_positive_prior(prior, bindings, taken; default=:HalfNormal)
     Expr(:call, :restricted, expression, 0.0, Inf)
 end
 
-function _rk_ast_value_bucket(bucket, draws, effects, taken, bindings)
+function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindings)
     grouping = bucket.grouping
     K = length(bucket.margins)
     group = first(grouping.columns)
@@ -121,13 +121,15 @@ function _rk_ast_value_bucket(bucket, draws, effects, taken, bindings)
         push!(stmts, Expr(:call, :.~, Expr(:ref, z,
             Expr(:call, :levels, group), index), _rk_ast_dotted(:Normal, 0, 1)))
         value = if K == 1
-            Expr(:call, :.*, z, Expr(:ref, tau, 1))
+            _rk_ast_statistical_call!(definitions, taken,
+                :brm_scaled_random_coefficients, tau, z)
         else
             L = _rk_ast_fresh_name(string(draws, "_L"), taken)
             push!(stmts, Expr(:call, :~, L, Expr(:call, :LKJCholesky, K, bucket.lkj_eta)))
-            Expr(:call, :*, z, Expr(:call, :transpose, Expr(:call, :.*, tau, L)))
+            _rk_ast_statistical_call!(definitions, taken,
+                :brm_correlated_random_coefficients, tau, L, z)
         end
-        push!(stmts, Expr(:(=), draws, value))
+        push!(stmts, Expr(:call, :~, draws, value))
     end
     indices = Dict{Symbol,Symbol}()
     if grouping.form !== :gr
@@ -208,7 +210,7 @@ function _rk_ast_value_spline(term, taken)
     stmts
 end
 
-function _rk_ast_value_hsgp(term, taken, bindings)
+function _rk_ast_value_hsgp(definitions, term, taken, bindings)
     options = term.options
     PHI = _rk_ast_fresh_name(string(options.id, "_PHI"), taken)
     lambda = _rk_ast_fresh_name(string(options.id, "_lambda"), taken)
@@ -223,7 +225,7 @@ function _rk_ast_value_hsgp(term, taken, bindings)
     end
     stmts = Expr[Expr(:(=), Expr(:tuple, PHI, lambda, floors), call)]
     if haskey(options, :group_index) || !isempty(get(options, :hyper_plans, ()))
-        append!(stmts, _rk_ast_hsgp_grouped(term, PHI, lambda, floors, taken, bindings))
+        append!(stmts, _rk_ast_hsgp_grouped(definitions, term, PHI, lambda, floors, taken, bindings))
         return stmts
     end
     rho_value = if periodic || options.iso
@@ -249,9 +251,10 @@ function _rk_ast_value_hsgp(term, taken, bindings)
         _rk_ast_positive_prior(options.sigma_prior, bindings, taken)))
     push!(stmts, Expr(:call, :.~, Expr(:ref, z, Expr(:call, :axes, PHI, 2)),
         _rk_ast_dotted(:Normal, 0, 1)))
-    spectral = periodic ? :brm_hsgp_periodic_sqrt_spd : :brm_hsgp_sqrt_spd
-    push!(stmts, Expr(:(=), options.id, Expr(:call, :*, PHI,
-        Expr(:call, :.*, Expr(:call, spectral, lambda, sigma, rho_value), z))))
+    model = periodic ? :brm_periodic_hsgp_summand : :brm_hsgp_summand
+    push!(stmts, Expr(:call, :~, options.id,
+        _rk_ast_statistical_call!(definitions, taken, model,
+            PHI, lambda, sigma, rho_value, z)))
     stmts
 end
 
@@ -508,6 +511,6 @@ function _rk_emit_ast(plan::_RKValuePlan)
         end
         push!(stmts, Expr(:call, :.~, observation.name, base))
     end
-    _rk_fitted_source(_RKEmittedProgram(defs, Expr(:block, stmts...), bindings),
+    _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings),
         _rk_observed_names(plan))
 end
