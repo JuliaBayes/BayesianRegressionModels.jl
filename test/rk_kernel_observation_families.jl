@@ -2,6 +2,7 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 
 module PublicKernelObservationFamilies
 using BayesianRegressionModels, StanBlocks, Distributions
+import ReactiveKernels
 import BayesianRegressionModels: _rk_observation_source!
 
 # A public vector law with two aligned row arguments and one live shared
@@ -31,6 +32,37 @@ StanBlocks.@deffun begin
         end
         return result
     end
+end
+
+StanBlocks.@deffun begin
+    @lhs @lpxf relative_bound_normal_lpdf(y::vector[n], location::vector[n],
+            reference::vector[n], scale::real)::real =
+        relative_normal_lpdf(y, location, reference, scale)
+    relative_bound_normal_lpdfs(y::vector[n], location::vector[n],
+            reference::vector[n], scale::real)::vector[n] =
+        relative_normal_lpdfs(y, location, reference, scale)
+    relative_bound_normal_rng(vector[n], location::vector[n],
+            reference::vector[n], scale::real)::vector[n] =
+        relative_normal_rng(vector[n], location, reference, scale)
+end
+
+ReactiveKernels.@kernel relative_bound_graph(value, location, reference, scale) = begin
+    relative_residual = (value - location + reference) / scale
+    relative_log_scale = log(scale)
+    relative_logdensity = -0.5 * log(2 * pi) - relative_log_scale -
+        0.5 * relative_residual * relative_residual
+    return relative_logdensity
+end
+
+function _rk_observation_source!(definitions, bindings, entry,
+        ::typeof(relative_bound_normal))
+    child = Symbol(entry, :_child)
+    push!(bindings, child => relative_bound_graph)
+    push!(definitions, :(ReactiveKernels.@kernel $entry(value, location, reference, scale) = begin
+        density = $child(value, location, reference, scale)
+        return density
+    end))
+    :done
 end
 
 function _rk_observation_source!(definitions, bindings, entry,
@@ -80,6 +112,40 @@ function build_relative_direct(data)
         y ~ relative_normal(loc, retained_reference, sigma)
     end
 end
+function build_relative_bound(data)
+    @brm data begin
+        a ~ Normal(0, 0.7)
+        sigma ~ Exponential(0.9)
+        locations ~ kernel(x, reference, y) do xs, refs, ys
+            loc = xs * a
+            retained_reference = refs * (1 + a)
+            ys ~ relative_bound_normal(loc, retained_reference, sigma)
+            loc
+        end
+    end
+end
+function _rk_observation_source!(definitions, bindings, entry,
+        ::typeof(StanBlocks.bernoulli_logit))
+    push!(definitions, :(ReactiveKernels.@kernel $entry(value, logit) = begin
+        binary_logdensity = if value == 0
+            -log1p(exp(logit))
+        else
+            -log1p(exp(-logit))
+        end
+        return binary_logdensity
+    end))
+    :done
+end
+function build_binary(data)
+    @brm data begin
+        a ~ Normal(0, 0.7)
+        locations ~ kernel(x, y) do xs, ys
+            loc = xs * a
+            ys ~ bernoulli_logit(loc)
+            loc
+        end
+    end
+end
 end
 
 @stestset "kernel cell-law retains exact Student-t constructor and observation axes" begin
@@ -108,6 +174,25 @@ end
     @test isequal(data,saved)
 end
 
+@stestset "integer observed cell law retains original discrete response rows" begin
+    data = (;x=[[0.2,0.5],Float64[],[0.7]],y=[[0,1],Int[],[1]])
+    saved = deepcopy(data)
+    brmi = PublicKernelObservationFamilies.build_binary(data)
+    backend,problem = consumer_problem(brmi)
+    @test eltype(backend.plan.columns[:y]) === Int
+    @test backend.plan.columns[:y] == [0,1,1]
+    @test coordinate_names(backend.model.layout) == [:a]
+    oracle(u) = logpdf(Normal(0,0.7),u[1]) +
+        sum(logpdf(Bernoulli(inv(1+exp(-x*u[1]))),y)
+            for (xs,ys) in zip(data.x,data.y) for (x,y) in zip(xs,ys))
+    stan = consumer_stan(brmi,"integer-kernel-law";mod=PublicKernelObservationFamilies)
+    for u in ([0.0],[0.17],[-0.1])
+        check_consumer_point(problem,u,oracle)
+        check_consumer_stan(problem,stan,[:a=>"a"],backend,u)
+    end
+    @test isequal(data,saved)
+end
+
 # Frozen518 diagnostic fields/classifier, with public entry/body accessors.
 # kernel_expr is a pre-build replay and can retain KernelSpec reader calls;
 # the built numerical graph is the place to verify composed scalar recipes.
@@ -125,7 +210,7 @@ function observation_graph_recipes(graph;depth=0)
 end
 
 @stestset "caller observation graph retains vector arguments and visible scalar law" begin
-  for route in (:kernel, :direct)
+  for route in (:kernel, :direct, :bound_child)
     data = (;x=[[0.2,0.5],Float64[],[0.7]],
         reference=[[0.1,0.4],Float64[],[-0.2]],
         y=[[0.1,0.4],Float64[],[-0.2]])
@@ -134,13 +219,14 @@ end
     end
     saved = deepcopy(data)
     brmi = route === :kernel ? PublicKernelObservationFamilies.build_relative(data) :
-        PublicKernelObservationFamilies.build_relative_direct(data)
+        route === :direct ? PublicKernelObservationFamilies.build_relative_direct(data) :
+        PublicKernelObservationFamilies.build_relative_bound(data)
     backend, problem = consumer_problem(brmi)
     @test coordinate_names(backend.model.layout) == [:a,:sigma]
     @test backend.plan.columns[:y] == [0.1,0.4,-0.2]
     oracle(u) = begin
         a,sigma = u[1],exp(u[2])
-        rows = route === :kernel ? zip(data.x,data.reference,data.y) :
+        rows = route !== :direct ? zip(data.x,data.reference,data.y) :
             [(data.x,data.reference,data.y)]
         logpdf(Normal(0,0.7),a) + logpdf(Exponential(0.9),sigma) + u[2] +
             sum(logpdf(Normal(x*a-r*(1+a),sigma),y)

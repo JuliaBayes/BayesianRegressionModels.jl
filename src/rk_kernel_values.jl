@@ -15,6 +15,7 @@ struct _RKPreparedKernelAssignment
     observations::Tuple
 end
 _rk_kernel_column_name(column::NamedColumn) = name(column)
+_rk_flatten_kernel_response(cells) = reduce(vcat, cells; init=eltype(eltype(cells))[])
 
 function _rk_kernel_observation_family(scope, expression, kernel)
     Meta.isexpr(expression, :call) || error(
@@ -177,7 +178,7 @@ function _rk_kernel_observed_layout(observation, kernels)
     end
     response = observation.response
     if response isa AbstractVector{<:AbstractVector}
-        return (; values=reduce(vcat, response; init=Float64[]),
+        return (; values=_rk_flatten_kernel_response(response),
             rows=nothing, lengths=length.(response))
     end
     (; values=response, rows=nothing, lengths=nothing)
@@ -230,7 +231,7 @@ function _brm_rk_composed_kernel_plan(brmi)
     for kernel in kernels, observation in kernel.observations
         raw = program.context.data[observation.source]
         plan.columns[observation.source] = raw isa AbstractVector{<:AbstractVector} ?
-            reduce(vcat, raw; init=Float64[]) : raw
+            _rk_flatten_kernel_response(raw) : raw
         distribution = _rk_kernel_observation_distribution(observation)
         push!(observations, _BRMPreparedObservation(observation.source,
             NamedColumn(observation.source, DataColumn(plan.columns[observation.source])),
