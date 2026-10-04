@@ -82,6 +82,17 @@ function build(data, route, object)
         end
     end
 end
+function build_grouped(data)
+    @brm data begin
+        theta ~ 1 + (1 | p | subject)
+        effect(theta, Intercept) ~ Normal(0, 0.7)
+        sd(:, p) ~ Exponential(0.9)
+        pred ~ kernel(t, theta) do ts, a
+            original_object_scan(ts, a)
+        end
+        ragged(y, event_subject) ~ Normal(pred, 0.8)
+    end
+end
 end
 
 function graph_source_inventory(graph; depth=0)
@@ -236,4 +247,49 @@ end
     @test_throws "defined more than once" BRM._rk_validate_source_definitions(program([valid, valid]))
     @test_throws "both bound and defined" BRM._rk_validate_source_definitions(program([valid], [:cell => identity]))
     @test_throws "explicit definitions" BRM._rk_source_definition(:(@eval cell(x) = x))
+end
+
+@stestset "computed grouped predictor ports retain the subject scan and empty-group prior" begin
+    data = (; subject=["b", "empty", "a"],
+        t=[[0.2, 0.5], Float64[], [0.7]],
+        y=[0.1, 0.0, 0.4], event_subject=["a", "b", "b"])
+    before = deepcopy(data)
+    brmi = PublicGraphSource.build_grouped(data)
+    backend, problem = consumer_problem(brmi)
+    inventory = graph_source_inventory(ReactiveKernels.kernel_graph(backend.model.spec))
+    @test (:scan, 1) in inventory
+    @test count(item -> first(item) === :scan, inventory) == 1
+    names = coordinate_names(backend.model.layout)
+    @test length(names) == 5
+    index(name) = only(findall(==(Symbol(name)), names))
+    intercept = index("theta_Intercept")
+    scale = index("ranef_draws_p_subject_sd.1")
+    levels = CategoricalArrays.levels(data.subject)
+    innovations = [index("ranef_draws_p_subject_z.$j.1") for j in eachindex(levels)]
+    rows = [only(findall(==(subject), levels)) for subject in data.subject]
+    grouped_y = reduce(vcat, [data.y[findall(==(subject), data.event_subject)]
+        for subject in data.subject])
+    oracle(u) = begin
+        tau = exp(u[scale])
+        theta = u[intercept] .+ tau .* u[innovations[rows]]
+        locations = reduce(vcat, [cumsum(data.t[j]) .* theta[j] for j in 1:3])
+        logpdf(Normal(0,0.7),u[intercept]) +
+            logpdf(Exponential(0.9),tau) + u[scale] +
+            sum(logpdf.(Normal(),u[innovations])) +
+            sum(logpdf.(Normal.(locations,0.8),grouped_y))
+    end
+    stan = consumer_stan(brmi,"graph-grouped-predictor"; mod=PublicGraphSource)
+    mapping = [names[intercept] => "pop_theta_beta_pop.1",
+        names[scale] => "b_p_subject_tau.1"]
+    append!(mapping,[names[innovations[j]] => "b_p_subject_z_flat.$j" for j in eachindex(levels)])
+    empty_coordinate = innovations[only(findall(==("empty"), levels))]
+    for u in (zeros(5),collect(range(-0.2,0.3;length=5)),fill(-0.1,5))
+        _, gradient = check_consumer_point(problem,u,oracle)
+        check_consumer_stan(problem,stan,mapping,backend,u)
+        @test gradient[empty_coordinate] ≈ -u[empty_coordinate] atol=2e-11
+    end
+    artifact = BRM.emit_rk_artifact(brmi;case_id="graph-grouped-predictor")
+    rebuilt = build_kernel(BRM.rk_translate_artifact(artifact))
+    @test graph_source_inventory(ReactiveKernels.kernel_graph(rebuilt.spec)) == inventory
+    @test isequal(data,before)
 end

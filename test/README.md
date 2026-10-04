@@ -149,6 +149,16 @@ nested helpers compare with compiled same-BRMI Stan on the published
 StanBlocks caller-dimension fix `65cabef`, pinned by `setup_env.jl`.
 These scoped checks do not certify complete application performance.
 
+`rk_graph_source.jl` supplies explicit `@kernel` entries through the callable
+source provider. It inspects the actual bound posterior for subject plates and
+child scans, then checks complete printed and artifact replay, ordinary Reverse
+and independent normalized oracles against compiled same-BRMI Stan. The
+computed grouped predictor case retains an empty subject's prior and all five
+coordinates while passing separately sliced inputs to the child object graph.
+The pinned RK revision also supports those computed graph arguments; source
+definitions or a separately prepared reader alone do not prove posterior
+visibility.
+
 `rk_graph_source.jl` checks explicit `@kernel` provider definitions and graph
 adapters for `KernelObjectSpec` endpoints. It distinguishes a retained scan in
 the provider/subject-reader graph from a retained scan in the actual PPL
