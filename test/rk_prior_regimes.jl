@@ -46,7 +46,7 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
                 [[0.11, 0.13, 0.14, 0.16], [0.10, 0.12, 0.15]]
             @test !haskey(backend.plan.columns, :pk_conc)
         elseif label == "prior-regression"
-            @test backend.plan.generative.data[:x_n] == 3
+            @test backend.plan.generative.data[:x] == data.x
         end
         problem = rk_logdensity_problem(backend;
             ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))

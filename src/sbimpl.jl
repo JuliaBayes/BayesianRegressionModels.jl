@@ -3360,6 +3360,15 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
     # (double link); see `_brm_validate_logit_family_links`.
     _brm_validate_logit_family_links(prepared; prefix="sbimpl")
     context = prepared.context
+    # Kernel preparation consumes categorical gather labels after converting
+    # them to row indices. Capture declared consumer extents while that raw
+    # frame is still present; later predictors and omitted ragged responses
+    # must retain the same row axis regardless of emission order.
+    declared_extents = Dict{Symbol,Pair{Symbol,Int}}()
+    for key in keys(context.target_axes)
+        axis = _brm_declared_row_axis(context, key)
+        isnothing(axis) || (declared_extents[key] = axis => length(context.data[axis]))
+    end
     nodes = Dict(node.name => node for node in _brm_prepared_nodes(prepared))
     prepass = context.prepass
     effect_overrides = _sb_prior_overrides(brmi; term_priors=context.term_priors,
@@ -3475,15 +3484,16 @@ SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
         op = brmi.operations[key]
         nc = _as_named_column(op)
         isnothing(nc) && error("sbimpl: top-level op `$key` is not a NamedColumn")
-        declared_axis = _brm_declared_row_axis(context, key)
-        obs_n = if isnothing(declared_axis)
+        declared_extent = get(declared_extents, key, nothing)
+        obs_n = if isnothing(declared_extent)
             get(target_obs, key, nothing)
         else
             # The declared frame can be categorical and need not have been
             # emitted yet. Bind its extent without exposing a string column
             # as Stan data or borrowing another likelihood's row count.
+            declared_axis, extent = declared_extent
             extent_name = Symbol(:n_rows_, key, :_, declared_axis)
-            data[extent_name] = length(context.data[declared_axis])
+            data[extent_name] = extent
             extent_name
         end
         _sb_emit_prepared!(stmts, data, get(nodes, key, nothing), key, parent(nc); id_lookup, obs_n, cv_groups,
