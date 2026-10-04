@@ -297,6 +297,8 @@ function _rk_needs_value_plan(program, observations)
     end
     assignments = Set(op.name for op in program.operations if op.role === :assignment)
     predictors = Set(op.name for op in program.operations if op.role === :predictor)
+    any(op -> op.role === :predictor && any(in(assignments), op.dependencies),
+        program.operations) && return true
     for op in program.operations
         op.role === :assignment || continue
         any(in(predictors), op.dependencies) && return true
@@ -564,7 +566,7 @@ function _rk_emit_ast(plan::_RKValuePlan)
         end
         push!(stmts, Expr(:call, :.~, observation.name, base))
     end
-    isempty(plan.completions) || (stmts = _rk_order_value_statements(stmts, keys(plan.columns)))
+    stmts = _rk_order_value_statements(stmts, keys(plan.columns))
     _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings),
         _rk_observed_names(plan))
 end
