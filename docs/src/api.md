@@ -1,5 +1,26 @@
 # API
 
+## Scientific descriptions
+
+```@docs
+brm_description
+brm_description_markdown
+brm_describe_component
+brm_description_components
+brm_description_math
+brm_description_symbol
+brm_description_binding
+brm_description_record
+brm_description_prior
+brm_description_prior_anchor
+brm_description_prior_references
+BRMDescription
+BRMDescriptionComponent
+BRMDescriptionFragment
+BRMDescriptionReference
+BRMPriorDescription
+```
+
 ## Frontend macros
 
 ```@docs

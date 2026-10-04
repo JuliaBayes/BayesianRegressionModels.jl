@@ -2804,9 +2804,9 @@ SBBRMI(parent::BRMI, model, data::AbstractDict, preproc::AbstractDict,
 # Stan data dictionary and carried with the emitted artifact through replay.
 const _SB_BINDINGS_KEY = :__brm_emission_bindings__
 const _SB_THRESHOLD_LOCATED_KEY = :__brm_threshold_located__
-function _sb_record_binding!(data, key, role, logical; family=nothing)
+function _sb_record_binding!(data, key, role, logical; family=nothing, metadata...)
     bindings = get(data, _SB_BINDINGS_KEY, nothing)
-    isnothing(bindings) || (bindings[key] = (; role, logical, family))
+    isnothing(bindings) || (bindings[key] = (; role, logical, family, metadata...))
     nothing
 end
 
@@ -2863,7 +2863,7 @@ _sb_effect_unresolved_note(unresolved) =
     "such a coefficient explicitly with `effect(linear_predictor, coefficient)` " *
     "to see why."
 
-function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing)
+function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing, provenance::Bool=false)
     specs = effect_priors(brmi)
     isempty(specs) && return Dict{Symbol,Any}()
 
@@ -3123,7 +3123,7 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing)
     # `beta_pop` keeps the plain `popefs` emission byte for byte. The winning
     # expression is unwrapped here so every downstream consumer keeps seeing a
     # bare expression-or-`nothing`, unaware of the precedence bookkeeping.
-    _unwrap(cell) = isnothing(cell) ? nothing : cell.expression
+    _unwrap(cell) = isnothing(cell) ? nothing : provenance ? cell : cell.expression
     out = Dict{Symbol,Any}()
     for lp in union(keys(pop_overrides), keys(cat_overrides))
         pop = get(pop_overrides, lp, nothing)
@@ -7023,14 +7023,23 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
         shared_design = _brm_population_design(
             target, Tuple(pop_terms), data, obs_n; row_source)
         if isnothing(shared_design)
+            description_columns=NamedTuple[]
             for t in pop_terms
                 # `direct_terms` / `ran_terms` ride along for the intercept's
                 # tier-1d / tier-1c length probes: a categorical peer or a group
                 # term names this formula's row axis, and one of them is the only
                 # signal available when the intercept is the sole population term.
+                first_column=length(col_exprs)+1
                 _sb_pop_cols!(col_exprs, t, data, stmts, pop_terms;
                               obs_n, ran_terms, direct_terms, target,
                               group_block_lookup, term_overrides)
+                for col in col_exprs[first_column:end]
+                    label=t isa ExprColumn && getf(t)===interval_censored ?
+                        name(_sb_named_inner(:interval_censored,only(getargs(t)))) :
+                        col isa Symbol ? col : :Intercept
+                    push!(description_columns,(;label,source=t===1 ? nothing : _brm_raw_column(t),
+                        effect_addresses=(label,),effect_block=label,preprocess=nothing,term=t))
+                end
             end
         else
             _sb_shared_population_cols!(col_exprs, data, shared_design;
@@ -7047,12 +7056,28 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
         else
             X_name = Symbol(:X_, target)
             pop_name = Symbol(:pop_, target)
-            _sb_record_binding!(data, pop_name, :population_effect, brmi_key)
+            # Preserve the producer's already prepared design semantics for
+            # reporting. Values stay in Stan data; metadata retains the fitted
+            # transforms and column identities without rebuilding the design.
+            design_columns=isnothing(shared_design) ? Tuple(description_columns) : Tuple(
+                (;label=c.label,source=c.source,effect_addresses=c.effect_addresses,
+                   effect_block=c.effect_block,preprocess=c.preprocess)
+                for c in shared_design.columns)
             # StanBlocks `hcat` promotes a lone vector to matrix[n,1] and folds to
             # append_col for two-or-more columns, so we can always just emit hcat.
             push!(stmts, :($X_name = $(Expr(:call, :hcat, col_exprs...))))
             overrides = _sb_pop_effect_overrides(effect_overrides, brmi_key)
             r2d2_spec = get(r2d2.overrides, brmi_key, nothing)
+            scheme = if !isnothing(joint_spec)
+                (;kind=:r2d2m2,spec=joint_spec)
+            elseif !isnothing(r2d2_spec)
+                (;kind=:r2d2,spec=r2d2_spec,names=r2d2.names[brmi_key])
+            elseif !isnothing(get(get(data,_SB_HS_PLANS_KEY,Dict()),brmi_key,nothing))
+                (;kind=:horseshoe,spec=data[_SB_HS_PLANS_KEY][brmi_key])
+            else
+                (;kind=:ordinary)
+            end
+            _sb_record_binding!(data,pop_name,:population_effect,brmi_key;design_columns,prior_scheme=scheme)
             if !isnothing(joint_spec) && joint_spec.n_shares > 0
                 # Joint block-wide budget: the same `_popefs_normal` emission
                 # as the whole-predictor form, indexing the block's ONE global
@@ -8764,7 +8789,8 @@ function _sb_emit_ranefs!(stmts, data, target::Symbol, ran_terms, summands;
         desc = plain_descs[k]
         isempty(gterms) && error("sbimpl: ranef `(… | $k)` has no terms after dropping `0`")
         _sb_emit_ranef_block!(stmts, data, target, desc, gterms, summands;
-                              cv_groups, centered_groups, r2d2_scale, term_overrides)
+                              cv_groups, centered_groups, r2d2_scale, term_overrides,
+                              description_predictor=brmi_key)
     end
     for k in id_keys_seen
         gterms = id_terms_by_bucket[k]
@@ -8790,7 +8816,7 @@ end
 function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, gterms, summands;
                                 cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
                                 r2d2_scale=nothing,
-                                term_overrides=Dict{Symbol,Any}())
+                                term_overrides=Dict{Symbol,Any}(),description_predictor=target)
     g_backing = _as_data_column(parent(group))
     isnothing(g_backing) && error("sbimpl: group `$(name(group))` must be a raw data column")
     g = name(group)
@@ -8836,6 +8862,8 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, 
         push!(stmts, :($scale_name = $r2d2_scale))
         push!(stmts, :($r_name ~ ranef_intercept_r2d2(;
             group_idx=$idx_name, n_groups=$n_groups_expr, scale=$scale_name)))
+        _sb_record_binding!(data,r_name,:random_effect,g;
+            predictor=description_predictor,columns=(:Intercept,))
         push!(summands, r_name)
         return
     end
@@ -8881,6 +8909,9 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, 
                 n_groups=$n_groups_expr, n_terms=$k_name)))
         end
     end
+    _sb_record_binding!(data,r_name,:random_effect,g;predictor=description_predictor,
+        columns=length(gterms)==1 && gterms[1]===1 ? (:Intercept,) :
+            Tuple(c isa Symbol ? c : :Intercept for c in col_exprs))
     push!(summands, r_name)
 end
 
@@ -8888,7 +8919,7 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol,
                                 term::MultiMembershipTerm, gterms, summands;
                                 cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
                                 r2d2_scale=nothing,
-                                term_overrides=Dict{Symbol,Any}())
+                                term_overrides=Dict{Symbol,Any}(),description_predictor=target)
     isnothing(r2d2_scale) || error(
         "sbimpl: `r2d2` decompositions over typed `mm(...)` multi-membership " *
         "random effects are not yet supported")
@@ -8966,13 +8997,16 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol,
             $Z_name, $b_name, $idx_name, $weight_name,
             $n_obs_name, $n_memberships_name)))
     end
+    _sb_record_binding!(data,b_name,:random_effect,suffix;predictor=description_predictor,
+        columns=length(gterms)==1 && gterms[1]===1 ? (:Intercept,) :
+            Tuple(c isa Symbol ? c : :Intercept for c in col_exprs))
     push!(summands, r_name)
 end
 
 function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::Tuple{NamedColumn,NamedColumn}, gterms, summands;
                                 cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
                                 r2d2_scale=nothing,
-                                term_overrides=Dict{Symbol,Any}())
+                                term_overrides=Dict{Symbol,Any}(),description_predictor=target)
     isnothing(r2d2_scale) || error(
         "sbimpl: `r2d2` decompositions over stratified `gr(g, by=b)` random " *
         "effects are not yet supported")
@@ -9025,6 +9059,8 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::Tuple{NamedCo
         Z=$Z_name, group_idx=$idx_name,
         n_groups=$n_groups_name, n_terms=$k_name,
         stratum_idx=$s_idx_name, n_strata=$n_strata_nm)))
+    _sb_record_binding!(data,r_name,:random_effect,g;predictor=description_predictor,
+        columns=Tuple(c isa Symbol ? c : :Intercept for c in col_exprs))
     push!(summands, r_name)
 end
 
@@ -9613,7 +9649,8 @@ end
 # empty, so every other predictor's emission is untouched.
 function _sb_emit_ranef_r2d2_tau!(stmts, data, bucket_name, n_terms,
                                    decomposition;
-                                   joint_out=Dict{Symbol,NamedTuple}())
+                                   joint_out=Dict{Symbol,NamedTuple}(),
+                                   description_block=nothing)
     tau = Any[nothing for _ in 1:n_terms]
     joint = decomposition.joint
     for (group_index, group) in enumerate(decomposition.groups)
@@ -9641,6 +9678,11 @@ function _sb_emit_ranef_r2d2_tau!(stmts, data, bucket_name, n_terms,
             push!(refs, ref)
             tau[margin_index] = :($ref * sqrt(
                 ($phi_name[$local_index] * $r2_name) / (1. - $r2_name)))
+        end
+        if !isnothing(description_block)
+            _sb_record_binding!(data,r2_name,:parameter,r2_name;
+                allocation_scheme=(;kind=:r2d2m2,block=description_block,budget=group_index,
+                    r2_name,phi_name,n_phi,indices=Tuple(group.indices),references=Tuple(refs)))
         end
         isnothing(joint) && continue
         for (lp, p) in joint.predictors
@@ -10356,7 +10398,7 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
                 "direct sampled SD prior; choose one scale prior")
             r2d2_tau = _sb_emit_ranef_r2d2_tau!(
                 stmts, data, bucket_name, n_terms_total, bucket_r2d2;
-                joint_out=r2d2_joint)
+                joint_out=r2d2_joint,description_block=(:random_effect,id_sym,name(desc)))
         elseif !isempty(r2d2_names) &&
            all(m -> haskey(r2d2_names, m.predictor), margins)
             (!isnothing(ranef_effect) && ranef_effect.has_sd) && error(
