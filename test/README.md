@@ -129,6 +129,14 @@ checks paired source hooks for an empty marker with active predictor keywords,
 no extra result coefficient, exact callable bindings and fresh-module replay;
 an emitted entry and a bound leaf cannot share the same symbol.
 
+`rk_callable_source.jl` checks original nested callable identities supplied by
+ordinary native source definitions. Ragged cells, live keyword arguments,
+native Reverse, independent density/gradient oracles, ownership and complete
+source replay are covered. Its ordinary assignment also compares with compiled
+same-BRMI Stan. The ragged typed-function Stan size-expression failure is
+tracked separately as `ragged-plate-typ-e33e4e9e`; native checks do not certify
+that reference or complete application performance.
+
 `rk_plain.jl` and `rk_statistical_library.jl` exercise BRM-owned statistical
 declarations through ordinary RKPPL lowering. `rk_leveled.jl` adds independent
 categorical-reference and multinomial row-density, Jacobian and ordinary

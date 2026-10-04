@@ -13,12 +13,15 @@
 
 function _rk_validate_source_definitions(emitted)
     bound = Set{Symbol}(first(binding) for binding in emitted.bindings)
+    defined = Set{Symbol}()
     for definition in emitted.defs
         definition isa Expr && definition.head in (:(=), :function) &&
             length(definition.args) == 2 && Meta.isexpr(first(definition.args), :call) ||
             error("RK source: definition must be an ordinary function or @rkppl definition")
         name = first(first(definition.args).args)
         name isa Symbol || error("RK source: definition requires a plain local callable name")
+        name in defined && error("RK source: callable `$name` is defined more than once")
+        push!(defined, name)
         name in bound && error(
             "RK source: callable `$name` is both bound and defined; use separate entry and leaf names")
     end
@@ -1100,6 +1103,6 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 fused_heads, union(Set(keys(plan.columns)), Set(Base.values(rename)),
                     Set(p.name for p in plan.predictors)), effects_name))
     end
-    _rk_fitted_source(_RKEmittedProgram(defs, Expr(:block, stmts...), bindings),
+    _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings),
         _rk_observed_names(plan))
 end

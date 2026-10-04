@@ -508,6 +508,6 @@ function _rk_emit_ast(plan::_RKValuePlan)
         end
         push!(stmts, Expr(:call, :.~, observation.name, base))
     end
-    _rk_fitted_source(_RKEmittedProgram(defs, Expr(:block, stmts...), bindings),
+    _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings),
         _rk_observed_names(plan))
 end
