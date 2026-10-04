@@ -61,7 +61,7 @@ const PINS = [
     # Current plain-function/array PPL surface, with data-only declaration inputs
     # retained before predictor inlining (computed membership axes; 606d76d0),
     # plus published live matrices (1t1v8zo) and callable array cells (0mr4zu5).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "aaea71f6e2a4bf768b0af9499e932c608ffe30b6"),  # main: computed-matrix whole-value dependencies; 0xhdznr
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "5184fe6287c89aee0ed28a3bad121c908ee990e4"),  # main: transparent PPL graph composition and computed child arguments; 0w1dsnv
 ]
 
 function main()

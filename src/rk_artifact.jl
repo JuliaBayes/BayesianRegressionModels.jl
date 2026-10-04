@@ -75,13 +75,6 @@ function _check_emitted(emitted::_RKEmittedProgram, case_id)
         "RK artifact: case `$(case_id)` emitted a non-block main " *
         "($(typeof(main))) — refusing to pack an artifact the thin " *
         "layer cannot lower")
-    for (i, d) in enumerate(emitted.defs)
-        d isa Expr && d.head in (:(=), :function) &&
-            length(d.args) == 2 && d.args[1] isa Expr &&
-            d.args[1].head === :call || error(
-            "RK artifact: case `$(case_id)` def $i is not a " *
-            "ordinary function or `@rkppl` definition — refusing to pack")
-    end
     return nothing
 end
 

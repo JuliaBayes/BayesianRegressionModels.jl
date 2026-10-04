@@ -4,10 +4,16 @@
 Source provider for an exact ordinary callable identity used by an emitted
 expression, including calls nested inside an anonymous kernel. Return
 `nothing` to keep the existing callable binding. To claim it, append an
-ordinary Julia `function entry(...) ... end` with the original argument and
-keyword contract, optionally append helper definitions and separately named
+ordinary Julia `function entry(...) ... end` or an explicit
+`ReactiveKernels.@kernel entry(...) = begin ... end` compatible with the emitted
+call's inputs, optionally append helper definitions and separately named
 leaf bindings, and return a non-`nothing` value. The emitted entry replaces
-the original binding; all original call sites retain their arguments.
+the original binding; existing call sites retain their arguments. Graph
+definitions may expose named plate/scan recipes; ordinary Julia functions do
+not make their internal loops visible to RK. Domain source may choose a new
+scientifically equivalent API rather than retain a historical argument count.
+Provider graph definitions precede their emitted reader/cell graphs; place
+helper graph definitions before entries that compose them.
 
 The provider receives no values, lowered plan or derivative. It supplies its
 own native mathematics under the caller's source namespace. An entry cannot
@@ -36,16 +42,14 @@ function _rk_resolve_callable_sources(emitted::_RKEmittedProgram)
         end
         names = Symbol[]
         for definition in provider_definitions
-            definition.head === :function && length(definition.args) == 2 &&
-                Meta.isexpr(first(definition.args), :call) || error(
-                "RK source: callable provider for `$entry` needs ordinary Julia function definitions")
-            name = first(first(definition.args).args)
-            name isa Symbol || error("RK source: callable provider requires a plain local name")
-            push!(names, name)
+            source = _rk_source_definition(definition)
+            source.kind in (:function, :kernel) || error(
+                "RK source: callable provider for `$entry` needs ordinary Julia functions or explicit @kernel definitions")
+            push!(names, source.name)
         end
         entry in names || error("RK source: callable provider did not define its entry `$entry`")
         claimed[callable] = entry
-        append!(definitions, provider_definitions)
+        prepend!(definitions, provider_definitions)
         append!(pending, provider_bindings)
     end
     resolved = _RKEmittedProgram(definitions, emitted.main, bindings)
