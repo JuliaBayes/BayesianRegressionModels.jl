@@ -4349,10 +4349,6 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         "$prefix: predictor `$target` partially-centered `hsgp(...)` " *
         "is out of slice 1 (the thin-layer surface is non-centered; " *
         "partial centering is sequenced)")
-    state.explicit_domain && error(
-        "$prefix: predictor `$target` `hsgp(...; domain=...)` " *
-        "is out of slice 1 (the thin-layer surface fits the boundary " *
-        "from raw columns; explicit domains are sequenced)")
     # The periodic prepared state carries no `orthogonal` field (the
     # raw-kw gate above refuses `orthogonal_to=` for periodic first).
     get(state, :orthogonal, nothing) === nothing || error(
@@ -4381,7 +4377,10 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         columns[idx] = state.by.idx
         (; group_index=idx, n_groups=length(state.by.levels))
     end
-    _RKTermSpec(:hsgp, collect(axes), (; id, k, c, iso=state.iso, common..., grouped...), id, id)
+    _RKTermSpec(:hsgp, collect(axes),
+        (; id, k, c, iso=state.iso,
+            fixed_fits=state.explicit_domain ? state.fits : nothing,
+            common..., grouped...), id, id)
 end
 
 # ---- AR(1) latent-path terms (mirrors `_sb_ar1`) ----
