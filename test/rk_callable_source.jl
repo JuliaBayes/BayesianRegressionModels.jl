@@ -74,14 +74,13 @@ end
         y = route === :kernel ? reduce(vcat, data.y) : data.y
         oracle(u) = logpdf(Normal(0, 0.7), u[ia]) + logpdf(Normal(0, 0.4), u[ib]) +
             sum(logpdf.(Normal.((x .+ u[ia]) .* u[ib], 0.8), y))
-        # The ragged typed-function Stan shape boundary is retained in the
-        # investigation evidence. Keep native/replay/oracle coverage here;
-        # the ordinary assignment has a compiled same-BRMI Stan reference.
-        stan = route === :assignment ? consumer_stan(brmi,
-            "nested-native-source-$route"; mod=PublicNestedSource) : nothing
+        # Published StanBlocks caller-dimension substitution preserves the
+        # original nested helpers for both dense and uneven/empty ragged axes.
+        stan = consumer_stan(brmi,
+            "nested-native-source-$route"; mod=PublicNestedSource)
         for u in (zeros(2), [0.2, -0.3], [-0.4, 0.1])
             check_consumer_point(problem, u, oracle)
-            stan === nothing || check_consumer_stan(problem, stan,
+            check_consumer_stan(problem, stan,
                 [:a => "a", :b => "b"], backend, u)
         end
         emitted = BRM._rk_emit_ast(backend.plan)
