@@ -15,6 +15,35 @@ struct _RKPreparedKernelAssignment
     observations::Tuple
 end
 _rk_kernel_column_name(column::NamedColumn) = name(column)
+_rk_flatten_kernel_response(cells) = reduce(vcat, cells; init=eltype(eltype(cells))[])
+
+function _rk_kernel_observation_family(scope, expression, kernel)
+    Meta.isexpr(expression, :call) || error(
+        "RK backend: kernel `$kernel` observation needs a constructor call")
+    head = first(expression.args)
+    (head isa Symbol || head isa GlobalRef || Meta.isexpr(head, :.)) || error(
+        "RK backend: kernel `$kernel` observation needs a named constructor")
+    # SLIC's unqualified built-in family tokens need not be exported into
+    # the caller module. A caller's actual binding still takes precedence.
+    callable = head isa Symbol && !isdefined(scope, head) &&
+            isdefined(StanBlocks.stan, head) ?
+        getfield(StanBlocks.stan, head) : Core.eval(scope, head)
+    callable === StanBlocks.normal && return Normal
+    callable
+end
+
+function _rk_kernel_observation_distribution(observation)
+    arguments = map(name -> _BRMPreparedRef(name, :whole), observation.argument_names)
+    # The original Stan scalar family is emitted through RKPPL's exact
+    # StudentT(nu, location, scale) spelling, retaining its argument order.
+    if observation.callable === StanBlocks.student_t
+        length(arguments) == 3 || error("RK backend: student_t needs nu, location and scale")
+        nu, location, scale = arguments
+        return _BRMPreparedExpr(LocationScale,
+            (location, scale, _BRMPreparedExpr(TDist, (nu,), (;))), (;))
+    end
+    _BRMPreparedExpr(observation.callable, arguments, (;))
+end
 
 function _rk_kernel_value_refs!(names, value)
     value isa Symbol && (push!(names, value); return names)
@@ -104,12 +133,14 @@ function _rk_prepare_kernel_value(brmi, program, name, rhs)
                 (argument isa ExprColumn && getf(argument) === ragged ?
                     _rk_kernel_column_name(first(getargs(argument))) : nothing)
             source === nothing && error("RK backend: kernel `$name` observed cell needs a named response")
-            Meta.isexpr(distribution, :call) && first(distribution.args) in (:Normal, :normal) &&
-                length(distribution.args) == 3 || error(
-                "RK backend: kernel `$name` cell observation needs an ordinary supported family")
-            push!(observations, (; source, param=lhs, location=distribution.args[2],
-                scale=distribution.args[3], location_name=Symbol(name, :_location_, source),
-                scale_name=Symbol(name, :_scale_, source)))
+            callable = _rk_kernel_observation_family(scope, distribution, name)
+            values = Tuple(distribution.args[2:end])
+            any(value -> Meta.isexpr(value, :parameters), values) && error(
+                "RK backend: kernel `$name` observation constructor keywords need explicit argument lowering")
+            argument_names = Tuple(Symbol(name, :_argument_, source, :_, i)
+                for i in eachindex(values))
+            push!(observations, (; source, param=lhs, callable,
+                arguments=values, argument_names))
             continue
         end
         push!(body, statement)
@@ -147,7 +178,7 @@ function _rk_kernel_observed_layout(observation, kernels)
     end
     response = observation.response
     if response isa AbstractVector{<:AbstractVector}
-        return (; values=reduce(vcat, response; init=Float64[]),
+        return (; values=_rk_flatten_kernel_response(response),
             rows=nothing, lengths=length.(response))
     end
     (; values=response, rows=nothing, lengths=nothing)
@@ -200,10 +231,8 @@ function _brm_rk_composed_kernel_plan(brmi)
     for kernel in kernels, observation in kernel.observations
         raw = program.context.data[observation.source]
         plan.columns[observation.source] = raw isa AbstractVector{<:AbstractVector} ?
-            reduce(vcat, raw; init=Float64[]) : raw
-        distribution = _BRMPreparedExpr(Normal,
-            (_BRMPreparedRef(observation.location_name, :whole),
-             _BRMPreparedRef(observation.scale_name, :whole)), (;))
+            _rk_flatten_kernel_response(raw) : raw
+        distribution = _rk_kernel_observation_distribution(observation)
         push!(observations, _BRMPreparedObservation(observation.source,
             NamedColumn(observation.source, DataColumn(plan.columns[observation.source])),
             distribution, plan.columns[observation.source], nothing, nothing))
@@ -288,9 +317,9 @@ function _rk_emit_value_assignment!(defs, statements, bindings, taken,
     for observation in kernel.observations
         vectorize(value) = Expr(:call, :.*, Expr(:call, :ones,
             Expr(:call, :length, observation.param)), value)
-        _rk_emit_kernel_reader!(defs, statements, bindings, taken, kernel,
-            observation.location_name, vectorize(observation.location))
-        _rk_emit_kernel_reader!(defs, statements, bindings, taken, kernel,
-            observation.scale_name, vectorize(observation.scale))
+        for (name, argument) in zip(observation.argument_names, observation.arguments)
+            _rk_emit_kernel_reader!(defs, statements, bindings, taken, kernel,
+                name, vectorize(argument))
+        end
     end
 end
