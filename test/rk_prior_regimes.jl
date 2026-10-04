@@ -40,7 +40,7 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
             backend.plan.generative.declarations)
         @test occursin("native generated draws = unavailable", BRM.show_rk_plan(backend.plan))
         @test BRM.stan_code(backend.plan.generative) ==
-            BRM.stan_code(SBBRMI(brmi; total_groups=()))
+            BRM.stan_code(SBBRMI(brmi))
         if label == "prior-ragged-bounds"
             @test backend.plan.generative.data[:pk_conc_lower_pk_lloq_ragged] ==
                 [[0.11, 0.13, 0.14, 0.16], [0.10, 0.12, 0.15]]

@@ -44,7 +44,7 @@ function _rk_unconditioned_plan(brmi)
     # The emitted declaration inventory also finds synthetic observations
     # (for example a modeled baseline). Endpoint absence alone must never
     # discard their densities or their inference coordinates.
-    generated = generative_plan(SBBRMI(brmi; total_groups=()))
+    generated = generative_plan(SBBRMI(brmi))
     any(d -> d.role === :observation && d.data_source !== nothing,
         generated.declarations) && return nothing
     _RKUnconditionedPlan(generated, Dict{Symbol,Any}(generated.data))
