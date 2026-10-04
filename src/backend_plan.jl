@@ -432,7 +432,7 @@ function _brm_missing_response_plan(lhs; prefix="BRM backend lowering")
     _brm_missing_response_plan(name(inner), raw; prefix,allow_complete=true)
 end
 
-function _brm_missing_response_plan(source::Symbol, raw; prefix="BRM backend lowering",allow_complete=false)
+function _brm_missing_response_plan(source::Symbol, raw; prefix="BRM backend lowering",allow_complete=true)
     raw isa AbstractVector || error(
         "$prefix: `mi($source)` requires a vector response")
     (allow_complete || Missing <: eltype(raw)) || error(

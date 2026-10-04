@@ -465,6 +465,11 @@ end
     @test complete_mi.data[:x_obs] == complete.x
     @test isempty(complete_mi.data[:Jmis_x])
     @test StanBlocks.stanc_check(BayesianRegressionModels.stan_code(complete_mi)).ok
+    replay_mi = reprocess(complete_mi, complete)
+    @test replay_mi.data[:x_obs] == complete.x
+    @test isempty(replay_mi.data[:Jmis_x])
+    changed_mask = merge(complete, (;x=Union{Missing,Float64}[missing, 1.2, 2.1, 1.7, 1.4],))
+    @test_throws r"same fitted missing-row positions" reprocess(complete_mi, changed_mask)
     sb = SBBRMI(MISSING_COMPLETE_CONDITIONAL(complete); mod=@__MODULE__)
     descriptor = brm_descriptor(sb)
     @test sb.data[:x] == complete.x
