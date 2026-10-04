@@ -21,6 +21,17 @@ function build(data)
 end
 end
 
+function modeled_slope_location_query(model, translated)
+    names = sort!(collect(keys(translated.columns)))
+    fixed = NamedTuple{Tuple(names)}(Tuple(translated.columns[n] for n in names))
+    # Select generated ports only after inspecting this emitted model. The
+    # predictor compiler may absorb authored aliases such as eta/x/mu.
+    wanted = (:_ppl_lp_eta, :_ppl_lp_mu)
+    @test all(in(keys(model.spec)),wanted)
+    Base.invokelatest(prepare,model.spec;
+        have=(:unconstrained,names...),want=wanted,bound=fixed)
+end
+
 @stestset "modeled random slopes preserve sampled design and conditional laws" begin
     original = (; subject=[1,1,2,2,3,3],
         assay=[0.2,0.7,0.5,0.2,0.8,0.9], limit=fill(0.2,6),
@@ -90,16 +101,26 @@ end
         ext = Base.get_extension(BRM,:BayesianRegressionModelsReactiveKernelsExt)
         bound = ext._rk_translated_plan(backend.plan)
         pointwise = prepare_query(backend.model,bound,:pointwise)
+        locations = modeled_slope_location_query(backend.model,bound)
+        graph = ReactiveKernels.kernel_graph(backend.model.spec)
+        println("VALUE_GRAPH_OPERATIONS=",unique(nameof(typeof(recipe.op))
+            for recipe in graph.recipes)); flush(stdout)
         translated = BRM.rk_translate_artifact(artifact)
         rebuilt = Base.invokelatest(build_kernel,translated)
         replay = prepare_sampler(rebuilt,translated,zeros(18);
             backend=AutoEnzyme(; mode=Enzyme.Reverse))
+        replay_locations = modeled_slope_location_query(rebuilt,translated)
         for u in (zeros(18),fill(0.13,18),collect(range(-0.2,0.3;length=18)))
             value, gradient = check_consumer_point(problem,u,oracle)
             check_consumer_stan(problem,stan,mapping,backend,u)
             c, parts = components(u), pointwise(u)
             @test parts.assay ≈ assay_parts(c)
             @test parts.y ≈ logpdf.(Normal.(c.mu,c.sigma),data.y)
+            queried = Base.invokelatest(locations,u)
+            @test length.(queried) == (6,6)
+            @test queried[1] ≈ c.eta
+            @test queried[2] ≈ c.mu
+            @test isequal(queried,Base.invokelatest(replay_locations,u))
             replay_gradient = similar(u)
             replay_value, _ = sampler_value_and_gradient!(replay,replay_gradient,u)
             @test isequal(value,replay_value)
