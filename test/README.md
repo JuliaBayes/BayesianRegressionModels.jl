@@ -53,6 +53,13 @@ A new heavy file adopts the same contract with one `include` plus the macro:
 `include(joinpath(@__DIR__, "testset_filter.jl"))` after `using Test`, then
 `@stestset "name" begin ... end` per chunkable block.
 
+`hsgp_hyper_prior_support.jl` checks explicit priors on authored log HSGP
+intercepts through both RK and Stan. The reported grouped model and an
+ungrouped control retain unbounded Normal intercepts; bounded and normalized
+truncated priors keep their own support and density constants. The checks
+compare independent normalized densities, every ordinary Reverse coordinate,
+compiled same-BRMI Stan, group-specific floors and full printed-source replay.
+
 `missing_covariates.jl` checks joint continuous `mi(x)` predictors through
 StanBlocks. It compiles Normal and LogNormal models and compares normalized
 densities and all unconstrained gradients with an independent explicit

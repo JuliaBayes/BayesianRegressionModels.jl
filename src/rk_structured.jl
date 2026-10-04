@@ -60,7 +60,7 @@ function _rk_ast_hsgp_hyper!(stmts, options, hyper, floors, taken, bindings, G)
     parts = Any[]
     if plan.intercept
         beta = _rk_ast_fresh_name(string(id, "_", stem, "_Intercept"), taken)
-        expression = stated ? _rk_value_expr!(bindings, _brm_prepare_expr(prior), taken) :
+        expression = stated ? _rk_ast_declared_prior(prior, bindings, taken) :
             Expr(:call, :Normal, 0, 1)
         push!(stmts, Expr(:call, :~, beta, expression))
         push!(parts, beta)
