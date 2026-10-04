@@ -513,3 +513,9 @@ Eight files are the reason this environment exists — they fail at their own
 
 There is no CI workflow for these on purpose: they need `stanc` and a BridgeStan
 toolchain, so a GitHub Actions job would be red by construction.
+# Prior-regime fitted geometry: `rk_prior_regimes.jl` retains the authoritative
+# generative snapshot for omitted responses while native fitted execution has
+# zero coordinates. Bound baseline observations keep their inference ancestors.
+# Controls cover normalized compiled same-BRMI Stan, ordinary native Reverse,
+# full source/artifact replay and input ownership; native generated draws are
+# unavailable.

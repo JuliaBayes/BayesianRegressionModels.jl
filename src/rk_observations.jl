@@ -5,6 +5,50 @@ struct _RKHeldOutPlan{P}
     parent::P
     held_out::Set{Symbol}
 end
+
+# An unconditioned BRM program forward-simulates on the Stan route. Its
+# declarations belong to generated quantities, not to an HMC coordinate pack.
+# Retain the authoritative generative snapshot while emitting only its empty
+# fitted density. This does not implement native generated draws.
+struct _RKUnconditionedPlan{G}
+    generative::G
+    columns::Dict{Symbol,Any}
+end
+_rk_plan_summary(plan::_RKUnconditionedPlan) =
+    "unconditioned program (zero fitted coordinates; " *
+    string(length(plan.generative.declarations)) * " retained generative declarations)"
+_rk_observed_names(::_RKUnconditionedPlan) = ()
+_rk_emit_ast(::_RKUnconditionedPlan) =
+    _RKEmittedProgram(Expr[], Expr(:block), Pair{Symbol,Any}[])
+
+function _rk_unconditioned_plan(brmi)
+    # Bound formula observations, including kernel-cell inputs, use the
+    # ordinary planner. Empty bound arrays still retain this fitted role.
+    for node in values(brmi.operations)
+        node isa NamedColumn || continue
+        operation = parent(node)
+        operation isa ExprColumn{typeof(~)} || continue
+        lhs, rhs = getargs(operation, 2)
+        _brm_observation_name(lhs) === nothing || return nothing
+        rhs isa ExprColumn && getf(rhs) === kernel || continue
+        args = getargs(rhs)
+        isempty(args) && continue
+        parts = _sb_kernel_lambda_parts(first(args))
+        parts === nothing && continue
+        params, body = parts
+        for (param, column) in zip(params, args[2:end])
+            _sb_cell_param_observed(body, param) || continue
+            _brm_observation_name(column) === nothing || return nothing
+        end
+    end
+    # The emitted declaration inventory also finds synthetic observations
+    # (for example a modeled baseline). Endpoint absence alone must never
+    # discard their densities or their inference coordinates.
+    generated = generative_plan(SBBRMI(brmi))
+    any(d -> d.role === :observation && d.data_source !== nothing,
+        generated.declarations) && return nothing
+    _RKUnconditionedPlan(generated, Dict{Symbol,Any}(generated.data))
+end
 function Base.getproperty(plan::_RKHeldOutPlan, field::Symbol)
     field in (:parent, :held_out) ? getfield(plan, field) :
         getproperty(getfield(plan, :parent), field)

@@ -29,7 +29,7 @@ rk_artifact_version() = 3
 # (`rk_translate_artifact`) consult. It currently equals the extension's
 # `_RK_PLAN_TYPES`; it is kept as its own predicate so a future plan kind
 # can join the RK backend without silently becoming an artifact kind.
-const _RK_ARTIFACT_PLAN_TYPES = Union{_RKStructuralPlan,_RKKernelPlan,_RKValuePlan,_RKHeldOutPlan}
+const _RK_ARTIFACT_PLAN_TYPES = Union{_RKStructuralPlan,_RKKernelPlan,_RKValuePlan,_RKHeldOutPlan,_RKUnconditionedPlan}
 
 """
     emit_rk_artifact(brmi::BRMI; case_id, provenance=nothing, brm_pin=nothing, held_out=())
@@ -51,7 +51,7 @@ function emit_rk_artifact(brmi::BRMI; case_id::AbstractString,
     emitted = _rk_emit_ast(plan)
     _check_emitted(emitted, case_id)
     columns = plan.columns
-    isempty(columns) && error(
+    isempty(columns) && !(plan isa _RKUnconditionedPlan) && error(
         "RK artifact: case `$(case_id)` planned zero data columns")
     meta = (;
         case_id=String(case_id),
@@ -189,6 +189,13 @@ end
 function show_rk_plan(plan::_RKHeldOutPlan)
     "held_out    = [$(join(sort!(string.(collect(plan.held_out))), ", "))]\n" *
         show_rk_plan(plan.parent)
+end
+
+function show_rk_plan(plan::_RKUnconditionedPlan)
+    string(_rk_plan_summary(plan), "\n",
+        "  data keys = ", sort!(collect(keys(plan.columns))), "\n",
+        "  generative snapshot = retained SLIC model and bindings\n",
+        "  native generated draws = unavailable\n")
 end
 
 function _rk_show_terms(terms)

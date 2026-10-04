@@ -7273,6 +7273,8 @@ current RKPPL surface; unsupported formula terms fail with RK attribution.
 """
 function _brm_rk_unselected_plan(brmi::BRMI)
     prefix = "RK backend"
+    unconditioned = _rk_unconditioned_plan(brmi)
+    unconditioned === nothing || return unconditioned
     # A kernel(...) model routes to the panel kernel planner; it has no
     # top-level observation, so it must not enter the GLM flow below.
     isempty(_rk_kernel_ops(brmi)) || return _brm_rk_composed_kernel_plan(brmi)
@@ -7313,8 +7315,13 @@ function _brm_rk_unselected_plan(brmi::BRMI)
             end
         end
     end
-    union!(roots, Tuple(parameter.name for parameter in prepared.parameters))
     referenced = _brm_reachable_operations(program, roots)
+    # Only likelihood-reaching declarations are fitted. An omitted outcome
+    # and independent unused priors forward-simulate on the Stan route; they
+    # must not be planned as extra scalar sampler parameters first.
+    prepared = _BRMPreparedModel(prepared.program,
+        Tuple(p for p in prepared.parameters if p.name in referenced),
+        prepared.predictors, prepared.assignments, prepared.observations)
     kept_assignments = Tuple(node for node in prepared.assignments
                              if node.name in referenced)
     # Phase 3: parameters and assignments (folding, cycles, uniqueness).
