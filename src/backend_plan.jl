@@ -1254,7 +1254,8 @@ end
 
 function _brm_simple_random_effect_plans(
         brmi::BRMI, target::Symbol, context::_BRMBackendContext;
-        required::Bool=false)
+        required::Bool=false,
+        random_effect_columns=_brm_random_effect_columns)
     grouped = filter(declaration -> declaration.predictor === target,
                      context.group_declarations)
     plans = ()
@@ -1360,10 +1361,8 @@ function _brm_simple_random_effect_plans(
                 _brm_categorical_term_block(inner_term) === cellmeans_block &&
                 !_brm_requests_treatment_coding(inner_term)
             cellmeans && (cellmeans_block = nothing)
-            columns = _brm_random_effect_columns(inner_term; cellmeans)
-            if isnothing(columns) || any(column ->
-                    !isnothing(column.source) &&
-                    !(column.values isa AbstractVector{<:Real}), columns)
+            columns = random_effect_columns(inner_term; cellmeans)
+            if isnothing(columns) || !all(_brm_random_effect_geometry_column, columns)
                 required && error(
                     "BRM backend lowering: random-slope designs support the " *
                     "backend-neutral population column surface (continuous, " *
@@ -1852,6 +1851,14 @@ function _brm_random_effect_columns(term; cellmeans::Bool=false)
     isnothing(columns) && return nothing
     Tuple(_brm_random_categorical_column(column) for column in columns)
 end
+
+# A modeled column can carry unavailable numerical values while its declared
+# row geometry is known. Concrete backends supply its executable value; this
+# marker must never be mistaken for a materialized data design.
+_brm_random_effect_geometry_column(column) =
+    isnothing(column.source) || column.values isa AbstractVector{<:Real} ||
+    (!isnothing(column.preprocess) && column.preprocess.kind === :model_value &&
+        column.values isa AbstractVector{<:Union{Missing,Real}})
 
 _brm_population_column_is_categorical(column) =
     !isnothing(column.preprocess) &&

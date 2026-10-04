@@ -24,34 +24,42 @@ _rk_mi_predictor_plan(_) = nothing
 # Formula geometry needs the declared row axis, not a numerical evaluation at
 # invented parameter values. Track pointwise assignment dependencies back to
 # their actual data/observation axes; scalar sampled parents add no row axis.
-_rk_model_value_axis(::Number) = ()
-_rk_model_value_axis(_) = nothing
-_rk_model_value_axis(value::NamedColumn) =
-    _rk_model_value_axis(value, parent(value))
-function _rk_model_value_axis(value::NamedColumn, backing::DataColumn)
+_rk_model_value_axis(::Number, _context) = ()
+_rk_model_value_axis(_value, _context) = nothing
+_rk_model_value_axis(value::NamedColumn, context) =
+    _rk_model_value_axis(value, parent(value), context)
+function _rk_model_value_axis(value::NamedColumn, backing::DataColumn, _context)
     raw = parent(backing)
     raw isa Real && return ()
     raw isa AbstractVector{<:Union{Missing,Real}} || return nothing
     (source=name(value), nrows=length(raw))
 end
-_rk_model_value_axis(value::NamedColumn, backing::ExprColumn{typeof(assign)}) =
-    _rk_model_value_axis(last(getargs(backing)))
-function _rk_model_value_axis(value::NamedColumn, backing::ExprColumn{typeof(~)})
+_rk_model_value_axis(value::NamedColumn, backing::ExprColumn{typeof(assign)}, context) =
+    _rk_model_value_axis(last(getargs(backing)), context)
+function _rk_model_value_axis(value::NamedColumn, backing::ExprColumn{typeof(~)}, context)
     lhs, rhs = getargs(backing)
     completion = _brm_missing_response_plan(lhs; prefix="RK backend")
     completion === nothing || return (
         source=completion.source, nrows=length(completion.values))
-    _brm_observation_name(lhs) === nothing || return _rk_model_value_axis(lhs)
-    _brm_prior_expression(rhs) && _brm_parameter_reference_axis(rhs) === :scalar ?
-        () : nothing
+    _brm_observation_name(lhs) === nothing || return _rk_model_value_axis(lhs, context)
+    _brm_prior_expression(rhs) && return (
+        _brm_parameter_reference_axis(rhs) === :scalar ? () : nothing)
+    context === nothing && return nothing
+    # Reuse the predictor's actual geometry, including declared consumers and
+    # group rows. The number of group levels is a coefficient axis, not this
+    # predictor's row axis; no parameter values are invented to resolve it.
+    geometry = _rk_model_predictor_geometry(context.parent, context, name(value);
+        available_predictors=Tuple(p.name for p in linear_predictors(context.parent)),
+        tolerant_default=true)
+    (; source=geometry.design.row_source, nrows=size(geometry.design.matrix, 1))
 end
-_rk_model_value_axis(::NamedColumn, _backing) = nothing
-function _rk_model_value_axis(value::ExprColumn)
+_rk_model_value_axis(::NamedColumn, _backing, _context) = nothing
+function _rk_model_value_axis(value::ExprColumn, context)
     callable = getf(value)
     (haskey(_RK_DERIVED_BINOPS, callable) ||
      haskey(_RK_DERIVED_MATH, callable) ||
      haskey(_RK_DERIVED_CMP, callable)) && isempty(getkwargs(value)) || return nothing
-    axes = map(_rk_model_value_axis, getargs(value))
+    axes = map(argument -> _rk_model_value_axis(argument, context), getargs(value))
     any(isnothing, axes) && return nothing
     rows = filter(!isempty, axes)
     isempty(rows) && return ()
@@ -59,9 +67,9 @@ function _rk_model_value_axis(value::ExprColumn)
     rows[findfirst(row -> row.nrows == only(shape), rows)]
 end
 
-function _rk_named_model_population_column(term::NamedColumn)
+function _rk_named_model_population_column(term::NamedColumn, context)
     parent(term) isa DataColumn && return nothing
-    axis = _rk_model_value_axis(term)
+    axis = _rk_model_value_axis(term, context)
     (axis === nothing || isempty(axis)) && return nothing
     label = name(term)
     # Missing geometry marks values unavailable until graph execution. It is
@@ -71,9 +79,9 @@ function _rk_named_model_population_column(term::NamedColumn)
         preprocess=_BRMPopulationPreprocess(:model_value, nothing, term),
         runtime_expression=label)
 end
-_rk_named_model_population_column(_) = nothing
+_rk_named_model_population_column(_term, _context) = nothing
 
-function _rk_model_population_column(term)
+function _rk_model_population_column(term, context=nothing)
     inner = term
     kind = :model_value
     if term isa ExprColumn && getf(term) in (standardize, zscale, center)
@@ -83,7 +91,7 @@ function _rk_model_population_column(term)
     end
     plan = _rk_mi_predictor_plan(inner)
     plan === nothing && return kind === :model_value ?
-        _rk_named_model_population_column(inner) : nothing
+        _rk_named_model_population_column(inner, context) : nothing
     label = kind === :model_value ? name(inner) : _brm_wrapper_col_name(kind, inner)
     raw = plan.values
     make_error = message -> ArgumentError("RK backend: missing covariate transform: $message")
@@ -100,9 +108,22 @@ function _rk_model_population_column(term)
         source=plan.source, values, preprocess, runtime_expression=expression)
 end
 
-function _rk_model_population_columns(term; cellmeans=false)
-    column = _rk_model_population_column(term)
+function _rk_model_population_columns(term; cellmeans=false, context=nothing)
+    column = _rk_model_population_column(term, context)
     column === nothing ? _brm_population_columns(term; cellmeans) : (column,)
+end
+
+function _rk_model_random_effect_columns(term; cellmeans=false, context)
+    column = _rk_model_population_column(term, context)
+    column === nothing ? _brm_random_effect_columns(term; cellmeans) : (column,)
+end
+
+function _rk_model_predictor_geometry(brmi, context, target; kwargs...)
+    _brm_prepare_predictor_geometry(brmi, context, target; kwargs...,
+        population_columns=(term; cellmeans=false) ->
+            _rk_model_population_columns(term; cellmeans, context),
+        random_effect_columns=(term; cellmeans=false) ->
+            _rk_model_random_effect_columns(term; cellmeans, context))
 end
 
 function _rk_mi_downstream(program, key, source)
