@@ -133,7 +133,7 @@ end
             t=exp(u[scale]); mu=t.*u[z]
             label=="slope" && (mu=mu.*data.x)
             scale_prior=label=="unnamed" ? logpdf(Normal(),u[scale]) :
-                logpdf(Normal(),t)+log(2)+u[scale]
+                logpdf(Normal(),t)+u[scale]
             sum(logpdf.(Normal.(mu,1),data.y))+sum(logpdf.(Normal(),u[z]))+scale_prior
         end
         stan=consumer_stan(model,"random-only-"*label)
@@ -143,8 +143,7 @@ end
         mapping=[names[scale]=>stan_scale; [names[z[i]]=>"$stan_z.$i" for i in 1:2]]
         for u in (zeros(length(names)),collect(range(-.2,.3;length=length(names))))
             check_consumer_point(problem,u,oracle)
-            check_consumer_stan(problem,stan,mapping,backend,u;
-                density_offset=label=="unnamed" ? 0. : log(2))
+            check_consumer_stan(problem,stan,mapping,backend,u)
         end
         @test bucket.kind == (label=="named" ? :correlated : label=="slope" ? :slope1 : :intercept1)
     end

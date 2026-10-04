@@ -11,6 +11,20 @@
 # namespace cannot hold both bindings). The AST is the sole emission
 # path; the extension holds no fallback serializer.
 
+function _rk_validate_source_definitions(emitted)
+    bound = Set{Symbol}(first(binding) for binding in emitted.bindings)
+    for definition in emitted.defs
+        definition isa Expr && definition.head in (:(=), :function) &&
+            length(definition.args) == 2 && Meta.isexpr(first(definition.args), :call) ||
+            error("RK source: definition must be an ordinary function or @rkppl definition")
+        name = first(first(definition.args).args)
+        name isa Symbol || error("RK source: definition requires a plain local callable name")
+        name in bound && error(
+            "RK source: callable `$name` is both bound and defined; use separate entry and leaf names")
+    end
+    nothing
+end
+
 function _rk_lower_assignment_expr(node, name::Symbol)
     node isa Number && return node
     node isa _BRMPreparedRef && return node.name
@@ -873,7 +887,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     stmts = Expr[]
     structured_blocks = Dict{Tuple{Symbol,Symbol},Any}()
     for derived in plan.derived
-        push!(stmts, Expr(:(=), derived.name, derived.expression))
+        expression = _rk_ast_data_expr!(defs, stmts, bindings, taken, derived.expression)
+        push!(stmts, Expr(:(=), derived.name, expression))
     end
     for predictor in plan.predictors
         lhs = get(rename, predictor.name, predictor.name)
@@ -1085,5 +1100,6 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 fused_heads, union(Set(keys(plan.columns)), Set(Base.values(rename)),
                     Set(p.name for p in plan.predictors)), effects_name))
     end
-    _RKEmittedProgram(defs, Expr(:block, stmts...), bindings)
+    _rk_fitted_source(_RKEmittedProgram(defs, Expr(:block, stmts...), bindings),
+        _rk_observed_names(plan))
 end
