@@ -88,13 +88,14 @@ function _rk_ast_hsgp_value_graph!(definitions, term, taken,
     sigma_by_group = any(p -> p.hyper === :sd, options.hyper_plans)
     cell_rho = group_index === nothing && rho_by_group ? :(rho[1]) : :rho
     cell_sigma = group_index === nothing && sigma_by_group ? :(sigma[1]) : :sigma
-    exponent = options.iso ? :(r^2 * sum(frequencies)) :
-        :(sum(r.^2 .* frequencies))
+    exponent_parts = [:(r^2 * omega2[b, $j]) for j in 1:D]
+    options.iso || (exponent_parts = [:(r[$j]^2 * omega2[b, $j]) for j in 1:D])
+    exponent = D == 1 ? only(exponent_parts) : Expr(:call, :+, exponent_parts...)
     scale = options.iso ? :(s * (r * sqrt(2pi))^($D / 2)) :
-        :(s * prod(sqrt.(r .* sqrt(2pi))))
+        Expr(:call, :*, :s, [:(sqrt(r[$j] * sqrt(2pi))) for j in 1:D]...)
     weight_cell = :($scale * exp(-0.25 * $exponent))
-    weight_plate = _rk_ast_graph_plate([:(eachrow(omega2)), :(Ref(s)), :(Ref(r))],
-        [:frequencies, :s, :r], weight_cell)
+    weight_plate = _rk_ast_graph_plate([:(axes(omega2,1)), :(Ref(omega2)), :(Ref(s)), :(Ref(r))],
+        [:b, :omega2, :s, :r], weight_cell)
     arguments = [:PHI, :omega2, :sigma, :rho, :z]
     if group_index === nothing
         body = quote
@@ -114,9 +115,12 @@ function _rk_ast_hsgp_value_graph!(definitions, term, taken,
         end
         group_plate = _rk_ast_graph_plate([:(axes(z, 1)), :(Ref(omega2)),
             :(Ref(sigma)), :(Ref(rho))], [:g, :omega2, :sigmas, :rhos], group_body)
-        value_plate = _rk_ast_graph_plate([:(eachrow(PHI)), :group_index,
-            :(Ref(spectra)), :(Ref(z))], [:basis, :g, :spectra, :z],
-            :(sum(basis .* spectra[g, :] .* z[g, :])))
+        terms = _rk_ast_graph_plate([:(axes(PHI,2)), :(Ref(i)), :(Ref(g)),
+            :(Ref(PHI)), :(Ref(spectra)), :(Ref(z))],
+            [:b, :i, :g, :PHI, :spectra, :z], :(PHI[i,b] * spectra[g,b] * z[g,b]))
+        value_plate = _rk_ast_graph_plate([:(axes(PHI,1)), :group_index,
+            :(Ref(PHI)), :(Ref(spectra)), :(Ref(z))], [:i, :g, :PHI, :spectra, :z],
+            Expr(:block, :(terms = $terms), :(sum(terms))))
         body = quote
             group_weights = $group_plate
             spectra = stack(group_weights; dims=1)
