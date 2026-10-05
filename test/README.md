@@ -24,6 +24,23 @@ covers interleaved rows, shared random effects, empty groups, raw-data controls
 and preservation of field and keyword names. Run it with
 `julia --project=. test/kernel_ragged_broadcast.jl` or the test environment above.
 
+`benchmark_emission_latency.jl` reports package loading, first model construction,
+first RK artifact emission and repeated calls separately, including compiler time,
+allocation and garbage collection. It uses independent synthetic regression and
+ragged panel examples, with unchanged cold/warm artifact source checks. Run each
+case in a fresh process; there is no timing threshold on a shared host:
+
+```sh
+julia --startup-file=no --project=test test/benchmark_emission_latency.jl regression
+julia --startup-file=no --project=test test/benchmark_emission_latency.jl panel
+```
+
+A second argument saves the complete artifact and printed source for comparison
+across revisions, plus a source copy with location nodes removed so checkout paths
+do not affect the comparison. Dependency pins, Julia version and host load should
+accompany timing reports; package-image rebuilding belongs to the separate
+loading phase.
+
 ## Description PDF rendering
 
 `description_tex.jl` checks Student-t sampling equations for standard, affine,
