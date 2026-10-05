@@ -62,7 +62,12 @@ function r2d2_components(u, names; nphi, latent=false, partial=false)
 end
 
 @stestset "shared R2D2M2 original laws and allocation controls" begin
-    for mode in (:margins, :joint, :contrasts, :design, :latent, :partial)
+    modes = (:margins, :joint, :contrasts, :design, :latent, :partial)
+    requested = split(get(ENV, "BRM_R2D2_CASES", ""), ','); filter!(!isempty, requested)
+    isempty(requested) || all(s -> Symbol(s) in modes, requested) ||
+        error("unknown BRM_R2D2_CASES selection: $requested")
+    for mode in modes
+        isempty(requested) || string(mode) in requested || continue
         joint = mode in (:joint, :contrasts, :design, :latent)
         categorical = mode in (:contrasts, :design)
         design = mode === :design
@@ -147,8 +152,7 @@ end
             end
             if categorical
                 for j in 1:2, k in 1:2
-                    name = design ? "pop_mu_$(j==1 ? "a" : "b")_beta_pop.$(k+2)" :
-                        "cat_mu_$(j==1 ? "a" : "b")_c_beta.$k"
+                    name = "cat_mu_$(j==1 ? "a" : "b")_c_beta.$k"
                     values[name] = c.contrasts[j,k]
                 end
             end
