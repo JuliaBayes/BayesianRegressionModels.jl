@@ -496,14 +496,6 @@ function brm_stan_to_rk(t::BRMCoordinateTransport, v::AbstractVector)
     out
 end
 
-# The emitter records the declaration path, including each allocating scope.
-# Reading that path does not infer a semantic address from a coordinate name.
-function _brm_rk_declaration_value(values, declaration::Symbol)
-    hasproperty(values, declaration) && return getproperty(values, declaration)
-    foldl((value, part) -> getproperty(value, Symbol(part)),
-        split(String(declaration), '.'); init=values)
-end
-
 _brm_physical(::Val{:identity}, stan_value) = stan_value
 _brm_physical(::Val{:exp}, stan_value) = exp(stan_value)
 
