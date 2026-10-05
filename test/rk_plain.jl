@@ -211,7 +211,7 @@ public_prior_reader(a, b, row) = a[row] .+ b[row]
     default_backend, backend = RKBRMI(control), RKBRMI(explicit)
     check_printed_roundtrip(default_backend)
     check_printed_roundtrip(backend)
-    artifact = emit_rk_artifact(explicit; case_id="shared-explicit-prior-source")
+    artifact = BRM.emit_rk_artifact(explicit; case_id="shared-explicit-prior-source")
     source = sprint(Base.show_unquoted, Expr(:block, artifact.defs..., artifact.ast))
     @test occursin("Exponential.(0.7)", source)
     @test occursin("LKJCholesky(2, 3.0)", source)
@@ -259,8 +259,10 @@ end
             end
         end
         backend = RKBRMI(model)
-        source = check_printed_roundtrip(backend)
-        @test occursin("@plate", source)
+        check_printed_roundtrip(backend)
+        emitted = BRM._rk_emit_ast(backend.plan)
+        source = sprint(Base.show_unquoted, Expr(:block, emitted.defs..., emitted.main))
+        @test occursin("ReactiveKernels.plate", source)
         @test !occursin("subjects=", source)
         check_plain_gradient(backend)
     end
