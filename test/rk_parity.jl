@@ -2599,7 +2599,7 @@ end
     translated = _rk_translated(backend)
     source = sprint(Base.show_unquoted, BRM._rk_emit_ast(backend.plan).main)
     @test occursin("mu_tau ~ HalfCauchy", source)
-    @test occursin("y[Jobs_y]", source)
+    @test occursin("mu[Jobs_y]", source)
     obs = [1, 3, 5]
     twin = _parity_backend(@brm (; x=cols.x[obs], z=cols.z[obs],
             y=Float64[0.2, -0.4, 0.7]) begin
