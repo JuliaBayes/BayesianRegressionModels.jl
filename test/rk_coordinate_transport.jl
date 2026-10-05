@@ -85,6 +85,22 @@ function check_coordinate_transport(fixture)
     end
 end
 
+@stestset "coordinate records retain fresh block-local declarations" begin
+    definitions, records, taken = Expr[], Any[], Set{Symbol}()
+    address = (; kind=:ranef, group=:subject, id=nothing, bucket_kind=:intercept1,
+        margins=((:mu, :Intercept),))
+    BRM._rk_ast_varying_draws!(definitions, taken, 1, 1.0, nothing;
+        group=:subject, scale_priors=:(Exponential(z)), coordinates=records,
+        coordinate_record=address, scope=:draws)
+    record = only(records)
+    @test record.z !== Symbol("draws.z")
+    definition = sprint(Base.show_unquoted, only(definitions))
+    local_z = last(split(String(record.z), '.'))
+    @test occursin("$(local_z)[levels(g), 1:1]", definition)
+    nested = (; draws=NamedTuple{(Symbol(local_z),)}((reshape([.2, .3], 2, 1),)))
+    @test BRM._brm_rk_declaration_value(nested, record.z) == reshape([.2, .3], 2, 1)
+end
+
 @stestset "coordinate transport correlated factors and categorical pool levels" begin
     groups = categorical(["b","b","a","a","c","c","d","d"])
     levels!(groups, ["d","b","a","c"])
