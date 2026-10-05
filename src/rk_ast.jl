@@ -825,8 +825,9 @@ function _rk_ast_multinomial_response_stmt!(definitions, statements, taken,
     columns = Expr(:tuple, response.response, response.count_columns...)
     probabilities = get(rename, response.predictor, response.predictor)
     scores = _rk_ast_fresh_name(string(response.response, "_multinomial_scores"), taken)
+    cell = first(_rk_ast_statistical_call!(definitions, taken, :brm_multinomial_cell).args)
     expression = _rk_ast_statistical_call!(definitions, taken, :brm_multinomial_scores,
-        columns, response.trials, probabilities; kernel=true)
+        cell, columns, response.trials, probabilities; kernel=true)
     response.weights === nothing || (expression = Expr(:call, :.*, expression, response.weights))
     push!(statements, Expr(:(=), scores, expression))
     reader = _rk_ast_fresh_name("brm_logdensity_value", taken)

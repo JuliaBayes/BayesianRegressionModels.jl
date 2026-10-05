@@ -161,18 +161,23 @@ function rkppl_model end
 # ordinary functions or numerical graphs, not submodels: statistical blocks
 # that allocate parameters are generated per block (see `_rk_ast_block_call!`).
 const _BRM_STATISTICAL_VALUES = (
+    brm_multinomial_cell = :(
+function brm_multinomial_cell(row, columns, totals, probs)
+    total = totals isa Integer ? totals : totals[row]
+    score = BayesianRegressionModels.loggamma(total + 1)
+    for category in eachindex(columns)
+        count = columns[category][row]
+        mass = count == 0 ? zero(probs[category]) : count * log(probs[category])
+        score += mass - BayesianRegressionModels.loggamma(count + 1)
+    end
+    return score
+end),
+
     brm_multinomial_scores = :(
-brm_multinomial_scores(count_columns, trials, probabilities) = begin
-    pointwise = ReactiveKernels.plate(eachindex(first(count_columns)),
-            Ref(count_columns), Ref(trials), Ref(probabilities)) do row, columns, totals, probs
-        total = totals isa Integer ? totals : totals[row]
-        score = BayesianRegressionModels.loggamma(total + 1)
-        for category in eachindex(columns)
-            count = columns[category][row]
-            mass = count == 0 ? zero(probs[category]) : count * log(probs[category])
-            score += mass - BayesianRegressionModels.loggamma(count + 1)
-        end
-        score
+brm_multinomial_scores(cell, count_columns, trials, probabilities) = begin
+    pointwise = ReactiveKernels.plate(eachindex(first(count_columns)), Ref(cell),
+            Ref(count_columns), Ref(trials), Ref(probabilities)) do row, density, columns, totals, probs
+        density(row, columns, totals, probs)
     end
     return pointwise
 end),
