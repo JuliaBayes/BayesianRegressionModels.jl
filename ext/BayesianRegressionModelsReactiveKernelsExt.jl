@@ -7,6 +7,8 @@ using ReactiveKernelsPPL
 
 const BRM = BayesianRegressionModels
 
+include("rk_statistical_gp.jl")
+
 # The emitted source is the executable contract. Every statistical prior and
 # observation role lowers through the public RKPPL surface; binding supplies
 # the data, with no ordinal or missing-response plan mutations.
@@ -21,7 +23,8 @@ function _rk_emit_module(emitted::BRM._RKEmittedProgram)
     mod = Module(gensym(:RKEmittedModels))
     Core.eval(mod, :(using ReactiveKernelsPPL))
     Core.eval(mod, :(import ReactiveKernels))
-    Core.eval(mod, :(import ReactiveKernels: @kernel))
+    Core.eval(mod, :(import BayesianRegressionModels))
+    Core.eval(mod, :(import ReactiveKernels: @kernel, plate))
     Core.eval(mod, :(import BayesianRegressionModels:
         brm_tps_basis, brm_t2_basis, brm_hsgp_basis, brm_hsgp_periodic_basis,
         brm_hsgp_sqrt_spd, brm_hsgp_periodic_sqrt_spd,

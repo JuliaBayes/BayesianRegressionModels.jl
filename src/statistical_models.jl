@@ -157,6 +157,18 @@ end
 """Return a BRM-owned statistical RKPPL submodel after loading ReactiveKernelsPPL."""
 function rkppl_model end
 
+"""
+    rk_model(name::Symbol)
+
+Return a BRM-owned native statistical KernelSpec after loading ReactiveKernels
+and ReactiveKernelsPPL. Available models: `:gp_exp_quad_cov`, `:gp_periodic_cov`
+and `:dual_hsgp`. Covariance graphs compose into authored RK/RKPPL models;
+`StatisticalPreparation` provides the matching covariance call wrappers.
+The dual HSGP preserves its 44 packed coordinates, live partial centeredness,
+LogNormal(0,4) hyperpriors, standard-normal weights and normalized likelihood.
+"""
+function rk_model end
+
 # Shared statistical algebra over explicitly declared random coordinates.
 # The emitter keeps prior statements at their current author paths, and uses
 # these ordinary submodels to make repeated block composition readable.
