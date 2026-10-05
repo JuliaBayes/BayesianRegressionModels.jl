@@ -152,6 +152,45 @@ end
     end
 end
 
+@stestset "public random-effect scale hyperprior remains a fitted draw" begin
+    data = (; g=[1, 1, 2, 2], y=[.2, -.1, .4, .3])
+    brmi = @brm data begin
+        tau ~ Exponential(1)
+        mu ~ 1 + (1 | p | g)
+        sd(:, p) ~ Exponential(tau)
+        y ~ Normal(mu, 1)
+    end
+    # consumer_problem independently reparses every emitted definition and
+    # the complete main program before preparing the ordinary Reverse query.
+    backend, problem = consumer_problem(brmi)
+    names = coordinate_names(backend.model.layout)
+    index(name) = only(findall(==(Symbol(name)), names))
+    record = only(filter(r -> r.kind === :ranef,
+        BRM._rk_coordinate_records(backend.plan)))
+    hyper, scale, population = index(:tau), index(string(record.scale, ".1")),
+        index(:mu_Intercept)
+    innovations = [index(string(record.z, ".", j, ".1")) for j in 1:2]
+    @test length(names) == 5
+    for u in (zeros(5), fill(.13, 5), collect(range(-.2, .3; length=5)))
+        saved = copy(u)
+        tau, sd, beta, z = exp(u[hyper]), exp(u[scale]), u[population], u[innovations]
+        means = beta .+ sd .* z[data.g]
+        residual = data.y .- means
+        oracle = logpdf(Exponential(1), tau) + u[hyper] +
+            logpdf(Exponential(tau), sd) + u[scale] + logpdf(Normal(), beta) +
+            sum(logpdf.(Normal(), z)) + sum(logpdf.(Normal.(means, 1), data.y))
+        expected = zeros(5)
+        expected[hyper] = -tau + sd / tau
+        expected[scale] = 1 - sd / tau + sum(residual .* sd .* z[data.g])
+        expected[population] = -beta + sum(residual)
+        expected[innovations] = [-z[j] + sd * sum(residual[data.g .== j]) for j in 1:2]
+        value, gradient = LogDensityProblems.logdensity_and_gradient(problem, u)
+        @test value ≈ oracle atol=2e-11 rtol=2e-11
+        @test gradient ≈ expected atol=2e-10 rtol=2e-10
+        @test isequal(u, saved)
+    end
+end
+
 @stestset "coordinate transport correlated factors and categorical pool levels" begin
     groups = categorical(["b","b","a","a","c","c","d","d"])
     levels!(groups, ["d","b","a","c"])
