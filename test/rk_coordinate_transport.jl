@@ -177,7 +177,7 @@ end
     record = only(filter(r -> r.kind === :ranef,
         BRM._rk_coordinate_records(backend.plan)))
     hyper, scale, population = index(:tau), index(string(record.scale, ".1")),
-        index(:mu_Intercept)
+        index("pop_mu.beta_pop.1")
     innovations = [index(string(record.z, ".", j, ".1")) for j in 1:2]
     @test length(names) == 5
     for u in (zeros(5), fill(.13, 5), collect(range(-.2, .3; length=5)))
@@ -214,7 +214,7 @@ end
     index(name) = only(findall(==(Symbol(name)), names))
     record = only(filter(r -> r.kind === :ranef,
         BRM._rk_coordinate_records(backend.plan)))
-    scale, population = index(string(record.scale, ".1")), index(:mu_Intercept)
+    scale, population = index(string(record.scale, ".1")), index("pop_mu.beta_pop.1")
     innovations = [index(string(record.z, ".", j, ".1")) for j in 1:2]
     @test length(names) == 4
     @test :unused ∉ names
