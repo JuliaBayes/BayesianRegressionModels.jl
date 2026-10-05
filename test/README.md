@@ -56,6 +56,30 @@ This explicit PDF mode requires Quarto and a working LuaLaTeX installation;
 render failures propagate. Outputs use a temporary directory, or the directory
 specified by `BRM_DESCRIPTION_TEX_OUTPUT`.
 
+## Native GP and dual HSGP adoption
+
+`rk_gp_covariance.jl` checks BRM-owned squared-exponential and periodic
+covariance construction, multivariate locations, duplicate-location jitter,
+input ownership, graph composition, independent density and native Reverse
+coordinates. `rk_dual_hsgp.jl` checks the exact public motorcycle dual HSGP
+against independent normalized densities and all 44 gradients at three points
+and four centeredness settings; it reuses the existing hashed public data.
+Both load the real ReactiveKernels extension.
+
+These focused scripts use RK's public `recipe_inventory` and
+`rk_cholesky_lower` APIs. Run them
+in an environment carrying RK `db4f16aa0f3d768e376269429ec613691c743b13`
+or a descendant containing both APIs and the precompiled graph allocation
+repair and native prepared-callback Reverse repair. The matching nested
+packages share the same checkout. The standard
+`test/setup_env.jl` pin and `test/Project.toml` source revision carry that floor:
+
+```sh
+julia --project=test test/setup_env.jl
+julia --project=test test/rk_dual_hsgp.jl
+julia --project=test test/rk_gp_covariance.jl
+```
+
 ## Chunking heavy suites
 
 `rk_retained_transport.jl` attaches `RKBRMI(brmi, artifact.plan, built)` to

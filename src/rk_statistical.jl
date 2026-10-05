@@ -61,20 +61,13 @@ function brm_hsgp_periodic_sqrt_spd(harmonics, sigma, rho)
     result
 end
 
-function brm_gp_covariance(x, sigma, rho, period, jitter)
-    n = length(x)
-    T = promote_type(eltype(x), typeof(sigma), typeof(rho))
-    covariance = Matrix{T}(undef, n, n)
-    for j in 1:n, i in 1:n
-        exponent = iszero(period) ?
-            0.5 * ((x[i] - x[j]) / rho)^2 :
-            2sinpi(abs(x[i] - x[j]) / period)^2 / rho^2
-        covariance[i, j] = sigma^2 * exp(-exponent)
-    end
-    covariance + jitter * I
-end
+# Legacy emitter bindings delegate to the adopted construction family.
+# All backends importing these names use one statistical implementation.
+brm_gp_covariance(x, sigma, rho, period, jitter) = iszero(period) ?
+    StatisticalPreparation.gp_exp_quad_cov(x, sigma, rho, jitter) :
+    StatisticalPreparation.gp_periodic_cov(x, sigma, rho, period, jitter)
 
-brm_gp_latent(covariance, z) = cholesky(Symmetric(covariance)).L * z
+brm_gp_latent(covariance, z) = StatisticalPreparation.gp_chol_latent(covariance, z)
 
 brm_level_indices(labels, source) = _rk_value_level_indices(labels, source)
 brm_ranef_column(draws, indices, margin) = draws[indices, margin]

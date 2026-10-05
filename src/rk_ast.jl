@@ -77,8 +77,8 @@ function _rk_ast_coef_name(base::String, taken::Set{Symbol})
     name
 end
 
-function _rk_ast_statistical_call!(definitions, taken, name, args...; kernel=false)
-    template = getproperty(_BRM_STATISTICAL_VALUES, name)
+function _rk_ast_statistical_call!(definitions, taken, name, args...;
+        kernel=false, template=getproperty(_BRM_STATISTICAL_VALUES, name))
     signature, body = template.args
     # Reuse a definition across distinct statistical blocks. A collision with
     # authored data, parameters or callable names only renames the definition.
@@ -773,11 +773,29 @@ end
 # `gp_chol_latent(gp_periodic_cov(x, sigma, rho, period, jitter), z)`:
 # arg order is (locations, sigma, rho, [period,] jitter) per the
 # thin-layer contract.
-function _rk_ast_gp_latent(term)
+function _rk_ast_gp_pair_calls(node, callee)
+    node isa Expr || return node
+    args = map(arg -> _rk_ast_gp_pair_calls(arg, callee), node.args)
+    Meta.isexpr(node, :call) && first(args) === :gp_pair_locations &&
+        (args[1] = callee)
+    Expr(node.head, args...)
+end
+
+function _rk_ast_gp_latent(definitions, taken, term)
     options = term.options
-    covariance = Expr(:call, :brm_gp_covariance, only(term.columns),
-        options.sigma, options.rho,
-        options.cov === :periodic ? options.period : 0.0, options.jitter)
+    templates = StatisticalPreparation._GP_COVARIANCE_MODELS
+    pair = _rk_ast_statistical_call!(definitions, taken,
+        :brm_gp_pair_locations, :x; kernel=true,
+        template=templates.gp_pair_locations)
+    periodic = options.cov === :periodic
+    template = periodic ? templates.gp_periodic_cov : templates.gp_exp_quad_cov
+    template = _rk_ast_gp_pair_calls(template, first(pair.args))
+    args = periodic ?
+        (only(term.columns), options.sigma, options.rho, options.period, options.jitter) :
+        (only(term.columns), options.sigma, options.rho, options.jitter)
+    covariance = _rk_ast_statistical_call!(definitions, taken,
+        periodic ? :brm_gp_periodic_cov : :brm_gp_exp_quad_cov, args...;
+        kernel=true, template)
     Expr(:call, :brm_gp_latent, covariance, options.z)
 end
 
@@ -1095,7 +1113,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             push!(stmts, Expr(:(=), axis, Expr(:call, :eachindex, response)))
             push!(stmts, Expr(:call, :.~, Expr(:ref, options.z, axis),
                 _rk_ast_dotted(:Normal, 0, 1)))
-            push!(stmts, Expr(:(=), options.f, _rk_ast_gp_latent(term)))
+            push!(stmts, Expr(:(=), options.f, _rk_ast_gp_latent(defs, taken, term)))
         end
         for term in predictor.terms
             term.kind === :ar || continue

@@ -472,4 +472,6 @@ hsgp_periodic_rho_floor(harmonics::AbstractVector) =
 hsgp_periodic_rho_floor(harmonics::AbstractMatrix) =
     maximum(_hsgp_periodic_rho_lower(maximum(col)) for col in eachcol(harmonics))
 
+include("statistical_gp.jl")
+
 end # StatisticalPreparation
