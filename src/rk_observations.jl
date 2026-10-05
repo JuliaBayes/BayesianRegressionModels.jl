@@ -179,8 +179,8 @@ function _rk_active_observation_source(emitted, conditioned, held_out)
         for statement in statements]
     Expr(:block, statements[.!withheld]...)
 end
-function _rk_emit_ast(plan::_RKHeldOutPlan)
-    emitted = _rk_emit_ast(plan.parent)
+function _rk_emit_ast(plan::_RKHeldOutPlan; coordinates=nothing)
+    emitted = _rk_emit_ast(plan.parent; coordinates)
     conditioned = _rk_observed_names(plan.parent)
     main = _rk_active_observation_source(emitted, conditioned, plan.held_out)
     _RKEmittedProgram(emitted.defs, main, emitted.bindings)

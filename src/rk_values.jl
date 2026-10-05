@@ -94,13 +94,15 @@ end
 # innovations and correlation factor, returning the levels x K draws.
 # `scale_priors` is one shared law or a vector of per-margin laws.
 function _rk_ast_varying_draws!(definitions, taken, K, eta, rows;
-        group=nothing, scale_priors=nothing, scales=nothing)
+        group=nothing, scale_priors=nothing, scales=nothing, coordinates=nothing,
+        coordinate_record=nothing, scope=nothing)
     block = _rk_block_body(rows, scale_priors)
     axis = group === nothing ? rows :
         Expr(:call, :levels, _rk_block_argument!(block, :g, group))
     index = Expr(:call, :(:), 1, K)
     sd = scales === nothing ? _rk_block_local!(block, :sd) :
         _rk_block_argument!(block, :sd, scales)
+    parts = nothing
     if scale_priors isa AbstractVector
         parts = [_rk_block_local!(block, string(sd, "_", j)) for j in eachindex(scale_priors)]
         for (part, prior) in zip(parts, scale_priors)
@@ -114,12 +116,19 @@ function _rk_ast_varying_draws!(definitions, taken, K, eta, rows;
     z = _rk_block_local!(block, :z)
     push!(block.statements, Expr(:call, :.~, Expr(:ref, z, axis, index),
         _rk_ast_dotted(:Normal, 0, 1)))
+    L = nothing
     value = if K == 1
         Expr(:call, :.*, z, Expr(:ref, sd, 1))
     else
         L = _rk_block_local!(block, :L)
         push!(block.statements, Expr(:call, :~, L, Expr(:call, :LKJCholesky, K, eta)))
         Expr(:call, :*, z, Expr(:call, :transpose, Expr(:call, :.*, sd, L)))
+    end
+    if coordinate_record !== nothing
+        path(local_name) = Symbol(scope, ".", local_name)
+        _rk_coordinate_record!(coordinates, (; coordinate_record...,
+            scale=path(sd), scales=parts === nothing ? nothing : Tuple(path.(parts)),
+            z=path(z), L=L === nothing ? nothing : path(L)))
     end
     base = K == 1 ? "brm_varying_draws" : "brm_correlated_draws"
     _rk_ast_block_call!(definitions, taken, scales === nothing ? base : base * "_r2d2",
@@ -159,7 +168,7 @@ function _rk_ast_stratified_draws!(definitions, taken, K, eta, group, stratum)
 end
 
 function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindings;
-        predictors=(), population_priors=Dict())
+        predictors=(), population_priors=Dict(), coordinates=nothing)
     grouping = bucket.grouping
     K = length(bucket.margins)
     group = first(grouping.columns)
@@ -189,8 +198,11 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
         else
             [_rk_ast_positive_prior(prior, bindings, taken) for prior in bucket.sd_priors]
         end
+        record = grouping.form === :plain ? (; kind=:ranef,
+            group=bucket.group, id=bucket.id, bucket_kind=bucket.kind,
+            margins=Tuple((m.predictor, m.coefficient) for m in bucket.margins)) : nothing
         _rk_ast_varying_draws!(definitions, taken, K, bucket.lkj_eta, nothing;
-            group, scale_priors)
+            group, scale_priors, coordinates, coordinate_record=record, scope=draws)
     end
     push!(stmts, Expr(:call, :~, draws, call))
     indices = Dict{Symbol,Symbol}()
@@ -583,10 +595,11 @@ function _rk_value_expr!(bindings, expression::_BRMPreparedExpr, taken)
     call
 end
 
-function _rk_emit_ast(plan::_RKValuePlan)
+function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
     reserved = Set{Symbol}(keys(plan.columns))
     union!(reserved, (a.name for a in plan.assignments))
-    regression = _rk_emit_ast(plan.regression, false; values=true, reserved)
+    regression = _rk_emit_ast(plan.regression, false; values=true, reserved,
+        coordinates)
     stmts = copy(regression.main.args)
     defs = copy(regression.defs)
     bindings = copy(regression.bindings)

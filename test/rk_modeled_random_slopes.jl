@@ -98,6 +98,10 @@ end
         append!(mapping,[names[location_z[j]]=>"b_location_subject_z_flat.$j" for j in 1:3])
         append!(mapping,[names[scales[k]]=>"b_effect_subject_tau.$k" for k in 1:2])
         append!(mapping,[names[z[j,k]]=>"b_effect_subject_z_flat.$(k+2*(j-1))" for j in 1:3 for k in 1:2])
+        transport = brm_coordinate_transport(backend,
+            SBBRMI(brmi; mod=PublicModeledRandomSlope, total_groups=()),
+            BridgeStan.param_unc_names(stan.model))
+        @test Dict(p.rk => p.stan for p in transport.pairs) == Dict(mapping)
         ext = Base.get_extension(BRM,:BayesianRegressionModelsReactiveKernelsExt)
         bound = ext._rk_translated_plan(backend.plan)
         pointwise = prepare_query(backend.model,bound,:pointwise)

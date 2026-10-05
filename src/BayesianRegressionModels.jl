@@ -94,6 +94,7 @@ include("turing_descriptor.jl")
 # the emitted random-effect parameterization, so they live next to the emitter
 # rather than being re-derived (differently) in every consumer.
 include("prediction.jl")
+include("coordinate_transport.jl")
 include("covariate_resampling.jl")
 export modeled_covariates
 include("description.jl")
@@ -196,6 +197,8 @@ export brm_description_prior_anchor, brm_description_prior_references
 export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
        brm_population_effect_coordinates, brm_term_coordinates,
        brm_ranef_sd_coordinates,
+       BRMCoordinatePair, BRMCoordinateTransport, brm_coordinate_transport,
+       brm_rk_to_stan, brm_stan_to_rk, brm_check_coordinate_transport,
        brm_operation, brm_execute, brm_columns, required_brm_inputs
 
 # Accessor helpers for column types — used unqualified by html renderers,

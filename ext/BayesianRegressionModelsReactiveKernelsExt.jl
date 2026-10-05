@@ -149,4 +149,10 @@ function BRM.rk_restore_draws(backend::BRM.RKBRMI, U::AbstractMatrix)
     restore_draws(backend.model.layout, U)
 end
 
+# Cross-backend coordinate transport (src/coordinate_transport.jl).
+BRM._rk_layout_coordinate_names(backend::BRM.RKBRMI) =
+    coordinate_names(backend.model.layout)
+BRM._rk_constrained_values(backend::BRM.RKBRMI, u::AbstractVector) =
+    constrain(backend.model.layout, u)
+
 end
