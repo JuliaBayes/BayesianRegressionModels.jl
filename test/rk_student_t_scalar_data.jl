@@ -55,13 +55,17 @@ function scalar_t_retyped(backend)
     emitted = BRM._rk_emit_ast(backend.plan)
     mod = Module(gensym(:ScalarStudentT))
     Core.eval(mod, :(using ReactiveKernelsPPL))
+    Core.eval(mod, :(import BayesianRegressionModels, ReactiveKernels))
     @test isempty(emitted.bindings)
     for definition in emitted.defs
-        Core.eval(mod, Expr(:macrocall, Symbol("@rkppl"), LineNumberNode(0),
-            scalar_t_parse_source(definition)))
+        parsed = scalar_t_parse_source(definition)
+        expression = BRM._rk_source_definition(definition).kind === :rkppl ?
+            Expr(:macrocall, Symbol("@rkppl"), LineNumberNode(0), parsed) : parsed
+        Core.eval(mod, expression)
     end
+    data = BRM._rk_source_data_columns(backend.plan, emitted)
     plan = bind_data(lower_rkppl(scalar_t_parse_source(emitted.main),
-        backend.plan.columns; mod, conditioned=(:y,)), backend.plan.columns)
+        data; mod, conditioned=(:y,)), data)
     built = build_kernel(plan)
     built, plan
 end

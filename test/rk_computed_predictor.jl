@@ -26,15 +26,18 @@ function computed_public_replay(backend)
     emitted = BRM._rk_emit_ast(backend.plan)
     mod = Module(gensym(:ComputedPredictorReplay))
     Core.eval(mod, :(using ReactiveKernelsPPL))
+    Core.eval(mod, :(import BayesianRegressionModels, ReactiveKernels))
     for (name, callable) in emitted.bindings
         Core.eval(mod, Expr(:const, Expr(:(=), name, QuoteNode(callable))))
     end
     for definition in emitted.defs
         parsed = Meta.parse(sprint(Base.show_unquoted, definition))
-        Core.eval(mod, Expr(:macrocall, Symbol("@rkppl"), LineNumberNode(0), parsed))
+        expression = BRM._rk_source_definition(definition).kind === :rkppl ?
+            Expr(:macrocall, Symbol("@rkppl"), LineNumberNode(0), parsed) : parsed
+        Core.eval(mod, expression)
     end
     main = Meta.parse(sprint(Base.show_unquoted, emitted.main))
-    data = backend.plan.columns
+    data = BRM._rk_source_data_columns(backend.plan, emitted)
     plan = bind_data(lower_rkppl(main, data; mod, conditioned=(:y,)), data)
     built = build_kernel(plan)
     @test coordinate_names(built.layout) == coordinate_names(backend.model.layout)
