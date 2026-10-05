@@ -1,9 +1,9 @@
 # src/coordinate_transport.jl — the cross-backend coordinate transport.
 #
 # One BRMI lowers to an `RKBRMI` and an `SBBRMI` whose sampled coordinates live
-# in different namespaces and shapes (RK `ranef_draws_<g>_z.<level>.<margin>`
-# versus Stan `<binding>_z_flat.<margin + K(level-1)>`, RK `mu_x` versus Stan
-# `pop_mu_beta_pop.2`). Both emitters already know what every declaration
+# in different namespaces and shapes (RK `b_<g>.z.<level>.<margin>`
+# versus Stan `<binding>_z_flat.<margin + K(level-1)>`, RK `pop_mu.beta_pop.2`
+# versus Stan `pop_mu_beta_pop.2`). Both emitters already know what every declaration
 # means, so the correspondence is built from their records instead of from the
 # names: the RK emitter files one semantic record per sampled declaration it can
 # address (`_rk_coordinate_record!`, threaded through `_rk_emit_ast`), and the
@@ -63,7 +63,8 @@ of the same [`BRMI`](@ref):
   `(; kind=:ranef_z, group=:subject, id=:effect, level=3, margin=(:mu, :x))`;
 - `rk` / `stan` — the RK layout coordinate name and the Stan unconstrained
   parameter name;
-- `rk_declaration` / `rk_index` — the RK declaration and the element of its
+- `rk_declaration` / `rk_index` — the RK declaration's complete scope path
+  (e.g. `pop_mu.beta_pop`) and the element of its
   constrained value that the coordinate parameterizes;
 - `relation` — how the constrained values correspond: `:identity` (equal),
   `:exp` (the RK value is `exp` of the Stan value, e.g. a random-intercept
@@ -296,8 +297,11 @@ function _brm_transport_pairs!(pairs, correlations, ::Val{:population}, record,
             "brm_coordinate_transport: population coefficient $(address) has no " *
             "sampled SB coordinate. The semantic inventory does not cover this coefficient.")
     end
-    push!(pairs, BRMCoordinatePair(address, record.declaration, name,
-        record.declaration, (), :identity))
+    index = get(record, :index, ())
+    rk_name = isempty(index) ? record.declaration :
+        Symbol(record.declaration, ".", join(index, "."))
+    push!(pairs, BRMCoordinatePair(address, rk_name, name,
+        record.declaration, index, :identity))
 end
 
 _brm_transport_level(x) = x isa CA.CategoricalValue ? CA.unwrap(x) : x
@@ -495,6 +499,17 @@ end
 _brm_physical(::Val{:identity}, stan_value) = stan_value
 _brm_physical(::Val{:exp}, stan_value) = exp(stan_value)
 
+# The emitter records a declaration's complete scope path. Constrained values
+# expose statistical submodels as nested named tuples, while older declarations
+# remain top-level properties.
+function _brm_rk_declaration_value(values, declaration::Symbol)
+    hasproperty(values, declaration) && return getproperty(values, declaration)
+    for field in split(String(declaration), '.')
+        values = getproperty(values, Symbol(field))
+    end
+    values
+end
+
 """
     brm_check_coordinate_transport(t, rk::RKBRMI, stan_model, u_rk; atol=1e-10, rtol=1e-10)
 
@@ -538,14 +553,14 @@ function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
     checked = 0
     for pair in t.pairs
         pair.relation === :cholesky && continue
-        value = getproperty(rk_values, pair.rk_declaration)
+        value = _brm_rk_declaration_value(rk_values, pair.rk_declaration)
         rk_value = isempty(pair.rk_index) ? value : value[pair.rk_index...]
         compare("$(pair.address) (`$(pair.rk)` / `$(pair.stan)`)", rk_value,
             _brm_physical(Val(pair.relation), stan_value(pair.stan)))
         checked += 1
     end
     for factor in t.correlations
-        L = getproperty(rk_values, factor.rk_declaration)
+        L = _brm_rk_declaration_value(rk_values, factor.rk_declaration)
         size(L) == (factor.K, factor.K) || error(
             "brm_check_coordinate_transport: RK factor `$(factor.rk_declaration)` " *
             "has size $(size(L)), expected $((factor.K, factor.K))")

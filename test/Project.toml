@@ -54,9 +54,8 @@ rev = "c317cc003fc41c2d933c27dc80799141eebd434e"
 
 [sources.StanBlocks]
 url = "https://github.com/nsiccha/StanBlocks.jl"
-# Published caller-dimension substitution for uneven/empty nested ragged
-# helpers. Retains mixed derived records, empty indices and ValueFamily/UDF.
-rev = "65cabefda5a9345993c7e0343739e9f8e363611f"
+# Published nested ragged helper types; matches compiled consumer acceptance.
+rev = "e355994384d44b86108105264ae3e34e0f2a0625"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"

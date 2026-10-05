@@ -125,9 +125,10 @@ end
         names = coordinate_names(backend.model.layout)
         id = length(K)==1 ? "hsgp_x" : "hsgp_x_w"
         position(name) = only(findall(==(Symbol(name)),names))
-        rpos = iso ? [position(id*"_rho")] : [position(id*"_rho$j") for j in eachindex(K)]
-        spos = position(id*"_sigma")
-        zpos = [position(id*"_z.$b") for b in 1:prod(K)]
+        # The HSGP component owns its hyperparameters and basis weights.
+        rpos = iso ? [position(id*".rho_iso")] : [position(id*".rho_$j") for j in eachindex(K)]
+        spos = position(id*".sigma")
+        zpos = [position(id*".beta_raw.$b") for b in 1:prod(K)]
         function oracle(u)
             lower = iso ? [maximum(floors)] : floors
             rhos = lower .+ exp.(u[rpos])
@@ -185,8 +186,8 @@ end
         backend,problem=consumer_problem(brmi)
         names=coordinate_names(backend.model.layout)
         index(name)=only(findall(==(Symbol(name)),names))
-        r=index("hsgp_x_rho");s=index("hsgp_x_sigma")
-        z=[index("hsgp_x_z.$b") for b in 1:3]
+        r=index("hsgp_x.rho_iso");s=index("hsgp_x.sigma")
+        z=[index("hsgp_x.beta_raw.$b") for b in 1:3]
         term=only(filter(t->t.kind===:hsgp,only(backend.plan.predictors).terms))
         @test !term.options.rho_truncated
         @test term.options.rho_stated && term.options.sigma_stated
@@ -203,8 +204,8 @@ end
                 sum(logpdf.(Normal(),u[z]))+sum(logpdf.(Normal.(locations,1.),data.y))
         end
         stan=consumer_stan(brmi,"fixed-hsgp-"*label)
-        mapping=Pair{Symbol,String}[:hsgp_x_rho=>"hsgp_x_rho_iso",
-            :hsgp_x_sigma=>"hsgp_x_sigma"]
+        mapping=Pair{Symbol,String}[Symbol("hsgp_x.rho_iso")=>"hsgp_x_rho_iso",
+            Symbol("hsgp_x.sigma")=>"hsgp_x_sigma"]
         append!(mapping,[names[z[b]]=>"hsgp_x_beta_raw.$b" for b in 1:3])
         replayed,sampler=printed_hsgp_replay(backend)
         @test coordinate_names(replayed.layout)==names

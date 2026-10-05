@@ -262,10 +262,10 @@ end
     names = coordinate_names(backend.model.layout)
     @test length(names) == 5
     index(name) = only(findall(==(Symbol(name)), names))
-    intercept = index("theta_Intercept")
-    scale = index("ranef_draws_p_subject_sd.1")
+    intercept = index("pop_theta.beta_pop.1")
+    scale = index("b_p_subject.tau.1")
     levels = CategoricalArrays.levels(data.subject)
-    innovations = [index("ranef_draws_p_subject_z.$j.1") for j in eachindex(levels)]
+    innovations = [index("b_p_subject.z.$j.1") for j in eachindex(levels)]
     rows = [only(findall(==(subject), levels)) for subject in data.subject]
     grouped_y = reduce(vcat, [data.y[findall(==(subject), data.event_subject)]
         for subject in data.subject])

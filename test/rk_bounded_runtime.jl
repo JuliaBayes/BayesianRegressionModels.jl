@@ -25,9 +25,13 @@ function bounded_public_replay(backend)
     for (name, callable) in emitted.bindings
         Core.eval(mod, Expr(:const, Expr(:(=), name, QuoteNode(callable))))
     end
+    Core.eval(mod, :(import ReactiveKernels))
     for definition in emitted.defs
         parsed = Meta.parse(sprint(Base.show_unquoted, definition))
-        Core.eval(mod, Expr(:macrocall, Symbol("@rkppl"), LineNumberNode(0), parsed))
+        # Explicit `@kernel` graphs and functions keep their own kind; a bare
+        # function-shaped definition is an `@rkppl` submodel.
+        Core.eval(mod, BRM._rk_source_definition(definition).kind === :rkppl ?
+            Expr(:macrocall, Symbol("@rkppl"), LineNumberNode(0), parsed) : parsed)
     end
     source = Meta.parse(sprint(Base.show_unquoted, emitted.main))
     data = backend.plan.columns

@@ -193,20 +193,11 @@ end
     @test isequal(data,saved)
 end
 
-# Frozen518 diagnostic fields/classifier, with public entry/body accessors.
 # kernel_expr is a pre-build replay and can retain KernelSpec reader calls;
 # the built numerical graph is the place to verify composed scalar recipes.
 function observation_graph_recipes(graph;depth=0)
-    records = NamedTuple[]
-    for recipe in graph.recipes
-        push!(records,(;depth,outputs=sprint(show,recipe.outputs),source=recipe.source))
-        if recipe.op isa ReactiveKernels._AuthoredPlateOp
-            append!(records,observation_graph_recipes(plate_body(recipe);depth=depth+1))
-        elseif recipe.op isa ReactiveKernels._AuthoredScanOp
-            append!(records,observation_graph_recipes(scan_body(recipe);depth=depth+1))
-        end
-    end
-    records
+    [(; depth=depth + entry.depth, outputs=sprint(show,entry.recipe.outputs),
+        source=entry.recipe.source) for entry in recipe_inventory(graph)]
 end
 
 @stestset "caller observation graph retains vector arguments and visible scalar law" begin
@@ -241,8 +232,7 @@ end
     end
     bound = BRM.rk_translate_artifact(BRM.emit_rk_artifact(brmi;
         case_id="relative-normal-graph-$route"))
-    expression = kernel_expr(bound, assign_layout(bound))
-    dump = sprint(Base.show_unquoted, expression)
+    main = sprint(Base.show_unquoted, BRM._rk_emit_ast(backend.plan).main)
     records = observation_graph_recipes(kernel_graph(build_kernel(bound).spec))
     scalar = filter(record->record.depth==1,records)
     println("OBSERVATION_BUILT_SCALAR_RECIPES=",scalar)
@@ -253,7 +243,10 @@ end
     @test any(record->occursin("relative_logdensity",record.outputs) &&
         isequal(record.source,:((-0.5*log(2*pi)-relative_log_scale)-
             0.5*relative_residual*relative_residual)),scalar)
-    @test !occursin("y_scalar_logdensity(",dump)
+    @test occursin("y .~ LogDensity.(y_scalar_logdensity,", main)
+    for retired in ("y_logdensity_reader", "brm_logdensity_value", "y_law_argument")
+        @test !occursin(retired, main)
+    end
     @test isequal(data,saved)
   end
 end

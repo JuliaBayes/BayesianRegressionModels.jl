@@ -99,76 +99,39 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
         group = _rk_ast_fresh_name(string(draws, "_groups"), taken)
         push!(stmts, Expr(:(=), group, Expr(:call, :vcat, grouping.columns...)))
     end
-    tau = _rk_ast_fresh_name(string(draws, "_sd"), taken)
-    z = _rk_ast_fresh_name(string(draws, "_z"), taken)
-    index = Expr(:call, :(:), 1, K)
     if grouping.form === :gr
-        stratum = grouping.by
-        L = _rk_ast_fresh_name(string(draws, "_L"), taken)
-        push!(stmts, Expr(:call, :.~, Expr(:ref, tau,
-            Expr(:call, :levels, stratum), index),
-            _rk_ast_dotted(:restricted, Expr(:call, :Normal, 0, 1), 0.0, Inf)))
-        if K > 1
-            cell = Expr(:call, :~, Expr(:ref, L, :k),
-                Expr(:call, :LKJCholesky, K, bucket.lkj_eta))
-            push!(stmts, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
-                Expr(:for, Expr(:(=), :k, Expr(:call, :levels, stratum)),
-                    Expr(:block, cell))))
-        end
-        push!(stmts, Expr(:call, :.~, Expr(:ref, z,
-            Expr(:call, :levels, group), index), _rk_ast_dotted(:Normal, 0, 1)))
-        scale = Expr(:ref, tau, Expr(:ref, stratum, :i), :(:))
-        raw = Expr(:ref, z, Expr(:ref, group, :i), :(:))
-        value = K == 1 ? Expr(:call, :.*, scale, raw) :
-            Expr(:call, :*, Expr(:call, :.*, scale,
-                Expr(:ref, L, Expr(:ref, stratum, :i))), raw)
-        cell = Expr(:(=), Expr(:ref, draws, :i, index), value)
-        push!(stmts, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
-            Expr(:for, Expr(:(=), :i, Expr(:call, :eachindex, group)), Expr(:block, cell))))
+        _rk_ast_stratified_group_component!(definitions, stmts, taken, draws,
+            group, grouping.by, K, bucket.lkj_eta)
+    elseif bucket.decomposition !== nothing
+        # Shared R2D2M2 budgets derive the scales in the main block; the
+        # component still owns its correlation factor and draws.
+        tau = _rk_ast_fresh_name(string(draws, "_tau"), taken)
+        _rk_ast_ranef_r2d2!(definitions, stmts, bucket, tau, bindings, taken,
+            predictors, population_priors; stem_base=draws)
+        _rk_ast_group_component!(definitions, stmts, taken, draws, group, K,
+            bucket.lkj_eta, (); scale_value=tau)
     else
         # Stan's ordinary unnamed intercept and multi-membership intercept
         # families sample log_scale ~ Normal(0,1). Shared-ID, slope and
         # stratified families keep their half-normal scale default.
         default = bucket.kind === :intercept1 ? :LogNormal : :HalfNormal
-        if bucket.decomposition !== nothing
-            _rk_ast_ranef_r2d2!(definitions, stmts, bucket, tau, bindings, taken,
-                predictors, population_priors)
-        elseif all(isequal(first(bucket.sd_priors)), bucket.sd_priors)
-            prior = _rk_ast_positive_prior(first(bucket.sd_priors), bindings, taken; default)
-            push!(stmts, Expr(:call, :.~, Expr(:ref, tau, index),
-                _rk_ast_dotted(prior.args[1], prior.args[2:end]...)))
+        priors = if all(isequal(first(bucket.sd_priors)), bucket.sd_priors)
+            fill(_rk_ast_positive_prior(first(bucket.sd_priors), bindings, taken; default), K)
         else
-            scales = Symbol[]
-            for (j, prior) in enumerate(bucket.sd_priors)
-                scale = _rk_ast_fresh_name(string(tau, "_", j), taken)
-                push!(scales, scale)
-                push!(stmts, Expr(:call, :~, scale,
-                    _rk_ast_positive_prior(prior, bindings, taken)))
-            end
-            push!(stmts, Expr(:(=), tau, Expr(:vect, scales...)))
+            [_rk_ast_positive_prior(prior, bindings, taken) for prior in bucket.sd_priors]
         end
-        push!(stmts, Expr(:call, :.~, Expr(:ref, z,
-            Expr(:call, :levels, group), index), _rk_ast_dotted(:Normal, 0, 1)))
-        value = if K == 1
-            _rk_ast_statistical_call!(definitions, taken,
-                :brm_scaled_random_coefficients, tau, z)
-        else
-            L = _rk_ast_fresh_name(string(draws, "_L"), taken)
-            push!(stmts, Expr(:call, :~, L, Expr(:call, :LKJCholesky, K, bucket.lkj_eta)))
-            _rk_ast_statistical_call!(definitions, taken,
-                :brm_correlated_random_coefficients, tau, L, z)
-        end
-        push!(stmts, Expr(:call, :~, draws, value))
-        # Plain grouping with sampled scales: the scale vector (or its
-        # per-margin scalars), the standardized `levels(group) x K` draws and
-        # the correlation factor. Other groupings stay unrecorded.
-        grouping.form === :plain && bucket.decomposition === nothing &&
+        _rk_ast_group_component!(definitions, stmts, taken, draws, group, K,
+            bucket.lkj_eta, priors)
+        # Plain groups retain semantic transport metadata at their actual
+        # component-owned declarations; other grouping forms remain unpaired.
+        grouping.form === :plain &&
             _rk_coordinate_record!(coordinates, (; kind=:ranef,
                 group=bucket.group, id=bucket.id, bucket_kind=bucket.kind,
                 margins=Tuple((m.predictor, m.coefficient) for m in bucket.margins),
-                scale=tau, scales=(all(isequal(first(bucket.sd_priors)),
-                    bucket.sd_priors) ? nothing : Tuple(scales)),
-                z, L=(K == 1 ? nothing : L)))
+                scale=Symbol(draws, ".tau"),
+                scales=all(isequal(first(priors)), priors) ? nothing :
+                    Tuple(Symbol(draws, ".tau_", k) for k in 1:K),
+                z=Symbol(draws, ".z"), L=K == 1 ? nothing : Symbol(draws, ".L")))
     end
     indices = Dict{Symbol,Symbol}()
     if grouping.form !== :gr
@@ -267,39 +230,17 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
         append!(stmts, _rk_ast_hsgp_grouped(definitions, term, PHI, lambda, floors, taken, bindings))
         return stmts
     end
-    rho_value = if periodic || options.iso
-        rho = _rk_ast_fresh_name(string(options.id, "_rho"), taken)
-        prior = _rk_ast_positive_prior(options.rho_prior, bindings, taken)
-        options.rho_truncated && (prior = Expr(:call, :restricted, prior, floors, Inf))
-        push!(stmts, Expr(:call, :~, rho, prior))
-        rho
-    else
-        rhos = Symbol[]
-        for j in eachindex(term.columns)
-            rho = _rk_ast_fresh_name(string(options.id, "_rho", j), taken)
-            push!(rhos, rho)
-            prior = _rk_ast_positive_prior(options.rho_prior, bindings, taken)
-            options.rho_truncated && (prior = Expr(:call, :restricted, prior, Expr(:ref, floors, j), Inf))
-            push!(stmts, Expr(:call, :~, rho, prior))
-        end
-        Expr(:vect, rhos...)
-    end
-    sigma = _rk_ast_fresh_name(string(options.id, "_sigma"), taken)
-    z = _rk_ast_fresh_name(string(options.id, "_z"), taken)
-    push!(stmts, Expr(:call, :~, sigma,
-        _rk_ast_positive_prior(options.sigma_prior, bindings, taken)))
-    # A basis over a model-derived axis is a graph value, so binding cannot
-    # read its column extent; that extent is the formula's basis count.
-    extent = get(options, :latent, false) ?
-        Expr(:call, :(:), 1, prod(options.k)) : Expr(:call, :axes, PHI, 2)
-    push!(stmts, Expr(:call, :.~, Expr(:ref, z, extent),
-        _rk_ast_dotted(:Normal, 0, 1)))
-    call = periodic ? _rk_ast_statistical_call!(definitions, taken,
-        :brm_periodic_hsgp_summand, PHI, lambda, sigma, rho_value, z) :
-        _rk_ast_hsgp_value_graph!(definitions, term, taken,
-            PHI, lambda, sigma, rho_value, z)
-    push!(stmts, Expr(:call, :~, options.id,
-        call))
+    axes = periodic || options.iso ? 1 : length(term.columns)
+    rho_priors = [_rk_ast_positive_prior(options.rho_prior, bindings, taken) for _ in 1:axes]
+    sigma_prior = _rk_ast_positive_prior(options.sigma_prior, bindings, taken)
+    rho = axes == 1 ? :rho_iso : :rho
+    value = periodic ?
+        :(PHI * (brm_hsgp_periodic_sqrt_spd(omega2, sigma, $rho) .* beta_raw)) :
+        _rk_ast_hsgp_value_graph!(definitions, term, taken, :PHI, :omega2, :sigma, rho, :beta_raw)
+    _rk_ast_hsgp_component!(definitions, stmts, taken, options.id, PHI, lambda,
+        floors, rho_priors, sigma_prior, value; truncated=options.rho_truncated,
+        nbasis=get(options, :latent, false) ? prod(options.k) : nothing,
+        base=periodic ? "brm_periodic_hsgp_effect" : "brm_hsgp_effect")
     stmts
 end
 

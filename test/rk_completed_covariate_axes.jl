@@ -38,10 +38,11 @@ end
     names = coordinate_names(backend.model.layout)
     @test length(names) == 16
     index(n) = only(findall(==(Symbol(n)), names))
-    beta = index.(["a_Intercept", "a_standardize_age_yr", "b_Intercept"])
-    scales = index.(["ranef_draws_p_subject_sd.1", "ranef_draws_p_subject_sd.2"])
-    z = [index("ranef_draws_p_subject_z.$j.$k") for j in 1:3, k in 1:2]
-    correlation = index("ranef_draws_p_subject_L.1")
+    # The population component owns the intercept and completed-column slope.
+    beta = index.(["pop_log_a.beta_pop.1", "pop_log_a.beta_pop.2", "pop_log_b.beta_pop.1"])
+    scales = index.(["b_p_subject.tau.1", "b_p_subject.tau.2"])
+    z = [index("b_p_subject.z.$j.$k") for j in 1:3, k in 1:2]
+    correlation = index("b_p_subject.L.1")
     ia, im, is, ie = index.(["age_yr_y_mis.1", "mu_age", "sigma_age", "scale"])
     observed = collect(skipmissing(data.age_yr))
     anchor, spread = mean(observed), std(observed)
@@ -105,7 +106,9 @@ end
         y ~ Normal(mu,exp(brm_completed_covariate))
     end
     artifact = BRM.emit_rk_artifact(brmi; case_id="completion-name-collision")
-    definition = only(filter(d->Meta.isexpr(d,:macrocall),artifact.defs))
+    definition = only(filter(d -> Meta.isexpr(d, :macrocall) &&
+        startswith(string(BRM._rk_source_definition(d).name), "brm_completed_covariate"),
+        artifact.defs))
     name = BRM._rk_source_definition(definition).name
     @test name != :brm_completed_covariate
     mod = Module(gensym(:CompletionGraph))

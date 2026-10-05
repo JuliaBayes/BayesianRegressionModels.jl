@@ -2,7 +2,7 @@
 # callable bindings and data. No translated-plan modifications are replayed.
 import ReactiveKernelsPPL
 
-function check_rk_source_roundtrip(backend)
+function check_rk_source_roundtrip(backend; ad_backend=nothing)
     brm = BayesianRegressionModels
     ext = Base.get_extension(brm, :BayesianRegressionModelsReactiveKernelsExt)
     emitted = brm._rk_emit_ast(backend.plan)
@@ -25,6 +25,20 @@ function check_rk_source_roundtrip(backend)
             ReactiveKernelsPPL.prepare_query(rebuilt, translated, preset), u)
         @test isequal(a, b)
         @test isequal(u, before)
+    end
+    if ad_backend !== nothing
+        qa = ReactiveKernelsPPL.prepare_sampler(backend.model, original, first(probes);
+            backend=ad_backend)
+        qb = ReactiveKernelsPPL.prepare_sampler(rebuilt, translated, first(probes);
+            backend=ad_backend)
+        for u in probes
+            ga, gb = similar(u), similar(u)
+            va, _ = ReactiveKernelsPPL.sampler_value_and_gradient!(qa, ga, u)
+            vb, _ = ReactiveKernelsPPL.sampler_value_and_gradient!(qb, gb, u)
+            @test isequal(va, vb)
+            @test ga ≈ gb atol=2e-13 rtol=2e-13
+            @test all(isfinite, ga)
+        end
     end
     return backend
 end

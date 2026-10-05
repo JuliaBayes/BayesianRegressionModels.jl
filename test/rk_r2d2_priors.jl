@@ -32,12 +32,13 @@ end
 
 function r2d2_components(u, names; nphi, latent=false, partial=false)
     index(name) = only(findall(==(Symbol(name)), names))
-    beta = index.(["mu_a_Intercept", "mu_a_x", "mu_b_Intercept", "mu_b_x"])
-    z = [index("ranef_draws_shared_subject_z.$j.$k") for j in 1:3, k in 1:2]
-    ir2 = index("ranef_draws_shared_subject_sd_r2d2_1_R2")
-    iphi = index.(["ranef_draws_shared_subject_sd_r2d2_1_phi.$j" for j in 1:nphi-1])
+    beta = index.(["pop_mu_a.beta_pop.1", "pop_mu_a.beta_pop.2",
+        "pop_mu_b.beta_pop.1", "pop_mu_b.beta_pop.2"])
+    z = [index("b_shared_subject.z.$j.$k") for j in 1:3, k in 1:2]
+    ir2 = index("b_shared_subject_r2d2_1_R2")
+    iphi = index.(["b_shared_subject_r2d2_1_phi.$j" for j in 1:nphi-1])
     iscales = index.(["scale_a", "scale_b"])
-    rho = tanh(u[index("ranef_draws_shared_subject_L.1")])
+    rho = tanh(u[index("b_shared_subject.L.1")])
     r2 = 1 / (1 + exp(-u[ir2]))
     phi, remaining, jac = Float64[], 1.0, 0.0
     for j in 1:nphi-1
@@ -49,8 +50,8 @@ function r2d2_components(u, names; nphi, latent=false, partial=false)
     push!(phi, remaining)
     scales = exp.(u[iscales])
     reference = latent ? exp.(u[index.([
-        "ranef_draws_shared_subject_sd_r2d2_1_ref_$j" for j in 1:2])]) : scales
-    free = partial ? exp(u[index("ranef_draws_shared_subject_sd_r2d2_free_2")]) : 0.
+        "b_shared_subject_r2d2_1_ref_$j" for j in 1:2])]) : scales
+    free = partial ? exp(u[index("b_shared_subject_r2d2_free_tau_2")]) : 0.
     tau = partial ? [reference[1]*sqrt(r2/(1-r2)),free] :
         reference .* sqrt.(phi[1:2] .* r2 ./ (1-r2))
     L = [1.0 0.0; rho sqrt(1-rho^2)]
@@ -81,14 +82,15 @@ end
         @test length(names) == 13+nphi+4categorical+2latent+partial
         @test count(n -> occursin("_R2",string(n)), names) == 1
         @test count(n -> occursin("_phi",string(n)), names) == nphi-1
-        @test !any(n -> occursin(r"_sd\.[12]$",string(n)), names)
+        # The budget derives the scales; the group component samples none.
+        @test !any(n -> occursin(r"\.tau\.[12]$",string(n)), names)
         emitted = BRM._rk_emit_ast(backend.plan)
         source = sprint(Base.show_unquoted, emitted.main)
         @test !occursin("brm_value_function", source)
         @test occursin("Dirichlet", source)
         graph = ReactiveKernels.kernel_graph(backend.model.spec)
         ports = Set(string(p.name) for recipe in graph.recipes for p in recipe.outputs)
-        @test "ranef_draws_shared_subject_sd" in ports
+        @test "b_shared_subject_tau" in ports
         @test !joint || "mu_a_x_r2d2_variance" in ports
         function components(u)
             c = r2d2_components(u, names; nphi, latent, partial)

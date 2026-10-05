@@ -28,12 +28,12 @@ rk_construction_result(index) = rk_construction_result_for(
     layout = backend.model.layout
     position = collect(range(-0.3, 0.2; length=layout.total))
     parameters = ReactiveKernelsPPL.constrain(layout, position)
-    mu = parameters.mu_Intercept .+ parameters.mu_x .* data.x
-    iseven(index) && (mu .+= parameters.mu_z .* data.z)
+    # The population component owns the coefficient vector (Intercept, x[, z]).
+    beta = parameters.pop_mu.beta_pop
+    mu = beta[1] .+ beta[2] .* data.x
+    iseven(index) && (mu .+= beta[3] .* data.z)
     expected = sum(logpdf.(Normal.(mu, parameters.s), data.y)) +
-        logpdf(Normal(), parameters.mu_Intercept) +
-        logpdf(Normal(), parameters.mu_x) +
-        (iseven(index) ? logpdf(Normal(), parameters.mu_z) : 0.0) +
+        sum(logpdf.(Normal(), beta)) +
         logpdf(Exponential(1), parameters.s) + log(parameters.s)
 
     # Construction and first execution share a compiled frame. Each task owns

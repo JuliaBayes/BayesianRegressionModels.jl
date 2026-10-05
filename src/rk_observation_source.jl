@@ -13,9 +13,9 @@ follow an explicit ragged response join. Original data ports remain available
 to other consumers. Prepare history-dependent row values
 before invoking this entry. The provider receives no model values or AD state.
 
-The emitted observation plate composes this graph before scoring its returned
-log density. It adds no sampled coordinates and keeps the original observed
-response. Ordinary constructors and deterministic callable-source providers
+The emitted observation `y .~ LogDensity.(entry, args...)` composes this graph
+inside RKPPL's observation plate. It adds no sampled coordinates and keeps the
+original observed response. Ordinary constructors and deterministic callable-source providers
 remain available; neither certifies expansion of a density callback's body.
 Extend with `import BayesianRegressionModels: _rk_observation_source!`.
 """
@@ -45,44 +45,12 @@ function _rk_emit_observation_source!(defs, statements, bindings, taken,
     append!(bindings, supplied_bindings)
     union!(taken, (source.name for source in sources), first.(supplied_bindings))
 
-    values = _rk_ast_fresh_name(string(observation.name, "_law_values"), taken)
-    row_values = response isa AbstractVector ? observation.name :
-        Expr(:vect, observation.name)
-    push!(statements, Expr(:(=), values, row_values))
-    arguments = Symbol[]
-    for (i, argument) in enumerate(distribution.args)
-        name = _rk_ast_fresh_name(string(observation.name, "_law_argument_", i), taken)
-        # This is ordinary broadcast alignment, not a new packed model axis.
-        expression = _rk_value_expr!(bindings, argument, taken)
-        push!(statements, Expr(:(=), name, Expr(:call, :.*,
-            Expr(:call, :ones, Expr(:call, :length, values)), expression)))
-        push!(arguments, name)
-    end
-    ports = [values; arguments]
-    index = _rk_ast_fresh_name("observation", Set(ports))
-    cell_call = Expr(:call, entry, (Expr(:ref, port, index) for port in ports)...)
-    plate = Expr(:do, Expr(:call,
-        Expr(:., :ReactiveKernels, QuoteNode(:plate)),
-        Expr(:call, :eachindex, values),
-        (Expr(:call, :Ref, port) for port in ports)...),
-        Expr(:->, Expr(:tuple, index, ports...), Expr(:block, cell_call)))
-    reader = _rk_ast_fresh_name(string(observation.name, "_logdensity_reader"), taken)
-    pointwise = _rk_ast_fresh_name("pointwise", Set(ports))
-    definition = Expr(:(=), Expr(:call, reader, ports...),
-        Expr(:block, Expr(:(=), pointwise, plate), Expr(:return, pointwise)))
-    push!(defs, Expr(:macrocall,
-        Expr(:., :ReactiveKernels, QuoteNode(Symbol("@kernel"))),
-        LineNumberNode(0), definition))
-    scores = _rk_ast_fresh_name(string(observation.name, "_logdensity"), taken)
-    push!(statements, Expr(:(=), scores, Expr(:call, reader, ports...)))
-
-    # All scientific algebra has already been composed into the numerical
-    # graph. This explicit scalar scoring adapter only returns that value.
-    score = _rk_ast_fresh_name("brm_logdensity_value", taken)
-    push!(defs, :(function $score(observed, logdensity)
-        return logdensity
-    end))
-    push!(statements, Expr(:call, :.~, observation.name,
-        _rk_ast_dotted(:LogDensity, score, scores)))
+    # The scalar law is observed directly: RKPPL composes the explicit graph
+    # inside the observation plate, one cell per observed value, with the
+    # constructor's arguments broadcast on the response's axis.
+    arguments = [_rk_value_expr!(bindings, argument, taken) for argument in distribution.args]
+    push!(statements, response isa AbstractVector ?
+        Expr(:call, :.~, observation.name, _rk_ast_dotted(:LogDensity, entry, arguments...)) :
+        Expr(:call, :~, observation.name, Expr(:call, :LogDensity, entry, arguments...)))
     true
 end

@@ -1,5 +1,5 @@
-# Exercise both source passes together. The ordinary reference keeps the exact
-# native entry definitions while expanding only statistical value algebra.
+# Exercise callable and statistical source together, including complete
+# printed-source replay of the native density and every Reverse coordinate.
 include(joinpath(@__DIR__, "rk_statistical_source.jl"))
 using Distributions
 
@@ -49,8 +49,14 @@ end
         end))
     for (label, brmi) in cases
         @testset "$label" begin
-            backend = check_statistical_source(brmi, data)
+            saved = deepcopy(data)
+            backend = check_rk_source_roundtrip(RKBRMI(brmi);
+                ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+            @test isequal(data, saved)
             emitted = BRM._rk_emit_ast(backend.plan)
+            @test !any(d -> occursin("brm_design_product", sprint(show, d)), emitted.defs)
+            @test any(d -> occursin("return X * beta_pop", sprint(Base.show_unquoted, d)),
+                emitted.defs)
             @test any(d -> d.head === :function, emitted.defs)
             @test any(d -> d.head === :(=), emitted.defs)
             @test !any(p -> last(p) === PublicComposedSource.original_affine,
