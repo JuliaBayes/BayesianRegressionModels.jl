@@ -172,6 +172,120 @@ function rk_model end
 # Shared numerical graphs over statistical values. Statistical components
 # that allocate parameters are emitted as submodels (`rk_components.jl`).
 const _BRM_STATISTICAL_VALUES = (
+    brm_multinomial_cell = :(
+function brm_multinomial_cell(row, columns, totals, probs)
+    total = totals isa Integer ? totals : totals[row]
+    score = BayesianRegressionModels.loggamma(total + 1)
+    for category in eachindex(columns)
+        count = columns[category][row]
+        mass = count == 0 ? zero(probs[category]) : count * log(probs[category])
+        score += mass - BayesianRegressionModels.loggamma(count + 1)
+    end
+    return score
+end),
+
+    brm_multinomial_scores = :(
+brm_multinomial_scores(cell, count_columns, trials, probabilities) = begin
+    pointwise = ReactiveKernels.plate(eachindex(first(count_columns)), Ref(cell),
+            Ref(count_columns), Ref(trials), Ref(probabilities)) do row, density, columns, totals, probs
+        density(row, columns, totals, probs)
+    end
+    return pointwise
+end),
+
+    brm_covariate_mean = :(
+brm_covariate_mean(values) = begin
+    mean = BayesianRegressionModels._brm_fit_mean_numeric(
+        values, :predictor, :center, ArgumentError)
+    return mean
+end),
+
+    brm_covariate_sd = :(
+brm_covariate_sd(values) = begin
+    fit = BayesianRegressionModels._brm_fit_zscale_numeric(
+        values, :predictor, ArgumentError)
+    return fit.scale
+end),
+
+    brm_flatten_response = :(
+brm_flatten_response(cells) = begin
+    values = reduce(vcat, cells; init=eltype(eltype(cells))[])
+    return values
+end),
+
+    brm_gather_response = :(
+brm_gather_response(raw, rows) = begin
+    values = raw[rows]
+    return values
+end),
+
+    brm_matrix_column = :(
+brm_matrix_column(inputs, column) = begin
+    matrix = only(inputs)
+    values = Int.(matrix[:, column])
+    return values
+end
+    ),
+    brm_covariate_observed = :(
+brm_covariate_observed(values) = begin
+    observed = Float64.(collect(skipmissing(values)))
+    return observed
+end
+    ),
+    brm_covariate_observed_rows = :(
+brm_covariate_observed_rows(values) = begin
+    rows = findall(!ismissing, values)
+    return rows
+end
+    ),
+    brm_covariate_missing_rows = :(
+brm_covariate_missing_rows(values) = begin
+    rows = findall(ismissing, values)
+    return rows
+end
+    ),
+    brm_structured_inputs = :(
+function brm_structured_inputs(prepared_inputs, indices)
+    prepared = only(prepared_inputs)
+    fields = map((field, index) -> merge(field, (; idx=index)), prepared.state.fields, indices)
+    state = merge(prepared.state, (; fields))
+    return [BayesianRegressionModels._BRMPreparedTerm(prepared.callable,
+        prepared.source, state, prepared.dependencies)]
+end
+    ),
+    brm_factor_dummy = :(
+brm_factor_dummy(values, level) = begin
+    dummy = ReactiveKernels.plate(values, Ref(level)) do value, selected
+        1.0 * isequal(value, selected)
+    end
+    return dummy
+end
+    ),
+    brm_prepared_indices = :(
+brm_prepared_indices(values, level_values) = begin
+    indices = ReactiveKernels.plate(values, Ref(level_values)) do value, declared
+        Int(findfirst(isequal(value), declared))
+    end
+    return indices
+end
+    ),
+    brm_covariate_geometry = :(
+brm_covariate_geometry(observed, observed_rows, missing_rows) = begin
+    rows = 1:(length(observed_rows) + length(missing_rows))
+    observed_by_row = Dict(zip(observed_rows, observed))
+    missing_by_row = Dict(zip(missing_rows, eachindex(missing_rows)))
+    observed_component = ReactiveKernels.plate(rows, Ref(observed_by_row)) do row, values
+        get(values, row, 0.0)
+    end
+    missing_lookup = ReactiveKernels.plate(rows, Ref(missing_by_row)) do row, indices
+        get(indices, row, 1)
+    end
+    missing_mask = ReactiveKernels.plate(rows, Ref(missing_by_row)) do row, indices
+        1.0 * haskey(indices, row)
+    end
+    return (observed_component, missing_lookup, missing_mask)
+end
+    ),
     brm_r2d2m2_scale = :(
 brm_r2d2m2_scale(reference, phi, r2, share, variance) = begin
     allocated = phi[share] * r2
@@ -187,4 +301,10 @@ brm_completed_covariate(observed, missing, lookup, mask) = begin
     return completed
 end
     ),
+    # An ordinary whole-value contrast composes with whole-value smooths.
+    # Reuse the statistical model's law rather than maintaining a second one.
+    brm_monotonic_contrast = let definition = deepcopy(_BRM_STATISTICAL_MODELS.monotonic)
+        first(definition.args).args[1] = :brm_monotonic_contrast
+        Expr(:function, definition.args...)
+    end,
 )

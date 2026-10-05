@@ -22,6 +22,7 @@ function bounded_public_replay(backend)
     emitted = BRM._rk_emit_ast(backend.plan)
     mod = Module(gensym(:BoundedKernelReplay))
     Core.eval(mod, :(using ReactiveKernelsPPL))
+    Core.eval(mod, :(import BayesianRegressionModels, ReactiveKernels))
     for (name, callable) in emitted.bindings
         Core.eval(mod, Expr(:const, Expr(:(=), name, QuoteNode(callable))))
     end
@@ -34,7 +35,7 @@ function bounded_public_replay(backend)
             Expr(:macrocall, Symbol("@rkppl"), LineNumberNode(0), parsed) : parsed)
     end
     source = Meta.parse(sprint(Base.show_unquoted, emitted.main))
-    data = backend.plan.columns
+    data = BRM._rk_source_data_columns(backend.plan, emitted)
     plan = bind_data(lower_rkppl(source, data; mod, conditioned=(:y,)), data)
     built = build_kernel(plan)
     @test coordinate_names(built.layout) == coordinate_names(backend.model.layout)

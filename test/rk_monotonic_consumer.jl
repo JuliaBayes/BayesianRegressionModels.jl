@@ -128,9 +128,9 @@ end
 @stestset "monotonic components own their simplex without name collisions" begin
     data = (; rank=[1,3,2,1,3], x=[-0.8,-0.3,0.1,0.4,0.9], y=zeros(5))
     brmi = @brm data begin
-        brm_monotonic_effect ~ Normal(0,1)
+        brm_monotonic_effect ~ Exponential(1)
         mu ~ 1 + mo(rank) + mo1(rank) + hsgp(x; k=3)
-        y ~ Normal(mu,1)
+        y ~ Normal(mu,brm_monotonic_effect)
     end
     artifact = BRM.emit_rk_artifact(brmi; case_id="monotonic-name-collision")
     names = [first(first(d.args).args) for d in artifact.defs if Meta.isexpr(d, :(=))]
@@ -140,7 +140,7 @@ end
     @test :brm_monotonic_value in names
     @test !occursin("Dirichlet", sprint(Base.show_unquoted, artifact.ast))
     backend = check_rk_source_roundtrip(RKBRMI(brmi))
+    # The authored name must be a fitted draw to reserve it for the collision.
     @test :brm_monotonic_effect in coordinate_names(backend.model.layout)
-    # Retain the fixture's nine sampled coordinates through source replay.
-    @test backend.model.layout.total == 9
+    @test backend.model.layout.total == 10
 end

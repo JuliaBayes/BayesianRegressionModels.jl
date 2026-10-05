@@ -45,6 +45,7 @@ function wildcard_public_replay(backend)
     emitted = BRM._rk_emit_ast(backend.plan)
     mod = Module(gensym(:WildcardReplay))
     Core.eval(mod, :(using ReactiveKernelsPPL))
+    Core.eval(mod, :(import BayesianRegressionModels, ReactiveKernels))
     for (name, callable) in emitted.bindings
         Core.eval(mod, Expr(:const, Expr(:(=), name, QuoteNode(callable))))
     end
@@ -57,7 +58,7 @@ function wildcard_public_replay(backend)
             Expr(:macrocall, Symbol("@rkppl"), LineNumberNode(0), parsed) : parsed)
     end
     parsed = Meta.parse(sprint(Base.show_unquoted, emitted.main))
-    data = backend.plan.columns
+    data = BRM._rk_source_data_columns(backend.plan, emitted)
     plan = bind_data(lower_rkppl(parsed, data; mod, conditioned=(:y,)), data)
     build_kernel(plan), plan
 end

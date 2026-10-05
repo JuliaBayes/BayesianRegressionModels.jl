@@ -14,32 +14,13 @@ function fixed_hsgp_oracle(axes, K, domains)
     PHI, omega2, floors
 end
 
-# Public graph/body accessors, with recipe classification explicitly frozen
-# to the tested RK revision (a stable public classifier remains separate).
+# Inspect retained structure and outputs through RK's public inventory.
 function hsgp_plate_depths(graph; depth=0)
-    result = Int[]
-    for recipe in graph.recipes
-        if recipe.op isa ReactiveKernels._AuthoredPlateOp
-            push!(result, depth)
-            append!(result, hsgp_plate_depths(plate_body(recipe); depth=depth+1))
-        elseif recipe.op isa ReactiveKernels._AuthoredScanOp
-            append!(result, hsgp_plate_depths(scan_body(recipe); depth=depth+1))
-        end
-    end
-    result
+    [depth + entry.depth for entry in recipe_inventory(graph) if entry.kind === :plate]
 end
 
 function hsgp_graph_outputs(graph)
-    outputs=String[]
-    for recipe in graph.recipes
-        push!(outputs,repr(recipe.outputs))
-        if recipe.op isa ReactiveKernels._AuthoredPlateOp
-            append!(outputs,hsgp_graph_outputs(plate_body(recipe)))
-        elseif recipe.op isa ReactiveKernels._AuthoredScanOp
-            append!(outputs,hsgp_graph_outputs(scan_body(recipe)))
-        end
-    end
-    outputs
+    [repr(entry.recipe.outputs) for entry in recipe_inventory(graph)]
 end
 
 # Replay the complete printed definitions and body, preserving explicit
@@ -58,8 +39,9 @@ function printed_hsgp_replay(backend)
     end,"\n")
     Core.eval(namespace,Meta.parseall(definitions))
     body=Meta.parse(sprint(Base.show_unquoted,emitted.main))
-    bound=bind_data(lower_rkppl(body,backend.plan.columns;mod=namespace,
-        conditioned=BRM._rk_observed_names(backend.plan)),backend.plan.columns)
+    inputs=BRM._rk_source_data_columns(backend.plan,emitted)
+    bound=bind_data(lower_rkppl(body,inputs;mod=namespace,
+        conditioned=BRM._rk_observed_names(backend.plan)),inputs)
     built=build_kernel(bound)
     sampler=prepare_sampler(built,bound,zeros(built.layout.total);
         backend=AutoEnzyme(;mode=Enzyme.Reverse))
@@ -251,22 +233,22 @@ end
         for intermediate in ("basis_rows","omega2",authored ? "spectra" : "weights")
             @test occursin(intermediate,actual_outputs)
         end
-        weights=[index("$(id)_z.$g.$b") for g in 1:G,b in 1:B]
+        weights=[index("$(id).z.$g.$b") for g in 1:G,b in 1:B]
         PHI,omega2,floors=fixed_hsgp_oracle((data.x,data.w)[1:length(K)],K,domains)
         floor=maximum(floors)
         function oracle(u)
             prior=sum(logpdf.(Normal(),u[weights]))
             hypers=map(("rho","sigma")) do stem
                 if authored
-                    beta=index("$(id)_$(stem)_Intercept")
-                    sd=index("$(id)_$(stem)_sd")
-                    zs=[index("$(id)_$(stem)_z.$g") for g in 1:G]
+                    beta=index("$(id).$(stem)_Intercept")
+                    sd=index("$(id).$(stem)_sd")
+                    zs=[index("$(id).$(stem)_z.$g") for g in 1:G]
                     prior+=logpdf(Normal(),u[beta])+sum(logpdf.(Normal(),u[zs]))+
                         logpdf(Normal(),exp(u[sd]))+u[sd]
                     value=exp.(u[beta].+exp(u[sd]).*u[zs])
                     stem=="rho" ? max.(value,floor) : value
                 else
-                    q=index("$(id)_$stem")
+                    q=index("$(id).$stem")
                     value=(stem=="rho" ? floor : 0.)+exp(u[q])
                     prior+=logpdf(LogNormal(),value)+u[q]
                     fill(value,G)
@@ -287,13 +269,13 @@ end
         end
         for (hyper,shared_name) in (("rho","rho_iso"),("sigma","sigma"))
             if authored
-                push!(mapping,Symbol("$(id)_$(hyper)_Intercept")=>"$(id)_by_g_beta0_$hyper")
-                push!(mapping,Symbol("$(id)_$(hyper)_sd")=>"$(id)_by_g_sd_$hyper")
+                push!(mapping,Symbol("$(id).$(hyper)_Intercept")=>"$(id)_by_g_beta0_$hyper")
+                push!(mapping,Symbol("$(id).$(hyper)_sd")=>"$(id)_by_g_sd_$hyper")
                 for g in 1:G
-                    push!(mapping,Symbol("$(id)_$(hyper)_z.$g")=>"$(id)_by_g_z_$hyper.$g")
+                    push!(mapping,Symbol("$(id).$(hyper)_z.$g")=>"$(id)_by_g_z_$hyper.$g")
                 end
             else
-                push!(mapping,Symbol("$(id)_$hyper")=>"$(id)_by_g_$shared_name")
+                push!(mapping,Symbol("$(id).$hyper")=>"$(id)_by_g_$shared_name")
             end
         end
         replayed,sampler=printed_hsgp_replay(backend)

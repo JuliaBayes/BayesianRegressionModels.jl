@@ -106,8 +106,13 @@ function _rk_held_out_selection(brmi, held_out)
 end
 
 _rk_emitted_observation_name(lhs::Symbol) = lhs
-_rk_emitted_observation_name(lhs::Expr) =
-    lhs.head === :ref ? _rk_emitted_observation_name(first(lhs.args)) : nothing
+function _rk_emitted_observation_name(lhs::Expr)
+    # A joint `[y1, y2]` target retains the identity of its lead original
+    # response column; it must root the complete fitted joint likelihood.
+    lhs.head in (:ref, :vect) && !isempty(lhs.args) &&
+        return _rk_emitted_observation_name(first(lhs.args))
+    nothing
+end
 _rk_emitted_observation_name(_) = nothing
 
 function _rk_source_symbols!(names, value)
@@ -115,6 +120,8 @@ function _rk_source_symbols!(names, value)
     value isa Expr && foreach(arg -> _rk_source_symbols!(names, arg), value.args)
     names
 end
+_rk_source_symbols!(names, values::AbstractVector) =
+    (foreach(value -> _rk_source_symbols!(names, value), values); names)
 function _rk_source_lhs!(names, lhs)
     name = _rk_emitted_observation_name(lhs)
     name === nothing || push!(names, name)
@@ -152,6 +159,17 @@ function _rk_fitted_source(emitted, conditioned)
     statements = emitted.main.args
     outputs = [_rk_source_outputs!(Set{Symbol}(), statement) for statement in statements]
     references = [_rk_source_symbols!(Set{Symbol}(), statement) for statement in statements]
+    block_reads = _rk_block_free_reads(emitted.defs)
+    for names in references
+        pending = collect(names)
+        for name in pending
+            for dependency in get(block_reads, name, ())
+                dependency in names && continue
+                push!(names, dependency)
+                push!(pending, dependency)
+            end
+        end
+    end
     kept = [_rk_source_observes(statement, conditioned) for statement in statements]
     needed = Set{Symbol}()
     for i in eachindex(statements)

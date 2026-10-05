@@ -71,7 +71,7 @@ end
     innovations = [index("b_p_subject.z.$row.$margin")
         for row in 1:3, margin in 1:2]
     correlation = index("b_p_subject.L.1")
-    ia, iw = index("age_y_mis.1"), index("weight_y_mis.1")
+    ia, iw = index("age.y_mis.1"), index("weight.y_mis.1")
     observed_age = collect(skipmissing(data.age))
     observed_weight = collect(skipmissing(data.weight))
     am, as = mean(observed_age), std(observed_age)
@@ -102,7 +102,7 @@ end
             sum(logpdf.(Normal.(v.k10,0.7), data.z))
     end
     mapping = [names[correlation] => "b_p_subject_L.1",
-        names[ia] => "age_y_mis.1", names[iw] => "weight_y_mis.1"]
+        names[ia] => "age.y_mis.1", names[iw] => "weight.y_mis.1"]
     append!(mapping, [names[scales[j]] => "b_p_subject_tau.$j" for j in 1:2])
     append!(mapping, [names[innovations[row,margin]] =>
         "b_p_subject_z_flat.$(margin+2*(row-1))" for row in 1:3 for margin in 1:2])
@@ -175,7 +175,7 @@ end
     composed,composed_problem = consumer_problem(PublicMissingValuePredictors.build_kernel(data))
     @test length(direct.plan.completions) == 2
     @test all(completion->completion.nmissing==0,direct.plan.completions)
-    @test all(completion->!haskey(direct.plan.columns,completion.missing_rows),direct.plan.completions)
+    @test all(completion->isempty(direct.plan.columns[completion.missing_rows]),direct.plan.completions)
     names = coordinate_names(direct.model.layout)
     @test length(names) == 14
     @test !any(name->occursin("y_mis",string(name)),names)

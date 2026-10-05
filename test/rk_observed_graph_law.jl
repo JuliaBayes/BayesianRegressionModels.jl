@@ -25,16 +25,8 @@ function _rk_observation_source!(definitions, bindings, entry,
 end
 
 function graph_law_recipes(graph; depth=0)
-    records = NamedTuple[]
-    for recipe in graph.recipes
-        push!(records, (;depth, source=recipe.source, outputs=recipe.outputs))
-        if recipe.op isa ReactiveKernels._AuthoredPlateOp
-            append!(records, graph_law_recipes(plate_body(recipe); depth=depth+1))
-        elseif recipe.op isa ReactiveKernels._AuthoredScanOp
-            append!(records, graph_law_recipes(scan_body(recipe); depth=depth+1))
-        end
-    end
-    records
+    [(; depth=depth + entry.depth, source=entry.recipe.source,
+        outputs=entry.recipe.outputs) for entry in recipe_inventory(graph)]
 end
 
 @stestset "inclusive observed law composes normalized threshold branches inside the plate" begin

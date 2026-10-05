@@ -3267,9 +3267,9 @@ function _rk_population_priors(brmi::BRMI, design, target::Symbol,
     priors
 end
 
-# Categorical preparation is shared with the other BRM backends. Each fitted
-# dummy is ordinary bound data; the emitted vector prior and matrix product
-# preserve declared levels, reference swaps, and the first cell-mean block.
+# Categorical preparation shares fitted level metadata with the other
+# backends. Each dummy is computed from the raw column in emitted source.
+
 function _rk_shared_factor_spec(term, target, columns, taken; cellmeans)
     shared = _brm_population_columns(term; cellmeans)
     shared === nothing && error(
@@ -3576,14 +3576,13 @@ function _rk_ranef_dummies!(margins::Vector{_RKRanefMargin}, target::Symbol,
         collect(first_level:length(fitted))
     end
     isempty(keep) && return 0
-    kept_values = raw isa CA.CategoricalVector ?
-        string.(fitted[keep]) : fitted[keep]
+    kept_values = fitted[keep]
     if raw isa CA.CategoricalVector
-        length(unique(kept_values)) == length(kept_values) || error(
+        length(unique(string.(kept_values))) == length(kept_values) || error(
             "$prefix: $what slope `$source` has distinct levels with the " *
             "same string form; the draws regime needs unambiguous levels")
     end
-    columns[source] = _rk_factor_crossed(raw)
+    columns[source] = raw
     for k in kept_values
         push!(margins, _RKRanefMargin(target,
             Symbol(string(source) * "_dummy_" * string(k)),
@@ -4429,7 +4428,14 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
     else
         idx = _rk_mint_generated!(taken, columns, string(id, "_group_index"))
         columns[idx] = state.by.idx
-        (; group_index=idx, n_groups=length(state.by.levels))
+        source = state.by.source
+        raw = data[source]
+        if haskey(columns, source) && columns[source] !== raw
+            source = _rk_mint_generated!(taken, columns, string(id, "_group_source"))
+        end
+        columns[source] = raw
+        (; group_index=idx, group_source=source,
+            group_levels=collect(state.by.levels), n_groups=length(state.by.levels))
     end
     _RKTermSpec(:hsgp, collect(axes),
         (; id, k, c, iso=state.iso,
@@ -4624,7 +4630,7 @@ function _rk_plan_monotonic_core!(head::Symbol,
         "$(length(alpha_vec)) entries for $K levels")
     increments = _rk_mint_generated!(
         taken, columns, string(head, "_", source, "_simplex_incr"))
-    (; source, idx_name, increments, alpha=alpha_vec)
+    (; source, idx_name, increments, alpha=alpha_vec, levels=collect(prepared.state.levels))
 end
 
 function _rk_plan_mo_term!(prepared::_BRMPreparedTerm{typeof(mo)},
@@ -4638,7 +4644,7 @@ function _rk_plan_mo_term!(prepared::_BRMPreparedTerm{typeof(mo)},
     # after the geometry loop (SB's scalar `0.0`, vector-shaped).
     isnothing(core) && return nothing
     _RKTermSpec(:monotonic, [core.idx_name],
-        (; increments=core.increments, alpha=core.alpha, source=core.source),
+        (; increments=core.increments, alpha=core.alpha, source=core.source, levels=core.levels),
         core.idx_name, Symbol(:mo_, target, :_, core.source))
 end
 
@@ -4655,10 +4661,10 @@ function _rk_plan_mo1_term!(prepared::_BRMPreparedTerm{typeof(mo1)},
         zero = _rk_mint_generated!(
             taken, columns, "mo1_$(prepared.source)_zero")
         columns[zero] = zeros(length(prepared.state.idx))
-        return _RKTermSpec(:offset, [zero], (;), zero, Symbol(:offset_, zero))
+        return _RKTermSpec(:offset, [zero], (; zero_source=prepared.source), zero, Symbol(:offset_, zero))
     end
     _RKTermSpec(:monotonic_summand, [core.idx_name],
-        (; increments=core.increments, alpha=core.alpha, source=core.source),
+        (; increments=core.increments, alpha=core.alpha, source=core.source, levels=core.levels),
         label, label)
 end
 
@@ -5018,7 +5024,7 @@ function _rk_plan_dar_term!(prepared::_BRMPreparedTerm{typeof(dar)},
         # offset twin (mo1-K=1 shape) and never touch the surface.
         zero = _rk_mint_generated!(taken, columns, "dar_$(source)_zero")
         columns[zero] = zeros(length(prepared.state.time))
-        return _RKTermSpec(:offset, [zero], (;), zero, Symbol(:offset_, zero))
+        return _RKTermSpec(:offset, [zero], (; zero_source=source), zero, Symbol(:offset_, zero))
     end
     beta_family, beta_args, beta_support = _rk_dar_beta_prior(
         prepared.state.ar_prior, target, source)
@@ -5339,9 +5345,17 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
             id = _rk_mint_smooth_id!(taken, columns,
                 string("structured_", target, "_", nameof(prepared.callable)))
             prepared_data = _rk_mint_generated!(taken, columns, string(id, "_inputs"))
-            columns[prepared_data] = [prepared]
+            metadata = _rk_mint_generated!(taken, columns, string(id, "_metadata"))
+            fields = map(field -> merge(field, (; idx=nothing)), prepared.state.fields)
+            columns[metadata] = [_BRMPreparedTerm(prepared.callable, prepared.source,
+                merge(prepared.state, (; fields)), prepared.dependencies)]
+            field_sources = map(prepared.state.fields) do field
+                source = _rk_mint_generated!(taken, columns, string(id, "_", field.name, "_groups"))
+                columns[source] = context.data[field.source]
+                source
+            end
             push!(terms, _RKTermSpec(:structured, Symbol[],
-                (; id, prepared, prepared_data), id, id))
+                (; id, prepared, prepared_data, metadata, field_sources), id, id))
         end
     end
     if isempty(terms)
@@ -5360,7 +5374,7 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         zero = _rk_mint_generated!(
             taken, columns, "mo_$(first_mo.source)_zero")
         columns[zero] = zeros(length(first_mo.state.idx))
-        push!(terms, _RKTermSpec(:offset, [zero], (;), zero,
+        push!(terms, _RKTermSpec(:offset, [zero], (; zero_source=first_mo.source), zero,
             Symbol(:offset_, zero)))
     end
     _rk_gate_monotonic_unique!(prefix, "predictor `$target` carries", terms)
@@ -5386,7 +5400,7 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
             columns[row_source] = raw
         else
             row_source = _rk_mint_generated!(taken, columns, string(target, "_rows"))
-            columns[row_source] = ones(size(design.matrix, 1))
+            columns[row_source] = Base.OneTo(size(design.matrix, 1))
         end
     end
     _RKPredictorSpec(target, link, terms, target, row_source), priors, r2d2, hs_priors
@@ -6267,7 +6281,9 @@ function _rk_peel_joint_observation(observation)
                 head === interval_censored ?
             " (bounded joint responses are out of slice)" : ""))
     rows = _brm_joint_response_values(observation.lhs; prefix)
-    (; key=observation.key, rhs, raw_response=rows, weight_plan=nothing,
+    raw_outcomes = Tuple(parent(parent(column)) for column in
+        joint_response_columns(observation.lhs))
+    (; key=observation.key, rhs, raw_response=rows, raw_outcomes, weight_plan=nothing,
         modifier=nothing, joint_outcomes=outcomes, missing_response=nothing)
 end
 
@@ -6562,8 +6578,9 @@ function _rk_plan_joint_response!(entry, link::Symbol, predictor::Symbol,
         "$prefix: internal: joint response `$(entry.key)` has $K " *
         "outcomes but $(1 + length(extra)) mean predictors")
     stem = _rk_joint_stem(entry.rhs)
-    for (i, outcome) in enumerate(outcomes)
-        column = Float64[row[i] for row in entry.raw_response]
+    for (outcome, column) in zip(outcomes, entry.raw_outcomes)
+        column isa AbstractVector || error(
+            "$prefix: joint response outcome `$outcome` has no original data column")
         columns[outcome] = _rk_gate_response_values!(
             :mvnormal_cholesky, column, outcome)
     end
@@ -6716,13 +6733,19 @@ end
 # Split a multinomial n×K count matrix into the lead response column
 # (category 1, under the response key) plus K−1 raw tail columns.
 function _rk_split_multinomial_counts!(columns::Dict{Symbol,AbstractVector},
-        key::Symbol, matrix::AbstractMatrix, tails::Vector{Symbol})
+        key::Symbol, matrix::AbstractMatrix, tails::Vector{Symbol}, derived, taken)
     prefix = "RK backend"
     size(matrix, 2) == 1 + length(tails) || error(
         "$prefix: internal: multinomial tail names disagree with $key")
+    raw = _rk_mint_generated!(taken, columns, string(key, "_matrix"))
+    columns[raw] = [matrix]
     columns[key] = Int.(vec(matrix[:, 1]))
     for (k, name) in enumerate(tails)
         columns[name] = Int.(vec(matrix[:, k + 1]))
+    end
+    for (k, name) in enumerate([key; tails])
+        push!(derived, _RKDerivedSpec(name,
+            Expr(:_rk_data_preparation, :brm_matrix_column, raw, k), name))
     end
     nothing
 end
@@ -6782,6 +6805,8 @@ function _rk_gate_name_hygiene!(predictor_specs::AbstractVector,
             "`$name`; rename it")
     end
     dnames = [spec.name for spec in derived]
+    prepared_names = Set(spec.name for spec in derived
+        if spec.expression.head === :_rk_data_preparation)
     for spec in response_specs
         for tname in (spec.thresholds, spec.threshold_coefs)
             tname === nothing && continue
@@ -6801,7 +6826,7 @@ function _rk_gate_name_hygiene!(predictor_specs::AbstractVector,
             cname in vnames && error(
                 "$prefix: generated count column `$cname` collides with " *
                 "vector parameter `$cname`; rename the parameter")
-            cname in dnames && error(
+            cname in dnames && !(cname in prepared_names) && error(
                 "$prefix: generated count column `$cname` collides with " *
                 "derived column `$cname`; rename the raw column")
         end
@@ -6840,7 +6865,7 @@ function _rk_gate_name_hygiene!(predictor_specs::AbstractVector,
         dn in vnames && error(
             "$prefix: generated derived column `$dn` collides with " *
             "vector parameter `$dn`; rename the parameter")
-        haskey(columns, dn) && error(
+        haskey(columns, dn) && !(dn in prepared_names) && error(
             "$prefix: generated derived column `$dn` collides with raw " *
             "column `$dn`; rename the raw column")
     end
@@ -7314,6 +7339,31 @@ function _rk_gate_ordinal_scale_slots!(response_specs::AbstractVector,
     nothing
 end
 
+# A fitted predictor depends on the resolved priors of its random-effect
+# margins. Discover those caller dependencies before filtering scalar draws;
+# an SD declaration is metadata rather than a normal formula operand.
+function _rk_with_ranef_prior_dependencies(brmi, program, roots)
+    specs = [spec for spec in ranef_effect_priors(brmi)
+        if !(spec.class === :sd && spec.family === r2d2)]
+    any(spec -> spec.class === :sd &&
+        !isempty(_brm_prepared_references(_brm_prepare_expr(spec.expression))), specs) ||
+        return program
+    reachable = _brm_reachable_operations(program, roots)
+    declarations = [declaration for declaration in program.context.group_declarations
+        if declaration.predictor in reachable]
+    buckets = _sb_collect_id_buckets(declarations)
+    ids = Set(first(key) for key in keys(buckets))
+    active = [spec for spec in specs if spec.id in ids]
+    isempty(active) && return program
+    margins = Dict(key => _sb_id_bucket_margins(bucket) for (key, bucket) in buckets)
+    overrides = _brm_resolve_ranef_effect_overrides(active, margins; prefix="RK backend")
+    claims = Pair{Symbol,Tuple}[]
+    for override in values(overrides), (margin, prior) in zip(override.margins, override.sd_prior)
+        prior === nothing || push!(claims, margin.predictor => (prior,))
+    end
+    isempty(claims) ? program : _brm_with_prior_dependencies(program, claims)
+end
+
 """
     _brm_rk_plan(brmi::BRMI)
 
@@ -7367,11 +7417,12 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
             end
         end
     end
+    program = _rk_with_ranef_prior_dependencies(brmi, program, roots)
     referenced = _brm_reachable_operations(program, roots)
     # Only likelihood-reaching declarations are fitted. An omitted outcome
     # and independent unused priors forward-simulate on the Stan route; they
     # must not be planned as extra scalar sampler parameters first.
-    prepared = _BRMPreparedModel(prepared.program,
+    prepared = _BRMPreparedModel(program,
         Tuple(p for p in prepared.parameters if p.name in referenced),
         prepared.predictors, prepared.assignments, prepared.observations)
     kept_assignments = Tuple(node for node in prepared.assignments
@@ -7532,6 +7583,14 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
                 implicit_vectors, vector_by_name, context.data,
                 predictor_specs) :
             _rk_unleveled(entry, predictor)
+        if family in (:categorical_logit, :ordinal, :categorical)
+            _, _, levels = _rk_leveled_levels(entry.key, entry.raw_response)
+            raw = _rk_mint_generated!(taken, columns, string(entry.key, "_raw"))
+            columns[raw] = entry.raw_response
+            push!(derived, _RKDerivedSpec(entry.key,
+                Expr(:_rk_data_preparation, :brm_prepared_indices, raw,
+                    _rk_ast_level_values(levels)), entry.key))
+        end
         # Mixture v1 admits no response-level weights or bounded
         # evidence (no driving case), and no `gp` mixture predictors
         # (the AST plate ranges over one response per predictor).
@@ -7641,7 +7700,7 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
         mi_jobs = nothing
         if family === :multinomial
             _rk_split_multinomial_counts!(columns, entry.key,
-                context.data[entry.key], leveled.count_columns)
+                context.data[entry.key], leveled.count_columns, derived, taken)
         elseif mi_plan !== nothing
             # Packed crossing (decision 05aemvx P2): observed values under
             # the response name plus the `Jobs_<response>` observed-row
@@ -7654,7 +7713,20 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
             haskey(columns, mi_jobs) && error(
                 "$prefix: response `$(entry.key)` `mi()` index column " *
                 "`$mi_jobs` collides with existing data; rename it")
+            raw = _rk_mint_generated!(taken, columns, string(entry.key, "_raw"))
+            columns[raw] = mi_plan.values
+            columns[entry.key] = mi_plan.observed_values
+            for i in eachindex(predictor_specs)
+                spec = predictor_specs[i]
+                spec.row_source === entry.key || continue
+                predictor_specs[i] = _RKPredictorSpec(spec.name, spec.link,
+                    spec.terms, spec.label, raw)
+            end
+            push!(derived, _RKDerivedSpec(entry.key,
+                Expr(:_rk_data_preparation, :brm_covariate_observed, raw), entry.key))
             columns[mi_jobs] = mi_plan.observed_indices
+            push!(derived, _RKDerivedSpec(mi_jobs,
+                Expr(:_rk_data_preparation, :brm_covariate_observed_rows, raw), mi_jobs))
         else
             # Mixture responses gate on the shared component family (the
             # same-family check ran at classification).
@@ -7697,12 +7769,23 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
     for spec in response_specs
         spec.mi_jobs === nothing && continue
         push!(mi_packed, spec.response, spec.mi_jobs)
-        length(columns[spec.response]) == n_obs ||
+        length(columns[spec.response]) == length(columns[spec.mi_jobs]) ||
             error("$prefix: internal: `mi()` packed columns for " *
-                  "response `$(spec.response)` does not retain the full row axis")
+                  "response `$(spec.response)` disagree on observed rows")
     end
-    statistical_inputs = Set{Symbol}(t.options.prepared_data for p in predictor_specs
+    for spec in derived
+        spec.expression.head === :_rk_data_preparation &&
+            first(spec.expression.args) === :brm_covariate_observed_rows || continue
+        raw = spec.expression.args[2]
+        push!(mi_packed, raw)
+        length(columns[raw]) == n_obs || error(
+            "$prefix: internal: `mi()` source `$raw` does not retain the full row axis")
+    end
+    statistical_inputs = Set{Symbol}(t.options.metadata for p in predictor_specs
         for t in p.terms if t.kind === :structured)
+    union!(statistical_inputs, (spec.expression.args[2] for spec in derived
+        if spec.expression.head === :_rk_data_preparation &&
+            first(spec.expression.args) === :brm_matrix_column))
     union!(statistical_inputs, _rk_callable_broadcast_columns(
         predictor_specs, response_specs, derived, columns))
     _rk_gate_crossed_columns!(columns, n_obs, mi_packed; statistical_inputs)

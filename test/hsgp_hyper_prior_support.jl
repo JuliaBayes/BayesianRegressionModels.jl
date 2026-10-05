@@ -99,8 +99,8 @@ end
         position(name)=only(findall(==(Symbol(name)),names))
         intercept=position("pop_mu.beta_pop.1")
         G=grouped ? 2 : 1
-        weights=grouped ? [position("hsgp_x_z.$g.$k") for g in 1:G,k in 1:3] :
-            reshape([position("hsgp_x_z.$k") for k in 1:3],1,3)
+        weights=grouped ? [position("hsgp_x.z.$g.$k") for g in 1:G,k in 1:3] :
+            reshape([position("hsgp_x.z.$k") for k in 1:3],1,3)
         term=only(filter(t->t.kind===:hsgp,only(backend.plan.predictors).terms))
         phi,frequencies,floor=log_hyper_basis(data.x,3,term.options.c)
         mapping=Pair{Symbol,String}[Symbol("pop_mu.beta_pop.1")=>"pop_mu_beta_pop.1"]
@@ -110,23 +110,23 @@ end
         end
         for stem in ("rho","sigma")
             prefix=grouped ? "hsgp_x_by_g" : "hsgp_x"
-            push!(mapping,Symbol("hsgp_x_$(stem)_Intercept")=>"$(prefix)_beta0_$stem")
+            push!(mapping,Symbol("hsgp_x.$(stem)_Intercept")=>"$(prefix)_beta0_$stem")
             if grouped
-                push!(mapping,Symbol("hsgp_x_$(stem)_sd")=>"$(prefix)_sd_$stem")
+                push!(mapping,Symbol("hsgp_x.$(stem)_sd")=>"$(prefix)_sd_$stem")
                 for g in 1:G
-                    push!(mapping,Symbol("hsgp_x_$(stem)_z.$g")=>"$(prefix)_z_$stem.$g")
+                    push!(mapping,Symbol("hsgp_x.$(stem)_z.$g")=>"$(prefix)_z_$stem.$g")
                 end
             end
         end
         function physical(u)
             prior=logpdf(Normal(),u[intercept])+sum(logpdf.(Normal(),u[weights]))
             hypers=map((("rho",rho_law,rho_bounds),("sigma",sigma_law,sigma_bounds))) do (stem,law,bounds)
-                beta,jac=log_hyper_coordinate(u[position("hsgp_x_$(stem)_Intercept")],bounds...)
+                beta,jac=log_hyper_coordinate(u[position("hsgp_x.$(stem)_Intercept")],bounds...)
                 prior+=logpdf(law,beta)+jac
                 eta=fill(beta,G)
                 if grouped
-                    sd=position("hsgp_x_$(stem)_sd")
-                    zs=[position("hsgp_x_$(stem)_z.$g") for g in 1:G]
+                    sd=position("hsgp_x.$(stem)_sd")
+                    zs=[position("hsgp_x.$(stem)_z.$g") for g in 1:G]
                     prior+=logpdf(Normal(),exp(u[sd]))+u[sd]+sum(logpdf.(Normal(),u[zs]))
                     eta+=exp(u[sd]).*u[zs]
                 end
@@ -156,12 +156,12 @@ end
         replay_gradient=zeros(length(names))
         for delta in (-.6,.15,-.35)
             u=collect(range(-.4,.4;length=length(names)))
-            u[position("hsgp_x_rho_Intercept")]=delta
-            u[position("hsgp_x_sigma_Intercept")]=delta/2
+            u[position("hsgp_x.rho_Intercept")]=delta
+            u[position("hsgp_x.sigma_Intercept")]=delta/2
             if grouped
-                u[position("hsgp_x_rho_sd")]=-.7
-                u[position("hsgp_x_rho_z.1")]=-.8
-                u[position("hsgp_x_rho_z.2")]=3.2
+                u[position("hsgp_x.rho_sd")]=-.7
+                u[position("hsgp_x_rho.z.1")]=-.8
+                u[position("hsgp_x_rho.z.2")]=3.2
                 _,rho,sigma=physical(u)
                 @test rho[1]==floor
                 @test rho[2]>floor

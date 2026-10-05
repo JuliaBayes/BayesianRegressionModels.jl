@@ -13,8 +13,8 @@ using LinearAlgebra
     names=coordinate_names(backend.model.layout)
     index(n)=something(findfirst(==(Symbol(n)),names))
     a=index("pop_mu.beta_pop.1")
-    tau=[index("b_line_g_sd.$k") for k in 1:2]
-    z=[index("b_line_g_z.$g.$k") for g in 1:2,k in 1:2]
+    tau=[index("b_line_g.sd.$k") for k in 1:2]
+    z=[index("b_line_g.z.$g.$k") for g in 1:2,k in 1:2]
     l=only(setdiff(eachindex(names),[a;tau;vec(z)]))
     @test length(names)==8
     oracle(u)=begin
@@ -33,13 +33,13 @@ using LinearAlgebra
     @test isequal(data,before)
     stan=consumer_stan(model,"downstream-group-line")
     mapping=[Symbol("pop_mu.beta_pop.1")=>"pop_mu_beta_pop.1",
-        Symbol("b_line_g_sd.1")=>"b_line_g_tau.1",
-        Symbol("b_line_g_sd.2")=>"b_line_g_tau.2",
+        Symbol("b_line_g.sd.1")=>"b_line_g_tau.1",
+        Symbol("b_line_g.sd.2")=>"b_line_g_tau.2",
         names[l]=>"b_line_g_L.1",
-        Symbol("b_line_g_z.1.1")=>"b_line_g_z_flat.1",
-        Symbol("b_line_g_z.1.2")=>"b_line_g_z_flat.2",
-        Symbol("b_line_g_z.2.1")=>"b_line_g_z_flat.3",
-        Symbol("b_line_g_z.2.2")=>"b_line_g_z_flat.4"]
+        Symbol("b_line_g.z.1.1")=>"b_line_g_z_flat.1",
+        Symbol("b_line_g.z.1.2")=>"b_line_g_z_flat.2",
+        Symbol("b_line_g.z.2.1")=>"b_line_g_z_flat.3",
+        Symbol("b_line_g.z.2.2")=>"b_line_g_z_flat.4"]
     # Exact original-model acceptance retains the constrained family kernel;
     # no positive-support normalizer is added or subtracted by the comparison.
     for u in (zeros(8),collect(range(-.2,.3;length=8)))
@@ -115,7 +115,7 @@ end
         names=coordinate_names(backend.model.layout)
         index(n)=something(findfirst(==(Symbol(n)),names))
         a=index("pop_mu.beta_pop.1")
-        weights=[index("hsgp_x_z.$g.$k") for g in 1:G,k in 1:3]
+        weights=[index("hsgp_x.z.$g.$k") for g in 1:G,k in 1:3]
         phi,frequencies,floor=independent_hsgp_basis(data.x,3,1.5)
         # Prepared geometry supplies only its immutable fitted c, never the
         # statistical density or a backend result used as a reference.
@@ -128,28 +128,28 @@ end
         end
         for (stem,stan_stem) in (("rho","rho_iso"),("sigma","sigma"))
             if label=="hyper"
-                push!(mapping,Symbol("hsgp_x_$(stem)_Intercept")=>"hsgp_x_by_g_beta0_$stem")
-                push!(mapping,Symbol("hsgp_x_$(stem)_sd")=>"hsgp_x_by_g_sd_$stem")
+                push!(mapping,Symbol("hsgp_x.$(stem)_Intercept")=>"hsgp_x_by_g_beta0_$stem")
+                push!(mapping,Symbol("hsgp_x.$(stem)_sd")=>"hsgp_x_by_g_sd_$stem")
                 for g in 1:G
-                    push!(mapping,Symbol("hsgp_x_$(stem)_z.$g")=>"hsgp_x_by_g_z_$stem.$g")
+                    push!(mapping,Symbol("hsgp_x.$(stem)_z.$g")=>"hsgp_x_by_g_z_$stem.$g")
                 end
             else
-                push!(mapping,Symbol("hsgp_x_$stem")=>"hsgp_x_by_g_$stan_stem")
+                push!(mapping,Symbol("hsgp_x.$stem")=>"hsgp_x_by_g_$stan_stem")
             end
         end
         oracle(u)=begin
             prior=logpdf(Normal(),u[a])+sum(logpdf.(Normal(),u[weights]))
             hypers=map(("rho","sigma")) do stem
                 if label=="hyper"
-                    beta=index("hsgp_x_$(stem)_Intercept")
-                    sd=index("hsgp_x_$(stem)_sd")
-                    zs=[index("hsgp_x_$(stem)_z.$g") for g in 1:G]
+                    beta=index("hsgp_x.$(stem)_Intercept")
+                    sd=index("hsgp_x.$(stem)_sd")
+                    zs=[index("hsgp_x.$(stem)_z.$g") for g in 1:G]
                     prior+=logpdf(Normal(),u[beta])+sum(logpdf.(Normal(),u[zs]))+
                         logpdf(Normal(),exp(u[sd]))+u[sd]
                     value=exp.(u[beta].+exp(u[sd]).*u[zs])
                     stem=="rho" ? max.(value,floor) : value
                 else
-                    q=index("hsgp_x_$(stem)")
+                    q=index("hsgp_x.$(stem)")
                     bound=label=="default" && stem=="rho" ? floor : 0.
                     value=bound+exp(u[q])
                     law=label=="explicit" ? Exponential(stem=="rho" ? .7 : 1.3) : LogNormal()

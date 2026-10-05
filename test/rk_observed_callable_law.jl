@@ -82,9 +82,35 @@ end
             sum(y<=data.lo ? logcdf(d,data.lo) :
                 y>=data.hi ? logccdf(d,data.hi) : logpdf(d,y) for y in data.y)
     end
+    # Differentiate each atom analytically: the Mills ratio supplies the
+    # tail derivative independently of either native or Stan autodiff.
+    function analytic_gradient(u)
+        mu,sigma=u[1],exp(u[2])
+        gradient=[-mu,1-sigma]
+        standard=Normal()
+        for y in data.y
+            if y<=data.lo
+                z=(data.lo-mu)/sigma
+                ratio=pdf(standard,z)/cdf(standard,z)
+                gradient[1]-=ratio/sigma
+                gradient[2]-=z*ratio
+            elseif y>=data.hi
+                z=(data.hi-mu)/sigma
+                ratio=pdf(standard,z)/ccdf(standard,z)
+                gradient[1]+=ratio/sigma
+                gradient[2]+=z*ratio
+            else
+                z=(y-mu)/sigma
+                gradient[1]+=z/sigma
+                gradient[2]+=z^2-1
+            end
+        end
+        gradient
+    end
     stan=consumer_stan(brmi,"observed-callable-law";mod=PublicObservedCallableLaw)
     for u in ([0.0,0.0],[0.17,-0.21],[-0.1,0.2])
-        check_consumer_point(problem,u,oracle)
+        _,gradient=check_consumer_point(problem,u,oracle)
+        @test gradient ≈ analytic_gradient(u) atol=2e-12 rtol=2e-12
         check_consumer_stan(problem,stan,[:mu=>"mu",:sigma=>"sigma"],backend,u)
     end
     artifact=BRM.emit_rk_artifact(brmi;case_id="observed-callable-law")

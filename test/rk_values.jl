@@ -130,7 +130,8 @@ end
     # value. Both readers consume the same sampled hyperparameters/latents.
     gp_term = only(t for p in backend.plan.regression.predictors for t in p.terms if t.kind === :gp)
     opts = gp_term.options
-    rho, amplitude, z = getproperty(nt, opts.rho), getproperty(nt, opts.sigma), getproperty(nt, opts.z)
+    gp_draws = getproperty(nt, opts.f)
+    rho, amplitude, z = gp_draws.rho, gp_draws.sigma, gp_draws.z
     covariance = [amplitude^2 * exp(-0.5 * ((x-y)/rho)^2) for x in df.t, y in df.t]
     covariance[diagind(covariance)] .+= opts.jitter
     f = cholesky(Symmetric(covariance)).L * z
@@ -204,28 +205,28 @@ read_rows(value, rows) = value[rows]
         nt = constrain(backend.model.layout, u)
         path = zeros(5)
         prior, jac = if kind === :ar
-            z = nt._ppl_scan_z_ar_mu_t
+            z = getproperty(nt.ar_mu_t, :_ppl_scan_z_state)
             path[1] = z[1]
             for i in 2:5
-                path[i] = tanh(nt.phi_raw_ar_mu_t) * path[i - 1] + z[i]
+                path[i] = tanh(nt.ar_mu_t.phi_raw) * path[i - 1] + z[i]
             end
             path .*= nt.mu_ar_mu_t
             @test length(u) == 8
             (logpdf(Normal(), only(nt.pop_mu.beta_pop)) + logpdf(Normal(), nt.mu_ar_mu_t) +
-                logpdf(Normal(), nt.phi_raw_ar_mu_t) + sum(logpdf.(Normal(), z)), 0.0)
+                logpdf(Normal(), nt.ar_mu_t.phi_raw) + sum(logpdf.(Normal(), z)), 0.0)
         else
-            z = nt._ppl_scan_z_dar_mu_t_level
+            z = getproperty(nt.dar_mu_t_level, :_ppl_scan_z_level)
             increment = 0.0
             for i in 2:5
-                increment = nt.dar_mu_t_beta * increment + nt.dar_mu_t_sigma * z[i - 1]
+                increment = nt.dar_mu_t_level.beta * increment + nt.dar_mu_t_level.sigma * z[i - 1]
                 path[i] = path[i - 1] + increment
             end
             @test length(u) == 7
             (logpdf(Normal(), only(nt.pop_mu.beta_pop)) +
-                logpdf(truncated(Normal(0.5, 0.2), 0, 1), nt.dar_mu_t_beta) +
-                logpdf(truncated(Normal(0, 0.2), 0, Inf), nt.dar_mu_t_sigma) +
+                logpdf(truncated(Normal(0.5, 0.2), 0, 1), nt.dar_mu_t_level.beta) +
+                logpdf(truncated(Normal(0, 0.2), 0, Inf), nt.dar_mu_t_level.sigma) +
                 sum(logpdf.(Normal(), z)),
-                log(nt.dar_mu_t_beta) + log1p(-nt.dar_mu_t_beta) + log(nt.dar_mu_t_sigma))
+                log(nt.dar_mu_t_level.beta) + log1p(-nt.dar_mu_t_level.beta) + log(nt.dar_mu_t_level.sigma))
         end
         likelihood = sum(logpdf.(Normal.(only(nt.pop_mu.beta_pop) .+ path[df.rows], 1), df.y))
         @test value_query(backend, :likelihood, u) ≈ likelihood
@@ -310,6 +311,77 @@ blend_values(p, q, r, rows) = p[rows] .+ q[rows] .+ r[rows]
     r = -expm1.(-exp.(linear(nt.pop_cloglog_r.beta_pop)))
     expected = p[df.rows] .+ q[df.rows] .+ r[df.rows]
     @test value_query(backend, :pointwise, u).y ≈ logpdf.(Normal.(expected, 1), df.y)
+end
+
+# Caller data occupy both the elementary function name and the generated
+# callable stem. The emitted inverse link must retain its exact callable.
+inverse_link_collision_reader(p, q, r, rows, logistic, brm_value_function) =
+    p[rows] .+ q[rows] .+ r[rows] .+ logistic .+ brm_value_function
+
+@stestset "inverse-link source bindings preserve names and normalized law" begin
+    base = (; x=[-0.4, 0.2, 0.9], rows=[3, 1, 2, 1], y=[0.1, 0.4, -0.2, 0.8])
+    collision = merge(base, (; logistic=[.1, -.2, .3, -.1],
+        brm_value_function=[-.2, .3, -.1, .2]))
+    models = (
+        "ordinary source namespace" => (base, @brm(base, begin
+            logit(p) ~ 1 + x
+            probit(q) ~ 1 + x
+            cloglog(r) ~ 1 + x
+            reads = blend_values(p, q, r, rows)
+            y ~ Normal(reads, 1)
+        end)),
+        "caller name collisions" => (collision, @brm(collision, begin
+            logit(p) ~ 1 + x
+            probit(q) ~ 1 + x
+            cloglog(r) ~ 1 + x
+            reads = inverse_link_collision_reader(p, q, r, rows, logistic, brm_value_function)
+            y ~ Normal(reads, 1)
+        end)))
+    for (label, (data, brmi)) in models
+        @testset "$label" begin
+            before = deepcopy(data)
+            backend = check_rk_source_roundtrip(RKBRMI(brmi);
+                ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+            emitted = BRM._rk_emit_ast(backend.plan)
+            binding = only(filter(pair -> last(pair) === BRM.logistic, emitted.bindings))
+            @test first(binding) ∉ keys(data)
+            ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
+            mod = ext._rk_emit_module(emitted)
+            @test getfield(mod, first(binding)) === BRM.logistic
+            names = coordinate_names(backend.model.layout)
+            @test sort(names) == sort([Symbol("pop_$(target).beta_pop.$j")
+                for target in (:logit_p, :probit_q, :cloglog_r) for j in 1:2])
+            index(target, j) = only(findall(==(Symbol("pop_$(target).beta_pop.$j")), names))
+            linear(u, target) = u[index(target, 1)] .+ u[index(target, 2)] .* data.x
+            function oracle(u)
+                p = 1 ./ (1 .+ exp.(-linear(u, :logit_p)))
+                q = cdf.(Normal(), linear(u, :probit_q))
+                r = -expm1.(-exp.(linear(u, :cloglog_r)))
+                expected = p[data.rows] .+ q[data.rows] .+ r[data.rows]
+                haskey(data, :logistic) &&
+                    (expected = expected .+ data.logistic .+ data.brm_value_function)
+                sum(logpdf.(Normal(), u)) + sum(logpdf.(Normal.(expected, 1), data.y))
+            end
+            problem = rk_logdensity_problem(backend;
+                ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+            for u in (zeros(6), fill(.13, 6), collect(range(-.2, .3; length=6)))
+                saved = copy(u)
+                value, gradient = logdensity_and_gradient(problem, u)
+                @test value ≈ oracle(u) atol=2e-11 rtol=2e-11
+                step = 1e-5
+                independent = map(eachindex(u)) do j
+                    plus, minus = copy(u), copy(u)
+                    plus[j] += step
+                    minus[j] -= step
+                    (oracle(plus) - oracle(minus)) / (2step)
+                end
+                @test gradient ≈ independent atol=2e-5 rtol=2e-5
+                @test all(isfinite, gradient)
+                @test isequal(u, saved)
+            end
+            @test isequal(data, before)
+        end
+    end
 end
 
 @stestset "ordinary categorical random slopes" begin

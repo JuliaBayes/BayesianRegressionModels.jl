@@ -56,7 +56,7 @@ end
         z = [index("b_p_subject.z.$j.$k") for j in 1:3, k in 1:2]
         correlation = index("b_p_subject.L.1")
         iw, imw, isw, imx, isx, ie = index.([
-            "w_y_mis.1", "mu_w", "sigma_w", "mu_x", "sigma_x", "scale"])
+            "w.y_mis.1", "mu_w", "sigma_w", "mu_x", "sigma_x", "scale"])
         function components(u)
             w = [10., exp(u[iw]), 30.]
             rho, tau = tanh(u[correlation]), exp.(u[scales])

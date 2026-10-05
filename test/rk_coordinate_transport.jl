@@ -94,6 +94,149 @@ function check_coordinate_transport(fixture)
     end
 end
 
+@stestset "coordinate records retain fresh block-local declarations" begin
+    definitions, records, taken = Expr[], Any[], Set{Symbol}()
+    address = (; kind=:ranef, group=:subject, id=nothing, bucket_kind=:intercept1,
+        margins=((:mu, :Intercept),))
+    BRM._rk_ast_varying_draws!(definitions, taken, 1, 1.0, nothing;
+        group=:subject, scale_priors=:(Exponential(z)), coordinates=records,
+        coordinate_record=address, scope=:draws)
+    record = only(records)
+    @test record.z !== Symbol("draws.z")
+    definition = sprint(Base.show_unquoted, only(definitions))
+    local_z = last(split(String(record.z), '.'))
+    @test occursin("$(local_z)[levels(g), 1:1]", definition)
+    nested = (; draws=NamedTuple{(Symbol(local_z),)}((reshape([.2, .3], 2, 1),)))
+    @test BRM._brm_rk_declaration_value(nested, record.z) == reshape([.2, .3], 2, 1)
+end
+
+@stestset "allocating blocks retain caller-side hyperparameter priors" begin
+    definitions, records, taken = Expr[], Any[], Set{Symbol}([:z])
+    address = (; kind=:ranef, group=:subject, id=nothing, bucket_kind=:intercept1,
+        margins=((:mu, :Intercept),))
+    call = BRM._rk_ast_varying_draws!(definitions, taken, 1, 1.0, nothing;
+        group=:subject, scale_priors=:(Exponential(z)), coordinates=records,
+        coordinate_record=address, scope=:draws)
+    emitted = BRM._rk_fitted_source(BRM._RKEmittedProgram(definitions, quote
+        z ~ Exponential(.8)
+        draws ~ $call
+        mu = draws[subject, 1]
+        y .~ Normal.(mu, 1)
+    end), (:y,))
+    parsed = BRM._RKEmittedProgram(
+        [Meta.parse(sprint(Base.show_unquoted, definition)) for definition in emitted.defs],
+        Meta.parse(sprint(Base.show_unquoted, emitted.main)))
+    data = Dict(:subject => [1, 2], :y => [.2, -.3])
+    ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
+    record = only(records)
+    for program in (emitted, parsed)
+        translated = bind_data(lower_rkppl(program.main, data;
+            mod=ext._rk_emit_module(program), conditioned=(:y,)), data)
+        model = Base.invokelatest(build_kernel, translated)
+        names = coordinate_names(model.layout)
+        index(name) = only(findall(==(Symbol(name)), names))
+        hyper = index(:z)
+        scale = index(string(record.scale, ".1"))
+        innovations = [index(string(record.z, ".", j, ".1")) for j in 1:2]
+        @test length(names) == 4
+        query = prepare_sampler(model, translated, zeros(4);
+            backend=AutoEnzyme(; mode=Enzyme.Reverse))
+        for u in (zeros(4), fill(.13, 4), collect(range(-.2, .3; length=4)))
+            saved = copy(u)
+            z, sd, v = exp(u[hyper]), exp(u[scale]), u[innovations]
+            residual = data[:y] .- sd .* v
+            oracle = logpdf(Exponential(.8), z) + u[hyper] +
+                logpdf(Exponential(z), sd) + u[scale] +
+                sum(logpdf.(Normal(), v)) + sum(logpdf.(Normal.(sd .* v, 1), data[:y]))
+            expected = zeros(4)
+            expected[hyper] = -z/.8 + sd/z
+            expected[scale] = 1 - sd/z + sum(residual .* sd .* v)
+            expected[innovations] = -v .+ sd .* residual
+            gradient = similar(u)
+            value, _ = sampler_value_and_gradient!(query, gradient, u)
+            @test value ≈ oracle atol=2e-11 rtol=2e-11
+            @test gradient ≈ expected atol=2e-10 rtol=2e-10
+            @test isequal(u, saved)
+        end
+    end
+end
+
+@stestset "public random-effect scale hyperprior remains a fitted draw" begin
+    data = (; g=[1, 1, 2, 2], y=[.2, -.1, .4, .3])
+    brmi = @brm data begin
+        tau ~ Exponential(1)
+        mu ~ 1 + (1 | p | g)
+        sd(:, p) ~ Exponential(tau)
+        y ~ Normal(mu, 1)
+    end
+    # consumer_problem independently reparses every emitted definition and
+    # the complete main program before preparing the ordinary Reverse query.
+    backend, problem = consumer_problem(brmi)
+    names = coordinate_names(backend.model.layout)
+    index(name) = only(findall(==(Symbol(name)), names))
+    record = only(filter(r -> r.kind === :ranef,
+        BRM._rk_coordinate_records(backend.plan)))
+    hyper, scale, population = index(:tau), index(string(record.scale, ".1")),
+        index("pop_mu.beta_pop.1")
+    innovations = [index(string(record.z, ".", j, ".1")) for j in 1:2]
+    @test length(names) == 5
+    for u in (zeros(5), fill(.13, 5), collect(range(-.2, .3; length=5)))
+        saved = copy(u)
+        tau, sd, beta, z = exp(u[hyper]), exp(u[scale]), u[population], u[innovations]
+        means = beta .+ sd .* z[data.g]
+        residual = data.y .- means
+        oracle = logpdf(Exponential(1), tau) + u[hyper] +
+            logpdf(Exponential(tau), sd) + u[scale] + logpdf(Normal(), beta) +
+            sum(logpdf.(Normal(), z)) + sum(logpdf.(Normal.(means, 1), data.y))
+        expected = zeros(5)
+        expected[hyper] = -tau + sd / tau
+        expected[scale] = 1 - sd / tau + sum(residual .* sd .* z[data.g])
+        expected[population] = -beta + sum(residual)
+        expected[innovations] = [-z[j] + sd * sum(residual[data.g .== j]) for j in 1:2]
+        value, gradient = LogDensityProblems.logdensity_and_gradient(problem, u)
+        @test value ≈ oracle atol=2e-11 rtol=2e-11
+        @test gradient ≈ expected atol=2e-10 rtol=2e-10
+        @test isequal(u, saved)
+    end
+end
+
+@stestset "overridden scale hyperprior remains outside fitted coordinates" begin
+    data = (; g=[1, 1, 2, 2], y=[.2, -.1, .4, .3])
+    brmi = @brm data begin
+        unused ~ Exponential(1)
+        mu ~ 1 + (1 | p | g)
+        sd(:, p) ~ Exponential(unused)
+        sd(mu, p, Intercept) ~ Exponential(.7)
+        y ~ Normal(mu, 1)
+    end
+    backend, problem = consumer_problem(brmi)
+    names = coordinate_names(backend.model.layout)
+    index(name) = only(findall(==(Symbol(name)), names))
+    record = only(filter(r -> r.kind === :ranef,
+        BRM._rk_coordinate_records(backend.plan)))
+    scale, population = index(string(record.scale, ".1")), index("pop_mu.beta_pop.1")
+    innovations = [index(string(record.z, ".", j, ".1")) for j in 1:2]
+    @test length(names) == 4
+    @test :unused ∉ names
+    for u in (zeros(4), fill(.13, 4), collect(range(-.2, .3; length=4)))
+        saved = copy(u)
+        sd, beta, z = exp(u[scale]), u[population], u[innovations]
+        means = beta .+ sd .* z[data.g]
+        residual = data.y .- means
+        oracle = logpdf(Exponential(.7), sd) + u[scale] +
+            logpdf(Normal(), beta) + sum(logpdf.(Normal(), z)) +
+            sum(logpdf.(Normal.(means, 1), data.y))
+        expected = zeros(4)
+        expected[scale] = 1 - sd / .7 + sum(residual .* sd .* z[data.g])
+        expected[population] = -beta + sum(residual)
+        expected[innovations] = [-z[j] + sd * sum(residual[data.g .== j]) for j in 1:2]
+        value, gradient = LogDensityProblems.logdensity_and_gradient(problem, u)
+        @test value ≈ oracle atol=2e-11 rtol=2e-11
+        @test gradient ≈ expected atol=2e-10 rtol=2e-10
+        @test isequal(u, saved)
+    end
+end
+
 @stestset "coordinate transport correlated factors and categorical pool levels" begin
     groups = categorical(["b","b","a","a","c","c","d","d"])
     levels!(groups, ["d","b","a","c"])

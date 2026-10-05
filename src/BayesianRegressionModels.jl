@@ -148,6 +148,7 @@ export brm_multinomial, brm_multinomial_lpmf, brm_multinomial_lpmfs, brm_multino
 export truncated, censored, interval_censored
 # Fusion append API (cross-package: the RK reporter resolves this by name).
 export rk_translate_artifact
+export rk_artifact_inputs
 export rkppl_model, rk_model
 # A julianic `@jmodel` body is ordinary Julia, so the distributions it names must
 # be real `Distributions` objects resolved in the AUTHOR's scope. Re-export the

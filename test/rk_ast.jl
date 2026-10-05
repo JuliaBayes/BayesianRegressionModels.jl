@@ -582,6 +582,8 @@ end
 end
 
 strip_source_lines(x) = x
+strip_source_lines(x::GlobalRef) =
+    strip_source_lines(Meta.parse(sprint(Base.show_unquoted, x)))
 strip_source_lines(x::AbstractFloat) = isinf(x) ? (signbit(x) ? Expr(:call, :-, :Inf) : :Inf) : x
 strip_source_lines(x::Expr) = Expr(x.head,
     (strip_source_lines(a) for a in x.args if !(a isa LineNumberNode))...)

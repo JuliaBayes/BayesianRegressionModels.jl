@@ -47,10 +47,11 @@ end
 
 function _rk_translate_from_emitted(plan::_RK_PLAN_TYPES,
         emitted::BRM._RKEmittedProgram)
+    columns = BRM._rk_source_data_columns(plan, emitted)
     unbound = lower_rkppl(emitted.main,
-        plan.columns; mod=_rk_emit_module(emitted),
+        columns; mod=_rk_emit_module(emitted),
         conditioned=BRM._rk_observed_names(plan))
-    bind_data(unbound, plan.columns)
+    bind_data(unbound, columns)
 end
 
 function _rk_translated_plan(plan::_RK_PLAN_TYPES)

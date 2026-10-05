@@ -77,6 +77,8 @@ end
         @test term.options.fixed_fits == ((2.0, 2.0),)
         emitted = BRM._rk_emit_ast(backend.plan)
         main = sprint(Base.show_unquoted, emitted.main)
+        blocks = join((sprint(Base.show_unquoted, d) for d in emitted.defs
+            if BRM._rk_source_definition(d).kind === :rkppl), "\n")
         @test occursin("hsgp_x_PHI = hsgp_x_basis_graph_basis_matrix(x)", main)
         definitions = join(sprint(Base.show_unquoted, d) for d in emitted.defs)
         @test occursin("beta_raw[1:nbasis] .~ Normal.(0, 1)", definitions)

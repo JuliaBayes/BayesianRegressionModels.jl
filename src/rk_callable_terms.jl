@@ -26,6 +26,11 @@ end
 
 function _rk_ast_data_expr!(defs, statements, bindings, taken, value)
     value isa Expr || return value
+    if value.head === :_rk_data_preparation
+        inputs = map(arg -> _rk_ast_data_expr!(defs, statements, bindings, taken, arg),
+            value.args[2:end])
+        return _rk_ast_statistical_call!(defs, taken, first(value.args), inputs...; kernel=true)
+    end
     if value.head === :call && first(value.args) isa _RKDataCall
         recipe = first(value.args)
         inputs = map(arg -> _rk_ast_data_expr!(defs, statements, bindings, taken, arg),

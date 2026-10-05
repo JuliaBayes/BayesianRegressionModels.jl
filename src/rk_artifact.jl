@@ -20,7 +20,8 @@
 The append-artifact shape version this BRM reads and writes (`3`). The
 September `(; ast, data, meta)` triple predates submodel `defs` and the
 data crossings; v3 carries
-`(; case_id, ast, defs, plan, meta)` with `data === plan.columns`.
+`(; case_id, ast, defs, plan, meta)`. `plan.columns` includes fitted geometry;
+[`rk_artifact_inputs`](@ref) selects the executable source inputs.
 """
 rk_artifact_version() = 3
 
@@ -83,6 +84,20 @@ end
 # `_rk_translated_plan`. Keeping the generic here lets the core emit
 # artifacts without loading RK.
 function rk_translate_artifact end
+
+"""
+    rk_artifact_inputs(artifact) -> Dict
+
+The input columns of a complete emitted RK artifact. Fitted geometry may
+retain cached preparation columns in `artifact.plan.columns`; an emitted
+assignment owns that value, so its name is excluded from the inputs. Use this
+dictionary with public `lower_rkppl` and `bind_data` when replaying printed
+source directly. `rk_translate_artifact` selects the same inputs automatically.
+"""
+function rk_artifact_inputs(artifact)
+    _check_artifact(artifact, "rk_artifact_inputs")
+    _rk_source_data_columns(artifact.plan, _RKEmittedProgram(artifact.defs, artifact.ast))
+end
 
 """
     write_rk_artifact(path, artifact) -> path

@@ -389,12 +389,16 @@ end
     end)
     @test only(arithmetic.derived).expression ==
         Expr(:call, :.*, :x, 2)
-    # Unknown functions fail closed with the admitted list named.
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    # Ordinary scalar callables use the native formula-term route even when
+    # they are outside the small list of specially broadcast math heads.
+    trigonometric = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + sind(z)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
+    @test length(trigonometric.derived) == 1
+    @test only(trigonometric.predictors).terms[2].columns ==
+        [only(trigonometric.derived).name]
     # Scalar-valued terms fail closed (predictors take vector terms).
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + mean(x)
@@ -1296,12 +1300,11 @@ end
     ids = Set(t.options.id for p in plan.predictors for t in p.terms
         if t.kind === :spline)
     @test ids == Set([:s_x, :s_x_2])
-    # Generated ids disambiguate against user parameters.
+    # Generated ids disambiguate against fitted user parameters.
     brmi = @brm sdf begin
         mu ~ 1 + s(x)
-        s_x ~ Normal(0, 1)
-        sigma ~ Exponential(1)
-        y ~ Normal(mu, sigma)
+        s_x ~ Exponential(1)
+        y ~ Normal(mu, s_x)
     end
     plan = BRM._brm_rk_plan(brmi)
     term = only(t for t in only(plan.predictors).terms if t.kind === :spline)
@@ -1525,12 +1528,11 @@ end
     end)
     @test plan.columns[:gs_idx] == [1, 1, 2, 2, 3, 3]
     @test only(plan.vector_parameters).size == 2
-    # Increments disambiguate against user parameters (smooth-id precedent).
+    # Increments disambiguate against fitted user parameters (smooth-id precedent).
     plan = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + mo(c)
-        mo_c_simplex_incr ~ Normal(0, 1)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        mo_c_simplex_incr ~ Exponential(1)
+        y ~ Normal(mu, mo_c_simplex_incr)
     end)
     @test only(plan.vector_parameters).name == :mo_c_simplex_incr_2
     # A raw `<c>_idx` column colliding with the codes fails loud: sharing
@@ -1626,9 +1628,8 @@ end
     plan = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
         effect(mu, :) ~ r2d2()
-        r2d2_mu_R2 ~ Normal(0, 1)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        r2d2_mu_R2 ~ Exponential(1)
+        y ~ Normal(mu, r2d2_mu_R2)
     end)
     @test only(plan.r2d2_priors).r2 == :r2d2_mu_R2_2
     # Non-Beta R2 stays closed (SB would need a Stan translation too).
@@ -1904,15 +1905,14 @@ end
     # Trajectory names disambiguate against user parameters.
     plan = BRM._brm_rk_plan(@brm tdf begin
         mu ~ 1 + dar(t)
-        dar_mu_t_beta ~ Normal(0, 1)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        dar_mu_t_beta ~ Exponential(1)
+        y ~ Normal(mu, dar_mu_t_beta)
     end)
     term = only(t for t in only(plan.predictors).terms if t.kind === :dar)
     @test term.options.beta == :dar_mu_t_beta_2
 end
 
-@stestset "fail closed: SB long tail (simplex)" begin
+@stestset "unused simplex prior is pruned while fitted scalar scales stay closed" begin
     # `mo1(c)` used to fail here; it plans now (thin-layer monotonic
     # surface landed, covered in "monotonic plan shape"). `dar(t)` used to
     # fail here too; it plans now (thin-layer dar surface, covered in
@@ -1922,13 +1922,20 @@ end
     # slice landed, covered in "LKJ factor + joint plan shape"). `me`
     # plans now as well (thin-layer plate-vector slice landed, covered
     # in "me plan shape").
-    # Unreferenced simplex-valued parameter declaration stays closed
-    # (response-linked simplexes are the categorical lane's open shape).
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    # Unreferenced declarations do not become fitted coordinates.
+    # Response-linked simplexes remain the categorical lane's open shape.
+    plan = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
         s ~ Dirichlet(3, 1.0)
         sigma ~ Exponential(1)
         y ~ Normal(mu, sigma)
+    end)
+    @test [p.name for p in plan.parameters] == [:sigma]
+    @test isempty(plan.vector_parameters)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        s ~ Dirichlet(3, 1.0)
+        y ~ Normal(mu, s)
     end)
 end
 
@@ -2074,21 +2081,22 @@ end
         L_res ~ LKJCovarianceFactor(0; scale_prior=Exponential(1))
         [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
     end)
-    # A stem no joint response uses fails (the old LKJ pin shape, now
-    # with linkage attribution).
-    @test_throws "no joint response uses" BRM._brm_rk_plan(@brm dfj begin
+    # Independent unused factors are generative declarations, not fitted
+    # coordinates. Their dimensions do not affect the ordinary response.
+    unused_factor = BRM._brm_rk_plan(@brm dfj begin
         mu ~ 1 + x
         L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1))
         s ~ Exponential(1)
         y1 ~ Normal(mu, s)
     end)
-    # A K=1 stem can never link (`@brm` needs at least two outcomes).
-    @test_throws "no joint response uses" BRM._brm_rk_plan(@brm dfj begin
+    @test [p.name for p in unused_factor.parameters] == [:s]
+    unused_single_factor = BRM._brm_rk_plan(@brm dfj begin
         mu ~ 1 + x
         L1 ~ LKJCovarianceFactor(1; scale_prior=Exponential(1))
         s ~ Exponential(1)
         y1 ~ Normal(mu, s)
     end)
+    @test [p.name for p in unused_single_factor.parameters] == [:s]
     # Factor linkage: unknown stem, scalar-backed stem, width mismatch.
     @test_throws "must be a sampled parameter" BRM._brm_rk_plan(@brm dfj begin
         mu1 ~ 1 + x
@@ -2199,13 +2207,13 @@ end
         [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
     end)
     # The stem reserves its two derived thin-layer bindings.
-    @test_throws "reserves emitted binding" BRM._brm_rk_plan(@brm dfj begin
+    @test_throws "reserves emitted binding" BRM._brm_rk_plan(@brm df4 begin
         mu1 ~ 1 + x
         mu2 ~ 1 + x
         L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1))
-        L_res_scales ~ Normal(0, 1)
-        s ~ Exponential(1)
+        L_res_scales ~ Exponential(1)
         [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
+        y3 ~ Normal(mu1, L_res_scales)
     end)
 end
 
@@ -2504,9 +2512,8 @@ end
     # A sampled parameter holding the latent name fails closed.
     @test_throws "already taken" BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + me(x, 0.5)
-        me_x ~ Normal(0, 1)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        me_x ~ Exponential(1)
+        y ~ Normal(mu, me_x)
     end)
     # The observed column doubles as an ordinary term (SB binds it once;
     # both the data column and the latent take betas).
@@ -2560,9 +2567,8 @@ end
     # Generated names disambiguate against user parameters.
     brmi = @brm df begin
         mu ~ 1 + gp(x)
-        rho_gp ~ Normal(0, 1)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        rho_gp ~ Exponential(1)
+        y ~ Normal(mu, rho_gp)
     end
     plan = BRM._brm_rk_plan(brmi)
     term = only(t for t in only(plan.predictors).terms if t.kind === :gp)
@@ -2706,9 +2712,8 @@ end
     # Generated ids disambiguate against user parameters.
     brmi = @brm df begin
         mu ~ 1 + hsgp(x; k=4)
-        hsgp_x ~ Normal(0, 1)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        hsgp_x ~ Exponential(1)
+        y ~ Normal(mu, hsgp_x)
     end
     plan = BRM._brm_rk_plan(brmi)
     term = only(t for t in only(plan.predictors).terms if t.kind === :hsgp)
@@ -2895,11 +2900,14 @@ end
     # NOTE: `Normal(mu, s)` with `s ~ 1 + x` lived here until the
     # distributional lift admitted a scale predictor; it now plans in
     # "distributional scale/shape predictors".
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    scalar_response = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
         s ~ Exponential(1)
         y ~ Normal(0, s)
     end)
+    @test isempty(scalar_response.regression.predictors)
+    @test only(scalar_response.regression.parameters).name === :s
+    @test only(scalar_response.observations).distribution.callable === Normal
 end
 
 # Slice-2 demand battery: the docs/examples corpus families/links that
@@ -3541,11 +3549,13 @@ end
         mu ~ 1 + x
         y ~ VonMises(mu)
     end)
-    # 1-arg `VonMises(kappa)` names no location predictor.
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    # The ordinary one-argument scalar law needs no formula location.
+    scalar_von_mises = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
         y ~ VonMises(1.7)
     end)
+    @test isempty(scalar_von_mises.regression.predictors)
+    @test only(scalar_von_mises.observations).distribution.args == (1.7,)
     # Non-positive literal kappa (positivity).
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
@@ -3765,9 +3775,8 @@ end
     # Name hygiene mirrors the thin layer.
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
-        mu_coef ~ Normal(0, 1)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        mu_coef ~ Exponential(1)
+        y ~ Normal(mu, mu_coef)
     end)
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
@@ -3814,7 +3823,7 @@ end
     @test_throws ErrorException BRM._rk_gate_acyclic!([cyclic_a, cyclic_b], [])
 end
 
-@stestset "mi() full response values with observed-row indices" begin
+@stestset "mi() packed response values with observed-row indices" begin
     # Case A (decision 05aemvx): the likelihood restricts to observed rows
     # while predictors, levels, and `n_obs` stay full-length.
     missing_df = (; df..., y=[0.5, missing, 0.1, 0.9, 1.4, 1.1])
@@ -3827,7 +3836,8 @@ end
     @test (spec.family, spec.link) === (:gaussian, :identity)
     @test spec.mi_jobs === :Jobs_y
     @test plan.n_obs == 6
-    @test isequal(plan.columns[:y], missing_df.y)
+    @test isequal(plan.columns[:y], collect(skipmissing(missing_df.y)))
+    @test isequal(plan.columns[:y_raw], missing_df.y)
     @test plan.columns[:Jobs_y] == [1, 3, 4, 5, 6]
     @test plan.columns[:x] == df.x
     # Distributional scale takes the same packed route.
@@ -3839,7 +3849,7 @@ end
     dist_spec = only(dist_plan.responses)
     @test (dist_spec.family, dist_spec.link) === (:gaussian, :identity)
     @test dist_spec.mi_jobs === :Jobs_y
-    @test isequal(dist_plan.columns[:y], missing_df.y)
+    @test isequal(dist_plan.columns[:y], collect(skipmissing(missing_df.y)))
     # RK-admitted Gamma/Beta spellings take the same packed route.
     gdf = (; df..., y=[0.5, missing, 0.1, 0.9, 1.4, 1.1])
     gplan = BRM._brm_rk_plan(@brm gdf begin
@@ -3849,7 +3859,7 @@ end
     gspec = only(gplan.responses)
     @test (gspec.family, gspec.link) === (:gamma_log, :log)
     @test gspec.mi_jobs === :Jobs_y
-    @test isequal(gplan.columns[:y], gdf.y)
+    @test isequal(gplan.columns[:y], collect(skipmissing(gdf.y)))
     udf = (; df..., y=[0.2, missing, 0.7, 0.3, 0.6, 0.5])
     uplan = BRM._brm_rk_plan(@brm udf begin
         logit(mu) ~ 1 + x
@@ -3858,9 +3868,8 @@ end
     uspec = only(uplan.responses)
     @test (uspec.family, uspec.link) === (:beta_logit, :logit)
     @test uspec.mi_jobs === :Jobs_y
-    @test isequal(uplan.columns[:y], udf.y)
-    # Fail-closed surface: compositions, discrete families, and Case-B
-    # downstream uses of the merged response.
+    @test isequal(uplan.columns[:y], collect(skipmissing(udf.y)))
+    # Unsupported observation compositions and discrete completion laws.
     wdf = (; missing_df..., w=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
     @test_throws ErrorException BRM._brm_rk_plan(@brm wdf begin
         mu ~ 1 + x
@@ -3878,13 +3887,19 @@ end
         mi(b) ~ Bernoulli(mu)
     end)
     zdf = (; missing_df..., z=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
-    @test_throws ErrorException BRM._brm_rk_plan(@brm zdf begin
+    completed = BRM._brm_rk_plan(@brm zdf begin
         mu ~ 1 + x
         s ~ Exponential(1)
         mi(y) ~ Normal(mu, s)
         loc2 ~ 1 + x + y
         z ~ Normal(loc2, s)
     end)
+    completion = only(completed.completions)
+    @test completion.source === :y
+    @test completion.nmissing == 1
+    @test completed.columns[completion.observed_rows] == [1, 3, 4, 5, 6]
+    @test completed.columns[completion.missing_rows] == [2]
+    @test !haskey(completed.columns, :y)
 end
 
 @stestset "distributional scale/shape predictors" begin
@@ -4365,14 +4380,14 @@ end
     end)
     @test sizemix isa ErrorException
     @test occursin("sizes must agree", sizemix.msg)
-    unused = rk_plan_error(@brm df begin
+    unused = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
         s ~ Dirichlet(2, 1.0)
         sigma ~ Exponential(1)
         y ~ Normal(mu, sigma)
     end)
-    @test unused isa ErrorException
-    @test occursin("no multinomial/categorical response uses it", unused.msg)
+    @test isempty(unused.vector_parameters)
+    @test [p.name for p in unused.parameters] == [:sigma]
     # Multinomial shape errors.
     badsums = rk_plan_error(@brm (;
         df...,
@@ -5018,11 +5033,8 @@ end
 end
 
 @stestset "kernel(...) end-to-end via _brm_rk_plan" begin
-    # Phase-1a: a panel kernel is ADMITTED — `_brm_rk_plan` returns a
-    # `_RKKernelPlan` (globals as parameters + flattened per-subject columns +
-    # the kernel spec) and `_rk_emit_ast` produces the globals plus the subject
-    # plate. A grouped (LP-arg) kernel still fails closed (needs RK random
-    # effects). See `BayesianRegressionModels:rk:kernel` todo `11b8mr9`.
+    # The composed route retains each positional input's subject axis, then
+    # flattens the actual likelihood outputs. Globals remain fitted scalars.
     kdf = (;
         t=[[0.0, 1.0, 2.0], [0.0, 1.0, 2.0]],
         dose=[10.0, 20.0],
@@ -5038,20 +5050,22 @@ end
         end
     end
     plan = BRM._brm_rk_plan(brmi)
-    @test plan isa BRM._RKKernelPlan
-    @test plan.kernel.result === :pred
-    @test Set(p.name for p in plan.parameters) == Set([:sigma, :b0])
-    @test plan.obs.family === :gaussian
-    # flattened bind layout: vector slices -> n_sub*T = 6; scalar -> n_sub = 2
-    @test length(plan.columns[:t]) == 6
+    @test plan isa BRM._RKValuePlan
+    cell = only(plan.assignments)
+    @test cell.name === :pred
+    @test cell.params == [:ts, :d, :yy]
+    @test Set(p.name for p in plan.regression.parameters) == Set([:sigma, :b0])
+    @test only(plan.observations).distribution.callable === Normal
+    @test length(plan.columns[:t]) == 2
     @test length(plan.columns[:obs]) == 6
     @test length(plan.columns[:dose]) == 2
-    @test plan.columns[:t] == [0.0, 1.0, 2.0, 0.0, 1.0, 2.0]   # flat T-blocked
-    # full program: no submodel defs (a single plate carries no top-level
-    # repeated structure); globals as top-level `~`, then the subject
-    # plate as the last main-block stmt
+    @test plan.columns[:t] == kdf.t
+    @test plan.columns[cell.inputs[1].source] == kdf.t
+    @test plan.columns[cell.inputs[3].source] == kdf.obs
+    @test plan.columns[cell.count] == 2
+    # Ordinary cell and reader graphs retain the subject plate in source.
     prog = BRM._rk_emit_ast(plan)
-    @test prog isa BRM._RKEmittedProgram && isempty(prog.defs)
+    @test prog isa BRM._RKEmittedProgram && !isempty(prog.defs)
     @test Meta.isexpr(prog.main, :block)
     stmts = filter(s -> !(s isa LineNumberNode), prog.main.args)
     @test any(s -> Meta.isexpr(s, :call) && s.args[1] === :~ && s.args[2] === :sigma,
@@ -5059,23 +5073,29 @@ end
     @test any(s -> Meta.isexpr(s, :call) && s.args[1] === :~ && s.args[2] === :b0,
               stmts)
     source = sprint(Base.show_unquoted, prog.main)
-    @test occursin("@plate", source)
+    definitions = join(sprint(Base.show_unquoted, d) for d in prog.defs)
+    @test occursin("ReactiveKernels.plate", definitions)
     @test occursin("obs .~ Normal.", source)
     @test !occursin("kernel_nsub_pred", source)
     @test !occursin("kernel_T_pred", source)
 
-    # grouped (LP-arg) kernel still fails closed via _brm_rk_plan
-    gbrmi = @brm df begin
+    # A grouped predictor is an admitted cell input on its original group axis.
+    gbrmi = @brm begin
         sigma ~ Exponential(1)
         log_slope ~ 1 + (1 | shared | g)
         pred ~ kernel(x, log_slope) do xs, lslope
             mu = exp(lslope) .* xs
-            yy ~ Normal(mu, sigma)
             mu
         end
         y ~ Normal(pred, sigma)
     end
-    @test_throws "per-subject data columns only" BRM._brm_rk_plan(gbrmi)
+    @test_throws "pre-grouped per-subject data" BRM._brm_rk_plan(gbrmi(df))
+    grouped_data = (; g=[1,2,3], x=[[-1.0,-0.5],[0.0,0.5],[1.0,1.5]],
+        y=[[0.5,-0.2],[0.1,0.9],[1.4,1.1]])
+    grouped = BRM._brm_rk_plan(gbrmi(grouped_data))
+    @test length(grouped.regression.ranef_buckets) == 1
+    grouped_cell = only(a for a in grouped.assignments if a.name === :pred)
+    @test grouped.columns[grouped_cell.count] == 3
 end
 
 @stestset "kernel(...) panel-mode structural extraction" begin
@@ -5363,13 +5383,14 @@ end
         m ~ Normal(0, 1)
         y ~ MixtureModel([Normal(m, 1), Normal(m, 1)], w)
     end))
-    # An unused Dirichlet names mixture weights only when the model has
-    # a mixture (the guidance stays context-sensitive).
-    @test_throws "or mixture weights use it" BRM._brm_rk_plan((@brm dfmix begin
+    # Independent unused simplex declarations do not add fitted coordinates.
+    unused_weights = BRM._brm_rk_plan((@brm dfmix begin
         w ~ Dirichlet(2, 1.0)
         m ~ Normal(0, 1)
         y ~ MixtureModel([Normal(m, 1), Normal(m, 1)], [0.5, 0.5])
     end))
+    @test isempty(unused_weights.vector_parameters)
+    @test [p.name for p in unused_weights.parameters] == [:m]
     @test_throws "fully fixed" BRM._brm_rk_plan((@brm dfmix begin
         y ~ MixtureModel([Normal(-1.0, 0.5), Normal(1.0, 0.5)], [0.4, 0.6])
     end))
@@ -5473,15 +5494,19 @@ end
 end
 
 @stestset "prior vocab v1: sampled families" begin
-    # Laplace / Logistic / StudentT / Uniform plan with Stan-order args.
-    plan = BRM._brm_rk_plan(@brm df begin
+    # Every tested draw feeds a likelihood; independent unused declarations
+    # are correctly absent from the fitted parameter inventory.
+    prior_df = merge(df, (; y_a=df.y, y_q=df.y, y_t=df.y, y_u=df.y))
+    plan = BRM._brm_rk_plan(@brm prior_df begin
         mu ~ 1 + x
         a ~ Laplace(0, 2)
         q ~ Logistic(1, 3)
         t ~ LocationScale(0, 2, TDist(4))
         u ~ Uniform(0.5, 1.5)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        y_a ~ Normal(mu, a)
+        y_q ~ Normal(mu, q)
+        y_t ~ Normal(mu, t)
+        y_u ~ Normal(mu, u)
     end)
     got = Dict(p.name => (p.family, p.args, p.support_override)
         for p in plan.parameters)
@@ -5494,8 +5519,7 @@ end
         mu ~ 1 + x
         k ~ Exponential(1)
         t ~ LocationScale(0, 2, TDist(k))
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        y ~ Normal(mu, t)
     end)
     @test only(p for p in plan.parameters if p.name === :t).args ==
         (:k, 0.0, 2.0)
@@ -5503,29 +5527,26 @@ end
     @test_throws "out of slice 1" BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
         t ~ TDist(4)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        y ~ Normal(mu, t)
     end)
     # A non-TDist LocationScale base stays rejected.
     @test_throws "must be `TDist(nu)`" BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
         t ~ LocationScale(0, 2, Normal(0, 1))
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        y ~ Normal(mu, t)
     end)
     # Uniform bounds must be finite literals with lower < upper (the
     # thin-layer layout derives support from values).
     @test_throws "must be finite" BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
         u ~ Uniform(1.5, 0.5)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        y ~ Normal(mu, u)
     end)
     @test_throws "must be numeric literals" BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
         s ~ Exponential(1)
         u ~ Uniform(0.5, s)
-        y ~ Normal(mu, s)
+        y ~ Normal(mu, u)
     end)
 end
 
@@ -5533,15 +5554,20 @@ end
     # New symmetric halves ride the general Tuple splice; Normal/Cauchy
     # halves keep the legacy `:positive` override (byte-identical
     # `HalfNormal`/`HalfCauchy` emission).
-    plan = BRM._brm_rk_plan(@brm df begin
+    prior_df = merge(df, (; y_h1=df.y, y_h2=df.y, y_h3=df.y,
+        y_hn=df.y, y_hc=df.y))
+    plan = BRM._brm_rk_plan(@brm prior_df begin
         mu ~ 1 + x
         h1 ~ truncated(Laplace(0, 2), 0, Inf)
         h2 ~ truncated(LocationScale(0, 3, TDist(5)), 0, Inf)
         h3 ~ truncated(Logistic(0, 1); lower=0.0)
         hn ~ truncated(Normal(0, 2), 0, Inf)
         hc ~ truncated(Cauchy(0, 2), 0, Inf)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        y_h1 ~ Normal(mu, h1)
+        y_h2 ~ Normal(mu, h2)
+        y_h3 ~ Normal(mu, h3)
+        y_hn ~ Normal(mu, hn)
+        y_hc ~ Normal(mu, hc)
     end)
     got = Dict(p.name => (p.family, p.args, p.support_override)
         for p in plan.parameters)
@@ -5555,20 +5581,17 @@ end
     @test_throws "must be the literal 0" BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
         hh ~ truncated(Laplace(0.5, 1), 0, Inf)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        y ~ Normal(mu, hh)
     end)
     @test_throws "out of slice 1" BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
         hh ~ truncated(Exponential(1), 0, Inf)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        y ~ Normal(mu, hh)
     end)
     @test_throws "out of slice 1" BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
         hh ~ truncated(Laplace(0, 1), 1, 2)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        y ~ Normal(mu, hh)
     end)
 end
 

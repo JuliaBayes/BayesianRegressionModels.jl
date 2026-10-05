@@ -1,0 +1,192 @@
+# Public synthetic preparation: fitted metadata fixes the coordinate geometry;
+# executable indices, dummies and completion contributions live in source.
+include(joinpath(@__DIR__, "rk_consumer_support.jl"))
+
+@stestset "data preparation kernels retain named recipes and printed replay" begin
+    ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
+    definitions, taken = Expr[], Set{Symbol}()
+    for name in (:brm_prepared_indices, :brm_factor_dummy, :brm_covariate_geometry,
+            :brm_covariate_observed, :brm_covariate_observed_rows, :brm_covariate_missing_rows,
+            :brm_matrix_column, :brm_flatten_response, :brm_gather_response,
+            :brm_covariate_mean, :brm_covariate_sd)
+        BRM._rk_ast_statistical_call!(definitions, taken, name; kernel=true)
+    end
+    emitted = BRM._RKEmittedProgram(definitions, Expr(:block))
+    parsed = BRM._RKEmittedProgram(
+        [Meta.parse(sprint(Base.show_unquoted, d)) for d in definitions], Expr(:block))
+    for mod in (ext._rk_emit_module(emitted), ext._rk_emit_module(parsed))
+        indices = getfield(mod, :brm_prepared_indices)
+        dummy = getfield(mod, :brm_factor_dummy)
+        geometry = getfield(mod, :brm_covariate_geometry)
+        @test [entry.kind for entry in recipe_inventory(indices.graph)
+            if entry.kind !== :ordinary] == [:plate]
+        @test [entry.kind for entry in recipe_inventory(dummy.graph)
+            if entry.kind !== :ordinary] == [:plate]
+        @test count(entry -> entry.kind === :plate, recipe_inventory(geometry.graph)) == 3
+        @test Base.invokelatest(prepare(indices), ["a", "b", "a"],
+            ["b", "unused", "a"]) == [3, 1, 3]
+        @test Base.invokelatest(prepare(dummy), ["a", "b", "a"], "a") == [1., 0., 1.]
+        query = prepare(geometry)
+        raw = Union{Missing, Float64}[3., missing, 7., missing]
+        @test Base.invokelatest(prepare(getfield(mod, :brm_covariate_observed)), raw) == [3., 7.]
+        @test Base.invokelatest(prepare(getfield(mod, :brm_covariate_observed_rows)), raw) == [1, 3]
+        @test Base.invokelatest(prepare(getfield(mod, :brm_covariate_missing_rows)), raw) == [2, 4]
+        @test Base.invokelatest(prepare(getfield(mod, :brm_matrix_column)), [[1 2; 3 4]], 2) == [2, 4]
+        @test Base.invokelatest(prepare(getfield(mod, :brm_flatten_response)),
+            [[.2, -.3], Float64[], [.4]]) == [.2, -.3, .4]
+        @test Base.invokelatest(prepare(getfield(mod, :brm_gather_response)),
+            [.2, -.3, .4], [3, 1, 2]) == [.4, .2, -.3]
+        for values in ([2., 4., 7.], [1e308, -1e308, 0.])
+            mean = Base.invokelatest(prepare(getfield(mod, :brm_covariate_mean)), values)
+            sd = Base.invokelatest(prepare(getfield(mod, :brm_covariate_sd)), values)
+            @test mean == BRM._brm_fit_mean_numeric(values, :predictor, :center, ArgumentError)
+            @test sd == BRM._brm_fit_zscale_numeric(values, :predictor, ArgumentError).scale
+            @test isfinite(mean) && isfinite(sd)
+        end
+        for (observed, jobs, jmis, expected) in (
+                ([3., 7.], [1, 3], [2, 4], ([3., 0., 7., 0.], [1, 1, 1, 2], [0., 1., 0., 1.])),
+                ([3., 5., 7.], [1, 2, 3], Int[], ([3., 5., 7.], [1, 1, 1], zeros(3))),
+                (Float64[], Int[], [1, 2], (zeros(2), [1, 2], ones(2))),
+                (Float64[], Int[], Int[], (Float64[], Int[], Float64[])))
+            saved = deepcopy((observed, jobs, jmis))
+            @test Base.invokelatest(query, observed, jobs, jmis) == expected
+            @test isequal((observed, jobs, jmis), saved)
+        end
+    end
+end
+
+@stestset "all-missing covariate source retains every latent law" begin
+    data = (; x=Union{Missing, Float64}[missing, missing], y=[.2, -.3])
+    saved = deepcopy(data)
+    brmi = @brm data begin
+        mi(x) ~ Normal(0, 1)
+        mu ~ 1 + x
+        y ~ Normal(mu, 1)
+    end
+    backend, problem = consumer_problem(brmi)
+    names = coordinate_names(backend.model.layout)
+    index(n) = only(findall(==(Symbol(n)), names))
+    a, b = index("pop_mu.beta_pop.1"), index("pop_mu.beta_pop.2")
+    latent = [index("x.y_mis.$j") for j in 1:2]
+    @test length(names) == 4
+    oracle(u) = sum(logpdf.(Normal(), u)) +
+        sum(logpdf.(Normal.(u[a] .+ u[b] .* u[latent], 1), data.y))
+    for u in (zeros(4), fill(.13, 4), collect(range(-.2, .3; length=4)))
+        check_consumer_point(problem, u, oracle)
+    end
+    @test isequal(data, saved)
+end
+
+@stestset "weighted regression artifacts retain their normalized law" begin
+    data = (; x=[-.4, .2, .7, 1.1], y=[.2, -.1, .4, .3], n=[1, 2, 1, 3])
+    saved = deepcopy(data)
+    brmi = @brm data begin
+        mu ~ 1 + x
+        sigma ~ Exponential(1)
+        y ~ weighted(Normal(mu, sigma), fweights(n))
+    end
+    artifact = BRM.emit_rk_artifact(brmi; case_id="weighted-regression-preparation")
+    translated = rk_translate_artifact(artifact)
+    model = build_kernel(translated)
+    names = coordinate_names(model.layout)
+    @test sort(names) == sort([Symbol("pop_mu.beta_pop.1"), Symbol("pop_mu.beta_pop.2"), :sigma])
+    index(name) = only(findall(==(Symbol(name)), names))
+    alpha, beta, sigma = index("pop_mu.beta_pop.1"), index("pop_mu.beta_pop.2"), index("sigma")
+    oracle(u) = sum(data.n .* logpdf.(Normal.(u[alpha] .+ u[beta] .* data.x, exp(u[sigma])), data.y)) +
+        sum(logpdf.(Normal(), u[[alpha, beta]])) + logpdf(Exponential(), exp(u[sigma])) + u[sigma]
+    problem = prepare_sampler(model, translated, zeros(3);
+        backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    for u in (zeros(3), [.13, -.2, .3], [-.4, .2, -.1])
+        gradient = similar(u)
+        value, _ = sampler_value_and_gradient!(problem, gradient, u)
+        @test value ≈ oracle(u) atol=2e-11 rtol=2e-11
+        step = 1e-5
+        independent = map(eachindex(u)) do j
+            plus, minus = copy(u), copy(u)
+            plus[j] += step
+            minus[j] -= step
+            (oracle(plus) - oracle(minus)) / (2step)
+        end
+        @test gradient ≈ independent atol=2e-8 rtol=2e-8
+    end
+    @test isequal(data, saved)
+end
+
+@stestset "cached preparation cannot override emitted categorical and ordinal values" begin
+    groups = categorical(["b", "a", "b", "a"])
+    levels!(groups, ["b", "unused", "a"])
+    data = (; g=groups, category=["b", "a", "b", "a"], rank=[1, 3, 2, 1],
+        x=[-.7, -.2, .4, .9], y=[.2, -.1, .3, .4])
+    saved = deepcopy(data)
+    brmi = @brm data begin
+        mu ~ 1 + factor(category; ref="a") + mo(rank) + hsgp(x; k=3, by=g)
+        y ~ Normal(mu, 1)
+    end
+    backend, problem = consumer_problem(brmi)
+    artifact = BRM.emit_rk_artifact(brmi; case_id="prepared-source-inputs")
+    emitted = BRM._rk_emit_ast(backend.plan)
+    ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
+    prepared = Symbol[]
+    for term in only(backend.plan.predictors).terms
+        term.kind === :factor && append!(prepared, term.options.design_columns)
+        term.kind === :monotonic && append!(prepared, term.columns)
+        term.kind === :hsgp && push!(prepared, term.options.group_index)
+    end
+    @test !isempty(prepared)
+    bound_inputs = BRM._rk_source_data_columns(backend.plan, emitted)
+    @test isequal(BRM.rk_artifact_inputs(artifact), bound_inputs)
+    @test all(name -> !haskey(bound_inputs, name), prepared)
+    for name in prepared
+        backend.plan.columns[name] = ones(eltype(backend.plan.columns[name]), length(data.y))
+    end
+    translated = ext._rk_translate_from_emitted(backend.plan, emitted)
+    model = Base.invokelatest(build_kernel, translated)
+    @test coordinate_names(model.layout) == coordinate_names(backend.model.layout)
+    n = model.layout.total
+    replay = prepare_sampler(model, translated, zeros(n); backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    for u in (zeros(n), fill(.13, n), collect(range(-.2, .3; length=n)))
+        value, gradient = LogDensityProblems.logdensity_and_gradient(problem, u)
+        rg = similar(u)
+        rv, _ = sampler_value_and_gradient!(replay, rg, u)
+        @test rv == value
+        @test rg == gradient
+    end
+    @test isequal(data, saved)
+end
+
+@stestset "response coding and count columns are executable source" begin
+    for kind in (:categorical, :multinomial)
+        data = kind === :categorical ? (; obs=[10, 20, 20, 10]) :
+            (; obs=[1 2; 3 0; 0 2; 2 2], n=[3, 3, 2, 4])
+        saved = deepcopy(data)
+        brmi = if kind === :categorical
+            @brm data begin
+                p ~ Dirichlet([2., 5.])
+                obs ~ Categorical(p)
+            end
+        else
+            @brm data begin
+                p ~ Dirichlet([2., 5.])
+                obs ~ Multinomial(n, p)
+            end
+        end
+        backend, problem = consumer_problem(brmi)
+        artifact = BRM.emit_rk_artifact(brmi; case_id="response-source-$kind")
+        @test !haskey(rk_artifact_inputs(artifact), :obs)
+        @test length(coordinate_names(backend.model.layout)) == 1
+        oracle(u) = begin
+            p = inv(1 + exp(-only(u)))
+            likelihood = if kind === :categorical
+                sum(logpdf.(Categorical([p, 1-p]), [1, 2, 2, 1]))
+            else
+                sum(logpdf(Multinomial(data.n[j], [p, 1-p]), data.obs[j, :])
+                    for j in eachindex(data.n))
+            end
+            logpdf(Beta(2, 5), p) + log(p) + log1p(-p) + likelihood
+        end
+        for u in ([0.], [.13], [-.2])
+            check_consumer_point(problem, u, oracle)
+        end
+        @test isequal(data, saved)
+    end
+end

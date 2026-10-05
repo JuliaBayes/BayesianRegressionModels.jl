@@ -166,7 +166,7 @@ end
                     sum(logpdf.(Normal(),u[location_z]))
                 u[intercept] .+ exp(u[location_scale]) .* u[location_z][groups]
             else
-                value = Float64[ismissing(data.x[j]) ? u[index("x_y_mis.1")] :
+                value = Float64[ismissing(data.x[j]) ? u[index("x.y_mis.1")] :
                     data.x[j] for j in 1:6]
                 prior += sum(logpdf.(Normal(),value))
                 value

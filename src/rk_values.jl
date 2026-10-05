@@ -18,7 +18,7 @@ brm_invcloglog(x) = -expm1(-exp(x))
 
 function _rk_value_link!(bindings, link, lhs, taken)
     link === :identity && return lhs
-    head = link === :log ? :exp : link === :logit ? :logistic :
+    head = link === :log ? :exp : link === :logit ? _rk_value_callee!(bindings, logistic, taken) :
         link === :probit ? :brm_invprobit :
         link === :cloglog ? :brm_invcloglog : error("RK backend: unknown link `$link`")
     _rk_ast_dotted(head, lhs)
@@ -87,6 +87,84 @@ function _rk_ast_positive_prior(prior, bindings, taken; default=:HalfNormal)
     # A BRM scale declaration constrains support without renormalizing its
     # authored family. Explicit `truncated` above retains its own normalizer.
     Expr(:call, :restricted, expression, 0.0, Inf)
+end
+
+# One varying-effect block, as StanBlocks' `ranef_*_draws` submodels: the
+# scales (unless an R2D2 budget derives them and passes them in), standard
+# innovations and correlation factor, returning the levels x K draws.
+# `scale_priors` is one shared law or a vector of per-margin laws.
+function _rk_ast_varying_draws!(definitions, taken, K, eta, rows;
+        group=nothing, scale_priors=nothing, scales=nothing, coordinates=nothing,
+        coordinate_record=nothing, scope=nothing)
+    block = _rk_block_body(rows, scale_priors)
+    axis = group === nothing ? rows :
+        Expr(:call, :levels, _rk_block_argument!(block, :g, group))
+    index = Expr(:call, :(:), 1, K)
+    sd = scales === nothing ? _rk_block_local!(block, :sd) :
+        _rk_block_argument!(block, :sd, scales)
+    parts = nothing
+    if scale_priors isa AbstractVector
+        parts = [_rk_block_local!(block, string(sd, "_", j)) for j in eachindex(scale_priors)]
+        for (part, prior) in zip(parts, scale_priors)
+            push!(block.statements, Expr(:call, :~, part, prior))
+        end
+        push!(block.statements, Expr(:(=), sd, Expr(:vect, parts...)))
+    elseif scale_priors !== nothing
+        push!(block.statements, Expr(:call, :.~, Expr(:ref, sd, index),
+            _rk_ast_dotted(scale_priors.args[1], scale_priors.args[2:end]...)))
+    end
+    z = _rk_block_local!(block, :z)
+    push!(block.statements, Expr(:call, :.~, Expr(:ref, z, axis, index),
+        _rk_ast_dotted(:Normal, 0, 1)))
+    L = nothing
+    value = if K == 1
+        Expr(:call, :.*, z, Expr(:ref, sd, 1))
+    else
+        L = _rk_block_local!(block, :L)
+        push!(block.statements, Expr(:call, :~, L, Expr(:call, :LKJCholesky, K, eta)))
+        Expr(:call, :*, z, Expr(:call, :transpose, Expr(:call, :.*, sd, L)))
+    end
+    if coordinate_record !== nothing
+        path(local_name) = Symbol(scope, ".", local_name)
+        _rk_coordinate_record!(coordinates, (; coordinate_record...,
+            scale=path(sd), scales=parts === nothing ? nothing : Tuple(path.(parts)),
+            z=path(z), L=L === nothing ? nothing : path(L)))
+    end
+    base = K == 1 ? "brm_varying_draws" : "brm_correlated_draws"
+    _rk_ast_block_call!(definitions, taken, scales === nothing ? base : base * "_r2d2",
+        block, value)
+end
+
+# `gr(g, by=s)`: per-stratum scales and correlation factors, one row of draws
+# per observation (StanBlocks' `ranef_correlated_by_draws`).
+function _rk_ast_stratified_draws!(definitions, taken, K, eta, group, stratum)
+    block = _rk_block_body()
+    g = _rk_block_argument!(block, :g, group)
+    s = _rk_block_argument!(block, :s, stratum)
+    sd, z, b = _rk_block_local!(block, :sd), _rk_block_local!(block, :z),
+        _rk_block_local!(block, :b)
+    i = _rk_block_local!(block, :i)
+    index = Expr(:call, :(:), 1, K)
+    push!(block.statements, Expr(:call, :.~, Expr(:ref, sd,
+        Expr(:call, :levels, s), index),
+        _rk_ast_dotted(:restricted, Expr(:call, :Normal, 0, 1), 0.0, Inf)))
+    L = nothing
+    if K > 1
+        L, k = _rk_block_local!(block, :L), _rk_block_local!(block, :k)
+        cell = Expr(:call, :~, Expr(:ref, L, k), Expr(:call, :LKJCholesky, K, eta))
+        push!(block.statements, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
+            Expr(:for, Expr(:(=), k, Expr(:call, :levels, s)), Expr(:block, cell))))
+    end
+    push!(block.statements, Expr(:call, :.~, Expr(:ref, z,
+        Expr(:call, :levels, g), index), _rk_ast_dotted(:Normal, 0, 1)))
+    scale = Expr(:ref, sd, Expr(:ref, s, i), :(:))
+    raw = Expr(:ref, z, Expr(:ref, g, i), :(:))
+    value = K == 1 ? Expr(:call, :.*, scale, raw) :
+        Expr(:call, :*, Expr(:call, :.*, scale, Expr(:ref, L, Expr(:ref, s, i))), raw)
+    cell = Expr(:(=), Expr(:ref, b, i, index), value)
+    push!(block.statements, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
+        Expr(:for, Expr(:(=), i, Expr(:call, :eachindex, g)), Expr(:block, cell))))
+    _rk_ast_block_call!(definitions, taken, "brm_stratified_draws", block, b)
 end
 
 function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindings;
@@ -186,29 +264,36 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
     stmts
 end
 
-function _rk_ast_value_spline(term, taken)
+# A penalized smooth, as StanBlocks' `_sb_s_generic`/`_sb_t2_generic`: the
+# fitted bases stay caller-level values; one block allocates the unpenalized
+# coefficients, smoothing scales and standardized penalized coefficients.
+function _rk_ast_value_spline(definitions, term, taken)
     X = _rk_ast_fresh_name(string(term.options.id, "_X"), taken)
     nblocks = term.options.kind === :t2 ? 3 : 1
     Z = [_rk_ast_fresh_name(string(term.options.id, "_Z", j), taken) for j in 1:nblocks]
     k = term.options.k
     kval = k isa Tuple ? Expr(:tuple, k...) : k
     basis = term.options.kind === :t2 ? :brm_t2_basis : :brm_tps_basis
-    call = Expr(:call, basis, term.columns..., kval)
-    b = _rk_ast_fresh_name(string(term.options.id, "_fixed"), taken)
-    stmts = Expr[Expr(:(=), Expr(:tuple, X, Z...), call),
-        Expr(:call, :.~, Expr(:ref, b, Expr(:call, :axes, X, 2)),
-            _rk_ast_dotted(:Flat))]
-    parts = Any[Expr(:call, :*, X, b)]
-    for (j, block) in enumerate(Z)
-        sd = _rk_ast_fresh_name(string(term.options.id, "_sd", j), taken)
-        raw = _rk_ast_fresh_name(string(term.options.id, "_raw", j), taken)
-        push!(stmts, Expr(:call, :~, sd,
+    stmts = Expr[Expr(:(=), Expr(:tuple, X, Z...),
+        Expr(:call, basis, term.columns..., kval))]
+    block = _rk_block_body()
+    fixed_basis = _rk_block_argument!(block, :X, X)
+    penalized = [_rk_block_argument!(block, "Z$j", Zj) for (j, Zj) in enumerate(Z)]
+    fixed = _rk_block_local!(block, :fixed)
+    push!(block.statements, Expr(:call, :.~,
+        Expr(:ref, fixed, Expr(:call, :axes, fixed_basis, 2)), _rk_ast_dotted(:Flat)))
+    parts = Any[Expr(:call, :*, fixed_basis, fixed)]
+    for (j, basis) in enumerate(penalized)
+        sd, raw = _rk_block_local!(block, "sd$j"), _rk_block_local!(block, "raw$j")
+        push!(block.statements, Expr(:call, :~, sd,
             Expr(:call, :restricted, Expr(:call, :Normal, 0, 1), 0.0, Inf)))
-        push!(stmts, Expr(:call, :.~, Expr(:ref, raw, Expr(:call, :axes, block, 2)),
-            _rk_ast_dotted(:Normal, 0, 1)))
-        push!(parts, Expr(:call, :*, block, Expr(:call, :.*, sd, raw)))
+        push!(block.statements, Expr(:call, :.~,
+            Expr(:ref, raw, Expr(:call, :axes, basis, 2)), _rk_ast_dotted(:Normal, 0, 1)))
+        push!(parts, Expr(:call, :*, basis, Expr(:call, :.*, sd, raw)))
     end
-    push!(stmts, Expr(:(=), term.options.id, Expr(:call, :.+, parts...)))
+    push!(stmts, Expr(:call, :~, term.options.id, _rk_ast_block_call!(definitions, taken,
+        term.options.kind === :t2 ? "brm_t2_smooth" : "brm_smooth", block,
+        Expr(:call, :.+, parts...))))
     stmts
 end
 
@@ -227,7 +312,8 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
         _rk_ast_hsgp_basis_graph!(definitions, term, taken, PHI, lambda, floors)
     end
     if haskey(options, :group_index) || !isempty(get(options, :hyper_plans, ()))
-        append!(stmts, _rk_ast_hsgp_grouped(definitions, term, PHI, lambda, floors, taken, bindings))
+        push!(stmts, Expr(:call, :~, options.id,
+            _rk_ast_hsgp_grouped(definitions, term, PHI, lambda, floors, taken, bindings)))
         return stmts
     end
     axes = periodic || options.iso ? 1 : length(term.columns)
@@ -275,10 +361,17 @@ function _rk_needs_value_plan(program, observations)
         # an authored array reader; no population intercept is synthesized.
         family = rhs
         while family isa ExprColumn && getf(family) in
-                (censored, truncated, interval_censored) && !isempty(getargs(family))
+                (weighted, censored, truncated, interval_censored) && !isempty(getargs(family))
             family = first(getargs(family))
         end
         head = family isa ExprColumn ? getf(family) : nothing
+        # A categorical response owns fitted level coding and a whole simplex;
+        # it is not a scalar response merely because it has no formula location.
+        head === Categorical && continue
+        # The joint family consumes one mean per outcome and a whole factor.
+        # Its constructor is a function, but it must use joint row lowering,
+        # rather than scalar broadcasting through the caller-owned value route.
+        head === MvNormalCholesky && continue
         # Caller-owned scalar RHS constructors use the ordinary value/source
         # protocol. Their sampled parents need no synthetic formula predictor.
         if head !== nothing && head !== LocationScale &&
@@ -360,6 +453,11 @@ function _rk_predictor_components(brmi, context, predictor_order, columns,
         push!(r2d2_vectors, r2d2.phi)
     end
     _brm_validate_population_effect_defaults(brmi, matched_defaults)
+    for predictor in predictors, term in predictor.terms
+        source = haskey(term.options, :zero_source) ? term.options.zero_source :
+            term.kind in (:monotonic, :monotonic_summand) ? term.options.source : nothing
+        source === nothing || (columns[source] = context.data[source])
+    end
     vectors = [_rk_plan_monotonic_vectors!(predictors); r2d2_vectors]
     (; predictors, priors, r2d2_priors, horseshoe_priors, buckets, vectors)
 end
@@ -410,13 +508,13 @@ function _brm_rk_value_plan(brmi, program, observations; kernels=(), submodels=(
     obs = Tuple(o for o in prepared.observations if o.name in roots)
     completions = _RKMissingValueSpec[]
     obs = map(obs) do original
-        o = _rk_prepare_missing_value!(value_columns, taken, original, program, completions)
+        o = _rk_prepare_missing_value!(value_columns, taken, original, program, completions, derived)
         o.weight === nothing || error(
             "RK backend: value-based response `$(o.name)` weights need an authored response")
         layout = isempty(kernels) ?
             (; values=o.response, rows=nothing, lengths=nothing) :
             _rk_kernel_observed_layout(o, kernels)
-        modifier = _rk_kernel_response_modifier!(value_columns, taken, o, layout)
+        modifier = _rk_kernel_response_modifier!(value_columns, taken, derived, o, layout)
         if modifier !== nothing
             bounds = (modifier.lower, modifier.upper)
             if all(b -> b === nothing || b isa Real ||
@@ -428,7 +526,10 @@ function _brm_rk_value_plan(brmi, program, observations; kernels=(), submodels=(
                     layout.values, context.data; prefix="RK backend")
             end
         end
-        value_columns[o.name] = layout.values
+        raw_response = o.lhs isa ExprColumn && getf(o.lhs) === ragged ?
+            parent(parent(first(getargs(o.lhs)))) : o.response
+        _rk_prepare_kernel_observed_values!(value_columns, taken, derived,
+            o.name, layout, raw_response)
         _BRMPreparedObservation(o.name, o.lhs, o.distribution, o.response,
             modifier, o.weight, o.missing_response)
     end
@@ -495,6 +596,9 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
     stmts = copy(regression.main.args)
     defs = copy(regression.defs)
     bindings = copy(regression.bindings)
+    observations = Dict(completion.source => completion.observed for completion in plan.completions)
+    stmts = map(statement -> _rk_observed_anchor_source(statement, observations), stmts)
+    defs = map(definition -> _rk_observed_anchor_source(definition, observations), defs)
     taken = Set{Symbol}(keys(plan.columns))
     union!(taken, first.(bindings), (a.name for a in plan.assignments),
         (p.name for p in plan.regression.parameters),
@@ -550,7 +654,11 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
         end
         push!(stmts, Expr(:call, :.~, observation.name, base))
     end
-    stmts = _rk_order_value_statements(stmts, keys(plan.columns))
+    stmts = _rk_source_data_axes(stmts, plan.columns)
+    computed = Set{Symbol}()
+    foreach(statement -> _rk_source_assignments!(computed, statement), stmts)
+    stmts = _rk_order_value_statements(stmts, setdiff(Set(keys(plan.columns)), computed), defs;
+        observed=_rk_observed_names(plan))
     _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings),
         _rk_observed_names(plan))
 end

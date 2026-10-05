@@ -96,19 +96,8 @@ end
 end
 
 function graph_source_inventory(graph; depth=0)
-    result = Tuple{Symbol,Int}[]
-    for recipe in graph.recipes
-        if recipe.op isa ReactiveKernels._AuthoredPlateOp
-            push!(result, (:plate, depth))
-            append!(result, graph_source_inventory(
-                ReactiveKernels.plate_body(recipe); depth=depth+1))
-        elseif recipe.op isa ReactiveKernels._AuthoredScanOp
-            push!(result, (:scan, depth))
-            append!(result, graph_source_inventory(
-                ReactiveKernels.scan_body(recipe); depth=depth+1))
-        end
-    end
-    result
+    [(entry.kind, depth + entry.depth) for entry in ReactiveKernels.recipe_inventory(graph)
+        if entry.kind !== :ordinary]
 end
 
 @stestset "graph provider source and printed definitions retain child recipes" begin
