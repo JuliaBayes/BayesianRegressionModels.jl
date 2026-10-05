@@ -389,12 +389,16 @@ end
     end)
     @test only(arithmetic.derived).expression ==
         Expr(:call, :.*, :x, 2)
-    # Unknown functions fail closed with the admitted list named.
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    # Ordinary scalar callables use the native formula-term route even when
+    # they are outside the small list of specially broadcast math heads.
+    trigonometric = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + sind(z)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
+    @test length(trigonometric.derived) == 1
+    @test only(trigonometric.predictors).terms[2].columns ==
+        [only(trigonometric.derived).name]
     # Scalar-valued terms fail closed (predictors take vector terms).
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + mean(x)
