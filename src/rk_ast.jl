@@ -57,10 +57,19 @@ end
 function _rk_source_data_columns(plan, emitted)
     computed = Set{Symbol}()
     for statement in emitted.main.args
-        Meta.isexpr(statement, :(=), 2) || continue
-        _rk_source_outputs!(computed, statement)
+        _rk_source_assignments!(computed, statement)
     end
     Dict(name => value for (name, value) in plan.columns if !(name in computed))
+end
+
+function _rk_source_assignments!(names, statement)
+    statement isa Expr || return names
+    if statement.head === :(=)
+        _rk_source_lhs!(names, first(statement.args))
+    elseif statement.head in (:macrocall, :for, :block)
+        foreach(arg -> _rk_source_assignments!(names, arg), statement.args)
+    end
+    names
 end
 
 # Whole numerical calls may return arrays. State each fitted data result's
@@ -81,9 +90,12 @@ function _rk_source_data_axes(statements, columns)
             continue
         end
         rows = Expr(:call, :(:), 1, length(columns[name]))
-        axis = _rk_ast_fresh_name(string(name, "_source_rows"), taken)
-        push!(out, Expr(:(=), axis, Expr(:call, :collect, rows)),
-            Expr(:(=), name, Expr(:ref, value, axis)))
+        values = _rk_ast_fresh_name(string(name, "_source_values"), taken)
+        row = _rk_ast_fresh_name(string(name, "_source_row"), taken)
+        cell = Expr(:(=), Expr(:ref, name, row), Expr(:ref, values, row))
+        push!(out, Expr(:(=), values, value),
+            Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
+                Expr(:for, Expr(:(=), row, rows), Expr(:block, cell))))
     end
     out
 end
