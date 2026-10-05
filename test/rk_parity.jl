@@ -1675,13 +1675,18 @@ end
             mu
         end
     end
-    plan = BRM._brm_rk_plan(brmi)
-    @test plan isa BRM._RKKernelPlan
-    @test plan.kernel.n_subjects == 3
-    @test plan.kernel.data_columns == [:t, :intercept, :slope, :y]
-    @test plan.kernel.slice_kinds == [:vector, :scalar, :scalar, :vector]
-    @test plan.kernel.n_timepoints == 4
-    @test plan.obs.family === :gaussian
+    artifact = BRM.emit_rk_artifact(brmi; case_id="parity-kernel-vector-cells")
+    inputs = BRM.rk_artifact_inputs(artifact)
+    @test inputs[:pred_subject_count] == 3
+    for name in (:t, :intercept, :slope, :y)
+        @test inputs[Symbol(:pred_input_, name)] == getproperty(_kernel_vector_cols, name)
+    end
+    @test all(length(cell) == 4 for cell in inputs[:pred_input_t])
+    @test all(length(cell) == 4 for cell in inputs[:pred_input_y])
+    @test all(cell isa Real for cell in inputs[:pred_input_intercept])
+    @test all(cell isa Real for cell in inputs[:pred_input_slope])
+    @test occursin("Normal", sprint(Base.show_unquoted,
+        Expr(:block, artifact.defs..., artifact.ast)))
     backend = _parity_backend(brmi)
     @test backend.model.layout.total == 1
     means = [a .+ b .* t for (a, b, t) in zip(_kernel_vector_cols.intercept,
@@ -1701,13 +1706,17 @@ end
             mu
         end
     end
-    plan = BRM._brm_rk_plan(brmi)
-    @test plan isa BRM._RKKernelPlan
-    @test plan.kernel.n_subjects == 4
-    @test plan.kernel.data_columns == [:x, :intercept, :y]
-    @test plan.kernel.slice_kinds == [:scalar, :scalar, :scalar]
-    @test plan.kernel.n_timepoints === nothing
-    @test plan.obs.family === :gaussian
+    artifact = BRM.emit_rk_artifact(brmi; case_id="parity-kernel-scalar-cells")
+    inputs = BRM.rk_artifact_inputs(artifact)
+    @test inputs[:pred_subject_count] == 4
+    for name in (:x, :intercept, :y)
+        column = inputs[Symbol(:pred_input_, name)]
+        @test column == getproperty(_kernel_scalar_cols, name)
+        @test length(column) == 4
+        @test all(cell isa Real for cell in column)
+    end
+    @test occursin("Normal", sprint(Base.show_unquoted,
+        Expr(:block, artifact.defs..., artifact.ast)))
     backend = _parity_backend(brmi)
     @test backend.model.layout.total == 1
     residuals = _kernel_scalar_cols.y .- (_kernel_scalar_cols.intercept .+ 2 .* _kernel_scalar_cols.x)

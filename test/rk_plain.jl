@@ -203,7 +203,9 @@ public_prior_reader(a, b, row) = a[row] .+ b[row]
     end
     default_backend, backend = RKBRMI(control), RKBRMI(explicit)
     check_printed_roundtrip(default_backend)
-    source = check_printed_roundtrip(backend)
+    check_printed_roundtrip(backend)
+    artifact = emit_rk_artifact(explicit; case_id="shared-explicit-prior-source")
+    source = sprint(Base.show_unquoted, Expr(:block, artifact.defs..., artifact.ast))
     @test occursin("Exponential.(0.7)", source)
     @test occursin("LKJCholesky(2, 3.0)", source)
     @test coordinate_names(backend.model.layout) == coordinate_names(default_backend.model.layout)
