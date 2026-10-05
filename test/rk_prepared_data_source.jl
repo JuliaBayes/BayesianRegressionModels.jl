@@ -7,7 +7,7 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
     definitions, taken = Expr[], Set{Symbol}()
     for name in (:brm_prepared_indices, :brm_factor_dummy, :brm_covariate_geometry,
             :brm_covariate_observed, :brm_covariate_observed_rows, :brm_covariate_missing_rows,
-            :brm_matrix_column)
+            :brm_matrix_column, :brm_flatten_response, :brm_gather_response)
         BRM._rk_ast_statistical_call!(definitions, taken, name; kernel=true)
     end
     emitted = BRM._RKEmittedProgram(definitions, Expr(:block))
@@ -29,6 +29,10 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
         @test Base.invokelatest(prepare(getfield(mod, :brm_covariate_observed_rows)), raw) == [1, 3]
         @test Base.invokelatest(prepare(getfield(mod, :brm_covariate_missing_rows)), raw) == [2, 4]
         @test Base.invokelatest(prepare(getfield(mod, :brm_matrix_column)), [[1 2; 3 4]], 2) == [2, 4]
+        @test Base.invokelatest(prepare(getfield(mod, :brm_flatten_response)),
+            [[.2, -.3], Float64[], [.4]]) == [.2, -.3, .4]
+        @test Base.invokelatest(prepare(getfield(mod, :brm_gather_response)),
+            [.2, -.3, .4], [3, 1, 2]) == [.4, .2, -.3]
         for (observed, jobs, jmis, expected) in (
                 ([3., 7.], [1, 3], [2, 4], ([3., 0., 7., 0.], [1, 1, 1, 2], [0., 1., 0., 1.])),
                 ([3., 5., 7.], [1, 2, 3], Int[], ([3., 5., 7.], [1, 1, 1], zeros(3))),

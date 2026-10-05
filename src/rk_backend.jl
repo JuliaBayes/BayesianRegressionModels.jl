@@ -6271,7 +6271,9 @@ function _rk_peel_joint_observation(observation)
                 head === interval_censored ?
             " (bounded joint responses are out of slice)" : ""))
     rows = _brm_joint_response_values(observation.lhs; prefix)
-    (; key=observation.key, rhs, raw_response=rows, weight_plan=nothing,
+    raw_outcomes = Tuple(parent(parent(column)) for column in
+        joint_response_columns(observation.lhs))
+    (; key=observation.key, rhs, raw_response=rows, raw_outcomes, weight_plan=nothing,
         modifier=nothing, joint_outcomes=outcomes, missing_response=nothing)
 end
 
@@ -6566,8 +6568,9 @@ function _rk_plan_joint_response!(entry, link::Symbol, predictor::Symbol,
         "$prefix: internal: joint response `$(entry.key)` has $K " *
         "outcomes but $(1 + length(extra)) mean predictors")
     stem = _rk_joint_stem(entry.rhs)
-    for (i, outcome) in enumerate(outcomes)
-        column = Float64[row[i] for row in entry.raw_response]
+    for (outcome, column) in zip(outcomes, entry.raw_outcomes)
+        column isa AbstractVector || error(
+            "$prefix: joint response outcome `$outcome` has no original data column")
         columns[outcome] = _rk_gate_response_values!(
             :mvnormal_cholesky, column, outcome)
     end

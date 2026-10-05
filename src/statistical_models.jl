@@ -161,6 +161,18 @@ function rkppl_model end
 # ordinary functions or numerical graphs, not submodels: statistical blocks
 # that allocate parameters are generated per block (see `_rk_ast_block_call!`).
 const _BRM_STATISTICAL_VALUES = (
+    brm_flatten_response = :(
+brm_flatten_response(cells) = begin
+    values = reduce(vcat, cells; init=eltype(eltype(cells))[])
+    return values
+end),
+
+    brm_gather_response = :(
+brm_gather_response(raw, rows) = begin
+    values = raw[rows]
+    return values
+end),
+
     brm_matrix_column = :(
 brm_matrix_column(inputs, column) = begin
     matrix = only(inputs)

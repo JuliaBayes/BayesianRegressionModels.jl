@@ -184,6 +184,24 @@ function _rk_kernel_observed_layout(observation, kernels)
     (; values=response, rows=nothing, lengths=nothing)
 end
 
+# The partition fixes likelihood geometry; its values are produced from the
+# original response port by the emitted numerical graph.
+function _rk_prepare_kernel_observed_values!(columns, taken, derived, name, layout, raw)
+    columns[name] = layout.values
+    layout.lengths === nothing && return
+    source = _rk_ast_fresh_name(string(name, "_raw_response"), taken)
+    columns[source] = raw
+    expression = if layout.rows === nothing && raw isa AbstractVector{<:AbstractVector}
+        Expr(:_rk_data_preparation, :brm_flatten_response, source)
+    else
+        rows = layout.rows === nothing ? collect(eachindex(raw)) :
+            reduce(vcat, layout.rows; init=Int[])
+        Expr(:_rk_data_preparation, :brm_gather_response, source, Expr(:vect, rows...))
+    end
+    push!(derived, _RKDerivedSpec(name, expression, name))
+    nothing
+end
+
 # Only the likelihood receives these row views. Keep original data ports for
 # kernels, readers and other responses, and perform the gather in printed RK
 # source rather than replacing their bound values during preparation.
@@ -335,7 +353,7 @@ function _rk_align_kernel_observation_arguments!(defs, statements, bindings, tak
     _BRMPreparedExpr(distribution.callable, Tuple(outputs), distribution.kwargs)
 end
 
-function _rk_kernel_response_modifier!(columns, taken, observation, layout)
+function _rk_kernel_response_modifier!(columns, taken, derived, observation, layout)
     modifier = observation.modifier
     (modifier === nothing || layout.lengths === nothing) && return modifier
     function gather(bound, label)
@@ -360,7 +378,10 @@ function _rk_kernel_response_modifier!(columns, taken, observation, layout)
         # terms. Only this likelihood consumes the gathered bound column.
         key = _rk_ast_fresh_name(
             "$(observation.name)_$(label)_$(name(bound))_grouped", taken)
-        columns[key] = grouped
+        bound_layout = (; values=grouped,
+            rows=raw isa AbstractVector{<:AbstractVector} ? nothing : layout.rows,
+            lengths=layout.lengths)
+        _rk_prepare_kernel_observed_values!(columns, taken, derived, key, bound_layout, raw)
         NamedColumn(key, DataColumn(grouped))
     end
     _BRMResponseModifierPlan(modifier.kind, modifier.base,
@@ -379,14 +400,20 @@ function _brm_rk_composed_kernel_plan(brmi)
     submodels = _rk_prepare_submodel_values(program)
     plan = _brm_rk_value_plan(brmi, program, direct; kernels, submodels)
     observations = Any[plan.observations...]
+    taken = union(Set{Symbol}(keys(plan.columns)),
+        Set(spec.name for spec in plan.regression.derived),
+        Set(assignment.name for assignment in plan.assignments))
     for kernel in kernels, observation in kernel.observations
         raw = program.context.data[observation.source]
-        plan.columns[observation.source] = raw isa AbstractVector{<:AbstractVector} ?
-            _rk_flatten_kernel_response(raw) : raw
+        layout = raw isa AbstractVector{<:AbstractVector} ?
+            (; values=_rk_flatten_kernel_response(raw), rows=nothing, lengths=length.(raw)) :
+            (; values=raw, rows=nothing, lengths=nothing)
+        _rk_prepare_kernel_observed_values!(plan.columns, taken, plan.regression.derived,
+            observation.source, layout, raw)
         distribution = _rk_kernel_observation_distribution(observation)
         push!(observations, _BRMPreparedObservation(observation.source,
             NamedColumn(observation.source, DataColumn(plan.columns[observation.source])),
-            distribution, plan.columns[observation.source], nothing, nothing))
+            distribution, raw, nothing, nothing))
     end
     isempty(observations) && error("RK backend: kernel program needs at least one observed likelihood")
     _RKValuePlan(plan.regression, plan.assignments, Tuple(observations), plan.columns,

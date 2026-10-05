@@ -524,7 +524,7 @@ function _brm_rk_value_plan(brmi, program, observations; kernels=(), submodels=(
         layout = isempty(kernels) ?
             (; values=o.response, rows=nothing, lengths=nothing) :
             _rk_kernel_observed_layout(o, kernels)
-        modifier = _rk_kernel_response_modifier!(value_columns, taken, o, layout)
+        modifier = _rk_kernel_response_modifier!(value_columns, taken, derived, o, layout)
         if modifier !== nothing
             bounds = (modifier.lower, modifier.upper)
             if all(b -> b === nothing || b isa Real ||
@@ -536,7 +536,10 @@ function _brm_rk_value_plan(brmi, program, observations; kernels=(), submodels=(
                     layout.values, context.data; prefix="RK backend")
             end
         end
-        value_columns[o.name] = layout.values
+        raw_response = o.lhs isa ExprColumn && getf(o.lhs) === ragged ?
+            parent(parent(first(getargs(o.lhs)))) : o.response
+        _rk_prepare_kernel_observed_values!(value_columns, taken, derived,
+            o.name, layout, raw_response)
         _BRMPreparedObservation(o.name, o.lhs, o.distribution, o.response,
             modifier, o.weight, o.missing_response)
     end
