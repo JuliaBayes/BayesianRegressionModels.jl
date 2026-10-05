@@ -1258,7 +1258,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 only(term.columns), options.loc, options.scale))
         end
         append!(stmts, scalar_stmts)
-        affine = if r2d2 === nothing && hs_tau === nothing &&
+        affine = if !values && r2d2 === nothing && hs_tau === nothing &&
                 predictor.row_source !== nothing &&
                 all(term -> term.kind in (:intercept, :continuous), predictor.terms)
             design = _rk_ast_fresh_name(string(lhs, "_X"), taken)
