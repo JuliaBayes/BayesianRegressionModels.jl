@@ -51,16 +51,7 @@ modeled_hsgp_points(N) = (zeros(N), collect(range(-0.2, 0.3; length=N)),
     0.13 .+ 0.07 .* sin.(1:N))
 
 function modeled_hsgp_outputs(graph)
-    outputs = String[]
-    for recipe in graph.recipes
-        push!(outputs, repr(recipe.outputs))
-        if recipe.op isa ReactiveKernels._AuthoredPlateOp
-            append!(outputs, modeled_hsgp_outputs(plate_body(recipe)))
-        elseif recipe.op isa ReactiveKernels._AuthoredScanOp
-            append!(outputs, modeled_hsgp_outputs(scan_body(recipe)))
-        end
-    end
-    outputs
+    [repr(entry.recipe.outputs) for entry in recipe_inventory(graph)]
 end
 
 function modeled_hsgp_location_query(model, translated)
@@ -94,9 +85,12 @@ end
         @test term.options.fixed_fits == ((2.0, 2.0),)
         emitted = BRM._rk_emit_ast(backend.plan)
         main = sprint(Base.show_unquoted, emitted.main)
+        blocks = join((sprint(Base.show_unquoted, d) for d in emitted.defs
+            if BRM._rk_source_definition(d).kind === :rkppl), "\n")
         @test occursin("hsgp_x_PHI = hsgp_x_basis_graph_basis_matrix(x)", main)
-        @test occursin("hsgp_x_z[1:3] .~ Normal.(0, 1)", main)
-        @test occursin("hsgp_x_rho ~ Uniform(0.4, 3.0)", main)
+        @test occursin("hsgp_x ~ brm_hsgp(", main)
+        @test occursin("z[1:3] .~ Normal.(0, 1)", blocks)
+        @test occursin("rho ~ Uniform(0.4, 3.0)", blocks)
         # Basis, centering, projection and spectral weights are numerical
         # intermediates of the actual built posterior graph.
         outputs = join(modeled_hsgp_outputs(kernel_graph(backend.model.spec)), "\n")
@@ -120,14 +114,14 @@ end
             first(modeled_hsgp_basis(constant_axis, 3, 2.0, 2.0; orthogonal=true)) atol=2e-14
         index(n) = only(findall(==(Symbol(n)), names))
         beta = index.(["eta_Intercept", "mu_Intercept", "mu_x"])
-        location_scale = index("ranef_draws_location_subject_sd.1")
-        location_z = [index("ranef_draws_location_subject_z.$j.1") for j in 1:3]
-        scales = index.(["ranef_draws_effect_subject_sd.1", "ranef_draws_effect_subject_sd.2"])
-        z = [index("ranef_draws_effect_subject_z.$j.$k") for j in 1:3, k in 1:2]
-        correlation = index("ranef_draws_effect_subject_L.1")
+        location_scale = index("ranef_draws_location_subject.sd.1")
+        location_z = [index("ranef_draws_location_subject.z.$j.1") for j in 1:3]
+        scales = index.(["ranef_draws_effect_subject.sd.1", "ranef_draws_effect_subject.sd.2"])
+        z = [index("ranef_draws_effect_subject.z.$j.$k") for j in 1:3, k in 1:2]
+        correlation = index("ranef_draws_effect_subject.L.1")
         assay_scale, sigma = index.(["assay_scale", "sigma"])
-        rho_u, hsgp_sigma = index.(["hsgp_x_rho", "hsgp_x_sigma"])
-        weights_z = [index("hsgp_x_z.$b") for b in 1:3]
+        rho_u, hsgp_sigma = index.(["hsgp_x.rho", "hsgp_x.sigma"])
+        weights_z = [index("hsgp_x.z.$b") for b in 1:3]
         function components(u)
             rho, tau = tanh(u[correlation]), exp.(u[scales])
             L = [1.0 0.0; rho sqrt(1-rho^2)]
@@ -247,8 +241,8 @@ end
         @test haskey(backend.plan.columns, :w) == (axis === :w)
         @test !haskey(backend.plan.columns, :x)
         id = "hsgp_$axis"
-        rho_u, hsgp_sigma = index.([id * "_rho", id * "_sigma"])
-        weights_z = [index(id * "_z.$b") for b in 1:k]
+        rho_u, hsgp_sigma = index.([id * ".rho", id * ".sigma"])
+        weights_z = [index(id * ".z.$b") for b in 1:k]
         mapping = Pair{Symbol,String}[names[rho_u]=>id * "_rho_iso",
             names[hsgp_sigma]=>id * "_sigma"]
         append!(mapping, [names[weights_z[b]]=>id * "_beta_raw.$b" for b in 1:k])
@@ -259,8 +253,8 @@ end
         if axis === :x
             parent = label == "link-predictor" ? "x" : "eta"
             parent_beta = index("$(parent)_Intercept")
-            location_scale = index("ranef_draws_location_subject_sd.1")
-            location_z = [index("ranef_draws_location_subject_z.$j.1") for j in 1:3]
+            location_scale = index("ranef_draws_location_subject.sd.1")
+            location_z = [index("ranef_draws_location_subject.z.$j.1") for j in 1:3]
             push!(mapping, names[parent_beta]=>
                 (label == "link-predictor" ? "pop_log_x_beta_pop.1" : "pop_eta_beta_pop.1"),
                 names[location_scale]=>"b_location_subject_tau.1")

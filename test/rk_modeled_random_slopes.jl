@@ -54,11 +54,11 @@ end
         @test effect.margins[2].z.column === :x
         index(n) = only(findall(==(Symbol(n)), names))
         beta = index.(["eta_Intercept", "mu_Intercept", "mu_x"])
-        location_scale = index("ranef_draws_location_subject_sd.1")
-        location_z = [index("ranef_draws_location_subject_z.$j.1") for j in 1:3]
-        scales = index.(["ranef_draws_effect_subject_sd.1", "ranef_draws_effect_subject_sd.2"])
-        z = [index("ranef_draws_effect_subject_z.$j.$k") for j in 1:3, k in 1:2]
-        correlation = index("ranef_draws_effect_subject_L.1")
+        location_scale = index("ranef_draws_location_subject.sd.1")
+        location_z = [index("ranef_draws_location_subject.z.$j.1") for j in 1:3]
+        scales = index.(["ranef_draws_effect_subject.sd.1", "ranef_draws_effect_subject.sd.2"])
+        z = [index("ranef_draws_effect_subject.z.$j.$k") for j in 1:3, k in 1:2]
+        correlation = index("ranef_draws_effect_subject.L.1")
         assay_scale, sigma = index.(["assay_scale", "sigma"])
         function components(u)
             rho, tau = tanh(u[correlation]), exp.(u[scales])
@@ -157,8 +157,8 @@ end
         names = coordinate_names(backend.model.layout)
         index(n) = only(findall(==(Symbol(n)),names))
         beta = index("mu_$slope")
-        scale = index("ranef_draws_effect_subject_sd.1")
-        draws = [index("ranef_draws_effect_subject_z.$j.1") for j in 1:3]
+        scale = index("ranef_draws_effect_subject.sd.1")
+        draws = [index("ranef_draws_effect_subject.z.$j.1") for j in 1:3]
         @test !haskey(backend.plan.columns,slope)
         @test length(backend.plan.columns[:subject]) == 6
         @test backend.plan isa BRM._RKValuePlan
@@ -168,14 +168,14 @@ end
                 sum(logpdf.(Normal(),u[draws]))
             value = if slope === :eta
                 intercept = index("eta_Intercept")
-                location_scale = index("ranef_draws_location_subject_sd.1")
-                location_z = [index("ranef_draws_location_subject_z.$j.1") for j in 1:3]
+                location_scale = index("ranef_draws_location_subject.sd.1")
+                location_z = [index("ranef_draws_location_subject.z.$j.1") for j in 1:3]
                 prior += logpdf(Normal(-0.4,0.7),u[intercept]) +
                     logpdf(Exponential(0.8),exp(u[location_scale])) + u[location_scale] +
                     sum(logpdf.(Normal(),u[location_z]))
                 u[intercept] .+ exp(u[location_scale]) .* u[location_z][groups]
             else
-                value = Float64[ismissing(data.x[j]) ? u[index("x_y_mis.1")] :
+                value = Float64[ismissing(data.x[j]) ? u[index("x.y_mis.1")] :
                     data.x[j] for j in 1:6]
                 prior += sum(logpdf.(Normal(),value))
                 value

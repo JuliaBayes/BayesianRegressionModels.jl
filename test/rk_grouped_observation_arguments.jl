@@ -99,19 +99,9 @@ function grouped_join(data)
 end
 end
 
-# Inspect the actual built graph, including authored child plates. These
-# diagnostic predicates are frozen to the RK revision used by this fixture.
+# Inspect the actual built graph, including retained child recipes.
 function argument_graph_sources(graph)
-    sources = Any[]
-    for recipe in graph.recipes
-        push!(sources, recipe.source)
-        if recipe.op isa ReactiveKernels._AuthoredPlateOp
-            append!(sources, argument_graph_sources(plate_body(recipe)))
-        elseif recipe.op isa ReactiveKernels._AuthoredScanOp
-            append!(sources, argument_graph_sources(scan_body(recipe)))
-        end
-    end
-    sources
+    [entry.recipe.source for entry in recipe_inventory(graph)]
 end
 
 argument_callee_is(callee, name) = callee === name ||

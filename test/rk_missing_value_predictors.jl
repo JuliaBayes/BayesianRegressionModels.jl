@@ -66,11 +66,11 @@ end
     index(name) = only(findall(==(Symbol(name)), names))
     coefficients = index.(["Vc_Intercept", "Vc_standardize_age", "Vc_standardize_weight",
         "k10_Intercept", "k10_standardize_age"])
-    scales = index.(["ranef_draws_p_subject_sd.1", "ranef_draws_p_subject_sd.2"])
-    innovations = [index("ranef_draws_p_subject_z.$row.$margin")
+    scales = index.(["ranef_draws_p_subject.sd.1", "ranef_draws_p_subject.sd.2"])
+    innovations = [index("ranef_draws_p_subject.z.$row.$margin")
         for row in 1:3, margin in 1:2]
-    correlation = index("ranef_draws_p_subject_L.1")
-    ia, iw = index("age_y_mis.1"), index("weight_y_mis.1")
+    correlation = index("ranef_draws_p_subject.L.1")
+    ia, iw = index("age.y_mis.1"), index("weight.y_mis.1")
     observed_age = collect(skipmissing(data.age))
     observed_weight = collect(skipmissing(data.weight))
     am, as = mean(observed_age), std(observed_age)

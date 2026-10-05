@@ -14,32 +14,13 @@ function fixed_hsgp_oracle(axes, K, domains)
     PHI, omega2, floors
 end
 
-# Public graph/body accessors, with recipe classification explicitly frozen
-# to the tested RK revision (a stable public classifier remains separate).
+# Inspect retained structure and outputs through RK's public inventory.
 function hsgp_plate_depths(graph; depth=0)
-    result = Int[]
-    for recipe in graph.recipes
-        if recipe.op isa ReactiveKernels._AuthoredPlateOp
-            push!(result, depth)
-            append!(result, hsgp_plate_depths(plate_body(recipe); depth=depth+1))
-        elseif recipe.op isa ReactiveKernels._AuthoredScanOp
-            append!(result, hsgp_plate_depths(scan_body(recipe); depth=depth+1))
-        end
-    end
-    result
+    [depth + entry.depth for entry in recipe_inventory(graph) if entry.kind === :plate]
 end
 
 function hsgp_graph_outputs(graph)
-    outputs=String[]
-    for recipe in graph.recipes
-        push!(outputs,repr(recipe.outputs))
-        if recipe.op isa ReactiveKernels._AuthoredPlateOp
-            append!(outputs,hsgp_graph_outputs(plate_body(recipe)))
-        elseif recipe.op isa ReactiveKernels._AuthoredScanOp
-            append!(outputs,hsgp_graph_outputs(scan_body(recipe)))
-        end
-    end
-    outputs
+    [repr(entry.recipe.outputs) for entry in recipe_inventory(graph)]
 end
 
 # Replay the complete printed definitions and body, preserving explicit
@@ -125,9 +106,9 @@ end
         names = coordinate_names(backend.model.layout)
         id = length(K)==1 ? "hsgp_x" : "hsgp_x_w"
         position(name) = only(findall(==(Symbol(name)),names))
-        rpos = iso ? [position(id*"_rho")] : [position(id*"_rho$j") for j in eachindex(K)]
-        spos = position(id*"_sigma")
-        zpos = [position(id*"_z.$b") for b in 1:prod(K)]
+        rpos = iso ? [position(id*".rho")] : [position(id*".rho$j") for j in eachindex(K)]
+        spos = position(id*".sigma")
+        zpos = [position(id*".z.$b") for b in 1:prod(K)]
         function oracle(u)
             lower = iso ? [maximum(floors)] : floors
             rhos = lower .+ exp.(u[rpos])
@@ -185,8 +166,8 @@ end
         backend,problem=consumer_problem(brmi)
         names=coordinate_names(backend.model.layout)
         index(name)=only(findall(==(Symbol(name)),names))
-        r=index("hsgp_x_rho");s=index("hsgp_x_sigma")
-        z=[index("hsgp_x_z.$b") for b in 1:3]
+        r=index("hsgp_x.rho");s=index("hsgp_x.sigma")
+        z=[index("hsgp_x.z.$b") for b in 1:3]
         term=only(filter(t->t.kind===:hsgp,only(backend.plan.predictors).terms))
         @test !term.options.rho_truncated
         @test term.options.rho_stated && term.options.sigma_stated
@@ -203,8 +184,8 @@ end
                 sum(logpdf.(Normal(),u[z]))+sum(logpdf.(Normal.(locations,1.),data.y))
         end
         stan=consumer_stan(brmi,"fixed-hsgp-"*label)
-        mapping=Pair{Symbol,String}[:hsgp_x_rho=>"hsgp_x_rho_iso",
-            :hsgp_x_sigma=>"hsgp_x_sigma"]
+        mapping=Pair{Symbol,String}[Symbol("hsgp_x.rho")=>"hsgp_x_rho_iso",
+            Symbol("hsgp_x.sigma")=>"hsgp_x_sigma"]
         append!(mapping,[names[z[b]]=>"hsgp_x_beta_raw.$b" for b in 1:3])
         replayed,sampler=printed_hsgp_replay(backend)
         @test coordinate_names(replayed.layout)==names
@@ -250,22 +231,22 @@ end
         for intermediate in ("basis_rows","omega2",authored ? "spectra" : "weights")
             @test occursin(intermediate,actual_outputs)
         end
-        weights=[index("$(id)_z.$g.$b") for g in 1:G,b in 1:B]
+        weights=[index("$(id).z.$g.$b") for g in 1:G,b in 1:B]
         PHI,omega2,floors=fixed_hsgp_oracle((data.x,data.w)[1:length(K)],K,domains)
         floor=maximum(floors)
         function oracle(u)
             prior=sum(logpdf.(Normal(),u[weights]))
             hypers=map(("rho","sigma")) do stem
                 if authored
-                    beta=index("$(id)_$(stem)_Intercept")
-                    sd=index("$(id)_$(stem)_sd")
-                    zs=[index("$(id)_$(stem)_z.$g") for g in 1:G]
+                    beta=index("$(id).$(stem)_Intercept")
+                    sd=index("$(id).$(stem)_sd")
+                    zs=[index("$(id).$(stem)_z.$g") for g in 1:G]
                     prior+=logpdf(Normal(),u[beta])+sum(logpdf.(Normal(),u[zs]))+
                         logpdf(Normal(),exp(u[sd]))+u[sd]
                     value=exp.(u[beta].+exp(u[sd]).*u[zs])
                     stem=="rho" ? max.(value,floor) : value
                 else
-                    q=index("$(id)_$stem")
+                    q=index("$(id).$stem")
                     value=(stem=="rho" ? floor : 0.)+exp(u[q])
                     prior+=logpdf(LogNormal(),value)+u[q]
                     fill(value,G)
@@ -286,13 +267,13 @@ end
         end
         for (hyper,shared_name) in (("rho","rho_iso"),("sigma","sigma"))
             if authored
-                push!(mapping,Symbol("$(id)_$(hyper)_Intercept")=>"$(id)_by_g_beta0_$hyper")
-                push!(mapping,Symbol("$(id)_$(hyper)_sd")=>"$(id)_by_g_sd_$hyper")
+                push!(mapping,Symbol("$(id).$(hyper)_Intercept")=>"$(id)_by_g_beta0_$hyper")
+                push!(mapping,Symbol("$(id).$(hyper)_sd")=>"$(id)_by_g_sd_$hyper")
                 for g in 1:G
-                    push!(mapping,Symbol("$(id)_$(hyper)_z.$g")=>"$(id)_by_g_z_$hyper.$g")
+                    push!(mapping,Symbol("$(id).$(hyper)_z.$g")=>"$(id)_by_g_z_$hyper.$g")
                 end
             else
-                push!(mapping,Symbol("$(id)_$hyper")=>"$(id)_by_g_$shared_name")
+                push!(mapping,Symbol("$(id).$hyper")=>"$(id)_by_g_$shared_name")
             end
         end
         replayed,sampler=printed_hsgp_replay(backend)

@@ -91,14 +91,14 @@ end
     stan=consumer_stan(brmi,"scalar-intercept")
     names=coordinate_names(backend.model.layout)
     ia=findfirst(==(:mu_Intercept),names)
-    it=findfirst(==(Symbol("ranef_draws_g_sd.1")),names)
-    iz=Int.(indexin([Symbol("ranef_draws_g_z.$i.1") for i in 1:2],names))
+    it=findfirst(==(Symbol("ranef_draws_g.sd.1")),names)
+    iz=Int.(indexin([Symbol("ranef_draws_g.z.$i.1") for i in 1:2],names))
     oracle(u)=sum(logpdf.(Normal.(u[ia] .+ exp(u[it]).*u[iz][data.g],1),data.y)) +
         logpdf(Normal(),u[ia]) + logpdf(Normal(),u[it]) + sum(logpdf.(Normal(),u[iz]))
     mapping=[:mu_Intercept=>"pop_mu_beta_pop.1",
-        Symbol("ranef_draws_g_sd.1")=>"r_mu_g_log_scale",
-        Symbol("ranef_draws_g_z.1.1")=>"r_mu_g_xi.1",
-        Symbol("ranef_draws_g_z.2.1")=>"r_mu_g_xi.2"]
+        Symbol("ranef_draws_g.sd.1")=>"r_mu_g_log_scale",
+        Symbol("ranef_draws_g.z.1.1")=>"r_mu_g_xi.1",
+        Symbol("ranef_draws_g.z.2.1")=>"r_mu_g_xi.2"]
     for u in (zeros(4),fill(.3,4),fill(-.1,4),[-.3,.2,.1,-.4])
         check_consumer_point(problem,u,oracle)
         check_consumer_stan(problem,stan,mapping,backend,u)

@@ -34,13 +34,13 @@ end
     names = coordinate_names(backend.model.layout)
     index(n) = only(findall(==(Symbol(n)), names))
     a, b = index("score_Intercept"), index("score_rank_idx")
-    intercept, sd = index("theta_Intercept"), index("ranef_draws_p_subject_sd.1")
+    intercept, sd = index("theta_Intercept"), index("ranef_draws_p_subject.sd.1")
     levels = CategoricalArrays.levels(data.subject)
-    z = [index("ranef_draws_p_subject_z.$j.1") for j in eachindex(levels)]
+    z = [index("ranef_draws_p_subject.z.$j.1") for j in eachindex(levels)]
     rows = [only(findall(==(subject), levels)) for subject in data.subject]
-    rho, sigma = index("hsgp_x_rho"), index("hsgp_x_sigma")
-    weights = [index("hsgp_x_z.$j") for j in 1:3]
-    simplex = index("mo_rank_simplex_incr.1")
+    rho, sigma = index("hsgp_x.rho"), index("hsgp_x.sigma")
+    weights = [index("hsgp_x.z.$j") for j in 1:3]
+    simplex = index("mo_score_rank_contrast.simplex_incr.1")
     @test length(names) == 13
     # Independent sine basis, spectral weights and prior transform, rather
     # than using the emitter's fitted values or its density as an oracle.

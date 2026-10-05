@@ -39,10 +39,10 @@ end
     @test length(names) == 16
     index(n) = only(findall(==(Symbol(n)), names))
     beta = index.(["a_Intercept", "a_standardize_age_yr", "b_Intercept"])
-    scales = index.(["ranef_draws_p_subject_sd.1", "ranef_draws_p_subject_sd.2"])
-    z = [index("ranef_draws_p_subject_z.$j.$k") for j in 1:3, k in 1:2]
-    correlation = index("ranef_draws_p_subject_L.1")
-    ia, im, is, ie = index.(["age_yr_y_mis.1", "mu_age", "sigma_age", "scale"])
+    scales = index.(["ranef_draws_p_subject.sd.1", "ranef_draws_p_subject.sd.2"])
+    z = [index("ranef_draws_p_subject.z.$j.$k") for j in 1:3, k in 1:2]
+    correlation = index("ranef_draws_p_subject.L.1")
+    ia, im, is, ie = index.(["age_yr.y_mis.1", "mu_age", "sigma_age", "scale"])
     observed = collect(skipmissing(data.age_yr))
     anchor, spread = mean(observed), std(observed)
     function components(u)
@@ -122,5 +122,5 @@ end
         ([5.,5.,5.,7.],[1.,5.,3.,7.])
     @test isequal(before,(observed,missing_values,lookup,mask))
     backend = check_rk_source_roundtrip(RKBRMI(brmi))
-    @test count(n->occursin("_y_mis.",string(n)),coordinate_names(backend.model.layout)) == 4
+    @test count(n->occursin(".y_mis.",string(n)),coordinate_names(backend.model.layout)) == 4
 end

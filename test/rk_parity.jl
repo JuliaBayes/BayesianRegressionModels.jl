@@ -88,9 +88,9 @@ function _parity_ranef(nt, backend)
     suffix = bucket.id === nothing ? string(bucket.group) :
         string(bucket.id, "_", bucket.group)
     stem = "ranef_draws_" * suffix
-    sd = getproperty(nt, Symbol(stem, "_sd"))
-    z = getproperty(nt, Symbol(stem, "_z"))
-    L = length(bucket.margins) == 1 ? ones(1, 1) : getproperty(nt, Symbol(stem, "_L"))
+    draws = getproperty(nt, Symbol(stem))
+    sd, z = draws.sd, draws.z
+    L = length(bucket.margins) == 1 ? ones(1, 1) : draws.L
     (; sd, z, L, zflat=vec(permutedims(z)))
 end
 
@@ -341,7 +341,7 @@ _ref_lkj_k2(eta, L) = -logbeta(0.5, eta) + 2 * (eta - 1) * log(L[2, 2])
     @test layout.total == 4
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    contrast = _ref_mo_contrast(nt.mo_c_simplex_incr, _parity_cols_mo.c)
+    contrast = _ref_mo_contrast(nt.mo_mu_c_contrast.simplex_incr, _parity_cols_mo.c)
     ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ _parity_population(nt, backend, :mu)[2] .* contrast, nt.s),
         _parity_cols_mo.y))
     # Full Dirichlet logpdf (normalizer included): the thin layer keeps
@@ -351,7 +351,7 @@ _ref_lkj_k2(eta, L) = -logbeta(0.5, eta) + 2 * (eta - 1) * log(L[2, 2])
     pr = logpdf(Normal(0, 1), _parity_population(nt, backend, :mu)[1]) +
         logpdf(Normal(0, 1), _parity_population(nt, backend, :mu)[2]) +
         logpdf(Exponential(1), nt.s) +
-        logpdf(Dirichlet(ones(2)), nt.mo_c_simplex_incr)
+        logpdf(Dirichlet(ones(2)), nt.mo_mu_c_contrast.simplex_incr)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     jac = u[3] + _ref_simplex_logjac(u[4:4])
@@ -372,11 +372,11 @@ end
     @test layout.total == 3
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    contrast = _ref_mo_contrast(nt.mo1_c_simplex_incr, _parity_cols_mo.c)
+    contrast = _ref_mo_contrast(nt.mo1_mu_c_contrast.simplex_incr, _parity_cols_mo.c)
     ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ contrast, nt.s), _parity_cols_mo.y))
     pr = logpdf(Normal(0, 1), _parity_population(nt, backend, :mu)[1]) +
         logpdf(Exponential(1), nt.s) +
-        logpdf(Dirichlet([1.0, 2.0]), nt.mo1_c_simplex_incr)
+        logpdf(Dirichlet([1.0, 2.0]), nt.mo1_mu_c_contrast.simplex_incr)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     jac = u[2] + _ref_simplex_logjac(u[3:3])
@@ -559,26 +559,26 @@ end
     layout = backend.model.layout
     @test layout.total == 7
     @test coordinate_names(layout) == [:mu_tau, :mu_Intercept,
-        :mu_x1_lambda, :mu_x1_raw, :mu_x2_lambda, :mu_x2_raw, :sigma]
+        Symbol("mu_x1.lambda"), Symbol("mu_x1.raw"), Symbol("mu_x2.lambda"), Symbol("mu_x2.raw"), :sigma]
     byname = Dict(:sigma=>0.5, :mu_Intercept=>0.1, :mu_tau=>0.4,
-        :mu_x1_raw=>-0.2, :mu_x1_lambda=>0.3,
-        :mu_x2_raw=>0.15, :mu_x2_lambda=>-0.35)
+        Symbol("mu_x1.raw")=>-0.2, Symbol("mu_x1.lambda")=>0.3,
+        Symbol("mu_x2.raw")=>0.15, Symbol("mu_x2.lambda")=>-0.35)
     u = Float64[byname[n] for n in coordinate_names(layout)]
     nt = constrain(layout, u)
-    b1 = nt.mu_x1_raw * nt.mu_x1_lambda * nt.mu_tau
-    b2 = nt.mu_x2_raw * nt.mu_x2_lambda * nt.mu_tau * 0.25
+    b1 = nt.mu_x1.raw * nt.mu_x1.lambda * nt.mu_tau
+    b2 = nt.mu_x2.raw * nt.mu_x2.lambda * nt.mu_tau * 0.25
     cols = _parity_cols_hs
     mu_hat = nt.mu_Intercept .+ b1 .* cols.x1 .+ b2 .* cols.x2
     ll = sum(logpdf.(Normal.(mu_hat, nt.sigma), cols.y))
     # One shared global scale and two local scales, all normalized halves.
     pr = logpdf(Normal(), nt.mu_Intercept) +
-        logpdf(Normal(), nt.mu_x1_raw) + logpdf(Normal(), nt.mu_x2_raw) +
+        logpdf(Normal(), nt.mu_x1.raw) + logpdf(Normal(), nt.mu_x2.raw) +
         logpdf(Cauchy(0, 1), nt.mu_tau) +
-        logpdf(Cauchy(0, 1), nt.mu_x1_lambda) +
-        logpdf(Cauchy(0, 0.5), nt.mu_x2_lambda) + 3log(2) +
+        logpdf(Cauchy(0, 1), nt.mu_x1.lambda) +
+        logpdf(Cauchy(0, 0.5), nt.mu_x2.lambda) + 3log(2) +
         logpdf(Exponential(1), nt.sigma)
     jac = log(nt.sigma) + log(nt.mu_tau) +
-        log(nt.mu_x1_lambda) + log(nt.mu_x2_lambda)
+        log(nt.mu_x1.lambda) + log(nt.mu_x2.lambda)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     @test logjac(layout, u) ≈ jac
@@ -597,8 +597,8 @@ end
     @test layout.total == 9
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    beta, sigma = nt.dar_mu_t_beta, nt.dar_mu_t_sigma
-    z = nt._ppl_scan_z_dar_mu_t_level
+    beta, sigma = nt.dar_mu_t_level.beta, nt.dar_mu_t_level.sigma
+    z = getproperty(nt.dar_mu_t_level, :_ppl_scan_z_level)
     path = _ref_dar_path(beta, sigma, z)
     @test path[1] == 0.0
     cols = _parity_cols_dar
@@ -631,8 +631,8 @@ end
     @test layout.total == 9
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    beta, sigma = nt.dar_mu_t_beta, nt.dar_mu_t_sigma
-    z = nt._ppl_scan_z_dar_mu_t_level
+    beta, sigma = nt.dar_mu_t_level.beta, nt.dar_mu_t_level.sigma
+    z = getproperty(nt.dar_mu_t_level, :_ppl_scan_z_level)
     path = _ref_dar_path(beta, sigma, z)
     @test path[1] == 0.0
     cols = _parity_cols_dar
@@ -950,15 +950,15 @@ end
     # the authored model's coordinate layout.
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    phi = tanh(nt.phi_raw_ar_mu_t)
-    path = _ref_ar1_path(phi, nt._ppl_scan_z_ar_mu_t)
+    phi = tanh(nt.ar_mu_t.phi_raw)
+    path = _ref_ar1_path(phi, getproperty(nt.ar_mu_t, :_ppl_scan_z_state))
     ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ nt.mu_ar_mu_t .* path, nt.sigma),
         ar_cols.y))
     pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) +
         logpdf(Normal(0, 1), nt.mu_ar_mu_t) +
-        logpdf(Normal(0, 1), nt.phi_raw_ar_mu_t) +
+        logpdf(Normal(0, 1), nt.ar_mu_t.phi_raw) +
         logpdf(Exponential(1), nt.sigma) +
-        sum(logpdf.(Normal(0, 1), nt._ppl_scan_z_ar_mu_t))
+        sum(logpdf.(Normal(0, 1), getproperty(nt.ar_mu_t, :_ppl_scan_z_state)))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     # Jacobian: sigma's exp only (betas/innovations ride identity).
@@ -2113,15 +2113,15 @@ end
     @test layout.total == 8
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    f = _ref_hsgp_muv([_parity_cols_hsgp.x], [4], [1.5], [nt.hsgp_x_rho],
-        nt.hsgp_x_sigma, Vector(nt.hsgp_x_z); iso = true)
+    f = _ref_hsgp_muv([_parity_cols_hsgp.x], [4], [1.5], [nt.hsgp_x.rho],
+        nt.hsgp_x.sigma, Vector(nt.hsgp_x.z); iso = true)
     ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ f, nt.sigma), _parity_cols_hsgp.y))
     floors = _ref_hsgp_floors([_parity_cols_hsgp.x], [4], [1.5]; iso=true)
-    pr = _ref_hsgp_prior(_parity_population(nt, backend, :mu)[1], nt.sigma, [nt.hsgp_x_rho], nt.hsgp_x_sigma,
-        Vector(nt.hsgp_x_z), floors)
+    pr = _ref_hsgp_prior(_parity_population(nt, backend, :mu)[1], nt.sigma, [nt.hsgp_x.rho], nt.hsgp_x.sigma,
+        Vector(nt.hsgp_x.z), floors)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    jac = log(nt.hsgp_x_rho - only(floors)) + log(nt.hsgp_x_sigma) + log(nt.sigma)
+    jac = log(nt.hsgp_x.rho - only(floors)) + log(nt.hsgp_x.sigma) + log(nt.sigma)
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
@@ -2139,18 +2139,18 @@ end
     @test layout.total == 17
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    rhos = [nt.hsgp_x_z_rho1, nt.hsgp_x_z_rho2]
+    rhos = [nt.hsgp_x_z.rho1, nt.hsgp_x_z.rho2]
     f = _ref_hsgp_muv([_parity_cols_hsgp.x, _parity_cols_hsgp.z], [4, 3],
-        [1.5, 2.0], rhos, nt.hsgp_x_z_sigma, Vector(nt.hsgp_x_z_z);
+        [1.5, 2.0], rhos, nt.hsgp_x_z.sigma, Vector(nt.hsgp_x_z.z);
         iso = false)
     ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ f, nt.sigma), _parity_cols_hsgp.y))
     floors = _ref_hsgp_floors([_parity_cols_hsgp.x, _parity_cols_hsgp.z],
         [4, 3], [1.5, 2.0]; iso=false)
-    pr = _ref_hsgp_prior(_parity_population(nt, backend, :mu)[1], nt.sigma, rhos, nt.hsgp_x_z_sigma,
-        Vector(nt.hsgp_x_z_z), floors)
+    pr = _ref_hsgp_prior(_parity_population(nt, backend, :mu)[1], nt.sigma, rhos, nt.hsgp_x_z.sigma,
+        Vector(nt.hsgp_x_z.z), floors)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    jac = sum(log.(rhos .- floors)) + log(nt.hsgp_x_z_sigma) + log(nt.sigma)
+    jac = sum(log.(rhos .- floors)) + log(nt.hsgp_x_z.sigma) + log(nt.sigma)
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
@@ -2168,15 +2168,15 @@ end
     @test layout.total == 5
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    f = _ref_hsgp_muv([_parity_cols_hsgp.x], [1], [1.5], [nt.hsgp_x_rho],
-        nt.hsgp_x_sigma, Vector(nt.hsgp_x_z); iso = true)
+    f = _ref_hsgp_muv([_parity_cols_hsgp.x], [1], [1.5], [nt.hsgp_x.rho],
+        nt.hsgp_x.sigma, Vector(nt.hsgp_x.z); iso = true)
     ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ f, nt.sigma), _parity_cols_hsgp.y))
     floors = _ref_hsgp_floors([_parity_cols_hsgp.x], [1], [1.5]; iso=true)
-    pr = _ref_hsgp_prior(_parity_population(nt, backend, :mu)[1], nt.sigma, [nt.hsgp_x_rho], nt.hsgp_x_sigma,
-        Vector(nt.hsgp_x_z), floors)
+    pr = _ref_hsgp_prior(_parity_population(nt, backend, :mu)[1], nt.sigma, [nt.hsgp_x.rho], nt.hsgp_x.sigma,
+        Vector(nt.hsgp_x.z), floors)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    jac = log(nt.hsgp_x_rho) + log(nt.hsgp_x_sigma) + log(nt.sigma)
+    jac = log(nt.hsgp_x.rho) + log(nt.hsgp_x.sigma) + log(nt.sigma)
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
@@ -2194,15 +2194,15 @@ end
     @test layout.total == 12
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    f = _ref_hsgp_periodic_muv(_parity_cols_hsgp.x, 4, 2.0, nt.hsgp_x_rho,
-        nt.hsgp_x_sigma, Vector(nt.hsgp_x_z))
+    f = _ref_hsgp_periodic_muv(_parity_cols_hsgp.x, 4, 2.0, nt.hsgp_x.rho,
+        nt.hsgp_x.sigma, Vector(nt.hsgp_x.z))
     ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ f, nt.sigma), _parity_cols_hsgp.y))
     floors = [_ref_hsgp_periodic_floor(4)]
-    pr = _ref_hsgp_prior(_parity_population(nt, backend, :mu)[1], nt.sigma, [nt.hsgp_x_rho], nt.hsgp_x_sigma,
-        Vector(nt.hsgp_x_z), floors)
+    pr = _ref_hsgp_prior(_parity_population(nt, backend, :mu)[1], nt.sigma, [nt.hsgp_x.rho], nt.hsgp_x.sigma,
+        Vector(nt.hsgp_x.z), floors)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    jac = log(nt.hsgp_x_rho - only(floors)) + log(nt.hsgp_x_sigma) + log(nt.sigma)
+    jac = log(nt.hsgp_x.rho - only(floors)) + log(nt.hsgp_x.sigma) + log(nt.sigma)
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
@@ -2227,12 +2227,12 @@ end
     translated = _rk_translated(backend)
     nt = constrain(layout, u)
     sig = nt.sigma
-    sd = nt.s_x_sd1
+    sd = nt.s_x.sd1
     Xnull, Zpen = BRM._brm_apply_spline(BRM._brm_fit_spline(x; k=10), x)
-    mu_hat = _parity_population(nt, backend, :mu)[1] .+ Xnull[:, 2:2] * nt.s_x_fixed .+ Zpen * (sd .* nt.s_x_raw1)
+    mu_hat = _parity_population(nt, backend, :mu)[1] .+ Xnull[:, 2:2] * nt.s_x.fixed .+ Zpen * (sd .* nt.s_x.raw1)
     ll = sum(logpdf.(Normal.(mu_hat, sig), y))
     pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) + logpdf(Normal(), sd) +
-        sum(logpdf.(Normal(), nt.s_x_raw1)) + logpdf(Exponential(1), sig)
+        sum(logpdf.(Normal(), nt.s_x.raw1)) + logpdf(Exponential(1), sig)
     jac = log(sd) + log(sig)
     @test _rk_query_translated(backend, translated, :likelihood, u) ≈ ll
     @test _rk_query_translated(backend, translated, :prior, u) ≈ pr
@@ -2268,18 +2268,18 @@ end
     translated = _rk_translated(backend)
     nt = constrain(layout, u)
     sig = nt.sigma
-    sd = [nt.t2_x_z_sd1, nt.t2_x_z_sd2, nt.t2_x_z_sd3]
+    sd = [nt.t2_x_z.sd1, nt.t2_x_z.sd2, nt.t2_x_z.sd3]
     Xfixed, Zrr, Zrn, Znr = BRM._brm_apply_t2(
         BRM._brm_fit_t2(x, z; k=(3, 3)), x, z)
-    mu_hat = _parity_population(nt, backend, :mu)[1] .+ Xfixed * nt.t2_x_z_fixed .+
-        Zrr * (sd[1] .* nt.t2_x_z_raw1) .+
-        Zrn * (sd[2] .* nt.t2_x_z_raw2) .+
-        Znr * (sd[3] .* nt.t2_x_z_raw3)
+    mu_hat = _parity_population(nt, backend, :mu)[1] .+ Xfixed * nt.t2_x_z.fixed .+
+        Zrr * (sd[1] .* nt.t2_x_z.raw1) .+
+        Zrn * (sd[2] .* nt.t2_x_z.raw2) .+
+        Znr * (sd[3] .* nt.t2_x_z.raw3)
     ll = sum(logpdf.(Normal.(mu_hat, sig), y))
     pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) + sum(logpdf.(Normal(), sd)) +
-        sum(logpdf.(Normal(), nt.t2_x_z_raw1)) +
-        sum(logpdf.(Normal(), nt.t2_x_z_raw2)) +
-        sum(logpdf.(Normal(), nt.t2_x_z_raw3)) +
+        sum(logpdf.(Normal(), nt.t2_x_z.raw1)) +
+        sum(logpdf.(Normal(), nt.t2_x_z.raw2)) +
+        sum(logpdf.(Normal(), nt.t2_x_z.raw3)) +
         logpdf(Exponential(1), sig)
     jac = sum(log.(sd)) + log(sig)
     @test _rk_query_translated(backend, translated, :likelihood, u) ≈ ll
@@ -2337,14 +2337,14 @@ end
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
     @test !hasproperty(nt, :y_loc)
-    f = _ref_gp_exp_quad_f(_parity_cols_gp.x, nt.rho_gp, nt.sigma_gp,
-        Vector(nt.z_gp))
+    f = _ref_gp_exp_quad_f(_parity_cols_gp.x, nt.f_gp.rho, nt.f_gp.sigma,
+        Vector(nt.f_gp.z))
     ll = sum(logpdf.(Normal.(nt.mu_Intercept .+ f, nt.sigma), _parity_cols_gp.y))
     pr = logpdf(Normal(0, 5), nt.mu_Intercept) +
         logpdf(Exponential(1), nt.sigma) +
-        logpdf(LogNormal(0, 1), nt.rho_gp) +
-        logpdf(LogNormal(0, 1), nt.sigma_gp) +
-        sum(logpdf.(Normal(0, 1), nt.z_gp))
+        logpdf(LogNormal(0, 1), nt.f_gp.rho) +
+        logpdf(LogNormal(0, 1), nt.f_gp.sigma) +
+        sum(logpdf.(Normal(0, 1), nt.f_gp.z))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     # Jacobian: rho/sigma_gp/sigma exps (u[1], u[2], u[4]); the empty
@@ -2382,14 +2382,14 @@ end
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
     @test !hasproperty(nt, :y_loc)
-    f = _ref_gp_periodic_f(_parity_cols_gp.x, nt.rho_gp, nt.sigma_gp,
-        Vector(nt.z_gp); period=1.0)
+    f = _ref_gp_periodic_f(_parity_cols_gp.x, nt.f_gp.rho, nt.f_gp.sigma,
+        Vector(nt.f_gp.z); period=1.0)
     ll = sum(logpdf.(Normal.(nt.mu_Intercept .+ f, nt.sigma), _parity_cols_gp.y))
     pr = logpdf(Normal(0, 5), nt.mu_Intercept) +
         logpdf(Exponential(1), nt.sigma) +
-        logpdf(LogNormal(0, 1), nt.rho_gp) +
-        logpdf(LogNormal(0, 1), nt.sigma_gp) +
-        sum(logpdf.(Normal(0, 1), nt.z_gp))
+        logpdf(LogNormal(0, 1), nt.f_gp.rho) +
+        logpdf(LogNormal(0, 1), nt.f_gp.sigma) +
+        sum(logpdf.(Normal(0, 1), nt.f_gp.z))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     @test logjac(layout, u) ≈ u[1] + u[2] + u[4]

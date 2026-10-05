@@ -289,9 +289,14 @@ source/graph bridge does not repair or relax that scientific comparison.
 `rk_plain.jl` and `rk_statistical_library.jl` exercise BRM-owned statistical
 declarations through ordinary RKPPL lowering. `rk_statistical_source.jl`
 compares emitted reusable block algebra with the former ordinary inline
-source: sampled names, physical coordinates, prior/likelihood/full densities,
-all standard Reverse coordinates, caller ownership and complete source replay
-must agree bit-exactly. Priors remain explicit at their existing paths.
+source: every statistical submodel allocates its own parameters and returns
+its computed value. Scoped names such as `ranef_draws_g.sd.1` map bijectively
+to the hand-inlined program's `ranef_draws_g_sd.1`. Prior, likelihood and full
+densities agree to rounding at three points, as do all standard Reverse
+coordinates. Caller ownership is preserved and complete printed-source replay
+is bit-identical. Optional testset filters select individual block cases.
+Graph structure checks use RK's public `recipe_inventory`, including retained
+child plates and scans.
 `rk_hsgp_domains.jl` checks fixed one-dimensional and tensor HSGP domains
 against independent basis/frequency/floor calculations and normalized
 same-BRMI compiled Stan values and every mapped ordinary Reverse coordinate.

@@ -33,11 +33,11 @@ end
 function r2d2_components(u, names; nphi, latent=false, partial=false)
     index(name) = only(findall(==(Symbol(name)), names))
     beta = index.(["mu_a_Intercept", "mu_a_x", "mu_b_Intercept", "mu_b_x"])
-    z = [index("ranef_draws_shared_subject_z.$j.$k") for j in 1:3, k in 1:2]
+    z = [index("ranef_draws_shared_subject.z.$j.$k") for j in 1:3, k in 1:2]
     ir2 = index("ranef_draws_shared_subject_sd_r2d2_1_R2")
     iphi = index.(["ranef_draws_shared_subject_sd_r2d2_1_phi.$j" for j in 1:nphi-1])
     iscales = index.(["scale_a", "scale_b"])
-    rho = tanh(u[index("ranef_draws_shared_subject_L.1")])
+    rho = tanh(u[index("ranef_draws_shared_subject.L.1")])
     r2 = 1 / (1 + exp(-u[ir2]))
     phi, remaining, jac = Float64[], 1.0, 0.0
     for j in 1:nphi-1
@@ -81,7 +81,7 @@ end
         @test length(names) == 13+nphi+4categorical+2latent+partial
         @test count(n -> occursin("_R2",string(n)), names) == 1
         @test count(n -> occursin("_phi",string(n)), names) == nphi-1
-        @test !any(n -> occursin(r"_sd\.[12]$",string(n)), names)
+        @test !any(n -> occursin(r"\.sd\.[12]$",string(n)), names)
         emitted = BRM._rk_emit_ast(backend.plan)
         source = sprint(Base.show_unquoted, emitted.main)
         @test !occursin("brm_value_function", source)

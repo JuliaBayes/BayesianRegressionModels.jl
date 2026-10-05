@@ -193,20 +193,11 @@ end
     @test isequal(data,saved)
 end
 
-# Frozen518 diagnostic fields/classifier, with public entry/body accessors.
 # kernel_expr is a pre-build replay and can retain KernelSpec reader calls;
 # the built numerical graph is the place to verify composed scalar recipes.
 function observation_graph_recipes(graph;depth=0)
-    records = NamedTuple[]
-    for recipe in graph.recipes
-        push!(records,(;depth,outputs=sprint(show,recipe.outputs),source=recipe.source))
-        if recipe.op isa ReactiveKernels._AuthoredPlateOp
-            append!(records,observation_graph_recipes(plate_body(recipe);depth=depth+1))
-        elseif recipe.op isa ReactiveKernels._AuthoredScanOp
-            append!(records,observation_graph_recipes(scan_body(recipe);depth=depth+1))
-        end
-    end
-    records
+    [(; depth=depth + entry.depth, outputs=sprint(show,entry.recipe.outputs),
+        source=entry.recipe.source) for entry in recipe_inventory(graph)]
 end
 
 @stestset "caller observation graph retains vector arguments and visible scalar law" begin

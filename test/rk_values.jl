@@ -75,7 +75,7 @@ const mixed_axes = (;
     nt = constrain(backend.model.layout, u)
     # Independent population and correlation reconstruction, including the
     # sorted label map (input rows are c,a,b) and b's public inverse link.
-    C = nt.ranef_draws_p_subject_z * (nt.ranef_draws_p_subject_sd .* nt.ranef_draws_p_subject_L)'
+    C = nt.ranef_draws_p_subject.z * (nt.ranef_draws_p_subject.sd .* nt.ranef_draws_p_subject.L)'
     a = nt.a_Intercept .+ nt.a_x .* mixed_axes.x .+ C[[3, 1, 2], 1]
     b = exp.(nt.b_Intercept .+ C[[3, 1, 2], 2])
     c = nt.c_Intercept .+ nt.c_w .* mixed_axes.w
@@ -88,8 +88,8 @@ const mixed_axes = (;
     @test value_query(backend, :likelihood, u) ≈ sum(expected_ll)
     normal_draws = [nt.a_Intercept, nt.a_x, nt.b_Intercept, nt.c_Intercept, nt.c_w, nt.multiplier]
     prior = sum(logpdf.(Normal(), normal_draws)) +
-        sum(logpdf.(Normal(), nt.ranef_draws_p_subject_z)) +
-        sum(logpdf.(Normal(), nt.ranef_draws_p_subject_sd) .+ log(2)) -
+        sum(logpdf.(Normal(), nt.ranef_draws_p_subject.z)) +
+        sum(logpdf.(Normal(), nt.ranef_draws_p_subject.sd) .+ log(2)) -
         nt.sigma - log(2) # Exponential(1), then LKJCholesky(2,1)
     @test value_query(backend, :prior, u) ≈ prior
     @test value_query(backend, :sampler, u) ≈
@@ -127,12 +127,13 @@ end
     # value. Both readers consume the same sampled hyperparameters/latents.
     gp_term = only(t for p in backend.plan.regression.predictors for t in p.terms if t.kind === :gp)
     opts = gp_term.options
-    rho, amplitude, z = getproperty(nt, opts.rho), getproperty(nt, opts.sigma), getproperty(nt, opts.z)
+    gp_draws = getproperty(nt, opts.f)
+    rho, amplitude, z = gp_draws.rho, gp_draws.sigma, gp_draws.z
     covariance = [amplitude^2 * exp(-0.5 * ((x-y)/rho)^2) for x in df.t, y in df.t]
     covariance[diagind(covariance)] .+= opts.jitter
     f = cholesky(Symmetric(covariance)).L * z
     # Independent one-axis Hilbert basis and exp-quad spectral weights.
-    hs = (; sigma=nt.hsgp_t_sigma, rho=nt.hsgp_t_rho, z=nt.hsgp_t_z)
+    hs = (; sigma=nt.hsgp_t.sigma, rho=nt.hsgp_t.rho, z=nt.hsgp_t.z)
     centered = df.t .- mean(df.t)
     L = 1.5maximum(abs, centered)
     omega = (1:3) .* (pi / (2L))
@@ -201,28 +202,28 @@ read_rows(value, rows) = value[rows]
         nt = constrain(backend.model.layout, u)
         path = zeros(5)
         prior, jac = if kind === :ar
-            z = nt._ppl_scan_z_ar_mu_t
+            z = getproperty(nt.ar_mu_t, :_ppl_scan_z_state)
             path[1] = z[1]
             for i in 2:5
-                path[i] = tanh(nt.phi_raw_ar_mu_t) * path[i - 1] + z[i]
+                path[i] = tanh(nt.ar_mu_t.phi_raw) * path[i - 1] + z[i]
             end
             path .*= nt.mu_ar_mu_t
             @test length(u) == 8
             (logpdf(Normal(), nt.mu_Intercept) + logpdf(Normal(), nt.mu_ar_mu_t) +
-                logpdf(Normal(), nt.phi_raw_ar_mu_t) + sum(logpdf.(Normal(), z)), 0.0)
+                logpdf(Normal(), nt.ar_mu_t.phi_raw) + sum(logpdf.(Normal(), z)), 0.0)
         else
-            z = nt._ppl_scan_z_dar_mu_t_level
+            z = getproperty(nt.dar_mu_t_level, :_ppl_scan_z_level)
             increment = 0.0
             for i in 2:5
-                increment = nt.dar_mu_t_beta * increment + nt.dar_mu_t_sigma * z[i - 1]
+                increment = nt.dar_mu_t_level.beta * increment + nt.dar_mu_t_level.sigma * z[i - 1]
                 path[i] = path[i - 1] + increment
             end
             @test length(u) == 7
             (logpdf(Normal(), nt.mu_Intercept) +
-                logpdf(truncated(Normal(0.5, 0.2), 0, 1), nt.dar_mu_t_beta) +
-                logpdf(truncated(Normal(0, 0.2), 0, Inf), nt.dar_mu_t_sigma) +
+                logpdf(truncated(Normal(0.5, 0.2), 0, 1), nt.dar_mu_t_level.beta) +
+                logpdf(truncated(Normal(0, 0.2), 0, Inf), nt.dar_mu_t_level.sigma) +
                 sum(logpdf.(Normal(), z)),
-                log(nt.dar_mu_t_beta) + log1p(-nt.dar_mu_t_beta) + log(nt.dar_mu_t_sigma))
+                log(nt.dar_mu_t_level.beta) + log1p(-nt.dar_mu_t_level.beta) + log(nt.dar_mu_t_level.sigma))
         end
         likelihood = sum(logpdf.(Normal.(nt.mu_Intercept .+ path[df.rows], 1), df.y))
         @test value_query(backend, :likelihood, u) ≈ likelihood
@@ -263,17 +264,16 @@ end
         backend = RKBRMI(brmi)
         u = check_value_gradient(backend)
         nt = constrain(backend.model.layout, u)
-        scale_name = only(filter(n -> endswith(string(n), "_sd"), propertynames(nt)))
-        raw_name = only(filter(n -> endswith(string(n), "_z"), propertynames(nt)))
-        scale, raw = getproperty(nt, scale_name), getproperty(nt, raw_name)
+        block_name = only(filter(n -> startswith(string(n), "ranef_draws_"), propertynames(nt)))
+        block = getproperty(nt, block_name)
+        scale, raw = block.sd, block.z
         gi = [1, 1, 2, 3, 3]
         expected = if grouped === :membership
             hi = [3, 2, 1, 1, 2]
             effects = only(scale) .* vec(raw)
             nt.mu_Intercept .+ (effects[gi] .+ effects[hi]) ./ 2
         else
-            factor_name = only(filter(n -> endswith(string(n), "_L"), propertynames(nt)))
-            factors = getproperty(nt, factor_name)
+            factors = block.L
             si = [1, 1, 1, 2, 2]
             map(eachindex(df.y)) do j
                 effects = (scale[si[j], :] .* factors[:, :, si[j]]) * raw[gi[j], :]
@@ -317,7 +317,7 @@ end
     end)
     u = check_value_gradient(backend)
     nt = constrain(backend.model.layout, u)
-    C = nt.ranef_draws_g_z * (nt.ranef_draws_g_sd .* nt.ranef_draws_g_L)'
+    C = nt.ranef_draws_g.z * (nt.ranef_draws_g.sd .* nt.ranef_draws_g.L)'
     gi = [2, 1, 3, 1, 2]
     mu = nt.mu_Intercept .+ C[gi, 1] .+ (df.c .== 4) .* C[gi, 2] .+ (df.c .== 6) .* C[gi, 3]
     @test value_query(backend, :pointwise, u).y ≈
