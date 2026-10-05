@@ -112,6 +112,8 @@ function _rk_source_symbols!(names, value)
     value isa Expr && foreach(arg -> _rk_source_symbols!(names, arg), value.args)
     names
 end
+_rk_source_symbols!(names, values::AbstractVector) =
+    (foreach(value -> _rk_source_symbols!(names, value), values); names)
 function _rk_source_lhs!(names, lhs)
     name = _rk_emitted_observation_name(lhs)
     name === nothing || push!(names, name)

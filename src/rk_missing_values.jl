@@ -4,7 +4,6 @@
 struct _RKMissingValueSpec
     source::Symbol
     observed::Symbol
-    missing::Symbol
     observed_rows::Symbol
     missing_rows::Symbol
     observed_component::Symbol
@@ -156,7 +155,6 @@ function _rk_prepare_missing_value!(columns, taken, observation, program, comple
     delete!(columns, plan.source)
     delete!(columns, observation.name)
     if _rk_mi_downstream(program, observation.name, plan.source)
-        missing = _rk_ast_fresh_name(string(plan.source, "_y_mis"), taken)
         jmis = _rk_ast_fresh_name(string("Jmis_", plan.source), taken)
         component = _rk_ast_fresh_name(string(plan.source, "_observed_component"), taken)
         lookup = _rk_ast_fresh_name(string(plan.source, "_missing_lookup"), taken)
@@ -173,7 +171,7 @@ function _rk_prepare_missing_value!(columns, taken, observation, program, comple
         if !isempty(plan.missing_indices)
             columns[jmis], columns[lookup], columns[mask] = plan.missing_indices, indices, selected
         end
-        push!(completions, _RKMissingValueSpec(plan.source, observed, missing,
+        push!(completions, _RKMissingValueSpec(plan.source, observed,
             jobs, jmis, component, lookup, mask, length(plan.missing_indices), observation.distribution))
     end
     _BRMPreparedObservation(observed, observation.lhs,
@@ -188,19 +186,27 @@ function _rk_emit_missing_value!(definitions, statements, bindings, taken, compl
     end
     distribution = _rk_mi_gather(completion.distribution, completion.missing_rows)
     law = _rk_ast_value_distribution(distribution, bindings, taken)
-    # Declared array dimensions belong to the missing-row axis. Unlike an
-    # observation broadcast, this statement samples that independent array.
-    shape = Expr(:call, :axes, completion.missing_rows, 1)
-    push!(statements, Expr(:call, Symbol(".~"),
-        Expr(:ref, completion.missing, shape), law))
+    # One block, as StanBlocks' `_sb_mi_response`: the missing entries with
+    # their law, completed onto the covariate's original row axis. The
+    # declared dimensions belong to the missing-row axis; unlike an
+    # observation broadcast, the statement samples that independent array.
+    block = _rk_block_body(law)
+    observed = _rk_block_argument!(block, :observed, completion.observed_component)
+    rows = _rk_block_argument!(block, :rows, completion.missing_rows)
+    lookup = _rk_block_argument!(block, :lookup, completion.missing_lookup)
+    mask = _rk_block_argument!(block, :mask, completion.missing_mask)
+    missing = _rk_block_local!(block, :y_mis)
+    push!(block.statements, Expr(:call, :.~,
+        Expr(:ref, missing, Expr(:call, :axes, rows, 1)), law))
     # Completion is a whole covariate value on its original row axis. Keep
     # the gather and mask in an explicit graph when downstream likelihoods
     # have different observation axes, rather than inferring a scalar recipe.
-    expression = _rk_ast_statistical_call!(definitions, taken,
-        :brm_completed_covariate, completion.observed_component,
-        completion.missing, completion.missing_lookup, completion.missing_mask;
-        kernel=true)
-    push!(statements, Expr(:(=), completion.source, expression))
+    completed = _rk_block_local!(block, :completed)
+    push!(block.statements, Expr(:(=), completed, _rk_ast_statistical_call!(definitions,
+        taken, :brm_completed_covariate, observed, missing, lookup, mask; kernel=true)))
+    push!(statements, Expr(:call, :~, completion.source,
+        _rk_ast_block_call!(definitions, taken, "brm_missing_covariate", block,
+            completed)))
 end
 
 function _rk_source_loop_indices!(names, statement)
@@ -213,10 +219,31 @@ function _rk_source_loop_indices!(names, statement)
     names
 end
 
+# A block call `lhs ~ block(...)` also reads the caller names its submodel
+# body mentions freely (for example a prior's hyperparameter or a missing
+# covariate's law): every body symbol that is not an argument, a local
+# output or a loop index.
+function _rk_block_free_reads(definitions)
+    reads = Dict{Symbol,Set{Symbol}}()
+    for definition in definitions
+        Meta.isexpr(definition, :(=), 2) || continue
+        call, body = definition.args
+        Meta.isexpr(call, :call) && Meta.isexpr(body, :block) || continue
+        names = setdiff!(_rk_source_symbols!(Set{Symbol}(), body), call.args[2:end])
+        for statement in body.args
+            setdiff!(names, _rk_source_outputs!(Set{Symbol}(), statement))
+            setdiff!(names, _rk_source_loop_indices!(Set{Symbol}(), statement))
+        end
+        reads[first(call.args)] = names
+    end
+    reads
+end
+
 # Completion, formula columns, sampled priors and readers may depend on one
 # another. Order ordinary emitted statements by their declared outputs before
 # PPL authoring, preserving independent source order and bound data ownership.
-function _rk_order_value_statements(statements, data_names)
+function _rk_order_value_statements(statements, data_names, definitions=())
+    block_reads = _rk_block_free_reads(definitions)
     outputs = map(statements) do statement
         names = _rk_source_outputs!(Set{Symbol}(), statement)
         setdiff!(names, data_names)
@@ -229,6 +256,9 @@ function _rk_order_value_statements(statements, data_names)
     end
     dependencies = map(eachindex(statements)) do index
         references = _rk_source_symbols!(Set{Symbol}(), statements[index])
+        for name in collect(references)
+            haskey(block_reads, name) && union!(references, block_reads[name])
+        end
         Set(producers[name] for name in references if haskey(producers, name) &&
             producers[name] != index)
     end

@@ -104,6 +104,86 @@ function _rk_ast_statistical_call!(definitions, taken, name, args...; kernel=fal
     Expr(:call, callee, args...)
 end
 
+# A horseshoe coefficient, as StanBlocks' `_sb_horseshoe`: the local scale
+# and standardized draw, scaled by the predictor's shared global scale `tau`.
+function _rk_ast_horseshoe_block!(definitions, taken, local_scale, tau, ratio)
+    block = _rk_block_body()
+    global_scale = _rk_block_argument!(block, :tau, tau)
+    lambda, raw = _rk_block_local!(block, :lambda), _rk_block_local!(block, :raw)
+    push!(block.statements, Expr(:call, :~, lambda, Expr(:call, :HalfCauchy, local_scale)),
+        Expr(:call, :~, raw, Expr(:call, :Normal, 0, 1)))
+    _rk_ast_block_call!(definitions, taken, "brm_horseshoe", block,
+        Expr(:call, :*, raw, lambda, global_scale, ratio))
+end
+
+# A monotonic effect, as StanBlocks' `_sb_mo`: the increment simplex with its
+# Dirichlet prior, returning the cumulative contrast at each row's level.
+function _rk_ast_monotonic_block!(definitions, taken, term)
+    column = only(term.columns)
+    block = _rk_block_body()
+    c = _rk_block_argument!(block, :c, column)
+    increments = _rk_block_local!(block, :simplex_incr)
+    push!(block.statements, Expr(:call, :~, increments,
+        Expr(:call, :Dirichlet, Expr(:vect, term.options.alpha...))))
+    contrast = _rk_ast_statistical_call!(definitions, taken,
+        :brm_monotonic_contrast, c, increments)
+    _rk_ast_block_call!(definitions, taken, "brm_monotonic", block, contrast)
+end
+
+# A statistical block is one self-contained submodel, as in StanBlocks: it
+# allocates its parameters with their priors and returns its post-processed
+# value, so the caller writes one `lhs ~ block(...)` statement and the block's
+# coordinates live under `lhs.`. Arguments are substituted by their caller
+# expressions, so an argument must not shadow a caller name the body reads
+# freely (`free`, e.g. a prior's hyperparameter), and a local must not
+# capture a name from the free reads or from any argument's value.
+struct _RKBlockBody
+    free::Set{Symbol}
+    captured::Set{Symbol}
+    allocated::Set{Symbol}
+    arguments::Vector{Symbol}
+    values::Vector{Any}
+    statements::Vector{Any}
+end
+
+function _rk_block_body(free...)
+    names = _rk_source_symbols!(Set{Symbol}(), collect(Any, free))
+    _RKBlockBody(names, copy(names), Set{Symbol}(), Symbol[], Any[], Any[])
+end
+
+function _rk_block_local!(block::_RKBlockBody, base)
+    name = _rk_ast_fresh_name(string(base), union(block.captured, block.allocated))
+    push!(block.allocated, name)
+    name
+end
+
+function _rk_block_argument!(block::_RKBlockBody, base, value)
+    symbols = _rk_source_symbols!(Set{Symbol}(), value)
+    isempty(intersect(symbols, setdiff(block.allocated, block.arguments))) || error(
+        "RK backend: internal: allocate block arguments before its locals")
+    argument = _rk_ast_fresh_name(string(base), union(block.free, block.allocated))
+    push!(block.allocated, argument)
+    union!(block.captured, symbols)
+    push!(block.arguments, argument)
+    push!(block.values, value)
+    argument
+end
+
+# Identical blocks share one definition.
+function _rk_ast_block_call!(definitions, taken, base, block::_RKBlockBody, value)
+    body = Expr(:block, block.statements..., Expr(:return, value))
+    for definition in definitions
+        Meta.isexpr(definition, :(=), 2) || continue
+        call = first(definition.args)
+        Meta.isexpr(call, :call) && isequal(call.args[2:end], block.arguments) &&
+            isequal(last(definition.args), body) || continue
+        return Expr(:call, first(call.args), block.values...)
+    end
+    name = _rk_ast_fresh_name(string(base), taken)
+    push!(definitions, Expr(:(=), Expr(:call, name, block.arguments...), body))
+    Expr(:call, name, block.values...)
+end
+
 function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol},
         colref::Dict{Int}, refref::Dict{Int}; values::Bool=false)
     summands = Any[]
@@ -769,16 +849,26 @@ function _rk_ast_plate(name::Symbol, range::Symbol,
     Expr(:macrocall, Symbol("@plate"), LineNumberNode(0), loop)
 end
 
-# `gp_chol_latent(gp_exp_quad_cov(x, sigma, rho, jitter), z)` /
-# `gp_chol_latent(gp_periodic_cov(x, sigma, rho, period, jitter), z)`:
-# arg order is (locations, sigma, rho, [period,] jitter) per the
-# thin-layer contract.
-function _rk_ast_gp_latent(term)
+# An exact GP, as StanBlocks' `_sb_gp`/`_sb_gp_periodic`: the length-scale
+# and marginal-scale priors with standardized innovations, returning the
+# Cholesky-scaled latent draw at each location. The covariance arguments are
+# (locations, sigma, rho, period, jitter); `period` is 0 for exp_quad.
+function _rk_ast_gp_block!(definitions, taken, term)
     options = term.options
-    covariance = Expr(:call, :brm_gp_covariance, only(term.columns),
-        options.sigma, options.rho,
+    rho_prior = last(_rk_ast_sampled(options.rho_param).args)
+    sigma_prior = last(_rk_ast_sampled(options.sigma_param).args)
+    block = _rk_block_body(rho_prior, sigma_prior)
+    x = _rk_block_argument!(block, :x, only(term.columns))
+    rho, sigma = _rk_block_local!(block, :rho), _rk_block_local!(block, :sigma)
+    axis, z = _rk_block_local!(block, :axis), _rk_block_local!(block, :z)
+    push!(block.statements, Expr(:call, :~, rho, rho_prior),
+        Expr(:call, :~, sigma, sigma_prior),
+        Expr(:(=), axis, Expr(:call, :eachindex, x)),
+        Expr(:call, :.~, Expr(:ref, z, axis), _rk_ast_dotted(:Normal, 0, 1)))
+    covariance = Expr(:call, :brm_gp_covariance, x, sigma, rho,
         options.cov === :periodic ? options.period : 0.0, options.jitter)
-    Expr(:call, :brm_gp_latent, covariance, options.z)
+    _rk_ast_block_call!(definitions, taken, "brm_gp", block,
+        Expr(:call, :brm_gp_latent, covariance, z))
 end
 
 function _rk_ast_gp_names(plan::_RKStructuralPlan)
@@ -791,33 +881,27 @@ function _rk_ast_gp_names(plan::_RKStructuralPlan)
     names
 end
 
-# An AR(1) latent path: the sampled `phi_raw ~ Normal(0, 1)`, the
-# non-centered `@scan` block the thin layer folds through RK-core
-# `scan(...)`, and the `phi = tanh(phi_raw)` stationarity map. The
-# loop bound is the authored term's explicit data-axis length;
-# the seed + innovation shape is SB's `ar1_recurse` verbatim
-# (`u[1] = eps[1]`, `u[t] = phi*u[t-1] + eps[t]`). Shape-verified
-# against `Meta.parse` of the surface spelling.
-function _rk_ast_ar_preamble(term, nsteps)
-    options = term.options
-    state, phi, phi_raw, eps =
-        options.state, options.phi, options.phi_raw, options.eps
-    setup = Expr(:call, :~,
-        Expr(:ref, state, 1), Expr(:call, :Normal, 0.0, 1.0))
-    innov = Expr(:call, :~,
-        eps, Expr(:call, :Normal, 0.0, 1.0))
-    carry = Expr(:(=), Expr(:ref, state, :t),
-        Expr(:call, :+,
-            Expr(:call, :*, phi,
-                Expr(:ref, state, Expr(:call, :-, :t, 1))),
-            eps))
-    loop = Expr(:for, Expr(:(=), :t, Expr(:call, :(:), 2, nsteps)),
-        Expr(:block, innov, carry))
-    scan = Expr(:macrocall, Symbol("@scan"), LineNumberNode(0),
-        Expr(:block, setup, loop))
-    Any[Expr(:call, :~, phi_raw, Expr(:call, :Normal, 0.0, 1.0)),
-        scan,
-        Expr(:(=), phi, Expr(:call, :tanh, phi_raw))]
+# An AR(1) latent path, as StanBlocks' `_sb_ar1`: the sampled
+# `phi_raw ~ Normal(0, 1)`, the non-centered `@scan` recurrence and the
+# `phi = tanh(phi_raw)` stationarity map, returning the path. The loop bound
+# is the authored term's explicit data-axis length; the seed + innovation
+# shape is SB's `ar1_recurse` verbatim (`u[1] = eps[1]`,
+# `u[t] = phi*u[t-1] + eps[t]`).
+function _rk_ast_ar_block!(definitions, taken, nsteps)
+    block = _rk_block_body()
+    T = _rk_block_argument!(block, :T, nsteps)
+    phi_raw, phi = _rk_block_local!(block, :phi_raw), _rk_block_local!(block, :phi)
+    state, eps = _rk_block_local!(block, :state), _rk_block_local!(block, :eps)
+    t = _rk_block_local!(block, :t)
+    carry = Expr(:(=), Expr(:ref, state, t), Expr(:call, :+,
+        Expr(:call, :*, phi, Expr(:ref, state, Expr(:call, :-, t, 1))), eps))
+    loop = Expr(:for, Expr(:(=), t, Expr(:call, :(:), 2, T)),
+        Expr(:block, Expr(:call, :~, eps, Expr(:call, :Normal, 0.0, 1.0)), carry))
+    push!(block.statements, Expr(:call, :~, phi_raw, Expr(:call, :Normal, 0.0, 1.0)),
+        Expr(:macrocall, Symbol("@scan"), LineNumberNode(0), Expr(:block,
+            Expr(:call, :~, Expr(:ref, state, 1), Expr(:call, :Normal, 0.0, 1.0)), loop)),
+        Expr(:(=), phi, Expr(:call, :tanh, phi_raw)))
+    _rk_ast_block_call!(definitions, taken, "brm_ar1", block, state)
 end
 
 function _rk_ast_ar_names(plan::_RKStructuralPlan)
@@ -831,23 +915,33 @@ function _rk_ast_ar_names(plan::_RKStructuralPlan)
     names
 end
 
-function _rk_ast_dar_scan(term, level, taken, nsteps)
+# A differenced AR(1) path, as StanBlocks' `_sb_dar1`: persistence and scale
+# priors with the zero-started recurrence over standardized innovations,
+# returning the level path.
+function _rk_ast_dar_block!(definitions, taken, term, nsteps)
     options = term.options
-    increment = _rk_ast_fresh_name(string(term.label, "_increment"), taken)
-    innovation = _rk_ast_fresh_name(string(term.label, "_innovation"), taken)
-    previous = Expr(:call, :-, :t, 1)
+    beta_prior = last(_rk_ast_sampled(options.beta_param).args)
+    sigma_prior = last(_rk_ast_sampled(options.sigma_param).args)
+    block = _rk_block_body(beta_prior, sigma_prior)
+    T = _rk_block_argument!(block, :T, nsteps)
+    beta, sigma = _rk_block_local!(block, :beta), _rk_block_local!(block, :sigma)
+    level, increment = _rk_block_local!(block, :level), _rk_block_local!(block, :increment)
+    innovation, t = _rk_block_local!(block, :innovation), _rk_block_local!(block, :t)
+    previous = Expr(:call, :-, t, 1)
     body = Expr(:block,
         Expr(:call, :~, innovation, Expr(:call, :Normal, 0, 1)),
-        Expr(:(=), Expr(:ref, increment, :t), Expr(:call, :+,
-            Expr(:call, :*, options.beta, Expr(:ref, increment, previous)),
-            Expr(:call, :*, options.sigma, innovation))),
-        Expr(:(=), Expr(:ref, level, :t), Expr(:call, :+,
-            Expr(:ref, level, previous), Expr(:ref, increment, :t))))
-    scan = Expr(:macrocall, Symbol("@scan"), LineNumberNode(0), Expr(:block,
-        Expr(:(=), Expr(:ref, level, 1), 0.0),
-        Expr(:(=), Expr(:ref, increment, 1), 0.0),
-        Expr(:for, Expr(:(=), :t, Expr(:call, :(:), 2, nsteps)), body)))
-    Expr[scan]
+        Expr(:(=), Expr(:ref, increment, t), Expr(:call, :+,
+            Expr(:call, :*, beta, Expr(:ref, increment, previous)),
+            Expr(:call, :*, sigma, innovation))),
+        Expr(:(=), Expr(:ref, level, t), Expr(:call, :+,
+            Expr(:ref, level, previous), Expr(:ref, increment, t))))
+    push!(block.statements, Expr(:call, :~, beta, beta_prior),
+        Expr(:call, :~, sigma, sigma_prior),
+        Expr(:macrocall, Symbol("@scan"), LineNumberNode(0), Expr(:block,
+            Expr(:(=), Expr(:ref, level, 1), 0.0),
+            Expr(:(=), Expr(:ref, increment, 1), 0.0),
+            Expr(:for, Expr(:(=), t, Expr(:call, :(:), 2, T)), body))))
+    _rk_ast_block_call!(definitions, taken, "brm_differenced_ar1", block, level)
 end
 
 function _rk_ast_dar_names(plan::_RKStructuralPlan)
@@ -975,15 +1069,13 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             end
             if kind === :monotonic || kind === :monotonic_summand
                 contrast = _rk_ast_fresh_name(string(term.label, "_contrast"), taken)
-                value = _rk_ast_statistical_call!(defs, taken,
-                    :brm_monotonic_contrast, only(term.columns), term.options.increments)
-                push!(stmts, Expr(:(=), contrast, value))
+                push!(stmts, Expr(:call, :~, contrast, _rk_ast_monotonic_block!(defs, taken, term)))
                 refactual[index] = contrast
             elseif kind === :spline || kind === :hsgp
                 refactual[index] = term.options.id
             elseif kind === :structured
                 refactual[index] = term.options.id
-                append!(stmts, _rk_ast_structured_term(term, structured_blocks,
+                append!(stmts, _rk_ast_structured_term(defs, term, structured_blocks,
                     taken, bindings))
             elseif kind === :gp
                 refactual[index] = term.options.f
@@ -993,8 +1085,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 refactual[index] = term.options.latent
             elseif kind === :dar
                 refactual[index] = _rk_ast_fresh_name(string(term.label, "_level"), taken)
-                append!(stmts, _rk_ast_dar_scan(term, refactual[index], taken,
-                    length(plan.columns[term.options.source])))
+                push!(stmts, Expr(:call, :~, refactual[index], _rk_ast_dar_block!(defs,
+                    taken, term, length(plan.columns[term.options.source]))))
             elseif kind === :ranef_gather
                 refactual[index] = ranef_effects[(predictor.name,
                     term.options.bucket_group, term.options.bucket_id)]
@@ -1038,13 +1130,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                     string(predictor.name, "_", term.addressee), taken)
                 coefs[index] = coef
                 if hs_spec !== nothing
-                    lambda = _rk_ast_fresh_name(string(coef, "_lambda"), taken)
-                    raw = _rk_ast_fresh_name(string(coef, "_raw"), taken)
-                    push!(scalar_stmts, Expr(:call, :~, lambda,
-                        Expr(:call, :HalfCauchy, hs_spec[1])))
-                    push!(scalar_stmts, Expr(:call, :~, raw, Expr(:call, :Normal, 0, 1)))
-                    push!(scalar_stmts, Expr(:(=), coef,
-                        Expr(:call, :*, raw, lambda, hs_tau, hs_spec[2] / hs_scale)))
+                    push!(scalar_stmts, Expr(:call, :~, coef, _rk_ast_horseshoe_block!(
+                        defs, taken, hs_spec[1], hs_tau, hs_spec[2] / hs_scale)))
                 elseif override !== nothing
                     push!(scalar_stmts, Expr(:call, :~, coef,
                         Expr(:call, override[1], override[2]...)))
@@ -1053,36 +1140,23 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         end
         for term in predictor.terms
             term.kind === :spline || continue
-            append!(stmts, _rk_ast_value_spline(term, taken))
+            append!(stmts, _rk_ast_value_spline(defs, term, taken))
         end
         for term in predictor.terms
             term.kind === :hsgp || continue
             append!(stmts, _rk_ast_value_hsgp(defs, term, taken, bindings))
         end
         for term in predictor.terms
-            term.kind === :dar || continue
-            options = term.options
-            push!(stmts, _rk_ast_sampled(options.beta_param))
-            push!(stmts, _rk_ast_sampled(options.sigma_param))
-        end
-        for term in predictor.terms
             term.kind === :gp || continue
-            options = term.options
-            push!(stmts, _rk_ast_sampled(options.rho_param))
-            push!(stmts, _rk_ast_sampled(options.sigma_param))
-            response = only(term.columns)
-            isnothing(response) && error(
+            isnothing(only(term.columns)) && error(
                 "RK backend: internal: gp predictor `$(predictor.name)` " *
                 "feeds no response")
-            axis = _rk_ast_fresh_name(string(options.z, "_axis"), taken)
-            push!(stmts, Expr(:(=), axis, Expr(:call, :eachindex, response)))
-            push!(stmts, Expr(:call, :.~, Expr(:ref, options.z, axis),
-                _rk_ast_dotted(:Normal, 0, 1)))
-            push!(stmts, Expr(:(=), options.f, _rk_ast_gp_latent(term)))
+            push!(stmts, Expr(:call, :~, term.options.f, _rk_ast_gp_block!(defs, taken, term)))
         end
         for term in predictor.terms
             term.kind === :ar || continue
-            append!(stmts, _rk_ast_ar_preamble(term, length(plan.columns[only(term.columns)])))
+            push!(stmts, Expr(:call, :~, term.options.state, _rk_ast_ar_block!(defs, taken,
+                length(plan.columns[only(term.columns)]))))
         end
         for term in predictor.terms
             term.kind === :me || continue
@@ -1130,7 +1204,11 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             push!(stmts, _rk_ast_sampled(parameter))
         end
     end
+    # Monotonic increment simplexes belong to their monotonic blocks.
+    monotonic = Set(term.options.increments for predictor in plan.predictors
+        for term in predictor.terms if term.kind in (:monotonic, :monotonic_summand))
     for vector_parameter in plan.vector_parameters
+        vector_parameter.name in monotonic && continue
         response_index = findfirst(r -> r.threshold_coefs === vector_parameter.name, plan.responses)
         if response_index !== nothing
             response = plan.responses[response_index]

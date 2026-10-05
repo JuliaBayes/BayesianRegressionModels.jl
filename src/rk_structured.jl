@@ -41,93 +41,95 @@ function brm_hsgp_grouped(PHI, omega2, z, group_index, rho, sigma)
     values
 end
 
-function _rk_ast_hsgp_hyper!(stmts, options, hyper, floors, taken, bindings, G)
-    id = options.id
+# The authored prior of one HSGP hyperparameter, in the original statement
+# order: a shared scale's positive law, or a stated hyper-intercept law.
+function _rk_ast_hsgp_hyper_prior(options, hyper, bindings, taken)
     prior = hyper === :length_scale ? options.rho_prior : options.sigma_prior
+    position = findfirst(p -> p.hyper === hyper, options.hyper_plans)
+    position === nothing && return _rk_ast_positive_prior(prior, bindings, taken)
+    stated = hyper === :length_scale ? options.rho_stated : options.sigma_stated
+    options.hyper_plans[position].intercept && stated ?
+        _rk_ast_declared_prior(prior, bindings, taken) : nothing
+end
+
+function _rk_ast_hsgp_hyper!(block, options, hyper, prior, floor, G)
     stated = hyper === :length_scale ? options.rho_stated : options.sigma_stated
     plans = options.hyper_plans
     position = findfirst(p -> p.hyper === hyper, plans)
     stem = hyper === :length_scale ? "rho" : "sigma"
     if position === nothing
-        value = _rk_ast_fresh_name(string(id, "_", stem), taken)
-        expression = _rk_ast_positive_prior(prior, bindings, taken)
+        value = _rk_block_local!(block, stem)
         hyper === :length_scale && options.rho_truncated &&
-            (expression = Expr(:call, :restricted, expression, floors, Inf))
-        push!(stmts, Expr(:call, :~, value, expression))
+            (prior = Expr(:call, :restricted, prior, floor, Inf))
+        push!(block.statements, Expr(:call, :~, value, prior))
         return value
     end
     plan = plans[position]
     parts = Any[]
     if plan.intercept
-        beta = _rk_ast_fresh_name(string(id, "_", stem, "_Intercept"), taken)
-        expression = stated ? _rk_ast_declared_prior(prior, bindings, taken) :
-            Expr(:call, :Normal, 0, 1)
-        push!(stmts, Expr(:call, :~, beta, expression))
+        beta = _rk_block_local!(block, string(stem, "_Intercept"))
+        push!(block.statements, Expr(:call, :~, beta,
+            stated ? prior : Expr(:call, :Normal, 0, 1)))
         push!(parts, beta)
     elseif stated
         error("RK backend: HSGP hyper prior needs an intercept in its authored predictor")
     end
     if !isempty(plan.ranefs)
-        sd = _rk_ast_fresh_name(string(id, "_", stem, "_sd"), taken)
-        z = _rk_ast_fresh_name(string(id, "_", stem, "_z"), taken)
-        push!(stmts, Expr(:call, :~, sd,
+        sd = _rk_block_local!(block, string(stem, "_sd"))
+        z = _rk_block_local!(block, string(stem, "_z"))
+        push!(block.statements, Expr(:call, :~, sd,
             Expr(:call, :restricted, Expr(:call, :Normal, 0, 1), 0.0, Inf)))
-        push!(stmts, Expr(:call, :.~, Expr(:ref, z, Expr(:call, :(:), 1, G)),
+        push!(block.statements, Expr(:call, :.~, Expr(:ref, z, Expr(:call, :(:), 1, G)),
             _rk_ast_dotted(:Normal, 0, 1)))
         push!(parts, Expr(:call, :.*, sd, z))
     end
     eta = length(parts) == 1 ? only(parts) : Expr(:call, :.+, parts...)
-    value = _rk_ast_fresh_name(string(id, "_", stem, "_value"), taken)
+    value = _rk_block_local!(block, string(stem, "_value"))
     expression = _rk_ast_dotted(:exp, eta)
-    hyper === :length_scale && (expression = _rk_ast_dotted(:max, expression, floors))
-    push!(stmts, Expr(:(=), value, expression))
+    hyper === :length_scale && (expression = _rk_ast_dotted(:max, expression, floor))
+    push!(block.statements, Expr(:(=), value, expression))
     value
 end
 
+# Grouped or hyper-predicted HSGP: one block allocating the hyperparameters,
+# their group-level effects and the basis weights, returning the summand.
 function _rk_ast_hsgp_grouped(definitions, term, PHI, lambda, floors, taken, bindings)
     options = term.options
     G = get(options, :n_groups, 1)
-    stmts = Expr[]
-    rho = _rk_ast_hsgp_hyper!(stmts, options, :length_scale, floors, taken, bindings, G)
-    sigma = _rk_ast_hsgp_hyper!(stmts, options, :sd, floors, taken, bindings, G)
-    z = _rk_ast_fresh_name(string(options.id, "_z"), taken)
-    if haskey(options, :group_index)
-        push!(stmts, Expr(:call, :.~, Expr(:ref, z, Expr(:call, :(:), 1, G),
-            Expr(:call, :axes, PHI, 2)), _rk_ast_dotted(:Normal, 0, 1)))
-        push!(stmts, Expr(:call, :~, options.id,
-            _rk_ast_hsgp_value_graph!(definitions, term, taken,
-                PHI, lambda, sigma, rho, z; group_index=options.group_index)))
-    else
-        push!(stmts, Expr(:call, :.~, Expr(:ref, z, Expr(:call, :axes, PHI, 2)),
-            _rk_ast_dotted(:Normal, 0, 1)))
-        push!(stmts, Expr(:call, :~, options.id,
-            _rk_ast_hsgp_value_graph!(definitions, term, taken,
-                PHI, lambda, sigma, rho, z)))
-    end
-    stmts
+    rho_prior = _rk_ast_hsgp_hyper_prior(options, :length_scale, bindings, taken)
+    sigma_prior = _rk_ast_hsgp_hyper_prior(options, :sd, bindings, taken)
+    grouped = haskey(options, :group_index)
+    block = _rk_block_body(rho_prior, sigma_prior)
+    P = _rk_block_argument!(block, :PHI, PHI)
+    omega2 = _rk_block_argument!(block, :omega2, lambda)
+    floor = _rk_block_argument!(block, :floor, floors)
+    group_index = grouped ? _rk_block_argument!(block, :group_index, options.group_index) :
+        nothing
+    rho = _rk_ast_hsgp_hyper!(block, options, :length_scale, rho_prior, floor, G)
+    sigma = _rk_ast_hsgp_hyper!(block, options, :sd, sigma_prior, floor, G)
+    z = _rk_block_local!(block, :z)
+    weights = grouped ? (Expr(:call, :(:), 1, G), Expr(:call, :axes, P, 2)) :
+        (Expr(:call, :axes, P, 2),)
+    push!(block.statements, Expr(:call, :.~, Expr(:ref, z, weights...),
+        _rk_ast_dotted(:Normal, 0, 1)))
+    value = _rk_block_local!(block, :value)
+    push!(block.statements, Expr(:(=), value, _rk_ast_hsgp_value_graph!(definitions,
+        term, taken, P, omega2, sigma, rho, z; group_index)))
+    _rk_ast_block_call!(definitions, taken, "brm_grouped_hsgp", block, value)
 end
-function _rk_ast_structured_block(field, taken, bindings)
+function _rk_ast_structured_block(definitions, field, taken, bindings)
     K, G = field.n_per_group, length(field.levels)
     K isa Integer && K > 0 || error("RK backend: structured field needs a positive width")
     G > 0 || error("RK backend: structured field has no declared group levels")
     block = _rk_ast_fresh_name(string("b_", field.name, "_", field.source), taken)
-    z = _rk_ast_fresh_name(string(block, "_z"), taken)
     axes = (Expr(:call, :(:), 1, G), Expr(:call, :(:), 1, K))
     stmts = Expr[]
     if field.prior === :correlated_normal
-        tau = _rk_ast_fresh_name(string(block, "_sd"), taken)
-        push!(stmts, Expr(:call, :.~, Expr(:ref, tau, last(axes)),
-            _rk_ast_dotted(:restricted, Expr(:call, :Normal, 0, 1), 0.0, Inf)))
-        push!(stmts, Expr(:call, :.~, Expr(:ref, z, axes...), _rk_ast_dotted(:Normal, 0, 1)))
-        value = if K == 1
-            Expr(:call, :.*, z, Expr(:ref, tau, 1))
-        else
-            L = _rk_ast_fresh_name(string(block, "_L"), taken)
-            push!(stmts, Expr(:call, :~, L, Expr(:call, :LKJCholesky, K, 1.0)))
-            Expr(:call, :*, z, Expr(:call, :transpose, Expr(:call, :.*, tau, L)))
-        end
-        push!(stmts, Expr(:(=), block, value))
+        call = _rk_ast_varying_draws!(definitions, taken, K, 1.0, first(axes);
+            scale_priors=Expr(:call, :restricted, Expr(:call, :Normal, 0, 1), 0.0, Inf))
+        push!(stmts, Expr(:call, :~, block, call))
     else
+        z = _rk_ast_fresh_name(string(block, "_z"), taken)
         prior = field.prior === :iid_normal ? ExprColumn(Normal, 0, 1) :
             _brm_structured_prior_expression(field)
         expression = _rk_value_expr!(bindings, _brm_prepare_expr(prior), taken)
@@ -143,7 +145,7 @@ function _rk_ast_structured_block(field, taken, bindings)
     block, stmts
 end
 
-function _rk_ast_structured_term(term, blocks, taken, bindings)
+function _rk_ast_structured_term(definitions, term, blocks, taken, bindings)
     prepared = term.options.prepared
     stmts = Expr[]
     parts = Symbol[]
@@ -157,7 +159,7 @@ function _rk_ast_structured_term(term, blocks, taken, bindings)
                 "has conflicting widths, levels or priors")
             old.name
         else
-            name, body = _rk_ast_structured_block(field, taken, bindings)
+            name, body = _rk_ast_structured_block(definitions, field, taken, bindings)
             append!(stmts, body)
             blocks[key] = (; name, signature)
             name

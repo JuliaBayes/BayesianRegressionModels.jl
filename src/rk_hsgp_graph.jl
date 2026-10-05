@@ -130,12 +130,8 @@ function _rk_ast_hsgp_value_graph!(definitions, term, taken,
             :(value = vec(sum(PHI .* rows; dims=2))), Expr(:return,:value))
     end
     push!(definitions, _rk_ast_graph_definition(entry, arguments, body))
-    # Retain the reusable statistical value declaration, with its numerical
-    # child graph explicit in the same emitted namespace.
-    wrapper = _rk_ast_fresh_name("brm_hsgp_summand", taken)
-    push!(definitions, Expr(:(=), Expr(:call, wrapper, arguments...),
-        Expr(:block, Expr(:call, entry, arguments...))))
+    # The HSGP block submodel calls its numerical child graph directly.
     values = [PHI, omega2, sigma, rho, z]
     group_index === nothing || push!(values, group_index)
-    Expr(:call, wrapper, values...)
+    Expr(:call, entry, values...)
 end

@@ -89,6 +89,75 @@ function _rk_ast_positive_prior(prior, bindings, taken; default=:HalfNormal)
     Expr(:call, :restricted, expression, 0.0, Inf)
 end
 
+# One varying-effect block, as StanBlocks' `ranef_*_draws` submodels: the
+# scales (unless an R2D2 budget derives them and passes them in), standard
+# innovations and correlation factor, returning the levels x K draws.
+# `scale_priors` is one shared law or a vector of per-margin laws.
+function _rk_ast_varying_draws!(definitions, taken, K, eta, rows;
+        group=nothing, scale_priors=nothing, scales=nothing)
+    block = _rk_block_body(rows, scale_priors)
+    axis = group === nothing ? rows :
+        Expr(:call, :levels, _rk_block_argument!(block, :g, group))
+    index = Expr(:call, :(:), 1, K)
+    sd = scales === nothing ? _rk_block_local!(block, :sd) :
+        _rk_block_argument!(block, :sd, scales)
+    if scale_priors isa AbstractVector
+        parts = [_rk_block_local!(block, string(sd, "_", j)) for j in eachindex(scale_priors)]
+        for (part, prior) in zip(parts, scale_priors)
+            push!(block.statements, Expr(:call, :~, part, prior))
+        end
+        push!(block.statements, Expr(:(=), sd, Expr(:vect, parts...)))
+    elseif scale_priors !== nothing
+        push!(block.statements, Expr(:call, :.~, Expr(:ref, sd, index),
+            _rk_ast_dotted(scale_priors.args[1], scale_priors.args[2:end]...)))
+    end
+    z = _rk_block_local!(block, :z)
+    push!(block.statements, Expr(:call, :.~, Expr(:ref, z, axis, index),
+        _rk_ast_dotted(:Normal, 0, 1)))
+    value = if K == 1
+        Expr(:call, :.*, z, Expr(:ref, sd, 1))
+    else
+        L = _rk_block_local!(block, :L)
+        push!(block.statements, Expr(:call, :~, L, Expr(:call, :LKJCholesky, K, eta)))
+        Expr(:call, :*, z, Expr(:call, :transpose, Expr(:call, :.*, sd, L)))
+    end
+    base = K == 1 ? "brm_varying_draws" : "brm_correlated_draws"
+    _rk_ast_block_call!(definitions, taken, scales === nothing ? base : base * "_r2d2",
+        block, value)
+end
+
+# `gr(g, by=s)`: per-stratum scales and correlation factors, one row of draws
+# per observation (StanBlocks' `ranef_correlated_by_draws`).
+function _rk_ast_stratified_draws!(definitions, taken, K, eta, group, stratum)
+    block = _rk_block_body()
+    g = _rk_block_argument!(block, :g, group)
+    s = _rk_block_argument!(block, :s, stratum)
+    sd, z, b = _rk_block_local!(block, :sd), _rk_block_local!(block, :z),
+        _rk_block_local!(block, :b)
+    i = _rk_block_local!(block, :i)
+    index = Expr(:call, :(:), 1, K)
+    push!(block.statements, Expr(:call, :.~, Expr(:ref, sd,
+        Expr(:call, :levels, s), index),
+        _rk_ast_dotted(:restricted, Expr(:call, :Normal, 0, 1), 0.0, Inf)))
+    L = nothing
+    if K > 1
+        L, k = _rk_block_local!(block, :L), _rk_block_local!(block, :k)
+        cell = Expr(:call, :~, Expr(:ref, L, k), Expr(:call, :LKJCholesky, K, eta))
+        push!(block.statements, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
+            Expr(:for, Expr(:(=), k, Expr(:call, :levels, s)), Expr(:block, cell))))
+    end
+    push!(block.statements, Expr(:call, :.~, Expr(:ref, z,
+        Expr(:call, :levels, g), index), _rk_ast_dotted(:Normal, 0, 1)))
+    scale = Expr(:ref, sd, Expr(:ref, s, i), :(:))
+    raw = Expr(:ref, z, Expr(:ref, g, i), :(:))
+    value = K == 1 ? Expr(:call, :.*, scale, raw) :
+        Expr(:call, :*, Expr(:call, :.*, scale, Expr(:ref, L, Expr(:ref, s, i))), raw)
+    cell = Expr(:(=), Expr(:ref, b, i, index), value)
+    push!(block.statements, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
+        Expr(:for, Expr(:(=), i, Expr(:call, :eachindex, g)), Expr(:block, cell))))
+    _rk_ast_block_call!(definitions, taken, "brm_stratified_draws", block, b)
+end
+
 function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindings;
         predictors=(), population_priors=Dict())
     grouping = bucket.grouping
@@ -99,67 +168,31 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
         group = _rk_ast_fresh_name(string(draws, "_groups"), taken)
         push!(stmts, Expr(:(=), group, Expr(:call, :vcat, grouping.columns...)))
     end
-    tau = _rk_ast_fresh_name(string(draws, "_sd"), taken)
-    z = _rk_ast_fresh_name(string(draws, "_z"), taken)
-    index = Expr(:call, :(:), 1, K)
-    if grouping.form === :gr
-        stratum = grouping.by
-        L = _rk_ast_fresh_name(string(draws, "_L"), taken)
-        push!(stmts, Expr(:call, :.~, Expr(:ref, tau,
-            Expr(:call, :levels, stratum), index),
-            _rk_ast_dotted(:restricted, Expr(:call, :Normal, 0, 1), 0.0, Inf)))
-        if K > 1
-            cell = Expr(:call, :~, Expr(:ref, L, :k),
-                Expr(:call, :LKJCholesky, K, bucket.lkj_eta))
-            push!(stmts, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
-                Expr(:for, Expr(:(=), :k, Expr(:call, :levels, stratum)),
-                    Expr(:block, cell))))
-        end
-        push!(stmts, Expr(:call, :.~, Expr(:ref, z,
-            Expr(:call, :levels, group), index), _rk_ast_dotted(:Normal, 0, 1)))
-        scale = Expr(:ref, tau, Expr(:ref, stratum, :i), :(:))
-        raw = Expr(:ref, z, Expr(:ref, group, :i), :(:))
-        value = K == 1 ? Expr(:call, :.*, scale, raw) :
-            Expr(:call, :*, Expr(:call, :.*, scale,
-                Expr(:ref, L, Expr(:ref, stratum, :i))), raw)
-        cell = Expr(:(=), Expr(:ref, draws, :i, index), value)
-        push!(stmts, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
-            Expr(:for, Expr(:(=), :i, Expr(:call, :eachindex, group)), Expr(:block, cell))))
+    call = if grouping.form === :gr
+        _rk_ast_stratified_draws!(definitions, taken, K, bucket.lkj_eta,
+            group, grouping.by)
+    elseif bucket.decomposition !== nothing
+        # The shared budget stays a caller-level graph: its scales also feed
+        # population priors. The block receives its derived scale vector.
+        tau = _rk_ast_fresh_name(string(draws, "_sd"), taken)
+        _rk_ast_ranef_r2d2!(definitions, stmts, bucket, tau, bindings, taken,
+            predictors, population_priors)
+        _rk_ast_varying_draws!(definitions, taken, K, bucket.lkj_eta, nothing;
+            group, scales=tau)
     else
         # Stan's ordinary unnamed intercept and multi-membership intercept
         # families sample log_scale ~ Normal(0,1). Shared-ID, slope and
         # stratified families keep their half-normal scale default.
         default = bucket.kind === :intercept1 ? :LogNormal : :HalfNormal
-        if bucket.decomposition !== nothing
-            _rk_ast_ranef_r2d2!(definitions, stmts, bucket, tau, bindings, taken,
-                predictors, population_priors)
-        elseif all(isequal(first(bucket.sd_priors)), bucket.sd_priors)
-            prior = _rk_ast_positive_prior(first(bucket.sd_priors), bindings, taken; default)
-            push!(stmts, Expr(:call, :.~, Expr(:ref, tau, index),
-                _rk_ast_dotted(prior.args[1], prior.args[2:end]...)))
+        scale_priors = if all(isequal(first(bucket.sd_priors)), bucket.sd_priors)
+            _rk_ast_positive_prior(first(bucket.sd_priors), bindings, taken; default)
         else
-            scales = Symbol[]
-            for (j, prior) in enumerate(bucket.sd_priors)
-                scale = _rk_ast_fresh_name(string(tau, "_", j), taken)
-                push!(scales, scale)
-                push!(stmts, Expr(:call, :~, scale,
-                    _rk_ast_positive_prior(prior, bindings, taken)))
-            end
-            push!(stmts, Expr(:(=), tau, Expr(:vect, scales...)))
+            [_rk_ast_positive_prior(prior, bindings, taken) for prior in bucket.sd_priors]
         end
-        push!(stmts, Expr(:call, :.~, Expr(:ref, z,
-            Expr(:call, :levels, group), index), _rk_ast_dotted(:Normal, 0, 1)))
-        value = if K == 1
-            _rk_ast_statistical_call!(definitions, taken,
-                :brm_scaled_random_coefficients, tau, z)
-        else
-            L = _rk_ast_fresh_name(string(draws, "_L"), taken)
-            push!(stmts, Expr(:call, :~, L, Expr(:call, :LKJCholesky, K, bucket.lkj_eta)))
-            _rk_ast_statistical_call!(definitions, taken,
-                :brm_correlated_random_coefficients, tau, L, z)
-        end
-        push!(stmts, Expr(:call, :~, draws, value))
+        _rk_ast_varying_draws!(definitions, taken, K, bucket.lkj_eta, nothing;
+            group, scale_priors)
     end
+    push!(stmts, Expr(:call, :~, draws, call))
     indices = Dict{Symbol,Symbol}()
     if grouping.form !== :gr
         callee = :brm_level_indices
@@ -213,29 +246,36 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
     stmts
 end
 
-function _rk_ast_value_spline(term, taken)
+# A penalized smooth, as StanBlocks' `_sb_s_generic`/`_sb_t2_generic`: the
+# fitted bases stay caller-level values; one block allocates the unpenalized
+# coefficients, smoothing scales and standardized penalized coefficients.
+function _rk_ast_value_spline(definitions, term, taken)
     X = _rk_ast_fresh_name(string(term.options.id, "_X"), taken)
     nblocks = term.options.kind === :t2 ? 3 : 1
     Z = [_rk_ast_fresh_name(string(term.options.id, "_Z", j), taken) for j in 1:nblocks]
     k = term.options.k
     kval = k isa Tuple ? Expr(:tuple, k...) : k
     basis = term.options.kind === :t2 ? :brm_t2_basis : :brm_tps_basis
-    call = Expr(:call, basis, term.columns..., kval)
-    b = _rk_ast_fresh_name(string(term.options.id, "_fixed"), taken)
-    stmts = Expr[Expr(:(=), Expr(:tuple, X, Z...), call),
-        Expr(:call, :.~, Expr(:ref, b, Expr(:call, :axes, X, 2)),
-            _rk_ast_dotted(:Flat))]
-    parts = Any[Expr(:call, :*, X, b)]
-    for (j, block) in enumerate(Z)
-        sd = _rk_ast_fresh_name(string(term.options.id, "_sd", j), taken)
-        raw = _rk_ast_fresh_name(string(term.options.id, "_raw", j), taken)
-        push!(stmts, Expr(:call, :~, sd,
+    stmts = Expr[Expr(:(=), Expr(:tuple, X, Z...),
+        Expr(:call, basis, term.columns..., kval))]
+    block = _rk_block_body()
+    fixed_basis = _rk_block_argument!(block, :X, X)
+    penalized = [_rk_block_argument!(block, "Z$j", Zj) for (j, Zj) in enumerate(Z)]
+    fixed = _rk_block_local!(block, :fixed)
+    push!(block.statements, Expr(:call, :.~,
+        Expr(:ref, fixed, Expr(:call, :axes, fixed_basis, 2)), _rk_ast_dotted(:Flat)))
+    parts = Any[Expr(:call, :*, fixed_basis, fixed)]
+    for (j, basis) in enumerate(penalized)
+        sd, raw = _rk_block_local!(block, "sd$j"), _rk_block_local!(block, "raw$j")
+        push!(block.statements, Expr(:call, :~, sd,
             Expr(:call, :restricted, Expr(:call, :Normal, 0, 1), 0.0, Inf)))
-        push!(stmts, Expr(:call, :.~, Expr(:ref, raw, Expr(:call, :axes, block, 2)),
-            _rk_ast_dotted(:Normal, 0, 1)))
-        push!(parts, Expr(:call, :*, block, Expr(:call, :.*, sd, raw)))
+        push!(block.statements, Expr(:call, :.~,
+            Expr(:ref, raw, Expr(:call, :axes, basis, 2)), _rk_ast_dotted(:Normal, 0, 1)))
+        push!(parts, Expr(:call, :*, basis, Expr(:call, :.*, sd, raw)))
     end
-    push!(stmts, Expr(:(=), term.options.id, Expr(:call, :.+, parts...)))
+    push!(stmts, Expr(:call, :~, term.options.id, _rk_ast_block_call!(definitions, taken,
+        term.options.kind === :t2 ? "brm_t2_smooth" : "brm_smooth", block,
+        Expr(:call, :.+, parts...))))
     stmts
 end
 
@@ -254,38 +294,40 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
         _rk_ast_hsgp_basis_graph!(definitions, term, taken, PHI, lambda, floors)
     end
     if haskey(options, :group_index) || !isempty(get(options, :hyper_plans, ()))
-        append!(stmts, _rk_ast_hsgp_grouped(definitions, term, PHI, lambda, floors, taken, bindings))
+        push!(stmts, Expr(:call, :~, options.id,
+            _rk_ast_hsgp_grouped(definitions, term, PHI, lambda, floors, taken, bindings)))
         return stmts
     end
-    rho_value = if periodic || options.iso
-        rho = _rk_ast_fresh_name(string(options.id, "_rho"), taken)
-        prior = _rk_ast_positive_prior(options.rho_prior, bindings, taken)
-        options.rho_truncated && (prior = Expr(:call, :restricted, prior, floors, Inf))
-        push!(stmts, Expr(:call, :~, rho, prior))
+    # One block, as StanBlocks' `_sb_hsgp*`: the hyperparameters and basis
+    # weights with their priors, returning the HSGP summand. The fitted basis
+    # and frequencies stay caller-level graph values, like Stan's data.
+    shared = periodic || options.iso
+    rho_priors = [_rk_ast_positive_prior(options.rho_prior, bindings, taken)
+        for _ in 1:(shared ? 1 : length(term.columns))]
+    sigma_prior = _rk_ast_positive_prior(options.sigma_prior, bindings, taken)
+    block = _rk_block_body(rho_priors, sigma_prior)
+    P = _rk_block_argument!(block, :PHI, PHI)
+    omega2 = _rk_block_argument!(block, periodic ? :harmonics : :omega2, lambda)
+    floor = options.rho_truncated ? _rk_block_argument!(block, :floor, floors) : nothing
+    rhos = map(enumerate(rho_priors)) do (j, prior)
+        rho = _rk_block_local!(block, shared ? "rho" : "rho$j")
+        options.rho_truncated && (prior = Expr(:call, :restricted, prior,
+            shared ? floor : Expr(:ref, floor, j), Inf))
+        push!(block.statements, Expr(:call, :~, rho, prior))
         rho
-    else
-        rhos = Symbol[]
-        for j in eachindex(term.columns)
-            rho = _rk_ast_fresh_name(string(options.id, "_rho", j), taken)
-            push!(rhos, rho)
-            prior = _rk_ast_positive_prior(options.rho_prior, bindings, taken)
-            options.rho_truncated && (prior = Expr(:call, :restricted, prior, Expr(:ref, floors, j), Inf))
-            push!(stmts, Expr(:call, :~, rho, prior))
-        end
-        Expr(:vect, rhos...)
     end
-    sigma = _rk_ast_fresh_name(string(options.id, "_sigma"), taken)
-    z = _rk_ast_fresh_name(string(options.id, "_z"), taken)
-    push!(stmts, Expr(:call, :~, sigma,
-        _rk_ast_positive_prior(options.sigma_prior, bindings, taken)))
-    push!(stmts, Expr(:call, :.~, Expr(:ref, z, Expr(:call, :axes, PHI, 2)),
+    rho = shared ? only(rhos) : Expr(:vect, rhos...)
+    sigma, z = _rk_block_local!(block, :sigma), _rk_block_local!(block, :z)
+    push!(block.statements, Expr(:call, :~, sigma, sigma_prior))
+    push!(block.statements, Expr(:call, :.~, Expr(:ref, z, Expr(:call, :axes, P, 2)),
         _rk_ast_dotted(:Normal, 0, 1)))
-    call = periodic ? _rk_ast_statistical_call!(definitions, taken,
-        :brm_periodic_hsgp_summand, PHI, lambda, sigma, rho_value, z) :
-        _rk_ast_hsgp_value_graph!(definitions, term, taken,
-            PHI, lambda, sigma, rho_value, z)
-    push!(stmts, Expr(:call, :~, options.id,
-        call))
+    value = _rk_block_local!(block, :value)
+    push!(block.statements, Expr(:(=), value, periodic ?
+        Expr(:call, :*, P, Expr(:call, :.*,
+            Expr(:call, :brm_hsgp_periodic_sqrt_spd, omega2, sigma, rho), z)) :
+        _rk_ast_hsgp_value_graph!(definitions, term, taken, P, omega2, sigma, rho, z)))
+    push!(stmts, Expr(:call, :~, options.id, _rk_ast_block_call!(definitions, taken,
+        periodic ? "brm_periodic_hsgp" : "brm_hsgp", block, value)))
     stmts
 end
 
@@ -594,7 +636,7 @@ function _rk_emit_ast(plan::_RKValuePlan)
         end
         push!(stmts, Expr(:call, :.~, observation.name, base))
     end
-    stmts = _rk_order_value_statements(stmts, keys(plan.columns))
+    stmts = _rk_order_value_statements(stmts, keys(plan.columns), defs)
     _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings),
         _rk_observed_names(plan))
 end
