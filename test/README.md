@@ -58,6 +58,16 @@ specified by `BRM_DESCRIPTION_TEX_OUTPUT`.
 
 ## Chunking heavy suites
 
+`rk_retained_transport.jl` attaches `RKBRMI(brmi, artifact.plan, built)` to
+the artifact route's existing build. It checks normalized compiled Stan
+densities, every ordinary Reverse coordinate and the physical-check return
+schema, with all responses and a held-out response. Centered parameterizations
+raise a typed mismatch; invalid input and a corrupted permutation remain
+errors. Public block metadata identifies known parameterization mismatches
+before compiling Stan. `rk_coordinate_transport.jl` covers the broader semantic inventory,
+including the typed unsupported-coverage diagnostic for HSGP internals.
+Run either file with `julia --project=test test/<file>.jl`.
+
 Files with dozens of testsets (`rk_parity.jl`, `rk_emitter.jl`) OOM a squeezed
 host single-process. Those files spell their blocks `@stestset` (defined in
 `testset_filter.jl`, covered by `testset_filter_check.jl`) instead of

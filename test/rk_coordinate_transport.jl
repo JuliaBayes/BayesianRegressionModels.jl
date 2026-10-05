@@ -159,7 +159,8 @@ end
     result = try
         brm_coordinate_transport(rk, sb, BridgeStan.param_unc_names(stan.model))
     catch err
-        err isa ErrorException || rethrow()
+        err isa BRMCoordinateTransportError || rethrow()
+        @test err.reason === :unsupported_coverage
         @test occursin("do not pair completely", sprint(showerror, err))
         @test occursin("hsgp", sprint(showerror, err))
         nothing
