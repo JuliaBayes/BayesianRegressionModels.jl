@@ -7553,7 +7553,7 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
             columns[raw] = entry.raw_response
             push!(derived, _RKDerivedSpec(entry.key,
                 Expr(:_rk_data_preparation, :brm_prepared_indices, raw,
-                    Expr(:vect, collect(levels)...)), entry.key))
+                    _rk_ast_level_values(levels)), entry.key))
         end
         # Mixture v1 admits no response-level weights or bounded
         # evidence (no driving case), and no `gp` mixture predictors

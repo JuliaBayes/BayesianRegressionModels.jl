@@ -72,6 +72,12 @@ function _rk_source_assignments!(names, statement)
     names
 end
 
+# Frozen labels are values, not source identifiers or categorical pool objects.
+_rk_ast_level_value(value) = value
+_rk_ast_level_value(value::CA.CategoricalValue) = _rk_ast_level_value(CA.unwrap(value))
+_rk_ast_level_value(value::Symbol) = QuoteNode(value)
+_rk_ast_level_values(values) = Expr(:vect, _rk_ast_level_value.(values)...)
+
 # Whole numerical calls may return arrays. State each fitted data result's
 # observation axis in source, so authoring does not mistake it for a scalar.
 # The range is geometry metadata; the values still come from the graph call.
@@ -1094,7 +1100,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         elseif term.kind === :factor && haskey(term.options, :design_columns)
             for (name, level) in zip(term.options.design_columns, term.options.level_values)
                 call = _rk_ast_statistical_call!(defs, taken, :brm_factor_dummy,
-                    only(term.columns), level; kernel=true)
+                    only(term.columns), _rk_ast_level_value(level); kernel=true)
                 push!(stmts, Expr(:(=), name, call))
             end
         elseif term.kind in (:monotonic, :monotonic_summand)
@@ -1107,7 +1113,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     for name in sort!(collect(keys(index_sources)); by=string)
         source, levels = index_sources[name]
         call = _rk_ast_statistical_call!(defs, taken, :brm_prepared_indices,
-            source, Expr(:vect, levels...); kernel=true)
+            source, _rk_ast_level_values(levels); kernel=true)
         push!(stmts, Expr(:(=), name, call))
     end
     for derived in plan.derived

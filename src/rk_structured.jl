@@ -152,7 +152,7 @@ function _rk_ast_structured_term(definitions, term, blocks, taken, bindings)
     for (field, source) in zip(prepared.state.fields, term.options.field_sources)
         index = _rk_ast_fresh_name(string(term.options.id, "_", field.name, "_indices"), taken)
         call = _rk_ast_statistical_call!(definitions, taken, :brm_prepared_indices,
-            source, Expr(:vect, collect(field.levels)...); kernel=true)
+            source, _rk_ast_level_values(field.levels); kernel=true)
         push!(stmts, Expr(:(=), index, call))
         push!(indices, index)
     end
