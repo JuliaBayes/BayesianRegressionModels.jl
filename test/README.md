@@ -128,6 +128,15 @@ all ordinary Reverse gradients, censoring and row order against independent
 oracles and compiled same-BRMI Stan. Complete printed source and artifact
 re-entry are included; a scalar native-location control is checked separately.
 
+`rk_r2d2_priors.jl` checks shared-margin R2D2M2 and joint population/contrast
+budgets through native RK execution. It compares absolute normalized densities,
+every ordinary Reverse coordinate, pointwise responses and complete printed
+source replay with independent oracles and compiled same-BRMI Stan at physical
+simplex parameters. Controls cover unequal categorical frequencies, explicit
+factor design columns, sampled latent references, partial per-margin ICCs and
+conflicting allocation statements. The two original synthetic formulas retain
+their separate active sampled reference scales.
+
 `spline_basis_signs.jl` checks canonical TPS/t2 projection signs, input
 ownership, and frozen projections directly. The spline blocks in
 `rk_parity.jl` compare RK densities and Enzyme gradients with independent

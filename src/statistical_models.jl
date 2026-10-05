@@ -161,6 +161,14 @@ function rkppl_model end
 # The emitter keeps prior statements at their current author paths, and uses
 # these ordinary submodels to make repeated block composition readable.
 const _BRM_STATISTICAL_VALUES = (
+    brm_r2d2m2_scale = :(
+brm_r2d2m2_scale(reference, phi, r2, share, variance) = begin
+    allocated = phi[share] * r2
+    residual = (1.0 - r2) * variance
+    ratio = allocated / residual
+    return reference * sqrt(ratio)
+end
+    ),
     brm_completed_covariate = :(
 brm_completed_covariate(observed, missing, lookup, mask) = begin
     drawn = missing[lookup]

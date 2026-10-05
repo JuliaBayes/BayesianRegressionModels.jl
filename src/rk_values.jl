@@ -89,7 +89,8 @@ function _rk_ast_positive_prior(prior, bindings, taken; default=:HalfNormal)
     Expr(:call, :restricted, expression, 0.0, Inf)
 end
 
-function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindings)
+function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindings;
+        predictors=(), population_priors=Dict())
     grouping = bucket.grouping
     K = length(bucket.margins)
     group = first(grouping.columns)
@@ -129,7 +130,10 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
         # families sample log_scale ~ Normal(0,1). Shared-ID, slope and
         # stratified families keep their half-normal scale default.
         default = bucket.kind === :intercept1 ? :LogNormal : :HalfNormal
-        if all(isequal(first(bucket.sd_priors)), bucket.sd_priors)
+        if bucket.decomposition !== nothing
+            _rk_ast_ranef_r2d2!(definitions, stmts, bucket, tau, bindings, taken,
+                predictors, population_priors)
+        elseif all(isequal(first(bucket.sd_priors)), bucket.sd_priors)
             prior = _rk_ast_positive_prior(first(bucket.sd_priors), bindings, taken; default)
             push!(stmts, Expr(:call, :.~, Expr(:ref, tau, index),
                 _rk_ast_dotted(prior.args[1], prior.args[2:end]...)))
