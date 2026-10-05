@@ -297,7 +297,8 @@ function _rk_needs_value_plan(program, observations)
     end
     assignments = Set(op.name for op in program.operations if op.role === :assignment)
     predictors = Set(op.name for op in program.operations if op.role === :predictor)
-    any(op -> op.role === :predictor && any(in(assignments), op.dependencies),
+    value_parents = union(assignments, predictors)
+    any(op -> op.role === :predictor && any(in(value_parents), op.dependencies),
         program.operations) && return true
     for op in program.operations
         op.role === :assignment || continue
@@ -543,6 +544,29 @@ function _rk_emit_ast(plan::_RKValuePlan)
     end
     for completion in plan.completions
         _rk_emit_missing_value!(defs, stmts, bindings, taken, completion)
+    end
+    # Keep authored deterministic values as transparent graph computations.
+    # The surface's affine likelihood lowering may otherwise absorb their
+    # expressions into a location, dropping the named value and its math.
+    graph_values = Set(p.name for p in plan.regression.predictors)
+    union!(graph_values, (a.name for a in plan.assignments
+        if a isa _BRMPreparedAssignment))
+    ports = Set{Symbol}(keys(plan.columns))
+    foreach(statement -> _rk_source_outputs!(ports, statement), stmts)
+    for index in eachindex(stmts)
+        statement = stmts[index]
+        Meta.isexpr(statement, :(=), 2) || continue
+        target, expression = statement.args
+        target in graph_values || continue
+        inputs = sort!(collect(intersect(
+            _rk_source_symbols!(Set{Symbol}(), expression), ports)); by=string)
+        callee = _rk_ast_fresh_name(string("brm_value_", target), taken)
+        definition = Expr(:(=), Expr(:call, callee, inputs...),
+            Expr(:block, Expr(:(=), target, expression)))
+        push!(defs, Expr(:macrocall,
+            Expr(:., :ReactiveKernels, QuoteNode(Symbol("@kernel"))),
+            LineNumberNode(0), definition))
+        stmts[index] = Expr(:(=), target, Expr(:call, callee, inputs...))
     end
     for observation in plan.observations
         modifier = observation.modifier

@@ -2793,11 +2793,11 @@ end
 function _rk_term_specs(term, target::Symbol, data::AbstractDict,
         columns::Dict{Symbol,AbstractVector},
         derived::Vector{_RKDerivedSpec}, taken::Set{Symbol},
-        has_intercept::Bool, spines::Dict{Symbol,Any})
+        has_intercept::Bool, spines::Dict{Symbol,Any}; context=nothing)
     prefix = "RK backend"
     term isa Integer && term == 1 && return _RKTermSpec[_RKTermSpec(
         :intercept, Symbol[], (;), :Intercept, :Intercept)]
-    model_column = _rk_model_population_column(term)
+    model_column = _rk_model_population_column(term, context)
     if model_column !== nothing
         value = model_column.runtime_expression
         column_name = value isa Symbol ? value : _rk_push_derived!(
@@ -3578,7 +3578,7 @@ end
 function _rk_ranef_recipes!(margins::Vector{_RKRanefMargin}, lowered::Vector{Any},
         target::Symbol, data::AbstractDict,
         columns::Dict{Symbol,AbstractVector}, derived::Vector{_RKDerivedSpec},
-        taken::Set{Symbol}, what::String)
+        taken::Set{Symbol}, what::String; context=nothing)
     prefix = "RK backend"
     admitted = "`1`, continuous columns, integer/string/categorical " *
         "columns, continuous `&` interactions"
@@ -3605,6 +3605,12 @@ function _rk_ranef_recipes!(margins::Vector{_RKRanefMargin}, lowered::Vector{Any
                     _RKRanefZRecipe(:column, dname, nothing)))
             end
         elseif t isa NamedColumn
+            model_column = _rk_model_population_column(t, context)
+            if model_column !== nothing
+                push!(margins, _RKRanefMargin(target, model_column.label,
+                    _RKRanefZRecipe(:column, model_column.runtime_expression, nothing)))
+                continue
+            end
             backing = parent(t)
             backing isa DataColumn || error(
                 "$prefix: $what slope `$(name(t))` is not a raw data " *
@@ -3708,7 +3714,7 @@ function _rk_bucket_margins!(margins::Vector{_RKRanefMargin},
         lowered = _sb_ranef_lowered_terms(collect(Any, d.effects))
         before = length(margins)
         _rk_ranef_recipes!(margins, lowered, target, data, columns,
-            derived, taken, what)
+            derived, taken, what; context)
         ncols = length(margins) - before
         if ncols == 0
             # Degenerate blocks span no coefficients: plain ones are a
@@ -5220,7 +5226,7 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
             continue
         end
         append!(terms, _rk_term_specs(term, target, context.data,
-            columns, derived, taken, has_intercept, spines))
+            columns, derived, taken, has_intercept, spines; context))
     end
     for term in grouped
         decl = _brm_group_declaration(target, term)
@@ -5245,10 +5251,9 @@ function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
         !isempty(other_structured) ||
         return _rk_plan_offset_only_predictor(
         brmi, context, target, ordinary, available, link, terms, derived)
-    geometry = _brm_prepare_predictor_geometry(
+    geometry = _rk_model_predictor_geometry(
         brmi, context, target; available_predictors=available,
-        tolerant_default, matched_defaults,
-        population_columns=_rk_model_population_columns)
+        tolerant_default, matched_defaults)
     for (raw, prepared) in zip(structured, geometry.terms)
         if prepared.callable === gp
             push!(terms, _rk_plan_gp_term!(
