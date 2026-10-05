@@ -5206,11 +5206,12 @@ const _sb_collect_data_lengths! = _brm_collect_data_lengths!
 
 # Substitute a bare symbol inside a do-block cell body. `:kw` names and the
 # field half of `a.b` are syntactic positions, never value references, so they
-# are left alone; a `QuoteNode` is opaque.
+# are left alone; a `QuoteNode` is opaque. Dotted calls also use `:.`, but
+# their second argument is a tuple of value expressions that must be visited.
 _sb_subst_sym(x, from::Symbol, to) = x === from ? to : x
 _sb_subst_sym(x::QuoteNode, ::Symbol, _to) = x
 _sb_subst_sym(x::Expr, from::Symbol, to) =
-    if x.head === :. && length(x.args) == 2
+    if x.head === :. && length(x.args) == 2 && x.args[2] isa QuoteNode
         Expr(:., _sb_subst_sym(x.args[1], from, to), x.args[2])
     elseif x.head === :kw && length(x.args) == 2
         Expr(:kw, x.args[1], _sb_subst_sym(x.args[2], from, to))
