@@ -107,8 +107,8 @@ end
         pointwise = prepare_query(backend.model,bound,:pointwise)
         locations = modeled_slope_location_query(backend.model,bound)
         graph = ReactiveKernels.kernel_graph(backend.model.spec)
-        println("VALUE_GRAPH_OPERATIONS=",unique(nameof(typeof(recipe.op))
-            for recipe in graph.recipes)); flush(stdout)
+        println("VALUE_GRAPH_RECIPES=",[(entry.kind, entry.depth, entry.recipe.outputs)
+            for entry in recipe_inventory(graph)]); flush(stdout)
         translated = BRM.rk_translate_artifact(artifact)
         rebuilt = Base.invokelatest(build_kernel,translated)
         replay = prepare_sampler(rebuilt,translated,zeros(18);
