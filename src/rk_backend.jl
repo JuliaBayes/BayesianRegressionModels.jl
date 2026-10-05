@@ -377,7 +377,11 @@ struct _RKRanefBucket
     label::Symbol # :bucket_<suffix>
     grouping::_RKRanefGrouping
     sd_priors::Vector{Any}
+    decomposition::Union{Nothing,NamedTuple}
 end
+_RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping, sd_priors) =
+    _RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping,
+        sd_priors, nothing)
 _RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping) =
     _RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping,
         Any[nothing for _ in margins])
@@ -4041,16 +4045,41 @@ function _rk_plan_ranef_buckets(brmi::BRMI, context,
         lookup[(target, sym, nothing)] = bucket
         isnothing(bucket) || push!(buckets, bucket)
     end
-    overrides = _brm_resolve_ranef_effect_overrides(ranef_effect_priors(brmi),
+    specs = ranef_effect_priors(brmi)
+    # R2D2 is a variance allocation, never a distribution on an SD. Reuse
+    # the allocation/address resolver also used by Stan emission.
+    decompositions = if any(s -> s.class === :sd && s.family === r2d2, specs)
+        _sb_ranef_r2d2_overrides(brmi, _sb_collect_id_buckets(context),
+            _sb_prior_overrides(brmi; term_priors=context.term_priors))
+    else
+        Dict{Tuple{Symbol,Any},NamedTuple}()
+    end
+    direct = [s for s in specs if !(s.class === :sd && s.family === r2d2)]
+    overrides = _brm_resolve_ranef_effect_overrides(direct,
         Dict((bucket.id, bucket.group) => bucket.margins for bucket in buckets
             if bucket.id !== nothing); prefix)
+    whole = isempty(decompositions) ? Set{Symbol}() :
+        Set(s.predictor for s in r2d2_priors(brmi))
     for i in eachindex(buckets)
         bucket = buckets[i]
         override = get(overrides, (bucket.id, bucket.group), nothing)
-        override === nothing && continue
+        decomposition = get(decompositions, (bucket.id, bucket.group), nothing)
+        override === nothing && decomposition === nothing && continue
+        if decomposition !== nothing
+            any(m -> m.predictor in whole, bucket.margins) && error(
+                "$prefix: `|$(bucket.id)|` carries both whole-predictor " *
+                "`effect(..., :) ~ r2d2(...)` and random-effect " *
+                "`sd(...) ~ r2d2(...)` decompositions; choose one " *
+                "variance allocation for the block")
+            addresses = [(; m.predictor, m.coefficient) for m in bucket.margins]
+            addresses == decomposition.margins || error(
+                "$prefix: R2D2 margin order differs from the shared allocation")
+        end
         replacement = _RKRanefBucket(bucket.id, bucket.group, bucket.kind,
-            bucket.margins, bucket.slices, override.lkj_eta, bucket.label,
-            bucket.grouping, override.sd_prior)
+            bucket.margins, bucket.slices,
+            override === nothing ? bucket.lkj_eta : override.lkj_eta, bucket.label,
+            bucket.grouping, override === nothing ? bucket.sd_priors : override.sd_prior,
+            decomposition)
         buckets[i] = replacement
         for (key, value) in lookup
             value === bucket && (lookup[key] = replacement)

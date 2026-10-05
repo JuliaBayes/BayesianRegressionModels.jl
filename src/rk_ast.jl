@@ -943,6 +943,15 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         expression = _rk_ast_data_expr!(defs, stmts, bindings, taken, derived.expression)
         push!(stmts, Expr(:(=), derived.name, expression))
     end
+    # Emit shared budgets once, before their population and group-level
+    # consumers. All derived scales remain ordinary graph values.
+    joint_priors = Dict{Tuple{Symbol,Symbol},Tuple{Symbol,Tuple}}()
+    for (bi, bucket) in enumerate(plan.ranef_buckets)
+        bucket.decomposition === nothing && continue
+        append!(stmts, _rk_ast_value_bucket(defs, bucket, ranef_draws[bi],
+            ranef_effects, taken, bindings; predictors=plan.predictors,
+            population_priors=joint_priors))
+    end
     for predictor in plan.predictors
         lhs = get(rename, predictor.name, predictor.name)
         r2d2 = get(r2d2s, predictor.name, nothing)
@@ -999,6 +1008,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 nothing)
             override = if hs_spec !== nothing
                 nothing
+            elseif haskey(joint_priors, (predictor.name, term.addressee))
+                joint_priors[(predictor.name, term.addressee)]
             elseif r2d2 === nothing
                 key = (predictor.name, term.addressee)
                 haskey(priors, key) || error(
@@ -1102,7 +1113,9 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         end
     end
     for (bi, bucket) in enumerate(plan.ranef_buckets)
-        append!(stmts, _rk_ast_value_bucket(defs, bucket, ranef_draws[bi], ranef_effects, taken, bindings))
+        bucket.decomposition === nothing || continue
+        append!(stmts, _rk_ast_value_bucket(defs, bucket, ranef_draws[bi],
+            ranef_effects, taken, bindings))
     end
     for parameter in plan.parameters
         if parameter.family === :LKJCovarianceFactor
