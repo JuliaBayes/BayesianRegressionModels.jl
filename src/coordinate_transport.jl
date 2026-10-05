@@ -14,6 +14,27 @@
 # address is refused by name; nothing is matched by position, dimension or a
 # parsed spelling.
 
+"""
+    BRMCoordinateTransportError <: Exception
+
+A known boundary of the permutation-only [`brm_coordinate_transport`](@ref).
+`reason` is `:unsupported_coverage` when the semantic inventory does not cover
+the model, or `:parameterization_mismatch` when a known correspondence needs
+more than a coordinate permutation (for example, centered effects or exact-total
+blocks). `message::String` retains the diagnostic rendered by `showerror`.
+
+Neither reason returns a partial map or permits a matched timing comparison.
+Other failures, including invalid inputs and failed physical checks, propagate
+normally; do not classify arbitrary exceptions as missing transport coverage.
+"""
+struct BRMCoordinateTransportError <: Exception
+    reason::Symbol
+    message::String
+end
+
+Base.showerror(io::IO, err::BRMCoordinateTransportError) = print(io, err.message)
+_brm_transport_error(reason, message) = throw(BRMCoordinateTransportError(reason, message))
+
 _rk_coordinate_record!(::Nothing, record) = nothing
 _rk_coordinate_record!(records::AbstractVector, record) = (push!(records, record); nothing)
 
@@ -22,7 +43,7 @@ _rk_coordinate_records(plan::Union{_RKStructuralPlan,_RKValuePlan,_RKHeldOutPlan
         _rk_emit_ast(plan; coordinates=records)
         records
     end
-_rk_coordinate_records(plan) = error(
+_rk_coordinate_records(plan) = _brm_transport_error(:unsupported_coverage,
     "brm_coordinate_transport: an RK plan of kind `$(nameof(typeof(plan)))` has " *
     "no cross-backend coordinate inventory")
 
@@ -117,6 +138,13 @@ gradients move by the same permutation ([`brm_rk_to_stan`](@ref),
 [`brm_stan_to_rk`](@ref)) and the log-Jacobian of each backend's transform is
 evaluated at the same physical point. Confirm the physical agreement at
 concrete points with [`brm_check_coordinate_transport`](@ref).
+
+For an already retained artifact build, use `RKBRMI(brmi, artifact.plan, built)`
+with the original `brmi`, artifact plan and `built = build_kernel(bound)`.
+That constructor wraps the exact values without translating or building again.
+Use the same `held_out` selection for both backends. Known coverage boundaries
+and incompatible parameterizations throw [`BRMCoordinateTransportError`](@ref)
+with distinct `reason` values; other failures propagate normally.
 """
 function brm_coordinate_transport(rk::RKBRMI, sb::SBBRMI, stan_names::AbstractVector)
     parent(rk) === parent(sb) || error(
@@ -128,6 +156,12 @@ function brm_coordinate_transport(rk::RKBRMI, sb::SBBRMI, stan_names::AbstractVe
     stan_pos = Dict{String,Int}(n => i for (i, n) in enumerate(stan))
     length(stan_pos) == length(stan) || error(
         "brm_coordinate_transport: Stan unconstrained names are not unique")
+    totals = total_effect_blocks(d.plan)
+    isempty(totals) || _brm_transport_error(:parameterization_mismatch,
+        "brm_coordinate_transport: SB exact total-effect blocks for predictors " *
+        "$(Tuple(b.predictor for b in totals)) absorb or mix population and " *
+        "group coefficients; their coordinates are not a permutation of RK's " *
+        "standardized draws. Build the SBBRMI with `total_groups=()` for this comparison.")
     pairs = BRMCoordinatePair[]
     correlations = NamedTuple[]
     for record in records
@@ -173,7 +207,8 @@ function _brm_transport_validate(rk_names, stan, pairs, correlations)
         isempty(missing_stan) || push!(lines,
             "Stan coordinates with no semantic RK counterpart: " *
             join(missing_stan, ", "))
-        error("brm_coordinate_transport: the two lowerings do not pair " *
+        _brm_transport_error(:unsupported_coverage,
+              "brm_coordinate_transport: the two lowerings do not pair " *
               "completely, so no transport is returned.\n  " * join(lines, "\n  ") *
               "\n  Covered: scalar parameters, ordinary-prior population and " *
               "categorical coefficients, and plain non-centered random-effect " *
@@ -239,7 +274,7 @@ function _brm_transport_population_stan(d, predictor, coefficient, stan, stan_po
     length(position) == 1 || error(
         "brm_coordinate_transport: coefficient `$coefficient` occurs " *
         "$(length(position)) times in SB population block `$(block.key)`")
-    block.kind === :ordinary || error(
+    block.kind === :ordinary || _brm_transport_error(:unsupported_coverage,
         "brm_coordinate_transport: SB population block `$(block.key)` uses a " *
         "`$(block.kind)` prior scheme; only ordinary coefficient priors pair")
     coordinates = _brm_element_coordinates(block.output, stan)
@@ -256,10 +291,11 @@ function _brm_transport_pairs!(pairs, correlations, ::Val{:population}, record,
         coefficient=record.coefficient)
     name = _brm_transport_population_stan(d, record.predictor,
         record.coefficient, stan, stan_pos)
-    isnothing(name) && error(
-        "brm_coordinate_transport: population coefficient $(address) has no " *
-        "sampled SB coordinate. An exact total-effect block absorbs it unless " *
-        "the SBBRMI is built with `total_groups=()`.")
+    if isnothing(name)
+        _brm_transport_error(:unsupported_coverage,
+            "brm_coordinate_transport: population coefficient $(address) has no " *
+            "sampled SB coordinate. The semantic inventory does not cover this coefficient.")
+    end
     push!(pairs, BRMCoordinatePair(address, record.declaration, name,
         record.declaration, (), :identity))
 end
@@ -290,7 +326,7 @@ function _brm_transport_pairs!(pairs, correlations, ::Val{:population_block},
         "predictor `$(record.predictor)` resolves to no SB categorical block")
     sb_cellmeans = resolved.coding === :cellmeans
     rk_cellmeans = record.coding === :fullrank
-    sb_cellmeans == rk_cellmeans || error(
+    sb_cellmeans == rk_cellmeans || _brm_transport_error(:parameterization_mismatch,
         "brm_coordinate_transport: categorical term `$(record.coefficient)` of " *
         "predictor `$(record.predictor)` is coded differently by the two " *
         "backends (RK $(record.coding), SB $(resolved.coding))")
@@ -332,10 +368,10 @@ function _brm_transport_ranef_block(d, record)
         "brm_coordinate_transport: random-effect block $(address) of RK " *
         "margins $(record.margins) matches $(length(blocks)) SB blocks")
     block = only(blocks)
-    block.generated && error(
+    block.generated && _brm_transport_error(:parameterization_mismatch,
         "brm_coordinate_transport: SB block `$(block.binding)` is drawn in " *
         "generated quantities and has no sampled coordinates")
-    block.noncentered || error(
+    block.noncentered || _brm_transport_error(:parameterization_mismatch,
         "brm_coordinate_transport: SB block `$(block.binding)` is centered; its " *
         "coordinates are the effects, not the standardized draws RK samples. " *
         "Build the SBBRMI without `centered_groups` for this comparison.")
@@ -411,7 +447,7 @@ function _brm_transport_pairs!(pairs, correlations, ::Val{:ranef}, record,
     end
     # Correlation factor: Stan's packed coordinates, in the same margin order.
     isnothing(record.L) && return
-    sb_margin == collect(1:K) || error(
+    sb_margin == collect(1:K) || _brm_transport_error(:parameterization_mismatch,
         "brm_coordinate_transport: block `$(block.binding)` orders its margins " *
         "$(Tuple(margins)) on SB and $(record.margins) on RK; a reordered " *
         "correlation factor is not a coordinate permutation")
@@ -467,8 +503,12 @@ same physical parameter point: every paired constrained value agrees under its
 `relation`, and every correlation factor agrees as a whole matrix, including
 its structurally fixed unit diagonal norm and zero upper triangle. `stan_model`
 is the compiled `BridgeStan.StanModel` whose `param_unc_names` built `t`.
-Returns `(; pairs, factors, max_error)`; any disagreement is an error naming
-the coordinate. Densities and gradients are not compared here.
+Returns `(; pairs::Int, factors::Int, max_error::Float64)`: `pairs` counts
+checked non-correlation elements, `factors` counts whole correlation matrices,
+and `max_error` is the largest absolute physical difference over these elements
+and every matrix entry. Every comparison must meet
+`atol + rtol * max(abs(rk_value), abs(stan_value))`. Any disagreement is an error
+naming the coordinate. Densities and gradients are not compared here.
 """
 function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
         stan_model, u_rk::AbstractVector; atol::Real=1e-10, rtol::Real=1e-10)
