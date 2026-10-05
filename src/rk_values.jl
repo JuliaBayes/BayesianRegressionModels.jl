@@ -382,6 +382,9 @@ function _rk_needs_value_plan(program, observations)
             family = first(getargs(family))
         end
         head = family isa ExprColumn ? getf(family) : nothing
+        # A categorical response owns fitted level coding and a whole simplex;
+        # it is not a scalar response merely because it has no formula location.
+        head === Categorical && continue
         # Caller-owned scalar RHS constructors use the ordinary value/source
         # protocol. Their sampled parents need no synthetic formula predictor.
         if head !== nothing && head !== LocationScale &&

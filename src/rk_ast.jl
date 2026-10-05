@@ -76,7 +76,7 @@ end
 _rk_ast_level_value(value) = value
 _rk_ast_level_value(value::CA.CategoricalValue) = _rk_ast_level_value(CA.unwrap(value))
 _rk_ast_level_value(value::Symbol) = QuoteNode(value)
-_rk_ast_level_values(values) = Expr(:vect, _rk_ast_level_value.(values)...)
+_rk_ast_level_values(values) = Expr(:vect, (_rk_ast_level_value(value) for value in values)...)
 
 # Whole numerical calls may return arrays. State each fitted data result's
 # observation axis in source, so authoring does not mistake it for a scalar.
