@@ -664,6 +664,7 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
         end
         push!(stmts, Expr(:call, :.~, observation.name, base))
     end
+    stmts = _rk_source_data_axes(stmts, plan.columns)
     computed = Set{Symbol}()
     foreach(statement -> Meta.isexpr(statement, :(=), 2) &&
         _rk_source_outputs!(computed, statement), stmts)

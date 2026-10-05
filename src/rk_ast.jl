@@ -63,6 +63,21 @@ function _rk_source_data_columns(plan, emitted)
     Dict(name => value for (name, value) in plan.columns if !(name in computed))
 end
 
+# Whole numerical calls may return arrays. State each fitted data result's
+# observation axis in source, so authoring does not mistake it for a scalar.
+# The range is geometry metadata; the values still come from the graph call.
+function _rk_source_data_axes(statements, columns)
+    map(statements) do statement
+        Meta.isexpr(statement, :(=), 2) || return statement
+        name, value = statement.args
+        name isa Symbol && haskey(columns, name) || return statement
+        columns[name] isa AbstractVector || return statement
+        rows = Expr(:call, :(:), 1, length(columns[name]))
+        Meta.isexpr(value, :ref, 2) && isequal(value.args[2], rows) && return statement
+        Expr(:(=), name, Expr(:ref, value, rows))
+    end
+end
+
 function _rk_lower_assignment_expr(node, name::Symbol)
     node isa Number && return node
     node isa _BRMPreparedRef && return node.name
@@ -1304,6 +1319,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 fused_heads, union(Set(keys(plan.columns)), Set(Base.values(rename)),
                     Set(p.name for p in plan.predictors)), effects_name))
     end
+    stmts = _rk_source_data_axes(stmts, plan.columns)
     _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings),
         _rk_observed_names(plan))
 end
