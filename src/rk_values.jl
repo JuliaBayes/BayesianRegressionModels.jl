@@ -90,7 +90,7 @@ function _rk_ast_positive_prior(prior, bindings, taken; default=:HalfNormal)
 end
 
 function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindings;
-        predictors=(), population_priors=Dict())
+        predictors=(), population_priors=Dict(), coordinates=nothing)
     grouping = bucket.grouping
     K = length(bucket.margins)
     group = first(grouping.columns)
@@ -159,6 +159,16 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
                 :brm_correlated_random_coefficients, tau, L, z)
         end
         push!(stmts, Expr(:call, :~, draws, value))
+        # Plain grouping with sampled scales: the scale vector (or its
+        # per-margin scalars), the standardized `levels(group) x K` draws and
+        # the correlation factor. Other groupings stay unrecorded.
+        grouping.form === :plain && bucket.decomposition === nothing &&
+            _rk_coordinate_record!(coordinates, (; kind=:ranef,
+                group=bucket.group, id=bucket.id, bucket_kind=bucket.kind,
+                margins=Tuple((m.predictor, m.coefficient) for m in bucket.margins),
+                scale=tau, scales=(all(isequal(first(bucket.sd_priors)),
+                    bucket.sd_priors) ? nothing : Tuple(scales)),
+                z, L=(K == 1 ? nothing : L)))
     end
     indices = Dict{Symbol,Symbol}()
     if grouping.form !== :gr
@@ -536,10 +546,11 @@ function _rk_value_expr!(bindings, expression::_BRMPreparedExpr, taken)
     call
 end
 
-function _rk_emit_ast(plan::_RKValuePlan)
+function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
     reserved = Set{Symbol}(keys(plan.columns))
     union!(reserved, (a.name for a in plan.assignments))
-    regression = _rk_emit_ast(plan.regression, false; values=true, reserved)
+    regression = _rk_emit_ast(plan.regression, false; values=true, reserved,
+        coordinates)
     stmts = copy(regression.main.args)
     defs = copy(regression.defs)
     bindings = copy(regression.bindings)
