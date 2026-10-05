@@ -105,7 +105,8 @@ end
         y ~ Normal(mu,exp(brm_completed_covariate))
     end
     artifact = BRM.emit_rk_artifact(brmi; case_id="completion-name-collision")
-    definition = only(filter(d->Meta.isexpr(d,:macrocall),artifact.defs))
+    definition = only(filter(d -> Meta.isexpr(d, :macrocall) &&
+        startswith(string(BRM._rk_source_definition(d).name), "brm_completed_covariate"), artifact.defs))
     name = BRM._rk_source_definition(definition).name
     @test name != :brm_completed_covariate
     mod = Module(gensym(:CompletionGraph))

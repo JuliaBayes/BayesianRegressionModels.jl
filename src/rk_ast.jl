@@ -51,6 +51,18 @@ function _rk_validate_source_definitions(emitted)
     nothing
 end
 
+# A planned column can describe geometry while its emitted assignment owns
+# the executable value. Bind only source inputs, so a cached preparation can
+# never shadow that assignment on replay or rebinding.
+function _rk_source_data_columns(plan, emitted)
+    computed = Set{Symbol}()
+    for statement in emitted.main.args
+        Meta.isexpr(statement, :(=), 2) || continue
+        _rk_source_outputs!(computed, statement)
+    end
+    Dict(name => value for (name, value) in plan.columns if !(name in computed))
+end
+
 function _rk_lower_assignment_expr(node, name::Symbol)
     node isa Number && return node
     node isa _BRMPreparedRef && return node.name
@@ -243,8 +255,9 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol},
         Expr(:call, :.+, summands...)
 end
 
-function _rk_ast_r2d2_scale(r2d2, addressee; scalar=true)
+function _rk_ast_r2d2_scale(r2d2, addressee; scalar=true, variance_values=nothing)
     shares, variances = r2d2.allocation[addressee]
+    variance_values === nothing || (variances = variance_values)
     scales = Any[Expr(:call, :*, r2d2.tau,
         Expr(:call, :sqrt, Expr(:call, :/,
             Expr(:call, :*, Expr(:ref, r2d2.phi, shares[j]), r2d2.r2),
@@ -1033,6 +1046,30 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     bindings = Pair{Symbol,Any}[]
     stmts = Expr[]
     structured_blocks = Dict{Tuple{Symbol,Symbol},Any}()
+    index_sources = Dict{Symbol,Tuple{Symbol,Any}}()
+    for predictor in plan.predictors, term in predictor.terms
+        if haskey(term.options, :zero_source)
+            push!(stmts, Expr(:(=), only(term.columns),
+                Expr(:call, :zeros, Expr(:call, :length, term.options.zero_source))))
+        elseif term.kind === :factor && haskey(term.options, :design_columns)
+            for (name, level) in zip(term.options.design_columns, term.options.design_levels)
+                call = _rk_ast_statistical_call!(defs, taken, :brm_factor_dummy,
+                    only(term.columns), level; kernel=true)
+                push!(stmts, Expr(:(=), name, call))
+            end
+        elseif term.kind in (:monotonic, :monotonic_summand)
+            index_sources[only(term.columns)] = (term.options.source, term.options.levels)
+        elseif term.kind === :hsgp && haskey(term.options, :group_index)
+            index_sources[term.options.group_index] =
+                (term.options.group_source, term.options.group_levels)
+        end
+    end
+    for name in sort!(collect(keys(index_sources)); by=string)
+        source, levels = index_sources[name]
+        call = _rk_ast_statistical_call!(defs, taken, :brm_prepared_indices,
+            source, Expr(:vect, levels...); kernel=true)
+        push!(stmts, Expr(:(=), name, call))
+    end
     for derived in plan.derived
         expression = _rk_ast_data_expr!(defs, stmts, bindings, taken, derived.expression)
         push!(stmts, Expr(:(=), derived.name, expression))
@@ -1114,7 +1151,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 r2 = get(r2d2.overrides, term.addressee, nothing)
                 r2 === nothing ? (kind === :intercept ? (:Normal, (0.0, 1.0)) :
                     (:Normal, (0.0, _rk_ast_r2d2_scale(r2d2, term.addressee;
-                        scalar=kind !== :factor)))) : (:Normal, r2)
+                        scalar=kind !== :factor,
+                        variance_values=kind === :factor ?
+                            [Expr(:call, :var, name) for name in term.options.design_columns] :
+                            [Expr(:call, :var, colactual[index])])))) : (:Normal, r2)
             end
             if kind === :factor
                 col = only(term.columns)

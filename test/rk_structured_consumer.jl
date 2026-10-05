@@ -35,7 +35,7 @@ using LinearAlgebra
     mapping=[:mu_Intercept=>"pop_mu_beta_pop.1",
         Symbol("b_line_g.sd.1")=>"b_line_g_tau.1",
         Symbol("b_line_g.sd.2")=>"b_line_g_tau.2",
-        names[l]=>"b_line_g.L.1",
+        names[l]=>"b_line_g_L.1",
         Symbol("b_line_g.z.1.1")=>"b_line_g_z_flat.1",
         Symbol("b_line_g.z.1.2")=>"b_line_g_z_flat.2",
         Symbol("b_line_g.z.2.1")=>"b_line_g_z_flat.3",
@@ -134,7 +134,7 @@ end
                     push!(mapping,Symbol("hsgp_x.$(stem)_z.$g")=>"hsgp_x_by_g_z_$stem.$g")
                 end
             else
-                push!(mapping,Symbol("hsgp_x_$stem")=>"hsgp_x_by_g_$stan_stem")
+                push!(mapping,Symbol("hsgp_x.$stem")=>"hsgp_x_by_g_$stan_stem")
             end
         end
         oracle(u)=begin

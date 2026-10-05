@@ -297,6 +297,11 @@ coordinates. Caller ownership is preserved and complete printed-source replay
 is bit-identical. Optional testset filters select individual block cases.
 Graph structure checks use RK's public `recipe_inventory`, including retained
 child plates and scans.
+`rk_prepared_data_source.jl` checks emitted categorical/ordinal preparation and
+completed-covariate geometry, including declared level order, empty and
+all-missing partitions, retained numerical recipes, printed replay and cached
+columns that must not override source computations. Run it directly with
+`julia --project=test test/rk_prepared_data_source.jl`.
 `rk_hsgp_domains.jl` checks fixed one-dimensional and tensor HSGP domains
 against independent basis/frequency/floor calculations and normalized
 same-BRMI compiled Stan values and every mapped ordinary Reverse coordinate.

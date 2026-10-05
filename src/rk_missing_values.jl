@@ -99,13 +99,26 @@ function _rk_model_population_column(term, context=nothing)
         (; mean=_brm_fit_mean_numeric(observed, :predictor, :center, make_error), scale=1.0) :
         _brm_fit_zscale_numeric(observed, :predictor, make_error)
     values = fit === nothing ? raw : (raw .- fit.mean) ./ fit.scale
+    anchors = Expr(:call, :_brm_observed_values, plan.source)
     expression = fit === nothing ? name(inner) :
-        Expr(:call, :./, Expr(:call, :.-, name(inner), fit.mean), fit.scale)
+        Expr(:call, :./,
+            Expr(:call, :.-, name(inner), Expr(:call, :mean, anchors)),
+            kind === :center ? 1.0 : Expr(:call, :std, anchors))
     preprocess = _BRMPopulationPreprocess(kind,
         fit === nothing ? nothing : (fit.mean, fit.scale), inner)
     (; label, effect_addresses=(label,), effect_block=label,
         source=plan.source, values, preprocess, runtime_expression=expression)
 end
+
+# The marker is planning metadata, resolved to the actual packed observation
+# port before source is lowered. Its mean/std remain executable graph math.
+function _rk_observed_anchor_source(value::Expr, observations)
+    if Meta.isexpr(value, :call, 2) && first(value.args) === :_brm_observed_values
+        return observations[value.args[2]]
+    end
+    Expr(value.head, map(arg -> _rk_observed_anchor_source(arg, observations), value.args)...)
+end
+_rk_observed_anchor_source(value, _observations) = value
 
 function _rk_model_population_columns(term; cellmeans=false, context=nothing)
     column = _rk_model_population_column(term, context)
@@ -144,14 +157,20 @@ function _rk_mi_gather(value::_BRMPreparedExpr, rows)
         map(argument -> _rk_mi_gather(argument, rows), value.kwargs))
 end
 
-function _rk_prepare_missing_value!(columns, taken, observation, program, completions)
+function _rk_prepare_missing_value!(columns, taken, observation, program, completions, derived)
     plan = observation.missing_response
     plan === nothing && return observation
     observation.modifier === nothing || error(
         "RK backend: missing response `$(observation.name)` with response modifiers requires a supported completion law")
     observed = _rk_ast_fresh_name(string(plan.source, "_obs"), taken)
     jobs = _rk_ast_fresh_name(string("Jobs_", plan.source), taken)
+    raw = _rk_ast_fresh_name(string(plan.source, "_raw"), taken)
+    columns[raw] = plan.values
     columns[observed], columns[jobs] = plan.observed_values, plan.observed_indices
+    push!(derived, _RKDerivedSpec(observed,
+        Expr(:_rk_data_preparation, :brm_covariate_observed, raw), observed))
+    push!(derived, _RKDerivedSpec(jobs,
+        Expr(:_rk_data_preparation, :brm_covariate_observed_rows, raw), jobs))
     delete!(columns, plan.source)
     delete!(columns, observation.name)
     if _rk_mi_downstream(program, observation.name, plan.source)
@@ -159,18 +178,11 @@ function _rk_prepare_missing_value!(columns, taken, observation, program, comple
         component = _rk_ast_fresh_name(string(plan.source, "_observed_component"), taken)
         lookup = _rk_ast_fresh_name(string(plan.source, "_missing_lookup"), taken)
         mask = _rk_ast_fresh_name(string(plan.source, "_missing_mask"), taken)
-        # These are the two contributions of the completion map, not filled
-        # covariate data. Only actual observed values enter the observed law.
-        nrows = length(plan.values)
-        fixed = zeros(Float64, nrows)
-        fixed[plan.observed_indices] = plan.observed_values
-        indices, selected = ones(Int, nrows), zeros(Float64, nrows)
-        indices[plan.missing_indices] = eachindex(plan.missing_indices)
-        selected[plan.missing_indices] .= 1.0
-        columns[component] = fixed
-        if !isempty(plan.missing_indices)
-            columns[jmis], columns[lookup], columns[mask] = plan.missing_indices, indices, selected
-        end
+        # Row partitions describe the declared covariate geometry. The
+        # observed contribution, missing lookup and mask are graph values.
+        columns[jmis] = plan.missing_indices
+        push!(derived, _RKDerivedSpec(jmis,
+            Expr(:_rk_data_preparation, :brm_covariate_missing_rows, raw), jmis))
         push!(completions, _RKMissingValueSpec(plan.source, observed,
             jobs, jmis, component, lookup, mask, length(plan.missing_indices), observation.distribution))
     end
@@ -180,6 +192,11 @@ function _rk_prepare_missing_value!(columns, taken, observation, program, comple
 end
 
 function _rk_emit_missing_value!(definitions, statements, bindings, taken, completion)
+    geometry = _rk_ast_statistical_call!(definitions, taken,
+        :brm_covariate_geometry, completion.observed, completion.observed_rows,
+        completion.missing_rows; kernel=true)
+    push!(statements, Expr(:(=), Expr(:tuple, completion.observed_component,
+        completion.missing_lookup, completion.missing_mask), geometry))
     if completion.nmissing == 0
         push!(statements, Expr(:(=), completion.source, completion.observed_component))
         return nothing

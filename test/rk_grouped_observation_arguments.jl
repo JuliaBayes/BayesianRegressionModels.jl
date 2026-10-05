@@ -129,8 +129,8 @@ function check_grouped_arguments(label, data)
     backend, problem = consumer_problem(brmi)
     names = coordinate_names(backend.model.layout)
     ia = findfirst(==(:alpha_Intercept), names)
-    it = findfirst(n -> occursin("_sd.", string(n)), names)
-    iz = findall(n -> occursin("_z.", string(n)), names)
+    it = findfirst(n -> occursin(".sd.", string(n)), names)
+    iz = findall(n -> occursin(".z.", string(n)), names)
     is = findfirst(==(:sigma), names)
     @test length(names) == 6
     @test length(iz) == 3

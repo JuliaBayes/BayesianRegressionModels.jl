@@ -148,6 +148,17 @@ end
 function _rk_ast_structured_term(definitions, term, blocks, taken, bindings)
     prepared = term.options.prepared
     stmts = Expr[]
+    indices = Symbol[]
+    for (field, source) in zip(prepared.state.fields, term.options.field_sources)
+        index = _rk_ast_fresh_name(string(term.options.id, "_", field.name, "_indices"), taken)
+        call = _rk_ast_statistical_call!(definitions, taken, :brm_prepared_indices,
+            source, Expr(:vect, collect(field.levels)...); kernel=true)
+        push!(stmts, Expr(:(=), index, call))
+        push!(indices, index)
+    end
+    inputs = _rk_ast_statistical_call!(definitions, taken, :brm_structured_inputs,
+        term.options.metadata, Expr(:tuple, indices...))
+    push!(stmts, Expr(:(=), term.options.prepared_data, inputs))
     parts = Symbol[]
     for (field_index, field) in enumerate(prepared.state.fields)
         key = (field.name, field.source)

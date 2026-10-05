@@ -40,8 +40,8 @@ end
     names = coordinate_names(backend.model.layout)
     ia = findfirst(==(:theta_Intercept), names)
     iq = findfirst(==(:qt_scale_Intercept), names)
-    it = findfirst(n -> occursin("_sd.", string(n)), names)
-    iz = findall(n -> occursin("_z.", string(n)), names)
+    it = findfirst(n -> occursin(".sd.", string(n)), names)
+    iz = findall(n -> occursin(".z.", string(n)), names)
     @test length(names) == 5
     @test length(iz) == 2
     oracle(u) = begin

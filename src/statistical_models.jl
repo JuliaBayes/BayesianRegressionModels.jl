@@ -161,6 +161,73 @@ function rkppl_model end
 # ordinary functions or numerical graphs, not submodels: statistical blocks
 # that allocate parameters are generated per block (see `_rk_ast_block_call!`).
 const _BRM_STATISTICAL_VALUES = (
+    brm_matrix_column = :(
+brm_matrix_column(inputs, column) = begin
+    matrix = only(inputs)
+    values = Int.(matrix[:, column])
+    return values
+end
+    ),
+    brm_covariate_observed = :(
+brm_covariate_observed(values) = begin
+    observed = Float64.(collect(skipmissing(values)))
+    return observed
+end
+    ),
+    brm_covariate_observed_rows = :(
+brm_covariate_observed_rows(values) = begin
+    rows = findall(!ismissing, values)
+    return rows
+end
+    ),
+    brm_covariate_missing_rows = :(
+brm_covariate_missing_rows(values) = begin
+    rows = findall(ismissing, values)
+    return rows
+end
+    ),
+    brm_structured_inputs = :(
+brm_structured_inputs(prepared_inputs, indices) = begin
+    prepared = only(prepared_inputs)
+    fields = map((field, index) -> merge(field, (; idx=index)), prepared.state.fields, indices)
+    state = merge(prepared.state, (; fields))
+    return [BayesianRegressionModels._BRMPreparedTerm(prepared.callable,
+        prepared.source, state, prepared.dependencies)]
+end
+    ),
+    brm_factor_dummy = :(
+brm_factor_dummy(values, level) = begin
+    dummy = ReactiveKernels.plate(values, Ref(level)) do value, selected
+        1.0 * isequal(value, selected)
+    end
+    return dummy
+end
+    ),
+    brm_prepared_indices = :(
+brm_prepared_indices(values, level_values) = begin
+    indices = ReactiveKernels.plate(values, Ref(level_values)) do value, declared
+        Int(findfirst(isequal(value), declared))
+    end
+    return indices
+end
+    ),
+    brm_covariate_geometry = :(
+brm_covariate_geometry(observed, observed_rows, missing_rows) = begin
+    rows = 1:(length(observed_rows) + length(missing_rows))
+    observed_by_row = Dict(zip(observed_rows, observed))
+    missing_by_row = Dict(zip(missing_rows, eachindex(missing_rows)))
+    observed_component = ReactiveKernels.plate(rows, Ref(observed_by_row)) do row, values
+        get(values, row, 0.0)
+    end
+    missing_lookup = ReactiveKernels.plate(rows, Ref(missing_by_row)) do row, indices
+        get(indices, row, 1)
+    end
+    missing_mask = ReactiveKernels.plate(rows, Ref(missing_by_row)) do row, indices
+        1.0 * haskey(indices, row)
+    end
+    return (observed_component, missing_lookup, missing_mask)
+end
+    ),
     brm_r2d2m2_scale = :(
 brm_r2d2m2_scale(reference, phi, r2, share, variance) = begin
     allocated = phi[share] * r2

@@ -39,8 +39,9 @@ function printed_hsgp_replay(backend)
     end,"\n")
     Core.eval(namespace,Meta.parseall(definitions))
     body=Meta.parse(sprint(Base.show_unquoted,emitted.main))
-    bound=bind_data(lower_rkppl(body,backend.plan.columns;mod=namespace,
-        conditioned=BRM._rk_observed_names(backend.plan)),backend.plan.columns)
+    inputs=BRM._rk_source_data_columns(backend.plan,emitted)
+    bound=bind_data(lower_rkppl(body,inputs;mod=namespace,
+        conditioned=BRM._rk_observed_names(backend.plan)),inputs)
     built=build_kernel(bound)
     sampler=prepare_sampler(built,bound,zeros(built.layout.total);
         backend=AutoEnzyme(;mode=Enzyme.Reverse))

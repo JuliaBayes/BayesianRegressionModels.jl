@@ -174,7 +174,7 @@ end
     composed,composed_problem = consumer_problem(PublicMissingValuePredictors.build_kernel(data))
     @test length(direct.plan.completions) == 2
     @test all(completion->completion.nmissing==0,direct.plan.completions)
-    @test all(completion->!haskey(direct.plan.columns,completion.missing_rows),direct.plan.completions)
+    @test all(completion->isempty(direct.plan.columns[completion.missing_rows]),direct.plan.completions)
     names = coordinate_names(direct.model.layout)
     @test length(names) == 14
     @test !any(name->occursin("y_mis",string(name)),names)

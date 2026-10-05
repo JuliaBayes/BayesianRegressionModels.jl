@@ -126,8 +126,8 @@ end
         @test BRM._rk_num_coefficients(backend.plan)==0
         bucket=only(backend.plan.ranef_buckets)
         names=coordinate_names(backend.model.layout)
-        scale=findfirst(n->occursin("_sd.",string(n)),names)
-        z=findall(n->occursin("_z.",string(n)),names)
+        scale=findfirst(n->occursin(".sd.",string(n)),names)
+        z=findall(n->occursin(".z.",string(n)),names)
         @test length(z)==2
         oracle(u)=begin
             t=exp(u[scale]); mu=t.*u[z]

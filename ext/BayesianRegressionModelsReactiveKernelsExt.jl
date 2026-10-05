@@ -22,6 +22,7 @@ function _rk_emit_module(emitted::BRM._RKEmittedProgram)
     Core.eval(mod, :(using ReactiveKernelsPPL))
     Core.eval(mod, :(import ReactiveKernels))
     Core.eval(mod, :(import ReactiveKernels: @kernel))
+    Core.eval(mod, :(import BayesianRegressionModels))
     Core.eval(mod, :(import BayesianRegressionModels:
         brm_tps_basis, brm_t2_basis, brm_hsgp_basis, brm_hsgp_periodic_basis,
         brm_hsgp_sqrt_spd, brm_hsgp_periodic_sqrt_spd,
@@ -44,10 +45,11 @@ end
 
 function _rk_translate_from_emitted(plan::_RK_PLAN_TYPES,
         emitted::BRM._RKEmittedProgram)
+    columns = BRM._rk_source_data_columns(plan, emitted)
     unbound = lower_rkppl(emitted.main,
-        plan.columns; mod=_rk_emit_module(emitted),
+        columns; mod=_rk_emit_module(emitted),
         conditioned=BRM._rk_observed_names(plan))
-    bind_data(unbound, plan.columns)
+    bind_data(unbound, columns)
 end
 
 function _rk_translated_plan(plan::_RK_PLAN_TYPES)

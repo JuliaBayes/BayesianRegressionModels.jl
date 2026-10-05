@@ -366,7 +366,7 @@ function _rk_needs_value_plan(program, observations)
         # an authored array reader; no population intercept is synthesized.
         family = rhs
         while family isa ExprColumn && getf(family) in
-                (censored, truncated, interval_censored) && !isempty(getargs(family))
+                (weighted, censored, truncated, interval_censored) && !isempty(getargs(family))
             family = first(getargs(family))
         end
         head = family isa ExprColumn ? getf(family) : nothing
@@ -451,6 +451,11 @@ function _rk_predictor_components(brmi, context, predictor_order, columns,
         push!(r2d2_vectors, r2d2.phi)
     end
     _brm_validate_population_effect_defaults(brmi, matched_defaults)
+    for predictor in predictors, term in predictor.terms
+        source = haskey(term.options, :zero_source) ? term.options.zero_source :
+            term.kind in (:monotonic, :monotonic_summand) ? term.options.source : nothing
+        source === nothing || (columns[source] = context.data[source])
+    end
     vectors = [_rk_plan_monotonic_vectors!(predictors); r2d2_vectors]
     (; predictors, priors, r2d2_priors, horseshoe_priors, buckets, vectors)
 end
@@ -501,7 +506,7 @@ function _brm_rk_value_plan(brmi, program, observations; kernels=(), submodels=(
     obs = Tuple(o for o in prepared.observations if o.name in roots)
     completions = _RKMissingValueSpec[]
     obs = map(obs) do original
-        o = _rk_prepare_missing_value!(value_columns, taken, original, program, completions)
+        o = _rk_prepare_missing_value!(value_columns, taken, original, program, completions, derived)
         o.weight === nothing || error(
             "RK backend: value-based response `$(o.name)` weights need an authored response")
         layout = isempty(kernels) ?
@@ -585,6 +590,9 @@ function _rk_emit_ast(plan::_RKValuePlan)
     stmts = copy(regression.main.args)
     defs = copy(regression.defs)
     bindings = copy(regression.bindings)
+    observations = Dict(completion.source => completion.observed for completion in plan.completions)
+    stmts = map(statement -> _rk_observed_anchor_source(statement, observations), stmts)
+    defs = map(definition -> _rk_observed_anchor_source(definition, observations), defs)
     taken = Set{Symbol}(keys(plan.columns))
     union!(taken, first.(bindings), (a.name for a in plan.assignments),
         (p.name for p in plan.regression.parameters),
@@ -640,7 +648,10 @@ function _rk_emit_ast(plan::_RKValuePlan)
         end
         push!(stmts, Expr(:call, :.~, observation.name, base))
     end
-    stmts = _rk_order_value_statements(stmts, keys(plan.columns), defs)
+    computed = Set{Symbol}()
+    foreach(statement -> Meta.isexpr(statement, :(=), 2) &&
+        _rk_source_outputs!(computed, statement), stmts)
+    stmts = _rk_order_value_statements(stmts, setdiff(Set(keys(plan.columns)), computed), defs)
     _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings),
         _rk_observed_names(plan))
 end
