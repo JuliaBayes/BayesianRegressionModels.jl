@@ -2207,7 +2207,7 @@ end
         [y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)
     end)
     # The stem reserves its two derived thin-layer bindings.
-    @test_throws "reserves emitted binding" BRM._brm_rk_plan(@brm dfj begin
+    @test_throws "reserves emitted binding" BRM._brm_rk_plan(@brm df4 begin
         mu1 ~ 1 + x
         mu2 ~ 1 + x
         L_res ~ LKJCovarianceFactor(2; scale_prior=Exponential(1))
@@ -5080,7 +5080,7 @@ end
     @test !occursin("kernel_T_pred", source)
 
     # A grouped predictor is an admitted cell input on its original group axis.
-    gbrmi = @brm df begin
+    gbrmi = @brm begin
         sigma ~ Exponential(1)
         log_slope ~ 1 + (1 | shared | g)
         pred ~ kernel(x, log_slope) do xs, lslope
@@ -5089,7 +5089,10 @@ end
         end
         y ~ Normal(pred, sigma)
     end
-    grouped = BRM._brm_rk_plan(gbrmi)
+    @test_throws "pre-grouped per-subject data" BRM._brm_rk_plan(gbrmi(df))
+    grouped_data = (; g=[1,2,3], x=[[-1.0,-0.5],[0.0,0.5],[1.0,1.5]],
+        y=[[0.5,-0.2],[0.1,0.9],[1.4,1.1]])
+    grouped = BRM._brm_rk_plan(gbrmi(grouped_data))
     @test length(grouped.regression.ranef_buckets) == 1
     grouped_cell = only(a for a in grouped.assignments if a.name === :pred)
     @test grouped.columns[grouped_cell.count] == 3
