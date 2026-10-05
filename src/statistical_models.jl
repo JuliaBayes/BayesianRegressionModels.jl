@@ -169,9 +169,8 @@ LogNormal(0,4) hyperpriors, standard-normal weights and normalized likelihood.
 """
 function rk_model end
 
-# Shared statistical algebra over explicitly declared random coordinates.
-# The emitter keeps prior statements at their current author paths, and uses
-# these ordinary submodels to make repeated block composition readable.
+# Shared numerical graphs over statistical values. Statistical components
+# that allocate parameters are emitted as submodels (`rk_components.jl`).
 const _BRM_STATISTICAL_VALUES = (
     brm_r2d2m2_scale = :(
 brm_r2d2m2_scale(reference, phi, r2, share, variance) = begin
@@ -186,37 +185,6 @@ brm_completed_covariate(observed, missing, lookup, mask) = begin
     drawn = missing[lookup]
     completed = observed .+ mask .* drawn
     return completed
-end
-    ),
-    # An ordinary whole-value contrast composes with whole-value smooths.
-    # Reuse the statistical model's law rather than maintaining a second one.
-    brm_monotonic_contrast = let definition = deepcopy(_BRM_STATISTICAL_MODELS.monotonic)
-        first(definition.args).args[1] = :brm_monotonic_contrast
-        Expr(:function, definition.args...)
-    end,
-    brm_scaled_random_coefficients = :(
-brm_scaled_random_coefficients(sd, z) = begin
-    z .* sd[1]
-end
-    ),
-    brm_correlated_random_coefficients = :(
-brm_correlated_random_coefficients(sd, L, z) = begin
-    z * transpose(sd .* L)
-end
-    ),
-    brm_hsgp_summand = :(
-brm_hsgp_summand(PHI, omega2, sigma, rho, z) = begin
-    PHI * (brm_hsgp_sqrt_spd(omega2, sigma, rho) .* z)
-end
-    ),
-    brm_periodic_hsgp_summand = :(
-brm_periodic_hsgp_summand(PHI, harmonics, sigma, rho, z) = begin
-    PHI * (brm_hsgp_periodic_sqrt_spd(harmonics, sigma, rho) .* z)
-end
-    ),
-    brm_grouped_hsgp_summand = :(
-brm_grouped_hsgp_summand(PHI, omega2, z, group_index, rho, sigma, reader) = begin
-    reader(PHI, omega2, z, group_index, rho, sigma)
 end
     ),
 )

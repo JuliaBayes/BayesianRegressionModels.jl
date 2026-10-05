@@ -84,12 +84,14 @@ function _rk_ast_r2d2m2_population!(definitions, statements, taken, predictors, 
     end
 end
 
+# Budget names follow SBBRMI's `<draws>_r2d2_<group>_R2` / `_phi` spelling;
+# `tau` names the derived scale vector the group component receives.
 function _rk_ast_ranef_r2d2!(definitions, statements, bucket, tau, bindings, taken,
-        predictors, population_priors)
+        predictors, population_priors; stem_base=tau)
     decomposition = bucket.decomposition
     scales = Any[nothing for _ in bucket.margins]
     for (index, group) in enumerate(decomposition.groups)
-        stem = string(tau, "_r2d2_", index)
+        stem = string(stem_base, "_r2d2_", index)
         r2 = _rk_ast_fresh_name(string(stem, "_R2"), taken)
         phi = _rk_ast_fresh_name(string(stem, "_phi"), taken)
         prior = _rk_ast_declared_prior(group.r2_prior, bindings, taken)
@@ -120,7 +122,7 @@ function _rk_ast_ranef_r2d2!(definitions, statements, bucket, tau, bindings, tak
     # unclaimed positive scale; no unused SD parameters are introduced.
     for margin in eachindex(scales)
         scales[margin] === nothing || continue
-        free = _rk_ast_fresh_name(string(tau, "_r2d2_free_", margin), taken)
+        free = _rk_ast_fresh_name(string(stem_base, "_r2d2_free_tau_", margin), taken)
         push!(statements, Expr(:call, :~, free,
             _rk_ast_positive_prior(nothing, bindings, taken)))
         scales[margin] = free

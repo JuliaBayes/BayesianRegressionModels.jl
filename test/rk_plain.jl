@@ -69,8 +69,9 @@ end
         @testset "smooth $i" begin
         backend = RKBRMI(brmi)
         source = check_printed_roundtrip(backend)
-        @test !occursin("penalized_smooth", source)
-        @test !occursin("hsgp_effect", source)
+        # No RKPPL library statistical calls; BRM's own components are allowed.
+        @test !occursin(r"(?<!brm_)penalized_smooth\(", source)
+        @test !occursin(r"(?<![a-z_])hsgp_effect\(", source)
         @test occursin("brm_", source)
         check_plain_gradient(backend)
         end
@@ -87,16 +88,22 @@ end
         y ~ Normal(mu, sigma)
     end)
     emitted = BRM._rk_emit_ast(backend.plan)
-    @test isempty(emitted.defs)
+    # Mixed coefficient families keep one named statement each inside the
+    # population component.
+    @test length(emitted.defs) == 1
+    definition = sprint(Base.show_unquoted, only(emitted.defs))
+    @test occursin("brm_mixed_population_effects(X)", definition)
+    @test occursin("beta_pop_1 ~ Normal(0.3, 1.2)", definition)
+    @test occursin("beta_pop_2 ~ Laplace(-0.1, 0.7)", definition)
     source = check_printed_roundtrip(backend)
-    @test occursin("mu_Intercept ~ Normal(0.3, 1.2)", source)
-    @test occursin("mu_x ~ Laplace(-0.1, 0.7)", source)
+    @test occursin("pop_mu ~ brm_mixed_population_effects(X_mu)", source)
     @test !occursin("popefs", source)
     u = fill(0.13, length(coordinate_names(backend.model.layout)))
     values = constrain(backend.model.layout, u)
-    expected = sum(logpdf.(Normal.(values.mu_Intercept .+ values.mu_x .* data.x,
-        values.sigma), data.y)) + logpdf(Normal(0.3, 1.2), values.mu_Intercept) +
-        logpdf(Laplace(-0.1, 0.7), values.mu_x) +
+    intercept, slope = values.pop_mu.beta_pop_1, values.pop_mu.beta_pop_2
+    expected = sum(logpdf.(Normal.(intercept .+ slope .* data.x,
+        values.sigma), data.y)) + logpdf(Normal(0.3, 1.2), intercept) +
+        logpdf(Laplace(-0.1, 0.7), slope) +
         logpdf(Exponential(1), values.sigma) + logjac(backend.model.layout, u)
     ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
     plan = ext._rk_translated_plan(backend.plan)
@@ -204,8 +211,9 @@ public_prior_reader(a, b, row) = a[row] .+ b[row]
     default_backend, backend = RKBRMI(control), RKBRMI(explicit)
     check_printed_roundtrip(default_backend)
     source = check_printed_roundtrip(backend)
-    @test occursin("Exponential.(0.7)", source)
-    @test occursin("LKJCholesky(2, 3.0)", source)
+    definitions = sprint(show, BRM._rk_emit_ast(backend.plan).defs)
+    @test occursin("Exponential.(0.7)", definitions)
+    @test occursin("b_shared_group ~ brm_correlated_group_effects(group, 2, 3.0)", source)
     @test coordinate_names(backend.model.layout) == coordinate_names(default_backend.model.layout)
     check_plain_gradient(backend)
     ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
@@ -215,13 +223,14 @@ public_prior_reader(a, b, row) = a[row] .+ b[row]
     for u in (fill(0.1, 9), collect(range(-0.3, 0.4; length=9)))
         saved = copy(u)
         nt = constrain(backend.model.layout, u)
-        sd, z, L = nt.ranef_draws_shared_group_sd, nt.ranef_draws_shared_group_z, nt.ranef_draws_shared_group_L
+        sd, z, L = nt.b_shared_group.tau, nt.b_shared_group.z, nt.b_shared_group.L
+        a_intercept, b_intercept = only(nt.pop_a.beta_pop), only(nt.pop_b.beta_pop)
         B = z * (Diagonal(sd) * L)'
-        a = nt.a_Intercept .+ B[[2, 1], 1]
-        b = nt.b_Intercept .+ B[[2, 1], 2]
+        a = a_intercept .+ B[[2, 1], 1]
+        b = b_intercept .+ B[[2, 1], 2]
         mu = [a[data.row[i]] + b[data.row[i]] for i in eachindex(data.y)]
         lk(eta) = logpdf(LKJCholesky(2, eta), LinearAlgebra.Cholesky(LinearAlgebra.LowerTriangular(L)))
-        expected_prior = logpdf(Normal(), nt.a_Intercept) + logpdf(Normal(), nt.b_Intercept) +
+        expected_prior = logpdf(Normal(), a_intercept) + logpdf(Normal(), b_intercept) +
             sum(logpdf.(Normal(), z)) + sum(logpdf.(Exponential(0.7), sd)) + lk(3)
         expected_ll = sum(logpdf.(Normal.(mu, 1), data.y))
         value, gradient = LogDensityProblems.logdensity_and_gradient(problem, u)

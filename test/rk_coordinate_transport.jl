@@ -39,6 +39,15 @@ function cellmeans(data)
         y ~ Normal(mu, 1)
     end
 end
+
+function mixed(data)
+    @brm data begin
+        mu ~ 1 + x
+        # Keep all comparison points away from the Laplace cusp.
+        effect(mu, x) ~ Laplace(0.17, 0.8)
+        y ~ Normal(mu, 1)
+    end
+end
 end
 
 function coordinate_transport_fixture(brmi, name)
@@ -144,6 +153,12 @@ end
         fixture = coordinate_transport_fixture(build(data), name)
         check_coordinate_transport(fixture)
     end
+end
+
+@stestset "coordinate transport mixed-family population components" begin
+    data = (; x=[-0.4,0.1,0.3,0.6], y=[0.2,-0.1,0.4,0.3])
+    fixture = coordinate_transport_fixture(PublicCoordinateTransport.mixed(data), "mixed")
+    check_coordinate_transport(fixture)
 end
 
 @stestset "coordinate transport capability gap for smooth internals" begin

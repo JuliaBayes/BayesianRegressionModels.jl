@@ -543,16 +543,18 @@ end
 
 @stestset "prior vocab v1: sampled splices" begin
     # New sampled heads splice generically; StudentT arrives in Stan
-    # order; Uniform carries literal bounds.
+    # order; Uniform carries literal bounds. Keep these draws reachable from
+    # the response so fitted-program root selection retains their priors.
     brmi = @brm df begin
         mu ~ 1 + x
         a ~ Laplace(0, 2)
         t ~ LocationScale(0, 2, TDist(4))
         u ~ Uniform(0.5, 1.5)
         s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        location = mu + a + t + u
+        y ~ Normal(location, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
     @test Expr(:call, :~, :a, Expr(:call, :Laplace, 0.0, 2.0)) in
         prog.main.args
     @test Expr(:call, :~, :t, Expr(:call, :StudentT, 4.0, 0.0, 2.0)) in
@@ -567,9 +569,10 @@ end
         hn ~ truncated(Normal(0, 2), 0, Inf)
         hc ~ truncated(Cauchy(0, 2), 0, Inf)
         s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        location = mu + h1 + hn + hc
+        y ~ Normal(location, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
     @test Expr(:call, :~, :h1, Expr(:call, :truncated,
         Expr(:call, :Logistic, 0.0, 1.0), 0.0, Inf)) in prog.main.args
     @test Expr(:call, :~, :hn, Expr(:call, :HalfNormal, 2.0)) in
@@ -590,13 +593,16 @@ strip_source_lines(x::Expr) = Expr(x.head,
         y ~ Normal(mu, sigma)
     end
     emitted = BRM._rk_emit_ast(BRM._brm_rk_plan(model))
-    @test isempty(emitted.defs)
+    # The population component owns its coefficient vector, as SBBRMI's popefs.
+    @test strip_source_lines.(emitted.defs) == [strip_source_lines(:(
+        brm_population_effects(X, ncoef, loc, scale) = begin
+            beta_pop[1:ncoef] .~ Normal.(loc, scale)
+            return X * beta_pop
+        end))]
     @test strip_source_lines(emitted.main) == strip_source_lines(:(begin
-        mu_Intercept ~ Normal(0.0, 1.0)
-        mu_x ~ Normal(0.0, 1.0)
-        mu_X = hcat(ones(length(x)), x)
-        mu_coefficients = [mu_Intercept, mu_x]
-        mu = mu_X * mu_coefficients
+        X_mu = hcat(ones(length(x)), x)
+        pop_mu ~ brm_population_effects(X_mu, 2, 0.0, 1.0)
+        mu = pop_mu
         sigma ~ Exponential(1.0)
         y .~ Normal.(mu, sigma)
     end))
@@ -611,8 +617,9 @@ end
         y2 ~ Normal(mu, 1.0)
     end
     emitted = BRM._rk_emit_ast(BRM._brm_rk_plan(model))
-    @test isempty(emitted.defs)
-    @test Expr(:call, :~, :mu_x, Expr(:call, :Laplace, 0.0, 2.0)) in emitted.main.args
+    definition = strip_source_lines(only(emitted.defs))
+    @test first(first(definition.args).args) === :brm_mixed_population_effects
+    @test Expr(:call, :~, :beta_pop_2, Expr(:call, :Laplace, 0.0, 2.0)) in last(definition.args).args
     @test count(a -> Meta.isexpr(a, :(=)) && a.args[1] === :mu, emitted.main.args) == 1
     @test emitted.main.args[1] == Expr(:(=), :int_x_x_z, Expr(:call, :.*, :x, :z))
 end

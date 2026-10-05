@@ -75,10 +75,11 @@ const mixed_axes = (;
     nt = constrain(backend.model.layout, u)
     # Independent population and correlation reconstruction, including the
     # sorted label map (input rows are c,a,b) and b's public inverse link.
-    C = nt.ranef_draws_p_subject_z * (nt.ranef_draws_p_subject_sd .* nt.ranef_draws_p_subject_L)'
-    a = nt.a_Intercept .+ nt.a_x .* mixed_axes.x .+ C[[3, 1, 2], 1]
-    b = exp.(nt.b_Intercept .+ C[[3, 1, 2], 2])
-    c = nt.c_Intercept .+ nt.c_w .* mixed_axes.w
+    group = nt.b_p_subject
+    C = group.z * (group.tau .* group.L)'
+    a = nt.pop_a.beta_pop[1] .+ nt.pop_a.beta_pop[2] .* mixed_axes.x .+ C[[3, 1, 2], 1]
+    b = exp.(only(nt.pop_log_b.beta_pop) .+ C[[3, 1, 2], 2])
+    c = nt.pop_c.beta_pop[1] .+ nt.pop_c.beta_pop[2] .* mixed_axes.w
     expected = [nt.multiplier * (a[mixed_axes.subject_row[j]] +
         b[mixed_axes.subject_row[j]] * mixed_axes.t[j]) +
         c[mixed_axes.secondary_row[j]] for j in eachindex(mixed_axes.y)]
@@ -86,10 +87,12 @@ const mixed_axes = (;
     expected_ll = logpdf.(Normal.(expected, nt.sigma), mixed_axes.y)
     @test pointwise.y ≈ expected_ll
     @test value_query(backend, :likelihood, u) ≈ sum(expected_ll)
-    normal_draws = [nt.a_Intercept, nt.a_x, nt.b_Intercept, nt.c_Intercept, nt.c_w, nt.multiplier]
+    normal_draws = [nt.pop_a.beta_pop; nt.pop_log_b.beta_pop; nt.pop_c.beta_pop; nt.multiplier]
     prior = sum(logpdf.(Normal(), normal_draws)) +
-        sum(logpdf.(Normal(), nt.ranef_draws_p_subject_z)) +
-        sum(logpdf.(Normal(), nt.ranef_draws_p_subject_sd) .+ log(2)) -
+        sum(logpdf.(Normal(), group.z)) +
+        # Default shared scales restrict the Normal kernel to positive values;
+        # explicit normalized half-Normal priors alone add log(2).
+        sum(logpdf.(Normal(), group.tau)) -
         nt.sigma - log(2) # Exponential(1), then LKJCholesky(2,1)
     @test value_query(backend, :prior, u) ≈ prior
     @test value_query(backend, :sampler, u) ≈
@@ -132,7 +135,7 @@ end
     covariance[diagind(covariance)] .+= opts.jitter
     f = cholesky(Symmetric(covariance)).L * z
     # Independent one-axis Hilbert basis and exp-quad spectral weights.
-    hs = (; sigma=nt.hsgp_t_sigma, rho=nt.hsgp_t_rho, z=nt.hsgp_t_z)
+    hs = (; sigma=nt.hsgp_t.sigma, rho=nt.hsgp_t.rho_iso, z=nt.hsgp_t.beta_raw)
     centered = df.t .- mean(df.t)
     L = 1.5maximum(abs, centered)
     omega = (1:3) .* (pi / (2L))
@@ -208,7 +211,7 @@ read_rows(value, rows) = value[rows]
             end
             path .*= nt.mu_ar_mu_t
             @test length(u) == 8
-            (logpdf(Normal(), nt.mu_Intercept) + logpdf(Normal(), nt.mu_ar_mu_t) +
+            (logpdf(Normal(), only(nt.pop_mu.beta_pop)) + logpdf(Normal(), nt.mu_ar_mu_t) +
                 logpdf(Normal(), nt.phi_raw_ar_mu_t) + sum(logpdf.(Normal(), z)), 0.0)
         else
             z = nt._ppl_scan_z_dar_mu_t_level
@@ -218,13 +221,13 @@ read_rows(value, rows) = value[rows]
                 path[i] = path[i - 1] + increment
             end
             @test length(u) == 7
-            (logpdf(Normal(), nt.mu_Intercept) +
+            (logpdf(Normal(), only(nt.pop_mu.beta_pop)) +
                 logpdf(truncated(Normal(0.5, 0.2), 0, 1), nt.dar_mu_t_beta) +
                 logpdf(truncated(Normal(0, 0.2), 0, Inf), nt.dar_mu_t_sigma) +
                 sum(logpdf.(Normal(), z)),
                 log(nt.dar_mu_t_beta) + log1p(-nt.dar_mu_t_beta) + log(nt.dar_mu_t_sigma))
         end
-        likelihood = sum(logpdf.(Normal.(nt.mu_Intercept .+ path[df.rows], 1), df.y))
+        likelihood = sum(logpdf.(Normal.(only(nt.pop_mu.beta_pop) .+ path[df.rows], 1), df.y))
         @test value_query(backend, :likelihood, u) ≈ likelihood
         @test value_query(backend, :prior, u) ≈ prior
         @test value_query(backend, :sampler, u) ≈ likelihood + prior + jac
@@ -263,21 +266,21 @@ end
         backend = RKBRMI(brmi)
         u = check_value_gradient(backend)
         nt = constrain(backend.model.layout, u)
-        scale_name = only(filter(n -> endswith(string(n), "_sd"), propertynames(nt)))
-        raw_name = only(filter(n -> endswith(string(n), "_z"), propertynames(nt)))
-        scale, raw = getproperty(nt, scale_name), getproperty(nt, raw_name)
+        # The group component owns its scales, factors and standardized draws.
+        group = getproperty(nt, only(filter(n -> startswith(string(n), "b_"), propertynames(nt))))
+        scale, raw = group.tau, group.z
+        intercept = only(nt.pop_mu.beta_pop)
         gi = [1, 1, 2, 3, 3]
         expected = if grouped === :membership
             hi = [3, 2, 1, 1, 2]
             effects = only(scale) .* vec(raw)
-            nt.mu_Intercept .+ (effects[gi] .+ effects[hi]) ./ 2
+            intercept .+ (effects[gi] .+ effects[hi]) ./ 2
         else
-            factor_name = only(filter(n -> endswith(string(n), "_L"), propertynames(nt)))
-            factors = getproperty(nt, factor_name)
+            factors = group.L
             si = [1, 1, 1, 2, 2]
             map(eachindex(df.y)) do j
                 effects = (scale[si[j], :] .* factors[:, :, si[j]]) * raw[gi[j], :]
-                nt.mu_Intercept + effects[1] + df.x[j] * effects[2]
+                intercept + effects[1] + df.x[j] * effects[2]
             end
         end
         pointwise = value_query(backend, :pointwise, u)
@@ -300,9 +303,11 @@ blend_values(p, q, r, rows) = p[rows] .+ q[rows] .+ r[rows]
     end)
     u = check_value_gradient(backend)
     nt = constrain(backend.model.layout, u)
-    p = 1 ./ (1 .+ exp.(-(nt.p_Intercept .+ nt.p_x .* df.x)))
-    q = cdf.(Normal(), nt.q_Intercept .+ nt.q_x .* df.x)
-    r = -expm1.(-exp.(nt.r_Intercept .+ nt.r_x .* df.x))
+    # Population components are named after each linked target (SBBRMI's names).
+    linear(beta) = beta[1] .+ beta[2] .* df.x
+    p = 1 ./ (1 .+ exp.(-linear(nt.pop_logit_p.beta_pop)))
+    q = cdf.(Normal(), linear(nt.pop_probit_q.beta_pop))
+    r = -expm1.(-exp.(linear(nt.pop_cloglog_r.beta_pop)))
     expected = p[df.rows] .+ q[df.rows] .+ r[df.rows]
     @test value_query(backend, :pointwise, u).y ≈ logpdf.(Normal.(expected, 1), df.y)
 end
@@ -317,9 +322,9 @@ end
     end)
     u = check_value_gradient(backend)
     nt = constrain(backend.model.layout, u)
-    C = nt.ranef_draws_g_z * (nt.ranef_draws_g_sd .* nt.ranef_draws_g_L)'
+    C = nt.b_g.z * (nt.b_g.tau .* nt.b_g.L)'
     gi = [2, 1, 3, 1, 2]
-    mu = nt.mu_Intercept .+ C[gi, 1] .+ (df.c .== 4) .* C[gi, 2] .+ (df.c .== 6) .* C[gi, 3]
+    mu = only(nt.pop_mu.beta_pop) .+ C[gi, 1] .+ (df.c .== 4) .* C[gi, 2] .+ (df.c .== 6) .* C[gi, 3]
     @test value_query(backend, :pointwise, u).y ≈
         logpdf.(Normal.(mu[df.rows], 1), df.y)
 end

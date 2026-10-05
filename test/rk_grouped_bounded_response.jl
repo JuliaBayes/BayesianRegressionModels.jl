@@ -68,9 +68,9 @@ end
             PublicGroupedBoundedResponse.build(data, law; nested)
         backend, problem = consumer_problem(brmi)
         names = coordinate_names(backend.model.layout)
-        ia = findfirst(==(:theta_Intercept), names)
-        it = findfirst(n -> occursin("_sd.", string(n)), names)
-        iz = findall(n -> occursin("_z.", string(n)), names)
+        ia = findfirst(==(Symbol("pop_theta.beta_pop.1")), names)
+        it = findfirst(n -> occursin(".tau.", string(n)), names)
+        iz = findall(n -> occursin(".z.", string(n)), names)
         @test length(names) == 5
         @test length(iz) == 3
         @test backend.plan.columns[:y] == (nested ? reduce(vcat, data.y) : data.y[permutation])

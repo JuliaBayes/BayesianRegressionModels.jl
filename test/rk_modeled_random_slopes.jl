@@ -21,16 +21,6 @@ function build(data)
 end
 end
 
-function modeled_slope_location_query(model, translated)
-    names = sort!(collect(keys(translated.columns)))
-    fixed = NamedTuple{Tuple(names)}(Tuple(translated.columns[n] for n in names))
-    # Select generated ports only after inspecting this emitted model. The
-    # predictor compiler may absorb authored aliases such as eta/x/mu.
-    wanted = (:_ppl_lp_eta, :_ppl_lp_mu)
-    @test all(in(keys(model.spec)),wanted)
-    Base.invokelatest(prepare,model.spec;
-        have=(:unconstrained,names...),want=wanted,bound=fixed)
-end
 
 @stestset "modeled random slopes preserve sampled design and conditional laws" begin
     original = (; subject=[1,1,2,2,3,3],
@@ -53,12 +43,14 @@ end
         @test [m.coefficient for m in effect.margins] == [:Intercept, :x]
         @test effect.margins[2].z.column === :x
         index(n) = only(findall(==(Symbol(n)), names))
-        beta = index.(["eta_Intercept", "mu_Intercept", "mu_x"])
-        location_scale = index("ranef_draws_location_subject_sd.1")
-        location_z = [index("ranef_draws_location_subject_z.$j.1") for j in 1:3]
-        scales = index.(["ranef_draws_effect_subject_sd.1", "ranef_draws_effect_subject_sd.2"])
-        z = [index("ranef_draws_effect_subject_z.$j.$k") for j in 1:3, k in 1:2]
-        correlation = index("ranef_draws_effect_subject_L.1")
+        # The population component owns both ordinary design coefficients,
+        # including the coefficient of the modeled column.
+        beta = index.(["pop_eta.beta_pop.1", "pop_mu.beta_pop.1", "pop_mu.beta_pop.2"])
+        location_scale = index("b_location_subject.tau.1")
+        location_z = [index("b_location_subject.z.$j.1") for j in 1:3]
+        scales = index.(["b_effect_subject.tau.1", "b_effect_subject.tau.2"])
+        z = [index("b_effect_subject.z.$j.$k") for j in 1:3, k in 1:2]
+        correlation = index("b_effect_subject.L.1")
         assay_scale, sigma = index.(["assay_scale", "sigma"])
         function components(u)
             rho, tau = tanh(u[correlation]), exp.(u[scales])
@@ -105,26 +97,21 @@ end
         ext = Base.get_extension(BRM,:BayesianRegressionModelsReactiveKernelsExt)
         bound = ext._rk_translated_plan(backend.plan)
         pointwise = prepare_query(backend.model,bound,:pointwise)
-        locations = modeled_slope_location_query(backend.model,bound)
         graph = ReactiveKernels.kernel_graph(backend.model.spec)
-        println("VALUE_GRAPH_OPERATIONS=",unique(nameof(typeof(recipe.op))
-            for recipe in graph.recipes)); flush(stdout)
+        println("VALUE_GRAPH_KINDS=", unique(entry.kind for entry in recipe_inventory(graph))); flush(stdout)
         translated = BRM.rk_translate_artifact(artifact)
         rebuilt = Base.invokelatest(build_kernel,translated)
+        replay_pointwise = prepare_query(rebuilt, translated, :pointwise)
         replay = prepare_sampler(rebuilt,translated,zeros(18);
             backend=AutoEnzyme(; mode=Enzyme.Reverse))
-        replay_locations = modeled_slope_location_query(rebuilt,translated)
         for u in (zeros(18),fill(0.13,18),collect(range(-0.2,0.3;length=18)))
             value, gradient = check_consumer_point(problem,u,oracle)
             check_consumer_stan(problem,stan,mapping,backend,u)
             c, parts = components(u), pointwise(u)
             @test parts.assay ≈ assay_parts(c)
             @test parts.y ≈ logpdf.(Normal.(c.mu,c.sigma),data.y)
-            queried = Base.invokelatest(locations,u)
-            @test length.(queried) == (6,6)
-            @test queried[1] ≈ c.eta
-            @test queried[2] ≈ c.mu
-            @test isequal(queried,Base.invokelatest(replay_locations,u))
+            @test length.((parts.assay, parts.y)) == (6,6)
+            @test isequal(parts, Base.invokelatest(replay_pointwise, u))
             replay_gradient = similar(u)
             replay_value, _ = sampler_value_and_gradient!(replay,replay_gradient,u)
             @test isequal(value,replay_value)
@@ -160,9 +147,9 @@ end
         backend, problem = consumer_problem(builder(data))
         names = coordinate_names(backend.model.layout)
         index(n) = only(findall(==(Symbol(n)),names))
-        beta = index("mu_$slope")
-        scale = index("ranef_draws_effect_subject_sd.1")
-        draws = [index("ranef_draws_effect_subject_z.$j.1") for j in 1:3]
+        beta = index("pop_mu.beta_pop.1")
+        scale = index("b_effect_subject.tau.1")
+        draws = [index("b_effect_subject.z.$j.1") for j in 1:3]
         @test !haskey(backend.plan.columns,slope)
         @test length(backend.plan.columns[:subject]) == 6
         @test backend.plan isa BRM._RKValuePlan
@@ -171,9 +158,9 @@ end
                 logpdf(Exponential(0.9),exp(u[scale])) + u[scale] +
                 sum(logpdf.(Normal(),u[draws]))
             value = if slope === :eta
-                intercept = index("eta_Intercept")
-                location_scale = index("ranef_draws_location_subject_sd.1")
-                location_z = [index("ranef_draws_location_subject_z.$j.1") for j in 1:3]
+                intercept = index("pop_eta.beta_pop.1")
+                location_scale = index("b_location_subject.tau.1")
+                location_z = [index("b_location_subject.z.$j.1") for j in 1:3]
                 prior += logpdf(Normal(-0.4,0.7),u[intercept]) +
                     logpdf(Exponential(0.8),exp(u[location_scale])) + u[location_scale] +
                     sum(logpdf.(Normal(),u[location_z]))

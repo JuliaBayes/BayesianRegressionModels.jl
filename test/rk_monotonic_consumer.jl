@@ -33,14 +33,16 @@ end
     backend, problem = consumer_problem(brmi)
     names = coordinate_names(backend.model.layout)
     index(n) = only(findall(==(Symbol(n)), names))
-    a, b = index("score_Intercept"), index("score_rank_idx")
-    intercept, sd = index("theta_Intercept"), index("ranef_draws_p_subject_sd.1")
+    # Components own their parameters: the monotonic effect its simplex and
+    # coefficient, the HSGP its hyperparameters and basis weights.
+    a, b = index("pop_score.beta_pop.1"), index("mo_rank.beta")
+    intercept, sd = index("pop_theta.beta_pop.1"), index("b_p_subject.tau.1")
     levels = CategoricalArrays.levels(data.subject)
-    z = [index("ranef_draws_p_subject_z.$j.1") for j in eachindex(levels)]
+    z = [index("b_p_subject.z.$j.1") for j in eachindex(levels)]
     rows = [only(findall(==(subject), levels)) for subject in data.subject]
-    rho, sigma = index("hsgp_x_rho"), index("hsgp_x_sigma")
-    weights = [index("hsgp_x_z.$j") for j in 1:3]
-    simplex = index("mo_rank_simplex_incr.1")
+    rho, sigma = index("hsgp_x.rho_iso"), index("hsgp_x.sigma")
+    weights = [index("hsgp_x.beta_raw.$j") for j in 1:3]
+    simplex = index("mo_rank.simplex_incr.1")
     @test length(names) == 13
     # Independent sine basis, spectral weights and prior transform, rather
     # than using the emitter's fitted values or its density as an oracle.
@@ -123,21 +125,22 @@ end
     @test isequal(data,saved)
 end
 
-@stestset "monotonic contrast definitions share their law without name collisions" begin
+@stestset "monotonic components own their simplex without name collisions" begin
     data = (; rank=[1,3,2,1,3], x=[-0.8,-0.3,0.1,0.4,0.9], y=zeros(5))
     brmi = @brm data begin
-        brm_monotonic_contrast ~ Normal(0,1)
+        brm_monotonic_effect ~ Normal(0,1)
         mu ~ 1 + mo(rank) + mo1(rank) + hsgp(x; k=3)
         y ~ Normal(mu,1)
     end
     artifact = BRM.emit_rk_artifact(brmi; case_id="monotonic-name-collision")
-    definitions = filter(d -> Meta.isexpr(d,:function),artifact.defs)
-    @test length(definitions) == 1
-    definition = only(definitions)
-    @test first(first(definition.args).args) != :brm_monotonic_contrast
-    @test last(definition.args) == last(BRM._BRM_STATISTICAL_MODELS.monotonic.args)
-    # Both beta-scaled mo and coefficient-free mo1 reuse the ordinary function.
+    names = [first(first(d.args).args) for d in artifact.defs if Meta.isexpr(d, :(=))]
+    # The authored parameter keeps its name; the component definition is renamed.
+    @test :brm_monotonic_effect ∉ names
+    @test any(n -> startswith(string(n), "brm_monotonic_effect"), names)
+    @test :brm_monotonic_value in names
+    @test !occursin("Dirichlet", sprint(Base.show_unquoted, artifact.ast))
     backend = check_rk_source_roundtrip(RKBRMI(brmi))
+    @test :brm_monotonic_effect in coordinate_names(backend.model.layout)
     # Retain the fixture's nine sampled coordinates through source replay.
     @test backend.model.layout.total == 9
 end

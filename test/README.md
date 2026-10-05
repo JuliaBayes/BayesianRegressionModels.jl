@@ -150,6 +150,12 @@ test/rk_completed_covariate_axes.jl`. The verified native closure is RK/PPL
 `3bdbfbbbb1c82caf4acf7b6ecb5fa28e3a089c58`, StanBlocks
 `e355994384d44b86108105264ae3e34e0f2a0625`, and Enzyme 0.13.209.
 
+`rk_component_prior_inputs.jl` checks caller values used by group and HSGP
+priors when their names collide with the component's own parameters. It uses
+independent normalized laws, all-coordinate finite differences and full printed
+source replay with native Reverse gradients. Run `julia --project=test
+test/rk_component_prior_inputs.jl`.
+
 `rk_modeled_transform_predictors.jl` checks named pointwise assignments from
 modeled and completed columns as formula predictors. It retains the original
 subject axis across ragged kernel likelihoods and checks independent normalized
@@ -166,7 +172,7 @@ assignment such as `x = exp(eta)` and a log-link predictor) with a fixed
 graph evaluates the basis, centering and projection from the current axis
 values. It checks the actual built graph intermediates, the emitted basis
 law at fresh axes, independent normalized densities, every ordinary Reverse
-coordinate, compiled same-model Stan, location and pointwise queries, row
+coordinate, compiled same-model Stan, pointwise queries and their replay, row
 permutations, artifact replay and complete printed-source replay. Run
 `julia --project=test test/rk_modeled_hsgp_axes.jl`.
 
