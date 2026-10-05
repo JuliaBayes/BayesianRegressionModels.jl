@@ -213,7 +213,7 @@ brm_covariate_missing_rows(values) = begin
 end
     ),
     brm_structured_inputs = :(
-brm_structured_inputs(prepared_inputs, indices) = begin
+function brm_structured_inputs(prepared_inputs, indices)
     prepared = only(prepared_inputs)
     fields = map((field, index) -> merge(field, (; idx=index)), prepared.state.fields, indices)
     state = merge(prepared.state, (; fields))
