@@ -90,13 +90,14 @@ function main()
     Pkg.develop(PackageSpec[
         PackageSpec(path=path) for (_name, path) in sort!(collect(paths))
     ])
-    # `Pkg.instantiate()` auto-precompiles the whole manifest in parallel, which
-    # self-deadlocks under Pkg 1.10 on Pathfinder 0.10.7's sibling Turing
-    # extensions (see test/README.md, "Pathfinder's Turing extension pair").
-    # Serialize just that pair first, then let the parallel pass reuse the cache.
+    # Older Julia 1.10 runtimes need a serial build of the sibling Turing
+    # extensions before the normal parallel pass. Julia 1.10.12 includes the
+    # loadable_exts fix and uses ordinary parallel precompilation directly.
     Pkg.instantiate(; allow_autoprecomp=false)
-    withenv("JULIA_NUM_PRECOMPILE_TASKS" => "1") do
-        Pkg.precompile(["Pathfinder", "Turing"])
+    if v"1.10" <= VERSION < v"1.10.12"
+        withenv("JULIA_NUM_PRECOMPILE_TASKS" => "1") do
+            Pkg.precompile(["Pathfinder", "Turing"])
+        end
     end
     Pkg.precompile()
     return nothing

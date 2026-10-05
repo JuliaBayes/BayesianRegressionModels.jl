@@ -59,7 +59,7 @@ function _rk_source_data_columns(plan, emitted)
     for statement in emitted.main.args
         _rk_source_assignments!(computed, statement)
     end
-    Dict(name => value for (name, value) in plan.columns if !(name in computed))
+    Dict{Symbol,Any}(name => value for (name, value) in plan.columns if !(name in computed))
 end
 
 function _rk_source_assignments!(names, statement)

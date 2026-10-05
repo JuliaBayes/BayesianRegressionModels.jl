@@ -7339,6 +7339,31 @@ function _rk_gate_ordinal_scale_slots!(response_specs::AbstractVector,
     nothing
 end
 
+# A fitted predictor depends on the resolved priors of its random-effect
+# margins. Discover those caller dependencies before filtering scalar draws;
+# an SD declaration is metadata rather than a normal formula operand.
+function _rk_with_ranef_prior_dependencies(brmi, program, roots)
+    specs = [spec for spec in ranef_effect_priors(brmi)
+        if !(spec.class === :sd && spec.family === r2d2)]
+    any(spec -> spec.class === :sd &&
+        !isempty(_brm_prepared_references(_brm_prepare_expr(spec.expression))), specs) ||
+        return program
+    reachable = _brm_reachable_operations(program, roots)
+    declarations = [declaration for declaration in program.context.group_declarations
+        if declaration.predictor in reachable]
+    buckets = _sb_collect_id_buckets(declarations)
+    ids = Set(first(key) for key in keys(buckets))
+    active = [spec for spec in specs if spec.id in ids]
+    isempty(active) && return program
+    margins = Dict(key => _sb_id_bucket_margins(bucket) for (key, bucket) in buckets)
+    overrides = _brm_resolve_ranef_effect_overrides(active, margins; prefix="RK backend")
+    claims = Pair{Symbol,Tuple}[]
+    for override in values(overrides), (margin, prior) in zip(override.margins, override.sd_prior)
+        prior === nothing || push!(claims, margin.predictor => (prior,))
+    end
+    isempty(claims) ? program : _brm_with_prior_dependencies(program, claims)
+end
+
 """
     _brm_rk_plan(brmi::BRMI)
 
@@ -7392,11 +7417,12 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
             end
         end
     end
+    program = _rk_with_ranef_prior_dependencies(brmi, program, roots)
     referenced = _brm_reachable_operations(program, roots)
     # Only likelihood-reaching declarations are fitted. An omitted outcome
     # and independent unused priors forward-simulate on the Stan route; they
     # must not be planned as extra scalar sampler parameters first.
-    prepared = _BRMPreparedModel(prepared.program,
+    prepared = _BRMPreparedModel(program,
         Tuple(p for p in prepared.parameters if p.name in referenced),
         prepared.predictors, prepared.assignments, prepared.observations)
     kept_assignments = Tuple(node for node in prepared.assignments
