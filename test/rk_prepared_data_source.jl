@@ -7,7 +7,8 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
     definitions, taken = Expr[], Set{Symbol}()
     for name in (:brm_prepared_indices, :brm_factor_dummy, :brm_covariate_geometry,
             :brm_covariate_observed, :brm_covariate_observed_rows, :brm_covariate_missing_rows,
-            :brm_matrix_column, :brm_flatten_response, :brm_gather_response)
+            :brm_matrix_column, :brm_flatten_response, :brm_gather_response,
+            :brm_covariate_mean, :brm_covariate_sd)
         BRM._rk_ast_statistical_call!(definitions, taken, name; kernel=true)
     end
     emitted = BRM._RKEmittedProgram(definitions, Expr(:block))
@@ -33,6 +34,13 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
             [[.2, -.3], Float64[], [.4]]) == [.2, -.3, .4]
         @test Base.invokelatest(prepare(getfield(mod, :brm_gather_response)),
             [.2, -.3, .4], [3, 1, 2]) == [.4, .2, -.3]
+        for values in ([2., 4., 7.], [1e308, -1e308, 0.])
+            mean = Base.invokelatest(prepare(getfield(mod, :brm_covariate_mean)), values)
+            sd = Base.invokelatest(prepare(getfield(mod, :brm_covariate_sd)), values)
+            @test mean == BRM._brm_fit_mean_numeric(values, :predictor, :center, ArgumentError)
+            @test sd == BRM._brm_fit_zscale_numeric(values, :predictor, ArgumentError).scale
+            @test isfinite(mean) && isfinite(sd)
+        end
         for (observed, jobs, jmis, expected) in (
                 ([3., 7.], [1, 3], [2, 4], ([3., 0., 7., 0.], [1, 1, 1, 2], [0., 1., 0., 1.])),
                 ([3., 5., 7.], [1, 2, 3], Int[], ([3., 5., 7.], [1, 1, 1], zeros(3))),

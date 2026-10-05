@@ -102,8 +102,10 @@ function _rk_model_population_column(term, context=nothing)
     anchors = Expr(:call, :_brm_observed_values, plan.source)
     expression = fit === nothing ? name(inner) :
         Expr(:call, :./,
-            Expr(:call, :.-, name(inner), Expr(:call, :mean, anchors)),
-            kind === :center ? 1.0 : Expr(:call, :std, anchors))
+            Expr(:call, :.-, name(inner),
+                Expr(:_rk_data_preparation, :brm_covariate_mean, anchors)),
+            kind === :center ? 1.0 :
+                Expr(:_rk_data_preparation, :brm_covariate_sd, anchors))
     preprocess = _BRMPopulationPreprocess(kind,
         fit === nothing ? nothing : (fit.mean, fit.scale), inner)
     (; label, effect_addresses=(label,), effect_block=label,

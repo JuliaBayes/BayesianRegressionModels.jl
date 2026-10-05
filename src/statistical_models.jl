@@ -161,6 +161,20 @@ function rkppl_model end
 # ordinary functions or numerical graphs, not submodels: statistical blocks
 # that allocate parameters are generated per block (see `_rk_ast_block_call!`).
 const _BRM_STATISTICAL_VALUES = (
+    brm_covariate_mean = :(
+brm_covariate_mean(values) = begin
+    mean = BayesianRegressionModels._brm_fit_mean_numeric(
+        values, :predictor, :center, ArgumentError)
+    return mean
+end),
+
+    brm_covariate_sd = :(
+brm_covariate_sd(values) = begin
+    fit = BayesianRegressionModels._brm_fit_zscale_numeric(
+        values, :predictor, ArgumentError)
+    return fit.scale
+end),
+
     brm_flatten_response = :(
 brm_flatten_response(cells) = begin
     values = reduce(vcat, cells; init=eltype(eltype(cells))[])
