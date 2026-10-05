@@ -270,7 +270,8 @@ end
 @stestset "main block calls components like SBBRMI" begin
     emitted = BRM._rk_emit_ast(BRM._brm_rk_plan(last(CASES[1])()))
     main = strip_lines(emitted.main)
-    @test main.args[1] == :(b_p_g ~ brm_correlated_group_effects(g, 2, 3.0))
+    # Executable preparation precedes allocating calls in the main graph.
+    @test :(b_p_g ~ brm_correlated_group_effects(g, 2, 3.0)) in main.args
     @test :(mo_c ~ brm_monotonic_effect(c_idx, [1.0, 1.0, 1.0], 0.0, 1.0)) in main.args
     @test :(X_mu = hcat(ones(length(c)), x)) in main.args
     @test :(pop_mu ~ brm_population_effects(X_mu, 2, 0.0, 1.0)) in main.args
