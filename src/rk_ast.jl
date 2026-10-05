@@ -89,13 +89,13 @@ function _rk_source_data_axes(statements, columns)
             push!(out, statement)
             continue
         end
-        rows = Expr(:call, :(:), 1, length(columns[name]))
+        range = Expr(:call, :(:), 1, length(columns[name]))
         values = _rk_ast_fresh_name(string(name, "_source_values"), taken)
-        row = _rk_ast_fresh_name(string(name, "_source_row"), taken)
-        cell = Expr(:(=), Expr(:ref, name, row), Expr(:ref, values, row))
+        rows = _rk_ast_fresh_name(string(name, "_source_rows"), taken)
         push!(out, Expr(:(=), values, value),
-            Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
-                Expr(:for, Expr(:(=), row, rows), Expr(:block, cell))))
+            Expr(:(=), rows, Expr(:call, :collect, range)),
+            Expr(:(=), name, _rk_ast_dotted(:getindex,
+                Expr(:call, :Ref, values), rows)))
     end
     out
 end
