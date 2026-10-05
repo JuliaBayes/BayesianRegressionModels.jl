@@ -67,15 +67,25 @@ end
 # observation axis in source, so authoring does not mistake it for a scalar.
 # The range is geometry metadata; the values still come from the graph call.
 function _rk_source_data_axes(statements, columns)
-    map(statements) do statement
-        Meta.isexpr(statement, :(=), 2) || return statement
+    taken = Set{Symbol}(keys(columns))
+    foreach(statement -> _rk_source_symbols!(taken, statement), statements)
+    out = Expr[]
+    for statement in statements
+        if !Meta.isexpr(statement, :(=), 2)
+            push!(out, statement)
+            continue
+        end
         name, value = statement.args
-        name isa Symbol && haskey(columns, name) || return statement
-        columns[name] isa AbstractVector || return statement
+        if !(name isa Symbol && haskey(columns, name) && columns[name] isa AbstractVector)
+            push!(out, statement)
+            continue
+        end
         rows = Expr(:call, :(:), 1, length(columns[name]))
-        Meta.isexpr(value, :ref, 2) && isequal(value.args[2], rows) && return statement
-        Expr(:(=), name, Expr(:ref, value, rows))
+        axis = _rk_ast_fresh_name(string(name, "_source_rows"), taken)
+        push!(out, Expr(:(=), axis, Expr(:call, :collect, rows)),
+            Expr(:(=), name, Expr(:ref, value, axis)))
     end
+    out
 end
 
 function _rk_lower_assignment_expr(node, name::Symbol)
