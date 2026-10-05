@@ -75,7 +75,7 @@ end
         sigma ~ Exponential(1)
         y ~ weighted(Normal(mu, sigma), fweights(n))
     end
-    artifact = emit_rk_artifact(brmi; case_id="weighted-regression-preparation")
+    artifact = BRM.emit_rk_artifact(brmi; case_id="weighted-regression-preparation")
     translated = rk_translate_artifact(artifact)
     model = build_kernel(translated)
     @test coordinate_names(model.layout) == [:mu_Intercept, :mu_x, :sigma]
@@ -138,4 +138,41 @@ end
         @test rg == gradient
     end
     @test isequal(data, saved)
+end
+
+@stestset "response coding and count columns are executable source" begin
+    for kind in (:categorical, :multinomial)
+        data = kind === :categorical ? (; obs=[10, 20, 20, 10]) :
+            (; obs=[1 2; 3 0; 0 2; 2 2], n=[3, 3, 2, 4])
+        saved = deepcopy(data)
+        brmi = if kind === :categorical
+            @brm data begin
+                p ~ Dirichlet([2., 5.])
+                obs ~ Categorical(p)
+            end
+        else
+            @brm data begin
+                p ~ Dirichlet([2., 5.])
+                obs ~ Multinomial(n, p)
+            end
+        end
+        backend, problem = consumer_problem(brmi)
+        artifact = BRM.emit_rk_artifact(brmi; case_id="response-source-$kind")
+        @test !haskey(rk_artifact_inputs(artifact), :obs)
+        @test length(coordinate_names(backend.model.layout)) == 1
+        oracle(u) = begin
+            p = inv(1 + exp(-only(u)))
+            likelihood = if kind === :categorical
+                sum(logpdf.(Categorical([p, 1-p]), [1, 2, 2, 1]))
+            else
+                sum(logpdf(Multinomial(data.n[j], [p, 1-p]), data.obs[j, :])
+                    for j in eachindex(data.n))
+            end
+            logpdf(Beta(2, 5), p) + log(p) + log1p(-p) + likelihood
+        end
+        for u in ([0.], [.13], [-.2])
+            check_consumer_point(problem, u, oracle)
+        end
+        @test isequal(data, saved)
+    end
 end
