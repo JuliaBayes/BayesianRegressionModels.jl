@@ -88,9 +88,12 @@ end
     artifact = BRM.emit_rk_artifact(brmi; case_id="weighted-regression-preparation")
     translated = rk_translate_artifact(artifact)
     model = build_kernel(translated)
-    @test coordinate_names(model.layout) == [Symbol("pop_mu.beta_pop.1"), Symbol("pop_mu.beta_pop.2"), :sigma]
-    oracle(u) = sum(data.n .* logpdf.(Normal.(u[1] .+ u[2] .* data.x, exp(u[3])), data.y)) +
-        sum(logpdf.(Normal(), u[1:2])) + logpdf(Exponential(), exp(u[3])) + u[3]
+    names = coordinate_names(model.layout)
+    @test sort(names) == sort([Symbol("pop_mu.beta_pop.1"), Symbol("pop_mu.beta_pop.2"), :sigma])
+    index(name) = only(findall(==(Symbol(name)), names))
+    alpha, beta, sigma = index("pop_mu.beta_pop.1"), index("pop_mu.beta_pop.2"), index("sigma")
+    oracle(u) = sum(data.n .* logpdf.(Normal.(u[alpha] .+ u[beta] .* data.x, exp(u[sigma])), data.y)) +
+        sum(logpdf.(Normal(), u[[alpha, beta]])) + logpdf(Exponential(), exp(u[sigma])) + u[sigma]
     problem = prepare_sampler(model, translated, zeros(3);
         backend=AutoEnzyme(; mode=Enzyme.Reverse))
     for u in (zeros(3), [.13, -.2, .3], [-.4, .2, -.1])

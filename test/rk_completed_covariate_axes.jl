@@ -71,7 +71,7 @@ end
             sum(logpdf.(Normal.(c.internal,c.scale),reduce(vcat,data.values)))
     end
     stan = consumer_stan(brmi,"completed-covariate-axes"; mod=PublicCompletedCovariateAxes)
-    mapping = [names[correlation]=>"b_p_subject_L.1", names[ia]=>"age_yr.y_mis.1",
+    mapping = [names[correlation]=>"b_p_subject_L.1", names[ia]=>"age_yr_y_mis.1",
         names[im]=>"mu_age", names[is]=>"sigma_age", names[ie]=>"scale"]
     append!(mapping, [names[scales[j]]=>"b_p_subject_tau.$j" for j in 1:2])
     append!(mapping, [names[z[j,k]]=>"b_p_subject_z_flat.$(k+2*(j-1))" for j in 1:3 for k in 1:2])

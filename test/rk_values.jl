@@ -313,6 +313,77 @@ blend_values(p, q, r, rows) = p[rows] .+ q[rows] .+ r[rows]
     @test value_query(backend, :pointwise, u).y ≈ logpdf.(Normal.(expected, 1), df.y)
 end
 
+# Caller data occupy both the elementary function name and the generated
+# callable stem. The emitted inverse link must retain its exact callable.
+inverse_link_collision_reader(p, q, r, rows, logistic, brm_value_function) =
+    p[rows] .+ q[rows] .+ r[rows] .+ logistic .+ brm_value_function
+
+@stestset "inverse-link source bindings preserve names and normalized law" begin
+    base = (; x=[-0.4, 0.2, 0.9], rows=[3, 1, 2, 1], y=[0.1, 0.4, -0.2, 0.8])
+    collision = merge(base, (; logistic=[.1, -.2, .3, -.1],
+        brm_value_function=[-.2, .3, -.1, .2]))
+    models = (
+        "ordinary source namespace" => (base, @brm(base, begin
+            logit(p) ~ 1 + x
+            probit(q) ~ 1 + x
+            cloglog(r) ~ 1 + x
+            reads = blend_values(p, q, r, rows)
+            y ~ Normal(reads, 1)
+        end)),
+        "caller name collisions" => (collision, @brm(collision, begin
+            logit(p) ~ 1 + x
+            probit(q) ~ 1 + x
+            cloglog(r) ~ 1 + x
+            reads = inverse_link_collision_reader(p, q, r, rows, logistic, brm_value_function)
+            y ~ Normal(reads, 1)
+        end)))
+    for (label, (data, brmi)) in models
+        @testset "$label" begin
+            before = deepcopy(data)
+            backend = check_rk_source_roundtrip(RKBRMI(brmi);
+                ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+            emitted = BRM._rk_emit_ast(backend.plan)
+            binding = only(filter(pair -> last(pair) === BRM.logistic, emitted.bindings))
+            @test first(binding) ∉ keys(data)
+            ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
+            mod = ext._rk_emit_module(emitted)
+            @test getfield(mod, first(binding)) === BRM.logistic
+            names = coordinate_names(backend.model.layout)
+            @test sort(names) == sort([Symbol("pop_$(target).beta_pop.$j")
+                for target in (:logit_p, :probit_q, :cloglog_r) for j in 1:2])
+            index(target, j) = only(findall(==(Symbol("pop_$(target).beta_pop.$j")), names))
+            linear(u, target) = u[index(target, 1)] .+ u[index(target, 2)] .* data.x
+            function oracle(u)
+                p = 1 ./ (1 .+ exp.(-linear(u, :logit_p)))
+                q = cdf.(Normal(), linear(u, :probit_q))
+                r = -expm1.(-exp.(linear(u, :cloglog_r)))
+                expected = p[data.rows] .+ q[data.rows] .+ r[data.rows]
+                haskey(data, :logistic) &&
+                    (expected = expected .+ data.logistic .+ data.brm_value_function)
+                sum(logpdf.(Normal(), u)) + sum(logpdf.(Normal.(expected, 1), data.y))
+            end
+            problem = rk_logdensity_problem(backend;
+                ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+            for u in (zeros(6), fill(.13, 6), collect(range(-.2, .3; length=6)))
+                saved = copy(u)
+                value, gradient = logdensity_and_gradient(problem, u)
+                @test value ≈ oracle(u) atol=2e-11 rtol=2e-11
+                step = 1e-5
+                independent = map(eachindex(u)) do j
+                    plus, minus = copy(u), copy(u)
+                    plus[j] += step
+                    minus[j] -= step
+                    (oracle(plus) - oracle(minus)) / (2step)
+                end
+                @test gradient ≈ independent atol=2e-5 rtol=2e-5
+                @test all(isfinite, gradient)
+                @test isequal(u, saved)
+            end
+            @test isequal(data, before)
+        end
+    end
+end
+
 @stestset "ordinary categorical random slopes" begin
     df = (; g=[2, 1, 3, 1, 2], c=[2, 4, 2, 6, 4],
         rows=[1, 5, 2, 4], y=[0.1, -0.2, 0.4, 0.3])
