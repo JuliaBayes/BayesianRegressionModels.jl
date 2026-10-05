@@ -67,6 +67,38 @@ end
     @test isequal(data, saved)
 end
 
+@stestset "weighted regression artifacts retain their normalized law" begin
+    data = (; x=[-.4, .2, .7, 1.1], y=[.2, -.1, .4, .3], n=[1, 2, 1, 3])
+    saved = deepcopy(data)
+    brmi = @brm data begin
+        mu ~ 1 + x
+        sigma ~ Exponential(1)
+        y ~ weighted(Normal(mu, sigma), fweights(n))
+    end
+    artifact = emit_rk_artifact(brmi; case_id="weighted-regression-preparation")
+    translated = rk_translate_artifact(artifact)
+    model = build_kernel(translated)
+    @test coordinate_names(model.layout) == [:mu_Intercept, :mu_x, :sigma]
+    oracle(u) = sum(data.n .* logpdf.(Normal.(u[1] .+ u[2] .* data.x, exp(u[3])), data.y)) +
+        sum(logpdf.(Normal(), u[1:2])) + logpdf(Exponential(), exp(u[3])) + u[3]
+    problem = prepare_sampler(model, translated, zeros(3);
+        backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    for u in (zeros(3), [.13, -.2, .3], [-.4, .2, -.1])
+        gradient = similar(u)
+        value, _ = sampler_value_and_gradient!(problem, gradient, u)
+        @test value ≈ oracle(u) atol=2e-11 rtol=2e-11
+        step = 1e-5
+        independent = map(eachindex(u)) do j
+            plus, minus = copy(u), copy(u)
+            plus[j] += step
+            minus[j] -= step
+            (oracle(plus) - oracle(minus)) / (2step)
+        end
+        @test gradient ≈ independent atol=2e-8 rtol=2e-8
+    end
+    @test isequal(data, saved)
+end
+
 @stestset "cached preparation cannot override emitted categorical and ordinal values" begin
     groups = categorical(["b", "a", "b", "a"])
     levels!(groups, ["b", "unused", "a"])
