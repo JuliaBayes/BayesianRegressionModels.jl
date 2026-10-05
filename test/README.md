@@ -147,6 +147,18 @@ factor design columns, sampled latent references, partial per-margin ICCs and
 conflicting allocation statements. The two original synthetic formulas retain
 their separate active sampled reference scales.
 
+`rk_coordinate_transport.jl` checks the public complete semantic RK/Stan
+coordinate map: scalar and population coefficients, categorical reference and
+cell-mean coding, grouping levels, random-effect scales and standardized draws,
+and whole correlation factors, including independent predictor blocks on the
+same grouping column. Distinct nonzero points compare constrained
+values, normalized densities and every ordinary Reverse gradient with compiled
+same-BRMI Stan. Point/gradient round trips, input preservation and incomplete
+coverage diagnostics are included. HSGP internals remain an expected capability
+gap. `rk_modeled_random_slopes.jl` additionally compares the generated map with
+its independent hand-written mapping. Run either file through the test project;
+trailing filters select individual blocks.
+
 `spline_basis_signs.jl` checks canonical TPS/t2 projection signs, input
 ownership, and frozen projections directly. The spline blocks in
 `rk_parity.jl` compare RK densities and Enzyme gradients with independent

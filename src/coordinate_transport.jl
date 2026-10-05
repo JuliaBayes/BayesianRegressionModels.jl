@@ -71,7 +71,7 @@ complete coordinate lists, `pairs` holds one [`BRMCoordinatePair`](@ref) per
 coordinate in RK order, and `permutation` satisfies
 `stan_u[i] == rk_u[permutation[i]]`. `correlations` lists each paired
 correlation factor (`rk_declaration`, `stan_carrier`, dimension `K`) for the
-whole-factor physical check.
+whole-factor physical check, with its ordered predictor/coefficient `margins`.
 """
 struct BRMCoordinateTransport
     rk_names::Vector{Symbol}
@@ -119,6 +119,8 @@ evaluated at the same physical point. Confirm the physical agreement at
 concrete points with [`brm_check_coordinate_transport`](@ref).
 """
 function brm_coordinate_transport(rk::RKBRMI, sb::SBBRMI, stan_names::AbstractVector)
+    parent(rk) === parent(sb) || error(
+        "brm_coordinate_transport: build both backends from the same BRMI instance")
     rk_names = Vector{Symbol}(_rk_layout_coordinate_names(rk))
     stan = Vector{String}(String.(stan_names))
     records = _rk_coordinate_records(rk.plan)
@@ -142,6 +144,7 @@ function _brm_transport_validate(rk_names, stan, pairs, correlations)
     stan_pos = Dict{String,Int}(n => i for (i, n) in enumerate(stan))
     seen_rk = Dict{Symbol,BRMCoordinatePair}()
     seen_stan = Dict{String,BRMCoordinatePair}()
+    seen_address = Dict{NamedTuple,BRMCoordinatePair}()
     for pair in pairs
         haskey(rk_pos, pair.rk) || error(
             "brm_coordinate_transport: the RK emission records coordinate " *
@@ -153,8 +156,12 @@ function _brm_transport_validate(rk_names, stan, pairs, correlations)
         haskey(seen_stan, pair.stan) && error(
             "brm_coordinate_transport: Stan coordinate `$(pair.stan)` is claimed " *
             "by both $(seen_stan[pair.stan].address) and $(pair.address)")
+        haskey(seen_address, pair.address) && error(
+            "brm_coordinate_transport: semantic address $(pair.address) is " *
+            "claimed by both `$(seen_address[pair.address].rk)` and `$(pair.rk)`")
         seen_rk[pair.rk] = pair
         seen_stan[pair.stan] = pair
+        seen_address[pair.address] = pair
     end
     missing_rk = [n for n in rk_names if !haskey(seen_rk, n)]
     missing_stan = [n for n in stan if !haskey(seen_stan, n)]
@@ -410,12 +417,12 @@ function _brm_transport_pairs!(pairs, correlations, ::Val{:ranef}, record,
         "correlation factor is not a coordinate permutation")
     carrier = string(block.binding, "_L")
     for m in 1:(K * (K - 1)) ÷ 2
-        address = (; kind=:ranef_correlation, base..., index=m)
+        address = (; kind=:ranef_correlation, base..., margins=record.margins, index=m)
         push!(pairs, BRMCoordinatePair(address, Symbol(record.L, ".", m),
             _brm_stan_name(stan_pos, string(carrier, ".", m), address),
             record.L, (m,), :cholesky))
     end
-    push!(correlations, (; base..., rk_declaration=record.L,
+    push!(correlations, (; base..., margins=record.margins, rk_declaration=record.L,
         stan_carrier=carrier, K))
 end
 
