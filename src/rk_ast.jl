@@ -888,8 +888,12 @@ function _rk_ast_me_names(plan::_RKStructuralPlan)
     names
 end
 
+# `coordinates`, when a vector, receives one semantic record per sampled
+# declaration this emitter can address across backends
+# (`_rk_coordinate_record!`, read by src/coordinate_transport.jl). Emission is
+# otherwise unchanged; an unrecorded declaration is refused by the transport.
 function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
-        values::Bool=false, reserved=())
+        values::Bool=false, reserved=(), coordinates=nothing)
     taken = union(Set(keys(plan.columns)),
         Set(p.name for p in plan.parameters),
         Set(a.name for a in plan.assignments),
@@ -950,7 +954,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         bucket.decomposition === nothing && continue
         append!(stmts, _rk_ast_value_bucket(defs, bucket, ranef_draws[bi],
             ranef_effects, taken, bindings; predictors=plan.predictors,
-            population_priors=joint_priors))
+            population_priors=joint_priors, coordinates))
     end
     for predictor in plan.predictors
         lhs = get(rename, predictor.name, predictor.name)
@@ -1033,6 +1037,14 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 override === nothing || push!(stmts,
                     _rk_ast_factor_prior(coef, col, term.options, K,
                         override[1], override[2]))
+                ordinary = override !== nothing && r2d2 === nothing &&
+                    !haskey(joint_priors, (predictor.name, term.addressee))
+                ordinary && haskey(term.options, :level_values) &&
+                    _rk_coordinate_record!(coordinates, (; kind=:population_block,
+                        declaration=coef, predictor=predictor.name,
+                        coefficient=term.addressee, labels=term.options.labels,
+                        level_values=term.options.level_values,
+                        coding=term.options.coding))
             else
                 coef = _rk_ast_coef_name(
                     string(predictor.name, "_", term.addressee), taken)
@@ -1048,6 +1060,11 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 elseif override !== nothing
                     push!(scalar_stmts, Expr(:call, :~, coef,
                         Expr(:call, override[1], override[2]...)))
+                    r2d2 === nothing &&
+                        !haskey(joint_priors, (predictor.name, term.addressee)) &&
+                        _rk_coordinate_record!(coordinates, (; kind=:population,
+                            declaration=coef, predictor=predictor.name,
+                            coefficient=term.addressee))
                 end
             end
         end
@@ -1115,7 +1132,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     for (bi, bucket) in enumerate(plan.ranef_buckets)
         bucket.decomposition === nothing || continue
         append!(stmts, _rk_ast_value_bucket(defs, bucket, ranef_draws[bi],
-            ranef_effects, taken, bindings))
+            ranef_effects, taken, bindings; coordinates))
     end
     for parameter in plan.parameters
         if parameter.family === :LKJCovarianceFactor
@@ -1128,6 +1145,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             push!(stmts, Expr(:(=), parameter.name, Expr(:call, :.*, scales, L)))
         else
             push!(stmts, _rk_ast_sampled(parameter))
+            _rk_coordinate_record!(coordinates,
+                (; kind=:scalar, declaration=parameter.name))
         end
     end
     for vector_parameter in plan.vector_parameters

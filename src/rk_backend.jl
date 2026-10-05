@@ -3275,8 +3275,11 @@ function _rk_shared_factor_spec(term, target, columns, taken; cellmeans)
         push!(names, key)
     end
     block = source
+    # `level_values` names the fitted level of each column, in column order,
+    # for the cross-backend coordinate transport (src/coordinate_transport.jl).
     options = (; coding=cellmeans ? :fullrank : :subset, levels=:shared,
-        design_columns=Tuple(names), labels=Tuple(c.label for c in shared))
+        design_columns=Tuple(names), labels=Tuple(c.label for c in shared),
+        level_values=Tuple(_brm_population_level_value(c) for c in shared))
     [_RKTermSpec(:factor, [source], options, block, block)]
 end
 

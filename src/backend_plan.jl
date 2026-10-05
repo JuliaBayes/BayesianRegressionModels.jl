@@ -1733,6 +1733,27 @@ function _brm_categorical_population_columns(
     end for level in (cellmeans ? 1 : 2):n_levels)
 end
 
+# The fitted level value one categorical population column codes, in the
+# original (un-recoded) level space. `factor(...; ref=r)` recodes the reference
+# to code 1 and the old code 1 to the reference's code; undo that swap so both
+# backends' coefficients pair by the level a column actually indicates.
+function _brm_population_level_value(column)
+    preprocess = column.preprocess
+    (preprocess isa _BRMPopulationPreprocess &&
+        preprocess.kind === :population_factor_dummy) || error(
+        "BRM backend lowering: population column `$(column.label)` is not a " *
+        "categorical level indicator")
+    c = preprocess.const_
+    if c.ref isa AbstractString
+        ref_code = findfirst(isequal(c.ref), c.levels)
+        code = c.level == 1 ? ref_code : c.level == ref_code ? 1 : c.level
+        return c.levels[code]
+    end
+    value = c.levels[c.level]
+    c.ref == 1 && return value
+    value == 1 ? c.ref : value == c.ref ? 1 : value
+end
+
 function _brm_population_columns(term::NamedColumn; cellmeans::Bool=false)
     backing = parent(term)
     categorical = backing isa DataColumn ?
