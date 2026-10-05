@@ -154,6 +154,17 @@ function _rk_fitted_source(emitted, conditioned)
     statements = emitted.main.args
     outputs = [_rk_source_outputs!(Set{Symbol}(), statement) for statement in statements]
     references = [_rk_source_symbols!(Set{Symbol}(), statement) for statement in statements]
+    block_reads = _rk_block_free_reads(emitted.defs)
+    for names in references
+        pending = collect(names)
+        for name in pending
+            for dependency in get(block_reads, name, ())
+                dependency in names && continue
+                push!(names, dependency)
+                push!(pending, dependency)
+            end
+        end
+    end
     kept = [_rk_source_observes(statement, conditioned) for statement in statements]
     needed = Set{Symbol}()
     for i in eachindex(statements)
