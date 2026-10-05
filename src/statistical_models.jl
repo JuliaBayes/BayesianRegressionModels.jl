@@ -166,12 +166,13 @@ brm_multinomial_scores(count_columns, trials, probabilities) = begin
     pointwise = ReactiveKernels.plate(eachindex(first(count_columns)),
             Ref(count_columns), Ref(trials), Ref(probabilities)) do row, columns, totals, probs
         total = totals isa Integer ? totals : totals[row]
-        cells = sum(eachindex(columns)) do category
+        score = BayesianRegressionModels.loggamma(total + 1)
+        for category in eachindex(columns)
             count = columns[category][row]
             mass = count == 0 ? zero(probs[category]) : count * log(probs[category])
-            mass - BayesianRegressionModels.loggamma(count + 1)
+            score += mass - BayesianRegressionModels.loggamma(count + 1)
         end
-        BayesianRegressionModels.loggamma(total + 1) + cells
+        score
     end
     return pointwise
 end),
