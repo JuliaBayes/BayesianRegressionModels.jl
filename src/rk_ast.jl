@@ -93,7 +93,7 @@ function _rk_source_data_axes(statements, columns)
         values = _rk_ast_fresh_name(string(name, "_source_values"), taken)
         rows = _rk_ast_fresh_name(string(name, "_source_rows"), taken)
         push!(out, Expr(:(=), values, value),
-            Expr(:(=), rows, Expr(:call, :collect, range)),
+            Expr(:(=), rows, Expr(:call, GlobalRef(Base, :collect), range)),
             Expr(:(=), name, _rk_ast_dotted(:getindex,
                 Expr(:call, :Ref, values), rows)))
     end
