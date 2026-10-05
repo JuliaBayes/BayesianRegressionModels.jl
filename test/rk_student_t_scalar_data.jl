@@ -57,11 +57,13 @@ function scalar_t_retyped(backend)
     Core.eval(mod, :(using ReactiveKernelsPPL))
     Core.eval(mod, :(import BayesianRegressionModels, ReactiveKernels))
     @test isempty(emitted.bindings)
+    Core.eval(mod, :(import ReactiveKernels))
     for definition in emitted.defs
         parsed = scalar_t_parse_source(definition)
-        expression = BRM._rk_source_definition(definition).kind === :rkppl ?
-            Expr(:macrocall, Symbol("@rkppl"), LineNumberNode(0), parsed) : parsed
-        Core.eval(mod, expression)
+        # Explicit `@kernel` graphs and functions keep their own kind; a bare
+        # function-shaped definition is an `@rkppl` submodel.
+        Core.eval(mod, BRM._rk_source_definition(definition).kind === :rkppl ?
+            Expr(:macrocall, Symbol("@rkppl"), LineNumberNode(0), parsed) : parsed)
     end
     data = BRM._rk_source_data_columns(backend.plan, emitted)
     plan = bind_data(lower_rkppl(scalar_t_parse_source(emitted.main),
@@ -72,7 +74,8 @@ end
 
 function scalar_t_observation_oracle(backend, data, u, evidence)
     physical = constrain(backend.model.layout, u)
-    mu = physical.mu_Intercept .+ physical.mu_x .* data.x
+    intercept, slope = physical.pop_mu.beta_pop
+    mu = intercept .+ slope .* data.x
     map(eachindex(data.y)) do j
         distribution = LocationScale(mu[j], 1, TDist(data.nu))
         if evidence === :censored && data.y[j] == data.lo[j]
@@ -135,8 +138,8 @@ end
                 cache = mktempdir(; prefix="brm-scalar-student-t-")
                 stan_problem = BRM.stan_instantiate(sb; path=joinpath(cache, "model.stan"))
                 names = BridgeStan.param_unc_names(stan_problem.model)
-                mapping = Dict(:mu_Intercept => "pop_mu_beta_pop.1",
-                    :mu_x => "pop_mu_beta_pop.2")
+                mapping = Dict(Symbol("pop_mu.beta_pop.1") => "pop_mu_beta_pop.1",
+                    Symbol("pop_mu.beta_pop.2") => "pop_mu_beta_pop.2")
                 indices = Int.(indexin(map(n -> mapping[n],
                     coordinate_names(backend.model.layout)), names))
                 @test length(names) == length(unique(indices)) == 2

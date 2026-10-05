@@ -425,6 +425,7 @@ _RKEmittedProgram(defs::Vector{Expr}, main::Expr) =
 
 """
     RKBRMI(brmi; held_out=())
+    RKBRMI(brmi, plan, built)
 
 A [`BRMI`](@ref) lowered to the ReactiveKernels backend. `plan` is the strict,
 RK-independent structural plan; `model` is the executable thin-layer program
@@ -433,6 +434,15 @@ is loaded. Implemented only by that extension; the generic here lets the core
 validate and materialise plans without loading RK.
 `held_out` selects a strict subset of response names whose likelihoods are
 withheld. Authored priors and sampled coordinates remain in the program.
+
+The three-argument constructor wraps an existing artifact build without
+planning, translation, emitted-definition evaluation or kernel construction.
+Pass the original `brmi`, `artifact.plan` from `emit_rk_artifact(brmi; held_out,
+case_id)`, and that artifact's `built = build_kernel(rk_translate_artifact(artifact))`.
+The wrapper retains these exact values; the caller must preserve their common
+provenance and `held_out` selection. Retain the bound program separately for
+queries. This constructor supports coordinate transport and its physical check
+on that existing build.
 """
 struct RKBRMI{P<:BRMI,PL,M}
     parent::P

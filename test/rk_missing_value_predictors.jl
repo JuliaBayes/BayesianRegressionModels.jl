@@ -64,12 +64,13 @@ end
     stan = consumer_stan(brmi, "missing-value-predictors"; mod=PublicMissingValuePredictors)
     @test N == 16
     index(name) = only(findall(==(Symbol(name)), names))
-    coefficients = index.(["Vc_Intercept", "Vc_standardize_age", "Vc_standardize_weight",
-        "k10_Intercept", "k10_standardize_age"])
-    scales = index.(["ranef_draws_p_subject.sd.1", "ranef_draws_p_subject.sd.2"])
-    innovations = [index("ranef_draws_p_subject.z.$row.$margin")
+    # Completed columns and intercepts share their population component.
+    coefficients = index.(["pop_log_Vc.beta_pop.1", "pop_log_Vc.beta_pop.2",
+        "pop_log_Vc.beta_pop.3", "pop_log_k10.beta_pop.1", "pop_log_k10.beta_pop.2"])
+    scales = index.(["b_p_subject.tau.1", "b_p_subject.tau.2"])
+    innovations = [index("b_p_subject.z.$row.$margin")
         for row in 1:3, margin in 1:2]
-    correlation = index("ranef_draws_p_subject.L.1")
+    correlation = index("b_p_subject.L.1")
     ia, iw = index("age.y_mis.1"), index("weight.y_mis.1")
     observed_age = collect(skipmissing(data.age))
     observed_weight = collect(skipmissing(data.weight))
@@ -101,7 +102,7 @@ end
             sum(logpdf.(Normal.(v.k10,0.7), data.z))
     end
     mapping = [names[correlation] => "b_p_subject_L.1",
-        names[ia] => "age_y_mis.1", names[iw] => "weight_y_mis.1"]
+        names[ia] => "age.y_mis.1", names[iw] => "weight.y_mis.1"]
     append!(mapping, [names[scales[j]] => "b_p_subject_tau.$j" for j in 1:2])
     append!(mapping, [names[innovations[row,margin]] =>
         "b_p_subject_z_flat.$(margin+2*(row-1))" for row in 1:3 for margin in 1:2])

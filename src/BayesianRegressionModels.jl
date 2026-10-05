@@ -50,6 +50,7 @@ include("rk_missing_values.jl")
 include("rk_values.jl")
 include("rk_r2d2.jl")
 include("rk_hsgp_graph.jl")
+include("rk_components.jl")
 include("rk_observation_source.jl")
 include("rk_callable_terms.jl")
 include("rk_kernel_values.jl")
@@ -148,7 +149,7 @@ export truncated, censored, interval_censored
 # Fusion append API (cross-package: the RK reporter resolves this by name).
 export rk_translate_artifact
 export rk_artifact_inputs
-export rkppl_model
+export rkppl_model, rk_model
 # A julianic `@jmodel` body is ordinary Julia, so the distributions it names must
 # be real `Distributions` objects resolved in the AUTHOR's scope. Re-export the
 # ones a model body actually writes so `using BayesianRegressionModels` is the
@@ -197,7 +198,8 @@ export brm_description_prior_anchor, brm_description_prior_references
 export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
        brm_population_effect_coordinates, brm_term_coordinates,
        brm_ranef_sd_coordinates,
-       BRMCoordinatePair, BRMCoordinateTransport, brm_coordinate_transport,
+       BRMCoordinatePair, BRMCoordinateTransport, BRMCoordinateTransportError,
+       brm_coordinate_transport,
        brm_rk_to_stan, brm_stan_to_rk, brm_check_coordinate_transport,
        brm_operation, brm_execute, brm_columns, required_brm_inputs
 

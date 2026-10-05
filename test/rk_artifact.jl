@@ -75,7 +75,9 @@ end
     @test keys(a) == (:case_id, :ast, :defs, :plan, :meta)
     @test a.case_id == "fixture-gauss"
     @test a.ast isa Expr && a.ast.head === :block
-    @test a.defs isa Vector{Expr} && isempty(a.defs)
+    # The population effects are one self-contained component submodel.
+    @test a.defs isa Vector{Expr} &&
+        [first(first(d.args).args) for d in a.defs] == [:brm_population_effects]
     @test a.plan isa BRM._RKStructuralPlan
     @test a.plan.n_obs == 6
     @test sort!(collect(keys(a.plan.columns))) == [:x, :y]
@@ -110,7 +112,7 @@ end
         y ~ weighted(Normal(mu, sigma), fweights(n))
     end
     a = BRM.emit_rk_artifact(brmi; case_id="fixture-weighted")
-    @test isempty(a.defs)
+    @test [first(first(d.args).args) for d in a.defs] == [:brm_population_effects]
     b = BRM.read_rk_artifact(
         BRM.write_rk_artifact(joinpath(mktempdir(), "w.jls"), a))
     @test b.defs == a.defs

@@ -1,10 +1,12 @@
 # Source-level preparation is independent of any backend's supported term set.
 # Every operation survives this pass, including extension-owned formula nodes.
-struct _BRMPreparedOperation{E,D}
+# Operation metadata has one carrier type; storing the original expression as
+# a value still lets leaf dispatch specialize on that expression's actual type.
+struct _BRMPreparedOperation
     name::Symbol
     role::Symbol
-    expression::E
-    dependencies::D
+    expression::Any
+    dependencies::Tuple
 end
 
 # Ordered operations remain a tuple; their expression types are not compiler

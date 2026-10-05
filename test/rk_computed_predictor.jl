@@ -30,11 +30,13 @@ function computed_public_replay(backend)
     for (name, callable) in emitted.bindings
         Core.eval(mod, Expr(:const, Expr(:(=), name, QuoteNode(callable))))
     end
+    Core.eval(mod, :(import ReactiveKernels))
     for definition in emitted.defs
         parsed = Meta.parse(sprint(Base.show_unquoted, definition))
-        expression = BRM._rk_source_definition(definition).kind === :rkppl ?
-            Expr(:macrocall, Symbol("@rkppl"), LineNumberNode(0), parsed) : parsed
-        Core.eval(mod, expression)
+        # Explicit `@kernel` graphs and functions keep their own kind; a bare
+        # function-shaped definition is an `@rkppl` submodel.
+        Core.eval(mod, BRM._rk_source_definition(definition).kind === :rkppl ?
+            Expr(:macrocall, Symbol("@rkppl"), LineNumberNode(0), parsed) : parsed)
     end
     main = Meta.parse(sprint(Base.show_unquoted, emitted.main))
     data = BRM._rk_source_data_columns(backend.plan, emitted)
@@ -53,20 +55,22 @@ end
         brmi = computed_predictor_model(data, intercept)
         backend, problem = consumer_problem(brmi)
         names = coordinate_names(backend.model.layout)
-        @test Set(names) == Set(intercept ? [:a_Intercept, :a_x] : [:a_x])
+        # Both backends store the population block as one `beta_pop` vector in
+        # its Intercept/x design-column order.
+        population = Symbol.("pop_a.beta_pop." .* string.(1:(intercept ? 2 : 1)))
+        @test Set(names) == Set(population)
         stan = consumer_stan(brmi, "computed-predictor-$intercept-$same_axis")
-        # Stan stores the shared population block as a vector in its
-        # Intercept/x design-column order; RK retains semantic scalar names.
-        mapping = intercept ? [:a_Intercept => "pop_a_beta_pop.1",
-            :a_x => "pop_a_beta_pop.2"] : [:a_x => "pop_a_beta_pop.1"]
+        mapping = [name => replace(string(name), "." => "_"; count=1) for name in population]
+        slope = last(population)
         @test Set(BridgeStan.param_unc_names(stan.model)) == Set(last.(mapping))
         rebuilt, plan = computed_public_replay(backend)
         original = Base.get_extension(BRM,
             :BayesianRegressionModelsReactiveKernelsExt)._rk_translated_plan(backend.plan)
+        intercept_name = intercept ? first(population) : nothing
         function oracle(u)
             coefficients = Dict(name => u[j] for (j, name) in enumerate(names))
-            mu = get(coefficients, :a_Intercept, 0.0) .+
-                coefficients[:a_x] .* data.x[data.indices]
+            mu = get(coefficients, intercept_name, 0.0) .+
+                coefficients[slope] .* data.x[data.indices]
             residual = data.y .- mu
             -0.5 * (length(u) + length(data.y)) * log(2pi) -
                 0.5sum(abs2, u) - 0.5sum(abs2, residual)
@@ -76,10 +80,10 @@ end
         for u in points
             value, gradient = check_consumer_point(problem, u, oracle)
             coefficients = Dict(name => u[j] for (j, name) in enumerate(names))
-            mu = get(coefficients, :a_Intercept, 0.0) .+
-                coefficients[:a_x] .* data.x[data.indices]
+            mu = get(coefficients, intercept_name, 0.0) .+
+                coefficients[slope] .* data.x[data.indices]
             residual = data.y .- mu
-            analytic = [name == :a_x ? -coefficients[name] +
+            analytic = [name == slope ? -coefficients[name] +
                 sum(data.x[data.indices] .* residual) :
                 -coefficients[name] + sum(residual) for name in names]
             @test gradient ≈ analytic atol=2e-12 rtol=2e-12

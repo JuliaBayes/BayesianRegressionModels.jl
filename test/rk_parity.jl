@@ -67,16 +67,35 @@ include(joinpath(@__DIR__, "rk_source_roundtrip.jl"))
 
 _parity_backend(brmi) = check_rk_source_roundtrip(BRM.RKBRMI(brmi))
 
-# Read the explicitly named population coordinates in formula order. The
-# density references below retain their independent predictor/prior algebra.
+# Read the population coefficients in formula order. Data-column
+# coefficients live in the `pop_<target>` component (`beta_pop`, or
+# `beta_pop_<j>` for mixed families), monotonic coefficients in their
+# `mo_<c>` component; others keep scalar names. The density references below
+# retain their independent predictor/prior algebra.
 function _parity_population(nt, backend, name)
     hasproperty(nt, name) && return getproperty(nt, name)
     plan = backend.plan isa BRM._RKValuePlan ? backend.plan.regression : backend.plan
     predictor = only(p for p in plan.predictors if p.name === name)
+    target = predictor.link === :identity ? string(name) : string(predictor.link, "_", name)
+    population = if hasproperty(nt, Symbol("pop_", target))
+        component = getproperty(nt, Symbol("pop_", target))
+        hasproperty(component, :beta_pop) ? collect(component.beta_pop) :
+            [getproperty(component, Symbol(:beta_pop_, j)) for j in 1:length(component)]
+    else
+        Float64[]
+    end
     coefficients = Float64[]
     for term in predictor.terms
         term.kind in (:intercept, :continuous, :factor, :monotonic, :ar, :me) || continue
-        value = getproperty(nt, Symbol(name, "_", term.addressee))
+        scalar = Symbol(name, "_", term.addressee)
+        value = if hasproperty(nt, scalar)
+            getproperty(nt, scalar)
+        elseif term.kind === :monotonic
+            getproperty(nt, Symbol(replace(string(term.options.increments),
+                "_simplex_incr" => ""))).beta
+        else
+            popfirst!(population)
+        end
         value isa Number ? push!(coefficients, value) : append!(coefficients, value)
     end
     coefficients
@@ -87,11 +106,33 @@ function _parity_ranef(nt, backend)
     bucket = only(plan.ranef_buckets)
     suffix = bucket.id === nothing ? string(bucket.group) :
         string(bucket.id, "_", bucket.group)
-    stem = "ranef_draws_" * suffix
-    draws = getproperty(nt, Symbol(stem))
-    sd, z = draws.sd, draws.z
-    L = length(bucket.margins) == 1 ? ones(1, 1) : draws.L
+    group = getproperty(nt, Symbol("b_" * suffix))
+    sd, z = group.tau, group.z
+    L = length(bucket.margins) == 1 ? ones(1, 1) : group.L
     (; sd, z, L, zflat=vec(permutedims(z)))
+end
+
+# The layout coordinate of one population coefficient: its scalar name when it
+# kept one, otherwise its position in the `pop_<target>` component.
+function _parity_coordinate(backend, name, addressee)
+    names = coordinate_names(backend.model.layout)
+    scalar = Symbol(name, "_", addressee)
+    scalar in names && return scalar
+    plan = backend.plan isa BRM._RKValuePlan ? backend.plan.regression : backend.plan
+    predictor = only(p for p in plan.predictors if p.name === name)
+    target = predictor.link === :identity ? string(name) : string(predictor.link, "_", name)
+    members = [t.addressee for t in predictor.terms if t.kind in (:intercept, :continuous) &&
+        !(Symbol(name, "_", t.addressee) in names)]
+    k = only(findall(==(addressee), members))
+    mixed = Symbol("pop_", target, ".beta_pop_", k)
+    mixed in names ? mixed : Symbol("pop_", target, ".beta_pop.", k)
+end
+
+# An unconstrained point in layout order from values listed beside their names.
+function _parity_u(layout, coordinates, values)
+    u = zeros(layout.total)
+    u[Int.(indexin(coordinates, coordinate_names(layout)))] = values
+    u
 end
 
 # Query the same bound ordinary source as the production density route,
@@ -341,7 +382,7 @@ _ref_lkj_k2(eta, L) = -logbeta(0.5, eta) + 2 * (eta - 1) * log(L[2, 2])
     @test layout.total == 4
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    contrast = _ref_mo_contrast(nt.mo_mu_c_contrast.simplex_incr, _parity_cols_mo.c)
+    contrast = _ref_mo_contrast(nt.mo_c.simplex_incr, _parity_cols_mo.c)
     ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ _parity_population(nt, backend, :mu)[2] .* contrast, nt.s),
         _parity_cols_mo.y))
     # Full Dirichlet logpdf (normalizer included): the thin layer keeps
@@ -351,7 +392,7 @@ _ref_lkj_k2(eta, L) = -logbeta(0.5, eta) + 2 * (eta - 1) * log(L[2, 2])
     pr = logpdf(Normal(0, 1), _parity_population(nt, backend, :mu)[1]) +
         logpdf(Normal(0, 1), _parity_population(nt, backend, :mu)[2]) +
         logpdf(Exponential(1), nt.s) +
-        logpdf(Dirichlet(ones(2)), nt.mo_mu_c_contrast.simplex_incr)
+        logpdf(Dirichlet(ones(2)), nt.mo_c.simplex_incr)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     jac = u[3] + _ref_simplex_logjac(u[4:4])
@@ -372,11 +413,11 @@ end
     @test layout.total == 3
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    contrast = _ref_mo_contrast(nt.mo1_mu_c_contrast.simplex_incr, _parity_cols_mo.c)
+    contrast = _ref_mo_contrast(nt.mo1_c.simplex_incr, _parity_cols_mo.c)
     ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ contrast, nt.s), _parity_cols_mo.y))
     pr = logpdf(Normal(0, 1), _parity_population(nt, backend, :mu)[1]) +
         logpdf(Exponential(1), nt.s) +
-        logpdf(Dirichlet([1.0, 2.0]), nt.mo1_mu_c_contrast.simplex_incr)
+        logpdf(Dirichlet([1.0, 2.0]), nt.mo1_c.simplex_incr)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     jac = u[2] + _ref_simplex_logjac(u[3:3])
@@ -558,9 +599,10 @@ end
     backend = _parity_backend(brmi)
     layout = backend.model.layout
     @test layout.total == 7
-    @test coordinate_names(layout) == [:mu_tau, :mu_Intercept,
+    intercept = _parity_coordinate(backend, :mu, :Intercept)
+    @test coordinate_names(layout) == [:mu_tau, intercept,
         Symbol("mu_x1.lambda"), Symbol("mu_x1.raw"), Symbol("mu_x2.lambda"), Symbol("mu_x2.raw"), :sigma]
-    byname = Dict(:sigma=>0.5, :mu_Intercept=>0.1, :mu_tau=>0.4,
+    byname = Dict(:sigma=>0.5, intercept=>0.1, :mu_tau=>0.4,
         Symbol("mu_x1.raw")=>-0.2, Symbol("mu_x1.lambda")=>0.3,
         Symbol("mu_x2.raw")=>0.15, Symbol("mu_x2.lambda")=>-0.35)
     u = Float64[byname[n] for n in coordinate_names(layout)]
@@ -568,10 +610,10 @@ end
     b1 = nt.mu_x1.raw * nt.mu_x1.lambda * nt.mu_tau
     b2 = nt.mu_x2.raw * nt.mu_x2.lambda * nt.mu_tau * 0.25
     cols = _parity_cols_hs
-    mu_hat = nt.mu_Intercept .+ b1 .* cols.x1 .+ b2 .* cols.x2
+    mu_hat = only(nt.pop_mu.beta_pop) .+ b1 .* cols.x1 .+ b2 .* cols.x2
     ll = sum(logpdf.(Normal.(mu_hat, nt.sigma), cols.y))
     # One shared global scale and two local scales, all normalized halves.
-    pr = logpdf(Normal(), nt.mu_Intercept) +
+    pr = logpdf(Normal(), only(nt.pop_mu.beta_pop)) +
         logpdf(Normal(), nt.mu_x1.raw) + logpdf(Normal(), nt.mu_x2.raw) +
         logpdf(Cauchy(0, 1), nt.mu_tau) +
         logpdf(Cauchy(0, 1), nt.mu_x1.lambda) +
@@ -758,8 +800,8 @@ end
     contribution = [effects.sd[1] * effects.z[j, 1] + data.x[i] *
         effects.sd[2] * (effects.L[2, 1] * effects.z[j, 1] +
             effects.L[2, 2] * effects.z[j, 2]) for (i, j) in enumerate(positions)]
-    ll = sum(logpdf.(Normal.(nt.mu_Intercept .+ contribution, nt.sigma), data.y))
-    pr = logpdf(Normal(0, 5), nt.mu_Intercept) +
+    ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ contribution, nt.sigma), data.y))
+    pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) +
         logpdf(Exponential(1), nt.sigma) +
         _ref_lkj_k2_eta1(effects.L) +
         sum(logpdf.(Normal(0, 1), effects.sd)) +
@@ -1795,8 +1837,9 @@ end
     pr = logpdf(Normal(), only(_parity_population(nt, backend, :eta))) + sum(logpdf.(Normal(), t))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    @test logjac(layout, u) ≈ u[3]
-    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[3]
+    jac = log(t[2] - t[1])
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
 end
 
@@ -1821,8 +1864,9 @@ end
         sum(logpdf.(Normal(), t))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    @test logjac(layout, u) ≈ u[5]
-    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[5]
+    jac = log(t[2] - t[1])
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
 end
 
@@ -1872,8 +1916,9 @@ end
     pr = logpdf(Normal(), only(_parity_population(nt, backend, :eta))) + sum(logpdf.(Normal(), t))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    @test logjac(layout, u) ≈ u[3]
-    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[3]
+    jac = log(t[2] - t[1])
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
 end
 
@@ -2122,15 +2167,15 @@ end
     @test layout.total == 8
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    f = _ref_hsgp_muv([_parity_cols_hsgp.x], [4], [1.5], [nt.hsgp_x.rho],
-        nt.hsgp_x.sigma, Vector(nt.hsgp_x.z); iso = true)
+    f = _ref_hsgp_muv([_parity_cols_hsgp.x], [4], [1.5], [nt.hsgp_x.rho_iso],
+        nt.hsgp_x.sigma, Vector(nt.hsgp_x.beta_raw); iso = true)
     ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ f, nt.sigma), _parity_cols_hsgp.y))
     floors = _ref_hsgp_floors([_parity_cols_hsgp.x], [4], [1.5]; iso=true)
-    pr = _ref_hsgp_prior(_parity_population(nt, backend, :mu)[1], nt.sigma, [nt.hsgp_x.rho], nt.hsgp_x.sigma,
-        Vector(nt.hsgp_x.z), floors)
+    pr = _ref_hsgp_prior(_parity_population(nt, backend, :mu)[1], nt.sigma, [nt.hsgp_x.rho_iso], nt.hsgp_x.sigma,
+        Vector(nt.hsgp_x.beta_raw), floors)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    jac = log(nt.hsgp_x.rho - only(floors)) + log(nt.hsgp_x.sigma) + log(nt.sigma)
+    jac = log(nt.hsgp_x.rho_iso - only(floors)) + log(nt.hsgp_x.sigma) + log(nt.sigma)
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
@@ -2148,15 +2193,15 @@ end
     @test layout.total == 17
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    rhos = [nt.hsgp_x_z.rho1, nt.hsgp_x_z.rho2]
+    rhos = [nt.hsgp_x_z.rho_1, nt.hsgp_x_z.rho_2]
     f = _ref_hsgp_muv([_parity_cols_hsgp.x, _parity_cols_hsgp.z], [4, 3],
-        [1.5, 2.0], rhos, nt.hsgp_x_z.sigma, Vector(nt.hsgp_x_z.z);
+        [1.5, 2.0], rhos, nt.hsgp_x_z.sigma, Vector(nt.hsgp_x_z.beta_raw);
         iso = false)
     ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ f, nt.sigma), _parity_cols_hsgp.y))
     floors = _ref_hsgp_floors([_parity_cols_hsgp.x, _parity_cols_hsgp.z],
         [4, 3], [1.5, 2.0]; iso=false)
     pr = _ref_hsgp_prior(_parity_population(nt, backend, :mu)[1], nt.sigma, rhos, nt.hsgp_x_z.sigma,
-        Vector(nt.hsgp_x_z.z), floors)
+        Vector(nt.hsgp_x_z.beta_raw), floors)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
     jac = sum(log.(rhos .- floors)) + log(nt.hsgp_x_z.sigma) + log(nt.sigma)
@@ -2177,15 +2222,15 @@ end
     @test layout.total == 5
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    f = _ref_hsgp_muv([_parity_cols_hsgp.x], [1], [1.5], [nt.hsgp_x.rho],
-        nt.hsgp_x.sigma, Vector(nt.hsgp_x.z); iso = true)
+    f = _ref_hsgp_muv([_parity_cols_hsgp.x], [1], [1.5], [nt.hsgp_x.rho_iso],
+        nt.hsgp_x.sigma, Vector(nt.hsgp_x.beta_raw); iso = true)
     ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ f, nt.sigma), _parity_cols_hsgp.y))
     floors = _ref_hsgp_floors([_parity_cols_hsgp.x], [1], [1.5]; iso=true)
-    pr = _ref_hsgp_prior(_parity_population(nt, backend, :mu)[1], nt.sigma, [nt.hsgp_x.rho], nt.hsgp_x.sigma,
-        Vector(nt.hsgp_x.z), floors)
+    pr = _ref_hsgp_prior(_parity_population(nt, backend, :mu)[1], nt.sigma, [nt.hsgp_x.rho_iso], nt.hsgp_x.sigma,
+        Vector(nt.hsgp_x.beta_raw), floors)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    jac = log(nt.hsgp_x.rho) + log(nt.hsgp_x.sigma) + log(nt.sigma)
+    jac = log(nt.hsgp_x.rho_iso) + log(nt.hsgp_x.sigma) + log(nt.sigma)
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
@@ -2203,15 +2248,15 @@ end
     @test layout.total == 12
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    f = _ref_hsgp_periodic_muv(_parity_cols_hsgp.x, 4, 2.0, nt.hsgp_x.rho,
-        nt.hsgp_x.sigma, Vector(nt.hsgp_x.z))
+    f = _ref_hsgp_periodic_muv(_parity_cols_hsgp.x, 4, 2.0, nt.hsgp_x.rho_iso,
+        nt.hsgp_x.sigma, Vector(nt.hsgp_x.beta_raw))
     ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ f, nt.sigma), _parity_cols_hsgp.y))
     floors = [_ref_hsgp_periodic_floor(4)]
-    pr = _ref_hsgp_prior(_parity_population(nt, backend, :mu)[1], nt.sigma, [nt.hsgp_x.rho], nt.hsgp_x.sigma,
-        Vector(nt.hsgp_x.z), floors)
+    pr = _ref_hsgp_prior(_parity_population(nt, backend, :mu)[1], nt.sigma, [nt.hsgp_x.rho_iso], nt.hsgp_x.sigma,
+        Vector(nt.hsgp_x.beta_raw), floors)
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    jac = log(nt.hsgp_x.rho - only(floors)) + log(nt.hsgp_x.sigma) + log(nt.sigma)
+    jac = log(nt.hsgp_x.rho_iso - only(floors)) + log(nt.hsgp_x.sigma) + log(nt.sigma)
     @test logjac(layout, u) ≈ jac
     @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
@@ -2250,7 +2295,7 @@ end
     # Independent BridgeStan anchor at SB's original 13-coordinate point
     # (test/spline_sb_parity.jl). Folding its constant into the intercept
     # preserves the likelihood; only the Normal(0,5) intercept prior moves.
-    intercept_bridge = logpdf(Normal(0, 5), nt.mu_Intercept) - logpdf(Normal(0, 5), -0.3)
+    intercept_bridge = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) - logpdf(Normal(0, 5), -0.3)
     @test _rk_query_translated(backend, translated, :sampler, u) ≈
         SPLINE_S_SB_ANCHOR + intercept_bridge atol=1e-9
     problem = BRM.rk_logdensity_problem(backend;
@@ -2348,18 +2393,20 @@ end
     @test !hasproperty(nt, :y_loc)
     f = _ref_gp_exp_quad_f(_parity_cols_gp.x, nt.f_gp.rho, nt.f_gp.sigma,
         Vector(nt.f_gp.z))
-    ll = sum(logpdf.(Normal.(nt.mu_Intercept .+ f, nt.sigma), _parity_cols_gp.y))
-    pr = logpdf(Normal(0, 5), nt.mu_Intercept) +
+    ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ f, nt.sigma), _parity_cols_gp.y))
+    pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) +
         logpdf(Exponential(1), nt.sigma) +
         logpdf(LogNormal(0, 1), nt.f_gp.rho) +
         logpdf(LogNormal(0, 1), nt.f_gp.sigma) +
         sum(logpdf.(Normal(0, 1), nt.f_gp.z))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    # Jacobian: rho/sigma_gp/sigma exps (u[1], u[2], u[4]); the empty
-    # coefficient and identity mu_b1/z_gp contribute nothing.
-    @test logjac(layout, u) ≈ u[1] + u[2] + u[4]
-    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[1] + u[2] + u[4]
+    # The three positive scales use exp transforms; the population
+    # intercept and latent GP vector use identity transforms. Component
+    # allocation may reorder their unconstrained slots.
+    jac = log(nt.rho_gp) + log(nt.sigma_gp) + log(nt.sigma)
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
 end
 
@@ -2393,16 +2440,17 @@ end
     @test !hasproperty(nt, :y_loc)
     f = _ref_gp_periodic_f(_parity_cols_gp.x, nt.f_gp.rho, nt.f_gp.sigma,
         Vector(nt.f_gp.z); period=1.0)
-    ll = sum(logpdf.(Normal.(nt.mu_Intercept .+ f, nt.sigma), _parity_cols_gp.y))
-    pr = logpdf(Normal(0, 5), nt.mu_Intercept) +
+    ll = sum(logpdf.(Normal.(_parity_population(nt, backend, :mu)[1] .+ f, nt.sigma), _parity_cols_gp.y))
+    pr = logpdf(Normal(0, 5), _parity_population(nt, backend, :mu)[1]) +
         logpdf(Exponential(1), nt.sigma) +
         logpdf(LogNormal(0, 1), nt.f_gp.rho) +
         logpdf(LogNormal(0, 1), nt.f_gp.sigma) +
         sum(logpdf.(Normal(0, 1), nt.f_gp.z))
     @test _rk_query(backend, :likelihood, u) ≈ ll
     @test _rk_query(backend, :prior, u) ≈ pr
-    @test logjac(layout, u) ≈ u[1] + u[2] + u[4]
-    @test _rk_query(backend, :posterior, u) ≈ ll + pr + u[1] + u[2] + u[4]
+    jac = log(nt.rho_gp) + log(nt.sigma_gp) + log(nt.sigma)
+    @test logjac(layout, u) ≈ jac
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + jac
     _check_parity_gradient(backend, u)
 end
 
@@ -2950,7 +2998,7 @@ end
     @test layout.total == 8
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    beta, sigma = nt.loc_Intercept, nt.sigma
+    beta, sigma = _parity_population(nt, backend, :loc)[1], nt.sigma
     draws = _parity_ranef(nt, backend)
     tau, z = vec(draws.sd), vec(draws.z)
     sidx = [1, 1, 2, 2]
@@ -2980,7 +3028,7 @@ end
     @test layout.total == 16
     u = collect(range(-0.4, 0.4; length = layout.total))
     nt = constrain(layout, u)
-    beta, sigma = nt.loc_Intercept, nt.sigma
+    beta, sigma = _parity_population(nt, backend, :loc)[1], nt.sigma
     draws = _parity_ranef(nt, backend)
     L1, L2 = draws.L[:, :, 1], draws.L[:, :, 2]
     tau1, tau2 = draws.sd[1, :], draws.sd[2, :]
@@ -3031,9 +3079,10 @@ end
     end
     backend = _parity_backend(brmi)
     layout = backend.model.layout
-    @test coordinate_names(layout) ==
-        [:mu_Intercept, :mu_x, :s]
-    u = [0.5, -0.25, log(1.3)]
+    coordinates = [_parity_coordinate(backend, :mu, :Intercept),
+        _parity_coordinate(backend, :mu, :x), :s]
+    @test Set(coordinate_names(layout)) == Set(coordinates)
+    u = _parity_u(layout, coordinates, [0.5, -0.25, log(1.3)])
     nt = constrain(layout, u)
     a, b, s = _parity_population(nt, backend, :mu)[1], _parity_population(nt, backend, :mu)[2], nt.s
     lp = a .+ b .* p_cols.x
@@ -3062,9 +3111,10 @@ end
     end
     backend = _parity_backend(brmi)
     layout = backend.model.layout
-    @test coordinate_names(layout) ==
-        [:mu_Intercept, :mu_x, :s]
-    u = [0.5, -0.25, log(1.3)]
+    coordinates = [_parity_coordinate(backend, :mu, :Intercept),
+        _parity_coordinate(backend, :mu, :x), :s]
+    @test Set(coordinate_names(layout)) == Set(coordinates)
+    u = _parity_u(layout, coordinates, [0.5, -0.25, log(1.3)])
     nt = constrain(layout, u)
     a, b, s = _parity_population(nt, backend, :mu)[1], _parity_population(nt, backend, :mu)[2], nt.s
     lp = a .+ b .* p_cols.x
@@ -3094,7 +3144,7 @@ end
     backend = _parity_backend(brmi)
     layout = backend.model.layout
     point = Dict(Symbol("mu_g.1") => 0.3, Symbol("mu_g.2") => -0.4,
-        Symbol("mu_g.3") => 0.1, :mu_x => 0.75)
+        Symbol("mu_g.3") => 0.1, _parity_coordinate(backend, :mu, :x) => 0.75)
     @test Set(coordinate_names(layout)) == Set(keys(point))
     u = [point[name] for name in coordinate_names(layout)]
     nt = constrain(layout, u)
@@ -3125,12 +3175,13 @@ end
     end
     backend = _parity_backend(brmi)
     layout = backend.model.layout
-    @test coordinate_names(layout) ==
-        [:mu_Intercept, :mu_x, :s]
+    coordinates = [_parity_coordinate(backend, :mu, :Intercept),
+        _parity_coordinate(backend, :mu, :x), :s]
+    @test Set(coordinate_names(layout)) == Set(coordinates)
     lo, hi = 0.5, 1.5
-    u = [0.5, -0.25, log((1.3 - lo) / (hi - 1.3))]
+    u = _parity_u(layout, coordinates, [0.5, -0.25, log((1.3 - lo) / (hi - 1.3))])
     nt = constrain(layout, u)
-    b, s, a = nt.mu_x, nt.s, nt.mu_Intercept
+    (a, b), s = _parity_population(nt, backend, :mu), nt.s
     lp = a .+ b .* p_cols.x
     ll = sum(logpdf.(Normal.(lp, s), p_cols.y))
     pr = logpdf(Normal(0, 1), a) + logpdf(Normal(0, 1), b) +
@@ -3158,11 +3209,12 @@ end
     end
     backend = _parity_backend(brmi)
     layout = backend.model.layout
-    @test coordinate_names(layout) ==
-        [:mu_Intercept, :mu_x, :s]
-    u = [0.5, -0.25, log(1.3)]
+    coordinates = [_parity_coordinate(backend, :mu, :Intercept),
+        _parity_coordinate(backend, :mu, :x), :s]
+    @test Set(coordinate_names(layout)) == Set(coordinates)
+    u = _parity_u(layout, coordinates, [0.5, -0.25, log(1.3)])
     nt = constrain(layout, u)
-    b, s, a = nt.mu_x, nt.s, nt.mu_Intercept
+    (a, b), s = _parity_population(nt, backend, :mu), nt.s
     lp = a .+ b .* p_cols.x
     ll = sum(logpdf.(Normal.(lp, s), p_cols.y))
     pr = logpdf(Normal(0, 1), a) + logpdf(Normal(0, 1), b) +

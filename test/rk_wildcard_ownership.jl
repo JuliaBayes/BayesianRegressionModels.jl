@@ -49,11 +49,13 @@ function wildcard_public_replay(backend)
     for (name, callable) in emitted.bindings
         Core.eval(mod, Expr(:const, Expr(:(=), name, QuoteNode(callable))))
     end
+    Core.eval(mod, :(import ReactiveKernels))
     for definition in emitted.defs
         parsed = Meta.parse(sprint(Base.show_unquoted, definition))
-        expression = BRM._rk_source_definition(definition).kind === :rkppl ?
-            Expr(:macrocall, Symbol("@rkppl"), LineNumberNode(0), parsed) : parsed
-        Core.eval(mod, expression)
+        # Explicit `@kernel` graphs and functions keep their own kind; a bare
+        # function-shaped definition is an `@rkppl` submodel.
+        Core.eval(mod, BRM._rk_source_definition(definition).kind === :rkppl ?
+            Expr(:macrocall, Symbol("@rkppl"), LineNumberNode(0), parsed) : parsed)
     end
     parsed = Meta.parse(sprint(Base.show_unquoted, emitted.main))
     data = BRM._rk_source_data_columns(backend.plan, emitted)
@@ -63,7 +65,8 @@ end
 
 function wildcard_reference(u, names; censored=false)
     q = Dict(name => u[j] for (j, name) in enumerate(names))
-    alpha, beta, gamma = q[:v_Intercept], q[:v_x], q[:f_op_x]
+    alpha, beta, gamma = q[Symbol("pop_log_v.beta_pop.1")], q[Symbol("pop_log_v.beta_pop.2")],
+        q[Symbol("pop_f.beta_pop.1")]
     subject = exp.(alpha .+ beta .* WILDCARD_DATA.x)
     operations = [sum(WILDCARD_DATA.op_x[1:2]), WILDCARD_DATA.op_x[3],
         sum(WILDCARD_DATA.op_x[4:6])]
@@ -88,15 +91,17 @@ end
         brmi = wildcard_model(body)
         backend, problem = consumer_problem(brmi)
         names = coordinate_names(backend.model.layout)
-        @test Set(names) == Set([:v_Intercept, :v_x, :f_op_x])
+        # Population components carry SBBRMI's names under RK scopes.
+        @test Set(names) == Set(Symbol.(["pop_log_v.beta_pop.1", "pop_log_v.beta_pop.2",
+            "pop_f.beta_pop.1"]))
         @test BRM.popcoefnames(brmi, :v) == [:Intercept, :x]
         @test BRM.popcoefnames(brmi, :f) == [:op_x]
         explicit = wildcard_model(replace(body, "effect(:, x)" => "effect(v, x)"))
         @test BRM.stan_code(SBBRMI(brmi; mod=@__MODULE__, total_groups=())) ==
             BRM.stan_code(SBBRMI(explicit; mod=@__MODULE__, total_groups=()))
         stan = consumer_stan(brmi, "wildcard-ownership-$evidence")
-        mapping = [:v_Intercept => "pop_log_v_beta_pop.1",
-            :v_x => "pop_log_v_beta_pop.2", :f_op_x => "pop_f_beta_pop.1"]
+        mapping = [Symbol(name) => replace(name, "." => "_"; count=1) for name in
+            ("pop_log_v.beta_pop.1", "pop_log_v.beta_pop.2", "pop_f.beta_pop.1")]
         @test Set(BridgeStan.param_unc_names(stan.model)) == Set(last.(mapping))
         rebuilt, plan = wildcard_public_replay(backend)
         @test coordinate_names(rebuilt.layout) == names

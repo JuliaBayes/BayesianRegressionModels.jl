@@ -50,10 +50,11 @@ end
             entry.kind === :plate && modeled_location_in_graph(plate_body(entry.recipe))
         end
         index(n) = only(findall(==(Symbol(n)), names))
-        beta = index.(["a_Intercept", "a_transformed_x", "b_Intercept"])
-        scales = index.(["ranef_draws_p_subject.sd.1", "ranef_draws_p_subject.sd.2"])
-        z = [index("ranef_draws_p_subject.z.$j.$k") for j in 1:3, k in 1:2]
-        correlation = index("ranef_draws_p_subject.L.1")
+        # The modeled column shares the population design with the intercept.
+        beta = index.(["pop_log_a.beta_pop.1", "pop_log_a.beta_pop.2", "pop_log_b.beta_pop.1"])
+        scales = index.(["b_p_subject.tau.1", "b_p_subject.tau.2"])
+        z = [index("b_p_subject.z.$j.$k") for j in 1:3, k in 1:2]
+        correlation = index("b_p_subject.L.1")
         iw, imw, isw, imx, isx, ie = index.([
             "w.y_mis.1", "mu_w", "sigma_w", "mu_x", "sigma_x", "scale"])
         function components(u)
@@ -156,11 +157,11 @@ end
     end
     backend, problem = consumer_problem(brmi)
     names = coordinate_names(backend.model.layout)
-    @test Set(names) == Set([:delta,:mu_shifted])
+    @test Set(names) == Set([:delta,Symbol("pop_mu.beta_pop.1")])
     function oracle(u)
         p = Dict(zip(names,u))
-        mu = p[:mu_shifted] .* (log.(data.raw_x) .+ p[:delta])
-        logpdf(Normal(),p[:delta]) + logpdf(Normal(0.2,0.8),p[:mu_shifted]) +
+        mu = p[Symbol("pop_mu.beta_pop.1")] .* (log.(data.raw_x) .+ p[:delta])
+        logpdf(Normal(),p[:delta]) + logpdf(Normal(0.2,0.8),p[Symbol("pop_mu.beta_pop.1")]) +
             sum(logpdf.(LogNormal(0,1),data.raw_x)) +
             sum(logpdf.(Normal.(mu,1),data.y))
     end

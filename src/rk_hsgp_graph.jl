@@ -106,7 +106,6 @@ function _rk_ast_hsgp_value_graph!(definitions, term, taken,
         PHI, omega2, sigma, rho, z; group_index=nothing)
     options = term.options
     D = length(term.columns)
-    entry = _rk_ast_fresh_name(string(options.id, "_spectral_graph"), taken)
     rho_by_group = any(p -> p.hyper === :length_scale, options.hyper_plans)
     sigma_by_group = any(p -> p.hyper === :sd, options.hyper_plans)
     cell_rho = group_index === nothing && rho_by_group ? :(rho[1]) : :rho
@@ -152,8 +151,9 @@ function _rk_ast_hsgp_value_graph!(definitions, term, taken,
         push!(body.args, :(rows = scaled_z[group_index,:]),
             :(value = vec(sum(PHI .* rows; dims=2))), Expr(:return,:value))
     end
-    push!(definitions, _rk_ast_graph_definition(entry, arguments, body))
-    # The HSGP block submodel calls its numerical child graph directly.
+    # Terms with the same spectral shape share one explicit numerical graph.
+    entry = _rk_ast_shared_definition!(definitions, taken, "brm_hsgp_spectral_graph",
+        arguments, body; kernel=true)
     values = [PHI, omega2, sigma, rho, z]
     group_index === nothing || push!(values, group_index)
     Expr(:call, entry, values...)

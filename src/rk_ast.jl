@@ -132,30 +132,13 @@ function _rk_ast_coef_name(base::String, taken::Set{Symbol})
     name
 end
 
-function _rk_ast_statistical_call!(definitions, taken, name, args...; kernel=false)
-    template = getproperty(_BRM_STATISTICAL_VALUES, name)
+function _rk_ast_statistical_call!(definitions, taken, name, args...;
+        kernel=false, template=getproperty(_BRM_STATISTICAL_VALUES, name))
     signature, body = template.args
     # Reuse a definition across distinct statistical blocks. A collision with
     # authored data, parameters or callable names only renames the definition.
-    for definition in definitions
-        kernel == Meta.isexpr(definition, :macrocall) || continue
-        definition = kernel ? last(definition.args) : definition
-        Meta.isexpr(definition, template.head, 2) || continue
-        call = first(definition.args)
-        Meta.isexpr(call, :call) || continue
-        isequal(call.args[2:end], signature.args[2:end]) || continue
-        isequal(last(definition.args), body) || continue
-        return Expr(:call, first(call.args), args...)
-    end
-    definition = deepcopy(template)
-    callee = _rk_ast_fresh_name(string(name), taken)
-    first(definition.args).args[1] = callee
-    if kernel
-        definition = Expr(:macrocall,
-            Expr(:., :ReactiveKernels, QuoteNode(Symbol("@kernel"))),
-            LineNumberNode(0), definition)
-    end
-    push!(definitions, definition)
+    callee = _rk_ast_shared_definition!(definitions, taken, name,
+        signature.args[2:end], deepcopy(body); kernel, head=template.head)
     Expr(:call, callee, args...)
 end
 
@@ -240,10 +223,15 @@ function _rk_ast_block_call!(definitions, taken, base, block::_RKBlockBody, valu
 end
 
 function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol},
-        colref::Dict{Int}, refref::Dict{Int}; values::Bool=false)
+        colref::Dict{Int}, refref::Dict{Int}; values::Bool=false,
+        replacements=Dict{Int,Any}())
     summands = Any[]
     for (index, term) in enumerate(predictor.terms)
-        if term.kind === :intercept
+        if haskey(replacements, index)
+            # A component value (or nothing, when an earlier one absorbed it).
+            replacement = replacements[index]
+            replacement === nothing || push!(summands, replacement)
+        elseif term.kind === :intercept
             push!(summands, predictor.row_source === nothing ? coefs[index] :
                 Expr(:call, :.*, coefs[index], Expr(:call, :ones,
                     Expr(:call, :length, predictor.row_source))))
@@ -843,11 +831,17 @@ _rk_ast_observed_slice(value::Symbol, jobs, rows) =
 _rk_ast_observed_slice(value::Expr, jobs, rows) =
     Expr(value.head, (_rk_ast_observed_slice(arg, jobs, rows) for arg in value.args)...)
 
-# Varying-name pre-pass (uniform split form): one `ranef_draws_<suffix>`
-# per bucket plus one `ranef_<target>_<suffix>` per slice. The `ranef_`
-# prefix cannot collide with the thin layer's implicit `r_<target>_<group>`
-# term labels; `taken` dedups the rest. Rename-independent (targets use
-# original predictor names), so names pre-mint before predictor emission.
+# A monotonic component is named after its increments vector, as SBBRMI
+# names `mo_<c>` (first occurrence) and its repeats.
+_rk_ast_monotonic_name(term, taken) = _rk_ast_fresh_name(
+    replace(string(term.options.increments), "_simplex_incr" => ""), taken)
+
+# Varying-name pre-pass (uniform split form): one `b_<suffix>` draws
+# component per bucket (SBBRMI's name) plus one `ranef_<target>_<suffix>`
+# per slice. The `ranef_` prefix cannot collide with the thin layer's
+# implicit `r_<target>_<group>` term labels; `taken` dedups the rest.
+# Rename-independent (targets use original predictor names), so names
+# pre-mint before predictor emission.
 function _rk_ast_ranef_names!(
         plan::_RKStructuralPlan, taken::Set{Symbol})
     draws = Dict{Int,Symbol}()
@@ -855,7 +849,7 @@ function _rk_ast_ranef_names!(
     for (bi, bucket) in enumerate(plan.ranef_buckets)
         suffix = bucket.id === nothing ? string(bucket.group) :
             string(bucket.id, "_", bucket.group)
-        draws[bi] = _rk_ast_coef_name("ranef_draws_" * suffix, taken)
+        draws[bi] = _rk_ast_coef_name("b_" * suffix, taken)
         for (target, _) in bucket.slices
             effect = _rk_ast_coef_name(
                 "ranef_" * string(target) * "_" * suffix, taken)
@@ -926,6 +920,28 @@ function _rk_ast_plate(name::Symbol, range::Symbol,
     Expr(:macrocall, Symbol("@plate"), LineNumberNode(0), loop)
 end
 
+function _rk_ast_gp_pair_calls(node, callee)
+    node isa Expr || return node
+    args = map(arg -> _rk_ast_gp_pair_calls(arg, callee), node.args)
+    Meta.isexpr(node, :call) && first(args) === :gp_pair_locations &&
+        (args[1] = callee)
+    Expr(node.head, args...)
+end
+
+function _rk_ast_gp_covariance!(definitions, taken, x, sigma, rho, period, jitter;
+        periodic=false)
+    templates = StatisticalPreparation._GP_COVARIANCE_MODELS
+    pair = _rk_ast_statistical_call!(definitions, taken,
+        :brm_gp_pair_locations, :x; kernel=true,
+        template=templates.gp_pair_locations)
+    template = periodic ? templates.gp_periodic_cov : templates.gp_exp_quad_cov
+    template = _rk_ast_gp_pair_calls(template, first(pair.args))
+    args = periodic ? (x, sigma, rho, period, jitter) : (x, sigma, rho, jitter)
+    _rk_ast_statistical_call!(definitions, taken,
+        periodic ? :brm_gp_periodic_cov : :brm_gp_exp_quad_cov, args...;
+        kernel=true, template)
+end
+
 # An exact GP, as StanBlocks' `_sb_gp`/`_sb_gp_periodic`: the length-scale
 # and marginal-scale priors with standardized innovations, returning the
 # Cholesky-scaled latent draw at each location. The covariance arguments are
@@ -942,8 +958,8 @@ function _rk_ast_gp_block!(definitions, taken, term)
         Expr(:call, :~, sigma, sigma_prior),
         Expr(:(=), axis, Expr(:call, :eachindex, x)),
         Expr(:call, :.~, Expr(:ref, z, axis), _rk_ast_dotted(:Normal, 0, 1)))
-    covariance = Expr(:call, :brm_gp_covariance, x, sigma, rho,
-        options.cov === :periodic ? options.period : 0.0, options.jitter)
+    covariance = _rk_ast_gp_covariance!(definitions, taken, x, sigma, rho,
+        options.cov === :periodic ? options.period : 0.0, options.jitter; periodic=options.cov === :periodic)
     _rk_ast_block_call!(definitions, taken, "brm_gp", block,
         Expr(:call, :brm_gp_latent, covariance, z))
 end
@@ -1151,6 +1167,13 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             ranef_effects, taken, bindings; predictors=plan.predictors,
             population_priors=joint_priors, coordinates))
     end
+    for (bi, bucket) in enumerate(plan.ranef_buckets)
+        bucket.decomposition === nothing || continue
+        append!(stmts, _rk_ast_value_bucket(defs, bucket, ranef_draws[bi],
+            ranef_effects, taken, bindings; coordinates))
+    end
+    vector_priors = Dict(v.name => v for v in plan.vector_parameters)
+    owned_vectors = Set{Symbol}()
     for predictor in plan.predictors
         lhs = get(rename, predictor.name, predictor.name)
         r2d2 = get(r2d2s, predictor.name, nothing)
@@ -1166,16 +1189,20 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         coefs = Dict{Int,Symbol}()
         colactual = Dict{Int,Any}()
         refactual = Dict{Int,Any}()
-    scalar_stmts = Expr[]
+        replacements = Dict{Int,Any}()
+        population = Tuple{Int,Any,Tuple{Symbol,Tuple}}[]
+        scalar_stmts = Expr[]
+        monotonic_alpha(term) = only(vector_priors[term.options.increments].args)
         for (index, term) in enumerate(predictor.terms)
             kind = term.kind
             if kind in (:continuous, :factor, :monotonic, :monotonic_summand, :offset, :ar, :me)
                 colactual[index] = only(term.columns)
             end
-            if kind === :monotonic || kind === :monotonic_summand
-                contrast = _rk_ast_fresh_name(string(term.label, "_contrast"), taken)
-                push!(stmts, Expr(:call, :~, contrast, _rk_ast_monotonic_block!(defs, taken, term)))
-                refactual[index] = contrast
+            if kind === :monotonic_summand
+                refactual[index] = _rk_ast_monotonic_component!(defs, stmts, taken,
+                    _rk_ast_monotonic_name(term, taken), only(term.columns),
+                    monotonic_alpha(term), nothing)
+                push!(owned_vectors, term.options.increments)
             elseif kind === :spline || kind === :hsgp
                 refactual[index] = term.options.id
             elseif kind === :structured
@@ -1241,7 +1268,27 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                         coefficient=term.addressee, labels=term.options.labels,
                         level_values=term.options.level_values,
                         coding=term.options.coding))
+            elseif kind === :monotonic && hs_spec === nothing && override !== nothing
+                # The monotonic component owns its simplex and coefficient.
+                replacements[index] = _rk_ast_monotonic_component!(defs, stmts, taken,
+                    _rk_ast_monotonic_name(term, taken), only(term.columns),
+                    monotonic_alpha(term), override)
+                push!(owned_vectors, term.options.increments)
+            elseif hs_spec === nothing && _rk_ast_population_family(override) &&
+                    (kind === :intercept ? predictor.row_source !== nothing :
+                        kind === :continuous)
+                column = kind === :intercept ?
+                    Expr(:call, :ones, Expr(:call, :length, predictor.row_source)) :
+                    colactual[index]
+                push!(population, (index, column, override))
             else
+                if kind === :monotonic
+                    # A horseshoe coefficient scales the owned contrast.
+                    refactual[index] = _rk_ast_monotonic_component!(defs, stmts, taken,
+                        _rk_ast_monotonic_name(term, taken), only(term.columns),
+                        monotonic_alpha(term), nothing)
+                    push!(owned_vectors, term.options.increments)
+                end
                 coef = _rk_ast_coef_name(
                     string(predictor.name, "_", term.addressee), taken)
                 coefs[index] = coef
@@ -1286,31 +1333,38 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 only(term.columns), options.loc, options.scale))
         end
         append!(stmts, scalar_stmts)
-        affine = if !values && r2d2 === nothing && hs_tau === nothing &&
-                predictor.row_source !== nothing &&
-                all(term -> term.kind in (:intercept, :continuous), predictor.terms)
-            design = _rk_ast_fresh_name(string(lhs, "_X"), taken)
-            coefficients = _rk_ast_fresh_name(string(lhs, "_coefficients"), taken)
-            columns = Any[term.kind === :intercept ?
-                Expr(:call, :ones, Expr(:call, :length, predictor.row_source)) :
-                colactual[i] for (i, term) in enumerate(predictor.terms)]
-            push!(stmts, Expr(:(=), design, Expr(:call, :hcat, columns...)))
-            push!(stmts, Expr(:(=), coefficients, Expr(:vect,
-                [coefs[i] for i in eachindex(predictor.terms)]...)))
-            Expr(:call, :*, design, coefficients)
-        else
-            _rk_ast_affine(predictor, coefs, colactual, refactual; values)
+        # The population component's value takes the place of the first
+        # coefficient it absorbs.
+        if !isempty(population)
+            # SBBRMI's names: `X_<target>` and `pop_<target>`, where a linked
+            # predictor's target carries its link (`log_v`).
+            target = predictor.link === :identity ? string(predictor.name) :
+                string(predictor.link, "_", predictor.name)
+            name = _rk_ast_population_component!(defs, stmts, taken,
+                _rk_ast_fresh_name(string("pop_", target), taken),
+                _rk_ast_fresh_name(string("X_", target), taken),
+                [entry[2] for entry in population], [entry[3] for entry in population])
+            # The component owns each coefficient. Record the actual sampled
+            # declaration and its index rather than its old caller-side name.
+            mixed = length(unique(first(entry[3]) for entry in population)) > 1
+            for (j, entry) in enumerate(population)
+                term = predictor.terms[first(entry)]
+                r2d2 === nothing &&
+                    !haskey(joint_priors, (predictor.name, term.addressee)) &&
+                    _rk_coordinate_record!(coordinates, (; kind=:population,
+                        declaration=Symbol(name, mixed ? ".beta_pop_$j" : ".beta_pop"),
+                        index=mixed ? () : (j,), predictor=predictor.name,
+                        coefficient=term.addressee))
+            end
+            replacements[first(first(population))] = name
+            foreach(entry -> replacements[first(entry)] = nothing, population[2:end])
         end
+        affine = _rk_ast_affine(predictor, coefs, colactual, refactual; values, replacements)
         push!(stmts, Expr(:(=), lhs, affine))
         if values && (lhs !== predictor.name || predictor.link !== :identity)
             value = _rk_value_link!(bindings, predictor.link, lhs, taken)
             push!(stmts, Expr(:(=), predictor.name, value))
         end
-    end
-    for (bi, bucket) in enumerate(plan.ranef_buckets)
-        bucket.decomposition === nothing || continue
-        append!(stmts, _rk_ast_value_bucket(defs, bucket, ranef_draws[bi],
-            ranef_effects, taken, bindings; coordinates))
     end
     for parameter in plan.parameters
         if parameter.family === :LKJCovarianceFactor
@@ -1341,6 +1395,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 _rk_ast_dotted(:Normal, vector_parameter.args...)))
             continue
         end
+        vector_parameter.name in owned_vectors && continue
         stmt = _rk_ast_vector_parameter(vector_parameter)
         stmt === nothing || push!(stmts, stmt)
     end

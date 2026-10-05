@@ -232,8 +232,7 @@ end
     end
     bound = BRM.rk_translate_artifact(BRM.emit_rk_artifact(brmi;
         case_id="relative-normal-graph-$route"))
-    expression = kernel_expr(bound, assign_layout(bound))
-    dump = sprint(Base.show_unquoted, expression)
+    main = sprint(Base.show_unquoted, BRM._rk_emit_ast(backend.plan).main)
     records = observation_graph_recipes(kernel_graph(build_kernel(bound).spec))
     scalar = filter(record->record.depth==1,records)
     println("OBSERVATION_BUILT_SCALAR_RECIPES=",scalar)
@@ -244,7 +243,10 @@ end
     @test any(record->occursin("relative_logdensity",record.outputs) &&
         isequal(record.source,:((-0.5*log(2*pi)-relative_log_scale)-
             0.5*relative_residual*relative_residual)),scalar)
-    @test !occursin("y_scalar_logdensity(",dump)
+    @test occursin("y .~ LogDensity.(y_scalar_logdensity,", main)
+    for retired in ("y_logdensity_reader", "brm_logdensity_value", "y_law_argument")
+        @test !occursin(retired, main)
+    end
     @test isequal(data,saved)
   end
 end

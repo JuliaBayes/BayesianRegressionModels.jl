@@ -44,9 +44,13 @@ function check_gaussian_emission(n)
     end
     backend = check_rk_source_roundtrip(RKBRMI(brmi))
     names = coordinate_names(backend.model.layout)
-    @test names == [:mu_Intercept, :mu_x, :sigma]
+    # The population component owns the Intercept/x coefficient vector.
+    population = [Symbol("pop_mu.beta_pop.1"), Symbol("pop_mu.beta_pop.2")]
+    @test Set(names) == Set([population; :sigma])
+    # Reference order (a, b, log sigma) inside the layout's coordinate order.
+    order = Int.(indexin([population; :sigma], names))
     source = BayesianRegressionModels.emit_rk_artifact(brmi; case_id="gaussian-$n")
-    @test isempty(source.defs)
+    @test [first(first(d.args).args) for d in source.defs] == [:brm_population_effects]
     @test !occursin("NormalIDGLM", sprint(Base.show_unquoted, source.ast))
     cache = joinpath(tempdir(), "brm-rk-gaussian")
     mkpath(cache)
@@ -54,15 +58,19 @@ function check_gaussian_emission(n)
     stan = BayesianRegressionModels.stan_instantiate(sb;
         path=joinpath(cache, "gaussian.stan"))
     permutation = BayesianRegressionModels.resolve_sb_map([
-        :mu_Intercept => "pop_mu_beta_pop.1",
-        :mu_x => "pop_mu_beta_pop.2", :sigma => "sigma"],
+        population[1] => "pop_mu_beta_pop.1",
+        population[2] => "pop_mu_beta_pop.2", :sigma => "sigma"],
         names, BridgeStan.param_unc_names(stan.model); case_id="gaussian-$n")
     problem = rk_logdensity_problem(backend;
         ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
     points = ([0.0, 0.0, 0.0], [0.3, 0.7, log(0.4)], [-0.2, 1.1, log(1.3)])
-    for u in points
+    for q in points
+        u = similar(q)
+        u[order] = q
         before = copy(u)
-        expected, expected_gradient = gaussian_emission_reference(data, u)
+        expected, reference_gradient = gaussian_emission_reference(data, q)
+        expected_gradient = similar(reference_gradient)
+        expected_gradient[order] = reference_gradient
         value, gradient = LogDensityProblems.logdensity_and_gradient(problem, u)
         stan_u = BayesianRegressionModels.apply_sb_map(u, permutation)
         stan_before = copy(stan_u)
@@ -76,7 +84,7 @@ function check_gaussian_emission(n)
         @test isequal(u, before) && isequal(stan_u, stan_before)
         @test isequal(data, saved)
     end
-    measured = gaussian_emission_allocations(problem.query, points[2])
+    measured = gaussian_emission_allocations(problem.query, points[2][invperm(order)])
     println("GAUSSIAN_EMITTED rows=$n allocations=$measured")
     @test isequal(data, saved)
 end

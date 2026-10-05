@@ -66,7 +66,7 @@ end
     backend, problem = consumer_problem(brmi)
     names = coordinate_names(backend.model.layout)
     index(n) = only(findall(==(Symbol(n)), names))
-    a, b = index("mu_Intercept"), index("mu_x")
+    a, b = index("pop_mu.beta_pop.1"), index("pop_mu.beta_pop.2")
     latent = [index("x.y_mis.$j") for j in 1:2]
     @test length(names) == 4
     oracle(u) = sum(logpdf.(Normal(), u)) +
@@ -88,7 +88,7 @@ end
     artifact = BRM.emit_rk_artifact(brmi; case_id="weighted-regression-preparation")
     translated = rk_translate_artifact(artifact)
     model = build_kernel(translated)
-    @test coordinate_names(model.layout) == [:mu_Intercept, :mu_x, :sigma]
+    @test coordinate_names(model.layout) == [Symbol("pop_mu.beta_pop.1"), Symbol("pop_mu.beta_pop.2"), :sigma]
     oracle(u) = sum(data.n .* logpdf.(Normal.(u[1] .+ u[2] .* data.x, exp(u[3])), data.y)) +
         sum(logpdf.(Normal(), u[1:2])) + logpdf(Exponential(), exp(u[3])) + u[3]
     problem = prepare_sampler(model, translated, zeros(3);

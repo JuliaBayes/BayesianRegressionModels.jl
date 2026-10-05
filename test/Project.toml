@@ -54,9 +54,7 @@ rev = "c317cc003fc41c2d933c27dc80799141eebd434e"
 
 [sources.StanBlocks]
 url = "https://github.com/nsiccha/StanBlocks.jl"
-# Published ragged-plate typing on top of the caller-dimension substitution
-# for uneven/empty nested ragged helpers. Retains mixed derived records, empty
-# indices and ValueFamily/UDF.
+# Published nested ragged helper types; matches compiled consumer acceptance.
 rev = "e355994384d44b86108105264ae3e34e0f2a0625"
 
 [sources.Treebars]
@@ -72,10 +70,9 @@ rev = "0194dce08e986ff17fd5a788bb315c6431b7858e"
 
 [sources.ReactiveKernels]
 url = "https://github.com/nsiccha/ReactiveKernels.jl"
-# Public recipe_kind/recipe_inventory structure inspection (1jnqeuv); retains
-# computed-matrix whole values, restricted priors, callable array cells and
-# computed axes.
+# GP adoption: RK lower Cholesky and graph allocation bounds preserved across
+# consumer precompilation, plus native prepared-callback Reverse.
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "aed7fe8e1591a5439ef719e9f582e227d225134f"
+rev = "db4f16aa0f3d768e376269429ec613691c743b13"

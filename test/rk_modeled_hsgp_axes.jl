@@ -54,14 +54,6 @@ function modeled_hsgp_outputs(graph)
     [repr(entry.recipe.outputs) for entry in recipe_inventory(graph)]
 end
 
-function modeled_hsgp_location_query(model, translated)
-    names = sort!(collect(keys(translated.columns)))
-    fixed = NamedTuple{Tuple(names)}(Tuple(translated.columns[n] for n in names))
-    wanted = (:_ppl_lp_eta, :_ppl_lp_mu)
-    @test all(in(keys(model.spec)), wanted)
-    Base.invokelatest(prepare, model.spec;
-        have=(:unconstrained, names...), want=wanted, bound=fixed)
-end
 
 @stestset "model-derived HSGP axis keeps fixed domain, orthogonal basis and sampled values" begin
     original = (; subject=[1,1,2,2,3,3],
@@ -88,9 +80,10 @@ end
         blocks = join((sprint(Base.show_unquoted, d) for d in emitted.defs
             if BRM._rk_source_definition(d).kind === :rkppl), "\n")
         @test occursin("hsgp_x_PHI = hsgp_x_basis_graph_basis_matrix(x)", main)
-        @test occursin("hsgp_x ~ brm_hsgp(", main)
-        @test occursin("z[1:3] .~ Normal.(0, 1)", blocks)
-        @test occursin("rho ~ Uniform(0.4, 3.0)", blocks)
+        definitions = join(sprint(Base.show_unquoted, d) for d in emitted.defs)
+        @test occursin("beta_raw[1:nbasis] .~ Normal.(0, 1)", definitions)
+        @test occursin("hsgp_x ~ brm_hsgp_effect(hsgp_x_PHI, hsgp_x_lambda, 3)", main)
+        @test occursin("rho_iso ~ Uniform(0.4, 3.0)", definitions)
         # Basis, centering, projection and spectral weights are numerical
         # intermediates of the actual built posterior graph.
         outputs = join(modeled_hsgp_outputs(kernel_graph(backend.model.spec)), "\n")
@@ -113,15 +106,15 @@ end
         @test Base.invokelatest(reader, constant_axis) ≈
             first(modeled_hsgp_basis(constant_axis, 3, 2.0, 2.0; orthogonal=true)) atol=2e-14
         index(n) = only(findall(==(Symbol(n)), names))
-        beta = index.(["eta_Intercept", "mu_Intercept", "mu_x"])
-        location_scale = index("ranef_draws_location_subject.sd.1")
-        location_z = [index("ranef_draws_location_subject.z.$j.1") for j in 1:3]
-        scales = index.(["ranef_draws_effect_subject.sd.1", "ranef_draws_effect_subject.sd.2"])
-        z = [index("ranef_draws_effect_subject.z.$j.$k") for j in 1:3, k in 1:2]
-        correlation = index("ranef_draws_effect_subject.L.1")
+        beta = index.(["pop_eta.beta_pop.1", "pop_mu.beta_pop.1", "pop_mu.beta_pop.2"])
+        location_scale = index("b_location_subject.tau.1")
+        location_z = [index("b_location_subject.z.$j.1") for j in 1:3]
+        scales = index.(["b_effect_subject.tau.1", "b_effect_subject.tau.2"])
+        z = [index("b_effect_subject.z.$j.$k") for j in 1:3, k in 1:2]
+        correlation = index("b_effect_subject.L.1")
         assay_scale, sigma = index.(["assay_scale", "sigma"])
-        rho_u, hsgp_sigma = index.(["hsgp_x.rho", "hsgp_x.sigma"])
-        weights_z = [index("hsgp_x.z.$b") for b in 1:3]
+        rho_u, hsgp_sigma = index.(["hsgp_x.rho_iso", "hsgp_x.sigma"])
+        weights_z = [index("hsgp_x.beta_raw.$b") for b in 1:3]
         function components(u)
             rho, tau = tanh(u[correlation]), exp.(u[scales])
             L = [1.0 0.0; rho sqrt(1-rho^2)]
@@ -173,12 +166,11 @@ end
         append!(mapping,[names[weights_z[b]]=>"hsgp_x_beta_raw.$b" for b in 1:3])
         bound = ext._rk_translated_plan(backend.plan)
         pointwise = prepare_query(backend.model, bound, :pointwise)
-        locations = modeled_hsgp_location_query(backend.model, bound)
         translated = BRM.rk_translate_artifact(artifact)
         rebuilt = Base.invokelatest(build_kernel, translated)
+        replay_pointwise = prepare_query(rebuilt, translated, :pointwise)
         replay = prepare_sampler(rebuilt, translated, zeros(23);
             backend=AutoEnzyme(; mode=Enzyme.Reverse))
-        replay_locations = modeled_hsgp_location_query(rebuilt, translated)
         # Equal subject draws make x constant: the value still follows the
         # oracle, and value and gradient follow compiled Stan's same branch.
         degenerate = fill(0.13, 23)
@@ -191,10 +183,7 @@ end
             c, parts = components(u), pointwise(u)
             @test parts.assay ≈ assay_parts(c)
             @test parts.y ≈ logpdf.(Normal.(c.mu,c.sigma),data.y)
-            queried = Base.invokelatest(locations, u)
-            @test queried[1] ≈ c.eta
-            @test queried[2] ≈ c.mu
-            @test isequal(queried, Base.invokelatest(replay_locations, u))
+            @test isequal(parts, Base.invokelatest(replay_pointwise, u))
             replay_gradient = similar(u)
             replay_value, _ = sampler_value_and_gradient!(replay, replay_gradient, u)
             @test isequal(value, replay_value)
@@ -241,20 +230,20 @@ end
         @test haskey(backend.plan.columns, :w) == (axis === :w)
         @test !haskey(backend.plan.columns, :x)
         id = "hsgp_$axis"
-        rho_u, hsgp_sigma = index.([id * ".rho", id * ".sigma"])
-        weights_z = [index(id * ".z.$b") for b in 1:k]
+        rho_u, hsgp_sigma = index.([id * ".rho_iso", id * ".sigma"])
+        weights_z = [index(id * ".beta_raw.$b") for b in 1:k]
         mapping = Pair{Symbol,String}[names[rho_u]=>id * "_rho_iso",
             names[hsgp_sigma]=>id * "_sigma"]
         append!(mapping, [names[weights_z[b]]=>id * "_beta_raw.$b" for b in 1:k])
-        intercept = index("mu_Intercept")
+        intercept = index("pop_mu.beta_pop.1")
         push!(mapping, names[intercept]=>"pop_mu_beta_pop.1")
-        slope = label == "default-floor" ? nothing : index("mu_$axis")
+        slope = label == "default-floor" ? nothing : index("pop_mu.beta_pop.2")
         slope === nothing || push!(mapping, names[slope]=>"pop_mu_beta_pop.2")
         if axis === :x
-            parent = label == "link-predictor" ? "x" : "eta"
-            parent_beta = index("$(parent)_Intercept")
-            location_scale = index("ranef_draws_location_subject.sd.1")
-            location_z = [index("ranef_draws_location_subject.z.$j.1") for j in 1:3]
+            parent = label == "link-predictor" ? "log_x" : "eta"
+            parent_beta = index("pop_$(parent).beta_pop.1")
+            location_scale = index("b_location_subject.tau.1")
+            location_z = [index("b_location_subject.z.$j.1") for j in 1:3]
             push!(mapping, names[parent_beta]=>
                 (label == "link-predictor" ? "pop_log_x_beta_pop.1" : "pop_eta_beta_pop.1"),
                 names[location_scale]=>"b_location_subject_tau.1")

@@ -157,9 +157,20 @@ end
 """Return a BRM-owned statistical RKPPL submodel after loading ReactiveKernelsPPL."""
 function rkppl_model end
 
-# Shared numerical algebra over explicitly declared coordinates. These are
-# ordinary functions or numerical graphs, not submodels: statistical blocks
-# that allocate parameters are generated per block (see `_rk_ast_block_call!`).
+"""
+    rk_model(name::Symbol)
+
+Return a BRM-owned native statistical KernelSpec after loading ReactiveKernels
+and ReactiveKernelsPPL. Available models: `:gp_exp_quad_cov`, `:gp_periodic_cov`
+and `:dual_hsgp`. Covariance graphs compose into authored RK/RKPPL models;
+`StatisticalPreparation` provides the matching covariance call wrappers.
+The dual HSGP preserves its 44 packed coordinates, live partial centeredness,
+LogNormal(0,4) hyperpriors, standard-normal weights and normalized likelihood.
+"""
+function rk_model end
+
+# Shared numerical graphs over statistical values. Statistical components
+# that allocate parameters are emitted as submodels (`rk_components.jl`).
 const _BRM_STATISTICAL_VALUES = (
     brm_multinomial_cell = :(
 function brm_multinomial_cell(row, columns, totals, probs)

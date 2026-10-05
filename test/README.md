@@ -56,7 +56,41 @@ This explicit PDF mode requires Quarto and a working LuaLaTeX installation;
 render failures propagate. Outputs use a temporary directory, or the directory
 specified by `BRM_DESCRIPTION_TEX_OUTPUT`.
 
+## Native GP and dual HSGP adoption
+
+`rk_gp_covariance.jl` checks BRM-owned squared-exponential and periodic
+covariance construction, multivariate locations, duplicate-location jitter,
+input ownership, graph composition, independent density and native Reverse
+coordinates. `rk_dual_hsgp.jl` checks the exact public motorcycle dual HSGP
+against independent normalized densities and all 44 gradients at three points
+and four centeredness settings; it reuses the existing hashed public data.
+Both load the real ReactiveKernels extension.
+
+These focused scripts use RK's public `recipe_inventory` and
+`rk_cholesky_lower` APIs. Run them
+in an environment carrying RK `db4f16aa0f3d768e376269429ec613691c743b13`
+or a descendant containing both APIs and the precompiled graph allocation
+repair and native prepared-callback Reverse repair. The matching nested
+packages share the same checkout. The standard
+`test/setup_env.jl` pin and `test/Project.toml` source revision carry that floor:
+
+```sh
+julia --project=test test/setup_env.jl
+julia --project=test test/rk_dual_hsgp.jl
+julia --project=test test/rk_gp_covariance.jl
+```
+
 ## Chunking heavy suites
+
+`rk_retained_transport.jl` attaches `RKBRMI(brmi, artifact.plan, built)` to
+the artifact route's existing build. It checks normalized compiled Stan
+densities, every ordinary Reverse coordinate and the physical-check return
+schema, with all responses and a held-out response. Centered parameterizations
+raise a typed mismatch; invalid input and a corrupted permutation remain
+errors. Public block metadata identifies known parameterization mismatches
+before compiling Stan. `rk_coordinate_transport.jl` covers the broader semantic inventory,
+including the typed unsupported-coverage diagnostic for HSGP internals.
+Run either file with `julia --project=test test/<file>.jl`.
 
 Files with dozens of testsets (`rk_parity.jl`, `rk_emitter.jl`) OOM a squeezed
 host single-process. Those files spell their blocks `@stestset` (defined in
@@ -116,6 +150,12 @@ test/rk_completed_covariate_axes.jl`. The verified native closure is RK/PPL
 `3bdbfbbbb1c82caf4acf7b6ecb5fa28e3a089c58`, StanBlocks
 `e355994384d44b86108105264ae3e34e0f2a0625`, and Enzyme 0.13.209.
 
+`rk_component_prior_inputs.jl` checks caller values used by group and HSGP
+priors when their names collide with the component's own parameters. It uses
+independent normalized laws, all-coordinate finite differences and full printed
+source replay with native Reverse gradients. Run `julia --project=test
+test/rk_component_prior_inputs.jl`.
+
 `rk_modeled_transform_predictors.jl` checks named pointwise assignments from
 modeled and completed columns as formula predictors. It retains the original
 subject axis across ragged kernel likelihoods and checks independent normalized
@@ -132,7 +172,7 @@ assignment such as `x = exp(eta)` and a log-link predictor) with a fixed
 graph evaluates the basis, centering and projection from the current axis
 values. It checks the actual built graph intermediates, the emitted basis
 law at fresh axes, independent normalized densities, every ordinary Reverse
-coordinate, compiled same-model Stan, location and pointwise queries, row
+coordinate, compiled same-model Stan, pointwise queries and their replay, row
 permutations, artifact replay and complete printed-source replay. Run
 `julia --project=test test/rk_modeled_hsgp_axes.jl`.
 
@@ -319,8 +359,8 @@ source/graph bridge does not repair or relax that scientific comparison.
 declarations through ordinary RKPPL lowering. `rk_statistical_source.jl`
 compares emitted reusable block algebra with the former ordinary inline
 source: every statistical submodel allocates its own parameters and returns
-its computed value. Scoped names such as `ranef_draws_g.sd.1` map bijectively
-to the hand-inlined program's `ranef_draws_g_sd.1`. Prior, likelihood and full
+its computed value. Scoped names such as `b_g.tau.1` map bijectively
+to the hand-inlined program's `b_g_tau.1`. Prior, likelihood and full
 densities agree to rounding at three points, as do all standard Reverse
 coordinates. Caller ownership is preserved and complete printed-source replay
 is bit-identical. Optional testset filters select individual block cases.

@@ -38,10 +38,11 @@ end
     names = coordinate_names(backend.model.layout)
     @test length(names) == 16
     index(n) = only(findall(==(Symbol(n)), names))
-    beta = index.(["a_Intercept", "a_standardize_age_yr", "b_Intercept"])
-    scales = index.(["ranef_draws_p_subject.sd.1", "ranef_draws_p_subject.sd.2"])
-    z = [index("ranef_draws_p_subject.z.$j.$k") for j in 1:3, k in 1:2]
-    correlation = index("ranef_draws_p_subject.L.1")
+    # The population component owns the intercept and completed-column slope.
+    beta = index.(["pop_log_a.beta_pop.1", "pop_log_a.beta_pop.2", "pop_log_b.beta_pop.1"])
+    scales = index.(["b_p_subject.tau.1", "b_p_subject.tau.2"])
+    z = [index("b_p_subject.z.$j.$k") for j in 1:3, k in 1:2]
+    correlation = index("b_p_subject.L.1")
     ia, im, is, ie = index.(["age_yr.y_mis.1", "mu_age", "sigma_age", "scale"])
     observed = collect(skipmissing(data.age_yr))
     anchor, spread = mean(observed), std(observed)
@@ -70,7 +71,7 @@ end
             sum(logpdf.(Normal.(c.internal,c.scale),reduce(vcat,data.values)))
     end
     stan = consumer_stan(brmi,"completed-covariate-axes"; mod=PublicCompletedCovariateAxes)
-    mapping = [names[correlation]=>"b_p_subject_L.1", names[ia]=>"age_yr_y_mis.1",
+    mapping = [names[correlation]=>"b_p_subject_L.1", names[ia]=>"age_yr.y_mis.1",
         names[im]=>"mu_age", names[is]=>"sigma_age", names[ie]=>"scale"]
     append!(mapping, [names[scales[j]]=>"b_p_subject_tau.$j" for j in 1:2])
     append!(mapping, [names[z[j,k]]=>"b_p_subject_z_flat.$(k+2*(j-1))" for j in 1:3 for k in 1:2])
@@ -106,7 +107,8 @@ end
     end
     artifact = BRM.emit_rk_artifact(brmi; case_id="completion-name-collision")
     definition = only(filter(d -> Meta.isexpr(d, :macrocall) &&
-        startswith(string(BRM._rk_source_definition(d).name), "brm_completed_covariate"), artifact.defs))
+        startswith(string(BRM._rk_source_definition(d).name), "brm_completed_covariate"),
+        artifact.defs))
     name = BRM._rk_source_definition(definition).name
     @test name != :brm_completed_covariate
     mod = Module(gensym(:CompletionGraph))

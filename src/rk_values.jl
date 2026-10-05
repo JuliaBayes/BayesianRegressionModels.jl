@@ -177,34 +177,40 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
         group = _rk_ast_fresh_name(string(draws, "_groups"), taken)
         push!(stmts, Expr(:(=), group, Expr(:call, :vcat, grouping.columns...)))
     end
-    call = if grouping.form === :gr
-        _rk_ast_stratified_draws!(definitions, taken, K, bucket.lkj_eta,
-            group, grouping.by)
+    if grouping.form === :gr
+        _rk_ast_stratified_group_component!(definitions, stmts, taken, draws,
+            group, grouping.by, K, bucket.lkj_eta)
     elseif bucket.decomposition !== nothing
-        # The shared budget stays a caller-level graph: its scales also feed
-        # population priors. The block receives its derived scale vector.
-        tau = _rk_ast_fresh_name(string(draws, "_sd"), taken)
+        # Shared R2D2M2 budgets derive the scales in the main block; the
+        # component still owns its correlation factor and draws.
+        tau = _rk_ast_fresh_name(string(draws, "_tau"), taken)
         _rk_ast_ranef_r2d2!(definitions, stmts, bucket, tau, bindings, taken,
-            predictors, population_priors)
-        _rk_ast_varying_draws!(definitions, taken, K, bucket.lkj_eta, nothing;
-            group, scales=tau)
+            predictors, population_priors; stem_base=draws)
+        _rk_ast_group_component!(definitions, stmts, taken, draws, group, K,
+            bucket.lkj_eta, (); scale_value=tau)
     else
         # Stan's ordinary unnamed intercept and multi-membership intercept
         # families sample log_scale ~ Normal(0,1). Shared-ID, slope and
         # stratified families keep their half-normal scale default.
         default = bucket.kind === :intercept1 ? :LogNormal : :HalfNormal
-        scale_priors = if all(isequal(first(bucket.sd_priors)), bucket.sd_priors)
-            _rk_ast_positive_prior(first(bucket.sd_priors), bindings, taken; default)
+        priors = if all(isequal(first(bucket.sd_priors)), bucket.sd_priors)
+            fill(_rk_ast_positive_prior(first(bucket.sd_priors), bindings, taken; default), K)
         else
             [_rk_ast_positive_prior(prior, bindings, taken) for prior in bucket.sd_priors]
         end
-        record = grouping.form === :plain ? (; kind=:ranef,
-            group=bucket.group, id=bucket.id, bucket_kind=bucket.kind,
-            margins=Tuple((m.predictor, m.coefficient) for m in bucket.margins)) : nothing
-        _rk_ast_varying_draws!(definitions, taken, K, bucket.lkj_eta, nothing;
-            group, scale_priors, coordinates, coordinate_record=record, scope=draws)
+        _rk_ast_group_component!(definitions, stmts, taken, draws, group, K,
+            bucket.lkj_eta, priors)
+        # Plain groups retain semantic transport metadata at their actual
+        # component-owned declarations; other grouping forms remain unpaired.
+        grouping.form === :plain &&
+            _rk_coordinate_record!(coordinates, (; kind=:ranef,
+                group=bucket.group, id=bucket.id, bucket_kind=bucket.kind,
+                margins=Tuple((m.predictor, m.coefficient) for m in bucket.margins),
+                scale=Symbol(draws, ".tau"),
+                scales=all(isequal(first(priors)), priors) ? nothing :
+                    Tuple(Symbol(draws, ".tau_", k) for k in 1:K),
+                z=Symbol(draws, ".z"), L=K == 1 ? nothing : Symbol(draws, ".L")))
     end
-    push!(stmts, Expr(:call, :~, draws, call))
     indices = Dict{Symbol,Symbol}()
     if grouping.form !== :gr
         callee = :brm_level_indices
@@ -310,40 +316,17 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
             _rk_ast_hsgp_grouped(definitions, term, PHI, lambda, floors, taken, bindings)))
         return stmts
     end
-    # One block, as StanBlocks' `_sb_hsgp*`: the hyperparameters and basis
-    # weights with their priors, returning the HSGP summand. The fitted basis
-    # and frequencies stay caller-level graph values, like Stan's data.
-    shared = periodic || options.iso
-    rho_priors = [_rk_ast_positive_prior(options.rho_prior, bindings, taken)
-        for _ in 1:(shared ? 1 : length(term.columns))]
+    axes = periodic || options.iso ? 1 : length(term.columns)
+    rho_priors = [_rk_ast_positive_prior(options.rho_prior, bindings, taken) for _ in 1:axes]
     sigma_prior = _rk_ast_positive_prior(options.sigma_prior, bindings, taken)
-    block = _rk_block_body(rho_priors, sigma_prior)
-    P = _rk_block_argument!(block, :PHI, PHI)
-    omega2 = _rk_block_argument!(block, periodic ? :harmonics : :omega2, lambda)
-    floor = options.rho_truncated ? _rk_block_argument!(block, :floor, floors) : nothing
-    rhos = map(enumerate(rho_priors)) do (j, prior)
-        rho = _rk_block_local!(block, shared ? "rho" : "rho$j")
-        options.rho_truncated && (prior = Expr(:call, :restricted, prior,
-            shared ? floor : Expr(:ref, floor, j), Inf))
-        push!(block.statements, Expr(:call, :~, rho, prior))
-        rho
-    end
-    rho = shared ? only(rhos) : Expr(:vect, rhos...)
-    sigma, z = _rk_block_local!(block, :sigma), _rk_block_local!(block, :z)
-    push!(block.statements, Expr(:call, :~, sigma, sigma_prior))
-    # A basis over a model-derived axis is a graph value, so binding cannot
-    # read its column extent; that extent is the formula's basis count.
-    extent = get(options, :latent, false) ?
-        Expr(:call, :(:), 1, prod(options.k)) : Expr(:call, :axes, P, 2)
-    push!(block.statements, Expr(:call, :.~, Expr(:ref, z, extent),
-        _rk_ast_dotted(:Normal, 0, 1)))
-    value = _rk_block_local!(block, :value)
-    push!(block.statements, Expr(:(=), value, periodic ?
-        Expr(:call, :*, P, Expr(:call, :.*,
-            Expr(:call, :brm_hsgp_periodic_sqrt_spd, omega2, sigma, rho), z)) :
-        _rk_ast_hsgp_value_graph!(definitions, term, taken, P, omega2, sigma, rho, z)))
-    push!(stmts, Expr(:call, :~, options.id, _rk_ast_block_call!(definitions, taken,
-        periodic ? "brm_periodic_hsgp" : "brm_hsgp", block, value)))
+    rho = axes == 1 ? :rho_iso : :rho
+    value = periodic ?
+        :(PHI * (brm_hsgp_periodic_sqrt_spd(omega2, sigma, $rho) .* beta_raw)) :
+        _rk_ast_hsgp_value_graph!(definitions, term, taken, :PHI, :omega2, :sigma, rho, :beta_raw)
+    _rk_ast_hsgp_component!(definitions, stmts, taken, options.id, PHI, lambda,
+        floors, rho_priors, sigma_prior, value; truncated=options.rho_truncated,
+        nbasis=get(options, :latent, false) ? prod(options.k) : nothing,
+        base=periodic ? "brm_periodic_hsgp_effect" : "brm_hsgp_effect")
     stmts
 end
 
