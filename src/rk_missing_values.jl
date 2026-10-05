@@ -259,10 +259,12 @@ end
 # Completion, formula columns, sampled priors and readers may depend on one
 # another. Order ordinary emitted statements by their declared outputs before
 # PPL authoring, preserving independent source order and bound data ownership.
-function _rk_order_value_statements(statements, data_names, definitions=())
+function _rk_order_value_statements(statements, data_names, definitions=(); observed=())
     block_reads = _rk_block_free_reads(definitions)
     outputs = map(statements) do statement
         names = _rk_source_outputs!(Set{Symbol}(), statement)
+        Meta.isexpr(statement, :call) && first(statement.args) in (:~, :.~) &&
+            setdiff!(names, observed)
         setdiff!(names, data_names)
         setdiff!(names, _rk_source_loop_indices!(Set{Symbol}(), statement))
     end

@@ -651,7 +651,8 @@ function _rk_emit_ast(plan::_RKValuePlan)
     computed = Set{Symbol}()
     foreach(statement -> Meta.isexpr(statement, :(=), 2) &&
         _rk_source_outputs!(computed, statement), stmts)
-    stmts = _rk_order_value_statements(stmts, setdiff(Set(keys(plan.columns)), computed), defs)
+    stmts = _rk_order_value_statements(stmts, setdiff(Set(keys(plan.columns)), computed), defs;
+        observed=_rk_observed_names(plan))
     _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings),
         _rk_observed_names(plan))
 end
