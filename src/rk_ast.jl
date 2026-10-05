@@ -644,7 +644,7 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
         # Lead count column (LHS) + trials + simplex + tail count columns.
         _rk_ast_dotted(:Multinomial, leaf[:trials], Expr(:call, :Ref, predictor))
     elseif response.family === :categorical
-        _rk_ast_dotted(:Categorical, Expr(:call, :Ref, predictor))
+        Expr(:call, :Categorical, predictor)
     elseif response.family === :mixture
         _rk_ast_mixture_dist(response, leaf)
     end
