@@ -126,9 +126,9 @@ end
 @stestset "monotonic contrast definitions share their law without name collisions" begin
     data = (; rank=[1,3,2,1,3], x=[-0.8,-0.3,0.1,0.4,0.9], y=zeros(5))
     brmi = @brm data begin
-        brm_monotonic_contrast ~ Normal(0,1)
+        brm_monotonic_contrast ~ Exponential(1)
         mu ~ 1 + mo(rank) + mo1(rank) + hsgp(x; k=3)
-        y ~ Normal(mu,1)
+        y ~ Normal(mu,brm_monotonic_contrast)
     end
     artifact = BRM.emit_rk_artifact(brmi; case_id="monotonic-name-collision")
     definitions = filter(d -> Meta.isexpr(d,:function),artifact.defs)
@@ -138,6 +138,7 @@ end
     @test last(definition.args) == last(BRM._BRM_STATISTICAL_MODELS.monotonic.args)
     # Both beta-scaled mo and coefficient-free mo1 reuse the ordinary function.
     backend = check_rk_source_roundtrip(RKBRMI(brmi))
-    # Retain the fixture's nine sampled coordinates through source replay.
-    @test backend.model.layout.total == 9
+    # The authored name must be a fitted draw to reserve it for the collision.
+    @test :brm_monotonic_contrast in coordinate_names(backend.model.layout)
+    @test backend.model.layout.total == 10
 end
