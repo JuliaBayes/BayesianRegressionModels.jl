@@ -127,7 +127,7 @@ end
         names = coordinate_names(model.layout)
         index(name) = only(findall(==(Symbol(name)), names))
         hyper = index(:z)
-        scale = index(string(record.sd, ".1"))
+        scale = index(string(record.scale, ".1"))
         innovations = [index(string(record.z, ".", j, ".1")) for j in 1:2]
         @test length(names) == 4
         query = prepare_sampler(model, translated, zeros(4);
