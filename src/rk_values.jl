@@ -288,7 +288,11 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
     z = _rk_ast_fresh_name(string(options.id, "_z"), taken)
     push!(stmts, Expr(:call, :~, sigma,
         _rk_ast_positive_prior(options.sigma_prior, bindings, taken)))
-    push!(stmts, Expr(:call, :.~, Expr(:ref, z, Expr(:call, :axes, PHI, 2)),
+    # A basis over a model-derived axis is a graph value, so binding cannot
+    # read its column extent; that extent is the formula's basis count.
+    extent = get(options, :latent, false) ?
+        Expr(:call, :(:), 1, prod(options.k)) : Expr(:call, :axes, PHI, 2)
+    push!(stmts, Expr(:call, :.~, Expr(:ref, z, extent),
         _rk_ast_dotted(:Normal, 0, 1)))
     call = periodic ? _rk_ast_statistical_call!(definitions, taken,
         :brm_periodic_hsgp_summand, PHI, lambda, sigma, rho_value, z) :

@@ -2784,24 +2784,32 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    # Explicit domains stay closed (the surface fits the boundary
-    # from raw columns).
-    @test_throws "domain=" BRM._brm_rk_plan(@brm df begin
+    # Fixed domains, linear orthogonalization and model-derived axes plan;
+    # numerical acceptance lives in test/rk_hsgp_domains.jl and
+    # test/rk_modeled_hsgp_axes.jl.
+    hsgp_term(plan) = only(t for p in (plan isa BRM._RKValuePlan ?
+        plan.regression.predictors : plan.predictors) for t in p.terms if t.kind === :hsgp)
+    plan = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + hsgp(x; k=4, domain=(-2.0, 2.0))
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    # Orthogonalization stays closed (raw tensor-product basis only).
-    @test_throws "orthogonal" BRM._brm_rk_plan(@brm df begin
+    term = hsgp_term(plan)
+    @test term.options.fixed_fits == ((0.0, 2.0),)
+    @test plan.columns[:x] == df.x
+    plan = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + hsgp(x; k=4, orthogonal_to=:linear)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    # Latent axes stay closed (raw data columns only). The latent
-    # axis needs its own observation, else the shared seam fails the
-    # axis predictor's row axis before the RK gate is reached.
+    term = hsgp_term(plan)
+    @test term.options.orthogonal === :linear
+    @test term.options.fixed_fits === nothing && !term.options.latent
+    # A model-derived axis is read from its graph value, never bound as data.
+    # The intercept-only axis predictor takes its row axis from its own
+    # observation `x_obs`.
     ldf = merge(df, (; x_obs=[0.3, 0.5, 0.4, 0.6, 0.5, 0.7]))
-    @test_throws "model-derived" BRM._brm_rk_plan(@brm ldf begin
+    plan = BRM._brm_rk_plan(@brm ldf begin
         xlat ~ 1
         xob_sd ~ Exponential(1)
         x_obs ~ Normal(xlat, xob_sd)
@@ -2809,6 +2817,11 @@ end
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
+    term = hsgp_term(plan)
+    @test term.columns == [:xlat] && term.options.latent
+    @test term.options.fixed_fits == ((1.0, 1.0),)
+    @test term.options.orthogonal === nothing
+    @test !haskey(plan.columns, :xlat)
 end
 
 @stestset "fail closed: response side" begin

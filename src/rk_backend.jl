@@ -4335,10 +4335,12 @@ end
 # periodic cosine/sine basis (single axis; no `c`/`iso`, mirroring
 # SB's `_sb_hsgp_periodic_term!` refusal set). The thin layer owns
 # every parameter (`beta_raw_<id>`, `rho_<id>`/`rho_<id>_1..d`,
-# `sigma_<id>`) and evaluates the basis in-graph from the raw axes:
-# BRM ships the recipe, never materialized `PHI`/`omega2` (user-GO'd
-# in-graph contract, decision `02e64eo`). One id per smooth occurrence
-# (exactly-one-use linkage), minted with numeric stems on collision.
+# `sigma_<id>`) and evaluates the basis in-graph from its axes — raw data
+# columns or, with a fixed `domain=`, model-derived values read by name —
+# including `orthogonal_to=:linear`: BRM ships the recipe, never
+# materialized `PHI`/`omega2` (user-GO'd in-graph contract, decision
+# `02e64eo`). One id per smooth occurrence (exactly-one-use linkage),
+# minted with numeric stems on collision.
 
 # Periodic HSGP admits exactly the SB spelling
 # (`_sb_hsgp_periodic_term!`): `c`/`domain`/`orthogonal_to`/`by` are
@@ -4369,10 +4371,13 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         rho_stated=false, sigma_stated=false)
     prefix = "RK backend"
     state = prepared.state
-    state.latent && error(
-        "$prefix: predictor `$target` model-derived `hsgp(...)` axis " *
-        "is out of slice 1 (the thin-layer surface binds raw data " *
-        "columns; latent axes are sequenced)")
+    # A model-derived axis (an assignment or predictor value) is read by
+    # name from the emitted graph; preparation already requires its fixed
+    # `domain=`, one isotropic exp-quad axis and no `by=`/partial centering.
+    # Hyper-predictors on it are refused exactly as SB refuses them.
+    state.latent && !isempty(hyper_plans) && error(
+        "$prefix: hyper-predictors on a model-derived `hsgp(...)` axis " *
+        "are not supported")
     state.cov === :exp_quad || state.cov === :periodic || error(
         "$prefix: predictor `$target` `hsgp(...; cov=$(repr(state.cov)))` " *
         "is out of slice 1 (the thin-layer surface is exp_quad + periodic)")
@@ -4389,13 +4394,14 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         "partial centering is sequenced)")
     # The periodic prepared state carries no `orthogonal` field (the
     # raw-kw gate above refuses `orthogonal_to=` for periodic first).
-    get(state, :orthogonal, nothing) === nothing || error(
+    orthogonal = get(state, :orthogonal, nothing)
+    orthogonal === :linear && state.by !== nothing && error(
         "$prefix: predictor `$target` `hsgp(...; orthogonal_to=:linear)` " *
-        "is out of slice 1 (the thin-layer surface takes the raw " *
-        "tensor-product basis; orthogonalization is sequenced)")
+        "is an ungrouped population-shape constraint and cannot be " *
+        "combined with `by=`")
     axes = Tuple(prepared.source)
     for axis in axes
-        _rk_plan_spline_axis!(axis, target, "hsgp", data, columns)
+        state.latent || _rk_plan_spline_axis!(axis, target, "hsgp", data, columns)
     end
     base = "hsgp_" * join(string.(axes), "_")
     id = _rk_mint_smooth_id!(taken, columns, base)
@@ -4418,7 +4424,7 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
     _RKTermSpec(:hsgp, collect(axes),
         (; id, k, c, iso=state.iso,
             fixed_fits=state.explicit_domain ? state.fits : nothing,
-            common..., grouped...), id, id)
+            latent=state.latent, orthogonal, common..., grouped...), id, id)
 end
 
 # ---- AR(1) latent-path terms (mirrors `_sb_ar1`) ----
