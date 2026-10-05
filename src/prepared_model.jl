@@ -397,9 +397,10 @@ function _brm_prepare_predictor_geometry(
         brmi::BRMI, context::_BRMBackendContext, predictor::Symbol;
         available_predictors=(predictor,), training=nothing,
         tolerant_default::Bool=false, matched_defaults=nothing,
-        population_columns=_brm_population_columns)
+        population_columns=_brm_population_columns,
+        random_effect_columns=_brm_random_effect_columns)
     random_effects = _brm_simple_random_effect_plans(
-        brmi, predictor, context; required=true)
+        brmi, predictor, context; required=true, random_effect_columns)
     op = linear_predictor_op(brmi, predictor)
     lhs, rhs = getargs(op, 2)
     link_lhs_fn, name = _peel_lp_lhs(lhs)

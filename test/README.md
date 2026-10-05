@@ -18,6 +18,12 @@ differentiates with Enzyme only — every gradient in this suite goes through
 so there is nothing here to work around; do not add it back to make a new
 gradient site easier.
 
+`kernel_ragged_broadcast.jl` checks Stan source emission and stanc acceptance
+for modeled secondary-axis arguments in plain and nested dotted calls. It
+covers interleaved rows, shared random effects, empty groups, raw-data controls
+and preservation of field and keyword names. Run it with
+`julia --project=. test/kernel_ragged_broadcast.jl` or the test environment above.
+
 ## Description PDF rendering
 
 `description_tex.jl` checks Student-t sampling equations for standard, affine,
@@ -140,6 +146,12 @@ full-posterior anchors and gradients, including the distributional spline toy.
 
 The focused preparation gates are `preparation_program.jl`,
 `preparation_replay.jl`, `preparation_assignments.jl`, and `backend_plan.jl`.
+`rk_modeled_random_slopes.jl` keeps modeled formula values active in both
+population and subject slope designs. It covers six rows from three subjects,
+censored LogNormal and Normal observations, sampled covariance and authored
+priors, row permutations, independent full-density/native Reverse oracles,
+compiled same-BRMI Stan, and complete source/artifact replay. Direct formula
+slopes and partially completed covariates also keep their original row axes.
 `rk_declared_consumer_axes.jl` checks that an explicit ragged consumer supplies
 an intercept predictor's row axis even when its endpoint data are omitted.
 Its observed model compares complete printed RK replay, ordinary Reverse and
