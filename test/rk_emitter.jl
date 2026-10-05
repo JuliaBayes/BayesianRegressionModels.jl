@@ -1300,12 +1300,12 @@ end
     ids = Set(t.options.id for p in plan.predictors for t in p.terms
         if t.kind === :spline)
     @test ids == Set([:s_x, :s_x_2])
-    # Generated ids disambiguate against user parameters.
+    # Generated ids disambiguate against fitted user parameters.
     brmi = @brm sdf begin
         mu ~ 1 + s(x)
         s_x ~ Normal(0, 1)
         sigma ~ Exponential(1)
-        y ~ Normal(mu, sigma)
+        y ~ Normal(mu + s_x, sigma)
     end
     plan = BRM._brm_rk_plan(brmi)
     term = only(t for t in only(plan.predictors).terms if t.kind === :spline)
