@@ -7335,7 +7335,7 @@ arrays on their own row axes. Regression geometry and priors use the same
 preparation on both regression routes. The extension emits and binds the
 current RKPPL surface; unsupported formula terms fail with RK attribution.
 """
-function _brm_rk_unselected_plan(brmi::BRMI)
+Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRMI))
     prefix = "RK backend"
     unconditioned = _rk_unconditioned_plan(brmi)
     unconditioned === nothing || return unconditioned

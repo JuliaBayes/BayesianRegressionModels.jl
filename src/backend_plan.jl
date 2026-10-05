@@ -22,14 +22,17 @@ likelihood-decorator prepass state, observed row axes and explicit gather
 consumer axes. It also caches grouped-term source declarations in
 formula order. Concrete backends own all later representation choices.
 """
-struct _BRMBackendContext{P<:BRMI,D<:AbstractDict,PP<:AbstractDict,TO<:AbstractDict,RA<:AbstractDict,TP,GD}
-    parent::P
+# Preparation consumes a model as syntax. Encoding the complete source tree in
+# this carrier's type forces every later planner to compile again per formula.
+# Retain the original values, including callable identity, as runtime fields.
+struct _BRMBackendContext{D<:AbstractDict,PP<:AbstractDict,TO<:AbstractDict,RA<:AbstractDict,TP}
+    parent::BRMI
     data::D
     prepass::PP
     target_obs::TO
     target_axes::RA
     term_priors::TP
-    group_declarations::GD
+    group_declarations::Tuple
 end
 
 # Backend-neutral construction replay. Concrete backends consume the same
@@ -677,7 +680,7 @@ function _brm_materialize_interval_response(
     _BRMResponseModifierPlan(:interval_censored, spec.base, nothing, upper)
 end
 
-function _brm_backend_context(brmi::BRMI;
+Base.@nospecializeinfer function _brm_backend_context(@nospecialize(brmi::BRMI);
                               data::AbstractDict=Dict{Symbol,Any}(),
                               retain_mm_sources::Bool=false)
     prepass = Dict{Symbol,Any}()

@@ -21,7 +21,7 @@ _rk_observed_names(::_RKUnconditionedPlan) = ()
 _rk_emit_ast(::_RKUnconditionedPlan) =
     _RKEmittedProgram(Expr[], Expr(:block), Pair{Symbol,Any}[])
 
-function _rk_unconditioned_plan(brmi)
+Base.@nospecializeinfer function _rk_unconditioned_plan(@nospecialize(brmi))
     # Bound formula observations, including kernel-cell inputs, use the
     # ordinary planner. Empty bound arrays still retain this fitted role.
     for node in values(brmi.operations)
@@ -57,7 +57,10 @@ _rk_plan_summary(plan::_RKHeldOutPlan) =
     _rk_plan_summary(plan.parent) * " (withheld: " *
     join(string.(sort!(collect(plan.held_out))), ", ") * ")"
 
-function _brm_rk_plan(brmi::BRMI; held_out=())
+# Compilation of preparation must not scale with the entire BRMI source type.
+# This barrier applies only to planning; emitted numerical kernels retain their
+# ordinary specialization and contain exactly the same source and data.
+Base.@nospecializeinfer function _brm_rk_plan(@nospecialize(brmi::BRMI); held_out=())
     selected = _rk_held_out_selection(brmi, held_out)
     original = _brm_rk_unselected_plan(brmi)
     isempty(selected) ? original : _RKHeldOutPlan(original, selected)

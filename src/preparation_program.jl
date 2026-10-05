@@ -7,9 +7,11 @@ struct _BRMPreparedOperation{E,D}
     dependencies::D
 end
 
-struct _BRMPreparedProgram{C,O,N}
+# Ordered operations remain a tuple; their expression types are not compiler
+# parameters of the whole program. Leaf dispatch still sees each original node.
+struct _BRMPreparedProgram{C,N}
     context::C
-    operations::O
+    operations::Tuple
     order::N
 end
 
@@ -117,7 +119,7 @@ Collect shared data/row-axis facts and a stable dependency order over the full
 BRMI source. Formula terms and distribution calls remain typed `ExprColumn`
 values: this pass neither selects a likelihood family nor emits backend code.
 """
-function _brm_prepare_program(brmi::BRMI; data=Dict{Symbol,Any}(),
+Base.@nospecializeinfer function _brm_prepare_program(@nospecialize(brmi::BRMI); data=Dict{Symbol,Any}(),
                               context=_brm_backend_context(brmi; data))
     names = keys(brmi.operations)
     operations = map(names) do key

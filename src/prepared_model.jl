@@ -67,12 +67,14 @@ Backend-neutral semantic program. Backends may prepare only the operation
 classes they consume; `source_operations` always retains the complete ordered
 BRMI program so unsupported backend features are not discarded.
 """
-struct _BRMPreparedModel{G,P,A,O,S}
+# Like the source program, this is a planning snapshot rather than a numeric
+# executor. Keep model-sized heterogeneous tuples out of its type signature.
+struct _BRMPreparedModel{G}
     program::G
-    parameters::P
-    predictors::A
-    assignments::O
-    observations::S
+    parameters::Tuple
+    predictors::Tuple
+    assignments::Tuple
+    observations::Tuple
 end
 
 function Base.getproperty(model::_BRMPreparedModel, field::Symbol)
@@ -92,7 +94,7 @@ operations a backend can execute. This intentionally retains exotic terms and
 joint responses in `source_operations`; backend-specific preparation can add
 geometry while sharing the same identities and dependency order.
 """
-function _brm_prepare_model(brmi::BRMI;
+Base.@nospecializeinfer function _brm_prepare_model(@nospecialize(brmi::BRMI);
                             program=_brm_prepare_program(brmi),
                             additional_parameters=(), observation_overrides=Dict())
     context = program.context

@@ -291,4 +291,8 @@ export popefs, _popefs_normal, _popefs_coefs, _popefs_normal_coefs,
        brm_mixture_rows_int,
        sb_group_demo_slic, sb_group_clamped_demo, sb_group_clamped_demo_slic
 
+# Cache reusable syntax planning and source emission, without constructing a
+# model or running an application workload during package loading.
+include("precompile.jl")
+
 end # module
