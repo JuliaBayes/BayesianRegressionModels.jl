@@ -7677,9 +7677,20 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
             haskey(columns, mi_jobs) && error(
                 "$prefix: response `$(entry.key)` `mi()` index column " *
                 "`$mi_jobs` collides with existing data; rename it")
+            raw = _rk_mint_generated!(taken, columns, string(entry.key, "_raw"))
+            columns[raw] = mi_plan.values
+            columns[entry.key] = mi_plan.observed_values
+            for i in eachindex(predictor_specs)
+                spec = predictor_specs[i]
+                spec.row_source === entry.key || continue
+                predictor_specs[i] = _RKPredictorSpec(spec.name, spec.link,
+                    spec.terms, spec.label, raw)
+            end
+            push!(derived, _RKDerivedSpec(entry.key,
+                Expr(:_rk_data_preparation, :brm_covariate_observed, raw), entry.key))
             columns[mi_jobs] = mi_plan.observed_indices
             push!(derived, _RKDerivedSpec(mi_jobs,
-                Expr(:_rk_data_preparation, :brm_covariate_observed_rows, entry.key), mi_jobs))
+                Expr(:_rk_data_preparation, :brm_covariate_observed_rows, raw), mi_jobs))
         else
             # Mixture responses gate on the shared component family (the
             # same-family check ran at classification).
@@ -7722,9 +7733,17 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
     for spec in response_specs
         spec.mi_jobs === nothing && continue
         push!(mi_packed, spec.response, spec.mi_jobs)
-        length(columns[spec.response]) == n_obs ||
+        length(columns[spec.response]) == length(columns[spec.mi_jobs]) ||
             error("$prefix: internal: `mi()` packed columns for " *
-                  "response `$(spec.response)` does not retain the full row axis")
+                  "response `$(spec.response)` disagree on observed rows")
+    end
+    for spec in derived
+        spec.expression.head === :_rk_data_preparation &&
+            first(spec.expression.args) === :brm_covariate_observed_rows || continue
+        raw = spec.expression.args[2]
+        push!(mi_packed, raw)
+        length(columns[raw]) == n_obs || error(
+            "$prefix: internal: `mi()` source `$raw` does not retain the full row axis")
     end
     statistical_inputs = Set{Symbol}(t.options.metadata for p in predictor_specs
         for t in p.terms if t.kind === :structured)

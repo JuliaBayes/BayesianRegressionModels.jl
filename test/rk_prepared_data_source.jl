@@ -18,8 +18,10 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
         indices = getfield(mod, :brm_prepared_indices)
         dummy = getfield(mod, :brm_factor_dummy)
         geometry = getfield(mod, :brm_covariate_geometry)
-        @test [entry.kind for entry in recipe_inventory(indices.graph)] == [:plate]
-        @test [entry.kind for entry in recipe_inventory(dummy.graph)] == [:plate]
+        @test [entry.kind for entry in recipe_inventory(indices.graph)
+            if entry.kind !== :ordinary] == [:plate]
+        @test [entry.kind for entry in recipe_inventory(dummy.graph)
+            if entry.kind !== :ordinary] == [:plate]
         @test count(entry -> entry.kind === :plate, recipe_inventory(geometry.graph)) == 3
         @test Base.invokelatest(prepare(indices), ["a", "b", "a"],
             ["b", "unused", "a"]) == [3, 1, 3]

@@ -779,7 +779,6 @@ function _rk_ast_response_stmt(response::_RKLikelihoodSpec,
     end
     if response.mi_jobs !== nothing
         jobs = response.mi_jobs
-        lhs = Expr(:ref, lhs, jobs)
         for (role, value) in leaf
             leaf[role] = _rk_ast_observed_slice(value, jobs, row_names)
         end
