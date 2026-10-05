@@ -816,7 +816,7 @@ function _rk_ast_response_stmt(response::_RKLikelihoodSpec,
 end
 
 # Count columns are graph values, so a row likelihood cannot require them to
-# arrive as precomputed bound data. The shared normalized BRM density computes
+# arrive as precomputed bound data. A numerical plate computes normalized
 # pointwise scores; the ordinary scoring adapter reads those scores unchanged.
 function _rk_ast_multinomial_response_stmt!(definitions, statements, taken,
         response, rename)

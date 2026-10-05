@@ -163,9 +163,16 @@ function rkppl_model end
 const _BRM_STATISTICAL_VALUES = (
     brm_multinomial_scores = :(
 brm_multinomial_scores(count_columns, trials, probabilities) = begin
-    counts = hcat(count_columns...)
-    totals = trials isa Integer ? fill(trials, size(counts, 1)) : trials
-    pointwise = BayesianRegressionModels.brm_multinomial_lpmfs(counts, probabilities, totals)
+    pointwise = ReactiveKernels.plate(eachindex(first(count_columns)),
+            Ref(count_columns), Ref(trials), Ref(probabilities)) do row, columns, totals, probs
+        total = totals isa Integer ? totals : totals[row]
+        cells = sum(eachindex(columns)) do category
+            count = columns[category][row]
+            mass = count == 0 ? zero(probs[category]) : count * log(probs[category])
+            mass - BayesianRegressionModels.loggamma(count + 1)
+        end
+        BayesianRegressionModels.loggamma(total + 1) + cells
+    end
     return pointwise
 end),
 
