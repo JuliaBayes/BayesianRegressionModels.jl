@@ -112,10 +112,11 @@ end
 @stestset "cached preparation cannot override emitted categorical and ordinal values" begin
     groups = categorical(["b", "a", "b", "a"])
     levels!(groups, ["b", "unused", "a"])
-    data = (; g=groups, rank=[1, 3, 2, 1], x=[-.7, -.2, .4, .9], y=[.2, -.1, .3, .4])
+    data = (; g=groups, category=["b", "a", "b", "a"], rank=[1, 3, 2, 1],
+        x=[-.7, -.2, .4, .9], y=[.2, -.1, .3, .4])
     saved = deepcopy(data)
     brmi = @brm data begin
-        mu ~ 1 + factor(g; ref="a") + mo(rank) + hsgp(x; k=3, by=g)
+        mu ~ 1 + factor(category; ref="a") + mo(rank) + hsgp(x; k=3, by=g)
         y ~ Normal(mu, 1)
     end
     backend, problem = consumer_problem(brmi)
