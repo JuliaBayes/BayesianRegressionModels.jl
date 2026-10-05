@@ -133,11 +133,27 @@ function _rk_model_random_effect_columns(term; cellmeans=false, context)
 end
 
 function _rk_model_predictor_geometry(brmi, context, target; kwargs...)
-    _brm_prepare_predictor_geometry(brmi, context, target; kwargs...,
-        population_columns=(term; cellmeans=false) ->
-            _rk_model_population_columns(term; cellmeans, context),
+    data = copy(context.data)
+    geometry_context = _BRMBackendContext(context.parent, data, context.prepass,
+        context.target_obs, context.target_axes, context.term_priors,
+        context.group_declarations)
+    function population_columns(term; cellmeans=false)
+        columns = _rk_model_population_columns(term; cellmeans, context=geometry_context)
+        if columns !== nothing
+            for column in columns
+                column.source === nothing && continue
+                # A wholly modeled covariate has no materialized source.
+                # Its declared row axis is metadata, not executable values.
+                haskey(data, column.source) ||
+                    (data[column.source] = Base.OneTo(length(column.values)))
+            end
+        end
+        columns
+    end
+    _brm_prepare_predictor_geometry(brmi, geometry_context, target; kwargs...,
+        population_columns,
         random_effect_columns=(term; cellmeans=false) ->
-            _rk_model_random_effect_columns(term; cellmeans, context))
+            _rk_model_random_effect_columns(term; cellmeans, context=geometry_context))
 end
 
 function _rk_mi_downstream(program, key, source)
