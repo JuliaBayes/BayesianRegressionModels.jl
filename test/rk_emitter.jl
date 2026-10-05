@@ -1303,9 +1303,8 @@ end
     # Generated ids disambiguate against fitted user parameters.
     brmi = @brm sdf begin
         mu ~ 1 + s(x)
-        s_x ~ Normal(0, 1)
-        sigma ~ Exponential(1)
-        y ~ Normal(mu + s_x, sigma)
+        s_x ~ Exponential(1)
+        y ~ Normal(mu, s_x)
     end
     plan = BRM._brm_rk_plan(brmi)
     term = only(t for t in only(plan.predictors).terms if t.kind === :spline)
@@ -1529,12 +1528,11 @@ end
     end)
     @test plan.columns[:gs_idx] == [1, 1, 2, 2, 3, 3]
     @test only(plan.vector_parameters).size == 2
-    # Increments disambiguate against user parameters (smooth-id precedent).
+    # Increments disambiguate against fitted user parameters (smooth-id precedent).
     plan = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + mo(c)
-        mo_c_simplex_incr ~ Normal(0, 1)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        mo_c_simplex_incr ~ Exponential(1)
+        y ~ Normal(mu, mo_c_simplex_incr)
     end)
     @test only(plan.vector_parameters).name == :mo_c_simplex_incr_2
     # A raw `<c>_idx` column colliding with the codes fails loud: sharing
@@ -1630,9 +1628,8 @@ end
     plan = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
         effect(mu, :) ~ r2d2()
-        r2d2_mu_R2 ~ Normal(0, 1)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        r2d2_mu_R2 ~ Exponential(1)
+        y ~ Normal(mu, r2d2_mu_R2)
     end)
     @test only(plan.r2d2_priors).r2 == :r2d2_mu_R2_2
     # Non-Beta R2 stays closed (SB would need a Stan translation too).
@@ -1908,9 +1905,8 @@ end
     # Trajectory names disambiguate against user parameters.
     plan = BRM._brm_rk_plan(@brm tdf begin
         mu ~ 1 + dar(t)
-        dar_mu_t_beta ~ Normal(0, 1)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        dar_mu_t_beta ~ Exponential(1)
+        y ~ Normal(mu, dar_mu_t_beta)
     end)
     term = only(t for t in only(plan.predictors).terms if t.kind === :dar)
     @test term.options.beta == :dar_mu_t_beta_2
@@ -2564,9 +2560,8 @@ end
     # Generated names disambiguate against user parameters.
     brmi = @brm df begin
         mu ~ 1 + gp(x)
-        rho_gp ~ Normal(0, 1)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        rho_gp ~ Exponential(1)
+        y ~ Normal(mu, rho_gp)
     end
     plan = BRM._brm_rk_plan(brmi)
     term = only(t for t in only(plan.predictors).terms if t.kind === :gp)
@@ -2710,9 +2705,8 @@ end
     # Generated ids disambiguate against user parameters.
     brmi = @brm df begin
         mu ~ 1 + hsgp(x; k=4)
-        hsgp_x ~ Normal(0, 1)
-        s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        hsgp_x ~ Exponential(1)
+        y ~ Normal(mu, hsgp_x)
     end
     plan = BRM._brm_rk_plan(brmi)
     term = only(t for t in only(plan.predictors).terms if t.kind === :hsgp)
