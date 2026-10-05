@@ -385,6 +385,10 @@ function _rk_needs_value_plan(program, observations)
         # A categorical response owns fitted level coding and a whole simplex;
         # it is not a scalar response merely because it has no formula location.
         head === Categorical && continue
+        # The joint family consumes one mean per outcome and a whole factor.
+        # Its constructor is a function, but it must use joint row lowering,
+        # rather than scalar broadcasting through the caller-owned value route.
+        head === MvNormalCholesky && continue
         # Caller-owned scalar RHS constructors use the ordinary value/source
         # protocol. Their sampled parents need no synthetic formula predictor.
         if head !== nothing && head !== LocationScale &&

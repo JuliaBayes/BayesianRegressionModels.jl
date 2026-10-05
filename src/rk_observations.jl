@@ -106,8 +106,13 @@ function _rk_held_out_selection(brmi, held_out)
 end
 
 _rk_emitted_observation_name(lhs::Symbol) = lhs
-_rk_emitted_observation_name(lhs::Expr) =
-    lhs.head === :ref ? _rk_emitted_observation_name(first(lhs.args)) : nothing
+function _rk_emitted_observation_name(lhs::Expr)
+    # A joint `[y1, y2]` target retains the identity of its lead original
+    # response column; it must root the complete fitted joint likelihood.
+    lhs.head in (:ref, :vect) && !isempty(lhs.args) &&
+        return _rk_emitted_observation_name(first(lhs.args))
+    nothing
+end
 _rk_emitted_observation_name(_) = nothing
 
 function _rk_source_symbols!(names, value)
