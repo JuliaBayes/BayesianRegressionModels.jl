@@ -319,7 +319,11 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
     rho = shared ? only(rhos) : Expr(:vect, rhos...)
     sigma, z = _rk_block_local!(block, :sigma), _rk_block_local!(block, :z)
     push!(block.statements, Expr(:call, :~, sigma, sigma_prior))
-    push!(block.statements, Expr(:call, :.~, Expr(:ref, z, Expr(:call, :axes, P, 2)),
+    # A basis over a model-derived axis is a graph value, so binding cannot
+    # read its column extent; that extent is the formula's basis count.
+    extent = get(options, :latent, false) ?
+        Expr(:call, :(:), 1, prod(options.k)) : Expr(:call, :axes, P, 2)
+    push!(block.statements, Expr(:call, :.~, Expr(:ref, z, extent),
         _rk_ast_dotted(:Normal, 0, 1)))
     value = _rk_block_local!(block, :value)
     push!(block.statements, Expr(:(=), value, periodic ?

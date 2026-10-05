@@ -1,5 +1,6 @@
 # Numerical HSGP source is authored graph data. Fixed domain fits are formula
-# constants; automatic fits are computed from the current bound raw axes.
+# constants; automatic fits are computed from the current bound raw axes. A
+# model-derived axis always has fixed fits and is read from its graph value.
 # Basis and spectral arithmetic never cross an ordinary BRM helper boundary.
 function _rk_ast_graph_definition(name, arguments, body)
     Expr(:macrocall, Expr(:., :ReactiveKernels, QuoteNode(Symbol("@kernel"))),
@@ -57,7 +58,29 @@ function _rk_ast_hsgp_basis_graph!(definitions, term, taken, PHI, omega2, floor)
         [row_values..., :frequencies, :widths, :centers],
         Expr(:block, :(xs = $(Expr(:tuple, row_values...))), :(values = $inner), :values))
     push!(body.args, :(basis_rows = $outer))
-    push!(body.args, :(PHI = stack(basis_rows; dims=1)))
+    if get(options, :orthogonal, nothing) === :linear
+        # `orthogonal_to=:linear` (one axis, by preparation): center every
+        # basis column and project out the centered axis, column by column,
+        # from the current axis values — the law of SB's in-graph
+        # `brm_hsgp_orthogonalize_linear`, including its degenerate-axis guard.
+        x = only(inputs)
+        push!(body.args, :(raw_basis = stack(basis_rows; dims=1)))
+        push!(body.args, :(axis_centered = $x .- sum($x) / length($x)))
+        push!(body.args, :(axis_ss = sum(axis_centered .^ 2)))
+        column = _rk_ast_graph_plate([:(1:$B), :(Ref(raw_basis)),
+                :(Ref(axis_centered)), :(Ref(axis_ss))],
+            [:b, :raw_basis, :axis_centered, :axis_ss], Base.remove_linenums!(quote
+                phi = raw_basis[:, b]
+                centered = phi .- sum(phi) / length(phi)
+                axis_ss > 1e-12 ?
+                    centered .- axis_centered .*
+                        (sum(axis_centered .* centered) / axis_ss) : centered
+            end))
+        push!(body.args, :(basis_columns = $column))
+        push!(body.args, :(PHI = stack(basis_columns; dims=2)))
+    else
+        push!(body.args, :(PHI = stack(basis_rows; dims=1)))
+    end
     push!(body.args, :(rho_floor = $(options.iso ?
         Expr(:call, :max, floors...) : Expr(:vect, floors...))))
     push!(body.args, :(basis_matrix() = PHI))

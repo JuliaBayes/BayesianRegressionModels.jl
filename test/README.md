@@ -109,6 +109,16 @@ an explicit transformed-coefficient prior without completion. Run
 `julia --project=test test/rk_modeled_transform_predictors.jl`; trailing filters
 select the standalone blocks. It uses the same native closure listed above.
 
+`rk_modeled_hsgp_axes.jl` checks HSGP terms over model-derived axes (an
+assignment such as `x = exp(eta)` and a log-link predictor) with a fixed
+`domain=`, and linear orthogonalization on model-derived and raw axes. The RK
+graph evaluates the basis, centering and projection from the current axis
+values. It checks the actual built graph intermediates, the emitted basis
+law at fresh axes, independent normalized densities, every ordinary Reverse
+coordinate, compiled same-model Stan, location and pointwise queries, row
+permutations, artifact replay and complete printed-source replay. Run
+`julia --project=test test/rk_modeled_hsgp_axes.jl`.
+
 `missing_joint_covariates.jl` checks the native correlated
 `mi([x, z]) ~ MvNormalCholesky(...)` block. Independent normalized density,
 all-coordinate gradient and pointwise likelihood oracles cover all four
