@@ -51,7 +51,7 @@ const PINS = [
     ("MutatingFunctions", "https://github.com/nsiccha/MutatingFunctions.jl.git", "4fc41b1c7b774133ceaacc4ff3c34c67b15b87b2"),  # main
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "121de3194f02044e00bac0d11019a93458ddb63a"),  # main
     ("TreeArrays",        "https://github.com/nsiccha/TreeArrays.jl.git",        "c317cc003fc41c2d933c27dc80799141eebd434e"),  # main
-    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "65cabefda5a9345993c7e0343739e9f8e363611f"),  # devibe: published caller-dimension substitution for nested ragged helpers; retains mixed derived-record and empty-index fixes
+    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "e355994384d44b86108105264ae3e34e0f2a0625"),  # devibe: ragged-plate typing on top of the caller-dimension substitution for nested ragged helpers; retains mixed derived-record and empty-index fixes
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     # 0194dce (2026-09-27, dev): WindowSelectionPlan (WarmupHMC-held evidence)
     # and the controls interface for custom reparametrizers,
@@ -61,7 +61,7 @@ const PINS = [
     # Current plain-function/array PPL surface, with data-only declaration inputs
     # retained before predictor inlining (computed membership axes; 606d76d0),
     # plus published live matrices (1t1v8zo) and callable array cells (0mr4zu5).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "3bdbfbbbb1c82caf4acf7b6ecb5fa28e3a089c58"),  # main: transparent graph composition plus published ordinary fused-broadcast Reverse repair; 1xtxbw3
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "aed7fe8e1591a5439ef719e9f582e227d225134f"),  # main: public recipe_kind/recipe_inventory structure inspection (1jnqeuv); contains the fused-broadcast Reverse repair (1xtxbw3)
 ]
 
 function main()
