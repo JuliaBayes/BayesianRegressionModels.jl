@@ -161,6 +161,14 @@ function rkppl_model end
 # ordinary functions or numerical graphs, not submodels: statistical blocks
 # that allocate parameters are generated per block (see `_rk_ast_block_call!`).
 const _BRM_STATISTICAL_VALUES = (
+    brm_multinomial_scores = :(
+brm_multinomial_scores(count_columns, trials, probabilities) = begin
+    counts = hcat(count_columns...)
+    totals = trials isa Integer ? fill(trials, size(counts, 1)) : trials
+    pointwise = BayesianRegressionModels.brm_multinomial_lpmfs(counts, probabilities, totals)
+    return pointwise
+end),
+
     brm_covariate_mean = :(
 brm_covariate_mean(values) = begin
     mean = BayesianRegressionModels._brm_fit_mean_numeric(

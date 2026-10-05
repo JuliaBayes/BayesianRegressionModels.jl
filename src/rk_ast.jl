@@ -815,6 +815,27 @@ function _rk_ast_response_stmt(response::_RKLikelihoodSpec,
         _rk_ast_response_dist(response, leaf, fused_heads))
 end
 
+# Count columns are graph values, so a row likelihood cannot require them to
+# arrive as precomputed bound data. The shared normalized BRM density computes
+# pointwise scores; the ordinary scoring adapter reads those scores unchanged.
+function _rk_ast_multinomial_response_stmt!(definitions, statements, taken,
+        response, rename)
+    response.evidence.kind === :none || error(
+        "RK backend: multinomial count rows do not support response evidence modifiers")
+    columns = Expr(:tuple, response.response, response.count_columns...)
+    probabilities = get(rename, response.predictor, response.predictor)
+    scores = _rk_ast_fresh_name(string(response.response, "_multinomial_scores"), taken)
+    expression = _rk_ast_statistical_call!(definitions, taken, :brm_multinomial_scores,
+        columns, response.trials, probabilities; kernel=true)
+    response.weights === nothing || (expression = Expr(:call, :.*, expression, response.weights))
+    push!(statements, Expr(:(=), scores, expression))
+    reader = _rk_ast_fresh_name("brm_logdensity_value", taken)
+    push!(definitions, :(function $reader(observed, logdensity)
+        return logdensity
+    end))
+    Expr(:call, :.~, response.response, _rk_ast_dotted(:LogDensity, reader, scores))
+end
+
 _rk_ast_observed_slice(value, jobs, rows) = value
 _rk_ast_observed_slice(value::Symbol, jobs, rows) =
     value in rows ? Expr(:ref, value, jobs) : value
@@ -1328,6 +1349,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     end
     predictor_link = Dict(spec.name => spec.link for spec in plan.predictors)
     for response in plan.responses
+        if response.family === :multinomial
+            push!(stmts, _rk_ast_multinomial_response_stmt!(defs, stmts, taken, response, rename))
+            continue
+        end
         if response.family === :mvnormal_cholesky
             push!(stmts, _rk_ast_joint_response(response, rename))
             continue
