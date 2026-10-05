@@ -1912,7 +1912,7 @@ end
     @test term.options.beta == :dar_mu_t_beta_2
 end
 
-@stestset "fail closed: SB long tail (simplex)" begin
+@stestset "unused simplex prior is pruned while fitted scalar scales stay closed" begin
     # `mo1(c)` used to fail here; it plans now (thin-layer monotonic
     # surface landed, covered in "monotonic plan shape"). `dar(t)` used to
     # fail here too; it plans now (thin-layer dar surface, covered in
@@ -1922,13 +1922,20 @@ end
     # slice landed, covered in "LKJ factor + joint plan shape"). `me`
     # plans now as well (thin-layer plate-vector slice landed, covered
     # in "me plan shape").
-    # Unreferenced simplex-valued parameter declaration stays closed
-    # (response-linked simplexes are the categorical lane's open shape).
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    # Unreferenced declarations do not become fitted coordinates.
+    # Response-linked simplexes remain the categorical lane's open shape.
+    plan = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
         s ~ Dirichlet(3, 1.0)
         sigma ~ Exponential(1)
         y ~ Normal(mu, sigma)
+    end)
+    @test [p.name for p in plan.parameters] == [:sigma]
+    @test isempty(plan.vector_parameters)
+    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + x
+        s ~ Dirichlet(3, 1.0)
+        y ~ Normal(mu, s)
     end)
 end
 
