@@ -543,16 +543,18 @@ end
 
 @stestset "prior vocab v1: sampled splices" begin
     # New sampled heads splice generically; StudentT arrives in Stan
-    # order; Uniform carries literal bounds.
+    # order; Uniform carries literal bounds. Each declaration feeds the
+    # response: independent unused priors are generated, not fitted.
     brmi = @brm df begin
         mu ~ 1 + x
         a ~ Laplace(0, 2)
         t ~ LocationScale(0, 2, TDist(4))
         u ~ Uniform(0.5, 1.5)
         s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        fitted_location = mu + a + t + u
+        y ~ Normal(fitted_location, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
     @test Expr(:call, :~, :a, Expr(:call, :Laplace, 0.0, 2.0)) in
         prog.main.args
     @test Expr(:call, :~, :t, Expr(:call, :StudentT, 4.0, 0.0, 2.0)) in
@@ -567,9 +569,10 @@ end
         hn ~ truncated(Normal(0, 2), 0, Inf)
         hc ~ truncated(Cauchy(0, 2), 0, Inf)
         s ~ Exponential(1)
-        y ~ Normal(mu, s)
+        fitted_location = mu + h1 + hn + hc
+        y ~ Normal(fitted_location, s)
     end
-    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
+    prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
     @test Expr(:call, :~, :h1, Expr(:call, :truncated,
         Expr(:call, :Logistic, 0.0, 1.0), 0.0, Inf)) in prog.main.args
     @test Expr(:call, :~, :hn, Expr(:call, :HalfNormal, 2.0)) in
