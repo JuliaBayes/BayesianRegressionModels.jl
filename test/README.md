@@ -18,6 +18,12 @@ differentiates with Enzyme only — every gradient in this suite goes through
 so there is nothing here to work around; do not add it back to make a new
 gradient site easier.
 
+`kernel_ragged_broadcast.jl` checks Stan source emission and stanc acceptance
+for modeled secondary-axis arguments in plain and nested dotted calls. It
+covers interleaved rows, shared random effects, empty groups, raw-data controls
+and preservation of field and keyword names. Run it with
+`julia --project=. test/kernel_ragged_broadcast.jl` or the test environment above.
+
 ## Description PDF rendering
 
 `description_tex.jl` checks Student-t sampling equations for standard, affine,
