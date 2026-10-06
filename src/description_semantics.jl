@@ -29,9 +29,12 @@ _brmd_children!(_nodes, _x) = nothing
 _brmd_children!(nodes, xs::Tuple) = foreach(x -> _brmd_children!(nodes, x), xs)
 _brmd_children!(nodes, xs::NamedTuple) = _brmd_children!(nodes, values(xs))
 
-function _brmd_component(env, id, kind, callable, args, kwargs=NamedTuple(); outputs=env.outputs,extra_children=())
+# `argument_children=false` is for a node whose extra children already own
+# every argument subtree (a coordinatewise vector prior), avoiding duplicates.
+function _brmd_component(env, id, kind, callable, args, kwargs=NamedTuple(); outputs=env.outputs,extra_children=(),argument_children=true)
     BRMDescriptionComponent(id, kind, callable, args, kwargs, env.axes,
-        outputs, env.priors, env.constants, (_brmd_children((args, values(kwargs)))...,extra_children...),
+        outputs, env.priors, env.constants,
+        (_brmd_children(argument_children ? (args, values(kwargs)) : values(kwargs))...,extra_children...),
         merge(env.provenance, (; path=id)), env.notation, env.bindings)
 end
 
@@ -94,7 +97,27 @@ function _brmd_value(x::ExprColumn, env, id)
             end
         end
     end
-    _brmd_component(env, id, :call, getf(x), args, kwargs;extra_children=included)
+    coordinates=_brmd_vector_prior_coordinates(env,getf(x),args,id)
+    _brmd_component(env, id, :call, getf(x), args, kwargs;extra_children=(included...,coordinates...),
+        argument_children=isempty(coordinates))
+end
+
+# A BRM-generated vector prior is a product of per-coordinate scalar priors.
+# Each coordinate is its own child, bound to its actual family callable, so a
+# custom family stays an explicit gap instead of being covered by its vector.
+_brmd_vector_prior_coordinates(_env,_f,_args,_id)=()
+function _brmd_vector_prior_coordinates(env,f::StanBlocks.ValueFamily,args,id)
+    records=_sb_vector_prior_coordinates(f)
+    isnothing(records) && return ()
+    sum(r->r.arguments,records)==length(args) ||
+        error("description: vector prior $(f.label) has $(length(args)) arguments for coordinates needing $(sum(r->r.arguments,records))")
+    offset=0
+    Tuple(begin
+        coordinate=args[offset+1:offset+r.arguments]
+        offset+=r.arguments
+        bounds=(; (k=>v for (k,v) in pairs((;lower=r.lower,upper=r.upper)) if !isnothing(v))...)
+        _brmd_component(env,(id...,:coordinate,i),:call,r.family,coordinate,bounds)
+    end for (i,r) in enumerate(records))
 end
 
 function _brmd_included_model(env,model,kwargs,id,path)

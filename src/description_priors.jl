@@ -37,11 +37,19 @@ end
 
 function _brmd_population_priors!(priors,d,anchors,notation)
     overrides = _sb_effect_prior_overrides(d.plan.parent; frozen_preproc=d.plan.preproc,provenance=true)
+    totals = Dict(t.binding.logical => t for t in _brmd_total_bindings(d))
     for entry in _brm_population_effect_entries(d.plan.parent)
-        labels = Tuple(label for output in d.outputs
-                       if output.declaration !== nothing && output.declaration.target === entry.block
-                       && output.labels !== nothing for label in output.labels)
-        labels = Tuple(unique(labels))
+        total = get(totals,entry.logical,nothing)
+        # Selector settings follow the complete design order. An exact-total
+        # predictor emits only its remaining columns, so its labels come from
+        # the emitter's recorded design rather than the population output.
+        labels = if isnothing(total)
+            Tuple(unique(Tuple(label for output in d.outputs
+                if output.declaration !== nothing && output.declaration.target === entry.block
+                && output.labels !== nothing for label in output.labels)))
+        else
+            total.binding.design_labels
+        end
         settings = _sb_pop_effect_overrides(overrides,entry.logical)
         binding=get(d.plan.bindings,entry.block,nothing)
         scheme=isnothing(binding) ? (;kind=:ordinary) : get(binding,:prior_scheme,(;kind=:ordinary))
@@ -62,6 +70,10 @@ function _brmd_population_priors!(priors,d,anchors,notation)
                     (:allocation,entry.logical,:population_scale,label)))
                 source=(;kind=:conditional,allocation=(:allocation,entry.logical),share=scheme.spec.share_idx[i])
             end
+            # The declared prior still defines an absorbed coefficient; the
+            # exact-total density integrates it instead of sampling it.
+            !isnothing(total) && i in total.binding.absorbed &&
+                (source=merge(source,(;integrated=(:total_effect,entry.logical))))
             push!(priors,_brmd_prior(d,(:population,entry.logical,label),expression,
                 _brmd_support(getf(expression)),source,anchors,notation))
         end
@@ -119,11 +131,53 @@ function _brmd_ranef_metadata(d)
             correlated=block.n_terms > 1,
             shared=!isnothing(block.id)))
     end
+    # Exact totals replace one independent block per column. Each column keeps
+    # the logical identity of the conventional block it replaces: its declared
+    # `|ID|`, otherwise its position in emission order.
+    index = length(result)
+    for t in _brmd_total_bindings(d)
+        b = t.binding.total
+        levels = d.plan.preproc[b.group_index].const_.levels
+        for (k,label) in enumerate(b.columns)
+            index += 1
+            id = t.binding.column_ids[k]
+            key = (:random_effect, isnothing(id) ? (:independent,index) : id, b.group)
+            block = (; binding=t.name, family=:brm_total, group=b.group, id, by=nothing,
+                levels, n_terms=1, n_groups=d.plan.data[b.group_count], noncentered=false)
+            push!(result,(; key,block,margins=((;predictor=b.predictor,coefficient=label),),
+                configuration=nothing,declaration=t.declaration,correlated=false,
+                shared=!isnothing(id),total=(;binding=t.binding,column=k)))
+        end
+    end
+    Tuple(result)
+end
+
+"""Exact-total bindings in emission order, with their generative declaration."""
+function _brmd_total_bindings(d)
+    result = NamedTuple[]
+    for declaration in d.plan.declarations
+        isempty(declaration.context) || continue
+        binding = get(d.plan.bindings,declaration.target,nothing)
+        (isnothing(binding) || binding.role !== :total_effect) && continue
+        haskey(binding,:scale_priors) || error("description: exact-total binding `$(declaration.target)` lacks its emitted scale priors; rebuild the SBBRMI")
+        push!(result,(; name=declaration.target,binding,declaration))
+    end
     Tuple(result)
 end
 
 function _brmd_ranef_priors!(priors,d,groups,anchors,notation)
     for group in groups
+        if group.block.family === :brm_total
+            # The sampled SD is the emitted scale prior itself; deviations are
+            # not sampled (the exact-total density is inventoried separately).
+            k = group.total.column
+            expression = something(group.total.binding.scale_priors[k],_brmd_default_normal())
+            push!(priors,_brmd_prior(d,(group.key...,:sd,1),expression,
+                merge(_brmd_support(getf(expression)),(; lower=0.0)),
+                (; kind=group.total.binding.scale_configured[k] ? :selector : :default,
+                   margin=only(group.margins),representation=:exact_total),anchors,notation))
+            continue
+        end
         cfg = group.configuration
         if !isnothing(group.block.by)
             site=group.declaration
@@ -230,16 +284,54 @@ function _brmd_submodel_priors!(priors,d,model,values,path,anchors,notation,stac
     end
 end
 
+# The joint density of sampled exact totals: their columns' SDs, the design
+# map A and each absorbed coefficient's prior location and precision.
+function _brmd_total_priors!(priors,d,groups,anchors,notation)
+    for t in _brmd_total_bindings(d)
+        b = t.binding.total
+        sds = Tuple(BRMDescriptionReference(:sd,:scalar,(g.key...,:sd,1)) for g in groups
+            if get(g,:total,nothing) !== nothing && g.block.binding === t.name)
+        keywords = isempty(b.mixture) ? NamedTuple() :
+            (; scale_mixture=BRMDescriptionReference(:scale_mixture,:scalar,(:total_effect,b.predictor,:scale_mixture)),
+               mixture_coefficients=Tuple(b.mixture))
+        density = ExprColumn(brm_total,sds,b.A,b.location,b.precision;keywords...)
+        push!(priors,_brmd_prior(d,(:total_effect,b.predictor,:totals),density,NamedTuple(),
+            (; kind=:conditional,representation=:exact_total,dimension=(d.plan.data[b.group_count],length(b.columns)),
+               integrated=Tuple((:population,b.predictor,label) for label in b.population_columns)),anchors,notation))
+        isnothing(b.mixture_name) && continue
+        mixture = only(x for x in d.plan.declarations if x.target === b.mixture_name && isempty(x.context))
+        push!(priors,_brmd_declared_prior(d,(:total_effect,b.predictor,:scale_mixture),mixture,anchors,notation))
+    end
+end
+
+# A top-level declaration's own family and keywords, with data substituted.
+function _brmd_declared_prior(d,logical,declaration,anchors,notation)
+    f = _brmd_binding(declaration.family,d.plan.model.mod)
+    raw = Expr(:call,declaration.family,Expr(:parameters,
+        (Expr(:kw,k,_brmd_substitute(v,d.plan.data)) for (k,v) in pairs(declaration.keywords))...),
+        (_brmd_substitute(a,d.plan.data) for a in declaration.arguments)...)
+    _brmd_prior(d,logical,raw,merge(_brmd_support(f),declaration.constraints),
+        (; kind=:declaration, family=f),anchors,notation)
+end
+
 function _brmd_priors(d, anchors, notation;groups=_brmd_ranef_metadata(d))
     priors = BRMPriorDescription[]
     _brmd_population_priors!(priors,d,anchors,notation)
     _brmd_ranef_priors!(priors,d,groups,anchors,notation)
+    _brmd_total_priors!(priors,d,groups,anchors,notation)
     categories=Set(cat.emitted for entry in _brm_population_effect_entries(d.plan.parent)
         for cat in _brm_categorical_effect_entries(d,entry.logical,entry.link))
+    # Exact-total carriers are inventoried semantically above.
+    total_carriers=Set{Symbol}()
+    for t in _brmd_total_bindings(d)
+        push!(total_carriers,t.name,t.binding.scale)
+        isnothing(t.binding.total.mixture_name) || push!(total_carriers,t.binding.total.mixture_name)
+    end
     for declaration in d.plan.declarations
         role = _brm_declaration_role(declaration,d.plan.bindings)
         role in (:population_effect,:random_effect) && continue
         declaration.target in categories && continue
+        isempty(declaration.context) && declaration.target in total_carriers && continue
         # A plate declares a grouped computation, not a distribution on its
         # returned value. Its cell priors are already separate declarations.
         declaration.family === :plate && continue
@@ -255,11 +347,7 @@ function _brmd_priors(d, anchors, notation;groups=_brmd_ranef_metadata(d))
                 o.declaration.target===declaration.target &&
                 o.declaration.context==declaration.context,d.outputs)
             declaration.role === :prior || sampled || continue
-            raw = Expr(:call,declaration.family,Expr(:parameters,
-                (Expr(:kw,k,_brmd_substitute(v,d.plan.data)) for (k,v) in pairs(declaration.keywords))...),
-                (_brmd_substitute(a,d.plan.data) for a in declaration.arguments)...)
-            push!(priors,_brmd_prior(d,logical,raw,merge(_brmd_support(f),declaration.constraints),
-                (; kind=:declaration, family=f),anchors,notation))
+            push!(priors,_brmd_declared_prior(d,logical,declaration,anchors,notation))
         end
     end
     Tuple(priors), groups

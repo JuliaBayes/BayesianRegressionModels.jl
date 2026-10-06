@@ -70,6 +70,20 @@ This explicit PDF mode requires Quarto and a working LuaLaTeX installation;
 render failures propagate. Outputs use a temporary directory, or the directory
 specified by `BRM_DESCRIPTION_TEX_OUTPUT`.
 
+## Exact-total descriptions
+
+`description_totals.jl` describes each synthetic model under the default
+automatic exact totals and under `total_groups=()`. Shared logical prior
+identities must carry identical families, arguments and support in both
+programs, and the totals description must be complete. It also covers remaining
+population columns, independent total columns, Student-t and flat population
+priors, a kernel cell, coordinatewise generated vector priors with a consumer
+family gap, and the retained sum-to-zero gap. It runs under the root project:
+
+```sh
+julia --startup-file=no --project=. test/description_totals.jl
+```
+
 ## Native GP and dual HSGP adoption
 
 `rk_gp_covariance.jl` checks BRM-owned squared-exponential and periodic

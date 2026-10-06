@@ -87,6 +87,11 @@ function _sb_insert_indexed_priors(base::StanBlocks.SlicModel,
 end
 
 const _SB_VECTOR_PRIOR_CACHE = Dict{Tuple{String,Tuple},StanBlocks.ValueFamily}()
+# Coordinate semantics of every generated vector-prior family, keyed by the
+# family object: the actual scalar family, its argument count and its numeric
+# bounds per coordinate. Descriptions read this record under `_SB_GEN_LOCK`
+# instead of parsing a generated name or body.
+const _SB_VECTOR_PRIOR_COORDINATES = IdDict{StanBlocks.ValueFamily,Tuple}()
 const _SB_MIXTURE_CACHE = Dict{String,StanBlocks.ValueFamily}()
 # Synchronize every cache lookup and publication. Generated families own their
 # syntax and are read-only after construction; they install no Julia bindings
@@ -276,14 +281,23 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
             push!(support, :lower => first(lowers))
         !positive && all(!isnothing, uppers) && allequal(uppers) &&
             push!(support, :upper => first(uppers))
-        StanBlocks.ValueFamily(stem, :lpdf,
+        generated = StanBlocks.ValueFamily(stem, :lpdf,
             _sb_anchor_slic_macrocalls!(density_def),
             _sb_anchor_slic_macrocalls!(pointwise_def),
             _sb_anchor_slic_macrocalls!(rng_def), home; support=(; support...))
+        _SB_VECTOR_PRIOR_COORDINATES[generated] = Tuple(
+            (; family=selectors[i], arguments=length(c.names), lower=c.lower, upper=c.upper)
+            for (i, c) in enumerate(calls))
+        generated
         end
     end
     family, actuals
 end
+
+"""Coordinate records of a BRM-generated vector-prior family, or `nothing`."""
+_sb_vector_prior_coordinates(family) = nothing
+_sb_vector_prior_coordinates(family::StanBlocks.ValueFamily) =
+    lock(() -> get(_SB_VECTOR_PRIOR_COORDINATES, family, nothing), _SB_GEN_LOCK)
 
 function _sb_vector_priors(base::StanBlocks.SlicModel, target::Symbol, priors;
                             mod::Module=base.mod)

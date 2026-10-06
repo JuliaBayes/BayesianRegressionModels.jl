@@ -47,6 +47,10 @@ function brm_description_math(c::BRMDescriptionContext,x::BRMDescriptionReferenc
         return _brmd_allocation_scale_math(x.logical)
     x.axis===:covariance && x.logical isa Tuple && last(x.logical)===:cholesky_scale &&
         return "C_{"*_brmd_block_math(c,x.logical[1:end-1])*"}"
+    # A block SD margin, as in D=diag(SD); exact-total blocks have one margin.
+    x.logical isa Tuple && first(x.logical)===:random_effect && length(x.logical)>=3 &&
+        x.logical[end-1]===:sd && return "\\mathrm{SD}_{"*_brmd_block_math(c,x.logical[1:end-2])*
+            (x.logical[end]==1 ? "" : ","*string(x.logical[end]))*"}"
     brm_description_symbol(c,x.name)
 end
 
@@ -166,6 +170,7 @@ end
 # constructor argument is an SD; the conventional Gaussian equation uses variance.
 _brmd_law(_f) = nothing
 _brmd_law(::_BRMDFlatPrior) = :improper_flat
+_brmd_law(::Type{<:Flat}) = :improper_flat
 _brmd_law(::Type{<:Normal}) = :normal_sd
 _brmd_law(::Type{<:Exponential}) = :exponential_scale
 _brmd_law(::Type{<:LogNormal}) = :lognormal_sd
@@ -187,6 +192,7 @@ _brmd_law(::Type{<:Weibull}) = :weibull
 _brmd_law(::Type{<:Uniform}) = :uniform
 _brmd_law(::typeof(MvNormalCholesky)) = :mvnormal_cholesky
 _brmd_law(::typeof(StanBlocks.stan.builtin.dummy)) = :allocation_only
+_brmd_law(::typeof(brm_total)) = :exact_total
 # These are exact producer-owned StanBlocks bindings, never a name heuristic
 # applied to arbitrary user callables.
 for (name,law) in ((:normal,:normal_sd),(:std_normal,:standard_normal),
@@ -219,6 +225,9 @@ _brmd_law_math(::Val{:uniform},a) = "\\operatorname{Uniform}(" * (isempty(a) ? "
 _brmd_law_math(::Val{:student_t_standard},a) = "t_{"*only(a)*"}(0,1)"
 _brmd_law_math(::Val{:student_t_location_scale},a) = "t_{"*a[1]*"}("*join(a[2:3],",")*")"
 _brmd_law_math(::Val{:mvnormal_cholesky},a) = "\\mathcal N(" * a[1] * "," * a[2] * a[2] * "^{\\mathsf T})"
+# The absorbed coefficients' prior p(beta) is integrated out exactly.
+_brmd_law_math(::Val{:exact_total},a) = "\\int\\prod_{i}\\mathcal N\\left(\\mathbf t_{i}\\mid A\\boldsymbol\\beta,\\operatorname{diag}\\left("*
+    a[1]*"\\right)^{2}\\right)\\,p(\\boldsymbol\\beta)\\,d\\boldsymbol\\beta"
 _brmd_law_math(::Val{L},a) where L = "\\operatorname{" * _brmd_escape(L) * "}(" * join(a,",") * ")"
 _brmd_law_prose(::Val{:normal_sd}) = "Gaussian distribution; the second argument is the residual standard deviation."
 _brmd_law_prose(::Val{:standard_normal}) = "Standard Gaussian distribution."
@@ -233,11 +242,30 @@ _brmd_law_prose(::Val{:student_t_standard}) = "Standard Student-t distribution w
 _brmd_law_prose(::Val{:student_t_location_scale}) = "Student-t distribution with degrees of freedom, location and scale in that order; scale is not its standard deviation."
 _brmd_law_prose(::Val{:affine}) = "Affine location-scale distribution of the declared base family."
 _brmd_law_prose(::Val{:mvnormal_cholesky}) = "Multivariate Gaussian distribution; the second argument is the lower covariance Cholesky factor, whose product with its transpose gives the covariance."
+_brmd_law_prose(::Val{:exact_total}) = "Exact-total density: group totals are Gaussian around the absorbed population part, with that population part integrated out under its declared prior."
 _brmd_law_prose(::Val{L}) where L = "$(L) distribution with the declared arguments."
 
+# Children `(id..., :coordinate, i)` of a BRM-generated vector prior.
+_brmd_coordinates(x::BRMDescriptionComponent) = Tuple(child for child in x.children
+    if length(child.id)==length(x.id)+2 && child.id[1:length(x.id)]==x.id && child.id[end-1]===:coordinate)
+function _brmd_coordinate_math(c,x,coordinates)
+    support=x.callable isa StanBlocks.ValueFamily ? x.callable.support : NamedTuple()
+    parts=map(coordinates) do coordinate
+        law=_brmd_distribution_math(c,coordinate)
+        lower=get(coordinate.keywords,:lower,nothing); upper=get(coordinate.keywords,:upper,nothing)
+        lower==get(support,:lower,nothing) && upper==get(support,:upper,nothing) && return law
+        law*"\\ \\text{on}\\ ["*(isnothing(lower) ? "-\\infty" : brm_description_math(c,lower))*","*
+            (isnothing(upper) ? "\\infty" : brm_description_math(c,upper))*"]"
+    end
+    length(parts)==1 ? only(parts) : "\\left["*join(parts,";\\ ")*"\\right]"
+end
 function _brmd_distribution_math(c,x::BRMDescriptionComponent)
     law = _brmd_law(x.callable)
-    isnothing(law) && return brm_description_math(c,x)
+    if isnothing(law)
+        coordinates=_brmd_coordinates(x)
+        isempty(coordinates) || return _brmd_coordinate_math(c,x,coordinates)
+        return brm_description_math(c,x)
+    end
     law===:affine && return "\\operatorname{LocationScale}("*
         brm_description_math(c,x.arguments[1])*","*brm_description_math(c,x.arguments[2])*","*
         _brmd_distribution_math(c,x.arguments[3])*")"
@@ -341,6 +369,10 @@ for f in (+,-,*,/,^,exp,log,sqrt,logistic,log1pexp,abs,sum,cumsum,maximum,minimu
     @eval _brmd_builtin_call(::$(typeof(f)),c) = BRMDescriptionFragment(covers=(c.id,))
 end
 _brmd_builtin_call(::StanBlocks.SlicModel,c)=BRMDescriptionFragment(covers=(c.id,))
+# Only BRM-generated vector priors decompose; other value families stay gaps.
+_brmd_builtin_call(::StanBlocks.ValueFamily,c)=isempty(_brmd_coordinates(c)) ? nothing :
+    BRMDescriptionFragment(prose=("This vector prior is a product of independent per-coordinate priors. Each coordinate's actual family, arguments and bounds form a separately described component; the density applies on the declared support.",),
+        covers=(c.id,))
 function _brmd_builtin_call(::typeof(mm),c)
     normalized=c.keywords.normalize
     weights=c.keywords.weights
@@ -801,6 +833,7 @@ function _brmd_builtin_kind(::Val{:random_effect},c)
         (k.shared ? "The declared ID shares one covariance block across its predictors." : "This block is independent of separately declared blocks.") *
         (k.correlated ? " Its margins are correlated." : " It has no estimated correlation.")
     k.by===nothing || (prose*=" Covariance factors are separate for each declared stratum; s(i) is the fitted group-to-stratum map.")
+    haskey(k,:total) && (prose*=" These deviations are not sampled directly: the fit samples the exact group totals of `$(last(k.total))`, described separately, and recovers the deviations in generated quantities.")
     margins=Tuple(m for m in k.margins if m.predictor isa Symbol)
     design=Tuple("\\mathbf z_{"*_brmd_escape(owner)*","*id*",j}=["*
         join((m.predictor!==owner ? "0" : m.coefficient===:Intercept ? "1" : brm_description_symbol(c,m.coefficient)
@@ -809,10 +842,34 @@ function _brmd_builtin_kind(::Val{:random_effect},c)
     BRMDescriptionFragment(prose=(prose,),equations=("\\mathbf b_{"*id*",i}\\sim\\mathcal N_{"*string(k.n_terms)*"}(0,"*covariance*")",
         definition*",\\quad "*D*"=\\operatorname{diag}(\\mathrm{SD}_{"*subscript*"})",design...),covers=(c.id,))
 end
+_brmd_matrix_math(x::NamedTuple)=begin
+    rows,cols=x.size
+    "\\begin{bmatrix}"*join((join((string(x.values[r+(j-1)*rows]) for j in 1:cols),"&") for r in 1:rows),"\\\\")*"\\end{bmatrix}"
+end
+function _brmd_builtin_kind(::Val{:total_effect},c)
+    k=c.keywords
+    blocks=map(key->_brmd_block_math(c,key),k.blocks)
+    beta="\\boldsymbol\\beta="*"\\left["*join((_brmd_beta(c,label) for label in k.population_columns),",")*"\\right]^{\\mathsf T}"
+    deviations="\\mathbf b_{i}=\\left["*join(("\\mathbf b_{"*b*",i}" for b in blocks),",")*"\\right]^{\\mathsf T}"
+    sds="\\left["*join(("\\mathrm{SD}_{"*b*"}" for b in blocks),",")*"\\right]"
+    sd="\\operatorname{diag}\\left("*sds*"\\right)"
+    precision="\\operatorname{diag}(q)"*(isempty(k.mixture) ? "" : "\\operatorname{diag}(\\lambda)")
+    prose=String["`$(c.provenance.owner)` samples its `$(k.group)` group totals directly as exact total coefficients. The total of column k for group i is the population part (Aβ)ₖ plus the deviation of that column's random-effect block. The absorbed population coefficients β ($(join((string(l) for l in k.population_columns),", "))) keep their declared priors from the effective inventory and are integrated out exactly: the totals carry the marginal density and the posterior of totals and SDs is that of the conventional parameterization. β is recovered from its exact conditional Gaussian in generated quantities; m and q are the prior locations and precisions of β."]
+    isempty(k.mixture) || push!(prose,"Student-t population priors use their exact Gaussian scale-mixture representation: coefficient a has precision qₐλₐ with λₐ ~ Gamma(νₐ/2, νₐ/2), inventoried separately; coefficients without a mixture have λₐ = 1.")
+    any(iszero,k.precision) && push!(prose,"A coefficient with zero prior precision has an improper flat prior and is integrated against constant density.")
+    BRMDescriptionFragment(prose=Tuple(prose),equations=(
+        "\\mathbf t_{i}=A\\boldsymbol\\beta+\\mathbf b_{i},\\quad "*beta*",\\quad "*deviations,
+        "A="*_brmd_matrix_math(k.A)*",\\quad m="*brm_description_math(c,k.location)*",\\quad q="*brm_description_math(c,k.precision),
+        "p(\\mathbf t\\mid\\mathrm{SD})="*_brmd_law_math(Val(:exact_total),(sds,)),
+        "\\boldsymbol\\beta\\mid\\mathbf t\\sim\\mathcal N\\left(Q^{-1}h,Q^{-1}\\right),\\quad Q="*precision*"+J\\,A^{\\mathsf T}"*sd*"^{-2}A,\\quad h="*precision*"m+A^{\\mathsf T}"*sd*"^{-2}\\sum_{i=1}^{J}\\mathbf t_{i}"),
+        covers=(c.id,))
+end
 _brmd_builtin_kind(::Val{K},_c) where K = nothing
 
 function _brmd_notation(d,labels)
-    names=unique((d.columns..., (o.logical for o in d.outputs if o.logical !== nothing)...,
+    # An exact-total scale carrier is rendered as its blocks' SDs, never by name.
+    carriers=Set(t.binding.scale for t in _brmd_total_bindings(d))
+    names=unique((d.columns..., (o.logical for o in d.outputs if o.logical !== nothing && !(o.logical in carriers))...,
         sort!(collect(keys(labels));by=string)...))
     result=NamedTuple[]
     for name in names
@@ -875,7 +932,20 @@ function brm_description(d::BRMDescriptor; hooks=(),labels=Dict(),prior_anchors=
         kwargs=(; group=b.group,id=b.id,n_terms=b.n_terms,n_groups=b.n_groups,
             levels=_brmd_snapshot(b.levels),margins=group.margins,
             correlated=group.correlated,shared=group.shared,noncentered=b.noncentered,by=b.by)
+        haskey(group,:total) && (kwargs=merge(kwargs,(;total=(:total_effect,group.total.binding.logical))))
         push!(roots,_brmd_component(env,group.key,:random_effect,nothing,(),kwargs))
+    end
+    for t in _brmd_total_bindings(d)
+        b=t.binding.total
+        env=_brmd_environment(d,b.predictor,:total_effect,priors,constants,notation;groups)
+        carriers=(b.binding,b.scales,b.population,b.deviations)
+        outputs=Tuple((;name=o.name,logical=o.logical,role=o.role,kind=o.kind,
+            segments=_brmd_snapshot(o.segments)) for o in d.outputs if o.name in carriers)
+        kwargs=(; predictor=b.predictor,group=b.group,
+            blocks=Tuple(g.key for g in groups if haskey(g,:total) && g.block.binding===t.name),
+            columns=b.columns,population_columns=b.population_columns,A=_brmd_snapshot(b.A),
+            location=_brmd_snapshot(b.location),precision=_brmd_snapshot(b.precision),mixture=Tuple(b.mixture))
+        push!(roots,_brmd_component(env,(:total_effect,b.predictor),:total_effect,nothing,(),kwargs;outputs))
     end
     for prior in priors
         prior.distribution isa BRMDescriptionComponent && push!(roots,prior.distribution)
@@ -910,6 +980,12 @@ function brm_description(d::BRMDescriptor; hooks=(),labels=Dict(),prior_anchors=
 end
 brm_description(prepared::Union{SBBRMI,GenerativePlan};kwargs...) =
     brm_description(brm_descriptor(prepared);kwargs...)
+
+function _brmd_family_caption(x::BRMDescriptionComponent)
+    coordinates=_brmd_coordinates(x)
+    isempty(coordinates) && return "`"*string(_brmd_callable_name(x.callable))*"`"
+    "coordinatewise "*join(unique("`"*string(_brmd_callable_name(c.callable))*"`" for c in coordinates),", ")
+end
 
 function _brmd_prior_equation(p)
     c=p.distribution
@@ -958,7 +1034,7 @@ function brm_description_markdown(description::BRMDescription;prefix=nothing)
         println(io,"\nEffective priors:\n\n| Logical parameter | Distribution and support | Prior listing |\n| --- | --- | --- |")
         for (index,p) in enumerate(description.priors)
             label="P"*string(index)
-            family=p.distribution isa BRMDescriptionComponent ? "`"*string(_brmd_callable_name(p.distribution.callable))*"`" : "Declared prior"
+            family=p.distribution isa BRMDescriptionComponent ? _brmd_family_caption(p.distribution) : "Declared prior"
             link=isnothing(p.anchor) ? "" : "[prior listing]("*replace(p.anchor," "=>"%20")*")"
             println(io,"| <a id=\"",brm_description_prior_anchor(p;prefix),"\"></a>",label," | ",family,"; definition ",label," below | ",link," |")
         end
