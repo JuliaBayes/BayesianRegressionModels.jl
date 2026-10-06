@@ -15,6 +15,10 @@ name is gensym-ed). The two-argument form bakes `df` in and returns the
   for repeating the `~` row once per name. Each slot takes one ordinary
   sampling LHS; `[y1, y2] ~ ...` stays the joint multivariate response.
 - `lhs = rhs` — a literal binding (named intermediate).
+- `@plate for i in eachindex(x) ... end` — a group-local kernel cell. Reads
+  such as `x[i]` and `ragged(events, subject)[i]` are sliced per group,
+  `result[i] = ...` declares a model-scope output, and bare assignments remain
+  cell locals.
 - `ragged(y, group) ~ rhs` — group a flat observed response at the formula
   boundary, aligned to the `kernel(...)` result referenced by `rhs`.
 - `effect(lp, coefficient) ~ Normal(location, scale)` — an SBBRMI
@@ -509,7 +513,8 @@ begin
 end
 """); kwargs...)
 _brm(x::Expr; df=nothing) = begin
-    (x.head == :block || x.head == :(=) || isxcall(x, :~)) || error(
+    (x.head == :block || x.head == :(=) || isxcall(x, :~) ||
+     _is_brm_plate(x)) || error(
         "@brm: a standalone predictor fragment such as `@brm(1 + x)` is " *
         "not implemented. Use nested `@brm(1 + x)` inside an outer `@brm` " *
         "likelihood, or write a top-level `lhs ~ rhs` formula.")
@@ -578,6 +583,8 @@ lowered into [`@n`](@ref)/[`@x`](@ref) calls. Used internally by
 parse!(x; info) = x
 parse!(x::Expr; info) = if x.head == :block
     Expr(:block, parse!.(x.args; info)...)
+elseif _is_brm_plate(x)
+    parse!(_brm_plate_kernel(x); info)
 elseif x.head == :(=)
     lhs, rhs = x.args
     parselocals!(rhs; info, val=:nonlocal)
@@ -614,6 +621,186 @@ elseif isxcall(x, :~)
 else
     dump(x)
     error("Don't know how to handle parse!($x)!")
+end
+
+# ---- `@plate for` kernel-cell surface --------------------------------------
+#
+# BRM's annotated plate is intentionally a surface rewrite, not a second
+# implementation of grouped cells. It lowers to the already-authoritative
+# `target ~ kernel(positionals...) do slices... ... end` IR before `_x` sees
+# the formula. SBBRMI and RKBRMI therefore share every grouping, ragged-input,
+# omitted-outcome, capture, and cell-observation rule with the legacy spelling.
+#
+# The accepted subset is the group-local kernel shape rather than StanBlocks'
+# entire general annotated-loop language:
+#
+#     @plate for i in eachindex(t)
+#         loc[i] = cell(t[i], ragged(dose, dose_subject)[i], theta[i])
+#         y[i] ~ normal(loc[i], sigma)
+#     end
+#
+# An indexed read becomes one kernel positional and one cell parameter. An
+# indexed assignment becomes a named cell value; the final indexed assignment
+# is the collected kernel result. Bare assignments remain cell locals. This
+# retains the StanBlocks/RKPPL distinction between model-scope indexed outputs
+# and per-cell bare locals without asking either backend to learn new IR.
+_is_brm_plate(x) = Meta.isexpr(x, :macrocall) && !isempty(x.args) &&
+                   x.args[1] === Symbol("@plate")
+
+function _brm_plate_loop(x::Expr)
+    length(x.args) == 3 || error(
+        "@brm: `@plate` takes exactly `@plate for i in eachindex(x) ... end`")
+    loop = x.args[3]
+    Meta.isexpr(loop, :for) || error(
+        "@brm: `@plate` takes exactly `@plate for i in eachindex(x) ... end`")
+    binding = loop.args[1]
+    Meta.isexpr(binding, :(=), 2) && binding.args[1] isa Symbol || error(
+        "@brm: a kernel `@plate` takes one loop variable, `for i in ...`")
+    binding.args[1], binding.args[2], loop.args[2]
+end
+
+function _brm_plate_range_input(range)
+    Meta.isexpr(range, :call) || error(
+        "@brm: a kernel `@plate` range must be `eachindex(x)` or `axes(x, 1)`")
+    head = range.args[1]
+    if head === :eachindex && length(range.args) == 2
+        return range.args[2]
+    elseif head === :axes && length(range.args) == 3 && range.args[3] == 1
+        return range.args[2]
+    end
+    error("@brm: a kernel `@plate` range must be `eachindex(x)` or `axes(x, 1)`")
+end
+
+function _brm_plate_input_key(x)
+    x isa Symbol && return (:column, x)
+    if isxcall(x, :ragged) && length(x.args) == 3 &&
+       x.args[2] isa Symbol && x.args[3] isa Symbol
+        return (:ragged, x.args[2], x.args[3])
+    end
+    error(
+        "@brm: a kernel `@plate` slices formula names (`x[i]`) or secondary " *
+        "axes (`ragged(x, group)[i]`); got `$(repr(x))`")
+end
+
+_brm_plate_param(x::Symbol) = x
+_brm_plate_param(x::Expr) = x.args[2]::Symbol # validated by `_brm_plate_input_key`
+
+_brm_plate_indexed(x, i) = Meta.isexpr(x, :ref, 2) && x.args[2] === i
+
+function _brm_plate_outputs(body, i)
+    stmts = Meta.isexpr(body, :block) ? body.args : Any[body]
+    outputs = Symbol[]
+    for stmt in stmts
+        stmt isa LineNumberNode && continue
+        if Meta.isexpr(stmt, :(=), 2) && _brm_plate_indexed(stmt.args[1], i)
+            lhs = stmt.args[1].args[1]
+            lhs isa Symbol || error(
+                "@brm: an indexed `@plate` output must be `name[$i] = ...`; " *
+                "got `$(repr(stmt.args[1]))`")
+            lhs in outputs && error(
+                "@brm: kernel `@plate` output `$lhs[$i]` is assigned more than once")
+            push!(outputs, lhs)
+        end
+    end
+    isempty(outputs) && error(
+        "@brm: a kernel `@plate` needs an indexed deterministic output, " *
+        "for example `loc[$i] = ...`")
+    stmts, outputs
+end
+
+function _brm_plate_kernel(x::Expr)
+    i, range, body = _brm_plate_loop(x)
+    stmts, outputs = _brm_plate_outputs(body, i)
+    output_set = Set(outputs)
+
+    positionals = Any[]
+    params = Symbol[]
+    keys = Any[]
+    param_sources = Dict{Symbol,Any}()
+
+    function add_input(source)
+        key = _brm_plate_input_key(source)
+        found = findfirst(isequal(key), keys)
+        found === nothing || return params[found]
+        param = _brm_plate_param(source)
+        param in output_set && error(
+            "@brm: kernel `@plate` output `$param[$i]` also names a sliced input; " *
+            "use a distinct output name")
+        if haskey(param_sources, param)
+            error(
+                "@brm: kernel `@plate` inputs `$(repr(param_sources[param]))` and " *
+                "`$(repr(source))` would both bind cell name `$param`; rename one " *
+                "source before the plate")
+        end
+        push!(keys, key)
+        push!(positionals, source)
+        push!(params, param)
+        param_sources[param] = source
+        param
+    end
+
+    # The range anchor participates even when the body does not read it: it is
+    # the subject-count witness in the no-random-effects panel form.
+    add_input(_brm_plate_range_input(range))
+
+    function rewrite(ex)
+        ex === i && error(
+            "@brm: a kernel `@plate` loop index is structural; use it only in " *
+            "`x[$i]` or `ragged(x, group)[$i]` reads")
+        ex isa Expr || return ex
+        if _brm_plate_indexed(ex, i)
+            source = ex.args[1]
+            if source isa Symbol && source in output_set
+                return source
+            end
+            return add_input(source)
+        end
+        # A remaining reference with the loop variable as one of ITS OWN axes
+        # (`x[i, j]`) is a different slicing contract, not a kernel positional.
+        # Nested indexed lanes remain valid: `catalog[index[i]]` recursively
+        # becomes `catalog[index]`, with `index` registered as the positional.
+        if ex.head === :ref && any(a -> a === i, ex.args[2:end])
+            error(
+                "@brm: kernel `@plate` inputs use one cell slice `x[$i]`; got " *
+                "`$(repr(ex))`")
+        end
+        Expr(ex.head, map(rewrite, ex.args)...)
+    end
+
+    rewritten = Any[]
+    bare_bindings = Set{Symbol}()
+    for stmt in stmts
+        stmt isa LineNumberNode && (push!(rewritten, stmt); continue)
+        if Meta.isexpr(stmt, :(=), 2)
+            lhs, rhs = stmt.args
+            if lhs isa Symbol
+                push!(bare_bindings, lhs)
+                push!(rewritten, Expr(:(=), lhs, rewrite(rhs)))
+            elseif _brm_plate_indexed(lhs, i) && lhs.args[1] isa Symbol
+                push!(rewritten, Expr(:(=), lhs.args[1], rewrite(rhs)))
+            else
+                error(
+                    "@brm: a kernel `@plate` assignment binds a bare cell local " *
+                    "or `name[$i]`; got `$(repr(lhs))`")
+            end
+        elseif isxcall(stmt, :~)
+            push!(rewritten, Expr(:call, :~, rewrite(stmt.args[2]), rewrite(stmt.args[3])))
+        else
+            error(
+                "@brm: kernel `@plate` cells contain `=` assignments and `~` " *
+                "statements; got `$(repr(stmt))`")
+        end
+    end
+    collision = findfirst(p -> p in bare_bindings, params)
+    collision === nothing || error(
+        "@brm: kernel `@plate` cell local `$(params[collision])` shadows a " *
+        "sliced input of the same name")
+
+    target = last(outputs)
+    push!(rewritten, target)
+    lambda = Expr(:->, Expr(:tuple, params...), Expr(:block, rewritten...))
+    call = Expr(:call, :kernel, lambda, positionals...)
+    Expr(:call, :~, target, call)
 end
 
 function _joint_response_symbols(lhs::Expr)

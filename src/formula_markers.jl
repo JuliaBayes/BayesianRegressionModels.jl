@@ -133,35 +133,40 @@ Marker struct only — the `@brm` parser never constructs an instance.
 struct Horseshoe end
 
 """
-    pred ~ kernel(data..., per_subject_lps...) do slices..., lp_values...
-        ...
+    @plate for i in eachindex(per_subject_axis)
+        pred[i] = cell(data[i], per_subject_lp[i])
     end
 
-General group-local submodel term: broadcast an inline cell over the groups of
-the linear predictors it is given.
+General group-local submodel surface: broadcast an inline cell over the groups
+of the linear predictors it reads.
 
 The per-subject LP formulas own the population effects, covariates, links and
 random-effect buckets — they are ordinary `@brm` formulas declared in the same
-block. `kernel` derives ONE shared grouping from those LPs and evaluates the
-`do` block once per group, with each positional passed in as that group's slice:
+block. `@plate for` derives ONE shared grouping from those LPs and evaluates the
+body once per group. An indexed read is that group's slice; an indexed LHS is a
+model-scope output, while a bare LHS is local to the cell:
 
 ```julia
 log_CL ~ 1 + weight + (1 | p | subject)
 log_Vc ~ 1 + (1 | p | subject)
 
-conc ~ kernel(t_obs, ragged(dose, dose_subject), log_CL, log_Vc) do ts, doses, lCL, lVc
-    ...                                    # runs per subject, in Stan
+@plate for i in eachindex(log_CL)
+    CL = exp(log_CL[i])
+    Vc = exp(log_Vc[i])
+    conc[i] = pk_cell(t_obs[i], ragged(dose, dose_subject)[i], CL, Vc)
 end
 ```
 
-Positionals split by kind. A raw data column on the kernel's own
+Indexed inputs split by kind. A raw data column on the plate's own
 one-row-per-subject frame is gathered into a per-group slice. A column living on
 a DIFFERENT frame — a dose-event table, say — must declare its grouping with
 [`ragged`](@ref). A linear predictor is passed as that group's scalar value.
 
-Dispatch tag only — lowering lives in `_sb_kernel_doblock!` (sbimpl). The legacy
-`model=` / `obs=` spelling and its anonymous `n_eta` block were removed by user
-decision `130c904`; the `do`-block form above is the only one. A name such as
+`@brm` lowers this annotated-loop surface to the shared kernel IR, so SBBRMI and
+RKBRMI use the same grouping, ragged, observation, and omitted-outcome paths.
+`kernel(...) do` remains a temporary source-compatibility spelling while known
+consumers migrate; new code should use `@plate for`. The much older `model=` /
+`obs=` spelling and its anonymous `n_eta` block remain removed. A name such as
 `eta_CL` is merely a user-chosen ordinary linear-predictor name—there is no
 kernel-owned eta vector or positional eta-index contract in the current API.
 """
@@ -173,9 +178,10 @@ function kernel end
 Group a FLAT secondary row axis by a raw data column that names the subject of
 every row. The marker has two formula positions:
 
-- As a `kernel(...)` positional, `ragged(x, group)` gives the cell a ragged
-  per-subject vector. `x` may be a flat data column or an event-axis linear
-  predictor.
+- As an indexed `@plate for` read, `ragged(x, group)[i]` gives cell `i` a
+  ragged per-subject vector. `x` may be a flat data column or an event-axis
+  linear predictor. The compatibility `kernel(...)` positional has the same
+  meaning.
 - As an observation LHS, `ragged(y, group) ~ Family(pred, ...)` groups a flat
   response before applying the top-level likelihood. The referenced
   `kernel(...)` result supplies the authoritative subject row order, so labels
@@ -196,12 +202,11 @@ flat data column. It is the same grouping either way:
 log_F  ~ 1 + vessel + mo(diet) + hsgp(log_dose)     # rows = dose events
 log_CL ~ 1 + weight + (1 | p | subject)             # rows = subjects
 
-pred ~ kernel(t_obs, dv,
-              ragged(dose_amount, dose_subject),    # flat column -> grouped here
-              ragged(log_F, dose_subject),          # predictor   -> indexed in Stan
-              log_CL) do ts, yy, doses, lF, lCL
-    effective_dose = doses .* exp(lF)
-    ...
+@plate for i in eachindex(log_CL)
+    effective_dose = ragged(dose_amount, dose_subject)[i] .*
+                     exp.(ragged(log_F, dose_subject)[i])
+    pred[i] = pk_cell(t_obs[i], effective_dose, log_CL[i])
+    dv[i] ~ normal(pred[i], sigma)
 end
 ```
 

@@ -550,8 +550,16 @@ function _brm_kernel_cell_values(brmi)
         stmts = Meta.isexpr(body, :block) ? body.args : Any[body]
         # `unique` because a cell may rebind one name; both assignments are the
         # same binding downstream, so it is one quantity, claimed once.
+        # A cell may bind the SAME name as its collected plate result. The
+        # annotated `@plate for` lowering does exactly that for `loc[i] = ...`:
+        # the inner `loc` is the value used by later statements in that cell,
+        # while the outer declaration already exposes the collected `loc`.
+        # Do not claim the promoted inner carrier a second time under the same
+        # logical name; it would make `brm_output(d, :loc)` spuriously
+        # ambiguous even though both carriers hold the same authored value.
         names = unique!(Symbol[s.args[1] for s in stmts
-                               if Meta.isexpr(s, :(=)) && s.args[1] isa Symbol])
+                               if Meta.isexpr(s, :(=)) && s.args[1] isa Symbol &&
+                                  s.args[1] !== target])
         isempty(names) || push!(cells, target => names)
     end
     cells
