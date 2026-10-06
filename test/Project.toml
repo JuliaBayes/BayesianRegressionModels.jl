@@ -5,6 +5,7 @@ CategoricalArrays = "324d7699-5711-5eae-9e2f-1d82baa6b597"
 DifferentiationInterface = "a0c0ee7d-e4b9-4e03-894e-1c5f64a51d63"
 Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
 Enzyme = "7da242da-08ed-463a-9acd-ee780be4f1d9"
+Enzyme_jll = "7cc45869-7501-5eee-bdea-0790c847d4ef"
 JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 LogDensityProblems = "6fdf6af0-433a-55f7-b3ed-c6c6e0b8df7c"
@@ -31,6 +32,9 @@ ZipFile = "a5390f91-8eb1-5f08-bee0-b1d1ffed6cea"
 [compat]
 BridgeStan = "2.9"
 Enzyme = "0.13"
+# Enzyme_jll 0.0.302 (required by Enzyme 0.13.211) segfaults native Reverse
+# gathers on Julia 1.10 (EnzymeAD/Enzyme.jl#3776); see test/README.md.
+Enzyme_jll = "< 0.0.302, >= 0.0.303"
 PSIS = "0.9"
 Treebars = "0.1"
 Turing = "0.46"
