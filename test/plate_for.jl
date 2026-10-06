@@ -165,6 +165,11 @@ plate_terminal_named_ragged_annotated(data) = @brm data begin
     end
 end
 
+@testset "@brm kernel(...) do — deprecated compatibility spelling" begin
+    @test_deprecated r"kernel.*do.*deprecated.*@plate for" plate_panel_legacy(PLATE_PANEL)
+    @test_logs plate_panel_annotated(PLATE_PANEL)
+end
+
 @testset "@brm @plate for — exact legacy lowering" begin
     for (label, old, new) in (
         ("no-random-effects panel", plate_panel_legacy(PLATE_PANEL),
