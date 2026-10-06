@@ -48,11 +48,114 @@ function mixed(data)
         y ~ Normal(mu, 1)
     end
 end
+
+function smooth(data)
+    @brm data begin
+        mu ~ 0 + hsgp(x; k=3, domain=(-2.0, 2.0))
+        y ~ Normal(mu, 1)
+    end
 end
 
-function coordinate_transport_fixture(brmi, name)
+function ordinal(data)
+    @brm data begin
+        mu ~ 1 + mo(r) + mo1(q) + hsgp(x; k=3) + hsgp(x, z; k=(2, 2), iso=false)
+        simplex(mu, mo(r)) ~ Dirichlet(1, 2, 1.5)
+        log(rate) ~ 1 + mo(r) + hsgp(x; k=2)
+        sigma ~ Exponential(0.7)
+        y ~ Normal(mu, sigma)
+        n ~ Poisson(rate)
+    end
+end
+end
+
+# A downstream submodel provider supplying its own mathematics to both
+# backends under the same declaration names.
+module PublicSubmodelTransport
+using BayesianRegressionModels, Distributions, StanBlocks
+import BayesianRegressionModels: _rk_submodel_rhs!, _sb_submodel_rhs!
+
+function shifted end
+function renamed end
+const ALPHA = [1.0, 2.0, 1.5, 0.8]
+
+stan_inner = StanBlocks.@slic begin
+    slope ~ normal(0, 1)
+    return slope * x
+end
+stan_shifted = StanBlocks.@slic begin
+    scale ~ lognormal(0, 1)
+    offset ~ normal(0, 1)
+    w::vector[3] ~ normal(0, 1)
+    p::simplex[dims(alpha)[1]] ~ dirichlet(alpha)
+    L::cholesky_factor_corr[3] ~ lkj_corr_cholesky(2.0)
+    inner ~ stan_inner(; x=x)
+    return location + offset + scale * x + inner +
+        (w[1] + 2 * w[2] - w[3]) * p[1] + p[2] - p[4] + L[2, 1] + L[3, 2]
+end
+
+function stan_source!(statements, data, target, rhs)
+    x = only(getargs(rhs))
+    key, alpha = Symbol(target, :_source_x), Symbol(target, :_alpha)
+    data[key] = copy(parent(parent(x)))
+    data[alpha] = copy(ALPHA)
+    location = name(getkwargs(rhs).location)
+    push!(statements, :($target ~ stan_shifted(; x=$key, location=$location,
+        alpha=$alpha)))
+    :done
+end
+_sb_submodel_rhs!(statements, data, target::Symbol, ::typeof(shifted), rhs) =
+    stan_source!(statements, data, target, rhs)
+_sb_submodel_rhs!(statements, data, target::Symbol, ::typeof(renamed), rhs) =
+    stan_source!(statements, data, target, rhs)
+
+function native_source!(definitions, statements, data, target, rhs, offset)
+    x = only(getargs(rhs))
+    key, alpha = Symbol(target, :_source_x), Symbol(target, :_alpha)
+    data[key] = copy(parent(parent(x)))
+    data[alpha] = copy(ALPHA)
+    location = name(getkwargs(rhs).location)
+    inner, outer = Symbol(target, :_inner), Symbol(target, :_shifted)
+    push!(definitions, :($inner(x) = begin
+        slope ~ Normal(0, 1)
+        return slope .* x
+    end))
+    push!(definitions, :($outer(x, location, alpha) = begin
+        scale ~ LogNormal(0, 1)
+        $offset ~ Normal(0, 1)
+        w[1:3] .~ Normal(0, 1)
+        p ~ Dirichlet(alpha)
+        L ~ LKJCholesky(3, 2.0)
+        inner ~ $inner(x)
+        return location .+ $offset .+ scale .* x .+ inner .+
+            (w[1] + 2 * w[2] - w[3]) * p[1] .+ p[2] .- p[4] .+ L[2, 1] .+ L[3, 2]
+    end))
+    push!(statements, :($target ~ $outer($key, $location, $alpha)))
+    :done
+end
+_rk_submodel_rhs!(definitions, statements, data, bindings, target::Symbol,
+    ::typeof(shifted), rhs) =
+    native_source!(definitions, statements, data, target, rhs, :offset)
+_rk_submodel_rhs!(definitions, statements, data, bindings, target::Symbol,
+    ::typeof(renamed), rhs) =
+    native_source!(definitions, statements, data, target, rhs, :shift)
+
+build(data) = @brm data begin
+    a ~ 0 + x
+    effect(a, :) ~ Normal(0, 0.7)
+    loc ~ shifted(x; location=a)
+    y ~ Normal(loc, 0.8)
+end
+build_renamed(data) = @brm data begin
+    a ~ 0 + x
+    effect(a, :) ~ Normal(0, 0.7)
+    loc ~ renamed(x; location=a)
+    y ~ Normal(loc, 0.8)
+end
+end
+
+function coordinate_transport_fixture(brmi, name; mod=PublicCoordinateTransport)
     rk, problem = consumer_problem(brmi)
-    sb = SBBRMI(brmi; mod=PublicCoordinateTransport, total_groups=())
+    sb = SBBRMI(brmi; mod, total_groups=())
     path = joinpath(tempdir(), "brm-coordinate-transport", name * ".stan")
     mkpath(dirname(path))
     stan = BRM.stan_instantiate(sb; path)
@@ -76,20 +179,35 @@ function check_coordinate_transport(fixture)
             collect(range(-0.43, 0.51; length=length(transport))),
             [0.37sin(i) for i in 1:length(transport)])
         saved = copy(u)
-        stan_u = brm_rk_to_stan(transport, u)
-        @test isequal(brm_stan_to_rk(transport, stan_u), u)
-        @test isequal(brm_rk_to_stan(transport, brm_stan_to_rk(transport, stan_u)), stan_u)
+        stan_u = brm_rk_point_to_stan(transport, u)
+        back = brm_stan_point_to_rk(transport, stan_u)
+        if isempty(transport.simplexes)
+            @test transport.logdensity_offset == 0
+            @test isequal(brm_rk_to_stan(transport, u), stan_u)
+            @test isequal(brm_stan_to_rk(transport, stan_u), u)
+            @test isequal(back, u)
+            @test isequal(brm_rk_to_stan(transport, brm_stan_to_rk(transport, stan_u)), stan_u)
+        else
+            @test back ≈ u atol=1e-12 rtol=1e-12
+            @test brm_rk_point_to_stan(transport, back) ≈ stan_u atol=1e-12 rtol=1e-12
+            # refused: a simplex block's free coordinates are a nonlinear map,
+            # so the point permutation would silently mis-map a gradient.
+            @test_throws "simplex block" brm_rk_to_stan(transport, u)
+            @test_throws "simplex block" brm_stan_to_rk(transport, stan_u)
+        end
         @test isequal(u, saved)
         checked = brm_check_coordinate_transport(transport, rk, stan.model, u)
-        @test checked.pairs == count(p -> p.relation !== :cholesky, transport.pairs)
+        @test keys(checked) == (:pairs, :factors, :simplexes, :max_error)
+        @test checked.pairs == count(p -> p.relation ∉ (:cholesky, :simplex), transport.pairs)
         @test checked.factors == length(transport.correlations)
+        @test checked.simplexes == length(transport.simplexes)
         @test checked.max_error <= 1e-12
         value, gradient = LogDensityProblems.logdensity_and_gradient(problem, u)
         stan_gradient = similar(stan_u)
         stan_value, _ = BridgeStan.log_density_gradient!(stan.model, stan_u,
             stan_gradient; propto=false, jacobian=true)
-        @test value ≈ stan_value atol=2e-11 rtol=2e-11
-        @test gradient ≈ brm_stan_to_rk(transport, stan_gradient) atol=2e-10 rtol=2e-10
+        @test value ≈ stan_value + transport.logdensity_offset atol=2e-11 rtol=2e-11
+        @test gradient ≈ brm_stan_gradient_to_rk(transport, u, stan_gradient) atol=2e-10 rtol=2e-10
         @test isequal(u, saved)
     end
 end
@@ -304,24 +422,98 @@ end
     check_coordinate_transport(fixture)
 end
 
-@stestset "coordinate transport capability gap for smooth internals" begin
-    brmi = @brm (; x=[-0.7,0.0,0.6], y=[0.2,-0.1,0.4]) begin
-        mu ~ 0 + hsgp(x; k=3, domain=(-2.0,2.0))
-        y ~ Normal(mu,1)
-    end
+@stestset "coordinate transport fixed-domain HSGP internals" begin
+    data = (; x=[-0.7,0.0,0.6], y=[0.2,-0.1,0.4])
+    fixture = coordinate_transport_fixture(PublicCoordinateTransport.smooth(data), "hsgp")
+    @test Set(p.address.parameter for p in fixture.transport.pairs) ==
+        Set([:length_scale, :sd, :basis_weights])
+    @test count(p -> p.address.parameter === :basis_weights, fixture.transport.pairs) == 3
+    check_coordinate_transport(fixture)
+end
+
+@stestset "coordinate transport monotonic and HSGP terms across linked predictors" begin
+    data = (; r=[1,4,2,3,1,4,2,3], q=[2,1,3,3,1,2,2,1],
+        x=[-0.7,0.0,0.6,0.9,0.2,-0.4,0.5,-0.1], z=[0.3,-0.2,0.5,0.1,-0.4,0.6,0.0,0.2],
+        y=[0.2,-0.1,0.4,0.3,0.1,-0.3,0.5,0.0], n=[1,4,0,3,2,5,1,2])
+    saved = deepcopy(data)
+    fixture = coordinate_transport_fixture(PublicCoordinateTransport.ordinal(data), "ordinal")
+    (; transport) = fixture
+    # Three monotonic simplexes: `mo(r)` on each predictor (4 levels, 3
+    # increments) and `mo1(q)` (3 levels, 2 increments).
+    @test sort([b.K for b in transport.simplexes]) == [2, 3, 3]
+    @test transport.logdensity_offset ≈ -(log(2) + 2log(3)) / 2
+    @test Set(b.address.predictor for b in transport.simplexes) == Set([:mu, :rate])
+    @test count(p -> p.address.kind === :population &&
+        p.address.coefficient === :mo_r, transport.pairs) == 2
+    # The repeated terms keep their semantic addresses whatever each
+    # backend's collision-free carrier names are.
+    hsgp_pairs = filter(p -> p.address.kind === :hsgp, transport.pairs)
+    @test Set((p.address.predictor, p.address.term) for p in hsgp_pairs) ==
+        Set([(:mu, :hsgp_x), (:mu, :hsgp_x_z), (:rate, :hsgp_x)])
+    @test count(p -> p.address.term === :hsgp_x_z &&
+        p.address.parameter === :length_scale, hsgp_pairs) == 2
+    check_coordinate_transport(fixture)
+    @test isequal(data, saved)
+end
+
+@stestset "coordinate transport custom submodel provider declarations" begin
+    data = (; x=[-0.4, 0.2, 0.7, 0.1], y=[0.1, -0.2, 0.3, 0.4])
+    saved = deepcopy(data)
+    fixture = coordinate_transport_fixture(PublicSubmodelTransport.build(data),
+        "provider"; mod=PublicSubmodelTransport)
+    (; transport) = fixture
+    provider = filter(p -> p.address.kind === :submodel, transport.pairs)
+    @test Set(p.address.declaration for p in provider) == Set(Symbol.(
+        ["loc.scale", "loc.offset", "loc.w", "loc.p", "loc.L", "loc.inner.slope"]))
+    @test only(transport.simplexes).K == 4
+    @test only(transport.correlations).K == 3
+    @test only(p.stan for p in provider
+        if p.address.declaration === Symbol("loc.inner.slope")) == "loc_inner_slope"
+    check_coordinate_transport(fixture)
+    @test isequal(data, saved)
+
+    # A provider pair that spells one declaration differently on the two
+    # backends has no shared address: both coordinates are named, no map.
+    brmi = PublicSubmodelTransport.build_renamed(data)
     rk = RKBRMI(brmi)
-    sb = SBBRMI(brmi; total_groups=())
-    stan = BRM.stan_instantiate(sb; path=joinpath(tempdir(), "brm-coordinate-transport", "hsgp.stan"))
-    # A valid model outside the current semantic inventory is a capability gap,
-    # not a rejected language shape (dev §2). It must never yield a partial map.
-    result = try
+    sb = SBBRMI(brmi; mod=PublicSubmodelTransport, total_groups=())
+    stan = BRM.stan_instantiate(sb; path=joinpath(tempdir(),
+        "brm-coordinate-transport", "provider-renamed.stan"))
+    err = try
         brm_coordinate_transport(rk, sb, BridgeStan.param_unc_names(stan.model))
-    catch err
-        err isa BRMCoordinateTransportError || rethrow()
-        @test err.reason === :unsupported_coverage
-        @test occursin("do not pair completely", sprint(showerror, err))
-        @test occursin("hsgp", sprint(showerror, err))
-        nothing
+    catch e
+        e
     end
-    @test_broken result isa BRMCoordinateTransport
+    @test err isa BRMCoordinateTransportError
+    @test err.reason === :unsupported_coverage
+    @test occursin("loc.shift", sprint(showerror, err))
+    @test occursin("loc_offset", sprint(showerror, err))
+end
+
+@stestset "simplex maps match both backends' transforms exactly" begin
+    for K in (2, 3, 5)
+        for u in (zeros(K - 1), [-0.8 + 0.47j for j in 1:(K - 1)],
+                [0.6cos(3j) for j in 1:(K - 1)])
+            saved = copy(u)
+            logx, z = BRM._brm_rk_simplex_log(u)
+            @test exp.(logx) ≈ ReactiveKernelsPPL.simplex_constrain(u) atol=1e-14
+            @test BRM._brm_rk_simplex_free(logx) ≈ u atol=1e-12
+            y = BRM._brm_stan_simplex_free(logx)
+            @test BRM._brm_stan_simplex_log(y) ≈ logx atol=1e-12
+            # Both log-Jacobians reduce to `sum(log.(x))`, up to Stan's
+            # constant `log(K) / 2`: the transport's density offset.
+            @test ReactiveKernelsPPL.simplex_logjac(u) ≈ sum(logx) atol=1e-12
+            # Independent central differences of the composed map.
+            g = [0.3, -1.2, 0.7, 0.25][1:(K - 1)]
+            step = 1e-6
+            jacobian = reduce(hcat, map(1:(K - 1)) do i
+                plus, minus = copy(u), copy(u)
+                plus[i] += step; minus[i] -= step
+                (BRM._brm_stan_simplex_free(first(BRM._brm_rk_simplex_log(plus))) .-
+                 BRM._brm_stan_simplex_free(first(BRM._brm_rk_simplex_log(minus)))) ./ (2step)
+            end)
+            @test BRM._brm_simplex_pullback(u, g) ≈ transpose(jacobian) * g atol=1e-8
+            @test isequal(u, saved)
+        end
+    end
 end

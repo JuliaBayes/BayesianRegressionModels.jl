@@ -627,6 +627,21 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   `Treebars [e1e568c4] has no known versions!`. `Pkg.develop` can only fix a path
   for a *direct* dependency, so Treebars has to be listed in `test/Project.toml`
   as well; that entry is transitive plumbing, not a test dependency.
+- **`Enzyme_jll` 0.0.302 is excluded.** That binary, which Enzyme 0.13.211
+  requires, can segfault (signal 11) in `getindex` inside the reverse pass on
+  Julia 1.10 when a differentiated function returns a freshly allocated array,
+  such as an index-vector gather
+  ([EnzymeAD/Enzyme.jl#3776](https://github.com/EnzymeAD/Enzyme.jl/issues/3776);
+  the fix ships in a later `Enzyme_jll`). Native Reverse gradients that read a
+  grouped effect as `draws[indices, margin]` crash with it; measured on the
+  public random-effect block of `rk_coordinate_transport.jl`,
+  `rk_retained_transport.jl`, `rk_modeled_random_slopes.jl` and five
+  `rk_values.jl` testsets, all of which pass on 0.0.301. `Enzyme_jll` is a
+  direct dependency here only to carry `Enzyme_jll = "< 0.0.302, >= 0.0.303"`,
+  which resolves Enzyme 0.13.210 with `Enzyme_jll` 0.0.301 and admits the next
+  binary without another edit; like Treebars, it is resolution plumbing, not a
+  test dependency. A manifest resolved before this entry still holds 0.0.302:
+  re-run `setup_env.jl`.
 - **The other three `[sources]` packages must be develop paths too.**
   `MutatingFunctions`, `OutputSignatures`, and `TreeArrays` are unregistered
   direct dependencies. On Julia 1.10 their committed source pins are inert, so
