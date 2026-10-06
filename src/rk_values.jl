@@ -393,24 +393,40 @@ function _rk_needs_value_plan(program, observations)
     false
 end
 
-function _rk_ast_value_distribution(distribution, bindings, taken)
-    # BRM authors Julia's LocationScale/TDist composition; RKPPL authors the
-    # same family in Stan argument order as StudentT(nu, location, scale).
-    if distribution.callable === LocationScale
-        isempty(distribution.kwargs) && length(distribution.args) == 3 || error(
-            "RK backend: a Student-t response needs LocationScale(mu, scale, TDist(nu))")
-        location, scale, base = distribution.args
-        base isa _BRMPreparedExpr && base.callable === TDist &&
-            isempty(base.kwargs) && length(base.args) == 1 || error(
-            "RK backend: a LocationScale response must wrap TDist(nu)")
-        return _rk_ast_dotted(:StudentT,
-            _rk_value_expr!(bindings, only(base.args), taken),
-            _rk_value_expr!(bindings, location, taken),
-            _rk_value_expr!(bindings, scale, taken))
-    end
-    callee = _rk_value_callee!(bindings, distribution.callable, taken)
+_rk_ast_value_distribution(distribution, bindings, taken) =
+    _rk_ast_value_distribution(distribution.callable, distribution, bindings, taken)
+
+# BRM authors Julia's LocationScale/TDist composition; RKPPL authors the same
+# family in Stan argument order as StudentT(nu, location, scale).
+function _rk_ast_value_distribution(::Type{LocationScale}, distribution, bindings, taken)
+    isempty(distribution.kwargs) && length(distribution.args) == 3 || error(
+        "RK backend: a Student-t response needs LocationScale(mu, scale, TDist(nu))")
+    location, scale, base = distribution.args
+    base isa _BRMPreparedExpr && base.callable === TDist &&
+        isempty(base.kwargs) && length(base.args) == 1 || error(
+        "RK backend: a LocationScale response must wrap TDist(nu)")
+    _rk_ast_dotted(:StudentT,
+        _rk_value_expr!(bindings, only(base.args), taken),
+        _rk_value_expr!(bindings, location, taken),
+        _rk_value_expr!(bindings, scale, taken))
+end
+
+_rk_ast_value_distribution(callable, distribution, bindings, taken) =
+    _rk_ast_value_call(callable, distribution, bindings, taken)
+
+function _rk_ast_value_call(callable, distribution, bindings, taken)
+    callee = _rk_value_callee!(bindings, callable, taken)
     args = map(arg -> _rk_value_expr!(bindings, arg, taken), distribution.args)
     _rk_ast_dotted(callee, args...)
+end
+
+# The prepared record's cutpoint vector is one value shared by every
+# observation. An unprepared one-argument call keeps the ordinary spelling.
+function _rk_ast_value_distribution(::Type{OrderedLogistic}, distribution, bindings, taken)
+    length(distribution.args) == 2 ||
+        return _rk_ast_value_call(OrderedLogistic, distribution, bindings, taken)
+    eta, cutpoints = map(arg -> _rk_value_expr!(bindings, arg, taken), distribution.args)
+    _rk_ast_dotted(:OrderedLogistic, eta, Expr(:call, :Ref, cutpoints))
 end
 
 _rk_has_value_call(_) = false
@@ -465,9 +481,51 @@ Base.@nospecializeinfer function _rk_predictor_components(@nospecialize(brmi), c
     (; predictors, priors, r2d2_priors, horseshoe_priors, buckets, vectors)
 end
 
+# Leveled families own their response coding and implicit threshold vectors as
+# formula semantics (`_brm_prepare_response`, the record SBBRMI's emitted
+# `<response>_cutpoints` and Turing's model share). A response whose location
+# is an authored value takes the same record as a formula-predictor location.
+const _RK_VALUE_LEVELED_HEADS = (OrderedLogistic,)
+
+function _rk_value_leveled_responses(observations, data)
+    records = Dict{Symbol,Any}()
+    for observation in observations
+        rhs, lhs = observation.rhs, observation.lhs
+        rhs isa ExprColumn && getf(rhs) in _RK_VALUE_LEVELED_HEADS || continue
+        lhs isa NamedColumn && parent(lhs) isa DataColumn || continue
+        raw = get(data, name(lhs), nothing)
+        raw isa AbstractVector && !(raw isa AbstractVector{<:AbstractVector}) || continue
+        records[observation.key] = _brm_prepare_response(observation.key, rhs, raw)
+    end
+    records
+end
+
+# `_BRMThresholdPrior{O}(n)` is n independent standard normals, increasing when
+# `O`: RKPPL's `Ordered(Normal(0, 1), n)` or `c[1:n] .~ Normal.(0, 1)`.
+_rk_threshold_vector(parameter::_BRMPreparedParameter) = _rk_threshold_vector(
+    parameter.name, parameter.prior.callable, only(parameter.prior.args))
+_rk_threshold_vector(name::Symbol, ::Type{_BRMThresholdPrior{true}}, n::Int) =
+    _RKVectorParameter(name, :ordered_normal, (0.0, 1.0), n, name)
+_rk_threshold_vector(name::Symbol, ::Type{_BRMThresholdPrior{false}}, n::Int) =
+    _RKVectorParameter(name, :vector_normal, (0.0, 1.0), n, name)
+
 function _brm_rk_value_plan(brmi, program, observations; kernels=(), submodels=())
     context = program.context
-    prepared = _brm_prepare_model(brmi; program)
+    leveled = _rk_value_leveled_responses(observations, context.data)
+    implicit = Pair{Symbol,Any}[parameter for record in values(leveled)
+        for parameter in record.parameters]
+    prepared = _brm_prepare_model(brmi; program, additional_parameters=implicit,
+        observation_overrides=Dict(key => (; distribution=record.distribution,
+            response=record.response, modifier=nothing, weight=nothing,
+            missing_response=nothing) for (key, record) in leveled))
+    implicit_names = Set{Symbol}(first.(implicit))
+    clashes = intersect(implicit_names,
+        union(Set(op.name for op in program.operations), keys(context.data)))
+    isempty(clashes) || error(
+        "RK backend: implicit response parameter(s) " *
+        "$(join(sort!(collect(clashes)), ", ")) collide with a model name; rename it")
+    threshold_vectors = [_rk_threshold_vector(p)
+        for p in prepared.parameters if p.name in implicit_names]
     roots = Set{Symbol}(observation.key for observation in observations)
     routes = (kernels..., submodels...)
     for route in routes
@@ -487,7 +545,7 @@ function _brm_rk_value_plan(brmi, program, observations; kernels=(), submodels=(
         for a in ordinary_assignments if a.expression isa Number)
     parameters = _rk_plan_parameters!(prepared, context.data, consts,
         Dict{Symbol,Symbol}(), parameter_names, assignment_names)
-    vectors = _rk_plan_vector_parameters!(prepared, consts)
+    vectors = [_rk_plan_vector_parameters!(prepared, consts); threshold_vectors]
     predictor_order = Symbol[op.name for op in program.operations
         if op.role === :predictor && op.name in referenced &&
             !any(route -> route.name === op.name, routes)]

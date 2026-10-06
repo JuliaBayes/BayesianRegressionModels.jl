@@ -7,7 +7,7 @@ using DifferentiationInterface: AutoEnzyme
 import LogDensityProblems: dimension, logdensity, logdensity_and_gradient
 using LinearAlgebra: cholesky, Symmetric, diagind
 using Statistics: mean
-using LogExpFunctions: logit
+using LogExpFunctions: logit, logistic
 include(joinpath(@__DIR__, "testset_filter.jl"))
 const BRM = BayesianRegressionModels
 include(joinpath(@__DIR__, "rk_source_roundtrip.jl"))
@@ -399,4 +399,47 @@ end
     mu = only(nt.pop_mu.beta_pop) .+ C[gi, 1] .+ (df.c .== 4) .* C[gi, 2] .+ (df.c .== 6) .* C[gi, 3]
     @test value_query(backend, :pointwise, u).y ≈
         logpdf.(Normal.(mu[df.rows], 1), df.y)
+end
+
+# P(y = k) = logistic(c[k] - eta) - logistic(c[k - 1] - eta), with
+# c[0] = -Inf and c[K] = Inf: Stan's ordered_logistic on the 1:K scale.
+function ordered_logistic_reference(eta, c, k)
+    upper = k > length(c) ? 1.0 : logistic(c[k] - eta)
+    lower = k == 1 ? 0.0 : logistic(c[k - 1] - eta)
+    log(upper - lower)
+end
+
+@stestset "legacy OrderedLogistic reads an authored location" begin
+    # Gappy codes: K = maximum(y) = 4 with level 3 unobserved, as SBBRMI.
+    df = (; x=[-1.2, -0.4, 0.1, 0.5, 0.9, 1.4, -0.8, 0.3],
+        y=[1, 2, 2, 4, 4, 4, 1, 2])
+    saved = deepcopy(df)
+    brmi = @brm df begin
+        slope ~ 0 + x
+        bias ~ Normal(0, 1)
+        loc = slope + bias
+        y ~ OrderedLogistic(loc)
+    end
+    backend = RKBRMI(brmi)
+    @test backend.plan isa BRM._RKValuePlan
+    source = string(Base.remove_linenums!(deepcopy(BRM._rk_emit_ast(backend.plan).main)))
+    @test occursin("y_cutpoints ~ Ordered(Normal(0.0, 1.0), 3)", source)
+    @test occursin("y .~ OrderedLogistic.(loc, Ref(y_cutpoints))", source)
+    u = check_value_gradient(backend)
+    nt = constrain(backend.model.layout, u)
+    c = nt.y_cutpoints
+    @test length(c) == 3 && issorted(c)
+    eta = only(nt.pop_slope.beta_pop) .* df.x .+ nt.bias
+    expected_ll = ordered_logistic_reference.(eta, Ref(c), df.y)
+    @test value_query(backend, :pointwise, u).y ≈ expected_ll
+    @test value_query(backend, :likelihood, u) ≈ sum(expected_ll)
+    prior = logpdf(Normal(), only(nt.pop_slope.beta_pop)) +
+        logpdf(Normal(), nt.bias) + sum(logpdf.(Normal(), c))
+    @test value_query(backend, :prior, u) ≈ prior
+    # First cutpoint free, later cutpoints through log increments.
+    @test value_query(backend, :sampler, u) ≈ prior + sum(expected_ll) + sum(log.(diff(c)))
+    artifact = BRM.emit_rk_artifact(brmi; case_id="authored-ordered-logistic")
+    rebuilt = build_kernel(BRM.rk_translate_artifact(artifact))
+    @test coordinate_names(rebuilt.layout) == coordinate_names(backend.model.layout)
+    @test isequal(df, saved)
 end
