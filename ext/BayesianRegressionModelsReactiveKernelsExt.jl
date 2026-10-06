@@ -85,13 +85,13 @@ BRM.rkppl_model(name::Symbol) = hasproperty(BRM._BRM_STATISTICAL_MODELS, name) ?
 """
     rk_translate_artifact(artifact) -> bound `StructuralPlan`
 
-Translate a v3 append artifact (`BRM.emit_rk_artifact` shape) through the
+Translate a v4 append artifact (`BRM.emit_rk_artifact` shape) through the
 production route, using the same definition module and data bindings as
 live `RKBRMI` builds. Fails closed on shape/version skew.
 """
 function BRM.rk_translate_artifact(artifact)
-    keys(artifact) == (:case_id, :ast, :defs, :plan, :meta) || error(
-        "RK artifact: not a v3 artifact (keys $(keys(artifact)))")
+    keys(artifact) == (:case_id, :ast, :defs, :bindings, :plan, :meta) || error(
+        "RK artifact: not a v4 artifact (keys $(keys(artifact)))")
     artifact.meta.generator_version == BRM.rk_artifact_version() || error(
         "RK artifact: case `$(artifact.case_id)` has generator_version " *
         "$(artifact.meta.generator_version); this BRM translates " *
@@ -99,8 +99,8 @@ function BRM.rk_translate_artifact(artifact)
     artifact.plan isa BRM._RK_ARTIFACT_PLAN_TYPES || error(
         "RK artifact: case `$(artifact.case_id)` carries a " *
         "$(typeof(artifact.plan)), not an RK plan")
-    bindings = BRM._rk_emit_ast(artifact.plan).bindings
-    emitted = BRM._RKEmittedProgram(artifact.defs, artifact.ast, bindings)
+    emitted = BRM._RKEmittedProgram(
+        artifact.defs, artifact.ast, artifact.bindings)
     return _rk_translate_from_emitted(artifact.plan, emitted)
 end
 

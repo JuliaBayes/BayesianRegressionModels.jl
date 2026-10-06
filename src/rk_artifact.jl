@@ -2,8 +2,8 @@
 #
 # The BRM-side library for the parity-closeout append sweep (pair
 # closeout-appends; coordinator lock brief 14oeobv + rulings on peer todo
-# 1womb1l + the twin's worker-contract reply): v3 RK artifacts
-# (`emit_rk_artifact`: BRMI → `(; case_id, ast, defs, plan, meta)` → `.jls`)
+# 1womb1l + the twin's worker-contract reply): v4 RK artifacts
+# (`emit_rk_artifact`: BRMI → `(; case_id, ast, defs, bindings, plan, meta)` → `.jls`)
 # consumed by the RK append driver, and SBBRMI-side reference numbers
 # (`sb_prepare_model` + `sb_probe_numbers`: full-posterior value +
 # BridgeStan gradient + FD and oracle cross-checks) for the SB leg.
@@ -17,15 +17,15 @@
 """
     rk_artifact_version()
 
-The append-artifact shape version this BRM reads and writes (`3`). The
+The append-artifact shape version this BRM reads and writes (`4`). The
 September `(; ast, data, meta)` triple predates submodel `defs` and the
-data crossings; v3 carries
-`(; case_id, ast, defs, plan, meta)`. `plan.columns` includes fitted geometry;
+data crossings; v4 carries the exact emitted callable `bindings` beside
+`(; case_id, ast, defs, bindings, plan, meta)`. `plan.columns` includes fitted geometry;
 [`rk_artifact_inputs`](@ref) selects the executable source inputs.
 """
-rk_artifact_version() = 3
+rk_artifact_version() = 4
 
-# The plan kinds a v3 artifact may carry — the one predicate both the core
+# The plan kinds a v4 artifact may carry — the one predicate both the core
 # read check (`_check_artifact`) and the extension translate check
 # (`rk_translate_artifact`) consult. It currently equals the extension's
 # `_RK_PLAN_TYPES`; it is kept as its own predicate so a future plan kind
@@ -36,8 +36,9 @@ const _RK_ARTIFACT_PLAN_TYPES = Union{_RKStructuralPlan,_RKKernelPlan,_RKValuePl
     emit_rk_artifact(brmi::BRMI; case_id, provenance=nothing, brm_pin=nothing, held_out=())
 
 Lower `brmi` through the production RK route (`_brm_rk_plan` →
-`_rk_emit_ast` with production defaults) and pack the v3 append artifact
-`(; case_id, ast, defs, plan, meta)`. `meta` is
+`_rk_emit_ast` with production defaults) and pack the v4 append artifact
+`(; case_id, ast, defs, bindings, plan, meta)`. Definitions, main source and
+callable bindings come from the same emission. `meta` is
 `(; case_id, provenance, brm_pin, generator_version, emitted_at,
 julia_version)`; `emitted_at` is a unix-epoch-UTC `Int`
 (`Dates` deliberately avoided). `provenance`/`brm_pin` are
@@ -71,6 +72,7 @@ Base.@nospecializeinfer function emit_rk_artifact(@nospecialize(brmi::BRMI);
         case_id=String(case_id),
         ast=emitted.main,
         defs=emitted.defs,
+        bindings=emitted.bindings,
         plan,
         meta)
 end
@@ -102,7 +104,8 @@ source directly. `rk_translate_artifact` selects the same inputs automatically.
 """
 function rk_artifact_inputs(artifact)
     _check_artifact(artifact, "rk_artifact_inputs")
-    _rk_source_data_columns(artifact.plan, _RKEmittedProgram(artifact.defs, artifact.ast))
+    _rk_source_data_columns(artifact.plan,
+        _RKEmittedProgram(artifact.defs, artifact.ast, artifact.bindings))
 end
 
 """
@@ -122,7 +125,7 @@ end
 """
     read_rk_artifact(path) -> artifact
 
-Deserialize a v3 artifact, failing closed on shape or version skew (a
+Deserialize a v4 artifact, failing closed on shape or version skew (a
 `generator_version` other than `rk_artifact_version()` is a loud error,
 never a silent read).
 """
@@ -135,8 +138,8 @@ function read_rk_artifact(path::AbstractString)
 end
 
 function _check_artifact(artifact, path)
-    keys(artifact) == (:case_id, :ast, :defs, :plan, :meta) || error(
-        "RK artifact: `$(path)` does not hold a v3 artifact " *
+    keys(artifact) == (:case_id, :ast, :defs, :bindings, :plan, :meta) || error(
+        "RK artifact: `$(path)` does not hold a v4 artifact " *
         "(keys $(keys(artifact)))")
     artifact.meta.generator_version == rk_artifact_version() || error(
         "RK artifact: `$(path)` has generator_version " *
@@ -146,7 +149,8 @@ function _check_artifact(artifact, path)
         "RK artifact: `$(path)` carries a $(typeof(artifact.plan)), " *
         "not an RK plan")
     _check_emitted(
-        _RKEmittedProgram(artifact.defs, artifact.ast), artifact.case_id)
+        _RKEmittedProgram(artifact.defs, artifact.ast, artifact.bindings),
+        artifact.case_id)
     return nothing
 end
 
