@@ -1203,6 +1203,9 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                     _rk_ast_monotonic_name(term, taken), only(term.columns),
                     monotonic_alpha(term), nothing)
                 push!(owned_vectors, term.options.increments)
+                _rk_coordinate_record!(coordinates, (; kind=:monotonic,
+                    declaration=refactual[index], predictor=predictor.name,
+                    head=:mo1, source=term.options.source, beta=false))
             elseif kind === :spline || kind === :hsgp
                 refactual[index] = term.options.id
             elseif kind === :structured
@@ -1274,6 +1277,13 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                     _rk_ast_monotonic_name(term, taken), only(term.columns),
                     monotonic_alpha(term), override)
                 push!(owned_vectors, term.options.increments)
+                # Its coefficient pairs like a population coefficient only
+                # under an ordinary prior; a shared budget leaves it unpaired.
+                _rk_coordinate_record!(coordinates, (; kind=:monotonic,
+                    declaration=replacements[index], predictor=predictor.name,
+                    head=:mo, source=term.options.source,
+                    beta=r2d2 === nothing &&
+                        !haskey(joint_priors, (predictor.name, term.addressee))))
             elseif hs_spec === nothing && _rk_ast_population_family(override) &&
                     (kind === :intercept ? predictor.row_source !== nothing :
                         kind === :continuous)
@@ -1288,6 +1298,9 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                         _rk_ast_monotonic_name(term, taken), only(term.columns),
                         monotonic_alpha(term), nothing)
                     push!(owned_vectors, term.options.increments)
+                    _rk_coordinate_record!(coordinates, (; kind=:monotonic,
+                        declaration=refactual[index], predictor=predictor.name,
+                        head=:mo, source=term.options.source, beta=false))
                 end
                 coef = _rk_ast_coef_name(
                     string(predictor.name, "_", term.addressee), taken)
@@ -1313,6 +1326,15 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         for term in predictor.terms
             term.kind === :hsgp || continue
             append!(stmts, _rk_ast_value_hsgp(defs, term, taken, bindings))
+            # Ungrouped HSGP components own scalar hyperparameters and basis
+            # weights; grouped or hyper-predicted terms stay unrecorded.
+            (haskey(term.options, :group_index) ||
+                !isempty(get(term.options, :hyper_plans, ()))) && continue
+            _rk_coordinate_record!(coordinates, (; kind=:hsgp,
+                declaration=term.options.id, predictor=predictor.name,
+                axes=Tuple(term.columns),
+                iso=get(term.options, :cov, :exp_quad) === :periodic ||
+                    term.options.iso))
         end
         for term in predictor.terms
             term.kind === :gp || continue
