@@ -154,6 +154,18 @@ end
 # Cross-backend coordinate transport (src/coordinate_transport.jl).
 BRM._rk_layout_coordinate_names(backend::BRM.RKBRMI) =
     coordinate_names(backend.model.layout)
+# Each packed coordinate's layout transform, in coordinate order.
+function BRM._rk_layout_coordinate_transforms(backend::BRM.RKBRMI)
+    layout = backend.model.layout
+    transforms = fill(:unassigned, layout.total)
+    for entry in layout.entries
+        transforms[entry.offset:(entry.offset + entry.size - 1)] .= entry.transform
+    end
+    any(==(:unassigned), transforms) && error(
+        "brm_coordinate_transport: internal: the RK layout leaves coordinates " *
+        "without an entry")
+    transforms
+end
 BRM._rk_constrained_values(backend::BRM.RKBRMI, u::AbstractVector) =
     constrain(backend.model.layout, u)
 

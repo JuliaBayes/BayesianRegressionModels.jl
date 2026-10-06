@@ -59,7 +59,7 @@ end
             saved = copy(u)
             before = Base.invokelatest(native, u)
             checked = brm_check_coordinate_transport(transport, rk, stan.model, u)
-            @test keys(checked) == (:pairs, :factors, :max_error)
+            @test keys(checked) == (:pairs, :factors, :simplexes, :max_error)
             @test checked.pairs == count(p -> p.relation !== :cholesky, transport.pairs)
             @test checked.factors == 1
             @test checked.max_error <= 1e-12

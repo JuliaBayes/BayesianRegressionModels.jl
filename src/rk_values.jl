@@ -734,6 +734,11 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
         (p.name for p in plan.regression.predictors))
     for assignment in plan.assignments
         _rk_emit_value_assignment!(defs, stmts, bindings, taken, assignment)
+        # A downstream submodel provider owns the declarations scoped under
+        # its target; the transport pairs them with the SB declaration's.
+        assignment isa _RKPreparedSubmodelAssignment &&
+            _rk_coordinate_record!(coordinates, (; kind=:submodel,
+                target=assignment.name))
     end
     for completion in plan.completions
         _rk_emit_missing_value!(defs, stmts, bindings, taken, completion)

@@ -1633,6 +1633,33 @@ an ordinary fit; a sampled carrier is preferred when both exist.
 function brm_term_coordinates(d::BRMDescriptor, logical::Symbol,
                               constrained_names;
                               term::Symbol, parameter::Symbol)
+    entry = _brm_term_entry(d, logical, e -> e.term === term, "term `$term`")
+    output = _brm_term_parameter_output(d, logical, entry, parameter)
+
+    coordinates = _brm_element_coordinates(output, constrained_names)
+    expected_count = _brm_term_coordinate_count(
+        getf(entry.value), entry.value, Val(parameter), d.plan, output)
+    if isnothing(expected_count)
+        isempty(coordinates) && error(
+            "brm_descriptor: term `$term` parameter role `$parameter` resolves " *
+            "to emitted `$(output.name)`, but that carrier is absent from the " *
+            "supplied constrained names. Re-reflect the model that produced " *
+            "the posterior draws.")
+    elseif length(coordinates) != expected_count
+        error("brm_descriptor: term `$term` parameter role `$parameter` owns " *
+              "$expected_count constrained coordinates but resolves to " *
+              "$(length(coordinates)). Re-reflect the model that produced the " *
+              "posterior draws.")
+    end
+
+    (; logical, term, parameter, output, coordinates,
+       link=entry.link, inverse_link=InverseFunctions.inverse(entry.link))
+end
+
+# The one formula term on `logical` that `select` accepts. `what` names the
+# selection in the error, so a public label lookup and an internal semantic
+# lookup (e.g. by HSGP axes) report the same available labels.
+function _brm_term_entry(d::BRMDescriptor, logical::Symbol, select, what)
     predictors = [lp for lp in linear_predictors(d.plan.parent)
                   if lp.name === logical]
     length(predictors) == 1 || error(
@@ -1641,13 +1668,19 @@ function brm_term_coordinates(d::BRMDescriptor, logical::Symbol,
         "public term-parameter address.")
 
     all_entries = _brm_term_coordinate_entries(d.plan.parent, logical)
-    entries = [e for e in all_entries if e.term === term]
+    entries = [e for e in all_entries if select(e)]
     length(entries) == 1 || error(
-        "brm_descriptor: term `$term` occurs $(length(entries)) times on logical " *
+        "brm_descriptor: $what occurs $(length(entries)) times on logical " *
         "predictor `$logical`; available term labels are " *
         "$(Tuple(sort!(unique(e.term for e in all_entries), by=string))).")
-    entry = only(entries)
+    only(entries)
+end
 
+# The declaration-owned output that carries one parameter role of a formula
+# term, resolved from the term to its logical owner without parsing a name.
+function _brm_term_parameter_output(d::BRMDescriptor, logical::Symbol, entry,
+                                    parameter::Symbol)
+    term = entry.term
     emitted_lp = _sb_lp_emitted_name(logical, entry.link)
     owner_labels = _brm_term_owner_labels(
         getf(entry.value), entry.value, emitted_lp)
@@ -1693,26 +1726,7 @@ function brm_term_coordinates(d::BRMDescriptor, logical::Symbol,
         "parameter role `$parameter` to $(length(idxs)) declaration-owned " *
         "posterior carriers; expected exactly one. Re-reflect the model that " *
         "produced the posterior draws.")
-    output = d.outputs[only(idxs)]
-
-    coordinates = _brm_element_coordinates(output, constrained_names)
-    expected_count = _brm_term_coordinate_count(
-        getf(entry.value), entry.value, Val(parameter), d.plan, output)
-    if isnothing(expected_count)
-        isempty(coordinates) && error(
-            "brm_descriptor: term `$term` parameter role `$parameter` resolves " *
-            "to emitted `$(output.name)`, but that carrier is absent from the " *
-            "supplied constrained names. Re-reflect the model that produced " *
-            "the posterior draws.")
-    elseif length(coordinates) != expected_count
-        error("brm_descriptor: term `$term` parameter role `$parameter` owns " *
-              "$expected_count constrained coordinates but resolves to " *
-              "$(length(coordinates)). Re-reflect the model that produced the " *
-              "posterior draws.")
-    end
-
-    (; logical, term, parameter, output, coordinates,
-       link=entry.link, inverse_link=InverseFunctions.inverse(entry.link))
+    d.outputs[only(idxs)]
 end
 
 # Categorical population terms own separate `_sb_cat` parameter blocks rather

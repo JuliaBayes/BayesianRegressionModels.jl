@@ -58,14 +58,21 @@ end
     @test length(names) == 2
     @test !any(n -> startswith(string(n), "loc"), names)
     @test :shift in names
-    ia = findfirst(==(:a_x), names)
-    ishift = findfirst(==(:shift), names)
-    @test ia !== nothing
+    stan = consumer_stan(brmi, "original-native-source-hook"; mod=PublicSourceExtension)
+    # Locate the coefficient and pair both backends through the semantic
+    # transport rather than a spelled coordinate name.
+    sb = SBBRMI(brmi; mod=PublicSourceExtension, total_groups=())
+    transport = brm_coordinate_transport(backend, sb,
+        BridgeStan.param_unc_names(stan.model))
+    rk_index(address) =
+        findfirst(==(only(p.rk for p in transport.pairs if p.address == address)), names)
+    ia = rk_index((; kind=:population, predictor=:a, coefficient=:x))
+    ishift = rk_index((; kind=:scalar, name=:shift))
+    @test names[ishift] === :shift
     oracle(u) = logpdf(Normal(0, 0.7), u[ia]) +
         logpdf(Normal(0, 0.4), u[ishift]) +
         sum(logpdf.(Normal.(data.x .* (u[ia] + u[ishift]), 0.8), data.y))
-    stan = consumer_stan(brmi, "original-native-source-hook"; mod=PublicSourceExtension)
-    mapping = [names[ia] => "pop_a_beta_pop.1", names[ishift] => "shift"]
+    mapping = [p.rk => p.stan for p in transport.pairs]
     for u in (zeros(2), [0.2, -0.3], [-0.4, 0.1])
         check_consumer_point(problem, u, oracle)
         check_consumer_stan(problem, stan, mapping, backend, u)
