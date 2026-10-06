@@ -157,6 +157,11 @@ log_Vc ~ 1 + (1 | p | subject)
 end
 ```
 
+When the cell's last statement is its final indexed assignment, as `conc[i] = ...`
+is here, that right-hand side is the cell's return value and the plate stores it
+once. An indexed output that later cell statements read is bound as a cell value
+first and then returned.
+
 Indexed inputs split by kind. A raw data column on the plate's own
 one-row-per-subject frame is gathered into a per-group slice. A column living on
 a DIFFERENT frame — a dose-event table, say — must declare its grouping with

@@ -551,8 +551,9 @@ function _brm_kernel_cell_values(brmi)
         # `unique` because a cell may rebind one name; both assignments are the
         # same binding downstream, so it is one quantity, claimed once.
         # A cell may bind the SAME name as its collected plate result. The
-        # annotated `@plate for` lowering does exactly that for `loc[i] = ...`:
-        # the inner `loc` is the value used by later statements in that cell,
+        # annotated `@plate for` lowering does exactly that for `loc[i] = ...`
+        # when later statements in that cell read `loc[i]`: the inner `loc` is
+        # the value those statements use,
         # while the outer declaration already exposes the collected `loc`.
         # Do not claim the promoted inner carrier a second time under the same
         # logical name; it would make `brm_output(d, :loc)` spuriously
