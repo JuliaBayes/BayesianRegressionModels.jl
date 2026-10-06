@@ -641,7 +641,10 @@ end
 #
 # An indexed read becomes one kernel positional and one cell parameter. An
 # indexed assignment becomes a named cell value; the final indexed assignment
-# is the collected kernel result. Bare assignments remain cell locals. This
+# is the collected kernel result. When that assignment is the cell's last
+# statement its right-hand side is the cell's return value, as in a closure
+# ending in an expression; otherwise the named value is returned. Bare
+# assignments remain cell locals. This
 # retains the StanBlocks/RKPPL distinction between model-scope indexed outputs
 # and per-cell bare locals without asking either backend to learn new IR.
 _is_brm_plate(x) = Meta.isexpr(x, :macrocall) && !isempty(x.args) &&
@@ -796,8 +799,19 @@ function _brm_plate_kernel(x::Expr)
         "@brm: kernel `@plate` cell local `$(params[collision])` shadows a " *
         "sliced input of the same name")
 
+    # A terminal `target[i] = expr` IS the cell's value: return `expr` directly,
+    # exactly as a closure ending in `expr` does. Binding it to a cell local
+    # first would make StanBlocks promote that local to a second, identical
+    # posterior carrier and copy it into the collected result. An output that
+    # later statements read stays a local and is returned by name.
     target = last(outputs)
-    push!(rewritten, target)
+    final = findlast(stmt -> !(stmt isa LineNumberNode), rewritten)
+    if Meta.isexpr(stmts[final], :(=), 2) && _brm_plate_indexed(stmts[final].args[1], i) &&
+       stmts[final].args[1].args[1] === target
+        rewritten[final] = rewritten[final].args[2]
+    else
+        push!(rewritten, target)
+    end
     lambda = Expr(:->, Expr(:tuple, params...), Expr(:block, rewritten...))
     call = Expr(:call, :kernel, lambda, positionals...)
     Expr(:call, :~, target, call)
