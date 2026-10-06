@@ -193,6 +193,60 @@ kernel_df = (;
     @test StanBlocks.stanc_check(prior_code; warn_pedantic=false).ok
 end
 
+# A latent scalar whose prior reads another parameter (`a ~ Normal(0, tau)`)
+# is a prior when another statement reads it and its RHS reads no row-varying
+# value. Statements nothing reads, and statements reading data rows, keep the
+# omitted-response meaning: they stay observations, warn, and twin.
+@testset "latent scalar priors classify as priors; omitted responses stay observations" begin
+    roles(sb) = Dict(d.target => d.role for d in generative_plan(sb).declarations)
+    x, y = joint_df.x, joint_df.y
+    hierarchical = @brm begin
+        tau ~ Exponential(1)
+        log_a ~ Normal(0, tau)
+        sigma ~ Exponential(1)
+        mu = exp(log_a) * x
+        y ~ Normal(mu, sigma)
+    end
+    sb = @test_logs min_level=Warn SBBRMI(hierarchical((; x, y)); mod=@__MODULE__)
+    @test roles(sb)[:log_a] === :prior
+    @test sb.model.observations == (:y,)
+    ids = Set(c.id for c in brm_description(sb).components)
+    @test (:parameter, :log_a) in ids && (:observation, :log_a) ∉ ids
+    prior = @test_logs (:warn, r"^sbimpl: `y` bind\(s\) no data column") SBBRMI(
+        hierarchical((; x)); mod=@__MODULE__)
+    @test roles(prior)[:log_a] === :prior
+    prior_code = BayesianRegressionModels.stan_code(prior)
+    @test occursin("y_gen", prior_code) && !occursin("log_a_gen", prior_code)
+    @test StanBlocks.stanc_check(prior_code; warn_pedantic=false).ok
+
+    # Control: an intercept-only response nothing reads stays an observation.
+    leaf = @brm begin
+        mu0 ~ Normal(0, 10)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu0, sigma)
+    end
+    omitted = @test_logs (:warn, r"^sbimpl: `y` bind\(s\) no data column") SBBRMI(
+        leaf((; x)); mod=@__MODULE__)
+    @test roles(omitted)[:y] === :observation
+    @test omitted.model.observations == (:y,)
+    @test occursin("y_gen", BayesianRegressionModels.stan_code(omitted))
+
+    # Control: a read-downstream response over data rows stays an observation,
+    # so a missing mediator column still warns.
+    mediator = @brm begin
+        s_m ~ Exponential(1)
+        sigma ~ Exponential(1)
+        m_mu ~ 1 + x
+        m ~ Normal(m_mu, s_m)
+        y_mu ~ 1 + m
+        y ~ Normal(y_mu, sigma)
+    end
+    missing_m = @test_logs (:warn, r"^sbimpl: `m` bind\(s\) no data column") SBBRMI(
+        mediator((; x, y)); mod=@__MODULE__)
+    @test roles(missing_m)[:m] === :observation
+    @test missing_m.model.observations == (:m, :y)
+end
+
 @testset "kernel-nested response hold-out" begin
     brmi = kernel_builder(kernel_df)
     ordinary = SBBRMI(brmi; mod=@__MODULE__)

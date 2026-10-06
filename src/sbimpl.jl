@@ -4116,25 +4116,50 @@ _sb_plan_obs_shaped(rhs::Expr) =
     !isempty(_sb_plan_value_refs(rhs.args[2:end]))
 
 # Formula keys whose unbound top-level `~` may classify as an observation.
-# A statement whose RHS reads only literals and scalar data constants is a
-# parameter prior: a named numeric constant rides in data exactly where a
-# literal would sit (brm-use "named numeric constants ride in data"), so
-# `a ~ normal(a0, s0)` classifies like `a ~ normal(0.1, 0.5)`. It reads no
-# parameter, so even a bound column under it would inform nothing.
+# Two shapes are parameter priors rather than omitted responses:
+# - the RHS reads only literals and scalar data constants. A named numeric
+#   constant rides in data exactly where a literal would sit (brm-use "named
+#   numeric constants ride in data"), so `a ~ normal(a0, s0)` classifies like
+#   `a ~ normal(0.1, 0.5)`. It reads no parameter, so even a bound column
+#   under it would inform nothing.
+# - the RHS reads no row-varying value and another statement reads the
+#   target: a latent such as `a ~ normal(0, tau)` feeding `mu = exp(a) .* x`.
+#   A leaf nothing reads (`y ~ normal(mu0, sigma)`) stays an observation —
+#   that is the omitted-response spelling — and so does a statement reading
+#   non-scalar data or anything computed from it (`m ~ normal(m_mu, s)`).
 function _sb_plan_observation_keys(body, data, formula_keys)
     constants = Set{Symbol}(k for (k, v) in pairs(data) if v isa Real)
+    varying = setdiff(Set{Symbol}(keys(data)), constants)
+    statements = _sb_plan_statements(body)
+    read = Set{Symbol}()
+    for stmt in statements
+        rhs = _sb_plan_statement_rhs(stmt)
+        isnothing(rhs) || _sb_plan_value_refs!(read, rhs)
+    end
     observable = Set{Symbol}(formula_keys)
-    for stmt in _sb_plan_statements(body)
-        stmt isa Expr && stmt.head === :call && length(stmt.args) == 3 &&
-            stmt.args[1] === :~ || continue
-        target = _sb_plan_lhs_name(stmt.args[2])
-        refs = _sb_plan_value_refs(stmt.args[3])
-        !isempty(refs) && issubset(refs, constants) && delete!(observable, target)
+    # Emission order is definition order, so one forward pass propagates
+    # row variation through assignments and sampled statements.
+    for stmt in statements
+        rhs = _sb_plan_statement_rhs(stmt)
+        isnothing(rhs) && continue
+        refs = _sb_plan_value_refs(rhs)
+        if any(in(varying), refs)
+            union!(varying, _sb_plan_param_names(stmt.args[end - 1]))
+        elseif stmt.head === :call && !isempty(refs)
+            target = _sb_plan_lhs_name(stmt.args[2])
+            (issubset(refs, constants) || target in read) &&
+                delete!(observable, target)
+        end
     end
     observable
 end
 _sb_plan_statements(x::Expr) = x.head === :block ? x.args : (x,)
 _sb_plan_statements(x) = (x,)
+# The RHS of a top-level `lhs ~ rhs` or `lhs = rhs`; `nothing` otherwise.
+_sb_plan_statement_rhs(x::Expr) =
+    x.head === :call && length(x.args) == 3 && x.args[1] === :~ ? x.args[3] :
+    x.head === :(=) && length(x.args) == 2 ? x.args[2] : nothing
+_sb_plan_statement_rhs(_) = nothing
 
 # The declaration inventory of an emitted top-level body, shared by the
 # construction triage, the SLIC observation declaration and `generative_plan`.
