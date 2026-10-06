@@ -41,6 +41,20 @@ do not affect the comparison. Dependency pins, Julia version and host load shoul
 accompany timing reports; package-image rebuilding belongs to the separate
 loading phase.
 
+`benchmark_emission_breadth.jl` measures compiler work across many independently
+named but structurally identical BRMs. The names deliberately give each model a
+different `BRMI` carrier type while the statistical work stays fixed, exposing
+planner or emitter specialization that grows with corpus breadth. It reports RK
+artifact and StanBlocks construction separately, then repeats the first model as
+a warm control. As above, compare cumulative compiler time and allocation from
+fresh processes on the same host; the script has no shared-host timing threshold:
+
+```sh
+julia --startup-file=no --project=. test/benchmark_emission_breadth.jl 12 both
+julia --startup-file=no --project=. test/benchmark_emission_breadth.jl 12 rk
+julia --startup-file=no --project=. test/benchmark_emission_breadth.jl 12 sb
+```
+
 ## Description PDF rendering
 
 `description_tex.jl` checks Student-t sampling equations for standard, affine,

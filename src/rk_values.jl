@@ -420,7 +420,10 @@ function _rk_has_value_call(expression::_BRMPreparedExpr)
         any(_rk_has_value_call, values(expression.kwargs))
 end
 
-function _rk_predictor_components(brmi, context, predictor_order, columns,
+# Model-wide orchestration over already boxed plan carriers. Do not infer this
+# loop again from each source BRMI's NamedTuple type; term-level helpers still
+# dispatch on the expression values they consume.
+Base.@nospecializeinfer function _rk_predictor_components(@nospecialize(brmi), context, predictor_order, columns,
         derived, taken, parameters)
     predictors = _RKPredictorSpec[]
     priors = _RKPopulationPrior[]

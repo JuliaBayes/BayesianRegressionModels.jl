@@ -66,7 +66,7 @@ Base.@nospecializeinfer function _brm_rk_plan(@nospecialize(brmi::BRMI); held_ou
     isempty(selected) ? original : _RKHeldOutPlan(original, selected)
 end
 
-function _rk_held_out_selection(brmi, held_out)
+Base.@nospecializeinfer function _rk_held_out_selection(@nospecialize(brmi), held_out)
     request = _brm_held_out_request(held_out; prefix="RK backend")
     isempty(request.names) && return Set{Symbol}()
     aliases = Dict{Symbol,Set{Symbol}}()

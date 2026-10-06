@@ -13,7 +13,7 @@
 using Test
 using BayesianRegressionModels
 using Distributions: Exponential, Normal, logpdf
-using ReactiveKernelsPPL: build_kernel, prepare_query
+using ReactiveKernelsPPL: build_kernel, coordinate_names, prepare_query
 using StanBlocks
 
 const BRM = BayesianRegressionModels
@@ -165,10 +165,17 @@ end
     translated = BRM.rk_translate_artifact(b)
     @test b.plan.n_obs == 6
     u = [0.5, -0.25, 0.1]
-    v = _spec_posterior(build_kernel(translated), translated, u)
-    sigma = exp(u[3])
-    oracle = sum(wdf.n .* logpdf.(Normal.(u[1] .+ u[2] .* wdf.x, sigma), wdf.y)) +
-        sum(logpdf.(Normal(), u[1:2])) + logpdf(Exponential(1), sigma) + u[3]
+    model = build_kernel(translated)
+    v = _spec_posterior(model, translated, u)
+    coordinates = Dict(coordinate_names(model.layout) .=> u)
+    coefficients = [coordinates[Symbol("pop_mu.beta_pop.1")],
+        coordinates[Symbol("pop_mu.beta_pop.2")]]
+    log_sigma = coordinates[:sigma]
+    sigma = exp(log_sigma)
+    oracle = sum(wdf.n .* logpdf.(
+        Normal.(coefficients[1] .+ coefficients[2] .* wdf.x, sigma), wdf.y)) +
+        sum(logpdf.(Normal(), coefficients)) +
+        logpdf(Exponential(1), sigma) + log_sigma
     @test v ≈ oracle atol=1e-12
 end
 

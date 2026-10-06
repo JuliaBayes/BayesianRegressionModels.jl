@@ -90,7 +90,7 @@ function _brm_term_address_map(brmi::BRMI, target::Symbol)
 end
 
 """Resolve and account for every term-prior statement before backend lowering."""
-function _brm_resolve_term_priors(brmi::BRMI; prefix="BRM preparation")
+Base.@nospecializeinfer function _brm_resolve_term_priors(@nospecialize(brmi::BRMI); prefix="BRM preparation")
     specs = term_priors(brmi)
     result = Dict{Symbol,Dict{Symbol,Dict{Symbol,Any}}}()
     isempty(specs) && return result

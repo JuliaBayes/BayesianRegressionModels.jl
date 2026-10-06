@@ -192,7 +192,7 @@ function _brm_joint_r2d2_plans(brmi::BRMI, components; prefix="BRM preparation")
     Tuple(out)
 end
 
-function _brm_whole_predictor_r2d2(brmi::BRMI, design, coefficient_priors;
+Base.@nospecializeinfer function _brm_whole_predictor_r2d2(@nospecialize(brmi::BRMI), design, coefficient_priors;
                                     prefix="BRM preparation",
                                     available_predictors=(design.target,))
     any(spec -> isnothing(spec.predictor), r2d2_priors(brmi)) &&

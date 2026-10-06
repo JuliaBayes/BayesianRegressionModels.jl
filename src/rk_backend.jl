@@ -552,7 +552,7 @@ const _RK_ADMITTED_SPELLINGS =
     "parameter, scalar assignment, or positive literal), or group C: " *
     "`y ~ Exponential(mu)` + `log(mu) ~ ...`"
 
-function _rk_predictor_link(brmi::BRMI, target::Symbol)
+Base.@nospecializeinfer function _rk_predictor_link(@nospecialize(brmi::BRMI), target::Symbol)
     prefix = "RK backend"
     op = linear_predictor_op(brmi, target)
     lhs, _ = getargs(op, 2)
@@ -3169,7 +3169,7 @@ function _rk_materialize_effect_prior_cells(overrides, n::Integer,
     cells
 end
 
-function _rk_population_priors(brmi::BRMI, design, target::Symbol,
+Base.@nospecializeinfer function _rk_population_priors(@nospecialize(brmi::BRMI), design, target::Symbol,
         available::Tuple, factor_addressees::Set{Symbol},
         terms::Vector{_RKTermSpec}, derived::Vector{_RKDerivedSpec},
         r2d2::Union{Nothing,_BRMR2D2Plan}, hs_addressees::Set{Symbol};
@@ -3917,7 +3917,7 @@ function _rk_lower_ranef_gr_bucket(context, gcol::NamedColumn, bcol::NamedColumn
         _rk_ranef_bucket_label(nothing, sym), grouping)
 end
 
-function _rk_plan_ranef_buckets(brmi::BRMI, context,
+Base.@nospecializeinfer function _rk_plan_ranef_buckets(@nospecialize(brmi::BRMI), context,
         predictor_order::Vector{Symbol},
         columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol},
         derived::Vector{_RKDerivedSpec})
@@ -4176,7 +4176,7 @@ end
 # spline surface takes default half-normal scales and fails overrides
 # closed, so BRM rejects them here with RK attribution instead of
 # emitting a default the formula did not ask for.
-function _rk_gate_spline_term_priors!(brmi::BRMI, target::Symbol,
+Base.@nospecializeinfer function _rk_gate_spline_term_priors!(@nospecialize(brmi::BRMI), target::Symbol,
         spline_raw::AbstractVector)
     prefix = "RK backend"
     isempty(spline_raw) && return nothing
@@ -4530,7 +4530,7 @@ end
 # resolves `effect(mu, ar_x)` and rejects `effect(mu, ar_mu_x)`
 # ("not a population coefficient"), and the RK side matches both —
 # the namespaced spelling falls through to the shared seam below.
-function _rk_gate_ar_effect_priors!(brmi::BRMI, target::Symbol,
+Base.@nospecializeinfer function _rk_gate_ar_effect_priors!(@nospecialize(brmi::BRMI), target::Symbol,
         ar_raw::AbstractVector)
     prefix = "RK backend"
     isempty(ar_raw) && return nothing
@@ -4699,7 +4699,7 @@ end
 # `_rk_plan_r2d2_prior` (an r2d2 + Horseshoe combination fails closed
 # here, ahead of the R2D2 override composition that would otherwise
 # misread the Horseshoe cells as Normals).
-function _rk_horseshoe_priors(brmi::BRMI, design, target::Symbol,
+Base.@nospecializeinfer function _rk_horseshoe_priors(@nospecialize(brmi::BRMI), design, target::Symbol,
         available::Tuple, terms::Vector{_RKTermSpec},
         r2d2::Union{Nothing,_BRMR2D2Plan}; tolerant_default::Bool=false)
     prefix = "RK backend"
@@ -5156,7 +5156,7 @@ end
 # coefficient". Reject it here with RK attribution instead. Runs before
 # predictor geometry (which invokes the shared seam); labels derive
 # syntactically, leniently — malformed terms stay shared prep's error.
-function _rk_gate_me_effect_priors!(brmi::BRMI, target::Symbol,
+Base.@nospecializeinfer function _rk_gate_me_effect_priors!(@nospecialize(brmi::BRMI), target::Symbol,
         me_raw::AbstractVector)
     prefix = "RK backend"
     isempty(me_raw) && return nothing
@@ -5226,7 +5226,7 @@ function _rk_plan_me_observations!(response_specs::Vector{_RKLikelihoodSpec},
     nothing
 end
 
-function _rk_plan_predictor(brmi::BRMI, context, target::Symbol,
+Base.@nospecializeinfer function _rk_plan_predictor(@nospecialize(brmi::BRMI), context, target::Symbol,
         available::Tuple, columns::Dict{Symbol,AbstractVector},
         derived::Vector{_RKDerivedSpec}, taken::Set{Symbol},
         ranef_buckets::Dict{Tuple{Symbol,Symbol,Union{Nothing,Symbol}},
@@ -7023,7 +7023,7 @@ end
 # The kernel RHS is an ExprColumn whose head is the `kernel` marker; its first
 # positional arg is the do-block cell (a verbatim `:->` lambda), the rest are the
 # per-subject positional args.
-function _rk_kernel_ops(brmi::BRMI)
+Base.@nospecializeinfer function _rk_kernel_ops(@nospecialize(brmi::BRMI))
     ops = Tuple{Symbol,Any}[]
     for (key, op_nc) in pairs(brmi.operations)
         op_nc isa NamedColumn || continue
@@ -7342,7 +7342,7 @@ end
 # A fitted predictor depends on the resolved priors of its random-effect
 # margins. Discover those caller dependencies before filtering scalar draws;
 # an SD declaration is metadata rather than a normal formula operand.
-function _rk_with_ranef_prior_dependencies(brmi, program, roots)
+Base.@nospecializeinfer function _rk_with_ranef_prior_dependencies(@nospecialize(brmi), program, roots)
     specs = [spec for spec in ranef_effect_priors(brmi)
         if !(spec.class === :sd && spec.family === r2d2)]
     any(spec -> spec.class === :sd &&

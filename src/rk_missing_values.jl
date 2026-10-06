@@ -132,7 +132,7 @@ function _rk_model_random_effect_columns(term; cellmeans=false, context)
     column === nothing ? _brm_random_effect_columns(term; cellmeans) : (column,)
 end
 
-function _rk_model_predictor_geometry(brmi, context, target; kwargs...)
+Base.@nospecializeinfer function _rk_model_predictor_geometry(@nospecialize(brmi), context, target; kwargs...)
     data = copy(context.data)
     geometry_context = _BRMBackendContext(context.parent, data, context.prepass,
         context.target_obs, context.target_axes, context.term_priors,

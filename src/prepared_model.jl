@@ -395,8 +395,8 @@ function Base.getproperty(p::_BRMPreparedPredictorGeometry, field::Symbol)
         getproperty(getfield(p, :component), field)
 end
 
-function _brm_prepare_predictor_geometry(
-        brmi::BRMI, context::_BRMBackendContext, predictor::Symbol;
+Base.@nospecializeinfer function _brm_prepare_predictor_geometry(
+        @nospecialize(brmi::BRMI), context::_BRMBackendContext, predictor::Symbol;
         available_predictors=(predictor,), training=nothing,
         tolerant_default::Bool=false, matched_defaults=nothing,
         population_columns=_brm_population_columns,
