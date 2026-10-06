@@ -7,7 +7,8 @@ using DifferentiationInterface: AutoEnzyme
 import LogDensityProblems: dimension, logdensity, logdensity_and_gradient
 using LinearAlgebra: cholesky, Symmetric, diagind
 using Statistics: mean
-using LogExpFunctions: logit
+using LogExpFunctions: logit, logistic
+using BayesianRegressionModels: Cumulative, StoppingRatio, LogitLink, ProbitLink
 include(joinpath(@__DIR__, "testset_filter.jl"))
 const BRM = BayesianRegressionModels
 include(joinpath(@__DIR__, "rk_source_roundtrip.jl"))
@@ -399,4 +400,144 @@ end
     mu = only(nt.pop_mu.beta_pop) .+ C[gi, 1] .+ (df.c .== 4) .* C[gi, 2] .+ (df.c .== 6) .* C[gi, 3]
     @test value_query(backend, :pointwise, u).y ≈
         logpdf.(Normal.(mu[df.rows], 1), df.y)
+end
+
+# P(y = k) = logistic(c[k] - eta) - logistic(c[k - 1] - eta), with
+# c[0] = -Inf and c[K] = Inf: Stan's ordered_logistic on the 1:K scale.
+function ordered_logistic_reference(eta, c, k)
+    upper = k > length(c) ? 1.0 : logistic(c[k] - eta)
+    lower = k == 1 ? 0.0 : logistic(c[k - 1] - eta)
+    log(upper - lower)
+end
+
+@stestset "legacy OrderedLogistic reads an authored location" begin
+    # Gappy codes: K = maximum(y) = 4 with level 3 unobserved, as SBBRMI.
+    df = (; x=[-1.2, -0.4, 0.1, 0.5, 0.9, 1.4, -0.8, 0.3],
+        y=[1, 2, 2, 4, 4, 4, 1, 2])
+    saved = deepcopy(df)
+    brmi = @brm df begin
+        slope ~ 0 + x
+        bias ~ Normal(0, 1)
+        loc = slope + bias
+        y ~ OrderedLogistic(loc)
+    end
+    backend = RKBRMI(brmi)
+    @test backend.plan isa BRM._RKValuePlan
+    source = string(Base.remove_linenums!(deepcopy(BRM._rk_emit_ast(backend.plan).main)))
+    @test occursin("y_cutpoints ~ Ordered(Normal(0.0, 1.0), 3)", source)
+    @test occursin("y .~ OrderedLogistic.(loc, Ref(y_cutpoints))", source)
+    u = check_value_gradient(backend)
+    nt = constrain(backend.model.layout, u)
+    c = nt.y_cutpoints
+    @test length(c) == 3 && issorted(c)
+    eta = only(nt.pop_slope.beta_pop) .* df.x .+ nt.bias
+    expected_ll = ordered_logistic_reference.(eta, Ref(c), df.y)
+    @test value_query(backend, :pointwise, u).y ≈ expected_ll
+    @test value_query(backend, :likelihood, u) ≈ sum(expected_ll)
+    prior = logpdf(Normal(), only(nt.pop_slope.beta_pop)) +
+        logpdf(Normal(), nt.bias) + sum(logpdf.(Normal(), c))
+    @test value_query(backend, :prior, u) ≈ prior
+    # First cutpoint free, later cutpoints through log increments.
+    @test value_query(backend, :sampler, u) ≈ prior + sum(expected_ll) + sum(log.(diff(c)))
+    artifact = BRM.emit_rk_artifact(brmi; case_id="authored-ordered-logistic")
+    rebuilt = build_kernel(BRM.rk_translate_artifact(artifact))
+    @test coordinate_names(rebuilt.layout) == coordinate_names(backend.model.layout)
+    @test isequal(df, saved)
+end
+
+ordinal_reference_cdf(::BRM.LogitLink, z) = logistic(z)
+ordinal_reference_cdf(::BRM.ProbitLink, z) = cdf(Normal(), z)
+
+# Cumulative: P(y <= k) = F(d * (c[k] - eta)). Stopping ratio: stage j stops
+# with F(d * (c[j] - eta - effect[j])), and continues otherwise.
+function ordinal_reference(::BRM.Cumulative, link, eta, c, d, effect, k)
+    upper = k > length(c) ? 1.0 : ordinal_reference_cdf(link, d * (c[k] - eta))
+    lower = k == 1 ? 0.0 : ordinal_reference_cdf(link, d * (c[k - 1] - eta))
+    log(upper - lower)
+end
+function ordinal_reference(::BRM.StoppingRatio, link, eta, c, d, effect, k)
+    q(j) = ordinal_reference_cdf(link, d * (c[j] - eta - effect[j]))
+    sum(log1p(-q(j)) for j in 1:k-1; init=0.0) + (k > length(c) ? 0.0 : log(q(k)))
+end
+
+@stestset "ordinal value responses read authored locations" begin
+    # Observed codes 1, 2, 4: fitted levels recode them to 1:3 (two thresholds).
+    df = (; x=[-1.2, -0.4, 0.1, 0.5, 0.9, 1.4, -0.8, 0.3],
+        z=[0.3, -0.2, 0.5, 0.1, -0.7, 0.9, 0.2, -0.4],
+        y=[1, 2, 2, 4, 4, 4, 1, 2])
+    coded = [1, 2, 2, 3, 3, 3, 1, 2]
+    saved = deepcopy(df)
+    cases = (
+        ("cumulative logit", BRM.Cumulative(), BRM.LogitLink(), 1.0, false, @brm(df, begin
+            slope ~ 0 + x
+            bias ~ Normal(0, 1)
+            loc = slope + bias
+            y ~ Ordinal(Cumulative(), LogitLink(), loc)
+        end)),
+        ("cumulative probit discrimination", BRM.Cumulative(), BRM.ProbitLink(), 2.0, false, @brm(df, begin
+            slope ~ 0 + x
+            bias ~ Normal(0, 1)
+            loc = slope + bias
+            y ~ Ordinal(Cumulative(), ProbitLink(), loc; discrimination=2.0)
+        end)),
+        ("stopping ratio threshold effects", BRM.StoppingRatio(), BRM.LogitLink(), 1.0, true, @brm(df, begin
+            slope ~ 0 + x
+            bias ~ Normal(0, 1)
+            loc = slope + bias
+            y ~ Ordinal(StoppingRatio(), LogitLink(), loc; per_threshold=(z,))
+        end)))
+    for (label, structure, link, d, effects, brmi) in cases
+        @testset "$label" begin
+            backend = RKBRMI(brmi)
+            @test backend.plan isa BRM._RKValuePlan
+            u = check_value_gradient(backend)
+            nt = constrain(backend.model.layout, u)
+            c = nt.y_thresholds
+            @test length(c) == 2
+            beta = effects ? nt.y_threshold_beta : zeros(1, 2)
+            @test size(beta) == (1, 2)
+            eta = only(nt.pop_slope.beta_pop) .* df.x .+ nt.bias
+            effect = effects ? df.z * beta : zeros(length(df.y), 2)
+            expected_ll = [ordinal_reference(structure, link, eta[i], c, d, effect[i, :], coded[i])
+                for i in eachindex(coded)]
+            @test value_query(backend, :pointwise, u).y ≈ expected_ll
+            prior = logpdf(Normal(), only(nt.pop_slope.beta_pop)) +
+                logpdf(Normal(), nt.bias) + sum(logpdf.(Normal(), c)) +
+                sum(logpdf.(Normal(), beta); init=0.0) * effects
+            @test value_query(backend, :prior, u) ≈ prior
+            jac = structure isa BRM.Cumulative ? sum(log.(diff(c))) : 0.0
+            @test value_query(backend, :sampler, u) ≈ prior + sum(expected_ll) + jac
+            artifact = BRM.emit_rk_artifact(brmi; case_id="authored-ordinal")
+            rebuilt = build_kernel(BRM.rk_translate_artifact(artifact))
+            @test coordinate_names(rebuilt.layout) == coordinate_names(backend.model.layout)
+        end
+    end
+    @test isequal(df, saved)
+end
+
+@stestset "categorical logit value response codes fitted labels" begin
+    df = (; x=[-1.2, -0.4, 0.1, 0.5, 0.9, 1.4, -0.8, 0.3],
+        c=["b", "a", "c", "a", "b", "c", "c", "a"])
+    saved = deepcopy(df)
+    brmi = @brm df begin
+        s2 ~ 0 + x
+        b2 ~ Normal(0, 1)
+        e2 = s2 + b2
+        e3 = 0.5 * s2
+        c ~ CategoricalLogit(e2, e3)
+    end
+    backend = RKBRMI(brmi)
+    @test backend.plan isa BRM._RKValuePlan
+    u = check_value_gradient(backend)
+    nt = constrain(backend.model.layout, u)
+    s2 = only(nt.pop_s2.beta_pop) .* df.x
+    logits = [zeros(length(df.x)) s2 .+ nt.b2 0.5 .* s2]  # reference level "a"
+    code = Dict("a" => 1, "b" => 2, "c" => 3)
+    expected_ll = [logits[i, code[df.c[i]]] - log(sum(exp, logits[i, :]))
+        for i in eachindex(df.c)]
+    @test value_query(backend, :pointwise, u).c ≈ expected_ll
+    artifact = BRM.emit_rk_artifact(brmi; case_id="authored-categorical-logit")
+    rebuilt = build_kernel(BRM.rk_translate_artifact(artifact))
+    @test coordinate_names(rebuilt.layout) == coordinate_names(backend.model.layout)
+    @test isequal(df, saved)
 end
