@@ -3561,11 +3561,7 @@ end
 # resolve with the same role logic the plan itself uses; synthesized latents
 # (`total`, `tau`, LKJ factors) never match and stay priors.
 Base.@nospecializeinfer function _sb_triage_emitted(@nospecialize(sb::SBBRMI))
-    declarations = GenerativeDeclaration[]
-    data_scope = Dict{Symbol,Union{Nothing,Symbol}}(k => k for k in keys(sb.data))
-    obs_keys = Set{Symbol}(keys(sb.parent.operations))
-    _sb_plan_collect!(declarations, sb.model.model, data_scope, (), obs_keys,
-                      Set{Symbol}(), _sb_unbound_cell_observations(sb.parent))
+    declarations = _sb_plan_declarations(sb.model.model, sb.data, sb.parent)
     missing_sources = Set{Symbol}()
     fresh_sources = _sb_existing_covariates(sb.preproc)
     for e in values(sb.preproc)
@@ -3610,11 +3606,7 @@ end
 # StanBlocks emits an alias twin when they redraw in GQ. Cell-local unbound
 # targets stay excluded because they lie outside that twin scope.
 Base.@nospecializeinfer function _sb_declared_observations(body, data, @nospecialize(brmi))
-    declarations = GenerativeDeclaration[]
-    data_scope = Dict{Symbol,Union{Nothing,Symbol}}(k => k for k in keys(data))
-    obs_keys = Set{Symbol}(keys(brmi.operations))
-    _sb_plan_collect!(declarations, body, data_scope, (), obs_keys, Set{Symbol}(),
-                      _sb_unbound_cell_observations(brmi))
+    declarations = _sb_plan_declarations(body, data, brmi)
     Tuple(sort!(unique(Symbol[isnothing(d.data_source) ? d.target : d.data_source
         for d in declarations if d.role === :observation &&
             (!isnothing(d.data_source) || isempty(d.context))])))
@@ -4103,26 +4095,82 @@ function _sb_plan_plate_parts(x::Expr)
     (; iterables=Tuple(iterables), params, body=lambda.args[2])
 end
 
-# Emitted-RHS STRICT check: does this distribution call reference a value (a
-# bare Symbol in argument position), as opposed to bare literals? Call heads
-# are skipped — only argument positions count.
-_sb_plan_value_ref(x::Symbol) = true
-_sb_plan_value_ref(::QuoteNode) = false
-_sb_plan_value_ref(x::Expr) =
-    x.head === :parameters ? any(_sb_plan_kw_ref, x.args) :
-    x.head === :call ? any(_sb_plan_value_ref, x.args[2:end]) :
-    x.head === :kw ? (length(x.args) >= 2 && _sb_plan_value_ref(x.args[2])) :
-    any(_sb_plan_value_ref, x.args)
-_sb_plan_value_ref(x::AbstractVector) = any(_sb_plan_value_ref, x)
-_sb_plan_value_ref(_) = false
-_sb_plan_kw_ref(x::Expr) =
-    x.head === :kw ? (length(x.args) >= 2 && _sb_plan_value_ref(x.args[2])) :
-    _sb_plan_value_ref(x)
-_sb_plan_kw_ref(x) = _sb_plan_value_ref(x)
+# Emitted-RHS value references: the bare Symbols in argument positions, as
+# opposed to bare literals. Call heads and keyword names are skipped — only
+# argument positions count.
+_sb_plan_value_refs!(out, x::Symbol) = push!(out, x)
+_sb_plan_value_refs!(out, ::QuoteNode) = out
+function _sb_plan_value_refs!(out, x::Expr)
+    args = x.head === :call || x.head === :kw ? x.args[2:end] : x.args
+    foreach(a -> _sb_plan_value_refs!(out, a), args)
+    out
+end
+_sb_plan_value_refs!(out, x::AbstractVector) =
+    (foreach(a -> _sb_plan_value_refs!(out, a), x); out)
+_sb_plan_value_refs!(out, _) = out
+_sb_plan_value_refs(x) = _sb_plan_value_refs!(Set{Symbol}(), x)
+# STRICT check: does this distribution call reference a value at all?
 _sb_plan_obs_shaped(rhs) = false
 _sb_plan_obs_shaped(rhs::Expr) =
     rhs.head === :call && length(rhs.args) >= 2 &&
-    any(_sb_plan_value_ref, rhs.args[2:end])
+    !isempty(_sb_plan_value_refs(rhs.args[2:end]))
+
+# Formula keys whose unbound top-level `~` may classify as an observation.
+# Two shapes are parameter priors rather than omitted responses:
+# - the RHS reads only literals and scalar data constants. A named numeric
+#   constant rides in data exactly where a literal would sit (brm-use "named
+#   numeric constants ride in data"), so `a ~ normal(a0, s0)` classifies like
+#   `a ~ normal(0.1, 0.5)`. It reads no parameter, so even a bound column
+#   under it would inform nothing.
+# - the RHS reads no row-varying value and another statement reads the
+#   target: a latent such as `a ~ normal(0, tau)` feeding `mu = exp(a) .* x`.
+#   A leaf nothing reads (`y ~ normal(mu0, sigma)`) stays an observation —
+#   that is the omitted-response spelling — and so does a statement reading
+#   non-scalar data or anything computed from it (`m ~ normal(m_mu, s)`).
+function _sb_plan_observation_keys(body, data, formula_keys)
+    constants = Set{Symbol}(k for (k, v) in pairs(data) if v isa Real)
+    varying = setdiff(Set{Symbol}(keys(data)), constants)
+    statements = _sb_plan_statements(body)
+    read = Set{Symbol}()
+    for stmt in statements
+        rhs = _sb_plan_statement_rhs(stmt)
+        isnothing(rhs) || _sb_plan_value_refs!(read, rhs)
+    end
+    observable = Set{Symbol}(formula_keys)
+    # Emission order is definition order, so one forward pass propagates
+    # row variation through assignments and sampled statements.
+    for stmt in statements
+        rhs = _sb_plan_statement_rhs(stmt)
+        isnothing(rhs) && continue
+        refs = _sb_plan_value_refs(rhs)
+        if any(in(varying), refs)
+            union!(varying, _sb_plan_param_names(stmt.args[end - 1]))
+        elseif stmt.head === :call && !isempty(refs)
+            target = _sb_plan_lhs_name(stmt.args[2])
+            (issubset(refs, constants) || target in read) &&
+                delete!(observable, target)
+        end
+    end
+    observable
+end
+_sb_plan_statements(x::Expr) = x.head === :block ? x.args : (x,)
+_sb_plan_statements(x) = (x,)
+# The RHS of a top-level `lhs ~ rhs` or `lhs = rhs`; `nothing` otherwise.
+_sb_plan_statement_rhs(x::Expr) =
+    x.head === :call && length(x.args) == 3 && x.args[1] === :~ ? x.args[3] :
+    x.head === :(=) && length(x.args) == 2 ? x.args[2] : nothing
+_sb_plan_statement_rhs(_) = nothing
+
+# The declaration inventory of an emitted top-level body, shared by the
+# construction triage, the SLIC observation declaration and `generative_plan`.
+function _sb_plan_declarations(body, data, @nospecialize(brmi))
+    declarations = GenerativeDeclaration[]
+    data_scope = Dict{Symbol,Union{Nothing,Symbol}}(k => k for k in keys(data))
+    _sb_plan_collect!(declarations, body, data_scope, (),
+                      _sb_plan_observation_keys(body, data, keys(brmi.operations)),
+                      Set{Symbol}(), _sb_unbound_cell_observations(brmi))
+    declarations
+end
 
 function _sb_plan_collect!(declarations, x, data_scope, context, obs_keys, plate_params,
                            unbound_cell)
@@ -4144,7 +4192,8 @@ function _sb_plan_collect!(declarations, x, data_scope, context, obs_keys, plate
         # observation — the response omitted from the data — not a prior.
         # Synthesized latents (`total`, `tau`, LKJ factors) have no formula
         # key and never match; literal priors (`sigma ~ exponential(1)`)
-        # fail the value check. Both stay `:prior`, exactly as before.
+        # fail the value check, and `obs_keys` already excludes priors over
+        # named data constants (`_sb_plan_observation_keys`). All stay `:prior`.
         role = if !isnothing(data_source)
             :observation
         elseif !isempty(context) && target in plate_params && _sb_plan_obs_shaped(rhs)
@@ -4197,11 +4246,7 @@ function _generative_plan(sb::SBBRMI, builder, cv_groups)
     preproc = deepcopy(sb.preproc)
     body = _sb_plan_copy(sb.model.model)
     model = StanBlocks.SlicModel(body, data, sb.model.mod, sb.model.observations)
-    declarations = GenerativeDeclaration[]
-    data_scope = Dict{Symbol,Union{Nothing,Symbol}}(k => k for k in keys(data))
-    obs_keys = Set{Symbol}(keys(parent.operations))
-    _sb_plan_collect!(declarations, body, data_scope, (), obs_keys, Set{Symbol}(),
-                      _sb_unbound_cell_observations(parent))
+    declarations = _sb_plan_declarations(body, data, parent)
     GenerativePlan(parent, model, data, preproc, Tuple(declarations), builder,
                    copy(cv_groups), copy(sb.held_out), deepcopy(sb.bindings))
 end
