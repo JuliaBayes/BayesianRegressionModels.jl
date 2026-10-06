@@ -265,6 +265,11 @@ function _sb_total_plan(brmi, prepared, predictor, overrides, buckets, sd_overri
     isnothing(frozen) || (A = copy(frozen.const_))
     prior_info = infos[absorbed]
     scale_priors = Any[]
+    # Per total column: the declared `|ID|` (or `nothing`) and whether an
+    # authored `sd(...)` statement selected its scale prior. Descriptions read
+    # these emitted facts instead of re-deriving the defaults below.
+    column_ids = Any[]
+    scale_configured = Bool[]
     claimed = Any[]
     for plan in plans
         if isnothing(plan.id)
@@ -272,6 +277,8 @@ function _sb_total_plan(brmi, prepared, predictor, overrides, buckets, sd_overri
                 # Plain scalar intercepts have the original log-normal scale
                 # prior; named buckets and scalar slopes use half-normal.
                 push!(scale_priors,isnothing(c.source) ? ExprColumn(LogNormal,0.,1.) : nothing)
+                push!(column_ids,nothing)
+                push!(scale_configured,false)
             end
         else
             keys_ = [key for (key,bucket) in buckets if first(key) === plan.id &&
@@ -282,6 +289,10 @@ function _sb_total_plan(brmi, prepared, predictor, overrides, buckets, sd_overri
             length(buckets[key].per_target) == 1 || return nothing
             sd = get(sd_overrides,key,nothing)
             append!(scale_priors,isnothing(sd) ? fill(nothing,length(plan.columns)) : sd.sd_prior)
+            for i in eachindex(plan.columns)
+                push!(column_ids,plan.id)
+                push!(scale_configured,!isnothing(sd) && !isnothing(sd.sd_prior[i]))
+            end
             push!(claimed,key)
         end
     end
@@ -294,7 +305,7 @@ function _sb_total_plan(brmi, prepared, predictor, overrides, buckets, sd_overri
         getf(prior) in (Normal,LogNormal,Cauchy,Exponential,TDist,LocationScale,Gamma) || return nothing
         isempty(_sb_prior_references(_sb_effect_prior_arg(prior))) || return nothing
     end
-    (; target,group,columns,design,A,prior_info,scale_priors,claimed,absorbed,remaining,
+    (; target,group,columns,design,A,prior_info,scale_priors,column_ids,scale_configured,claimed,absorbed,remaining,
        remaining_priors=all_priors[remaining],
        indices=first(plans).indices,levels=first(plans).levels)
 end
@@ -394,7 +405,12 @@ function _sb_emit_total!(stmts,data,target,plan;mod::Module=@__MODULE__)
     block = TotalEffectBlock(plan.target,plan.group,total,Symbol(tau,:_tau),beta,deviations,idx,ng,
         Tuple(c.label for c in plan.columns),Tuple(plan.design.columns[c].label for c in plan.absorbed),
         plan.A,copy(data[loc]),copy(data[prec]),mixture_indices,mixture)
-    data[_SB_BINDINGS_KEY][total] = (;role=:total_effect,logical=plan.target,family=:brm_total,total=block)
+    # The description reads the emitted scale priors, column identities and
+    # design order from this record; it never reparses the generated families.
+    data[_SB_BINDINGS_KEY][total] = (;role=:total_effect,logical=plan.target,family=:brm_total,total=block,
+        scale=tau,scale_priors=Tuple(plan.scale_priors),scale_configured=Tuple(plan.scale_configured),
+        column_ids=Tuple(plan.column_ids),design_labels=Tuple(c.label for c in plan.design.columns),
+        absorbed=Tuple(plan.absorbed))
     _sb_record_binding!(data,beta,:population_effect,plan.target)
     _sb_record_binding!(data,tau,:parameter,plan.target)
     nothing

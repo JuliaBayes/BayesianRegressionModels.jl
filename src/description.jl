@@ -182,7 +182,7 @@ function _brmd_prior_references!(ids,c::BRMDescriptionComponent)
         union!(ids,b.prior_ids)
     end
     for p in c.priors
-        if first(c.id)===:random_effect && length(p.id)>=length(c.id) && p.id[1:length(c.id)]==c.id ||
+        if first(c.id) in (:random_effect,:total_effect) && length(p.id)>=length(c.id) && p.id[1:length(c.id)]==c.id ||
            first(p.id)===:population && length(p.id)>=2 && p.id[2]===c.provenance.owner
             push!(ids,p.id)
         end

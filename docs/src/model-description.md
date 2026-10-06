@@ -215,6 +215,28 @@ renderer labels such a result **incomplete**.
 Population Horseshoe allocation nodes currently retain explicit gaps. Their
 Gaussian conditionals do not establish coverage of the allocation.
 
+## Exact totals and generated vector priors
+
+Automatic exact totals (`total_groups=:auto`, the default) describe the
+authored hierarchy of the conventional program they replace. Each total column
+keeps its conventional random-effect identity: `(:random_effect, id, group)`
+for a declared `|ID|`, otherwise `(:independent, k)` in emission order. Its SD
+prior is listed under `(…, :sd, 1)`, and the absorbed population coefficients
+keep their declared priors under `(:population, predictor, coefficient)`, with
+`source.integrated == (:total_effect, predictor)`. The sampled totals density
+is `(:total_effect, predictor, :totals)`; Student-t population priors add their
+exact Gaussian scale mixture as `(:total_effect, predictor, :scale_mixture)`.
+The `(:total_effect, predictor)` component gives the design map A, the prior
+locations m and precisions q, the integrated density and the exact conditional
+recovery of β. Coordinates that only the conventional program samples, such
+as standardized deviations, are not inventoried.
+
+A BRM-generated vector prior, such as a configured smoothing SD, is a product
+of per-coordinate priors. Each coordinate is a separate component bound to its
+actual scalar family, so a consumer-defined family remains an explicit gap
+until a hook covers that callable. Sum-to-zero blocks still retain an explicit
+`brm_s2z_contrast` gap.
+
 ## R2D2 allocation conventions
 
 Whole-predictor `effect(mu, :) ~ r2d2(...)` and shared-block
