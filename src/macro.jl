@@ -581,6 +581,28 @@ lowered into [`@n`](@ref)/[`@x`](@ref) calls. Used internally by
 [`_brm`](@ref).
 """
 parse!(x; info) = x
+
+function _is_brm_legacy_kernel_doblock(x)
+    Meta.isexpr(x, :do, 2) || return false
+    call = x.args[1]
+    Meta.isexpr(call, :call) && !isempty(call.args) || return false
+    head = call.args[1]
+    head === :kernel && return true
+    head isa Expr && Meta.isexpr(head, :., 2) || return false
+    name = head.args[2]
+    name === :kernel || (name isa QuoteNode && name.value === :kernel)
+end
+
+function _brm_depwarn_kernel_doblock()
+    Base.depwarn(
+        "`kernel(...) do` inside `@brm` is deprecated; use an indexed " *
+        "`@plate for i in eachindex(x) ... end` cell instead. The compatibility " *
+        "spelling remains supported for now.",
+        :_brm_depwarn_kernel_doblock,
+    )
+    nothing
+end
+
 parse!(x::Expr; info) = if x.head == :block
     Expr(:block, parse!.(x.args; info)...)
 elseif _is_brm_plate(x)
@@ -608,6 +630,7 @@ elseif isxcall(x, :~) && _is_hyper_lhs(x.args[2])
     _parse_hyper!(lhs, rhs; info)
 elseif isxcall(x, :~)
     _, lhs, rhs = x.args
+    legacy_kernel_doblock = _is_brm_legacy_kernel_doblock(rhs)
     # Shield brms-style `(e | ID | g)` ranef IDs from parselocals! so the bare
     # ID symbol doesn't get registered as a data-column name. Left-associative
     # `|` lowers to `Expr(:call, :|, Expr(:call, :|, e, id), g)`; rewrite to a
@@ -617,7 +640,9 @@ elseif isxcall(x, :~)
     rhs = rewrite_ranef_ids(rhs)
     parselocals!(rhs; info, val=:nonlocal)
     parselocals!(lhs; info, val=:maybelocal)
-    :(@n $lhs = @x $(Expr(:call, :~, lhs, rhs)))
+    parsed = :(@n $lhs = @x $(Expr(:call, :~, lhs, rhs)))
+    legacy_kernel_doblock ?
+        Expr(:block, :($_brm_depwarn_kernel_doblock()), parsed) : parsed
 else
     dump(x)
     error("Don't know how to handle parse!($x)!")

@@ -169,7 +169,8 @@ a DIFFERENT frame — a dose-event table, say — must declare its grouping with
 
 `@brm` lowers this annotated-loop surface to the shared kernel IR, so SBBRMI and
 RKBRMI use the same grouping, ragged, observation, and omitted-outcome paths.
-`kernel(...) do` remains a temporary source-compatibility spelling while known
+`kernel(...) do` is deprecated and emits a deprecation warning when a model is
+constructed. It remains a temporary source-compatibility spelling while known
 consumers migrate; new code should use `@plate for`. The much older `model=` /
 `obs=` spelling and its anonymous `n_eta` block remain removed. A name such as
 `eta_CL` is merely a user-chosen ordinary linear-predictor name—there is no
