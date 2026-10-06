@@ -5,6 +5,7 @@
 # Run: julia --project=test test/prior_predictive.jl
 
 using Test
+using Logging: Warn
 using BayesianRegressionModels
 using StanBlocks
 using Distributions: Exponential, LKJCholesky, Normal
@@ -149,6 +150,48 @@ kernel_df = (;
     qt_y=[0.8, 1.2, 1.7],
     subject=[:a, :b, :c],
 )
+
+# brm-use: named numeric constants ride in data. A scalar parameter whose
+# prior reads only scalar data constants is a PRIOR, exactly like its literal
+# spelling — not an unbound observation. Misclassified, it warned "binds no
+# data column", rendered as an observation component, and emitted a spurious
+# `log_a_gen` twin in the prior program (snag prior-with-data-fed1df30).
+@testset "named-constant priors classify like literal priors" begin
+    named = @brm begin
+        log_a ~ Normal(log_a_init, sigma_init)
+        sigma ~ Exponential(1)
+        mu = exp(log_a) * x
+        y ~ Normal(mu, sigma)
+    end
+    literal = @brm begin
+        log_a ~ Normal(0.1, 0.5)
+        sigma ~ Exponential(1)
+        mu = exp(log_a) * x
+        y ~ Normal(mu, sigma)
+    end
+    constants = (; log_a_init=0.1, sigma_init=0.5)
+    roles(sb) = [(d.target, d.role) for d in generative_plan(sb).declarations]
+    x, y = joint_df.x, joint_df.y
+
+    sb = @test_logs min_level=Warn SBBRMI(named((; x, y, constants...)); mod=@__MODULE__)
+    control = SBBRMI(literal((; x, y)); mod=@__MODULE__)
+    @test roles(sb) == roles(control) ==
+          [(:log_a, :prior), (:sigma, :prior), (:y, :observation)]
+    @test sb.model.observations == control.model.observations == (:y,)
+    code = BayesianRegressionModels.stan_code(sb)
+    @test occursin("log_a ~ normal(log_a_init, sigma_init);", code)
+    ids = Set(c.id for c in brm_description(sb).components)
+    @test (:parameter, :log_a) in ids && (:observation, :log_a) ∉ ids
+
+    # Prior program: only the omitted response warns and twins.
+    prior = @test_logs (:warn, r"^sbimpl: `y` bind\(s\) no data column") SBBRMI(
+        named((; x, constants...)); mod=@__MODULE__)
+    @test roles(prior) == roles(control)
+    @test prior.model.observations == (:y,)
+    prior_code = BayesianRegressionModels.stan_code(prior)
+    @test occursin("y_gen", prior_code) && !occursin("log_a_gen", prior_code)
+    @test StanBlocks.stanc_check(prior_code; warn_pedantic=false).ok
+end
 
 @testset "kernel-nested response hold-out" begin
     brmi = kernel_builder(kernel_df)
