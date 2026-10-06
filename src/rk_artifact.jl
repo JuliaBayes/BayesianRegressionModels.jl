@@ -44,7 +44,13 @@ julia_version)`; `emitted_at` is a unix-epoch-UTC `Int`
 caller-supplied (the worker resolves the pin from its checkout; nothing
 here shells out). Fails closed on a malformed emission.
 """
-function emit_rk_artifact(brmi::BRMI; case_id::AbstractString,
+# Artifact emission consumes a BRMI as syntax. Specializing this public
+# keyword entry on the complete formula-tree type recompiles the same planner
+# wrapper for every model in a corpus, even though `_brm_rk_plan` already has
+# the corresponding abstraction barrier. Keep the original BRMI value while
+# reusing one inferred entry across structurally different models.
+Base.@nospecializeinfer function emit_rk_artifact(@nospecialize(brmi::BRMI);
+        case_id::AbstractString,
         provenance=nothing, brm_pin=nothing, held_out=())
     isempty(case_id) && error(
         "RK artifact: case_id must be non-empty")

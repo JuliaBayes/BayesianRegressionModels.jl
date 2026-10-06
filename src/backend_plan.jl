@@ -295,7 +295,7 @@ function _brm_collect_rhs_refs!(target_obs, x::Union{Tuple,AbstractVector}, obs_
     foreach(a -> _brm_collect_rhs_refs!(target_obs, a, obs_name), x)
 end
 
-function _brm_collect_target_obs(brmi::BRMI)
+Base.@nospecializeinfer function _brm_collect_target_obs(@nospecialize(brmi::BRMI))
     target_obs = Dict{Symbol,Symbol}()
     for op_nc in values(brmi.operations)
         op_nc isa NamedColumn || continue
@@ -330,7 +330,7 @@ function _brm_collect_target_axes!(axes, node::ExprColumn)
     foreach(arg -> _brm_collect_target_axes!(axes, arg), args)
     foreach(arg -> _brm_collect_target_axes!(axes, arg), values(getkwargs(node)))
 end
-function _brm_collect_target_axes(brmi::BRMI)
+Base.@nospecializeinfer function _brm_collect_target_axes(@nospecialize(brmi::BRMI))
     axes = Dict{Symbol,Vector{Symbol}}()
     foreach(node -> _brm_collect_target_axes!(axes, node), values(brmi.operations))
     axes
@@ -355,7 +355,7 @@ distribution` operation whose LHS names response data. Returns `(key, lhs,
 rhs)` records in operation order. Concrete backends admit or reject each
 record's decorators, family, and shape.
 """
-function _brm_direct_observations(brmi::BRMI; prefix="BRM backend lowering")
+Base.@nospecializeinfer function _brm_direct_observations(@nospecialize(brmi::BRMI); prefix="BRM backend lowering")
     found = Any[]
     for (key, op_nc) in pairs(brmi.operations)
         op_nc isa NamedColumn || continue
@@ -1220,7 +1220,7 @@ function _brm_group_declaration(predictor::Symbol, term::ExprColumn)
         explicit_id, id, uncorrelated, descriptor)
 end
 
-function _brm_group_declarations(brmi::BRMI)
+Base.@nospecializeinfer function _brm_group_declarations(@nospecialize(brmi::BRMI))
     declarations = _BRMGroupDeclaration[]
     for (predictor, operation) in pairs(brmi.operations)
         expression = operation isa NamedColumn ? parent(operation) : operation
@@ -1255,8 +1255,8 @@ function _brm_group_strata(group_indices, stratum_indices, n_groups,
     mapping
 end
 
-function _brm_simple_random_effect_plans(
-        brmi::BRMI, target::Symbol, context::_BRMBackendContext;
+Base.@nospecializeinfer function _brm_simple_random_effect_plans(
+        @nospecialize(brmi::BRMI), target::Symbol, context::_BRMBackendContext;
         required::Bool=false,
         random_effect_columns=_brm_random_effect_columns)
     grouped = filter(declaration -> declaration.predictor === target,
@@ -1677,7 +1677,7 @@ _brm_threshold_location(::Type{<:OrderedLogistic}, rhs) =
     isempty(getargs(rhs)) ? nothing : first(getargs(rhs))
 _brm_threshold_location(_family, _rhs) = nothing
 
-function _brm_threshold_located_predictors(brmi::BRMI)
+Base.@nospecializeinfer function _brm_threshold_located_predictors(@nospecialize(brmi::BRMI))
     out = Set{Symbol}()
     for op_nc in values(brmi.operations)
         op = _named_op(op_nc)
@@ -1696,7 +1696,7 @@ end
 The emitted block name of the categorical term that linear predictor `lhs`
 codes by cell means, or `nothing`. See [`_brm_cellmeans_block`](@ref).
 """
-function _brm_predictor_cellmeans_block(brmi::BRMI, lhs::Symbol)
+Base.@nospecializeinfer function _brm_predictor_cellmeans_block(@nospecialize(brmi::BRMI), lhs::Symbol)
     op = linear_predictor_op(brmi, lhs)
     isnothing(op) && return nothing
     _brm_cellmeans_block(_brm_additive_terms(last(getargs(op, 2)));
@@ -2375,7 +2375,7 @@ With `tolerant_default=true`, wildcard predictor addresses skip nonowners.
 The complete-set caller passes `matched_defaults` and validates it with
 `_brm_validate_population_effect_defaults` after preparing all predictors.
 """
-function _brm_simple_population_effect_overrides(brmi::BRMI,
+Base.@nospecializeinfer function _brm_simple_population_effect_overrides(@nospecialize(brmi::BRMI),
                                                  design::_BRMPopulationDesign;
                                                  prefix="BRM backend lowering",
                                                  available_predictors=(design.target,),
@@ -2450,7 +2450,7 @@ end
 # one coefficient across the complete prepared predictor set. Keep this
 # check separate from per-predictor claiming so nonowners can be skipped
 # without suppressing misspelled addresses or changing precedence.
-function _brm_validate_population_effect_defaults(brmi::BRMI, matched_defaults;
+Base.@nospecializeinfer function _brm_validate_population_effect_defaults(@nospecialize(brmi::BRMI), matched_defaults;
                                                   prefix="BRM preparation")
     for (index, spec) in enumerate(effect_priors(brmi))
         spec.predictor === _EFFECT_COLON || continue

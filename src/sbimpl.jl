@@ -3310,10 +3310,16 @@ const _SB_STAN_RESERVED_IDENTIFIERS = Set{Symbol}((
     Symbol("true"), Symbol("false"),
 ))
 
-SBBRMI(brmi::BRMI; mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
+# SBBRMI lowers formula syntax rather than executing numerical code. Inferring
+# this whole orchestration method separately for every `BRMI{NamedTuple{...}}`
+# made batch construction scale with the corpus's formula types. Leaf emitters
+# still dispatch on the original expression values; reuse only this model-wide
+# orchestration entry.
+Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
+       mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
        centered_groups=Set{Symbol}(), total_groups=:auto,
        s2z_groups=(), s2z_rho=nothing, s2z_coordinates=:contrasts, held_out=(),
-       resample_covariates=(), _frozen_preproc=nothing) = begin
+       resample_covariates=(), _frozen_preproc=nothing)
     source_parent = brmi
     fresh_covariates = _sb_covariate_selection(brmi,resample_covariates)
     isempty(fresh_covariates) || (brmi = _sb_covariate_brmi(brmi,fresh_covariates))
@@ -3554,7 +3560,7 @@ end
 # observations (`pk_obs`/`qt_obs` inside `kernel(...)`) and fused statements
 # resolve with the same role logic the plan itself uses; synthesized latents
 # (`total`, `tau`, LKJ factors) never match and stay priors.
-function _sb_triage_emitted(sb::SBBRMI)
+Base.@nospecializeinfer function _sb_triage_emitted(@nospecialize(sb::SBBRMI))
     declarations = GenerativeDeclaration[]
     data_scope = Dict{Symbol,Union{Nothing,Symbol}}(k => k for k in keys(sb.data))
     obs_keys = Set{Symbol}(keys(sb.parent.operations))
@@ -3603,7 +3609,7 @@ end
 # need that source identity. Whole-LHS unbound observations use their target;
 # StanBlocks emits an alias twin when they redraw in GQ. Cell-local unbound
 # targets stay excluded because they lie outside that twin scope.
-function _sb_declared_observations(body, data, brmi)
+Base.@nospecializeinfer function _sb_declared_observations(body, data, @nospecialize(brmi))
     declarations = GenerativeDeclaration[]
     data_scope = Dict{Symbol,Union{Nothing,Symbol}}(k => k for k in keys(data))
     obs_keys = Set{Symbol}(keys(brmi.operations))
@@ -4209,7 +4215,7 @@ _sb_held_out_request(held_out) = _brm_held_out_request(held_out; prefix="sbimpl"
 # is what makes a nested `qy ~ normal(...)` inside `kernel(..., qt_y, ...)`
 # addressable as `held_out=:qt_y`: the declaration records `target=:qy` and
 # `data_source=:qt_y`, while StanBlocks must receive the mark on the latter.
-function _sb_apply_held_out(sb::SBBRMI, held_out)
+Base.@nospecializeinfer function _sb_apply_held_out(@nospecialize(sb::SBBRMI), held_out)
     request = _sb_held_out_request(held_out)
     isempty(request.names) && return sb
 
@@ -5948,7 +5954,7 @@ _sb_emit_vector_prior!(_stmts, _data, _target, _f, _op) = false
 _sb_lkj_covariance_factor_spec(target::Symbol, op::ExprColumn) =
     _brm_lkj_covariance_factor_spec(target, op; prefix="sbimpl")
 
-function _sb_validate_covariance_factor_names(brmi::BRMI)
+Base.@nospecializeinfer function _sb_validate_covariance_factor_names(@nospecialize(brmi::BRMI))
     operation_names = Set{Symbol}(keys(brmi.operations))
     for (target, value) in pairs(brmi.operations)
         column = _as_named_column(value)
@@ -7623,7 +7629,7 @@ function _sb_hyper_ranef_group(t, spelling, term_key, kw; prefix="sbimpl")
     name(raw_group)
 end
 
-function _sb_collect_hyper_plans(brmi::BRMI; prefix="sbimpl")
+Base.@nospecializeinfer function _sb_collect_hyper_plans(@nospecialize(brmi::BRMI); prefix="sbimpl")
     lps = [p.name for p in linear_predictors(brmi)]
     plans = Any[]
     for (key, op_nc) in pairs(brmi.operations)
@@ -8233,7 +8239,7 @@ end
 # threading path — nine `_sb_emit!`/`_sb_sampling!` signatures deep — unchanged,
 # and lets a formula that configures ONLY a term parameter still reach
 # `_sb_linear_predictor!`.
-function _sb_prior_overrides(brmi::BRMI;
+Base.@nospecializeinfer function _sb_prior_overrides(@nospecialize(brmi::BRMI);
         term_priors=_brm_resolve_term_priors(brmi; prefix="sbimpl"),
         hyper_plans=_sb_collect_hyper_plans(brmi),
         frozen_preproc=nothing)
@@ -9341,7 +9347,7 @@ end
 # buckets. The result is keyed exactly like `id_buckets`; entries are present
 # only for explicitly configured buckets, preserving default emission byte for
 # byte when the formula contains no ranef effect statements.
-function _sb_ranef_effect_overrides(brmi::BRMI, id_buckets)
+Base.@nospecializeinfer function _sb_ranef_effect_overrides(@nospecialize(brmi::BRMI), id_buckets)
     # `sd(...) ~ r2d2(...)` is a derived-scale prior, not a distribution on a
     # sampled `tau`.  Resolve it in `_sb_ranef_r2d2_overrides`; the ordinary
     # resolver still sees `cor(...)` and every direct-scale SD statement.
@@ -9605,7 +9611,7 @@ function _sb_ranef_r2d2_spelling(spec)
     (isnothing(spec.coefficient) ? "" : ", $(spec.coefficient)") * ")"
 end
 
-function _sb_ranef_r2d2_overrides(brmi::BRMI, id_buckets,
+Base.@nospecializeinfer function _sb_ranef_r2d2_overrides(@nospecialize(brmi::BRMI), id_buckets,
                                   effect_overrides=Dict{Symbol,Any}())
     all_specs = ranef_effect_priors(brmi)
     specs = [spec for spec in all_specs
@@ -9837,7 +9843,7 @@ end
 # the shared-bucket all-or-nothing rule. Returns a Dict keyed by predictor; an
 # empty Dict when the formula contains no r2d2 statement, which keeps every
 # other model's emission byte for byte unchanged.
-function _sb_r2d2_overrides(brmi::BRMI, id_buckets, effect_overrides)
+Base.@nospecializeinfer function _sb_r2d2_overrides(@nospecialize(brmi::BRMI), id_buckets, effect_overrides)
     specs = r2d2_priors(brmi)
     isempty(specs) && return Dict{Symbol,NamedTuple}()
 
@@ -10134,7 +10140,7 @@ function _sb_hs_literal_sibling_args!(expr, spelling)
     nothing
 end
 
-function _sb_horseshoe_overrides(brmi::BRMI, effect_overrides, r2d2_overrides)
+Base.@nospecializeinfer function _sb_horseshoe_overrides(@nospecialize(brmi::BRMI), effect_overrides, r2d2_overrides)
     for spec in ranef_effect_priors(brmi)
         spec.family === Horseshoe || continue
         spelling = spec.class === :sd ? "sd" : "cor"
@@ -10265,7 +10271,7 @@ end
 # each get collected and allocated their own block. Identical instances (same
 # block name) are coalesced later, at emit time. A subsequent emit step
 # allocates one block per declared field and builds the lookup.
-function _sb_collect_group_block_terms(brmi::BRMI)
+Base.@nospecializeinfer function _sb_collect_group_block_terms(@nospecialize(brmi::BRMI))
     result = Any[]
     for (key, op_nc) in pairs(brmi.operations)
         op = _as_expr_column(parent(op_nc)); isnothing(op) && continue

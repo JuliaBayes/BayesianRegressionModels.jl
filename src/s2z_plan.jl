@@ -166,7 +166,7 @@ function _sb_s2z_plan(brmi, prepared, predictor, overrides, rho;
     end
 end
 
-function _sb_plan_s2zs(brmi, prepared, overrides, selection, rho;
+Base.@nospecializeinfer function _sb_plan_s2zs(@nospecialize(brmi), prepared, overrides, selection, rho;
                        cv_groups, centered_groups, coordinates::Symbol=:contrasts)
     coordinates in (:contrasts, :groups) || throw(ArgumentError(
         "s2z_coordinates must be :contrasts or :groups, got $(repr(coordinates))"))

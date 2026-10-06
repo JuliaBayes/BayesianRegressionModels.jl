@@ -70,7 +70,7 @@ function modeled_covariates(model::Union{SBBRMI,GenerativePlan})
     end
 end
 
-function _sb_covariate_selection(brmi, request)
+Base.@nospecializeinfer function _sb_covariate_selection(@nospecialize(brmi), request)
     values = request === nothing ? () : request isa Symbol ? (request,) : request
     (values isa Tuple || values isa AbstractVector || values isa AbstractSet) &&
         all(v -> v isa Symbol,values) || throw(ArgumentError(

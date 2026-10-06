@@ -299,7 +299,7 @@ function _sb_total_plan(brmi, prepared, predictor, overrides, buckets, sd_overri
        indices=first(plans).indices,levels=first(plans).levels)
 end
 
-function _sb_plan_totals(brmi,prepared,overrides,buckets,sd_overrides,selection;
+Base.@nospecializeinfer function _sb_plan_totals(@nospecialize(brmi),prepared,overrides,buckets,sd_overrides,selection;
                          cv_groups,centered_groups,r2d2_overrides,ranef_r2d2_overrides,
                          s2z_groups=Set{Symbol}())
     selection === :auto || selection isa Symbol || selection isa Tuple || selection isa AbstractVector || selection isa AbstractSet ||

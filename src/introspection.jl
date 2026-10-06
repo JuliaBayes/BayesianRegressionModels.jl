@@ -288,7 +288,7 @@ one with fewer wildcard slots — override it. Two statements of equal
 specificity reaching one parameter have no winner and error, as do addresses
 matching no parameter at all.
 """
-function effect_priors(brmi::BRMI)
+Base.@nospecializeinfer function effect_priors(@nospecialize(brmi::BRMI))
     out = NamedTuple[]
     for op_nc in values(brmi.operations)
         op = _named_op(op_nc)
@@ -337,7 +337,7 @@ carries both symbols.
 Use [`ranefcoefnames`](@ref) for the authoritative ordered margin addresses of
 a shared `|ID|` block.
 """
-function ranef_effect_priors(brmi::BRMI)
+Base.@nospecializeinfer function ranef_effect_priors(@nospecialize(brmi::BRMI))
     out = NamedTuple[]
     for op_nc in values(brmi.operations)
         op = _named_op(op_nc)
@@ -417,7 +417,7 @@ deliberately NOT addressable: they carry no independent scale, and giving them
 a prior would duplicate or confound the model-scale parameter above
 (decision `145tp0o`).
 """
-function term_priors(brmi::BRMI)
+Base.@nospecializeinfer function term_priors(@nospecialize(brmi::BRMI))
     out = NamedTuple[]
     for op_nc in values(brmi.operations)
         op = _named_op(op_nc)
@@ -472,7 +472,7 @@ These statements are deliberately separate from [`effect_priors`](@ref): a
 predictor plus that predictor's random-effect margins, rather than overriding
 one labelled coefficient.
 """
-function r2d2_priors(brmi::BRMI)
+Base.@nospecializeinfer function r2d2_priors(@nospecialize(brmi::BRMI))
     out = NamedTuple[]
     for op_nc in values(brmi.operations)
         op = _named_op(op_nc)
