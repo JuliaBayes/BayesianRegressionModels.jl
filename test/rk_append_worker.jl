@@ -29,7 +29,7 @@
 #
 # OUTPUTS (all into --out, all required; nonzero exit or missing outputs
 # => driver ERROR row):
-# - artifact.jls: v3 artifact (opaque to the driver).
+# - artifact.jls: v4 artifact (opaque to the driver).
 # - sections.md: Layer 1, Layer 2, Layer 3, Boundary, Layer 4,
 #   Verification, Layer SB bodies (spliced verbatim under the driver's
 #   closeout header). RK sections render through the twin's

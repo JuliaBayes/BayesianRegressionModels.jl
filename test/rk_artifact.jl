@@ -3,7 +3,7 @@
 # Run: julia --project=test test/rk_artifact.jl
 #
 # Fixture-tests the BRM side of the parity-closeout append sweep (pair
-# closeout-appends): v3 artifact emit → serialize → read (RK-free),
+# closeout-appends): v4 artifact emit → serialize → read (RK-free),
 # artifact → bound-plan translation through the production route
 # (behavioral equivalence with the live RKBRMI path), the Layer-2 plan
 # dump, the explicit SB name-map machinery (pure), and the SB Stan
@@ -17,6 +17,23 @@ using ReactiveKernelsPPL: build_kernel, prepare_query
 using StanBlocks
 
 const BRM = BayesianRegressionModels
+
+module ArtifactGensymBindingSource
+import BayesianRegressionModels: _rk_callable_source!
+
+function original_affine end
+native_affine(x, offset) = x .+ offset
+
+function _rk_callable_source!(definitions, bindings, entry,
+        ::typeof(original_affine))
+    leaf = gensym(:artifact_native_affine)
+    push!(bindings, leaf => native_affine)
+    push!(definitions, :(function $entry(x, offset)
+        return $leaf(x, offset)
+    end))
+    :done
+end
+end
 
 const _DF = (;
     x=[0.5, -1.0, 1.5, 0.0, -0.5, 1.0],
@@ -72,17 +89,18 @@ end
     brmi = _gaussian_brmi()
     a = BRM.emit_rk_artifact(brmi; case_id="fixture-gauss",
         provenance="test/rk_artifact.jl", brm_pin="test-pin")
-    @test keys(a) == (:case_id, :ast, :defs, :plan, :meta)
+    @test keys(a) == (:case_id, :ast, :defs, :bindings, :plan, :meta)
     @test a.case_id == "fixture-gauss"
     @test a.ast isa Expr && a.ast.head === :block
     # The population effects are one self-contained component submodel.
     @test a.defs isa Vector{Expr} &&
         [first(first(d.args).args) for d in a.defs] == [:brm_population_effects]
+    @test a.bindings isa Vector{Pair{Symbol,Any}}
     @test a.plan isa BRM._RKStructuralPlan
     @test a.plan.n_obs == 6
     @test sort!(collect(keys(a.plan.columns))) == [:x, :y]
     @test a.meta.case_id == "fixture-gauss"
-    @test a.meta.generator_version == BRM.rk_artifact_version() == 3
+    @test a.meta.generator_version == BRM.rk_artifact_version() == 4
     @test a.meta.brm_pin == "test-pin"
     @test a.meta.emitted_at isa Int && a.meta.emitted_at > 0
     @test a.meta.julia_version == string(VERSION)
@@ -99,8 +117,36 @@ end
     @test b.case_id == a.case_id
     @test b.ast == a.ast
     @test b.defs == a.defs
+    @test _structural_equal(b.bindings, a.bindings)
     @test _structural_equal(b.plan, a.plan)
     @test b.meta == a.meta
+end
+
+@testset "artifact retains gensym provider bindings from its source emission" begin
+    data = (; x=[-0.5, 0.25, 0.75], y=[-0.2, 0.4, 1.1])
+    brmi = @brm data begin
+        offset ~ Normal(0, 1)
+        mu = ArtifactGensymBindingSource.original_affine(x, offset)
+        y ~ Normal(mu, 0.5)
+    end
+    artifact = BRM.emit_rk_artifact(brmi; case_id="gensym-provider-binding")
+    @test length(artifact.bindings) == 1
+    stored_name = first(artifact.bindings).first
+    @test occursin(string(stored_name), sprint(show, artifact.defs))
+    fresh = BRM._rk_emit_ast(artifact.plan)
+    @test length(fresh.bindings) == 1
+    @test first(fresh.bindings).first != stored_name
+
+    roundtripped = BRM.read_rk_artifact(BRM.write_rk_artifact(
+        joinpath(mktempdir(), "gensym-provider-binding.jls"), artifact))
+    translated = BRM.rk_translate_artifact(roundtripped)
+    model = build_kernel(translated)
+    for u in ([0.0], [0.3], [-0.4])
+        value = _spec_posterior(model, translated, u)
+        oracle = logpdf(Normal(), only(u)) +
+            sum(logpdf.(Normal.(data.x .+ only(u), 0.5), data.y))
+        @test value ≈ oracle atol=1e-12
+    end
 end
 
 @testset "artifact weighted predictor round-trip" begin
