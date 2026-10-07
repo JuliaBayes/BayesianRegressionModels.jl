@@ -835,8 +835,8 @@ function _brmd_builtin_kind(::Val{:random_effect},c)
     k.by===nothing || (prose*=" Covariance factors are separate for each declared stratum; s(i) is the fitted group-to-stratum map.")
     haskey(k,:total) && (prose*=" These deviations are not sampled directly: the fit samples the exact group totals of `$(last(k.total))`, described separately, and recovers the deviations in generated quantities.")
     nu=get(k,:student_t_nu,nothing)
-    law=isnothing(nu) ? "\\mathcal N_{"*string(k.n_terms)*"}(0,"*covariance*")" :
-        "t_{"*brm_description_math(c,nu)*","*string(k.n_terms)*"}(0,"*covariance*")"
+    law=isnothing(nu) ? "\\sim\\mathcal N_{"*string(k.n_terms)*"}(0,"*covariance*")" :
+        "\\sim t_{"*brm_description_math(c,nu)*","*string(k.n_terms)*"}(0,"*covariance*")"
     mixture=isnothing(nu) ? () : ("\\mathbf b_{"*id*",i}=\\sqrt{w_{"*id*",i}}\\,\\mathbf u_{"*id*",i},\\quad "*
         "\\mathbf u_{"*id*",i}\\sim\\mathcal N_{"*string(k.n_terms)*"}(0,"*covariance*"),\\quad "*
         "w_{"*id*",i}\\sim\\operatorname{InvGamma}\\left(\\tfrac{"*brm_description_math(c,nu)*"}{2},\\tfrac{"*
@@ -847,7 +847,7 @@ function _brmd_builtin_kind(::Val{:random_effect},c)
         join((m.predictor!==owner ? "0" : m.coefficient===:Intercept ? "1" : brm_description_symbol(c,m.coefficient)
             for m in margins),",")*"]" for owner in unique(m.predictor for m in margins))
     definition=k.correlated ? omega*"="*L*L*"^{\\mathsf T},\\quad "*C*"="*D*L : C*"="*D
-    BRMDescriptionFragment(prose=(prose,),equations=("\\mathbf b_{"*id*",i}\\sim "*law,mixture...,
+    BRMDescriptionFragment(prose=(prose,),equations=("\\mathbf b_{"*id*",i}"*law,mixture...,
         definition*",\\quad "*D*"=\\operatorname{diag}(\\mathrm{SD}_{"*subscript*"})",design...),covers=(c.id,))
 end
 _brmd_matrix_math(x::NamedTuple)=begin

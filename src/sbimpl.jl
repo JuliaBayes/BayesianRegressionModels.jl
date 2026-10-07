@@ -565,6 +565,13 @@ function _sb_student_t_ranef(base::StanBlocks.SlicModel, family::Symbol)
     StanBlocks.SlicModel(body, base.data, base.mod, base.observations)
 end
 
+# The emitted Student-t families, derived once from their Gaussian bases. A
+# bucket with configured `sd(...)` priors merges them into the generic one.
+ranef_correlated_draws_student_t =
+    _sb_student_t_ranef(ranef_correlated_draws, :ranef_correlated_draws)
+ranef_correlated_draws_generic_student_t =
+    _sb_student_t_ranef(ranef_correlated_draws_generic, :ranef_correlated_draws_generic)
+
 # ---- R2D2: derived random-effect scales -----------------------------------
 #
 # The `effect(..., :) ~ r2d2(...)` family DERIVES the marginal scale
@@ -6021,12 +6028,15 @@ _sb_apply_positive_prior_bounds!(stmt, prior::ExprColumn) =
 
 # `mod` is the SBBRMI caller's module: the correlated-draws generics are
 # BRM-owned, so their `base.mod` cannot see consumer-defined custom families.
-function _sb_generic_ranef_submodel(priors, centered::Bool; mod::Module=@__MODULE__)
+_sb_generic_ranef_submodel(priors, centered::Bool; mod::Module=@__MODULE__) =
+    _sb_generic_ranef_submodel(priors,
+        centered ? ranef_correlated_draws_centered_generic : ranef_correlated_draws_generic;
+        mod)
+function _sb_generic_ranef_submodel(priors, base::StanBlocks.SlicModel;
+                                    mod::Module=@__MODULE__)
     resolved = map(priors) do prior
         isnothing(prior) ? ExprColumn(Normal) : prior
     end
-    base = centered ? ranef_correlated_draws_centered_generic :
-                      ranef_correlated_draws_generic
     _sb_vector_positive_priors(base, :tau, resolved; direct_homogeneous=true, mod)
 end
 
@@ -10629,25 +10639,25 @@ function _sb_emit_student_t_id_bucket!(stmts, data, bucket_name, n_terms_name,
         n_groups = Symbol(bucket_name, :_n_g)
         push!(stmts, :($n_groups = maximum($idx_name)))
     end
-    kwargs = Any[Expr(:kw, :group_idx, idx_name), Expr(:kw, :n_groups, n_groups),
-                 Expr(:kw, :n_terms, n_terms_name)]
-    if ranef_effect.has_sd || ranef_effect.has_cor
-        config = _sb_generic_ranef_submodel(ranef_effect.sd_prior, false; mod)
-        base, family = config.model, :ranef_correlated_draws_generic
-        push!(kwargs, Expr(:kw, :lkj_eta, ranef_effect.lkj_eta))
-        append!(kwargs, [Expr(:kw, d, d) for d in config.dependencies])
-    else
-        base, family = ranef_correlated_draws, :ranef_correlated_draws
-    end
     nu = _sb_effect_prior_arg(dist.nu)
     nu isa Real || nu isa Symbol || error(
         "sbimpl: Student-t degrees of freedom for `|$id_sym|` must be a numeric " *
         "formula constant or the name of a declared scalar parameter, got " *
         "`$(repr(nu))`")
+    kwargs = Any[Expr(:kw, :group_idx, idx_name), Expr(:kw, :n_groups, n_groups),
+                 Expr(:kw, :n_terms, n_terms_name)]
+    if ranef_effect.has_sd || ranef_effect.has_cor
+        config = _sb_generic_ranef_submodel(ranef_effect.sd_prior,
+            ranef_correlated_draws_generic_student_t; mod)
+        model = config.model
+        _sb_record_binding!(data, bucket_name, :random_effect, gname;
+                            family=:ranef_correlated_draws_generic_student_t)
+        push!(kwargs, Expr(:kw, :lkj_eta, ranef_effect.lkj_eta))
+        append!(kwargs, [Expr(:kw, d, d) for d in config.dependencies])
+    else
+        model = :ranef_correlated_draws_student_t
+    end
     push!(kwargs, Expr(:kw, :nu, nu))
-    model = _sb_student_t_ranef(base, family)
-    _sb_record_binding!(data, bucket_name, :random_effect, gname;
-                        family=_sb_student_t_ranef_family(family))
     push!(stmts, Expr(:call, :~, bucket_name,
                       Expr(:call, model, Expr(:parameters, kwargs...))))
     nothing
