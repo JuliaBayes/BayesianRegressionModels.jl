@@ -55,6 +55,25 @@ julia --startup-file=no --project=. test/benchmark_emission_breadth.jl 12 rk
 julia --startup-file=no --project=. test/benchmark_emission_breadth.jl 12 sb
 ```
 
+`rk_planning_specialization.jl` pins the same property without timing. After
+one warm member of a value-route family (caller-owned submodel, ordinary
+callable assignment, grouped, population and log-scale predictors), building
+another member, emitting its RK artifact and building its kernel must not
+compile any BRM method, or generic method over BRM values, whose signature
+names that member's operations. Only constructing the model's own
+`NamedTuple`, `BRMI` and `RKBRMI` may. It records compilation with
+`jl_dump_compiles` and also checks that the reused compilation emits the same
+program up to the names. A second testset builds a member whose submodel
+callable differs, so its expression types are new throughout (a named column
+embeds its definition): the source walkers that collect data, references,
+target axes, roles and additive terms must still reuse their compilation, while
+constructing the member's values, the caller-owned hook and the prepared
+representation may specialize:
+
+```sh
+julia --startup-file=no --project=test test/rk_planning_specialization.jl
+```
+
 ## Description PDF rendering
 
 `description_tex.jl` checks Student-t sampling equations for standard, affine,

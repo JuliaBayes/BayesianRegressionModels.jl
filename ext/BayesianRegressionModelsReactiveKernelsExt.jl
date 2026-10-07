@@ -110,7 +110,9 @@ function BRM._brm_rk_model(plan::_RK_PLAN_TYPES)
     build_kernel(_rk_translated_plan(plan))
 end
 
-function BRM.RKBRMI(brmi::BRM.BRMI; held_out=())
+# Planning and building read the model as syntax; only wrapping the retained
+# original `brmi` constructs a model-specific `RKBRMI` type.
+Base.@nospecializeinfer function BRM.RKBRMI(@nospecialize(brmi::BRM.BRMI); held_out=())
     plan = BRM._brm_rk_plan(brmi; held_out)
     BRM.RKBRMI(brmi, plan, BRM._brm_rk_model(plan))
 end
