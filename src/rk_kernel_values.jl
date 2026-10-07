@@ -45,19 +45,6 @@ function _rk_kernel_observation_distribution(observation)
     _BRMPreparedExpr(observation.callable, arguments, (;))
 end
 
-function _rk_kernel_value_refs!(names, value)
-    value isa Symbol && (push!(names, value); return names)
-    value isa Expr || return names
-    if value.head in (:call, :macrocall)
-        foreach(arg -> _rk_kernel_value_refs!(names, arg), value.args[2:end])
-    elseif value.head in (:kw, :.)
-        _rk_kernel_value_refs!(names, value.args[value.head === :kw ? 2 : 1])
-    else
-        foreach(arg -> _rk_kernel_value_refs!(names, arg), value.args)
-    end
-    names
-end
-
 Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BRMI), program, name, rhs)
     parts = _sb_kernel_lambda_parts(first(getargs(rhs)))
     parts === nothing && error("RK backend: kernel `$name` requires an inline cell body")
@@ -156,7 +143,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
         _rk_source_outputs!(locals, statement)
     end
     referenced = Set{Symbol}()
-    foreach(statement -> _rk_kernel_value_refs!(referenced, statement), raw_body)
+    foreach(statement -> _brm_cell_value_refs!(referenced, statement), raw_body)
     available = union(Set(keys(program.context.data)), Set(op.name for op in program.operations))
     globals = sort!(collect(intersect(setdiff(referenced, locals), available)))
     _RKPreparedKernelAssignment(name, params, body, collected, scope, Tuple(inputs),
@@ -447,7 +434,8 @@ end
 function _rk_kernel_bind_calls(value, scope, bindings, taken)
     value isa Expr || return value
     args = map(arg -> _rk_kernel_bind_calls(arg, scope, bindings, taken), value.args)
-    if value.head === :call
+    # A broadcast `f.(args...)` carries its callee in the same first slot.
+    if value.head === :call || _brm_is_broadcast_call(value)
         head = first(value.args)
         if head === :rep_vector
             args[1] = :fill

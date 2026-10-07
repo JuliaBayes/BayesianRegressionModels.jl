@@ -18,6 +18,22 @@ function build(data)
 end
 end
 
+module DottedCellScope
+using BayesianRegressionModels, Distributions
+halfsq(x) = 0.5 * x * x
+function build(data)
+    @brm data begin
+        s ~ Normal(0, 1)
+        sigma ~ Exponential(1)
+        @plate for i in eachindex(x)
+            m = halfsq.(exp(s) .* x[i])
+            y[i] ~ normal(m, sigma)
+            pred[i] = x[i]
+        end
+    end
+end
+end
+
 @stestset "kernel response aliases withhold one likelihood on independent axes" begin
     data = (; index=[[1, 2, 1]], y=[[0.1, -0.2, 0.4]],
         z=[[0.2, -0.3]], catalog=[[0.2, 0.7]])
@@ -143,6 +159,70 @@ end
     for u in ([0.0], [0.2], [-0.3])
         check_consumer_point(problem, u, oracle)
         check_consumer_stan(problem, stan, [:shift => "shift"], backend, u)
+    end
+    @test isequal(data, saved)
+end
+
+# A cell value read only inside a broadcast call `f.(args...)` is captured like
+# an ordinary call argument: a model parameter (keeping its prior), a shared data
+# column, and a Julia callee (snag plate-cell-drops-4ab1adb2). The Julia-only
+# callee has no Stan counterpart, so that mode checks the oracle alone.
+@stestset "plate cells read model values inside broadcast calls" begin
+    refs(ex) = BRM._brm_cell_value_refs!(Set{Symbol}(), ex)
+    @test refs(:(tanh.(0.5 .* (exp(s) .* x)))) == Set([:s, :x])
+    @test refs(:(M.g.(u, w))) == Set([:u, :w])
+    @test refs(:(f(a.b; k = v))) == Set([:a, :v])
+
+    data = (; x=[[1.0, 2.0], [3.0], [0.5, 1.5]], y=[[0.1, 0.2], [0.4], [0.3, 0.5]],
+        w=[0.2, -0.3, 0.5, 0.1])
+    saved = deepcopy(data)
+    halfsq = DottedCellScope.halfsq
+    for mode in (:parameter, :data, :callable)
+        brmi = if mode === :parameter
+            @brm data begin
+                s ~ Normal(0, 1)
+                sigma ~ Exponential(1)
+                @plate for i in eachindex(x)
+                    m = tanh.(0.5 .* (exp(s) .* x[i]))
+                    y[i] ~ normal(m, sigma)
+                    pred[i] = x[i]
+                end
+            end
+        elseif mode === :data
+            @brm data begin
+                s ~ Normal(0, 1)
+                sigma ~ Exponential(1)
+                @plate for i in eachindex(x)
+                    m = s .* x[i] .+ sum(tanh.(w))
+                    y[i] ~ normal(m, sigma)
+                    pred[i] = x[i]
+                end
+            end
+        else
+            DottedCellScope.build(data)
+        end
+        mean_of(s, x) = mode === :parameter ? tanh.(0.5 .* (exp(s) .* x)) :
+            mode === :data ? s .* x .+ sum(tanh.(data.w)) : halfsq.(exp(s) .* x)
+        backend, problem = consumer_problem(brmi)
+        names = coordinate_names(backend.model.layout)
+        @test sort(names) == [:s, :sigma]
+        is, iσ = findfirst(==(:s), names), findfirst(==(:sigma), names)
+        oracle(u) = begin
+            s, sigma = u[is], exp(u[iσ])
+            logpdf(Normal(), s) + logpdf(Exponential(), sigma) + u[iσ] +
+                sum(sum(logpdf.(Normal.(mean_of(s, x), sigma), y))
+                    for (x, y) in zip(data.x, data.y))
+        end
+        points = ([0.0, 0.0], [0.3, -0.2], [-0.4, 0.25])
+        for u in points
+            check_consumer_point(problem, u, oracle)
+        end
+        if mode !== :callable
+            stan = consumer_stan(brmi, "plate-broadcast-$mode")
+            for u in points
+                check_consumer_stan(problem, stan, [:s => "s", :sigma => "sigma"], backend, u)
+            end
+        end
     end
     @test isequal(data, saved)
 end
