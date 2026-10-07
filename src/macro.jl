@@ -1294,7 +1294,7 @@ parselocals!(x::Expr; info, val) = if Meta.isexpr(x, :->)
     # registers them as shared data so the emitted plate cell resolves them the
     # way a `plate` captures a `@slic` data kwarg. Cell params/locals and typos
     # that are not columns fall away in `_brm`.
-    hasproperty(info, :captures) && _collect_capture_syms!(info.captures, x.args[2])
+    hasproperty(info, :captures) && _brm_cell_value_refs!(info.captures, x.args[2])
     x
 elseif _is_nested_brm(x)
     parselocals!(_nested_brm_payload(x); info, val)
@@ -1441,29 +1441,32 @@ capturedata(df, names::Tuple) = (;
     (n => NamedColumn(n, DataColumn(getproperty(df, n)))
      for n in names if hasproperty(df, n))...)
 
-# Collect bare Symbols in ARGUMENT positions (never call heads) inside a
-# `do`-block cell body — the candidate names a kernel cell references freely.
-# `_brm` keeps only those that are real df columns (via `capturedata`) and are not
-# themselves formula names; do-block params and cell-locals that are not columns
-# fall away there, so no exclusion set is needed here. Mirrors `parselocals!`'s
-# call-head skipping so a function name (`exp`, `renewal`) is never captured.
-_collect_capture_syms!(acc, x) = nothing
-_collect_capture_syms!(acc, x::Symbol) = (push!(acc, x); nothing)
-function _collect_capture_syms!(acc, x::Expr)
-    if Meta.isexpr(x, :->)
-        _collect_capture_syms!(acc, x.args[2])
-    elseif Meta.isexpr(x, (:call, :kw))
-        for a in x.args[2:end]
-            _collect_capture_syms!(acc, a)
-        end
+# Collect bare Symbols in VALUE positions inside a `do`-block cell body — the
+# candidate names a kernel cell references freely. Call and macro heads (`exp`,
+# `renewal`), `:kw` names and the field half of `a.b` are never values. A
+# broadcast call `f.(args...)` shares the `:.` head with field access, but its
+# second argument is a tuple of value expressions, visited exactly like an
+# ordinary call's arguments; its callee is skipped like a call head. Callers
+# keep only names they can resolve — `_brm` real df columns (via `capturedata`)
+# that are not formula names, the RK kernel planner model names — so do-block
+# params and cell-locals fall away there and no exclusion set is needed here.
+_brm_is_broadcast_call(x) = Meta.isexpr(x, :., 2) && Meta.isexpr(x.args[2], :tuple)
+_brm_cell_value_refs!(acc, x) = acc
+_brm_cell_value_refs!(acc, x::Symbol) = (push!(acc, x); acc)
+function _brm_cell_value_refs!(acc, x::Expr)
+    values = if Meta.isexpr(x, :->)
+        (x.args[2],)
+    elseif Meta.isexpr(x, (:call, :macrocall, :kw))
+        x.args[2:end]
+    elseif _brm_is_broadcast_call(x)
+        x.args[2].args
     elseif Meta.isexpr(x, :.)
-        _collect_capture_syms!(acc, x.args[1])
+        (x.args[1],)
     else
-        for a in x.args
-            _collect_capture_syms!(acc, a)
-        end
+        x.args
     end
-    nothing
+    foreach(value -> _brm_cell_value_refs!(acc, value), values)
+    acc
 end
 
 """
