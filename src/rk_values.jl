@@ -736,6 +736,12 @@ function _rk_value_expr!(bindings, expression::_BRMPreparedExpr, taken)
     call
 end
 
+# An in-cell `weighted(family, weight, args...)` observation keeps RKPPL's
+# power-likelihood wrapper outermost over its row-aligned weight reader.
+_rk_weighted_observation(base, ::Nothing, bindings, taken) = base
+_rk_weighted_observation(base, weight::_BRMPreparedRef, bindings, taken) =
+    _rk_ast_dotted(:weighted, base, _rk_value_expr!(bindings, weight, taken))
+
 function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
     reserved = Set{Symbol}(keys(plan.columns))
     union!(reserved, (a.name for a in plan.assignments))
@@ -806,6 +812,7 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
                 _rk_value_expr!(bindings, _brm_prepare_expr(modifier.upper), taken)
             base = _rk_ast_response_modifier(base, modifier.kind, lower, upper)
         end
+        base = _rk_weighted_observation(base, observation.weight, bindings, taken)
         push!(stmts, Expr(:call, :.~, observation.name, base))
     end
     stmts = _rk_source_data_axes(stmts, plan.columns)

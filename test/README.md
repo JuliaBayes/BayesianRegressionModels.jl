@@ -394,6 +394,13 @@ elementwise argument expressions and unchanged data ports. Each case checks
 normalized independent values and every ordinary Reverse coordinate, strict
 same-model compiled Stan parity, printed source replay and actual graph gathers.
 Run the standalone file with optional case filters such as `joined` or `integer`.
+`rk_kernel_weighted_observations.jl` checks in-cell
+`weighted(family, weight, args...)` power likelihoods: SLIC token and call
+forms, a cell-expression weight and a subject-shared weight over a native
+family, plus a caller-owned `_rk_observation_source!` law, each with uneven
+and empty cells, independent normalized values and Reverse gradients, strict
+same-BRMI Stan parity and printed source replay. The weight reader must read
+only data. In-cell bounded combinators remain `@test_broken` on RK.
 `rk_observed_graph_law.jl` checks the public inclusive threshold law's lower
 and upper branches and normalized interior in that built graph, against
 independent native values/gradients. The retained ordinary-constructor fixture

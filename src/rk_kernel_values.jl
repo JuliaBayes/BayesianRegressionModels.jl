@@ -17,7 +17,7 @@ end
 _rk_kernel_column_name(column::NamedColumn) = name(column)
 _rk_flatten_kernel_response(cells) = reduce(vcat, cells; init=eltype(eltype(cells))[])
 
-function _rk_kernel_observation_family(scope, expression, kernel)
+function _rk_kernel_observation_callee(scope, expression, kernel)
     Meta.isexpr(expression, :call) || error(
         "RK backend: kernel `$kernel` observation needs a constructor call")
     head = first(expression.args)
@@ -25,11 +25,49 @@ function _rk_kernel_observation_family(scope, expression, kernel)
         "RK backend: kernel `$kernel` observation needs a named constructor")
     # SLIC's unqualified built-in family tokens need not be exported into
     # the caller module. A caller's actual binding still takes precedence.
-    callable = head isa Symbol && !isdefined(scope, head) &&
-            isdefined(StanBlocks.stan, head) ?
+    head isa Symbol && !isdefined(scope, head) && isdefined(StanBlocks.stan, head) ?
         getfield(StanBlocks.stan, head) : Core.eval(scope, head)
+end
+
+# In-cell distribution combinators take a family token as their first
+# positional (`weighted(normal, w, mu, sigma)`), never a data argument.
+_rk_kernel_weighted(callable) = callable === weighted || callable === StanBlocks.stan.weighted
+_rk_kernel_bounded(callable) = callable in (censored, truncated, interval_censored,
+    StanBlocks.stan.censored, StanBlocks.stan.truncated, StanBlocks.stan.interval_censored)
+
+function _rk_kernel_observation_family(scope, expression, kernel)
+    callable = _rk_kernel_observation_callee(scope, expression, kernel)
+    _rk_kernel_weighted(callable) && error(
+        "RK backend: kernel `$kernel` observation nests `weighted` in its family; " *
+        "write one `weighted(family, weight, args...)`")
+    _rk_kernel_bounded(callable) && error(
+        "RK backend: kernel `$kernel` in-cell `$(nameof(callable))(family, ...)` " *
+        "observations are not lowered on the RK backend yet; observe the response " *
+        "with an unbounded in-cell family, or supply the bounded law through " *
+        "`_rk_observation_source!` for a caller-owned family")
     callable === StanBlocks.normal && return Normal
     callable
+end
+
+# SLIC's observation weighting `weighted(family, weight, args...)` is a power
+# likelihood: each row's `family(args...)` log density is scaled by its
+# weight. StanBlocks' call form `weighted(family(args...), weight, extra...)`
+# splices the family call's arguments after the remaining positionals, so it
+# names the same observation as `weighted(family, weight, extra..., args...)`.
+function _rk_kernel_observation_weight(scope, expression, kernel)
+    _rk_kernel_weighted(_rk_kernel_observation_callee(scope, expression, kernel)) ||
+        return expression, nothing
+    positional(args) = any(arg -> Meta.isexpr(arg, (:parameters, :kw)), args) && error(
+        "RK backend: kernel `$kernel` `weighted(family, weight, args...)` " *
+        "takes positional arguments only")
+    args = expression.args[2:end]
+    positional(args)
+    length(args) >= 2 || error(
+        "RK backend: kernel `$kernel` observation needs `weighted(family, weight, args...)`")
+    family, weight, rest = args[1], args[2], args[3:end]
+    Meta.isexpr(family, :call) || return Expr(:call, family, rest...), weight
+    positional(family.args[2:end])
+    Expr(:call, first(family.args), rest..., family.args[2:end]...), weight
 end
 
 function _rk_kernel_observation_distribution(observation)
@@ -120,14 +158,16 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
                 (argument isa ExprColumn && getf(argument) === ragged ?
                     _rk_kernel_column_name(first(getargs(argument))) : nothing)
             source === nothing && error("RK backend: kernel `$name` observed cell needs a named response")
+            distribution, weight = _rk_kernel_observation_weight(scope, distribution, name)
             callable = _rk_kernel_observation_family(scope, distribution, name)
             values = Tuple(distribution.args[2:end])
             any(value -> Meta.isexpr(value, :parameters), values) && error(
                 "RK backend: kernel `$name` observation constructor keywords need explicit argument lowering")
             argument_names = Tuple(Symbol(name, :_argument_, source, :_, i)
                 for i in eachindex(values))
+            weight_name = weight === nothing ? nothing : Symbol(name, :_weight_, source)
             push!(observations, (; source, param=lhs, callable,
-                arguments=values, argument_names))
+                arguments=values, argument_names, weight, weight_name))
             continue
         end
         push!(body, statement)
@@ -422,9 +462,11 @@ Base.@nospecializeinfer function _brm_rk_composed_kernel_plan(@nospecialize(brmi
         _rk_prepare_kernel_observed_values!(plan.columns, taken, plan.regression.derived,
             observation.source, layout, raw)
         distribution = _rk_kernel_observation_distribution(observation)
+        weight = observation.weight === nothing ? nothing :
+            _BRMPreparedRef(observation.weight_name, :whole)
         push!(observations, _BRMPreparedObservation(observation.source,
             NamedColumn(observation.source, DataColumn(plan.columns[observation.source])),
-            distribution, raw, nothing, nothing))
+            distribution, raw, nothing, weight))
     end
     isempty(observations) && error("RK backend: kernel program needs at least one observed likelihood")
     _RKValuePlan(plan.regression, plan.assignments, Tuple(observations), plan.columns,
@@ -512,5 +554,27 @@ function _rk_emit_value_assignment!(defs, statements, bindings, taken,
             _rk_emit_kernel_reader!(defs, statements, bindings, taken, kernel,
                 name, vectorize(argument))
         end
+        # The weight reader reads only what the weight depends on, so a data
+        # weight stays a data-only definition for RKPPL's `weighted`.
+        observation.weight === nothing && continue
+        weight = vectorize(observation.weight)
+        _rk_emit_kernel_reader!(defs, statements, bindings, taken,
+            _rk_kernel_value_slice(kernel, weight), observation.weight_name, weight)
     end
+end
+
+# The cell restricted to what `value` reads: the body statements producing
+# its names, and the positional inputs and globals those statements read.
+function _rk_kernel_value_slice(kernel::_RKPreparedKernelAssignment, value)
+    needed = _brm_cell_value_refs!(Set{Symbol}(), value)
+    body = Any[]
+    for statement in Iterators.reverse(kernel.body)
+        isdisjoint(_rk_source_outputs!(Set{Symbol}(), statement), needed) && continue
+        pushfirst!(body, statement)
+        _brm_cell_value_refs!(needed, statement)
+    end
+    kept = [i for (i, param) in enumerate(kernel.params) if param in needed]
+    _RKPreparedKernelAssignment(kernel.name, kernel.params[kept], body, value,
+        kernel.scope, kernel.inputs[kept], filter(in(needed), kernel.globals),
+        kernel.count, kernel.columns, kernel.group_values, ())
 end
