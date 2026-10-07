@@ -3799,7 +3799,7 @@ end
 # Whole-predictor `r2d2` makes every ranef of that predictor the residual
 # (SB threads the derived scale into each block); SB rejects that over
 # mm/gr blocks, so the draws regime fails it closed here.
-function _rk_gate_ranef_r2d2!(brmi::BRMI, target::Symbol, what::String)
+Base.@nospecializeinfer function _rk_gate_ranef_r2d2!(@nospecialize(brmi::BRMI), target::Symbol, what::String)
     prefix = "RK backend"
     for spec in r2d2_priors(brmi)
         if isnothing(spec.predictor) || spec.predictor === target
@@ -4112,7 +4112,7 @@ end
 # fixed-offset vector still materializes and validates its row axis,
 # and the prior/r2d2 seam runs unchanged over zero columns (a stated
 # effect or r2d2 prior keeps its fail-closed error).
-function _rk_plan_offset_only_predictor(brmi::BRMI, context, target::Symbol,
+Base.@nospecializeinfer function _rk_plan_offset_only_predictor(@nospecialize(brmi::BRMI), context, target::Symbol,
         ordinary::Tuple, available::Tuple, link::Symbol,
         terms::Vector{_RKTermSpec}, derived::Vector{_RKDerivedSpec})
     prefix = "RK backend"
@@ -4563,7 +4563,7 @@ end
 # design cells), defaulting to Normal(0, 1) (SB's `popefs` default).
 # Runs after the shared seam (which owns spec validation); explicit
 # ar addresses never reach here (gated above).
-function _rk_ar_beta_prior(brmi::BRMI, target::Symbol, addressee::Symbol)
+Base.@nospecializeinfer function _rk_ar_beta_prior(@nospecialize(brmi::BRMI), target::Symbol, addressee::Symbol)
     prefix = "RK backend"
     cell = Ref{Any}(nothing)
     for spec in effect_priors(brmi)
@@ -4676,7 +4676,7 @@ end
 # (verified against emitted Stan). Generated-name `effect(mu, mo_c)` claims
 # stay unaddressable (they fail in the shared seam, like generated
 # interaction labels): the colon is the mainline spelling.
-function _rk_mo_beta_prior(brmi::BRMI, target::Symbol, addressee::Symbol)
+Base.@nospecializeinfer function _rk_mo_beta_prior(@nospecialize(brmi::BRMI), target::Symbol, addressee::Symbol)
     prefix = "RK backend"
     won = Ref{Any}(nothing)
     for spec in effect_priors(brmi)
@@ -4779,7 +4779,7 @@ end
 # recomputes the share composition at bind from the same
 # override/no-override structure, so the numbering itself need not
 # agree. Returns `(; prior, scalars, phi)`.
-function _rk_plan_r2d2_prior(brmi::BRMI, design, r2plan::_BRMR2D2Plan,
+Base.@nospecializeinfer function _rk_plan_r2d2_prior(@nospecialize(brmi::BRMI), design, r2plan::_BRMR2D2Plan,
         target::Symbol, available::Tuple, terms::Vector{_RKTermSpec},
         taken::Set{Symbol}, columns::Dict{Symbol,AbstractVector})
     prefix = "RK backend"
@@ -5189,7 +5189,7 @@ end
 # Normal(0, 1) (SB's `popefs` default). Runs after the shared seam
 # (which owns spec validation); explicit me addresses never reach here
 # (gated above).
-function _rk_me_beta_prior(brmi::BRMI, target::Symbol, addressee::Symbol)
+Base.@nospecializeinfer function _rk_me_beta_prior(@nospecialize(brmi::BRMI), target::Symbol, addressee::Symbol)
     prefix = "RK backend"
     won = Ref{Any}(nothing)
     for spec in effect_priors(brmi)
@@ -6145,7 +6145,7 @@ function _rk_gate_multinomial_trials!(specs::AbstractVector,
     nothing
 end
 
-function _rk_peel_observation(brmi::BRMI, observation)
+Base.@nospecializeinfer function _rk_peel_observation(@nospecialize(brmi::BRMI), observation)
     prefix = "RK backend"
     missing_response = _brm_missing_response_plan(observation.lhs; prefix)
     if !isnothing(missing_response)
@@ -6200,7 +6200,7 @@ end
 # index column, and the thin layer restricts the likelihood to
 # observed rows. Compositions SB never tested (weights, evidence) fail
 # closed, mirroring the Turing backend.
-function _rk_peel_mi_observation(brmi::BRMI, observation, plan)
+Base.@nospecializeinfer function _rk_peel_mi_observation(@nospecialize(brmi::BRMI), observation, plan)
     prefix = "RK backend"
     _rk_gate_mi_case_a!(brmi, observation.key, plan.source)
     rhs = observation.rhs
@@ -6229,9 +6229,9 @@ end
 # means StanBlocks would promote `y_mis` to parameters (Case B); v1
 # lowers Case A only, so that reference fails closed here with the
 # offending operation named.
-function _rk_gate_mi_case_a!(brmi::BRMI, mi_key::Symbol, inner::Symbol)
+Base.@nospecializeinfer function _rk_gate_mi_case_a!(@nospecialize(brmi::BRMI), mi_key::Symbol, inner::Symbol)
     prefix = "RK backend"
-    for (key, op_nc) in pairs(brmi.operations)
+    for (key, op_nc) in _brm_operation_entries(brmi)
         key === mi_key && continue
         op_nc isa NamedColumn || continue
         _rk_refs_name(parent(op_nc), inner) || continue
@@ -7025,7 +7025,7 @@ end
 # per-subject positional args.
 Base.@nospecializeinfer function _rk_kernel_ops(@nospecialize(brmi::BRMI))
     ops = Tuple{Symbol,Any}[]
-    for (key, op_nc) in pairs(brmi.operations)
+    for (key, op_nc) in _brm_operation_entries(brmi)
         op_nc isa NamedColumn || continue
         op = parent(op_nc)
         op isa ExprColumn{typeof(~)} || continue
@@ -7058,7 +7058,7 @@ struct _RKKernelSpec
     n_subjects::Int
 end
 
-function _rk_kernel_spec(brmi::BRMI, result::Symbol, rhs)
+Base.@nospecializeinfer function _rk_kernel_spec(@nospecialize(brmi::BRMI), result::Symbol, rhs)
     prefix = "RK backend"
     dcols = getargs(rhs)
     (!isempty(dcols) && _sb_kernel_lambda_parts(first(dcols)) !== nothing) || error(
@@ -7248,7 +7248,7 @@ _rk_plan_summary(plan::_RKKernelPlan) = string(
     plan.kernel.n_subjects, "-subject kernel plate and ",
     length(plan.parameters), " parameters")
 
-function _brm_rk_kernel_plan(brmi::BRMI)
+Base.@nospecializeinfer function _brm_rk_kernel_plan(@nospecialize(brmi::BRMI))
     prefix = "RK backend"
     kops = _rk_kernel_ops(brmi)
     length(kops) == 1 || error(
@@ -7342,7 +7342,7 @@ end
 # A fitted predictor depends on the resolved priors of its random-effect
 # margins. Discover those caller dependencies before filtering scalar draws;
 # an SD declaration is metadata rather than a normal formula operand.
-Base.@nospecializeinfer function _rk_with_ranef_prior_dependencies(@nospecialize(brmi), program, roots)
+Base.@nospecializeinfer function _rk_with_ranef_prior_dependencies(@nospecialize(brmi::BRMI), program, roots)
     specs = [spec for spec in ranef_effect_priors(brmi)
         if !(spec.class === :sd && spec.family === r2d2)]
     any(spec -> spec.class === :sd &&
@@ -7380,8 +7380,8 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
     # A kernel(...) model routes to the panel kernel planner; it has no
     # top-level observation, so it must not enter the GLM flow below.
     isempty(_rk_kernel_ops(brmi)) || return _brm_rk_composed_kernel_plan(brmi)
-    observations = _brm_direct_observations(brmi; prefix)
-    keys = Tuple(observation.key for observation in observations)
+    observations = _brm_direct_observation_list(brmi; prefix)
+    keys = Symbol[observation.key for observation in observations]
     length(unique(keys)) == length(keys) || error(
         "$prefix: multi-response observation names must be unique")
     program = _brm_prepare_program(
@@ -7392,8 +7392,10 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
         return _brm_rk_value_plan(brmi, program, observations)
     context = program.context
     # Phase 1: peel weights/modifiers and materialize responses.
-    peeled = map(observations) do observation
-        _rk_peel_observation(brmi, observation)
+    # A loop, not a closure over `brmi`, so peeling compiles once per corpus.
+    peeled = Vector{Any}(undef, length(observations))
+    for (index, observation) in enumerate(observations)
+        peeled[index] = _rk_peel_observation(brmi, observation)
     end
     # Phase 2: prepared model for parameters and assignments.
     overrides = Dict(entry.key => (;

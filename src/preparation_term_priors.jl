@@ -76,7 +76,7 @@ function _brm_resolve_term_slot(term, spec; prefix="BRM preparation")
     only(matches)
 end
 
-function _brm_term_address_map(brmi::BRMI, target::Symbol)
+Base.@nospecializeinfer function _brm_term_address_map(@nospecialize(brmi::BRMI), target::Symbol)
     result = Dict{Symbol,Vector{Any}}()
     _brm_is_prior_declaration(brmi, target) && return result
     operation = linear_predictor_op(brmi, target)

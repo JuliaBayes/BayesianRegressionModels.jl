@@ -21,10 +21,10 @@ _rk_observed_names(::_RKUnconditionedPlan) = ()
 _rk_emit_ast(::_RKUnconditionedPlan) =
     _RKEmittedProgram(Expr[], Expr(:block), Pair{Symbol,Any}[])
 
-Base.@nospecializeinfer function _rk_unconditioned_plan(@nospecialize(brmi))
+Base.@nospecializeinfer function _rk_unconditioned_plan(@nospecialize(brmi::BRMI))
     # Bound formula observations, including kernel-cell inputs, use the
     # ordinary planner. Empty bound arrays still retain this fitted role.
-    for node in values(brmi.operations)
+    for node in _brm_operation_values(brmi)
         node isa NamedColumn || continue
         operation = parent(node)
         operation isa ExprColumn{typeof(~)} || continue
@@ -66,7 +66,7 @@ Base.@nospecializeinfer function _brm_rk_plan(@nospecialize(brmi::BRMI); held_ou
     isempty(selected) ? original : _RKHeldOutPlan(original, selected)
 end
 
-Base.@nospecializeinfer function _rk_held_out_selection(@nospecialize(brmi), held_out)
+Base.@nospecializeinfer function _rk_held_out_selection(@nospecialize(brmi::BRMI), held_out)
     request = _brm_held_out_request(held_out; prefix="RK backend")
     isempty(request.names) && return Set{Symbol}()
     aliases = Dict{Symbol,Set{Symbol}}()
@@ -83,7 +83,7 @@ Base.@nospecializeinfer function _rk_held_out_selection(@nospecialize(brmi), hel
             push!(get!(() -> Set{Symbol}(), aliases, alias), source)
         end
     end
-    for (key, node) in pairs(brmi.operations)
+    for (key, node) in _brm_operation_entries(brmi)
         node isa NamedColumn || continue
         operation = parent(node)
         operation isa ExprColumn{typeof(~)} || continue

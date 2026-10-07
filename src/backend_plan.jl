@@ -297,7 +297,7 @@ end
 
 Base.@nospecializeinfer function _brm_collect_target_obs(@nospecialize(brmi::BRMI))
     target_obs = Dict{Symbol,Symbol}()
-    for op_nc in values(brmi.operations)
+    for op_nc in _brm_operation_values(brmi)
         op_nc isa NamedColumn || continue
         op = parent(op_nc)
         op isa ExprColumn || continue
@@ -332,7 +332,7 @@ function _brm_collect_target_axes!(axes, node::ExprColumn)
 end
 Base.@nospecializeinfer function _brm_collect_target_axes(@nospecialize(brmi::BRMI))
     axes = Dict{Symbol,Vector{Symbol}}()
-    foreach(node -> _brm_collect_target_axes!(axes, node), values(brmi.operations))
+    foreach(node -> _brm_collect_target_axes!(axes, node), _brm_operation_values(brmi))
     axes
 end
 function _brm_declared_row_axis(context::_BRMBackendContext, target::Symbol)
@@ -353,11 +353,16 @@ end
 Backend-neutral enumeration of observed likelihood statements: every `name ~
 distribution` operation whose LHS names response data. Returns `(key, lhs,
 rhs)` records in operation order. Concrete backends admit or reject each
-record's decorators, family, and shape.
+record's decorators, family, and shape. Each record's type embeds its whole
+formula tree; planners that only read them as syntax use the vector form,
+`_brm_direct_observation_list`, which iterates without compiling per model.
 """
-Base.@nospecializeinfer function _brm_direct_observations(@nospecialize(brmi::BRMI); prefix="BRM backend lowering")
+Base.@nospecializeinfer _brm_direct_observations(@nospecialize(brmi::BRMI); prefix="BRM backend lowering") =
+    Tuple(_brm_direct_observation_list(brmi; prefix))
+
+Base.@nospecializeinfer function _brm_direct_observation_list(@nospecialize(brmi::BRMI); prefix="BRM backend lowering")
     found = Any[]
-    for (key, op_nc) in pairs(brmi.operations)
+    for (key, op_nc) in _brm_operation_entries(brmi)
         op_nc isa NamedColumn || continue
         op = parent(op_nc)
         op isa ExprColumn{typeof(~)} || continue
@@ -367,7 +372,7 @@ Base.@nospecializeinfer function _brm_direct_observations(@nospecialize(brmi::BR
     end
     isempty(found) && error(
         "$prefix: direct execution requires at least one observed likelihood")
-    Tuple(found)
+    found
 end
 
 # ---- shared response composition -----------------------------------------
@@ -684,14 +689,14 @@ Base.@nospecializeinfer function _brm_backend_context(@nospecialize(brmi::BRMI);
                               data::AbstractDict=Dict{Symbol,Any}(),
                               retain_mm_sources::Bool=false)
     prepass = Dict{Symbol,Any}()
-    for op in values(brmi.operations)
+    for op in _brm_operation_values(brmi)
         _brm_visit_op!(prepass, op)
     end
 
     skip_data = copy(get(prepass, :skip_data, Set{Symbol}()))
     mm_sources = Set{Symbol}()
     non_mm_sources = Set{Symbol}()
-    for op in values(brmi.operations)
+    for op in _brm_operation_values(brmi)
         payload = op isa NamedColumn ? parent(op) : op
         _brm_collect_mm_sources!(mm_sources, payload)
         _brm_collect_non_mm_sources!(non_mm_sources, payload)
@@ -699,7 +704,7 @@ Base.@nospecializeinfer function _brm_backend_context(@nospecialize(brmi::BRMI);
     retain_mm_sources || union!(skip_data, setdiff(mm_sources, non_mm_sources))
     prepass[:skip_data] = skip_data
 
-    for op in values(brmi.operations)
+    for op in _brm_operation_values(brmi)
         _brm_collect_data!(data, op; skip=skip_data)
     end
 
@@ -1222,7 +1227,7 @@ end
 
 Base.@nospecializeinfer function _brm_group_declarations(@nospecialize(brmi::BRMI))
     declarations = _BRMGroupDeclaration[]
-    for (predictor, operation) in pairs(brmi.operations)
+    for (predictor, operation) in _brm_operation_entries(brmi)
         expression = operation isa NamedColumn ? parent(operation) : operation
         expression isa ExprColumn && getf(expression) === (~) || continue
         # Hyper-predictor ranefs lower through their own per-level blocks, not
@@ -1679,7 +1684,7 @@ _brm_threshold_location(_family, _rhs) = nothing
 
 Base.@nospecializeinfer function _brm_threshold_located_predictors(@nospecialize(brmi::BRMI))
     out = Set{Symbol}()
-    for op_nc in values(brmi.operations)
+    for op_nc in _brm_operation_values(brmi)
         op = _named_op(op_nc)
         (isnothing(op) || getf(op) !== (~)) && continue
         rhs = last(getargs(op, 2))
@@ -2081,7 +2086,7 @@ end
 _brm_lp_emitted_name(name::Symbol, link_lhs_fn) =
     link_lhs_fn === identity ? name : Symbol(nameof(link_lhs_fn), :_, name)
 
-function _brm_simple_population_predictor(brmi::BRMI, target::Symbol,
+Base.@nospecializeinfer function _brm_simple_population_predictor(@nospecialize(brmi::BRMI), target::Symbol,
                                           context::_BRMBackendContext;
                                           required::Bool=false)
     op = linear_predictor_op(brmi, target)
@@ -2491,9 +2496,9 @@ end
 # Operation keys for the declarations consumed by the resolver above. These
 # keys are model statements, not stray operations, and must be admitted by a
 # strict direct-BRMI backend after their semantics have been validated.
-function _brm_population_effect_operation_keys(brmi::BRMI)
+Base.@nospecializeinfer function _brm_population_effect_operation_keys(@nospecialize(brmi::BRMI))
     out = Set{Symbol}()
-    for (key, op_nc) in pairs(brmi.operations)
+    for (key, op_nc) in _brm_operation_entries(brmi)
         op = _named_op(op_nc)
         isnothing(op) && continue
         getf(op) === (~) || continue
@@ -2511,9 +2516,9 @@ function _brm_population_effect_operation_keys(brmi::BRMI)
     out
 end
 
-function _brm_ranef_effect_operation_keys(brmi::BRMI)
+Base.@nospecializeinfer function _brm_ranef_effect_operation_keys(@nospecialize(brmi::BRMI))
     out = Set{Symbol}()
-    for (key, op_nc) in pairs(brmi.operations)
+    for (key, op_nc) in _brm_operation_entries(brmi)
         op = _named_op(op_nc)
         isnothing(op) && continue
         getf(op) === (~) || continue

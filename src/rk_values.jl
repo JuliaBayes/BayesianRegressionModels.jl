@@ -334,7 +334,9 @@ _rk_plan_summary(plan::_RKValuePlan) = string(
     _rk_num_coefficients(plan.regression), " population coefficients and ",
     length(plan.observations), " value-based responses")
 
-function _rk_needs_value_plan(program, observations)
+# Observation records carry their whole formula tree in their types; this scan
+# reads them as syntax.
+Base.@nospecializeinfer function _rk_needs_value_plan(@nospecialize(program), @nospecialize(observations))
     for observation in observations
         plan = _brm_missing_response_plan(observation.lhs; prefix="RK backend")
         plan === nothing && continue
@@ -481,7 +483,7 @@ end
 # Model-wide orchestration over already boxed plan carriers. Do not infer this
 # loop again from each source BRMI's NamedTuple type; term-level helpers still
 # dispatch on the expression values they consume.
-Base.@nospecializeinfer function _rk_predictor_components(@nospecialize(brmi), context, predictor_order, columns,
+Base.@nospecializeinfer function _rk_predictor_components(@nospecialize(brmi::BRMI), context, predictor_order, columns,
         derived, taken, parameters)
     predictors = _RKPredictorSpec[]
     priors = _RKPopulationPrior[]
@@ -529,7 +531,7 @@ end
 # is an authored value takes the same record as a formula-predictor location.
 const _RK_VALUE_LEVELED_HEADS = (OrderedLogistic, Ordinal, CategoricalLogit)
 
-function _rk_value_leveled_responses(observations, data)
+Base.@nospecializeinfer function _rk_value_leveled_responses(@nospecialize(observations), data)
     records = Dict{Symbol,Any}()
     for observation in observations
         rhs, lhs = observation.rhs, observation.lhs
@@ -567,7 +569,9 @@ _rk_threshold_vector(name::Symbol, ::Type{_BRMThresholdPrior{true}}, n::Int) =
 _rk_threshold_vector(name::Symbol, ::Type{_BRMThresholdPrior{false}}, n::Int) =
     _RKVectorParameter(name, :vector_normal, (0.0, 1.0), n, name)
 
-function _brm_rk_value_plan(brmi, program, observations; kernels=(), submodels=())
+Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
+        @nospecialize(program), @nospecialize(observations);
+        @nospecialize(kernels=()), @nospecialize(submodels=()))
     context = program.context
     leveled = _rk_value_leveled_responses(observations, context.data)
     implicit = Pair{Symbol,Any}[parameter for entry in values(leveled)

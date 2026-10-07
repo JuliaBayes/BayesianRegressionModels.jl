@@ -120,9 +120,9 @@ Return one entry per `<response> ~ Family(args...)` likelihood (i.e. every
 - `(; role=:constant, value)` -- numeric literal.
 - `(; role=:expression, expr)` -- catch-all opaque ExprColumn.
 """
-function outcomes(brmi::BRMI)
+Base.@nospecializeinfer function outcomes(@nospecialize(brmi::BRMI))
     out = NamedTuple[]
-    for (k, v) in pairs(brmi.operations)
+    for (k, v) in _brm_operation_entries(brmi)
         op = _named_op(v)
         op === nothing && continue
         getf(op) === (~) || continue
@@ -176,9 +176,9 @@ end
 The `~` ExprColumn that defines `<name> ~ <rhs>`, or `nothing` if
 `name` isn't a `~`-bound entry in `brmi.operations`.
 """
-function linear_predictor_op(brmi::BRMI, n::Symbol)
-    haskey(brmi.operations, n) || return nothing
-    op = _named_op(brmi.operations[n])
+Base.@nospecializeinfer function linear_predictor_op(@nospecialize(brmi::BRMI), n::Symbol)
+    _brm_has_operation(brmi, n) || return nothing
+    op = _named_op(_brm_operation(brmi, n))
     op === nothing && return nothing
     # Either `<n> ~ <rhs>` (formula) or `<n> = <rhs>` (literal assign).
     # See `_classify_named` -- both bind a latent that downstream
@@ -211,9 +211,9 @@ underlying parameter name (e.g. `:err` for `log(err) ~ ...`) and
 `link_lhs_fn` is the link applied to the LHS (e.g. `log`; `identity`
 when bare).
 """
-function linear_predictors(brmi::BRMI)
+Base.@nospecializeinfer function linear_predictors(@nospecialize(brmi::BRMI))
     out = NamedTuple[]
-    for (k, v) in pairs(brmi.operations)
+    for (k, v) in _brm_operation_entries(brmi)
         op = _named_op(v)
         op === nothing && continue
         getf(op) === (~) || continue
@@ -290,7 +290,7 @@ matching no parameter at all.
 """
 Base.@nospecializeinfer function effect_priors(@nospecialize(brmi::BRMI))
     out = NamedTuple[]
-    for op_nc in values(brmi.operations)
+    for op_nc in _brm_operation_values(brmi)
         op = _named_op(op_nc)
         isnothing(op) && continue
         getf(op) === (~) || continue
@@ -339,7 +339,7 @@ a shared `|ID|` block.
 """
 Base.@nospecializeinfer function ranef_effect_priors(@nospecialize(brmi::BRMI))
     out = NamedTuple[]
-    for op_nc in values(brmi.operations)
+    for op_nc in _brm_operation_values(brmi)
         op = _named_op(op_nc)
         isnothing(op) && continue
         getf(op) === (~) || continue
@@ -419,7 +419,7 @@ a prior would duplicate or confound the model-scale parameter above
 """
 Base.@nospecializeinfer function term_priors(@nospecialize(brmi::BRMI))
     out = NamedTuple[]
-    for op_nc in values(brmi.operations)
+    for op_nc in _brm_operation_values(brmi)
         op = _named_op(op_nc)
         isnothing(op) && continue
         getf(op) === (~) || continue
@@ -474,7 +474,7 @@ one labelled coefficient.
 """
 Base.@nospecializeinfer function r2d2_priors(@nospecialize(brmi::BRMI))
     out = NamedTuple[]
-    for op_nc in values(brmi.operations)
+    for op_nc in _brm_operation_values(brmi)
         op = _named_op(op_nc)
         isnothing(op) && continue
         getf(op) === (~) || continue
@@ -600,7 +600,7 @@ Works for both bare-LHS LPs (`loc ~ 1 + a`) and link-transformed-LHS
 LPs (`log(err) ~ 1 + b`); the link is captured separately via
 `linear_predictors`. `nothing` only when the RHS is malformed.
 """
-function predictors(brmi::BRMI, lhs::Symbol)
+Base.@nospecializeinfer function predictors(@nospecialize(brmi::BRMI), lhs::Symbol)
     op = linear_predictor_op(brmi, lhs)
     isnothing(op) && return nothing
     _, rhs_expr = getargs(op, 2)
@@ -746,7 +746,7 @@ The grouping-factor symbols in `<lhs> ~ ...`: the last arg of every
 `(... | g)` term plus the `by=` group of every `hsgp(x, by=g)` term. Empty if
 no grouping term or the LP isn't introspectable.
 """
-function grouping_factors(brmi::BRMI, lhs::Symbol)
+Base.@nospecializeinfer function grouping_factors(@nospecialize(brmi::BRMI), lhs::Symbol)
     p = predictors(brmi, lhs)
     re_groups = Symbol[]
     if !isnothing(p)
@@ -776,7 +776,7 @@ For `y1 ~ Normal(loc, err)` with `loc ~ 1 + a + (1|g1)` and
 `(; data=[:a, :g1, :b], intermediates=[:loc, :err])`. RE grouping
 factors count as data deps.
 """
-function dependencies(brmi::BRMI, n::Symbol)
+Base.@nospecializeinfer function dependencies(@nospecialize(brmi::BRMI), n::Symbol)
     data = OrderedSet{Symbol}()
     intermediates = OrderedSet{Symbol}()
     seen = Set{Symbol}()
@@ -784,14 +784,14 @@ function dependencies(brmi::BRMI, n::Symbol)
     (; data=collect(data), intermediates=collect(intermediates))
 end
 
-function _trace!(brmi, n::Symbol, data, intermediates, seen)
+Base.@nospecializeinfer function _trace!(@nospecialize(brmi::BRMI), n::Symbol, data, intermediates, seen)
     n in seen && return
     push!(seen, n)
     op = linear_predictor_op(brmi, n)
     if isnothing(op)
         # Maybe a likelihood node -- look for `~` op even if LHS is data.
-        outer = haskey(brmi.operations, n) ?
-            _named_op(brmi.operations[n]) : _joint_response_operation(brmi, n)
+        outer = _brm_has_operation(brmi, n) ?
+            _named_op(_brm_operation(brmi, n)) : _joint_response_operation(brmi, n)
         outer === nothing && return
         getf(outer) === (~) || return
         op = outer
@@ -800,8 +800,8 @@ function _trace!(brmi, n::Symbol, data, intermediates, seen)
     _trace_expr!(brmi, rhs, data, intermediates, seen)
 end
 
-function _joint_response_operation(brmi::BRMI, response::Symbol)
-    for value in values(brmi.operations)
+Base.@nospecializeinfer function _joint_response_operation(@nospecialize(brmi::BRMI), response::Symbol)
+    for value in _brm_operation_values(brmi)
         outer = _named_op(value)
         outer === nothing && continue
         getf(outer) === (~) || continue
@@ -814,12 +814,12 @@ end
 
 # Dispatch on argument type for traversal -- no Symbol switch.
 _trace_expr!(_, ::Number, _, _, _) = nothing
-function _trace_expr!(brmi, expr::NamedColumn, data, intermediates, seen)
+Base.@nospecializeinfer function _trace_expr!(@nospecialize(brmi::BRMI), expr::NamedColumn, data, intermediates, seen)
     inner = parent(expr)
     _trace_named!(brmi, name(expr), inner, data, intermediates, seen)
 end
 _trace_named!(_, n::Symbol, ::DataColumn, data, _, _) = (push!(data, n); nothing)
-_trace_named!(brmi, n::Symbol, op::ExprColumn, data, intermediates, seen) = begin
+Base.@nospecializeinfer _trace_named!(@nospecialize(brmi::BRMI), n::Symbol, op::ExprColumn, data, intermediates, seen) = begin
     if getf(op) === (~)
         push!(intermediates, n)
         _trace!(brmi, n, data, intermediates, seen)
@@ -830,17 +830,17 @@ _trace_named!(brmi, n::Symbol, op::ExprColumn, data, intermediates, seen) = begi
     end
 end
 _trace_named!(_, _, _, _, _, _) = nothing
-function _trace_expr!(brmi, expr::ExprColumn, data, intermediates, seen)
+Base.@nospecializeinfer function _trace_expr!(@nospecialize(brmi::BRMI), expr::ExprColumn, data, intermediates, seen)
     for a in getargs(expr)
         _trace_expr!(brmi, a, data, intermediates, seen)
     end
 end
-function _trace_expr!(brmi, expr::AbstractVector, data, intermediates, seen)
+Base.@nospecializeinfer function _trace_expr!(@nospecialize(brmi::BRMI), expr::AbstractVector, data, intermediates, seen)
     for a in expr
         _trace_expr!(brmi, a, data, intermediates, seen)
     end
 end
-function _trace_expr!(brmi, expr::MultiMembershipTerm, data, intermediates, seen)
+Base.@nospecializeinfer function _trace_expr!(@nospecialize(brmi::BRMI), expr::MultiMembershipTerm, data, intermediates, seen)
     for a in getargs(expr)
         _trace_expr!(brmi, a, data, intermediates, seen)
     end
@@ -851,7 +851,7 @@ function _trace_expr!(brmi, expr::MultiMembershipTerm, data, intermediates, seen
         end
     end
 end
-function _trace_expr!(brmi, expr::JointResponseColumn, data, intermediates, seen)
+Base.@nospecializeinfer function _trace_expr!(@nospecialize(brmi::BRMI), expr::JointResponseColumn, data, intermediates, seen)
     for column in joint_response_columns(expr)
         _trace_expr!(brmi, column, data, intermediates, seen)
     end
@@ -866,9 +866,9 @@ _trace_expr!(_, _, _, _, _) = nothing
 Underlying data vector for a NamedColumn-over-DataColumn entry.
 `nothing` if `name` doesn't resolve to a DataColumn.
 """
-function column_data(brmi::BRMI, n::Symbol)
-    haskey(brmi.operations, n) || return nothing
-    _column_data_value(brmi.operations[n])
+Base.@nospecializeinfer function column_data(@nospecialize(brmi::BRMI), n::Symbol)
+    _brm_has_operation(brmi, n) || return nothing
+    _column_data_value(_brm_operation(brmi, n))
 end
 _column_data_value(v::NamedColumn) = _column_data_expr(parent(v))
 _column_data_expr(d::DataColumn) = _column_data_inner(d)
@@ -887,9 +887,9 @@ _column_data_inner(_) = nothing
 Every name in `brmi.operations` that is a NamedColumn over a DataColumn
 (i.e. every actual data column referenced by the formula).
 """
-function data_columns(brmi::BRMI)
+Base.@nospecializeinfer function data_columns(@nospecialize(brmi::BRMI))
     out = Symbol[]
-    for (k, v) in pairs(brmi.operations)
+    for (k, v) in _brm_operation_entries(brmi)
         _push_if_data_name!(out, k, v)
     end
     out
@@ -913,10 +913,10 @@ _push_if_data_inner!(_out, _k, _p) = nothing
 `outcomes(brmi)` filtered to those whose linear predictor has any RE
 term.
 """
-function hierarchical_outcomes(brmi::BRMI)
+Base.@nospecializeinfer function hierarchical_outcomes(@nospecialize(brmi::BRMI))
     [o for o in outcomes(brmi) if _has_re(brmi, o)]
 end
-function _has_re(brmi::BRMI, o)
+Base.@nospecializeinfer function _has_re(@nospecialize(brmi::BRMI), o)
     for arg in o.args
         names = arg.role === :linear_predictor ? (arg.link_lp,) :
                 arg.role === :joint_means ? arg.names : ()

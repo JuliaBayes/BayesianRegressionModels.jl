@@ -123,15 +123,19 @@ values: this pass neither selects a likelihood family nor emits backend code.
 """
 Base.@nospecializeinfer function _brm_prepare_program(@nospecialize(brmi::BRMI); data=Dict{Symbol,Any}(),
                               context=_brm_backend_context(brmi; data))
-    names = keys(brmi.operations)
-    operations = map(names) do key
-        raw = brmi.operations[key]
+    # Loop over erased entries: a closure capturing `brmi` would make this
+    # mapping compile again for every model's operation NamedTuple.
+    entries = _brm_operation_entries(brmi)
+    names = first.(entries)
+    prepared = Vector{_BRMPreparedOperation}(undef, length(entries))
+    for (index, (key, raw)) in enumerate(entries)
         op = _named_op(raw)
         isnothing(op) && (op = raw)
         role = _brm_operation_role(op)
-        _BRMPreparedOperation(key, role, op,
+        prepared[index] = _BRMPreparedOperation(key, role, op,
             _brm_operation_dependencies(op, names, key, role))
     end
+    operations = Tuple(prepared)
     order = _brm_operation_order(operations)
     byname = Dict(op.name => op for op in operations)
     # An assignment preserves its consumers' observation axis. Propagate this
@@ -154,9 +158,9 @@ Base.@nospecializeinfer function _brm_prepare_program(@nospecialize(brmi::BRMI);
     isempty(claims) ? program : _brm_with_prior_dependencies(program, claims)
 end
 
-function _brm_is_prior_declaration(brmi::BRMI, key::Symbol)
-    haskey(brmi.operations, key) || return false
-    op = _named_op(brmi.operations[key])
+Base.@nospecializeinfer function _brm_is_prior_declaration(@nospecialize(brmi::BRMI), key::Symbol)
+    _brm_has_operation(brmi, key) || return false
+    op = _named_op(_brm_operation(brmi, key))
     !isnothing(op) && _brm_operation_role(op) === :parameter
 end
 

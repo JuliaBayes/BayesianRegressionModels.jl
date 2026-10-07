@@ -58,7 +58,7 @@ function _rk_kernel_value_refs!(names, value)
     names
 end
 
-function _rk_prepare_kernel_value(brmi, program, name, rhs)
+Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BRMI), program, name, rhs)
     parts = _sb_kernel_lambda_parts(first(getargs(rhs)))
     parts === nothing && error("RK backend: kernel `$name` requires an inline cell body")
     params, raw_body = parts
@@ -388,15 +388,15 @@ function _rk_kernel_response_modifier!(columns, taken, derived, observation, lay
         gather(modifier.lower, :lower), gather(modifier.upper, :upper))
 end
 
-function _brm_rk_composed_kernel_plan(brmi)
+Base.@nospecializeinfer function _brm_rk_composed_kernel_plan(@nospecialize(brmi::BRMI))
     program = _brm_prepare_program(brmi;
         context=_brm_backend_context(brmi; retain_mm_sources=true))
     kernels = Tuple(_rk_prepare_kernel_value(brmi, program, name, rhs)
         for (name, rhs) in _rk_kernel_ops(brmi))
-    direct = Tuple((; key, lhs=getargs(parent(node))[1], rhs=getargs(parent(node))[2])
-        for (key, node) in pairs(brmi.operations) if node isa NamedColumn &&
+    direct = Any[(; key, lhs=getargs(parent(node))[1], rhs=getargs(parent(node))[2])
+        for (key, node) in _brm_operation_entries(brmi) if node isa NamedColumn &&
             parent(node) isa ExprColumn{typeof(~)} &&
-            _brm_observation_name(first(getargs(parent(node)))) !== nothing)
+            _brm_observation_name(first(getargs(parent(node)))) !== nothing]
     submodels = _rk_prepare_submodel_values(program)
     plan = _brm_rk_value_plan(brmi, program, direct; kernels, submodels)
     observations = Any[plan.observations...]
