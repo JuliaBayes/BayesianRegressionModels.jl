@@ -164,30 +164,43 @@ end
 # Group-level effects allocate their scales, correlation factor and
 # standardized draws, and return the non-centered levels-by-margins matrix.
 # `priors` holds one positive prior per margin; with `scale_value` the scales
-# are instead a supplied value (shared R2D2M2 budgets).
+# are instead a supplied value (shared R2D2M2 budgets). A Student-t block
+# (`nu`, a constant or graph value) also draws one mixing weight per level,
+# `w ~ InverseGamma(nu/2, nu/2)`, and scales that level's row by `sqrt(w)`:
+# the same scale mixture as StanBlocks' `_sb_student_t_ranef`.
 function _rk_ast_group_component!(definitions, statements, taken, name, group, K, eta,
-        priors; scale_value=nothing)
+        priors; scale_value=nothing, nu=nothing)
     priors, prior_inputs, prior_values = _rk_ast_component_prior_inputs(priors,
-        (:g, :K, :eta, :tau, :L, :z, (Symbol(:tau_, j) for j in 1:K)...))
+        (:g, :K, :eta, :tau, :L, :z, :w, :nu, (Symbol(:tau_, j) for j in 1:K)...))
     index = K > 1 ? Expr(:call, :(:), 1, :K) : Expr(:call, :(:), 1, 1)
     body = Expr(:block)
     scale_value === nothing && append!(body.args, _rk_ast_group_scales(priors, index))
     K > 1 && push!(body.args, Expr(:call, :~, :L, Expr(:call, :LKJCholesky, :K, :eta)))
     push!(body.args, Expr(:call, :.~, Expr(:ref, :z, Expr(:call, :levels, :g), index),
         _rk_ast_dotted(:Normal, 0, 1)))
-    push!(body.args, Expr(:return, K > 1 ?
+    value = K > 1 ?
         Expr(:call, :*, :z, Expr(:call, :transpose, Expr(:call, :.*, :tau, :L))) :
-        Expr(:call, :.*, :z, Expr(:ref, :tau, 1))))
+        Expr(:call, :.*, :z, Expr(:ref, :tau, 1))
+    if nu !== nothing
+        half = Expr(:call, :/, :nu, 2)
+        push!(body.args, Expr(:call, :.~, Expr(:ref, :w, Expr(:call, :levels, :g)),
+            _rk_ast_dotted(:InverseGamma, half, half)))
+        value = Expr(:call, :.*, _rk_ast_dotted(:sqrt, :w), value)
+    end
+    push!(body.args, Expr(:return, value))
     arguments = Any[:g]
     K > 1 && push!(arguments, :K, :eta)
     scale_value === nothing || push!(arguments, :tau)
+    nu === nothing || push!(arguments, :nu)
     append!(arguments, prior_inputs)
     base = string(scale_value === nothing ? "brm_" : "brm_scaled_",
+        nu === nothing ? "" : "student_t_",
         K > 1 ? "correlated_group_effects" : "group_effects")
     callee = _rk_ast_shared_definition!(definitions, taken, base, arguments, body)
     values = Any[group]
     K > 1 && push!(values, K, eta)
     scale_value === nothing || push!(values, scale_value)
+    nu === nothing || push!(values, nu)
     append!(values, prior_values)
     push!(statements, _rk_ast_component_call(name, callee, values...))
     name

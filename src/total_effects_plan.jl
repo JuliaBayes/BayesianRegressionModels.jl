@@ -288,6 +288,9 @@ function _sb_total_plan(brmi, prepared, predictor, overrides, buckets, sd_overri
             haskey(ranef_r2d2_overrides,key) && return nothing
             length(buckets[key].per_target) == 1 || return nothing
             sd = get(sd_overrides,key,nothing)
+            # The induced total covariance is Gaussian; a Student-t block's
+            # per-level mixing weights have no representation in it.
+            !isnothing(sd) && !isnothing(sd.dist) && return nothing
             append!(scale_priors,isnothing(sd) ? fill(nothing,length(plan.columns)) : sd.sd_prior)
             for i in eachindex(plan.columns)
                 push!(column_ids,plan.id)
@@ -333,7 +336,7 @@ Base.@nospecializeinfer function _sb_plan_totals(@nospecialize(brmi),prepared,ov
     end
     if !isnothing(requested)
         missing = setdiff(requested,Set(p.group for p in values(out)))
-        isempty(missing) || throw(ArgumentError("exact totals are unavailable for group(s) $(join(missing, ", ")); requires one independent grouping structure, matched population design and supported priors"))
+        isempty(missing) || throw(ArgumentError("exact totals are unavailable for group(s) $(join(missing, ", ")); requires one independent Gaussian grouping structure, matched population design and supported priors"))
     end
     out
 end
