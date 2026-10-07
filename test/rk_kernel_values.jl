@@ -226,3 +226,121 @@ end
     end
     @test isequal(data, saved)
 end
+
+# The reader of a kernel cell is the authored cell as one subject plate over
+# its per-subject inputs, then one flatten of the subject cells (snag
+# rk-kernel-reader-9a48d7b7). It was a `1:count` plate passing every port as
+# `Ref`, rebinding `cell_input_<k>` locals for a forwarding cell kernel, and
+# flattening with `reduce(vcat, cells; init=…)`, which reallocates once per
+# subject on every evaluation and reverse pass.
+@stestset "kernel readers are the authored cell, flattened in linear time" begin
+    flat = BRM.brm_flatten_cells
+    @test isequal(flat(Vector{Float64}[]), Float64[])
+    @test isequal(flat([[1.0, 2.0], Float64[], [3.0]]), [1.0, 2.0, 3.0])
+    @test isequal(flat([2.5]), [2.5])
+    @test isequal(flat([[1, 2], [3]]), [1, 2, 3])
+    @test isequal(flat(Any[[1.0], 2.0]), Any[1.0, 2.0])
+    cells = [fill(0.5, 10) for _ in 1:400]
+    flat(cells)
+    @test @allocated(flat(cells)) < 2 * sizeof(Float64) * 4000
+
+    build(data) = @brm data begin
+        log_k ~ Normal(0, 1)
+        sigma ~ Exponential(1)
+        @plate for i in eachindex(t)
+            loc[i] = dose[i] .* exp.(-exp(log_k) .* t[i])
+        end
+        y ~ Normal(loc, sigma)
+    end
+    data = (; t=[[0.5, 1.5], Float64[], [0.7, 1.1, 2.0]], dose=[1.0, 2.0, 1.5],
+        y=[[0.6, 0.2], Float64[], [1.0, 0.8, 0.3]])
+    saved = deepcopy(data)
+    brmi = build(data)
+    emitted = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    source = join((sprint(Base.show_unquoted, d) for d in emitted.defs), "\n")
+    @test occursin("loc_reader(loc_input_t, loc_input_dose, log_k)", source)
+    @test occursin("ReactiveKernels.plate(loc_input_t, loc_input_dose, Ref(log_k)) do t, dose, log_k", source)
+    @test occursin("brm_flatten_cells(cells)", source)
+    for retired in ("cell_input", "subject_count", "loc_cell", "init =", "reduce(vcat")
+        @test !occursin(retired, source)
+    end
+    backend, problem = consumer_problem(brmi)
+    names = coordinate_names(backend.model.layout)
+    @test sort(names) == [:log_k, :sigma]
+    ik, is = findfirst(==(:log_k), names), findfirst(==(:sigma), names)
+    oracle(u) = begin
+        k, sigma = exp(u[ik]), exp(u[is])
+        logpdf(Normal(), u[ik]) + logpdf(Exponential(), sigma) + u[is] +
+            sum(sum(logpdf.(Normal.(dose .* exp.(-k .* t), sigma), y); init=0.0)
+                for (t, dose, y) in zip(data.t, data.dose, data.y))
+    end
+    stan = consumer_stan(brmi, "kernel-reader-shape")
+    points = ([0.0, 0.0], [0.3, -0.2], [-0.4, 0.25])
+    for u in points
+        check_consumer_point(problem, u, oracle)
+        check_consumer_stan(problem, stan, [:log_k => "log_k", :sigma => "sigma"], backend, u)
+    end
+    @test isequal(data, saved)
+
+    # Evaluation cost is linear in the number of subjects: four times the
+    # subjects allocate about four times as much, value and gradient alike.
+    sized(groups) = (; t=[collect(range(0.5, 2.0; length=5)) for _ in 1:groups],
+        dose=collect(range(1.0, 2.0; length=groups)), y=[fill(0.4, 5) for _ in 1:groups])
+    allocations = map((100, 400)) do groups
+        p = rk_logdensity_problem(RKBRMI(build(sized(groups)));
+            ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+        u = [0.1, -0.3]
+        LogDensityProblems.logdensity(p, u)
+        LogDensityProblems.logdensity_and_gradient(p, u)
+        (@allocated(LogDensityProblems.logdensity(p, u)),
+            @allocated(LogDensityProblems.logdensity_and_gradient(p, u)))
+    end
+    println("READER_ALLOCATIONS=", allocations); flush(stdout)
+    @test first(allocations[2]) < 6 * first(allocations[1])
+    @test last(allocations[2]) < 6 * last(allocations[1])
+
+    # Cell locals named like the reader's own locals stay the cell's, and an
+    # in-cell observation's argument readers carry only what they read.
+    shadowing = @brm data begin
+        log_k ~ Normal(0, 1)
+        sigma ~ Exponential(1)
+        @plate for i in eachindex(t)
+            values = t[i] .* exp(log_k)
+            cells = dose[i] .* exp.(-values)
+            y[i] ~ normal(cells, sigma)
+            loc[i] = cells
+        end
+    end
+    source = join((sprint(Base.show_unquoted, d)
+        for d in BRM._rk_emit_ast(BRM._brm_rk_plan(shadowing)).defs), "\n")
+    @test occursin("ReactiveKernels.plate(loc_input_y, Ref(sigma)) do y, sigma", source)
+    backend, problem = consumer_problem(shadowing)
+    stan = consumer_stan(shadowing, "kernel-reader-shadowing")
+    for u in points
+        check_consumer_point(problem, u, oracle)
+        check_consumer_stan(problem, stan, [:log_k => "log_k", :sigma => "sigma"], backend, u)
+    end
+
+    # Scalar cells hold one value per subject, including a single subject.
+    for scalar_data in ((; dose=[1.0, 2.0, 1.5], y=[0.6, 1.1, 0.7]), (; dose=[1.2], y=[0.5]))
+        scalar = @brm scalar_data begin
+            log_k ~ Normal(0, 1)
+            sigma ~ Exponential(1)
+            @plate for i in eachindex(dose)
+                loc[i] = dose[i] * exp(-exp(log_k))
+            end
+            y ~ Normal(loc, sigma)
+        end
+        backend, problem = consumer_problem(scalar)
+        names = coordinate_names(backend.model.layout)
+        jk, js = findfirst(==(:log_k), names), findfirst(==(:sigma), names)
+        scalar_oracle(u) = logpdf(Normal(), u[jk]) + logpdf(Exponential(), exp(u[js])) +
+            u[js] + sum(logpdf.(Normal.(scalar_data.dose .* exp(-exp(u[jk])), exp(u[js])),
+                scalar_data.y))
+        stan = consumer_stan(scalar, "kernel-reader-scalar-$(length(scalar_data.dose))")
+        for u in points
+            check_consumer_point(problem, u, scalar_oracle)
+            check_consumer_stan(problem, stan, [:log_k => "log_k", :sigma => "sigma"], backend, u)
+        end
+    end
+end

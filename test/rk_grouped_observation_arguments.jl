@@ -180,15 +180,15 @@ function check_grouped_arguments(label, data)
         port = only(key for (key, value) in backend.plan.columns if isequal(value, partition))
         @test occursin(string(port), main)
         @test !occursin("[2, 3, 5, 1, 4, 6, 7]", definitions * main)
-        @test :(raw[reduce(vcat, groups; init = Int[])]) in graph_sources
+        @test :(raw[brm_flatten_cells(groups)]) in graph_sources
     elseif label === :singleton
         # Each subject's response cell length comes from the bound response.
         @test !occursin("[3, 0, 4]", definitions * main)
-        @test occursin("length(groups[group])", sources)
+        @test occursin("ones(length(rows))", sources)
     else
         @test occursin("y_observation_argument_1(loc, reference, sigma)", main)
         @test any(source -> Meta.isexpr(source, :call) &&
-            argument_callee_is(first(source.args), :reduce) &&
+            argument_callee_is(first(source.args), :brm_flatten_cells) &&
             :raw in source.args, graph_sources)
     end
     if label !== :ordinary

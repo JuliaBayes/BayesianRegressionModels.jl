@@ -76,3 +76,14 @@ brm_dummy(values, level) = _rk_value_dummy(values, level)
 # A rectangular panel's ordinary Julia slice, preserving subject order.
 brm_panel_slice(column, timepoints, subject) =
     column[((subject - 1) * timepoints + 1):(subject * timepoints)]
+
+# Per-subject cells concatenated in subject order with one allocation of their
+# total length. `reduce(vcat, cells; init=…)` would fold one pairwise `vcat`
+# per cell, reallocating the accumulator each time: quadratic in the number of
+# cells, on every evaluation and reverse pass. Base's specialized
+# `reduce(vcat, cells)` refuses zero cells, so that case is explicit. Scalar
+# cells already hold one value per subject.
+brm_flatten_cells(cells::AbstractVector{<:AbstractVector}) =
+    isempty(cells) ? eltype(eltype(cells))[] : reduce(vcat, cells)
+brm_flatten_cells(cells::AbstractVector{<:Number}) = collect(cells)
+brm_flatten_cells(cells::AbstractVector) = collect(Iterators.flatten(cells))

@@ -5062,7 +5062,7 @@ end
     @test plan.columns[:t] == kdf.t
     @test plan.columns[cell.inputs[1].source] == kdf.t
     @test plan.columns[cell.inputs[3].source] == kdf.obs
-    @test plan.columns[cell.count] == 2
+    @test !haskey(plan.columns, :pred_subject_count)
     # Ordinary cell and reader graphs retain the subject plate in source.
     prog = BRM._rk_emit_ast(plan)
     @test prog isa BRM._RKEmittedProgram && !isempty(prog.defs)
@@ -5095,7 +5095,8 @@ end
     grouped = BRM._brm_rk_plan(gbrmi(grouped_data))
     @test length(grouped.regression.ranef_buckets) == 1
     grouped_cell = only(a for a in grouped.assignments if a.name === :pred)
-    @test grouped.columns[grouped_cell.count] == 3
+    @test length(grouped_cell.group_values) == 3
+    @test !haskey(grouped.columns, :pred_subject_count)
 end
 
 @stestset "kernel(...) panel-mode structural extraction" begin

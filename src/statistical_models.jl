@@ -209,13 +209,13 @@ end),
 
     brm_flatten_response = :(
 brm_flatten_response(cells) = begin
-    values = reduce(vcat, cells; init=eltype(eltype(cells))[])
+    values = brm_flatten_cells(cells)
     return values
 end),
 
     brm_gather_response = :(
 brm_gather_response(raw, groups) = begin
-    values = raw[reduce(vcat, groups; init=Int[])]
+    values = raw[brm_flatten_cells(groups)]
     return values
 end),
 
