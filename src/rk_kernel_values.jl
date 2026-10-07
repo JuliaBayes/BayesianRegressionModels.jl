@@ -185,7 +185,9 @@ function _rk_kernel_observed_layout(observation, kernels)
 end
 
 # The partition fixes likelihood geometry; its values are produced from the
-# original response port by the emitted numerical graph.
+# original response port by the emitted numerical graph. A ragged join's row
+# partition (one group of response rows per kernel subject) is data, so it is
+# a bound port like a kernel's ragged input rows, never a literal in source.
 function _rk_prepare_kernel_observed_values!(columns, taken, derived, name, layout, raw)
     columns[name] = layout.values
     layout.lengths === nothing && return
@@ -194,22 +196,37 @@ function _rk_prepare_kernel_observed_values!(columns, taken, derived, name, layo
     expression = if layout.rows === nothing && raw isa AbstractVector{<:AbstractVector}
         Expr(:_rk_data_preparation, :brm_flatten_response, source)
     else
-        rows = layout.rows === nothing ? collect(eachindex(raw)) :
-            reduce(vcat, layout.rows; init=Int[])
-        Expr(:_rk_data_preparation, :brm_gather_response, source, Expr(:vect, rows...))
+        groups = _rk_ast_fresh_name(string(name, "_rows"), taken)
+        columns[groups] = layout.rows === nothing ? [collect(eachindex(raw))] : layout.rows
+        Expr(:_rk_data_preparation, :brm_gather_response, source, groups)
     end
     push!(derived, _RKDerivedSpec(name, expression, name))
     nothing
+end
+
+# The bound port whose groups fix a kernel-observed response's rows: its
+# per-subject cells, or its ragged-join partition. Argument readers derive
+# their row geometry from it, so new data of the same body rebinds it.
+function _rk_observation_geometry_port(plan, observation)
+    expressions = [spec.expression for spec in plan.regression.derived
+        if spec.name === observation.name && spec.expression.head === :_rk_data_preparation]
+    length(expressions) == 1 || error(
+        "RK backend: internal: response `$(observation.name)` needs one row-geometry preparation")
+    recipe, source, groups... = only(expressions).args
+    recipe === :brm_flatten_response && return source
+    recipe === :brm_gather_response && return only(groups)
+    error("RK backend: internal: response `$(observation.name)` row geometry " *
+        "comes from unknown preparation `$recipe`")
 end
 
 # Only the likelihood receives these row views. Keep original data ports for
 # kernels, readers and other responses, and perform the gather in printed RK
 # source rather than replacing their bound values during preparation.
 _rk_observation_argument_rows!(defs, statements, taken, observation, layout,
-    argument, raw) = argument
+    geometry, argument, raw) = argument
 
 function _rk_observation_argument_rows!(defs, statements, taken, observation, layout,
-        argument, raw::AbstractVector{<:AbstractVector})
+        geometry, argument, raw::AbstractVector{<:AbstractVector})
     lengths = length.(raw)
     length(lengths) == length(layout.lengths) &&
         all(pair -> first(pair) == last(pair) || first(pair) == 1,
@@ -226,55 +243,52 @@ function _rk_observation_argument_rows!(defs, statements, taken, observation, la
         end))
         push!(statements, :($name = $reader($source)))
     else
-        push!(defs, :(ReactiveKernels.@kernel $reader(raw, lengths) = begin
-            cells = ReactiveKernels.plate(eachindex(lengths), Ref(raw), Ref(lengths)) do group, raw, lengths
-                ones(lengths[group]) .* raw[group]
+        push!(defs, :(ReactiveKernels.@kernel $reader(raw, groups) = begin
+            cells = ReactiveKernels.plate(eachindex(groups), Ref(raw), Ref(groups)) do group, raw, groups
+                ones(length(groups[group])) .* raw[group]
             end
             values = reduce(vcat, cells; init=Float64[])
             return values
         end))
-        push!(statements, Expr(:(=), name,
-            Expr(:call, reader, source, Expr(:vect, layout.lengths...))))
+        push!(statements, Expr(:(=), name, Expr(:call, reader, source, geometry())))
     end
     _BRMPreparedRef(name, :whole)
 end
 
 function _rk_observation_argument_rows!(defs, statements, taken, observation, layout,
-        argument, raw::AbstractVector)
+        geometry, argument, raw::AbstractVector)
     layout.rows === nothing && return argument
     length(raw) == 1 && return argument
     length(raw) == length(layout.values) || error(
         "RK backend: response `$(observation.name)` argument `$(argument.name)` " *
         "has $(length(raw)) rows; expected $(length(layout.values))")
     name = _rk_ast_fresh_name("$(observation.name)_rows_$(argument.name)", taken)
-    # The partition is already determined by the original response join. Its
-    # indices are metadata; the actual argument gather stays in the graph.
-    indices = reduce(vcat, layout.rows; init=Int[])
+    # The original response join partitions these rows; the bound partition
+    # port orders them and the argument gather stays in the graph.
     reader = _rk_ast_fresh_name("$(name)_reader", taken)
-    push!(defs, :(ReactiveKernels.@kernel $reader(raw, rows) = begin
-        values = raw[rows]
+    push!(defs, :(ReactiveKernels.@kernel $reader(raw, groups) = begin
+        values = raw[reduce(vcat, groups; init=Int[])]
         return values
     end))
-    push!(statements, Expr(:(=), name,
-        Expr(:call, reader, argument.name, Expr(:vect, indices...))))
+    push!(statements, Expr(:(=), name, Expr(:call, reader, argument.name, geometry())))
     _BRMPreparedRef(name, :whole)
 end
 
 _rk_align_observation_argument!(defs, statements, taken, columns, observation, layout,
-    aligned, argument) = argument
+    geometry, aligned, argument) = argument
 
 function _rk_align_observation_argument!(defs, statements, taken, columns, observation,
-        layout, aligned, argument::_BRMPreparedRef)
+        layout, geometry, aligned, argument::_BRMPreparedRef)
     argument.axis in (:observation, :observation_row) || return argument
     argument.name === observation.name && return argument
     get!(aligned, argument.name) do
         _rk_observation_argument_rows!(defs, statements, taken, observation, layout,
-            argument, get(columns, argument.name, nothing))
+            geometry, argument, get(columns, argument.name, nothing))
     end
 end
 
 function _rk_align_observation_argument!(defs, statements, taken, columns, observation,
-        layout, aligned, argument::_BRMPreparedExpr)
+        layout, geometry, aligned, argument::_BRMPreparedExpr)
     # BRM arithmetic is elementwise. Whole-array reader calls retain their
     # original input axes and remain responsible for their returned row values.
     callable = argument.callable
@@ -282,7 +296,7 @@ function _rk_align_observation_argument!(defs, statements, taken, columns, obser
         haskey(_RK_DERIVED_MATH, callable)) || return argument
     args = map(argument.args) do value
         _rk_align_observation_argument!(defs, statements, taken, columns, observation,
-            layout, aligned, value)
+            layout, geometry, aligned, value)
     end
     _BRMPreparedExpr(callable, args, argument.kwargs)
 end
@@ -327,11 +341,21 @@ function _rk_align_kernel_observation_arguments!(defs, statements, bindings, tak
         argument
     end
     local_args = map(local_argument, distribution.args)
+    # The readers' row geometry enters as one more input, on first use.
+    geometry_param = nothing
+    function geometry()
+        geometry_param === nothing || return geometry_param
+        geometry_param = _rk_ast_fresh_name(
+            "$(observation.name)_input_$(length(params) + 1)", taken)
+        push!(params, geometry_param)
+        push!(inputs, _rk_observation_geometry_port(plan, observation))
+        geometry_param
+    end
     body = Any[]
     aligned = Dict{Symbol,_BRMPreparedRef}()
     args = map(local_args) do argument
         _rk_align_observation_argument!(defs, body, taken, columns,
-            observation, layout, aligned, argument)
+            observation, layout, geometry, aligned, argument)
     end
     isempty(body) && return distribution
     prepared = map(args) do argument

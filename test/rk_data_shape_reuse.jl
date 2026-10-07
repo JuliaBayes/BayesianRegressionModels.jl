@@ -20,6 +20,30 @@ secondary_axis(data) = @brm data begin
     end
     ragged(y, event_subject) ~ Normal(pred, 0.8)
 end
+# Event rows joined to the kernel's subjects, with a per-row argument: the
+# join's row partition orders both the response and the argument.
+joined(data) = @brm data begin
+    alpha ~ 1 + (1 | p | subject)
+    effect(alpha, Intercept) ~ Normal(0, 0.7)
+    sd(:, p) ~ Exponential(0.9)
+    sigma ~ Exponential(0.9)
+    loc ~ kernel(x, alpha) do xs, a
+        xs * a
+    end
+    ragged(y, event_subject) ~ Normal(loc - reference, sigma)
+end
+# Per-subject response cells with a per-subject singleton argument, which
+# each subject's cell length broadcasts.
+nested(data) = @brm data begin
+    alpha ~ 1 + (1 | p | subject)
+    effect(alpha, Intercept) ~ Normal(0, 0.7)
+    sd(:, p) ~ Exponential(0.9)
+    sigma ~ Exponential(0.9)
+    loc ~ kernel(x, alpha) do xs, a
+        xs * a
+    end
+    y ~ Normal(loc - reference, sigma)
+end
 end
 
 emitted_source(brmi) = begin
@@ -57,16 +81,18 @@ function check_shape_reuse(build, trained, scored)
     own, names
 end
 
-secondary_data(dose_rows) = begin
+secondary_data(dose_rows, event_subject) = begin
     subjects = ["b", "empty", "a"]
-    (; subject=subjects, t=[[0.2, 0.5], Float64[], [0.7]],
+    t = [[0.2 + 0.3k for k in 1:count(==(s), event_subject)] for s in subjects]
+    (; subject=subjects, t,
         row_group=[subjects[mod1(i, 3)] for i in 1:dose_rows],
         rank=[mod1(2i, 3) for i in 1:dose_rows],
-        y=[0.1, -0.2, 0.4], event_subject=["b", "b", "a"])
+        y=[0.1 * mod1(3i, 5) - 0.2 for i in eachindex(event_subject)], event_subject)
 end
 
 @stestset "secondary-axis row counts do not enter the emitted program" begin
-    trained, scored = secondary_data(5), secondary_data(8)
+    trained = secondary_data(5, ["b", "b", "a"])
+    scored = secondary_data(8, ["a", "b", "a", "b", "a"])
     own, names = check_shape_reuse(PublicShapeReuse.secondary_axis, trained, scored)
     # The scored build itself matches an independent density.
     index(n) = only(findall(==(Symbol(n)), names))
@@ -97,4 +123,74 @@ end
     for u in (zeros(8), fill(0.13, 8), collect(range(-0.2, 0.3; length=8)))
         check_consumer_point(problem, u, oracle)
     end
+end
+
+# Coordinates and independent density shared by the joined and nested models.
+function grouped_kernel_oracle(names, data, rows_of)
+    ia = only(findall(==(Symbol("pop_alpha.beta_pop.1")), names))
+    it = only(findall(n -> occursin(".tau.", string(n)), names))
+    iz = findall(n -> occursin(".z.", string(n)), names)
+    is = only(findall(==(:sigma), names))
+    @test length(names) == 6 && length(iz) == 3
+    levels = sort(unique(data.subject))
+    order = [findfirst(==(s), levels) for s in data.subject]
+    u -> begin
+        tau, sigma = exp(u[it]), exp(u[is])
+        alpha = u[ia] .+ tau .* u[iz][order]
+        likelihood = sum(eachindex(data.subject)) do j
+            y, reference = rows_of(j)
+            sum(logpdf.(Normal.(data.x[j] .* alpha[j] .- reference, sigma), y); init=0.0)
+        end
+        logpdf(Normal(0, 0.7), u[ia]) + sum(logpdf.(Normal(), u[iz])) +
+            logpdf(Exponential(0.9), tau) + u[it] +
+            logpdf(Exponential(0.9), sigma) + u[is] + likelihood
+    end
+end
+
+function check_scored_density(own, names, oracle)
+    problem = rk_logdensity_problem(own; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    n = length(names)
+    for u in (zeros(n), fill(0.13, n), collect(range(-0.2, 0.3; length=n)))
+        check_consumer_point(problem, u, oracle)
+    end
+end
+
+joined_data(event_subject) = begin
+    subjects = ["b", "empty", "a"]
+    x = [[0.3k - 0.2 for k in 1:count(==(s), event_subject)] for s in subjects]
+    (; subject=subjects, x, event_subject,
+        y=[0.1 * mod1(2i, 7) - 0.3 for i in eachindex(event_subject)],
+        reference=[0.01 * mod1(3i, 5) for i in eachindex(event_subject)])
+end
+
+@stestset "a ragged join's row partition is bound data, not source" begin
+    trained = joined_data(["a", "b", "b", "a", "b", "a", "a"])
+    # The same row count in another subject order: a stale partition would
+    # pair rows with the wrong subjects and reference values.
+    for scored in (joined_data(["b", "a", "a", "b", "a", "b", "a"]),
+            joined_data(["a", "b", "a", "a", "a"]))
+        own, names = check_shape_reuse(PublicShapeReuse.joined, trained, scored)
+        oracle = grouped_kernel_oracle(names, scored, j -> begin
+            rows = findall(==(scored.subject[j]), scored.event_subject)
+            scored.y[rows], scored.reference[rows]
+        end)
+        check_scored_density(own, names, oracle)
+    end
+end
+
+nested_data(lengths) = begin
+    x = [[0.3k - 0.2 for k in 1:n] for n in lengths]
+    (; subject=["b", "c", "a"], x,
+        y=[[0.1 * mod1(j + k, 5) - 0.2 for k in 1:n] for (j, n) in enumerate(lengths)],
+        reference=[[0.01j] for j in eachindex(lengths)])
+end
+
+@stestset "per-subject response lengths are bound data, not source" begin
+    # Equal totals with different per-subject lengths: stale lengths would
+    # broadcast each subject's argument over another subject's rows.
+    trained, scored = nested_data([3, 0, 4]), nested_data([2, 1, 4])
+    own, names = check_shape_reuse(PublicShapeReuse.nested, trained, scored)
+    oracle = grouped_kernel_oracle(names, scored,
+        j -> (scored.y[j], only(scored.reference[j])))
+    check_scored_density(own, names, oracle)
 end
