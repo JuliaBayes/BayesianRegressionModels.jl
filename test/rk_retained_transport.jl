@@ -136,3 +136,46 @@ end
     @test err.reason === :parameterization_mismatch
     @test occursin("exact total-effect block", sprint(showerror, err))
 end
+
+@stestset "retained build pairs implicit OrderedLogistic cutpoints" begin
+    # An authored location, as in a downstream retained artifact: the value
+    # route emits `y_cutpoints ~ Ordered(Normal(0.0, 1.0), 3)` and SBBRMI
+    # `ordered[3] y_cutpoints` (gappy raw codes, K = maximum(y) = 4).
+    data = (; subject=[1,2,3,1,2,3,1,2], x=[-1.2,-0.4,0.1,0.5,0.9,1.4,-0.8,0.3],
+        y=[1,2,2,4,4,4,1,2])
+    brmi = @brm data begin
+        slope ~ 0 + x + (1 | subject)
+        bias ~ Normal(0, 1)
+        loc = slope + bias
+        y ~ OrderedLogistic(loc)
+    end
+    saved_data = deepcopy(data)
+    artifact = BRM.emit_rk_artifact(brmi; case_id="retained-cutpoints")
+    bound = rk_translate_artifact(artifact)
+    built = build_kernel(bound)
+    rk = RKBRMI(brmi, artifact.plan, built)
+    sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
+    stan = BRM.stan_instantiate(sb; path=joinpath(tempdir(),
+        "brm-coordinate-transport", "retained-cutpoints.stan"))
+    transport = brm_coordinate_transport(rk, sb, BridgeStan.param_unc_names(stan.model))
+    @test sort(transport.permutation) == collect(1:built.layout.total)
+    @test [p.stan for p in transport.pairs if p.address.kind === :vector] ==
+        ["y_cutpoints.$j" for j in 1:3]
+    u0 = zeros(built.layout.total)
+    query = prepare_sampler(built, bound, u0; backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    for u in (u0, collect(range(-0.43,0.51; length=length(u0))),
+            [0.37sin(i) for i in eachindex(u0)])
+        saved = copy(u)
+        checked = brm_check_coordinate_transport(transport, rk, stan.model, u)
+        @test checked.pairs == length(transport)
+        @test checked.max_error <= 1e-12
+        gradient = similar(u)
+        value, _ = sampler_value_and_gradient!(query, gradient, u)
+        sv, sg = BridgeStan.log_density_gradient(stan.model, brm_rk_to_stan(transport, u);
+            propto=false, jacobian=true)
+        @test value ≈ sv atol=2e-11 rtol=2e-11
+        @test gradient ≈ brm_stan_to_rk(transport, sg) atol=2e-10 rtol=2e-10
+        @test isequal(u, saved)
+    end
+    @test isequal(data, saved_data)
+end

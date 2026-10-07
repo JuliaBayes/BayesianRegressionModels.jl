@@ -66,6 +66,70 @@ function ordinal(data)
         n ~ Poisson(rate)
     end
 end
+
+# Response threshold vectors: implicit cutpoints for an authored and a
+# formula location, cumulative and stopping-ratio thresholds.
+function authored_cutpoints(data)
+    @brm data begin
+        slope ~ 0 + x
+        bias ~ Normal(0, 1)
+        loc = slope + bias
+        y ~ OrderedLogistic(loc)
+    end
+end
+
+function formula_cutpoints(data)
+    @brm data begin
+        eta ~ 0 + x + (1 | g)
+        y ~ OrderedLogistic(eta)
+    end
+end
+
+function cumulative_thresholds(data)
+    @brm data begin
+        slope ~ 0 + x
+        bias ~ Normal(0, 1)
+        loc = slope + bias
+        # Logit: compiled Stan's `normal_lcdf` gradient is a known
+        # StanBlocks boundary (issue 59) that a probit link would compare.
+        y ~ Ordinal(Cumulative(), LogitLink(), loc; discrimination=2.0)
+    end
+end
+
+function stopping_thresholds(data)
+    @brm data begin
+        eta ~ 0 + x
+        y ~ Ordinal(StoppingRatio(), LogitLink(), eta)
+    end
+end
+
+# Stopping-ratio per-threshold coefficients: several terms over several
+# stages, on the formula and the authored-location routes.
+function formula_threshold_effects(data)
+    @brm data begin
+        eta ~ 0 + x
+        y ~ Ordinal(StoppingRatio(), LogitLink(), eta; per_threshold=(z, w, v))
+    end
+end
+
+function authored_threshold_effects(data)
+    @brm data begin
+        slope ~ 0 + x
+        bias ~ Normal(0, 1)
+        loc = slope + bias
+        y ~ Ordinal(StoppingRatio(), LogitLink(), loc; per_threshold=(w, z))
+    end
+end
+
+# An authored simplex parameter read by an authored location.
+function authored_simplex(data)
+    @brm data begin
+        s ~ Dirichlet([1.0, 2.0, 1.5])
+        mu ~ 1 + x
+        loc = mu + 0.8 * s[1] - s[3]
+        y ~ Normal(loc, 1)
+    end
+end
 end
 
 # A downstream submodel provider supplying its own mathematics to both
@@ -516,4 +580,84 @@ end
             @test isequal(u, saved)
         end
     end
+end
+
+@stestset "coordinate transport response threshold vectors" begin
+    # Gappy raw codes for OrderedLogistic on an authored location (K = max = 4,
+    # as SBBRMI); contiguous codes on the formula route; fitted 1:3 levels for
+    # Ordinal.
+    data = (; x=[-1.2, -0.4, 0.1, 0.5, 0.9, 1.4, -0.8, 0.3],
+        g=[1, 1, 2, 2, 3, 3, 1, 2],
+        y=[1, 2, 2, 4, 4, 4, 1, 2])
+    contiguous = merge(data, (; y=[1, 2, 2, 3, 3, 3, 1, 2]))
+    saved = deepcopy(data)
+    cases = (
+        (PublicCoordinateTransport.authored_cutpoints, data, :y_cutpoints, 3, :ordered),
+        (PublicCoordinateTransport.formula_cutpoints, contiguous, :y_cutpoints, 2, :ordered),
+        (PublicCoordinateTransport.cumulative_thresholds, data, :y_thresholds, 2, :ordered),
+        (PublicCoordinateTransport.stopping_thresholds, data, :y_thresholds, 2, :identity))
+    for (build, input, declaration, n, transform) in cases
+        @testset "$(nameof(build))" begin
+            fixture = coordinate_transport_fixture(build(input), String(nameof(build)))
+            (; rk, transport) = fixture
+            vector = filter(p -> p.address.kind === :vector, transport.pairs)
+            @test [p.address for p in vector] ==
+                [(; kind=:vector, declaration, index=j) for j in 1:n]
+            @test [p.stan for p in vector] == ["$declaration.$j" for j in 1:n]
+            @test all(p -> p.relation === :identity, vector)
+            positions = [only(findall(==(p.rk), transport.rk_names)) for p in vector]
+            @test all(==(transform), BRM._rk_layout_coordinate_transforms(rk)[positions])
+            @test isempty(transport.simplexes)
+            check_coordinate_transport(fixture)
+        end
+    end
+    @test isequal(data, saved)
+end
+
+@stestset "coordinate transport authored simplex parameter" begin
+    data = (; x=[-0.4, 0.1, 0.3, 0.6, -0.2], y=[0.2, -0.1, 0.4, 0.3, 0.0])
+    saved = deepcopy(data)
+    fixture = coordinate_transport_fixture(
+        PublicCoordinateTransport.authored_simplex(data), "authored-simplex")
+    (; transport) = fixture
+    block = only(transport.simplexes)
+    @test block.address == (; kind=:vector, declaration=:s)
+    @test block.K == 3
+    @test transport.logdensity_offset ≈ -log(3) / 2
+    check_coordinate_transport(fixture)
+    @test isequal(data, saved)
+end
+
+@stestset "coordinate transport per-threshold ordinal coefficients" begin
+    data = (; x=[-1.2, -0.4, 0.1, 0.5, 0.9, 1.4, -0.8, 0.3],
+        z=[0.3, -0.2, 0.5, 0.1, -0.7, 0.9, 0.2, -0.4],
+        w=[1.0, 0.5, -0.3, 0.2, 0.8, -1.1, 0.4, 0.0],
+        v=[0.1, 0.2, -0.3, 0.4, -0.5, 0.6, -0.7, 0.8],
+        y=[1, 2, 2, 4, 4, 4, 1, 2])
+    saved = deepcopy(data)
+    for (build, terms) in ((PublicCoordinateTransport.formula_threshold_effects, (:z, :w, :v)),
+            (PublicCoordinateTransport.authored_threshold_effects, (:w, :z)))
+        @testset "$(nameof(build))" begin
+            fixture = coordinate_transport_fixture(build(data), String(nameof(build)))
+            (; transport) = fixture
+            coefficients = filter(p -> p.address.kind === :threshold_coefficient,
+                transport.pairs)
+            # Fitted levels 1:3 give two stages; RK's `terms x stages` matrix
+            # element (t, s) is Stan's `y_threshold_beta[s][t]`.
+            @test Set((p.address.stage, p.address.term) for p in coefficients) ==
+                Set((s, t) for s in 1:2 for t in terms)
+            for p in coefficients
+                t = findfirst(==(p.address.term), terms)
+                @test p.address.response === :y
+                @test p.rk === Symbol("y_threshold_beta.$t.$(p.address.stage)")
+                @test p.rk_index == (t, p.address.stage)
+                @test p.stan_value == "y_threshold_beta.$(p.address.stage).$t"
+            end
+            # BridgeStan lists this array of vectors stage-fastest, so with
+            # several terms some names differ from the element they hold.
+            @test any(p -> p.stan != p.stan_value, coefficients)
+            check_coordinate_transport(fixture)
+        end
+    end
+    @test isequal(data, saved)
 end
