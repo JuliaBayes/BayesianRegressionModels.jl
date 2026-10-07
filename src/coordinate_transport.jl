@@ -64,7 +64,8 @@ of the same [`BRMI`](@ref):
 
 - `address` — the semantic address both backends agree on, e.g.
   `(; kind=:population, predictor=:mu, coefficient=:x)` or
-  `(; kind=:ranef_z, group=:subject, id=:effect, level=3, margin=(:mu, :x))`;
+  `(; kind=:ranef_z, group=:subject, id=:effect, level=3, margin=(:mu, :x))`,
+  or a Student-t block's per-level weight `(; kind=:ranef_mixing, …, level=3)`;
 - `rk` / `stan` — the RK layout coordinate name and the Stan unconstrained
   parameter name;
 - `rk_declaration` / `rk_index` — the RK declaration's complete scope path
@@ -521,6 +522,22 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:ranef}, re
             push!(pairs, BRMCoordinatePair(address,
                 Symbol(record.z, ".", g, ".", k),
                 stan[positions[sb_margin[k], only(h)]], record.z, (g, k), :identity))
+        end
+    end
+    # Student-t mixing weights: one per level, paired by level label. Both
+    # backends must agree that the block is Student-t.
+    rk_mixing = get(record, :mixing, nothing)
+    stan_mixing = _ranef_mixing_coordinates(block, stan)
+    isnothing(rk_mixing) == isnothing(stan_mixing) || _brm_transport_error(
+        :parameterization_mismatch,
+        "brm_coordinate_transport: block `$(block.binding)` is Student-t on " *
+        "$(isnothing(rk_mixing) ? "SB" : "RK") only")
+    if !isnothing(rk_mixing)
+        for (g, level) in enumerate(rk_levels)
+            h = only(findall(l -> isequal(l, level), block.levels))
+            address = (; kind=:ranef_mixing, base..., level)
+            push!(pairs, BRMCoordinatePair(address, Symbol(rk_mixing, ".", g),
+                stan[stan_mixing[h]], rk_mixing, (g,), :identity))
         end
     end
     # Correlation factor: Stan's packed coordinates, in the same margin order.

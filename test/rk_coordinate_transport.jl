@@ -16,6 +16,22 @@ function correlated(data)
     end
 end
 
+# Student-t blocks: one inverse-gamma mixing weight per level, with a
+# declared and a fixed degrees of freedom (decision 0d59ktf).
+function student_t(data)
+    @brm data begin
+        nu ~ Gamma(2, 10; lower=1.0)
+        mu ~ 1 + x + (1 + x | effect | subject)
+        sd(:, effect) ~ Exponential(0.8)
+        ranef(:, effect) ~ TDist(nu)
+        eta ~ 1 + (1 | site_block | site)
+        ranef(:, site_block) ~ TDist(4)
+        sigma ~ Exponential(0.7)
+        y ~ Normal(mu, sigma)
+        y2 ~ Normal(eta, sigma)
+    end
+end
+
 function linked(data)
     @brm data begin
         log(rate) ~ 1 + x + g + (1 + x | subject)
@@ -451,6 +467,22 @@ end
     @test_throws "absent" brm_coordinate_transport(fixture.rk, fixture.sb, names[2:end])
     @test_throws "values for" brm_rk_to_stan(fixture.transport, zeros(length(names)-1))
     @test_throws "values for" brm_stan_to_rk(fixture.transport, zeros(length(names)+1))
+end
+
+@stestset "coordinate transport Student-t random-effect blocks" begin
+    data = (; subject=[1,1,2,2,3,3,4,4],
+        site=["s1","s2","s1","s2","s3","s3","s1","s2"],
+        x=[0.1,0.4,-0.2,0.3,0.7,0.5,0.2,-0.1],
+        y=[0.4,1.1,-0.3,0.6,1.7,1.2,0.2,-0.5], y2=[0.3,0.2,0.1,-0.4,0.6,0.8,0.1,0.0])
+    saved = deepcopy(data)
+    fixture = coordinate_transport_fixture(PublicCoordinateTransport.student_t(data),
+        "student_t")
+    weights = [p for p in fixture.transport.pairs if p.address.kind === :ranef_mixing]
+    @test Set((p.address.group, p.address.level) for p in weights) ==
+        Set([((:subject), l) for l in 1:4]) ∪ Set([(:site, l) for l in ("s1","s2","s3")])
+    @test all(p -> p.relation === :identity, weights)
+    check_coordinate_transport(fixture)
+    @test isequal(data, saved)
 end
 
 @stestset "coordinate transport linked shared-design factor and plain slope" begin

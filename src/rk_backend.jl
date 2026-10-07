@@ -378,7 +378,12 @@ struct _RKRanefBucket
     grouping::_RKRanefGrouping
     sd_priors::Vector{Any}
     decomposition::Union{Nothing,NamedTuple}
+    dist::Union{Nothing,_BRMRanefStudentT} # block law; `nothing` is Gaussian
 end
+_RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping, sd_priors,
+        decomposition) =
+    _RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping,
+        sd_priors, decomposition, nothing)
 _RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping, sd_priors) =
     _RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping,
         sd_priors, nothing)
@@ -4083,10 +4088,17 @@ Base.@nospecializeinfer function _rk_plan_ranef_buckets(@nospecialize(brmi::BRMI
         override = get(overrides, (bucket.id, bucket.group), nothing)
         decomposition = get(decompositions, (bucket.id, bucket.group), nothing)
         override === nothing && decomposition === nothing && continue
-        override === nothing || isnothing(override.dist) || error(
-            "$prefix: `|$(bucket.id)|` is a Student-t random-effect block; the " *
-            "ReactiveKernels backend does not emit Student-t random effects " *
-            "yet. Use SBBRMI")
+        dist = override === nothing ? nothing : override.dist
+        if dist !== nothing
+            decomposition === nothing || error(
+                "$prefix: `|$(bucket.id)|` is Student-t and also carries an " *
+                "`r2d2` decomposition; a derived scale for a Student-t block " *
+                "is not implemented")
+            bucket.grouping.form === :plain || error(
+                "$prefix: `|$(bucket.id)|` is a Student-t random-effect block " *
+                "over a `$(bucket.grouping.form)` grouping; only ordinary " *
+                "grouping factors have a Student-t emission")
+        end
         if decomposition !== nothing
             any(m -> m.predictor in whole, bucket.margins) && error(
                 "$prefix: `|$(bucket.id)|` carries both whole-predictor " *
@@ -4101,7 +4113,7 @@ Base.@nospecializeinfer function _rk_plan_ranef_buckets(@nospecialize(brmi::BRMI
             bucket.margins, bucket.slices,
             override === nothing ? bucket.lkj_eta : override.lkj_eta, bucket.label,
             bucket.grouping, override === nothing ? bucket.sd_priors : override.sd_prior,
-            decomposition)
+            decomposition, dist)
         buckets[i] = replacement
         for (key, value) in lookup
             value === bucket && (lookup[key] = replacement)
@@ -7344,12 +7356,13 @@ function _rk_gate_ordinal_scale_slots!(response_specs::AbstractVector,
 end
 
 # A fitted predictor depends on the resolved priors of its random-effect
-# margins. Discover those caller dependencies before filtering scalar draws;
-# an SD declaration is metadata rather than a normal formula operand.
+# margins, and on a Student-t block's degrees of freedom. Discover those caller
+# dependencies before filtering scalar draws; an SD or law declaration is
+# metadata rather than a normal formula operand.
 Base.@nospecializeinfer function _rk_with_ranef_prior_dependencies(@nospecialize(brmi::BRMI), program, roots)
     specs = [spec for spec in ranef_effect_priors(brmi)
         if !(spec.class === :sd && spec.family === r2d2)]
-    any(spec -> spec.class === :sd &&
+    any(spec -> spec.class in (:sd, :ranef) &&
         !isempty(_brm_prepared_references(_brm_prepare_expr(spec.expression))), specs) ||
         return program
     reachable = _brm_reachable_operations(program, roots)
@@ -7364,6 +7377,7 @@ Base.@nospecializeinfer function _rk_with_ranef_prior_dependencies(@nospecialize
     claims = Pair{Symbol,Tuple}[]
     for override in values(overrides), (margin, prior) in zip(override.margins, override.sd_prior)
         prior === nothing || push!(claims, margin.predictor => (prior,))
+        override.dist === nothing || push!(claims, margin.predictor => (override.dist,))
     end
     isempty(claims) ? program : _brm_with_prior_dependencies(program, claims)
 end
