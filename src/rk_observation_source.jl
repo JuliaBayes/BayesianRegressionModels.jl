@@ -48,9 +48,28 @@ function _rk_emit_observation_source!(defs, statements, bindings, taken,
     # The scalar law is observed directly: RKPPL composes the explicit graph
     # inside the observation plate, one cell per observed value, with the
     # constructor's arguments broadcast on the response's axis.
-    arguments = [_rk_value_expr!(bindings, argument, taken) for argument in distribution.args]
+    arguments = Any[_rk_value_expr!(bindings, argument, taken) for argument in distribution.args]
+    entry = _rk_weighted_observation_entry!(defs, arguments, bindings, taken,
+        observation.weight, entry)
     push!(statements, response isa AbstractVector ?
         Expr(:call, :.~, observation.name, _rk_ast_dotted(:LogDensity, entry, arguments...)) :
         Expr(:call, :~, observation.name, Expr(:call, :LogDensity, entry, arguments...)))
     true
+end
+
+# An in-cell `weighted(family, weight, args...)` power likelihood scales the
+# caller's normalized scalar law by its row weight. A fresh entry composes the
+# law graph, so the weight is one more row-aligned port of the same plate.
+_rk_weighted_observation_entry!(defs, arguments, bindings, taken, ::Nothing, entry) = entry
+function _rk_weighted_observation_entry!(defs, arguments, bindings, taken,
+        weight::_BRMPreparedRef, entry)
+    weighted_entry = _rk_ast_fresh_name(string(entry, "_weighted"), taken)
+    ports = [Symbol(:argument_, i) for i in eachindex(arguments)]
+    push!(defs, :(ReactiveKernels.@kernel $weighted_entry(value, weight, $(ports...)) = begin
+        density = $entry(value, $(ports...))
+        weighted_density = weight * density
+        return weighted_density
+    end))
+    pushfirst!(arguments, _rk_value_expr!(bindings, weight, taken))
+    weighted_entry
 end
