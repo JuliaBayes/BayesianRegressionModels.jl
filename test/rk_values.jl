@@ -104,6 +104,78 @@ const mixed_axes = (;
     @test length(artifact.plan.regression.ranef_buckets) == 1
 end
 
+# Group-level effects are gathered by label straight from the component's
+# levels-by-margins draws, `b[subject, k]`, as ordinary graph indexing; no
+# level-index vector or column helper is emitted per block (snag
+# rk-emission-grou-9dac9bc6). The likelihood is rebuilt independently from the
+# constrained draws with DataAPI's level order, so a label/position mix-up in
+# the gather changes it.
+@stestset "group effects gather by label from the component draws" begin
+    subject_labels = (
+        ["c", "a", "b", "a", "c", "b"],
+        [30, 10, 20, 10, 30, 20],
+        BRM.CA.categorical(["b", "a", "c", "a", "b", "c"]; levels=["c", "z", "a", "b"]))
+    x = [0.2, 0.5, -0.8, 0.1, 0.3, -0.4]
+    y = [0.3, 0.5, -0.2, 0.8, 0.1, 0.4]
+    for subject in subject_labels
+        df = (; subject, x, y)
+        saved = deepcopy(df)
+        brmi = @brm df begin
+            a ~ 1 + x + (1 + x | p | subject)
+            log(b) ~ 1 + (1 | p | subject)
+            c ~ 1 + (1 | subject)
+            sigma ~ Exponential(1)
+            mu = a + b * x + c
+            y ~ Normal(mu, sigma)
+        end
+        backend = RKBRMI(brmi)
+        emitted = BRM._rk_emit_ast(backend.plan)
+        source = join((sprint(Base.show_unquoted, s) for s in [emitted.defs; emitted.main.args]), "\n")
+        for retired in ("brm_ranef_column", "brm_level_indices", "_index_subject")
+            @test !occursin(retired, source)
+        end
+        main = [s for s in emitted.main.args if !(s isa LineNumberNode)]
+        @test :(ranef_a_p_subject = b_p_subject[subject, 1] .+ b_p_subject[subject, 2] .* x) in main
+        @test :(ranef_b_p_subject = b_p_subject[subject, 3]) in main
+        @test :(ranef_c_subject = b_subject[subject, 1]) in main
+        u = check_value_gradient(backend)
+        nt = constrain(backend.model.layout, u)
+        rows = indexin(subject, BRM.CA.levels(subject))
+        correlated = nt.b_p_subject.z * (nt.b_p_subject.tau .* nt.b_p_subject.L)'
+        intercepts = nt.b_subject.z .* only(nt.b_subject.tau)
+        @test size(correlated, 1) == size(intercepts, 1) == length(BRM.CA.levels(subject))
+        a = nt.pop_a.beta_pop[1] .+ nt.pop_a.beta_pop[2] .* x .+
+            correlated[rows, 1] .+ correlated[rows, 2] .* x
+        b = exp.(only(nt.pop_log_b.beta_pop) .+ correlated[rows, 3])
+        c = only(nt.pop_c.beta_pop) .+ intercepts[rows, 1]
+        expected = logpdf.(Normal.(a .+ b .* x .+ c, nt.sigma), y)
+        @test value_query(backend, :pointwise, u).y ≈ expected
+        @test value_query(backend, :likelihood, u) ≈ sum(expected)
+        @test isequal(df, saved)
+    end
+end
+
+# A computed data column states its observation axis in source only when a
+# likelihood observes it; RKPPL reads any other computed column with its
+# ordinary Julia axes (snag rk-emission-grou-9dac9bc6).
+@stestset "computed columns state an observation axis only when observed" begin
+    df = (; g=["b", "a", "c", "a", "b", "c"], x=[0.2, 0.5, -0.8, 0.1, 0.3, -0.2],
+        y=[0.3, 0.5, -0.2, 0.8, 0.1, 0.4])
+    backend = RKBRMI(@brm df begin
+        mu ~ 1 + x + g
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end)
+    main = sprint(Base.show_unquoted, BRM._rk_emit_ast(backend.plan).main)
+    @test !occursin("_source_rows", main)
+    @test !occursin("getindex.(Ref(", main)
+    u = check_value_gradient(backend)
+    nt = constrain(backend.model.layout, u)
+    effect = Dict("a" => 0.0, "b" => nt.mu_g[1], "c" => nt.mu_g[2])
+    mu = nt.pop_mu.beta_pop[1] .+ nt.pop_mu.beta_pop[2] .* df.x .+ getindex.(Ref(effect), df.g)
+    @test value_query(backend, :likelihood, u) ≈ sum(logpdf.(Normal.(mu, nt.sigma), df.y))
+end
+
 function shared_reader(t, h, f, theta; direction=1.0)
     result = Vector{Float64}(undef, length(t))
     for j in eachindex(t)
