@@ -63,7 +63,12 @@ compile any BRM method, or generic method over BRM values, whose signature
 names that member's operations. Only constructing the model's own
 `NamedTuple`, `BRMI` and `RKBRMI` may. It records compilation with
 `jl_dump_compiles` and also checks that the reused compilation emits the same
-program up to the names:
+program up to the names. A second testset builds a member whose submodel
+callable differs, so its expression types are new throughout (a named column
+embeds its definition): the source walkers that collect data, references,
+target axes, roles and additive terms must still reuse their compilation, while
+constructing the member's values, the caller-owned hook and the prepared
+representation may specialize:
 
 ```sh
 julia --startup-file=no --project=test test/rk_planning_specialization.jl

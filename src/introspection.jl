@@ -64,10 +64,10 @@ _classify_arg(a) = (; role=:expression, expr=a)
 # `nothing`, so callers compose with `isnothing(...)` rather than carrying
 # Bool predicates and `&&`/`||` control flow internally.
 
-_named_op(v::NamedColumn) = _named_op_inner(parent(v))
-_named_op(_) = nothing
-_named_op_inner(p::ExprColumn) = p
-_named_op_inner(_) = nothing
+_named_op(@nospecialize(v::NamedColumn)) = _named_op_inner(parent(v))
+_named_op(@nospecialize(_value)) = nothing
+_named_op_inner(@nospecialize(p::ExprColumn)) = p
+_named_op_inner(@nospecialize(_value)) = nothing
 
 # Narrow to ExprColumn (or nothing); split a sum into its summands (or wrap as
 # a 1-tuple so callers don't have to special-case non-`+` RHS shapes).

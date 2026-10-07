@@ -35,30 +35,29 @@ brm_distribution_type(_) = nothing
 _brm_prior_constructor(constructor) = !isnothing(brm_distribution_type(constructor))
 _brm_prior_constructor(::Type{Horseshoe}) = true
 _brm_prior_constructor(::typeof(LKJCovarianceFactor)) = true
-_brm_prior_expression(x) = false
-_brm_prior_expression(x::ExprColumn) = _brm_prior_constructor(getf(x))
+_brm_prior_expression(@nospecialize(x)) = false
+_brm_prior_expression(@nospecialize(x::ExprColumn)) = _brm_prior_constructor(getf(x))
 
-function _brm_operation_role(op::ExprColumn{typeof(~)})
+function _brm_operation_role(@nospecialize(op::ExprColumn{typeof(~)}))
     lhs, rhs = getargs(op, 2)
     isnothing(_brm_observation_name(lhs)) || return :observation
     lhs isa ExprColumn && getf(lhs) === effect && return :prior_modifier
     lhs isa NamedColumn && _brm_prior_expression(rhs) ? :parameter : :predictor
 end
-_brm_operation_role(::ExprColumn{typeof(assign)}) = :assignment
-_brm_operation_role(_) = :extension
+_brm_operation_role(@nospecialize(_op::ExprColumn{typeof(assign)})) = :assignment
+_brm_operation_role(@nospecialize(_op)) = :extension
 
-_brm_operation_references!(refs, _) = refs
-_brm_operation_references!(refs, node::NamedColumn) = (push!(refs, name(node)); refs)
-function _brm_operation_references!(refs, node::ExprColumn)
-    foreach(arg -> _brm_operation_references!(refs, arg), getargs(node))
-    foreach(arg -> _brm_operation_references!(refs, arg), values(getkwargs(node)))
+_brm_operation_references!(refs, @nospecialize(_node)) = refs
+_brm_operation_references!(refs, @nospecialize(node::NamedColumn)) = (push!(refs, name(node)); refs)
+function _brm_operation_references!(refs, @nospecialize(node::ExprColumn))
+    _brm_foreach_child((@nospecialize(arg)) -> _brm_operation_references!(refs, arg), node)
     refs
 end
-function _brm_operation_references!(refs, values::Union{Tuple,AbstractArray})
-    foreach(value -> _brm_operation_references!(refs, value), values)
+function _brm_operation_references!(refs, @nospecialize(values::Union{Tuple,NamedTuple}))
+    _brm_foreach_item((@nospecialize(value)) -> _brm_operation_references!(refs, value), values)
     refs
 end
-function _brm_operation_references!(refs, values::NamedTuple)
+function _brm_operation_references!(refs, @nospecialize(values::AbstractArray))
     foreach(value -> _brm_operation_references!(refs, value), values)
     refs
 end
@@ -87,7 +86,7 @@ function _brm_prior_value_dependencies(program::_BRMPreparedProgram, roots)
     Tuple(name for name in program.order if name in required)
 end
 
-function _brm_operation_dependencies(op, names, key, role)
+function _brm_operation_dependencies(@nospecialize(op), names, key, role)
     role === :prior_modifier && return ()
     op isa ExprColumn || return ()
     args = getargs(op)

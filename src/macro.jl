@@ -1675,6 +1675,33 @@ exposes `(; k=20, c=1.5)`.
 """
 getkwargs(x::ExprColumn) = getfield(x, :kwargs)
 
+# Syntax walkers visit an expression's positional, then keyword, children
+# through these rather than `foreach`/`any` over its argument tuples. A node's
+# type spells its whole subtree (a NamedColumn embeds its definition), so tuple
+# higher-order functions and walker methods specialized on it compile again
+# for every new model structure. With the walker methods themselves
+# non-specializing, each walk compiles once.
+Base.@nospecializeinfer function _brm_foreach_child(f, @nospecialize(node::ExprColumn))
+    _brm_foreach_item(f, getargs(node))
+    _brm_foreach_item(f, getkwargs(node))
+end
+Base.@nospecializeinfer function _brm_foreach_item(f, @nospecialize(items::Union{Tuple,NamedTuple}))
+    for index in 1:nfields(items)
+        f(getfield(items, index))
+    end
+    nothing
+end
+Base.@nospecializeinfer function _brm_any_child(f, @nospecialize(node::ExprColumn))
+    args, kwargs = getargs(node), getkwargs(node)
+    for index in 1:nfields(args)
+        f(getfield(args, index)) && return true
+    end
+    for index in 1:nfields(kwargs)
+        f(getfield(kwargs, index)) && return true
+    end
+    false
+end
+
 """
     getop(x) -> Symbol_or_Function
 
@@ -1825,11 +1852,10 @@ Base.merge(a::BRMI, b::BRMI, rest::BRMI...) =
 # backends see only the existing explicit `eta ~ formula` representation.
 _brm_fit_levels(raw::AbstractVector) = sort(unique(raw))
 
-_nested_contains(::Any) = false
+_nested_contains(@nospecialize(_value)) = false
 _nested_contains(::NestedPredictorFormula) = true
-_nested_contains(x::NamedColumn) = _nested_contains(parent(x))
-_nested_contains(x::ExprColumn) =
-    any(_nested_contains, getargs(x)) || any(_nested_contains, values(getkwargs(x)))
+_nested_contains(@nospecialize(x::NamedColumn)) = _nested_contains(parent(x))
+_nested_contains(@nospecialize(x::ExprColumn)) = _brm_any_child(_nested_contains, x)
 
 _nested_path_token(kind::Symbol, value) = Symbol(kind, value)
 _nested_predictor_name(target::Symbol, path::Tuple) =

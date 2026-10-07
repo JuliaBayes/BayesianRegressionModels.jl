@@ -133,12 +133,12 @@ end
 
 # Generic likelihood-LHS prepass. Each decorator claims its own bucket in the
 # context; no concrete backend or walker needs to know the decorator list.
-_brm_visit_op!(_, _) = nothing
-_brm_visit_op!(ctx, op::NamedColumn) = _brm_visit_op!(ctx, parent(op))
-_brm_visit_op!(ctx, op::ExprColumn{typeof(~)}) =
+_brm_visit_op!(_, @nospecialize(_op)) = nothing
+_brm_visit_op!(ctx, @nospecialize(op::NamedColumn)) = _brm_visit_op!(ctx, parent(op))
+_brm_visit_op!(ctx, @nospecialize(op::ExprColumn{typeof(~)})) =
     _brm_register_sampling_lhs!(ctx, first(getargs(op, 2)))
 
-_brm_register_sampling_lhs!(_, _) = nothing
+_brm_register_sampling_lhs!(_, @nospecialize(_lhs)) = nothing
 _brm_register_sampling_lhs!(ctx::AbstractDict,
                             lhs::ExprColumn{typeof(mi)}) =
     _brm_register_skipped_inner!(ctx, only(getargs(lhs)))
@@ -152,49 +152,43 @@ _brm_register_skipped_inner!(ctx::AbstractDict, inner::NamedColumn) =
 
 # Multi-membership-only sources are Julia-side preprocessing inputs, not raw
 # backend data. A source also used elsewhere remains ordinary model data.
-_brm_collect_mm_sources!(_, _) = nothing
-_brm_collect_mm_sources!(out, x::NamedColumn) =
+_brm_collect_mm_sources!(_, @nospecialize(_x)) = nothing
+_brm_collect_mm_sources!(out, @nospecialize(x::NamedColumn)) =
     _brm_collect_mm_sources!(out, parent(x))
-function _brm_collect_mm_sources!(out, x::ExprColumn)
-    foreach(a -> _brm_collect_mm_sources!(out, a), getargs(x))
-    foreach(v -> _brm_collect_mm_sources!(out, v), values(getkwargs(x)))
-end
-function _brm_collect_mm_sources!(out, x::MultiMembershipTerm)
+_brm_collect_mm_sources!(out, @nospecialize(x::ExprColumn)) =
+    _brm_foreach_child((@nospecialize(a)) -> _brm_collect_mm_sources!(out, a), x)
+function _brm_collect_mm_sources!(out, @nospecialize(x::MultiMembershipTerm))
     foreach(g -> push!(out, name(g)), getargs(x))
     weights = getfield(x, :weights)
     isnothing(weights) || foreach(w -> push!(out, name(w)), weights)
 end
-function _brm_collect_mm_sources!(out, x::JointResponseColumn)
+function _brm_collect_mm_sources!(out, @nospecialize(x::JointResponseColumn))
     foreach(a -> _brm_collect_mm_sources!(out, a), joint_response_columns(x))
 end
 
-_brm_collect_non_mm_sources!(_, _) = nothing
-function _brm_collect_non_mm_sources!(out, x::NamedColumn)
+_brm_collect_non_mm_sources!(_, @nospecialize(_x)) = nothing
+function _brm_collect_non_mm_sources!(out, @nospecialize(x::NamedColumn))
     parent(x) isa DataColumn && push!(out, name(x))
     nothing
 end
-function _brm_collect_non_mm_sources!(out, x::ExprColumn)
-    foreach(a -> _brm_collect_non_mm_sources!(out, a), getargs(x))
-    foreach(v -> _brm_collect_non_mm_sources!(out, v), values(getkwargs(x)))
-end
-_brm_collect_non_mm_sources!(_, ::MultiMembershipTerm) = nothing
-function _brm_collect_non_mm_sources!(out, x::JointResponseColumn)
+_brm_collect_non_mm_sources!(out, @nospecialize(x::ExprColumn)) =
+    _brm_foreach_child((@nospecialize(a)) -> _brm_collect_non_mm_sources!(out, a), x)
+_brm_collect_non_mm_sources!(_, @nospecialize(_x::MultiMembershipTerm)) = nothing
+function _brm_collect_non_mm_sources!(out, @nospecialize(x::JointResponseColumn))
     foreach(a -> _brm_collect_non_mm_sources!(out, a), joint_response_columns(x))
 end
 
-_brm_collect_data!(_data, _x; skip=Set{Symbol}()) = nothing
-function _brm_collect_data!(data, x::NamedColumn; skip=Set{Symbol}())
+_brm_collect_data!(_data, @nospecialize(_x); skip=Set{Symbol}()) = nothing
+function _brm_collect_data!(data, @nospecialize(x::NamedColumn); skip=Set{Symbol}())
     backing = parent(x)
     if backing isa DataColumn && !(name(x) in skip)
         data[name(x)] = _brm_data_vec(name(x), parent(backing))
     end
     _brm_collect_data!(data, backing; skip)
 end
-function _brm_collect_data!(data, x::ExprColumn; skip=Set{Symbol}())
-    foreach(a -> _brm_collect_data!(data, a; skip), getargs(x))
-    foreach(v -> _brm_collect_data!(data, v; skip), values(getkwargs(x)))
-end
-function _brm_collect_data!(data, x::MultiMembershipTerm; skip=Set{Symbol}())
+_brm_collect_data!(data, @nospecialize(x::ExprColumn); skip=Set{Symbol}()) =
+    _brm_foreach_child((@nospecialize(a)) -> _brm_collect_data!(data, a; skip), x)
+function _brm_collect_data!(data, @nospecialize(x::MultiMembershipTerm); skip=Set{Symbol}())
     foreach(a -> _brm_collect_data!(data, a; skip), getargs(x))
     weights = getfield(x, :weights)
     isnothing(weights) || foreach(a -> _brm_collect_data!(data, a; skip), weights)
@@ -260,7 +254,7 @@ end
 # The target-to-observation map sizes intercept-only mean predictors from the
 # explicit scalar row count, while StanBlocks sees a top-level RaggedVector and
 # therefore emits one joint density / predictive vector per row.
-function _brm_collect_data!(data, x::JointResponseColumn; skip=Set{Symbol}())
+function _brm_collect_data!(data, @nospecialize(x::JointResponseColumn); skip=Set{Symbol}())
     values = _brm_joint_response_values(x; allow_imputation=x.impute)
     data[_joint_response_data_key(x)] = values
     data[_joint_response_n_key(x)] = length(values)
@@ -270,28 +264,27 @@ end
 _brm_is_nothing_column(x::NamedColumn) =
     name(x) === :nothing && parent(x) isa MissingColumn
 
-_brm_observation_name(_) = nothing
-_brm_observation_name(lhs::NamedColumn) =
+_brm_observation_name(@nospecialize(_lhs)) = nothing
+_brm_observation_name(@nospecialize(lhs::NamedColumn)) =
     parent(lhs) isa DataColumn ? name(lhs) : nothing
-_brm_observation_name(lhs::ExprColumn{typeof(ragged)}) =
+_brm_observation_name(@nospecialize(lhs::ExprColumn{typeof(ragged)})) =
     _brm_observation_name(first(getargs(lhs)))
-_brm_observation_name(lhs::JointResponseColumn) = _joint_response_data_key(lhs)
-function _brm_observation_name(lhs::ExprColumn)
+_brm_observation_name(@nospecialize(lhs::JointResponseColumn)) = _joint_response_data_key(lhs)
+function _brm_observation_name(@nospecialize(lhs::ExprColumn))
     args = getargs(lhs)
     length(args) == 1 ? _brm_observation_name(only(args)) : nothing
 end
 
-_brm_collect_rhs_refs!(_target_obs, _x, _obs_name) = nothing
-function _brm_collect_rhs_refs!(target_obs, x::NamedColumn, obs_name)
+_brm_collect_rhs_refs!(_target_obs, @nospecialize(_x), _obs_name) = nothing
+function _brm_collect_rhs_refs!(target_obs, @nospecialize(x::NamedColumn), obs_name)
     !_brm_is_nothing_column(x) && get!(target_obs, name(x), obs_name)
     nothing
 end
-function _brm_collect_rhs_refs!(target_obs, x::ExprColumn, obs_name)
-    foreach(a -> _brm_collect_rhs_refs!(target_obs, a, obs_name), getargs(x))
-    foreach(v -> _brm_collect_rhs_refs!(target_obs, v, obs_name),
-            values(getkwargs(x)))
-end
-function _brm_collect_rhs_refs!(target_obs, x::Union{Tuple,AbstractVector}, obs_name)
+_brm_collect_rhs_refs!(target_obs, @nospecialize(x::ExprColumn), obs_name) =
+    _brm_foreach_child((@nospecialize(a)) -> _brm_collect_rhs_refs!(target_obs, a, obs_name), x)
+_brm_collect_rhs_refs!(target_obs, @nospecialize(x::Tuple), obs_name) =
+    _brm_foreach_item((@nospecialize(a)) -> _brm_collect_rhs_refs!(target_obs, a, obs_name), x)
+function _brm_collect_rhs_refs!(target_obs, @nospecialize(x::AbstractVector), obs_name)
     foreach(a -> _brm_collect_rhs_refs!(target_obs, a, obs_name), x)
 end
 
@@ -314,11 +307,11 @@ end
 
 # A declared gather supplies a predictor's row axis even when its response is
 # absent or withheld. Keep this distinct from observed-likelihood activity.
-_brm_collect_target_axes!(axes, _) = nothing
-function _brm_collect_target_axes!(axes, node::NamedColumn)
+_brm_collect_target_axes!(axes, @nospecialize(_node)) = nothing
+function _brm_collect_target_axes!(axes, @nospecialize(node::NamedColumn))
     _brm_collect_target_axes!(axes, parent(node))
 end
-function _brm_collect_target_axes!(axes, node::ExprColumn)
+function _brm_collect_target_axes!(axes, @nospecialize(node::ExprColumn))
     args = getargs(node)
     if getf(node) === ragged && length(args) == 2
         value, group = args
@@ -327,12 +320,11 @@ function _brm_collect_target_axes!(axes, node::ExprColumn)
             name(group) in sources || push!(sources, name(group))
         end
     end
-    foreach(arg -> _brm_collect_target_axes!(axes, arg), args)
-    foreach(arg -> _brm_collect_target_axes!(axes, arg), values(getkwargs(node)))
+    _brm_foreach_child((@nospecialize(arg)) -> _brm_collect_target_axes!(axes, arg), node)
 end
 Base.@nospecializeinfer function _brm_collect_target_axes(@nospecialize(brmi::BRMI))
     axes = Dict{Symbol,Vector{Symbol}}()
-    foreach(node -> _brm_collect_target_axes!(axes, node), _brm_operation_values(brmi))
+    foreach((@nospecialize(node)) -> _brm_collect_target_axes!(axes, node), _brm_operation_values(brmi))
     axes
 end
 function _brm_declared_row_axis(context::_BRMBackendContext, target::Symbol)
@@ -1140,18 +1132,18 @@ end
 _brm_replay_random_effect_plans(training::Tuple, context::_BRMBackendContext) =
     Tuple(_brm_replay_random_effect_plan(block, context) for block in training)
 
-_brm_additive_terms(rhs) = begin
+_brm_additive_terms(@nospecialize(rhs)) = begin
     terms = Any[]
     _brm_collect_additive_terms!(terms, rhs)
     terms
 end
-_brm_collect_additive_terms!(terms, x::ExprColumn{typeof(+)}) =
-    foreach(a -> _brm_collect_additive_terms!(terms, a), getargs(x))
+_brm_collect_additive_terms!(terms, @nospecialize(x::ExprColumn{typeof(+)})) =
+    _brm_foreach_item((@nospecialize(a)) -> _brm_collect_additive_terms!(terms, a), getargs(x))
 function _brm_collect_additive_terms!(terms, x::Integer)
     x == 0 || push!(terms, x)
     nothing
 end
-_brm_collect_additive_terms!(terms, x) = push!(terms, x)
+_brm_collect_additive_terms!(terms, @nospecialize(x)) = push!(terms, x)
 
 _brm_is_grouped_term(term::ExprColumn) =
     getf(term) === (|) || getf(term) === doublepipe

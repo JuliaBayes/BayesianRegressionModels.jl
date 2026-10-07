@@ -23,10 +23,11 @@ module SpecializationFamilySource
 import BayesianRegressionModels: _rk_submodel_rhs!, getargs, getkwargs, name
 
 function shifted_curve end
+function shifted_curve_variant end
 native_shifted_curve(x, location, shift) = location .+ x .* shift
 
 function _rk_submodel_rhs!(definitions, statements, data, bindings,
-        target::Symbol, ::typeof(shifted_curve), rhs)
+        target::Symbol, ::Union{typeof(shifted_curve),typeof(shifted_curve_variant)}, rhs)
     x = only(getargs(rhs))
     key = Symbol(target, :_curve_x)
     data[key] = copy(parent(parent(x)))
@@ -52,7 +53,7 @@ const FAMILY_DATA = (;
 
 # Every operation and data column name carries `zqspec<index>`, the marker
 # searched for in the compile dump.
-function define_member(index)
+function define_member(index; curve_function=:shifted_curve)
     tag(base) = Symbol(base, :_zqspec, index)
     x, z, g, y = tag(:x), tag(:z), tag(:g), tag(:y)
     a, shift, curve, gain, reads, scale = tag(:a), tag(:shift), tag(:curve),
@@ -63,7 +64,7 @@ function define_member(index)
             @brm df begin
                 $a ~ 1 + $z + (1 | $g)
                 $shift ~ Normal(0, 0.4)
-                $curve ~ SpecializationFamilySource.shifted_curve($x;
+                $curve ~ SpecializationFamilySource.$curve_function($x;
                     location=$a, shift=$shift)
                 $gain ~ Normal(1, 0.2)
                 $reads = scaled_sum($curve, $gain)
@@ -128,5 +129,30 @@ end
         @test map(rename, member.artifact.defs) == map(string, warm.artifact.defs)
         @test length(coordinate_names(member.backend.model.layout)) ==
             length(coordinate_names(warm.backend.model.layout))
+    end
+end
+
+# Source walkers read expression trees as syntax. A member whose submodel
+# callable differs has new expression types throughout (a named column embeds
+# its definition), yet the walkers must reuse their compilation. Constructing
+# the member's values, the caller-owned hook and the prepared representation
+# still specialize on those types.
+const SOURCE_WALKERS = r"typeof\(BayesianRegressionModels\.(_brm_collect_mm_sources!|_brm_collect_non_mm_sources!|_brm_collect_data!|_brm_collect_rhs_refs!|_brm_collect_target_axes!|_brm_operation_references!|_brm_operation_dependencies|_brm_operation_role|_brm_observation_name|_brm_visit_op!|_brm_register_sampling_lhs!|_brm_collect_additive_terms!|_brm_additive_terms|_brm_prior_expression|_named_op|_named_op_inner|_nested_contains|_brm_foreach_child|_brm_foreach_item|_brm_any_child)\)"
+const SOURCE_CLOSURE = r"^\"Tuple\{BayesianRegressionModels\.var\"#[0-9]+#[0-9]+\"\{Base\.(Set|Dict)\{Symbol"
+
+@testset "a structurally new member reuses the source walkers" begin
+    warm_builder, warm_data = define_member(11)
+    Base.invokelatest(member_stage, warm_builder, warm_data, 11)
+    builder, data = define_member(12; curve_function=:shifted_curve_variant)
+    member, lines = compiled_during(() -> member_stage(builder, data, 12))
+    structural = filter(line -> occursin("shifted_curve_variant", line), lines)
+    @test any(line -> occursin(r"^\"Tuple\{Type\{BayesianRegressionModels\.", line), structural)
+    walked = filter(line -> occursin(SOURCE_WALKERS, line) || occursin(SOURCE_CLOSURE, line),
+        structural)
+    isempty(walked) || foreach(line -> println("WALKER ", line), walked)
+    @test isempty(walked)
+    @test member.artifact.plan isa BRM._RKValuePlan
+    for line in structural
+        occursin("BayesianRegressionModels", line) && println("RESIDUAL ", first(line, 160))
     end
 end
