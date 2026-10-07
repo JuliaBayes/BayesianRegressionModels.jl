@@ -19,14 +19,6 @@ function _rk_ast_r2d2m2_variance!(statements, taken, stem, column)
     variance
 end
 
-# A named factor-level indicator, read several times by its variance.
-function _rk_ast_r2d2m2_indicator!(definitions, statements, taken, stem, term, position)
-    indicator = _rk_ast_fresh_name(string(stem, "_indicator"), taken)
-    push!(statements, Expr(:(=), indicator,
-        _rk_ast_factor_indicator!(definitions, taken, term, position)))
-    indicator
-end
-
 function _rk_ast_r2d2m2_population!(definitions, statements, taken, predictors, joint,
         references, phi, r2, population_priors)
     for (target, allocation) in joint.predictors
@@ -42,7 +34,7 @@ function _rk_ast_r2d2m2_population!(definitions, statements, taken, predictors, 
                 only(findall(==(label), term.options.labels)) : nothing
             stem = string(target, "_", label, "_r2d2")
             column = position === nothing ? only(term.columns) :
-                _rk_ast_r2d2m2_indicator!(definitions, statements, taken, stem, term, position)
+                _rk_ast_factor_indicator!(definitions, statements, taken, stem, term, position)
             variance = _rk_ast_r2d2m2_variance!(statements, taken, stem, column)
             scale = _rk_ast_fresh_name(string(target, "_", label, "_r2d2_scale"), taken)
             push!(statements, Expr(:(=), scale,
@@ -66,7 +58,7 @@ function _rk_ast_r2d2m2_population!(definitions, statements, taken, predictors, 
             term = only(t for t in predictor.terms if t.kind === :factor &&
                 t.addressee === contrast.address)
             columns = if haskey(term.options, :index)
-                [_rk_ast_r2d2m2_indicator!(definitions, statements, taken,
+                [_rk_ast_factor_indicator!(definitions, statements, taken,
                     string(target, "_", contrast.address, "_r2d2_", position), term, position)
                     for position in eachindex(term.options.labels)]
             else

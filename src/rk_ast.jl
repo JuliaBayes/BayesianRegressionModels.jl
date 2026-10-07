@@ -142,12 +142,16 @@ function _rk_ast_statistical_call!(definitions, taken, name, args...;
     Expr(:call, callee, args...)
 end
 
-# The indicator column of a shared factor's `position`-th coefficient level.
-# Only variance-based shrinkage allocations read it; the effect itself gathers
-# coefficients by level (`_rk_ast_affine`).
-_rk_ast_factor_indicator!(definitions, taken, term, position) =
-    _rk_ast_statistical_call!(definitions, taken, :brm_factor_dummy, only(term.columns),
-        _rk_ast_level_value(term.options.level_values[position]); kernel=true)
+# A named indicator column of a shared factor's `position`-th coefficient
+# level. Only variance-based shrinkage allocations read it; the effect itself
+# gathers coefficients by level (`_rk_ast_affine`).
+function _rk_ast_factor_indicator!(definitions, statements, taken, stem, term, position)
+    indicator = _rk_ast_fresh_name(string(stem, "_indicator"), taken)
+    push!(statements, Expr(:(=), indicator,
+        _rk_ast_statistical_call!(definitions, taken, :brm_factor_dummy, only(term.columns),
+            _rk_ast_level_value(term.options.level_values[position]); kernel=true)))
+    indicator
+end
 
 # A horseshoe coefficient, as StanBlocks' `_sb_horseshoe`: the local scale
 # and standardized draw, scaled by the predictor's shared global scale `tau`.
@@ -1257,8 +1261,9 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                     (:Normal, (0.0, _rk_ast_r2d2_scale(r2d2, term.addressee;
                         scalar=kind !== :factor,
                         variance_values=kind === :factor ?
-                            [Expr(:call, :var, _rk_ast_factor_indicator!(defs, taken, term, j))
-                                for j in eachindex(term.options.labels)] :
+                            [Expr(:call, :var, _rk_ast_factor_indicator!(defs, stmts, taken,
+                                string(predictor.name, "_", label), term, j))
+                                for (j, label) in enumerate(term.options.labels)] :
                             [Expr(:call, :var, colactual[index])])))) : (:Normal, r2)
             end
             if kind === :factor
