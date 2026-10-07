@@ -1417,6 +1417,9 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 Expr(:call, :(:), 1, length(response.threshold_columns)),
                 Expr(:call, :(:), 1, response.n_levels - 1)),
                 _rk_ast_dotted(:Normal, vector_parameter.args...)))
+            _rk_coordinate_record!(coordinates, (; kind=:threshold_coefficients,
+                declaration=vector_parameter.name, response=response.response,
+                terms=Tuple(response.threshold_columns), stages=response.n_levels - 1))
             continue
         end
         vector_parameter.name in owned_vectors && continue
