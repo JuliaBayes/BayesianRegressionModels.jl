@@ -35,7 +35,7 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
         @test Base.invokelatest(prepare(getfield(mod, :brm_flatten_response)),
             [[.2, -.3], Float64[], [.4]]) == [.2, -.3, .4]
         @test Base.invokelatest(prepare(getfield(mod, :brm_gather_response)),
-            [.2, -.3, .4], [3, 1, 2]) == [.4, .2, -.3]
+            [.2, -.3, .4], [[3, 1], Int[], [2]]) == [.4, .2, -.3]
         for values in ([2., 4., 7.], [1e308, -1e308, 0.])
             mean = Base.invokelatest(prepare(getfield(mod, :brm_covariate_mean)), values)
             sd = Base.invokelatest(prepare(getfield(mod, :brm_covariate_sd)), values)

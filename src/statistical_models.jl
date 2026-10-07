@@ -214,8 +214,8 @@ brm_flatten_response(cells) = begin
 end),
 
     brm_gather_response = :(
-brm_gather_response(raw, rows) = begin
-    values = raw[rows]
+brm_gather_response(raw, groups) = begin
+    values = raw[reduce(vcat, groups; init=Int[])]
     return values
 end),
 

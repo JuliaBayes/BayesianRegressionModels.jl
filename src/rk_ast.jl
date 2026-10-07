@@ -95,9 +95,9 @@ function _rk_source_data_axes(statements, columns)
             push!(out, statement)
             continue
         end
-        range = Expr(:call, :(:), 1, length(columns[name]))
         values = _rk_ast_fresh_name(string(name, "_source_values"), taken)
         rows = _rk_ast_fresh_name(string(name, "_source_rows"), taken)
+        range = Expr(:call, GlobalRef(Base, :eachindex), values)
         push!(out, Expr(:(=), values, value),
             Expr(:(=), rows, Expr(:call, GlobalRef(Base, :collect), range)),
             Expr(:(=), name, _rk_ast_dotted(:getindex,
@@ -1460,7 +1460,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 fused_heads, union(Set(keys(plan.columns)), Set(Base.values(rename)),
                     Set(p.name for p in plan.predictors)), effects_name))
     end
-    stmts = _rk_source_data_axes(stmts, plan.columns)
+    values || (stmts = _rk_source_data_axes(stmts, plan.columns))
     _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings),
         _rk_observed_names(plan))
 end
