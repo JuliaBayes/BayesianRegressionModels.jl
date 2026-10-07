@@ -4083,6 +4083,10 @@ Base.@nospecializeinfer function _rk_plan_ranef_buckets(@nospecialize(brmi::BRMI
         override = get(overrides, (bucket.id, bucket.group), nothing)
         decomposition = get(decompositions, (bucket.id, bucket.group), nothing)
         override === nothing && decomposition === nothing && continue
+        override === nothing || isnothing(override.dist) || error(
+            "$prefix: `|$(bucket.id)|` is a Student-t random-effect block; the " *
+            "ReactiveKernels backend does not emit Student-t random effects " *
+            "yet. Use SBBRMI")
         if decomposition !== nothing
             any(m -> m.predictor in whole, bucket.margins) && error(
                 "$prefix: `|$(bucket.id)|` carries both whole-predictor " *

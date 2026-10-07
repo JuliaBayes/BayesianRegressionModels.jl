@@ -61,6 +61,10 @@ function _brm_operation_references!(refs, @nospecialize(values::AbstractArray))
     foreach(value -> _brm_operation_references!(refs, value), values)
     refs
 end
+# A sampled Student-t degrees-of-freedom name is a prior-value dependency of
+# its random-effect block, exactly like a name inside a prior expression.
+_brm_operation_references!(refs, node::_BRMRanefStudentT) =
+    _brm_operation_references!(refs, node.nu)
 function _brm_operation_references!(refs, mapping::AbstractDict)
     foreach(value -> _brm_operation_references!(refs, value), values(mapping))
     refs

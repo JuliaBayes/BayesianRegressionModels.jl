@@ -834,12 +834,20 @@ function _brmd_builtin_kind(::Val{:random_effect},c)
         (k.correlated ? " Its margins are correlated." : " It has no estimated correlation.")
     k.by===nothing || (prose*=" Covariance factors are separate for each declared stratum; s(i) is the fitted group-to-stratum map.")
     haskey(k,:total) && (prose*=" These deviations are not sampled directly: the fit samples the exact group totals of `$(last(k.total))`, described separately, and recovers the deviations in generated quantities.")
+    nu=get(k,:student_t_nu,nothing)
+    law=isnothing(nu) ? "\\mathcal N_{"*string(k.n_terms)*"}(0,"*covariance*")" :
+        "t_{"*brm_description_math(c,nu)*","*string(k.n_terms)*"}(0,"*covariance*")"
+    mixture=isnothing(nu) ? () : ("\\mathbf b_{"*id*",i}=\\sqrt{w_{"*id*",i}}\\,\\mathbf u_{"*id*",i},\\quad "*
+        "\\mathbf u_{"*id*",i}\\sim\\mathcal N_{"*string(k.n_terms)*"}(0,"*covariance*"),\\quad "*
+        "w_{"*id*",i}\\sim\\operatorname{InvGamma}\\left(\\tfrac{"*brm_description_math(c,nu)*"}{2},\\tfrac{"*
+        brm_description_math(c,nu)*"}{2}\\right)",)
+    isnothing(nu) || (prose*=" Its deviations are multivariate Student-t with $(nu isa Symbol ? "`$nu`" : nu) degrees of freedom: each level's Gaussian deviation vector is scaled by the square root of one inverse-gamma mixing weight shared by all of that level's margins, so the scale matrix is the Gaussian covariance and outlying levels are outlying in every margin at once.")
     margins=Tuple(m for m in k.margins if m.predictor isa Symbol)
     design=Tuple("\\mathbf z_{"*_brmd_escape(owner)*","*id*",j}=["*
         join((m.predictor!==owner ? "0" : m.coefficient===:Intercept ? "1" : brm_description_symbol(c,m.coefficient)
             for m in margins),",")*"]" for owner in unique(m.predictor for m in margins))
     definition=k.correlated ? omega*"="*L*L*"^{\\mathsf T},\\quad "*C*"="*D*L : C*"="*D
-    BRMDescriptionFragment(prose=(prose,),equations=("\\mathbf b_{"*id*",i}\\sim\\mathcal N_{"*string(k.n_terms)*"}(0,"*covariance*")",
+    BRMDescriptionFragment(prose=(prose,),equations=("\\mathbf b_{"*id*",i}\\sim "*law,mixture...,
         definition*",\\quad "*D*"=\\operatorname{diag}(\\mathrm{SD}_{"*subscript*"})",design...),covers=(c.id,))
 end
 _brmd_matrix_math(x::NamedTuple)=begin
@@ -931,7 +939,8 @@ function brm_description(d::BRMDescriptor; hooks=(),labels=Dict(),prior_anchors=
         b=group.block
         kwargs=(; group=b.group,id=b.id,n_terms=b.n_terms,n_groups=b.n_groups,
             levels=_brmd_snapshot(b.levels),margins=group.margins,
-            correlated=group.correlated,shared=group.shared,noncentered=b.noncentered,by=b.by)
+            correlated=group.correlated,shared=group.shared,noncentered=b.noncentered,by=b.by,
+            student_t_nu=_brmd_ranef_student_t_nu(group))
         haskey(group,:total) && (kwargs=merge(kwargs,(;total=(:total_effect,group.total.binding.logical))))
         push!(roots,_brmd_component(env,group.key,:random_effect,nothing,(),kwargs))
     end

@@ -525,6 +525,46 @@ ranef_correlated_draws_generic = StanBlocks.@slic begin
     return (diag_pre_multiply(tau, L) * z)'
 end
 
+# ---- Student-t random effects: a Gaussian scale mixture --------------------
+#
+# A Student-t block keeps its Gaussian submodel and adds one positive weight per
+# group level, `w[j] ~ inv_gamma(nu / 2, nu / 2)`, scaling every effect of level
+# `j` by `sqrt(w[j])`. Integrating `w` out leaves a multivariate t with `nu`
+# degrees of freedom and the block's Gaussian scale matrix
+# `diag(tau) * L * L' * diag(tau)` -- brms' `gr(..., dist = "student")`
+# construction (Pinheiro, Liu & Wu 2001). Because one weight is shared by all of
+# a level's coefficients the law stays elliptical and `L` keeps its meaning.
+#
+# Given `w` the block is still Gaussian, so each Student-t submodel is DERIVED
+# from its Gaussian one instead of being written a second time: the weight
+# statement goes before the `return` and the returned value is rescaled by its
+# shape. `n_groups` sizes `w` exactly as it sizes the standardized draws, so a
+# cv-tainted size moves `w` to generated quantities together with them and a
+# fresh level draws its own weight. `nu` is a submodel input: a numeric formula
+# constant, or an already-declared sampled scalar passed by name.
+const _SB_STUDENT_T_RANEF_SHAPES = Dict{Symbol,Symbol}(
+    :ranef_correlated_draws => :level_rows,
+    :ranef_correlated_draws_generic => :level_rows,
+)
+
+_sb_student_t_ranef_family(family::Symbol) = Symbol(family, :_student_t)
+
+_sb_student_t_scaled(::Val{:level_rows}, value) = :(diag_pre_multiply(sqrt(w), $value))
+
+function _sb_student_t_ranef(base::StanBlocks.SlicModel, family::Symbol)
+    shape = get(_SB_STUDENT_T_RANEF_SHAPES, family, nothing)
+    isnothing(shape) && error(
+        "sbimpl: Student-t random effects are not implemented for the " *
+        "`$family` emission")
+    body = deepcopy(base.model)
+    at = findfirst(s -> Meta.isexpr(s, :return), body.args)
+    isnothing(at) && error("sbimpl: random-effect submodel `$family` has no `return`")
+    returned = only(body.args[at].args)
+    body.args[at] = Expr(:return, _sb_student_t_scaled(Val(shape), returned))
+    insert!(body.args, at, :(w ~ inv_gamma(0.5 * nu, 0.5 * nu; n=n_groups)))
+    StanBlocks.SlicModel(body, base.data, base.mod, base.observations)
+end
+
 # ---- R2D2: derived random-effect scales -----------------------------------
 #
 # The `effect(..., :) ~ r2d2(...)` family DERIVES the marginal scale
@@ -10570,6 +10610,49 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
     lookup
 end
 
+# Emit a Student-t `|ID|` block: the bucket's Gaussian draws submodel -- the
+# default one, or the generic one when `sd(...)` / `cor(...)` configure it --
+# turned into its scale mixture by `_sb_student_t_ranef`. Only the non-centered
+# emission has a Student-t form; cv sizing works unchanged because `w` shares
+# the standardized draws' size expression.
+function _sb_emit_student_t_id_bucket!(stmts, data, bucket_name, n_terms_name,
+                                       gname, idx_name, n_name,
+                                       dist::_BRMRanefStudentT;
+                                       cv_groups, centered_groups, id_sym,
+                                       ranef_effect, mod::Module)
+    gname in centered_groups && error(
+        "sbimpl: group `$gname` is in `centered_groups`, but its `|$id_sym|` " *
+        "block is Student-t; the centered Student-t emission is not " *
+        "implemented. Use the default non-centered emission for this group")
+    n_groups = n_name
+    if gname in cv_groups
+        n_groups = Symbol(bucket_name, :_n_g)
+        push!(stmts, :($n_groups = maximum($idx_name)))
+    end
+    kwargs = Any[Expr(:kw, :group_idx, idx_name), Expr(:kw, :n_groups, n_groups),
+                 Expr(:kw, :n_terms, n_terms_name)]
+    if ranef_effect.has_sd || ranef_effect.has_cor
+        config = _sb_generic_ranef_submodel(ranef_effect.sd_prior, false; mod)
+        base, family = config.model, :ranef_correlated_draws_generic
+        push!(kwargs, Expr(:kw, :lkj_eta, ranef_effect.lkj_eta))
+        append!(kwargs, [Expr(:kw, d, d) for d in config.dependencies])
+    else
+        base, family = ranef_correlated_draws, :ranef_correlated_draws
+    end
+    nu = _sb_effect_prior_arg(dist.nu)
+    nu isa Real || nu isa Symbol || error(
+        "sbimpl: Student-t degrees of freedom for `|$id_sym|` must be a numeric " *
+        "formula constant or the name of a declared scalar parameter, got " *
+        "`$(repr(nu))`")
+    push!(kwargs, Expr(:kw, :nu, nu))
+    model = _sb_student_t_ranef(base, family)
+    _sb_record_binding!(data, bucket_name, :random_effect, gname;
+                        family=_sb_student_t_ranef_family(family))
+    push!(stmts, Expr(:call, :~, bucket_name,
+                      Expr(:call, model, Expr(:parameters, kwargs...))))
+    nothing
+end
+
 _sb_id_bucket_suffix(id_sym, g::NamedColumn) = Symbol(id_sym, :_, name(g))
 _sb_id_bucket_suffix(id_sym, g::Tuple{NamedColumn,NamedColumn}) =
     Symbol(id_sym, :_, name(g[1]), :__by__, name(g[2]))
@@ -10585,6 +10668,18 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g:
                                       mod::Module=@__MODULE__, r2d2_lkj_eta=1.0)
     idx_name, n_name = _sb_ensure_group_data!(data, g)
     gname = name(g)
+    dist = isnothing(ranef_effect) ? nothing : ranef_effect.dist
+    if !isnothing(dist)
+        isnothing(r2d2_tau) || error(
+            "sbimpl: `|$id_sym|` is Student-t and also carries an `r2d2` " *
+            "decomposition; a derived scale for a Student-t block is not " *
+            "implemented")
+        _sb_emit_student_t_id_bucket!(stmts, data, bucket_name, n_terms_name,
+                                      gname, idx_name, n_name, dist;
+                                      cv_groups, centered_groups, id_sym,
+                                      ranef_effect, mod)
+        return idx_name
+    end
     if !isnothing(r2d2_tau)
         # R2D2 bucket: the marginal scales are a transformed parameter, so the
         # block goes to the derived-`tau` sibling. Centered and cv variants are
@@ -10611,6 +10706,12 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g:
             group_idx=$idx_name, n_groups=$n_groups, n_terms=$n_terms_name,
             tau=$tau_name, lkj_eta=$r2d2_lkj_eta)))
         return idx_name
+    end
+    # An explicit `ranef(:, ID) ~ Normal()` resolves an entry with no SD or
+    # correlation statement; it is the default law and keeps the default
+    # emission byte for byte.
+    if !isnothing(ranef_effect) && !(ranef_effect.has_sd || ranef_effect.has_cor)
+        ranef_effect = nothing
     end
     lkj_eta = isnothing(ranef_effect) ? nothing : ranef_effect.lkj_eta
     generic_prior = !isnothing(ranef_effect)
