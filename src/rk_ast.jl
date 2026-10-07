@@ -1406,6 +1406,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     # Monotonic increment simplexes belong to their monotonic blocks.
     monotonic = Set(term.options.increments for predictor in plan.predictors
         for term in predictor.terms if term.kind in (:monotonic, :monotonic_summand))
+    # R2D2 allocation simplexes belong to their (unpaired) shrinkage prior.
+    r2d2_phis = Set(rp.phi for rp in plan.r2d2_priors)
     for vector_parameter in plan.vector_parameters
         vector_parameter.name in monotonic && continue
         response_index = findfirst(r -> r.threshold_coefs === vector_parameter.name, plan.responses)
@@ -1419,7 +1421,13 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         end
         vector_parameter.name in owned_vectors && continue
         stmt = _rk_ast_vector_parameter(vector_parameter)
-        stmt === nothing || push!(stmts, stmt)
+        stmt === nothing && continue
+        push!(stmts, stmt)
+        # Response cutpoints/thresholds and authored `Dirichlet` simplexes
+        # keep their declaration name on both backends, like scalars.
+        vector_parameter.name in r2d2_phis ||
+            _rk_coordinate_record!(coordinates, (; kind=:vector,
+                declaration=vector_parameter.name, family=vector_parameter.family))
     end
     for assignment in plan.assignments
         push!(stmts, Expr(:(=), assignment.name,

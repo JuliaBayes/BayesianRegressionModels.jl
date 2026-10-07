@@ -160,7 +160,11 @@ and correlation-factor coordinates in Stan's packing. A grouped
 `margin + K(level - 1)` vector through the level and margin labels, never
 through matching dimensions.
 
-Covered in this version: scalar parameters, ordinary-prior population
+Covered in this version: scalar parameters, vector parameters (a response's
+`OrderedLogistic` cutpoints and `Ordinal` cumulative or stopping-ratio
+thresholds, element by element under the shared ordered or unconstrained
+transform, and authored `Dirichlet` simplexes as `:simplex` blocks; all keep
+their declaration name on both backends), ordinary-prior population
 coefficients (including shared-design and separate categorical blocks),
 plain non-centered random-effect blocks (`(1 | g)`, `(0 + x | g)`,
 `(1 + x | g)`, `(… | id | g)`) with sampled scales, ungrouped HSGP terms
@@ -260,12 +264,14 @@ function _brm_transport_validate(rk_names, stan, pairs, correlations, simplexes)
         _brm_transport_error(:unsupported_coverage,
               "brm_coordinate_transport: the two lowerings do not pair " *
               "completely, so no transport is returned.\n  " * join(lines, "\n  ") *
-              "\n  Covered: scalar parameters, ordinary-prior population and " *
-              "categorical coefficients, plain non-centered random-effect " *
+              "\n  Covered: scalar parameters, response cutpoints and " *
+              "thresholds, authored `Dirichlet` simplexes, ordinary-prior " *
+              "population and categorical coefficients, plain non-centered random-effect " *
               "blocks with sampled scales, ungrouped HSGP terms, monotonic " *
               "terms, and declarations a submodel provider scopes under its " *
               "target (RK `<target>.<path>` with SB `<target>_<path>`). Other " *
-              "constructs (R2D2/horseshoe priors, smooths, GP, grouped or " *
+              "constructs (R2D2/horseshoe priors, `Ordinal` per-threshold " *
+              "coefficients, smooths, GP, grouped or " *
               "hyper-predicted HSGP, AR, measurement error, multi-membership " *
               "and stratified groups, centered or exact-total SB emissions, " *
               "completed covariates) are not paired yet.")
@@ -694,6 +700,69 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:submodel},
                     element.name, stan_name, declaration, element.index, :identity))
             end
         end
+    end
+end
+
+# The Stan declaration type and RK layout transform of each vector family the
+# shared emitter declares. Within a family both backends use the same
+# transform (an ordered vector's first element, then log increments), so
+# its free coordinates are equal; a simplex moves as a `:simplex` block.
+const _BRM_TRANSPORT_VECTOR_FAMILIES = Dict(
+    :ordered_normal => ("ordered", :ordered),
+    :vector_normal => ("vector", :identity),
+    :simplex_dirichlet => ("simplex", :simplex))
+
+# A vector parameter — a response's cutpoints or thresholds, or an authored
+# `Dirichlet` simplex — keeps its declaration name on both backends, like a
+# scalar, and pairs element by element with the same-named SB draw carrier.
+# A declaration with no such carrier stays unpaired, so the validator names it.
+function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:vector},
+        record, rk, d, stan, stan_pos)
+    declaration = record.declaration
+    idxs = _brm_carrier_indices(d.outputs,
+        o -> o.name === declaration && !isnothing(o.declaration) &&
+            o.declaration.target === declaration)
+    isempty(idxs) && return
+    length(idxs) == 1 || error(
+        "brm_coordinate_transport: vector `$declaration` matches $(length(idxs)) " *
+        "SB draw carriers; expected one")
+    output = d.outputs[only(idxs)]
+    stan_type, transform = _BRM_TRANSPORT_VECTOR_FAMILIES[record.family]
+    address = (; kind=:vector, declaration)
+    string(output.type) == stan_type || _brm_transport_error(:parameterization_mismatch,
+        "brm_coordinate_transport: RK `$(record.family)` vector `$declaration` " *
+        "pairs with SB `$(output.type)` carrier `$(output.name)`; the two " *
+        "transforms differ, so their coordinates are not a permutation")
+    elements = Pair{Int,Symbol}[]
+    for (rk_name, rk_transform) in zip(_rk_layout_coordinate_names(rk),
+            _rk_layout_coordinate_transforms(rk))
+        scoped = _brm_transport_scoped(rk_name)
+        !isnothing(scoped) && first(scoped) === declaration &&
+            length(last(scoped)) == 1 || continue
+        rk_transform === transform || error(
+            "brm_coordinate_transport: internal: RK `$(record.family)` vector " *
+            "`$declaration` has layout transform `$rk_transform`")
+        push!(elements, only(last(scoped)) => rk_name)
+    end
+    sort!(elements; by=first)
+    first.(elements) == 1:length(elements) || error(
+        "brm_coordinate_transport: RK vector `$declaration` has element " *
+        "coordinates $(Tuple(first.(elements))), not 1:$(length(elements))")
+    rk_names = last.(elements)
+    # A one-element simplex or an empty threshold vector has no free coordinate.
+    isempty(rk_names) && isempty(_brm_element_coordinates(output, stan)) && return
+    if transform === :simplex
+        _brm_transport_simplex!(pairs, simplexes, address, rk_names, declaration,
+            output, stan, d.plan)
+        return
+    end
+    names = stan[_brm_element_coordinates(output, stan)]
+    length(names) == length(rk_names) || error(
+        "brm_coordinate_transport: vector $(address) has $(length(rk_names)) RK " *
+        "and $(length(names)) Stan coordinates")
+    for (j, (rk_name, stan_name)) in enumerate(zip(rk_names, names))
+        push!(pairs, BRMCoordinatePair((; address..., index=j), rk_name, stan_name,
+            declaration, (j,), :identity))
     end
 end
 
