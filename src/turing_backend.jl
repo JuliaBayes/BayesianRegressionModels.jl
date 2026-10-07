@@ -568,6 +568,10 @@ function _turing_apply_ranef_effect_priors(brmi::BRMI, components::Tuple)
             key, range = location
             override = get(resolved, key, nothing)
             isnothing(override) && return block
+            isnothing(override.dist) || error(
+                "Turing backend: `|$(first(key))|` is a Student-t random-effect " *
+                "block; the direct Turing backend does not implement Student-t " *
+                "random effects. Use SBBRMI")
             _turing_with_ranef_prior(
                 block, override.sd_prior[range], override.sd_family[range], override.sd_rate[range],
                 override.lkj_eta)

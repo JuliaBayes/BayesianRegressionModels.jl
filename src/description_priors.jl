@@ -165,6 +165,12 @@ function _brmd_total_bindings(d)
     Tuple(result)
 end
 
+# The degrees of freedom of a Student-t random-effect group, or `nothing` for a
+# Gaussian one: a numeric constant or the parsed model name.
+_brmd_ranef_student_t_nu(group) =
+    isnothing(group.configuration) || isnothing(group.configuration.dist) ? nothing :
+        _sb_effect_prior_arg(group.configuration.dist.nu)
+
 function _brmd_ranef_priors!(priors,d,groups,anchors,notation)
     for group in groups
         if group.block.family === :brm_total
@@ -212,6 +218,14 @@ function _brmd_ranef_priors!(priors,d,groups,anchors,notation)
             push!(priors,_brmd_prior(d,(group.key...,:standardized_deviations),
                 ExprColumn(Normal,0.0,1.0),NamedTuple(),
                 (;kind=:generated,dimension=(group.block.n_terms,group.block.n_groups)),anchors,notation))
+            nu = _brmd_ranef_student_t_nu(group)
+            # A Student-t block scales each level's Gaussian deviations by the
+            # square root of one inverse-gamma weight per level.
+            isnothing(nu) || push!(priors,_brmd_prior(d,(group.key...,:mixing_weights),
+                nu isa Real ? ExprColumn(InverseGamma,nu/2,nu/2) :
+                    ExprColumn(InverseGamma,ExprColumn(/,group.configuration.dist.nu,2),
+                                            ExprColumn(/,group.configuration.dist.nu,2)),(; lower=0.0),
+                (;kind=:generated,dimension=(group.block.n_groups,)),anchors,notation))
         else
             push!(priors,_brmd_prior(d,(group.key...,:deviations),
                 ExprColumn(MvNormalCholesky,zeros(group.block.n_terms),

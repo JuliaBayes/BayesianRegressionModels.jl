@@ -928,7 +928,7 @@ end
 # macro rewrites the head before `@x` ever evaluates it, so the user never
 # needs them bound -- and exporting `cor` would collide with `Statistics.cor`
 # for anyone doing `using BayesianRegressionModels, Statistics`.
-const _PRIOR_HEADS = (:effect, :sd, :cor, :ar, :simplex, :latent, :length_scale)
+const _PRIOR_HEADS = (:effect, :sd, :cor, :ranef, :ar, :simplex, :latent, :length_scale)
 
 _is_effect_lhs(x) = any(h -> isxcall(x, h), _PRIOR_HEADS)
 # A bare `:` reaches the macro as an ordinary Symbol, so the address vector
@@ -1137,6 +1137,18 @@ function _prior_address(head::Symbol, args::Vector{Symbol})
         # common block-wide and per-predictor spellings normalise onto the
         # address shapes the walkers and backend already understand.
         full = Symbol[:sd, args[2], args[1], length(args) == 3 ? args[3] : _EFFECT_COLON]
+        while length(full) > 2 && last(full) === _EFFECT_COLON
+            pop!(full)
+        end
+        return full
+    elseif head === :ranef
+        # The standardized law of a block's effects: `ranef(:, p) ~ TDist(nu)`.
+        # Same slot grammar as `sd`, so a per-coefficient law can later reuse
+        # the margin addresses; the backend currently accepts block-wide only.
+        length(args) in (2, 3) || error(
+            "@brm: `ranef` takes `ranef(<linear_predictor|:>, <ID>)` or " *
+            "`ranef(<linear_predictor|:>, <ID>, <coefficient>)`; got `$spelling`.")
+        full = Symbol[:ranef, args[2], args[1], length(args) == 3 ? args[3] : _EFFECT_COLON]
         while length(full) > 2 && last(full) === _EFFECT_COLON
             pop!(full)
         end

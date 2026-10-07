@@ -254,7 +254,7 @@ end
 # both skip on this list rather than on a hand-copied tuple that can drift as
 # classes are added.
 const _NON_EFFECT_CLASSES =
-    (:sd, :cor, :term_sd, :term_ar, :term_simplex, :term_latent,
+    (:sd, :cor, :ranef, :term_sd, :term_ar, :term_simplex, :term_latent,
      :term_length_scale)
 
 # The classes that address a TERM's own parameters, as built by
@@ -329,7 +329,8 @@ in formula order. Each entry has
 (; class, id, predictor, coefficient, family, arguments, keywords, expression)
 ```
 
-`class` is `:sd` or `:cor`. `predictor === nothing` means the statement is not
+`class` is `:sd`, `:cor`, or `:ranef` (the block's standardized law, such as
+`ranef(:, ID) ~ TDist(nu)`). `predictor === nothing` means the statement is not
 predictor-specific — `sd(:, ID)`, and always `cor(:, ID)`, since a shared
 `|ID|` covariance block spans every predictor that slices it. `coefficient ===
 nothing` means the whole block rather than one margin. `sd(lp, ID, coef)`
@@ -350,8 +351,8 @@ Base.@nospecializeinfer function ranef_effect_priors(@nospecialize(brmi::BRMI))
         address = getargs(lhs_e)
         isempty(address) && continue
         class = first(address)
-        class in (:sd, :cor) || continue
-        valid = class === :sd ? length(address) in (2, 3, 4) : length(address) == 2
+        class in (:sd, :cor, :ranef) || continue
+        valid = class === :cor ? length(address) == 2 : length(address) in (2, 3, 4)
         valid || error(
             "ranef_effect_priors: malformed random-effect address " *
             "`effect($(join(address, ", ")))`")

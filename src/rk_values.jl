@@ -167,6 +167,13 @@ function _rk_ast_stratified_draws!(definitions, taken, K, eta, group, stratum)
     _rk_ast_block_call!(definitions, taken, "brm_stratified_draws", block, b)
 end
 
+# The degrees of freedom of a Student-t bucket as an RK value: a numeric
+# constant, or the graph value of the declared scalar it names.
+_rk_ast_student_t_nu(::Nothing, _bindings, _taken) = nothing
+_rk_ast_student_t_nu(dist::_BRMRanefStudentT, bindings, taken) =
+    dist.nu isa Real ? dist.nu :
+        _rk_value_expr!(bindings, _brm_prepare_expr(dist.nu), taken)
+
 function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindings;
         predictors=(), population_priors=Dict(), coordinates=nothing)
     grouping = bucket.grouping
@@ -199,17 +206,21 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
             [_rk_ast_positive_prior(prior, bindings, taken) for prior in bucket.sd_priors]
         end
         _rk_ast_group_component!(definitions, stmts, taken, draws, group, K,
-            bucket.lkj_eta, priors)
+            bucket.lkj_eta, priors;
+            nu=_rk_ast_student_t_nu(bucket.dist, bindings, taken))
         # Plain groups retain semantic transport metadata at their actual
         # component-owned declarations; other grouping forms remain unpaired.
+        # A Student-t block also records its per-level mixing weights; Gaussian
+        # records keep their established fields.
         grouping.form === :plain &&
-            _rk_coordinate_record!(coordinates, (; kind=:ranef,
+            _rk_coordinate_record!(coordinates, merge((; kind=:ranef,
                 group=bucket.group, id=bucket.id, bucket_kind=bucket.kind,
                 margins=Tuple((m.predictor, m.coefficient) for m in bucket.margins),
                 scale=Symbol(draws, ".tau"),
                 scales=all(isequal(first(priors)), priors) ? nothing :
                     Tuple(Symbol(draws, ".tau_", k) for k in 1:K),
-                z=Symbol(draws, ".z"), L=K == 1 ? nothing : Symbol(draws, ".L")))
+                z=Symbol(draws, ".z"), L=K == 1 ? nothing : Symbol(draws, ".L")),
+                bucket.dist === nothing ? (;) : (; mixing=Symbol(draws, ".w"))))
     end
     indices = Dict{Symbol,Symbol}()
     if grouping.form !== :gr

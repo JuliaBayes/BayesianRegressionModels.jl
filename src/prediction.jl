@@ -153,6 +153,19 @@ const _RANEF_FAMILIES = Dict{Symbol,NamedTuple}(
     :ranef_correlated_draws_centered => (; z = :b,  layout = :group_term, noncentered = false, tau = :tau),
 )
 
+# Student-t blocks (`_sb_student_t_ranef`, src/sbimpl.jl) keep their Gaussian
+# family's standardized coordinates and add one inverse-gamma mixing weight per
+# level, `<binding>_w` (`vector<lower=0>[n_groups]`). The entries are derived
+# from the Gaussian ones so the two cannot drift apart.
+for family in keys(_SB_STUDENT_T_RANEF_SHAPES)
+    _RANEF_FAMILIES[_sb_student_t_ranef_family(family)] =
+        merge(_RANEF_FAMILIES[family], (; mixing = :w))
+end
+
+# The per-level mixing-weight carrier of a block's family, or `nothing` for a
+# Gaussian block.
+_ranef_mixing(family::Symbol) = get(_RANEF_FAMILIES[family], :mixing, nothing)
+
 """
     RanefBlock
 
@@ -633,6 +646,24 @@ end
 ranef_coordinates(blocks::AbstractVector{RanefBlock}, unc_names) =
     [ranef_coordinates(b, unc_names) for b in blocks]
 
+# Positions of a Student-t block's per-level mixing weights `<binding>_w.<g>`
+# in `unc_names`, ordered by the block's level index; `nothing` for a Gaussian
+# block. Missing names are a loud error, as in `ranef_coordinates`.
+function _ranef_mixing_coordinates(block::RanefBlock, unc_names)
+    mixing = _ranef_mixing(block.family)
+    isnothing(mixing) && return nothing
+    pos = _ranef_name_positions(unc_names)
+    names = ["$(block.binding)_$(mixing).$g" for g in 1:block.n_groups]
+    missing_names = filter(nm -> !haskey(pos, nm), names)
+    isempty(missing_names) || error(
+        "BRM prediction: Student-t block `$(block.binding)` expects mixing-weight ",
+        "coordinates that this model does not have: ",
+        join(first(missing_names, 8), ", "),
+        length(missing_names) > 8 ? " … ($(length(missing_names)) total)" : "",
+        ". The draw matrix and the model do not describe the same emission.")
+    [pos[nm] for nm in names]
+end
+
 _ranef_name_positions(unc_names) =
     Dict{String,Int}(String(n) => i for (i, n) in enumerate(unc_names))
 
@@ -1013,6 +1044,23 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
                     claimed[j] = true
                     plan_idx[j] = gf == 0 ? 0 : coords_from[t, gf]
                 end
+            end
+        end
+        # A Student-t level carries its mixing weight with it. Fresh levels of
+        # these non-centered blocks were refused above (they re-draw Stan-side
+        # through `resample_groups`), so every remaining level is retained.
+        mix_to = _ranef_mixing_coordinates(bt, unc_to)
+        if !isnothing(mix_to)
+            mix_from = _ranef_mixing_coordinates(bf, unc_from)
+            for g in 1:bt.n_groups
+                gf = fresh ? 0 : get(level_pos, bt.levels[g], 0)
+                gf == 0 && error(
+                    "BRM prediction: Student-t block `$(bt.binding)` needs a ",
+                    "fresh mixing weight for level $(repr(bt.levels[g])); fresh ",
+                    "Student-t levels re-draw Stan-side through ",
+                    "`reprocess(fit, new_df; resample_groups=[$(repr(bt.group))])`.")
+                claimed[mix_to[g]] = true
+                plan_idx[mix_to[g]] = mix_from[gf]
             end
         end
         if centered && !isempty(fresh_groups)

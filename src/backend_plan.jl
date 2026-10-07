@@ -2243,6 +2243,41 @@ function _brm_ranef_lkj_eta(spec, n_terms::Int;
     eta
 end
 
+"""
+    _BRMRanefStudentT(nu)
+
+Resolved Student-t law of one random-effect block: a multivariate t with `nu`
+degrees of freedom and the block's Gaussian scale matrix, i.e. the Gaussian
+block with one inverse-gamma mixing weight per group level. `nu` is the raw
+parsed argument -- a numeric formula constant or a model name -- and each
+backend lowers it. A Gaussian block carries `nothing` instead.
+"""
+struct _BRMRanefStudentT{N}
+    nu::N
+end
+
+# The standardized law of a block's effects. `Normal()` is the explicit form of
+# the Gaussian default; `TDist(nu)` selects the Student-t scale mixture.
+_brm_ranef_distribution(::Type{<:Normal}, spec; prefix) =
+    isempty(spec.arguments) && isempty(spec.keywords) ? nothing : error(
+        "$prefix: a random-effect block law is standardized -- its scale comes " *
+        "from `sd(...)` and its correlation from `cor(...)` -- so write " *
+        "`Normal()` without arguments")
+function _brm_ranef_distribution(::Type{<:TDist}, spec; prefix)
+    isempty(spec.keywords) && length(spec.arguments) == 1 || error(
+        "$prefix: a Student-t random-effect block takes exactly one " *
+        "degrees-of-freedom argument, `TDist(nu)`")
+    nu = only(spec.arguments)
+    value = _brm_numeric_constant(nu)
+    isnothing(value) || (isfinite(value) && value > 0) || error(
+        "$prefix: Student-t random-effect degrees of freedom must be finite " *
+        "and strictly positive, got $value")
+    _BRMRanefStudentT(isnothing(value) ? nu : Float64(value))
+end
+_brm_ranef_distribution(T, spec; prefix) = error(
+    "$prefix: random-effect blocks support the standardized laws `Normal()` " *
+    "and `TDist(nu)`; got `$(spec.expression)`")
+
 function _brm_ranef_margin_claim(spec, margins;
                                  prefix="BRM backend lowering")
     spelling = "sd($(isnothing(spec.predictor) ? ":" : spec.predictor), " *
@@ -2301,7 +2336,19 @@ function _brm_resolve_ranef_effect_overrides(
                 :margins => margins,
                 :sd_default => nothing,
                 :sd_overrides => Dict{Int,Tuple{ExprColumn,Int}}(),
-                :lkj_eta => nothing)
+                :lkj_eta => nothing,
+                :dist => missing)
+        end
+        if spec.class === :ranef
+            isnothing(spec.predictor) && isnothing(spec.coefficient) || error(
+                "$prefix: a random-effect law is block-wide in this version -- " *
+                "write `ranef(:, $(spec.id))`. Per-coefficient laws need one " *
+                "mixing weight per coefficient and are not implemented yet")
+            state[:dist] === missing || error(
+                "$prefix: duplicate random-effect law for `ranef(:, $(spec.id))`")
+            state[:dist] = _brm_ranef_distribution(
+                _as_distribution_type(spec.family), spec; prefix)
+            continue
         end
         if spec.class === :cor
             state[:lkj_eta] === nothing || error(
@@ -2346,7 +2393,9 @@ function _brm_resolve_ranef_effect_overrides(
         out[key] = (; sd_prior, sd_family, sd_rate,
                     has_sd=(!isnothing(default_prior) ||
                             !isempty(state[:sd_overrides])),
+                    has_cor=!isnothing(state[:lkj_eta]),
                     lkj_eta=isnothing(state[:lkj_eta]) ? 1.0 : state[:lkj_eta],
+                    dist=coalesce(state[:dist], nothing),
                     margins)
     end
     out
