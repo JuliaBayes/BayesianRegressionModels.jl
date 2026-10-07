@@ -142,6 +142,13 @@ function _rk_ast_statistical_call!(definitions, taken, name, args...;
     Expr(:call, callee, args...)
 end
 
+# The indicator column of a shared factor's `position`-th coefficient level.
+# Only variance-based shrinkage allocations read it; the effect itself gathers
+# coefficients by level (`_rk_ast_affine`).
+_rk_ast_factor_indicator!(definitions, taken, term, position) =
+    _rk_ast_statistical_call!(definitions, taken, :brm_factor_dummy, only(term.columns),
+        _rk_ast_level_value(term.options.level_values[position]); kernel=true)
+
 # A horseshoe coefficient, as StanBlocks' `_sb_horseshoe`: the local scale
 # and standardized draw, scaled by the predictor's shared global scale `tau`.
 function _rk_ast_horseshoe_block!(definitions, taken, local_scale, tau, ratio)
@@ -226,21 +233,25 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol},
         colref::Dict{Int}, refref::Dict{Int}; values::Bool=false,
         replacements=Dict{Int,Any}())
     summands = Any[]
+    intercept = nothing
     for (index, term) in enumerate(predictor.terms)
         if haskey(replacements, index)
             # A component value (or nothing, when an earlier one absorbed it).
             replacement = replacements[index]
             replacement === nothing || push!(summands, replacement)
         elseif term.kind === :intercept
-            push!(summands, predictor.row_source === nothing ? coefs[index] :
-                Expr(:call, :.*, coefs[index], Expr(:call, :ones,
-                    Expr(:call, :length, predictor.row_source))))
+            # A scalar; it broadcasts against the other (row-valued) summands.
+            intercept = coefs[index]
+            push!(summands, intercept)
         elseif term.kind === :continuous
             push!(summands, Expr(:call, :.*, coefs[index], colref[index]))
         elseif term.kind === :factor
-            if haskey(term.options, :design_columns)
-                push!(summands, Expr(:call, :*,
-                    Expr(:call, :hcat, term.options.design_columns...), refref[index]))
+            if haskey(term.options, :index)
+                # Each row reads its level's coefficient; a treatment-coded
+                # reference level reads the leading zero.
+                coefficients = term.options.coding === :fullrank ? refref[index] :
+                    Expr(:call, :vcat, 0.0, refref[index])
+                push!(summands, Expr(:ref, coefficients, term.options.index))
                 continue
             end
             # Factor use is always bare `c[g]`; the LevelMap (full cover
@@ -282,8 +293,11 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol},
             push!(summands, Expr(:call, :.*, coefs[index], refref[index]))
         end
     end
-    length(summands) == 1 ? only(summands) :
-        Expr(:call, :.+, summands...)
+    length(summands) == 1 || return Expr(:call, :.+, summands...)
+    # A lone intercept still states the predictor's rows.
+    only(summands) === intercept && predictor.row_source !== nothing ?
+        Expr(:call, :.*, intercept, Expr(:call, :ones,
+            Expr(:call, :length, predictor.row_source))) : only(summands)
 end
 
 function _rk_ast_r2d2_scale(r2d2, addressee; scalar=true, variance_values=nothing)
@@ -334,8 +348,8 @@ end
 # thin-layer wide-block rule); the plan family symbol is the head.
 function _rk_ast_factor_prior(coef::Symbol, col::Symbol,
         options::NamedTuple, K::Int, family::Symbol, args::Tuple)
-    index = if haskey(options, :design_columns)
-        Expr(:call, :(:), 1, length(options.design_columns))
+    index = if haskey(options, :index)
+        Expr(:call, :(:), 1, length(options.labels))
     elseif options.coding === :fullrank
         Expr(:call, :levels, col)
     else
@@ -1135,12 +1149,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         if haskey(term.options, :zero_source)
             push!(stmts, Expr(:(=), only(term.columns),
                 Expr(:call, :zeros, Expr(:call, :length, term.options.zero_source))))
-        elseif term.kind === :factor && haskey(term.options, :design_columns)
-            for (name, level) in zip(term.options.design_columns, term.options.level_values)
-                call = _rk_ast_statistical_call!(defs, taken, :brm_factor_dummy,
-                    only(term.columns), _rk_ast_level_value(level); kernel=true)
-                push!(stmts, Expr(:(=), name, call))
-            end
+        elseif term.kind === :factor && haskey(term.options, :index)
+            index_sources[term.options.index] = (only(term.columns), term.options.index_levels)
         elseif term.kind in (:monotonic, :monotonic_summand)
             index_sources[only(term.columns)] = (term.options.source, term.options.levels)
         elseif term.kind === :hsgp && haskey(term.options, :group_index)
@@ -1193,6 +1203,18 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         population = Tuple{Int,Any,Tuple{Symbol,Tuple}}[]
         scalar_stmts = Expr[]
         monotonic_alpha(term) = only(vector_priors[term.options.increments].args)
+        # An ordinary scalar coefficient under its resolved prior.
+        function scalar_coefficient!(index, term, override)
+            coef = _rk_ast_coef_name(
+                string(predictor.name, "_", term.addressee), taken)
+            coefs[index] = coef
+            r2d2 === nothing &&
+                !haskey(joint_priors, (predictor.name, term.addressee)) &&
+                _rk_coordinate_record!(coordinates, (; kind=:population,
+                    declaration=coef, predictor=predictor.name,
+                    coefficient=term.addressee))
+            Expr(:call, :~, coef, Expr(:call, override[1], override[2]...))
+        end
         for (index, term) in enumerate(predictor.terms)
             kind = term.kind
             if kind in (:continuous, :factor, :monotonic, :monotonic_summand, :offset, :ar, :me)
@@ -1251,7 +1273,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                     (:Normal, (0.0, _rk_ast_r2d2_scale(r2d2, term.addressee;
                         scalar=kind !== :factor,
                         variance_values=kind === :factor ?
-                            [Expr(:call, :var, name) for name in term.options.design_columns] :
+                            [Expr(:call, :var, _rk_ast_factor_indicator!(defs, taken, term, j))
+                                for j in eachindex(term.options.labels)] :
                             [Expr(:call, :var, colactual[index])])))) : (:Normal, r2)
             end
             if kind === :factor
@@ -1302,22 +1325,25 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                         declaration=refactual[index], predictor=predictor.name,
                         head=:mo, source=term.options.source, beta=false))
                 end
-                coef = _rk_ast_coef_name(
-                    string(predictor.name, "_", term.addressee), taken)
-                coefs[index] = coef
                 if hs_spec !== nothing
+                    coef = _rk_ast_coef_name(
+                        string(predictor.name, "_", term.addressee), taken)
+                    coefs[index] = coef
                     push!(scalar_stmts, Expr(:call, :~, coef, _rk_ast_horseshoe_block!(
                         defs, taken, hs_spec[1], hs_tau, hs_spec[2] / hs_scale)))
-                elseif override !== nothing
-                    push!(scalar_stmts, Expr(:call, :~, coef,
-                        Expr(:call, override[1], override[2]...)))
-                    r2d2 === nothing &&
-                        !haskey(joint_priors, (predictor.name, term.addressee)) &&
-                        _rk_coordinate_record!(coordinates, (; kind=:population,
-                            declaration=coef, predictor=predictor.name,
-                            coefficient=term.addressee))
+                else
+                    push!(scalar_stmts, scalar_coefficient!(index, term, override))
                 end
             end
+        end
+        # A lone intercept is its scalar coefficient, not a one-column design
+        # product.
+        if length(population) == 1 &&
+                predictor.terms[first(only(population))].kind === :intercept
+            index, _, override = only(population)
+            pushfirst!(scalar_stmts,
+                scalar_coefficient!(index, predictor.terms[index], override))
+            empty!(population)
         end
         for term in predictor.terms
             term.kind === :spline || continue
@@ -1364,7 +1390,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 string(predictor.link, "_", predictor.name)
             name = _rk_ast_population_component!(defs, stmts, taken,
                 _rk_ast_fresh_name(string("pop_", target), taken),
-                _rk_ast_fresh_name(string("X_", target), taken),
+                string("X_", target),
                 [entry[2] for entry in population], [entry[3] for entry in population])
             # The component owns each coefficient. Record the actual sampled
             # declaration and its index rather than its old caller-side name.
