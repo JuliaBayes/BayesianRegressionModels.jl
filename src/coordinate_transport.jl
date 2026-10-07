@@ -75,7 +75,12 @@ of the same [`BRMI`](@ref):
   scale against Stan's `log_scale`), `:cholesky` (a correlation-factor
   coordinate; the whole factors are compared, see
   [`brm_check_coordinate_transport`](@ref)), or `:simplex` (one free
-  coordinate of a simplex block; see below).
+  coordinate of a simplex block; see below);
+- `stan_value` — the Stan constrained parameter name holding the physical
+  value this coordinate parameterizes. It equals `stan` except inside a Stan
+  array of vectors, whose unconstrained values BridgeStan stores array-major
+  while `param_unc_names` lists the same block first-index-fastest, so the
+  name at a position can belong to another element.
 
 In the `:identity`, `:exp` and `:cholesky` relations the two UNCONSTRAINED
 values are equal, so those coordinates move by a permutation. A `:simplex`
@@ -92,7 +97,11 @@ struct BRMCoordinatePair
     rk_declaration::Symbol
     rk_index::Tuple
     relation::Symbol
+    stan_value::String
 end
+
+BRMCoordinatePair(address, rk, stan, rk_declaration, rk_index, relation) =
+    BRMCoordinatePair(address, rk, stan, rk_declaration, rk_index, relation, stan)
 
 """
     BRMCoordinateTransport
@@ -160,7 +169,12 @@ and correlation-factor coordinates in Stan's packing. A grouped
 `margin + K(level - 1)` vector through the level and margin labels, never
 through matching dimensions.
 
-Covered in this version: scalar parameters, ordinary-prior population
+Covered in this version: scalar parameters, vector parameters (a response's
+`OrderedLogistic` cutpoints and `Ordinal` cumulative or stopping-ratio
+thresholds, element by element under the shared ordered or unconstrained
+transform, and authored `Dirichlet` simplexes as `:simplex` blocks; all keep
+their declaration name on both backends), `Ordinal` per-threshold
+coefficients by (stage, term), ordinary-prior population
 coefficients (including shared-design and separate categorical blocks),
 plain non-centered random-effect blocks (`(1 | g)`, `(0 + x | g)`,
 `(1 + x | g)`, `(… | id | g)`) with sampled scales, ungrouped HSGP terms
@@ -260,8 +274,10 @@ function _brm_transport_validate(rk_names, stan, pairs, correlations, simplexes)
         _brm_transport_error(:unsupported_coverage,
               "brm_coordinate_transport: the two lowerings do not pair " *
               "completely, so no transport is returned.\n  " * join(lines, "\n  ") *
-              "\n  Covered: scalar parameters, ordinary-prior population and " *
-              "categorical coefficients, plain non-centered random-effect " *
+              "\n  Covered: scalar parameters, response cutpoints and " *
+              "thresholds, `Ordinal` per-threshold coefficients, authored " *
+              "`Dirichlet` simplexes, ordinary-prior " *
+              "population and categorical coefficients, plain non-centered random-effect " *
               "blocks with sampled scales, ungrouped HSGP terms, monotonic " *
               "terms, and declarations a submodel provider scopes under its " *
               "target (RK `<target>.<path>` with SB `<target>_<path>`). Other " *
@@ -697,6 +713,109 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:submodel},
     end
 end
 
+# The Stan declaration type and RK layout transform of each vector family the
+# shared emitter declares. Within a family both backends use the same
+# transform (an ordered vector's first element, then log increments), so
+# its free coordinates are equal; a simplex moves as a `:simplex` block.
+const _BRM_TRANSPORT_VECTOR_FAMILIES = Dict(
+    :ordered_normal => ("ordered", :ordered),
+    :vector_normal => ("vector", :identity),
+    :simplex_dirichlet => ("simplex", :simplex))
+
+# A vector parameter — a response's cutpoints or thresholds, or an authored
+# `Dirichlet` simplex — keeps its declaration name on both backends, like a
+# scalar, and pairs element by element with the same-named SB draw carrier.
+# A declaration with no such carrier stays unpaired, so the validator names it.
+function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:vector},
+        record, rk, d, stan, stan_pos)
+    declaration = record.declaration
+    idxs = _brm_carrier_indices(d.outputs,
+        o -> o.name === declaration && !isnothing(o.declaration) &&
+            o.declaration.target === declaration)
+    isempty(idxs) && return
+    length(idxs) == 1 || error(
+        "brm_coordinate_transport: vector `$declaration` matches $(length(idxs)) " *
+        "SB draw carriers; expected one")
+    output = d.outputs[only(idxs)]
+    stan_type, transform = _BRM_TRANSPORT_VECTOR_FAMILIES[record.family]
+    address = (; kind=:vector, declaration)
+    string(output.type) == stan_type || _brm_transport_error(:parameterization_mismatch,
+        "brm_coordinate_transport: RK `$(record.family)` vector `$declaration` " *
+        "pairs with SB `$(output.type)` carrier `$(output.name)`; the two " *
+        "transforms differ, so their coordinates are not a permutation")
+    elements = Pair{Int,Symbol}[]
+    for (rk_name, rk_transform) in zip(_rk_layout_coordinate_names(rk),
+            _rk_layout_coordinate_transforms(rk))
+        scoped = _brm_transport_scoped(rk_name)
+        !isnothing(scoped) && first(scoped) === declaration &&
+            length(last(scoped)) == 1 || continue
+        rk_transform === transform || error(
+            "brm_coordinate_transport: internal: RK `$(record.family)` vector " *
+            "`$declaration` has layout transform `$rk_transform`")
+        push!(elements, only(last(scoped)) => rk_name)
+    end
+    sort!(elements; by=first)
+    first.(elements) == 1:length(elements) || error(
+        "brm_coordinate_transport: RK vector `$declaration` has element " *
+        "coordinates $(Tuple(first.(elements))), not 1:$(length(elements))")
+    rk_names = last.(elements)
+    # A one-element simplex or an empty threshold vector has no free coordinate.
+    isempty(rk_names) && isempty(_brm_element_coordinates(output, stan)) && return
+    if transform === :simplex
+        _brm_transport_simplex!(pairs, simplexes, address, rk_names, declaration,
+            output, stan, d.plan)
+        return
+    end
+    names = stan[_brm_element_coordinates(output, stan)]
+    length(names) == length(rk_names) || error(
+        "brm_coordinate_transport: vector $(address) has $(length(rk_names)) RK " *
+        "and $(length(names)) Stan coordinates")
+    for (j, (rk_name, stan_name)) in enumerate(zip(rk_names, names))
+        push!(pairs, BRMCoordinatePair((; address..., index=j), rk_name, stan_name,
+            declaration, (j,), :identity))
+    end
+end
+
+# `Ordinal(...; per_threshold=...)` coefficients: RK's `terms × stages` matrix
+# and SB's `stages`-array of `terms`-vectors hold the same independent
+# coefficient per (stage, term), paired by those positions. Stan stores the
+# array stage-major — element `[s][t]` at block offset `(s-1)T + t` — which is
+# also RK's column-major `(t, s)` order, while BridgeStan's names enumerate the
+# block stage-fastest; each pair keeps the unconstrained name at its true
+# position and the constrained `<carrier>.<s>.<t>` for the physical check.
+function _brm_transport_pairs!(pairs, correlations, simplexes,
+        ::Val{:threshold_coefficients}, record, rk, d, stan, stan_pos)
+    declaration = record.declaration
+    idxs = _brm_carrier_indices(d.outputs,
+        o -> o.name === declaration && !isnothing(o.declaration) &&
+            o.declaration.target === declaration)
+    isempty(idxs) && return
+    length(idxs) == 1 || error(
+        "brm_coordinate_transport: threshold coefficients `$declaration` match " *
+        "$(length(idxs)) SB draw carriers; expected one")
+    output = d.outputs[only(idxs)]
+    T, S = length(record.terms), record.stages
+    string(output.type) == "vector" && length(output.size) == 2 ||
+        _brm_transport_error(:parameterization_mismatch,
+            "brm_coordinate_transport: RK threshold coefficients `$declaration` " *
+            "pair with SB `$(output.type)$(output.size)` carrier, not a " *
+            "stages-array of term vectors")
+    positions = sort(_brm_element_coordinates(output, stan))
+    n = S * T
+    n == 0 && isempty(positions) && return
+    positions == positions[1]:(positions[1] + n - 1) || error(
+        "brm_coordinate_transport: SB threshold coefficients `$declaration` " *
+        "occupy Stan positions $(positions); expected $n contiguous ones " *
+        "($S stages × $T terms)")
+    for s in 1:S, t in 1:T
+        address = (; kind=:threshold_coefficient, response=record.response,
+            stage=s, term=record.terms[t])
+        push!(pairs, BRMCoordinatePair(address, Symbol(declaration, ".", t, ".", s),
+            stan[positions[1] + (s - 1) * T + t - 1], declaration, (t, s), :identity,
+            string(declaration, ".", s, ".", t)))
+    end
+end
+
 function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{kind}, record,
         rk, d, stan, stan_pos) where {kind}
     error("brm_coordinate_transport: internal: no pairing for RK record kind `$kind`")
@@ -939,8 +1058,8 @@ function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
         pair.relation in (:cholesky, :simplex) && continue
         value = _brm_rk_declaration_value(rk_values, pair.rk_declaration)
         rk_value = isempty(pair.rk_index) ? value : value[pair.rk_index...]
-        compare("$(pair.address) (`$(pair.rk)` / `$(pair.stan)`)", rk_value,
-            _brm_physical(Val(pair.relation), stan_value(pair.stan)))
+        compare("$(pair.address) (`$(pair.rk)` / `$(pair.stan_value)`)", rk_value,
+            _brm_physical(Val(pair.relation), stan_value(pair.stan_value)))
         checked += 1
     end
     for factor in t.correlations

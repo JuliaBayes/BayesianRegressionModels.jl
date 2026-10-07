@@ -432,7 +432,7 @@ end
 # RKPPL's explicit ordinal: tags by name, shared thresholds, positional
 # discrimination and one threshold-effect row per observation.
 function _rk_ast_value_distribution!(statements, ::Type{Ordinal}, observation,
-        distribution, bindings, taken)
+        distribution, bindings, taken; coordinates=nothing)
     length(distribution.args) == 4 ||
         return _rk_ast_value_call(Ordinal, distribution, bindings, taken)
     structure, link, eta, thresholds = distribution.args
@@ -440,23 +440,25 @@ function _rk_ast_value_distribution!(statements, ::Type{Ordinal}, observation,
         "RK backend: response `$(observation.name)` ordinal keywords " *
         "$(keys(distribution.kwargs)) are not a prepared ordinal record")
     eta, effects = _rk_ast_value_threshold_effects!(statements, observation.name,
-        eta, bindings, taken)
+        eta, bindings, taken; coordinates)
     _rk_ast_dotted(:Ordinal, Expr(:call, nameof(typeof(structure))),
         Expr(:call, nameof(typeof(link))), _rk_value_expr!(bindings, eta, taken),
         Expr(:call, :Ref, _rk_value_expr!(bindings, thresholds, taken)),
         _rk_value_expr!(bindings, distribution.kwargs.discrimination, taken), effects...)
 end
-_rk_ast_value_distribution!(statements, callable, observation, distribution, bindings, taken) =
-    _rk_ast_value_distribution(callable, distribution, bindings, taken)
+_rk_ast_value_distribution!(statements, callable, observation, distribution, bindings,
+    taken; coordinates=nothing) = _rk_ast_value_distribution(callable, distribution,
+    bindings, taken)
 
-_rk_ast_value_threshold_effects!(statements, response, eta, bindings, taken) = (eta, ())
+_rk_ast_value_threshold_effects!(statements, response, eta, bindings, taken;
+    coordinates=nothing) = (eta, ())
 _rk_ast_value_threshold_effects!(statements, response, eta::_BRMPreparedExpr,
-        bindings, taken) = _rk_ast_value_threshold_effects!(statements, response,
-    eta.callable, eta, bindings, taken)
-_rk_ast_value_threshold_effects!(statements, response, _callable, eta, bindings, taken) =
-    (eta, ())
+        bindings, taken; coordinates=nothing) = _rk_ast_value_threshold_effects!(
+    statements, response, eta.callable, eta, bindings, taken; coordinates)
+_rk_ast_value_threshold_effects!(statements, response, _callable, eta, bindings, taken;
+    coordinates=nothing) = (eta, ())
 function _rk_ast_value_threshold_effects!(statements, response,
-        ::typeof(_brm_threshold_eta), eta, bindings, taken)
+        ::typeof(_brm_threshold_eta), eta, bindings, taken; coordinates=nothing)
     location, columns, coefficients, n_cut = eta.args
     names = [_rk_value_expr!(bindings, column, taken) for column in columns]
     beta = _rk_value_expr!(bindings, coefficients, taken)
@@ -464,6 +466,8 @@ function _rk_ast_value_threshold_effects!(statements, response,
     push!(statements, Expr(:call, :.~, Expr(:ref, beta,
             Expr(:call, :(:), 1, length(names)), Expr(:call, :(:), 1, n_cut)),
         _rk_ast_dotted(:Normal, 0.0, 1.0)))
+    _rk_coordinate_record!(coordinates, (; kind=:threshold_coefficients,
+        declaration=beta, response, terms=Tuple(names), stages=n_cut))
     design = _rk_ast_fresh_name(string(response, "_threshold_X"), taken)
     push!(statements, Expr(:(=), design, Expr(:call, :hcat, names...)))
     effects = _rk_ast_fresh_name(string(response, "_threshold_effects"), taken)
@@ -779,7 +783,7 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
         _rk_emit_observation_source!(defs, stmts, bindings, taken,
             observation, distribution, plan.columns[observation.name]) && continue
         base = _rk_ast_value_distribution!(stmts, distribution.callable, observation,
-            distribution, bindings, taken)
+            distribution, bindings, taken; coordinates)
         if modifier !== nothing
             lower = modifier.lower === nothing ? -Inf :
                 _rk_value_expr!(bindings, _brm_prepare_expr(modifier.lower), taken)
