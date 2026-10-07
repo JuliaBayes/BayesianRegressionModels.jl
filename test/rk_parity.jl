@@ -1745,7 +1745,8 @@ end
     end
     artifact = BRM.emit_rk_artifact(brmi; case_id="parity-kernel-vector-cells")
     inputs = BRM.rk_artifact_inputs(artifact)
-    @test inputs[:pred_subject_count] == 3
+    # The reader's subject plate iterates the per-subject inputs themselves.
+    @test !haskey(inputs, :pred_subject_count)
     for name in (:t, :intercept, :slope, :y)
         @test inputs[Symbol(:pred_input_, name)] == getproperty(_kernel_vector_cols, name)
     end
@@ -1776,7 +1777,7 @@ end
     end
     artifact = BRM.emit_rk_artifact(brmi; case_id="parity-kernel-scalar-cells")
     inputs = BRM.rk_artifact_inputs(artifact)
-    @test inputs[:pred_subject_count] == 4
+    @test !haskey(inputs, :pred_subject_count)
     for name in (:x, :intercept, :y)
         column = inputs[Symbol(:pred_input_, name)]
         @test column == getproperty(_kernel_scalar_cols, name)

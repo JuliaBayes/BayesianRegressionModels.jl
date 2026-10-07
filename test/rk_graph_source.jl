@@ -120,9 +120,9 @@ end
         a, b = getfield(source_module, reader), getfield(replay_module, reader)
         @test graph_source_inventory(a.graph) == [(:plate, 0), (:scan, 1)]
         @test graph_source_inventory(b.graph) == graph_source_inventory(a.graph)
-        @test isequal(prepare(a)(3, data.x, 0.2),
+        @test isequal(prepare(a)(data.x, 0.2),
             reduce(vcat, [cumsum(x) .* 0.2 for x in data.x]))
-        @test isequal(prepare(b)(3, data.x, 0.2), prepare(a)(3, data.x, 0.2))
+        @test isequal(prepare(b)(data.x, 0.2), prepare(a)(data.x, 0.2))
         @test isequal(data, before)
     end
 end
@@ -139,17 +139,17 @@ end
         reader = only([BRM._rk_source_definition(d).name for d in emitted.defs
             if endswith(string(BRM._rk_source_definition(d).name), "_reader")])
         score = Core.eval(source_module,
-            :(ReactiveKernels.@kernel provider_score(count, x, a) = begin
-                values = $reader(count, x, a)
+            :(ReactiveKernels.@kernel provider_score(x, a) = begin
+                values = $reader(x, a)
                 total = sum(values)
                 return total
             end))
         @test graph_source_inventory(score.graph) == [(:plate, 0), (:scan, 1)]
         prepared = prepare_ad(prepare(score), AutoEnzyme(; mode=Enzyme.Reverse),
-            3, data.x, 0.2; active=:a)
+            data.x, 0.2; active=:a)
         derivative = sum(reduce(vcat, [cumsum(x) for x in data.x]))
         for a in (0.0, 0.2, -0.3)
-            value, gradient = ad_value_and_gradient(prepared, 3, data.x, a)
+            value, gradient = ad_value_and_gradient(prepared, data.x, a)
             @test value ≈ derivative * a atol=1e-14
             @test gradient ≈ derivative atol=1e-14
             @test isequal(data, before)

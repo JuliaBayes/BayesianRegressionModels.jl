@@ -451,19 +451,40 @@ function _rk_kernel_bind_calls(value, scope, bindings, taken)
     Expr(value.head, args...)
 end
 
+# A reader's cell keeps only the statements its value depends on. A plain
+# local nothing later reads is dropped; every other statement is kept whole.
+function _rk_live_cell(body, value)
+    live = _rk_source_symbols!(Set{Symbol}(), value)
+    cell = Any[value]
+    for statement in Iterators.reverse(body)
+        target = Meta.isexpr(statement, :(=)) ? first(statement.args) : nothing
+        target isa Symbol && !(target in live) && continue
+        _rk_source_symbols!(live, statement)
+        pushfirst!(cell, statement)
+    end
+    cell
+end
+
 # The reader is the authored cell as one subject plate. Each per-subject input
-# is a plate operand bound to the cell's own formal; a ragged join iterates its
-# subject row indices and gathers from its shared values; the cell's model
-# values stay shared. The subject cells are then flattened in subject order.
+# the cell reads is a plate operand bound to the cell's own formal; a ragged
+# join iterates its subject row indices and gathers from its shared values;
+# the model values the cell reads stay shared. The subject cells are then
+# flattened in subject order.
 function _rk_emit_kernel_reader!(defs, statements, bindings, taken, kernel, name, collected)
     reader_name = _rk_ast_fresh_name(string(name, "_reader"), taken)
-    cell = Any[_rk_kernel_bind_calls(statement, kernel.scope, bindings, taken)
-        for statement in kernel.body]
-    push!(cell, _rk_kernel_bind_calls(collected, kernel.scope, bindings, taken))
-    inputs = collect(zip(kernel.params, kernel.inputs))
+    cell = _rk_live_cell(
+        [_rk_kernel_bind_calls(statement, kernel.scope, bindings, taken)
+            for statement in kernel.body],
+        _rk_kernel_bind_calls(collected, kernel.scope, bindings, taken))
+    read = _rk_source_symbols!(Set{Symbol}(), cell)
+    inputs = [(param, input) for (param, input) in zip(kernel.params, kernel.inputs)
+        if param in read]
+    # A cell reading no per-subject input still iterates one for its subject axis.
+    isempty(inputs) && push!(inputs, (first(kernel.params), first(kernel.inputs)))
+    globals = filter(in(read), kernel.globals)
     gathered = unique(Symbol[input.source for (_, input) in inputs if input.kind === :gather])
     ports = unique(Symbol[[input.kind === :gather ? input.rows : input.source
-        for (_, input) in inputs]; gathered; kernel.globals])
+        for (_, input) in inputs]; gathered; globals])
     # The cell runs inline in the plate's closure. Every name the reader adds
     # avoids the cell's own names, so the cell neither captures nor rebinds a
     # reader local. Globals keep their names because the cell reads them so.
@@ -475,11 +496,13 @@ function _rk_emit_kernel_reader!(defs, statements, bindings, taken, kernel, name
     shared = Dict(source => source in cell_names ? fresh("$(source)_values") : source
         for source in gathered)
     formals = Symbol[[input.kind === :gather ? rows[param] : param for (param, input) in inputs];
-        [shared[source] for source in gathered]; kernel.globals]
-    # A reader port that no formal shadows stays clear of the cell's names.
-    port = Dict(p => p in cell_names && !(p in formals) ? fresh("$(p)_port") : p for p in ports)
+        [shared[source] for source in gathered]; globals]
+    # A reader port no formal shadows stays clear of the cell's names; a
+    # renamed shared source keeps one name as port and formal.
+    port = Dict(p => haskey(shared, p) ? shared[p] :
+        p in cell_names && !(p in formals) ? fresh("$(p)_port") : p for p in ports)
     operands = Any[[port[input.kind === :gather ? input.rows : input.source] for (_, input) in inputs];
-        [Expr(:call, :Ref, port[source]) for source in [gathered; kernel.globals]]]
+        [Expr(:call, :Ref, port[source]) for source in [gathered; globals]]]
     gathers = [Expr(:(=), param, Expr(:ref, shared[input.source], rows[param]))
         for (param, input) in inputs if input.kind === :gather]
     plate = Expr(:do, Expr(:call, Expr(:., :ReactiveKernels, QuoteNode(:plate)), operands...),
