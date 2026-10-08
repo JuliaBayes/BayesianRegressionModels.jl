@@ -61,7 +61,10 @@ const PINS = [
     # Current plain-function/array PPL surface, with data-only declaration inputs
     # retained before predictor inlining (computed membership axes; 606d76d0),
     # plus published live matrices (1t1v8zo) and callable array cells (0mr4zu5).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "db4f16aa0f3d768e376269429ec613691c743b13"),  # lower Cholesky + graph allocation + native callback AD repairs
+    # Contains db4f16aa (lower Cholesky + graph allocation + native callback AD
+    # repairs), e0930dcd (a declared-array element is a scalar location summand)
+    # and 712c227b (vector-of-vectors nested-plate observations).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "eaeacebc6c315f1229e077a2c1abb1bbd5bac1df"),  # main
 ]
 
 function main()
