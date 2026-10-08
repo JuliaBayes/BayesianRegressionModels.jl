@@ -101,8 +101,10 @@ end
             sum(logpdf.(Normal.(v.vc,0.8), data.y)) +
             sum(logpdf.(Normal.(v.k10,0.7), data.z))
     end
+    # `brm_coordinate_transport` does not yet address missing-value
+    # completions, so this mapping spells the compiled Stan names.
     mapping = [names[correlation] => "b_p_subject_L.1",
-        names[ia] => "age.y_mis.1", names[iw] => "weight.y_mis.1"]
+        names[ia] => "age_y_mis.1", names[iw] => "weight_y_mis.1"]
     append!(mapping, [names[scales[j]] => "b_p_subject_tau.$j" for j in 1:2])
     append!(mapping, [names[innovations[row,margin]] =>
         "b_p_subject_z_flat.$(margin+2*(row-1))" for row in 1:3 for margin in 1:2])
