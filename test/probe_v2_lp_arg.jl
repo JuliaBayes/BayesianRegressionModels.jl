@@ -334,10 +334,10 @@ end
             warn_pedantic = false).ok
     end
 
-    # Pre-existing upstream gap, shared with random-effect panels: the argument
-    # plate infers its outer size from the response, and StanBlocks' descriptor
-    # cannot size that ragged carrier (StanBlocks snag `stan-descriptor-18cffc24`).
-    @test_broken (brm_descriptor(sbs.plate); true)
+    descriptor = brm_descriptor(sbs.plate)
+    byname = Dict(output.name => output for output in descriptor.outputs)
+    @test byname[:y_gen].segments == [2, 2, 5]
+    @test byname[:y_likelihood].segments == [2, 2, 5]
 
     @testset "BridgeStan: both spellings equal the in-cell law and an oracle" begin
         if V2_RUN_BRIDGESTAN
