@@ -430,6 +430,16 @@ end
         @test isequal(data, saved)
     end
 
+    # Laws RKPPL observes in a nested cell at the pinned RK are nested; the
+    # rest keep the flattened route. Capability gaps, not refusals: a caller
+    # observation graph, a link-family shorthand and NegativeBinomial are
+    # refused inside a nested cell (ReactiveKernels snag rkppl-nested-one-931ad60f).
+    for law in (Normal, LocationScale, Poisson, Bernoulli, Binomial, Gamma)
+        @test BRM._rk_nested_law(law)
+    end
+    @test_broken BRM._rk_nested_law(NegativeBinomial)
+    @test_broken BRM._rk_nested_law(BernoulliLogit)
+
     # Withholding the per-subject response drops its nested plate and density;
     # withholding the other response keeps it.
     z = [0.2, -0.1]

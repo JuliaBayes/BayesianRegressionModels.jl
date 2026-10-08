@@ -24,6 +24,19 @@ _rk_kernel_column_name(column::NamedColumn) = name(column)
 _rk_observation_source_claimed(family) =
     _rk_observation_source!(Expr[], Pair{Symbol,Any}[], :_rk_claim_probe, family) !== nothing
 
+# The laws RKPPL observes entry by entry in a nested cell at the pinned RK
+# `eaeacebc` (each checked natively against its flattened form). Caller
+# observation graphs and RHS functions, the link-family shorthands and
+# NegativeBinomial are refused there and keep the flattened route until
+# ReactiveKernels snag rkppl-nested-one-931ad60f lands.
+const _RK_NESTED_FAMILIES = (Normal, LocationScale, LogNormal, Gamma, Exponential,
+    Weibull, Beta, Poisson, Bernoulli, Binomial)
+# `law` is the emitted family (SLIC's Student-t token is emitted as
+# `LocationScale`); `family` is the authored one a caller provider may claim.
+_rk_nested_law(law, family=law) =
+    any(admitted -> law === admitted, _RK_NESTED_FAMILIES) &&
+    !_rk_observation_source_claimed(family)
+
 # One observed array per subject. RKPPL observes it in nested subject and entry
 # plates: `cells` maps each value read per subject to the graph value holding
 # its per-subject cells; every other value is shared by all subjects.
@@ -218,13 +231,12 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
                 for i in eachindex(values))
             weight_name = weight === nothing ? nothing : Symbol(name, :_weight_, source)
             # A response holding one array per subject is observed per subject
-            # (RKPPL nested plates). A caller observation graph keeps the
-            # flattened route: RKPPL does not compose `LogDensity` kernels in a
-            # nested cell yet (ReactiveKernels snag rkppl-nested-one-931ad60f).
+            # (RKPPL nested plates) when RKPPL observes its law there.
             input = inputs[index]
+            law = _rk_kernel_observation_distribution((; callable, argument_names)).callable
             nested = input.kind === :element &&
                 get(columns, input.source, nothing) isa AbstractVector{<:AbstractVector} &&
-                !_rk_observation_source_claimed(callable)
+                _rk_nested_law(law, callable)
             push!(observations, (; source, param=lhs, callable,
                 arguments=values, argument_names, weight, weight_name, nested))
             continue
@@ -254,17 +266,17 @@ end
 # subject is observed per subject when every value its law reads is either
 # per subject (a kernel's cells, grouped data with one array per subject) or
 # shared (a number, scalar data, a scalar parameter), through BRM's
-# elementwise arithmetic. Returns the per-subject cells, or `nothing` to keep
-# the flattened route: response joins, bounds, weights, missing entries and
-# caller observation graphs (ReactiveKernels snag rkppl-nested-one-931ad60f)
-# are not observed per subject yet.
+# elementwise arithmetic, and RKPPL observes its law in a nested cell
+# (`_rk_nested_law`). Returns the per-subject cells, or `nothing` to keep
+# the flattened route: response joins, bounds, weights and missing entries are
+# not observed per subject yet.
 function _rk_nested_kernel_cells(observation, layout, kernels, columns, parameters)
     (layout.lengths !== nothing && layout.rows === nothing) || return nothing
     observation.modifier === nothing && observation.weight === nothing &&
         observation.missing_response === nothing || return nothing
     distribution = observation.distribution
     distribution isa _BRMPreparedExpr && isempty(distribution.kwargs) &&
-        !_rk_observation_source_claimed(distribution.callable) || return nothing
+        _rk_nested_law(distribution.callable) || return nothing
     cells = Dict{Symbol,Symbol}()
     context = (; kernels, columns, parameters, groups=length(layout.lengths))
     _rk_nested_law_cells!(cells, distribution.callable, distribution, context) || return nothing

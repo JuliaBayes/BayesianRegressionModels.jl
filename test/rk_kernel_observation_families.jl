@@ -180,8 +180,11 @@ end
     saved = deepcopy(data)
     brmi = PublicKernelObservationFamilies.build_binary(data)
     backend,problem = consumer_problem(brmi)
-    @test eltype(eltype(backend.plan.columns[:y])) === Int
-    @test isequal(backend.plan.columns[:y], data.y)
+    # This module's caller observation graph claims `bernoulli_logit`, so the
+    # response keeps the flattened route (ReactiveKernels snag
+    # rkppl-nested-one-931ad60f: no `LogDensity` kernel in a nested cell yet).
+    @test eltype(backend.plan.columns[:y]) === Int
+    @test backend.plan.columns[:y] == [0,1,1]
     @test coordinate_names(backend.model.layout) == [:a]
     oracle(u) = logpdf(Normal(0,0.7),u[1]) +
         sum(logpdf(Bernoulli(inv(1+exp(-x*u[1]))),y)
