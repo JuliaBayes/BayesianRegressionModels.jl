@@ -163,7 +163,6 @@ Base.maximum(::ScaledInvChiScale) = Inf
 # Its Stan translation for SBBRMI.
 BayesianRegressionModels._sb_stan_dist_name(::Type{<:ScaledInvChiScale}) =
     :scaled_inv_chi_scale
-# Like Stan's native families it is vectorized over its variate.
 StanBlocks.@deffun begin
     @lpxf scaled_inv_chi_scale_lpdf(tau::real, nu::real, s::real)::real =
         scaled_inv_chi_square_lpdf(square(tau), nu, s) + log(2.0 * tau)
@@ -171,23 +170,6 @@ StanBlocks.@deffun begin
         scaled_inv_chi_scale_lpdf(tau, nu, s)
     scaled_inv_chi_scale_rng(nu::real, s::real)::real =
         sqrt(scaled_inv_chi_square_rng(nu, s))
-
-    @lhs scaled_inv_chi_scale_lpdf(tau::vector[n], nu::real, s::real)::real =
-        scaled_inv_chi_square_lpdf(square(tau), nu, s) + sum(log(2.0 * tau))
-    scaled_inv_chi_scale_lpdfs(tau::vector[n], nu::real, s::real)::vector[n] = begin
-        lp::vector[n]
-        for i in 1:n
-            lp[i] = scaled_inv_chi_scale_lpdf(tau[i], nu, s)
-        end
-        lp
-    end
-    scaled_inv_chi_scale_rng(vector[n], nu::real, s::real)::vector[n] = begin
-        tau::vector[n]
-        for i in 1:n
-            tau[i] = scaled_inv_chi_scale_rng(nu, s)
-        end
-        tau
-    end
 end
 
 # The six persons and two exposure experiments of the source's final data
