@@ -58,8 +58,8 @@ rev = "c317cc003fc41c2d933c27dc80799141eebd434e"
 
 [sources.StanBlocks]
 url = "https://github.com/nsiccha/StanBlocks.jl"
-# Published nested ragged helper types; matches compiled consumer acceptance.
-rev = "e355994384d44b86108105264ae3e34e0f2a0625"
+# Published grouped-observation descriptor tracing and construction locking.
+rev = "1e0af724be4f7ee0dccfccf99187cf80e35b551b"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
