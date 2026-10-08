@@ -677,7 +677,7 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
         raw_response = o.lhs isa ExprColumn && getf(o.lhs) === ragged ?
             parent(parent(first(getargs(o.lhs)))) : o.response
         _rk_prepare_kernel_observed_values!(value_columns, taken, derived,
-            o.name, layout, raw_response)
+            o.name, layout, raw_response; port=_rk_kernel_input_port(kernels, o.name))
         _BRMPreparedObservation(o.name, o.lhs, o.distribution, o.response,
             modifier, o.weight, o.missing_response)
     end

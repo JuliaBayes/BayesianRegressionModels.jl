@@ -256,10 +256,16 @@ end
         y=[[0.6, 0.2], Float64[], [1.0, 0.8, 0.3]])
     saved = deepcopy(data)
     brmi = build(data)
-    emitted = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    plan = BRM._brm_rk_plan(brmi)
+    emitted = BRM._rk_emit_ast(plan)
     source = join((sprint(Base.show_unquoted, d) for d in emitted.defs), "\n")
-    @test occursin("loc_reader(loc_input_t, loc_input_dose, log_k)", source)
-    @test occursin("ReactiveKernels.plate(loc_input_t, loc_input_dose, Ref(log_k)) do t, dose, log_k", source)
+    # Each data input reaches the reader through its own column, and the
+    # per-subject response is bound as authored with no flattened copy
+    # (snag rk-emission-grou-9dac9bc6, todo 1jocaai).
+    @test sort!(collect(keys(plan.columns)); by=string) == [:dose, :t, :y]
+    @test isequal(plan.columns[:y], data.y)
+    @test occursin("loc_reader(t, dose, log_k)", source)
+    @test occursin("ReactiveKernels.plate(t, dose, Ref(log_k)) do t, dose, log_k", source)
     # The reader returns its subject cells; the per-subject response reads
     # them cell by cell, so the response is never flattened. The authored
     # `loc` stays a named value over the cells, planned only when queried.
@@ -317,11 +323,16 @@ end
             loc[i] = cells
         end
     end
-    shadowed = BRM._rk_emit_ast(BRM._brm_rk_plan(shadowing))
+    shadowing_plan = BRM._brm_rk_plan(shadowing)
+    shadowed = BRM._rk_emit_ast(shadowing_plan)
     source = join((sprint(Base.show_unquoted, d) for d in shadowed.defs), "\n")
     @test occursin("return cells_", source)
     @test occursin("y[i] .~ Normal.(loc_argument_y_1[i], sigma)",
         sprint(Base.show_unquoted, shadowed.main))
+    # The observed cell response keeps its kernel input port beside its own
+    # column; observed per subject, both hold the authored arrays.
+    @test sort!(collect(keys(shadowing_plan.columns)); by=string) == [:dose, :loc_input_y, :t, :y]
+    @test isequal(shadowing_plan.columns[:y], data.y)
     backend, problem = consumer_problem(shadowing)
     stan = consumer_stan(shadowing, "kernel-reader-shadowing")
     for u in points

@@ -209,7 +209,7 @@ end
         end
         emitted = BRM._rk_emit_ast(backend.plan)
         main = sprint(Base.show_unquoted, emitted.main)
-        @test occursin("y[i] .~ LogDensity.(y_scalar_logdensity_weighted, pred_input_w[i],", main)
+        @test occursin("y[i] .~ LogDensity.(y_scalar_logdensity_weighted, w[i],", main)
         @test isdisjoint(nested_weight_reads(emitted.main), (:s, :sigma, :delta))
         @test any(definition -> occursin("weighted_density = weight * density",
             sprint(Base.show_unquoted, definition)), emitted.defs)
