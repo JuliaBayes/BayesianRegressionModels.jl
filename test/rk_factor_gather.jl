@@ -71,3 +71,39 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
     end
     @test isequal(data, before)
 end
+
+@stestset "factor preparation stays graph-valued on the held-out value route" begin
+    data = (;
+        subject=["s1", "s2", "s3"],
+        weight=[60.0, 75.0, 90.0],
+        pk_idx=[collect(1.0:4.0), collect(1.0:3.0), Float64[]],
+        pk_y=[fill(0.2, 4), fill(0.3, 3), Float64[]],
+        ecg_subject=["s1", "s1", "s1", "s2", "s2", "s3", "s3"],
+        treatment=[1, 2, 1, 3, 2, 3, 1],
+        qt_y=[.1, .3, -.2, .5, .6, .2, -.1],
+    )
+    brmi = @brm data begin
+        qt_fixed ~ 1 + treatment
+        pk_fixed ~ 1 + weight + (1 | p | subject)
+        sigma ~ Exponential(1)
+        pred ~ kernel(pk_idx, pk_y, ragged(qt_y, ecg_subject),
+                ragged(qt_fixed, ecg_subject), pk_fixed) do idx, yy, qq, qt, pk
+            mu = fill(sum(qt) + pk, length(idx))
+            yy ~ normal(mu, sigma)
+            qq ~ normal(qt, sigma)
+            mu
+        end
+    end
+
+    artifact = BRM.emit_rk_artifact(
+        brmi; case_id="factor-gather-held-out-value", held_out=:pk_y)
+    translated = BRM.rk_translate_artifact(artifact)
+    built = build_kernel(translated)
+
+    @test Symbol("qt_fixed_treatment.1") in coordinate_names(built.layout)
+    # Preparation remains inside the emitted graph, as one data-only value.
+    # Wrapping it as an observation-shaped source hides it from positional
+    # gather validation on the held-out value route.
+    @test occursin("treatment_level = brm_prepared_indices", string(artifact.ast))
+    @test !occursin("treatment_level_source_values", string(artifact.ast))
+end
