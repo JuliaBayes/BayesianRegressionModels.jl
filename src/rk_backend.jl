@@ -473,8 +473,8 @@ function _rk_num_coefficients(plan::_RKStructuralPlan)
                 term.kind === :me
             total += 1
         elseif term.kind === :factor
-            if haskey(term.options, :design_columns)
-                total += length(term.options.design_columns)
+            if haskey(term.options, :index)
+                total += length(term.options.labels)
                 continue
             end
             width = length(_rk_grouping_levels(
@@ -3273,9 +3273,14 @@ Base.@nospecializeinfer function _rk_population_priors(@nospecialize(brmi::BRMI)
 end
 
 # Categorical preparation shares fitted level metadata with the other
-# backends. Each dummy is computed from the raw column in emitted source.
-
-function _rk_shared_factor_spec(term, target, columns, taken; cellmeans)
+# backends. The effect gathers its coefficients by each row's level
+# position, computed from the raw column in emitted source.
+#
+# `index_levels` is the declared level order: the reference first, then one
+# level per coefficient (cell means code the reference too). Every predictor
+# coding the same factor the same way shares one index column; a caller data
+# column of the same name is never mistaken for it.
+function _rk_shared_factor_spec(term, target, data, columns, taken; cellmeans)
     shared = _brm_population_columns(term; cellmeans)
     shared === nothing && error(
         "RK backend: predictor `$target` categorical term `$term` has unsupported geometry")
@@ -3283,18 +3288,29 @@ function _rk_shared_factor_spec(term, target, columns, taken; cellmeans)
     source = first(shared).source
     backing = term isa NamedColumn ? parent(term) : parent(only(getargs(term)))
     columns[source] = parent(backing)
-    names = Symbol[]
-    for column in shared
-        key = _rk_mint_generated!(taken, columns, string(target, "_", column.label, "_data"))
-        columns[key] = column.values
-        push!(names, key)
+    level_values = Tuple(_brm_population_level_value(c) for c in shared)
+    index_levels = cellmeans ? level_values :
+        (_brm_population_level_value(first(shared), 1), level_values...)
+    level_position(value) = something(findfirst(isequal(value), index_levels), 0)
+    positions = Int[level_position(value) for value in columns[source]]
+    0 in positions && error(
+        "RK backend: predictor `$target` categorical column `$source` holds a " *
+        "value outside its fitted levels $(repr(index_levels))")
+    base = string(first(shared).effect_block, "_level")
+    index = Symbol(base)
+    serial = 2
+    while index in taken || haskey(columns, index)
+        !haskey(data, index) && isequal(get(columns, index, nothing), positions) && break
+        index = Symbol(base, "_", serial)
+        serial += 1
     end
+    push!(taken, index)
+    columns[index] = positions
     block = source
-    # `level_values` names the fitted level of each column, in column order,
+    # `level_values` names the fitted level of each coefficient, in order,
     # for the cross-backend coordinate transport (src/coordinate_transport.jl).
     options = (; coding=cellmeans ? :fullrank : :subset, levels=:shared,
-        design_columns=Tuple(names), labels=Tuple(c.label for c in shared),
-        level_values=Tuple(_brm_population_level_value(c) for c in shared))
+        index, index_levels, labels=Tuple(c.label for c in shared), level_values)
     [_RKTermSpec(:factor, [source], options, block, block)]
 end
 
@@ -4921,7 +4937,7 @@ Base.@nospecializeinfer function _rk_plan_r2d2_prior(@nospecialize(brmi::BRMI), 
         # must ride share 0 with an explicit Normal (which keeps the
         # subset, like the PopulationPrior path).
         term.kind === :factor || continue
-        haskey(term.options, :design_columns) && continue
+        haskey(term.options, :index) && continue
         term.options.coding === :subset || continue
         haskey(overrides, term.addressee) && continue
         error("$prefix: predictor `$target` factor `$(term.addressee)` " *
@@ -5292,7 +5308,8 @@ Base.@nospecializeinfer function _rk_plan_predictor(@nospecialize(brmi::BRMI), c
         if block !== nothing
             cellmeans = block === cellmeans_block && !_brm_requests_treatment_coding(term)
             cellmeans && (cellmeans_block = nothing)
-            append!(terms, _rk_shared_factor_spec(term, target, columns, taken; cellmeans))
+            append!(terms, _rk_shared_factor_spec(term, target, context.data,
+                columns, taken; cellmeans))
             continue
         end
         append!(terms, _rk_term_specs(term, target, context.data,

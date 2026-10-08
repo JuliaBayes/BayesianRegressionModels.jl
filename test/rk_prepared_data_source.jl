@@ -128,7 +128,7 @@ end
     ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
     prepared = Symbol[]
     for term in only(backend.plan.predictors).terms
-        term.kind === :factor && append!(prepared, term.options.design_columns)
+        term.kind === :factor && push!(prepared, term.options.index)
         term.kind === :monotonic && append!(prepared, term.columns)
         term.kind === :hsgp && push!(prepared, term.options.group_index)
     end

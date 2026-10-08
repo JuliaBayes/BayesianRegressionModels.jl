@@ -78,10 +78,13 @@ _rk_ast_level_value(value::CA.CategoricalValue) = _rk_ast_level_value(CA.unwrap(
 _rk_ast_level_value(value::Symbol) = QuoteNode(value)
 _rk_ast_level_values(values) = Expr(:vect, (_rk_ast_level_value(value) for value in values)...)
 
-# Whole numerical calls may return arrays. State each fitted data result's
-# observation axis in source, so authoring does not mistake it for a scalar.
-# The range is geometry metadata; the values still come from the graph call.
-function _rk_source_data_axes(statements, columns)
+# Whole numerical calls may return arrays. RKPPL observes `y .~ ...` only over
+# a data column or a vector-shaped derived column, and lowers a data-only
+# undotted call as a scalar definition, so a computed response states its
+# observation axis in source. The range is geometry metadata; the values still
+# come from the graph call. Every other computed column keeps its plain
+# assignment: RKPPL reads it with its ordinary Julia axes.
+function _rk_source_data_axes(statements, columns, observed)
     taken = Set{Symbol}(keys(columns))
     foreach(statement -> _rk_source_symbols!(taken, statement), statements)
     out = Expr[]
@@ -91,7 +94,8 @@ function _rk_source_data_axes(statements, columns)
             continue
         end
         name, value = statement.args
-        if !(name isa Symbol && haskey(columns, name) && columns[name] isa AbstractVector)
+        if !(name isa Symbol && name in observed &&
+                haskey(columns, name) && columns[name] isa AbstractVector)
             push!(out, statement)
             continue
         end
@@ -140,6 +144,17 @@ function _rk_ast_statistical_call!(definitions, taken, name, args...;
     callee = _rk_ast_shared_definition!(definitions, taken, name,
         signature.args[2:end], deepcopy(body); kernel, head=template.head)
     Expr(:call, callee, args...)
+end
+
+# A named indicator column of a shared factor's `position`-th coefficient
+# level. Only variance-based shrinkage allocations read it; the effect itself
+# gathers coefficients by level (`_rk_ast_affine`).
+function _rk_ast_factor_indicator!(definitions, statements, taken, stem, term, position)
+    indicator = _rk_ast_fresh_name(string(stem, "_indicator"), taken)
+    push!(statements, Expr(:(=), indicator,
+        _rk_ast_statistical_call!(definitions, taken, :brm_factor_dummy, only(term.columns),
+            _rk_ast_level_value(term.options.level_values[position]); kernel=true)))
+    indicator
 end
 
 # A horseshoe coefficient, as StanBlocks' `_sb_horseshoe`: the local scale
@@ -238,9 +253,12 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol},
         elseif term.kind === :continuous
             push!(summands, Expr(:call, :.*, coefs[index], colref[index]))
         elseif term.kind === :factor
-            if haskey(term.options, :design_columns)
-                push!(summands, Expr(:call, :*,
-                    Expr(:call, :hcat, term.options.design_columns...), refref[index]))
+            if haskey(term.options, :index)
+                # Each row reads its level's coefficient; a treatment-coded
+                # reference level reads the leading zero.
+                coefficients = term.options.coding === :fullrank ? refref[index] :
+                    Expr(:call, :vcat, 0.0, refref[index])
+                push!(summands, Expr(:ref, coefficients, term.options.index))
                 continue
             end
             # Factor use is always bare `c[g]`; the LevelMap (full cover
@@ -334,8 +352,8 @@ end
 # thin-layer wide-block rule); the plan family symbol is the head.
 function _rk_ast_factor_prior(coef::Symbol, col::Symbol,
         options::NamedTuple, K::Int, family::Symbol, args::Tuple)
-    index = if haskey(options, :design_columns)
-        Expr(:call, :(:), 1, length(options.design_columns))
+    index = if haskey(options, :index)
+        Expr(:call, :(:), 1, length(options.labels))
     elseif options.coding === :fullrank
         Expr(:call, :levels, col)
     else
@@ -1135,12 +1153,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         if haskey(term.options, :zero_source)
             push!(stmts, Expr(:(=), only(term.columns),
                 Expr(:call, :zeros, Expr(:call, :length, term.options.zero_source))))
-        elseif term.kind === :factor && haskey(term.options, :design_columns)
-            for (name, level) in zip(term.options.design_columns, term.options.level_values)
-                call = _rk_ast_statistical_call!(defs, taken, :brm_factor_dummy,
-                    only(term.columns), _rk_ast_level_value(level); kernel=true)
-                push!(stmts, Expr(:(=), name, call))
-            end
+        elseif term.kind === :factor && haskey(term.options, :index)
+            index_sources[term.options.index] = (only(term.columns), term.options.index_levels)
         elseif term.kind in (:monotonic, :monotonic_summand)
             index_sources[only(term.columns)] = (term.options.source, term.options.levels)
         elseif term.kind === :hsgp && haskey(term.options, :group_index)
@@ -1251,7 +1265,9 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                     (:Normal, (0.0, _rk_ast_r2d2_scale(r2d2, term.addressee;
                         scalar=kind !== :factor,
                         variance_values=kind === :factor ?
-                            [Expr(:call, :var, name) for name in term.options.design_columns] :
+                            [Expr(:call, :var, _rk_ast_factor_indicator!(defs, stmts, taken,
+                                string(predictor.name, "_", label), term, j))
+                                for (j, label) in enumerate(term.options.labels)] :
                             [Expr(:call, :var, colactual[index])])))) : (:Normal, r2)
             end
             if kind === :factor
@@ -1364,7 +1380,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 string(predictor.link, "_", predictor.name)
             name = _rk_ast_population_component!(defs, stmts, taken,
                 _rk_ast_fresh_name(string("pop_", target), taken),
-                _rk_ast_fresh_name(string("X_", target), taken),
+                string("X_", target),
                 [entry[2] for entry in population], [entry[3] for entry in population])
             # The component owns each coefficient. Record the actual sampled
             # declaration and its index rather than its old caller-side name.
@@ -1460,7 +1476,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 fused_heads, union(Set(keys(plan.columns)), Set(Base.values(rename)),
                     Set(p.name for p in plan.predictors)), effects_name))
     end
-    values || (stmts = _rk_source_data_axes(stmts, plan.columns))
+    values || (stmts = _rk_source_data_axes(
+        stmts, plan.columns, _rk_observed_names(plan)))
     _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings),
         _rk_observed_names(plan))
 end

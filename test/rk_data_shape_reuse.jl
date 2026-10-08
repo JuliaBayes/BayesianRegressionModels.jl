@@ -44,6 +44,29 @@ nested(data) = @brm data begin
     end
     y ~ Normal(loc - reference, sigma)
 end
+# Superposed decaying pulses read at per-subject times: the events arrive on a
+# secondary row axis, and a fresh output buffer keeps the cell ordinary Julia.
+function pulse_sum(times, event_times, heights, rate)
+    out = zeros(length(times))
+    for (k, t) in enumerate(times), (te, h) in zip(event_times, heights)
+        t >= te && (out[k] += h * exp(-rate * (t - te)))
+    end
+    out
+end
+# An authored `@plate` value read by an in-cell observation: the location the
+# likelihood reads is the cell's own `loc[i]`, never a top-level response.
+in_cell(data) = @brm data begin
+    sigma ~ Exponential(0.9)
+    rate ~ 1 + x + (1 | p | subject)
+    effect(rate, Intercept) ~ Normal(0, 0.5)
+    effect(rate, x) ~ Normal(0, 0.5)
+    sd(:, p) ~ Exponential(0.9)
+    @plate for i in eachindex(rate)
+        loc[i] = pulse_sum(t[i], ragged(event_time, event_subject)[i],
+            ragged(height, event_subject)[i], exp(rate[i]))
+        y[i] ~ normal(loc[i], sigma)
+    end
+end
 end
 
 emitted_source(brmi) = begin
@@ -193,4 +216,77 @@ end
     oracle = grouped_kernel_oracle(names, scored,
         j -> (scored.y[j], only(scored.reference[j])))
     check_scored_density(own, names, oracle)
+end
+
+in_cell_data(subjects, reads, event_subject) = (; subject=subjects,
+    x=[0.3, -0.2, 0.5][eachindex(subjects)],
+    t=[[0.4k for k in 1:n] for n in reads],
+    y=[[0.2 + 0.05 * mod1(j + k, 4) for k in 1:n] for (j, n) in enumerate(reads)],
+    event_subject, event_time=[0.3 * mod1(r, 3) for r in eachindex(event_subject)],
+    height=[1.0 + 0.1r for r in eachindex(event_subject)])
+
+# The authored cell value per subject, flattened in subject order like the
+# in-cell response's rows. `b` holds each subject's group effect.
+in_cell_locations(data, u, b) = reduce(vcat, map(eachindex(data.subject)) do j
+    rows = findall(==(data.subject[j]), data.event_subject)
+    PublicShapeReuse.pulse_sum(data.t[j], data.event_time[rows], data.height[rows],
+        exp(u.intercept + u.slope * data.x[j] + b[j]))
+end; init=Float64[])
+
+@stestset "an in-cell observation's rows and events are bound data" begin
+    subjects = ["b", "c", "a"]
+    trained = in_cell_data(subjects, [3, 0, 4], ["a", "b", "b", "a"])
+    # More response rows and more events, with the event rows interleaved.
+    scored = in_cell_data(subjects, [5, 2, 1], ["c", "a", "b", "a", "c", "b"])
+    own, names = check_shape_reuse(PublicShapeReuse.in_cell, trained, scored)
+    index(n) = only(findall(==(Symbol(n)), names))
+    ia, ib = index("pop_rate.beta_pop.1"), index("pop_rate.beta_pop.2")
+    it, is = index("b_p_subject.tau.1"), index(:sigma)
+    iz = findall(n -> occursin(".z.", string(n)), names)
+    @test length(names) == 7 && length(iz) == 3
+    levels = sort(unique(scored.subject))
+    order = [findfirst(==(s), levels) for s in scored.subject]
+    oracle(u) = begin
+        tau, sigma = exp(u[it]), exp(u[is])
+        loc = in_cell_locations(scored, (; intercept=u[ia], slope=u[ib]), tau .* u[iz][order])
+        likelihood = sum(logpdf.(Normal.(loc, sigma), reduce(vcat, scored.y)))
+        logpdf(Normal(0, 0.5), u[ia]) + logpdf(Normal(0, 0.5), u[ib]) +
+            sum(logpdf.(Normal(), u[iz])) + logpdf(Exponential(0.9), tau) + u[it] +
+            logpdf(Exponential(0.9), sigma) + u[is] + likelihood
+    end
+    check_scored_density(own, names, oracle)
+end
+
+# A prediction cut requests the authored value by the name it was written
+# under, on the one retained build, for data with other subjects and rows.
+@stestset "an authored @plate value no response reads is a named graph value" begin
+    trained = in_cell_data(["b", "c", "a"], [3, 0, 4], ["a", "b", "b", "a"])
+    emitted = BRM._rk_emit_ast(BRM._brm_rk_plan(PublicShapeReuse.in_cell(trained)))
+    @test count(s -> Meta.isexpr(s, :(=)) && first(s.args) === :loc, emitted.main.args) == 1
+    retained = RKBRMI(PublicShapeReuse.in_cell(trained))
+    @test :loc in keys(retained.model.spec.ports)
+    names = coordinate_names(retained.model.layout)
+    u = zeros(length(names))
+    u[only(findall(==(Symbol("pop_rate.beta_pop.1")), names))] = -0.4
+    u[only(findall(==(Symbol("pop_rate.beta_pop.2")), names))] = 0.7
+    for scored in (in_cell_data(["b", "c", "a"], [5, 2, 1], ["c", "a", "b", "a", "c", "b"]),
+            in_cell_data(["c", "a"], [6, 3], ["a", "c", "a", "a", "c"]))
+        saved = deepcopy(scored)
+        columns = BRM.rk_translate_artifact(BRM.emit_rk_artifact(
+            PublicShapeReuse.in_cell(scored); case_id="authored-value")).columns
+        ports = Tuple(keys(columns))
+        # The group block holds one row per level, in level order.
+        levels = sort(unique(scored.subject))
+        b = [0.1, -0.2, 0.15][eachindex(levels)]
+        query = ReactiveKernels.prepare(retained.model.spec;
+            have=(:unconstrained, :b_p_subject, ports...), want=(:loc,),
+            bound=NamedTuple{ports}(Tuple(columns[p] for p in ports)))
+        value = query(u, reshape(b, :, 1))
+        value = value isa Tuple ? only(value) : value
+        expected = in_cell_locations(scored, (; intercept=-0.4, slope=0.7),
+            b[[findfirst(==(s), levels) for s in scored.subject]])
+        @test length(value) == sum(length, scored.y)
+        @test value == expected
+        @test isequal(scored, saved)
+    end
 end
