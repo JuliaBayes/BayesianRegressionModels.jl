@@ -767,6 +767,8 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
     end
     for completion in plan.completions
         _rk_emit_missing_value!(defs, stmts, bindings, taken, completion)
+        completion.nmissing > 0 && _rk_coordinate_record!(coordinates,
+            (; kind=:missing_value, target=completion.source))
     end
     # Keep authored deterministic values as transparent graph computations.
     # RKPPL's affine likelihood lowering otherwise inlines an authored value
