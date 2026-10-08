@@ -18,25 +18,6 @@ struct _RKPreparedKernelAssignment
 end
 _rk_kernel_column_name(column::NamedColumn) = name(column)
 
-# A caller provider claims its family's observation law by returning
-# non-`nothing`; it only appends to the collections it is handed, so a dry run
-# on scratch collections answers whether the law is the provider's graph.
-_rk_observation_source_claimed(family) =
-    _rk_observation_source!(Expr[], Pair{Symbol,Any}[], :_rk_claim_probe, family) !== nothing
-
-# The laws RKPPL observes entry by entry in a nested cell at the pinned RK
-# `eaeacebc` (each checked natively against its flattened form). Caller
-# observation graphs and RHS functions, the link-family shorthands and
-# NegativeBinomial are refused there and keep the flattened route until
-# ReactiveKernels snag rkppl-nested-one-931ad60f lands.
-const _RK_NESTED_FAMILIES = (Normal, LocationScale, LogNormal, Gamma, Exponential,
-    Weibull, Beta, Poisson, Bernoulli, Binomial)
-# `law` is the emitted family (SLIC's Student-t token is emitted as
-# `LocationScale`); `family` is the authored one a caller provider may claim.
-_rk_nested_law(law, family=law) =
-    any(admitted -> law === admitted, _RK_NESTED_FAMILIES) &&
-    !_rk_observation_source_claimed(family)
-
 # One observed array per subject. RKPPL observes it in nested subject and entry
 # plates: `cells` maps each value read per subject to the graph value holding
 # its per-subject cells; every other value is shared by all subjects.
@@ -70,17 +51,9 @@ _rk_ast_index_cells(value::Expr, cells, index) =
 _rk_ast_index_cells(value, cells, index) = value
 
 # A nested observation reads its own per-subject cells, so the row alignment
-# of a flattened response does not apply; a caller observation graph never
-# reaches it (see `nested` in `_rk_prepare_kernel_value`).
+# of a flattened response does not apply.
 _rk_align_kernel_observation_arguments!(defs, statements, bindings, taken, plan,
     observation::_RKNestedObservation, distribution) = distribution
-function _rk_emit_observation_source!(defs, statements, bindings, taken,
-        observation::_RKNestedObservation, distribution, response)
-    _rk_observation_source_claimed(distribution.callable) && error(
-        "RK backend: internal: per-subject response `$(observation.name)` " *
-        "reached the caller observation graph route")
-    false
-end
 
 function _rk_kernel_observation_callee(scope, expression, kernel)
     Meta.isexpr(expression, :call) || error(
@@ -231,12 +204,10 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
                 for i in eachindex(values))
             weight_name = weight === nothing ? nothing : Symbol(name, :_weight_, source)
             # A response holding one array per subject is observed per subject
-            # (RKPPL nested plates) when RKPPL observes its law there.
+            # (RKPPL nested plates).
             input = inputs[index]
-            law = _rk_kernel_observation_distribution((; callable, argument_names)).callable
             nested = input.kind === :element &&
-                get(columns, input.source, nothing) isa AbstractVector{<:AbstractVector} &&
-                _rk_nested_law(law, callable)
+                get(columns, input.source, nothing) isa AbstractVector{<:AbstractVector}
             push!(observations, (; source, param=lhs, callable,
                 arguments=values, argument_names, weight, weight_name, nested))
             continue
@@ -263,24 +234,45 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
 end
 
 # A formula observation of kernel output whose response holds one array per
-# subject is observed per subject when every value its law reads is either
-# per subject (a kernel's cells, grouped data with one array per subject) or
-# shared (a number, scalar data, a scalar parameter), through BRM's
-# elementwise arithmetic, and RKPPL observes its law in a nested cell
-# (`_rk_nested_law`). Returns the per-subject cells, or `nothing` to keep
-# the flattened route: response joins, bounds, weights and missing entries are
-# not observed per subject yet.
+# subject is observed per subject when every value its law and bounds read is
+# either per subject (a kernel's cells, grouped data with one array per
+# subject) or shared (a number, scalar data, a scalar parameter), through BRM's
+# elementwise arithmetic. Returns the per-subject cells, or `nothing` to keep
+# the flattened route: a response join (authored as one flat column), weights,
+# missing entries, keyword laws and arguments with one value per flattened row.
 function _rk_nested_kernel_cells(observation, layout, kernels, columns, parameters)
     (layout.lengths !== nothing && layout.rows === nothing) || return nothing
-    observation.modifier === nothing && observation.weight === nothing &&
-        observation.missing_response === nothing || return nothing
-    distribution = observation.distribution
-    distribution isa _BRMPreparedExpr && isempty(distribution.kwargs) &&
-        _rk_nested_law(distribution.callable) || return nothing
+    observation.weight === nothing && observation.missing_response === nothing ||
+        return nothing
+    modifier = observation.modifier
+    distribution = modifier === nothing ? observation.distribution :
+        _brm_prepare_expr(modifier.base)
+    distribution isa _BRMPreparedExpr && isempty(distribution.kwargs) || return nothing
     cells = Dict{Symbol,Symbol}()
-    context = (; kernels, columns, parameters, groups=length(layout.lengths))
+    context = (; kernels, columns, parameters, name=observation.name, lengths=layout.lengths)
     _rk_nested_law_cells!(cells, distribution.callable, distribution, context) || return nothing
+    modifier === nothing && return cells
+    all(bound -> bound === nothing ||
+            _rk_nested_cells!(cells, _brm_prepare_expr(bound), context),
+        (modifier.lower, modifier.upper)) || return nothing
     cells
+end
+
+# Data bounds read per subject are validated as the flattened route validates
+# them, on their concatenated values.
+function _rk_validate_nested_bounds(observation, data)
+    modifier = observation.modifier
+    modifier === nothing && return
+    bounds = (modifier.lower, modifier.upper)
+    all(b -> b === nothing || b isa Real || (b isa NamedColumn && parent(b) isa DataColumn),
+        bounds) || return
+    flat = Dict{Symbol,Any}(name(b) => brm_flatten_cells(parent(parent(b))) for b in bounds
+        if b isa NamedColumn && parent(parent(b)) isa AbstractVector{<:AbstractVector})
+    materialize = modifier.kind === :interval_censored ?
+        _brm_materialize_interval_response : _brm_materialize_bounded_response
+    materialize(modifier, observation.name, brm_flatten_cells(observation.response),
+        merge(Dict{Symbol,Any}(data), flat); prefix="RK backend")
+    nothing
 end
 
 _rk_nested_law_cells!(cells, callable, distribution, context) =
@@ -304,7 +296,7 @@ function _rk_nested_cells!(cells, value::_BRMPreparedRef, context)
     end
     data = get(context.columns, value.name, nothing)
     if data isa AbstractVector{<:AbstractVector}
-        length(data) == context.groups || return false
+        _rk_check_argument_groups(context.name, value.name, data, context.lengths)
         cells[value.name] = value.name
         return true
     end
@@ -379,14 +371,22 @@ end
 _rk_observation_argument_rows!(defs, statements, taken, observation, layout,
     geometry, argument, raw) = argument
 
+# Grouped argument data broadcasts against its response subject by subject: one
+# array per subject, each as long as the response's or a single value.
+function _rk_check_argument_groups(response, argument, raw, expected)
+    lengths = length.(raw)
+    length(lengths) == length(expected) &&
+        all(pair -> first(pair) == last(pair) || first(pair) == 1,
+            zip(lengths, expected)) || error(
+        "RK backend: response `$response` argument `$argument` " *
+        "has group lengths $lengths; expected $expected")
+    nothing
+end
+
 function _rk_observation_argument_rows!(defs, statements, taken, observation, layout,
         geometry, argument, raw::AbstractVector{<:AbstractVector})
     lengths = length.(raw)
-    length(lengths) == length(layout.lengths) &&
-        all(pair -> first(pair) == last(pair) || first(pair) == 1,
-            zip(lengths, layout.lengths)) || error(
-        "RK backend: response `$(observation.name)` argument `$(argument.name)` " *
-        "has group lengths $(length.(raw)); expected $(layout.lengths)")
+    _rk_check_argument_groups(observation.name, argument.name, raw, layout.lengths)
     name = _rk_ast_fresh_name("$(observation.name)_rows_$(argument.name)", taken)
     source = argument.name
     reader = _rk_ast_fresh_name("$(name)_reader", taken)

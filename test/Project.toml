@@ -76,9 +76,10 @@ rev = "0194dce08e986ff17fd5a788bb315c6431b7858e"
 url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # RK main: contains db4f16aa (lower Cholesky, graph allocation bounds,
 # native prepared-callback Reverse), e0930dcd (a declared-array element is a
-# scalar location summand) and 712c227b (vector-of-vectors nested-plate
-# observations).
+# scalar location summand), 712c227b (vector-of-vectors nested-plate
+# observations) and 9e425eda (LogDensity laws, link families, per-index
+# arithmetic and derived responses in nested plate cells).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "eaeacebc6c315f1229e077a2c1abb1bbd5bac1df"
+rev = "15ea43645fc6b56f9198f9a46e58161975d7c4a6"

@@ -180,11 +180,10 @@ end
     saved = deepcopy(data)
     brmi = PublicKernelObservationFamilies.build_binary(data)
     backend,problem = consumer_problem(brmi)
-    # This module's caller observation graph claims `bernoulli_logit`, so the
-    # response keeps the flattened route (ReactiveKernels snag
-    # rkppl-nested-one-931ad60f: no `LogDensity` kernel in a nested cell yet).
-    @test eltype(backend.plan.columns[:y]) === Int
-    @test backend.plan.columns[:y] == [0,1,1]
+    # One array per subject, observed per subject through this module's
+    # caller observation graph (RKPPL nested plates).
+    @test eltype(eltype(backend.plan.columns[:y])) === Int
+    @test isequal(backend.plan.columns[:y], data.y)
     @test coordinate_names(backend.model.layout) == [:a]
     oracle(u) = logpdf(Normal(0,0.7),u[1]) +
         sum(logpdf(Bernoulli(inv(1+exp(-x*u[1]))),y)
@@ -218,7 +217,8 @@ end
         PublicKernelObservationFamilies.build_relative_bound(data)
     backend, problem = consumer_problem(brmi)
     @test coordinate_names(backend.model.layout) == [:a,:sigma]
-    @test backend.plan.columns[:y] == [0.1,0.4,-0.2]
+    # A cell's per-subject response is observed per subject; flat data stays flat.
+    @test isequal(backend.plan.columns[:y], data.y)
     oracle(u) = begin
         a,sigma = u[1],exp(u[2])
         rows = route !== :direct ? zip(data.x,data.reference,data.y) :
@@ -238,7 +238,9 @@ end
         case_id="relative-normal-graph-$route"))
     main = sprint(Base.show_unquoted, BRM._rk_emit_ast(backend.plan).main)
     records = observation_graph_recipes(kernel_graph(build_kernel(bound).spec))
-    scalar = filter(record->record.depth==1,records)
+    # The scalar law runs inside the observation plate, which a per-subject
+    # response nests inside its subject plate.
+    scalar = filter(record->record.depth==(route === :direct ? 1 : 2),records)
     println("OBSERVATION_BUILT_SCALAR_RECIPES=",scalar)
     @test any(record->occursin("relative_residual",record.outputs) &&
         isequal(record.source,:(((value-location)+reference)/scale)),scalar)
@@ -247,7 +249,7 @@ end
     @test any(record->occursin("relative_logdensity",record.outputs) &&
         isequal(record.source,:((-0.5*log(2*pi)-relative_log_scale)-
             0.5*relative_residual*relative_residual)),scalar)
-    @test occursin("y .~ LogDensity.(y_scalar_logdensity,", main)
+    @test occursin((route === :direct ? "y" : "y[i]") * " .~ LogDensity.(y_scalar_logdensity,", main)
     for retired in ("y_logdensity_reader", "brm_logdensity_value", "y_law_argument")
         @test !occursin(retired, main)
     end
