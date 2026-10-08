@@ -140,8 +140,8 @@ end
             if endswith(string(BRM._rk_source_definition(d).name), "_reader")])
         score = Core.eval(source_module,
             :(ReactiveKernels.@kernel provider_score(x, a) = begin
-                values = $reader(x, a)
-                total = sum(values)
+                cells = $reader(x, a)
+                total = sum(brm_flatten_cells(cells))
                 return total
             end))
         @test graph_source_inventory(score.graph) == [(:plate, 0), (:scan, 1)]
