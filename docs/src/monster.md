@@ -33,9 +33,12 @@ holds that updated copy, the verbatim data and the comparison script.
 
 Downloads, generated from the declaration below while these docs were built:
 
-- [`monster.stan`](downloads/monster.stan) — the generated Stan program;
-- [`monster.data.json`](downloads/monster.data.json) — its data in Stan's JSON
-  format.
+```@raw html
+<ul>
+<li><a href="downloads/monster.stan" target="_self" download><code>monster.stan</code></a>: the generated Stan program;</li>
+<li><a href="downloads/monster.data.json" target="_self" download><code>monster.data.json</code></a>: its data in Stan's JSON format.</li>
+</ul>
+```
 
 The data use Stan tuples, which need Stan 2.33 or later; the pair was checked
 with BridgeStan 2.9 (Stan 2.39).
