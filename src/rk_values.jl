@@ -752,6 +752,8 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
     end
     for completion in plan.completions
         _rk_emit_missing_value!(defs, stmts, bindings, taken, completion)
+        completion.nmissing > 0 && _rk_coordinate_record!(coordinates,
+            (; kind=:missing_value, target=completion.source))
     end
     # Keep authored deterministic values as transparent graph computations.
     # RKPPL's affine likelihood lowering otherwise inlines an authored value
@@ -808,6 +810,8 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
     foreach(statement -> _rk_source_assignments!(computed, statement), stmts)
     stmts = _rk_order_value_statements(stmts, setdiff(Set(keys(plan.columns)), computed), defs;
         observed=_rk_observed_names(plan))
+    authored = union(Set(a.name for a in plan.assignments),
+        (p.name for p in plan.regression.predictors))
     _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings),
-        _rk_observed_names(plan))
+        _rk_observed_names(plan); retained=authored)
 end

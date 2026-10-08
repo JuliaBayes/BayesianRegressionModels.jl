@@ -188,7 +188,9 @@ target (`_rk_submodel_rhs!` / `_sb_submodel_rhs!`). A provider declaration
 declaration owns under StanBlocks' submodel name `<target>_<path>` (path
 segments joined by `_`), element by element; a simplex declaration pairs as a
 `:simplex` block and an LKJ Cholesky factor as a correlation factor. Name both
-providers' declarations identically for this pairing. Any coordinate outside
+providers' declarations identically for this pairing. Missing-value completions
+pair RK `<column>.y_mis.<i>` with Stan `<column>_y_mis.<i>` when the completed
+column feeds a downstream likelihood. Any coordinate outside
 that coverage — on either side — is an error naming it; there is no partial
 transport. An `SBBRMI` built with exact total-effect blocks or centered groups
 has no sampled counterpart for the absorbed or centered coordinates; build it
@@ -280,12 +282,12 @@ function _brm_transport_validate(rk_names, stan, pairs, correlations, simplexes)
               "`Dirichlet` simplexes, ordinary-prior " *
               "population and categorical coefficients, plain non-centered random-effect " *
               "blocks with sampled scales, ungrouped HSGP terms, monotonic " *
-              "terms, and declarations a submodel provider scopes under its " *
-              "target (RK `<target>.<path>` with SB `<target>_<path>`). Other " *
+              "terms, submodel provider declarations, and missing-value " *
+              "completions (RK `<column>.y_mis` with SB `<column>_y_mis`). Other " *
               "constructs (R2D2/horseshoe priors, smooths, GP, grouped or " *
               "hyper-predicted HSGP, AR, measurement error, multi-membership " *
-              "and stratified groups, centered or exact-total SB emissions, " *
-              "completed covariates) are not paired yet.")
+              "and stratified groups, centered or exact-total SB emissions) " *
+              "are not paired yet.")
     end
     ordered = sort(pairs; by=pair -> rk_pos[pair.rk])
     permutation = Vector{Int}(undef, length(stan))
@@ -666,14 +668,14 @@ function _brm_transport_scoped(name::Symbol)
     (Symbol(join(parts[1:(k - 1)], ".")), Tuple(index))
 end
 
-# A downstream submodel provider's declarations. RK scopes each one under the
-# provider's target (`loc.inner.slope`); StanBlocks inlines the same submodel
-# under `_`-joined names (`loc_inner_slope`) owned by the same target
-# declaration. Only outputs that declaration owns are candidates, and an RK
-# declaration without one stays unpaired, so the validator names it.
-function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:submodel},
-        record, rk, d, stan, stan_pos)
-    target = record.target
+# A provider's or missing completion's scoped declarations. RK scopes each
+# under its target (`loc.inner.slope`, `age.y_mis`); StanBlocks inlines the
+# submodel under `_`-joined names owned by that target declaration. Only
+# sampled outputs that declaration owns are candidates; the validator names
+# any RK declaration without a matching sampled SB output.
+function _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
+        kind::Symbol, target::Symbol, rk, d, stan, stan_pos;
+        only_declaration::Union{Nothing,Symbol}=nothing)
     owned = Dict{String,BRMOutput}(String(o.name) => o for o in d.outputs
         if !isnothing(o.declaration) && o.declaration.target === target &&
             o.kind === :parameter)
@@ -686,6 +688,7 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:submodel},
         scoped = _brm_transport_scoped(rk_name)
         isnothing(scoped) && continue
         declaration, index = scoped
+        !isnothing(only_declaration) && declaration !== only_declaration && continue
         haskey(entries, declaration) || push!(declarations, declaration)
         push!(get!(entries, declaration, Any[]), (; name=rk_name, index, transform))
     end
@@ -698,7 +701,7 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:submodel},
         length(transforms) == 1 || error(
             "brm_coordinate_transport: RK declaration `$declaration` mixes layout " *
             "transforms $(Tuple(transforms))")
-        address = (; kind=:submodel, target, declaration)
+        address = (; kind, target, declaration)
         if only(transforms) === :simplex
             _brm_transport_simplex!(pairs, simplexes, address,
                 [e.name for e in elements], declaration, output, stan, d.plan)
@@ -728,6 +731,19 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:submodel},
             end
         end
     end
+end
+
+function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:submodel},
+        record, rk, d, stan, stan_pos)
+    _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
+        :submodel, record.target, rk, d, stan, stan_pos)
+end
+
+function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:missing_value},
+        record, rk, d, stan, stan_pos)
+    _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
+        :missing_value, record.target, rk, d, stan, stan_pos;
+        only_declaration=Symbol(record.target, ".y_mis"))
 end
 
 # The Stan declaration type and RK layout transform of each vector family the

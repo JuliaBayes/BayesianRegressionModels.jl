@@ -101,15 +101,18 @@ end
             sum(logpdf.(Normal.(v.vc,0.8), data.y)) +
             sum(logpdf.(Normal.(v.k10,0.7), data.z))
     end
-    # `brm_coordinate_transport` does not yet address missing-value
-    # completions, so this mapping spells the compiled Stan names.
-    mapping = [names[correlation] => "b_p_subject_L.1",
-        names[ia] => "age_y_mis.1", names[iw] => "weight_y_mis.1"]
-    append!(mapping, [names[scales[j]] => "b_p_subject_tau.$j" for j in 1:2])
-    append!(mapping, [names[innovations[row,margin]] =>
-        "b_p_subject_z_flat.$(margin+2*(row-1))" for row in 1:3 for margin in 1:2])
-    append!(mapping, [names[coefficients[j]] => "pop_log_Vc_beta_pop.$j" for j in 1:3])
-    append!(mapping, [names[coefficients[j+3]] => "pop_log_k10_beta_pop.$j" for j in 1:2])
+    sb = SBBRMI(brmi; mod=PublicMissingValuePredictors, total_groups=())
+    transport = brm_coordinate_transport(backend, sb,
+        BridgeStan.param_unc_names(stan.model))
+    mapping = [pair.rk => pair.stan for pair in transport.pairs]
+    completions = filter(pair -> pair.address.kind === :missing_value,
+        transport.pairs)
+    @test Set(pair.rk => pair.stan for pair in completions) ==
+        Set([Symbol("age.y_mis.1") => "age_y_mis.1",
+            Symbol("weight.y_mis.1") => "weight_y_mis.1"])
+    physical = brm_check_coordinate_transport(transport, backend, stan.model, u)
+    @test physical.pairs == N - 1
+    @test physical.factors == 1
     ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
     bound = ext._rk_translated_plan(backend.plan)
     pointwise = prepare_query(backend.model, bound, :pointwise)
