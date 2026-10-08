@@ -32,10 +32,10 @@ function _rk_ast_r2d2m2_population!(definitions, statements, taken, predictors, 
                 (haskey(t.options, :labels) && label in t.options.labels))
             position = term.kind === :factor ?
                 only(findall(==(label), term.options.labels)) : nothing
+            stem = string(target, "_", label, "_r2d2")
             column = position === nothing ? only(term.columns) :
-                term.options.design_columns[position]
-            variance = _rk_ast_r2d2m2_variance!(statements, taken,
-                string(target, "_", label, "_r2d2"), column)
+                _rk_ast_factor_indicator!(definitions, statements, taken, stem, term, position)
+            variance = _rk_ast_r2d2m2_variance!(statements, taken, stem, column)
             scale = _rk_ast_fresh_name(string(target, "_", label, "_r2d2_scale"), taken)
             push!(statements, Expr(:(=), scale,
                 _rk_ast_r2d2m2_scale!(definitions, taken, reference, phi, r2, share, variance)))
@@ -43,7 +43,7 @@ function _rk_ast_r2d2m2_population!(definitions, statements, taken, predictors, 
                 population_priors[(target, term.addressee)] = (:Normal, (0.0, scale))
             else
                 scales = get!(design_scales, term.addressee) do
-                    Union{Nothing,Symbol}[nothing for _ in term.options.design_columns]
+                    Union{Nothing,Symbol}[nothing for _ in term.options.labels]
                 end
                 scales[position] = scale
             end
@@ -57,8 +57,10 @@ function _rk_ast_r2d2m2_population!(definitions, statements, taken, predictors, 
             contrast.n_contrasts == 0 && continue
             term = only(t for t in predictor.terms if t.kind === :factor &&
                 t.addressee === contrast.address)
-            columns = if haskey(term.options, :design_columns)
-                term.options.design_columns
+            columns = if haskey(term.options, :index)
+                [_rk_ast_factor_indicator!(definitions, statements, taken,
+                    string(target, "_", contrast.address, "_r2d2_", position), term, position)
+                    for position in eachindex(term.options.labels)]
             else
                 col = only(term.columns)
                 K = contrast.n_contrasts + 1
