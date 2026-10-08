@@ -120,8 +120,8 @@ end
         a, b = getfield(source_module, reader), getfield(replay_module, reader)
         @test graph_source_inventory(a.graph) == [(:plate, 0), (:scan, 1)]
         @test graph_source_inventory(b.graph) == graph_source_inventory(a.graph)
-        @test isequal(prepare(a)(data.x, 0.2),
-            reduce(vcat, [cumsum(x) .* 0.2 for x in data.x]))
+        # The reader returns its subject cells; formula terms flatten them.
+        @test isequal(prepare(a)(data.x, 0.2), [cumsum(x) .* 0.2 for x in data.x])
         @test isequal(prepare(b)(data.x, 0.2), prepare(a)(data.x, 0.2))
         @test isequal(data, before)
     end
