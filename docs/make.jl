@@ -14,6 +14,7 @@ const GENERATED_EXAMPLE_PAGES = [
     joinpath(@__DIR__, "src", "renewal.md"),
     joinpath(@__DIR__, "src", "seal-brm.md"),
     joinpath(@__DIR__, "src", "state-space-models.md"),
+    joinpath(@__DIR__, "src", "monster.md"),
     joinpath(@__DIR__, "src", "adaptive-centering.md"),
     joinpath(@__DIR__, "src", "eight-schools-centering.md"),
     joinpath(@__DIR__, "src", "radon-centering.md"),
@@ -69,6 +70,7 @@ makedocs(
         "Epidemic renewal models" => "renewal.md",
         "Grey-seal IPM" => "seal-brm.md",
         "State-space models" => "state-space-models.md",
+        "Monster PBPK model" => "monster.md",
         "Adaptive centering" => [
             "Motorcycle HSGP" => "adaptive-centering.md",
             "Eight schools" => "eight-schools-centering.md",
@@ -110,6 +112,11 @@ BRMDocsComparisons.validate_required_stan_outputs(
 )
 
 BRMDocsComparisons.validate_required_stan_outputs(
+    joinpath(@__DIR__, "build", ".documenter", "monster.md"),
+    (:monster_brmi,),
+)
+
+BRMDocsComparisons.validate_required_stan_outputs(
     joinpath(@__DIR__, "build", ".documenter", "adaptive-centering.md"),
     (:adaptive_motorcycle_model,),
 )
@@ -141,6 +148,15 @@ let src = joinpath(@__DIR__, "src", "public")
         cp(src, dst; force=true)
         @info "Copied public assets to $dst"
     end
+end
+
+# The Monster page links its generated Stan program and data for download;
+# write both from the same reproduction source the page renders.
+let mod = Module(:MonsterDownloads)
+    Core.eval(mod, :(using BayesianRegressionModels, Distributions, StanBlocks))
+    Base.include(mod, joinpath(@__DIR__, "..", "research", "monster", "reproduce.jl"))
+    Base.invokelatest(getfield(mod, :write_monster_stan_files),
+        joinpath(@__DIR__, "build", ".documenter", "public", "downloads"))
 end
 
 DocumenterVitepress.build_docs(joinpath(@__DIR__, "build"))

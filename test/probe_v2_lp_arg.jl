@@ -20,7 +20,7 @@
 using Test
 using BayesianRegressionModels
 using StanBlocks
-using Distributions: Exponential
+using Distributions: Exponential, Normal
 
 const V2_RUN_BRIDGESTAN = get(ENV, "BRM_KERNEL_RUNTIME", "1") != "0"
 const V2_N = 6
@@ -266,6 +266,118 @@ end
             @test isfinite(lp)
             @test length(g) == dim
             @test all(isfinite, g)
+        else
+            @info "Skipping BridgeStan runtime gate (BRM_KERNEL_RUNTIME=0)"
+        end
+    end
+end
+
+# snag `sb-emission-of-p-2866de56`: a formula-level observation argument that
+# combines the kernel result with ragged data (`loc - reference`) lowered only
+# when some kernel argument carried a random-effect bucket. A no-random-effects
+# panel's kernel result went unrecognised, so the per-subject argument plate
+# sliced `reference` alone and StanBlocks rejected `loc - <cell>` as arithmetic
+# on a whole RaggedVector. `@plate for` and `kernel(...) do` both lower to the
+# same kernel IR, so both spellings failed and both must now equal the in-cell
+# law exactly, including an empty subject.
+const V2_ARG_DATA = (;
+    t         = [[0.5, 1.5], Float64[], [0.7, 1.1, 2.0]],
+    dose      = [1.0, 2.0, 1.5],
+    y         = [[0.6, 0.2], Float64[], [1.0, 0.8, 0.3]],
+    reference = [[0.1, 0.0], Float64[], [0.2, -0.1, 0.05]],
+)
+
+v2_arg_plate(data) = @brm data begin
+    log_k ~ Normal(0, 1)
+    sigma ~ Exponential(1)
+    @plate for i in eachindex(t)
+        loc[i] = dose[i] .* exp.(-exp(log_k) .* t[i])
+    end
+    y ~ Normal(loc - reference, sigma)
+end
+
+v2_arg_kernel(data) = @brm data begin
+    log_k ~ Normal(0, 1)
+    sigma ~ Exponential(1)
+    loc ~ kernel(t, dose) do ts, d
+        d .* exp.(-exp(log_k) .* ts)
+    end
+    y ~ Normal(loc - reference, sigma)
+end
+
+v2_arg_scaled(data) = @brm data begin
+    log_k ~ Normal(0, 1)
+    sigma ~ Exponential(1)
+    @plate for i in eachindex(t)
+        loc[i] = dose[i] .* exp.(-exp(log_k) .* t[i])
+    end
+    y ~ Normal(2 * loc, sigma)
+end
+
+v2_arg_in_cell(data) = @brm data begin
+    log_k ~ Normal(0, 1)
+    sigma ~ Exponential(1)
+    @plate for i in eachindex(t)
+        loc[i] = dose[i] .* exp.(-exp(log_k) .* t[i])
+        y[i] ~ normal(loc[i] - reference[i], sigma)
+    end
+end
+
+@testset "kernel(...) — no-random-effects panel: grouped observation arguments" begin
+    builds = (; plate = v2_arg_plate, kernel = v2_arg_kernel,
+        scaled = v2_arg_scaled, in_cell = v2_arg_in_cell)
+    sbs = map(build -> SBBRMI(build(V2_ARG_DATA); mod = @__MODULE__, total_groups = ()),
+        builds)
+
+    @testset "transpile + stanc: $label" for (label, sb) in pairs(sbs)
+        @test StanBlocks.stanc_check(StanBlocks.stan_code(sb.model);
+            warn_pedantic = false).ok
+    end
+
+    # Pre-existing upstream gap, shared with random-effect panels: the argument
+    # plate infers its outer size from the response, and StanBlocks' descriptor
+    # cannot size that ragged carrier (StanBlocks snag `stan-descriptor-18cffc24`).
+    @test_broken (brm_descriptor(sbs.plate); true)
+
+    @testset "BridgeStan: both spellings equal the in-cell law and an oracle" begin
+        if V2_RUN_BRIDGESTAN
+            using LogDensityProblems, BridgeStan
+            using Distributions: logpdf
+            cache = joinpath(tempdir(), "brm-v2-observation-arguments")
+            isdir(cache) || mkpath(cache)
+            problem(sb) = StanBlocks.stan_instantiate(sb.model; path = joinpath(
+                cache, string(hash(StanBlocks.stan_code(sb.model))) * ".stan"))
+            reference = problem(sbs.in_cell)
+            names = BridgeStan.param_unc_names(reference.model)
+            @test names == ["log_k", "sigma"]
+            data = V2_ARG_DATA
+            oracle(u) = begin
+                sigma = exp(u[2])
+                lp = logpdf(Normal(0, 1), u[1]) + logpdf(Exponential(1), sigma) + u[2]
+                for (d, t, r, y) in zip(data.dose, data.t, data.reference, data.y)
+                    lp += sum(logpdf.(Normal.(d .* exp.(-exp(u[1]) .* t) .- r, sigma), y);
+                        init = 0.0)
+                end
+                lp
+            end
+            central(f, u; h = 1e-6) = [(f(u .+ h .* (eachindex(u) .== j)) -
+                f(u .- h .* (eachindex(u) .== j))) / 2h for j in eachindex(u)]
+            points = ([0.0, 0.0], [0.3, -0.4], [-0.7, 0.25])
+            offsets = Float64[]
+            for sb in (sbs.plate, sbs.kernel)
+                prob = problem(sb)
+                @test BridgeStan.param_unc_names(prob.model) == names
+                for u in points
+                    lp, g = LogDensityProblems.logdensity_and_gradient(prob, u)
+                    lp_ref, g_ref = LogDensityProblems.logdensity_and_gradient(reference, u)
+                    @test isapprox(lp, lp_ref; atol = 1e-12, rtol = 0)
+                    @test isapprox(g, g_ref; atol = 1e-12, rtol = 0)
+                    @test isapprox(g, central(oracle, u); atol = 1e-6, rtol = 0)
+                    push!(offsets, oracle(u) - lp)
+                end
+            end
+            # Stan's `~` drops constants; the oracle differs by one fixed offset.
+            @test maximum(offsets) - minimum(offsets) < 1e-10
         else
             @info "Skipping BridgeStan runtime gate (BRM_KERNEL_RUNTIME=0)"
         end
