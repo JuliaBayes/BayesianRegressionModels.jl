@@ -425,6 +425,11 @@ completed-covariate geometry, including declared level order, empty and
 all-missing partitions, retained numerical recipes, printed replay and cached
 columns that must not override source computations. Run it directly with
 `julia --project=test test/rk_prepared_data_source.jl`.
+`rk_factor_gather.jl` checks that categorical population effects gather their
+coefficients from one level index per factor coding (treatment coding with a
+leading reference zero, cell means directly, `ref=` listed first), that
+predictors with identical design columns share one matrix, and the normalized
+density and ordinary Reverse gradient against an independent oracle.
 `rk_hsgp_domains.jl` checks fixed one-dimensional and tensor HSGP domains
 against independent basis/frequency/floor calculations and normalized
 same-BRMI compiled Stan values and every mapped ordinary Reverse coordinate.
