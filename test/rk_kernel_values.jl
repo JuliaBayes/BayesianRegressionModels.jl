@@ -357,13 +357,13 @@ end
 # nested subject and entry plates over the kernel's subject cells, with the
 # response bound as authored and no flattened response, row geometry port or
 # row-aligned argument reader (todo 1jocaai). Covers a formula observation of
-# a cell output and an in-cell observation, each against an independent
-# oracle, finite differences, the compiled Stan program, its per-subject
-# pointwise densities and withholding. Grouped-data arithmetic in a nested
-# formula observation is `rk_grouped_observation_arguments.jl`'s `ordinary`.
+# a cell output, the same with grouped-data arithmetic, and an in-cell
+# observation, each against an independent oracle, finite differences, the
+# compiled Stan program, its per-subject pointwise densities and withholding.
 @stestset "per-subject observations are RK nested plates" begin
     data = (; t=[[0.5, 1.5], Float64[], [0.7, 1.1, 2.0]], dose=[1.0, 2.0, 1.5],
-        y=[[0.6, 0.2], Float64[], [1.0, 0.8, 0.3]])
+        y=[[0.6, 0.2], Float64[], [1.0, 0.8, 0.3]],
+        reference=[[0.1, 0.0], Float64[], [0.2, -0.1, 0.05]])
     saved = deepcopy(data)
     models = (
         formula=(@brm data begin
@@ -373,6 +373,14 @@ end
                 loc[i] = dose[i] .* exp.(-exp(log_k) .* t[i])
             end
             y ~ Normal(loc, sigma)
+        end),
+        arithmetic=(@brm data begin
+            log_k ~ Normal(0, 1)
+            sigma ~ Exponential(1)
+            @plate for i in eachindex(t)
+                loc[i] = dose[i] .* exp.(-exp(log_k) .* t[i])
+            end
+            y ~ Normal(loc - reference, sigma)
         end),
         cell=(@brm data begin
             log_k ~ Normal(0, 1)
@@ -384,6 +392,7 @@ end
             end
         end))
     observed = (formula="y[i] .~ Normal.(loc_cells[i], sigma)",
+        arithmetic="y[i] .~ Normal.(loc_cells[i] .- reference[i], sigma)",
         cell="y[i] .~ Normal.(loc_argument_y_1[i], sigma)")
     ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
     structure(program) = [(e.kind, e.depth) for e in recipe_inventory(program)
@@ -402,7 +411,9 @@ end
         names = coordinate_names(backend.model.layout)
         @test sort(names) == [:log_k, :sigma]
         ik, is = findfirst(==(:log_k), names), findfirst(==(:sigma), names)
-        means(u) = [dose .* exp.(-exp(u[ik]) .* t) for (t, dose) in zip(data.t, data.dose)]
+        shift = label === :arithmetic ? data.reference : [zero(t) for t in data.t]
+        means(u) = [dose .* exp.(-exp(u[ik]) .* t) .- r
+            for (t, dose, r) in zip(data.t, data.dose, shift)]
         prior(u) = logpdf(Normal(), u[ik]) + logpdf(Exponential(), exp(u[is])) + u[is]
         pointwise(u) = [logpdf.(Normal.(mu, exp(u[is])), y) for (mu, y) in zip(means(u), data.y)]
         oracle(u) = prior(u) + sum(sum(cell; init=0.0) for cell in pointwise(u))
