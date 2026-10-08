@@ -63,10 +63,11 @@ const PINS = [
     # plus published live matrices (1t1v8zo) and callable array cells (0mr4zu5).
     # Contains db4f16aa (lower Cholesky + graph allocation + native callback AD
     # repairs), e0930dcd (a declared-array element is a scalar location summand),
-    # 712c227b (vector-of-vectors nested-plate observations) and 9e425eda
+    # 712c227b (vector-of-vectors nested-plate observations), 9e425eda
     # (LogDensity laws, link families, per-index arithmetic and derived responses
-    # in nested plate cells).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "15ea43645fc6b56f9198f9a46e58161975d7c4a6"),  # main
+    # in nested plate cells) and 628769da + ea596e50 (built graphs carry no
+    # bound row count, so a graph built on one data set evaluates another).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "bbbd8c97beccd627cf1629ca37944ecef4c3b3ed"),  # main
 ]
 
 function main()
