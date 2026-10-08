@@ -53,7 +53,12 @@ probit(p) = quantile(Normal(), p)
 cloglog(p) = log(-log1p(-p))
 dfp = merge(df, (; prop=[0.2, 0.7, 0.4, 0.6, 0.3, 0.8]))
 
-factor_design(plan,term) = hcat((plan.columns[c] for c in term.options.design_columns)...)
+# The indicator design a factor's level gather is equivalent to: coefficient
+# `k` reads index position `k`, after the reference under treatment coding.
+factor_design(plan,term) = let offset = term.options.coding === :fullrank ? 0 : 1
+    hcat((plan.columns[term.options.index] .== k + offset
+        for k in eachindex(term.options.labels))...)
+end
 
 @stestset "gaussian identity plan shape" begin
     brmi = @brm df begin
