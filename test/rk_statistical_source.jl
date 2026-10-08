@@ -281,7 +281,7 @@ end
             tau[1:K] .~ Exponential.(0.7)
             L ~ LKJCholesky(K, eta)
             z[levels(g), 1:K] .~ Normal.(0, 1)
-            return z * (tau .* L)'
+            return z * transpose(tau .* L)
         end))
     @test definitions[:brm_monotonic_effect] == strip_lines(:(
         brm_monotonic_effect(c, alpha, loc, scale) = begin

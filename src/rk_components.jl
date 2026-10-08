@@ -174,9 +174,6 @@ end
 
 # Group-level effects allocate their scales, correlation factor and
 # standardized draws, and return the non-centered levels-by-margins matrix.
-# The return keeps `z`'s `levels(g)` row axis (elementwise math and an
-# adjoint `'`, not an opaque `transpose` call), so callers gather a level's
-# effects by label, `b[g, k]`, as ordinary RK graph indexing.
 # `priors` holds one positive prior per margin; with `scale_value` the scales
 # are instead a supplied value (shared R2D2M2 budgets). A Student-t block
 # (`nu`, a constant or graph value) also draws one mixing weight per level,
@@ -193,7 +190,7 @@ function _rk_ast_group_component!(definitions, statements, taken, name, group, K
     push!(body.args, Expr(:call, :.~, Expr(:ref, :z, Expr(:call, :levels, :g), index),
         _rk_ast_dotted(:Normal, 0, 1)))
     value = K > 1 ?
-        Expr(:call, :*, :z, Expr(Symbol("'"), Expr(:call, :.*, :tau, :L))) :
+        Expr(:call, :*, :z, Expr(:call, :transpose, Expr(:call, :.*, :tau, :L))) :
         Expr(:call, :.*, :z, Expr(:ref, :tau, 1))
     if nu !== nothing
         half = Expr(:call, :/, :nu, 2)

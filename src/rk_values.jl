@@ -24,6 +24,13 @@ function _rk_value_link!(bindings, link, lhs, taken)
     _rk_ast_dotted(head, lhs)
 end
 
+# Arrays, rather than the retired structural varying/smooth summands, let
+# a named predictor be read by ordinary Julia functions on its own axis.
+function _rk_value_level_indices(labels, source)
+    levels = _rk_grouping_levels(source)
+    Int[findfirst(isequal(label), levels) for label in labels]
+end
+
 _rk_value_dummy(values, level) = Float64.(isequal.(values, level))
 
 # Native prior source spells declaration bounds as a support restriction,
@@ -215,10 +222,18 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
                 z=Symbol(draws, ".z"), L=K == 1 ? nothing : Symbol(draws, ".L")),
                 bucket.dist === nothing ? (;) : (; mixing=Symbol(draws, ".w"))))
     end
-    # The draws keep the `levels(group)` row axis, so a grouping column gathers
-    # its rows' effects by label: `draws[col, margin]`. RKPPL resolves the
-    # labels to positions once at binding and keeps the gather in the graph.
-    gather_margin(col, margin) = Expr(:ref, draws, col, margin)
+    indices = Dict{Symbol,Symbol}()
+    if grouping.form !== :gr
+        callee = :brm_level_indices
+        for col in grouping.columns
+            idx = _rk_ast_fresh_name(string(draws, "_index_", col), taken)
+            push!(stmts, Expr(:(=), idx,
+                Expr(:call, callee, col, group)))
+            indices[col] = idx
+        end
+    end
+    gather_margin(col, margin) =
+        Expr(:call, :brm_ranef_column, draws, indices[col], margin)
     for (target, margins) in bucket.slices
         summands = Any[]
         for margin in margins
