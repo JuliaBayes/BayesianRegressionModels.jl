@@ -138,7 +138,9 @@ function check_grouped_arguments(label, data)
     observed = label === :joined ? data.y[permutation] : reduce(vcat, data.y)
     reference = label === :joined ? data.reference[permutation] :
         reduce(vcat, [ones(length(xs)) .* refs for (xs, refs) in zip(data.x, data.reference)])
-    @test backend.plan.columns[:y] == observed
+    # An ordinary law observes the per-subject response per subject; a caller
+    # observation graph or a join observes the flattened rows.
+    @test backend.plan.columns[:y] == (label === :ordinary ? data.y : observed)
     levels = sort(unique(data.subject))
     subject_order = [findfirst(==(s), levels) for s in data.subject]
     oracle(u) = begin
@@ -185,6 +187,9 @@ function check_grouped_arguments(label, data)
         # Each subject's response cell length comes from the bound response.
         @test !occursin("[3, 0, 4]", definitions * main)
         @test occursin("ones(length(rows))", sources)
+    elseif label === :ordinary
+        @test occursin("y[i] .~ Normal.(loc_cells[i] .- reference[i], sigma)", main)
+        @test !occursin("brm_flatten", definitions * main)
     else
         @test occursin("y_observation_argument_1(loc, reference, sigma)", main)
         @test any(source -> Meta.isexpr(source, :call) &&

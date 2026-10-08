@@ -138,6 +138,26 @@ function weight_reader_arguments(main)
     only(calls).args[2:end]
 end
 
+# A per-subject observation is one nested plate `y[i] .~ weighted.(law, w)`.
+# Its weight reads only data (a bound port or a reader over data ports), so
+# RKPPL binds it as data.
+function nested_weight_reads(main)
+    plate = only(s for s in main.args if Meta.isexpr(s, :macrocall))
+    cell = only(x for x in last(last(plate.args).args).args if !(x isa LineNumberNode))
+    weight = cell.args[3].args[2].args[2]
+    reads = BRM._rk_source_symbols!(Set{Symbol}(), weight)
+    definitions = Dict(x.args[1] => x.args[2] for x in main.args if Meta.isexpr(x, :(=)))
+    pending = collect(reads)
+    while !isempty(pending)
+        definition = get(definitions, pop!(pending), nothing)
+        definition === nothing && continue
+        for name in BRM._rk_source_symbols!(Set{Symbol}(), definition)
+            name in reads || (push!(reads, name); push!(pending, name))
+        end
+    end
+    reads
+end
+
 @stestset "in-cell weighted native family observes a data-weighted power likelihood" begin
     data = WEIGHTED_DATA
     saved = deepcopy(data)
@@ -164,8 +184,8 @@ end
             check_consumer_stan(problem, stan, [:s => "s", :sigma => "sigma"], backend, u)
         end
         main = BRM._rk_emit_ast(backend.plan).main
-        @test occursin("y .~ weighted.(Normal.(", sprint(Base.show_unquoted, main))
-        @test isdisjoint(weight_reader_arguments(main), (:s, :sigma))
+        @test occursin("y[i] .~ weighted.(Normal.(", sprint(Base.show_unquoted, main))
+        @test isdisjoint(nested_weight_reads(main), (:s, :sigma))
     end
     @test isequal(data, saved)
 end

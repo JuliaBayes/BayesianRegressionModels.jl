@@ -155,7 +155,8 @@ end
     brmi = PublicKernelObservationFamilies.build(data)
     backend, problem = consumer_problem(brmi)
     @test coordinate_names(backend.model.layout) == [:a,:sigma,:nu]
-    @test backend.plan.columns[:y] == [0.1,0.4,-0.2]
+    # One array per subject, observed per subject (RKPPL nested plates).
+    @test isequal(backend.plan.columns[:y], data.y)
     oracle(u) = begin
         a,sigma,nu = u[1],exp(u[2]),exp(u[3])
         logpdf(Normal(0,0.7),a) +
@@ -170,7 +171,7 @@ end
         check_consumer_stan(problem,stan,[:a=>"a",:sigma=>"sigma",:nu=>"nu"],backend,u)
     end
     emitted = BRM._rk_emit_ast(backend.plan)
-    @test occursin("StudentT",sprint(Base.show_unquoted,emitted.main))
+    @test occursin("y[i] .~ StudentT.(",sprint(Base.show_unquoted,emitted.main))
     @test isequal(data,saved)
 end
 
@@ -179,8 +180,8 @@ end
     saved = deepcopy(data)
     brmi = PublicKernelObservationFamilies.build_binary(data)
     backend,problem = consumer_problem(brmi)
-    @test eltype(backend.plan.columns[:y]) === Int
-    @test backend.plan.columns[:y] == [0,1,1]
+    @test eltype(eltype(backend.plan.columns[:y])) === Int
+    @test isequal(backend.plan.columns[:y], data.y)
     @test coordinate_names(backend.model.layout) == [:a]
     oracle(u) = logpdf(Normal(0,0.7),u[1]) +
         sum(logpdf(Bernoulli(inv(1+exp(-x*u[1]))),y)
