@@ -71,8 +71,10 @@ function log_hyper_printed_sampler(backend)
     end,"\n")
     Core.eval(namespace,Meta.parseall(definitions))
     body=Meta.parse(sprint(Base.show_unquoted,emitted.main))
-    bound=bind_data(lower_rkppl(body,backend.plan.columns;mod=namespace,
-        conditioned=BRM._rk_observed_names(backend.plan)),backend.plan.columns)
+    # Emitted assignments own prepared indices retained in the plan cache.
+    inputs=BRM._rk_source_data_columns(backend.plan,emitted)
+    bound=bind_data(lower_rkppl(body,inputs;mod=namespace,
+        conditioned=BRM._rk_observed_names(backend.plan)),inputs)
     built=build_kernel(bound)
     @test coordinate_names(built.layout)==coordinate_names(backend.model.layout)
     built,prepare_sampler(built,bound,zeros(built.layout.total);
@@ -160,8 +162,8 @@ end
             u[position("hsgp_x.sigma_Intercept")]=delta/2
             if grouped
                 u[position("hsgp_x.rho_sd")]=-.7
-                u[position("hsgp_x_rho.z.1")]=-.8
-                u[position("hsgp_x_rho.z.2")]=3.2
+                u[position("hsgp_x.rho_z.1")]=-.8
+                u[position("hsgp_x.rho_z.2")]=3.2
                 _,rho,sigma=physical(u)
                 @test rho[1]==floor
                 @test rho[2]>floor

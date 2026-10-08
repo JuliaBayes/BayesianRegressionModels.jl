@@ -51,7 +51,7 @@ const PINS = [
     ("MutatingFunctions", "https://github.com/nsiccha/MutatingFunctions.jl.git", "4fc41b1c7b774133ceaacc4ff3c34c67b15b87b2"),  # main
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "121de3194f02044e00bac0d11019a93458ddb63a"),  # main
     ("TreeArrays",        "https://github.com/nsiccha/TreeArrays.jl.git",        "c317cc003fc41c2d933c27dc80799141eebd434e"),  # main
-    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "e355994384d44b86108105264ae3e34e0f2a0625"),  # devibe: published nested ragged helper types; matches compiled consumer acceptance
+    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "1e0af724be4f7ee0dccfccf99187cf80e35b551b"),  # devibe: grouped-observation descriptors + construction locking
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     # 0194dce (2026-09-27, dev): WindowSelectionPlan (WarmupHMC-held evidence)
     # and the controls interface for custom reparametrizers,

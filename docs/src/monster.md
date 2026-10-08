@@ -9,10 +9,12 @@ behind its data. Six people each inhaled two concentrations of the solvent
 for four hours. Their venous blood and exhaled air were then sampled for up to
 a week.
 
-This page declares the model with `@brm` and StanBlocks. The declaration is an
-exact reproduction of one program from the Stan implementation in
-[`nsiccha/monster`](https://github.com/nsiccha/monster), so it can serve as a
-single, clearly specified model/data pair.
+This page declares the model with `@brm` and StanBlocks. The declaration
+reproduces one program from the Stan implementation in
+[`nsiccha/monster`](https://github.com/nsiccha/monster) exactly, except for two
+bugs of that implementation, which are corrected here (see
+[below](#two-corrections-to-the-source-program)). It is meant as a single,
+clearly specified model/data pair.
 
 ## What exactly is reproduced
 
@@ -21,21 +23,27 @@ single, clearly specified model/data pair.
 | [`stan/unconstrained_monster.stan`](https://github.com/nsiccha/monster/blob/a362738efd9c83525a2edb6db3e3646fba1a293f/stan/unconstrained_monster.stan) | the Stan program |
 | [`cfg/nu=4/parallel_incremental_data.json`](https://github.com/nsiccha/monster/blob/a362738efd9c83525a2edb6db3e3646fba1a293f/cfg/nu%3D4/parallel_incremental_data.json) | its data: all six people, both experiments, population GSD prior with `nu = 4`, 128 Strang substeps |
 
-The two programs were compared with BridgeStan at 25 random unconstrained
-points. Their normalized log densities, Jacobians included, differ by a single
-constant (spread `6e-12`): the Jacobian of the affine map between the two
-parameterizations. Their gradients agree to a relative error of `2e-12`. Both
-have 122 unconstrained coordinates, and a gradient evaluation costs the same
-(about 60 ms on the test machine). The source program needs small syntax
-updates for current stanc; the
+The comparison target is that program with the two corrections applied, a
+three-line diff. The two programs were compared with BridgeStan at 25 random
+unconstrained points. Their normalized log densities, Jacobians included,
+differ by a single constant (spread `1e-11`): the Jacobian of the affine map
+between the two parameterizations. Their gradients agree to a relative error
+of `1e-11`. The same check against the uncorrected program fails, as it
+should. Both programs have 122 unconstrained coordinates, and a gradient
+evaluation costs the same (about 60 ms on the test machine). The source
+program needs small syntax updates for current stanc. The
 [reproduction directory](https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/monster)
-holds that updated copy, the verbatim data and the comparison script.
+holds the updated copy, the corrected copy, the verbatim data and the
+comparison script.
 
 Downloads, generated from the declaration below while these docs were built:
 
-- [`monster.stan`](downloads/monster.stan) — the generated Stan program;
-- [`monster.data.json`](downloads/monster.data.json) — its data in Stan's JSON
-  format.
+```@raw html
+<ul>
+<li><a href="downloads/monster.stan" target="_self" download><code>monster.stan</code></a>: the generated Stan program;</li>
+<li><a href="downloads/monster.data.json" target="_self" download><code>monster.data.json</code></a>: its data in Stan's JSON format.</li>
+</ul>
+```
 
 The data use Stan tuples, which need Stan 2.33 or later; the pair was checked
 with BridgeStan 2.9 (Stan 2.39).
@@ -52,7 +60,7 @@ removes it. Each person has fifteen positive quantities:
 | --- | --- |
 | `VPR` | ventilation–perfusion ratio |
 | `Fwp`, `Fpp`, `Ff`, `Fl` | fractions of blood flow to the four compartments (normalized to sum to one) |
-| `Vwp`, `Vpp`, `Vl` | lean-body-mass fractions of the non-fat compartments (`Vwp + Vpp + Vl = 0.837`) |
+| `Vwp`, `Vpp`, `Vl` | lean-body-mass fractions of the non-fat compartments (`Vwp + Vpp + Vl = 0.873`) |
 | `Pba` | blood/air partition coefficient |
 | `Pwp`, `Ppp`, `Pf`, `Pl` | tissue/blood partition coefficients |
 | `VMI`, `KMI` | maximal metabolic rate (per kg^0.7 of lean body mass) and Michaelis constant |
@@ -160,11 +168,41 @@ Main.BRMDocsComparisons.comparison(
 )
 ```
 
+## Two corrections to the source program
+
+The source program differs from the published model in two places. Both are
+corrected here; everything else is unchanged.
+
+- **The non-fat organ volumes sum to 0.873 of lean body mass, not 0.837.**
+  [Bois et al. (1996)](https://stat.columbia.edu/~gelman/research/published/toxicology.pdf)
+  state that the volume coefficients "have to sum to 0.873 (the fraction of
+  lean body weight not including bones)". Equation (1) of Gelman, Bois and
+  Jiang uses the same value, and the prior means sum to it
+  (0.28 + 0.56 + 0.033). The source has the digits swapped.
+- **Alveolar air weights the inhaled concentration by the
+  ventilation–perfusion ratio.** With instantaneous equilibrium between
+  alveolar air and arterial blood, the lung mass balance gives
+  `C_alv = (VPR·C_inh + C_ven) / (VPR + Pba)`. That is also the balance in
+  MCSim's `perc.model`. The source writes `(C_inh + C_ven) / (VPR + Pba)` in
+  its output line only; its dynamics already use the correct arterial
+  balance. The formula matters only at the end-of-exposure sample (240
+  minutes), the only observation with inhaled solvent.
+
+Evaluated at 200 draws of the source repository's stored `nu = 4` posterior,
+the corrections raise the log density by about 2 on average and move no
+prediction by more than about one noise standard deviation. The largest
+moves are at the 240-minute exhaled-air samples. The
+corrections were found when checking candidates listed in a discussion of the
+model; the other candidates (Michaelis–Menten units, prior scales,
+integrating across the end of exposure) do not apply to this program.
+
 ## Other variants in the source repository
 
 The repository holds several related programs and data files. Three facts
 matter when comparing results:
 
+- **The source repository still contains both bugs** in
+  `unconstrained_monster.stan` and `flexible_monster.stan`.
 - **`flexible_monster.stan` produced every fit stored under `cfg/`** and the
   results in its README. Its data files set `enforce_constraints = 1`. The four
   flow fractions and the two lean-volume fractions then use standardized
