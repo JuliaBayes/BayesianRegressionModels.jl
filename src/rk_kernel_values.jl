@@ -532,11 +532,11 @@ function _rk_kernel_bind_calls(value, scope, bindings, taken)
 end
 
 # The reader is the authored cell, sliced to what its value reads, as one
-# subject plate. Each per-subject input the cell reads is a plate operand
-# bound to the cell's own formal; a ragged join iterates its subject row
-# indices and gathers from its shared values; the model values the cell reads
-# stay shared. The subject cells are then flattened in subject order. A value
-# reading only data therefore stays a data-only definition.
+# subject plate. Data inputs are plate operands; when a cell also reads a live
+# vector, a bound data axis indexes that vector from an atomic operand. A
+# ragged join iterates its subject row indices and gathers from its shared
+# values; model values read as globals stay shared. The subject cells are then
+# flattened in subject order. A value reading only data stays data-only.
 function _rk_emit_kernel_reader!(defs, statements, bindings, taken, kernel, name, collected)
     reader_name = _rk_ast_fresh_name(string(name, "_reader"), taken)
     slice = _rk_kernel_value_slice(kernel, collected)
@@ -546,6 +546,15 @@ function _rk_emit_kernel_reader!(defs, statements, bindings, taken, kernel, name
     inputs = collect(zip(slice.params, slice.inputs))
     # A cell reading no per-subject input still iterates one for its subject axis.
     isempty(inputs) && push!(inputs, (first(kernel.params), first(kernel.inputs)))
+    # A live vector in a zip plate can change its domain after binding, which
+    # prevents preparation of the cell's data-only recipes. A bound input fixes the
+    # subject axis; read live elements by index from atomic operands instead.
+    data_axis = findfirst(inputs) do (_, input)
+        input.kind === :gather || haskey(kernel.columns, input.source)
+    end
+    indexed = data_axis !== nothing && any(inputs) do (_, input)
+        input.kind === :element && !haskey(kernel.columns, input.source)
+    end
     globals = slice.globals
     gathered = unique(Symbol[input.source for (_, input) in inputs if input.kind === :gather])
     ports = unique(Symbol[[input.kind === :gather ? input.rows : input.source
@@ -560,18 +569,33 @@ function _rk_emit_kernel_reader!(defs, statements, bindings, taken, kernel, name
         if input.kind === :gather)
     shared = Dict(source => source in cell_names ? fresh("$(source)_values") : source
         for source in gathered)
-    formals = Symbol[[input.kind === :gather ? rows[param] : param for (param, input) in inputs];
+    subject = indexed ? fresh("$(name)_subject") : nothing
+    live_values = Dict(param => fresh("$(param)_values") for (param, input) in inputs
+        if indexed && input.kind === :element && !haskey(kernel.columns, input.source))
+    formals = Symbol[[input.kind === :gather ? rows[param] :
+        get(live_values, param, param) for (param, input) in inputs];
         [shared[source] for source in gathered]; globals]
     # A reader port no formal shadows stays clear of the cell's names; a
     # renamed shared source keeps one name as port and formal.
     port = Dict(p => haskey(shared, p) ? shared[p] :
         p in cell_names && !(p in formals) ? fresh("$(p)_port") : p for p in ports)
-    operands = Any[[port[input.kind === :gather ? input.rows : input.source] for (_, input) in inputs];
+    operands = Any[[haskey(live_values, param) ?
+        Expr(:call, :Ref, port[input.source]) :
+        port[input.kind === :gather ? input.rows : input.source]
+        for (param, input) in inputs];
         [Expr(:call, :Ref, port[source]) for source in [gathered; globals]]]
+    if indexed
+        axis = last(inputs[data_axis])
+        axis_port = port[axis.kind === :gather ? axis.rows : axis.source]
+        pushfirst!(operands, Expr(:call, :(Base.eachindex), axis_port))
+        pushfirst!(formals, subject)
+    end
+    indexed_values = [Expr(:(=), param, Expr(:ref, live_values[param], subject))
+        for (param, _) in inputs if haskey(live_values, param)]
     gathers = [Expr(:(=), param, Expr(:ref, shared[input.source], rows[param]))
         for (param, input) in inputs if input.kind === :gather]
     plate = Expr(:do, Expr(:call, Expr(:., :ReactiveKernels, QuoteNode(:plate)), operands...),
-        Expr(:->, Expr(:tuple, formals...), Expr(:block, gathers..., cell...)))
+        Expr(:->, Expr(:tuple, formals...), Expr(:block, indexed_values..., gathers..., cell...)))
     cells, values = fresh(:cells), fresh(:values)
     body = Expr(:block,
         Expr(:(=), cells, plate),
