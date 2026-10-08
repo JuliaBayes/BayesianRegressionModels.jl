@@ -60,8 +60,10 @@ const PINS = [
     ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "0194dce08e986ff17fd5a788bb315c6431b7858e"),  # dev (contains exact sampling-counter floor 913da79)
     # Current plain-function/array PPL surface, with data-only declaration inputs
     # retained before predictor inlining (computed membership axes; 606d76d0),
-    # plus published live matrices (1t1v8zo) and callable array cells (0mr4zu5).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "db4f16aa0f3d768e376269429ec613691c743b13"),  # lower Cholesky + graph allocation + native callback AD repairs
+    # plus published live matrices (1t1v8zo) and callable array cells (0mr4zu5),
+    # and one shape rule for named and inline array gathers (957f0b8f; an
+    # inline multi-membership gather sum lowers like its named members).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "957f0b8f6fb1a8cec5d64d1ea126f63669d58262"),  # main
 ]
 
 function main()
