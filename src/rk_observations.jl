@@ -149,12 +149,26 @@ function _rk_source_observes(statement, conditioned)
         return any(arg -> _rk_source_observes(arg, conditioned), statement.args)
     false
 end
+function _rk_source_samples(statement)
+    statement isa Expr || return false
+    statement.head === :call && length(statement.args) == 3 &&
+        first(statement.args) in (:~, :.~) && return true
+    statement.head in (:macrocall, :for, :block) &&
+        return any(_rk_source_samples, statement.args)
+    false
+end
 
 # Fitted density follows the original observation graph. Independent priors
 # never used by any response become generated draws on the Stan route. Resolve
 # this before withholding, so a parameter used by a held-out response stays.
 # A compound plate remains atomic; its declared block geometry is preserved.
-function _rk_fitted_source(emitted, conditioned)
+#
+# An authored value no response reads (`retained`: a `@plate` output, an `=`
+# assignment, a formula predictor) stays a named graph value when everything
+# it needs is deterministic over what the fitted program already computes. It
+# adds no density, coordinate or Jacobian, a query plans it only when asked,
+# and a caller can request it by the name it was written under.
+function _rk_fitted_source(emitted, conditioned; retained=())
     isempty(conditioned) && return emitted
     statements = emitted.main.args
     outputs = [_rk_source_outputs!(Set{Symbol}(), statement) for statement in statements]
@@ -184,6 +198,22 @@ function _rk_fitted_source(emitted, conditioned)
             union!(needed, references[i])
             changed = true
         end
+    end
+    for i in eachindex(statements)
+        (kept[i] || isdisjoint(outputs[i], retained)) && continue
+        closure, reads = Set([i]), copy(references[i])
+        changed = true
+        while changed
+            changed = false
+            for j in eachindex(statements)
+                (kept[j] || j in closure || isdisjoint(outputs[j], reads)) && continue
+                push!(closure, j)
+                union!(reads, references[j])
+                changed = true
+            end
+        end
+        any(j -> _rk_source_samples(statements[j]), closure) && continue
+        foreach(j -> kept[j] = true, closure)
     end
     _RKEmittedProgram(emitted.defs, Expr(:block, statements[kept]...), emitted.bindings)
 end
