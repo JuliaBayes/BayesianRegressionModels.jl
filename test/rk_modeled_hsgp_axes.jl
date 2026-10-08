@@ -106,7 +106,7 @@ end
         @test Base.invokelatest(reader, constant_axis) ≈
             first(modeled_hsgp_basis(constant_axis, 3, 2.0, 2.0; orthogonal=true)) atol=2e-14
         index(n) = only(findall(==(Symbol(n)), names))
-        beta = index.(["pop_eta.beta_pop.1", "pop_mu.beta_pop.1", "pop_mu.beta_pop.2"])
+        beta = index.(["eta_Intercept", "pop_mu.beta_pop.1", "pop_mu.beta_pop.2"])
         location_scale = index("b_location_subject.tau.1")
         location_z = [index("b_location_subject.z.$j.1") for j in 1:3]
         scales = index.(["b_effect_subject.tau.1", "b_effect_subject.tau.2"])
@@ -235,13 +235,14 @@ end
         mapping = Pair{Symbol,String}[names[rho_u]=>id * "_rho_iso",
             names[hsgp_sigma]=>id * "_sigma"]
         append!(mapping, [names[weights_z[b]]=>id * "_beta_raw.$b" for b in 1:k])
-        intercept = index("pop_mu.beta_pop.1")
+        intercept = label == "default-floor" ? index("mu_Intercept") :
+            index("pop_mu.beta_pop.1")
         push!(mapping, names[intercept]=>"pop_mu_beta_pop.1")
         slope = label == "default-floor" ? nothing : index("pop_mu.beta_pop.2")
         slope === nothing || push!(mapping, names[slope]=>"pop_mu_beta_pop.2")
         if axis === :x
-            parent = label == "link-predictor" ? "log_x" : "eta"
-            parent_beta = index("pop_$(parent).beta_pop.1")
+            parent = label == "link-predictor" ? "x" : "eta"
+            parent_beta = index("$(parent)_Intercept")
             location_scale = index("b_location_subject.tau.1")
             location_z = [index("b_location_subject.z.$j.1") for j in 1:3]
             push!(mapping, names[parent_beta]=>

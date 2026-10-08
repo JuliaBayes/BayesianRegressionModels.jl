@@ -45,7 +45,7 @@ end
         index(n) = only(findall(==(Symbol(n)), names))
         # The population component owns both ordinary design coefficients,
         # including the coefficient of the modeled column.
-        beta = index.(["pop_eta.beta_pop.1", "pop_mu.beta_pop.1", "pop_mu.beta_pop.2"])
+        beta = index.(["eta_Intercept", "pop_mu.beta_pop.1", "pop_mu.beta_pop.2"])
         location_scale = index("b_location_subject.tau.1")
         location_z = [index("b_location_subject.z.$j.1") for j in 1:3]
         scales = index.(["b_effect_subject.tau.1", "b_effect_subject.tau.2"])
@@ -158,7 +158,7 @@ end
                 logpdf(Exponential(0.9),exp(u[scale])) + u[scale] +
                 sum(logpdf.(Normal(),u[draws]))
             value = if slope === :eta
-                intercept = index("pop_eta.beta_pop.1")
+                intercept = index("eta_Intercept")
                 location_scale = index("b_location_subject.tau.1")
                 location_z = [index("b_location_subject.z.$j.1") for j in 1:3]
                 prior += logpdf(Normal(-0.4,0.7),u[intercept]) +

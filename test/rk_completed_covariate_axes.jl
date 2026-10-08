@@ -39,7 +39,7 @@ end
     @test length(names) == 16
     index(n) = only(findall(==(Symbol(n)), names))
     # The population component owns the intercept and completed-column slope.
-    beta = index.(["pop_log_a.beta_pop.1", "pop_log_a.beta_pop.2", "pop_log_b.beta_pop.1"])
+    beta = index.(["pop_log_a.beta_pop.1", "pop_log_a.beta_pop.2", "b_Intercept"])
     scales = index.(["b_p_subject.tau.1", "b_p_subject.tau.2"])
     z = [index("b_p_subject.z.$j.$k") for j in 1:3, k in 1:2]
     correlation = index("b_p_subject.L.1")

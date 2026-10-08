@@ -97,13 +97,13 @@ end
         backend,problem=consumer_problem(brmi)
         names=coordinate_names(backend.model.layout)
         position(name)=only(findall(==(Symbol(name)),names))
-        intercept=position("pop_mu.beta_pop.1")
+        intercept=position("mu_Intercept")
         G=grouped ? 2 : 1
         weights=grouped ? [position("hsgp_x.z.$g.$k") for g in 1:G,k in 1:3] :
             reshape([position("hsgp_x.z.$k") for k in 1:3],1,3)
         term=only(filter(t->t.kind===:hsgp,only(backend.plan.predictors).terms))
         phi,frequencies,floor=log_hyper_basis(data.x,3,term.options.c)
-        mapping=Pair{Symbol,String}[Symbol("pop_mu.beta_pop.1")=>"pop_mu_beta_pop.1"]
+        mapping=Pair{Symbol,String}[:mu_Intercept=>"pop_mu_beta_pop.1"]
         for g in 1:G,k in 1:3
             target=grouped ? "zflat_hsgpw_x_g.$((g-1)*3+k)" : "hsgp_x_beta_raw.$k"
             push!(mapping,names[weights[g,k]]=>target)

@@ -56,7 +56,12 @@ end
             emitted = BRM._rk_emit_ast(backend.plan)
             @test !any(d -> occursin("brm_design_product", sprint(show, d)), emitted.defs)
             @test any(d -> occursin("return X * beta_pop", sprint(Base.show_unquoted, d)),
-                emitted.defs)
+                emitted.defs) == (label == "correlated")
+            if label != "correlated"
+                source = sprint(Base.show_unquoted, emitted.main)
+                @test occursin("eta_Intercept ~ Normal", source)
+                @test !occursin("X_eta =", source)
+            end
             @test any(d -> d.head === :function, emitted.defs)
             @test any(d -> d.head === :(=), emitted.defs)
             @test !any(p -> last(p) === PublicComposedSource.original_affine,
