@@ -61,9 +61,11 @@ const PINS = [
     # Current plain-function/array PPL surface, with data-only declaration inputs
     # retained before predictor inlining (computed membership axes; 606d76d0),
     # plus published live matrices (1t1v8zo) and callable array cells (0mr4zu5),
-    # and one shape rule for named and inline array gathers (957f0b8f; an
-    # inline multi-membership gather sum lowers like its named members).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "957f0b8f6fb1a8cec5d64d1ea126f63669d58262"),  # main
+    # one shape rule for named and inline array gathers (957f0b8f; an inline
+    # multi-membership gather sum lowers like its named members), and value
+    # locations that read their row count from the binding, so a built graph
+    # carries no fitted row count (19082396).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "190823963d5aee9772da80fa5d334c82e167fce1"),  # main
 ]
 
 function main()

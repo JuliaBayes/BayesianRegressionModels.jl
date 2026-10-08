@@ -75,9 +75,10 @@ rev = "0194dce08e986ff17fd5a788bb315c6431b7858e"
 [sources.ReactiveKernels]
 url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # GP adoption: RK lower Cholesky and graph allocation bounds preserved across
-# consumer precompilation, plus native prepared-callback Reverse, and one
-# shape rule for named and inline array gathers (957f0b8f).
+# consumer precompilation, plus native prepared-callback Reverse, one shape
+# rule for named and inline array gathers (957f0b8f), and value locations
+# that read their row count from the binding (19082396).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "957f0b8f6fb1a8cec5d64d1ea126f63669d58262"
+rev = "190823963d5aee9772da80fa5d334c82e167fce1"
