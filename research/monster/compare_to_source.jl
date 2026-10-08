@@ -1,5 +1,6 @@
 # Check that the BRM model in `reproduce.jl` is the source program
-# `source/unconstrained_monster.stan` with `source/parallel_incremental_data.json`:
+# `source/unconstrained_monster_corrected.stan` (the nsiccha/monster program with
+# its two bugs fixed) with `source/parallel_incremental_data.json`:
 # at random unconstrained points the two normalized log densities (with
 # Jacobians) must differ by one constant, and their gradients must agree under
 # the affine map between the two parameterizations.
@@ -13,9 +14,10 @@ using Printf, Random
 const SOURCE = joinpath(@__DIR__, "source")
 
 function monster_source_comparison(; npoints=25, seed=20261008,
-                                   build=mktempdir())
-    source_stan = joinpath(build, "unconstrained_monster.stan")
-    cp(joinpath(SOURCE, "unconstrained_monster.stan"), source_stan; force=true)
+                                   build=mktempdir(),
+                                   program="unconstrained_monster_corrected.stan")
+    source_stan = joinpath(build, program)
+    cp(joinpath(SOURCE, program), source_stan; force=true)
     source = BS.StanModel(BS.compile_model(source_stan),
                           joinpath(SOURCE, "parallel_incremental_data.json"))
     brm = StanBlocks.stan_instantiate(monster_sbbrmi().model;
@@ -99,5 +101,5 @@ if abspath(PROGRAM_FILE) == @__FILE__
     result.offset_spread < 1e-8 || error("log densities differ by more than a constant")
     abs(result.offset - result.expected_offset) < 1e-8 || error("unexpected offset")
     result.max_relative_gradient_error < 1e-8 || error("gradients disagree")
-    println("OK: the BRM model reproduces source/unconstrained_monster.stan")
+    println("OK: the BRM model reproduces source/unconstrained_monster_corrected.stan")
 end
