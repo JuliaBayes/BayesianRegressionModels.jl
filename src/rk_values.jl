@@ -754,11 +754,14 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
         _rk_emit_missing_value!(defs, stmts, bindings, taken, completion)
     end
     # Keep authored deterministic values as transparent graph computations.
-    # The surface's affine likelihood lowering may otherwise absorb their
-    # expressions into a location, dropping the named value and its math.
-    graph_values = Set(p.name for p in plan.regression.predictors)
-    union!(graph_values, (a.name for a in plan.assignments
-        if a isa _BRMPreparedAssignment))
+    # RKPPL's affine likelihood lowering otherwise inlines an authored value
+    # into the location it feeds, where it refuses some valid scalar summands
+    # (`loc = mu + 0.8 * s[1] - s[3]`; ReactiveKernels snag
+    # rkppl-declared-a-a2a040fc). BRM's own formula predictor values are
+    # component sums that lowering admits, so they stay plain statements, as
+    # in the StanBlocks emission.
+    graph_values = Set(a.name for a in plan.assignments
+        if a isa _BRMPreparedAssignment)
     ports = Set{Symbol}(keys(plan.columns))
     foreach(statement -> _rk_source_outputs!(ports, statement), stmts)
     for index in eachindex(stmts)

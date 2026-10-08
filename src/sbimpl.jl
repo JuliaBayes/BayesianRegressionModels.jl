@@ -352,13 +352,18 @@ function _sb_vector_positive_priors(base::StanBlocks.SlicModel,
     # margin has the exact same mapped distribution, retain that natural Stan
     # spelling instead of synthesising a coordinate-by-coordinate UDF. Custom,
     # composed, or heterogeneous priors keep the general generated-family path.
+    # The direct statement is merged into the BRM-owned `base`, so it only
+    # resolves families visible there: a consumer-registered distribution type
+    # (`_sb_stan_dist_name(::Type{<:MyPrior})`) whose StanBlocks family lives in
+    # `mod` must take the generated-family path, which traces in `mod`.
     if direct_homogeneous && !isempty(priors) &&
        all(prior -> isequal(prior, first(priors)), priors)
         T = _as_distribution_type(getf(first(priors)))
-        if !isnothing(T) &&
+        family = isnothing(T) ? nothing : _sb_stan_dist_name(T)
+        if family isa Symbol &&
            _brm_distribution_shape(first(priors)) ==
                (Distributions.Univariate, Distributions.Continuous) &&
-           !isnothing(_sb_stan_dist_name(T))
+           (isdefined(StanBlocks, family) || isdefined(base.mod, family))
             direct = _sb_direct_vector_positive_prior(
                 base, target, first(priors), nvalue)
             isnothing(direct) || return direct
@@ -6700,6 +6705,18 @@ _sb_sampling_backed!(stmts, data, key, backing::DataColumn, rhs; id_lookup, kwar
     _sb_likelihood!(stmts, key, rhs, data)
 end
 
+# The `kernel(...)` call declaring formula name `x` (`x ~ kernel(...)`, which
+# `@plate for` also lowers to), or `nothing`. Its value is the collected
+# per-subject cell result whether or not any kernel argument is a grouped
+# linear predictor: a no-random-effects panel takes its subjects from the
+# pre-grouped columns instead.
+_sb_kernel_producer(_x) = nothing
+_sb_kernel_producer(x::NamedColumn) = _sb_kernel_declaration(parent(x))
+_sb_kernel_declaration(_decl) = nothing
+_sb_kernel_declaration(decl::ExprColumn{typeof(~)}) = _sb_kernel_call(last(getargs(decl, 2)))
+_sb_kernel_call(_rhs) = nothing
+_sb_kernel_call(rhs::ExprColumn{typeof(kernel)}) = rhs
+
 # Find the per-subject group column of every `kernel(...)` result referenced by
 # a likelihood RHS. The formula node retains the producer declaration on the
 # referenced NamedColumn, so the observation boundary can align a flat response
@@ -6707,10 +6724,8 @@ end
 # sorted labels.
 _sb_ragged_rhs_kernel_groups!(_acc, _x) = nothing
 function _sb_ragged_rhs_kernel_groups!(acc, x::NamedColumn)
-    decl = parent(x)
-    decl isa ExprColumn && getf(decl) === (~) || return nothing
-    _, producer_rhs = getargs(decl, 2)
-    producer_rhs isa ExprColumn && getf(producer_rhs) === kernel || return nothing
+    producer_rhs = _sb_kernel_producer(x)
+    isnothing(producer_rhs) && return nothing
 
     buckets = Any[]
     for arg in getargs(producer_rhs)
@@ -12431,9 +12446,10 @@ function _sb_grouped_argument_ports!(ports, argument::NamedColumn, lengths)
         ports[name(argument)] = argument
         return actual != lengths
     end
-    producers = Any[]
-    _sb_ragged_rhs_kernel_groups!(producers, argument)
-    isempty(producers) || (ports[name(argument)] = argument)
+    # A kernel result is one cell per subject, so it slices per observed group
+    # exactly like ragged data. Its subject grouping is irrelevant here: a
+    # no-random-effects panel has none, yet its result is just as ragged.
+    isnothing(_sb_kernel_producer(argument)) || (ports[name(argument)] = argument)
     false
 end
 _sb_grouped_argument_ports!(_ports, _argument, _lengths) = false
