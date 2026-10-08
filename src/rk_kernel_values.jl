@@ -104,6 +104,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
     columns = Dict{Symbol,Any}()
     inputs = Any[]
     outer_lengths = Int[]
+    observed = _rk_kernel_observed_columns(brmi, params, arguments, raw_body)
     for (i, argument) in enumerate(arguments)
         if argument isa ExprColumn && getf(argument) === ragged
             group_values === nothing && error(
@@ -117,18 +118,23 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             if parent(value) isa DataColumn
                 columns[_rk_kernel_column_name(value)] = parent(parent(value))
             end
-            push!(inputs, (; source=_rk_kernel_column_name(value), kind=:gather, rows))
+            push!(inputs, (; source=_rk_kernel_column_name(value), kind=:gather, rows,
+                column=nothing))
         elseif argument isa NamedColumn && parent(argument) isa DataColumn
-            # A separate port preserves the original nested input when its
-            # observation counterpart is flattened for the likelihood.
-            source = Symbol(name, :_input_, _rk_kernel_column_name(argument))
+            # A data input is read through its own column. Only a response,
+            # whose column is flattened for the likelihood under its own name,
+            # keeps its original nested values in a separate port; that port
+            # is also the response's raw source (`_rk_kernel_input_port`).
+            column = _rk_kernel_column_name(argument)
+            source = column in observed ? Symbol(name, :_input_, column) : column
             values = parent(parent(argument))
             values isa AbstractVector || error("RK backend: kernel input `$source` must be an array")
             columns[source] = values
             push!(outer_lengths, length(values))
-            push!(inputs, (; source, kind=:element, rows=nothing))
+            push!(inputs, (; source, kind=:element, rows=nothing, column))
         elseif argument isa NamedColumn && parent(argument) isa ExprColumn
-            push!(inputs, (; source=_rk_kernel_column_name(argument), kind=:element, rows=nothing))
+            push!(inputs, (; source=_rk_kernel_column_name(argument), kind=:element,
+                rows=nothing, column=nothing))
         else
             error("RK backend: kernel `$name` input must be a data column, predictor or ragged join")
         end
@@ -187,6 +193,33 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
         globals, columns, group_values, Tuple(observations))
 end
 
+# The data columns observed by a likelihood: every authored response, and
+# every kernel input this cell observes. Each is flattened under its own name.
+function _rk_kernel_observed_columns(brmi, params, arguments, raw_body)
+    observed = Set{Symbol}()
+    for (_, node) in _brm_operation_entries(brmi)
+        node isa NamedColumn && parent(node) isa ExprColumn{typeof(~)} || continue
+        response = _brm_observation_name(first(getargs(parent(node))))
+        response === nothing || push!(observed, response)
+    end
+    for statement in raw_body
+        Meta.isexpr(statement, :call) && length(statement.args) == 3 &&
+            first(statement.args) === :~ || continue
+        index = findfirst(==(statement.args[2]), params)
+        index === nothing && continue
+        argument = arguments[index]
+        argument isa NamedColumn && push!(observed, _rk_kernel_column_name(argument))
+    end
+    observed
+end
+
+# The separate port a kernel reads a response's nested values from, if any.
+function _rk_kernel_input_port(kernels, column)
+    ports = unique(Symbol[input.source for kernel in kernels for input in kernel.inputs
+        if input.kind === :element && input.column === column && input.source !== column])
+    isempty(ports) ? nothing : first(ports)
+end
+
 function _rk_kernel_observed_layout(observation, kernels)
     lhs = observation.lhs
     if lhs isa ExprColumn && getf(lhs) === ragged
@@ -212,10 +245,14 @@ end
 # original response port by the emitted numerical graph. A ragged join's row
 # partition (one group of response rows per kernel subject) is data, so it is
 # a bound port like a kernel's ragged input rows, never a literal in source.
-function _rk_prepare_kernel_observed_values!(columns, taken, derived, name, layout, raw)
+# A kernel port already holding the raw response (`port`) is that source, so
+# the nested values enter the graph once.
+function _rk_prepare_kernel_observed_values!(columns, taken, derived, name, layout, raw;
+        port=nothing)
     columns[name] = layout.values
     layout.lengths === nothing && return
-    source = _rk_ast_fresh_name(string(name, "_raw_response"), taken)
+    source = port !== nothing && isequal(get(columns, port, nothing), raw) ? port :
+        _rk_ast_fresh_name(string(name, "_raw_response"), taken)
     columns[source] = raw
     expression = if layout.rows === nothing && raw isa AbstractVector{<:AbstractVector}
         Expr(:_rk_data_preparation, :brm_flatten_response, source)
@@ -457,7 +494,8 @@ Base.@nospecializeinfer function _brm_rk_composed_kernel_plan(@nospecialize(brmi
             (; values=brm_flatten_cells(raw), rows=nothing, lengths=length.(raw)) :
             (; values=raw, rows=nothing, lengths=nothing)
         _rk_prepare_kernel_observed_values!(plan.columns, taken, plan.regression.derived,
-            observation.source, layout, raw)
+            observation.source, layout, raw;
+            port=_rk_kernel_input_port((kernel,), observation.source))
         distribution = _rk_kernel_observation_distribution(observation)
         weight = observation.weight === nothing ? nothing :
             _BRMPreparedRef(observation.weight_name, :whole)

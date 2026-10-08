@@ -1745,15 +1745,21 @@ end
     end
     artifact = BRM.emit_rk_artifact(brmi; case_id="parity-kernel-vector-cells")
     inputs = BRM.rk_artifact_inputs(artifact)
-    # The reader's subject plate iterates the per-subject inputs themselves.
+    # The reader's subject plate iterates the per-subject inputs themselves,
+    # each through its own data column. The observed cell response keeps one
+    # nested port, which is also its raw likelihood source (snag
+    # rk-emission-grou-9dac9bc6).
     @test !haskey(inputs, :pred_subject_count)
-    for name in (:t, :intercept, :slope, :y)
-        @test inputs[Symbol(:pred_input_, name)] == getproperty(_kernel_vector_cols, name)
+    for name in (:t, :intercept, :slope)
+        @test inputs[name] == getproperty(_kernel_vector_cols, name)
+        @test !haskey(inputs, Symbol(:pred_input_, name))
     end
-    @test all(length(cell) == 4 for cell in inputs[:pred_input_t])
+    @test inputs[:pred_input_y] == _kernel_vector_cols.y
+    @test !haskey(inputs, :y_raw_response)
+    @test all(length(cell) == 4 for cell in inputs[:t])
     @test all(length(cell) == 4 for cell in inputs[:pred_input_y])
-    @test all(cell isa Real for cell in inputs[:pred_input_intercept])
-    @test all(cell isa Real for cell in inputs[:pred_input_slope])
+    @test all(cell isa Real for cell in inputs[:intercept])
+    @test all(cell isa Real for cell in inputs[:slope])
     @test occursin("Normal", sprint(Base.show_unquoted,
         Expr(:block, artifact.defs..., artifact.ast)))
     backend = _parity_backend(brmi)
@@ -1778,8 +1784,10 @@ end
     artifact = BRM.emit_rk_artifact(brmi; case_id="parity-kernel-scalar-cells")
     inputs = BRM.rk_artifact_inputs(artifact)
     @test !haskey(inputs, :pred_subject_count)
+    # Data inputs through their own columns; the observed `y` keeps one port.
+    @test !haskey(inputs, :pred_input_x) && !haskey(inputs, :pred_input_intercept)
     for name in (:x, :intercept, :y)
-        column = inputs[Symbol(:pred_input_, name)]
+        column = inputs[name === :y ? :pred_input_y : name]
         @test column == getproperty(_kernel_scalar_cols, name)
         @test length(column) == 4
         @test all(cell isa Real for cell in column)
