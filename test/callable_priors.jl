@@ -298,6 +298,70 @@ end)
     end
 end
 
+# A consumer distribution TYPE (not a factory) registered with
+# `_sb_stan_dist_name(::Type{...})` and taking arguments, as
+# `research/monster/reproduce.jl`'s `ScaledInvChiScale`. A homogeneous
+# shared-ID scale prior used to take the direct vectorized spelling meant for
+# native Stan families; merged into the BRM-owned base, its family then failed
+# to resolve with "Could not find typemod_half_normal in model, builtin,
+# BayesianRegressionModels or Main!" whenever the triad lived in a non-Main `mod`.
+struct TypeModHalfNormal <: ContinuousUnivariateDistribution
+    scale::Float64
+end
+Distributions.logpdf(d::TypeModHalfNormal, x::Real) =
+    x >= 0 ? logpdf(Normal(0, d.scale), x) + log(2) : -Inf
+Base.minimum(::TypeModHalfNormal) = 0.0
+Base.maximum(::TypeModHalfNormal) = Inf
+Distributions.rand(rng::Random.AbstractRNG, d::TypeModHalfNormal) =
+    abs(d.scale * randn(rng))
+BRM._sb_stan_dist_name(::Type{<:TypeModHalfNormal}) = :typemod_half_normal
+
+const UserModType = Module(:BRMUserModType)
+Core.eval(UserModType, :(using StanBlocks))
+Core.eval(UserModType, quote
+    StanBlocks.@deffun begin
+        @lpxf typemod_half_normal_lpdf(y::real, scale::real)::real =
+            normal_lpdf(y, 0.0, scale) + log(2.0)
+        typemod_half_normal_lpdfs(y::real, scale::real)::real =
+            typemod_half_normal_lpdf(y, scale)
+        typemod_half_normal_rng(scale::real)::real = abs(normal_rng(0.0, scale))
+    end
+end)
+
+@testset "registered custom distribution type on a ranef scale in a non-Main module" begin
+    data = (;
+        school=[1, 2, 3, 4, 5, 6, 7, 8],
+        y=[28.0, 8.0, -3.0, 7.0, -1.0, 1.0, 18.0, 12.0],
+        sigma=[15.0, 10.0, 16.0, 11.0, 9.0, 11.0, 10.0, 18.0],
+    )
+    builder = @brm begin
+        theta ~ 1 + (1 | docblock | school)
+        sd(:, docblock) ~ TypeModHalfNormal(2.5)
+        y ~ Normal(theta, sigma)
+    end
+    sb = SBBRMI(builder(data); mod=UserModType)
+    code = BRM.stan_code(sb)
+    @test occursin("typemod_half_normal_lpdf(x[1]", code)
+    @test occursin(r"b_docblock_school_tau ~ brm_vector_prior_", code)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+
+    mkpath(CALLABLE_CACHE)
+    problem = StanBlocks.stan_instantiate(sb.model;
+        path=joinpath(CALLABLE_CACHE, string(hash(code)) * ".stan"))
+    raw = zeros(LogDensityProblems.dimension(problem))
+    names = StanBlocks.BridgeStan.param_names(problem.model)
+    values = StanBlocks.BridgeStan.param_constrain(problem.model, raw)
+    physical = Dict(zip(names, values))
+    beta = physical["pop_theta_beta_pop.1"]
+    tau = physical["b_docblock_school_tau.1"]
+    z = [physical["b_docblock_school_z_flat.$i"] for i in 1:8]
+    expected = logpdf(Normal(), beta) + logpdf(TypeModHalfNormal(2.5), tau) +
+        sum(logpdf.(Normal(), z)) +
+        sum(logpdf.(Normal.(beta .+ tau .* z, data.sigma), data.y))
+    @test StanBlocks.BridgeStan.log_density(problem.model, raw;
+        propto=false, jacobian=false) ≈ expected
+end
+
 @testset "non-Main custom families on smooth, population, and contrast priors" begin
     smooth_data = (; x=collect(range(-1.0, 1.0; length=12)), y=zeros(12))
     smooth_builder = @brm begin
