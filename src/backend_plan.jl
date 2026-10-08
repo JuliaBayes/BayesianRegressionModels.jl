@@ -1737,19 +1737,21 @@ end
 # original (un-recoded) level space. `factor(...; ref=r)` recodes the reference
 # to code 1 and the old code 1 to the reference's code; undo that swap so both
 # backends' coefficients pair by the level a column actually indicates.
-function _brm_population_level_value(column)
+# `level` selects another position of the same factor (1 is the reference).
+function _brm_population_level_value(column, level::Union{Nothing,Integer}=nothing)
     preprocess = column.preprocess
     (preprocess isa _BRMPopulationPreprocess &&
         preprocess.kind === :population_factor_dummy) || error(
         "BRM backend lowering: population column `$(column.label)` is not a " *
         "categorical level indicator")
     c = preprocess.const_
+    level = something(level, c.level)
     if c.ref isa AbstractString
         ref_code = findfirst(isequal(c.ref), c.levels)
-        code = c.level == 1 ? ref_code : c.level == ref_code ? 1 : c.level
+        code = level == 1 ? ref_code : level == ref_code ? 1 : level
         return c.levels[code]
     end
-    value = c.levels[c.level]
+    value = c.levels[level]
     c.ref == 1 && return value
     value == 1 ? c.ref : value == c.ref ? 1 : value
 end

@@ -82,10 +82,21 @@ function _rk_ast_population_argument(values)
     all(isequal(first(values)), values) ? first(values) : Expr(:vect, values...)
 end
 
-"""Population effects over design columns: coefficients allocated inside, `X * beta_pop` returned."""
+"""Population effects over design columns: coefficients allocated inside, `X * beta_pop` returned.
+
+Predictors with identical design columns share one design matrix; `design` is
+the base name of a new one."""
 function _rk_ast_population_component!(definitions, statements, taken, name, design,
         columns, priors)
-    push!(statements, Expr(:(=), design, Expr(:call, :hcat, columns...)))
+    matrix = Expr(:call, :hcat, columns...)
+    shared = findfirst(statement -> Meta.isexpr(statement, :(=), 2) &&
+        isequal(last(statement.args), matrix), statements)
+    if shared === nothing
+        design = _rk_ast_fresh_name(design, taken)
+        push!(statements, Expr(:(=), design, matrix))
+    else
+        design = first(statements[shared].args)
+    end
     product = Expr(:call, :*, :X, :beta_pop)
     families = unique(first.(priors))
     if length(families) > 1
