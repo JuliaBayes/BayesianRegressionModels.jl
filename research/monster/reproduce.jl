@@ -4,14 +4,17 @@ using Random: AbstractRNG
 using StanBlocks
 
 # The Monster PBPK model (Gelman, Bois and Jiang 1996), as implemented in
-# https://github.com/nsiccha/monster at a362738efd9c83525a2edb6db3e3646fba1a293f:
-# `stan/unconstrained_monster.stan` with `cfg/nu=4/parallel_incremental_data.json`.
-# README.md in this directory states the exact correspondence.
+# https://github.com/nsiccha/monster at a362738efd9c83525a2edb6db3e3646fba1a293f
+# (`stan/unconstrained_monster.stan` with `cfg/nu=4/parallel_incremental_data.json`),
+# with two bugs of that implementation corrected: the non-fat organ volumes sum
+# to 0.873 of lean body mass, and alveolar air weights the inhaled
+# concentration by VPR. README.md in this directory states the exact
+# correspondence.
 
 # Physiology: a line-by-line port of `simulate_person` and its helpers from
 # `stan/flexible_monster.stan` (identical in `stan/unconstrained_monster.stan`),
 # restricted to the Strang-splitting branch (`no_sub_steps > 0`) that the
-# likelihood uses.
+# likelihood uses, with the alveolar-air line corrected.
 StanBlocks.@deffun begin
     monster_min_concentration()::real = 1e-12
 
@@ -133,7 +136,8 @@ StanBlocks.@deffun begin
                 unit_volume_flow, all_concentration_out[t])
             concentration_inhale = t <= no_exposure_times ?
                                    concentration_exposure : 0.0
-            concentration_alveolar = (concentration_inhale + concentration_venous) /
+            # Lung balance (MCSim perc.model): the source omits the VPR factor.
+            concentration_alveolar = (VPR * concentration_inhale + concentration_venous) /
                                      (VPR + partition_coefficient_alveolar)
             concentration_exhale = 0.7 * concentration_alveolar +
                                    0.3 * concentration_inhale
@@ -297,7 +301,7 @@ function monster_brmi(data = monster_data())
             unit_volume_flow = softmax([log_Fwp[i], log_Fpp[i], log_Ff[i], log_Fl[i]])
             Vl = exp(log_Vl[i])
             volume_fraction = append_row(
-                (0.837 - Vl) * softmax([log_Vwp[i], log_Vpp[i]]), Vl)
+                (0.873 - Vl) * softmax([log_Vwp[i], log_Vpp[i]]), Vl)
             partition_coefficient = exp([log_Pwp[i], log_Ppp[i], log_Pf[i], log_Pl[i]])
             pred_72[i] = monster_experiment(
                 times_72[i], exposure_72,
