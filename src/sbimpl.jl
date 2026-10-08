@@ -352,13 +352,18 @@ function _sb_vector_positive_priors(base::StanBlocks.SlicModel,
     # margin has the exact same mapped distribution, retain that natural Stan
     # spelling instead of synthesising a coordinate-by-coordinate UDF. Custom,
     # composed, or heterogeneous priors keep the general generated-family path.
+    # The direct statement is merged into the BRM-owned `base`, so it only
+    # resolves families visible there: a consumer-registered distribution type
+    # (`_sb_stan_dist_name(::Type{<:MyPrior})`) whose StanBlocks family lives in
+    # `mod` must take the generated-family path, which traces in `mod`.
     if direct_homogeneous && !isempty(priors) &&
        all(prior -> isequal(prior, first(priors)), priors)
         T = _as_distribution_type(getf(first(priors)))
-        if !isnothing(T) &&
+        family = isnothing(T) ? nothing : _sb_stan_dist_name(T)
+        if family isa Symbol &&
            _brm_distribution_shape(first(priors)) ==
                (Distributions.Univariate, Distributions.Continuous) &&
-           !isnothing(_sb_stan_dist_name(T))
+           (isdefined(StanBlocks, family) || isdefined(base.mod, family))
             direct = _sb_direct_vector_positive_prior(
                 base, target, first(priors), nvalue)
             isnothing(direct) || return direct
