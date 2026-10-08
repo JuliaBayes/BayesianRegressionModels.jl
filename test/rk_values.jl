@@ -72,6 +72,24 @@ const mixed_axes = (;
     @test length(backend.plan.columns[:w]) == 4
     @test length(backend.plan.columns[:y]) == 5
     @test any(pair -> last(pair) === synthetic_reader, BRM._rk_emit_ast(backend.plan).bindings)
+    # BRM's own formula values are plain source assignments, as in the
+    # StanBlocks emission: no generated one-line definition wraps them (snag
+    # rk-emission-wrap-3b8da520). Authored assignments keep their graph
+    # definition until RKPPL admits declared-array scalar summands
+    # (ReactiveKernels snag rkppl-declared-a-a2a040fc).
+    emitted = BRM._rk_emit_ast(backend.plan)
+    kernels = Set(d.name for d in map(BRM._rk_source_definition, emitted.defs)
+        if d.kind === :kernel)
+    authored = Set(a.name for a in backend.plan.assignments)
+    checked = Symbol[]
+    for statement in emitted.main.args
+        (Meta.isexpr(statement, :(=), 2) && statement.args[1] isa Symbol) || continue
+        statement.args[1] in authored && continue
+        push!(checked, statement.args[1])
+        value = statement.args[2]
+        @test !(Meta.isexpr(value, :call) && first(value.args) in kernels)
+    end
+    @test issubset((:a, :b, :c), checked)
     u = check_value_gradient(backend)
     nt = constrain(backend.model.layout, u)
     # Independent population and correlation reconstruction, including the
