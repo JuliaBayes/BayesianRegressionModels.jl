@@ -261,12 +261,13 @@ end
     @test occursin("loc_reader(loc_input_t, loc_input_dose, log_k)", source)
     @test occursin("ReactiveKernels.plate(loc_input_t, loc_input_dose, Ref(log_k)) do t, dose, log_k", source)
     # The reader returns its subject cells; the per-subject response reads
-    # them cell by cell, so nothing is flattened.
+    # them cell by cell, so the response is never flattened. The authored
+    # `loc` stays a named value over the cells, planned only when queried.
     @test occursin("return cells", source)
     @test occursin("y[i] .~ Normal.(loc_cells[i], sigma)",
         sprint(Base.show_unquoted, emitted.main))
     for retired in ("cell_input", "subject_count", "loc_cell(", "init =", "reduce(vcat",
-            "brm_flatten")
+            "brm_flatten_response", "raw_response")
         @test !occursin(retired, source * sprint(Base.show_unquoted, emitted.main))
     end
     backend, problem = consumer_problem(brmi)
@@ -403,7 +404,7 @@ end
         everything = main * join((sprint(Base.show_unquoted, d) for d in emitted.defs), "\n")
         @test occursin("@plate for i = eachindex(y)", main)
         @test occursin(observed[label], main)
-        for retired in ("brm_flatten", "y_raw_response", "y_rows", "ones(length(")
+        for retired in ("brm_flatten_response", "y_raw_response", "y_rows", "ones(length(")
             @test !occursin(retired, everything)
         end
         backend, problem = consumer_problem(brmi)

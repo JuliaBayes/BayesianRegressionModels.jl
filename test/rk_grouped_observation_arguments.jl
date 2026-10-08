@@ -188,7 +188,8 @@ function check_grouped_arguments(label, data)
             "y[i] .~ LogDensity.(y_scalar_logdensity, loc_cells[i], reference[i] .* sigma, sigma)" :
             "y[i] .~ LogDensity.(y_scalar_logdensity, loc_cells[i], reference[i], sigma)", main)
         @test !occursin("[3, 0, 4]", definitions * main)
-        @test !occursin("brm_flatten", definitions * main)
+        @test !occursin("brm_flatten_response", definitions * main)
+        @test !occursin("y_raw_response", definitions * main)
     end
     if label !== :ordinary
         @test occursin("relative_residual", sources)
