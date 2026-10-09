@@ -1,8 +1,9 @@
 # Names in the emitted RK main block say what each value is: a design matrix
 # shared by several predictors is named for its columns, a grouping's level
-# positions are computed once under that grouping's name, repeated monotonic
-# effects are named for their predictor as SBBRMI names its carriers, and the
-# linear predictor of `log(v) ~ …` is `log_v`.
+# positions are computed once under that grouping's name, a monotonic column
+# repeated across predictors is one joint block that each predictor reads by
+# column (decision `1pj2p5j`), and the linear predictor of `log(v) ~ …` is
+# `log_v`.
 #
 #     julia --project=test test/rk_emitted_names.jl
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
@@ -53,11 +54,14 @@ main_statements(brmi) = filter(s -> !(s isa LineNumberNode), emitted_main(brmi).
     groups = :b_mm__g1__g2_groups
     @test :(b_mm__g1__g2_groups_g1_level = brm_level_indices(g1, $groups)) in stmts
     @test :(b_mm__g1__g2_groups_g2_level = brm_level_indices(g2, $groups)) in stmts
-    # The first `mo(rank)` is `mo_rank`; its repeats are named for their
-    # predictor, never numbered.
-    @test occursin("mo_rank ~ brm_monotonic_effect(rank_idx", main)
-    @test occursin("mo_d_rank ~ brm_monotonic_effect(rank_idx", main)
-    @test occursin("mo_e_rank ~ brm_monotonic_effect(rank_idx", main)
+    # `mo(rank)` in three predictors is one joint block, `mo_rank`: a simplex
+    # column and a coefficient per predictor, one table gathered once. Each
+    # predictor reads its column under its own name, never a number.
+    @test occursin("mo_rank ~ brm_joint_monotonic_effects(rank_idx, [1.0, 1.0], 2, 3, 0.0, 1.0)", main)
+    @test :(mo_c_rank = mo_rank[:, 1]) in stmts
+    @test :(mo_d_rank = mo_rank[:, 2]) in stmts
+    @test :(mo_e_rank = mo_rank[:, 3]) in stmts
+    @test !occursin("brm_monotonic_effect(", main)
     @test !occursin(r"mo_rank_\d", main)
     # `log(a) ~ …` sums into `log_a`, and `a` is its value.
     @test :(log_a = pop_log_a .+ ranef_a_p_subject) in stmts
@@ -68,8 +72,8 @@ main_statements(brmi) = filter(s -> !(s isa LineNumberNode), emitted_main(brmi).
     # Coordinates follow the component names.
     backend, problem = consumer_problem(brmi)
     names = coordinate_names(backend.model.layout)
-    for name in ("mo_rank.beta", "mo_d_rank.beta", "mo_e_rank.beta",
-            "mo_rank.simplex_incr.1", "mo_d_rank.simplex_incr.1", "mo_e_rank.simplex_incr.1")
+    for name in ("mo_rank.beta.1", "mo_rank.beta.2", "mo_rank.beta.3",
+            "mo_rank.simplex_incr.1.1", "mo_rank.simplex_incr.1.2", "mo_rank.simplex_incr.1.3")
         @test Symbol(name) in names
     end
     for u in (zeros(length(names)), [0.3 * sin(3j) for j in eachindex(names)])
@@ -86,11 +90,15 @@ end
         log(sigma) ~ 1 + x2 + mo(rank)
         y ~ Normal(mu, sigma)
     end
+    stmts = main_statements(brmi)
     main = string(emitted_main(brmi))
-    # A linked predictor's carrier carries its link, as `pop_log_sigma` does.
-    @test occursin("mo_rank ~ brm_monotonic_effect(rank_idx", main)
+    # The two `mo(rank)` effects are one block; a linked predictor's column
+    # carries its link, as `pop_log_sigma` does. The single `mo1(rank)` keeps
+    # its own component and SBBRMI's carrier name.
+    @test occursin("mo_rank ~ brm_joint_monotonic_effects(rank_idx, [1.0, 1.0], 2, 2, 0.0, 1.0)", main)
+    @test :(mo_mu_rank = mo_rank[:, 1]) in stmts
+    @test :(mo_log_sigma_rank = mo_rank[:, 2]) in stmts
     @test occursin("mo1_rank ~ brm_monotonic_value(rank_idx", main)
-    @test occursin("mo_log_sigma_rank ~ brm_monotonic_effect(rank_idx", main)
     code = BRM.stan_code(SBBRMI(brmi; mod=@__MODULE__, total_groups=()))
     for carrier in ("mo_rank", "mo1_rank", "mo_log_sigma_rank")
         @test occursin("$(carrier)_simplex_incr ~ dirichlet", code)

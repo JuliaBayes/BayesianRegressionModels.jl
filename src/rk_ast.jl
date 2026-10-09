@@ -872,6 +872,64 @@ function _rk_ast_monotonic_name(term, predictor, taken)
     name
 end
 
+# Repeated monotonic terms over one index column with one configuration (head,
+# coefficient or not, concentration) are one joint block: `mo_<c>` owns a
+# simplex column, and a coefficient when the term has one, per predictor, and
+# returns the rows x predictors matrix of effects. Each predictor reads its
+# column as `mo_<target>_<c>` (user decision `1pj2p5j`). A configuration used
+# once keeps its own component, named by `_rk_ast_monotonic_name`.
+function _rk_ast_monotonic_groups(plan, vector_priors, hs_priors, taken)
+    keyed = Dict{Any,Vector{Any}}()
+    keys_in_order = Any[]
+    for predictor in plan.predictors, (index, term) in enumerate(predictor.terms)
+        term.kind in (:monotonic, :monotonic_summand) || continue
+        head = term.kind === :monotonic_summand ? :mo1 : :mo
+        effect = head === :mo && !haskey(hs_priors, (predictor.name, term.addressee))
+        alpha = Tuple(only(vector_priors[term.options.increments].args))
+        key = (head, effect, only(term.columns), alpha)
+        haskey(keyed, key) || (keyed[key] = Any[]; push!(keys_in_order, key))
+        push!(keyed[key], (predictor, index, term))
+    end
+    members = Dict{Tuple{Symbol,Int},Any}()
+    groups = Any[]
+    for key in keys_in_order
+        occurrences = keyed[key]
+        length(occurrences) > 1 || continue
+        head, effect, column, alpha = key
+        source = last(first(occurrences)).options.source
+        group = (; block=_rk_ast_fresh_name(string(head, "_", source), taken),
+            head, effect, column, source, alpha=collect(alpha), entries=Any[])
+        push!(groups, group)
+        for (j, (predictor, index, _)) in enumerate(occurrences)
+            name = _rk_ast_fresh_name(string(head, "_",
+                _rk_ast_linked_target(predictor), "_", source), taken)
+            members[(predictor.name, index)] = (; group, column=j, name)
+        end
+    end
+    (; members, groups)
+end
+
+# Each joint block's call goes before its first column read; its predictors'
+# coefficients and simplexes are recorded per column for coordinate transport.
+function _rk_ast_emit_joint_monotonic!(definitions, statements, groups, taken, coordinates)
+    for group in groups
+        entries = sort(group.entries; by=e -> e.column)
+        priors = [entry.prior for entry in entries]
+        call, betas = _rk_ast_joint_monotonic_component!(definitions, taken,
+            group.block, group.column, group.alpha, priors)
+        first_read = findfirst(s -> any(e -> s === e.read, entries), statements)
+        insert!(statements, first_read, call)
+        for (entry, beta) in zip(entries, betas)
+            _rk_coordinate_record!(coordinates, (; kind=:monotonic,
+                declaration=group.block, column=entry.column, predictor=entry.predictor,
+                head=group.head, source=group.source, beta=entry.beta && beta !== nothing,
+                beta_declaration=beta === nothing ? nothing : first(beta),
+                beta_index=beta === nothing ? () : last(beta)))
+        end
+    end
+    statements
+end
+
 # Varying-name pre-pass (uniform split form): one `b_<suffix>` draws
 # component per bucket (SBBRMI's name) plus one `ranef_<target>_<suffix>`
 # per slice. The `ranef_` prefix cannot collide with the thin layer's
@@ -1214,6 +1272,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     vector_priors = Dict(v.name => v for v in plan.vector_parameters)
     owned_vectors = Set{Symbol}()
     designs = Dict{Symbol,Any}()
+    monotonic_joint = _rk_ast_monotonic_groups(plan, vector_priors, hs_priors, taken)
     for predictor in plan.predictors
         lhs = get(rename, predictor.name, predictor.name)
         r2d2 = get(r2d2s, predictor.name, nothing)
@@ -1233,6 +1292,27 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         population = Tuple{Int,Any,Tuple{Symbol,Tuple}}[]
         scalar_stmts = Expr[]
         monotonic_alpha(term) = only(vector_priors[term.options.increments].args)
+        # A monotonic term's value: its column of a joint block, or its own
+        # component. `prior` is the coefficient's law, `nothing` for a
+        # coefficient-free contrast; `beta` says whether that coefficient pairs.
+        function monotonic!(index, term, prior, head, beta)
+            push!(owned_vectors, term.options.increments)
+            joint = get(monotonic_joint.members, (predictor.name, index), nothing)
+            if joint !== nothing
+                read = Expr(:(=), joint.name, Expr(:ref, joint.group.block, :(:), joint.column))
+                push!(stmts, read)
+                push!(joint.group.entries, (; column=joint.column, predictor=predictor.name,
+                    prior, beta, read))
+                return joint.name
+            end
+            name = _rk_ast_monotonic_component!(defs, stmts, taken,
+                _rk_ast_monotonic_name(term, predictor, taken), only(term.columns),
+                monotonic_alpha(term), prior)
+            _rk_coordinate_record!(coordinates, (; kind=:monotonic,
+                declaration=name, predictor=predictor.name,
+                head, source=term.options.source, beta))
+            name
+        end
         # An ordinary scalar coefficient under its resolved prior.
         function scalar_coefficient!(index, term, override)
             coef = _rk_ast_coef_name(
@@ -1251,13 +1331,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 colactual[index] = only(term.columns)
             end
             if kind === :monotonic_summand
-                refactual[index] = _rk_ast_monotonic_component!(defs, stmts, taken,
-                    _rk_ast_monotonic_name(term, predictor, taken), only(term.columns),
-                    monotonic_alpha(term), nothing)
-                push!(owned_vectors, term.options.increments)
-                _rk_coordinate_record!(coordinates, (; kind=:monotonic,
-                    declaration=refactual[index], predictor=predictor.name,
-                    head=:mo1, source=term.options.source, beta=false))
+                refactual[index] = monotonic!(index, term, nothing, :mo1, false)
             elseif kind === :spline || kind === :hsgp
                 refactual[index] = term.options.id
             elseif kind === :structured
@@ -1327,17 +1401,11 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                         coding=term.options.coding))
             elseif kind === :monotonic && hs_spec === nothing && override !== nothing
                 # The monotonic component owns its simplex and coefficient.
-                replacements[index] = _rk_ast_monotonic_component!(defs, stmts, taken,
-                    _rk_ast_monotonic_name(term, predictor, taken), only(term.columns),
-                    monotonic_alpha(term), override)
-                push!(owned_vectors, term.options.increments)
                 # Its coefficient pairs like a population coefficient only
                 # under an ordinary prior; a shared budget leaves it unpaired.
-                _rk_coordinate_record!(coordinates, (; kind=:monotonic,
-                    declaration=replacements[index], predictor=predictor.name,
-                    head=:mo, source=term.options.source,
-                    beta=r2d2 === nothing &&
-                        !haskey(joint_priors, (predictor.name, term.addressee))))
+                replacements[index] = monotonic!(index, term, override, :mo,
+                    r2d2 === nothing &&
+                        !haskey(joint_priors, (predictor.name, term.addressee)))
             elseif hs_spec === nothing && _rk_ast_population_family(override) &&
                     (kind === :intercept ? predictor.row_source !== nothing :
                         kind === :continuous)
@@ -1348,13 +1416,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             else
                 if kind === :monotonic
                     # A horseshoe coefficient scales the owned contrast.
-                    refactual[index] = _rk_ast_monotonic_component!(defs, stmts, taken,
-                        _rk_ast_monotonic_name(term, predictor, taken), only(term.columns),
-                        monotonic_alpha(term), nothing)
-                    push!(owned_vectors, term.options.increments)
-                    _rk_coordinate_record!(coordinates, (; kind=:monotonic,
-                        declaration=refactual[index], predictor=predictor.name,
-                        head=:mo, source=term.options.source, beta=false))
+                    refactual[index] = monotonic!(index, term, nothing, :mo, false)
                 end
                 if hs_spec !== nothing
                     coef = _rk_ast_coef_name(
@@ -1446,6 +1508,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         end
     end
     _rk_ast_name_shared_designs!(designs, taken)
+    _rk_ast_emit_joint_monotonic!(defs, stmts, monotonic_joint.groups, taken, coordinates)
     for parameter in plan.parameters
         if parameter.family === :LKJCovarianceFactor
             K, theta, eta = parameter.args

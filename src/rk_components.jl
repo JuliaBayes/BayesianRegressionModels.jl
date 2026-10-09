@@ -187,6 +187,62 @@ function _rk_ast_monotonic_component!(definitions, statements, taken, name, inde
     name
 end
 
+# Several predictors' monotonic effects of one column, as one component: one
+# increment simplex per predictor (the columns of `simplex_incr`), one
+# cumulative table, one gather by the codes `c`, and the coefficients `beta`
+# when the effects have them. Returns the call statement and, per predictor,
+# its coefficient's `(declaration, index)` or `nothing`. One shared prior
+# family broadcasts over `beta[1:ntargets]`; mixed families give one
+# statement per predictor.
+function _rk_ast_joint_monotonic_component!(definitions, taken, name, index, alpha, priors)
+    ntargets = length(priors)
+    simplex = Expr(:call, :.~, Expr(:call, :eachcol, Expr(:ref, :simplex_incr,
+            Expr(:call, :(:), 1, :nincr), Expr(:call, :(:), 1, :ntargets))),
+        Expr(:call, :Dirichlet, :alpha))
+    table = :((cumsum(vcat(zeros(1, ntargets), simplex_incr); dims=1))[c, :])
+    inputs = (index, Expr(:vect, alpha...), length(alpha), ntargets)
+    if all(isnothing, priors)
+        body = _rk_ast_component_body(simplex, Expr(:return, table))
+        callee = _rk_ast_shared_definition!(definitions, taken,
+            "brm_joint_monotonic_values", (:c, :alpha, :nincr, :ntargets), body)
+        return _rk_ast_component_call(name, callee, inputs...), fill(nothing, ntargets)
+    end
+    any(isnothing, priors) && error("RK backend: internal: joint monotonic block " *
+        "`$name` mixes effects with and without a coefficient")
+    families = unique(first.(priors))
+    effect = Expr(:return, Expr(:call, :.*, table, Expr(Symbol("'"), :beta)))
+    if length(families) == 1
+        family = only(families)
+        roles = haskey(_RK_POPULATION_FAMILIES, family) &&
+            length(getproperty(_RK_POPULATION_FAMILIES, family)) == length(last(first(priors))) ?
+            getproperty(_RK_POPULATION_FAMILIES, family) :
+            Tuple(Symbol(:arg_, j) for j in eachindex(last(first(priors))))
+        body = _rk_ast_component_body(simplex,
+            Expr(:call, :.~, Expr(:ref, :beta, Expr(:call, :(:), 1, :ntargets)),
+                _rk_ast_dotted(family, roles...)),
+            effect)
+        base = family === :Normal ? "brm_joint_monotonic_effects" :
+            string("brm_joint_monotonic_effects_", lowercase(string(family)))
+        callee = _rk_ast_shared_definition!(definitions, taken, base,
+            (:c, :alpha, :nincr, :ntargets, roles...), body)
+        arguments = [_rk_ast_population_argument([last(prior)[j] for prior in priors])
+            for j in eachindex(roles)]
+        betas = [(Symbol(name, ".beta"), (t,)) for t in 1:ntargets]
+        return _rk_ast_component_call(name, callee, inputs..., arguments...), betas
+    end
+    # Coefficients with different prior families keep one statement each.
+    coefficients = [Symbol(:beta_, t) for t in 1:ntargets]
+    body = _rk_ast_component_body(simplex,
+        (Expr(:call, :~, coefficient, Expr(:call, family, args...))
+            for (coefficient, (family, args)) in zip(coefficients, priors))...,
+        Expr(:(=), :beta, Expr(:vect, coefficients...)),
+        effect)
+    callee = _rk_ast_shared_definition!(definitions, taken,
+        "brm_joint_monotonic_mixed_effects", (:c, :alpha, :nincr, :ntargets), body)
+    betas = [(Symbol(name, ".", coefficient), ()) for coefficient in coefficients]
+    _rk_ast_component_call(name, callee, inputs...), betas
+end
+
 # One shared positive prior broadcasts over the margins; distinct priors are
 # stated per margin and collected into the same `tau` vector.
 function _rk_ast_group_scales(priors, index)
