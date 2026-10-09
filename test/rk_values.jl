@@ -366,9 +366,13 @@ inverse_link_collision_reader(p, q, r, rows, logistic, brm_value_function) =
             mod = ext._rk_emit_module(emitted)
             @test getfield(mod, first(binding)) === BRM.logistic
             names = coordinate_names(backend.model.layout)
-            @test sort(names) == sort([Symbol("pop_$(target).beta_pop.$j")
-                for target in (:logit_p, :probit_q, :cloglog_r) for j in 1:2])
-            index(target, j) = only(findall(==(Symbol("pop_$(target).beta_pop.$j")), names))
+            # The three linked targets share `hcat(1, x)`: one joint block, one
+            # coefficient column per target in formula order.
+            column = (logit_p=1, probit_q=2, cloglog_r=3)
+            @test sort(names) == sort([Symbol("pop_Intercept_x.beta_pop.$j.$t")
+                for t in 1:3 for j in 1:2])
+            index(target, j) = only(findall(
+                ==(Symbol("pop_Intercept_x.beta_pop.$j.$(column[target])")), names))
             linear(u, target) = u[index(target, 1)] .+ u[index(target, 2)] .* data.x
             function oracle(u)
                 p = 1 ./ (1 .+ exp.(-linear(u, :logit_p)))
