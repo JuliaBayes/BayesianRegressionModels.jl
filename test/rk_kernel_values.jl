@@ -259,15 +259,22 @@ end
     plan = BRM._brm_rk_plan(brmi)
     emitted = BRM._rk_emit_ast(plan)
     source = join((sprint(Base.show_unquoted, d) for d in emitted.defs), "\n")
-    # Each data input reaches the reader through its own column; only the
-    # flattened response keeps its nested values in a second port, which is
-    # its raw source (snag rk-emission-grou-9dac9bc6).
-    @test sort!(collect(keys(plan.columns)); by=string) == [:dose, :t, :y, :y_raw_response]
+    # Each data input reaches the reader through its own column, and the
+    # per-subject response is bound as authored with no flattened copy
+    # (snag rk-emission-grou-9dac9bc6, todo 1jocaai).
+    @test sort!(collect(keys(plan.columns)); by=string) == [:dose, :t, :y]
+    @test isequal(plan.columns[:y], data.y)
     @test occursin("loc_reader(t, dose, log_k)", source)
     @test occursin("ReactiveKernels.plate(t, dose, Ref(log_k)) do t, dose, log_k", source)
-    @test occursin("brm_flatten_cells(cells)", source)
-    for retired in ("cell_input", "subject_count", "loc_cell", "init =", "reduce(vcat")
-        @test !occursin(retired, source)
+    # The reader returns its subject cells; the per-subject response reads
+    # them cell by cell, so the response is never flattened. The authored
+    # `loc` stays a named value over the cells, planned only when queried.
+    @test occursin("return cells", source)
+    @test occursin("y[i] .~ Normal.(loc_cells[i], sigma)",
+        sprint(Base.show_unquoted, emitted.main))
+    for retired in ("cell_input", "subject_count", "loc_cell(", "init =", "reduce(vcat",
+            "brm_flatten_response", "raw_response")
+        @test !occursin(retired, source * sprint(Base.show_unquoted, emitted.main))
     end
     backend, problem = consumer_problem(brmi)
     names = coordinate_names(backend.model.layout)
@@ -317,11 +324,15 @@ end
         end
     end
     shadowing_plan = BRM._brm_rk_plan(shadowing)
-    source = join((sprint(Base.show_unquoted, d)
-        for d in BRM._rk_emit_ast(shadowing_plan).defs), "\n")
-    @test occursin("ReactiveKernels.plate(loc_input_y, Ref(sigma)) do y, sigma", source)
-    # The observed cell response's nested port is also its raw likelihood source.
+    shadowed = BRM._rk_emit_ast(shadowing_plan)
+    source = join((sprint(Base.show_unquoted, d) for d in shadowed.defs), "\n")
+    @test occursin("return cells_", source)
+    @test occursin("y[i] .~ Normal.(loc_argument_y_1[i], sigma)",
+        sprint(Base.show_unquoted, shadowed.main))
+    # The observed cell response keeps its kernel input port beside its own
+    # column; observed per subject, both hold the authored arrays.
     @test sort!(collect(keys(shadowing_plan.columns)); by=string) == [:dose, :loc_input_y, :t, :y]
+    @test isequal(shadowing_plan.columns[:y], data.y)
     backend, problem = consumer_problem(shadowing)
     stan = consumer_stan(shadowing, "kernel-reader-shadowing")
     for u in points
@@ -329,7 +340,8 @@ end
         check_consumer_stan(problem, stan, [:log_k => "log_k", :sigma => "sigma"], backend, u)
     end
 
-    # Scalar cells hold one value per subject, including a single subject.
+    # Scalar cells hold one value per subject, including a single subject;
+    # their responses hold one number per subject and stay flat.
     for scalar_data in ((; dose=[1.0, 2.0, 1.5], y=[0.6, 1.1, 0.7]), (; dose=[1.2], y=[0.5]))
         scalar = @brm scalar_data begin
             log_k ~ Normal(0, 1)
@@ -351,4 +363,123 @@ end
             check_consumer_stan(problem, stan, [:log_k => "log_k", :sigma => "sigma"], backend, u)
         end
     end
+end
+
+# A response holding one array per subject is observed per subject: RKPPL
+# nested subject and entry plates over the kernel's subject cells, with the
+# response bound as authored and no flattened response, row geometry port or
+# row-aligned argument reader (todo 1jocaai). Covers a formula observation of
+# a cell output, the same with grouped-data arithmetic, and an in-cell
+# observation, each against an independent oracle, finite differences, the
+# compiled Stan program, its per-subject pointwise densities and withholding.
+@stestset "per-subject observations are RK nested plates" begin
+    data = (; t=[[0.5, 1.5], Float64[], [0.7, 1.1, 2.0]], dose=[1.0, 2.0, 1.5],
+        y=[[0.6, 0.2], Float64[], [1.0, 0.8, 0.3]],
+        reference=[[0.1, 0.0], Float64[], [0.2, -0.1, 0.05]])
+    saved = deepcopy(data)
+    models = (
+        formula=(@brm data begin
+            log_k ~ Normal(0, 1)
+            sigma ~ Exponential(1)
+            @plate for i in eachindex(t)
+                loc[i] = dose[i] .* exp.(-exp(log_k) .* t[i])
+            end
+            y ~ Normal(loc, sigma)
+        end),
+        arithmetic=(@brm data begin
+            log_k ~ Normal(0, 1)
+            sigma ~ Exponential(1)
+            @plate for i in eachindex(t)
+                loc[i] = dose[i] .* exp.(-exp(log_k) .* t[i])
+            end
+            y ~ Normal(loc - reference, sigma)
+        end),
+        cell=(@brm data begin
+            log_k ~ Normal(0, 1)
+            sigma ~ Exponential(1)
+            @plate for i in eachindex(t)
+                m = dose[i] .* exp.(-exp(log_k) .* t[i])
+                y[i] ~ normal(m, sigma)
+                loc[i] = m
+            end
+        end))
+    observed = (formula="y[i] .~ Normal.(loc_cells[i], sigma)",
+        arithmetic="y[i] .~ Normal.(loc_cells[i] .- reference[i], sigma)",
+        cell="y[i] .~ Normal.(loc_argument_y_1[i], sigma)")
+    ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
+    structure(program) = [(e.kind, e.depth) for e in recipe_inventory(program)
+        if e.kind !== :ordinary]
+    for (label, brmi) in pairs(models)
+        emitted = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+        main = sprint(Base.show_unquoted, emitted.main)
+        everything = main * join((sprint(Base.show_unquoted, d) for d in emitted.defs), "\n")
+        @test occursin("@plate for i = eachindex(y)", main)
+        @test occursin(observed[label], main)
+        for retired in ("brm_flatten_response", "y_raw_response", "y_rows", "ones(length(")
+            @test !occursin(retired, everything)
+        end
+        backend, problem = consumer_problem(brmi)
+        @test isequal(backend.plan.columns[:y], data.y)
+        names = coordinate_names(backend.model.layout)
+        @test sort(names) == [:log_k, :sigma]
+        ik, is = findfirst(==(:log_k), names), findfirst(==(:sigma), names)
+        shift = label === :arithmetic ? data.reference : [zero(t) for t in data.t]
+        means(u) = [dose .* exp.(-exp(u[ik]) .* t) .- r
+            for (t, dose, r) in zip(data.t, data.dose, shift)]
+        prior(u) = logpdf(Normal(), u[ik]) + logpdf(Exponential(), exp(u[is])) + u[is]
+        pointwise(u) = [logpdf.(Normal.(mu, exp(u[is])), y) for (mu, y) in zip(means(u), data.y)]
+        oracle(u) = prior(u) + sum(sum(cell; init=0.0) for cell in pointwise(u))
+        stan = consumer_stan(brmi, "nested-plates-$label")
+        points = ([0.0, 0.0], [0.3, -0.2], [-0.4, 0.25])
+        for u in points
+            check_consumer_point(problem, u, oracle)
+            check_consumer_stan(problem, stan, [:log_k => "log_k", :sigma => "sigma"], backend, u)
+        end
+        # The prepared density keeps the group plate with its observation
+        # plate inside, one retained body whatever the number of subjects.
+        translated = ext._rk_translated_plan(backend.plan)
+        sampler = prepare_sampler(backend.model, translated, zeros(2);
+            backend=AutoEnzyme(; mode=Enzyme.Reverse))
+        @test (:plate, 1) in structure(sampler.kernel)
+        # One array of densities per subject, empty subjects included.
+        query = prepare_query(backend.model, translated, :pointwise)
+        for u in points
+            densities = Base.invokelatest(query, u).y
+            @test length(densities) == length(data.y)
+            @test all(isequal.(length.(densities), length.(data.y)))
+            @test all(map((a, b) -> isapprox(a, b; atol=2e-12, rtol=2e-12),
+                densities, pointwise(u)))
+        end
+        @test isequal(data, saved)
+    end
+
+    # Withholding the per-subject response drops its nested plate and density;
+    # withholding the other response keeps it.
+    z = [0.2, -0.1]
+    both = @brm (; data..., z) begin
+        log_k ~ Normal(0, 1)
+        sigma ~ Exponential(1)
+        @plate for i in eachindex(t)
+            loc[i] = dose[i] .* exp.(-exp(log_k) .* t[i])
+        end
+        y ~ Normal(loc, sigma)
+        z ~ Normal(log_k, 1)
+    end
+    for (hold, active) in ((:y, :z), (:z, :y))
+        held = check_rk_source_roundtrip(RKBRMI(both; held_out=hold))
+        @test BRM._rk_observed_names(held.plan) == (active,)
+        @test occursin("@plate", sprint(Base.show_unquoted, BRM._rk_emit_ast(held.plan).main)) ==
+            (active === :y)
+        names = coordinate_names(held.model.layout)
+        ik, is = findfirst(==(:log_k), names), findfirst(==(:sigma), names)
+        oracle(u) = logpdf(Normal(), u[ik]) + logpdf(Exponential(), exp(u[is])) + u[is] +
+            (active === :z ? sum(logpdf.(Normal(u[ik], 1), z)) :
+                sum(sum(logpdf.(Normal.(dose .* exp.(-exp(u[ik]) .* t), exp(u[is])), y); init=0.0)
+                    for (t, dose, y) in zip(data.t, data.dose, data.y)))
+        problem = rk_logdensity_problem(held; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+        for u in ([0.0, 0.0], [0.3, -0.2])
+            check_consumer_point(problem, u, oracle)
+        end
+    end
+    @test isequal(data, saved)
 end

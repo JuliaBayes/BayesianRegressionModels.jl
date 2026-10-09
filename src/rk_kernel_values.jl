@@ -12,8 +12,48 @@ struct _RKPreparedKernelAssignment
     columns::Dict{Symbol,Any}
     group_values::Any
     observations::Tuple
+    # The graph value holding the collected value of each subject, which a
+    # per-subject observation reads entry by entry.
+    cells::Symbol
 end
 _rk_kernel_column_name(column::NamedColumn) = name(column)
+
+# One observed array per subject. RKPPL observes it in nested subject and entry
+# plates: `cells` maps each value read per subject to the graph value holding
+# its per-subject cells; every other value is shared by all subjects.
+struct _RKNestedObservation{O}
+    observation::O
+    cells::Dict{Symbol,Symbol}
+end
+Base.getproperty(observation::_RKNestedObservation, field::Symbol) =
+    field in (:observation, :cells) ? getfield(observation, field) :
+        getproperty(getfield(observation, :observation), field)
+
+_rk_observation_statement(observation, base, taken) =
+    Expr(:call, :.~, observation.name, base)
+function _rk_observation_statement(observation::_RKNestedObservation, base, taken)
+    # Every plate reuses the authored loop name `i` unless the cell reads it.
+    read = union!(_rk_source_symbols!(Set{Symbol}(), base), values(observation.cells))
+    index = :i
+    while index in taken || index in read
+        index = Symbol(index, :_)
+    end
+    cell = Expr(:call, :.~, Expr(:ref, observation.name, index),
+        _rk_ast_index_cells(base, observation.cells, index))
+    Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
+        Expr(:for, Expr(:(=), index, Expr(:call, :eachindex, observation.name)),
+            Expr(:block, cell)))
+end
+_rk_ast_index_cells(value::Symbol, cells, index) =
+    haskey(cells, value) ? Expr(:ref, cells[value], index) : value
+_rk_ast_index_cells(value::Expr, cells, index) =
+    Expr(value.head, (_rk_ast_index_cells(arg, cells, index) for arg in value.args)...)
+_rk_ast_index_cells(value, cells, index) = value
+
+# A nested observation reads its own per-subject cells, so the row alignment
+# of a flattened response does not apply.
+_rk_align_kernel_observation_arguments!(defs, statements, bindings, taken, plan,
+    observation::_RKNestedObservation, distribution) = distribution
 
 function _rk_kernel_observation_callee(scope, expression, kernel)
     Meta.isexpr(expression, :call) || error(
@@ -68,8 +108,8 @@ function _rk_kernel_observation_weight(scope, expression, kernel)
     Expr(:call, first(family.args), rest..., family.args[2:end]...), weight
 end
 
-function _rk_kernel_observation_distribution(observation)
-    arguments = map(name -> _BRMPreparedRef(name, :whole), observation.argument_names)
+function _rk_kernel_observation_distribution(observation, names=observation.argument_names)
+    arguments = map(name -> _BRMPreparedRef(name, :whole), names)
     # The original Stan scalar family is emitted through RKPPL's exact
     # StudentT(nu, location, scale) spelling, retaining its argument order.
     if observation.callable === StanBlocks.student_t
@@ -169,8 +209,13 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             argument_names = Tuple(Symbol(name, :_argument_, source, :_, i)
                 for i in eachindex(values))
             weight_name = weight === nothing ? nothing : Symbol(name, :_weight_, source)
+            # A response holding one array per subject is observed per subject
+            # (RKPPL nested plates).
+            input = inputs[index]
+            nested = input.kind === :element &&
+                get(columns, input.source, nothing) isa AbstractVector{<:AbstractVector}
             push!(observations, (; source, param=lhs, callable,
-                arguments=values, argument_names, weight, weight_name))
+                arguments=values, argument_names, weight, weight_name, nested))
             continue
         end
         push!(body, statement)
@@ -189,8 +234,85 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
     foreach(statement -> _brm_cell_value_refs!(referenced, statement), raw_body)
     available = union(Set(keys(program.context.data)), Set(op.name for op in program.operations))
     globals = sort!(collect(intersect(setdiff(referenced, locals), available)))
+    cells = _rk_ast_fresh_name(string(name, "_cells"), union(available, keys(columns)))
     _RKPreparedKernelAssignment(name, params, body, collected, scope, Tuple(inputs),
-        globals, columns, group_values, Tuple(observations))
+        globals, columns, group_values, Tuple(observations), cells)
+end
+
+# A formula observation of kernel output whose response holds one array per
+# subject is observed per subject when every value its law and bounds read is
+# either per subject (a kernel's cells, grouped data with one array per
+# subject) or shared (a number, scalar data, a scalar parameter), through BRM's
+# elementwise arithmetic. Returns the per-subject cells, or `nothing` to keep
+# the flattened route: a response join (authored as one flat column), weights,
+# missing entries, keyword laws and arguments with one value per flattened row.
+function _rk_nested_kernel_cells(observation, layout, kernels, columns, parameters)
+    (layout.lengths !== nothing && layout.rows === nothing) || return nothing
+    observation.weight === nothing && observation.missing_response === nothing ||
+        return nothing
+    modifier = observation.modifier
+    distribution = modifier === nothing ? observation.distribution :
+        _brm_prepare_expr(modifier.base)
+    distribution isa _BRMPreparedExpr && isempty(distribution.kwargs) || return nothing
+    cells = Dict{Symbol,Symbol}()
+    context = (; kernels, columns, parameters, name=observation.name, lengths=layout.lengths)
+    _rk_nested_law_cells!(cells, distribution.callable, distribution, context) || return nothing
+    modifier === nothing && return cells
+    all(bound -> bound === nothing ||
+            _rk_nested_cells!(cells, _brm_prepare_expr(bound), context),
+        (modifier.lower, modifier.upper)) || return nothing
+    cells
+end
+
+# Data bounds read per subject are validated as the flattened route validates
+# them, on their concatenated values.
+function _rk_validate_nested_bounds(observation, data)
+    modifier = observation.modifier
+    modifier === nothing && return
+    bounds = (modifier.lower, modifier.upper)
+    all(b -> b === nothing || b isa Real || (b isa NamedColumn && parent(b) isa DataColumn),
+        bounds) || return
+    flat = Dict{Symbol,Any}(name(b) => brm_flatten_cells(parent(parent(b))) for b in bounds
+        if b isa NamedColumn && parent(parent(b)) isa AbstractVector{<:AbstractVector})
+    materialize = modifier.kind === :interval_censored ?
+        _brm_materialize_interval_response : _brm_materialize_bounded_response
+    materialize(modifier, observation.name, brm_flatten_cells(observation.response),
+        merge(Dict{Symbol,Any}(data), flat); prefix="RK backend")
+    nothing
+end
+
+_rk_nested_law_cells!(cells, callable, distribution, context) =
+    all(argument -> _rk_nested_cells!(cells, argument, context), distribution.args)
+# Student-t reads its degrees of freedom through `TDist(nu)`.
+function _rk_nested_law_cells!(cells, ::Type{LocationScale}, distribution, context)
+    length(distribution.args) == 3 || return false
+    location, scale, base = distribution.args
+    base isa _BRMPreparedExpr && base.callable === TDist && length(base.args) == 1 &&
+        all(argument -> _rk_nested_cells!(cells, argument, context),
+            (location, scale, only(base.args)))
+end
+
+_rk_nested_cells!(cells, value, context) = false
+_rk_nested_cells!(cells, value::Number, context) = true
+function _rk_nested_cells!(cells, value::_BRMPreparedRef, context)
+    index = findfirst(kernel -> kernel.name === value.name, context.kernels)
+    if index !== nothing
+        cells[value.name] = context.kernels[index].cells
+        return true
+    end
+    data = get(context.columns, value.name, nothing)
+    if data isa AbstractVector{<:AbstractVector}
+        _rk_check_argument_groups(context.name, value.name, data, context.lengths)
+        cells[value.name] = value.name
+        return true
+    end
+    data isa Real || (value.axis === :scalar && value.name in context.parameters)
+end
+function _rk_nested_cells!(cells, value::_BRMPreparedExpr, context)
+    callable = value.callable
+    isempty(value.kwargs) && (haskey(_RK_DERIVED_BINOPS, callable) ||
+        haskey(_RK_DERIVED_CMP, callable) || haskey(_RK_DERIVED_MATH, callable)) &&
+        all(argument -> _rk_nested_cells!(cells, argument, context), value.args)
 end
 
 # The data columns observed by a likelihood: every authored response, and
@@ -286,14 +408,22 @@ end
 _rk_observation_argument_rows!(defs, statements, taken, observation, layout,
     geometry, argument, raw) = argument
 
+# Grouped argument data broadcasts against its response subject by subject: one
+# array per subject, each as long as the response's or a single value.
+function _rk_check_argument_groups(response, argument, raw, expected)
+    lengths = length.(raw)
+    length(lengths) == length(expected) &&
+        all(pair -> first(pair) == last(pair) || first(pair) == 1,
+            zip(lengths, expected)) || error(
+        "RK backend: response `$response` argument `$argument` " *
+        "has group lengths $lengths; expected $expected")
+    nothing
+end
+
 function _rk_observation_argument_rows!(defs, statements, taken, observation, layout,
         geometry, argument, raw::AbstractVector{<:AbstractVector})
     lengths = length.(raw)
-    length(lengths) == length(layout.lengths) &&
-        all(pair -> first(pair) == last(pair) || first(pair) == 1,
-            zip(lengths, layout.lengths)) || error(
-        "RK backend: response `$(observation.name)` argument `$(argument.name)` " *
-        "has group lengths $(length.(raw)); expected $(layout.lengths)")
+    _rk_check_argument_groups(observation.name, argument.name, raw, layout.lengths)
     name = _rk_ast_fresh_name("$(observation.name)_rows_$(argument.name)", taken)
     source = argument.name
     reader = _rk_ast_fresh_name("$(name)_reader", taken)
@@ -487,18 +617,38 @@ Base.@nospecializeinfer function _brm_rk_composed_kernel_plan(@nospecialize(brmi
     observations = Any[plan.observations...]
     taken = union(Set{Symbol}(keys(plan.columns)),
         Set(spec.name for spec in plan.regression.derived),
-        Set(assignment.name for assignment in plan.assignments))
+        Set(assignment.name for assignment in plan.assignments),
+        Set(kernel.cells for kernel in kernels))
     for kernel in kernels, observation in kernel.observations
         raw = program.context.data[observation.source]
+        distribution = _rk_kernel_observation_distribution(observation)
+        weight = observation.weight === nothing ? nothing :
+            _BRMPreparedRef(observation.weight_name, :whole)
+        if observation.nested
+            # The response stays one array per subject. Each argument and the
+            # weight is read per subject or shared, as the cell reads it.
+            plan.columns[observation.source] = raw
+            routes = [_rk_kernel_cell_argument(kernel, name, argument) for (name, argument)
+                in zip(observation.argument_names, observation.arguments)]
+            observation.weight === nothing || push!(routes,
+                _rk_kernel_cell_argument(kernel, observation.weight_name, observation.weight))
+            arguments = Tuple(route.ref for route in routes[eachindex(observation.arguments)])
+            distribution = _rk_kernel_observation_distribution(observation, arguments)
+            weight = observation.weight === nothing ? nothing :
+                _BRMPreparedRef(last(routes).ref, :whole)
+            prepared = _BRMPreparedObservation(observation.source,
+                NamedColumn(observation.source, DataColumn(raw)), distribution, raw,
+                nothing, weight)
+            push!(observations, _RKNestedObservation(prepared, Dict{Symbol,Symbol}(
+                route.ref => route.ref for route in routes if route.route in (:input, :reader))))
+            continue
+        end
         layout = raw isa AbstractVector{<:AbstractVector} ?
             (; values=brm_flatten_cells(raw), rows=nothing, lengths=length.(raw)) :
             (; values=raw, rows=nothing, lengths=nothing)
         _rk_prepare_kernel_observed_values!(plan.columns, taken, plan.regression.derived,
             observation.source, layout, raw;
             port=_rk_kernel_input_port((kernel,), observation.source))
-        distribution = _rk_kernel_observation_distribution(observation)
-        weight = observation.weight === nothing ? nothing :
-            _BRMPreparedRef(observation.weight_name, :whole)
         push!(observations, _BRMPreparedObservation(observation.source,
             NamedColumn(observation.source, DataColumn(plan.columns[observation.source])),
             distribution, raw, nothing, weight))
@@ -535,15 +685,17 @@ end
 # subject plate. Data inputs are plate operands; when a cell also reads a live
 # vector, a bound data axis indexes that vector from an atomic operand. A
 # ragged join iterates its subject row indices and gathers from its shared
-# values; model values read as globals stay shared. The subject cells are then
-# flattened in subject order. A value reading only data stays data-only.
-function _rk_emit_kernel_reader!(defs, statements, bindings, taken, kernel, name, collected)
-    reader_name = _rk_ast_fresh_name(string(name, "_reader"), taken)
+# values; model values read as globals stay shared. It returns one cell per
+# subject, or with `flatten` the cells concatenated in subject order. A value
+# reading only data stays data-only.
+function _rk_emit_kernel_reader!(defs, statements, bindings, taken, kernel, name, collected;
+        flatten::Bool, reader=name)
+    reader_name = _rk_ast_fresh_name(string(reader, "_reader"), taken)
     slice = _rk_kernel_value_slice(kernel, collected)
     cell = Any[[_rk_kernel_bind_calls(statement, kernel.scope, bindings, taken)
         for statement in slice.body];
         _rk_kernel_bind_calls(collected, kernel.scope, bindings, taken)]
-    inputs = collect(zip(slice.params, slice.inputs))
+    inputs = Any[zip(slice.params, slice.inputs)...]
     # A cell reading no per-subject input still iterates one for its subject axis.
     isempty(inputs) && push!(inputs, (first(kernel.params), first(kernel.inputs)))
     # A live vector in a zip plate can change its domain after binding, which
@@ -597,10 +749,11 @@ function _rk_emit_kernel_reader!(defs, statements, bindings, taken, kernel, name
     plate = Expr(:do, Expr(:call, Expr(:., :ReactiveKernels, QuoteNode(:plate)), operands...),
         Expr(:->, Expr(:tuple, formals...), Expr(:block, indexed_values..., gathers..., cell...)))
     cells, values = fresh(:cells), fresh(:values)
-    body = Expr(:block,
+    body = flatten ? Expr(:block,
         Expr(:(=), cells, plate),
         Expr(:(=), values, Expr(:call, :brm_flatten_cells, cells)),
-        Expr(:return, values))
+        Expr(:return, values)) :
+        Expr(:block, Expr(:(=), cells, plate), Expr(:return, cells))
     reader_definition = Expr(:(=), Expr(:call, reader_name, (port[p] for p in ports)...), body)
     push!(defs, Expr(:macrocall,
         Expr(:., :ReactiveKernels, QuoteNode(Symbol("@kernel"))),
@@ -608,22 +761,62 @@ function _rk_emit_kernel_reader!(defs, statements, bindings, taken, kernel, name
     push!(statements, Expr(:(=), name, Expr(:call, reader_name, ports...)))
 end
 
+# How a per-subject observation reads one in-cell argument (`name` holds its
+# value): a model value or whole-model expression the cell reads is shared by
+# every subject; a per-subject input read as is stays its bound port; anything
+# else is its reader's subject cells.
+function _rk_kernel_cell_argument(kernel, name, argument)
+    slice = _rk_kernel_value_slice(kernel, argument)
+    if isempty(slice.params) && isempty(slice.body)
+        return (; route=argument isa Symbol ? :shared : :value,
+            ref=argument isa Symbol ? argument : name)
+    end
+    if argument isa Symbol && isempty(slice.body) && only(slice.inputs).kind === :element
+        return (; route=:input, ref=only(slice.inputs).source)
+    end
+    (; route=:reader, ref=name)
+end
+
+function _rk_emit_kernel_cell_argument!(defs, statements, bindings, taken, kernel, name, argument)
+    route = _rk_kernel_cell_argument(kernel, name, argument)
+    if route.route === :reader
+        _rk_emit_kernel_reader!(defs, statements, bindings, taken, kernel, name, argument;
+            flatten=false)
+    elseif route.route === :value
+        push!(statements, Expr(:(=), name,
+            _rk_kernel_bind_calls(argument, kernel.scope, bindings, taken)))
+    end
+    nothing
+end
+
+# The kernel's value is its subject cells; formula terms read them
+# concatenated, a per-subject observation reads them cell by cell.
 function _rk_emit_value_assignment!(defs, statements, bindings, taken,
         kernel::_RKPreparedKernelAssignment)
     _rk_emit_kernel_reader!(defs, statements, bindings, taken, kernel,
-        kernel.name, kernel.collected)
+        kernel.cells, kernel.collected; flatten=false, reader=kernel.name)
+    push!(statements, Expr(:(=), kernel.name, Expr(:call, :brm_flatten_cells, kernel.cells)))
     for observation in kernel.observations
-        vectorize(value) = Expr(:call, :.*, Expr(:call, :ones,
-            Expr(:call, :length, observation.param)), value)
-        for (name, argument) in zip(observation.argument_names, observation.arguments)
-            _rk_emit_kernel_reader!(defs, statements, bindings, taken, kernel,
-                name, vectorize(argument))
+        named = Any[zip(observation.argument_names, observation.arguments)...]
+        observation.weight === nothing ||
+            push!(named, (observation.weight_name, observation.weight))
+        if observation.nested
+            # Each cell broadcasts against its own response array.
+            for (name, argument) in named
+                _rk_emit_kernel_cell_argument!(defs, statements, bindings, taken,
+                    kernel, name, argument)
+            end
+            continue
         end
-        # A data weight's reader reads only data, so it stays a data-only
+        # A flattened observation needs one argument value per response row. A
+        # data weight's reader reads only data, so it stays a data-only
         # definition for RKPPL's `weighted`.
-        observation.weight === nothing && continue
-        _rk_emit_kernel_reader!(defs, statements, bindings, taken, kernel,
-            observation.weight_name, vectorize(observation.weight))
+        row_aligned(value) = Expr(:call, :.*,
+            Expr(:call, :ones, Expr(:call, :length, observation.param)), value)
+        for (name, argument) in named
+            _rk_emit_kernel_reader!(defs, statements, bindings, taken, kernel,
+                name, row_aligned(argument); flatten=true)
+        end
     end
 end
 
@@ -644,5 +837,5 @@ function _rk_kernel_value_slice(kernel::_RKPreparedKernelAssignment, value)
     kept = [i for (i, param) in enumerate(kernel.params) if param in needed]
     _RKPreparedKernelAssignment(kernel.name, kernel.params[kept], body, value,
         kernel.scope, kernel.inputs[kept], filter(in(needed), kernel.globals),
-        kernel.columns, kernel.group_values, ())
+        kernel.columns, kernel.group_values, (), kernel.cells)
 end

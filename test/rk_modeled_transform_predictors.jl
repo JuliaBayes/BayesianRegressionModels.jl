@@ -119,8 +119,11 @@ end
             c, parts = components(u), pointwise(u)
             @test parts.w_obs ≈ logpdf.(LogNormal(c.mu_w,c.sigma_w),[10.,30.])
             @test parts.raw_x ≈ logpdf.(LogNormal(c.mu_x,c.sigma_x),data.raw_x)
-            @test parts.y ≈ logpdf.(Normal.(c.reads,c.scale),reduce(vcat,data.y))
-            @test parts.values ≈ logpdf.(Normal.(c.internal,c.scale),reduce(vcat,data.values))
+            # Per-subject responses give one array of densities per subject.
+            @test length.(parts.y) == length.(data.y)
+            @test reduce(vcat,parts.y) ≈ logpdf.(Normal.(c.reads,c.scale),reduce(vcat,data.y))
+            @test length.(parts.values) == length.(data.values)
+            @test reduce(vcat,parts.values) ≈ logpdf.(Normal.(c.internal,c.scale),reduce(vcat,data.values))
             before = copy(u)
             replay_gradient = similar(u)
             replay_value, _ = sampler_value_and_gradient!(replay,replay_gradient,u)
