@@ -426,14 +426,12 @@ function _rk_observation_argument_rows!(defs, statements, taken, observation, la
     _rk_check_argument_groups(observation.name, argument.name, raw, layout.lengths)
     name = _rk_ast_fresh_name("$(observation.name)_rows_$(argument.name)", taken)
     source = argument.name
-    reader = _rk_ast_fresh_name("$(name)_reader", taken)
+    # Arguments as long as the response flatten in the argument kernel; a
+    # singleton per subject repeats over its rows in a subject plate.
     if lengths == layout.lengths
-        push!(defs, :(ReactiveKernels.@kernel $reader(raw) = begin
-            values = brm_flatten_cells(raw)
-            return values
-        end))
-        push!(statements, :($name = $reader($source)))
+        push!(statements, :($name = brm_flatten_cells($source)))
     else
+        reader = _rk_ast_fresh_name("$(name)_reader", taken)
         push!(defs, :(ReactiveKernels.@kernel $reader(raw, groups) = begin
             cells = ReactiveKernels.plate(raw, groups) do value, rows
                 ones(length(rows)) .* value
@@ -456,12 +454,8 @@ function _rk_observation_argument_rows!(defs, statements, taken, observation, la
     name = _rk_ast_fresh_name("$(observation.name)_rows_$(argument.name)", taken)
     # The original response join partitions these rows; the bound partition
     # port orders them and the argument gather stays in the graph.
-    reader = _rk_ast_fresh_name("$(name)_reader", taken)
-    push!(defs, :(ReactiveKernels.@kernel $reader(raw, groups) = begin
-        values = raw[brm_flatten_cells(groups)]
-        return values
-    end))
-    push!(statements, Expr(:(=), name, Expr(:call, reader, argument.name, geometry())))
+    push!(statements, Expr(:(=), name, Expr(:ref, argument.name,
+        Expr(:call, :brm_flatten_cells, geometry()))))
     _BRMPreparedRef(name, :whole)
 end
 

@@ -824,7 +824,6 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
         base = _rk_weighted_observation(base, observation.weight, bindings, taken)
         push!(stmts, _rk_observation_statement(observation, base, taken))
     end
-    stmts = _rk_source_data_axes(stmts, plan.columns, _rk_observed_names(plan))
     computed = Set{Symbol}()
     foreach(statement -> _rk_source_assignments!(computed, statement), stmts)
     stmts = _rk_order_value_statements(stmts, setdiff(Set(keys(plan.columns)), computed), defs;
