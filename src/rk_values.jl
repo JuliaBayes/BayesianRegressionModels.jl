@@ -813,6 +813,6 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
         observed=_rk_observed_names(plan))
     authored = union(Set(a.name for a in plan.assignments),
         (p.name for p in plan.regression.predictors))
-    _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings),
+    _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken),
         _rk_observed_names(plan); retained=authored)
 end

@@ -64,9 +64,11 @@ function _rk_resolve_callable_sources(emitted::_RKEmittedProgram)
     resolved
 end
 
-_rk_source_program(definitions, main, bindings) =
+# `taken` holds the emitter's reserved names, including data columns the
+# source may never spell but the program binds by name.
+_rk_source_program(definitions, main, bindings, taken=()) =
     _rk_resolve_callable_sources(_rk_name_callable_bindings(
-        _RKEmittedProgram(definitions, main, bindings)))
+        _RKEmittedProgram(definitions, main, bindings), taken))
 
 # An opaque callable is bound under a placeholder while the program is
 # emitted; `#` keeps it out of every authored and generated name.
@@ -115,12 +117,14 @@ function _rk_callable_name_free(name::Symbol, @nospecialize(callable))
 end
 
 # Each opaque callable takes its own name once the whole program exists, made
-# fresh against every name the program reads; an anonymous callable takes a
-# generic one. A source provider receives the chosen name as its entry.
-function _rk_name_callable_bindings(emitted::_RKEmittedProgram)
+# fresh against every name the program reads or the emitter reserved; an
+# anonymous callable takes a generic one. A source provider receives the
+# chosen name as its entry.
+function _rk_name_callable_bindings(emitted::_RKEmittedProgram, taken=())
     any(binding -> _rk_is_callable_placeholder(first(binding)), emitted.bindings) ||
         return emitted
     used = Set{Symbol}(first.(emitted.bindings))
+    union!(used, taken)
     _rk_source_symbols!(used, emitted.main)
     _rk_source_symbols!(used, emitted.defs)
     renames = Dict{Symbol,Symbol}()

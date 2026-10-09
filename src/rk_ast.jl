@@ -1497,6 +1497,6 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     end
     values || (stmts = _rk_source_data_axes(
         stmts, plan.columns, _rk_observed_names(plan)))
-    _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings),
+    _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken),
         _rk_observed_names(plan))
 end
