@@ -74,6 +74,25 @@ representation may specialize:
 julia --startup-file=no --project=test test/rk_planning_specialization.jl
 ```
 
+## NLME estimators
+
+`nlme_view.jl` pins `brm_nlme_view` and the lockstep evaluation
+(`brm_nlme_model`, `brm_nlme_loglikelihoods[_and_gradients]`) against an
+independent per-subject oracle. It runs in the test environment above.
+`nlme_estimation_ext.jl` covers the NLMEEstimation.jl protocol extension.
+NLMEEstimation.jl is not published yet, so it is not part of
+`test/Project.toml`. Run the file from a copy of this environment that
+develops a local NLMEEstimation checkout:
+
+```sh
+cp test/Project.toml test/Manifest.toml <scratch-env>/
+julia --project=<scratch-env> -e 'using Pkg; Pkg.develop(path="<NLMEEstimation checkout>")'
+julia --project=<scratch-env> test/nlme_estimation_ext.jl
+```
+
+Without NLMEEstimation the file stops with an error rather than skipping.
+Shared fixtures live in `nlme_fixtures.jl`.
+
 ## Description PDF rendering
 
 `description_tex.jl` checks Student-t sampling equations for standard, affine,
