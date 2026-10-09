@@ -251,7 +251,7 @@ end
     names = coordinate_names(backend.model.layout)
     @test length(names) == 5
     index(name) = only(findall(==(Symbol(name)), names))
-    intercept = index("pop_theta.beta_pop.1")
+    intercept = index("theta_Intercept")
     scale = index("b_p_subject.tau.1")
     levels = CategoricalArrays.levels(data.subject)
     innovations = [index("b_p_subject.z.$j.1") for j in eachindex(levels)]

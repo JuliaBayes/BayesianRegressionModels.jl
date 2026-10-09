@@ -36,6 +36,8 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
     @test occursin("(vcat(0.0, nu_g))[g_level]", main)
     @test occursin("(vcat(0.0, eta_g))[g__ref_3_level]", main)
     @test occursin("zeta_g[g_level]", main)
+    @test occursin("eta_Intercept ~ Normal", main)
+    @test !occursin("X_eta =", main)
     # `pa` and `pb` share one design matrix.
     @test count("hcat(ones(length(x)), x, w)", main) == 1
     @test occursin("pop_pb ~ brm_population_effects(X_pa, 3", main)
@@ -51,7 +53,7 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
         nu = [ones(6) data.w] * coefs(u, "pop_nu.beta_pop", 2) .+
             [0.0; coefs(u, "nu_g", 2)][data.g]
         eg = coefs(u, "eta_g", 2)
-        eta = at(u, "pop_eta.beta_pop.1") .+ [eg[2], eg[1], 0.0][data.g]
+        eta = at(u, "eta_Intercept") .+ [eg[2], eg[1], 0.0][data.g]
         bz = coefs(u, "pop_zeta.beta_pop", 2)
         zeta = coefs(u, "zeta_g", 3)[data.g] .+ bz[1] .* data.x .+ bz[2] .* data.w
         design = [ones(6) data.x data.w]

@@ -93,7 +93,7 @@ const mixed_axes = (;
     group = nt.b_p_subject
     C = group.z * (group.tau .* group.L)'
     a = nt.pop_a.beta_pop[1] .+ nt.pop_a.beta_pop[2] .* mixed_axes.x .+ C[[3, 1, 2], 1]
-    b = exp.(only(nt.pop_log_b.beta_pop) .+ C[[3, 1, 2], 2])
+    b = exp.(nt.b_Intercept .+ C[[3, 1, 2], 2])
     c = nt.pop_c.beta_pop[1] .+ nt.pop_c.beta_pop[2] .* mixed_axes.w
     expected = [nt.multiplier * (a[mixed_axes.subject_row[j]] +
         b[mixed_axes.subject_row[j]] * mixed_axes.t[j]) +
@@ -102,7 +102,7 @@ const mixed_axes = (;
     expected_ll = logpdf.(Normal.(expected, nt.sigma), mixed_axes.y)
     @test pointwise.y ≈ expected_ll
     @test value_query(backend, :likelihood, u) ≈ sum(expected_ll)
-    normal_draws = [nt.pop_a.beta_pop; nt.pop_log_b.beta_pop; nt.pop_c.beta_pop; nt.multiplier]
+    normal_draws = [nt.pop_a.beta_pop; nt.b_Intercept; nt.pop_c.beta_pop; nt.multiplier]
     prior = sum(logpdf.(Normal(), normal_draws)) +
         sum(logpdf.(Normal(), group.z)) +
         # Default shared scales restrict the Normal kernel to positive values;
@@ -227,7 +227,7 @@ read_rows(value, rows) = value[rows]
             end
             path .*= nt.mu_ar_mu_t
             @test length(u) == 8
-            (logpdf(Normal(), only(nt.pop_mu.beta_pop)) + logpdf(Normal(), nt.mu_ar_mu_t) +
+            (logpdf(Normal(), nt.mu_Intercept) + logpdf(Normal(), nt.mu_ar_mu_t) +
                 logpdf(Normal(), nt.ar_mu_t.phi_raw) + sum(logpdf.(Normal(), z)), 0.0)
         else
             z = getproperty(nt.dar_mu_t_level, :_ppl_scan_z_level)
@@ -237,13 +237,13 @@ read_rows(value, rows) = value[rows]
                 path[i] = path[i - 1] + increment
             end
             @test length(u) == 7
-            (logpdf(Normal(), only(nt.pop_mu.beta_pop)) +
+            (logpdf(Normal(), nt.mu_Intercept) +
                 logpdf(truncated(Normal(0.5, 0.2), 0, 1), nt.dar_mu_t_level.beta) +
                 logpdf(truncated(Normal(0, 0.2), 0, Inf), nt.dar_mu_t_level.sigma) +
                 sum(logpdf.(Normal(), z)),
                 log(nt.dar_mu_t_level.beta) + log1p(-nt.dar_mu_t_level.beta) + log(nt.dar_mu_t_level.sigma))
         end
-        likelihood = sum(logpdf.(Normal.(only(nt.pop_mu.beta_pop) .+ path[df.rows], 1), df.y))
+        likelihood = sum(logpdf.(Normal.(nt.mu_Intercept .+ path[df.rows], 1), df.y))
         @test value_query(backend, :likelihood, u) ≈ likelihood
         @test value_query(backend, :prior, u) ≈ prior
         @test value_query(backend, :sampler, u) ≈ likelihood + prior + jac
@@ -285,7 +285,7 @@ end
         # The group component owns its scales, factors and standardized draws.
         group = getproperty(nt, only(filter(n -> startswith(string(n), "b_"), propertynames(nt))))
         scale, raw = group.tau, group.z
-        intercept = only(nt.pop_mu.beta_pop)
+        intercept = nt.mu_Intercept
         gi = [1, 1, 2, 3, 3]
         expected = if grouped === :membership
             hi = [3, 2, 1, 1, 2]
@@ -411,7 +411,7 @@ end
     nt = constrain(backend.model.layout, u)
     C = nt.b_g.z * (nt.b_g.tau .* nt.b_g.L)'
     gi = [2, 1, 3, 1, 2]
-    mu = only(nt.pop_mu.beta_pop) .+ C[gi, 1] .+ (df.c .== 4) .* C[gi, 2] .+ (df.c .== 6) .* C[gi, 3]
+    mu = nt.mu_Intercept .+ C[gi, 1] .+ (df.c .== 4) .* C[gi, 2] .+ (df.c .== 6) .* C[gi, 3]
     @test value_query(backend, :pointwise, u).y ≈
         logpdf.(Normal.(mu[df.rows], 1), df.y)
 end

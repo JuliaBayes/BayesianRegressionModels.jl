@@ -47,19 +47,19 @@ const CASES = (
                 p = constrain(layout,u)
                 if label == "group caller tau"
                     b = p.b_p_g
-                    eta = only(p.pop_mu.beta_pop) .+ (b.z .* b.tau[1])[DATA.g]
+                    eta = p.mu_Intercept .+ (b.z .* b.tau[1])[DATA.g]
                     lp = logpdf(Exponential(),p.tau) +
                         logpdf(Exponential(p.tau),only(b.tau)) +
-                        sum(logpdf.(Normal(),b.z)) + logpdf(Normal(),only(p.pop_mu.beta_pop))
+                        sum(logpdf.(Normal(),b.z)) + logpdf(Normal(),p.mu_Intercept)
                     jac = log(p.tau) + log(only(b.tau))
                     response_scale = p.tau
                 elseif label == "HSGP caller sigma"
                     h = p.hsgp_x
                     weights = h.sigma*sqrt(h.rho_iso*sqrt(2pi)) .* exp.(-h.rho_iso^2 .* omega2 ./ 4)
-                    eta = only(p.pop_mu.beta_pop) .+ PHI*(weights .* h.beta_raw)
+                    eta = p.mu_Intercept .+ PHI*(weights .* h.beta_raw)
                     lp = logpdf(Exponential(),p.sigma) + logpdf(Exponential(p.sigma),h.sigma) +
                         logpdf(LogNormal(),h.rho_iso) + sum(logpdf.(Normal(),h.beta_raw)) +
-                        logpdf(Normal(),only(p.pop_mu.beta_pop))
+                        logpdf(Normal(),p.mu_Intercept)
                     jac = log(p.sigma) + log(h.sigma) + log(h.rho_iso-floor)
                     response_scale = 1.0
 

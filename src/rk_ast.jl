@@ -241,15 +241,16 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol},
         colref::Dict{Int}, refref::Dict{Int}; values::Bool=false,
         replacements=Dict{Int,Any}())
     summands = Any[]
+    intercept = nothing
     for (index, term) in enumerate(predictor.terms)
         if haskey(replacements, index)
             # A component value (or nothing, when an earlier one absorbed it).
             replacement = replacements[index]
             replacement === nothing || push!(summands, replacement)
         elseif term.kind === :intercept
-            push!(summands, predictor.row_source === nothing ? coefs[index] :
-                Expr(:call, :.*, coefs[index], Expr(:call, :ones,
-                    Expr(:call, :length, predictor.row_source))))
+            # A scalar; it broadcasts against the other (row-valued) summands.
+            intercept = coefs[index]
+            push!(summands, intercept)
         elseif term.kind === :continuous
             push!(summands, Expr(:call, :.*, coefs[index], colref[index]))
         elseif term.kind === :factor
@@ -300,8 +301,11 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol},
             push!(summands, Expr(:call, :.*, coefs[index], refref[index]))
         end
     end
-    length(summands) == 1 ? only(summands) :
-        Expr(:call, :.+, summands...)
+    length(summands) == 1 || return Expr(:call, :.+, summands...)
+    # Keep the authored predictor's row axis when other model values read it.
+    only(summands) === intercept && predictor.row_source !== nothing ?
+        Expr(:call, :fill, intercept,
+            Expr(:call, :length, predictor.row_source)) : only(summands)
 end
 
 function _rk_ast_r2d2_scale(r2d2, addressee; scalar=true, variance_values=nothing)
@@ -1207,6 +1211,18 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         population = Tuple{Int,Any,Tuple{Symbol,Tuple}}[]
         scalar_stmts = Expr[]
         monotonic_alpha(term) = only(vector_priors[term.options.increments].args)
+        # An ordinary scalar coefficient under its resolved prior.
+        function scalar_coefficient!(index, term, override)
+            coef = _rk_ast_coef_name(
+                string(predictor.name, "_", term.addressee), taken)
+            coefs[index] = coef
+            r2d2 === nothing &&
+                !haskey(joint_priors, (predictor.name, term.addressee)) &&
+                _rk_coordinate_record!(coordinates, (; kind=:population,
+                    declaration=coef, predictor=predictor.name,
+                    coefficient=term.addressee))
+            Expr(:call, :~, coef, Expr(:call, override[1], override[2]...))
+        end
         for (index, term) in enumerate(predictor.terms)
             kind = term.kind
             if kind in (:continuous, :factor, :monotonic, :monotonic_summand, :offset, :ar, :me)
@@ -1318,22 +1334,25 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                         declaration=refactual[index], predictor=predictor.name,
                         head=:mo, source=term.options.source, beta=false))
                 end
-                coef = _rk_ast_coef_name(
-                    string(predictor.name, "_", term.addressee), taken)
-                coefs[index] = coef
                 if hs_spec !== nothing
+                    coef = _rk_ast_coef_name(
+                        string(predictor.name, "_", term.addressee), taken)
+                    coefs[index] = coef
                     push!(scalar_stmts, Expr(:call, :~, coef, _rk_ast_horseshoe_block!(
                         defs, taken, hs_spec[1], hs_tau, hs_spec[2] / hs_scale)))
-                elseif override !== nothing
-                    push!(scalar_stmts, Expr(:call, :~, coef,
-                        Expr(:call, override[1], override[2]...)))
-                    r2d2 === nothing &&
-                        !haskey(joint_priors, (predictor.name, term.addressee)) &&
-                        _rk_coordinate_record!(coordinates, (; kind=:population,
-                            declaration=coef, predictor=predictor.name,
-                            coefficient=term.addressee))
+                else
+                    push!(scalar_stmts, scalar_coefficient!(index, term, override))
                 end
             end
+        end
+        # A lone intercept is its scalar coefficient, not a one-column design
+        # product.
+        if length(population) == 1 &&
+                predictor.terms[first(only(population))].kind === :intercept
+            index, _, override = only(population)
+            pushfirst!(scalar_stmts,
+                scalar_coefficient!(index, predictor.terms[index], override))
+            empty!(population)
         end
         for term in predictor.terms
             term.kind === :spline || continue
