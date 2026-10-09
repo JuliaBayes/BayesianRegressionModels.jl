@@ -86,7 +86,8 @@ _brm_nlme_records(plan::Union{_RKStructuralPlan,_RKValuePlan,_RKHeldOutPlan}) =
 _brm_nlme_records(plan) = _brm_nlme_error(
     "brm_nlme_view: an RK plan of kind `$(nameof(typeof(plan)))` has no " *
     "semantic coordinate inventory, so its NLME partition cannot be read. " *
-    "Kernel/panel (`kernel(...)`, `@plate for`) models are not covered yet.")
+    "The legacy panel `kernel(...)` route is not covered; `@plate for` cells " *
+    "lower to value plans, which are.")
 
 _brm_nlme_owned(name::Symbol, declaration::Symbol) = name === declaration ||
     startswith(String(name), string(declaration, "."))
