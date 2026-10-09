@@ -109,38 +109,6 @@ _rk_ast_level_value(value::CA.CategoricalValue) = _rk_ast_level_value(CA.unwrap(
 _rk_ast_level_value(value::Symbol) = QuoteNode(value)
 _rk_ast_level_values(values) = Expr(:vect, (_rk_ast_level_value(value) for value in values)...)
 
-# Whole numerical calls may return arrays. RKPPL observes `y .~ ...` only over
-# a data column or a vector-shaped derived column, and lowers a data-only
-# undotted call as a scalar definition, so a computed response states its
-# observation axis in source. The range is geometry metadata; the values still
-# come from the graph call. Every other computed column keeps its plain
-# assignment: RKPPL reads it with its ordinary Julia axes.
-function _rk_source_data_axes(statements, columns, observed)
-    taken = Set{Symbol}(keys(columns))
-    foreach(statement -> _rk_source_symbols!(taken, statement), statements)
-    out = Expr[]
-    for statement in statements
-        if !Meta.isexpr(statement, :(=), 2)
-            push!(out, statement)
-            continue
-        end
-        name, value = statement.args
-        if !(name isa Symbol && name in observed &&
-                haskey(columns, name) && columns[name] isa AbstractVector)
-            push!(out, statement)
-            continue
-        end
-        values = _rk_ast_fresh_name(string(name, "_source_values"), taken)
-        rows = _rk_ast_fresh_name(string(name, "_source_rows"), taken)
-        range = Expr(:call, GlobalRef(Base, :eachindex), values)
-        push!(out, Expr(:(=), values, value),
-            Expr(:(=), rows, Expr(:call, GlobalRef(Base, :collect), range)),
-            Expr(:(=), name, _rk_ast_dotted(:getindex,
-                Expr(:call, :Ref, values), rows)))
-    end
-    out
-end
-
 function _rk_lower_assignment_expr(node, name::Symbol)
     node isa Number && return node
     node isa _BRMPreparedRef && return node.name
@@ -1550,8 +1518,6 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 fused_heads, union(Set(keys(plan.columns)), Set(Base.values(rename)),
                     Set(p.name for p in plan.predictors)), effects_name))
     end
-    values || (stmts = _rk_source_data_axes(
-        stmts, plan.columns, _rk_observed_names(plan)))
     _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken),
         _rk_observed_names(plan))
 end

@@ -178,7 +178,15 @@ function check_grouped_arguments(label, data)
         port = only(key for (key, value) in backend.plan.columns if isequal(value, partition))
         @test occursin(string(port), main)
         @test !occursin("[2, 3, 5, 1, 4, 6, 7]", definitions * main)
-        @test :(raw[brm_flatten_cells(groups)]) in graph_sources
+        # The joined response is the gather itself, with no identity row
+        # gather. Each per-row argument is gathered by a plain statement in
+        # its argument kernel, which stays in the built graph, not by a
+        # one-line reader kernel (snag rk-emission-wrap-4ee9950d).
+        @test occursin("y = brm_gather_response(y_raw_response, $port)", main)
+        @test !occursin("_source_rows", main)
+        @test occursin("y_rows_y_input_2 = y_input_2[brm_flatten_cells(y_input_4)]", definitions)
+        @test !occursin("_reader(raw, groups)", definitions)
+        @test :(y_input_2[brm_flatten_cells(y_input_4)]) in graph_sources
     else
         # Each subject's arguments broadcast against its own response array; a
         # singleton reference repeats over that subject's observations.
