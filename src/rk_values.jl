@@ -781,32 +781,6 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
         completion.nmissing > 0 && _rk_coordinate_record!(coordinates,
             (; kind=:missing_value, target=completion.source))
     end
-    # Keep authored deterministic values as transparent graph computations.
-    # RKPPL's affine likelihood lowering otherwise inlines an authored value
-    # into the location it feeds, where it refuses some valid scalar summands
-    # (`loc = mu + 0.8 * s[1] - s[3]`; ReactiveKernels snag
-    # rkppl-declared-a-a2a040fc). BRM's own formula predictor values are
-    # component sums that lowering admits, so they stay plain statements, as
-    # in the StanBlocks emission.
-    graph_values = Set(a.name for a in plan.assignments
-        if a isa _BRMPreparedAssignment)
-    ports = Set{Symbol}(keys(plan.columns))
-    foreach(statement -> _rk_source_outputs!(ports, statement), stmts)
-    for index in eachindex(stmts)
-        statement = stmts[index]
-        Meta.isexpr(statement, :(=), 2) || continue
-        target, expression = statement.args
-        target in graph_values || continue
-        inputs = sort!(collect(intersect(
-            _rk_source_symbols!(Set{Symbol}(), expression), ports)); by=string)
-        callee = _rk_ast_fresh_name(string("brm_value_", target), taken)
-        definition = Expr(:(=), Expr(:call, callee, inputs...),
-            Expr(:block, Expr(:(=), target, expression)))
-        push!(defs, Expr(:macrocall,
-            Expr(:., :ReactiveKernels, QuoteNode(Symbol("@kernel"))),
-            LineNumberNode(0), definition))
-        stmts[index] = Expr(:(=), target, Expr(:call, callee, inputs...))
-    end
     for observation in plan.observations
         modifier = observation.modifier
         distribution = modifier === nothing ? observation.distribution :
