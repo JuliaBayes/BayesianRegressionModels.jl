@@ -93,7 +93,7 @@ end
 
 # Grouped or hyper-predicted HSGP: one block allocating the hyperparameters,
 # their group-level effects and the basis weights, returning the summand.
-function _rk_ast_hsgp_grouped(definitions, term, PHI, lambda, floors, taken, bindings)
+function _rk_ast_hsgp_grouped(definitions, term, PHI, omega2_value, floors, taken, bindings)
     options = term.options
     G = get(options, :n_groups, 1)
     rho_prior = _rk_ast_hsgp_hyper_prior(options, :length_scale, bindings, taken)
@@ -101,8 +101,8 @@ function _rk_ast_hsgp_grouped(definitions, term, PHI, lambda, floors, taken, bin
     grouped = haskey(options, :group_index)
     block = _rk_block_body(rho_prior, sigma_prior)
     P = _rk_block_argument!(block, :PHI, PHI)
-    omega2 = _rk_block_argument!(block, :omega2, lambda)
-    floor = _rk_block_argument!(block, :floor, floors)
+    omega2 = _rk_block_argument!(block, :omega2, omega2_value)
+    floor = floors === nothing ? nothing : _rk_block_argument!(block, :floor, floors)
     group_index = grouped ? _rk_block_argument!(block, :group_index, options.group_index) :
         nothing
     rho = _rk_ast_hsgp_hyper!(block, options, :length_scale, rho_prior, floor, G)

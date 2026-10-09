@@ -83,29 +83,39 @@ end
         for intermediate in ("basis_rows","omega2","weights")
             @test occursin(intermediate,actual_outputs)
         end
-        for j in eachindex(K)
-            @test occursin("frequency_$j",actual_outputs)
+        # A tensor basis keeps one frequency vector per axis; a single axis
+        # computes `omega2` directly.
+        if length(K) > 1
+            for j in eachindex(K)
+                @test occursin("frequency_$j",actual_outputs)
+            end
         end
         PHI, omega2, floors = fixed_hsgp_oracle((data.x,data.w)[1:length(K)],K,domains)
+        length(K) == 1 && (omega2 = vec(omega2))
+        # The main block destructures one function-shaped basis graph; there
+        # are no per-endpoint reader kernels.
+        main = sprint(Base.show_unquoted,emitted.main)
+        id = length(K)==1 ? "hsgp_x" : "hsgp_x_w"
+        call = "($(id)_PHI, $(id)_omega2, $(id)_rho_floor) = brm_hsgp_basis_graph(" *
+            join(("x","w")[1:length(K)],", ") * ")"
+        @test occursin(call,main)
+        @test !occursin("$(id)_basis_graph",text)
+        @test !occursin("basis_matrix()",text)
+        @test !occursin("length_scale_floor",text)
         ext = Base.get_extension(BRM,:BayesianRegressionModelsReactiveKernelsExt)
         mod = ext._rk_emit_module(emitted)
         definition = only(filter(d -> BRM._rk_source_definition(d).kind === :kernel &&
-            endswith(string(BRM._rk_source_definition(d).name),"_basis_graph"),emitted.defs))
-        owner = getfield(mod,BRM._rk_source_definition(definition).name)
-        have = Tuple(Symbol(:axis_,j) for j in eachindex(K))
-        for (method, expected) in ((:basis_matrix,PHI),(:squared_frequencies,omega2),
-                (:length_scale_floor,iso ? maximum(floors) : floors))
-            reader = Base.invokelatest(prepare,getproperty(owner,method);have,want=method)
-            @test Base.invokelatest(reader,(data.x,data.w)[1:length(K)]...) ≈ expected atol=2e-15 rtol=2e-15
-            if method === :basis_matrix
-                new_axes = ([0.9,-0.8,0.1,0.3],[-0.7,0.2,0.4,-0.3])[1:length(K)]
-                new_expected = first(fixed_hsgp_oracle(new_axes,K,domains))
-                @test Base.invokelatest(reader,new_axes...) ≈ new_expected atol=2e-15 rtol=2e-15
-                @test Base.invokelatest(reader,map(x->view(x,:),new_axes)...) ≈ new_expected atol=2e-15 rtol=2e-15
-            end
+            BRM._rk_source_definition(d).name === :brm_hsgp_basis_graph,emitted.defs))
+        owner = getfield(mod,:brm_hsgp_basis_graph)
+        basis = Base.invokelatest(owner,(data.x,data.w)[1:length(K)]...)
+        for (actual, expected) in zip(basis,(PHI,omega2,iso ? maximum(floors) : floors))
+            @test actual ≈ expected atol=2e-15 rtol=2e-15
         end
+        new_axes = ([0.9,-0.8,0.1,0.3],[-0.7,0.2,0.4,-0.3])[1:length(K)]
+        new_expected = first(fixed_hsgp_oracle(new_axes,K,domains))
+        @test first(Base.invokelatest(owner,new_axes...)) ≈ new_expected atol=2e-15 rtol=2e-15
+        @test first(Base.invokelatest(owner,map(x->view(x,:),new_axes)...)) ≈ new_expected atol=2e-15 rtol=2e-15
         names = coordinate_names(backend.model.layout)
-        id = length(K)==1 ? "hsgp_x" : "hsgp_x_w"
         position(name) = only(findall(==(Symbol(name)),names))
         # The HSGP component owns its hyperparameters and basis weights.
         rpos = iso ? [position(id*".rho_iso")] : [position(id*".rho_$j") for j in eachindex(K)]

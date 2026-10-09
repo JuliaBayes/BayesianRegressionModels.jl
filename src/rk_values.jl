@@ -311,20 +311,27 @@ end
 function _rk_ast_value_hsgp(definitions, term, taken, bindings)
     options = term.options
     PHI = _rk_ast_fresh_name(string(options.id, "_PHI"), taken)
-    lambda = _rk_ast_fresh_name(string(options.id, "_lambda"), taken)
+    omega2 = _rk_ast_fresh_name(string(options.id, "_omega2"), taken)
     periodic = get(options, :cov, :exp_quad) === :periodic
     k = options.k isa Tuple ? Expr(:tuple, options.k...) : options.k
-    floors = _rk_ast_fresh_name(string(options.id, "_floors"), taken)
+    grouped = haskey(options, :group_index) || !isempty(get(options, :hyper_plans, ()))
+    # The length-scale floor exists only where a prior or hyper-predictor reads it.
+    floor_read = options.rho_truncated ||
+        any(p -> p.hyper === :length_scale, get(options, :hyper_plans, ()))
+    floors = floor_read ? _rk_ast_fresh_name(string(options.id, "_rho_floor"), taken) :
+        nothing
     stmts = if periodic
         call =
         Expr(:call, :brm_hsgp_periodic_basis, only(term.columns), k, options.period)
-        Expr[Expr(:(=), Expr(:tuple, PHI, lambda, floors), call)]
+        # Destructuring drops the helper's trailing floor when nothing reads it.
+        targets = floors === nothing ? (PHI, omega2) : (PHI, omega2, floors)
+        Expr[Expr(:(=), Expr(:tuple, targets...), call)]
     else
-        _rk_ast_hsgp_basis_graph!(definitions, term, taken, PHI, lambda, floors)
+        _rk_ast_hsgp_basis_graph!(definitions, term, taken, PHI, omega2, floors)
     end
-    if haskey(options, :group_index) || !isempty(get(options, :hyper_plans, ()))
+    if grouped
         push!(stmts, Expr(:call, :~, options.id,
-            _rk_ast_hsgp_grouped(definitions, term, PHI, lambda, floors, taken, bindings)))
+            _rk_ast_hsgp_grouped(definitions, term, PHI, omega2, floors, taken, bindings)))
         return stmts
     end
     axes = periodic || options.iso ? 1 : length(term.columns)
@@ -334,7 +341,7 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
     value = periodic ?
         :(PHI * (brm_hsgp_periodic_sqrt_spd(omega2, sigma, $rho) .* beta_raw)) :
         _rk_ast_hsgp_value_graph!(definitions, term, taken, :PHI, :omega2, :sigma, rho, :beta_raw)
-    _rk_ast_hsgp_component!(definitions, stmts, taken, options.id, PHI, lambda,
+    _rk_ast_hsgp_component!(definitions, stmts, taken, options.id, PHI, omega2,
         floors, rho_priors, sigma_prior, value; truncated=options.rho_truncated,
         nbasis=get(options, :latent, false) ? prod(options.k) : nothing,
         base=periodic ? "brm_periodic_hsgp_effect" : "brm_hsgp_effect")
