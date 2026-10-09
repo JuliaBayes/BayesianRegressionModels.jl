@@ -108,12 +108,12 @@ function _rk_ast_population_component!(definitions, statements, taken, name, des
     if length(families) > 1
         # Coefficients with different prior families keep one statement each,
         # as SBBRMI's configured generic population block does.
-        coefficients = [Symbol(:beta_pop_, j) for j in eachindex(priors)]
+        declarations = [Symbol(:beta_pop_, j) for j in eachindex(priors)]
         body = Expr(:block)
-        for (coefficient, (family, args)) in zip(coefficients, priors)
-            push!(body.args, Expr(:call, :~, coefficient, Expr(:call, family, args...)))
+        for (declaration, (family, args)) in zip(declarations, priors)
+            push!(body.args, Expr(:call, :~, declaration, Expr(:call, family, args...)))
         end
-        push!(body.args, Expr(:(=), :beta_pop, Expr(:vect, coefficients...)))
+        push!(body.args, Expr(:(=), :beta_pop, Expr(:vect, declarations...)))
         push!(body.args, Expr(:return, product))
         callee = _rk_ast_shared_definition!(definitions, taken,
             "brm_mixed_population_effects", (:X,), body)
