@@ -69,8 +69,10 @@ const PINS = [
     # row count, so a graph built on one data set evaluates another), 683b8342
     # (one source always lowers to one program) and ed87ceef (a proven scalar
     # response location stays scalar; 0f7d2521 gives other locations their rows
-    # once, without a ones vector).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "28e232a41df685428f3cbb2a0e234d3fae1e6e0b"),  # main
+    # once, without a ones vector). 83707d4d adds closure captures in plate
+    # cells and scan steps (an enclosing name a do-block reads is shared whole,
+    # never zipped), which BRM's emitted do-blocks use instead of Ref operands.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "83707d4d4992998e3d3d33461743d7e9d4c5be1f"),  # main
 ]
 
 function main()

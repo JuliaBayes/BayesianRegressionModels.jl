@@ -38,8 +38,8 @@ function _rk_ast_hsgp_basis_graph!(definitions, term, taken, PHI, omega2, floor)
         # These are the tensor basis coordinates in the same Julia/Stan
         # column-major order; no prepared numerical basis is shipped.
         modes = Expr(:vect, [I[j] for I in CartesianIndices(K)]...)
-        frequency = _rk_ast_graph_plate([modes, :(Ref($width))], [:mode, :width],
-            :((mode * pi / (2 * width))^2))
+        frequency = _rk_ast_graph_plate([modes], [:mode],
+            :((mode * pi / (2 * $width))^2))
         push!(body.args, Expr(:(=), frequencies[j], frequency))
         lower = K[j] == 1 ? 0.0 :
             :((4 * $width / pi) * sqrt(log($(_BRM_HSGP_WEIGHT_THRESHOLD)) / ($(K[j])^2 - 1)))
@@ -48,15 +48,15 @@ function _rk_ast_hsgp_basis_graph!(definitions, term, taken, PHI, omega2, floor)
     push!(body.args, :(widths = $(Expr(:tuple, widths...))))
     push!(body.args, :(centers = $(Expr(:tuple, centers...))))
     push!(body.args, :(omega2 = hcat($(frequencies...))))
+    # Each row cell zips the axes; its mode cells close over the row's axis
+    # values and the graph's whole `omega2`, `widths` and `centers`.
     row_values = [Symbol(:x_, j) for j in 1:D]
-    factors = [:(sin(sqrt(frequencies[b, $j]) *
-        (xs[$j] - centers[$j] + widths[$j])) / sqrt(widths[$j])) for j in 1:D]
+    factors = [:(sin(sqrt(omega2[b, $j]) *
+        ($(row_values[j]) - centers[$j] + widths[$j])) / sqrt(widths[$j])) for j in 1:D]
     product = length(factors) == 1 ? only(factors) : Expr(:call, :*, factors...)
-    inner = _rk_ast_graph_plate([:(1:$B), :(Ref(xs)), :(Ref(frequencies)),
-        :(Ref(widths)), :(Ref(centers))], [:b, :xs, :frequencies, :widths, :centers], product)
-    outer = _rk_ast_graph_plate([inputs... , :(Ref(omega2)), :(Ref(widths)), :(Ref(centers))],
-        [row_values..., :frequencies, :widths, :centers],
-        Expr(:block, :(xs = $(Expr(:tuple, row_values...))), :(values = $inner), :values))
+    inner = _rk_ast_graph_plate([:(1:$B)], [:b], product)
+    outer = _rk_ast_graph_plate(inputs, row_values,
+        Expr(:block, :(values = $inner), :values))
     push!(body.args, :(basis_rows = $outer))
     if get(options, :orthogonal, nothing) === :linear
         # `orthogonal_to=:linear` (one axis, by preparation): center every
@@ -67,9 +67,7 @@ function _rk_ast_hsgp_basis_graph!(definitions, term, taken, PHI, omega2, floor)
         push!(body.args, :(raw_basis = stack(basis_rows; dims=1)))
         push!(body.args, :(axis_centered = $x .- sum($x) / length($x)))
         push!(body.args, :(axis_ss = sum(axis_centered .^ 2)))
-        column = _rk_ast_graph_plate([:(1:$B), :(Ref(raw_basis)),
-                :(Ref(axis_centered)), :(Ref(axis_ss))],
-            [:b, :raw_basis, :axis_centered, :axis_ss], Base.remove_linenums!(quote
+        column = _rk_ast_graph_plate([:(1:$B)], [:b], Base.remove_linenums!(quote
                 phi = raw_basis[:, b]
                 centered = phi .- sum(phi) / length(phi)
                 axis_ss > 1e-12 ?
@@ -116,8 +114,7 @@ function _rk_ast_hsgp_value_graph!(definitions, term, taken,
     scale = options.iso ? :(s * (r * sqrt(2pi))^($D / 2)) :
         Expr(:call, :*, :s, [:(sqrt(r[$j] * sqrt(2pi))) for j in 1:D]...)
     weight_cell = :($scale * exp(-0.25 * $exponent))
-    weight_plate = _rk_ast_graph_plate([:(axes(omega2,1)), :(Ref(omega2)), :(Ref(s)), :(Ref(r))],
-        [:b, :omega2, :s, :r], weight_cell)
+    weight_plate = _rk_ast_graph_plate([:(axes(omega2,1))], [:b], weight_cell)
     arguments = [:PHI, :omega2, :sigma, :rho, :z]
     if group_index === nothing
         body = quote

@@ -186,9 +186,8 @@ end),
 
     brm_multinomial_scores = :(
 brm_multinomial_scores(cell, count_columns, trials, probabilities) = begin
-    pointwise = ReactiveKernels.plate(eachindex(first(count_columns)), Ref(cell),
-            Ref(count_columns), Ref(trials), Ref(probabilities)) do row, density, columns, totals, probs
-        density(row, columns, totals, probs)
+    pointwise = ReactiveKernels.plate(eachindex(first(count_columns))) do row
+        cell(row, count_columns, trials, probabilities)
     end
     return pointwise
 end),
@@ -255,16 +254,16 @@ end
     ),
     brm_factor_dummy = :(
 brm_factor_dummy(values, level) = begin
-    dummy = ReactiveKernels.plate(values, Ref(level)) do value, selected
-        1.0 * isequal(value, selected)
+    dummy = ReactiveKernels.plate(values) do value
+        1.0 * isequal(value, level)
     end
     return dummy
 end
     ),
     brm_prepared_indices = :(
 brm_prepared_indices(values, level_values) = begin
-    indices = ReactiveKernels.plate(values, Ref(level_values)) do value, declared
-        Int(findfirst(isequal(value), declared))
+    indices = ReactiveKernels.plate(values) do value
+        Int(findfirst(isequal(value), level_values))
     end
     return indices
 end
@@ -274,14 +273,14 @@ brm_covariate_geometry(observed, observed_rows, missing_rows) = begin
     rows = 1:(length(observed_rows) + length(missing_rows))
     observed_by_row = Dict(zip(observed_rows, observed))
     missing_by_row = Dict(zip(missing_rows, eachindex(missing_rows)))
-    observed_component = ReactiveKernels.plate(rows, Ref(observed_by_row)) do row, values
-        get(values, row, 0.0)
+    observed_component = ReactiveKernels.plate(rows) do row
+        get(observed_by_row, row, 0.0)
     end
-    missing_lookup = ReactiveKernels.plate(rows, Ref(missing_by_row)) do row, indices
-        get(indices, row, 1)
+    missing_lookup = ReactiveKernels.plate(rows) do row
+        get(missing_by_row, row, 1)
     end
-    missing_mask = ReactiveKernels.plate(rows, Ref(missing_by_row)) do row, indices
-        1.0 * haskey(indices, row)
+    missing_mask = ReactiveKernels.plate(rows) do row
+        1.0 * haskey(missing_by_row, row)
     end
     return (observed_component, missing_lookup, missing_mask)
 end
