@@ -274,15 +274,17 @@ function _rk_ast_stratified_group_component!(definitions, statements, taken, nam
 end
 
 # An HSGP effect allocates its length scale(s), marginal scale and basis
-# weights and returns the spectral-weighted basis product. Basis, frequencies
-# and validity floors are passed in from the main block. A model-derived
-# basis supplies its formula extent, since its matrix is a graph value.
-function _rk_ast_hsgp_component!(definitions, statements, taken, name, PHI, omega2,
-        floors, rho_priors, sigma_prior, value; truncated=true, nbasis=nothing,
+# weights and returns the spectral-weighted basis product. `inputs` pairs its
+# data arguments with their main-block values: the axes of a
+# squared-exponential term, or a periodic term's prepared basis and
+# frequencies. The validity floor is passed in where a prior reads it.
+function _rk_ast_hsgp_component!(definitions, statements, taken, name, inputs,
+        floors, rho_priors, sigma_prior, value, extent; truncated=true,
         base="brm_hsgp_effect")
+    formals = first.(inputs)
     priors, prior_inputs, prior_values = _rk_ast_component_prior_inputs(
         [rho_priors; sigma_prior],
-        (:PHI, :omega2, :rho_floor, :nbasis, :rho_iso, :rho, :sigma, :beta_raw,
+        (formals..., :rho_floor, :rho_iso, :rho, :sigma, :beta_raw,
             (Symbol(:rho_, j) for j in eachindex(rho_priors))...))
     rho_priors, sigma_prior = priors[1:end-1], last(priors)
     body = Expr(:block)
@@ -303,16 +305,12 @@ function _rk_ast_hsgp_component!(definitions, statements, taken, name, PHI, omeg
         push!(body.args, Expr(:(=), :rho, Expr(:vect, rhos...)))
     end
     push!(body.args, Expr(:call, :~, :sigma, sigma_prior))
-    extent = nbasis === nothing ? Expr(:call, :axes, :PHI, 2) :
-        Expr(:call, :(:), 1, :nbasis)
     push!(body.args, Expr(:call, :.~, Expr(:ref, :beta_raw, extent),
         _rk_ast_dotted(:Normal, 0, 1)))
     push!(body.args, Expr(:return, value))
     callee = _rk_ast_shared_definition!(definitions, taken, base,
-        (:PHI, :omega2, floor_argument..., (nbasis === nothing ? () : (:nbasis,))...,
-            prior_inputs...), body)
-    push!(statements, _rk_ast_component_call(name, callee, PHI, omega2,
-        (truncated ? (floors,) : ())..., (nbasis === nothing ? () : (nbasis,))...,
-        prior_values...))
+        (formals..., floor_argument..., prior_inputs...), body)
+    push!(statements, _rk_ast_component_call(name, callee, last.(inputs)...,
+        (truncated ? (floors,) : ())..., prior_values...))
     name
 end

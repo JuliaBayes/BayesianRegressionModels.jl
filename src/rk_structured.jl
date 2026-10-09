@@ -93,28 +93,29 @@ end
 
 # Grouped or hyper-predicted HSGP: one block allocating the hyperparameters,
 # their group-level effects and the basis weights, returning the summand.
-function _rk_ast_hsgp_grouped(definitions, term, PHI, lambda, floors, taken, bindings)
+function _rk_ast_hsgp_grouped(definitions, term, inputs, floors, extent, taken, bindings)
     options = term.options
     G = get(options, :n_groups, 1)
     rho_prior = _rk_ast_hsgp_hyper_prior(options, :length_scale, bindings, taken)
     sigma_prior = _rk_ast_hsgp_hyper_prior(options, :sd, bindings, taken)
     grouped = haskey(options, :group_index)
     block = _rk_block_body(rho_prior, sigma_prior)
-    P = _rk_block_argument!(block, :PHI, PHI)
-    omega2 = _rk_block_argument!(block, :omega2, lambda)
-    floor = _rk_block_argument!(block, :floor, floors)
+    arguments = Pair{Symbol,Any}[formal => _rk_block_argument!(block, formal, value)
+        for (formal, value) in inputs]
+    floor = floors === nothing ? nothing : _rk_block_argument!(block, :floor, floors)
     group_index = grouped ? _rk_block_argument!(block, :group_index, options.group_index) :
         nothing
     rho = _rk_ast_hsgp_hyper!(block, options, :length_scale, rho_prior, floor, G)
     sigma = _rk_ast_hsgp_hyper!(block, options, :sd, sigma_prior, floor, G)
     z = _rk_block_local!(block, :z)
-    weights = grouped ? (Expr(:call, :(:), 1, G), Expr(:call, :axes, P, 2)) :
-        (Expr(:call, :axes, P, 2),)
+    # A periodic extent reads its prepared basis argument.
+    extent = _rk_ast_hsgp_substitute(extent, Dict(arguments))
+    weights = grouped ? (Expr(:call, :(:), 1, G), extent) : (extent,)
     push!(block.statements, Expr(:call, :.~, Expr(:ref, z, weights...),
         _rk_ast_dotted(:Normal, 0, 1)))
     value = _rk_block_local!(block, :value)
     push!(block.statements, Expr(:(=), value, _rk_ast_hsgp_value_graph!(definitions,
-        term, taken, P, omega2, sigma, rho, z; group_index)))
+        term, taken, arguments, sigma, rho, z; group_index)))
     _rk_ast_block_call!(definitions, taken, "brm_grouped_hsgp", block, value)
 end
 function _rk_ast_structured_block(definitions, field, taken, bindings)
