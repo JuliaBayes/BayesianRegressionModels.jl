@@ -67,8 +67,10 @@ const PINS = [
     # of the 32-argument gradient cliff. fbd0aef0 runs an `@plate for` cell
     # over arrays per index as one retained plate (`@kernel` callees, dotted
     # math, chained/local indexing, vector gathers, plate-scoped locals), which
-    # BRM's inline kernel cells emit instead of per-output reader kernels.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "fbd0aef03d1b7765a9983d00d102d7af0d67bf2c"),  # main
+    # BRM's inline kernel cells emit instead of per-output reader kernels;
+    # 2503ede6 also runs a cell reading an array per index with undotted
+    # arithmetic (`ts * a`, legacy Stan-style cells) as such a plate.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "2503ede63f16a1d1ed60de9f10b73888cfe5aa29"),  # main
 ]
 
 function main()

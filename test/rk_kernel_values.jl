@@ -134,8 +134,11 @@ end
             check_consumer_stan(problem, stan, mapping, backend, u)
         end
         artifact = BRM.emit_rk_artifact(brmi; case_id="ragged-cell-$mode")
-        @test length(artifact.defs) >= 2
+        # The cell is an inline plate in the main block: the artifact defines
+        # the group-effect submodel and no reader kernel.
+        @test !isempty(artifact.defs)
         @test all(d -> BRM._rk_source_definition(d).kind in (:function, :kernel, :rkppl), artifact.defs)
+        @test !any(d -> endswith(string(BRM._rk_source_definition(d).name), "_reader"), artifact.defs)
         @test isequal(data, saved)
     end
 end

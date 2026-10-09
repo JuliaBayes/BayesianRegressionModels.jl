@@ -67,8 +67,9 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # without a ones vector), 83707d4d (closure captures in plate cells and
 # scan steps, used instead of Ref operands; bed5d467 deprecates the Ref
 # spelling), ecf99453 (hidden bound operands packed into one AD context) and
-# fbd0aef0 (`@plate for` cells over arrays per index as retained plates).
+# fbd0aef0 + 2503ede6 (`@plate for` cells over arrays per index as retained
+# plates, whatever arithmetic they use).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "fbd0aef03d1b7765a9983d00d102d7af0d67bf2c"
+rev = "2503ede63f16a1d1ed60de9f10b73888cfe5aa29"
