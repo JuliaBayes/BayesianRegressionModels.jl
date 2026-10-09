@@ -52,7 +52,8 @@ function _rk_emit_observation_source!(defs, statements, bindings, taken,
     entry = _rk_weighted_observation_entry!(defs, arguments, bindings, taken,
         observation.weight, entry)
     push!(statements, response isa AbstractVector ?
-        Expr(:call, :.~, observation.name, _rk_ast_dotted(:LogDensity, entry, arguments...)) :
+        _rk_observation_statement(observation,
+            _rk_ast_dotted(:LogDensity, entry, arguments...), taken) :
         Expr(:call, :~, observation.name, Expr(:call, :LogDensity, entry, arguments...)))
     true
 end

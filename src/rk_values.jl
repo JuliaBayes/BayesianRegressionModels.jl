@@ -654,6 +654,14 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
         layout = isempty(kernels) ?
             (; values=o.response, rows=nothing, lengths=nothing) :
             _rk_kernel_observed_layout(o, kernels)
+        cells = isempty(kernels) ? nothing :
+            _rk_nested_kernel_cells(o, layout, kernels, value_columns, parameter_names)
+        if cells !== nothing
+            # One array per subject, observed per subject (RKPPL nested plates).
+            _rk_validate_nested_bounds(o, context.data)
+            value_columns[o.name] = o.response
+            return _RKNestedObservation(o, cells)
+        end
         modifier = _rk_kernel_response_modifier!(value_columns, taken, derived, o, layout)
         if modifier !== nothing
             bounds = (modifier.lower, modifier.upper)
@@ -745,6 +753,9 @@ _rk_weighted_observation(base, weight::_BRMPreparedRef, bindings, taken) =
 function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
     reserved = Set{Symbol}(keys(plan.columns))
     union!(reserved, (a.name for a in plan.assignments))
+    kernel_cells = Set{Symbol}(a.cells for a in plan.assignments
+        if a isa _RKPreparedKernelAssignment)
+    union!(reserved, kernel_cells)
     regression = _rk_emit_ast(plan.regression, false; values=true, reserved,
         coordinates)
     stmts = copy(regression.main.args)
@@ -754,7 +765,7 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
     stmts = map(statement -> _rk_observed_anchor_source(statement, observations), stmts)
     defs = map(definition -> _rk_observed_anchor_source(definition, observations), defs)
     taken = Set{Symbol}(keys(plan.columns))
-    union!(taken, first.(bindings), (a.name for a in plan.assignments),
+    union!(taken, first.(bindings), (a.name for a in plan.assignments), kernel_cells,
         (p.name for p in plan.regression.parameters),
         (p.name for p in plan.regression.predictors))
     for assignment in plan.assignments
@@ -818,7 +829,7 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
             base = _rk_ast_response_modifier(base, modifier.kind, lower, upper)
         end
         base = _rk_weighted_observation(base, observation.weight, bindings, taken)
-        push!(stmts, Expr(:call, :.~, observation.name, base))
+        push!(stmts, _rk_observation_statement(observation, base, taken))
     end
     stmts = _rk_source_data_axes(stmts, plan.columns, _rk_observed_names(plan))
     computed = Set{Symbol}()

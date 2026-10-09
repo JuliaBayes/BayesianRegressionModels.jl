@@ -88,8 +88,11 @@ end
         check_consumer_stan(problem,stan,mapping,backend,u)
         c, parts = components(u), pointwise(u)
         @test parts.age_yr_obs ≈ logpdf.(LogNormal(c.mu,c.sigma),observed)
-        @test parts.y ≈ logpdf.(Normal.(c.reads,c.scale),reduce(vcat,data.y))
-        @test parts.values ≈ logpdf.(Normal.(c.internal,c.scale),reduce(vcat,data.values))
+        # Per-subject responses give one array of densities per subject.
+        @test length.(parts.y) == length.(data.y)
+        @test reduce(vcat,parts.y) ≈ logpdf.(Normal.(c.reads,c.scale),reduce(vcat,data.y))
+        @test length.(parts.values) == length.(data.values)
+        @test reduce(vcat,parts.values) ≈ logpdf.(Normal.(c.internal,c.scale),reduce(vcat,data.values))
         @test value == Base.invokelatest(replay,u)
     end
     @test isequal(data,saved)
