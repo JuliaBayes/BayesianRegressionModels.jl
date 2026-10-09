@@ -59,7 +59,7 @@ end
         backend, problem = consumer_problem(brmi)
         names = coordinate_names(backend.model.layout)
         ia, ib = findfirst(==(:a), names), findfirst(==(:b), names)
-        im = findfirst(==(Symbol("pop_theta.beta_pop.1")), names)
+        im = findfirst(==(Symbol("theta_Intercept")), names)
         it = findfirst(n -> occursin(".tau.", string(n)), names)
         iz = findall(n -> occursin(".z.", string(n)), names)
         @test length(names) == 7
@@ -87,7 +87,11 @@ end
             _, gradient = check_consumer_point(problem, u, oracle)
             check_consumer_stan(problem, stan, mapping, backend, u)
             actual = Base.invokelatest(prepare_query(backend.model, translated, :pointwise), u)
-            @test actual.y ≈ pointwise(u) atol=2e-11 rtol=2e-11
+            # The cell route observes its per-subject response per subject: one
+            # array of densities per subject, in subject order.
+            route === :cell && @test length.(actual.y) == length.(data.y)
+            flat = route === :cell ? reduce(vcat, actual.y) : actual.y
+            @test flat ≈ pointwise(u) atol=2e-11 rtol=2e-11
             @test abs(gradient[ia]) > 1e-8
             @test abs(gradient[ib]) > 1e-8
         end

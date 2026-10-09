@@ -119,8 +119,8 @@ end
     own, names = check_shape_reuse(PublicShapeReuse.secondary_axis, trained, scored)
     # The scored build itself matches an independent density.
     index(n) = only(findall(==(Symbol(n)), names))
-    a, b = index("pop_score.beta_pop.1"), index("mo_rank.beta")
-    intercept, sd = index("pop_theta.beta_pop.1"), index("b_p_subject.tau.1")
+    a, b = index("score_Intercept"), index("mo_rank.beta")
+    intercept, sd = index("theta_Intercept"), index("b_p_subject.tau.1")
     levels = CategoricalArrays.levels(scored.subject)
     z = [index("b_p_subject.z.$j.1") for j in eachindex(levels)]
     simplex = index("mo_rank.simplex_incr.1")
@@ -150,7 +150,7 @@ end
 
 # Coordinates and independent density shared by the joined and nested models.
 function grouped_kernel_oracle(names, data, rows_of)
-    ia = only(findall(==(Symbol("pop_alpha.beta_pop.1")), names))
+    ia = only(findall(==(Symbol("alpha_Intercept")), names))
     it = only(findall(n -> occursin(".tau.", string(n)), names))
     iz = findall(n -> occursin(".z.", string(n)), names)
     is = only(findall(==(:sigma), names))

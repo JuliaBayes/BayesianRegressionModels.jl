@@ -46,8 +46,8 @@ end
     stan_names = BridgeStan.param_unc_names(problem.model)
     rk_names = coordinate_names(backend.model.layout)
     mapping = [
-        Symbol("pop_a.beta_pop.1") => "pop_a_beta_pop.1",
-        Symbol("pop_b.beta_pop.1") => "pop_b_beta_pop.1",
+        Symbol("a_Intercept") => "pop_a_beta_pop.1",
+        Symbol("b_Intercept") => "pop_b_beta_pop.1",
         Symbol("b_shared_group.tau.1") => "b_shared_group_tau.1",
         Symbol("b_shared_group.tau.2") => "b_shared_group_tau.2",
         Symbol("b_shared_group.z.1.1") => "b_shared_group_z_flat.1",

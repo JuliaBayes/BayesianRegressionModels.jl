@@ -120,8 +120,8 @@ end
         a, b = getfield(source_module, reader), getfield(replay_module, reader)
         @test graph_source_inventory(a.graph) == [(:plate, 0), (:scan, 1)]
         @test graph_source_inventory(b.graph) == graph_source_inventory(a.graph)
-        @test isequal(prepare(a)(data.x, 0.2),
-            reduce(vcat, [cumsum(x) .* 0.2 for x in data.x]))
+        # The reader returns its subject cells; formula terms flatten them.
+        @test isequal(prepare(a)(data.x, 0.2), [cumsum(x) .* 0.2 for x in data.x])
         @test isequal(prepare(b)(data.x, 0.2), prepare(a)(data.x, 0.2))
         @test isequal(data, before)
     end
@@ -140,8 +140,8 @@ end
             if endswith(string(BRM._rk_source_definition(d).name), "_reader")])
         score = Core.eval(source_module,
             :(ReactiveKernels.@kernel provider_score(x, a) = begin
-                values = $reader(x, a)
-                total = sum(values)
+                cells = $reader(x, a)
+                total = sum(brm_flatten_cells(cells))
                 return total
             end))
         @test graph_source_inventory(score.graph) == [(:plate, 0), (:scan, 1)]
@@ -251,7 +251,7 @@ end
     names = coordinate_names(backend.model.layout)
     @test length(names) == 5
     index(name) = only(findall(==(Symbol(name)), names))
-    intercept = index("pop_theta.beta_pop.1")
+    intercept = index("theta_Intercept")
     scale = index("b_p_subject.tau.1")
     levels = CategoricalArrays.levels(data.subject)
     innovations = [index("b_p_subject.z.$j.1") for j in eachindex(levels)]

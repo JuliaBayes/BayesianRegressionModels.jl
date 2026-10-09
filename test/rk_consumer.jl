@@ -11,10 +11,10 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
     backend, problem = consumer_problem(brmi)
     @test LogDensityProblems.dimension(problem) == 3
     stan = consumer_stan(brmi, "categorical-default")
-    mapping = [Symbol("pop_mu.beta_pop.1") => "pop_mu_beta_pop.1",
+    mapping = [Symbol("mu_Intercept") => "pop_mu_beta_pop.1",
         Symbol("mu_g.1") => "cat_mu_g_beta.1", :sigma => "sigma"]
     names = coordinate_names(backend.model.layout)
-    ia, ib, is = indexin([Symbol("pop_mu.beta_pop.1"), Symbol("mu_g.1"), :sigma], names)
+    ia, ib, is = indexin([Symbol("mu_Intercept"), Symbol("mu_g.1"), :sigma], names)
     oracle(u) = begin
         a, b, logs = u[ia], u[ib], u[is]; sigma = exp(logs)
         sum(logpdf.(Normal.(a .+ b .* (data.g .== 2), sigma), data.y)) +
@@ -44,7 +44,7 @@ end
         backend, problem=consumer_problem(model)
         @test LogDensityProblems.dimension(problem) == 1 + size(rows,2)
         names=coordinate_names(backend.model.layout)
-        ia=findfirst(==(Symbol("pop_mu.beta_pop.1")),names)
+        ia=findfirst(==(Symbol("mu_Intercept")),names)
         ib=findall(n->startswith(string(n),"mu_g."),names)
         oracle(u)=sum(logpdf.(Normal.(u[ia] .+ rows*u[ib],1),data.y)) +
             sum(logpdf.(Normal(),u))
@@ -69,7 +69,7 @@ end
                 (Normal(),Normal(),Normal(),Normal())))
         backend, problem=consumer_problem(model)
         names=coordinate_names(backend.model.layout)
-        ordered=label=="reference" ? [Symbol("pop_mu.beta_pop.1"),Symbol("mu_g.1"),Symbol("mu_g.2")] :
+        ordered=label=="reference" ? [Symbol("mu_Intercept"),Symbol("mu_g.1"),Symbol("mu_g.2")] :
             [Symbol("mu_g.$i") for i in 1:3] ∪ [Symbol("mu_h.1")]
         indices=Int.(indexin(ordered,names))
         @test length(indices)==length(names)
@@ -90,12 +90,12 @@ end
     backend, problem=consumer_problem(brmi)
     stan=consumer_stan(brmi,"scalar-intercept")
     names=coordinate_names(backend.model.layout)
-    ia=findfirst(==(Symbol("pop_mu.beta_pop.1")),names)
+    ia=findfirst(==(Symbol("mu_Intercept")),names)
     it=findfirst(==(Symbol("b_g.tau.1")),names)
     iz=Int.(indexin([Symbol("b_g.z.$i.1") for i in 1:2],names))
     oracle(u)=sum(logpdf.(Normal.(u[ia] .+ exp(u[it]).*u[iz][data.g],1),data.y)) +
         logpdf(Normal(),u[ia]) + logpdf(Normal(),u[it]) + sum(logpdf.(Normal(),u[iz]))
-    mapping=[Symbol("pop_mu.beta_pop.1")=>"pop_mu_beta_pop.1",
+    mapping=[Symbol("mu_Intercept")=>"pop_mu_beta_pop.1",
         Symbol("b_g.tau.1")=>"r_mu_g_log_scale",
         Symbol("b_g.z.1.1")=>"r_mu_g_xi.1",
         Symbol("b_g.z.2.1")=>"r_mu_g_xi.2"]

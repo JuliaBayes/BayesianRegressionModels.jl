@@ -104,10 +104,6 @@ function argument_graph_sources(graph)
     [entry.recipe.source for entry in recipe_inventory(graph)]
 end
 
-argument_callee_is(callee, name) = callee === name ||
-    (callee isa GlobalRef && callee.name === name) ||
-    (Meta.isexpr(callee, :.) && last(callee.args) == QuoteNode(name))
-
 nested = (;subject=["b", "empty", "a"],
     x=[[0.0, 0.5, 1.0], Float64[], [0.0, 0.3, 0.8, 1.4]],
     y=[[0.1, 0.2, 0.4], Float64[], [0.0, 0.1, 0.3, 0.4]],
@@ -128,7 +124,7 @@ function check_grouped_arguments(label, data)
             arithmetic=label === :arithmetic, ordinary=label === :ordinary)
     backend, problem = consumer_problem(brmi)
     names = coordinate_names(backend.model.layout)
-    ia = findfirst(==(Symbol("pop_alpha.beta_pop.1")), names)
+    ia = findfirst(==(Symbol("alpha_Intercept")), names)
     it = findfirst(n -> occursin(".tau.", string(n)), names)
     iz = findall(n -> occursin(".z.", string(n)), names)
     is = findfirst(==(:sigma), names)
@@ -138,7 +134,9 @@ function check_grouped_arguments(label, data)
     observed = label === :joined ? data.y[permutation] : reduce(vcat, data.y)
     reference = label === :joined ? data.reference[permutation] :
         reduce(vcat, [ones(length(xs)) .* refs for (xs, refs) in zip(data.x, data.reference)])
-    @test backend.plan.columns[:y] == observed
+    # A per-subject response is observed per subject; a join's flat response
+    # column stays flat.
+    @test backend.plan.columns[:y] == (label === :joined ? observed : data.y)
     levels = sort(unique(data.subject))
     subject_order = [findfirst(==(s), levels) for s in data.subject]
     oracle(u) = begin
@@ -181,15 +179,17 @@ function check_grouped_arguments(label, data)
         @test occursin(string(port), main)
         @test !occursin("[2, 3, 5, 1, 4, 6, 7]", definitions * main)
         @test :(raw[brm_flatten_cells(groups)]) in graph_sources
-    elseif label === :singleton
-        # Each subject's response cell length comes from the bound response.
-        @test !occursin("[3, 0, 4]", definitions * main)
-        @test occursin("ones(length(rows))", sources)
     else
-        @test occursin("y_observation_argument_1(loc, reference, sigma)", main)
-        @test any(source -> Meta.isexpr(source, :call) &&
-            argument_callee_is(first(source.args), :brm_flatten_cells) &&
-            :raw in source.args, graph_sources)
+        # Each subject's arguments broadcast against its own response array; a
+        # singleton reference repeats over that subject's observations.
+        @test occursin(label === :ordinary ?
+            "y[i] .~ Normal.(loc_cells[i] .- reference[i], sigma)" :
+            label === :arithmetic ?
+            "y[i] .~ LogDensity.(y_scalar_logdensity, loc_cells[i], reference[i] .* sigma, sigma)" :
+            "y[i] .~ LogDensity.(y_scalar_logdensity, loc_cells[i], reference[i], sigma)", main)
+        @test !occursin("[3, 0, 4]", definitions * main)
+        @test !occursin("brm_flatten_response", definitions * main)
+        @test !occursin("y_raw_response", definitions * main)
     end
     if label !== :ordinary
         @test occursin("relative_residual", sources)

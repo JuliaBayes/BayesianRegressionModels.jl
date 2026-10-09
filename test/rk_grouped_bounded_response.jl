@@ -68,12 +68,15 @@ end
             PublicGroupedBoundedResponse.build(data, law; nested)
         backend, problem = consumer_problem(brmi)
         names = coordinate_names(backend.model.layout)
-        ia = findfirst(==(Symbol("pop_theta.beta_pop.1")), names)
+        ia = findfirst(==(Symbol("theta_Intercept")), names)
         it = findfirst(n -> occursin(".tau.", string(n)), names)
         iz = findall(n -> occursin(".z.", string(n)), names)
         @test length(names) == 5
         @test length(iz) == 3
-        @test backend.plan.columns[:y] == (nested ? reduce(vcat, data.y) : data.y[permutation])
+        # A per-subject response and its bounds are observed per subject.
+        @test backend.plan.columns[:y] == (nested ? data.y : data.y[permutation])
+        nested && @test occursin("y[i] .~ censored.(Normal.(pred_cells[i], 0.8), lo[i], hi[i])",
+            sprint(Base.show_unquoted, BRM._rk_emit_ast(backend.plan).main))
         raw_lower = nested ? reduce(vcat, data.lo) : data.lo
         @test backend.plan.columns[:lo] == data.lo
         # An independent likelihood still reads the original lower-bound axis.
@@ -119,4 +122,12 @@ end
         merge(data, (; lo=zeros(2))), censored))
     @test_throws "strictly below" RKBRMI(PublicGroupedBoundedResponse.interval(
         merge(data, (; hi=[1.0, 0.0, 1.0]))))
+    # Per-subject responses and bounds are validated on the same entries.
+    nested = (; subject=data.subject, t=data.t, z=[[0.2, -0.1], Float64[], [0.3]],
+        y=[[-0.2, 0.5], Float64[], [0.1]], lo=[[-0.2, -0.3], Float64[], [-0.1]],
+        hi=[[0.7, 0.5], Float64[], [0.6]])
+    @test_throws "outside its bounds" RKBRMI(PublicGroupedBoundedResponse.build(
+        merge(nested, (; y=[[-0.2, 0.9], Float64[], [0.1]])), censored; nested=true))
+    @test_throws "lower bounds must not exceed" RKBRMI(PublicGroupedBoundedResponse.build(
+        merge(nested, (; hi=[[0.7, -0.4], Float64[], [0.6]])), censored; nested=true))
 end

@@ -12,7 +12,7 @@ using LinearAlgebra
     backend,problem=consumer_problem(model)
     names=coordinate_names(backend.model.layout)
     index(n)=something(findfirst(==(Symbol(n)),names))
-    a=index("pop_mu.beta_pop.1")
+    a=index("mu_Intercept")
     tau=[index("b_line_g.sd.$k") for k in 1:2]
     z=[index("b_line_g.z.$g.$k") for g in 1:2,k in 1:2]
     l=only(setdiff(eachindex(names),[a;tau;vec(z)]))
@@ -32,7 +32,7 @@ using LinearAlgebra
     end
     @test isequal(data,before)
     stan=consumer_stan(model,"downstream-group-line")
-    mapping=[Symbol("pop_mu.beta_pop.1")=>"pop_mu_beta_pop.1",
+    mapping=[Symbol("mu_Intercept")=>"pop_mu_beta_pop.1",
         Symbol("b_line_g.sd.1")=>"b_line_g_tau.1",
         Symbol("b_line_g.sd.2")=>"b_line_g_tau.2",
         names[l]=>"b_line_g_L.1",
@@ -114,7 +114,7 @@ end
         backend,problem=consumer_problem(model)
         names=coordinate_names(backend.model.layout)
         index(n)=something(findfirst(==(Symbol(n)),names))
-        a=index("pop_mu.beta_pop.1")
+        a=index("mu_Intercept")
         weights=[index("hsgp_x.z.$g.$k") for g in 1:G,k in 1:3]
         phi,frequencies,floor=independent_hsgp_basis(data.x,3,1.5)
         # Prepared geometry supplies only its immutable fitted c, never the
@@ -122,7 +122,7 @@ end
         term=only(filter(t->t.kind===:hsgp,only(backend.plan.predictors).terms))
         phi,frequencies,floor=independent_hsgp_basis(data.x,3,term.options.c)
         stan=consumer_stan(model,"grouped-hsgp-"*label)
-        mapping=[Symbol("pop_mu.beta_pop.1")=>"pop_mu_beta_pop.1"]
+        mapping=[Symbol("mu_Intercept")=>"pop_mu_beta_pop.1"]
         for g in 1:G,k in 1:3
             push!(mapping,names[weights[g,k]]=>"zflat_hsgpw_x_g.$((g-1)*3+k)")
         end
@@ -199,7 +199,7 @@ end
         backend,problem=consumer_problem(model)
         names=coordinate_names(backend.model.layout)
         index(n)=something(findfirst(==(Symbol(n)),names))
-        a=index("pop_mu.beta_pop.1");r=index("hsgp_x.rho_iso");s=index("hsgp_x.sigma")
+        a=index("mu_Intercept");r=index("hsgp_x.rho_iso");s=index("hsgp_x.sigma")
         z=[index("hsgp_x.beta_raw.$j") for j in 1:3]
         term=only(filter(t->t.kind===:hsgp,only(backend.plan.predictors).terms))
         phi,frequencies,floor=independent_hsgp_basis(data.x,3,term.options.c)
@@ -221,7 +221,7 @@ end
             prior+sum(logpdf.(Normal.(mu,1),data.y))
         end
         stan=consumer_stan(model,"hsgp-explicit-"*label)
-        mapping=[Symbol("pop_mu.beta_pop.1")=>"pop_mu_beta_pop.1",
+        mapping=[Symbol("mu_Intercept")=>"pop_mu_beta_pop.1",
             Symbol("hsgp_x.rho_iso")=>"hsgp_x_rho_iso",Symbol("hsgp_x.sigma")=>"hsgp_x_sigma"]
         append!(mapping,[names[z[k]]=>"hsgp_x_beta_raw.$k" for k in 1:3])
         for u in (zeros(6),fill(.13,6),collect(range(-.2,.3;length=6)))

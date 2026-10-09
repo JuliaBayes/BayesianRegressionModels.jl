@@ -251,7 +251,7 @@ end
 @stestset "component definitions are shared and renamed on collision" begin
     emitted(i) = BRM._rk_emit_ast(BRM._brm_rk_plan(last(CASES[i])()))
     names(i) = Set(submodel_name.(submodels(emitted(i))))
-    @test names(2) == Set([:brm_group_effects, :brm_population_effects])
+    @test names(2) == Set([:brm_group_effects])
     groups = filter(s -> Meta.isexpr(s, :call) && s.args[1] === :~ &&
         Meta.isexpr(s.args[3], :call) && s.args[3].args[1] === :brm_group_effects,
         emitted(2).main.args)
@@ -261,7 +261,7 @@ end
     @test :brm_population_effects ∉ collision
     @test any(n -> startswith(string(n), "brm_population_effects"), collision)
     hsgp = emitted(6)
-    @test names(6) == Set([:brm_hsgp_effect, :brm_population_effects])
+    @test names(6) == Set([:brm_hsgp_effect])
     spectral = [d for d in hsgp.defs if Meta.isexpr(d, :macrocall) &&
         occursin("brm_hsgp_spectral_graph", sprint(show, d))]
     @test length(spectral) == 1

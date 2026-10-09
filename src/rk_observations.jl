@@ -221,12 +221,20 @@ end
 # coordinates stay in the program, including priors used only by that response.
 function _rk_active_observation_source(emitted, conditioned, held_out)
     statements = emitted.main.args
-    withheld = [Meta.isexpr(statement, :call) && length(statement.args) == 3 &&
-        statement.args[1] in (:~, :.~) &&
-        _rk_emitted_observation_name(statement.args[2]) in conditioned &&
-        _rk_emitted_observation_name(statement.args[2]) in held_out
-        for statement in statements]
+    names = Set(name for name in conditioned if name in held_out)
+    withheld = [_rk_withheld_observation(statement, names) for statement in statements]
     Expr(:block, statements[.!withheld]...)
+end
+function _rk_withheld_observation(statement, names)
+    statement isa Expr || return false
+    statement.head === :call && length(statement.args) == 3 &&
+        first(statement.args) in (:~, :.~) &&
+        return _rk_emitted_observation_name(statement.args[2]) in names
+    # A per-subject observation is a `@plate` holding only that observation.
+    Meta.isexpr(statement, :macrocall) && first(statement.args) === Symbol("@plate") &&
+        Meta.isexpr(last(statement.args), :for) || return false
+    body = [s for s in last(last(statement.args).args).args if !(s isa LineNumberNode)]
+    !isempty(body) && all(s -> _rk_withheld_observation(s, names), body)
 end
 function _rk_emit_ast(plan::_RKHeldOutPlan; coordinates=nothing)
     emitted = _rk_emit_ast(plan.parent; coordinates)

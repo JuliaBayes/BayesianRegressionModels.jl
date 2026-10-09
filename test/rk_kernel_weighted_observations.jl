@@ -131,11 +131,24 @@ const WEIGHTED_DATA = (; x=[[1.0, 2.0], Float64[], [0.5, 1.5, -0.4]],
     w=[[1.0, 0.0], Float64[], [2.0, 0.5, 1.0]],
     ws=[1.5, 0.7, 0.25])
 
-# The weight reader keeps only the data it reads, so RKPPL binds it as data.
-function weight_reader_arguments(main)
-    calls = [statement.args[2] for statement in main.args
-        if Meta.isexpr(statement, :(=)) && occursin("_weight_", string(statement.args[1]))]
-    only(calls).args[2:end]
+# A per-subject observation is one nested plate `y[i] .~ weighted.(law, w)`
+# or `y[i] .~ LogDensity.(weighted_entry, w, args...)`. Its weight reads only
+# data (a bound port or a reader over data ports), so RKPPL binds it as data.
+function nested_weight_reads(main)
+    plate = only(s for s in main.args if Meta.isexpr(s, :macrocall))
+    cell = only(x for x in last(last(plate.args).args).args if !(x isa LineNumberNode))
+    weight = cell.args[3].args[2].args[2]
+    reads = BRM._rk_source_symbols!(Set{Symbol}(), weight)
+    definitions = Dict(x.args[1] => x.args[2] for x in main.args if Meta.isexpr(x, :(=)))
+    pending = collect(reads)
+    while !isempty(pending)
+        definition = get(definitions, pop!(pending), nothing)
+        definition === nothing && continue
+        for name in BRM._rk_source_symbols!(Set{Symbol}(), definition)
+            name in reads || (push!(reads, name); push!(pending, name))
+        end
+    end
+    reads
 end
 
 @stestset "in-cell weighted native family observes a data-weighted power likelihood" begin
@@ -164,8 +177,8 @@ end
             check_consumer_stan(problem, stan, [:s => "s", :sigma => "sigma"], backend, u)
         end
         main = BRM._rk_emit_ast(backend.plan).main
-        @test occursin("y .~ weighted.(Normal.(", sprint(Base.show_unquoted, main))
-        @test isdisjoint(weight_reader_arguments(main), (:s, :sigma))
+        @test occursin("y[i] .~ weighted.(Normal.(", sprint(Base.show_unquoted, main))
+        @test isdisjoint(nested_weight_reads(main), (:s, :sigma))
     end
     @test isequal(data, saved)
 end
@@ -196,8 +209,8 @@ end
         end
         emitted = BRM._rk_emit_ast(backend.plan)
         main = sprint(Base.show_unquoted, emitted.main)
-        @test occursin("y .~ LogDensity.(y_scalar_logdensity_weighted, pred_weight_y,", main)
-        @test isdisjoint(weight_reader_arguments(emitted.main), (:s, :sigma, :delta))
+        @test occursin("y[i] .~ LogDensity.(y_scalar_logdensity_weighted, w[i],", main)
+        @test isdisjoint(nested_weight_reads(emitted.main), (:s, :sigma, :delta))
         @test any(definition -> occursin("weighted_density = weight * density",
             sprint(Base.show_unquoted, definition)), emitted.defs)
     end

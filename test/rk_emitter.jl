@@ -5062,7 +5062,8 @@ end
     @test Set(p.name for p in plan.regression.parameters) == Set([:sigma, :b0])
     @test only(plan.observations).distribution.callable === Normal
     @test length(plan.columns[:t]) == 2
-    @test length(plan.columns[:obs]) == 6
+    # One array per subject, observed per subject (RKPPL nested plates).
+    @test isequal(plan.columns[:obs], kdf.obs)
     @test length(plan.columns[:dose]) == 2
     @test plan.columns[:t] == kdf.t
     @test plan.columns[cell.inputs[1].source] == kdf.t
@@ -5080,7 +5081,7 @@ end
     source = sprint(Base.show_unquoted, prog.main)
     definitions = join(sprint(Base.show_unquoted, d) for d in prog.defs)
     @test occursin("ReactiveKernels.plate", definitions)
-    @test occursin("obs .~ Normal.", source)
+    @test occursin("obs[i] .~ Normal.(", source)
     @test !occursin("kernel_nsub_pred", source)
     @test !occursin("kernel_T_pred", source)
 
