@@ -72,7 +72,7 @@ end
     @test isequal(data, saved)
 end
 
-@stestset "ragged kernel readers preserve subject joins and original axes" begin
+@stestset "ragged kernel cells preserve subject joins and original axes" begin
     data = (; subject=["b", "empty", "a"],
         t=[[0.1, 0.7], Float64[], [0.2, 0.8, 1.3]],
         y=[[0.2, -0.1], Float64[], [0.1, 0.3, -0.2]],
@@ -124,7 +124,7 @@ end
                 logpdf(Exponential(), sigma) + u[is] +
                 sum(logpdf.(Normal.(means, sigma), reduce(vcat, data.y)))
         end
-        stan = consumer_stan(brmi, "ragged-reader-$mode";
+        stan = consumer_stan(brmi, "ragged-cell-$mode";
             mod=mode === :scope ? PublicKernelScope : @__MODULE__)
         mapping = [names[ia] => "pop_theta_beta_pop.1";
             names[it] => "b_p_subject_tau.1"; names[is] => "sigma";
@@ -133,7 +133,7 @@ end
             check_consumer_point(problem, u, oracle)
             check_consumer_stan(problem, stan, mapping, backend, u)
         end
-        artifact = BRM.emit_rk_artifact(brmi; case_id="ragged-reader-$mode")
+        artifact = BRM.emit_rk_artifact(brmi; case_id="ragged-cell-$mode")
         @test length(artifact.defs) >= 2
         @test all(d -> BRM._rk_source_definition(d).kind in (:function, :kernel, :rkppl), artifact.defs)
         @test isequal(data, saved)
@@ -227,13 +227,21 @@ end
     @test isequal(data, saved)
 end
 
-# The reader of a kernel cell is the authored cell as one subject plate over
-# its per-subject inputs, then one flatten of the subject cells (snag
-# rk-kernel-reader-9a48d7b7). It was a `1:count` plate passing every port as
-# `Ref`, rebinding `cell_input_<k>` locals for a forwarding cell kernel, and
-# flattening with `reduce(vcat, cells; init=…)`, which reallocates once per
-# subject on every evaluation and reverse pass.
-@stestset "kernel readers are the authored cell, flattened in linear time" begin
+# The `@plate for` statements of an emitted main block, and the indexed
+# outputs each one writes.
+emitted_plates(main) = [s for s in main.args
+    if Meta.isexpr(s, :macrocall) && first(s.args) === Symbol("@plate")]
+plate_writes(plate) = Symbol[first(first(cell.args).args)
+    for cell in last(last(plate.args).args).args
+    if Meta.isexpr(cell, :(=)) && Meta.isexpr(first(cell.args), :ref)]
+
+# A kernel cell is emitted once, as the authored `@plate for` loop in the model
+# body, with one indexed write per value the program reads (decision
+# 1dsco4y). It was a `ReactiveKernels.@kernel <name>_reader` per output, each
+# re-running the whole cell; earlier still a `1:count` plate passing every
+# port as `Ref` and flattening with `reduce(vcat, cells; init=…)`, which
+# reallocates once per subject on every evaluation and reverse pass.
+@stestset "kernel cells are one inline plate, flattened in linear time" begin
     flat = BRM.brm_flatten_cells
     @test isequal(flat(Vector{Float64}[]), Float64[])
     @test isequal(flat([[1.0, 2.0], Float64[], [3.0]]), [1.0, 2.0, 3.0])
@@ -258,26 +266,27 @@ end
     brmi = build(data)
     plan = BRM._brm_rk_plan(brmi)
     emitted = BRM._rk_emit_ast(plan)
-    source = join((sprint(Base.show_unquoted, d) for d in emitted.defs), "\n")
-    # Each data input reaches the reader through its own column, and the
-    # per-subject response is bound as authored with no flattened copy
-    # (snag rk-emission-grou-9dac9bc6, todo 1jocaai).
+    main = sprint(Base.show_unquoted, emitted.main)
+    # Each data input is read through its own column, and the per-subject
+    # response is bound as authored with no flattened copy (snag
+    # rk-emission-grou-9dac9bc6, todo 1jocaai).
     @test sort!(collect(keys(plan.columns)); by=string) == [:dose, :t, :y]
     @test isequal(plan.columns[:y], data.y)
-    @test occursin("loc_reader(t, dose, log_k)", source)
-    # The cell zips its per-subject inputs and closes over the model value
-    # `log_k`; no do-block `Ref` operand (todo 0t3q6dl).
-    @test occursin("ReactiveKernels.plate(t, dose) do t, dose", source)
-    @test !occursin(r"(plate|scan)\([^\n]*Ref\(", source)
-    # The reader returns its subject cells; the per-subject response reads
-    # them cell by cell, so the response is never flattened. The authored
-    # `loc` stays a named value over the cells, planned only when queried.
-    @test occursin("return cells", source)
-    @test occursin("y[i] .~ Normal.(loc_cells[i], sigma)",
-        sprint(Base.show_unquoted, emitted.main))
-    for retired in ("cell_input", "subject_count", "loc_cell(", "init =", "reduce(vcat",
-            "brm_flatten_response", "raw_response")
-        @test !occursin(retired, source * sprint(Base.show_unquoted, emitted.main))
+    @test isempty(emitted.defs)
+    # The cell reads its per-subject inputs at the subject index and the model
+    # value `log_k` whole; no do-block `Ref` operand (todo 0t3q6dl).
+    cell = only(p for p in emitted_plates(emitted.main) if :loc_cells in plate_writes(p))
+    @test plate_writes(cell) == [:loc_cells]
+    @test occursin("@plate for i = eachindex(t)", main)
+    @test occursin(r"loc_cells\[i\] = dose\[i\] \.\* exp\.\(.*log_k.*t\[i\]", main)
+    # The per-subject response reads the cells cell by cell, so it is never
+    # flattened. The authored `loc` stays a named value over the cells,
+    # planned only when queried.
+    @test occursin("loc = brm_flatten_cells(loc_cells)", main)
+    @test occursin("y[i] .~ Normal.(loc_cells[i], sigma)", main)
+    for retired in ("_reader", "ReactiveKernels.plate", "Ref(", "cell_input", "subject_count",
+            "init =", "reduce(vcat", "brm_flatten_response", "raw_response")
+        @test !occursin(retired, main)
     end
     backend, problem = consumer_problem(brmi)
     names = coordinate_names(backend.model.layout)
@@ -289,7 +298,7 @@ end
             sum(sum(logpdf.(Normal.(dose .* exp.(-k .* t), sigma), y); init=0.0)
                 for (t, dose, y) in zip(data.t, data.dose, data.y))
     end
-    stan = consumer_stan(brmi, "kernel-reader-shape")
+    stan = consumer_stan(brmi, "kernel-cell-shape")
     points = ([0.0, 0.0], [0.3, -0.2], [-0.4, 0.25])
     for u in points
         check_consumer_point(problem, u, oracle)
@@ -310,12 +319,13 @@ end
         (@allocated(LogDensityProblems.logdensity(p, u)),
             @allocated(LogDensityProblems.logdensity_and_gradient(p, u)))
     end
-    println("READER_ALLOCATIONS=", allocations); flush(stdout)
+    println("CELL_ALLOCATIONS=", allocations); flush(stdout)
     @test first(allocations[2]) < 6 * first(allocations[1])
     @test last(allocations[2]) < 6 * last(allocations[1])
 
-    # Cell locals named like the reader's own locals stay the cell's, and an
-    # in-cell observation's argument readers carry only what they read.
+    # One plate writes every value the program reads from a cell, so the cell
+    # runs once per subject however many values that is; its locals keep their
+    # authored names, including ones the retired reader kernels used.
     shadowing = @brm data begin
         log_k ~ Normal(0, 1)
         sigma ~ Exponential(1)
@@ -328,16 +338,20 @@ end
     end
     shadowing_plan = BRM._brm_rk_plan(shadowing)
     shadowed = BRM._rk_emit_ast(shadowing_plan)
-    source = join((sprint(Base.show_unquoted, d) for d in shadowed.defs), "\n")
-    @test occursin("return cells_", source)
-    @test occursin("y[i] .~ Normal.(loc_argument_y_1[i], sigma)",
-        sprint(Base.show_unquoted, shadowed.main))
+    shadowed_main = sprint(Base.show_unquoted, shadowed.main)
+    @test isempty(shadowed.defs)
+    cell = only(p for p in emitted_plates(shadowed.main) if :loc_cells in plate_writes(p))
+    @test plate_writes(cell) == [:loc_cells, :loc_argument_y_1]
+    @test occursin("values = t[i] .* exp(log_k)", shadowed_main)
+    @test occursin("cells = dose[i] .* exp.(-values)", shadowed_main)
+    @test occursin("loc_argument_y_1[i] = cells", shadowed_main)
+    @test occursin("y[i] .~ Normal.(loc_argument_y_1[i], sigma)", shadowed_main)
     # The observed cell response keeps its kernel input port beside its own
     # column; observed per subject, both hold the authored arrays.
     @test sort!(collect(keys(shadowing_plan.columns)); by=string) == [:dose, :loc_input_y, :t, :y]
     @test isequal(shadowing_plan.columns[:y], data.y)
     backend, problem = consumer_problem(shadowing)
-    stan = consumer_stan(shadowing, "kernel-reader-shadowing")
+    stan = consumer_stan(shadowing, "kernel-cell-shadowing")
     for u in points
         check_consumer_point(problem, u, oracle)
         check_consumer_stan(problem, stan, [:log_k => "log_k", :sigma => "sigma"], backend, u)
@@ -360,12 +374,77 @@ end
         scalar_oracle(u) = logpdf(Normal(), u[jk]) + logpdf(Exponential(), exp(u[js])) +
             u[js] + sum(logpdf.(Normal.(scalar_data.dose .* exp(-exp(u[jk])), exp(u[js])),
                 scalar_data.y))
-        stan = consumer_stan(scalar, "kernel-reader-scalar-$(length(scalar_data.dose))")
+        stan = consumer_stan(scalar, "kernel-cell-scalar-$(length(scalar_data.dose))")
         for u in points
             check_consumer_point(problem, u, scalar_oracle)
             check_consumer_stan(problem, stan, [:log_k => "log_k", :sigma => "sigma"], backend, u)
         end
     end
+end
+
+module CountedCell
+using BayesianRegressionModels, Distributions
+const calls = Ref(0)
+counted_live(t, picks, rate) = (calls[] += 1; t[picks] .* exp(rate))
+build(data) = @brm data begin
+    log_a ~ Normal(0, 1)
+    sigma ~ Exponential(1)
+    @plate for i in eachindex(t)
+        m = counted_live(t[i], picks[i], log_a)
+        z[i] ~ normal(2 .* m, sigma)
+        w[i] ~ normal(m .- 1, sigma)
+        loc[i] = m
+    end
+    y ~ Normal(loc, sigma)
+end
+end
+
+# Every value the program reads from a cell is written by the one plate BRM
+# emits for it, so each subject's cell should run once per density and per
+# value and gradient. The retired per-output reader kernels ran it once per
+# reader, three times here (co-report RKPPLBench:flag:emission-hunt on snag
+# rk-emission-lift-0a8bc777). RKPPL at fbd0aef0 still lowers a multi-output
+# `@plate for` cell to one RK plate per output, each re-running the cell: RK
+# snag rkppl-plate-for-5f5a19db. The counts are `@test_broken` until it lands.
+@stestset "a multi-output cell is one plate evaluated per subject" begin
+    data = (; t=[[0.5, 1.0, 1.5], [0.7, 1.3, 2.0], [0.4, 0.9], [1.1, 0.2]],
+        picks=[[1, 2], [2], [1, 2], [1]],
+        y=[[0.6, 0.2], [0.3], [0.8, 0.1], [0.5]], z=[[1.2, 0.4], [0.6], [1.6, 0.2], [1.0]],
+        w=[[0.0, -0.4], [-0.7], [-0.2, -0.9], [-0.5]])
+    saved = deepcopy(data)
+    brmi = CountedCell.build(data)
+    emitted = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    @test isempty(emitted.defs)
+    cell = only(p for p in emitted_plates(emitted.main) if :loc_cells in plate_writes(p))
+    @test plate_writes(cell) == [:loc_cells, :loc_argument_z_1, :loc_argument_w_1]
+    backend, problem = consumer_problem(brmi)
+    names = coordinate_names(backend.model.layout)
+    @test sort(names) == [:log_a, :sigma]
+    ia, is = findfirst(==(:log_a), names), findfirst(==(:sigma), names)
+    oracle(u) = begin
+        sigma = exp(u[is])
+        cells = [t[p] .* exp(u[ia]) for (t, p) in zip(data.t, data.picks)]
+        logpdf(Normal(), u[ia]) + logpdf(Exponential(), sigma) + u[is] +
+            sum(sum(logpdf.(Normal.(m, sigma), y)) + sum(logpdf.(Normal.(2 .* m, sigma), z)) +
+                sum(logpdf.(Normal.(m .- 1, sigma), w))
+                for (m, y, z, w) in zip(cells, data.y, data.z, data.w))
+    end
+    for u in ([0.0, 0.0], [0.3, -0.2], [-0.4, 0.25])
+        check_consumer_point(problem, u, oracle)
+    end
+    u = [0.1, -0.2]
+    LogDensityProblems.logdensity_and_gradient(problem, u)
+    CountedCell.calls[] = 0
+    LogDensityProblems.logdensity(problem, u)
+    println("CELL_CALLS_PER_DENSITY=", CountedCell.calls[]); flush(stdout)
+    @test CountedCell.calls[] <= 3 * length(data.t)
+    @test_broken CountedCell.calls[] == length(data.t)
+    CountedCell.calls[] = 0
+    LogDensityProblems.logdensity_and_gradient(problem, u)
+    println("CELL_CALLS_PER_GRADIENT=", CountedCell.calls[]); flush(stdout)
+    @test CountedCell.calls[] <= 3 * length(data.t)
+    @test_broken CountedCell.calls[] == length(data.t)
+    @test isequal(data, saved)
 end
 
 # A response holding one array per subject is observed per subject: RKPPL
@@ -471,7 +550,7 @@ end
     for (hold, active) in ((:y, :z), (:z, :y))
         held = check_rk_source_roundtrip(RKBRMI(both; held_out=hold))
         @test BRM._rk_observed_names(held.plan) == (active,)
-        @test occursin("@plate", sprint(Base.show_unquoted, BRM._rk_emit_ast(held.plan).main)) ==
+        @test occursin("y[i] .~", sprint(Base.show_unquoted, BRM._rk_emit_ast(held.plan).main)) ==
             (active === :y)
         names = coordinate_names(held.model.layout)
         ik, is = findfirst(==(:log_k), names), findfirst(==(:sigma), names)

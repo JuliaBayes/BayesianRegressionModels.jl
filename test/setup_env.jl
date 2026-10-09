@@ -64,8 +64,11 @@ const PINS = [
     # never zipped), which BRM's emitted do-blocks use instead of Ref operands;
     # bed5d467 deprecates those Ref operands, and ecf99453 packs every hidden
     # bound operand (captures included) into one prepared-AD context, clear
-    # of the 32-argument gradient cliff.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "ecf994537aa229e987e9f862146496a2842409d3"),  # main
+    # of the 32-argument gradient cliff. fbd0aef0 runs an `@plate for` cell
+    # over arrays per index as one retained plate (`@kernel` callees, dotted
+    # math, chained/local indexing, vector gathers, plate-scoped locals), which
+    # BRM's inline kernel cells emit instead of per-output reader kernels.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "fbd0aef03d1b7765a9983d00d102d7af0d67bf2c"),  # main
 ]
 
 function main()

@@ -128,6 +128,8 @@ function _rk_source_lhs!(names, lhs)
     Meta.isexpr(lhs, :tuple) && foreach(arg -> _rk_source_lhs!(names, arg), lhs.args)
     names
 end
+# A `@plate for` cell's bare locals belong to its plate (rkppl-use §13); its
+# model outputs are its indexed writes, declarations and observations.
 function _rk_source_outputs!(names, statement)
     statement isa Expr || return names
     if statement.head === :(=)
@@ -135,6 +137,12 @@ function _rk_source_outputs!(names, statement)
     elseif statement.head === :call && length(statement.args) == 3 &&
             first(statement.args) in (:~, :.~)
         _rk_source_lhs!(names, statement.args[2])
+    elseif Meta.isexpr(statement, :macrocall) && first(statement.args) === Symbol("@plate") &&
+            Meta.isexpr(last(statement.args), :for)
+        for cell in last(last(statement.args).args).args
+            Meta.isexpr(cell, :(=)) && !Meta.isexpr(first(cell.args), :ref) && continue
+            _rk_source_outputs!(names, cell)
+        end
     elseif statement.head in (:macrocall, :for, :block)
         foreach(arg -> _rk_source_outputs!(names, arg), statement.args)
     end
