@@ -21,8 +21,8 @@ StanBlocks.@deffun original_object_scan(x::vector[n], gain::real)::vector[n] =
 function _rk_callable_source!(definitions, bindings, entry,
         ::typeof(original_scan))
     push!(definitions, :(ReactiveKernels.@kernel $entry(x, gain) = begin
-        values = ReactiveKernels.scan(x, Ref(gain); init=0.0) do carry, value, g
-            next = carry + g * value
+        values = ReactiveKernels.scan(x; init=0.0) do carry, value
+            next = carry + gain * value
             (next, next)
         end
         return values
@@ -34,8 +34,8 @@ function _rk_callable_source!(definitions, bindings, entry,
         ::typeof(original_object_scan))
     subject = Symbol(entry, :_subject)
     push!(definitions, :(ReactiveKernels.@kernel $subject(x, gain) = begin
-        values = ReactiveKernels.scan(x, Ref(gain); init=0.0) do carry, value, g
-            next = carry + g * value
+        values = ReactiveKernels.scan(x; init=0.0) do carry, value
+            next = carry + gain * value
             (next, next)
         end
         locations() = values
