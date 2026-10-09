@@ -95,6 +95,7 @@ include("turing_descriptor.jl")
 # rather than being re-derived (differently) in every consumer.
 include("prediction.jl")
 include("coordinate_transport.jl")
+include("nlme_view.jl")
 include("covariate_resampling.jl")
 export modeled_covariates
 include("description.jl")
@@ -194,6 +195,9 @@ export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
        brm_coordinate_transport,
        brm_rk_to_stan, brm_stan_to_rk, brm_check_coordinate_transport,
        brm_rk_point_to_stan, brm_stan_point_to_rk, brm_stan_gradient_to_rk,
+       BRMNLMEView, BRMNLMEViewError, brm_nlme_view,
+       BRMNLMEModel, brm_nlme_model, brm_nlme_loglikelihoods,
+       brm_nlme_loglikelihoods_and_gradients,
        brm_operation, brm_execute, brm_columns, required_brm_inputs
 
 # Accessor helpers for column types — used unqualified by html renderers,

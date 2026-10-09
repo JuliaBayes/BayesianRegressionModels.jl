@@ -74,6 +74,13 @@ representation may specialize:
 julia --startup-file=no --project=test test/rk_planning_specialization.jl
 ```
 
+## NLME estimators
+
+`nlme_view.jl` pins `brm_nlme_view` and the lockstep evaluation
+(`brm_nlme_model`, `brm_nlme_loglikelihoods[_and_gradients]`) against an
+independent per-subject oracle with analytic η gradients. It runs in the test
+environment above. Shared fixtures live in `nlme_fixtures.jl`.
+
 ## Description PDF rendering
 
 `description_tex.jl` checks Student-t sampling equations for standard, affine,
@@ -350,7 +357,10 @@ Stan, invalid evidence and original bound-column ownership are covered.
 `rk_submodel_values.jl`
 checks paired source hooks for an empty marker with active predictor keywords,
 no extra result coefficient, exact callable bindings and fresh-module replay;
-an emitted entry and a bound leaf cannot share the same symbol.
+an emitted entry and a bound leaf cannot share the same symbol. Two hook calls
+appending one shared helper `@kernel` emit its definition once, with the
+independent density/gradient oracle and artifact replay; a different definition
+under that name fails before evaluation.
 
 `rk_callable_source.jl` checks original nested callable identities supplied by
 ordinary native source definitions. Ragged cells, live keyword arguments,

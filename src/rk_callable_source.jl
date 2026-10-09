@@ -25,6 +25,9 @@ receive the generic `brm_value_function`.
 The provider receives no values, lowered plan or derivative. It supplies its
 own native mathematics under the caller's source namespace. An entry cannot
 also be bound, and rebinding the original callable as its own leaf is refused.
+Providers sharing a helper may each append it: an equal definition (source
+locations aside) under one name is emitted once, at its first position, while
+different definitions under one name are refused.
 Extend with `import BayesianRegressionModels: _rk_callable_source!`.
 """
 _rk_callable_source!(definitions, bindings, entry, f) = nothing
@@ -59,7 +62,8 @@ function _rk_resolve_callable_sources(emitted::_RKEmittedProgram)
         prepend!(definitions, provider_definitions)
         append!(pending, provider_bindings)
     end
-    resolved = _RKEmittedProgram(definitions, emitted.main, bindings)
+    resolved = _RKEmittedProgram(_rk_unique_source_definitions(definitions),
+        emitted.main, bindings)
     _rk_validate_source_definitions(resolved)
     resolved
 end
