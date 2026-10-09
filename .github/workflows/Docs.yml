@@ -57,9 +57,8 @@ jobs:
           # and precompiles the packages it actually consumes.
           JULIA_PKG_PRECOMPILE_AUTO: "0"
         # BRM's nsiccha-org runtime dependencies must be developed explicitly:
-        # Julia 1.10 ignores Project.toml's `[sources]`, and MutatingFunctions
-        # plus OutputSignatures are not registered. Clone the public sources
-        # and Pkg.develop the whole closure in one batch (see /ci §5).
+        # Julia 1.10 ignores Project.toml's `[sources]`. Clone the public
+        # sources and Pkg.develop the whole closure in one batch (see /ci §5).
         # HTMXObjects is private and not needed by the docs build — see
         # make.jl's conditional theme install.
         #
@@ -73,13 +72,9 @@ jobs:
         # (run 30708357301).
         run: |
           git clone -b devibe https://github.com/nsiccha/StanBlocks.jl.git
-          git clone https://github.com/nsiccha/MutatingFunctions.jl.git
-          git clone https://github.com/nsiccha/OutputSignatures.jl.git
           julia --project=docs -e 'using Pkg; Pkg.develop([
             PackageSpec(path=pwd()),
             PackageSpec(path="StanBlocks.jl"),
-            PackageSpec(path="MutatingFunctions.jl"),
-            PackageSpec(path="OutputSignatures.jl"),
           ]); Pkg.instantiate()'
       - name: Build and deploy
         env:

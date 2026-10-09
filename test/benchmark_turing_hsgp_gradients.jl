@@ -66,8 +66,6 @@ const DEPENDENCIES = (;
     enzyme=dependency_receipt("Enzyme"),
     differentiationinterface=dependency_receipt("DifferentiationInterface"),
     warmuphmc=dependency_receipt("WarmupHMC"),
-    mutatingfunctions=dependency_receipt("MutatingFunctions"),
-    outputsignatures=dependency_receipt("OutputSignatures"),
 )
 
 function print_allocation_profile(label, f; repetitions=5, limit=24)
@@ -771,8 +769,6 @@ const PROVENANCE = (;
         DEPENDENCIES.differentiationinterface.revision,
     warmuphmc_version=DEPENDENCIES.warmuphmc.version,
     warmuphmc_revision=DEPENDENCIES.warmuphmc.revision,
-    mutatingfunctions_revision=DEPENDENCIES.mutatingfunctions.revision,
-    outputsignatures_revision=DEPENDENCIES.outputsignatures.revision,
 )
 
 println("context=", (;
