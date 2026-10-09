@@ -79,7 +79,22 @@ julia --startup-file=no --project=test test/rk_planning_specialization.jl
 `nlme_view.jl` pins `brm_nlme_view` and the lockstep evaluation
 (`brm_nlme_model`, `brm_nlme_loglikelihoods[_and_gradients]`) against an
 independent per-subject oracle with analytic η gradients. It runs in the test
-environment above. Shared fixtures live in `nlme_fixtures.jl`.
+environment above.
+
+`nlme_estimation_ext.jl` covers the NLMEEstimation.jl protocol extension:
+batched evaluation, `check_protocol`, and gradient-only posthoc against the same
+oracle. NLMEEstimation.jl is not published yet, so it is not part of
+`test/Project.toml`. Run the file from a copy of this environment that develops
+a local NLMEEstimation checkout:
+
+```sh
+cp test/Project.toml test/Manifest.toml <scratch-env>/
+julia --project=<scratch-env> -e 'using Pkg; Pkg.develop(path="<NLMEEstimation checkout>")'
+julia --project=<scratch-env> test/nlme_estimation_ext.jl
+```
+
+Without NLMEEstimation the file stops with an error rather than skipping.
+Shared fixtures live in `nlme_fixtures.jl`.
 
 ## Description PDF rendering
 

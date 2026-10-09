@@ -24,6 +24,7 @@ StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
 [weakdeps]
 AlgebraOfVega = "a2420894-485a-4f42-a4fc-c4323ec6fb2b"
 Enzyme = "7da242da-08ed-463a-9acd-ee780be4f1d9"
+NLMEEstimation = "93620da2-aa34-4028-9135-3a6a776ddbc2"
 ReactiveKernels = "78e9f072-d36b-4c73-b7a3-751b0eb26cf9"
 ReactiveKernelsPPL = "e266ea2a-6817-46cd-8bec-6238f0035f44"
 Turing = "fce5fe82-541a-59a6-adf8-730c64b5f9a0"
@@ -31,6 +32,7 @@ WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 
 [extensions]
 BayesianRegressionModelsAlgebraOfVegaExt = "AlgebraOfVega"
+BayesianRegressionModelsNLMEEstimationExt = "NLMEEstimation"
 BayesianRegressionModelsReactiveKernelsExt = ["ReactiveKernels", "ReactiveKernelsPPL"]
 BayesianRegressionModelsTuringExt = "Turing"
 BayesianRegressionModelsTuringWarmupHMCExt = ["Turing", "WarmupHMC"]
@@ -41,6 +43,7 @@ BayesianRegressionModelsWarmupHMCExt = "WarmupHMC"
 BridgeStan = "2.9"
 AlgebraOfVega = "0.2"
 Enzyme = "0.13"
+NLMEEstimation = "0.1"
 ReactiveKernels = "0.1"
 ReactiveKernelsPPL = "0.1"
 RuntimeGeneratedFunctions = "0.5"
