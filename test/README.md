@@ -350,7 +350,10 @@ Stan, invalid evidence and original bound-column ownership are covered.
 `rk_submodel_values.jl`
 checks paired source hooks for an empty marker with active predictor keywords,
 no extra result coefficient, exact callable bindings and fresh-module replay;
-an emitted entry and a bound leaf cannot share the same symbol.
+an emitted entry and a bound leaf cannot share the same symbol. Two hook calls
+appending one shared helper `@kernel` emit its definition once, with the
+independent density/gradient oracle and artifact replay; a different definition
+under that name fails before evaluation.
 
 `rk_callable_source.jl` checks original nested callable identities supplied by
 ordinary native source definitions. Ragged cells, live keyword arguments,
