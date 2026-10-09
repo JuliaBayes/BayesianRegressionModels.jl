@@ -74,6 +74,13 @@ representation may specialize:
 julia --startup-file=no --project=test test/rk_planning_specialization.jl
 ```
 
+## NLME estimators
+
+`nlme_view.jl` pins `brm_nlme_view` and the lockstep evaluation
+(`brm_nlme_model`, `brm_nlme_loglikelihoods[_and_gradients]`) against an
+independent per-subject oracle with analytic η gradients. It runs in the test
+environment above. Shared fixtures live in `nlme_fixtures.jl`.
+
 ## Description PDF rendering
 
 `description_tex.jl` checks Student-t sampling equations for standard, affine,
