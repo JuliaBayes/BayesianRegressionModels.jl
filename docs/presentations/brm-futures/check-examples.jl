@@ -11,6 +11,13 @@ source = read(joinpath(repo, "docs", "src", "feature-atlas.md"), String)
         first_index = first(first_match) + 1
         terminator = findnext("\"\"\"", source, first_index)
         code = source[first_index:prevind(source, first(terminator))]
+        if name == "population_pk"
+            # The PK slides narrate an indexed `@plate for` cell, the current
+            # population-PK spelling (brm-use references/kernel.md); the closure
+            # `kernel(...) do` form is deprecated.
+            @test occursin("@plate for i in eachindex(", code)
+            @test !occursin(r"~\s*kernel\(", code)
+        end
         example_mod = Module(Symbol("Deck_", name))
         Core.eval(example_mod, :(using BayesianRegressionModels, Distributions))
         model = BRMDocsComparisons.evaluate_source(example_mod, code)
@@ -25,7 +32,7 @@ source = read(joinpath(repo, "docs", "src", "feature-atlas.md"), String)
         else
             @test occursin("Turing unsupported for this BRM example", turing)
             @test occursin("response decorators other than `mi(response)` and response links are not yet supported", turing)
-            println("verified example=population_pk StanBlocks+Stan emission; expected Turing ragged-response rejection")
+            println("verified example=population_pk @plate for cell; StanBlocks+Stan emission; expected Turing ragged-response rejection")
         end
     end
 end

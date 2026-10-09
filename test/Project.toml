@@ -64,9 +64,10 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # ea596e50 (built graphs carry no bound row count), 683b8342 (one source
 # always lowers to one program) and ed87ceef (a proven scalar response
 # location stays scalar; 0f7d2521 gives other locations their rows once,
-# without a ones vector), and 83707d4d (closure captures in plate cells and
-# scan steps, used instead of Ref operands).
+# without a ones vector), 83707d4d (closure captures in plate cells and
+# scan steps, used instead of Ref operands; bed5d467 deprecates the Ref
+# spelling) and ecf99453 (hidden bound operands packed into one AD context).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "83707d4d4992998e3d3d33461743d7e9d4c5be1f"
+rev = "ecf994537aa229e987e9f862146496a2842409d3"
