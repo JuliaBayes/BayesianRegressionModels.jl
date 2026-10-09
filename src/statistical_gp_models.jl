@@ -19,11 +19,11 @@ gp_exp_quad_cov_graph(x, sigma, rho, jitter) = begin
     jit = BayesianRegressionModels.StatisticalPreparation._gp_jitter(jitter)
     variance = scale^2
     denominator = 2 * width^2
-    covariance = plate(left, right, row, col, Ref(variance), Ref(denominator), Ref(jit)) do xi, xj, i, j, s2, denom, eps
+    covariance = plate(left, right, row, col) do xi, xj, i, j
         distance = xi - xj
         squared_distance = distance * distance
-        cell = s2 * exp(-squared_distance / denom)
-        diagonal_jitter = ifelse(i == j, eps, 0.0)
+        cell = variance * exp(-squared_distance / denominator)
+        diagonal_jitter = ifelse(i == j, jit, 0.0)
         cell + diagonal_jitter
     end
     return covariance
@@ -38,11 +38,11 @@ gp_periodic_cov_graph(x, sigma, rho, period, jitter) = begin
     jit = BayesianRegressionModels.StatisticalPreparation._gp_jitter(jitter)
     variance = scale^2
     squared_width = width^2
-    covariance = plate(left, right, row, col, Ref(variance), Ref(squared_width), Ref(per), Ref(jit)) do xi, xj, i, j, s2, r2, p, eps
+    covariance = plate(left, right, row, col) do xi, xj, i, j
         distance = abs(xi - xj)
-        sine = sin(pi * distance / p)
-        cell = s2 * exp(-2 * sine * sine / r2)
-        diagonal_jitter = ifelse(i == j, eps, 0.0)
+        sine = sin(pi * distance / per)
+        cell = variance * exp(-2 * sine * sine / squared_width)
+        diagonal_jitter = ifelse(i == j, jit, 0.0)
         cell + diagonal_jitter
     end
     return covariance

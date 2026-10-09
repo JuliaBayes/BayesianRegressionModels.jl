@@ -426,14 +426,12 @@ function _rk_observation_argument_rows!(defs, statements, taken, observation, la
     _rk_check_argument_groups(observation.name, argument.name, raw, layout.lengths)
     name = _rk_ast_fresh_name("$(observation.name)_rows_$(argument.name)", taken)
     source = argument.name
-    reader = _rk_ast_fresh_name("$(name)_reader", taken)
+    # Arguments as long as the response flatten in the argument kernel; a
+    # singleton per subject repeats over its rows in a subject plate.
     if lengths == layout.lengths
-        push!(defs, :(ReactiveKernels.@kernel $reader(raw) = begin
-            values = brm_flatten_cells(raw)
-            return values
-        end))
-        push!(statements, :($name = $reader($source)))
+        push!(statements, :($name = brm_flatten_cells($source)))
     else
+        reader = _rk_ast_fresh_name("$(name)_reader", taken)
         push!(defs, :(ReactiveKernels.@kernel $reader(raw, groups) = begin
             cells = ReactiveKernels.plate(raw, groups) do value, rows
                 ones(length(rows)) .* value
@@ -456,12 +454,8 @@ function _rk_observation_argument_rows!(defs, statements, taken, observation, la
     name = _rk_ast_fresh_name("$(observation.name)_rows_$(argument.name)", taken)
     # The original response join partitions these rows; the bound partition
     # port orders them and the argument gather stays in the graph.
-    reader = _rk_ast_fresh_name("$(name)_reader", taken)
-    push!(defs, :(ReactiveKernels.@kernel $reader(raw, groups) = begin
-        values = raw[brm_flatten_cells(groups)]
-        return values
-    end))
-    push!(statements, Expr(:(=), name, Expr(:call, reader, argument.name, geometry())))
+    push!(statements, Expr(:(=), name, Expr(:ref, argument.name,
+        Expr(:call, :brm_flatten_cells, geometry()))))
     _BRMPreparedRef(name, :whole)
 end
 
@@ -711,24 +705,24 @@ function _rk_emit_kernel_reader!(defs, statements, bindings, taken, kernel, name
     gathered = unique(Symbol[input.source for (_, input) in inputs if input.kind === :gather])
     ports = unique(Symbol[[input.kind === :gather ? input.rows : input.source
         for (_, input) in inputs]; gathered; globals])
-    # The cell runs inline in the plate's closure. Every name the reader adds
-    # avoids the cell's own names, so the cell neither captures nor rebinds a
-    # reader local. Globals keep their names because the cell reads them so.
+    # The cell runs inline in the plate's do-block: it zips its per-subject
+    # inputs and closes over the reader's gathered sources and globals, which
+    # it reads whole. Globals keep their names because the cell reads them so.
+    # Every other name the reader adds avoids the cell's own names, so the cell
+    # neither captures nor rebinds a reader local.
     cell_names = _rk_source_symbols!(Set{Symbol}(kernel.params), cell)
     used = union(cell_names, ports)
     fresh(base) = _rk_ast_fresh_name(string(base), used)
     rows = Dict(param => fresh("$(param)_rows") for (param, input) in inputs
         if input.kind === :gather)
-    shared = Dict(source => source in cell_names ? fresh("$(source)_values") : source
-        for source in gathered)
-    formals = Symbol[[input.kind === :gather ? rows[param] : param for (param, input) in inputs];
-        [shared[source] for source in gathered]; globals]
-    # A reader port no formal shadows stays clear of the cell's names; a
-    # renamed shared source keeps one name as port and formal.
-    port = Dict(p => haskey(shared, p) ? shared[p] :
+    shared = Dict(source => source in cell_names && !(source in globals) ?
+        fresh("$(source)_values") : source for source in gathered)
+    formals = Symbol[input.kind === :gather ? rows[param] : param for (param, input) in inputs]
+    # A captured port is named as the cell reads it; a zipped port no formal
+    # shadows stays clear of the cell's names.
+    port = Dict(p => p in globals ? p : haskey(shared, p) ? shared[p] :
         p in cell_names && !(p in formals) ? fresh("$(p)_port") : p for p in ports)
-    operands = Any[[port[input.kind === :gather ? input.rows : input.source] for (_, input) in inputs];
-        [Expr(:call, :Ref, port[source]) for source in [gathered; globals]]]
+    operands = Any[port[input.kind === :gather ? input.rows : input.source] for (_, input) in inputs]
     gathers = [Expr(:(=), param, Expr(:ref, shared[input.source], rows[param]))
         for (param, input) in inputs if input.kind === :gather]
     plate = Expr(:do, Expr(:call, Expr(:., :ReactiveKernels, QuoteNode(:plate)), operands...),

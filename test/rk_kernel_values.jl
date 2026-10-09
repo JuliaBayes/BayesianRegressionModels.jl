@@ -265,7 +265,10 @@ end
     @test sort!(collect(keys(plan.columns)); by=string) == [:dose, :t, :y]
     @test isequal(plan.columns[:y], data.y)
     @test occursin("loc_reader(t, dose, log_k)", source)
-    @test occursin("ReactiveKernels.plate(t, dose, Ref(log_k)) do t, dose, log_k", source)
+    # The cell zips its per-subject inputs and closes over the model value
+    # `log_k`; no do-block `Ref` operand (todo 0t3q6dl).
+    @test occursin("ReactiveKernels.plate(t, dose) do t, dose", source)
+    @test !occursin(r"(plate|scan)\([^\n]*Ref\(", source)
     # The reader returns its subject cells; the per-subject response reads
     # them cell by cell, so the response is never flattened. The authored
     # `loc` stays a named value over the cells, planned only when queried.

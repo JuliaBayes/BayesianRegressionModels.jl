@@ -50,29 +50,26 @@ function _rk_ast_hsgp_basis_graph!(definitions, term, taken)
         # These are the tensor basis coordinates in the same Julia/Stan
         # column-major order; no prepared numerical basis is shipped.
         modes = D == 1 ? :(1:$B) : Expr(:vect, [I[j] for I in CartesianIndices(K)]...)
-        frequency = _rk_ast_graph_plate([modes, :(Ref($(widths[j])))], [:mode, :width],
-            :((mode * pi / (2 * width))^2))
+        frequency = _rk_ast_graph_plate([modes], [:mode],
+            :((mode * pi / (2 * $(widths[j])))^2))
         push!(body.args, Expr(:(=), frequencies[j], frequency))
     end
+    # Each row cell zips the axes; its mode cells close over the row's axis
+    # values and the graph's whole `omega2`, widths and centers.
     if D == 1
         cell = :(sin(sqrt(omega2[b]) * (x - center + width)) / sqrt(width))
-        inner = _rk_ast_graph_plate([:(1:$B), :(Ref(x)), :(Ref(omega2)), :(Ref(width)),
-            :(Ref(center))], [:b, :x, :omega2, :width, :center], cell)
-        outer = _rk_ast_graph_plate([:axis, :(Ref(omega2)), :(Ref(width)), :(Ref(center))],
-            [:x, :omega2, :width, :center], Expr(:block, :(values = $inner), :values))
+        inner = _rk_ast_graph_plate([:(1:$B)], [:b], cell)
+        outer = _rk_ast_graph_plate([:axis], [:x], Expr(:block, :(values = $inner), :values))
     else
         push!(body.args, :(widths = $(Expr(:tuple, widths...))))
         push!(body.args, :(centers = $(Expr(:tuple, centers...))))
         push!(body.args, :(omega2 = hcat($(frequencies...))))
         row_values = [Symbol(:x_, j) for j in 1:D]
-        factors = [:(sin(sqrt(frequencies[b, $j]) *
-            (xs[$j] - centers[$j] + widths[$j])) / sqrt(widths[$j])) for j in 1:D]
-        inner = _rk_ast_graph_plate([:(1:$B), :(Ref(xs)), :(Ref(frequencies)),
-            :(Ref(widths)), :(Ref(centers))], [:b, :xs, :frequencies, :widths, :centers],
-            Expr(:call, :*, factors...))
-        outer = _rk_ast_graph_plate([inputs..., :(Ref(omega2)), :(Ref(widths)),
-                :(Ref(centers))], [row_values..., :frequencies, :widths, :centers],
-            Expr(:block, :(xs = $(Expr(:tuple, row_values...))), :(values = $inner), :values))
+        factors = [:(sin(sqrt(omega2[b, $j]) *
+            ($(row_values[j]) - centers[$j] + widths[$j])) / sqrt(widths[$j])) for j in 1:D]
+        inner = _rk_ast_graph_plate([:(1:$B)], [:b], Expr(:call, :*, factors...))
+        outer = _rk_ast_graph_plate(inputs, row_values,
+            Expr(:block, :(values = $inner), :values))
     end
     push!(body.args, :(basis_rows = $outer))
     if get(options, :orthogonal, nothing) === :linear
@@ -84,9 +81,7 @@ function _rk_ast_hsgp_basis_graph!(definitions, term, taken)
         push!(body.args, :(raw_basis = stack(basis_rows; dims=1)))
         push!(body.args, :(axis_centered = $x .- sum($x) / length($x)))
         push!(body.args, :(axis_ss = sum(axis_centered .^ 2)))
-        column = _rk_ast_graph_plate([:(1:$B), :(Ref(raw_basis)),
-                :(Ref(axis_centered)), :(Ref(axis_ss))],
-            [:b, :raw_basis, :axis_centered, :axis_ss], Base.remove_linenums!(quote
+        column = _rk_ast_graph_plate([:(1:$B)], [:b], Base.remove_linenums!(quote
                 phi = raw_basis[:, b]
                 centered = phi .- sum(phi) / length(phi)
                 axis_ss > 1e-12 ?
@@ -154,9 +149,9 @@ function _rk_ast_hsgp_value_graph!(definitions, term, taken, inputs, sigma, rho,
     scale = options.iso ? :(sigma * (rho * sqrt(2pi))^($D / 2)) :
         Expr(:call, :*, :sigma, [:(sqrt(rho[$j] * sqrt(2pi))) for j in 1:D]...)
     weight_cell = :($scale * exp(-0.25 * $exponent))
-    weight_plate(sigma_value, rho_value) = _rk_ast_graph_plate([:(axes(omega2, 1)),
-            :(Ref(omega2)), :(Ref($sigma_value)), :(Ref($rho_value))],
-        [:b, :omega2, :sigma, :rho], weight_cell)
+    # Mode cells close over `omega2` and the scales, read under their names.
+    weight_plate(sigma_value, rho_value) = _rk_ast_graph_plate([:(axes(omega2, 1))], [:b],
+        _rk_ast_hsgp_substitute(weight_cell, Dict(:sigma => sigma_value, :rho => rho_value)))
     formals = first.(inputs)
     arguments = [formals..., :sigma, :rho, :z]
     body = Expr(:block)

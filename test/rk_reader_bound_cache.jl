@@ -30,10 +30,10 @@ end
     k = exp(log_k)
     v = exp(log_v)
     a = exp(log_a)
-    reads = scan(kinds, gaps, amounts, Ref(k), Ref(v), Ref(a); init=0.0) do previous, kind, gap, amount, kk, vv, aa
-        decayed = previous * exp(-kk * gap)
-        read = kind == 1 ? decayed / vv : 0.0
-        next = kind == 1 ? decayed : decayed + aa * amount
+    reads = scan(kinds, gaps, amounts; init=0.0) do previous, kind, gap, amount
+        decayed = previous * exp(-k * gap)
+        read = kind == 1 ? decayed / v : 0.0
+        next = kind == 1 ? decayed : decayed + a * amount
         (next, read)
     end
     read_events = counted_positions(kinds)

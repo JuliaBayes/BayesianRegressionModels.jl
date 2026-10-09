@@ -74,6 +74,9 @@ end
         text = join(sprint(Base.show_unquoted,d) for d in emitted.defs)
         @test !occursin("brm_hsgp_basis(",text)
         @test !occursin("brm_hsgp_sqrt_spd(",text)
+        # Graph plates close over whole values; no do-block `Ref` operand
+        # (todo 0t3q6dl).
+        @test !occursin(r"(plate|scan)\([^\n]*Ref\(",text)
         inventory = hsgp_plate_depths(kernel_graph(backend.model.spec))
         @test !isempty(inventory)
         @test any(>(0),inventory)
