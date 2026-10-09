@@ -57,7 +57,6 @@ include("rk_kernel_values.jl")
 include("rk_submodel_values.jl")
 include("rk_structured.jl")
 include("rk_observations.jl")
-include("native_ppl.jl")
 include("vimpl.jl")
 
 # SBBRMI — StanBlocks backend. Lowers a BRMI into a StanBlocks SlicModel
@@ -150,16 +149,10 @@ export truncated, censored, interval_censored
 export rk_translate_artifact
 export rk_artifact_inputs
 export rkppl_model, rk_model
-# A julianic `@jmodel` body is ordinary Julia, so the distributions it names must
-# be real `Distributions` objects resolved in the AUTHOR's scope. Re-export the
-# ones a model body actually writes so `using BayesianRegressionModels` is the
-# only import a model file needs — no `using Distributions` on top (todo
-# `0n9bz7p`, decision `0w84aut`). These are `Distributions.*` verbatim, not
-# wrappers. Note `NativePPL` exports its OWN `Exponential`/`StandardNormal` —
-# the DECLARATIVE prior *declarations*, a different thing — so a caller who
-# `using`s both modules must qualify that one name; `Normal` does not clash at
-# all, because the declarative macro matches the bare symbol at expansion time
-# rather than resolving a binding.
+# Re-export the distributions a model file commonly writes so
+# `using BayesianRegressionModels` is the only import it needs — no
+# `using Distributions` on top (todo `0n9bz7p`, decision `0w84aut`). These are
+# `Distributions.*` verbatim, not wrappers.
 export Normal, Exponential, Poisson, Bernoulli, LKJCholesky
 export product_distribution, logpdf
 # Logit-form Bernoulli/Binomial -- prefer these over `Bernoulli(logistic(eta))`
@@ -185,7 +178,6 @@ export BRMI, VBRMI, SBBRMI, TuringBRMI, RKBRMI, GenerativeDeclaration, Generativ
        turing_pointwise_loglikelihoods, turing_predictive_model,
        turing_generated_quantities, turing_posterior_predictive,
        rk_logdensity_problem, rk_restore_draws
-export NativePPL
 export BRMDescriptor, BRMInput, BRMOutput, BRMOperation, BRMHighlight
 export BRMDescription, BRMDescriptionComponent, BRMDescriptionContext,
        BRMDescriptionFragment, BRMDescriptionReference, BRMPriorDescription,

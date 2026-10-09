@@ -2,7 +2,6 @@
 using Test, BayesianRegressionModels, Turing, Distributions, LinearAlgebra
 
 const BRM = BayesianRegressionModels
-const NP = BRM.NativePPL
 include("concurrent_builds.jl")
 
 @testset "Turing source expressions belong to each caller" begin
@@ -38,42 +37,6 @@ include("concurrent_builds.jl")
         @test all(Turing.logjoint(backend.model, parameters) ≈ density
                   for backend in backends)
     end
-end
-
-@testset "Julianic lowering owns its syntax before rewriting indices" begin
-    definition = :(function indexed_source(selector)
-        z ~ product_distribution(fill(Normal(0.0, 1.0), 4))
-        total = sum(z[selector[begin:end]])
-        y ~ Normal(total, 1.0)
-    end)
-    original = deepcopy(definition)
-    expansions = concurrent_builds(_ -> NP._julianic_model_syntax(definition), 1:16)
-    @test definition == original
-    @test all(occursin("lastindex", sprint(show, expansion))
-              for expansion in expansions)
-    @test all(occursin("firstindex", sprint(show, expansion))
-              for expansion in expansions)
-
-    # The returned signature also belongs to the expansion, not the input.
-    push!(first(expansions).args[1].args, :extra_argument)
-    @test definition == original
-    @test all(length(expansion.args[1].args) == 2
-              for expansion in expansions[2:end])
-    @test_throws ArgumentError NP._julianic_model_syntax(:(x + 1))
-    @test definition == original
-
-    # Ownership applies to syntax, not to literal values captured by that
-    # syntax. Deepcopy would silently change the identity of this reference.
-    captured = Ref(0.25)
-    captured_ref = Expr(:ref, captured)
-    literal_definition = :(function literal_prior()
-        y ~ Normal($captured_ref, 1.0)
-    end)
-    contains_capture(node) = node === captured ||
-        (node isa Expr && any(contains_capture, node.args))
-    literal_expansions = concurrent_builds(
-        _ -> NP._julianic_model_syntax(literal_definition), 1:16)
-    @test all(contains_capture, literal_expansions)
 end
 
 @testset "shared-group source is stable and keeps caller names distinct" begin

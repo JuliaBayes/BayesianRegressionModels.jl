@@ -228,7 +228,6 @@ end
     @test_throws "supported by the StanBlocks backend only" VBRMI(brmi)
     @test BayesianRegressionModels._brm_turing_plan(brmi).response ==
           [[joint_df.y1[i], joint_df.y2[i]] for i in eachindex(joint_df.y1)]
-    @test_throws "supported by the StanBlocks backend only" BayesianRegressionModels.NativePPL.lower(brmi)
 
     trained = SBBRMI(brmi; mod=@__MODULE__)
     @test_throws "mean source `x` has 1 rows" reprocess(trained, (;
