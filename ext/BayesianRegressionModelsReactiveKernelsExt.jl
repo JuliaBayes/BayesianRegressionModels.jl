@@ -169,4 +169,10 @@ end
 BRM._rk_constrained_values(backend::BRM.RKBRMI, u::AbstractVector) =
     constrain(backend.model.layout, u)
 
+# NLME evaluation (src/nlme_view.jl): the prepared `:pointwise` query and its
+# evaluation at a packed unconstrained point.
+BRM._rk_pointwise_query(backend::BRM.RKBRMI) =
+    prepare_query(backend.model, _rk_translated_plan(backend.plan), :pointwise)
+BRM._rk_pointwise_values(query, u::AbstractVector) = Base.invokelatest(query, u)
+
 end
