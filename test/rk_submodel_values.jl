@@ -101,8 +101,8 @@ function second_events end
 const SECOND_FACTOR = Ref(1.0)
 
 recurrence(factor) = :(ReactiveKernels.@kernel shared_response(x, gain) = begin
-    values = ReactiveKernels.scan(x, Ref(gain); init=0.0) do carry, value, g
-        next = carry + $factor * g * value
+    values = ReactiveKernels.scan(x; init=0.0) do carry, value
+        next = carry + $factor * gain * value
         (next, next)
     end
     return values
