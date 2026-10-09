@@ -79,13 +79,15 @@ end
         main = sprint(Base.show_unquoted, emitted.main)
         blocks = join((sprint(Base.show_unquoted, d) for d in emitted.defs
             if BRM._rk_source_definition(d).kind === :rkppl), "\n")
-        # A bounded authored length-scale prior reads no floor, so the basis
-        # graph returns only the matrix and squared frequencies.
-        @test occursin("(hsgp_x_PHI, hsgp_x_omega2) = brm_hsgp_basis_graph(x)", main)
+        # The effect reads the model-derived axis by name; its spectral graph
+        # composes the basis graph. A bounded authored length-scale prior
+        # reads no validity floor, so none is emitted.
+        @test occursin("hsgp_x ~ brm_hsgp_effect(x)", main)
         @test !occursin("rho_floor", main)
         definitions = join(sprint(Base.show_unquoted, d) for d in emitted.defs)
-        @test occursin("beta_raw[1:nbasis] .~ Normal.(0, 1)", definitions)
-        @test occursin("hsgp_x ~ brm_hsgp_effect(hsgp_x_PHI, hsgp_x_omega2, 3)", main)
+        @test occursin("beta_raw[1:3] .~ Normal.(0, 1)", definitions)
+        @test occursin("(PHI, omega2) = brm_hsgp_basis_graph(axis)", definitions)
+        @test !occursin("rho_floor", definitions)
         @test occursin("rho_iso ~ Uniform(0.4, 3.0)", definitions)
         # Basis, centering, projection and spectral weights are numerical
         # intermediates of the actual built posterior graph.

@@ -11,39 +11,48 @@ function _rk_ast_graph_plate(arguments, parameters, body)
         Expr(:->, Expr(:tuple, parameters...), body))
 end
 
-# One function-shaped graph per basis structure returns the basis matrix and
-# squared frequencies, plus the length-scale floor when a prior reads it; the
-# main block destructures that result. Terms with the same structure (modes,
-# boundary factor, fits, geometry) share the definition. A one-dimensional
-# basis reads its axis directly: per-axis suffixes, tuples and one-column
-# frequency matrices appear only for a tensor basis.
-function _rk_ast_hsgp_basis_graph!(definitions, term, taken, PHI, omega2, floor)
-    options = term.options
-    K = options.k isa Tuple ? options.k : (options.k,)
+# Axis inputs of a squared-exponential HSGP graph: a one-dimensional basis
+# reads `axis`; per-axis suffixes, tuples and one-column frequency matrices
+# appear only for a tensor basis.
+_rk_hsgp_per_axis(stem, D) = D == 1 ? [Symbol(stem)] : [Symbol(stem, :_, j) for j in 1:D]
+_rk_hsgp_modes(options) = options.k isa Tuple ? options.k : (options.k,)
+_rk_hsgp_axis_inputs(term) = _rk_hsgp_per_axis(:axis, length(term.columns))
+
+# Each axis's half-width, and its center when the basis reads it: formula
+# constants for a fixed domain, otherwise computed from the current axis.
+function _rk_ast_hsgp_fits!(body, options, inputs; centered=true)
+    D = length(inputs)
     C = options.c isa Tuple ? options.c : (options.c,)
-    D, B = length(K), prod(K)
-    per_axis(stem) = D == 1 ? [Symbol(stem)] : [Symbol(stem, :_, j) for j in 1:D]
-    inputs, centers, widths = per_axis(:axis), per_axis(:center), per_axis(:width)
-    frequencies = D == 1 ? [:omega2] : per_axis(:frequency)
-    floors = D == 1 ? [:rho_floor] : per_axis(:floor)
-    body = Expr(:block)
+    centers, widths = _rk_hsgp_per_axis(:center, D), _rk_hsgp_per_axis(:width, D)
     fits = options.fixed_fits
     for j in 1:D
         x, center, width = inputs[j], centers[j], widths[j]
-        push!(body.args, Expr(:(=), center, fits === nothing ?
-            :(sum($x) / length($x)) : fits[j][1]))
+        (centered || fits === nothing) && push!(body.args, Expr(:(=), center,
+            fits === nothing ? :(sum($x) / length($x)) : fits[j][1]))
         push!(body.args, Expr(:(=), width, fits === nothing ?
             :($(C[j]) * maximum(abs.($x .- $center))) : fits[j][2]))
+    end
+    centers, widths
+end
+
+# The basis matrix and squared frequencies of one basis structure (modes,
+# boundary factor, fits, orthogonalization); terms with the same structure
+# share the definition. Its caller destructures both results.
+function _rk_ast_hsgp_basis_graph!(definitions, term, taken)
+    options = term.options
+    K = _rk_hsgp_modes(options)
+    D, B = length(K), prod(K)
+    inputs = _rk_hsgp_axis_inputs(term)
+    body = Expr(:block)
+    centers, widths = _rk_ast_hsgp_fits!(body, options, inputs)
+    frequencies = D == 1 ? [:omega2] : _rk_hsgp_per_axis(:frequency, D)
+    for j in 1:D
         # These are the tensor basis coordinates in the same Julia/Stan
         # column-major order; no prepared numerical basis is shipped.
         modes = D == 1 ? :(1:$B) : Expr(:vect, [I[j] for I in CartesianIndices(K)]...)
-        frequency = _rk_ast_graph_plate([modes, :(Ref($width))], [:mode, :width],
+        frequency = _rk_ast_graph_plate([modes, :(Ref($(widths[j])))], [:mode, :width],
             :((mode * pi / (2 * width))^2))
         push!(body.args, Expr(:(=), frequencies[j], frequency))
-        floor === nothing && continue
-        lower = K[j] == 1 ? 0.0 :
-            :((4 * $width / pi) * sqrt(log($(_BRM_HSGP_WEIGHT_THRESHOLD)) / ($(K[j])^2 - 1)))
-        push!(body.args, Expr(:(=), floors[j], lower))
     end
     if D == 1
         cell = :(sin(sqrt(omega2[b]) * (x - center + width)) / sqrt(width))
@@ -89,21 +98,50 @@ function _rk_ast_hsgp_basis_graph!(definitions, term, taken, PHI, omega2, floor)
     else
         push!(body.args, :(PHI = stack(basis_rows; dims=1)))
     end
-    outputs = Any[:PHI, :omega2]
-    if floor !== nothing
-        D == 1 || push!(body.args, :(rho_floor = $(options.iso ?
-            Expr(:call, :max, floors...) : Expr(:vect, floors...))))
-        push!(outputs, :rho_floor)
-    end
-    push!(body.args, Expr(:return, Expr(:tuple, outputs...)))
-    entry = _rk_ast_shared_definition!(definitions, taken, "brm_hsgp_basis_graph", inputs, body;
+    push!(body.args, Expr(:return, Expr(:tuple, :PHI, :omega2)))
+    _rk_ast_shared_definition!(definitions, taken, "brm_hsgp_basis_graph", inputs, body;
         kernel=true)
-    targets = floor === nothing ? (PHI, omega2) : (PHI, omega2, floor)
-    Expr[Expr(:(=), Expr(:tuple, targets...), Expr(:call, entry, term.columns...))]
 end
 
-function _rk_ast_hsgp_value_graph!(definitions, term, taken,
-        PHI, omega2, sigma, rho, z; group_index=nothing)
+# The length-scale validity floor `(4L/pi) * sqrt(log(100) / (k^2 - 1))` per
+# axis (the largest for an isotropic length scale, `0.0` for a single mode),
+# emitted only where a prior or hyper-predictor reads it. Automatic fits read
+# the current axes through a shared graph; a fixed domain's floor is constant.
+function _rk_ast_hsgp_floor!(definitions, statements, term, taken)
+    options = term.options
+    K = _rk_hsgp_modes(options)
+    D = length(K)
+    all(==(1), K) && return 0.0
+    body = Expr(:block)
+    inputs = _rk_hsgp_axis_inputs(term)
+    _, widths = _rk_ast_hsgp_fits!(body, options, inputs; centered=false)
+    floors = [K[j] == 1 ? 0.0 : :((4 * $(widths[j]) / pi) *
+        sqrt(log($(_BRM_HSGP_WEIGHT_THRESHOLD)) / ($(K[j])^2 - 1))) for j in 1:D]
+    value = D == 1 ? only(floors) : options.iso ? Expr(:call, :max, floors...) :
+        Expr(:vect, floors...)
+    name = _rk_ast_fresh_name(string(options.id, "_rho_floor"), taken)
+    if options.fixed_fits === nothing
+        push!(body.args, :(rho_floor = $value), :(return rho_floor))
+        entry = _rk_ast_shared_definition!(definitions, taken, "brm_hsgp_rho_floor_graph",
+            inputs, body; kernel=true)
+        push!(statements, Expr(:(=), name, Expr(:call, entry, term.columns...)))
+    else
+        fits = Dict(widths[j] => options.fixed_fits[j][2] for j in 1:D)
+        push!(statements, Expr(:(=), name, _rk_ast_hsgp_substitute(value, fits)))
+    end
+    name
+end
+
+_rk_ast_hsgp_substitute(value::Symbol, values) = get(values, value, value)
+_rk_ast_hsgp_substitute(value::Expr, values) =
+    Expr(value.head, (_rk_ast_hsgp_substitute(a, values) for a in value.args)...)
+_rk_ast_hsgp_substitute(value, values) = value
+
+# The spectral-weighted basis product. `inputs` pairs each graph argument
+# with its value: a squared-exponential term passes its axes and the graph
+# composes its basis; a periodic term passes its prepared `PHI` and `omega2`.
+function _rk_ast_hsgp_value_graph!(definitions, term, taken, inputs, sigma, rho, z;
+        group_index=nothing)
     options = term.options
     D = length(term.columns)
     rho_by_group = any(p -> p.hyper === :length_scale, options.hyper_plans)
@@ -119,8 +157,14 @@ function _rk_ast_hsgp_value_graph!(definitions, term, taken,
     weight_plate(sigma_value, rho_value) = _rk_ast_graph_plate([:(axes(omega2, 1)),
             :(Ref(omega2)), :(Ref($sigma_value)), :(Ref($rho_value))],
         [:b, :omega2, :sigma, :rho], weight_cell)
-    arguments = [:PHI, :omega2, :sigma, :rho, :z]
+    formals = first.(inputs)
+    arguments = [formals..., :sigma, :rho, :z]
     body = Expr(:block)
+    if get(options, :cov, :exp_quad) !== :periodic
+        basis = _rk_ast_hsgp_basis_graph!(definitions, term, taken)
+        push!(body.args, Expr(:(=), Expr(:tuple, :PHI, :omega2),
+            Expr(:call, basis, formals...)))
+    end
     if group_index === nothing
         # Hyper-predicted scales arrive as one-element vectors.
         sigma_value, rho_value = :sigma, :rho
@@ -150,7 +194,7 @@ function _rk_ast_hsgp_value_graph!(definitions, term, taken,
     # Terms with the same spectral shape share one explicit numerical graph.
     entry = _rk_ast_shared_definition!(definitions, taken, "brm_hsgp_spectral_graph",
         arguments, body; kernel=true)
-    values = [PHI, omega2, sigma, rho, z]
+    values = [last.(inputs)..., sigma, rho, z]
     group_index === nothing || push!(values, group_index)
     Expr(:call, entry, values...)
 end

@@ -92,24 +92,36 @@ end
         end
         PHI, omega2, floors = fixed_hsgp_oracle((data.x,data.w)[1:length(K)],K,domains)
         length(K) == 1 && (omega2 = vec(omega2))
-        # The main block destructures one function-shaped basis graph; there
-        # are no per-endpoint reader kernels.
+        # One main-block line calls the effect on its axes; its spectral graph
+        # composes the shared basis graph. There are no per-term basis graphs,
+        # endpoint reader kernels or main-block basis values.
         main = sprint(Base.show_unquoted,emitted.main)
         id = length(K)==1 ? "hsgp_x" : "hsgp_x_w"
-        call = "($(id)_PHI, $(id)_omega2, $(id)_rho_floor) = brm_hsgp_basis_graph(" *
-            join(("x","w")[1:length(K)],", ") * ")"
-        @test occursin(call,main)
-        @test !occursin("$(id)_basis_graph",text)
-        @test !occursin("basis_matrix()",text)
-        @test !occursin("length_scale_floor",text)
+        columns = join(("x","w")[1:length(K)],", ")
+        @test occursin("$(id) ~ brm_hsgp_effect($(columns)",main)
+        @test occursin("(PHI, omega2) = brm_hsgp_basis_graph(",text)
+        for retired in ("$(id)_basis_graph","basis_matrix()","length_scale_floor",
+                "$(id)_PHI","$(id)_lambda","axis_1 =","s = sigma")
+            @test !occursin(retired,text*main)
+        end
         ext = Base.get_extension(BRM,:BayesianRegressionModelsReactiveKernelsExt)
         mod = ext._rk_emit_module(emitted)
-        definition = only(filter(d -> BRM._rk_source_definition(d).kind === :kernel &&
-            BRM._rk_source_definition(d).name === :brm_hsgp_basis_graph,emitted.defs))
         owner = getfield(mod,:brm_hsgp_basis_graph)
         basis = Base.invokelatest(owner,(data.x,data.w)[1:length(K)]...)
-        for (actual, expected) in zip(basis,(PHI,omega2,iso ? maximum(floors) : floors))
+        @test length(basis) == 2
+        for (actual, expected) in zip(basis,(PHI,omega2))
             @test actual ≈ expected atol=2e-15 rtol=2e-15
+        end
+        # A fixed domain's validity floor is a main-block constant, present
+        # only where the truncated length-scale prior reads it.
+        floor_name = Symbol(id,"_rho_floor")
+        floor_statements = filter(x -> Meta.isexpr(x,:(=)) && x.args[1] === floor_name,
+            emitted.main.args)
+        if all(==(1),K)
+            @test isempty(floor_statements)
+        else
+            @test Core.eval(mod,last(only(floor_statements).args)) ≈
+                (iso ? maximum(floors) : floors) atol=2e-15 rtol=2e-15
         end
         new_axes = ([0.9,-0.8,0.1,0.3],[-0.7,0.2,0.4,-0.3])[1:length(K)]
         new_expected = first(fixed_hsgp_oracle(new_axes,K,domains))
