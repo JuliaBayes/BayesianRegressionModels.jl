@@ -300,8 +300,7 @@ grouping, conditioning, replay, prediction, and parameterization contracts.
 `turing_world_age.jl` constructs and evaluates models inside compiled callers
 and checks that generated-model caching distinguishes prior literals.
 `model_source_ownership.jl` checks concurrent Turing construction, source-AST
-isolation, stable shared-group source, and non-mutating Julianic lowering of
-shared input syntax. Run it in a fresh process with `julia --threads=4 --project=test
+isolation and stable shared-group source. Run it in a fresh process with `julia --threads=4 --project=test
 test/model_source_ownership.jl` to exercise the concurrent paths.
 `sbimpl_generation_concurrency.jl` checks concurrent SBBRMI construction and
 immediate consumption in compiled callers, including cold and warm vector
@@ -548,21 +547,6 @@ at an older dependency checkout.
 `BridgeStan.jl` finds them via `$BRIDGESTAN`, falling back to
 `~/.bridgestan/bridgestan-<version>`, and downloads them if neither exists.
 
-The native-PPL milestone gates are separate on purpose:
-
-```sh
-julia --project=test test/native_ppl.jl
-julia --project=test test/native_ppl_warmuphmc.jl
-julia --project=test test/native_ppl_backend_parity.jl
-```
-
-The parity file compiles the unchanged substantive BRMI through `SBBRMI` and
-also compiles `test/native_ppl_shared_distributional_mixed.stan`, its
-hand-optimized minimal Stan analogue. It checks normalized density and mapped
-gradients before printing warmed density/gradient allocation and timing rows;
-those timings include the BridgeStan FFI crossing but exclude compilation and
-model/data construction.
-
 The grouped Turing parity benchmark compares the same BRMI and constrained
 parameter point through StanBlocks/BridgeStan and Turing/Enzyme. Pass a case
 name to keep a hardening run focused; the centered-geometry gate is:
@@ -627,14 +611,13 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   registry only carries WarmupHMC 0.1.x, and the root `Project.toml` bounds it
   at `WarmupHMC = "0.2"` — so a registry resolve is unsatisfiable, not merely
   stale. `[sources]` cannot fix this either: it is a Julia 1.11+ feature and is
-  silently ignored on 1.10, which is this package's compat floor. Native PPL
-  sampling additionally requires WarmupHMC
-  `9c642178720d5c294b9cead86fc8c82da5a5db09` or later. That floor retains
-  Pathfinder's use of the target's own `logdensity_and_gradient` and admits
-  Pathfinder 0.10.7, the first registered release compatible with the test
-  environment's Turing 0.46. `setup_env.jl` and the focused sampler test
-  enforce this ancestry because older and newer checkouts all report version
-  0.2.1. `setup_env.jl` resolves an exact published revision rather than a
+  silently ignored on 1.10, which is this package's compat floor. The pinned
+  revision must contain WarmupHMC `9c642178720d5c294b9cead86fc8c82da5a5db09`:
+  that floor retains Pathfinder's use of the target's own
+  `logdensity_and_gradient` and admits Pathfinder 0.10.7, the first registered
+  release compatible with the test environment's Turing 0.46. Older and newer
+  checkouts all report version 0.2.1, so the version number cannot express
+  this. `setup_env.jl` resolves an exact published revision rather than a
   shared checkout's possibly stale local branch.
 - **`StanBlocks` must be a checkout, not a release.** BRM does not precompile
   against registered StanBlocks; it fails inside a `@deffun` in `src/sbimpl.jl`.
@@ -673,13 +656,9 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   binary without another edit; like Treebars, it is resolution plumbing, not a
   test dependency. A manifest resolved before this entry still holds 0.0.302:
   re-run `setup_env.jl`.
-- **The other three `[sources]` packages must be develop paths too.**
-  `MutatingFunctions`, `OutputSignatures`, and `TreeArrays` are unregistered
-  direct dependencies. On Julia 1.10 their committed source pins are inert, so
-  omitting their paths fails with `expected package ... to be registered`.
-- **All ten `develop` paths go in ONE `Pkg.develop` call.** Resolution has to
-  satisfy them together: the unregistered BRM root, the seven external
-  source pins, and the two nested ReactiveKernels packages. Developing
+- **All eight `develop` paths go in ONE `Pkg.develop` call.** Resolution has to
+  satisfy them together: the unregistered BRM root, the four external
+  source pins, and the three nested ReactiveKernels packages. Developing
   StanBlocks by itself fails with `expected package
   BayesianRegressionModels to be registered`, while omitting a source-only or
   nested package produces the same error for that dependency.
@@ -705,7 +684,7 @@ and no `[extras]`/`[targets]` in the root `Project.toml`:
   every supported Julia version, so carrying both would be two declarations of
   one dependency list.
 
-Eight files are the reason this environment exists — they fail at their own
+Six files are the reason this environment exists — they fail at their own
 `using` line under `julia --project=.`, before any BRM code runs:
 
 | file | needs beyond the root project |
@@ -715,8 +694,6 @@ Eight files are the reason this environment exists — they fail at their own
 | `test/adaptive_centering_bridgestan.jl` | `WarmupHMC`, `Enzyme` |
 | `test/adaptive_centering_warmuphmc.jl` | `WarmupHMC`, `Enzyme`, `DifferentiationInterface` |
 | `test/turing_adaptive_centering_warmuphmc.jl` | `Turing`, `WarmupHMC`, `Enzyme`, `DifferentiationInterface` |
-| `test/native_ppl_backend_parity.jl` | `BridgeStan`, `StanBlocks`, `Enzyme`, `DifferentiationInterface` |
-| `test/native_ppl_warmuphmc.jl` | `WarmupHMC`, `Enzyme`, `DifferentiationInterface` |
 | `test/plate_stress.jl` | `BridgeStan` |
 
 There is no CI workflow for these on purpose: they need `stanc` and a BridgeStan

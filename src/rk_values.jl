@@ -310,21 +310,35 @@ end
 
 function _rk_ast_value_hsgp(definitions, term, taken, bindings)
     options = term.options
-    PHI = _rk_ast_fresh_name(string(options.id, "_PHI"), taken)
-    lambda = _rk_ast_fresh_name(string(options.id, "_lambda"), taken)
     periodic = get(options, :cov, :exp_quad) === :periodic
-    k = options.k isa Tuple ? Expr(:tuple, options.k...) : options.k
-    floors = _rk_ast_fresh_name(string(options.id, "_floors"), taken)
-    stmts = if periodic
-        call =
-        Expr(:call, :brm_hsgp_periodic_basis, only(term.columns), k, options.period)
-        Expr[Expr(:(=), Expr(:tuple, PHI, lambda, floors), call)]
+    grouped = haskey(options, :group_index) || !isempty(get(options, :hyper_plans, ()))
+    # The length-scale floor exists only where a prior or hyper-predictor reads it.
+    floor_read = options.rho_truncated ||
+        any(p -> p.hyper === :length_scale, get(options, :hyper_plans, ()))
+    stmts = Expr[]
+    floors = nothing
+    if periodic
+        # The periodic basis is prepared data; its effect reads the matrix and
+        # harmonic frequencies. Destructuring drops an unread trailing floor.
+        PHI = _rk_ast_fresh_name(string(options.id, "_PHI"), taken)
+        omega2 = _rk_ast_fresh_name(string(options.id, "_omega2"), taken)
+        floor_read && (floors = _rk_ast_fresh_name(string(options.id, "_rho_floor"), taken))
+        targets = floors === nothing ? (PHI, omega2) : (PHI, omega2, floors)
+        push!(stmts, Expr(:(=), Expr(:tuple, targets...), Expr(:call,
+            :brm_hsgp_periodic_basis, only(term.columns), options.k, options.period)))
+        inputs = Pair{Symbol,Any}[:PHI => PHI, :omega2 => omega2]
+        extent = :(axes(PHI, 2))
     else
-        _rk_ast_hsgp_basis_graph!(definitions, term, taken, PHI, lambda, floors)
+        # A squared-exponential effect reads its axes; its spectral graph
+        # composes the basis graph, so the main block names no basis values.
+        floor_read && (floors = _rk_ast_hsgp_floor!(definitions, stmts, term, taken))
+        inputs = Pair{Symbol,Any}[a => c for (a, c) in
+            zip(_rk_hsgp_axis_inputs(term), term.columns)]
+        extent = :(1:$(prod(_rk_hsgp_modes(options))))
     end
-    if haskey(options, :group_index) || !isempty(get(options, :hyper_plans, ()))
+    if grouped
         push!(stmts, Expr(:call, :~, options.id,
-            _rk_ast_hsgp_grouped(definitions, term, PHI, lambda, floors, taken, bindings)))
+            _rk_ast_hsgp_grouped(definitions, term, inputs, floors, extent, taken, bindings)))
         return stmts
     end
     axes = periodic || options.iso ? 1 : length(term.columns)
@@ -333,10 +347,10 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
     rho = axes == 1 ? :rho_iso : :rho
     value = periodic ?
         :(PHI * (brm_hsgp_periodic_sqrt_spd(omega2, sigma, $rho) .* beta_raw)) :
-        _rk_ast_hsgp_value_graph!(definitions, term, taken, :PHI, :omega2, :sigma, rho, :beta_raw)
-    _rk_ast_hsgp_component!(definitions, stmts, taken, options.id, PHI, lambda,
-        floors, rho_priors, sigma_prior, value; truncated=options.rho_truncated,
-        nbasis=get(options, :latent, false) ? prod(options.k) : nothing,
+        _rk_ast_hsgp_value_graph!(definitions, term, taken, [a => a for a in first.(inputs)],
+            :sigma, rho, :beta_raw)
+    _rk_ast_hsgp_component!(definitions, stmts, taken, options.id, inputs, floors,
+        rho_priors, sigma_prior, value, extent; truncated=options.rho_truncated,
         base=periodic ? "brm_periodic_hsgp_effect" : "brm_hsgp_effect")
     stmts
 end

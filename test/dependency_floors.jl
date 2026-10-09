@@ -1,6 +1,3 @@
-const WARMUPHMC_TEST_MINIMUM =
-    "9c642178720d5c294b9cead86fc8c82da5a5db09"
-
 function _git_succeeds(arguments)
     try
         success(pipeline(Cmd(String.(arguments)); stdout=devnull, stderr=devnull))
