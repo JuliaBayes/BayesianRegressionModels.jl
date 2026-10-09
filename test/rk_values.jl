@@ -319,11 +319,13 @@ blend_values(p, q, r, rows) = p[rows] .+ q[rows] .+ r[rows]
     end)
     u = check_value_gradient(backend)
     nt = constrain(backend.model.layout, u)
-    # Population components are named after each linked target (SBBRMI's names).
+    # The three linked targets share `hcat(1, x)`, so their coefficients are
+    # one joint block over it, one column per target in formula order.
     linear(beta) = beta[1] .+ beta[2] .* df.x
-    p = 1 ./ (1 .+ exp.(-linear(nt.pop_logit_p.beta_pop)))
-    q = cdf.(Normal(), linear(nt.pop_probit_q.beta_pop))
-    r = -expm1.(-exp.(linear(nt.pop_cloglog_r.beta_pop)))
+    beta = nt.pop_Intercept_x.beta_pop
+    p = 1 ./ (1 .+ exp.(-linear(beta[:, 1])))
+    q = cdf.(Normal(), linear(beta[:, 2]))
+    r = -expm1.(-exp.(linear(beta[:, 3])))
     expected = p[df.rows] .+ q[df.rows] .+ r[df.rows]
     @test value_query(backend, :pointwise, u).y ≈ logpdf.(Normal.(expected, 1), df.y)
 end
