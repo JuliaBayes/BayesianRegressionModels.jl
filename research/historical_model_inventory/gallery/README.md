@@ -56,16 +56,17 @@ the manifest, the service fails at boot with
 
 ```sh
 cd ~/github/nsiccha/BayesianRegressionModels.jl
-julia --startup-file=no --project=web-macro -e 'using Pkg; Pkg.develop([Pkg.PackageSpec(path="/home/n/github/nsiccha/MutatingFunctions.jl"), Pkg.PackageSpec(path="/home/n/github/nsiccha/OutputSignatures.jl")]); Pkg.resolve()'
+julia --startup-file=no --project=web-macro -e 'using Pkg; Pkg.resolve()'
 git diff --quiet -- web-macro/Project.toml  # must be clean: the entries are committed
 julia --startup-file=no --project=web-macro research/historical_model_inventory/gallery/validate.jl
 ```
 
-A bare `Pkg.resolve()` is not enough when the drift spans an unregistered
-dependency: Julia 1.10 ignores `[sources]`, so unregistered packages must be
-developed from local checkouts (here `MutatingFunctions` and
-`OutputSignatures`, hard dependencies of `BayesianRegressionModels` since
-0.2.1, committed to `web-macro/Project.toml` for exactly this reason).
+A bare `Pkg.resolve()` is not enough when the drift adds an unregistered
+dependency the manifest has never seen: Julia 1.10 ignores `[sources]`, so
+such a package must first be developed from its local checkout and committed
+to `web-macro/Project.toml`. (`MutatingFunctions` and `OutputSignatures` were
+handled this way while `BayesianRegressionModels` depended on them; the
+NativePPL removal dropped both, so a resolve now prunes them.)
 `web-macro/Project.toml` carries no comments: Pkg rewrites that file and
 would strip them, dirtying the service checkout.
 

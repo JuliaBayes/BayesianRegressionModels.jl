@@ -29,21 +29,9 @@ julia = "1.10"
 [sources.BayesianRegressionModels]
 path = "../.."
 
-[sources.MutatingFunctions]
-rev = "4fc41b1c7b774133ceaacc4ff3c34c67b15b87b2"
-url = "https://github.com/nsiccha/MutatingFunctions.jl"
-
-[sources.OutputSignatures]
-rev = "4f9c5a711859918e0d0eab37745dcd47f51b9e40"
-url = "https://github.com/nsiccha/OutputSignatures.jl"
-
 [sources.StanBlocks]
 rev = "3aba023afd840115545e64f1482d6f3973a0d073"
 url = "https://github.com/nsiccha/StanBlocks.jl"
-
-[sources.TreeArrays]
-rev = "c317cc003fc41c2d933c27dc80799141eebd434e"
-url = "https://github.com/nsiccha/TreeArrays.jl"
 
 [sources.Treebars]
 rev = "c02aa16ab1b08e4f5283597fe678a88e69555cd1"
