@@ -44,6 +44,18 @@ nested(data) = @brm data begin
     end
     y ~ Normal(loc - reference, sigma)
 end
+# Per-subject response cells under a location-dependent scale, which keeps
+# the response on the flat route: one flatten of the bound cells, and of the
+# per-subject reference the location subtracts.
+flat_scale(data) = @brm data begin
+    log_k ~ Normal(0, 1)
+    a ~ Exponential(1)
+    b ~ Exponential(1)
+    @plate for i in eachindex(t)
+        loc[i] = dose[i] .* exp.(-exp(log_k) .* t[i])
+    end
+    y ~ Normal(loc - reference, addprop(loc, a, b))
+end
 # Superposed decaying pulses read at per-subject times: the events arrive on a
 # secondary row axis, and a fresh output buffer keeps the cell ordinary Julia.
 function pulse_sum(times, event_times, heights, rate)
@@ -215,6 +227,43 @@ end
     own, names = check_shape_reuse(PublicShapeReuse.nested, trained, scored)
     oracle = grouped_kernel_oracle(names, scored,
         j -> (scored.y[j], only(scored.reference[j])))
+    check_scored_density(own, names, oracle)
+end
+
+flat_data(lengths) = (; t=[[0.4k for k in 1:n] for n in lengths],
+    dose=[1.0 + 0.2j for j in eachindex(lengths)],
+    y=[[0.3 + 0.05 * mod1(j + k, 4) for k in 1:n] for (j, n) in enumerate(lengths)],
+    reference=[[0.01 * mod1(j + k, 3) for k in 1:n] for (j, n) in enumerate(lengths)])
+
+# A flattened per-subject response is one data-only definition over the bound
+# cells, and a per-subject argument one statement in its argument kernel. They
+# were one-line kernels wrapping `brm_flatten_cells` (`brm_flatten_response`,
+# `y_rows_<argument>_reader`), the response followed by an identity row gather
+# (snag rk-emission-wrap-4ee9950d). RKPPL observes a data-only definition as
+# the response and evaluates it once, at binding.
+@stestset "a flattened per-subject response is one direct flatten of its bound cells" begin
+    trained, scored = flat_data([3, 0, 4]), flat_data([2, 1, 4, 2])
+    definitions, main, _ = emitted_source(PublicShapeReuse.flat_scale(trained))
+    @test occursin("y = brm_flatten_cells(y_raw_response)", main)
+    @test occursin("y .~ Normal.(", main)
+    @test occursin(r"y_rows_y_input_\d+ = brm_flatten_cells\(y_input_\d+\)", definitions)
+    for retired in ("brm_flatten_response", "_reader(raw)", "_source_values", "_source_rows",
+            "getindex.(Ref(")
+        @test !occursin(retired, definitions * main)
+    end
+    own, names = check_shape_reuse(PublicShapeReuse.flat_scale, trained, scored)
+    @test sort(names) == [:a, :b, :log_k]
+    il, ia, ib = (only(findall(==(n), names)) for n in (:log_k, :a, :b))
+    oracle(u) = begin
+        k, a, b = exp(u[il]), exp(u[ia]), exp(u[ib])
+        loc = reduce(vcat, [scored.dose[j] .* exp.(-k .* scored.t[j])
+            for j in eachindex(scored.t)]; init=Float64[])
+        observed = reduce(vcat, scored.y; init=Float64[])
+        reference = reduce(vcat, scored.reference; init=Float64[])
+        logpdf(Normal(), u[il]) + logpdf(Exponential(), a) + u[ia] +
+            logpdf(Exponential(), b) + u[ib] +
+            sum(logpdf.(Normal.(loc .- reference, sqrt.(a^2 .+ (loc .* b) .^ 2)), observed))
+    end
     check_scored_density(own, names, oracle)
 end
 

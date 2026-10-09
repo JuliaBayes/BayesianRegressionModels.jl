@@ -207,12 +207,6 @@ brm_covariate_sd(values) = begin
     return fit.scale
 end),
 
-    brm_flatten_response = :(
-brm_flatten_response(cells) = begin
-    values = brm_flatten_cells(cells)
-    return values
-end),
-
     brm_gather_response = :(
 brm_gather_response(raw, groups) = begin
     values = raw[brm_flatten_cells(groups)]

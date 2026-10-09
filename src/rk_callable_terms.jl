@@ -24,12 +24,23 @@ function _rk_callable_broadcast_columns(predictors, responses, derived, columns)
         if haskey(columns, key) && length(columns[key]) == 1)
 end
 
+# A data preparation recipe is a named statistical kernel over its inputs. A
+# kernel-observed response holding its cells per subject is one direct flatten
+# instead, which RKPPL evaluates once, at binding. A ragged join keeps its
+# `brm_gather_response` kernel: RKPPL refuses the direct `raw[rows]` gather as
+# a response observed through `LogDensity` (ReactiveKernels snag
+# rkppl-derived-re-3096acdf).
+_rk_ast_data_preparation!(defs, taken, ::Val{recipe}, inputs...) where {recipe} =
+    _rk_ast_statistical_call!(defs, taken, recipe, inputs...; kernel=true)
+_rk_ast_data_preparation!(defs, taken, ::Val{:brm_flatten_response}, cells) =
+    Expr(:call, :brm_flatten_cells, cells)
+
 function _rk_ast_data_expr!(defs, statements, bindings, taken, value)
     value isa Expr || return value
     if value.head === :_rk_data_preparation
         inputs = map(arg -> _rk_ast_data_expr!(defs, statements, bindings, taken, arg),
             value.args[2:end])
-        return _rk_ast_statistical_call!(defs, taken, first(value.args), inputs...; kernel=true)
+        return _rk_ast_data_preparation!(defs, taken, Val(first(value.args)), inputs...)
     end
     if value.head === :call && first(value.args) isa _RKDataCall
         recipe = first(value.args)
