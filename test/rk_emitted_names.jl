@@ -1,5 +1,7 @@
 # Names in the emitted RK main block say what each value is: a design matrix
-# shared by several predictors is named for its columns, a grouping's level
+# shared by several predictors is named for its columns and read through one
+# joint population block, `pop_<columns>`, whose columns the predictors read
+# (decision `1pj2p5j`), a grouping's level
 # positions are computed once under that grouping's name, a monotonic column
 # repeated across predictors is one joint block that each predictor reads by
 # column (decision `1pj2p5j`), and the linear predictor of `log(v) ~ …` is
@@ -34,15 +36,19 @@ main_statements(brmi) = filter(s -> !(s isa LineNumberNode), emitted_main(brmi).
     stmts = main_statements(brmi)
     main = string(emitted_main(brmi))
     # One design per column set. `a` and `b` share theirs, so it belongs to
-    # neither and is named for its columns; `d` and `e` share `hcat(x2)`.
-    # `c` alone reads `hcat(x1)` and keeps its own name.
+    # neither and is named for its columns; one joint block computes
+    # `X * beta_pop` once and each predictor reads its column. `d` and `e`
+    # share `hcat(x2)`. `c` alone reads `hcat(x1)` and keeps its own component.
     @test :(X_Intercept_x1_x2 = hcat(ones(length(subject)), x1, x2)) in stmts
-    @test occursin("pop_log_a ~ brm_population_effects(X_Intercept_x1_x2, 3", main)
-    @test occursin("pop_log_b ~ brm_population_effects(X_Intercept_x1_x2, 3", main)
+    @test occursin("pop_Intercept_x1_x2 ~ brm_joint_population_effects(X_Intercept_x1_x2, 3, 2, 0.0, 1.0)", main)
+    @test :(pop_log_a = pop_Intercept_x1_x2[:, 1]) in stmts
+    @test :(pop_log_b = pop_Intercept_x1_x2[:, 2]) in stmts
     @test :(X_x2 = hcat(x2)) in stmts
-    @test occursin("pop_d ~ brm_population_effects(X_x2, 1", main)
-    @test occursin("pop_e ~ brm_population_effects(X_x2, 1", main)
+    @test occursin("pop_x2 ~ brm_joint_population_effects(X_x2, 1, 2, 0.0, 1.0)", main)
+    @test :(pop_d = pop_x2[:, 1]) in stmts
+    @test :(pop_e = pop_x2[:, 2]) in stmts
     @test :(X_c = hcat(x1)) in stmts
+    @test occursin("pop_c ~ brm_population_effects(X_c, 1, 0.0, 1.0)", main)
     @test !occursin(r"X_log_a\b|X_log_b\b|X_d\b|X_e\b", main)
     # The `p` and id-less buckets over `subject` read one level position.
     @test count("brm_level_indices(subject, subject)", main) == 1
@@ -72,7 +78,9 @@ main_statements(brmi) = filter(s -> !(s isa LineNumberNode), emitted_main(brmi).
     # Coordinates follow the component names.
     backend, problem = consumer_problem(brmi)
     names = coordinate_names(backend.model.layout)
-    for name in ("mo_rank.beta.1", "mo_rank.beta.2", "mo_rank.beta.3",
+    for name in ("pop_Intercept_x1_x2.beta_pop.1.1", "pop_Intercept_x1_x2.beta_pop.3.2",
+            "pop_x2.beta_pop.1.2", "pop_c.beta_pop.1",
+            "mo_rank.beta.1", "mo_rank.beta.2", "mo_rank.beta.3",
             "mo_rank.simplex_incr.1.1", "mo_rank.simplex_incr.1.2", "mo_rank.simplex_incr.1.3")
         @test Symbol(name) in names
     end
@@ -117,6 +125,8 @@ end
     main = string(emitted_main(brmi))
     @test :(X_Intercept_x1_x2 = hcat(ones(length(subject)), x1, x2)) in stmts
     @test count("hcat(", main) == 1
-    @test occursin("pop_nu ~ brm_population_effects(X_Intercept_x1_x2, 3", main)
+    @test occursin("pop_Intercept_x1_x2 ~ brm_joint_population_effects(X_Intercept_x1_x2, 3, 2, 0.0, 1.0)", main)
+    @test :(pop_mu = pop_Intercept_x1_x2[:, 1]) in stmts
+    @test :(pop_nu = pop_Intercept_x1_x2[:, 2]) in stmts
     @test :(subject_level = brm_level_indices(subject, subject)) in stmts
 end

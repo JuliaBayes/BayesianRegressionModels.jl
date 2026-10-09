@@ -96,6 +96,32 @@ function joint_monotonic(data)
     end
 end
 
+# Predictors sharing a design read one joint population block. Their priors
+# differ per predictor (a coefficients x predictors argument matrix); in the
+# mixed fixture one predictor's Cauchy coefficients keep the predictors on
+# their own components.
+function joint_population(data)
+    @brm data begin
+        mu ~ 1 + x + z
+        log(rate) ~ 1 + x + z
+        effect(rate, Intercept) ~ Normal(1.0, 0.5)
+        sigma ~ Exponential(0.7)
+        y ~ Normal(mu, sigma)
+        n ~ Poisson(rate)
+    end
+end
+
+function joint_population_mixed(data)
+    @brm data begin
+        mu ~ 1 + x + z
+        nu ~ 1 + x + z
+        effect(nu, :) ~ Cauchy(0, 2)
+        sigma ~ Exponential(0.7)
+        y ~ Normal(mu, sigma)
+        y2 ~ Normal(nu, sigma)
+    end
+end
+
 function joint_monotonic_mixed(data)
     @brm data begin
         mu ~ 1 + mo(r)
@@ -610,6 +636,35 @@ end
     main = string(BRM._rk_emit_ast(BRM._brm_rk_plan(
         PublicCoordinateTransport.joint_monotonic(data))).main)
     @test occursin("mo1_q ~ brm_joint_monotonic_values(q_idx, [1.0, 1.0], 2, 2)", main)
+    @test isequal(data, saved)
+end
+
+@stestset "coordinate transport joint population blocks" begin
+    data = (; x=[-0.7,0.0,0.6,0.9,0.2,-0.4,0.5,-0.1], z=[0.3,-0.2,0.5,0.1,-0.4,0.6,0.0,0.2],
+        y=[0.2,-0.1,0.4,0.3,0.1,-0.3,0.5,0.0], y2=[0.1,0.3,-0.2,0.4,0.0,-0.1,0.2,0.3],
+        n=[1,4,0,3,2,5,1,2])
+    saved = deepcopy(data)
+    brmi = PublicCoordinateTransport.joint_population(data)
+    main = string(BRM._rk_emit_ast(BRM._brm_rk_plan(brmi)).main)
+    # The rate intercept's own prior makes the location argument a matrix.
+    @test occursin("pop_Intercept_x_z ~ brm_joint_population_effects(X_Intercept_x_z, 3, 2, " *
+        "hcat([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]), hcat([1.0, 1.0, 1.0], [0.5, 1.0, 1.0]))", main)
+    @test occursin("pop_mu = pop_Intercept_x_z[:, 1]", main)
+    @test occursin("pop_log_rate = pop_Intercept_x_z[:, 2]", main)
+    fixture = coordinate_transport_fixture(brmi, "joint-population")
+    names = string.(fixture.transport.rk_names)
+    @test all(n -> n in names, ["pop_Intercept_x_z.beta_pop.$j.$t" for j in 1:3, t in 1:2])
+    population = filter(p -> p.address.kind === :population, fixture.transport.pairs)
+    @test Set((p.address.predictor, p.address.coefficient) for p in population) ==
+        Set([(:mu, :Intercept), (:mu, :x), (:mu, :z), (:rate, :Intercept), (:rate, :x), (:rate, :z)])
+    check_coordinate_transport(fixture)
+    # Mixed families stay one component per predictor over the shared design.
+    mixed = PublicCoordinateTransport.joint_population_mixed(data)
+    main = string(BRM._rk_emit_ast(BRM._brm_rk_plan(mixed)).main)
+    @test !occursin("brm_joint_population_effects", main)
+    @test occursin("pop_mu ~ brm_population_effects(X_Intercept_x_z", main)
+    @test occursin("pop_nu ~ brm_population_effects_cauchy(X_Intercept_x_z", main)
+    check_coordinate_transport(coordinate_transport_fixture(mixed, "joint-population-mixed"))
     @test isequal(data, saved)
 end
 

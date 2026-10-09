@@ -176,6 +176,23 @@ function brm_nlme_view(backend::RKBRMI)
                 claim!(i, :population)
                 population[(record.predictor, record.coefficient)] = i
             end
+        elseif kind === :monotonic && get(record, :column, nothing) !== nothing
+            # One predictor's column of a joint monotonic block: its simplex
+            # column `<block>.simplex_incr.<j>.<t>` and its coefficient entry.
+            t = string(record.column)
+            prefix = string(record.declaration, ".simplex_incr.")
+            for (i, name) in enumerate(names)
+                parts = split(String(name), '.')
+                startswith(String(name), prefix) && length(parts) == 4 &&
+                    parts[end] == t && claim!(i, :population)
+            end
+            # The coefficient entry exists whether or not it pairs with Stan.
+            beta = get(record, :beta_declaration, nothing)
+            if beta !== nothing
+                index = get(record, :beta_index, ())
+                claim!(coordinate(isempty(index) ? beta :
+                    Symbol(beta, ".", join(index, "."))), :population)
+            end
         elseif kind in (:population_block, :monotonic, :threshold_coefficients, :vector)
             claim_declaration!(record.declaration, :population)
         elseif kind === :scalar

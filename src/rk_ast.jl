@@ -873,11 +873,12 @@ function _rk_ast_monotonic_name(term, predictor, taken)
 end
 
 # Repeated monotonic terms over one index column with one configuration (head,
-# coefficient or not, concentration) are one joint block: `mo_<c>` owns a
-# simplex column, and a coefficient when the term has one, per predictor, and
-# returns the rows x predictors matrix of effects. Each predictor reads its
-# column as `mo_<target>_<c>` (user decision `1pj2p5j`). A configuration used
-# once keeps its own component, named by `_rk_ast_monotonic_name`.
+# coefficient or not) are one joint block: `mo_<c>` owns a simplex column, with
+# that predictor's Dirichlet concentration, and a coefficient when the term has
+# one, per predictor, and returns the rows x predictors matrix of effects. Each
+# predictor reads its column as `mo_<target>_<c>` (user decision `1pj2p5j`). A
+# configuration used once keeps its own component, named by
+# `_rk_ast_monotonic_name`.
 function _rk_ast_monotonic_groups(plan, vector_priors, hs_priors, taken)
     keyed = Dict{Any,Vector{Any}}()
     keys_in_order = Any[]
@@ -885,8 +886,8 @@ function _rk_ast_monotonic_groups(plan, vector_priors, hs_priors, taken)
         term.kind in (:monotonic, :monotonic_summand) || continue
         head = term.kind === :monotonic_summand ? :mo1 : :mo
         effect = head === :mo && !haskey(hs_priors, (predictor.name, term.addressee))
-        alpha = Tuple(only(vector_priors[term.options.increments].args))
-        key = (head, effect, only(term.columns), alpha)
+        nincr = length(only(vector_priors[term.options.increments].args))
+        key = (head, effect, only(term.columns), nincr)
         haskey(keyed, key) || (keyed[key] = Any[]; push!(keys_in_order, key))
         push!(keyed[key], (predictor, index, term))
     end
@@ -895,10 +896,10 @@ function _rk_ast_monotonic_groups(plan, vector_priors, hs_priors, taken)
     for key in keys_in_order
         occurrences = keyed[key]
         length(occurrences) > 1 || continue
-        head, effect, column, alpha = key
+        head, effect, column, _ = key
         source = last(first(occurrences)).options.source
         group = (; block=_rk_ast_fresh_name(string(head, "_", source), taken),
-            head, effect, column, source, alpha=collect(alpha), entries=Any[])
+            head, effect, column, source, entries=Any[])
         push!(groups, group)
         for (j, (predictor, index, _)) in enumerate(occurrences)
             name = _rk_ast_fresh_name(string(head, "_",
@@ -916,7 +917,7 @@ function _rk_ast_emit_joint_monotonic!(definitions, statements, groups, taken, c
         entries = sort(group.entries; by=e -> e.column)
         priors = [entry.prior for entry in entries]
         call, betas = _rk_ast_joint_monotonic_component!(definitions, taken,
-            group.block, group.column, group.alpha, priors)
+            group.block, group.column, [entry.alpha for entry in entries], priors)
         first_read = findfirst(s -> any(e -> s === e.read, entries), statements)
         insert!(statements, first_read, call)
         for (entry, beta) in zip(entries, betas)
@@ -1302,7 +1303,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 read = Expr(:(=), joint.name, Expr(:ref, joint.group.block, :(:), joint.column))
                 push!(stmts, read)
                 push!(joint.group.entries, (; column=joint.column, predictor=predictor.name,
-                    prior, beta, read))
+                    prior, beta, read, alpha=monotonic_alpha(term)))
                 return joint.name
             end
             name = _rk_ast_monotonic_component!(defs, stmts, taken,
@@ -1478,25 +1479,22 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         # coefficient it absorbs.
         if !isempty(population)
             # SBBRMI's names: `X_<target>` and `pop_<target>`. A design shared
-            # by several predictors is renamed for its columns below.
+            # by several predictors is named for its columns and read through
+            # one joint block below.
             target = _rk_ast_linked_target(predictor)
+            # The component owns each coefficient; its coordinate records name
+            # the actual sampled declaration once the shared designs are joined.
+            coefficients = map(population) do entry
+                term = predictor.terms[first(entry)]
+                (; predictor=predictor.name, coefficient=term.addressee,
+                    paired=r2d2 === nothing &&
+                        !haskey(joint_priors, (predictor.name, term.addressee)))
+            end
             name = _rk_ast_population_component!(defs, stmts, taken,
                 _rk_ast_fresh_name(string("pop_", target), taken),
                 string("X_", target),
                 [entry[2] for entry in population], [entry[3] for entry in population],
-                designs)
-            # The component owns each coefficient. Record the actual sampled
-            # declaration and its index rather than its old caller-side name.
-            mixed = length(unique(first(entry[3]) for entry in population)) > 1
-            for (j, entry) in enumerate(population)
-                term = predictor.terms[first(entry)]
-                r2d2 === nothing &&
-                    !haskey(joint_priors, (predictor.name, term.addressee)) &&
-                    _rk_coordinate_record!(coordinates, (; kind=:population,
-                        declaration=Symbol(name, mixed ? ".beta_pop_$j" : ".beta_pop"),
-                        index=mixed ? () : (j,), predictor=predictor.name,
-                        coefficient=term.addressee))
-            end
+                designs, coefficients)
             replacements[first(first(population))] = name
             foreach(entry -> replacements[first(entry)] = nothing, population[2:end])
         end
@@ -1507,7 +1505,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             push!(stmts, Expr(:(=), predictor.name, value))
         end
     end
-    _rk_ast_name_shared_designs!(designs, taken)
+    _rk_ast_join_shared_designs!(defs, stmts, designs, taken, coordinates)
     _rk_ast_emit_joint_monotonic!(defs, stmts, monotonic_joint.groups, taken, coordinates)
     for parameter in plan.parameters
         if parameter.family === :LKJCovarianceFactor

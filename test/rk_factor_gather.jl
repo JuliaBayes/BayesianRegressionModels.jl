@@ -38,15 +38,18 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
     @test occursin("zeta_g[g_level]", main)
     @test occursin("eta_Intercept ~ Normal", main)
     @test !occursin("X_eta =", main)
-    # `pa` and `pb` share one design matrix, named for its columns.
+    # `pa` and `pb` share one design matrix, named for its columns, and one
+    # joint population block that each reads by column.
     @test count("hcat(ones(length(x)), x, w)", main) == 1
-    @test occursin("pop_pa ~ brm_population_effects(X_Intercept_x_w, 3", main)
-    @test occursin("pop_pb ~ brm_population_effects(X_Intercept_x_w, 3", main)
+    @test occursin("pop_Intercept_x_w ~ brm_joint_population_effects(X_Intercept_x_w, 3, 2", main)
+    @test occursin("pop_pa = pop_Intercept_x_w[:, 1]", main)
+    @test occursin("pop_pb = pop_Intercept_x_w[:, 2]", main)
 
     backend, problem = consumer_problem(brmi)
     names = coordinate_names(backend.model.layout)
     at(u, name) = u[findfirst(==(Symbol(name)), names)]
-    coefs(u, block, k) = [at(u, "$block.$j") for j in 1:k]
+    coefs(u, block, k; column=nothing) =
+        [at(u, column === nothing ? "$block.$j" : "$block.$j.$column") for j in 1:k]
     oracle(u) = begin
         s = exp(at(u, "s"))
         mu = [ones(6) data.x] * coefs(u, "pop_mu.beta_pop", 2) .+
@@ -58,8 +61,8 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
         bz = coefs(u, "pop_zeta.beta_pop", 2)
         zeta = coefs(u, "zeta_g", 3)[data.g] .+ bz[1] .* data.x .+ bz[2] .* data.w
         design = [ones(6) data.x data.w]
-        pa = design * coefs(u, "pop_pa.beta_pop", 3)
-        pb = design * coefs(u, "pop_pb.beta_pop", 3)
+        pa = design * coefs(u, "pop_Intercept_x_w.beta_pop", 3; column=1)
+        pb = design * coefs(u, "pop_Intercept_x_w.beta_pop", 3; column=2)
         likelihood = sum(sum(logpdf.(Normal.(m, s), y)) for (m, y) in
             ((mu, data.y1), (nu, data.y2), (eta, data.y3), (zeta, data.y4),
              (pa, data.y5), (pb, data.y6)))
