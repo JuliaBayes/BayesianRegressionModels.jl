@@ -256,10 +256,15 @@ end
         y=[[0.6, 0.2], Float64[], [1.0, 0.8, 0.3]])
     saved = deepcopy(data)
     brmi = build(data)
-    emitted = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi))
+    plan = BRM._brm_rk_plan(brmi)
+    emitted = BRM._rk_emit_ast(plan)
     source = join((sprint(Base.show_unquoted, d) for d in emitted.defs), "\n")
-    @test occursin("loc_reader(loc_input_t, loc_input_dose, log_k)", source)
-    @test occursin("ReactiveKernels.plate(loc_input_t, loc_input_dose, Ref(log_k)) do t, dose, log_k", source)
+    # Each data input reaches the reader through its own column; only the
+    # flattened response keeps its nested values in a second port, which is
+    # its raw source (snag rk-emission-grou-9dac9bc6).
+    @test sort!(collect(keys(plan.columns)); by=string) == [:dose, :t, :y, :y_raw_response]
+    @test occursin("loc_reader(t, dose, log_k)", source)
+    @test occursin("ReactiveKernels.plate(t, dose, Ref(log_k)) do t, dose, log_k", source)
     @test occursin("brm_flatten_cells(cells)", source)
     for retired in ("cell_input", "subject_count", "loc_cell", "init =", "reduce(vcat")
         @test !occursin(retired, source)
@@ -311,9 +316,12 @@ end
             loc[i] = cells
         end
     end
+    shadowing_plan = BRM._brm_rk_plan(shadowing)
     source = join((sprint(Base.show_unquoted, d)
-        for d in BRM._rk_emit_ast(BRM._brm_rk_plan(shadowing)).defs), "\n")
+        for d in BRM._rk_emit_ast(shadowing_plan).defs), "\n")
     @test occursin("ReactiveKernels.plate(loc_input_y, Ref(sigma)) do y, sigma", source)
+    # The observed cell response's nested port is also its raw likelihood source.
+    @test sort!(collect(keys(shadowing_plan.columns)); by=string) == [:dose, :loc_input_y, :t, :y]
     backend, problem = consumer_problem(shadowing)
     stan = consumer_stan(shadowing, "kernel-reader-shadowing")
     for u in points
