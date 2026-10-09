@@ -2,7 +2,7 @@
 #
 #     julia --project=test test/setup_env.jl
 #
-# The test env has seven external UNREGISTERED dependencies plus the unregistered
+# The test env has four external UNREGISTERED dependencies plus the unregistered
 # BRM root itself. Each external package is materialized at a specific GitHub
 # COMMIT under the ignored `test/.bootstrap/` cache; there is NO dependence on
 # any shared `~/github/nsiccha/<pkg>` checkout. A full-SHA revision is
@@ -15,12 +15,12 @@
 # `ReactiveKernelsPPL`, and `ReactiveKernelsPPLExamples` packages, which have
 # no standalone repos).
 #
-# All eleven paths enter ONE `Pkg.develop` call on EVERY Julia version we run.
+# All eight paths enter ONE `Pkg.develop` call on EVERY Julia version we run.
 # On 1.11+ the `[sources]` blocks in `test/Project.toml` (which mirror these
 # revisions) would also resolve them; on **1.10, which is what this suite runs
 # on, `[sources]` is IGNORED**, so a bare `Pkg.resolve()` fails with
 #
-#     ERROR: expected package `TreeArrays [5daaa025]` to be registered
+#     ERROR: expected package `Treebars [e1e568c4]` to be registered
 #
 # an error that looks like a missing registry rather than a version-gated
 # feature. This script is the version-independent answer.
@@ -41,16 +41,6 @@ const TESTENV = @__DIR__
 # name => (github url, pinned commit)   — comment records the branch the commit
 # is on, for humans; the pin itself is the full SHA and needs no branch.
 const PINS = [
-    # MutatingFunctions carries the SubArray-gather activity fix the julianic
-    # 0-alloc surface depends on (main). Pinned at/after b353559 (2026-08-13),
-    # where the LinearAlgebra/Random/Statistics integrations became strong
-    # `[deps]` instead of package extensions. The pre-b353559 ext trio
-    # (MutatingFunctions{LinearAlgebra,Random,Statistics}Ext) SELF-DEADLOCKS a
-    # fresh parallel precompile under Pkg 1.10, so this pin must never regress
-    # below b353559.
-    ("MutatingFunctions", "https://github.com/nsiccha/MutatingFunctions.jl.git", "4fc41b1c7b774133ceaacc4ff3c34c67b15b87b2"),  # main
-    ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "121de3194f02044e00bac0d11019a93458ddb63a"),  # main
-    ("TreeArrays",        "https://github.com/nsiccha/TreeArrays.jl.git",        "c317cc003fc41c2d933c27dc80799141eebd434e"),  # main
     ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "1e0af724be4f7ee0dccfccf99187cf80e35b551b"),  # devibe: grouped-observation descriptors + construction locking
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     # 0194dce (2026-09-27, dev): WindowSelectionPlan (WarmupHMC-held evidence)
