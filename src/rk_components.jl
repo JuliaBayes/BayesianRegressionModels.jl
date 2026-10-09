@@ -85,17 +85,19 @@ end
 """Population effects over design columns: coefficients allocated inside, `X * beta_pop` returned.
 
 Predictors with identical design columns share one design matrix; `design` is
-the base name of a new one."""
+the base name of a new one. `designs` records each matrix with the statements
+that name it, for `_rk_ast_name_shared_designs!`."""
 function _rk_ast_population_component!(definitions, statements, taken, name, design,
-        columns, priors)
+        columns, priors, designs)
     matrix = Expr(:call, :hcat, columns...)
-    shared = findfirst(statement -> Meta.isexpr(statement, :(=), 2) &&
-        isequal(last(statement.args), matrix), statements)
+    shared = findfirst(record -> isequal(last(record.assignment.args), matrix), designs)
     if shared === nothing
         design = _rk_ast_fresh_name(design, taken)
-        push!(statements, Expr(:(=), design, matrix))
+        assignment = Expr(:(=), design, matrix)
+        push!(statements, assignment)
+        designs[design] = (; columns, assignment, calls=Expr[])
     else
-        design = first(statements[shared].args)
+        design = shared
     end
     product = Expr(:call, :*, :X, :beta_pop)
     families = unique(first.(priors))
@@ -111,7 +113,9 @@ function _rk_ast_population_component!(definitions, statements, taken, name, des
         push!(body.args, Expr(:return, product))
         callee = _rk_ast_shared_definition!(definitions, taken,
             "brm_mixed_population_effects", (:X,), body)
-        push!(statements, _rk_ast_component_call(name, callee, design))
+        call = _rk_ast_component_call(name, callee, design)
+        push!(designs[design].calls, call)
+        push!(statements, call)
         return name
     end
     family = only(families)
@@ -125,8 +129,33 @@ function _rk_ast_population_component!(definitions, statements, taken, name, des
     callee = _rk_ast_shared_definition!(definitions, taken, base, (:X, :ncoef, roles...), body)
     arguments = [_rk_ast_population_argument([last(prior)[j] for prior in priors])
         for j in eachindex(roles)]
-    push!(statements, _rk_ast_component_call(name, callee, design, length(columns), arguments...))
+    call = _rk_ast_component_call(name, callee, design, length(columns), arguments...)
+    push!(designs[design].calls, call)
+    push!(statements, call)
     name
+end
+
+# A design column's part of a shared matrix name: the intercept's column of
+# ones is `Intercept`, as its coefficient is.
+_rk_ast_design_label(column::Symbol) = string(column)
+function _rk_ast_design_label(column::Expr)
+    Meta.isexpr(column, :call) && first(column.args) === :ones && return "Intercept"
+    error("RK backend: internal: design column `$column` has no name")
+end
+
+# A design matrix read by one predictor keeps that predictor's name. One read
+# by several belongs to none of them: it is named for its columns instead.
+# The recorded statements are this emission's own, not yet published.
+function _rk_ast_name_shared_designs!(designs, taken)
+    for design in sort!(collect(keys(designs)); by=string)
+        record = designs[design]
+        length(record.calls) > 1 || continue
+        shared = _rk_ast_fresh_name(
+            join(("X", map(_rk_ast_design_label, record.columns)...), "_"), taken)
+        record.assignment.args[1] = shared
+        foreach(call -> call.args[3].args[2] = shared, record.calls)
+    end
+    designs
 end
 
 # A monotonic effect owns its increment simplex and, when it has one, its

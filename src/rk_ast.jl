@@ -853,10 +853,25 @@ _rk_ast_observed_slice(value::Symbol, jobs, rows) =
 _rk_ast_observed_slice(value::Expr, jobs, rows) =
     Expr(value.head, (_rk_ast_observed_slice(arg, jobs, rows) for arg in value.args)...)
 
-# A monotonic component is named after its increments vector, as SBBRMI
-# names `mo_<c>` (first occurrence) and its repeats.
-_rk_ast_monotonic_name(term, taken) = _rk_ast_fresh_name(
-    replace(string(term.options.increments), "_simplex_incr" => ""), taken)
+# SBBRMI's `<target>`: a linked predictor's carries its link (`log_v`).
+_rk_ast_linked_target(predictor) = predictor.link === :identity ?
+    string(predictor.name) : string(predictor.link, "_", predictor.name)
+
+# A monotonic component is named as SBBRMI names its carrier: the first
+# `mo(c)` is `mo_c`, and a repeat of the column, in another predictor or
+# twice in one, is `mo_<target>_c` with a serial if needed. `mo1` likewise.
+function _rk_ast_monotonic_name(term, predictor, taken)
+    head = term.kind === :monotonic_summand ? "mo1" : "mo"
+    name = Symbol(head, "_", term.options.source)
+    stem = string(head, "_", _rk_ast_linked_target(predictor), "_", term.options.source)
+    serial = 1
+    while name in taken
+        name = serial == 1 ? Symbol(stem) : Symbol(stem, "_", serial)
+        serial += 1
+    end
+    push!(taken, name)
+    name
+end
 
 # Varying-name pre-pass (uniform split form): one `b_<suffix>` draws
 # component per bucket (SBBRMI's name) plus one `ranef_<target>_<suffix>`
@@ -1123,10 +1138,16 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     # response uses) is alpha-renamed. Unreachable via `@brm`
     # (observation discovery claims `P ~ …` as a likelihood whenever `P`
     # is observed data), but programmatic plans can still overlap.
+    # As a value, a linked predictor `log(v) ~ …` is `v`; its linear
+    # predictor is named as authored, `log_v`.
     rename = Dict{Symbol,Symbol}()
     for predictor in plan.predictors
-        (haskey(plan.columns, predictor.name) ||
-            (values && predictor.link !== :identity)) || continue
+        if values && predictor.link !== :identity
+            rename[predictor.name] =
+                _rk_ast_fresh_name(_rk_ast_linked_target(predictor), taken)
+            continue
+        end
+        haskey(plan.columns, predictor.name) || continue
         fresh = Symbol(string(predictor.name), "_")
         while fresh in taken
             fresh = Symbol(string(fresh), "_")
@@ -1179,19 +1200,21 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     # Emit shared budgets once, before their population and group-level
     # consumers. All derived scales remain ordinary graph values.
     joint_priors = Dict{Tuple{Symbol,Symbol},Tuple{Symbol,Tuple}}()
+    level_indices = Dict{Tuple{Symbol,Symbol},Symbol}()
     for (bi, bucket) in enumerate(plan.ranef_buckets)
         bucket.decomposition === nothing && continue
         append!(stmts, _rk_ast_value_bucket(defs, bucket, ranef_draws[bi],
-            ranef_effects, taken, bindings; predictors=plan.predictors,
+            ranef_effects, taken, bindings; level_indices, predictors=plan.predictors,
             population_priors=joint_priors, coordinates))
     end
     for (bi, bucket) in enumerate(plan.ranef_buckets)
         bucket.decomposition === nothing || continue
         append!(stmts, _rk_ast_value_bucket(defs, bucket, ranef_draws[bi],
-            ranef_effects, taken, bindings; coordinates))
+            ranef_effects, taken, bindings; level_indices, coordinates))
     end
     vector_priors = Dict(v.name => v for v in plan.vector_parameters)
     owned_vectors = Set{Symbol}()
+    designs = Dict{Symbol,Any}()
     for predictor in plan.predictors
         lhs = get(rename, predictor.name, predictor.name)
         r2d2 = get(r2d2s, predictor.name, nothing)
@@ -1230,7 +1253,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             end
             if kind === :monotonic_summand
                 refactual[index] = _rk_ast_monotonic_component!(defs, stmts, taken,
-                    _rk_ast_monotonic_name(term, taken), only(term.columns),
+                    _rk_ast_monotonic_name(term, predictor, taken), only(term.columns),
                     monotonic_alpha(term), nothing)
                 push!(owned_vectors, term.options.increments)
                 _rk_coordinate_record!(coordinates, (; kind=:monotonic,
@@ -1306,7 +1329,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             elseif kind === :monotonic && hs_spec === nothing && override !== nothing
                 # The monotonic component owns its simplex and coefficient.
                 replacements[index] = _rk_ast_monotonic_component!(defs, stmts, taken,
-                    _rk_ast_monotonic_name(term, taken), only(term.columns),
+                    _rk_ast_monotonic_name(term, predictor, taken), only(term.columns),
                     monotonic_alpha(term), override)
                 push!(owned_vectors, term.options.increments)
                 # Its coefficient pairs like a population coefficient only
@@ -1327,7 +1350,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 if kind === :monotonic
                     # A horseshoe coefficient scales the owned contrast.
                     refactual[index] = _rk_ast_monotonic_component!(defs, stmts, taken,
-                        _rk_ast_monotonic_name(term, taken), only(term.columns),
+                        _rk_ast_monotonic_name(term, predictor, taken), only(term.columns),
                         monotonic_alpha(term), nothing)
                     push!(owned_vectors, term.options.increments)
                     _rk_coordinate_record!(coordinates, (; kind=:monotonic,
@@ -1393,14 +1416,14 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         # The population component's value takes the place of the first
         # coefficient it absorbs.
         if !isempty(population)
-            # SBBRMI's names: `X_<target>` and `pop_<target>`, where a linked
-            # predictor's target carries its link (`log_v`).
-            target = predictor.link === :identity ? string(predictor.name) :
-                string(predictor.link, "_", predictor.name)
+            # SBBRMI's names: `X_<target>` and `pop_<target>`. A design shared
+            # by several predictors is renamed for its columns below.
+            target = _rk_ast_linked_target(predictor)
             name = _rk_ast_population_component!(defs, stmts, taken,
                 _rk_ast_fresh_name(string("pop_", target), taken),
                 string("X_", target),
-                [entry[2] for entry in population], [entry[3] for entry in population])
+                [entry[2] for entry in population], [entry[3] for entry in population],
+                designs)
             # The component owns each coefficient. Record the actual sampled
             # declaration and its index rather than its old caller-side name.
             mixed = length(unique(first(entry[3]) for entry in population)) > 1
@@ -1423,6 +1446,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             push!(stmts, Expr(:(=), predictor.name, value))
         end
     end
+    _rk_ast_name_shared_designs!(designs, taken)
     for parameter in plan.parameters
         if parameter.family === :LKJCovarianceFactor
             K, theta, eta = parameter.args
