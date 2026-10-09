@@ -129,15 +129,9 @@ end
     @test brm_nlme_loglikelihoods(m, θ, σ, H) == values
     # Attribution is complete: subjects sum to the model's whole likelihood.
     @test sum(values) ≈ Base.invokelatest(likelihood_query(backend), u) rtol=1e-12
-    # Central-difference reference for the η gradients (test oracle only).
-    step = 1e-6
-    for i in 1:n, k in 1:size(H, 1)
-        plus, minus = copy(H), copy(H)
-        plus[k, i] += step; minus[k, i] -= step
-        reference = (plate_pk_oracle(m, θ, σ, plus)[i] -
-            plate_pk_oracle(m, θ, σ, minus)[i]) / 2step
-        @test G[k, i] ≈ reference rtol=1e-6 atol=1e-8
-    end
+    # The η gradients against the oracle's analytic gradients.
+    @test size(G) == size(H)
+    @test G ≈ plate_pk_oracle_gradients(m, θ, σ, H) rtol=1e-10
     # Moving one subject's η moves only that subject's value.
     H2 = copy(H); H2[:, 2] .+= [0.3, -0.2]
     moved = brm_nlme_loglikelihoods(m, θ, σ, H2)

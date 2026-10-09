@@ -221,8 +221,9 @@ end
 # the joint RK program serves all subjects in lockstep: the pointwise densities
 # summed by subject give every subject's conditional log-likelihood, and the
 # joint gradient restricted to a subject's block is that subject's conditional
-# gradient. RK has no per-subject evaluation, so per-subject calls through this
-# layer cost one full pass each; estimators should evaluate all subjects at once.
+# gradient. This layer therefore offers all-subject evaluation only: RK has no
+# per-subject evaluation, and a per-subject entry point would cost a full pass
+# per call, O(N²) per sweep over subjects.
 
 # The packed unconstrained point at which every random-effect block has unit
 # scales and an identity correlation factor, so that each block's standardized

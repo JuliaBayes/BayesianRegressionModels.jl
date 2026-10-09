@@ -1,4 +1,4 @@
-# Shared fixtures for the NLME tests (test/nlme_view.jl, test/nlme_estimation_ext.jl).
+# Shared fixtures for the NLME tests (test/nlme_view.jl).
 using Test, BayesianRegressionModels, Distributions
 using ReactiveKernels, ReactiveKernelsPPL, Enzyme
 using DifferentiationInterface: AutoEnzyme
@@ -56,8 +56,11 @@ likelihood_query(backend) = prepare_query(backend.model,
 const NLME_AD = AutoEnzyme(; mode=Enzyme.Reverse)
 
 # Independent oracle for the @plate population-PK model: every subject's
-# conditional log-likelihood written out from the model's equations.
-function plate_pk_oracle(m, θ, σ, H)
+# conditional log-likelihood, and its η gradient, written out from the model's
+# equations. With CL = exp(a + η_CL), V = exp(b + η_V), k = CL / V and
+# pred = dose / V * exp(-k t): ∂pred/∂η_CL = -k t pred, ∂pred/∂η_V = (k t - 1) pred,
+# and ∂ log p / ∂pred = (dv - pred) / sigma².
+function _plate_pk_oracle_terms(m, θ, σ, H)
     names = m.view.coordinates[m.theta]
     θn = Dict(zip(names, θ))
     cl0, cl_w = θn[Symbol("pop_log_CL.beta_pop.1")], θn[Symbol("pop_log_CL.beta_pop.2")]
@@ -70,7 +73,17 @@ function plate_pk_oracle(m, θ, σ, H)
         r = only(m.view.rows[i])
         CL = exp(cl0 + cl_w * d.weight[r] + H[kcl, i])
         V = exp(v0 + H[kv, i])
-        pred = d.dose[r] / V .* exp.(-(CL / V) .* d.t[r])
-        sum(logpdf.(Normal.(pred, sigma), d.dv[r]))
+        kt = (CL / V) .* d.t[r]
+        pred = d.dose[r] / V .* exp.(-kt)
+        value = sum(logpdf.(Normal.(pred, sigma), d.dv[r]))
+        residual = (d.dv[r] .- pred) ./ sigma^2
+        gradient = zeros(size(H, 1))
+        gradient[kcl] = sum(residual .* pred .* -kt)
+        gradient[kv] = sum(residual .* pred .* (kt .- 1))
+        (; value, gradient)
     end
 end
+
+plate_pk_oracle(m, θ, σ, H) = [term.value for term in _plate_pk_oracle_terms(m, θ, σ, H)]
+plate_pk_oracle_gradients(m, θ, σ, H) =
+    reduce(hcat, [term.gradient for term in _plate_pk_oracle_terms(m, θ, σ, H)])
