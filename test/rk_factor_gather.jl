@@ -38,9 +38,10 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
     @test occursin("zeta_g[g_level]", main)
     @test occursin("eta_Intercept ~ Normal", main)
     @test !occursin("X_eta =", main)
-    # `pa` and `pb` share one design matrix.
+    # `pa` and `pb` share one design matrix, named for its columns.
     @test count("hcat(ones(length(x)), x, w)", main) == 1
-    @test occursin("pop_pb ~ brm_population_effects(X_pa, 3", main)
+    @test occursin("pop_pa ~ brm_population_effects(X_Intercept_x_w, 3", main)
+    @test occursin("pop_pb ~ brm_population_effects(X_Intercept_x_w, 3", main)
 
     backend, problem = consumer_problem(brmi)
     names = coordinate_names(backend.model.layout)

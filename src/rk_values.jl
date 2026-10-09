@@ -175,7 +175,7 @@ _rk_ast_student_t_nu(dist::_BRMRanefStudentT, bindings, taken) =
         _rk_value_expr!(bindings, _brm_prepare_expr(dist.nu), taken)
 
 function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindings;
-        predictors=(), population_priors=Dict(), coordinates=nothing)
+        level_indices, predictors=(), population_priors=Dict(), coordinates=nothing)
     grouping = bucket.grouping
     K = length(bucket.margins)
     group = first(grouping.columns)
@@ -222,14 +222,18 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
                 z=Symbol(draws, ".z"), L=K == 1 ? nothing : Symbol(draws, ".L")),
                 bucket.dist === nothing ? (;) : (; mixing=Symbol(draws, ".w"))))
     end
+    # One level position per row of a grouping, named for that grouping and
+    # read by every bucket over it. A multi-membership column's positions are
+    # into its bucket's joint levels, so they are named for those as well.
     indices = Dict{Symbol,Symbol}()
     if grouping.form !== :gr
-        callee = :brm_level_indices
         for col in grouping.columns
-            idx = _rk_ast_fresh_name(string(draws, "_index_", col), taken)
-            push!(stmts, Expr(:(=), idx,
-                Expr(:call, callee, col, group)))
-            indices[col] = idx
+            indices[col] = get!(level_indices, (col, group)) do
+                idx = _rk_ast_fresh_name(grouping.form === :mm ?
+                    string(group, "_", col, "_level") : string(col, "_level"), taken)
+                push!(stmts, Expr(:(=), idx, Expr(:call, :brm_level_indices, col, group)))
+                idx
+            end
         end
     end
     gather_margin(col, margin) =
