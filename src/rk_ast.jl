@@ -240,7 +240,6 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol},
         colref::Dict{Int}, refref::Dict{Int}; values::Bool=false,
         replacements=Dict{Int,Any}())
     summands = Any[]
-    intercept = nothing
     for (index, term) in enumerate(predictor.terms)
         if haskey(replacements, index)
             # A component value (or nothing, when an earlier one absorbed it).
@@ -248,8 +247,7 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol},
             replacement === nothing || push!(summands, replacement)
         elseif term.kind === :intercept
             # A scalar; it broadcasts against the other (row-valued) summands.
-            intercept = coefs[index]
-            push!(summands, intercept)
+            push!(summands, coefs[index])
         elseif term.kind === :continuous
             push!(summands, Expr(:call, :.*, coefs[index], colref[index]))
         elseif term.kind === :factor
@@ -300,11 +298,82 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol},
             push!(summands, Expr(:call, :.*, coefs[index], refref[index]))
         end
     end
-    length(summands) == 1 || return Expr(:call, :.+, summands...)
-    # Keep the authored predictor's row axis when other model values read it.
-    only(summands) === intercept && predictor.row_source !== nothing ?
-        Expr(:call, :fill, intercept,
-            Expr(:call, :length, predictor.row_source)) : only(summands)
+    length(summands) == 1 ? only(summands) : Expr(:call, :.+, summands...)
+end
+
+# A predictor whose value is its lone intercept coefficient. It is emitted
+# row-aligned (`fill`) and kept that way when any reader needs its rows.
+function _rk_lone_intercept(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol}, affine)
+    affine isa Symbol && predictor.row_source !== nothing || return false
+    any(index -> predictor.terms[index].kind === :intercept &&
+        get(coefs, index, nothing) === affine, eachindex(predictor.terms))
+end
+
+# Whether every occurrence of `name` in `value` is only broadcast: an operand
+# of dotted calls and operators, never indexed (`getindex.`/`view.`) or passed
+# whole to an ordinary call.
+function _rk_broadcasts(value, name::Symbol)
+    value === name && return true
+    value isa Expr || return true
+    name in _rk_source_symbols!(Set{Symbol}(), value) || return true
+    if value.head === :. && length(value.args) == 2 && Meta.isexpr(value.args[2], :tuple)
+        f = first(value.args)
+        f in (:getindex, :view) && return false
+        name in _rk_source_symbols!(Set{Symbol}(), f) && return false
+        return all(arg -> _rk_broadcasts(arg, name), value.args[2].args)
+    end
+    if value.head === :call && first(value.args) isa Symbol
+        op = string(first(value.args))
+        startswith(op, ".") && length(op) > 1 &&
+            return all(arg -> _rk_broadcasts(arg, name), value.args[2:end])
+    end
+    false
+end
+
+# Whether `name` is read only by broadcasts in likelihood statements, or by
+# broadcast definitions whose own values are read that way, as a link value
+# (`sigma = exp.(log_sigma)`) is. A block-local read, a plain `~`, an indexing
+# read or a whole-value call (an authored function, kernel input, design
+# column or basis axis) needs its rows.
+function _rk_broadcast_only(name::Symbol, statements, block_reads, seen=Set{Symbol}())
+    name in block_reads && return false
+    push!(seen, name)
+    for statement in statements
+        name in _rk_source_symbols!(Set{Symbol}(), statement) || continue
+        if Meta.isexpr(statement, :call) && length(statement.args) == 3 &&
+                first(statement.args) === :.~
+            statement.args[2] === name && return false
+            _rk_broadcasts(statement.args[3], name) || return false
+        elseif Meta.isexpr(statement, :(=), 2) && first(statement.args) isa Symbol
+            target, value = statement.args
+            target === name && continue
+            _rk_broadcasts(value, name) || return false
+            target in seen ||
+                _rk_broadcast_only(target, statements, block_reads, seen) || return false
+        else
+            return false
+        end
+    end
+    true
+end
+
+# A lone intercept is its scalar coefficient when every reader only broadcasts
+# it, so the observation plate shares the scalar instead of a filled row
+# vector (rkppl-use §1). Readers are resolved on the finished program, after
+# authored values and kernels are emitted. `lone` maps each row-aligned
+# predictor value to its coefficient.
+function _rk_scalar_lone_intercepts(emitted::_RKEmittedProgram, lone::Dict{Symbol,Symbol})
+    isempty(lone) && return emitted
+    statements = emitted.main.args
+    block_reads = reduce(union!, values(_rk_block_free_reads(emitted.defs));
+        init=Set{Symbol}())
+    scalar = Set(name for name in keys(lone)
+        if _rk_broadcast_only(name, statements, block_reads))
+    isempty(scalar) && return emitted
+    main = Expr(:block, (Meta.isexpr(statement, :(=), 2) && first(statement.args) in scalar ?
+        Expr(:(=), first(statement.args), lone[first(statement.args)]) : statement
+        for statement in statements)...)
+    _RKEmittedProgram(emitted.defs, main, emitted.bindings)
 end
 
 function _rk_ast_r2d2_scale(r2d2, addressee; scalar=true, variance_values=nothing)
@@ -1175,7 +1244,8 @@ end
 # (`_rk_coordinate_record!`, read by src/coordinate_transport.jl). Emission is
 # otherwise unchanged; an unrecorded declaration is refused by the transport.
 function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
-        values::Bool=false, reserved=(), coordinates=nothing)
+        values::Bool=false, reserved=(), coordinates=nothing,
+        lone_intercepts=Dict{Symbol,Symbol}())
     taken = union(Set(keys(plan.columns)),
         Set(p.name for p in plan.parameters),
         Set(a.name for a in plan.assignments),
@@ -1372,9 +1442,11 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 priors[key]
             else
                 # R2D2 overrides are Normal-only by construction
-                # (planner gate); normalize to the family shape here.
+                # (planner gate); normalize to the family shape here. The
+                # budget allocates no share to a zero-width factor block.
                 r2 = get(r2d2.overrides, term.addressee, nothing)
-                r2 === nothing ? (kind === :intercept ? (:Normal, (0.0, 1.0)) :
+                r2 === nothing ? (kind === :intercept ||
+                        _rk_zero_width_factor(term) ? (:Normal, (0.0, 1.0)) :
                     (:Normal, (0.0, _rk_ast_r2d2_scale(r2d2, term.addressee;
                         scalar=kind !== :factor,
                         variance_values=kind === :factor ?
@@ -1499,6 +1571,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             foreach(entry -> replacements[first(entry)] = nothing, population[2:end])
         end
         affine = _rk_ast_affine(predictor, coefs, colactual, refactual; values, replacements)
+        if _rk_lone_intercept(predictor, coefs, affine)
+            lone_intercepts[lhs] = affine
+            affine = Expr(:call, :fill, affine, Expr(:call, :length, predictor.row_source))
+        end
         push!(stmts, Expr(:(=), lhs, affine))
         if values && (lhs !== predictor.name || predictor.link !== :identity)
             value = _rk_value_link!(bindings, predictor.link, lhs, taken)
@@ -1579,6 +1655,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 fused_heads, union(Set(keys(plan.columns)), Set(Base.values(rename)),
                     Set(p.name for p in plan.predictors)), effects_name))
     end
-    _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken),
+    emitted = _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken),
         _rk_observed_names(plan))
+    # A value plan resolves lone intercepts once its own readers are emitted.
+    values ? emitted : _rk_scalar_lone_intercepts(emitted, lone_intercepts)
 end

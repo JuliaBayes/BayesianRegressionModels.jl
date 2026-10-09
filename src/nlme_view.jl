@@ -320,9 +320,13 @@ function _brm_nlme_attribution(backend::RKBRMI, view::BRMNLMEView, fields)
 end
 
 # Implemented by `BayesianRegressionModelsReactiveKernelsExt`: the prepared
-# `:pointwise` query of a backend and its evaluation at a packed point.
+# `:pointwise` query of a backend and its evaluation at a packed point, and the
+# sampler query that retains the pointwise densities of its reverse sweep, with
+# `(value, gradient, pointwise)` from one evaluation.
 function _rk_pointwise_query end
 function _rk_pointwise_values end
+function _rk_retained_pointwise_sampler end
+function _rk_value_gradient_and_pointwise! end
 
 """
     BRMNLMEModel
@@ -340,10 +344,10 @@ covariance Ω is not a model coordinate here: estimators own it, and the model
 evaluates the conditional likelihood `log p(y_i | θ, σ, η_i)` without the
 random-effect prior.
 """
-struct BRMNLMEModel{B<:RKBRMI,P,Q}
+struct BRMNLMEModel{B<:RKBRMI,S,Q}
     view::BRMNLMEView
     backend::B
-    problem::P
+    sampler::S
     pointwise::Q
     attribution::Vector{Pair{Symbol,Vector{Int}}}
     theta::Vector{Int}
@@ -360,9 +364,10 @@ Base.show(io::IO, m::BRMNLMEModel) = print(io, "BRMNLMEModel(",
     brm_nlme_model(backend::RKBRMI; ad_backend) -> BRMNLMEModel
 
 Prepare an RK-lowered population model for NLME estimators: its
-[`brm_nlme_view`](@ref) partition, the backend's log-density problem
-(`rk_logdensity_problem(backend; ad_backend)`, first-order), its pointwise
-densities, and the subject attribution of every observed density.
+[`brm_nlme_view`](@ref) partition, the backend's sampler query retaining its
+pointwise densities (first-order, reverse-mode Enzyme: `ad_backend` must be
+`AutoEnzyme(; mode=Enzyme.Reverse)`), its pointwise densities, and the subject
+attribution of every observed density.
 
 Refuses ([`BRMNLMEViewError`](@ref)) everything `brm_nlme_view` refuses, Student-t
 random-effect blocks (the estimators own a Gaussian η prior), and observed
@@ -374,7 +379,7 @@ function brm_nlme_model(backend::RKBRMI; ad_backend)
         "brm_nlme_model: Student-t random-effect blocks are not covered; NLME " *
         "estimators own a Gaussian random-effect prior")
     unit = _brm_nlme_unit_point(backend, view)
-    problem = rk_logdensity_problem(backend; ad_backend)
+    sampler = _rk_retained_pointwise_sampler(backend; ad_backend)
     pointwise = _rk_pointwise_query(backend)
     attribution = _brm_nlme_attribution(backend, view,
         _rk_pointwise_values(pointwise, unit))
@@ -384,7 +389,7 @@ function brm_nlme_model(backend::RKBRMI; ad_backend)
         margin.block == previous ? (eta_blocks[end] += 1) : push!(eta_blocks, 1)
         previous = margin.block
     end
-    BRMNLMEModel(view, backend, problem, pointwise, attribution,
+    BRMNLMEModel(view, backend, sampler, pointwise, attribution,
         findall(==(:population), view.role), findall(==(:scalar), view.role),
         eta_blocks, unit)
 end
@@ -431,14 +436,16 @@ brm_nlme_loglikelihoods(m::BRMNLMEModel, θ, σ, H) =
     brm_nlme_loglikelihoods_and_gradients(m::BRMNLMEModel, θ, σ, H) -> (values, G)
 
 [`brm_nlme_loglikelihoods`](@ref) together with `G[:, i] = ∇_{η_i} log p(y_i | θ, σ, η_i)`
-for every subject, from one pointwise and one gradient evaluation. Subjects are
+for every subject, from one reverse sweep that also retains the pointwise
+densities. Subjects are
 conditionally independent, so the joint gradient restricted to subject `i`'s
 block is its conditional gradient once the standard-normal draw prior is removed.
 """
 function brm_nlme_loglikelihoods_and_gradients(m::BRMNLMEModel, θ, σ, H)
     u = _brm_nlme_point(m, θ, σ, H)
-    values = _brm_nlme_sum_by_subject(m, _rk_pointwise_values(m.pointwise, u))
-    _, g = LogDensityProblems.logdensity_and_gradient(m.problem, u)
+    g = Vector{Float64}(undef, length(u))
+    _, g, pointwise = _rk_value_gradient_and_pointwise!(m.sampler, g, u)
+    values = _brm_nlme_sum_by_subject(m, pointwise)
     G = Matrix{Float64}(undef, size(H))
     for (i, block) in enumerate(m.view.subject_coordinates)
         G[:, i] .= view(g, block) .+ view(H, :, i)

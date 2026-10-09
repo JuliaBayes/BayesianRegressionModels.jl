@@ -66,9 +66,12 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # location stays scalar; 0f7d2521 gives other locations their rows once,
 # without a ones vector), 83707d4d (closure captures in plate cells and
 # scan steps, used instead of Ref operands; bed5d467 deprecates the Ref
-# spelling), ecf99453 (hidden bound operands packed into one AD context) and
-# 659a6e8b (columns of `X * B`, per-element two-axis prior arguments and
-# per-slice Dirichlet concentrations, read by BRM's joint blocks).
+# spelling), ecf99453 (hidden bound operands packed into one AD context),
+# 1603d87a (sampler queries that retain pointwise densities from the reverse
+# sweep), 5c2b80d5 (every @rkppl predictor node carries its authored
+# name, so `mu = mu_Intercept` is queryable as `mu`) and 659a6e8b (columns
+# of `X * B`, per-element two-axis prior arguments and per-slice Dirichlet
+# concentrations, read by BRM's joint blocks).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
