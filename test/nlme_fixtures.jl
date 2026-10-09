@@ -1,4 +1,4 @@
-# Shared fixtures for the NLME tests (test/nlme_view.jl).
+# Shared fixtures for the NLME tests (test/nlme_view.jl, test/nlme_estimation_ext.jl).
 using Test, BayesianRegressionModels, Distributions
 using ReactiveKernels, ReactiveKernelsPPL, Enzyme
 using DifferentiationInterface: AutoEnzyme
