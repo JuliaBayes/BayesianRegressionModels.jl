@@ -38,6 +38,37 @@ function _rk_source_definition(definition)
     (; name, kind)
 end
 
+# Source locations are not part of a definition's meaning, so two copies
+# quoted at different sites still compare equal.
+_rk_source_equal(a, b) = isequal(a, b)
+function _rk_source_equal(a::Expr, b::Expr)
+    a.head === b.head || return false
+    xs = filter(arg -> !(arg isa LineNumberNode), a.args)
+    ys = filter(arg -> !(arg isa LineNumberNode), b.args)
+    length(xs) == length(ys) && all(splat(_rk_source_equal), zip(xs, ys))
+end
+
+# Several contributors (submodel hooks, callable providers) may each supply
+# the one helper they share. A callable name owns one definition: an equal
+# repeat is kept once, at its first position, so it still precedes every
+# entry composing it; a different definition under the same name fails.
+function _rk_unique_source_definitions(definitions)
+    kept = Expr[]
+    owners = Dict{Symbol,Expr}()
+    for definition in definitions
+        name = _rk_source_definition(definition).name
+        previous = get(owners, name, nothing)
+        if previous === nothing
+            owners[name] = definition
+            push!(kept, definition)
+        elseif !_rk_source_equal(previous, definition)
+            error("RK source: callable `$name` is defined more than once, " *
+                "with different definitions")
+        end
+    end
+    kept
+end
+
 function _rk_validate_source_definitions(emitted)
     bound = Set{Symbol}(first(binding) for binding in emitted.bindings)
     defined = Set{Symbol}()

@@ -89,3 +89,82 @@ end
     @test artifact.ast == emitted.main
     @test isequal(data, saved)
 end
+
+# Two submodels calling one shared recurrence: each hook call appends the same
+# helper definition, and the printed source defines it once.
+module SharedHelperSource
+using BayesianRegressionModels, Distributions
+import BayesianRegressionModels: _rk_submodel_rhs!
+
+function first_events end
+function second_events end
+const SECOND_FACTOR = Ref(1.0)
+
+recurrence(factor) = :(ReactiveKernels.@kernel shared_response(x, gain) = begin
+    values = ReactiveKernels.scan(x, Ref(gain); init=0.0) do carry, value, g
+        next = carry + $factor * g * value
+        (next, next)
+    end
+    return values
+end)
+
+function shared_source!(definitions, statements, data, target, rhs, factor)
+    x = only(getargs(rhs))
+    key = Symbol(target, :_source_x)
+    data[key] = copy(parent(parent(x)))
+    gain = name(getkwargs(rhs).gain)
+    push!(definitions, recurrence(factor))
+    push!(statements, :($target = shared_response($key, $gain)))
+    :done
+end
+_rk_submodel_rhs!(definitions, statements, data, bindings, target::Symbol,
+    ::typeof(first_events), rhs) =
+    shared_source!(definitions, statements, data, target, rhs, 1.0)
+_rk_submodel_rhs!(definitions, statements, data, bindings, target::Symbol,
+    ::typeof(second_events), rhs) =
+    shared_source!(definitions, statements, data, target, rhs, SECOND_FACTOR[])
+
+function build(data)
+    @brm data begin
+        a ~ Normal(0, 0.7)
+        b ~ Normal(0, 0.5)
+        first_loc ~ first_events(x; gain=a)
+        second_loc ~ second_events(z; gain=b)
+        y ~ Normal(first_loc, 0.8)
+        w ~ Normal(second_loc, 0.6)
+    end
+end
+end
+
+@stestset "submodel hooks sharing one helper emit its definition once" begin
+    data = (; x=[-0.4, 0.2, 0.7, 0.1], z=[0.3, -0.5, 0.25, 0.6],
+        y=[0.1, -0.2, 0.3, 0.05], w=[-0.1, 0.4, 0.2, -0.3])
+    saved = deepcopy(data)
+    brmi = SharedHelperSource.build(data)
+    backend, problem = consumer_problem(brmi)
+    names = coordinate_names(backend.model.layout)
+    ia, ib = findfirst(==(:a), names), findfirst(==(:b), names)
+    oracle(u) = logpdf(Normal(0, 0.7), u[ia]) + logpdf(Normal(0, 0.5), u[ib]) +
+        sum(logpdf.(Normal.(cumsum(data.x) .* u[ia], 0.8), data.y)) +
+        sum(logpdf.(Normal.(cumsum(data.z) .* u[ib], 0.6), data.w))
+    for u in ([0.0, 0.0], [0.2, -0.3], [-0.4, 0.1])
+        check_consumer_point(problem, u, oracle)
+    end
+    emitted = BRM._rk_emit_ast(backend.plan)
+    named(name) = count(d -> BRM._rk_source_definition(d).name === name, emitted.defs)
+    @test named(:shared_response) == 1
+    artifact = BRM.emit_rk_artifact(brmi; case_id="shared-helper-source")
+    @test count(d -> BRM._rk_source_definition(d).name === :shared_response,
+        artifact.defs) == 1
+    rebuilt = build_kernel(BRM.rk_translate_artifact(artifact))
+    @test coordinate_names(rebuilt.layout) == names
+    # A different definition under the shared name still fails before evaluation.
+    SharedHelperSource.SECOND_FACTOR[] = 2.0
+    try
+        @test_throws "with different definitions" BRM.emit_rk_artifact(
+            SharedHelperSource.build(data); case_id="conflicting-helper-source")
+    finally
+        SharedHelperSource.SECOND_FACTOR[] = 1.0
+    end
+    @test isequal(data, saved)
+end
