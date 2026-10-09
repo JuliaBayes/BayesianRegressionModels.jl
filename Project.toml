@@ -12,9 +12,7 @@ InverseFunctions = "3587e190-3f89-42d0-90ee-14403ec27112"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 LogDensityProblems = "6fdf6af0-433a-55f7-b3ed-c6c6e0b8df7c"
 LogExpFunctions = "2ab3a3ac-af41-5b50-aa03-7779005ae688"
-MutatingFunctions = "8a4c2d94-4b3b-4f9e-be63-a3c0cd816e3a"
 OrderedCollections = "bac558e1-5e72-5ebc-8fee-abe8a469f55d"
-OutputSignatures = "86cfaae4-1704-4c69-ba62-d919d81ae5f8"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 RuntimeGeneratedFunctions = "7e49a35a-f44a-4d26-94aa-eba1b4ca6b47"
 Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
@@ -25,19 +23,15 @@ StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
 
 [weakdeps]
 AlgebraOfVega = "a2420894-485a-4f42-a4fc-c4323ec6fb2b"
-DifferentiationInterface = "a0c0ee7d-e4b9-4e03-894e-1c5f64a51d63"
 Enzyme = "7da242da-08ed-463a-9acd-ee780be4f1d9"
 ReactiveKernels = "78e9f072-d36b-4c73-b7a3-751b0eb26cf9"
 ReactiveKernelsPPL = "e266ea2a-6817-46cd-8bec-6238f0035f44"
-TreeArrays = "5daaa025-ac78-4e9a-8805-78946e672e43"
 Turing = "fce5fe82-541a-59a6-adf8-730c64b5f9a0"
 WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 
 [extensions]
 BayesianRegressionModelsAlgebraOfVegaExt = "AlgebraOfVega"
-BayesianRegressionModelsDifferentiationInterfaceExt = "DifferentiationInterface"
 BayesianRegressionModelsReactiveKernelsExt = ["ReactiveKernels", "ReactiveKernelsPPL"]
-BayesianRegressionModelsTreeArraysExt = "TreeArrays"
 BayesianRegressionModelsTuringExt = "Turing"
 BayesianRegressionModelsTuringWarmupHMCExt = ["Turing", "WarmupHMC"]
 BayesianRegressionModelsWarmupHMCEnzymeExt = ["WarmupHMC", "Enzyme"]
@@ -46,37 +40,11 @@ BayesianRegressionModelsWarmupHMCExt = "WarmupHMC"
 [compat]
 BridgeStan = "2.9"
 AlgebraOfVega = "0.2"
-DifferentiationInterface = "0.7"
 Enzyme = "0.13"
-MutatingFunctions = "0.1"
-OutputSignatures = "0.1"
 ReactiveKernels = "0.1"
 ReactiveKernelsPPL = "0.1"
 RuntimeGeneratedFunctions = "0.5"
-TreeArrays = "0.1"
 Turing = "0.46"
 WarmupHMC = "0.2"
 julia = "1.10"
 
-# TreeArrays is a weakdep (extension trigger for BayesianRegressionModelsTreeArraysExt)
-# sourced from an unregistered git repo below. Pkg >=1.12 validates that every
-# [sources] key appears in [deps] or [extras]; a weakdep can't be in [deps], so it
-# is declared here in [extras]. Without this, reading this Project.toml on Julia
-# >=1.12 fails with "Sources for `TreeArrays` not listed in `deps` or `extras`",
-# breaking every downstream consumer (MutatingFunctions/OutputSignatures are exempt
-# because they're already in [deps]). No [targets] references it, so this entry is
-# inert for resolution — TreeArrays stays a weakdep and never enters the manifest.
-[extras]
-TreeArrays = "5daaa025-ac78-4e9a-8805-78946e672e43"
-
-# MutatingFunctions.jl + OutputSignatures.jl are the 0-alloc buffer-threading
-# substrate for the julianic run-the-body executor (user directive 2026-08-04:
-# "use ... the MutatingFunctions.jl and OutputSignatures.jl packages"). Not yet
-# in a registry — sourced from their canonical GitHub repos; the Manifest pins
-# the resolved commit.
-[sources]
-MutatingFunctions = {url = "https://github.com/nsiccha/MutatingFunctions.jl"}
-OutputSignatures = {url = "https://github.com/nsiccha/OutputSignatures.jl"}
-# TreeArrays.jl labels the postprocessing draw axes (weak dep — the density
-# path never loads it).
-TreeArrays = {url = "https://github.com/nsiccha/TreeArrays.jl"}
