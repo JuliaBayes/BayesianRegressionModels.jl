@@ -175,7 +175,7 @@ _rk_ast_student_t_nu(dist::_BRMRanefStudentT, bindings, taken) =
         _rk_value_expr!(bindings, _brm_prepare_expr(dist.nu), taken)
 
 function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindings;
-        predictors=(), population_priors=Dict(), coordinates=nothing)
+        level_indices, predictors=(), population_priors=Dict(), coordinates=nothing)
     grouping = bucket.grouping
     K = length(bucket.margins)
     group = first(grouping.columns)
@@ -222,14 +222,18 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
                 z=Symbol(draws, ".z"), L=K == 1 ? nothing : Symbol(draws, ".L")),
                 bucket.dist === nothing ? (;) : (; mixing=Symbol(draws, ".w"))))
     end
+    # One level position per row of a grouping, named for that grouping and
+    # read by every bucket over it. A multi-membership column's positions are
+    # into its bucket's joint levels, so they are named for those as well.
     indices = Dict{Symbol,Symbol}()
     if grouping.form !== :gr
-        callee = :brm_level_indices
         for col in grouping.columns
-            idx = _rk_ast_fresh_name(string(draws, "_index_", col), taken)
-            push!(stmts, Expr(:(=), idx,
-                Expr(:call, callee, col, group)))
-            indices[col] = idx
+            indices[col] = get!(level_indices, (col, group)) do
+                idx = _rk_ast_fresh_name(grouping.form === :mm ?
+                    string(group, "_", col, "_level") : string(col, "_level"), taken)
+                push!(stmts, Expr(:(=), idx, Expr(:call, :brm_level_indices, col, group)))
+                idx
+            end
         end
     end
     gather_margin(col, margin) =
@@ -310,21 +314,35 @@ end
 
 function _rk_ast_value_hsgp(definitions, term, taken, bindings)
     options = term.options
-    PHI = _rk_ast_fresh_name(string(options.id, "_PHI"), taken)
-    lambda = _rk_ast_fresh_name(string(options.id, "_lambda"), taken)
     periodic = get(options, :cov, :exp_quad) === :periodic
-    k = options.k isa Tuple ? Expr(:tuple, options.k...) : options.k
-    floors = _rk_ast_fresh_name(string(options.id, "_floors"), taken)
-    stmts = if periodic
-        call =
-        Expr(:call, :brm_hsgp_periodic_basis, only(term.columns), k, options.period)
-        Expr[Expr(:(=), Expr(:tuple, PHI, lambda, floors), call)]
+    grouped = haskey(options, :group_index) || !isempty(get(options, :hyper_plans, ()))
+    # The length-scale floor exists only where a prior or hyper-predictor reads it.
+    floor_read = options.rho_truncated ||
+        any(p -> p.hyper === :length_scale, get(options, :hyper_plans, ()))
+    stmts = Expr[]
+    floors = nothing
+    if periodic
+        # The periodic basis is prepared data; its effect reads the matrix and
+        # harmonic frequencies. Destructuring drops an unread trailing floor.
+        PHI = _rk_ast_fresh_name(string(options.id, "_PHI"), taken)
+        omega2 = _rk_ast_fresh_name(string(options.id, "_omega2"), taken)
+        floor_read && (floors = _rk_ast_fresh_name(string(options.id, "_rho_floor"), taken))
+        targets = floors === nothing ? (PHI, omega2) : (PHI, omega2, floors)
+        push!(stmts, Expr(:(=), Expr(:tuple, targets...), Expr(:call,
+            :brm_hsgp_periodic_basis, only(term.columns), options.k, options.period)))
+        inputs = Pair{Symbol,Any}[:PHI => PHI, :omega2 => omega2]
+        extent = :(axes(PHI, 2))
     else
-        _rk_ast_hsgp_basis_graph!(definitions, term, taken, PHI, lambda, floors)
+        # A squared-exponential effect reads its axes; its spectral graph
+        # composes the basis graph, so the main block names no basis values.
+        floor_read && (floors = _rk_ast_hsgp_floor!(definitions, stmts, term, taken))
+        inputs = Pair{Symbol,Any}[a => c for (a, c) in
+            zip(_rk_hsgp_axis_inputs(term), term.columns)]
+        extent = :(1:$(prod(_rk_hsgp_modes(options))))
     end
-    if haskey(options, :group_index) || !isempty(get(options, :hyper_plans, ()))
+    if grouped
         push!(stmts, Expr(:call, :~, options.id,
-            _rk_ast_hsgp_grouped(definitions, term, PHI, lambda, floors, taken, bindings)))
+            _rk_ast_hsgp_grouped(definitions, term, inputs, floors, extent, taken, bindings)))
         return stmts
     end
     axes = periodic || options.iso ? 1 : length(term.columns)
@@ -333,10 +351,10 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
     rho = axes == 1 ? :rho_iso : :rho
     value = periodic ?
         :(PHI * (brm_hsgp_periodic_sqrt_spd(omega2, sigma, $rho) .* beta_raw)) :
-        _rk_ast_hsgp_value_graph!(definitions, term, taken, :PHI, :omega2, :sigma, rho, :beta_raw)
-    _rk_ast_hsgp_component!(definitions, stmts, taken, options.id, PHI, lambda,
-        floors, rho_priors, sigma_prior, value; truncated=options.rho_truncated,
-        nbasis=get(options, :latent, false) ? prod(options.k) : nothing,
+        _rk_ast_hsgp_value_graph!(definitions, term, taken, [a => a for a in first.(inputs)],
+            :sigma, rho, :beta_raw)
+    _rk_ast_hsgp_component!(definitions, stmts, taken, options.id, inputs, floors,
+        rho_priors, sigma_prior, value, extent; truncated=options.rho_truncated,
         base=periodic ? "brm_periodic_hsgp_effect" : "brm_hsgp_effect")
     stmts
 end
@@ -709,7 +727,8 @@ function _rk_value_callee!(bindings, callable, taken)
     end
     index = findfirst(pair -> last(pair) === callable, bindings)
     index === nothing || return first(bindings[index])
-    name = _rk_ast_fresh_name("brm_value_function", taken)
+    # Named once the whole program exists (`_rk_name_callable_bindings`).
+    name = _rk_ast_fresh_name(_RK_CALLABLE_PLACEHOLDER, taken)
     push!(bindings, name => callable)
     name
 end
@@ -811,6 +830,6 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
         observed=_rk_observed_names(plan))
     authored = union(Set(a.name for a in plan.assignments),
         (p.name for p in plan.regression.predictors))
-    _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings),
+    _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken),
         _rk_observed_names(plan); retained=authored)
 end

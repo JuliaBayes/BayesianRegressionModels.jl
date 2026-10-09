@@ -83,29 +83,51 @@ end
         for intermediate in ("basis_rows","omega2","weights")
             @test occursin(intermediate,actual_outputs)
         end
-        for j in eachindex(K)
-            @test occursin("frequency_$j",actual_outputs)
-        end
-        PHI, omega2, floors = fixed_hsgp_oracle((data.x,data.w)[1:length(K)],K,domains)
-        ext = Base.get_extension(BRM,:BayesianRegressionModelsReactiveKernelsExt)
-        mod = ext._rk_emit_module(emitted)
-        definition = only(filter(d -> BRM._rk_source_definition(d).kind === :kernel &&
-            endswith(string(BRM._rk_source_definition(d).name),"_basis_graph"),emitted.defs))
-        owner = getfield(mod,BRM._rk_source_definition(definition).name)
-        have = Tuple(Symbol(:axis_,j) for j in eachindex(K))
-        for (method, expected) in ((:basis_matrix,PHI),(:squared_frequencies,omega2),
-                (:length_scale_floor,iso ? maximum(floors) : floors))
-            reader = Base.invokelatest(prepare,getproperty(owner,method);have,want=method)
-            @test Base.invokelatest(reader,(data.x,data.w)[1:length(K)]...) ≈ expected atol=2e-15 rtol=2e-15
-            if method === :basis_matrix
-                new_axes = ([0.9,-0.8,0.1,0.3],[-0.7,0.2,0.4,-0.3])[1:length(K)]
-                new_expected = first(fixed_hsgp_oracle(new_axes,K,domains))
-                @test Base.invokelatest(reader,new_axes...) ≈ new_expected atol=2e-15 rtol=2e-15
-                @test Base.invokelatest(reader,map(x->view(x,:),new_axes)...) ≈ new_expected atol=2e-15 rtol=2e-15
+        # A tensor basis keeps one frequency vector per axis; a single axis
+        # computes `omega2` directly.
+        if length(K) > 1
+            for j in eachindex(K)
+                @test occursin("frequency_$j",actual_outputs)
             end
         end
-        names = coordinate_names(backend.model.layout)
+        PHI, omega2, floors = fixed_hsgp_oracle((data.x,data.w)[1:length(K)],K,domains)
+        length(K) == 1 && (omega2 = vec(omega2))
+        # One main-block line calls the effect on its axes; its spectral graph
+        # composes the shared basis graph. There are no per-term basis graphs,
+        # endpoint reader kernels or main-block basis values.
+        main = sprint(Base.show_unquoted,emitted.main)
         id = length(K)==1 ? "hsgp_x" : "hsgp_x_w"
+        columns = join(("x","w")[1:length(K)],", ")
+        @test occursin("$(id) ~ brm_hsgp_effect($(columns)",main)
+        @test occursin("(PHI, omega2) = brm_hsgp_basis_graph(",text)
+        for retired in ("$(id)_basis_graph","basis_matrix()","length_scale_floor",
+                "$(id)_PHI","$(id)_lambda","axis_1 =","s = sigma")
+            @test !occursin(retired,text*main)
+        end
+        ext = Base.get_extension(BRM,:BayesianRegressionModelsReactiveKernelsExt)
+        mod = ext._rk_emit_module(emitted)
+        owner = getfield(mod,:brm_hsgp_basis_graph)
+        basis = Base.invokelatest(owner,(data.x,data.w)[1:length(K)]...)
+        @test length(basis) == 2
+        for (actual, expected) in zip(basis,(PHI,omega2))
+            @test actual ≈ expected atol=2e-15 rtol=2e-15
+        end
+        # A fixed domain's validity floor is a main-block constant, present
+        # only where the truncated length-scale prior reads it.
+        floor_name = Symbol(id,"_rho_floor")
+        floor_statements = filter(x -> Meta.isexpr(x,:(=)) && x.args[1] === floor_name,
+            emitted.main.args)
+        if all(==(1),K)
+            @test isempty(floor_statements)
+        else
+            @test Core.eval(mod,last(only(floor_statements).args)) ≈
+                (iso ? maximum(floors) : floors) atol=2e-15 rtol=2e-15
+        end
+        new_axes = ([0.9,-0.8,0.1,0.3],[-0.7,0.2,0.4,-0.3])[1:length(K)]
+        new_expected = first(fixed_hsgp_oracle(new_axes,K,domains))
+        @test first(Base.invokelatest(owner,new_axes...)) ≈ new_expected atol=2e-15 rtol=2e-15
+        @test first(Base.invokelatest(owner,map(x->view(x,:),new_axes)...)) ≈ new_expected atol=2e-15 rtol=2e-15
+        names = coordinate_names(backend.model.layout)
         position(name) = only(findall(==(Symbol(name)),names))
         # The HSGP component owns its hyperparameters and basis weights.
         rpos = iso ? [position(id*".rho_iso")] : [position(id*".rho_$j") for j in eachindex(K)]
