@@ -61,8 +61,11 @@ const PINS = [
     # response location stays scalar; 0f7d2521 gives other locations their rows
     # once, without a ones vector). 83707d4d adds closure captures in plate
     # cells and scan steps (an enclosing name a do-block reads is shared whole,
-    # never zipped), which BRM's emitted do-blocks use instead of Ref operands.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "83707d4d4992998e3d3d33461743d7e9d4c5be1f"),  # main
+    # never zipped), which BRM's emitted do-blocks use instead of Ref operands;
+    # bed5d467 deprecates those Ref operands, and ecf99453 packs every hidden
+    # bound operand (captures included) into one prepared-AD context, clear
+    # of the 32-argument gradient cliff.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "ecf994537aa229e987e9f862146496a2842409d3"),  # main
 ]
 
 function main()
