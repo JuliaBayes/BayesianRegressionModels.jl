@@ -234,6 +234,12 @@ end
     program(defs, bindings=Pair{Symbol,Any}[]) =
         BRM._RKEmittedProgram(defs, Expr(:block), bindings)
     @test_throws "defined more than once" BRM._rk_validate_source_definitions(program([valid, valid]))
+    # Contributors sharing a helper: an equal repeat (source locations aside)
+    # is the same definition, kept once; a different one under the name is not.
+    kept = BRM._rk_unique_source_definitions([valid, parsed])
+    @test length(kept) == 1 && only(kept) === valid
+    changed = :(ReactiveKernels.@kernel cell(x) = begin result = x + 2; return result; end)
+    @test_throws "with different definitions" BRM._rk_unique_source_definitions([valid, changed])
     @test_throws "both bound and defined" BRM._rk_validate_source_definitions(program([valid], [:cell => identity]))
     @test_throws "explicit definitions" BRM._rk_source_definition(:(@eval cell(x) = x))
 end

@@ -15,6 +15,9 @@ in this source; the extension never receives a lowered PPL plan or derivative.
 An emitted entry owns its callable name: bind its existing leaf functions under
 separate names, or bind an existing entry without defining it again. Defining
 and binding the same name is rejected before any definitions are evaluated.
+Hook calls sharing a helper may each append it: an equal definition (source
+locations aside) under one name is emitted once, while different definitions
+under one name are rejected.
 Extend this method with `import BayesianRegressionModels: _rk_submodel_rhs!`.
 Model-specific downstream mathematics stays in the downstream extension.
 """
