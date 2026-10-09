@@ -31,6 +31,16 @@ julia --startup-file=no --project=docs docs/presentations/brm-futures/check-exam
 
 This is a focused construction/emission check, not a sampling or gradient test.
 
+`source-results.lua` supplies the HSGP study's numbers the same way, through
+`brm-hsgp` and `brm-source-audit` shortcodes evaluated at render time. Per-fit
+divergences, efficiencies, ESS, split R-hat and gradient counts come from
+`research/centering_refresh/results/hsgp/comparison.tsv`; the frame-check count
+and WarmupHMC revisions from the same directory; the partial-target audit
+maxima from `research/adaptive_centering/results/source-faithful/`. The filter
+also confirms that the refreshed post-hoc position choices equal the source
+reproduction's selection. A missing value or a changed selection fails the
+render, so a refit cannot leave stale numbers in the deck.
+
 The visual system follows the StanCon 2026 StanBlocks.jl presentation at
 StanBlocks.jl revision `c0b5b9197e2d06cf284f1990db024c37ed2b9d47`:
 Reveal `simple`, a 1600×900 canvas, warm paper, Avenir/Inter typography, Stan
@@ -59,10 +69,11 @@ notes. Source, notes, and references remain in `brm-futures.qmd` and this file.
 ## BRM provenance
 
 The formulas/custom-code rewrite was checked against BRM revision
-`8dfe41253af3043482cb3270cf513b50a1de5437`. Adaptive-centering claims were
-integrated from corrected reviewed revision
-`ea27c18ed2517e3061f441971f561235f48cceb8`, canonically integrated in
-`2db645e5e9bdc59465ecdaa18d039460f682cda2`. The executable case-study source is
+`8dfe41253af3043482cb3270cf513b50a1de5437`. The HSGP results follow the
+refreshed centering study introduced in
+`4dc28de1039303300b532fc778cb6ace0b6d46f1`, which replaced comparisons recorded
+before WarmupHMC's active-position transport repair. The executable case-study
+source is
 <https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/docs/src/adaptive-centering.md>.
 
 The adaptive case is derived from:
@@ -76,17 +87,18 @@ The adaptive case is derived from:
   `1dcc2bf5f955cc1224a3e1307256e1fe86b68dae`, raw CSV SHA-256
   `b89a1e4eb0391a982b32be3e378df00e8593ff9971e9425e9c5d7929b74f9801`.
 
-The adaptive panels use the committed source-faithful artifacts under
-`research/adaptive_centering/results/source-faithful/`: all 133 observations,
-two 20-frequency HSGPs, source-equivalent log-hyperpriors, `Xoshiro(1)`,
-10,000 retained draws per fit, and unchanged WarmupHMC defaults. The source
-reproduction has a noncentered pilot and a fresh selected-partial refit; the
-online StanBlocks fit is a separate extension. Their divergence counts are
-34, 16, and 0. Each result is one chain, so split R-hat is a within-chain
-diagnostic rather than evidence that independent chains agree, and the counts
-are not a general efficiency guarantee. No corrected Turing samples exist:
-sampling remains disabled until matched target-value and warmed
-gradient-runtime gates pass.
+Appendix D's source reproduction uses the committed source-faithful artifacts
+under `research/adaptive_centering/results/source-faithful/`: all 133
+observations, two 20-frequency HSGPs, source-equivalent log-hyperpriors,
+`Xoshiro(1)`, 10,000 retained draws per fit, and unchanged WarmupHMC defaults.
+The results slide and appendix E use `research/centering_refresh/results/hsgp/`:
+fixed NCP and CP, plus post-hoc and online fits for both the position and the
+gradient loss. Its post-hoc position fit is the source workflow. Each fit is one
+chain, so split R-hat is a within-chain diagnostic rather than evidence that
+independent chains agree, and the results are not a general efficiency
+guarantee. No Turing posterior samples exist; the separate Turing gradient
+benchmark in `test/receipts/turing_hsgp_gradients.tsv` is not sampling
+evidence.
 
 ## Possible Julia-to-XLA GPU path
 

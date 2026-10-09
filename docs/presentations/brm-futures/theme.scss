@@ -531,34 +531,39 @@ $presentation-font-size-root: 34px;
   max-height: 340px;
 }
 
-.case-result-stack {
-  display: grid;
-  gap: 10px;
-  grid-template-rows: repeat(3, minmax(0, 1fr));
-}
-
-.case-result {
+.case-result-table {
   display: flex;
   flex-direction: column;
-  font-size: 0.56em;
   justify-content: center;
-  line-height: 1.22;
-  padding: 12px 15px;
+  padding: 14px 18px;
 }
 
-.case-result .label {
-  align-self: flex-start;
-  margin-bottom: 0.3em;
+.case-result-row {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  font-size: 0.56em;
+  gap: 10px;
+  grid-template-columns: 1.45fr 0.85fr 0.85fr 0.85fr;
+  line-height: 1.2;
+  padding: 10px 2px;
 }
 
-.case-result strong {
-  font-size: 1.15em;
-  margin-bottom: 0.18em;
+.case-result-row > div:not(:first-child) {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
-.case-result span:last-child {
+.case-result-row.header {
   color: var(--muted);
+  font-size: 0.4em;
+  font-weight: 760;
+  letter-spacing: 0.06em;
+  padding-top: 0;
+  text-transform: uppercase;
 }
+
+.case-result-row:last-child { border-bottom: none; }
 
 .case-boundaries {
   display: grid;

@@ -7,6 +7,8 @@ pagetitle: "BRM.jl: simple formulas, room for custom models"
 description-meta: "Combine concise regression formulas with custom calculations, likelihoods, and scientific models."
 filters:
   - source-examples.lua
+shortcodes:
+  - source-results.lua
 format:
   revealjs:
     theme: [simple, theme.scss]
@@ -232,27 +234,31 @@ Often useful when the data provide less information.
 These are centered and noncentered parameterizations. Neither is universally better. The scale s_k can depend on sampled hyperparameters, so the choice affects posterior geometry. Stan's reparameterization guide and Papaspiliopoulos, Roberts, and Sköld (2007) describe the information-dependent tradeoff. The next slide shows this specific BRM study, not a general guarantee. Appendix D gives the partial-centering transform and exact source model.
 :::
 
-## One model, three recorded fits
+## One model, six recorded fits
 
-<div class="section-kicker">Corrected HSGP study · StanBlocks sampling</div>
+<div class="section-kicker">Refreshed HSGP study · StanBlocks sampling</div>
 
 :::: {.grid-2 .wide-left .case-result-grid}
 ::: {.card .accent-violet .tight .case-result-figure}
-<img src="../../src/assets/adaptive-hsgp/online_centeredness.png" alt="Centeredness for each of the 20 basis frequencies in the mean and log-noise Gaussian processes, comparing online warmup and offline pilot selection">
+<img src="../../src/assets/centering-refresh-hsgp/centeredness.png" alt="Centeredness chosen for each of the 20 basis weights in the mean and log-noise Gaussian processes by the position and gradient losses, post-hoc and online">
 
-<div class="tiny muted">Each coefficient gets its own choice. Zero is fully noncentered; one is fully centered. The two selection procedures need not agree.</div>
+<div class="tiny muted">Each coefficient gets its own choice. Zero is fully noncentered; one is fully centered. The two losses and the two procedures need not agree.</div>
 :::
-::: {.case-result-stack}
-<div class="card accent-coral case-result"><span class="label demo">Noncentered pilot</span><strong>10,000 draws · 34 divergences</strong><span>max split R-hat 1.0012 · min bulk/tail ESS 2,514 / 2,886</span></div>
-<div class="card accent-amber case-result"><span class="label demo">Fresh partially centered fit</span><strong>10,000 draws · 16 divergences</strong><span>max split R-hat 1.0007 · min bulk/tail ESS 2,533 / 1,797</span></div>
-<div class="card accent-teal case-result"><span class="label demo">Separate online extension</span><strong>10,000 draws · 0 divergences</strong><span>max split R-hat 1.0018 · min bulk/tail ESS 2,318 / 2,775</span></div>
+::: {.card .tight .case-result-table}
+<div class="case-result-row header"><div>Fit</div><div>Divergences</div><div>Sampling efficiency</div><div>Total efficiency</div></div>
+<div class="case-result-row"><div>{{< brm-hsgp ncp method >}}</div><div>{{< brm-hsgp ncp divergences >}}</div><div>{{< brm-hsgp ncp sampling >}}</div><div>{{< brm-hsgp ncp total >}}</div></div>
+<div class="case-result-row"><div>{{< brm-hsgp cp method >}}</div><div>{{< brm-hsgp cp divergences >}}</div><div>{{< brm-hsgp cp sampling >}}</div><div>{{< brm-hsgp cp total >}}</div></div>
+<div class="case-result-row"><div>{{< brm-hsgp posthoc_position method >}}</div><div>{{< brm-hsgp posthoc_position divergences >}}</div><div>{{< brm-hsgp posthoc_position sampling >}}</div><div>{{< brm-hsgp posthoc_position total >}}</div></div>
+<div class="case-result-row"><div>{{< brm-hsgp posthoc_gradient method >}}</div><div>{{< brm-hsgp posthoc_gradient divergences >}}</div><div>{{< brm-hsgp posthoc_gradient sampling >}}</div><div>{{< brm-hsgp posthoc_gradient total >}}</div></div>
+<div class="case-result-row"><div>{{< brm-hsgp online_position method >}}</div><div>{{< brm-hsgp online_position divergences >}}</div><div>{{< brm-hsgp online_position sampling >}}</div><div>{{< brm-hsgp online_position total >}}</div></div>
+<div class="case-result-row"><div>{{< brm-hsgp online_gradient method >}}</div><div>{{< brm-hsgp online_gradient divergences >}}</div><div>{{< brm-hsgp online_gradient sampling >}}</div><div>{{< brm-hsgp online_gradient total >}}</div></div>
 :::
 ::::
 
-<div class="case-boundaries"><div><strong>One chain per fit.</strong> These counts do not establish a general improvement in speed or accuracy. Split R-hat compares parts of the same chain.</div><div><strong>No corrected Turing samples.</strong> Target-value agreement and warmed gradient runtime still need verification.</div></div>
+<div class="case-boundaries"><div><strong>One chain per fit.</strong> These runs do not establish a reliable ranking or a general speed advantage. Split R-hat compares parts of the same chain.</div><div><strong>Efficiency relative to NCP.</strong> Minimum bulk ESS over {{< brm-hsgp ncp qois >}} scientific quantities per sampling gradient, or per gradient of the whole workflow. Post-hoc totals include the pilot.</div></div>
 
 ::: {.notes}
-Counts and diagnostics come from research/adaptive_centering/results/source-faithful/diagnostics.tsv and online_diagnostics.tsv. All fits retain 10,000 draws, use Xoshiro(1), and keep WarmupHMC defaults. The source reproduction is the pilot plus fresh selected-partial refit; the online run is a separate extension. Offline selection searches 0:0.01:1; online warmup uses 0:0.1:1. The partial refit's minimum tail ESS is lower than the pilot's. No runtime comparison or cross-model advantage is established. A divergence indicates a numerical sampling problem; zero observed divergences is not proof of an accurate posterior. Appendix E gives the verification boundary.
+Values are read at render time from research/centering_refresh/results/hsgp/comparison.tsv, the study shown on the adaptive-centering documentation page. Every fit uses one chain, seed 1, {{< brm-hsgp ncp draws >}} retained draws and ordinary WarmupHMC initialization and adaptation, with the active-position transport repair (WarmupHMC {{< brm-hsgp warmuphmc ncp >}}); the online-gradient fit uses {{< brm-hsgp warmuphmc online_gradient >}}, which adds a finite-transport guard. Post-hoc fits select on 0:0.01:1 from the NCP pilot and keep that choice fixed; online fits adapt on 0:0.1:1 during warmup. Minimum bulk/tail ESS: {{< brm-hsgp ncp method >}} {{< brm-hsgp ncp bulk >}} / {{< brm-hsgp ncp tail >}}; {{< brm-hsgp cp method >}} {{< brm-hsgp cp bulk >}} / {{< brm-hsgp cp tail >}}; {{< brm-hsgp posthoc_position method >}} {{< brm-hsgp posthoc_position bulk >}} / {{< brm-hsgp posthoc_position tail >}}; {{< brm-hsgp posthoc_gradient method >}} {{< brm-hsgp posthoc_gradient bulk >}} / {{< brm-hsgp posthoc_gradient tail >}}; {{< brm-hsgp online_position method >}} {{< brm-hsgp online_position bulk >}} / {{< brm-hsgp online_position tail >}}; {{< brm-hsgp online_gradient method >}} {{< brm-hsgp online_gradient bulk >}} / {{< brm-hsgp online_gradient tail >}}. Maximum split R-hat: {{< brm-hsgp ncp method >}} {{< brm-hsgp ncp rhat >}}; {{< brm-hsgp cp method >}} {{< brm-hsgp cp rhat >}}; {{< brm-hsgp posthoc_position method >}} {{< brm-hsgp posthoc_position rhat >}}; {{< brm-hsgp posthoc_gradient method >}} {{< brm-hsgp posthoc_gradient rhat >}}; {{< brm-hsgp online_position method >}} {{< brm-hsgp online_position rhat >}}; {{< brm-hsgp online_gradient method >}} {{< brm-hsgp online_gradient rhat >}}. Total gradients: {{< brm-hsgp ncp method >}} {{< brm-hsgp ncp gradients >}}; {{< brm-hsgp cp method >}} {{< brm-hsgp cp gradients >}}; {{< brm-hsgp posthoc_position method >}} {{< brm-hsgp posthoc_position gradients >}}; {{< brm-hsgp posthoc_gradient method >}} {{< brm-hsgp posthoc_gradient gradients >}}; {{< brm-hsgp online_position method >}} {{< brm-hsgp online_position gradients >}}; {{< brm-hsgp online_gradient method >}} {{< brm-hsgp online_gradient gradients >}}. Gradient counts measure target evaluations, a proxy for compute rather than wall-clock speed. Fits recorded before the transport repair are not used. A divergence indicates a numerical sampling problem; few observed divergences is not proof of an accurate posterior. Appendix E gives the verification boundary.
 :::
 
 ## Make predictions with the fitted model
@@ -415,7 +421,7 @@ $$
 :::
 ::::
 
-<div class="case-invariant">The source reproduction has two fits. Online adaptation is a separate BRM extension.</div>
+<div class="case-invariant">This source workflow is the refreshed study's post-hoc position fit. CP, the gradient loss and online adaptation are BRM extensions.</div>
 
 ::: {.notes}
 All 133 MASS::mcycle rows; acceleration divided by its sample standard deviation; time mapped to [-1,1]; sine basis on [-1.5,1.5], normalized by 1/sqrt(1.5); no population intercept. Normal(0,4) on each source log hyperparameter is represented by LogNormal(0,4) on its positive BRM parameter with the matching unconstraining Jacobian. Offline centeredness search: 0:0.01:1, 40 coefficients total. The source's centered scatter panels transform pilot draws; there is no centered sampling arm. HSGP reference: Riutort-Mayol et al. (2023). Full hashes and source links are in the README.
@@ -430,26 +436,26 @@ All 133 MASS::mcycle rows; acceleration divided by its sample standard deviation
 **Recorded evidence**
 
 - All 133 rows; 20 basis functions per GP.
-- `Xoshiro(1)`; 10,000 retained draws per fit; unchanged WarmupHMC defaults.
+- Seed 1; {{< brm-hsgp ncp draws >}} retained draws per fit; ordinary WarmupHMC initialization and adaptation.
 - Original Stan density and gradient checks: 26 for the noncentered target; 51 for the partial target.
-- All 40 offline choices match the source-literal calculation.
-- Complete-record and figure verification: 8,221 checks.
+- All {{< brm-hsgp posthoc-source-matches >}} post-hoc position choices match the source reproduction's selection.
+- Saved-draw mapping, density and gradient checks across all fits: {{< brm-hsgp frame-checks >}}.
 :::
 ::: {.card .accent-amber .tight}
 **Limits of the conclusion**
 
 - One chain per fit; split R-hat is a within-chain diagnostic.
-- Divergences: 34, 16, and 0 in these runs.
-- The partial refit has lower minimum tail ESS than the pilot.
-- No general speed or accuracy advantage is established.
-- No corrected Turing samples exist.
+- Divergences: NCP {{< brm-hsgp ncp divergences >}}, CP {{< brm-hsgp cp divergences >}}, post-hoc {{< brm-hsgp posthoc_position divergences >}} / {{< brm-hsgp posthoc_gradient divergences >}}, online {{< brm-hsgp online_position divergences >}} / {{< brm-hsgp online_gradient divergences >}}.
+- Gradient counts are a compute proxy, not wall-clock speed.
+- No reliable ranking or general speed advantage is established.
+- No Turing posterior samples exist.
 :::
 ::::
 
-<div class="source-note">Corrected case <code>ea27c18ed2517e3061f441971f561235f48cceb8</code>, integrated as <code>2db645e5e9bdc59465ecdaa18d039460f682cda2</code>. <a href="https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/adaptive_centering/results/source-faithful">Committed diagnostics, provenance, and audits</a>.</div>
+<div class="source-note"><a href="https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/centering_refresh">Refresh harness</a> · <a href="https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/centering_refresh/results/hsgp">committed comparison, controls and checks</a> · <a href="https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/adaptive_centering/results/source-faithful">source reproduction and audits</a>.</div>
 
 ::: {.notes}
-The partial target was compared with the original adaptive Stan program at 16 saved posterior positions; maximum absolute density/gradient differences were 1.14e-13/4.96e-12. The online run uses the same full model and sampler defaults with a 0:0.1:1 warmup grid. Turing model generation does not establish target agreement: the explicit length-scale prior retained a default lower bound, and its gradient path remained too slow. Matched target-value and warmed-runtime checks must pass before corrected Turing sampling. Old reduced-basis/reduced-draw smoke results are superseded.
+The partial target was compared with the original adaptive Stan program at {{< brm-source-audit positions >}} saved posterior positions; maximum absolute density/gradient differences were {{< brm-source-audit max_density >}}/{{< brm-source-audit max_gradient >}}. The refreshed study reran the noncentered source audit and checked three saved draws of every fit for coordinate mapping, Jacobian-adjusted density and transformed gradients. Its post-hoc position selections are identical to the source reproduction's, which the render checks; its fits wrap the compiled noncentered target, whose saved draws those frame checks cover. A separate Turing gradient benchmark agrees with StanBlocks in density and gradient (test/receipts/turing_hsgp_gradients.tsv); it is not posterior-sampling evidence. Fits recorded before WarmupHMC's active-position transport repair are not used to rank online adaptation.
 :::
 
 ## Sources and reproduction {.smaller}

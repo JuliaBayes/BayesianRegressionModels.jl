@@ -87,6 +87,17 @@ if rg -q '5ccf212|5ce974c|k=8|eight-frequency|20 retained draws|0x20260913|onlin
   exit 1
 fi
 
+if rg -q 'online_centeredness\.png|online_diagnostics\.tsv|three recorded fits|ea27c18|2db645e' \
+  "$deck_dir/brm-futures.qmd" "$deck_dir/README.md"; then
+  echo "deck still cites HSGP results recorded before the WarmupHMC transport repair" >&2
+  exit 1
+fi
+
+if rg -q '\{\{(<|&lt;)' "$html"; then
+  echo "render contains an unexpanded shortcode" >&2
+  exit 1
+fi
+
 if rg -q '(src|href)="brm-futures_files/' "$html"; then
   echo "render is not self-contained: brm-futures_files reference found" >&2
   exit 1
