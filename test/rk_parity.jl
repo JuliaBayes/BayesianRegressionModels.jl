@@ -617,9 +617,9 @@ end
     layout = backend.model.layout
     @test layout.total == 7
     intercept = _parity_coordinate(backend, :mu, :Intercept)
-    @test coordinate_names(layout) == [:mu_tau,
+    @test coordinate_names(layout) == [:mu_tau, intercept,
         Symbol("mu_x1.lambda"), Symbol("mu_x1.raw"), Symbol("mu_x2.lambda"), Symbol("mu_x2.raw"),
-        :sigma, intercept]
+        :sigma]
     byname = Dict(:sigma=>0.5, intercept=>0.1, :mu_tau=>0.4,
         Symbol("mu_x1.raw")=>-0.2, Symbol("mu_x1.lambda")=>0.3,
         Symbol("mu_x2.raw")=>0.15, Symbol("mu_x2.lambda")=>-0.35)
@@ -628,10 +628,10 @@ end
     b1 = nt.mu_x1.raw * nt.mu_x1.lambda * nt.mu_tau
     b2 = nt.mu_x2.raw * nt.mu_x2.lambda * nt.mu_tau * 0.25
     cols = _parity_cols_hs
-    mu_hat = only(nt.pop_mu.beta_pop) .+ b1 .* cols.x1 .+ b2 .* cols.x2
+    mu_hat = nt.mu_Intercept .+ b1 .* cols.x1 .+ b2 .* cols.x2
     ll = sum(logpdf.(Normal.(mu_hat, nt.sigma), cols.y))
     # One shared global scale and two local scales, all normalized halves.
-    pr = logpdf(Normal(), only(nt.pop_mu.beta_pop)) +
+    pr = logpdf(Normal(), nt.mu_Intercept) +
         logpdf(Normal(), nt.mu_x1.raw) + logpdf(Normal(), nt.mu_x2.raw) +
         logpdf(Cauchy(0, 1), nt.mu_tau) +
         logpdf(Cauchy(0, 1), nt.mu_x1.lambda) +

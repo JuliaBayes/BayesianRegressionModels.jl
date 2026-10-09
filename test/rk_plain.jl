@@ -32,6 +32,39 @@ function check_plain_gradient(backend)
     @test gradient ≈ fd atol=2e-5 rtol=2e-5
 end
 
+@stestset "intercept-only predictor has a scalar coefficient" begin
+    data = (; y=[-0.4, 0.2, 0.7, -0.1])
+    backend = RKBRMI(@brm data begin
+        mu ~ 1
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end)
+    source = check_printed_roundtrip(backend)
+    @test occursin("mu_Intercept ~ Normal", source)
+    @test occursin("mu = fill(mu_Intercept, length(y))", source)
+    @test !occursin("X_mu =", source)
+    @test coordinate_names(backend.model.layout) == [:mu_Intercept, :sigma]
+    translated = Base.get_extension(BRM,
+        :BayesianRegressionModelsReactiveKernelsExt)._rk_translated_plan(backend.plan)
+    spec = backend.model.spec
+    fixed_names = Tuple(n for n in spec.have_names if n !== :unconstrained)
+    fixed = NamedTuple{fixed_names}(Tuple(translated.columns[n] for n in fixed_names))
+    mu_query = Base.invokelatest(ReactiveKernels.prepare, spec;
+        have=spec.have_names, want=(:mu,), bound=fixed)
+    problem = rk_logdensity_problem(backend;
+        ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    for u in ([-0.3, 0.2], [0.4, -0.1])
+        value = Base.invokelatest(mu_query, u)
+        @test (value isa Tuple ? only(value) : value) == fill(u[1], length(data.y))
+        sigma = exp(u[2])
+        expected = logpdf(Normal(), u[1]) +
+            logpdf(Exponential(1), sigma) + u[2] +
+            sum(logpdf.(Normal(u[1], sigma), data.y))
+        @test LogDensityProblems.logdensity(problem, u) ≈ expected
+    end
+    check_plain_gradient(backend)
+end
+
 @stestset "BRM-owned smooth and GP statistical bodies" begin
     data = (; x=collect(range(-1, 1; length=12)),
         z=sin.(collect(range(-2, 2; length=12))), y=fill(0.3, 12))
@@ -226,7 +259,7 @@ public_prior_reader(a, b, row) = a[row] .+ b[row]
         saved = copy(u)
         nt = constrain(backend.model.layout, u)
         sd, z, L = nt.b_shared_group.tau, nt.b_shared_group.z, nt.b_shared_group.L
-        a_intercept, b_intercept = only(nt.pop_a.beta_pop), only(nt.pop_b.beta_pop)
+        a_intercept, b_intercept = nt.a_Intercept, nt.b_Intercept
         B = z * (Diagonal(sd) * L)'
         a = a_intercept .+ B[[2, 1], 1]
         b = b_intercept .+ B[[2, 1], 2]

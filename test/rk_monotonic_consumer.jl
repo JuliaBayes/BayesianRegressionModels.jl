@@ -35,8 +35,8 @@ end
     index(n) = only(findall(==(Symbol(n)), names))
     # Components own their parameters: the monotonic effect its simplex and
     # coefficient, the HSGP its hyperparameters and basis weights.
-    a, b = index("pop_score.beta_pop.1"), index("mo_rank.beta")
-    intercept, sd = index("pop_theta.beta_pop.1"), index("b_p_subject.tau.1")
+    a, b = index("score_Intercept"), index("mo_rank.beta")
+    intercept, sd = index("theta_Intercept"), index("b_p_subject.tau.1")
     levels = CategoricalArrays.levels(data.subject)
     z = [index("b_p_subject.z.$j.1") for j in eachindex(levels)]
     rows = [only(findall(==(subject), levels)) for subject in data.subject]
