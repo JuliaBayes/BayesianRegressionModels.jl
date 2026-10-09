@@ -7,6 +7,7 @@
 # RUN: julia --project=test test/nlme_view.jl [testset-filter...]
 using Test, BayesianRegressionModels, Distributions
 using ReactiveKernels, ReactiveKernelsPPL, Enzyme
+using DifferentiationInterface: AutoEnzyme
 const BRM = BayesianRegressionModels
 include(joinpath(@__DIR__, "testset_filter.jl"))
 
@@ -157,4 +158,77 @@ end
     err = try brm_nlme_view(RKBRMI(crossed)); nothing catch e; e end
     @test err isa BRMNLMEViewError
     @test occursin("2 grouping columns", err.message)
+end
+
+likelihood_query(backend) = prepare_query(backend.model,
+    RKEXT._rk_translated_plan(backend.plan), :likelihood)
+
+const NLME_AD = AutoEnzyme(; mode=Enzyme.Reverse)
+
+# Independent oracle for the @plate population-PK model: every subject's
+# conditional log-likelihood written out from the model's equations.
+function plate_pk_oracle(m, θ, σ, H)
+    names = m.view.coordinates[m.theta]
+    θn = Dict(zip(names, θ))
+    cl0, cl_w = θn[Symbol("pop_log_CL.beta_pop.1")], θn[Symbol("pop_log_CL.beta_pop.2")]
+    v0 = θn[:log_V_Intercept]
+    sigma = exp(only(σ))
+    margin(pred) = findfirst(b -> b.predictor === pred, m.view.block_margins)
+    kcl, kv = margin(:log_CL), margin(:log_V)
+    d = NLME_PLATE_DATA
+    map(eachindex(m.view.levels)) do i
+        r = only(m.view.rows[i])
+        CL = exp(cl0 + cl_w * d.weight[r] + H[kcl, i])
+        V = exp(v0 + H[kv, i])
+        pred = d.dose[r] / V .* exp.(-(CL / V) .* d.t[r])
+        sum(logpdf.(Normal.(pred, sigma), d.dv[r]))
+    end
+end
+
+@stestset "lockstep per-subject log-likelihoods and gradients match an oracle" begin
+    backend = RKBRMI(nlme_plate_pk(NLME_PLATE_DATA))
+    m = brm_nlme_model(backend; ad_backend=NLME_AD)
+    n = length(m.view.levels)
+    @test m.eta_blocks == [2]
+    @test length(m.theta) == 3 && length(m.sigma) == 1
+    θ = [0.4, -0.7, 0.2][sortperm(m.view.coordinates[m.theta])]
+    σ = [log(0.8)]
+    H = [0.15 -0.2 0.05; -0.1 0.25 0.3]
+    # σ is the unconstrained residual scale: exp(σ) is the constrained sigma.
+    u = BRM._brm_nlme_point(m, θ, σ, H)
+    @test constrain(backend.model.layout, u).sigma ≈ exp(only(σ))
+    values, G = brm_nlme_loglikelihoods_and_gradients(m, θ, σ, H)
+    @test values ≈ plate_pk_oracle(m, θ, σ, H) rtol=1e-12
+    @test brm_nlme_loglikelihoods(m, θ, σ, H) == values
+    # Attribution is complete: subjects sum to the model's whole likelihood.
+    @test sum(values) ≈ Base.invokelatest(likelihood_query(backend), u) rtol=1e-12
+    # Central-difference reference for the η gradients (test oracle only).
+    step = 1e-6
+    for i in 1:n, k in 1:size(H, 1)
+        plus, minus = copy(H), copy(H)
+        plus[k, i] += step; minus[k, i] -= step
+        reference = (plate_pk_oracle(m, θ, σ, plus)[i] -
+            plate_pk_oracle(m, θ, σ, minus)[i]) / 2step
+        @test G[k, i] ≈ reference rtol=1e-6 atol=1e-8
+    end
+    # Moving one subject's η moves only that subject's value.
+    H2 = copy(H); H2[:, 2] .+= [0.3, -0.2]
+    moved = brm_nlme_loglikelihoods(m, θ, σ, H2)
+    @test moved[[1, 3]] == values[[1, 3]]
+    @test moved[2] != values[2]
+end
+
+@stestset "flat-row attribution sums to the whole likelihood" begin
+    backend = RKBRMI(nlme_pk(NLME_DATA))
+    m = brm_nlme_model(backend; ad_backend=NLME_AD)
+    n = length(m.view.levels)
+    θ = fill(0.1, length(m.theta)); σ = [log(2.0)]
+    H = 0.1 .* reshape(collect(1:2n), 2, n) ./ n
+    u = BRM._brm_nlme_point(m, θ, σ, H)
+    values = brm_nlme_loglikelihoods(m, θ, σ, H)
+    @test sum(values) ≈ Base.invokelatest(likelihood_query(backend), u) rtol=1e-12
+    pointwise = Base.invokelatest(pointwise_query(backend), u).y
+    for i in 1:n
+        @test values[i] ≈ sum(pointwise[m.view.rows[i]]) rtol=1e-13
+    end
 end

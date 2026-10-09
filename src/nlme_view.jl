@@ -214,3 +214,216 @@ function brm_nlme_view(backend::RKBRMI)
     BRMNLMEView(group, levels, names, role, subject, blocks, block_margins,
         mu_references, rows)
 end
+
+# ── Evaluation for NLME estimators ───────────────────────────────────────────
+#
+# Subjects are conditionally independent given (θ, Ω, σ), so one evaluation of
+# the joint RK program serves all subjects in lockstep: the pointwise densities
+# summed by subject give every subject's conditional log-likelihood, and the
+# joint gradient restricted to a subject's block is that subject's conditional
+# gradient. RK has no per-subject evaluation, so per-subject calls through this
+# layer cost one full pass each; estimators should evaluate all subjects at once.
+
+# The packed unconstrained point at which every random-effect block has unit
+# scales and an identity correlation factor, so that each block's standardized
+# draws ARE the natural-scale random effects η_i. Verified on the constrained
+# values rather than assumed from the transforms.
+function _brm_nlme_unit_point(backend::RKBRMI, view::BRMNLMEView)
+    u = zeros(Float64, length(view.coordinates))
+    values = _rk_constrained_values(backend, u)
+    for record in _brm_nlme_records(backend.plan)
+        record.kind === :ranef || continue
+        for declaration in (isnothing(record.scales) ? (record.scale,) : record.scales)
+            scale = _brm_rk_declaration_value(values, declaration)
+            all(isequal(1), scale) || _brm_nlme_error(
+                "brm_nlme_model: random-effect scale `$declaration` is $(scale), not 1, " *
+                "at the zero unconstrained point; its transform has no unit point here")
+        end
+        isnothing(record.L) && continue
+        L = _brm_rk_declaration_value(values, record.L)
+        L == I || _brm_nlme_error(
+            "brm_nlme_model: correlation factor `$(record.L)` is not the identity at " *
+            "the zero unconstrained point")
+    end
+    u
+end
+
+# Which subject each pointwise density element belongs to, per observed name:
+# one element per row of the grouping column (flat rows on the grouping axis,
+# or one in-cell array per plate cell), or a `ragged(y, g)` axis whose labels
+# are subject labels. Anything else is refused rather than attributed by
+# position.
+_brm_nlme_ragged_labels(plan, name) = nothing
+_brm_nlme_ragged_labels(plan::_RKHeldOutPlan, name) =
+    _brm_nlme_ragged_labels(plan.parent, name)
+function _brm_nlme_ragged_labels(plan::_RKValuePlan, name)
+    for o in plan.observations
+        o.name === name || continue
+        lhs = o.lhs
+        lhs isa ExprColumn && getf(lhs) === ragged || return nothing
+        return parent(parent(getargs(lhs)[2]))
+    end
+    nothing
+end
+
+function _brm_nlme_attribution(backend::RKBRMI, view::BRMNLMEView, fields)
+    L = sum(length, view.rows)
+    row_subject = zeros(Int, L)
+    for (i, rows) in enumerate(view.rows), r in rows
+        row_subject[r] = i
+    end
+    any(iszero, row_subject) && error(
+        "brm_nlme_model: internal: a row of `$(view.group)` belongs to no subject")
+    index = Dict(_brm_transport_level(l) => i for (i, l) in enumerate(view.levels))
+    attribution = Pair{Symbol,Vector{Int}}[]
+    for (name, values) in pairs(fields)
+        m = length(values)
+        if m == L
+            push!(attribution, name => row_subject)
+            continue
+        end
+        labels = _brm_nlme_ragged_labels(backend.plan, name)
+        labels === nothing && _brm_nlme_error(
+            "brm_nlme_model: observation `$name` has $m pointwise densities, neither " *
+            "one per row of `$(view.group)` ($L) nor a `ragged(..., group)` axis; its " *
+            "densities cannot be attributed to subjects")
+        length(labels) == m || _brm_nlme_error(
+            "brm_nlme_model: observation `$name` has $m pointwise densities but its " *
+            "ragged grouping column has $(length(labels)) labels")
+        subjects = map(labels) do label
+            get(index, _brm_transport_level(label)) do
+                _brm_nlme_error("brm_nlme_model: label $(repr(label)) of observation " *
+                    "`$name` is not a level of `$(view.group)`")
+            end
+        end
+        push!(attribution, name => subjects)
+    end
+    attribution
+end
+
+# Implemented by `BayesianRegressionModelsReactiveKernelsExt`: the prepared
+# `:pointwise` query of a backend and its evaluation at a packed point.
+function _rk_pointwise_query end
+function _rk_pointwise_values end
+
+"""
+    BRMNLMEModel
+
+An RK-lowered population model prepared for NLME estimators, returned by
+[`brm_nlme_model`](@ref). Its coordinates follow the NLME convention:
+
+- `θ` — the population coordinates (`view.role .=== :population`), in packed order;
+- `σ` — the other sampled scalars (`view.role .=== :scalar`), in packed order;
+- `η_i` — subject `i`'s random effects on the natural scale, one column of a
+  `neta × nsubjects` matrix, in the subject-block order of [`BRMNLMEView`](@ref).
+
+All three are in the model's unconstrained coordinates. The random-effect
+covariance Ω is not a model coordinate here: estimators own it, and the model
+evaluates the conditional likelihood `log p(y_i | θ, σ, η_i)` without the
+random-effect prior.
+"""
+struct BRMNLMEModel{B<:RKBRMI,P,Q}
+    view::BRMNLMEView
+    backend::B
+    problem::P
+    pointwise::Q
+    attribution::Vector{Pair{Symbol,Vector{Int}}}
+    theta::Vector{Int}
+    sigma::Vector{Int}
+    eta_blocks::Vector{Int}
+    unit::Vector{Float64}
+end
+
+Base.show(io::IO, m::BRMNLMEModel) = print(io, "BRMNLMEModel(",
+    length(m.view.levels), " subjects, θ: ", length(m.theta), ", σ: ",
+    length(m.sigma), ", η: ", sum(m.eta_blocks), " in blocks ", m.eta_blocks, ")")
+
+"""
+    brm_nlme_model(backend::RKBRMI; ad_backend) -> BRMNLMEModel
+
+Prepare an RK-lowered population model for NLME estimators: its
+[`brm_nlme_view`](@ref) partition, the backend's log-density problem
+(`rk_logdensity_problem(backend; ad_backend)`, first-order), its pointwise
+densities, and the subject attribution of every observed density.
+
+Refuses ([`BRMNLMEViewError`](@ref)) everything `brm_nlme_view` refuses, Student-t
+random-effect blocks (the estimators own a Gaussian η prior), and observed
+densities that cannot be attributed to subjects.
+"""
+function brm_nlme_model(backend::RKBRMI; ad_backend)
+    view = brm_nlme_view(backend)
+    any(==(:subject_mixing), view.role) && _brm_nlme_error(
+        "brm_nlme_model: Student-t random-effect blocks are not covered; NLME " *
+        "estimators own a Gaussian random-effect prior")
+    unit = _brm_nlme_unit_point(backend, view)
+    problem = rk_logdensity_problem(backend; ad_backend)
+    pointwise = _rk_pointwise_query(backend)
+    attribution = _brm_nlme_attribution(backend, view,
+        _rk_pointwise_values(pointwise, unit))
+    eta_blocks = Int[]
+    previous = nothing
+    for margin in view.block_margins
+        margin.block == previous ? (eta_blocks[end] += 1) : push!(eta_blocks, 1)
+        previous = margin.block
+    end
+    BRMNLMEModel(view, backend, problem, pointwise, attribution,
+        findall(==(:population), view.role), findall(==(:scalar), view.role),
+        eta_blocks, unit)
+end
+
+function _brm_nlme_point(m::BRMNLMEModel, θ, σ, H)
+    n = length(m.view.levels)
+    length(θ) == length(m.theta) || throw(DimensionMismatch(
+        "θ has length $(length(θ)), the model has $(length(m.theta)) population coordinates"))
+    length(σ) == length(m.sigma) || throw(DimensionMismatch(
+        "σ has length $(length(σ)), the model has $(length(m.sigma)) scalar coordinates"))
+    size(H) == (sum(m.eta_blocks), n) || throw(DimensionMismatch(
+        "η matrix has size $(size(H)), the model needs ($(sum(m.eta_blocks)), $n)"))
+    u = Vector{promote_type(Float64, eltype(θ), eltype(σ), eltype(H))}(m.unit)
+    u[m.theta] .= θ
+    u[m.sigma] .= σ
+    for (i, block) in enumerate(m.view.subject_coordinates)
+        u[block] .= view(H, :, i)
+    end
+    u
+end
+
+function _brm_nlme_sum_by_subject(m::BRMNLMEModel, fields)
+    out = zeros(Float64, length(m.view.levels))
+    for (name, subjects) in m.attribution
+        values = getproperty(fields, name)
+        for (k, i) in enumerate(subjects)
+            out[i] += sum(values[k])
+        end
+    end
+    out
+end
+
+"""
+    brm_nlme_loglikelihoods(m::BRMNLMEModel, θ, σ, H) -> Vector{Float64}
+
+Every subject's conditional log-likelihood `log p(y_i | θ, σ, η_i)`, with
+`η_i = H[:, i]`, from one evaluation of the model. See [`BRMNLMEModel`](@ref)
+for the coordinates.
+"""
+brm_nlme_loglikelihoods(m::BRMNLMEModel, θ, σ, H) =
+    _brm_nlme_sum_by_subject(m, _rk_pointwise_values(m.pointwise, _brm_nlme_point(m, θ, σ, H)))
+
+"""
+    brm_nlme_loglikelihoods_and_gradients(m::BRMNLMEModel, θ, σ, H) -> (values, G)
+
+[`brm_nlme_loglikelihoods`](@ref) together with `G[:, i] = ∇_{η_i} log p(y_i | θ, σ, η_i)`
+for every subject, from one pointwise and one gradient evaluation. Subjects are
+conditionally independent, so the joint gradient restricted to subject `i`'s
+block is its conditional gradient once the standard-normal draw prior is removed.
+"""
+function brm_nlme_loglikelihoods_and_gradients(m::BRMNLMEModel, θ, σ, H)
+    u = _brm_nlme_point(m, θ, σ, H)
+    values = _brm_nlme_sum_by_subject(m, _rk_pointwise_values(m.pointwise, u))
+    _, g = LogDensityProblems.logdensity_and_gradient(m.problem, u)
+    G = Matrix{Float64}(undef, size(H))
+    for (i, block) in enumerate(m.view.subject_coordinates)
+        G[:, i] .= view(g, block) .+ view(H, :, i)
+    end
+    values, G
+end
