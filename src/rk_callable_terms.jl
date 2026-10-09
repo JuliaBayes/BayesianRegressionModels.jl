@@ -27,9 +27,9 @@ end
 # A data preparation recipe is a named statistical kernel over its inputs. A
 # kernel-observed response holding its cells per subject is one direct flatten
 # instead, which RKPPL evaluates once, at binding. A ragged join keeps its
-# `brm_gather_response` kernel: RKPPL refuses the direct `raw[rows]` gather as
-# a response observed through `LogDensity` (ReactiveKernels snag
-# rkppl-derived-re-3096acdf).
+# `brm_gather_response` kernel until the RK pin includes 3fc1f0c7: before it,
+# RKPPL refuses the direct `raw[rows]` gather as a response observed through
+# `LogDensity` (ReactiveKernels snag rkppl-derived-re-3096acdf).
 _rk_ast_data_preparation!(defs, taken, ::Val{recipe}, inputs...) where {recipe} =
     _rk_ast_statistical_call!(defs, taken, recipe, inputs...; kernel=true)
 _rk_ast_data_preparation!(defs, taken, ::Val{:brm_flatten_response}, cells) =
