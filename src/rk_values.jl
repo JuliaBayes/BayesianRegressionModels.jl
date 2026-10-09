@@ -709,7 +709,8 @@ function _rk_value_callee!(bindings, callable, taken)
     end
     index = findfirst(pair -> last(pair) === callable, bindings)
     index === nothing || return first(bindings[index])
-    name = _rk_ast_fresh_name("brm_value_function", taken)
+    # Named once the whole program exists (`_rk_name_callable_bindings`).
+    name = _rk_ast_fresh_name(_RK_CALLABLE_PLACEHOLDER, taken)
     push!(bindings, name => callable)
     name
 end
