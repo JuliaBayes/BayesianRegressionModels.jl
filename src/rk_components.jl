@@ -85,17 +85,19 @@ end
 """Population effects over design columns: coefficients allocated inside, `X * beta_pop` returned.
 
 Predictors with identical design columns share one design matrix; `design` is
-the base name of a new one."""
+the base name of a new one. `designs` records each matrix with the statements
+that name it, for `_rk_ast_name_shared_designs!`."""
 function _rk_ast_population_component!(definitions, statements, taken, name, design,
-        columns, priors)
+        columns, priors, designs)
     matrix = Expr(:call, :hcat, columns...)
-    shared = findfirst(statement -> Meta.isexpr(statement, :(=), 2) &&
-        isequal(last(statement.args), matrix), statements)
+    shared = findfirst(record -> isequal(last(record.assignment.args), matrix), designs)
     if shared === nothing
         design = _rk_ast_fresh_name(design, taken)
-        push!(statements, Expr(:(=), design, matrix))
+        assignment = Expr(:(=), design, matrix)
+        push!(statements, assignment)
+        designs[design] = (; columns, assignment, calls=Expr[])
     else
-        design = first(statements[shared].args)
+        design = shared
     end
     product = Expr(:call, :*, :X, :beta_pop)
     families = unique(first.(priors))
@@ -111,7 +113,9 @@ function _rk_ast_population_component!(definitions, statements, taken, name, des
         push!(body.args, Expr(:return, product))
         callee = _rk_ast_shared_definition!(definitions, taken,
             "brm_mixed_population_effects", (:X,), body)
-        push!(statements, _rk_ast_component_call(name, callee, design))
+        call = _rk_ast_component_call(name, callee, design)
+        push!(designs[design].calls, call)
+        push!(statements, call)
         return name
     end
     family = only(families)
@@ -125,8 +129,33 @@ function _rk_ast_population_component!(definitions, statements, taken, name, des
     callee = _rk_ast_shared_definition!(definitions, taken, base, (:X, :ncoef, roles...), body)
     arguments = [_rk_ast_population_argument([last(prior)[j] for prior in priors])
         for j in eachindex(roles)]
-    push!(statements, _rk_ast_component_call(name, callee, design, length(columns), arguments...))
+    call = _rk_ast_component_call(name, callee, design, length(columns), arguments...)
+    push!(designs[design].calls, call)
+    push!(statements, call)
     name
+end
+
+# A design column's part of a shared matrix name: the intercept's column of
+# ones is `Intercept`, as its coefficient is.
+_rk_ast_design_label(column::Symbol) = string(column)
+function _rk_ast_design_label(column::Expr)
+    Meta.isexpr(column, :call) && first(column.args) === :ones && return "Intercept"
+    error("RK backend: internal: design column `$column` has no name")
+end
+
+# A design matrix read by one predictor keeps that predictor's name. One read
+# by several belongs to none of them: it is named for its columns instead.
+# The recorded statements are this emission's own, not yet published.
+function _rk_ast_name_shared_designs!(designs, taken)
+    for design in sort!(collect(keys(designs)); by=string)
+        record = designs[design]
+        length(record.calls) > 1 || continue
+        shared = _rk_ast_fresh_name(
+            join(("X", map(_rk_ast_design_label, record.columns)...), "_"), taken)
+        record.assignment.args[1] = shared
+        foreach(call -> call.args[3].args[2] = shared, record.calls)
+    end
+    designs
 end
 
 # A monotonic effect owns its increment simplex and, when it has one, its
@@ -245,15 +274,17 @@ function _rk_ast_stratified_group_component!(definitions, statements, taken, nam
 end
 
 # An HSGP effect allocates its length scale(s), marginal scale and basis
-# weights and returns the spectral-weighted basis product. Basis, frequencies
-# and validity floors are passed in from the main block. A model-derived
-# basis supplies its formula extent, since its matrix is a graph value.
-function _rk_ast_hsgp_component!(definitions, statements, taken, name, PHI, omega2,
-        floors, rho_priors, sigma_prior, value; truncated=true, nbasis=nothing,
+# weights and returns the spectral-weighted basis product. `inputs` pairs its
+# data arguments with their main-block values: the axes of a
+# squared-exponential term, or a periodic term's prepared basis and
+# frequencies. The validity floor is passed in where a prior reads it.
+function _rk_ast_hsgp_component!(definitions, statements, taken, name, inputs,
+        floors, rho_priors, sigma_prior, value, extent; truncated=true,
         base="brm_hsgp_effect")
+    formals = first.(inputs)
     priors, prior_inputs, prior_values = _rk_ast_component_prior_inputs(
         [rho_priors; sigma_prior],
-        (:PHI, :omega2, :rho_floor, :nbasis, :rho_iso, :rho, :sigma, :beta_raw,
+        (formals..., :rho_floor, :rho_iso, :rho, :sigma, :beta_raw,
             (Symbol(:rho_, j) for j in eachindex(rho_priors))...))
     rho_priors, sigma_prior = priors[1:end-1], last(priors)
     body = Expr(:block)
@@ -274,16 +305,12 @@ function _rk_ast_hsgp_component!(definitions, statements, taken, name, PHI, omeg
         push!(body.args, Expr(:(=), :rho, Expr(:vect, rhos...)))
     end
     push!(body.args, Expr(:call, :~, :sigma, sigma_prior))
-    extent = nbasis === nothing ? Expr(:call, :axes, :PHI, 2) :
-        Expr(:call, :(:), 1, :nbasis)
     push!(body.args, Expr(:call, :.~, Expr(:ref, :beta_raw, extent),
         _rk_ast_dotted(:Normal, 0, 1)))
     push!(body.args, Expr(:return, value))
     callee = _rk_ast_shared_definition!(definitions, taken, base,
-        (:PHI, :omega2, floor_argument..., (nbasis === nothing ? () : (:nbasis,))...,
-            prior_inputs...), body)
-    push!(statements, _rk_ast_component_call(name, callee, PHI, omega2,
-        (truncated ? (floors,) : ())..., (nbasis === nothing ? () : (nbasis,))...,
-        prior_values...))
+        (formals..., floor_argument..., prior_inputs...), body)
+    push!(statements, _rk_ast_component_call(name, callee, last.(inputs)...,
+        (truncated ? (floors,) : ())..., prior_values...))
     name
 end

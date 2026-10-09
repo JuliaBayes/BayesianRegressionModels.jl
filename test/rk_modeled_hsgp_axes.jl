@@ -79,10 +79,15 @@ end
         main = sprint(Base.show_unquoted, emitted.main)
         blocks = join((sprint(Base.show_unquoted, d) for d in emitted.defs
             if BRM._rk_source_definition(d).kind === :rkppl), "\n")
-        @test occursin("hsgp_x_PHI = hsgp_x_basis_graph_basis_matrix(x)", main)
+        # The effect reads the model-derived axis by name; its spectral graph
+        # composes the basis graph. A bounded authored length-scale prior
+        # reads no validity floor, so none is emitted.
+        @test occursin("hsgp_x ~ brm_hsgp_effect(x)", main)
+        @test !occursin("rho_floor", main)
         definitions = join(sprint(Base.show_unquoted, d) for d in emitted.defs)
-        @test occursin("beta_raw[1:nbasis] .~ Normal.(0, 1)", definitions)
-        @test occursin("hsgp_x ~ brm_hsgp_effect(hsgp_x_PHI, hsgp_x_lambda, 3)", main)
+        @test occursin("beta_raw[1:3] .~ Normal.(0, 1)", definitions)
+        @test occursin("(PHI, omega2) = brm_hsgp_basis_graph(axis)", definitions)
+        @test !occursin("rho_floor", definitions)
         @test occursin("rho_iso ~ Uniform(0.4, 3.0)", definitions)
         # Basis, centering, projection and spectral weights are numerical
         # intermediates of the actual built posterior graph.
@@ -94,12 +99,10 @@ end
         # The emitted basis graph is the fixed-domain orthogonal law at any axis.
         ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
         mod = ext._rk_emit_module(emitted)
-        definition = only(filter(d -> BRM._rk_source_definition(d).kind === :kernel &&
-            endswith(string(BRM._rk_source_definition(d).name), "_basis_graph"), emitted.defs))
-        owner = getfield(mod, BRM._rk_source_definition(definition).name)
-        reader = Base.invokelatest(prepare, owner.basis_matrix; have=(:axis_1,), want=:basis_matrix)
+        owner = getfield(mod, :brm_hsgp_basis_graph)
+        reader(axis) = first(Base.invokelatest(owner, axis))
         for axis in ([0.4, 1.1, 2.6, 0.9, 3.3, 1.7], [0.3, 0.8, 2.2, 1.0])
-            @test Base.invokelatest(reader, axis) ≈
+            @test reader(axis) ≈
                 first(modeled_hsgp_basis(axis, 3, 2.0, 2.0; orthogonal=true)) atol=2e-14 rtol=2e-14
         end
         constant_axis = fill(1.3, 4)

@@ -24,13 +24,11 @@ function _rk_emit_module(emitted::BRM._RKEmittedProgram)
     Core.eval(mod, :(using ReactiveKernelsPPL))
     Core.eval(mod, :(import ReactiveKernels))
     Core.eval(mod, :(import BayesianRegressionModels))
-    Core.eval(mod, :(import ReactiveKernels: @kernel, plate))
-    Core.eval(mod, :(import BayesianRegressionModels:
-        brm_tps_basis, brm_t2_basis, brm_hsgp_basis, brm_hsgp_periodic_basis,
-        brm_hsgp_sqrt_spd, brm_hsgp_periodic_sqrt_spd,
-        brm_gp_covariance, brm_gp_latent, brm_level_indices, brm_ranef_column,
-        brm_dummy, brm_panel_slice, brm_flatten_cells,
-        brm_invprobit, brm_invcloglog))
+    # Callable bindings are named around exactly these imports.
+    for (source, names) in pairs(BRM._RK_SOURCE_IMPORTS)
+        Core.eval(mod, Expr(:import, Expr(:(:), Expr(:., source),
+            (Expr(:., name) for name in names)...)))
+    end
     for (name, value) in emitted.bindings
         Core.eval(mod, Expr(:const, Expr(:(=), name, QuoteNode(value))))
     end
