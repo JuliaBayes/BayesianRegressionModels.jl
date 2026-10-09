@@ -92,6 +92,52 @@ end
     @test all(.!isapprox.(moved, base; atol=0, rtol=1e-12))
 end
 
+# The current population-PK spelling: per-subject predictors read inside an
+# indexed `@plate for` cell over pre-grouped observations.
+const NLME_PLATE_DATA = (; subject=["a", "b", "c"], dose=[100.0, 80.0, 120.0],
+    weight=[0.1, -0.2, 0.3], t=[[0.5, 1.0, 2.0], [0.5, 3.0], [1.0, 2.0, 4.0, 8.0]],
+    dv=[[18.0, 15.0, 11.0], [20.0, 8.0], [16.0, 12.0, 7.0, 3.0]])
+
+function nlme_plate_pk(data)
+    @brm data begin
+        sigma ~ Exponential(1)
+        log_CL ~ 1 + weight + (1 | pk | subject)
+        log_V ~ 1 + (1 | pk | subject)
+        @plate for i in eachindex(log_CL)
+            CL = exp(log_CL[i])
+            Vc = exp(log_V[i])
+            pred[i] = dose[i] / Vc .* exp.(-(CL / Vc) .* t[i])
+            dv[i] ~ normal(pred[i], sigma)
+        end
+    end
+end
+
+@stestset "an @plate population-PK cell has the same NLME reading" begin
+    backend = RKBRMI(nlme_plate_pk(NLME_PLATE_DATA))
+    view = brm_nlme_view(backend)
+    @test length(view.levels) == 3
+    @test count(==(:population), view.role) == 3
+    @test count(==(:scalar), view.role) == 1
+    @test count(r -> r === :subject_scale || r === :subject_correlation, view.role) == 3
+    @test all(length.(view.subject_coordinates) .== 2)
+    @test Set((r.predictor, r.coefficient) for r in view.mu_references) ==
+        Set([(:log_CL, :Intercept), (:log_V, :Intercept)])
+    # The in-cell observation keeps one density array per subject; a subject
+    # block moves exactly its own array.
+    query = pointwise_query(backend)
+    u0 = fill(0.05, length(view.coordinates))
+    base = Base.invokelatest(query, u0).dv
+    @test length.(base) == length.(NLME_PLATE_DATA.dv)
+    for (i, block) in enumerate(view.subject_coordinates)
+        u = copy(u0)
+        u[block] .+= [0.4, -0.3]
+        moved = Base.invokelatest(query, u).dv
+        changed = findall(k -> !isapprox(moved[k], base[k]; atol=0, rtol=1e-12),
+            eachindex(base))
+        @test changed == view.rows[i]
+    end
+end
+
 @stestset "models without an NLME reading are refused by name" begin
     no_ranef = @brm NLME_DATA begin
         sigma ~ Exponential(1)
