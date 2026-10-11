@@ -9,7 +9,7 @@
 using Test
 using BayesianRegressionModels
 using StanBlocks
-using Distributions: Normal
+using Distributions: Exponential, Normal
 
 resample_builder = @brm begin
     mu ~ 1 + zscale(zage) + (1 + zage | p | subject)
@@ -65,6 +65,22 @@ resample_future = (;
     @test occursin("b_p_subject_L", params)
     @test occursin("b_p_subject_tau", params)
 
+    fitted_outputs = brm_descriptor(fitted).outputs
+    replay_outputs = brm_descriptor(replay).outputs
+    fitted_parameters = Set(o.name for o in fitted_outputs if o.kind === :parameter)
+    replay_parameters = Set(o.name for o in replay_outputs if o.kind === :parameter)
+    replay_kinds = Dict(o.name => o.kind for o in replay_outputs)
+    @test issubset(replay_parameters, fitted_parameters)
+    @test replay_parameters != fitted_parameters
+    for name in (:b_p_subject_z_flat, :b_p_subject_z, :b_p_subject,
+                 :r_mu_p_subject, :mu, :y_gen, :y_likelihood)
+        @test replay_kinds[name] === :generated_quantity
+    end
+    @test replay_kinds[:pop_mu] === :transformed_parameter
+    for name in (:b_p_subject_L, :b_p_subject_tau, :pop_mu_beta_pop)
+        @test replay_kinds[name] === :parameter
+    end
+
     # Exact source parity with the former hand-wired recipe: re-emit with
     # cv_groups, then mark the new group index by hand. The public path also
     # replaces the fresh transform fit with the training one (asserted above).
@@ -115,6 +131,44 @@ resample_future = (;
         first(findfirst("parameters {", plain_code)):first(findfirst(
             "model {", plain_code))]
     @test !occursin("r_mu_subject_xi", plain_params)
+end
+
+@testset "resampled kernel cell moves the whole prediction chain to GQ" begin
+    builder = @brm begin
+        sigma_pk ~ Exponential(1)
+        sigma_qt ~ Exponential(1)
+        log_scale ~ 1 + (1 | p | subject)
+        pred ~ kernel(dose, pk_y, qt_y, log_scale) do dd, pk_obs, qt_obs, ls
+            pred_location = (dd / 10.0) * exp(ls)
+            pk_obs ~ normal(pred_location, sigma_pk)
+            qt_obs ~ normal(pred_location, sigma_qt)
+            pred_location
+        end
+    end
+    train = (; subject=[:a, :b, :c], dose=fill(100.0, 3),
+              pk_y=[1.0, 1.5, 2.0], qt_y=[0.8, 1.2, 1.7])
+    future = (; subject=[:w, :x, :y, :z], dose=fill(120.0, 4),
+               pk_y=fill(0.0, 4), qt_y=fill(0.0, 4))
+    fitted = SBBRMI(builder(train); mod=@__MODULE__, total_groups=())
+    replay = reprocess(fitted, future; resample_groups=[:subject])
+    fitted_outputs = brm_descriptor(fitted).outputs
+    replay_outputs = brm_descriptor(replay).outputs
+    fitted_parameters = Set(o.name for o in fitted_outputs if o.kind === :parameter)
+    replay_parameters = Set(o.name for o in replay_outputs if o.kind === :parameter)
+    replay_kinds = Dict(o.name => o.kind for o in replay_outputs)
+    @test issubset(replay_parameters, fitted_parameters)
+    @test replay_parameters != fitted_parameters
+    for name in (:b_p_subject_z_flat, :b_p_subject_z, :b_p_subject,
+                 :r_log_scale_p_subject, :log_scale, :pred,
+                 :pk_y_gen, :qt_y_gen)
+        @test replay_kinds[name] === :generated_quantity
+    end
+    @test only(o.kind for o in replay_outputs if o.logical === :pred_location) ===
+          :generated_quantity
+    for name in (:sigma_pk, :sigma_qt, :b_p_subject_L, :b_p_subject_tau,
+                 :pop_log_scale_beta_pop)
+        @test replay_kinds[name] === :parameter
+    end
 end
 
 @testset "resampled plain block stays introspectable" begin
