@@ -68,10 +68,15 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # scan steps, used instead of Ref operands; bed5d467 deprecates the Ref
 # spelling), ecf99453 (hidden bound operands packed into one AD context),
 # 1603d87a (sampler queries that retain pointwise densities from the reverse
-# sweep), 5c2b80d5 (authored predictor names), and f67bd182 (prepared query
-# HVPs for NLME η Hessian blocks, plus :observations and query pushforwards
-# for Gaussian NLME moments and Jacobians).
+# sweep), 5c2b80d5 (every @rkppl predictor node carries its authored
+# name, so `mu = mu_Intercept` is queryable as `mu`), 281933141
+# (positional `1:length(levels(gg))` axes over pool definitions such as
+# `gg = vcat(g, h)`, which BRM's group blocks declare; it contains 5c2b80d5),
+# f67bd182 (prepared query HVPs, :observations and query pushforwards for
+# NLME η Hessians, Gaussian moments and Jacobians), and 7eafe9ba (a positional
+# axis reads its level source as a whole pool, admitting per-group tables of
+# any length; it contains 9b2e3080 and f67bd182).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "f67bd1829864da2d456247be99a54b6605bb2c95"
+rev = "7eafe9ba7b99c9e569dbe47a6b6a2c60b4759729"

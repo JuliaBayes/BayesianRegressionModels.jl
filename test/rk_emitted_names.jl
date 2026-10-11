@@ -46,8 +46,10 @@ main_statements(brmi) = filter(s -> !(s isa LineNumberNode), emitted_main(brmi).
     # The `p` and id-less buckets over `subject` read one level position.
     @test count("brm_level_indices(subject, subject)", main) == 1
     @test :(subject_level = brm_level_indices(subject, subject)) in stmts
-    @test occursin("brm_ranef_column(b_p_subject, subject_level, 1)", main)
-    @test occursin("brm_ranef_column(b_subject, subject_level, 1)", main)
+    # Each bucket gathers its draws inline, so RK sees the per-row index.
+    @test occursin("b_p_subject[subject_level, 1]", main)
+    @test occursin("b_subject[subject_level, 1]", main)
+    @test !occursin("brm_ranef_column", main)
     @test !occursin("_index_", main)
     # A multi-membership column's positions are into its bucket's joint levels.
     groups = :b_mm__g1__g2_groups
