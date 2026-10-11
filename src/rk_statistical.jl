@@ -70,6 +70,8 @@ brm_gp_covariance(x, sigma, rho, period, jitter) = iszero(period) ?
 brm_gp_latent(covariance, z) = StatisticalPreparation.gp_chol_latent(covariance, z)
 
 brm_level_indices(labels, source) = _rk_value_level_indices(labels, source)
+# No longer emitted: the gather is written inline as `draws[indices, margin]`.
+# Kept for RK sources printed before that change, which import it by name.
 brm_ranef_column(draws, indices, margin) = draws[indices, margin]
 brm_dummy(values, level) = _rk_value_dummy(values, level)
 
