@@ -6,11 +6,14 @@ module BayesianRegressionModelsNLMEEstimationExt
 # evaluation (`brm_nlme_loglikelihoods[_and_gradients]`) whatever the batch size,
 # and the estimators make one such call per iteration for all subjects still
 # iterating. No per-subject method is implemented here, because each would cost a
-# full pass. No Hessian method and no AD backend are declared either: RK exposes
-# first-order AD only (ReactiveKernels snag `rkppl-second-ord-ba21b602`), so
-# `empirical_bayes` runs its gradient-only `QuasiNewtonEBE`.
+# full pass. Colored RK Hessian-vector products give all subjects' η Hessian
+# blocks in one pass per η coordinate, so `empirical_bayes` uses `NewtonEBE`.
+# Gaussian observations use one :observations query and colored forward
+# pushforwards for all η Jacobians.
 
 using BayesianRegressionModels
+using ADTypes: AutoEnzyme
+import Enzyme
 import NLMEEstimation as NE
 const BRM = BayesianRegressionModels
 
@@ -20,20 +23,61 @@ NE.nlme_layout(m::BRM.BRMNLMEModel) = NE.NLMELayout(;
     ntheta=length(m.theta), nsigma=length(m.sigma), eta_blocks=m.eta_blocks)
 
 NE.evaluation_style(::BRM.BRMNLMEModel) = NE.BatchedEvaluation()
+NE.provides_eta_hessian(::BRM.BRMNLMEModel) = true
+BRM._brm_nlme_forward_backend(::AutoEnzyme) = AutoEnzyme(; mode=Enzyme.Forward)
+
+function _check_subjects(m::BRM.BRMNLMEModel, subjects)
+    n = length(m.view.levels)
+    all(i -> 1 <= i <= n, subjects) || throw(ArgumentError(
+        "subjects $subjects are outside 1:$n"))
+    allunique(subjects) || throw(ArgumentError(
+        "subjects $subjects are not unique; one lockstep evaluation holds one η per subject"))
+    nothing
+end
 
 # All subjects' random effects with column `k` of `H` placed at subject
 # `subjects[k]` and the other subjects at zero; by conditional independence the
 # other subjects' values do not affect the batch's.
 function _batch_eta(m::BRM.BRMNLMEModel, subjects, H::AbstractMatrix)
-    n = length(m.view.levels)
     size(H, 2) == length(subjects) || throw(DimensionMismatch(
         "η matrix has $(size(H, 2)) columns for $(length(subjects)) subjects"))
-    all(i -> 1 <= i <= n, subjects) || throw(ArgumentError("subjects $subjects are outside 1:$n"))
-    allunique(subjects) || throw(ArgumentError(
-        "subjects $subjects are not unique; one lockstep evaluation holds one η per subject"))
-    full = zeros(promote_type(Float64, eltype(H)), size(H, 1), n)
+    _check_subjects(m, subjects)
+    full = zeros(promote_type(Float64, eltype(H)), size(H, 1), length(m.view.levels))
     full[:, subjects] .= H
     full
+end
+
+# FOCE(I) consumes subject vectors but evaluates all requested subjects in one
+# joint RK pass. No per-subject full-pass overload is defined here.
+NE.observation_model(m::BRM.BRMNLMEModel) =
+    m.observations_query === nothing || m.observations_pushforward === nothing ?
+        nothing : NE.GaussianObservations()
+
+function NE.observations(m::BRM.BRMNLMEModel, subjects::AbstractVector{<:Integer})
+    NE.observation_model(m) isa NE.GaussianObservations || throw(ArgumentError(
+        "BRMNLMEModel has no prepared Gaussian observation model"))
+    _check_subjects(m, subjects)
+    [copy(m.observed[i]) for i in subjects]
+end
+
+function NE.observation_moments(m::BRM.BRMNLMEModel,
+        subjects::AbstractVector{<:Integer}, θ, σ, H::AbstractMatrix)
+    NE.observation_model(m) isa NE.GaussianObservations || throw(ArgumentError(
+        "BRMNLMEModel has no prepared Gaussian observation model"))
+    u = BRM._brm_nlme_point(m, θ, σ, _batch_eta(m, subjects, H))
+    moments = BRM._brm_nlme_moments(m, BRM._rk_observation_values(m.observations_query, u))
+    moments[subjects]
+end
+
+function NE.observation_moments_and_jacobians(m::BRM.BRMNLMEModel,
+        subjects::AbstractVector{<:Integer}, θ, σ, H::AbstractMatrix)
+    NE.observation_model(m) isa NE.GaussianObservations || throw(ArgumentError(
+        "BRMNLMEModel has no prepared Gaussian observation model"))
+    u = BRM._brm_nlme_point(m, θ, σ, _batch_eta(m, subjects, H))
+    values, tangents = BRM._rk_observation_value_and_pushforward(
+        m.observations_pushforward, u)
+    moments = BRM._brm_nlme_moments(m, values, tangents)
+    moments[subjects]
 end
 
 function NE.conditional_loglikelihoods(m::BRM.BRMNLMEModel, subjects, θ, σ, H)
@@ -44,6 +88,11 @@ end
 function NE.conditional_loglikelihoods_and_gradients(m::BRM.BRMNLMEModel, subjects, θ, σ, H)
     values, G = BRM.brm_nlme_loglikelihoods_and_gradients(m, θ, σ, _batch_eta(m, subjects, H))
     values[subjects], G[:, subjects]
+end
+
+function NE.conditional_loglikelihood_hessian_blocks(m::BRM.BRMNLMEModel, subjects, θ, σ, H)
+    blocks = BRM._brm_nlme_hessian_blocks(m, θ, σ, _batch_eta(m, subjects, H))
+    blocks[subjects]
 end
 
 # Intercept margins only: their population coefficient and random effect both

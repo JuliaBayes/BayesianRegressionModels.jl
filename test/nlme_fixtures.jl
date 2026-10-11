@@ -56,7 +56,7 @@ likelihood_query(backend) = prepare_query(backend.model,
 const NLME_AD = AutoEnzyme(; mode=Enzyme.Reverse)
 
 # Independent oracle for the @plate population-PK model: every subject's
-# conditional log-likelihood, and its η gradient, written out from the model's
+# conditional log-likelihood, η gradient, and η Hessian, written out from the model's
 # equations. With CL = exp(a + η_CL), V = exp(b + η_V), k = CL / V and
 # pred = dose / V * exp(-k t): ∂pred/∂η_CL = -k t pred, ∂pred/∂η_V = (k t - 1) pred,
 # and ∂ log p / ∂pred = (dv - pred) / sigma².
@@ -80,13 +80,27 @@ function _plate_pk_oracle_terms(m, θ, σ, H)
         gradient = zeros(size(H, 1))
         gradient[kcl] = sum(residual .* pred .* -kt)
         gradient[kv] = sum(residual .* pred .* (kt .- 1))
-        (; value, gradient)
+        # For p = dose/V * exp(-CL*t/V), with q = CL*t/V:
+        # p_CL = -q*p, p_V = (q-1)*p, and
+        # p_CL,CL = (q²-q)*p, p_CL,V = (2q-q²)*p,
+        # p_V,V = (q²-3q+1)*p. The Normal Hessian is
+        # Σ[(y-p)*p_ab - p_a*p_b] / sigma².
+        dcl = -kt .* pred
+        dv = (kt .- 1) .* pred
+        hessian = zeros(size(H, 1), size(H, 1))
+        hessian[kcl, kcl] = sum(residual .* pred .* (kt.^2 .- kt) .- dcl.^2 ./ sigma^2)
+        hessian[kcl, kv] = sum(residual .* pred .* (2 .* kt .- kt.^2) .- dcl .* dv ./ sigma^2)
+        hessian[kv, kcl] = hessian[kcl, kv]
+        hessian[kv, kv] = sum(residual .* pred .* (kt.^2 .- 3 .* kt .+ 1) .- dv.^2 ./ sigma^2)
+        (; value, gradient, hessian)
     end
 end
 
 plate_pk_oracle(m, θ, σ, H) = [term.value for term in _plate_pk_oracle_terms(m, θ, σ, H)]
 plate_pk_oracle_gradients(m, θ, σ, H) =
     reduce(hcat, [term.gradient for term in _plate_pk_oracle_terms(m, θ, σ, H)])
+plate_pk_oracle_hessians(m, θ, σ, H) =
+    [term.hessian for term in _plate_pk_oracle_terms(m, θ, σ, H)]
 
 # A flat observation axis joined to the subject cells by `ragged(y, group)`:
 # rows interleave subjects, counts differ, and the subject column is not in

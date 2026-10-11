@@ -206,12 +206,6 @@ brm_covariate_sd(values) = begin
     return fit.scale
 end),
 
-    brm_gather_response = :(
-brm_gather_response(raw, groups) = begin
-    values = raw[brm_flatten_cells(groups)]
-    return values
-end),
-
     brm_matrix_column = :(
 brm_matrix_column(inputs, column) = begin
     matrix = only(inputs)

@@ -69,7 +69,8 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # spelling), ecf99453 (hidden bound operands packed into one AD context),
 # 1603d87a (sampler queries that retain pointwise densities from the reverse
 # sweep), 5c2b80d5 (every @rkppl predictor node carries its authored
-# name, so `mu = mu_Intercept` is queryable as `mu`) and 659a6e8b (columns
+# name, so `mu = mu_Intercept` is queryable as `mu`), f67bd182 (prepared
+# query HVPs and Gaussian NLME observation pushforwards), 659a6e8b (columns
 # of `X * B`, per-element two-axis prior arguments and per-slice Dirichlet
 # concentrations, read by BRM's joint blocks), and cb3a0db7 (in-place
 # observation-column reads during native reverse).

@@ -71,9 +71,11 @@ const PINS = [
     # contains ecf99453 and bed5d467, plus 3fc1f0c7, 54d4a7b9 and 46d5520c.
     # 5c2b80d5 contains 1603d87a and names every @rkppl predictor node after
     # its authored name, so a scalar lone intercept `mu = mu_Intercept` stays
-    # queryable as `mu`. 659a6e8b contains 5c2b80d5 and adds what BRM's joint
-    # blocks read: columns `P[:, j]` of `X * B` (65f5ea8f) and per-element
-    # prior arguments on two-axis declarations and per-slice Dirichlet
+    # queryable as `mu`. f67bd182 adds prepared query HVPs for NLME η Hessian
+    # blocks, plus :observations and query pushforwards for Gaussian NLME
+    # moments and η Jacobians. 659a6e8b contains f67bd182 and adds what
+    # BRM's joint blocks read: columns `P[:, j]` of `X * B` (65f5ea8f),
+    # per-element prior arguments on two-axis declarations and per-slice Dirichlet
     # concentrations (`Dirichlet.(eachcol(A))`). cb3a0db7 reads the
     # observation columns of X * B in place during native reverse.
     ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "cb3a0db7a9d8c166f8eb211814b9da815fbbf51d"),  # main
