@@ -180,11 +180,14 @@ function check_grouped_arguments(label, data)
         @test !occursin("[2, 3, 5, 1, 4, 6, 7]", definitions * main)
         # The joined response is the gather itself, with no identity row
         # gather. Each per-row argument is gathered by a plain statement in
-        # its argument kernel, which stays in the built graph, not by a
+        # the shared argument kernel, which stays in the built graph, not by a
         # one-line reader kernel (snag rk-emission-wrap-4ee9950d).
         @test occursin("y = y_raw_response[brm_flatten_cells($port)]", main)
         @test !occursin("brm_gather_response", definitions * main)
         @test !occursin("_source_rows", main)
+        @test occursin("ReactiveKernels.@kernel y_observation_arguments", definitions)
+        @test !occursin("ReactiveKernels.@kernel y_observation_argument_", definitions)
+        @test occursin("y_observation_arguments(", main)
         @test occursin("y_rows_y_input_2 = y_input_2[brm_flatten_cells(y_input_4)]", definitions)
         @test !occursin("_reader(raw, groups)", definitions)
         @test :(y_input_2[brm_flatten_cells(y_input_4)]) in graph_sources

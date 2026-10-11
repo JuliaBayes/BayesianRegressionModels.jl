@@ -200,6 +200,10 @@ end
 
 @stestset "a ragged join's row partition is bound data, not source" begin
     trained = joined_data(["a", "b", "b", "a", "b", "a", "a"])
+    definitions, main, _ = emitted_source(PublicShapeReuse.joined(trained))
+    @test occursin("y_observation_arguments(", definitions)
+    @test !occursin("y_observation_argument_1(", definitions)
+    @test occursin("y_observation_arguments(", main)
     # The same row count in another subject order: a stale partition would
     # pair rows with the wrong subjects and reference values.
     for scored in (joined_data(["b", "a", "a", "b", "a", "b", "a"]),

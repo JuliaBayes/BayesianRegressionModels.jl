@@ -494,7 +494,7 @@ function _rk_align_kernel_observation_arguments!(defs, statements, bindings, tak
     layout.lengths === nothing && return distribution
     # Prepare the constructor's arguments together in authored source. A
     # data-only model assignment is evaluated by RKPPL at binding; keeping
-    # these operations in the argument readers retains the complete source
+    # these operations in one argument kernel retains the complete source
     # graph beside the live location/scale and avoids that preprocessing path.
     inputs = Any[]
     params = Symbol[]
@@ -526,7 +526,7 @@ function _rk_align_kernel_observation_arguments!(defs, statements, bindings, tak
         argument
     end
     local_args = map(local_argument, distribution.args)
-    # The readers' row geometry enters as one more input, on first use.
+    # The argument kernel's row geometry enters as one more input, on first use.
     geometry_param = nothing
     function geometry()
         geometry_param === nothing || return geometry_param
@@ -548,17 +548,18 @@ function _rk_align_kernel_observation_arguments!(defs, statements, bindings, tak
         push!(body, Expr(:(=), value, _rk_value_expr!(bindings, argument, taken)))
         value
     end
-    outputs = map(eachindex(args)) do i
-        reader = _rk_ast_fresh_name("$(observation.name)_observation_argument_$i", taken)
-        definition = Expr(:(=), Expr(:call, reader, params...),
-            Expr(:block, body..., Expr(:return, prepared[i])))
-        push!(defs, Expr(:macrocall,
-            Expr(:., :ReactiveKernels, QuoteNode(Symbol("@kernel"))),
-            LineNumberNode(0), definition))
-        value = _rk_ast_fresh_name("$(observation.name)_argument_$i", taken)
-        push!(statements, Expr(:(=), value, Expr(:call, reader, inputs...)))
-        _BRMPreparedRef(value, :whole)
-    end
+    reader = _rk_ast_fresh_name("$(observation.name)_observation_arguments", taken)
+    returned = length(prepared) == 1 ? only(prepared) : Expr(:tuple, prepared...)
+    definition = Expr(:(=), Expr(:call, reader, params...),
+        Expr(:block, body..., Expr(:return, returned)))
+    push!(defs, Expr(:macrocall,
+        Expr(:., :ReactiveKernels, QuoteNode(Symbol("@kernel"))),
+        LineNumberNode(0), definition))
+    names = [_rk_ast_fresh_name("$(observation.name)_argument_$i", taken)
+        for i in eachindex(args)]
+    target = length(names) == 1 ? only(names) : Expr(:tuple, names...)
+    push!(statements, Expr(:(=), target, Expr(:call, reader, inputs...)))
+    outputs = map(name -> _BRMPreparedRef(name, :whole), names)
     _BRMPreparedExpr(distribution.callable, Tuple(outputs), distribution.kwargs)
 end
 
