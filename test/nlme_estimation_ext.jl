@@ -72,6 +72,33 @@ end
     @test_throws DimensionMismatch conditional_loglikelihoods(m, [1, 2], θ, σ, zeros(2, 1))
 end
 
+@stestset "a singleton protocol batch uses subject-local RK work" begin
+    measured = map((3, 9, 27)) do n
+        d = NLME_PLATE_DATA
+        data = (; subject=["s$j" for j in 1:n],
+            dose=[d.dose[mod1(j, 3)] for j in 1:n],
+            weight=[d.weight[mod1(j, 3)] for j in 1:n],
+            t=[d.t[mod1(j, 3)] for j in 1:n],
+            dv=[d.dv[mod1(j, 3)] for j in 1:n])
+        m = brm_nlme_model(RKBRMI(nlme_plate_pk(data)); ad_backend=NLME_AD)
+        θ, σ = plate_pk_point(m)
+        i = findfirst(==("s2"), m.view.levels)
+        H = reshape([0.05, -0.1], 2, 1)
+        values() = conditional_loglikelihoods(m, [i], θ, σ, H)
+        gradients() = conditional_loglikelihoods_and_gradients(m, [i], θ, σ, H)
+        values(); gradients()
+        primal_bytes = minimum(@allocated(values()) for _ in 1:3)
+        gradient_bytes = minimum(@allocated(gradients()) for _ in 1:3)
+        (; result=gradients(), primal_bytes, gradient_bytes)
+    end
+    @test all(x -> isapprox(x.result[1], measured[1].result[1]; rtol=1e-12), measured)
+    @test all(x -> isapprox(x.result[2], measured[1].result[2]; rtol=1e-10), measured)
+    @test maximum(x.primal_bytes for x in measured) <=
+        1.2minimum(x.primal_bytes for x in measured)
+    @test maximum(x.gradient_bytes for x in measured) <=
+        1.2minimum(x.gradient_bytes for x in measured)
+end
+
 @stestset "declared mu-referencing holds on the density" begin
     m = brm_nlme_model(RKBRMI(nlme_plate_pk(NLME_PLATE_DATA)); ad_backend=NLME_AD)
     mr = mu_referencing(m)

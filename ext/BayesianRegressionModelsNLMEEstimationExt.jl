@@ -2,8 +2,8 @@ module BayesianRegressionModelsNLMEEstimationExt
 
 # The NLMEEstimation.jl model protocol for an RK-lowered BRM population model
 # (`BRMNLMEModel`, from `brm_nlme_model`). The model declares
-# `BatchedEvaluation`: batched calls use one lockstep RK evaluation, while
-# explicit per-subject calls use one subject-indexed observation plate cell.
+# `BatchedEvaluation`: larger batches use one lockstep RK evaluation, while
+# singleton batches and explicit per-subject calls use one observation cell.
 # Colored RK Hessian-vector products give all subjects' η Hessian
 # blocks in one pass per η coordinate, so `empirical_bayes` uses `NewtonEBE`.
 # Gaussian observations use one :observations query and colored forward
@@ -45,8 +45,8 @@ function _batch_eta(m::BRM.BRMNLMEModel, subjects, H::AbstractMatrix)
     full
 end
 
-# FOCE(I) consumes subject vectors but evaluates all requested subjects in one
-# joint RK pass. No per-subject full-pass overload is defined here.
+# Gaussian moments and Jacobians still evaluate all requested subjects in one
+# joint RK pass.
 NE.observation_model(m::BRM.BRMNLMEModel) =
     m.observations_query === nothing || m.observations_pushforward === nothing ?
         nothing : NE.GaussianObservations()
@@ -78,7 +78,17 @@ function NE.observation_moments_and_jacobians(m::BRM.BRMNLMEModel,
     moments[subjects]
 end
 
+function _singleton_cell(m::BRM.BRMNLMEModel, subjects, H::AbstractMatrix)
+    length(subjects) == 1 && m.cell_query !== nothing || return nothing
+    size(H, 2) == 1 || throw(DimensionMismatch(
+        "η matrix has $(size(H, 2)) columns for 1 subject"))
+    _check_subjects(m, subjects)
+    only(subjects), view(H, :, 1)
+end
+
 function NE.conditional_loglikelihoods(m::BRM.BRMNLMEModel, subjects, θ, σ, H)
+    cell = _singleton_cell(m, subjects, H)
+    cell === nothing || return [BRM.brm_nlme_loglikelihood(m, cell[1], θ, σ, cell[2])]
     values = BRM.brm_nlme_loglikelihoods(m, θ, σ, _batch_eta(m, subjects, H))
     values[subjects]
 end
@@ -91,6 +101,12 @@ NE.conditional_loglikelihood_and_gradient(m::BRM.BRMNLMEModel,
     BRM.brm_nlme_loglikelihood_and_gradient(m, i, θ, σ, η)
 
 function NE.conditional_loglikelihoods_and_gradients(m::BRM.BRMNLMEModel, subjects, θ, σ, H)
+    cell = _singleton_cell(m, subjects, H)
+    if cell !== nothing
+        value, gradient = BRM.brm_nlme_loglikelihood_and_gradient(
+            m, cell[1], θ, σ, cell[2])
+        return [value], reshape(gradient, :, 1)
+    end
     values, G = BRM.brm_nlme_loglikelihoods_and_gradients(m, θ, σ, _batch_eta(m, subjects, H))
     values[subjects], G[:, subjects]
 end
