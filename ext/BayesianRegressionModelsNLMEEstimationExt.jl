@@ -1,12 +1,10 @@
 module BayesianRegressionModelsNLMEEstimationExt
 
 # The NLMEEstimation.jl model protocol for an RK-lowered BRM population model
-# (`BRMNLMEModel`, from `brm_nlme_model`). RK evaluates the whole program at once,
-# so the model declares `BatchedEvaluation`: one batched call is one lockstep
-# evaluation (`brm_nlme_loglikelihoods[_and_gradients]`) whatever the batch size,
-# and the estimators make one such call per iteration for all subjects still
-# iterating. No per-subject method is implemented here, because each would cost a
-# full pass. Colored RK Hessian-vector products give all subjects' η Hessian
+# (`BRMNLMEModel`, from `brm_nlme_model`). The model declares
+# `BatchedEvaluation`: batched calls use one lockstep RK evaluation, while
+# explicit per-subject calls use one subject-indexed observation plate cell.
+# Colored RK Hessian-vector products give all subjects' η Hessian
 # blocks in one pass per η coordinate, so `empirical_bayes` uses `NewtonEBE`.
 # Gaussian observations use one :observations query and colored forward
 # pushforwards for all η Jacobians.
@@ -84,6 +82,13 @@ function NE.conditional_loglikelihoods(m::BRM.BRMNLMEModel, subjects, θ, σ, H)
     values = BRM.brm_nlme_loglikelihoods(m, θ, σ, _batch_eta(m, subjects, H))
     values[subjects]
 end
+
+NE.conditional_loglikelihood(m::BRM.BRMNLMEModel, i::Integer, θ, σ, η) =
+    BRM.brm_nlme_loglikelihood(m, i, θ, σ, η)
+
+NE.conditional_loglikelihood_and_gradient(m::BRM.BRMNLMEModel,
+        i::Integer, θ, σ, η) =
+    BRM.brm_nlme_loglikelihood_and_gradient(m, i, θ, σ, η)
 
 function NE.conditional_loglikelihoods_and_gradients(m::BRM.BRMNLMEModel, subjects, θ, σ, H)
     values, G = BRM.brm_nlme_loglikelihoods_and_gradients(m, θ, σ, _batch_eta(m, subjects, H))

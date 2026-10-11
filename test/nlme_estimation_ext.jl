@@ -59,10 +59,14 @@ end
         @test length(blocks) == length(subjects)
         @test all(isapprox.(blocks, oracle; rtol=1e-9, atol=1e-9))
     end
-    # The per-subject entry points derive from a batch of one.
+    # The per-subject entry points use one plate cell, not a batch of one.
     η = [0.05, -0.1]
+    oracle_H = full_eta(m, [2], reshape(η, 2, 1))
     @test conditional_loglikelihood(m, 2, θ, σ, η) ≈
-        plate_pk_oracle(m, θ, σ, full_eta(m, [2], reshape(η, 2, 1)))[2] rtol=1e-12
+        plate_pk_oracle(m, θ, σ, oracle_H)[2] rtol=1e-12
+    value, gradient = conditional_loglikelihood_and_gradient(m, 2, θ, σ, η)
+    @test value ≈ plate_pk_oracle(m, θ, σ, oracle_H)[2] rtol=1e-12
+    @test gradient ≈ plate_pk_oracle_gradients(m, θ, σ, oracle_H)[:, 2] rtol=1e-10
     @test_throws ArgumentError conditional_loglikelihoods(m, [1, 1], θ, σ, zeros(2, 2))
     @test_throws ArgumentError conditional_loglikelihoods(m, [n + 1], θ, σ, zeros(2, 1))
     @test_throws DimensionMismatch conditional_loglikelihoods(m, [1, 2], θ, σ, zeros(2, 1))
@@ -170,7 +174,11 @@ end
         end
     end
     ω = omega_parameters(nlme_layout(m), [0.09 0.0; 0.0 0.04])
-    @test check_protocol(m, θ, σ, ω; η=H)
+    # Decision 110evqv: the batch Gaussian route remains valid, but conformance
+    # also probes the single-subject route. A ragged join has no subject cell.
+    err = try check_protocol(m, θ, σ, ω; η=H); nothing catch e; e end
+    @test err isa BRMNLMEViewError
+    @test occursin("ragged-join", err.message)
 end
 
 @stestset "Gaussian moments and colored η Jacobians for array-valued plate cells" begin

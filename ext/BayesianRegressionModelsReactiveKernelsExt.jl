@@ -176,6 +176,10 @@ BRM._rk_constrained_values(backend::BRM.RKBRMI, u::AbstractVector) =
 BRM._rk_pointwise_query(backend::BRM.RKBRMI) =
     prepare_query(backend.model, _rk_translated_plan(backend.plan), :pointwise)
 BRM._rk_pointwise_values(query, u::AbstractVector) = Base.invokelatest(query, u)
+BRM._rk_nlme_cell_query(backend::BRM.RKBRMI, observations::Tuple) =
+    prepare_cell_query(backend.model, _rk_translated_plan(backend.plan), observations)
+BRM._rk_nlme_cell_value(query::CellQuery, point::BRM._BRMNLMEPoint, row::Int) =
+    query(point, row)
 BRM._rk_retained_pointwise_sampler(backend::BRM.RKBRMI; ad_backend,
         u0=zeros(Float64, backend.model.layout.total)) =
     prepare_sampler(backend.model, _rk_translated_plan(backend.plan), u0;

@@ -139,6 +139,57 @@ end
     @test moved[2] != values[2]
 end
 
+@stestset "a subject plate cell gives one subject value and η gradient" begin
+    m = brm_nlme_model(RKBRMI(nlme_plate_pk(NLME_PLATE_DATA)); ad_backend=NLME_AD)
+    named = Dict(Symbol("pop_log_CL.beta_pop.1") => 0.2,
+        Symbol("pop_log_CL.beta_pop.2") => 0.1, :log_V_Intercept => 1.6)
+    θ = [named[c] for c in m.view.coordinates[m.theta]]
+    σ = [log(0.8)]
+    H = [0.15 -0.2 0.05; -0.1 0.25 0.3]
+    oracle = plate_pk_oracle(m, θ, σ, H)
+    gradients = plate_pk_oracle_gradients(m, θ, σ, H)
+    for i in eachindex(m.view.levels)
+        η = H[:, i]
+        @test brm_nlme_loglikelihood(m, i, θ, σ, η) ≈ oracle[i] rtol=1e-12
+        value, gradient = brm_nlme_loglikelihood_and_gradient(m, i, θ, σ, η)
+        @test value ≈ oracle[i] rtol=1e-12
+        @test gradient ≈ gradients[:, i] rtol=1e-10
+    end
+    @test_throws BoundsError brm_nlme_loglikelihood(m, 4, θ, σ, H[:, 1])
+    @test_throws DimensionMismatch brm_nlme_loglikelihood(m, 1, θ, σ, [0.1])
+end
+
+@stestset "one subject's work stays flat as other subjects are added" begin
+    d = NLME_PLATE_DATA
+    measured = map((3, 9, 27)) do n
+        data = (; subject=["s$j" for j in 1:n],
+            dose=[d.dose[mod1(j, 3)] for j in 1:n],
+            weight=[d.weight[mod1(j, 3)] for j in 1:n],
+            t=[d.t[mod1(j, 3)] for j in 1:n],
+            dv=[d.dv[mod1(j, 3)] for j in 1:n])
+        m = brm_nlme_model(RKBRMI(nlme_plate_pk(data)); ad_backend=NLME_AD)
+        named = Dict(Symbol("pop_log_CL.beta_pop.1") => 0.2,
+            Symbol("pop_log_CL.beta_pop.2") => 0.1, :log_V_Intercept => 1.6)
+        θ = [named[c] for c in m.view.coordinates[m.theta]]
+        σ = [0.0]
+        η = [0.05, -0.1]
+        i = findfirst(==("s2"), m.view.levels)
+        value() = brm_nlme_loglikelihood(m, i, θ, σ, η)
+        gradient() = brm_nlme_loglikelihood_and_gradient(m, i, θ, σ, η)
+        value(); gradient()
+        primal_bytes = minimum(@allocated(value()) for _ in 1:3)
+        gradient_bytes = minimum(@allocated(gradient()) for _ in 1:3)
+        (; result=gradient(), primal_bytes, gradient_bytes)
+    end
+    @test all(x -> isapprox(x.result[1], measured[1].result[1]; rtol=1e-12), measured)
+    @test all(x -> isapprox(x.result[2], measured[1].result[2]; rtol=1e-10), measured)
+    # The RK cell query and Enzyme η reverse must not allocate with cohort size.
+    @test maximum(x.primal_bytes for x in measured) <=
+        1.2minimum(x.primal_bytes for x in measured)
+    @test maximum(x.gradient_bytes for x in measured) <=
+        1.2minimum(x.gradient_bytes for x in measured)
+end
+
 @stestset "flat-row attribution sums to the whole likelihood" begin
     backend = RKBRMI(nlme_pk(NLME_DATA))
     m = brm_nlme_model(backend; ad_backend=NLME_AD)
@@ -152,6 +203,11 @@ end
     for i in 1:n
         @test values[i] ≈ sum(pointwise[m.view.rows[i]]) rtol=1e-13
     end
+    # Decision 110evqv requires O(n_i) single-subject calls. Flat rows have no
+    # subject cell, so the lockstep path is the supported evaluation here.
+    err = try brm_nlme_loglikelihood(m, 1, θ, σ, H[:, 1]); nothing catch e; e end
+    @test err isa BRMNLMEViewError
+    @test occursin("flat-row grouped", err.message)
 end
 
 @stestset "a ragged(y, group) join over interleaved rows is attributed by subject" begin
