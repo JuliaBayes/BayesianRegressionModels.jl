@@ -299,7 +299,10 @@ function _rk_ast_joint_monotonic_component!(definitions, taken, name, index, alp
     any(isnothing, priors) && error("RK backend: internal: joint monotonic block " *
         "`$name` mixes effects with and without a coefficient")
     families = unique(first.(priors))
-    effect = Expr(:return, Expr(:call, :.*, table, Expr(Symbol("'"), :beta)))
+    # Scale the tiny levels × predictors table before gathering rows. Scaling
+    # after the gather would broadcast over observations × predictors.
+    scaled_table = :((cumsum(vcat(zeros(1, ntargets), simplex_incr); dims=1)) .* beta')
+    effect = Expr(:return, Expr(:ref, scaled_table, :c, :(:)))
     if length(families) == 1
         family = only(families)
         roles = haskey(_RK_POPULATION_FAMILIES, family) &&
