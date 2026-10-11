@@ -105,15 +105,27 @@ end
     mr = mu_referencing(m)
     @test mr isa MuReferencing
     @test sort(parameter_names(m).theta[mr.theta_indices]) ==
-        ["log_V_Intercept", "pop_log_CL.beta_pop.1"]
+        ["log_V_Intercept", "pop_log_CL.beta_pop.1", "pop_log_CL.beta_pop.2"]
+    cl_margin = findfirst(b -> b.predictor === :log_CL, m.view.block_margins)
+    weight_column = findfirst(==("pop_log_CL.beta_pop.2"),
+        parameter_names(m).theta[mr.theta_indices])
+    @test [X[cl_margin, weight_column] for X in mr.design] ==
+        NLME_PLATE_DATA.weight
     θ, σ = plate_pk_point(m)
-    δ = [0.3, -0.2]
+    δ = [0.3, -0.2, 0.4]
     θs = copy(θ); θs[mr.theta_indices] .+= δ
     subjects = collect(1:nsubjects(m))
     H = repeat([0.1, 0.2], 1, length(subjects))
     Hs = H .- reduce(hcat, [mr.design[i] * δ for i in subjects])
     @test conditional_loglikelihoods(m, subjects, θs, σ, Hs) ≈
         conditional_loglikelihoods(m, subjects, θ, σ, H) rtol=1e-12
+    for j in eachindex(δ)
+        shift = zeros(length(δ)); shift[j] = δ[j]
+        shifted = copy(θ); shifted[mr.theta_indices] .+= shift
+        effects = H .- reduce(hcat, [mr.design[i] * shift for i in subjects])
+        @test conditional_loglikelihoods(m, subjects, shifted, σ, effects) ≈
+            conditional_loglikelihoods(m, subjects, θ, σ, H) rtol=1e-12
+    end
 end
 
 @stestset "check_protocol accepts the model" begin
@@ -128,9 +140,12 @@ end
     θ, σ = plate_pk_point(m)
     ω = omega_parameters(nlme_layout(m), [0.09 0.0; 0.0 0.04])
     @test NLMEEstimation.ad_backend(m) isa AutoEnzyme
+    # Three subjects now identify three mu-referenced coefficients, so this
+    # tiny AD smoke test needs a covariance floor in its Gaussian M-step.
     fit = saem(m, θ, σ, ω; rng=Random.Xoshiro(2026),
         options=SAEMOptions(iterations=3, burnin=1, mcmc_burnin=0,
-            adapt_iterations=0, numeric_maxiter=2, mstep_interval=3))
+            adapt_iterations=0, numeric_maxiter=2, mstep_interval=3,
+            omega_floor=0.05))
     @test fit.kernel == :standard_mh
     @test all(isfinite, (fit.theta..., fit.sigma..., fit.omega...))
     @test size(fit.eta) == (2, nsubjects(m))
