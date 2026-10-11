@@ -944,8 +944,8 @@ end
 # Repeated monotonic terms over one index column with one configuration (head,
 # coefficient or not) are one joint block: `mo_<c>` owns a simplex column, with
 # that predictor's Dirichlet concentration, and a coefficient when the term has
-# one, per predictor, and returns the rows x predictors matrix of effects. Each
-# predictor reads its column as `mo_<target>_<c>` (user decision `1pj2p5j`). A
+# one, per predictor, and returns the levels × predictors table of effects. Each
+# predictor gathers its column as `mo_<target>_<c>` (user decision `1pj2p5j`). A
 # configuration used once keeps its own component, named by
 # `_rk_ast_monotonic_name`.
 function _rk_ast_monotonic_groups(plan, vector_priors, hs_priors, taken)
@@ -986,7 +986,7 @@ function _rk_ast_emit_joint_monotonic!(definitions, statements, groups, taken, c
         entries = sort(group.entries; by=e -> e.column)
         priors = [entry.prior for entry in entries]
         call, betas = _rk_ast_joint_monotonic_component!(definitions, taken,
-            group.block, group.column, [entry.alpha for entry in entries], priors)
+            group.block, [entry.alpha for entry in entries], priors)
         first_read = findfirst(s -> any(e -> s === e.read, entries), statements)
         insert!(statements, first_read, call)
         for (entry, beta) in zip(entries, betas)
@@ -1370,7 +1370,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             push!(owned_vectors, term.options.increments)
             joint = get(monotonic_joint.members, (predictor.name, index), nothing)
             if joint !== nothing
-                read = Expr(:(=), joint.name, Expr(:ref, joint.group.block, :(:), joint.column))
+                read = Expr(:(=), joint.name,
+                    Expr(:ref, joint.group.block, joint.group.column, joint.column))
                 push!(stmts, read)
                 push!(joint.group.entries, (; column=joint.column, predictor=predictor.name,
                     prior, beta, read, alpha=monotonic_alpha(term)))

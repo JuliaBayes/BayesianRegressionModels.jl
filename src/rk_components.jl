@@ -270,39 +270,40 @@ end
 
 # Several predictors' monotonic effects of one column, as one component: one
 # increment simplex per predictor (the columns of `simplex_incr`), one
-# cumulative table, one gather by the codes `c`, and the coefficients `beta`
-# when the effects have them. Returns the call statement and, per predictor,
+# cumulative table, and the coefficients `beta` when the effects have them.
+# The predictors gather their columns directly by the codes. Returns the call
+# statement and, per predictor,
 # its coefficient's `(declaration, index)` or `nothing`. One shared prior
 # family broadcasts over `beta[1:ntargets]`; mixed families give one
 # statement per predictor. A shared Dirichlet concentration is one vector;
 # per-predictor concentrations are the columns of an increments x predictors
 # matrix (`Dirichlet.(eachcol(alpha))`).
-function _rk_ast_joint_monotonic_component!(definitions, taken, name, index, alphas, priors)
+function _rk_ast_joint_monotonic_component!(definitions, taken, name, alphas, priors)
     ntargets = length(priors)
     shared = all(isequal(first(alphas)), alphas)
     law = shared ? Expr(:call, :Dirichlet, :alpha) :
         Expr(:., :Dirichlet, Expr(:tuple, Expr(:call, :eachcol, :alpha)))
     simplex = Expr(:call, :.~, Expr(:call, :eachcol, Expr(:ref, :simplex_incr,
             Expr(:call, :(:), 1, :nincr), Expr(:call, :(:), 1, :ntargets))), law)
-    table = :((cumsum(vcat(zeros(1, ntargets), simplex_incr); dims=1))[c, :])
+    table = :(cumsum(vcat(zeros(1, ntargets), simplex_incr); dims=1))
     alpha = shared ? Expr(:vect, first(alphas)...) :
         Expr(:vcat, (Expr(:row, (alphas[t][i] for t in 1:ntargets)...)
             for i in eachindex(first(alphas)))...)
     suffix = shared ? "" : "_by_column"
-    inputs = (index, alpha, length(first(alphas)), ntargets)
+    inputs = (alpha, length(first(alphas)), ntargets)
     if all(isnothing, priors)
         body = _rk_ast_component_body(simplex, Expr(:return, table))
         callee = _rk_ast_shared_definition!(definitions, taken,
-            "brm_joint_monotonic_values" * suffix, (:c, :alpha, :nincr, :ntargets), body)
+            "brm_joint_monotonic_values" * suffix, (:alpha, :nincr, :ntargets), body)
         return _rk_ast_component_call(name, callee, inputs...), fill(nothing, ntargets)
     end
     any(isnothing, priors) && error("RK backend: internal: joint monotonic block " *
         "`$name` mixes effects with and without a coefficient")
     families = unique(first.(priors))
-    # Scale the tiny levels × predictors table before gathering rows. Scaling
-    # after the gather would broadcast over observations × predictors.
+    # Return the tiny levels × predictors table. Each predictor gathers only
+    # its own column, avoiding an observations × predictors materialization.
     scaled_table = :((cumsum(vcat(zeros(1, ntargets), simplex_incr); dims=1)) .* beta')
-    effect = Expr(:return, Expr(:ref, scaled_table, :c, :(:)))
+    effect = Expr(:return, scaled_table)
     if length(families) == 1
         family = only(families)
         roles = haskey(_RK_POPULATION_FAMILIES, family) &&
@@ -316,7 +317,7 @@ function _rk_ast_joint_monotonic_component!(definitions, taken, name, index, alp
         base = (family === :Normal ? "brm_joint_monotonic_effects" :
             string("brm_joint_monotonic_effects_", lowercase(string(family)))) * suffix
         callee = _rk_ast_shared_definition!(definitions, taken, base,
-            (:c, :alpha, :nincr, :ntargets, roles...), body)
+            (:alpha, :nincr, :ntargets, roles...), body)
         arguments = [_rk_ast_population_argument([last(prior)[j] for prior in priors])
             for j in eachindex(roles)]
         betas = [(Symbol(name, ".beta"), (t,)) for t in 1:ntargets]
@@ -330,7 +331,7 @@ function _rk_ast_joint_monotonic_component!(definitions, taken, name, index, alp
         Expr(:(=), :beta, Expr(:vect, coefficients...)),
         effect)
     callee = _rk_ast_shared_definition!(definitions, taken,
-        "brm_joint_monotonic_mixed_effects" * suffix, (:c, :alpha, :nincr, :ntargets), body)
+        "brm_joint_monotonic_mixed_effects" * suffix, (:alpha, :nincr, :ntargets), body)
     betas = [(Symbol(name, ".", coefficient), ()) for coefficient in coefficients]
     _rk_ast_component_call(name, callee, inputs...), betas
 end

@@ -63,12 +63,12 @@ main_statements(brmi) = filter(s -> !(s isa LineNumberNode), emitted_main(brmi).
     @test :(b_mm__g1__g2_groups_g1_level = brm_level_indices(g1, $groups)) in stmts
     @test :(b_mm__g1__g2_groups_g2_level = brm_level_indices(g2, $groups)) in stmts
     # `mo(rank)` in three predictors is one joint block, `mo_rank`: a simplex
-    # column and a coefficient per predictor, one table gathered once. Each
-    # predictor reads its column under its own name, never a number.
-    @test occursin("mo_rank ~ brm_joint_monotonic_effects(rank_idx, [1.0, 1.0], 2, 3, 0.0, 1.0)", main)
-    @test :(mo_c_rank = mo_rank[:, 1]) in stmts
-    @test :(mo_d_rank = mo_rank[:, 2]) in stmts
-    @test :(mo_e_rank = mo_rank[:, 3]) in stmts
+    # column and a coefficient per predictor, one small level table. Each
+    # predictor gathers its own column under its own name.
+    @test occursin("mo_rank ~ brm_joint_monotonic_effects([1.0, 1.0], 2, 3, 0.0, 1.0)", main)
+    @test :(mo_c_rank = mo_rank[rank_idx, 1]) in stmts
+    @test :(mo_d_rank = mo_rank[rank_idx, 2]) in stmts
+    @test :(mo_e_rank = mo_rank[rank_idx, 3]) in stmts
     @test !occursin("brm_monotonic_effect(", main)
     @test !occursin(r"mo_rank_\d", main)
     # `log(a) ~ …` sums into `log_a`, and `a` is its value.
@@ -105,9 +105,9 @@ end
     # The two `mo(rank)` effects are one block; a linked predictor's column
     # carries its link, as `pop_log_sigma` does. The single `mo1(rank)` keeps
     # its own component and SBBRMI's carrier name.
-    @test occursin("mo_rank ~ brm_joint_monotonic_effects(rank_idx, [1.0, 1.0], 2, 2, 0.0, 1.0)", main)
-    @test :(mo_mu_rank = mo_rank[:, 1]) in stmts
-    @test :(mo_log_sigma_rank = mo_rank[:, 2]) in stmts
+    @test occursin("mo_rank ~ brm_joint_monotonic_effects([1.0, 1.0], 2, 2, 0.0, 1.0)", main)
+    @test :(mo_mu_rank = mo_rank[rank_idx, 1]) in stmts
+    @test :(mo_log_sigma_rank = mo_rank[rank_idx, 2]) in stmts
     @test occursin("mo1_rank ~ brm_monotonic_value(rank_idx", main)
     code = BRM.stan_code(SBBRMI(brmi; mod=@__MODULE__, total_groups=()))
     for carrier in ("mo_rank", "mo1_rank", "mo_log_sigma_rank")

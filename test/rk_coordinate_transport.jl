@@ -635,7 +635,7 @@ end
     # The coefficient-free `mo1(q)` effects are one joint value block too.
     main = string(BRM._rk_emit_ast(BRM._brm_rk_plan(
         PublicCoordinateTransport.joint_monotonic(data))).main)
-    @test occursin("mo1_q ~ brm_joint_monotonic_values(q_idx, [1.0, 1.0], 2, 2)", main)
+    @test occursin("mo1_q ~ brm_joint_monotonic_values([1.0, 1.0], 2, 2)", main)
     @test isequal(data, saved)
 end
 
