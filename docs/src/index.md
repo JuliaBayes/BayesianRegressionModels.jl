@@ -5,7 +5,7 @@ layout: home
 hero:
   name: BayesianRegressionModels.jl
   text: A brms-shaped formula DSL for Julia
-  tagline: Same formula grammar, but your columns do not all have to come from one equal-length data frame. Runs directly in Turing or transpiles to Stan through StanBlocks.
+  tagline: Same formula grammar, but your columns do not all have to come from one equal-length data frame. Runs through ReactiveKernelsPPL or Turing, and can transpile to Stan through StanBlocks.
   actions:
     - theme: brand
       text: Gallery
@@ -26,6 +26,11 @@ brms-style syntax (`y ~ 1 + a + (1 | g)`, `log(err) ~ 1 + b`,
 `y ~ Normal(loc, err)`) into a [`BRMI`](@ref) intermediate
 representation, then lowers into a backend-specific executor:
 
+- [`RKBRMI`](@ref) — emits an executable ReactiveKernelsPPL model for Julia
+  evaluation and automatic differentiation. Its subject view also feeds
+  NLMEEstimation's posthoc, FOCE(I), and SAEM estimators. The
+  [PK method comparison](https://nsiccha.github.io/NLMEEstimation.jl/dev/pk-comparison)
+  runs those estimators and full joint WarmupHMC on one model.
 - [`TuringBRMI`](@ref) — direct Turing / `DynamicPPL.Model` execution for the
   [generic backend capabilities and support contract](turing-backend.md).
 - [`SBBRMI`](@ref) — StanBlocks → Stan source, fit via Pathfinder or full
