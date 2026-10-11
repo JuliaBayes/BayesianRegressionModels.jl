@@ -298,9 +298,15 @@ function _brmd_value(x::Expr, env, id)
             localenv=merge(env,(;provenance=merge(env.provenance,(;owner=lhs,
                 attribution...))))
             if role===:observation
+                # A bound or held-out response's twins carry its data source as
+                # their logical name. An omitted response has no twin: its
+                # forward-simulated carrier is claimed under the cell-local
+                # declaration itself, so match that declaration's identity too.
+                cell=get(env.provenance,:cell_owner,nothing)
                 outputs=Tuple((;name=o.name,logical=o.logical,role=o.role,kind=o.kind,
                     segments=_brmd_snapshot(o.segments)) for o in env.descriptor.outputs
-                    if o.logical in sources)
+                    if o.logical in sources || !isnothing(cell) && !isnothing(o.declaration) &&
+                        o.declaration.target===lhs && o.declaration.context==(cell,))
                 localenv=merge(localenv,(;outputs))
                 # Likelihood hooks and their observation parent share the
                 # actual response outputs, including held-out predictive twins.
