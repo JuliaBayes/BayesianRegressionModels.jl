@@ -571,9 +571,10 @@ end
 _brm_transport_is_simplex(output) = string(output.type) == "simplex"
 
 # One simplex block: the K-1 free RK coordinates `rk_names` of
-# `rk_declaration` with the K-1 free coordinates of SB carrier `output`.
+# `rk_declaration` with the K-1 free coordinates of SB carrier `output`. A
+# `column` names one simplex column of a two-axis RK declaration.
 function _brm_transport_simplex!(pairs, simplexes, address, rk_names,
-        rk_declaration, output, stan, plan)
+        rk_declaration, output, stan, plan; column=nothing)
     _brm_transport_is_simplex(output) || error(
         "brm_coordinate_transport: RK simplex $(address) pairs with SB carrier " *
         "`$(output.name)` of type `$(output.type)`, not a simplex")
@@ -588,16 +589,17 @@ function _brm_transport_simplex!(pairs, simplexes, address, rk_names,
         "elements; RK's has $K")
     for (j, (rk_name, stan_name)) in enumerate(zip(rk_names, names))
         push!(pairs, BRMCoordinatePair((; address..., index=j), rk_name, stan_name,
-            rk_declaration, (j,), :simplex))
+            rk_declaration, column === nothing ? (j,) : (j, column), :simplex))
     end
-    push!(simplexes, (; address, rk_declaration,
+    push!(simplexes, (; address, rk_declaration, column,
         stan_carrier=String(output.name), K, rk=collect(Symbol, rk_names),
         stan=collect(String, names)))
 end
 
 # A monotonic component: its increments are a simplex block resolved through
 # the formula term's `:simplex` role, and its coefficient is the population
-# column that SB labels with the same term's owning carrier.
+# column that SB labels with the same term's owning carrier. In a joint block
+# (`column`), the predictor owns one simplex column and one coefficient entry.
 function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:monotonic},
         record, rk, d, stan, stan_pos)
     head = record.head === :mo ? mo : mo1
@@ -609,8 +611,11 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:monotonic}
     address = (; kind=:simplex, predictor=record.predictor, term=entry.term)
     increments = Symbol(record.declaration, ".simplex_incr")
     free = length(_brm_transport_elements(output, stan, address))
-    _brm_transport_simplex!(pairs, simplexes, address,
-        [Symbol(increments, ".", j) for j in 1:free], increments, output, stan, d.plan)
+    column = get(record, :column, nothing)
+    rk_names = column === nothing ? [Symbol(increments, ".", j) for j in 1:free] :
+        [Symbol(increments, ".", j, ".", column) for j in 1:free]
+    _brm_transport_simplex!(pairs, simplexes, address, rk_names, increments, output,
+        stan, d.plan; column)
     record.beta || return
     coefficient = (; kind=:population, predictor=record.predictor,
         coefficient=entry.term)
@@ -619,8 +624,10 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:monotonic}
     isnothing(stan_name) && _brm_transport_error(:unsupported_coverage,
         "brm_coordinate_transport: monotonic coefficient $(coefficient) has no " *
         "sampled SB population coordinate")
-    beta = Symbol(record.declaration, ".beta")
-    push!(pairs, BRMCoordinatePair(coefficient, beta, stan_name, beta, (), :identity))
+    beta = something(get(record, :beta_declaration, nothing), Symbol(record.declaration, ".beta"))
+    index = get(record, :beta_index, ())
+    rk_name = isempty(index) ? beta : Symbol(beta, ".", join(index, "."))
+    push!(pairs, BRMCoordinatePair(coefficient, rk_name, stan_name, beta, index, :identity))
 end
 
 # An ungrouped HSGP component, paired by its formula axes and parameter roles.
@@ -1107,6 +1114,8 @@ function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
     end
     for block in t.simplexes
         x = _brm_rk_declaration_value(rk_values, block.rk_declaration)
+        column = get(block, :column, nothing)
+        column === nothing || (x = x[:, column])
         length(x) == block.K || error(
             "brm_check_coordinate_transport: RK simplex `$(block.rk_declaration)` " *
             "has $(length(x)) elements, expected $(block.K)")

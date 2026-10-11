@@ -72,14 +72,18 @@ const PINS = [
     # 5c2b80d5 keeps authored predictor names; 281933141 admits positional
     # level axes over pool definitions (`gg = vcat(g, h)`). f67bd182 adds
     # prepared HVPs, observation queries and pushforwards for Gaussian NLME.
+    # 659a6e8b adds joint matrix columns and two-axis priors; cb3a0db7 reads
+    # those columns in place during native reverse.
     # 7eafe9ba reads a positional level source as a whole pool, so per-group
     # tables need not have observation length. fbd0aef0 runs authored
     # `@plate for` cells over arrays per index; 2503ede6 supports undotted
     # per-index arithmetic. d702209e evaluates shared live cell outputs once
     # per subject and keeps weights based only on data independent of live
     # parameters. ddb68802 reports Gaussian observation arguments and colored
-    # pushforwards for one observed array per plate index.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "ddb6880259e4b61c7ac9a20d5f32870f22a108f4"),  # main
+    # pushforwards for one observed array per plate index. fa23fe7f reads
+    # columns of a row-gathered joint monotonic output in place during native
+    # reverse; 609c7a9d keeps composed plate cell queries at one subject.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "609c7a9d313272af5a3e946bba3af3bdc962eb3a"),  # main
 ]
 
 function main()

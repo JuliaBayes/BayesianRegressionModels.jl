@@ -319,11 +319,13 @@ blend_values(p, q, r, rows) = p[rows] .+ q[rows] .+ r[rows]
     end)
     u = check_value_gradient(backend)
     nt = constrain(backend.model.layout, u)
-    # Population components are named after each linked target (SBBRMI's names).
+    # The three linked targets share `hcat(1, x)`, so their coefficients are
+    # one joint block over it, one column per target in formula order.
     linear(beta) = beta[1] .+ beta[2] .* df.x
-    p = 1 ./ (1 .+ exp.(-linear(nt.pop_logit_p.beta_pop)))
-    q = cdf.(Normal(), linear(nt.pop_probit_q.beta_pop))
-    r = -expm1.(-exp.(linear(nt.pop_cloglog_r.beta_pop)))
+    beta = nt.pop_Intercept_x.beta_pop
+    p = 1 ./ (1 .+ exp.(-linear(beta[:, 1])))
+    q = cdf.(Normal(), linear(beta[:, 2]))
+    r = -expm1.(-exp.(linear(beta[:, 3])))
     expected = p[df.rows] .+ q[df.rows] .+ r[df.rows]
     @test value_query(backend, :pointwise, u).y ≈ logpdf.(Normal.(expected, 1), df.y)
 end
@@ -364,9 +366,13 @@ inverse_link_collision_reader(p, q, r, rows, logistic, brm_value_function) =
             mod = ext._rk_emit_module(emitted)
             @test getfield(mod, first(binding)) === BRM.logistic
             names = coordinate_names(backend.model.layout)
-            @test sort(names) == sort([Symbol("pop_$(target).beta_pop.$j")
-                for target in (:logit_p, :probit_q, :cloglog_r) for j in 1:2])
-            index(target, j) = only(findall(==(Symbol("pop_$(target).beta_pop.$j")), names))
+            # The three linked targets share `hcat(1, x)`: one joint block, one
+            # coefficient column per target in formula order.
+            column = (logit_p=1, probit_q=2, cloglog_r=3)
+            @test sort(names) == sort([Symbol("pop_Intercept_x.beta_pop.$j.$t")
+                for t in 1:3 for j in 1:2])
+            index(target, j) = only(findall(
+                ==(Symbol("pop_Intercept_x.beta_pop.$j.$(column[target])")), names))
             linear(u, target) = u[index(target, 1)] .+ u[index(target, 2)] .* data.x
             function oracle(u)
                 p = 1 ./ (1 .+ exp.(-linear(u, :logit_p)))

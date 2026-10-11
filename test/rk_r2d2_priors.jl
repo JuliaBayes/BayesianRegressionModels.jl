@@ -32,8 +32,12 @@ end
 
 function r2d2_components(u, names; nphi, latent=false, partial=false)
     index(name) = only(findall(==(Symbol(name)), names))
-    beta = index.(["pop_mu_a.beta_pop.1", "pop_mu_a.beta_pop.2",
-        "pop_mu_b.beta_pop.1", "pop_mu_b.beta_pop.2"])
+    # `mu_a` and `mu_b` share `hcat(1, x)`: one joint block, column `t` per
+    # predictor, unless budget-derived slope scales keep their own components.
+    beta_name(t, j) = let joint = "pop_Intercept_x.beta_pop.$j.$t"
+        Symbol(joint) in names ? joint : "pop_mu_$(t == 1 ? "a" : "b").beta_pop.$j"
+    end
+    beta = index.([beta_name(1, 1), beta_name(1, 2), beta_name(2, 1), beta_name(2, 2)])
     z = [index("b_shared_subject.z.$j.$k") for j in 1:3, k in 1:2]
     ir2 = index("b_shared_subject_r2d2_1_R2")
     iphi = index.(["b_shared_subject_r2d2_1_phi.$j" for j in 1:nphi-1])

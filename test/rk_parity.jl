@@ -67,15 +67,35 @@ include(joinpath(@__DIR__, "rk_source_roundtrip.jl"))
 
 _parity_backend(brmi) = check_rk_source_roundtrip(BRM.RKBRMI(brmi))
 
+# The emitter's semantic record for a coefficient names its declaration and
+# index, whether the coefficient sits in its own `pop_<target>` / `mo_<c>`
+# component or in a joint block shared by several predictors.
+function _parity_records(backend, kind, name)
+    [r for r in BRM._rk_coordinate_records(backend.plan)
+        if r.kind === kind && r.predictor === name]
+end
+function _parity_record_value(nt, declaration, index)
+    value = nt
+    for field in split(String(declaration), '.')
+        value = getproperty(value, Symbol(field))
+    end
+    isempty(index) ? value : value[index...]
+end
+
 # Read the population coefficients in formula order. Data-column
-# coefficients live in the `pop_<target>` component (`beta_pop`, or
-# `beta_pop_<j>` for mixed families), monotonic coefficients in their
-# `mo_<c>` component; others keep scalar names. The density references below
-# retain their independent predictor/prior algebra.
+# coefficients live in a population component (its own `pop_<target>`, or a
+# joint block over a shared design), monotonic coefficients in their
+# monotonic component; others keep scalar names. Recorded coefficients are
+# read through their semantic records; unrecorded ones (shared budgets) from
+# the predictor's own component. The density references below retain their
+# independent predictor/prior algebra.
 function _parity_population(nt, backend, name)
     hasproperty(nt, name) && return getproperty(nt, name)
     plan = backend.plan isa BRM._RKValuePlan ? backend.plan.regression : backend.plan
     predictor = only(p for p in plan.predictors if p.name === name)
+    recorded = Dict(r.coefficient => r for r in _parity_records(backend, :population, name))
+    monotonic = Dict(r.source => r for r in _parity_records(backend, :monotonic, name)
+        if r.head === :mo)
     target = predictor.link === :identity ? string(name) : string(predictor.link, "_", name)
     population = if hasproperty(nt, Symbol("pop_", target))
         component = getproperty(nt, Symbol("pop_", target))
@@ -91,8 +111,12 @@ function _parity_population(nt, backend, name)
         value = if hasproperty(nt, scalar)
             getproperty(nt, scalar)
         elseif term.kind === :monotonic
-            getproperty(nt, Symbol(replace(string(term.options.increments),
-                "_simplex_incr" => ""))).beta
+            r = monotonic[term.options.source]
+            get(r, :column, nothing) === nothing ? getproperty(nt, r.declaration).beta :
+                _parity_record_value(nt, r.beta_declaration, r.beta_index)
+        elseif haskey(recorded, term.addressee)
+            r = recorded[term.addressee]
+            _parity_record_value(nt, r.declaration, get(r, :index, ()))
         else
             popfirst!(population)
         end
@@ -124,6 +148,11 @@ function _parity_coordinate(backend, name, addressee)
     names = coordinate_names(backend.model.layout)
     scalar = Symbol(name, "_", addressee)
     scalar in names && return scalar
+    for r in _parity_records(backend, :population, name)
+        r.coefficient === addressee || continue
+        index = get(r, :index, ())
+        return isempty(index) ? r.declaration : Symbol(r.declaration, ".", join(index, "."))
+    end
     plan = backend.plan isa BRM._RKValuePlan ? backend.plan.regression : backend.plan
     predictor = only(p for p in plan.predictors if p.name === name)
     target = predictor.link === :identity ? string(name) : string(predictor.link, "_", name)
