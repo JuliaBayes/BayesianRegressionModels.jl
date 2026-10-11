@@ -44,6 +44,8 @@ end
     @test nlme_layout(m) == NLMELayout(; ntheta=3, nsigma=1, eta_blocks=[2])
     @test evaluation_style(m) isa BatchedEvaluation
     @test saem_population_gradient_style(m) isa PerSubjectEvaluation
+    @test saem_population_gradient_style(m, Val(:online)) isa PerSubjectEvaluation
+    @test saem_population_gradient_style(m, Val(:mixture)) isa BatchedEvaluation
     @test provides_eta_hessian(m)
     names = parameter_names(m)
     @test length(names.theta) == 3 && length(names.sigma) == 1 && length(names.eta) == 2

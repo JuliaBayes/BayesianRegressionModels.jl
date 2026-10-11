@@ -24,6 +24,8 @@ NE.nlme_layout(m::BRM.BRMNLMEModel) = NE.NLMELayout(;
 
 NE.evaluation_style(::BRM.BRMNLMEModel) = NE.BatchedEvaluation()
 NE.saem_population_gradient_style(::BRM.BRMNLMEModel) = NE.PerSubjectEvaluation()
+NE.saem_population_gradient_style(::BRM.BRMNLMEModel, ::Val{:mixture}) =
+    NE.BatchedEvaluation()
 NE.provides_eta_hessian(::BRM.BRMNLMEModel) = true
 # Other numerical derivatives still use Enzyme. The RK pointwise query mixes
 # active and constant overlay reads.
