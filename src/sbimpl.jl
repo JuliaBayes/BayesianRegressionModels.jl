@@ -2834,13 +2834,16 @@ draws are not interchangeable between them.
 `held_out` names one response or a collection of responses — a strict
 subset. Holding out every observation is refused: there would be nothing to
 fit, and held-out likelihoods are not the prior mechanism. Each named
-observation is emitted through StanBlocks' cv activity analysis: its
-likelihood is removed while its predictive draw remains in generated
-quantities. Other likelihoods remain active, so `held_out=:qt_y` fits the rest
-of a joint model while drawing QT-only parameters from their priors. Names
-resolve against both top-level responses and data-backed observations inside
-`kernel(...)` cells. For prior draws, keep the model identical and omit the
-response column from the data — the program lowers to generated quantities
+observation is emitted through StanBlocks' cv activity analysis, the
+given-a-fit transformation: its likelihood is removed while its predictive
+draw remains in generated quantities, and every parameter it reads — even one
+only it reads — stays a parameter, so a fit's draws supply them. It is not a
+fit that ignores the response: to not condition on a response (say a PK-only
+fit of a joint PK/QT model), omit its column from the data instead, and
+everything no remaining likelihood reaches moves to generated quantities.
+Names resolve against both top-level responses and data-backed observations
+inside `kernel(...)` cells. For prior draws, keep the model identical and omit
+the response column from the data — the program lowers to generated quantities
 automatically.
 
 Formula statements `sd(:, ID) ~ Exponential(scale)` and

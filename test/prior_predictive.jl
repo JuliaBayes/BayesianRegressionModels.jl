@@ -283,6 +283,71 @@ end
           BayesianRegressionModels.stan_code(pk_only)
 end
 
+# Held-out versus omitted responses are two different transformations (user,
+# StanBlocks decision 1dmnxji, 2026-10-09): `held_out` cv-marks the response,
+# which is the given-a-fit transformation — its likelihood leaves `model`, but
+# every parameter it reads, even one only it reads, stays a parameter so a
+# fit's draws supply it. Omitting the response column is the not-conditioning
+# transformation: everything no remaining likelihood reaches re-draws in
+# generated quantities. Pin both placements, side by side, in every observation
+# shape (BRM snag held-out-retains-2f8dd4cd).
+output_kinds(sb) = Dict(o.name => o.kind for o in brm_descriptor(sb).outputs)
+
+plate_builder = @brm begin
+    sigma_pk ~ Exponential(1)
+    sigma_qt ~ Exponential(1)
+    log_scale ~ 1 + (1 | p | subject)
+    @plate for i in eachindex(log_scale)
+        location = (dose[i] / 10.0) * exp(log_scale[i])
+        pk_y[i] ~ normal(location, sigma_pk)
+        qt_y[i] ~ normal(location, sigma_qt)
+        loc[i] = location
+    end
+end
+
+ragged_builder = @brm begin
+    sigma_y ~ Exponential(1)
+    sigma_qt ~ Exponential(1)
+    log_scale ~ 1 + (1 | p | subject)
+    pred ~ kernel(ragged(obs_idx, obs_subject), qt_y, log_scale) do idxs, qt_obs, ls
+        qt_obs ~ normal(exp(ls), sigma_qt)
+        idxs .* exp(ls)
+    end
+    ragged(obs_y, obs_subject) ~ Normal(pred, sigma_y)
+end
+
+ragged_df = (;
+    subject=[:a, :b, :c], qt_y=[0.8, 1.2, 1.7],
+    obs_subject=[:a, :a, :b, :c, :c], obs_idx=[1.0, 2.0, 1.0, 1.0, 2.0],
+    obs_y=[1.0, 2.1, 0.9, 1.2, 2.3],
+)
+
+@testset "held-out response keeps its parameters; omitted response re-draws them" begin
+    drop(data, name) = NamedTuple(k => v for (k, v) in pairs(data) if k !== name)
+    cases = (
+        (label="top-level", builder=joint_builder, data=joint_df, response=:z,
+         exclusive=:sigma_z, shared=(:sigma_y, :pop_mu_beta_pop)),
+        (label="kernel cell", builder=kernel_builder, data=kernel_df, response=:qt_y,
+         exclusive=:sigma_qt, shared=(:sigma_pk,)),
+        (label="@plate cell", builder=plate_builder, data=kernel_df, response=:qt_y,
+         exclusive=:sigma_qt, shared=(:sigma_pk,)),
+        (label="ragged join", builder=ragged_builder, data=ragged_df, response=:obs_y,
+         exclusive=:sigma_y, shared=(:sigma_qt,)),
+    )
+    for case in cases
+        @testset "$(case.label)" begin
+            held = output_kinds(SBBRMI(case.builder(case.data); mod=@__MODULE__,
+                                       held_out=case.response))
+            omitted = output_kinds(@test_logs (:warn,) match_mode=:any SBBRMI(
+                case.builder(drop(case.data, case.response)); mod=@__MODULE__))
+            @test all(name -> held[name] === :parameter, case.shared)
+            @test all(name -> omitted[name] === :parameter, case.shared)
+            @test held[case.exclusive] === :parameter
+            @test omitted[case.exclusive] === :generated_quantity
+        end
+    end
+end
+
 @testset "kernel-nested omitted response: count-form plate forward-simulates" begin
     # The one prior spelling for kernel responses: the model identical, the
     # outcome columns omitted. The plate drops the unbound positionals (count
