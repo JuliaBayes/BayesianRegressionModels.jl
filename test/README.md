@@ -84,7 +84,9 @@ environment above.
 `nlme_estimation_ext.jl` covers the NLMEEstimation.jl protocol extension:
 batched evaluation, analytic η Hessian blocks, Gaussian observation moments
 and colored η Jacobians, `check_protocol`, and Newton posthoc against
-independent oracles. NLMEEstimation.jl is not published yet, so it is not part of
+independent oracles. Its Gaussian checks include arrays observed within plate
+cells and a modeled scale shared by the observations in each cell.
+NLMEEstimation.jl is not published yet, so it is not part of
 `test/Project.toml`. Run the file from a copy of this environment that develops
 a local NLMEEstimation checkout:
 
