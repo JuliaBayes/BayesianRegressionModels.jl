@@ -79,8 +79,11 @@ const PINS = [
     # `@plate for` cells over arrays per index; 2503ede6 supports undotted
     # per-index arithmetic. d702209e evaluates shared live cell outputs once
     # per subject and keeps weights based only on data independent of live
-    # parameters.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "d702209e6f452ad2c833b517667a3b2406b20978"),  # main
+    # parameters. ddb68802 reports Gaussian observation arguments and colored
+    # pushforwards for one observed array per plate index. fa23fe7f reads
+    # columns of a row-gathered joint monotonic output in place during native
+    # reverse; 609c7a9d keeps composed plate cell queries at one subject.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "609c7a9d313272af5a3e946bba3af3bdc962eb3a"),  # main
 ]
 
 function main()

@@ -69,12 +69,15 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # spelling), ecf99453 (hidden bound operands packed into one AD context),
 # 1603d87a (sampler queries that retain pointwise densities from the reverse
 # sweep), 5c2b80d5 (authored predictor names), 281933141 (positional
-# level axes over pool definitions), f67bd182 (Gaussian NLME queries),
-# 659a6e8b (joint matrix columns and two-axis priors), cb3a0db7 (in-place
-# column reads in native reverse), 7eafe9ba (whole-pool level reads),
-# fbd0aef0 + 2503ede6 (arrays-per-index `@plate for` cells), and d702209e
-# (shared cell work evaluated once with data-only weights).
+# level axes over pool definitions), f67bd182 (prepared HVPs, observation
+# queries and pushforwards for Gaussian NLME), 659a6e8b (joint matrix columns
+# and two-axis priors), cb3a0db7 (in-place native reverse column reads),
+# 7eafe9ba (whole-pool level reads), fbd0aef0 + 2503ede6 (arrays-per-index
+# `@plate for` cells), d702209e (shared cell work evaluated once), ddb68802
+# (Gaussian observation arguments), fa23fe7f (in-place column reads of a
+# row-gathered joint monotonic output), and 609c7a9d (one composed plate cell
+# query per subject).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "d702209e6f452ad2c833b517667a3b2406b20978"
+rev = "609c7a9d313272af5a3e946bba3af3bdc962eb3a"

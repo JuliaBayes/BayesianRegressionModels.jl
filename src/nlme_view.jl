@@ -296,12 +296,9 @@ _brm_nlme_gaussian_plan(plan::_RKStructuralPlan) =
         o.interval === nothing && o.mi_jobs === nothing, plan.responses)
 function _brm_nlme_gaussian_plan(plan::_RKValuePlan)
     !isempty(plan.observations) && all(o -> begin
-        # RK's :observations preset currently excludes one observed array per
-        # plate index. Keep such models available to the posthoc likelihood path.
         o.distribution.callable in (Normal, StanBlocks.normal) &&
             o.modifier === nothing && o.weight === nothing &&
-            o.missing_response === nothing &&
-            !(o.response isa AbstractVector{<:AbstractVector})
+            o.missing_response === nothing
     end, plan.observations)
 end
 _brm_nlme_gaussian_plan(plan) = false
@@ -332,9 +329,31 @@ function _brm_nlme_observed(backend::RKBRMI, attribution, nsubjects)
     observed, scalar_attribution
 end
 
-function _brm_nlme_observation_argument(value, n, name, field)
-    values = value isa Number ? fill(Float64(value), n) :
+function _brm_nlme_observation_argument(value, sizes, name, field)
+    n = sum(sizes)
+    values = if value isa Number
+        fill(Float64(value), n)
+    elseif value isa AbstractVector && length(value) == length(sizes)
+        out = Float64[]
+        sizehint!(out, n)
+        for (part, size) in zip(value, sizes)
+            if part isa Number
+                append!(out, Iterators.repeated(Float64(part), size))
+            elseif part isa AbstractArray
+                length(part) == size || throw(DimensionMismatch(
+                    "brm_nlme_model: `$name.$field` has $(length(part)) entries " *
+                    "for a plate cell with $size observations"))
+                append!(out, Float64.(vec(part)))
+            else
+                _brm_nlme_error(
+                    "brm_nlme_model: `$name.$field` is neither a scalar nor an array " *
+                    "in a plate cell")
+            end
+        end
+        out
+    else
         Float64.(brm_flatten_cells(value))
+    end
     length(values) == n || throw(DimensionMismatch(
         "brm_nlme_model: `$name.$field` has $(length(values)) entries for $n observations"))
     values
@@ -349,16 +368,21 @@ function _brm_nlme_moments(m, arguments, tangents=())
     variance_rows = [Vector{Float64}[] for _ in 1:nsubjects]
     for (name, subjects) in m.observation_attribution
         n = length(subjects)
+        sizes = [value isa AbstractArray ? length(value) : 1
+            for value in m.backend.plan.columns[name]]
+        sum(sizes) == n || error(
+            "brm_nlme_model: response `$name` has $(sum(sizes)) observed values " *
+            "for $n attributed pointwise entries")
         field = getproperty(arguments, name)
-        locations = _brm_nlme_observation_argument(field.location, n, name, :location)
-        scales = _brm_nlme_observation_argument(field.scale, n, name, :scale)
+        locations = _brm_nlme_observation_argument(field.location, sizes, name, :location)
+        scales = _brm_nlme_observation_argument(field.scale, sizes, name, :scale)
         all(s -> isfinite(s) && s > 0, scales) || _brm_nlme_error(
             "brm_nlme_model: Gaussian response `$name` has a non-finite or " *
             "non-positive scale")
         dlocations = [_brm_nlme_observation_argument(getproperty(t, name).location,
-            n, name, :location) for t in tangents]
+            sizes, name, :location) for t in tangents]
         dscales = [_brm_nlme_observation_argument(getproperty(t, name).scale,
-            n, name, :scale) for t in tangents]
+            sizes, name, :scale) for t in tangents]
         for (k, i) in enumerate(subjects)
             push!(means[i], locations[k])
             push!(variances[i], abs2(scales[k]))
