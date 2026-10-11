@@ -186,4 +186,29 @@ function BRM._rk_value_gradient_and_pointwise!(query::SamplerQuery,
     value, gradient, retained.pointwise
 end
 
+# The Gaussian NLME view uses one primal observations query and one set of
+# colored η directions. Direction k moves margin k for every subject; their
+# responses are conditionally independent, so each output sees only its own
+# subject's component of that direction.
+BRM._rk_observation_query(backend::BRM.RKBRMI) =
+    prepare_query(backend.model, _rk_translated_plan(backend.plan), :observations)
+BRM._rk_observation_values(query, u::AbstractVector) = Base.invokelatest(query, u)
+function BRM._rk_observation_pushforward(backend::BRM.RKBRMI,
+        view::BRM.BRMNLMEView, unit::Vector{Float64}, ad_backend)
+    neta = length(first(view.subject_coordinates))
+    directions = ntuple(neta) do k
+        direction = zeros(Float64, length(unit))
+        for block in view.subject_coordinates
+            direction[block[k]] = 1.0
+        end
+        direction
+    end
+    query = prepare_query_ad(prepare_ad_pushforward, backend.model,
+        _rk_translated_plan(backend.plan), :observations, ad_backend,
+        directions, unit)
+    (; query, directions)
+end
+BRM._rk_observation_value_and_pushforward(bundle, u::AbstractVector) =
+    ad_value_and_pushforward(bundle.query, bundle.directions, u)
+
 end

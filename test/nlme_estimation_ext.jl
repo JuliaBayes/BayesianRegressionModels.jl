@@ -125,3 +125,83 @@ end
     subset = empirical_bayes(m, θ, σ, ω; subjects=[3, 1])
     @test subset.modes ≈ H[:, [3, 1]] rtol=1e-6 atol=1e-8
 end
+
+@stestset "batched Gaussian observations and colored η Jacobians" begin
+    d = NLME_RAGGED_DATA
+    m = brm_nlme_model(RKBRMI(nlme_ragged_pk(d)); ad_backend=NLME_AD)
+    @test observation_model(m) isa GaussianObservations
+    θ = [0.4, 2.1]
+    σ = [log(0.8)]
+    H = [0.15 -0.2 0.05; -0.1 0.25 0.3]
+    population(pred) = θ[findfirst(==(only(r.population for r in m.view.mu_references
+        if r.predictor === pred)), m.theta)]
+    margin(pred) = findfirst(b -> b.predictor === pred, m.view.block_margins)
+    kcl, kv = margin(:CL), margin(:V)
+    function oracle(i)
+        level = string(m.view.levels[i])
+        r = only(findall(==(level), d.subject))
+        rows = findall(==(level), d.obs_subject)
+        CL = exp(population(:CL) + H[kcl, i])
+        V = exp(population(:V) + H[kv, i])
+        kt = (CL / V) .* d.t[rows]
+        μ = d.dose[r] / V .* exp.(-kt)
+        v = fill(exp(2 * only(σ)), length(rows))
+        Jμ = zeros(length(rows), size(H, 1))
+        Jμ[:, kcl] .= μ .* -kt
+        Jμ[:, kv] .= μ .* (kt .- 1)
+        (d.y[rows], μ, v, Jμ, zeros(size(Jμ)))
+    end
+    for subjects in ([1, 2, 3], [3, 1], [2])
+        observed = observations(m, subjects)
+        moments = observation_moments(m, subjects, θ, σ, H[:, subjects])
+        with_jacobians = observation_moments_and_jacobians(
+            m, subjects, θ, σ, H[:, subjects])
+        densities = conditional_loglikelihoods(m, subjects, θ, σ, H[:, subjects])
+        for (k, i) in enumerate(subjects)
+            y, μ, v, Jμ, Jv = oracle(i)
+            @test observed[k] == y
+            @test moments[k][1] ≈ μ rtol=1e-12
+            @test moments[k][2] ≈ v rtol=1e-12
+            @test with_jacobians[k][1] ≈ μ rtol=1e-12
+            @test with_jacobians[k][2] ≈ v rtol=1e-12
+            @test with_jacobians[k][3] ≈ Jμ rtol=1e-10 atol=1e-12
+            @test with_jacobians[k][4] ≈ Jv atol=1e-12
+            @test sum(logpdf.(Normal.(μ, sqrt.(v)), y)) ≈ densities[k] rtol=1e-12
+        end
+    end
+    ω = omega_parameters(nlme_layout(m), [0.09 0.0; 0.0 0.04])
+    @test check_protocol(m, θ, σ, ω; η=H)
+end
+
+@stestset "a modeled Gaussian scale has a nonzero variance Jacobian" begin
+    d = (; subject=["a", "b", "a", "c", "b"], y=[1.0, 2.2, 0.6, -0.4, 1.7])
+    brmi = @brm d begin
+        mu ~ 1 + (1 | subject)
+        log(sigma) ~ 1 + (1 | subject)
+        y ~ Normal(mu, sigma)
+    end
+    m = brm_nlme_model(RKBRMI(brmi); ad_backend=NLME_AD)
+    @test observation_model(m) isa GaussianObservations
+    @test isempty(m.sigma)
+    θ = [name === :mu_Intercept ? 0.5 : log(0.8)
+        for name in m.view.coordinates[m.theta]]
+    H = [0.1 -0.2 0.3; -0.05 0.2 -0.1]
+    kmu = findfirst(b -> b.predictor === :mu, m.view.block_margins)
+    ksigma = findfirst(b -> b.predictor === :sigma, m.view.block_margins)
+    for subjects in ([1, 2, 3], [3, 1])
+        y = observations(m, subjects)
+        result = observation_moments_and_jacobians(m, subjects, θ, Float64[], H[:, subjects])
+        for (k, i) in enumerate(subjects)
+            rows = findall(==(string(m.view.levels[i])), d.subject)
+            μ = fill(0.5 + H[kmu, i], length(rows))
+            v = fill(exp(2 * (log(0.8) + H[ksigma, i])), length(rows))
+            Jμ = zeros(length(rows), 2); Jμ[:, kmu] .= 1
+            Jv = zeros(length(rows), 2); Jv[:, ksigma] .= 2 .* v
+            @test y[k] == d.y[rows]
+            @test result[k][1] ≈ μ rtol=1e-12
+            @test result[k][2] ≈ v rtol=1e-12
+            @test result[k][3] ≈ Jμ rtol=1e-10 atol=1e-12
+            @test result[k][4] ≈ Jv rtol=1e-10 atol=1e-12
+        end
+    end
+end
