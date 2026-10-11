@@ -250,19 +250,24 @@ function _brm_nlme_unit_point(backend::RKBRMI, view::BRMNLMEView)
 end
 
 # Which subject each pointwise density element belongs to, per observed name:
-# one element per row of the grouping column (flat rows on the grouping axis,
-# or one in-cell array per plate cell), or a `ragged(y, g)` axis whose labels
-# are subject labels. Anything else is refused rather than attributed by
+# a `ragged(y, g)` axis whose labels are subject labels, or else one element
+# per row of the grouping column (flat rows on the grouping axis, or one in-cell
+# array per plate cell). Anything else is refused rather than attributed by
 # position.
 _brm_nlme_ragged_labels(plan, name) = nothing
 _brm_nlme_ragged_labels(plan::_RKHeldOutPlan, name) =
     _brm_nlme_ragged_labels(plan.parent, name)
+# A ragged join gathers its response cell by cell (`_rk_kernel_observed_layout`),
+# so its densities follow the row partition, not the flat row order: the labels
+# are gathered by the same partition.
 function _brm_nlme_ragged_labels(plan::_RKValuePlan, name)
     for o in plan.observations
         o.name === name || continue
         lhs = o.lhs
         lhs isa ExprColumn && getf(lhs) === ragged || return nothing
-        return parent(parent(getargs(lhs)[2]))
+        kernels = Tuple(a for a in plan.assignments if a isa _RKPreparedKernelAssignment)
+        layout = _rk_kernel_observed_layout(o, kernels)
+        return parent(parent(getargs(lhs)[2]))[brm_flatten_cells(layout.rows)]
     end
     nothing
 end
@@ -279,15 +284,17 @@ function _brm_nlme_attribution(backend::RKBRMI, view::BRMNLMEView, fields)
     attribution = Pair{Symbol,Vector{Int}}[]
     for (name, values) in pairs(fields)
         m = length(values)
-        if m == L
+        # A ragged axis is attributed by its labels even when its length
+        # happens to equal the grouping column's.
+        labels = _brm_nlme_ragged_labels(backend.plan, name)
+        if labels === nothing
+            m == L || _brm_nlme_error(
+                "brm_nlme_model: observation `$name` has $m pointwise densities, neither " *
+                "one per row of `$(view.group)` ($L) nor a `ragged(..., group)` axis; its " *
+                "densities cannot be attributed to subjects")
             push!(attribution, name => row_subject)
             continue
         end
-        labels = _brm_nlme_ragged_labels(backend.plan, name)
-        labels === nothing && _brm_nlme_error(
-            "brm_nlme_model: observation `$name` has $m pointwise densities, neither " *
-            "one per row of `$(view.group)` ($L) nor a `ragged(..., group)` axis; its " *
-            "densities cannot be attributed to subjects")
         length(labels) == m || _brm_nlme_error(
             "brm_nlme_model: observation `$name` has $m pointwise densities but its " *
             "ragged grouping column has $(length(labels)) labels")
