@@ -208,22 +208,26 @@ end
 # (`nu`, a constant or graph value) also draws one mixing weight per level,
 # `w ~ InverseGamma(nu/2, nu/2)`, and scales that level's row by `sqrt(w)`:
 # the same scale mixture as StanBlocks' `_sb_student_t_ranef`.
+# Rows are level positions, one per level of `g`: callers gather them with
+# positions computed from the data (`b[g_level, k]`), which a `levels(g)` axis
+# would instead read as labels.
 function _rk_ast_group_component!(definitions, statements, taken, name, group, K, eta,
         priors; scale_value=nothing, nu=nothing)
     priors, prior_inputs, prior_values = _rk_ast_component_prior_inputs(priors,
         (:g, :K, :eta, :tau, :L, :z, :w, :nu, (Symbol(:tau_, j) for j in 1:K)...))
     index = K > 1 ? Expr(:call, :(:), 1, :K) : Expr(:call, :(:), 1, 1)
+    rows = Expr(:call, :(:), 1, Expr(:call, :length, Expr(:call, :levels, :g)))
     body = Expr(:block)
     scale_value === nothing && append!(body.args, _rk_ast_group_scales(priors, index))
     K > 1 && push!(body.args, Expr(:call, :~, :L, Expr(:call, :LKJCholesky, :K, :eta)))
-    push!(body.args, Expr(:call, :.~, Expr(:ref, :z, Expr(:call, :levels, :g), index),
+    push!(body.args, Expr(:call, :.~, Expr(:ref, :z, rows, index),
         _rk_ast_dotted(:Normal, 0, 1)))
     value = K > 1 ?
         Expr(:call, :*, :z, Expr(:call, :transpose, Expr(:call, :.*, :tau, :L))) :
         Expr(:call, :.*, :z, Expr(:ref, :tau, 1))
     if nu !== nothing
         half = Expr(:call, :/, :nu, 2)
-        push!(body.args, Expr(:call, :.~, Expr(:ref, :w, Expr(:call, :levels, :g)),
+        push!(body.args, Expr(:call, :.~, Expr(:ref, :w, rows),
             _rk_ast_dotted(:InverseGamma, half, half)))
         value = Expr(:call, :.*, _rk_ast_dotted(:sqrt, :w), value)
     end

@@ -69,10 +69,17 @@ const PINS = [
     # `sampler_value_gradient_and_retained!` (pointwise densities from the
     # gradient's reverse sweep), which BRM's lockstep NLME gradient uses; it
     # contains ecf99453 and bed5d467, plus 3fc1f0c7, 54d4a7b9 and 46d5520c.
-    # f67bd182 contains 5c2b80d5 and adds prepared query HVPs for NLME η
-    # Hessian blocks, plus :observations and query pushforwards for Gaussian
-    # NLME moments and η Jacobians.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "f67bd1829864da2d456247be99a54b6605bb2c95"),  # main
+    # 5c2b80d5 contains 1603d87a and names every @rkppl predictor node after
+    # its authored name, so a scalar lone intercept `mu = mu_Intercept` stays
+    # queryable as `mu`. 281933141 contains 5c2b80d5 and admits positional
+    # `1:length(levels(gg))` axes over pool definitions (`gg = vcat(g, h)`),
+    # which BRM's group blocks declare so `b[g_level, k]` reads positions.
+    # f67bd182 adds prepared query HVPs, :observations and query pushforwards
+    # for NLME η Hessians, Gaussian moments and η Jacobians.
+    # 7eafe9ba contains f67bd182 and 9b2e3080: a positional level axis reads
+    # its source as a whole pool, so a per-group table need not have
+    # observation length.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "7eafe9ba7b99c9e569dbe47a6b6a2c60b4759729"),  # main
 ]
 
 function main()
