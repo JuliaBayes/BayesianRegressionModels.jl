@@ -120,19 +120,18 @@ function NE.conditional_loglikelihood_hessian_blocks(m::BRM.BRMNLMEModel, subjec
     blocks[subjects]
 end
 
-# Intercept margins only: their population coefficient and random effect both
-# add one unit to the predictor, so the density depends on them only through
-# their sum. Slope margins are left undeclared until BRM proves their
-# population and random-effect columns are the same transformed column.
+# The view records only population columns whose shift can be absorbed into a
+# random-effect margin on every row of each subject.
 function NE.mu_referencing(m::BRM.BRMNLMEModel)
-    refs = [r for r in m.view.mu_references if r.coefficient === :Intercept]
+    refs = m.view.mu_references
     isempty(refs) && return nothing
-    X = zeros(Float64, sum(m.eta_blocks), length(refs))
-    for (j, r) in enumerate(refs)
-        X[r.subject, j] = 1.0
+    design = [zeros(Float64, sum(m.eta_blocks), length(refs))
+        for _ in m.view.levels]
+    for (j, r) in enumerate(refs), i in eachindex(design)
+        design[i][r.subject, j] = r.design[i]
     end
     NE.MuReferencing([findfirst(==(r.population), m.theta) for r in refs],
-        fill(X, length(m.view.levels)))
+        design)
 end
 
 NE.parameter_names(m::BRM.BRMNLMEModel) = (

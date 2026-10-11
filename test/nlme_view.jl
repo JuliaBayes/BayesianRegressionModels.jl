@@ -30,8 +30,12 @@ include(joinpath(@__DIR__, "nlme_fixtures.jl"))
         findall(r -> r === :subject_effect, view.role)
     @test [(m.predictor, m.coefficient) for m in view.block_margins] ==
         [(:CL, :Intercept), (:V, :Intercept)]
-    # Both margins are mu-referenced on their log-scale intercepts.
-    @test length(view.mu_references) == 2
+    # The subject-constant weight column also shifts through CL's random
+    # intercept, even without a random weight slope.
+    @test Set((r.predictor, r.coefficient) for r in view.mu_references) ==
+        Set([(:CL, :Intercept), (:CL, :wt), (:V, :Intercept)])
+    @test only(r.design for r in view.mu_references if r.coefficient === :wt) ==
+        [0.1, -0.3, 0.6, -0.8]
     for ref in view.mu_references
         @test ref.link === :log
         @test view.role[ref.population] === :population
@@ -42,6 +46,35 @@ include(joinpath(@__DIR__, "nlme_fixtures.jl"))
     for (i, rows) in enumerate(view.rows)
         @test all(r -> NLME_DATA.subject[r] == string(view.levels[i]), rows)
     end
+end
+
+@stestset "a within-subject covariate cannot shift through a random intercept" begin
+    data = merge(NLME_DATA, (; wt=[i == 4 ? 0.25 : w for (i, w) in enumerate(NLME_DATA.wt)]))
+    view = brm_nlme_view(RKBRMI(nlme_pk(data)))
+    @test Set((r.predictor, r.coefficient) for r in view.mu_references) ==
+        Set([(:CL, :Intercept), (:V, :Intercept)])
+
+    brmi = @brm data begin
+        sigma ~ Exponential(1)
+        log(CL) ~ 1 + wt + (1 + wt | pk | subject)
+        log(V) ~ 1 + (1 | pk | subject)
+        m = dose / V * exp(-CL / V * t)
+        y ~ Normal(m, sigma)
+    end
+    slope_view = brm_nlme_view(RKBRMI(brmi))
+    slope = only(r for r in slope_view.mu_references if r.coefficient === :wt)
+    @test slope_view.block_margins[slope.subject].coefficient === :wt
+    @test all(==(1.0), slope.design)
+    model = brm_nlme_model(RKBRMI(brmi); ad_backend=NLME_AD)
+    θ = fill(0.1, length(model.theta))
+    σ = fill(-1.0, length(model.sigma))
+    H = zeros(length(model.view.block_margins), length(model.view.levels))
+    shifted_θ = copy(θ)
+    shifted_θ[findfirst(==(slope.population), model.theta)] += 0.3
+    shifted_H = copy(H)
+    shifted_H[slope.subject, :] .-= 0.3
+    @test brm_nlme_loglikelihoods(model, shifted_θ, σ, shifted_H) ≈
+        brm_nlme_loglikelihoods(model, θ, σ, H) rtol=1e-12
 end
 
 @stestset "a subject block moves exactly that subject's densities" begin
@@ -74,7 +107,9 @@ end
     @test count(r -> r === :subject_scale || r === :subject_correlation, view.role) == 3
     @test all(length.(view.subject_coordinates) .== 2)
     @test Set((r.predictor, r.coefficient) for r in view.mu_references) ==
-        Set([(:log_CL, :Intercept), (:log_V, :Intercept)])
+        Set([(:log_CL, :Intercept), (:log_CL, :weight), (:log_V, :Intercept)])
+    @test only(r.design for r in view.mu_references if r.coefficient === :weight) ==
+        NLME_PLATE_DATA.weight
     # The in-cell observation keeps one density array per subject; a subject
     # block moves exactly its own array.
     query = pointwise_query(backend)

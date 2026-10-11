@@ -47,11 +47,12 @@ unconstrained coordinate vector (`coordinates`, in packed order).
   order, then its mixing weight when the block is Student-t.
 - `block_margins[k]` — `(; block, predictor, coefficient)` for position `k` of
   every subject block (`coefficient === :mixing` for a mixing weight).
-- `mu_references` — one `(; predictor, coefficient, link, population, subject)`
-  per subject margin whose predictor also carries a population coefficient of
-  the same name: `population` is that coefficient's packed position and
-  `subject` the margin's position inside a subject block. The individual
-  parameter is `link⁻¹(Xβ + Zη)` on the predictor's link scale.
+- `mu_references` — one `(; predictor, coefficient, link, population, subject,
+  design)` per population coefficient that can be absorbed into a subject
+  margin. `population` is the coefficient's packed position, `subject` the
+  margin's position in a subject block, and `design[i]` its multiplier for
+  subject `i`. The conditional predictor is unchanged by adding `δ` to the
+  population coefficient and subtracting `design[i] * δ` from that margin.
 - `rows[i]` — the rows of the grouping column that belong to subject `i`.
 
 Subject draws are standardized (`η = diag(scale) L z`, `z ~ N(0, I)`): the
@@ -91,6 +92,82 @@ _brm_nlme_records(plan) = _brm_nlme_error(
 
 _brm_nlme_owned(name::Symbol, declaration::Symbol) = name === declaration ||
     startswith(String(name), string(declaration, "."))
+
+_brm_nlme_regression(plan::_RKStructuralPlan) = plan
+_brm_nlme_regression(plan::_RKValuePlan) = plan.regression
+_brm_nlme_regression(plan::_RKHeldOutPlan) = _brm_nlme_regression(plan.parent)
+
+# Read the same scalar design columns that the RK affine emitter multiplies by
+# its population coefficients. Other coefficient families need a separate
+# coordinate-to-column record and are deliberately not inferred from names.
+function _brm_nlme_population_column(plan::_RKStructuralPlan, predictor, coefficient, nrows)
+    priors = [p for p in plan.population_priors if p.predictor === predictor &&
+        p.addressee === coefficient]
+    # MuReferencing shifts unconstrained θ additively. Bounded/positive priors
+    # transform that coordinate before the predictor sees it, so their
+    # population design cannot certify this invariance.
+    length(priors) == 1 && only(priors).family in
+        (:Normal, :Cauchy, :Laplace, :Logistic, :StudentT, :Flat) || return nothing
+    specs = [term for p in plan.predictors if p.name === predictor
+        for term in p.terms if term.addressee === coefficient &&
+        term.kind in (:intercept, :continuous)]
+    length(specs) == 1 || return nothing
+    term = only(specs)
+    term.kind === :intercept && return ones(Float64, nrows)
+    values = plan.columns[only(term.columns)]
+    length(values) == nrows && all(x -> x isa Real && isfinite(x), values) || return nothing
+    Float64.(values)
+end
+
+# A population column is mu-referenced through a random slope when its actual
+# emitted Z column is identical. A subject-constant column can instead be
+# absorbed through an intercept, including a covariate slope without a random
+# slope. Both cases preserve the whole predictor row by row.
+function _brm_nlme_mu_references(backend, block_margins, population, rows, nrows)
+    plan = _brm_nlme_regression(backend.plan)
+    references = NamedTuple[]
+    for ((predictor, coefficient), position) in sort!(collect(population); by=x -> last(x))
+        column = _brm_nlme_population_column(plan, predictor, coefficient, nrows)
+        column === nothing && continue
+        link = _rk_predictor_link(parent(backend), predictor)
+        # A matching random slope takes precedence, since it also works when
+        # the observed covariate varies among a subject's rows.
+        matched = false
+        for (k, margin) in enumerate(block_margins)
+            margin.predictor === predictor && margin.coefficient === coefficient || continue
+            recipes = [r.z for bucket in plan.ranef_buckets
+                if bucket.group === margin.block.group && bucket.id === margin.block.id
+                for r in bucket.margins if r.predictor === predictor &&
+                    r.coefficient === coefficient]
+            length(recipes) == 1 || continue
+            recipe = only(recipes)
+            z = recipe.kind === :ones ? ones(Float64, nrows) :
+                recipe.kind === :column ? get(plan.columns, recipe.column, nothing) : nothing
+            z === nothing && continue
+            length(z) == nrows && all(isequal.(column, z)) || continue
+            push!(references, (; predictor, coefficient, link, population=position,
+                subject=k, design=ones(Float64, length(rows))))
+            matched = true
+            break
+        end
+        matched && continue
+        for (k, margin) in enumerate(block_margins)
+            margin.predictor === predictor && margin.coefficient === :Intercept || continue
+            values = Float64[]
+            for subject_rows in rows
+                isempty(subject_rows) && break
+                value = column[first(subject_rows)]
+                all(r -> isequal(column[r], value), subject_rows) || break
+                push!(values, value)
+            end
+            length(values) == length(rows) || continue
+            push!(references, (; predictor, coefficient, link, population=position,
+                subject=k, design=values))
+            break
+        end
+    end
+    references
+end
 
 """
     brm_nlme_view(backend::RKBRMI) -> BRMNLMEView
@@ -217,17 +294,10 @@ function brm_nlme_view(backend::RKBRMI)
         "brm_nlme_view: $(length(unclaimed)) coordinate(s) are not covered by the " *
         "semantic inventory: $(join(string.(unclaimed), ", ")). Random effects " *
         "must use a plain `(... | group)` grouping, not `gr(...)` or `mm(...)`.")
-    mu_references = NamedTuple[]
-    for (k, m) in enumerate(block_margins)
-        m.coefficient === :mixing && continue
-        pop = get(population, (m.predictor, m.coefficient), 0)
-        pop == 0 && continue
-        push!(mu_references, (; predictor=m.predictor, coefficient=m.coefficient,
-            link=_rk_predictor_link(parent(backend), m.predictor),
-            population=pop, subject=k))
-    end
     labels = map(_brm_transport_level, backend.plan.columns[group])
     rows = [findall(x -> isequal(x, _brm_transport_level(level)), labels) for level in levels]
+    mu_references = _brm_nlme_mu_references(backend, block_margins, population,
+        rows, length(labels))
     BRMNLMEView(group, levels, names, role, subject, blocks, block_margins,
         mu_references, rows)
 end
