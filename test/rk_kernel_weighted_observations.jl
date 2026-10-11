@@ -143,7 +143,8 @@ function nested_weight_reads(main)
     cell = only(body(plate))
     weight = cell.args[3].args[2].args[2]
     reads = BRM._rk_source_symbols!(Set{Symbol}(), weight)
-    definitions = Dict(x.args[1] => x.args[2] for x in main.args if Meta.isexpr(x, :(=)))
+    definitions = Dict{Symbol,Any}(x.args[1] => x.args[2] for x in main.args
+        if Meta.isexpr(x, :(=)))
     for p in plates, x in body(p)
         Meta.isexpr(x, :(=)) || continue
         lhs = first(x.args)
