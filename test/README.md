@@ -82,8 +82,9 @@ independent per-subject oracle with analytic η gradients. It runs in the test
 environment above.
 
 `nlme_estimation_ext.jl` covers the NLMEEstimation.jl protocol extension:
-batched evaluation, analytic η Hessian blocks, `check_protocol`, and Newton
-posthoc against the same oracle. NLMEEstimation.jl is not published yet, so it is not part of
+batched evaluation, analytic η Hessian blocks, Gaussian observation moments
+and colored η Jacobians, `check_protocol`, and Newton posthoc against
+independent oracles. NLMEEstimation.jl is not published yet, so it is not part of
 `test/Project.toml`. Run the file from a copy of this environment that develops
 a local NLMEEstimation checkout:
 

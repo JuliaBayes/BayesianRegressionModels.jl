@@ -60,14 +60,14 @@ function build_events(data)
 end
 end
 
-function reader_source(brmi)
+function cell_source(brmi)
     emitted = BayesianRegressionModels._rk_emit_ast(BayesianRegressionModels._brm_rk_plan(brmi))
-    join((sprint(Base.show_unquoted, d) for d in emitted.defs), "\n")
+    join((sprint(Base.show_unquoted, d) for d in [emitted.defs; emitted.main]), "\n")
 end
 
 # Value and gradient against central differences at several points; the
 # data-only index work runs once per subject at preparation when RK caches it.
-function check_bound_reader(brmi, data, case_id)
+function check_bound_cell(brmi, data, case_id)
     fixture = BoundReaderCacheFixture
     BRM = BayesianRegressionModels
     backend = RKBRMI(brmi)
@@ -103,23 +103,26 @@ function check_bound_reader(brmi, data, case_id)
     end
 end
 
-# A predictor is a zipped plate operand whose declared rank lets the bound
-# data operands fix the subject domain (snag brm-reader-bound-3a64804a). The
-# earlier bound-axis reader instead indexed `Ref`'d predictors by an
-# `eachindex` subject, which cost reverse passes more than the zip and broke
-# native Reverse on one consumer model.
-@stestset "a mixed kernel reader uses a bound data domain" begin
+# A cell whose authored range is a live predictor iterates a bound data input
+# instead: the same subjects in the same order, but RK prepares the cell's
+# data-only work once only when bound data fix the plate's domain (rkppl-use
+# §13 "Arrays per index"). The retired reader kernels got the same effect by
+# zipping predictors typed `AbstractVector{Float64}` beside the data operands
+# (snag brm-reader-bound-3a64804a).
+@stestset "a mixed kernel cell iterates a bound data domain" begin
     data = (; subject=["a", "b"], kinds=[[1, 2, 1], [1, 1, 2]],
         picks=[[1, 2], [2]], y=[[0.1, -0.2], [0.3]])
     saved = deepcopy(data)
     brmi = BoundReaderCacheFixture.build(data)
-    source = reader_source(brmi)
-    @test occursin("loc_reader(log_rate::AbstractVector{Float64}, kinds, picks)", source)
-    @test occursin("ReactiveKernels.plate(log_rate, kinds, picks) do rate, kinds, picks", source)
-    for retired in ("Base.eachindex", "Ref(log_rate", "_subject")
+    source = cell_source(brmi)
+    @test occursin("@plate for i = eachindex(kinds)", source)
+    @test occursin("positions = counted_positions(kinds[i])", source)
+    @test occursin("selected = positions[picks[i]]", source)
+    @test occursin("loc_cells[i] = exp(log_rate[i]) .* selected", source)
+    for retired in ("_reader", "ReactiveKernels.plate", "Base.eachindex", "Ref(log_rate", "loc_subject")
         @test !occursin(retired, source)
     end
-    check_bound_reader(brmi, data, "bound-reader-cache")
+    check_bound_cell(brmi, data, "bound-cell-cache")
     @test isequal(data, saved)
 end
 
@@ -133,11 +136,15 @@ end
         y=[[0.3, 0.2, 0.4, 0.3], [0.5], [0.6, 0.3]])
     saved = deepcopy(data)
     brmi = BoundReaderCacheFixture.build_events(data)
-    source = reader_source(brmi)
-    @test occursin("log_k::AbstractVector{Float64}", source)
-    @test occursin("log_v::AbstractVector{Float64}", source)
-    @test occursin("log_a::AbstractVector{Float64}", source)
-    @test !occursin("Base.eachindex", source)
-    check_bound_reader(brmi, data, "bound-reader-events")
+    source = cell_source(brmi)
+    @test occursin("@plate for i = eachindex(observed_reads)", source)
+    # The child `@kernel` is a callable object, so it binds under BRM's
+    # compiler-owned callable name; its arguments are the per-subject reads.
+    @test occursin(r"loc_cells\[i\] = \w+\(observed_reads\[i\], kinds\[i\], gaps\[i\], " *
+        r"amounts\[i\], log_k\[i\], log_v\[i\], log_a\[i\]\)", source)
+    for retired in ("_reader", "ReactiveKernels.plate", "Base.eachindex")
+        @test !occursin(retired, source)
+    end
+    check_bound_cell(brmi, data, "bound-cell-events")
     @test isequal(data, saved)
 end

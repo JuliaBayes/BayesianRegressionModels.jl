@@ -100,60 +100,38 @@ function graph_source_inventory(graph; depth=0)
         if entry.kind !== :ordinary]
 end
 
-@stestset "graph provider source and printed definitions retain child recipes" begin
+# A grouped provider cell is one inline `@plate for` calling the provider's
+# graph entry (decision 1dsco4y); the program's only definitions are the
+# provider graphs, which keep their scans in source and in printed replay. The
+# retired reader kernels were separate graphs, checked here by composing one
+# under native Reverse; the posterior's own plate, scan and native Reverse
+# gradient are checked in "source providers retain authored scans and subject
+# graph plates" below.
+@stestset "graph provider cells are an inline plate over the provider entry" begin
     ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
     for object in (false, true)
         data = (; x=[[-0.4, 0.2], Float64[], [0.7]],
             y=[[0.1, -0.2], Float64[], [0.3]])
         before = deepcopy(data)
-        plan = BRM._brm_rk_plan(PublicGraphSource.build(data, :kernel, object))
-        emitted = BRM._rk_emit_ast(plan)
+        emitted = BRM._rk_emit_ast(BRM._brm_rk_plan(PublicGraphSource.build(data, :kernel, object)))
+        main = sprint(Base.show_unquoted, emitted.main)
+        entry = object ? :original_object_scan : :original_scan
+        definitions = [BRM._rk_source_definition(d) for d in emitted.defs]
+        @test all(d -> d.kind === :kernel, definitions)
+        @test entry in [d.name for d in definitions]
+        @test !any(d -> endswith(string(d.name), "_reader"), definitions)
+        @test occursin("@plate for i = eachindex(x)", main)
+        @test occursin("loc_cells[i] = $entry(x[i], a)", main)
         parsed = BRM._RKEmittedProgram(
             [Meta.parse(sprint(Base.show_unquoted, d)) for d in emitted.defs],
-            Meta.parse(sprint(Base.show_unquoted, emitted.main)), emitted.bindings)
-        source_module = ext._rk_emit_module(emitted)
-        replay_module = ext._rk_emit_module(parsed)
-        readers = [BRM._rk_source_definition(d).name for d in emitted.defs
-            if endswith(string(BRM._rk_source_definition(d).name), "_reader")]
-        @test length(readers) == 1
-        reader = only(readers)
-        a, b = getfield(source_module, reader), getfield(replay_module, reader)
-        @test graph_source_inventory(a.graph) == [(:plate, 0), (:scan, 1)]
+            Meta.parse(main), emitted.bindings)
+        a = getfield(ext._rk_emit_module(emitted), entry)
+        b = getfield(ext._rk_emit_module(parsed), entry)
+        @test any(item -> first(item) === :scan, graph_source_inventory(a.graph))
         @test graph_source_inventory(b.graph) == graph_source_inventory(a.graph)
-        # The reader returns its subject cells; formula terms flatten them.
-        @test isequal(prepare(a)(data.x, 0.2), [cumsum(x) .* 0.2 for x in data.x])
-        @test isequal(prepare(b)(data.x, 0.2), prepare(a)(data.x, 0.2))
+        @test isequal(prepare(a)(data.x[1], 0.2), cumsum(data.x[1]) .* 0.2)
+        @test isequal(prepare(b)(data.x[1], 0.2), prepare(a)(data.x[1], 0.2))
         @test isequal(data, before)
-    end
-end
-
-@stestset "provider subject graphs execute standard native Reverse" begin
-    ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
-    for object in (false, true)
-        data = (; x=[[-0.4, 0.2], Float64[], [0.7]],
-            y=[[0.1, -0.2], Float64[], [0.3]])
-        before = deepcopy(data)
-        plan = BRM._brm_rk_plan(PublicGraphSource.build(data, :kernel, object))
-        emitted = BRM._rk_emit_ast(plan)
-        source_module = ext._rk_emit_module(emitted)
-        reader = only([BRM._rk_source_definition(d).name for d in emitted.defs
-            if endswith(string(BRM._rk_source_definition(d).name), "_reader")])
-        score = Core.eval(source_module,
-            :(ReactiveKernels.@kernel provider_score(x, a) = begin
-                cells = $reader(x, a)
-                total = sum(brm_flatten_cells(cells))
-                return total
-            end))
-        @test graph_source_inventory(score.graph) == [(:plate, 0), (:scan, 1)]
-        prepared = prepare_ad(prepare(score), AutoEnzyme(; mode=Enzyme.Reverse),
-            data.x, 0.2; active=:a)
-        derivative = sum(reduce(vcat, [cumsum(x) for x in data.x]))
-        for a in (0.0, 0.2, -0.3)
-            value, gradient = ad_value_and_gradient(prepared, data.x, a)
-            @test value ≈ derivative * a atol=1e-14
-            @test gradient ≈ derivative atol=1e-14
-            @test isequal(data, before)
-        end
     end
 end
 

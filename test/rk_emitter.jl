@@ -5069,9 +5069,10 @@ end
     @test plan.columns[cell.inputs[1].source] == kdf.t
     @test plan.columns[cell.inputs[3].source] == kdf.obs
     @test !haskey(plan.columns, :pred_subject_count)
-    # Ordinary cell and reader graphs retain the subject plate in source.
+    # The cell is the authored subject plate in the model body, with no
+    # separately defined reader graph (decision 1dsco4y).
     prog = BRM._rk_emit_ast(plan)
-    @test prog isa BRM._RKEmittedProgram && !isempty(prog.defs)
+    @test prog isa BRM._RKEmittedProgram && isempty(prog.defs)
     @test Meta.isexpr(prog.main, :block)
     stmts = filter(s -> !(s isa LineNumberNode), prog.main.args)
     @test any(s -> Meta.isexpr(s, :call) && s.args[1] === :~ && s.args[2] === :sigma,
@@ -5079,8 +5080,8 @@ end
     @test any(s -> Meta.isexpr(s, :call) && s.args[1] === :~ && s.args[2] === :b0,
               stmts)
     source = sprint(Base.show_unquoted, prog.main)
-    definitions = join(sprint(Base.show_unquoted, d) for d in prog.defs)
-    @test occursin("ReactiveKernels.plate", definitions)
+    @test occursin("@plate for i = eachindex(t)", source)
+    @test occursin("pred_argument_obs_1[i] = mu", source)
     @test occursin("obs[i] .~ Normal.(", source)
     @test !occursin("kernel_nsub_pred", source)
     @test !occursin("kernel_T_pred", source)

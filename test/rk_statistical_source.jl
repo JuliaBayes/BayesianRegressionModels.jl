@@ -280,7 +280,7 @@ end
         brm_correlated_group_effects(g, K, eta) = begin
             tau[1:K] .~ Exponential.(0.7)
             L ~ LKJCholesky(K, eta)
-            z[levels(g), 1:K] .~ Normal.(0, 1)
+            z[1:length(levels(g)), 1:K] .~ Normal.(0, 1)
             return z * transpose(tau .* L)
         end))
     @test definitions[:brm_monotonic_effect] == strip_lines(:(

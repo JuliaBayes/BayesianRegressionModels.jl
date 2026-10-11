@@ -236,8 +236,8 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
             end
         end
     end
-    gather_margin(col, margin) =
-        Expr(:call, :brm_ranef_column, draws, indices[col], margin)
+    # An ordinary RKPPL gather, so a per-cell query reads only its own row.
+    gather_margin(col, margin) = Expr(:ref, draws, indices[col], margin)
     for (target, margins) in bucket.slices
         summands = Any[]
         for margin in margins

@@ -332,7 +332,8 @@ end
         check_printed_roundtrip(backend)
         emitted = BRM._rk_emit_ast(backend.plan)
         source = sprint(Base.show_unquoted, Expr(:block, emitted.defs..., emitted.main))
-        @test occursin("ReactiveKernels.plate", source)
+        @test occursin("@plate for i = eachindex(x)", source)
+        @test !occursin("ReactiveKernels.plate", source)
         @test !occursin("subjects=", source)
         check_plain_gradient(backend)
     end
