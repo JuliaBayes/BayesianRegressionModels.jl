@@ -71,8 +71,9 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # sweep), 5c2b80d5 (every @rkppl predictor node carries its authored
 # name, so `mu = mu_Intercept` is queryable as `mu`) and 659a6e8b (columns
 # of `X * B`, per-element two-axis prior arguments and per-slice Dirichlet
-# concentrations, read by BRM's joint blocks).
+# concentrations, read by BRM's joint blocks), and cb3a0db7 (in-place
+# observation-column reads during native reverse).
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "659a6e8b852ee33e0cfefd53176982916db20dc0"
+rev = "cb3a0db7a9d8c166f8eb211814b9da815fbbf51d"

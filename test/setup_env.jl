@@ -74,8 +74,9 @@ const PINS = [
     # queryable as `mu`. 659a6e8b contains 5c2b80d5 and adds what BRM's joint
     # blocks read: columns `P[:, j]` of `X * B` (65f5ea8f) and per-element
     # prior arguments on two-axis declarations and per-slice Dirichlet
-    # concentrations (`Dirichlet.(eachcol(A))`).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "659a6e8b852ee33e0cfefd53176982916db20dc0"),  # main
+    # concentrations (`Dirichlet.(eachcol(A))`). cb3a0db7 reads the
+    # observation columns of X * B in place during native reverse.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "cb3a0db7a9d8c166f8eb211814b9da815fbbf51d"),  # main
 ]
 
 function main()
