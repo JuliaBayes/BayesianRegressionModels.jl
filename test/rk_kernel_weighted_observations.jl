@@ -133,13 +133,23 @@ const WEIGHTED_DATA = (; x=[[1.0, 2.0], Float64[], [0.5, 1.5, -0.4]],
 
 # A per-subject observation is one nested plate `y[i] .~ weighted.(law, w)`
 # or `y[i] .~ LogDensity.(weighted_entry, w, args...)`. Its weight reads only
-# data (a bound port or a reader over data ports), so RKPPL binds it as data.
+# data (a bound port, or the cell plate's write over data), so RKPPL binds it
+# as data. The cell's own plate writes the weight beside its other outputs.
 function nested_weight_reads(main)
-    plate = only(s for s in main.args if Meta.isexpr(s, :macrocall))
-    cell = only(x for x in last(last(plate.args).args).args if !(x isa LineNumberNode))
+    plates = [s for s in main.args if Meta.isexpr(s, :macrocall)]
+    body(plate) = [x for x in last(last(plate.args).args).args if !(x isa LineNumberNode)]
+    plate = only(p for p in plates if any(x -> Meta.isexpr(x, :call) &&
+        first(x.args) === :.~, body(p)))
+    cell = only(body(plate))
     weight = cell.args[3].args[2].args[2]
     reads = BRM._rk_source_symbols!(Set{Symbol}(), weight)
-    definitions = Dict(x.args[1] => x.args[2] for x in main.args if Meta.isexpr(x, :(=)))
+    definitions = Dict{Symbol,Any}(x.args[1] => x.args[2] for x in main.args
+        if Meta.isexpr(x, :(=)))
+    for p in plates, x in body(p)
+        Meta.isexpr(x, :(=)) || continue
+        lhs = first(x.args)
+        definitions[Meta.isexpr(lhs, :ref) ? first(lhs.args) : lhs] = last(x.args)
+    end
     pending = collect(reads)
     while !isempty(pending)
         definition = get(definitions, pop!(pending), nothing)

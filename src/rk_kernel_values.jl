@@ -179,7 +179,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             error("RK backend: kernel `$name` input must be a data column, predictor or ragged join")
         end
     end
-    # The reader's subject plate iterates these inputs in lockstep.
+    # The cell's subject plate iterates these inputs in lockstep.
     nsubjects = group_values === nothing ?
         (isempty(outer_lengths) ? error("RK backend: kernel `$name` needs a subject input") : first(outer_lengths)) :
         length(group_values)
@@ -494,7 +494,7 @@ function _rk_align_kernel_observation_arguments!(defs, statements, bindings, tak
     layout.lengths === nothing && return distribution
     # Prepare the constructor's arguments together in authored source. A
     # data-only model assignment is evaluated by RKPPL at binding; keeping
-    # these operations in the argument readers retains the complete source
+    # these operations in one argument kernel retains the complete source
     # graph beside the live location/scale and avoids that preprocessing path.
     inputs = Any[]
     params = Symbol[]
@@ -526,7 +526,7 @@ function _rk_align_kernel_observation_arguments!(defs, statements, bindings, tak
         argument
     end
     local_args = map(local_argument, distribution.args)
-    # The readers' row geometry enters as one more input, on first use.
+    # The argument kernel's row geometry enters as one more input, on first use.
     geometry_param = nothing
     function geometry()
         geometry_param === nothing || return geometry_param
@@ -548,17 +548,18 @@ function _rk_align_kernel_observation_arguments!(defs, statements, bindings, tak
         push!(body, Expr(:(=), value, _rk_value_expr!(bindings, argument, taken)))
         value
     end
-    outputs = map(eachindex(args)) do i
-        reader = _rk_ast_fresh_name("$(observation.name)_observation_argument_$i", taken)
-        definition = Expr(:(=), Expr(:call, reader, params...),
-            Expr(:block, body..., Expr(:return, prepared[i])))
-        push!(defs, Expr(:macrocall,
-            Expr(:., :ReactiveKernels, QuoteNode(Symbol("@kernel"))),
-            LineNumberNode(0), definition))
-        value = _rk_ast_fresh_name("$(observation.name)_argument_$i", taken)
-        push!(statements, Expr(:(=), value, Expr(:call, reader, inputs...)))
-        _BRMPreparedRef(value, :whole)
-    end
+    reader = _rk_ast_fresh_name("$(observation.name)_observation_arguments", taken)
+    returned = length(prepared) == 1 ? only(prepared) : Expr(:tuple, prepared...)
+    definition = Expr(:(=), Expr(:call, reader, params...),
+        Expr(:block, body..., Expr(:return, returned)))
+    push!(defs, Expr(:macrocall,
+        Expr(:., :ReactiveKernels, QuoteNode(Symbol("@kernel"))),
+        LineNumberNode(0), definition))
+    names = [_rk_ast_fresh_name("$(observation.name)_argument_$i", taken)
+        for i in eachindex(args)]
+    target = length(names) == 1 ? only(names) : Expr(:tuple, names...)
+    push!(statements, Expr(:(=), target, Expr(:call, reader, inputs...)))
+    outputs = map(name -> _BRMPreparedRef(name, :whole), names)
     _BRMPreparedExpr(distribution.callable, Tuple(outputs), distribution.kwargs)
 end
 
@@ -634,7 +635,7 @@ Base.@nospecializeinfer function _brm_rk_composed_kernel_plan(@nospecialize(brmi
                 NamedColumn(observation.source, DataColumn(raw)), distribution, raw,
                 nothing, weight)
             push!(observations, _RKNestedObservation(prepared, Dict{Symbol,Symbol}(
-                route.ref => route.ref for route in routes if route.route in (:input, :reader))))
+                route.ref => route.ref for route in routes if route.route in (:input, :plate))))
             continue
         end
         layout = raw isa AbstractVector{<:AbstractVector} ?
@@ -675,77 +676,100 @@ function _rk_kernel_bind_calls(value, scope, bindings, taken)
     Expr(value.head, args...)
 end
 
-# The reader is the authored cell, sliced to what its value reads, as one
-# subject plate. Each per-subject input the cell reads is a plate operand
-# bound to the cell's own formal; a ragged join iterates its subject row
-# indices and gathers from its shared values; the model values the cell reads
-# stay shared. It returns one cell per subject, or with `flatten` the cells
-# concatenated in subject order. A value reading only data therefore stays a
-# data-only definition.
-function _rk_emit_kernel_reader!(defs, statements, bindings, taken, kernel, name, collected;
-        flatten::Bool, reader=name)
-    reader_name = _rk_ast_fresh_name(string(reader, "_reader"), taken)
-    slice = _rk_kernel_value_slice(kernel, collected)
+# The authored cell, once, as an RKPPL `@plate for` in the model body. Its
+# statements are sliced to what the program reads from it, and each such value
+# is one indexed write `<cells>[i] = value`, so every subject's cell runs once
+# per evaluation however many values the program reads. Each per-subject input
+# is read at the subject index (`t[i]`; a ragged join gathers its subject's
+# rows, `x[rows[i]]`), and the model values the cell reads stay shared.
+#
+# The plate iterates the authored range input unless that is a live value
+# beside a bound data input: then it iterates the data input, the same subjects
+# in the same order, because RK prepares a cell's data-only work once only when
+# bound data fix the plate's domain (rkppl-use §13 "Arrays per index").
+function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs)
+    slice = _rk_kernel_value_slice(kernel, Expr(:tuple, last.(outputs)...))
     cell = Any[[_rk_kernel_bind_calls(statement, kernel.scope, bindings, taken)
         for statement in slice.body];
-        _rk_kernel_bind_calls(collected, kernel.scope, bindings, taken)]
-    inputs = Any[zip(slice.params, slice.inputs)...]
-    # A cell reading no per-subject input still iterates one for its subject axis.
-    isempty(inputs) && push!(inputs, (first(kernel.params), first(kernel.inputs)))
-    # A per-subject predictor is a live Float64 vector. Beside a bound data input
-    # (or ragged row partition), its declared rank lets that operand fix the
-    # plate's domain, so RK prepares the cell's data-only recipes once while the
-    # predictor stays a zipped operand.
-    data_axis = any(inputs) do (_, input)
-        input.kind === :gather || haskey(kernel.columns, input.source)
+        [Expr(:(=), cells, _rk_kernel_bind_calls(value, kernel.scope, bindings, taken))
+            for (cells, value) in outputs]]
+    bound(input) = input.kind === :gather || haskey(kernel.columns, input.source)
+    authored = first(kernel.inputs)
+    data = filter(bound, Any[slice.inputs..., kernel.inputs...])
+    axis = bound(authored) || isempty(data) ? authored : first(data)
+    range = axis.kind === :gather ? axis.rows : axis.source
+    inputs = Dict(zip(slice.params, slice.inputs))
+    # Plate-scoped cell locals keep their names unless a model name, which the
+    # plate also reads or writes, already spells them.
+    locals = Set{Symbol}()
+    foreach(statement -> _rk_source_outputs!(locals, statement), slice.body)
+    setdiff!(locals, slice.params)
+    model = union!(Set{Symbol}(), taken, _rk_source_symbols!(Set{Symbol}(), statements),
+        (input.kind === :gather ? input.rows : input.source for input in values(inputs)),
+        (input.source for input in values(inputs)), slice.globals, first.(outputs), (range,))
+    cell_names = _rk_source_symbols!(Set{Symbol}(slice.params), cell)
+    avoid = union(model, cell_names)
+    reads = Dict{Symbol,Any}(l => _rk_ast_fresh_name(string(l, "_cell"), avoid)
+        for l in sort!(collect(intersect(locals, model))))
+    union!(taken, (get(reads, l, l) for l in locals))
+    index = :i
+    while index in avoid
+        index = Symbol(index, :_)
     end
-    live = Set(input.source for (_, input) in inputs if data_axis &&
-        input.kind === :element && !haskey(kernel.columns, input.source))
-    globals = slice.globals
-    gathered = unique(Symbol[input.source for (_, input) in inputs if input.kind === :gather])
-    ports = unique(Symbol[[input.kind === :gather ? input.rows : input.source
-        for (_, input) in inputs]; gathered; globals])
-    # The cell runs inline in the plate's do-block: it zips its per-subject
-    # inputs and closes over the reader's gathered sources and globals, which
-    # it reads whole. Globals keep their names because the cell reads them so.
-    # Every other name the reader adds avoids the cell's own names, so the cell
-    # neither captures nor rebinds a reader local.
-    cell_names = _rk_source_symbols!(Set{Symbol}(kernel.params), cell)
-    used = union(cell_names, ports)
-    fresh(base) = _rk_ast_fresh_name(string(base), used)
-    rows = Dict(param => fresh("$(param)_rows") for (param, input) in inputs
-        if input.kind === :gather)
-    shared = Dict(source => source in cell_names && !(source in globals) ?
-        fresh("$(source)_values") : source for source in gathered)
-    formals = Symbol[input.kind === :gather ? rows[param] : param for (param, input) in inputs]
-    # A captured port is named as the cell reads it; a zipped port no formal
-    # shadows stays clear of the cell's names.
-    port = Dict(p => p in globals ? p : haskey(shared, p) ? shared[p] :
-        p in cell_names && !(p in formals) ? fresh("$(p)_port") : p for p in ports)
-    operands = Any[port[input.kind === :gather ? input.rows : input.source] for (_, input) in inputs]
-    gathers = [Expr(:(=), param, Expr(:ref, shared[input.source], rows[param]))
-        for (param, input) in inputs if input.kind === :gather]
-    plate = Expr(:do, Expr(:call, Expr(:., :ReactiveKernels, QuoteNode(:plate)), operands...),
-        Expr(:->, Expr(:tuple, formals...), Expr(:block, gathers..., cell...)))
-    cells, values = fresh(:cells), fresh(:values)
-    body = flatten ? Expr(:block,
-        Expr(:(=), cells, plate),
-        Expr(:(=), values, Expr(:call, :brm_flatten_cells, cells)),
-        Expr(:return, values)) :
-        Expr(:block, Expr(:(=), cells, plate), Expr(:return, cells))
-    signature = Any[p in live ? Expr(:(::), port[p], :(AbstractVector{Float64})) : port[p]
-        for p in ports]
-    reader_definition = Expr(:(=), Expr(:call, reader_name, signature...), body)
-    push!(defs, Expr(:macrocall,
-        Expr(:., :ReactiveKernels, QuoteNode(Symbol("@kernel"))),
-        LineNumberNode(0), reader_definition))
-    push!(statements, Expr(:(=), name, Expr(:call, reader_name, ports...)))
+    for (param, input) in inputs
+        reads[param] = input.kind === :gather ?
+            Expr(:ref, input.source, Expr(:ref, input.rows, index)) :
+            Expr(:ref, input.source, index)
+    end
+    body = Any[_rk_kernel_cell_reads(statement, reads) for statement in cell]
+    for (k, (cells, _)) in enumerate(outputs)
+        body[end - length(outputs) + k].args[1] = Expr(:ref, cells, index)
+    end
+    push!(statements, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
+        Expr(:for, Expr(:(=), index, Expr(:call, :eachindex, range)),
+            Expr(:block, body...))))
+end
+
+# A cell statement as the plate reads it: each name in `reads` (a per-subject
+# formal, a renamed local) is replaced in value positions only. Call heads,
+# field and keyword names, and names an inner function or generator binds keep
+# their meaning.
+_rk_kernel_cell_reads(value, reads) = value
+_rk_kernel_cell_reads(value::Symbol, reads) = get(reads, value, value)
+function _rk_kernel_cell_reads(value::Expr, reads)
+    recur(arg) = _rk_kernel_cell_reads(arg, reads)
+    args = value.args
+    if value.head === :call || _brm_is_broadcast_call(value)
+        return Expr(value.head, first(args), map(recur, args[2:end])...)
+    elseif value.head === :. && length(args) == 2 && last(args) isa QuoteNode
+        return Expr(:., recur(first(args)), last(args))
+    elseif value.head === :kw
+        return Expr(:kw, first(args), recur(last(args)))
+    elseif value.head === :->
+        bound = _rk_source_symbols!(Set{Symbol}(), first(args))
+        inner = filter(pair -> !(first(pair) in bound), reads)
+        return Expr(:->, first(args), _rk_kernel_cell_reads(last(args), inner))
+    elseif value.head === :generator
+        specs = args[2:end]
+        bound = Set{Symbol}()
+        for spec in specs, s in (Meta.isexpr(spec, :filter) ? spec.args[2:end] : (spec,))
+            Meta.isexpr(s, :(=)) && _rk_source_symbols!(bound, first(s.args))
+        end
+        inner = filter(pair -> !(first(pair) in bound), reads)
+        ranges(spec) = Meta.isexpr(spec, :(=)) ?
+            Expr(:(=), first(spec.args), recur(last(spec.args))) :
+            Meta.isexpr(spec, :filter) ? Expr(:filter,
+                _rk_kernel_cell_reads(first(spec.args), inner), map(ranges, spec.args[2:end])...) :
+            spec
+        return Expr(:generator, _rk_kernel_cell_reads(first(args), inner), map(ranges, specs)...)
+    end
+    Expr(value.head, map(recur, args)...)
 end
 
 # How a per-subject observation reads one in-cell argument (`name` holds its
 # value): a model value or whole-model expression the cell reads is shared by
 # every subject; a per-subject input read as is stays its bound port; anything
-# else is its reader's subject cells.
+# else is written per subject by the cell's plate.
 function _rk_kernel_cell_argument(kernel, name, argument)
     slice = _rk_kernel_value_slice(kernel, argument)
     if isempty(slice.params) && isempty(slice.body)
@@ -755,50 +779,42 @@ function _rk_kernel_cell_argument(kernel, name, argument)
     if argument isa Symbol && isempty(slice.body) && only(slice.inputs).kind === :element
         return (; route=:input, ref=only(slice.inputs).source)
     end
-    (; route=:reader, ref=name)
-end
-
-function _rk_emit_kernel_cell_argument!(defs, statements, bindings, taken, kernel, name, argument)
-    route = _rk_kernel_cell_argument(kernel, name, argument)
-    if route.route === :reader
-        _rk_emit_kernel_reader!(defs, statements, bindings, taken, kernel, name, argument;
-            flatten=false)
-    elseif route.route === :value
-        push!(statements, Expr(:(=), name,
-            _rk_kernel_bind_calls(argument, kernel.scope, bindings, taken)))
-    end
-    nothing
+    (; route=:plate, ref=name)
 end
 
 # The kernel's value is its subject cells; formula terms read them
-# concatenated, a per-subject observation reads them cell by cell.
+# concatenated, a per-subject observation reads them cell by cell. The cell's
+# plate also writes every in-cell observation argument the observations read
+# per subject: a per-subject observation reads it cell by cell, a flattened one
+# reads one value per response row.
 function _rk_emit_value_assignment!(defs, statements, bindings, taken,
         kernel::_RKPreparedKernelAssignment)
-    _rk_emit_kernel_reader!(defs, statements, bindings, taken, kernel,
-        kernel.cells, kernel.collected; flatten=false, reader=kernel.name)
-    push!(statements, Expr(:(=), kernel.name, Expr(:call, :brm_flatten_cells, kernel.cells)))
+    outputs = Any[(kernel.cells, kernel.collected)]
+    after = Any[Expr(:(=), kernel.name, Expr(:call, :brm_flatten_cells, kernel.cells))]
     for observation in kernel.observations
         named = Any[zip(observation.argument_names, observation.arguments)...]
         observation.weight === nothing ||
             push!(named, (observation.weight_name, observation.weight))
-        if observation.nested
-            # Each cell broadcasts against its own response array.
-            for (name, argument) in named
-                _rk_emit_kernel_cell_argument!(defs, statements, bindings, taken,
-                    kernel, name, argument)
-            end
-            continue
-        end
-        # A flattened observation needs one argument value per response row. A
-        # data weight's reader reads only data, so it stays a data-only
-        # definition for RKPPL's `weighted`.
-        row_aligned(value) = Expr(:call, :.*,
-            Expr(:call, :ones, Expr(:call, :length, observation.param)), value)
         for (name, argument) in named
-            _rk_emit_kernel_reader!(defs, statements, bindings, taken, kernel,
-                name, row_aligned(argument); flatten=true)
+            if observation.nested
+                # Each cell broadcasts against its own response array.
+                route = _rk_kernel_cell_argument(kernel, name, argument)
+                if route.route === :plate
+                    push!(outputs, (name, argument))
+                elseif route.route === :value
+                    push!(after, Expr(:(=), name,
+                        _rk_kernel_bind_calls(argument, kernel.scope, bindings, taken)))
+                end
+                continue
+            end
+            cells = _rk_ast_fresh_name(string(name, "_cells"), taken)
+            push!(outputs, (cells, Expr(:call, :.*,
+                Expr(:call, :ones, Expr(:call, :length, observation.param)), argument)))
+            push!(after, Expr(:(=), name, Expr(:call, :brm_flatten_cells, cells)))
         end
     end
+    _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs)
+    append!(statements, after)
 end
 
 # The cell restricted to what `value` reads: the body statements producing

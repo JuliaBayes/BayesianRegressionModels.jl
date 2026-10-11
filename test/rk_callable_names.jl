@@ -45,9 +45,9 @@ source_text(emitted) = join((sprint(Base.show_unquoted, d) for d in emitted.defs
     # The BRM provider receives `addprop` as its entry and defines it.
     @test any(d -> BRM._rk_source_definition(d) == (; name=:addprop, kind=:kernel), emitted.defs)
     @test occursin("addprop(loc", source)
-    # The cell's own callable is bound under its own name inside the reader.
+    # The cell's own callable is bound under its own name inside its plate.
     @test (:cell_decay => PublicCallableNames.cell_decay) in emitted.bindings
-    @test occursin("cell_decay(t, dose, exp(log_k))", source)
+    @test occursin("cell_decay(t[i], dose[i], exp(log_k))", source)
     ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
     @test getfield(ext._rk_emit_module(emitted), :cell_decay) === PublicCallableNames.cell_decay
 
