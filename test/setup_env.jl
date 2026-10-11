@@ -64,14 +64,16 @@ const PINS = [
     # never zipped), which BRM's emitted do-blocks use instead of Ref operands;
     # bed5d467 deprecates those Ref operands, and ecf99453 packs every hidden
     # bound operand (captures included) into one prepared-AD context, clear
-    # of the 32-argument gradient cliff. 1603d87a adds pointwise densities
-    # retained from the sampler gradient's reverse sweep (used by BRM's NLME
-    # gradient); 5c2b80d5 keeps predictor nodes queryable by authored name.
-    # fbd0aef0 runs authored `@plate for` cells over arrays per index as
-    # retained plates (`@kernel` callees, dotted math, gathers, and cell
-    # locals); 2503ede6 also supports undotted per-index array arithmetic.
-    # d702209e groups shared live outputs into one evaluation per cell and
-    # keeps weight outputs based only on data independent of live parameters.
+    # of the 32-argument gradient cliff. 1603d87a adds
+    # `prepare_sampler(...; retain=(:pointwise,))` and
+    # `sampler_value_gradient_and_retained!` (pointwise densities from the
+    # gradient's reverse sweep), which BRM's lockstep NLME gradient uses; it
+    # contains ecf99453 and bed5d467, plus 3fc1f0c7, 54d4a7b9 and 46d5520c.
+    # f67bd182 contains 5c2b80d5 and adds prepared query HVPs, which BRM's
+    # NLME η Hessian blocks use. fbd0aef0 runs authored `@plate for` cells
+    # over arrays per index; 2503ede6 supports undotted per-index arithmetic.
+    # d702209e evaluates shared live cell outputs once per subject and keeps
+    # weight outputs based only on data independent of live parameters.
     ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "d702209e6f452ad2c833b517667a3b2406b20978"),  # main
 ]
 

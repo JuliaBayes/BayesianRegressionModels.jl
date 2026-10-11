@@ -6,9 +6,8 @@ module BayesianRegressionModelsNLMEEstimationExt
 # evaluation (`brm_nlme_loglikelihoods[_and_gradients]`) whatever the batch size,
 # and the estimators make one such call per iteration for all subjects still
 # iterating. No per-subject method is implemented here, because each would cost a
-# full pass. No Hessian method and no AD backend are declared either: RK exposes
-# first-order AD only (ReactiveKernels snag `rkppl-second-ord-ba21b602`), so
-# `empirical_bayes` runs its gradient-only `QuasiNewtonEBE`.
+# full pass. Colored RK Hessian-vector products give all subjects' η Hessian
+# blocks in one pass per η coordinate, so `empirical_bayes` uses `NewtonEBE`.
 
 using BayesianRegressionModels
 import NLMEEstimation as NE
@@ -20,6 +19,7 @@ NE.nlme_layout(m::BRM.BRMNLMEModel) = NE.NLMELayout(;
     ntheta=length(m.theta), nsigma=length(m.sigma), eta_blocks=m.eta_blocks)
 
 NE.evaluation_style(::BRM.BRMNLMEModel) = NE.BatchedEvaluation()
+NE.provides_eta_hessian(::BRM.BRMNLMEModel) = true
 
 # All subjects' random effects with column `k` of `H` placed at subject
 # `subjects[k]` and the other subjects at zero; by conditional independence the
@@ -44,6 +44,11 @@ end
 function NE.conditional_loglikelihoods_and_gradients(m::BRM.BRMNLMEModel, subjects, θ, σ, H)
     values, G = BRM.brm_nlme_loglikelihoods_and_gradients(m, θ, σ, _batch_eta(m, subjects, H))
     values[subjects], G[:, subjects]
+end
+
+function NE.conditional_loglikelihood_hessian_blocks(m::BRM.BRMNLMEModel, subjects, θ, σ, H)
+    blocks = BRM._brm_nlme_hessian_blocks(m, θ, σ, _batch_eta(m, subjects, H))
+    blocks[subjects]
 end
 
 # Intercept margins only: their population coefficient and random effect both

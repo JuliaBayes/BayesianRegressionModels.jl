@@ -1,6 +1,6 @@
 # The NLMEEstimation.jl protocol for RK-lowered BRM models
 # (ext/BayesianRegressionModelsNLMEEstimationExt.jl): batched evaluation and the
-# gradient-only posthoc estimator, checked against the analytic oracle of
+# Newton posthoc estimator, checked against the analytic oracle of
 # nlme_fixtures.jl.
 #
 # NLMEEstimation.jl is not published yet, so it is not part of test/Project.toml.
@@ -12,6 +12,7 @@ Base.find_package("NLMEEstimation") === nothing && error(
     "see the header of this file")
 
 using NLMEEstimation
+using LinearAlgebra
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 
 const NLMEEXT = Base.get_extension(BRM, :BayesianRegressionModelsNLMEEstimationExt)
@@ -41,7 +42,7 @@ end
     @test n == 3
     @test nlme_layout(m) == NLMELayout(; ntheta=3, nsigma=1, eta_blocks=[2])
     @test evaluation_style(m) isa BatchedEvaluation
-    @test !provides_eta_hessian(m)
+    @test provides_eta_hessian(m)
     names = parameter_names(m)
     @test length(names.theta) == 3 && length(names.sigma) == 1 && length(names.eta) == 2
     θ, σ = plate_pk_point(m)
@@ -53,6 +54,10 @@ end
         ℓ, G = conditional_loglikelihoods_and_gradients(m, subjects, θ, σ, H)
         @test ℓ == values
         @test G ≈ plate_pk_oracle_gradients(m, θ, σ, full)[:, subjects] rtol=1e-10
+        blocks = conditional_loglikelihood_hessian_blocks(m, subjects, θ, σ, H)
+        oracle = plate_pk_oracle_hessians(m, θ, σ, full)[subjects]
+        @test length(blocks) == length(subjects)
+        @test all(isapprox.(blocks, oracle; rtol=1e-9, atol=1e-9))
     end
     # The per-subject entry points derive from a batch of one.
     η = [0.05, -0.1]
@@ -92,11 +97,20 @@ end
     ω = omega_parameters(nlme_layout(m), [0.09 0.02; 0.02 0.04])
     prior = re_prior(m, ω)
     result = empirical_bayes(m, θ, σ, ω)
-    @test result.method isa QuasiNewtonEBE
+    @test result.method isa NewtonEBE
     @test all(result.converged)
-    @test result.hessians === nothing
+    @test result.hessians !== nothing
+    @test length(ebe_covariances(result)) == nsubjects(m)
     H = result.modes
+    quasi = empirical_bayes(m, θ, σ, ω; method=QuasiNewtonEBE())
+    @test all(quasi.converged)
+    @test H ≈ quasi.modes rtol=1e-5 atol=1e-7
     @test result.conditional_loglikelihood ≈ plate_pk_oracle(m, θ, σ, H) rtol=1e-12
+    oracle_hessians = plate_pk_oracle_hessians(m, θ, σ, H)
+    @test all(isapprox.(result.hessians,
+        [B - prior.precision for B in oracle_hessians]; rtol=1e-8, atol=1e-8))
+    @test all(isapprox.(ebe_covariances(result),
+        [inv(-B + prior.precision) for B in oracle_hessians]; rtol=1e-8, atol=1e-8))
     # Stationary for the oracle's complete-data density: analytic likelihood
     # gradient plus the Gaussian prior's, standardized as the solver measures it.
     G = plate_pk_oracle_gradients(m, θ, σ, H) .- prior.precision * H
