@@ -272,6 +272,97 @@ function _brm_nlme_ragged_labels(plan::_RKValuePlan, name)
     nothing
 end
 
+_brm_nlme_gaussian_plan(plan::_RKHeldOutPlan) =
+    isempty(plan.held_out) && _brm_nlme_gaussian_plan(plan.parent)
+_brm_nlme_gaussian_plan(plan::_RKStructuralPlan) =
+    !isempty(plan.responses) && all(o -> o.family === :gaussian && o.weights === nothing &&
+        o.interval === nothing && o.mi_jobs === nothing, plan.responses)
+function _brm_nlme_gaussian_plan(plan::_RKValuePlan)
+    !isempty(plan.observations) && all(o -> begin
+        # RK's :observations preset currently excludes one observed array per
+        # plate index. Keep such models available to the posthoc likelihood path.
+        o.distribution.callable in (Normal, StanBlocks.normal) &&
+            o.modifier === nothing && o.weight === nothing &&
+            o.missing_response === nothing &&
+            !(o.response isa AbstractVector{<:AbstractVector})
+    end, plan.observations)
+end
+_brm_nlme_gaussian_plan(plan) = false
+
+function _brm_nlme_observed(backend::RKBRMI, attribution, nsubjects)
+    observed = [Float64[] for _ in 1:nsubjects]
+    scalar_attribution = Pair{Symbol,Vector{Int}}[]
+    for (name, subjects) in attribution
+        # Value plans have already gathered ragged response values into the
+        # pointwise query's order in their bound `columns[name]`.
+        values = backend.plan.columns[name]
+        length(values) == length(subjects) || error(
+            "brm_nlme_model: response `$name` has $(length(values)) values for " *
+            "$(length(subjects)) attributed pointwise entries")
+        expanded = Int[]
+        for (value, i) in zip(values, subjects)
+            items = value isa AbstractArray ? vec(value) : (value,)
+            for y in items
+                y isa Real && isfinite(y) || _brm_nlme_error(
+                    "brm_nlme_model: Gaussian response `$name` contains a non-finite " *
+                    "or non-numeric observation $(repr(y))")
+                push!(observed[i], Float64(y))
+                push!(expanded, i)
+            end
+        end
+        push!(scalar_attribution, name => expanded)
+    end
+    observed, scalar_attribution
+end
+
+function _brm_nlme_observation_argument(value, n, name, field)
+    values = value isa Number ? fill(Float64(value), n) :
+        Float64.(brm_flatten_cells(value))
+    length(values) == n || throw(DimensionMismatch(
+        "brm_nlme_model: `$name.$field` has $(length(values)) entries for $n observations"))
+    values
+end
+
+function _brm_nlme_moments(m, arguments, tangents=())
+    nsubjects = length(m.view.levels)
+    neta = sum(m.eta_blocks)
+    means = [Float64[] for _ in 1:nsubjects]
+    variances = [Float64[] for _ in 1:nsubjects]
+    mean_rows = [Vector{Float64}[] for _ in 1:nsubjects]
+    variance_rows = [Vector{Float64}[] for _ in 1:nsubjects]
+    for (name, subjects) in m.observation_attribution
+        n = length(subjects)
+        field = getproperty(arguments, name)
+        locations = _brm_nlme_observation_argument(field.location, n, name, :location)
+        scales = _brm_nlme_observation_argument(field.scale, n, name, :scale)
+        all(s -> isfinite(s) && s > 0, scales) || _brm_nlme_error(
+            "brm_nlme_model: Gaussian response `$name` has a non-finite or " *
+            "non-positive scale")
+        dlocations = [_brm_nlme_observation_argument(getproperty(t, name).location,
+            n, name, :location) for t in tangents]
+        dscales = [_brm_nlme_observation_argument(getproperty(t, name).scale,
+            n, name, :scale) for t in tangents]
+        for (k, i) in enumerate(subjects)
+            push!(means[i], locations[k])
+            push!(variances[i], abs2(scales[k]))
+            if !isempty(tangents)
+                push!(mean_rows[i], [d[k] for d in dlocations])
+                push!(variance_rows[i], [2 * scales[k] * d[k] for d in dscales])
+            end
+        end
+    end
+    for i in 1:nsubjects
+        length(means[i]) == length(m.observed[i]) || error(
+            "brm_nlme_model: subject $i has $(length(means[i])) observation moments " *
+            "for $(length(m.observed[i])) observed values")
+    end
+    matrix(rows) = isempty(rows) ? zeros(Float64, 0, neta) :
+        reduce(vcat, (permutedims(row) for row in rows))
+    isempty(tangents) ? collect(zip(means, variances)) :
+        [(means[i], variances[i], matrix(mean_rows[i]), matrix(variance_rows[i]))
+            for i in 1:nsubjects]
+end
+
 function _brm_nlme_attribution(backend::RKBRMI, view::BRMNLMEView, fields)
     L = sum(length, view.rows)
     row_subject = zeros(Int, L)
@@ -319,6 +410,11 @@ function _rk_retained_pointwise_sampler end
 function _rk_value_gradient_and_pointwise! end
 function _rk_eta_hvp_query end
 function _rk_eta_hvp end
+function _rk_observation_query end
+function _rk_observation_pushforward end
+function _rk_observation_values end
+function _rk_observation_value_and_pushforward end
+_brm_nlme_forward_backend(ad_backend) = nothing
 
 """
     BRMNLMEModel
@@ -335,8 +431,13 @@ All three are in the model's unconstrained coordinates. The random-effect
 covariance Ω is not a model coordinate here: estimators own it, and the model
 evaluates the conditional likelihood `log p(y_i | θ, σ, η_i)` without the
 random-effect prior.
+
+When every fitted response is an independent, unweighted Normal observation
+supported by RK's `:observations` preset, `observed` holds subject observation
+vectors in the same order as the prepared query. `observations_pushforward`
+uses one colored direction per random-effect margin across all subjects.
 """
-struct BRMNLMEModel{B<:RKBRMI,S,Q,V}
+struct BRMNLMEModel{B<:RKBRMI,S,Q,V,O,J}
     view::BRMNLMEView
     backend::B
     sampler::S
@@ -347,6 +448,10 @@ struct BRMNLMEModel{B<:RKBRMI,S,Q,V}
     sigma::Vector{Int}
     eta_blocks::Vector{Int}
     unit::Vector{Float64}
+    observations_query::O
+    observations_pushforward::J
+    observed::Vector{Vector{Float64}}
+    observation_attribution::Vector{Pair{Symbol,Vector{Int}}}
 end
 
 Base.show(io::IO, m::BRMNLMEModel) = print(io, "BRMNLMEModel(",
@@ -354,7 +459,7 @@ Base.show(io::IO, m::BRMNLMEModel) = print(io, "BRMNLMEModel(",
     length(m.sigma), ", η: ", sum(m.eta_blocks), " in blocks ", m.eta_blocks, ")")
 
 """
-    brm_nlme_model(backend::RKBRMI; ad_backend) -> BRMNLMEModel
+    brm_nlme_model(backend::RKBRMI; ad_backend, observation_ad_backend=nothing) -> BRMNLMEModel
 
 Prepare an RK-lowered population model for NLME estimators: its
 [`brm_nlme_view`](@ref) partition, the backend's sampler query retaining its
@@ -362,11 +467,16 @@ pointwise densities (first-order, reverse-mode Enzyme: `ad_backend` must be
 `AutoEnzyme(; mode=Enzyme.Reverse)`), a reverse-over-forward sampler HVP query,
 its pointwise densities, and the subject attribution of every observed density.
 
+`observation_ad_backend` selects the forward-mode backend for Gaussian moment
+Jacobians. With the NLMEEstimation/Enzyme extension loaded, an `AutoEnzyme`
+reverse backend automatically selects Enzyme forward mode. Other callers can
+pass a forward backend explicitly.
+
 Refuses ([`BRMNLMEViewError`](@ref)) everything `brm_nlme_view` refuses, Student-t
 random-effect blocks (the estimators own a Gaussian η prior), and observed
 densities that cannot be attributed to subjects.
 """
-function brm_nlme_model(backend::RKBRMI; ad_backend)
+function brm_nlme_model(backend::RKBRMI; ad_backend, observation_ad_backend=nothing)
     view = brm_nlme_view(backend)
     any(==(:subject_mixing), view.role) && _brm_nlme_error(
         "brm_nlme_model: Student-t random-effect blocks are not covered; NLME " *
@@ -383,9 +493,19 @@ function brm_nlme_model(backend::RKBRMI; ad_backend)
         margin.block == previous ? (eta_blocks[end] += 1) : push!(eta_blocks, 1)
         previous = margin.block
     end
+    gaussian = _brm_nlme_gaussian_plan(backend.plan)
+    observations_query = gaussian ? _rk_observation_query(backend) : nothing
+    forward_backend = observation_ad_backend === nothing ?
+        _brm_nlme_forward_backend(ad_backend) : observation_ad_backend
+    observations_pushforward = gaussian && forward_backend !== nothing ?
+        _rk_observation_pushforward(backend, view, unit, forward_backend) : nothing
+    observed, observation_attribution = gaussian ?
+        _brm_nlme_observed(backend, attribution, length(view.levels)) :
+        (Vector{Vector{Float64}}(), Pair{Symbol,Vector{Int}}[])
     BRMNLMEModel(view, backend, sampler, pointwise, eta_hvp, attribution,
         findall(==(:population), view.role), findall(==(:scalar), view.role),
-        eta_blocks, unit)
+        eta_blocks, unit, observations_query, observations_pushforward,
+        observed, observation_attribution)
 end
 
 function _brm_nlme_point(m::BRMNLMEModel, θ, σ, H)
