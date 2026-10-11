@@ -69,10 +69,9 @@ const PINS = [
     # `sampler_value_gradient_and_retained!` (pointwise densities from the
     # gradient's reverse sweep), which BRM's lockstep NLME gradient uses; it
     # contains ecf99453 and bed5d467, plus 3fc1f0c7, 54d4a7b9 and 46d5520c.
-    # 5c2b80d5 contains 1603d87a and names every @rkppl predictor node after
-    # its authored name, so a scalar lone intercept `mu = mu_Intercept` stays
-    # queryable as `mu`.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "5c2b80d53e33cd0d485c302a73e98466dd94118e"),  # main
+    # f67bd182 contains 5c2b80d5 and adds prepared query HVPs, which BRM's
+    # NLME η Hessian blocks use.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "f67bd1829864da2d456247be99a54b6605bb2c95"),  # main
 ]
 
 function main()
