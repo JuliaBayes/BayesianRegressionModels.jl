@@ -453,7 +453,8 @@ function _rk_observation_values end
 function _rk_observation_value_and_pushforward end
 function _rk_nlme_cell_query end
 function _rk_nlme_cell_value end
-function _rk_nlme_cell_value_and_eta_gradient end
+function _rk_nlme_compact_cell_sampler end
+function _rk_nlme_compact_cell_value_and_gradient! end
 _brm_nlme_forward_backend(ad_backend) = nothing
 
 # A cell query still addresses the original packed coordinate space. Overlay
@@ -521,7 +522,7 @@ supported by RK's `:observations` preset, `observed` holds subject observation
 vectors in the same order as the prepared query. `observations_pushforward`
 uses one colored direction per random-effect margin across all subjects.
 """
-struct BRMNLMEModel{B<:RKBRMI,S,Q,V,O,J,C}
+struct BRMNLMEModel{B<:RKBRMI,S,Q,V,O,J,C,G}
     view::BRMNLMEView
     backend::B
     sampler::S
@@ -537,6 +538,7 @@ struct BRMNLMEModel{B<:RKBRMI,S,Q,V,O,J,C}
     observed::Vector{Vector{Float64}}
     observation_attribution::Vector{Pair{Symbol,Vector{Int}}}
     cell_query::C
+    cell_gradient::G
     cell_rows::Union{Nothing,Vector{Int}}
 end
 
@@ -596,10 +598,18 @@ function brm_nlme_model(backend::RKBRMI; ad_backend, observation_ad_backend=noth
     cell_rows = _brm_nlme_cell_rows(backend, view, attribution)
     cell_query = cell_rows === nothing ? nothing :
         _rk_nlme_cell_query(backend, Tuple(first.(attribution)))
+    cell_gradient = if cell_rows === nothing
+        nothing
+    else
+        selected = sort!(vcat(findall(==(:population), view.role),
+            findall(==(:scalar), view.role), first(view.subject_coordinates)))
+        (sampler=_rk_nlme_compact_cell_sampler(backend,
+            Tuple(first.(attribution)), unit, selected), lock=ReentrantLock())
+    end
     BRMNLMEModel(view, backend, sampler, pointwise, eta_hvp, attribution,
         findall(==(:population), view.role), findall(==(:scalar), view.role),
         eta_blocks, unit, observations_query, observations_pushforward,
-        observed, observation_attribution, cell_query, cell_rows)
+        observed, observation_attribution, cell_query, cell_gradient, cell_rows)
 end
 
 function _brm_nlme_cell_point(m::BRMNLMEModel, i::Integer, θ, σ, η)
@@ -636,12 +646,24 @@ end
 """
     brm_nlme_loglikelihood_and_gradient(m::BRMNLMEModel, i, θ, σ, η_i)
 
-Return one subject's conditional log-likelihood and its η_i gradient. Enzyme
-reverses the same cell query over η_i alone, without a packed gradient buffer.
+Return one subject's conditional log-likelihood and its η_i gradient. RK's
+compact cell sampler differentiates selected coordinates in one fused call,
+without a packed gradient buffer.
 """
 function brm_nlme_loglikelihood_and_gradient(m::BRMNLMEModel, i::Integer, θ, σ, η)
     point, row = _brm_nlme_cell_point(m, i, θ, σ, η)
-    _rk_nlme_cell_value_and_eta_gradient(m.cell_query, point, row)
+    indices = sort!(vcat(m.theta, m.sigma, point.eta_positions))
+    active = point[indices]
+    selected_gradient = similar(active)
+    # A prepared RK sampler owns mutable AD workspace. Protect it when the
+    # model is shared across concurrent subject requests.
+    value = lock(m.cell_gradient.lock) do
+        first(_rk_nlme_compact_cell_value_and_gradient!(
+            m.cell_gradient.sampler, selected_gradient, m.unit,
+            active, indices, row))
+    end
+    value, [selected_gradient[searchsortedfirst(indices, j)]
+        for j in point.eta_positions]
 end
 
 function _brm_nlme_point(m::BRMNLMEModel, θ, σ, H)

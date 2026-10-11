@@ -13,6 +13,7 @@ Base.find_package("NLMEEstimation") === nothing && error(
 
 using NLMEEstimation
 using LinearAlgebra
+using Random
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 
 const NLMEEXT = Base.get_extension(BRM, :BayesianRegressionModelsNLMEEstimationExt)
@@ -120,6 +121,19 @@ end
     θ, σ = plate_pk_point(m)
     ω = omega_parameters(nlme_layout(m), [0.09 0.0; 0.0 0.04])
     @test check_protocol(m, θ, σ, ω; η=[0.1 -0.05 0.2; -0.1 0.15 0.05])
+end
+
+@stestset "SAEM differentiates the batched conditional density" begin
+    m = brm_nlme_model(RKBRMI(nlme_plate_pk(NLME_PLATE_DATA)); ad_backend=NLME_AD)
+    θ, σ = plate_pk_point(m)
+    ω = omega_parameters(nlme_layout(m), [0.09 0.0; 0.0 0.04])
+    @test NLMEEstimation.ad_backend(m) isa AutoEnzyme
+    fit = saem(m, θ, σ, ω; rng=Random.Xoshiro(2026),
+        options=SAEMOptions(iterations=3, burnin=1, mcmc_burnin=0,
+            adapt_iterations=0, numeric_maxiter=2, mstep_interval=3))
+    @test fit.kernel == :standard_mh
+    @test all(isfinite, (fit.theta..., fit.sigma..., fit.omega...))
+    @test size(fit.eta) == (2, nsubjects(m))
 end
 
 @stestset "posthoc finds the oracle's complete-data modes" begin
