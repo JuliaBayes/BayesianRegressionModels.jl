@@ -85,7 +85,8 @@ value and gradient allocations stay flat when unrelated subjects grow from
 the single-subject method by name. It runs in the test environment above.
 
 `nlme_estimation_ext.jl` covers the NLMEEstimation.jl protocol extension:
-batched and single-subject evaluation, analytic η Hessian blocks, Gaussian observation moments
+batched and single-subject evaluation, subject-cell population gradients,
+analytic η Hessian blocks, Gaussian observation moments
 and colored η Jacobians, `check_protocol`, and Newton posthoc against
 independent oracles. Its Gaussian checks include arrays observed within plate
 cells and a modeled scale shared by the observations in each cell.

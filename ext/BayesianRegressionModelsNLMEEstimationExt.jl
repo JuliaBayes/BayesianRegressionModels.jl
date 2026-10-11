@@ -4,6 +4,9 @@ module BayesianRegressionModelsNLMEEstimationExt
 # (`BRMNLMEModel`, from `brm_nlme_model`). The model declares
 # `BatchedEvaluation`: larger batches use one lockstep RK evaluation, while
 # singleton batches and explicit per-subject calls use one observation cell.
+# Online SAEM uses those cells for its population gradient, avoiding a reverse
+# derivative through the entire batched RK evaluator. The retained-draw
+# mixture keeps batched gradients to avoid repeating cell work for each draw.
 # Colored RK Hessian-vector products give all subjects' η Hessian
 # blocks in one pass per η coordinate, so `empirical_bayes` uses `NewtonEBE`.
 # Gaussian observations use one :observations query and colored forward
@@ -21,9 +24,14 @@ NE.nlme_layout(m::BRM.BRMNLMEModel) = NE.NLMELayout(;
     ntheta=length(m.theta), nsigma=length(m.sigma), eta_blocks=m.eta_blocks)
 
 NE.evaluation_style(::BRM.BRMNLMEModel) = NE.BatchedEvaluation()
+NE.saem_population_gradient_style(::BRM.BRMNLMEModel) = NE.PerSubjectEvaluation()
+NE.saem_population_gradient_style(::BRM.BRMNLMEModel, ::Val{:online}) =
+    NE.PerSubjectEvaluation()
+NE.saem_population_gradient_style(::BRM.BRMNLMEModel, ::Val{:mixture}) =
+    NE.BatchedEvaluation()
 NE.provides_eta_hessian(::BRM.BRMNLMEModel) = true
-# SAEM's numerical M-step differentiates the batched conditional density in
-# θ and σ. The RK pointwise query mixes active and constant overlay reads.
+# Other numerical derivatives still use Enzyme. The RK pointwise query mixes
+# active and constant overlay reads.
 NE.ad_backend(::BRM.BRMNLMEModel) =
     AutoEnzyme(; mode=Enzyme.set_runtime_activity(Enzyme.Reverse))
 BRM._brm_nlme_forward_backend(::AutoEnzyme) = AutoEnzyme(; mode=Enzyme.Forward)
@@ -103,6 +111,18 @@ NE.conditional_loglikelihood(m::BRM.BRMNLMEModel, i::Integer, θ, σ, η) =
 NE.conditional_loglikelihood_and_gradient(m::BRM.BRMNLMEModel,
         i::Integer, θ, σ, η) =
     BRM.brm_nlme_loglikelihood_and_gradient(m, i, θ, σ, η)
+
+# The same prepared subject-cell sampler also differentiates the population
+# coordinates. SAEM can use this protocol method without compiling a reverse
+# derivative of the entire batched RK evaluation.
+function NE.conditional_loglikelihood_and_population_gradient(m::BRM.BRMNLMEModel,
+        i::Integer, θ, σ, η)
+    value, indices, selected_gradient, _ =
+        BRM._brm_nlme_cell_value_and_selected_gradient(m, i, θ, σ, η)
+    gθ = [selected_gradient[searchsortedfirst(indices, j)] for j in m.theta]
+    gσ = [selected_gradient[searchsortedfirst(indices, j)] for j in m.sigma]
+    value, gθ, gσ
+end
 
 function NE.conditional_loglikelihoods_and_gradients(m::BRM.BRMNLMEModel, subjects, θ, σ, H)
     cell = _singleton_cell(m, subjects, H)

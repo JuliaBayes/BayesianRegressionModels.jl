@@ -80,6 +80,11 @@ function _plate_pk_oracle_terms(m, θ, σ, H)
         gradient = zeros(size(H, 1))
         gradient[kcl] = sum(residual .* pred .* -kt)
         gradient[kv] = sum(residual .* pred .* (kt .- 1))
+        population = Dict(Symbol("pop_log_CL.beta_pop.1") => gradient[kcl],
+            Symbol("pop_log_CL.beta_pop.2") => d.weight[r] * gradient[kcl],
+            :log_V_Intercept => gradient[kv])
+        theta_gradient = [population[name] for name in names]
+        sigma_gradient = [sum((d.dv[r] .- pred).^2 ./ sigma^2 .- 1)]
         # For p = dose/V * exp(-CL*t/V), with q = CL*t/V:
         # p_CL = -q*p, p_V = (q-1)*p, and
         # p_CL,CL = (q²-q)*p, p_CL,V = (2q-q²)*p,
@@ -92,7 +97,7 @@ function _plate_pk_oracle_terms(m, θ, σ, H)
         hessian[kcl, kv] = sum(residual .* pred .* (2 .* kt .- kt.^2) .- dcl .* dv ./ sigma^2)
         hessian[kv, kcl] = hessian[kcl, kv]
         hessian[kv, kv] = sum(residual .* pred .* (kt.^2 .- 3 .* kt .+ 1) .- dv.^2 ./ sigma^2)
-        (; value, gradient, hessian)
+        (; value, gradient, hessian, theta_gradient, sigma_gradient)
     end
 end
 
