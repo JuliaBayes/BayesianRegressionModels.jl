@@ -22,6 +22,10 @@ NE.nlme_layout(m::BRM.BRMNLMEModel) = NE.NLMELayout(;
 
 NE.evaluation_style(::BRM.BRMNLMEModel) = NE.BatchedEvaluation()
 NE.provides_eta_hessian(::BRM.BRMNLMEModel) = true
+# SAEM's numerical M-step differentiates the batched conditional density in
+# θ and σ. The RK pointwise query mixes active and constant overlay reads.
+NE.ad_backend(::BRM.BRMNLMEModel) =
+    AutoEnzyme(; mode=Enzyme.set_runtime_activity(Enzyme.Reverse))
 BRM._brm_nlme_forward_backend(::AutoEnzyme) = AutoEnzyme(; mode=Enzyme.Forward)
 
 function _check_subjects(m::BRM.BRMNLMEModel, subjects)
