@@ -234,13 +234,9 @@ end
 
 # ── Evaluation for NLME estimators ───────────────────────────────────────────
 #
-# Subjects are conditionally independent given (θ, Ω, σ), so one evaluation of
-# the joint RK program serves all subjects in lockstep: the pointwise densities
-# summed by subject give every subject's conditional log-likelihood, and the
-# joint gradient restricted to a subject's block is that subject's conditional
-# gradient. This layer therefore offers all-subject evaluation only: RK has no
-# per-subject evaluation, and a per-subject entry point would cost a full pass
-# per call, O(N²) per sweep over subjects.
+# Subjects are conditionally independent given (θ, Ω, σ). The lockstep path
+# serves all subjects in one RK evaluation. A subject-indexed observation plate
+# also permits a cell query that evaluates just one subject at a time.
 
 # The packed unconstrained point at which every random-effect block has unit
 # scales and an identity correlation factor, so that each block's standardized
@@ -455,7 +451,54 @@ function _rk_observation_query end
 function _rk_observation_pushforward end
 function _rk_observation_values end
 function _rk_observation_value_and_pushforward end
+function _rk_nlme_cell_query end
+function _rk_nlme_cell_value end
+function _rk_nlme_cell_value_and_eta_gradient end
 _brm_nlme_forward_backend(ad_backend) = nothing
+
+# A cell query still addresses the original packed coordinate space. Overlay
+# only the shared coordinates and the selected subject's η onto the read-only
+# unit point; constructing a packed Vector would make each call scale with the
+# number of other subjects.
+struct _BRMNLMEPoint{T,S,E} <: AbstractVector{Float64}
+    unit::Vector{Float64}
+    theta_positions::Vector{Int}
+    theta::T
+    sigma_positions::Vector{Int}
+    sigma::S
+    eta_positions::Vector{Int}
+    eta::E
+end
+Base.size(p::_BRMNLMEPoint) = size(p.unit)
+Base.IndexStyle(::Type{<:_BRMNLMEPoint}) = IndexLinear()
+function Base.getindex(p::_BRMNLMEPoint, j::Int)
+    k = findfirst(==(j), p.theta_positions)
+    k === nothing || return p.theta[k]
+    k = findfirst(==(j), p.sigma_positions)
+    k === nothing || return p.sigma[k]
+    k = findfirst(==(j), p.eta_positions)
+    k === nothing || return p.eta[k]
+    p.unit[j]
+end
+
+# Only a subject-indexed observation plate has a single query cell containing
+# exactly that subject's densities. A flat grouped observation, including a
+# ragged join, remains available through lockstep evaluation but cannot use a
+# cell as its conditional subject density.
+function _brm_nlme_cell_rows(backend::RKBRMI, view::BRMNLMEView, attribution)
+    plan = backend.plan
+    isempty(attribution) && return nothing
+    plan isa _RKValuePlan || return nothing
+    plate_observations = Set(o.source for a in plan.assignments
+        if a isa _RKPreparedKernelAssignment for o in a.observations)
+    all(name -> name in plate_observations, first.(attribution)) || return nothing
+    all(rows -> length(rows) == 1, view.rows) || return nothing
+    n = length(view.levels)
+    rows = [only(group_rows) for group_rows in view.rows]
+    all(subjects -> length(subjects) == n &&
+        all(i -> subjects[rows[i]] == i, 1:n), last.(attribution)) || return nothing
+    rows
+end
 
 """
     BRMNLMEModel
@@ -478,7 +521,7 @@ supported by RK's `:observations` preset, `observed` holds subject observation
 vectors in the same order as the prepared query. `observations_pushforward`
 uses one colored direction per random-effect margin across all subjects.
 """
-struct BRMNLMEModel{B<:RKBRMI,S,Q,V,O,J}
+struct BRMNLMEModel{B<:RKBRMI,S,Q,V,O,J,C}
     view::BRMNLMEView
     backend::B
     sampler::S
@@ -493,6 +536,8 @@ struct BRMNLMEModel{B<:RKBRMI,S,Q,V,O,J}
     observations_pushforward::J
     observed::Vector{Vector{Float64}}
     observation_attribution::Vector{Pair{Symbol,Vector{Int}}}
+    cell_query::C
+    cell_rows::Union{Nothing,Vector{Int}}
 end
 
 Base.show(io::IO, m::BRMNLMEModel) = print(io, "BRMNLMEModel(",
@@ -512,6 +557,11 @@ its pointwise densities, and the subject attribution of every observed density.
 Jacobians. With the NLMEEstimation/Enzyme extension loaded, an `AutoEnzyme`
 reverse backend automatically selects Enzyme forward mode. Other callers can
 pass a forward backend explicitly.
+
+When the observations belong to one subject-indexed `@plate for` cell each,
+the model also prepares a cell query for
+[`brm_nlme_loglikelihood`](@ref) and
+[`brm_nlme_loglikelihood_and_gradient`](@ref).
 
 Refuses ([`BRMNLMEViewError`](@ref)) everything `brm_nlme_view` refuses, Student-t
 random-effect blocks (the estimators own a Gaussian η prior), and observed
@@ -543,10 +593,55 @@ function brm_nlme_model(backend::RKBRMI; ad_backend, observation_ad_backend=noth
     observed, observation_attribution = gaussian ?
         _brm_nlme_observed(backend, attribution, length(view.levels)) :
         (Vector{Vector{Float64}}(), Pair{Symbol,Vector{Int}}[])
+    cell_rows = _brm_nlme_cell_rows(backend, view, attribution)
+    cell_query = cell_rows === nothing ? nothing :
+        _rk_nlme_cell_query(backend, Tuple(first.(attribution)))
     BRMNLMEModel(view, backend, sampler, pointwise, eta_hvp, attribution,
         findall(==(:population), view.role), findall(==(:scalar), view.role),
         eta_blocks, unit, observations_query, observations_pushforward,
-        observed, observation_attribution)
+        observed, observation_attribution, cell_query, cell_rows)
+end
+
+function _brm_nlme_cell_point(m::BRMNLMEModel, i::Integer, θ, σ, η)
+    rows = m.cell_rows
+    rows === nothing && _brm_nlme_error(
+        "brm_nlme_loglikelihood: per-subject evaluation requires a " *
+        "subject-indexed `@plate for` observation; flat-row grouped and " *
+        "ragged-join models use the lockstep methods")
+    1 <= i <= length(rows) || throw(BoundsError(rows, i))
+    length(θ) == length(m.theta) || throw(DimensionMismatch(
+        "θ has length $(length(θ)), expected $(length(m.theta))"))
+    length(σ) == length(m.sigma) || throw(DimensionMismatch(
+        "σ has length $(length(σ)), expected $(length(m.sigma))"))
+    block = m.view.subject_coordinates[i]
+    length(η) == length(block) || throw(DimensionMismatch(
+        "η has length $(length(η)), expected $(length(block))"))
+    point = _BRMNLMEPoint(m.unit, m.theta, Vector{Float64}(θ), m.sigma,
+        Vector{Float64}(σ), block, Vector{Float64}(η))
+    point, rows[i]
+end
+
+"""
+    brm_nlme_loglikelihood(m::BRMNLMEModel, i, θ, σ, η_i) -> Float64
+
+One subject's conditional log-likelihood from its observation plate cell.
+The work depends on that cell's observations, not on other subjects. Models
+with flat grouped observations use [`brm_nlme_loglikelihoods`](@ref) instead.
+"""
+function brm_nlme_loglikelihood(m::BRMNLMEModel, i::Integer, θ, σ, η)
+    point, row = _brm_nlme_cell_point(m, i, θ, σ, η)
+    _rk_nlme_cell_value(m.cell_query, point, row)
+end
+
+"""
+    brm_nlme_loglikelihood_and_gradient(m::BRMNLMEModel, i, θ, σ, η_i)
+
+Return one subject's conditional log-likelihood and its η_i gradient. Enzyme
+reverses the same cell query over η_i alone, without a packed gradient buffer.
+"""
+function brm_nlme_loglikelihood_and_gradient(m::BRMNLMEModel, i::Integer, θ, σ, η)
+    point, row = _brm_nlme_cell_point(m, i, θ, σ, η)
+    _rk_nlme_cell_value_and_eta_gradient(m.cell_query, point, row)
 end
 
 function _brm_nlme_point(m::BRMNLMEModel, θ, σ, H)

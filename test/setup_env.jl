@@ -82,7 +82,9 @@ const PINS = [
     # parameters. ddb68802 reports Gaussian observation arguments and colored
     # pushforwards for one observed array per plate index. fa23fe7f reads
     # columns of a row-gathered joint monotonic output in place during native
-    # reverse; 609c7a9d keeps composed plate cell queries at one subject.
+    # reverse.
+    # 609c7a9d composes authored plate cells and keeps CellQuery overlay
+    # evaluation/Enzyme η reverse allocations flat as other subjects grow.
     ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "609c7a9d313272af5a3e946bba3af3bdc962eb3a"),  # main
 ]
 

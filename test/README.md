@@ -76,13 +76,16 @@ julia --startup-file=no --project=test test/rk_planning_specialization.jl
 
 ## NLME estimators
 
-`nlme_view.jl` pins `brm_nlme_view` and the lockstep evaluation
-(`brm_nlme_model`, `brm_nlme_loglikelihoods[_and_gradients]`) against an
-independent per-subject oracle with analytic η gradients. It runs in the test
-environment above.
+`nlme_view.jl` pins `brm_nlme_view`, lockstep evaluation
+(`brm_nlme_loglikelihoods[_and_gradients]`), and single-subject plate-cell
+evaluation (`brm_nlme_loglikelihood[_and_gradient]`) against an independent
+oracle with analytic η gradients. The single-subject test also checks that
+value and gradient allocations stay flat when unrelated subjects grow from
+3 to 9 to 27. Flat-row grouped models retain lockstep evaluation and refuse
+the single-subject method by name. It runs in the test environment above.
 
 `nlme_estimation_ext.jl` covers the NLMEEstimation.jl protocol extension:
-batched evaluation, analytic η Hessian blocks, Gaussian observation moments
+batched and single-subject evaluation, analytic η Hessian blocks, Gaussian observation moments
 and colored η Jacobians, `check_protocol`, and Newton posthoc against
 independent oracles. Its Gaussian checks include arrays observed within plate
 cells and a modeled scale shared by the observations in each cell.
