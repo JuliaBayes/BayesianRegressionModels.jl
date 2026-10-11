@@ -170,9 +170,20 @@ BRM._rk_constrained_values(backend::BRM.RKBRMI, u::AbstractVector) =
     constrain(backend.model.layout, u)
 
 # NLME evaluation (src/nlme_view.jl): the prepared `:pointwise` query and its
-# evaluation at a packed unconstrained point.
+# evaluation at a packed unconstrained point, and the sampler query whose
+# reverse sweep also retains those pointwise densities (reverse-mode Enzyme
+# only; RK refuses other backends when preparing it).
 BRM._rk_pointwise_query(backend::BRM.RKBRMI) =
     prepare_query(backend.model, _rk_translated_plan(backend.plan), :pointwise)
 BRM._rk_pointwise_values(query, u::AbstractVector) = Base.invokelatest(query, u)
+BRM._rk_retained_pointwise_sampler(backend::BRM.RKBRMI; ad_backend,
+        u0=zeros(Float64, backend.model.layout.total)) =
+    prepare_sampler(backend.model, _rk_translated_plan(backend.plan), u0;
+        backend=ad_backend, retain=(:pointwise,))
+function BRM._rk_value_gradient_and_pointwise!(query::SamplerQuery,
+        gradient::Vector{Float64}, u::Vector{Float64})
+    value, gradient, retained = sampler_value_gradient_and_retained!(query, gradient, u)
+    value, gradient, retained.pointwise
+end
 
 end

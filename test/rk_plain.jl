@@ -41,7 +41,9 @@ end
     end)
     source = check_printed_roundtrip(backend)
     @test occursin("mu_Intercept ~ Normal", source)
-    @test occursin("mu = fill(mu_Intercept, length(y))", source)
+    # Only the likelihood reads `mu`, by broadcast: no row vector.
+    @test occursin("mu = mu_Intercept", source)
+    @test !occursin("fill(", source)
     @test !occursin("X_mu =", source)
     @test coordinate_names(backend.model.layout) == [:mu_Intercept, :sigma]
     translated = Base.get_extension(BRM,
@@ -55,11 +57,45 @@ end
         ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
     for u in ([-0.3, 0.2], [0.4, -0.1])
         value = Base.invokelatest(mu_query, u)
-        @test (value isa Tuple ? only(value) : value) == fill(u[1], length(data.y))
+        @test (value isa Tuple ? only(value) : value) == u[1]
         sigma = exp(u[2])
         expected = logpdf(Normal(), u[1]) +
             logpdf(Exponential(1), sigma) + u[2] +
             sum(logpdf.(Normal(u[1], sigma), data.y))
+        @test LogDensityProblems.logdensity(problem, u) ≈ expected
+    end
+    check_plain_gradient(backend)
+    # A lone-intercept scale predictor stays scalar through its link value.
+    scaled = RKBRMI(@brm data begin
+        mu ~ 1
+        log(sigma) ~ 1
+        y ~ Normal(mu, sigma)
+    end)
+    source = check_printed_roundtrip(scaled)
+    @test !occursin("fill(", source)
+    @test coordinate_names(scaled.model.layout) == [:mu_Intercept, :sigma_Intercept]
+    check_plain_gradient(scaled)
+end
+
+lone_intercept_rows(m, x) = m[eachindex(x)] .+ x
+
+@stestset "a lone intercept read by its rows stays row-aligned" begin
+    data = (; x=[0.1, -0.2, 0.3, 0.0], y=[-0.4, 0.2, 0.7, -0.1])
+    backend = RKBRMI(@brm data begin
+        mu ~ 1
+        sigma ~ Exponential(1)
+        shifted = lone_intercept_rows(mu, x)
+        y ~ Normal(shifted, sigma)
+    end)
+    source = check_printed_roundtrip(backend)
+    @test occursin("fill(mu_Intercept, length(", source)
+    problem = rk_logdensity_problem(backend;
+        ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    for u in ([-0.3, 0.2], [0.4, -0.1])
+        sigma = exp(u[2])
+        expected = logpdf(Normal(), u[1]) +
+            logpdf(Exponential(1), sigma) + u[2] +
+            sum(logpdf.(Normal.(u[1] .+ data.x, sigma), data.y))
         @test LogDensityProblems.logdensity(problem, u) ≈ expected
     end
     check_plain_gradient(backend)

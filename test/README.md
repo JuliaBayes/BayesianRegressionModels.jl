@@ -197,6 +197,13 @@ of fitted missing coordinates during subject kernel CV. It uses only root
 dependencies, so `julia --project=. test/missing_covariates.jl` also works;
 trailing filters such as `anchors` or `kernel CV` select focused blocks.
 
+`rk_single_level_factor.jl` checks a single-level treatment-coded factor on the
+RK route. Its K=1 source equals the K=2 source apart from the level list and the
+zero-width coefficient declaration, as SBBRMI declares `vector[0]`. Densities and
+every native Reverse coordinate equal the factor-free model, including R2D2 and
+Horseshoe predictors, and same-BRMI compiled Stan agrees through the coordinate
+transport. Run `julia --project=test test/rk_single_level_factor.jl`.
+
 `rk_missing_value_predictors.jl` checks native completed covariates with fixed
 observed-only standardization anchors, shared correlated subject effects and
 subject-kernel composition. It compares full normalized densities and all

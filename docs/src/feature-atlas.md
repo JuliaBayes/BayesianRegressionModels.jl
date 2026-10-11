@@ -176,10 +176,15 @@ title="Shared mean and precision group covariance")
 
 The subject frame has one row per person, while the observation frame has one
 row per concentration measurement. Those axes deliberately have different
-lengths and the observation rows are interleaved. `ragged(x, group)` joins the
-flat observation columns to the subject axis; `kernel(...)` then evaluates one
-structural-model cell per subject. In the generated StanBlocks pane, that
-public BRM kernel lowers to a `plate`.
+lengths and the observation rows are interleaved. The indexed `@plate for`
+cell evaluates the structural model once per subject: `CL[i]` and `V[i]` read
+subject `i`'s values of the linked formulas, `dose[i]` reads the subject frame,
+and `ragged(time, obs_subject)[i]` selects that subject's observation times
+from the flat observation frame. The cell body is ordinary Julia, so `.*` and
+`exp.` act elementwise on those times. The cell names its result
+`predicted_concentration[i]`; the top-level `ragged(concentration, obs_subject)`
+response joins the flat concentrations to it. In the generated StanBlocks pane,
+the cell lowers to a `plate`.
 
 This is a deliberately small one-compartment IV-bolus model,
 `C(t) = dose / V * exp(-(CL / V)t)`. The shared `pk` ID gives `CL` and `V` one
@@ -192,10 +197,9 @@ population_pk = (@brm begin
     log(CL) ~ 1 + (1 | pk | subject)
     log(V)  ~ 1 + (1 | pk | subject)
 
-    predicted_concentration ~ kernel(
-        ragged(time, obs_subject), dose, CL, V,
-    ) do ts, d, cl, volume
-        d / volume * exp((-cl / volume) * ts)
+    @plate for i in eachindex(CL)
+        predicted_concentration[i] = dose[i] / V[i] .*
+            exp.((-CL[i] / V[i]) .* ragged(time, obs_subject)[i])
     end
 
     ragged(concentration, obs_subject) ~
