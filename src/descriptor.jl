@@ -858,7 +858,9 @@ new-population `resample_groups=` CV/GQ re-emission described by
 The builder form's `held_out` keyword names one response or a collection of
 responses — a strict subset; holding out every observation is refused. A
 partial selection removes only those likelihoods; the remaining observations
-still offer `:fit`. For prior draws there is no separate operation: keep the
+still offer `:fit`, and the parameters a held-out likelihood reads stay
+parameters (given a fit). To not condition on a response, omit its column
+instead. For prior draws there is no separate operation: keep the
 model identical, omit the response column from the data, and sample the
 `:instantiate` problem (fixed_param) — the program lowers to generated
 quantities automatically.

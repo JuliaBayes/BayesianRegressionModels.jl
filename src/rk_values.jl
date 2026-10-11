@@ -775,8 +775,9 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
     kernel_cells = Set{Symbol}(a.cells for a in plan.assignments
         if a isa _RKPreparedKernelAssignment)
     union!(reserved, kernel_cells)
+    lone_intercepts = Dict{Symbol,Symbol}()
     regression = _rk_emit_ast(plan.regression, false; values=true, reserved,
-        coordinates)
+        coordinates, lone_intercepts)
     stmts = copy(regression.main.args)
     defs = copy(regression.defs)
     bindings = copy(regression.bindings)
@@ -830,6 +831,7 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
         observed=_rk_observed_names(plan))
     authored = union(Set(a.name for a in plan.assignments),
         (p.name for p in plan.regression.predictors))
-    _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken),
-        _rk_observed_names(plan); retained=authored)
+    _rk_scalar_lone_intercepts(
+        _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken),
+            _rk_observed_names(plan); retained=authored), lone_intercepts)
 end

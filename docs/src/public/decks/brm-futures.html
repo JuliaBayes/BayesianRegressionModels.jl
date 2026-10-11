@@ -1262,18 +1262,17 @@ Example: drug concentration in each subject
 <span id="cb2-2"><a href aria-label="2"></a><span class="fu">log</span>(CL) <span class="op">~</span> <span class="fl">1</span> <span class="op">+</span> (<span class="fl">1</span> <span class="op">|</span> pk <span class="op">|</span> subject)</span>
 <span id="cb2-3"><a href aria-label="3"></a><span class="fu">log</span>(V)  <span class="op">~</span> <span class="fl">1</span> <span class="op">+</span> (<span class="fl">1</span> <span class="op">|</span> pk <span class="op">|</span> subject)</span>
 <span id="cb2-4"><a href aria-label="4"></a></span>
-<span id="cb2-5"><a href aria-label="5"></a>predicted_concentration <span class="op">~</span> <span class="fu">kernel</span>(</span>
-<span id="cb2-6"><a href aria-label="6"></a>    <span class="fu">ragged</span>(time, obs_subject), dose, CL, V,</span>
-<span id="cb2-7"><a href aria-label="7"></a>) <span class="cf">do</span> ts, d, cl, volume</span>
-<span id="cb2-8"><a href aria-label="8"></a>    d <span class="op">/</span> volume <span class="op">*</span> <span class="fu">exp</span>((<span class="op">-</span>cl <span class="op">/</span> volume) <span class="op">*</span> ts)</span>
-<span id="cb2-9"><a href aria-label="9"></a><span class="cf">end</span></span>
-<span id="cb2-10"><a href aria-label="10"></a></span>
-<span id="cb2-11"><a href aria-label="11"></a><span class="fu">ragged</span>(concentration, obs_subject) <span class="op">~</span></span>
-<span id="cb2-12"><a href aria-label="12"></a>    <span class="fu">Normal</span>(predicted_concentration, sigma)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<span id="cb2-5"><a href aria-label="5"></a><span class="pp">@plate</span> <span class="cf">for</span> i <span class="kw">in</span> <span class="fu">eachindex</span>(CL)</span>
+<span id="cb2-6"><a href aria-label="6"></a>    predicted_concentration[i] <span class="op">=</span> dose[i] <span class="op">/</span> V[i] <span class="op">.*</span></span>
+<span id="cb2-7"><a href aria-label="7"></a>        <span class="fu">exp</span>.((<span class="op">-</span>CL[i] <span class="op">/</span> V[i]) <span class="op">.*</span> <span class="fu">ragged</span>(time, obs_subject)[i])</span>
+<span id="cb2-8"><a href aria-label="8"></a><span class="cf">end</span></span>
+<span id="cb2-9"><a href aria-label="9"></a></span>
+<span id="cb2-10"><a href aria-label="10"></a><span class="fu">ragged</span>(concentration, obs_subject) <span class="op">~</span></span>
+<span id="cb2-11"><a href aria-label="11"></a>    <span class="fu">Normal</span>(predicted_concentration, sigma)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </div>
 <div class="card accent-blue tight">
 <p><strong>Formula lines:</strong> describe how clearance (<code>CL</code>) and volume (<code>V</code>) vary between subjects.</p>
-<p><strong>Custom calculation:</strong> the <code>do</code> block computes the concentration curve.</p>
+<p><strong>Custom calculation:</strong> the <code>@plate for</code> cell computes each subject’s concentration curve.</p>
 <p><strong>Observation line:</strong> compares that curve with measured concentrations.</p>
 <p>The shared <code>pk</code> label allows clearance and volume effects to be correlated.</p>
 </div>
@@ -1282,10 +1281,10 @@ Example: drug concentration in each subject
 Formulas and a custom calculation live in the same model declaration.
 </div>
 <div class="source-note">
-<strong>StanBlocks example.</strong> Turing currently rejects this ragged response. Body of the existing <code><span class="citation" data-cites="brm">@brm</span> begin … end</code> declaration; complete code and data in appendix B. <code>kernel</code> runs the calculation for each subject.
+<strong>StanBlocks example.</strong> Turing currently rejects this ragged response. Body of the existing <code><span class="citation" data-cites="brm">@brm</span> begin … end</code> declaration; complete code and data in appendix B. <code><span class="citation" data-cites="plate">@plate</span> for</code> runs the calculation once per subject.
 </div>
 <aside class="notes">
-<p>This is the body of the exact population_pk declaration from docs/src/feature-atlas.md. The Lua filter extracts it rather than maintaining a second copy. The structural equation is a one-compartment IV-bolus model: C(t) = dose/V * exp(-(CL/V)t). The log link is explicit on CL and V. The do-block receives evaluated subject-level values. This demonstrates formula/custom-code composition without asserting that every Julia operation is supported by every backend.</p>
+<p>This is the body of the exact population_pk declaration from docs/src/feature-atlas.md. The Lua filter extracts it rather than maintaining a second copy. The structural equation is a one-compartment IV-bolus model: C(t) = dose/V * exp(-(CL/V)t). The log link is explicit on CL and V. Inside the <span class="citation" data-cites="plate">@plate</span> for cell, CL[i] and V[i] read subject i’s evaluated values, and ragged(time, obs_subject)[i] selects that subject’s measurement times. This demonstrates formula/custom-code composition without asserting that every Julia operation is supported by every backend.</p>
 <style type="text/css">
 span.MJX_Assistive_MathML {
 position:absolute!important;
@@ -1327,7 +1326,7 @@ Describe subject differences with formulas; evaluate the curve at each subject�
 Data fields passed to the declaration on the previous slide. The interleaved rows are intentional.
 </div>
 <aside class="notes">
-<p>The example has two subject rows and five observation rows. alice has three measurements and bob has two; the rows are interleaved. The public kernel/ragged terms join these structures. This is a concrete data-alignment example, not a claim that a data.frame interface prevents another package from expressing the model.</p>
+<p>The example has two subject rows and five observation rows. alice has three measurements and bob has two; the rows are interleaved. The <span class="citation" data-cites="plate">@plate</span> for cell and the ragged(…) wrappers join these structures. This is a concrete data-alignment example, not a claim that a data.frame interface prevents another package from expressing the model.</p>
 <style type="text/css">
 span.MJX_Assistive_MathML {
 position:absolute!important;
@@ -1867,24 +1866,23 @@ display:block!important;
 <span id="cb4-3"><a href aria-label="3"></a>    <span class="fu">log</span>(CL) <span class="op">~</span> <span class="fl">1</span> <span class="op">+</span> (<span class="fl">1</span> <span class="op">|</span> pk <span class="op">|</span> subject)</span>
 <span id="cb4-4"><a href aria-label="4"></a>    <span class="fu">log</span>(V)  <span class="op">~</span> <span class="fl">1</span> <span class="op">+</span> (<span class="fl">1</span> <span class="op">|</span> pk <span class="op">|</span> subject)</span>
 <span id="cb4-5"><a href aria-label="5"></a></span>
-<span id="cb4-6"><a href aria-label="6"></a>    predicted_concentration <span class="op">~</span> <span class="fu">kernel</span>(</span>
-<span id="cb4-7"><a href aria-label="7"></a>        <span class="fu">ragged</span>(time, obs_subject), dose, CL, V,</span>
-<span id="cb4-8"><a href aria-label="8"></a>    ) <span class="cf">do</span> ts, d, cl, volume</span>
-<span id="cb4-9"><a href aria-label="9"></a>        d <span class="op">/</span> volume <span class="op">*</span> <span class="fu">exp</span>((<span class="op">-</span>cl <span class="op">/</span> volume) <span class="op">*</span> ts)</span>
-<span id="cb4-10"><a href aria-label="10"></a>    <span class="cf">end</span></span>
-<span id="cb4-11"><a href aria-label="11"></a></span>
-<span id="cb4-12"><a href aria-label="12"></a>    <span class="fu">ragged</span>(concentration, obs_subject) <span class="op">~</span></span>
-<span id="cb4-13"><a href aria-label="13"></a>        <span class="fu">Normal</span>(predicted_concentration, sigma)</span>
-<span id="cb4-14"><a href aria-label="14"></a><span class="cf">end</span>)((;</span>
-<span id="cb4-15"><a href aria-label="15"></a>    <span class="co"># Subject axis: one row per subject.</span></span>
-<span id="cb4-16"><a href aria-label="16"></a>    subject<span class="op">=</span>[<span class="st">&quot;alice&quot;</span>, <span class="st">&quot;bob&quot;</span>],</span>
-<span id="cb4-17"><a href aria-label="17"></a>    dose<span class="op">=</span>[<span class="fl">100.0</span>, <span class="fl">80.0</span>],</span>
-<span id="cb4-18"><a href aria-label="18"></a></span>
-<span id="cb4-19"><a href aria-label="19"></a>    <span class="co"># Observation axis: one row per sample, interleaved by subject.</span></span>
-<span id="cb4-20"><a href aria-label="20"></a>    obs_subject<span class="op">=</span>[<span class="st">&quot;alice&quot;</span>, <span class="st">&quot;bob&quot;</span>, <span class="st">&quot;alice&quot;</span>, <span class="st">&quot;bob&quot;</span>, <span class="st">&quot;alice&quot;</span>],</span>
-<span id="cb4-21"><a href aria-label="21"></a>    time<span class="op">=</span>[<span class="fl">0.5</span>, <span class="fl">0.25</span>, <span class="fl">1.5</span>, <span class="fl">1.0</span>, <span class="fl">3.0</span>],</span>
-<span id="cb4-22"><a href aria-label="22"></a>    concentration<span class="op">=</span>[<span class="fl">8.1</span>, <span class="fl">7.6</span>, <span class="fl">5.2</span>, <span class="fl">4.9</span>, <span class="fl">2.1</span>],</span>
-<span id="cb4-23"><a href aria-label="23"></a>))</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<span id="cb4-6"><a href aria-label="6"></a>    <span class="pp">@plate</span> <span class="cf">for</span> i <span class="kw">in</span> <span class="fu">eachindex</span>(CL)</span>
+<span id="cb4-7"><a href aria-label="7"></a>        predicted_concentration[i] <span class="op">=</span> dose[i] <span class="op">/</span> V[i] <span class="op">.*</span></span>
+<span id="cb4-8"><a href aria-label="8"></a>            <span class="fu">exp</span>.((<span class="op">-</span>CL[i] <span class="op">/</span> V[i]) <span class="op">.*</span> <span class="fu">ragged</span>(time, obs_subject)[i])</span>
+<span id="cb4-9"><a href aria-label="9"></a>    <span class="cf">end</span></span>
+<span id="cb4-10"><a href aria-label="10"></a></span>
+<span id="cb4-11"><a href aria-label="11"></a>    <span class="fu">ragged</span>(concentration, obs_subject) <span class="op">~</span></span>
+<span id="cb4-12"><a href aria-label="12"></a>        <span class="fu">Normal</span>(predicted_concentration, sigma)</span>
+<span id="cb4-13"><a href aria-label="13"></a><span class="cf">end</span>)((;</span>
+<span id="cb4-14"><a href aria-label="14"></a>    <span class="co"># Subject axis: one row per subject.</span></span>
+<span id="cb4-15"><a href aria-label="15"></a>    subject<span class="op">=</span>[<span class="st">&quot;alice&quot;</span>, <span class="st">&quot;bob&quot;</span>],</span>
+<span id="cb4-16"><a href aria-label="16"></a>    dose<span class="op">=</span>[<span class="fl">100.0</span>, <span class="fl">80.0</span>],</span>
+<span id="cb4-17"><a href aria-label="17"></a></span>
+<span id="cb4-18"><a href aria-label="18"></a>    <span class="co"># Observation axis: one row per sample, interleaved by subject.</span></span>
+<span id="cb4-19"><a href aria-label="19"></a>    obs_subject<span class="op">=</span>[<span class="st">&quot;alice&quot;</span>, <span class="st">&quot;bob&quot;</span>, <span class="st">&quot;alice&quot;</span>, <span class="st">&quot;bob&quot;</span>, <span class="st">&quot;alice&quot;</span>],</span>
+<span id="cb4-20"><a href aria-label="20"></a>    time<span class="op">=</span>[<span class="fl">0.5</span>, <span class="fl">0.25</span>, <span class="fl">1.5</span>, <span class="fl">1.0</span>, <span class="fl">3.0</span>],</span>
+<span id="cb4-21"><a href aria-label="21"></a>    concentration<span class="op">=</span>[<span class="fl">8.1</span>, <span class="fl">7.6</span>, <span class="fl">5.2</span>, <span class="fl">4.9</span>, <span class="fl">2.1</span>],</span>
+<span id="cb4-22"><a href aria-label="22"></a>))</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="source-note">
 <strong>StanBlocks example; Turing does not yet support the ragged-response wrapper.</strong> Julia setup: <code>using BayesianRegressionModels, Distributions</code>. Code and data are read from <a href="https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/docs/src/feature-atlas.md">the executable feature atlas</a>.
 </div>

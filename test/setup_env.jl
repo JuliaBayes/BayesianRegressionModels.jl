@@ -64,13 +64,15 @@ const PINS = [
     # never zipped), which BRM's emitted do-blocks use instead of Ref operands;
     # bed5d467 deprecates those Ref operands, and ecf99453 packs every hidden
     # bound operand (captures included) into one prepared-AD context, clear
-    # of the 32-argument gradient cliff. fbd0aef0 runs an `@plate for` cell
-    # over arrays per index as one retained plate (`@kernel` callees, dotted
-    # math, chained/local indexing, vector gathers, plate-scoped locals), which
-    # BRM's inline kernel cells emit instead of per-output reader kernels;
-    # 2503ede6 also runs a cell reading an array per index with undotted
-    # arithmetic (`ts * a`, legacy Stan-style cells) as such a plate.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "2503ede63f16a1d1ed60de9f10b73888cfe5aa29"),  # main
+    # of the 32-argument gradient cliff. 1603d87a adds pointwise densities
+    # retained from the sampler gradient's reverse sweep (used by BRM's NLME
+    # gradient); 5c2b80d5 keeps predictor nodes queryable by authored name.
+    # fbd0aef0 runs authored `@plate for` cells over arrays per index as
+    # retained plates (`@kernel` callees, dotted math, gathers, and cell
+    # locals); 2503ede6 also supports undotted per-index array arithmetic.
+    # d702209e groups shared live outputs into one evaluation per cell and
+    # keeps weight outputs based only on data independent of live parameters.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "d702209e6f452ad2c833b517667a3b2406b20978"),  # main
 ]
 
 function main()

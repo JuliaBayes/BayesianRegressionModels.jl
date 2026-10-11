@@ -153,3 +153,36 @@ end
         @test values[i] ≈ sum(pointwise[m.view.rows[i]]) rtol=1e-13
     end
 end
+
+@stestset "a ragged(y, group) join over interleaved rows is attributed by subject" begin
+    backend = RKBRMI(nlme_ragged_pk(NLME_RAGGED_DATA))
+    m = brm_nlme_model(backend; ad_backend=NLME_AD)
+    n = length(m.view.levels)
+    @test n == 3
+    @test m.eta_blocks == [2]
+    θ = [0.4, 2.1]
+    σ = [log(0.8)]
+    H = [0.15 -0.2 0.05; -0.1 0.25 0.3]
+    u = BRM._brm_nlme_point(m, θ, σ, H)
+    values, G = brm_nlme_loglikelihoods_and_gradients(m, θ, σ, H)
+    @test values ≈ ragged_pk_oracle(m, θ, σ, H, NLME_RAGGED_DATA) rtol=1e-12
+    @test brm_nlme_loglikelihoods(m, θ, σ, H) == values
+    @test sum(values) ≈ Base.invokelatest(likelihood_query(backend), u) rtol=1e-12
+    @test G ≈ ragged_pk_oracle_gradients(m, θ, σ, H, NLME_RAGGED_DATA) rtol=1e-10
+    # Against the executable model: a subject block moves exactly the joined
+    # densities attributed to that subject, and every subject's value but its own
+    # stays put.
+    subjects = Dict(m.attribution)[:y]
+    base = Base.invokelatest(pointwise_query(backend), u).y
+    @test length(base) == length(subjects) == length(NLME_RAGGED_DATA.y)
+    for (i, block) in enumerate(m.view.subject_coordinates)
+        moved_u = copy(u)
+        moved_u[block] .+= [0.4, -0.3]
+        moved = Base.invokelatest(pointwise_query(backend), moved_u).y
+        @test findall(.!isapprox.(moved, base; atol=0, rtol=1e-12)) == findall(==(i), subjects)
+        H2 = copy(H); H2[:, i] .+= [0.3, -0.2]
+        moved_values = brm_nlme_loglikelihoods(m, θ, σ, H2)
+        @test moved_values[setdiff(1:n, i)] == values[setdiff(1:n, i)]
+        @test moved_values[i] != values[i]
+    end
+end

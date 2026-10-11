@@ -72,7 +72,7 @@ The code is extracted during rendering from the Gaussian example in docs/src/fea
 ::: {.card .accent-blue .tight}
 **Formula lines:** describe how clearance (`CL`) and volume (`V`) vary between subjects.
 
-**Custom calculation:** the `do` block computes the concentration curve.
+**Custom calculation:** the `@plate for` cell computes each subject's concentration curve.
 
 **Observation line:** compares that curve with measured concentrations.
 
@@ -81,10 +81,10 @@ The shared `pk` label allows clearance and volume effects to be correlated.
 ::::
 
 <div class="takeaway">Formulas and a custom calculation live in the same model declaration.</div>
-<div class="source-note"><strong>StanBlocks example.</strong> Turing currently rejects this ragged response. Body of the existing <code>@brm begin … end</code> declaration; complete code and data in appendix B. <code>kernel</code> runs the calculation for each subject.</div>
+<div class="source-note"><strong>StanBlocks example.</strong> Turing currently rejects this ragged response. Body of the existing <code>@brm begin … end</code> declaration; complete code and data in appendix B. <code>@plate for</code> runs the calculation once per subject.</div>
 
 ::: {.notes}
-This is the body of the exact population_pk declaration from docs/src/feature-atlas.md. The Lua filter extracts it rather than maintaining a second copy. The structural equation is a one-compartment IV-bolus model: C(t) = dose/V * exp(-(CL/V)t). The log link is explicit on CL and V. The do-block receives evaluated subject-level values. This demonstrates formula/custom-code composition without asserting that every Julia operation is supported by every backend.
+This is the body of the exact population_pk declaration from docs/src/feature-atlas.md. The Lua filter extracts it rather than maintaining a second copy. The structural equation is a one-compartment IV-bolus model: C(t) = dose/V * exp(-(CL/V)t). The log link is explicit on CL and V. Inside the @plate for cell, CL[i] and V[i] read subject i's evaluated values, and ragged(time, obs_subject)[i] selects that subject's measurement times. This demonstrates formula/custom-code composition without asserting that every Julia operation is supported by every backend.
 :::
 
 ## Subjects and measurements can fit together
@@ -109,7 +109,7 @@ Each subject has a dose, clearance, and volume. Each measurement has a time and 
 <div class="source-note">Data fields passed to the declaration on the previous slide. The interleaved rows are intentional.</div>
 
 ::: {.notes}
-The example has two subject rows and five observation rows. alice has three measurements and bob has two; the rows are interleaved. The public kernel/ragged terms join these structures. This is a concrete data-alignment example, not a claim that a data.frame interface prevents another package from expressing the model.
+The example has two subject rows and five observation rows. alice has three measurements and bob has two; the rows are interleaved. The @plate for cell and the ragged(...) wrappers join these structures. This is a concrete data-alignment example, not a claim that a data.frame interface prevents another package from expressing the model.
 :::
 
 ## The same approach reaches larger models

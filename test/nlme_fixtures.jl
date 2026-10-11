@@ -87,3 +87,53 @@ end
 plate_pk_oracle(m, θ, σ, H) = [term.value for term in _plate_pk_oracle_terms(m, θ, σ, H)]
 plate_pk_oracle_gradients(m, θ, σ, H) =
     reduce(hcat, [term.gradient for term in _plate_pk_oracle_terms(m, θ, σ, H)])
+
+# A flat observation axis joined to the subject cells by `ragged(y, group)`:
+# rows interleave subjects, counts differ, and the subject column is not in
+# level order, so the joined (cell-by-cell) density order differs from both.
+const NLME_RAGGED_DATA = (; subject=["s2", "s1", "s3"], dose=[80.0, 100.0, 120.0],
+    obs_subject=["s1", "s2", "s3", "s1", "s3", "s2", "s1", "s3"],
+    t=[0.5, 0.25, 0.5, 1.5, 2.0, 1.0, 3.0, 6.0],
+    y=[8.1, 7.6, 9.0, 5.2, 6.3, 4.9, 2.1, 2.4])
+
+function nlme_ragged_pk(data)
+    @brm data begin
+        sigma ~ Exponential(1)
+        log(CL) ~ 1 + (1 | pk | subject)
+        log(V) ~ 1 + (1 | pk | subject)
+        @plate for i in eachindex(CL)
+            conc[i] = dose[i] / V[i] .* exp.((-CL[i] / V[i]) .* ragged(t, obs_subject)[i])
+        end
+        ragged(y, obs_subject) ~ Normal(conc, sigma)
+    end
+end
+
+# Independent oracle for the ragged-join model, by subject label from the flat
+# rows: the same equations and η gradients as the @plate oracle above.
+function _ragged_pk_oracle_terms(m, θ, σ, H, d)
+    population(pred) = θ[findfirst(==(only(r.population for r in m.view.mu_references
+        if r.predictor === pred)), m.theta)]
+    a, b = population(:CL), population(:V)
+    sigma = exp(only(σ))
+    margin(pred) = findfirst(b -> b.predictor === pred, m.view.block_margins)
+    kcl, kv = margin(:CL), margin(:V)
+    map(eachindex(m.view.levels)) do i
+        level = string(m.view.levels[i])
+        dose = d.dose[only(findall(==(level), d.subject))]
+        rows = findall(==(level), d.obs_subject)
+        CL = exp(a + H[kcl, i])
+        V = exp(b + H[kv, i])
+        kt = (CL / V) .* d.t[rows]
+        pred = dose / V .* exp.(-kt)
+        value = sum(logpdf.(Normal.(pred, sigma), d.y[rows]))
+        residual = (d.y[rows] .- pred) ./ sigma^2
+        gradient = zeros(size(H, 1))
+        gradient[kcl] = sum(residual .* pred .* -kt)
+        gradient[kv] = sum(residual .* pred .* (kt .- 1))
+        (; value, gradient)
+    end
+end
+
+ragged_pk_oracle(m, θ, σ, H, d) = [term.value for term in _ragged_pk_oracle_terms(m, θ, σ, H, d)]
+ragged_pk_oracle_gradients(m, θ, σ, H, d) =
+    reduce(hcat, [term.gradient for term in _ragged_pk_oracle_terms(m, θ, σ, H, d)])

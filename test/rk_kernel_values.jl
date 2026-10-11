@@ -406,9 +406,8 @@ end
 # emits for it, so each subject's cell should run once per density and per
 # value and gradient. The retired per-output reader kernels ran it once per
 # reader, three times here (co-report RKPPLBench:flag:emission-hunt on snag
-# rk-emission-lift-0a8bc777). RKPPL at fbd0aef0 still lowers a multi-output
-# `@plate for` cell to one RK plate per output, each re-running the cell: RK
-# snag rkppl-plate-for-5f5a19db. The counts are `@test_broken` until it lands.
+# rk-emission-lift-0a8bc777). The shared-cell lowering from RK snag
+# rkppl-plate-for-5f5a19db evaluates all outputs together.
 @stestset "a multi-output cell is one plate evaluated per subject" begin
     data = (; t=[[0.5, 1.0, 1.5], [0.7, 1.3, 2.0], [0.4, 0.9], [1.1, 0.2]],
         picks=[[1, 2], [2], [1, 2], [1]],
@@ -440,13 +439,11 @@ end
     CountedCell.calls[] = 0
     LogDensityProblems.logdensity(problem, u)
     println("CELL_CALLS_PER_DENSITY=", CountedCell.calls[]); flush(stdout)
-    @test CountedCell.calls[] <= 3 * length(data.t)
-    @test_broken CountedCell.calls[] == length(data.t)
+    @test CountedCell.calls[] == length(data.t)
     CountedCell.calls[] = 0
     LogDensityProblems.logdensity_and_gradient(problem, u)
     println("CELL_CALLS_PER_GRADIENT=", CountedCell.calls[]); flush(stdout)
-    @test CountedCell.calls[] <= 3 * length(data.t)
-    @test_broken CountedCell.calls[] == length(data.t)
+    @test CountedCell.calls[] == length(data.t)
     @test isequal(data, saved)
 end
 

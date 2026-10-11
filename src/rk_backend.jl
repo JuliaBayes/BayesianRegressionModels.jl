@@ -3219,6 +3219,15 @@ Base.@nospecializeinfer function _rk_population_priors(@nospecialize(brmi::BRMI)
             target, addressee, agreed[1], agreed[2]))
     end
     known = Set(order)
+    # A zero-width factor block has no design cell, and its prior reaches
+    # no coefficient: the default keeps the declaration uniform.
+    for term in terms
+        _rk_zero_width_factor(term) || continue
+        term.addressee in known && continue
+        push!(known, term.addressee)
+        push!(priors, _RKPopulationPrior(
+            target, term.addressee, :Normal, (0.0, 1.0)))
+    end
     for term in terms
         term.kind === :continuous || continue
         term.addressee in known && continue
@@ -3284,19 +3293,26 @@ function _rk_shared_factor_spec(term, target, data, columns, taken; cellmeans)
     shared = _brm_population_columns(term; cellmeans)
     shared === nothing && error(
         "RK backend: predictor `$target` categorical term `$term` has unsupported geometry")
-    isempty(shared) && return _RKTermSpec[]
-    source = first(shared).source
+    # A single-level treatment-coded factor has no contrast column. Its
+    # full-rank coding still names the source, block and lone (reference)
+    # level, so the factor keeps the ordinary K-1 emission with zero
+    # coefficients, as SB declares `vector[0]`: one emission at every K
+    # (decision 1j8lxwi).
+    named = isempty(shared) ? _brm_population_columns(term; cellmeans=true) : shared
+    isempty(named) && error(
+        "RK backend: predictor `$target` categorical term `$term` observes no level")
+    source = first(named).source
     backing = term isa NamedColumn ? parent(term) : parent(only(getargs(term)))
     columns[source] = parent(backing)
     level_values = Tuple(_brm_population_level_value(c) for c in shared)
     index_levels = cellmeans ? level_values :
-        (_brm_population_level_value(first(shared), 1), level_values...)
+        (_brm_population_level_value(first(named), 1), level_values...)
     level_position(value) = something(findfirst(isequal(value), index_levels), 0)
     positions = Int[level_position(value) for value in columns[source]]
     0 in positions && error(
         "RK backend: predictor `$target` categorical column `$source` holds a " *
         "value outside its fitted levels $(repr(index_levels))")
-    base = string(first(shared).effect_block, "_level")
+    base = string(first(named).effect_block, "_level")
     index = Symbol(base)
     serial = 2
     while index in taken || haskey(columns, index)
@@ -3313,6 +3329,12 @@ function _rk_shared_factor_spec(term, target, data, columns, taken; cellmeans)
         index, index_levels, labels=Tuple(c.label for c in shared), level_values)
     [_RKTermSpec(:factor, [source], options, block, block)]
 end
+
+# A shared-level factor whose block spans no coefficient: single-level
+# treatment coding. It emits like any factor, but no design column carries
+# its prior and it is no coefficient for the gates that require one.
+_rk_zero_width_factor(term::_RKTermSpec) = term.kind === :factor &&
+    haskey(term.options, :labels) && isempty(term.options.labels)
 
 # Structural identifiability over full-cover groups: a bare (full-rank)
 # factor and a factor-only `&` cross each structurally span the
@@ -4143,7 +4165,9 @@ end
 # them. The empty-column design builds directly instead: the
 # fixed-offset vector still materializes and validates its row axis,
 # and the prior/r2d2 seam runs unchanged over zero columns (a stated
-# effect or r2d2 prior keeps its fail-closed error).
+# effect or r2d2 prior keeps its fail-closed error). A zero-width
+# (single-level treatment-coded) factor is coefficient-free too; its
+# raw column supplies the row axis.
 Base.@nospecializeinfer function _rk_plan_offset_only_predictor(@nospecialize(brmi::BRMI), context, target::Symbol,
         ordinary::Tuple, available::Tuple, link::Symbol,
         terms::Vector{_RKTermSpec}, derived::Vector{_RKDerivedSpec})
@@ -4542,7 +4566,7 @@ function _rk_gate_ar_sibling!(terms::Vector{_RKTermSpec}, target::Symbol)
     prefix = "RK backend"
     any(t -> t.kind === :ar, terms) || return nothing
     any(t -> t.kind === :intercept || t.kind === :continuous ||
-        t.kind === :factor, terms) || error(
+        (t.kind === :factor && !_rk_zero_width_factor(t)), terms) || error(
         "$prefix: predictor `$target` carries an `ar(...)` latent path " *
         "with no sibling population coefficient — the thin-layer scan " *
         "surface pairs every scan summand with an intercept or " *
@@ -4753,9 +4777,10 @@ Base.@nospecializeinfer function _rk_horseshoe_priors(@nospecialize(brmi::BRMI),
         "predictor takes one structured prior in slice 1 (drop one of them)")
     # The thin flat slice covers intercept/continuous/offset predictors
     # only (every other term kind fails thin-side); gate it here with
-    # BRM-side attribution.
+    # BRM-side attribution. A zero-width factor block adds no coefficient.
     for term in terms
-        term.kind in (:intercept, :continuous, :offset) || error(
+        term.kind in (:intercept, :continuous, :offset) ||
+            _rk_zero_width_factor(term) || error(
             "$prefix: predictor `$target` carries `~ Horseshoe(...)` " *
             "with a `$(term.kind)` term; structured Horseshoe covers " *
             "intercept/continuous/offset predictors in slice 1")
@@ -5088,7 +5113,8 @@ function _rk_gate_dar_admitted!(prefix::String, target::Symbol,
         "the thin layer splices one dar summand per predictor in v1 " *
         "(multi-trajectory predictors are sequenced)")
     any(t -> t.kind === :intercept || t.kind === :continuous ||
-        t.kind === :factor || t.kind === :monotonic, terms) || error(
+        (t.kind === :factor && !_rk_zero_width_factor(t)) ||
+        t.kind === :monotonic, terms) || error(
         "$prefix: predictor `$target` `dar()` has no estimated " *
         "coefficients — add an intercept or coefficient (the thin layer " *
         "admits no coefficient-free dar predictor in v1)")
@@ -5332,7 +5358,8 @@ Base.@nospecializeinfer function _rk_plan_predictor(@nospecialize(brmi::BRMI), c
         terms, ordinary, target, context.data, has_intercept)
     _rk_gate_cross_identified!(
         terms, spines, derived, context.data, target, has_intercept)
-    any(t -> t.kind !== :offset, terms) || !isempty(spline_raw) ||
+    any(t -> t.kind !== :offset && !_rk_zero_width_factor(t), terms) ||
+        !isempty(spline_raw) ||
         !isempty(gp_raw) || !isempty(hsgp_raw) || !isempty(mo_raw) ||
         !isempty(dar_raw) || !isempty(ar_raw) || !isempty(me_raw) ||
         !isempty(other_structured) ||
