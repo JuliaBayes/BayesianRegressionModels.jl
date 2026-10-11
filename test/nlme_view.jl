@@ -65,6 +65,16 @@ end
     slope = only(r for r in slope_view.mu_references if r.coefficient === :wt)
     @test slope_view.block_margins[slope.subject].coefficient === :wt
     @test all(==(1.0), slope.design)
+    model = brm_nlme_model(RKBRMI(brmi); ad_backend=NLME_AD)
+    θ = fill(0.1, length(model.theta))
+    σ = fill(-1.0, length(model.sigma))
+    H = zeros(length(model.view.block_margins), length(model.view.levels))
+    shifted_θ = copy(θ)
+    shifted_θ[findfirst(==(slope.population), model.theta)] += 0.3
+    shifted_H = copy(H)
+    shifted_H[slope.subject, :] .-= 0.3
+    @test brm_nlme_loglikelihoods(model, shifted_θ, σ, shifted_H) ≈
+        brm_nlme_loglikelihoods(model, θ, σ, H) rtol=1e-12
 end
 
 @stestset "a subject block moves exactly that subject's densities" begin
