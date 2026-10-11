@@ -4,8 +4,9 @@ module BayesianRegressionModelsNLMEEstimationExt
 # (`BRMNLMEModel`, from `brm_nlme_model`). The model declares
 # `BatchedEvaluation`: larger batches use one lockstep RK evaluation, while
 # singleton batches and explicit per-subject calls use one observation cell.
-# SAEM's population gradient uses those cells, avoiding a reverse derivative
-# through the entire batched RK evaluator.
+# Online SAEM uses those cells for its population gradient, avoiding a reverse
+# derivative through the entire batched RK evaluator. The retained-draw
+# mixture keeps batched gradients to avoid repeating cell work for each draw.
 # Colored RK Hessian-vector products give all subjects' η Hessian
 # blocks in one pass per η coordinate, so `empirical_bayes` uses `NewtonEBE`.
 # Gaussian observations use one :observations query and colored forward
@@ -24,6 +25,8 @@ NE.nlme_layout(m::BRM.BRMNLMEModel) = NE.NLMELayout(;
 
 NE.evaluation_style(::BRM.BRMNLMEModel) = NE.BatchedEvaluation()
 NE.saem_population_gradient_style(::BRM.BRMNLMEModel) = NE.PerSubjectEvaluation()
+NE.saem_population_gradient_style(::BRM.BRMNLMEModel, ::Val{:online}) =
+    NE.PerSubjectEvaluation()
 NE.saem_population_gradient_style(::BRM.BRMNLMEModel, ::Val{:mixture}) =
     NE.BatchedEvaluation()
 NE.provides_eta_hessian(::BRM.BRMNLMEModel) = true
