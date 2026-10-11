@@ -43,6 +43,7 @@ end
     @test n == 3
     @test nlme_layout(m) == NLMELayout(; ntheta=3, nsigma=1, eta_blocks=[2])
     @test evaluation_style(m) isa BatchedEvaluation
+    @test saem_population_gradient_style(m) isa PerSubjectEvaluation
     @test provides_eta_hessian(m)
     names = parameter_names(m)
     @test length(names.theta) == 3 && length(names.sigma) == 1 && length(names.eta) == 2
@@ -68,6 +69,15 @@ end
     value, gradient = conditional_loglikelihood_and_gradient(m, 2, θ, σ, η)
     @test value ≈ plate_pk_oracle(m, θ, σ, oracle_H)[2] rtol=1e-12
     @test gradient ≈ plate_pk_oracle_gradients(m, θ, σ, oracle_H)[:, 2] rtol=1e-10
+    for i in (3, 1, 2)
+        ηi = [0.05 * i, -0.1 * i]
+        Hi = full_eta(m, [i], reshape(ηi, :, 1))
+        oracle = _plate_pk_oracle_terms(m, θ, σ, Hi)[i]
+        ℓ, gθ, gσ = conditional_loglikelihood_and_population_gradient(m, i, θ, σ, ηi)
+        @test ℓ ≈ oracle.value rtol=1e-12
+        @test gθ ≈ oracle.theta_gradient rtol=1e-10
+        @test gσ ≈ oracle.sigma_gradient rtol=1e-10
+    end
     @test_throws ArgumentError conditional_loglikelihoods(m, [1, 1], θ, σ, zeros(2, 2))
     @test_throws ArgumentError conditional_loglikelihoods(m, [n + 1], θ, σ, zeros(2, 1))
     @test_throws DimensionMismatch conditional_loglikelihoods(m, [1, 2], θ, σ, zeros(2, 1))

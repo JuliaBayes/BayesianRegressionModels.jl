@@ -713,14 +713,7 @@ function brm_nlme_loglikelihood(m::BRMNLMEModel, i::Integer, θ, σ, η)
     _rk_nlme_cell_value(m.cell_query, point, row)
 end
 
-"""
-    brm_nlme_loglikelihood_and_gradient(m::BRMNLMEModel, i, θ, σ, η_i)
-
-Return one subject's conditional log-likelihood and its η_i gradient. RK's
-compact cell sampler differentiates selected coordinates in one fused call,
-without a packed gradient buffer.
-"""
-function brm_nlme_loglikelihood_and_gradient(m::BRMNLMEModel, i::Integer, θ, σ, η)
+function _brm_nlme_cell_value_and_selected_gradient(m::BRMNLMEModel, i::Integer, θ, σ, η)
     point, row = _brm_nlme_cell_point(m, i, θ, σ, η)
     indices = sort!(vcat(m.theta, m.sigma, point.eta_positions))
     active = point[indices]
@@ -732,8 +725,21 @@ function brm_nlme_loglikelihood_and_gradient(m::BRMNLMEModel, i::Integer, θ, σ
             m.cell_gradient.sampler, selected_gradient, m.unit,
             active, indices, row))
     end
+    value, indices, selected_gradient, point.eta_positions
+end
+
+"""
+    brm_nlme_loglikelihood_and_gradient(m::BRMNLMEModel, i, θ, σ, η_i)
+
+Return one subject's conditional log-likelihood and its η_i gradient. RK's
+compact cell sampler differentiates selected coordinates in one fused call,
+without a packed gradient buffer.
+"""
+function brm_nlme_loglikelihood_and_gradient(m::BRMNLMEModel, i::Integer, θ, σ, η)
+    value, indices, selected_gradient, eta_positions =
+        _brm_nlme_cell_value_and_selected_gradient(m, i, θ, σ, η)
     value, [selected_gradient[searchsortedfirst(indices, j)]
-        for j in point.eta_positions]
+        for j in eta_positions]
 end
 
 function _brm_nlme_point(m::BRMNLMEModel, θ, σ, H)
