@@ -317,6 +317,8 @@ function _rk_pointwise_query end
 function _rk_pointwise_values end
 function _rk_retained_pointwise_sampler end
 function _rk_value_gradient_and_pointwise! end
+function _rk_eta_hvp_query end
+function _rk_eta_hvp end
 
 """
     BRMNLMEModel
@@ -334,11 +336,12 @@ covariance Ω is not a model coordinate here: estimators own it, and the model
 evaluates the conditional likelihood `log p(y_i | θ, σ, η_i)` without the
 random-effect prior.
 """
-struct BRMNLMEModel{B<:RKBRMI,S,Q}
+struct BRMNLMEModel{B<:RKBRMI,S,Q,V}
     view::BRMNLMEView
     backend::B
     sampler::S
     pointwise::Q
+    eta_hvp::V
     attribution::Vector{Pair{Symbol,Vector{Int}}}
     theta::Vector{Int}
     sigma::Vector{Int}
@@ -356,8 +359,8 @@ Base.show(io::IO, m::BRMNLMEModel) = print(io, "BRMNLMEModel(",
 Prepare an RK-lowered population model for NLME estimators: its
 [`brm_nlme_view`](@ref) partition, the backend's sampler query retaining its
 pointwise densities (first-order, reverse-mode Enzyme: `ad_backend` must be
-`AutoEnzyme(; mode=Enzyme.Reverse)`), its pointwise densities, and the subject
-attribution of every observed density.
+`AutoEnzyme(; mode=Enzyme.Reverse)`), a reverse-over-forward sampler HVP query,
+its pointwise densities, and the subject attribution of every observed density.
 
 Refuses ([`BRMNLMEViewError`](@ref)) everything `brm_nlme_view` refuses, Student-t
 random-effect blocks (the estimators own a Gaussian η prior), and observed
@@ -371,6 +374,7 @@ function brm_nlme_model(backend::RKBRMI; ad_backend)
     unit = _brm_nlme_unit_point(backend, view)
     sampler = _rk_retained_pointwise_sampler(backend; ad_backend)
     pointwise = _rk_pointwise_query(backend)
+    eta_hvp = _rk_eta_hvp_query(backend, unit)
     attribution = _brm_nlme_attribution(backend, view,
         _rk_pointwise_values(pointwise, unit))
     eta_blocks = Int[]
@@ -379,7 +383,7 @@ function brm_nlme_model(backend::RKBRMI; ad_backend)
         margin.block == previous ? (eta_blocks[end] += 1) : push!(eta_blocks, 1)
         previous = margin.block
     end
-    BRMNLMEModel(view, backend, sampler, pointwise, attribution,
+    BRMNLMEModel(view, backend, sampler, pointwise, eta_hvp, attribution,
         findall(==(:population), view.role), findall(==(:scalar), view.role),
         eta_blocks, unit)
 end
@@ -441,4 +445,26 @@ function brm_nlme_loglikelihoods_and_gradients(m::BRMNLMEModel, θ, σ, H)
         G[:, i] .= view(g, block) .+ view(H, :, i)
     end
     values, G
+end
+
+# One direction per position within a subject block colors that position in
+# every subject. Conditional independence makes its HVP the corresponding
+# column of each subject's Hessian. The sampler also includes z ~ N(0, I): at
+# the unit point z = η, so adding I removes that prior's Hessian.
+function _brm_nlme_hessian_blocks(m::BRMNLMEModel, θ, σ, H)
+    u = _brm_nlme_point(m, θ, σ, H)
+    nη = size(H, 1)
+    blocks = [Matrix{Float64}(undef, nη, nη) for _ in m.view.levels]
+    for k in 1:nη
+        direction = zeros(Float64, length(u))
+        for coordinates in m.view.subject_coordinates
+            direction[coordinates[k]] = 1.0
+        end
+        hv = _rk_eta_hvp(m.eta_hvp, direction, u)
+        for (i, coordinates) in enumerate(m.view.subject_coordinates)
+            blocks[i][:, k] .= view(hv, coordinates)
+            blocks[i][k, k] += 1.0
+        end
+    end
+    blocks
 end
