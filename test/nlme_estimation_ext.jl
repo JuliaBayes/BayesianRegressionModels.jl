@@ -154,6 +154,17 @@ end
         @test gθ[j] ≈ finite rtol=1e-5 atol=1e-6
     end
     @test length(gσ) == 1 && isfinite(only(gσ))
+    ω = [log(0.7)]
+    prior, pgθ, _, _ = population_logprior_and_gradient(m, θ, σ, ω)
+    @test prior ≈ population_logprior(m, θ, σ, ω) atol=1e-10
+    @test population_prior_provenance(m).theta == m.view.coordinates[m.theta]
+    for j in eachindex(θ)
+        plus = copy(θ); plus[j] += h
+        minus = copy(θ); minus[j] -= h
+        finite = (population_logprior(m, plus, σ, ω) -
+            population_logprior(m, minus, σ, ω)) / (2h)
+        @test pgθ[j] ≈ finite rtol=1e-5 atol=1e-6
+    end
 end
 
 @stestset "batched protocol methods match the analytic oracle" begin
