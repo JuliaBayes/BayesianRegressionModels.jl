@@ -664,6 +664,25 @@ Base.@nospecializeinfer function _brm_rk_composed_kernel_plan(@nospecialize(brmi
         plan.completions)
 end
 
+_rk_kernel_inv_logit(x) = logistic(x)
+_rk_kernel_inv_logit(x::AbstractArray) = logistic.(x)
+
+# Stan broadcasts scalar addition/subtraction over vectors and matrices.
+# Julia's undotted operators require matching array operands, so bind those
+# Stan cases at the cell edge while leaving all other dispatch unchanged.
+_rk_kernel_stan_add(x) = +x
+_rk_kernel_stan_add(x, y) = x + y
+_rk_kernel_stan_add(x::Number, y::AbstractArray) = x .+ y
+_rk_kernel_stan_add(x::AbstractArray, y::Number) = x .+ y
+_rk_kernel_stan_add(x, y, z, rest...) =
+    _rk_kernel_stan_add(_rk_kernel_stan_add(x, y), z, rest...)
+_rk_kernel_stan_sub(x) = -x
+_rk_kernel_stan_sub(x, y) = x - y
+_rk_kernel_stan_sub(x::Number, y::AbstractArray) = x .- y
+_rk_kernel_stan_sub(x::AbstractArray, y::Number) = x .- y
+_rk_kernel_stan_sub(x, y, z, rest...) =
+    _rk_kernel_stan_sub(_rk_kernel_stan_sub(x, y), z, rest...)
+
 function _rk_kernel_bind_calls(value, scope, bindings, taken)
     value isa Expr || return value
     args = map(arg -> _rk_kernel_bind_calls(arg, scope, bindings, taken), value.args)
@@ -672,6 +691,14 @@ function _rk_kernel_bind_calls(value, scope, bindings, taken)
         head = first(value.args)
         if head === :rep_vector
             args[1] = :fill
+        elseif head === :+
+            args[1] = _rk_value_callee!(bindings, _rk_kernel_stan_add, taken)
+        elseif head === :-
+            args[1] = _rk_value_callee!(bindings, _rk_kernel_stan_sub, taken)
+        elseif head === :inv_logit && !isdefined(scope, head)
+            # Stan's vectorized primitive need not be defined in the cell's
+            # Julia scope. Bind its scalar and array Julia equivalent.
+            args[1] = _rk_value_callee!(bindings, _rk_kernel_inv_logit, taken)
         elseif head isa Symbol && (Base.isoperator(head) ||
                 (startswith(string(head), ".") &&
                  Base.isoperator(Symbol(string(head)[2:end]))))
@@ -707,7 +734,7 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs)
         [Expr(:(=), cells, _rk_kernel_bind_calls(value, kernel.scope, bindings, taken))
             for (cells, value) in outputs]]
     bound(input) = input.kind === :gather || haskey(kernel.columns, input.source)
-    authored = first(kernel.inputs)
+    authored = first(input for input in kernel.inputs if input.kind !== :omitted)
     data = filter(bound, Any[slice.inputs..., kernel.inputs...])
     axis = bound(authored) || isempty(data) ? authored : first(data)
     range = axis.kind === :gather ? axis.rows : axis.source
