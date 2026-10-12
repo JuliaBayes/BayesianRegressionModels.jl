@@ -235,11 +235,11 @@ BRM._rk_observation_query(backend::BRM.RKBRMI) =
 BRM._rk_observation_values(query, u::AbstractVector) = Base.invokelatest(query, u)
 function BRM._rk_observation_pushforward(backend::BRM.RKBRMI,
         view::BRM.BRMNLMEView, unit::Vector{Float64}, ad_backend)
-    neta = length(first(view.subject_coordinates))
+    neta = maximum(length, view.subject_coordinates)
     directions = ntuple(neta) do k
         direction = zeros(Float64, length(unit))
         for block in view.subject_coordinates
-            direction[block[k]] = 1.0
+            k <= length(block) && (direction[block[k]] = 1.0)
         end
         direction
     end
