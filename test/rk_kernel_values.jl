@@ -72,6 +72,31 @@ end
     @test isequal(data, saved)
 end
 
+@stestset "unbound in-cell response leaves the other likelihood active" begin
+    data = (; index=[[1, 2, 1]], y=[[0.1, -0.2, 0.4]],
+        catalog=[[0.2, 0.7]])
+    brmi = @brm data begin
+        shift ~ Normal(0, 1)
+        pred ~ kernel(index, y, z, catalog) do ii, yy, zz, cc
+            mu_y = cc[ii] .+ shift
+            mu_z = cc .+ shift
+            yy ~ normal(mu_y, 1)
+            zz ~ normal(mu_z, 1)
+            mu_y
+        end
+    end
+    backend, problem = consumer_problem(brmi)
+    @test BRM._rk_observed_names(backend.plan) == (:y,)
+    @test coordinate_names(backend.model.layout) == [:shift]
+    stan = consumer_stan(brmi, "kernel-unbound-response")
+    oracle(u) = logpdf(Normal(), u[1]) +
+        sum(logpdf.(Normal.(data.catalog[1][data.index[1]] .+ u[1], 1), data.y[1]))
+    for u in ([0.0], [0.2], [-0.3])
+        check_consumer_point(problem, u, oracle)
+        check_consumer_stan(problem, stan, [:shift => "shift"], backend, u)
+    end
+end
+
 @stestset "ragged kernel cells preserve subject joins and original axes" begin
     data = (; subject=["b", "empty", "a"],
         t=[[0.1, 0.7], Float64[], [0.2, 0.8, 1.3]],

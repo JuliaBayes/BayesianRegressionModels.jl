@@ -63,7 +63,7 @@ using BridgeStan, LinearAlgebra
             mod=@__MODULE__); path=joinpath(tempdir(), "unused.stan"))
 end
 
-@stestset "shared HSGP point survives the full Stan conversion" begin
+@stestset "fitted and fixed shared HSGP points survive full Stan conversion" begin
     data = (; subject=["a", "b", "c"], t=[-0.8, 0.1, 0.7],
         y=[0.2, -0.1, 0.5])
     brmi = @brm data begin
@@ -100,6 +100,18 @@ end
     @test start.checked.max_error <= 1e-9
     @test length(start.fixed.indices) + length(start.free.indices) ==
         length(start.stan)
+    model = brm_nlme_model(rk; ad_backend=NLME_AD)
+    @test model.view.coordinates[model.theta] == view.coordinates[sort!(vcat(
+        findall(==(:population), view.role), shared))]
+    fitted_θ = [i in shared ? point[i] : θ[findfirst(==(i),
+        findall(==(:population), view.role))] for i in model.theta]
+    fitted = brm_nlme_joint_start(map;
+        theta=fitted_θ, sigma=σ, omega=Ω, eta=H, subjects=view.levels)
+    @test fitted.stan ≈ start.stan atol=1e-10
+    @test brm_nlme_joint_values(map, fitted.stan).shared.values ≈ point[shared] atol=1e-10
+    @test_throws BRMNLMEViewError brm_nlme_joint_start(map;
+        theta=fitted_θ, sigma=σ, omega=Ω, eta=H, subjects=view.levels,
+        shared_point=point)
 end
 
 @stestset "independent NLME covariance blocks stay independent in Stan" begin

@@ -3,8 +3,8 @@
 # NLME estimators (posthoc/EBE, FOCEI, SAEM; the separate NLMEEstimation
 # package) see a population model as: population coordinates θ, subject-level
 # covariance coordinates Ω, other scalars σ, and one random-effect block η_i per
-# subject, with subjects conditionally independent given (θ, Ω, σ) and any
-# fixed shared latents. The RK
+# subject, with subjects conditionally independent given (θ, Ω, σ). Shared
+# sampled latents may be estimated in θ or fixed explicitly. The RK
 # emitter already files one semantic record per sampled declaration it can
 # address (`_rk_coordinate_record!`, shared with the cross-backend coordinate
 # transport), so the partition is read from those records, never from
@@ -313,8 +313,7 @@ end
 
 # ── Evaluation for NLME estimators ───────────────────────────────────────────
 #
-# Subjects are conditionally independent given (θ, Ω, σ) and fixed shared
-# latents. The lockstep path
+# Subjects are conditionally independent given (θ, Ω, σ). The lockstep path
 # serves all subjects in one RK evaluation. A subject-indexed observation plate
 # also permits a cell query that evaluates just one subject at a time.
 
@@ -326,10 +325,7 @@ function _brm_nlme_unit_point(backend::RKBRMI, view::BRMNLMEView;
         shared_point=nothing)
     u = zeros(Float64, length(view.coordinates))
     shared = findall(==(:shared_latent), view.role)
-    if !isempty(shared)
-        shared_point === nothing && _brm_nlme_error(
-            "brm_nlme_model: $(length(shared)) shared latent coordinate(s) need " *
-            "`shared_point`, a full packed unconstrained point from this RK model")
+    if !isempty(shared) && shared_point !== nothing
         length(shared_point) == length(u) || throw(DimensionMismatch(
             "shared_point has length $(length(shared_point)), expected $(length(u))"))
         u[shared] .= shared_point[shared]
@@ -625,21 +621,22 @@ end
 An RK-lowered population model prepared for NLME estimators, returned by
 [`brm_nlme_model`](@ref). Its coordinates follow the NLME convention:
 
-- `θ` — the population coordinates (`view.role .=== :population`), in packed order;
+- `θ` — the population coordinates and, unless fixed at `shared_point`, shared
+  sampled coordinates, in packed order;
 - `σ` — the other sampled scalars (`view.role .=== :scalar`), in packed order;
 - `η_i` — subject `i`'s random effects on the natural scale, one column of a
   `neta × nsubjects` matrix, in the subject-block order of [`BRMNLMEView`](@ref).
 
 All three are in the model's unconstrained coordinates. The random-effect
 covariance Ω is not a model coordinate here: estimators own it, and the model
-evaluates the conditional likelihood `log p(y_i | θ, σ, η_i, shared_point)` without the
+evaluates the conditional likelihood `log p(y_i | θ, σ, η_i)` without the
 random-effect prior.
 
-Shared sampled coordinates have role `:shared_latent` and remain fixed at the
-`shared_point` supplied during construction. They retain the original RK
-layout's unconstrained values and transforms. The conditional likelihood does
-not include their priors; inference for those coordinates belongs to the full
-joint RK model.
+Shared sampled coordinates have role `:shared_latent` and enter θ by default.
+They retain the original RK layout's unconstrained values and transforms.
+Supplying `shared_point` instead fixes them at that full RK packed point. The
+conditional likelihood excludes all population priors; the NLMEEstimation
+population-prior protocol includes the authored priors once in the fit objective.
 
 When every fitted response is an independent, unweighted Normal observation
 supported by RK's `:observations` preset, `observed` holds subject observation
@@ -686,9 +683,10 @@ Jacobians. With the NLMEEstimation/Enzyme extension loaded, an `AutoEnzyme`
 reverse backend automatically selects Enzyme forward mode. Other callers can
 pass a forward backend explicitly.
 
-When the view contains shared sampled coordinates, `shared_point` is required:
-the full RK packed unconstrained point whose shared coordinates are held fixed
-in the conditional fit. Other entries in that point are ignored.
+Shared sampled coordinates enter θ by default and can therefore be estimated
+jointly with ordinary population parameters. To hold them fixed, pass
+`shared_point`, a full RK packed unconstrained point. Only its shared entries
+are used. The model's θ positions and names make the chosen fit mode explicit.
 
 When the observations belong to one subject-indexed cell each (`@plate for` or
 the deprecated closure-style `kernel(...) do`), the model also prepares a cell
@@ -730,17 +728,19 @@ function brm_nlme_model(backend::RKBRMI; ad_backend,
     cell_rows = _brm_nlme_cell_rows(backend, view, attribution)
     cell_query = cell_rows === nothing ? nothing :
         _rk_nlme_cell_query(backend, Tuple(first.(attribution)))
+    theta = findall(r -> r === :population ||
+        (shared_point === nothing && r === :shared_latent), view.role)
+    sigma = findall(==(:scalar), view.role)
     cell_gradient = if cell_rows === nothing
         nothing
     else
-        selected = sort!(vcat(findall(==(:population), view.role),
-            findall(==(:scalar), view.role), first(view.subject_coordinates)))
+        selected = sort!(vcat(theta, sigma, first(view.subject_coordinates)))
         (sampler=_rk_nlme_compact_cell_sampler(backend,
             Tuple(first.(attribution)), unit, selected), lock=ReentrantLock())
     end
     population_prior = _rk_nlme_population_prior(backend, unit, ad_backend)
     BRMNLMEModel(view, backend, sampler, pointwise, eta_hvp, attribution,
-        findall(==(:population), view.role), findall(==(:scalar), view.role),
+        theta, sigma,
         eta_blocks, unit, observations_query, observations_pushforward,
         observed, observation_attribution, cell_query, cell_gradient, cell_rows,
         population_prior)
