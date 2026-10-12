@@ -63,6 +63,7 @@ include("vimpl.jl")
 # so it can be compiled by BridgeStan / fit via Stan.
 using StanBlocks
 include("sbimpl.jl")
+include("sb_cell_julia.jl")
 # Fusion-append artifacts + SB reference numbers (RK-side driver inputs).
 # After sbimpl (SBBRMI) and the RK planner/AST above; RK-free — the
 # bound-plan translation lives in the ReactiveKernels extension.

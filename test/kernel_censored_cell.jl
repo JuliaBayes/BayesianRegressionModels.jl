@@ -8,9 +8,10 @@
 # token plus positional arguments (`yy ~ censored(normal, mu, sigma;
 # lower=lloq)`), per stanblocks-use §8.1 — which lowers through the same
 # `lower_clamping` / `lower_conditioning` / `interval_evidence_impl` builtins
-# as plain-`@slic` use. The `Distributions.jl` `Normal(...)` call form is not
-# valid there (deliberate UnionAll rejection); the lowercase `normal(...)`
-# call form is sugar for the token form (StanBlocks 9607eee6).
+# as plain-`@slic` use. The lowercase `normal(...)` call form is sugar for the
+# token form (StanBlocks 9607eee6), and a cell's Julia spelling
+# `censored(Normal(...); ...)` is translated to it by SBBRMI
+# (`src/sb_cell_julia.jl`), so all three spellings emit the same Stan.
 
 using Test
 using BayesianRegressionModels
@@ -84,12 +85,12 @@ end
     @test knc_stanc_ok(sb.model)
 end
 
-@testset "kernel(...) cell: Distributions call form still fails loudly" begin
-    # `Normal(...)` hits the deliberate UnionAll rejection (StanBlocks decision
-    # `3bbtrv`). The message is not matched here — the wording is owned by
-    # StanBlocks — only that it stays loud instead of silently accepted.
+@testset "kernel(...) cell: Distributions call form emits the token-form Stan" begin
+    # A cell is Julia source; SBBRMI gives StanBlocks the family of a
+    # Distributions constructor (`Normal` -> `normal`), so the BRM top-level
+    # spelling works in-cell and emits exactly the token form's program.
     df = knc_df()
-    m_cap = @brm df begin
+    m_cens = @brm df begin
         sigma ~ Exponential(1)
         log_a ~ 1 + (1 | site)
         pred ~ kernel(t_grid, dv, log_a) do ts, yy, la
@@ -98,8 +99,29 @@ end
             mu
         end
     end
-    sb_cap = SBBRMI(m_cap; mod = @__MODULE__)
-    @test_throws Exception StanBlocks.stan_code(sb_cap.model)
+    m_trunc = @brm df begin
+        sigma ~ Exponential(1)
+        log_a ~ 1 + (1 | site)
+        pred ~ kernel(t_grid, dv, log_a) do ts, yy, la
+            mu = ts .* exp(la)
+            yy ~ truncated(Normal(mu, sigma); lower=-1.0)
+            mu
+        end
+    end
+    m_int = @brm df begin
+        sigma ~ Exponential(1)
+        log_a ~ 1 + (1 | site)
+        pred ~ kernel(t_grid, dv, log_a) do ts, yy, la
+            mu = ts .* exp(la)
+            yy ~ interval_censored(Normal(mu, sigma), -1.0, 1.0)
+            mu
+        end
+    end
+    code(m) = StanBlocks.stan_code(SBBRMI(m; mod = @__MODULE__).model)
+    @test code(m_cens) == code(knc_censored(df))
+    @test code(m_trunc) == code(knc_truncated(df))
+    @test code(m_int) == code(knc_interval(df))
+    @test knc_stanc_ok(SBBRMI(m_cens; mod = @__MODULE__).model)
 end
 
 @testset "kernel(...) cell: lowercase call form is token sugar" begin
