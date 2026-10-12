@@ -76,6 +76,12 @@ julia --startup-file=no --project=test test/rk_planning_specialization.jl
 
 ## NLME estimators
 
+`nlme_joint_start.jl` checks a complete NLME estimate against the same
+BRMI's compiled Stan model: non-unit covariance and natural subject effects
+round-trip through Stan's unconstrained coordinates, fixed/free indices
+partition the full vector, subject labels are checked, and a direct coordinate
+copy is shown to be a different physical point.
+
 `nlme_view.jl` pins `brm_nlme_view`, lockstep evaluation
 (`brm_nlme_loglikelihoods[_and_gradients]`), and single-subject cell
 evaluation (`brm_nlme_loglikelihood[_and_gradient]`) against an independent
