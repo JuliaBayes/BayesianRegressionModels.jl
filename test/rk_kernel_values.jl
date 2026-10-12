@@ -59,6 +59,26 @@ end
     @test values ≈ expected rtol=1e-12
 end
 
+@stestset "only operator calls with two operands take Stan's scalar-with-array semantics" begin
+    function bind(ex)
+        bindings = Pair{Symbol,Any}[]
+        BRM._rk_kernel_bind_calls(ex, @__MODULE__, bindings, Set{Symbol}()), last.(bindings)
+    end
+    # Unary `+`/`-` mean the same in Julia and Stan and keep their spelling.
+    for ex in (:(-x), :(+x), :((-).(x)), :(exp.(-x)))
+        @test bind(ex) == (ex, [])
+    end
+    for (ex, callable) in ((:(a + b), BRM._rk_kernel_stan_add), (:(a - b), BRM._rk_kernel_stan_sub),
+            (:(a - b - c), BRM._rk_kernel_stan_sub), (:(-(xs...)), BRM._rk_kernel_stan_sub),
+            (:((-).(a, b)), BRM._rk_kernel_stan_sub))
+        bound, callables = bind(ex)
+        @test callables == [callable]
+        @test bound != ex
+    end
+    @test BRM._rk_kernel_stan_sub(1.0, [2.0, 3.0]) == [-1.0, -2.0]
+    @test BRM._rk_kernel_stan_sub([1.0]...) == -1.0
+end
+
 module DottedCellScope
 using BayesianRegressionModels, Distributions
 halfsq(x) = 0.5 * x * x

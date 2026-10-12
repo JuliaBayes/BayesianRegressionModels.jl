@@ -670,6 +670,8 @@ _rk_kernel_inv_logit(x::AbstractArray) = logistic.(x)
 # Stan broadcasts scalar addition/subtraction over vectors and matrices.
 # Julia's undotted operators require matching array operands, so bind those
 # Stan cases at the cell edge while leaving all other dispatch unchanged.
+# Unary `+`/`-` mean the same in both languages and keep their authored
+# spelling; a splatted call may still reach the one-operand methods.
 _rk_kernel_stan_add(x) = +x
 _rk_kernel_stan_add(x, y) = x + y
 _rk_kernel_stan_add(x::Number, y::AbstractArray) = x .+ y
@@ -683,6 +685,12 @@ _rk_kernel_stan_sub(x::AbstractArray, y::Number) = x .- y
 _rk_kernel_stan_sub(x, y, z, rest...) =
     _rk_kernel_stan_sub(_rk_kernel_stan_sub(x, y), z, rest...)
 
+# One plain operand: `-x`, or the broadcast `(-).(x)`.
+function _rk_kernel_unary_call(value)
+    operands = value.head === :call ? value.args[2:end] : value.args[2].args
+    length(operands) == 1 && !Meta.isexpr(only(operands), :...)
+end
+
 function _rk_kernel_bind_calls(value, scope, bindings, taken)
     value isa Expr || return value
     args = map(arg -> _rk_kernel_bind_calls(arg, scope, bindings, taken), value.args)
@@ -691,9 +699,9 @@ function _rk_kernel_bind_calls(value, scope, bindings, taken)
         head = first(value.args)
         if head === :rep_vector
             args[1] = :fill
-        elseif head === :+
+        elseif head === :+ && !_rk_kernel_unary_call(value)
             args[1] = _rk_value_callee!(bindings, _rk_kernel_stan_add, taken)
-        elseif head === :-
+        elseif head === :- && !_rk_kernel_unary_call(value)
             args[1] = _rk_value_callee!(bindings, _rk_kernel_stan_sub, taken)
         elseif head === :inv_logit && !isdefined(scope, head)
             # Stan's vectorized primitive need not be defined in the cell's
