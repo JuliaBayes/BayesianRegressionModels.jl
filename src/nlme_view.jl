@@ -79,16 +79,16 @@ Base.show(io::IO, v::BRMNLMEView) = print(io, "BRMNLMEView(",
     count(r -> r === :subject_scale || r === :subject_correlation, v.role),
     " Ω and ", count(==(:scalar), v.role), " scalar coordinates)")
 
-# The coordinate records this view reads. Kernel (`kernel(...)` / panel) plans
-# have no semantic inventory yet; the refusal names that boundary instead of
-# the transport's wording.
+# The coordinate records this view reads. The old panel-only kernel plan has
+# no semantic inventory. Closure-style `kernel(...) do` cells instead use the
+# value plan, like `@plate for` cells.
 _brm_nlme_records(plan::Union{_RKStructuralPlan,_RKValuePlan,_RKHeldOutPlan}) =
     _rk_coordinate_records(plan)
 _brm_nlme_records(plan) = _brm_nlme_error(
     "brm_nlme_view: an RK plan of kind `$(nameof(typeof(plan)))` has no " *
     "semantic coordinate inventory, so its NLME partition cannot be read. " *
-    "The legacy panel `kernel(...)` route is not covered; `@plate for` cells " *
-    "lower to value plans, which are.")
+    "The old panel-only `_RKKernelPlan` route is not covered; " *
+    "`kernel(...) do` and `@plate for` cells lower to value plans, which are.")
 
 _brm_nlme_owned(name::Symbol, declaration::Symbol) = name === declaration ||
     startswith(String(name), string(declaration, "."))
@@ -552,7 +552,7 @@ function Base.getindex(p::_BRMNLMEPoint, j::Int)
     p.unit[j]
 end
 
-# Only a subject-indexed observation plate has a single query cell containing
+# Only a subject-indexed observation cell has a single query cell containing
 # exactly that subject's densities. A flat grouped observation, including a
 # ragged join, remains available through lockstep evaluation but cannot use a
 # cell as its conditional subject density.
@@ -630,8 +630,9 @@ Jacobians. With the NLMEEstimation/Enzyme extension loaded, an `AutoEnzyme`
 reverse backend automatically selects Enzyme forward mode. Other callers can
 pass a forward backend explicitly.
 
-When the observations belong to one subject-indexed `@plate for` cell each,
-the model also prepares a cell query for
+When the observations belong to one subject-indexed cell each (`@plate for` or
+the deprecated closure-style `kernel(...) do`), the model also prepares a cell
+query for
 [`brm_nlme_loglikelihood`](@ref) and
 [`brm_nlme_loglikelihood_and_gradient`](@ref).
 
@@ -686,7 +687,7 @@ function _brm_nlme_cell_point(m::BRMNLMEModel, i::Integer, θ, σ, η)
     rows = m.cell_rows
     rows === nothing && _brm_nlme_error(
         "brm_nlme_loglikelihood: per-subject evaluation requires a " *
-        "subject-indexed `@plate for` observation; flat-row grouped and " *
+        "subject-indexed observation cell; flat-row grouped and " *
         "ragged-join models use the lockstep methods")
     1 <= i <= length(rows) || throw(BoundsError(rows, i))
     length(θ) == length(m.theta) || throw(DimensionMismatch(

@@ -50,6 +50,23 @@ function nlme_plate_pk(data)
     end
 end
 
+# The deprecated closure spelling of the same subject-indexed PK cell. It
+# remains a value plan, with one in-cell observation array per subject.
+function nlme_kernel_pk(data)
+    @brm data begin
+        sigma ~ Exponential(1)
+        log_CL ~ 1 + weight + (1 | pk | subject)
+        log_V ~ 1 + (1 | pk | subject)
+        pred ~ kernel(t, dose, dv, log_CL, log_V) do ts, d, y, lCL, lV
+            CL = exp(lCL)
+            Vc = exp(lV)
+            p = d / Vc .* exp.(-(CL / Vc) .* ts)
+            y ~ normal(p, sigma)
+            p
+        end
+    end
+end
+
 likelihood_query(backend) = prepare_query(backend.model,
     RKEXT._rk_translated_plan(backend.plan), :likelihood)
 
