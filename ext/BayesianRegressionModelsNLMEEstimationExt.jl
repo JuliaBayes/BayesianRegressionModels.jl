@@ -30,8 +30,10 @@ NE.nlme_layout(m::BRM.BRMNLMEModel) = BRM._brm_nlme_ragged(m.view) ?
         eta_blocks=m.eta_blocks)
 
 NE.evaluation_style(::BRM.BRMNLMEModel) = NE.BatchedEvaluation()
+# Only a prepared compact subject-cell sampler differentiates one subject's
+# population coordinates; every other model uses the lockstep batch.
 NE.saem_population_gradient_style(m::BRM.BRMNLMEModel) =
-    BRM._brm_nlme_ragged(m.view) ? NE.BatchedEvaluation() : NE.PerSubjectEvaluation()
+    m.cell_gradient === nothing ? NE.BatchedEvaluation() : NE.PerSubjectEvaluation()
 NE.saem_population_gradient_style(m::BRM.BRMNLMEModel, ::Val{:online}) =
     NE.saem_population_gradient_style(m)
 NE.saem_population_gradient_style(::BRM.BRMNLMEModel, ::Val{:mixture}) =

@@ -99,7 +99,12 @@ oracle with analytic η gradients. It also compares the deprecated
 `kernel(...) do` spelling with the indexed cell's partition, likelihoods and
 η gradients. The single-subject test checks that
 value and gradient allocations stay flat when unrelated subjects grow from
-3 to 9 to 27. Flat-row grouped models retain lockstep evaluation and refuse
+3 to 9 to 27. A top-level `ragged(y, group)` join of a plate cell's output,
+including a left-censored join with a per-row limit and an `addprop` scale
+beside an in-cell observation, has the same single-subject cell, checked
+against independent oracles and for flat work at 27, 81 and 243 subjects. A
+completed covariate's observed entries join their subject's cell.
+Flat-row grouped models retain lockstep evaluation and refuse
 the single-subject method by name. It runs in the test environment above.
 
 `nlme_nested.jl` uses a public synthetic model with interleaved observations
@@ -120,7 +125,9 @@ same Stan point from the natural values. Run it in the NLMEEstimation scratch
 environment described below.
 
 `nlme_estimation_ext.jl` covers the NLMEEstimation.jl protocol extension:
-batched and single-subject evaluation, subject-cell population gradients,
+batched and single-subject evaluation (including `check_protocol` and online
+SAEM on ragged joins, and SAEM's batched population gradient for flat grouped
+rows), subject-cell population gradients,
 analytic η Hessian blocks, Gaussian observation moments
 and colored η Jacobians, `check_protocol`, and Newton posthoc against
 independent oracles. Its Gaussian checks include arrays observed within plate

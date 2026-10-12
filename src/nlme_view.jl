@@ -442,10 +442,13 @@ _brm_nlme_ragged_labels(plan::_RKHeldOutPlan, name) =
     _brm_nlme_ragged_labels(plan.parent, name)
 # A ragged join gathers its response cell by cell (`_rk_kernel_observed_layout`),
 # so its densities follow the row partition, not the flat row order: the labels
-# are gathered by the same partition.
+# are gathered by the same partition. A join observed per subject
+# (`_RKNestedObservation`) instead has one density array per kernel subject,
+# which is one row of the grouping column.
 function _brm_nlme_ragged_labels(plan::_RKValuePlan, name)
     for o in plan.observations
         o.name === name || continue
+        o isa _RKNestedObservation && return nothing
         lhs = o.lhs
         lhs isa ExprColumn && getf(lhs) === ragged || return nothing
         kernels = Tuple(a for a in plan.assignments if a isa _RKPreparedKernelAssignment)
@@ -679,23 +682,38 @@ function Base.getindex(p::_BRMNLMEPoint, j::Int)
     p.unit[j]
 end
 
-# Only a subject-indexed observation cell has a single query cell containing
-# exactly that subject's densities. A flat grouped observation, including a
-# ragged join, remains available through lockstep evaluation but cannot use a
-# cell as its conditional subject density.
-function _brm_nlme_cell_rows(backend::RKBRMI, view::BRMNLMEView, attribution)
+# A subject's conditional density is a sum of RK query cells, in groups that
+# share cell positions. The subject plate group holds the observations with one
+# cell per subject row: in-cell observations and formula observations of kernel
+# output observed per subject (`_RKNestedObservation`, including a ragged
+# join). Each completed covariate's observed values form one group whose
+# entries belong to the subject rows they were observed on. A flat grouped
+# observation has no such cell: its model remains available through lockstep
+# evaluation only. Returns `(; names, positions)` per group, `positions[i]`
+# being subject `i`'s cells, or `nothing`.
+function _brm_nlme_subject_cells(backend::RKBRMI, view::BRMNLMEView, attribution)
     plan = backend.plan
     isempty(attribution) && return nothing
     plan isa _RKValuePlan || return nothing
+    all(rows -> length(rows) == 1, view.rows) || return nothing
     plate_observations = Set(o.source for a in plan.assignments
         if a isa _RKPreparedKernelAssignment for o in a.observations)
-    all(name -> name in plate_observations, first.(attribution)) || return nothing
-    all(rows -> length(rows) == 1, view.rows) || return nothing
+    union!(plate_observations,
+        (o.name for o in plan.observations if o isa _RKNestedObservation))
     n = length(view.levels)
     rows = [only(group_rows) for group_rows in view.rows]
-    all(subjects -> length(subjects) == n &&
-        all(i -> subjects[rows[i]] == i, 1:n), last.(attribution)) || return nothing
-    rows
+    plate = [entry for entry in attribution if first(entry) in plate_observations]
+    isempty(plate) && return nothing
+    all(subjects -> length(subjects) == n && all(i -> subjects[rows[i]] == i, 1:n),
+        last.(plate)) || return nothing
+    groups = Any[(; names=Tuple(first.(plate)), positions=[[row] for row in rows])]
+    for (name, subjects) in attribution
+        name in plate_observations && continue
+        _brm_nlme_completion_rows(plan, name, n) === nothing && return nothing
+        push!(groups, (; names=(name,),
+            positions=[findall(==(i), subjects) for i in 1:n]))
+    end
+    Tuple(groups)
 end
 
 """
@@ -744,7 +762,6 @@ struct BRMNLMEModel{B<:RKBRMI,S,Q,V,O,J,C,G,P}
     observation_attribution::Vector{Pair{Symbol,Vector{Int}}}
     cell_query::C
     cell_gradient::G
-    cell_rows::Union{Nothing,Vector{Int}}
     population_prior::P
 end
 
@@ -820,34 +837,34 @@ function brm_nlme_model(backend::RKBRMI; ad_backend,
     observed, observation_attribution = gaussian ?
         _brm_nlme_observed(backend, attribution, length(view.levels)) :
         (Vector{Vector{Float64}}(), Pair{Symbol,Vector{Int}}[])
-    cell_rows = _brm_nlme_cell_rows(backend, view, attribution)
-    cell_query = cell_rows === nothing ? nothing :
-        _rk_nlme_cell_query(backend, Tuple(first.(attribution)))
+    cells = _brm_nlme_subject_cells(backend, view, attribution)
+    cell_query = cells === nothing ? nothing : map(cells) do cell
+        (; cell.names, cell.positions, query=_rk_nlme_cell_query(backend, cell.names))
+    end
     theta = findall(r -> r === :population ||
         (shared_point === nothing && r === :shared_latent), view.role)
     sigma = findall(==(:scalar), view.role)
-    cell_gradient = if cell_rows === nothing || _brm_nlme_ragged(view)
+    cell_gradient = if cells === nothing || _brm_nlme_ragged(view)
         nothing
     else
         selected = sort!(vcat(theta, sigma, first(view.subject_coordinates)))
-        (sampler=_rk_nlme_compact_cell_sampler(backend,
-            Tuple(first.(attribution)), unit, selected), lock=ReentrantLock())
+        (samplers=map(cell -> _rk_nlme_compact_cell_sampler(backend, cell.names,
+            unit, selected), cells), lock=ReentrantLock())
     end
     population_prior = _rk_nlme_population_prior(backend, unit, ad_backend)
     BRMNLMEModel(view, backend, sampler, pointwise, eta_hvp, attribution,
         theta, sigma,
         eta_blocks, unit, observations_query, observations_pushforward,
-        observed, observation_attribution, cell_query, cell_gradient, cell_rows,
+        observed, observation_attribution, cell_query, cell_gradient,
         population_prior)
 end
 
 function _brm_nlme_cell_point(m::BRMNLMEModel, i::Integer, θ, σ, η)
-    rows = m.cell_rows
-    rows === nothing && _brm_nlme_error(
+    m.cell_query === nothing && _brm_nlme_error(
         "brm_nlme_loglikelihood: per-subject evaluation requires a " *
-        "subject-indexed observation cell; flat-row grouped and " *
-        "ragged-join models use the lockstep methods")
-    1 <= i <= length(rows) || throw(BoundsError(rows, i))
+        "subject-indexed observation cell; flat-row grouped models, and joins " *
+        "RK observes on flat rows, use the lockstep methods")
+    1 <= i <= length(m.view.levels) || throw(BoundsError(m.view.levels, i))
     length(θ) == length(m.theta) || throw(DimensionMismatch(
         "θ has length $(length(θ)), expected $(length(m.theta))"))
     length(σ) == length(m.sigma) || throw(DimensionMismatch(
@@ -855,17 +872,17 @@ function _brm_nlme_cell_point(m::BRMNLMEModel, i::Integer, θ, σ, η)
     block = m.view.subject_coordinates[i]
     length(η) == length(block) || throw(DimensionMismatch(
         "η has length $(length(η)), expected $(length(block))"))
-    point = _BRMNLMEPoint(m.unit, m.theta, Vector{Float64}(θ), m.sigma,
+    _BRMNLMEPoint(m.unit, m.theta, Vector{Float64}(θ), m.sigma,
         Vector{Float64}(σ), block, Vector{Float64}(η))
-    point, rows[i]
 end
 
 """
     brm_nlme_loglikelihood(m::BRMNLMEModel, i, θ, σ, η_i) -> Float64
 
-One subject's conditional log-likelihood from its observation plate cell.
-The work depends on that cell's observations, not on other subjects. Models
-with flat grouped observations use [`brm_nlme_loglikelihoods`](@ref) instead.
+One subject's conditional log-likelihood from its observation plate cell,
+plus the cells of its observed values of completed covariates. The work
+depends on those cells' observations, not on other subjects. Models with flat
+grouped observations use [`brm_nlme_loglikelihoods`](@ref) instead.
 """
 function brm_nlme_loglikelihood(m::BRMNLMEModel, i::Integer, θ, σ, η)
     if _brm_nlme_ragged(m.view) && m.cell_query === nothing
@@ -876,23 +893,31 @@ function brm_nlme_loglikelihood(m::BRMNLMEModel, i::Integer, θ, σ, η)
         H[i] = Vector{Float64}(η)
         return brm_nlme_loglikelihoods(m, θ, σ, H)[i]
     end
-    point, row = _brm_nlme_cell_point(m, i, θ, σ, η)
-    _rk_nlme_cell_value(m.cell_query, point, row)
+    point = _brm_nlme_cell_point(m, i, θ, σ, η)
+    sum(m.cell_query) do cell
+        sum(p -> _rk_nlme_cell_value(cell.query, point, p), cell.positions[i]; init=0.0)
+    end
 end
 
 function _brm_nlme_cell_value_and_selected_gradient(m::BRMNLMEModel, i::Integer, θ, σ, η)
     m.cell_gradient === nothing && _brm_nlme_error(
         "brm_nlme_model: this subject cell has no prepared compact gradient")
-    point, row = _brm_nlme_cell_point(m, i, θ, σ, η)
+    point = _brm_nlme_cell_point(m, i, θ, σ, η)
     indices = sort!(vcat(m.theta, m.sigma, point.eta_positions))
     active = point[indices]
-    selected_gradient = similar(active)
+    selected_gradient = zeros(length(active))
+    cell_gradient = similar(active)
     # A prepared RK sampler owns mutable AD workspace. Protect it when the
     # model is shared across concurrent subject requests.
     value = lock(m.cell_gradient.lock) do
-        first(_rk_nlme_compact_cell_value_and_gradient!(
-            m.cell_gradient.sampler, selected_gradient, m.unit,
-            active, indices, row))
+        total = 0.0
+        for (cell, sampler) in zip(m.cell_query, m.cell_gradient.samplers),
+                p in cell.positions[i]
+            total += first(_rk_nlme_compact_cell_value_and_gradient!(
+                sampler, cell_gradient, m.unit, active, indices, p))
+            selected_gradient .+= cell_gradient
+        end
+        total
     end
     value, indices, selected_gradient, point.eta_positions
 end

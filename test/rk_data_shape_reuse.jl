@@ -56,6 +56,16 @@ flat_scale(data) = @brm data begin
     end
     y ~ Normal(loc - reference, addprop(loc, a, b))
 end
+# The same response with an argument holding one value per flattened row: it
+# keeps the flattened route.
+flat_rows(data) = @brm data begin
+    log_k ~ Normal(0, 1)
+    a ~ Exponential(1)
+    @plate for i in eachindex(t)
+        loc[i] = dose[i] .* exp.(-exp(log_k) .* t[i])
+    end
+    y ~ Normal(loc - offset, a)
+end
 # Superposed decaying pulses read at per-subject times: the events arrive on a
 # secondary row axis, and a fresh output buffer keeps the cell ordinary Julia.
 function pulse_sum(times, event_times, heights, rate)
@@ -201,9 +211,12 @@ end
 @stestset "a ragged join's row partition is bound data, not source" begin
     trained = joined_data(["a", "b", "b", "a", "b", "a", "a"])
     definitions, main, _ = emitted_source(PublicShapeReuse.joined(trained))
-    @test occursin("y_observation_arguments(", definitions)
-    @test !occursin("y_observation_argument_1(", definitions)
-    @test occursin("y_observation_arguments(", main)
+    # The join is observed per subject: its response and per-row reference are
+    # bound as subject cells grouped by the partition, so no argument kernel
+    # gathers rows and no partition appears in source.
+    @test occursin("y[i] .~ Normal.(loc_cells[i] .- y_cells_reference[i], sigma)", main)
+    @test !occursin("y_observation_argument", definitions * main)
+    @test !occursin("y_rows", definitions * main)
     # The same row count in another subject order: a stale partition would
     # pair rows with the wrong subjects and reference values.
     for scored in (joined_data(["b", "a", "a", "b", "a", "b", "a"]),
@@ -239,20 +252,16 @@ flat_data(lengths) = (; t=[[0.4k for k in 1:n] for n in lengths],
     y=[[0.3 + 0.05 * mod1(j + k, 4) for k in 1:n] for (j, n) in enumerate(lengths)],
     reference=[[0.01 * mod1(j + k, 3) for k in 1:n] for (j, n) in enumerate(lengths)])
 
-# A flattened per-subject response is one data-only definition over the bound
-# cells, and a per-subject argument one statement in its argument kernel. They
-# were one-line kernels wrapping `brm_flatten_cells` (`brm_flatten_response`,
-# `y_rows_<argument>_reader`), the response followed by an identity row gather
-# (snag rk-emission-wrap-4ee9950d). RKPPL observes a data-only definition as
-# the response and evaluates it once, at binding.
-@stestset "a flattened per-subject response is one direct flatten of its bound cells" begin
+# A per-subject response whose law reads per-subject arguments and a
+# row-local helper (`addprop`) is observed per subject, reading its bound cells
+# directly: no flatten, argument kernel or row gather.
+@stestset "a per-subject response with a row-local scale is observed from its bound cells" begin
     trained, scored = flat_data([3, 0, 4]), flat_data([2, 1, 4, 2])
     definitions, main, _ = emitted_source(PublicShapeReuse.flat_scale(trained))
-    @test occursin("y = brm_flatten_cells(y_raw_response)", main)
-    @test occursin("y .~ Normal.(", main)
-    @test occursin(r"y_rows_y_input_\d+ = brm_flatten_cells\(y_input_\d+\)", definitions)
-    for retired in ("brm_flatten_response", "_reader(raw)", "_source_values", "_source_rows",
-            "getindex.(Ref(")
+    @test occursin("y[i] .~ Normal.(loc_cells[i] .- reference[i], addprop(loc_cells[i], a, b))",
+        main)
+    for retired in ("brm_flatten_response", "y_raw_response", "y_rows", "_reader(raw)",
+            "_source_values", "_source_rows", "getindex.(Ref(")
         @test !occursin(retired, definitions * main)
     end
     own, names = check_shape_reuse(PublicShapeReuse.flat_scale, trained, scored)
@@ -267,6 +276,36 @@ flat_data(lengths) = (; t=[[0.4k for k in 1:n] for n in lengths],
         logpdf(Normal(), u[il]) + logpdf(Exponential(), a) + u[ia] +
             logpdf(Exponential(), b) + u[ib] +
             sum(logpdf.(Normal.(loc .- reference, sqrt.(a^2 .+ (loc .* b) .^ 2)), observed))
+    end
+    check_scored_density(own, names, oracle)
+end
+
+# A flattened per-subject response is one data-only definition over the bound
+# cells. It was a one-line kernel wrapping `brm_flatten_cells`
+# (`brm_flatten_response`) followed by an identity row gather (snag
+# rk-emission-wrap-4ee9950d). RKPPL observes a data-only definition as the
+# response and evaluates it once, at binding.
+@stestset "a flattened per-subject response is one direct flatten of its bound cells" begin
+    rows_data(lengths) = merge(flat_data(lengths),
+        (; offset=[0.01 * mod1(r, 3) for r in 1:sum(lengths)]))
+    trained, scored = rows_data([3, 0, 4]), rows_data([2, 1, 4, 2])
+    definitions, main, _ = emitted_source(PublicShapeReuse.flat_rows(trained))
+    @test occursin("y = brm_flatten_cells(y_raw_response)", main)
+    @test occursin("y .~ Normal.(", main)
+    for retired in ("brm_flatten_response", "_reader(raw)", "_source_values", "_source_rows",
+            "getindex.(Ref(")
+        @test !occursin(retired, definitions * main)
+    end
+    own, names = check_shape_reuse(PublicShapeReuse.flat_rows, trained, scored)
+    @test sort(names) == [:a, :log_k]
+    il, ia = (only(findall(==(n), names)) for n in (:log_k, :a))
+    oracle(u) = begin
+        k, a = exp(u[il]), exp(u[ia])
+        loc = reduce(vcat, [scored.dose[j] .* exp.(-k .* scored.t[j])
+            for j in eachindex(scored.t)]; init=Float64[])
+        observed = reduce(vcat, scored.y; init=Float64[])
+        logpdf(Normal(), u[il]) + logpdf(Exponential(), a) + u[ia] +
+            sum(logpdf.(Normal.(loc .- scored.offset, a), observed))
     end
     check_scored_density(own, names, oracle)
 end

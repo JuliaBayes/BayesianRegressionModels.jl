@@ -372,11 +372,48 @@ end
         end
     end
     ω = omega_parameters(nlme_layout(m), [0.09 0.0; 0.0 0.04])
-    # Decision 110evqv: the batch Gaussian route remains valid, but conformance
-    # also probes the single-subject route. A ragged join has no subject cell.
-    err = try check_protocol(m, θ, σ, ω; η=H); nothing catch e; e end
-    @test err isa BRMNLMEViewError
-    @test occursin("ragged-join", err.message)
+    # Conformance also probes the single-subject routes, which a ragged join
+    # serves from its per-subject cell.
+    @test check_protocol(m, θ, σ, ω; η=H, population_gradient=true)
+end
+
+@stestset "a censored ragged join beside an in-cell observation meets the protocol" begin
+    d = NLME_CENSORED_JOIN_DATA
+    backend = RKBRMI(nlme_censored_join(d))
+    m = brm_nlme_model(backend; ad_backend=NLME_AD)
+    @test saem_population_gradient_style(m) isa PerSubjectEvaluation
+    θ = [0.3, 2.0]
+    σ = [-0.4, -1.0, -0.7]
+    H = [0.15 -0.2 0.05 0.1; -0.1 0.25 0.3 -0.2]
+    ω = omega_parameters(nlme_layout(m), [0.09 0.0; 0.0 0.04])
+    @test check_protocol(m, θ, σ, ω; η=H, population_gradient=true)
+    oracle = censored_join_oracle(m, backend, θ, σ, H, d)
+    @test conditional_loglikelihoods(m, [4, 2], θ, σ, H[:, [4, 2]]) ≈ oracle[[4, 2]] rtol=1e-12
+    for i in eachindex(m.view.levels)
+        @test conditional_loglikelihood(m, i, θ, σ, H[:, i]) ≈ oracle[i] rtol=1e-12
+    end
+    fit = saem(m, θ, σ, ω; rng=Random.Xoshiro(2026),
+        options=SAEMOptions(iterations=3, burnin=1, mcmc_burnin=0,
+            adapt_iterations=0, numeric_maxiter=2, mstep_interval=1,
+            numeric_mstep=:online, omega_floor=0.05))
+    @test all(isfinite, (fit.theta..., fit.sigma..., fit.omega...))
+end
+
+@stestset "flat grouped rows take SAEM's batched population gradient" begin
+    # Only a prepared subject cell differentiates one subject's population
+    # coordinates; flat grouped rows have none, so SAEM uses the lockstep batch.
+    m = brm_nlme_model(RKBRMI(nlme_pk(NLME_DATA)); ad_backend=NLME_AD)
+    @test m.cell_gradient === nothing
+    for mode in (Val(:online), Val(:mixture))
+        @test saem_population_gradient_style(m, mode) isa BatchedEvaluation
+    end
+    θ = fill(0.1, length(m.theta))
+    σ = [log(2.0)]
+    fit = saem(m, θ, σ, zeros(3); rng=Random.Xoshiro(1),
+        options=SAEMOptions(iterations=3, burnin=1, mcmc_burnin=0,
+            adapt_iterations=0, numeric_maxiter=2, mstep_interval=1,
+            numeric_mstep=:online, omega_floor=0.05))
+    @test all(isfinite, (fit.theta..., fit.sigma..., fit.omega...))
 end
 
 @stestset "Gaussian moments and colored η Jacobians for array-valued plate cells" begin

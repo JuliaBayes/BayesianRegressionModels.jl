@@ -274,6 +274,21 @@ function _rk_block_free_reads(definitions)
     reads
 end
 
+# An observation reads its response rather than defining it: a top-level `~`,
+# or a per-subject `@plate` holding only observations (`_rk_observation_statement`).
+function _rk_observation_source_statement(statement)
+    Meta.isexpr(statement, :call) && return first(statement.args) in (:~, :.~)
+    body = _rk_plate_body(statement)
+    body !== nothing && !isempty(body) && all(_rk_observation_source_statement, body)
+end
+
+# The statements of an emitted `@plate for … end`, or `nothing`.
+function _rk_plate_body(statement)
+    Meta.isexpr(statement, :macrocall) && first(statement.args) === Symbol("@plate") &&
+        Meta.isexpr(last(statement.args), :for) || return nothing
+    [s for s in last(last(statement.args).args).args if !(s isa LineNumberNode)]
+end
+
 # Completion, formula columns, sampled priors and readers may depend on one
 # another. Order ordinary emitted statements by their declared outputs before
 # PPL authoring, preserving independent source order and bound data ownership.
@@ -281,8 +296,7 @@ function _rk_order_value_statements(statements, data_names, definitions=(); obse
     block_reads = _rk_block_free_reads(definitions)
     outputs = map(statements) do statement
         names = _rk_source_outputs!(Set{Symbol}(), statement)
-        Meta.isexpr(statement, :call) && first(statement.args) in (:~, :.~) &&
-            setdiff!(names, observed)
+        _rk_observation_source_statement(statement) && setdiff!(names, observed)
         setdiff!(names, data_names)
         setdiff!(names, _rk_source_loop_indices!(Set{Symbol}(), statement))
     end

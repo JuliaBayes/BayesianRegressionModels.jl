@@ -519,10 +519,12 @@ end
     @test G ≈ ragged_pk_oracle_gradients(m, θ, σ, H, NLME_RAGGED_DATA) rtol=1e-10
     # Against the executable model: a subject block moves exactly the joined
     # densities attributed to that subject, and every subject's value but its own
-    # stays put.
+    # stays put. The join is observed per subject: one density array per
+    # subject cell, all joined rows together.
     subjects = Dict(m.attribution)[:y]
     base = Base.invokelatest(pointwise_query(backend), u).y
-    @test length(base) == length(subjects) == length(NLME_RAGGED_DATA.y)
+    @test length(base) == length(subjects) == n
+    @test sum(length, base) == length(NLME_RAGGED_DATA.y)
     for (i, block) in enumerate(m.view.subject_coordinates)
         moved_u = copy(u)
         moved_u[block] .+= [0.4, -0.3]
@@ -533,4 +535,111 @@ end
         @test moved_values[setdiff(1:n, i)] == values[setdiff(1:n, i)]
         @test moved_values[i] != values[i]
     end
+end
+
+@stestset "a ragged join observed per subject gives one subject's value and η gradient" begin
+    # brm-use keeps a population-PK response flat at top level,
+    # `ragged(y, group) ~ …`. RK observes that join per subject, so the model
+    # has a subject cell, as an in-cell observation does.
+    backend = RKBRMI(nlme_ragged_pk(NLME_RAGGED_DATA))
+    m = brm_nlme_model(backend; ad_backend=NLME_AD)
+    @test m.cell_query !== nothing && m.cell_gradient !== nothing
+    θ = [0.4, 2.1]
+    σ = [log(0.8)]
+    H = [0.15 -0.2 0.05; -0.1 0.25 0.3]
+    oracle = ragged_pk_oracle(m, θ, σ, H, NLME_RAGGED_DATA)
+    gradients = ragged_pk_oracle_gradients(m, θ, σ, H, NLME_RAGGED_DATA)
+    for i in eachindex(m.view.levels)
+        @test brm_nlme_loglikelihood(m, i, θ, σ, H[:, i]) ≈ oracle[i] rtol=1e-12
+        value, gradient = brm_nlme_loglikelihood_and_gradient(m, i, θ, σ, H[:, i])
+        @test value ≈ oracle[i] rtol=1e-12
+        @test gradient ≈ gradients[:, i] rtol=1e-10
+    end
+
+    # Left-censored concentrations with a per-row limit and an additive plus
+    # proportional scale, beside the cell's own marker observation.
+    d = NLME_CENSORED_JOIN_DATA
+    backend = RKBRMI(nlme_censored_join(d))
+    m = brm_nlme_model(backend; ad_backend=NLME_AD)
+    @test Set(first.(m.attribution)) == Set([:conc, :marker])
+    @test m.cell_query !== nothing && m.cell_gradient !== nothing
+    θ = [0.3, 2.0]
+    σ = [-0.4, -1.0, -0.7]
+    H = [0.15 -0.2 0.05 0.1; -0.1 0.25 0.3 -0.2]
+    oracle = censored_join_oracle(m, backend, θ, σ, H, d)
+    values, G = brm_nlme_loglikelihoods_and_gradients(m, θ, σ, H)
+    @test values ≈ oracle rtol=1e-12
+    for i in eachindex(m.view.levels)
+        @test brm_nlme_loglikelihood(m, i, θ, σ, H[:, i]) ≈ oracle[i] rtol=1e-12
+        value, gradient = brm_nlme_loglikelihood_and_gradient(m, i, θ, σ, H[:, i])
+        @test value ≈ oracle[i] rtol=1e-12
+        @test gradient ≈ G[:, i] rtol=1e-10 atol=1e-12
+    end
+end
+
+@stestset "a completed covariate's observed values join their subject's cell" begin
+    # The covariate's observed values are attributed to the subject rows they
+    # were observed on, so a subject's cell adds its own observed entries (one
+    # or none here) to its plate cell.
+    d = NLME_IMPUTED_JOIN_DATA
+    backend = RKBRMI(nlme_imputed_join(d))
+    m = brm_nlme_model(backend; ad_backend=NLME_AD)
+    @test m.cell_query !== nothing && m.cell_gradient !== nothing
+    # Groups of different sizes: the plate's two observations, then the
+    # covariate's observed values.
+    @test Set(m.cell_query[1].names) == Set([:conc, :marker])
+    @test m.cell_query[2].names == (:w_obs,)
+    observed = m.cell_query[2]
+    n = length(m.view.levels)
+    levels = string.(m.view.levels)
+    @test [length(observed.positions[i]) for i in 1:n] ==
+        [ismissing(d.w[findfirst(==(l), d.subject)]) ? 0 : 1 for l in levels]
+    θ = collect(range(0.2, 0.6; length=length(m.theta)))
+    σ = fill(-0.3, length(m.sigma))
+    H = 0.1 .* reshape(collect(1:2n), 2, n) ./ n
+    values = brm_nlme_loglikelihoods(m, θ, σ, H)
+    u = BRM._brm_nlme_point(m, θ, σ, H)
+    @test sum(values) ≈ Base.invokelatest(likelihood_query(backend), u) rtol=1e-12
+    # Reference η gradient: the full sampler's, whose standard-normal draw
+    # prior contributes -η at the unit point. (The lockstep retained-pointwise
+    # sweep raises EnzymeRuntimeActivityError on this completion graph at the
+    # pinned RK, on the old flat route too.)
+    problem = BRM.rk_logdensity_problem(backend; ad_backend=NLME_AD)
+    _, full = BRM.LogDensityProblems.logdensity_and_gradient(problem, u)
+    for i in 1:n
+        @test brm_nlme_loglikelihood(m, i, θ, σ, H[:, i]) ≈ values[i] rtol=1e-12
+        value, gradient = brm_nlme_loglikelihood_and_gradient(m, i, θ, σ, H[:, i])
+        @test value ≈ values[i] rtol=1e-12
+        @test gradient ≈ full[m.view.subject_coordinates[i]] .+ H[:, i] rtol=1e-10 atol=1e-12
+    end
+end
+
+@stestset "one subject's ragged-join work stays flat as other subjects are added" begin
+    d = NLME_RAGGED_DATA
+    rows = [findall(==(s), d.obs_subject) for s in d.subject]
+    # Past ~15 subjects RK's reverse workspace takes one fixed step (measured
+    # 93 → 126 KB between 12 and 16 subjects), so compare beyond it.
+    measured = map((27, 81, 243)) do n
+        obs = [(j, r) for j in 1:n for r in rows[mod1(j, 3)]]
+        data = (; subject=["s$j" for j in 1:n], dose=[d.dose[mod1(j, 3)] for j in 1:n],
+            obs_subject=["s$(first(o))" for o in obs], t=[d.t[last(o)] for o in obs],
+            y=[d.y[last(o)] for o in obs])
+        m = brm_nlme_model(RKBRMI(nlme_ragged_pk(data)); ad_backend=NLME_AD)
+        θ = [0.4, 2.1]
+        σ = [0.0]
+        η = [0.05, -0.1]
+        i = findfirst(==("s2"), m.view.levels)
+        value() = brm_nlme_loglikelihood(m, i, θ, σ, η)
+        gradient() = brm_nlme_loglikelihood_and_gradient(m, i, θ, σ, η)
+        value(); gradient()
+        primal_bytes = minimum(@allocated(value()) for _ in 1:3)
+        gradient_bytes = minimum(@allocated(gradient()) for _ in 1:3)
+        (; result=gradient(), primal_bytes, gradient_bytes)
+    end
+    @test all(x -> isapprox(x.result[1], measured[1].result[1]; rtol=1e-12), measured)
+    @test all(x -> isapprox(x.result[2], measured[1].result[2]; rtol=1e-10), measured)
+    @test maximum(x.primal_bytes for x in measured) <=
+        1.2minimum(x.primal_bytes for x in measured)
+    @test maximum(x.gradient_bytes for x in measured) <=
+        1.2minimum(x.gradient_bytes for x in measured)
 end

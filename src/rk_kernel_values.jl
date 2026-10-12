@@ -270,11 +270,14 @@ end
 # subject is observed per subject when every value its law and bounds read is
 # either per subject (a kernel's cells, grouped data with one array per
 # subject) or shared (a number, scalar data, a scalar parameter), through BRM's
-# elementwise arithmetic. Returns the per-subject cells, or `nothing` to keep
-# the flattened route: a response join (authored as one flat column), weights,
-# missing entries, keyword laws and arguments with one value per flattened row.
+# elementwise arithmetic and row-local callables. A ragged join (`ragged(y, g)`
+# over one flat column) is observed per subject too: its response, and every
+# data column with one value per joined row, are grouped by the join's row
+# partition (`gathered`). Returns the per-subject cells and those gathered
+# columns, or `nothing` to keep the flattened route: weights, missing entries,
+# keyword laws and other callables.
 function _rk_nested_kernel_cells(observation, layout, kernels, columns, parameters)
-    (layout.lengths !== nothing && layout.rows === nothing) || return nothing
+    layout.lengths === nothing && return nothing
     observation.weight === nothing && observation.missing_response === nothing ||
         return nothing
     modifier = observation.modifier
@@ -282,18 +285,38 @@ function _rk_nested_kernel_cells(observation, layout, kernels, columns, paramete
         _brm_prepare_expr(modifier.base)
     distribution isa _BRMPreparedExpr && isempty(distribution.kwargs) || return nothing
     cells = Dict{Symbol,Symbol}()
-    context = (; kernels, columns, parameters, name=observation.name, lengths=layout.lengths)
+    gathered = Set{Symbol}()
+    context = (; kernels, columns, parameters, name=observation.name,
+        lengths=layout.lengths, joined=layout.rows === nothing ? nothing :
+            length(layout.values), gathered)
     _rk_nested_law_cells!(cells, distribution.callable, distribution, context) || return nothing
-    modifier === nothing && return cells
+    modifier === nothing && return (; cells, gathered)
     all(bound -> bound === nothing ||
             _rk_nested_cells!(cells, _brm_prepare_expr(bound), context),
         (modifier.lower, modifier.upper)) || return nothing
-    cells
+    (; cells, gathered)
+end
+
+# Bind a ragged join's per-subject cells: the response and each gathered
+# column are grouped by the join's row partition, as data. The partition is
+# BRM's own preparation of the authored rows, so new data rebinds through the
+# same planning; RKPPL observes a bounded (censored, truncated) response only
+# from a bound column, never from a derived definition.
+function _rk_prepare_nested_join!(columns, taken, observation, layout, nested, raw)
+    gather(values) = [values[rows] for rows in layout.rows]
+    columns[observation.name] = gather(raw)
+    for name in sort!(collect(nested.gathered))
+        key = _rk_ast_fresh_name(string(observation.name, "_cells_", name), taken)
+        columns[key] = gather(columns[name])
+        nested.cells[name] = key
+    end
+    nested.cells
 end
 
 # Data bounds read per subject are validated as the flattened route validates
-# them, on their concatenated values.
-function _rk_validate_nested_bounds(observation, data)
+# them, on their concatenated values. `response` holds the observed values in
+# the bounds' row order: one array per subject, or a join's flat column.
+function _rk_validate_nested_bounds(observation, response, data)
     modifier = observation.modifier
     modifier === nothing && return
     bounds = (modifier.lower, modifier.upper)
@@ -303,7 +326,7 @@ function _rk_validate_nested_bounds(observation, data)
         if b isa NamedColumn && parent(parent(b)) isa AbstractVector{<:AbstractVector})
     materialize = modifier.kind === :interval_censored ?
         _brm_materialize_interval_response : _brm_materialize_bounded_response
-    materialize(modifier, observation.name, brm_flatten_cells(observation.response),
+    materialize(modifier, observation.name, brm_flatten_cells(response),
         merge(Dict{Symbol,Any}(data), flat); prefix="RK backend")
     nothing
 end
@@ -333,14 +356,27 @@ function _rk_nested_cells!(cells, value::_BRMPreparedRef, context)
         cells[value.name] = value.name
         return true
     end
+    # One value per joined row: grouped by the join's partition.
+    if context.joined !== nothing && data isa AbstractVector && length(data) != 1 &&
+            length(data) == context.joined
+        push!(context.gathered, value.name)
+        cells[value.name] = value.name
+        return true
+    end
     data isa Real || (value.axis === :scalar && value.name in context.parameters)
 end
 function _rk_nested_cells!(cells, value::_BRMPreparedExpr, context)
     callable = value.callable
     isempty(value.kwargs) && (haskey(_RK_DERIVED_BINOPS, callable) ||
-        haskey(_RK_DERIVED_CMP, callable) || haskey(_RK_DERIVED_MATH, callable)) &&
+        haskey(_RK_DERIVED_CMP, callable) || haskey(_RK_DERIVED_MATH, callable) ||
+        _rk_rowwise_callable(callable)) &&
         all(argument -> _rk_nested_cells!(cells, argument, context), value.args)
 end
+
+# A callable whose output entry `k` depends only on entry `k` of its
+# row-aligned inputs (and on shared values), so a subject cell may evaluate it
+# on that subject's rows alone. Opt in by method (`addprop`, `src/sbimpl.jl`).
+_rk_rowwise_callable(callable) = false
 
 # The data columns observed by a likelihood: every authored response, and
 # every kernel input this cell observes. Each is flattened under its own name.

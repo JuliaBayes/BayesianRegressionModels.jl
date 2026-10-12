@@ -73,8 +73,12 @@ end
         iz = findall(n -> occursin(".z.", string(n)), names)
         @test length(names) == 5
         @test length(iz) == 3
-        # A per-subject response and its bounds are observed per subject.
-        @test backend.plan.columns[:y] == (nested ? data.y : data.y[permutation])
+        # A per-subject response and its bounds are observed per subject, and so
+        # is a join: its response is grouped into subject cells by the join's
+        # row partition (`permutation`, cell by cell).
+        partition = [[2, 3], Int[], [1]]
+        @test BRM.brm_flatten_cells(partition) == permutation
+        @test backend.plan.columns[:y] == (nested ? data.y : [data.y[rows] for rows in partition])
         nested && @test occursin("y[i] .~ censored.(Normal.(pred_cells[i], 0.8), lo[i], hi[i])",
             sprint(Base.show_unquoted, BRM._rk_emit_ast(backend.plan).main))
         raw_lower = nested ? reduce(vcat, data.lo) : data.lo

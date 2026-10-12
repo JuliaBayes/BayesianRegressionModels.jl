@@ -109,6 +109,7 @@ nested = (;subject=["b", "empty", "a"],
     y=[[0.1, 0.2, 0.4], Float64[], [0.0, 0.1, 0.3, 0.4]],
     reference=[[0.01, 0.02, 0.03], Float64[], [0.01, 0.02, 0.03, 0.04]])
 permutation = [2, 3, 5, 1, 4, 6, 7]
+joined_partition = [[2, 3, 5], Int[], [1, 4, 6, 7]]
 joined = (;subject=nested.subject, x=nested.x,
     event_subject=["a", "b", "b", "a", "b", "a", "a"],
     y=[0.0, 0.1, 0.2, 0.1, 0.4, 0.3, 0.4],
@@ -134,9 +135,12 @@ function check_grouped_arguments(label, data)
     observed = label === :joined ? data.y[permutation] : reduce(vcat, data.y)
     reference = label === :joined ? data.reference[permutation] :
         reduce(vcat, [ones(length(xs)) .* refs for (xs, refs) in zip(data.x, data.reference)])
-    # A per-subject response is observed per subject; a join's flat response
-    # column stays flat.
-    @test backend.plan.columns[:y] == (label === :joined ? observed : data.y)
+    # A per-subject response is observed per subject, and so is a join: its
+    # flat response column is grouped into subject cells by the join's row
+    # partition (`permutation`, cell by cell).
+    @test BRM.brm_flatten_cells(joined_partition) == permutation
+    @test backend.plan.columns[:y] == (label === :joined ?
+        [data.y[rows] for rows in joined_partition] : data.y)
     levels = sort(unique(data.subject))
     subject_order = [findfirst(==(s), levels) for s in data.subject]
     oracle(u) = begin
@@ -172,25 +176,21 @@ function check_grouped_arguments(label, data)
     graph_sources = argument_graph_sources(kernel_graph(backend.model.spec))
     sources = sprint(show, graph_sources)
     if label === :joined
-        # The join's per-subject row partition is a bound port read by the
-        # emitted argument reader, never a literal in source.
-        partition = [[2, 3, 5], Int[], [1, 4, 6, 7]]
-        port = only(key for (key, value) in backend.plan.columns if isequal(value, partition))
-        @test occursin(string(port), main)
-        @test !occursin("[2, 3, 5, 1, 4, 6, 7]", definitions * main)
-        # The joined response is the gather itself, with no identity row
-        # gather. Each per-row argument is gathered by a plain statement in
-        # the shared argument kernel, which stays in the built graph, not by a
-        # one-line reader kernel (snag rk-emission-wrap-4ee9950d).
-        @test occursin("y = y_raw_response[brm_flatten_cells($port)]", main)
-        @test !occursin("brm_gather_response", definitions * main)
-        @test !occursin("_source_rows", main)
-        @test occursin("ReactiveKernels.@kernel y_observation_arguments", definitions)
-        @test !occursin("ReactiveKernels.@kernel y_observation_argument_", definitions)
-        @test occursin("y_observation_arguments(", main)
-        @test occursin("y_rows_y_input_2 = y_input_2[brm_flatten_cells(y_input_4)]", definitions)
-        @test !occursin("_reader(raw, groups)", definitions)
-        @test :(y_input_2[brm_flatten_cells(y_input_4)]) in graph_sources
+        # The join is observed per subject. Its response and per-row
+        # reference are bound as subject cells grouped by the join's
+        # partition; `z` keeps reading the flat reference port. Neither the
+        # partition nor a row gather appears in source.
+        @test backend.plan.columns[:y_cells_reference] ==
+            [data.reference[rows] for rows in joined_partition]
+        @test backend.plan.columns[:reference] == data.reference
+        @test occursin("y[i] .~ LogDensity.(y_scalar_logdensity, loc_cells[i], " *
+            "y_cells_reference[i], sigma)", main)
+        @test occursin("z .~ Normal.(reference, 1)", main)
+        @test !occursin("[2, 3, 5", definitions * main)
+        for retired in ("y_raw_response", "y_rows", "brm_gather_response",
+                "y_observation_argument", "_source_rows", "_reader(raw, groups)")
+            @test !occursin(retired, definitions * main)
+        end
     else
         # Each subject's arguments broadcast against its own response array; a
         # singleton reference repeats over that subject's observations.
