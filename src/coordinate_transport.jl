@@ -40,6 +40,37 @@ _brm_transport_error(reason, message) = throw(BRMCoordinateTransportError(reason
 _rk_coordinate_record!(::Nothing, record) = nothing
 _rk_coordinate_record!(records::AbstractVector, record) = (push!(records, record); nothing)
 
+# The program names a record's declarations live under: scalar `c`, block
+# `b_g` of `b_g.z`, component `pop_x` of `pop_x.beta_pop`, submodel target `t`
+# of `t.<path>`.
+const _RK_RECORD_DECLARATION_FIELDS =
+    (:declaration, :scale, :scales, :z, :L, :mixing, :target, :beta_declaration)
+_rk_record_root(name::Symbol) = Symbol(first(split(String(name), '.')))
+_rk_record_roots!(roots, ::Nothing) = roots
+_rk_record_roots!(roots, name::Symbol) = push!(roots, _rk_record_root(name))
+_rk_record_roots!(roots, names::Tuple) =
+    (foreach(name -> _rk_record_roots!(roots, name), names); roots)
+_rk_record_roots(record) = foldl(_RK_RECORD_DECLARATION_FIELDS; init=Set{Symbol}()) do roots, field
+    _rk_record_roots!(roots, get(record, field, nothing))
+end
+
+# The fitted pass removes the declarations no response reads; on the Stan route
+# they are generated draws, so neither backend packs a coordinate for them.
+# A record leaves with them only when every program name it declares is an
+# output of a removed statement and of no kept one; any other record stays, so
+# a genuine emission/build disagreement still fails by name downstream.
+_rk_drop_unfitted_records!(::Nothing, outputs, kept) = nothing
+function _rk_drop_unfitted_records!(records::AbstractVector, outputs, kept)
+    fitted = reduce(union!, outputs[kept]; init=Set{Symbol}())
+    removed = setdiff!(reduce(union!, outputs[.!kept]; init=Set{Symbol}()), fitted)
+    isempty(removed) && return nothing
+    filter!(records) do record
+        roots = _rk_record_roots(record)
+        isempty(roots) || !issubset(roots, removed)
+    end
+    nothing
+end
+
 _rk_coordinate_records(plan::Union{_RKStructuralPlan,_RKValuePlan,_RKHeldOutPlan}) =
     let records = Any[]
         _rk_emit_ast(plan; coordinates=records)

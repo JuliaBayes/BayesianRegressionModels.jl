@@ -1657,7 +1657,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                     Set(p.name for p in plan.predictors)), effects_name))
     end
     emitted = _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken),
-        _rk_observed_names(plan))
+        _rk_observed_names(plan); coordinates)
     # A value plan resolves lone intercepts once its own readers are emitted.
     values ? emitted : _rk_scalar_lone_intercepts(emitted, lone_intercepts)
 end
