@@ -11,8 +11,9 @@ compiles `sb` itself at `path`, so the returned `stan_problem` is the exact
 target whose coordinates are converted. Pass that problem to the sampler.
 Both backends must lower the same BRMI instance. The NLME view must cover every RK coordinate,
 and the semantic RK/Stan transport must pair every coordinate on both sides.
-Shared latent variables need a full packed `shared_point` from the RK model at
-conversion time. Student-t mixing weights, centered Stan random effects, and
+Shared latent variables may arrive in the fitted population vector or in an
+explicit full packed `shared_point` from the RK model. Student-t mixing weights,
+centered Stan random effects, and
 other incomplete pairings are refused rather than silently initialized.
 """
 struct BRMNLMEJointMap{R<:RKBRMI,S<:SBBRMI,P,M}
@@ -109,8 +110,9 @@ end
     brm_nlme_joint_values(map::BRMNLMEJointMap, stan_u)
 
 Read a complete Stan unconstrained point back as
-`(; theta, sigma, omega, eta, subjects, shared)`. `shared` contains the names
-and unconstrained values of fixed shared latent coordinates in RK order.
+`(; theta, sigma, omega, eta, subjects, shared)`. `theta` contains ordinary
+population coordinates; `shared` contains the names and unconstrained values
+of shared latent coordinates in RK order, whether they were fitted or fixed.
 `omega` is the covariance matrix
 of natural effects; columns of `eta` follow `subjects` in the NLME view's
 grouping-level order. The inverse uses the validated semantic transport and
@@ -161,9 +163,11 @@ vectors; `omega` is its natural-effect covariance matrix; `eta[:, j]` is
 the natural effect of the explicitly named `subjects[j]`. Subject columns
 may be reordered, but every model level must occur exactly once. Covariance
 between independent NLME blocks must be zero.
-If the model has shared latent coordinates, `shared_point` must be a full packed
-unconstrained point from the same RK model, as for `brm_nlme_model`. Only its
-shared coordinates are copied; they remain fixed in the returned Stan point.
+If the NLME model estimated shared latent coordinates, pass its complete `theta`
+vector in the model's packed order, including those coordinates. For a fit that
+held them fixed, pass the shorter population `theta` and the same full packed
+`shared_point` supplied to `brm_nlme_model`. Only the shared entries of that
+point are copied. The two forms cannot be combined.
 
 Returns `(; stan, fixed, free, checked)`. `stan` is the full unconstrained
 vector. `fixed` names and indexes the population, scalar, shared and covariance
@@ -183,8 +187,15 @@ function brm_nlme_joint_start(map::BRMNLMEJointMap; theta, sigma, omega, eta,
     H = Matrix{Float64}(eta)
     p = findall(==(:population), view.role)
     s = findall(==(:scalar), view.role)
-    length(θ) == length(p) || throw(DimensionMismatch(
-        "brm_nlme_joint_start: theta has $(length(θ)) entries, expected $(length(p))"))
+    shared = findall(==(:shared_latent), view.role)
+    estimated = sort!(vcat(p, shared))
+    fitted_shared = !isempty(shared) && length(θ) == length(estimated)
+    length(θ) in (length(p), length(estimated)) || throw(DimensionMismatch(
+        "brm_nlme_joint_start: theta has $(length(θ)) entries, expected " *
+        "$(length(p)) with shared_point or $(length(estimated)) with estimated shared coordinates"))
+    fitted_shared && shared_point !== nothing && _brm_nlme_error(
+        "brm_nlme_joint_start: estimated shared coordinates in theta and " *
+        "shared_point cannot both supply the same values")
     length(σ) == length(s) || throw(DimensionMismatch(
         "brm_nlme_joint_start: sigma has $(length(σ)) entries, expected $(length(s))"))
     nη, nsubjects = length(view.block_margins), length(view.levels)
@@ -198,8 +209,7 @@ function brm_nlme_joint_start(map::BRMNLMEJointMap; theta, sigma, omega, eta,
         "brm_nlme_joint_start: omega must be symmetric")
     order = _brm_nlme_joint_subject_order(view, subjects)
     u = zeros(Float64, length(view.coordinates))
-    shared = findall(==(:shared_latent), view.role)
-    if !isempty(shared)
+    if !isempty(shared) && !fitted_shared
         shared_point === nothing && _brm_nlme_error(
             "brm_nlme_joint_start: $(length(shared)) shared latent coordinate(s) " *
             "need `shared_point`, a full packed unconstrained point from this RK model")
@@ -210,7 +220,7 @@ function brm_nlme_joint_start(map::BRMNLMEJointMap; theta, sigma, omega, eta,
         all(isfinite, u[shared]) || _brm_nlme_error(
             "brm_nlme_joint_start: shared_point contains a nonfinite shared coordinate")
     end
-    u[p] = θ
+    u[fitted_shared ? estimated : p] = θ
     u[s] = σ
     # The compiled model supplies the inverse transform for its correlation
     # factor. Start from its valid unit point, then replace only the constrained
@@ -263,7 +273,7 @@ function brm_nlme_joint_start(map::BRMNLMEJointMap; theta, sigma, omega, eta,
     end
     stan = BridgeStan.param_unconstrain(map.stan_model, constrained)
     roundtrip = brm_nlme_joint_values(map, stan)
-    isapprox(roundtrip.theta, θ; atol=1e-9, rtol=1e-9) &&
+    isapprox(roundtrip.theta, u[p]; atol=1e-9, rtol=1e-9) &&
         isapprox(roundtrip.sigma, σ; atol=1e-9, rtol=1e-9) &&
         isapprox(roundtrip.omega, Ω; atol=1e-9, rtol=1e-9) &&
         isapprox(roundtrip.eta, H[:, order]; atol=1e-9, rtol=1e-9) &&

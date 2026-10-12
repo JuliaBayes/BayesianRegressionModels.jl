@@ -124,6 +124,38 @@ end
     @test NLMEEXT !== nothing
 end
 
+@stestset "subject-cell population gradient includes estimated HSGP coordinates" begin
+    data = (; subject=["a", "b", "c"], t=[-0.8, 0.1, 0.7],
+        y=[0.2, -0.1, 0.5])
+    brmi = @brm data begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + hsgp(t; k=3, domain=(-1.0, 1.0)) + (1 | subject)
+        @plate for i in eachindex(mu)
+            loc[i] = mu[i]
+            y[i] ~ normal(loc[i], sigma)
+        end
+    end
+    m = brm_nlme_model(RKBRMI(brmi); ad_backend=NLME_AD)
+    shared = findall(==(:shared_latent), m.view.role)
+    @test !isempty(shared) && all(i -> i in m.theta, shared)
+    @test parameter_names(m).theta == string.(m.view.coordinates[m.theta])
+    θ = fill(0.2, length(m.theta))
+    σ = [-0.3]
+    η = [0.1]
+    value, gθ, gσ = conditional_loglikelihood_and_population_gradient(
+        m, 2, θ, σ, η)
+    @test value ≈ conditional_loglikelihood(m, 2, θ, σ, η) rtol=1e-12
+    h = 1e-5
+    for j in eachindex(θ)
+        plus = copy(θ); plus[j] += h
+        minus = copy(θ); minus[j] -= h
+        finite = (conditional_loglikelihood(m, 2, plus, σ, η) -
+            conditional_loglikelihood(m, 2, minus, σ, η)) / (2h)
+        @test gθ[j] ≈ finite rtol=1e-5 atol=1e-6
+    end
+    @test length(gσ) == 1 && isfinite(only(gσ))
+end
+
 @stestset "batched protocol methods match the analytic oracle" begin
     m = brm_nlme_model(RKBRMI(nlme_plate_pk(NLME_PLATE_DATA)); ad_backend=NLME_AD)
     n = nsubjects(m)
