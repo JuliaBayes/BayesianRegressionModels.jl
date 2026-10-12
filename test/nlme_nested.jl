@@ -1,6 +1,6 @@
 # Nested random effects (`nested_model` in nlme_fixtures.jl) through the NLME protocol.
 # RUN: julia --project=<env with NLMEEstimation> test/nlme_nested.jl
-using BridgeStan, NLMEEstimation, Random
+using BridgeStan, NLMEEstimation, Random, LogDensityProblems, WarmupHMC
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 
 function nested_oracle(m, θ, σ, H, data)
@@ -134,4 +134,40 @@ end
     @test conditional[start.fixed.indices] == start.fixed.values
     @test isfinite(BridgeStan.log_density(map.stan_model, conditional;
         propto=false, jacobian=true))
+end
+
+@stestset "an NLMEEstimation fit conditions both backends for subject sampling" begin
+    brmi = nested_model(NESTED_DATA)
+    rk = RKBRMI(brmi)
+    sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
+    nesting = (; subject_group=:subject, nested_groups=(unit=:obs_subject,))
+    map = brm_nlme_joint_map(rk, sb; path=joinpath(mktempdir(), "nested_fit.stan"),
+        nesting...)
+    m = brm_nlme_model(rk; ad_backend=NLME_AD, nesting...)
+    layout = nlme_layout(m)
+    ω = omega_parameters(layout,
+        [reshape([0.49], 1, 1), reshape([0.36], 1, 1)])
+    fit = saem(m, [0.15], [log(0.7)], ω; rng=Random.Xoshiro(2026),
+        options=SAEMOptions(iterations=3, burnin=1, mcmc_burnin=0,
+            adapt_iterations=0, numeric_maxiter=2, mstep_interval=3,
+            omega_floor=0.05))
+    start = brm_nlme_joint_start(map; theta=fit.theta, sigma=fit.sigma,
+        omega=fit.omega_matrix, eta=fit.eta, subjects=map.view.levels[fit.subjects])
+    for (backend, options) in ((map.sb, (;)), (map.rk, (; ad_backend=NLME_AD)))
+        c = brm_nlme_conditional_problem(map, start; backend, options...)
+        @test LogDensityProblems.dimension(c) == sum(length, fit.eta)
+        result = adaptive_warmup_mcmc(Random.Xoshiro(7), c;
+            init=(; position=copy(c.position),
+                squared_scale=ones(length(c.position))),
+            n_draws=100)
+        draws = convert(Matrix{Float64}, result.posterior_position)
+        @test size(draws, 2) >= 100
+        @test all(isfinite, draws)
+        values = brm_nlme_joint_values(c, draws[:, end])
+        @test values.theta ≈ fit.theta atol=1e-10
+        @test values.sigma ≈ fit.sigma atol=1e-10
+        @test all(isapprox(values.omega[f], fit.omega_matrix[f]; atol=1e-10)
+            for f in eachindex(fit.omega_matrix))
+        @test length.(values.eta) == [2, 3, 4]
+    end
 end

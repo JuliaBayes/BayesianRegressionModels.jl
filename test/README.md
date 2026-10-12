@@ -82,12 +82,15 @@ round-trip through Stan's unconstrained coordinates, fixed/free indices
 partition the full vector, subject labels are checked, and a direct coordinate
 copy is shown to be a different physical point.
 
-`nlme_conditional.jl` conditions that compiled model on a checked start for
-flat, fixed-shared-HSGP and nested models: values, gradients and Hessians equal
-the full model's at the embedded point restricted to the subject draws, fixed
-coordinates survive every evaluation and a short WarmupHMC run, provenance
-names each free draw's subject and nested unit, and mismatched or tampered
-starts are refused. It runs in the test environment above.
+`nlme_conditional.jl` conditions that compiled model, and the RK program of
+the same BRMI, on a checked start for flat, fixed-shared-HSGP and nested
+models: values, gradients and Hessians equal the full target's at the embedded
+point restricted to the subject draws; the RK and Stan problems agree on free
+gradients and log-density differences at the same physical points; fixed
+coordinates survive every evaluation and short WarmupHMC runs on both
+backends; provenance names each free draw's subject and nested unit; and
+mismatched or tampered starts and foreign backends are refused. It runs in the
+test environment above.
 
 `nlme_view.jl` pins `brm_nlme_view`, lockstep evaluation
 (`brm_nlme_loglikelihoods[_and_gradients]`), and single-subject cell
@@ -102,8 +105,10 @@ the single-subject method by name. It runs in the test environment above.
 `nlme_nested.jl` uses a public synthetic model with interleaved observations
 and 1, 2, and 3 nested units per subject. It checks explicit ownership,
 compact η likelihoods and gradients against an independent Normal oracle,
-the ragged NLME protocol, posthoc/SAEM smoke paths, and a full Stan-start
-round trip with reordered subjects. Run it in the NLMEEstimation scratch
+the ragged NLME protocol, posthoc/SAEM smoke paths, a full Stan-start
+round trip with reordered subjects, and the end-to-end chain from an SAEM fit
+through `brm_nlme_joint_start` to WarmupHMC on the conditional Stan and RK
+subject-draw targets. Run it in the NLMEEstimation scratch
 environment described below.
 
 `nlme_estimation_ext.jl` covers the NLMEEstimation.jl protocol extension:

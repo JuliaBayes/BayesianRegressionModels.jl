@@ -1,45 +1,60 @@
-# The same compiled Stan target, conditioned on the fixed NLME coordinates of
-# one checked joint start: only the standardized subject draws move.
+# One NLME model's full target, conditioned on the fixed coordinates of one
+# checked joint start: only the standardized subject draws move. The compiled
+# Stan model and the RK backend evaluate the same conditional density in their
+# own coordinate frames.
 
 """
     BRMNLMEConditionalProblem
-    brm_nlme_conditional_problem(map::BRMNLMEJointMap, start)
+    brm_nlme_conditional_problem(map::BRMNLMEJointMap, start;
+        backend=map.sb, ad_backend)
 
-Condition `map.stan_problem`, the exact compiled model of `map`, on the fixed
-coordinates of `start`, a value returned by [`brm_nlme_joint_start`](@ref) for
-the same map. The returned problem implements the LogDensityProblems interface
-over the free coordinates only: the standardized subject draws, including one
-block per nested unit, in full Stan unconstrained order. Population
-coefficients, scalar parameters, shared latent coordinates and the
-random-effect scales and correlation factors stay at `start.fixed.values`.
+Condition one backend's full target on the fixed coordinates of `start`, a
+value returned by [`brm_nlme_joint_start`](@ref) for the same map. The
+returned problem implements the LogDensityProblems interface over the free
+coordinates only: the standardized subject draws, including one block per
+nested unit. Population coefficients, scalar parameters, shared latent
+coordinates and the random-effect scales and correlation factors stay at
+`start`.
 
-The log density at a free point `x` is the full model's log density at
-`start.stan` with `start.free.indices` replaced by `x`; it differs from the
+`backend` selects the evaluated target and its coordinate frame:
+- `map.sb` (default): `map.stan_problem`, the exact compiled Stan model, in
+  Stan unconstrained order. No `ad_backend` is taken.
+- `map.rk`: `rk_logdensity_problem(map.rk; ad_backend)`, the ReactiveKernels
+  program of the same BRMI, in RK packed order. `ad_backend` is a
+  DifferentiationInterface backend such as reverse-mode `AutoEnzyme`.
+
+The log density at a free point `x` is the target's log density at the start
+point with the free coordinates replaced by `x`; it differs from the
 conditional posterior of the subject draws only by a constant. The gradient,
-and the Hessian when the compiled problem provides one, are the full ones
-restricted to the free coordinates. Every evaluation works on a fresh full
-vector, so one problem can serve several threads.
+and the Hessian when the target provides one, are the target's restricted to
+the free coordinates. Each evaluation builds a fresh full point. The compiled
+Stan target can serve several threads; an RK target holds one prepared
+automatic-differentiation workspace, so give each chain its own problem.
 
 Fields:
-- `map` — the joint map; `map.stan_problem` is the evaluated target.
-- `point` — the complete unconstrained Stan point of the start.
-- `free`, `fixed` — full Stan indices of the free and fixed coordinates.
-- `names` — Stan names of the free coordinates, in problem order.
+- `map`, `backend` — the joint map and the selected backend.
+- `target` — the evaluated full LogDensityProblems target.
+- `point` — the complete start point in the target's frame.
+- `free`, `fixed` — the target's indices of the free and fixed coordinates.
+- `names` — the target's names of the free coordinates, in problem order.
 - `subjects`, `margins` — for each free coordinate, its subject label and the
   view's `(; block, predictor, coefficient, level)` margin record.
 - `position` — the initial free point, `point[free]`.
 
 Construction checks that `start` has this map's dimension, names and
 fixed/free partition, that its recorded values equal `start.stan`, that the
-point passes the physical RK/Stan coordinate check, and that its log density
-is finite. A map without subject draws, or without fixed coordinates, is
-refused. No caller input is mutated. Use
-[`brm_nlme_conditional_point`](@ref) to turn free draws back into full Stan
-points; sample the unconditioned model with `map.stan_problem` and
-`start.stan` instead.
+point passes the physical RK/Stan coordinate check, and that the target's log
+density there is finite. A map without subject draws, or without fixed
+coordinates, is refused. No caller input is mutated. Use
+[`brm_nlme_conditional_point`](@ref) for complete points in the target's
+frame and `brm_nlme_joint_values(problem, x)` for the NLME values of a free
+point; sample the unconditioned model with `map.stan_problem` and `start.stan`
+instead.
 """
-struct BRMNLMEConditionalProblem{M<:BRMNLMEJointMap}
+struct BRMNLMEConditionalProblem{M<:BRMNLMEJointMap,B,P}
     map::M
+    backend::B
+    target::P
     point::Vector{Float64}
     free::Vector{Int}
     fixed::Vector{Int}
@@ -49,8 +64,8 @@ struct BRMNLMEConditionalProblem{M<:BRMNLMEJointMap}
     position::Vector{Float64}
 end
 
-# The partition is the map's, never the caller's: subject draws are free and
-# every other coordinate is fixed.
+# A start's own fixed/free records are in Stan order: subject draws are free
+# and every other coordinate is fixed.
 function _brm_nlme_conditional_partition(map::BRMNLMEJointMap)
     role = map.view.role
     free = Int[]
@@ -61,26 +76,42 @@ function _brm_nlme_conditional_partition(map::BRMNLMEJointMap)
     free, fixed
 end
 
-function brm_nlme_conditional_problem(map::BRMNLMEJointMap, start::NamedTuple)
+# Each backend's frame of one Stan start point: its target, the point in its
+# coordinates, the RK coordinate behind each of its coordinates, and its names.
+function _brm_nlme_conditional_frame(sb::SBBRMI, map::BRMNLMEJointMap, stan)
+    sb === map.sb || _brm_nlme_error(
+        "brm_nlme_conditional_problem: backend is not this map's SBBRMI")
+    (; target=map.stan_problem, point=stan, rk=map.transport.permutation,
+       names=map.transport.stan_names)
+end
+
+function _brm_nlme_conditional_frame(rk::RKBRMI, map::BRMNLMEJointMap, stan;
+        ad_backend)
+    rk === map.rk || _brm_nlme_error(
+        "brm_nlme_conditional_problem: backend is not this map's RKBRMI")
+    point = brm_stan_point_to_rk(map.transport, stan)
+    (; target=rk_logdensity_problem(rk; ad_backend, u0=copy(point)), point,
+       rk=collect(eachindex(point)), names=String.(map.view.coordinates))
+end
+
+function brm_nlme_conditional_problem(map::BRMNLMEJointMap, start::NamedTuple;
+        backend=map.sb, kwargs...)
     t, view = map.transport, map.view
     n = length(t.stan_names)
-    point = Vector{Float64}(start.stan)
-    length(point) == n || throw(DimensionMismatch(
-        "brm_nlme_conditional_problem: start.stan has $(length(point)) " *
+    stan = Vector{Float64}(start.stan)
+    length(stan) == n || throw(DimensionMismatch(
+        "brm_nlme_conditional_problem: start.stan has $(length(stan)) " *
         "coordinates for $n compiled parameters"))
-    LogDensityProblems.dimension(map.stan_problem) == n || _brm_nlme_error(
-        "brm_nlme_conditional_problem: the compiled problem no longer has the " *
-        "map's $n unconstrained coordinates")
-    all(isfinite, point) || _brm_nlme_error(
+    all(isfinite, stan) || _brm_nlme_error(
         "brm_nlme_conditional_problem: start.stan must be finite")
-    free, fixed = _brm_nlme_conditional_partition(map)
-    isempty(free) && _brm_nlme_error(
+    start_free, start_fixed = _brm_nlme_conditional_partition(map)
+    isempty(start_free) && _brm_nlme_error(
         "brm_nlme_conditional_problem: the model has no standardized subject " *
         "draws to sample")
-    isempty(fixed) && _brm_nlme_error(
+    isempty(start_fixed) && _brm_nlme_error(
         "brm_nlme_conditional_problem: the model has no fixed coordinates; " *
         "sample map.stan_problem from start.stan instead")
-    for (field, expected) in ((:fixed, fixed), (:free, free))
+    for (field, expected) in ((:fixed, start_fixed), (:free, start_free))
         coords = getproperty(start, field)
         collect(coords.indices) == expected || _brm_nlme_error(
             "brm_nlme_conditional_problem: start.$field.indices do not match " *
@@ -88,36 +119,41 @@ function brm_nlme_conditional_problem(map::BRMNLMEJointMap, start::NamedTuple)
         collect(coords.names) == t.stan_names[expected] || _brm_nlme_error(
             "brm_nlme_conditional_problem: start.$field.names do not match " *
             "the compiled parameter names")
-        collect(coords.values) == point[expected] || _brm_nlme_error(
+        collect(coords.values) == stan[expected] || _brm_nlme_error(
             "brm_nlme_conditional_problem: start.$field.values disagree " *
             "with start.stan")
     end
     brm_check_coordinate_transport(t, map.rk, map.stan_model,
-        brm_stan_point_to_rk(t, point))
-    value = LogDensityProblems.logdensity(map.stan_problem, point)
+        brm_stan_point_to_rk(t, stan))
+    frame = _brm_nlme_conditional_frame(backend, map, stan; kwargs...)
+    LogDensityProblems.dimension(frame.target) == n || _brm_nlme_error(
+        "brm_nlme_conditional_problem: the target no longer has the map's " *
+        "$n unconstrained coordinates")
+    value = LogDensityProblems.logdensity(frame.target, frame.point)
     isfinite(value) || _brm_nlme_error(
-        "brm_nlme_conditional_problem: the log density at start.stan is $value")
+        "brm_nlme_conditional_problem: the log density at the start is $value")
+    free = findall(k -> view.role[k] === :subject_effect, frame.rk)
+    fixed = findall(k -> view.role[k] !== :subject_effect, frame.rk)
     subjects = Any[]
     margins = NamedTuple[]
-    for j in free
-        k = t.permutation[j]
+    for k in frame.rk[free]
         i = view.subject[k]
         push!(subjects, view.levels[i])
         push!(margins, view.subject_margins[i][
             only(findall(==(k), view.subject_coordinates[i]))])
     end
-    BRMNLMEConditionalProblem(map, point, free, fixed, t.stan_names[free],
-        subjects, margins, point[free])
+    BRMNLMEConditionalProblem(map, backend, frame.target, frame.point, free,
+        fixed, frame.names[free], subjects, margins, frame.point[free])
 end
 
 """
     brm_nlme_conditional_point(problem::BRMNLMEConditionalProblem, x)
 
-Return the complete unconstrained Stan point of the compiled model for the
-free point `x`: `problem.point` with `problem.free` replaced by `x`. A matrix
-whose columns are free draws, as WarmupHMC returns them, gives one complete
-point per column. The result is fresh; `x` is not mutated. Read it with
-[`brm_nlme_joint_values`](@ref) or `BridgeStan.param_constrain`.
+Return the complete point of `problem.target` for the free point `x`:
+`problem.point` with `problem.free` replaced by `x`, in the target's frame
+(Stan unconstrained order for `map.sb`, RK packed order for `map.rk`). A
+matrix whose columns are free draws, as WarmupHMC returns them, gives one
+complete point per column. The result is fresh; `x` is not mutated.
 """
 function brm_nlme_conditional_point(problem::BRMNLMEConditionalProblem,
         x::AbstractVector)
@@ -139,26 +175,43 @@ function brm_nlme_conditional_point(problem::BRMNLMEConditionalProblem,
     U
 end
 
-LogDensityProblems.capabilities(::Type{<:BRMNLMEConditionalProblem{M}}) where {M} =
-    LogDensityProblems.capabilities(fieldtype(M, :stan_problem))
+_brm_nlme_stan_point(::SBBRMI, map::BRMNLMEJointMap, u) = u
+_brm_nlme_stan_point(::RKBRMI, map::BRMNLMEJointMap, u) =
+    brm_rk_point_to_stan(map.transport, u)
+
+"""
+    brm_nlme_joint_values(problem::BRMNLMEConditionalProblem, x)
+
+Read the free point `x` of a conditional problem back as
+`(; theta, sigma, omega, eta, subjects, shared)`, exactly as
+`brm_nlme_joint_values(problem.map, stan_u)` reads the corresponding complete
+Stan point, whichever backend `problem` evaluates.
+"""
+brm_nlme_joint_values(problem::BRMNLMEConditionalProblem, x::AbstractVector) =
+    brm_nlme_joint_values(problem.map, _brm_nlme_stan_point(problem.backend,
+        problem.map, brm_nlme_conditional_point(problem, x)))
+
+LogDensityProblems.capabilities(
+        ::Type{<:BRMNLMEConditionalProblem{M,B,P}}) where {M,B,P} =
+    LogDensityProblems.capabilities(P)
 
 LogDensityProblems.dimension(problem::BRMNLMEConditionalProblem) =
     length(problem.free)
 
 LogDensityProblems.logdensity(problem::BRMNLMEConditionalProblem, x) =
-    LogDensityProblems.logdensity(problem.map.stan_problem,
+    LogDensityProblems.logdensity(problem.target,
         brm_nlme_conditional_point(problem, x))
 
 function LogDensityProblems.logdensity_and_gradient(
         problem::BRMNLMEConditionalProblem, x)
     value, gradient = LogDensityProblems.logdensity_and_gradient(
-        problem.map.stan_problem, brm_nlme_conditional_point(problem, x))
+        problem.target, brm_nlme_conditional_point(problem, x))
     value, gradient[problem.free]
 end
 
 function LogDensityProblems.logdensity_gradient_and_hessian(
         problem::BRMNLMEConditionalProblem, x)
     value, gradient, hessian = LogDensityProblems.logdensity_gradient_and_hessian(
-        problem.map.stan_problem, brm_nlme_conditional_point(problem, x))
+        problem.target, brm_nlme_conditional_point(problem, x))
     value, gradient[problem.free], hessian[problem.free, problem.free]
 end
