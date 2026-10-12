@@ -1,26 +1,55 @@
-# The compiled Stan target conditioned on a checked NLME start: only the
-# standardized subject draws are free.
+# One NLME model's compiled Stan and RK targets, conditioned on a checked
+# start: only the standardized subject draws are free.
 # RUN: julia --project=test test/nlme_conditional.jl
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using BridgeStan, LinearAlgebra, LogDensityProblems, Random, WarmupHMC
 
 const CONDITIONAL_DIR = mkpath(joinpath(tempdir(), "brm-nlme-conditional"))
 
-# Every evaluation must equal the full compiled model at the embedded point,
-# with the gradient and Hessian restricted to the free coordinates.
+# Every evaluation must equal the full target at the embedded point, with the
+# gradient (and Hessian, where offered) restricted to the free coordinates.
 function check_projection(c, x)
     full = copy(c.point)
     full[c.free] = x
-    stan = c.map.stan_problem
+    target = c.target
     @test LogDensityProblems.logdensity(c, x) ==
-        LogDensityProblems.logdensity(stan, full)
+        LogDensityProblems.logdensity(target, full)
     value, gradient = LogDensityProblems.logdensity_and_gradient(c, x)
-    full_value, full_gradient = LogDensityProblems.logdensity_and_gradient(stan, full)
+    full_value, full_gradient = LogDensityProblems.logdensity_and_gradient(target, full)
     @test value == full_value
     @test gradient == full_gradient[c.free]
+    LogDensityProblems.capabilities(typeof(c)) isa
+        LogDensityProblems.LogDensityOrder{2} || return
     _, _, hessian = LogDensityProblems.logdensity_gradient_and_hessian(c, x)
-    _, _, full_hessian = LogDensityProblems.logdensity_gradient_and_hessian(stan, full)
+    _, _, full_hessian = LogDensityProblems.logdensity_gradient_and_hessian(target, full)
     @test hessian == full_hessian[c.free, c.free]
+end
+
+# The RK problem conditions the same model in RK packed order: at the same
+# physical points its free coordinates, log-density differences and free
+# gradients agree with the Stan problem's.
+function check_rk_parity(c, r, xs1, xs2)
+    t = c.map.transport
+    @test r.backend === c.map.rk
+    @test LogDensityProblems.dimension(r) == LogDensityProblems.dimension(c)
+    @test sort(collect(zip(r.subjects, [m.level for m in r.margins]))) ==
+        sort(collect(zip(c.subjects, [m.level for m in c.margins])))
+    @test sort(r.names) == sort(String.(t.rk_names[t.permutation[c.free]]))
+    rk_free(xs) = brm_stan_point_to_rk(t, brm_nlme_conditional_point(c, xs))[r.free]
+    xr1, xr2 = rk_free(xs1), rk_free(xs2)
+    @test brm_nlme_conditional_point(r, xr1) ≈
+        brm_stan_point_to_rk(t, brm_nlme_conditional_point(c, xs1)) atol=1e-12
+    check_projection(r, xr2)
+    vs1, gs1 = LogDensityProblems.logdensity_and_gradient(c, xs1)
+    vs2 = LogDensityProblems.logdensity(c, xs2)
+    vr1, gr1 = LogDensityProblems.logdensity_and_gradient(r, xr1)
+    vr2 = LogDensityProblems.logdensity(r, xr2)
+    @test vr2 - vr1 ≈ vs2 - vs1 rtol=1e-8 atol=1e-10
+    us1 = brm_nlme_conditional_point(c, xs1)
+    _, full_gs1 = LogDensityProblems.logdensity_and_gradient(c.target, us1)
+    @test brm_stan_gradient_to_rk(t, brm_stan_point_to_rk(t, us1), full_gs1)[r.free] ≈
+        gr1 rtol=1e-8 atol=1e-10
+    @test brm_nlme_joint_values(r, xr2).eta ≈ brm_nlme_joint_values(c, xs2).eta atol=1e-10
 end
 
 @stestset "flat NLME start conditions the exact compiled target" begin
@@ -37,6 +66,8 @@ end
     saved = deepcopy(start)
     c = brm_nlme_conditional_problem(map, start)
     @test c.map === map
+    @test c.backend === map.sb
+    @test c.target === map.stan_problem
     @test LogDensityProblems.dimension(c) == length(H)
     @test LogDensityProblems.capabilities(typeof(c)) ==
         LogDensityProblems.capabilities(typeof(map.stan_problem))
@@ -63,6 +94,7 @@ end
     @test point[c.free] == x
     # The fixed coordinates are the NLME estimate; the free draws move η only.
     values = brm_nlme_joint_values(map, point)
+    @test brm_nlme_joint_values(c, x) == values
     @test values.theta ≈ θ atol=1e-10
     @test values.sigma ≈ σ atol=1e-10
     @test values.omega ≈ Ω atol=1e-10
@@ -88,6 +120,25 @@ end
     @test last_values.omega ≈ Ω atol=1e-10
     @test last_values.theta ≈ θ atol=1e-10
     @test start == saved
+
+    r = brm_nlme_conditional_problem(map, start; backend=map.rk, ad_backend=NLME_AD)
+    @test LogDensityProblems.capabilities(typeof(r)) ==
+        LogDensityProblems.LogDensityOrder{1}()
+    @test r.point ≈ brm_stan_point_to_rk(map.transport, start.stan) atol=1e-12
+    check_rk_parity(c, r, c.position, x)
+    rk_result = adaptive_warmup_mcmc(Xoshiro(2027), r;
+        init=(; position=copy(r.position), squared_scale=ones(length(r.position))),
+        n_draws=100)
+    rk_draws = convert(Matrix{Float64}, rk_result.posterior_position)
+    @test size(rk_draws, 1) == length(r.free)
+    @test all(brm_nlme_conditional_point(r, rk_draws)[r.fixed, :] .== r.point[r.fixed])
+    rk_values = brm_nlme_joint_values(r, rk_draws[:, end])
+    @test rk_values.omega ≈ Ω atol=1e-10
+    @test rk_values.theta ≈ θ atol=1e-10
+    @test start == saved
+    # refused: the backend must be one of this map's own backends.
+    @test_throws BRMNLMEViewError brm_nlme_conditional_problem(map, start;
+        backend=RKBRMI(brmi), ad_backend=NLME_AD)
 
     # refused: a start whose partition, names, values or dimension are not this
     # map's would condition the compiled target on coordinates the NLME fit
@@ -150,6 +201,11 @@ end
     check_projection(c, x)
     values = brm_nlme_joint_values(map, brm_nlme_conditional_point(c, x))
     @test values.shared.values ≈ point[shared] atol=1e-10
+    r = brm_nlme_conditional_problem(map, start; backend=map.rk, ad_backend=NLME_AD)
+    @test isempty(intersect(shared, r.free))
+    check_rk_parity(c, r, c.position, x)
+    @test brm_nlme_joint_values(r, r.position .- 0.2).shared.values ≈
+        point[shared] atol=1e-10
 end
 
 @stestset "nested unit draws are free with their subject provenance" begin
@@ -174,4 +230,7 @@ end
     @test all(isapprox(values.omega[f], Ω[f]; atol=1e-10) for f in 1:2)
     @test values.theta ≈ [0.15] atol=1e-10
     @test values.sigma ≈ [log(0.7)] atol=1e-10
+    r = brm_nlme_conditional_problem(map, start; backend=map.rk, ad_backend=NLME_AD)
+    @test count(m -> m.block.group === :unit, r.margins) == 6
+    check_rk_parity(c, r, c.position, x)
 end
