@@ -276,4 +276,33 @@ end
     @test_throws "range must be" macroexpand(@__MODULE__, bad_range)
     @test_throws "one cell slice" macroexpand(@__MODULE__, bad_slice)
     @test_throws "shadows a sliced input" macroexpand(@__MODULE__, shadow)
+    # refused: an observation samples the data itself, so omitting it gives the
+    # prior draw; a `=`-defined name has nothing to draw. The user rejected
+    # making such an alias observable (StanBlocks decision
+    # 2026-10-12T16-03-48-199-1fxdnz0 on snag plate-observatio-2b5c02f8).
+    observed_alias = :(@brm PLATE_PANEL begin
+        sigma ~ Exponential(1)
+        @plate for i in eachindex(t)
+            loc[i] = theta[i] .* t[i]
+            yy = y[i]
+            yy ~ normal(loc[i], sigma)
+        end
+    end)
+    observed_computed = :(@brm PLATE_PANEL begin
+        sigma ~ Exponential(1)
+        @plate for i in eachindex(t)
+            loc[i] = theta[i] .* t[i]
+            ly = log.(y[i])
+            ly ~ normal(loc[i], sigma)
+        end
+    end)
+    observed_output = :(@brm PLATE_PANEL begin
+        @plate for i in eachindex(t)
+            loc[i] = theta[i] .* t[i]
+            loc[i] ~ normal(0.0, 1.0)
+        end
+    end)
+    @test_throws "write `y[i] ~ …` instead" macroexpand(@__MODULE__, observed_alias)
+    @test_throws "observe the data it is computed from" macroexpand(@__MODULE__, observed_computed)
+    @test_throws "samples the plate output `loc[i]`" macroexpand(@__MODULE__, observed_output)
 end
