@@ -157,7 +157,7 @@ end
     end
 end
 
-@stestset "shared HSGP and imputed coordinates stay fixed at a full RK point" begin
+@stestset "shared HSGP and imputed coordinates can be estimated or fixed" begin
     data = (;
         subject=["a", "b", "c", "d"],
         t=[-0.8, -0.3, 0.25, 0.9],
@@ -179,15 +179,18 @@ end
     @test all(i -> view.role[i] === :shared_latent, vcat(smooth, completed))
     @test all(length.(view.subject_coordinates) .== 1)
 
-    err = try brm_nlme_model(backend; ad_backend=NLME_AD); nothing catch e; e end
-    @test err isa BRMNLMEViewError
-    @test occursin("shared_point", err.message)
     fixed = zeros(length(view.coordinates))
     fixed[first(completed)] = 0.7
     beta = first(filter(n -> occursin(".beta_raw.", String(n)), view.coordinates))
     fixed[findfirst(==(beta), view.coordinates)] = 0.6
-    m = brm_nlme_model(backend; ad_backend=NLME_AD, shared_point=fixed)
+    m = brm_nlme_model(backend; ad_backend=NLME_AD)
+    shared = findall(==(:shared_latent), view.role)
+    @test all(i -> i in m.theta, shared)
+    @test length(m.theta) == count(==(:population), view.role) + length(shared)
     θ = fill(0.3, length(m.theta))
+    for i in shared
+        θ[findfirst(==(i), m.theta)] = fixed[i]
+    end
     σ = zeros(length(m.sigma))
     H = zeros(1, length(view.levels))
     u = BRM._brm_nlme_point(m, θ, σ, H)
@@ -201,6 +204,52 @@ end
     changed = copy(u)
     changed[first(completed)] = -0.5
     @test Base.invokelatest(likelihood_query(backend), changed) != sum(values)
+    for i in (first(completed), findfirst(==(beta), view.coordinates))
+        moved = copy(θ)
+        moved[findfirst(==(i), m.theta)] += 0.2
+        @test sum(brm_nlme_loglikelihoods(m, moved, σ, H)) != sum(values)
+    end
+    fixed_model = brm_nlme_model(backend; ad_backend=NLME_AD, shared_point=fixed)
+    @test isempty(intersect(shared, fixed_model.theta))
+    fixed_θ = [θ[findfirst(==(i), m.theta)] for i in fixed_model.theta]
+    @test brm_nlme_loglikelihoods(fixed_model, fixed_θ, σ, H) ≈ values rtol=1e-12
+end
+
+@stestset "an event-axis HSGP is an estimable shared population term" begin
+    data = (; subject=["a", "b", "c"],
+        event_subject=["a", "a", "b", "c", "c"],
+        event_x=[-0.8, -0.2, 0.1, 0.5, 0.9],
+        y=[[0.2, 0.4], [-0.1], [0.1, 0.5]])
+    brmi = @brm data begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + (1 | subject)
+        event_effect ~ 0 + hsgp(event_x; k=3, domain=(-1.0, 1.0))
+        length_scale(:, hsgp(event_x)) ~ LogNormal(0, 1)
+        sd(:, hsgp(event_x)) ~ LogNormal(0, 1)
+        @plate for i in eachindex(mu)
+            loc[i] = mu[i] .+ ragged(event_effect, event_subject)[i]
+            y[i] ~ normal(loc[i], sigma)
+        end
+    end
+    backend = RKBRMI(brmi)
+    m = brm_nlme_model(backend; ad_backend=NLME_AD)
+    shared = findall(==(:shared_latent), m.view.role)
+    @test !isempty(shared)
+    @test all(i -> i in m.theta, shared)
+    θ = zeros(length(m.theta))
+    σ = zeros(length(m.sigma))
+    H = zeros(length(m.view.block_margins), length(m.view.levels))
+    values = brm_nlme_loglikelihoods(m, θ, σ, H)
+    @test all(isfinite, values)
+    @test sum(values) ≈ Base.invokelatest(likelihood_query(backend),
+        BRM._brm_nlme_point(m, θ, σ, H)) rtol=1e-12
+    beta = only(i for i in shared if occursin(".beta_raw.1", String(m.view.coordinates[i])))
+    moved = copy(θ)
+    moved[findfirst(==(beta), m.theta)] = 0.5
+    changed = brm_nlme_loglikelihoods(m, moved, σ, H)
+    @test changed != values
+    @test sum(changed) ≈ Base.invokelatest(likelihood_query(backend),
+        BRM._brm_nlme_point(m, moved, σ, H)) rtol=1e-12
 end
 
 module NLMEPublicSharedProvider
@@ -248,7 +297,7 @@ end
         Base.invokelatest(likelihood_query(backend), u) rtol=1e-12
 end
 
-@stestset "a subject plate cell conditions on shared HSGP coordinates" begin
+@stestset "a subject plate cell differentiates estimated HSGP coordinates" begin
     data = (; subject=["a", "b", "c"], t=[-0.8, 0.1, 0.7],
         y=[0.2, -0.1, 0.5])
     brmi = @brm data begin
@@ -264,9 +313,10 @@ end
     fixed = zeros(length(view.coordinates))
     beta = first(findall(n -> occursin(".beta_raw.", String(n)), view.coordinates))
     fixed[beta] = 0.4
-    m = brm_nlme_model(backend; ad_backend=NLME_AD, shared_point=fixed)
+    m = brm_nlme_model(backend; ad_backend=NLME_AD)
     @test m.cell_query !== nothing
     θ = fill(0.25, length(m.theta))
+    θ[findfirst(==(beta), m.theta)] = fixed[beta]
     σ = fill(log(0.8), length(m.sigma))
     H = reshape([0.1, -0.2, 0.3], 1, :)
     values, G = brm_nlme_loglikelihoods_and_gradients(m, θ, σ, H)
