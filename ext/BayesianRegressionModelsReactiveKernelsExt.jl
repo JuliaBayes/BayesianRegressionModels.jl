@@ -190,6 +190,30 @@ function BRM._rk_value_gradient_and_pointwise!(query::SamplerQuery,
     value, gradient, retained.pointwise
 end
 
+# The prior and its coordinate Jacobian are separate RK graph nodes. Preparing
+# them independently of the likelihood lets NLME evaluate the population prior
+# once per objective, without running any subject observation cells.
+function BRM._rk_nlme_population_prior(backend::BRM.RKBRMI,
+        unit::Vector{Float64}, ad_backend)
+    plan = _rk_translated_plan(backend.plan)
+    built = backend.model
+    value = prepare_query(built, plan, :prior)
+    jacobian = prepare_query(built, plan, :log_jacobian)
+    gradient = prepare_query_ad(prepare_ad, built, plan, :prior, ad_backend, unit)
+    jacobian_gradient = prepare_query_ad(prepare_ad, built, plan,
+        :log_jacobian, ad_backend, unit)
+    (; value, jacobian, gradient, jacobian_gradient)
+end
+
+BRM._rk_nlme_population_prior_value(bundle, u::Vector{Float64}) =
+    Base.invokelatest(bundle.value, u) + Base.invokelatest(bundle.jacobian, u)
+
+function BRM._rk_nlme_population_prior_value_gradient(bundle, u::Vector{Float64})
+    value, gradient = ad_value_and_gradient(bundle.gradient, u)
+    jacobian, jacobian_gradient = ad_value_and_gradient(bundle.jacobian_gradient, u)
+    value + jacobian, gradient + jacobian_gradient
+end
+
 # The Gaussian NLME view uses one primal observations query and one set of
 # colored η directions. Direction k moves margin k for every subject; their
 # responses are conditionally independent, so each output sees only its own
