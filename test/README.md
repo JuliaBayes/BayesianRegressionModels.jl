@@ -82,6 +82,13 @@ round-trip through Stan's unconstrained coordinates, fixed/free indices
 partition the full vector, subject labels are checked, and a direct coordinate
 copy is shown to be a different physical point.
 
+`nlme_conditional.jl` conditions that compiled model on a checked start for
+flat, fixed-shared-HSGP and nested models: values, gradients and Hessians equal
+the full model's at the embedded point restricted to the subject draws, fixed
+coordinates survive every evaluation and a short WarmupHMC run, provenance
+names each free draw's subject and nested unit, and mismatched or tampered
+starts are refused. It runs in the test environment above.
+
 `nlme_view.jl` pins `brm_nlme_view`, lockstep evaluation
 (`brm_nlme_loglikelihoods[_and_gradients]`), and single-subject cell
 evaluation (`brm_nlme_loglikelihood[_and_gradient]`) against an independent

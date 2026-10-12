@@ -98,6 +98,7 @@ include("prediction.jl")
 include("coordinate_transport.jl")
 include("nlme_view.jl")
 include("nlme_joint_start.jl")
+include("nlme_conditional.jl")
 include("covariate_resampling.jl")
 export modeled_covariates
 include("description.jl")
@@ -200,6 +201,8 @@ export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
        BRMNLMEView, BRMNLMEViewError, brm_nlme_view,
        BRMNLMEJointMap, brm_nlme_joint_map, brm_nlme_joint_start,
        brm_nlme_joint_values,
+       BRMNLMEConditionalProblem, brm_nlme_conditional_problem,
+       brm_nlme_conditional_point,
        BRMNLMEModel, brm_nlme_model, brm_nlme_loglikelihood,
        brm_nlme_loglikelihood_and_gradient, brm_nlme_loglikelihoods,
        brm_nlme_loglikelihoods_and_gradients,
