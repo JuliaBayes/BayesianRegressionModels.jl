@@ -122,9 +122,16 @@ const MAPPING = [:sigma => "sigma", :base => "base", :log_s => "log_s", :amp => 
     @test sort(names) == [:amp, :base, :log_s, :sigma]
     oracle = saturating_oracle(DATA, names)
     stan = consumer_stan(julia, "julia-first-cell")
+    # The StanBlocks spelling stays accepted on RK as a compatibility layer.
+    stan_backend, stan_problem = consumer_problem(stan_spelled)
+    @test coordinate_names(stan_backend.model.layout) == names
     for u in ([0.0, 0.0, 0.0, 0.0], [0.3, -0.2, 0.1, 0.4], [-0.4, 0.25, -0.3, 0.2])
         check_consumer_point(problem, u, oracle)
         check_consumer_stan(problem, stan, MAPPING, backend, u)
+        value, gradient = LogDensityProblems.logdensity_and_gradient(problem, u)
+        stan_value, stan_gradient = LogDensityProblems.logdensity_and_gradient(stan_problem, u)
+        @test stan_value ≈ value atol=1e-12 rtol=1e-12
+        @test stan_gradient ≈ gradient atol=1e-12 rtol=1e-12
     end
     @test isequal(DATA, saved)
 end
