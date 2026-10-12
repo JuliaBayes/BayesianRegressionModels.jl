@@ -157,6 +157,126 @@ end
     end
 end
 
+@stestset "shared HSGP and imputed coordinates stay fixed at a full RK point" begin
+    data = (;
+        subject=["a", "b", "c", "d"],
+        t=[-0.8, -0.3, 0.25, 0.9],
+        w=Union{Missing,Float64}[0.2, missing, -0.4, missing],
+        y=[0.1, -0.25, 0.4, 0.8])
+    brmi = @brm data begin
+        mi(w) ~ Normal(0, 1)
+        sigma ~ Exponential(1)
+        mu ~ 1 + w + hsgp(t; k=3, domain=(-1.0, 1.0)) + (1 | subject)
+        y ~ Normal(mu, sigma)
+    end
+    backend = RKBRMI(brmi)
+    view = brm_nlme_view(backend)
+    smooth = findall(n -> occursin(".beta_raw.", String(n)) ||
+        occursin(".rho_iso", String(n)) || occursin(".sigma", String(n)),
+        view.coordinates)
+    completed = findall(n -> startswith(String(n), "w.y_mis."), view.coordinates)
+    @test !isempty(smooth) && !isempty(completed)
+    @test all(i -> view.role[i] === :shared_latent, vcat(smooth, completed))
+    @test all(length.(view.subject_coordinates) .== 1)
+
+    err = try brm_nlme_model(backend; ad_backend=NLME_AD); nothing catch e; e end
+    @test err isa BRMNLMEViewError
+    @test occursin("shared_point", err.message)
+    fixed = zeros(length(view.coordinates))
+    fixed[first(completed)] = 0.7
+    beta = first(filter(n -> occursin(".beta_raw.", String(n)), view.coordinates))
+    fixed[findfirst(==(beta), view.coordinates)] = 0.6
+    m = brm_nlme_model(backend; ad_backend=NLME_AD, shared_point=fixed)
+    θ = fill(0.3, length(m.theta))
+    σ = zeros(length(m.sigma))
+    H = zeros(1, length(view.levels))
+    u = BRM._brm_nlme_point(m, θ, σ, H)
+    @test u[completed] == fixed[completed]
+    values = brm_nlme_loglikelihoods(m, θ, σ, H)
+    @test sum(values) ≈ Base.invokelatest(likelihood_query(backend), u) rtol=1e-12
+    @test all(isfinite, values)
+    no_smooth = copy(u)
+    no_smooth[findfirst(==(beta), view.coordinates)] = 0.0
+    @test Base.invokelatest(likelihood_query(backend), no_smooth) != sum(values)
+    changed = copy(u)
+    changed[first(completed)] = -0.5
+    @test Base.invokelatest(likelihood_query(backend), changed) != sum(values)
+end
+
+module NLMEPublicSharedProvider
+using BayesianRegressionModels, Distributions
+import BayesianRegressionModels: _rk_submodel_rhs!
+
+function shifted end
+function _rk_submodel_rhs!(definitions, statements, data, bindings,
+        target::Symbol, ::typeof(shifted), rhs)
+    x = only(getargs(rhs))
+    key = Symbol(target, :_source_x)
+    data[key] = copy(parent(parent(x)))
+    source = Symbol(target, :_source)
+    push!(definitions, :($source(x) = begin
+        offset ~ Normal(0, 1)
+        return x .+ offset
+    end))
+    push!(statements, :($target ~ $source($key)))
+    :done
+end
+
+build(data) = @brm data begin
+    loc ~ shifted(x)
+    mu ~ 1 + (1 | subject)
+    y ~ Normal(mu + loc, 1)
+end
+end
+
+@stestset "submodel coordinates stay fixed at a full RK point" begin
+    data = (; subject=["a", "b", "c"], x=[-0.3, 0.2, 0.7],
+        y=[0.1, -0.2, 0.4])
+    backend = RKBRMI(NLMEPublicSharedProvider.build(data))
+    view = brm_nlme_view(backend)
+    provider = findall(n -> startswith(String(n), "loc."), view.coordinates)
+    @test length(provider) == 1
+    @test all(i -> view.role[i] === :shared_latent, provider)
+    fixed = zeros(length(view.coordinates))
+    fixed[only(provider)] = 0.4
+    m = brm_nlme_model(backend; ad_backend=NLME_AD, shared_point=fixed)
+    u = BRM._brm_nlme_point(m, zeros(length(m.theta)), zeros(length(m.sigma)),
+        zeros(1, length(view.levels)))
+    @test u[only(provider)] == 0.4
+    @test sum(brm_nlme_loglikelihoods(m, zeros(length(m.theta)),
+        zeros(length(m.sigma)), zeros(1, length(view.levels)))) ≈
+        Base.invokelatest(likelihood_query(backend), u) rtol=1e-12
+end
+
+@stestset "a subject plate cell conditions on shared HSGP coordinates" begin
+    data = (; subject=["a", "b", "c"], t=[-0.8, 0.1, 0.7],
+        y=[0.2, -0.1, 0.5])
+    brmi = @brm data begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + hsgp(t; k=3, domain=(-1.0, 1.0)) + (1 | subject)
+        @plate for i in eachindex(mu)
+            loc[i] = mu[i]
+            y[i] ~ normal(loc[i], sigma)
+        end
+    end
+    backend = RKBRMI(brmi)
+    view = brm_nlme_view(backend)
+    fixed = zeros(length(view.coordinates))
+    beta = first(findall(n -> occursin(".beta_raw.", String(n)), view.coordinates))
+    fixed[beta] = 0.4
+    m = brm_nlme_model(backend; ad_backend=NLME_AD, shared_point=fixed)
+    @test m.cell_query !== nothing
+    θ = fill(0.25, length(m.theta))
+    σ = fill(log(0.8), length(m.sigma))
+    H = reshape([0.1, -0.2, 0.3], 1, :)
+    values, G = brm_nlme_loglikelihoods_and_gradients(m, θ, σ, H)
+    value, gradient = brm_nlme_loglikelihood_and_gradient(m, 2, θ, σ, H[:, 2])
+    @test value ≈ values[2] rtol=1e-12
+    @test gradient ≈ G[:, 2] rtol=1e-10
+    @test sum(values) ≈ Base.invokelatest(likelihood_query(backend),
+        BRM._brm_nlme_point(m, θ, σ, H)) rtol=1e-12
+end
+
 @stestset "models without an NLME reading are refused by name" begin
     no_ranef = @brm NLME_DATA begin
         sigma ~ Exponential(1)

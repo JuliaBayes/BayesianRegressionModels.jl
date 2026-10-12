@@ -3,7 +3,8 @@
 # NLME estimators (posthoc/EBE, FOCEI, SAEM; the separate NLMEEstimation
 # package) see a population model as: population coordinates θ, subject-level
 # covariance coordinates Ω, other scalars σ, and one random-effect block η_i per
-# subject, with subjects conditionally independent given (θ, Ω, σ). The RK
+# subject, with subjects conditionally independent given (θ, Ω, σ) and any
+# fixed shared latents. The RK
 # emitter already files one semantic record per sampled declaration it can
 # address (`_rk_coordinate_record!`, shared with the cross-backend coordinate
 # transport), so the partition is read from those records, never from
@@ -16,8 +17,7 @@
 
 A model that has no nonlinear-mixed-effects reading in [`brm_nlme_view`](@ref):
 no subject-level random effects, more than one grouping factor, a non-plain
-grouping (`gr(...)`, `mm(...)`), a shared latent quantity (HSGP weights, imputed
-values, submodel coordinates), or a coordinate the semantic inventory does not
+grouping (`gr(...)`, `mm(...)`), or a coordinate the semantic inventory does not
 cover. `message` names the offending declaration or coordinates.
 """
 struct BRMNLMEViewError <: Exception
@@ -35,8 +35,10 @@ unconstrained coordinate vector (`coordinates`, in packed order).
 
 - `group` — the subject grouping column; `levels[i]` is subject `i`'s label,
   in the RK level order.
-- `role[c]` — `:population` (population coefficients, including categorical
-  contrasts, monotonic simplexes, ordinal thresholds and vector parameters),
+- `role[c]` — `:population` (population coefficients, categorical contrasts,
+  monotonic simplexes, ordinal thresholds and vector parameters),
+  `:shared_latent` (fixed sampled coordinates from HSGP components,
+  missing-value completions and submodels),
   `:scalar` (other sampled scalars such as residual scales),
   `:subject_scale` / `:subject_correlation` (the random-effect scales and
   Cholesky correlation factors, i.e. Ω), or `:subject_effect` /
@@ -76,6 +78,7 @@ Base.show(io::IO, v::BRMNLMEView) = print(io, "BRMNLMEView(",
     length(v.levels), " subjects of `", v.group, "`, ",
     length(v.block_margins), " coordinates per subject, ",
     count(==(:population), v.role), " population, ",
+    count(==(:shared_latent), v.role), " shared latent, ",
     count(r -> r === :subject_scale || r === :subject_correlation, v.role),
     " Ω and ", count(==(:scalar), v.role), " scalar coordinates)")
 
@@ -114,7 +117,10 @@ function _brm_nlme_population_column(plan::_RKStructuralPlan, predictor, coeffic
     length(specs) == 1 || return nothing
     term = only(specs)
     term.kind === :intercept && return ones(Float64, nrows)
-    values = plan.columns[only(term.columns)]
+    # A completed covariate is a live model value, not a frozen design column;
+    # it cannot certify a mu-reference from the prepared column table.
+    values = get(plan.columns, only(term.columns), nothing)
+    values === nothing && return nothing
     length(values) == nrows && all(x -> x isa Real && isfinite(x), values) || return nothing
     Float64.(values)
 end
@@ -178,8 +184,7 @@ random-effect block per subject. See [`BRMNLMEView`](@ref).
 
 Refuses with [`BRMNLMEViewError`](@ref) when the model has no such reading:
 no random effects, random effects on more than one grouping column, a non-plain
-grouping, a shared latent quantity, or any coordinate the semantic inventory
-does not cover.
+grouping, or any coordinate the semantic inventory does not cover.
 """
 function brm_nlme_view(backend::RKBRMI)
     names = Vector{Symbol}(_rk_layout_coordinate_names(backend))
@@ -275,15 +280,19 @@ function brm_nlme_view(backend::RKBRMI)
         elseif kind === :scalar
             claim_declaration!(record.declaration, :scalar)
         elseif kind === :hsgp
-            _brm_nlme_error(
-                "brm_nlme_view: predictor `$(record.predictor)` carries the shared " *
-                "Gaussian-process term `$(record.declaration)`; its latent weights are " *
-                "shared across subjects, which an NLME reading does not cover")
-        elseif kind === :missing_value || kind === :submodel
-            _brm_nlme_error(
-                "brm_nlme_view: `$(record.target)` carries $(kind === :missing_value ?
-                    "imputed values" : "submodel coordinates") that are not part of " *
-                "the per-subject structure; an NLME reading does not cover them")
+            # The whole HSGP component, including its scale, length and basis
+            # weights, is shared across subjects and remains in the original
+            # unconstrained layout.
+            claim_declaration!(record.declaration, :shared_latent)
+        elseif kind === :missing_value
+            # Only the completion's sampled y_mis carrier is a parameter.
+            claim_declaration!(Symbol(record.target, ".y_mis"), :shared_latent)
+        elseif kind === :submodel
+            # A provider may be deterministic and own no packed coordinates.
+            # Its sampled declarations are scoped under its target.
+            for (i, name) in enumerate(names)
+                _brm_nlme_owned(name, record.target) && claim!(i, :shared_latent)
+            end
         else
             _brm_nlme_error("brm_nlme_view: coordinate record kind `$kind` has no " *
                 "NLME role")
@@ -304,7 +313,8 @@ end
 
 # ── Evaluation for NLME estimators ───────────────────────────────────────────
 #
-# Subjects are conditionally independent given (θ, Ω, σ). The lockstep path
+# Subjects are conditionally independent given (θ, Ω, σ) and fixed shared
+# latents. The lockstep path
 # serves all subjects in one RK evaluation. A subject-indexed observation plate
 # also permits a cell query that evaluates just one subject at a time.
 
@@ -312,8 +322,20 @@ end
 # scales and an identity correlation factor, so that each block's standardized
 # draws ARE the natural-scale random effects η_i. Verified on the constrained
 # values rather than assumed from the transforms.
-function _brm_nlme_unit_point(backend::RKBRMI, view::BRMNLMEView)
+function _brm_nlme_unit_point(backend::RKBRMI, view::BRMNLMEView;
+        shared_point=nothing)
     u = zeros(Float64, length(view.coordinates))
+    shared = findall(==(:shared_latent), view.role)
+    if !isempty(shared)
+        shared_point === nothing && _brm_nlme_error(
+            "brm_nlme_model: $(length(shared)) shared latent coordinate(s) need " *
+            "`shared_point`, a full packed unconstrained point from this RK model")
+        length(shared_point) == length(u) || throw(DimensionMismatch(
+            "shared_point has length $(length(shared_point)), expected $(length(u))"))
+        u[shared] .= shared_point[shared]
+        all(isfinite, Base.view(u, shared)) || _brm_nlme_error(
+            "brm_nlme_model: shared_point contains a nonfinite shared latent coordinate")
+    end
     values = _rk_constrained_values(backend, u)
     for record in _brm_nlme_records(backend.plan)
         record.kind === :ranef || continue
@@ -470,6 +492,21 @@ function _brm_nlme_moments(m, arguments, tangents=())
             for i in 1:nsubjects]
 end
 
+_brm_nlme_completion_rows(_plan, _name, _nrows) = nothing
+function _brm_nlme_completion_rows(plan::_RKValuePlan, name, nrows)
+    matches = [c for c in plan.completions if c.observed === name]
+    length(matches) == 1 || return nothing
+    completion = only(matches)
+    observed = get(plan.columns, completion.observed_rows, nothing)
+    missing = get(plan.columns, completion.missing_rows, nothing)
+    observed === nothing && return nothing
+    missing === nothing && return nothing
+    # A completion's observed and missing positions must cover precisely the
+    # subject grouping axis before its observed-value density is attributable.
+    sort(vcat(observed, missing)) == collect(1:nrows) || return nothing
+    observed
+end
+
 function _brm_nlme_attribution(backend::RKBRMI, view::BRMNLMEView, fields)
     L = sum(length, view.rows)
     row_subject = zeros(Int, L)
@@ -482,6 +519,14 @@ function _brm_nlme_attribution(backend::RKBRMI, view::BRMNLMEView, fields)
     attribution = Pair{Symbol,Vector{Int}}[]
     for (name, values) in pairs(fields)
         m = length(values)
+        completion_rows = _brm_nlme_completion_rows(backend.plan, name, L)
+        if completion_rows !== nothing
+            length(completion_rows) == m || _brm_nlme_error(
+                "brm_nlme_model: completed-covariate observation `$name` has $m " *
+                "densities for $(length(completion_rows)) observed rows")
+            push!(attribution, name => row_subject[completion_rows])
+            continue
+        end
         # A ragged axis is attributed by its labels even when its length
         # happens to equal the grouping column's.
         labels = _brm_nlme_ragged_labels(backend.plan, name)
@@ -584,8 +629,14 @@ An RK-lowered population model prepared for NLME estimators, returned by
 
 All three are in the model's unconstrained coordinates. The random-effect
 covariance Ω is not a model coordinate here: estimators own it, and the model
-evaluates the conditional likelihood `log p(y_i | θ, σ, η_i)` without the
+evaluates the conditional likelihood `log p(y_i | θ, σ, η_i, shared_point)` without the
 random-effect prior.
+
+Shared sampled coordinates have role `:shared_latent` and remain fixed at the
+`shared_point` supplied during construction. They retain the original RK
+layout's unconstrained values and transforms. The conditional likelihood does
+not include their priors; inference for those coordinates belongs to the full
+joint RK model.
 
 When every fitted response is an independent, unweighted Normal observation
 supported by RK's `:observations` preset, `observed` holds subject observation
@@ -617,7 +668,8 @@ Base.show(io::IO, m::BRMNLMEModel) = print(io, "BRMNLMEModel(",
     length(m.sigma), ", η: ", sum(m.eta_blocks), " in blocks ", m.eta_blocks, ")")
 
 """
-    brm_nlme_model(backend::RKBRMI; ad_backend, observation_ad_backend=nothing) -> BRMNLMEModel
+    brm_nlme_model(backend::RKBRMI; ad_backend, observation_ad_backend=nothing,
+        shared_point=nothing) -> BRMNLMEModel
 
 Prepare an RK-lowered population model for NLME estimators: its
 [`brm_nlme_view`](@ref) partition, the backend's sampler query retaining its
@@ -630,6 +682,10 @@ Jacobians. With the NLMEEstimation/Enzyme extension loaded, an `AutoEnzyme`
 reverse backend automatically selects Enzyme forward mode. Other callers can
 pass a forward backend explicitly.
 
+When the view contains shared sampled coordinates, `shared_point` is required:
+the full RK packed unconstrained point whose shared coordinates are held fixed
+in the conditional fit. Other entries in that point are ignored.
+
 When the observations belong to one subject-indexed cell each (`@plate for` or
 the deprecated closure-style `kernel(...) do`), the model also prepares a cell
 query for
@@ -640,12 +696,13 @@ Refuses ([`BRMNLMEViewError`](@ref)) everything `brm_nlme_view` refuses, Student
 random-effect blocks (the estimators own a Gaussian η prior), and observed
 densities that cannot be attributed to subjects.
 """
-function brm_nlme_model(backend::RKBRMI; ad_backend, observation_ad_backend=nothing)
+function brm_nlme_model(backend::RKBRMI; ad_backend,
+        observation_ad_backend=nothing, shared_point=nothing)
     view = brm_nlme_view(backend)
     any(==(:subject_mixing), view.role) && _brm_nlme_error(
         "brm_nlme_model: Student-t random-effect blocks are not covered; NLME " *
         "estimators own a Gaussian random-effect prior")
-    unit = _brm_nlme_unit_point(backend, view)
+    unit = _brm_nlme_unit_point(backend, view; shared_point)
     sampler = _rk_retained_pointwise_sampler(backend; ad_backend)
     pointwise = _rk_pointwise_query(backend)
     eta_hvp = _rk_eta_hvp_query(backend, unit)
