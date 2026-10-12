@@ -715,6 +715,28 @@ _brm_plate_param(x::Expr) = x.args[2]::Symbol # validated by `_brm_plate_input_k
 
 _brm_plate_indexed(x, i) = Meta.isexpr(x, :ref, 2) && x.args[2] === i
 
+# An observation samples data, so that omitting the data turns it into a prior
+# draw; a name the cell defines by `=` has nothing to draw. StanBlocks refuses
+# such a `~` inside every plate cell, but its message names BRM's lowered kernel
+# formal (`qt_y = y`, "write `y ~ …`"), and `y ~ …` in an `@plate` cell reads
+# the whole column. Refuse it here in the authored spelling instead.
+function _brm_plate_check_observed(lhs, i, bare_bindings, output_set)
+    if lhs isa Symbol && haskey(bare_bindings, lhs)
+        rhs = bare_bindings[lhs]
+        fix = _brm_plate_indexed(rhs, i) ? "write `$rhs ~ …` instead" :
+              "observe the data it is computed from instead"
+        error(
+            "@brm: kernel `@plate` observation `$lhs ~ …` samples `$lhs`, which " *
+            "this cell defines as `$lhs = $rhs`. An observation samples the data " *
+            "itself, so that omitting the data turns it into a prior draw; a value " *
+            "defined by `=` has nothing to draw — $fix")
+    elseif _brm_plate_indexed(lhs, i) && lhs.args[1] in output_set
+        error(
+            "@brm: kernel `@plate` observation `$lhs ~ …` samples the plate output " *
+            "`$lhs`, which this cell defines by `=`; observe the data itself")
+    end
+end
+
 function _brm_plate_outputs(body, i)
     stmts = Meta.isexpr(body, :block) ? body.args : Any[body]
     outputs = Symbol[]
@@ -796,13 +818,13 @@ function _brm_plate_kernel(x::Expr)
     end
 
     rewritten = Any[]
-    bare_bindings = Set{Symbol}()
+    bare_bindings = Dict{Symbol,Any}() # cell local => authored right-hand side
     for stmt in stmts
         stmt isa LineNumberNode && (push!(rewritten, stmt); continue)
         if Meta.isexpr(stmt, :(=), 2)
             lhs, rhs = stmt.args
             if lhs isa Symbol
-                push!(bare_bindings, lhs)
+                bare_bindings[lhs] = rhs
                 push!(rewritten, Expr(:(=), lhs, rewrite(rhs)))
             elseif _brm_plate_indexed(lhs, i) && lhs.args[1] isa Symbol
                 push!(rewritten, Expr(:(=), lhs.args[1], rewrite(rhs)))
@@ -812,6 +834,7 @@ function _brm_plate_kernel(x::Expr)
                     "or `name[$i]`; got `$(repr(lhs))`")
             end
         elseif isxcall(stmt, :~)
+            _brm_plate_check_observed(stmt.args[2], i, bare_bindings, output_set)
             push!(rewritten, Expr(:call, :~, rewrite(stmt.args[2]), rewrite(stmt.args[3])))
         else
             error(
@@ -819,7 +842,7 @@ function _brm_plate_kernel(x::Expr)
                 "statements; got `$(repr(stmt))`")
         end
     end
-    collision = findfirst(p -> p in bare_bindings, params)
+    collision = findfirst(p -> haskey(bare_bindings, p), params)
     collision === nothing || error(
         "@brm: kernel `@plate` cell local `$(params[collision])` shadows a " *
         "sliced input of the same name")
