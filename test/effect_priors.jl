@@ -335,8 +335,22 @@ end
     end
     @test [lp.name for lp in linear_predictors(explicit)] == [:log_F_bottle, :mu]
     @test popcoefnames(explicit, :mu) == [:Intercept, :x]
-    # The scalar prior is exactly the entry `popcoefnames` cannot name.
-    @test_throws "cannot resolve the `beta_pop` column(s)" popcoefnames(explicit, :log_F_bottle)
+    # The scalar prior is no population formula, so it has no labels: the
+    # documented `nothing`, not a failure (snag `popcoefnames-brm-e8bbc697`).
+    @test popcoefnames(explicit, :log_F_bottle) === nothing
+    # Neither has the observation nor an assignment, though both are named
+    # bindings `linear_predictor_op` answers for.
+    @test popcoefnames(explicit, :y) === nothing
+    assigned = @brm df begin
+        slope ~ Normal(0, 0.5)
+        mu ~ 1 + x
+        total = mu + slope * x
+        y ~ Normal(total, 1)
+    end
+    @test popcoefnames(assigned, :total) === nothing
+    # So scanning `linear_predictors` needs no prior filtering.
+    @test [lp.name => popcoefnames(assigned, lp.name) for lp in linear_predictors(assigned)] ==
+          [:slope => nothing, :mu => [:Intercept, :x]]
 
     sb = SBBRMI(explicit; mod=@__MODULE__, total_groups=())
     code = BayesianRegressionModels.stan_code(sb)
@@ -381,8 +395,9 @@ end
 
 # The PMX shape the snag was reported against: a population PK model carries a
 # scalar prior (`sigma ~ Exponential(1)`) AND a `kernel(...)` submodel binding
-# whose columns `popcoefnames` cannot name — two distinct unnameable entries —
-# alongside `effect(...)` overrides on the per-subject linear predictors.
+# — two distinct entries without population columns, for which `popcoefnames`
+# answers `nothing` — alongside `effect(...)` overrides on the per-subject
+# linear predictors.
 @testset "effect priors coexist with a kernel(...) PMX model" begin
     n = 6
     pk_df = (; t       = [abs.(sin.(1:4)) .+ 0.5 for _ in 1:n],
@@ -404,8 +419,8 @@ end
             mu
         end
     end
-    @test_throws "cannot resolve the `beta_pop` column(s)" popcoefnames(pk, :sigma)
-    @test_throws "cannot resolve the `beta_pop` column(s)" popcoefnames(pk, :pred)
+    @test popcoefnames(pk, :sigma) === nothing
+    @test popcoefnames(pk, :pred) === nothing
     @test popcoefnames(pk, :log_CL) == [:Intercept]
 
     sb = SBBRMI(pk; mod=@__MODULE__, total_groups=())

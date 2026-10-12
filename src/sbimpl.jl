@@ -2921,10 +2921,9 @@ priors_of(sb::SBBRMI)    = priors_of(parent(sb))
 # A `~` statement whose RHS is a distribution call is a SCALAR PARAMETER PRIOR
 # (`log_F_bottle ~ Normal(0, 0.5)`) that `_sb_emit_prior!` claims at emission
 # time -- it is NOT a population formula. `linear_predictors` reports it all the
-# same (its LHS is a non-data `NamedColumn`), so effect-prior resolution has to
-# recognise the shape itself: `popcoefnames` has no `beta_pop` columns to name
-# there, and asking it anyway either throws or mislabels the distribution call
-# as a population column.
+# same (its LHS is a non-data `NamedColumn`). `popcoefnames` answers `nothing`
+# for it; the categorical, level, cell-mean and interaction walkers below have
+# no such answer, so they recognise the shape here before walking its RHS.
 function _sb_is_prior_declaration(brmi::BRMI, lp::Symbol)
     _brm_is_prior_declaration(brmi, lp)
 end
@@ -2959,8 +2958,8 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing, provenan
     resolved = Dict{Symbol,Union{Vector{Symbol},Nothing}}()
     unresolved = Dict{Symbol,String}()
     labels_of(lp::Symbol) = get!(resolved, lp) do
-        # Not a population formula at all -- there is nothing to name.
-        _sb_is_prior_declaration(brmi, lp) && return nothing
+        # `nothing` for a binding that is not a population formula at all
+        # (a scalar prior, a `kernel(...)` binding): there is nothing to name.
         try
             popcoefnames(brmi, lp)
         catch err
@@ -7484,6 +7483,17 @@ end
 # terms whose columns need prepass context (e.g. `hsgp(x, by=g)`) are out of
 # scope in v1 and raise a clear, actionable error rather than mis-counting.
 
+# Only a population formula owns `beta_pop` columns. `linear_predictor_op`
+# also answers for every other named `~`/`=` binding, and the emitter claims
+# those before `_sb_linear_predictor!`: declared parameters (`log_F ~
+# Normal(0, 0.5)`), assignments and observations by their semantic role, and a
+# `kernel(...)` binding through its submodel hook. Walking their RHS as a
+# formula used to throw on the distribution or `kernel` call.
+_popcoef_formula(op, rhs) =
+    _brm_operation_role(op) === :predictor && !_popcoef_submodel(rhs)
+_popcoef_submodel(_) = false
+_popcoef_submodel(::ExprColumn{typeof(kernel)}) = true
+
 """
     popcoefnames(brmi::BRMI, lhs::Symbol) -> Union{Vector{Symbol}, Nothing}
 
@@ -7524,7 +7534,12 @@ appear in `pop_<lhs>_beta_pop`:
 Needs a data-bound `BRMI` (any fitted model has one): the population-vs-
 categorical split reads each predictor's element type. Returns `Symbol[]`
 when `lhs` has no population columns (e.g. `loc ~ (1 | g)`), and `nothing`
-when `lhs` is not a linear predictor of `brmi`.
+when `lhs` names no population formula of `brmi`: an unknown name, or a
+binding sbimpl emits as its own declaration rather than a `beta_pop` design —
+a declared parameter (`lhs ~ Normal(0, 1)`), an assignment (`lhs = …`), an
+observation, or a `kernel(...)` submodel binding. `linear_predictors` lists
+declared parameters and `kernel(...)` bindings too, so scanning it with
+`popcoefnames` needs no prior filtering.
 
 These are the labels the `effect(lhs, label) ~ Normal(...)` prior address
 resolves against — with ONE addition that is deliberately not listed here,
@@ -7546,6 +7561,7 @@ function popcoefnames(brmi::BRMI, lhs::Symbol)
     op = linear_predictor_op(brmi, lhs)
     isnothing(op) && return nothing
     _, rhs = getargs(op, 2)
+    _popcoef_formula(op, rhs) || return nothing
     pop_terms = Any[]; ran_terms = Any[]; direct_terms = Any[]
     for t in _sb_terms(rhs)
         _sb_classify_term!(t, pop_terms, ran_terms, direct_terms)
@@ -9676,18 +9692,14 @@ function _sb_ranef_r2d2_joint(brmi::BRMI, id, margins, include, effect_overrides
                   "reference margin for the population coefficients of `$lp`: " *
                   "it contributes $(length(hits)) margins to `|$id|` and none " *
                   "is its intercept")
-        labels = if _sb_is_prior_declaration(brmi, lp)
-            Symbol[]
-        else
-            resolved = try
-                popcoefnames(brmi, lp)
-            catch err
-                error("sbimpl: `sd(:, $id) ~ r2d2(...; include=...)` cannot " *
-                      "resolve the population columns of `$lp`: " *
-                      "$(sprint(showerror, err))")
-            end
-            isnothing(resolved) ? Symbol[] : resolved
+        resolved = try
+            popcoefnames(brmi, lp)
+        catch err
+            error("sbimpl: `sd(:, $id) ~ r2d2(...; include=...)` cannot " *
+                  "resolve the population columns of `$lp`: " *
+                  "$(sprint(showerror, err))")
         end
+        labels = isnothing(resolved) ? Symbol[] : resolved
         share_idx = zeros(Int, length(labels))
         n_shares = 0
         if include.population
@@ -9977,8 +9989,7 @@ Base.@nospecializeinfer function _sb_r2d2_overrides(@nospecialize(brmi::BRMI), i
     isempty(specs) && return Dict{Symbol,NamedTuple}()
 
     lp_names = Symbol[x.name for x in linear_predictors(brmi)]
-    labels_of(lp) = _sb_is_prior_declaration(brmi, lp) ? nothing :
-        try popcoefnames(brmi, lp) catch; nothing end
+    labels_of(lp) = try popcoefnames(brmi, lp) catch; nothing end
 
     out = Dict{Symbol,NamedTuple}()
     for spec in specs
