@@ -31,6 +31,16 @@ function brm_nlme_joint_map(rk::RKBRMI, sb::SBBRMI; path, kwargs...)
     any(==(:subject_mixing), view.role) && _brm_nlme_error(
         "brm_nlme_joint_map: Student-t mixing coordinates are not natural " *
         "Gaussian subject effects")
+    # A later NLME view may admit shared latent coordinates by taking a
+    # caller-supplied fixed point. They cannot be silently zero-filled when
+    # reconstructing a *full* joint start from only θ, σ, Ω and η.
+    known = (:population, :scalar, :subject_scale, :subject_correlation,
+        :subject_effect)
+    extra = [(view.coordinates[i], role) for (i, role) in enumerate(view.role)
+        if role ∉ known]
+    isempty(extra) || _brm_nlme_error(
+        "brm_nlme_joint_map: coordinates $(extra) require validated values " *
+        "outside theta, sigma, omega and eta")
     problem = stan_instantiate(sb; path, kwargs...)
     stan_model = problem.model
     transport = brm_coordinate_transport(rk, sb, BridgeStan.param_unc_names(stan_model))
