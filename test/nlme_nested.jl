@@ -1,26 +1,7 @@
-# A generic two-level random-effect model with interleaved observation rows.
+# Nested random effects (`nested_model` in nlme_fixtures.jl) through the NLME protocol.
 # RUN: julia --project=<env with NLMEEstimation> test/nlme_nested.jl
 using BridgeStan, NLMEEstimation, Random
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
-
-const NESTED_DATA = (;
-    subject=["s1", "s2", "s3"],
-    obs_subject=["s2", "s1", "s3", "s2", "s3", "s3", "s1", "s2", "s3"],
-    unit=["u2", "u1", "u4", "u3", "u5", "u6", "u1", "u2", "u4"],
-    y=[0.3, 0.2, -0.2, 0.5, 0.1, -0.4, 0.4, 0.6, -0.1],
-)
-
-function nested_model(data)
-    @brm data begin
-        sigma ~ Exponential(1)
-        mu ~ 1 + (1 | p | subject)
-        unit_shift ~ 0 + (1 | u | unit)
-        @plate for i in eachindex(mu)
-            pred[i] = mu[i] .+ ragged(unit_shift, obs_subject)[i]
-        end
-        ragged(y, obs_subject) ~ Normal(pred, sigma)
-    end
-end
 
 function nested_oracle(m, θ, σ, H, data)
     scale = exp(only(σ))
