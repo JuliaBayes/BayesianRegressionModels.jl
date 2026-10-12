@@ -34,7 +34,7 @@ WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 
 [extensions]
 BayesianRegressionModelsAlgebraOfVegaExt = "AlgebraOfVega"
-BayesianRegressionModelsNLMEEstimationExt = ["NLMEEstimation", "Enzyme", "ADTypes", "ReactiveKernels", "ReactiveKernelsPPL"]
+BayesianRegressionModelsNLMEEstimationExt = ["NLMEEstimation", "Enzyme", "ADTypes", "DifferentiationInterface", "ReactiveKernels", "ReactiveKernelsPPL"]
 BayesianRegressionModelsReactiveKernelsExt = ["ReactiveKernels", "ReactiveKernelsPPL"]
 BayesianRegressionModelsReactiveKernelsEnzymeExt = ["ReactiveKernels", "ReactiveKernelsPPL", "Enzyme", "DifferentiationInterface"]
 BayesianRegressionModelsTuringExt = "Turing"

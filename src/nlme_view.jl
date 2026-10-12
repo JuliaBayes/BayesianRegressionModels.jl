@@ -2,9 +2,10 @@
 #
 # NLME estimators (posthoc/EBE, FOCEI, SAEM; the separate NLMEEstimation
 # package) see a population model as: population coordinates θ, subject-level
-# covariance coordinates Ω, other scalars σ, and one random-effect block η_i per
-# subject, with subjects conditionally independent given (θ, Ω, σ). Shared
-# sampled latents may be estimated in θ or fixed explicitly. The RK
+# covariance coordinates Ω, other scalars σ, and one compact random-effect
+# vector η_i per subject, with subjects conditionally independent given
+# (θ, Ω, σ). Shared sampled latents may be estimated in θ or fixed explicitly.
+# The RK
 # emitter already files one semantic record per sampled declaration it can
 # address (`_rk_coordinate_record!`, shared with the cross-backend coordinate
 # transport), so the partition is read from those records, never from
@@ -44,17 +45,20 @@ unconstrained coordinate vector (`coordinates`, in packed order).
   Cholesky correlation factors, i.e. Ω), or `:subject_effect` /
   `:subject_mixing` (subject `subject[c]`'s standardized draw or Student-t
   mixing weight).
-- `subject_coordinates[i]` — subject `i`'s block, in a fixed order shared by
-  every subject: for each random-effect block, its standardized draws in margin
-  order, then its mixing weight when the block is Student-t.
+- `subject_coordinates[i]` — subject `i`'s compact block of standardized
+  draws. Flat models share one order; nested models add one instance per
+  nested level owned by this subject.
 - `block_margins[k]` — `(; block, predictor, coefficient)` for position `k` of
-  every subject block (`coefficient === :mixing` for a mixing weight).
+  each random-effect family (`coefficient === :mixing` for a mixing weight).
+- `family_sizes[f]` and `subject_families[i]` — each covariance family's
+  dimension and the ordered family IDs for subject `i`'s block instances.
+- `subject_margins[i]` — the compact coordinates' family margin and grouping
+  level labels for subject `i`.
 - `mu_references` — one `(; predictor, coefficient, link, population, subject,
   design)` per population coefficient that can be absorbed into a subject
   margin. `population` is the coefficient's packed position, `subject` the
-  margin's position in a subject block, and `design[i]` its multiplier for
-  subject `i`. The conditional predictor is unchanged by adding `δ` to the
-  population coefficient and subtracting `design[i] * δ` from that margin.
+  margin's position in a flat subject block, and `design[i]` its multiplier
+  for subject `i`. Nested models currently expose no such references.
 - `rows[i]` — the rows of the grouping column that belong to subject `i`.
 
 Subject draws are standardized (`η = diag(scale) L z`, `z ~ N(0, I)`): the
@@ -72,11 +76,18 @@ struct BRMNLMEView
     block_margins::Vector{NamedTuple}
     mu_references::Vector{NamedTuple}
     rows::Vector{Vector{Int}}
+    family_sizes::Vector{Int}
+    subject_families::Vector{Vector{Int}}
+    subject_margins::Vector{Vector{NamedTuple}}
+    nested_groups::NamedTuple
 end
+
+_brm_nlme_ragged(view::BRMNLMEView) = !isempty(view.nested_groups)
 
 Base.show(io::IO, v::BRMNLMEView) = print(io, "BRMNLMEView(",
     length(v.levels), " subjects of `", v.group, "`, ",
-    length(v.block_margins), " coordinates per subject, ",
+    _brm_nlme_ragged(v) ? string("η lengths ", length.(v.subject_coordinates)) :
+        string(length(v.block_margins), " coordinates per subject"), ", ",
     count(==(:population), v.role), " population, ",
     count(==(:shared_latent), v.role), " shared latent, ",
     count(r -> r === :subject_scale || r === :subject_correlation, v.role),
@@ -176,17 +187,22 @@ function _brm_nlme_mu_references(backend, block_margins, population, rows, nrows
 end
 
 """
-    brm_nlme_view(backend::RKBRMI) -> BRMNLMEView
+    brm_nlme_view(backend::RKBRMI; subject_group=nothing,
+                  nested_groups=NamedTuple()) -> BRMNLMEView
 
 Read the nonlinear-mixed-effects partition of an RK-lowered model: population
 coordinates, subject-level covariance coordinates, other scalars, and one
-random-effect block per subject. See [`BRMNLMEView`](@ref).
+compact random-effect block per subject. For several grouping columns, supply
+the top-level `subject_group` and a `nested_groups` NamedTuple mapping each
+nested grouping to its row-aligned parent-subject column. Every nested level
+must belong to exactly one subject. See [`BRMNLMEView`](@ref).
 
 Refuses with [`BRMNLMEViewError`](@ref) when the model has no such reading:
-no random effects, random effects on more than one grouping column, a non-plain
-grouping, or any coordinate the semantic inventory does not cover.
+no random effects, several grouping columns without explicit subject ownership,
+a non-plain grouping, or any coordinate the semantic inventory does not cover.
 """
-function brm_nlme_view(backend::RKBRMI)
+function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
+        nested_groups=NamedTuple())
     names = Vector{Symbol}(_rk_layout_coordinate_names(backend))
     position = Dict{Symbol,Int}(n => i for (i, n) in enumerate(names))
     records = _brm_nlme_records(backend.plan)
@@ -195,13 +211,60 @@ function brm_nlme_view(backend::RKBRMI)
         "brm_nlme_view: the model has no subject-level random effects; an NLME " *
         "reading needs at least one `(... | group)` block")
     groups = unique(r.group for r in ranefs)
-    length(groups) == 1 || _brm_nlme_error(
-        "brm_nlme_view: random effects use $(length(groups)) grouping columns " *
-        "($(join(string.(groups), ", "))); subjects are conditionally " *
-        "independent only under a single grouping")
-    group = only(groups)
+    nested_groups isa NamedTuple || throw(ArgumentError(
+        "nested_groups must be a NamedTuple mapping each nested grouping to its parent-label column"))
+    if length(groups) == 1
+        group = only(groups)
+        isempty(nested_groups) || _brm_nlme_error(
+            "brm_nlme_view: nested_groups was supplied for a single grouping column")
+        subject_group === nothing || subject_group === group || _brm_nlme_error(
+            "brm_nlme_view: subject_group `$subject_group` is not `$group`")
+    else
+        subject_group isa Symbol && subject_group in groups || _brm_nlme_error(
+            "brm_nlme_view: random effects use $(length(groups)) grouping columns " *
+            "($(join(string.(groups), ", "))); supply subject_group and nested_groups " *
+            "to establish independent subject ownership")
+        group = subject_group
+        Set(keys(nested_groups)) == Set(filter(!=(group), groups)) || _brm_nlme_error(
+            "brm_nlme_view: nested_groups must name every grouping except `$group`")
+    end
     levels = Any[_rk_grouping_levels(backend.plan.columns[group])...]
     n = length(levels)
+    owner = Dict{Symbol,Vector{Int}}(group => collect(1:n))
+    group_levels = Dict{Symbol,Vector{Any}}(group => levels)
+    subject_index = Dict(_brm_transport_level(level) => i for (i, level) in enumerate(levels))
+    for (nested, parent_column) in pairs(nested_groups)
+        parent_column isa Symbol || _brm_nlme_error(
+            "brm_nlme_view: parent column for `$nested` must be a Symbol")
+        haskey(backend.plan.columns, nested) &&
+            haskey(backend.plan.columns, parent_column) || _brm_nlme_error(
+            "brm_nlme_view: nested group `$nested` or parent column `$parent_column` is absent")
+        children = backend.plan.columns[nested]
+        parents = backend.plan.columns[parent_column]
+        length(children) == length(parents) || _brm_nlme_error(
+            "brm_nlme_view: `$nested` and `$parent_column` have different row counts")
+        nested_levels = Any[_rk_grouping_levels(children)...]
+        parent_of = Dict{Any,Int}()
+        for (child, parent) in zip(children, parents)
+            c = _brm_transport_level(child)
+            p = _brm_transport_level(parent)
+            i = get(subject_index, p, 0)
+            i == 0 && _brm_nlme_error(
+                "brm_nlme_view: nested level $(repr(child)) names unknown subject $(repr(parent))")
+            if haskey(parent_of, c)
+                parent_of[c] == i || _brm_nlme_error(
+                    "brm_nlme_view: nested level $(repr(child)) belongs to multiple subjects")
+            else
+                parent_of[c] = i
+            end
+        end
+        group_levels[nested] = nested_levels
+        owner[nested] = map(nested_levels) do level
+            get(parent_of, _brm_transport_level(level)) do
+                _brm_nlme_error("brm_nlme_view: nested level $(repr(level)) has no parent row")
+            end
+        end
+    end
     role = fill(:unclaimed, length(names))
     subject = zeros(Int, length(names))
     claim!(i, r) = (role[i] === :unclaimed || error(
@@ -219,10 +282,15 @@ function brm_nlme_view(backend::RKBRMI)
     end
     blocks = [Int[] for _ in 1:n]
     block_margins = NamedTuple[]
+    subject_margins = [NamedTuple[] for _ in 1:n]
+    subject_families = [Int[] for _ in 1:n]
+    family_sizes = Int[]
     population = Dict{Tuple{Symbol,Symbol},Int}()
     for record in records
         kind = record.kind
         if kind === :ranef
+            family = length(family_sizes) + 1
+            push!(family_sizes, length(record.margins))
             for declaration in (isnothing(record.scales) ? (record.scale,) : record.scales)
                 claim_declaration!(declaration, :subject_scale)
             end
@@ -231,20 +299,32 @@ function brm_nlme_view(backend::RKBRMI)
             block = (; group=record.group, id=record.id)
             for (k, (predictor, coefficient)) in enumerate(record.margins)
                 push!(block_margins, (; block, predictor, coefficient))
-                for g in 1:n
+                for g in eachindex(group_levels[record.group])
                     i = coordinate(Symbol(record.z, ".", g, ".", k))
                     claim!(i, :subject_effect)
-                    subject[i] = g
-                    push!(blocks[g], i)
+                    subject[i] = owner[record.group][g]
+                end
+            end
+            for g in eachindex(group_levels[record.group])
+                i = owner[record.group][g]
+                push!(subject_families[i], family)
+                for (k, (predictor, coefficient)) in enumerate(record.margins)
+                    push!(blocks[i], coordinate(Symbol(record.z, ".", g, ".", k)))
+                    push!(subject_margins[i], (; block, predictor, coefficient,
+                        level=group_levels[record.group][g]))
                 end
             end
             if !isnothing(mixing)
+                record.group === group || _brm_nlme_error(
+                    "brm_nlme_view: nested Student-t random effects are not covered")
                 push!(block_margins, (; block, predictor=:none, coefficient=:mixing))
                 for g in 1:n
                     i = coordinate(Symbol(mixing, ".", g))
                     claim!(i, :subject_mixing)
                     subject[i] = g
                     push!(blocks[g], i)
+                    push!(subject_margins[g], (; block, predictor=:none,
+                        coefficient=:mixing, level=levels[g]))
                 end
             end
         elseif kind === :population
@@ -305,10 +385,12 @@ function brm_nlme_view(backend::RKBRMI)
         "must use a plain `(... | group)` grouping, not `gr(...)` or `mm(...)`.")
     labels = map(_brm_transport_level, backend.plan.columns[group])
     rows = [findall(x -> isequal(x, _brm_transport_level(level)), labels) for level in levels]
-    mu_references = _brm_nlme_mu_references(backend, block_margins, population,
-        rows, length(labels))
+    mu_references = isempty(nested_groups) ?
+        _brm_nlme_mu_references(backend, block_margins, population,
+            rows, length(labels)) : NamedTuple[]
     BRMNLMEView(group, levels, names, role, subject, blocks, block_margins,
-        mu_references, rows)
+        mu_references, rows, family_sizes, subject_families, subject_margins,
+        nested_groups)
 end
 
 # ── Evaluation for NLME estimators ───────────────────────────────────────────
@@ -445,7 +527,6 @@ end
 
 function _brm_nlme_moments(m, arguments, tangents=())
     nsubjects = length(m.view.levels)
-    neta = sum(m.eta_blocks)
     means = [Float64[] for _ in 1:nsubjects]
     variances = [Float64[] for _ in 1:nsubjects]
     mean_rows = [Vector{Float64}[] for _ in 1:nsubjects]
@@ -481,10 +562,12 @@ function _brm_nlme_moments(m, arguments, tangents=())
             "brm_nlme_model: subject $i has $(length(means[i])) observation moments " *
             "for $(length(m.observed[i])) observed values")
     end
-    matrix(rows) = isempty(rows) ? zeros(Float64, 0, neta) :
-        reduce(vcat, (permutedims(row) for row in rows))
+    matrix(rows, nη) = isempty(rows) ? zeros(Float64, 0, nη) :
+        reduce(vcat, (permutedims(row[1:nη]) for row in rows))
     isempty(tangents) ? collect(zip(means, variances)) :
-        [(means[i], variances[i], matrix(mean_rows[i]), matrix(variance_rows[i]))
+        [(means[i], variances[i],
+            matrix(mean_rows[i], length(m.view.subject_coordinates[i])),
+            matrix(variance_rows[i], length(m.view.subject_coordinates[i])))
             for i in 1:nsubjects]
 end
 
@@ -624,8 +707,9 @@ An RK-lowered population model prepared for NLME estimators, returned by
 - `θ` — the population coordinates and, unless fixed at `shared_point`, shared
   sampled coordinates, in packed order;
 - `σ` — the other sampled scalars (`view.role .=== :scalar`), in packed order;
-- `η_i` — subject `i`'s random effects on the natural scale, one column of a
-  `neta × nsubjects` matrix, in the subject-block order of [`BRMNLMEView`](@ref).
+- `η_i` — subject `i`'s random effects on the natural scale. A flat model uses
+  column `i` of a `neta × nsubjects` matrix; a nested model uses compact vector
+  `H[i]` in `view.subject_families[i]` order.
 
 All three are in the model's unconstrained coordinates. The random-effect
 covariance Ω is not a model coordinate here: estimators own it, and the model
@@ -666,11 +750,14 @@ end
 
 Base.show(io::IO, m::BRMNLMEModel) = print(io, "BRMNLMEModel(",
     length(m.view.levels), " subjects, θ: ", length(m.theta), ", σ: ",
-    length(m.sigma), ", η: ", sum(m.eta_blocks), " in blocks ", m.eta_blocks, ")")
+    length(m.sigma), ", η: ",
+    _brm_nlme_ragged(m.view) ? string(length.(m.view.subject_coordinates)) :
+        string(sum(m.eta_blocks)), " in blocks ", m.eta_blocks, ")")
 
 """
     brm_nlme_model(backend::RKBRMI; ad_backend, observation_ad_backend=nothing,
-        shared_point=nothing) -> BRMNLMEModel
+        shared_point=nothing, subject_group=nothing,
+        nested_groups=NamedTuple()) -> BRMNLMEModel
 
 Prepare an RK-lowered population model for NLME estimators: its
 [`brm_nlme_view`](@ref) partition, the backend's sampler query retaining its
@@ -688,6 +775,10 @@ jointly with ordinary population parameters. To hold them fixed, pass
 `shared_point`, a full RK packed unconstrained point. Only its shared entries
 are used. The model's θ positions and names make the chosen fit mode explicit.
 
+Pass the same `subject_group` and `nested_groups` as for `brm_nlme_view` when
+the model has nested effects. Its NLME layout then has one shared covariance
+family per random-effect declaration and one compact η vector per subject.
+
 When the observations belong to one subject-indexed cell each (`@plate for` or
 the deprecated closure-style `kernel(...) do`), the model also prepares a cell
 query for
@@ -699,8 +790,9 @@ random-effect blocks (the estimators own a Gaussian η prior), and observed
 densities that cannot be attributed to subjects.
 """
 function brm_nlme_model(backend::RKBRMI; ad_backend,
-        observation_ad_backend=nothing, shared_point=nothing)
-    view = brm_nlme_view(backend)
+        observation_ad_backend=nothing, shared_point=nothing,
+        subject_group=nothing, nested_groups=NamedTuple())
+    view = brm_nlme_view(backend; subject_group, nested_groups)
     any(==(:subject_mixing), view.role) && _brm_nlme_error(
         "brm_nlme_model: Student-t random-effect blocks are not covered; NLME " *
         "estimators own a Gaussian random-effect prior")
@@ -716,7 +808,10 @@ function brm_nlme_model(backend::RKBRMI; ad_backend,
         margin.block == previous ? (eta_blocks[end] += 1) : push!(eta_blocks, 1)
         previous = margin.block
     end
-    gaussian = _brm_nlme_gaussian_plan(backend.plan)
+    # NLMEEstimation's Gaussian-observation protocol currently serves FOCE(I),
+    # which does not accept RaggedNLMELayout. Keep the ragged conditional and
+    # Hessian paths active without advertising an unusable observation model.
+    gaussian = !_brm_nlme_ragged(view) && _brm_nlme_gaussian_plan(backend.plan)
     observations_query = gaussian ? _rk_observation_query(backend) : nothing
     forward_backend = observation_ad_backend === nothing ?
         _brm_nlme_forward_backend(ad_backend) : observation_ad_backend
@@ -731,7 +826,7 @@ function brm_nlme_model(backend::RKBRMI; ad_backend,
     theta = findall(r -> r === :population ||
         (shared_point === nothing && r === :shared_latent), view.role)
     sigma = findall(==(:scalar), view.role)
-    cell_gradient = if cell_rows === nothing
+    cell_gradient = if cell_rows === nothing || _brm_nlme_ragged(view)
         nothing
     else
         selected = sort!(vcat(theta, sigma, first(view.subject_coordinates)))
@@ -773,11 +868,21 @@ The work depends on that cell's observations, not on other subjects. Models
 with flat grouped observations use [`brm_nlme_loglikelihoods`](@ref) instead.
 """
 function brm_nlme_loglikelihood(m::BRMNLMEModel, i::Integer, θ, σ, η)
+    if _brm_nlme_ragged(m.view) && m.cell_query === nothing
+        1 <= i <= length(m.view.levels) || throw(BoundsError(m.view.levels, i))
+        H = [zeros(Float64, length(block)) for block in m.view.subject_coordinates]
+        length(η) == length(H[i]) || throw(DimensionMismatch(
+            "η has length $(length(η)), expected $(length(H[i]))"))
+        H[i] = Vector{Float64}(η)
+        return brm_nlme_loglikelihoods(m, θ, σ, H)[i]
+    end
     point, row = _brm_nlme_cell_point(m, i, θ, σ, η)
     _rk_nlme_cell_value(m.cell_query, point, row)
 end
 
 function _brm_nlme_cell_value_and_selected_gradient(m::BRMNLMEModel, i::Integer, θ, σ, η)
+    m.cell_gradient === nothing && _brm_nlme_error(
+        "brm_nlme_model: this subject cell has no prepared compact gradient")
     point, row = _brm_nlme_cell_point(m, i, θ, σ, η)
     indices = sort!(vcat(m.theta, m.sigma, point.eta_positions))
     active = point[indices]
@@ -800,13 +905,24 @@ compact cell sampler differentiates selected coordinates in one fused call,
 without a packed gradient buffer.
 """
 function brm_nlme_loglikelihood_and_gradient(m::BRMNLMEModel, i::Integer, θ, σ, η)
+    if _brm_nlme_ragged(m.view)
+        1 <= i <= length(m.view.levels) || throw(BoundsError(m.view.levels, i))
+        H = [zeros(Float64, length(block)) for block in m.view.subject_coordinates]
+        length(η) == length(H[i]) || throw(DimensionMismatch(
+            "η has length $(length(η)), expected $(length(H[i]))"))
+        H[i] = Vector{Float64}(η)
+        values, gradients = brm_nlme_loglikelihoods_and_gradients(m, θ, σ, H)
+        return values[i], gradients[i]
+    end
     value, indices, selected_gradient, eta_positions =
         _brm_nlme_cell_value_and_selected_gradient(m, i, θ, σ, η)
     value, [selected_gradient[searchsortedfirst(indices, j)]
         for j in eta_positions]
 end
 
-function _brm_nlme_point(m::BRMNLMEModel, θ, σ, H)
+function _brm_nlme_point(m::BRMNLMEModel, θ, σ, H::AbstractMatrix)
+    _brm_nlme_ragged(m.view) && throw(DimensionMismatch(
+        "ragged subjects need one compact η vector per subject, not a matrix"))
     n = length(m.view.levels)
     length(θ) == length(m.theta) || throw(DimensionMismatch(
         "θ has length $(length(θ)), the model has $(length(m.theta)) population coordinates"))
@@ -819,6 +935,26 @@ function _brm_nlme_point(m::BRMNLMEModel, θ, σ, H)
     u[m.sigma] .= σ
     for (i, block) in enumerate(m.view.subject_coordinates)
         u[block] .= view(H, :, i)
+    end
+    u
+end
+
+function _brm_nlme_point(m::BRMNLMEModel, θ, σ,
+        H::AbstractVector{<:AbstractVector})
+    n = length(m.view.levels)
+    length(θ) == length(m.theta) || throw(DimensionMismatch(
+        "θ has length $(length(θ)), expected $(length(m.theta))"))
+    length(σ) == length(m.sigma) || throw(DimensionMismatch(
+        "σ has length $(length(σ)), expected $(length(m.sigma))"))
+    length(H) == n || throw(DimensionMismatch(
+        "η has $(length(H)) subject vectors, expected $n"))
+    u = copy(m.unit)
+    u[m.theta] = θ
+    u[m.sigma] = σ
+    for (i, block) in enumerate(m.view.subject_coordinates)
+        length(H[i]) == length(block) || throw(DimensionMismatch(
+            "subject $i η has length $(length(H[i])), expected $(length(block))"))
+        u[block] = H[i]
     end
     u
 end
@@ -838,8 +974,8 @@ end
     brm_nlme_loglikelihoods(m::BRMNLMEModel, θ, σ, H) -> Vector{Float64}
 
 Every subject's conditional log-likelihood `log p(y_i | θ, σ, η_i)`, with
-`η_i = H[:, i]`, from one evaluation of the model. See [`BRMNLMEModel`](@ref)
-for the coordinates.
+`η_i = H[:, i]` for a flat model or `η_i = H[i]` for a nested model, from one
+evaluation of the model. See [`BRMNLMEModel`](@ref) for the coordinates.
 """
 brm_nlme_loglikelihoods(m::BRMNLMEModel, θ, σ, H) =
     _brm_nlme_sum_by_subject(m, _rk_pointwise_values(m.pointwise, _brm_nlme_point(m, θ, σ, H)))
@@ -847,9 +983,9 @@ brm_nlme_loglikelihoods(m::BRMNLMEModel, θ, σ, H) =
 """
     brm_nlme_loglikelihoods_and_gradients(m::BRMNLMEModel, θ, σ, H) -> (values, G)
 
-[`brm_nlme_loglikelihoods`](@ref) together with `G[:, i] = ∇_{η_i} log p(y_i | θ, σ, η_i)`
-for every subject, from one reverse sweep that also retains the pointwise
-densities. Subjects are
+[`brm_nlme_loglikelihoods`](@ref) together with each subject's η gradient,
+in the same matrix or vector-of-vectors shape as `H`, from one reverse sweep
+that also retains the pointwise densities. Subjects are
 conditionally independent, so the joint gradient restricted to subject `i`'s
 block is its conditional gradient once the standard-normal draw prior is removed.
 """
@@ -858,9 +994,14 @@ function brm_nlme_loglikelihoods_and_gradients(m::BRMNLMEModel, θ, σ, H)
     g = Vector{Float64}(undef, length(u))
     _, g, pointwise = _rk_value_gradient_and_pointwise!(m.sampler, g, u)
     values = _brm_nlme_sum_by_subject(m, pointwise)
-    G = Matrix{Float64}(undef, size(H))
-    for (i, block) in enumerate(m.view.subject_coordinates)
-        G[:, i] .= view(g, block) .+ view(H, :, i)
+    G = if H isa AbstractMatrix
+        out = Matrix{Float64}(undef, size(H))
+        for (i, block) in enumerate(m.view.subject_coordinates)
+            out[:, i] .= view(g, block) .+ view(H, :, i)
+        end
+        out
+    else
+        [g[block] .+ H[i] for (i, block) in enumerate(m.view.subject_coordinates)]
     end
     values, G
 end
@@ -871,15 +1012,17 @@ end
 # the unit point z = η, so adding I removes that prior's Hessian.
 function _brm_nlme_hessian_blocks(m::BRMNLMEModel, θ, σ, H)
     u = _brm_nlme_point(m, θ, σ, H)
-    nη = size(H, 1)
-    blocks = [Matrix{Float64}(undef, nη, nη) for _ in m.view.levels]
+    nη = maximum(length, m.view.subject_coordinates)
+    blocks = [Matrix{Float64}(undef, length(c), length(c))
+        for c in m.view.subject_coordinates]
     for k in 1:nη
         direction = zeros(Float64, length(u))
         for coordinates in m.view.subject_coordinates
-            direction[coordinates[k]] = 1.0
+            k <= length(coordinates) && (direction[coordinates[k]] = 1.0)
         end
         hv = _rk_eta_hvp(m.eta_hvp, direction, u)
         for (i, coordinates) in enumerate(m.view.subject_coordinates)
+            k <= length(coordinates) || continue
             blocks[i][:, k] .= view(hv, coordinates)
             blocks[i][k, k] += 1.0
         end

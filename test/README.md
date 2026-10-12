@@ -92,15 +92,21 @@ value and gradient allocations stay flat when unrelated subjects grow from
 3 to 9 to 27. Flat-row grouped models retain lockstep evaluation and refuse
 the single-subject method by name. It runs in the test environment above.
 
+`nlme_nested.jl` uses a public synthetic model with interleaved observations
+and 1, 2, and 3 nested units per subject. It checks explicit ownership,
+compact η likelihoods and gradients against an independent Normal oracle,
+the ragged NLME protocol, posthoc/SAEM smoke paths, and a full Stan-start
+round trip with reordered subjects. Run it in the NLMEEstimation scratch
+environment described below.
+
 `nlme_estimation_ext.jl` covers the NLMEEstimation.jl protocol extension:
 batched and single-subject evaluation, subject-cell population gradients,
 analytic η Hessian blocks, Gaussian observation moments
 and colored η Jacobians, `check_protocol`, and Newton posthoc against
 independent oracles. Its Gaussian checks include arrays observed within plate
 cells and a modeled scale shared by the observations in each cell.
-NLMEEstimation.jl is not published yet, so it is not part of
-`test/Project.toml`. Run the file from a copy of this environment that develops
-a local NLMEEstimation checkout:
+NLMEEstimation.jl is not part of `test/Project.toml`. Run the file from a
+copy of this environment that develops a local NLMEEstimation checkout:
 
 ```sh
 cp test/Project.toml test/Manifest.toml <scratch-env>/

@@ -14,6 +14,7 @@ module BayesianRegressionModelsNLMEEstimationExt
 
 using BayesianRegressionModels
 using ADTypes: AutoEnzyme
+import DifferentiationInterface as DI
 using LinearAlgebra
 import Enzyme
 import NLMEEstimation as NE
@@ -22,13 +23,17 @@ const BRM = BayesianRegressionModels
 
 NE.nsubjects(m::BRM.BRMNLMEModel) = length(m.view.levels)
 
-NE.nlme_layout(m::BRM.BRMNLMEModel) = NE.NLMELayout(;
-    ntheta=length(m.theta), nsigma=length(m.sigma), eta_blocks=m.eta_blocks)
+NE.nlme_layout(m::BRM.BRMNLMEModel) = BRM._brm_nlme_ragged(m.view) ?
+    NE.RaggedNLMELayout(; ntheta=length(m.theta), nsigma=length(m.sigma),
+        family_sizes=m.view.family_sizes, subject_families=m.view.subject_families) :
+    NE.NLMELayout(; ntheta=length(m.theta), nsigma=length(m.sigma),
+        eta_blocks=m.eta_blocks)
 
 NE.evaluation_style(::BRM.BRMNLMEModel) = NE.BatchedEvaluation()
-NE.saem_population_gradient_style(::BRM.BRMNLMEModel) = NE.PerSubjectEvaluation()
-NE.saem_population_gradient_style(::BRM.BRMNLMEModel, ::Val{:online}) =
-    NE.PerSubjectEvaluation()
+NE.saem_population_gradient_style(m::BRM.BRMNLMEModel) =
+    BRM._brm_nlme_ragged(m.view) ? NE.BatchedEvaluation() : NE.PerSubjectEvaluation()
+NE.saem_population_gradient_style(m::BRM.BRMNLMEModel, ::Val{:online}) =
+    NE.saem_population_gradient_style(m)
 NE.saem_population_gradient_style(::BRM.BRMNLMEModel, ::Val{:mixture}) =
     NE.BatchedEvaluation()
 NE.provides_eta_hessian(::BRM.BRMNLMEModel) = true
@@ -81,7 +86,8 @@ function _prior_omega_map(m::BRM.BRMNLMEModel, θ, σ, ω)
     u[m.theta] = θ
     u[m.sigma] = σ
     values = RKPPL.constrain(layout, u)
-    C = Matrix(NE.omega_cholesky(NE.nlme_layout(m), ω))
+    chol = NE.omega_cholesky(NE.nlme_layout(m), ω)
+    C = BRM._brm_nlme_ragged(m.view) ? chol : Matrix(chol)
     records = [r for r in BRM._brm_nlme_records(m.backend.plan) if r.kind === :ranef]
     J = zeros(Float64, length(ω), length(ω))
     omega_positions = Int[]
@@ -91,9 +97,10 @@ function _prior_omega_map(m::BRM.BRMNLMEModel, θ, σ, ω)
     log_omega_jacobian_gradient = zeros(Float64, length(ω))
     margin_start = 1
     omega_start = 1
-    for record in records
+    for (family, record) in enumerate(records)
         K = length(record.margins)
-        block = C[margin_start:(margin_start + K - 1), margin_start:(margin_start + K - 1)]
+        block = BRM._brm_nlme_ragged(m.view) ? C[family] :
+            C[margin_start:(margin_start + K - 1), margin_start:(margin_start + K - 1)]
         τ = [norm(view(block, i, 1:i)) for i in 1:K]
         R = zeros(Float64, K, K)
         for i in 1:K, j in 1:i
@@ -135,11 +142,12 @@ function _prior_omega_map(m::BRM.BRMNLMEModel, θ, σ, ω)
     margin_start = 1
     omega_start = 1
     urow = 1
-    for record in records
+    for (family, record) in enumerate(records)
         K = length(record.margins)
         scale_positions = omega_positions[urow:(urow + K - 1)]
         factor_positions = omega_positions[(urow + K):(urow + K * (K + 1) ÷ 2 - 1)]
-        block = C[margin_start:(margin_start + K - 1), margin_start:(margin_start + K - 1)]
+        block = BRM._brm_nlme_ragged(m.view) ? C[family] :
+            C[margin_start:(margin_start + K - 1), margin_start:(margin_start + K - 1)]
         τ = [norm(view(block, i, 1:i)) for i in 1:K]
         local_omega = [omega_start + i * (i - 1) ÷ 2 + j - 1 for i in 1:K, j in 1:K]
         for i in 1:K
@@ -203,8 +211,7 @@ function NE.population_logprior(m::BRM.BRMNLMEModel, θ, σ, ω)
     mapping = _prior_omega_map(m, θ, σ, ω)
     # BRM's standardized z prior is one N(0,1) per subject and margin at z=0.
     # NLMEEstimation owns the η prior, so remove precisely that constant term.
-    z_constant = -length(first(m.view.subject_coordinates)) *
-        length(m.view.levels) * log(2π) / 2
+    z_constant = -sum(length, m.view.subject_coordinates) * log(2π) / 2
     BRM._rk_nlme_population_prior_value(m.population_prior, mapping.mapped) +
         mapping.correction - z_constant
 end
@@ -213,8 +220,7 @@ function NE.population_logprior_and_gradient(m::BRM.BRMNLMEModel, θ, σ, ω)
     mapping = _prior_omega_map(m, θ, σ, ω)
     value, gradient = BRM._rk_nlme_population_prior_value_gradient(
         m.population_prior, mapping.mapped)
-    z_constant = -length(first(m.view.subject_coordinates)) *
-        length(m.view.levels) * log(2π) / 2
+    z_constant = -sum(length, m.view.subject_coordinates) * log(2π) / 2
     gω = mapping.J' *
         (gradient[mapping.omega_positions] - mapping.omega_logjac_gradient) +
         mapping.log_omega_jacobian_gradient
@@ -243,12 +249,48 @@ end
 # `subjects[k]` and the other subjects at zero; by conditional independence the
 # other subjects' values do not affect the batch's.
 function _batch_eta(m::BRM.BRMNLMEModel, subjects, H::AbstractMatrix)
+    BRM._brm_nlme_ragged(m.view) && throw(DimensionMismatch(
+        "ragged subjects need one compact η vector per subject, not a matrix"))
     size(H, 2) == length(subjects) || throw(DimensionMismatch(
         "η matrix has $(size(H, 2)) columns for $(length(subjects)) subjects"))
     _check_subjects(m, subjects)
     full = zeros(promote_type(Float64, eltype(H)), size(H, 1), length(m.view.levels))
     full[:, subjects] .= H
     full
+end
+
+function _batch_eta(m::BRM.BRMNLMEModel, subjects,
+        H::AbstractVector{<:AbstractVector})
+    length(H) == length(subjects) || throw(DimensionMismatch(
+        "η has $(length(H)) subject vectors for $(length(subjects)) subjects"))
+    _check_subjects(m, subjects)
+    full = [zeros(Float64, length(block)) for block in m.view.subject_coordinates]
+    for (k, i) in enumerate(subjects)
+        length(H[k]) == length(full[i]) || throw(DimensionMismatch(
+            "subject $i η has length $(length(H[k])), expected $(length(full[i]))"))
+        full[i] = Vector{Float64}(H[k])
+    end
+    full
+end
+
+# NLMEEstimation's generic batched population derivative expands a selected
+# η batch inside the differentiated function. For ragged subjects, that
+# allocation has no θ/σ derivative and Enzyme cannot compile its nested-vector
+# mutation. Expand the constant η batch first, then differentiate only the
+# population coordinates through the one lockstep RK likelihood query.
+function _ragged_population_objective(x, m, subjects, full, ntheta)
+    values = BRM.brm_nlme_loglikelihoods(m, view(x, 1:ntheta),
+        view(x, ntheta+1:length(x)), full)
+    sum(values[subjects])
+end
+
+function NE._saem_population_value_gradient(::NE.BatchedEvaluation,
+        m::BRM.BRMNLMEModel, subjects, θ, σ,
+        H::AbstractVector{<:AbstractVector})
+    full = _batch_eta(m, subjects, H)
+    DI.value_and_gradient(_ragged_population_objective, NE.ad_backend(m), vcat(θ, σ),
+        DI.Constant(m), DI.Constant(subjects), DI.Constant(full),
+        DI.Constant(length(θ)))
 end
 
 # Gaussian moments and Jacobians still evaluate all requested subjects in one
@@ -265,7 +307,7 @@ function NE.observations(m::BRM.BRMNLMEModel, subjects::AbstractVector{<:Integer
 end
 
 function NE.observation_moments(m::BRM.BRMNLMEModel,
-        subjects::AbstractVector{<:Integer}, θ, σ, H::AbstractMatrix)
+        subjects::AbstractVector{<:Integer}, θ, σ, H)
     NE.observation_model(m) isa NE.GaussianObservations || throw(ArgumentError(
         "BRMNLMEModel has no prepared Gaussian observation model"))
     u = BRM._brm_nlme_point(m, θ, σ, _batch_eta(m, subjects, H))
@@ -274,7 +316,7 @@ function NE.observation_moments(m::BRM.BRMNLMEModel,
 end
 
 function NE.observation_moments_and_jacobians(m::BRM.BRMNLMEModel,
-        subjects::AbstractVector{<:Integer}, θ, σ, H::AbstractMatrix)
+        subjects::AbstractVector{<:Integer}, θ, σ, H)
     NE.observation_model(m) isa NE.GaussianObservations || throw(ArgumentError(
         "BRMNLMEModel has no prepared Gaussian observation model"))
     u = BRM._brm_nlme_point(m, θ, σ, _batch_eta(m, subjects, H))
@@ -290,6 +332,15 @@ function _singleton_cell(m::BRM.BRMNLMEModel, subjects, H::AbstractMatrix)
         "η matrix has $(size(H, 2)) columns for 1 subject"))
     _check_subjects(m, subjects)
     only(subjects), view(H, :, 1)
+end
+
+function _singleton_cell(m::BRM.BRMNLMEModel, subjects,
+        H::AbstractVector{<:AbstractVector})
+    length(subjects) == 1 && m.cell_query !== nothing || return nothing
+    length(H) == 1 || throw(DimensionMismatch(
+        "η has $(length(H)) vectors for 1 subject"))
+    _check_subjects(m, subjects)
+    only(subjects), only(H)
 end
 
 function NE.conditional_loglikelihoods(m::BRM.BRMNLMEModel, subjects, θ, σ, H)
@@ -323,10 +374,10 @@ function NE.conditional_loglikelihoods_and_gradients(m::BRM.BRMNLMEModel, subjec
     if cell !== nothing
         value, gradient = BRM.brm_nlme_loglikelihood_and_gradient(
             m, cell[1], θ, σ, cell[2])
-        return [value], reshape(gradient, :, 1)
+        return [value], H isa AbstractMatrix ? reshape(gradient, :, 1) : [gradient]
     end
     values, G = BRM.brm_nlme_loglikelihoods_and_gradients(m, θ, σ, _batch_eta(m, subjects, H))
-    values[subjects], G[:, subjects]
+    values[subjects], G isa AbstractMatrix ? G[:, subjects] : G[subjects]
 end
 
 function NE.conditional_loglikelihood_hessian_blocks(m::BRM.BRMNLMEModel, subjects, θ, σ, H)
@@ -351,6 +402,9 @@ end
 NE.parameter_names(m::BRM.BRMNLMEModel) = (
     theta=string.(m.view.coordinates[m.theta]),
     sigma=string.(m.view.coordinates[m.sigma]),
-    eta=[string(b.predictor, ":", b.coefficient) for b in m.view.block_margins])
+    eta=BRM._brm_nlme_ragged(m.view) ?
+        [[string(b.block.group, "[", b.level, "]:", b.predictor, ":", b.coefficient)
+            for b in margins] for margins in m.view.subject_margins] :
+        [string(b.predictor, ":", b.coefficient) for b in m.view.block_margins])
 
 end
