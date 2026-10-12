@@ -3,7 +3,8 @@
 
 """
     BRMNLMEJointMap
-    brm_nlme_joint_map(rk::RKBRMI, sb::SBBRMI; path, kwargs...)
+    brm_nlme_joint_map(rk::RKBRMI, sb::SBBRMI; path,
+                       subject_group=nothing, nested_groups=NamedTuple(), kwargs...)
 
 Prepare a bridge from natural subject effects and an NLME covariance to the
 complete unconstrained coordinates of a compiled BridgeStan model. BRM
@@ -11,6 +12,8 @@ compiles `sb` itself at `path`, so the returned `stan_problem` is the exact
 target whose coordinates are converted. Pass that problem to the sampler.
 Both backends must lower the same BRMI instance. The NLME view must cover every RK coordinate,
 and the semantic RK/Stan transport must pair every coordinate on both sides.
+Nested models require the same explicit subject ownership arguments as
+`brm_nlme_view`.
 Shared latent variables may arrive in the fitted population vector or in an
 explicit full packed `shared_point` from the RK model. Student-t mixing weights,
 centered Stan random effects, and
@@ -26,10 +29,11 @@ struct BRMNLMEJointMap{R<:RKBRMI,S<:SBBRMI,P,M}
     blocks::Vector{NamedTuple}
 end
 
-function brm_nlme_joint_map(rk::RKBRMI, sb::SBBRMI; path, kwargs...)
+function brm_nlme_joint_map(rk::RKBRMI, sb::SBBRMI; path,
+        subject_group=nothing, nested_groups=NamedTuple(), kwargs...)
     parent(rk) === parent(sb) || error(
         "brm_nlme_joint_map: build both backends from the same BRMI instance")
-    view = brm_nlme_view(rk)
+    view = brm_nlme_view(rk; subject_group, nested_groups)
     any(==(:subject_mixing), view.role) && _brm_nlme_error(
         "brm_nlme_joint_map: Student-t mixing coordinates are not natural " *
         "Gaussian subject effects")
@@ -68,12 +72,25 @@ function brm_nlme_joint_map(rk::RKBRMI, sb::SBBRMI; path, kwargs...)
             if f.group === record.group && isequal(f.id, record.id)]
         length(factors) == (isnothing(record.L) ? 0 : 1) || _brm_nlme_error(
             "brm_nlme_joint_map: correlation factor for $key is not paired")
-        push!(blocks, (; record, indices, scales,
+        push!(blocks, (; family=length(blocks) + 1, record, indices, scales,
             factor=isempty(factors) ? nothing : only(factors)))
     end
     length(blocks) == length(unique(m.block for m in view.block_margins)) ||
         _brm_nlme_error("brm_nlme_joint_map: NLME random-effect blocks are not unique")
     BRMNLMEJointMap(rk, sb, problem, stan_model, view, transport, blocks)
+end
+
+# A family can occur once or several times in a subject. These compact η
+# positions follow RaggedNLMELayout.subject_families exactly.
+function _brm_nlme_family_instances(view::BRMNLMEView, i, family)
+    ranges = UnitRange{Int}[]
+    offset = 1
+    for f in view.subject_families[i]
+        K = view.family_sizes[f]
+        f == family && push!(ranges, offset:(offset + K - 1))
+        offset += K
+    end
+    ranges
 end
 
 function _brm_nlme_joint_subject_order(view::BRMNLMEView, subjects)
@@ -128,10 +145,13 @@ function brm_nlme_joint_values(map::BRMNLMEJointMap, stan_u::AbstractVector)
     u = brm_stan_point_to_rk(t, stan_u)
     values = _rk_constrained_values(map.rk, u)
     nη = length(view.block_margins)
-    omega = zeros(Float64, nη, nη)
-    eta = zeros(Float64, nη, length(view.levels))
+    ragged = _brm_nlme_ragged(view)
+    omega = ragged ? [zeros(Float64, K, K) for K in view.family_sizes] :
+        zeros(Float64, nη, nη)
+    eta = ragged ? [zeros(Float64, length(c)) for c in view.subject_coordinates] :
+        zeros(Float64, nη, length(view.levels))
     for block in map.blocks
-        (; record, indices) = block
+        (; family, record, indices) = block
         K = length(indices)
         scale = _brm_nlme_joint_scale(values, record, K)
         L = isnothing(record.L) ? Matrix{Float64}(I, K, K) :
@@ -140,10 +160,21 @@ function brm_nlme_joint_values(map::BRMNLMEJointMap, stan_u::AbstractVector)
             "brm_nlme_joint_values: correlation factor has size $(size(L)), " *
             "expected ($K, $K)")
         A = Diagonal(scale) * L
-        omega[indices, indices] = A * A'
+        if ragged
+            omega[family] = A * A'
+        else
+            omega[indices, indices] = A * A'
+        end
         for i in eachindex(view.levels)
-            z = u[view.subject_coordinates[i][indices]]
-            eta[indices, i] = A * z
+            if ragged
+                for range in _brm_nlme_family_instances(view, i, family)
+                    z = u[view.subject_coordinates[i][range]]
+                    eta[i][range] = A * z
+                end
+            else
+                z = u[view.subject_coordinates[i][indices]]
+                eta[indices, i] = A * z
+            end
         end
     end
     shared = findall(==(:shared_latent), view.role)
@@ -159,10 +190,12 @@ end
 
 Convert one NLME estimate into the *same model's* complete BridgeStan
 `init_positions`. `theta` and `sigma` are the NLME model's unconstrained
-vectors; `omega` is its natural-effect covariance matrix; `eta[:, j]` is
-the natural effect of the explicitly named `subjects[j]`. Subject columns
-may be reordered, but every model level must occur exactly once. Covariance
-between independent NLME blocks must be zero.
+vectors. For a flat model, `omega` is its natural-effect covariance matrix,
+`eta[:, j]` is the natural effect of `subjects[j]`, and covariance between
+independent blocks must be zero. For a nested model, `omega[f]` is one
+covariance matrix per family and `eta[j]` is the compact effect vector for
+`subjects[j]`. Subjects may be reordered, but every model level must occur
+exactly once.
 If the NLME model estimated shared latent coordinates, pass its complete `theta`
 vector in the model's packed order, including those coordinates. For a fit that
 held them fixed, pass the shorter population `theta` and the same full packed
@@ -183,8 +216,9 @@ function brm_nlme_joint_start(map::BRMNLMEJointMap; theta, sigma, omega, eta,
     t, view = map.transport, map.view
     θ = Vector{Float64}(theta)
     σ = Vector{Float64}(sigma)
-    Ω = Matrix{Float64}(omega)
-    H = Matrix{Float64}(eta)
+    ragged = _brm_nlme_ragged(view)
+    Ω = ragged ? [Matrix{Float64}(block) for block in omega] : Matrix{Float64}(omega)
+    H = ragged ? [Vector{Float64}(block) for block in eta] : Matrix{Float64}(eta)
     p = findall(==(:population), view.role)
     s = findall(==(:scalar), view.role)
     shared = findall(==(:shared_latent), view.role)
@@ -199,15 +233,26 @@ function brm_nlme_joint_start(map::BRMNLMEJointMap; theta, sigma, omega, eta,
     length(σ) == length(s) || throw(DimensionMismatch(
         "brm_nlme_joint_start: sigma has $(length(σ)) entries, expected $(length(s))"))
     nη, nsubjects = length(view.block_margins), length(view.levels)
-    size(Ω) == (nη, nη) || throw(DimensionMismatch(
-        "brm_nlme_joint_start: omega has size $(size(Ω)), expected ($nη, $nη)"))
-    size(H) == (nη, nsubjects) || throw(DimensionMismatch(
-        "brm_nlme_joint_start: eta has size $(size(H)), expected ($nη, $nsubjects)"))
-    all(isfinite, θ) && all(isfinite, σ) && all(isfinite, Ω) && all(isfinite, H) ||
-        _brm_nlme_error("brm_nlme_joint_start: all estimate coordinates must be finite")
-    issymmetric(Ω) || _brm_nlme_error(
-        "brm_nlme_joint_start: omega must be symmetric")
     order = _brm_nlme_joint_subject_order(view, subjects)
+    if ragged
+        length(Ω) == length(view.family_sizes) &&
+            all(size(Ω[f]) == (K, K) for (f, K) in enumerate(view.family_sizes)) ||
+            throw(DimensionMismatch("brm_nlme_joint_start: omega must have one square matrix per family"))
+        length(H) == nsubjects &&
+            all(length(H[order[i]]) == length(view.subject_coordinates[i]) for i in 1:nsubjects) ||
+            throw(DimensionMismatch("brm_nlme_joint_start: eta lengths do not match subject layouts"))
+    else
+        size(Ω) == (nη, nη) || throw(DimensionMismatch(
+            "brm_nlme_joint_start: omega has size $(size(Ω)), expected ($nη, $nη)"))
+        size(H) == (nη, nsubjects) || throw(DimensionMismatch(
+            "brm_nlme_joint_start: eta has size $(size(H)), expected ($nη, $nsubjects)"))
+    end
+    finite_omega = ragged ? all(all(isfinite, block) for block in Ω) : all(isfinite, Ω)
+    finite_eta = ragged ? all(all(isfinite, block) for block in H) : all(isfinite, H)
+    all(isfinite, θ) && all(isfinite, σ) && finite_omega && finite_eta ||
+        _brm_nlme_error("brm_nlme_joint_start: all estimate coordinates must be finite")
+    (ragged ? all(issymmetric, Ω) : issymmetric(Ω)) || _brm_nlme_error(
+        "brm_nlme_joint_start: omega must be symmetric")
     u = zeros(Float64, length(view.coordinates))
     if !isempty(shared) && !fitted_shared
         shared_point === nothing && _brm_nlme_error(
@@ -228,12 +273,14 @@ function brm_nlme_joint_start(map::BRMNLMEJointMap; theta, sigma, omega, eta,
     covariance = NamedTuple[]
     used = falses(nη)
     for block in map.blocks
-        (; indices) = block
+        (; family, indices) = block
         used[indices] .= true
-        other = setdiff(1:nη, indices)
-        all(iszero, Ω[indices, other]) || _brm_nlme_error(
-            "brm_nlme_joint_start: omega couples independent NLME blocks")
-        localΩ = Matrix(Ω[indices, indices])
+        if !ragged
+            other = setdiff(1:nη, indices)
+            all(iszero, Ω[indices, other]) || _brm_nlme_error(
+                "brm_nlme_joint_start: omega couples independent NLME blocks")
+        end
+        localΩ = ragged ? Ω[family] : Matrix(Ω[indices, indices])
         factor = cholesky(Symmetric(localΩ); check=false)
         issuccess(factor) || _brm_nlme_error(
             "brm_nlme_joint_start: an omega block is not positive definite")
@@ -241,7 +288,13 @@ function brm_nlme_joint_start(map::BRMNLMEJointMap; theta, sigma, omega, eta,
         scales = sqrt.(diag(localΩ))
         Lcorr = Diagonal(1 ./ scales) * A
         for (i, j) in enumerate(order)
-            u[view.subject_coordinates[i][indices]] = A \ H[indices, j]
+            if ragged
+                for range in _brm_nlme_family_instances(view, i, family)
+                    u[view.subject_coordinates[i][range]] = A \ H[j][range]
+                end
+            else
+                u[view.subject_coordinates[i][indices]] = A \ H[indices, j]
+            end
         end
         push!(covariance, (; block, scales, Lcorr))
     end
@@ -273,10 +326,14 @@ function brm_nlme_joint_start(map::BRMNLMEJointMap; theta, sigma, omega, eta,
     end
     stan = BridgeStan.param_unconstrain(map.stan_model, constrained)
     roundtrip = brm_nlme_joint_values(map, stan)
+    same_omega = ragged ? all(isapprox(roundtrip.omega[f], Ω[f]; atol=1e-9, rtol=1e-9)
+        for f in eachindex(Ω)) : isapprox(roundtrip.omega, Ω; atol=1e-9, rtol=1e-9)
+    same_eta = ragged ? all(isapprox(roundtrip.eta[i], H[order[i]];
+        atol=1e-9, rtol=1e-9) for i in 1:nsubjects) :
+        isapprox(roundtrip.eta, H[:, order]; atol=1e-9, rtol=1e-9)
     isapprox(roundtrip.theta, u[p]; atol=1e-9, rtol=1e-9) &&
         isapprox(roundtrip.sigma, σ; atol=1e-9, rtol=1e-9) &&
-        isapprox(roundtrip.omega, Ω; atol=1e-9, rtol=1e-9) &&
-        isapprox(roundtrip.eta, H[:, order]; atol=1e-9, rtol=1e-9) &&
+        same_omega && same_eta &&
         isapprox(roundtrip.shared.values, u[shared]; atol=1e-9, rtol=1e-9) ||
         _brm_nlme_error("brm_nlme_joint_start: NLME-to-Stan round trip disagrees")
     checked = brm_check_coordinate_transport(t, map.rk, map.stan_model,
