@@ -77,9 +77,11 @@ julia --startup-file=no --project=test test/rk_planning_specialization.jl
 ## NLME estimators
 
 `nlme_view.jl` pins `brm_nlme_view`, lockstep evaluation
-(`brm_nlme_loglikelihoods[_and_gradients]`), and single-subject plate-cell
+(`brm_nlme_loglikelihoods[_and_gradients]`), and single-subject cell
 evaluation (`brm_nlme_loglikelihood[_and_gradient]`) against an independent
-oracle with analytic η gradients. The single-subject test also checks that
+oracle with analytic η gradients. It also compares the deprecated
+`kernel(...) do` spelling with the indexed cell's partition, likelihoods and
+η gradients. The single-subject test checks that
 value and gradient allocations stay flat when unrelated subjects grow from
 3 to 9 to 27. Flat-row grouped models retain lockstep evaluation and refuse
 the single-subject method by name. It runs in the test environment above.

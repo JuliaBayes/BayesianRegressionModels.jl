@@ -126,6 +126,37 @@ end
     end
 end
 
+@stestset "legacy closure kernel cells retain the NLME subject reading" begin
+    legacy = RKBRMI(nlme_kernel_pk(NLME_PLATE_DATA))
+    plate = RKBRMI(nlme_plate_pk(NLME_PLATE_DATA))
+    @test legacy.plan isa BRM._RKValuePlan
+    @test plate.plan isa BRM._RKValuePlan
+    old_view = brm_nlme_view(legacy)
+    new_view = brm_nlme_view(plate)
+    @test old_view.coordinates == new_view.coordinates
+    @test old_view.role == new_view.role
+    @test old_view.subject_coordinates == new_view.subject_coordinates
+    @test old_view.rows == new_view.rows
+
+    old_model = brm_nlme_model(legacy; ad_backend=NLME_AD)
+    new_model = brm_nlme_model(plate; ad_backend=NLME_AD)
+    named = Dict(Symbol("pop_log_CL.beta_pop.1") => 0.2,
+        Symbol("pop_log_CL.beta_pop.2") => 0.1, :log_V_Intercept => 1.6)
+    θ = [named[c] for c in old_view.coordinates[old_model.theta]]
+    σ = [log(0.8)]
+    H = [0.15 -0.2 0.05; -0.1 0.25 0.3]
+    old_values, old_gradients = brm_nlme_loglikelihoods_and_gradients(
+        old_model, θ, σ, H)
+    new_values, new_gradients = brm_nlme_loglikelihoods_and_gradients(
+        new_model, θ, σ, H)
+    @test old_values ≈ new_values rtol=1e-12
+    @test old_gradients ≈ new_gradients rtol=1e-10
+    for i in eachindex(old_view.levels)
+        @test brm_nlme_loglikelihood(old_model, i, θ, σ, H[:, i]) ≈
+            brm_nlme_loglikelihood(new_model, i, θ, σ, H[:, i]) rtol=1e-12
+    end
+end
+
 @stestset "models without an NLME reading are refused by name" begin
     no_ranef = @brm NLME_DATA begin
         sigma ~ Exponential(1)
