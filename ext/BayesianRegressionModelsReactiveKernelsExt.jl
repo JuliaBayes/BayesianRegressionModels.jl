@@ -192,23 +192,35 @@ end
 
 # The prior and its coordinate Jacobian are separate RK graph nodes. Preparing
 # them independently of the likelihood lets NLME evaluate the population prior
-# once per objective, without running any subject observation cells.
+# once per objective, without running any subject observation cells. Prepare
+# them on first use so a conditional-only NLME fit keeps its construction cost.
 function BRM._rk_nlme_population_prior(backend::BRM.RKBRMI,
         unit::Vector{Float64}, ad_backend)
-    plan = _rk_translated_plan(backend.plan)
-    built = backend.model
-    value = prepare_query(built, plan, :prior)
-    jacobian = prepare_query(built, plan, :log_jacobian)
-    gradient = prepare_query_ad(prepare_ad, built, plan, :prior, ad_backend, unit)
-    jacobian_gradient = prepare_query_ad(prepare_ad, built, plan,
-        :log_jacobian, ad_backend, unit)
-    (; value, jacobian, gradient, jacobian_gradient)
+    (; backend, unit, ad_backend, cached=Ref{Any}(nothing), lock=ReentrantLock())
 end
 
-BRM._rk_nlme_population_prior_value(bundle, u::Vector{Float64}) =
-    Base.invokelatest(bundle.value, u) + Base.invokelatest(bundle.jacobian, u)
+function _nlme_population_prior_bundle(state)
+    lock(state.lock) do
+        state.cached[] === nothing || return state.cached[]
+        backend, unit, ad_backend = state.backend, state.unit, state.ad_backend
+        plan = _rk_translated_plan(backend.plan)
+        built = backend.model
+        value = prepare_query(built, plan, :prior)
+        jacobian = prepare_query(built, plan, :log_jacobian)
+        gradient = prepare_query_ad(prepare_ad, built, plan, :prior, ad_backend, unit)
+        jacobian_gradient = prepare_query_ad(prepare_ad, built, plan,
+            :log_jacobian, ad_backend, unit)
+        state.cached[] = (; value, jacobian, gradient, jacobian_gradient)
+    end
+end
 
-function BRM._rk_nlme_population_prior_value_gradient(bundle, u::Vector{Float64})
+function BRM._rk_nlme_population_prior_value(state, u::Vector{Float64})
+    bundle = _nlme_population_prior_bundle(state)
+    Base.invokelatest(bundle.value, u) + Base.invokelatest(bundle.jacobian, u)
+end
+
+function BRM._rk_nlme_population_prior_value_gradient(state, u::Vector{Float64})
+    bundle = _nlme_population_prior_bundle(state)
     value, gradient = ad_value_and_gradient(bundle.gradient, u)
     jacobian, jacobian_gradient = ad_value_and_gradient(bundle.jacobian_gradient, u)
     value + jacobian, gradient + jacobian_gradient

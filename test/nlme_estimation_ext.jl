@@ -74,6 +74,37 @@ const NLMEEXT = Base.get_extension(BRM, :BayesianRegressionModelsNLMEEstimationE
     @test provenance.omega === :NLME_log_Cholesky
 end
 
+@stestset "three-margin covariance prior gradient follows NLME coordinates" begin
+    data = (; subject=["a", "b", "c"],
+        ya=[0.2, -0.1, 0.5], yb=[-0.3, 0.4, 0.1], yc=[0.1, 0.0, -0.2])
+    brmi = @brm data begin
+        sigma ~ Exponential(1)
+        a ~ 1 + (1 | pk | subject)
+        b ~ 1 + (1 | pk | subject)
+        c ~ 1 + (1 | pk | subject)
+        sd(:, pk) ~ Exponential(0.7)
+        cor(:, pk) ~ LKJCholesky(3, 2)
+        ya ~ Normal(a, sigma)
+        yb ~ Normal(b, sigma)
+        yc ~ Normal(c, sigma)
+    end
+    m = brm_nlme_model(RKBRMI(brmi); ad_backend=NLME_AD)
+    θ = fill(0.1, length(m.theta))
+    σ = [log(0.8)]
+    ω = [log(0.7), 0.12, log(0.8), -0.08, 0.16, log(0.9)]
+    value, _, _, gω = population_logprior_and_gradient(m, θ, σ, ω)
+    @test value ≈ population_logprior(m, θ, σ, ω) atol=1e-10
+    @test length(gω) == 6
+    for j in eachindex(ω)
+        plus, minus = copy(ω), copy(ω)
+        plus[j] += 1e-5
+        minus[j] -= 1e-5
+        numerical = (population_logprior(m, θ, σ, plus) -
+            population_logprior(m, θ, σ, minus)) / 2e-5
+        @test gω[j] ≈ numerical atol=1e-6
+    end
+end
+
 # A realistic population point for NLME_PLATE_DATA: V ≈ 5, CL ≈ 1.2.
 function plate_pk_point(m)
     named = Dict(Symbol("pop_log_CL.beta_pop.1") => 0.2,
