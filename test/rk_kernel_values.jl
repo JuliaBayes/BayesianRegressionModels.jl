@@ -18,6 +18,47 @@ function build(data)
 end
 end
 
+@stestset "unbound leading response keeps subject likelihood and Stan inv_logit" begin
+    data = (; subject=[1, 2], x=[[0.5, 1.0], [1.5]],
+        y=[[0.2, 0.7], [-0.3]])
+    brmi = @brm data begin
+        slope ~ 1 + (1 | p | subject)
+        effect(slope, Intercept) ~ Normal(0, 1)
+        sd(:, p) ~ Exponential(1)
+        loc ~ kernel(z, x, y, slope) do zz, xx, yy, b
+            base = inv_logit(xx .* b)
+            shifted = b + base
+            shifted_twice = shifted + b
+            shifted_back = shifted_twice - b
+            mu = shifted_back + 0.5 .* (b - base)
+            sigma = inv_logit(b)
+            zz ~ normal(mu, sigma)
+            yy ~ normal(mu, sigma)
+            mu
+        end
+    end
+    sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
+    @test StanBlocks.stanc_check(BRM.stan_code(sb); warn_pedantic=false).ok
+    @test any(d -> d.role === :observation && d.data_source === nothing &&
+        !isempty(d.context), generative_plan(sb).declarations)
+    backend = check_rk_source_roundtrip(RKBRMI(brmi))
+    @test backend.plan isa BRM._RKValuePlan
+    @test BRM._rk_observed_names(backend.plan) == (:y,)
+    @test !haskey(backend.plan.columns, :z)
+    view = brm_nlme_view(backend)
+    @test view.group === :subject
+    @test view.levels == [1, 2]
+    @test view.rows == [[1], [2]]
+    model = brm_nlme_model(backend; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    θ, σ, H = [0.4], Float64[], reshape([0.2, -0.3], 1, 2)
+    values = brm_nlme_loglikelihoods(model, θ, σ, H)
+    expected = [sum(logpdf.(Normal.(0.5 .* BRM.logistic.(data.x[i] .* (θ[1] + H[1, i])) .+
+        1.5 * (θ[1] + H[1, i]),
+        BRM.logistic(θ[1] + H[1, i])), data.y[i]))
+        for i in eachindex(data.subject)]
+    @test values ≈ expected rtol=1e-12
+end
+
 module DottedCellScope
 using BayesianRegressionModels, Distributions
 halfsq(x) = 0.5 * x * x
