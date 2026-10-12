@@ -8,8 +8,8 @@ using WarmupHMC
 const AC_EXT = Base.get_extension(
     BayesianRegressionModels, :BayesianRegressionModelsWarmupHMCExt,
 )
-const SmallLocation = AC_EXT.BRMAdaptiveCenteringArgument{:location,true}
-const SmallLogScale = AC_EXT.BRMAdaptiveCenteringArgument{:log_scale,true}
+const SmallLocation = AC_EXT.BRMAdaptiveCenteringArgument{:location,1}
+const SmallLogScale = AC_EXT.BRMAdaptiveCenteringArgument{:log_scale,1}
 const SmallArguments = Tuple{SmallLocation,SmallLogScale}
 const FloatCentering = WarmupHMC.PartiallyCentered{Float64}
 const SmallReparametrization = WarmupHMC.Reparametrization{

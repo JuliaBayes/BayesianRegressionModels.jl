@@ -209,8 +209,14 @@ Base.show(io::IO, b::AdaptiveCenteringBlock) = print(
 #             + sum(a * log(inv_logit(x[i])) + b * log1m(inv_logit(x[i])))  # unit-interval parameter
 #             + sum(w * log(simplex(x[coords])[j]))            # Dirichlet share
 #
-# Three loops over concrete vectors: no recursion, no closures, no per-call
-# dispatch, so the generic Enzyme path differentiates it directly.
+# `_AdaptiveLogScale` is the inspectable form. The generic Enzyme path reads
+# the block's `_AdaptiveLogScaleTable` instead: the same atoms, flattened into
+# term-indexed arrays, so a differentiated row loop loads only numbers. On Julia
+# 1.10, reading a term's `_AdaptiveLogScale` (a struct holding vectors) inside
+# that loop is a use-after-free in Enzyme's reverse pass once another thread
+# runs GC; flat reads of the same data are clean (see `_block_location` in
+# BayesianRegressionModelsWarmupHMCExt). No recursion, closures or per-call
+# dispatch either.
 
 struct _AdaptiveSimplexLog
     weight::Float64
@@ -224,6 +230,49 @@ struct _AdaptiveLogScale
     linear::Vector{Tuple{Float64,Int}}
     unit::Vector{Tuple{Float64,Float64,Int}}
     simplex::Vector{_AdaptiveSimplexLog}
+end
+
+# A block's `_AdaptiveLogScale`s, term `k` owning `linear[k]:linear[k+1]-1` of
+# the linear atoms, likewise `unit` and `simplex`; simplex atom `q` owns
+# `simplex_coordinates[q]:simplex_coordinates[q+1]-1` of `simplex_coordinate`.
+# Atoms keep their order within each term.
+struct _AdaptiveLogScaleTable
+    constant::Vector{Float64}
+    linear::Vector{Int}
+    linear_weight::Vector{Float64}
+    linear_index::Vector{Int}
+    unit::Vector{Int}
+    unit_log::Vector{Float64}
+    unit_log1m::Vector{Float64}
+    unit_index::Vector{Int}
+    simplex::Vector{Int}
+    simplex_weight::Vector{Float64}
+    simplex_entry::Vector{Int}
+    simplex_coordinates::Vector{Int}
+    simplex_coordinate::Vector{Int}
+end
+
+function _AdaptiveLogScaleTable(scales::AbstractVector{_AdaptiveLogScale})
+    t = _AdaptiveLogScaleTable(Float64[], [1], Float64[], Int[], [1], Float64[],
+        Float64[], Int[], [1], Float64[], Int[], [1], Int[])
+    for s in scales
+        push!(t.constant, s.constant)
+        for (w, i) in s.linear
+            push!(t.linear_weight, w); push!(t.linear_index, i)
+        end
+        push!(t.linear, length(t.linear_index) + 1)
+        for (a, b, i) in s.unit
+            push!(t.unit_log, a); push!(t.unit_log1m, b); push!(t.unit_index, i)
+        end
+        push!(t.unit, length(t.unit_index) + 1)
+        for atom in s.simplex
+            push!(t.simplex_weight, atom.weight); push!(t.simplex_entry, atom.entry)
+            append!(t.simplex_coordinate, atom.coordinates)
+            push!(t.simplex_coordinates, length(t.simplex_coordinate) + 1)
+        end
+        push!(t.simplex, length(t.simplex_entry) + 1)
+    end
+    t
 end
 
 """
@@ -246,6 +295,11 @@ struct R2D2AdaptiveCenteringBlock <: AbstractAdaptiveCenteringBlock
     effects::Matrix{Int}
     cholesky_free::Vector{Int}
     scales::Vector{_AdaptiveLogScale}
+    # `scales`, flattened for the differentiated accessors.
+    table::_AdaptiveLogScaleTable
+    R2D2AdaptiveCenteringBlock(ranef, target_c, effects, cholesky_free, scales) =
+        new(ranef, target_c, effects, cholesky_free, scales,
+            _AdaptiveLogScaleTable(scales))
 end
 
 Base.show(io::IO, b::R2D2AdaptiveCenteringBlock) = print(
@@ -258,41 +312,60 @@ Base.show(io::IO, b::R2D2AdaptiveCenteringBlock) = print(
 # `log1p(exp(y))` without overflow on either side.
 _adaptive_softplus(y) = y > zero(y) ? y + log1p(exp(-y)) : log1p(exp(y))
 
-# `log(simplex_constrain(y)[entry])` for Stan's (>= 2.37) simplex transform:
-# the isometric log-ratio sum-to-zero vector of `y`, then softmax. The loop is
-# `stan::math::simplex_constrain` index for index.
-function _adaptive_log_simplex(x::AbstractVector, coordinates, entry)
+# Entry `j` of the isometric log-ratio sum-to-zero vector `z` of `y` in Stan's
+# (>= 2.37) `stan::math::simplex_constrain`, rebuilt with exactly the operations
+# that transform's loop applies to `z[j]`: `0 + sum(w[N:-1:j])`, then
+# `- w[j-1] * (j-1)`, with `w[i] = y[i] / sqrt(i * (i + 1))`. `y[i]` is
+# `x[coordinate[offset + i]]`.
+function _adaptive_simplex_ilr(x::AbstractVector, coordinate, offset, N, j)
     T = eltype(x)
-    N = length(coordinates)
-    N == 0 && return zero(T)
-    z = zeros(T, N + 1)
+    1 <= j <= N + 1 || throw(BoundsError(1:N+1, j))
     sum_w = zero(T)
-    for i in N:-1:1
-        w = x[coordinates[i]] * inv(sqrt(T(i * (i + 1))))
-        sum_w += w
-        z[i] += sum_w
-        z[i + 1] -= w * i
+    for i in N:-1:j
+        sum_w += x[coordinate[offset + i]] * inv(sqrt(T(i * (i + 1))))
     end
-    m = maximum(z)
-    total = zero(T)
-    for zi in z
-        total += exp(zi - m)
+    z = zero(T) + sum_w
+    if j > 1
+        i = j - 1
+        z -= (x[coordinate[offset + i]] * inv(sqrt(T(i * (i + 1))))) * i
     end
-    z[entry] - (m + log(total))
+    z
 end
 
-function _adaptive_log_scale(x::AbstractVector, s::_AdaptiveLogScale)
-    acc = convert(eltype(x), s.constant)
-    for (w, i) in s.linear
-        acc += w * x[i]
+# `log(simplex_constrain(y)[entry])`: the softmax of the isometric log-ratio
+# vector at `entry`. Each `z[j]` is recomputed instead of stored — O(N^2) over a
+# handful of Dirichlet components, bit-identical to filling a vector: a heap
+# work vector here is the same Julia 1.10 Enzyme use-after-free.
+function _adaptive_log_simplex(x::AbstractVector, coordinate, offset, N, entry)
+    T = eltype(x)
+    N == 0 && return zero(T)
+    m = _adaptive_simplex_ilr(x, coordinate, offset, N, 1)
+    for j in 2:N+1
+        m = max(m, _adaptive_simplex_ilr(x, coordinate, offset, N, j))
     end
-    for (a, b, i) in s.unit
+    total = zero(T)
+    for j in 1:N+1
+        total += exp(_adaptive_simplex_ilr(x, coordinate, offset, N, j) - m)
+    end
+    _adaptive_simplex_ilr(x, coordinate, offset, N, entry) - (m + log(total))
+end
+
+# Term `k`'s log-scale, atom by atom in `_AdaptiveLogScale` order.
+function _adaptive_log_scale(x::AbstractVector, t::_AdaptiveLogScaleTable, k::Int)
+    acc = convert(eltype(x), t.constant[k])
+    for q in t.linear[k]:t.linear[k + 1] - 1
+        acc += t.linear_weight[q] * x[t.linear_index[q]]
+    end
+    for q in t.unit[k]:t.unit[k + 1] - 1
         # log(inv_logit(y)) = -softplus(-y); log(1 - inv_logit(y)) = -softplus(y)
-        y = x[i]
-        acc -= a * _adaptive_softplus(-y) + b * _adaptive_softplus(y)
+        y = x[t.unit_index[q]]
+        acc -= t.unit_log[q] * _adaptive_softplus(-y) +
+            t.unit_log1m[q] * _adaptive_softplus(y)
     end
-    for atom in s.simplex
-        acc += atom.weight * _adaptive_log_simplex(x, atom.coordinates, atom.entry)
+    for q in t.simplex[k]:t.simplex[k + 1] - 1
+        first = t.simplex_coordinates[q]
+        acc += t.simplex_weight[q] * _adaptive_log_simplex(x, t.simplex_coordinate,
+            first - 1, t.simplex_coordinates[q + 1] - first, t.simplex_entry[q])
     end
     acc
 end
@@ -1451,7 +1524,7 @@ end
 _adaptive_block_taus(x::AbstractVector, block::AdaptiveCenteringBlock) =
     exp.(x[block.log_scales])
 _adaptive_block_taus(x::AbstractVector, block::R2D2AdaptiveCenteringBlock) =
-    [exp(_adaptive_log_scale(x, s)) for s in block.scales]
+    [exp(_adaptive_log_scale(x, block.table, k)) for k in 1:block.ranef.n_terms]
 
 function _adaptive_block_cholesky(x::AbstractVector, block::AbstractAdaptiveCenteringBlock)
     K = block.ranef.n_terms

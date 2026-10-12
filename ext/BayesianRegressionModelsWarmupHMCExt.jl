@@ -8,9 +8,16 @@ const BRM = BayesianRegressionModels
 # Random-effect block states: ordinary blocks (`BRMAdaptiveCenteringState`) and
 # R2D2 blocks (`BRMR2D2AdaptiveCenteringState`) share one cell layout and one
 # triangular map; they differ only in where `tau` comes from (`_block_tau`).
-abstract type _BRMRanefCenteringState end
+# `N` is the innovation capacity `_block_location` keeps on the stack: the
+# widest block's K-1, and at least 1, so every K<=2 plan shares one concrete
+# type (the exact pullback in BayesianRegressionModelsWarmupHMCEnzymeExt
+# dispatches on `N == 1`).
+abstract type _BRMRanefCenteringState{N} end
 
-mutable struct BRMAdaptiveCenteringState{SMALL_BLOCKS} <: _BRMRanefCenteringState
+_innovation_capacity(blocks) =
+    max(1, maximum((b.ranef.n_terms for b in blocks); init=1) - 1)
+
+mutable struct BRMAdaptiveCenteringState{N} <: _BRMRanefCenteringState{N}
     blocks::Vector{BRM.AdaptiveCenteringBlock}
     pair_blocks::Vector{Int}
     pair_terms::Vector{Int}
@@ -39,17 +46,15 @@ function _ranef_pair_layout(blocks)
     (pair_blocks, pair_terms, pair_groups, pair_lookup, sources, effect_indices)
 end
 
-function BRMAdaptiveCenteringState(blocks)
-    small_blocks = all(b.ranef.n_terms <= 2 for b in blocks)
-    BRMAdaptiveCenteringState{small_blocks}(
+BRMAdaptiveCenteringState(blocks) =
+    BRMAdaptiveCenteringState{_innovation_capacity(blocks)}(
         collect(blocks), _ranef_pair_layout(blocks)...,
     )
-end
 
 # R2D2 blocks keep their own state and argument types for the same reason HSGP
 # and cdar cells do: the exact K<=2 Enzyme reverse pass dispatches on the
 # ordinary state's concrete pair type and must never see a derived scale.
-mutable struct BRMR2D2AdaptiveCenteringState <: _BRMRanefCenteringState
+mutable struct BRMR2D2AdaptiveCenteringState{N} <: _BRMRanefCenteringState{N}
     blocks::Vector{BRM.R2D2AdaptiveCenteringBlock}
     pair_blocks::Vector{Int}
     pair_terms::Vector{Int}
@@ -59,32 +64,33 @@ mutable struct BRMR2D2AdaptiveCenteringState <: _BRMRanefCenteringState
     effect_indices::BitSet
 end
 
-BRMR2D2AdaptiveCenteringState(blocks) = BRMR2D2AdaptiveCenteringState(
-    collect(blocks), _ranef_pair_layout(blocks)...,
-)
+BRMR2D2AdaptiveCenteringState(blocks) =
+    BRMR2D2AdaptiveCenteringState{_innovation_capacity(blocks)}(
+        collect(blocks), _ranef_pair_layout(blocks)...,
+    )
 
 # A block's marginal scale `tau[i]`: a sampled coordinate for an ordinary
 # block, the emitted model's derived scale for an R2D2 block.
 _block_tau(x, block::BRM.AdaptiveCenteringBlock, i) = exp(x[block.log_scales[i]])
 _block_tau(x, block::BRM.R2D2AdaptiveCenteringBlock, i) =
-    exp(BRM._adaptive_log_scale(x, block.scales[i]))
+    exp(BRM._adaptive_log_scale(x, block.table, i))
 
 # The kind is a type parameter so Enzyme sees only the accessor branch it is
 # differentiating.  Every pair still has the same concrete
 # `(location, log_scale)` argument-tuple type, keeping WarmupHMC's pair vector
 # concrete.
-struct BRMAdaptiveCenteringArgument{KIND,SMALL_BLOCKS} <: Function
-    state::BRMAdaptiveCenteringState{SMALL_BLOCKS}
+struct BRMAdaptiveCenteringArgument{KIND,N} <: Function
+    state::BRMAdaptiveCenteringState{N}
     pair_number::Int
 end
 
 function BRMAdaptiveCenteringArgument(
-    state::BRMAdaptiveCenteringState{SMALL_BLOCKS}, pair_number, kind::Symbol,
-) where {SMALL_BLOCKS}
+    state::BRMAdaptiveCenteringState{N}, pair_number, kind::Symbol,
+) where {N}
     kind in (:location, :log_scale) || error(
         "unknown BRM adaptive-centering argument kind $kind",
     )
-    BRMAdaptiveCenteringArgument{kind,SMALL_BLOCKS}(state, pair_number)
+    BRMAdaptiveCenteringArgument{kind,N}(state, pair_number)
 end
 
 function _pair_location(state, pair_number)
@@ -123,22 +129,26 @@ end
 #
 # `u[k] = c[k] * sum(C[k,l] * z[l] for l < k) + C[k,k]^c[k] * z[k]` is triangular,
 # so recovering `z` is a forward substitution: row `i` needs the `i-1`
-# innovations below it.  That O(k) state is irreducible, and it is the only
-# allocation left here — the whole `K x K` `L` and `C` rebuild per pair is gone,
-# replaced by the same inline stick walk as `_block_cholesky_entry`.  The
-# innovation buffer cannot become an `NTuple`: `IndexedReparametrization` needs a
-# concrete pair element type, so making K a type parameter would widen the pair
-# vector's `eltype` and throw on any plan mixing block widths.  It cannot be
-# cached on the state either, because accessors run under `Enzyme.Const`.
-# Recursion is deliberately avoided: a recursive scalar callable here corrupted
-# Julia's GC after ~1,750 sustained gradients (fixed by ade46ac/bd9ca2d/b5f4a86).
-function _block_location(x, state::_BRMRanefCenteringState, pair_number)
+# innovations below it.  That O(k) state is irreducible — the whole `K x K` `L`
+# and `C` rebuild per pair is gone, replaced by the same inline stick walk as
+# `_block_cholesky_entry`.  The innovations live in an `NTuple{N}` sized by the
+# state's capacity `N`, not a heap vector: on Julia 1.10, Enzyme's reverse pass
+# over a function that allocates a small work vector and reads it back is a
+# use-after-free once another thread runs GC — `getindex` segfaults or the GC
+# aborts with "probable corruption" (measured on Enzyme 0.13.210-0.13.216; Julia
+# 1.12 and single-threaded runs are clean).  Concurrent completion/multi-chain
+# workers hit exactly that.  `N` belongs to the state, so every pair keeps one
+# concrete element type whatever the block widths.  The buffer cannot be cached
+# on the state, because accessors run under `Enzyme.Const`.  Recursion is
+# deliberately avoided: a recursive scalar callable here corrupted Julia's GC
+# after ~1,750 sustained gradients (fixed by ade46ac/bd9ca2d/b5f4a86).
+function _block_location(x, state::_BRMRanefCenteringState{N}, pair_number) where {N}
     bi, k, g = _pair_location(state, pair_number)
     T = eltype(x)
     k == 1 && return zero(T)
     block = state.blocks[bi]
     lookup = state.pair_lookup[bi]
-    innovations = Vector{T}(undef, k - 1)
+    innovations = ntuple(_ -> zero(T), Val(N))
     m = zero(T)
     for i in 1:k
         m = zero(T)
@@ -154,7 +164,7 @@ function _block_location(x, state::_BRMRanefCenteringState, pair_number)
             c = state.sources[lookup[i, g]]
             u = x[block.effects[i, g]]
             s = tau * stick
-            innovations[i] = (u - c * m) / s^c
+            innovations = Base.setindex(innovations, (u - c * m) / s^c, i)
         end
     end
     m
@@ -170,16 +180,18 @@ function (arg::BRMAdaptiveCenteringArgument{:log_scale})(x)
     log(_block_cholesky_entry(x, block, k, k))
 end
 
-struct BRMR2D2AdaptiveCenteringArgument{KIND} <: Function
-    state::BRMR2D2AdaptiveCenteringState
+struct BRMR2D2AdaptiveCenteringArgument{KIND,N} <: Function
+    state::BRMR2D2AdaptiveCenteringState{N}
     pair_number::Int
 end
 
-function BRMR2D2AdaptiveCenteringArgument(state, pair_number, kind::Symbol)
+function BRMR2D2AdaptiveCenteringArgument(
+    state::BRMR2D2AdaptiveCenteringState{N}, pair_number, kind::Symbol,
+) where {N}
     kind in (:location, :log_scale) || error(
         "unknown BRM R2D2 adaptive-centering argument kind $kind",
     )
-    BRMR2D2AdaptiveCenteringArgument{kind}(state, pair_number)
+    BRMR2D2AdaptiveCenteringArgument{kind,N}(state, pair_number)
 end
 
 function (arg::BRMR2D2AdaptiveCenteringArgument{:location})(x)
@@ -425,26 +437,26 @@ end
 # cells. No accessor arithmetic is duplicated or altered — every branch calls
 # the family functions verbatim. A model without R2D2 blocks has `n_r2d2 = 0`
 # and the historical ordinary-then-HSGP pair order.
-struct BRMJointAdaptiveCenteringState{SB}
-    ranef::BRMAdaptiveCenteringState{SB}
-    r2d2::BRMR2D2AdaptiveCenteringState
+struct BRMJointAdaptiveCenteringState{N,NR}
+    ranef::BRMAdaptiveCenteringState{N}
+    r2d2::BRMR2D2AdaptiveCenteringState{NR}
     hsgp::BRMHSGPAdaptiveCenteringState
     n_ranef::Int
     n_r2d2::Int
 end
 
-struct BRMJointAdaptiveCenteringArgument{KIND,SB} <: Function
-    state::BRMJointAdaptiveCenteringState{SB}
+struct BRMJointAdaptiveCenteringArgument{KIND,N,NR} <: Function
+    state::BRMJointAdaptiveCenteringState{N,NR}
     pair_number::Int
 end
 
 function BRMJointAdaptiveCenteringArgument(
-        state::BRMJointAdaptiveCenteringState{SB}, pair_number, kind::Symbol,
-    ) where {SB}
+        state::BRMJointAdaptiveCenteringState{N,NR}, pair_number, kind::Symbol,
+    ) where {N,NR}
     kind in (:location, :log_scale) || error(
         "unknown BRM joint adaptive-centering argument kind $kind",
     )
-    BRMJointAdaptiveCenteringArgument{kind,SB}(state, pair_number)
+    BRMJointAdaptiveCenteringArgument{kind,N,NR}(state, pair_number)
 end
 
 function (arg::BRMJointAdaptiveCenteringArgument{:location})(x)
@@ -750,44 +762,81 @@ struct BRMS2ZMapReparametrization <: WarmupHMC.AbstractReparametrization
     direction::Int
 end
 
-# One coefficient's contrasts from the `from` frame to the `to` frame, and the
-# log-Jacobian. Same math as `_s2z_partial_forward` / `_s2z_partial_inverse` /
-# `_s2z_partial_logjac`, written as scalar loops over the weight matrices: this
-# runs under Enzyme on every gradient, and views of the (constant) weights
-# stored into active temporaries trip its activity analysis.
-function _s2z_map_column(x, contrasts::Matrix{Int}, k::Int, tau,
-                         from::Matrix{Float64}, to::Matrix{Float64})
+# Helmert contrast `u[j]` of coefficient `k` (`_s2z_helmert_mul` of its J-1
+# contrast coordinates), streamed in descending `j` from `j = J`: `suf` carries
+# the suffix sum that function accumulates, so every step is O(1) and every pass
+# reproduces `u` bit for bit.
+@inline function _s2z_helmert_step(x, contrasts, k, j, suf, ::Type{T}) where {T}
+    j == 1 && return suf, suf
+    v = T(x[contrasts[j - 1, k]])
+    c = inv(sqrt(T((j - 1) * j)))
+    suf += v * c
+    suf - T(j) * v * c, suf
+end
+
+# Level `j` of the target contrasts before the Helmert transpose:
+# `d_to * (w - mean(w) - shift)` with `w = u / d_from`.
+@inline function _s2z_target_deviation(u, j, k, tau, from, to, mean_w, shift)
+    d_to = 1 - to[j, k] + to[j, k] * tau
+    d_to * (u / (1 - from[j, k] + from[j, k] * tau) - mean_w - shift)
+end
+
+# One coefficient's contrasts from the `from` frame to the `to` frame, written
+# into `y`; returns the log-Jacobian. Same math as `_s2z_partial_forward` /
+# `_s2z_partial_inverse` / `_s2z_partial_logjac`, written as scalar loops over
+# the weight matrices: this runs under Enzyme on every gradient, and views of
+# the (constant) weights stored into active temporaries trip its activity
+# analysis. It also keeps no heap work vectors — on Julia 1.10 one is a
+# use-after-free in Enzyme's reverse pass once another thread runs GC (see
+# `_block_location`) — so O(J) passes stream the Helmert contrasts instead, and
+# the transpose's prefix sums are the total minus the descending suffix. Each
+# `x` contrast is read before its `y` slot is written, so `y === x` is safe.
+function _s2z_map_column!(y, x, contrasts::Matrix{Int}, k::Int, tau,
+                          from::Matrix{Float64}, to::Matrix{Float64})
     J = size(from, 1)
     T = promote_type(eltype(x), typeof(tau))
-    v = Vector{T}(undef, J - 1)
-    for r in 1:J-1
-        v[r] = x[contrasts[r, k]]
-    end
-    u = BRM._s2z_helmert_mul(v)
-    # Physical deviations over tau: w .- mean(w), w = u ./ d_from.
-    w = Vector{T}(undef, J)
-    sum_w = zero(T); log_from = zero(T); sum_from = zero(T)
+    # The restricted Jacobians need only the level weights.
+    log_from = zero(T); sum_from = zero(T); log_to = zero(T); sum_to = zero(T)
     for j in 1:J
         d = 1 - from[j, k] + from[j, k] * tau
-        w[j] = u[j] / d
-        sum_w += w[j]; log_from += log(d); sum_from += d
+        log_from += log(d); sum_from += d
+        d = 1 - to[j, k] + to[j, k] * tau
+        log_to += log(d); sum_to += d
+    end
+    # Physical deviations over tau: w .- mean(w), w = u ./ d_from.
+    sum_w = zero(T)
+    suf = zero(T)
+    for j in J:-1:1
+        u, suf = _s2z_helmert_step(x, contrasts, k, j, suf, T)
+        sum_w += u / (1 - from[j, k] + from[j, k] * tau)
     end
     mean_w = sum_w / J
     # Target contrasts: d_to .* (z .- dot(d_to, z) / sum(d_to)).
-    d_to = Vector{T}(undef, J)
-    weighted = zero(T); log_to = zero(T); sum_to = zero(T)
-    for j in 1:J
-        d_to[j] = 1 - to[j, k] + to[j, k] * tau
-        weighted += d_to[j] * (w[j] - mean_w)
-        log_to += log(d_to[j]); sum_to += d_to[j]
+    weighted = zero(T)
+    suf = zero(T)
+    for j in J:-1:1
+        u, suf = _s2z_helmert_step(x, contrasts, k, j, suf, T)
+        weighted += (1 - to[j, k] + to[j, k] * tau) *
+            (u / (1 - from[j, k] + from[j, k] * tau) - mean_w)
     end
     shift = weighted / sum_to
-    u_to = Vector{T}(undef, J)
-    for j in 1:J
-        u_to[j] = d_to[j] * (w[j] - mean_w - shift)
+    total = zero(T)
+    suf = zero(T)
+    for j in J:-1:1
+        u, suf = _s2z_helmert_step(x, contrasts, k, j, suf, T)
+        total += _s2z_target_deviation(u, j, k, tau, from, to, mean_w, shift)
     end
-    ljac = (log(sum_from / J) - log_from) - (log(sum_to / J) - log_to)
-    BRM._s2z_helmert_transpose_mul(u_to), ljac
+    suffix = zero(T)
+    suf = zero(T)
+    for j in J:-1:2
+        u, suf = _s2z_helmert_step(x, contrasts, k, j, suf, T)
+        deviation = _s2z_target_deviation(u, j, k, tau, from, to, mean_w, shift)
+        suffix += deviation
+        r = j - 1
+        y[contrasts[r, k]] =
+            ((total - suffix) - T(r) * deviation) * inv(sqrt(T(r * (r + 1))))
+    end
+    (log(sum_from / J) - log_from) - (log(sum_to / J) - log_to)
 end
 
 function WarmupHMC.with_logabsdet_jacobian!(y::AbstractVector,
@@ -797,11 +846,7 @@ function WarmupHMC.with_logabsdet_jacobian!(y::AbstractVector,
         from, to = t.direction > 0 ? (t.source[b], t.target[b]) : (t.target[b], t.source[b])
         for k in axes(block.contrasts, 2)
             tau = exp(x[block.scales[k]])
-            z, l = _s2z_map_column(x, block.contrasts, k, tau, from, to)
-            for r in eachindex(z)
-                y[block.contrasts[r, k]] = z[r]
-            end
-            ljac += l
+            ljac += _s2z_map_column!(y, x, block.contrasts, k, tau, from, to)
         end
     end
     ljac, y
