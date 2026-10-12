@@ -111,6 +111,14 @@ through `brm_nlme_joint_start` to WarmupHMC on the conditional Stan and RK
 subject-draw targets. Run it in the NLMEEstimation scratch
 environment described below.
 
+`nlme_start.jl` reads complete RK and Stan points as NLMEEstimation starting
+values with `brm_nlme_start`. It covers a correlated population-PK model and a
+nested model with a correlated subject family, nested units and a shared HSGP,
+in estimated and fixed shared modes. Subject log-likelihoods sum to the RK
+observation likelihood at the point, and `brm_nlme_joint_start` rebuilds the
+same Stan point from the natural values. Run it in the NLMEEstimation scratch
+environment described below.
+
 `nlme_estimation_ext.jl` covers the NLMEEstimation.jl protocol extension:
 batched and single-subject evaluation, subject-cell population gradients,
 analytic η Hessian blocks, Gaussian observation moments

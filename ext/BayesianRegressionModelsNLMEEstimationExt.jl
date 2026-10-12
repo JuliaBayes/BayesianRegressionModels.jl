@@ -228,6 +228,29 @@ function NE.population_logprior_and_gradient(m::BRM.BRMNLMEModel, θ, σ, ω)
         gradient[m.theta], gradient[m.sigma], gω
 end
 
+# brm_nlme_start: pack the natural covariance as ω, then map ω back onto BRM's
+# authored scale and correlation coordinates. Both must reproduce the point.
+function BRM._brm_nlme_start_coordinates(m::BRM.BRMNLMEModel, θ, σ, Ω, u)
+    layout = NE.nlme_layout(m)
+    ω = NE.omega_parameters(layout, Ω)
+    unpacked = NE.omega_matrix(layout, ω)
+    same = BRM._brm_nlme_ragged(m.view) ?
+        all(isapprox(a, b; rtol=1e-10, atol=1e-12) for (a, b) in zip(unpacked, Ω)) :
+        isapprox(unpacked, Ω; rtol=1e-10, atol=1e-12)
+    same || BRM._brm_nlme_error(
+        "brm_nlme_start: NLMEEstimation's ω does not reproduce the covariance")
+    mapping = _prior_omega_map(m, θ, σ, ω)
+    positions = mapping.omega_positions
+    max_error = maximum(abs.(mapping.mapped[positions] .- u[positions]); init=0.0)
+    max_error <= 1e-8 * (1 + maximum(abs, u[positions]; init=0.0)) ||
+        BRM._brm_nlme_error("brm_nlme_start: ω maps back to BRM covariance " *
+            "coordinates $max_error away from the point")
+    population_logprior = NE.population_logprior(m, θ, σ, ω)
+    isfinite(population_logprior) || BRM._brm_nlme_error(
+        "brm_nlme_start: the population log prior is $population_logprior at the point")
+    (; omega=ω, population_logprior, max_error)
+end
+
 NE.population_prior_provenance(m::BRM.BRMNLMEModel) = (
     source=:BRM_RK_authored_priors,
     theta=copy(m.view.coordinates[m.theta]),
@@ -399,12 +422,6 @@ function NE.mu_referencing(m::BRM.BRMNLMEModel)
         design)
 end
 
-NE.parameter_names(m::BRM.BRMNLMEModel) = (
-    theta=string.(m.view.coordinates[m.theta]),
-    sigma=string.(m.view.coordinates[m.sigma]),
-    eta=BRM._brm_nlme_ragged(m.view) ?
-        [[string(b.block.group, "[", b.level, "]:", b.predictor, ":", b.coefficient)
-            for b in margins] for margins in m.view.subject_margins] :
-        [string(b.predictor, ":", b.coefficient) for b in m.view.block_margins])
+NE.parameter_names(m::BRM.BRMNLMEModel) = BRM._brm_nlme_parameter_names(m)
 
 end

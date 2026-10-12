@@ -48,15 +48,8 @@ function brm_nlme_joint_map(rk::RKBRMI, sb::SBBRMI; path,
     stan_model = problem.model
     transport = brm_coordinate_transport(rk, sb, BridgeStan.param_unc_names(stan_model))
     blocks = NamedTuple[]
-    for record in _brm_nlme_records(rk.plan)
-        record.kind === :ranef || continue
+    for (; family, record, indices) in _brm_nlme_families(rk, view)
         key = (; group=record.group, id=record.id)
-        indices = findall(m -> isequal(m.block, key), view.block_margins)
-        length(indices) == length(record.margins) &&
-            [(view.block_margins[i].predictor, view.block_margins[i].coefficient)
-                for i in indices] == collect(record.margins) || _brm_nlme_error(
-            "brm_nlme_joint_map: random-effect block $key does not match the " *
-            "NLME margin order")
         scales = BRMCoordinatePair[]
         for margin in record.margins
             matches = [p for p in transport.pairs
@@ -72,12 +65,31 @@ function brm_nlme_joint_map(rk::RKBRMI, sb::SBBRMI; path,
             if f.group === record.group && isequal(f.id, record.id)]
         length(factors) == (isnothing(record.L) ? 0 : 1) || _brm_nlme_error(
             "brm_nlme_joint_map: correlation factor for $key is not paired")
-        push!(blocks, (; family=length(blocks) + 1, record, indices, scales,
+        push!(blocks, (; family, record, indices, scales,
             factor=isempty(factors) ? nothing : only(factors)))
     end
-    length(blocks) == length(unique(m.block for m in view.block_margins)) ||
-        _brm_nlme_error("brm_nlme_joint_map: NLME random-effect blocks are not unique")
     BRMNLMEJointMap(rk, sb, problem, stan_model, view, transport, blocks)
+end
+
+# One entry per covariance family, in the view's family order: its random-effect
+# record and its margins' positions in a flat subject block.
+function _brm_nlme_families(rk::RKBRMI, view::BRMNLMEView)
+    families = NamedTuple[]
+    for record in _brm_nlme_records(rk.plan)
+        record.kind === :ranef || continue
+        key = (; group=record.group, id=record.id)
+        indices = findall(m -> isequal(m.block, key), view.block_margins)
+        length(indices) == length(record.margins) &&
+            [(view.block_margins[i].predictor, view.block_margins[i].coefficient)
+                for i in indices] == collect(record.margins) || _brm_nlme_error(
+            "NLME covariance: random-effect block $key does not match the " *
+            "NLME margin order")
+        push!(families, (; family=length(families) + 1, record, indices))
+    end
+    length(families) == length(view.family_sizes) ==
+        length(unique(m.block for m in view.block_margins)) ||
+        _brm_nlme_error("NLME covariance: random-effect blocks are not unique")
+    families
 end
 
 # A family can occur once or several times in a subject. These compact η
@@ -116,11 +128,51 @@ function _brm_nlme_joint_scale(values, record, K)
         [_brm_rk_declaration_value(values, name) for name in record.scales]
     end
     length(scales) == K || _brm_nlme_error(
-        "brm_nlme_joint_values: random-effect scale has $(length(scales)) " *
-        "values for $K margins")
+        "NLME covariance: random-effect scale of `$(record.group)` has " *
+        "$(length(scales)) values for $K margins")
     all(x -> x isa Real && isfinite(x) && x > 0, scales) || _brm_nlme_error(
-        "brm_nlme_joint_values: a random-effect scale is not finite and positive")
+        "NLME covariance: a random-effect scale of `$(record.group)` is not " *
+        "finite and positive")
     Float64.(scales)
+end
+
+# The natural covariance of every family and the natural subject effects at a
+# full RK unconstrained point: η = diag(scale) L z for each block instance.
+# `omega` is one matrix per family for a nested view and one block-diagonal
+# matrix otherwise; `eta` follows the view's subject order and compact layout.
+function _brm_nlme_natural(rk::RKBRMI, view::BRMNLMEView, families, u::AbstractVector)
+    values = _rk_constrained_values(rk, u)
+    nη = length(view.block_margins)
+    ragged = _brm_nlme_ragged(view)
+    omega = ragged ? [zeros(Float64, K, K) for K in view.family_sizes] :
+        zeros(Float64, nη, nη)
+    eta = ragged ? [zeros(Float64, length(c)) for c in view.subject_coordinates] :
+        zeros(Float64, nη, length(view.levels))
+    for (; family, record, indices) in families
+        K = length(indices)
+        scale = _brm_nlme_joint_scale(values, record, K)
+        L = isnothing(record.L) ? Matrix{Float64}(I, K, K) :
+            Matrix{Float64}(_brm_rk_declaration_value(values, record.L))
+        size(L) == (K, K) || _brm_nlme_error(
+            "NLME covariance: correlation factor of `$(record.group)` has size " *
+            "$(size(L)), expected ($K, $K)")
+        A = Diagonal(scale) * L
+        if ragged
+            omega[family] = A * A'
+        else
+            omega[indices, indices] = A * A'
+        end
+        for i in eachindex(view.levels)
+            if ragged
+                for range in _brm_nlme_family_instances(view, i, family)
+                    eta[i][range] = A * u[view.subject_coordinates[i][range]]
+                end
+            else
+                eta[indices, i] = A * u[view.subject_coordinates[i][indices]]
+            end
+        end
+    end
+    (; omega, eta)
 end
 
 """
@@ -143,40 +195,7 @@ function brm_nlme_joint_values(map::BRMNLMEJointMap, stan_u::AbstractVector)
     all(isfinite, stan_u) || _brm_nlme_error(
         "brm_nlme_joint_values: Stan coordinates must be finite")
     u = brm_stan_point_to_rk(t, stan_u)
-    values = _rk_constrained_values(map.rk, u)
-    nη = length(view.block_margins)
-    ragged = _brm_nlme_ragged(view)
-    omega = ragged ? [zeros(Float64, K, K) for K in view.family_sizes] :
-        zeros(Float64, nη, nη)
-    eta = ragged ? [zeros(Float64, length(c)) for c in view.subject_coordinates] :
-        zeros(Float64, nη, length(view.levels))
-    for block in map.blocks
-        (; family, record, indices) = block
-        K = length(indices)
-        scale = _brm_nlme_joint_scale(values, record, K)
-        L = isnothing(record.L) ? Matrix{Float64}(I, K, K) :
-            Matrix{Float64}(_brm_rk_declaration_value(values, record.L))
-        size(L) == (K, K) || _brm_nlme_error(
-            "brm_nlme_joint_values: correlation factor has size $(size(L)), " *
-            "expected ($K, $K)")
-        A = Diagonal(scale) * L
-        if ragged
-            omega[family] = A * A'
-        else
-            omega[indices, indices] = A * A'
-        end
-        for i in eachindex(view.levels)
-            if ragged
-                for range in _brm_nlme_family_instances(view, i, family)
-                    z = u[view.subject_coordinates[i][range]]
-                    eta[i][range] = A * z
-                end
-            else
-                z = u[view.subject_coordinates[i][indices]]
-                eta[indices, i] = A * z
-            end
-        end
-    end
+    (; omega, eta) = _brm_nlme_natural(map.rk, view, map.blocks, u)
     shared = findall(==(:shared_latent), view.role)
     (; theta=u[findall(==(:population), view.role)],
        sigma=u[findall(==(:scalar), view.role)], omega, eta,
