@@ -157,6 +157,62 @@ end
     end
 end
 
+@stestset "a prior only a generated cell response reads owns no NLME coordinate" begin
+    # `c` reaches only `z`, which binds no data column. The Stan route
+    # forward-simulates both and the fitted RK program omits them, so the
+    # partition, the semantic records and the subject likelihoods are those of
+    # the same model without them.
+    plate = @brm NLME_PLATE_DATA begin
+        sigma ~ Exponential(1)
+        c ~ Normal(-1.0, 1.0; upper=0.0)
+        log_CL ~ 1 + weight + (1 | pk | subject)
+        log_V ~ 1 + (1 | pk | subject)
+        @plate for i in eachindex(log_CL)
+            CL = exp(log_CL[i])
+            Vc = exp(log_V[i])
+            pred[i] = dose[i] / Vc .* exp.(-(CL / Vc) .* t[i])
+            dv[i] ~ normal(pred[i], sigma)
+            z[i] ~ normal(log.(pred[i]) .+ c, 1.0)
+        end
+    end
+    closure = @brm NLME_PLATE_DATA begin
+        sigma ~ Exponential(1)
+        c ~ Normal(-1.0, 1.0; upper=0.0)
+        log_CL ~ 1 + weight + (1 | pk | subject)
+        log_V ~ 1 + (1 | pk | subject)
+        pred ~ kernel(t, dose, dv, z, log_CL, log_V) do ts, d, y, zz, lCL, lV
+            CL = exp(lCL)
+            Vc = exp(lV)
+            p = d / Vc .* exp.(-(CL / Vc) .* ts)
+            y ~ normal(p, sigma)
+            zz ~ normal(log.(p) .+ c, 1.0)
+            p
+        end
+    end
+    twin = RKBRMI(nlme_plate_pk(NLME_PLATE_DATA))
+    twin_view = brm_nlme_view(twin)
+    named = Dict(Symbol("pop_log_CL.beta_pop.1") => 0.2,
+        Symbol("pop_log_CL.beta_pop.2") => 0.1, :log_V_Intercept => 1.6)
+    σ = [log(0.8)]
+    H = [0.15 -0.2 0.05; -0.1 0.25 0.3]
+    for brmi in (plate, closure)
+        backend = RKBRMI(brmi)
+        @test coordinate_names(backend.model.layout) == coordinate_names(twin.model.layout)
+        @test isequal(BRM._rk_coordinate_records(backend.plan),
+            BRM._rk_coordinate_records(twin.plan))
+        view = brm_nlme_view(backend)
+        @test view.coordinates == twin_view.coordinates
+        @test view.role == twin_view.role
+        @test view.subject_coordinates == twin_view.subject_coordinates
+        @test view.rows == twin_view.rows
+        m = brm_nlme_model(backend; ad_backend=NLME_AD)
+        θ = [named[c] for c in view.coordinates[m.theta]]
+        values, G = brm_nlme_loglikelihoods_and_gradients(m, θ, σ, H)
+        @test values ≈ plate_pk_oracle(m, θ, σ, H) rtol=1e-12
+        @test G ≈ plate_pk_oracle_gradients(m, θ, σ, H) rtol=1e-10
+    end
+end
+
 @stestset "shared HSGP and imputed coordinates can be estimated or fixed" begin
     data = (;
         subject=["a", "b", "c", "d"],

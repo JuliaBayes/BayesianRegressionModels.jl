@@ -833,5 +833,5 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
         (p.name for p in plan.regression.predictors))
     _rk_scalar_lone_intercepts(
         _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken),
-            _rk_observed_names(plan); retained=authored), lone_intercepts)
+            _rk_observed_names(plan); retained=authored, coordinates), lone_intercepts)
 end

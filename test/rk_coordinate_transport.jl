@@ -196,6 +196,20 @@ function authored_simplex(data)
         y ~ Normal(loc, 1)
     end
 end
+
+# `c` reaches only `z`, an in-cell response that binds no data column.
+function generated_cell_prior(data)
+    @brm data begin
+        sigma ~ Exponential(1)
+        c ~ Normal(-1.0, 1.0; upper=0.0)
+        log_k ~ 1 + x + (1 | subject)
+        @plate for i in eachindex(log_k)
+            level[i] = exp(log_k[i]) .* t[i]
+            y[i] ~ normal(level[i], sigma)
+            z[i] ~ normal(log.(level[i]) .+ c, 1.0)
+        end
+    end
+end
 end
 
 # A downstream submodel provider supplying its own mathematics to both
@@ -772,6 +786,27 @@ end
     @test block.address == (; kind=:vector, declaration=:s)
     @test block.K == 3
     @test transport.logdensity_offset ≈ -log(3) / 2
+    check_coordinate_transport(fixture)
+    @test isequal(data, saved)
+end
+
+@stestset "coordinate transport omits a prior only a generated cell response reads" begin
+    # The Stan route forward-simulates `z` and therefore `c`; the fitted RK
+    # program omits both. Neither backend packs `c`, and RK files no record
+    # for it, so the two inventories still pair completely.
+    data = (; subject=["a", "b", "c"], x=[0.1, -0.2, 0.3],
+        t=[[0.5, 1.0, 2.0], [0.5, 3.0], [1.0, 2.0, 4.0, 8.0]],
+        y=[[0.6, 1.1, 2.3], [0.4, 2.9], [1.2, 1.8, 4.5, 7.6]])
+    saved = deepcopy(data)
+    brmi = PublicCoordinateTransport.generated_cell_prior(data)
+    fixture = coordinate_transport_fixture(brmi, "generated-cell-prior")
+    (; rk, sb, transport) = fixture
+    @test :c ∉ coordinate_names(rk.model.layout)
+    @test "c" ∉ transport.stan_names
+    @test only(o.kind for o in brm_descriptor(sb).outputs if o.name === :c) ===
+        :generated_quantity
+    @test !any(r -> get(r, :declaration, nothing) === :c,
+        BRM._rk_coordinate_records(rk.plan))
     check_coordinate_transport(fixture)
     @test isequal(data, saved)
 end
