@@ -617,9 +617,10 @@ end
 @stestset "one subject's ragged-join work stays flat as other subjects are added" begin
     d = NLME_RAGGED_DATA
     rows = [findall(==(s), d.obs_subject) for s in d.subject]
-    # RK's reverse workspace takes one fixed ~33 KB step at a cohort size that
-    # varies between processes (seen between 12 and 81 subjects); compare
-    # beyond it. Linear growth would triple the bytes from 81 to 243.
+    # Time stays flat. Gradient bytes take one fixed ~33 KB step at a cohort
+    # size that differs between processes (seen between 12 and 243 subjects)
+    # and grow ~16 B per subject from whole-vector predictor reads, as the
+    # in-cell plate's do; whole-cohort work would triple them from 81 to 243.
     measured = map((81, 243)) do n
         obs = [(j, r) for j in 1:n for r in rows[mod1(j, 3)]]
         data = (; subject=["s$j" for j in 1:n], dose=[d.dose[mod1(j, 3)] for j in 1:n],
@@ -642,5 +643,5 @@ end
     @test maximum(x.primal_bytes for x in measured) <=
         1.2minimum(x.primal_bytes for x in measured)
     @test maximum(x.gradient_bytes for x in measured) <=
-        1.2minimum(x.gradient_bytes for x in measured)
+        1.5minimum(x.gradient_bytes for x in measured)
 end
