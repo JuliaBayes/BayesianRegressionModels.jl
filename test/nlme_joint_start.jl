@@ -63,6 +63,45 @@ using BridgeStan, LinearAlgebra
             mod=@__MODULE__); path=joinpath(tempdir(), "unused.stan"))
 end
 
+@stestset "shared HSGP point survives the full Stan conversion" begin
+    data = (; subject=["a", "b", "c"], t=[-0.8, 0.1, 0.7],
+        y=[0.2, -0.1, 0.5])
+    brmi = @brm data begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + hsgp(t; k=3, domain=(-1.0, 1.0)) + (1 | subject)
+        y ~ Normal(mu, sigma)
+    end
+    rk = RKBRMI(brmi)
+    sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
+    map = brm_nlme_joint_map(rk, sb;
+        path=joinpath(tempdir(), "brm-nlme-joint-start", "shared-hsgp.stan"))
+    view = map.view
+    shared = findall(==(:shared_latent), view.role)
+    @test !isempty(shared)
+    point = zeros(length(view.coordinates))
+    point[shared] .= collect(0.1:0.1:0.1length(shared))
+    θ = fill(0.2, count(==(:population), view.role))
+    σ = [-0.3]
+    Ω = reshape([0.49], 1, 1)
+    H = reshape([0.12, -0.2, 0.3], 1, :)
+    @test_throws BRMNLMEViewError brm_nlme_joint_start(map;
+        theta=θ, sigma=σ, omega=Ω, eta=H, subjects=view.levels)
+    @test_throws DimensionMismatch brm_nlme_joint_start(map;
+        theta=θ, sigma=σ, omega=Ω, eta=H, subjects=view.levels,
+        shared_point=point[1:end-1])
+    start = brm_nlme_joint_start(map;
+        theta=θ, sigma=σ, omega=Ω, eta=H, subjects=view.levels,
+        shared_point=point)
+    recovered = brm_nlme_joint_values(map, start.stan)
+    @test recovered.shared.names == view.coordinates[shared]
+    @test recovered.shared.values ≈ point[shared] atol=1e-10
+    @test recovered.omega ≈ Ω atol=1e-10
+    @test recovered.eta ≈ H atol=1e-10
+    @test start.checked.max_error <= 1e-9
+    @test length(start.fixed.indices) + length(start.free.indices) ==
+        length(start.stan)
+end
+
 @stestset "independent NLME covariance blocks stay independent in Stan" begin
     data = (; subject=["a", "b", "a", "b"], y=[0.4, -0.3, 0.2, -0.1],
         y2=[-0.2, 0.4, -0.1, 0.2])

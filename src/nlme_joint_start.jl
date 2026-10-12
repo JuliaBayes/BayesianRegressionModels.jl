@@ -11,8 +11,9 @@ compiles `sb` itself at `path`, so the returned `stan_problem` is the exact
 target whose coordinates are converted. Pass that problem to the sampler.
 Both backends must lower the same BRMI instance. The NLME view must cover every RK coordinate,
 and the semantic RK/Stan transport must pair every coordinate on both sides.
-Shared latent variables, Student-t mixing weights, centered Stan random effects,
-and other incomplete pairings are refused rather than silently initialized.
+Shared latent variables need a full packed `shared_point` from the RK model at
+conversion time. Student-t mixing weights, centered Stan random effects, and
+other incomplete pairings are refused rather than silently initialized.
 """
 struct BRMNLMEJointMap{R<:RKBRMI,S<:SBBRMI,P,M}
     rk::R
@@ -31,11 +32,8 @@ function brm_nlme_joint_map(rk::RKBRMI, sb::SBBRMI; path, kwargs...)
     any(==(:subject_mixing), view.role) && _brm_nlme_error(
         "brm_nlme_joint_map: Student-t mixing coordinates are not natural " *
         "Gaussian subject effects")
-    # A later NLME view may admit shared latent coordinates by taking a
-    # caller-supplied fixed point. They cannot be silently zero-filled when
-    # reconstructing a *full* joint start from only θ, σ, Ω and η.
     known = (:population, :scalar, :subject_scale, :subject_correlation,
-        :subject_effect)
+        :subject_effect, :shared_latent)
     extra = [(view.coordinates[i], role) for (i, role) in enumerate(view.role)
         if role ∉ known]
     isempty(extra) || _brm_nlme_error(
@@ -111,7 +109,9 @@ end
     brm_nlme_joint_values(map::BRMNLMEJointMap, stan_u)
 
 Read a complete Stan unconstrained point back as
-`(; theta, sigma, omega, eta, subjects)`. `omega` is the covariance matrix
+`(; theta, sigma, omega, eta, subjects, shared)`. `shared` contains the names
+and unconstrained values of fixed shared latent coordinates in RK order.
+`omega` is the covariance matrix
 of natural effects; columns of `eta` follow `subjects` in the NLME view's
 grouping-level order. The inverse uses the validated semantic transport and
 the actual RK constrained scale/correlation values.
@@ -144,14 +144,16 @@ function brm_nlme_joint_values(map::BRMNLMEJointMap, stan_u::AbstractVector)
             eta[indices, i] = A * z
         end
     end
+    shared = findall(==(:shared_latent), view.role)
     (; theta=u[findall(==(:population), view.role)],
        sigma=u[findall(==(:scalar), view.role)], omega, eta,
-       subjects=copy(view.levels))
+       subjects=copy(view.levels),
+       shared=(; names=view.coordinates[shared], values=u[shared]))
 end
 
 """
     brm_nlme_joint_start(map::BRMNLMEJointMap;
-        theta, sigma, omega, eta, subjects)
+        theta, sigma, omega, eta, subjects, shared_point=nothing)
 
 Convert one NLME estimate into the *same model's* complete BridgeStan
 `init_positions`. `theta` and `sigma` are the NLME model's unconstrained
@@ -159,17 +161,21 @@ vectors; `omega` is its natural-effect covariance matrix; `eta[:, j]` is
 the natural effect of the explicitly named `subjects[j]`. Subject columns
 may be reordered, but every model level must occur exactly once. Covariance
 between independent NLME blocks must be zero.
+If the model has shared latent coordinates, `shared_point` must be a full packed
+unconstrained point from the same RK model, as for `brm_nlme_model`. Only its
+shared coordinates are copied; they remain fixed in the returned Stan point.
 
 Returns `(; stan, fixed, free, checked)`. `stan` is the full unconstrained
-vector. `fixed` names and indexes the population, scalar and covariance
+vector. `fixed` names and indexes the population, scalar, shared and covariance
 coordinates; `free` names and indexes standardized subject coordinates.
 Both sets include their values and partition the full vector. `checked`
 is BRM's physical RK/Stan coordinate comparison. The function also inverts
-the constructed point and checks the supplied theta, sigma, omega and eta.
+the constructed point and checks the supplied theta, sigma, omega, eta and
+shared values.
 No caller input is mutated.
 """
 function brm_nlme_joint_start(map::BRMNLMEJointMap; theta, sigma, omega, eta,
-        subjects)
+        subjects, shared_point=nothing)
     t, view = map.transport, map.view
     θ = Vector{Float64}(theta)
     σ = Vector{Float64}(sigma)
@@ -192,6 +198,18 @@ function brm_nlme_joint_start(map::BRMNLMEJointMap; theta, sigma, omega, eta,
         "brm_nlme_joint_start: omega must be symmetric")
     order = _brm_nlme_joint_subject_order(view, subjects)
     u = zeros(Float64, length(view.coordinates))
+    shared = findall(==(:shared_latent), view.role)
+    if !isempty(shared)
+        shared_point === nothing && _brm_nlme_error(
+            "brm_nlme_joint_start: $(length(shared)) shared latent coordinate(s) " *
+            "need `shared_point`, a full packed unconstrained point from this RK model")
+        length(shared_point) == length(u) || throw(DimensionMismatch(
+            "brm_nlme_joint_start: shared_point has length $(length(shared_point)), " *
+            "expected $(length(u))"))
+        u[shared] .= shared_point[shared]
+        all(isfinite, u[shared]) || _brm_nlme_error(
+            "brm_nlme_joint_start: shared_point contains a nonfinite shared coordinate")
+    end
     u[p] = θ
     u[s] = σ
     # The compiled model supplies the inverse transform for its correlation
@@ -248,7 +266,8 @@ function brm_nlme_joint_start(map::BRMNLMEJointMap; theta, sigma, omega, eta,
     isapprox(roundtrip.theta, θ; atol=1e-9, rtol=1e-9) &&
         isapprox(roundtrip.sigma, σ; atol=1e-9, rtol=1e-9) &&
         isapprox(roundtrip.omega, Ω; atol=1e-9, rtol=1e-9) &&
-        isapprox(roundtrip.eta, H[:, order]; atol=1e-9, rtol=1e-9) ||
+        isapprox(roundtrip.eta, H[:, order]; atol=1e-9, rtol=1e-9) &&
+        isapprox(roundtrip.shared.values, u[shared]; atol=1e-9, rtol=1e-9) ||
         _brm_nlme_error("brm_nlme_joint_start: NLME-to-Stan round trip disagrees")
     checked = brm_check_coordinate_transport(t, map.rk, map.stan_model,
         brm_stan_point_to_rk(t, stan))
