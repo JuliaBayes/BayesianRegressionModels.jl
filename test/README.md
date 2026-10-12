@@ -102,7 +102,7 @@ value and gradient allocations stay flat when unrelated subjects grow from
 3 to 9 to 27. A top-level `ragged(y, group)` join of a plate cell's output,
 including a left-censored join with a per-row limit and an `addprop` scale
 beside an in-cell observation, has the same single-subject cell, checked
-against independent oracles and for flat work at 27, 81 and 243 subjects. A
+against independent oracles and for flat work at 81 and 243 subjects. A
 completed covariate's observed entries join their subject's cell.
 Flat-row grouped models retain lockstep evaluation and refuse
 the single-subject method by name. It runs in the test environment above.

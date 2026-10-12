@@ -617,9 +617,10 @@ end
 @stestset "one subject's ragged-join work stays flat as other subjects are added" begin
     d = NLME_RAGGED_DATA
     rows = [findall(==(s), d.obs_subject) for s in d.subject]
-    # Past ~15 subjects RK's reverse workspace takes one fixed step (measured
-    # 93 → 126 KB between 12 and 16 subjects), so compare beyond it.
-    measured = map((27, 81, 243)) do n
+    # RK's reverse workspace takes one fixed ~33 KB step at a cohort size that
+    # varies between processes (seen between 12 and 81 subjects); compare
+    # beyond it. Linear growth would triple the bytes from 81 to 243.
+    measured = map((81, 243)) do n
         obs = [(j, r) for j in 1:n for r in rows[mod1(j, 3)]]
         data = (; subject=["s$j" for j in 1:n], dose=[d.dose[mod1(j, 3)] for j in 1:n],
             obs_subject=["s$(first(o))" for o in obs], t=[d.t[last(o)] for o in obs],
