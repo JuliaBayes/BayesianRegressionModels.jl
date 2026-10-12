@@ -190,6 +190,42 @@ function BRM._rk_value_gradient_and_pointwise!(query::SamplerQuery,
     value, gradient, retained.pointwise
 end
 
+# The prior and its coordinate Jacobian are separate RK graph nodes. Preparing
+# them independently of the likelihood lets NLME evaluate the population prior
+# once per objective, without running any subject observation cells. Prepare
+# them on first use so a conditional-only NLME fit keeps its construction cost.
+function BRM._rk_nlme_population_prior(backend::BRM.RKBRMI,
+        unit::Vector{Float64}, ad_backend)
+    (; backend, unit, ad_backend, cached=Ref{Any}(nothing), lock=ReentrantLock())
+end
+
+function _nlme_population_prior_bundle(state)
+    lock(state.lock) do
+        state.cached[] === nothing || return state.cached[]
+        backend, unit, ad_backend = state.backend, state.unit, state.ad_backend
+        plan = _rk_translated_plan(backend.plan)
+        built = backend.model
+        value = prepare_query(built, plan, :prior)
+        jacobian = prepare_query(built, plan, :log_jacobian)
+        gradient = prepare_query_ad(prepare_ad, built, plan, :prior, ad_backend, unit)
+        jacobian_gradient = prepare_query_ad(prepare_ad, built, plan,
+            :log_jacobian, ad_backend, unit)
+        state.cached[] = (; value, jacobian, gradient, jacobian_gradient)
+    end
+end
+
+function BRM._rk_nlme_population_prior_value(state, u::Vector{Float64})
+    bundle = _nlme_population_prior_bundle(state)
+    Base.invokelatest(bundle.value, u) + Base.invokelatest(bundle.jacobian, u)
+end
+
+function BRM._rk_nlme_population_prior_value_gradient(state, u::Vector{Float64})
+    bundle = _nlme_population_prior_bundle(state)
+    value, gradient = ad_value_and_gradient(bundle.gradient, u)
+    jacobian, jacobian_gradient = ad_value_and_gradient(bundle.jacobian_gradient, u)
+    value + jacobian, gradient + jacobian_gradient
+end
+
 # The Gaussian NLME view uses one primal observations query and one set of
 # colored η directions. Direction k moves margin k for every subject; their
 # responses are conditionally independent, so each output sees only its own

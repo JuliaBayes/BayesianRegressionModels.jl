@@ -18,6 +18,93 @@ include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 
 const NLMEEXT = Base.get_extension(BRM, :BayesianRegressionModelsNLMEEstimationExt)
 
+@stestset "population priors use the authored laws in NLME coordinates" begin
+    data = NLME_PLATE_DATA
+    brmi = @brm data begin
+        sigma ~ Exponential(2)
+        log_CL ~ 1 + weight + (1 | pk | subject)
+        log_V ~ 1 + (1 | pk | subject)
+        effect(log_CL, Intercept) ~ Normal(0.3, 0.8)
+        effect(log_CL, weight) ~ Normal(-0.1, 0.4)
+        effect(log_V, Intercept) ~ Normal(1.5, 0.6)
+        sd(:, pk) ~ Exponential(0.7)
+        cor(:, pk) ~ LKJCholesky(2, 2)
+        @plate for i in eachindex(log_CL)
+            CL = exp(log_CL[i])
+            Vc = exp(log_V[i])
+            pred[i] = dose[i] / Vc .* exp.(-(CL / Vc) .* t[i])
+            dv[i] ~ normal(pred[i], sigma)
+        end
+    end
+    m = brm_nlme_model(RKBRMI(brmi); ad_backend=NLME_AD)
+    named = Dict(Symbol("pop_log_CL.beta_pop.1") => 0.25,
+        Symbol("pop_log_CL.beta_pop.2") => -0.15, :log_V_Intercept => 1.4)
+    θ = [named[name] for name in m.view.coordinates[m.theta]]
+    σ = [log(0.8)]
+    ω = [log(0.7), 0.15, log(0.6)]
+    a, b, c = exp(ω[1]), ω[2], exp(ω[3])
+    τ = hypot(b, c)
+    ρ = b / τ
+    # K=2 LKJ(η=2) has density 3/4*(1-ρ²) on its free Cholesky entry.
+    # The change from NLME's log-Cholesky ω to (τ₁, τ₂, ρ) has Jacobian
+    # log(a) + 2log(c/τ). BRM's standardized z prior belongs to NLME instead.
+    oracle = logpdf(Normal(0.3, 0.8), named[Symbol("pop_log_CL.beta_pop.1")]) +
+        logpdf(Normal(-0.1, 0.4), named[Symbol("pop_log_CL.beta_pop.2")]) +
+        logpdf(Normal(1.5, 0.6), named[:log_V_Intercept]) +
+        logpdf(Exponential(2), exp(only(σ))) + only(σ) +
+        logpdf(Exponential(0.7), a) + logpdf(Exponential(0.7), τ) +
+        log(3 / 4) + log1p(-ρ^2) + log(a) + 2log(c / τ)
+    value = population_logprior(m, θ, σ, ω)
+    @test value ≈ oracle atol=1e-10
+    v, gθ, gσ, gω = population_logprior_and_gradient(m, θ, σ, ω)
+    @test v ≈ value atol=1e-10
+    θgradient = Dict(Symbol("pop_log_CL.beta_pop.1") =>
+            -(named[Symbol("pop_log_CL.beta_pop.1")] - 0.3) / 0.8^2,
+        Symbol("pop_log_CL.beta_pop.2") =>
+            -(named[Symbol("pop_log_CL.beta_pop.2")] + 0.1) / 0.4^2,
+        :log_V_Intercept => -(named[:log_V_Intercept] - 1.5) / 0.6^2)
+    @test gθ ≈ [θgradient[name] for name in m.view.coordinates[m.theta]] atol=1e-9
+    @test gσ ≈ [1 - exp(only(σ)) / 2] atol=1e-9
+    @test gω ≈ [1 - a / 0.7,
+        -b / (0.7τ) - 4b / τ^2,
+        -c^2 / (0.7τ) + 4b^2 / τ^2] atol=1e-9
+    provenance = population_prior_provenance(m)
+    @test provenance.source === :BRM_RK_authored_priors
+    @test provenance.theta == m.view.coordinates[m.theta]
+    @test provenance.omega === :NLME_log_Cholesky
+end
+
+@stestset "three-margin covariance prior gradient follows NLME coordinates" begin
+    data = (; subject=["a", "b", "c"],
+        ya=[0.2, -0.1, 0.5], yb=[-0.3, 0.4, 0.1], yc=[0.1, 0.0, -0.2])
+    brmi = @brm data begin
+        sigma ~ Exponential(1)
+        a ~ 1 + (1 | pk | subject)
+        b ~ 1 + (1 | pk | subject)
+        c ~ 1 + (1 | pk | subject)
+        sd(:, pk) ~ Exponential(0.7)
+        cor(:, pk) ~ LKJCholesky(3, 2)
+        ya ~ Normal(a, sigma)
+        yb ~ Normal(b, sigma)
+        yc ~ Normal(c, sigma)
+    end
+    m = brm_nlme_model(RKBRMI(brmi); ad_backend=NLME_AD)
+    θ = fill(0.1, length(m.theta))
+    σ = [log(0.8)]
+    ω = [log(0.7), 0.12, log(0.8), -0.08, 0.16, log(0.9)]
+    value, _, _, gω = population_logprior_and_gradient(m, θ, σ, ω)
+    @test value ≈ population_logprior(m, θ, σ, ω) atol=1e-10
+    @test length(gω) == 6
+    for j in eachindex(ω)
+        plus, minus = copy(ω), copy(ω)
+        plus[j] += 1e-5
+        minus[j] -= 1e-5
+        numerical = (population_logprior(m, θ, σ, plus) -
+            population_logprior(m, θ, σ, minus)) / 2e-5
+        @test gω[j] ≈ numerical atol=1e-6
+    end
+end
+
 # A realistic population point for NLME_PLATE_DATA: V ≈ 5, CL ≈ 1.2.
 function plate_pk_point(m)
     named = Dict(Symbol("pop_log_CL.beta_pop.1") => 0.2,

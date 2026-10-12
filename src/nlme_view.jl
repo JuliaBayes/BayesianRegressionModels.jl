@@ -570,6 +570,9 @@ function _rk_nlme_cell_query end
 function _rk_nlme_cell_value end
 function _rk_nlme_compact_cell_sampler end
 function _rk_nlme_compact_cell_value_and_gradient! end
+function _rk_nlme_population_prior end
+function _rk_nlme_population_prior_value end
+function _rk_nlme_population_prior_value_gradient end
 _brm_nlme_forward_backend(ad_backend) = nothing
 
 # A cell query still addresses the original packed coordinate space. Overlay
@@ -643,7 +646,7 @@ supported by RK's `:observations` preset, `observed` holds subject observation
 vectors in the same order as the prepared query. `observations_pushforward`
 uses one colored direction per random-effect margin across all subjects.
 """
-struct BRMNLMEModel{B<:RKBRMI,S,Q,V,O,J,C,G}
+struct BRMNLMEModel{B<:RKBRMI,S,Q,V,O,J,C,G,P}
     view::BRMNLMEView
     backend::B
     sampler::S
@@ -661,6 +664,7 @@ struct BRMNLMEModel{B<:RKBRMI,S,Q,V,O,J,C,G}
     cell_query::C
     cell_gradient::G
     cell_rows::Union{Nothing,Vector{Int}}
+    population_prior::P
 end
 
 Base.show(io::IO, m::BRMNLMEModel) = print(io, "BRMNLMEModel(",
@@ -734,10 +738,12 @@ function brm_nlme_model(backend::RKBRMI; ad_backend,
         (sampler=_rk_nlme_compact_cell_sampler(backend,
             Tuple(first.(attribution)), unit, selected), lock=ReentrantLock())
     end
+    population_prior = _rk_nlme_population_prior(backend, unit, ad_backend)
     BRMNLMEModel(view, backend, sampler, pointwise, eta_hvp, attribution,
         findall(==(:population), view.role), findall(==(:scalar), view.role),
         eta_blocks, unit, observations_query, observations_pushforward,
-        observed, observation_attribution, cell_query, cell_gradient, cell_rows)
+        observed, observation_attribution, cell_query, cell_gradient, cell_rows,
+        population_prior)
 end
 
 function _brm_nlme_cell_point(m::BRMNLMEModel, i::Integer, θ, σ, η)

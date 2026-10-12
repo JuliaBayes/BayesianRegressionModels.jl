@@ -34,7 +34,7 @@ WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 
 [extensions]
 BayesianRegressionModelsAlgebraOfVegaExt = "AlgebraOfVega"
-BayesianRegressionModelsNLMEEstimationExt = ["NLMEEstimation", "Enzyme", "ADTypes"]
+BayesianRegressionModelsNLMEEstimationExt = ["NLMEEstimation", "Enzyme", "ADTypes", "ReactiveKernels", "ReactiveKernelsPPL"]
 BayesianRegressionModelsReactiveKernelsExt = ["ReactiveKernels", "ReactiveKernelsPPL"]
 BayesianRegressionModelsReactiveKernelsEnzymeExt = ["ReactiveKernels", "ReactiveKernelsPPL", "Enzyme", "DifferentiationInterface"]
 BayesianRegressionModelsTuringExt = "Turing"
@@ -55,4 +55,3 @@ RuntimeGeneratedFunctions = "0.5"
 Turing = "0.46"
 WarmupHMC = "0.2"
 julia = "1.10"
-
