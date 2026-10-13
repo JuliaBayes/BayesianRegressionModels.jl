@@ -174,6 +174,82 @@ ragged_pk_oracle(m, θ, σ, H, d) = [term.value for term in _ragged_pk_oracle_te
 ragged_pk_oracle_gradients(m, θ, σ, H, d) =
     reduce(hcat, [term.gradient for term in _ragged_pk_oracle_terms(m, θ, σ, H, d)])
 
+# A plate cell with its own observation (one marker array per subject) and a
+# flat concentration column joined to the cells, left-censored at a per-row
+# quantification limit with a combined additive and proportional scale. Rows
+# interleave subjects; `s4` has no markers and one concentration, and two
+# concentrations sit at their limit.
+const NLME_CENSORED_JOIN_DATA = (; subject=["s2", "s1", "s3", "s4"],
+    dose=[80.0, 100.0, 120.0, 90.0],
+    marker=[[1.1, 0.9], [1.3], [0.8, 1.0, 1.2], Float64[]],
+    obs_subject=["s1", "s2", "s3", "s1", "s3", "s2", "s1", "s3", "s4"],
+    t=[0.5, 0.25, 0.5, 1.5, 2.0, 1.0, 3.0, 6.0, 1.0],
+    conc=[8.1, 7.6, 9.0, 5.2, 6.3, 5.0, 2.1, 3.0, 4.0],
+    lloq=[1.0, 1.0, 1.0, 1.0, 1.0, 5.0, 1.0, 3.0, 0.5])
+
+function nlme_censored_join(data)
+    @brm data begin
+        sigma_add ~ Exponential(1)
+        sigma_prop ~ Exponential(1)
+        marker_scale ~ Exponential(1)
+        log(CL) ~ 1 + (1 | pk | subject)
+        log(V) ~ 1 + (1 | pk | subject)
+        @plate for i in eachindex(CL)
+            pred[i] = dose[i] / V[i] .* exp.((-CL[i] / V[i]) .* ragged(t, obs_subject)[i])
+            marker[i] ~ normal(fill(CL[i] / 10, length(marker[i])), marker_scale)
+        end
+        ragged(conc, obs_subject) ~ censored(
+            Normal(pred, addprop(pred, sigma_add, sigma_prop)); lower=lloq)
+    end
+end
+
+# A subject-level covariate with missing values, completed by the model and
+# read by a subject predictor, beside an in-cell marker observation and a
+# ragged concentration join. The covariate's observed values are subject data:
+# `s1` and `s4` have one, `s2` and `s3` none.
+const NLME_IMPUTED_JOIN_DATA = (; subject=["s2", "s1", "s3", "s4"],
+    dose=[80.0, 100.0, 120.0, 90.0],
+    w=Union{Missing,Float64}[missing, 0.3, missing, -0.5],
+    marker=[[1.1, 0.9], [1.3], [0.8, 1.0, 1.2], Float64[]],
+    obs_subject=["s1", "s2", "s3", "s1", "s3", "s2", "s1", "s3", "s4"],
+    t=[0.5, 0.25, 0.5, 1.5, 2.0, 1.0, 3.0, 6.0, 1.0],
+    conc=[8.1, 7.6, 9.0, 5.2, 6.3, 5.0, 2.1, 3.0, 4.0])
+
+function nlme_imputed_join(data)
+    @brm data begin
+        mi(w) ~ Normal(0, 1)
+        sigma ~ Exponential(1)
+        marker_scale ~ Exponential(1)
+        log(CL) ~ 1 + w + (1 | pk | subject)
+        log(V) ~ 1 + (1 | pk | subject)
+        @plate for i in eachindex(CL)
+            pred[i] = dose[i] / V[i] .* exp.((-CL[i] / V[i]) .* ragged(t, obs_subject)[i])
+            marker[i] ~ normal(fill(CL[i] / 10, length(marker[i])), marker_scale)
+        end
+        ragged(conc, obs_subject) ~ Normal(pred, sigma)
+    end
+end
+
+# Independent oracle: each subject's marker and censored concentration
+# densities, written out from the model's equations at the NLME point.
+function censored_join_oracle(m, backend, θ, σ, H, d)
+    c = constrain(backend.model.layout, BRM._brm_nlme_point(m, θ, σ, H))
+    margin(pred) = findfirst(b -> b.predictor === pred, m.view.block_margins)
+    kcl, kv = margin(:CL), margin(:V)
+    map(eachindex(m.view.levels)) do i
+        level = string(m.view.levels[i])
+        r = only(findall(==(level), d.subject))
+        rows = findall(==(level), d.obs_subject)
+        CL = exp(c.CL_Intercept + H[kcl, i])
+        V = exp(c.V_Intercept + H[kv, i])
+        pred = d.dose[r] / V .* exp.(-(CL / V) .* d.t[rows])
+        scale = sqrt.(c.sigma_add^2 .+ (pred .* c.sigma_prop) .^ 2)
+        sum(logpdf.(censored.(Normal.(pred, scale), d.lloq[rows], Inf), d.conc[rows]);
+            init=0.0) +
+            sum(logpdf.(Normal(CL / 10, c.marker_scale), d.marker[r]); init=0.0)
+    end
+end
+
 # A generic two-level random-effect model with interleaved observation rows:
 # subject effects plus nested unit effects owned through `obs_subject`.
 const NESTED_DATA = (;

@@ -1730,6 +1730,8 @@ function _rk_callable_source!(definitions, bindings, entry, ::typeof(addprop))
         LineNumberNode(0), definition))
     :done
 end
+# Each scale entry reads only its own location entry.
+_rk_rowwise_callable(::typeof(addprop)) = true
 
 # Distinctly-named 2-arg `@lhs @lpxf` UDFs so typed-LHS sampling routes to a
 # user-defined Stan function without clashing with Stan's scalar-only

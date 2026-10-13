@@ -244,10 +244,8 @@ function _rk_withheld_observation(statement, names)
         first(statement.args) in (:~, :.~) &&
         return _rk_emitted_observation_name(statement.args[2]) in names
     # A per-subject observation is a `@plate` holding only that observation.
-    Meta.isexpr(statement, :macrocall) && first(statement.args) === Symbol("@plate") &&
-        Meta.isexpr(last(statement.args), :for) || return false
-    body = [s for s in last(last(statement.args).args).args if !(s isa LineNumberNode)]
-    !isempty(body) && all(s -> _rk_withheld_observation(s, names), body)
+    body = _rk_plate_body(statement)
+    body !== nothing && !isempty(body) && all(s -> _rk_withheld_observation(s, names), body)
 end
 function _rk_emit_ast(plan::_RKHeldOutPlan; coordinates=nothing)
     emitted = _rk_emit_ast(plan.parent; coordinates)

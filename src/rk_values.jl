@@ -672,12 +672,20 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
         layout = isempty(kernels) ?
             (; values=o.response, rows=nothing, lengths=nothing) :
             _rk_kernel_observed_layout(o, kernels)
-        cells = isempty(kernels) ? nothing :
+        raw_response = o.lhs isa ExprColumn && getf(o.lhs) === ragged ?
+            parent(parent(first(getargs(o.lhs)))) : o.response
+        nested = isempty(kernels) ? nothing :
             _rk_nested_kernel_cells(o, layout, kernels, value_columns, parameter_names)
-        if cells !== nothing
+        if nested !== nothing
             # One array per subject, observed per subject (RKPPL nested plates).
-            _rk_validate_nested_bounds(o, context.data)
-            value_columns[o.name] = o.response
+            _rk_validate_nested_bounds(o, raw_response, context.data)
+            cells = if layout.rows === nothing
+                value_columns[o.name] = o.response
+                nested.cells
+            else
+                _rk_prepare_nested_join!(value_columns, taken, o, layout, nested,
+                    raw_response)
+            end
             return _RKNestedObservation(o, cells)
         end
         modifier = _rk_kernel_response_modifier!(value_columns, taken, derived, o, layout)
@@ -692,8 +700,6 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
                     layout.values, context.data; prefix="RK backend")
             end
         end
-        raw_response = o.lhs isa ExprColumn && getf(o.lhs) === ragged ?
-            parent(parent(first(getargs(o.lhs)))) : o.response
         _rk_prepare_kernel_observed_values!(value_columns, taken, derived,
             o.name, layout, raw_response; port=_rk_kernel_input_port(kernels, o.name))
         _BRMPreparedObservation(o.name, o.lhs, o.distribution, o.response,
@@ -788,8 +794,14 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
     union!(taken, first.(bindings), (a.name for a in plan.assignments), kernel_cells,
         (p.name for p in plan.regression.parameters),
         (p.name for p in plan.regression.predictors))
+    hoisted = _rk_nested_kernel_arguments(plan, bindings, taken)
     for assignment in plan.assignments
-        _rk_emit_value_assignment!(defs, stmts, bindings, taken, assignment)
+        if assignment isa _RKPreparedKernelAssignment && haskey(hoisted.kernels, assignment.name)
+            _rk_emit_value_assignment!(defs, stmts, bindings, taken, assignment;
+                arguments=hoisted.kernels[assignment.name])
+        else
+            _rk_emit_value_assignment!(defs, stmts, bindings, taken, assignment)
+        end
         # A downstream submodel provider owns the declarations scoped under
         # its target; the transport pairs them with the SB declaration's.
         assignment isa _RKPreparedSubmodelAssignment &&
@@ -809,6 +821,8 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
             "RK backend: response `$(observation.name)` needs a distribution call")
         isempty(distribution.kwargs) || distribution.callable === Ordinal || error(
             "RK backend: response `$(observation.name)` distribution keywords are unsupported")
+        observation isa _RKNestedObservation && ((observation, distribution) =
+            _rk_nested_observation_reads(observation, distribution, hoisted.reads))
         distribution = _rk_align_kernel_observation_arguments!(defs, stmts, bindings, taken,
             plan, observation, distribution)
         _rk_emit_observation_source!(defs, stmts, bindings, taken,
