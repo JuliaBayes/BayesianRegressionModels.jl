@@ -24,6 +24,12 @@ covers interleaved rows, shared random effects, empty groups, raw-data controls
 and preservation of field and keyword names. Run it with
 `julia --project=. test/kernel_ragged_broadcast.jl` or the test environment above.
 
+`plate_ragged_omitted_response.jl` checks a censored ragged observation inside
+`@plate` with its data column bound, omitted, and reprocessed. It requires the
+StanBlocks revision pinned by `setup_env.jl` and checks the public flat
+predictive segments, bound pointwise likelihood, and refusal of a missing
+non-response ragged input.
+
 `benchmark_emission_latency.jl` reports package loading, first model construction,
 first RK artifact emission and repeated calls separately, including compiler time,
 allocation and garbage collection. It uses independent synthetic regression and
