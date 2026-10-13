@@ -194,10 +194,11 @@ function check_grouped_arguments(label, data)
     else
         # Each subject's arguments broadcast against its own response array; a
         # singleton reference repeats over that subject's observations.
+        # A computed argument is written by the kernel's plate.
         @test occursin(label === :ordinary ?
-            "y[i] .~ Normal.(loc_cells[i] .- reference[i], sigma)" :
+            "y[i] .~ Normal.(loc_argument_y_1[i], sigma)" :
             label === :arithmetic ?
-            "y[i] .~ LogDensity.(y_scalar_logdensity, loc_cells[i], reference[i] .* sigma, sigma)" :
+            "y[i] .~ LogDensity.(y_scalar_logdensity, loc_cells[i], loc_argument_y_2[i], sigma)" :
             "y[i] .~ LogDensity.(y_scalar_logdensity, loc_cells[i], reference[i], sigma)", main)
         @test !occursin("[3, 0, 4]", definitions * main)
         @test !occursin("brm_flatten_response", definitions * main)

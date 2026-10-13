@@ -213,8 +213,10 @@ end
     definitions, main, _ = emitted_source(PublicShapeReuse.joined(trained))
     # The join is observed per subject: its response and per-row reference are
     # bound as subject cells grouped by the partition, so no argument kernel
-    # gathers rows and no partition appears in source.
-    @test occursin("y[i] .~ Normal.(loc_cells[i] .- y_cells_reference[i], sigma)", main)
+    # gathers rows and no partition appears in source. The computed location
+    # is written by the kernel's plate from that subject's reference cell.
+    @test occursin("loc_argument_y_1[i] = loc_value .- y_cells_reference[i]", main)
+    @test occursin("y[i] .~ Normal.(loc_argument_y_1[i], sigma)", main)
     @test !occursin("y_observation_argument", definitions * main)
     @test !occursin("y_rows", definitions * main)
     # The same row count in another subject order: a stale partition would
@@ -253,13 +255,15 @@ flat_data(lengths) = (; t=[[0.4k for k in 1:n] for n in lengths],
     reference=[[0.01 * mod1(j + k, 3) for k in 1:n] for (j, n) in enumerate(lengths)])
 
 # A per-subject response whose law reads per-subject arguments and a
-# row-local helper (`addprop`) is observed per subject, reading its bound cells
-# directly: no flatten, argument kernel or row gather.
+# row-local helper (`addprop`) is observed per subject. The kernel's plate
+# computes both arguments from its own value and the bound reference cells: no
+# flatten, argument kernel or row gather.
 @stestset "a per-subject response with a row-local scale is observed from its bound cells" begin
     trained, scored = flat_data([3, 0, 4]), flat_data([2, 1, 4, 2])
     definitions, main, _ = emitted_source(PublicShapeReuse.flat_scale(trained))
-    @test occursin("y[i] .~ Normal.(loc_cells[i] .- reference[i], addprop(loc_cells[i], a, b))",
-        main)
+    @test occursin("loc_argument_y_1[i] = loc_value .- reference[i]", main)
+    @test occursin("loc_argument_y_2[i] = addprop(loc_value, a, b)", main)
+    @test occursin("y[i] .~ Normal.(loc_argument_y_1[i], loc_argument_y_2[i])", main)
     for retired in ("brm_flatten_response", "y_raw_response", "y_rows", "_reader(raw)",
             "_source_values", "_source_rows", "getindex.(Ref(")
         @test !occursin(retired, definitions * main)

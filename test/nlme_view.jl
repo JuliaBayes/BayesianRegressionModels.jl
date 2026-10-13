@@ -614,34 +614,50 @@ end
     end
 end
 
-@stestset "one subject's ragged-join work stays flat as other subjects are added" begin
-    d = NLME_RAGGED_DATA
+# A fixture's subjects repeated to `n`, each copy with its source subject's
+# per-subject values and rows.
+function replicated_cohort(d, n)
+    k = length(d.subject)
     rows = [findall(==(s), d.obs_subject) for s in d.subject]
-    # Time stays flat. Gradient bytes take one fixed ~33 KB step at a cohort
-    # size that differs between processes (seen between 12 and 243 subjects)
-    # and grow ~16 B per subject from whole-vector predictor reads, as the
-    # in-cell plate's do; whole-cohort work would triple them from 81 to 243.
-    measured = map((81, 243)) do n
-        obs = [(j, r) for j in 1:n for r in rows[mod1(j, 3)]]
-        data = (; subject=["s$j" for j in 1:n], dose=[d.dose[mod1(j, 3)] for j in 1:n],
-            obs_subject=["s$(first(o))" for o in obs], t=[d.t[last(o)] for o in obs],
-            y=[d.y[last(o)] for o in obs])
-        m = brm_nlme_model(RKBRMI(nlme_ragged_pk(data)); ad_backend=NLME_AD)
-        θ = [0.4, 2.1]
-        σ = [0.0]
-        η = [0.05, -0.1]
-        i = findfirst(==("s2"), m.view.levels)
-        value() = brm_nlme_loglikelihood(m, i, θ, σ, η)
-        gradient() = brm_nlme_loglikelihood_and_gradient(m, i, θ, σ, η)
-        value(); gradient()
-        primal_bytes = minimum(@allocated(value()) for _ in 1:3)
-        gradient_bytes = minimum(@allocated(gradient()) for _ in 1:3)
-        (; result=gradient(), primal_bytes, gradient_bytes)
+    obs = [(j, r) for j in 1:n for r in rows[mod1(j, k)]]
+    NamedTuple{keys(d)}(Tuple(
+        key === :subject ? ["s$j" for j in 1:n] :
+        key === :obs_subject ? ["s$(first(o))" for o in obs] :
+        length(v) == length(d.obs_subject) ? [v[last(o)] for o in obs] :
+        [v[mod1(j, k)] for j in 1:n]
+        for (key, v) in pairs(d)))
+end
+
+# Two joins: a plain law, and a censored law whose scale is computed from the
+# kernel's cells (`addprop`) beside an in-cell observation. The kernel's plate
+# computes that scale; computed in its own plate, it would make RK run the
+# kernel for every subject, so the primal bytes would grow with the cohort.
+@stestset "one subject's ragged-join work stays flat as other subjects are added" begin
+    for (data, build) in ((NLME_RAGGED_DATA, nlme_ragged_pk),
+            (NLME_CENSORED_JOIN_DATA, nlme_censored_join))
+        # Time stays flat. Gradient bytes take one fixed ~33 KB step at a
+        # cohort size that differs between processes (seen between 12 and 243
+        # subjects) and grow ~16 B per subject from whole-vector predictor
+        # reads, as the in-cell plate's do; whole-cohort work would triple them
+        # from 81 to 243.
+        measured = map((81, 243)) do n
+            m = brm_nlme_model(RKBRMI(build(replicated_cohort(data, n))); ad_backend=NLME_AD)
+            θ = fill(0.3, length(m.theta))
+            σ = fill(-0.5, length(m.sigma))
+            η = [0.05, -0.1]
+            i = findfirst(==("s2"), m.view.levels)
+            value() = brm_nlme_loglikelihood(m, i, θ, σ, η)
+            gradient() = brm_nlme_loglikelihood_and_gradient(m, i, θ, σ, η)
+            value(); gradient()
+            primal_bytes = minimum(@allocated(value()) for _ in 1:3)
+            gradient_bytes = minimum(@allocated(gradient()) for _ in 1:3)
+            (; result=gradient(), primal_bytes, gradient_bytes)
+        end
+        @test all(x -> isapprox(x.result[1], measured[1].result[1]; rtol=1e-12), measured)
+        @test all(x -> isapprox(x.result[2], measured[1].result[2]; rtol=1e-10), measured)
+        @test maximum(x.primal_bytes for x in measured) <=
+            1.2minimum(x.primal_bytes for x in measured)
+        @test maximum(x.gradient_bytes for x in measured) <=
+            1.5minimum(x.gradient_bytes for x in measured)
     end
-    @test all(x -> isapprox(x.result[1], measured[1].result[1]; rtol=1e-12), measured)
-    @test all(x -> isapprox(x.result[2], measured[1].result[2]; rtol=1e-10), measured)
-    @test maximum(x.primal_bytes for x in measured) <=
-        1.2minimum(x.primal_bytes for x in measured)
-    @test maximum(x.gradient_bytes for x in measured) <=
-        1.5minimum(x.gradient_bytes for x in measured)
 end

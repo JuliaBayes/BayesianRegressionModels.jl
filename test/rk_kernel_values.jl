@@ -572,7 +572,7 @@ end
             end
         end))
     observed = (formula="y[i] .~ Normal.(loc_cells[i], sigma)",
-        arithmetic="y[i] .~ Normal.(loc_cells[i] .- reference[i], sigma)",
+        arithmetic="y[i] .~ Normal.(loc_argument_y_1[i], sigma)",
         cell="y[i] .~ Normal.(loc_argument_y_1[i], sigma)")
     ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
     structure(program) = [(e.kind, e.depth) for e in recipe_inventory(program)

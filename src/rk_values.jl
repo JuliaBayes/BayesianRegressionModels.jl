@@ -794,8 +794,14 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
     union!(taken, first.(bindings), (a.name for a in plan.assignments), kernel_cells,
         (p.name for p in plan.regression.parameters),
         (p.name for p in plan.regression.predictors))
+    hoisted = _rk_nested_kernel_arguments(plan, bindings, taken)
     for assignment in plan.assignments
-        _rk_emit_value_assignment!(defs, stmts, bindings, taken, assignment)
+        if assignment isa _RKPreparedKernelAssignment && haskey(hoisted.kernels, assignment.name)
+            _rk_emit_value_assignment!(defs, stmts, bindings, taken, assignment;
+                arguments=hoisted.kernels[assignment.name])
+        else
+            _rk_emit_value_assignment!(defs, stmts, bindings, taken, assignment)
+        end
         # A downstream submodel provider owns the declarations scoped under
         # its target; the transport pairs them with the SB declaration's.
         assignment isa _RKPreparedSubmodelAssignment &&
@@ -815,6 +821,8 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
             "RK backend: response `$(observation.name)` needs a distribution call")
         isempty(distribution.kwargs) || distribution.callable === Ordinal || error(
             "RK backend: response `$(observation.name)` distribution keywords are unsupported")
+        observation isa _RKNestedObservation && ((observation, distribution) =
+            _rk_nested_observation_reads(observation, distribution, hoisted.reads))
         distribution = _rk_align_kernel_observation_arguments!(defs, stmts, bindings, taken,
             plan, observation, distribution)
         _rk_emit_observation_source!(defs, stmts, bindings, taken,
