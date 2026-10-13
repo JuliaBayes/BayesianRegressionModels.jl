@@ -49,6 +49,9 @@ function threaded_gradient_stress(problem, d, budget, worker_copy=deepcopy)
     workers = map(1:Threads.nthreads() - 1) do t
         Threads.@spawn begin
             local_problem = worker_copy(problem)
+            # A rebuilt copy compiles on first use; keep that out of the budget.
+            first_value = LogDensityProblems.logdensity_and_gradient(local_problem, points[t])
+            isequal(first_value, reference[t]) || Threads.atomic_add!(mismatches, 1)
             deadline = time() + (budget isa AbstractFloat ? budget : 0.0)
             i = 0
             while _keep_going(budget, i, deadline)

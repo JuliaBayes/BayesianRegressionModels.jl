@@ -578,14 +578,30 @@ four compiled models first compares the physical value every cell reads with
 BridgeStan's `param_constrain`, then checks the wrapper identities.
 
 `adaptive_centering_threads.jl` differentiates the ordinary, joint (ordinary +
-R2D2 + HSGP) and S2Z wrappers on three concurrent tasks while a fourth forces
-collections, in a child Julia started with four threads; the child must exit
-cleanly and every gradient must bitwise-equal its single-threaded reference.
-On Julia 1.10, Enzyme's reverse pass corrupted Julia's GC whenever an accessor
-allocated a work vector, read a struct holding vectors in its row loop, or
-reached two `_block_location` instantiations: the process segfaulted in
-`getindex` or aborted with "GC error (probable corruption)". Synthetic blocks
-only; no Stan toolchain.
+R2D2 + HSGP), S2Z, HSGP-only, cdar and scalar (total / S2Z cell) wrappers on
+three concurrent tasks while a fourth forces collections, in a child Julia
+started with four threads; the child must exit cleanly and every gradient must
+bitwise-equal its single-threaded reference. On Julia 1.10, Enzyme's reverse
+pass corrupted Julia's GC whenever an accessor allocated a work vector, read a
+struct holding vectors in its row loop, or reached two `_block_location`
+instantiations: the process segfaulted in `getindex` or aborted with "GC error
+(probable corruption)". Synthetic blocks only; no Stan toolchain. The stress
+loop and child launch live in `threaded_gradient_stress.jl`, shared with the
+two gates below.
+
+`rk_enzyme_threads.jl` and `turing_enzyme_threads.jl` run the same stress, 15
+seconds per case, over native-Reverse RK gradients (`rk_logdensity_problem` for
+correlated random effects, an HSGP with a modeled log-scale, a logit GLM and an
+`@plate for` population-PK cell; the NLME batched, compact-cell and η-Hessian
+entry points) and over Turing (DynamicPPL's Enzyme gradient of a random
+intercept and of a location/log-scale HSGP pair, and the Turing
+adaptive-centering wrappers around them). On Julia 1.10 both are known broken:
+Enzyme's reverse pass corrupts memory when another thread runs GC — the same
+upstream defect, reproduced without BRM by a plain `@rkppl` random-effects
+model and a plain Turing model with a `y[i] ~` loop (Enzyme snag
+`julia-1-10-concu-152a4415`). They then record one `@test_broken` without
+stressing; `BRM_STRESS_KNOWN_BROKEN=1` runs the stress, which is the BRM
+acceptance check for that upstream fix.
 
 `stanblocks_preservation_corpus.jl` compares fourteen representative models'
 emitted SLIC/Stan, prepared data, metadata, and frozen replay against an external
