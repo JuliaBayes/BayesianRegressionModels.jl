@@ -28,6 +28,55 @@ function nested_oracle(m, θ, σ, H, data)
     values, gradients
 end
 
+@stestset "ragged SAEM population gradient handles mixed pointwise fields" begin
+    data = merge(NESTED_DATA, (; subject_y=[0.1, 0.4, -0.3]))
+    m = brm_nlme_model(RKBRMI(nested_mixed_observations(data));
+        ad_backend=NLME_AD, subject_group=:subject,
+        nested_groups=(unit=:obs_subject,))
+    @test length(m.attribution) == 2
+    θ = [0.15]
+    σ = [log(0.7)]
+    H = [[0.1, 0.2], [-0.2, 0.3, -0.1], [0.2, -0.1, 0.05, 0.3]]
+    subjects = [3, 1]
+    value, gradient = NLMEEstimation._saem_population_value_gradient(
+        BatchedEvaluation(), m, subjects, θ, σ, H[subjects])
+
+    scale = exp(only(σ))
+    scale2 = scale^2
+    expected = 0.0
+    gθ = 0.0
+    gσ = 0.0
+    for i in subjects
+        rows = findall(==(m.view.levels[i]), data.obs_subject)
+        loc = only(θ) + H[i][1]
+        residual = data.subject_y[i] - loc
+        expected += logpdf(Normal(loc, scale), data.subject_y[i])
+        gθ += residual / scale2
+        gσ += residual^2 / scale2 - 1
+        for r in rows
+            k = findfirst(margin -> margin.block.group === :unit &&
+                margin.level == data.unit[r], m.view.subject_margins[i])
+            μ = loc + H[i][k]
+            residual = data.y[r] - μ
+            expected += logpdf(Normal(μ, scale), data.y[r])
+            gθ += residual / scale2
+            gσ += residual^2 / scale2 - 1
+        end
+    end
+    @test value ≈ expected rtol=1e-12
+    @test gradient ≈ [gθ, gσ] rtol=1e-9 atol=1e-10
+
+    layout = nlme_layout(m)
+    ω = omega_parameters(layout,
+        [reshape([0.49], 1, 1), reshape([0.36], 1, 1)])
+    fit = saem(m, θ, σ, ω; η0=H, rng=Random.Xoshiro(2026),
+        options=SAEMOptions(iterations=2, burnin=1, mcmc_burnin=0,
+            adapt_iterations=0, numeric_maxiter=2, mstep_interval=1,
+            numeric_mstep=:mixture, omega_floor=0.05))
+    @test fit.numeric_mstep == :mixture
+    @test all(isfinite, (fit.theta..., fit.sigma..., fit.omega...))
+end
+
 @stestset "nested random effects retain unequal subject blocks" begin
     backend = RKBRMI(nested_model(NESTED_DATA))
     view = brm_nlme_view(backend; subject_group=:subject,
