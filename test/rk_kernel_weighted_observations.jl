@@ -48,6 +48,23 @@ function _rk_observation_source!(definitions, bindings, entry,
     :done
 end
 
+# A Stan-only family token has no Julia constructor. Its vector Stan density
+# cannot become a scalar RK observation without a caller-provided graph law.
+StanBlocks.@deffun begin
+    @lhs @lpxf unprovided_normal_lpdf(y::vector[n], location::vector[n],
+            scale::real)::real = normal_lpdf(y, location, scale)
+    unprovided_normal_lpdfs(y::vector[n], location::vector[n],
+            scale::real)::vector[n] = begin
+        result::vector[n]
+        for i in 1:n
+            result[i] = normal_lpdf(y[i], location[i], scale)
+        end
+        return result
+    end
+    unprovided_normal_rng(vector[n], location::vector[n],
+            scale::real)::vector[n] = normal_rng(location, scale)
+end
+
 function build(data, form)
     if form === :token
         @brm data begin
@@ -109,6 +126,16 @@ function build(data, form)
             @plate for i in eachindex(x)
                 m = s .* x[i]
                 y[i] ~ weighted(shifted_normal(m, delta, sigma), w[i])
+                pred[i] = x[i]
+            end
+        end
+    elseif form === :unprovided
+        @brm data begin
+            s ~ Normal(0, 1)
+            sigma ~ Exponential(1)
+            @plate for i in eachindex(x)
+                m = s .* x[i]
+                y[i] ~ weighted(unprovided_normal, w[i], m, sigma)
                 pred[i] = x[i]
             end
         end
@@ -225,6 +252,11 @@ end
             sprint(Base.show_unquoted, definition)), emitted.defs)
     end
     @test isequal(data, saved)
+end
+
+@stestset "in-cell Stan-only family requires a scalar RK observation provider" begin
+    brmi = KernelWeightedObservations.build(WEIGHTED_DATA, :unprovided)
+    @test_throws "needs a scalar `_rk_observation_source!` provider" RKBRMI(brmi)
 end
 
 @stestset "in-cell bounded combinators keep their family token out of the data" begin
