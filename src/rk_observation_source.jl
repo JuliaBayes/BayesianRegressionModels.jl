@@ -50,6 +50,10 @@ function _rk_emit_observation_source!(defs, statements, bindings, taken,
     if claimed === nothing
         isempty(supplied_defs) && isempty(supplied_bindings) || error(
             "RK source: unclaimed observation provider changed its source collections")
+        distribution.callable isa StanBlocks.ValueFamily && error(
+            "RK source: `$(observation.name) ~ $(distribution.callable.label)(...)` " *
+            "needs a scalar `_rk_observation_source!` provider on the RK backend; " *
+            "its StanBlocks family density cannot be broadcast as a scalar observation")
         return false
     end
     observation.modifier === nothing || error(
