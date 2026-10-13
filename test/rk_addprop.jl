@@ -87,10 +87,13 @@ end
             _, gradient = check_consumer_point(problem, u, oracle)
             check_consumer_stan(problem, stan, mapping, backend, u)
             actual = Base.invokelatest(prepare_query(backend.model, translated, :pointwise), u)
-            # The cell route observes its per-subject response per subject: one
-            # array of densities per subject, in subject order.
-            route === :cell && @test length.(actual.y) == length.(data.y)
-            flat = route === :cell ? reduce(vcat, actual.y) : actual.y
+            # The cell route, and the inline route whose `addprop` scale is
+            # row-local, observe their per-subject response per subject: one
+            # array of densities per subject, in subject order. The assigned
+            # scale is a whole value, so that route stays flattened.
+            nested = route in (:cell, :inline)
+            nested && @test length.(actual.y) == length.(data.y)
+            flat = nested ? reduce(vcat, actual.y) : actual.y
             @test flat ≈ pointwise(u) atol=2e-11 rtol=2e-11
             @test abs(gradient[ia]) > 1e-8
             @test abs(gradient[ib]) > 1e-8
