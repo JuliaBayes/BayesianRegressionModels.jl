@@ -352,8 +352,8 @@ end
     # The one prior spelling for kernel responses: the model identical, the
     # outcome columns omitted. The plate drops the unbound positionals (count
     # form over the known subject count) and each in-cell `~` forward-simulates
-    # its cell through the in-cell family's `_rng`. Declaring the emitted
-    # plate-cell stems gives each completed draw a flat `_gen` alias.
+    # its cell through the in-cell family's `_rng`. The declared cell stems
+    # retain generated predictive twins under the public response names.
     brmi = kernel_builder((; dose=kernel_df.dose, subject=kernel_df.subject))
     sb = @test_logs (:warn, r"unconditioned \(prior\) program") SBBRMI(
         brmi; mod=@__MODULE__)
@@ -364,7 +364,7 @@ end
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
     @test occursin("kernel_nsub_pred", code)
     @test occursin(r"parameters\s*\{\s*\}", code)
-    @test occursin("pred_qt_obs_gen", code)
+    @test occursin(r"pred_qt_obs\[[^\]]+\] = normal_rng\(pred_location", code)
     problem = StanBlocks.stan_instantiate(sb.model)
     @test StanBlocks.LogDensityProblems.dimension(problem) == 0
     @test isfinite(StanBlocks.LogDensityProblems.logdensity(problem, Float64[]))
@@ -386,7 +386,7 @@ end
 @testset "kernel-nested mixed bound/unbound: omitted cell simulates beside a fit" begin
     # `pk_y` stays bound (a real likelihood, sampled parameters) while `qt_y`
     # is omitted and its cell forward-simulates in generated quantities. The
-    # bound and unbound responses resolve through their `_gen` twins.
+    # bound and unbound responses both resolve through their `_gen` twins.
     brmi = kernel_builder((; dose=kernel_df.dose, pk_y=kernel_df.pk_y,
                             subject=kernel_df.subject))
     sb = @test_logs (:warn, r"bind\(s\) no data column") SBBRMI(

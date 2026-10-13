@@ -622,21 +622,22 @@ function _brm_logical_outputs(stan, by_name, targets, cell_values,
     # query takes `role` to disambiguate.
     for o in stan.outputs
         isnothing(o.source) && continue
-        # A missing plate-cell response has no data column. StanBlocks sources
-        # its new predictive twin at the context-qualified emitted stem; the
-        # author still addresses the cell's declaration target.
-        declaration = get(by_name, o.source, nothing)
-        if !isnothing(declaration) && declaration.role === :observation &&
-                isnothing(declaration.data_source)
-            claim!(o.name, declaration.target)
-            continue
-        end
         # A ragged kernel positional is gathered into a derived data key before
         # StanBlocks sees it. Its generated twins correctly source that key,
         # while BRM's public response remains the original flat column.
         entry = get(preproc, o.source, nothing)
-        source = entry isa PreprocEntry && entry.kind === :kernel_ragged &&
-                 !entry.const_.is_lp ? first(entry.raw_ref) : o.source
+        decl = get(by_name, o.source, nothing)
+        source = if entry isa PreprocEntry && entry.kind === :kernel_ragged &&
+                    !entry.const_.is_lp
+            first(entry.raw_ref)
+        elseif decl isa GenerativeDeclaration && decl.role === :observation &&
+               isnothing(decl.data_source) && !isempty(decl.context)
+            # StanBlocks sources an omitted cell's twin at the plate-qualified
+            # stem; BRM's public response is the cell declaration's target.
+            decl.target
+        else
+            o.source
+        end
         claim!(o.name, source)
     end
 
@@ -672,8 +673,9 @@ function _brm_logical_outputs(stan, by_name, targets, cell_values,
     # through the twin — already claimed via its `source` link above — exactly
     # as a fitted observation does. The twin is detected WITHOUT parsing the
     # emitter-owned suffix: it is the `:draw` output StanBlocks sources at the
-    # resolved emitted stem (the same `draw_sources` rule the descriptor body
-    # uses). Twinless unbound observations keep the bare-target claim below.
+    # declaration's resolved name (the same `draw_sources` rule the descriptor
+    # body uses). Unbound observations without a twin keep the bare-target
+    # claim below.
     twin_sources = Set{Symbol}(o.source for o in stan.outputs
                                if o.generative === :draw && !isnothing(o.source))
     for (resolved, decl) in by_name
@@ -686,7 +688,8 @@ function _brm_logical_outputs(stan, by_name, targets, cell_values,
         if decl.role === :observation && !isnothing(decl.data_source)
             continue
         end
-        if decl.role === :observation && resolved in twin_sources
+        if decl.role === :observation &&
+           (decl.target in twin_sources || resolved in twin_sources)
             continue
         end
         owned = owned_by(decl)

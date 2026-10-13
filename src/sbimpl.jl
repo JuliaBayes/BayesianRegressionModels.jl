@@ -3672,19 +3672,31 @@ end
 # Declare observation stems to SLIC from the same emitted-body roles as the
 # plan. Bound observations use their source column, including kernel aliases:
 # group CV can eliminate their data inputs, while predictive carriers still
-# need that source identity. Unbound observations use their emitted stem:
-# a top-level target is unchanged, while a plate-cell target is prefixed by
-# its plate context. StanBlocks uses the stem to alias the completed draw.
+# need that source identity. Whole-LHS unbound observations use their target.
+# An omitted kernel cell observation uses the plate's hygienic stem, because
+# StanBlocks renames fresh cell bindings before tracing their `~`.
 Base.@nospecializeinfer function _sb_declared_observations(body, data, @nospecialize(brmi))
     declarations = _sb_plan_declarations(body, data, brmi)
-    Tuple(sort!(unique(Symbol[isnothing(d.data_source) ?
-        _sb_plan_stem(d.context, d.target) : d.data_source
-        for d in declarations if d.role === :observation])))
+    unbound_cell = _sb_unbound_cell_observations(brmi)
+    names = Symbol[]
+    for d in declarations
+        d.role === :observation || continue
+        if !isnothing(d.data_source)
+            push!(names, d.data_source)
+        elseif isempty(d.context)
+            push!(names, d.target)
+        elseif (d.context, d.target) in unbound_cell
+            length(d.context) == 1 || error(
+                "sbimpl: expected a top-level kernel plate for omitted cell observation")
+            push!(names, Symbol(only(d.context), :_, d.target))
+        end
+    end
+    Tuple(sort!(unique!(names)))
 end
 
 # Plate-nested omitted outcomes, read from the FORMULA: `(context, cell target)`
 # pairs whose in-cell `~` is an unconditioned observation. The plan collector
-# cannot infer this from the emitted body — an unbound in-cell `~` is
+# cannot infer this from the emitted body — an unconditioned in-cell `~` is
 # syntactically identical to a per-cell prior (`_sb_plan_value_ref(::Symbol)`
 # is true, so the obs-shaped gate cannot separate them) — so the emitter's own
 # classification (`_sb_kernel_unbound_cell_idx`) is re-derived here from the
@@ -4072,8 +4084,8 @@ _sb_plan_family(x::Expr) = begin
 end
 _sb_plan_family(x) = x
 
-_sb_plan_stem(context, target) = Symbol(join((context..., target), "_"))
-_sb_plan_generated(context, target) = Symbol(_sb_plan_stem(context, target), "_gen")
+_sb_plan_generated(context, target) =
+    Symbol(join((context..., target), "_"), "_gen")
 
 # A configured term prior is spliced into the emitted body as a `SlicModel`
 # value.  Its `mod` field is the stable namespace where the submodel was
@@ -5366,11 +5378,13 @@ _sb_kernel_subject_values(raw, group::Symbol) =
 _sb_kernel_ragged_partition(a_name, grp_name, ev_vals, subject_vals) =
     _brm_kernel_ragged_partition(a_name, grp_name, ev_vals, subject_vals; prefix="sbimpl")
 
-function _sb_kernel_ragged_rows(data, arg_col, grp_arg, g_vals)
-    prepared = _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals; prefix="sbimpl")
+function _sb_kernel_ragged_rows(data, arg_col, grp_arg, g_vals;
+                                allow_unbound_observation=false)
+    prepared = _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals;
+        prefix="sbimpl", allow_unbound_observation)
     # Non-numeric labels only join rows in preparation; Stan consumes indices.
     all(v -> v isa Real, prepared.group_values) || pop!(data, prepared.group_name, nothing)
-    (prepared.rows, prepared.is_lp)
+    (prepared.rows, prepared.is_lp, prepared.is_unbound)
 end
 
 # Is a kernel cell parameter OBSERVED by the cell body — the LHS of a top-level
@@ -5421,14 +5435,20 @@ end
 # forward-simulates per cell. A `MissingColumn` positional that is never
 # observed is an input problem and stays a loud error at the call site.
 # Shared by the emitter (which drops the positions) and the plan collector
-# (which marks the unbound in-cell `~` an observation); both read the same
+# (which marks the unconditioned in-cell `~` an observation); both read the same
 # formula body, so the classification cannot disagree with emission.
 function _sb_kernel_unbound_cell_idx(positionals, params::Vector{Symbol}, body_stmts)
     found = Int[]
     length(params) == length(positionals) || return found
     for (i, c) in enumerate(positionals)
-        c isa NamedColumn || continue
-        parent(c) isa MissingColumn || continue
+        response = if c isa NamedColumn
+            c
+        elseif c isa ExprColumn && getf(c) === ragged && length(getargs(c)) == 2
+            first(getargs(c))
+        else
+            nothing
+        end
+        response isa NamedColumn && parent(response) isa MissingColumn || continue
         _sb_cell_param_observed(body_stmts, params[i]) || continue
         push!(found, i)
     end
@@ -5670,7 +5690,12 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     # column: something else may name it on its own axis — `hsgp(log_dose)` over
     # the event frame, say — and that term registers it through its own path.
     for (i, arg_col, grp_arg, gath_sym) in ragged_specs
-        rows, is_lp = _sb_kernel_ragged_rows(data, arg_col, grp_arg, g_vals)
+        rows, is_lp, is_unbound = _sb_kernel_ragged_rows(data, arg_col, grp_arg, g_vals;
+            allow_unbound_observation=i in unbound_idx)
+        # The grouping column fixes the omitted response's per-cell row axis,
+        # but it supplies no observed values. Keep the response out of data and
+        # out of the plate's sliced positionals so the in-cell `~` simulates it.
+        is_unbound && continue
         if is_lp
             data[gath_sym] = rows
             rows_param = Symbol("kernel_rows_", params[i])

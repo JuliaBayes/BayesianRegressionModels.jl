@@ -25,9 +25,10 @@ import StanBlocks
     end
 end
 
-# An omitted in-cell response has a flat `_gen` twin under the emitted cell
-# stem. Its embedded observation context lists that carrier exactly as an
-# omitted top-level response lists its twin.
+# An omitted in-cell response has no `_gen` twin: its forward-simulated carrier
+# is claimed under the cell-local declaration (brm-use "Prior draws"). Its
+# embedded observation context lists that carrier exactly as an omitted
+# top-level response lists its twin (snag describe-a-joint-8a53c3b9).
 @testset "omitted embedded responses list their forward-simulated carriers" begin
     legacy=@brm begin
         pred ~ kernel(ts,response) do t,yy

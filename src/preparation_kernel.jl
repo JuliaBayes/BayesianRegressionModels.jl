@@ -56,11 +56,14 @@ function _brm_kernel_ragged_partition(a_name::Symbol, grp_name::Symbol,
     rows
 end
 
-function _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals; prefix="BRM kernel preparation")
+function _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals;
+                                 prefix="BRM kernel preparation",
+                                 allow_unbound_observation=false)
     a_name = name(arg_col)
     decl = parent(arg_col)
     is_lp = decl isa ExprColumn && getf(decl) === (~)
-    is_lp || decl isa DataColumn || error(
+    is_unbound = decl isa MissingColumn && allow_unbound_observation
+    is_lp || decl isa DataColumn || is_unbound || error(
         "$prefix: kernel(...) positional `ragged($a_name, …)`: `$a_name` must be either a ",
         "linear predictor declared in this @brm block (`$a_name ~ <terms>`) or a raw ",
         "data column; got $(typeof(decl)).")
@@ -76,7 +79,7 @@ function _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals; prefix="BRM kernel pr
     lens = Tuple{Symbol,Int}[]
     if is_lp
         _brm_collect_data_lengths!(lens, getargs(decl)[2])
-    else
+    elseif decl isa DataColumn
         v = parent(decl)
         v isa AbstractVector{<:AbstractVector} && error(
             "$prefix: kernel(...) `ragged($a_name, $grp_name)`: `$a_name` is ALREADY a ",
@@ -94,5 +97,5 @@ function _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals; prefix="BRM kernel pr
 
     rows = _brm_kernel_ragged_partition(a_name, grp_name, ev_vals, g_vals; prefix)
 
-    (; rows, is_lp, group_name=grp_name, group_values=ev_vals)
+    (; rows, is_lp, is_unbound, group_name=grp_name, group_values=ev_vals)
 end
