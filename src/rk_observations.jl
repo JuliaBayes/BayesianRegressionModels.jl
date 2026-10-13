@@ -176,7 +176,11 @@ end
 # it needs is deterministic over what the fitted program already computes. It
 # adds no density, coordinate or Jacobian, a query plans it only when asked,
 # and a caller can request it by the name it was written under.
-function _rk_fitted_source(emitted, conditioned; retained=())
+#
+# The coordinate records the emission filed for a removed declaration leave
+# with it (`_rk_drop_unfitted_records!`), so the semantic inventory describes
+# the fitted program's packed coordinates and nothing else.
+function _rk_fitted_source(emitted, conditioned; retained=(), coordinates=nothing)
     isempty(conditioned) && return emitted
     statements = emitted.main.args
     outputs = [_rk_source_outputs!(Set{Symbol}(), statement) for statement in statements]
@@ -223,6 +227,7 @@ function _rk_fitted_source(emitted, conditioned; retained=())
         any(j -> _rk_source_samples(statements[j]), closure) && continue
         foreach(j -> kept[j] = true, closure)
     end
+    _rk_drop_unfitted_records!(coordinates, outputs, kept)
     _RKEmittedProgram(emitted.defs, Expr(:block, statements[kept]...), emitted.bindings)
 end
 # Withholding changes the observation likelihood. Authored priors and their
