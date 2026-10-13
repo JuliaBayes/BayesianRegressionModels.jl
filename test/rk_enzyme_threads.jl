@@ -110,4 +110,4 @@ const _CASES = ("ranef" => _ranef_problem, "hsgp" => _hsgp_problem,
                 "nlme_hessian" => _nlme_hessian_problem)
 
 run_threaded_gradient_gate(@__FILE__, _CASES, _SECONDS_PER_CASE;
-    broken_on_julia_1_10=ENZYME_JULIA_1_10_GC)
+    known_broken=ENZYME_CONCURRENT_GC)

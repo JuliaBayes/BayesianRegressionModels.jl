@@ -593,10 +593,10 @@ gate below.
 native-Reverse RK gradients (`rk_logdensity_problem` for correlated random
 effects, an HSGP with a modeled log-scale, a logit GLM and an `@plate for`
 population-PK cell; the NLME batched, compact-cell and η-Hessian entry points).
-On Julia 1.10 it is known broken: Enzyme's reverse pass corrupts memory when
-another thread runs GC — the same upstream defect, reproduced without BRM by a
-plain `@rkppl` random-effects model (Enzyme snag `julia-1-10-concu-152a4415`,
-ReactiveKernels snag `julia-1-10-concu-1261b917`). It then records one
+It is known broken: Enzyme's reverse pass corrupts memory when another thread
+runs GC, measured on Julia 1.10 and 1.12 — the same upstream defect, reproduced
+without BRM by a plain `@rkppl` random-effects model (Enzyme snag
+`julia-1-10-concu-152a4415`; `reactivekernels-use` §7ao). It then records one
 `@test_broken` without stressing; `BRM_STRESS_KNOWN_BROKEN=1` runs the stress,
 which is the BRM acceptance check for that upstream fix.
 

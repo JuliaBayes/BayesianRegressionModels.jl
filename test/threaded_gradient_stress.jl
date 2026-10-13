@@ -1,9 +1,9 @@
 # Shared harness for the concurrent-GC gradient gates
 # (`adaptive_centering_threads.jl`, `rk_enzyme_threads.jl`).
 #
-# On Julia 1.10, Enzyme's reverse pass can turn a differentiated function into a
-# use-after-free once another thread runs GC (upstream, unfixed; see
-# `_block_location` in BayesianRegressionModelsWarmupHMCExt). WarmupHMC's
+# Enzyme's reverse pass can turn a differentiated function into a use-after-free
+# once another thread runs GC — measured on Julia 1.10 and 1.12 (upstream,
+# unfixed; see `_block_location` in BayesianRegressionModelsWarmupHMCExt). WarmupHMC's
 # multi-chain and completion samplers differentiate one `deepcopy` of the density
 # per chain on `Threads.@threads`, and a regression kills the whole process — a
 # segfault or "GC error (probable corruption)" — so each gate runs its stress in a
@@ -19,15 +19,15 @@
 # `budget` is gradients per worker (an `Integer`) or seconds per case (a float):
 # slow, rarely crashing paths need wall time rather than a fixed count.
 #
-# A path that still corrupts on Julia 1.10 for a reason outside BRM passes
-# `broken_on_julia_1_10 = "<why>"`: on 1.10 the gate then records a broken test
-# naming that reason instead of running, unless `BRM_STRESS_KNOWN_BROKEN=1`
-# asks for the stress (the acceptance check of the upstream fix).
+# A path that still corrupts for a reason outside BRM passes
+# `known_broken = "<why>"`: the gate then records a broken test naming that
+# reason instead of running, unless `BRM_STRESS_KNOWN_BROKEN=1` asks for the
+# stress (the acceptance check of the upstream fix).
 using LogDensityProblems, Random, Test
 
-# Why a path's gate is broken on Julia 1.10 when the cause is outside BRM.
-const ENZYME_JULIA_1_10_GC = "Enzyme's Julia 1.10 reverse pass corrupts memory when " *
-    "another thread runs GC (Enzyme snag julia-1-10-concu-152a4415)."
+# Why a path's gate is known broken when the cause is outside BRM.
+const ENZYME_CONCURRENT_GC = "Enzyme's reverse pass corrupts memory when another " *
+    "thread runs GC, on Julia 1.10 and 1.12 (Enzyme snag julia-1-10-concu-152a4415)."
 
 # Every worker differentiates its own copy, as the samplers' chains do, while
 # another task churns the allocator and forces collections.
@@ -70,12 +70,11 @@ end
 
 # In the child (`--stress-worker`), stress every case and exit; in the parent,
 # launch that child and check its report.
-function run_threaded_gradient_gate(file, cases, budget;
-        broken_on_julia_1_10=nothing)
-    if !isnothing(broken_on_julia_1_10) && VERSION < v"1.11-" &&
+function run_threaded_gradient_gate(file, cases, budget; known_broken=nothing)
+    if !isnothing(known_broken) &&
             get(ENV, "BRM_STRESS_KNOWN_BROKEN", "") != "1" && !("--stress-worker" in ARGS)
-        @testset "$(basename(file)): known broken on Julia 1.10" begin
-            @info "Not stressed on Julia $VERSION: $broken_on_julia_1_10 " *
+        @testset "$(basename(file)): known broken" begin
+            @info "Not stressed: $known_broken " *
                 "Set BRM_STRESS_KNOWN_BROKEN=1 to run it."
             @test_broken false
         end
