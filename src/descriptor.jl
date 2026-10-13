@@ -580,7 +580,7 @@ function _brm_top_level_assignments(brmi)
 end
 
 function _brm_logical_outputs(stan, by_name, targets, cell_values,
-                              formula_predictors, top_assignments)
+                              formula_predictors, top_assignments, preproc)
     logical = Dict{Symbol,Symbol}()
     output_names = Set{Symbol}(o.name for o in stan.outputs)
     model_names = Set{Symbol}(keys(stan.model))
@@ -621,7 +621,14 @@ function _brm_logical_outputs(stan, by_name, targets, cell_values,
     # (`:posterior_predictive` vs `:pointwise_loglik`) separates them, so the
     # query takes `role` to disambiguate.
     for o in stan.outputs
-        isnothing(o.source) || claim!(o.name, o.source)
+        isnothing(o.source) && continue
+        # A ragged kernel positional is gathered into a derived data key before
+        # StanBlocks sees it. Its generated twins correctly source that key,
+        # while BRM's public response remains the original flat column.
+        entry = get(preproc, o.source, nothing)
+        source = entry isa PreprocEntry && entry.kind === :kernel_ragged &&
+                 !entry.const_.is_lp ? first(entry.raw_ref) : o.source
+        claim!(o.name, source)
     end
 
     # A formula-level linear predictor is not a declaration: sbimpl emits it
@@ -1027,7 +1034,7 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
         stan, by_name, targets, _brm_kernel_cell_values(brmi),
         Iterators.flatten(((e.logical for e in population_effects),
                            covariance_factors)),
-        _brm_top_level_assignments(brmi))
+        _brm_top_level_assignments(brmi), plan.preproc)
 
     # Linear-predictor names come from the FORMULA, not from the emitted body:
     # `mu = pop_mu + r_mu_g` is an `=`, so no declaration binds it, yet it is
