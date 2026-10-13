@@ -52,6 +52,74 @@ function check_rk_parity(c, r, xs1, xs2)
     @test brm_nlme_joint_values(r, xr2).eta ≈ brm_nlme_joint_values(c, xs2).eta atol=1e-10
 end
 
+@stestset "per-chain deepcopy of RK and conditional NLME targets" begin
+    # The plate plan retains its authored lexical module. A copied backend
+    # must preserve that binding while giving the model and NLME workspaces
+    # independent state.
+    rk = RKBRMI(nlme_plate_pk(NLME_PLATE_DATA))
+    m = brm_nlme_model(rk; ad_backend=NLME_AD)
+    rk_copy = deepcopy(rk)
+    m_copy = deepcopy(m)
+    @test rk_copy !== rk
+    @test rk_copy.plan !== rk.plan
+    @test rk_copy.model !== rk.model
+    @test m_copy !== m
+    @test m_copy.backend !== m.backend
+    @test m_copy.sampler !== m.sampler
+    θ = [0.4, -0.7, 0.2][sortperm(m.view.coordinates[m.theta])]
+    σ = [log(0.8)]
+    H = [0.15 -0.2 0.05; -0.1 0.25 0.3]
+    u = BRM._brm_nlme_point(m, θ, σ, H)
+    p = rk_logdensity_problem(rk; ad_backend=NLME_AD, u0=u)
+    p_copy = rk_logdensity_problem(rk_copy; ad_backend=NLME_AD, u0=u)
+    v, g = LogDensityProblems.logdensity_and_gradient(p, u)
+    v_copy, g_copy = LogDensityProblems.logdensity_and_gradient(p_copy, u)
+    @test v_copy ≈ v
+    @test g_copy ≈ g
+    values, gradients = brm_nlme_loglikelihoods_and_gradients(m, θ, σ, H)
+    copied_values, copied_gradients =
+        brm_nlme_loglikelihoods_and_gradients(m_copy, θ, σ, H)
+    @test copied_values ≈ values
+    @test copied_gradients ≈ gradients
+
+    brmi = nlme_pk(NLME_DATA)
+    joint_rk = RKBRMI(brmi)
+    sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
+    map = brm_nlme_joint_map(joint_rk, sb;
+        path=joinpath(CONDITIONAL_DIR, "deepcopy.stan"))
+    start = brm_nlme_joint_start(map;
+        theta=[0.32, -0.17, 0.48], sigma=[-0.61],
+        omega=[0.36 0.105; 0.105 0.49],
+        eta=[0.12 -0.09 0.31 -0.22; -0.08 0.14 0.03 -0.17],
+        subjects=map.view.levels)
+    for problem in (brm_nlme_conditional_problem(map, start),
+            brm_nlme_conditional_problem(map, start;
+                backend=map.rk, ad_backend=NLME_AD))
+        copied = deepcopy(problem)
+        @test copied !== problem
+        @test copied.map === problem.map
+        @test copied.target !== problem.target
+        @test copied.point !== problem.point
+        @test copied.position !== problem.position
+        x = problem.position .+ 0.1
+        value, gradient = LogDensityProblems.logdensity_and_gradient(problem, x)
+        copied_value, copied_gradient =
+            LogDensityProblems.logdensity_and_gradient(copied, x)
+        @test copied_value ≈ value
+        @test copied_gradient ≈ gradient
+        if problem.backend === map.sb
+            @test copied.target.model !== problem.target.model
+            @test copied.target.model.stanmodel != problem.target.model.stanmodel
+        end
+        # WarmupHMC's scalar-density entry copies once per chain.
+        inits = [(; position=copy(problem.position),
+            squared_scale=ones(length(problem.position))) for _ in 1:2]
+        results = adaptive_warmup_mcmc([Xoshiro(41), Xoshiro(42)], problem;
+            init=inits, n_draws=10, parallel=false)
+        @test length(results) == 2
+    end
+end
+
 @stestset "flat NLME start conditions the exact compiled target" begin
     brmi = nlme_pk(NLME_DATA)
     rk = RKBRMI(brmi)

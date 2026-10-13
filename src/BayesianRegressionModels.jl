@@ -13,7 +13,7 @@ include("introspection.jl")
 
 # VBRMI — vectorized implementation. Materializes predictors and
 # likelihood into a LogDensityProblems-compatible object.
-using LogExpFunctions, InverseFunctions, Distributions, ElasticArrays,
+using LogExpFunctions, InverseFunctions, Distributions, ElasticArrays, Libdl,
       LogDensityProblems, LinearAlgebra, SpecialFunctions, Random, Statistics
 using StatsBase: AbstractWeights, AnalyticWeights, FrequencyWeights,
                  ProbabilityWeights, UnitWeights, Weights,
