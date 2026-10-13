@@ -740,10 +740,13 @@ end
 function _adaptive_scalar_centering_reparametrizer(model,names)
     totals = BRM._total_centering_cells(model,names)
     s2z = BRM._s2z_centering_cells(model,names)
-    indices = vcat(totals.indices,s2z.indices)
-    targets = vcat(totals.targets,s2z.targets)
-    state = BRMScalarCenteringState(indices,vcat(totals.scales,s2z.scales),
-        vcat(totals.locations,s2z.locations),copy(targets))
+    _scalar_centering_reparametrizer(vcat(totals.indices,s2z.indices),
+        vcat(totals.scales,s2z.scales),vcat(totals.locations,s2z.locations),
+        vcat(totals.targets,s2z.targets))
+end
+
+function _scalar_centering_reparametrizer(indices,scales,locations,targets)
+    state = BRMScalarCenteringState(indices,scales,locations,copy(targets))
     pairs = [indices[p] => WarmupHMC.Reparametrization(
         WarmupHMC.PartiallyCentered(targets[p]),WarmupHMC.PartiallyCentered(targets[p]),
         BRMScalarCenteringArgument{:location}(state,p),
