@@ -4,20 +4,17 @@
 # vector, reads a struct holding vectors inside its row loop, or reaches two
 # `_block_location` instantiations (see `_block_location` in
 # BayesianRegressionModelsWarmupHMCExt). Completion and multi-chain workers do
-# exactly that, and a regression kills the whole process — a segfault in
-# `getindex` or "GC error (probable corruption)" — so the stress runs in a child
-# Julia with four threads. This file asserts the child's clean exit and that
-# every concurrent gradient bitwise-equals its single-threaded reference.
+# exactly that; `threaded_gradient_stress.jl` runs the stress in a child Julia.
 #
 #     julia --project=test test/adaptive_centering_threads.jl
 #
 # Synthetic toy blocks only; no compiled Stan model is involved.
 using BayesianRegressionModels, WarmupHMC, Enzyme, LogDensityProblems, Random
 using DifferentiationInterface: AutoEnzyme
+include("threaded_gradient_stress.jl")
 
 const BRM = BayesianRegressionModels
 const AC_EXT = Base.get_extension(BRM, :BayesianRegressionModelsWarmupHMCExt)
-const _STRESS_WORKER = "--stress-worker" in ARGS
 const _GRADIENTS_PER_WORKER = 40_000
 
 struct _StdNormal
@@ -95,61 +92,37 @@ function _s2z_problem()
     WarmupHMC.ReparametrizedProblem(s2z, _StdNormal(last(scales)), AutoEnzyme()), last(scales)
 end
 
-# Every worker differentiates its own deepcopy, as completion workers do, while
-# another task churns the allocator and forces collections.
-function _stress(problem, d)
-    points = [0.3 .* randn(Xoshiro(10 + i), d) for i in 1:8]
-    reference = [LogDensityProblems.logdensity_and_gradient(problem, x) for x in points]
-    stop = Threads.Atomic{Bool}(false)
-    churn = Threads.@spawn while !stop[]
-        junk = [rand(64) for _ in 1:100]
-        rand() < 0.01 && GC.gc(false)
-        yield()
-    end
-    mismatches = Threads.Atomic{Int}(0)
-    workers = map(1:Threads.nthreads() - 1) do t
-        Threads.@spawn begin
-            local_problem = deepcopy(problem)
-            for i in 1:_GRADIENTS_PER_WORKER
-                j = mod1(i + t, length(points))
-                value = LogDensityProblems.logdensity_and_gradient(local_problem, points[j])
-                isequal(value, reference[j]) || Threads.atomic_add!(mismatches, 1)
-            end
-        end
-    end
-    foreach(wait, workers)
-    stop[] = true
-    wait(churn)
-    (Threads.nthreads() - 1) * _GRADIENTS_PER_WORKER, mismatches[]
+# HSGP-only wrapper: a two-axis squared-exponential block and a periodic block.
+function _hsgp_problem()
+    M = 10
+    se = BRM._HSGPAdaptiveCenteringBlock(:mu, :gp_x, zeros(M), collect(1:M),
+        [M + 1, M + 2], [0.0, 0.0], [Inf, Inf], M + 3, 0.0, Inf,
+        hcat([(pi * j / 8)^2 for j in 1:M], [(pi * j / 6)^2 for j in 1:M]), Float64[])
+    o = M + 3
+    periodic = BRM._HSGPAdaptiveCenteringBlock(:sigma, :gp_t, fill(0.5, 2M),
+        collect(o .+ (1:2M)), [o + 2M + 1], [0.0], [Inf], o + 2M + 2, 0.0, Inf,
+        zeros(0, 0), vcat(1.0:M, 1.0:M))
+    _with_controls(AC_EXT._adaptive_hsgp_centering_reparametrizer([se, periodic])...,
+        o + 2M + 2)
 end
 
-if _STRESS_WORKER
-    Threads.nthreads() >= 2 || (println(stderr, "stress worker needs --threads >= 2"); exit(2))
-    for (name, build) in (("ordinary", _ordinary_problem), ("joint", _joint_problem),
-                          ("s2z", _s2z_problem))
-        gradients, mismatches = _stress(build()...)
-        println("STRESS ", name, " gradients=", gradients, " mismatches=", mismatches)
-        flush(stdout)
-    end
-    exit(0)
+# cdar walk cells: 4 groups x 6 steps, bounded persistence.
+function _cdar_problem()
+    P, W = 4, 6
+    block = BRM._CDARAdaptiveCenteringBlock(:mu, :cdar_t, P, W, collect(1:P*W),
+        P * W + 1, 0.0, Inf, P * W + 2, 0.0, 1.0, [1.0, 1.5, 0.7, 1.2])
+    _with_controls(AC_EXT._adaptive_cdar_centering_reparametrizer([block])..., P * W + 2)
 end
 
-using Test
-
-@testset "adaptive-centering gradients stay exact under concurrent GC" begin
-    project = "--project=$(Base.active_project())"
-    cmd = `$(Base.julia_cmd()) --startup-file=no --threads=4 $project $(@__FILE__) --stress-worker`
-    out = IOBuffer()
-    process = run(pipeline(ignorestatus(cmd); stdout=out, stderr=out))
-    log = String(take!(out))
-    clean = process.exitcode == 0 && process.termsignal == 0
-    clean || println(log)
-    @test clean
-    for name in ("ordinary", "joint", "s2z")
-        line = match(Regex("STRESS $name gradients=(\\d+) mismatches=(\\d+)"), log)
-        @test !isnothing(line)
-        isnothing(line) && continue
-        @test parse(Int, line[1]) == 3 * _GRADIENTS_PER_WORKER
-        @test parse(Int, line[2]) == 0
-    end
+# Scalar total / S2Z cells: twelve cells sharing three log-scale coordinates.
+function _scalar_problem()
+    n = 12
+    _with_controls(AC_EXT._scalar_centering_reparametrizer(collect(1:n),
+        n .+ mod1.(1:n, 3), collect(range(-1, 1; length=n)), zeros(n))..., n + 3)
 end
+
+const _CASES = ("ordinary" => _ordinary_problem, "joint" => _joint_problem,
+                "s2z" => _s2z_problem, "hsgp" => _hsgp_problem,
+                "cdar" => _cdar_problem, "scalar" => _scalar_problem)
+
+run_threaded_gradient_gate(@__FILE__, _CASES, _GRADIENTS_PER_WORKER)
