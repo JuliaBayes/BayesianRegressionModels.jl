@@ -577,6 +577,16 @@ density identities hold for any function of those coordinates, each of its
 four compiled models first compares the physical value every cell reads with
 BridgeStan's `param_constrain`, then checks the wrapper identities.
 
+`adaptive_centering_threads.jl` differentiates the ordinary, joint (ordinary +
+R2D2 + HSGP) and S2Z wrappers on three concurrent tasks while a fourth forces
+collections, in a child Julia started with four threads; the child must exit
+cleanly and every gradient must bitwise-equal its single-threaded reference.
+On Julia 1.10, Enzyme's reverse pass corrupted Julia's GC whenever an accessor
+allocated a work vector, read a struct holding vectors in its row loop, or
+reached two `_block_location` instantiations: the process segfaulted in
+`getindex` or aborted with "GC error (probable corruption)". Synthetic blocks
+only; no Stan toolchain.
+
 `stanblocks_preservation_corpus.jl` compares fourteen representative models'
 emitted SLIC/Stan, prepared data, metadata, and frozen replay against an external
 baseline artifact. Capture the artifact on the implementation base, then use

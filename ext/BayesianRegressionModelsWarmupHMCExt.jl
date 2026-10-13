@@ -51,7 +51,8 @@ BRMAdaptiveCenteringState(blocks) =
         collect(blocks), _ranef_pair_layout(blocks)...,
     )
 
-# R2D2 blocks keep their own state and argument types for the same reason HSGP
+# Derived-scale blocks — R2D2 blocks, and ordinary blocks inside the joint
+# wrapper — keep their own state and argument types for the same reason HSGP
 # and cdar cells do: the exact K<=2 Enzyme reverse pass dispatches on the
 # ordinary state's concrete pair type and must never see a derived scale.
 mutable struct BRMR2D2AdaptiveCenteringState{N} <: _BRMRanefCenteringState{N}
@@ -431,61 +432,70 @@ end
 # Joint ordinary + R2D2 + HSGP adaptation. `IndexedReparametrization`
 # requires one concrete pair element type, so the families cannot contribute
 # their own accessor closures to one vector. Every joint pair therefore carries
-# the same `BRMJointAdaptiveCenteringArgument`, which selects the family's
-# exact existing accessor by pair-number range: pairs `1:n_ranef` are ordinary
-# cells, the next `n_r2d2` are R2D2 cells, the rest are HSGP basis-weight
-# cells. No accessor arithmetic is duplicated or altered — every branch calls
-# the family functions verbatim. A model without R2D2 blocks has `n_r2d2 = 0`
-# and the historical ordinary-then-HSGP pair order.
-struct BRMJointAdaptiveCenteringState{N,NR}
-    ranef::BRMAdaptiveCenteringState{N}
-    r2d2::BRMR2D2AdaptiveCenteringState{NR}
+# the same `BRMJointAdaptiveCenteringArgument`, which selects by pair-number
+# range: pairs `1:n_ranef` are ordinary cells, the next `n_r2d2` are R2D2
+# cells, the rest are HSGP basis-weight cells. A model without R2D2 blocks has
+# `n_r2d2 = 0` and the historical ordinary-then-HSGP pair order.
+#
+# Ordinary and R2D2 cells share one derived-scale state: an ordinary block
+# joins it in derived-scale form (`_derived_scale_block`), whose `tau` is
+# `exp(0.0 + 1.0 * x[i])`, bit-identical to `exp(x[i])`. On Julia 1.10, a
+# differentiated joint accessor that reaches two `_block_location`
+# instantiations (ordinary and R2D2) corrupts Julia's GC under Enzyme's reverse
+# pass once another thread runs GC — even when the R2D2 branch never executes —
+# while one instantiation is clean (see `_block_location`). HSGP cells keep
+# their scalar accessor.
+struct BRMJointAdaptiveCenteringState{N}
+    ranef::BRMR2D2AdaptiveCenteringState{N}
     hsgp::BRMHSGPAdaptiveCenteringState
     n_ranef::Int
     n_r2d2::Int
 end
 
-struct BRMJointAdaptiveCenteringArgument{KIND,N,NR} <: Function
-    state::BRMJointAdaptiveCenteringState{N,NR}
+# An ordinary block in derived-scale form: term `k`'s log-scale is the single
+# atom `1.0 * x[log_scales[k]]`.
+_derived_scale_block(b::BRM.AdaptiveCenteringBlock) = BRM.R2D2AdaptiveCenteringBlock(
+    b.ranef, b.target_c, b.effects, b.cholesky_free,
+    [BRM._AdaptiveLogScale(0.0, [(1.0, i)], Tuple{Float64,Float64,Int}[],
+                           BRM._AdaptiveSimplexLog[]) for i in b.log_scales],
+)
+
+struct BRMJointAdaptiveCenteringArgument{KIND,N} <: Function
+    state::BRMJointAdaptiveCenteringState{N}
     pair_number::Int
 end
 
 function BRMJointAdaptiveCenteringArgument(
-        state::BRMJointAdaptiveCenteringState{N,NR}, pair_number, kind::Symbol,
-    ) where {N,NR}
+        state::BRMJointAdaptiveCenteringState{N}, pair_number, kind::Symbol,
+    ) where {N}
     kind in (:location, :log_scale) || error(
         "unknown BRM joint adaptive-centering argument kind $kind",
     )
-    BRMJointAdaptiveCenteringArgument{kind,N,NR}(state, pair_number)
+    BRMJointAdaptiveCenteringArgument{kind,N}(state, pair_number)
 end
 
 function (arg::BRMJointAdaptiveCenteringArgument{:location})(x)
     p = arg.pair_number
     s = arg.state
-    p <= s.n_ranef && return _block_location(x, s.ranef, p)
-    p <= s.n_ranef + s.n_r2d2 && return _block_location(x, s.r2d2, p - s.n_ranef)
+    p <= s.n_ranef + s.n_r2d2 && return _block_location(x, s.ranef, p)
     zero(eltype(x))
 end
 
 function (arg::BRMJointAdaptiveCenteringArgument{:log_scale})(x)
     p = arg.pair_number
     s = arg.state
-    if p <= s.n_ranef
+    if p <= s.n_ranef + s.n_r2d2
         bi, k, _ = _pair_location(s.ranef, p)
         log(_block_cholesky_entry(x, s.ranef.blocks[bi], k, k))
-    elseif p <= s.n_ranef + s.n_r2d2
-        bi, k, _ = _pair_location(s.r2d2, p - s.n_ranef)
-        log(_block_cholesky_entry(x, s.r2d2.blocks[bi], k, k))
     else
         bi, basis = _hsgp_pair_location(s.hsgp, p - s.n_ranef - s.n_r2d2)
         BRM._adaptive_hsgp_log_scale(x, s.hsgp.blocks[bi], basis)
     end
 end
 
-# The family owning joint pair `i`, and the pair's number within it.
+# The family state owning joint pair `i`, and the pair's number within it.
 function _joint_pair_family(state::BRMJointAdaptiveCenteringState, i)
-    i <= state.n_ranef && return (:ranef, i)
-    i <= state.n_ranef + state.n_r2d2 && return (:r2d2, i - state.n_ranef)
+    i <= state.n_ranef + state.n_r2d2 && return (:ranef, i)
     (:hsgp, i - state.n_ranef - state.n_r2d2)
 end
 
@@ -498,7 +508,7 @@ function _sync_sources!(state::BRMJointAdaptiveCenteringState, ir)
     for (i, (idx, value)) in enumerate(ir.pairs)
         family, j = _joint_pair_family(state, i)
         expected = family === :hsgp ? _hsgp_pair_index(state.hsgp, j) :
-                                      _pair_index(getfield(state, family), j)
+                                      _pair_index(state.ranef, j)
         idx == expected || throw(ArgumentError(
             "BRM joint adaptive-centering pair $i addresses raw coordinate $idx, " *
             "but the model metadata requires $expected; pair ordering changed",
@@ -515,7 +525,6 @@ end
 
 function _centering_frame(state::BRMJointAdaptiveCenteringState, position, gradient)
     frames = (_centering_frame(state.ranef, position, gradient),
-              _centering_frame(state.r2d2, position, gradient),
               _centering_frame(state.hsgp, position, gradient))
     BRMAdaptiveCenteringFrame(
         (reduce(vcat, getfield.(frames, f)) for f in fieldnames(BRMAdaptiveCenteringFrame))...,
@@ -524,40 +533,40 @@ end
 
 function _adaptive_joint_centering_reparametrizer(
         blocks, hsgp_blocks, r2d2_blocks=BRM.R2D2AdaptiveCenteringBlock[])
-    ranef_state = BRMAdaptiveCenteringState(blocks)
-    r2d2_state = BRMR2D2AdaptiveCenteringState(r2d2_blocks)
     hsgp_state = BRMHSGPAdaptiveCenteringState(hsgp_blocks)
-    effects = (ranef_state.effect_indices, r2d2_state.effect_indices,
+    block_effects(bs) = BitSet(Iterators.flatten(vec(b.effects) for b in bs))
+    effects = (block_effects(blocks), block_effects(r2d2_blocks),
                hsgp_state.effect_indices)
     sum(length, effects) == length(union(effects...)) || error(
         "BRM joint adaptive centering: ordinary, R2D2 and HSGP blocks claim " *
         "overlapping unconstrained coordinates; refusing an ambiguous transform.",
     )
-    for block in r2d2_state.blocks, s in block.scales
+    for block in r2d2_blocks, s in block.scales
         isdisjoint(BRM._adaptive_scale_coordinates(s), hsgp_state.effect_indices) ||
             error("BRM joint adaptive centering: R2D2 block " *
                   "`$(block.ranef.binding)` derives its scale from an HSGP " *
                   "basis weight this transform rewrites; refusing an inexact " *
                   "transform.")
     end
-    n_ranef = length(ranef_state.sources)
-    n_r2d2 = length(r2d2_state.sources)
-    state = BRMJointAdaptiveCenteringState(
-        ranef_state, r2d2_state, hsgp_state, n_ranef, n_r2d2)
+    # Block order fixes pair order, which is load-bearing across
+    # checkpoint/resume (positional restore): ordinary cells first, then R2D2
+    # cells, each in the family's own block/group/term order, then HSGP
+    # basis-weight cells.
+    ranef_state = BRMR2D2AdaptiveCenteringState(vcat(
+        BRM.R2D2AdaptiveCenteringBlock[_derived_scale_block(b) for b in blocks],
+        r2d2_blocks,
+    ))
+    n_ranef = sum(b -> b.ranef.n_terms * b.ranef.n_groups, blocks; init=0)
+    n_r2d2 = length(ranef_state.sources) - n_ranef
+    state = BRMJointAdaptiveCenteringState(ranef_state, hsgp_state, n_ranef, n_r2d2)
     pair(p, idx, c) = idx => WarmupHMC.Reparametrization(
         WarmupHMC.PartiallyCentered(c), WarmupHMC.PartiallyCentered(c),
         BRMJointAdaptiveCenteringArgument(state, p, :location),
         BRMJointAdaptiveCenteringArgument(state, p, :log_scale),
     )
-    # Pair order is load-bearing across checkpoint/resume (positional restore):
-    # ordinary cells first, then R2D2 cells, then HSGP basis-weight cells, each
-    # in the family's own deterministic order.
     pairs = [pair(p, _pair_index(ranef_state, p),
                   ranef_state.blocks[ranef_state.pair_blocks[p]].target_c)
-             for p in 1:n_ranef]
-    append!(pairs, [pair(n_ranef + j, _pair_index(r2d2_state, j),
-                         r2d2_state.blocks[r2d2_state.pair_blocks[j]].target_c)
-                    for j in 1:n_r2d2])
+             for p in eachindex(ranef_state.sources)]
     append!(pairs, [begin
         bi, basis = _hsgp_pair_location(hsgp_state, j)
         pair(n_ranef + n_r2d2 + j, _hsgp_pair_index(hsgp_state, j),

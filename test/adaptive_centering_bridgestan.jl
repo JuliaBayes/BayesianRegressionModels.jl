@@ -81,9 +81,11 @@ const ADAPTIVE_GRADIENT_ATOL = 1e-10
     )
         block = synthetic_adaptive_block(K, G)
         state, ir = AC_EXT._adaptive_centering_reparametrizer([block])
-        # The K<=2 hand-rolled Enzyme reverse pass stays gated on this type
-        # parameter; wider blocks keep the generic DifferentiationInterface path.
-        @test (state isa AC_EXT.BRMAdaptiveCenteringState{true}) == (K <= 2)
+        # The K<=2 hand-rolled Enzyme reverse pass stays gated on the
+        # innovation-capacity parameter (`N == 1` exactly when K <= 2); wider
+        # blocks keep the generic DifferentiationInterface path.
+        @test (state isa AC_EXT.BRMAdaptiveCenteringState{1}) == (K <= 2)
+        @test state isa AC_EXT.BRMAdaptiveCenteringState{max(1, K - 1)}
         controls = collect(range(0.17, 0.83, length=K * G))
         set_adaptive_sources!(state, ir, controls)
         reference_ir = materialized_reparametrizer(state, ir)
@@ -744,7 +746,7 @@ end
     state = ir.pairs[1][2].args[1].state
     controls = collect(range(0.15, 0.85, length=length(ir.pairs)))
     set_adaptive_sources!(state, ir, controls)
-    @test vcat(state.ranef.sources, state.r2d2.sources, state.hsgp.sources) ==
+    @test vcat(state.ranef.sources, state.hsgp.sources) ==
           controls
     lp, gradient = LogDensityProblems.logdensity_and_gradient(wrapped, x)
     ljac, position = ir(x)
