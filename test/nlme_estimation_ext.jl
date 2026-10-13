@@ -193,6 +193,15 @@ end
         @test length(blocks) == length(subjects)
         @test all(isapprox.(blocks, oracle; rtol=1e-9, atol=1e-9))
     end
+    for subjects in ([3, 1], [1, 2, 3])
+        H = 0.1 .* reshape(collect(1.0:(2length(subjects))), 2, :) .- 0.2
+        value, gradient = NLMEEstimation._saem_population_value_gradient(
+            BatchedEvaluation(), m, subjects, θ, σ, H)
+        cell_value, cell_gradient = NLMEEstimation._saem_population_value_gradient(
+            PerSubjectEvaluation(), m, subjects, θ, σ, H)
+        @test value ≈ cell_value rtol=1e-11 atol=1e-11
+        @test gradient ≈ cell_gradient rtol=1e-9 atol=1e-9
+    end
     # The per-subject entry points use one plate cell, not a batch of one.
     η = [0.05, -0.1]
     oracle_H = full_eta(m, [2], reshape(η, 2, 1))

@@ -318,6 +318,37 @@ function NE._saem_population_value_gradient(::NE.BatchedEvaluation,
         DI.Constant(length(θ)))
 end
 
+# Enzyme's argument lowering asserts on a large BRMNLMEModel passed as a
+# constant, even when the differentiated function only sums its active input.
+# Keep the differentiated batch context to the conditional-likelihood inputs.
+_flat_population_context(m::BRM.BRMNLMEModel) =
+    (; unit=m.unit, theta=m.theta, sigma=m.sigma,
+       subject_coordinates=m.view.subject_coordinates,
+       nsubjects=length(m.view.levels), pointwise=m.pointwise,
+       attribution=m.attribution)
+
+function _flat_population_objective(x, context, subjects, full, ntheta)
+    u = BRM._brm_nlme_flat_point(context.unit, context.theta, context.sigma,
+        context.subject_coordinates, view(x, 1:ntheta),
+        view(x, ntheta+1:length(x)), full)
+    fields = BRM._rk_pointwise_values(context.pointwise, u)
+    values = zeros(Float64, context.nsubjects)
+    BRM._brm_nlme_sum_fields!(values, context.attribution, fields, Val(1))
+    sum(values[subjects])
+end
+
+function NE._saem_population_value_gradient(::NE.BatchedEvaluation,
+        m::BRM.BRMNLMEModel, subjects, θ, σ, H::AbstractMatrix)
+    length(θ) == length(m.theta) || throw(DimensionMismatch(
+        "θ has length $(length(θ)), expected $(length(m.theta))"))
+    length(σ) == length(m.sigma) || throw(DimensionMismatch(
+        "σ has length $(length(σ)), expected $(length(m.sigma))"))
+    full = _batch_eta(m, subjects, H)
+    DI.value_and_gradient(_flat_population_objective, NE.ad_backend(m), vcat(θ, σ),
+        DI.Constant(_flat_population_context(m)), DI.Constant(subjects),
+        DI.Constant(full), DI.Constant(length(θ)))
+end
+
 # Gaussian moments and Jacobians still evaluate all requested subjects in one
 # joint RK pass.
 NE.observation_model(m::BRM.BRMNLMEModel) =
