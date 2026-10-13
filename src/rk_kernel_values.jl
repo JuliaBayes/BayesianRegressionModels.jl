@@ -97,11 +97,52 @@ function _rk_kernel_observation_family(scope, expression, kernel)
         "write one `weighted(family, weight, args...)`")
     _rk_kernel_bounded(callable) && error(
         "RK backend: kernel `$kernel` in-cell `$(nameof(callable))(family, ...)` " *
-        "observations are not lowered on the RK backend yet; observe the response " *
-        "with an unbounded in-cell family, or supply the bounded law through " *
-        "`_rk_observation_source!` for a caller-owned family")
+        "supports `censored(Normal(...); lower=..., upper=...)` only; " *
+        "use `_rk_observation_source!` for other bounded laws")
     callable === StanBlocks.normal && return Normal
     callable
+end
+
+# A cell writes the same censored Normal law as a formula response, but its
+# bounds may read cell locals and ragged inputs. Keep those expressions beside
+# the constructor arguments so the authored plate computes them on its axis.
+function _rk_kernel_observation_law(scope, expression, kernel)
+    callable = _rk_kernel_observation_callee(scope, expression, kernel)
+    callable in (censored, StanBlocks.stan.censored) ||
+        return expression, nothing
+    args = expression.args[2:end]
+    parameters = filter(arg -> Meta.isexpr(arg, :parameters), args)
+    length(parameters) <= 1 || error(
+        "RK backend: kernel `$kernel` `censored` has repeated keyword groups")
+    bounds = Dict{Symbol,Any}()
+    for keyword in (isempty(parameters) ? () : only(parameters).args)
+        Meta.isexpr(keyword, :kw) && first(keyword.args) in (:lower, :upper) || error(
+            "RK backend: kernel `$kernel` `censored` accepts only `lower` and `upper` bounds")
+        haskey(bounds, first(keyword.args)) && error(
+            "RK backend: kernel `$kernel` `censored` repeats `$(first(keyword.args))`")
+        bounds[first(keyword.args)] = last(keyword.args)
+    end
+    positional = filter(arg -> !Meta.isexpr(arg, :parameters), args)
+    isempty(positional) && error(
+        "RK backend: kernel `$kernel` `censored` needs a Normal family")
+    family = first(positional)
+    base = if Meta.isexpr(family, :call) && length(positional) == 1
+        family
+    elseif (family isa Symbol || family isa GlobalRef || Meta.isexpr(family, :.)) &&
+            length(positional) > 1
+        Expr(:call, positional...)
+    else
+        error("RK backend: kernel `$kernel` `censored` needs a family call or token")
+    end
+    _rk_kernel_observation_family(scope, base, kernel) === Normal || error(
+        "RK backend: kernel `$kernel` in-cell `censored` currently supports Normal only")
+    lower = get(bounds, :lower, nothing)
+    upper = get(bounds, :upper, nothing)
+    lower === :nothing && (lower = nothing)
+    upper === :nothing && (upper = nothing)
+    lower === nothing && upper === nothing && error(
+        "RK backend: kernel `$kernel` `censored` needs a non-nothing bound")
+    base, (; kind=:censored, lower, upper)
 end
 
 # SLIC's observation weighting `weighted(family, weight, args...)` is a power
@@ -138,6 +179,16 @@ function _rk_kernel_observation_distribution(observation, names=observation.argu
     _BRMPreparedExpr(observation.callable, arguments, (;))
 end
 
+function _rk_kernel_observation_modifier(observation, distribution, bound_names)
+    observation.modifier === nothing && return nothing
+    function bound(label)
+        index = findfirst(entry -> entry.label === label, observation.bounds)
+        index === nothing ? nothing : _BRMPreparedRef(bound_names[index], :whole)
+    end
+    _BRMResponseModifierPlan(observation.modifier.kind, distribution,
+        bound(:lower), bound(:upper))
+end
+
 Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BRMI), program, name, rhs)
     parts = _sb_kernel_lambda_parts(first(getargs(rhs)))
     parts === nothing && error("RK backend: kernel `$name` requires an inline cell body")
@@ -172,10 +223,12 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             partition = _brm_kernel_ragged_rows(value, group, group_values; prefix="RK backend")
             rows = Symbol(name, :_rows_, i)
             columns[rows] = partition.rows
+            column = _rk_kernel_column_name(value)
+            source = column in observed ? Symbol(name, :_input_, column) : column
             if parent(value) isa DataColumn
-                columns[_rk_kernel_column_name(value)] = parent(parent(value))
+                columns[source] = parent(parent(value))
             end
-            push!(inputs, (; source=_rk_kernel_column_name(value), kind=:gather, rows,
+            push!(inputs, (; source, kind=:gather, rows,
                 column=nothing))
         elseif argument isa NamedColumn && parent(argument) isa DataColumn
             # A data input is read through its own column. Only a response,
@@ -229,6 +282,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
                     _rk_kernel_column_name(first(getargs(argument))) : nothing)
             source === nothing && error("RK backend: kernel `$name` observed cell needs a named response")
             distribution, weight = _rk_kernel_observation_weight(scope, distribution, name)
+            distribution, modifier = _rk_kernel_observation_law(scope, distribution, name)
             callable = _rk_kernel_observation_family(scope, distribution, name)
             values = Tuple(distribution.args[2:end])
             any(value -> Meta.isexpr(value, :parameters), values) && error(
@@ -236,13 +290,17 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             argument_names = Tuple(Symbol(name, :_argument_, source, :_, i)
                 for i in eachindex(values))
             weight_name = weight === nothing ? nothing : Symbol(name, :_weight_, source)
+            bounds = modifier === nothing ? () : Tuple((;
+                name=Symbol(name, :_, label, :_, source), expression=bound, label)
+                for (label, bound) in pairs(modifier) if label !== :kind && bound !== nothing)
             # A response holding one array per subject is observed per subject
             # (RKPPL nested plates).
             input = inputs[index]
-            nested = input.kind === :element &&
-                get(columns, input.source, nothing) isa AbstractVector{<:AbstractVector}
+            nested = input.kind === :gather || (input.kind === :element &&
+                get(columns, input.source, nothing) isa AbstractVector{<:AbstractVector})
             push!(observations, (; source, param=lhs, callable,
-                arguments=values, argument_names, weight, weight_name, nested))
+                arguments=values, argument_names, weight, weight_name, nested,
+                modifier, bounds, input))
             continue
         end
         push!(body, statement)
@@ -395,6 +453,11 @@ function _rk_kernel_observed_columns(brmi, params, arguments, raw_body)
         argument = arguments[index]
         argument isa NamedColumn && !(parent(argument) isa MissingColumn) &&
             push!(observed, _rk_kernel_column_name(argument))
+        if argument isa ExprColumn && getf(argument) === ragged
+            value = first(getargs(argument))
+            value isa NamedColumn && parent(value) isa DataColumn &&
+                push!(observed, _rk_kernel_column_name(value))
+        end
     end
     observed
 end
@@ -686,20 +749,27 @@ Base.@nospecializeinfer function _brm_rk_composed_kernel_plan(@nospecialize(brmi
         if observation.nested
             # The response stays one array per subject. Each argument and the
             # weight is read per subject or shared, as the cell reads it.
-            plan.columns[observation.source] = raw
+            response = observation.input.kind === :gather ?
+                [raw[rows] for rows in kernel.columns[observation.input.rows]] : raw
+            plan.columns[observation.source] = response
             routes = [_rk_kernel_cell_argument(kernel, name, argument) for (name, argument)
                 in zip(observation.argument_names, observation.arguments)]
+            bound_routes = [_rk_kernel_cell_argument(kernel, entry.name, entry.expression)
+                for entry in observation.bounds]
             observation.weight === nothing || push!(routes,
                 _rk_kernel_cell_argument(kernel, observation.weight_name, observation.weight))
             arguments = Tuple(route.ref for route in routes[eachindex(observation.arguments)])
             distribution = _rk_kernel_observation_distribution(observation, arguments)
+            modifier = _rk_kernel_observation_modifier(observation, distribution,
+                Tuple(route.ref for route in bound_routes))
             weight = observation.weight === nothing ? nothing :
                 _BRMPreparedRef(last(routes).ref, :whole)
             prepared = _BRMPreparedObservation(observation.source,
-                NamedColumn(observation.source, DataColumn(raw)), distribution, raw,
-                nothing, weight)
+                NamedColumn(observation.source, DataColumn(response)), distribution, response,
+                modifier, weight)
             push!(observations, _RKNestedObservation(prepared, Dict{Symbol,Symbol}(
-                route.ref => route.ref for route in routes if route.route in (:input, :plate))))
+                route.ref => route.ref for route in (routes..., bound_routes...)
+                if route.route in (:input, :plate))))
             continue
         end
         layout = raw isa AbstractVector{<:AbstractVector} ?
@@ -708,9 +778,11 @@ Base.@nospecializeinfer function _brm_rk_composed_kernel_plan(@nospecialize(brmi
         _rk_prepare_kernel_observed_values!(plan.columns, taken, plan.regression.derived,
             observation.source, layout, raw;
             port=_rk_kernel_input_port((kernel,), observation.source))
+        modifier = _rk_kernel_observation_modifier(observation, distribution,
+            Tuple(entry.name for entry in observation.bounds))
         push!(observations, _BRMPreparedObservation(observation.source,
             NamedColumn(observation.source, DataColumn(plan.columns[observation.source])),
-            distribution, raw, nothing, weight))
+            distribution, raw, modifier, weight))
     end
     isempty(observations) && error("RK backend: kernel program needs at least one observed likelihood")
     _RKValuePlan(plan.regression, plan.assignments, Tuple(observations), plan.columns,
@@ -900,6 +972,7 @@ function _rk_emit_value_assignment!(defs, statements, bindings, taken,
     after = Any[Expr(:(=), kernel.name, Expr(:call, :brm_flatten_cells, kernel.cells))]
     for observation in kernel.observations
         named = Any[zip(observation.argument_names, observation.arguments)...]
+        append!(named, ((entry.name, entry.expression) for entry in observation.bounds))
         observation.weight === nothing ||
             push!(named, (observation.weight_name, observation.weight))
         for (name, argument) in named
