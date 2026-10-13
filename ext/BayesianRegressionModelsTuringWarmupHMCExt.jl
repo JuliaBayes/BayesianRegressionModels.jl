@@ -480,13 +480,15 @@ function _two_hsgp_adaptive_problem(backend, problem, ad_backend)
     blocks, _mu, _sigma = _two_hsgp_geometry(backend, problem, contract)
     warmup_extension = _warmuphmc_hsgp_extension()
     state, ir = warmup_extension._adaptive_hsgp_centering_reparametrizer(blocks)
+    # Capture the functions, not the module: multi-chain samplers `deepcopy`
+    # the problem once per chain, and a Module cannot be deep-copied.
+    prepare_frame = warmup_extension._prepare_frame
+    sync_sources! = warmup_extension._sync_sources!
     scoring_plan = WarmupHMC.CandidateScoringPlan(
         (ir_, position, gradient) ->
-            warmup_extension._prepare_frame(
-                state, ir_, position, gradient),
+            prepare_frame(state, ir_, position, gradient),
         warmup_extension._score_candidate;
-        synchronize! = ir_ ->
-            warmup_extension._sync_sources!(state, ir_),
+        synchronize! = ir_ -> sync_sources!(state, ir_),
     )
     gradient_problem = _prepare_dynamicppl_gradient(problem, ad_backend)
     WarmupHMC.ReparametrizedProblem(
