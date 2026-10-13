@@ -1,6 +1,5 @@
 # Shared harness for the concurrent-GC gradient gates
-# (`adaptive_centering_threads.jl`, `rk_enzyme_threads.jl`,
-# `turing_enzyme_threads.jl`).
+# (`adaptive_centering_threads.jl`, `rk_enzyme_threads.jl`).
 #
 # On Julia 1.10, Enzyme's reverse pass can turn a differentiated function into a
 # use-after-free once another thread runs GC (upstream, unfixed; see
