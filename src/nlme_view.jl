@@ -945,6 +945,17 @@ function brm_nlme_loglikelihood_and_gradient(m::BRMNLMEModel, i::Integer, θ, σ
         for j in eta_positions]
 end
 
+function _brm_nlme_flat_point(unit, theta_indices, sigma_indices,
+        subject_coordinates, θ, σ, H)
+    u = Vector{promote_type(Float64, eltype(θ), eltype(σ), eltype(H))}(unit)
+    u[theta_indices] .= θ
+    u[sigma_indices] .= σ
+    for (i, block) in enumerate(subject_coordinates)
+        u[block] .= view(H, :, i)
+    end
+    u
+end
+
 function _brm_nlme_point(m::BRMNLMEModel, θ, σ, H::AbstractMatrix)
     _brm_nlme_ragged(m.view) && throw(DimensionMismatch(
         "ragged subjects need one compact η vector per subject, not a matrix"))
@@ -955,13 +966,8 @@ function _brm_nlme_point(m::BRMNLMEModel, θ, σ, H::AbstractMatrix)
         "σ has length $(length(σ)), the model has $(length(m.sigma)) scalar coordinates"))
     size(H) == (sum(m.eta_blocks), n) || throw(DimensionMismatch(
         "η matrix has size $(size(H)), the model needs ($(sum(m.eta_blocks)), $n)"))
-    u = Vector{promote_type(Float64, eltype(θ), eltype(σ), eltype(H))}(m.unit)
-    u[m.theta] .= θ
-    u[m.sigma] .= σ
-    for (i, block) in enumerate(m.view.subject_coordinates)
-        u[block] .= view(H, :, i)
-    end
-    u
+    _brm_nlme_flat_point(m.unit, m.theta, m.sigma,
+        m.view.subject_coordinates, θ, σ, H)
 end
 
 function _brm_nlme_point(m::BRMNLMEModel, θ, σ,
