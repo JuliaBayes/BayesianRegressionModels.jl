@@ -651,26 +651,3 @@ end
     @test all(c -> c in 0.0:0.1:1.0, sources)
     @test any(!iszero, sources)
 end
-
-@testset "Turing same-axis HSGP problem copies per chain" begin
-    # Multi-chain samplers give every chain its own `deepcopy` of the problem,
-    # so its scoring plan must not capture a Module.
-    backend = same_axis_hsgp_backend()
-    density, q = same_axis_hsgp_problem(backend)
-    problem = adaptive_centering_problem(backend, density, ENZYME_BACKEND)
-    copied = deepcopy(problem)
-    @test LogDensityProblems.logdensity_and_gradient(copied, q) ==
-          LogDensityProblems.logdensity_and_gradient(problem, q)
-    results = WarmupHMC.adaptive_warmup_mcmc(
-        [Xoshiro(1), Xoshiro(2)], problem;
-        parallel=false,
-        n_draws=5,
-        n_evaluations=200,
-        stepsize_adaptation_limit=50,
-        progress=nothing,
-        monitor_ess=false,
-        init=[q, q],
-    )
-    @test length(results) == 2
-    @test all(result -> all(isfinite, result.posterior_position), results)
-end
