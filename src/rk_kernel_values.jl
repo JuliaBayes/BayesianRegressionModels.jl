@@ -16,6 +16,23 @@ struct _RKPreparedKernelAssignment
     # per-subject observation reads entry by entry.
     cells::Symbol
 end
+
+# The authored cell's lexical namespace is a stable callable authority, not
+# per-chain state. Julia deliberately refuses to deepcopy a Module; copy the
+# plan's mutable payload while retaining that namespace by identity.
+function Base.deepcopy_internal(x::_RKPreparedKernelAssignment, stack::IdDict)
+    _RKPreparedKernelAssignment(x.name,
+        Base.deepcopy_internal(x.params, stack),
+        Base.deepcopy_internal(x.body, stack),
+        Base.deepcopy_internal(x.collected, stack),
+        x.scope,
+        Base.deepcopy_internal(x.inputs, stack),
+        Base.deepcopy_internal(x.globals, stack),
+        Base.deepcopy_internal(x.columns, stack),
+        Base.deepcopy_internal(x.group_values, stack),
+        Base.deepcopy_internal(x.observations, stack),
+        x.cells)
+end
 _rk_kernel_column_name(column::NamedColumn) = name(column)
 
 # One observed array per subject. RKPPL observes it in nested subject and entry
