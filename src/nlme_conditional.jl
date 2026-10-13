@@ -27,9 +27,10 @@ The log density at a free point `x` is the target's log density at the start
 point with the free coordinates replaced by `x`; it differs from the
 conditional posterior of the subject draws only by a constant. The gradient,
 and the Hessian when the target provides one, are the target's restricted to
-the free coordinates. Each evaluation builds a fresh full point. The compiled
-Stan target can serve several threads; an RK target holds one prepared
-automatic-differentiation workspace, so give each chain its own problem.
+the free coordinates. Each evaluation builds a fresh full point. `deepcopy`
+gives an RK copy its own prepared automatic-differentiation workspace and a
+Stan copy its own native model instance. WarmupHMC's multi-chain scalar-density
+entry copies the problem once per chain.
 
 Fields:
 - `map`, `backend` — the joint map and the selected backend.
@@ -62,6 +63,39 @@ struct BRMNLMEConditionalProblem{M<:BRMNLMEJointMap,B,P}
     subjects::Vector{Any}
     margins::Vector{NamedTuple}
     position::Vector{Float64}
+end
+
+# A conditional RK target owns a prepared AD workspace. StanProblem instead
+# wraps a BridgeStan.StanModel with a finalizer-managed native pointer: Julia's
+# structural deepcopy would duplicate that pointer without constructing a new
+# native model. Reopen the already compiled library and copy the wrapper using
+# the replacement model, preserving its log-density options.
+_brm_nlme_copy_conditional_target(::RKBRMI, target, stack) =
+    Base.deepcopy_internal(target, stack)
+function _brm_nlme_copy_conditional_target(::SBBRMI, target, stack)
+    model = target.model
+    copied = BridgeStan.StanModel(Libdl.dlpath(model.lib), model.data,
+        model.seed; warn=false)
+    stack[model] = copied
+    Base.deepcopy_internal(target, stack)
+end
+
+function Base.deepcopy_internal(problem::BRMNLMEConditionalProblem, stack::IdDict)
+    haskey(stack, problem) && return stack[problem]
+    target = _brm_nlme_copy_conditional_target(problem.backend, problem.target, stack)
+    # The map and backend are read-only provenance. Their compiled program and
+    # coordinate records are shared; the evaluation target and point buffers
+    # belong to this copy alone.
+    copied = BRMNLMEConditionalProblem(problem.map, problem.backend, target,
+        Base.deepcopy_internal(problem.point, stack),
+        Base.deepcopy_internal(problem.free, stack),
+        Base.deepcopy_internal(problem.fixed, stack),
+        Base.deepcopy_internal(problem.names, stack),
+        Base.deepcopy_internal(problem.subjects, stack),
+        Base.deepcopy_internal(problem.margins, stack),
+        Base.deepcopy_internal(problem.position, stack))
+    stack[problem] = copied
+    copied
 end
 
 # A start's own fixed/free records are in Stan order: subject draws are free
