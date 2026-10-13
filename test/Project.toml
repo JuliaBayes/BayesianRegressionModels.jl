@@ -40,8 +40,8 @@ julia = "1.10"
 
 [sources.StanBlocks]
 url = "https://github.com/nsiccha/StanBlocks.jl"
-# Published grouped-observation descriptor tracing and construction locking.
-rev = "1e0af724be4f7ee0dccfccf99187cf80e35b551b"
+# Published declared-missing plate observation twins.
+rev = "f442bee5e69f5bc89659951d09fa531a90bfac01"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"

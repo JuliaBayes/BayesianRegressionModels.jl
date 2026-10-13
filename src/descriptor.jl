@@ -622,6 +622,15 @@ function _brm_logical_outputs(stan, by_name, targets, cell_values,
     # query takes `role` to disambiguate.
     for o in stan.outputs
         isnothing(o.source) && continue
+        # A missing plate-cell response has no data column. StanBlocks sources
+        # its new predictive twin at the context-qualified emitted stem; the
+        # author still addresses the cell's declaration target.
+        declaration = get(by_name, o.source, nothing)
+        if !isnothing(declaration) && declaration.role === :observation &&
+                isnothing(declaration.data_source)
+            claim!(o.name, declaration.target)
+            continue
+        end
         # A ragged kernel positional is gathered into a derived data key before
         # StanBlocks sees it. Its generated twins correctly source that key,
         # while BRM's public response remains the original flat column.
@@ -663,9 +672,8 @@ function _brm_logical_outputs(stan, by_name, targets, cell_values,
     # through the twin — already claimed via its `source` link above — exactly
     # as a fitted observation does. The twin is detected WITHOUT parsing the
     # emitter-owned suffix: it is the `:draw` output StanBlocks sources at the
-    # declaration target (the same `draw_sources` rule the descriptor body
-    # uses). Twinless unbound observations (per-cell unbound, sampled unbound)
-    # keep the bare-target claim below.
+    # resolved emitted stem (the same `draw_sources` rule the descriptor body
+    # uses). Twinless unbound observations keep the bare-target claim below.
     twin_sources = Set{Symbol}(o.source for o in stan.outputs
                                if o.generative === :draw && !isnothing(o.source))
     for (resolved, decl) in by_name
@@ -678,7 +686,7 @@ function _brm_logical_outputs(stan, by_name, targets, cell_values,
         if decl.role === :observation && !isnothing(decl.data_source)
             continue
         end
-        if decl.role === :observation && decl.target in twin_sources
+        if decl.role === :observation && resolved in twin_sources
             continue
         end
         owned = owned_by(decl)

@@ -3672,19 +3672,19 @@ end
 # Declare observation stems to SLIC from the same emitted-body roles as the
 # plan. Bound observations use their source column, including kernel aliases:
 # group CV can eliminate their data inputs, while predictive carriers still
-# need that source identity. Whole-LHS unbound observations use their target;
-# StanBlocks emits an alias twin when they redraw in GQ. Cell-local unbound
-# targets stay excluded because they lie outside that twin scope.
+# need that source identity. Unbound observations use their emitted stem:
+# a top-level target is unchanged, while a plate-cell target is prefixed by
+# its plate context. StanBlocks uses the stem to alias the completed draw.
 Base.@nospecializeinfer function _sb_declared_observations(body, data, @nospecialize(brmi))
     declarations = _sb_plan_declarations(body, data, brmi)
-    Tuple(sort!(unique(Symbol[isnothing(d.data_source) ? d.target : d.data_source
-        for d in declarations if d.role === :observation &&
-            (!isnothing(d.data_source) || isempty(d.context))])))
+    Tuple(sort!(unique(Symbol[isnothing(d.data_source) ?
+        _sb_plan_stem(d.context, d.target) : d.data_source
+        for d in declarations if d.role === :observation])))
 end
 
 # Plate-nested omitted outcomes, read from the FORMULA: `(context, cell target)`
 # pairs whose in-cell `~` is an unconditioned observation. The plan collector
-# cannot infer this from the emitted body — a twinless in-cell `~` is
+# cannot infer this from the emitted body — an unbound in-cell `~` is
 # syntactically identical to a per-cell prior (`_sb_plan_value_ref(::Symbol)`
 # is true, so the obs-shaped gate cannot separate them) — so the emitter's own
 # classification (`_sb_kernel_unbound_cell_idx`) is re-derived here from the
@@ -4072,8 +4072,8 @@ _sb_plan_family(x::Expr) = begin
 end
 _sb_plan_family(x) = x
 
-_sb_plan_generated(context, target) =
-    Symbol(join((context..., target), "_"), "_gen")
+_sb_plan_stem(context, target) = Symbol(join((context..., target), "_"))
+_sb_plan_generated(context, target) = Symbol(_sb_plan_stem(context, target), "_gen")
 
 # A configured term prior is spliced into the emitted body as a `SlicModel`
 # value.  Its `mod` field is the stable namespace where the submodel was
@@ -4270,8 +4270,8 @@ function _sb_plan_collect!(declarations, x, data_scope, context, obs_keys, plate
             :observation
         elseif !isempty(context) && (context, target) in unbound_cell
             # Omitted kernel outcome: the emitter dropped this cell parameter
-            # from the plate (count form) and its in-cell `~` forward-simulates
-            # twinless. No obs-shaped gate here — the formula-level
+            # from the plate (count form) and its in-cell `~` forward-simulates.
+            # No obs-shaped gate here — the formula-level
             # classification (a `MissingColumn` positional observed in-cell) is
             # already as discriminating as `data_source`: per-cell priors and
             # synthesized latents never match it, while even a literal-RHS
@@ -5421,7 +5421,7 @@ end
 # forward-simulates per cell. A `MissingColumn` positional that is never
 # observed is an input problem and stays a loud error at the call site.
 # Shared by the emitter (which drops the positions) and the plan collector
-# (which marks the twinless in-cell `~` an observation); both read the same
+# (which marks the unbound in-cell `~` an observation); both read the same
 # formula body, so the classification cannot disagree with emission.
 function _sb_kernel_unbound_cell_idx(positionals, params::Vector{Symbol}, body_stmts)
     found = Int[]

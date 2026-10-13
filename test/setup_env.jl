@@ -41,7 +41,7 @@ const TESTENV = @__DIR__
 # name => (github url, pinned commit)   — comment records the branch the commit
 # is on, for humans; the pin itself is the full SHA and needs no branch.
 const PINS = [
-    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "1e0af724be4f7ee0dccfccf99187cf80e35b551b"),  # devibe: grouped-observation descriptors + construction locking
+    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "f442bee5e69f5bc89659951d09fa531a90bfac01"),  # devibe: declared-missing plate observation twins
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     # 0194dce (2026-09-27, dev): WindowSelectionPlan (WarmupHMC-held evidence)
     # and the controls interface for custom reparametrizers,
