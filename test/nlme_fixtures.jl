@@ -270,3 +270,18 @@ function nested_model(data)
         ragged(y, obs_subject) ~ Normal(pred, sigma)
     end
 end
+
+# Two pointwise fields with different shapes: one scalar density per subject
+# and one vector of densities for each subject's uneven nested units.
+function nested_mixed_observations(data)
+    @brm data begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + (1 | p | subject)
+        unit_shift ~ 0 + (1 | u | unit)
+        subject_y ~ Normal(mu, sigma)
+        @plate for i in eachindex(mu)
+            pred[i] = mu[i] .+ ragged(unit_shift, obs_subject)[i]
+        end
+        ragged(y, obs_subject) ~ Normal(pred, sigma)
+    end
+end
