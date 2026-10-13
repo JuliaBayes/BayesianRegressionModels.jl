@@ -984,15 +984,25 @@ function _brm_nlme_point(m::BRMNLMEModel, θ, σ,
     u
 end
 
-function _brm_nlme_sum_by_subject(m::BRMNLMEModel, fields)
-    out = zeros(Float64, length(m.view.levels))
-    for (name, subjects) in m.attribution
-        values = getproperty(fields, name)
-        for (k, i) in enumerate(subjects)
-            out[i] += sum(values[k])
-        end
+@inline function _brm_nlme_sum_fields!(out, attribution,
+        fields::NamedTuple{names}, ::Val{K}) where {names,K}
+    K > length(names) && return out
+    name, subjects = attribution[K]
+    name === names[K] || error("NLME pointwise field order differs from its attribution")
+    values = getfield(fields, K)
+    for (k, i) in enumerate(subjects)
+        out[i] += sum(values[k])
     end
-    out
+    _brm_nlme_sum_fields!(out, attribution, fields, Val(K + 1))
+end
+
+function _brm_nlme_sum_by_subject(m::BRMNLMEModel, fields::NamedTuple)
+    length(m.attribution) == length(fields) || error(
+        "NLME pointwise field count differs from its attribution")
+    out = zeros(Float64, length(m.view.levels))
+    # The attribution is built in pointwise NamedTuple order. A static field
+    # index keeps each field's (possibly nested) value type concrete for Enzyme.
+    _brm_nlme_sum_fields!(out, m.attribution, fields, Val(1))
 end
 
 """
