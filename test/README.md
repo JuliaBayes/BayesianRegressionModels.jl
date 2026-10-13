@@ -30,6 +30,10 @@ StanBlocks revision pinned by `setup_env.jl` and checks the public flat
 predictive segments, bound pointwise likelihood, and refusal of a missing
 non-response ragged input.
 
+`omitted_plate_observations.jl` checks the grouped `pk_conc[i]` spelling with
+an omitted censored response and a joint QT likelihood. It checks the
+predictive descriptor and a finite generated draw above the censoring floor.
+
 `benchmark_emission_latency.jl` reports package loading, first model construction,
 first RK artifact emission and repeated calls separately, including compiler time,
 allocation and garbage collection. It uses independent synthetic regression and
