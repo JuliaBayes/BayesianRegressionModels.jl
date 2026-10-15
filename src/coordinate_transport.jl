@@ -465,7 +465,8 @@ end
 function _brm_transport_ranef_block(d, record)
     plan = d.plan
     brmi = plan.parent
-    blocks = [b for b in ranef_blocks(plan)
+    all_blocks = ranef_blocks(plan)
+    blocks = [b for b in all_blocks
         if b.group === record.group && b.id === record.id]
     if isnothing(record.id)
         predictors = unique(first.(record.margins))
@@ -480,6 +481,13 @@ function _brm_transport_ranef_block(d, record)
         "brm_coordinate_transport: random-effect block $(address) of RK " *
         "margins $(record.margins) matches $(length(blocks)) SB blocks")
     block = only(blocks)
+    # A marginalized `|ID|` block samples its likelihood-active margins in a
+    # carrier (src/sb_marginal_ranef.jl); RK plans that same reduced block.
+    completion = get(plan.bindings, block.binding, NamedTuple())
+    active = hasproperty(completion, :active) ?
+        collect(plan.bindings[completion.active].margins) : nothing
+    isnothing(active) ||
+        (block = only(b for b in all_blocks if b.binding === completion.active))
     block.generated && _brm_transport_error(:parameterization_mismatch,
         "brm_coordinate_transport: SB block `$(block.binding)` is drawn in " *
         "generated quantities and has no sampled coordinates")
@@ -491,7 +499,8 @@ function _brm_transport_ranef_block(d, record)
         binding = plan.bindings[block.binding]
         [(binding.predictor, c) for c in binding.columns]
     else
-        [(m.predictor, m.coefficient) for m in ranefcoefnames(brmi, record.id)]
+        shared = [(m.predictor, m.coefficient) for m in ranefcoefnames(brmi, record.id)]
+        isnothing(active) ? shared : shared[active]
     end
     length(margins) == block.n_terms || error(
         "brm_coordinate_transport: SB block `$(block.binding)` reports " *
