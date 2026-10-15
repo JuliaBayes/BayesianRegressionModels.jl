@@ -307,8 +307,7 @@ function _sb_vector_priors(base::StanBlocks.SlicModel, target::Symbol, priors;
     Base.merge(base, Expr(:call, :~, target, rhs))
 end
 
-function _sb_direct_vector_positive_prior(base::StanBlocks.SlicModel,
-                                          target::Symbol, prior, nvalue)
+function _sb_direct_vector_positive_prior(target::Symbol, prior, nvalue)
     emitted = Any[]
     _sb_emit_prior!(emitted, target, getf(prior), prior) || return nothing
     stmt = only(emitted)
@@ -327,8 +326,42 @@ function _sb_direct_vector_positive_prior(base::StanBlocks.SlicModel,
     _, actuals, _, _ = _sb_vector_prior_parts((prior,))
     dependencies = Set{Symbol}()
     foreach(arg -> _sb_vector_prior_dependencies!(dependencies, arg), actuals)
-    (; model=Base.merge(base, stmt),
-       dependencies=sort!(collect(dependencies)))
+    (; statement=stmt, dependencies=sort!(collect(dependencies)))
+end
+
+# The one `lhs ~ <positive vector prior>` statement for per-margin `priors`, and
+# the model names its arguments read. `scope` is the module the statement is
+# traced in: a direct homogeneous family must resolve there.
+function _sb_vector_positive_prior_statement(lhs, target::Symbol, priors, nvalue;
+                                             direct_homogeneous::Bool=false,
+                                             mod::Module, scope::Module)
+    # Stan's native univariate families vectorise over their variate. When every
+    # margin has the exact same mapped distribution, retain that natural Stan
+    # spelling instead of synthesising a coordinate-by-coordinate UDF. Custom,
+    # composed, or heterogeneous priors keep the general generated-family path.
+    # The direct statement only resolves families visible in `scope` (the
+    # BRM-owned base for a merged submodel): a consumer-registered distribution
+    # type (`_sb_stan_dist_name(::Type{<:MyPrior})`) whose StanBlocks family
+    # lives in `mod` must take the generated-family path, which traces in `mod`.
+    if direct_homogeneous && !isempty(priors) &&
+       all(prior -> isequal(prior, first(priors)), priors)
+        T = _as_distribution_type(getf(first(priors)))
+        family = isnothing(T) ? nothing : _sb_stan_dist_name(T)
+        if family isa Symbol &&
+           _brm_distribution_shape(first(priors)) ==
+               (Distributions.Univariate, Distributions.Continuous) &&
+           (isdefined(StanBlocks, family) || isdefined(scope, family))
+            direct = _sb_direct_vector_positive_prior(target, first(priors), nvalue)
+            isnothing(direct) || return direct
+        end
+    end
+    family, args = _sb_vector_prior_family(priors; mod)
+    # Intrinsic bounds belong to the value family, including when this
+    # parameter is redrawn in generated quantities.
+    rhs = Expr(:call, family, Expr(:parameters, Expr(:kw, :n, nvalue)), args...)
+    dependencies = Set{Symbol}()
+    foreach(arg -> _sb_vector_prior_dependencies!(dependencies, arg), args)
+    (; statement=Expr(:call, :~, lhs, rhs), dependencies=sort!(collect(dependencies)))
 end
 
 function _sb_vector_positive_priors(base::StanBlocks.SlicModel,
@@ -348,35 +381,9 @@ function _sb_vector_positive_priors(base::StanBlocks.SlicModel,
             isnothing(nkw) || (nvalue = source.args[3].args[params].args[nkw].args[2])
         end
     end
-    # Stan's native univariate families vectorise over their variate. When every
-    # margin has the exact same mapped distribution, retain that natural Stan
-    # spelling instead of synthesising a coordinate-by-coordinate UDF. Custom,
-    # composed, or heterogeneous priors keep the general generated-family path.
-    # The direct statement is merged into the BRM-owned `base`, so it only
-    # resolves families visible there: a consumer-registered distribution type
-    # (`_sb_stan_dist_name(::Type{<:MyPrior})`) whose StanBlocks family lives in
-    # `mod` must take the generated-family path, which traces in `mod`.
-    if direct_homogeneous && !isempty(priors) &&
-       all(prior -> isequal(prior, first(priors)), priors)
-        T = _as_distribution_type(getf(first(priors)))
-        family = isnothing(T) ? nothing : _sb_stan_dist_name(T)
-        if family isa Symbol &&
-           _brm_distribution_shape(first(priors)) ==
-               (Distributions.Univariate, Distributions.Continuous) &&
-           (isdefined(StanBlocks, family) || isdefined(base.mod, family))
-            direct = _sb_direct_vector_positive_prior(
-                base, target, first(priors), nvalue)
-            isnothing(direct) || return direct
-        end
-    end
-    family, args = _sb_vector_prior_family(priors; mod)
-    # Intrinsic bounds belong to the value family, including when this
-    # parameter is redrawn in generated quantities.
-    rhs = Expr(:call, family, Expr(:parameters, Expr(:kw, :n, nvalue)), args...)
-    model = Base.merge(base, Expr(:call, :~, lhs, rhs))
-    dependencies = Set{Symbol}()
-    foreach(arg -> _sb_vector_prior_dependencies!(dependencies, arg), args)
-    (; model, dependencies=sort!(collect(dependencies)))
+    prior = _sb_vector_positive_prior_statement(lhs, target, priors, nvalue;
+                                                direct_homogeneous, mod, scope=base.mod)
+    (; model=Base.merge(base, prior.statement), prior.dependencies)
 end
 
 _sb_vector_prior_dependencies!(_out, _value) = nothing
@@ -3389,7 +3396,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
        mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
        centered_groups=Set{Symbol}(), total_groups=:auto,
        s2z_groups=(), s2z_rho=nothing, s2z_coordinates=:contrasts, held_out=(),
-       resample_covariates=(), _frozen_preproc=nothing)
+       resample_covariates=(), _frozen_preproc=nothing, _marginal_id_targets=nothing)
     source_parent = brmi
     fresh_covariates = _sb_covariate_selection(brmi,resample_covariates)
     isempty(fresh_covariates) || (brmi = _sb_covariate_brmi(brmi,fresh_covariates))
@@ -3540,9 +3547,11 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     # of its population columns / contrast blocks and its margin reference.
     # Empty for every other model.
     r2d2_joint = Dict{Symbol,NamedTuple}()
+    marginal_candidates = NamedTuple[]
     id_lookup = _sb_emit_id_buckets!(stmts, data, id_buckets;
         cv_groups, centered_groups, ranef_effect_overrides, r2d2_names,
-        ranef_r2d2_overrides, r2d2_joint, mod)
+        ranef_r2d2_overrides, r2d2_joint, marginal_targets=_marginal_id_targets,
+        marginal_candidates, mod)
     # Prepass 2.5: group-block terms. For each `mu ~ f(...)` where f has a
     # _sb_term_group_block declaration, allocate one ranef_correlated_draws
     # block per (f, group-column) pair. The lookup is threaded into _sb_emit!
@@ -3616,7 +3625,29 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     body = Expr(:block, stmts...)
     model = StanBlocks.SlicModel(body, data, mod, _sb_declared_observations(body, data, brmi))
     sb = SBBRMI(source_parent, model, data, preproc, Set{Symbol}(), bindings)
-    _sb_triage_emitted(sb)
+    triage = _sb_observation_triage(sb)
+    # The activity probe's own build: no warnings, no held-out marks.
+    _marginal_id_targets isa _SBMarginalProbe && return sb
+    if isnothing(_marginal_id_targets) && !isempty(marginal_candidates) &&
+       !isempty(triage.unbound)
+        # Omitted responses can leave some margins of a shared `|ID|` block
+        # outside every likelihood. StanBlocks' own placement of the emitted
+        # per-margin gathers decides which (`_sb_marginal_id_probe`); rebuild
+        # once with those margins integrated out of the sampled block. The
+        # probe ignores cv marks, so a replay program reduces exactly as the
+        # fit it replays.
+        build(; cv_groups, held_out, _marginal_id_targets) = SBBRMI(source_parent;
+            mod, cv_groups, centered_groups, total_groups, s2z_groups, s2z_rho,
+            s2z_coordinates, held_out, resample_covariates, _frozen_preproc,
+            _marginal_id_targets)
+        probe = isempty(cv_groups) ? sb :
+            build(; cv_groups=Set{Symbol}(), held_out=(),
+                  _marginal_id_targets=_SBMarginalProbe())
+        inactive = _sb_marginal_id_probe(probe, marginal_candidates)
+        isempty(inactive) ||
+            return build(; cv_groups, held_out, _marginal_id_targets=inactive)
+    end
+    _sb_triage_emitted(sb, triage)
     _sb_apply_held_out(sb, held_out)
 end
 
@@ -3630,7 +3661,7 @@ end
 # observations (`pk_obs`/`qt_obs` inside `kernel(...)`) and fused statements
 # resolve with the same role logic the plan itself uses; synthesized latents
 # (`total`, `tau`, LKJ factors) never match and stay priors.
-Base.@nospecializeinfer function _sb_triage_emitted(@nospecialize(sb::SBBRMI))
+Base.@nospecializeinfer function _sb_observation_triage(@nospecialize(sb::SBBRMI))
     declarations = _sb_plan_declarations(sb.model.model, sb.data, sb.parent)
     missing_sources = Set{Symbol}()
     fresh_sources = _sb_existing_covariates(sb.preproc)
@@ -3644,6 +3675,12 @@ Base.@nospecializeinfer function _sb_triage_emitted(@nospecialize(sb::SBBRMI))
     unbound = sort!(Symbol[d.target for d in declarations
                            if d.role === :observation && isnothing(d.data_source) &&
                               !(d.target in missing_sources) && !(d.target in fresh_sources)])
+    (; bound, unbound, fresh_sources)
+end
+
+Base.@nospecializeinfer function _sb_triage_emitted(@nospecialize(sb::SBBRMI),
+                                                    triage=_sb_observation_triage(sb))
+    (; bound, unbound, fresh_sources) = triage
     if !isempty(unbound)
         names = join(map(s -> "`$s`", unbound), ", ")
         if bound >= 1
@@ -10602,6 +10639,7 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
                               r2d2_names=Dict{Symbol,NamedTuple}(),
                               ranef_r2d2_overrides=Dict{Tuple{Symbol,Any},NamedTuple}(),
                               r2d2_joint=Dict{Symbol,NamedTuple}(),
+                              marginal_targets=nothing, marginal_candidates=nothing,
                               mod::Module=@__MODULE__)
     lookup = _sb_empty_id_lookup()
     for (k, bucket) in pairs(buckets)
@@ -10665,6 +10703,25 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
             end
             r2d2_tau = Expr(:vect,
                 [_sb_r2d2_resid_scale(r2d2_names[m.predictor]) for m in margins]...)
+        end
+        # Likelihood-inactive margins (`src/sb_marginal_ranef.jl`): sample only
+        # the active margins' marginal block and complete the rest exactly.
+        if _sb_marginal_eligible(desc, ranef_effect, r2d2_tau)
+            inactive = marginal_targets isa AbstractDict ?
+                get(marginal_targets, k, nothing) : nothing
+            if !isnothing(inactive)
+                split = _sb_emit_marginal_id_bucket!(stmts, data, bucket_name,
+                    n_terms_name, desc, per_target_ranges, inactive;
+                    cv_groups, centered_groups, ranef_effect, mod)
+                for (brmi_key, (carrier, cols)) in split.ranges
+                    lookup[(brmi_key, k)] = (; bucket_name=carrier, cols,
+                                             split.idx_name, suffix)
+                end
+                continue
+            end
+            length(per_target_ranges) >= 2 && !isnothing(marginal_candidates) &&
+                push!(marginal_candidates, (; key=k, bucket_name, suffix,
+                                            targets=first.(per_target_ranges)))
         end
         idx_name = _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, desc;
                                                 cv_groups, centered_groups, id_sym,

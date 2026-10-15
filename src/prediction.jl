@@ -121,6 +121,14 @@ const _RANEF_FAMILIES = Dict{Symbol,NamedTuple}(
     :ranef_correlated_draws    => (; z = :z_flat, layout = :flat_term_group, noncentered = true,  tau = :tau),
     :ranef_correlated_draws_generic => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :tau),
     :ranef_correlated_draws_centered_generic => (; z = :b_cols_bc, layout = :group_term, noncentered = false, tau = :tau),
+    # A shared `|ID|` block whose omitted responses leave some margins outside
+    # every likelihood (src/sb_marginal_ranef.jl): the sampled active margins
+    # (`<bucket>_active`, whose `L`/`tau` are top-level `<bucket>_active_L` /
+    # `<bucket>_active_tau`) and the generated completion under the bucket's
+    # own name, whose `z_flat`/`tau` are full-width generated quantities.
+    :ranef_correlated_draws_marginal => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :tau),
+    :ranef_correlated_draws_centered_marginal => (; z = :b_cols_bc, layout = :group_term, noncentered = false, tau = :tau),
+    :ranef_correlated_draws_completion => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :tau),
     :ranef_intercept_r2d2      => (; z = :xi,     layout = :group,           noncentered = true,  tau = nothing),
     :ranef_correlated_r2d2     => (; z = :z_flat, layout = :flat_term_group, noncentered = true,  tau = :r2d2_tau),
     :ranef_correlated_draws_r2d2 => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :r2d2_tau),

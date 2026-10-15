@@ -117,6 +117,10 @@ const _ADAPTIVE_CORRELATED_FAMILIES = Set((
     :ranef_correlated_draws_centered,
     :ranef_correlated_draws_centered_effect,
     :ranef_correlated_draws_centered_generic,
+    # The sampled active margins of a marginalized `|ID|` block; its generated
+    # completion has no coordinates and stays outside every set.
+    :ranef_correlated_draws_marginal,
+    :ranef_correlated_draws_centered_marginal,
 ))
 
 const _ADAPTIVE_INTERCEPT_FAMILIES = Set((
