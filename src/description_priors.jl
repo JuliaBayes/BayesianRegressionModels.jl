@@ -107,6 +107,10 @@ function _brmd_ranef_metadata(d)
     overrides = _sb_ranef_effect_overrides(d.plan.parent,buckets)
     result = NamedTuple[]
     for (index,block) in enumerate(ranef_blocks(d.plan))
+        # A marginalized `|ID|` block (src/sb_marginal_ranef.jl) samples its
+        # active margins in a carrier and completes the rest in the bucket's
+        # own block; that block states the complete generative prior.
+        hasproperty(get(d.plan.bindings,block.binding,NamedTuple()),:marginal_of) && continue
         key = (:random_effect, isnothing(block.id) ? (:independent,index) : block.id, block.group)
         declarations = filter(x -> x.target === block.binding,d.plan.declarations)
         declaration = only(declarations)

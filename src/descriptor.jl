@@ -338,6 +338,15 @@ _brm_declaration_role(d::GenerativeDeclaration, bindings=nothing) = begin
     :parameter
 end
 
+# The sampled correlation factor and scales of a marginalized `|ID|` block
+# (src/sb_marginal_ranef.jl) are top-level statements that its carrier reads by
+# keyword; the carrier, not they, holds the group index.
+_brm_marginal_hyperparameter(d::GenerativeDeclaration, bindings) = begin
+    binding = get(bindings, d.target, nothing)
+    !isnothing(binding) && hasproperty(binding, :marginal_of) &&
+        !haskey(d.keywords, :group_idx)
+end
+
 # ---- schema: which dataframe column does this Stan input come from? ---------
 
 # A preproc record names its source either directly (a column NAME Symbol, for
@@ -1154,7 +1163,8 @@ function _brm_reprocess_supported(plan, outputs)
     any(o -> o.role === :random_effect, outputs) || return true
 
     ranef_declarations = [d for d in plan.declarations
-                          if _brm_declaration_role(d, plan.bindings) === :random_effect]
+                          if _brm_declaration_role(d, plan.bindings) === :random_effect &&
+                             !_brm_marginal_hyperparameter(d, plan.bindings)]
     isempty(ranef_declarations) && return false
 
     all(ranef_declarations) do d

@@ -4116,16 +4116,39 @@ Base.@nospecializeinfer function _rk_plan_ranef_buckets(@nospecialize(brmi::BRMI
         Dict{Tuple{Symbol,Any},NamedTuple}()
     end
     direct = [s for s in specs if !(s.class === :sd && s.family === r2d2)]
+    # A shared `|ID|` bucket is planned over the reachable predictors only.
+    # `sd`/`cor` statements address and size its full margins (every
+    # predictor naming the ID), and a bucket an omitted response left
+    # narrower samples their exact marginal law: LKJ(a, eta + (K - a) / 2)
+    # and the kept margins' own scale priors (derivation:
+    # src/sb_marginal_ranef.jl).
+    full = Dict{Tuple{Symbol,Any},Vector{NamedTuple}}(
+        key => _sb_id_bucket_margins(b) for (key, b) in _sb_collect_id_buckets(context))
     overrides = _brm_resolve_ranef_effect_overrides(direct,
-        Dict((bucket.id, bucket.group) => bucket.margins for bucket in buckets
-            if bucket.id !== nothing); prefix)
+        Dict((bucket.id, bucket.group) =>
+                get(full, (bucket.id, bucket.group), bucket.margins)
+             for bucket in buckets if bucket.id !== nothing); prefix)
     whole = isempty(decompositions) ? Set{Symbol}() :
         Set(s.predictor for s in r2d2_priors(brmi))
     for i in eachindex(buckets)
         bucket = buckets[i]
         override = get(overrides, (bucket.id, bucket.group), nothing)
         decomposition = get(decompositions, (bucket.id, bucket.group), nothing)
-        override === nothing && decomposition === nothing && continue
+        all_margins = bucket.id === nothing ? nothing :
+            get(full, (bucket.id, bucket.group), nothing)
+        reduced = !isnothing(all_margins) && length(all_margins) > length(bucket.margins)
+        override === nothing && decomposition === nothing && !reduced && continue
+        found = reduced ? [findfirst(x -> x.predictor === m.predictor &&
+                                          x.coefficient === m.coefficient, all_margins)
+                           for m in bucket.margins] : Int[]
+        any(isnothing, found) && error(
+            "$prefix: internal: `|$(bucket.id)|` plans margins outside its shared block")
+        positions = Int[p for p in found]
+        reduced && decomposition !== nothing && error(
+            "$prefix: `|$(bucket.id)|` carries an `sd(...) ~ r2d2(...)` " *
+            "decomposition, and an omitted response leaves some of its margins " *
+            "outside every likelihood; a partial R2D2 block is not implemented. " *
+            "Bind the response, or drop the decomposition for this fit")
         dist = override === nothing ? nothing : override.dist
         if dist !== nothing
             decomposition === nothing || error(
@@ -4147,11 +4170,15 @@ Base.@nospecializeinfer function _rk_plan_ranef_buckets(@nospecialize(brmi::BRMI
             addresses == decomposition.margins || error(
                 "$prefix: R2D2 margin order differs from the shared allocation")
         end
+        eta = override === nothing ? bucket.lkj_eta : override.lkj_eta
+        sd_priors = override === nothing ? bucket.sd_priors : override.sd_prior
+        if reduced
+            eta += (length(all_margins) - length(bucket.margins)) / 2
+            override === nothing || (sd_priors = sd_priors[positions])
+        end
         replacement = _RKRanefBucket(bucket.id, bucket.group, bucket.kind,
-            bucket.margins, bucket.slices,
-            override === nothing ? bucket.lkj_eta : override.lkj_eta, bucket.label,
-            bucket.grouping, override === nothing ? bucket.sd_priors : override.sd_prior,
-            decomposition, dist)
+            bucket.margins, bucket.slices, eta, bucket.label,
+            bucket.grouping, sd_priors, decomposition, dist)
         buckets[i] = replacement
         for (key, value) in lookup
             value === bucket && (lookup[key] = replacement)

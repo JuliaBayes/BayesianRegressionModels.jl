@@ -63,6 +63,7 @@ include("vimpl.jl")
 # so it can be compiled by BridgeStan / fit via Stan.
 using StanBlocks
 include("sbimpl.jl")
+include("sb_marginal_ranef.jl")
 include("sb_cell_julia.jl")
 # Fusion-append artifacts + SB reference numbers (RK-side driver inputs).
 # After sbimpl (SBBRMI) and the RK planner/AST above; RK-free — the
@@ -269,6 +270,8 @@ export popefs, _popefs_normal, _popefs_coefs, _popefs_normal_coefs,
        ranef_correlated_draws_effect,
        ranef_correlated_draws_centered_effect,
        ranef_correlated_draws_r2d2, ranef_intercept_r2d2, ranef_correlated_r2d2,
+       ranef_correlated_draws_marginal, ranef_correlated_draws_centered_marginal,
+       ranef_correlated_draws_completion,
        brm_col_variances, brm_r2d2_scale, brm_cat_variances,
        multi_membership_intercept, multi_membership_correlated,
        _sb_mo, _sb_cat, _sb_cat_normal, _sb_cat_cells, _sb_cat_cells_normal, _sb_ar1, _sb_dar1, _sb_rw1, _sb_cdar, _sb_s, _sb_t2, _sb_me,
