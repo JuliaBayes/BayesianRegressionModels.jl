@@ -10720,8 +10720,8 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
                 continue
             end
             length(per_target_ranges) >= 2 && !isnothing(marginal_candidates) &&
-                push!(marginal_candidates, (; key=k, bucket_name, suffix,
-                                            targets=first.(per_target_ranges)))
+                push!(marginal_candidates, (; key=k, bucket_name,
+                                            ranges=copy(per_target_ranges)))
         end
         idx_name = _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, desc;
                                                 cv_groups, centered_groups, id_sym,

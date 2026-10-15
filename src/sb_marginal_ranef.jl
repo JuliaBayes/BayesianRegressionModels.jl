@@ -288,32 +288,67 @@ function _sb_emit_marginal_id_bucket!(stmts, data, bucket_name, n_terms_name,
 end
 
 # Which candidate targets reach no likelihood, read from StanBlocks' placement of
-# each target's emitted gather in `probe` (a build without cv or held-out marks).
-# Only a proper, nonempty subset of a bucket's targets is returned; a bucket the
-# body reads other than through its gathers is left whole.
+# the emitted gathers in `probe` (a build without cv or held-out marks). Each
+# gather is a top-level `r = ...` whose RHS slices the bucket at known columns
+# (`_sb_emit_id_ranef_block!`); a target is inactive when every gather of its
+# columns is a generated quantity. Only a proper, nonempty subset of a bucket's
+# targets is returned. A bucket the body reads any other way is left whole.
 function _sb_marginal_id_probe(probe, candidates)
     kinds = Dict(o.name => o.kind for o in StanBlocks.stan_descriptor(probe.model).outputs)
-    references = Dict{Symbol,Int}()
-    _sb_marginal_count_refs!(references, probe.model.model)
+    body = probe.model.model
+    statements = body isa Expr && body.head === :block ? body.args : Any[body]
     out = Dict{Tuple{Symbol,Any},Set{Symbol}}()
     for c in candidates
-        gathers = Dict(t => Symbol(:r_, t, :_, c.suffix) for t in c.targets)
-        get(references, c.bucket_name, 0) == length(c.targets) || continue
-        inactive = Set{Symbol}(t for t in c.targets
-                               if get(kinds, gathers[t], nothing) === :generated_quantity)
-        0 < length(inactive) < length(c.targets) && (out[c.key] = inactive)
+        reads = _sb_marginal_gathers(statements, c.bucket_name, probe.data)
+        isnothing(reads) && continue
+        read_cols = Set{Int}(col for (_, cols) in reads for col in cols)
+        all(range -> issubset(last(range), read_cols), c.ranges) || continue
+        active_cols = Set{Int}(col for (lhs, cols) in reads
+                               if get(kinds, lhs, nothing) !== :generated_quantity
+                               for col in cols)
+        inactive = Set{Symbol}(target for (target, cols) in c.ranges
+                               if isdisjoint(cols, active_cols))
+        0 < length(inactive) < length(c.ranges) && (out[c.key] = inactive)
     end
     out
 end
 
-_sb_marginal_count_refs!(out, x::Symbol) = (out[x] = get(out, x, 0) + 1; out)
-function _sb_marginal_count_refs!(out, x::Expr)
-    # The bucket's own `b ~ ...` LHS is a definition, not a read.
-    if x.head === :call && length(x.args) == 3 && x.args[1] === :~ && x.args[2] isa Symbol
-        _sb_marginal_count_refs!(out, x.args[3])
-        return out
+# `(lhs, columns)` for every statement reading `bucket`, or `nothing` when one
+# reads it other than as a top-level `lhs = f(bucket[idx, cols])` gather.
+function _sb_marginal_gathers(statements, bucket::Symbol, data)
+    reads = Tuple{Symbol,Vector{Int}}[]
+    for stmt in statements
+        _sb_marginal_mentions(stmt, bucket) || continue
+        stmt isa Expr && stmt.head === :(=) && stmt.args[1] isa Symbol || return nothing
+        refs = Expr[]
+        _sb_marginal_bucket_refs!(refs, stmt.args[2], bucket)
+        length(refs) == 1 && length(only(refs).args) == 3 || return nothing
+        colspec = only(refs).args[3]
+        cols = colspec isa Integer ? Int[colspec] :
+            colspec isa Symbol && get(data, colspec, nothing) isa AbstractVector{<:Integer} ?
+                collect(Int, data[colspec]) : nothing
+        isnothing(cols) && return nothing
+        # Every other mention must be that one slice.
+        _sb_marginal_mentions(stmt.args[2], bucket; skip=only(refs)) && return nothing
+        push!(reads, (stmt.args[1], cols))
     end
-    foreach(a -> _sb_marginal_count_refs!(out, a), x.args)
+    reads
+end
+
+function _sb_marginal_bucket_refs!(out, x::Expr, bucket)
+    x.head === :ref && !isempty(x.args) && x.args[1] === bucket && return push!(out, x)
+    foreach(a -> _sb_marginal_bucket_refs!(out, a, bucket), x.args)
     out
 end
-_sb_marginal_count_refs!(out, _) = out
+_sb_marginal_bucket_refs!(out, _, _) = out
+
+# Whether `x` names `bucket` anywhere other than inside `skip` or as the LHS of
+# its own `bucket ~ ...` definition.
+_sb_marginal_mentions(x::Symbol, bucket; skip=nothing) = x === bucket
+function _sb_marginal_mentions(x::Expr, bucket; skip=nothing)
+    x === skip && return false
+    x.head === :call && length(x.args) == 3 && x.args[1] === :~ && x.args[2] === bucket &&
+        return _sb_marginal_mentions(x.args[3], bucket; skip)
+    any(a -> _sb_marginal_mentions(a, bucket; skip), x.args)
+end
+_sb_marginal_mentions(x, bucket; skip=nothing) = false

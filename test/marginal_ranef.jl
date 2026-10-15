@@ -50,6 +50,17 @@ const MR_CONFIGURED = @brm begin
     yc ~ Normal(c_loc, 0.5)
 end
 
+# A linked predictor's gather is named after its linear predictor
+# (`r_log_b_loc_p_subject`), not after the bucket's predictor key.
+const MR_LINKED = @brm begin
+    a_loc ~ 1 + x + (1 + x | p | subject)
+    log(b_loc) ~ 1 + (1 | p | subject)
+    c_loc ~ 1 + (1 | p | subject)
+    ya ~ Normal(a_loc, 0.5)
+    yb ~ Normal(b_loc, 0.5)
+    yc ~ Normal(c_loc, 0.5)
+end
+
 mr_build(builder, df; kwargs...) = SBBRMI(builder(df); mod=@__MODULE__, total_groups=(), kwargs...)
 
 function mr_block(code, name)
@@ -181,6 +192,16 @@ end
     @test mr_ks(observed_b, expected_b) < mr_ks_crit(4000, 20_000)
 end
 
+@testset "a linked predictor's margin is found through its emitted gather" begin
+    sb = mr_build(MR_LINKED, MR_OMIT_B)
+    @test sb.data[:b_p_subject_inactive_margins] == [3]
+    code = MR.stan_code(sb)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    @test occursin("r_log_b_loc_p_subject = b_p_subject[subject_idx, 3];",
+                   mr_block(code, "generated quantities"))
+    @test LogDensityProblems.dimension(StanBlocks.stan_instantiate(sb.model)) == 21
+end
+
 @testset "configured scale and correlation priors split by margin" begin
     sb = mr_build(MR_CONFIGURED, MR_OMIT_B)
     code = MR.stan_code(sb)
@@ -249,4 +270,14 @@ end
     names = BridgeStan.param_names(problem.model; include_tp=true, include_gq=true)
     scale = brm_ranef_sd_coordinates(d, :b_loc, names; id=:p)
     @test names[only(scale.coordinates)] == "b_p_subject_tau.3"
+end
+
+@testset "descriptions keep the full generative block" begin
+    full = brm_description_markdown(brm_description(mr_build(MR_BUILDER, MR_DF)))
+    omitted = brm_description_markdown(brm_description(mr_build(MR_BUILDER, MR_OMIT_B)))
+    # The omitted response's margins stay in the described law: four scale
+    # priors, the standardized deviations and one LKJ correlation prior.
+    for row in ("| `LKJCholesky`;", "| `Normal`;")
+        @test count(row, omitted) == count(row, full) > 0
+    end
 end
