@@ -214,6 +214,10 @@ address its draws without reading the generated Stan.
   `L` / `tau` hyperparameters are the transportable state, and they are copied by
   name when they remain sampled. The flag comes from the emitted carrier's
   descriptor kind, independently of the supplied coordinate names.
+- `population` — true iff the program evaluates this block at its population
+  mean: a [`population_model`](@ref) artifact, whose block keeps the fitted
+  family, coordinates and placement but whose every consumer reads zero
+  effects.
 
 Obtain with [`ranef_blocks`](@ref); resolve to unconstrained coordinates with
 [`ranef_coordinates`](@ref).
@@ -230,14 +234,22 @@ struct RanefBlock
     z::Symbol
     noncentered::Bool
     generated::Bool
+    population::Bool
 end
+
+# A block of an ordinary (non-population) program.
+RanefBlock(binding, family, group, id, by, levels, n_terms, n_groups, z,
+           noncentered, generated) =
+    RanefBlock(binding, family, group, id, by, levels, n_terms, n_groups, z,
+               noncentered, generated, false)
 
 Base.show(io::IO, b::RanefBlock) = print(io,
     "RanefBlock(", b.binding, " :: ", b.family, ", group=", b.group,
     isnothing(b.id) ? "" : ", id=$(b.id)",
     isnothing(b.by) ? "" : ", by=$(b.by)",
     ", ", b.n_terms, "×", b.n_groups, ", z=", b.z,
-    b.generated ? ", generated" : "", ")")
+    b.generated ? ", generated" : "",
+    b.population ? ", population" : "", ")")
 
 # `<gname>_idx` / `<gname>__by__<bname>_idx` — the emitter's own group-index
 # naming (`_sb_ensure_group_data!`, `_sb_emit_ranef_block!`), read backwards.
@@ -536,10 +548,12 @@ function ranef_blocks(model)
             "descriptor kind `$kind`; expected a sampled parameter or generated ",
             "quantity. The random-effect emission table and traced model disagree.")
         push!(seen, d.target)
+        population = !isnothing(binding) && get(binding, :population, false) === true
         push!(out, RanefBlock(d.target, fam, raw_group,
                               _ranef_id_of_binding(d.target, raw_group, by), by,
                               levels, n_terms, n_groups,
-                              z, spec.noncentered, kind === :generated_quantity))
+                              z, spec.noncentered, kind === :generated_quantity,
+                              population))
     end
     out
 end
@@ -835,6 +849,10 @@ between-group variation.
 
 A selected grouping factor whose every block is generated has no coordinate to
 zero at all, and is an error rather than a silent no-op.
+
+[`population_model`](@ref) is the exact Stan-side alternative for those
+quantities: a program in which every block of the selected factors, sampled or
+generated, contributes exactly zero, evaluated on the fitted draws unchanged.
 
 # Example
 

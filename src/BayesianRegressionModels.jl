@@ -96,6 +96,7 @@ include("turing_descriptor.jl")
 # the emitted random-effect parameterization, so they live next to the emitter
 # rather than being re-derived (differently) in every consumer.
 include("prediction.jl")
+include("population_model.jl")
 include("coordinate_transport.jl")
 include("nlme_view.jl")
 include("nlme_joint_start.jl")
@@ -223,7 +224,8 @@ export parse!, _brm, stan_code, stan_data, stan_model, stan_instantiate,
 # Post-fit prediction — the population-level ("nore") and transported
 # ("recov") modes, plus the random-effect block description both stand on.
 export RanefBlock, ranef_blocks, ranef_coordinates,
-       population_draws, transport_draws, term_draws, hsgp_population_curve
+       population_draws, population_model, transport_draws, term_draws,
+       hsgp_population_curve
 export AbstractAdaptiveCenteringBlock, AdaptiveCenteringBlock,
        R2D2AdaptiveCenteringBlock, adaptive_centering_blocks,
        adaptive_centering_problem, select_hsgp_centeredness,

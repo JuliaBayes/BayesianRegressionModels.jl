@@ -9,6 +9,10 @@
 # The load-bearing checks read the model's own transformed parameters back out
 # of BridgeStan: the sampled block's per-row contribution is exactly zero.
 #
+# `population_model` is the exact Stan-side counterpart: a program in which
+# every block of the factor, sampled or generated, contributes exactly zero,
+# with the fitted program's coordinates so the same draws evaluate on it.
+#
 # Run: julia --project=<worktree> test/population_draws_generated.jl
 # (needs BridgeStan reachable through StanBlocks; set BRM_PRED_RUNTIME=0 to run
 # only the declaration-level half.)
@@ -77,6 +81,51 @@ end
     end
 end
 
+# The population program describes the same blocks: fitted family, effect
+# carrier and placement, flagged `population`.
+block_shape(b) = (b.binding, b.family, b.group, b.id, b.n_terms, b.n_groups, b.z,
+                  b.noncentered, b.generated)
+
+@testset "population_model: same blocks, flagged population" begin
+    pop = population_model(conv_sb; groups = :subject)
+    @test block_shape.(ranef_blocks(pop)) == block_shape.(ranef_blocks(conv_sb))
+    @test all(b -> b.population, ranef_blocks(pop))
+    @test !any(b -> b.population, ranef_blocks(conv_sb))
+    @test BayesianRegressionModels.stan_code(pop) != BayesianRegressionModels.stan_code(conv_sb)
+    # Selecting an already-population factor again changes nothing.
+    @test BayesianRegressionModels.stan_code(population_model(pop; groups = :subject)) ==
+          BayesianRegressionModels.stan_code(pop)
+    fitted_d = brm_descriptor(conv_sb)
+    pop_d = brm_descriptor(pop)
+    @test [(o.name, o.kind, o.role) for o in pop_d.outputs] ==
+          [(o.name, o.kind, o.role) for o in fitted_d.outputs]
+    # Replay on a new grid of the same groups, in either order.
+    regrid = merge(observed, (; x = randn(MersenneTwister(4), n)))
+    replayed = reprocess(pop, regrid)
+    @test all(b -> b.population, ranef_blocks(replayed))
+    @test BayesianRegressionModels.stan_code(replayed) ==
+          BayesianRegressionModels.stan_code(
+              population_model(reprocess(conv_sb, regrid); groups = :subject))
+    @test BayesianRegressionModels.stan_code(replayed) == BayesianRegressionModels.stan_code(pop)
+    # refused: a typo'd factor must not silently return the fitted program
+    # (fail closed, as `population_draws` does).
+    @test_throws "no random-effect block on grouping factor `subjct`" population_model(
+        conv_sb; groups = :subjct)
+end
+
+# Capability gap, not a wrong shape: an exact-total block's population mean is
+# the recovered population coefficient, which the program draws only in
+# generated quantities. Today the call refuses loudly; tracked by todo
+# `BayesianRegressionModels/todos/2026-10-15T22-50-46-005-0rk6smb`.
+@testset "population_model: exact totals are not built yet" begin
+    @test_broken (try
+        population_model(totals_sb; groups = :subject)
+        true
+    catch
+        false
+    end)
+end
+
 if !PRED_RUNTIME
     @info "BRM_PRED_RUNTIME=0 — skipping the compiled-model half"
 else
@@ -130,6 +179,68 @@ end
     @test pop[:, totals] != draws[:, totals]
     keep = setdiff(eachindex(unc), totals)
     @test pop[:, keep] == draws[:, keep]
+end
+
+# One factor, a sampled `|p|` block and a generated `|q|` block, plus the
+# centered emission, a shared `|p|` block split into its sampled active margins
+# and generated completion, and a prior program in which every block is
+# generated.
+shared_builder = @brm begin
+    sigma  ~ Exponential(1)
+    sigma2 ~ Exponential(1)
+    mu ~ 1 + x + (1 + x | p | subject)
+    nu ~ 1 + (1 | p | subject)
+    y ~ Normal(mu, sigma)
+    z ~ Normal(nu, sigma2)
+end
+population_cases = [
+    "conventional" => (conv_sb, ("r_mu_p_subject.", "r_nu_q_subject.")),
+    "centered" => (SBBRMI(joint_builder(observed); mod = @__MODULE__, total_groups = (),
+                          centered_groups = [:subject]),
+                   ("r_mu_p_subject.", "r_nu_q_subject.")),
+    "marginal" => (SBBRMI(shared_builder(observed); mod = @__MODULE__, total_groups = ()),
+                   ("r_mu_p_subject.", "r_nu_p_subject.")),
+    "prior" => (SBBRMI(joint_builder(covariates); mod = @__MODULE__, total_groups = ()),
+                ("r_mu_p_subject.", "r_nu_q_subject.")),
+]
+
+@testset "population_model: every block contributes exactly zero ($label)" for
+        (label, (sb, gathers)) in population_cases
+    pop = population_model(sb; groups = :subject)
+    sm = BayesianRegressionModels.stan_instantiate(sb).model
+    pop_sm = BayesianRegressionModels.stan_instantiate(pop).model
+    unc = BS.param_unc_names(sm)
+    # The fitted coordinates, so fitted draws evaluate on it unchanged.
+    @test BS.param_unc_names(pop_sm) == unc
+    @test BS.param_unc_num(pop_sm) == BS.param_unc_num(sm)
+    # The prior program samples nothing (its name list is BridgeStan's `[""]`).
+    @test (BS.param_unc_num(sm) == 0) == (label == "prior")
+    draws = randn(MersenneTwister(5), 4, BS.param_unc_num(sm))
+    blocks = ranef_blocks(sb)
+    zeroed = all(b -> b.generated, blocks) ? nothing :
+        population_draws(sb, draws, unc; groups = :subject)
+    for i in axes(draws, 1)
+        gq = constrained_by_name(pop_sm, draws[i, :]; gq_seed = 9)
+        for g in gathers
+            @test !isempty(entries(gq, g))
+            @test all(iszero, entries(gq, g))
+        end
+        # Both responses' locations are their population parts.
+        @test entries(gq, "mu.") == entries(gq, "pop_mu.")
+        @test entries(gq, "nu.") == entries(gq, "pop_nu.")
+        isnothing(zeroed) && continue
+        # On the sampled likelihood it is exactly `population_draws`.
+        @test entries(gq, "mu.") ==
+              entries(constrained_by_name(sm, zeroed[i, :]), "mu.")
+    end
+    # The descriptor mounts it: `:predict` takes the same draws.
+    if label == "conventional"
+        predicted = brm_execute(brm_descriptor(pop), :predict; draws = draws[1, :], seed = 3)
+        @test length(predicted.z_gen) == n && all(isfinite, predicted.z_gen)
+    end
+    # The fitted program's generated block is not at the population mean.
+    any(b -> b.generated, blocks) && @test any(!iszero,
+        entries(constrained_by_name(sm, draws[1, :]; gq_seed = 9), last(gathers)))
 end
 
 end # PRED_RUNTIME
