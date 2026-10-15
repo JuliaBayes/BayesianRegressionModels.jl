@@ -99,6 +99,14 @@ block_shape(b) = (b.binding, b.family, b.group, b.id, b.n_terms, b.n_groups, b.z
     pop_d = brm_descriptor(pop)
     @test [(o.name, o.kind, o.role) for o in pop_d.outputs] ==
           [(o.name, o.kind, o.role) for o in fitted_d.outputs]
+    # Replay on a new grid of the same groups, in either order.
+    regrid = merge(observed, (; x = randn(MersenneTwister(4), n)))
+    replayed = reprocess(pop, regrid)
+    @test all(b -> b.population, ranef_blocks(replayed))
+    @test BayesianRegressionModels.stan_code(replayed) ==
+          BayesianRegressionModels.stan_code(
+              population_model(reprocess(conv_sb, regrid); groups = :subject))
+    @test BayesianRegressionModels.stan_code(replayed) == BayesianRegressionModels.stan_code(pop)
     # refused: a typo'd factor must not silently return the fitted program
     # (fail closed, as `population_draws` does).
     @test_throws "no random-effect block on grouping factor `subjct`" population_model(
@@ -224,6 +232,11 @@ population_cases = [
         # On the sampled likelihood it is exactly `population_draws`.
         @test entries(gq, "mu.") ==
               entries(constrained_by_name(sm, zeroed[i, :]), "mu.")
+    end
+    # The descriptor mounts it: `:predict` takes the same draws.
+    if label == "conventional"
+        predicted = brm_execute(brm_descriptor(pop), :predict; draws = draws[1, :], seed = 3)
+        @test length(predicted.z_gen) == n && all(isfinite, predicted.z_gen)
     end
     # The fitted program's generated block is not at the population mean.
     any(b -> b.generated, blocks) && @test any(!iszero,
