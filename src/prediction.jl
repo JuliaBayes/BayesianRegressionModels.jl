@@ -201,7 +201,8 @@ address its draws without reading the generated Stan.
   model remain sampled. Such a block is re-drawn Stan-side
   per draw, so it has NO coordinate in `param_unc_names`: it is DESCRIBED (shape,
   `levels`, group count read from group data and fitted preprocessing) but
-  [`ranef_coordinates`](@ref) refuses it and `transport_draws` skips it — its
+  [`ranef_coordinates`](@ref) refuses it, while `transport_draws` and
+  `population_draws` skip it — its
   `L` / `tau` hyperparameters are the transportable state, and they are copied by
   name when they remain sampled. The flag comes from the emitted carrier's
   descriptor kind, independently of the supplied coordinate names.
@@ -519,8 +520,7 @@ function ranef_blocks(model)
         end
         z = Symbol(d.target, :_, spec.z)
         if isnothing(output_kinds)
-            output_kinds = Dict(o.name => o.kind for o in
-                Base.invokelatest(StanBlocks.stan_descriptor, plan.model).outputs)
+            output_kinds = _traced_output_kinds(plan)
         end
         kind = get(output_kinds, z, nothing)
         kind in (:parameter, :generated_quantity) || error(
@@ -534,6 +534,28 @@ function ranef_blocks(model)
                               z, spec.noncentered, kind === :generated_quantity))
     end
     out
+end
+
+# Descriptor kind (`:parameter`, `:generated_quantity`, …) of every output of
+# the traced program of an `SBBRMI` or `GenerativePlan`. Placement is the
+# traced program's answer, never inferred from which names a caller supplies.
+_traced_output_kinds(model) = Dict(o.name => o.kind for o in
+    Base.invokelatest(StanBlocks.stan_descriptor, model.model).outputs)
+
+# Whether each exact total-coefficient block's totals carrier is emitted in
+# generated quantities (for example, no observed likelihood reaches it). Such
+# a block has no unconstrained coordinate, like a generated `RanefBlock`.
+function _total_blocks_generated(model, blocks)
+    isempty(blocks) && return Bool[]
+    kinds = _traced_output_kinds(model)
+    map(blocks) do b
+        kind = get(kinds, b.binding, nothing)
+        kind in (:parameter, :generated_quantity) || error(
+            "BRM prediction: total-coefficient carrier `$(b.binding)` has ",
+            "descriptor kind `$kind`; expected a sampled parameter or generated ",
+            "quantity. The total-effect binding and traced model disagree.")
+        kind === :generated_quantity
+    end
 end
 
 _ranef_data_int(data, key, target, fam) = begin
@@ -603,7 +625,8 @@ function ranef_coordinates(block::RanefBlock, unc_names)
         "re-generated Stan-side, so it has no unconstrained coordinates to ",
         "resolve against `param_unc_names`. Transport copies any sampled ",
         "hyperparameters by name and lets the target re-draw the effects; ",
-        "`transport_draws` skips such a block rather than calling this.")
+        "`transport_draws` and `population_draws` skip such a block rather ",
+        "than calling this.")
     layout = _RANEF_FAMILIES[block.family].layout
     pos = _ranef_name_positions(unc_names)
     out = Matrix{Int}(undef, block.n_terms, block.n_groups)
@@ -790,6 +813,21 @@ population coefficient vector conditionally and replaces the selected group
 totals with its implied population means. `rng` controls this recovery. The
 input and returned draws are both in the compiled model frame.
 
+# Blocks emitted in generated quantities
+
+A selected block whose effect carrier the traced program emits in GENERATED
+QUANTITIES (`RanefBlock.generated`, or a total-coefficient block whose totals
+are generated — for example, no observed likelihood reaches it) has no
+coordinate in `draws`, so there is nothing to zero: it is skipped, exactly as
+[`transport_draws`](@ref) skips it. Its effects stay what the program makes
+them: Stan draws them when generated quantities are evaluated. Every quantity
+that does not read such a block is at the population mean of the selected
+factors; a quantity that does read one keeps that block's generated
+between-group variation.
+
+A selected grouping factor whose every block is generated has no coordinate to
+zero at all, and is an error rather than a silent no-op.
+
 # Example
 
 ```julia
@@ -804,9 +842,24 @@ function population_draws(model, draws::AbstractMatrix, unc_names; groups,
     s2z_hit = filter(b -> b.group in selected, s2z_effect_blocks(model))
     isempty(s2z_hit) || throw(ArgumentError(
         "population draws for S2Z block(s) $(join(sort!(collect(Set(b.group for b in s2z_hit))), ", ")) need recovery-aware population projection, which is not implemented yet"))
-    total_blocks = filter(b -> b.group in selected,total_effect_blocks(model))
-    remaining = setdiff(selected,Set(b.group for b in total_blocks))
-    blocks = isempty(remaining) ? RanefBlock[] : _ranef_select(ranef_blocks(model), remaining)
+    all_totals = filter(b -> b.group in selected,total_effect_blocks(model))
+    remaining = setdiff(selected,Set(b.group for b in all_totals))
+    all_blocks = isempty(remaining) ? RanefBlock[] : _ranef_select(ranef_blocks(model), remaining)
+    # A generated block has no coordinate in `draws`; Stan draws its effects
+    # when generated quantities are evaluated (see the docstring).
+    blocks = filter(b -> !b.generated, all_blocks)
+    total_blocks = all_totals[.!_total_blocks_generated(model, all_totals)]
+    for g in selected
+        (any(b -> _ranef_group_matches(b, g), blocks) ||
+         any(b -> b.group === g, total_blocks)) && continue
+        error(
+            "BRM prediction: every random-effect block of grouping factor `$g` ",
+            "(", join(vcat([string(b.binding) for b in all_blocks if _ranef_group_matches(b, g)],
+                           [string(b.binding) for b in all_totals if b.group === g]), ", "),
+            ") is emitted in generated quantities, so `draws` carries no coordinate ",
+            "of `$g` to zero. Stan draws those effects when generated quantities ",
+            "are evaluated; population-level draws cannot set them to their mean.")
+    end
     out = Matrix{Float64}(draws)
     for b in blocks
         # Zeroing is the population mean under BOTH emissions: a non-centered
