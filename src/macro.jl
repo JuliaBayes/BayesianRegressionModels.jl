@@ -16,9 +16,11 @@ name is gensym-ed). The two-argument form bakes `df` in and returns the
   sampling LHS; `[y1, y2] ~ ...` stays the joint multivariate response.
 - `lhs = rhs` — a literal binding (named intermediate).
 - `@plate for i in eachindex(x) ... end` — a group-local kernel cell. Reads
-  such as `x[i]` and `ragged(events, subject)[i]` are sliced per group,
-  `result[i] = ...` declares a model-scope output, and bare assignments remain
-  cell locals.
+  such as `x[i]` are sliced per group, `result[i] = ...` declares a
+  model-scope output, and bare assignments remain cell locals.
+- `ragged(events, subject)` — a model-scope statement declaring that the flat
+  data column or formula name `events` is grouped by `subject`; `@plate for`
+  cells then read it as `events[i]`.
 - `ragged(y, group) ~ rhs` — group a flat observed response at the formula
   boundary, aligned to the `kernel(...)` result referenced by `rhs`.
 - `effect(lp, coefficient) ~ Normal(location, scale)` — an SBBRMI
@@ -522,8 +524,11 @@ _brm(x::Expr; df=nothing) = begin
     alllocals = OrderedDict{Symbol,Symbol}()
     jointkeys = Set{Symbol}()
     captures = Set{Symbol}()
-    info = (;alllocals, jointkeys, captures)
+    groupings = _brm_plate_groupings(x)
+    grouped_reads = Set{Symbol}()
+    info = (;alllocals, jointkeys, captures, groupings, grouped_reads)
     x = parse!(x; info)
+    _brm_check_plate_groupings_read(groupings, grouped_reads)
     nonlocals = [key for (key, value) in pairs(alllocals) if value == :nonlocal]
     maybelocals = [key for (key, value) in pairs(alllocals) if value == :maybelocal]
     # kernel(...) do-block captures: body free-symbols that are NOT already a
@@ -603,10 +608,31 @@ function _brm_depwarn_kernel_doblock()
     nothing
 end
 
+function _brm_depwarn_plate_inbody_ragged()
+    Base.depwarn(
+        "`ragged(x, group)[i]` inside a `@plate for` body is deprecated; declare " *
+        "the grouping once at model scope with a `ragged(x, group)` statement and " *
+        "read `x[i]` in the cell. The in-body spelling remains supported for now.",
+        :_brm_depwarn_plate_inbody_ragged,
+    )
+    nothing
+end
+
 parse!(x::Expr; info) = if x.head == :block
     Expr(:block, parse!.(x.args; info)...)
 elseif _is_brm_plate(x)
-    parse!(_brm_plate_kernel(x); info)
+    groupings = hasproperty(info, :groupings) ? info.groupings : Dict{Symbol,Symbol}()
+    grouped_reads = hasproperty(info, :grouped_reads) ? info.grouped_reads : Set{Symbol}()
+    kernel, inbody_ragged = _brm_plate_kernel(x; groupings, grouped_reads)
+    parsed = parse!(kernel; info)
+    inbody_ragged ? Expr(:block, :($_brm_depwarn_plate_inbody_ragged()), parsed) : parsed
+elseif _is_brm_plate_grouping(x)
+    # Collected by `_brm_plate_groupings` before parsing and consumed by the
+    # `@plate for` rewrite; the declaration itself emits nothing.
+    hasproperty(info, :groupings) && haskey(info.groupings, x.args[2]) || error(
+        "@brm: `$(repr(x))` declares a plate grouping and must be a statement " *
+        "of the `@brm` block")
+    nothing
 elseif x.head == :(=)
     lhs, rhs = x.args
     parselocals!(rhs; info, val=:nonlocal)
@@ -659,8 +685,9 @@ end
 # The accepted subset is the group-local kernel shape rather than StanBlocks'
 # entire general annotated-loop language:
 #
+#     ragged(dose, dose_subject)
 #     @plate for i in eachindex(t)
-#         loc[i] = cell(t[i], ragged(dose, dose_subject)[i], theta[i])
+#         loc[i] = cell(t[i], dose[i], theta[i])
 #         y[i] ~ normal(loc[i], sigma)
 #     end
 #
@@ -672,8 +699,54 @@ end
 # assignments remain cell locals. This
 # retains the StanBlocks/RKPPL distinction between model-scope indexed outputs
 # and per-cell bare locals without asking either backend to learn new IR.
+#
+# A flat secondary row axis is declared once, outside every cell, by a
+# model-scope `ragged(x, group)` statement. The rewrite then reads `x[i]` as the
+# positional `ragged(x, group)`, so the lowered kernel — and with it the Stan
+# program, the RK graph and the descriptor — is exactly the one the deprecated
+# in-body `ragged(x, group)[i]` read produces.
 _is_brm_plate(x) = Meta.isexpr(x, :macrocall) && !isempty(x.args) &&
                    x.args[1] === Symbol("@plate")
+
+_is_brm_plate_grouping(x) = isxcall(x, :ragged)
+
+# Model-scope `ragged(x, group)` statements of one `@brm` block, keyed by `x`.
+# Collected before parsing so a declaration may follow the cells that read it.
+function _brm_plate_groupings(x)
+    groupings = OrderedDict{Symbol,Symbol}()
+    function collect!(stmt)
+        if Meta.isexpr(stmt, :block)
+            foreach(collect!, stmt.args)
+        elseif _is_brm_plate_grouping(stmt)
+            length(stmt.args) == 3 && stmt.args[2] isa Symbol &&
+                stmt.args[3] isa Symbol || error(
+                "@brm: a model-scope plate grouping is `ragged(x, group)` with a " *
+                "formula or data name `x` and a grouping data column `group`; " *
+                "got `$(repr(stmt))`")
+            name, group = stmt.args[2], stmt.args[3]
+            name === group && error(
+                "@brm: `$(repr(stmt))` groups `$name` by itself")
+            haskey(groupings, name) && error(
+                "@brm: the plate grouping of `$name` is declared twice " *
+                "(`ragged($name, $(groupings[name]))` and `$(repr(stmt))`)")
+            groupings[name] = group
+        end
+    end
+    collect!(x)
+    groupings
+end
+
+# A declaration no cell reads would leave the author believing `x` is grouped
+# somewhere it is not, for example in a top-level likelihood.
+function _brm_check_plate_groupings_read(groupings, grouped_reads)
+    unread = [name for name in keys(groupings) if !(name in grouped_reads)]
+    isempty(unread) || error(
+        "@brm: model-scope `ragged(x, group)` declares how a `@plate for` cell " *
+        "reads `x[i]`, but no cell reads " *
+        join(("`$name[i]`" for name in unread), ", ") * ". Group a top-level " *
+        "response with `ragged(y, group) ~ ...` instead")
+    nothing
+end
 
 function _brm_plate_loop(x::Expr)
     length(x.args) == 3 || error(
@@ -706,8 +779,9 @@ function _brm_plate_input_key(x)
         return (:ragged, x.args[2], x.args[3])
     end
     error(
-        "@brm: a kernel `@plate` slices formula names (`x[i]`) or secondary " *
-        "axes (`ragged(x, group)[i]`); got `$(repr(x))`")
+        "@brm: a kernel `@plate` slices formula and data names (`x[i]`); declare " *
+        "a flat secondary axis once at model scope with `ragged(x, group)`; " *
+        "got `$(repr(x))`")
 end
 
 _brm_plate_param(x::Symbol) = x
@@ -758,7 +832,8 @@ function _brm_plate_outputs(body, i)
     stmts, outputs
 end
 
-function _brm_plate_kernel(x::Expr)
+function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,Symbol}(),
+                           grouped_reads=Set{Symbol}())
     i, range, body = _brm_plate_loop(x)
     stmts, outputs = _brm_plate_outputs(body, i)
     output_set = Set(outputs)
@@ -789,21 +864,40 @@ function _brm_plate_kernel(x::Expr)
         param
     end
 
+    # A name with a model-scope `ragged(x, group)` declaration is read through
+    # that grouping. The deprecated in-body wrapper stays accepted for a name
+    # without one; mixing both spellings for one name is refused.
+    inbody_ragged = false
+    function grouped(source)
+        if source isa Symbol && haskey(groupings, source)
+            push!(grouped_reads, source)
+            return Expr(:call, :ragged, source, groupings[source])
+        elseif isxcall(source, :ragged)
+            inbody_ragged = true
+            name = length(source.args) >= 2 ? source.args[2] : nothing
+            name isa Symbol && haskey(groupings, name) && error(
+                "@brm: `$name` is grouped at model scope by " *
+                "`ragged($name, $(groupings[name]))`; read it in the cell as " *
+                "`$name[$i]`")
+        end
+        source
+    end
+
     # The range anchor participates even when the body does not read it: it is
     # the subject-count witness in the no-random-effects panel form.
-    add_input(_brm_plate_range_input(range))
+    add_input(grouped(_brm_plate_range_input(range)))
 
     function rewrite(ex)
         ex === i && error(
             "@brm: a kernel `@plate` loop index is structural; use it only in " *
-            "`x[$i]` or `ragged(x, group)[$i]` reads")
+            "`x[$i]` reads")
         ex isa Expr || return ex
         if _brm_plate_indexed(ex, i)
             source = ex.args[1]
             if source isa Symbol && source in output_set
                 return source
             end
-            return add_input(source)
+            return add_input(grouped(source))
         end
         # A remaining reference with the loop variable as one of ITS OWN axes
         # (`x[i, j]`) is a different slicing contract, not a kernel positional.
@@ -862,7 +956,7 @@ function _brm_plate_kernel(x::Expr)
     end
     lambda = Expr(:->, Expr(:tuple, params...), Expr(:block, rewritten...))
     call = Expr(:call, :kernel, lambda, positionals...)
-    Expr(:call, :~, target, call)
+    Expr(:call, :~, target, call), inbody_ragged
 end
 
 function _joint_response_symbols(lhs::Expr)
