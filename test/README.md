@@ -200,6 +200,20 @@ family gap, and the retained sum-to-zero gap. It runs under the root project:
 julia --startup-file=no --project=. test/description_totals.jl
 ```
 
+## In-cell distribution combinators
+
+`description_cell_combinators.jl` describes `@plate for` cells whose
+observations use StanBlocks' `censored`, `truncated`, `weighted` and
+`interval_censored` combinators. A call-form family is an argument child; a
+token-form family is a `:family` child over the token's arguments, which a
+family hook sees by its actual callable. Bounds are keyword-only, so a token's
+arguments never render as bounds. The in-cell censoring prose matches the
+formula wrapper's. It runs under the test project:
+
+```sh
+julia --startup-file=no --project=test test/description_cell_combinators.jl
+```
+
 ## Native GP and dual HSGP adoption
 
 `rk_gp_covariance.jl` checks BRM-owned squared-exponential and periodic
