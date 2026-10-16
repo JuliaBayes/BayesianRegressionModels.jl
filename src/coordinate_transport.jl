@@ -81,11 +81,13 @@ _rk_coordinate_records(plan) = _brm_transport_error(:unsupported_coverage,
     "no cross-backend coordinate inventory")
 
 # Implemented by `BayesianRegressionModelsReactiveKernelsExt`: the built
-# layout's coordinate names, each coordinate's layout transform, and the named
-# constrained values at a point.
+# layout's coordinate names, each coordinate's layout transform, the named
+# constrained values at a point, and the packed point of named constrained
+# values.
 function _rk_layout_coordinate_names end
 function _rk_layout_coordinate_transforms end
 function _rk_constrained_values end
+function _rk_unconstrained_values end
 
 """
     BRMCoordinatePair
@@ -1088,6 +1090,17 @@ function _brm_rk_declaration_value(values, declaration::Symbol)
         values = getproperty(values, Symbol(field))
     end
     values
+end
+
+# A copy of the constrained values with one declaration replaced, addressed as
+# in `_brm_rk_declaration_value`.
+function _brm_rk_with_declaration(values::NamedTuple, declaration::Symbol, value)
+    hasproperty(values, declaration) && return merge(values,
+        NamedTuple{(declaration,)}((value,)))
+    replace_path(nt, path) = length(path) == 1 ?
+        merge(nt, NamedTuple{(only(path),)}((value,))) :
+        merge(nt, NamedTuple{(first(path),)}((replace_path(nt[first(path)], path[2:end]),)))
+    replace_path(values, Symbol.(split(String(declaration), '.')))
 end
 
 """
