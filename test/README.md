@@ -143,6 +143,14 @@ through `brm_nlme_joint_start` to WarmupHMC on the conditional Stan and RK
 subject-draw targets. Run it in the NLMEEstimation scratch
 environment described below.
 
+`nlme_fit.jl` checks the prior-median default start against independently
+computed medians (authored, default, truncated, hierarchical and `Flat()`
+laws), keeps random-effect blocks without an ID independent, reads named
+natural-unit estimates of a hand-set point (and passes them back as
+address-keyed `inits`), and runs `brm_nlme_fit` with `empirical_bayes`,
+`saem` and `focei` on flat and nested models. Run it in the NLMEEstimation
+scratch environment described below.
+
 `nlme_start.jl` reads complete RK and Stan points as NLMEEstimation starting
 values with `brm_nlme_start`. It covers a correlated population-PK model and a
 nested model with a correlated subject family, nested units and a shared HSGP,
