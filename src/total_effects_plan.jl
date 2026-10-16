@@ -69,12 +69,20 @@ Draw the original population coefficients conditional on each saved total-
 coefficient draw. Returns one record per predictor with `population`, `totals`,
 and `deviations` arrays. This exact recovery adds conditional randomness; totals
 are unchanged. Input draws must be in the compiled model's coordinate frame.
+
+A block whose totals are emitted in generated quantities (no observed
+likelihood reaches it, for example an omitted response) has no saved total to
+condition on, so it has no record here. Stan draws its totals, population
+coefficients and deviations together when generated quantities are evaluated.
+A model whose every block is generated is an error.
 """
 function recover_population_draws(model, draws::AbstractMatrix, names;
                                   rng::Random.AbstractRNG=Random.default_rng())
     size(draws,2) == length(names) || throw(DimensionMismatch("draws and names disagree"))
     out = Dict{Symbol,NamedTuple}()
-    for block in total_effect_blocks(model)
+    for block in _sampled_total_blocks(model,"recover_population_draws",
+            "Stan draws their recovered population coefficients in generated " *
+            "quantities, which `brm_population_effect_coordinates` resolves")
         coordinates = _total_coordinates(model,block,names)
         n,J,K = size(draws,1),size(coordinates.totals)...
         population = Matrix{Float64}(undef,n,length(block.population_columns))
@@ -103,20 +111,39 @@ frame. `:position` minimizes log SD minus mean log Jacobian; `:gradient`
 minimizes position-gradient correlation and requires matching exact gradients.
 No new density/gradient calls are made. The returned `centeredness` vector can
 be passed to `adaptive_centering_problem`; `losses` preserves every grid score.
+Only sampled blocks have cells: a block whose totals are emitted in generated
+quantities has no sampler coordinate to center, and a model whose every block
+is generated is an error.
 """
 function select_total_centeredness(model,draws::AbstractMatrix,names;
         criterion=:position,gradients=nothing,grid=0.:0.1:1.)
     isempty(total_effect_blocks(model)) && throw(ArgumentError("model has no exact total-coefficient blocks"))
-    _select_scalar_centeredness(_total_centering_cells(model,names),draws,names;
+    blocks = _sampled_total_blocks(model,"select_total_centeredness",
+        "the sampler has no total coordinate to center")
+    _select_scalar_centeredness(_total_centering_cells(model,names,blocks),draws,names;
         criterion,gradients,grid)
 end
 
-# One scalar cell per total (group, coefficient), column-major. Each has a
-# constant location (its prior total), a log-scale coordinate and the compiled
-# frame c = 1. The WarmupHMC wrapper and the pilot selector share this order.
-function _total_centering_cells(model,names)
+# The exact total-coefficient blocks with sampler coordinates. A model with
+# blocks but none sampled gives the draws nothing to condition on: refuse it
+# rather than return an empty result.
+function _sampled_total_blocks(model,caller,remedy)
+    placement = _total_blocks_by_placement(model)
+    isempty(placement.sampled) && !isempty(placement.generated) && throw(ArgumentError(
+        "$caller: every exact total-coefficient block " *
+        "($(join((b.binding for b in placement.generated), ", "))) is emitted in " *
+        "generated quantities because no observed likelihood reaches them, so the " *
+        "draws carry no total coordinate; $remedy."))
+    placement.sampled
+end
+
+# One scalar cell per sampled total (group, coefficient), column-major. Each
+# has a constant location (its prior total), a log-scale coordinate and the
+# compiled frame c = 1. The WarmupHMC wrapper and the pilot selector share this
+# order. A generated block has no sampler coordinate and contributes no cell.
+function _total_centering_cells(model,names,blocks=_total_blocks_by_placement(model).sampled)
     indices,scales,locations = Int[],Int[],Float64[]
-    for block in total_effect_blocks(model)
+    for block in blocks
         coords = _total_coordinates(model,block,names)
         mu = block.A*block.location
         for k in axes(coords.totals,2), g in axes(coords.totals,1)
