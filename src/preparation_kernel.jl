@@ -21,14 +21,21 @@ _brm_collect_data_lengths!(acc, x::Union{Tuple,AbstractVector}) = begin
     nothing
 end
 
-# A per-subject linear predictor without a random effect defines no grouping;
-# it rides on the subject frame a ranef LP defines, sliced by the same row
-# index. That is sound only when every data column its terms name has exactly
-# one row per subject. An LP with no data column has no rows at all.
-function _brm_kernel_check_subject_frame_lp(lp_col, nsub; prefix="BRM kernel preparation")
-    lp = name(lp_col)
+# `(name, length)` of every raw data column a linear predictor's terms read.
+function _brm_kernel_lp_data_lengths(lp_col)
     lens = Tuple{Symbol,Int}[]
     _brm_collect_data_lengths!(lens, getargs(parent(lp_col))[2])
+    lens
+end
+
+# A per-subject linear predictor without a random effect defines no grouping;
+# it rides on the subject frame a ranef LP — or, in a no-random-effects panel,
+# the pre-grouped columns — defines, sliced by the same row index. That is
+# sound only when every data column its terms name has exactly one row per
+# subject. An LP with no data column has no rows at all.
+function _brm_kernel_check_subject_frame_lp(lp_col, nsub; prefix="BRM kernel preparation")
+    lp = name(lp_col)
+    lens = _brm_kernel_lp_data_lengths(lp_col)
     isempty(lens) && error(
         "$prefix: kernel(...) per-subject linear predictor `$lp` has no random-effect " *
         "term and no data column, so it has no per-subject rows. Declare a shared " *
@@ -100,7 +107,7 @@ function _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals;
     # LP that means every data column its terms name; for a raw column, itself.
     lens = Tuple{Symbol,Int}[]
     if is_lp
-        _brm_collect_data_lengths!(lens, getargs(decl)[2])
+        append!(lens, _brm_kernel_lp_data_lengths(arg_col))
     elseif decl isa DataColumn
         v = parent(decl)
         v isa AbstractVector{<:AbstractVector} && error(

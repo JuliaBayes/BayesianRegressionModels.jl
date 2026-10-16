@@ -32,6 +32,13 @@ predictor without a random effect read as `x[i]` (BridgeStan and RK density
 parity with the old one-element ragged gather). Run it with `--depwarn=yes` so
 its deprecation assertion is live.
 
+`kernel_population_lp.jl` checks per-subject linear predictors without a random
+effect (a typical value plus covariates) read as `x[i]`, beside a random-effect
+predictor and in a no-random-effects panel, against an independent density
+oracle with finite-difference RK gradients and matched BridgeStan coordinates.
+It also covers a panel whose cell slices only such predictors and the refusal of
+one declared on another row axis.
+
 `plate_ragged_omitted_response.jl` checks a censored ragged observation inside
 `@plate` with its data column bound, omitted, and reprocessed. It requires the
 StanBlocks revision pinned by `setup_env.jl` and checks the public flat

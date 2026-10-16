@@ -210,10 +210,6 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
         column = first(groups)[3]
         _brm_kernel_subject_values(parent(parent(column)), _rk_kernel_column_name(column); prefix="RK backend")
     end
-    for (lp, bucket) in zip(direct_lps, buckets)
-        bucket === nothing && _brm_kernel_check_subject_frame_lp(
-            lp, length(group_values); prefix="RK backend")
-    end
     columns = Dict{Symbol,Any}()
     inputs = Any[]
     outer_lengths = Int[]
@@ -263,12 +259,20 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             error("RK backend: kernel `$name` input must be a data column, predictor or ragged join")
         end
     end
-    # The cell's subject plate iterates these inputs in lockstep.
+    # The cell's subject plate iterates these inputs in lockstep. Without a
+    # random-effect LP or a pre-grouped data input, the per-subject columns the
+    # LPs read supply the count.
+    group_values === nothing && isempty(outer_lengths) && foreach(
+        lp -> append!(outer_lengths, last.(_brm_kernel_lp_data_lengths(lp))), direct_lps)
     nsubjects = group_values === nothing ?
         (isempty(outer_lengths) ? error("RK backend: kernel `$name` needs a subject input") : first(outer_lengths)) :
         length(group_values)
     all(==(nsubjects), outer_lengths) || error(
         "RK backend: kernel `$name` positional inputs disagree on subject count")
+    for (lp, bucket) in zip(direct_lps, buckets)
+        bucket === nothing && _brm_kernel_check_subject_frame_lp(
+            lp, nsubjects; prefix="RK backend")
+    end
     body = Any[]
     observations = Any[]
     collected = nothing
