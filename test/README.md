@@ -159,7 +159,10 @@ on both backends. For a correlated population-PK model, a linked predictor,
 a categorical predictor with a `Dirichlet` simplex, and an exact-total block,
 it checks the addressed constrained values, the semantic transport's
 agreement between the RK and Stan points, unaddressed coordinates kept at a
-random base, and refusals of unknown addresses and invalid values. It runs in
+random base, and refusals of unknown addresses and invalid values. A model
+with one lone `|ID|` per predictor checks that the default exact totals keep
+each `|ID|`'s scale address, for `brm_start` and `brm_ranef_sd_coordinates`,
+including the generated-quantities block of its prior program. It runs in
 the test environment above.
 
 `nlme_estimation_ext.jl` covers the NLMEEstimation.jl protocol extension:

@@ -46,7 +46,9 @@ whatever scale and correlation are set.
 On an `SBBRMI` with exact total-coefficient blocks, a coefficient the block
 absorbed has no sampled coordinate: its value places every group's total at
 the population value `A β` (zero deviations), with the block's unaddressed
-absorbed coefficients at 0.
+absorbed coefficients at 0. An `|ID|` such a block absorbed keeps its address:
+`ID = Σ` or `(; sd)` sets the block's total scale, the SD of each group's
+total around `A β`, which is the margin's between-group SD.
 
 An `|ID|` block whose margins are partly integrated out of the model (an
 omitted response) samples only its active margins; their scales and
@@ -432,9 +434,13 @@ end
 
 function _brm_sb_start_writes!(writes, absorbed, ::Val{:ranef}, t, d, names, totals)
     blocks = [b for b in ranef_blocks(d.plan) if isequal(b.id, t.id)]
-    isempty(blocks) && error(
-        "brm_start: `|$(t.id)|` has no sampled random-effect block in this Stan " *
-        "model (an exact-total block has no `|ID|` scale address)")
+    if isempty(blocks)
+        scales = _brm_total_id_scales(d, t.id)
+        isempty(scales) && error(
+            "brm_start: `|$(t.id)|` has no sampled random-effect block in this " *
+            "Stan model")
+        return _brm_sb_start_total_scales!(writes, t, scales, names)
+    end
     (; block, margins) = _brm_sb_ranef_block(d,
         (; group=only(unique(b.group for b in blocks)), id=t.id, margins=());
         caller="brm_start")
@@ -469,6 +475,27 @@ function _brm_sb_start_writes!(writes, absorbed, ::Val{:ranef}, t, d, names, tot
         for i in 1:K, j in 1:K
             push!(writes, (lookup(string(carrier, ".", i, ".", j)), L[i, j]))
         end
+    end
+end
+
+# An `|ID|` an exact-total block absorbed: each margin's scale is the block's
+# total scale `tau`, the SD of each group's total around `A β`. The absorbed
+# margins are independent, so a correlation other than the identity has no
+# coordinate.
+function _brm_sb_start_total_scales!(writes, t, scales, names)
+    P = _brm_start_margin_positions(t, [s.margin for s in scales])
+    length(P) == length(t.margins) || error(
+        "brm_start: internal: $(length(P)) of the $(length(t.margins)) margins " *
+        "of `|$(t.id)|` are in exact total-coefficient blocks")
+    isnothing(t.cor) || isapprox(t.cor, I; atol=1e-12) || error(
+        "brm_start: the margins of `|$(t.id)|` are independent in this model's " *
+        "exact total-coefficient blocks; its correlation must be the identity")
+    isnothing(t.sd) && return
+    for (s, j) in zip(scales, P)
+        s.output.kind === :generated_quantity && error(
+            "brm_start: `|$(t.id)|` total block `$(s.block.binding)` is drawn " *
+            "in generated quantities and has no sampled coordinates")
+        push!(writes, (_brm_total_scale_coordinate(s, names, "brm_start"), t.sd[j]))
     end
 end
 
