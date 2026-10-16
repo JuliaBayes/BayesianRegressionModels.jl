@@ -580,6 +580,15 @@ function _total_blocks_generated(model, blocks)
     end
 end
 
+# `blocks` split by that placement. Only `sampled` blocks have coordinates for
+# `_total_coordinates`; Stan draws a `generated` block's totals, recovered
+# population coefficients and deviations when generated quantities are
+# evaluated.
+function _total_blocks_by_placement(model, blocks=total_effect_blocks(model))
+    generated = _total_blocks_generated(model, blocks)
+    (; sampled=blocks[.!generated], generated=blocks[generated])
+end
+
 _ranef_data_int(data, key, target, fam) = begin
     haskey(data, key) || error(
         "BRM prediction: `$target ~ $fam(…)` references data key `$key`, which ",
@@ -874,7 +883,7 @@ function population_draws(model, draws::AbstractMatrix, unc_names; groups,
     # A generated block has no coordinate in `draws`; Stan draws its effects
     # when generated quantities are evaluated (see the docstring).
     blocks = filter(b -> !b.generated, all_blocks)
-    total_blocks = all_totals[.!_total_blocks_generated(model, all_totals)]
+    total_blocks = _total_blocks_by_placement(model, all_totals).sampled
     for g in selected
         (any(b -> _ranef_group_matches(b, g), blocks) ||
          any(b -> b.group === g, total_blocks)) && continue
@@ -993,6 +1002,12 @@ generated effects and any generated covariance inputs to Stan. Activity comes
 from the traced carrier's descriptor kind, not from missing caller-supplied
 coordinate names: an incomplete sampled block still raises.
 
+Exact total-coefficient blocks follow the same rule. A target block whose
+totals are generated (its scales are generated with them) is skipped: the
+target re-draws it Stan-side. A block the target samples but the source
+generates is refused, because the fitted draws carry nothing to transport onto
+it.
+
 # Example
 
 ```julia
@@ -1042,10 +1057,12 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
     centered_plans = Tuple{AdaptiveCenteringBlock,Vector{Vector{Int}},Vector{Float64},Vector{Float64}}[]
     centered_deferred = falses(length(unc_to))
     total_plans = NamedTuple[]
-    for bt in totals_to
-        matching = filter(b -> b.predictor === bt.predictor && b.group === bt.group,totals_from)
+    matched_totals = 0
+    generated_from = _total_blocks_generated(from, totals_from)
+    for (bt, generated_to) in zip(totals_to, _total_blocks_generated(to, totals_to))
+        matching = findall(b -> b.predictor === bt.predictor && b.group === bt.group,totals_from)
         length(matching) == 1 || throw(ArgumentError("total prediction target has no matching fitted block $(bt.binding)"))
-        bf = only(matching)
+        bf = totals_from[only(matching)]
         (bf.columns == bt.columns && bf.population_columns == bt.population_columns &&
          bf.A == bt.A && bf.location == bt.location && bf.precision == bt.precision &&
          bf.mixture == bt.mixture &&
@@ -1053,6 +1070,18 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
           from.data[Symbol(:total_mixture_shape_,bf.predictor)] ==
           to.data[Symbol(:total_mixture_shape_,bt.predictor)])) ||
             throw(ArgumentError("total prediction changes the fitted design or prior; use frozen preprocessing"))
+        matched_totals += 1
+        # A target block emitted in generated quantities has no coordinate in
+        # `unc_to`: the target re-draws its totals Stan-side, as it re-draws a
+        # generated random-effect block. Its scales are generated with it, so
+        # any fitted totals and scales are source-only coordinates, dropped.
+        generated_to && continue
+        generated_from[only(matching)] && throw(ArgumentError(
+            "total prediction target samples block `$(bt.binding)` (group `$(bt.group)`), " *
+            "but the source emits it in generated quantities because no observed likelihood " *
+            "reaches it, so the fitted draws carry no totals or scales to transport onto it. " *
+            "Transport onto a target that leaves the block unobserved, or fit a source whose " *
+            "likelihood reaches it."))
         cf,ct = _total_coordinates(from,bf,unc_from),_total_coordinates(to,bt,unc_to)
         lf,lt = from.preproc[bf.group_index].const_.levels,to.preproc[bt.group_index].const_.levels
         level_pos = Dict(level=>i for (i,level) in enumerate(lf))
@@ -1064,7 +1093,7 @@ function transport_draws(from, to, draws::AbstractMatrix, unc_from, unc_to;
         end
         push!(total_plans,(;block=bf,source=cf,target=ct,source_groups))
     end
-    length(total_plans) == length(totals_from) || throw(ArgumentError(
+    matched_totals == length(totals_from) || throw(ArgumentError(
         "total prediction cannot change to a conventional parameterization"))
 
     for bt in blocks_to
