@@ -132,6 +132,16 @@ const _RANEF_FAMILIES = Dict{Symbol,NamedTuple}(
     :ranef_intercept_r2d2      => (; z = :xi,     layout = :group,           noncentered = true,  tau = nothing),
     :ranef_correlated_r2d2     => (; z = :z_flat, layout = :flat_term_group, noncentered = true,  tau = :r2d2_tau),
     :ranef_correlated_draws_r2d2 => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :r2d2_tau),
+    # Known-value blocks (`sd(...) = value`, `cor(:, ID) = R`;
+    # `_sb_emit_known_id_bucket!` in src/sbimpl.jl): the non-centred
+    # `ranef_correlated_draws` layout, with `tau` the caller-level
+    # `<binding>_tau` -- a data vector when every scale is known, a sampled
+    # vector when none is, their scatter otherwise -- and, for `_known_cor`, a
+    # data `L`. `known = true` marks them for the readers of scale and
+    # correlation coordinates; the binding record carries `known_scales` /
+    # `known_cor`.
+    :ranef_correlated_draws_known_scale => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :tau, known = true),
+    :ranef_correlated_draws_known_cor => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :tau, known = true),
     # Native constrained-matrix plate emission (StanBlocks 0421b28). The
     # per-group standardised cell is namespaced under the group plate result
     # `b_T`; the collected storage is term-major (`matrix[K, G]`), so the

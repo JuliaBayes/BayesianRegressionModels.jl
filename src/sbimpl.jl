@@ -603,6 +603,8 @@ end
 const _SB_STUDENT_T_RANEF_SHAPES = Dict{Symbol,Symbol}(
     :ranef_correlated_draws => :level_rows,
     :ranef_correlated_draws_generic => :level_rows,
+    :ranef_correlated_draws_known_scale => :level_rows,
+    :ranef_correlated_draws_known_cor => :level_rows,
 )
 
 _sb_student_t_ranef_family(family::Symbol) = Symbol(family, :_student_t)
@@ -647,6 +649,46 @@ ranef_correlated_draws_r2d2 = StanBlocks.@slic begin
     z = to_matrix(z_flat, n_terms, n_groups)
     return (diag_pre_multiply(tau, L) * z)'
 end
+
+# ---- Known scales and correlations ----------------------------------------
+#
+# `sd(lp, ID) = value` / `cor(:, ID) = R` hold a shared block's marginal scales
+# or correlation at known values (nlmixr2's `fix()` on an omega). Like the
+# R2D2 sibling above, these take `tau` as a caller-supplied kwarg: the caller
+# passes a data vector when every scale is known, the sampled scale vector when
+# none is, and their scatter (`brm_scatter_margins`) when the block mixes
+# them. A known correlation also passes its data Cholesky factor `L`. The
+# standardised draws and the column-major layout are those of
+# `ranef_correlated_draws`. Separate names (not the R2D2 one) keep the family
+# metadata of `src/prediction.jl` and the descriptions honest.
+ranef_correlated_draws_known_scale = StanBlocks.@slic begin
+    L      ~ lkj_corr_cholesky(lkj_eta; n=n_terms)
+    z_flat ~ std_normal(; n=n_terms * n_groups)
+    z = to_matrix(z_flat, n_terms, n_groups)
+    return (diag_pre_multiply(tau, L) * z)'
+end
+
+ranef_correlated_draws_known_cor = StanBlocks.@slic begin
+    z_flat ~ std_normal(; n=n_terms * n_groups)
+    z = to_matrix(z_flat, n_terms, n_groups)
+    return (diag_pre_multiply(tau, L) * z)'
+end
+
+ranef_correlated_draws_known_scale_student_t =
+    _sb_student_t_ranef(ranef_correlated_draws_known_scale, :ranef_correlated_draws_known_scale)
+ranef_correlated_draws_known_cor_student_t =
+    _sb_student_t_ranef(ranef_correlated_draws_known_cor, :ranef_correlated_draws_known_cor)
+
+# The emitted family of a known-value block, keyed by (known correlation?,
+# Student-t?).
+const _SB_KNOWN_RANEF_FAMILIES = Dict{Tuple{Bool,Bool},Tuple{Symbol,StanBlocks.SlicModel}}(
+    (false, false) => (:ranef_correlated_draws_known_scale, ranef_correlated_draws_known_scale),
+    (true, false) => (:ranef_correlated_draws_known_cor, ranef_correlated_draws_known_cor),
+    (false, true) => (:ranef_correlated_draws_known_scale_student_t,
+                      ranef_correlated_draws_known_scale_student_t),
+    (true, true) => (:ranef_correlated_draws_known_cor_student_t,
+                     ranef_correlated_draws_known_cor_student_t),
+)
 
 # Plain `(1 | g)` with a derived scale. Sibling of `ranef_intercept`, whose
 # `log_scale ~ std_normal()` is exactly the sampled degree of freedom R2D2
@@ -10751,8 +10793,9 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
                     "`sd(...) ~ r2d2(...)` decompositions; choose one " *
                     "variance allocation for the block")
             !isnothing(ranef_effect) && ranef_effect.has_sd && error(
-                "sbimpl: `|$id_sym|` carries both an R2D2-derived scale and a " *
-                "direct sampled SD prior; choose one scale prior")
+                "sbimpl: `|$id_sym|` carries both an R2D2-derived scale " *
+                "(`sd(...) ~ r2d2(...)`) and a direct `sd(...)` statement (a " *
+                "sampled prior or a known value); choose one scale definition")
             r2d2_tau = _sb_emit_ranef_r2d2_tau!(
                 stmts, data, bucket_name, n_terms_total, bucket_r2d2;
                 joint_out=r2d2_joint,description_block=(:random_effect,id_sym,name(desc)))
@@ -10854,6 +10897,96 @@ function _sb_emit_student_t_id_bucket!(stmts, data, bucket_name, n_terms_name,
     nothing
 end
 
+# Emit a shared `|ID|` block that holds some marginal scales and/or its
+# correlation at known values (`sd(...) = value`, `cor(:, ID) = R`). Known
+# scales and the known Cholesky factor are data; the remaining scales keep
+# their resolved priors on one caller-level vector. Its `tau` is
+#
+#   every scale known  -> `<bucket>_tau`, a data vector;
+#   no scale known     -> `<bucket>_tau ~ <priors>` (a known correlation only);
+#   some scales known  -> `<bucket>_tau_free ~ <priors>` scattered with the data
+#                         `<bucket>_tau_known` into `<bucket>_tau`.
+#
+# cv sizing rides the `n_groups` size expression exactly as in the sampled
+# families; a Student-t block uses the derived `_student_t` family.
+function _sb_emit_known_id_bucket!(stmts, data, bucket_name, n_terms_name,
+                                   gname, idx_name, n_name; cv_groups,
+                                   centered_groups, id_sym, ranef_effect,
+                                   mod::Module)
+    gname in centered_groups && error(
+        "sbimpl: group `$gname` is in `centered_groups`, but its `|$id_sym|` " *
+        "block holds a known scale or correlation (`sd(...) = value` / " *
+        "`cor(:, $id_sym) = R`); the centered emission of a known-value block " *
+        "is not implemented. Use the default non-centered emission for this group")
+    n_groups = n_name
+    if gname in cv_groups
+        n_groups = Symbol(bucket_name, :_n_g)
+        push!(stmts, :($n_groups = maximum($idx_name)))
+    end
+    priors = ranef_effect.sd_prior
+    tau = _sb_emit_known_ranef_tau!(stmts, data, bucket_name, n_terms_name,
+                                    priors; mod)
+    known_cor = ranef_effect.known_cor
+    dist = ranef_effect.dist
+    family, model = _SB_KNOWN_RANEF_FAMILIES[(!isnothing(known_cor), !isnothing(dist))]
+    kwargs = Any[Expr(:kw, :group_idx, idx_name), Expr(:kw, :n_groups, n_groups),
+                 Expr(:kw, :n_terms, n_terms_name), Expr(:kw, :tau, tau)]
+    if isnothing(known_cor)
+        push!(kwargs, Expr(:kw, :lkj_eta, ranef_effect.lkj_eta))
+    else
+        L_name = Symbol(bucket_name, :_L_known)
+        data[L_name] = Matrix{Float64}(cholesky(Symmetric(known_cor)).L)
+        _sb_record_static!(data, L_name)
+        push!(kwargs, Expr(:kw, :L, L_name))
+    end
+    if !isnothing(dist)
+        nu = _sb_effect_prior_arg(dist.nu)
+        nu isa Real || nu isa Symbol || error(
+            "sbimpl: Student-t degrees of freedom for `|$id_sym|` must be a numeric " *
+            "formula constant or the name of a declared scalar parameter, got " *
+            "`$(repr(nu))`")
+        push!(kwargs, Expr(:kw, :nu, nu))
+    end
+    _sb_record_binding!(data, bucket_name, :random_effect, gname; family,
+        known_scales=Tuple(_brm_is_known_scale(p) ? p.value : nothing for p in priors),
+        known_cor)
+    push!(stmts, Expr(:call, :~, bucket_name,
+                      Expr(:call, model, Expr(:parameters, kwargs...))))
+    nothing
+end
+
+# The `tau` value a known-value block passes in (see `_sb_emit_known_id_bucket!`).
+function _sb_emit_known_ranef_tau!(stmts, data, bucket_name, n_terms_name, priors;
+                                   mod::Module)
+    known = findall(_brm_is_known_scale, priors)
+    free = [i for i in eachindex(priors) if !(i in known)]
+    tau_name = Symbol(bucket_name, :_tau)
+    # Known values are fitted-model constants: `reprocess` replays them frozen.
+    if isempty(free)
+        data[tau_name] = Float64[prior.value for prior in priors]
+        _sb_record_static!(data, tau_name)
+        return tau_name
+    end
+    # An unaddressed margin keeps the shared block's half-standard-Normal scale.
+    free_priors = Any[isnothing(prior) ? ExprColumn(Normal) : prior
+                      for prior in priors[free]]
+    free_name = isempty(known) ? tau_name : Symbol(bucket_name, :_tau_free)
+    statement = _sb_vector_positive_prior_statement(free_name, free_name,
+        free_priors, length(free); direct_native=true, mod, scope=mod).statement
+    push!(stmts, statement)
+    isempty(known) && return tau_name
+    known_name = Symbol(bucket_name, :_tau_known)
+    free_idx_name = Symbol(bucket_name, :_tau_free_idx)
+    known_idx_name = Symbol(bucket_name, :_tau_known_idx)
+    data[known_name] = Float64[priors[i].value for i in known]
+    data[free_idx_name] = free
+    data[known_idx_name] = known
+    foreach(key -> _sb_record_static!(data, key), (known_name, free_idx_name, known_idx_name))
+    push!(stmts, :($tau_name = brm_scatter_margins($free_name, $known_name,
+        $free_idx_name, $known_idx_name, $n_terms_name)))
+    tau_name
+end
+
 _sb_id_bucket_suffix(id_sym, g::NamedColumn) = Symbol(id_sym, :_, name(g))
 _sb_id_bucket_suffix(id_sym, g::Tuple{NamedColumn,NamedColumn}) =
     Symbol(id_sym, :_, name(g[1]), :__by__, name(g[2]))
@@ -10870,6 +11003,16 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g:
     idx_name, n_name = _sb_ensure_group_data!(data, g)
     gname = name(g)
     dist = isnothing(ranef_effect) ? nothing : ranef_effect.dist
+    if _brm_ranef_has_known(ranef_effect)
+        isnothing(r2d2_tau) || error(
+            "sbimpl: `|$id_sym|` holds a known correlation and also carries an " *
+            "`r2d2` decomposition; a derived-scale block with a known " *
+            "correlation is not implemented")
+        _sb_emit_known_id_bucket!(stmts, data, bucket_name, n_terms_name,
+                                  gname, idx_name, n_name; cv_groups,
+                                  centered_groups, id_sym, ranef_effect, mod)
+        return idx_name
+    end
     if !isnothing(dist)
         isnothing(r2d2_tau) || error(
             "sbimpl: `|$id_sym|` is Student-t and also carries an `r2d2` " *
