@@ -250,10 +250,89 @@ end
     end
 end
 
+# Observation-only cells: the prediction stays a cell local and the plate has no
+# collected result. Each is paired with the same cell plus a terminal output.
+plate_effect_named(data) = @brm data begin
+    sigma ~ Exponential(1)
+    @plate for i in eachindex(t)
+        mu = theta[i] .* t[i]
+        y[i] ~ normal(mu, sigma)
+    end
+end
+
+plate_output_named_grouped(data) = @brm data begin
+    sigma ~ Exponential(1)
+    log_CL ~ 1 + weight + (1 | p | subject)
+    ragged(obs_time, obs_subject)
+    ragged(obs_y, obs_subject)
+    @plate for i in eachindex(log_CL)
+        mu = exp.(-exp(log_CL[i]) .* obs_time[i])
+        obs_y[i] ~ normal(mu, sigma)
+        loc[i] = mu
+    end
+end
+
+plate_effect_named_grouped(data) = @brm data begin
+    sigma ~ Exponential(1)
+    log_CL ~ 1 + weight + (1 | p | subject)
+    ragged(obs_time, obs_subject)
+    ragged(obs_y, obs_subject)
+    @plate for i in eachindex(log_CL)
+        mu = exp.(-exp(log_CL[i]) .* obs_time[i])
+        obs_y[i] ~ normal(mu, sigma)
+    end
+end
+
+const PLATE_EFFECT_PAIRS = (
+    ("no-random-effects panel", PLATE_PANEL, plate_terminal_named_annotated,
+     plate_effect_named),
+    ("formula LP + grouped flat axes", PLATE_EVENTS, plate_output_named_grouped,
+     plate_effect_named_grouped),
+)
+
+@testset "@brm @plate for — observation-only cells on RKBRMI" begin
+    emitted(backend) = sprint(Base.show_unquoted, BRM._rk_emit_ast(backend.plan).main)
+    for (label, data, with_output, effect_only) in PLATE_EFFECT_PAIRS
+        @testset "$label" begin
+            @test_logs effect_only(data)
+            old_backend, old_problem = consumer_problem(with_output(data))
+            new_backend, new_problem = consumer_problem(effect_only(data))
+            # Nothing is collected: only the output form flattens its cells.
+            @test occursin("brm_flatten_cells", emitted(old_backend))
+            @test !occursin("brm_flatten_cells", emitted(new_backend))
+            names = coordinate_names(old_backend.model.layout)
+            @test coordinate_names(new_backend.model.layout) == names
+            n = length(names)
+            for u in (zeros(n), fill(0.3, n),
+                      n == 1 ? [-0.4] : collect(range(-0.4, 0.2; length=n)))
+                old_value, old_gradient = LogDensityProblems.logdensity_and_gradient(old_problem, u)
+                new_value, new_gradient = LogDensityProblems.logdensity_and_gradient(new_problem, u)
+                @test new_value == old_value
+                @test new_gradient == old_gradient
+            end
+        end
+    end
+end
+
+@testset "@brm @plate for — observation-only cells on SBBRMI" begin
+    # Capability gap, not a wrong shape: StanBlocks' do-block `plate` always
+    # collects a cell value (StanBlocks snag `result-less-do-f-3076f098`), so
+    # SBBRMI refuses the cell until StanBlocks has a plate without one.
+    for (label, data, _with_output, effect_only) in PLATE_EFFECT_PAIRS
+        @testset "$label" begin
+            @test_broken StanBlocks.stanc_check(BRM.stan_code(SBBRMI(
+                effect_only(data); mod=@__MODULE__, total_groups=()));
+                warn_pedantic=false).ok
+        end
+    end
+end
+
 @testset "@brm @plate for — syntax fails at the formula boundary" begin
+    # refused: a cell with neither an indexed output nor an observation computes
+    # nothing the model can use.
     no_output = :(@brm PLATE_PANEL begin
         @plate for i in eachindex(t)
-            y[i] ~ normal(theta[i] .* t[i], 1)
+            mu = theta[i] .* t[i]
         end
     end)
     bad_range = :(@brm PLATE_PANEL begin
@@ -272,7 +351,7 @@ end
             loc[i] = theta[i] .* t[i]
         end
     end)
-    @test_throws "needs an indexed deterministic output" macroexpand(@__MODULE__, no_output)
+    @test_throws "this one has neither" macroexpand(@__MODULE__, no_output)
     @test_throws "range must be" macroexpand(@__MODULE__, bad_range)
     @test_throws "one cell slice" macroexpand(@__MODULE__, bad_slice)
     @test_throws "shadows a sliced input" macroexpand(@__MODULE__, shadow)
