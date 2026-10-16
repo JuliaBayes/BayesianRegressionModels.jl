@@ -81,7 +81,10 @@ const CALLABLE_CACHE = joinpath(tempdir(), "brm-callable-priors")
     sb = SBBRMI(builder(data); mod=@__MODULE__)
     code = BRM.stan_code(sb)
     @test occursin("registered_positive_lpdf(x[1])", code)
-    @test occursin("(x[1] < 0.0)", code)
+    # The positive support is the declaration's bound, so the generated
+    # density carries no coordinate guard for it.
+    @test occursin("vector<lower=0.0>[n_terms_eight_schools_school] b_eight_schools_school_tau;", code)
+    @test !occursin("(x[1] < 0.0)", code)
     @test occursin(r"b_eight_schools_school_tau ~ brm_vector_prior_", code)
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
 

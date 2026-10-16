@@ -11,7 +11,7 @@ const BRM = BayesianRegressionModels
 # `stan_data` boundary (`stan_data(::SBBRMI)` only accepts the wrapper) and
 # had to call `StanBlocks.stan_data` directly. If the model registers a
 # generated `brm_vector_prior_*` family (here: a nine-margin correlated block
-# with heterogeneous scale priors), that direct trace in the same compiled
+# with mixed-family scale priors), that direct trace in the same compiled
 # caller dies with "... is missing `lpxf_expr`" even though the hook exists.
 # BRM's SLIC-model data method is the missing call-site-independent seam.
 
@@ -25,7 +25,9 @@ data = (; subject=[1, 1, 2, 2],
 builder = @brm begin
     sd(:, p) ~ Exponential(1 / 3)
     sd(loc8, p) ~ Exponential(0.5)
-    sd(loc9, p) ~ Exponential(0.5)
+    # One Normal margin keeps the scale vector mixed-family: an all-Exponential
+    # vector lowers to a native vectorised statement and generates no family.
+    sd(loc9, p) ~ Normal(0, 0.5)
     cor(:, p) ~ LKJCholesky(9, 2.0)
     loc1 ~ 1 + (1 | p | subject)
     loc2 ~ 1 + (1 | p | subject)

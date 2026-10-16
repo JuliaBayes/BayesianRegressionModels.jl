@@ -54,6 +54,37 @@ natural_df = (;
     @test occursin(r"b_p_g_tau ~ brm_vector_prior_[0-9a-f]+", heterogeneous_code)
     @test occursin("exponential_lpdf(x[1]", heterogeneous_code)
     @test occursin("normal_lpdf(x[2]", heterogeneous_code)
+    # `tau` is declared `vector<lower=0.0>`, so a per-coordinate `< 0` guard in
+    # the mixed-family density could never fire.
+    @test !occursin("negative_infinity()", heterogeneous_code)
+
+    # One family with margin-specific hyperparameters stays one native
+    # vectorised statement: differing hyperparameters become a vector literal.
+    same_family = @brm natural_df begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 + x | p | g)
+        sd(:, p) ~ Exponential(2)
+        sd(mu, p, x) ~ Exponential(0.5)
+        y ~ Normal(mu, sigma)
+    end
+    same_family_code = BRM.stan_code(SBBRMI(same_family; mod=@__MODULE__))
+    @test StanBlocks.stanc_check(same_family_code; warn_pedantic=false).ok
+    @test occursin("vector<lower=0.0>[n_terms_p_g] b_p_g_tau;", same_family_code)
+    @test occursin("b_p_g_tau ~ exponential([0.5, 2.0]');", same_family_code)
+    @test !occursin(r"brm_vector_prior_[0-9a-f]+", same_family_code)
+
+    # A hyperparameter every margin shares stays scalar.
+    shared_location = @brm natural_df begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 + x | p | g)
+        sd(:, p) ~ Normal(0, 1)
+        sd(mu, p, x) ~ Normal(0, 0.5)
+        y ~ Normal(mu, sigma)
+    end
+    shared_location_code = BRM.stan_code(SBBRMI(shared_location; mod=@__MODULE__))
+    @test StanBlocks.stanc_check(shared_location_code; warn_pedantic=false).ok
+    @test occursin("b_p_g_tau ~ normal(0.0, [1.0, 0.5]');", shared_location_code)
+    @test !occursin(r"brm_vector_prior_[0-9a-f]+", shared_location_code)
 end
 
 # Reference family spelling the previous homogeneous lowering: one scalar
@@ -137,9 +168,11 @@ end
                   propto=false, jacobian=true) atol=1e-12
     end
 
+    # Prior draws keep the observation statement and omit its response column.
     prior = @brm (; x=natural_df.x, g=natural_df.g) begin
         mu ~ 1 + x + (1 + x | p | g)
         sd(:, p) ~ Exponential(2)
+        y ~ Normal(mu, 1)
     end
     prior_sb = SBBRMI(prior; mod=@__MODULE__)
     prior_code = BRM.stan_code(prior_sb)
@@ -164,4 +197,84 @@ end
     end
     @test all(draws .>= 0.0)
     @test vec(mean(draws; dims=1)) ≈ [2.0, 2.0] atol=0.3
+end
+
+# Draw `b_p_g_tau` from a response-free SBBRMI program's prior predictive.
+function natural_prior_tau_draws(sb, label; n_draws=256)
+    problem = StanBlocks.stan_instantiate(
+        sb.model; path=joinpath(NATURAL_EMISSION_CACHE, "$label.stan"))
+    @test LogDensityProblems.dimension(problem) == 0
+    names = BS.param_names(problem.model; include_tp=true, include_gq=true)
+    tau_indices = Int[findfirst(==("b_p_g_tau.$i"), names) for i in 1:2]
+    draws = Matrix{Float64}(undef, n_draws, 2)
+    for draw_index in axes(draws, 1)
+        values = BS.param_constrain(
+            problem.model, Float64[];
+            include_tp=true, include_gq=true,
+            rng=BS.StanRNG(problem.model, 30_000 + draw_index))
+        draws[draw_index, :] = values[tau_indices]
+    end
+    draws
+end
+
+@testset "same-family margins keep the generated family's law" begin
+    base = StanBlocks.@slic (; y=[0.2, -0.1]) begin
+        theta::vector[2]
+        y ~ normal(theta, 1.0)
+    end
+    cases = (
+        exponential=[BRM.ExprColumn(Exponential, 2.0), BRM.ExprColumn(Exponential, 0.5)],
+        normal=[BRM.ExprColumn(Normal, 0.1, 1.0), BRM.ExprColumn(Normal, 0.1, 0.5)],
+    )
+    mkpath(NATURAL_EMISSION_CACHE)
+    for (label, priors) in pairs(cases)
+        native = BRM._sb_native_vector_prior(:theta, priors, 2; positive=true)
+        @test !isnothing(native)
+        family, args = BRM._sb_vector_prior_family(priors; mod=@__MODULE__)
+        generated = Expr(:call, :~, :theta,
+            Expr(:call, family, Expr(:parameters, Expr(:kw, :n, 2)), args...))
+        native_problem = StanBlocks.stan_instantiate(Base.merge(base, native.statement);
+            path=joinpath(NATURAL_EMISSION_CACHE, "native-$label.stan"))
+        generated_problem = StanBlocks.stan_instantiate(Base.merge(base, generated);
+            path=joinpath(NATURAL_EMISSION_CACHE, "generated-$label.stan"))
+        @test BS.param_unc_names(native_problem.model) ==
+              BS.param_unc_names(generated_problem.model) ==
+              ["theta.1", "theta.2"]
+        for q in ([-0.7, 0.4], [0.0, 0.0], [0.8, -0.2])
+            @test BS.log_density(native_problem.model, q;
+                propto=false, jacobian=true) ≈
+                  BS.log_density(generated_problem.model, q;
+                      propto=false, jacobian=true) atol=1e-12
+        end
+    end
+
+    exponential_prior = @brm (; x=natural_df.x, g=natural_df.g) begin
+        mu ~ 1 + x + (1 + x | p | g)
+        sd(:, p) ~ Exponential(2)
+        sd(mu, p, x) ~ Exponential(0.5)
+        y ~ Normal(mu, 1)
+    end
+    exponential_sb = SBBRMI(exponential_prior; mod=@__MODULE__)
+    exponential_code = BRM.stan_code(exponential_sb)
+    @test StanBlocks.stanc_check(exponential_code; warn_pedantic=false).ok
+    @test !occursin(r"brm_vector_prior_[0-9a-f]+", exponential_code)
+    exponential_draws = natural_prior_tau_draws(exponential_sb, "prior-exponential")
+    @test all(exponential_draws .>= 0.0)
+    @test vec(mean(exponential_draws; dims=1)) ≈ [2.0, 0.5] atol=0.3
+
+    # Positive Normal margins redraw through the lower-conditioned RNG, now
+    # with a vector scale.
+    normal_prior = @brm (; x=natural_df.x, g=natural_df.g) begin
+        mu ~ 1 + x + (1 + x | p | g)
+        sd(:, p) ~ Normal(0, 1)
+        sd(mu, p, x) ~ Normal(0, 0.5)
+        y ~ Normal(mu, 1)
+    end
+    normal_sb = SBBRMI(normal_prior; mod=@__MODULE__)
+    normal_code = BRM.stan_code(normal_sb)
+    @test StanBlocks.stanc_check(normal_code; warn_pedantic=false).ok
+    @test !occursin(r"brm_vector_prior_[0-9a-f]+", normal_code)
+    normal_draws = natural_prior_tau_draws(normal_sb, "prior-normal")
+    @test all(normal_draws .>= 0.0)
+    @test vec(mean(normal_draws; dims=1)) ≈ sqrt(2 / pi) .* [1.0, 0.5] atol=0.15
 end
