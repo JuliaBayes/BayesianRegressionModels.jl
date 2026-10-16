@@ -379,7 +379,15 @@ struct _RKRanefBucket
     sd_priors::Vector{Any}
     decomposition::Union{Nothing,NamedTuple}
     dist::Union{Nothing,_BRMRanefStudentT} # block law; `nothing` is Gaussian
+    # `cor(:, ID) = R`: the known correlation (in margin order), held as a
+    # constant Cholesky factor instead of an LKJ draw. Known scales
+    # (`sd(...) = value`) ride `sd_priors` as `_BRMKnownScale` entries.
+    known_cor::Union{Nothing,Matrix{Float64}}
 end
+_RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping, sd_priors,
+        decomposition, dist) =
+    _RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping,
+        sd_priors, decomposition, dist, nothing)
 _RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping, sd_priors,
         decomposition) =
     _RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping,
@@ -4176,9 +4184,26 @@ Base.@nospecializeinfer function _rk_plan_ranef_buckets(@nospecialize(brmi::BRMI
             eta += (length(all_margins) - length(bucket.margins)) / 2
             override === nothing || (sd_priors = sd_priors[positions])
         end
+        known_cor = override === nothing ? nothing : override.known_cor
+        if _brm_ranef_has_known(override)
+            decomposition === nothing || error(
+                "$prefix: `|$(bucket.id)|` holds a known scale or correlation " *
+                "(`sd(...) = value` / `cor(:, $(bucket.id)) = R`) and also carries " *
+                "an `r2d2` decomposition; choose one scale definition for the block")
+            bucket.grouping.form === :plain || error(
+                "$prefix: `|$(bucket.id)|` holds a known scale or correlation over " *
+                "a `$(bucket.grouping.form)` grouping; known values are " *
+                "implemented for ordinary grouping factors only")
+            # A narrower block (an omitted response) keeps exactly the known
+            # values of its planned margins: the marginal of a fixed
+            # correlation is its submatrix.
+            reduced && known_cor !== nothing &&
+                (known_cor = known_cor[positions, positions])
+        end
         replacement = _RKRanefBucket(bucket.id, bucket.group, bucket.kind,
             bucket.margins, bucket.slices, eta, bucket.label,
-            bucket.grouping, sd_priors, decomposition, dist)
+            bucket.grouping, sd_priors, decomposition, dist,
+            known_cor !== nothing && size(known_cor, 1) >= 2 ? known_cor : nothing)
         buckets[i] = replacement
         for (key, value) in lookup
             value === bucket && (lookup[key] = replacement)
@@ -7431,8 +7456,9 @@ end
 # dependencies before filtering scalar draws; an SD or law declaration is
 # metadata rather than a normal formula operand.
 Base.@nospecializeinfer function _rk_with_ranef_prior_dependencies(@nospecialize(brmi::BRMI), program, roots)
+    # Known values (`sd(...) = value`) resolve to constants and read nothing.
     specs = [spec for spec in ranef_effect_priors(brmi)
-        if !(spec.class === :sd && spec.family === r2d2)]
+        if !(spec.class === :sd && spec.family === r2d2) && spec.family !== _brm_known]
     any(spec -> spec.class in (:sd, :ranef) &&
         !isempty(_brm_prepared_references(_brm_prepare_expr(spec.expression))), specs) ||
         return program
