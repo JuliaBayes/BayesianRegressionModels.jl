@@ -40,8 +40,8 @@ julia = "1.10"
 
 [sources.StanBlocks]
 url = "https://github.com/nsiccha/StanBlocks.jl"
-# Declared omitted plate-cell observations retain public predictive twins.
-rev = "f442bee5e69f5bc89659951d09fa531a90bfac01"
+# Every `_rng` draw (and what reads it) is a generated quantity.
+rev = "0936d96bdac0496fbce50526d4d3bb9fb380367f"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
