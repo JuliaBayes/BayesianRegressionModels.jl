@@ -344,3 +344,32 @@ end
     end
     @test stan(prune_responses(coupled(kernel_data); keep = :w)) == stan(coupled(kernel_data))
 end
+
+@testset "an observation-only cell loses its pruned observations" begin
+    # The cell is named after its first observed response (`a_cell`), so the
+    # formula written without `b` names it the same. SBBRMI does not build
+    # observation-only cells yet (StanBlocks snag `result-less-do-f-3076f098`),
+    # so this compares the RK source.
+    observed = @brm begin
+        sigma_a ~ Exponential(1)
+        sigma_b ~ Exponential(1)
+        log_k ~ 1 + x + (1 | p | subject)
+        base  ~ 1 + (1 | p | subject)
+        @plate for i in eachindex(t)
+            level = exp(log_k[i]) .* t[i]
+            a[i] ~ normal(level, sigma_a)
+            b[i] ~ normal(base[i] .+ level[b_idx[i]], sigma_b)
+        end
+    end
+    observed_a = @brm begin
+        sigma_a ~ Exponential(1)
+        log_k ~ 1 + x + (1 | p | subject)
+        @plate for i in eachindex(t)
+            level = exp(log_k[i]) .* t[i]
+            a[i] ~ normal(level, sigma_a)
+        end
+    end
+    pruned = prune_responses(observed(plate_data); keep = :a)
+    @test rk_source(pruned) == rk_source(observed_a(plate_a_data))
+    @test !any(in(keys(pruned.operations)), (:base, :sigma_b))
+end
