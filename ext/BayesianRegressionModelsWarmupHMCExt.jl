@@ -1000,6 +1000,9 @@ exact. Literal endpoints are preserved: `c=0` is BRM's standardised draw and
 For exact totals, `c=1` is the sampled group total and `c=0` is the total
 scaled around its prior location. The exact marginal prior remains correlated
 at either endpoint. Each group/term cell receives its own control automatically.
+A total block emitted in generated quantities (no observed likelihood reaches
+it) has no sampler coordinate, so it has no cell and does not count as a totals
+block when choosing the wrapper.
 
 For an S2Z block compiled with `s2z_coordinates=:groups`, each group of each
 coefficient is one scalar cell with zero location and scale `tau_k`: `c=0` is
@@ -1071,7 +1074,7 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
     if s2z_rule === :fisher
         isempty(BRM.s2z_effect_blocks(model)) &&
             throw(ArgumentError("s2z_rule=:fisher needs S2Z blocks"))
-        isempty(BRM.total_effect_blocks(model)) &&
+        isempty(BRM._total_blocks_by_placement(model).sampled) &&
             isempty(BRM.adaptive_centering_blocks(model, names)) &&
             isempty(BRM._adaptive_hsgp_centering_blocks(model, names)) &&
             isempty(BRM._adaptive_cdar_centering_blocks(model, names)) ||
@@ -1082,7 +1085,7 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
     blocks = BRM.adaptive_centering_blocks(model, names)
     hsgp_blocks = BRM._adaptive_hsgp_centering_blocks(model, names)
     cdar_blocks = BRM._adaptive_cdar_centering_blocks(model, names)
-    total_blocks = BRM.total_effect_blocks(model)
+    total_blocks = BRM._total_blocks_by_placement(model).sampled
     s2z_blocks = BRM.s2z_effect_blocks(model)
     if !isempty(total_blocks) || !isempty(s2z_blocks)
         isempty(blocks) && isempty(hsgp_blocks) && isempty(cdar_blocks) || throw(ArgumentError(
