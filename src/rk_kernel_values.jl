@@ -193,6 +193,9 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
     parts = _sb_kernel_lambda_parts(first(getargs(rhs)))
     parts === nothing && error("RK backend: kernel `$name` requires an inline cell body")
     params, raw_body = parts
+    # A cell ending in `nothing` has no collected value (`collected === nothing`).
+    resultless = _brm_cell_has_no_result(raw_body)
+    resultless && (raw_body = _brm_cell_without_result(raw_body))
     arguments = getargs(rhs)[2:end]
     length(params) == length(arguments) || error(
         "RK backend: kernel `$name` cell and positional argument counts disagree")
@@ -209,10 +212,6 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             "RK backend: kernel `$name` predictor inputs disagree on subject grouping")
         column = first(groups)[3]
         _brm_kernel_subject_values(parent(parent(column)), _rk_kernel_column_name(column); prefix="RK backend")
-    end
-    for (lp, bucket) in zip(direct_lps, buckets)
-        bucket === nothing && _brm_kernel_check_subject_frame_lp(
-            lp, length(group_values); prefix="RK backend")
     end
     columns = Dict{Symbol,Any}()
     inputs = Any[]
@@ -263,12 +262,20 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             error("RK backend: kernel `$name` input must be a data column, predictor or ragged join")
         end
     end
-    # The cell's subject plate iterates these inputs in lockstep.
+    # The cell's subject plate iterates these inputs in lockstep. Without a
+    # random-effect LP or a pre-grouped data input, the per-subject columns the
+    # LPs read supply the count.
+    group_values === nothing && isempty(outer_lengths) && foreach(
+        lp -> append!(outer_lengths, last.(_brm_kernel_lp_data_lengths(lp))), direct_lps)
     nsubjects = group_values === nothing ?
         (isempty(outer_lengths) ? error("RK backend: kernel `$name` needs a subject input") : first(outer_lengths)) :
         length(group_values)
     all(==(nsubjects), outer_lengths) || error(
         "RK backend: kernel `$name` positional inputs disagree on subject count")
+    for (lp, bucket) in zip(direct_lps, buckets)
+        bucket === nothing && _brm_kernel_check_subject_frame_lp(
+            lp, nsubjects; prefix="RK backend")
+    end
     body = Any[]
     observations = Any[]
     collected = nothing
@@ -309,13 +316,14 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             continue
         end
         push!(body, statement)
+        resultless && continue
         collected = Meta.isexpr(statement, :(=)) ? first(statement.args) :
             Meta.isexpr(statement, :return) ? only(statement.args) : statement
     end
-    collected === nothing && error("RK backend: kernel `$name` has no collected value")
+    resultless || collected !== nothing || error("RK backend: kernel `$name` has no collected value")
     # The final value expression is returned once. An assignment stays in the
     # body and returns its newly bound name.
-    !isempty(body) && !Meta.isexpr(last(body), :(=)) && pop!(body)
+    !resultless && !isempty(body) && !Meta.isexpr(last(body), :(=)) && pop!(body)
     locals = Set{Symbol}(params)
     for statement in body
         _rk_source_outputs!(locals, statement)
@@ -868,6 +876,9 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
     # `rendered` outputs are already emitted program expressions (hoisted
     # observation arguments): their calls are bound, not cell source.
     written = Any[outputs..., rendered...]
+    # Nothing written per subject (a cell without a collected value whose
+    # observations read only shared values): there is no cell to run.
+    isempty(written) && return
     slice = _rk_kernel_value_slice(kernel, Expr(:tuple, last.(written)...))
     any(input -> input.kind === :omitted, slice.inputs) && error(
         "RK backend: kernel `$(kernel.name)` reads an unbound in-cell response outside its observation")
@@ -973,8 +984,10 @@ end
 function _rk_emit_value_assignment!(defs, statements, bindings, taken,
         kernel::_RKPreparedKernelAssignment; arguments=nothing)
     arguments === nothing || (kernel = _rk_kernel_with_arguments(kernel, arguments))
-    outputs = Any[(kernel.cells, kernel.collected)]
-    after = Any[Expr(:(=), kernel.name, Expr(:call, :brm_flatten_cells, kernel.cells))]
+    # A cell without a collected value writes only what its observations read.
+    outputs, after = kernel.collected === nothing ? (Any[], Any[]) : (
+        Any[(kernel.cells, kernel.collected)],
+        Any[Expr(:(=), kernel.name, Expr(:call, :brm_flatten_cells, kernel.cells))])
     for observation in kernel.observations
         named = Any[zip(observation.argument_names, observation.arguments)...]
         append!(named, ((entry.name, entry.expression) for entry in observation.bounds))
