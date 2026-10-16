@@ -181,10 +181,12 @@ end
 
 # A bucket the split supports: a plain grouping factor whose block is Gaussian
 # with sampled scales (default, configured `sd`/`cor`, centered or not). Student-t
-# mixing weights and R2D2-derived scales keep the ordinary full block.
+# mixing weights, R2D2-derived scales and known scales or correlations
+# (`sd(...) = value`) keep the ordinary full block.
 _sb_marginal_eligible(desc, ranef_effect, r2d2_tau) =
     desc isa NamedColumn && isnothing(r2d2_tau) &&
-    (isnothing(ranef_effect) || isnothing(ranef_effect.dist))
+    (isnothing(ranef_effect) ||
+     (isnothing(ranef_effect.dist) && !_brm_ranef_has_known(ranef_effect)))
 
 # Emit the split block for one bucket. `per_target_ranges` is the bucket's
 # `target => column range` table; `inactive` names the targets no likelihood
@@ -249,7 +251,7 @@ function _sb_emit_marginal_id_bucket!(stmts, data, bucket_name, n_terms_name,
     push!(stmts, Expr(:call, :~, Expr(:(::), L_name, Expr(:ref, :cholesky_factor_corr, n_active)),
                       Expr(:call, :lkj_corr_cholesky, eta + m / 2)))
     scale = _sb_vector_positive_prior_statement(tau_name, tau_name, resolved[active_cols],
-        n_active; direct_homogeneous=true, mod, scope=@__MODULE__)
+        n_active; direct_native=true, mod, scope=@__MODULE__)
     push!(stmts, scale.statement)
     for hyper in (L_name, tau_name)
         _sb_record_binding!(data, hyper, :random_effect, gname; marginal_of=bucket_name)
@@ -267,7 +269,7 @@ function _sb_emit_marginal_id_bucket!(stmts, data, bucket_name, n_terms_name,
              Expr(:kw, :tau, tau_name)))))
 
     completion = _sb_vector_positive_priors(ranef_correlated_draws_completion,
-        :tau_inactive, resolved[inactive_cols]; direct_homogeneous=true, mod)
+        :tau_inactive, resolved[inactive_cols]; direct_native=true, mod)
     _sb_record_binding!(data, bucket_name, :random_effect, gname;
                         family=:ranef_correlated_draws_completion,
                         active=carrier, margins=Tuple(inactive_cols))

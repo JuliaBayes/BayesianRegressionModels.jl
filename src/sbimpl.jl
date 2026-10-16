@@ -237,13 +237,22 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
         lpdf, lpdfs, rng = Symbol(stem, :_lpdf), Symbol(stem, :_lpdfs), Symbol(stem, :_rng)
         typed = [argkinds[i] === :selector ? Symbol(:arg_, i) :
                  Expr(:(::), Symbol(:arg_, i), :real) for i in eachindex(actuals)]
+        # The family's support becomes the parameter declaration's bounds:
+        # positive blocks are always `lower=0`, others carry a bound only when
+        # every coordinate shares it.
+        lowers = [c.lower for c in calls]
+        uppers = [c.upper for c in calls]
+        declared_lower = positive ? 0.0 :
+            all(!isnothing, lowers) && allequal(lowers) ? first(lowers) : nothing
+        declared_upper = !positive && all(!isnothing, uppers) && allequal(uppers) ?
+            first(uppers) : nothing
         densities = Any[]; draws = Any[]; guards = Any[]
         for (i, c) in enumerate(calls)
             distname = c.dist isa Symbol ? c.dist : nameof(c.dist)
             # StanBlocks' flat token is a parameter declaration with no density
             # contribution, so it has no Stan flat_lpdf builtin to call from a
-            # generated whole-vector prior. Retain the coefficient and support
-            # guards while contributing the exact constant zero.
+            # generated whole-vector prior. Retain the coefficient and any
+            # coordinate guards while contributing the exact constant zero.
             push!(densities, distname === :flat ? 0.0 :
                 Expr(:call, Symbol(distname, :_lpdf), Expr(:ref, :x, i), c.names...))
             selector = selectors[i]
@@ -254,9 +263,13 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
                 isnothing(c.upper) ?
                     Expr(:call, :_sb_lower_conditioning_rng, selector, c.lower, c.names...) :
                     Expr(:call, :_sb_conditioning_rng, selector, c.lower, c.upper, c.names...))
-            !isnothing(c.lower) && push!(guards,
+            # Stan's constraining transform already enforces a declared bound,
+            # so a guard for it can never fire. Only a coordinate-specific bound
+            # that the declaration cannot carry keeps an explicit guard.
+            !isnothing(c.lower) && !isequal(c.lower, declared_lower) && push!(guards,
                 :(if x[$i] < $(c.lower); return negative_infinity(); end))
-            !isnothing(c.upper) && push!(guards, :(if x[$i] > $(c.upper); return negative_infinity(); end))
+            !isnothing(c.upper) && !isequal(c.upper, declared_upper) && push!(guards,
+                :(if x[$i] > $(c.upper); return negative_infinity(); end))
         end
         total = foldl((a,b)->Expr(:call, :+, a, b), densities)
         point = Any[:(@stan_assert n == $(length(calls))), :(out::vector[n])]
@@ -274,13 +287,8 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
         rng_def = :($rng(vector[n], $(typed...))::vector[n] =
             $(Expr(:block, drawbody...)))
         support = Pair{Symbol,Any}[]
-        positive && push!(support, :lower => 0.0)
-        lowers = [c.lower for c in calls]
-        uppers = [c.upper for c in calls]
-        !positive && all(!isnothing, lowers) && allequal(lowers) &&
-            push!(support, :lower => first(lowers))
-        !positive && all(!isnothing, uppers) && allequal(uppers) &&
-            push!(support, :upper => first(uppers))
+        isnothing(declared_lower) || push!(support, :lower => declared_lower)
+        isnothing(declared_upper) || push!(support, :upper => declared_upper)
         generated = StanBlocks.ValueFamily(stem, :lpdf,
             _sb_anchor_slic_macrocalls!(density_def),
             _sb_anchor_slic_macrocalls!(pointwise_def),
@@ -329,21 +337,55 @@ function _sb_direct_vector_positive_prior(target::Symbol, prior, nvalue)
     (; statement=stmt, dependencies=sort!(collect(dependencies)))
 end
 
+# Margins of one StanBlocks builtin family with one shared support, but with
+# coordinate-specific hyperparameters, as a single native vectorised statement:
+# `target ~ exponential([1.5, 3.0, 5.0]; n=n, lower=0.0)`. Stan's univariate
+# builtins vectorise over their hyperparameters as well as their variate, so a
+# hyperparameter that differs across margins becomes a vector literal and one
+# shared by every margin stays scalar. `nothing` when any margin is custom or
+# composed, the families differ, or the margins' bounds differ (the
+# declaration carries a single bound); those keep the generated family.
+function _sb_native_vector_prior(target::Symbol, priors, nvalue; positive::Bool)
+    length(priors) > 1 || return nothing
+    all(prior -> _brm_distribution_shape(prior) ==
+            (Distributions.Univariate, Distributions.Continuous), priors) || return nothing
+    calls, actuals, _, argkinds = _sb_vector_prior_parts(priors; positive)
+    reference = first(calls)
+    dist = reference.dist
+    dist isa Symbol && dist !== :flat && isdefined(StanBlocks, dist) || return nothing
+    all(==(:real), argkinds) || return nothing
+    all(c -> c.dist === dist && length(c.names) == length(reference.names) &&
+             isequal(c.lower, reference.lower) && isequal(c.upper, reference.upper),
+        calls) || return nothing
+    k = length(reference.names)
+    args = map(1:k) do j
+        column = Any[actuals[(i - 1) * k + j] for i in eachindex(calls)]
+        allequal(column) ? first(column) : Expr(:vect, column...)
+    end
+    kws = Any[Expr(:kw, :n, nvalue)]
+    isnothing(reference.lower) || push!(kws, Expr(:kw, :lower, reference.lower))
+    isnothing(reference.upper) || push!(kws, Expr(:kw, :upper, reference.upper))
+    dependencies = Set{Symbol}()
+    foreach(arg -> _sb_vector_prior_dependencies!(dependencies, arg), actuals)
+    (; statement=Expr(:call, :~, target, Expr(:call, dist, Expr(:parameters, kws...), args...)),
+       dependencies=sort!(collect(dependencies)))
+end
+
 # The one `lhs ~ <positive vector prior>` statement for per-margin `priors`, and
 # the model names its arguments read. `scope` is the module the statement is
-# traced in: a direct homogeneous family must resolve there.
+# traced in: a direct native family must resolve there.
 function _sb_vector_positive_prior_statement(lhs, target::Symbol, priors, nvalue;
-                                             direct_homogeneous::Bool=false,
+                                             direct_native::Bool=false,
                                              mod::Module, scope::Module)
     # Stan's native univariate families vectorise over their variate. When every
     # margin has the exact same mapped distribution, retain that natural Stan
     # spelling instead of synthesising a coordinate-by-coordinate UDF. Custom,
-    # composed, or heterogeneous priors keep the general generated-family path.
+    # composed, or mixed-family priors keep the general generated-family path.
     # The direct statement only resolves families visible in `scope` (the
     # BRM-owned base for a merged submodel): a consumer-registered distribution
     # type (`_sb_stan_dist_name(::Type{<:MyPrior})`) whose StanBlocks family
     # lives in `mod` must take the generated-family path, which traces in `mod`.
-    if direct_homogeneous && !isempty(priors) &&
+    if direct_native && !isempty(priors) &&
        all(prior -> isequal(prior, first(priors)), priors)
         T = _as_distribution_type(getf(first(priors)))
         family = isnothing(T) ? nothing : _sb_stan_dist_name(T)
@@ -354,6 +396,10 @@ function _sb_vector_positive_prior_statement(lhs, target::Symbol, priors, nvalue
             direct = _sb_direct_vector_positive_prior(target, first(priors), nvalue)
             isnothing(direct) || return direct
         end
+    end
+    if direct_native
+        native = _sb_native_vector_prior(target, priors, nvalue; positive=true)
+        isnothing(native) || return native
     end
     family, args = _sb_vector_prior_family(priors; mod)
     # Intrinsic bounds belong to the value family, including when this
@@ -366,7 +412,7 @@ end
 
 function _sb_vector_positive_priors(base::StanBlocks.SlicModel,
                                     target::Symbol, priors;
-                                    direct_homogeneous::Bool=false,
+                                    direct_native::Bool=false,
                                     mod::Module=base.mod)
     source = only(node for node in base.model.args if node isa Expr &&
         ((node.head === :(::) && node.args[1] === target) ||
@@ -382,7 +428,7 @@ function _sb_vector_positive_priors(base::StanBlocks.SlicModel,
         end
     end
     prior = _sb_vector_positive_prior_statement(lhs, target, priors, nvalue;
-                                                direct_homogeneous, mod, scope=base.mod)
+                                                direct_native, mod, scope=base.mod)
     (; model=Base.merge(base, prior.statement), prior.dependencies)
 end
 
@@ -557,6 +603,8 @@ end
 const _SB_STUDENT_T_RANEF_SHAPES = Dict{Symbol,Symbol}(
     :ranef_correlated_draws => :level_rows,
     :ranef_correlated_draws_generic => :level_rows,
+    :ranef_correlated_draws_known_scale => :level_rows,
+    :ranef_correlated_draws_known_cor => :level_rows,
 )
 
 _sb_student_t_ranef_family(family::Symbol) = Symbol(family, :_student_t)
@@ -601,6 +649,46 @@ ranef_correlated_draws_r2d2 = StanBlocks.@slic begin
     z = to_matrix(z_flat, n_terms, n_groups)
     return (diag_pre_multiply(tau, L) * z)'
 end
+
+# ---- Known scales and correlations ----------------------------------------
+#
+# `sd(lp, ID) = value` / `cor(:, ID) = R` hold a shared block's marginal scales
+# or correlation at known values (nlmixr2's `fix()` on an omega). Like the
+# R2D2 sibling above, these take `tau` as a caller-supplied kwarg: the caller
+# passes a data vector when every scale is known, the sampled scale vector when
+# none is, and their scatter (`brm_scatter_margins`) when the block mixes
+# them. A known correlation also passes its data Cholesky factor `L`. The
+# standardised draws and the column-major layout are those of
+# `ranef_correlated_draws`. Separate names (not the R2D2 one) keep the family
+# metadata of `src/prediction.jl` and the descriptions honest.
+ranef_correlated_draws_known_scale = StanBlocks.@slic begin
+    L      ~ lkj_corr_cholesky(lkj_eta; n=n_terms)
+    z_flat ~ std_normal(; n=n_terms * n_groups)
+    z = to_matrix(z_flat, n_terms, n_groups)
+    return (diag_pre_multiply(tau, L) * z)'
+end
+
+ranef_correlated_draws_known_cor = StanBlocks.@slic begin
+    z_flat ~ std_normal(; n=n_terms * n_groups)
+    z = to_matrix(z_flat, n_terms, n_groups)
+    return (diag_pre_multiply(tau, L) * z)'
+end
+
+ranef_correlated_draws_known_scale_student_t =
+    _sb_student_t_ranef(ranef_correlated_draws_known_scale, :ranef_correlated_draws_known_scale)
+ranef_correlated_draws_known_cor_student_t =
+    _sb_student_t_ranef(ranef_correlated_draws_known_cor, :ranef_correlated_draws_known_cor)
+
+# The emitted family of a known-value block, keyed by (known correlation?,
+# Student-t?).
+const _SB_KNOWN_RANEF_FAMILIES = Dict{Tuple{Bool,Bool},Tuple{Symbol,StanBlocks.SlicModel}}(
+    (false, false) => (:ranef_correlated_draws_known_scale, ranef_correlated_draws_known_scale),
+    (true, false) => (:ranef_correlated_draws_known_cor, ranef_correlated_draws_known_cor),
+    (false, true) => (:ranef_correlated_draws_known_scale_student_t,
+                      ranef_correlated_draws_known_scale_student_t),
+    (true, true) => (:ranef_correlated_draws_known_cor_student_t,
+                     ranef_correlated_draws_known_cor_student_t),
+)
 
 # Plain `(1 | g)` with a derived scale. Sibling of `ranef_intercept`, whose
 # `log_scale ~ std_normal()` is exactly the sampled degree of freedom R2D2
@@ -5471,6 +5559,13 @@ function _sb_kernel_lambda_parts(lam)
     (params, statements)
 end
 
+# The column a kernel positional binds to its cell formal: the column itself,
+# or the flat column of a `ragged(y, group)` positional; `nothing` otherwise.
+_sb_kernel_positional_column(c::NamedColumn) = c
+_sb_kernel_positional_column(c::ExprColumn{typeof(ragged)}) =
+    length(getargs(c)) == 2 ? first(getargs(c)) : nothing
+_sb_kernel_positional_column(_) = nothing
+
 # Indexes (1-based into `positionals`, i.e. `dcols[2:end]`) of omitted kernel
 # OUTCOMES: `MissingColumn`-backed positionals whose cell parameter is observed
 # in-cell. The omitted response column is the one prior spelling, so these
@@ -5484,13 +5579,7 @@ function _sb_kernel_unbound_cell_idx(positionals, params::Vector{Symbol}, body_s
     found = Int[]
     length(params) == length(positionals) || return found
     for (i, c) in enumerate(positionals)
-        response = if c isa NamedColumn
-            c
-        elseif c isa ExprColumn && getf(c) === ragged && length(getargs(c)) == 2
-            first(getargs(c))
-        else
-            nothing
-        end
+        response = _sb_kernel_positional_column(c)
         response isa NamedColumn && parent(response) isa MissingColumn || continue
         _sb_cell_param_observed(body_stmts, params[i]) || continue
         push!(found, i)
@@ -6131,7 +6220,7 @@ function _sb_generic_ranef_submodel(priors, base::StanBlocks.SlicModel;
     resolved = map(priors) do prior
         isnothing(prior) ? ExprColumn(Normal) : prior
     end
-    _sb_vector_positive_priors(base, :tau, resolved; direct_homogeneous=true, mod)
+    _sb_vector_positive_priors(base, :tau, resolved; direct_native=true, mod)
 end
 
 """
@@ -10697,8 +10786,9 @@ function _sb_emit_id_buckets!(stmts, data, buckets;
                     "`sd(...) ~ r2d2(...)` decompositions; choose one " *
                     "variance allocation for the block")
             !isnothing(ranef_effect) && ranef_effect.has_sd && error(
-                "sbimpl: `|$id_sym|` carries both an R2D2-derived scale and a " *
-                "direct sampled SD prior; choose one scale prior")
+                "sbimpl: `|$id_sym|` carries both an R2D2-derived scale " *
+                "(`sd(...) ~ r2d2(...)`) and a direct `sd(...)` statement (a " *
+                "sampled prior or a known value); choose one scale definition")
             r2d2_tau = _sb_emit_ranef_r2d2_tau!(
                 stmts, data, bucket_name, n_terms_total, bucket_r2d2;
                 joint_out=r2d2_joint,description_block=(:random_effect,id_sym,name(desc)))
@@ -10800,6 +10890,96 @@ function _sb_emit_student_t_id_bucket!(stmts, data, bucket_name, n_terms_name,
     nothing
 end
 
+# Emit a shared `|ID|` block that holds some marginal scales and/or its
+# correlation at known values (`sd(...) = value`, `cor(:, ID) = R`). Known
+# scales and the known Cholesky factor are data; the remaining scales keep
+# their resolved priors on one caller-level vector. Its `tau` is
+#
+#   every scale known  -> `<bucket>_tau`, a data vector;
+#   no scale known     -> `<bucket>_tau ~ <priors>` (a known correlation only);
+#   some scales known  -> `<bucket>_tau_free ~ <priors>` scattered with the data
+#                         `<bucket>_tau_known` into `<bucket>_tau`.
+#
+# cv sizing rides the `n_groups` size expression exactly as in the sampled
+# families; a Student-t block uses the derived `_student_t` family.
+function _sb_emit_known_id_bucket!(stmts, data, bucket_name, n_terms_name,
+                                   gname, idx_name, n_name; cv_groups,
+                                   centered_groups, id_sym, ranef_effect,
+                                   mod::Module)
+    gname in centered_groups && error(
+        "sbimpl: group `$gname` is in `centered_groups`, but its `|$id_sym|` " *
+        "block holds a known scale or correlation (`sd(...) = value` / " *
+        "`cor(:, $id_sym) = R`); the centered emission of a known-value block " *
+        "is not implemented. Use the default non-centered emission for this group")
+    n_groups = n_name
+    if gname in cv_groups
+        n_groups = Symbol(bucket_name, :_n_g)
+        push!(stmts, :($n_groups = maximum($idx_name)))
+    end
+    priors = ranef_effect.sd_prior
+    tau = _sb_emit_known_ranef_tau!(stmts, data, bucket_name, n_terms_name,
+                                    priors; mod)
+    known_cor = ranef_effect.known_cor
+    dist = ranef_effect.dist
+    family, model = _SB_KNOWN_RANEF_FAMILIES[(!isnothing(known_cor), !isnothing(dist))]
+    kwargs = Any[Expr(:kw, :group_idx, idx_name), Expr(:kw, :n_groups, n_groups),
+                 Expr(:kw, :n_terms, n_terms_name), Expr(:kw, :tau, tau)]
+    if isnothing(known_cor)
+        push!(kwargs, Expr(:kw, :lkj_eta, ranef_effect.lkj_eta))
+    else
+        L_name = Symbol(bucket_name, :_L_known)
+        data[L_name] = Matrix{Float64}(cholesky(Symmetric(known_cor)).L)
+        _sb_record_static!(data, L_name)
+        push!(kwargs, Expr(:kw, :L, L_name))
+    end
+    if !isnothing(dist)
+        nu = _sb_effect_prior_arg(dist.nu)
+        nu isa Real || nu isa Symbol || error(
+            "sbimpl: Student-t degrees of freedom for `|$id_sym|` must be a numeric " *
+            "formula constant or the name of a declared scalar parameter, got " *
+            "`$(repr(nu))`")
+        push!(kwargs, Expr(:kw, :nu, nu))
+    end
+    _sb_record_binding!(data, bucket_name, :random_effect, gname; family,
+        known_scales=Tuple(_brm_is_known_scale(p) ? p.value : nothing for p in priors),
+        known_cor)
+    push!(stmts, Expr(:call, :~, bucket_name,
+                      Expr(:call, model, Expr(:parameters, kwargs...))))
+    nothing
+end
+
+# The `tau` value a known-value block passes in (see `_sb_emit_known_id_bucket!`).
+function _sb_emit_known_ranef_tau!(stmts, data, bucket_name, n_terms_name, priors;
+                                   mod::Module)
+    known = findall(_brm_is_known_scale, priors)
+    free = [i for i in eachindex(priors) if !(i in known)]
+    tau_name = Symbol(bucket_name, :_tau)
+    # Known values are fitted-model constants: `reprocess` replays them frozen.
+    if isempty(free)
+        data[tau_name] = Float64[prior.value for prior in priors]
+        _sb_record_static!(data, tau_name)
+        return tau_name
+    end
+    # An unaddressed margin keeps the shared block's half-standard-Normal scale.
+    free_priors = Any[isnothing(prior) ? ExprColumn(Normal) : prior
+                      for prior in priors[free]]
+    free_name = isempty(known) ? tau_name : Symbol(bucket_name, :_tau_free)
+    statement = _sb_vector_positive_prior_statement(free_name, free_name,
+        free_priors, length(free); direct_native=true, mod, scope=mod).statement
+    push!(stmts, statement)
+    isempty(known) && return tau_name
+    known_name = Symbol(bucket_name, :_tau_known)
+    free_idx_name = Symbol(bucket_name, :_tau_free_idx)
+    known_idx_name = Symbol(bucket_name, :_tau_known_idx)
+    data[known_name] = Float64[priors[i].value for i in known]
+    data[free_idx_name] = free
+    data[known_idx_name] = known
+    foreach(key -> _sb_record_static!(data, key), (known_name, free_idx_name, known_idx_name))
+    push!(stmts, :($tau_name = brm_scatter_margins($free_name, $known_name,
+        $free_idx_name, $known_idx_name, $n_terms_name)))
+    tau_name
+end
+
 _sb_id_bucket_suffix(id_sym, g::NamedColumn) = Symbol(id_sym, :_, name(g))
 _sb_id_bucket_suffix(id_sym, g::Tuple{NamedColumn,NamedColumn}) =
     Symbol(id_sym, :_, name(g[1]), :__by__, name(g[2]))
@@ -10816,6 +10996,16 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g:
     idx_name, n_name = _sb_ensure_group_data!(data, g)
     gname = name(g)
     dist = isnothing(ranef_effect) ? nothing : ranef_effect.dist
+    if _brm_ranef_has_known(ranef_effect)
+        isnothing(r2d2_tau) || error(
+            "sbimpl: `|$id_sym|` holds a known correlation and also carries an " *
+            "`r2d2` decomposition; a derived-scale block with a known " *
+            "correlation is not implemented")
+        _sb_emit_known_id_bucket!(stmts, data, bucket_name, n_terms_name,
+                                  gname, idx_name, n_name; cv_groups,
+                                  centered_groups, id_sym, ranef_effect, mod)
+        return idx_name
+    end
     if !isnothing(dist)
         isnothing(r2d2_tau) || error(
             "sbimpl: `|$id_sym|` is Student-t and also carries an `r2d2` " *

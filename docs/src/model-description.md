@@ -142,6 +142,15 @@ conventions, input bindings and child coverage are preserved.
 Long opaque observation-family relations place each actual argument on its own
 aligned row, in authored order, including keyword bindings. The family still
 needs independent scientific hook coverage.
+Inside a cell, `censored`, `truncated`, `weighted` and `interval_censored` are
+StanBlocks' distribution combinators. They are built-in descriptions with the
+formula wrappers' laws, and their bounds are `lower=`/`upper=` keywords. A
+family call, as in `censored(Normal(mu, s); lower=l)`, is an argument child. A
+family token followed by its arguments, as in `censored(normal, mu, s; lower=l)`,
+becomes a `(..., :family)` child with that token as its callable, so a custom
+family token needs its own hook exactly as it does at top level. A cell
+`interval_censored(family, L, U, args...)` observes a latent value in `(L, U]`
+and contributes `F(U) - F(L)`.
 Authored literal assignments have `role=:constant` and expose their value;
 composed assignments have `role=:deterministic` and expose a public expression.
 This includes assignments preceded by documentation strings in an included

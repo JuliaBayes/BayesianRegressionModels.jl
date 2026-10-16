@@ -461,8 +461,15 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:population
     end
 end
 
-# The SB random-effect block an RK bucket lowered to, and its ordered margins.
-function _brm_transport_ranef_block(d, record)
+# The known marginal scales of a known-value SB block, in its margin order
+# (`nothing` for a sampled margin).
+_brm_transport_known_scales(d, block) =
+    collect(d.plan.bindings[block.binding].known_scales)
+
+# The SB random-effect block an RK bucket (or `(; group, id)`) lowered to, and
+# its ordered margins; for a marginalized `|ID|` block, its sampled active part.
+# `caller` names the public entry in errors.
+function _brm_sb_ranef_block(d, record; caller="brm_coordinate_transport")
     plan = d.plan
     brmi = plan.parent
     all_blocks = ranef_blocks(plan)
@@ -478,7 +485,7 @@ function _brm_transport_ranef_block(d, record)
     end
     address = (; group=record.group, id=record.id)
     length(blocks) == 1 || error(
-        "brm_coordinate_transport: random-effect block $(address) of RK " *
+        "$caller: random-effect block $(address) of RK " *
         "margins $(record.margins) matches $(length(blocks)) SB blocks")
     block = only(blocks)
     # A marginalized `|ID|` block samples its likelihood-active margins in a
@@ -488,13 +495,6 @@ function _brm_transport_ranef_block(d, record)
         collect(plan.bindings[completion.active].margins) : nothing
     isnothing(active) ||
         (block = only(b for b in all_blocks if b.binding === completion.active))
-    block.generated && _brm_transport_error(:parameterization_mismatch,
-        "brm_coordinate_transport: SB block `$(block.binding)` is drawn in " *
-        "generated quantities and has no sampled coordinates")
-    block.noncentered || _brm_transport_error(:parameterization_mismatch,
-        "brm_coordinate_transport: SB block `$(block.binding)` is centered; its " *
-        "coordinates are the effects, not the standardized draws RK samples. " *
-        "Build the SBBRMI without `centered_groups` for this comparison.")
     margins = if isnothing(record.id)
         binding = plan.bindings[block.binding]
         [(binding.predictor, c) for c in binding.columns]
@@ -503,8 +503,20 @@ function _brm_transport_ranef_block(d, record)
         isnothing(active) ? shared : shared[active]
     end
     length(margins) == block.n_terms || error(
-        "brm_coordinate_transport: SB block `$(block.binding)` reports " *
+        "$caller: SB block `$(block.binding)` reports " *
         "$(length(margins)) margins for $(block.n_terms) terms")
+    (; block, margins)
+end
+
+function _brm_transport_ranef_block(d, record)
+    (; block, margins) = _brm_sb_ranef_block(d, record)
+    block.generated && _brm_transport_error(:parameterization_mismatch,
+        "brm_coordinate_transport: SB block `$(block.binding)` is drawn in " *
+        "generated quantities and has no sampled coordinates")
+    block.noncentered || _brm_transport_error(:parameterization_mismatch,
+        "brm_coordinate_transport: SB block `$(block.binding)` is centered; its " *
+        "coordinates are the effects, not the standardized draws RK samples. " *
+        "Build the SBBRMI without `centered_groups` for this comparison.")
     (; block, margins)
 end
 
@@ -526,12 +538,35 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:ranef}, re
     # Scales: one per margin.
     spec = _RANEF_FAMILIES[block.family]
     tau = get(spec, :tau, nothing)
+    # A known-value block (`sd(...) = value`) samples only its free scales,
+    # under `<binding>_tau_free` when some scale is known; a known scale is a
+    # constant on both backends and pairs with nothing.
+    known_scales = get(spec, :known, false) ?
+        _brm_transport_known_scales(d, block) : fill(nothing, block.n_terms)
+    rk_known = get(record, :known_scales, nothing)
+    free_margins = findall(isnothing, known_scales)
     for (k, margin) in enumerate(record.margins)
+        sb_known = !isnothing(known_scales[sb_margin[k]])
+        sb_known == (!isnothing(rk_known) && !isnothing(rk_known[k])) ||
+            _brm_transport_error(:parameterization_mismatch,
+                "brm_coordinate_transport: margin $margin of block " *
+                "`$(block.binding)` has a known scale on " *
+                "$(sb_known ? "SB" : "RK") only")
+        sb_known && continue
         address = (; kind=:ranef_scale, base..., margin)
         rk_name, rk_decl, rk_index = isnothing(record.scales) ?
             (Symbol(record.scale, ".", k), record.scale, (k,)) :
             (record.scales[k], record.scales[k], ())
-        if !isnothing(tau)
+        if length(free_margins) < block.n_terms
+            carrier = string(block.binding, "_tau_free")
+            name = string(carrier, ".", only(findall(==(sb_margin[k]), free_margins)))
+            single = length(free_margins) == 1 && haskey(stan_pos, carrier)
+            haskey(stan_pos, name) || single || error(
+                "brm_coordinate_transport: SB free scale `$carrier` of block " *
+                "`$(block.binding)` has no unconstrained coordinate for margin $margin")
+            push!(pairs, BRMCoordinatePair(address, rk_name,
+                haskey(stan_pos, name) ? name : carrier, rk_decl, rk_index, :identity))
+        elseif !isnothing(tau)
             carrier = string(block.binding, "_", tau)
             name = string(carrier, ".", sb_margin[k])
             haskey(stan_pos, name) || (K == 1 && haskey(stan_pos, carrier)) || error(
@@ -583,12 +618,19 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:ranef}, re
         end
     end
     # Correlation factor: Stan's packed coordinates, in the same margin order.
+    # A known correlation (`cor(:, ID) = R`) is data on SB and a constant on RK.
+    sb_cor_known = get(spec, :known, false) &&
+        !isnothing(d.plan.bindings[block.binding].known_cor)
+    sb_cor_known == !isnothing(get(record, :known_cor, nothing)) || _brm_transport_error(
+        :parameterization_mismatch,
+        "brm_coordinate_transport: block `$(block.binding)` has a known " *
+        "correlation on $(sb_cor_known ? "SB" : "RK") only")
     isnothing(record.L) && return
     sb_margin == collect(1:K) || _brm_transport_error(:parameterization_mismatch,
         "brm_coordinate_transport: block `$(block.binding)` orders its margins " *
         "$(Tuple(margins)) on SB and $(record.margins) on RK; a reordered " *
         "correlation factor is not a coordinate permutation")
-    carrier = string(block.binding, "_L")
+    carrier = _sb_ranef_correlation_carrier(block)
     for m in 1:(K * (K - 1)) ÷ 2
         address = (; kind=:ranef_correlation, base..., margins=record.margins, index=m)
         push!(pairs, BRMCoordinatePair(address, Symbol(record.L, ".", m),
@@ -598,6 +640,9 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:ranef}, re
     push!(correlations, (; base..., margins=record.margins, rk_declaration=record.L,
         stan_carrier=carrier, K))
 end
+
+# The Stan carrier of a random-effect block's correlation Cholesky factor.
+_sb_ranef_correlation_carrier(block) = string(block.binding, "_L")
 
 # The unconstrained Stan names of one SB carrier, in element order.
 function _brm_transport_elements(output, stan, address)

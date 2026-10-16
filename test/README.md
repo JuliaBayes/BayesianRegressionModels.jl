@@ -32,6 +32,21 @@ predictor without a random effect read as `x[i]` (BridgeStan and RK density
 parity with the old one-element ragged gather). Run it with `--depwarn=yes` so
 its deprecation assertion is live.
 
+`fixed_ranef_scales.jl` checks random-effect scales and correlations held at
+known values, `sd(lp, ID) = value` and `cor(:, ID) = R`. It covers:
+
+- parsing, `priors_of`/`merge` composition and the refusals;
+- SBBRMI emission and stanc acceptance for mixed, all-known, correlation-only,
+  one-margin, Student-t, `cv_groups` and `@plate` models;
+- BridgeStan densities: each known model equals its sampled twin evaluated at
+  the known values, up to exactly the twin's prior density of those values;
+- RK/Stan coordinate transport with density and gradient parity;
+- `population_draws`, `reprocess(...; resample_groups=...)`, an
+  omitted-response prior program, descriptors, descriptions, and the NLME and
+  adaptive-centering refusals.
+
+Set `BRM_FIXED_RANEF_RUNTIME=0` to skip the compiled-model sets.
+
 `kernel_population_lp.jl` checks per-subject linear predictors without a random
 effect (a typical value plus covariates) read as `x[i]`, beside a random-effect
 predictor and in a no-random-effects panel, against an independent density
@@ -148,8 +163,19 @@ values with `brm_nlme_start`. It covers a correlated population-PK model and a
 nested model with a correlated subject family, nested units and a shared HSGP,
 in estimated and fixed shared modes. Subject log-likelihoods sum to the RK
 observation likelihood at the point, and `brm_nlme_joint_start` rebuilds the
-same Stan point from the natural values. Run it in the NLMEEstimation scratch
+same Stan point from the natural values. Initial estimates keyed by prior
+address (`brm_nlme_start(m, inits)`) give the addressed θ, σ and Ω with zero
+η, and `brm_start` on the joint map's Stan model gives the same point as
+`brm_nlme_joint_start` of that start. Run it in the NLMEEstimation scratch
 environment described below.
+
+`start_values.jl` checks `brm_start`, initial values keyed by prior address,
+on both backends. For a correlated population-PK model, a linked predictor,
+a categorical predictor with a `Dirichlet` simplex, and an exact-total block,
+it checks the addressed constrained values, the semantic transport's
+agreement between the RK and Stan points, unaddressed coordinates kept at a
+random base, and refusals of unknown addresses and invalid values. It runs in
+the test environment above.
 
 `nlme_estimation_ext.jl` covers the NLMEEstimation.jl protocol extension:
 batched and single-subject evaluation (including `check_protocol` and online
@@ -198,6 +224,20 @@ family gap, and the retained sum-to-zero gap. It runs under the root project:
 
 ```sh
 julia --startup-file=no --project=. test/description_totals.jl
+```
+
+## In-cell distribution combinators
+
+`description_cell_combinators.jl` describes `@plate for` cells whose
+observations use StanBlocks' `censored`, `truncated`, `weighted` and
+`interval_censored` combinators. A call-form family is an argument child; a
+token-form family is a `:family` child over the token's arguments, which a
+family hook sees by its actual callable. Bounds are keyword-only, so a token's
+arguments never render as bounds. The in-cell censoring prose matches the
+formula wrapper's. It runs under the test project:
+
+```sh
+julia --startup-file=no --project=test test/description_cell_combinators.jl
 ```
 
 ## Native GP and dual HSGP adoption

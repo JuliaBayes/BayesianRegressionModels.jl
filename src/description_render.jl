@@ -391,21 +391,29 @@ function _brmd_builtin_call(::Type{<:LocationScale},c)
     BRMDescriptionFragment(prose=(prose,),equations=("Z\\sim{}"*_brmd_distribution_math(c,base),
         "p_Y(y)=\\frac{1}{"*s*"}f_Z\\left(\\frac{y-"*loc*"}{"*s*"}\\right)"),covers=(c.id,))
 end
+# A bound is a keyword or, when `position` is an index, that positional argument.
 function _brmd_bound_math(c,key,position,fallback)
-    !haskey(c.keywords,key) && length(c.arguments)<position && return fallback
-    value=get(c.keywords,key,length(c.arguments)>=position ? c.arguments[position] : fallback)
+    positional=!isnothing(position) && length(c.arguments)>=position
+    haskey(c.keywords,key) || positional || return fallback
+    value=haskey(c.keywords,key) ? c.keywords[key] : c.arguments[position]
     value isa Real && isinf(value) && return value<0 ? "-\\infty" : "\\infty"
     value===nothing ? fallback : brm_description_math(c,value)
 end
-function _brmd_builtin_call(::typeof(truncated),c)
-    lower=_brmd_bound_math(c,:lower,2,"-\\infty")
-    upper=_brmd_bound_math(c,:upper,3,"\\infty")
+# The Distributions wrappers also take positional bounds; StanBlocks'
+# combinators take `lower=`/`upper=` keywords only.
+_brmd_bounds_math(c,positional) = (_brmd_bound_math(c,:lower,positional ? 2 : nothing,"-\\infty"),
+    _brmd_bound_math(c,:upper,positional ? 3 : nothing,"\\infty"))
+_brmd_builtin_call(::typeof(truncated),c) = _brmd_truncation_fragment(c,_brmd_bounds_math(c,true)...)
+_brmd_builtin_call(::typeof(StanBlocks.stan.builtin.truncated),c) =
+    _brmd_truncation_fragment(c,_brmd_bounds_math(c,false)...)
+function _brmd_truncation_fragment(c,lower,upper)
     BRMDescriptionFragment(prose=("Truncation conditions the declared base distribution on its bounds. F is its CDF; F(L⁻) is the left limit, which preserves inclusive discrete bounds.",),
         equations=("p(y)=\\frac{f(y)\\,\\mathbf1\\{"*lower*"\\le y\\le "*upper*"\\}}{F("*upper*")-F("*lower*"^-)}",),covers=(c.id,))
 end
-function _brmd_builtin_call(::typeof(censored),c)
-    lower=_brmd_bound_math(c,:lower,2,"-\\infty")
-    upper=_brmd_bound_math(c,:upper,3,"\\infty")
+_brmd_builtin_call(::typeof(censored),c) = _brmd_censoring_fragment(c,_brmd_bounds_math(c,true)...)
+_brmd_builtin_call(::typeof(StanBlocks.stan.builtin.censored),c) =
+    _brmd_censoring_fragment(c,_brmd_bounds_math(c,false)...)
+function _brmd_censoring_fragment(c,lower,upper)
     rows=String[]
     lower!="-\\infty" && push!(rows,"F("*lower*")&y="*lower)
     condition=(lower=="-\\infty" ? "y" : lower*"<y")*(upper=="\\infty" ? "" : "<"*upper)
@@ -438,8 +446,20 @@ function _brmd_builtin_call(::typeof(weighted),c)
         return BRMDescriptionFragment(prose=("Analytic weights modify Gaussian precision: the residual SD for row j is σ divided by √wⱼ. This includes the Gaussian normalization for that adjusted SD.",),
             equations=(output*"\\sim\\mathcal N("*mean*",{"*sd*"}^{2}/"*w*")",),covers=(c.id,))
     end
-    BRMDescriptionFragment(prose=("Each declared observation weight multiplies its pointwise log likelihood; weights do not replace the response distribution.",),
-        equations=("\\log\\mathcal L=\\sum_j "*w*"\\log p(y_j\\mid\\theta)",),covers=(c.id,))
+    _brmd_weight_fragment(c,w)
+end
+_brmd_weight_fragment(c,w) = BRMDescriptionFragment(prose=("Each declared observation weight multiplies its pointwise log likelihood; weights do not replace the response distribution.",),
+    equations=("\\log\\mathcal L=\\sum_j "*w*"\\log p(y_j\\mid\\theta)",),covers=(c.id,))
+# StanBlocks' combinators inside a cell: `weighted(family, w, args...)` and
+# `interval_censored(family, lower, upper, args...)`, or the same with a family
+# call in place of the token and its arguments (StanBlocks `lpxf_builtin.jl`).
+_brmd_builtin_call(::typeof(StanBlocks.stan.builtin.weighted),c) =
+    length(c.arguments)<2 ? nothing : _brmd_weight_fragment(c,brm_description_math(c,c.arguments[2]))
+function _brmd_builtin_call(::typeof(StanBlocks.stan.builtin.interval_censored),c)
+    length(c.arguments)<3 && return nothing
+    lower,upper=map(a->brm_description_math(c,a),c.arguments[2:3])
+    BRMDescriptionFragment(prose=("The latent base-family value is known only to lie in the interval (L, U]; the observed value carries the statement and does not enter the likelihood. Continuous and integer families both contribute F(U)−F(L), where F is the base CDF.",),
+        equations=("\\mathcal L=F("*upper*")-F("*lower*")",),covers=(c.id,))
 end
 for f in (aweights,fweights,weights)
     @eval _brmd_builtin_call(::$(typeof(f)),c)=BRMDescriptionFragment(covers=(c.id,))

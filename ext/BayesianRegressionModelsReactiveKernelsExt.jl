@@ -168,6 +168,8 @@ function BRM._rk_layout_coordinate_transforms(backend::BRM.RKBRMI)
 end
 BRM._rk_constrained_values(backend::BRM.RKBRMI, u::AbstractVector) =
     constrain(backend.model.layout, u)
+BRM._rk_unconstrained_point(backend::BRM.RKBRMI, values::NamedTuple) =
+    unconstrain(backend.model.layout, values)
 
 # NLME evaluation (src/nlme_view.jl): the prepared `:pointwise` query and its
 # evaluation at a packed unconstrained point, and the sampler query whose
