@@ -1448,6 +1448,14 @@ _brm_data_expression_sources!(sources, _term) = sources
 _brm_data_expression_sources(term) =
     _brm_data_expression_sources!(Symbol[], term)
 
+# Whether an expression reads a model value (a sampled parameter, an authored
+# assignment or a predictor) rather than raw data alone.
+_brm_reads_model_value(term::NamedColumn) = !(parent(term) isa DataColumn)
+_brm_reads_model_value(term::ExprColumn) =
+    any(_brm_reads_model_value, getargs(term)) ||
+    any(_brm_reads_model_value, values(getkwargs(term)))
+_brm_reads_model_value(_term) = false
+
 # A BRM DSL term head (`mo`, `me`, `s`, `t2`, `gp`, `hsgp`, `ar`, `dar`, `mo1`) is a
 # parameter-owning special term, NOT a pure data function: it carries no method
 # that accepts a materialized data value, so broadcasting it as if it were
@@ -1553,10 +1561,11 @@ function _brm_population_fixed_term(term)
     isempty(getkwargs(term)) || error(
         "BRM backend lowering: `offset(x)` does not accept keyword arguments")
     inner = only(args)
+    # An offset of a model value has no data values: it is a population term
+    # for the backend's `population_columns` hook (below by default).
+    _brm_reads_model_value(inner) && return nothing
     values = _brm_materialize_data_expression(inner)
-    values isa AbstractVector{<:Real} || error(
-        "BRM backend lowering: direct-BRMI `offset(...)` currently requires a " *
-        "pure expression over raw numeric data columns")
+    values isa AbstractVector{<:Real} || _brm_data_offset_error()
     sources = _brm_data_expression_sources(inner)
     isempty(sources) && error(
         "BRM backend lowering: `offset(...)` has no raw data row axis")
@@ -1847,6 +1856,17 @@ _brm_population_columns(term; cellmeans::Bool=false) =
     let column = _brm_population_column(term)
         isnothing(column) ? nothing : (column,)
     end
+# An offset of a model value reaches the column hook instead of the fixed data
+# terms. A backend that lowers it as graph math (RK) passes its own hook; the
+# rest refuse it here, as before.
+function _brm_population_columns(term::ExprColumn{typeof(offset)}; cellmeans::Bool=false)
+    args = getargs(term)
+    length(args) == 1 && _brm_reads_model_value(only(args)) && _brm_data_offset_error()
+    invoke(_brm_population_columns, Tuple{Any}, term; cellmeans)
+end
+_brm_data_offset_error() = error(
+    "BRM backend lowering: direct-BRMI `offset(...)` currently requires a " *
+    "pure expression over raw numeric data columns")
 
 function _brm_random_categorical_column(column)
     _brm_population_column_is_categorical(column) || return column
