@@ -781,7 +781,7 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
     kernel_cells = Set{Symbol}(a.cells for a in plan.assignments
         if a isa _RKPreparedKernelAssignment)
     union!(reserved, kernel_cells)
-    lone_intercepts = Dict{Symbol,Symbol}()
+    lone_intercepts = Dict{Symbol,Any}()
     regression = _rk_emit_ast(plan.regression, false; values=true, reserved,
         coordinates, lone_intercepts)
     stmts = copy(regression.main.args)
