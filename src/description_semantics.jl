@@ -31,11 +31,33 @@ _brmd_children!(nodes, xs::NamedTuple) = _brmd_children!(nodes, values(xs))
 
 # `argument_children=false` is for a node whose extra children already own
 # every argument subtree (a coordinatewise vector prior), avoiding duplicates.
-function _brmd_component(env, id, kind, callable, args, kwargs=NamedTuple(); outputs=env.outputs,extra_children=(),argument_children=true)
+# `argument_nodes` regroups the argument subtrees under other nodes (a
+# combinator's token family) while `args` stays the authored argument list.
+function _brmd_component(env, id, kind, callable, args, kwargs=NamedTuple(); outputs=env.outputs,extra_children=(),argument_children=true,argument_nodes=args)
     BRMDescriptionComponent(id, kind, callable, args, kwargs, env.axes,
         outputs, env.priors, env.constants,
-        (_brmd_children(argument_children ? (args, values(kwargs)) : values(kwargs))...,extra_children...),
+        (_brmd_children(argument_children ? (argument_nodes, values(kwargs)) : values(kwargs))...,extra_children...),
         merge(env.provenance, (; path=id)), env.notation, env.bindings)
+end
+
+# StanBlocks' distribution combinators also take a family token followed by its
+# arguments: `censored(normal, mu, sigma; lower=lo)`. That base family is then
+# its own `:family` child over those arguments, as the call form
+# `censored(Normal(mu, sigma); lower=lo)` makes it an argument child, so either
+# spelling's family is covered, or left a gap, by its actual callable. The
+# value is the index of the token's first argument (StanBlocks `lpxf_builtin.jl`).
+_brmd_family_arguments(_f)=nothing
+_brmd_family_arguments(::typeof(StanBlocks.stan.builtin.censored))=2
+_brmd_family_arguments(::typeof(StanBlocks.stan.builtin.truncated))=2
+_brmd_family_arguments(::typeof(StanBlocks.stan.builtin.weighted))=3
+_brmd_family_arguments(::typeof(StanBlocks.stan.builtin.interval_censored))=4
+function _brmd_call_component(env, id, callable, args, kwargs)
+    start=_brmd_family_arguments(callable)
+    token=!isnothing(start) && length(args)>=start-1 &&
+        first(args) isa Union{Function,StanBlocks.ValueFamily}
+    token || return _brmd_component(env, id, :call, callable, args, kwargs)
+    family=_brmd_component(env, (id..., :family), :call, first(args), args[start:end])
+    _brmd_component(env, id, :call, callable, args, kwargs; argument_nodes=(family, args[2:start-1]...))
 end
 
 _brmd_value(x::Number, _env, _id) = x
@@ -331,7 +353,7 @@ function _brmd_value(x::Expr, env, id)
                 return _brmd_component(env,id,:call,bound,args,merge(kwargs,(;broadcast=true)))
             end
         end
-        return _brmd_component(env, id, :call, _brmd_binding(head, env.mod), args, kwargs)
+        return _brmd_call_component(env, id, _brmd_binding(head, env.mod), args, kwargs)
     end
     args = Tuple(_brmd_value(a, env, (id..., x.head, i))
                  for (i,a) in enumerate(x.args) if !(a isa LineNumberNode))

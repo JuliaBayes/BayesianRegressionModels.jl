@@ -22,13 +22,17 @@ _brm_nlme_start_coordinates(m, θ, σ, Ω, u) = error(
 """
     brm_nlme_start(m::BRMNLMEModel, u::AbstractVector)
     brm_nlme_start(m::BRMNLMEModel, map::BRMNLMEJointMap, stan_u::AbstractVector)
+    brm_nlme_start(m::BRMNLMEModel, inits::NamedTuple; base=m.unit)
 
 Read one complete point of the *same* model as NLMEEstimation starting values
 for `m`. `u` is a full RK packed unconstrained point of `m.backend`'s layout.
 `stan_u` is a full unconstrained point of `map.stan_problem`; `map` must come
 from the same BRMI instance and NLME partition as `m`, and its validated
-semantic transport converts `stan_u` to RK coordinates first. Requires
-NLMEEstimation to be loaded.
+semantic transport converts `stan_u` to RK coordinates first. `inits` are
+initial values keyed by prior address, as [`brm_start`](@ref) takes them; the
+point is `brm_start(m.backend, inits; base)`, whose default base is `m`'s unit
+point (zero subject effects, and the fixed values of a fixed-shared model).
+Requires NLMEEstimation to be loaded.
 
 Returns a named tuple:
 
@@ -98,6 +102,9 @@ function brm_nlme_start(m::BRMNLMEModel, u::AbstractVector)
        shared=(; names=view.coordinates[shared], values=point[shared], estimated),
        loglikelihoods, coordinates.population_logprior, coordinates.max_error)
 end
+
+brm_nlme_start(m::BRMNLMEModel, inits::NamedTuple; base=m.unit) =
+    brm_nlme_start(m, brm_start(m.backend, inits; base))
 
 function brm_nlme_start(m::BRMNLMEModel, map::BRMNLMEJointMap, stan_u::AbstractVector)
     parent(map.rk) === parent(m.backend) || _brm_nlme_error(
