@@ -632,12 +632,13 @@ different thing from `weighted(...)`, which scales the likelihood.
 | Term | What it does |
 | --- | --- |
 | `kernel(args…) do …` | a per-subject model cell — the PMX/PKPD surface |
-| `ragged(x, group)` | group a flat secondary row axis into the ragged per-subject view a `kernel` cell slices |
+| `ragged(x, group)` | a model-scope statement grouping a flat secondary row axis into the ragged per-subject view an `@plate for` cell reads as `x[i]` |
 
 `ragged`'s `x` may be a linear predictor declared in the same `@brm` block or a
 raw flat data column; `group` names, for every row of that frame, which subject
-the row belongs to. See the [multi-axis population PK kernel](@ref) for a
-runnable example whose subject and observation columns have different lengths.
+the row belongs to. Declare it once, outside the cell; inside the cell, read
+`x[i]`. See the [multi-axis population PK kernel](@ref) for a runnable example
+whose subject and observation columns have different lengths.
 
 ### Downstream grouped terms: the reusable-term pattern
 
