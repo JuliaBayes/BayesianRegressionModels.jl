@@ -40,8 +40,8 @@ julia = "1.10"
 
 [sources.StanBlocks]
 url = "https://github.com/nsiccha/StanBlocks.jl"
-# A plate cell ending in a statement collects no result; every `_rng` draw is a GQ.
-rev = "c8f17ffee8d6e155a986a135d66ff969282a214f"
+# Result-less plate cells; every `_rng` draw is a GQ; size-only re-draw data is declared.
+rev = "7a0b91f97fa9dc29807e1c851ce5d163988a11f9"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
