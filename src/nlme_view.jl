@@ -218,6 +218,19 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
     isempty(ranefs) && _brm_nlme_error(
         "brm_nlme_view: the model has no subject-level random effects; an NLME " *
         "reading needs at least one `(... | group)` block")
+    # NLMEEstimation estimates every covariance family it is given; a block
+    # whose scale or correlation is held at a known value has no reading there
+    # until it can hold a family fixed (NLMEEstimation snag
+    # `fixed-omega-fami-a1322422`).
+    for r in ranefs
+        haskey(r, :known_scales) && _brm_nlme_error(
+            "brm_nlme_view: random-effect block `|$(r.id)|` (group `$(r.group)`) " *
+            "holds a known scale or correlation (`sd(...) = value` / " *
+            "`cor(:, ID) = R`). NLMEEstimation estimates every covariance family " *
+            "and cannot hold one fixed yet (NLMEEstimation snag " *
+            "`fixed-omega-fami-a1322422`), so this model has no NLME reading. " *
+            "Estimate the block, or fit it with the Stan or RK sampler.")
+    end
     groups = unique(r.group for r in ranefs)
     nested_groups isa NamedTuple || throw(ArgumentError(
         "nested_groups must be a NamedTuple mapping each nested grouping to its parent-label column"))

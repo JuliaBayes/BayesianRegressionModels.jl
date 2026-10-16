@@ -11,7 +11,9 @@
 #
 # `population_model` is the exact Stan-side counterpart: a program in which
 # every block of the factor, sampled or generated, contributes exactly zero,
-# with the fitted program's coordinates so the same draws evaluate on it.
+# with the fitted program's coordinates so the same draws evaluate on it. Its
+# exact-total blocks read their population mean `A * beta` instead, with `beta`
+# recovered in generated quantities.
 #
 # Run: julia --project=<worktree> test/population_draws_generated.jl
 # (needs BridgeStan reachable through StanBlocks; set BRM_PRED_RUNTIME=0 to run
@@ -21,6 +23,7 @@ using Test
 using BayesianRegressionModels
 using StanBlocks
 using Random
+using Statistics: mean, std
 using Distributions: Exponential, Normal
 
 const PRED_RUNTIME = get(ENV, "BRM_PRED_RUNTIME", "1") != "0"
@@ -113,17 +116,39 @@ block_shape(b) = (b.binding, b.family, b.group, b.id, b.n_terms, b.n_groups, b.z
         conv_sb; groups = :subjct)
 end
 
-# Capability gap, not a wrong shape: an exact-total block's population mean is
-# the recovered population coefficient, which the program draws only in
-# generated quantities. Today the call refuses loudly; tracked by todo
-# `BayesianRegressionModels/todos/2026-10-15T22-50-46-005-0rk6smb`.
-@testset "population_model: exact totals are not built yet" begin
-    @test_broken (try
-        population_model(totals_sb; groups = :subject)
-        true
-    catch
-        false
-    end)
+# An exact-total block's population mean is `A * beta`, with `beta` the
+# population coefficient the program recovers in generated quantities. Its
+# predictor reads that mean, so it is a generated quantity and the observed
+# response is held out; the totals keep their placement.
+@testset "population_model: exact totals read their population mean" begin
+    pop = population_model(totals_sb; groups = :subject)
+    code = BayesianRegressionModels.stan_code(pop)
+    @test code != BayesianRegressionModels.stan_code(totals_sb)
+    @test isempty(totals_sb.held_out)
+    @test pop.held_out == Set([:y])
+    @test BayesianRegressionModels._total_blocks_generated(
+        pop, total_effect_blocks(pop)) == [false, true]
+    @test isempty(ranef_blocks(pop))
+    # Selecting an already-population factor again changes nothing.
+    again = population_model(pop; groups = :subject)
+    @test BayesianRegressionModels.stan_code(again) == code
+    @test again.held_out == pop.held_out
+    ops = Set(o.name for o in brm_descriptor(pop).operations)
+    @test :predict in ops && :pointwise_loglik in ops && !(:fit in ops)
+    # Replay on a new grid of the same groups, in either order.
+    regrid = merge(observed, (; x = randn(MersenneTwister(4), n)))
+    replayed = reprocess(pop, regrid)
+    @test replayed.held_out == Set([:y])
+    @test BayesianRegressionModels.stan_code(replayed) == BayesianRegressionModels.stan_code(
+        population_model(reprocess(totals_sb, regrid); groups = :subject))
+    # A response the caller already held out is not marked twice: the program
+    # equals the one holding out both responses itself.
+    both = merge(observed, (; z = randn(MersenneTwister(5), n)))
+    held = SBBRMI(totals_builder(both); mod = @__MODULE__, held_out = :z)
+    pop_held = population_model(held; groups = :subject)
+    @test pop_held.held_out == Set([:y, :z])
+    @test BayesianRegressionModels.stan_code(pop_held) == BayesianRegressionModels.stan_code(
+        population_model(SBBRMI(totals_builder(both); mod = @__MODULE__); groups = :subject))
 end
 
 if !PRED_RUNTIME
@@ -163,6 +188,48 @@ entries(d, prefix) = [d[k] for k in sort!([k for k in keys(d) if startswith(k, p
     # quantity reading it retains its between-group variation).
     gq = constrained_by_name(sm, pop[1, :]; gq_seed = 9)
     @test any(!iszero, entries(gq, "r_nu_q_subject."))
+end
+
+@testset "population_model: exact totals at the population mean" begin
+    pop = population_model(totals_sb; groups = :subject)
+    sm = BayesianRegressionModels.stan_instantiate(totals_sb).model
+    pop_sm = BayesianRegressionModels.stan_instantiate(pop).model
+    unc = BS.param_unc_names(sm)
+    # The fitted coordinates, so fitted draws evaluate on it unchanged.
+    @test BS.param_unc_names(pop_sm) == unc
+    draws = randn(MersenneTwister(6), 4, length(unc))
+    for i in axes(draws, 1)
+        gq = constrained_by_name(pop_sm, draws[i, :]; gq_seed = 9)
+        fitted = constrained_by_name(sm, draws[i, :]; gq_seed = 9)
+        # Each row's total contribution is the recovered population intercept,
+        # for the sampled block (`mu`) and the generated one (`nu`).
+        @test entries(gq, "mu.") == entries(gq, "pop_mu.") .+ only(entries(gq, "population_mu."))
+        @test entries(gq, "nu.") == fill(only(entries(gq, "population_nu.")), n)
+        # The fitted totals and population part are reported unchanged.
+        for prefix in ("total_mu.", "total_scale_mu.", "pop_mu.")
+            names = filter(startswith(prefix), collect(keys(fitted)))
+            @test !isempty(names) && all(k -> gq[k] == fitted[k], names)
+        end
+        @test length(entries(gq, "y_gen.")) == n && length(entries(gq, "z_gen.")) == n
+        @test all(isfinite, entries(gq, "y_likelihood."))
+    end
+    # The fitted program's generated block varies between groups.
+    @test !allequal(entries(constrained_by_name(sm, draws[1, :]; gq_seed = 9), "nu."))
+    # In law: the recovered intercept the observed location reads, and the one
+    # `population_draws` substitutes, are both the exact conditional given a draw.
+    block = only(filter(b -> b.binding === :total_mu, total_effect_blocks(totals_sb)))
+    coords = BayesianRegressionModels._total_coordinates(totals_sb, block, unc)
+    conditional = BayesianRegressionModels._total_conditional(block, coords, draws[1, :])
+    m, s = only(conditional.mean), sqrt(only(inv(conditional.factor)))
+    S = 4000
+    program = [only(entries(constrained_by_name(pop_sm, draws[1, :]; gq_seed = seed),
+                            "population_mu.")) for seed in 1:S]
+    julia = population_draws(totals_sb, repeat(draws[1:1, :], S), unc; groups = :subject,
+                             rng = MersenneTwister(8))[:, coords.totals[1, 1]]
+    for sample in (program, julia)
+        @test abs(mean(sample) - m) < 5 * s / sqrt(S)
+        @test isapprox(std(sample), s; rtol = 0.1)
+    end
 end
 
 @testset "exact totals: sampled totals recovered, generated totals skipped" begin

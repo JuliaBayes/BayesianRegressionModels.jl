@@ -343,15 +343,17 @@ function _rk_ast_joint_monotonic_component!(definitions, taken, name, alphas, pr
 end
 
 # One shared positive prior broadcasts over the margins; distinct priors are
-# stated per margin and collected into the same `tau` vector.
+# stated per margin and collected into the same `tau` vector. A known scale
+# (`sd(...) = value`) arrives as its number and enters `tau` as a constant.
 function _rk_ast_group_scales(priors, index)
-    if all(isequal(first(priors)), priors)
+    if all(isequal(first(priors)), priors) && !(first(priors) isa Real)
         prior = first(priors)
         return Expr[Expr(:call, :.~, Expr(:ref, :tau, index),
             _rk_ast_dotted(prior.args[1], prior.args[2:end]...))]
     end
-    scales = [Symbol(:tau_, j) for j in eachindex(priors)]
-    statements = Expr[Expr(:call, :~, scale, prior) for (scale, prior) in zip(scales, priors)]
+    scales = Any[prior isa Real ? prior : Symbol(:tau_, j) for (j, prior) in pairs(priors)]
+    statements = Expr[Expr(:call, :~, scale, prior)
+                      for (scale, prior) in zip(scales, priors) if !(prior isa Real)]
     push!(statements, Expr(:(=), :tau, Expr(:vect, scales...)))
     statements
 end
@@ -367,14 +369,16 @@ end
 # positions computed from the data (`b[g_level, k]`), which a `levels(g)` axis
 # would instead read as labels.
 function _rk_ast_group_component!(definitions, statements, taken, name, group, K, eta,
-        priors; scale_value=nothing, nu=nothing)
+        priors; scale_value=nothing, nu=nothing, L_value=nothing)
     priors, prior_inputs, prior_values = _rk_ast_component_prior_inputs(priors,
         (:g, :K, :eta, :tau, :L, :z, :w, :nu, (Symbol(:tau_, j) for j in 1:K)...))
     index = K > 1 ? Expr(:call, :(:), 1, :K) : Expr(:call, :(:), 1, 1)
     rows = Expr(:call, :(:), 1, Expr(:call, :length, Expr(:call, :levels, :g)))
     body = Expr(:block)
     scale_value === nothing && append!(body.args, _rk_ast_group_scales(priors, index))
-    K > 1 && push!(body.args, Expr(:call, :~, :L, Expr(:call, :LKJCholesky, :K, :eta)))
+    # `L_value`: a known correlation's constant Cholesky factor (`cor(:, ID) = R`).
+    K > 1 && L_value === nothing &&
+        push!(body.args, Expr(:call, :~, :L, Expr(:call, :LKJCholesky, :K, :eta)))
     push!(body.args, Expr(:call, :.~, Expr(:ref, :z, rows, index),
         _rk_ast_dotted(:Normal, 0, 1)))
     value = K > 1 ?
@@ -390,15 +394,18 @@ function _rk_ast_group_component!(definitions, statements, taken, name, group, K
     arguments = Any[:g]
     K > 1 && push!(arguments, :K, :eta)
     scale_value === nothing || push!(arguments, :tau)
+    L_value === nothing || push!(arguments, :L)
     nu === nothing || push!(arguments, :nu)
     append!(arguments, prior_inputs)
     base = string(scale_value === nothing ? "brm_" : "brm_scaled_",
         nu === nothing ? "" : "student_t_",
+        L_value === nothing ? "" : "known_cor_",
         K > 1 ? "correlated_group_effects" : "group_effects")
     callee = _rk_ast_shared_definition!(definitions, taken, base, arguments, body)
     values = Any[group]
     K > 1 && push!(values, K, eta)
     scale_value === nothing || push!(values, scale_value)
+    L_value === nothing || push!(values, L_value)
     nu === nothing || push!(values, nu)
     append!(values, prior_values)
     push!(statements, _rk_ast_component_call(name, callee, values...))

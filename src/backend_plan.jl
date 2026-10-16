@@ -1448,6 +1448,14 @@ _brm_data_expression_sources!(sources, _term) = sources
 _brm_data_expression_sources(term) =
     _brm_data_expression_sources!(Symbol[], term)
 
+# Whether an expression reads a model value (a sampled parameter, an authored
+# assignment or a predictor) rather than raw data alone.
+_brm_reads_model_value(term::NamedColumn) = !(parent(term) isa DataColumn)
+_brm_reads_model_value(term::ExprColumn) =
+    any(_brm_reads_model_value, getargs(term)) ||
+    any(_brm_reads_model_value, values(getkwargs(term)))
+_brm_reads_model_value(_term) = false
+
 # A BRM DSL term head (`mo`, `me`, `s`, `t2`, `gp`, `hsgp`, `ar`, `dar`, `mo1`) is a
 # parameter-owning special term, NOT a pure data function: it carries no method
 # that accepts a materialized data value, so broadcasting it as if it were
@@ -1553,10 +1561,11 @@ function _brm_population_fixed_term(term)
     isempty(getkwargs(term)) || error(
         "BRM backend lowering: `offset(x)` does not accept keyword arguments")
     inner = only(args)
+    # An offset of a model value has no data values: it is a population term
+    # for the backend's `population_columns` hook (below by default).
+    _brm_reads_model_value(inner) && return nothing
     values = _brm_materialize_data_expression(inner)
-    values isa AbstractVector{<:Real} || error(
-        "BRM backend lowering: direct-BRMI `offset(...)` currently requires a " *
-        "pure expression over raw numeric data columns")
+    values isa AbstractVector{<:Real} || _brm_data_offset_error()
     sources = _brm_data_expression_sources(inner)
     isempty(sources) && error(
         "BRM backend lowering: `offset(...)` has no raw data row axis")
@@ -1847,6 +1856,17 @@ _brm_population_columns(term; cellmeans::Bool=false) =
     let column = _brm_population_column(term)
         isnothing(column) ? nothing : (column,)
     end
+# An offset of a model value reaches the column hook instead of the fixed data
+# terms. A backend that lowers it as graph math (RK) passes its own hook; the
+# rest refuse it here, as before.
+function _brm_population_columns(term::ExprColumn{typeof(offset)}; cellmeans::Bool=false)
+    args = getargs(term)
+    length(args) == 1 && _brm_reads_model_value(only(args)) && _brm_data_offset_error()
+    invoke(_brm_population_columns, Tuple{Any}, term; cellmeans)
+end
+_brm_data_offset_error() = error(
+    "BRM backend lowering: direct-BRMI `offset(...)` currently requires a " *
+    "pure expression over raw numeric data columns")
 
 function _brm_random_categorical_column(column)
     _brm_population_column_is_categorical(column) || return column
@@ -2197,13 +2217,111 @@ function _brm_ranef_sd_prior(spec, spelling::AbstractString;
                              prefix="BRM backend lowering")
     spec.expression isa ExprColumn || error(
         "$prefix: `$spelling` RHS must be a callable distribution expression")
+    spec.family === _brm_known && return _BRMKnownScale(
+        _brm_known_ranef_scale(spec, spelling; prefix))
     spec.expression
 end
+
+"""
+    _BRMKnownScale(value)
+
+A random-effect marginal scale held at a known value by `sd(...) = value`
+(nlmixr2's `fix()` on an omega): a positive finite SD that the backends emit
+as data or a constant, never as a sampled parameter. It occupies the margin's
+`sd_prior` slot, so `sd` addresses keep one most-specific-wins resolution
+whether a margin is sampled or known.
+"""
+struct _BRMKnownScale
+    value::Float64
+end
+
+# The number or matrix a known-value statement names: a numeric formula
+# constant (literal arithmetic is evaluated with Julia semantics, as for prior
+# hyperparameters), a data field of the bound container, or a call over them.
+_brm_known_value(x::Real) = Float64(x)
+_brm_known_value(x::AbstractArray{<:Real}) = Float64.(x)
+_brm_known_value(x::NamedColumn) = _brm_known_value(parent(x))
+_brm_known_value(x::DataColumn) = _brm_known_value(parent(x))
+function _brm_known_value(x::ExprColumn)
+    isempty(getkwargs(x)) || return nothing
+    values = map(_brm_known_value, getargs(x))
+    any(isnothing, values) && return nothing
+    value = try
+        getf(x)(values...)
+    catch
+        return nothing
+    end
+    value isa Real || value isa AbstractArray{<:Real} ? _brm_known_value(value) : nothing
+end
+_brm_known_value(_x) = nothing
+
+function _brm_known_spec_value(spec, spelling; prefix)
+    raw = only(getargs(spec.expression))
+    value = _brm_known_value(raw)
+    isnothing(value) && error(
+        "$prefix: `$spelling = $raw` needs a known value: a numeric formula " *
+        "constant, a data field, or arithmetic over them. A sampled quantity " *
+        "or a distribution is not a known value; write `$spelling ~ <prior>` " *
+        "to estimate it.")
+    value
+end
+
+function _brm_known_ranef_scale(spec, spelling; prefix)
+    value = _brm_known_spec_value(spec, spelling; prefix)
+    value isa Real || error(
+        "$prefix: `$spelling = value` holds one standard deviation; got a " *
+        "$(join(size(value), "×")) array. Address each margin with its own " *
+        "`sd(<linear_predictor>, $(spec.id), <coefficient>) = value`.")
+    isfinite(value) && value > 0 || error(
+        "$prefix: `$spelling = $value` must be a finite, strictly positive " *
+        "standard deviation. (A known variance `v` is the SD `sqrt(v)`; a zero " *
+        "SD means dropping the random-effect term.)")
+    value
+end
+
+function _brm_known_ranef_cor(spec, n_terms::Int; prefix)
+    spelling = "cor(:, $(spec.id))"
+    n_terms >= 2 || error(
+        "$prefix: `$spelling = R` fixes a correlation, but `|$(spec.id)|` has " *
+        "one margin and so no correlation to fix")
+    value = _brm_known_spec_value(spec, spelling; prefix)
+    value isa AbstractMatrix && size(value) == (n_terms, n_terms) || error(
+        "$prefix: `$spelling = R` needs a $(n_terms)×$(n_terms) correlation " *
+        "matrix in `ranefcoefnames(brmi, :$(spec.id))` order; got " *
+        (value isa Real ? "the number $value" : "a $(join(size(value), "×")) array"))
+    all(isfinite, value) || error("$prefix: `$spelling = R` has non-finite entries")
+    tol = 1e-10
+    all(i -> abs(value[i, i] - 1) <= tol, 1:n_terms) || error(
+        "$prefix: `$spelling = R` must have a unit diagonal (it is a " *
+        "correlation, not a covariance); got diagonal $(diag(value)). Convert " *
+        "a covariance Σ with `sd = sqrt.(diag(Σ))` for the `sd(...)` statements " *
+        "and `R = Σ ./ (sd * sd')`.")
+    maximum(abs, value - value') <= tol || error(
+        "$prefix: `$spelling = R` must be symmetric")
+    R = Symmetric((value + value') / 2)
+    isposdef(R) || error(
+        "$prefix: `$spelling = R` must be positive definite")
+    Matrix{Float64}(R)
+end
+
+_brm_is_known_scale(prior) = prior isa _BRMKnownScale
+
+"""
+    _brm_ranef_has_known(override) -> Bool
+
+Whether a resolved shared-block override holds any margin's scale or the
+block correlation at a known value. Those blocks take the backends' known-
+value emission instead of the sampled-scale families.
+"""
+_brm_ranef_has_known(::Nothing) = false
+_brm_ranef_has_known(override) =
+    any(_brm_is_known_scale, override.sd_prior) || !isnothing(override.known_cor)
 
 # Temporary compatibility metadata for consumers which have not migrated to
 # `sd_prior`. Unknown families deliberately return `nothing`: semantic prior
 # resolution must remain open, and a legacy backend may then diagnose its own
 # missing lowering rather than constraining the common representation.
+_brm_legacy_ranef_sd_prior(::_BRMKnownScale) = nothing
 function _brm_legacy_ranef_sd_prior(prior::ExprColumn)
     T = _as_distribution_type(getf(prior))
     args = getargs(prior)
@@ -2280,11 +2398,13 @@ _brm_ranef_distribution(T, spec; prefix) = error(
     "$prefix: random-effect blocks support the standardized laws `Normal()` " *
     "and `TDist(nu)`; got `$(spec.expression)`")
 
+_brm_ranef_sd_spelling(spec) =
+    "sd($(isnothing(spec.predictor) ? ":" : spec.predictor), $(spec.id)" *
+    (isnothing(spec.coefficient) ? "" : ", $(spec.coefficient)") * ")"
+
 function _brm_ranef_margin_claim(spec, margins;
                                  prefix="BRM backend lowering")
-    spelling = "sd($(isnothing(spec.predictor) ? ":" : spec.predictor), " *
-               "$(spec.id)" *
-               (isnothing(spec.coefficient) ? "" : ", $(spec.coefficient)") * ")"
+    spelling = _brm_ranef_sd_spelling(spec)
     if isnothing(spec.predictor) && isnothing(spec.coefficient)
         return nothing
     elseif isnothing(spec.predictor)
@@ -2337,8 +2457,9 @@ function _brm_resolve_ranef_effect_overrides(
             Dict{Symbol,Any}(
                 :margins => margins,
                 :sd_default => nothing,
-                :sd_overrides => Dict{Int,Tuple{ExprColumn,Int}}(),
+                :sd_overrides => Dict{Int,Tuple{Any,Int}}(),
                 :lkj_eta => nothing,
+                :known_cor => nothing,
                 :dist => missing)
         end
         if spec.class === :ranef
@@ -2353,13 +2474,16 @@ function _brm_resolve_ranef_effect_overrides(
             continue
         end
         if spec.class === :cor
-            state[:lkj_eta] === nothing || error(
-                "$prefix: duplicate correlation prior for `cor(:, $(spec.id))`")
-            state[:lkj_eta] = _brm_ranef_lkj_eta(
-                spec, length(margins); prefix)
+            (state[:lkj_eta] === nothing && state[:known_cor] === nothing) || error(
+                "$prefix: duplicate correlation statement for `cor(:, $(spec.id))`")
+            if spec.family === _brm_known
+                state[:known_cor] = _brm_known_ranef_cor(spec, length(margins); prefix)
+            else
+                state[:lkj_eta] = _brm_ranef_lkj_eta(spec, length(margins); prefix)
+            end
             continue
         end
-        prior = _brm_ranef_sd_prior(spec, "sd(:, $(spec.id))"; prefix)
+        prior = _brm_ranef_sd_prior(spec, _brm_ranef_sd_spelling(spec); prefix)
         claim = _brm_ranef_margin_claim(spec, margins; prefix)
         if isnothing(claim)
             state[:sd_default] === nothing || error(
@@ -2395,8 +2519,9 @@ function _brm_resolve_ranef_effect_overrides(
         out[key] = (; sd_prior, sd_family, sd_rate,
                     has_sd=(!isnothing(default_prior) ||
                             !isempty(state[:sd_overrides])),
-                    has_cor=!isnothing(state[:lkj_eta]),
+                    has_cor=!isnothing(state[:lkj_eta]) || !isnothing(state[:known_cor]),
                     lkj_eta=isnothing(state[:lkj_eta]) ? 1.0 : state[:lkj_eta],
+                    known_cor=state[:known_cor],
                     dist=coalesce(state[:dist], nothing),
                     margins)
     end

@@ -105,6 +105,54 @@ end
     end
 end
 
+# An SAEM MAP M-step can try a finite ω whose Cholesky row is dominated by an
+# off-diagonal entry, so that row's partial correlation rounds to ±1. The prior
+# is then -Inf, which the line search rejects, instead of an LKJ refusal that
+# aborts the fit (snag saem-map-mstep-l-82de0b0a).
+@stestset "a covariance prior at a correlation that rounds to ±1 is -Inf" begin
+    data = (; subject=["a", "b", "c"],
+        ya=[0.2, -0.1, 0.5], yb=[-0.3, 0.4, 0.1], yc=[0.1, 0.0, -0.2])
+    brmi = @brm data begin
+        sigma ~ Exponential(1)
+        a ~ 1 + (1 | pk | subject)
+        b ~ 1 + (1 | pk | subject)
+        c ~ 1 + (1 | pk | subject)
+        sd(:, pk) ~ Exponential(0.7)
+        cor(:, pk) ~ LKJCholesky(3, 2)
+        ya ~ Normal(a, sigma)
+        yb ~ Normal(b, sigma)
+        yc ~ Normal(c, sigma)
+    end
+    m = brm_nlme_model(RKBRMI(brmi); ad_backend=NLME_AD)
+    layout = NLMEEstimation.nlme_layout(m)
+    θ = fill(0.1, length(m.theta))
+    σ = [log(0.8)]
+    # Row 2's partial correlation C[2,1]/‖C[2,1:2]‖, then row 3's
+    # C[3,2]/‖C[3,2:3]‖, rounds to exactly 1.
+    for (ω, row, col) in (([log(0.7), 0.5, log(1e-10), -0.08, 0.16, log(0.9)], 2, 1),
+            ([log(0.7), 0.12, log(0.8), -0.08, 0.5, log(1e-10)], 3, 2))
+        C = Matrix(NLMEEstimation.omega_cholesky(layout, ω))
+        @test C[row, col] / norm(C[row, col:row]) == 1
+        @test population_logprior(m, θ, σ, ω) == -Inf
+        value, gθ, gσ, gω = population_logprior_and_gradient(m, θ, σ, ω)
+        @test value == -Inf
+        @test all(isnan, gθ) && all(isnan, gσ) && all(isnan, gω)
+    end
+    # Approaching that boundary, the prior stays finite and differentiable.
+    ω = [log(0.7), 0.12, log(0.8), -0.08, 0.5, log(1e-4)]
+    value, _, _, gω = population_logprior_and_gradient(m, θ, σ, ω)
+    @test isfinite(value) && all(isfinite, gω)
+    @test value ≈ population_logprior(m, θ, σ, ω) atol=1e-10
+    for j in eachindex(ω)
+        plus, minus = copy(ω), copy(ω)
+        plus[j] += 1e-5
+        minus[j] -= 1e-5
+        numerical = (population_logprior(m, θ, σ, plus) -
+            population_logprior(m, θ, σ, minus)) / 2e-5
+        @test gω[j] ≈ numerical rtol=1e-4 atol=1e-4
+    end
+end
+
 # A realistic population point for NLME_PLATE_DATA: V ≈ 5, CL ≈ 1.2.
 function plate_pk_point(m)
     named = Dict(Symbol("pop_log_CL.beta_pop.1") => 0.2,

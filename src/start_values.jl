@@ -304,8 +304,20 @@ function _brm_rk_start_writes!(writes, ::Val{:ranef}, t, records, values)
         "expected one plain block")
     r = only(blocks)
     P = _brm_start_margin_positions(t, r.margins)
-    isnothing(t.sd) || _brm_rk_scale_writes!(writes, r, t.sd[P], values)
-    if !isnothing(t.cor) && !isnothing(r.L)
+    known = get(r, :known_scales, nothing)
+    if !isnothing(t.sd)
+        # A known-value block names only its sampled scales; an address agrees
+        # with each known one and writes nothing for it.
+        sd = map(enumerate(P)) do (k, j)
+            isnothing(known) || isnothing(known[k]) ? t.sd[j] :
+                _brm_start_known_scale(t, j, known[k])
+        end
+        _brm_rk_scale_writes!(writes, r, sd, values)
+    end
+    known_cor = get(r, :known_cor, nothing)
+    if !isnothing(t.cor) && !isnothing(known_cor)
+        _brm_start_known_cor(t, P, known_cor)
+    elseif !isnothing(t.cor) && !isnothing(r.L)
         push!(writes, (r.L, (), _brm_start_lower_factor(t.cor[P, P])))
     end
 end
@@ -460,8 +472,12 @@ function _brm_sb_start_writes!(writes, absorbed, ::Val{:ranef}, t, d, names, tot
             "model does not declare")
     end
     K = length(P)
+    spec = _RANEF_FAMILIES[block.family]
+    if get(spec, :known, false)
+        return _brm_sb_start_known_writes!(writes, t, d, block, P, lookup)
+    end
     if !isnothing(t.sd)
-        tau = get(_RANEF_FAMILIES[block.family], :tau, nothing)
+        tau = get(spec, :tau, nothing)
         if isnothing(tau)
             K == 1 || error("brm_start: `|$(t.id)|` block `$(block.binding)` " *
                 "(`$(block.family)`) has no per-margin scale")
@@ -482,6 +498,56 @@ function _brm_sb_start_writes!(writes, absorbed, ::Val{:ranef}, t, d, names, tot
             push!(writes, (lookup(string(carrier, ".", i, ".", j)), L[i, j]))
         end
     end
+end
+
+# A known value (`sd(...) = value`, `cor(:, ID) = R`) is not a coordinate on
+# either backend. An initial value for it must restate it, is checked, and writes
+# nothing; the sampled scales of the same block are written as usual.
+function _brm_start_known_scale(t, j, known)
+    isapprox(t.sd[j], known; rtol=1e-8) || error(
+        "brm_start: the SD of margin $(t.margins[j]) of `|$(t.id)|` is held at " *
+        "the known value $known (`sd(...) = value`); the initial value " *
+        "$(t.sd[j]) contradicts it")
+    nothing
+end
+
+function _brm_start_known_cor(t, P, known)
+    isapprox(t.cor[P, P], known; rtol=1e-8, atol=1e-10) || error(
+        "brm_start: the correlation of `|$(t.id)|` is held at the known matrix " *
+        "$(known) (`cor(:, $(t.id)) = R`); the initial correlation " *
+        "$(t.cor[P, P]) contradicts it")
+    nothing
+end
+
+# A known-value SB block (`_sb_emit_known_id_bucket!`): its sampled scales are
+# `<binding>_tau`, or `<binding>_tau_free` when some scale is known, and a known
+# correlation has no `L`.
+function _brm_sb_start_known_writes!(writes, t, d, block, P, lookup)
+    record = d.plan.bindings[block.binding]
+    known = record.known_scales
+    free = findall(isnothing, collect(known))
+    carrier = string(block.binding, length(free) < length(known) ? "_tau_free" : "_tau")
+    if !isnothing(t.sd)
+        for (k, j) in enumerate(P)
+            if isnothing(known[k])
+                push!(writes, (lookup(string(carrier, ".", only(findall(==(k), free)))),
+                    t.sd[j]))
+            else
+                _brm_start_known_scale(t, j, known[k])
+            end
+        end
+    end
+    (isnothing(t.cor) || length(P) == 1) && return nothing
+    if isnothing(record.known_cor)
+        L = _brm_start_lower_factor(t.cor[P, P])
+        carrier = _sb_ranef_correlation_carrier(block)
+        for i in eachindex(P), j in eachindex(P)
+            push!(writes, (lookup(string(carrier, ".", i, ".", j)), L[i, j]))
+        end
+    else
+        _brm_start_known_cor(t, P, record.known_cor)
+    end
+    nothing
 end
 
 # An exact-total block samples each group's total `A β + deviation`; place every
