@@ -21,6 +21,28 @@ _brm_collect_data_lengths!(acc, x::Union{Tuple,AbstractVector}) = begin
     nothing
 end
 
+# A per-subject linear predictor without a random effect defines no grouping;
+# it rides on the subject frame a ranef LP defines, sliced by the same row
+# index. That is sound only when every data column its terms name has exactly
+# one row per subject. An LP with no data column has no rows at all.
+function _brm_kernel_check_subject_frame_lp(lp_col, nsub; prefix="BRM kernel preparation")
+    lp = name(lp_col)
+    lens = Tuple{Symbol,Int}[]
+    _brm_collect_data_lengths!(lens, getargs(parent(lp_col))[2])
+    isempty(lens) && error(
+        "$prefix: kernel(...) per-subject linear predictor `$lp` has no random-effect " *
+        "term and no data column, so it has no per-subject rows. Declare a shared " *
+        "scalar as `$lp ~ <distribution>` and read it in the cell without `[i]`.")
+    for (column, n) in lens
+        n == nsub || error(
+            "$prefix: kernel(...) linear predictor `$lp` has no random-effect term, so " *
+            "it is read on the kernel's subject frame (one row per subject), but its " *
+            "data column `$column` has $n rows for $nsub subjects. Declare a secondary " *
+            "axis with a model-scope `ragged($lp, group)` statement instead.")
+    end
+    nothing
+end
+
 function _brm_kernel_subject_values(raw, group::Symbol; prefix="BRM kernel preparation")
     raw isa AbstractVector || error(
         "$prefix: kernel(...) subject grouping column `$group` must be a vector, " *

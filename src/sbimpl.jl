@@ -5344,6 +5344,18 @@ _sb_submodel_rhs!(stmts, data, target, f, rhs) = nothing
 #
 # Returns `(id_sym, group_key, group_col)`.
 function _sb_kernel_lp_bucket(lp_col)
+    bucket = _sb_kernel_lp_bucket_or_nothing(lp_col)
+    bucket === nothing && error(
+        "sbimpl: kernel(...) per-subject linear predictor `$(name(lp_col))` has no ",
+        "random-effect term, so it defines no grouping. Give it one, e.g. ",
+        "`$(name(lp_col)) ~ 1 + (1 | p | subject)`.")
+    bucket
+end
+
+# `nothing` for a per-subject LP without a random effect: it defines no
+# grouping of its own and rides on the subject frame a ranef LP defines
+# (`_sb_kernel_lp_buckets`).
+function _sb_kernel_lp_bucket_or_nothing(lp_col)
     decl = parent(lp_col)
     (decl isa ExprColumn && getf(decl) === ~) || error(
         "sbimpl: kernel(...) positional arg `$(name(lp_col))` is not a formula ",
@@ -5353,10 +5365,7 @@ function _sb_kernel_lp_bucket(lp_col)
     for t in _sb_terms(rhs)
         _sb_classify_term!(t, pop_terms, ran_terms, direct_terms)
     end
-    isempty(ran_terms) && error(
-        "sbimpl: kernel(...) per-subject linear predictor `$(name(lp_col))` has no ",
-        "random-effect term, so it defines no grouping. Give it one, e.g. ",
-        "`$(name(lp_col)) ~ 1 + (1 | p | subject)`.")
+    isempty(ran_terms) && return nothing
     parts = map(_sb_ranef_parts, ran_terms)
     buckets = unique([(p[1], _sb_group_key(p[3])) for p in parts])
     length(buckets) == 1 || error(
@@ -5365,6 +5374,16 @@ function _sb_kernel_lp_bucket(lp_col)
     id_sym, gkey = only(buckets)
     desc = parts[1][3]
     (id_sym, gkey, desc isa NamedColumn ? desc : first(desc))
+end
+
+# Buckets of a kernel's per-subject LP positionals, `nothing` for an LP without
+# a random effect. At least one LP must carry the subject grouping; the others
+# are checked against its subject count by `_brm_kernel_check_subject_frame_lp`
+# once that count is known.
+function _sb_kernel_lp_buckets(lp_cols)
+    buckets = map(_sb_kernel_lp_bucket_or_nothing, lp_cols)
+    isempty(lp_cols) || any(!isnothing, buckets) || _sb_kernel_lp_bucket(first(lp_cols))
+    buckets
 end
 
 # Collect `(name, length)` for every RAW data column reachable from a formula
@@ -5687,14 +5706,15 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         # would therefore MIS-align the LP against its own subjects whenever the
         # labels are not sorted. The only thing that must hold is the bijection
         # below: one level per row.
-        lp_buckets = [_sb_kernel_lp_bucket(c) for c in lp_cols]
-        groups = unique([b[2] for b in lp_buckets])
+        lp_buckets = _sb_kernel_lp_buckets(lp_cols)
+        grouped = [b for b in lp_buckets if b !== nothing]
+        groups = unique([b[2] for b in grouped])
         length(groups) == 1 || error(
             "sbimpl: kernel(...) per-subject linear predictors disagree on their ",
             "grouping — got groups $(groups) across $(Tuple(name(c) for c in lp_cols)). ",
             "LPs may use distinct `|ID|` buckets, but every LP handed to one kernel ",
             "must describe the same subjects.")
-        group_col = first(lp_buckets)[3]
+        group_col = first(grouped)[3]
 
         # The labels identify groups to Julia callers but never enter the emitted
         # Stan program: only their count and row order do. Accept arbitrary unique
@@ -5703,6 +5723,9 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         g_vals = _sb_kernel_subject_values(
             parent(parent(group_col)), name(group_col))
         nsub = length(g_vals)
+        for (c, b) in zip(lp_cols, lp_buckets)
+            b === nothing && _brm_kernel_check_subject_frame_lp(c, nsub; prefix="sbimpl")
+        end
         # Arbitrary labels identify rows on the Julia side; the emitted Stan program
         # consumes only their integer index/count. The generic data prepass has
         # already materialised the raw column, so discard it when Stan cannot type it
@@ -6795,13 +6818,14 @@ function _sb_ragged_rhs_kernel_groups!(acc, x::NamedColumn)
     producer_rhs = _sb_kernel_producer(x)
     isnothing(producer_rhs) && return nothing
 
-    buckets = Any[]
+    lps = Any[]
     for arg in getargs(producer_rhs)
         arg isa NamedColumn || continue
         arg_decl = parent(arg)
         arg_decl isa ExprColumn && getf(arg_decl) === (~) || continue
-        push!(buckets, _sb_kernel_lp_bucket(arg))
+        push!(lps, arg)
     end
+    buckets = [b for b in _sb_kernel_lp_buckets(lps) if b !== nothing]
     isempty(buckets) && return nothing
     groups = unique(b[2] for b in buckets)
     length(groups) == 1 || error(

@@ -84,7 +84,7 @@ The shared `pk` label allows clearance and volume effects to be correlated.
 <div class="source-note"><strong>StanBlocks example.</strong> Turing currently rejects this ragged response. Body of the existing <code>@brm begin … end</code> declaration; complete code and data in appendix B. <code>@plate for</code> runs the calculation once per subject.</div>
 
 ::: {.notes}
-This is the body of the exact population_pk declaration from docs/src/feature-atlas.md. The Lua filter extracts it rather than maintaining a second copy. The structural equation is a one-compartment IV-bolus model: C(t) = dose/V * exp(-(CL/V)t). The log link is explicit on CL and V. Inside the @plate for cell, CL[i] and V[i] read subject i's evaluated values, and ragged(time, obs_subject)[i] selects that subject's measurement times. This demonstrates formula/custom-code composition without asserting that every Julia operation is supported by every backend.
+This is the body of the exact population_pk declaration from docs/src/feature-atlas.md. The Lua filter extracts it rather than maintaining a second copy. The structural equation is a one-compartment IV-bolus model: C(t) = dose/V * exp(-(CL/V)t). The log link is explicit on CL and V. Inside the @plate for cell, CL[i] and V[i] read subject i's evaluated values, and time[i] selects that subject's measurement times, grouped once at model scope by ragged(time, obs_subject). This demonstrates formula/custom-code composition without asserting that every Julia operation is supported by every backend.
 :::
 
 ## Subjects and measurements can fit together
