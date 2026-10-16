@@ -9,11 +9,14 @@
 #
 # The kept model is the dependency closure of the kept responses' operations
 # over BRM's prepared program, plus the prior statements addressing what
-# survives. A shared `|ID|` block that keeps `a` of its `K` margins keeps its
-# per-margin scale priors. Its correlation prior is the formula's own spelling
-# at width `a` by default (LKJ(a, eta), the model one would write without the
-# pruned responses); `marginalize = true` takes the exact marginal of the full
-# block instead: LKJ(K, eta) restricted to `a` margins is LKJ(a, eta + (K - a)/2).
+# survives. Kernel cells (`@plate for`, `kernel(...) do`) first lose the
+# observations of pruned responses and the cell statements only they reached,
+# so a cell shared between kept and pruned responses stays. A shared `|ID|`
+# block that keeps `a` of its `K` margins keeps its per-margin scale priors.
+# Its correlation prior is the formula's own spelling at width `a` by default
+# (LKJ(a, eta), the model one would write without the pruned responses);
+# `marginalize = true` takes the exact marginal of the full block instead:
+# LKJ(K, eta) restricted to `a` margins is LKJ(a, eta + (K - a)/2).
 # ==============================================================================
 
 # The prior address of a prior statement (`effect(...)`, `sd(...)`,
@@ -23,40 +26,193 @@ function _brm_prune_prior_address(@nospecialize(op))
     Tuple(getargs(lhs))
 end
 
+# The kernel cell of a model operation, or `nothing`: its `~` operation and
+# kernel call, the cell formals, the columns bound to them, and the body
+# statements (`_sb_kernel_lambda_parts`, which shares the original statements).
+function _brm_prune_cell(@nospecialize(raw))
+    op = _as_expr_column(parent(raw))
+    (isnothing(op) || getf(op) !== (~)) && return nothing
+    args = getargs(op)
+    length(args) == 2 || return nothing
+    rhs = _as_expr_column(args[2])
+    (isnothing(rhs) || getf(rhs) !== kernel) && return nothing
+    dcols = getargs(rhs)
+    isempty(dcols) && return nothing
+    parts = _sb_kernel_lambda_parts(first(dcols))
+    isnothing(parts) && return nothing
+    params, body = parts
+    (; op, rhs, params, positionals=dcols[2:end], body)
+end
+
+# The observation statements of a kernel cell, as the emitters read them
+# (`_sb_cell_param_observed`): a top-level `formal ~ …` or `formal[j] ~ …`. Each
+# is its body index, the response names it observes (the formal and the data
+# column bound to it), and that column.
+function _brm_prune_cell_observations(cell)
+    out = Tuple{Int,Set{Symbol},Any}[]
+    for (k, statement) in enumerate(cell.body)
+        Meta.isexpr(statement, :call) && length(statement.args) >= 3 &&
+            statement.args[1] === :~ || continue
+        formal = _sb_plan_lhs_name(statement.args[2])
+        i = isnothing(formal) ? nothing : findfirst(==(formal), cell.params)
+        isnothing(i) && continue
+        column = i <= length(cell.positionals) ?
+                 _sb_kernel_positional_column(cell.positionals[i]) : nothing
+        aliases = Set{Symbol}([formal])
+        column isa NamedColumn && push!(aliases, name(column))
+        push!(out, (k, aliases, column))
+    end
+    out
+end
+
 # The kernel operations of `brmi` with the responses each observes in its cell:
 # one name set per observation statement, holding the cell-local formal and the
-# data column bound to it.
+# data column bound to it. Bound response columns are added to `bound`.
 function _brm_prune_kernel_observations(@nospecialize(brmi::BRMI), bound=Set{Symbol}())
     out = Dict{Symbol,Vector{Set{Symbol}}}()
     for (key, raw) in _brm_operation_entries(brmi)
-        op = _as_expr_column(parent(raw))
-        (isnothing(op) || getf(op) !== (~)) && continue
-        args = getargs(op)
-        length(args) == 2 || continue
-        rhs = _as_expr_column(args[2])
-        (isnothing(rhs) || getf(rhs) !== kernel) && continue
-        dcols = getargs(rhs)
-        isempty(dcols) && continue
-        parts = _sb_kernel_lambda_parts(first(dcols))
-        isnothing(parts) && continue
-        params, body = parts
+        cell = _brm_prune_cell(raw)
+        isnothing(cell) && continue
         observed = Set{Symbol}[]
-        for statement in body
-            Meta.isexpr(statement, :call, 3) && statement.args[1] === :~ || continue
-            lhs = statement.args[2]
-            lhs isa Symbol || continue
-            i = findfirst(==(lhs), params)
-            isnothing(i) && continue
-            aliases = Set{Symbol}([lhs])
-            column = i + 1 <= length(dcols) ? dcols[i + 1] : nothing
-            column isa NamedColumn && push!(aliases, name(column))
+        for (_, aliases, column) in _brm_prune_cell_observations(cell)
             push!(observed, aliases)
             column isa NamedColumn && !(parent(column) isa MissingColumn) &&
-                push!(bound, first(setdiff(aliases, Set([lhs]))))
+                push!(bound, name(column))
         end
         isempty(observed) || (out[key] = observed)
     end
     out
+end
+
+# The names a cell statement reads: an assignment's right-hand side, an
+# observation's law and any index on its left-hand side, or the whole statement.
+_brm_prune_statement_reads(statement) =
+    _brm_cell_value_refs!(Set{Symbol}(), statement)
+function _brm_prune_statement_reads(statement::Expr)
+    Meta.isexpr(statement, :(=), 2) && statement.args[1] isa Symbol &&
+        return _brm_cell_value_refs!(Set{Symbol}(), statement.args[2])
+    if Meta.isexpr(statement, :call) && length(statement.args) >= 3 &&
+       statement.args[1] === :~
+        reads = Set{Symbol}()
+        foreach(value -> _brm_cell_value_refs!(reads, value), statement.args[3:end])
+        lhs = statement.args[2]
+        lhs isa Expr && foreach(value -> _brm_cell_value_refs!(reads, value), lhs.args[2:end])
+        return reads
+    end
+    _brm_cell_value_refs!(Set{Symbol}(), statement)
+end
+
+# A kernel cell without the observations of responses outside `wanted` and the
+# statements only they reached. A cell statement stays when the cell's value,
+# a kept observation, a statement that is neither an assignment nor an
+# observation, or a cell value no statement reads (an output the cell reports)
+# reaches it — except a reported output computed from what only the pruned
+# observations reach, which goes with them. Reading a name reaches every
+# statement that assigns or observes it, so a kept statement that reads a
+# pruned response keeps its observation, exactly as a formula-level likelihood
+# reading a response keeps it. A formal that only removed statements read
+# leaves the call with its positional; the model values the cell captures
+# follow from the remaining body. Returns `raw` itself when nothing is removed.
+function _brm_prune_cell_body(@nospecialize(raw), key::Symbol, wanted)
+    cell = _brm_prune_cell(raw)
+    (isnothing(cell) || length(cell.params) != length(cell.positionals)) && return raw
+    statements = cell.body
+    indices = [k for (k, s) in enumerate(statements) if !(s isa LineNumberNode)]
+    isempty(indices) && return raw
+    final = last(indices)
+    defines = Dict{Int,Symbol}()
+    for k in indices
+        s = statements[k]
+        Meta.isexpr(s, :(=), 2) && s.args[1] isa Symbol && (defines[k] = s.args[1])
+    end
+    roots = Set{Int}([final])
+    pruned = Set{Int}()
+    for (k, aliases, _) in _brm_prune_cell_observations(cell)
+        defines[k] = _sb_plan_lhs_name(statements[k].args[2])
+        push!(isempty(intersect(aliases, wanted)) ? pruned : roots, k)
+    end
+    reads = Dict(k => _brm_prune_statement_reads(statements[k]) for k in indices)
+    outputs = Int[]
+    for k in indices
+        haskey(defines, k) || (push!(roots, k); continue)
+        Meta.isexpr(statements[k], :call) && continue # an observation is no output
+        v = defines[k]
+        any(j -> j != k && v in reads[j], indices) || push!(outputs, k)
+    end
+    function closure(from)
+        found = Set{Int}()
+        pending = collect(from)
+        while !isempty(pending)
+            k = pop!(pending)
+            k in found && continue
+            push!(found, k)
+            for (j, v) in defines
+                j != k && v in reads[k] && push!(pending, j)
+            end
+        end
+        found
+    end
+    # What only pruned observations reach goes, and so does a reported output
+    # computed from it; every other reported output stays.
+    only_pruned = setdiff(closure(pruned), closure(roots))
+    reported = filter(k -> isdisjoint(closure((k,)), only_pruned), outputs)
+    reached = closure(union(roots, reported))
+    length(reached) == length(indices) && return raw
+
+    # The remaining body, without each removed statement's source location.
+    body = Any[]
+    for (k, s) in enumerate(statements)
+        if s isa LineNumberNode
+            next = findfirst(>(k), indices)
+            (isnothing(next) || indices[next] in reached) && push!(body, s)
+        elseif k in reached
+            push!(body, s)
+        end
+    end
+    # A cell left ending `key = expr; key` returns `expr` directly, as the
+    # `@plate for` lowering of a terminal output does.
+    kept = [k for k in indices if k in reached]
+    if length(kept) >= 2 && statements[final] === key &&
+       get(defines, kept[end - 1], nothing) === key &&
+       Meta.isexpr(statements[kept[end - 1]], :(=)) &&
+       kept[end - 1] != indices[end - 1]
+        at = findlast(s -> s === key, body)
+        assignment = findlast(s -> Meta.isexpr(s, :(=), 2) && s.args[1] === key, body)
+        body[assignment] = statements[kept[end - 1]].args[2]
+        deleteat!(body, at)
+    end
+
+    function used(ks)
+        names = Set{Symbol}()
+        for k in ks
+            union!(names, reads[k])
+            haskey(defines, k) && push!(names, defines[k])
+        end
+        names
+    end
+    before, after = used(indices), used(kept)
+    keep_formal = [!(p in before) || p in after for p in cell.params]
+    params = cell.params[keep_formal]
+    positionals = cell.positionals[keep_formal]
+
+    lam = first(getargs(cell.rhs))
+    expression = _brm_inline_expr(lam)
+    signature = expression.args[1] isa Symbol && length(params) == 1 ?
+                only(params) : Expr(:tuple, params...)
+    lambda = Expr(:->, signature, Expr(:block, body...))
+    lam isa _BRMInlineBody && (lambda = _BRMInlineBody(lambda, _brm_inline_scope(lam)))
+    rhs = ExprColumn(kernel, lambda, positionals...; getkwargs(cell.rhs)...)
+    lhs = first(getargs(cell.op))
+    NamedColumn(name(raw), ExprColumn(~, lhs, rhs; getkwargs(cell.op)...))
+end
+
+# Every kernel cell of `brmi` without what only its pruned observations needed.
+Base.@nospecializeinfer function _brm_prune_cells(@nospecialize(brmi::BRMI), wanted)
+    entries = _brm_operation_entries(brmi)
+    rewritten = Pair{Symbol,Any}[key => _brm_prune_cell_body(raw, key, wanted)
+                                 for (key, raw) in entries]
+    all(i -> last(rewritten[i]) === last(entries[i]), eachindex(entries)) && return brmi
+    BRMI((; rewritten...))
 end
 
 # Names a kernel cell body reads from the model (its free names), which the
@@ -84,10 +240,21 @@ response's column keeps its parts out of the sampler but re-draws them in
 generated quantities.
 
 `keep` is a response name or a collection of them: the formula name or the data
-column of an observation, or, for one observed inside a `kernel(...)` cell, the
-cell's formal. It defaults to the responses whose columns are bound in the data;
-name the responses for a prior program, which binds none. It acts on the
-formula, so every backend (`SBBRMI`, `RKBRMI`, …) builds the pruned model.
+column of an observation, or, for one observed inside a `@plate for` /
+`kernel(...)` cell, the cell's formal. It defaults to the responses whose
+columns are bound in the data; name the responses for a prior program, which
+binds none. It acts on the formula, so every backend (`SBBRMI`, `RKBRMI`, …)
+builds the pruned model.
+
+A cell that observes kept and pruned responses stays without the pruned
+observations and the cell statements only they reached; the inputs and model
+values only those statements read leave with them, and with them the
+predictors, parameters and margins nothing kept reads. A statement stays when
+the cell's value, a kept observation, or a cell value that no statement reads
+(an output the cell reports) reaches it; a reported output computed from what
+only the pruned observations reach goes with them. As at formula level, a kept
+statement that reads a pruned response's value keeps that response's
+observation.
 
 A shared `|ID|` block that keeps `a` of its `K` margins keeps their scale
 priors. Its correlation prior is, by default, the formula's own at width `a`:
@@ -96,10 +263,8 @@ would write without the pruned responses. `marginalize = true` instead keeps the
 exact marginal prior of the full block, `LKJCholesky(a, eta + (K - a)/2)` —
 the law the omitted-response program samples.
 
-Refused: a name that is not a response; a kept `kernel(...)` cell that also
-observes a pruned response (a cell body cannot lose a statement); a joint R2D2
-budget that would lose terms; a stratified or multi-membership shared block that
-loses margins.
+Refused: a name that is not a response; a joint R2D2 budget that would lose
+terms; a stratified or multi-membership shared block that loses margins.
 
 ```julia
 pk_tumor = prune_responses(builder(data); keep = (:pk_y, :tumor_y))
@@ -128,10 +293,15 @@ Base.@nospecializeinfer function _brm_prune_responses(@nospecialize(brmi::BRMI),
     wanted = Set{Symbol}(keep isa Symbol ? (keep,) : keep)
     isempty(wanted) && throw(ArgumentError(
         "prune_responses: `keep` names no response"))
+    # Kernel cells lose their pruned observations first, so the closure below
+    # sees only what their remaining statements read.
+    brmi = _brm_prune_cells(brmi, wanted)
     program = _brm_prepare_program(brmi)
     byname = Dict(op.name => op for op in program.operations)
     names = Set(keys(byname))
     kernels = _brm_prune_kernel_observations(brmi)
+    cells = Set(key for (key, raw) in _brm_operation_entries(brmi)
+                if !isnothing(_brm_prune_cell(raw)))
 
     # A kept response roots the closure at the operation that observes it. An
     # omitted response reads as a parameter; like SBBRMI's triage, a sampled
@@ -164,22 +334,10 @@ Base.@nospecializeinfer function _brm_prune_responses(@nospecialize(brmi::BRMI),
         reachable = _brm_reachable_operations(program, roots)
         before = length(roots)
         for key in reachable
-            haskey(kernels, key) && union!(roots,
+            key in cells && union!(roots,
                 _brm_prune_kernel_globals(byname[key].expression, names))
         end
         length(roots) == before && break
-    end
-
-    # A kept kernel cell cannot drop an observation inside its body.
-    for (kernel_op, observed) in kernels
-        kernel_op in reachable || continue
-        for aliases in observed
-            isempty(intersect(aliases, wanted)) || continue
-            throw(ArgumentError(
-                "prune_responses: kernel `$kernel_op` is kept, but it also observes " *
-                "$(join(sort!(collect(aliases)), " / ")) inside its cell, and pruning " *
-                "cannot remove a statement from a cell body. Keep that response too."))
-        end
     end
 
     kept = Set(op.name for op in program.operations if op.name in reachable)
