@@ -124,6 +124,13 @@ BayesianRegressionModels.MvNormalCholesky
 `BetaBinomial` is re-exported unchanged from Distributions.jl and documented
 there; `BetaBinomial2` above is BRM's own mean/precision parameterization.
 
+Every other Distributions.jl family BRM lowers is re-exported unchanged too
+(`Normal`, `LogNormal`, `Uniform`, `Gamma`, `Beta`, `TDist`, `LocationScale`,
+`Dirichlet`, `MvNormal`, `Binomial`, …), so `using BayesianRegressionModels`
+alone binds the distributions a model writes, and importing Distributions.jl as
+well stays unambiguous. A Distributions.jl family outside that set has no
+StanBlocks lowering.
+
 ## Backends
 
 ```@docs
