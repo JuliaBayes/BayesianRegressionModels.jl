@@ -50,6 +50,8 @@ unconstrained coordinate vector (`coordinates`, in packed order).
   nested level owned by this subject.
 - `block_margins[k]` — `(; block, predictor, coefficient)` for position `k` of
   each random-effect family (`coefficient === :mixing` for a mixing weight).
+  `block` is `(; group, id, predictor)`: the grouping column, the `|ID|`, and,
+  for a block without an ID, the predictor that owns it (`nothing` otherwise).
 - `family_sizes[f]` and `subject_families[i]` — each covariance family's
   dimension and the ordered family IDs for subject `i`'s block instances.
 - `subject_margins[i]` — the compact coordinates' family margin and grouping
@@ -106,6 +108,12 @@ _brm_nlme_records(plan) = _brm_nlme_error(
 
 _brm_nlme_owned(name::Symbol, declaration::Symbol) = name === declaration ||
     startswith(String(name), string(declaration, "."))
+
+# A random-effect block's identity: its grouping and `|ID|`. A block without an
+# ID belongs to one predictor, and several predictors can each own one over the
+# same grouping, so its owning predictor completes the identity.
+_brm_nlme_block_identity(record) = (; group=record.group, id=record.id,
+    predictor=record.id === nothing ? first(first(record.margins)) : nothing)
 
 _brm_nlme_regression(plan::_RKStructuralPlan) = plan
 _brm_nlme_regression(plan::_RKValuePlan) = plan.regression
@@ -296,7 +304,7 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
             end
             isnothing(record.L) || claim_declaration!(record.L, :subject_correlation)
             mixing = get(record, :mixing, nothing)
-            block = (; group=record.group, id=record.id)
+            block = _brm_nlme_block_identity(record)
             for (k, (predictor, coefficient)) in enumerate(record.margins)
                 push!(block_margins, (; block, predictor, coefficient))
                 for g in eachindex(group_levels[record.group])
