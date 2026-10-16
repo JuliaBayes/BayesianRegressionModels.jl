@@ -5342,19 +5342,10 @@ _sb_submodel_rhs!(stmts, data, target, f, rhs) = nothing
 # only ever contributed the subject COUNT, restating a fact the ranef already
 # knows, and was checked against nothing.
 #
-# Returns `(id_sym, group_key, group_col)`.
-function _sb_kernel_lp_bucket(lp_col)
-    bucket = _sb_kernel_lp_bucket_or_nothing(lp_col)
-    bucket === nothing && error(
-        "sbimpl: kernel(...) per-subject linear predictor `$(name(lp_col))` has no ",
-        "random-effect term, so it defines no grouping. Give it one, e.g. ",
-        "`$(name(lp_col)) ~ 1 + (1 | p | subject)`.")
-    bucket
-end
-
-# `nothing` for a per-subject LP without a random effect: it defines no
-# grouping of its own and rides on the subject frame a ranef LP defines
-# (`_sb_kernel_lp_buckets`).
+# Returns `(id_sym, group_key, group_col)`, or `nothing` for a per-subject LP
+# without a random effect: it defines no grouping of its own and rides on the
+# subject frame a ranef LP, or a no-random-effects panel's pre-grouped
+# columns, define (`_sb_kernel_lp_buckets`).
 function _sb_kernel_lp_bucket_or_nothing(lp_col)
     decl = parent(lp_col)
     (decl isa ExprColumn && getf(decl) === ~) || error(
@@ -5377,14 +5368,10 @@ function _sb_kernel_lp_bucket_or_nothing(lp_col)
 end
 
 # Buckets of a kernel's per-subject LP positionals, `nothing` for an LP without
-# a random effect. At least one LP must carry the subject grouping; the others
-# are checked against its subject count by `_brm_kernel_check_subject_frame_lp`
-# once that count is known.
-function _sb_kernel_lp_buckets(lp_cols)
-    buckets = map(_sb_kernel_lp_bucket_or_nothing, lp_cols)
-    isempty(lp_cols) || any(!isnothing, buckets) || _sb_kernel_lp_bucket(first(lp_cols))
-    buckets
-end
+# a random effect. Those LPs are checked against the subject count by
+# `_brm_kernel_check_subject_frame_lp` once it is known; with no bucket at all
+# the kernel is a no-random-effects panel.
+_sb_kernel_lp_buckets(lp_cols) = map(_sb_kernel_lp_bucket_or_nothing, lp_cols)
 
 # Collect `(name, length)` for every RAW data column reachable from a formula
 # RHS. Used to check that a `ragged(x, group)` LP really is declared over the
@@ -5684,21 +5671,32 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     # no group column, so `ragged(...)` (which joins a secondary event axis onto
     # subject LABELS) has nothing to join against and is rejected in this mode.
     nsub_sym = Symbol("kernel_nsub_", target)
-    if isempty(lp_cols)
+    # Only an LP with a random-effect term names the subjects. One without
+    # rides on the subject frame the others, or the pre-grouped columns, define.
+    lp_buckets = _sb_kernel_lp_buckets(lp_cols)
+    grouped = [b for b in lp_buckets if b !== nothing]
+    if isempty(grouped)
         isempty(ragged_specs) || error(
             "sbimpl: kernel(...) `ragged(...)` needs a subject grouping to join its ",
             "event rows against, which a no-random-effects panel does not supply. ",
             "Declare a per-subject linear predictor with a `(1 | ID | group)` term, ",
             "or pass pre-grouped per-subject columns directly (one entry per subject).")
-        isempty(kept_names) && error(
-            "sbimpl: kernel(...) with no per-subject linear predictor needs at least ",
+        # The subject count is the common length of the pre-grouped data
+        # columns or, when the cell slices only LPs (beside omitted outcomes),
+        # of the per-subject columns those LPs read.
+        lp_names = Set(name(c) for c in lp_cols)
+        counted = [(k, length(data[k])) for k in kept_names if k ∉ lp_names]
+        isempty(counted) &&
+            foreach(c -> append!(counted, _brm_kernel_lp_data_lengths(c)), lp_cols)
+        isempty(counted) && error(
+            "sbimpl: kernel(...) with no random-effect linear predictor needs at least ",
             "one pre-grouped per-subject data column to derive the subject count from; ",
             "omitted outcomes cannot supply it.")
-        col_lens = unique(length(data[k]) for k in kept_names)
+        col_lens = unique(last.(counted))
         length(col_lens) == 1 || error(
             "sbimpl: kernel(...) pre-grouped per-subject columns disagree on the ",
             "subject count: ",
-            join(("$(k)=$(length(data[k]))" for k in kept_names), ", "),
+            join(("$(k)=$(n)" for (k, n) in counted), ", "),
             ". Every positional column must carry exactly one entry per subject.")
         nsub = only(col_lens)
         # Count only; no group column exists (labels are the implicit 1:nsub row
@@ -5706,7 +5704,7 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         # column length — see the `:kernel_subject_count` reprocess branch.
         data[nsub_sym] = nsub
         _sb_record_preproc!(data, nsub_sym, PreprocEntry(
-            :kernel_subject_count, (; from_data_length = true), first(kept_names), false))
+            :kernel_subject_count, (; from_data_length = true), first(first(counted)), false))
     else
         # ORDER: cells stay in ROW order, deliberately. `_sb_linear_predictor!`
         # returns `popefs(X) + rows_dot_product(Z, b[group_idx,:])`, i.e. a
@@ -5715,8 +5713,6 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         # would therefore MIS-align the LP against its own subjects whenever the
         # labels are not sorted. The only thing that must hold is the bijection
         # below: one level per row.
-        lp_buckets = _sb_kernel_lp_buckets(lp_cols)
-        grouped = [b for b in lp_buckets if b !== nothing]
         groups = unique([b[2] for b in grouped])
         length(groups) == 1 || error(
             "sbimpl: kernel(...) per-subject linear predictors disagree on their ",
@@ -5732,9 +5728,6 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         g_vals = _sb_kernel_subject_values(
             parent(parent(group_col)), name(group_col))
         nsub = length(g_vals)
-        for (c, b) in zip(lp_cols, lp_buckets)
-            b === nothing && _brm_kernel_check_subject_frame_lp(c, nsub; prefix="sbimpl")
-        end
         # Arbitrary labels identify rows on the Julia side; the emitted Stan program
         # consumes only their integer index/count. The generic data prepass has
         # already materialised the raw column, so discard it when Stan cannot type it
@@ -5744,6 +5737,9 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         data[nsub_sym] = nsub
         _sb_record_preproc!(data, nsub_sym,
             PreprocEntry(:kernel_subject_count, nothing, name(group_col), false))
+    end
+    for (c, b) in zip(lp_cols, lp_buckets)
+        b === nothing && _brm_kernel_check_subject_frame_lp(c, nsub; prefix="sbimpl")
     end
 
     # `ragged(x, group)` positionals, now that the subject row order is known.
