@@ -237,13 +237,22 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
         lpdf, lpdfs, rng = Symbol(stem, :_lpdf), Symbol(stem, :_lpdfs), Symbol(stem, :_rng)
         typed = [argkinds[i] === :selector ? Symbol(:arg_, i) :
                  Expr(:(::), Symbol(:arg_, i), :real) for i in eachindex(actuals)]
+        # The family's support becomes the parameter declaration's bounds:
+        # positive blocks are always `lower=0`, others carry a bound only when
+        # every coordinate shares it.
+        lowers = [c.lower for c in calls]
+        uppers = [c.upper for c in calls]
+        declared_lower = positive ? 0.0 :
+            all(!isnothing, lowers) && allequal(lowers) ? first(lowers) : nothing
+        declared_upper = !positive && all(!isnothing, uppers) && allequal(uppers) ?
+            first(uppers) : nothing
         densities = Any[]; draws = Any[]; guards = Any[]
         for (i, c) in enumerate(calls)
             distname = c.dist isa Symbol ? c.dist : nameof(c.dist)
             # StanBlocks' flat token is a parameter declaration with no density
             # contribution, so it has no Stan flat_lpdf builtin to call from a
-            # generated whole-vector prior. Retain the coefficient and support
-            # guards while contributing the exact constant zero.
+            # generated whole-vector prior. Retain the coefficient and any
+            # coordinate guards while contributing the exact constant zero.
             push!(densities, distname === :flat ? 0.0 :
                 Expr(:call, Symbol(distname, :_lpdf), Expr(:ref, :x, i), c.names...))
             selector = selectors[i]
@@ -254,9 +263,13 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
                 isnothing(c.upper) ?
                     Expr(:call, :_sb_lower_conditioning_rng, selector, c.lower, c.names...) :
                     Expr(:call, :_sb_conditioning_rng, selector, c.lower, c.upper, c.names...))
-            !isnothing(c.lower) && push!(guards,
+            # Stan's constraining transform already enforces a declared bound,
+            # so a guard for it can never fire. Only a coordinate-specific bound
+            # that the declaration cannot carry keeps an explicit guard.
+            !isnothing(c.lower) && !isequal(c.lower, declared_lower) && push!(guards,
                 :(if x[$i] < $(c.lower); return negative_infinity(); end))
-            !isnothing(c.upper) && push!(guards, :(if x[$i] > $(c.upper); return negative_infinity(); end))
+            !isnothing(c.upper) && !isequal(c.upper, declared_upper) && push!(guards,
+                :(if x[$i] > $(c.upper); return negative_infinity(); end))
         end
         total = foldl((a,b)->Expr(:call, :+, a, b), densities)
         point = Any[:(@stan_assert n == $(length(calls))), :(out::vector[n])]
@@ -274,13 +287,8 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
         rng_def = :($rng(vector[n], $(typed...))::vector[n] =
             $(Expr(:block, drawbody...)))
         support = Pair{Symbol,Any}[]
-        positive && push!(support, :lower => 0.0)
-        lowers = [c.lower for c in calls]
-        uppers = [c.upper for c in calls]
-        !positive && all(!isnothing, lowers) && allequal(lowers) &&
-            push!(support, :lower => first(lowers))
-        !positive && all(!isnothing, uppers) && allequal(uppers) &&
-            push!(support, :upper => first(uppers))
+        isnothing(declared_lower) || push!(support, :lower => declared_lower)
+        isnothing(declared_upper) || push!(support, :upper => declared_upper)
         generated = StanBlocks.ValueFamily(stem, :lpdf,
             _sb_anchor_slic_macrocalls!(density_def),
             _sb_anchor_slic_macrocalls!(pointwise_def),
@@ -329,21 +337,55 @@ function _sb_direct_vector_positive_prior(target::Symbol, prior, nvalue)
     (; statement=stmt, dependencies=sort!(collect(dependencies)))
 end
 
+# Margins of one StanBlocks builtin family with one shared support, but with
+# coordinate-specific hyperparameters, as a single native vectorised statement:
+# `target ~ exponential([1.5, 3.0, 5.0]; n=n, lower=0.0)`. Stan's univariate
+# builtins vectorise over their hyperparameters as well as their variate, so a
+# hyperparameter that differs across margins becomes a vector literal and one
+# shared by every margin stays scalar. `nothing` when any margin is custom or
+# composed, the families differ, or the margins' bounds differ (the
+# declaration carries a single bound); those keep the generated family.
+function _sb_native_vector_prior(target::Symbol, priors, nvalue; positive::Bool)
+    length(priors) > 1 || return nothing
+    all(prior -> _brm_distribution_shape(prior) ==
+            (Distributions.Univariate, Distributions.Continuous), priors) || return nothing
+    calls, actuals, _, argkinds = _sb_vector_prior_parts(priors; positive)
+    reference = first(calls)
+    dist = reference.dist
+    dist isa Symbol && dist !== :flat && isdefined(StanBlocks, dist) || return nothing
+    all(==(:real), argkinds) || return nothing
+    all(c -> c.dist === dist && length(c.names) == length(reference.names) &&
+             isequal(c.lower, reference.lower) && isequal(c.upper, reference.upper),
+        calls) || return nothing
+    k = length(reference.names)
+    args = map(1:k) do j
+        column = Any[actuals[(i - 1) * k + j] for i in eachindex(calls)]
+        allequal(column) ? first(column) : Expr(:vect, column...)
+    end
+    kws = Any[Expr(:kw, :n, nvalue)]
+    isnothing(reference.lower) || push!(kws, Expr(:kw, :lower, reference.lower))
+    isnothing(reference.upper) || push!(kws, Expr(:kw, :upper, reference.upper))
+    dependencies = Set{Symbol}()
+    foreach(arg -> _sb_vector_prior_dependencies!(dependencies, arg), actuals)
+    (; statement=Expr(:call, :~, target, Expr(:call, dist, Expr(:parameters, kws...), args...)),
+       dependencies=sort!(collect(dependencies)))
+end
+
 # The one `lhs ~ <positive vector prior>` statement for per-margin `priors`, and
 # the model names its arguments read. `scope` is the module the statement is
-# traced in: a direct homogeneous family must resolve there.
+# traced in: a direct native family must resolve there.
 function _sb_vector_positive_prior_statement(lhs, target::Symbol, priors, nvalue;
-                                             direct_homogeneous::Bool=false,
+                                             direct_native::Bool=false,
                                              mod::Module, scope::Module)
     # Stan's native univariate families vectorise over their variate. When every
     # margin has the exact same mapped distribution, retain that natural Stan
     # spelling instead of synthesising a coordinate-by-coordinate UDF. Custom,
-    # composed, or heterogeneous priors keep the general generated-family path.
+    # composed, or mixed-family priors keep the general generated-family path.
     # The direct statement only resolves families visible in `scope` (the
     # BRM-owned base for a merged submodel): a consumer-registered distribution
     # type (`_sb_stan_dist_name(::Type{<:MyPrior})`) whose StanBlocks family
     # lives in `mod` must take the generated-family path, which traces in `mod`.
-    if direct_homogeneous && !isempty(priors) &&
+    if direct_native && !isempty(priors) &&
        all(prior -> isequal(prior, first(priors)), priors)
         T = _as_distribution_type(getf(first(priors)))
         family = isnothing(T) ? nothing : _sb_stan_dist_name(T)
@@ -354,6 +396,10 @@ function _sb_vector_positive_prior_statement(lhs, target::Symbol, priors, nvalue
             direct = _sb_direct_vector_positive_prior(target, first(priors), nvalue)
             isnothing(direct) || return direct
         end
+    end
+    if direct_native
+        native = _sb_native_vector_prior(target, priors, nvalue; positive=true)
+        isnothing(native) || return native
     end
     family, args = _sb_vector_prior_family(priors; mod)
     # Intrinsic bounds belong to the value family, including when this
@@ -366,7 +412,7 @@ end
 
 function _sb_vector_positive_priors(base::StanBlocks.SlicModel,
                                     target::Symbol, priors;
-                                    direct_homogeneous::Bool=false,
+                                    direct_native::Bool=false,
                                     mod::Module=base.mod)
     source = only(node for node in base.model.args if node isa Expr &&
         ((node.head === :(::) && node.args[1] === target) ||
@@ -382,7 +428,7 @@ function _sb_vector_positive_priors(base::StanBlocks.SlicModel,
         end
     end
     prior = _sb_vector_positive_prior_statement(lhs, target, priors, nvalue;
-                                                direct_homogeneous, mod, scope=base.mod)
+                                                direct_native, mod, scope=base.mod)
     (; model=Base.merge(base, prior.statement), prior.dependencies)
 end
 
@@ -6139,7 +6185,7 @@ function _sb_generic_ranef_submodel(priors, base::StanBlocks.SlicModel;
     resolved = map(priors) do prior
         isnothing(prior) ? ExprColumn(Normal) : prior
     end
-    _sb_vector_positive_priors(base, :tau, resolved; direct_homogeneous=true, mod)
+    _sb_vector_positive_priors(base, :tau, resolved; direct_native=true, mod)
 end
 
 """

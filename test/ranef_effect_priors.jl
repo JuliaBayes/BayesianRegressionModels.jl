@@ -65,13 +65,12 @@ end
     code = BayesianRegressionModels.stan_code(sb)
     @test StanBlocks.stan.transpiles(sb.model)
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
-    # A shared bucket keeps one tau vector. Its generated family sums one
-    # concrete scalar kernel per margin and provides a matching sized RNG.
-    @test occursin(r"real brm_vector_prior_[0-9a-f]+_lpdf", code)
+    # A shared bucket keeps one tau vector. Every margin is Exponential, so
+    # it stays one native vectorised statement with per-margin rates.
+    @test !occursin(r"brm_vector_prior_[0-9a-f]+", code)
     @test !occursin("brm_ranef_sd", code)
     @test occursin("b_p_subject_L ~ lkj_corr_cholesky(2.0);", code)
-    @test occursin(r"b_p_subject_tau ~ brm_vector_prior_[0-9a-f]+", code)
-    @test count("exponential_lpdf(x[", code) == 6
+    @test occursin("b_p_subject_tau ~ exponential([1.5, 1.5, 3.0, 1.5, 5.0, 4.0]');", code)
 
     plan = generative_plan(sb)
     decl = only(d for d in plan.declarations if d.target === :b_p_subject)
@@ -405,7 +404,7 @@ end
     ]
     # Block default 1/2 on the intercept margin; BOTH `x` margins take 3.
     cross_code = rates(brmi)
-    @test count("exponential_lpdf(x[", cross_code) == 3
+    @test occursin("b_p_subject_tau ~ exponential([0.5, 3.0, 3.0]');", cross_code)
     @test all(x -> occursin(string(x), cross_code), (0.5, 3.0))
 
     # A more specific address overrides the `:`-predictor one on its margin.
@@ -418,7 +417,7 @@ end
         y ~ Normal(eta_Vc + eta_Q, 1)
     end
     refined_code = rates(refined(df))
-    @test count("exponential_lpdf(x[", refined_code) == 3
+    @test occursin("b_p_subject_tau ~ exponential([0.5, 3.0, 5.0]');", refined_code)
     @test all(x -> occursin(string(x), refined_code), (0.5, 3.0, 5.0))
 
     # Two addresses of EQUAL specificity reaching one margin have no winner.
