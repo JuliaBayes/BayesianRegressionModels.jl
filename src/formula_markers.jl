@@ -162,13 +162,20 @@ is here, that right-hand side is the cell's return value and the plate stores it
 once. An indexed output that later cell statements read is bound as a cell value
 first and then returned.
 
+A cell needs no indexed output. When its only indexed statements are
+observations (`dv[i] ~ Normal(cp, sigma)` after a bare `cp = ...`), it has no
+collected result: `cp` stays a cell local and nothing is stored at model scope.
+RKBRMI builds such a cell; SBBRMI refuses it until StanBlocks has a plate with no
+collected result.
+
 Indexed inputs split by kind. A raw data column on the plate's own
 one-row-per-subject frame is gathered into a per-group slice. A column or
 linear predictor living on a DIFFERENT frame — a dose-event table, say — is
 grouped by a model-scope [`ragged`](@ref) statement and still read as `x[i]`.
 A per-subject linear predictor is passed as that group's scalar value. One
 without a random effect defines no grouping of its own: it is read on the
-subject frame a random-effect predictor defines, so its data columns must have
+subject frame a random-effect predictor defines — or, in a panel with no random
+effects, the frame of the pre-grouped columns — so its data columns must have
 one row per subject.
 
 `@brm` lowers this annotated-loop surface to the shared kernel IR, so SBBRMI and
@@ -235,8 +242,8 @@ does not consume the flat original: a term that names it on its own axis
 
 Why the grouping is an explicit argument rather than derived: an ordinary
 per-subject LP is grouped by the ranef bucket it already carries
-(`_sb_kernel_lp_bucket`), but a secondary-axis population LP like the one above
-has no random-effect term at all, and a raw column carries no grouping
+(`_sb_kernel_lp_bucket_or_nothing`), but a secondary-axis population LP like
+the one above has no random-effect term at all, and a raw column carries no grouping
 whatsoever. The axis has to be declared, and `group` is that declaration.
 
 ONE VALUE PER ROW OF `x`'s OWN FRAME — no expansion happens anywhere. If the
