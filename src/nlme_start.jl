@@ -23,13 +23,17 @@ _brm_nlme_start_coordinates(m, θ, σ, Ω, u) = error(
     brm_nlme_start(m::BRMNLMEModel)
     brm_nlme_start(m::BRMNLMEModel, u::AbstractVector)
     brm_nlme_start(m::BRMNLMEModel, map::BRMNLMEJointMap, stan_u::AbstractVector)
+    brm_nlme_start(m::BRMNLMEModel, inits::NamedTuple; base=m.unit)
 
 Read one complete point of the *same* model as NLMEEstimation starting values
 for `m`. `u` is a full RK packed unconstrained point of `m.backend`'s layout.
 `stan_u` is a full unconstrained point of `map.stan_problem`; `map` must come
 from the same BRMI instance and NLME partition as `m`, and its validated
-semantic transport converts `stan_u` to RK coordinates first. Requires
-NLMEEstimation to be loaded.
+semantic transport converts `stan_u` to RK coordinates first. `inits` are
+initial values keyed by prior address, as [`brm_start`](@ref) takes them; the
+point is `brm_start(m.backend, inits; base)`, whose default base is `m`'s unit
+point (zero subject effects, and the fixed values of a fixed-shared model).
+Requires NLMEEstimation to be loaded.
 
 Without a point, the start is the model's **prior medians**: every population
 coefficient, sampled scalar and random-effect scale starts at the median of
@@ -111,6 +115,9 @@ function brm_nlme_start(m::BRMNLMEModel, u::AbstractVector)
        loglikelihoods, coordinates.population_logprior, coordinates.max_error)
 end
 
+brm_nlme_start(m::BRMNLMEModel, inits::NamedTuple; base=m.unit) =
+    brm_nlme_start(m, brm_start(m.backend, inits; base))
+
 function brm_nlme_start(m::BRMNLMEModel, map::BRMNLMEJointMap, stan_u::AbstractVector)
     parent(map.rk) === parent(m.backend) || _brm_nlme_error(
         "brm_nlme_start: the joint map and the NLME model come from different " *
@@ -180,55 +187,46 @@ _brm_nlme_scalar_data(plan, name) = let x = get(plan.columns, name, nothing)
     x isa Real ? Float64(x) : nothing
 end
 
-# One declaration with its element at `index` (all elements for `()`) set to x.
-function _brm_nlme_with_element(values, declaration, index, x)
-    current = _brm_rk_declaration_value(values, declaration)
-    value = current isa AbstractArray ?
-        (isempty(index) ? fill(x, size(current)) :
-            (new = Array{Float64}(current); new[index...] = x; new)) : x
-    _brm_rk_with_declaration(values, declaration, value)
-end
-
-# The packed names a record's element addresses: `<declaration>.<index>`, or
-# every coordinate of the declaration.
+# The packed names a write addresses: `<declaration>.<index>`, or every
+# coordinate of the declaration.
 _brm_nlme_element_names(view, declaration, index) = isempty(index) ?
     [n for n in view.coordinates if _brm_nlme_owned(n, declaration)] :
     [Symbol(declaration, ".", join(index, "."))]
 
-# Each record kind contributes the declarations its recorded laws start.
-# Returns `(values, names)` with the names of the coordinates it set.
-_brm_nlme_prior_start(::Val, values, record, view, value) = (values, Symbol[])
-function _brm_nlme_prior_start(::Val{:population}, values, record, view, value)
-    x = _brm_prior_median(_brm_prior_law(get(record, :prior, nothing), value))
-    x === nothing && return (values, Symbol[])
-    index = get(record, :index, ())
-    _brm_nlme_with_element(values, record.declaration, index, x),
-        _brm_nlme_element_names(view, record.declaration, index)
+# Each record kind adds `(declaration, index, value)` writes, as `brm_start`
+# applies them, for the declarations its recorded laws start.
+_brm_nlme_prior_writes!(writes, ::Val, record, values, value) = writes
+_brm_nlme_record_median(record, value) =
+    _brm_prior_median(_brm_prior_law(get(record, :prior, nothing), value))
+function _brm_nlme_prior_writes!(writes, ::Val{:population}, record, values, value)
+    x = _brm_nlme_record_median(record, value)
+    x === nothing || push!(writes, (record.declaration, get(record, :index, ()), x))
+    writes
 end
-_brm_nlme_prior_start(::Val{:population_block}, values, record, view, value) =
-    _brm_nlme_prior_start(Val(:population), values, record, view, value)
-function _brm_nlme_prior_start(::Val{:scalar}, values, record, view, value)
-    x = value(record.declaration)
-    x === nothing && return (values, Symbol[])
-    _brm_nlme_with_element(values, record.declaration, (), x),
-        _brm_nlme_element_names(view, record.declaration, ())
-end
-function _brm_nlme_prior_start(::Val{:ranef}, values, record, view, value)
-    laws = get(record, :scale_priors, nothing)
-    laws === nothing && return (values, Symbol[])
-    names = Symbol[]
-    for (k, law) in enumerate(laws)
-        x = _brm_prior_median(_brm_prior_law(law, value))
-        x === nothing && continue
-        declaration, index = isnothing(record.scales) ? (record.scale, (k,)) :
-            (record.scales[k], ())
-        values = _brm_nlme_with_element(values, declaration, index, x)
-        append!(names, _brm_nlme_element_names(view, declaration, index))
+function _brm_nlme_prior_writes!(writes, ::Val{:population_block}, record, values, value)
+    x = _brm_nlme_record_median(record, value)
+    x === nothing && return writes
+    for i in eachindex(record.labels)
+        push!(writes, (record.declaration, (i,), x))
     end
-    values, names
+    writes
+end
+function _brm_nlme_prior_writes!(writes, ::Val{:scalar}, record, values, value)
+    x = value(record.declaration)
+    x === nothing || push!(writes, (record.declaration, (), x))
+    writes
+end
+function _brm_nlme_prior_writes!(writes, ::Val{:ranef}, record, values, value)
+    laws = get(record, :scale_priors, nothing)
+    laws === nothing && return writes
+    _brm_rk_scale_writes!(writes, record,
+        [_brm_prior_median(_brm_prior_law(law, value)) for law in laws], values)
 end
 
-function brm_nlme_start(m::BRMNLMEModel)
+# `m`'s unit point with its prior-median coordinates set, and the positions of
+# those coordinates. Every other coordinate keeps the unit point's exact value,
+# the fixed values of a fixed-shared model included.
+function _brm_nlme_prior_median_point(m::BRMNLMEModel)
     view, backend = m.view, m.backend
     records = _brm_nlme_records(backend.plan)
     scalars = Dict(r.declaration => r for r in records if r.kind === :scalar)
@@ -241,22 +239,28 @@ function brm_nlme_start(m::BRMNLMEModel)
         record === nothing && return _brm_nlme_scalar_data(backend.plan, name)
         name in pending && return nothing
         push!(pending, name)
-        x = _brm_prior_median(_brm_prior_law(get(record, :prior, nothing), value))
+        x = _brm_nlme_record_median(record, value)
         delete!(pending, name)
         medians[name] = x
     end
     values = _rk_constrained_values(backend, m.unit)
-    set = Symbol[]
+    writes = Tuple{Symbol,Tuple,Any}[]
     for record in records
-        values, names = _brm_nlme_prior_start(Val(record.kind), values, record, view, value)
-        append!(set, names)
+        _brm_nlme_prior_writes!(writes, Val(record.kind), record, values, value)
     end
+    point = _brm_rk_start_point(backend, values, writes)
     position = Dict(n => i for (i, n) in enumerate(view.coordinates))
-    chosen = sort!(unique!([position[n] for n in set]))
+    chosen = sort!(unique!([position[n] for (declaration, index, _) in writes
+        for n in _brm_nlme_element_names(view, declaration, index)]))
     u = copy(m.unit)
-    u[chosen] = _rk_unconstrained_values(backend, values)[chosen]
+    u[chosen] = point[chosen]
+    u, chosen
+end
+
+function brm_nlme_start(m::BRMNLMEModel)
+    u, chosen = _brm_nlme_prior_median_point(m)
+    view = m.view
     estimated = sort!(vcat(m.theta, m.sigma, findall(==(:subject_scale), view.role)))
-    start = brm_nlme_start(m, u)
-    merge(start, (; start_source=(; prior_median=view.coordinates[chosen],
+    merge(brm_nlme_start(m, u), (; start_source=(; prior_median=view.coordinates[chosen],
         zero=view.coordinates[setdiff(estimated, chosen)])))
 end

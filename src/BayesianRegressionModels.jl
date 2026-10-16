@@ -103,6 +103,7 @@ include("nlme_view.jl")
 include("nlme_joint_start.jl")
 include("nlme_conditional.jl")
 include("nlme_start.jl")
+include("start_values.jl")
 include("nlme_fit.jl")
 include("covariate_resampling.jl")
 export modeled_covariates
@@ -210,6 +211,7 @@ export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
        brm_coordinate_transport,
        brm_rk_to_stan, brm_stan_to_rk, brm_check_coordinate_transport,
        brm_rk_point_to_stan, brm_stan_point_to_rk, brm_stan_gradient_to_rk,
+       brm_start,
        BRMNLMEView, BRMNLMEViewError, brm_nlme_view,
        BRMNLMEJointMap, brm_nlme_joint_map, brm_nlme_joint_start,
        brm_nlme_joint_values, brm_nlme_start, brm_nlme_estimates, brm_nlme_fit,

@@ -16,8 +16,6 @@ function _brm_nlme_record_value(values, record)
     isempty(index) ? value : value[index...]
 end
 
-_brm_nlme_labelled(value, labels) = NamedTuple{Tuple(Symbol.(labels))}(Tuple(value))
-
 # Each record kind adds its entries to `population` (predictor => coefficient
 # pairs), `scalars`, or `other` (the constrained values of declarations without
 # a BRM address). Random-effect blocks are read from Ω separately.
@@ -28,9 +26,11 @@ function _brm_nlme_named!(::Val{:population}, acc, record, values)
     acc
 end
 function _brm_nlme_named!(::Val{:population_block}, acc, record, values)
+    # Level => value pairs, as `brm_start` takes a categorical column.
+    contrasts = _brm_rk_declaration_value(values, record.declaration)
     push!(get!(acc.population, record.predictor, Pair{Symbol,Any}[]),
-        record.coefficient => _brm_nlme_labelled(
-            _brm_rk_declaration_value(values, record.declaration), record.labels))
+        record.coefficient => [level => x
+            for (level, x) in zip(record.level_values, contrasts)])
     acc
 end
 function _brm_nlme_named!(::Val{:scalar}, acc, record, values)
@@ -70,9 +70,11 @@ end
 function _brm_nlme_block(Ω::AbstractMatrix, record)
     covariance = Matrix{Float64}(Ω)
     sd = sqrt.(diag(covariance))
+    cor = covariance ./ (sd * sd')
+    cor[diagind(cor)] .= 1 # exactly, as `brm_start` requires of a correlation
     (; group=record.group,
        margins=[(; predictor, coefficient) for (predictor, coefficient) in record.margins],
-       covariance, sd, cor=covariance ./ (sd * sd'))
+       covariance, sd, cor)
 end
 
 """
@@ -92,7 +94,8 @@ Returns `(; point, eta)`:
   - a predictor's population coefficients under the predictor's name, one
     entry per coefficient address (`point.log_CL.weight` for
     `effect(log_CL, weight)`), on the scale the formula gives them. A
-    categorical block is one entry of contrasts named by their labels;
+    categorical column is one entry of `level => value` pairs, one per
+    non-reference level, as [`brm_start`](@ref) takes it;
   - a sampled scalar under its name, constrained (`point.sigma`, not its log);
   - a random-effect block under its `|ID|` (`point.pk`), or
     `var"<predictor>|<group>"` for a block without one, as
@@ -154,9 +157,9 @@ function _brm_nlme_named_eta(m::BRMNLMEModel, ebes)
 end
 
 """
-    brm_nlme_fit(x, estimator; start=nothing, ebes=true, ad_backend=nothing,
-        shared_point=nothing, subject_group=nothing, nested_groups=NamedTuple(),
-        kwargs...)
+    brm_nlme_fit(x, estimator; start=nothing, inits=nothing, ebes=true,
+        ad_backend=nothing, shared_point=nothing, subject_group=nothing,
+        nested_groups=NamedTuple(), kwargs...)
 
 Fit an NLME model through the RK backend with one of NLMEEstimation's own
 estimators and read the result in the model's names and natural units.
@@ -175,6 +178,9 @@ Requires NLMEEstimation and Enzyme to be loaded.
 - `start` — `nothing` for the prior-median start of
   [`brm_nlme_start`](@ref)`(m)`, a full RK packed point `u` for
   `brm_nlme_start(m, u)`, or a start returned by `brm_nlme_start`.
+- `inits` — initial values keyed by prior address, as [`brm_start`](@ref)
+  takes them; every coordinate they do not address keeps its prior-median
+  start. Give either `start` or `inits`.
 - `ebes` — after `saem`, run `empirical_bayes` at the fitted population point
   (warm-started from SAEM's final subject states) so the result reports EBEs.
   SAEM's own `eta` are chain states, not EBEs. `focei` always returns its EBEs.

@@ -101,13 +101,13 @@ function _prior_omega_map(m::BRM.BRMNLMEModel, θ, σ, ω)
         scales = isnothing(record.scales) ? (record.scale,) : record.scales
         scale_positions = Int[]
         if isnothing(record.scales)
-            values = BRM._brm_rk_with_declaration(values, record.scale, τ)
+            values = BRM._brm_rk_set_declaration_value(values, record.scale, (), τ)
             append!(scale_positions, _prior_positions(m, record.scale))
         else
             length(scales) == K || BRM._brm_nlme_error(
                 "population prior: scale declarations do not match the random-effect block")
             for (declaration, scale) in zip(scales, τ)
-                values = BRM._brm_rk_with_declaration(values, declaration, scale)
+                values = BRM._brm_rk_set_declaration_value(values, declaration, (), scale)
                 append!(scale_positions, _prior_positions(m, declaration))
             end
         end
@@ -116,7 +116,7 @@ function _prior_omega_map(m::BRM.BRMNLMEModel, θ, σ, ω)
         factor_positions = isnothing(record.L) ? Int[] : _prior_positions(m, record.L)
         length(factor_positions) == K * (K - 1) ÷ 2 || BRM._brm_nlme_error(
             "population prior: correlation coordinates do not match the random-effect block")
-        isnothing(record.L) || (values = BRM._brm_rk_with_declaration(values, record.L, R))
+        isnothing(record.L) || (values = BRM._brm_rk_set_declaration_value(values, record.L, (), R))
         append!(omega_positions, scale_positions, factor_positions)
         margin_start += K
         omega_start += K * (K + 1) ÷ 2
@@ -472,7 +472,15 @@ _fit_model(x; kwargs...) = throw(ArgumentError(
     "brm_nlme_fit: expected a @brm model (BRMI), an RKBRMI or a BRMNLMEModel, " *
     "got $(typeof(x))"))
 
-_fit_start(m, ::Nothing) = BRM.brm_nlme_start(m)
+_fit_start(m, ::Nothing, ::Nothing) = BRM.brm_nlme_start(m)
+# Addressed values over the prior-median start.
+_fit_start(m, ::Nothing, inits::NamedTuple) = BRM.brm_nlme_start(m, inits;
+    base=first(BRM._brm_nlme_prior_median_point(m)))
+_fit_start(m, ::Nothing, inits) = throw(ArgumentError(
+    "brm_nlme_fit: `inits` is a NamedTuple keyed by prior address; got $(typeof(inits))"))
+_fit_start(m, start, ::Nothing) = _fit_start(m, start)
+_fit_start(m, start, inits) = throw(ArgumentError(
+    "brm_nlme_fit: give either `start` or `inits`, not both"))
 _fit_start(m, u::AbstractVector{<:Real}) = BRM.brm_nlme_start(m, u)
 function _fit_start(m, start::NamedTuple)
     missing_fields = [k for k in (:theta, :sigma, :omega, :omega_matrix, :eta)
@@ -483,8 +491,8 @@ function _fit_start(m, start::NamedTuple)
     start
 end
 _fit_start(m, start) = throw(ArgumentError(
-    "brm_nlme_fit: `start` is `nothing` (prior medians), a full RK packed point, " *
-    "or a start returned by brm_nlme_start; got $(typeof(start))"))
+    "brm_nlme_fit: `start` is a full RK packed point or a start returned by " *
+    "brm_nlme_start; got $(typeof(start)). Address-keyed values go in `inits`"))
 
 # The start's subject effects for the subjects an estimator is asked about.
 _start_eta(H, ::Nothing) = H
@@ -516,11 +524,11 @@ _fit_run(estimator, m, start, ebes; kwargs...) = throw(ArgumentError(
     "brm_nlme_fit: `$estimator` is not one of NLMEEstimation's estimators saem, " *
     "focei or empirical_bayes (posthoc)"))
 
-function BRM.brm_nlme_fit(x, estimator; start=nothing, ebes::Bool=true,
+function BRM.brm_nlme_fit(x, estimator; start=nothing, inits=nothing, ebes::Bool=true,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
         nested_groups=NamedTuple(), kwargs...)
     model = _fit_model(x; ad_backend, shared_point, subject_group, nested_groups)
-    s = _fit_start(model, start)
+    s = _fit_start(model, start, inits)
     result, ebe, estimates = _fit_run(estimator, model, s, ebes; kwargs...)
     (; estimates, result, ebes=ebe, start=s, model)
 end

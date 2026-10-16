@@ -94,7 +94,7 @@ end
     @test keys(e.point) == (:log_CL, :log_V, :s0, :sigma,
         Symbol("log_CL|subject"), Symbol("log_V|subject"), :other)
     @test keys(e.point.log_CL) == (:Intercept, :weight, :sex) # formula order
-    @test e.point.log_CL.sex == (; sex_lvl_2=0.0)
+    @test e.point.log_CL.sex == ["m" => 0.0] # level pairs, as brm_start takes them
     @test e.point[Symbol("log_V|subject")].margins ==
         [(; predictor=:log_V, coefficient=:Intercept)]
     @test e.point[Symbol("log_CL|subject")].sd ≈ [1.0] rtol=1e-12
@@ -130,6 +130,13 @@ end
     @test e.eta.subjects == ["a", "b", "c"]
     @test e.eta.names == ["log_CL:Intercept", "log_V:Intercept"]
     @test e.eta.values == ebes.modes
+    # The named point is what address-keyed starts take: its entries give
+    # back the same θ, σ and Ω.
+    back = brm_nlme_start(m, (; log_CL=e.point.log_CL, log_V=e.point.log_V,
+        sigma=e.point.sigma, pk=(; sd=e.point.pk.sd, cor=e.point.pk.cor)))
+    @test back.theta ≈ θ rtol=1e-10
+    @test back.sigma ≈ σ rtol=1e-10
+    @test back.omega_matrix ≈ Ω rtol=1e-10
     @test_throws DimensionMismatch brm_nlme_estimates(m, θ[1:2], σ, Ω)
     @test_throws DimensionMismatch brm_nlme_estimates(m, θ, σ, Ω[1:1, 1:1])
     # refused: predictors, scalars and blocks share the result's one namespace
@@ -200,6 +207,16 @@ end
     g = brm_nlme_fit(m, saem; start=u, ebes=false, rng=Xoshiro(3),
         options=SAEMOptions(iterations=4, burnin=2))
     @test g.start.theta == u[m.theta]
+    # Address-keyed values override the prior medians where they address.
+    f = brm_nlme_fit(m, empirical_bayes; inits=(; log_V=(; Intercept=1.2), sigma=0.5))
+    θ = named_theta(m, f.start.theta)
+    @test θ[:log_V_Intercept] ≈ 1.2 rtol=1e-12
+    @test θ[Symbol("pop_log_CL.beta_pop.1")] == 0.3 # still its prior median
+    @test exp(only(f.start.sigma)) ≈ 0.5 rtol=1e-12
+    @test f.start.omega_matrix ≈ start.omega_matrix rtol=1e-12
+    # refused: a packed point and address-keyed values would compete.
+    @test_throws ArgumentError brm_nlme_fit(m, empirical_bayes; start=u,
+        inits=(; sigma=0.5))
     # NewtonEBE fails from this start inside NLMEEstimation (its first trials
     # all lack a step, so its trial table cannot hold a later one): snag
     # NLMEEstimation newtonebe-trial-97825f7d.

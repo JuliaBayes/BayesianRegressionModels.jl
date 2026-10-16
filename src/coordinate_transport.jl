@@ -81,13 +81,11 @@ _rk_coordinate_records(plan) = _brm_transport_error(:unsupported_coverage,
     "no cross-backend coordinate inventory")
 
 # Implemented by `BayesianRegressionModelsReactiveKernelsExt`: the built
-# layout's coordinate names, each coordinate's layout transform, the named
-# constrained values at a point, and the packed point of named constrained
-# values.
+# layout's coordinate names, each coordinate's layout transform, and the named
+# constrained values at a point.
 function _rk_layout_coordinate_names end
 function _rk_layout_coordinate_transforms end
 function _rk_constrained_values end
-function _rk_unconstrained_values end
 
 """
     BRMCoordinatePair
@@ -463,8 +461,10 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:population
     end
 end
 
-# The SB random-effect block an RK bucket lowered to, and its ordered margins.
-function _brm_transport_ranef_block(d, record)
+# The SB random-effect block an RK bucket (or `(; group, id)`) lowered to, and
+# its ordered margins; for a marginalized `|ID|` block, its sampled active part.
+# `caller` names the public entry in errors.
+function _brm_sb_ranef_block(d, record; caller="brm_coordinate_transport")
     plan = d.plan
     brmi = plan.parent
     all_blocks = ranef_blocks(plan)
@@ -480,7 +480,7 @@ function _brm_transport_ranef_block(d, record)
     end
     address = (; group=record.group, id=record.id)
     length(blocks) == 1 || error(
-        "brm_coordinate_transport: random-effect block $(address) of RK " *
+        "$caller: random-effect block $(address) of RK " *
         "margins $(record.margins) matches $(length(blocks)) SB blocks")
     block = only(blocks)
     # A marginalized `|ID|` block samples its likelihood-active margins in a
@@ -490,13 +490,6 @@ function _brm_transport_ranef_block(d, record)
         collect(plan.bindings[completion.active].margins) : nothing
     isnothing(active) ||
         (block = only(b for b in all_blocks if b.binding === completion.active))
-    block.generated && _brm_transport_error(:parameterization_mismatch,
-        "brm_coordinate_transport: SB block `$(block.binding)` is drawn in " *
-        "generated quantities and has no sampled coordinates")
-    block.noncentered || _brm_transport_error(:parameterization_mismatch,
-        "brm_coordinate_transport: SB block `$(block.binding)` is centered; its " *
-        "coordinates are the effects, not the standardized draws RK samples. " *
-        "Build the SBBRMI without `centered_groups` for this comparison.")
     margins = if isnothing(record.id)
         binding = plan.bindings[block.binding]
         [(binding.predictor, c) for c in binding.columns]
@@ -505,8 +498,20 @@ function _brm_transport_ranef_block(d, record)
         isnothing(active) ? shared : shared[active]
     end
     length(margins) == block.n_terms || error(
-        "brm_coordinate_transport: SB block `$(block.binding)` reports " *
+        "$caller: SB block `$(block.binding)` reports " *
         "$(length(margins)) margins for $(block.n_terms) terms")
+    (; block, margins)
+end
+
+function _brm_transport_ranef_block(d, record)
+    (; block, margins) = _brm_sb_ranef_block(d, record)
+    block.generated && _brm_transport_error(:parameterization_mismatch,
+        "brm_coordinate_transport: SB block `$(block.binding)` is drawn in " *
+        "generated quantities and has no sampled coordinates")
+    block.noncentered || _brm_transport_error(:parameterization_mismatch,
+        "brm_coordinate_transport: SB block `$(block.binding)` is centered; its " *
+        "coordinates are the effects, not the standardized draws RK samples. " *
+        "Build the SBBRMI without `centered_groups` for this comparison.")
     (; block, margins)
 end
 
@@ -590,7 +595,7 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:ranef}, re
         "brm_coordinate_transport: block `$(block.binding)` orders its margins " *
         "$(Tuple(margins)) on SB and $(record.margins) on RK; a reordered " *
         "correlation factor is not a coordinate permutation")
-    carrier = string(block.binding, "_L")
+    carrier = _sb_ranef_correlation_carrier(block)
     for m in 1:(K * (K - 1)) ÷ 2
         address = (; kind=:ranef_correlation, base..., margins=record.margins, index=m)
         push!(pairs, BRMCoordinatePair(address, Symbol(record.L, ".", m),
@@ -600,6 +605,9 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:ranef}, re
     push!(correlations, (; base..., margins=record.margins, rk_declaration=record.L,
         stan_carrier=carrier, K))
 end
+
+# The Stan carrier of a random-effect block's correlation Cholesky factor.
+_sb_ranef_correlation_carrier(block) = string(block.binding, "_L")
 
 # The unconstrained Stan names of one SB carrier, in element order.
 function _brm_transport_elements(output, stan, address)
@@ -1090,17 +1098,6 @@ function _brm_rk_declaration_value(values, declaration::Symbol)
         values = getproperty(values, Symbol(field))
     end
     values
-end
-
-# A copy of the constrained values with one declaration replaced, addressed as
-# in `_brm_rk_declaration_value`.
-function _brm_rk_with_declaration(values::NamedTuple, declaration::Symbol, value)
-    hasproperty(values, declaration) && return merge(values,
-        NamedTuple{(declaration,)}((value,)))
-    replace_path(nt, path) = length(path) == 1 ?
-        merge(nt, NamedTuple{(only(path),)}((value,))) :
-        merge(nt, NamedTuple{(first(path),)}((replace_path(nt[first(path)], path[2:end]),)))
-    replace_path(values, Symbol.(split(String(declaration), '.')))
 end
 
 """
