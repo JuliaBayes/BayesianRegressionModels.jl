@@ -553,8 +553,6 @@ The brms/check-loss scale ``s`` translates explicitly as
 available in formulas:
 
 ```julia
-using Distributions: SkewedExponentialPower
-
 y ~ SkewedExponentialPower(mu, sigma_sepd, 1, tau)
 ```
 

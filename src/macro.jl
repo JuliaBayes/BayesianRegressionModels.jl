@@ -705,6 +705,13 @@ end
 # positional `ragged(x, group)`, so the lowered kernel — and with it the Stan
 # program, the RK graph and the descriptor — is exactly the one the deprecated
 # in-body `ragged(x, group)[i]` read produces.
+#
+# A cell whose only indexed statements are observations (`y[i] ~ …`) has no
+# collected result. It lowers to a kernel whose closure ends in `nothing`, the
+# closure spelling of "no value", under a compiler-owned name derived from the
+# first observed response (`_brm_plate_effect_name`). Both backends then emit the
+# cell's statements without a collected result, so a prediction the cell only
+# observes stays a cell local instead of becoming a model-scope output.
 _is_brm_plate(x) = Meta.isexpr(x, :macrocall) && !isempty(x.args) &&
                    x.args[1] === Symbol("@plate")
 
@@ -826,10 +833,37 @@ function _brm_plate_outputs(body, i)
             push!(outputs, lhs)
         end
     end
-    isempty(outputs) && error(
-        "@brm: a kernel `@plate` needs an indexed deterministic output, " *
-        "for example `loc[$i] = ...`")
+    isempty(outputs) && !any(stmt -> isxcall(stmt, :~), stmts) && error(
+        "@brm: a kernel `@plate` cell needs an indexed output (`loc[$i] = ...`) " *
+        "or an observation (`y[$i] ~ ...`); this one has neither")
     stmts, outputs
+end
+
+# The compiler-owned kernel name of an observation-only cell: its first observed
+# response plus `_cell` (`y[i] ~ …` and `ragged(y, g)[i] ~ …` both give `y_cell`).
+# Backends derive the cell's emitted names from it, as they do from an output's.
+function _brm_plate_effect_name(stmts, i)
+    for stmt in stmts
+        isxcall(stmt, :~) && _brm_plate_indexed(stmt.args[2], i) || continue
+        source = stmt.args[2].args[1]
+        base = source isa Symbol ? source :
+               isxcall(source, :ragged) && source.args[2] isa Symbol ? source.args[2] :
+               nothing
+        base === nothing || return Symbol(base, :_cell)
+    end
+    error("@brm: an observation-only kernel `@plate` cell observes a response " *
+          "`y[$i] ~ …` or `ragged(y, group)[$i] ~ …`")
+end
+
+# A kernel closure ending in `nothing` has no collected result; backends emit its
+# statements without one. `_brm_cell_without_result` drops that terminal marker.
+function _brm_cell_has_no_result(statements)
+    final = findlast(statement -> !(statement isa LineNumberNode), statements)
+    final !== nothing && statements[final] === :nothing
+end
+function _brm_cell_without_result(statements)
+    final = findlast(statement -> !(statement isa LineNumberNode), statements)
+    Any[statements[1:final-1]; statements[final+1:end]]
 end
 
 function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,Symbol}(),
@@ -945,14 +979,20 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,Symbol}(),
     # exactly as a closure ending in `expr` does. Binding it to a cell local
     # first would make StanBlocks promote that local to a second, identical
     # posterior carrier and copy it into the collected result. An output that
-    # later statements read stays a local and is returned by name.
-    target = last(outputs)
-    final = findlast(stmt -> !(stmt isa LineNumberNode), rewritten)
-    if Meta.isexpr(stmts[final], :(=), 2) && _brm_plate_indexed(stmts[final].args[1], i) &&
-       stmts[final].args[1].args[1] === target
-        rewritten[final] = rewritten[final].args[2]
+    # later statements read stays a local and is returned by name. A cell with
+    # no output ends in `nothing`: it has no collected result at all.
+    if isempty(outputs)
+        target = _brm_plate_effect_name(stmts, i)
+        push!(rewritten, :nothing)
     else
-        push!(rewritten, target)
+        target = last(outputs)
+        final = findlast(stmt -> !(stmt isa LineNumberNode), rewritten)
+        if Meta.isexpr(stmts[final], :(=), 2) && _brm_plate_indexed(stmts[final].args[1], i) &&
+           stmts[final].args[1].args[1] === target
+            rewritten[final] = rewritten[final].args[2]
+        else
+            push!(rewritten, target)
+        end
     end
     lambda = Expr(:->, Expr(:tuple, params...), Expr(:block, rewritten...))
     call = Expr(:call, :kernel, lambda, positionals...)

@@ -5560,6 +5560,15 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     isnothing(parts) &&
         error("sbimpl: kernel(...) do-block params must be plain names (no types/defaults)")
     params, body_stmts = parts
+    # Interim refusal: a cell with no collected result needs a plate without
+    # one, and StanBlocks' do-block `plate` always collects its trailing value
+    # (StanBlocks snag `result-less-do-f-3076f098`). RKBRMI emits such a cell.
+    _brm_cell_has_no_result(body_stmts) && error(
+        "sbimpl: kernel `$target` has no collected result (an observation-only " *
+        "`@plate for` cell, or a closure ending in `nothing`). SBBRMI cannot emit " *
+        "it yet: StanBlocks' `plate` always collects a cell value (StanBlocks " *
+        "snag `result-less-do-f-3076f098`). Name an indexed output such as `pred[i] = ...`, " *
+        "or build the model with RKBRMI.")
 
     # positional args (everything after the do-block); sliced in the plate.
     # Three admissible kinds:

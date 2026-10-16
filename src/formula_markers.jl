@@ -162,6 +162,12 @@ is here, that right-hand side is the cell's return value and the plate stores it
 once. An indexed output that later cell statements read is bound as a cell value
 first and then returned.
 
+A cell needs no indexed output. When its only indexed statements are
+observations (`dv[i] ~ Normal(cp, sigma)` after a bare `cp = ...`), it has no
+collected result: `cp` stays a cell local and nothing is stored at model scope.
+RKBRMI builds such a cell; SBBRMI refuses it until StanBlocks has a plate with no
+collected result.
+
 Indexed inputs split by kind. A raw data column on the plate's own
 one-row-per-subject frame is gathered into a per-group slice. A column or
 linear predictor living on a DIFFERENT frame — a dose-event table, say — is

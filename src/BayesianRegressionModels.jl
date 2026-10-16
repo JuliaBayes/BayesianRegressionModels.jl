@@ -97,6 +97,7 @@ include("turing_descriptor.jl")
 # rather than being re-derived (differently) in every consumer.
 include("prediction.jl")
 include("population_model.jl")
+include("response_pruning.jl")
 include("coordinate_transport.jl")
 include("nlme_view.jl")
 include("nlme_joint_start.jl")
@@ -156,11 +157,18 @@ export truncated, censored, interval_censored
 export rk_translate_artifact
 export rk_artifact_inputs
 export rkppl_model, rk_model
-# Re-export the distributions a model file commonly writes so
-# `using BayesianRegressionModels` is the only import it needs — no
+# Re-export every Distributions.jl family BRM lowers so
+# `using BayesianRegressionModels` is the only import a model file needs — no
 # `using Distributions` on top (todo `0n9bz7p`, decision `0w84aut`). These are
-# `Distributions.*` verbatim, not wrappers.
+# `Distributions.*` verbatim, not wrappers. test/exported_families.jl pins that
+# every family a lowering seam dispatches on is exported: a new family is
+# added here together with its lowering.
 export Normal, Exponential, Poisson, Bernoulli, LKJCholesky
+export Arcsine, Beta, Binomial, Categorical, Cauchy, Chisq, Dirichlet, Erlang,
+       Frechet, Gamma, Gumbel, InverseGamma, InverseGaussian, Laplace,
+       LocationScale, LogNormal, Logistic, MixtureModel, Multinomial, MvNormal,
+       NegativeBinomial, NormalCanon, Pareto, Rayleigh, SkewNormal,
+       SkewedExponentialPower, TDist, Uniform, VonMises, Weibull
 export product_distribution, logpdf
 # Logit-form Bernoulli/Binomial -- prefer these over `Bernoulli(logistic(eta))`
 # / `Binomial(N, logistic(eta))`. Both backends lower to a logit-native log-pmf
@@ -224,7 +232,7 @@ export parse!, _brm, stan_code, stan_data, stan_model, stan_instantiate,
 # Post-fit prediction — the population-level ("nore") and transported
 # ("recov") modes, plus the random-effect block description both stand on.
 export RanefBlock, ranef_blocks, ranef_coordinates,
-       population_draws, population_model, transport_draws, term_draws,
+       population_draws, population_model, prune_responses, transport_draws, term_draws,
        hsgp_population_curve
 export AbstractAdaptiveCenteringBlock, AdaptiveCenteringBlock,
        R2D2AdaptiveCenteringBlock, adaptive_centering_blocks,
