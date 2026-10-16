@@ -461,6 +461,11 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:population
     end
 end
 
+# The known marginal scales of a known-value SB block, in its margin order
+# (`nothing` for a sampled margin).
+_brm_transport_known_scales(d, block) =
+    collect(d.plan.bindings[block.binding].known_scales)
+
 # The SB random-effect block an RK bucket lowered to, and its ordered margins.
 function _brm_transport_ranef_block(d, record)
     plan = d.plan
@@ -526,12 +531,35 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:ranef}, re
     # Scales: one per margin.
     spec = _RANEF_FAMILIES[block.family]
     tau = get(spec, :tau, nothing)
+    # A known-value block (`sd(...) = value`) samples only its free scales,
+    # under `<binding>_tau_free` when some scale is known; a known scale is a
+    # constant on both backends and pairs with nothing.
+    known_scales = get(spec, :known, false) ?
+        _brm_transport_known_scales(d, block) : fill(nothing, block.n_terms)
+    rk_known = get(record, :known_scales, nothing)
+    free_margins = findall(isnothing, known_scales)
     for (k, margin) in enumerate(record.margins)
+        sb_known = !isnothing(known_scales[sb_margin[k]])
+        sb_known == (!isnothing(rk_known) && !isnothing(rk_known[k])) ||
+            _brm_transport_error(:parameterization_mismatch,
+                "brm_coordinate_transport: margin $margin of block " *
+                "`$(block.binding)` has a known scale on " *
+                "$(sb_known ? "SB" : "RK") only")
+        sb_known && continue
         address = (; kind=:ranef_scale, base..., margin)
         rk_name, rk_decl, rk_index = isnothing(record.scales) ?
             (Symbol(record.scale, ".", k), record.scale, (k,)) :
             (record.scales[k], record.scales[k], ())
-        if !isnothing(tau)
+        if length(free_margins) < block.n_terms
+            carrier = string(block.binding, "_tau_free")
+            name = string(carrier, ".", only(findall(==(sb_margin[k]), free_margins)))
+            single = length(free_margins) == 1 && haskey(stan_pos, carrier)
+            haskey(stan_pos, name) || single || error(
+                "brm_coordinate_transport: SB free scale `$carrier` of block " *
+                "`$(block.binding)` has no unconstrained coordinate for margin $margin")
+            push!(pairs, BRMCoordinatePair(address, rk_name,
+                haskey(stan_pos, name) ? name : carrier, rk_decl, rk_index, :identity))
+        elseif !isnothing(tau)
             carrier = string(block.binding, "_", tau)
             name = string(carrier, ".", sb_margin[k])
             haskey(stan_pos, name) || (K == 1 && haskey(stan_pos, carrier)) || error(
@@ -583,6 +611,13 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:ranef}, re
         end
     end
     # Correlation factor: Stan's packed coordinates, in the same margin order.
+    # A known correlation (`cor(:, ID) = R`) is data on SB and a constant on RK.
+    sb_cor_known = get(spec, :known, false) &&
+        !isnothing(d.plan.bindings[block.binding].known_cor)
+    sb_cor_known == get(record, :known_cor, false) || _brm_transport_error(
+        :parameterization_mismatch,
+        "brm_coordinate_transport: block `$(block.binding)` has a known " *
+        "correlation on $(sb_cor_known ? "SB" : "RK") only")
     isnothing(record.L) && return
     sb_margin == collect(1:K) || _brm_transport_error(:parameterization_mismatch,
         "brm_coordinate_transport: block `$(block.binding)` orders its margins " *

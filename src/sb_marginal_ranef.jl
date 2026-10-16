@@ -181,10 +181,12 @@ end
 
 # A bucket the split supports: a plain grouping factor whose block is Gaussian
 # with sampled scales (default, configured `sd`/`cor`, centered or not). Student-t
-# mixing weights and R2D2-derived scales keep the ordinary full block.
+# mixing weights, R2D2-derived scales and known scales or correlations
+# (`sd(...) = value`) keep the ordinary full block.
 _sb_marginal_eligible(desc, ranef_effect, r2d2_tau) =
     desc isa NamedColumn && isnothing(r2d2_tau) &&
-    (isnothing(ranef_effect) || isnothing(ranef_effect.dist))
+    (isnothing(ranef_effect) ||
+     (isnothing(ranef_effect.dist) && !_brm_ranef_has_known(ranef_effect)))
 
 # Emit the split block for one bucket. `per_target_ranges` is the bucket's
 # `target => column range` table; `inactive` names the targets no likelihood

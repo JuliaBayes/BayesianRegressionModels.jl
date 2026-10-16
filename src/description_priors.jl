@@ -211,8 +211,16 @@ function _brmd_ranef_priors!(priors,d,groups,anchors,notation)
         elseif !derived
             for i in 1:group.block.n_terms
                 expression = isnothing(cfg) ? nothing : cfg.sd_prior[i]
-                expression = something(expression,_brmd_default_normal())
                 margin = i <= length(group.margins) ? group.margins[i] : (; index=i)
+                # A known scale (`sd(...) = value`) is not sampled: its law is
+                # the point mass at that value.
+                if expression isa _BRMKnownScale
+                    push!(priors,_brmd_prior(d,(group.key...,:sd,i),
+                        ExprColumn(Dirac,expression.value),(; lower=0.0),
+                        (; kind=:known, margin),anchors,notation))
+                    continue
+                end
+                expression = something(expression,_brmd_default_normal())
                 push!(priors,_brmd_prior(d,(group.key...,:sd,i),expression,
                     merge(_brmd_support(getf(expression)),(; lower=0.0)),
                     (; kind=isnothing(cfg) ? :default : :selector, margin),anchors,notation))
@@ -236,7 +244,12 @@ function _brmd_ranef_priors!(priors,d,groups,anchors,notation)
                     BRMDescriptionReference(:C,:covariance,(group.key...,:cholesky_scale))),NamedTuple(),
                 (;kind=:conditional,dimension=(group.block.n_groups,group.block.n_terms),covariance=group.key),anchors,notation))
         end
-        if group.correlated
+        if group.correlated && !isnothing(cfg) && !isnothing(cfg.known_cor)
+            # `cor(:, ID) = R`: the correlation is the point mass at `R`.
+            push!(priors,_brmd_prior(d,(group.key...,:correlation),
+                ExprColumn(Dirac,cfg.known_cor),(; domain=:correlation),
+                (; kind=:known),anchors,notation))
+        elseif group.correlated
             eta = isnothing(cfg) ? 1.0 : cfg.lkj_eta
             push!(priors,_brmd_prior(d,(group.key...,:correlation),
                 ExprColumn(LKJCholesky,group.block.n_terms,eta),
