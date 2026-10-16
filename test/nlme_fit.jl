@@ -217,10 +217,12 @@ end
     # refused: a packed point and address-keyed values would compete.
     @test_throws ArgumentError brm_nlme_fit(m, empirical_bayes; start=u,
         inits=(; sigma=0.5))
-    # NewtonEBE fails from this start inside NLMEEstimation (its first trials
-    # all lack a step, so its trial table cannot hold a later one): snag
-    # NLMEEstimation newtonebe-trial-97825f7d.
-    @test_broken (brm_nlme_fit(m, empirical_bayes; start=u); true)
+    # The default NewtonEBE from this start: its first trials all lack a step
+    # (NLMEEstimation snag newtonebe-trial-97825f7d, fixed in 1dd8b86).
+    f = brm_nlme_fit(m, empirical_bayes; start=u)
+    q = empirical_bayes(m, f.start.theta, f.start.sigma, f.start.omega;
+        η0=f.start.eta, method=QuasiNewtonEBE())
+    @test f.estimates.eta.values ≈ q.modes rtol=1e-6 atol=1e-8
     # refused: a prepared model already fixes its grouping and AD backend, so
     # model-building keywords given with it would otherwise be ignored silently.
     @test_throws ArgumentError brm_nlme_fit(m, empirical_bayes; subject_group=:subject)
