@@ -215,7 +215,7 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
     # until it can hold a family fixed (NLMEEstimation snag
     # `fixed-omega-fami-a1322422`).
     for r in ranefs
-        (haskey(r, :known_scales) || get(r, :known_cor, false)) && _brm_nlme_error(
+        haskey(r, :known_scales) && _brm_nlme_error(
             "brm_nlme_view: random-effect block `|$(r.id)|` (group `$(r.group)`) " *
             "holds a known scale or correlation (`sd(...) = value` / " *
             "`cor(:, ID) = R`). NLMEEstimation estimates every covariance family " *

@@ -245,7 +245,7 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
                 bucket.dist === nothing ? (;) : (; mixing=Symbol(draws, ".w")),
                 known || L_value !== nothing ?
                     (; known_scales=Tuple(p isa Real ? p : nothing for p in priors),
-                       known_cor=L_value !== nothing) : (;)))
+                       known_cor=bucket.known_cor) : (;)))
     end
     # One level position per row of a grouping, named for that grouping and
     # read by every bucket over it. A multi-membership column's positions are

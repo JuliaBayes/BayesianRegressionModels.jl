@@ -621,7 +621,7 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, ::Val{:ranef}, re
     # A known correlation (`cor(:, ID) = R`) is data on SB and a constant on RK.
     sb_cor_known = get(spec, :known, false) &&
         !isnothing(d.plan.bindings[block.binding].known_cor)
-    sb_cor_known == get(record, :known_cor, false) || _brm_transport_error(
+    sb_cor_known == !isnothing(get(record, :known_cor, nothing)) || _brm_transport_error(
         :parameterization_mismatch,
         "brm_coordinate_transport: block `$(block.binding)` has a known " *
         "correlation on $(sb_cor_known ? "SB" : "RK") only")

@@ -10972,7 +10972,7 @@ function _sb_emit_known_ranef_tau!(stmts, data, bucket_name, n_terms_name, prior
                       for prior in priors[free]]
     free_name = isempty(known) ? tau_name : Symbol(bucket_name, :_tau_free)
     statement = _sb_vector_positive_prior_statement(free_name, free_name,
-        free_priors, length(free); direct_homogeneous=true, mod, scope=mod).statement
+        free_priors, length(free); direct_native=true, mod, scope=mod).statement
     push!(stmts, statement)
     isempty(known) && return tau_name
     known_name = Symbol(bucket_name, :_tau_known)

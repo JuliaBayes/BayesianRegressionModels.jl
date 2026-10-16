@@ -348,6 +348,32 @@ FIXED_RUNTIME && @stestset "compositions: prediction, replay and prior programs"
     @test only(ranef_blocks(prior)).family === :ranef_correlated_draws_known_cor
 end
 
+FIXED_RUNTIME && @stestset "brm_start: known values are restated, sampled ones start" begin
+    # sd = (sqrt(0.1), 0.5); the first matches the known SD of `mixed_builder`.
+    Sigma = [0.1 0.02; 0.02 0.25]
+    contradicting = [0.2 0.0; 0.0 0.25]
+    sb = build(mixed_builder)
+    model = instantiate(sb).model
+    names = BridgeStan.param_names(model)
+    u = brm_start(sb, model, (; p=Sigma, sigma=0.7))
+    values = BridgeStan.param_constrain(model, u)
+    @test values[only(findall(==("b_p_subject_tau_free.1"), names))] ≈ 0.5
+    # refused: an initial value cannot contradict a known one (`1kicac2`).
+    @test_throws "contradicts it" brm_start(sb, model, (; p=contradicting))
+    rk = RKBRMI(mixed_builder(DF))
+    @test length(brm_start(rk, (; p=Sigma, sigma=0.7))) ==
+        length(coordinate_names(rk.model.layout))
+    @test_throws "contradicts it" brm_start(rk, (; p=contradicting))
+    # A known correlation: restating it starts, another one is refused.
+    known = build(known_builder)
+    known_model = instantiate(known).model
+    @test brm_start(known, known_model, (; p=0.16 .* R)) isa Vector{Float64}
+    @test_throws "contradicts it" brm_start(known, known_model,
+        (; p=0.16 .* [1 0.5; 0.5 1]))
+    @test_throws "contradicts it" brm_start(RKBRMI(known_builder(DF)),
+        (; p=0.16 .* [1 0.5; 0.5 1]))
+end
+
 @stestset "descriptors, descriptions and the loud edges" begin
     sb = build(mixed_builder)
     d = brm_descriptor(sb; name=:fixed)
