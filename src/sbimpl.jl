@@ -4379,10 +4379,21 @@ _sb_held_out_request(held_out) = _brm_held_out_request(held_out; prefix="sbimpl"
 # is what makes a nested `qy ~ normal(...)` inside `kernel(..., qt_y, ...)`
 # addressable as `held_out=:qt_y`: the declaration records `target=:qy` and
 # `data_source=:qt_y`, while StanBlocks must receive the mark on the latter.
-Base.@nospecializeinfer function _sb_apply_held_out(@nospecialize(sb::SBBRMI), held_out)
+#
+# `cover_all` re-applies a set the artifact already recorded, which may cover
+# every observation: `population_model` holds them all out.
+Base.@nospecializeinfer function _sb_apply_held_out(@nospecialize(sb::SBBRMI), held_out;
+                                                    cover_all::Bool=false)
     request = _sb_held_out_request(held_out)
     isempty(request.names) && return sb
+    inventory = _sb_held_out_inventory(sb)
+    selected = _brm_resolve_held_out(request, inventory.aliases, inventory.sources,
+                                     inventory.unbound; prefix="sbimpl", cover_all)
+    _sb_mark_held_out(sb, selected)
+end
 
+# Every observation's response data source, under each name that addresses it.
+Base.@nospecializeinfer function _sb_held_out_inventory(@nospecialize(sb::SBBRMI))
     plan = _generative_plan(sb, nothing, Set{Symbol}())
     aliases = Dict{Symbol,Set{Symbol}}()
     sources = Set{Symbol}()
@@ -4405,14 +4416,18 @@ Base.@nospecializeinfer function _sb_apply_held_out(@nospecialize(sb::SBBRMI), h
             push!(get!(() -> Set{Symbol}(), aliases, alias), source)
         end
     end
-    selected = _brm_resolve_held_out(request, aliases, sources, unbound; prefix="sbimpl")
+    (; aliases, sources, unbound)
+end
 
+# Mark the response data sources `selected` held out (cv), on top of the ones
+# `sb` already holds out.
+Base.@nospecializeinfer function _sb_mark_held_out(@nospecialize(sb::SBBRMI), selected)
     marked = Dict{Symbol,Any}(sb.data)
-    for source in selected
+    for source in setdiff(selected, sb.held_out)
         marked[source] = StanBlocks.stan.maybecv(source, marked[source])
     end
     model = StanBlocks.SlicModel(sb.model.model, marked, sb.model.mod, sb.model.observations)
-    SBBRMI(sb.parent, model, marked, sb.preproc, selected, sb.bindings)
+    SBBRMI(sb.parent, model, marked, sb.preproc, union(sb.held_out, selected), sb.bindings)
 end
 
 """
@@ -5166,7 +5181,8 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
     end
     new_model = StanBlocks.SlicModel(sb.model.model, new_data, sb.model.mod, sb.model.observations)
     _sb_apply_held_out(
-        SBBRMI(sb.parent, new_model, new_data, new_preproc, Set{Symbol}(), sb.bindings), sb.held_out)
+        SBBRMI(sb.parent, new_model, new_data, new_preproc, Set{Symbol}(), sb.bindings), sb.held_out;
+        cover_all=true)
 end
 
 function reprocess(plan::GenerativePlan, new_df; freeze_constants::Bool=true,
