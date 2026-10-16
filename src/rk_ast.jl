@@ -1404,12 +1404,13 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             coef = _rk_ast_coef_name(
                 string(predictor.name, "_", term.addressee), taken)
             coefs[index] = coef
+            prior = Expr(:call, override[1], override[2]...)
             r2d2 === nothing &&
                 !haskey(joint_priors, (predictor.name, term.addressee)) &&
                 _rk_coordinate_record!(coordinates, (; kind=:population,
                     declaration=coef, predictor=predictor.name,
-                    coefficient=term.addressee))
-            Expr(:call, :~, coef, Expr(:call, override[1], override[2]...))
+                    coefficient=term.addressee, prior))
+            Expr(:call, :~, coef, prior)
         end
         for (index, term) in enumerate(predictor.terms)
             kind = term.kind
@@ -1488,7 +1489,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                         declaration=coef, predictor=predictor.name,
                         coefficient=term.addressee, labels=term.options.labels,
                         level_values=term.options.level_values,
-                        coding=term.options.coding))
+                        coding=term.options.coding,
+                        prior=Expr(:call, override[1], override[2]...)))
             elseif kind === :monotonic && hs_spec === nothing && override !== nothing
                 # The monotonic component owns its simplex and coefficient.
                 # Its coefficient pairs like a population coefficient only
@@ -1610,9 +1612,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             push!(stmts, Expr(:call, :~, L, Expr(:call, :LKJCholesky, K, eta)))
             push!(stmts, Expr(:(=), parameter.name, Expr(:call, :.*, scales, L)))
         else
-            push!(stmts, _rk_ast_sampled(parameter))
+            sampled = _rk_ast_sampled(parameter)
+            push!(stmts, sampled)
             _rk_coordinate_record!(coordinates,
-                (; kind=:scalar, declaration=parameter.name))
+                (; kind=:scalar, declaration=parameter.name, prior=sampled.args[3]))
         end
     end
     # Monotonic increment simplexes belong to their monotonic blocks.

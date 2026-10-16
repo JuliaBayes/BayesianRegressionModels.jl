@@ -209,6 +209,13 @@ function brm_start(rk::RKBRMI, inits::NamedTuple;
     for target in _brm_start_targets(parent(rk), inits)
         _brm_rk_start_writes!(writes, Val(target.kind), target, records, values)
     end
+    _brm_rk_start_point(rk, values, writes)
+end
+
+# Write `(declaration, index, value)` constrained values into `values` (the
+# constrained view of the base point), invert the layout, and check that the
+# point reproduces every written value.
+function _brm_rk_start_point(rk::RKBRMI, values, writes)
     seen = Set{Tuple{Symbol,Tuple}}()
     for (declaration, index, _) in writes
         (declaration, index) in seen && error(
@@ -299,28 +306,13 @@ function _brm_rk_start_writes!(writes, ::Val{:ranef}, t, records, values)
     P = _brm_start_margin_positions(t, r.margins)
     known = get(r, :known_scales, nothing)
     if !isnothing(t.sd)
-        if !isnothing(known)
-            # A known-value block names only its sampled scales.
-            for (k, j) in enumerate(P)
-                isnothing(known[k]) ? push!(writes, (r.scales[k], (), t.sd[j])) :
-                    _brm_start_known_scale(t, j, known[k])
-            end
-        elseif isnothing(r.scales)
-            current = _brm_rk_declaration_value(values, r.scale)
-            if current isa Number
-                length(P) == 1 || error(
-                    "brm_start: internal: scalar scale `$(r.scale)` for $(length(P)) margins")
-                push!(writes, (r.scale, (), t.sd[only(P)]))
-            else
-                for (k, j) in enumerate(P)
-                    push!(writes, (r.scale, (k,), t.sd[j]))
-                end
-            end
-        else
-            for (k, j) in enumerate(P)
-                push!(writes, (r.scales[k], (), t.sd[j]))
-            end
+        # A known-value block names only its sampled scales; an address agrees
+        # with each known one and writes nothing for it.
+        sd = map(enumerate(P)) do (k, j)
+            isnothing(known) || isnothing(known[k]) ? t.sd[j] :
+                _brm_start_known_scale(t, j, known[k])
         end
+        _brm_rk_scale_writes!(writes, r, sd, values)
     end
     known_cor = get(r, :known_cor, nothing)
     if !isnothing(t.cor) && !isnothing(known_cor)
@@ -328,6 +320,28 @@ function _brm_rk_start_writes!(writes, ::Val{:ranef}, t, records, values)
     elseif !isnothing(t.cor) && !isnothing(r.L)
         push!(writes, (r.L, (), _brm_start_lower_factor(t.cor[P, P])))
     end
+end
+
+# A random-effect record's scales, `sd[k]` for its margin `k`; a `nothing`
+# entry leaves that scale at the base point.
+function _brm_rk_scale_writes!(writes, r, sd, values)
+    if isnothing(r.scales)
+        current = _brm_rk_declaration_value(values, r.scale)
+        if current isa Number
+            length(sd) == 1 || error(
+                "brm_start: internal: scalar scale `$(r.scale)` for $(length(sd)) margins")
+            isnothing(only(sd)) || push!(writes, (r.scale, (), only(sd)))
+        else
+            for (k, x) in enumerate(sd)
+                isnothing(x) || push!(writes, (r.scale, (k,), x))
+            end
+        end
+    else
+        for (k, x) in enumerate(sd)
+            isnothing(x) || push!(writes, (r.scales[k], (), x))
+        end
+    end
+    writes
 end
 
 # Replace one addressed element (or the whole value) of a declaration in the

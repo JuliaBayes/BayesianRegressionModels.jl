@@ -229,7 +229,8 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
         # A Student-t block also records its per-level mixing weights; Gaussian
         # records keep their established fields. A known-value block names only
         # its sampled scales (`nothing` at a known margin) and records which
-        # values are known.
+        # values are known. `scale_priors` are the laws emitted for the
+        # margins' scales, in margin order (a known scale's is its number).
         grouping.form === :plain &&
             _rk_coordinate_record!(coordinates, merge((; kind=:ranef,
                 group=bucket.group, id=bucket.id, bucket_kind=bucket.kind,
@@ -241,7 +242,8 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
                     all(isequal(first(priors)), priors) ? nothing :
                     Tuple(Symbol(draws, ".tau_", k) for k in 1:K),
                 z=Symbol(draws, ".z"),
-                L=K == 1 || L_value !== nothing ? nothing : Symbol(draws, ".L")),
+                L=K == 1 || L_value !== nothing ? nothing : Symbol(draws, ".L"),
+                scale_priors=Tuple(priors)),
                 bucket.dist === nothing ? (;) : (; mixing=Symbol(draws, ".w")),
                 known || L_value !== nothing ?
                     (; known_scales=Tuple(p isa Real ? p : nothing for p in priors),

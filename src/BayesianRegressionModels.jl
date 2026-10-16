@@ -104,6 +104,7 @@ include("nlme_joint_start.jl")
 include("nlme_conditional.jl")
 include("nlme_start.jl")
 include("start_values.jl")
+include("nlme_fit.jl")
 include("covariate_resampling.jl")
 export modeled_covariates
 include("description.jl")
@@ -213,7 +214,7 @@ export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
        brm_start,
        BRMNLMEView, BRMNLMEViewError, brm_nlme_view,
        BRMNLMEJointMap, brm_nlme_joint_map, brm_nlme_joint_start,
-       brm_nlme_joint_values, brm_nlme_start,
+       brm_nlme_joint_values, brm_nlme_start, brm_nlme_estimates, brm_nlme_fit,
        BRMNLMEConditionalProblem, brm_nlme_conditional_problem,
        brm_nlme_conditional_point,
        BRMNLMEModel, brm_nlme_model, brm_nlme_loglikelihood,

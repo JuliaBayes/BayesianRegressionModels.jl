@@ -141,12 +141,17 @@ end
 
 # A population component's coefficient records: `<name>.beta_pop` indexed by
 # column, or one `<name>.beta_pop_<j>` declaration per column for mixed families.
+# Each carries the law its column was given.
+_rk_ast_population_prior(entry, j) =
+    Expr(:call, first(entry.priors[j]), last(entry.priors[j])...)
+
 function _rk_ast_population_records!(coordinates, entry)
     for (j, c) in enumerate(entry.coefficients)
         c.paired || continue
         _rk_coordinate_record!(coordinates, (; kind=:population,
             declaration=Symbol(entry.name, entry.mixed ? ".beta_pop_$j" : ".beta_pop"),
-            index=entry.mixed ? () : (j,), predictor=c.predictor, coefficient=c.coefficient))
+            index=entry.mixed ? () : (j,), predictor=c.predictor, coefficient=c.coefficient,
+            prior=_rk_ast_population_prior(entry, j)))
     end
 end
 
@@ -233,7 +238,8 @@ function _rk_ast_joint_population!(definitions, statements, taken, coordinates,
         for (j, c) in enumerate(entry.coefficients)
             c.paired && _rk_coordinate_record!(coordinates, (; kind=:population,
                 declaration=Symbol(joint, ".beta_pop"), index=(j, t),
-                predictor=c.predictor, coefficient=c.coefficient))
+                predictor=c.predictor, coefficient=c.coefficient,
+                prior=_rk_ast_population_prior(entry, j)))
         end
     end
     true
