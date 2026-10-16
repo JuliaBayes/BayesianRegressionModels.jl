@@ -24,6 +24,14 @@ covers interleaved rows, shared random effects, empty groups, raw-data controls
 and preservation of field and keyword names. Run it with
 `julia --project=. test/kernel_ragged_broadcast.jl` or the test environment above.
 
+`plate_grouping.jl` checks the model-scope `ragged(x, group)` statement that
+`@plate for` cells read as `x[i]`: identical Stan source, descriptor outputs
+and RK log density to the deprecated in-body `ragged(x, group)[i]` read, the
+omitted-response path, the boundary refusals, and a per-subject linear
+predictor without a random effect read as `x[i]` (BridgeStan and RK density
+parity with the old one-element ragged gather). Run it with `--depwarn=yes` so
+its deprecation assertion is live.
+
 `plate_ragged_omitted_response.jl` checks a censored ragged observation inside
 `@plate` with its data column bound, omitted, and reprocessed. It requires the
 StanBlocks revision pinned by `setup_env.jl` and checks the public flat

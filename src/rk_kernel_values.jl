@@ -200,7 +200,8 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
     scope = _brm_inline_scope(first(getargs(rhs)))
     direct_lps = [argument for argument in arguments
         if argument isa NamedColumn && parent(argument) isa ExprColumn]
-    groups = [_sb_kernel_lp_bucket(lp) for lp in direct_lps]
+    buckets = _sb_kernel_lp_buckets(direct_lps)
+    groups = [bucket for bucket in buckets if bucket !== nothing]
     group_values = if isempty(groups)
         nothing
     else
@@ -208,6 +209,10 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             "RK backend: kernel `$name` predictor inputs disagree on subject grouping")
         column = first(groups)[3]
         _brm_kernel_subject_values(parent(parent(column)), _rk_kernel_column_name(column); prefix="RK backend")
+    end
+    for (lp, bucket) in zip(direct_lps, buckets)
+        bucket === nothing && _brm_kernel_check_subject_frame_lp(
+            lp, length(group_values); prefix="RK backend")
     end
     columns = Dict{Symbol,Any}()
     inputs = Any[]

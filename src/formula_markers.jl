@@ -153,7 +153,7 @@ log_Vc ~ 1 + (1 | p | subject)
 @plate for i in eachindex(log_CL)
     CL = exp(log_CL[i])
     Vc = exp(log_Vc[i])
-    conc[i] = pk_cell(t_obs[i], ragged(dose, dose_subject)[i], CL, Vc)
+    conc[i] = pk_cell(t_obs[i], dose[i], CL, Vc)
 end
 ```
 
@@ -163,9 +163,13 @@ once. An indexed output that later cell statements read is bound as a cell value
 first and then returned.
 
 Indexed inputs split by kind. A raw data column on the plate's own
-one-row-per-subject frame is gathered into a per-group slice. A column living on
-a DIFFERENT frame — a dose-event table, say — must declare its grouping with
-[`ragged`](@ref). A linear predictor is passed as that group's scalar value.
+one-row-per-subject frame is gathered into a per-group slice. A column or
+linear predictor living on a DIFFERENT frame — a dose-event table, say — is
+grouped by a model-scope [`ragged`](@ref) statement and still read as `x[i]`.
+A per-subject linear predictor is passed as that group's scalar value. One
+without a random effect defines no grouping of its own: it is read on the
+subject frame a random-effect predictor defines, so its data columns must have
+one row per subject.
 
 `@brm` lowers this annotated-loop surface to the shared kernel IR, so SBBRMI and
 RKBRMI use the same grouping, ragged, observation, and omitted-outcome paths.
@@ -184,10 +188,13 @@ function kernel end
 Group a FLAT secondary row axis by a raw data column that names the subject of
 every row. The marker has two formula positions:
 
-- As an indexed `@plate for` read, `ragged(x, group)[i]` gives cell `i` a
-  ragged per-subject vector. `x` may be a flat data column or an event-axis
-  linear predictor. The compatibility `kernel(...)` positional has the same
-  meaning.
+- As a model-scope statement, `ragged(x, group)` declares that `@plate for`
+  cells read `x[i]` as cell `i`'s ragged per-subject vector. `x` may be a flat
+  data column or an event-axis linear predictor. The declaration emits nothing
+  itself; it may precede or follow the cells, a name is grouped at most once,
+  and a declaration no cell reads is refused. The deprecated in-body read
+  `ragged(x, group)[i]` and the compatibility `kernel(...)` positional lower
+  to exactly the same kernel argument.
 - As an observation LHS, `ragged(y, group) ~ Family(pred, ...)` groups a flat
   response before applying the top-level likelihood. The referenced
   `kernel(...)` result supplies the authoritative subject row order, so labels
@@ -207,10 +214,11 @@ flat data column. It is the same grouping either way:
 ```julia
 log_F  ~ 1 + vessel + mo(diet) + hsgp(log_dose)     # rows = dose events
 log_CL ~ 1 + weight + (1 | p | subject)             # rows = subjects
+ragged(dose_amount, dose_subject)                   # a flat data column
+ragged(log_F, dose_subject)                         # a linear predictor
 
 @plate for i in eachindex(log_CL)
-    effective_dose = ragged(dose_amount, dose_subject)[i] .*
-                     exp.(ragged(log_F, dose_subject)[i])
+    effective_dose = dose_amount[i] .* exp.(log_F[i])
     pred[i] = pk_cell(t_obs[i], effective_dose, log_CL[i])
     dv[i] ~ normal(pred[i], sigma)
 end
@@ -241,8 +249,10 @@ per-subject inner lengths across positionals; once each positional supplies one
 outer cell per subject, relationships among the values inside a cell belong to
 the cell body.
 
-Dispatch tag only — lowering lives in `_sb_kernel_doblock!` (sbimpl).
-Observation-LHS lowering lives in `_sb_sampling!`.
+Dispatch tag only — the model-scope statement is consumed by the `@plate for`
+rewrite (`_brm_plate_kernel`, macro.jl), kernel-argument lowering lives in
+`_sb_kernel_doblock!` (sbimpl), and observation-LHS lowering lives in
+`_sb_sampling!`.
 """
 ragged
 

@@ -179,8 +179,9 @@ row per concentration measurement. Those axes deliberately have different
 lengths and the observation rows are interleaved. The indexed `@plate for`
 cell evaluates the structural model once per subject: `CL[i]` and `V[i]` read
 subject `i`'s values of the linked formulas, `dose[i]` reads the subject frame,
-and `ragged(time, obs_subject)[i]` selects that subject's observation times
-from the flat observation frame. The cell body is ordinary Julia, so `.*` and
+and `time[i]` selects that subject's observation times from the flat
+observation frame, grouped once outside the cell by the model-scope statement
+`ragged(time, obs_subject)`. The cell body is ordinary Julia, so `.*` and
 `exp.` act elementwise on those times. The cell names its result
 `predicted_concentration[i]`; the top-level `ragged(concentration, obs_subject)`
 response joins the flat concentrations to it. In the generated StanBlocks pane,
@@ -196,10 +197,11 @@ population_pk = (@brm begin
     sigma ~ Exponential(1)
     log(CL) ~ 1 + (1 | pk | subject)
     log(V)  ~ 1 + (1 | pk | subject)
+    ragged(time, obs_subject)
 
     @plate for i in eachindex(CL)
         predicted_concentration[i] = dose[i] / V[i] .*
-            exp.((-CL[i] / V[i]) .* ragged(time, obs_subject)[i])
+            exp.((-CL[i] / V[i]) .* time[i])
     end
 
     ragged(concentration, obs_subject) ~
