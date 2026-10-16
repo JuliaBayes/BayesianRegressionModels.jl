@@ -315,14 +315,43 @@ const PLATE_EFFECT_PAIRS = (
 end
 
 @testset "@brm @plate for — observation-only cells on SBBRMI" begin
-    # Capability gap, not a wrong shape: StanBlocks' do-block `plate` always
-    # collects a cell value (StanBlocks snag `result-less-do-f-3076f098`), so
-    # SBBRMI refuses the cell until StanBlocks has a plate without one.
-    for (label, data, _with_output, effect_only) in PLATE_EFFECT_PAIRS
+    # StanBlocks' do-block `plate` collects no result from a cell ending in
+    # `nothing` (StanBlocks snag `result-less-do-f-3076f098`), which is how
+    # `@brm` lowers an observation-only cell.
+    carriers(code) = length(collect(eachmatch(r"__pl_mem_\d+;", code)))
+    for (label, data, with_output, effect_only) in PLATE_EFFECT_PAIRS
         @testset "$label" begin
-            @test_broken StanBlocks.stanc_check(BRM.stan_code(SBBRMI(
-                effect_only(data); mod=@__MODULE__, total_groups=()));
-                warn_pedantic=false).ok
+            old_sb = SBBRMI(with_output(data); mod=@__MODULE__, total_groups=())
+            new_sb = SBBRMI(effect_only(data); mod=@__MODULE__, total_groups=())
+            old_code, new_code = BRM.stan_code(old_sb), BRM.stan_code(new_sb)
+            @test StanBlocks.stanc_check(new_code; warn_pedantic=false).ok
+            # Nothing is collected: the output form stores the prediction a
+            # second time as its result; the observation-only cell does not.
+            @test carriers(new_code) == carriers(old_code) - 1
+            old_outputs = brm_descriptor(old_sb).outputs
+            new_outputs = brm_descriptor(new_sb).outputs
+            @test [(o.logical, o.role) for o in new_outputs] ==
+                  [(o.logical, o.role) for o in old_outputs if o.logical !== :loc]
+            # Where the prediction reads a parameter, the cell local is still
+            # addressable by its authored name.
+            if any(o -> o.logical === :mu, old_outputs)
+                @test brm_output(brm_descriptor(new_sb), :mu).role === :group_block
+            end
+            tag = replace(label, r"\W+" => "_")
+            old = consumer_stan(with_output(data), "obs_only_output_" * tag)
+            new = consumer_stan(effect_only(data), "obs_only_" * tag)
+            @test BridgeStan.param_unc_names(new.model) == BridgeStan.param_unc_names(old.model)
+            n = length(BridgeStan.param_unc_names(new.model))
+            for u in (zeros(n), fill(0.3, n),
+                      n == 1 ? [-0.4] : collect(range(-0.4, 0.2; length=n)))
+                old_gradient, new_gradient = similar(u), similar(u)
+                old_value, _ = BridgeStan.log_density_gradient!(old.model, u, old_gradient;
+                    propto=false, jacobian=true)
+                new_value, _ = BridgeStan.log_density_gradient!(new.model, u, new_gradient;
+                    propto=false, jacobian=true)
+                @test new_value == old_value
+                @test new_gradient == old_gradient
+            end
         end
     end
 end

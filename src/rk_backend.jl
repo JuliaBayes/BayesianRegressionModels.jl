@@ -379,7 +379,15 @@ struct _RKRanefBucket
     sd_priors::Vector{Any}
     decomposition::Union{Nothing,NamedTuple}
     dist::Union{Nothing,_BRMRanefStudentT} # block law; `nothing` is Gaussian
+    # `cor(:, ID) = R`: the known correlation (in margin order), held as a
+    # constant Cholesky factor instead of an LKJ draw. Known scales
+    # (`sd(...) = value`) ride `sd_priors` as `_BRMKnownScale` entries.
+    known_cor::Union{Nothing,Matrix{Float64}}
 end
+_RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping, sd_priors,
+        decomposition, dist) =
+    _RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping,
+        sd_priors, decomposition, dist, nothing)
 _RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping, sd_priors,
         decomposition) =
     _RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping,
@@ -2809,6 +2817,73 @@ function _rk_staged_transform(f::Function, inner, target::Symbol,
     staged
 end
 
+# `offset(x)` whose `x` reads a model value (`_brm_reads_model_value`: a
+# sampled scalar, an authored assignment, another predictor), alone or composed
+# with raw data, is graph math rather than a bound column: the same forms
+# SBBRMI's offset admits. Its expression reads model values by name, binds raw
+# data columns by name, and dots elementwise arithmetic as authored
+# assignments do.
+function _rk_model_offset_expr(node, target::Symbol, data::AbstractDict,
+        columns::Dict{Symbol,AbstractVector})
+    prefix = "RK backend"
+    node isa Real && !(node isa Bool) && return node
+    if node isa NamedColumn
+        source = name(node)
+        parent(node) isa DataColumn || return source
+        raw = get(data, source, nothing)
+        raw isa AbstractVector{<:Real} && !(eltype(raw) <: Bool) &&
+            !(raw isa CA.CategoricalVector) || error(
+            "$prefix: predictor `$target` `offset()` reads data `$source`, " *
+            "which must be a numeric data column (a vector of reals)")
+        columns[source] = raw
+        return source
+    end
+    node isa ExprColumn && isempty(getkwargs(node)) || error(
+        "$prefix: predictor `$target` `offset()` argument " *
+        "`$(repr(node))` is not elementwise arithmetic over data and model values")
+    f = getf(node)
+    args = map(arg -> _rk_model_offset_expr(arg, target, data, columns), getargs(node))
+    haskey(_RK_DERIVED_BINOPS, f) && return Expr(:call, _RK_DERIVED_BINOPS[f], args...)
+    haskey(_RK_DERIVED_CMP, f) && return Expr(:call, _RK_DERIVED_CMP[f], args...)
+    haskey(_RK_DERIVED_MATH, f) && length(args) == 1 &&
+        return _rk_ast_dotted(_RK_DERIVED_MATH[f], only(args))
+    error("$prefix: predictor `$target` `offset()` calls `$(repr(f))`; an " *
+        "offset of a model value takes elementwise `+ - * / ^ %`, comparisons " *
+        "and `$(join(sort!(string.(nameof.(collect(keys(_RK_DERIVED_MATH))))), "`, `"))`")
+end
+
+# The summand is the lowered expression with coefficient one. `axis` is `()`
+# for a row-less value (it broadcasts over the predictor's rows) or the row
+# axis `(; source, nrows)` the predictor must share (`_rk_check_model_offset_rows`).
+function _rk_model_offset_spec(inner, target::Symbol, data::AbstractDict,
+        columns::Dict{Symbol,AbstractVector}, context)
+    axis = _rk_model_value_axis(inner, context)
+    axis === nothing && error(
+        "RK backend: predictor `$target` `offset($(repr(inner)))` reads a " *
+        "model value that is neither a scalar nor a value on data rows; an " *
+        "offset adds a scalar or a row-aligned value")
+    expression = _rk_model_offset_expr(inner, target, data, columns)
+    hint = Symbol(_rk_derived_hint(expression))
+    _RKTermSpec(:offset, unique!(_brm_data_expression_sources(inner)),
+        (; expression, axis), hint, Symbol(:offset_, hint))
+end
+
+_rk_model_offset(term::_RKTermSpec) =
+    term.kind === :offset && haskey(term.options, :expression)
+_rk_scalar_model_offset(term::_RKTermSpec) =
+    _rk_model_offset(term) && term.options.axis == ()
+
+function _rk_check_model_offset_rows(terms, nrows::Integer, target::Symbol)
+    for term in terms
+        _rk_model_offset(term) && !_rk_scalar_model_offset(term) || continue
+        term.options.axis.nrows == nrows || error(
+            "RK backend: predictor `$target` `offset()` reads " *
+            "`$(term.options.axis.source)`-aligned values with " *
+            "$(term.options.axis.nrows) rows, but the predictor has $nrows rows")
+    end
+    nothing
+end
+
 function _rk_term_specs(term, target::Symbol, data::AbstractDict,
         columns::Dict{Symbol,AbstractVector},
         derived::Vector{_RKDerivedSpec}, taken::Set{Symbol},
@@ -2831,6 +2906,8 @@ function _rk_term_specs(term, target::Symbol, data::AbstractDict,
         isempty(getkwargs(term)) || error(
             "$prefix: predictor `$target` `offset()` takes no keywords")
         inner = only(args)
+        _brm_reads_model_value(inner) && return _RKTermSpec[
+            _rk_model_offset_spec(inner, target, data, columns, context)]
         if inner isa NamedColumn
             sources = _brm_data_expression_sources(inner)
             length(sources) == 1 || error(
@@ -4176,9 +4253,26 @@ Base.@nospecializeinfer function _rk_plan_ranef_buckets(@nospecialize(brmi::BRMI
             eta += (length(all_margins) - length(bucket.margins)) / 2
             override === nothing || (sd_priors = sd_priors[positions])
         end
+        known_cor = override === nothing ? nothing : override.known_cor
+        if _brm_ranef_has_known(override)
+            decomposition === nothing || error(
+                "$prefix: `|$(bucket.id)|` holds a known scale or correlation " *
+                "(`sd(...) = value` / `cor(:, $(bucket.id)) = R`) and also carries " *
+                "an `r2d2` decomposition; choose one scale definition for the block")
+            bucket.grouping.form === :plain || error(
+                "$prefix: `|$(bucket.id)|` holds a known scale or correlation over " *
+                "a `$(bucket.grouping.form)` grouping; known values are " *
+                "implemented for ordinary grouping factors only")
+            # A narrower block (an omitted response) keeps exactly the known
+            # values of its planned margins: the marginal of a fixed
+            # correlation is its submatrix.
+            reduced && known_cor !== nothing &&
+                (known_cor = known_cor[positions, positions])
+        end
         replacement = _RKRanefBucket(bucket.id, bucket.group, bucket.kind,
             bucket.margins, bucket.slices, eta, bucket.label,
-            bucket.grouping, sd_priors, decomposition, dist)
+            bucket.grouping, sd_priors, decomposition, dist,
+            known_cor !== nothing && size(known_cor, 1) >= 2 ? known_cor : nothing)
         buckets[i] = replacement
         for (key, value) in lookup
             value === bucket && (lookup[key] = replacement)
@@ -4211,7 +4305,10 @@ Base.@nospecializeinfer function _rk_plan_offset_only_predictor(@nospecialize(br
     design = _brm_population_design(target, ordinary, context.data,
         get(context.target_obs, target, nothing);
         required=true, row_source,
-        implicit_intercept=target in _brm_threshold_located_predictors(brmi))
+        implicit_intercept=target in _brm_threshold_located_predictors(brmi),
+        population_columns=(term; cellmeans=false) ->
+            _rk_model_population_columns(term; cellmeans, context))
+    _rk_check_model_offset_rows(terms, size(design.matrix, 1), target)
     hs_priors = _rk_horseshoe_priors(brmi, design, target, available,
         terms, nothing)
     priors = _rk_population_priors(brmi, design, target, available,
@@ -5480,6 +5577,7 @@ Base.@nospecializeinfer function _rk_plan_predictor(@nospecialize(brmi::BRMI), c
     r2d2 = isnothing(r2plan) ? nothing :
         _rk_plan_r2d2_prior(brmi, design, r2plan, target, available,
             terms, taken, columns)
+    _rk_check_model_offset_rows(terms, size(design.matrix, 1), target)
     row_source = design.row_source
     if !haskey(columns, row_source)
         raw = get(context.data, row_source, nothing)
@@ -7431,8 +7529,9 @@ end
 # dependencies before filtering scalar draws; an SD or law declaration is
 # metadata rather than a normal formula operand.
 Base.@nospecializeinfer function _rk_with_ranef_prior_dependencies(@nospecialize(brmi::BRMI), program, roots)
+    # Known values (`sd(...) = value`) resolve to constants and read nothing.
     specs = [spec for spec in ranef_effect_priors(brmi)
-        if !(spec.class === :sd && spec.family === r2d2)]
+        if !(spec.class === :sd && spec.family === r2d2) && spec.family !== _brm_known]
     any(spec -> spec.class in (:sd, :ranef) &&
         !isempty(_brm_prepared_references(_brm_prepare_expr(spec.expression))), specs) ||
         return program

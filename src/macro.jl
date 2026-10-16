@@ -633,6 +633,9 @@ elseif _is_brm_plate_grouping(x)
         "@brm: `$(repr(x))` declares a plate grouping and must be a statement " *
         "of the `@brm` block")
     nothing
+elseif x.head == :(=) && _is_effect_lhs(x.args[1])
+    lhs, rhs = x.args
+    _parse_effect!(lhs, rhs; info, known=true)
 elseif x.head == :(=)
     lhs, rhs = x.args
     parselocals!(rhs; info, val=:nonlocal)
@@ -1324,9 +1327,56 @@ function _prior_address(head::Symbol, args::Vector{Symbol})
           join(("`$h`" for h in _PRIOR_HEADS), ", ") * ".")
 end
 
-function _parse_effect!(lhs::Expr, rhs; info)
+# ---- known-value statements -------------------------------------------------
+#
+# `sd(<lp|:>, <ID>[, <coefficient>]) = value` and `cor(:, <ID>) = R` hold a
+# shared random-effect block's marginal scale or correlation matrix at a KNOWN
+# value instead of sampling it (nlmixr2's `fix()` on an omega). `=` keeps BRM's
+# split: `~` declares something stochastic, `=` a known model value. The
+# address grammar is exactly the `~` one.
+#
+# A known value lowers onto the same `effect(...)` carrier and the same
+# generated key as its `~` twin, with the value wrapped in the `_brm_known`
+# marker. So it is a prior-address statement everywhere downstream
+# (`priors_of`/`structure_of`, `ranef_effect_priors`), a `~` statement on the
+# same address is a duplicate, and `merge(structure, priors)` swaps an estimated
+# scale for a known one by address.
+"""
+    _brm_known(value)
+
+Internal marker for a known-value prior-address statement,
+`sd(lp, ID) = value` or `cor(:, ID) = R`. Never called.
+"""
+function _brm_known end
+
+const _KNOWN_VALUE_HEADS = (:sd, :cor)
+
+# The RHS of `f(args...) = value` reaches the macro as a short-form function
+# body: `Expr(:block, LineNumberNode, value)`.
+function _brm_known_value_expr(rhs, lhs)
+    Meta.isexpr(rhs, :block) || return rhs
+    values = [a for a in rhs.args if !(a isa LineNumberNode)]
+    length(values) == 1 || error(
+        "@brm: `$lhs = ...` takes exactly one known value; got " *
+        "$(length(values)) expressions")
+    only(values)
+end
+
+function _parse_effect!(lhs::Expr, rhs; info, known::Bool=false)
     head = lhs.args[1]::Symbol
     args = map(_prior_slot, lhs.args[2:end])
+    if known
+        head in _KNOWN_VALUE_HEADS || error(
+            "@brm: only random-effect `sd(...)` and `cor(...)` addresses take a " *
+            "known value with `=`; got `$lhs = ...`. Use `~` for a prior" *
+            (head === :effect ? ", or `offset(...)` for a known population term." : "."))
+        any(_is_term_key, args) && error(
+            "@brm: `$lhs = ...` addresses a term's own scale; a known value is " *
+            "supported for random-effect blocks only, " *
+            "`sd(<linear_predictor|:>, <ID>[, <coefficient>]) = value`. Use `~` " *
+            "for a prior on `$lhs`.")
+        rhs = Expr(:call, _brm_known, _brm_known_value_expr(rhs, lhs))
+    end
     address = _prior_address(head, args)
     # The key becomes a generated LOCAL NAME. A term key carries `(`/`)`/`,`,
     # which are legal inside a `Symbol` but not in emitted Julia source, so
@@ -2179,6 +2229,13 @@ end
 _show_top(io::IO, key, op) = print(io, key, ": ", op)
 _show_top(io::IO, key, op::ExprColumn{<:Union{typeof(~),typeof(assign)}}) = begin
     args = getargs(op)
+    # A known-value address statement prints the way it was written.
+    if getf(op) === (~) && last(args) isa ExprColumn{typeof(_brm_known)}
+        _show_bare(io, first(args))
+        print(io, " = ")
+        _show_bare(io, only(getargs(last(args))))
+        return
+    end
     _show_bare(io, first(args))
     for arg in Base.tail(args)
         print(io, " ", getop(op), " ")
