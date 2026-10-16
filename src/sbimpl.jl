@@ -5471,6 +5471,13 @@ function _sb_kernel_lambda_parts(lam)
     (params, statements)
 end
 
+# The column a kernel positional binds to its cell formal: the column itself,
+# or the flat column of a `ragged(y, group)` positional; `nothing` otherwise.
+_sb_kernel_positional_column(c::NamedColumn) = c
+_sb_kernel_positional_column(c::ExprColumn{typeof(ragged)}) =
+    length(getargs(c)) == 2 ? first(getargs(c)) : nothing
+_sb_kernel_positional_column(_) = nothing
+
 # Indexes (1-based into `positionals`, i.e. `dcols[2:end]`) of omitted kernel
 # OUTCOMES: `MissingColumn`-backed positionals whose cell parameter is observed
 # in-cell. The omitted response column is the one prior spelling, so these
@@ -5484,13 +5491,7 @@ function _sb_kernel_unbound_cell_idx(positionals, params::Vector{Symbol}, body_s
     found = Int[]
     length(params) == length(positionals) || return found
     for (i, c) in enumerate(positionals)
-        response = if c isa NamedColumn
-            c
-        elseif c isa ExprColumn && getf(c) === ragged && length(getargs(c)) == 2
-            first(getargs(c))
-        else
-            nothing
-        end
+        response = _sb_kernel_positional_column(c)
         response isa NamedColumn && parent(response) isa MissingColumn || continue
         _sb_cell_param_observed(body_stmts, params[i]) || continue
         push!(found, i)
