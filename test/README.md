@@ -141,8 +141,19 @@ values with `brm_nlme_start`. It covers a correlated population-PK model and a
 nested model with a correlated subject family, nested units and a shared HSGP,
 in estimated and fixed shared modes. Subject log-likelihoods sum to the RK
 observation likelihood at the point, and `brm_nlme_joint_start` rebuilds the
-same Stan point from the natural values. Run it in the NLMEEstimation scratch
+same Stan point from the natural values. Initial estimates keyed by prior
+address (`brm_nlme_start(m, inits)`) give the addressed θ, σ and Ω with zero
+η, and `brm_start` on the joint map's Stan model gives the same point as
+`brm_nlme_joint_start` of that start. Run it in the NLMEEstimation scratch
 environment described below.
+
+`start_values.jl` checks `brm_start`, initial values keyed by prior address,
+on both backends. For a correlated population-PK model, a linked predictor,
+a categorical predictor with a `Dirichlet` simplex, and an exact-total block,
+it checks the addressed constrained values, the semantic transport's
+agreement between the RK and Stan points, unaddressed coordinates kept at a
+random base, and refusals of unknown addresses and invalid values. It runs in
+the test environment above.
 
 `nlme_estimation_ext.jl` covers the NLMEEstimation.jl protocol extension:
 batched and single-subject evaluation (including `check_protocol` and online

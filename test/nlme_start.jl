@@ -170,3 +170,37 @@ end
     moved = copy(u); moved[first(shared)] += 0.25
     @test_throws BRMNLMEViewError brm_nlme_start(fixed, moved)
 end
+
+@stestset "address-keyed initial estimates become NLME and full Stan starts" begin
+    brmi = nlme_plate_pk(NLME_PLATE_DATA)
+    backend = RKBRMI(brmi)
+    m = brm_nlme_model(backend; ad_backend=NLME_AD)
+    view = m.view
+    Ω = [0.09 0.018; 0.018 0.16]           # ranefcoefnames(brmi, :pk) order
+    inits = (; log_CL=(; Intercept=log(2.7), weight=0.75),
+        log_V=(; Intercept=log(31.5)), pk=Ω, sigma=0.1)
+    start = brm_nlme_start(m, inits)
+    @test start == brm_nlme_start(m, brm_start(backend, inits; base=m.unit))
+    theta = Dict(zip(view.coordinates[m.theta], start.theta))
+    @test theta[Symbol("pop_log_CL.beta_pop.1")] ≈ log(2.7) rtol=1e-12
+    @test theta[Symbol("pop_log_CL.beta_pop.2")] ≈ 0.75 rtol=1e-12
+    @test theta[:log_V_Intercept] ≈ log(31.5) rtol=1e-12
+    @test start.sigma ≈ [log(0.1)] rtol=1e-12
+    order = [findfirst(b -> b.predictor === lp, view.block_margins)
+        for lp in (:log_CL, :log_V)]
+    @test start.omega_matrix[order, order] ≈ Ω rtol=1e-10
+    @test omega_matrix(nlme_layout(m), start.omega) ≈ start.omega_matrix rtol=1e-12
+    @test all(iszero, start.eta)
+    @test check_protocol(m, start.theta, start.sigma, start.omega; η=start.eta)
+
+    # The full Stan target starts from the same addresses at the same point.
+    sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
+    map = brm_nlme_joint_map(backend, sb;
+        path=joinpath(mktempdir(), "nlme_start_inits.stan"))
+    joint = brm_nlme_joint_start(map; theta=start.theta, sigma=start.sigma,
+        omega=start.omega_matrix, eta=start.eta, subjects=start.subjects)
+    @test brm_start(map.sb, map.stan_model, inits) ≈ joint.stan rtol=1e-9 atol=1e-10
+
+    # refused: the base is a full packed point of this model's own layout.
+    @test_throws DimensionMismatch brm_nlme_start(m, inits; base=zeros(2))
+end
