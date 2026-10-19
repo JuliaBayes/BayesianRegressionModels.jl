@@ -3007,6 +3007,10 @@ SBBRMI(parent::BRMI, model, data::AbstractDict, preproc::AbstractDict,
 # Stan data dictionary and carried with the emitted artifact through replay.
 const _SB_BINDINGS_KEY = :__brm_emission_bindings__
 const _SB_THRESHOLD_LOCATED_KEY = :__brm_threshold_located__
+# Raw grouping columns the ranef pass replaced by a dense index, each with the
+# value it removed (see `_sb_note_group_column!`). Settled once emission is
+# complete by `_sb_settle_group_columns!`.
+const _SB_GROUP_COLUMNS_KEY = :__brm_group_columns__
 function _sb_record_binding!(data, key, role, logical; family=nothing, metadata...)
     bindings = get(data, _SB_BINDINGS_KEY, nothing)
     isnothing(bindings) || (bindings[key] = (; role, logical, family, metadata...))
@@ -3541,6 +3545,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
         Dict{Symbol,PreprocEntry}() :
         _SBPreprocContext(Dict{Symbol,PreprocEntry}(), _frozen_preproc)
     data[_SB_BINDINGS_KEY] = Dict{Symbol,NamedTuple}()
+    data[_SB_GROUP_COLUMNS_KEY] = Dict{Symbol,Union{Nothing,Some}}()
     # Predictors whose intercept an ordinal response's thresholds supply: their
     # categorical terms stay treatment-coded (see `_brm_cellmeans_block`).
     data[_SB_THRESHOLD_LOCATED_KEY] = _brm_threshold_located_predictors(brmi)
@@ -3702,6 +3707,9 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     # "this linear predictor is read by exactly one likelihood". Every
     # non-matching model keeps its statements byte for byte.
     _sb_fuse_normal_id_glm!(stmts, data)
+    # Settle raw grouping columns against the final statements, before the
+    # generic non-Stan drop below could silently remove one a statement reads.
+    _sb_settle_group_columns!(stmts, data, pop!(data, _SB_GROUP_COLUMNS_KEY))
     # Pop the preproc side-channel BEFORE building the SlicModel so it never
     # pollutes Stan's data dict.
     bindings = pop!(data, _SB_BINDINGS_KEY)
@@ -5390,20 +5398,17 @@ fall through to the default linear-predictor path. The default method
 `using`) when adding methods from a downstream module so the binding is
 extended rather than shadowed.
 
-**Reserved data keys — BRM owns raw grouping-column names.** Any raw
-column used as a ranef grouping factor (the `g` in `(… | g)`,
-`(… | ID | g)`, or `gr(g, by=…)`) is reclaimed by BRM's ranef pre-pass:
-the raw labels are DELETED from `data` and replaced by a dense integer
-index (`g_idx`) and level count (`n_g`), because Stan cannot consume raw
-(possibly string) labels. So a hook must NOT stash its own vector under a
-raw column name that the same model also uses as a grouping factor, nor
-emit a reference to it — the reclaim will delete it out from under the
-emitted statement, and the failure surfaces only much later, in
-StanBlocks tracing, as an unresolvable-symbol error. Key consumer-owned
-`data` PER TARGET instead, e.g. `Symbol(col_key, :_, target)`, which is
-self-owned and order-independent. (`_sb_reclaim_group_col!` now turns a
-collision into an immediate, correctly-attributed error at the delete
-site rather than a late one in a third package.)
+**Data keys and grouping columns.** A hook may store and read data under
+any column's own name, including a column the same model uses as a ranef
+grouping factor (the `g` in `(… | g)`, `(… | ID | g)`, or `gr(g, by=…)`),
+in any formula order. BRM itself reads a grouping column only through the
+dense integer index it derives (`g_idx`, level count `n_g`; `g__by__b_*`
+for `gr(g, by=b)`), and drops the raw `g` from the Stan data only when no
+emitted statement reads it (`_sb_settle_group_columns!`). A statement
+that reads `g` while `data[g]` holds string labels is refused at build:
+store an integer coding under `g`, or read `g_idx`. The derived index
+names belong to BRM: if one already holds a different value when BRM
+writes it, the build is refused (`_sb_set_group_index_datum!`).
 """
 _sb_submodel_rhs!(stmts, data, target, f, rhs) = nothing
 
@@ -9281,8 +9286,8 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, 
     n_levels, g_idx = _sb_level_index(parent(g_backing))
     idx_name = Symbol(g, :_idx)
     n_name   = Symbol(:n_, g)
-    data[idx_name] = g_idx
-    data[n_name]   = n_levels
+    _sb_set_group_index_datum!(data, idx_name, g_idx, g)
+    _sb_set_group_index_datum!(data, n_name, n_levels, g)
     _sb_record_group_index!(data, idx_name, n_name, g, parent(g_backing))
     r_name = Symbol(:r_, target, :_, g)
     # The size expression the non-centered submodels are given. Bound to a named
@@ -11212,38 +11217,76 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name,
     info.idx_name
 end
 
-# Reclaim a raw grouping-column name for BRM's dense integer index. The generic
-# data prepass sees grouping columns too, but Stan consumes only their dense
-# integer code, never the raw labels (which may be strings and therefore are not
-# valid Stan data at all) — so the raw column is deleted from `data` here. BRM
-# OWNS the raw name of any column used as a ranef grouping factor and reclaims it
-# in this pre-pass; see the `_sb_submodel_rhs!` docstring for the reserved-name
-# contract this enforces.
-#
-# Guard against a silent clobber: a `_sb_submodel_rhs!` hook (or any other data-
-# writing extension) that stashes its OWN vector under a raw column name the same
-# model also uses as a grouping factor — and emits a reference to it — would have
-# that vector deleted out from under the emitted statement, surfacing only much
-# later as an unresolvable-symbol error deep in StanBlocks tracing that names
-# neither the delete nor BRM. When the key no longer holds the raw column the
-# data prepass wrote (i.e. something replaced it), fail loudly and attributed
-# HERE, pointing at the per-target keying that fixes it.
-function _sb_reclaim_group_col!(data, colname::Symbol, backing::DataColumn)
-    if haskey(data, colname) && !isequal(data[colname], parent(backing))
+# A ranef grouping column reaches Stan only through its dense integer index
+# (`<g>_idx` / `n_<g>`), so the raw labels the generic data prepass wrote under
+# `g` are normally dead data — and may be strings, which are not Stan data at
+# all. The FIRST visit removes `data[g]`, so every later emitter sees exactly
+# the data it always saw; re-entries (this helper backs every emitter that needs
+# the index) leave `data[g]` alone. The removed value is kept, because `data` is
+# shared with `_sb_submodel_rhs!` hooks: a hook may store and read its own
+# `data[g]`, before or after this pass. `_sb_settle_group_columns!` restores it
+# once emission is complete if a statement reads `g`.
+function _sb_note_group_column!(data, colname::Symbol)
+    noted = data[_SB_GROUP_COLUMNS_KEY]
+    haskey(noted, colname) && return nothing
+    noted[colname] = haskey(data, colname) ? Some(pop!(data, colname)) : nothing
+    nothing
+end
+
+# BRM owns the index names it derives from a grouping column (`<g>_idx`,
+# `n_<g>`, the `gr(g, by=b)` `__by__` names). Re-entry stores the same value. A
+# DIFFERENT value already stored there was written by someone else (a
+# `_sb_submodel_rhs!` hook), and overwriting it would silently change what that
+# writer's statement reads.
+function _sb_set_group_index_datum!(data, key::Symbol, value, gname::Symbol)
+    haskey(data, key) && !isequal(data[key], value) && error(
+        "sbimpl: `$key` is the index BRM derives from the ranef grouping column ",
+        "`$gname`, but `data[:$key]` already holds a different value written by ",
+        "another term (e.g. a `_sb_submodel_rhs!` hook). Overwriting it would ",
+        "change what that term's statement reads. Store that term's data under a ",
+        "name BRM does not derive — the raw column name `$gname` itself is fine.")
+    data[key] = value
+    nothing
+end
+
+# Symbols an emitted statement reads as values. A keyword argument's NAME is a
+# label, not a read (`subjects=subjects_eff` reads only `subjects_eff`), and a
+# plain `x = …` binds `x` rather than reading it. Non-expression payloads (a
+# nested `@slic` model, a function) are opaque: data reaches them only through
+# the call arguments walked here.
+_sb_read_symbols!(out, _) = out
+_sb_read_symbols!(out, x::Symbol) = push!(out, x)
+function _sb_read_symbols!(out, x::Expr)
+    args = x.head === :kw ? x.args[2:end] :
+           x.head === :(=) && x.args[1] isa Symbol ? x.args[2:end] : x.args
+    foreach(a -> _sb_read_symbols!(out, a), args)
+    out
+end
+
+# Settle the raw grouping columns noted by `_sb_note_group_column!` against the
+# finished statements. A column no statement reads stays out of the Stan data,
+# as it always did (a hook value written after the first visit and never read
+# is dropped too). A column a statement reads is that statement's data: keep
+# what is stored now, or restore the value the first visit removed. If that
+# value cannot be Stan data (raw string labels), the generic non-Stan drop
+# would delete it silently and the build would die later in StanBlocks naming
+# neither BRM nor the statement, so refuse here.
+function _sb_settle_group_columns!(stmts, data, noted)
+    reads = Set{Symbol}()
+    foreach(st -> _sb_read_symbols!(reads, st), stmts)
+    for (g, removed) in noted
+        g in reads || (delete!(data, g); continue)
+        haskey(data, g) || isnothing(removed) || (data[g] = something(removed))
+        haskey(data, g) || continue
+        _sb_is_stan_data_value(data[g]) && continue
+        reader = stmts[findfirst(st -> g in _sb_read_symbols!(Set{Symbol}(), st), stmts)]
         error(
-            "sbimpl: `$colname` is used as a ranef grouping factor, so BRM ",
-            "reclaims its raw column for a dense integer index (`$(colname)_idx` ",
-            "/ `n_$colname`) and deletes the raw labels here — but `data[:$colname]` ",
-            "currently holds a value the generic data prepass did NOT write. A ",
-            "`_sb_submodel_rhs!` hook (or other extension) stashed its own vector ",
-            "under this reserved name; it would be deleted out from under any ",
-            "statement referencing it and fail later in StanBlocks tracing with an ",
-            "unresolvable-symbol error naming a third package. BRM owns raw column ",
-            "names used as grouping factors — key consumer-written data PER TARGET ",
-            "instead, e.g. `_sb_kernel_key(col, target) = Symbol(col, :_, target)`, ",
-            "which is self-owned and order-independent.")
+            "sbimpl: the emitted statement `$reader` reads `$g`, which is also a ",
+            "ranef grouping column, but `data[:$g]` holds $(eltype(data[g])) ",
+            "labels, which are not valid Stan data. Store an integer coding under ",
+            "`$g` in the term that reads it, or read BRM's dense index `$(g)_idx` ",
+            "(levels `1:n_$g`) instead.")
     end
-    delete!(data, colname)
     nothing
 end
 
@@ -11257,9 +11300,9 @@ function _sb_ensure_group_data!(data, g::NamedColumn)
     idx_name = Symbol(gname, :_idx)
     n_name   = Symbol(:n_, gname)
     n_levels, g_idx = _sb_level_index(parent(g_backing))
-    _sb_reclaim_group_col!(data, gname, g_backing)
-    data[idx_name] = g_idx
-    data[n_name]   = n_levels
+    _sb_note_group_column!(data, gname)
+    _sb_set_group_index_datum!(data, idx_name, g_idx, gname)
+    _sb_set_group_index_datum!(data, n_name, n_levels, gname)
     _sb_record_group_index!(data, idx_name, n_name, gname, parent(g_backing))
     idx_name, n_name
 end
@@ -11276,18 +11319,18 @@ function _sb_ensure_group_data!(data, g::Tuple{NamedColumn,NamedColumn})
     gname, bname = name(gcol), name(bcol)
     n_groups, g_idx = _sb_level_index(parent(g_backing))
     n_strata, b_idx = _sb_level_index(parent(b_backing))
-    _sb_reclaim_group_col!(data, gname, g_backing)
-    _sb_reclaim_group_col!(data, bname, b_backing)
+    _sb_note_group_column!(data, gname)
+    _sb_note_group_column!(data, bname)
     stratum_idx = _sb_stratum_idx(g_idx, b_idx, gname, bname)
     suffix = Symbol(gname, :__by__, bname)
     idx_name       = Symbol(suffix, :_idx)
     n_name         = Symbol(:n_, suffix)
     s_idx_name     = Symbol(suffix, :_stratum_idx)
     n_strata_name  = Symbol(:n_strata_, suffix)
-    data[idx_name]      = g_idx
-    data[n_name]        = n_groups
-    data[s_idx_name]    = stratum_idx
-    data[n_strata_name] = n_strata
+    _sb_set_group_index_datum!(data, idx_name, g_idx, gname)
+    _sb_set_group_index_datum!(data, n_name, n_groups, gname)
+    _sb_set_group_index_datum!(data, s_idx_name, stratum_idx, gname)
+    _sb_set_group_index_datum!(data, n_strata_name, n_strata, gname)
     (; idx_name, n_name, s_idx_name, n_strata_name)
 end
 
@@ -12792,7 +12835,7 @@ _sb_is_side_channel_key(k::Symbol) =
     k === _SB_PREPROC_KEY || k === _SB_BINDINGS_KEY ||
     k === _SB_THRESHOLD_LOCATED_KEY || k === _SB_HYPER_PLANS_KEY ||
     k === _SB_TOTAL_PLANS_KEY || k === _SB_S2Z_PLANS_KEY ||
-    k === _SB_HS_PLANS_KEY
+    k === _SB_HS_PLANS_KEY || k === _SB_GROUP_COLUMNS_KEY
 
 # Return `k` if `v` is a flat (non-ragged) vector, else `nothing` — replaces
 # the old `_is_flat_vec` Bool predicate so the caller composes via the
