@@ -197,6 +197,19 @@ function _sb_anchor_slic_macrocalls!(ex::Expr)
     ex
 end
 
+# One side of a generated vector prior's declaration bound. A side no
+# coordinate bounds has none; a bound every coordinate shares stays the scalar
+# Stan spelling; otherwise the bound is coordinate-specific, and a coordinate
+# without one takes the infinite value Stan's constraining transforms treat as
+# absent (the identity on that coordinate). StanBlocks keeps a numeric vector
+# bound on the one native declaration (`vector<lower=[...]'>`), so the sampler
+# never leaves any column's support, inits included.
+function _sb_vector_prior_bound(bounds, unbounded::Float64)
+    all(isnothing, bounds) && return nothing
+    all(!isnothing, bounds) && allequal(bounds) && return first(bounds)
+    Float64[isnothing(b) ? unbounded : b for b in bounds]
+end
+
 function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
     calls, actuals, shape, argkinds = _sb_vector_prior_parts(priors; positive)
     selectors = [_sb_vector_prior_selector(c.dist, mod) for c in calls]
@@ -237,22 +250,19 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
         lpdf, lpdfs, rng = Symbol(stem, :_lpdf), Symbol(stem, :_lpdfs), Symbol(stem, :_rng)
         typed = [argkinds[i] === :selector ? Symbol(:arg_, i) :
                  Expr(:(::), Symbol(:arg_, i), :real) for i in eachindex(actuals)]
-        # The family's support becomes the parameter declaration's bounds:
-        # positive blocks are always `lower=0`, others carry a bound only when
-        # every coordinate shares it.
-        lowers = [c.lower for c in calls]
-        uppers = [c.upper for c in calls]
-        declared_lower = positive ? 0.0 :
-            all(!isnothing, lowers) && allequal(lowers) ? first(lowers) : nothing
-        declared_upper = !positive && all(!isnothing, uppers) && allequal(uppers) ?
-            first(uppers) : nothing
-        densities = Any[]; draws = Any[]; guards = Any[]
+        # The family's support becomes the parameter declaration's bounds, and
+        # it carries every coordinate's bound (`_sb_vector_prior_bound`;
+        # positive blocks always bound below), so Stan's constraining transform
+        # enforces each one and the density needs no guard for any of them.
+        declared_lower = _sb_vector_prior_bound([c.lower for c in calls], -Inf)
+        declared_upper = _sb_vector_prior_bound([c.upper for c in calls], Inf)
+        densities = Any[]; draws = Any[]
         for (i, c) in enumerate(calls)
             distname = c.dist isa Symbol ? c.dist : nameof(c.dist)
             # StanBlocks' flat token is a parameter declaration with no density
             # contribution, so it has no Stan flat_lpdf builtin to call from a
-            # generated whole-vector prior. Retain the coefficient and any
-            # coordinate guards while contributing the exact constant zero.
+            # generated whole-vector prior. Retain the coefficient (its bounds
+            # live on the declaration) while contributing the exact constant zero.
             push!(densities, distname === :flat ? 0.0 :
                 Expr(:call, Symbol(distname, :_lpdf), Expr(:ref, :x, i), c.names...))
             selector = selectors[i]
@@ -263,13 +273,6 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
                 isnothing(c.upper) ?
                     Expr(:call, :_sb_lower_conditioning_rng, selector, c.lower, c.names...) :
                     Expr(:call, :_sb_conditioning_rng, selector, c.lower, c.upper, c.names...))
-            # Stan's constraining transform already enforces a declared bound,
-            # so a guard for it can never fire. Only a coordinate-specific bound
-            # that the declaration cannot carry keeps an explicit guard.
-            !isnothing(c.lower) && !isequal(c.lower, declared_lower) && push!(guards,
-                :(if x[$i] < $(c.lower); return negative_infinity(); end))
-            !isnothing(c.upper) && !isequal(c.upper, declared_upper) && push!(guards,
-                :(if x[$i] > $(c.upper); return negative_infinity(); end))
         end
         total = foldl((a,b)->Expr(:call, :+, a, b), densities)
         point = Any[:(@stan_assert n == $(length(calls))), :(out::vector[n])]
@@ -279,7 +282,6 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
         append!(drawbody, [:(out[$i] = $(draws[i])) for i in eachindex(calls)])
         push!(drawbody, :out)
         density_def = :($lpdf(x::vector[n], $(typed...))::real = begin
-            $(guards...)
             $total
         end)
         pointwise_def = :($lpdfs(x::vector[n], $(typed...))::vector[n] =
@@ -1799,16 +1801,37 @@ end
 
 function addprop end
 
-# One variance law serves the typed Stan declaration and the native graph.
-# Stan's vector sqrt is intrinsic; native Julia spells it as a broadcast.
-const _BRM_ADDPROP_VARIANCE = :(add^2 .+ (loc .* prop).^2)
+# One variance law serves the typed Stan declarations and the native graph;
+# only the spelling of the additive square varies. Stan's vector sqrt is
+# intrinsic; native Julia spells it as a broadcast.
+_brm_addprop_variance(add_square) = :($add_square .+ (loc .* prop).^2)
+# The native definition serves scalar and per-location scales alike.
+const _BRM_ADDPROP_VARIANCE = _brm_addprop_variance(:(add .^ 2))
+
+# Each scale is one value for every location, or one value per location. A
+# per-location `add` is squared elementwise; a shared `add` keeps `add^2`, so
+# the shared-scale helper's Stan source, and every descriptor id hashed from
+# it, is unchanged.
+const _BRM_ADDPROP_ADD_SCALES = ((:real, :(add^2)), (:(vector[n]), :(add .^ 2)))
+const _BRM_ADDPROP_PROP_SCALES = (:real, :(vector[n]))
 
 @eval StanBlocks.@deffun begin
-    addprop(loc::vector[n], add::real, prop::real)::vector[n] = begin
-        sqrt($(_BRM_ADDPROP_VARIANCE))
-    end
+    $((:(addprop(loc::vector[n], add::$add, prop::$prop)::vector[n] = begin
+        sqrt($(_brm_addprop_variance(add_square)))
+    end) for (add, add_square) in _BRM_ADDPROP_ADD_SCALES
+        for prop in _BRM_ADDPROP_PROP_SCALES)...)
+    # A grouped location takes per-location scales grouped the same way.
     @inline addprop(loc::RaggedVector, add::real, prop::real) = begin
         RaggedVector(addprop(loc.mem, add, prop), loc.ends)
+    end
+    @inline addprop(loc::RaggedVector, add::RaggedVector, prop::real) = begin
+        RaggedVector(addprop(loc.mem, add.mem, prop), loc.ends)
+    end
+    @inline addprop(loc::RaggedVector, add::real, prop::RaggedVector) = begin
+        RaggedVector(addprop(loc.mem, add, prop.mem), loc.ends)
+    end
+    @inline addprop(loc::RaggedVector, add::RaggedVector, prop::RaggedVector) = begin
+        RaggedVector(addprop(loc.mem, add.mem, prop.mem), loc.ends)
     end
 end
 
@@ -5572,10 +5595,11 @@ function _sb_kernel_lambda_parts(lam)
 end
 
 # The column a kernel positional binds to its cell formal: the column itself,
-# or the flat column of a `ragged(y, group)` positional; `nothing` otherwise.
+# or the flat column of a `ragged(y, group[, cells])` positional; `nothing`
+# otherwise.
 _sb_kernel_positional_column(c::NamedColumn) = c
 _sb_kernel_positional_column(c::ExprColumn{typeof(ragged)}) =
-    length(getargs(c)) == 2 ? first(getargs(c)) : nothing
+    length(getargs(c)) in (2, 3) ? first(getargs(c)) : nothing
 _sb_kernel_positional_column(_) = nothing
 
 # Indexes (1-based into `positionals`, i.e. `dcols[2:end]`) of omitted kernel
@@ -5692,13 +5716,11 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     dcol_names    = Symbol[]
     lp_cols       = Any[]
     ragged_specs  = Any[]
+    ragged_cols   = Any[]
     for (i, c) in enumerate(dcols[2:end])
         if c isa ExprColumn && getf(c) === ragged
-            length(getargs(c)) == 2 || error(
-                "sbimpl: kernel(...) `ragged(...)` takes exactly two positional args — ",
-                "the thing to group and its grouping column — got ",
-                "$(length(getargs(c))).")
-            arg_col, grp_arg = getargs(c)
+            arg_col, grp_arg = _brm_kernel_ragged_args(c; prefix="sbimpl")
+            push!(ragged_cols, c)
             arg_col isa NamedColumn || error(
                 "sbimpl: kernel(...) `ragged(...)`: the first argument must name a ",
                 "linear predictor declared in this @brm block, or a raw data column; ",
@@ -5767,12 +5789,31 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     # rides on the subject frame the others, or the pre-grouped columns, define.
     lp_buckets = _sb_kernel_lp_buckets(lp_cols)
     grouped = [b for b in lp_buckets if b !== nothing]
-    if isempty(grouped)
-        isempty(ragged_specs) || error(
-            "sbimpl: kernel(...) `ragged(...)` needs a subject grouping to join its ",
-            "event rows against, which a no-random-effects panel does not supply. ",
-            "Declare a per-subject linear predictor with a `(1 | ID | group)` term, ",
-            "or pass pre-grouped per-subject columns directly (one entry per subject).")
+    if isempty(grouped) && !isempty(ragged_specs)
+        # Label-anchored plate: no per-cell LP carries a ranef bucket, so the
+        # cells are the rows of the explicit cell label column every
+        # `ragged(x, group => cells)` names — districts beside their totals,
+        # with each facility row joining its district by label. Replayed on a
+        # new frame this is the ordinary subject-labelled plate below.
+        group_col = _brm_kernel_cell_label_column(ragged_cols; prefix="sbimpl")
+        g_vals = _sb_kernel_subject_values(
+            parent(parent(group_col)), name(group_col))
+        nsub = length(g_vals)
+        lp_names = Set(name(c) for c in lp_cols)
+        ragged_names = Set(spec[4] for spec in ragged_specs)
+        for k in kept_names
+            (k in lp_names || k in ragged_names || !haskey(data, k)) && continue
+            length(data[k]) == nsub || error(
+                "sbimpl: kernel(...) per-cell column `$k` has ",
+                "$(length(data[k])) entries for the $nsub cells of `",
+                "$(name(group_col))`; a per-cell data column belongs to the ",
+                "cell label column's frame, one entry per cell row.")
+        end
+        all(v -> v isa Real, g_vals) || pop!(data, name(group_col), nothing)
+        data[nsub_sym] = nsub
+        _sb_record_preproc!(data, nsub_sym,
+            PreprocEntry(:kernel_subject_count, nothing, name(group_col), false))
+    elseif isempty(grouped)
         # The subject count is the common length of the pre-grouped data
         # columns or, when the cell slices only LPs (beside omitted outcomes),
         # of the per-subject columns those LPs read.
@@ -5812,6 +5853,7 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
             "LPs may use distinct `|ID|` buckets, but every LP handed to one kernel ",
             "must describe the same subjects.")
         group_col = first(grouped)[3]
+        _brm_kernel_check_cell_labels(ragged_cols, name(group_col); prefix="sbimpl")
 
         # The labels identify groups to Julia callers but never enter the emitted
         # Stan program: only their count and row order do. Accept arbitrary unique
@@ -7065,10 +7107,12 @@ function _sb_ragged_argument(data, key, argument::NamedColumn, layout)
     raw isa AbstractVector && length(raw) == 1 && return argument
     _sb_ragged_bound(data, key, :argument, argument, layout)
 end
+# A row-local callable (`addprop`) keeps its rows aligned, so its per-row data
+# arguments are grouped like the law's own.
 function _sb_ragged_argument(data, key, argument::ExprColumn, layout)
     f = getf(argument)
     (haskey(_RK_DERIVED_BINOPS, f) || haskey(_RK_DERIVED_CMP, f) ||
-        haskey(_RK_DERIVED_MATH, f)) || return argument
+        haskey(_RK_DERIVED_MATH, f) || _rk_rowwise_callable(f)) || return argument
     ExprColumn(f, map(a -> _sb_ragged_argument(data, key, a, layout),
         getargs(argument))...; getkwargs(argument)...)
 end

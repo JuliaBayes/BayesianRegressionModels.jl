@@ -191,6 +191,7 @@ function kernel end
 
 """
     ragged(x, group)
+    ragged(x, group => cells)
 
 Group a FLAT secondary row axis by a raw data column that names the subject of
 every row. The marker has two formula positions:
@@ -240,6 +241,30 @@ exactly what a hand-prepared per-subject view would have been. Wrapping a column
 does not consume the flat original: a term that names it on its own axis
 (`hsgp(log_dose)` above) still sees it.
 
+When no per-subject linear predictor carries a random effect, nothing labels
+the cells for `group` to join against. Name the cell label column then:
+`ragged(x, group => cells)`, where `cells` lists each cell's label once, on the
+cells' own frame. The plate has one cell per row of `cells`, in that row order,
+and every per-cell data column belongs to that frame. A district total observes
+the summed rate of the facilities in its district:
+
+```julia
+log_lambda ~ 1 + (1 | fac | facility)               # rows = facilities
+ragged(log_lambda, fac_district => district)        # rows = districts
+
+@plate for d in eachindex(Y)                        # Y: one total per district
+    Y[d] ~ Poisson(sum(exp.(log_lambda[d])))
+end
+```
+
+Rows join their cell by label, so the totals' frame may list its districts in
+any order. A plate with no random-effect predictor and no `cells` is refused:
+matching rows to cells by position — `group`'s first appearance — cannot be
+checked against a per-cell column, which would then bind to the wrong cells
+silently. Every `ragged(...)` input of one plate names the same `cells`; their
+`group` columns may differ. Under a random-effect predictor the cells are its
+grouping, so `cells` may be named only as that same column.
+
 Why the grouping is an explicit argument rather than derived: an ordinary
 per-subject LP is grouped by the ranef bucket it already carries
 (`_sb_kernel_lp_bucket_or_nothing`), but a secondary-axis population LP like
@@ -265,7 +290,8 @@ ragged
 
 _check_term_kwargs(::typeof(ragged), kwargs) = isempty(kwargs) || error(
     "@brm: ragged(...) takes no keywords, got $(keys(kwargs)). The spelling is ",
-    "`ragged(<linear predictor or flat column>, <grouping column>)`.")
+    "`ragged(<linear predictor or flat column>, <grouping column>)`, or ",
+    "`ragged(x, group => cells)` with a cell label column `cells`.")
 
 # Reject the retired keyword surface at CONSTRUCTION — i.e. at the `@brm` /
 # `kernel(...)` call the consumer actually wrote — not merely when the model is

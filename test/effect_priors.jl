@@ -9,7 +9,7 @@ using Test
 using BayesianRegressionModels
 using StanBlocks
 using LogDensityProblems
-using Distributions: Cauchy, Dirichlet, Exponential, LKJCholesky, Normal, Uniform
+using Distributions: Cauchy, Dirichlet, Exponential, LKJCholesky, Normal, Uniform, logpdf
 
 const EFFECT_PRIOR_CACHE = joinpath(tempdir(), "brm-effect-priors")
 const EFFECT_PRIOR_RUNTIME = get(ENV, "BRM_EFFECT_RUNTIME", "1") != "0"
@@ -93,6 +93,119 @@ end
         sigma ~ Normal(0, 2; typo=0.0)
         y ~ Normal(0, sigma)
     end); mod=@__MODULE__, total_groups=())
+end
+
+# A support-limited per-column family bounds its own coordinate of the one
+# generated-family declaration, so the sampler never leaves any column's
+# support, inits included (snag per-column-unifo-6a3aa727).
+@testset "per-column supports bound the coefficient declaration coordinatewise" begin
+    declaration(code, name) = strip(only(l for l in split(code, '\n')
+        if endswith(strip(l), " $name;") && occursin("<", l)))
+
+    bounded = @brm df begin
+        mu ~ 1 + x
+        effect(mu, Intercept) ~ Uniform(0.2, 0.8)
+        effect(mu, x) ~ Normal(0.5, 1; lower=0.3, upper=0.9)
+        y ~ Normal(mu, 1)
+    end
+    bounded_sb = SBBRMI(bounded; mod=@__MODULE__, total_groups=())
+    bounded_code = BayesianRegressionModels.stan_code(bounded_sb)
+    @test declaration(bounded_code, "pop_mu_beta_pop") ==
+        "vector<lower=[0.2, 0.3]', upper=[0.8, 0.9]'>[pop_mu_n_covariates] pop_mu_beta_pop;"
+    @test StanBlocks.stanc_check(bounded_code; warn_pedantic=false).ok
+
+    # Ranef SD margins share the seam: positive margins keep their common
+    # lower bound as a scalar and bound their uppers coordinatewise.
+    margins = @brm df begin
+        mu ~ 1 + (1 + x | p | subject)
+        sd(mu, p, Intercept) ~ Uniform(0, 2)
+        sd(mu, p, x) ~ Uniform(0, 1)
+        y ~ Normal(mu, 1)
+    end
+    margins_code = BayesianRegressionModels.stan_code(
+        SBBRMI(margins; mod=@__MODULE__, total_groups=()))
+    @test declaration(margins_code, "b_p_subject_tau") ==
+        "vector<lower=0.0, upper=[2.0, 1.0]'>[n_terms_p_subject] b_p_subject_tau;"
+    @test StanBlocks.stanc_check(margins_code; warn_pedantic=false).ok
+
+    # The reported shape: one bounded column beside the default-Normal
+    # intercept. The unbounded coordinate takes an infinite bound, Stan's
+    # identity transform.
+    mixed_declaration = "vector<lower=[negative_infinity(), 0.0]', " *
+        "upper=[positive_infinity(), 2.0]'>[pop_mu_n_covariates] pop_mu_beta_pop;"
+    mixed = @brm df begin
+        mu ~ 1 + x
+        effect(mu, x) ~ Uniform(0, 2)
+        y ~ Normal(mu, 1)
+    end
+    mixed_sb = SBBRMI(mixed; mod=@__MODULE__, total_groups=())
+    mixed_code = BayesianRegressionModels.stan_code(mixed_sb)
+    @test declaration(mixed_code, "pop_mu_beta_pop") == mixed_declaration
+    @test StanBlocks.stanc_check(mixed_code; warn_pedantic=false).ok
+    keyword_code = BayesianRegressionModels.stan_code(SBBRMI((@brm df begin
+        mu ~ 1 + x
+        effect(mu, x) ~ Normal(0.75, 0.5; lower=0.0, upper=2.0)
+        y ~ Normal(mu, 1)
+    end); mod=@__MODULE__, total_groups=()))
+    @test declaration(keyword_code, "pop_mu_beta_pop") == mixed_declaration
+    @test StanBlocks.stanc_check(keyword_code; warn_pedantic=false).ok
+    one_margin_code = BayesianRegressionModels.stan_code(SBBRMI((@brm df begin
+        mu ~ 1 + (1 + x | p | subject)
+        sd(mu, p, x) ~ Uniform(0, 1)
+        y ~ Normal(mu, 1)
+    end); mod=@__MODULE__, total_groups=()))
+    @test declaration(one_margin_code, "b_p_subject_tau") ==
+        "vector<lower=0.0, upper=[positive_infinity(), 1.0]'>[n_terms_p_subject] b_p_subject_tau;"
+    @test StanBlocks.stanc_check(one_margin_code; warn_pedantic=false).ok
+
+    if EFFECT_PRIOR_RUNTIME
+        problem = StanBlocks.stan_instantiate(
+            bounded_sb.model;
+            path=joinpath(EFFECT_PRIOR_CACHE, string(hash(bounded_code)) * ".stan"))
+        model = problem.model
+        # The emitted transformed-data design is `hcat(rep_vector(1.0, …), x)`.
+        X = hcat(ones(length(df.x)), df.x)
+        @test occursin("X_mu = hcat(rep_vector(1.0, num_elements(x)), x);", bounded_code)
+        @test StanBlocks.BridgeStan.param_names(model) ==
+              ["pop_mu_beta_pop.1", "pop_mu_beta_pop.2"]
+        logistic(u) = 1 / (1 + exp(-u))
+        for z1 in (-4.0, -0.7, 0.0, 2.5), z2 in (-3.0, 0.4, 5.0)
+            z = [z1, z2]
+            theta = StanBlocks.BridgeStan.param_constrain(model, z)
+            @test 0.2 < theta[1] < 0.8 && 0.3 < theta[2] < 0.9
+            lp, grad = StanBlocks.BridgeStan.log_density_gradient(
+                model, z; propto=false, jacobian=true)
+            @test isfinite(lp) && all(isfinite, grad)
+            s = logistic.(z)
+            jacobian = sum(log.([0.6, 0.6]) .+ log.(s) .+ log1p.(-s))
+            # The bounded Normal keeps its untruncated kernel (fixed bounds: the
+            # omitted normaliser is a constant), as for scalar declarations.
+            expected = logpdf(Uniform(0.2, 0.8), theta[1]) +
+                logpdf(Normal(0.5, 1), theta[2]) +
+                sum(logpdf.(Normal.(X * theta, 1), df.y)) + jacobian
+            @test lp ≈ expected
+        end
+
+        # Mixed: the intercept coordinate is the identity (no Jacobian term),
+        # and every unconstrained point, Stan's default init box included,
+        # lands inside the bounded column's support.
+        mixed_model = StanBlocks.stan_instantiate(
+            mixed_sb.model;
+            path=joinpath(EFFECT_PRIOR_CACHE, string(hash(mixed_code)) * ".stan")).model
+        for z1 in (-4.0, -0.7, 0.0, 2.5), z2 in (-3.0, -2.0, 0.4, 2.0, 5.0)
+            z = [z1, z2]
+            theta = StanBlocks.BridgeStan.param_constrain(mixed_model, z)
+            @test theta[1] == z1
+            @test 0 < theta[2] < 2
+            lp, grad = StanBlocks.BridgeStan.log_density_gradient(
+                mixed_model, z; propto=false, jacobian=true)
+            @test isfinite(lp) && all(isfinite, grad)
+            s = logistic(z2)
+            expected = logpdf(Normal(), theta[1]) + logpdf(Uniform(0, 2), theta[2]) +
+                sum(logpdf.(Normal.(X * theta, 1), df.y)) + log(2) + log(s) + log1p(-s)
+            @test lp ≈ expected
+        end
+    end
 end
 
 @testset "sampled scalar parameter in an effect-prior argument" begin
@@ -235,9 +348,12 @@ end
     end
     heterogeneous_code = BayesianRegressionModels.stan_code(
         SBBRMI(heterogeneous_bounds; mod=@__MODULE__, total_groups=()))
-    @test occursin("vector[pop_mu_n_covariates] pop_mu_beta_pop;", heterogeneous_code)
-    @test occursin("if((x[1] < 0.2))", heterogeneous_code)
-    @test occursin("if((x[2] > 0.9))", heterogeneous_code)
+    # Differing per-column supports bound their own coordinates of the one
+    # declaration (snag per-column-unifo-6a3aa727); they used to leave it
+    # unconstrained behind density guards alone. Declared bounds need no guard.
+    @test occursin("vector<lower=[0.2, 0.3]', upper=[0.8, 0.9]'>[pop_mu_n_covariates] pop_mu_beta_pop;",
+                   heterogeneous_code)
+    @test !occursin("negative_infinity", heterogeneous_code)
     @test StanBlocks.stanc_check(heterogeneous_code; warn_pedantic=false).ok
 
     prior_only = @brm df begin

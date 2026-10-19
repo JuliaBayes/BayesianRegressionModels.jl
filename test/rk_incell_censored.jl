@@ -68,3 +68,56 @@ end
     @test brm_nlme_loglikelihoods(model, u[model.theta], u[model.sigma], eta) ≈
         expected_by_level atol=2e-11 rtol=2e-11
 end
+
+const WEIGHTED_CENSORED_CELL_DATA = merge(CENSORED_CELL_DATA, (;
+    w=[1.0, 0.5, 0.0, 2.0, 0.75]))
+
+const WEIGHTED_CENSORED_CELL = @brm begin
+    sigma_add ~ Exponential(1)
+    sigma_prop ~ Exponential(1)
+    location ~ 1 + (1 | panel | subject)
+    @plate for i in eachindex(location)
+        mean[i] = location[i] .+ ragged(time, row_subject)[i]
+        ragged(y, row_subject)[i] ~ weighted(censored(
+            Normal(mean[i], addprop(mean[i], sigma_add, sigma_prop));
+            lower=ragged(limit, row_subject)[i]), ragged(w, row_subject)[i])
+    end
+end
+
+# The unweighted cell above is verified against Stan; weighting must scale
+# each of its row log densities, everywhere, by that row's weight.
+@stestset "weighted censored Normal inside a ragged cell scales every row density" begin
+    data = WEIGHTED_CENSORED_CELL_DATA
+    backend, problem = consumer_problem(WEIGHTED_CENSORED_CELL(data))
+    base, base_problem = consumer_problem(CENSORED_CELL(CENSORED_CELL_DATA))
+    @test coordinate_names(backend.model.layout) == coordinate_names(base.model.layout)
+    extension = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
+    query(b) = prepare_query(b.model, extension._rk_translated_plan(b.plan), :pointwise)
+    pointwise, base_pointwise = query(backend), query(base)
+    weights = [data.w[findall(==(subject), data.row_subject)] for subject in data.subject]
+    oracle(u) = LogDensityProblems.logdensity(base_problem, u) +
+        sum(sum((w .- 1) .* row) for (w, row) in
+            zip(weights, Base.invokelatest(base_pointwise, u).y))
+    for u in (zeros(LogDensityProblems.dimension(problem)),
+              [0.15 * sin(i) for i in 1:LogDensityProblems.dimension(problem)])
+        check_consumer_point(problem, u, oracle)
+        actual = Base.invokelatest(pointwise, u).y
+        expected = map((w, row) -> w .* row, weights, Base.invokelatest(base_pointwise, u).y)
+        @test all(isapprox(actual[i], expected[i]; atol=2e-11, rtol=2e-11)
+            for i in eachindex(expected))
+    end
+
+    model = brm_nlme_model(backend; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    u = zeros(LogDensityProblems.dimension(problem))
+    eta = zeros(length(first(model.view.subject_coordinates)), length(data.subject))
+    rows = Base.invokelatest(pointwise, u).y
+    expected_by_level = [sum(rows[only(findall(==(level), data.subject))])
+        for level in model.view.levels]
+    @test brm_nlme_loglikelihoods(model, u[model.theta], u[model.sigma], eta) ≈
+        expected_by_level atol=2e-11 rtol=2e-11
+    # Capability gap, not a wrong shape: StanBlocks' `weighted` does not yet
+    # take a censoring combinator as its family (StanBlocks snag
+    # `weighted-over-ce-a55869f3`), so SBBRMI cannot transpile this cell.
+    @test_broken (BRM.stan_code(SBBRMI(WEIGHTED_CENSORED_CELL(data);
+        mod=@__MODULE__, total_groups=())); true)
+end
