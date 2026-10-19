@@ -138,3 +138,35 @@ end
     @test family.callable === SB.normal && length(family.arguments) == 2
     @test any(e -> startswith(e, "\\mathcal L=F("), r.equations)
 end
+
+@testset "weighted over an in-cell censored law keeps its bounds in both spellings" begin
+    weighted_call = @brm begin
+        eta ~ 1 + (1 | p | subject)
+        @plate for i in eachindex(subject)
+            loc[i] = exp(eta[i]) .+ ragged(time, obs_subject)[i]
+            y[i] ~ weighted(censored(Normal(loc[i], 0.3); lower=ragged(lloq, obs_subject)[i]),
+                ragged(weight, obs_subject)[i])
+        end
+    end
+    weighted_token = @brm begin
+        eta ~ 1 + (1 | p | subject)
+        @plate for i in eachindex(subject)
+            loc[i] = exp(eta[i]) .+ ragged(time, obs_subject)[i]
+            y[i] ~ weighted(censored, ragged(weight, obs_subject)[i], normal, loc[i], 0.3;
+                lower=ragged(lloq, obs_subject)[i])
+        end
+    end
+    cases(r) = only(filter(e -> startswith(e, "p(y)=\\begin{cases}"), r.equations))
+    call, token = describe(weighted_call), describe(weighted_token)
+    @test call.complete && token.complete
+    # The token's `lower=` rides on `weighted` but bounds its censored family.
+    @test occursin("F(", cases(token)) && occursin("&y=", cases(token))
+    @test cases(token) == cases(call)
+    @test any(e -> startswith(e, "\\log\\mathcal L=\\sum_j "), token.equations)
+    w = only(components(token, SB.weighted))
+    c = only(filter(x -> last(x.id) === :family, w.children))
+    @test c.callable === SB.censored && haskey(c.keywords, :lower)
+    family = only(filter(x -> last(x.id) === :family, c.children))
+    @test family.callable === SB.normal && length(family.arguments) == 2
+    @test covered(token, c) && covered(token, family)
+end

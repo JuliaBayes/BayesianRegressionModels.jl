@@ -255,7 +255,10 @@ observations use StanBlocks' `censored`, `truncated`, `weighted` and
 token-form family is a `:family` child over the token's arguments, which a
 family hook sees by its actual callable. Bounds are keyword-only, so a token's
 arguments never render as bounds. The in-cell censoring prose matches the
-formula wrapper's. It runs under the test project:
+formula wrapper's. A combinator token in `weighted`'s family position takes
+`weighted`'s bounds, so `weighted(censored, w, normal, m, s; lower=lo)`
+describes the same censoring as the call form
+`weighted(censored(Normal(m, s); lower=lo), w)`. It runs under the test project:
 
 ```sh
 julia --startup-file=no --project=test test/description_cell_combinators.jl
@@ -570,15 +573,15 @@ same-BRMI Stan parity and printed source replay. The weight reader must read
 only data. A weighted censored Normal, in the call form
 `weighted(censored(Normal(m, s); lower=lo[i]), w[i])` and the token form
 `weighted(censored, w[i], normal, m, s; lower=lo[i])`, is checked against an
-independent weighted clamp density, Reverse gradients and pointwise rows;
-its SBBRMI transpile is `@test_broken` until StanBlocks' `weighted` takes a
-censoring combinator (StanBlocks snag `weighted-over-ce-a55869f3`). In-cell
-`interval_censored` remains `@test_broken` on RK.
+independent weighted clamp density, Reverse gradients, pointwise rows and
+strict same-BRMI Stan parity. In-cell `interval_censored` remains
+`@test_broken` on RK.
 `rk_incell_censored.jl` checks an in-cell `censored(Normal(...); lower=...)`
 over a ragged join against Stan, pointwise rows and NLME subject
 log-likelihoods, then the same cell under a row weight against the
 unweighted model: density, Reverse gradient, pointwise rows and NLME
-log-likelihoods all scale by the row weights.
+log-likelihoods all scale by the row weights, and its density and gradient
+match Stan.
 `rk_observed_graph_law.jl` checks the public inclusive threshold law's lower
 and upper branches and normalized interior in that built graph, against
 independent native values/gradients. The retained ordinary-constructor fixture

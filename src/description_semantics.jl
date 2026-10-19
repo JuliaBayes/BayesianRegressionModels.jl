@@ -56,7 +56,13 @@ function _brmd_call_component(env, id, callable, args, kwargs)
     token=!isnothing(start) && length(args)>=start-1 &&
         first(args) isa Union{Function,StanBlocks.ValueFamily}
     token || return _brmd_component(env, id, :call, callable, args, kwargs)
-    family=_brmd_component(env, (id..., :family), :call, first(args), args[start:end])
+    # A combinator token in the family position takes the keywords: the bounds
+    # of `weighted(censored, w, normal, mu, sigma; lower=lo)` are those of
+    # `censored(normal, mu, sigma; lower=lo)`, as in the call form
+    # `weighted(censored(normal(mu, sigma); lower=lo), w)`.
+    family=isnothing(_brmd_family_arguments(first(args))) ?
+        _brmd_component(env, (id..., :family), :call, first(args), args[start:end]) :
+        _brmd_call_component(env, (id..., :family), first(args), args[start:end], kwargs)
     _brmd_component(env, id, :call, callable, args, kwargs; argument_nodes=(family, args[2:start-1]...))
 end
 
