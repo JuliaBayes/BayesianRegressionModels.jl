@@ -434,10 +434,13 @@ Base.@nospecializeinfer function _brm_prepare_predictor_geometry(
     # declared group is the row axis: one LP value per group level. This
     # is the per-subject predictor shape of a grouped PK model (and the
     # prior-only total-effects path already resolves the same axis explicitly).
+    # Crossed or nested groups (districts within regions) list one level per
+    # row alike, so the first one serves.
     if isnothing(row_source)
         groups = unique(plan.group for plan in random_effects)
-        length(groups) == 1 && haskey(context.data, only(groups)) &&
-            (row_source = only(groups))
+        !isempty(groups) && all(g -> haskey(context.data, g), groups) &&
+            allequal(length(context.data[g]) for g in groups) &&
+            (row_source = first(groups))
     end
     design = _brm_population_design(
         name, ordinary_terms, context.data, get(context.target_obs, name, nothing);

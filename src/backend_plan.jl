@@ -172,11 +172,16 @@ _brm_constant_argument(key, input, ::MissingColumn) = error(
     "BRM: `$key = constant(...)` reads `$(name(input))`, which the data " *
     "does not supply and the builder's scope does not define")
 
+# `spec.evaluate` is the closure the `@brm` expansion defined. A body built
+# from a runtime string and `Core.eval`'d inside a function defines it in a
+# world newer than that function's, and the backend is built in the same
+# function, so the closure is called in the newest world (snag
+# `declared-a-data-8e5f1f07`).
 function _brm_evaluate_constant(key::Symbol, node::ExprColumn{typeof(constant)}; prefix)
     spec = first(getargs(node))
     arguments = map(input -> _brm_constant_argument(key, input), Base.tail(getargs(node)))
     value = try
-        spec.evaluate(arguments...)
+        Base.invokelatest(spec.evaluate, arguments...)
     catch err
         error("$prefix: evaluating `$key = constant($(spec.expression))` failed: ",
               sprint(showerror, err))
@@ -283,20 +288,85 @@ function _brm_collect_non_mm_sources!(out, @nospecialize(x::JointResponseColumn)
     foreach(a -> _brm_collect_non_mm_sources!(out, a), joint_response_columns(x))
 end
 
-_brm_collect_data!(_data, @nospecialize(_x); skip=Set{Symbol}()) = nothing
-function _brm_collect_data!(data, @nospecialize(x::NamedColumn); skip=Set{Symbol}())
+# HSGP `rows=` axes (decision 1fk9b29). A data column read only as the axis of
+# `rows=`-masked HSGP terms may hold `missing` in the rows no mask carries: those
+# rows contribute nothing, so they read as an inert 0.0. Any other read of the
+# column keeps the never-drop-a-row refusal above. `refs.masked` maps each axis
+# to its NamedColumn and its terms' mask columns; `refs.other` collects every
+# other data-column read.
+_brm_classify_data_refs!(_refs, @nospecialize(_x)) = nothing
+function _brm_classify_data_refs!(refs, @nospecialize(x::NamedColumn))
+    parent(x) isa DataColumn && push!(refs.other, name(x))
+    _brm_classify_data_refs!(refs, parent(x))
+end
+function _brm_classify_data_refs!(refs, @nospecialize(x::ExprColumn))
+    rows = getf(x) === hsgp ? get(getkwargs(x), :rows, nothing) : nothing
+    rows isa NamedColumn && parent(rows) isa DataColumn || return _brm_foreach_child(
+        (@nospecialize(a)) -> _brm_classify_data_refs!(refs, a), x)
+    for axis in getargs(x)
+        if axis isa NamedColumn && parent(axis) isa DataColumn
+            push!(last(get!(refs.masked, name(axis), (axis, NamedColumn[]))), rows)
+        else
+            _brm_classify_data_refs!(refs, axis)
+        end
+    end
+    _brm_foreach_item((@nospecialize(a)) -> _brm_classify_data_refs!(refs, a), getkwargs(x))
+end
+function _brm_classify_data_refs!(refs, @nospecialize(x::MultiMembershipTerm))
+    foreach(a -> _brm_classify_data_refs!(refs, a), getargs(x))
+    weights = getfield(x, :weights)
+    isnothing(weights) || foreach(a -> _brm_classify_data_refs!(refs, a), weights)
+end
+_brm_classify_data_refs!(refs, @nospecialize(x::JointResponseColumn)) =
+    foreach(a -> _brm_classify_data_refs!(refs, a), joint_response_columns(x))
+
+# Each masked-only HSGP axis, with the mask columns of the terms reading it.
+# A top-level data binding (`t = <column>`) declares the column; it is not a read.
+Base.@nospecializeinfer function _brm_masked_axis_refs(@nospecialize(brmi::BRMI))
+    refs = (; masked=Dict{Symbol,Tuple{NamedColumn,Vector{NamedColumn}}}(),
+            other=Set{Symbol}())
+    for op in _brm_operation_values(brmi)
+        op isa NamedColumn && parent(op) isa DataColumn && continue
+        _brm_classify_data_refs!(refs, op)
+    end
+    filter(entry -> !(first(entry) in refs.other), refs.masked)
+end
+
+# The rows any of an axis's masks carries; `masks` pairs each mask's column
+# name with its values.
+_brm_masked_axis_union(n::Int, masks) =
+    reduce((a, b) -> a .| b, (_brm_hsgp_row_mask(raw, n, source) for (source, raw) in masks);
+           init=falses(n))
+
+Base.@nospecializeinfer function _brm_masked_axis_rows(@nospecialize(brmi::BRMI))
+    Dict{Symbol,BitVector}(axis => _brm_masked_axis_union(
+            length(parent(parent(column))), [(name(m), parent(parent(m))) for m in masks])
+        for (axis, (column, masks)) in _brm_masked_axis_refs(brmi))
+end
+
+const _BRM_NO_MASKED_AXES = Dict{Symbol,BitVector}()
+
+_brm_collect_data!(_data, @nospecialize(_x); skip=Set{Symbol}(),
+                   masked=_BRM_NO_MASKED_AXES) = nothing
+function _brm_collect_data!(data, @nospecialize(x::NamedColumn); skip=Set{Symbol}(),
+                            masked=_BRM_NO_MASKED_AXES)
     backing = parent(x)
     if backing isa DataColumn && !(name(x) in skip)
-        data[name(x)] = _brm_data_vec(name(x), parent(backing))
+        data[name(x)] = haskey(masked, name(x)) ?
+            _brm_axis_values(parent(backing), masked[name(x)],
+                             "BRM backend lowering: data column `$(name(x))`") :
+            _brm_data_vec(name(x), parent(backing))
     end
-    _brm_collect_data!(data, backing; skip)
+    _brm_collect_data!(data, backing; skip, masked)
 end
-_brm_collect_data!(data, @nospecialize(x::ExprColumn); skip=Set{Symbol}()) =
-    _brm_foreach_child((@nospecialize(a)) -> _brm_collect_data!(data, a; skip), x)
-function _brm_collect_data!(data, @nospecialize(x::MultiMembershipTerm); skip=Set{Symbol}())
-    foreach(a -> _brm_collect_data!(data, a; skip), getargs(x))
+_brm_collect_data!(data, @nospecialize(x::ExprColumn); skip=Set{Symbol}(),
+                   masked=_BRM_NO_MASKED_AXES) =
+    _brm_foreach_child((@nospecialize(a)) -> _brm_collect_data!(data, a; skip, masked), x)
+function _brm_collect_data!(data, @nospecialize(x::MultiMembershipTerm); skip=Set{Symbol}(),
+                            masked=_BRM_NO_MASKED_AXES)
+    foreach(a -> _brm_collect_data!(data, a; skip, masked), getargs(x))
     weights = getfield(x, :weights)
-    isnothing(weights) || foreach(a -> _brm_collect_data!(data, a; skip), weights)
+    isnothing(weights) || foreach(a -> _brm_collect_data!(data, a; skip, masked), weights)
 end
 function _brm_joint_response_values(x::JointResponseColumn;
                                     prefix="BRM backend lowering", allow_imputation=false)
@@ -359,7 +429,8 @@ end
 # The target-to-observation map sizes intercept-only mean predictors from the
 # explicit scalar row count, while StanBlocks sees a top-level RaggedVector and
 # therefore emits one joint density / predictive vector per row.
-function _brm_collect_data!(data, @nospecialize(x::JointResponseColumn); skip=Set{Symbol}())
+function _brm_collect_data!(data, @nospecialize(x::JointResponseColumn); skip=Set{Symbol}(),
+                            masked=_BRM_NO_MASKED_AXES)
     values = _brm_joint_response_values(x; allow_imputation=x.impute)
     data[_joint_response_data_key(x)] = values
     data[_joint_response_n_key(x)] = length(values)
@@ -858,8 +929,9 @@ Base.@nospecializeinfer function _brm_backend_context(@nospecialize(brmi::BRMI);
     retain_mm_sources || union!(skip_data, setdiff(mm_sources, non_mm_sources))
     prepass[:skip_data] = skip_data
 
+    masked = _brm_masked_axis_rows(brmi)
     for op in _brm_operation_values(brmi)
-        _brm_collect_data!(data, op; skip=skip_data)
+        _brm_collect_data!(data, op; skip=skip_data, masked)
     end
 
     _BRMBackendContext(brmi, data, prepass, _brm_collect_target_obs(brmi),
@@ -1769,10 +1841,12 @@ _brm_is_categorical_data(raw) =
 # Plain string vectors and string-leveled `CategoricalVector`s code exactly
 # like integer levels: `sort(unique)` order with the reference first, the
 # reference addressed by level value. (A bare `CategoricalVector` of any
-# level type keeps its declared level order downstream, as before.)
+# level type keeps its declared level order downstream, as before.) Ask the
+# level TYPE: since CategoricalArrays 1.0, `levels(raw)` is itself a vector of
+# `CategoricalValue`s, never of the underlying level values.
 _brm_is_string_categorical_data(raw) =
     raw isa CA.CategoricalVector ?
-        eltype(CA.levels(raw)) <: AbstractString :
+        CA.leveltype(raw) <: AbstractString :
     raw isa AbstractVector ? eltype(raw) <: AbstractString : false
 
 # The emitted block name of a categorical MAIN-EFFECT term, else `nothing`.
@@ -1990,8 +2064,8 @@ function _brm_population_columns(term::ExprColumn{typeof(factor)};
             term, inner, raw; cellmeans)
     end
     raw_values = if raw isa CA.CategoricalVector
-        levels = CA.levels(raw)
-        eltype(levels) <: Integer || return nothing
+        CA.leveltype(raw) <: Integer || return nothing
+        levels = CA.unwrap.(CA.levels(raw))
         [levels[code] for code in Int.(CA.levelcode.(raw))]
     else
         eltype(raw) <: Integer || return nothing
@@ -2149,6 +2223,22 @@ end
 # A backend may lower structured terms separately while sharing exactly the
 # same fitted population columns. Taking the selected terms explicitly avoids
 # treating a mixed formula as an unsupported population design.
+# Which of `terms` the shared design codes by cell means. At most one term is,
+# and only the FIRST coefficient-bearing term carrying `_brm_cellmeans_block`'s
+# block name: a repeated categorical stays treatment-coded. Grouped and fixed
+# terms code no coefficients and never take the flag.
+function _brm_cellmeans_term_flags(terms; implicit_intercept::Bool=false)
+    block = _brm_cellmeans_block(terms; implicit_intercept)
+    map(terms) do term
+        (_brm_is_grouped_term(term) || !isnothing(_brm_population_fixed_term(term))) &&
+            return false
+        flag = !isnothing(block) && _brm_categorical_term_block(term) === block &&
+            !_brm_requests_treatment_coding(term)
+        flag && (block = nothing)
+        flag
+    end
+end
+
 function _brm_population_design(target::Symbol, terms::Tuple,
                                 data::AbstractDict,
                                 obs_name::Union{Nothing,Symbol};
@@ -2158,10 +2248,8 @@ function _brm_population_design(target::Symbol, terms::Tuple,
                                 population_columns=_brm_population_columns)
     raw_columns = Any[]
     fixed_terms = _BRMPopulationFixedTerm[]
-    # At most one term is cell-mean coded, and only the FIRST term carrying that
-    # block name: a repeated categorical stays treatment-coded.
-    cellmeans_block = _brm_cellmeans_block(terms; implicit_intercept)
-    for term in terms
+    cellmeans_flags = _brm_cellmeans_term_flags(terms; implicit_intercept)
+    for (term, cellmeans) in zip(terms, cellmeans_flags)
         # Grouped terms have their own backend-neutral geometry. They are not
         # coefficient-bearing population columns and are planned separately.
         _brm_is_grouped_term(term) && continue
@@ -2170,10 +2258,6 @@ function _brm_population_design(target::Symbol, terms::Tuple,
             push!(fixed_terms, fixed)
             continue
         end
-        cellmeans = !isnothing(cellmeans_block) &&
-            _brm_categorical_term_block(term) === cellmeans_block &&
-            !_brm_requests_treatment_coding(term)
-        cellmeans && (cellmeans_block = nothing)
         columns = population_columns(term; cellmeans)
         if isnothing(columns)
             required && error(

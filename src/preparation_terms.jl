@@ -35,10 +35,9 @@ function _brm_term_prior_spec(term, target, context, class; component=nothing)
     brmi = hasproperty(context, :parent) ? context.parent :
            hasproperty(context, :brmi) ? context.brmi : nothing
     isnothing(brmi) && return nothing
-    key = _brm_prepared_term_key(term)
     resolved = hasproperty(context, :term_priors) ? context.term_priors :
                _brm_resolve_term_priors(brmi)
-    per_term = get(get(resolved, target, Dict()), key, Dict())
+    per_term = something(_brm_term_override(get(resolved, target, Dict()), term), Dict())
     slots = filter(slot -> slot.class === class && slot.component === component,
                    _brm_term_prior_slots(getf(term)))
     isempty(slots) && return nothing

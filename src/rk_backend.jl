@@ -461,6 +461,12 @@ struct RKBRMI{P<:BRMI,PL,M}
     parent::P
     plan::PL
     model::M
+    # The retained parent is the model the plan lowered: `optional(...)`
+    # priors are already resolved (`_brm_resolve_optional_priors`).
+    function RKBRMI(parent::BRMI, plan, model)
+        parent = _brm_resolve_optional_priors(parent)
+        new{typeof(parent),typeof(plan),typeof(model)}(parent, plan, model)
+    end
 end
 
 Base.parent(x::RKBRMI) = x.parent
@@ -4372,7 +4378,7 @@ Base.@nospecializeinfer function _rk_gate_spline_term_priors!(@nospecialize(brmi
     per_target = get(_brm_resolve_term_priors(brmi), target, Dict())
     for t in spline_raw
         key = _brm_prepared_term_key(t)
-        isempty(get(per_target, key, Dict())) || error(
+        isempty(something(_brm_term_override(per_target, t), Dict())) || error(
             "$prefix: predictor `$target` smoothing-scale priors on " *
             "`$key` are out of slice 1 (the thin-layer spline surface " *
             "takes default half-normal scales; `sd(...)` overrides are " *
@@ -4603,8 +4609,26 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
     end
     base = "hsgp_" * join(string.(axes), "_")
     id = _rk_mint_smooth_id!(taken, columns, base)
+    # `length_scale_floor` in the length-scale prior reads the floor as a prior
+    # argument, so the declaration needs no separate truncation (decision 1fk9b29).
+    rho_floor_named = _brm_has_floor_marker(state.rho_prior)
+    rho_floor_named && any(p -> p.hyper === :length_scale, hyper_plans) && error(
+        "$prefix: predictor `$target` uses `length_scale_floor` in a " *
+        "hyper-predicted length scale's prior, which is its log-scale " *
+        "intercept; the floor already binds per group")
+    # A `rows=` mask is bound data, like a grouped term's level index.
+    rows = get(state, :rows, nothing)
+    mask = if isnothing(rows)
+        nothing
+    else
+        name = _rk_mint_generated!(taken, columns, string(id, "_rows"))
+        columns[name] = Float64.(rows.mask)
+        name
+    end
     common = (; rho_prior=state.rho_prior, sigma_prior=state.sigma_prior,
-        rho_truncated=any(>(0), state.rho_lower isa Real ? (state.rho_lower,) : state.rho_lower),
+        rho_truncated=!rho_floor_named &&
+            any(>(0), state.rho_lower isa Real ? (state.rho_lower,) : state.rho_lower),
+        rho_floor_named, anchor=get(state, :anchor, nothing), mask,
         hyper_plans, rho_stated, sigma_stated)
     if state.cov === :periodic
         return _RKTermSpec(:hsgp, collect(axes),

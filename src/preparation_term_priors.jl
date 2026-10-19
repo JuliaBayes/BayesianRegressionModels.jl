@@ -51,7 +51,103 @@ function _brm_term_prior_spelling(spec)
     head = _brm_term_prior_label(Val(spec.class))
     lp = isnothing(spec.predictor) ? ":" : string(spec.predictor)
     component = isnothing(spec.component) ? "" : ", $(spec.component)"
-    "$head($lp, $(spec.term)$component)"
+    qualifiers = get(spec, :qualifiers, (;))
+    term = isempty(qualifiers) ? string(spec.term) :
+        string(chop(string(spec.term)), "; ",
+               join(("$k=$(repr(v))" for (k, v) in pairs(qualifiers)), ", "), ")")
+    "$head($lp, $term$component)"
+end
+
+# ---- keyword-qualified term addresses (decision 1fk9b29) --------------------
+#
+# Several terms over the same axes in one predictor share a term key. An
+# address may name the term's literal keywords to reach only the terms that
+# spell them (`length_scale(:, hsgp(x; cov=:periodic))`); its winning priors are stored
+# under the term's FULL key, which also spells every keyword, and every reader
+# looks that key up first. A predictor with one such term keeps the plain key.
+_brm_term_key_value(value::NamedColumn) = name(value)
+_brm_term_key_value(value) = value
+function _brm_term_full_key(term::ExprColumn)
+    kwargs = getkwargs(term)
+    isempty(kwargs) && return _brm_prepared_term_key(term)
+    spelled = sort!([string(k, "=", repr(_brm_term_key_value(v))) for (k, v) in pairs(kwargs)])
+    Symbol(chop(string(_brm_prepared_term_key(term))), ";", join(spelled, ","), ")")
+end
+
+# A qualifier compares with the keyword's effective value, so the default
+# `cov=:exp_quad` names an `hsgp(t)` that does not spell it. The parsers own
+# the defaults.
+_brm_term_effective_keyword(term, key) = get(getkwargs(term), key, nothing)
+function _brm_term_effective_keyword(term::ExprColumn{F}, key) where {F<:Union{typeof(gp),typeof(hsgp)}}
+    label = nameof(getf(term))
+    key === :cov && return _brm_gp_cov(getkwargs(term), label)
+    key === :iso && return _brm_gp_iso(getkwargs(term), label)
+    get(getkwargs(term), key, nothing)
+end
+
+function _brm_term_matches_qualifiers(term::ExprColumn, qualifiers)
+    all(pairs(qualifiers)) do (key, value)
+        held = _brm_term_effective_keyword(term, key)
+        held isa Tuple && value isa Tuple ?
+            length(held) == length(value) && all(map(==, held, value)) :
+            held == value
+    end
+end
+
+"""The resolved priors of `term` in one predictor's resolved-term map."""
+function _brm_term_override(per_target, term)
+    term isa ExprColumn || return get(per_target, _brm_prepared_term_key(term), nothing)
+    full = _brm_term_full_key(term)
+    haskey(per_target, full) && return per_target[full]
+    get(per_target, _brm_prepared_term_key(term), nothing)
+end
+
+# ---- the HSGP validity floor inside its own length-scale prior --------------
+#
+# `length_scale(:, hsgp(x)) ~ Uniform(length_scale_floor, 24.0)` keeps BRM's
+# derived validity floor as the lower end of an explicit prior (decision
+# 1fk9b29). Resolution replaces the name with this marker; each backend lowers
+# it to the term's own floor data, so a fresh `reprocess` re-derives it.
+struct _BRMLengthScaleFloor end
+const _BRM_LENGTH_SCALE_FLOOR = :length_scale_floor
+Base.show(io::IO, ::_BRMLengthScaleFloor) = print(io, _BRM_LENGTH_SCALE_FLOOR)
+
+_brm_substitute_floor(value, spelling) = value
+function _brm_substitute_floor(value::NamedColumn, spelling)
+    name(value) === _BRM_LENGTH_SCALE_FLOOR || return value
+    parent(value) isa DataColumn && error(
+        "BRM preparation: `$spelling` names `$(_BRM_LENGTH_SCALE_FLOOR)`, which " *
+        "is both a data column and the HSGP validity-floor marker; rename the column")
+    _BRMLengthScaleFloor()
+end
+function _brm_substitute_floor(value::ExprColumn, spelling)
+    args = map(arg -> _brm_substitute_floor(arg, spelling), getargs(value))
+    kwargs = getkwargs(value)
+    rebuilt = NamedTuple{keys(kwargs)}(
+        map(arg -> _brm_substitute_floor(arg, spelling), values(kwargs)))
+    ExprColumn(getf(value), args...; rebuilt...)
+end
+_brm_substitute_floor(value::Tuple, spelling) =
+    map(arg -> _brm_substitute_floor(arg, spelling), value)
+_brm_substitute_floor(value::NamedTuple, spelling) =
+    NamedTuple{keys(value)}(_brm_substitute_floor(values(value), spelling))
+
+_brm_has_floor_marker(::_BRMLengthScaleFloor) = true
+_brm_has_floor_marker(value::ExprColumn) =
+    any(_brm_has_floor_marker, getargs(value)) ||
+    any(_brm_has_floor_marker, values(getkwargs(value)))
+_brm_has_floor_marker(_value) = false
+
+function _brm_floor_prior_spec(spec, term, slot, spelling)
+    substituted = _brm_substitute_floor(spec.expression, spelling)
+    _brm_has_floor_marker(substituted) || return spec
+    slot.class === :term_length_scale && getf(term) === hsgp || error(
+        "BRM preparation: `$spelling` uses `$(_BRM_LENGTH_SCALE_FLOOR)`, which " *
+        "names an `hsgp` term's validity floor and is only valid in its own " *
+        "`length_scale(...)` prior")
+    merge(spec, (; expression=substituted,
+                 arguments=_brm_substitute_floor(spec.arguments, spelling),
+                 keywords=_brm_substitute_floor(spec.keywords, spelling)))
 end
 
 _brm_term_slot_ambiguity(_callable) = "this term has several parameter components"
@@ -99,25 +195,38 @@ Base.@nospecializeinfer function _brm_resolve_term_priors(@nospecialize(brmi::BR
     for spec in specs
         spelling = _brm_term_prior_spelling(spec)
         candidates = isnothing(spec.predictor) ? targets : [spec.predictor]
-        reached = [target for target in candidates
-                   if haskey(get(addresses, target, Dict()), spec.term)]
-        if isempty(reached)
+        carrying = [target for target in candidates
+                    if haskey(get(addresses, target, Dict()), spec.term)]
+        if isempty(carrying)
             location = isnothing(spec.predictor) ? "any linear predictor" : "`$(spec.predictor)`"
             error("$prefix: `$spelling` matches no `$(spec.term)` term in $location")
         end
+        # A qualified address reaches only the terms whose keywords agree.
+        qualifiers = get(spec, :qualifiers, (;))
+        matching(target) = filter(term -> _brm_term_matches_qualifiers(term, qualifiers),
+                                  addresses[target][spec.term])
+        reached = filter(target -> !isempty(matching(target)), carrying)
+        isempty(reached) && error(
+            "$prefix: `$spelling` matches none of the `$(spec.term)` terms in " *
+            join(("`$target`" for target in carrying), ", ") *
+            ": no such term spells those keyword values")
         for target in reached
-            terms = addresses[target][spec.term]
+            shared = addresses[target][spec.term]
+            terms = matching(target)
             length(terms) == 1 || error(
                 "$prefix: `$spelling` is ambiguous — `$target` carries $(length(terms)) " *
-                "terms spelled `$(spec.term)`")
+                "terms spelled `$(spec.term)`; qualify the address with a keyword " *
+                "that tells them apart, as in `hsgp(x; cov=:periodic)`")
             term = only(terms)
             slot = _brm_resolve_term_slot(term, spec; prefix)
+            resolved = _brm_floor_prior_spec(spec, term, slot, spelling)
+            key = length(shared) > 1 ? _brm_term_full_key(term) : spec.term
             per_term = get!(get!(result, target, Dict{Symbol,Dict{Symbol,Any}}()),
-                            spec.term, Dict{Symbol,Any}())
+                            key, Dict{Symbol,Any}())
             held = get(per_term, slot.name, nothing)
-            rank = _brm_term_prior_rank(spec)
+            rank = _brm_term_prior_rank(resolved)
             if isnothing(held) || rank > _brm_term_prior_rank(held.spec)
-                per_term[slot.name] = (; spec, term)
+                per_term[slot.name] = (; spec=resolved, term)
             elseif rank == _brm_term_prior_rank(held.spec)
                 error("$prefix: `$spelling` and `$(_brm_term_prior_spelling(held.spec))` " *
                       "are equally specific and both set the same parameter of `$(spec.term)` in `$target`")

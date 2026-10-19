@@ -50,25 +50,34 @@ function _brm_kernel_check_subject_frame_lp(lp_col, nsub; prefix="BRM kernel pre
     nothing
 end
 
+# One non-missing unique label per row: what lets a grouping column label a
+# plate's cells.
+function _brm_kernel_labels_rows(raw::AbstractVector)
+    values = _brm_group_values(raw)
+    !isempty(values) && !any(ismissing, values) && allunique(values)
+end
+_brm_kernel_labels_rows(_raw) = false
+
 function _brm_kernel_subject_values(raw, group::Symbol; prefix="BRM kernel preparation")
     raw isa AbstractVector || error(
         "$prefix: kernel(...) subject grouping column `$group` must be a vector, " *
         "got $(typeof(raw)).")
     values = collect(_brm_group_values(raw))
-    (!isempty(values) && !any(ismissing, values) &&
-     length(unique(values)) == length(values)) || error(
+    _brm_kernel_labels_rows(values) || error(
         "$prefix: kernel(...) needs pre-grouped per-subject data — `$group` must " *
         "list one non-missing unique subject per row. Repeated levels indicate " *
         "long-format data. Got $(values).")
     values
 end
 
+# An empty `ev_vals` is a zero-row axis (a design with no rows on it, such as
+# no placebo observations): every cell gets an empty slice.
 function _brm_kernel_ragged_partition(a_name::Symbol, grp_name::Symbol,
                                      ev_vals::AbstractVector,
                                      subject_vals::AbstractVector; prefix="BRM kernel preparation")
-    (!isempty(ev_vals) && !any(ismissing, ev_vals)) || error(
+    any(ismissing, ev_vals) && error(
         "$prefix: kernel(...) `ragged($a_name, $grp_name)`: `$grp_name` must be a " *
-        "non-empty column with no missing labels.")
+        "column with no missing labels.")
     pos = Dict{Any,Int}()
     for (i, v) in enumerate(subject_vals); pos[v] = i; end
     rows = [Int[] for _ in eachindex(subject_vals)]
