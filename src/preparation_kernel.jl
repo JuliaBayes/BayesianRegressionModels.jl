@@ -50,13 +50,20 @@ function _brm_kernel_check_subject_frame_lp(lp_col, nsub; prefix="BRM kernel pre
     nothing
 end
 
+# One non-missing unique label per row: what lets a grouping column label a
+# plate's cells.
+function _brm_kernel_labels_rows(raw::AbstractVector)
+    values = _brm_group_values(raw)
+    !isempty(values) && !any(ismissing, values) && allunique(values)
+end
+_brm_kernel_labels_rows(_raw) = false
+
 function _brm_kernel_subject_values(raw, group::Symbol; prefix="BRM kernel preparation")
     raw isa AbstractVector || error(
         "$prefix: kernel(...) subject grouping column `$group` must be a vector, " *
         "got $(typeof(raw)).")
     values = collect(_brm_group_values(raw))
-    (!isempty(values) && !any(ismissing, values) &&
-     length(unique(values)) == length(values)) || error(
+    _brm_kernel_labels_rows(values) || error(
         "$prefix: kernel(...) needs pre-grouped per-subject data — `$group` must " *
         "list one non-missing unique subject per row. Repeated levels indicate " *
         "long-format data. Got $(values).")
