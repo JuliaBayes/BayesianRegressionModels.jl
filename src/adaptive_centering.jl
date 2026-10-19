@@ -839,11 +839,13 @@ _adaptive_stan_expr_value(x::StanBlocks.StanExpr) =
     _adaptive_stan_expr_value(x.expr)
 _adaptive_stan_expr_value(x) = x
 
+# A declared constraint's value: a literal, or the compiler-owned data value a
+# bare symbol names. Shared by adaptive centering and `parameter_draws`.
 function _adaptive_constraint_value(plan, raw, owner, role)
     value = _adaptive_stan_expr_value(raw)
     value isa Symbol && begin
         haskey(plan.data, value) || error(
-            "BRM adaptive centering: HSGP `$owner` $role constraint refers to " *
+            "BRM: `$owner` $role constraint refers to " *
             "compiler-owned data `$value`, but the generative plan does not " *
             "carry that value.",
         )

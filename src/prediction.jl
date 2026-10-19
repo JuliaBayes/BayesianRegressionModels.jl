@@ -1261,10 +1261,10 @@ end
                predictor::Symbol, term::Symbol, to::Symbol = :zero) -> Matrix{Float64}
 
 Ablate ONE named linear-predictor term in fitted UNCONSTRAINED draws: a copy of
-`draws` with that term's basis-weight coordinates set to zero, so a subsequent
+`draws` with that term's coefficient coordinates set to zero, so a subsequent
 `brm_execute(d, :predict; draws = …)` regenerates every descriptor output with
-the term's contribution removed and all other structure — every other term, the
-population coefficients, the residual scales, the term's own length-scale and
+the term's contribution removed and all other structure — every other term,
+every other coefficient, the residual scales, a GP term's own length-scale and
 marginal sd — held at its fitted value.
 
 This is the structural counterpart to [`population_draws`](@ref): that zeroes a
@@ -1280,31 +1280,57 @@ compiler-owned coordinate order.
 - `unc_names` — that model's `param_unc_names` (BridgeStan), in its order. The
   carrier is looked up by Stan name, so nothing here depends on that order.
 - `predictor` — the linear-predictor name (`:log_F`).
-- `term` — the public term label BRM derives from the formula
-  (`:hsgp_op_log_dose`), the same labels [`brm_term_coordinates`](@ref) uses.
+- `term` — a public formula label of that predictor: an ungrouped-`hsgp` term
+  label (`:hsgp_op_log_dose`, the labels [`brm_term_coordinates`](@ref) uses),
+  or a population coefficient label (`:Intercept`, a column such as `:age`, a
+  wrapped term's design key, an interaction column) or categorical predictor
+  (`:site` in `1 + site` or `factor(site; cmc=false)`) — the addresses
+  [`brm_population_effect_coordinates`](@ref) resolves.
 - `to` — the target value for the term's carrier. Only `:zero` is supported.
 
 Returns a fresh draws × `length(unc_names)` matrix; `draws` is left untouched.
 
-# Why zeroing removes exactly the term, and only for `hsgp`
+# Why zeroing removes exactly the term
 
-An ungrouped `hsgp(x; …)` emits `beta_raw ~ std_normal()` and contributes the
-summand `PHI * (sqrt_spd .* beta_raw)` to its linear predictor (`_sb_hsgp` /
-`_sb_hsgp_aniso`, sbimpl.jl). `beta_raw` is a raw standard normal — an
-unconstrained-domain parameter whose unconstrained coordinate IS the value
-multiplied into the predictor — so setting it to zero removes that summand
-exactly, whatever the fitted length-scale (`rho`) and marginal sd (`sigma`).
+Each admitted term contributes a summand that is LINEAR in a carrier whose
+unconstrained coordinate IS its value, so setting those coordinates to zero
+removes exactly that summand:
 
-No other emitted term shares this "zero the raw carrier ⇒ remove the
-contribution" invariant, so `term_draws` admits ONLY the ungrouped-`hsgp`
-basis-weight carrier and fails closed on everything else. It resolves the
-carrier through [`brm_term_coordinates`](@ref)'s `parameter = :basis_weights`
-role, which exists only for an ungrouped `hsgp`; a grouped `hsgp(…; by = …)`
-(whose weights are a correlated random-effect block — zero its levels with
-[`population_draws`](@ref) instead), an `mo(…)` simplex, or a population term
-exposes no such role and errors rather than zeroing a coordinate whose removal
-would mean something else. `to = :zero` is likewise the only value with an
-established meaning; any other target errors.
+- An ungrouped `hsgp(x; …)` emits `beta_raw ~ std_normal()` and contributes
+  `PHI * (sqrt_spd .* beta_raw)` (`_sb_hsgp` / `_sb_hsgp_aniso`, sbimpl.jl),
+  whatever the fitted length-scale (`rho`) and marginal sd (`sigma`).
+- A population coefficient is one column of `beta_pop` in `X * beta_pop`
+  (`popefs`); zeroing it removes that column's `X[:, k] * beta_pop[k]`. A
+  wrapped term such as `mo(x)` owns one such column under its term label, so
+  `term = :mo_x` removes the whole monotonic summand (its simplex is kept).
+- A categorical predictor contributes `append_row(0., beta)[x]` (treatment
+  coding) or `beta[x]` (cell means) (`_sb_cat` / `_sb_cat_cells`); zeroing its
+  whole block makes the term contribute zero on every row, so under treatment
+  coding every level takes the reference level's value.
+
+Everything else fails closed rather than zeroing a coordinate whose removal
+would mean something else:
+
+- a grouped `hsgp(…; by = …)` (a correlated random-effect block — zero its
+  levels with [`population_draws`](@ref)), and other terms whose contribution
+  is not one coefficient column (`dar`/`rw`/`cdar` processes, `s(...)` splines);
+- a population carrier whose declaration spells a bound, offset or multiplier
+  (for example `effect(mu, :) ~ Exponential(1)` declares every coefficient with
+  `lower=0`: its unconstrained 0 is the constrained 1, and the term's removal
+  sits on the boundary). A single support-limited margin such as
+  `effect(mu, x) ~ Exponential(1)` leaves the vector declared unbounded (its
+  density enforces the support), so that coefficient zeroes exactly;
+- a coefficient absorbed by an exact total-coefficient block (the `(1 | g)`
+  intercept under the default `total_groups=:auto`), which is integrated out of
+  the sampled model and has no unconstrained coordinate;
+- a carrier absent from the unconstrained draws — re-drawn in generated
+  quantities (an unconditioned program), or assembled from raw draws as a
+  transformed vector (a horseshoe population prior). An R2D2 population prior
+  samples `beta_pop` itself, so its coefficients ablate like any other;
+- a label naming both an `hsgp` term and a population coefficient.
+
+`to = :zero` is the only value with an established meaning; any other target
+errors. To set a declared parameter to a value, use [`parameter_draws`](@ref).
 
 # Example
 
@@ -1314,25 +1340,242 @@ full    = brm_execute(d, :predict; problem, draws, seed)  # every term present
 linear  = term_draws(d, draws, unc;
                      predictor = :log_F, term = :hsgp_op_log_dose)
 no_hsgp = brm_execute(d, :predict; problem, draws = linear, seed)  # term removed
+no_site = term_draws(d, draws, unc; predictor = :mu, term = :site)
 ```
 """
 function term_draws(d::BRMDescriptor, draws::AbstractMatrix, unc_names;
                     predictor::Symbol, term::Symbol, to::Symbol = :zero)
     to === :zero || error(
         "BRM prediction: `term_draws` supports only `to = :zero` (got `$to`). ",
-        "Zeroing an ungrouped `hsgp` term's basis weights removes exactly its ",
-        "predictor contribution; no other target value has an established ",
-        "meaning, so it is refused rather than guessed.")
+        "Zeroing a term's coefficients removes exactly its predictor ",
+        "contribution; no other target value has an established meaning, so it ",
+        "is refused rather than guessed. Use `parameter_draws` to set a ",
+        "declared parameter to a value.")
     _ranef_check_draws(draws, unc_names)
-    # Resolve the term's basis-weight carrier BY NAME against the UNCONSTRAINED
-    # names. `brm_term_coordinates` matches emitted names and validates the
-    # count, and `:basis_weights` resolves only for an ungrouped `hsgp` — so a
-    # non-hsgp / grouped-hsgp term fails closed here rather than in `:predict`.
-    resolved = brm_term_coordinates(d, predictor, unc_names;
-                                    term, parameter = :basis_weights)
+    coordinates = _term_draws_coordinates(d, predictor, term, unc_names)
     out = Matrix{Float64}(draws)
-    out[:, resolved.coordinates] .= 0.0
+    out[:, coordinates] .= 0.0
     out
+end
+
+# The unconstrained coordinates `term_draws` zeroes, resolved BY NAME against
+# the UNCONSTRAINED names. A population label takes the population path; any
+# other formula term goes through `brm_term_coordinates`' `:basis_weights`
+# role, which resolves only for an ungrouped `hsgp`, so every other
+# term-internal carrier fails closed there.
+function _term_draws_coordinates(d::BRMDescriptor, predictor::Symbol,
+                                 term::Symbol, unc_names)
+    brmi = d.plan.parent
+    term_entries = _brm_term_coordinate_entries(brmi, predictor)
+    term_matches = [e for e in term_entries if e.term === term]
+    population = _term_draws_population_labels(d, predictor)
+    if term in population
+        any(e -> getf(e.value) === hsgp, term_matches) && error(
+            "BRM prediction: `term_draws` label `$term` on predictor ",
+            "`$predictor` names both an `hsgp` term and a population ",
+            "coefficient; refusing to guess which one to remove.")
+        return _term_draws_population_coordinates(d, predictor, term, unc_names)
+    end
+    isempty(term_matches) && error(
+        "BRM prediction: `term_draws` label `$term` names no term of predictor ",
+        "`$predictor`; available term labels are ",
+        "$(Tuple(sort!(unique(e.term for e in term_entries), by=string))) and ",
+        "population coefficient labels are $(Tuple(population)).")
+    brm_term_coordinates(d, predictor, unc_names;
+                         term, parameter = :basis_weights).coordinates
+end
+
+# The exact total-coefficient blocks of `predictor`.
+_term_draws_total_blocks(d::BRMDescriptor, predictor::Symbol) =
+    hasproperty(d.plan, :bindings) ?
+        [b for b in total_effect_blocks(d.plan) if b.predictor === predictor] : []
+
+# The population addresses of `predictor`: its `beta_pop` coefficient labels,
+# the columns an exact total-coefficient block absorbed, and its categorical
+# blocks — exactly what `brm_population_effect_coordinates` accepts as
+# `coefficient`.
+function _term_draws_population_labels(d::BRMDescriptor, predictor::Symbol)
+    brmi = d.plan.parent
+    labels = Symbol[]
+    numeric = _brm_labels(brmi, predictor)
+    isnothing(numeric) || append!(labels, numeric)
+    for b in _term_draws_total_blocks(d, predictor)
+        append!(labels, b.population_columns)
+    end
+    append!(labels, sort!(collect(keys(_sb_cat_address_map(brmi, predictor))),
+                          by=string))
+    unique!(labels)
+end
+
+function _term_draws_population_coordinates(d::BRMDescriptor, predictor::Symbol,
+                                            term::Symbol, unc_names)
+    blocks = _term_draws_total_blocks(d, predictor)
+    any(b -> term in b.population_columns, blocks) && error(
+        "BRM prediction: coefficient `$term` of predictor `$predictor` is ",
+        "absorbed by an exact total-coefficient block: it is integrated out of ",
+        "the sampled model and has no unconstrained coordinate to zero. ",
+        "`population_draws` sets the block's groups to their population mean; ",
+        "refit with `total_groups=()` to sample the coefficient itself.")
+    resolved = brm_population_effect_coordinates(d, predictor, unc_names;
+                                                 coefficient = term)
+    output = resolved.output
+    output.kind === :parameter || error(
+        "BRM prediction: coefficient `$term` of predictor `$predictor` is a ",
+        "`$(output.kind)` carrier (`$(output.name)`), not a sampled parameter, ",
+        "so the unconstrained draws do not contain it.")
+    _brm_identity_unconstrained(output) || error(
+        "BRM prediction: coefficient `$term` of predictor `$predictor` has ",
+        "Stan type `$(output.type)` with constraints $(output.constraints) ",
+        "(`$(output.name)`): its unconstrained coordinate is not the ",
+        "coefficient, so zeroing it would not remove the term. A support-bounded ",
+        "prior puts the term's removal on the boundary.")
+    isempty(resolved.coordinates) && error(
+        "BRM prediction: coefficient `$term` of predictor `$predictor` ",
+        "resolves to no unconstrained coordinate in the supplied names.")
+    resolved.coordinates
+end
+
+const _BRM_REAL_CONTAINER_TYPES = (:real, :vector, :row_vector, :matrix)
+
+# Stan treats an infinite bound as no bound.
+_brm_no_bound(::Nothing, _side) = true
+_brm_no_bound(v::Real, side::Symbol) =
+    isinf(v) && (side === :lower ? v < 0 : v > 0)
+_brm_no_bound(_v, _side) = false
+
+# True when the carrier's unconstrained coordinates ARE its values: a real
+# container whose declaration spells no finite bound and the identity affine
+# transform. A support the prior density alone enforces (one margin of a mixed
+# vector prior) leaves the declaration unbounded, so it qualifies.
+function _brm_identity_unconstrained(output::BRMOutput)
+    output.type in _BRM_REAL_CONTAINER_TYPES || return false
+    c = output.constraints
+    raw(key, default) = _adaptive_stan_expr_value(get(c, key, default))
+    _brm_no_bound(raw(:lower, nothing), :lower) || return false
+    _brm_no_bound(raw(:upper, nothing), :upper) || return false
+    offset, multiplier = raw(:offset, 0), raw(:multiplier, 1)
+    offset isa Real && iszero(offset) && multiplier isa Real && isone(multiplier)
+end
+
+"""
+    parameter_draws(d::BRMDescriptor, draws, unc_names;
+                    parameter::Symbol, to::Real) -> Matrix{Float64}
+
+Set ONE declared parameter to the constrained value `to` in fitted
+UNCONSTRAINED draws: a copy of `draws` whose coordinates for that parameter
+hold the unconstrained image of `to`, so a subsequent
+`brm_execute(d, :predict; draws = …)` or BridgeStan
+`param_constrain(...; include_tp = true)` regenerates every output with the
+parameter fixed at `to` and every other coordinate held at its fitted value.
+
+This is the parameter counterpart of [`term_draws`](@ref), which removes a
+formula term. For `placebo_mag ~ Normal(0, 1)` entering
+`loc = … + placebo_mag * unit_placebo`, `to = 0.0` removes that contribution.
+
+- `d`, `draws`, `unc_names` — as for [`term_draws`](@ref).
+- `parameter` — the declared name (`:placebo_mag`), resolved through
+  [`brm_output`](@ref); never an emitted Stan name.
+- `to` — the finite constrained value. A real container (vector, matrix) has
+  every element set to `to`.
+
+The unconstrained image follows the declaration's own Stan transform:
+`log(to - lower)` for a lower bound, `log(upper - to)` for an upper bound,
+`logit((to - lower) / (upper - lower))` for both, and
+`(to - offset) / multiplier` for an affine declaration; an unbounded parameter
+takes `to` itself. A `to` on or beyond a bound is refused (its unconstrained
+image is infinite). So is anything that is not a sampled, real-valued, top-level
+declared parameter: a population coefficient, random effect, linear predictor,
+plate-local value, transformed or generated quantity, a natively constrained
+type (simplex, correlation, Cholesky factor), and a bound that is not a numeric
+constant (one computed from data or another parameter).
+
+Returns a fresh draws × `length(unc_names)` matrix; `draws` is left untouched.
+
+```julia
+no_placebo = parameter_draws(d, draws, unc; parameter = :placebo_mag, to = 0.0)
+pinned_sd  = parameter_draws(d, draws, unc; parameter = :sigma, to = 0.5)
+```
+"""
+function parameter_draws(d::BRMDescriptor, draws::AbstractMatrix, unc_names;
+                         parameter::Symbol, to::Real)
+    _ranef_check_draws(draws, unc_names)
+    isfinite(to) || error(
+        "BRM prediction: `parameter_draws` needs a finite `to` (got `$to`).")
+    output = brm_output(d, parameter)
+    output.role === :parameter || error(
+        "BRM prediction: `$parameter` resolves to a `$(output.role)` output ",
+        "(`$(output.name)`), not a declared parameter. `term_draws` removes a ",
+        "population term; `population_draws` sets random effects to their ",
+        "population mean.")
+    output.kind === :parameter || error(
+        "BRM prediction: declared parameter `$parameter` is a ",
+        "`$(output.kind)` carrier (`$(output.name)`), not a sampled ",
+        "parameter, so the unconstrained draws do not contain it.")
+    output.type in _BRM_REAL_CONTAINER_TYPES || error(
+        "BRM prediction: declared parameter `$parameter` has Stan type ",
+        "`$(output.type)`; only real-valued parameters (real, vector, ",
+        "row_vector, matrix) map one coordinate per element.")
+    value = _brm_unconstrain_value(d.plan, output.constraints, Float64(to),
+                                   parameter)
+    coordinates = _brm_element_coordinates(output, unc_names)
+    isempty(coordinates) && error(
+        "BRM prediction: declared parameter `$parameter` (`$(output.name)`) is ",
+        "absent from the supplied unconstrained names. Re-reflect the model ",
+        "that produced the posterior draws.")
+    expected = _brm_output_coordinate_count(d.plan, output)
+    isnothing(expected) || length(coordinates) == expected || error(
+        "BRM prediction: declared parameter `$parameter` owns $expected ",
+        "coordinates but resolves to $(length(coordinates)) of the supplied ",
+        "unconstrained names. Re-reflect the model that produced the posterior ",
+        "draws.")
+    out = Matrix{Float64}(draws)
+    out[:, coordinates] .= value
+    out
+end
+
+# One declared constraint as a number: a literal, or a scalar data value. A
+# bound computed from other values is refused.
+function _brm_numeric_constraint(plan, constraints, key, parameter)
+    haskey(constraints, key) || return nothing
+    value = _adaptive_constraint_value(plan, constraints[key], parameter,
+                                       "declared-parameter")
+    value isa Real || error(
+        "BRM prediction: declared parameter `$parameter` has `$key = ",
+        "$(constraints[key])`, which is not a numeric constant; its ",
+        "unconstrained image depends on other values and is refused rather ",
+        "than guessed.")
+    Float64(value)
+end
+
+# The unconstrained image of the constrained value `to` under Stan's transform
+# for a declaration with these constraints.
+function _brm_unconstrain_value(plan, constraints::NamedTuple, to::Float64,
+                                parameter::Symbol)
+    num(key) = _brm_numeric_constraint(plan, constraints, key, parameter)
+    lower, upper = num(:lower), num(:upper)
+    lower = _brm_no_bound(lower, :lower) ? nothing : lower
+    upper = _brm_no_bound(upper, :upper) ? nothing : upper
+    outside(bound) = error(
+        "BRM prediction: `to = $to` is not strictly inside the support of ",
+        "declared parameter `$parameter` ($bound); its unconstrained image ",
+        "would be infinite.")
+    if !isnothing(lower) && !isnothing(upper)
+        lower < to < upper || outside("lower = $lower, upper = $upper")
+        p = (to - lower) / (upper - lower)
+        return log(p) - log1p(-p)
+    elseif !isnothing(lower)
+        to > lower || outside("lower = $lower")
+        return log(to - lower)
+    elseif !isnothing(upper)
+        to < upper || outside("upper = $upper")
+        return log(upper - to)
+    end
+    offset = something(num(:offset), 0.0)
+    multiplier = something(num(:multiplier), 1.0)
+    multiplier > 0 || error(
+        "BRM prediction: declared parameter `$parameter` has non-positive ",
+        "`multiplier = $multiplier`.")
+    (to - offset) / multiplier
 end
 
 function _hsgp_population_curve_term(d::BRMDescriptor, predictor::Symbol,
