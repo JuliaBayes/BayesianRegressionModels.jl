@@ -32,6 +32,21 @@ predictor without a random effect read as `x[i]` (BridgeStan and RK density
 parity with the old one-element ragged gather). Run it with `--depwarn=yes` so
 its deprecation assertion is live.
 
+`fixed_ranef_scales.jl` checks random-effect scales and correlations held at
+known values, `sd(lp, ID) = value` and `cor(:, ID) = R`. It covers:
+
+- parsing, `priors_of`/`merge` composition and the refusals;
+- SBBRMI emission and stanc acceptance for mixed, all-known, correlation-only,
+  one-margin, Student-t, `cv_groups` and `@plate` models;
+- BridgeStan densities: each known model equals its sampled twin evaluated at
+  the known values, up to exactly the twin's prior density of those values;
+- RK/Stan coordinate transport with density and gradient parity;
+- `population_draws`, `reprocess(...; resample_groups=...)`, an
+  omitted-response prior program, descriptors, descriptions, and the NLME and
+  adaptive-centering refusals.
+
+Set `BRM_FIXED_RANEF_RUNTIME=0` to skip the compiled-model sets.
+
 `kernel_population_lp.jl` checks per-subject linear predictors without a random
 effect (a typical value plus covariates) read as `x[i]`, beside a random-effect
 predictor and in a no-random-effects panel, against an independent density
@@ -142,6 +157,14 @@ round trip with reordered subjects, and the end-to-end chain from an SAEM fit
 through `brm_nlme_joint_start` to WarmupHMC on the conditional Stan and RK
 subject-draw targets. Run it in the NLMEEstimation scratch
 environment described below.
+
+`nlme_fit.jl` checks the prior-median default start against independently
+computed medians (authored, default, truncated, hierarchical and `Flat()`
+laws), keeps random-effect blocks without an ID independent, reads named
+natural-unit estimates of a hand-set point (and passes them back as
+address-keyed `inits`), and runs `brm_nlme_fit` with `empirical_bayes`,
+`saem` and `focei` on flat and nested models. Run it in the NLMEEstimation
+scratch environment described below.
 
 `nlme_start.jl` reads complete RK and Stan points as NLMEEstimation starting
 values with `brm_nlme_start`. It covers a correlated population-PK model and a

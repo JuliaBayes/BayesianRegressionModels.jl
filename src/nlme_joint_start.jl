@@ -49,7 +49,7 @@ function brm_nlme_joint_map(rk::RKBRMI, sb::SBBRMI; path,
     transport = brm_coordinate_transport(rk, sb, BridgeStan.param_unc_names(stan_model))
     blocks = NamedTuple[]
     for (; family, record, indices) in _brm_nlme_families(rk, view)
-        key = (; group=record.group, id=record.id)
+        key = _brm_nlme_block_identity(record)
         scales = BRMCoordinatePair[]
         for margin in record.margins
             matches = [p for p in transport.pairs
@@ -77,7 +77,7 @@ function _brm_nlme_families(rk::RKBRMI, view::BRMNLMEView)
     families = NamedTuple[]
     for record in _brm_nlme_records(rk.plan)
         record.kind === :ranef || continue
-        key = (; group=record.group, id=record.id)
+        key = _brm_nlme_block_identity(record)
         indices = findall(m -> isequal(m.block, key), view.block_margins)
         length(indices) == length(record.margins) &&
             [(view.block_margins[i].predictor, view.block_margins[i].coefficient)

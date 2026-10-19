@@ -368,13 +368,22 @@ Base.@nospecializeinfer function _sb_plan_totals(@nospecialize(brmi),prepared,ov
     out
 end
 
+# The random-effect design `Z` and basis `A` of the block on `predictor`, which
+# `population_model` reads back from a TotalEffectBlock.
+_sb_total_design_name(predictor) = Symbol(:total_Z_,predictor)
+_sb_total_basis_name(predictor) = Symbol(:total_A_,predictor)
+# Each row's total contribution: its group's totals against the row's design.
+_sb_total_location(total,idx,zn) = :(rows_dot_product($total[$idx,:],$zn))
+# The population counterpart: every group at the population mean `A * beta`.
+_sb_total_population_location(zn,an,beta) = :($zn * ($an * $beta))
+
 function _sb_emit_total!(stmts,data,target,plan;mod::Module=@__MODULE__)
     suffix = plan.target
     total, tau = Symbol(:total_,suffix), Symbol(:total_scale_,suffix)
     beta, deviations = Symbol(:population_,suffix), Symbol(:deviation_,suffix)
     idx, ng = Symbol(:total_group_,suffix), Symbol(:total_ng_,suffix)
     nk, np = Symbol(:total_nk_,suffix), Symbol(:total_np_,suffix)
-    an, loc, prec = Symbol(:total_A_,suffix), Symbol(:total_location_,suffix), Symbol(:total_precision_,suffix)
+    an, loc, prec = _sb_total_basis_name(suffix), Symbol(:total_location_,suffix), Symbol(:total_precision_,suffix)
     j,k,p = length(plan.levels),length(plan.columns),length(plan.absorbed)
     for (key,value) in (ng=>j,nk=>k,np=>p,an=>plan.A,
                        loc=>Float64[v.location for v in plan.prior_info],
@@ -415,9 +424,9 @@ function _sb_emit_total!(stmts,data,target,plan;mod::Module=@__MODULE__)
     push!(stmts,:($deviations = brm_total_deviations($total,$an*$beta)))
     zcols = Any[isnothing(c.source) ? :(rep_vector(1.,num_elements($idx))) :
                     _sb_shared_population_column!(data,c) for c in plan.columns]
-    zn = Symbol(:total_Z_,suffix)
+    zn = _sb_total_design_name(suffix)
     push!(stmts,:($zn = $(Expr(:call,:hcat,zcols...))))
-    total_lp = :(rows_dot_product($total[$idx,:],$zn))
+    total_lp = _sb_total_location(total,idx,zn)
     if !isempty(plan.remaining)
         remaining_cols = Any[isnothing(plan.design.columns[c].source) ? :(rep_vector(1.,num_elements($idx))) :
             _sb_shared_population_column!(data,plan.design.columns[c]) for c in plan.remaining]

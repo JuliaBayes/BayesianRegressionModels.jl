@@ -50,16 +50,6 @@ BRM._brm_nlme_forward_backend(::AutoEnzyme) = AutoEnzyme(; mode=Enzyme.Forward)
 # an LKJ correlation Cholesky factor R, with C = diag(τ) R. These helpers move
 # the *authored* RK prior to NLME's ω measure; the standardized subject draws
 # are omitted because NLMEEstimation supplies their Gaussian prior itself.
-function _replace_prior_declaration(values::NamedTuple, declaration::Symbol, value)
-    hasproperty(values, declaration) && return merge(values,
-        NamedTuple{(declaration,)}((value,)))
-    parts = Symbol.(split(String(declaration), '.'))
-    replace_path(nt, path) = length(path) == 1 ?
-        merge(nt, NamedTuple{(only(path),)}((value,))) :
-        merge(nt, NamedTuple{(first(path),)}((replace_path(nt[first(path)], path[2:end]),)))
-    replace_path(values, parts)
-end
-
 _prior_positions(m, declaration) = findall(name ->
     BRM._brm_nlme_owned(name, declaration), m.view.coordinates)
 
@@ -97,6 +87,7 @@ function _prior_omega_map(m::BRM.BRMNLMEModel, θ, σ, ω)
     log_omega_jacobian = 0.0
     log_coordinate_jacobian = 0.0
     log_omega_jacobian_gradient = zeros(Float64, length(ω))
+    saturated = false
     margin_start = 1
     omega_start = 1
     for (family, record) in enumerate(records)
@@ -104,20 +95,16 @@ function _prior_omega_map(m::BRM.BRMNLMEModel, θ, σ, ω)
         block = BRM._brm_nlme_ragged(m.view) ? C[family] :
             C[margin_start:(margin_start + K - 1), margin_start:(margin_start + K - 1)]
         τ = [norm(view(block, i, 1:i)) for i in 1:K]
-        R = zeros(Float64, K, K)
-        for i in 1:K, j in 1:i
-            R[i, j] = block[i, j] / τ[i]
-        end
         scales = isnothing(record.scales) ? (record.scale,) : record.scales
         scale_positions = Int[]
         if isnothing(record.scales)
-            values = _replace_prior_declaration(values, record.scale, τ)
+            values = BRM._brm_rk_set_declaration_value(values, record.scale, (), τ)
             append!(scale_positions, _prior_positions(m, record.scale))
         else
             length(scales) == K || BRM._brm_nlme_error(
                 "population prior: scale declarations do not match the random-effect block")
             for (declaration, scale) in zip(scales, τ)
-                values = _replace_prior_declaration(values, declaration, scale)
+                values = BRM._brm_rk_set_declaration_value(values, declaration, (), scale)
                 append!(scale_positions, _prior_positions(m, declaration))
             end
         end
@@ -126,7 +113,6 @@ function _prior_omega_map(m::BRM.BRMNLMEModel, θ, σ, ω)
         factor_positions = isnothing(record.L) ? Int[] : _prior_positions(m, record.L)
         length(factor_positions) == K * (K - 1) ÷ 2 || BRM._brm_nlme_error(
             "population prior: correlation coordinates do not match the random-effect block")
-        isnothing(record.L) || (values = _replace_prior_declaration(values, record.L, R))
         append!(omega_positions, scale_positions, factor_positions)
         margin_start += K
         omega_start += K * (K + 1) ÷ 2
@@ -134,7 +120,8 @@ function _prior_omega_map(m::BRM.BRMNLMEModel, θ, σ, ω)
     length(omega_positions) == length(ω) || BRM._brm_nlme_error(
         "population prior: BRM covariance coordinates do not match NLME ω")
     # Preserve the supplied unconstrained population point exactly after the
-    # constrained round trip. Only BRM's covariance coordinates are replaced.
+    # constrained round trip. Only BRM's scale coordinates are replaced here;
+    # the correlation coordinates are written from C below.
     mapped = RKPPL.unconstrain(layout, values)
     mapped[m.theta] = θ
     mapped[m.sigma] = σ
@@ -184,10 +171,18 @@ function _prior_omega_map(m::BRM.BRMNLMEModel, θ, σ, ω)
             entry = _prior_entry(layout, position)
             entry.kind === :cholesky_corr && entry.transform === :lkj ||
                 BRM._brm_nlme_error("population prior: expected an LKJ correlation factor")
+            # The LKJ coordinate is atanh of the partial correlation
+            # C[i,j] / ‖C[i,j:i]‖, i.e. asinh(C[i,j] / ‖C[i,j+1:i]‖). That form
+            # is finite for every finite ω, while the partial correlation
+            # itself rounds to ±1 once ‖C[i,j+1:i]‖ ≪ |C[i,j]|.
+            mapped[position] = asinh(block[i, j] / norm(view(block, i, (j + 1):i)))
             z = tanh(mapped[position])
+            # Past |u| ≈ 19, tanh(u) rounds to ±1: RK's LKJ log-Jacobian
+            # log(1 - tanh(u)²) is then -Inf and the ω density underflows.
+            abs(z) < 1 || (saturated = true)
             push!(omega_logjac_gradient, -(i - j + 1) * z)
             S = sum(abs2, view(block, i, j:i))
-            T = S - block[i, j]^2
+            T = sum(abs2, view(block, i, (j + 1):i))
             for k in j:i
                 col = local_omega[i, k]
                 du_dC = k == j ? inv(sqrt(S)) :
@@ -206,11 +201,15 @@ function _prior_omega_map(m::BRM.BRMNLMEModel, θ, σ, ω)
     end
     correction = log_omega_jacobian - log_coordinate_jacobian
     (; mapped, omega_positions, J, omega_logjac_gradient,
-        log_omega_jacobian_gradient, correction)
+        log_omega_jacobian_gradient, correction, saturated)
 end
 
+# A finite ω whose correlation coordinate saturates has an underflowed prior
+# density in BRM's coordinates: its log is -Inf, and its gradient is undefined.
+# NLMEEstimation's M-step line search and FOCE(I) objective reject such a trial.
 function NE.population_logprior(m::BRM.BRMNLMEModel, θ, σ, ω)
     mapping = _prior_omega_map(m, θ, σ, ω)
+    mapping.saturated && return -Inf
     # BRM's standardized z prior is one N(0,1) per subject and margin at z=0.
     # NLMEEstimation owns the η prior, so remove precisely that constant term.
     z_constant = -sum(length, m.view.subject_coordinates) * log(2π) / 2
@@ -220,6 +219,8 @@ end
 
 function NE.population_logprior_and_gradient(m::BRM.BRMNLMEModel, θ, σ, ω)
     mapping = _prior_omega_map(m, θ, σ, ω)
+    mapping.saturated && return -Inf, fill(NaN, length(θ)), fill(NaN, length(σ)),
+        fill(NaN, length(ω))
     value, gradient = BRM._rk_nlme_population_prior_value_gradient(
         m.population_prior, mapping.mapped)
     z_constant = -sum(length, m.view.subject_coordinates) * log(2π) / 2
@@ -456,5 +457,91 @@ function NE.mu_referencing(m::BRM.BRMNLMEModel)
 end
 
 NE.parameter_names(m::BRM.BRMNLMEModel) = BRM._brm_nlme_parameter_names(m)
+
+# ── brm_nlme_fit (src/nlme_fit.jl): one call from a model to named estimates ──
+
+BRM.brm_nlme_estimates(m::BRM.BRMNLMEModel, r::NE.FOCEResult) =
+    BRM.brm_nlme_estimates(m, r.theta, r.sigma, r.omega_matrix, r.ebes)
+BRM.brm_nlme_estimates(m::BRM.BRMNLMEModel,
+        r::Union{NE.SAEMResult,NE.RaggedSAEMResult}, ebes=nothing) =
+    BRM.brm_nlme_estimates(m, r.theta, r.sigma, r.omega_matrix, ebes)
+
+_fit_model(x::BRM.BRMI; kwargs...) = _fit_model(BRM.RKBRMI(x); kwargs...)
+_fit_model(x::BRM.RKBRMI; ad_backend, shared_point, subject_group, nested_groups) =
+    BRM.brm_nlme_model(x;
+        ad_backend=ad_backend === nothing ? AutoEnzyme(; mode=Enzyme.Reverse) : ad_backend,
+        shared_point, subject_group, nested_groups)
+function _fit_model(m::BRM.BRMNLMEModel; ad_backend, shared_point, subject_group,
+        nested_groups)
+    ad_backend === nothing && shared_point === nothing && subject_group === nothing &&
+        isempty(nested_groups) || throw(ArgumentError(
+        "brm_nlme_fit: a prepared BRMNLMEModel already fixes its ad_backend, " *
+        "shared_point and subject grouping; pass them to brm_nlme_model instead"))
+    m
+end
+_fit_model(x; kwargs...) = throw(ArgumentError(
+    "brm_nlme_fit: expected a @brm model (BRMI), an RKBRMI or a BRMNLMEModel, " *
+    "got $(typeof(x))"))
+
+_fit_start(m, ::Nothing, ::Nothing) = BRM.brm_nlme_start(m)
+# Addressed values over the prior-median start.
+_fit_start(m, ::Nothing, inits::NamedTuple) = BRM.brm_nlme_start(m, inits;
+    base=first(BRM._brm_nlme_prior_median_point(m)))
+_fit_start(m, ::Nothing, inits) = throw(ArgumentError(
+    "brm_nlme_fit: `inits` is a NamedTuple keyed by prior address; got $(typeof(inits))"))
+_fit_start(m, start, ::Nothing) = _fit_start(m, start)
+_fit_start(m, start, inits) = throw(ArgumentError(
+    "brm_nlme_fit: give either `start` or `inits`, not both"))
+_fit_start(m, u::AbstractVector{<:Real}) = BRM.brm_nlme_start(m, u)
+function _fit_start(m, start::NamedTuple)
+    missing_fields = [k for k in (:theta, :sigma, :omega, :omega_matrix, :eta)
+        if !haskey(start, k)]
+    isempty(missing_fields) || throw(ArgumentError(
+        "brm_nlme_fit: a start needs the fields of brm_nlme_start; missing " *
+        join(missing_fields, ", ")))
+    start
+end
+_fit_start(m, start) = throw(ArgumentError(
+    "brm_nlme_fit: `start` is a full RK packed point or a start returned by " *
+    "brm_nlme_start; got $(typeof(start)). Address-keyed values go in `inits`"))
+
+# The start's subject effects for the subjects an estimator is asked about.
+_start_eta(H, ::Nothing) = H
+_start_eta(H::AbstractMatrix, subjects::AbstractVector) = H[:, subjects]
+_start_eta(H::AbstractVector, subjects::AbstractVector) = H[subjects]
+
+# The caller's keywords win over the start's subject effects.
+_with_eta(start, kwargs) = merge((; η0=_start_eta(start.eta,
+    get(kwargs, :subjects, nothing))), values(kwargs))
+
+function _fit_run(::typeof(NE.saem), m, start, ebes; kwargs...)
+    result = NE.saem(m, start.theta, start.sigma, start.omega; _with_eta(start, kwargs)...)
+    # SAEM's `eta` are its final chain states; EBEs need a posthoc pass.
+    ebe = ebes ? NE.empirical_bayes(m, result.theta, result.sigma, result.omega;
+        subjects=result.subjects, η0=result.eta) : nothing
+    result, ebe, BRM.brm_nlme_estimates(m, result, ebe)
+end
+function _fit_run(::typeof(NE.focei), m, start, _ebes; kwargs...)
+    result = NE.focei(m, start.theta, start.sigma, start.omega; kwargs...)
+    result, result.ebes, BRM.brm_nlme_estimates(m, result)
+end
+function _fit_run(::typeof(NE.empirical_bayes), m, start, _ebes; kwargs...)
+    result = NE.empirical_bayes(m, start.theta, start.sigma, start.omega;
+        _with_eta(start, kwargs)...)
+    result, result, BRM.brm_nlme_estimates(m, start.theta, start.sigma,
+        start.omega_matrix, result)
+end
+_fit_run(estimator, m, start, ebes; kwargs...) = throw(ArgumentError(
+    "brm_nlme_fit: `$estimator` is not one of NLMEEstimation's estimators saem, " *
+    "focei or empirical_bayes (posthoc)"))
+
+function BRM.brm_nlme_fit(x, estimator; start=nothing, inits=nothing, ebes::Bool=true,
+        ad_backend=nothing, shared_point=nothing, subject_group=nothing,
+        nested_groups=NamedTuple(), kwargs...)
+    model = _fit_model(x; ad_backend, shared_point, subject_group, nested_groups)
+    s = _fit_start(model, start, inits)
+    result, ebe, estimates = _fit_run(estimator, model, s, ebes; kwargs...)
+    (; estimates, result, ebes=ebe, start=s, model)
+end
 
 end

@@ -2246,10 +2246,23 @@ function brm_ranef_sd_coordinates(d::BRMDescriptor, logical::Symbol,
         "neither is a single per-margin coordinate.")
     tau_name = Symbol(block.binding, :_, tau_suffix)
 
+    # A known-value block (`sd(...) = value`) passes its scales in from the
+    # model body: a known margin has no posterior coordinate at all, and the
+    # others are the elements of the caller-level `<binding>_tau`.
+    known = get(spec, :known, false)
+    if known
+        record = d.plan.bindings[block.binding]
+        value = record.known_scales[margin_index]
+        isnothing(value) || error(
+            "brm_descriptor: the SD of margin `(predictor=$logical, " *
+            "coefficient=$coefficient)` of block `|$id|` is held at the known " *
+            "value $value (`sd(...) = value`); it is not a parameter and has no " *
+            "posterior coordinate.")
+    end
     outputs = BRMOutput[
         o for o in d.outputs
-        if o.role === :random_effect && o.name === tau_name &&
-           !isnothing(o.declaration) && o.declaration.target === block.binding
+        if o.name === tau_name && (known || (o.role === :random_effect &&
+           !isnothing(o.declaration) && o.declaration.target === block.binding))
     ]
     length(outputs) == 1 || error(
         "brm_descriptor: random-effect block `$(block.binding)` (`|$id|`) resolves " *

@@ -20,6 +20,7 @@ _brm_nlme_start_coordinates(m, θ, σ, Ω, u) = error(
     "NLMEEstimation to activate BRM's NLMEEstimation extension")
 
 """
+    brm_nlme_start(m::BRMNLMEModel)
     brm_nlme_start(m::BRMNLMEModel, u::AbstractVector)
     brm_nlme_start(m::BRMNLMEModel, map::BRMNLMEJointMap, stan_u::AbstractVector)
     brm_nlme_start(m::BRMNLMEModel, inits::NamedTuple; base=m.unit)
@@ -33,6 +34,17 @@ initial values keyed by prior address, as [`brm_start`](@ref) takes them; the
 point is `brm_start(m.backend, inits; base)`, whose default base is `m`'s unit
 point (zero subject effects, and the fixed values of a fixed-shared model).
 Requires NLMEEstimation to be loaded.
+
+Without a point, the start is the model's **prior medians**: every population
+coefficient, sampled scalar and random-effect scale starts at the median of
+the prior law the model declares for it (laws whose arguments name another
+scalar use that scalar's own median), the random-effect correlations at the
+identity, and every subject effect at zero. A coordinate whose law has no
+median (`Flat()`, or an argument without a value) and every other estimated
+coordinate (shared latents, simplexes, thresholds) keeps the zero
+unconstrained value. The result adds `start_source = (; prior_median, zero)`,
+the packed names of the θ, σ and random-effect scale coordinates in each
+group.
 
 Returns a named tuple:
 
@@ -123,4 +135,132 @@ function brm_nlme_start(m::BRMNLMEModel, map::BRMNLMEJointMap, stan_u::AbstractV
     all(isfinite, stan_u) || _brm_nlme_error(
         "brm_nlme_start: Stan coordinates must be finite")
     brm_nlme_start(m, brm_stan_point_to_rk(map.transport, stan_u))
+end
+
+# ── Prior medians ────────────────────────────────────────────────────────────
+#
+# Beside each population coefficient, sampled scalar and random-effect scale it
+# declares, the RK emitter records the law it wrote (`prior`, `scale_priors`).
+# The default start reads those records, so it follows the emitted program.
+
+# A recorded law as a Distributions.jl distribution. Names resolve through
+# `value`: another declaration's own start, or a bound scalar. `nothing` when
+# the law has no median (`Flat()`) or an argument has no value.
+_brm_prior_law(x::Real, _value) = Float64(x)
+_brm_prior_law(x::Symbol, value) = value(x)
+function _brm_prior_law(x::Expr, value)
+    x.head === :call && first(x.args) isa Symbol || return nothing
+    args = Any[_brm_prior_law(a, value) for a in x.args[2:end]]
+    any(isnothing, args) && return nothing
+    _brm_prior_law(Val(first(x.args)), args...)
+end
+_brm_prior_law(_x, _value) = nothing
+
+_brm_prior_law(::Val{:Flat}) = nothing
+_brm_prior_law(::Val{:HalfNormal}, s::Real) = truncated(Normal(0, s), 0, Inf)
+_brm_prior_law(::Val{:HalfCauchy}, s::Real) = truncated(Cauchy(0, s), 0, Inf)
+# `restricted` keeps its family's kernel on the support, so its median within
+# the bounds is the normalized truncation's.
+_brm_prior_law(::Val{:restricted}, d::UnivariateDistribution, lo::Real, hi::Real) =
+    truncated(d, lo, hi)
+_brm_prior_law(::Val{:truncated}, d::UnivariateDistribution, lo::Real, hi::Real) =
+    truncated(d, lo, hi)
+# RKPPL's three-argument Student t is located and scaled.
+_brm_prior_law(::Val{:StudentT}, nu::Real, mu::Real, s::Real) = mu + s * TDist(nu)
+for op in (:+, :-, :*, :/, :^, :sqrt, :exp, :log, :abs)
+    @eval _brm_prior_law(::Val{$(QuoteNode(op))}, args::Real...) = $op(args...)
+end
+# Any other law names its Distributions.jl family.
+function _brm_prior_law(::Val{F}, args...) where {F}
+    isdefined(Distributions, F) || return nothing
+    family = getfield(Distributions, F)
+    family isa Type && family <: UnivariateDistribution &&
+        all(a -> a isa Real, args) || return nothing
+    family(args...)
+end
+
+_brm_prior_median(law::UnivariateDistribution) = Float64(median(law))
+_brm_prior_median(_law) = nothing
+
+_brm_nlme_scalar_data(plan::_RKHeldOutPlan, name) = _brm_nlme_scalar_data(plan.parent, name)
+_brm_nlme_scalar_data(plan, name) = let x = get(plan.columns, name, nothing)
+    x isa Real ? Float64(x) : nothing
+end
+
+# The packed names a write addresses: `<declaration>.<index>`, or every
+# coordinate of the declaration.
+_brm_nlme_element_names(view, declaration, index) = isempty(index) ?
+    [n for n in view.coordinates if _brm_nlme_owned(n, declaration)] :
+    [Symbol(declaration, ".", join(index, "."))]
+
+# Each record kind adds `(declaration, index, value)` writes, as `brm_start`
+# applies them, for the declarations its recorded laws start.
+_brm_nlme_prior_writes!(writes, ::Val, record, values, value) = writes
+_brm_nlme_record_median(record, value) =
+    _brm_prior_median(_brm_prior_law(get(record, :prior, nothing), value))
+function _brm_nlme_prior_writes!(writes, ::Val{:population}, record, values, value)
+    x = _brm_nlme_record_median(record, value)
+    x === nothing || push!(writes, (record.declaration, get(record, :index, ()), x))
+    writes
+end
+function _brm_nlme_prior_writes!(writes, ::Val{:population_block}, record, values, value)
+    x = _brm_nlme_record_median(record, value)
+    x === nothing && return writes
+    for i in eachindex(record.labels)
+        push!(writes, (record.declaration, (i,), x))
+    end
+    writes
+end
+function _brm_nlme_prior_writes!(writes, ::Val{:scalar}, record, values, value)
+    x = value(record.declaration)
+    x === nothing || push!(writes, (record.declaration, (), x))
+    writes
+end
+function _brm_nlme_prior_writes!(writes, ::Val{:ranef}, record, values, value)
+    laws = get(record, :scale_priors, nothing)
+    laws === nothing && return writes
+    _brm_rk_scale_writes!(writes, record,
+        [_brm_prior_median(_brm_prior_law(law, value)) for law in laws], values)
+end
+
+# `m`'s unit point with its prior-median coordinates set, and the positions of
+# those coordinates. Every other coordinate keeps the unit point's exact value,
+# the fixed values of a fixed-shared model included.
+function _brm_nlme_prior_median_point(m::BRMNLMEModel)
+    view, backend = m.view, m.backend
+    records = _brm_nlme_records(backend.plan)
+    scalars = Dict(r.declaration => r for r in records if r.kind === :scalar)
+    medians = Dict{Symbol,Union{Nothing,Float64}}()
+    pending = Set{Symbol}()
+    # A scalar's start is its own prior median, resolved when a law reads it.
+    function value(name::Symbol)
+        haskey(medians, name) && return medians[name]
+        record = get(scalars, name, nothing)
+        record === nothing && return _brm_nlme_scalar_data(backend.plan, name)
+        name in pending && return nothing
+        push!(pending, name)
+        x = _brm_nlme_record_median(record, value)
+        delete!(pending, name)
+        medians[name] = x
+    end
+    values = _rk_constrained_values(backend, m.unit)
+    writes = Tuple{Symbol,Tuple,Any}[]
+    for record in records
+        _brm_nlme_prior_writes!(writes, Val(record.kind), record, values, value)
+    end
+    point = _brm_rk_start_point(backend, values, writes)
+    position = Dict(n => i for (i, n) in enumerate(view.coordinates))
+    chosen = sort!(unique!([position[n] for (declaration, index, _) in writes
+        for n in _brm_nlme_element_names(view, declaration, index)]))
+    u = copy(m.unit)
+    u[chosen] = point[chosen]
+    u, chosen
+end
+
+function brm_nlme_start(m::BRMNLMEModel)
+    u, chosen = _brm_nlme_prior_median_point(m)
+    view = m.view
+    estimated = sort!(vcat(m.theta, m.sigma, findall(==(:subject_scale), view.role)))
+    merge(brm_nlme_start(m, u), (; start_source=(; prior_median=view.coordinates[chosen],
+        zero=view.coordinates[setdiff(estimated, chosen)])))
 end
