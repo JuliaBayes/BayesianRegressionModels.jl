@@ -68,8 +68,9 @@ observation.
 column: a formula LP, a raw data column and an observed response (in-cell and
 formula-LHS) each give every cell an empty slice. Each model's BridgeStan and
 RK density and gradient equal a twin that never reads the empty axis.
-`reprocess` moves the same Stan program onto data with rows and back, and a
-missing group label is still refused.
+`reprocess` moves the same Stan program onto data with rows and back,
+recomputing the row count of a declared axis that sizes an intercept-only
+predictor, and a missing group label is still refused.
 
 `plate_ragged_omitted_response.jl` checks a censored ragged observation inside
 `@plate` with its data column bound, omitted, and reprocessed. It requires the

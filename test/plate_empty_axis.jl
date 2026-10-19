@@ -8,7 +8,8 @@
 # raw data column and an observed response alike. An empty slice contributes
 # nothing, so each model must equal a twin that never reads the empty axis —
 # density and gradient, on both backends — and the same program must replay
-# onto data that has rows (and back) with `reprocess`.
+# onto data that has rows (and back) with `reprocess`, including the row
+# count of a declared axis that sizes a predictor with no data column.
 
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 
@@ -47,6 +48,19 @@ lp_twin(data) = @brm data begin
     ragged(y, obs_subject)
     @plate for i in eachindex(log_CL)
         loc[i] = exp(log_CL[i])
+        y[i] ~ normal(loc[i], sigma)
+    end
+end
+
+# A predictor with no data column takes its length from the declared axis.
+intercept_gather(data) = @brm data begin
+    sigma ~ Exponential(1)
+    log_CL ~ 1 + weight + (1 | p | subject)
+    p_offset ~ 1
+    ragged(p_offset, p_subject)
+    ragged(y, obs_subject)
+    @plate for i in eachindex(log_CL)
+        loc[i] = exp(log_CL[i]) + sum(p_offset[i])
         y[i] ~ normal(loc[i], sigma)
     end
 end
@@ -156,6 +170,10 @@ end
     @test sb.data[:kernel_loc_p_time_ragged] == [Float64[], Float64[]]
     _, twin = stan_problem(column_twin(EMPTY_PLACEBO), "column-twin")
     check_stan_twin(stan, twin)
+
+    sb, stan = stan_problem(intercept_gather(EMPTY_PLACEBO), "intercept-gather")
+    @test sb.data[:n_rows_p_offset_p_subject] == 0
+    check_stan_twin(stan, twin; extra=["pop_p_offset_beta_pop.1"])
     @test isequal(EMPTY_PLACEBO, saved)
 end
 
@@ -163,6 +181,8 @@ end
     check_rk_twin(lp_gather(EMPTY_PLACEBO), lp_twin(EMPTY_PLACEBO);
         extra=[Symbol("pop_placebo.beta_pop.1")])
     check_rk_twin(column_gather(EMPTY_PLACEBO), column_twin(EMPTY_PLACEBO))
+    check_rk_twin(intercept_gather(EMPTY_PLACEBO), column_twin(EMPTY_PLACEBO);
+        extra=[:p_offset_Intercept])
 end
 
 @stestset "an empty observed axis observes nothing" begin
@@ -179,7 +199,8 @@ end
 @stestset "reprocess moves a program between an empty and a populated axis" begin
     for (model, key, populated) in (
             (lp_gather, :kernel_loc_placebo_ragged, [[2], [1, 3]]),
-            (column_gather, :kernel_loc_p_time_ragged, [[1.0], [0.5, 2.0]]))
+            (column_gather, :kernel_loc_p_time_ragged, [[1.0], [0.5, 2.0]]),
+            (intercept_gather, :kernel_loc_p_offset_ragged, [[2], [1, 3]]))
         empty = SBBRMI(model(EMPTY_PLACEBO); mod=@__MODULE__, total_groups=())
         direct = SBBRMI(model(PLACEBO_ROWS); mod=@__MODULE__, total_groups=())
         @test direct.data[key] == populated
@@ -194,14 +215,19 @@ end
         @test emptied.data[key] == empty.data[key]
         @test emptied.data == empty.data
     end
-    # The replayed populated program evaluates like the one built on rows.
-    filled = reprocess(SBBRMI(lp_gather(EMPTY_PLACEBO); mod=@__MODULE__,
-        total_groups=()), PLACEBO_ROWS; freeze_constants=true)
-    replayed = BRM.stan_instantiate(filled; path=joinpath(STAN_DIR, "lp-replayed.stan"))
-    _, direct = stan_problem(lp_gather(PLACEBO_ROWS), "lp-direct")
-    for u in points(BridgeStan.param_unc_num(direct.model))
-        @test BridgeStan.log_density(replayed.model, u; propto=false) ≈
-              BridgeStan.log_density(direct.model, u; propto=false) atol=1e-12
+    # The replayed populated program evaluates like the one built on rows. The
+    # intercept-only predictor is sized by the declared axis's row count, which
+    # the replay recomputes (`:axis_extent`) rather than keeping the fit's 0.
+    for (model, name) in ((lp_gather, "lp"), (intercept_gather, "intercept"))
+        filled = reprocess(SBBRMI(model(EMPTY_PLACEBO); mod=@__MODULE__,
+            total_groups=()), PLACEBO_ROWS; freeze_constants=true)
+        replayed = BRM.stan_instantiate(filled;
+            path=joinpath(STAN_DIR, name * "-replayed.stan"))
+        _, direct = stan_problem(model(PLACEBO_ROWS), name * "-direct")
+        for u in points(BridgeStan.param_unc_num(direct.model))
+            @test BridgeStan.log_density(replayed.model, u; propto=false) ≈
+                  BridgeStan.log_density(direct.model, u; propto=false) atol=1e-12
+        end
     end
 end
 
