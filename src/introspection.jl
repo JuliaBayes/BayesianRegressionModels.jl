@@ -384,7 +384,8 @@ applied to a term rather than to a coefficient or a grouping factor — in
 formula order. Each entry has
 
 ```julia
-(; class, term, predictor, component, family, arguments, keywords, expression)
+(; class, term, predictor, component, family, arguments, keywords, expression,
+   qualifiers)
 ```
 
 `class` is `:term_sd`, `:term_ar`, `:term_simplex`, `:term_latent` or
@@ -396,7 +397,10 @@ formula spells it, minus numeric and keyword arguments, so `me(x, 0.5)` and
 `Symbol("hsgp(x)")`. `predictor === nothing` means the statement is the default
 layer for every linear predictor carrying that term; a `Symbol` restricts it to
 one. `component` is `nothing` except for `sd(lp, t2(x, z), rr)`, where it names
-one of the tensor smooth's three penalty blocks.
+one of the tensor smooth's three penalty blocks. `qualifiers` holds the
+address's literal keyword values (`hsgp(x; cov=:periodic)` gives
+`(; cov=:periodic)`): the address reaches only terms whose keywords agree,
+which picks one of several same-axes terms on a predictor.
 
 Which parameter each class reaches:
 
@@ -441,9 +445,10 @@ Base.@nospecializeinfer function term_priors(@nospecialize(brmi::BRMI))
             "term_priors: term prior RHS is not a distribution expression")
         predictor = address[3] === _EFFECT_COLON ? nothing : address[3]
         component = length(address) == 4 ? address[4] : nothing
-        push!(out, (; class, term=address[2], predictor, component,
+        term, qualifiers = _brm_split_term_key(address[2])
+        push!(out, (; class, term, predictor, component,
                      family=getf(rhs_e), arguments=getargs(rhs_e),
-                     keywords=getkwargs(rhs_e), expression=rhs_e))
+                     keywords=getkwargs(rhs_e), expression=rhs_e, qualifiers))
     end
     out
 end

@@ -343,8 +343,7 @@ configured prior templates) are not consumer submodels and are not listed.
   `@slic f(args...) = body` submodel function.
 - `target` — the left-hand side the submodel is called for (`:log_F`).
 - `path` — the enclosing plate results and submodel targets, outermost first.
-  The submodel's own parameters are emitted as
-  `<join((path..., target), "_")>_<name>`.
+  `(path..., target)` is the call's address for `submodel=`.
 - `parent` — the index in `d.submodels` of the enclosing submodel, or `nothing`
   when the model body calls it.
 - `trigger` — the formula statement that produced the call, rendered from the
@@ -357,10 +356,12 @@ configured prior templates) are not consumer submodels and are not listed.
   submodel function takes its inputs positionally, in `declaration.arguments`.
 - `declarations` — the submodel's own `~` statements, with targets and
   contexts relative to the submodel body.
-- `outputs` — the [`BRMOutput`](@ref)s emitted under the submodel's prefix:
-  its parameters and its deterministic internals. Outputs of a nested
-  submodel belong to that submodel's own entry. The call's returned value
-  (`target` itself) is not included.
+- `outputs` — the [`BRMOutput`](@ref)s the call owns: its parameters and its
+  deterministic internals. Outputs of a nested submodel belong to that
+  submodel's own entry. The call's returned value (`target` itself) is not
+  included. Their emitted names are compiler-owned; resolve one value the body
+  binds with `brm_output(d, name; submodel=target)` (or
+  `brm_output_coordinates` with the same keyword), never by building a name.
 - `source` — the submodel body as Julia prints the value BRM lowers, one
   statement per line. It is derived from the model that runs, so it cannot
   drift from it; author comments and alignment are not kept. `nothing` for a
@@ -846,6 +847,22 @@ function _brm_top_level_assignments(brmi)
     names
 end
 
+# The emitted carriers of the program binding `resolved`, among `owned`. Two
+# shapes, one rule: a scalar per-cell value is emitted under its resolved name
+# directly, while a per-cell VECTOR is promoted to plate memory and only the
+# traced binding names the promoted carrier. `output_names` / `model_names` are
+# the program's output and binding names, passed in so a caller resolving many
+# names builds them once.
+function _brm_binding_carriers(stan, output_names, model_names, resolved::Symbol, owned)
+    found = Set{Symbol}()
+    if resolved in output_names
+        push!(found, resolved)
+    elseif resolved in model_names
+        _brm_output_leaves!(found, stan.model[resolved], owned)
+    end
+    found
+end
+
 function _brm_logical_outputs(stan, by_name, targets, cell_values,
                               formula_predictors, top_assignments, preproc)
     logical = Dict{Symbol,Symbol}()
@@ -919,22 +936,12 @@ function _brm_logical_outputs(stan, by_name, targets, cell_values,
     end
 
     # The outputs one declaration owns, and the emitted carriers a BRM-side name
-    # resolves to within them. Two shapes, one rule: a scalar per-cell value is
-    # emitted under the context-joined name directly, while a per-cell VECTOR is
-    # promoted to plate memory and only the traced binding names the promoted
-    # carrier. Factored out because the cell-value pass below applies exactly
-    # this rule to a different name.
+    # resolves to within them (`_brm_binding_carriers`). The cell-value pass
+    # below applies the same rule to a different name.
     owned_by = decl -> Set{Symbol}(o.name for o in stan.outputs
                                    if _brm_owner(o, by_name, targets) === decl)
-    carriers = (resolved, owned) -> begin
-        found = Set{Symbol}()
-        if resolved in output_names
-            push!(found, resolved)
-        elseif resolved in model_names
-            _brm_output_leaves!(found, stan.model[resolved], owned)
-        end
-        found
-    end
+    carriers = (resolved, owned) ->
+        _brm_binding_carriers(stan, output_names, model_names, resolved, owned)
 
     # Unbound observations whose `<stem>_gen` twin the program emits resolve
     # through the twin — already claimed via its `source` link above — exactly
@@ -1541,8 +1548,8 @@ collect for a `:replay` / `:reprocess`. Equivalent to `d.columns`.
 brm_columns(d::BRMDescriptor) = d.columns
 
 """
-    brm_outputs(d::BRMDescriptor; logical=nothing, role=nothing, kind=nothing)
-        -> Vector{BRMOutput}
+    brm_outputs(d::BRMDescriptor; logical=nothing, role=nothing, kind=nothing,
+                submodel=nothing) -> Vector{BRMOutput}
 
 Every emitted output matching the given semantic filters, in descriptor order.
 Each filter accepts a `Symbol` or any collection of them, and an omitted filter
@@ -1553,12 +1560,24 @@ zero, one, or many; use [`brm_output`](@ref) when exactly one is required.
 brm_outputs(d; role=:posterior_predictive)          # every predictive carrier
 brm_outputs(d; logical=:pk_conc)                    # every carrier of one target
 brm_outputs(d; role=(:parameter, :random_effect))   # either role
+brm_outputs(d; submodel=:effect)                    # every output one submodel call owns
 ```
 
-Filtering here is on BRM meaning (`logical` / `role`) or Stan representation
-(`kind`) — never on the emitted NAME, which the compiler owns.
+`submodel=` scopes the query to one consumer `@slic` submodel call (see
+[`BRMSubmodel`](@ref)): the outputs that call owns, its `outputs` field. It
+takes the call's `target`, its `(path..., target)` tuple, or an entry of
+`d.submodels`, and an address that matches no call or several calls is an
+error. Within that scope `logical` names values the submodel body binds — its
+own `~` declarations and `=` assignments (`logical=:slope` for
+`slope ~ normal(…)` in the body called for `effect`).
+
+Filtering here is on BRM meaning (`logical` / `role` / `submodel`) or Stan
+representation (`kind`) — never on the emitted NAME, which the compiler owns.
 """
-function brm_outputs(d::BRMDescriptor; logical=nothing, role=nothing, kind=nothing)
+function brm_outputs(d::BRMDescriptor; logical=nothing, role=nothing, kind=nothing,
+                     submodel=nothing)
+    isnothing(submodel) ||
+        return _brm_submodel_query(d, _brm_submodel_entry(d, submodel), logical, role, kind)
     BRMOutput[o for o in d.outputs
               if _brm_matches(o.logical, logical) &&
                  _brm_matches(o.role, role) &&
@@ -1569,8 +1588,133 @@ _brm_matches(_value, ::Nothing) = true
 _brm_matches(value, wanted::Symbol) = value === wanted
 _brm_matches(value, wanted) = any(w -> value === w, wanted)
 
+# ---- consumer submodel scope ------------------------------------------------
+#
+# A consumer `@slic` submodel's own values carry no `logical` (the same name may
+# be declared by several submodels, and by the model body), so they are
+# addressed within one `d.submodels` entry instead. The entry already owns its
+# outputs (`_brm_submodels`); a name its body binds resolves among them through
+# the carrier rule every other BRM-side name uses (`_brm_binding_carriers`).
+
+_brm_submodel_address(s::BRMSubmodel) = (s.path..., s.target)
+
+# How a caller spells this entry's address: the bare target when no other call
+# shares it, otherwise the full path tuple.
+_brm_submodel_spelling(d::BRMDescriptor, s::BRMSubmodel) =
+    count(x -> x.target === s.target, d.submodels) == 1 ? repr(s.target) :
+    repr(_brm_submodel_address(s))
+
+_brm_submodel_entry(d::BRMDescriptor, address::Symbol) =
+    _brm_submodel_pick(d, address, [s for s in d.submodels if s.target === address])
+_brm_submodel_entry(d::BRMDescriptor, address::Tuple{Vararg{Symbol}}) =
+    _brm_submodel_pick(d, address,
+                       [s for s in d.submodels if _brm_submodel_address(s) == address])
+function _brm_submodel_entry(d::BRMDescriptor, address::BRMSubmodel)
+    any(s -> s === address, d.submodels) && return address
+    error("brm_descriptor: the `BRMSubmodel` passed as `submodel=` (called for " *
+          "`$(address.target)`) is not an entry of model `$(d.name)`'s `d.submodels`; " *
+          "take it from this descriptor.")
+end
+_brm_submodel_entry(d::BRMDescriptor, address) = error(
+    "brm_descriptor: `submodel=` takes a call's target `Symbol`, its " *
+    "`(path..., target)` tuple, or an entry of `d.submodels`; got `$(repr(address))`.")
+
+function _brm_submodel_pick(d::BRMDescriptor, address, found)
+    length(found) == 1 && return only(found)
+    calls = Tuple(_brm_submodel_address(s) for s in d.submodels)
+    isempty(found) && error(
+        "brm_descriptor: model `$(d.name)` has no consumer submodel call at " *
+        "`$(repr(address))`. " *
+        (isempty(calls) ? "It calls none." :
+         "Its calls, as (path..., target): $calls."))
+    error("brm_descriptor: `submodel=$(repr(address))` matches $(length(found)) " *
+          "consumer submodel calls $(Tuple(_brm_submodel_address(s) for s in found)); " *
+          "pass the full `(path..., target)` tuple.")
+end
+
+# The names a submodel body binds at its top level, in body order: its `~`
+# declarations and `=` assignments. `nothing` for a named submodel function,
+# whose body is selected by dispatch at trace time.
+function _brm_submodel_bound_names(s::BRMSubmodel)
+    s.model isa StanBlocks.SlicModel || return nothing
+    body = s.model.model
+    statements = Meta.isexpr(body, :block) ? body.args : Any[body]
+    names = Symbol[]
+    for st in statements
+        if Meta.isexpr(st, :(=)) && st.args[1] isa Symbol
+            push!(names, st.args[1])
+        elseif Meta.isexpr(st, :call) && length(st.args) == 3 && st.args[1] === :~ &&
+               st.args[2] isa Symbol
+            push!(names, st.args[2])
+        end
+    end
+    unique!(names)
+end
+
+# The outputs entry `s` owns that carry the value its body binds to `name`. The
+# call inlines the body under its `(path..., target)` prefix, which is the rule
+# `_brm_submodels` assigns outputs to entries by.
+function _brm_submodel_carriers(d::BRMDescriptor, s::BRMSubmodel, name::Symbol)
+    bound = _brm_submodel_bound_names(s)
+    isnothing(bound) || name in bound || return BRMOutput[]
+    owned = Set{Symbol}(o.name for o in s.outputs)
+    resolved = Symbol(join((_brm_submodel_address(s)..., name), "_"))
+    found = _brm_binding_carriers(d.stan, Set{Symbol}(o.name for o in d.stan.outputs),
+                                  Set{Symbol}(keys(d.stan.model)), resolved, owned)
+    BRMOutput[o for o in s.outputs if o.name in found]
+end
+
+_brm_symbols(name::Symbol) = (name,)
+_brm_symbols(names) = names
+
+function _brm_submodel_query(d::BRMDescriptor, s::BRMSubmodel, logical, role, kind)
+    wanted = isnothing(logical) ? nothing :
+        Set{Symbol}(o.name for name in _brm_symbols(logical)
+                    for o in _brm_submodel_carriers(d, s, name))
+    BRMOutput[o for o in s.outputs
+              if (isnothing(wanted) || o.name in wanted) &&
+                 _brm_matches(o.role, role) && _brm_matches(o.kind, kind)]
+end
+
+function _brm_submodel_output(d::BRMDescriptor, s::BRMSubmodel, name::Symbol, role)
+    carriers = _brm_submodel_carriers(d, s, name)
+    found = BRMOutput[o for o in carriers if _brm_matches(o.role, role)]
+    length(found) == 1 && return only(found)
+    call = "the consumer submodel call `submodel=$(_brm_submodel_spelling(d, s))` " *
+           "in model `$(d.name)`"
+    if isempty(found)
+        isempty(carriers) || error(
+            "brm_descriptor: `$name` of $call has no carrier with role `$role`; its " *
+            "carriers have role(s) $(Tuple(unique(o.role for o in carriers))).")
+        bound = _brm_submodel_bound_names(s)
+        isnothing(bound) && error(
+            "brm_descriptor: $call emits no posterior carrier for `$name`.")
+        name in bound && error(
+            "brm_descriptor: $call binds `$name`, but no posterior carrier holds it " *
+            "(the compiler folded it away).")
+        error("brm_descriptor: $call binds no `$name`; it binds $(Tuple(bound)).")
+    end
+    error("brm_descriptor: `$name` of $call spans several emitted carriers " *
+          "(name, role) $(Tuple((o.name, o.role) for o in found)); pass `role=` to " *
+          "select one, or use `brm_outputs(d; submodel=…, logical=:$name)` to take " *
+          "them all.")
+end
+
+# The `submodel=` to suggest when a bare `logical` misses but a consumer
+# submodel binds that name.
+function _brm_submodel_hint(d::BRMDescriptor, name::Symbol)
+    calls = [s for s in d.submodels if !isempty(_brm_submodel_carriers(d, s, name))]
+    isempty(calls) && return ""
+    choices = join(("`submodel=$(_brm_submodel_spelling(d, s))`" for s in calls), " or ")
+    length(calls) == 1 ?
+        " `$name` is bound inside a consumer submodel; pass $choices to address it." :
+        " `$name` is bound inside $(length(calls)) consumer submodel calls; pass " *
+        "$choices to address one."
+end
+
 """
-    brm_output(d::BRMDescriptor, logical::Symbol; role=nothing) -> BRMOutput
+    brm_output(d::BRMDescriptor, logical::Symbol; role=nothing, submodel=nothing)
+        -> BRMOutput
 
 Return the unique emitted output that physically carries the BRM quantity
 `logical`. This resolves BRM meaning to Stan representation without parsing an
@@ -1595,18 +1739,37 @@ brm_output(d, :pk_conc; role=:pointwise_loglik)       # the per-element loglik
 The emitted names (`pk_conc_gen`, …) are StanBlocks' to choose and are NOT part
 of this contract; that is the whole point of asking by role.
 
+**A consumer `@slic` submodel's own values are addressed through
+`submodel=`.** A submodel called by `effect ~ saturating(dose)` whose body
+declares `slope ~ normal(…)` owns that parameter, but the same name may be
+declared by another submodel or by the model itself, so it carries no
+model-wide `logical`. Name the call instead — its target, its
+`(path..., target)` tuple, or an entry of `d.submodels` — and `logical` is then
+a name the submodel body binds (a `~` declaration or an `=` assignment):
+
+```julia
+brm_output(d, :slope; submodel=:effect)
+brm_output(d, :loc; submodel=(:effect, :inner))     # a call inside another submodel
+```
+
+An address matching no call or several calls, and a name the body does not
+bind, are errors that list what is available. A bare `brm_output(d, :slope)`
+that misses says which `submodel=` to pass.
+
 Fails loudly when the target has no emitted carrier or still maps to several;
 the caller must never guess from descriptor order in either case. The
 several-carriers message lists each candidate WITH its role, so the fix is the
 `role=` to add rather than a name to hardcode.
 """
-function brm_output(d::BRMDescriptor, logical::Symbol; role=nothing)
+function brm_output(d::BRMDescriptor, logical::Symbol; role=nothing, submodel=nothing)
+    isnothing(submodel) ||
+        return _brm_submodel_output(d, _brm_submodel_entry(d, submodel), logical, role)
     found = brm_outputs(d; logical, role)
     length(found) == 1 && return only(found)
     qualifier = isnothing(role) ? "" : " with role `$role`"
     if isempty(found)
         available = unique!(Symbol[o.role for o in d.outputs if o.logical === logical])
-        hint = isempty(available) ? "" :
+        hint = isempty(available) ? _brm_submodel_hint(d, logical) :
             " That target does emit carriers with role(s) $(Tuple(available))."
         error("brm_descriptor: logical output `$logical`$qualifier has no emitted " *
               "posterior carrier in model `$(d.name)`.$hint")
@@ -2726,7 +2889,7 @@ end
 
 """
     brm_output_coordinates(d::BRMDescriptor, logical::Symbol, constrained_names;
-                           role=nothing) -> Vector{Int}
+                           role=nothing, submodel=nothing) -> Vector{Int}
 
 Resolve a logical BRM output to its columns in BridgeStan's constrained
 `param_names` (or an equivalent posterior name vector). Resolution first uses
@@ -2741,6 +2904,13 @@ that exact name or its documented container coordinates (`name.1`,
 brm_output_coordinates(d, :pk_conc, param_names; role=:posterior_predictive)
 ```
 
+`submodel=` addresses a consumer `@slic` submodel's own value, exactly as on
+[`brm_output`](@ref):
+
+```julia
+brm_output_coordinates(d, :slope, param_names; submodel=:effect)
+```
+
 The returned integers index `constrained_names` in their existing order. For a
 ragged carrier they compose with that output's `segments`: group `g` is
 `coordinates[segments[g-1]+1 : segments[g]]`. This axis-order preservation is
@@ -2753,14 +2923,15 @@ A missing carrier is an error, which catches descriptor/artifact drift instead
 of returning an empty posterior slice.
 """
 function brm_output_coordinates(d::BRMDescriptor, logical::Symbol,
-                                constrained_names; role=nothing)
-    output = brm_output(d, logical; role)
+                                constrained_names; role=nothing, submodel=nothing)
+    output = brm_output(d, logical; role, submodel)
     coordinates = _brm_emitted_coordinates(output, constrained_names)
-    isempty(coordinates) && error(
-        "brm_descriptor: logical output `$logical` resolves to emitted " *
-        "`$(output.name)`, but that carrier is absent from the supplied constrained " *
-        "names. Re-reflect the model that produced the posterior draws.")
-    coordinates
+    isempty(coordinates) || return coordinates
+    scope = isnothing(submodel) ? "" :
+        " of `submodel=$(_brm_submodel_spelling(d, _brm_submodel_entry(d, submodel)))`"
+    error("brm_descriptor: logical output `$logical`$scope resolves to emitted " *
+          "`$(output.name)`, but that carrier is absent from the supplied constrained " *
+          "names. Re-reflect the model that produced the posterior draws.")
 end
 
 """

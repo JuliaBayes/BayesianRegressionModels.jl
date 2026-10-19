@@ -19,8 +19,18 @@ function brm_hsgp_basis(axes, k, c, iso)
     state.PHI, state.omega2, state.rho_lower
 end
 
-function brm_hsgp_periodic_basis(x, k, period)
-    state = _brm_hsgp_basis_state((x,), (k,), :periodic, true, period)
+brm_hsgp_periodic_basis(x, k, period) = _brm_rk_periodic_basis(x, k, period, nothing, nothing)
+# An anchored (`anchor::Real`) and/or row-masked (`mask`, the bound 0/1 rows)
+# periodic basis (decision 1fk9b29).
+brm_hsgp_periodic_basis(x, k, period, anchor::Real) =
+    _brm_rk_periodic_basis(x, k, period, (anchor,), nothing)
+brm_hsgp_periodic_basis(x, k, period, mask::AbstractVector) =
+    _brm_rk_periodic_basis(x, k, period, nothing, mask .!= 0)
+brm_hsgp_periodic_basis(x, k, period, anchor::Real, mask::AbstractVector) =
+    _brm_rk_periodic_basis(x, k, period, (anchor,), mask .!= 0)
+
+function _brm_rk_periodic_basis(x, k, period, anchor, mask)
+    state = _brm_hsgp_basis_state((x,), (k,), :periodic, true, period; anchor, mask)
     state.PHI, state.harmonics, state.rho_lower
 end
 

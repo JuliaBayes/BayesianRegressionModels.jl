@@ -1497,13 +1497,40 @@ _effect_address_symbol(x) = error(
 #
 # Only the SYMBOL arguments are part of the key: `me(x, 0.5)` and `me(x)` name
 # the same term, because the measurement SD is a constant OF the term, not part
-# of its identity. Keyword arguments are likewise excluded -- `hsgp(x; k=20)`
-# and `hsgp(x)` are the same term with different tuning.
+# of its identity. Keyword arguments are likewise not part of the identity --
+# `hsgp(x; k=20)` and `hsgp(x)` are the same term with different tuning. Their
+# literal values (symbols, numbers, numeric tuples) still ride in the key after
+# a `;`, as QUALIFIERS: the address reaches only terms whose keywords agree, so
+# when one predictor carries several terms over the same axes,
+# `hsgp(x; cov=:periodic)` picks one of them (decision 1fk9b29).
 const _TERM_HEADS =
     (:s, :t2, :mo, :mo1, :me, :interval_censored, :gp, :hsgp, :ar, :dar, :rw, :cdar)
 
 _is_term_address(x) = Meta.isexpr(x, :call) && !isempty(x.args) &&
                       x.args[1] isa Symbol && x.args[1] in _TERM_HEADS
+
+_term_address_literal(value::Union{Number,Bool}) = value
+_term_address_literal(value::QuoteNode) =
+    value.value isa Symbol ? value.value : nothing
+_term_address_literal(value::Expr) =
+    Meta.isexpr(value, :tuple) && all(v -> v isa Number, value.args) ?
+        Tuple(value.args) : nothing
+_term_address_literal(_value) = nothing
+
+function _term_address_qualifiers(x::Expr)
+    entries = Pair{Symbol,Any}[]
+    for a in x.args[2:end]
+        keywords = Meta.isexpr(a, :parameters) ? a.args :
+                   Meta.isexpr(a, :kw) ? Any[a] : Any[]
+        for kw in keywords
+            Meta.isexpr(kw, :kw) && kw.args[1] isa Symbol || continue
+            value = _term_address_literal(kw.args[2])
+            isnothing(value) || push!(entries, kw.args[1] => value)
+        end
+    end
+    sort!(entries; by=first)
+    isempty(entries) ? "" : ";" * join(("$k=$(repr(v))" for (k, v) in entries), ",")
+end
 
 function _term_address_key(x::Expr)
     head = x.args[1]::Symbol
@@ -1524,7 +1551,19 @@ function _term_address_key(x::Expr)
     isempty(names) && error(
         "@brm: `$x` names no data column, so it does not identify a term to " *
         "put a prior on.")
-    Symbol(head, "(", join(names, ","), ")")
+    Symbol(head, "(", join(names, ","), _term_address_qualifiers(x), ")")
+end
+
+# Split a term key into the term's identity key and its keyword qualifiers.
+function _brm_split_term_key(key::Symbol)
+    text = string(key)
+    i = findfirst(';', text)
+    isnothing(i) && return key, (;)
+    parsed = Meta.parse(text)
+    params = only(a for a in parsed.args if Meta.isexpr(a, :parameters))
+    entries = [kw.args[1]::Symbol => _term_address_literal(kw.args[2])
+               for kw in params.args]
+    Symbol(text[1:prevind(text, i)], ")"), NamedTuple(entries)
 end
 
 # A canonicalised term key is the one address symbol that can contain `(`, so
