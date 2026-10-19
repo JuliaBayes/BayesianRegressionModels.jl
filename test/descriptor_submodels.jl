@@ -79,6 +79,31 @@ _sb_submodel_rhs!(stmts, data, target::Symbol, ::typeof(named), rhs) = begin
     :done
 end
 
+# A submodel with a deterministic `=` value next to its parameter.
+function rated end
+const _sb_rated = StanBlocks.@slic begin
+    log_rate ~ normal(0.0, 1.0)
+    rate = exp(log_rate)
+    return toy_shape(dose, rate, 1.0)
+end
+_sb_submodel_rhs!(stmts, data, target::Symbol, ::typeof(rated), rhs) = begin
+    (dose_term,) = getargs(rhs)
+    push!(stmts, :($target ~ _sb_rated(; dose=$(name(dose_term)))))
+    :done
+end
+
+# A submodel whose own parameter shares its name with a model-level prior.
+function noisy end
+const _sb_noisy = StanBlocks.@slic begin
+    sigma ~ normal(0.0, 1.0; lower=0.0)
+    return dose .* sigma
+end
+_sb_submodel_rhs!(stmts, data, target::Symbol, ::typeof(noisy), rhs) = begin
+    (dose_term,) = getargs(rhs)
+    push!(stmts, :($target ~ _sb_noisy(; dose=$(name(dose_term)))))
+    :done
+end
+
 df = (; dose=[0.0, 0.5, 1.0, 1.5, 2.0, 2.5], x=[0.1, -0.2, 0.3, 0.0, 0.5, -0.4],
         g=[1, 1, 2, 2, 3, 3], y=[0.1, 0.3, 0.5, 0.7, 0.8, 0.9],
         z=[0.2, 0.0, 0.4, 0.1, 0.6, -0.1])
@@ -110,6 +135,23 @@ valued_builder = @brm begin
     b ~ configured(dose)
     y ~ Normal(a, sigma)
     z ~ Normal(b, sigma)
+end
+
+# `inner` is the target of a top-level call AND of the call inside `scaled`.
+address_builder = @brm begin
+    sigma ~ Exponential(1)
+    inner ~ valued(dose)
+    effect ~ scaled(dose)
+    y ~ Normal(inner, sigma)
+    z ~ Normal(effect, sigma)
+end
+
+rated_builder = @brm begin
+    sigma ~ Exponential(1)
+    r ~ rated(dose)
+    noisy_effect ~ noisy(dose)
+    y ~ Normal(r, sigma)
+    z ~ Normal(noisy_effect, sigma)
 end
 end
 
@@ -299,4 +341,132 @@ end
     @test manual.submodels == ()
     @test [(s.name, s.caption, s.signature, s.optional) for s in manual.highlight_specs] ==
           [(:toy_shape, "Shape", only(d.highlights).definition.signature, false)]
+end
+
+# The message of the error `f` throws.
+thrown(f) = try
+    f()
+    nothing
+catch err
+    sprint(showerror, err)
+end
+
+@testset "a submodel's own values resolve through submodel=" begin
+    d = brm_descriptor(TS.toy_builder, TS.df; mod=TS, total_groups=(), name=:toy)
+    s = only(d.submodels)
+    slope = brm_output(d, :slope; submodel=:effect)
+    @test slope === s.outputs[2]
+    @test brm_output(d, :loc; submodel=:effect) === s.outputs[1]
+    # The same call by its full address and by its `d.submodels` entry.
+    @test brm_output(d, :slope; submodel=(:effect,)) === slope
+    @test brm_output(d, :slope; submodel=s) === slope
+    @test brm_output(d, :slope; submodel=:effect, role=:parameter) === slope
+
+    # Coordinates are the shared resolver's, in the names' own order.
+    names = reverse([string(o.name) for o in d.outputs])
+    @test brm_output_coordinates(d, :slope, names; submodel=:effect) ==
+          brm_output_coordinates(slope, names) ==
+          [findfirst(==(string(slope.name)), names)]
+
+    @test brm_outputs(d; submodel=:effect) == collect(s.outputs)
+    @test brm_outputs(d; submodel=:effect, logical=:slope) == [slope]
+    @test brm_outputs(d; submodel=:effect, logical=(:loc, :slope)) == collect(s.outputs)
+    @test brm_outputs(d; submodel=:effect, logical=:missing_name) == BRMOutput[]
+    @test brm_outputs(d; submodel=:effect, role=:pointwise_loglik) == BRMOutput[]
+
+    # Without the keyword nothing changes, and the miss names the keyword.
+    msg = thrown(() -> brm_output(d, :slope))
+    @test occursin("has no emitted posterior carrier", msg)
+    @test occursin("pass `submodel=:effect` to address it", msg)
+    msg = thrown(() -> brm_output_coordinates(d, :slope, names))
+    @test occursin("pass `submodel=:effect` to address it", msg)
+    @test brm_output(d, :effect_scale).name === :effect_scale
+
+    # Only names the body binds: the sibling prior `effect_scale` is not the
+    # submodel's `scale`.
+    msg = thrown(() -> brm_output(d, :scale; submodel=:effect))
+    @test occursin("binds no `scale`; it binds (:loc, :slope)", msg)
+    msg = thrown(() -> brm_output(d, :slope; submodel=:effect, role=:pointwise_loglik))
+    @test occursin("has no carrier with role `pointwise_loglik`", msg)
+    msg = thrown(() -> brm_output_coordinates(d, :slope, ["sigma"]; submodel=:effect))
+    @test occursin("of `submodel=:effect` resolves to emitted", msg)
+
+    # Addresses that name no call, or not a call of this descriptor.
+    msg = thrown(() -> brm_output(d, :slope; submodel=:nope))
+    @test occursin("no consumer submodel call at `:nope`", msg)
+    @test occursin("(path..., target): ((:effect,),)", msg)
+    @test occursin("takes a call's target",
+                   thrown(() -> brm_output(d, :slope; submodel="effect")))
+    other = only(brm_descriptor(TS.toy_builder, TS.df; mod=TS, total_groups=()).submodels)
+    @test occursin("is not an entry of model `toy`",
+                   thrown(() -> brm_output(d, :slope; submodel=other)))
+    none = @brm begin
+        sigma ~ Exponential(1)
+        y ~ Normal(0, sigma)
+    end
+    dn = brm_descriptor(none, TS.df; mod=TS, total_groups=())
+    @test occursin("no consumer submodel call at `:effect`. It calls none.",
+                   thrown(() -> brm_output(dn, :slope; submodel=:effect)))
+end
+
+@testset "nested calls and calls sharing a target" begin
+    d = brm_descriptor(TS.nested_builder, TS.df; mod=TS, total_groups=())
+    outer, inner = d.submodels
+    loc = brm_output(d, :loc; submodel=(:effect, :inner))
+    @test loc === only(inner.outputs)
+    @test brm_output(d, :loc; submodel=:inner) === loc
+    @test brm_output(d, :scale; submodel=:effect) in outer.outputs
+    # The outer body binds `inner` too: the nested call's returned value.
+    @test brm_output(d, :inner; submodel=:effect) in outer.outputs
+    @test occursin("binds no `loc`; it binds (:inner, :scale)",
+                   thrown(() -> brm_output(d, :loc; submodel=:effect)))
+
+    d = brm_descriptor(TS.address_builder, TS.df; mod=TS, total_groups=())
+    @test [(s.path, s.target) for s in d.submodels] ==
+          [((), :inner), ((), :effect), ((:effect,), :inner)]
+    msg = thrown(() -> brm_output(d, :loc; submodel=:inner))
+    @test occursin("matches 2 consumer submodel calls ((:inner,), (:effect, :inner))", msg)
+    top = brm_output(d, :loc; submodel=(:inner,))
+    nested = brm_output(d, :loc; submodel=(:effect, :inner))
+    @test top !== nested
+    @test top in d.submodels[1].outputs && nested in d.submodels[3].outputs
+    msg = thrown(() -> brm_output(d, :loc))
+    @test occursin("bound inside 2 consumer submodel calls; pass " *
+                   "`submodel=(:inner,)` or `submodel=(:effect, :inner)`", msg)
+end
+
+@testset "value-spliced and named submodels" begin
+    d = brm_descriptor(TS.valued_builder, TS.df; mod=TS, total_groups=())
+    a, b = d.submodels
+    @test brm_output(d, :loc; submodel=:a) === only(a.outputs)
+    @test brm_output(d, :loc; submodel=:b) === only(b.outputs)
+    @test occursin("pass `submodel=:a` or `submodel=:b` to address one",
+                   thrown(() -> brm_output(d, :loc)))
+
+    # A named submodel function's body is chosen at trace time, so its bound
+    # names are unknown; its owned outputs still resolve.
+    d = brm_descriptor(TS.named_builder, TS.df; mod=TS, total_groups=())
+    s = only(d.submodels)
+    @test brm_output(d, :loc; submodel=:n) === only(s.outputs)
+    @test occursin("emits no posterior carrier for `slope`",
+                   thrown(() -> brm_output(d, :slope; submodel=:n)))
+end
+
+@testset "assigned values, and names the model also declares" begin
+    d = brm_descriptor(TS.rated_builder, TS.df; mod=TS, total_groups=())
+    r, noisy = d.submodels
+    rate = brm_output(d, :rate; submodel=:r)
+    log_rate = brm_output(d, :log_rate; submodel=:r)
+    @test rate in r.outputs && log_rate in r.outputs && rate !== log_rate
+    @test rate.kind !== log_rate.kind
+    @test brm_outputs(d; submodel=:r, kind=log_rate.kind) == [log_rate]
+
+    # A model-level `sigma` keeps its bare address; the submodel's own `sigma`
+    # is reached only through its call.
+    top = brm_output(d, :sigma)
+    own = brm_output(d, :sigma; submodel=:noisy_effect)
+    @test top.declaration.target === :sigma
+    @test own === only(noisy.outputs)
+    @test top !== own
+    @test only(brm_outputs(d; logical=:sigma)) === top
 end

@@ -132,7 +132,7 @@ include("conditional_effects.jl")
 # Public surface. The macros and value types everything downstream
 # (web-macro, downstream extensions, tests) reaches for.
 export @brm, @n, @x, @getproperty
-export assign, effect, r2d2, doublepipe, gr, mm, gp, offset, zscale, center, standardize, protect, factor
+export assign, effect, r2d2, doublepipe, gr, mm, gp, offset, zscale, center, standardize, constant, protect, factor
 export LKJCovarianceFactor, MvNormalCholesky
 export Flat, TotalEffectBlock, total_effect_blocks, recover_population_draws, select_total_centeredness
 export S2ZEffectBlock, s2z_effect_blocks, recover_s2z_draws, select_s2z_rho,
@@ -240,7 +240,7 @@ export parse!, _brm, stan_code, stan_data, stan_model, stan_instantiate,
 # ("recov") modes, plus the random-effect block description both stand on.
 export RanefBlock, ranef_blocks, ranef_coordinates,
        population_draws, population_model, prune_responses, transport_draws, term_draws,
-       hsgp_population_curve
+       parameter_draws, hsgp_population_curve
 export AbstractAdaptiveCenteringBlock, AdaptiveCenteringBlock,
        R2D2AdaptiveCenteringBlock, adaptive_centering_blocks,
        adaptive_centering_problem, select_hsgp_centeredness,

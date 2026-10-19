@@ -107,6 +107,111 @@ function _brm_rebind_brmi(brmi::BRMI, df)
         map(value -> _brm_rebind_value(value, df), values(operations))))
 end
 
+# ---- `name = constant(expr)`: data-calibrated scalars ---------------------
+#
+# A backend resolves every constant declaration before lowering: the declared
+# name becomes an ordinary scalar data field (`NamedColumn(name,
+# DataColumn(value))`), exactly what a data container carrying that field
+# produces, so every downstream rule for named scalar constants applies
+# unchanged. The value is the fitted one when replay supplies it and is
+# otherwise evaluated from the bound inputs. `SBBRMI` records it as a
+# `:constant` preprocessing entry whose `raw_ref` is the `_BRMConstantSource`.
+
+# Identity of a constant across builder runs: what it computes, not the
+# closure or data it computed it from.
+struct _BRMConstantSource
+    expression::Any
+    inputs::Tuple{Vararg{Symbol}}
+end
+Base.:(==)(a::_BRMConstantSource, b::_BRMConstantSource) =
+    a.expression == b.expression && a.inputs == b.inputs
+Base.isequal(a::_BRMConstantSource, b::_BRMConstantSource) = a == b
+Base.hash(a::_BRMConstantSource, h::UInt) =
+    hash(a.inputs, hash(a.expression, hash(:_BRMConstantSource, h)))
+Base.show(io::IO, a::_BRMConstantSource) = print(io, "constant(", a.expression, ")")
+
+_brm_constant_source(node::ExprColumn{typeof(constant)}) =
+    (spec = first(getargs(node)); _BRMConstantSource(spec.expression, spec.inputs))
+
+_brm_is_constant_declaration(@nospecialize(_x)) = false
+_brm_is_constant_declaration(@nospecialize(x::ExprColumn{typeof(assign)})) =
+    last(getargs(x, 2)) isa ExprColumn{typeof(constant)}
+
+# The constant itself is the declaration's whole definition, so only the
+# NamedColumn that carries it changes; every other node is rebuilt unchanged
+# by the shared rebind map.
+struct _BRMConstantSubstitution
+    values::Dict{Symbol,Any}
+end
+function _brm_rebind_value(x::NamedColumn, s::_BRMConstantSubstitution)
+    payload = parent(x)
+    haskey(s.values, name(x)) && _brm_is_constant_declaration(payload) &&
+        return NamedColumn(name(x), DataColumn(s.values[name(x)]))
+    payload isa Union{DataColumn,MissingColumn} && return x
+    NamedColumn(name(x), _brm_rebind_value(payload, s))
+end
+
+# Rebinding a constant to a replay frame keeps it evaluable there when the
+# frame carries its inputs, and leaves an absent input unbound instead of
+# refusing: frozen replay restores the fitted value without reading them.
+function _brm_rebind_value(x::ExprColumn{typeof(constant)}, df)
+    inputs = map(input -> _brm_rebind_constant_input(input, df), Base.tail(getargs(x)))
+    ExprColumn(constant, first(getargs(x)), inputs...)
+end
+_brm_rebind_constant_input(input, _df) = input
+_brm_rebind_constant_input(input::NamedColumn, df) =
+    _brm_df_has_column(df, name(input)) ?
+        NamedColumn(name(input), DataColumn(_brm_df_column(df, name(input)))) :
+        NamedColumn(name(input), MissingColumn())
+
+_brm_constant_argument(_key, input::_BRMConstantScopeValue) = input.value
+_brm_constant_argument(key, input::NamedColumn) =
+    _brm_constant_argument(key, input, parent(input))
+_brm_constant_argument(_key, _input, payload::DataColumn) = parent(payload)
+_brm_constant_argument(key, input, ::MissingColumn) = error(
+    "BRM: `$key = constant(...)` reads `$(name(input))`, which the data " *
+    "does not supply and the builder's scope does not define")
+
+function _brm_evaluate_constant(key::Symbol, node::ExprColumn{typeof(constant)}; prefix)
+    spec = first(getargs(node))
+    arguments = map(input -> _brm_constant_argument(key, input), Base.tail(getargs(node)))
+    value = try
+        spec.evaluate(arguments...)
+    catch err
+        error("$prefix: evaluating `$key = constant($(spec.expression))` failed: ",
+              sprint(showerror, err))
+    end
+    (value isa Real && !(value isa Bool) && isfinite(value)) || error(
+        "$prefix: `$key = constant($(spec.expression))` evaluated to " *
+        "$(repr(value)) (::$(typeof(value))); a constant is one finite real number")
+    value
+end
+
+"""
+    _brm_resolve_constants(brmi; fitted, prefix) -> (resolved, constants)
+
+Replace every `name = constant(expr)` declaration of `brmi` by a scalar data
+field holding its value. `fitted(name, source)` returns a value restored from a
+fitted model, or `nothing` to evaluate `expr` from its bound inputs. Returns
+the resolved `BRMI` and one `(; name, value, source, node)` per constant, in
+formula order. A model without constants is returned unchanged.
+"""
+Base.@nospecializeinfer function _brm_resolve_constants(@nospecialize(brmi::BRMI);
+        fitted=(_name, _source) -> nothing, prefix::AbstractString="BRM")
+    resolved = Any[]
+    for (key, op) in pairs(brmi.operations)
+        op isa NamedColumn && _brm_is_constant_declaration(parent(op)) || continue
+        node = last(getargs(parent(op), 2))
+        source = _brm_constant_source(node)
+        value = fitted(key, source)
+        isnothing(value) && (value = _brm_evaluate_constant(key, node; prefix))
+        push!(resolved, (; name=key, value, source, node))
+    end
+    isempty(resolved) && return brmi, ()
+    values = Dict{Symbol,Any}(c.name => c.value for c in resolved)
+    _brm_rebind_brmi(brmi, _BRMConstantSubstitution(values)), Tuple(resolved)
+end
+
 # Materialise a user data vector without silently deleting missing rows. A
 # likelihood decorator may deliberately keep its response out of this generic
 # data dict and model the missing values itself; that decision is made by the
