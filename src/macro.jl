@@ -2084,10 +2084,27 @@ inline one at the same address (last-wins) rather than colliding the way two
 same-address statements in ONE block do. `merge` is a pure structural
 combine: an address is validated against the model it configures at backend
 lowering (`SBBRMI(...)`), exactly as for an inline prior — never here.
+
+Structural fragments compose the same way, in any order. A fragment that only
+READS a name another fragment defines (`y ~ Normal(mu, sigma)` without a `mu`
+formula) carries a bare placeholder for it, and a placeholder never overrides
+a definition: `merge(lp_fragment, obs_fragment)` and
+`merge(obs_fragment, lp_fragment)` both keep `mu`'s formula.
 """
-Base.merge(a::BRMI, b::BRMI) = BRMI(Base.merge(a.operations, b.operations))
+Base.merge(a::BRMI, b::BRMI) = BRMI(Base.merge(a.operations,
+    _brm_drop_shadowing_placeholders(b.operations, a.operations)))
 Base.merge(a::BRMI, b::BRMI, rest::BRMI...) =
     foldl(Base.merge, rest; init=Base.merge(a, b))
+
+# A builder binds every name it reads but does not define to a `MissingColumn`
+# placeholder; such an entry is a reference, not a declaration.
+_brm_is_placeholder(op) = op isa NamedColumn && parent(op) isa MissingColumn
+
+# `incoming`'s operations minus the placeholders that would shadow a name
+# `existing` already carries, in `incoming`'s order.
+_brm_drop_shadowing_placeholders(incoming::NamedTuple, existing::NamedTuple) =
+    (; (key => op for (key, op) in pairs(incoming)
+        if !(_brm_is_placeholder(op) && haskey(existing, key)))...)
 
 # Nested predictor formulas are normalised at builder execution time, after
 # data columns have values (categorical K is therefore known) but before a BRMI

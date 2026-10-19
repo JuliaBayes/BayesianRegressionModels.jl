@@ -1607,10 +1607,12 @@ _brm_is_categorical_data(raw) =
 # Plain string vectors and string-leveled `CategoricalVector`s code exactly
 # like integer levels: `sort(unique)` order with the reference first, the
 # reference addressed by level value. (A bare `CategoricalVector` of any
-# level type keeps its declared level order downstream, as before.)
+# level type keeps its declared level order downstream, as before.) Ask the
+# level TYPE: since CategoricalArrays 1.0, `levels(raw)` is itself a vector of
+# `CategoricalValue`s, never of the underlying level values.
 _brm_is_string_categorical_data(raw) =
     raw isa CA.CategoricalVector ?
-        eltype(CA.levels(raw)) <: AbstractString :
+        CA.leveltype(raw) <: AbstractString :
     raw isa AbstractVector ? eltype(raw) <: AbstractString : false
 
 # The emitted block name of a categorical MAIN-EFFECT term, else `nothing`.
@@ -1828,8 +1830,8 @@ function _brm_population_columns(term::ExprColumn{typeof(factor)};
             term, inner, raw; cellmeans)
     end
     raw_values = if raw isa CA.CategoricalVector
-        levels = CA.levels(raw)
-        eltype(levels) <: Integer || return nothing
+        CA.leveltype(raw) <: Integer || return nothing
+        levels = CA.unwrap.(CA.levels(raw))
         [levels[code] for code in Int.(CA.levelcode.(raw))]
     else
         eltype(raw) <: Integer || return nothing
