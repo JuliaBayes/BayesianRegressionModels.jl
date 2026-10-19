@@ -810,6 +810,8 @@ struct _HSGPAdaptiveCenteringBlock
     # Both the transform and retrospective scorer must start in that frame.
     target_c::Vector{Float64}
     effects::Vector{Int}
+    # One length scale per `omega2` column, or the single shared one of an
+    # isotropic multi-axis term (`_brm_hsgp_omega2`).
     length_scales::Vector{Int}
     # Compiler-declared bounds of each length scale and the marginal SD; an
     # upper bound is `Inf` unless declared (`_adaptive_bounds`).
@@ -944,8 +946,10 @@ This is the backend-internal companion to [`adaptive_centering_blocks`](@ref).
 It follows BRM's formula-term descriptor to declaration-owned parameter roles,
 then reads the declaration's compiler-owned spectral data binding (`omega2`
 for squared-exponential terms, `harmonics` for periodic ones).  It never
-parses generated Stan or assumes a global parameter order.  Length scales and
-marginal SDs may be `<lower=a>` or `<lower=a, upper=b>` (an explicit
+parses generated Stan or assumes a global parameter order.  A multi-axis
+squared-exponential term carries one length scale per axis (`iso=false`) or
+its single isotropic length scale, which every axis's frequencies read, as in
+the compiled spectrum.  Length scales and marginal SDs may be `<lower=a>` or `<lower=a, upper=b>` (an explicit
 `Uniform(a, b)` prior); the cells read them through Stan's own transform. The
 metadata is intentionally fail-closed: unknown covariances, grouped periodic
 terms, a scale without a finite lower bound or with an offset/multiplier, and
@@ -1019,24 +1023,9 @@ function _adaptive_hsgp_centering_blocks(model, unc_names)
                 "BRM adaptive centering: HSGP `$(entry.term)` must have one marginal-SD coordinate.",
             )
 
-            omega_key = get(owner.keywords, :omega2, nothing)
-            omega_key isa Symbol || error(
-                "BRM adaptive centering: HSGP `$(entry.term)` declaration does " *
-                "not expose its compiler-owned `omega2` data binding.",
-            )
-            omega_raw = get(plan.data, omega_key, nothing)
-            omega_raw isa AbstractMatrix{<:Real} || error(
-                "BRM adaptive centering: HSGP `$(entry.term)` compiler data " *
-                "`$omega_key` is not a real spectral-frequency matrix.",
-            )
-            omega2 = Matrix{Float64}(omega_raw)
-            size(omega2) == (length(weights.coordinates), length(rho.coordinates)) ||
-                error(
-                    "BRM adaptive centering: HSGP `$(entry.term)` owns " *
-                    "$(length(weights.coordinates)) basis weights and " *
-                    "$(length(rho.coordinates)) length scales, but `$omega_key` " *
-                    "has size $(size(omega2)).",
-                )
+            omega2 = _brm_hsgp_omega2(plan, owner,
+                "BRM adaptive centering: HSGP `$(entry.term)`",
+                length(weights.coordinates), length(rho.coordinates))
 
             rho_lower, rho_upper = _adaptive_bounds(
                 plan, rho.output, length(rho.coordinates), entry.term,
@@ -1244,22 +1233,9 @@ function _adaptive_grouped_hsgp_blocks!(
     length(sigma.coordinates) == 1 || error(
         "BRM adaptive centering: grouped HSGP `$(entry.term)` must have one marginal-SD coordinate.",
     )
-    omega_key = get(owner.keywords, :omega2, nothing)
-    omega_key isa Symbol || error(
-        "BRM adaptive centering: grouped HSGP `$(entry.term)` declaration does " *
-        "not expose its compiler-owned `omega2` data binding.",
-    )
-    omega_raw = get(plan.data, omega_key, nothing)
-    omega_raw isa AbstractMatrix{<:Real} || error(
-        "BRM adaptive centering: grouped HSGP `$(entry.term)` compiler data " *
-        "`$omega_key` is not a real spectral-frequency matrix.",
-    )
-    omega2 = Matrix{Float64}(omega_raw)
-    size(omega2) == (B, length(rho.coordinates)) || error(
-        "BRM adaptive centering: grouped HSGP `$(entry.term)` owns " *
-        "$B basis weights and $(length(rho.coordinates)) length scales, but " *
-        "`$omega_key` has size $(size(omega2)).",
-    )
+    omega2 = _brm_hsgp_omega2(plan, owner,
+        "BRM adaptive centering: grouped HSGP `$(entry.term)`",
+        B, length(rho.coordinates))
     rho_lower, rho_upper = _adaptive_bounds(
         plan, rho.output, length(rho.coordinates), entry.term,
         "length scale",
@@ -1281,6 +1257,31 @@ function _adaptive_grouped_hsgp_blocks!(
     out
 end
 
+# The compiler-owned squared-exponential frequencies of an ungrouped or
+# grouped HSGP: `omega2[b, axis]` for basis row `b`. `brm_hsgp_sqrt_spd` reads
+# one length scale per axis; an isotropic term (`_sb_hsgp`, `_sb_hsgp_partial`,
+# `_sb_hsgp_by`) samples one `rho_iso` and passes `rep_vector(rho_iso, n_axes)`,
+# so a term owns either one length scale per `omega2` column or exactly one,
+# which every column reads. `what` prefixes each error with the caller.
+function _brm_hsgp_omega2(plan, owner, what, n_weights, n_scales)
+    omega_key = get(owner.keywords, :omega2, nothing)
+    omega_key isa Symbol || error(
+        "$what declaration does not expose its compiler-owned `omega2` data " *
+        "binding.",
+    )
+    omega_raw = get(plan.data, omega_key, nothing)
+    omega_raw isa AbstractMatrix{<:Real} || error(
+        "$what compiler data `$omega_key` is not a real spectral-frequency matrix.",
+    )
+    omega2 = Matrix{Float64}(omega_raw)
+    size(omega2, 1) == n_weights && n_scales in (1, size(omega2, 2)) || error(
+        "$what owns $n_weights basis weights and $n_scales length scales, but " *
+        "`$omega_key` has size $(size(omega2)); expected $n_weights rows and " *
+        "one length scale per axis or a single isotropic one.",
+    )
+    omega2
+end
+
 function _adaptive_hsgp_log_scale(x::AbstractVector,
                                   block::_HSGPAdaptiveCenteringBlock,
                                   basis::Int)
@@ -1298,9 +1299,11 @@ function _adaptive_hsgp_log_scale(x::AbstractVector,
     end
     sigma = _adaptive_constrain(x[block.sd], block.sd_lower, block.sd_upper)
     value = log(sigma)
-    for axis in eachindex(block.length_scales)
-        rho = _adaptive_constrain(x[block.length_scales[axis]],
-            block.length_scale_lower[axis], block.length_scale_upper[axis])
+    iso = length(block.length_scales) == 1
+    for axis in axes(block.omega2, 2)
+        j = iso ? 1 : axis
+        rho = _adaptive_constrain(x[block.length_scales[j]],
+            block.length_scale_lower[j], block.length_scale_upper[j])
         value += 0.5 * log(rho * 2.5066282746310002)
         value -= 0.25 * rho * rho * block.omega2[basis, axis]
     end
