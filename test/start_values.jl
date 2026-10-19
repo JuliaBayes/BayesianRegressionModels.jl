@@ -140,6 +140,84 @@ end
     @test length(s) == length(u)
 end
 
+# One lone `|ID|` margin per predictor: independent effects, which the default
+# `total_groups=:auto` turns into exact total blocks.
+function lone_eta_pk(data)
+    @brm data begin
+        sigma ~ Exponential(1)
+        log_CL ~ 1 + weight + (1 | eta_cl | subject)
+        log_V ~ 1 + (1 | eta_v | subject)
+        @plate for i in eachindex(log_CL)
+            CL = exp(log_CL[i])
+            Vc = exp(log_V[i])
+            pred[i] = dose[i] / Vc .* exp.(-(CL / Vc) .* t[i])
+            dv[i] ~ normal(pred[i], sigma)
+        end
+    end
+end
+
+@stestset "an |ID| absorbed by an exact total block keeps its scale address" begin
+    brmi = lone_eta_pk(NLME_PLATE_DATA)
+    sb = SBBRMI(brmi; mod=@__MODULE__)
+    blocks = Dict(b.predictor => b for b in total_effect_blocks(sb))
+    @test sort!(collect(keys(blocks))) == [:log_CL, :log_V]
+    model = compiled(sb, "lone_eta_totals")
+    inits = (; log_CL=(; Intercept=log(2.7), weight=0.75),
+        log_V=(; Intercept=log(31.5)), eta_cl=[0.09;;], eta_v=(; sd=0.2), sigma=0.7)
+    saved = deepcopy(inits)
+    s = brm_start(sb, model, inits)
+    @test inits == saved
+    @test isfinite(BridgeStan.log_density(model, s))
+    θ, names = constrained(model, s)
+    d = brm_descriptor(sb)
+    # The `|ID|` scale is the block's total scale: the SD of each group's
+    # total around `A β`, read back through the same address.
+    scale(lp, id) = θ[only(brm_ranef_sd_coordinates(d, lp, names; id).coordinates)]
+    @test scale(:log_CL, :eta_cl) ≈ 0.3 rtol=1e-12
+    @test scale(:log_V, :eta_v) ≈ 0.2 rtol=1e-12
+    for (lp, sd) in (:log_CL => 0.3, :log_V => 0.2)
+        @test θ[BRM._total_coordinates(sb, blocks[lp], names).scales] ≈ [sd] rtol=1e-12
+    end
+    # Absorbed intercepts place every total at the population value; the
+    # retained `weight` slope is sampled.
+    for (lp, β) in (:log_CL => log(2.7), :log_V => log(31.5))
+        @test blocks[lp].population_columns == (:Intercept,)
+        totals = BRM._total_coordinates(sb, blocks[lp], names).totals
+        @test θ[totals] ≈ fill(β, size(totals)) rtol=1e-12
+    end
+    @test θ[only(brm_population_effect_coordinates(d, :log_CL, names;
+        coefficient=:weight).coordinates)] ≈ 0.75 rtol=1e-12
+    @test θ[only(brm_output_coordinates(d, :sigma, names))] ≈ 0.7 rtol=1e-12
+    # Unaddressed coordinates keep a random base: here everything but one scale.
+    unc = String.(BridgeStan.param_unc_names(model))
+    k = only(BRM._total_coordinates(sb, blocks[:log_V], unc).scales)
+    base = 0.3 .* randn(Xoshiro(11), length(s))
+    u = brm_start(sb, model, (; eta_v=(; sd=0.2)); base)
+    @test exp(u[k]) ≈ 0.2 rtol=1e-12
+    rest = setdiff(eachindex(u), k)
+    @test u[rest] ≈ base[rest] rtol=1e-10 atol=1e-12
+    # refused: a one-margin block takes a 1×1 covariance and a positive scale.
+    @test_throws DimensionMismatch brm_start(sb, model, (; eta_cl=fill(0.1, 2, 2)))
+    @test_throws ErrorException brm_start(sb, model, (; eta_cl=(; sd=-0.1)))
+
+    # Omitting the response leaves no likelihood reaching the totals: the block
+    # and its scale are drawn in generated quantities, under the same address.
+    prior_sb = SBBRMI(lone_eta_pk(Base.structdiff(NLME_PLATE_DATA, (; dv=nothing)));
+        mod=@__MODULE__)
+    prior = compiled(prior_sb, "lone_eta_prior")
+    pd = brm_descriptor(prior_sb)
+    gq_names = String.(BridgeStan.param_names(prior; include_tp=true, include_gq=true))
+    q = brm_ranef_sd_coordinates(pd, :log_V, gq_names; id=:eta_v)
+    @test q.output.kind === :generated_quantity
+    @test gq_names[only(q.coordinates)] ==
+        "$(only(b for b in total_effect_blocks(prior_sb) if b.predictor === :log_V).scales).1"
+    # refused: the generated scale is not among the sampled names, and a start
+    # point has no coordinate for it.
+    @test_throws ErrorException brm_ranef_sd_coordinates(pd, :log_V,
+        String.(BridgeStan.param_names(prior)); id=:eta_v)
+    @test_throws ErrorException brm_start(prior_sb, prior, (; eta_v=(; sd=0.2)))
+end
+
 @stestset "a categorical predictor takes level-keyed values" begin
     data = (; subject=repeat(["a", "b", "c", "d"], 3),
         arm=categorical(repeat(["p", "q", "r"], 4)), y=sin.(1:12))
