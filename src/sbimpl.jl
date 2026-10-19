@@ -3160,7 +3160,10 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing, provenan
     interaction_map_of(lp::Symbol) = get!(resolved_interactions, lp) do
         _sb_is_prior_declaration(brmi, lp) && return Dict{Symbol,Vector{Symbol}}()
         try
-            _sb_interaction_address_map(brmi, lp)
+            # A design-coded string column's block address fans out over its
+            # level columns exactly like an interaction term over its columns.
+            merge(_sb_interaction_address_map(brmi, lp),
+                  _sb_design_block_address_map(brmi, lp))
         catch err
             haskey(unresolved, lp) || (unresolved[lp] = sprint(showerror, err))
             Dict{Symbol,Vector{Symbol}}()
@@ -3239,7 +3242,12 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing, provenan
 
             if all_coefficients
                 # The default layer for this predictor: every `beta_pop` column
-                # and every categorical contrast block it owns.
+                # and every categorical contrast block it owns. A predictor name
+                # the model does not bind is a typo, not an empty layer.
+                all_predictors || target in lp_names || error(
+                    "sbimpl: `$(_spelling(spec))` names no linear predictor. " *
+                    "Available predictors: " *
+                    "$(join(_sb_effect_available_predictors(lp_names, labels_of), ", ")).")
                 if !isnothing(labels) && !isempty(labels)
                     cells = get!(pop_overrides, target) do
                         Any[nothing for _ in labels]
@@ -3387,10 +3395,10 @@ end
 # offers. Operands print in key (sorted) order; either surface order addresses
 # the same term.
 function _sb_effect_interaction_note(interaction_map)
-    isempty(interaction_map) && return ""
+    keys_ = filter(_is_interaction_key, collect(keys(interaction_map)))
+    isempty(keys_) && return ""
     spells = sort!(["$(ops[1]) & $(ops[2])"
-                    for ops in (_interaction_key_operands(k)
-                                for k in keys(interaction_map))])
+                    for ops in (_interaction_key_operands(k) for k in keys_)])
     " Interaction term(s) on this data: " *
     join(("`$s`" for s in spells), ", ") *
     " — address one as `effect(<lp>, a & b)` (either operand order) to set " *
@@ -3530,6 +3538,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
        centered_groups=Set{Symbol}(), total_groups=:auto,
        s2z_groups=(), s2z_rho=nothing, s2z_coordinates=:contrasts, held_out=(),
        resample_covariates=(), _frozen_preproc=nothing, _marginal_id_targets=nothing)
+    brmi = _brm_resolve_optional_priors(brmi)
     source_parent = brmi
     fresh_covariates = _sb_covariate_selection(brmi,resample_covariates)
     isempty(fresh_covariates) || (brmi = _sb_covariate_brmi(brmi,fresh_covariates))
@@ -8045,11 +8054,16 @@ function popcoefnames(brmi::BRMI, lhs::Symbol)
     # Scratch data/stmts: `_sb_pop_cols!` materialises columns into these as a
     # side effect; we only read back the pushed column reference(s) as labels.
     scratch = Dict{Symbol,Any}(); scratch_stmts = Any[]
-    for t in pop_terms
+    design_columns = _sb_design_coded_columns(pop_terms)
+    for (t, coded) in zip(pop_terms, design_columns)
         # The intercept is always exactly one all-ones column; skip the
         # emitter's length probe (irrelevant to naming) and label it directly.
         if t isa Integer
             push!(labels, :Intercept)
+            continue
+        end
+        if !isnothing(coded)
+            append!(labels, (c.label for c in coded))
             continue
         end
         cols = Any[]
@@ -8155,12 +8169,13 @@ function _sb_cat_coefnames(brmi::BRMI, lhs::Symbol)
 end
 
 # `factor(c; ref=k)` is re-encoded at term-collection time into a synthetic
-# `c__ref_k` NamedColumn (see `_sb_collect_terms_expr!(::typeof(factor), ...)`),
-# and that synthetic name is what reaches the emitted `cat_<lp>_c__ref_k_beta`.
+# `c__ref_k` NamedColumn (`c__ref_<level>` for a string level; see
+# `_sb_collect_terms_expr!(::typeof(factor), ...)`), and that synthetic name is
+# what reaches the emitted `cat_<lp>_c__ref_k_beta`.
 # Requiring the user to spell the internal suffix would leak an implementation
 # detail into a public prior address, so BOTH the emitted name and the column
 # the formula names resolve onto the same block.
-const _SB_REF_SUFFIX = r"__ref_[0-9]+$"
+const _SB_REF_SUFFIX = r"__ref_.+$"
 function _sb_cat_addresses(emitted::Symbol)
     s = String(emitted)
     m = match(_SB_REF_SUFFIX, s)
@@ -8942,6 +8957,41 @@ function _sb_interaction_address_map(brmi::BRMI, lhs::Symbol)
         labels = Symbol[c isa Symbol ? c : :Intercept for c in cols]
         key = _brm_interaction_key(name(args[1]), name(args[2]))
         append!(get!(out, key, Symbol[]), labels)
+    end
+    out
+end
+
+# The population columns of the terms only the shared design codes (a bare
+# string column: its level indicators, `<c>_lvl_<k>`), aligned with
+# `pop_terms`, `nothing` elsewhere. SBBRMI emits such a predictor through
+# `_brm_population_design`, so its labels and block addresses come from the
+# same columns, with the design's own cell-means choice.
+function _sb_design_coded_columns(pop_terms)
+    flags = _brm_cellmeans_term_flags(Tuple(pop_terms))
+    map(pop_terms, flags) do t, cellmeans
+        t isa NamedColumn && parent(t) isa DataColumn &&
+            _brm_is_string_categorical_data(parent(parent(t))) || return nothing
+        _brm_population_columns(t; cellmeans)
+    end
+end
+
+# block address -> the ordered `beta_pop` labels of a design-coded categorical
+# term, for one linear predictor: `effect(lp, c)` claims every level column of
+# a bare string column `c`, and `effect(lp, c_lvl_<k>)` refines one of them.
+function _sb_design_block_address_map(brmi::BRMI, lhs::Symbol)
+    out = Dict{Symbol,Vector{Symbol}}()
+    op = linear_predictor_op(brmi, lhs)
+    isnothing(op) && return out
+    _, rhs = getargs(op, 2)
+    pop_terms = Any[]; ran_terms = Any[]; direct_terms = Any[]
+    for t in _sb_terms(rhs)
+        _sb_classify_term!(t, pop_terms, ran_terms, direct_terms)
+    end
+    for coded in _sb_design_coded_columns(pop_terms)
+        isnothing(coded) && continue
+        for c in coded, address in c.effect_addresses
+            address === c.label || push!(get!(out, address, Symbol[]), c.label)
+        end
     end
     out
 end
@@ -11638,7 +11688,9 @@ _sb_collect_terms_expr!(acc, ::typeof(*), x) = push!(acc, x)
 # column. Re-encode at term-collection time (swap level k <-> level 1)
 # and inject a synthetic NamedColumn with the recoded data, so the
 # downstream categorical pipeline (treatment-coded dummies relative to
-# level 1) reuses unchanged.
+# level 1) reuses unchanged. An integer-leveled `CategoricalVector` codes its
+# unwrapped values the same way; a string-leveled one or a plain string column
+# goes through `_sb_string_factor_column` (level VALUES, `ref="level"`).
 _sb_collect_terms_expr!(acc, ::typeof(factor), x::ExprColumn) = begin
     args = getargs(x); kw = getkwargs(x)
     length(args) == 1 || error("sbimpl: `factor(...)` expects 1 positional arg, got $(length(args))")
@@ -11647,8 +11699,16 @@ _sb_collect_terms_expr!(acc, ::typeof(factor), x::ExprColumn) = begin
     isnothing(inner) && error("sbimpl: `factor(...)` expects a NamedColumn, got $(typeof(inner_raw))")
     backing = _as_data_column(parent(inner))
     isnothing(backing) && error("sbimpl: `factor($(name(inner)))` expects a raw data column")
-    raw = _as_int_vec(parent(backing))
-    isnothing(raw) && error("sbimpl: `factor($(name(inner)))` expects integer-coded categorical data, got $(typeof(parent(backing)))")
+    data = parent(backing)
+    if data isa CA.CategoricalVector && CA.leveltype(data) <: Integer
+        backing = DataColumn(Int.(CA.unwrap.(data)))
+        data = parent(backing)
+    end
+    _brm_is_string_categorical_data(data) &&
+        return push!(acc, _sb_string_factor_column(x, inner, data))
+    raw = _as_int_vec(data)
+    isnothing(raw) && error("sbimpl: `factor($(name(inner)))` expects integer, string or " *
+        "`CategoricalVector` data, got $(typeof(data))")
     ref_raw = get(kw, :ref, 1)
     ref = _as_integer(ref_raw)
     isnothing(ref) && error("sbimpl: `factor(...; ref=k)` expects an integer level, got $(typeof(ref_raw))")
@@ -11658,6 +11718,36 @@ _sb_collect_terms_expr!(acc, ::typeof(factor), x::ExprColumn) = begin
         DataColumn(Int[r == ref ? 1 : r == 1 ? ref : r for r in raw])
     push!(acc, NamedColumn(new_name, new_backing))
 end
+# A string `factor(...)` term as the categorical column `_sb_emit_cat!` codes:
+# the backend-neutral string design's `sort(unique)` level order with the
+# reference swapped into first place (`_brm_string_factor_population_columns`),
+# carried as a `CategoricalVector` so emitted labels keep the level values. Its
+# name is the term's block name (`c`, or `c__ref_<level>` for a non-default
+# reference), which the cell-means choice and prior addresses resolve against.
+function _sb_string_factor_column(term, inner, data::AbstractVector)
+    values = _brm_factor_values(data)
+    any(ismissing, values) && error(
+        "sbimpl: `factor($(name(inner)))` has missing values; a categorical " *
+        "predictor needs a level on every row")
+    fit = collect(_brm_fit_levels(values))
+    isempty(fit) && error("sbimpl: `factor($(name(inner)))` observes no level")
+    ref = get(getkwargs(term), :ref, first(fit))
+    ref isa AbstractString || error(
+        "sbimpl: `factor($(name(inner)); ref=...)` on string data names the " *
+        "reference by its level value, got $(repr(ref))")
+    k = findfirst(isequal(ref), fit)
+    isnothing(k) && error(
+        "sbimpl: `factor($(name(inner)); ref=$(repr(ref)))` ref is not an " *
+        "observed level (levels $(repr(fit)))")
+    block = _brm_categorical_term_block(term)
+    Base.isidentifier(block) || error(
+        "sbimpl: `factor($(name(inner)); ref=$(repr(ref)))` names its emitted " *
+        "block `$block`, which is not a valid identifier; choose a reference " *
+        "level whose value is identifier-safe")
+    fit[1], fit[k] = fit[k], fit[1]
+    NamedColumn(block, DataColumn(CA.categorical(values; levels=fit)))
+end
+
 # `(t1 + t2 + ... || g)` zerocorr ranefs: independent variances per term,
 # no shared correlation. Expand into N separate `(t_i | g_nocor_i)` ran
 # terms with synthetic group names so the ran-term coalescer in
