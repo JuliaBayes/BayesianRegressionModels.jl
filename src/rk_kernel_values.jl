@@ -78,11 +78,14 @@ function _rk_kernel_observation_callee(scope, expression, kernel)
     head = first(expression.args)
     (head isa Symbol || head isa GlobalRef || Meta.isexpr(head, :.)) || error(
         "RK backend: kernel `$kernel` observation needs a named constructor")
-    # SLIC's unqualified built-in family tokens need not be exported into
-    # the caller module. A caller's actual binding still takes precedence.
+    _rk_kernel_binding(scope, head)
+end
+
+# SLIC's unqualified built-in family tokens need not be exported into the
+# caller module. A caller's actual binding still takes precedence.
+_rk_kernel_binding(scope, head) =
     head isa Symbol && !isdefined(scope, head) && isdefined(StanBlocks.stan, head) ?
         getfield(StanBlocks.stan, head) : Core.eval(scope, head)
-end
 
 # In-cell distribution combinators take a family token as their first
 # positional (`weighted(normal, w, mu, sigma)`), never a data argument.
@@ -150,21 +153,41 @@ end
 # weight. StanBlocks' call form `weighted(family(args...), weight, extra...)`
 # splices the family call's arguments after the remaining positionals, so it
 # names the same observation as `weighted(family, weight, extra..., args...)`.
+# A bounded combinator as the family weights that combinator's law, and its
+# bounds stay its own: on the family call in `weighted(censored(Normal(m, s);
+# lower=l), w)`, on `weighted` in the token form `weighted(censored, w, normal,
+# m, s; lower=l)`. `_rk_kernel_observation_law` then reads the bounded law.
 function _rk_kernel_observation_weight(scope, expression, kernel)
     _rk_kernel_weighted(_rk_kernel_observation_callee(scope, expression, kernel)) ||
         return expression, nothing
-    positional(args) = any(arg -> Meta.isexpr(arg, (:parameters, :kw)), args) && error(
+    keyword(arg) = Meta.isexpr(arg, (:parameters, :kw))
+    positional(args) = any(keyword, args) && error(
         "RK backend: kernel `$kernel` `weighted(family, weight, args...)` " *
         "takes positional arguments only")
     args = expression.args[2:end]
-    positional(args)
-    length(args) >= 2 || error(
+    keywords = filter(keyword, args)
+    values = filter(!keyword, args)
+    length(values) >= 2 || error(
         "RK backend: kernel `$kernel` observation needs `weighted(family, weight, args...)`")
-    family, weight, rest = args[1], args[2], args[3:end]
-    Meta.isexpr(family, :call) || return Expr(:call, family, rest...), weight
+    family, weight, rest = values[1], values[2], values[3:end]
+    call = Meta.isexpr(family, :call)
+    if _rk_kernel_bounded(_rk_kernel_binding(scope, call ? first(family.args) : family))
+        call || return Expr(:call, family, _rk_kernel_keyword_group(keywords)..., rest...), weight
+        isempty(rest) && isempty(keywords) || error(
+            "RK backend: kernel `$kernel` `weighted($(first(family.args))(...), weight)` " *
+            "takes no further arguments; bounds belong on `$(first(family.args))`")
+        return family, weight
+    end
+    positional(keywords)
+    call || return Expr(:call, family, rest...), weight
     positional(family.args[2:end])
     Expr(:call, first(family.args), rest..., family.args[2:end]...), weight
 end
+
+# One `;` keyword group from call keywords written after `;` or after a comma.
+_rk_kernel_keyword_group(keywords) = isempty(keywords) ? () :
+    (Expr(:parameters, (arg for keyword in keywords
+        for arg in (Meta.isexpr(keyword, :parameters) ? keyword.args : (keyword,)))...),)
 
 function _rk_kernel_observation_distribution(observation, names=observation.argument_names)
     arguments = map(name -> _BRMPreparedRef(name, :whole), names)
@@ -205,12 +228,23 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
         if argument isa NamedColumn && parent(argument) isa ExprColumn]
     buckets = _sb_kernel_lp_buckets(direct_lps)
     groups = [bucket for bucket in buckets if bucket !== nothing]
+    ragged_cols = [argument for argument in arguments
+        if argument isa ExprColumn && getf(argument) === ragged]
     group_values = if isempty(groups)
-        nothing
+        # Without a subject predictor, `ragged(x, group => cells)` inputs label
+        # the cells by their explicit cell label column (district totals over
+        # facility predictors are the shape).
+        if isempty(ragged_cols)
+            nothing
+        else
+            column = _brm_kernel_cell_label_column(ragged_cols; prefix="RK backend")
+            _brm_kernel_subject_values(parent(parent(column)), _rk_kernel_column_name(column); prefix="RK backend")
+        end
     else
         length(unique(group[2] for group in groups)) == 1 || error(
             "RK backend: kernel `$name` predictor inputs disagree on subject grouping")
         column = first(groups)[3]
+        _brm_kernel_check_cell_labels(ragged_cols, _rk_kernel_column_name(column); prefix="RK backend")
         _brm_kernel_subject_values(parent(parent(column)), _rk_kernel_column_name(column); prefix="RK backend")
     end
     columns = Dict{Symbol,Any}()
@@ -219,10 +253,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
     observed = _rk_kernel_observed_columns(brmi, params, arguments, raw_body)
     for (i, argument) in enumerate(arguments)
         if argument isa ExprColumn && getf(argument) === ragged
-            group_values === nothing && error(
-                "RK backend: kernel `$name` ragged inputs require a subject predictor")
-            length(getargs(argument)) == 2 || error("RK backend: ragged input needs value and group")
-            value, group = getargs(argument)
+            value, group = _brm_kernel_ragged_args(argument; prefix="RK backend")
             value isa NamedColumn || error("RK backend: ragged input must name a column or predictor")
             partition = _brm_kernel_ragged_rows(value, group, group_values; prefix="RK backend")
             rows = Symbol(name, :_rows_, i)
