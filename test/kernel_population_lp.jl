@@ -224,14 +224,6 @@ const POP_CATEGORICAL_SPELLINGS = (
         (; ind=CategoricalArrays.categorical(POP_CATEGORICAL.ind)))),
 )
 
-function stan_density_points(brmi, name)
-    stan = consumer_stan(brmi, name)
-    n = BridgeStan.param_unc_num(stan.model)
-    names = BridgeStan.param_unc_names(stan.model)
-    points = (zeros(n), fill(0.1, n), collect(range(-0.4, 0.4; length=n)))
-    names, [BridgeStan.log_density(stan.model, u; propto=false) for u in points]
-end
-
 with_witness(data) = merge(data, (; zero_axis=zeros(length(data.subject))))
 
 @stestset "a categorical-only population predictor needs no axis witness on Stan" begin

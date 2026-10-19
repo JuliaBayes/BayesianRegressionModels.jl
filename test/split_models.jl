@@ -4,9 +4,10 @@
 #
 # The two accessors split ONE BRMI into its prior fragment and its structural
 # fragment (each a BRMI). They are the inverse of `Base.merge(::BRMI, ::BRMI)`:
-# `merge(structure_of(b), priors_of(b))` must recompose an equivalent model,
-# and the default `show(::BRMI)` must be unchanged (zero ripple to `d.formula`
-# / the web BRMI view).
+# `merge(structure_of(b), priors_of(b))` must recompose an equivalent model.
+# `show(::BRMI)` prints the model's statements as authored (decision `0eqw9xp`),
+# so each fragment prints as its own source card; `d.formula` and the web BRMI
+# view print the same source.
 
 using Test
 using BayesianRegressionModels
@@ -71,15 +72,16 @@ end
     @test !occursin("sd(", structure_txt)
 
     # priors_of prints ONLY the prior block ("set to the only thing"). Every
-    # prior statement shows on its normalised `effect(...)` carrier, so the
-    # `sd(:, pk)` prior appears as `effect(sd, pk)` (pre-existing `show`).
+    # prior statement prints the way it was written: the `sd(:, pk)` prior as
+    # `sd(:, pk)`, never as its internal `effect(sd, pk)` carrier.
     priors_txt = sprint(show, priors_of(inline))
     @test occursin("effect(", priors_txt)
-    @test occursin("effect(sd, pk)", priors_txt)  # the sd(:, pk) prior, on its carrier
+    @test occursin("sd(:, pk) ~ ", priors_txt)
+    @test !occursin("effect(sd", priors_txt)
     @test !occursin("Normal(log_ka", priors_txt)  # no likelihood
     @test !occursin("1 + x", priors_txt)          # no linear predictor
 
-    # The DEFAULT show is unchanged: the full listing still interleaves both.
+    # The full listing interleaves both.
     full_txt = sprint(show, inline)
     @test occursin("effect(", full_txt)
     @test occursin("log_ka", full_txt)

@@ -61,6 +61,7 @@ _rk_plan_summary(plan::_RKHeldOutPlan) =
 # This barrier applies only to planning; emitted numerical kernels retain their
 # ordinary specialization and contain exactly the same source and data.
 Base.@nospecializeinfer function _brm_rk_plan(@nospecialize(brmi::BRMI); held_out=())
+    brmi = _brm_resolve_optional_priors(brmi)
     selected = _rk_held_out_selection(brmi, held_out)
     original = _brm_rk_unselected_plan(brmi)
     isempty(selected) ? original : _RKHeldOutPlan(original, selected)

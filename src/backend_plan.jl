@@ -2046,6 +2046,22 @@ end
 # A backend may lower structured terms separately while sharing exactly the
 # same fitted population columns. Taking the selected terms explicitly avoids
 # treating a mixed formula as an unsupported population design.
+# Which of `terms` the shared design codes by cell means. At most one term is,
+# and only the FIRST coefficient-bearing term carrying `_brm_cellmeans_block`'s
+# block name: a repeated categorical stays treatment-coded. Grouped and fixed
+# terms code no coefficients and never take the flag.
+function _brm_cellmeans_term_flags(terms; implicit_intercept::Bool=false)
+    block = _brm_cellmeans_block(terms; implicit_intercept)
+    map(terms) do term
+        (_brm_is_grouped_term(term) || !isnothing(_brm_population_fixed_term(term))) &&
+            return false
+        flag = !isnothing(block) && _brm_categorical_term_block(term) === block &&
+            !_brm_requests_treatment_coding(term)
+        flag && (block = nothing)
+        flag
+    end
+end
+
 function _brm_population_design(target::Symbol, terms::Tuple,
                                 data::AbstractDict,
                                 obs_name::Union{Nothing,Symbol};
@@ -2055,10 +2071,8 @@ function _brm_population_design(target::Symbol, terms::Tuple,
                                 population_columns=_brm_population_columns)
     raw_columns = Any[]
     fixed_terms = _BRMPopulationFixedTerm[]
-    # At most one term is cell-mean coded, and only the FIRST term carrying that
-    # block name: a repeated categorical stays treatment-coded.
-    cellmeans_block = _brm_cellmeans_block(terms; implicit_intercept)
-    for term in terms
+    cellmeans_flags = _brm_cellmeans_term_flags(terms; implicit_intercept)
+    for (term, cellmeans) in zip(terms, cellmeans_flags)
         # Grouped terms have their own backend-neutral geometry. They are not
         # coefficient-bearing population columns and are planned separately.
         _brm_is_grouped_term(term) && continue
@@ -2067,10 +2081,6 @@ function _brm_population_design(target::Symbol, terms::Tuple,
             push!(fixed_terms, fixed)
             continue
         end
-        cellmeans = !isnothing(cellmeans_block) &&
-            _brm_categorical_term_block(term) === cellmeans_block &&
-            !_brm_requests_treatment_coding(term)
-        cellmeans && (cellmeans_block = nothing)
         columns = population_columns(term; cellmeans)
         if isnothing(columns)
             required && error(

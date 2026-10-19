@@ -503,6 +503,119 @@ Wrap the vector LHS in `mi(...)` for explicit joint missing-value completion.
 function MvNormalCholesky end
 
 """
+    BRMBuilder
+
+What `@brm begin … end` returns when no data is given: a model builder. Call it
+on a data frame, `builder(df)`, to get the [`BRMI`](@ref); every API that takes
+a builder (`brm_descriptor(builder, df)`, `generative_plan(builder, df)`, …)
+accepts it unchanged. It keeps the authored source, so a model can be
+inspected and composed before any data exists:
+
+- [`brm_columns(builder)`](@ref brm_columns(::BRMBuilder)) lists the data
+  columns the model reads;
+- `merge(a, b, …)` concatenates the fragments' sources into one builder;
+- `show(builder)` prints the source.
+
+`Core.eval(mod, _brm(expr))` returns the same object for a source `Expr`, so a
+model family can be assembled from interpolated `Expr` fragments.
+"""
+struct BRMBuilder{F} <: Function
+    f::F
+    source::Expr
+    columns::Tuple{Vararg{Symbol}}
+    scope::Module
+end
+# A merged builder's function is defined by `Core.eval`; calling it through
+# `invokelatest` keeps it usable from code compiled before the merge.
+(b::BRMBuilder)(df) = Base.invokelatest(b.f, df)
+
+"""
+    brm_columns(builder::BRMBuilder) -> Tuple{Vararg{Symbol}}
+
+The data columns a model reads, sorted, without any data: predictors, grouping
+factors, `@plate` cell reads and the columns they capture, `ragged(...)`
+groupings, bound and weight columns, imputed covariates and observed
+responses. A `~` statement whose name no other statement reads is an observed
+response; one that another statement reads is a parameter or predictor. So
+for a model that declares every parameter it reads (`sigma ~ …`), the result
+equals `brm_columns(brm_descriptor(builder, df))`; a name read but declared
+nowhere is listed as a column.
+"""
+brm_columns(b::BRMBuilder) = b.columns
+
+"""
+    merge(a::BRMBuilder, b::BRMBuilder, rest::BRMBuilder...) -> BRMBuilder
+
+One builder whose source is the fragments' statements in order, exactly as if
+they had been written in one `@brm` block: a fragment may read names another
+defines, and a `@plate` cell may read a `ragged(...)` grouping declared in
+another fragment. A statement repeated across fragments is a duplicate, as in
+one block. To replace a built model's statements by address, `merge` the
+built [`BRMI`](@ref)s instead.
+"""
+function Base.merge(a::BRMBuilder, b::BRMBuilder, rest::BRMBuilder...)
+    builders = (a, b, rest...)
+    scope = a.scope
+    all(x -> x.scope === scope, builders) || error(
+        "merge: the builders were defined in different modules " *
+        "($(join(unique(string(x.scope) for x in builders), ", "))); names " *
+        "their statements call would resolve in only one of them. Define the " *
+        "fragments in one module.")
+    source = Expr(:block, (stmt for x in builders for stmt in x.source.args)...)
+    Core.eval(scope, _brm(source))
+end
+
+Base.show(io::IO, b::BRMBuilder) = begin
+    for (i, stmt) in enumerate(b.source.args)
+        i == 1 || print(io, "\n")
+        _brm_print_source(io, stmt)
+    end
+end
+Base.show(io::IO, ::MIME"text/plain", b::BRMBuilder) = show(io, b)
+
+# The names `parselocals!` classifies while parsing one block, for the
+# data-free column inventory (`brm_columns(::BRMBuilder)`):
+# `reads` every name a right-hand side reads, `responses` every `~` left-hand
+# name, `assigned` every `=` left-hand name, `data` names that are always data
+# (an imputed `mi(z)`, joint responses), `latent` `~` targets that are model
+# values whatever reads them (kernel cell outputs), `cell_bound` the parameters
+# and locals of kernel cell bodies.
+_brm_inventory() = (; reads=Set{Symbol}(), responses=Set{Symbol}(),
+                      assigned=Set{Symbol}(), data=Set{Symbol}(),
+                      latent=Set{Symbol}(), cell_bound=Set{Symbol}())
+
+function _brm_inventory_statement!(inventory, lhs, rhs, legacy_kernel_doblock)
+    isxcall(lhs, :mi) && length(lhs.args) == 2 && lhs.args[2] isa Symbol &&
+        push!(inventory.data, lhs.args[2])
+    (isxcall(rhs, :kernel) || legacy_kernel_doblock) && lhs isa Symbol &&
+        push!(inventory.latent, lhs)
+    inventory
+end
+
+function _brm_cell_bound_names!(acc, lambda::Expr)
+    _brm_bound_symbols!(acc, lambda.args[1])
+    body = lambda.args[2]
+    for stmt in (Meta.isexpr(body, :block) ? body.args : Any[body])
+        Meta.isexpr(stmt, :(=), 2) && _brm_bound_symbols!(acc, stmt.args[1])
+    end
+    acc
+end
+_brm_bound_symbols!(acc, x::Symbol) = push!(acc, x)
+_brm_bound_symbols!(acc, x::Expr) =
+    Meta.isexpr(x, :tuple) ? (foreach(a -> _brm_bound_symbols!(acc, a), x.args); acc) : acc
+_brm_bound_symbols!(acc, _) = acc
+
+# A `~` name another statement (or a kernel cell) reads is a parameter or
+# predictor; one nothing reads is an observed response.
+function _brm_inventory_columns(inventory, captures)
+    latent = union(inventory.assigned, inventory.latent,
+                   intersect(inventory.responses, union(inventory.reads, captures)))
+    names = union(inventory.reads, inventory.responses,
+                  setdiff(captures, inventory.cell_bound))
+    Tuple(sort!(collect(union(setdiff(names, latent), inventory.data))))
+end
+
+"""
     _brm(formula::Union{Expr,AbstractString}; df=nothing) -> Expr
 
 The macro-free entry point behind [`@brm`](@ref). Parses a formula block
@@ -522,15 +635,24 @@ _brm(x::Expr; df=nothing) = begin
         "@brm: a standalone predictor fragment such as `@brm(1 + x)` is " *
         "not implemented. Use nested `@brm(1 + x)` inside an outer `@brm` " *
         "likelihood, or write a top-level `lhs ~ rhs` formula.")
-    lhs, x = x.head == :(=) ? x.args : (:($(gensym("model"))(__df__)), x)
+    named = x.head == :(=)
+    lhs, x = named ? x.args : (:($(gensym("model"))(__df__)), x)
+    source = Base.remove_linenums!(Meta.isexpr(x, :block) ?
+        deepcopy(x) : Expr(:block, deepcopy(x)))
     alllocals = OrderedDict{Symbol,Symbol}()
     jointkeys = Set{Symbol}()
     captures = Set{Symbol}()
     groupings = _brm_plate_groupings(x)
     grouped_reads = Set{Symbol}()
-    info = (;alllocals, jointkeys, captures, groupings, grouped_reads)
+    inventory = _brm_inventory()
+    info = (;alllocals, jointkeys, captures, groupings, grouped_reads, inventory)
     x = parse!(x; info)
-    _brm_check_plate_groupings_read(groupings, grouped_reads)
+    # A builder fragment may declare groupings that a cell in another fragment
+    # reads: `merge` re-parses the composed source, which checks them again.
+    # The fragment itself refuses only when built on its own.
+    fragment = isnothing(df) && !named
+    unread = _brm_unread_plate_groupings(groupings, grouped_reads)
+    fragment || isnothing(unread) || error(unread)
     nonlocals = [key for (key, value) in pairs(alllocals) if value == :nonlocal]
     maybelocals = [key for (key, value) in pairs(alllocals) if value == :maybelocal]
     # kernel(...) do-block captures: body free-symbols that are NOT already a
@@ -549,6 +671,7 @@ _brm(x::Expr; df=nothing) = begin
     # ANY consumer scope (`data` is unexported). Both forms below reuse THIS
     # body, so the two builder forms cannot diverge.
     body = Expr(:block,
+        (isnothing(unread) ? () : (:($error($unread)),))...,
         :(__ddf__ = $data(__df__)),
         [:($nonlocal = @getproperty __ddf__.$nonlocal) for nonlocal in nonlocals]...,
         :((;$(maybelocals...)) = $maybedata(__df__)),
@@ -567,9 +690,17 @@ _brm(x::Expr; df=nothing) = begin
     # enclosing state; reads of never-assigned names (call heads, spliced
     # values) still resolve outward exactly as before.
     body = Expr(:let, Expr(:block, unique!([keys(alllocals)..., :__ddf__, :__caps__])...), body)
-    if isnothing(df)
-        # no-df: `gensym_model(__df__) = body` — a reusable `df -> BRMI` builder.
+    if isnothing(df) && named
+        # named no-df: the caller's `f(df) = body` function definition.
         Expr(:(=), lhs, body)
+    elseif isnothing(df)
+        # no-df: `gensym_model(__df__) = body`, a reusable `df -> BRMI` builder,
+        # wrapped with its authored source and data-free column inventory.
+        columns = _brm_inventory_columns(inventory, captures)
+        Expr(:block, Expr(:(=), lhs, body),
+             Expr(:call, BRMBuilder, lhs.args[1], QuoteNode(source),
+                  Expr(:tuple, map(QuoteNode, columns)...),
+                  Expr(:macrocall, Symbol("@__MODULE__"), LineNumberNode(0))))
     else
         # baked: the SAME body with `__df__` bound to the literal df.
         Expr(:let, Expr(:block, :(__df__ = $df)), body)
@@ -637,6 +768,9 @@ elseif _is_brm_plate_grouping(x)
         "@brm: `$(repr(x))` declares a plate grouping and must be a statement " *
         "of the `@brm` block")
     nothing
+elseif x.head == :(=) && _is_optional_prior_lhs(x.args[1])
+    lhs, rhs = x.args
+    _parse_effect!(_optional_prior_address(lhs), rhs; info, known=true, optional=true)
 elseif x.head == :(=) && _is_effect_lhs(x.args[1])
     lhs, rhs = x.args
     _parse_effect!(lhs, rhs; info, known=true)
@@ -645,6 +779,9 @@ elseif x.head == :(=)
     parselocals!(rhs; info, val=:nonlocal)
     parselocals!(lhs; info, val=:local)
     :(@n $lhs = @x $assign($(xname(lhs)), $rhs))
+elseif isxcall(x, :~) && _is_optional_prior_lhs(x.args[2])
+    _, lhs, rhs = x.args
+    _parse_effect!(_optional_prior_address(lhs), rhs; info, optional=true)
 elseif isxcall(x, :~) && _is_effect_lhs(x.args[2])
     _, lhs, rhs = x.args
     _parse_effect!(lhs, rhs; info)
@@ -673,6 +810,8 @@ elseif isxcall(x, :~)
     rhs = rewrite_ranef_ids(rhs)
     parselocals!(rhs; info, val=:nonlocal)
     parselocals!(lhs; info, val=:maybelocal)
+    hasproperty(info, :inventory) &&
+        _brm_inventory_statement!(info.inventory, lhs, rhs, legacy_kernel_doblock)
     parsed = :(@n $lhs = @x $(Expr(:call, :~, lhs, rhs)))
     legacy_kernel_doblock ?
         Expr(:block, :($_brm_depwarn_kernel_doblock()), parsed) : parsed
@@ -814,15 +953,15 @@ function _brm_plate_grouping_input(name, grouping::_BRMPlateGrouping)
 end
 
 # A declaration no cell reads would leave the author believing `x` is grouped
-# somewhere it is not, for example in a top-level likelihood.
-function _brm_check_plate_groupings_read(groupings, grouped_reads)
+# somewhere it is not, for example in a top-level likelihood. Returns the
+# refusal, or `nothing` when every declared grouping is read.
+function _brm_unread_plate_groupings(groupings, grouped_reads)
     unread = [name for name in keys(groupings) if !(name in grouped_reads)]
-    isempty(unread) || error(
-        "@brm: model-scope `ragged(x, group)` declares how a `@plate for` cell " *
-        "reads `x[i]`, but no cell reads " *
-        join(("`$name[i]`" for name in unread), ", ") * ". Group a top-level " *
-        "response with `ragged(y, group) ~ ...` instead")
-    nothing
+    isempty(unread) && return nothing
+    "@brm: model-scope `ragged(x, group)` declares how a `@plate for` cell " *
+    "reads `x[i]`, but no cell reads " *
+    join(("`$name[i]`" for name in unread), ", ") * ". Group a top-level " *
+    "response with `ragged(y, group) ~ ...` instead"
 end
 
 function _brm_plate_loop(x::Expr)
@@ -975,9 +1114,11 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
     # that grouping. The deprecated in-body wrapper stays accepted for a name
     # without one; mixing both spellings for one name is refused.
     inbody_ragged = false
+    cell_groupings = Symbol[]
     function grouped(source)
         if source isa Symbol && haskey(groupings, source)
             push!(grouped_reads, source)
+            source in cell_groupings || push!(cell_groupings, source)
             return _brm_plate_grouping_input(source, groupings[source])
         elseif isxcall(source, :ragged)
             inbody_ragged = true
@@ -1067,9 +1208,109 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
             push!(rewritten, target)
         end
     end
-    lambda = Expr(:->, Expr(:tuple, params...), Expr(:block, rewritten...))
+    lambda = Expr(:->, Expr(:tuple, params...), Expr(:block, rewritten...),
+                  _brm_plate_source(i, range, stmts, cell_groupings, groupings))
     call = Expr(:call, :kernel, lambda, positionals...)
     Expr(:call, :~, target, call), inbody_ragged
+end
+
+# The cell as written, for `show`: the model-scope groupings it reads, then the
+# loop with one statement per line.
+function _brm_plate_source(i, range, stmts, cell_groupings, groupings)
+    io = IOBuffer()
+    for name in cell_groupings
+        println(io, _brm_plate_grouping_repr(name, groupings[name]))
+    end
+    _brm_print_plate(io, i, range, stmts)
+    String(take!(io))
+end
+function _brm_print_plate(io::IO, i, range, stmts)
+    print(io, "@plate for ", i, " in ")
+    _brm_print_source(io, range)
+    println(io)
+    for stmt in stmts
+        stmt isa LineNumberNode && continue
+        print(io, "    ")
+        _brm_print_source(io, stmt)
+        println(io)
+    end
+    print(io, "end")
+end
+
+# Formula source as written. Julia's own `Expr` printer renders a left-nested
+# `(1 | p | g)` as `((1 | p) | g)`, `1e-3 * d` as `0.001d` and keywords as
+# `ref = "b"`; this prints binary operators infix with the same precedence rule
+# as `_brm_show_infix`, calls with `f(args; kw=value)`, and falls back to
+# Julia's printer for any other syntax.
+_brm_print_source(io::IO, x, outer::Int=0; left::Bool=false) = show(io, x)
+_brm_print_source(io::IO, x::Symbol, outer::Int=0; left::Bool=false) = print(io, x)
+_brm_print_source(io::IO, x::LineNumberNode, outer::Int=0; left::Bool=false) = nothing
+function _brm_print_source(io::IO, x::Expr, outer::Int=0; left::Bool=false)
+    op = _brm_source_infix(x)
+    if !isnothing(op)
+        operands = x.head === :call ? x.args[2:end] : x.args
+        precedence = Base.operator_precedence(op)
+        parens = precedence < outer || (precedence == outer && !left)
+        parens && print(io, "(")
+        for (i, arg) in enumerate(operands)
+            i == 1 || print(io, " ", op, " ")
+            _brm_print_source(io, arg, precedence; left=i == 1)
+        end
+        parens && print(io, ")")
+    elseif Meta.isexpr(x, :call, 2) && x.args[1] in (:-, :+, :!)
+        print(io, x.args[1])
+        _brm_print_source(io, x.args[2], Base.operator_precedence(:^))
+    elseif Meta.isexpr(x, :call)
+        _brm_print_source(io, x.args[1], typemax(Int))
+        _brm_print_arguments(io, x.args[2:end], "(", ")")
+    elseif _brm_is_broadcast_call(x)
+        _brm_print_source(io, x.args[1], typemax(Int))
+        _brm_print_arguments(io, x.args[2].args, ".(", ")")
+    elseif Meta.isexpr(x, :ref)
+        _brm_print_source(io, x.args[1], typemax(Int))
+        _brm_print_arguments(io, x.args[2:end], "[", "]")
+    elseif Meta.isexpr(x, :vect)
+        _brm_print_arguments(io, x.args, "[", "]")
+    elseif Meta.isexpr(x, :(=), 2)
+        _brm_print_source(io, x.args[1])
+        print(io, " = ")
+        _brm_print_source(io, x.args[2])
+    elseif Meta.isexpr(x, :block) && count(a -> !(a isa LineNumberNode), x.args) == 1
+        # The value of a short-form `sd(:, p) = value` statement.
+        _brm_print_source(io, only(filter(a -> !(a isa LineNumberNode), x.args)), outer; left)
+    elseif _is_brm_plate(x)
+        i, range, body = _brm_plate_loop(x)
+        _brm_print_plate(io, i, range, Meta.isexpr(body, :block) ? body.args : Any[body])
+    else
+        print(io, x)
+    end
+end
+function _brm_source_infix(x::Expr)
+    x.head in (:||, :&&) && return x.head
+    Meta.isexpr(x, :call) && length(x.args) >= 3 && x.args[1] isa Symbol &&
+        !any(a -> Meta.isexpr(a, :parameters), x.args) &&
+        Base.isbinaryoperator(x.args[1]) ? x.args[1] : nothing
+end
+function _brm_print_arguments(io::IO, args, open, close)
+    print(io, open)
+    positional = filter(a -> !Meta.isexpr(a, :parameters), args)
+    keywords = Any[kw for a in args if Meta.isexpr(a, :parameters) for kw in a.args]
+    append!(keywords, filter(a -> Meta.isexpr(a, :kw), positional))
+    filter!(a -> !Meta.isexpr(a, :kw), positional)
+    for (i, arg) in enumerate(positional)
+        i == 1 || print(io, ", ")
+        _brm_print_source(io, arg)
+    end
+    for (i, kw) in enumerate(keywords)
+        print(io, i == 1 ? (open == "(" || open == ".(" ? "; " : ", ") : ", ")
+        if Meta.isexpr(kw, :kw, 2)
+            print(io, kw.args[1], "=")
+            _brm_print_source(io, kw.args[2])
+        else
+            _brm_print_source(io, kw)
+        end
+    end
+    print(io, close)
 end
 
 function _joint_response_symbols(lhs::Expr)
@@ -1089,6 +1330,7 @@ end
 
 function _parse_joint_response!(lhs::Expr, rhs; info, impute=false)
     names = _joint_response_symbols(lhs)
+    hasproperty(info, :inventory) && union!(info.inventory.data, names)
     parselocals!(rhs; info, val=:nonlocal)
 
     key = _joint_response_operation_key(names)
@@ -1161,6 +1403,18 @@ end
 const _PRIOR_HEADS = (:effect, :sd, :cor, :ranef, :ar, :simplex, :latent, :length_scale)
 
 _is_effect_lhs(x) = any(h -> isxcall(x, h), _PRIOR_HEADS)
+
+# `optional(<address>) ~ prior` (or `= value`) marks a prior that applies only
+# where its address exists; `_brm_resolve_optional_priors` drops it before
+# lowering when the model provably lacks the address. The marker wraps exactly
+# one prior address and rides the `effect` carrier as `optional=true`.
+_is_optional_prior_lhs(x) = isxcall(x, :optional)
+function _optional_prior_address(x::Expr)
+    length(x.args) == 2 && _is_effect_lhs(x.args[2]) || error(
+        "@brm: `optional(...)` wraps exactly one prior address, as in " *
+        "`optional(effect(mu, weight)) ~ Normal(0, 1)`; got `$x`.")
+    x.args[2]
+end
 # A bare `:` reaches the macro as an ordinary Symbol, so the address vector
 # stays homogeneous and no separate Colon carrier is needed. `:` means "the
 # default" -- the base layer that a more specific statement overrides.
@@ -1432,7 +1686,7 @@ function _brm_known_value_expr(rhs, lhs)
     only(values)
 end
 
-function _parse_effect!(lhs::Expr, rhs; info, known::Bool=false)
+function _parse_effect!(lhs::Expr, rhs; info, known::Bool=false, optional::Bool=false)
     head = lhs.args[1]::Symbol
     args = map(_prior_slot, lhs.args[2:end])
     if known
@@ -1463,7 +1717,10 @@ function _parse_effect!(lhs::Expr, rhs; info, known::Bool=false)
         "@brm: duplicate `$head($(join(args, ", ")))` prior statement")
     info.alllocals[key] = :local
     parselocals!(rhs; info, val=:nonlocal)
-    quoted_lhs = Expr(:call, :effect, map(QuoteNode, address)...)
+    quoted_lhs = optional ?
+        Expr(:call, :effect, Expr(:parameters, Expr(:kw, :optional, true)),
+             map(QuoteNode, address)...) :
+        Expr(:call, :effect, map(QuoteNode, address)...)
     :(@n $key = @x $(Expr(:call, :~, quoted_lhs, rhs)))
 end
 
@@ -1557,6 +1814,9 @@ function parselocals!(x::Symbol; info, val)
     hasproperty(info, :jointkeys) && x in info.jointkeys && error(
         "@brm: formula name `$x` collides with a generated joint-response " *
         "binding; rename that formula name or one of the outcome columns")
+    hasproperty(info, :inventory) && push!(
+        val === :nonlocal ? info.inventory.reads :
+        val === :maybelocal ? info.inventory.responses : info.inventory.assigned, x)
     get!(info.alllocals, x, val)
 end
 parselocals!(x::Expr; info, val) = if Meta.isexpr(x, :->)
@@ -1572,6 +1832,7 @@ parselocals!(x::Expr; info, val) = if Meta.isexpr(x, :->)
     # way a `plate` captures a `@slic` data kwarg. Cell params/locals and typos
     # that are not columns fall away in `_brm`.
     hasproperty(info, :captures) && _brm_cell_value_refs!(info.captures, x.args[2])
+    hasproperty(info, :inventory) && _brm_cell_bound_names!(info.inventory.cell_bound, x)
     x
 elseif _is_nested_brm(x)
     parselocals!(_nested_brm_payload(x); info, val)
@@ -1628,14 +1889,27 @@ end
 struct _BRMInlineBody
     expression::Expr
     scope::Module
+    # The authored `@plate for` cell this lambda was rewritten from, rendered
+    # with the model-scope `ragged(...)` groupings it reads, or `nothing`. Only
+    # `show` reads it; every backend lowers `expression`.
+    source::Union{String,Nothing}
 end
+# `_brm_plate_kernel` hands the rendered cell to `_x` as a third `->` argument,
+# which `parselocals!` never reads; split it off here so emitters only ever see
+# the two-argument lambda.
+_BRMInlineBody(expression::Expr, scope::Module) =
+    Meta.isexpr(expression, :->, 3) ?
+        _BRMInlineBody(Expr(:->, expression.args[1], expression.args[2]), scope,
+                       expression.args[3]) :
+        _BRMInlineBody(expression, scope, nothing)
 _brm_inline_expr(x) = x
 _brm_inline_expr(x::_BRMInlineBody) = x.expression
 _brm_inline_scope(x) = Main
 _brm_inline_scope(x::_BRMInlineBody) = x.scope
-Base.show(io::IO, x::_BRMInlineBody) = show(io, x.expression)
+Base.show(io::IO, x::_BRMInlineBody) =
+    print(io, Base.remove_linenums!(deepcopy(x.expression)))
 Base.deepcopy_internal(x::_BRMInlineBody, stack::IdDict) =
-    _BRMInlineBody(Base.deepcopy_internal(x.expression, stack), x.scope)
+    _BRMInlineBody(Base.deepcopy_internal(x.expression, stack), x.scope, x.source)
 
 _x(x) = x
 _x(x::Symbol) = x
@@ -2305,14 +2579,22 @@ Base.@nospecializeinfer function _expand_nested_predictor_formulas(
     BRMI(NamedTuple{names}(values_))
 end
 
+# A BRMI prints as the model source: its statements, one per line, in formula
+# order and in their authored spelling. Data columns and the placeholders a
+# fragment binds for names it only reads are not statements and do not print,
+# so `string(structure_of(m))` and `string(priors_of(m))` are the model's two
+# source cards.
 Base.show(io::IO, (;operations)::BRMI) = begin
-    print(io, "BRMI:\n")
+    started = false
     for (key, value::NamedColumn) in pairs(operations)
-        print(io, "  ")
+        _brm_is_statement(parent(value)) || continue
+        started && print(io, "\n")
+        started = true
         _show_top(io, key, parent(value))
-        print(io, "\n")
     end
 end
+_brm_is_statement(op) = false
+_brm_is_statement(::ExprColumn{<:Union{typeof(~),typeof(assign)}}) = true
 # Top-level entries in a BRMI listing are either ExprColumns whose own show
 # already names the LHS (`loc ~ ...`, `(err = ...)`) or other column types
 # (DataColumn, MaterializedColumn, ...) whose show prints just the value with
@@ -2328,6 +2610,14 @@ _show_top(io::IO, key, op::ExprColumn{<:Union{typeof(~),typeof(assign)}}) = begi
         _show_bare(io, only(getargs(last(args))))
         return
     end
+    # An `@plate for` cell prints as written.
+    if getf(op) === (~) && last(args) isa ExprColumn{typeof(kernel)}
+        body = first(getargs(last(args)))
+        if body isa _BRMInlineBody && !isnothing(body.source)
+            print(io, body.source)
+            return
+        end
+    end
     _show_bare(io, first(args))
     for arg in Base.tail(args)
         print(io, " ", getop(op), " ")
@@ -2340,24 +2630,56 @@ end
 # top-level `y ~ (a | g)` would print the misleading `y ~ a | g`.
 _show_bare(io::IO, x) = show(io, x)
 _show_bare(io::IO, x::ExprColumn{<:Union{typeof(*),typeof(+)}}) =
-    join(io, getargs(x), " $(getop(x)) ")
+    _brm_show_infix(io, x, _brm_infix_symbol(x), 0)
 Base.show(io::IO, d::DataColumn) = begin
     print(io, "data (eltype=", eltype(parent(d)), ", n=", length(parent(d)), ")")
 end
-Base.show(io::IO, x::ExprColumn{<:Union{typeof.((~,*,+,|,doublepipe,assign))...}}) = begin
+Base.show(io::IO, x::ExprColumn{<:Union{typeof(~),typeof(assign)}}) = begin
     print(io, "(", )
     join(io, getargs(x), " $(getop(x)) ")
     print(io, ")")
 end
-nonemptyjoin(io::IO, iterator, args...; first) = if length(iterator) > 0
-    print(io, first)
-    join(io, iterator, args...)
+# Binary-operator terms print infix as written (`x & z`, `(1 + x | p | g)`),
+# parenthesized only where Julia's precedence needs it: a child binding no
+# tighter than its parent, except as the parent's left operand (operators
+# here are left-associative). A term printed on its own is parenthesized.
+_brm_infix_symbol(_) = nothing
+function _brm_infix_symbol(x::ExprColumn)
+    f = getf(x)
+    f === doublepipe && return :||
+    f isa Function && length(getargs(x)) >= 2 && isempty(getkwargs(x)) || return nothing
+    op = nameof(f)
+    Base.isbinaryoperator(op) ? op : nothing
 end
+function _brm_show_infix(io::IO, x, op::Symbol, outer::Int; left::Bool=false)
+    precedence = Base.operator_precedence(op)
+    parens = precedence < outer || (precedence == outer && !left)
+    parens && print(io, "(")
+    for (i, arg) in enumerate(getargs(x))
+        i == 1 || print(io, " ", op, " ")
+        _brm_show_operand(io, arg, precedence; left=i == 1)
+    end
+    parens && print(io, ")")
+end
+function _brm_show_operand(io::IO, x, outer::Int; left::Bool=false)
+    op = _brm_infix_symbol(x)
+    isnothing(op) ? show(io, x) : _brm_show_infix(io, x, op, outer; left)
+end
+# A bare symbol argument is a name as written (a `|ID|`, an address slot).
+_brm_show_operand(io::IO, x::Symbol, _outer::Int; left::Bool=false) = print(io, x)
 Base.show(io::IO, x::ExprColumn) = begin
+    op = _brm_infix_symbol(x)
+    isnothing(op) || return _brm_show_infix(io, x, op, typemax(Int))
     _show_call_head(io, getf(x))
     print(io, "(", )
-    join(io, getargs(x), ", ")
-    nonemptyjoin(io, ["$key=$value" for (key, value) in pairs(getkwargs(x))], ", "; first="; ")
+    for (i, arg) in enumerate(getargs(x))
+        i == 1 || print(io, ", ")
+        _brm_show_operand(io, arg, 0)
+    end
+    for (i, (key, value)) in enumerate(pairs(getkwargs(x)))
+        print(io, i == 1 ? "; " : ", ", key, "=")
+        _brm_show_operand(io, value, 0)
+    end
     print(io, ")")
 end
 # A resolved call head prints as the name the user wrote. Julia prints a
@@ -2370,6 +2692,38 @@ _show_call_head(io::IO, f) = print(io, f)
 _show_call_head(io::IO, f::Union{Function,DataType,UnionAll}) =
     print(io, Base.nameof(f))
 _show_call_head(io::IO, g::GlobalRef) = print(io, g.name)
+# A prior address prints the way it is written: the parameter head with its
+# slots (`sd(:, p)`, `cor(:, p)`, `simplex(mu, mo1(x))`, `effect(mu, a & b)`),
+# inverting `_prior_address`, and wrapped in `optional(...)` when marked.
+Base.show(io::IO, x::ExprColumn{typeof(effect)}) = begin
+    optional = get(getkwargs(x), :optional, false) === true
+    optional && print(io, "optional(")
+    head, slots = _prior_address_spelling(collect(Symbol, getargs(x)))
+    print(io, head, "(")
+    join(io, map(_prior_slot_spelling, slots), ", ")
+    print(io, ")")
+    optional && print(io, ")")
+end
+const _TERM_PRIOR_CLASS_HEAD = Dict(class => head for (head, class) in pairs(_TERM_PRIOR_HEAD_CLASS))
+function _prior_address_spelling(address::Vector{Symbol})
+    class = first(address)
+    if class in (:sd, :ranef)
+        predictor = length(address) >= 3 ? address[3] : _EFFECT_COLON
+        return class, length(address) == 4 ?
+            [predictor, address[2], address[4]] : [predictor, address[2]]
+    elseif class === :cor
+        return :cor, [_EFFECT_COLON, address[2]]
+    elseif class === :term_sd
+        return :sd, [address[3], address[2], address[4:end]...]
+    elseif haskey(_TERM_PRIOR_CLASS_HEAD, class)
+        return _TERM_PRIOR_CLASS_HEAD[class], [address[3], address[2]]
+    end
+    :effect, address
+end
+_prior_slot_spelling(slot::Symbol) =
+    _is_interaction_key(slot) ? join(_interaction_key_operands(slot), " & ") :
+    _is_term_key(slot) ? replace(string(slot), "," => ", ") : string(slot)
+
 Base.show(io::IO, x::MultiMembershipTerm) = begin
     print(io, "mm(")
     join(io, getfield(x, :groups), ", ")

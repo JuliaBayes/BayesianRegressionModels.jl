@@ -3134,7 +3134,10 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing, provenan
     interaction_map_of(lp::Symbol) = get!(resolved_interactions, lp) do
         _sb_is_prior_declaration(brmi, lp) && return Dict{Symbol,Vector{Symbol}}()
         try
-            _sb_interaction_address_map(brmi, lp)
+            # A design-coded string column's block address fans out over its
+            # level columns exactly like an interaction term over its columns.
+            merge(_sb_interaction_address_map(brmi, lp),
+                  _sb_design_block_address_map(brmi, lp))
         catch err
             haskey(unresolved, lp) || (unresolved[lp] = sprint(showerror, err))
             Dict{Symbol,Vector{Symbol}}()
@@ -3366,10 +3369,10 @@ end
 # offers. Operands print in key (sorted) order; either surface order addresses
 # the same term.
 function _sb_effect_interaction_note(interaction_map)
-    isempty(interaction_map) && return ""
+    keys_ = filter(_is_interaction_key, collect(keys(interaction_map)))
+    isempty(keys_) && return ""
     spells = sort!(["$(ops[1]) & $(ops[2])"
-                    for ops in (_interaction_key_operands(k)
-                                for k in keys(interaction_map))])
+                    for ops in (_interaction_key_operands(k) for k in keys_)])
     " Interaction term(s) on this data: " *
     join(("`$s`" for s in spells), ", ") *
     " — address one as `effect(<lp>, a & b)` (either operand order) to set " *
@@ -3509,6 +3512,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
        centered_groups=Set{Symbol}(), total_groups=:auto,
        s2z_groups=(), s2z_rho=nothing, s2z_coordinates=:contrasts, held_out=(),
        resample_covariates=(), _frozen_preproc=nothing, _marginal_id_targets=nothing)
+    brmi = _brm_resolve_optional_priors(brmi)
     source_parent = brmi
     fresh_covariates = _sb_covariate_selection(brmi,resample_covariates)
     isempty(fresh_covariates) || (brmi = _sb_covariate_brmi(brmi,fresh_covariates))
@@ -7839,11 +7843,16 @@ function popcoefnames(brmi::BRMI, lhs::Symbol)
     # Scratch data/stmts: `_sb_pop_cols!` materialises columns into these as a
     # side effect; we only read back the pushed column reference(s) as labels.
     scratch = Dict{Symbol,Any}(); scratch_stmts = Any[]
-    for t in pop_terms
+    design_columns = _sb_design_coded_columns(pop_terms)
+    for (t, coded) in zip(pop_terms, design_columns)
         # The intercept is always exactly one all-ones column; skip the
         # emitter's length probe (irrelevant to naming) and label it directly.
         if t isa Integer
             push!(labels, :Intercept)
+            continue
+        end
+        if !isnothing(coded)
+            append!(labels, (c.label for c in coded))
             continue
         end
         cols = Any[]
@@ -8723,6 +8732,41 @@ function _sb_interaction_address_map(brmi::BRMI, lhs::Symbol)
         labels = Symbol[c isa Symbol ? c : :Intercept for c in cols]
         key = _brm_interaction_key(name(args[1]), name(args[2]))
         append!(get!(out, key, Symbol[]), labels)
+    end
+    out
+end
+
+# The population columns of the terms only the shared design codes (a bare
+# string column: its level indicators, `<c>_lvl_<k>`), aligned with
+# `pop_terms`, `nothing` elsewhere. SBBRMI emits such a predictor through
+# `_brm_population_design`, so its labels and block addresses come from the
+# same columns, with the design's own cell-means choice.
+function _sb_design_coded_columns(pop_terms)
+    flags = _brm_cellmeans_term_flags(Tuple(pop_terms))
+    map(pop_terms, flags) do t, cellmeans
+        t isa NamedColumn && parent(t) isa DataColumn &&
+            _brm_is_string_categorical_data(parent(parent(t))) || return nothing
+        _brm_population_columns(t; cellmeans)
+    end
+end
+
+# block address -> the ordered `beta_pop` labels of a design-coded categorical
+# term, for one linear predictor: `effect(lp, c)` claims every level column of
+# a bare string column `c`, and `effect(lp, c_lvl_<k>)` refines one of them.
+function _sb_design_block_address_map(brmi::BRMI, lhs::Symbol)
+    out = Dict{Symbol,Vector{Symbol}}()
+    op = linear_predictor_op(brmi, lhs)
+    isnothing(op) && return out
+    _, rhs = getargs(op, 2)
+    pop_terms = Any[]; ran_terms = Any[]; direct_terms = Any[]
+    for t in _sb_terms(rhs)
+        _sb_classify_term!(t, pop_terms, ran_terms, direct_terms)
+    end
+    for coded in _sb_design_coded_columns(pop_terms)
+        isnothing(coded) && continue
+        for c in coded, address in c.effect_addresses
+            address === c.label || push!(get!(out, address, Symbol[]), c.label)
+        end
     end
     out
 end
