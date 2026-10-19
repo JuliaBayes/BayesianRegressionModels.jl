@@ -228,8 +228,86 @@ end
     @test_throws ArgumentError brm_nlme_fit(m, empirical_bayes; subject_group=:subject)
     # refused: the estimator is one of NLMEEstimation's own functions.
     @test_throws ArgumentError brm_nlme_fit(m, sum)
-    # refused: a start is nothing, a full packed point, or a brm_nlme_start result.
+    # refused: a start needs a whole population point (theta, sigma, omega).
     @test_throws ArgumentError brm_nlme_fit(m, empirical_bayes; start=(; theta=start.theta))
+end
+
+@stestset "brm_nlme_fit starts from NLMEEstimation's own starts and results" begin
+    m = brm_nlme_model(RKBRMI(authored_pk(NLME_PLATE_DATA)); ad_backend=NLME_AD)
+    start = brm_nlme_start(m)
+    θ, σ, ω = start.theta, start.sigma, start.omega
+    # θ, σ and ω alone: Ω is derived, and the subject effects start at zero.
+    f = brm_nlme_fit(m, empirical_bayes; start=(; theta=θ, sigma=σ, omega=ω))
+    @test f.start.omega_matrix ≈ start.omega_matrix rtol=1e-12
+    @test f.result.modes == empirical_bayes(m, θ, σ, ω).modes
+    @test f.estimates.point == brm_nlme_estimates(m, θ, σ, start.omega_matrix).point
+    a = brm_nlme_fit(m, saem; start=(; theta=θ, sigma=σ, omega=ω), ebes=false,
+        rng=Xoshiro(1), options=SAEMOptions(iterations=4, burnin=2))
+    b = brm_nlme_fit(m, saem; ebes=false, rng=Xoshiro(1),
+        options=SAEMOptions(iterations=4, burnin=2))
+    @test a.result.theta == b.result.theta && a.result.eta == b.result.eta
+    # Subject effects are matched to the estimator's subjects by subject. One
+    # EBE iteration from each start tells the warm starts apart.
+    H = [0.3 -0.2 0.1; -0.1 0.25 0.2]
+    one_step = (; options=EBEOptions(maxiter=1), require_convergence=false)
+    s = (; theta=θ, sigma=σ, omega=ω, eta=H[:, [3, 1]], subjects=["c", "a"])
+    f = brm_nlme_fit(m, empirical_bayes; start=s, subjects=[1, 3], one_step...)
+    expected = empirical_bayes(m, θ, σ, ω; subjects=[1, 3], η0=H[:, [1, 3]], one_step...)
+    @test f.result.modes == expected.modes
+    @test f.result.modes != empirical_bayes(m, θ, σ, ω; subjects=[1, 3],
+        η0=H[:, [3, 1]], one_step...).modes
+    # refused: a start names its subjects by grouping level, as brm_nlme_start
+    # does; an index would be ambiguous with an integer-coded grouping column.
+    @test_throws ArgumentError brm_nlme_fit(m, empirical_bayes;
+        start=(; s..., subjects=[3, 1]), subjects=[3])
+    @test_throws ArgumentError brm_nlme_fit(m, empirical_bayes;
+        start=(; s..., subjects=["c", "z"]), subjects=[3])
+    # Without `subjects` of its own, a start's η belongs to every subject.
+    f = brm_nlme_fit(m, empirical_bayes; start=(; theta=θ, sigma=σ, omega=ω, eta=H),
+        subjects=[2, 3], one_step...)
+    @test f.result.modes == empirical_bayes(m, θ, σ, ω; subjects=[2, 3],
+        η0=H[:, [2, 3]], one_step...).modes
+    # The caller's η0 replaces the start's effects, and is the only way to
+    # start a subject the start has none for.
+    z = zeros(2, 1)
+    f = brm_nlme_fit(m, empirical_bayes; start=s, subjects=[2], η0=z, one_step...)
+    @test f.result.modes == empirical_bayes(m, θ, σ, ω; subjects=[2], η0=z,
+        one_step...).modes
+    # refused: subject 2 has no effects in the start and no η0 was given;
+    # starting it elsewhere would be a silent default (dev §1).
+    @test_throws ArgumentError brm_nlme_fit(m, empirical_bayes; start=s, subjects=[2])
+    @test_throws ArgumentError brm_nlme_fit(m, empirical_bayes; start=s)
+    # refused: an Ω that is not ω's covariance would name the estimates wrongly.
+    @test_throws ArgumentError brm_nlme_fit(m, empirical_bayes;
+        start=(; theta=θ, sigma=σ, omega=ω, omega_matrix=2start.omega_matrix))
+
+    # An SAEM result over some subjects: its population point, warm-started from
+    # those subjects' final chain states, as a later EBE pass needs it.
+    options = SAEMOptions(iterations=6, burnin=3)
+    fit = brm_nlme_fit(m, saem; subjects=[1, 3], rng=Xoshiro(4), options)
+    r = fit.result
+    @test r.subjects == [1, 3] && size(r.eta) == (2, 2)
+    e = brm_nlme_fit(m, empirical_bayes; start=r, subjects=r.subjects)
+    @test e.result.modes == fit.ebes.modes # the pass `ebes=true` ran
+    @test e.start.omega_matrix == r.omega_matrix
+    @test e.start.subjects == ["a", "c"]
+    @test e.estimates.point == fit.estimates.point
+    @test e.estimates.eta == fit.estimates.eta
+    tuned = (; options=EBEOptions(maxiter=20), require_convergence=false)
+    e = brm_nlme_fit(m, empirical_bayes; start=r, subjects=[3, 1], tuned...)
+    @test e.result.modes == empirical_bayes(m, r.theta, r.sigma, r.omega;
+        subjects=[3, 1], η0=r.eta[:, [2, 1]], tuned...).modes
+    @test_throws ArgumentError brm_nlme_fit(m, empirical_bayes; start=r)
+    # SAEM continues from an SAEM result.
+    g = brm_nlme_fit(m, saem; start=r, subjects=r.subjects, ebes=false,
+        rng=Xoshiro(5), options)
+    @test g.result.theta == saem(m, r.theta, r.sigma, r.omega; subjects=r.subjects,
+        η0=r.eta, rng=Xoshiro(5), options).theta
+    # A FOCE(I) result warm-starts from its EBEs.
+    fo = brm_nlme_fit(m, focei; options=FOCEOptions(maxeval=20)).result
+    e = brm_nlme_fit(m, empirical_bayes; start=fo, one_step...)
+    @test e.result.modes == empirical_bayes(m, fo.theta, fo.sigma, fo.omega;
+        η0=fo.ebes.modes, one_step...).modes
 end
 
 @stestset "a nested model fits with one covariance per family and compact EBEs" begin
@@ -247,4 +325,9 @@ end
     @test length.(eta.values) == [2, 3, 4]
     @test eta.names[2] == ["subject[s2]:mu:Intercept",
         "unit[u2]:unit_shift:Intercept", "unit[u3]:unit_shift:Intercept"]
+    # The ragged SAEM result starts a later EBE pass with compact effects.
+    e = brm_nlme_fit(f.model, empirical_bayes; start=f.result, subjects=[3, 1])
+    @test e.result.modes == empirical_bayes(f.model, f.result.theta, f.result.sigma,
+        f.result.omega; subjects=[3, 1], η0=f.result.eta[[3, 1]]).modes
+    @test length.(e.result.modes) == [4, 2]
 end

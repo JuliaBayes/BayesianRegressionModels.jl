@@ -493,29 +493,69 @@ _fit_start(m, start, ::Nothing) = _fit_start(m, start)
 _fit_start(m, start, inits) = throw(ArgumentError(
     "brm_nlme_fit: give either `start` or `inits`, not both"))
 _fit_start(m, u::AbstractVector{<:Real}) = BRM.brm_nlme_start(m, u)
+# NLMEEstimation's own start: θ, σ and ω, optionally the subjects' η (one
+# column or compact vector per grouping level in `subjects`, all subjects
+# without it). Ω is derived from ω when the start does not carry it.
 function _fit_start(m, start::NamedTuple)
-    missing_fields = [k for k in (:theta, :sigma, :omega, :omega_matrix, :eta)
-        if !haskey(start, k)]
+    missing_fields = [k for k in (:theta, :sigma, :omega) if !haskey(start, k)]
     isempty(missing_fields) || throw(ArgumentError(
-        "brm_nlme_fit: a start needs the fields of brm_nlme_start; missing " *
-        join(missing_fields, ", ")))
+        "brm_nlme_fit: a start needs NLMEEstimation's population point " *
+        "(theta, sigma, omega); missing " * join(missing_fields, ", ")))
+    Ω = NE.omega_matrix(NE.nlme_layout(m), start.omega)
+    haskey(start, :omega_matrix) || return merge(start, (; omega_matrix=Ω))
+    start.omega_matrix ≈ Ω || throw(ArgumentError(
+        "brm_nlme_fit: the start's omega_matrix is not the covariance of its omega"))
     start
 end
+# A fit's population point, warm-starting from its subjects' effects: SAEM's
+# final chain states, or FOCE(I)'s EBEs.
+_fit_start(m, r::Union{NE.SAEMResult,NE.RaggedSAEMResult}) =
+    (; r.theta, r.sigma, r.omega, r.omega_matrix, eta=r.eta,
+       subjects=m.view.levels[r.subjects])
+_fit_start(m, r::NE.FOCEResult) = (; r.theta, r.sigma, r.omega, r.omega_matrix,
+    eta=r.ebes.modes, subjects=m.view.levels[r.ebes.subjects])
 _fit_start(m, start) = throw(ArgumentError(
-    "brm_nlme_fit: `start` is a full RK packed point or a start returned by " *
-    "brm_nlme_start; got $(typeof(start)). Address-keyed values go in `inits`"))
+    "brm_nlme_fit: `start` is a full RK packed point, a start returned by " *
+    "brm_nlme_start, a NamedTuple (theta, sigma, omega[, eta, subjects]) or an " *
+    "NLMEEstimation SAEM or FOCE(I) result; got $(typeof(start)). Address-keyed " *
+    "values go in `inits`"))
 
-# The start's subject effects for the subjects an estimator is asked about.
-_start_eta(H, ::Nothing) = H
-_start_eta(H::AbstractMatrix, subjects::AbstractVector) = H[:, subjects]
-_start_eta(H::AbstractVector, subjects::AbstractVector) = H[subjects]
+# A start's `subjects` are grouping levels, as `brm_nlme_start` reports them,
+# never indices: an integer-coded grouping column would make the two ambiguous.
+function _start_subject_ids(m, own)
+    ids = indexin(own, m.view.levels)
+    unknown = own[ids .=== nothing]
+    isempty(unknown) || throw(ArgumentError(
+        "brm_nlme_fit: the start's subjects $(collect(unknown)) are not grouping " *
+        "levels of the model; a start names its subjects by grouping level, as " *
+        "brm_nlme_start reports them"))
+    Int.(ids)
+end
 
-# The caller's keywords win over the start's subject effects.
-_with_eta(start, kwargs) = merge((; η0=_start_eta(start.eta,
-    get(kwargs, :subjects, nothing))), values(kwargs))
+# The start's subject effects for the subjects an estimator is asked about
+# (all of the model's without `subjects`), found by subject, not position.
+_eta_entries(H::AbstractMatrix, positions) = H[:, positions]
+_eta_entries(H::AbstractVector, positions) = H[positions]
+function _start_eta(m, start, subjects)
+    own = get(start, :subjects, nothing)
+    own === nothing && subjects === nothing && return start.eta
+    own = own === nothing ? (1:NE.nsubjects(m)) : _start_subject_ids(m, own)
+    asked = subjects === nothing ? (1:NE.nsubjects(m)) : subjects
+    positions = indexin(asked, own)
+    absent = asked[positions .=== nothing]
+    isempty(absent) || throw(ArgumentError(
+        "brm_nlme_fit: the start carries no subject effects for subjects " *
+        "$(collect(absent)); pass `η0` for them, or a start without `eta`"))
+    _eta_entries(start.eta, Int.(positions))
+end
+
+# The caller's `η0` wins; only without it are the start's effects taken.
+_with_eta(m, start, kwargs) = haskey(kwargs, :η0) || !haskey(start, :eta) ?
+    values(kwargs) :
+    merge((; η0=_start_eta(m, start, get(kwargs, :subjects, nothing))), values(kwargs))
 
 function _fit_run(::typeof(NE.saem), m, start, ebes; kwargs...)
-    result = NE.saem(m, start.theta, start.sigma, start.omega; _with_eta(start, kwargs)...)
+    result = NE.saem(m, start.theta, start.sigma, start.omega; _with_eta(m, start, kwargs)...)
     # SAEM's `eta` are its final chain states; EBEs need a posthoc pass.
     ebe = ebes ? NE.empirical_bayes(m, result.theta, result.sigma, result.omega;
         subjects=result.subjects, η0=result.eta) : nothing
@@ -527,7 +567,7 @@ function _fit_run(::typeof(NE.focei), m, start, _ebes; kwargs...)
 end
 function _fit_run(::typeof(NE.empirical_bayes), m, start, _ebes; kwargs...)
     result = NE.empirical_bayes(m, start.theta, start.sigma, start.omega;
-        _with_eta(start, kwargs)...)
+        _with_eta(m, start, kwargs)...)
     result, result, BRM.brm_nlme_estimates(m, start.theta, start.sigma,
         start.omega_matrix, result)
 end
