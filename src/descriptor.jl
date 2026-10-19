@@ -499,9 +499,16 @@ _brm_raw_column(x::Tuple) = begin
 end
 _brm_raw_column(_) = nothing
 
+# Most records name their source column(s) in `raw_ref`. An exact-total basis
+# (`total_A_<lp>`, and the S2Z `s2z_B_<lp>`) instead records the linear
+# predictor it decomposes — a model value, not a dataframe column.
+_brm_preproc_column(e::PreprocEntry) = _brm_preproc_column(Val(e.kind), e.raw_ref)
+_brm_preproc_column(::Val, raw_ref) = _brm_raw_column(raw_ref)
+_brm_preproc_column(::Val{:total_basis}, _) = nothing
+
 function _brm_input_schema(plan, key::Symbol, df_columns)
     e = get(plan.preproc, key, nothing)
-    isnothing(e) || return (_brm_raw_column(e.raw_ref), e.kind)
+    isnothing(e) || return (_brm_preproc_column(e), e.kind)
     key in df_columns && return (key, nothing)
     (nothing, nothing)
 end
