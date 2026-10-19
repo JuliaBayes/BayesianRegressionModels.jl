@@ -63,9 +63,9 @@ end
 # from a zero `offset(...)` witness.
 const POP_CATEGORICAL = merge(POP_PANEL, (; ind=["BLCL", "AITL", "BLCL"]))
 
-# Default population priors: an `effect(rate, ...)` address on a plain String
-# categorical predictor is a separate, still-open gap (`popcoefnames`; owner
-# todo `0cidxk1`).
+# Default population priors. An `effect(rate, ...)` prior address on a plain
+# String categorical predictor is covered in `test/model_family_composition.jl`,
+# and its descriptor coordinates in `test/string_categorical_coordinates.jl`.
 pop_categorical(data) = @brm data begin
     theta ~ 1 + (1 | p | subject)
     rate ~ 1 + ind
