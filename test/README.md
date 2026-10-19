@@ -112,6 +112,14 @@ gradient parity with the in-cell spelling. For a `ragged(y, group)` join it
 also checks the omitted response: the same observation statement, the bound
 `y_rows` partition and its replay, and the predictive segments.
 
+`adaptive_multiaxis_hsgp_centering.jl` checks online adaptive centering of
+two-axis squared-exponential HSGPs: isotropic (one length scale every axis
+reads) and `iso=false`, ungrouped and grouped, beside a shared random-effect
+block. Each cell's spectral scale is pinned against BridgeStan's constrained
+hyperparameters, and the wrapped non-centered model at `c = 1` reproduces the
+density and gradient of the compiled `centeredness=1.0` twin.
+`hsgp_coordinate_draws` returns the same log scales on those draws.
+
 `benchmark_emission_latency.jl` reports package loading, first model construction,
 first RK artifact emission and repeated calls separately, including compiler time,
 allocation and garbage collection. It uses independent synthetic regression and
