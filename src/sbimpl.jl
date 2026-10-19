@@ -5071,24 +5071,21 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         # comes from the new DataFrame's own kernel frame (which is how a
         # resample re-emission and a same-subject replay stay consistent).
         source = e.raw_ref
-        group_col = e.const_.group_col
-        subject_col = e.const_.subject_col
         raw = _sb_df_column(df, source)
         if raw isa AbstractVector{<:AbstractVector}
             new_data[key] = raw   # already per-subject ragged: pass through
         else
-            subject_values = _sb_kernel_subject_values(
-                _sb_df_column(df, subject_col), subject_col)
-            group_values = collect(_sb_group_values(_sb_df_column(df, group_col)))
-            length(group_values) == length(raw) || error(
+            (; rows, nrows) = _sb_replay_group_rows(df, key, e.const_)
+            nrows == length(raw) || error(
                 "sbimpl: reprocess: ragged source `$source` has $(length(raw)) " *
-                "rows but grouping column `$group_col` has " *
-                "$(length(group_values)); they must describe the same " *
-                "observation axis.")
-            rows = _sb_ragged_group_rows(key, group_col, group_values,
-                                         subject_values)
+                "rows but grouping column `$(e.const_.group_col)` has " *
+                "$nrows; they must describe the same observation axis.")
             new_data[key] = [raw[r] for r in rows]
         end
+        new_preproc[key] = e
+    elseif e.kind === :ragged_rows
+        # An omitted join's row partition, regrouped from the new frame.
+        new_data[key] = _sb_replay_group_rows(df, key, e.const_).rows
         new_preproc[key] = e
     elseif e.kind === :rw
         # `rw(time)`: the grid may gain new steps; each row reads its own point.
@@ -6982,6 +6979,16 @@ function _sb_ragged_group_rows(key::Symbol, group::Symbol,
     rows
 end
 
+# The same partition of a replay frame's rows, and its row count.
+function _sb_replay_group_rows(df, key::Symbol, grouping)
+    (; group_col, subject_col) = grouping
+    subject_values = _sb_kernel_subject_values(
+        _sb_df_column(df, subject_col), subject_col)
+    group_values = collect(_sb_group_values(_sb_df_column(df, group_col)))
+    (; rows=_sb_ragged_group_rows(key, group_col, group_values, subject_values),
+       nrows=length(group_values))
+end
+
 _sb_ragged_response_values(_key, _group, ::MissingColumn) = nothing
 function _sb_ragged_response_values(key, group, response::DataColumn)
     raw = _brm_data_vec(key, parent(response))
@@ -7096,25 +7103,52 @@ function _sb_ragged_argument(data, key, argument::ExprColumn, layout)
         getargs(argument))...; getkwargs(argument)...)
 end
 
-function _sb_ragged_likelihood_rhs(data, key::Symbol, rhs::ExprColumn, layout)
+function _sb_ragged_likelihood_rhs(stmts, data, key::Symbol, rhs::ExprColumn, layout)
     f = getf(rhs)
     if f === truncated || f === censored
         lower, upper = _sb_wrapper_bounds(f, getargs(rhs), getkwargs(rhs))
         lower = _sb_ragged_bound(data, key, :lower, lower, layout)
         upper = _sb_ragged_bound(data, key, :upper, upper, layout)
-        base = _sb_ragged_likelihood_rhs(data, key, first(getargs(rhs)), layout)
+        base = _sb_ragged_likelihood_rhs(stmts, data, key, first(getargs(rhs)), layout)
         return ExprColumn(f, base; lower, upper)
     elseif f === interval_censored && length(getargs(rhs)) == 1 &&
            keys(getkwargs(rhs)) == (:upper,)
         upper = _sb_ragged_bound(
             data, key, :upper, getkwargs(rhs).upper, layout)
-        base = _sb_ragged_likelihood_rhs(data, key, first(getargs(rhs)), layout)
+        base = _sb_ragged_likelihood_rhs(stmts, data, key, first(getargs(rhs)), layout)
         return ExprColumn(f, base; upper)
     end
-    ExprColumn(f, map(a -> _sb_ragged_argument(data, key, a, layout),
-        getargs(rhs))...; getkwargs(rhs)...)
+    ExprColumn(f, map(enumerate(getargs(rhs))) do (index, argument)
+        grouped = _sb_ragged_argument(data, key, argument, layout)
+        # A bound response groups its computed arguments when it is observed
+        # (`_sb_grouped_argument!`). An omitted one has no values, so its
+        # arguments are grouped here over the join's row partition, under the
+        # same names: the observation reads them as it does when bound.
+        isnothing(layout.values) || return grouped
+        ports = _sb_grouped_ports(grouped, length.(layout.rows))
+        isnothing(ports) ? grouped : _sb_grouped_argument_plate!(stmts, data, key,
+            _sb_ragged_rows!(data, key, layout), grouped, index, ports)
+    end...; getkwargs(rhs)...)
 end
-_sb_ragged_likelihood_rhs(_data, _key, rhs, _layout) = rhs
+_sb_ragged_likelihood_rhs(_stmts, _data, _key, rhs, _layout) = rhs
+
+# An omitted join's row partition, one array of flat row numbers per kernel
+# subject, bound under the name RKBRMI gives the same port.
+function _sb_ragged_rows!(data, key::Symbol, layout)
+    rows_key = Symbol(key, :_rows)
+    if haskey(data, rows_key)
+        data[rows_key] == layout.rows || error(
+            "sbimpl: derived ragged-row data key `$rows_key` collides with " *
+            "different observed data")
+    else
+        data[rows_key] = layout.rows
+        _sb_record_preproc!(data, rows_key, PreprocEntry(
+            :ragged_rows,
+            (; group_col=layout.group_col, subject_col=layout.subject_col),
+            layout.group_col, true))
+    end
+    rows_key
+end
 
 # Formula-boundary grouping for a flat observed frame. The emitted likelihood
 # keeps the logical response name (`key`), so StanBlocks' existing top-level
@@ -7134,7 +7168,7 @@ function _sb_sampling!(stmts, data, key,
             (; group_col=layout.group_col, subject_col=layout.subject_col),
             key, true))
     end
-    grouped_rhs = _sb_ragged_likelihood_rhs(data, key, rhs, layout)
+    grouped_rhs = _sb_ragged_likelihood_rhs(stmts, data, key, rhs, layout)
     _sb_likelihood!(stmts, key, grouped_rhs, data)
 end
 
@@ -12800,20 +12834,37 @@ function _sb_grouped_argument_ports!(ports, argument::NamedColumn, lengths)
     false
 end
 _sb_grouped_argument_ports!(_ports, _argument, _lengths) = false
+# A row-wise callable (`addprop`) gives one group's rows the values it gives
+# them over all rows, so it runs in the cell like arithmetic. Applied to the
+# whole flattened argument, it would run once per group, every group's rows
+# each time.
 function _sb_grouped_argument_ports!(ports, argument::ExprColumn, lengths)
     f = getf(argument)
     (haskey(_RK_DERIVED_BINOPS, f) || haskey(_RK_DERIVED_CMP, f) ||
-        haskey(_RK_DERIVED_MATH, f)) || return false
+        haskey(_RK_DERIVED_MATH, f) || _rk_rowwise_callable(f)) || return false
     foreach(a -> _sb_grouped_argument_ports!(ports, a, lengths), getargs(argument))
     !isempty(ports)
+end
+
+# The grouped ports of an observation argument evaluated per observed group,
+# or `nothing` when the argument is read in place.
+function _sb_grouped_ports(argument, lengths)
+    ports = Dict{Symbol,NamedColumn}()
+    _sb_grouped_argument_ports!(ports, argument, lengths) ? ports : nothing
 end
 
 function _sb_grouped_argument!(stmts, data, target, argument, index)
     response = get(data, target, nothing)
     response isa AbstractVector{<:AbstractVector} || return argument
-    ports = Dict{Symbol,NamedColumn}()
-    stage = _sb_grouped_argument_ports!(ports, argument, length.(response))
-    stage && !isempty(ports) || return argument
+    ports = _sb_grouped_ports(argument, length.(response))
+    isnothing(ports) ? argument :
+        _sb_grouped_argument_plate!(stmts, data, target, target, argument, index, ports)
+end
+
+# Evaluate a computed observation argument one group at a time, in a plate over
+# the observed `cells` (the bound response, or an omitted join's row partition)
+# and the argument's grouped ports.
+function _sb_grouped_argument_plate!(stmts, data, target, cells, argument, index, ports)
     expression = _sb_scalar_expr(argument, data)
     names = sort!(collect(keys(ports)))
     taken = Set{Symbol}(keys(data))
@@ -12829,7 +12880,7 @@ function _sb_grouped_argument!(stmts, data, target, argument, index)
             rep_vector($param[1], num_elements($observed)) : $param)
         expression = _sb_subst_sym(expression, name, rows)
     end
-    plate = Expr(:do, Expr(:call, :plate, target, names...),
+    plate = Expr(:do, Expr(:call, :plate, cells, names...),
         Expr(:->, Expr(:tuple, observed, params...), Expr(:block, expression)))
     push!(stmts, Expr(:call, :~, entry, plate))
     NamedColumn(entry, MissingColumn())

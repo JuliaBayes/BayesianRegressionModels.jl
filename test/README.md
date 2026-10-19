@@ -64,6 +64,14 @@ non-response ragged input.
 an omitted censored response and a joint QT likelihood. It checks the
 predictive descriptor and a finite generated draw above the censoring floor.
 
+`ragged_rowwise_arguments.jl` checks that SBBRMI evaluates a row-wise helper
+(`addprop`) or elementwise arithmetic over a ragged plate or kernel result once
+per subject when it is observed outside the cell. The observation never reads
+the helper over the whole flattened result. It checks BridgeStan density and
+gradient parity with the in-cell spelling. For a `ragged(y, group)` join it
+also checks the omitted response: the same observation statement, the bound
+`y_rows` partition and its replay, and the predictive segments.
+
 `benchmark_emission_latency.jl` reports package loading, first model construction,
 first RK artifact emission and repeated calls separately, including compiler time,
 allocation and garbage collection. It uses independent synthetic regression and
