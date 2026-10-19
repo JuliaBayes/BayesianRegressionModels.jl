@@ -226,5 +226,5 @@ function brm_descriptor(backend::TuringBRMI;
     formula = _brm_descriptor_formula(brmi)
     id = "turing:" * formula
     BRMDescriptor(id, descriptor_name, formula, backend.plan, nothing,
-        (), _brm_turing_inputs(backend), Tuple(outputs), Tuple(ops), columns, ())
+        (), _brm_turing_inputs(backend), Tuple(outputs), Tuple(ops), columns, (), (), ())
 end
