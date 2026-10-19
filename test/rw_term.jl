@@ -117,6 +117,10 @@ end
         @test length(brm_term_coordinates(
             descriptor, :mu, constrained_names;
             term=:rw_mu_t, parameter=:innovations).coordinates) == 3
+        # With the intercept at zero the predictor IS the term's value.
+        value = brm_term_coordinates(
+            descriptor, :mu, constrained_names; term=:rw_mu_t, parameter=:value)
+        @test constrained[value.coordinates] ≈ mu
     else
         @info "Skipping BridgeStan rw runtime gate (BRM_RW_RUNTIME=0)"
         @test true

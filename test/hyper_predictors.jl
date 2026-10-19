@@ -175,6 +175,12 @@ end
         d, :loc, names; term=:hsgp_x_by_g, parameter=:length_scale)
     @test_throws "no sampled carrier" brm_term_coordinates(
         d, :loc, names; term=:hsgp_x_by_g, parameter=:sd)
+    # The term's collected value is not a hyper: it resolves under `:value`
+    # whether or not its hypers are predicted (design 0mc2uvo).
+    value = brm_term_coordinates(d, :loc, [names; ["hsgp_x_by_g.$i" for i in 1:8]];
+        term=:hsgp_x_by_g, parameter=:value)
+    @test value.output.name === :hsgp_x_by_g
+    @test value.coordinates == collect(9:16)
     # Mixed: the planned hyper redirects, the bare hyper still resolves.
     sbm = SBBRMI(hyper_mixed_model(df); mod=@__MODULE__)
     dm = brm_descriptor(sbm)
@@ -198,6 +204,10 @@ end
         du, :loc, namesu; term=:hsgp_x, parameter=:length_scale)
     @test brm_term_coordinates(du, :loc, namesu;
         term=:hsgp_x, parameter=:sd).coordinates == [2]
+    valueu = brm_term_coordinates(du, :loc, [namesu; ["hsgp_x.$i" for i in 1:8]];
+        term=:hsgp_x, parameter=:value)
+    @test valueu.output.name === :hsgp_x
+    @test valueu.coordinates == collect(3:10)
 end
 
 @testset "hyper-predictor BridgeStan finite density and gradient" begin
