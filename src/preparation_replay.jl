@@ -144,38 +144,51 @@ function _brm_check_hsgp_domain(fits, axes; prefix="BRM replay")
     nothing
 end
 
-function _brm_replay_preprocess(::Val{:hsgp}, entry, axes::Tuple,
+# The SB reprocess input is the replay axes plus, for a `rows=` term, the
+# replay mask (decision 1fk9b29).
+_brm_replay_preprocess(kind::Val{:hsgp}, entry, axes::Tuple, freeze, prefix) =
+    _brm_replay_preprocess(kind, entry, (; axes, mask=nothing), freeze, prefix)
+
+function _brm_replay_preprocess(::Val{:hsgp}, entry, input::NamedTuple,
                                 freeze, prefix)
+    (; axes, mask) = input
     covariance = get(entry.const_, :cov, :exp_quad)
     covariance === :periodic && return _brm_replay_periodic_hsgp(
-        entry, axes, prefix)
+        entry, axes, mask, prefix)
     K = entry.const_.K
+    anchor = get(entry.const_, :anchor, nothing)
+    extrapolate = get(entry.const_, :extrapolate, :error)
     domain_fits = get(entry.const_, :domain_fits, nothing)
-    _brm_check_hsgp_domain(domain_fits, axes; prefix)
+    fitted_axes = _brm_hsgp_masked_axes(axes, mask)
+    fresh = !freeze && isnothing(domain_fits)
     fits = !isnothing(domain_fits) ? domain_fits :
-           freeze ? entry.const_.fits : _brm_fit_hsgp(axes, K, entry.const_.c)
-    PHI, omega2 = _brm_apply_hsgp(fits, axes, K)
+           freeze ? entry.const_.fits :
+           _brm_fit_hsgp(fitted_axes, K, entry.const_.c; anchor)
+    # A fresh fit re-derives the clamp range; a frozen or fixed-domain fit
+    # keeps the one it was fitted with.
+    support = fresh || !haskey(entry.const_, :support) ?
+        _brm_hsgp_support(fitted_axes, fits) : entry.const_.support
+    evaluated = fresh ? axes :
+        _brm_hsgp_replay_axes(axes, fits, support, extrapolate, mask; prefix,
+                              fixed_domain=!isnothing(domain_fits))
     orthogonal_to = get(entry.const_, :orthogonal_to, nothing)
-    orthogonal_to === :linear &&
-        (PHI = _brm_orthogonalize_hsgp_linear(PHI, only(axes)))
     iso = entry.const_.iso
-    rho_lower = _brm_hsgp_rho_lower_data(fits, K, iso)
-    updated = (; fits, K, c=entry.const_.c, iso, domain_fits, orthogonal_to,
-               omega2_key=entry.const_.omega2_key,
-               rho_lower_key=entry.const_.rho_lower_key)
+    basis = _brm_hsgp_basis_state(evaluated, K, :exp_quad, iso, nothing;
+        fits, orthogonal=orthogonal_to, anchor, mask)
+    updated = merge(entry.const_, (; fits, support))
     _BRMPreprocessResult(
-        (primary=PHI, omega2, rho_lower),
+        (primary=basis.PHI, omega2=basis.omega2, rho_lower=basis.rho_lower),
         _BRMPreprocEntry(:hsgp, updated, entry.raw_ref, false))
 end
 
-function _brm_replay_periodic_hsgp(entry, axes::Tuple, prefix)
+function _brm_replay_periodic_hsgp(entry, axes::Tuple, mask, prefix)
     length(axes) == 1 || error(
         "$prefix: periodic `hsgp` expects exactly one axis")
     K = entry.const_.K
-    values = (primary=_brm_apply_hsgp_periodic(
-                  entry.const_.period, only(axes), K),
-              harmonics=_brm_hsgp_periodic_harmonics(K),
-              rho_lower=_brm_hsgp_periodic_rho_lower(K))
+    basis = _brm_hsgp_basis_state(axes, (K,), :periodic, true,
+        entry.const_.period; anchor=get(entry.const_, :anchor, nothing), mask)
+    values = (primary=basis.PHI, harmonics=basis.harmonics,
+              rho_lower=basis.rho_lower)
     _BRMPreprocessResult(values,
         _BRMPreprocEntry(:hsgp, entry.const_, entry.raw_ref, false))
 end

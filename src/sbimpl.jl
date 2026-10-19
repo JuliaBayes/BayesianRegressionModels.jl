@@ -2672,6 +2672,15 @@ function _sb_apply_group_levels(levels, raw::AbstractVector, group::Symbol)
     idx
 end
 
+# The replay input of an HSGP record: its axes and, for a `rows=` term, the
+# replay data's mask column (decision 1fk9b29).
+function _sb_hsgp_replay_input(df, e, axes)
+    source = get(e.const_, :rows_source, nothing)
+    mask = isnothing(source) ? nothing : _brm_hsgp_row_mask(
+        _sb_df_column(df, source), length(first(axes)), source)
+    (; axes, mask)
+end
+
 # GP input helpers. Both public terms accept one-or-more raw real-valued axes
 # and lower them to an N x d matrix. Keeping the raw column names in the
 # preprocessing record lets `reprocess` rebuild that matrix on new data.
@@ -2735,12 +2744,14 @@ _sb_hsgp_periodic_harmonics(K::Integer) = _brm_hsgp_periodic_harmonics(K)
 _sb_hsgp_periodic_rho_lower(K::Integer) = _brm_hsgp_periodic_rho_lower(K)
 
 function _sb_hsgp_periodic_frozen_check(data, key, names, K::Integer,
-                                        period::Real)
+                                        period::Real, options)
     frozen = _sb_frozen_preproc_entry(data, key, :hsgp, names)
     isnothing(frozen) && return nothing
     const_ = frozen.const_
     (get(const_, :cov, :exp_quad) === :periodic && const_.K == K &&
-     const_.period == period) || error(
+     const_.period == period &&
+     get(const_, :anchor, nothing) == options.anchor &&
+     get(const_, :rows_source, nothing) === _sb_hsgp_rows_source(options)) || error(
         "sbimpl: resample replay: fitted periodic HSGP configuration for " *
         "`$key` no longer matches the re-emitted formula")
     nothing
@@ -2839,11 +2850,12 @@ _sb_rematerialize_vec(x, _df) = error(
 # the `@brm` builder uses), unwrapped to a plain vector. Errors if absent.
 const _sb_df_column = _brm_df_column
 
-function _sb_gp_axes_from_df(df, raw_ref, label::Symbol)
+function _sb_gp_axes_from_df(df, raw_ref, label::Symbol; allow_empty::Bool=false)
     names = raw_ref isa Symbol ? (raw_ref,) : Tuple(raw_ref)
     axes = ntuple(length(names)) do j
         v = collect(Float64, _sb_df_column(df, names[j]))
-        isempty(v) && error("sbimpl: reprocess: `$label($(names[j]))` cannot use an empty axis")
+        isempty(v) && !allow_empty && error(
+            "sbimpl: reprocess: `$label($(names[j]))` cannot use an empty axis")
         all(isfinite, v) || error(
             "sbimpl: reprocess: `$label($(names[j]))` requires finite values")
         v
@@ -4981,13 +4993,15 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         axes = _sb_gp_axes_from_df(df, e.raw_ref, :gp)
         replay_and_bind(axes, :primary => key)
     elseif e.kind === :hsgp && get(e.const_, :cov, :exp_quad) === :periodic
-        axes = _sb_gp_axes_from_df(df, e.raw_ref, :hsgp)
-        replay_and_bind(axes, :primary => key,
+        axes = _sb_gp_axes_from_df(df, e.raw_ref, :hsgp; allow_empty=true)
+        replay_and_bind(_sb_hsgp_replay_input(df, e, axes), :primary => key,
                         :harmonics => e.const_.harmonics_key,
                         :rho_lower => e.const_.rho_lower_key)
     elseif e.kind === :hsgp
-        axes = _sb_gp_axes_from_df(df, e.raw_ref, :hsgp)
-        replay_and_bind(axes, :primary => key, :omega2 => e.const_.omega2_key,
+        axes = _sb_gp_axes_from_df(df, e.raw_ref, :hsgp;
+            allow_empty=!isnothing(get(e.const_, :domain_fits, nothing)))
+        replay_and_bind(_sb_hsgp_replay_input(df, e, axes), :primary => key,
+                        :omega2 => e.const_.omega2_key,
                         :rho_lower => e.const_.rho_lower_key)
     elseif e.kind === :categorical_outcome
         v = _sb_df_column(df, e.raw_ref)
@@ -11972,23 +11986,57 @@ end
 # A one-dimensional model-derived axis instead evaluates that basis inside Stan
 # and therefore requires an explicit fixed domain.
 function _sb_hsgp_fit_for_emission(data, key, names, axes, K, c, iso,
-                                   domain_fits, orthogonal_to)
+                                   domain_fits, orthogonal_to, options, mask)
     frozen = _sb_frozen_preproc_entry(data, key, :hsgp, names)
+    fitted_axes = _brm_hsgp_masked_axes(axes, mask)
     # Fit the fresh basis LAZILY — only when there is no frozen entry to return.
     # A constant prediction axis (e.g. a fixed future dose) trips `_sb_fit_hsgp`'s
     # degeneracy check, so evaluating it eagerly crashed frozen CV-template
     # re-emission even though `const_.fits` is what gets returned. (`f5a177d`
     # had this lazy; `2e929f7` regressed it while threading in `domain_fits`.)
-    isnothing(frozen) && return isnothing(domain_fits) ?
-        _sb_fit_hsgp(axes, K, c) : domain_fits
+    if isnothing(frozen)
+        fits = isnothing(domain_fits) ?
+            _brm_fit_hsgp(fitted_axes, K, c; anchor=options.anchor) : domain_fits
+        return (; fits, support=_brm_hsgp_support(fitted_axes, fits), axes)
+    end
     const_ = frozen.const_
     frozen_domain = get(const_, :domain_fits, nothing)
     frozen_orthogonal = get(const_, :orthogonal_to, nothing)
     (const_.K == K && const_.c == c && const_.iso == iso &&
-     frozen_domain == domain_fits && frozen_orthogonal === orthogonal_to) || error(
+     frozen_domain == domain_fits && frozen_orthogonal === orthogonal_to &&
+     get(const_, :anchor, nothing) == options.anchor &&
+     get(const_, :extrapolate, :error) === options.extrapolate &&
+     get(const_, :rows_source, nothing) === _sb_hsgp_rows_source(options)) || error(
         "sbimpl: resample replay: fitted HSGP configuration for `$key` no " *
         "longer matches the re-emitted formula")
-    const_.fits
+    # The re-emitted axes are replay values on the frozen basis.
+    support = get(const_, :support, nothing)
+    isnothing(support) && (support = _brm_hsgp_support(fitted_axes, const_.fits))
+    evaluated = _brm_hsgp_replay_axes(axes, const_.fits, support,
+        options.extrapolate, mask; prefix="sbimpl: resample replay", names,
+        fixed_domain=!isnothing(domain_fits))
+    (; fits=const_.fits, support, axes=evaluated)
+end
+
+_sb_hsgp_rows_source(options) =
+    isnothing(options.rows) ? nothing : name(_sb_named_inner(:hsgp, options.rows))
+
+# Replay needs the options next to the frozen fit; a term that uses none of
+# them records nothing new, so its preprocessing record is unchanged.
+function _sb_hsgp_option_const(options, support)
+    out = (;)
+    isnothing(options.anchor) || (out = merge(out, (; anchor=options.anchor)))
+    options.extrapolate === :clamp &&
+        (out = merge(out, (; extrapolate=:clamp, support)))
+    isnothing(options.rows) || (out = merge(out, (; rows_source=_sb_hsgp_rows_source(options))))
+    out
+end
+
+# The `rows=` mask of an HSGP term as a Bool vector over its `n` rows.
+function _sb_hsgp_mask(options, n::Int)
+    isnothing(options.rows) && return nothing
+    source, raw = _sb_inner_data(:hsgp, options.rows)
+    _brm_hsgp_row_mask(raw, n, source)
 end
 
 function _sb_hsgp_raw_axes(args)
@@ -12001,16 +12049,8 @@ function _sb_hsgp_raw_axes(args)
     names, backings, raw
 end
 
-function _sb_hsgp_check_explicit_domain(fits, axes)
-    isnothing(fits) && return
-    for j in eachindex(axes)
-        center, L = fits[j]
-        lower, upper = center - L, center + L
-        all(x -> lower <= x <= upper, axes[j]) || error(
-            "sbimpl: `hsgp(...; domain=...)` axis $j contains training values " *
-            "outside its fixed domain ($lower, $upper)")
-    end
-end
+_sb_hsgp_check_explicit_domain(fits, axes) =
+    _brm_check_hsgp_domain(fits, axes; prefix="sbimpl")
 
 _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
                     term_overrides=Dict{Symbol,Any}(), target=nothing, kwargs...) = begin
@@ -12034,9 +12074,10 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     K, c = _sb_hsgp_options(kw, n_axes)
     cov = _sb_gp_cov(kw, :hsgp)
     period = _sb_gp_period(kw, :hsgp, cov)
+    options = _brm_hsgp_extended_options(kw, n_axes, cov; latent=!is_raw)
     cov === :periodic && return _sb_hsgp_periodic_term!(
         stmts, data, t, names, raw, is_raw, K, kw, period, term_overrides,
-        target)
+        target, options)
     suffix, col_name = _sb_unique_structured_term_names(
         stmts, :hsgp, join(string.(names), "_"), target)
     centeredness = _brm_hsgp_centeredness(kw, prod(K))
@@ -12087,7 +12128,11 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
 
     axes = ntuple(n_axes) do j
         v = collect(Float64, _sb_real_vec(:hsgp, names[j], raw[j]))
-        isempty(v) && error("sbimpl: `hsgp($(names[j]))` cannot use an empty axis")
+        # A basis with an explicit domain needs no data (decision 1fk9b29).
+        isempty(v) && isnothing(domain_fits) && error(
+            "sbimpl: `hsgp($(names[j]))` cannot use an empty axis; an HSGP " *
+            "over an axis that can be empty needs an explicit " *
+            "`domain=(lower, upper)` (or `cov=:periodic`)")
         all(isfinite, v) || error(
             "sbimpl: `hsgp($(names[j]))` requires finite values")
         v
@@ -12095,7 +12140,8 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     n = length(first(axes))
     all(v -> length(v) == n, axes) || error(
         "sbimpl: `hsgp(x...)` axes must have equal lengths (got $(length.(axes)))")
-    _sb_hsgp_check_explicit_domain(domain_fits, axes)
+    mask = _sb_hsgp_mask(options, n)
+    _sb_hsgp_check_explicit_domain(domain_fits, _brm_hsgp_masked_axes(axes, mask))
 
     if haskey(kw, :by)
         partial && error(
@@ -12110,18 +12156,21 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         PHI_name = Symbol(:PHI_hsgp_, suffix, :_by_, gname)
         omega2_name = Symbol(:omega2_hsgp_, suffix, :_by_, gname)
         rho_lower_name = Symbol(:rho_lower_hsgp_, suffix, :_by_, gname)
-        fits = _sb_hsgp_fit_for_emission(
+        fitted = _sb_hsgp_fit_for_emission(
             data, PHI_name, names, axes, K, c, iso,
-            domain_fits, orthogonal_to)
+            domain_fits, orthogonal_to, options, mask)
+        fits = fitted.fits
         basis = _brm_hsgp_basis_state(
-            axes, K, cov, iso, period; fits, orthogonal=orthogonal_to)
+            fitted.axes, K, cov, iso, period; fits, orthogonal=orthogonal_to,
+            options.anchor, mask)
         PHI, omega2 = basis.PHI, basis.omega2
         data[PHI_name] = PHI
         data[omega2_name] = omega2
         data[rho_lower_name] = basis.rho_lower
         _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp,
             (; fits, K, c, iso, domain_fits, orthogonal_to,
-             omega2_key=omega2_name, rho_lower_key=rho_lower_name),
+             omega2_key=omega2_name, rho_lower_key=rho_lower_name,
+             _sb_hsgp_option_const(options, fitted.support)...),
             names, false))
         col_name = Symbol(:hsgp_, suffix, :_by_, gname)
         rho_plan = _sb_hyper_plan_for(hyper_plans, :length_scale)
@@ -12155,18 +12204,21 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     omega2_name = Symbol(:omega2_hsgp_, suffix)
     rho_lower_name = Symbol(:rho_lower_hsgp_, suffix)
     centeredness_name = Symbol(:centeredness_hsgp_, suffix)
-    fits = _sb_hsgp_fit_for_emission(
+    fitted = _sb_hsgp_fit_for_emission(
         data, PHI_name, names, axes, K, c, iso,
-        domain_fits, orthogonal_to)
+        domain_fits, orthogonal_to, options, mask)
+    fits = fitted.fits
     basis = _brm_hsgp_basis_state(
-        axes, K, cov, iso, period; fits, orthogonal=orthogonal_to)
+        fitted.axes, K, cov, iso, period; fits, orthogonal=orthogonal_to,
+        options.anchor, mask)
     PHI, omega2 = basis.PHI, basis.omega2
     data[PHI_name] = PHI
     data[omega2_name] = omega2
     data[rho_lower_name] = basis.rho_lower
     partial && (data[centeredness_name] = centeredness)
     preproc_const = (; fits, K, c, iso, domain_fits, orthogonal_to,
-                     omega2_key=omega2_name, rho_lower_key=rho_lower_name)
+                     omega2_key=omega2_name, rho_lower_key=rho_lower_name,
+                     _sb_hsgp_option_const(options, fitted.support)...)
     partial && (preproc_const = merge(preproc_const, (; centeredness)))
     _sb_record_preproc!(data, PHI_name, PreprocEntry(
         :hsgp, preproc_const, names, false))
@@ -12200,7 +12252,8 @@ end
 # spelling is not implemented, so every such keyword is refused by name rather
 # than silently ignored.
 function _sb_hsgp_periodic_term!(stmts, data, t, names, raw, is_raw, K, kw,
-                                 period, term_overrides, target=nothing)
+                                 period, term_overrides, target=nothing,
+                                 options=_brm_hsgp_extended_options(kw, length(names), :periodic))
     n_axes = length(names)
     n_axes == 1 || error(
         "sbimpl: `hsgp(...; cov=:periodic)` supports exactly one axis, got $n_axes")
@@ -12220,9 +12273,11 @@ function _sb_hsgp_periodic_term!(stmts, data, t, names, raw, is_raw, K, kw,
     end
     K1 = only(K)
     x = only(names)
+    # The periodic basis needs no data, so an empty axis is admitted: the term
+    # keeps its parameters, prior-only (decision 1fk9b29).
     axis = collect(Float64, _sb_real_vec(:hsgp, x, only(raw)))
-    isempty(axis) && error("sbimpl: `hsgp($x)` cannot use an empty axis")
     all(isfinite, axis) || error("sbimpl: `hsgp($x)` requires finite values")
+    mask = _sb_hsgp_mask(options, length(axis))
 
     # Carrier disambiguation follows the mainline `hsgp` path: the first
     # `hsgp(x; cov=:periodic)` keeps `hsgp_<x>`; a repeat over the same axis
@@ -12232,15 +12287,16 @@ function _sb_hsgp_periodic_term!(stmts, data, t, names, raw, is_raw, K, kw,
     PHI_name = Symbol(:PHI_hsgp_, suffix)
     harmonics_name = Symbol(:harmonics_hsgp_, suffix)
     rho_lower_name = Symbol(:rho_lower_hsgp_, suffix)
-    _sb_hsgp_periodic_frozen_check(data, PHI_name, names, K1, period)
+    _sb_hsgp_periodic_frozen_check(data, PHI_name, names, K1, period, options)
     basis = _brm_hsgp_basis_state(
-        (axis,), (K1,), :periodic, true, period)
+        (axis,), (K1,), :periodic, true, period; options.anchor, mask)
     data[PHI_name] = basis.PHI
     data[harmonics_name] = basis.harmonics
     data[rho_lower_name] = basis.rho_lower
     _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp,
         (; cov=:periodic, period, K=K1, iso=true,
-         harmonics_key=harmonics_name, rho_lower_key=rho_lower_name),
+         harmonics_key=harmonics_name, rho_lower_key=rho_lower_name,
+         _sb_hsgp_option_const(options, nothing)...),
         names, false))
     submodel = _sb_gp_submodel_expr(:_sb_hsgp_periodic, term_overrides, t)
     push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(

@@ -130,15 +130,125 @@ function _brm_gp_period(kw, label::Symbol, cov::Symbol)
     Float64(period)
 end
 
+# `extrapolate` says what replay does with an axis value outside the basis the
+# term was fitted on (decision 1fk9b29). `:error` (the default) refuses it: past
+# `center ± L` the sine basis wraps around and evaluates a different point.
+# `:clamp` holds the curve constant beyond the fitted data range instead.
+# A periodic basis has no interval, so the keyword means nothing there.
+const _BRM_HSGP_EXTRAPOLATE = (:error, :clamp)
+
+function _brm_hsgp_extrapolate(kw, cov::Symbol)
+    haskey(kw, :extrapolate) && cov === :periodic && error(
+        "sbimpl: `hsgp(...; cov=:periodic)` does not accept `extrapolate=`: " *
+        "the periodic basis has no interval to leave")
+    value = get(kw, :extrapolate, :error)
+    value in _BRM_HSGP_EXTRAPOLATE || error(
+        "sbimpl: `hsgp(...; extrapolate=...)` supports `:error` and `:clamp`, " *
+        "got $(repr(value))")
+    value
+end
+
+# `anchor=x0` makes the term `f(x) - f(x0)`: zero at `x0` exactly. One value per
+# axis; a scalar serves a one-dimensional term.
+function _brm_hsgp_anchor(kw, n_axes::Int)
+    haskey(kw, :anchor) || return nothing
+    raw = kw[:anchor]
+    values = if raw isa Real && !(raw isa Bool)
+        n_axes == 1 || error(
+            "sbimpl: `hsgp(...; anchor=...)` over $n_axes axes needs one value " *
+            "per axis, got $(repr(raw))")
+        (raw,)
+    elseif (raw isa Tuple || raw isa AbstractVector) && length(raw) == n_axes &&
+           all(v -> v isa Real && !(v isa Bool), raw)
+        Tuple(raw)
+    else
+        error("sbimpl: `hsgp(...; anchor=...)` expects " *
+              (n_axes == 1 ? "a number" : "one number per axis ($n_axes)") *
+              ", got $(repr(raw))")
+    end
+    all(isfinite, values) || error(
+        "sbimpl: `hsgp(...; anchor=...)` must be finite, got $(repr(raw))")
+    Tuple(Float64(v) for v in values)
+end
+
+# `rows=mask` names a Bool (or 0/1) data column: only those rows carry the
+# predictor. The basis interval and validity floor are fitted from them, and
+# every other row contributes 0 whatever value its axis holds.
+_brm_hsgp_rows_column(kw) = get(kw, :rows, nothing)
+
+function _brm_hsgp_row_mask(raw, n::Int, source)
+    raw isa AbstractVector || error(
+        "sbimpl: `hsgp(...; rows=$source)` expects a Bool data column, got $(typeof(raw))")
+    length(raw) == n || error(
+        "sbimpl: `hsgp(...; rows=$source)` has $(length(raw)) rows but the " *
+        "axis has $n")
+    all(v -> v isa Bool || (v isa Real && (v == 0 || v == 1)), raw) || error(
+        "sbimpl: `hsgp(...; rows=$source)` must hold Bool (or 0/1) values")
+    BitVector(Bool.(raw))
+end
+
+_brm_hsgp_masked_axes(axes::Tuple, mask::Nothing) = axes
+_brm_hsgp_masked_axes(axes::Tuple, mask::AbstractVector{Bool}) =
+    map(axis -> axis[mask], axes)
+
+# The training data range of each axis: where `extrapolate=:clamp` holds the
+# curve constant on replay. A term fitted on no rows (an empty axis with an
+# explicit `domain=`) clamps to that domain instead.
+function _brm_hsgp_support(axes::Tuple, fits)
+    ntuple(length(axes)) do j
+        axis = axes[j]
+        isempty(axis) || return (Float64(minimum(axis)), Float64(maximum(axis)))
+        center, L = fits[j]
+        (center - L, center + L)
+    end
+end
+
+# Replay a frozen fit on new axis values. Inside the basis interval the
+# approximation holds; past it the sines wrap around, so `:error` refuses and
+# `:clamp` maps every value into the fitted data range first. Rows outside a
+# `rows=` mask are never evaluated and need no check.
+function _brm_hsgp_replay_axes(axes::Tuple, fits, support, extrapolate::Symbol,
+                               mask=nothing; prefix="BRM replay", names=nothing,
+                               fixed_domain::Bool=false)
+    extrapolate === :clamp && return ntuple(length(axes)) do j
+        lo, hi = support[j]
+        clamp.(axes[j], lo, hi)
+    end
+    for j in eachindex(axes)
+        center, L = fits[j]
+        lower, upper = center - L, center + L
+        for (i, value) in pairs(axes[j])
+            (isnothing(mask) || mask[i]) || continue
+            lower <= value <= upper && continue
+            label = isnothing(names) ? "axis $j" : "`$(names[j])`"
+            where = fixed_domain ? "its fixed domain" : "the fitted basis interval"
+            error("$prefix: `hsgp` $label value $value lies outside $where " *
+                  "($lower, $upper); past it the basis wraps " *
+                  "around and evaluates a different point. Keep replay values " *
+                  "inside it, or declare `hsgp(...; extrapolate=:clamp)` to hold " *
+                  "the curve constant beyond the fitted data range.")
+        end
+    end
+    axes
+end
+
 
 
 # HSGP fit/apply split. The scalar methods reproduce the historical 1D basis;
 # the tuple methods form its tensor product for variadic `hsgp(x...)`.
-_brm_fit_hsgp(raw::AbstractVector{<:Real}, K::Integer, c::Real) = begin
+# An `anchor` must lie inside the basis interval to be evaluated there, so it
+# widens the half-width exactly as a training value would; the center stays
+# the training mean.
+_brm_fit_hsgp(raw::AbstractVector{<:Real}, K::Integer, c::Real; anchor=nothing) = begin
     K >= 1 || error("hsgp: k must be >= 1 (got $K)")
     c > 1  || error("hsgp: c must be > 1 (got $c)")
+    isempty(raw) && error(
+        "hsgp: no rows to fit the basis interval from; an axis that can be " *
+        "empty needs an explicit `domain=(lower, upper)`")
     mu = sum(raw) / length(raw)
-    L = c * maximum(abs, raw .- mu)
+    deviation = maximum(abs, raw .- mu)
+    isnothing(anchor) || (deviation = max(deviation, abs(anchor - mu)))
+    L = c * deviation
     L > 0 || error("hsgp: degenerate input (all x equal)")
     (mu, L)
 end
@@ -154,8 +264,9 @@ _brm_apply_hsgp(c::Tuple, raw::AbstractVector{<:Real}, K::Integer) = begin
     PHI, lambda
 end
 
-_brm_fit_hsgp(axes::Tuple, K::Tuple, c::Tuple) =
-    ntuple(j -> _brm_fit_hsgp(axes[j], K[j], c[j]), length(axes))
+_brm_fit_hsgp(axes::Tuple, K::Tuple, c::Tuple; anchor=nothing) =
+    ntuple(j -> _brm_fit_hsgp(axes[j], K[j], c[j];
+        anchor=isnothing(anchor) ? nothing : anchor[j]), length(axes))
 
 # The weight threshold `w` in the validity bound below. 100 is the value the
 # reference port uses; it is not reachable from the formula.
