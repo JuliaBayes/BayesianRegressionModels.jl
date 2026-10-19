@@ -250,8 +250,8 @@ function _sb_emit_marginal_id_bucket!(stmts, data, bucket_name, n_terms_name,
     # The active correlation submatrix of `LKJ(K, eta)` is `LKJ(a, eta + m / 2)`.
     push!(stmts, Expr(:call, :~, Expr(:(::), L_name, Expr(:ref, :cholesky_factor_corr, n_active)),
                       Expr(:call, :lkj_corr_cholesky, eta + m / 2)))
-    scale = _sb_vector_positive_prior_statement(tau_name, tau_name, resolved[active_cols],
-        n_active; direct_native=true, mod, scope=@__MODULE__)
+    scale = _sb_vector_prior_statement(tau_name, tau_name, resolved[active_cols],
+        n_active; positive=true, mod, scope=@__MODULE__)
     push!(stmts, scale.statement)
     for hyper in (L_name, tau_name)
         _sb_record_binding!(data, hyper, :random_effect, gname; marginal_of=bucket_name)
@@ -269,7 +269,7 @@ function _sb_emit_marginal_id_bucket!(stmts, data, bucket_name, n_terms_name,
              Expr(:kw, :tau, tau_name)))))
 
     completion = _sb_vector_positive_priors(ranef_correlated_draws_completion,
-        :tau_inactive, resolved[inactive_cols]; direct_native=true, mod)
+        :tau_inactive, resolved[inactive_cols]; mod)
     _sb_record_binding!(data, bucket_name, :random_effect, gname;
                         family=:ranef_correlated_draws_completion,
                         active=carrier, margins=Tuple(inactive_cols))

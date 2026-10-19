@@ -650,7 +650,7 @@ end
 parse!(x::Expr; info) = if x.head == :block
     Expr(:block, parse!.(x.args; info)...)
 elseif _is_brm_plate(x)
-    groupings = hasproperty(info, :groupings) ? info.groupings : Dict{Symbol,Tuple{Vararg{Symbol}}}()
+    groupings = hasproperty(info, :groupings) ? info.groupings : Dict{Symbol,_BRMPlateGrouping}()
     grouped_reads = hasproperty(info, :grouped_reads) ? info.grouped_reads : Set{Symbol}()
     kernel, inbody_ragged = _brm_plate_kernel(x; groupings, grouped_reads)
     parsed = parse!(kernel; info)
@@ -658,7 +658,9 @@ elseif _is_brm_plate(x)
 elseif _is_brm_plate_grouping(x)
     # Collected by `_brm_plate_groupings` before parsing and consumed by the
     # `@plate for` rewrite; the declaration itself emits nothing.
-    hasproperty(info, :groupings) && haskey(info.groupings, x.args[2]) || error(
+    decl = _brm_plate_grouping_decl(x)
+    hasproperty(info, :groupings) && decl !== nothing &&
+        haskey(info.groupings, decl.name) || error(
         "@brm: `$(repr(x))` declares a plate grouping and must be a statement " *
         "of the `@brm` block")
     nothing
@@ -752,38 +754,72 @@ _is_brm_plate(x) = Meta.isexpr(x, :macrocall) && !isempty(x.args) &&
 _is_brm_plate_grouping(x) = isxcall(x, :ragged)
 
 # Model-scope `ragged(x, group)` statements of one `@brm` block, keyed by `x`.
-# Each value is `(group,)`, or `(group, cells)` for `ragged(x, group => cells)`:
-# the cell label column `cells` lists the plate's cells, one label per row of
-# the cells' own frame, and `x`'s rows join to them by their `group` label.
-# Collected before parsing so a declaration may follow the cells that read it.
+# Each value's `spec` is `(group,)`, or `(group, cells)` for
+# `ragged(x, group => cells)`: the cell label column `cells` lists the plate's
+# cells, one label per row of the cells' own frame, and `x`'s rows join to them
+# by their `group` label. Its `into` is the `target` of
+# `ragged(idx, group; into=target)`: `idx` holds row numbers on the flat axis
+# `target` labels, which cells read as positions inside their own cell's slice
+# of it. Collected before parsing so a declaration may follow the cells that
+# read it.
+const _BRMPlateGrouping =
+    NamedTuple{(:spec, :into),Tuple{Tuple{Vararg{Symbol}},Union{Nothing,Symbol}}}
+
 function _brm_plate_groupings(x)
-    groupings = OrderedDict{Symbol,Tuple{Vararg{Symbol}}}()
+    groupings = OrderedDict{Symbol,_BRMPlateGrouping}()
     function collect!(stmt)
         if Meta.isexpr(stmt, :block)
             foreach(collect!, stmt.args)
         elseif _is_brm_plate_grouping(stmt)
-            spec = length(stmt.args) == 3 && stmt.args[2] isa Symbol ?
-                _brm_plate_grouping_spec(stmt.args[3]) : nothing
-            spec === nothing && error(
+            decl = _brm_plate_grouping_decl(stmt)
+            decl === nothing && error(
                 "@brm: a model-scope plate grouping is `ragged(x, group)` or " *
                 "`ragged(x, group => cells)` with a formula or data name `x`, a " *
-                "grouping data column `group` and a cell label column `cells`; " *
-                "got `$(repr(stmt))`")
-            name = stmt.args[2]
+                "grouping data column `group` and a cell label column `cells`, or " *
+                "`ragged(idx, group; into=target)` for an index column into the " *
+                "flat axis `target` labels; got `$(repr(stmt))`")
+            (; name, spec, into) = decl
             name in spec && error(
                 "@brm: `$(repr(stmt))` groups `$name` by itself")
             length(spec) == 2 && spec[1] === spec[2] && error(
                 "@brm: `$(repr(stmt))` matches `$(spec[1])` against itself; the " *
                 "cell label column lists each cell once, on the cells' own frame")
+            name === into && error(
+                "@brm: `$(repr(stmt))` indexes `$name` into itself; `into=` names " *
+                "the grouping column of the axis whose rows `$name` points at")
             haskey(groupings, name) && error(
                 "@brm: the plate grouping of `$name` is declared twice " *
                 "(`$(_brm_plate_grouping_repr(name, groupings[name]))` and " *
                 "`$(repr(stmt))`)")
-            groupings[name] = spec
+            groupings[name] = (; spec, into)
         end
     end
     collect!(x)
     groupings
+end
+
+# The positional arguments and `into=` target of a `ragged(...)` call, or
+# `nothing` when it carries any other keyword.
+function _brm_plate_grouping_args(stmt)
+    positional, keywords = Any[], Any[]
+    for arg in stmt.args[2:end]
+        Meta.isexpr(arg, :parameters) ? append!(keywords, arg.args) :
+        Meta.isexpr(arg, :kw) ? push!(keywords, arg) : push!(positional, arg)
+    end
+    isempty(keywords) && return (; positional, into=nothing)
+    length(keywords) == 1 && Meta.isexpr(only(keywords), :kw, 2) &&
+        only(keywords).args[1] === :into && only(keywords).args[2] isa Symbol ||
+        return nothing
+    (; positional, into=only(keywords).args[2])
+end
+
+function _brm_plate_grouping_decl(stmt)
+    args = _brm_plate_grouping_args(stmt)
+    args === nothing && return nothing
+    (; positional, into) = args
+    length(positional) == 2 && positional[1] isa Symbol || return nothing
+    spec = _brm_plate_grouping_spec(positional[2])
+    spec === nothing ? nothing : (; name=positional[1], spec, into)
 end
 
 _brm_plate_grouping_spec(group::Symbol) = (group,)
@@ -791,8 +827,20 @@ _brm_plate_grouping_spec(x) =
     Meta.isexpr(x, :call, 3) && x.args[1] === :(=>) &&
     x.args[2] isa Symbol && x.args[3] isa Symbol ? (x.args[2], x.args[3]) : nothing
 
-_brm_plate_grouping_repr(name, spec) = length(spec) == 1 ?
-    "ragged($name, $(spec[1]))" : "ragged($name, $(spec[1]) => $(spec[2]))"
+function _brm_plate_grouping_repr(name, grouping::_BRMPlateGrouping)
+    (; spec, into) = grouping
+    group = length(spec) == 1 ? "$(spec[1])" : "$(spec[1]) => $(spec[2])"
+    isnothing(into) ? "ragged($name, $group)" : "ragged($name, $group; into=$into)"
+end
+
+# The kernel positional a cell read of a declared name lowers to:
+# `ragged(x, group[, cells][; into=target])`.
+function _brm_plate_grouping_input(name, grouping::_BRMPlateGrouping)
+    (; spec, into) = grouping
+    call = Expr(:call, :ragged, name, spec...)
+    isnothing(into) || insert!(call.args, 2, Expr(:parameters, Expr(:kw, :into, into)))
+    call
+end
 
 # A declaration no cell reads would leave the author believing `x` is grouped
 # somewhere it is not, for example in a top-level likelihood.
@@ -833,10 +881,11 @@ end
 function _brm_plate_input_key(x)
     x isa Symbol && return (:column, x)
     # `ragged(x, group)`, or `ragged(x, group, cells)` lowered from a model-scope
-    # `ragged(x, group => cells)`.
-    if isxcall(x, :ragged) && length(x.args) in (3, 4) &&
-       all(arg -> arg isa Symbol, x.args[2:end])
-        return (:ragged, x.args[2:end]...)
+    # `ragged(x, group => cells)`, either with an optional `into=target`.
+    args = isxcall(x, :ragged) ? _brm_plate_grouping_args(x) : nothing
+    if args !== nothing && length(args.positional) in (2, 3) &&
+       all(arg -> arg isa Symbol, args.positional)
+        return (:ragged, args.positional..., args.into)
     end
     error(
         "@brm: a kernel `@plate` slices formula and data names (`x[i]`); declare " *
@@ -845,7 +894,7 @@ function _brm_plate_input_key(x)
 end
 
 _brm_plate_param(x::Symbol) = x
-_brm_plate_param(x::Expr) = x.args[2]::Symbol # validated by `_brm_plate_input_key`
+_brm_plate_param(x::Expr) = _brm_plate_grouping_args(x).positional[1]::Symbol # validated by `_brm_plate_input_key`
 
 _brm_plate_indexed(x, i) = Meta.isexpr(x, :ref, 2) && x.args[2] === i
 
@@ -919,7 +968,7 @@ function _brm_cell_without_result(statements)
     Any[statements[1:final-1]; statements[final+1:end]]
 end
 
-function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,Tuple{Vararg{Symbol}}}(),
+function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
                            grouped_reads=Set{Symbol}())
     i, range, body = _brm_plate_loop(x)
     stmts, outputs = _brm_plate_outputs(body, i)
@@ -958,7 +1007,7 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,Tuple{Vararg{Symbol}}}
     function grouped(source)
         if source isa Symbol && haskey(groupings, source)
             push!(grouped_reads, source)
-            return Expr(:call, :ragged, source, groupings[source]...)
+            return _brm_plate_grouping_input(source, groupings[source])
         elseif isxcall(source, :ragged)
             inbody_ragged = true
             name = length(source.args) >= 2 ? source.args[2] : nothing
@@ -1576,6 +1625,11 @@ elseif isxcall(x, :ragged) && length(x.args) >= 2
     # logical response (`y`); sbimpl groups its flat backing at the likelihood
     # boundary. This mirrors the one-argument link/decorator spelling below,
     # while retaining `group` on the parsed LHS for backend validation.
+    # `into=` rebases an index column a plate cell reads; a response has none.
+    any(a -> Meta.isexpr(a, (:parameters, :kw)), x.args) && error(
+        "@brm: an observation `ragged(y, group) ~ …` takes no keywords; " *
+        "`into=` belongs to a model-scope `ragged(idx, group; into=target)` " *
+        "declaration of an index column; got `$(repr(x))`")
     xassignable(x.args[2])
 elseif x.head == :call 
     if length(x.args) == 2

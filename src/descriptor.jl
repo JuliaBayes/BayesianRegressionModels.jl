@@ -261,8 +261,8 @@ One caller-selected Stan definition to feature when presenting a
 
 BRM never copies or parses the generated Stan source to construct either.
 
-Pass symbols and/or `name => caption` pairs through the ordered `highlights=`
-keyword of [`brm_descriptor`](@ref). The full executable definition inventory
+Pass symbols, `name => caption` pairs and/or [`brm_highlight`](@ref) specs
+through the ordered `highlights=` keyword of [`brm_descriptor`](@ref). The full executable definition inventory
 remains available on `d.stan.definitions`; `d.highlights` is only the selected,
 ordered presentation layer.
 """
@@ -271,6 +271,117 @@ struct BRMHighlight
     caption::Union{Nothing,String}
     definition::StanBlocks.ModelDefinition
     closure::Tuple{Vararg{StanBlocks.ModelDefinition}}
+end
+
+"""
+    BRMHighlightSpec
+
+One requested highlight, before it is resolved against a model's Stan
+definitions. Build one with [`brm_highlight`](@ref); `brm_descriptor`
+normalizes every `highlights=` entry to this form.
+
+- `name` / `caption` — as for [`BRMHighlight`](@ref).
+- `signature` — the exact emitted Stan signature to select among overloads, or
+  `nothing` for a name that must resolve uniquely.
+- `optional` — when `true`, a program that defines no Stan function of this
+  name skips the entry instead of raising.
+
+`d.highlight_specs` keeps the descriptor's requests in order, with each
+resolved entry's signature filled in. `:replay` and `:reprocess` re-resolve
+them against the new program, so an optional entry absent from one fit is
+highlighted again on a replay that defines it.
+"""
+struct BRMHighlightSpec
+    name::Symbol
+    caption::Union{Nothing,String}
+    signature::Union{Nothing,String}
+    optional::Bool
+end
+
+"""
+    brm_highlight(name, caption=nothing; optional=false) -> BRMHighlightSpec
+
+A `highlights=` entry for [`brm_descriptor`](@ref). It mixes freely with bare
+names and `name => caption` pairs, which are required entries.
+
+With `optional=true` the entry is skipped when the fitted program defines no
+Stan function named `name`, for example a likelihood helper that only a
+conditioned response emits. A required entry still raises on an absent name,
+so a misspelt required name never disappears silently. A name selected twice
+raises whether or not either entry is optional.
+
+```julia
+d = brm_descriptor(sb; highlights=(
+    :pk_recurrence => "PK recurrence cell",
+    brm_highlight(:response_category_lpmfs, "Ordinal response model"; optional=true),
+))
+```
+"""
+brm_highlight(name::Union{Symbol,AbstractString},
+              caption::Union{Nothing,AbstractString}=nothing;
+              optional::Bool=false) =
+    BRMHighlightSpec(Symbol(name), isnothing(caption) ? nothing : String(caption),
+                     nothing, optional)
+
+# ---- consumer @slic submodels -----------------------------------------------
+
+"""
+    BRMSubmodel
+
+One consumer-authored StanBlocks `@slic` submodel that the emitted model
+inlines, such as the value a `_sb_submodel_rhs!` hook emits for
+`log_F ~ bioav_emax(op_log_dose)`. `d.submodels` lists them in emission order,
+including submodels called from inside another submodel or a plate cell.
+BRM's own building blocks (population effects, random effects, HSGP terms,
+configured prior templates) are not consumer submodels and are not listed.
+
+- `name` — the Julia binding the submodel value is defined under
+  (`:_sb_bioav_emax`), or `nothing` when the value has no module binding (an
+  unnamed `Base.merge` configuration).
+- `model` — the submodel value from the plan's retained snapshot: a
+  `StanBlocks.SlicModel`, or a `StanBlocks.SubmodelFn` for a named
+  `@slic f(args...) = body` submodel function.
+- `target` — the left-hand side the submodel is called for (`:log_F`).
+- `path` — the enclosing plate results and submodel targets, outermost first.
+  The submodel's own parameters are emitted as
+  `<join((path..., target), "_")>_<name>`.
+- `parent` — the index in `d.submodels` of the enclosing submodel, or `nothing`
+  when the model body calls it.
+- `trigger` — the formula statement that produced the call, rendered from the
+  parsed declaration (`"log_F ~ bioav_emax(op_log_dose)"`), or `nothing` for a
+  call that no top-level formula statement names (one inside a plate cell or
+  another submodel).
+- `declaration` — the call site, `target ~ <submodel>(...)`, as a
+  [`GenerativeDeclaration`](@ref).
+- `inputs` — the call site's keyword bindings, `declaration.keywords`. A named
+  submodel function takes its inputs positionally, in `declaration.arguments`.
+- `declarations` — the submodel's own `~` statements, with targets and
+  contexts relative to the submodel body.
+- `outputs` — the [`BRMOutput`](@ref)s emitted under the submodel's prefix:
+  its parameters and its deterministic internals. Outputs of a nested
+  submodel belong to that submodel's own entry. The call's returned value
+  (`target` itself) is not included.
+- `source` — the submodel body as Julia prints the value BRM lowers, one
+  statement per line. It is derived from the model that runs, so it cannot
+  drift from it; author comments and alignment are not kept. `nothing` for a
+  named submodel function, whose body is selected by dispatch at trace time
+  (its `declarations` are then empty too).
+
+`source` is a display listing of one submodel. It is not a re-evaluable export
+of the emitted model.
+"""
+struct BRMSubmodel
+    name::Union{Nothing,Symbol}
+    model::Any
+    target::Symbol
+    path::Tuple{Vararg{Symbol}}
+    parent::Union{Nothing,Int}
+    trigger::Union{Nothing,String}
+    declaration::GenerativeDeclaration
+    inputs::NamedTuple
+    declarations::Tuple{Vararg{GenerativeDeclaration}}
+    outputs::Tuple{Vararg{BRMOutput}}
+    source::Union{Nothing,String}
 end
 
 # ---- the descriptor ---------------------------------------------------------
@@ -288,12 +399,14 @@ Construct with [`brm_descriptor`](@ref).
 | `formula` | the canonical rendering of the parsed declaration (`show` of the `BRMI`). Not the literal characters you typed — it is *derived* from the declaration, so unlike a hand-kept `formula_src` string it cannot drift from the model that runs |
 | `plan` | the [`GenerativePlan`](@ref) — every emitted `~` site, in order |
 | `stan` | StanBlocks' `ModelDescriptor` for the same model, if you need the Stan-level view verbatim |
-| `highlights` | ordered caller-selected [`BRMHighlight`](@ref)s, resolved by stable name against `stan.definitions`; the full included-definition inventory remains on `stan` |
+| `highlights` | ordered caller-selected [`BRMHighlight`](@ref)s, resolved by stable name against `stan.definitions`; the full included-definition inventory remains on `stan`. An optional entry ([`brm_highlight`](@ref)) the program does not define is absent here |
 | `inputs` | `Tuple` of [`BRMInput`](@ref) — the data block plus its dataframe provenance |
 | `outputs` | `Tuple` of [`BRMOutput`](@ref) — everything the model produces, with BRM roles |
 | `operations` | `Tuple` of [`BRMOperation`](@ref) — derived, not listed |
 | `columns` | the dataframe columns the declaration reads. **This is the schema** a form should collect for a replay |
 | `unpredictable` | observation targets whose predictive draw the emitted Stan program does **not** produce. Empty in the ordinary case; see below |
+| `submodels` | `Tuple` of [`BRMSubmodel`](@ref) — the consumer `@slic` submodels the emitted model inlines, in emission order, with their call site, own declarations and outputs, and derived source |
+| `highlight_specs` | `Tuple` of [`BRMHighlightSpec`](@ref) — every requested highlight in order, resolved ones with their signature filled in; replay operations re-resolve these |
 
 `brm_columns(d)`, `brm_operation(d, name)`, `brm_execute(d, name; …)` are the
 accessors.
@@ -310,7 +423,19 @@ struct BRMDescriptor{P,S}
     operations::Tuple{Vararg{BRMOperation}}
     columns::Tuple{Vararg{Symbol}}
     unpredictable::Tuple{Vararg{Symbol}}
+    submodels::Tuple{Vararg{BRMSubmodel}}
+    highlight_specs::Tuple{Vararg{BRMHighlightSpec}}
 end
+
+# The positional constructor without the two trailing fields keeps compiling for
+# code that assembles a descriptor by hand; such a descriptor lists no
+# submodels and records its resolved highlights as required requests.
+BRMDescriptor(id, name, formula, plan, stan, highlights, inputs, outputs,
+              operations, columns, unpredictable) =
+    BRMDescriptor(id, name, formula, plan, stan, highlights, inputs, outputs,
+                  operations, columns, unpredictable, (),
+                  Tuple(BRMHighlightSpec(h.name, h.caption, h.definition.signature, false)
+                        for h in highlights))
 
 # ---- role derivation --------------------------------------------------------
 
@@ -437,31 +562,154 @@ _brm_joint_covariance_factors(brmi) = Symbol[
     if _brm_is_joint_covariance_factor(brmi, l.name)]
 
 _brm_highlight_spec(x::Union{Symbol,AbstractString}) =
-    (Symbol(x), nothing, nothing)
+    BRMHighlightSpec(Symbol(x), nothing, nothing, false)
 _brm_highlight_spec(x::Pair{<:Union{Symbol,AbstractString}}) =
-    (Symbol(first(x)), isnothing(last(x)) ? nothing : String(last(x)), nothing)
+    BRMHighlightSpec(Symbol(first(x)), isnothing(last(x)) ? nothing : String(last(x)),
+                     nothing, false)
 _brm_highlight_spec(x::BRMHighlight) =
-    (x.name, x.caption, x.definition.signature)
+    BRMHighlightSpec(x.name, x.caption, x.definition.signature, false)
+_brm_highlight_spec(x::BRMHighlightSpec) = x
 _brm_highlight_spec(x) = error(
     "brm_descriptor: each `highlights` entry must be a definition name, a " *
-    "`name => caption` pair, or a BRMHighlight; got $(repr(x)).")
+    "`name => caption` pair, a `brm_highlight(...)` spec, or a BRMHighlight; " *
+    "got $(repr(x)).")
 
+# Resolve the requested highlights against StanBlocks' definition inventory.
+# Returns the resolved highlights and the normalized requests (resolved ones
+# pinned to their emitted signature), which replay operations re-resolve.
+# Only an OPTIONAL request may name a function the program does not define;
+# every other lookup goes through `stan_definition`, which raises on an absent
+# or ambiguous name.
 function _brm_highlights(stan, specs)
-    entries = specs isa Union{Symbol,AbstractString,Pair,BRMHighlight} ?
+    entries = specs isa Union{Symbol,AbstractString,Pair,BRMHighlight,BRMHighlightSpec} ?
               (specs,) : specs
     selected = BRMHighlight[]
+    requested = BRMHighlightSpec[]
     seen = Set{Symbol}()
-    for spec in entries
-        name, caption, signature = _brm_highlight_spec(spec)
-        name in seen && error(
-            "brm_descriptor: definition `$name` is selected more than once in " *
+    for entry in entries
+        spec = _brm_highlight_spec(entry)
+        spec.name in seen && error(
+            "brm_descriptor: definition `$(spec.name)` is selected more than once in " *
             "`highlights`; each highlight must be unique.")
-        push!(seen, name)
-        definition = StanBlocks.stan_definition(stan, name; signature)
+        push!(seen, spec.name)
+        if spec.optional && !any(def -> def.name === spec.name, stan.definitions)
+            push!(requested, spec)
+            continue
+        end
+        definition = StanBlocks.stan_definition(stan, spec.name; spec.signature)
         closure = StanBlocks.stan_definition_closure(stan, definition)
-        push!(selected, BRMHighlight(name, caption, definition, closure))
+        push!(selected, BRMHighlight(spec.name, spec.caption, definition, closure))
+        push!(requested, BRMHighlightSpec(spec.name, spec.caption,
+                                          definition.signature, spec.optional))
     end
-    Tuple(selected)
+    Tuple(selected), Tuple(requested)
+end
+
+# Consumer submodels. A call-site head is a consumer submodel when it resolves
+# to a SLIC submodel value defined outside BRM: BRM's own building blocks and
+# the templates they configure keep this module as their namespace (the same
+# test `brm_description` applies to included submodels). BRM defines no named
+# submodel functions, so every `SubmodelFn` is a consumer's.
+_brm_consumer_submodel(f::StanBlocks.SlicModel) = f.mod !== @__MODULE__
+_brm_consumer_submodel(::StanBlocks.SubmodelFn) = true
+_brm_consumer_submodel(_) = false
+
+# The plan retains a COPY of a submodel value spliced into the emitted body, so
+# its module binding is found by content, not identity.
+_brm_same_submodel(a::StanBlocks.SlicModel, b::StanBlocks.SlicModel) =
+    a.mod === b.mod && isequal(a.model, b.model) && isequal(a.data, b.data) &&
+    isequal(a.observations, b.observations)
+_brm_same_submodel(a, b) = a === b
+
+_brm_submodel_name(head::Symbol, _value) = head
+_brm_submodel_name(head::GlobalRef, _value) = head.name
+_brm_submodel_name(_head, value) = _brm_bound_submodel_name(value)
+function _brm_bound_submodel_name(value::StanBlocks.SlicModel)
+    scope = value.mod
+    for name in names(scope; all=true)
+        isdefined(scope, name) || continue
+        bound = getfield(scope, name)
+        bound isa StanBlocks.SlicModel && _brm_same_submodel(bound, value) && return name
+    end
+    nothing
+end
+_brm_bound_submodel_name(_value) = nothing
+
+# The body as Julia prints it, one top-level statement per line, without
+# location nodes. Rendered from a copy: the retained snapshot stays untouched.
+function _brm_submodel_source(model::StanBlocks.SlicModel)
+    body = Base.remove_linenums!(_sb_plan_copy(model.model))
+    statements = Meta.isexpr(body, :block) ? body.args : Any[body]
+    join((sprint(print, statement) for statement in statements), "\n")
+end
+_brm_submodel_source(_) = nothing
+
+# A submodel's own `~` sites, collected exactly as the plan collects the model
+# body. Its keyword inputs and bound data are its data scope, so an observation
+# slot reads as an observation.
+function _brm_submodel_declarations(model::StanBlocks.SlicModel, inputs)
+    scope = Dict{Symbol,Symbol}(k => k for k in
+        Iterators.flatten((keys(inputs), keys(model.data))))
+    declarations = GenerativeDeclaration[]
+    _sb_plan_collect!(declarations, model.model, scope, (), Set{Symbol}(),
+                      Set{Symbol}(), Set())
+    Tuple(declarations)
+end
+_brm_submodel_declarations(_model, _inputs) = ()
+
+function _brm_submodels(plan, outputs)
+    entries = NamedTuple[]
+    function visit!(declaration, scope, path, parent_index, root, trigger, stack)
+        model = _brmd_binding(declaration.family, scope)
+        _brm_consumer_submodel(model) || return nothing
+        any(m -> _brm_same_submodel(m, model), stack) && error(
+            "brm_descriptor: submodel `$(declaration.family)` calls itself.")
+        inputs = declaration.keywords
+        own = _brm_submodel_declarations(model, inputs)
+        push!(entries, (; name=_brm_submodel_name(declaration.family, model), model,
+                          target=declaration.target, path, parent=parent_index, root,
+                          trigger, declaration, inputs, declarations=own,
+                          source=_brm_submodel_source(model)))
+        index = length(entries)
+        for inner in own
+            visit!(inner, model.mod, (path..., declaration.target, inner.context...),
+                   index, root, nothing, (stack..., model))
+        end
+        nothing
+    end
+    brmi = plan.parent
+    scope = plan.model.mod
+    for declaration in plan.declarations
+        _brm_consumer_submodel(_brmd_binding(declaration.family, scope)) || continue
+        trigger = isempty(declaration.context) &&
+                  haskey(brmi.operations, declaration.target) ?
+            sprint(_show_top, declaration.target,
+                   parent(brmi.operations[declaration.target])) : nothing
+        visit!(declaration, scope, declaration.context, nothing, declaration, trigger, ())
+    end
+    # `_brm_owner` already attributes every output under a call site's
+    # `<target>_` prefix to that top-level declaration (exact names first, so a
+    # sibling `<target>_scale ~ ...` keeps its own). Within one call chain an
+    # output belongs to the entry with the longest emitted prefix it carries,
+    # the same longest-prefix rule, so a nested submodel's outputs are listed
+    # only on its own entry. The returned `<target>` carrier matches no
+    # `<target>_` prefix, and a predictive or pointwise twin (`source` set)
+    # stays with its observation.
+    prefixes = [string(join((e.path..., e.target), "_"), "_") for e in entries]
+    owned = [BRMOutput[] for _ in entries]
+    for o in outputs
+        isnothing(o.source) && !isnothing(o.declaration) || continue
+        name = String(o.name)
+        best = nothing
+        for (i, e) in enumerate(entries)
+            e.root === o.declaration && startswith(name, prefixes[i]) || continue
+            (isnothing(best) || length(prefixes[i]) > length(prefixes[best])) && (best = i)
+        end
+        isnothing(best) || push!(owned[best], o)
+    end
+    Tuple(BRMSubmodel(e.name, e.model, e.target, Tuple(e.path), e.parent, e.trigger,
+                      e.declaration, e.inputs, e.declarations, Tuple(owned[i]), e.source)
+          for (i, e) in enumerate(entries))
 end
 
 # Label a population-effect output's elements, when BRM can. `popcoefnames`
@@ -907,10 +1155,13 @@ than fork the descriptor:
   * `nothing` **suppresses** a derived operation (hide a button the surface
     should not show).
 - `titles` — a `name => String` mapping relabelling any operation.
-- `highlights` — an ordered collection of included Stan definition names, or
-  `name => caption` pairs. Names resolve through StanBlocks' authoritative
-  definition inventory and fail closed when absent; order and captions are
-  presentation metadata only and do not change `d.id` or the executable model.
+- `highlights` — an ordered collection of included Stan definition names,
+  `name => caption` pairs, or [`brm_highlight`](@ref) specs. Names resolve
+  through StanBlocks' authoritative definition inventory and fail closed when
+  absent, except an entry built with `brm_highlight(...; optional=true)`, which
+  is skipped when the program defines no function of that name. Order and
+  captions are presentation metadata only and do not change `d.id` or the
+  executable model.
 
 Overriding a name the model does not offer is allowed (that is how you *add*
 one); suppressing a name that was never derived is a loud error, because it
@@ -931,8 +1182,10 @@ consumer that keys on names:
    errors and names the operations it *does* offer, so the discovery never
    moves into the consumer.
 4. **Suppressing an operation that was not derived** (see above).
-5. **Selecting an absent or duplicate Stan definition highlight.** BRM accepts
-   only names that StanBlocks reports in the executable definition inventory.
+5. **Selecting an absent required or a duplicate Stan definition highlight.**
+   BRM accepts only names that StanBlocks reports in the executable definition
+   inventory. Only an entry marked `optional=true` through
+   [`brm_highlight`](@ref) may be absent; it is then skipped.
 
 One case deliberately does **not** raise, because it is a legitimate model:
 an observation whose predictive draw the Stan program does not emit is
@@ -967,7 +1220,7 @@ end
 function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
     brmi = plan.parent
     semantics = _brm_descriptor_semantics(brmi)
-    highlights = _brm_highlights(stan, highlight_specs)
+    highlights, requested_highlights = _brm_highlights(stan, highlight_specs)
 
     # --- the dataframe columns this declaration reads -----------------------
     # `data_columns` covers every column the formula references as a bare
@@ -1147,7 +1400,8 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
 
     BRMDescriptor(stan.id, stan.name, _brm_descriptor_formula(brmi), plan, stan, highlights,
                   Tuple(inputs), Tuple(outputs), Tuple(ops), columns,
-                  Tuple(unpredictable))
+                  Tuple(unpredictable), _brm_submodels(plan, outputs),
+                  requested_highlights)
 end
 
 # Every operation StanBlocks derived, delegated verbatim, plus the two BRM-level
@@ -1197,13 +1451,13 @@ function _brm_derive_operations(plan, stan, outputs, columns)
     if !isnothing(plan.builder)
         push!(ops, BRMOperation(
             :replay, "Rebuild the declaration on a new dataframe", columns, (), :brm,
-            (d, new_df; highlights=d.highlights, kwargs...) -> brm_descriptor(
+            (d, new_df; highlights=d.highlight_specs, kwargs...) -> brm_descriptor(
                 generative_plan(d.plan, new_df); highlights, kwargs...)))
     end
     if _brm_reprocess_supported(plan, outputs)
         push!(ops, BRMOperation(
             :reprocess, "Re-run preprocessing on a new dataframe", columns, (), :brm,
-            (d, new_df; freeze_constants::Bool=true, highlights=d.highlights,
+            (d, new_df; freeze_constants::Bool=true, highlights=d.highlight_specs,
              resample_groups=(), kwargs...) -> brm_descriptor(
                 reprocess(d.plan, new_df; freeze_constants, resample_groups);
                 highlights, kwargs...)))
@@ -2308,14 +2562,19 @@ function brm_ranef_sd_coordinates(d::BRMDescriptor, logical::Symbol,
 end
 
 function _brm_ranef_sd_result(brmi, logical, id, coefficient, output, coordinate)
+    link = _brm_margin_link(brmi, logical)
+    (; logical, id, coefficient, output, coordinates=[coordinate],
+       link, inverse_link=InverseFunctions.inverse(link))
+end
+
+# The LHS link of a random-effect margin's linear predictor: the scale its
+# population location, between-group SD and per-level effects all live on.
+function _brm_margin_link(brmi, logical::Symbol)
     predictors = [lp for lp in linear_predictors(brmi) if lp.name === logical]
     length(predictors) == 1 || error(
         "brm_descriptor: margin predictor `$logical` resolves to " *
         "$(length(predictors)) linear predictors; expected exactly one.")
-    link = only(predictors).link_lhs_fn
-
-    (; logical, id, coefficient, output, coordinates=[coordinate],
-       link, inverse_link=InverseFunctions.inverse(link))
+    only(predictors).link_lhs_fn
 end
 
 # The exact total-coefficient columns that absorbed `|id|`, one per margin:
@@ -2463,6 +2722,10 @@ Base.show(io::IO, d::BRMDescriptor) = begin
     print(io, "  operations: ", join((op.name for op in d.operations), ", "), "\n")
     isempty(d.highlights) ||
         print(io, "  highlights: ", join((h.name for h in d.highlights), ", "), "\n")
+    isempty(d.submodels) ||
+        print(io, "  submodels:  ", join((string(something(s.name, "(unnamed)"), " (",
+                                                 join((s.path..., s.target), "_"), ")")
+                                          for s in d.submodels), ", "), "\n")
     isempty(d.unpredictable) ||
         print(io, "  no predictive draw for: ", join(d.unpredictable, ", "), "\n")
     for o in d.outputs

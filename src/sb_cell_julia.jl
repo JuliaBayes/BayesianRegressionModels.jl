@@ -129,10 +129,22 @@ function _sb_cell_family(x, scope)
     Expr(:call, head, args...)
 end
 
+# An unbound family token (`normal`) names the StanBlocks family of that name.
+function _sb_cell_family_binding(scope, head)
+    callable = _sb_cell_binding(scope, head)
+    callable === nothing && head isa Symbol && isdefined(StanBlocks, head) ?
+        getfield(StanBlocks, head) : callable
+end
+
 _sb_cell_statement(x, scope) = _sb_cell_value(x, scope)
 function _sb_cell_statement(x::Expr, scope)
     Meta.isexpr(x, :call, 3) && x.args[1] === :~ || return _sb_cell_value(x, scope)
-    Expr(:call, :~, x.args[2], _sb_cell_family(x.args[3], scope))
+    law = x.args[3]
+    if Meta.isexpr(law, :call) && first(law.args) === :weighted
+        law = _brm_cell_typed_weight(head -> _sb_cell_family_binding(scope, head),
+            law, "sbimpl"; normal=c -> c === Normal || c === StanBlocks.normal)
+    end
+    Expr(:call, :~, x.args[2], _sb_cell_family(law, scope))
 end
 
 _sb_cell_statements(statements, scope) =
