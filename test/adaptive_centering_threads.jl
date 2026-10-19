@@ -61,7 +61,8 @@ end
 
 # Ordinary + R2D2 + squared-exponential HSGP cells in one joint wrapper. Every
 # R2D2 term's log-scale carries a linear, a unit-interval and a simplex atom.
-function _joint_problem()
+# `scalar=true` appends twelve total/S2Z cells sharing three log-scales.
+function _joint_problem(; scalar=false)
     blocks, o = _ordinary_blocks()
     K, G = 3, 10
     reference, r2, simplex = o + 1, o + 2, collect(o + 3:o + 5)
@@ -78,8 +79,11 @@ function _joint_problem()
         [o + M + 1], [0.0], [Inf], o + M + 2, 0.0, Inf,
         reshape([(pi * j / 8)^2 for j in 1:M], M, 1), Float64[])
     d = o + M + 2
+    n = scalar ? 12 : 0
+    cells = (; indices=collect(d .+ (1:n)), scales=d + n .+ mod1.(1:n, 3),
+               locations=collect(range(-1, 1; length=12))[1:n], targets=zeros(n))
     _with_controls(AC_EXT._adaptive_joint_centering_reparametrizer(
-        blocks, [hsgp], [r2d2])..., d)
+        blocks, [hsgp], [r2d2], cells)..., d + (scalar ? n + 3 : 0))
 end
 
 function _s2z_problem()
@@ -122,6 +126,7 @@ function _scalar_problem()
 end
 
 const _CASES = ("ordinary" => _ordinary_problem, "joint" => _joint_problem,
+                "joint_scalar" => () -> _joint_problem(; scalar=true),
                 "s2z" => _s2z_problem, "hsgp" => _hsgp_problem,
                 "cdar" => _cdar_problem, "scalar" => _scalar_problem)
 

@@ -10,10 +10,15 @@
 # design and `src/s2z_kernel.jl` for the shared pure-Julia geometry.
 #
 # First scope (fail-closed outside it): scalar independent blocks
-# (`zero_correlation || single column`), one grouping structure per predictor,
+# (`zero_correlation || single column`), one S2Z grouping per predictor,
 # J >= 2 levels, fully matched square population design, Flat/Normal
 # population priors (no Student-t mixture yet), fixed scalar or per-coefficient
-# `rho`, no shared `|ID|` buckets, no stratified/cv/centered/totals overlap.
+# `rho`, no shared `|ID|` buckets (a bucket only this block uses is claimed,
+# its `sd(...)` prior kept), no stratified/cv/centered/totals overlap.
+# The predictor's other groupings (crossed or nested, `|ID|` buckets included)
+# and its direct terms (`hsgp`, categorical blocks, `mo`, offsets, ...) stay
+# ordinary additive terms: `X*beta + Z*b = X*theta + Z*r` holds whatever else
+# the linear predictor adds, so the S2Z block alone is reparameterised.
 #
 # `s2z_coordinates=:groups` samples J group coordinates per coefficient instead
 # of the J-1 contrasts: `s_j ~ N(0, tau^(2 c_j))`, `w = s ./ tau.^c` and
@@ -75,29 +80,48 @@ function _s2z_resolve_rho(rho, J::Int, K::Int, group::Symbol;
     weights
 end
 
-function _sb_s2z_plan(brmi, prepared, predictor, overrides, rho;
+# The grouping factor a declaration's block is indexed by; a multi-membership
+# block spans several columns and is never a sum-to-zero candidate.
+_s2z_declaration_group(d) = d.raw_group isa MultiMembershipTerm ? nothing :
+    name(d.descriptor isa Tuple ? first(d.descriptor) : d.descriptor)
+
+# Whether ranef term `t` belongs to the S2Z block of `group`: an unstratified
+# `(… | group)` declaration, its claimed `|ID|`, or one `g__nocor__k` margin of
+# its `(… || group)` split (every other declaration of `group` was refused).
+function _s2z_owns_term(t, group::Symbol)
+    _, _, desc = _sb_ranef_parts(t)
+    desc isa NamedColumn || return false
+    g = String(name(desc))
+    nocor = match(_RANEF_NOCOR_RE, g)
+    (isnothing(nocor) ? g : only(nocor.captures)) == String(group)
+end
+
+function _sb_s2z_plan(brmi, prepared, predictor, overrides, rho, requested;
+                      buckets=Dict(), sd_overrides=Dict(), ranef_r2d2_overrides=Dict(),
                       cv_groups, centered_groups, coordinates::Symbol=:contrasts)
     target = predictor.name
     declarations = filter(d -> d.predictor === target, prepared.context.group_declarations)
-    isempty(declarations) && return nothing
+    selected = unique(g for g in map(_s2z_declaration_group, declarations)
+                      if !isnothing(g) && g in requested)
+    isempty(selected) && return nothing
     group = nothing
     try
-        any(d -> d.raw_group isa MultiMembershipTerm || d.descriptor isa Tuple, declarations) &&
-            throw(ArgumentError("multi-membership or stratified blocks"))
-        plans = _brm_simple_random_effect_plans(brmi, target, prepared.context)
+        length(selected) == 1 || throw(ArgumentError(
+            "several sum-to-zero groupings ($(join(selected, ", "))) on one predictor"))
+        group = only(selected)
+        own = filter(d -> _s2z_declaration_group(d) === group, declarations)
+        any(d -> d.descriptor isa Tuple, own) && throw(ArgumentError("stratified blocks"))
+        plans = _brm_simple_random_effect_plans(brmi, target, prepared.context;
+            select=d -> _s2z_declaration_group(d) === group)
         isnothing(plans) && throw(ArgumentError("unresolved random-effect plans"))
-        group = first(plans).group
-        all(p -> p.group === group && (p.zero_correlation || length(p.columns) == 1), plans) ||
-            throw(ArgumentError("crossed, correlated or multi-group structure"))
+        all(p -> p.zero_correlation || length(p.columns) == 1, plans) ||
+            throw(ArgumentError("correlated block (write `||` or one column per term)"))
         group in cv_groups && throw(ArgumentError("`cv_groups` overlap"))
         group in centered_groups && throw(ArgumentError("`centered_groups` overlap"))
-        any(p -> !isnothing(p.id), plans) &&
-            throw(ArgumentError("shared `|ID|` buckets"))
         J = length(first(plans).levels)
         J >= 2 || throw(ArgumentError("J = 1 level (no contrast coordinates)"))
         pop, ran, direct = Any[], Any[], Any[]
         foreach(t -> _sb_classify_term!(t, pop, ran, direct), _sb_terms(predictor.expression))
-        isempty(direct) || throw(ArgumentError("direct terms"))
         design = _brm_population_design(target, Tuple(pop), prepared.context.data,
                                         get(prepared.context.target_obs, target, nothing))
         (isnothing(design) || isempty(design.columns) || !isempty(design.fixed_terms)) &&
@@ -140,8 +164,29 @@ function _sb_s2z_plan(brmi, prepared, predictor, overrides, rho;
         isnothing(frozen) || (B = copy(frozen.const_))
         prior_info = infos[absorbed]
         scale_priors = Any[]
-        for plan in plans, c in plan.columns
-            push!(scale_priors, isnothing(c.source) ? ExprColumn(LogNormal, 0., 1.) : nothing)
+        # `|ID|` buckets this block claims; emission drops them from the
+        # shared-bucket prepass, as for exact totals.
+        claimed = Any[]
+        for plan in plans
+            if isnothing(plan.id)
+                for c in plan.columns
+                    push!(scale_priors, isnothing(c.source) ? ExprColumn(LogNormal, 0., 1.) : nothing)
+                end
+                continue
+            end
+            keys_ = [key for (key, bucket) in buckets if first(key) === plan.id &&
+                     any(entry -> first(entry) === target, bucket.per_target)]
+            length(keys_) == 1 || throw(ArgumentError("unresolved `|$(plan.id)|` bucket"))
+            key = only(keys_)
+            length(buckets[key].per_target) == 1 || throw(ArgumentError(
+                "shared `|$(plan.id)|` bucket (it also serves another block)"))
+            haskey(ranef_r2d2_overrides, key) && throw(ArgumentError(
+                "`|$(plan.id)|` carries an R2D2 scale decomposition"))
+            sd = get(sd_overrides, key, nothing)
+            !isnothing(sd) && !isnothing(sd.dist) && throw(ArgumentError(
+                "Student-t `|$(plan.id)|` block (its per-level mixing has no S2Z form)"))
+            append!(scale_priors, isnothing(sd) ? fill(nothing, length(plan.columns)) : sd.sd_prior)
+            push!(claimed, key)
         end
         for prior in scale_priors
             isnothing(prior) && continue
@@ -154,19 +199,20 @@ function _sb_s2z_plan(brmi, prepared, predictor, overrides, rho;
         end
         weights = _s2z_resolve_rho(rho, J, K, group; coordinates)
         return (; target, group, columns, design, B, prior_info, scale_priors,
-                absorbed, remaining, weights, Z, coordinates,
+                absorbed, remaining, weights, Z, coordinates, claimed,
                 remaining_priors=all_priors[remaining],
                 indices=first(plans).indices, levels=first(plans).levels)
     catch err
         err isa ArgumentError || rethrow()
         label = isnothing(group) ? string(target) : "`$group`"
         throw(ArgumentError("sbimpl: S2Z is unavailable for group $label: $(err.msg); " *
-              "requires one independent Gaussian grouping structure with J >= 2, " *
+              "requires one independent Gaussian block of that grouping with J >= 2, " *
               "fully matched population design and supported priors"))
     end
 end
 
 Base.@nospecializeinfer function _sb_plan_s2zs(@nospecialize(brmi), prepared, overrides, selection, rho;
+                       buckets=Dict(), sd_overrides=Dict(), ranef_r2d2_overrides=Dict(),
                        cv_groups, centered_groups, coordinates::Symbol=:contrasts)
     coordinates in (:contrasts, :groups) || throw(ArgumentError(
         "s2z_coordinates must be :contrasts or :groups, got $(repr(coordinates))"))
@@ -183,11 +229,8 @@ Base.@nospecializeinfer function _sb_plan_s2zs(@nospecialize(brmi), prepared, ov
     end
     out = Dict{Symbol,Any}()
     for predictor in prepared.predictors
-        # Selection probe only; the throwing planner below gives the reason.
-        probe = _brm_simple_random_effect_plans(brmi, predictor.name, prepared.context)
-        (isnothing(probe) || isempty(probe)) && continue
-        any(p -> p.group in requested, probe) || continue
-        plan = _sb_s2z_plan(brmi, prepared, predictor, overrides, rho;
+        plan = _sb_s2z_plan(brmi, prepared, predictor, overrides, rho, requested;
+                            buckets, sd_overrides, ranef_r2d2_overrides,
                             cv_groups, centered_groups, coordinates)
         isnothing(plan) && continue
         out[predictor.name] = plan
@@ -195,8 +238,8 @@ Base.@nospecializeinfer function _sb_plan_s2zs(@nospecialize(brmi), prepared, ov
     missing = setdiff(requested, Set(p.group for p in values(out)))
     isempty(missing) || throw(ArgumentError(
         "S2Z requested for group(s) $(join(sort!(collect(missing)), ", ")) with no " *
-        "eligible predictor; requires one independent Gaussian grouping structure, " *
-        "matched population design and supported priors"))
+        "eligible predictor; requires one independent Gaussian block of that " *
+        "grouping, matched population design and supported priors"))
     out
 end
 
@@ -344,6 +387,9 @@ StanBlocks.@deffun begin
     end
 end
 
+# Emits the S2Z block plus the predictor's remaining population columns and
+# returns their summand `X*theta + Z*r (+ pop)`; `_sb_linear_predictor!` adds
+# the predictor's other terms and assigns the target.
 function _sb_emit_s2z!(stmts, data, target, plan; mod::Module=@__MODULE__)
     suffix = plan.target
     z = Symbol(plan.coordinates === :groups ? :s2z_level_ : :s2z_contrast_, suffix)
@@ -411,7 +457,6 @@ function _sb_emit_s2z!(stmts, data, target, plan; mod::Module=@__MODULE__)
                                  for c in plan.remaining))
         s2z_lp = :($s2z_lp + $pop)
     end
-    push!(stmts, :($target = $s2z_lp))
     block = S2ZEffectBlock(plan.target, plan.group, z, Symbol(tau, :_tau), theta, r, mu, b,
         idx, ng, Tuple(c.label for c in plan.columns),
         Tuple(plan.design.columns[c].label for c in plan.absorbed),
@@ -423,7 +468,7 @@ function _sb_emit_s2z!(stmts, data, target, plan; mod::Module=@__MODULE__)
         family=nothing, population_columns=block.population_columns)
     _sb_record_binding!(data, beta, :population_effect, plan.target)
     _sb_record_binding!(data, tau, :parameter, plan.target)
-    nothing
+    s2z_lp
 end
 
 function _s2z_coordinates(model, block, names)
