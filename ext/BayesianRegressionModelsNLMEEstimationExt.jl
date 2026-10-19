@@ -300,53 +300,38 @@ function _batch_eta(m::BRM.BRMNLMEModel, subjects,
 end
 
 # NLMEEstimation's generic batched population derivative expands a selected
-# η batch inside the differentiated function. For ragged subjects, that
-# allocation has no θ/σ derivative and Enzyme cannot compile its nested-vector
+# η batch inside the differentiated function. That allocation has no θ/σ
+# derivative, and for ragged subjects Enzyme cannot compile its nested-vector
 # mutation. Expand the constant η batch first, then differentiate only the
 # population coordinates through the one lockstep RK likelihood query.
-function _ragged_population_objective(x, m, subjects, full, ntheta)
-    values = BRM.brm_nlme_loglikelihoods(m, view(x, 1:ntheta),
-        view(x, ntheta+1:length(x)), full)
-    sum(values[subjects])
-end
-
-function NE._saem_population_value_gradient(::NE.BatchedEvaluation,
-        m::BRM.BRMNLMEModel, subjects, θ, σ,
-        H::AbstractVector{<:AbstractVector})
-    full = _batch_eta(m, subjects, H)
-    DI.value_and_gradient(_ragged_population_objective, NE.ad_backend(m), vcat(θ, σ),
-        DI.Constant(m), DI.Constant(subjects), DI.Constant(full),
-        DI.Constant(length(θ)))
-end
-
+#
 # Enzyme's argument lowering asserts on a large BRMNLMEModel passed as a
 # constant, even when the differentiated function only sums its active input.
 # Keep the differentiated batch context to the conditional-likelihood inputs.
-_flat_population_context(m::BRM.BRMNLMEModel) =
+_population_context(m::BRM.BRMNLMEModel) =
     (; unit=m.unit, theta=m.theta, sigma=m.sigma,
        subject_coordinates=m.view.subject_coordinates,
        nsubjects=length(m.view.levels), pointwise=m.pointwise,
        attribution=m.attribution)
 
-function _flat_population_objective(x, context, subjects, full, ntheta)
-    u = BRM._brm_nlme_flat_point(context.unit, context.theta, context.sigma,
+function _population_objective(x, context, subjects, full, ntheta)
+    u = BRM._brm_nlme_pack_point(context.unit, context.theta, context.sigma,
         context.subject_coordinates, view(x, 1:ntheta),
         view(x, ntheta+1:length(x)), full)
-    fields = BRM._rk_pointwise_values(context.pointwise, u)
-    values = zeros(Float64, context.nsubjects)
-    BRM._brm_nlme_sum_fields!(values, context.attribution, fields, Val(1))
+    values = BRM._brm_nlme_sum_by_subject(context.attribution, context.nsubjects,
+        BRM._rk_pointwise_values(context.pointwise, u))
     sum(values[subjects])
 end
 
 function NE._saem_population_value_gradient(::NE.BatchedEvaluation,
-        m::BRM.BRMNLMEModel, subjects, θ, σ, H::AbstractMatrix)
+        m::BRM.BRMNLMEModel, subjects, θ, σ, H)
     length(θ) == length(m.theta) || throw(DimensionMismatch(
         "θ has length $(length(θ)), expected $(length(m.theta))"))
     length(σ) == length(m.sigma) || throw(DimensionMismatch(
         "σ has length $(length(σ)), expected $(length(m.sigma))"))
     full = _batch_eta(m, subjects, H)
-    DI.value_and_gradient(_flat_population_objective, NE.ad_backend(m), vcat(θ, σ),
-        DI.Constant(_flat_population_context(m)), DI.Constant(subjects),
+    DI.value_and_gradient(_population_objective, NE.ad_backend(m), vcat(θ, σ),
+        DI.Constant(_population_context(m)), DI.Constant(subjects),
         DI.Constant(full), DI.Constant(length(θ)))
 end
 
