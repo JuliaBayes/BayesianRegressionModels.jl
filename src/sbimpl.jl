@@ -4911,7 +4911,15 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         push!(handled, e.const_.n_key)
         impute || (new_preproc[key] = e)
     elseif e.kind === :kernel_subject_count
-        if e.const_ isa NamedTuple && get(e.const_, :from_data_length, false)
+        if e.const_ isa NamedTuple && get(e.const_, :ragged_anchored, false)
+            # Ragged-anchored plate: the count is the number of distinct
+            # labels of the shared ragged grouping column.
+            col = _sb_df_column(df, e.raw_ref)
+            col isa AbstractVector || error(
+                "sbimpl: reprocess: kernel ragged grouping column " *
+                "`$(e.raw_ref)` must be a vector, got $(typeof(col))")
+            new_data[key] = length(_sb_kernel_outer_values(col, e.raw_ref))
+        elseif e.const_ isa NamedTuple && get(e.const_, :from_data_length, false)
             # No-random-effects panel: the subject count is the pre-grouped
             # per-subject column's length, not a unique-label count.
             col = _sb_df_column(df, e.raw_ref)
@@ -4927,8 +4935,15 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         new_preproc[key] = e
     elseif e.kind === :kernel_ragged
         arg_name, event_group, subject_group = e.raw_ref
-        subjects = _sb_kernel_subject_values(
-            _sb_df_column(df, subject_group), subject_group)
+        # A repeated subject label means a ragged-anchored plate, whose outer
+        # cells are the grouping column's distinct labels; the classic path
+        # (one unique label per subject row) keeps its strict validation.
+        subject_col = _sb_df_column(df, subject_group)
+        subject_vals = subject_col isa AbstractVector ?
+            collect(_sb_group_values(subject_col)) : Any[]
+        subjects = length(unique(subject_vals)) == length(subject_vals) ?
+            _sb_kernel_subject_values(subject_col, subject_group) :
+            _sb_kernel_outer_values(subject_col, subject_group)
         event_groups = _sb_df_column(df, event_group)
         event_groups isa AbstractVector || error(
             "sbimpl: reprocess: kernel event grouping column `$event_group` " *
@@ -5522,6 +5537,21 @@ _sb_subst_sym(x::Expr, from::Symbol, to) =
 # Nothing requires a subject's rows to be CONTIGUOUS, and nothing is reordered.
 _sb_kernel_subject_values(raw, group::Symbol) =
     _brm_kernel_subject_values(raw, group; prefix="sbimpl")
+
+# Outer-cell labels of a ragged-anchored plate: the distinct labels of its
+# shared grouping column, in first-appearance order. Used on reprocess, where
+# the grouping column lists one label per inner (event/facility) row rather
+# than one per cell.
+function _sb_kernel_outer_values(raw, group::Symbol)
+    raw isa AbstractVector || error(
+        "sbimpl: reprocess: kernel grouping column `$group` must be a " *
+        "vector, got $(typeof(raw))")
+    vals = collect(_sb_group_values(raw))
+    (!isempty(vals) && !any(ismissing, vals)) || error(
+        "sbimpl: reprocess: kernel grouping column `$group` must be " *
+        "non-empty with no missing labels.")
+    unique(vals)
+end
 _sb_kernel_ragged_partition(a_name, grp_name, ev_vals, subject_vals) =
     _brm_kernel_ragged_partition(a_name, grp_name, ev_vals, subject_vals; prefix="sbimpl")
 
@@ -5771,7 +5801,45 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     # rides on the subject frame the others, or the pre-grouped columns, define.
     lp_buckets = _sb_kernel_lp_buckets(lp_cols)
     grouped = [b for b in lp_buckets if b !== nothing]
-    if isempty(grouped)
+    if isempty(grouped) && !isempty(ragged_specs)
+        # Ragged-anchored plate: no per-cell LP carries a ranef bucket, but
+        # every `ragged(x, group)` positional names the same grouping column,
+        # whose distinct labels ARE the outer cells (a district total over
+        # facility predictors is the shape: cells are districts, the ragged
+        # view gathers each district's facilities). Outer order is the
+        # grouping column's first-appearance order; per-cell data columns
+        # (the totals) carry one entry per cell in that order.
+        grp_names = unique([name(spec[3]) for spec in ragged_specs])
+        length(grp_names) == 1 || error(
+            "sbimpl: kernel(...) `ragged(...)` positionals disagree on their ",
+            "grouping columns ($(grp_names)); a plate with no ranef linear ",
+            "predictor needs every `ragged(...)` to share one grouping ",
+            "column so its labels can anchor the cells.")
+        group_col = first(ragged_specs)[3]
+        (group_col isa NamedColumn && parent(group_col) isa DataColumn) || error(
+            "sbimpl: kernel(...) `ragged(...)` grouping must be a raw data ",
+            "column; got $(typeof(group_col)).")
+        grp_name = only(grp_names)
+        g_vals = unique(collect(_brm_group_values(parent(parent(group_col)))))
+        (!isempty(g_vals) && !any(ismissing, g_vals)) || error(
+            "sbimpl: kernel(...) ragged grouping column `$grp_name` must be ",
+            "a non-empty column with no missing labels.")
+        nsub = length(g_vals)
+        lp_names = Set(name(c) for c in lp_cols)
+        ragged_names = Set(spec[4] for spec in ragged_specs)
+        for k in kept_names
+            (k in lp_names || k in ragged_names || !haskey(data, k)) && continue
+            length(data[k]) == nsub || error(
+                "sbimpl: kernel(...) per-cell column `$k` has ",
+                "$(length(data[k])) entries for $nsub cells: the plate's ",
+                "cells are the distinct `$grp_name` labels ",
+                "(first-appearance order), so every per-cell data column ",
+                "must carry one entry per cell in that order.")
+        end
+        data[nsub_sym] = nsub
+        _sb_record_preproc!(data, nsub_sym, PreprocEntry(
+            :kernel_subject_count, (; ragged_anchored = true), grp_name, false))
+    elseif isempty(grouped)
         isempty(ragged_specs) || error(
             "sbimpl: kernel(...) `ragged(...)` needs a subject grouping to join its ",
             "event rows against, which a no-random-effects panel does not supply. ",
