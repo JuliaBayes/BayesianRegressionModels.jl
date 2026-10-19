@@ -505,24 +505,23 @@ end
     @test brm_output(d, :qt_obs; role=:posterior_predictive).name === :pred_qt_obs_gen
 end
 
-# A shared `|ID|` block whose marginal scales carry an explicit `sd(...)` prior
-# samples `tau` through the custom `@lpxf brm_ranef_sd` family. The ONE prior
-# spelling keeps the model identical and omits the response column: the
-# observation statement stays in the formula, binds no data, and StanBlocks
-# lowers the whole program to generated quantities (fixed_param), RE-DRAWING
-# every `tau` from `brm_ranef_sd_rng`. Without that predictive companion, trace
-# fails loudly at `stan_code` naming exactly this signature to add
-# (stanblocks-use §8/§34); this pins that it is present and the program empties
-# its `parameters` block.
+# A shared `|ID|` block whose marginal scales carry explicit `sd(...)` priors of
+# differing families samples `tau` through native per-family statements
+# (StanBlocks `vcat`). The ONE prior spelling keeps the model identical and
+# omits the response column: the observation statement stays in the formula,
+# binds no data, and StanBlocks lowers the whole program to generated
+# quantities (fixed_param), RE-DRAWING every `tau` coordinate from its own
+# family's RNG within the declared support. This pins those draws and that the
+# program empties its `parameters` block.
 #
 # This is NOT `held_out`: held-out observations keep their parameters SAMPLED
 # from their priors under NUTS (dimension > 0, covered by the mixed testset
 # above), and holding out every observation is refused. The fixed_param prior
 # is the same formula with the response column omitted.
 #
-# The whole-vector prior retains distinct half-Normal, Exponential, and
-# half-Normal(scale=2) coordinates. Its sized RNG draws the same vector in GQ.
-@testset "omitted response: shared |ID| sd() retains joint vector draws" begin
+# The vector prior retains distinct half-Normal, Exponential, and
+# half-Normal(scale=2) coordinates, and GQ draws each from its own family.
+@testset "omitted response: shared |ID| sd() redraws every margin" begin
     ranef_sd_df = (;
         x = [-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
         z = [0.3, -0.2, 0.5, -0.4, 0.1, 0.0],
@@ -530,7 +529,7 @@ end
     )
 
     # Fitted twin (the response column present): `tau` stays a SAMPLED
-    # parameter scored by the custom family's density in the model block.
+    # parameter scored by each coordinate's family in the model block.
     fitted = @brm begin
         eta ~ 1 + x + z + (1 + x + z | p | subject)
         sd(eta, p, x) ~ Exponential(1 / 3)
@@ -540,8 +539,10 @@ end
     end
     fitted_df = (; ranef_sd_df..., y = [-2.4, -2.2, -2.0, -1.8, -1.7, -1.5])
     fitted_code = BayesianRegressionModels.stan_code(SBBRMI(fitted(fitted_df); mod=@__MODULE__))
-    @test occursin(r"brm_vector_prior_[0-9a-f]+_lpdf", fitted_code)
-    @test occursin(r"~\s*brm_vector_prior_[0-9a-f]+\(", fitted_code)
+    @test occursin("b_p_subject_tau[1] ~ normal(0.0, 1.0);", fitted_code)
+    @test occursin("b_p_subject_tau[2] ~ exponential(3.0);", fitted_code)
+    @test occursin("b_p_subject_tau[3] ~ normal(0.0, 2.0);", fitted_code)
+    @test !occursin(r"brm_vector_prior_[0-9a-f]+", fitted_code)
 
     # Prior program: the IDENTICAL formula, the response column omitted.
     sb = @test_logs (:warn, r"unconditioned \(prior\) program") SBBRMI(
@@ -549,8 +550,10 @@ end
     @test StanBlocks.stan.transpiles(sb.model)
     prior_code = BayesianRegressionModels.stan_code(sb)
     @test StanBlocks.stanc_check(prior_code; warn_pedantic=false).ok
-    @test occursin(r"brm_vector_prior_[0-9a-f]+_vector_rng", prior_code)
-    @test !occursin(r"~\s*brm_vector_prior_[0-9a-f]+\(", prior_code)
+    @test occursin("b_p_subject_tau[1] = lower_conditioning_normal_rng(0.0, 0.0, 1.0);", prior_code)
+    @test occursin("b_p_subject_tau[2] = exponential_rng(3.0);", prior_code)
+    @test occursin("b_p_subject_tau[3] = lower_conditioning_normal_rng(0.0, 0.0, 2.0);", prior_code)
+    @test !occursin(r"brm_vector_prior_[0-9a-f]+", prior_code)
     # Every parameter, `tau` included, is a GQ draw -> the `parameters` block is
     # empty (the fixed_param program has zero sampler dimensions).
     @test occursin(r"parameters\s*\{\s*\}", prior_code)

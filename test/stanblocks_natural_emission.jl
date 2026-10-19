@@ -51,11 +51,12 @@ natural_df = (;
     end
     heterogeneous_code = BRM.stan_code(SBBRMI(heterogeneous; mod=@__MODULE__))
     @test StanBlocks.stanc_check(heterogeneous_code; warn_pedantic=false).ok
-    @test occursin(r"b_p_g_tau ~ brm_vector_prior_[0-9a-f]+", heterogeneous_code)
-    @test occursin("exponential_lpdf(x[1]", heterogeneous_code)
-    @test occursin("normal_lpdf(x[2]", heterogeneous_code)
-    # `tau` is declared `vector<lower=0.0>`, so a per-coordinate `< 0` guard in
-    # the mixed-family density could never fire.
+    # Differing builtin families are native per-family statements over one
+    # `vector<lower=0.0>` declaration (StanBlocks `vcat`), not a generated family.
+    @test occursin("vector<lower=0.0>[n_terms_p_g] b_p_g_tau;", heterogeneous_code)
+    @test occursin("b_p_g_tau[1] ~ exponential(0.5);", heterogeneous_code)
+    @test occursin("b_p_g_tau[2] ~ normal(0.0, 0.5);", heterogeneous_code)
+    @test !occursin(r"brm_vector_prior_[0-9a-f]+", heterogeneous_code)
     @test !occursin("negative_infinity()", heterogeneous_code)
 
     # One family with margin-specific hyperparameters stays one native
@@ -280,6 +281,64 @@ end
     normal_draws = natural_prior_tau_draws(normal_sb, "prior-normal")
     @test all(normal_draws .>= 0.0)
     @test vec(mean(normal_draws; dims=1)) ≈ sqrt(2 / pi) .* [1.0, 0.5] atol=0.15
+end
+
+@testset "mixed-family margins keep the generated family's law" begin
+    base = StanBlocks.@slic (; y=[0.2, -0.1, 0.4]) begin
+        theta::vector[3]
+        y ~ normal(theta, 1.0)
+    end
+    # (margins, positive): consecutive margins of one family and support form
+    # one `vcat` block; a family that recurs later starts a new block.
+    cases = (
+        scales=([BRM.ExprColumn(Exponential, 2.0), BRM.ExprColumn(Exponential, 0.5),
+                 BRM.ExprColumn(Normal, 0.0, 0.5)], true),
+        recurring=([BRM.ExprColumn(Normal, 0.0, 1.0), BRM.ExprColumn(Cauchy, 0.0, 2.0),
+                    BRM.ExprColumn(Normal, 0.5, 1.0)], false),
+        bounded=([BRM.ExprColumn(Normal, 0.0, 1.0), BRM.ExprColumn(Uniform, 0.2, 0.8),
+                  BRM.ExprColumn(Uniform, 0.3, 0.9)], false),
+    )
+    mkpath(NATURAL_EMISSION_CACHE)
+    for (label, (priors, positive)) in pairs(cases)
+        native = BRM._sb_native_vector_prior(:theta, priors, 3; positive)
+        @test !isnothing(native)
+        @test native.statement.args[3].args[1] === :vcat
+        family, args = BRM._sb_vector_prior_family(priors; positive, mod=@__MODULE__)
+        generated = Expr(:call, :~, :theta,
+            Expr(:call, family, Expr(:parameters, Expr(:kw, :n, 3)), args...))
+        native_code = StanBlocks.stan_code(Base.merge(base, native.statement))
+        @test StanBlocks.stanc_check(native_code; warn_pedantic=false).ok
+        @test !occursin(r"brm_vector_prior_[0-9a-f]+", native_code)
+        native_problem = StanBlocks.stan_instantiate(Base.merge(base, native.statement);
+            path=joinpath(NATURAL_EMISSION_CACHE, "native-mixed-$label.stan"))
+        generated_problem = StanBlocks.stan_instantiate(Base.merge(base, generated);
+            path=joinpath(NATURAL_EMISSION_CACHE, "generated-mixed-$label.stan"))
+        @test BS.param_unc_names(native_problem.model) ==
+              BS.param_unc_names(generated_problem.model) ==
+              ["theta.1", "theta.2", "theta.3"]
+        for q in ([-0.7, 0.4, 0.1], [0.0, 0.0, 0.0], [0.8, -0.2, -1.3])
+            @test BS.log_density(native_problem.model, q;
+                propto=false, jacobian=true) ≈
+                  BS.log_density(generated_problem.model, q;
+                      propto=false, jacobian=true) atol=1e-12
+        end
+    end
+
+    # Exponential intercept and half-Normal slope margins redraw through their
+    # own families inside the shared positive support.
+    prior = @brm (; x=natural_df.x, g=natural_df.g) begin
+        mu ~ 1 + x + (1 + x | p | g)
+        sd(:, p) ~ Exponential(2)
+        sd(mu, p, x) ~ Normal(0, 0.5)
+        y ~ Normal(mu, 1)
+    end
+    prior_sb = SBBRMI(prior; mod=@__MODULE__)
+    prior_code = BRM.stan_code(prior_sb)
+    @test StanBlocks.stanc_check(prior_code; warn_pedantic=false).ok
+    @test !occursin(r"brm_vector_prior_[0-9a-f]+", prior_code)
+    draws = natural_prior_tau_draws(prior_sb, "prior-mixed")
+    @test all(draws .>= 0.0)
+    @test vec(mean(draws; dims=1)) ≈ [2.0, 0.5 * sqrt(2 / pi)] atol=0.3
 end
 
 @testset "same-family coefficient margins redraw coordinatewise" begin

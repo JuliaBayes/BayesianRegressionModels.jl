@@ -147,8 +147,12 @@ end
     @test all(s -> s.term === Symbol("t2(x,z)"), specs)
 
     code = code_of(m)
-    # (rr, rn, nr) is the sampled order; the unmentioned `rn` keeps family 0.
-    @test occursin(r"t2_mu_x_z_sd_pen ~ brm_vector_prior_[0-9a-f]+", code)
+    # (rr, rn, nr) is the sampled order; the unmentioned `rn` keeps the
+    # default half-Normal, so the margins are native per-family statements.
+    @test occursin("t2_mu_x_z_sd_pen[1] ~ exponential(0.3333333333333333);", code)
+    @test occursin("t2_mu_x_z_sd_pen[2] ~ normal(0.0, 1.0);", code)
+    @test occursin("t2_mu_x_z_sd_pen[3] ~ exponential(2.0);", code)
+    @test !occursin("brm_vector_prior_", code)
     @test occursin("vector<lower=0.0>[3] t2_mu_x_z_sd_pen;", code)
     @test transpiles_and_stanc(m)
 end
@@ -274,8 +278,11 @@ end
     code = code_of(m)
     # mu takes the `:` default layer; nu's own statement is strictly more
     # specific and wins there.
-    @test occursin(r"t2_mu_x_z_sd_pen ~ brm_vector_prior_[0-9a-f]+", code)
-    @test occursin(r"t2_nu_x_z_sd_pen ~ brm_vector_prior_[0-9a-f]+", code)
+    @test occursin("t2_mu_x_z_sd_pen[1] ~ exponential(0.5);", code)
+    @test occursin("t2_nu_x_z_sd_pen[1] ~ exponential(0.125);", code)
+    @test occursin("t2_mu_x_z_sd_pen[2:3] ~ normal(0.0, 1.0);", code)
+    @test occursin("t2_nu_x_z_sd_pen[2:3] ~ normal(0.0, 1.0);", code)
+    @test !occursin("brm_vector_prior_", code)
     @test transpiles_and_stanc(m)
 end
 

@@ -243,9 +243,11 @@ as standardized deviations, are not inventoried.
 A vector prior whose coordinates carry different priors, such as tensor
 smoothing SDs configured per block, is a product of per-coordinate priors.
 That holds whether BRM emits one native vectorised statement (every coordinate
-in one family) or a generated family (mixed families). Each coordinate is a
-separate component bound to its actual scalar family, so a consumer-defined
-family remains an explicit gap until a hook covers that callable. One prior
+in one family), native per-family blocks laid end to end with `vcat` (builtin
+families that differ), or a generated family (custom or composed families).
+Each coordinate is a separate component bound to its actual scalar family, so a
+consumer-defined family remains an explicit gap until a hook covers that
+callable. One prior
 shared by every coordinate is described as that family. Sum-to-zero blocks
 still retain an explicit `brm_s2z_contrast` gap.
 

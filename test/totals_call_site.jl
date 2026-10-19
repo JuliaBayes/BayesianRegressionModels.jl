@@ -37,8 +37,10 @@ function build_radonlike()
 end
 
 # Two uncorrelated varying columns keep a mixed-family (LogNormal and
-# half-Normal) total-scale vector, so construction generates a vector-prior
-# family; a single shared family would lower to one native statement.
+# half-Normal) total-scale vector, which lowers to native per-family
+# statements. Totals admit only builtin scale families, so no generated
+# vector-prior family is involved; the direct trace must still agree with
+# BRM's entries in the constructing frame.
 builder = @brm begin
     sigma ~ Exponential(1)
     mu ~ 1 + floor + (1 + floor || county)
@@ -63,7 +65,9 @@ end
     infunc = build_and_trace_in_function(builder, data)
     @test infunc.src isa String
     @test !isempty(infunc.src)
-    @test occursin("brm_vector_prior_", infunc.src)
+    @test occursin("total_scale_mu_tau[1] ~ lognormal(0.0, 1.0);", infunc.src)
+    @test occursin("total_scale_mu_tau[2] ~ normal(0.0, 1.0);", infunc.src)
+    @test !occursin("brm_vector_prior_", infunc.src)
     @test infunc.traced isa StanBlocks.StanModel
     # Compile entry exists on the SBBRMI (same invokelatest pattern as the
     # trace entries; the C++ compile itself is covered by

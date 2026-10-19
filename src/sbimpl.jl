@@ -311,8 +311,11 @@ _sb_vector_prior_coordinates(family::StanBlocks.ValueFamily) =
 
 function _sb_vector_priors(base::StanBlocks.SlicModel, target::Symbol, priors;
                             mod::Module=base.mod)
+    declaration = only(node for node in base.model.args if node isa Expr &&
+        node.head === :(::) && node.args[1] === target)
     prior = _sb_vector_prior_statement(target, target, priors, length(priors);
-                                       positive=false, mod, scope=base.mod)
+                                       positive=false, mod, scope=base.mod,
+                                       declaration=deepcopy(declaration))
     Base.merge(base, prior.statement)
 end
 
@@ -338,37 +341,62 @@ function _sb_direct_vector_prior(target::Symbol, prior, nvalue; positive::Bool)
     (; statement=stmt, dependencies=sort!(collect(dependencies)))
 end
 
-# Margins of one StanBlocks builtin family with one shared support, but with
-# coordinate-specific hyperparameters, as a single native vectorised statement:
-# `target ~ exponential([1.5, 3.0, 5.0]; n=n, lower=0.0)`. Stan's univariate
-# builtins vectorise over their hyperparameters as well as their variate, so a
-# hyperparameter that differs across margins becomes a vector literal and one
-# shared by every margin stays scalar. `nothing` when any margin is custom or
-# composed, the families differ, or the margins' bounds differ (the
-# declaration carries a single bound); those keep the generated family.
-function _sb_native_vector_prior(target::Symbol, priors, nvalue; positive::Bool)
+# Margins that are all StanBlocks builtin univariate families, as native
+# statements. Stan's univariate builtins vectorise over their hyperparameters as
+# well as their variate, so each maximal run of consecutive margins sharing one
+# family and one support is one block whose differing hyperparameters are a
+# vector literal (a hyperparameter shared by the run stays scalar):
+# `target ~ exponential([1.5, 3.0, 5.0]; n=n, lower=0.0)`. Several runs are laid
+# end to end with StanBlocks' `vcat` prior family, which emits one statement per
+# block and folds every coordinate's support into the one declaration:
+# `target ~ vcat(exponential([1.5, 3.0]; lower=0.0), normal(0.0, 0.5; lower=0.0))`.
+# `nothing` when any margin is custom, composed or `flat`; those keep the
+# generated family. A `vcat` call names no size, so that statement's LHS
+# declares it: `declaration` (the target's existing typed declaration), else
+# `target::vector[nvalue]`, which keeps the plan's `dimension`.
+function _sb_native_vector_prior(target::Symbol, priors, nvalue; positive::Bool,
+                                 declaration=Expr(:(::), target, Expr(:ref, :vector, nvalue)))
     length(priors) > 1 || return nothing
     all(prior -> _brm_distribution_shape(prior) ==
             (Distributions.Univariate, Distributions.Continuous), priors) || return nothing
     calls, actuals, _, argkinds = _sb_vector_prior_parts(priors; positive)
-    reference = first(calls)
-    dist = reference.dist
-    dist isa Symbol && dist !== :flat && isdefined(StanBlocks, dist) || return nothing
-    all(==(:real), argkinds) || return nothing
-    all(c -> c.dist === dist && length(c.names) == length(reference.names) &&
-             isequal(c.lower, reference.lower) && isequal(c.upper, reference.upper),
+    all(c -> c.dist isa Symbol && c.dist !== :flat && isdefined(StanBlocks, c.dist),
         calls) || return nothing
-    k = length(reference.names)
-    args = map(1:k) do j
-        column = Any[actuals[(i - 1) * k + j] for i in eachindex(calls)]
-        allequal(column) ? first(column) : Expr(:vect, column...)
+    all(==(:real), argkinds) || return nothing
+    offsets = cumsum([0; [length(c.names) for c in calls]])
+    same_block(a, b) = a.dist === b.dist && length(a.names) == length(b.names) &&
+        isequal(a.lower, b.lower) && isequal(a.upper, b.upper)
+    runs = UnitRange{Int}[]
+    for i in eachindex(calls)
+        if !isempty(runs) && same_block(calls[last(last(runs))], calls[i])
+            runs[end] = first(runs[end]):i
+        else
+            push!(runs, i:i)
+        end
     end
-    kws = Any[Expr(:kw, :n, nvalue)]
-    isnothing(reference.lower) || push!(kws, Expr(:kw, :lower, reference.lower))
-    isnothing(reference.upper) || push!(kws, Expr(:kw, :upper, reference.upper))
+    blocks = map(runs) do run
+        reference = calls[first(run)]
+        args = map(eachindex(reference.names)) do j
+            column = Any[actuals[offsets[i] + j] for i in run]
+            allequal(column) ? first(column) : Expr(:vect, column...)
+        end
+        # One run covers the whole vector and is sized by the caller's `n`.
+        # A `vcat` block's length is its own: a vector-literal argument sizes
+        # it, otherwise `n` does, and a lone scalar call is one coordinate.
+        n = length(runs) == 1 ? nvalue :
+            length(run) > 1 && !any(a -> a isa Expr && a.head === :vect, args) ?
+                length(run) : nothing
+        kws = Any[]
+        isnothing(n) || push!(kws, Expr(:kw, :n, n))
+        isnothing(reference.lower) || push!(kws, Expr(:kw, :lower, reference.lower))
+        isnothing(reference.upper) || push!(kws, Expr(:kw, :upper, reference.upper))
+        isempty(kws) ? Expr(:call, reference.dist, args...) :
+            Expr(:call, reference.dist, Expr(:parameters, kws...), args...)
+    end
+    rhs = length(blocks) == 1 ? only(blocks) : Expr(:call, :vcat, blocks...)
     dependencies = Set{Symbol}()
     foreach(arg -> _sb_vector_prior_dependencies!(dependencies, arg), actuals)
-    (; statement=Expr(:call, :~, target, Expr(:call, dist, Expr(:parameters, kws...), args...)),
+    (; statement=Expr(:call, :~, length(blocks) == 1 ? target : declaration, rhs),
        dependencies=sort!(collect(dependencies)))
 end
 
@@ -376,13 +404,17 @@ end
 # is the default `Normal()` margin), and the model names its arguments read.
 # `positive` adds `lower=0` to every margin. `scope` is the module the
 # statement is traced in: a direct native family must resolve there.
+# `declaration` is the target's typed declaration in the merged base, if any.
 function _sb_vector_prior_statement(lhs, target::Symbol, priors, nvalue;
-                                    positive::Bool, mod::Module, scope::Module)
+                                    positive::Bool, mod::Module, scope::Module,
+                                    declaration=lhs isa Symbol ?
+                                        Expr(:(::), lhs, Expr(:ref, :vector, nvalue)) : lhs)
     priors = Any[isnothing(prior) ? ExprColumn(Normal) : prior for prior in priors]
     # Stan's native univariate families vectorise over their variate. When every
     # margin has the exact same mapped distribution, retain that natural Stan
-    # spelling instead of synthesising a coordinate-by-coordinate UDF. Custom,
-    # composed, or mixed-family priors keep the general generated-family path.
+    # spelling instead of synthesising a coordinate-by-coordinate UDF. Builtin
+    # margins that differ take native per-family blocks; custom, composed or
+    # flat margins keep the general generated-family path.
     # The direct statement only resolves families visible in `scope` (the
     # BRM-owned base for a merged submodel): a consumer-registered distribution
     # type (`_sb_stan_dist_name(::Type{<:MyPrior})`) whose StanBlocks family
@@ -398,7 +430,7 @@ function _sb_vector_prior_statement(lhs, target::Symbol, priors, nvalue;
             isnothing(direct) || return direct
         end
     end
-    native = _sb_native_vector_prior(target, priors, nvalue; positive)
+    native = _sb_native_vector_prior(target, priors, nvalue; positive, declaration)
     isnothing(native) || return native
     family, args = _sb_vector_prior_family(priors; positive, mod)
     # Intrinsic bounds belong to the value family, including when this

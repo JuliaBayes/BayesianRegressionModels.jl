@@ -218,15 +218,16 @@ end
     end
     @test_throws "equally specific" sbbrmi(tied)
 
-    # A per-level family that is not Normal takes the generated vector prior.
+    # A per-level family that is not Normal takes native per-family statements.
     heavy = @brm df begin
         mu ~ 0 + factor(patch)
         effect(mu, patch_lvl_1) ~ Cauchy(0, 1)
         y ~ Normal(mu, 1.0)
     end
     heavy_code = stan(heavy)
-    @test occursin(r"cat_mu_patch_beta ~ brm_vector_prior_[0-9a-f]+", heavy_code)
-    @test count("cauchy_lpdf(x[", heavy_code) == 1
+    @test occursin("cat_mu_patch_beta[1] ~ cauchy(0.0, 1.0);", heavy_code)
+    @test occursin("cat_mu_patch_beta[2:3] ~ normal(0.0, 1.0);", heavy_code)
+    @test !occursin("brm_vector_prior_", heavy_code)
     @test StanBlocks.stanc_check(heavy_code; warn_pedantic=false).ok
 
     # One non-Normal family on every level is one native statement.
