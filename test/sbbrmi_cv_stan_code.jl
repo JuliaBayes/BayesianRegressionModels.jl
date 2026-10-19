@@ -6,12 +6,16 @@ const BRM = BayesianRegressionModels
 #
 # A leave-all-out CV artifact is the emitted `SBBRMI.model` called with a
 # `maybecv`-marked group index. That value is a bare `StanBlocks.SlicModel`,
-# so consumers could not reach BRM's world-age-safe `stan_code` boundary and
-# had to call `StanBlocks.stan_code` directly. If the model registers a
-# generated `brm_vector_prior_*` family (here: a nine-margin correlated block
-# with mixed-family scale priors), that direct trace in the same compiled
-# caller dies with "... is missing `lpxf_expr`" even though the hook exists.
-# BRM's SLIC-model trace method is the missing call-site-independent seam.
+# so BRM provides a `stan_code` method for it as well as for `SBBRMI`.
+#
+# The snag was filed while lowering installed each generated
+# `brm_vector_prior_*` family (here: a nine-margin correlated block with
+# mixed-family scale priors) through `Core.eval`: a direct
+# `StanBlocks.stan_code` in the constructing frame could not see the fresh
+# methods and died with "... is missing `lpxf_expr`". Generated families are
+# now `StanBlocks.ValueFamily` values and construction installs no methods
+# (d10effe), so the direct trace and BRM's entry must both succeed in the
+# constructing frame and agree with a top-level trace.
 
 data = (; subject=[1, 1, 2, 2],
           y1=[-0.3, -0.1, 0.2, 0.4], y2=[-0.2, 0.0, 0.3, 0.5],
@@ -48,33 +52,27 @@ builder = @brm begin
 end
 
 # Order is load-bearing: this must be the first trace of this family shape in
-# the process, while the calling function's world age predates registration.
+# the process. A prior top-level trace populates `_SB_VECTOR_PRIOR_CACHE` and
+# would miss a cold-construction regression.
 function build_and_trace_cv(builder, data)
     sb = SBBRMI(builder(data); mod=@__MODULE__, cv_groups=[:subject])
     marked = copy(sb.data)
     marked[:subject_idx] = StanBlocks.stan.maybecv(
         :subject_idx, marked[:subject_idx])
     cv_model = sb.model(; subject_idx=marked[:subject_idx])
-    direct_error = try
-        StanBlocks.stan_code(cv_model)
-        nothing
-    catch e
-        sprint(showerror, e)
-    end
+    direct_source = StanBlocks.stan_code(cv_model)
     cv_source = BRM.stan_code(cv_model)
-    (; cv_model, direct_error, cv_source)
+    (; cv_model, direct_source, cv_source)
 end
 
-@testset "world-age-safe SLIC-model trace" begin
+@testset "call-site-independent SLIC-model trace" begin
     infunc = build_and_trace_cv(builder, data)
     @test infunc.cv_model isa StanBlocks.SlicModel
-    @test !isnothing(infunc.direct_error)
-    @test occursin("is missing `lpxf_expr`", infunc.direct_error)
+    @test infunc.direct_source == infunc.cv_source
     @test occursin("brm_vector_prior_", infunc.cv_source)
     @test occursin("subject_idx", infunc.cv_source)
 
-    # At top level (or in any frame compiled after registration), the same
-    # direct StanBlocks trace succeeds and is byte-identical to the BRM entry.
+    # A top-level trace of the same model is byte-identical.
     sb_top = SBBRMI(builder(data); mod=@__MODULE__, cv_groups=[:subject])
     marked_top = copy(sb_top.data)
     marked_top[:subject_idx] = StanBlocks.stan.maybecv(

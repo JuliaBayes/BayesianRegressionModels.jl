@@ -85,6 +85,64 @@ function _brm_kernel_ragged_partition(a_name::Symbol, grp_name::Symbol,
     rows
 end
 
+# `ragged(x, group)` or `ragged(x, group, cells)` — the kernel positional a
+# model-scope `ragged(x, group => cells)` lowers to.
+function _brm_kernel_ragged_args(c; prefix="BRM kernel preparation")
+    args = getargs(c)
+    length(args) in (2, 3) || error(
+        "$prefix: kernel(...) `ragged(...)` takes the thing to group, its grouping ",
+        "column and optionally the plate's cell label column — got ",
+        "$(length(args)) positional args.")
+    args
+end
+
+# The cell label column of a plate no random-effect linear predictor labels:
+# the `cells` of every `ragged(x, group => cells)` input. Its rows are the
+# cells, in row order, and each row of `x` joins its cell by its `group`
+# label. Without it the only order left is position — the first appearance of
+# `group`'s labels — which nothing can check against a per-cell column such
+# as district totals, so a differently ordered frame would bind to the wrong
+# cells silently (refused at the user's direction, 2026-10-19).
+function _brm_kernel_cell_label_column(ragged_cols; prefix="BRM kernel preparation")
+    unlabelled = [name(first(getargs(c))) for c in ragged_cols if length(getargs(c)) == 2]
+    isempty(unlabelled) || error(
+        "$prefix: kernel(...) `ragged(...)` input(s) ",
+        join(("`$n`" for n in unlabelled), ", "), " have no cell labels to join ",
+        "against: no per-cell linear predictor carries a random effect that would ",
+        "label the plate's cells. Name the cell label column at model scope — ",
+        "`ragged(x, group => cells)`, where `cells` lists each cell's label once, ",
+        "on the per-cell frame beside the per-cell data — so every row joins its ",
+        "cell by label. Matching rows to cells by position is refused: a per-cell ",
+        "column ordered differently from `group`'s first appearance would bind to ",
+        "the wrong cell without any error.")
+    cells = [getargs(c)[3] for c in ragged_cols]
+    names = unique(name.(cells))
+    length(names) == 1 || error(
+        "$prefix: kernel(...) `ragged(...)` inputs name different cell label ",
+        "columns (", join(("`$n`" for n in names), ", "), "); one plate has one ",
+        "set of cells.")
+    column = first(cells)
+    (column isa NamedColumn && parent(column) isa DataColumn) || error(
+        "$prefix: kernel(...) the cell label column must be a raw data column; ",
+        "got $(typeof(column)).")
+    column
+end
+
+# Under a random-effect linear predictor the cells are already labelled by its
+# grouping; a `ragged(x, group => cells)` must then name that same column.
+function _brm_kernel_check_cell_labels(ragged_cols, group::Symbol;
+                                       prefix="BRM kernel preparation")
+    for c in ragged_cols
+        args = getargs(c)
+        length(args) == 3 && name(args[3]) !== group || continue
+        error(
+            "$prefix: kernel(...) `ragged($(name(args[1])), $(name(args[2])) => ",
+            "$(name(args[3])))` labels the cells by `$(name(args[3]))`, but the ",
+            "plate's random-effect linear predictor already labels them by ",
+            "`$group`. Name `$group`, or drop `=> $(name(args[3]))`.")
+    end
+end
+
 function _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals;
                                  prefix="BRM kernel preparation",
                                  allow_unbound_observation=false)

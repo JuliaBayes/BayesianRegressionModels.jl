@@ -20,7 +20,9 @@ name is gensym-ed). The two-argument form bakes `df` in and returns the
   model-scope output, and bare assignments remain cell locals.
 - `ragged(events, subject)` — a model-scope statement declaring that the flat
   data column or formula name `events` is grouped by `subject`; `@plate for`
-  cells then read it as `events[i]`.
+  cells then read it as `events[i]`. `ragged(events, subject => cells)` also
+  names the cell label column `cells` that lists the plate's cells when no
+  random-effect predictor labels them.
 - `ragged(y, group) ~ rhs` — group a flat observed response at the formula
   boundary, aligned to the `kernel(...)` result referenced by `rhs`.
 - `effect(lp, coefficient) ~ Normal(location, scale)` — an SBBRMI
@@ -621,7 +623,7 @@ end
 parse!(x::Expr; info) = if x.head == :block
     Expr(:block, parse!.(x.args; info)...)
 elseif _is_brm_plate(x)
-    groupings = hasproperty(info, :groupings) ? info.groupings : Dict{Symbol,Symbol}()
+    groupings = hasproperty(info, :groupings) ? info.groupings : Dict{Symbol,Tuple{Vararg{Symbol}}}()
     grouped_reads = hasproperty(info, :grouped_reads) ? info.grouped_reads : Set{Symbol}()
     kernel, inbody_ragged = _brm_plate_kernel(x; groupings, grouped_reads)
     parsed = parse!(kernel; info)
@@ -721,30 +723,47 @@ _is_brm_plate(x) = Meta.isexpr(x, :macrocall) && !isempty(x.args) &&
 _is_brm_plate_grouping(x) = isxcall(x, :ragged)
 
 # Model-scope `ragged(x, group)` statements of one `@brm` block, keyed by `x`.
+# Each value is `(group,)`, or `(group, cells)` for `ragged(x, group => cells)`:
+# the cell label column `cells` lists the plate's cells, one label per row of
+# the cells' own frame, and `x`'s rows join to them by their `group` label.
 # Collected before parsing so a declaration may follow the cells that read it.
 function _brm_plate_groupings(x)
-    groupings = OrderedDict{Symbol,Symbol}()
+    groupings = OrderedDict{Symbol,Tuple{Vararg{Symbol}}}()
     function collect!(stmt)
         if Meta.isexpr(stmt, :block)
             foreach(collect!, stmt.args)
         elseif _is_brm_plate_grouping(stmt)
-            length(stmt.args) == 3 && stmt.args[2] isa Symbol &&
-                stmt.args[3] isa Symbol || error(
-                "@brm: a model-scope plate grouping is `ragged(x, group)` with a " *
-                "formula or data name `x` and a grouping data column `group`; " *
+            spec = length(stmt.args) == 3 && stmt.args[2] isa Symbol ?
+                _brm_plate_grouping_spec(stmt.args[3]) : nothing
+            spec === nothing && error(
+                "@brm: a model-scope plate grouping is `ragged(x, group)` or " *
+                "`ragged(x, group => cells)` with a formula or data name `x`, a " *
+                "grouping data column `group` and a cell label column `cells`; " *
                 "got `$(repr(stmt))`")
-            name, group = stmt.args[2], stmt.args[3]
-            name === group && error(
+            name = stmt.args[2]
+            name in spec && error(
                 "@brm: `$(repr(stmt))` groups `$name` by itself")
+            length(spec) == 2 && spec[1] === spec[2] && error(
+                "@brm: `$(repr(stmt))` matches `$(spec[1])` against itself; the " *
+                "cell label column lists each cell once, on the cells' own frame")
             haskey(groupings, name) && error(
                 "@brm: the plate grouping of `$name` is declared twice " *
-                "(`ragged($name, $(groupings[name]))` and `$(repr(stmt))`)")
-            groupings[name] = group
+                "(`$(_brm_plate_grouping_repr(name, groupings[name]))` and " *
+                "`$(repr(stmt))`)")
+            groupings[name] = spec
         end
     end
     collect!(x)
     groupings
 end
+
+_brm_plate_grouping_spec(group::Symbol) = (group,)
+_brm_plate_grouping_spec(x) =
+    Meta.isexpr(x, :call, 3) && x.args[1] === :(=>) &&
+    x.args[2] isa Symbol && x.args[3] isa Symbol ? (x.args[2], x.args[3]) : nothing
+
+_brm_plate_grouping_repr(name, spec) = length(spec) == 1 ?
+    "ragged($name, $(spec[1]))" : "ragged($name, $(spec[1]) => $(spec[2]))"
 
 # A declaration no cell reads would leave the author believing `x` is grouped
 # somewhere it is not, for example in a top-level likelihood.
@@ -784,9 +803,11 @@ end
 
 function _brm_plate_input_key(x)
     x isa Symbol && return (:column, x)
-    if isxcall(x, :ragged) && length(x.args) == 3 &&
-       x.args[2] isa Symbol && x.args[3] isa Symbol
-        return (:ragged, x.args[2], x.args[3])
+    # `ragged(x, group)`, or `ragged(x, group, cells)` lowered from a model-scope
+    # `ragged(x, group => cells)`.
+    if isxcall(x, :ragged) && length(x.args) in (3, 4) &&
+       all(arg -> arg isa Symbol, x.args[2:end])
+        return (:ragged, x.args[2:end]...)
     end
     error(
         "@brm: a kernel `@plate` slices formula and data names (`x[i]`); declare " *
@@ -869,7 +890,7 @@ function _brm_cell_without_result(statements)
     Any[statements[1:final-1]; statements[final+1:end]]
 end
 
-function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,Symbol}(),
+function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,Tuple{Vararg{Symbol}}}(),
                            grouped_reads=Set{Symbol}())
     i, range, body = _brm_plate_loop(x)
     stmts, outputs = _brm_plate_outputs(body, i)
@@ -908,13 +929,13 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,Symbol}(),
     function grouped(source)
         if source isa Symbol && haskey(groupings, source)
             push!(grouped_reads, source)
-            return Expr(:call, :ragged, source, groupings[source])
+            return Expr(:call, :ragged, source, groupings[source]...)
         elseif isxcall(source, :ragged)
             inbody_ragged = true
             name = length(source.args) >= 2 ? source.args[2] : nothing
             name isa Symbol && haskey(groupings, name) && error(
                 "@brm: `$name` is grouped at model scope by " *
-                "`ragged($name, $(groupings[name]))`; read it in the cell as " *
+                "`$(_brm_plate_grouping_repr(name, groupings[name]))`; read it in the cell as " *
                 "`$name[$i]`")
         end
         source
