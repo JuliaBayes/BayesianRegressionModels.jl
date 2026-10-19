@@ -123,6 +123,49 @@ end
     end
 end
 
+@stestset "a constant scales a population-effect prior on both backends" begin
+    calibrated = @brm begin
+        slope_scale = constant(2 * std(y))
+        sigma ~ Exponential(1)
+        mu ~ 1 + x
+        effect(mu, x) ~ Normal(0, slope_scale)
+        y ~ Normal(mu, sigma)
+    end
+    supplied_scale = @brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x
+        effect(mu, x) ~ Normal(0, slope_scale)
+        y ~ Normal(mu, sigma)
+    end
+    with_scale = merge(PANEL, (; slope_scale=2 * std(PANEL.y)))
+    sb = SBBRMI(calibrated(PANEL); mod=@__MODULE__, total_groups=())
+    @test stan_code(sb) == stan_code(SBBRMI(supplied_scale(with_scale); mod=@__MODULE__, total_groups=()))
+    @test stan_data(sb)[:slope_scale] == 2 * std(PANEL.y)
+    @test StanBlocks.stan.compiles(sb.model)
+    ad_backend = AutoEnzyme(; mode=Enzyme.Reverse)
+    rk = rk_logdensity_problem(RKBRMI(calibrated(PANEL)); ad_backend)
+    rk_supplied = rk_logdensity_problem(RKBRMI(supplied_scale(with_scale)); ad_backend)
+    literal_scale = eval(:(@brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x
+        effect(mu, x) ~ Normal(0, $(2 * std(PANEL.y)))
+        y ~ Normal(mu, sigma)
+    end))
+    rk_literal = rk_logdensity_problem(RKBRMI(literal_scale(PANEL)); ad_backend)
+    for u in (zeros(LogDensityProblems.dimension(rk)), fill(0.3, LogDensityProblems.dimension(rk)))
+        @test LogDensityProblems.logdensity(rk, u) == LogDensityProblems.logdensity(rk_supplied, u)
+        @test LogDensityProblems.logdensity(rk, u) ≈ LogDensityProblems.logdensity(rk_literal, u) atol=1e-12
+    end
+    # A sampled scale is still refused.
+    @test_throws "must be a numeric constant or a scalar data field" RKBRMI(@brm PANEL begin
+        slope_scale ~ Exponential(1)
+        sigma ~ Exponential(1)
+        mu ~ 1 + x
+        effect(mu, x) ~ Normal(0, slope_scale)
+        y ~ Normal(mu, sigma)
+    end)
+end
+
 @stestset "replay keeps fitted constants without their inputs" begin
     sb = SBBRMI(CALIBRATED(PANEL); mod=@__MODULE__, total_groups=())
     frozen = reprocess(sb, NO_CONC)
