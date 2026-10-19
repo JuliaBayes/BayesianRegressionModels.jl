@@ -36,14 +36,14 @@ function build_radonlike()
     (; log_radon=Float64.(log_radon), floor=Float64.(floor), county=county)
 end
 
-# Two independent varying columns, one with a composed scale prior, keep a
-# total-scale vector that construction lowers through a generated vector-prior
-# family; builtin margins alone, even of differing families, lower to native
-# statements.
+# Two uncorrelated varying columns keep a mixed-family (LogNormal and
+# half-Normal) total-scale vector, which lowers to native per-family
+# statements. Totals admit only builtin scale families, so no generated
+# vector-prior family is involved; the direct trace must still agree with
+# BRM's entries in the constructing frame.
 builder = @brm begin
     sigma ~ Exponential(1)
-    mu ~ 1 + floor + (1 | a | county) + (0 + floor | b | county)
-    sd(:, b) ~ truncated(TDist(3); lower=0.0)
+    mu ~ 1 + floor + (1 + floor || county)
     log_radon ~ Normal(mu, sigma)
 end
 
@@ -65,7 +65,9 @@ end
     infunc = build_and_trace_in_function(builder, data)
     @test infunc.src isa String
     @test !isempty(infunc.src)
-    @test occursin("brm_vector_prior_", infunc.src)
+    @test occursin("total_scale_mu_tau[1] ~ lognormal(0.0, 1.0);", infunc.src)
+    @test occursin("total_scale_mu_tau[2] ~ normal(0.0, 1.0);", infunc.src)
+    @test !occursin("brm_vector_prior_", infunc.src)
     @test infunc.traced isa StanBlocks.StanModel
     # Compile entry exists on the SBBRMI (same invokelatest pattern as the
     # trace entries; the C++ compile itself is covered by
