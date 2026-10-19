@@ -402,8 +402,10 @@ such as `independent` or `log-space` select focused blocks.
 native graph source. Unequal grouped responses, empty subjects, callable
 aliases, top-level assignments and in-cell calls retain normalized densities,
 all ordinary Reverse gradients, censoring and row order against independent
-oracles and compiled same-BRMI Stan. Complete printed source and artifact
-re-entry are included; a scalar native-location control is checked separately.
+oracles and compiled same-BRMI Stan. Per-location scales, in the cell and in a
+top-level ragged join (including a scale computed from parameters and per-row
+data), have the same checks. Complete printed source and artifact re-entry are
+included; a scalar native-location control is checked separately.
 
 `rk_r2d2_priors.jl` checks shared-margin R2D2M2 and joint population/contrast
 budgets through native RK execution. It compares absolute normalized densities,
