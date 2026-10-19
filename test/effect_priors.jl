@@ -201,6 +201,19 @@ end
     @test generic_output.role === :population_effect
     @test generic_output.labels == [:Intercept, :x]
 
+    # One family with coefficient-specific scales is one native statement.
+    same_family = @brm df begin
+        mu ~ 1 + x
+        effect(mu, :) ~ Cauchy(0, 1)
+        effect(mu, x) ~ Cauchy(0, 2)
+        y ~ Normal(mu, 1)
+    end
+    same_family_code = BayesianRegressionModels.stan_code(
+        SBBRMI(same_family; mod=@__MODULE__, total_groups=()))
+    @test occursin("pop_mu_beta_pop ~ cauchy(0.0, [1.0, 2.0]');", same_family_code)
+    @test !occursin("brm_vector_prior_", same_family_code)
+    @test StanBlocks.stanc_check(same_family_code; warn_pedantic=false).ok
+
     bounded_vector = @brm df begin
         mu ~ 1 + x
         effect(mu, :) ~ Uniform(0.2, 0.8)
@@ -209,7 +222,9 @@ end
     bounded_vector_code = BayesianRegressionModels.stan_code(
         SBBRMI(bounded_vector; mod=@__MODULE__, total_groups=()))
     @test occursin("vector<lower=0.2, upper=0.8>", bounded_vector_code)
-    @test occursin("uniform_lpdf(x[1] | arg_1, arg_2)", bounded_vector_code)
+    # One shared prior is one native statement on the bounded vector.
+    @test occursin("pop_mu_beta_pop ~ uniform(0.2, 0.8);", bounded_vector_code)
+    @test !occursin("brm_vector_prior_", bounded_vector_code)
     @test StanBlocks.stanc_check(bounded_vector_code; warn_pedantic=false).ok
 
     heterogeneous_bounds = @brm df begin
@@ -232,8 +247,9 @@ end
     end
     prior_only_sb = SBBRMI(prior_only; mod=@__MODULE__, total_groups=())
     prior_only_code = BayesianRegressionModels.stan_code(prior_only_sb)
-    @test occursin(r"pop_mu_beta_pop = brm_vector_prior_[0-9a-f]+_vector_rng",
-                   prior_only_code)
+    @test occursin(
+        "pop_mu_beta_pop = uniform_vector_rng(pop_mu_n_covariates, 0.2, 0.8);",
+        prior_only_code)
     if EFFECT_PRIOR_RUNTIME
         problem = StanBlocks.stan_instantiate(
             prior_only_sb.model;
@@ -717,8 +733,9 @@ end
     end
     generic_family_sb = SBBRMI(generic_family; mod=@__MODULE__, total_groups=())
     generic_family_code = BayesianRegressionModels.stan_code(generic_family_sb)
-    @test count("cauchy_lpdf(x[", generic_family_code) == 2
-    @test occursin(r"cat_mu_g_beta ~ brm_vector_prior_[0-9a-f]+", generic_family_code)
+    # One prior over every contrast is one native statement.
+    @test occursin("cat_mu_g_beta ~ cauchy(0, 1);", generic_family_code)
+    @test !occursin("brm_vector_prior_", generic_family_code)
     @test StanBlocks.stanc_check(generic_family_code; warn_pedantic=false).ok
 
     # A configured contrast block and a configured `beta_pop` coexist.

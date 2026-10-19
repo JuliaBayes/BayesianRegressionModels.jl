@@ -116,12 +116,9 @@ end
         sb_priors = SBBRMI(smooth_distributional_priors_model(df); mod=@__MODULE__)
         code = StanBlocks.stan_code(sb_priors.model)
         # Distributions.Exponential is scale-parameterized, Stan's is rate:
-        # Exponential(2) -> 0.5, Exponential(3) -> 1/3. The shared hash names
-        # the vector-prior template; the rate argument carries the value.
-        @test occursin(r"s_h_sd_pen ~ brm_vector_prior_[0-9a-f]+\(0\.5\);", code)
-        @test occursin(
-            r"s_log_alpha_h_sd_pen ~ brm_vector_prior_[0-9a-f]+\(0\.3333333333333333\);",
-            code)
+        # Exponential(2) -> 1/2, Exponential(3) -> 1/3, each smooth its own.
+        @test occursin("s_h_sd_pen ~ exponential((1.0 ./ 2));", code)
+        @test occursin("s_log_alpha_h_sd_pen ~ exponential((1.0 ./ 3));", code)
         @test StanBlocks.stan.transpiles(sb_priors.model)
         @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
     end

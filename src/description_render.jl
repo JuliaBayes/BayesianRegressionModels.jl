@@ -260,12 +260,10 @@ function _brmd_coordinate_math(c,x,coordinates)
     length(parts)==1 ? only(parts) : "\\left["*join(parts,";\\ ")*"\\right]"
 end
 function _brmd_distribution_math(c,x::BRMDescriptionComponent)
+    coordinates=_brmd_coordinates(x)
+    isempty(coordinates) || return _brmd_coordinate_math(c,x,coordinates)
     law = _brmd_law(x.callable)
-    if isnothing(law)
-        coordinates=_brmd_coordinates(x)
-        isempty(coordinates) || return _brmd_coordinate_math(c,x,coordinates)
-        return brm_description_math(c,x)
-    end
+    isnothing(law) && return brm_description_math(c,x)
     law===:affine && return "\\operatorname{LocationScale}("*
         brm_description_math(c,x.arguments[1])*","*brm_description_math(c,x.arguments[2])*","*
         _brmd_distribution_math(c,x.arguments[3])*")"
@@ -361,8 +359,12 @@ _brmd_term_call_math(::typeof(doublepipe),c,x) = _brmd_group_term_math(c,x)
 # Built-in semantic coverage is explicit. Unknown callable identities stay gaps.
 _brmd_builtin_call(_f,c) = begin
     law=_brmd_law(c.callable)
-    isnothing(law) ? nothing : BRMDescriptionFragment(covers=(c.id,))
+    isnothing(law) ? nothing : isempty(_brmd_coordinates(c)) ?
+        BRMDescriptionFragment(covers=(c.id,)) : _brmd_coordinatewise_fragment(c)
 end
+_brmd_coordinatewise_fragment(c)=BRMDescriptionFragment(
+    prose=("This vector prior is a product of independent per-coordinate priors. Each coordinate's actual family, arguments and bounds form a separately described component; the density applies on the declared support.",),
+    covers=(c.id,))
 for f in (+,-,*,/,^,exp,log,sqrt,logistic,log1pexp,abs,sum,cumsum,maximum,minimum,
           getindex,getproperty,identity,|,doublepipe,&,gr,offset,protect,factor,ragged,
           center,zscale,standardize)
@@ -371,8 +373,7 @@ end
 _brmd_builtin_call(::StanBlocks.SlicModel,c)=BRMDescriptionFragment(covers=(c.id,))
 # Only BRM-generated vector priors decompose; other value families stay gaps.
 _brmd_builtin_call(::StanBlocks.ValueFamily,c)=isempty(_brmd_coordinates(c)) ? nothing :
-    BRMDescriptionFragment(prose=("This vector prior is a product of independent per-coordinate priors. Each coordinate's actual family, arguments and bounds form a separately described component; the density applies on the declared support.",),
-        covers=(c.id,))
+    _brmd_coordinatewise_fragment(c)
 function _brmd_builtin_call(::typeof(mm),c)
     normalized=c.keywords.normalize
     weights=c.keywords.weights
