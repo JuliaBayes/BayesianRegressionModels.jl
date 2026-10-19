@@ -4966,6 +4966,10 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
                 "sbimpl: reprocess: kernel ragged source `$arg_name` has " *
                 "$(length(flat)) rows but grouping column `$event_group` has " *
                 "$(length(event_groups)); they must describe the same event axis.")
+            into = get(e.const_, :into, nothing)
+            isnothing(into) || (flat = _brm_kernel_rebase_index(
+                arg_name, flat, event_group, event_groups,
+                into, _sb_df_column(df, into); prefix="sbimpl: reprocess"))
             new_data[key] = [flat[r] for r in rows]
         end
         new_preproc[key] = e
@@ -5047,13 +5051,15 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         new_preproc[key] = e
     elseif e.kind === :observation_weight
         raw = _sb_df_column(df, e.raw_ref)
-        response = _sb_df_column(df, e.const_.response)
-        response isa AbstractVector || error(
+        # An omitted response has no values to match the weights against.
+        response = _sb_df_has_column(df, e.const_.response) ?
+            _sb_df_column(df, e.const_.response) : nothing
+        isnothing(response) || response isa AbstractVector || error(
             "sbimpl: reprocess: weighted response `$(e.const_.response)` must " *
             "be a vector, got $(typeof(response))")
         new_data[key] = _brm_prepare_observation_weight_values(
-            e.const_.kind, raw, length(response), e.const_.response, e.raw_ref;
-            prefix="sbimpl: reprocess")
+            e.const_.kind, raw, isnothing(response) ? nothing : length(response),
+            e.const_.response, e.raw_ref; prefix="sbimpl: reprocess")
         new_preproc[key] = e
     elseif e.kind === :interval_censored_predictor
         x_name, upper_name = e.raw_ref
@@ -5329,11 +5335,18 @@ _sb_emit_prepared!(stmts, data, _node, key, source; kwargs...) =
     _sb_emit!(stmts, data, key, source; kwargs...)
 function _sb_emit_prepared!(stmts, data, node::_BRMPreparedParameter, key, source; kwargs...)
     _, rhs = getargs(source, 2)
-    callable = getf(rhs)
+    _sb_emit_sampled_declaration!(stmts, data, key, getf(rhs), rhs)
+end
+function _sb_emit_sampled_declaration!(stmts, data, key, callable, rhs)
     _sb_emit_vector_prior!(stmts, data, key, callable, rhs) && return
     _sb_emit_prior!(stmts, key, callable, rhs) && return
     error("sbimpl: sampled declaration `$key` has no Stan prior translation for `$callable`")
 end
+# `weighted` wraps only observations, so a sampled `weighted` declaration is an
+# observation with its response omitted: it emits the weighted likelihood
+# statement, which StanBlocks forward-simulates from the fitted predictive law.
+_sb_emit_sampled_declaration!(stmts, data, key, ::typeof(weighted), rhs) =
+    _sb_likelihood!(stmts, key, rhs, data)
 function _sb_emit_prepared!(stmts, data, node::_BRMPreparedAssignment, key, source; kwargs...)
     _, rhs = getargs(source, 2)
     push!(stmts, :($key = $(_sb_scalar_expr(rhs, data))))
@@ -5727,7 +5740,8 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
                 "got a bare $(typeof(arg_col)).",
                 _sb_kernel_link_advice(arg_col))
             gath_sym = Symbol("kernel_", target, "_", name(arg_col), "_ragged")
-            push!(ragged_specs, (i, arg_col, grp_arg, gath_sym))
+            into = _brm_kernel_ragged_into(c; prefix="sbimpl")
+            push!(ragged_specs, (i, arg_col, grp_arg, gath_sym, into))
             push!(dcol_names, gath_sym)
             continue
         end
@@ -5888,9 +5902,15 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     # rather than its own. Wrapping it for the cell must not claim the flat
     # column: something else may name it on its own axis — `hsgp(log_dose)` over
     # the event frame, say — and that term registers it through its own path.
-    for (i, arg_col, grp_arg, gath_sym) in ragged_specs
+    for (i, arg_col, grp_arg, gath_sym, into) in ragged_specs
         rows, is_lp, is_unbound = _sb_kernel_ragged_rows(data, arg_col, grp_arg, g_vals;
             allow_unbound_observation=i in unbound_idx)
+        # An `into=` index column gathers its rebased positions, not its raw
+        # row numbers; the target's labels only join rows here.
+        flat = isnothing(into) ? nothing :
+            _brm_kernel_ragged_index_values(arg_col, grp_arg, into; prefix="sbimpl")
+        isnothing(into) || all(v -> v isa Real, parent(parent(into))) ||
+            pop!(data, name(into), nothing)
         # The grouping column fixes the omitted response's per-cell row axis,
         # but it supplies no observed values. Keep the response out of data and
         # out of the plate's sliced positionals so the in-cell `~` simulates it.
@@ -5902,12 +5922,12 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
             sliced = :($(name(arg_col))[$rows_param])
             body_stmts = Any[_sb_subst_sym(s, params[i], sliced) for s in body_stmts]
         else
-            flat = parent(parent(arg_col))
+            isnothing(flat) && (flat = parent(parent(arg_col)))
             gathered = [flat[r] for r in rows]
             data[gath_sym] = gathered
         end
         _sb_record_preproc!(data, gath_sym, PreprocEntry(
-            :kernel_ragged, (; is_lp),
+            :kernel_ragged, isnothing(into) ? (; is_lp) : (; is_lp, into=name(into)),
             (name(arg_col), name(grp_arg), name(group_col)), false))
     end
 
@@ -7370,19 +7390,32 @@ function _sb_shared_population_column!(data, column)
     column.label
 end
 
+# The intercept column's row extent. The design's row source names its axis, but
+# a raw categorical/string source never reaches Stan data — its emitted columns
+# are the derived level indicators — so `num_elements(<raw>)` would not resolve
+# (`slope ~ 1 + indication` with no other covariate). Every design column has the
+# design's row count, so an emitted numeric column sizes the intercept instead,
+# exactly as the legacy intercept tiers skip a string peer.
+function _sb_shared_population_extent(data, design::_BRMPopulationDesign)
+    source = design.row_source
+    row_value = data[source]
+    row_value isa Integer && !(row_value isa Bool) && return source
+    _sb_probe_is_live_numeric(data, source) && return :(num_elements($source))
+    for column in design.columns
+        isnothing(column.source) || return :(num_elements($(column.label)))
+    end
+    error("sbimpl: internal: predictor `$(design.target)` has no numeric column " *
+          "to size its intercept; row source `$source` is not numeric Stan data")
+end
+
 function _sb_shared_population_cols!(cols, data,
                                      design::_BRMPopulationDesign;
                                      intercept=nothing)
     for column in design.columns
         if isnothing(column.source)
-            if isnothing(intercept)
-                row_value = data[design.row_source]
-                row_extent = row_value isa Integer && !(row_value isa Bool) ?
-                    design.row_source : :(num_elements($(design.row_source)))
-                push!(cols, :(rep_vector(1.0, $row_extent)))
-            else
-                push!(cols, intercept)
-            end
+            push!(cols, isnothing(intercept) ?
+                :(rep_vector(1.0, $(_sb_shared_population_extent(data, design)))) :
+                intercept)
         else
             push!(cols, _sb_shared_population_column!(data, column))
         end
@@ -11628,12 +11661,20 @@ _sb_predictor_col(t::Int, data, _stmts, pop_terms=(); obs_n::Union{Symbol,Nothin
     #   2. The observation column threaded from the likelihood walker
     #      (`obs_n`). Covers purely-intercept formulas like `loc ~ 1` whose
     #      length matches the observed `~` target consuming `loc`.
+    #   2b. The per-row level index `<c>_idx` of a categorical peer whose raw
+    #      levels are not numeric (a string-leveled `CategoricalVector`), which
+    #      tier 1d's numeric guard rightly skips. Its own block emits that index
+    #      (`_sb_emit_cat!`) with this formula's row count, so a no-group-term
+    #      predictor such as `slope ~ 1 + indication`, read as `slope[i]` in a
+    #      plate, names its axis without a zero `offset(...)` witness (snag
+    #      `axis-witness-and-6a7991c9`). Ranked below 1c and 2 so every
+    #      program those tiers already size keeps its emitted extent.
     #   3. Hash-order fallback (`_sb_any_data_symbol`). Last resort; lossy
     #      for composite models with multi-length data and reachable only
-    #      when none of (1), (1b), (1d), (1c) or (2) yields a name — i.e. a
-    #      formula whose ONLY term is the intercept (no covariate of any kind,
-    #      no group term) and whose target no observed likelihood references.
-    #      A formula naming any live numeric data column resolves above.
+    #      when none of (1), (1b), (1d), (1c), (2) or (2b) yields a name — i.e.
+    #      a formula whose ONLY term is the intercept (no covariate of any
+    #      kind, no group term) and whose target no observed likelihood
+    #      references. A formula naming any data column resolves above.
     probe = _sb_n_obs_probe(pop_terms)
     # Tier 1a is unguarded: keep it only when it named a live numeric datum,
     # else fall through to the numeric-guarded tiers (a raw categorical/string
@@ -11644,6 +11685,7 @@ _sb_predictor_col(t::Int, data, _stmts, pop_terms=(); obs_n::Union{Symbol,Nothin
     isnothing(probe) && (probe = group_idx)
     isnothing(probe) && (probe = _sb_group_n_obs_probe(data, ran_terms))
     isnothing(probe) && !isnothing(obs_n) && (probe = obs_n)
+    isnothing(probe) && (probe = _sb_cat_index_probe(direct_terms))
     isnothing(probe) && (probe = _sb_any_data_symbol(data, target))
     probe_value = get(data, probe, nothing)
     extent = probe_value isa Integer && !(probe_value isa Bool) ?
@@ -12672,6 +12714,17 @@ _sb_n_obs_probe_deep(terms, data) = begin
     end
     nothing
 end
+# Tier 2b of the intercept length probe (see `_sb_predictor_col(::Int, …)`):
+# the per-row level index a categorical peer's own block emits. Named, not read:
+# `_sb_emit_cat!` writes `<c>_idx` when the direct terms are emitted, after
+# this probe runs, and StanBlocks resolves the extent at transpile time.
+_sb_cat_index_probe(direct_terms) = begin
+    for t in direct_terms
+        isnothing(_sb_cat_levels(t)) || return Symbol(name(t), :_idx)
+    end
+    nothing
+end
+
 _n_obs_name_deep(_t, _data) = nothing
 _n_obs_name_deep(t::NamedColumn, data) = begin
     parent(t) isa DataColumn || return nothing
@@ -12924,10 +12977,12 @@ function _sb_objective_weighted_likelihood!(stmts, target::Symbol,
     append!(stmts, translated)
 end
 
+# An omitted response (no `target` data) emits the same statement: StanBlocks
+# then forward-simulates it from the law the fitted predictive draw uses.
 function _sb_likelihood!(stmts, target::Symbol,
                          rhs::ExprColumn{typeof(weighted)}, data)
     response = get(data, target, nothing)
-    response isa AbstractVector || error(
+    isnothing(response) || response isa AbstractVector || error(
         "sbimpl: weighted response `$target` must be an observed vector, got " *
         "$(typeof(response))")
     plan = _brm_observation_weight_plan(
