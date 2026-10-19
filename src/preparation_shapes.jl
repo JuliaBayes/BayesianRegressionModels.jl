@@ -17,6 +17,10 @@ _brm_distribution_shape(::typeof(weighted), args) =
 
 _brm_prior_constructor(::typeof(truncated)) = true
 _brm_prior_constructor(::typeof(censored)) = true
+# A `weighted` observation whose response is omitted is a sampled declaration,
+# exactly as its unweighted base would be; a backend draws it from the law its
+# fitted predictive draw uses.
+_brm_prior_constructor(::typeof(weighted)) = true
 
 # This is a backend extension seam; the common program retains the marker and
 # its complete prior call until the concrete backend chooses its geometry.
