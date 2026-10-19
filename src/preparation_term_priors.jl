@@ -61,8 +61,8 @@ end
 # ---- keyword-qualified term addresses (decision 1fk9b29) --------------------
 #
 # Several terms over the same axes in one predictor share a term key. An
-# address may then name the term's literal keywords to pick one
-# (`length_scale(:, hsgp(x; cov=:periodic))`); its winning priors are stored
+# address may name the term's literal keywords to reach only the terms that
+# spell them (`length_scale(:, hsgp(x; cov=:periodic))`); its winning priors are stored
 # under the term's FULL key, which also spells every keyword, and every reader
 # looks that key up first. A predictor with one such term keeps the plain key.
 _brm_term_key_value(value::NamedColumn) = name(value)
@@ -195,35 +195,38 @@ Base.@nospecializeinfer function _brm_resolve_term_priors(@nospecialize(brmi::BR
     for spec in specs
         spelling = _brm_term_prior_spelling(spec)
         candidates = isnothing(spec.predictor) ? targets : [spec.predictor]
-        reached = [target for target in candidates
-                   if haskey(get(addresses, target, Dict()), spec.term)]
-        if isempty(reached)
+        carrying = [target for target in candidates
+                    if haskey(get(addresses, target, Dict()), spec.term)]
+        if isempty(carrying)
             location = isnothing(spec.predictor) ? "any linear predictor" : "`$(spec.predictor)`"
             error("$prefix: `$spelling` matches no `$(spec.term)` term in $location")
         end
+        # A qualified address reaches only the terms whose keywords agree.
+        qualifiers = get(spec, :qualifiers, (;))
+        matching(target) = filter(term -> _brm_term_matches_qualifiers(term, qualifiers),
+                                  addresses[target][spec.term])
+        reached = filter(target -> !isempty(matching(target)), carrying)
+        isempty(reached) && error(
+            "$prefix: `$spelling` matches none of the `$(spec.term)` terms in " *
+            join(("`$target`" for target in carrying), ", ") *
+            ": no such term spells those keyword values")
         for target in reached
             shared = addresses[target][spec.term]
-            qualifiers = get(spec, :qualifiers, (;))
-            terms = length(shared) > 1 && !isempty(qualifiers) ?
-                filter(term -> _brm_term_matches_qualifiers(term, qualifiers), shared) :
-                shared
-            isempty(terms) && error(
-                "$prefix: `$spelling` matches none of the $(length(shared)) " *
-                "`$(spec.term)` terms in `$target`")
+            terms = matching(target)
             length(terms) == 1 || error(
                 "$prefix: `$spelling` is ambiguous — `$target` carries $(length(terms)) " *
                 "terms spelled `$(spec.term)`; qualify the address with a keyword " *
                 "that tells them apart, as in `hsgp(x; cov=:periodic)`")
             term = only(terms)
             slot = _brm_resolve_term_slot(term, spec; prefix)
-            spec = _brm_floor_prior_spec(spec, term, slot, spelling)
+            resolved = _brm_floor_prior_spec(spec, term, slot, spelling)
             key = length(shared) > 1 ? _brm_term_full_key(term) : spec.term
             per_term = get!(get!(result, target, Dict{Symbol,Dict{Symbol,Any}}()),
                             key, Dict{Symbol,Any}())
             held = get(per_term, slot.name, nothing)
-            rank = _brm_term_prior_rank(spec)
+            rank = _brm_term_prior_rank(resolved)
             if isnothing(held) || rank > _brm_term_prior_rank(held.spec)
-                per_term[slot.name] = (; spec, term)
+                per_term[slot.name] = (; spec=resolved, term)
             elseif rank == _brm_term_prior_rank(held.spec)
                 error("$prefix: `$spelling` and `$(_brm_term_prior_spelling(held.spec))` " *
                       "are equally specific and both set the same parameter of `$(spec.term)` in `$target`")

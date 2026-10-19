@@ -171,6 +171,19 @@ function _brm_hsgp_anchor(kw, n_axes::Int)
     Tuple(Float64(v) for v in values)
 end
 
+# The anchor is evaluated on the basis, so it must lie inside a fixed
+# `domain=`; a data-derived interval is widened to contain it instead.
+function _brm_check_hsgp_anchor(domain_fits, anchor; prefix)
+    (isnothing(domain_fits) || isnothing(anchor)) && return nothing
+    for (j, value) in enumerate(anchor)
+        center, half_width = domain_fits[j]
+        abs(value - center) <= half_width || error(
+            "$prefix: `hsgp(...; anchor=...)` value $value on axis $j lies " *
+            "outside its fixed domain ($(center - half_width), $(center + half_width))")
+    end
+    nothing
+end
+
 # `rows=mask` names a Bool (or 0/1) data column: only those rows carry the
 # predictor. The basis interval and validity floor are fitted from them, and
 # every other row contributes 0 whatever value its axis holds.
@@ -185,6 +198,31 @@ function _brm_hsgp_row_mask(raw, n::Int, source)
     all(v -> v isa Bool || (v isa Real && (v == 0 || v == 1)), raw) || error(
         "sbimpl: `hsgp(...; rows=$source)` must hold Bool (or 0/1) values")
     BitVector(Bool.(raw))
+end
+
+# An axis's values as Float64. Rows outside a `rows=` mask carry no predictor
+# value, so they may hold `missing`; it reads as an inert 0.0, since their
+# basis rows are zeroed.
+_brm_axis_values(raw, ::Nothing, _label) = collect(Float64, raw)
+function _brm_axis_values(raw, mask::AbstractVector{Bool}, label)
+    length(raw) == length(mask) || error(
+        "$label has $(length(raw)) rows but its `rows=` mask has $(length(mask))")
+    map(raw, mask) do value, carried
+        ismissing(value) || return Float64(value)
+        carried && error(
+            "$label is missing in a row its `rows=` mask marks as carrying the predictor")
+        0.0
+    end
+end
+
+# The `rows=` mask of a raw-axis HSGP term: its source column and Bool rows.
+function _brm_hsgp_rows(kw, term, context)
+    column = _brm_hsgp_rows_column(kw)
+    isnothing(column) && return nothing
+    source, raw = _brm_term_data(:hsgp, column, context)
+    args = getargs(term)
+    n = isempty(args) ? 0 : length(last(_brm_term_data(:hsgp, first(args), context)))
+    (; source, mask=_brm_hsgp_row_mask(raw, n, source))
 end
 
 _brm_hsgp_masked_axes(axes::Tuple, mask::Nothing) = axes

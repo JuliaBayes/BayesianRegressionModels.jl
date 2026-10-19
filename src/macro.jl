@@ -1146,9 +1146,9 @@ _effect_address_symbol(x) = error(
 # of its identity. Keyword arguments are likewise not part of the identity --
 # `hsgp(x; k=20)` and `hsgp(x)` are the same term with different tuning. Their
 # literal values (symbols, numbers, numeric tuples) still ride in the key after
-# a `;`, as QUALIFIERS: when one predictor carries several terms over the same
-# axes, `hsgp(x; cov=:periodic)` picks the one whose keywords agree (decision
-# 1fk9b29). With a single such term they change nothing, as before.
+# a `;`, as QUALIFIERS: the address reaches only terms whose keywords agree, so
+# when one predictor carries several terms over the same axes,
+# `hsgp(x; cov=:periodic)` picks one of them (decision 1fk9b29).
 const _TERM_HEADS =
     (:s, :t2, :mo, :mo1, :me, :interval_censored, :gp, :hsgp, :ar, :dar, :rw, :cdar)
 

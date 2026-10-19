@@ -399,8 +399,8 @@ layer for every linear predictor carrying that term; a `Symbol` restricts it to
 one. `component` is `nothing` except for `sd(lp, t2(x, z), rr)`, where it names
 one of the tensor smooth's three penalty blocks. `qualifiers` holds the
 address's literal keyword values (`hsgp(x; cov=:periodic)` gives
-`(; cov=:periodic)`): they pick one of several same-axes terms on a predictor
-and are otherwise ignored.
+`(; cov=:periodic)`): the address reaches only terms whose keywords agree,
+which picks one of several same-axes terms on a predictor.
 
 Which parameter each class reaches:
 

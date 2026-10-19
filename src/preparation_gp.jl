@@ -10,14 +10,15 @@ _brm_term_prior_expressions(term::_BRMPreparedTerm{typeof(hsgp)}) =
 
 # `allow_empty` admits a zero-row axis for a basis that needs no data: an HSGP
 # with an explicit `domain=` or a periodic one (decision 1fk9b29).
-function _brm_gp_axes(term, context, label; allow_empty::Bool=false)
+function _brm_gp_axes(term, context, label; allow_empty::Bool=false, mask=nothing)
     args = getargs(term)
     isempty(args) && error("BRM term preparation: `$label` needs at least one axis")
     sources = Symbol[]
     axes = Vector{Vector{Float64}}()
     for arg in args
         source, raw = _brm_term_data(label, arg, context)
-        values = collect(Float64, raw)
+        values = _brm_axis_values(raw, mask,
+            "BRM term preparation: `$label` axis `$source`")
         isempty(values) && !allow_empty && error(
             "BRM term preparation: `$label` axis cannot be empty" *
             (label === :hsgp ? "; an HSGP over an axis that can be empty needs " *
@@ -157,20 +158,15 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
         return _BRMPreparedTerm(hsgp, (source,), state, (source,))
     end
     cov = _brm_gp_cov(kw, :hsgp)
+    options = _brm_hsgp_extended_options(kw, length(getargs(term)), cov)
+    (; extrapolate, anchor) = options
+    rows = _brm_hsgp_rows(kw, term, context)
+    mask = isnothing(rows) ? nothing : rows.mask
     sources, axes = _brm_gp_axes(term, context, :hsgp;
-        allow_empty=cov === :periodic || haskey(kw, :domain))
+        allow_empty=cov === :periodic || haskey(kw, :domain), mask)
     iso = _brm_gp_iso(kw, :hsgp)
     K, c = _brm_hsgp_options(kw, length(axes))
     period = _brm_gp_period(kw, :hsgp, cov)
-    options = _brm_hsgp_extended_options(kw, length(axes), cov)
-    (; extrapolate, anchor) = options
-    rows = if isnothing(options.rows)
-        nothing
-    else
-        source, raw = _brm_term_data(:hsgp, options.rows, context)
-        (; source, mask=_brm_hsgp_row_mask(raw, length(first(axes)), source))
-    end
-    mask = isnothing(rows) ? nothing : rows.mask
     fitted_axes = _brm_hsgp_masked_axes(axes, mask)
     by = get(kw, :by, nothing)
     by_state = if isnothing(by)
@@ -210,6 +206,7 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
         isnothing(domain_fits) ||
             _brm_check_hsgp_domain(domain_fits, fitted_axes;
                                    prefix="BRM term preparation")
+        _brm_check_hsgp_anchor(domain_fits, anchor; prefix="BRM term preparation")
         orthogonal = _brm_hsgp_orthogonal_to(kw, length(axes))
         basis = _brm_hsgp_basis_state(axes, K, cov, iso, period;
                                       fits, orthogonal, anchor, mask)
@@ -227,8 +224,11 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
     _BRMPreparedTerm(hsgp, sources, state, deps)
 end
 
-function _brm_replay_gp_axes(training, context, label; allow_empty::Bool=false)
-    axes = Tuple(collect(Float64, context.data[source]) for source in training.source)
+function _brm_replay_gp_axes(training, context, label; allow_empty::Bool=false,
+                             mask=nothing)
+    axes = Tuple(_brm_axis_values(context.data[source], mask,
+                     "BRM term replay: `$label` axis `$source`")
+                 for source in training.source)
     allow_empty || all(!isempty, axes) ||
         error("BRM term replay: `$label` axes cannot be empty")
     all(axis -> all(isfinite, axis), axes) || error(
@@ -251,12 +251,13 @@ function _brm_replay_term(::typeof(hsgp), training,
         hsgp, training.source, training.state, training.dependencies)
     st = training.state
     periodic = st.cov === :periodic
-    axes = _brm_replay_gp_axes(training, context, :hsgp;
-        allow_empty=periodic || get(st, :explicit_domain, false))
     rows = get(st, :rows, nothing)
     mask = isnothing(rows) ? nothing : _brm_hsgp_row_mask(
-        context.data[rows.source], length(first(axes)), rows.source)
+        context.data[rows.source], length(context.data[first(training.source)]),
+        rows.source)
     rows = isnothing(rows) ? nothing : merge(rows, (; mask))
+    axes = _brm_replay_gp_axes(training, context, :hsgp;
+        allow_empty=periodic || get(st, :explicit_domain, false), mask)
     anchor = get(st, :anchor, nothing)
     state = if periodic
         basis = _brm_hsgp_basis_state(axes, st.K, :periodic, true, st.period;

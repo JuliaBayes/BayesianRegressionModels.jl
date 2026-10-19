@@ -73,6 +73,14 @@ end
     @test any(occursin("uniform(rho_lower_hsgp_t_u, 30.0)", l)
               for l in stan_lines(anisotropic, "hsgp_t_u_rho"))
 
+    grouped = options_model(@brm(begin
+        mu ~ 1 + hsgp(t; k=4, by=g)
+        length_scale(:, hsgp(t)) ~ Uniform(length_scale_floor, 20.0)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end), merge(df, (; g=repeat(["a", "b"], 6))))
+    @test occursin("uniform(rho_lower_hsgp_t_by_g, 20.0)", BRM.stan_code(grouped))
+
     # refused: the marker names a length scale's floor (decision 1fk9b29)
     @test_throws "only valid in its own" options_model(@brm(begin
         mu ~ 1 + hsgp(t; k=5)
@@ -178,6 +186,12 @@ end
     end), merge(df, (; g=repeat(["a", "b"], 6))))
     @test all(iszero, options_data(grouped)[:PHI_hsgp_t_by_g][1, :])
 
+    # refused: a fixed domain is not widened, and past it the basis wraps
+    # around (decision 1fk9b29)
+    @test_throws "outside its fixed domain" options_model(@brm(begin
+        mu ~ 1 + hsgp(t; k=4, domain=(-1.0, 11.0), anchor=-4.0)
+        y ~ Normal(mu, 1)
+    end), df)
     # refused: the projection centers every basis column, so the term would
     # no longer vanish at the anchor (decision 1fk9b29)
     @test_throws "orthogonal_to=:linear" options_model(@brm(begin
@@ -207,6 +221,20 @@ end
     @test all(iszero, replay.data[:PHI_hsgp_t][2, :])
     @test_throws "outside the fitted basis interval" reprocess(
         masked, (; t=[500.0, 1.0], y=zeros(2), carried=[true, false]))
+    # Rows outside the mask may be missing; they contribute 0 all the same.
+    gaps = options_model(@brm(begin
+        mu ~ 1 + hsgp(t; k=5, rows=carried)
+        sigma ~ Exponential(1)
+        y ~ Normal(mu, sigma)
+    end), (; t=ifelse.(carried, df.t, missing), y=df.y, carried))
+    @test options_data(gaps)[:PHI_hsgp_t] ≈ PHI
+    @test BRM.stan_code(gaps) == BRM.stan_code(masked)
+    @test all(iszero, reprocess(gaps, (; t=[1.0, missing], y=zeros(2),
+                                       carried=[true, false])).data[:PHI_hsgp_t][2, :])
+    @test_throws "marks as carrying the predictor" options_model(@brm(begin
+        mu ~ 1 + hsgp(t; k=5, rows=carried)
+        y ~ Normal(mu, 1)
+    end), (; t=ifelse.(carried, missing, df.t), y=df.y, carried))
     # A 0/1 numeric mask is the same mask.
     numeric = options_model(@brm(begin
         mu ~ 1 + hsgp(t; k=5, rows=carried)
@@ -249,8 +277,10 @@ end
         mkpath(HSGP_OPTIONS_CACHE)
         problem = BRM.stan_instantiate(empty_domain;
             path=joinpath(HSGP_OPTIONS_CACHE, "empty.stan"))
+        # Nothing reads the empty term here, so StanBlocks draws its
+        # prior-only parameters in generated quantities.
         names = BridgeStan.param_unc_names(problem.model)
-        @test "hsgp_p_rho_iso" in names
+        @test "hsgp_p_rho_iso" in BridgeStan.param_names(problem.model; include_gq=true)
         @test isfinite(BridgeStan.log_density(problem.model, zeros(length(names))))
     end
 end
@@ -287,11 +317,16 @@ end
         length_scale(:, hsgp(t; k=7)) ~ Uniform(0.5, 10.0)
         y ~ Normal(mu, 1)
     end), df)
-    # With one such term a qualifier changes nothing, as before.
+    # A lone term must spell the qualifier too.
     lone = options_model(@brm(begin
+        mu ~ 1 + hsgp(t; k=5)
+        length_scale(:, hsgp(t; k=5)) ~ Uniform(0.5, 10.0)
+        y ~ Normal(mu, 1)
+    end), df)
+    @test occursin("uniform(0.5, 10.0)", BRM.stan_code(lone))
+    @test_throws "matches none" options_model(@brm(begin
         mu ~ 1 + hsgp(t; k=5)
         length_scale(:, hsgp(t; k=20)) ~ Uniform(0.5, 10.0)
         y ~ Normal(mu, 1)
     end), df)
-    @test occursin("uniform(0.5, 10.0)", BRM.stan_code(lone))
 end

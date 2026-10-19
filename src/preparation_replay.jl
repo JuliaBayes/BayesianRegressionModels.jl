@@ -175,7 +175,9 @@ function _brm_replay_preprocess(::Val{:hsgp}, entry, input::NamedTuple,
     iso = entry.const_.iso
     basis = _brm_hsgp_basis_state(evaluated, K, :exp_quad, iso, nothing;
         fits, orthogonal=orthogonal_to, anchor, mask)
-    updated = merge(entry.const_, (; fits, support))
+    # Only a clamping record keeps its support; others stay as they were fitted.
+    updated = haskey(entry.const_, :support) ?
+        merge(entry.const_, (; fits, support)) : merge(entry.const_, (; fits))
     _BRMPreprocessResult(
         (primary=basis.PHI, omega2=basis.omega2, rho_lower=basis.rho_lower),
         _BRMPreprocEntry(:hsgp, updated, entry.raw_ref, false))

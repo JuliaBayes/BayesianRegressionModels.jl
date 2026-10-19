@@ -2695,11 +2695,12 @@ end
 
 # The replay input of an HSGP record: its axes and, for a `rows=` term, the
 # replay data's mask column (decision 1fk9b29).
-function _sb_hsgp_replay_input(df, e, axes)
+function _sb_hsgp_replay_input(df, e; allow_empty::Bool)
     source = get(e.const_, :rows_source, nothing)
+    names = e.raw_ref isa Symbol ? (e.raw_ref,) : Tuple(e.raw_ref)
     mask = isnothing(source) ? nothing : _brm_hsgp_row_mask(
-        _sb_df_column(df, source), length(first(axes)), source)
-    (; axes, mask)
+        _sb_df_column(df, source), length(_sb_df_column(df, first(names))), source)
+    (; axes=_sb_gp_axes_from_df(df, e.raw_ref, :hsgp; allow_empty, mask), mask)
 end
 
 # GP input helpers. Both public terms accept one-or-more raw real-valued axes
@@ -2871,10 +2872,12 @@ _sb_rematerialize_vec(x, _df) = error(
 # the `@brm` builder uses), unwrapped to a plain vector. Errors if absent.
 const _sb_df_column = _brm_df_column
 
-function _sb_gp_axes_from_df(df, raw_ref, label::Symbol; allow_empty::Bool=false)
+function _sb_gp_axes_from_df(df, raw_ref, label::Symbol; allow_empty::Bool=false,
+                             mask=nothing)
     names = raw_ref isa Symbol ? (raw_ref,) : Tuple(raw_ref)
     axes = ntuple(length(names)) do j
-        v = collect(Float64, _sb_df_column(df, names[j]))
+        v = _brm_axis_values(_sb_df_column(df, names[j]), mask,
+                             "sbimpl: reprocess: `$label($(names[j]))`")
         isempty(v) && !allow_empty && error(
             "sbimpl: reprocess: `$label($(names[j]))` cannot use an empty axis")
         all(isfinite, v) || error(
@@ -4794,6 +4797,18 @@ function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool)
     _sb_mark_resample_groups(prepared, groups)
 end
 
+# The replay rows each masked-only HSGP axis carries (decision 1fk9b29); its
+# other rows may hold `missing`, which passes through as 0.0.
+function _sb_reprocess_masked_axes(sb::SBBRMI, df)
+    out = Dict{Symbol,BitVector}()
+    for (axis, (_, masks)) in _brm_masked_axis_refs(sb.parent)
+        _sb_df_has_column(df, axis) || continue
+        out[axis] = _brm_masked_axis_union(length(_sb_df_column(df, axis)),
+            [(name(m), _sb_df_column(df, name(m))) for m in masks])
+    end
+    out
+end
+
 function _sb_reprocess_data_value(sb::SBBRMI, key::Symbol, value)
     key in sb.held_out || return value
     raw = StanBlocks.getvalue(value)
@@ -5014,14 +5029,13 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         axes = _sb_gp_axes_from_df(df, e.raw_ref, :gp)
         replay_and_bind(axes, :primary => key)
     elseif e.kind === :hsgp && get(e.const_, :cov, :exp_quad) === :periodic
-        axes = _sb_gp_axes_from_df(df, e.raw_ref, :hsgp; allow_empty=true)
-        replay_and_bind(_sb_hsgp_replay_input(df, e, axes), :primary => key,
+        replay_and_bind(_sb_hsgp_replay_input(df, e; allow_empty=true), :primary => key,
                         :harmonics => e.const_.harmonics_key,
                         :rho_lower => e.const_.rho_lower_key)
     elseif e.kind === :hsgp
-        axes = _sb_gp_axes_from_df(df, e.raw_ref, :hsgp;
-            allow_empty=!isnothing(get(e.const_, :domain_fits, nothing)))
-        replay_and_bind(_sb_hsgp_replay_input(df, e, axes), :primary => key,
+        replay_and_bind(_sb_hsgp_replay_input(df, e;
+                            allow_empty=!isnothing(get(e.const_, :domain_fits, nothing))),
+                        :primary => key,
                         :omega2 => e.const_.omega2_key,
                         :rho_lower => e.const_.rho_lower_key)
     elseif e.kind === :categorical_outcome
@@ -5255,6 +5269,7 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
     end
     # 2. Account for every remaining old data key: pass-through raw columns, or
     #    frozen structural scalars; ERROR on any unaccounted derived structure.
+    masked = _sb_reprocess_masked_axes(sb, new_df)
     for (k, stored) in sb.data
         v = _sb_reprocess_data_value(sb, k, stored)
         k in handled && continue
@@ -5262,7 +5277,10 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
         has_column = _sb_df_has_column(new_df, k)
         if v isa AbstractVector
             if has_column
-                new_data[k] = _sb_df_column(new_df, k)   # pass-through (plain / me obs / ar time)
+                # pass-through (plain / me obs / ar time)
+                new_data[k] = haskey(masked, k) ? _brm_axis_values(
+                    _sb_df_column(new_df, k), masked[k], "sbimpl: reprocess: data column `$k`") :
+                    _sb_df_column(new_df, k)
             else
                 error(
                     "sbimpl: reprocess: data key `$k` is a derived vector with no ",
@@ -12035,6 +12053,7 @@ function _sb_hsgp_fit_for_emission(data, key, names, axes, K, c, iso,
     # had this lazy; `2e929f7` regressed it while threading in `domain_fits`.)
     if isnothing(frozen)
         _sb_hsgp_check_explicit_domain(domain_fits, fitted_axes)
+        _brm_check_hsgp_anchor(domain_fits, options.anchor; prefix="sbimpl")
         fits = isnothing(domain_fits) ?
             _brm_fit_hsgp(fitted_axes, K, c; anchor=options.anchor) : domain_fits
         return (; fits, support=_brm_hsgp_support(fitted_axes, fits), axes)
@@ -12071,6 +12090,12 @@ function _sb_hsgp_option_const(options, support)
     isnothing(options.rows) || (out = merge(out, (; rows_source=_sb_hsgp_rows_source(options))))
     out
 end
+
+# A raw HSGP axis as Float64; rows outside a `rows=` mask may be `missing`.
+_sb_hsgp_axis_values(name, raw, ::Nothing) =
+    collect(Float64, _sb_real_vec(:hsgp, name, raw))
+_sb_hsgp_axis_values(name, raw, mask::AbstractVector{Bool}) =
+    _brm_axis_values(raw, mask, "sbimpl: `hsgp($name)`")
 
 # The `rows=` mask of an HSGP term as a Bool vector over its `n` rows.
 function _sb_hsgp_mask(options, n::Int)
@@ -12166,8 +12191,9 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         return col_name
     end
 
+    mask = _sb_hsgp_mask(options, length(first(raw)))
     axes = ntuple(n_axes) do j
-        v = collect(Float64, _sb_real_vec(:hsgp, names[j], raw[j]))
+        v = _sb_hsgp_axis_values(names[j], raw[j], mask)
         # A basis with an explicit domain needs no data (decision 1fk9b29).
         isempty(v) && isnothing(domain_fits) && error(
             "sbimpl: `hsgp($(names[j]))` cannot use an empty axis; an HSGP " *
@@ -12180,7 +12206,6 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     n = length(first(axes))
     all(v -> length(v) == n, axes) || error(
         "sbimpl: `hsgp(x...)` axes must have equal lengths (got $(length.(axes)))")
-    mask = _sb_hsgp_mask(options, n)
 
     if haskey(kw, :by)
         partial && error(
@@ -12314,9 +12339,9 @@ function _sb_hsgp_periodic_term!(stmts, data, t, names, raw, is_raw, K, kw,
     x = only(names)
     # The periodic basis needs no data, so an empty axis is admitted: the term
     # keeps its parameters, prior-only (decision 1fk9b29).
-    axis = collect(Float64, _sb_real_vec(:hsgp, x, only(raw)))
+    mask = _sb_hsgp_mask(options, length(only(raw)))
+    axis = _sb_hsgp_axis_values(x, only(raw), mask)
     all(isfinite, axis) || error("sbimpl: `hsgp($x)` requires finite values")
-    mask = _sb_hsgp_mask(options, length(axis))
 
     # Carrier disambiguation follows the mainline `hsgp` path: the first
     # `hsgp(x; cov=:periodic)` keeps `hsgp_<x>`; a repeat over the same axis

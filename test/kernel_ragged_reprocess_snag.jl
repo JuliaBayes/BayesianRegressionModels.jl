@@ -112,9 +112,11 @@ end
     # constant even though its TRAINING domain was non-degenerate. Frozen
     # replay must evaluate that constant against the training basis; it must
     # not try to fit a new basis while constructing the CV template.
+    # 110 mg lies past the training doses (50, 100 mg) but inside the fitted
+    # basis interval; past that interval frozen replay refuses (decision 1fk9b29).
     new_population = merge(
         subj_df(; subs=["n1", "n2", "n3", "n4"]),
-        (; dose_amount_flat=fill(120.0, 8), log_dose=fill(log(120.0), 8)))
+        (; dose_amount_flat=fill(110.0, 8), log_dose=fill(log(110.0), 8)))
     resampled = reprocess(
         sb, new_population; resample_groups=[:subject])
     @test resampled.preproc[:subject_idx].const_.levels ==
@@ -130,10 +132,10 @@ end
           sb.data[:omega2_hsgp_log_dose]
 
     # Same-subject frozen replay was the pre-existing reference path. Its
-    # evaluation of 120 mg must agree with the new-population path above.
+    # evaluation of 110 mg must agree with the new-population path above.
     fitted_population = merge(
         subj_df(),
-        (; dose_amount_flat=fill(120.0, 6), log_dose=fill(log(120.0), 6)))
+        (; dose_amount_flat=fill(110.0, 6), log_dose=fill(log(110.0), 6)))
     fitted_replay = reprocess(sb, fitted_population)
     @test resampled.data[:PHI_hsgp_log_dose][1, :] ==
           fitted_replay.data[:PHI_hsgp_log_dose][1, :]
