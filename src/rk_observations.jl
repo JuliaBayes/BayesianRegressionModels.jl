@@ -61,6 +61,9 @@ _rk_plan_summary(plan::_RKHeldOutPlan) =
 # This barrier applies only to planning; emitted numerical kernels retain their
 # ordinary specialization and contain exactly the same source and data.
 Base.@nospecializeinfer function _brm_rk_plan(@nospecialize(brmi::BRMI); held_out=())
+    # A `constant(...)` becomes a named scalar data constant, which the graph
+    # holds as a number. RK has no replay, so it is always evaluated here.
+    brmi, _ = _brm_resolve_constants(brmi; prefix="RK backend")
     selected = _rk_held_out_selection(brmi, held_out)
     original = _brm_rk_unselected_plan(brmi)
     isempty(selected) ? original : _RKHeldOutPlan(original, selected)

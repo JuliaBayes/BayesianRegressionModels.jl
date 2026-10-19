@@ -217,6 +217,34 @@ end
     @test byname[:y_n].column === nothing
 end
 
+@testset "schema propagation — an exact-total basis names no column" begin
+    # The basis record carries the linear predictor it decomposes (`mu`), a
+    # model value: a replay form built from `brm_columns` must not ask for it.
+    totals_builder = @brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 | p | g)
+        y ~ Normal(mu, sigma)
+    end
+    auto = brm_descriptor(totals_builder, df; mod=@__MODULE__)
+    conventional = brm_descriptor(totals_builder, df; total_groups=(), mod=@__MODULE__)
+    basis = only(i for i in auto.inputs if i.transform === :total_basis)
+    @test basis.name === :total_A_mu
+    @test basis.column === nothing
+    @test brm_columns(auto) == brm_columns(conventional) == (:g, :x, :y)
+
+    s2z_builder = @brm begin
+        mu ~ 1 + (1 | g)
+        effect(mu, Intercept) ~ Normal(0, 5)
+        y ~ Normal(mu, 1)
+    end
+    s2z = brm_descriptor(SBBRMI(s2z_builder(df); mod=@__MODULE__,
+        s2z_groups=[:g], s2z_rho=0.5, total_groups=()))
+    basis = only(i for i in s2z.inputs if i.transform === :total_basis)
+    @test basis.name === :s2z_B_mu
+    @test basis.column === nothing
+    @test brm_columns(s2z) == (:g, :y)
+end
+
 @testset "generative semantics — BRM roles and labels" begin
     d = brm_descriptor(hier_builder, df; total_groups=(), mod=@__MODULE__)
     byname = Dict(o.name => o for o in d.outputs)

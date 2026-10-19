@@ -54,8 +54,11 @@ The last two are BRM's addition — the **schema link** back to the dataframe:
 - `transform` — the BRM preprocessing kind applied on the way (`:zscale`,
   `:center`, `:standardize`, `:factor`, `:mo`, `:spline`, `:gp`, `:hsgp`,
   `:static`, `:group_index`, `:ranef_factor_dummy`, `:multi_membership`, `:kernel_subject_count`,
-  `:kernel_ragged`, `:protect`),
-  or `nothing` when the column is passed through untransformed.
+  `:kernel_ragged`, `:protect`, `:constant`),
+  or `nothing` when the column is passed through untransformed. A
+  `name = constant(expr)` input has `transform = :constant` and no `column`:
+  replay keeps its fitted value, so a column only `expr` reads is not part of
+  the replay schema `brm_columns`.
 
 `column`/`transform` are read from the plan's `preproc` record and the BRMI's
 own data columns — they are never inferred from the input's *name*.
@@ -499,9 +502,16 @@ _brm_raw_column(x::Tuple) = begin
 end
 _brm_raw_column(_) = nothing
 
+# Most records name their source column(s) in `raw_ref`. An exact-total basis
+# (`total_A_<lp>`, and the S2Z `s2z_B_<lp>`) instead records the linear
+# predictor it decomposes — a model value, not a dataframe column.
+_brm_preproc_column(e::PreprocEntry) = _brm_preproc_column(Val(e.kind), e.raw_ref)
+_brm_preproc_column(::Val, raw_ref) = _brm_raw_column(raw_ref)
+_brm_preproc_column(::Val{:total_basis}, _) = nothing
+
 function _brm_input_schema(plan, key::Symbol, df_columns)
     e = get(plan.preproc, key, nothing)
-    isnothing(e) || return (_brm_raw_column(e.raw_ref), e.kind)
+    isnothing(e) || return (_brm_preproc_column(e), e.kind)
     key in df_columns && return (key, nothing)
     (nothing, nothing)
 end
