@@ -1067,7 +1067,24 @@ end
 # such carrier the uniqueness check fails and nothing is labelled, rather than
 # the wrong output being labelled — a missing label is a plain UI, a wrong label
 # is a lie about which covariate a posterior column belongs to.
-function _brm_label_population!(outputs, brmi, pop_lp)
+#
+# The labels are the emitted design's own: the binding `pop_<lp>` records its
+# columns in `beta_pop` order. `popcoefnames` re-derives them from the formula
+# and cannot name every emitted column (a plain `String` categorical's level
+# indicators, which only the shared design codes), so it labels a block only
+# when the emitter left no design record.
+_brm_population_design_columns(bindings, block::Symbol) =
+    let binding = get(bindings, block, nothing)
+        isnothing(binding) || !hasproperty(binding, :design_columns) ? nothing :
+            binding.design_columns
+    end
+
+function _brm_population_labels(bindings, brmi, block::Symbol, lp::Symbol)
+    columns = _brm_population_design_columns(bindings, block)
+    isnothing(columns) ? _brm_labels(brmi, lp) : Symbol[c.label for c in columns]
+end
+
+function _brm_label_population!(outputs, brmi, pop_lp, bindings)
     for (block, lp) in pop_lp
         # The coefficient vector is the block INTERNAL (`pop_<lp>_beta_pop`, whose
         # name differs from the block target); the block RESULT (`pop_<lp>`, name
@@ -1079,7 +1096,7 @@ function _brm_label_population!(outputs, brmi, pop_lp)
                   o -> o.role === :population_effect && !isnothing(o.declaration) &&
                        o.declaration.target === block && o.name !== block)
         length(idx) == 1 || continue
-        labels = _brm_labels(brmi, lp)
+        labels = _brm_population_labels(bindings, brmi, block, lp)
         isnothing(labels) && continue
         o = outputs[idx[1]]
         outputs[idx[1]] = BRMOutput(o.name, o.kind, o.type, o.size, o.constraints,
@@ -1371,7 +1388,7 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
                                  o.name in fresh_covariates ? o.name : get(logical_outputs, o.name, nothing), nothing,
                                  _brm_output_segments(o)))
     end
-    outputs = _brm_label_population!(outputs, brmi, pop_lp)
+    outputs = _brm_label_population!(outputs, brmi, pop_lp, plan.bindings)
     for i in eachindex(outputs)
         o = outputs[i]
         isnothing(o.declaration) && continue
@@ -2146,13 +2163,89 @@ function _brm_categorical_effect_coordinates(d::BRMDescriptor,
 
     coordinates = _brm_element_coordinates(output, constrained_names)
     expected_count = length(categorical.nonreference_levels)
-    cellmeans = categorical.coding === :cellmeans
     length(coordinates) == expected_count || error(
         "brm_descriptor: categorical address `$coefficient` on logical " *
         "predictor `$logical` owns $expected_count " *
-        (cellmeans ? "cell means" : "treatment contrasts") * " but " *
-        "resolves to $(length(coordinates)) constrained coordinates. " *
+        (categorical.coding === :cellmeans ? "cell means" : "treatment contrasts") *
+        " but resolves to $(length(coordinates)) constrained coordinates. " *
         "Re-reflect the model that produced the posterior draws.")
+    _brm_categorical_result(logical, coefficient, output, coordinates,
+                            categorical, entry)
+end
+
+# A plain `String` column has no contrast block: the shared design codes it into
+# level-indicator columns `<c>_lvl_<k>` of the predictor's own `beta_pop`, and
+# its column name addresses them all, as `effect(lp, c)` does. Returns the
+# claimed columns in carrier order, or `nothing` when `coefficient` is no such
+# block address. Level indicators are never absorbed by an exact-total block
+# (`_sb_total_plan` absorbs only untransformed or `protect` random-effect
+# columns), so they always sit in the conventional carrier.
+_brm_is_level_indicator(column) =
+    column.preprocess isa _BRMPopulationPreprocess &&
+    column.preprocess.kind === :population_factor_dummy
+
+function _brm_design_block_columns(d::BRMDescriptor, logical::Symbol,
+                                   coefficient::Symbol, entry)
+    bindings = hasproperty(d.plan, :bindings) ? d.plan.bindings : Dict()
+    columns = _brm_population_design_columns(bindings, entry.block)
+    isnothing(columns) && return nothing
+    claimed = [c for c in columns
+               if c.label !== coefficient && coefficient in c.effect_addresses &&
+                  _brm_is_level_indicator(c)]
+    isempty(claimed) && return nothing
+    blocks = unique(c.effect_block for c in claimed)
+    length(blocks) == 1 || error(
+        "brm_descriptor: categorical address `$coefficient` on logical " *
+        "predictor `$logical` claims the level columns of $(length(blocks)) " *
+        "design terms $(Tuple(blocks)); address one of them by its own name.")
+    claimed
+end
+
+function _brm_design_categorical_coordinates(d::BRMDescriptor, logical::Symbol,
+                                             coefficient::Symbol,
+                                             constrained_names, entry, columns)
+    idxs = _brm_carrier_indices(d.outputs,
+               o -> o.role === :population_effect && !isnothing(o.declaration) &&
+                    o.declaration.target === entry.block && o.name !== entry.block)
+    length(idxs) == 1 || error(
+        "brm_descriptor: categorical address `$coefficient` on logical " *
+        "predictor `$logical` resolves to population block `$(entry.block)`, " *
+        "which owns $(length(idxs)) parameter carriers; expected exactly one.")
+    output = d.outputs[only(idxs)]
+    labels = output.labels
+    isnothing(labels) && error(
+        "brm_descriptor: population carrier `$(output.name)` for logical " *
+        "predictor `$logical` has no coefficient labels; re-reflect the model " *
+        "that produced the posterior draws.")
+    all_coordinates = _brm_element_coordinates(output, constrained_names)
+    length(all_coordinates) == length(labels) || error(
+        "brm_descriptor: population carrier `$(output.name)` has " *
+        "$(length(labels)) coefficient labels but resolves to " *
+        "$(length(all_coordinates)) constrained coordinates. Re-reflect the " *
+        "model that produced the posterior draws.")
+    positions = map(columns) do c
+        p = findall(==(c.label), labels)
+        length(p) == 1 || error(
+            "brm_descriptor: level column `$(c.label)` of categorical address " *
+            "`$coefficient` occurs $(length(p)) times on population carrier " *
+            "`$(output.name)`; re-reflect the model.")
+        only(p)
+    end
+    # Treatment coding starts at level 2; cell means keep level 1.
+    cellmeans = first(columns).preprocess.const_.level == 1
+    categorical = (; predictor=first(columns).source,
+                     coding=cellmeans ? :cellmeans : :treatment,
+                     reference_level=cellmeans ? nothing :
+                         _brm_population_level_value(first(columns), 1),
+                     nonreference_levels=[_brm_population_level_value(c)
+                                          for c in columns])
+    _brm_categorical_result(logical, coefficient, output,
+                            all_coordinates[positions], categorical, entry)
+end
+
+function _brm_categorical_result(logical::Symbol, coefficient::Symbol, output,
+                                 coordinates, categorical, entry)
+    cellmeans = categorical.coding === :cellmeans
     # Treatment coding pairs every non-reference level with the reference;
     # cell-mean coding has no reference, so each level owns its coordinate.
     contrasts = cellmeans ? NamedTuple[] : [
@@ -2206,7 +2299,10 @@ reference: `reference_level === nothing`, `nonreference_levels` lists every
 level, `contrasts` is empty and `cells` pairs each level with its coordinate. For example, `coefficient=:indication` resolves
 the K-1 block in `log(Vc) ~ 1 + indication`; the block's emitted spelling stays
 private. A `factor(g; ref=3)` term remains addressable as `coefficient=:g` and
-reports the fitted reference and contrast order after recoding.
+reports the fitted reference and contrast order after recoding. A plain
+`Vector{String}` column has no contrast block of its own: its level columns sit
+in the predictor's population coefficient vector, so `output` is that carrier,
+but the result has the same shape and its levels are the column's strings.
 
 For `log(Vc) ~ 1 + weight`, ask for `logical=:Vc`. The returned intercept is on
 the log scale, `link === log`, and `inverse_link === exp`; the emitted
@@ -2271,6 +2367,9 @@ function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
             d, logical, coefficient, constrained_names, entry,
             categorical_block)
     end
+    design_block = _brm_design_block_columns(d, logical, coefficient, entry)
+    isnothing(design_block) || return _brm_design_categorical_coordinates(
+        d, logical, coefficient, constrained_names, entry, design_block)
 
     # The coefficient vector is the block INTERNAL (name !== target); the block
     # RESULT (name === target) is the linear-predictor value. `name !== block`
@@ -2335,8 +2434,13 @@ function brm_population_effect_coordinates(d::BRMDescriptor, logical::Symbol,
     # available labels too. Models without a total block for this predictor
     # report exactly the conventional set, as before.
     recovered_labels = Symbol[c for b in blocks for c in b.population_columns]
+    design_columns = _brm_population_design_columns(
+        hasproperty(d.plan, :bindings) ? d.plan.bindings : Dict(), entry.block)
+    design_blocks = isnothing(design_columns) ? Symbol[] :
+        sort!(unique!(Symbol[a for c in design_columns if _brm_is_level_indicator(c)
+                             for a in c.effect_addresses if a !== c.label]))
     available = unique!(vcat(copy(labels), sort!(collect(keys(categorical))),
-                             recovered_labels))
+                             design_blocks, recovered_labels))
     length(label_indices) == 1 || error(
         "brm_descriptor: coefficient `$coefficient` occurs $(length(label_indices)) " *
         "times on logical predictor `$logical`; available labels are " *
