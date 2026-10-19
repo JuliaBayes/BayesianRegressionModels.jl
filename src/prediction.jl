@@ -159,9 +159,12 @@ const _RANEF_FAMILIES = Dict{Symbol,NamedTuple}(
     # `b_T`; the collected storage is term-major (`matrix[K, G]`), so the
     # layout is `:term_group` (`<p>.<t>.<g>`) — NOT `:group_term`, which
     # spells `array[G] vector[K]` names that do not exist on this carrier
-    # (snag stratified-by-la-3d4f05a7).
-    :ranef_correlated_by       => (; z = :b_T_z_g, layout = :term_group,     noncentered = true,  tau = nothing, effects = :b),
-    :ranef_correlated_by_draws => (; z = :b_T_z_g, layout = :term_group,     noncentered = true,  tau = nothing, effects = :self),
+    # (snag stratified-by-la-3d4f05a7). There is no per-block `tau`: each
+    # stratum has its own, the columns of `stratum_tau` (`matrix[K, n_strata]`),
+    # and its own correlation factor `stratum_L` (`array[n_strata]
+    # cholesky_factor_corr[K]`).
+    :ranef_correlated_by       => (; z = :b_T_z_g, layout = :term_group,     noncentered = true,  tau = nothing, effects = :b,    stratum_tau = :tau_s, stratum_L = :L_s),
+    :ranef_correlated_by_draws => (; z = :b_T_z_g, layout = :term_group,     noncentered = true,  tau = nothing, effects = :self, stratum_tau = :tau_s, stratum_L = :L_s),
     # Centered emissions — the opt-in `SBBRMI(...; centered_groups = [:g])` path,
     # which SHIPS. The coordinate is the effect ITSELF (unconstrained, so the
     # unconstrained value IS the effect): `population_draws` zeroes it, which is

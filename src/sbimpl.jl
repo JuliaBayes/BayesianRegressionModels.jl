@@ -3757,7 +3757,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
         "offending column(s) before building the model — e.g. `lower`/`upper` -> ",
         "`y_lower`/`y_upper` for interval-censored endpoints.")
     body = Expr(:block, stmts...)
-    model = StanBlocks.SlicModel(body, data, mod, _sb_declared_observations(body, data, brmi))
+    model = StanBlocks.SlicModel(body, data, mod, _sb_declared_observations(body, data, brmi, mod))
     sb = SBBRMI(source_parent, model, data, preproc, Set{Symbol}(), bindings)
     triage = _sb_observation_triage(sb)
     # The activity probe's own build: no warnings, no held-out marks.
@@ -3796,7 +3796,7 @@ end
 # resolve with the same role logic the plan itself uses; synthesized latents
 # (`total`, `tau`, LKJ factors) never match and stay priors.
 Base.@nospecializeinfer function _sb_observation_triage(@nospecialize(sb::SBBRMI))
-    declarations = _sb_plan_declarations(sb.model.model, sb.data, sb.parent)
+    declarations = _sb_plan_declarations(sb.model.model, sb.data, sb.parent, sb.model.mod)
     missing_sources = Set{Symbol}()
     fresh_sources = _sb_existing_covariates(sb.preproc)
     for e in values(sb.preproc)
@@ -3846,8 +3846,9 @@ end
 # need that source identity. Whole-LHS unbound observations use their target.
 # An omitted kernel cell observation uses the plate's hygienic stem, because
 # StanBlocks renames fresh cell bindings before tracing their `~`.
-Base.@nospecializeinfer function _sb_declared_observations(body, data, @nospecialize(brmi))
-    declarations = _sb_plan_declarations(body, data, brmi)
+Base.@nospecializeinfer function _sb_declared_observations(body, data, @nospecialize(brmi),
+                                                          mod::Module)
+    declarations = _sb_plan_declarations(body, data, brmi, mod)
     unbound_cell = _sb_unbound_cell_observations(brmi)
     names = Symbol[]
     for d in declarations
@@ -4380,7 +4381,9 @@ _sb_plan_obs_shaped(rhs::Expr) =
 #   A leaf nothing reads (`y ~ normal(mu0, sigma)`) stays an observation —
 #   that is the omitted-response spelling — and so does a statement reading
 #   non-scalar data or anything computed from it (`m ~ normal(m_mu, s)`).
-function _sb_plan_observation_keys(body, data, formula_keys)
+# A predictor term emitted as a SLIC submodel call is never an observation,
+# whatever it reads (`_sb_plan_submodel_term`).
+function _sb_plan_observation_keys(body, data, @nospecialize(brmi), mod::Module)
     constants = Set{Symbol}(k for (k, v) in pairs(data) if v isa Real)
     varying = setdiff(Set{Symbol}(keys(data)), constants)
     statements = _sb_plan_statements(body)
@@ -4389,13 +4392,17 @@ function _sb_plan_observation_keys(body, data, formula_keys)
         rhs = _sb_plan_statement_rhs(stmt)
         isnothing(rhs) || _sb_plan_value_refs!(read, rhs)
     end
-    observable = Set{Symbol}(formula_keys)
+    observable = Set{Symbol}(keys(brmi.operations))
     # Emission order is definition order, so one forward pass propagates
     # row variation through assignments and sampled statements.
     for stmt in statements
         rhs = _sb_plan_statement_rhs(stmt)
         isnothing(rhs) && continue
         refs = _sb_plan_value_refs(rhs)
+        if stmt.head === :call
+            target = _sb_plan_lhs_name(stmt.args[2])
+            _sb_plan_submodel_term(brmi, target, rhs, mod) && delete!(observable, target)
+        end
         if any(in(varying), refs)
             union!(varying, _sb_plan_param_names(stmt.args[end - 1]))
         elseif stmt.head === :call && !isempty(refs)
@@ -4405,6 +4412,34 @@ function _sb_plan_observation_keys(body, data, formula_keys)
         end
     end
     observable
+end
+# A formula predictor term that an extension emitted as a SLIC submodel call,
+# such as `effect ~ saturating(dose)` lowered by a `_sb_submodel_rhs!` hook to
+# `effect ~ _sb_saturating(; dose=dose)`. A submodel embedded on a non-data
+# LHS binds that LHS to its `return` value (stanblocks-use §3), so the target
+# is a latent: there is no response to omit. BRM's own response completions
+# (`mi(y) ~ …`, imputed joint responses) also emit submodel calls, but their
+# formula statement is an observation rather than a predictor, and an omitted
+# response under a custom family emits a family call rather than a submodel.
+# A submodel without `return` binds nothing; it may carry its own likelihood
+# over a keyword-bound column, which this classification cannot see, so it
+# keeps its previous role. So does an observation-model submodel (stanblocks-use
+# §3 Form A: `return obs` naming the LHS of its own `obs ~ …`): its target is
+# the response, omitted.
+function _sb_plan_submodel_term(@nospecialize(brmi), target, rhs, mod::Module)
+    target isa Symbol && Meta.isexpr(rhs, :call) && !isempty(rhs.args) || return false
+    _brm_has_operation(brmi, target) || return false
+    raw = _brm_operation(brmi, target)
+    _brm_operation_role(something(_named_op(raw), raw)) === :predictor || return false
+    head = _brmd_binding(first(rhs.args), mod)
+    head isa StanBlocks.SlicModel || return false
+    statements = _sb_plan_statements(head.model)
+    i = findfirst(s -> Meta.isexpr(s, :return), statements)
+    isnothing(i) && return false
+    value = first(statements[i].args)
+    !(value isa Symbol && any(statements) do s
+        Meta.isexpr(s, :call, 3) && s.args[1] === :~ && _sb_plan_lhs_name(s.args[2]) === value
+    end)
 end
 _sb_plan_statements(x::Expr) = x.head === :block ? x.args : (x,)
 _sb_plan_statements(x) = (x,)
@@ -4416,11 +4451,12 @@ _sb_plan_statement_rhs(_) = nothing
 
 # The declaration inventory of an emitted top-level body, shared by the
 # construction triage, the SLIC observation declaration and `generative_plan`.
-function _sb_plan_declarations(body, data, @nospecialize(brmi))
+# `mod` is the namespace the emitted body resolves its callees in.
+function _sb_plan_declarations(body, data, @nospecialize(brmi), mod::Module)
     declarations = GenerativeDeclaration[]
     data_scope = Dict{Symbol,Union{Nothing,Symbol}}(k => k for k in keys(data))
     _sb_plan_collect!(declarations, body, data_scope, (),
-                      _sb_plan_observation_keys(body, data, keys(brmi.operations)),
+                      _sb_plan_observation_keys(body, data, brmi, mod),
                       Set{Symbol}(), _sb_unbound_cell_observations(brmi))
     declarations
 end
@@ -4499,7 +4535,7 @@ function _generative_plan(sb::SBBRMI, builder, cv_groups)
     preproc = deepcopy(sb.preproc)
     body = _sb_plan_copy(sb.model.model)
     model = StanBlocks.SlicModel(body, data, sb.model.mod, sb.model.observations)
-    declarations = _sb_plan_declarations(body, data, parent)
+    declarations = _sb_plan_declarations(body, data, parent, sb.model.mod)
     GenerativePlan(parent, model, data, preproc, Tuple(declarations), builder,
                    copy(cv_groups), copy(sb.held_out), deepcopy(sb.bindings))
 end
@@ -5139,24 +5175,21 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         # comes from the new DataFrame's own kernel frame (which is how a
         # resample re-emission and a same-subject replay stay consistent).
         source = e.raw_ref
-        group_col = e.const_.group_col
-        subject_col = e.const_.subject_col
         raw = _sb_df_column(df, source)
         if raw isa AbstractVector{<:AbstractVector}
             new_data[key] = raw   # already per-subject ragged: pass through
         else
-            subject_values = _sb_kernel_subject_values(
-                _sb_df_column(df, subject_col), subject_col)
-            group_values = collect(_sb_group_values(_sb_df_column(df, group_col)))
-            length(group_values) == length(raw) || error(
+            (; rows, nrows) = _sb_replay_group_rows(df, key, e.const_)
+            nrows == length(raw) || error(
                 "sbimpl: reprocess: ragged source `$source` has $(length(raw)) " *
-                "rows but grouping column `$group_col` has " *
-                "$(length(group_values)); they must describe the same " *
-                "observation axis.")
-            rows = _sb_ragged_group_rows(key, group_col, group_values,
-                                         subject_values)
+                "rows but grouping column `$(e.const_.group_col)` has " *
+                "$nrows; they must describe the same observation axis.")
             new_data[key] = [raw[r] for r in rows]
         end
+        new_preproc[key] = e
+    elseif e.kind === :ragged_rows
+        # An omitted join's row partition, regrouped from the new frame.
+        new_data[key] = _sb_replay_group_rows(df, key, e.const_).rows
         new_preproc[key] = e
     elseif e.kind === :rw
         # `rw(time)`: the grid may gain new steps; each row reads its own point.
@@ -7064,6 +7097,16 @@ function _sb_ragged_group_rows(key::Symbol, group::Symbol,
     rows
 end
 
+# The same partition of a replay frame's rows, and its row count.
+function _sb_replay_group_rows(df, key::Symbol, grouping)
+    (; group_col, subject_col) = grouping
+    subject_values = _sb_kernel_subject_values(
+        _sb_df_column(df, subject_col), subject_col)
+    group_values = collect(_sb_group_values(_sb_df_column(df, group_col)))
+    (; rows=_sb_ragged_group_rows(key, group_col, group_values, subject_values),
+       nrows=length(group_values))
+end
+
 _sb_ragged_response_values(_key, _group, ::MissingColumn) = nothing
 function _sb_ragged_response_values(key, group, response::DataColumn)
     raw = _brm_data_vec(key, parent(response))
@@ -7180,25 +7223,52 @@ function _sb_ragged_argument(data, key, argument::ExprColumn, layout)
         getargs(argument))...; getkwargs(argument)...)
 end
 
-function _sb_ragged_likelihood_rhs(data, key::Symbol, rhs::ExprColumn, layout)
+function _sb_ragged_likelihood_rhs(stmts, data, key::Symbol, rhs::ExprColumn, layout)
     f = getf(rhs)
     if f === truncated || f === censored
         lower, upper = _sb_wrapper_bounds(f, getargs(rhs), getkwargs(rhs))
         lower = _sb_ragged_bound(data, key, :lower, lower, layout)
         upper = _sb_ragged_bound(data, key, :upper, upper, layout)
-        base = _sb_ragged_likelihood_rhs(data, key, first(getargs(rhs)), layout)
+        base = _sb_ragged_likelihood_rhs(stmts, data, key, first(getargs(rhs)), layout)
         return ExprColumn(f, base; lower, upper)
     elseif f === interval_censored && length(getargs(rhs)) == 1 &&
            keys(getkwargs(rhs)) == (:upper,)
         upper = _sb_ragged_bound(
             data, key, :upper, getkwargs(rhs).upper, layout)
-        base = _sb_ragged_likelihood_rhs(data, key, first(getargs(rhs)), layout)
+        base = _sb_ragged_likelihood_rhs(stmts, data, key, first(getargs(rhs)), layout)
         return ExprColumn(f, base; upper)
     end
-    ExprColumn(f, map(a -> _sb_ragged_argument(data, key, a, layout),
-        getargs(rhs))...; getkwargs(rhs)...)
+    ExprColumn(f, map(enumerate(getargs(rhs))) do (index, argument)
+        grouped = _sb_ragged_argument(data, key, argument, layout)
+        # A bound response groups its computed arguments when it is observed
+        # (`_sb_grouped_argument!`). An omitted one has no values, so its
+        # arguments are grouped here over the join's row partition, under the
+        # same names: the observation reads them as it does when bound.
+        isnothing(layout.values) || return grouped
+        ports = _sb_grouped_ports(grouped, length.(layout.rows))
+        isnothing(ports) ? grouped : _sb_grouped_argument_plate!(stmts, data, key,
+            _sb_ragged_rows!(data, key, layout), grouped, index, ports)
+    end...; getkwargs(rhs)...)
 end
-_sb_ragged_likelihood_rhs(_data, _key, rhs, _layout) = rhs
+_sb_ragged_likelihood_rhs(_stmts, _data, _key, rhs, _layout) = rhs
+
+# An omitted join's row partition, one array of flat row numbers per kernel
+# subject, bound under the name RKBRMI gives the same port.
+function _sb_ragged_rows!(data, key::Symbol, layout)
+    rows_key = Symbol(key, :_rows)
+    if haskey(data, rows_key)
+        data[rows_key] == layout.rows || error(
+            "sbimpl: derived ragged-row data key `$rows_key` collides with " *
+            "different observed data")
+    else
+        data[rows_key] = layout.rows
+        _sb_record_preproc!(data, rows_key, PreprocEntry(
+            :ragged_rows,
+            (; group_col=layout.group_col, subject_col=layout.subject_col),
+            layout.group_col, true))
+    end
+    rows_key
+end
 
 # Formula-boundary grouping for a flat observed frame. The emitted likelihood
 # keeps the logical response name (`key`), so StanBlocks' existing top-level
@@ -7218,7 +7288,7 @@ function _sb_sampling!(stmts, data, key,
             (; group_col=layout.group_col, subject_col=layout.subject_col),
             key, true))
     end
-    grouped_rhs = _sb_ragged_likelihood_rhs(data, key, rhs, layout)
+    grouped_rhs = _sb_ragged_likelihood_rhs(stmts, data, key, rhs, layout)
     _sb_likelihood!(stmts, key, grouped_rhs, data)
 end
 
@@ -12955,20 +13025,37 @@ function _sb_grouped_argument_ports!(ports, argument::NamedColumn, lengths)
     false
 end
 _sb_grouped_argument_ports!(_ports, _argument, _lengths) = false
+# A row-wise callable (`addprop`) gives one group's rows the values it gives
+# them over all rows, so it runs in the cell like arithmetic. Applied to the
+# whole flattened argument, it would run once per group, every group's rows
+# each time.
 function _sb_grouped_argument_ports!(ports, argument::ExprColumn, lengths)
     f = getf(argument)
     (haskey(_RK_DERIVED_BINOPS, f) || haskey(_RK_DERIVED_CMP, f) ||
-        haskey(_RK_DERIVED_MATH, f)) || return false
+        haskey(_RK_DERIVED_MATH, f) || _rk_rowwise_callable(f)) || return false
     foreach(a -> _sb_grouped_argument_ports!(ports, a, lengths), getargs(argument))
     !isempty(ports)
+end
+
+# The grouped ports of an observation argument evaluated per observed group,
+# or `nothing` when the argument is read in place.
+function _sb_grouped_ports(argument, lengths)
+    ports = Dict{Symbol,NamedColumn}()
+    _sb_grouped_argument_ports!(ports, argument, lengths) ? ports : nothing
 end
 
 function _sb_grouped_argument!(stmts, data, target, argument, index)
     response = get(data, target, nothing)
     response isa AbstractVector{<:AbstractVector} || return argument
-    ports = Dict{Symbol,NamedColumn}()
-    stage = _sb_grouped_argument_ports!(ports, argument, length.(response))
-    stage && !isempty(ports) || return argument
+    ports = _sb_grouped_ports(argument, length.(response))
+    isnothing(ports) ? argument :
+        _sb_grouped_argument_plate!(stmts, data, target, target, argument, index, ports)
+end
+
+# Evaluate a computed observation argument one group at a time, in a plate over
+# the observed `cells` (the bound response, or an omitted join's row partition)
+# and the argument's grouped ports.
+function _sb_grouped_argument_plate!(stmts, data, target, cells, argument, index, ports)
     expression = _sb_scalar_expr(argument, data)
     names = sort!(collect(keys(ports)))
     taken = Set{Symbol}(keys(data))
@@ -12984,7 +13071,7 @@ function _sb_grouped_argument!(stmts, data, target, argument, index)
             rep_vector($param[1], num_elements($observed)) : $param)
         expression = _sb_subst_sym(expression, name, rows)
     end
-    plate = Expr(:do, Expr(:call, :plate, target, names...),
+    plate = Expr(:do, Expr(:call, :plate, cells, names...),
         Expr(:->, Expr(:tuple, observed, params...), Expr(:block, expression)))
     push!(stmts, Expr(:call, :~, entry, plate))
     NamedColumn(entry, MissingColumn())
