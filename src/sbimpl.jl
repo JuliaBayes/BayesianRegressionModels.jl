@@ -2829,6 +2829,13 @@ function _sb_frozen_preproc_entry(data, key::Symbol, kind::Symbol, raw_ref)
     entry
 end
 
+# The fitted value of a `constant(...)` declaration during replay, or `nothing`
+# when this construction is not a replay of a fit that recorded it.
+function _sb_fitted_constant(data, key::Symbol, source)
+    entry = _sb_frozen_preproc_entry(data, key, :constant, source)
+    isnothing(entry) ? nothing : entry.const_.value
+end
+
 function _sb_record_group_index!(data, idx_key::Symbol, n_groups_key::Symbol,
                                  group::Symbol, raw::AbstractVector)
     levels = _sb_fit_levels(raw)
@@ -3003,6 +3010,10 @@ SBBRMI(parent::BRMI, model, data::AbstractDict, preproc::AbstractDict,
 # Stan data dictionary and carried with the emitted artifact through replay.
 const _SB_BINDINGS_KEY = :__brm_emission_bindings__
 const _SB_THRESHOLD_LOCATED_KEY = :__brm_threshold_located__
+# Raw grouping columns the ranef pass replaced by a dense index, each with the
+# value it removed (see `_sb_note_group_column!`). Settled once emission is
+# complete by `_sb_settle_group_columns!`.
+const _SB_GROUP_COLUMNS_KEY = :__brm_group_columns__
 function _sb_record_binding!(data, key, role, logical; family=nothing, metadata...)
     bindings = get(data, _SB_BINDINGS_KEY, nothing)
     isnothing(bindings) || (bindings[key] = (; role, logical, family, metadata...))
@@ -3546,6 +3557,16 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
         Dict{Symbol,PreprocEntry}() :
         _SBPreprocContext(Dict{Symbol,PreprocEntry}(), _frozen_preproc)
     data[_SB_BINDINGS_KEY] = Dict{Symbol,NamedTuple}()
+    data[_SB_GROUP_COLUMNS_KEY] = Dict{Symbol,Union{Nothing,Some}}()
+    # `name = constant(expr)` becomes an ordinary scalar data field before
+    # anything else reads the formula. Replay restores the fitted value from
+    # its `:constant` record instead of evaluating `expr` on the new data.
+    brmi, constants = _brm_resolve_constants(brmi; prefix="sbimpl",
+        fitted=(key, source) -> _sb_fitted_constant(data, key, source))
+    for c in constants
+        _sb_record_preproc!(data, c.name,
+            PreprocEntry(:constant, (; c.value, c.node), c.source, false))
+    end
     # Predictors whose intercept an ordinal response's thresholds supply: their
     # categorical terms stay treatment-coded (see `_brm_cellmeans_block`).
     data[_SB_THRESHOLD_LOCATED_KEY] = _brm_threshold_located_predictors(brmi)
@@ -3707,6 +3728,9 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     # "this linear predictor is read by exactly one likelihood". Every
     # non-matching model keeps its statements byte for byte.
     _sb_fuse_normal_id_glm!(stmts, data)
+    # Settle raw grouping columns against the final statements, before the
+    # generic non-Stan drop below could silently remove one a statement reads.
+    _sb_settle_group_columns!(stmts, data, pop!(data, _SB_GROUP_COLUMNS_KEY))
     # Pop the preproc side-channel BEFORE building the SlicModel so it never
     # pollutes Stan's data dict.
     bindings = pop!(data, _SB_BINDINGS_KEY)
@@ -3725,6 +3749,9 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     for k in collect(keys(data))
         _sb_is_stan_data_value(data[k]) || delete!(data, k)
     end
+    # A constant nothing reads never reaches the Stan data, so it has nothing
+    # to replay either.
+    filter!(((key, entry),) -> entry.kind !== :constant || haskey(data, key), preproc)
     # `keys(data)` is now exactly the set of Stan `data` identifiers this model
     # emits. Reject any that collide with a Stan reserved keyword here — with an
     # actionable BRM-level error — instead of returning invalid Stan that only
@@ -4595,14 +4622,16 @@ function generative_plan(builder::Function, df;
                          mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
                          centered_groups=Set{Symbol}(),
                          total_groups=:auto, s2z_groups=(), s2z_rho=nothing,
-                         s2z_coordinates=:contrasts, held_out=())
+                         s2z_coordinates=:contrasts, held_out=(),
+                         _frozen_preproc=nothing)
     brmi = Base.invokelatest(builder, df)
     brmi isa BRMI || error(
         "generative_plan: builder returned $(typeof(brmi)); expected a BRMI from `@brm begin ... end`")
     cv_groups = cv_groups isa Set ? cv_groups : Set{Symbol}(cv_groups)
     centered_groups = centered_groups isa Set ? centered_groups : Set{Symbol}(centered_groups)
     _generative_plan(SBBRMI(brmi; mod, cv_groups, centered_groups, total_groups,
-                            s2z_groups, s2z_rho, s2z_coordinates, held_out),
+                            s2z_groups, s2z_rho, s2z_coordinates, held_out,
+                            _frozen_preproc),
                       builder, cv_groups)
 end
 
@@ -4623,8 +4652,12 @@ function generative_plan(plan::GenerativePlan, new_df;
     # Preserve the fitted representation and population/random basis relation.
     # An empty selected set also preserves an explicit conventional opt-out.
     selected = unique(b.group for b in total_effect_blocks(plan))
+    # A rebuild for new groups keeps every `constant(...)` at its fitted value;
+    # the new data need not carry what it was computed from.
+    constants = filter(((_, entry),) -> entry.kind === :constant, plan.preproc)
     isempty(selected) && return generative_plan(plan.builder,new_df;
-        mod=plan.model.mod,cv_groups,centered_groups,held_out,total_groups=())
+        mod=plan.model.mod,cv_groups,centered_groups,held_out,total_groups=(),
+        _frozen_preproc=isempty(constants) ? nothing : constants)
     brmi = Base.invokelatest(plan.builder,new_df)
     sb = SBBRMI(brmi;mod=plan.model.mod,cv_groups,centered_groups,held_out,total_groups=selected,
                 _frozen_preproc=plan.preproc)
@@ -4816,6 +4849,16 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
     if e.kind === :static
         new_data[key] = deepcopy(e.const_)
         new_preproc[key] = e
+    elseif e.kind === :constant
+        if freeze
+            new_data[key] = e.const_.value
+            new_preproc[key] = e
+        else
+            node = _brm_rebind_value(e.const_.node, df)
+            value = _brm_evaluate_constant(key, node; prefix="sbimpl: reprocess")
+            new_data[key] = value
+            new_preproc[key] = PreprocEntry(:constant, (; value, node), e.raw_ref, false)
+        end
     elseif e.kind === :total_basis
         freeze || throw(ArgumentError("total-coefficient replay requires freeze_constants=true; rebuild the model to fit a different population/random design basis"))
         new_data[key] = copy(e.const_)
@@ -5105,24 +5148,21 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         # comes from the new DataFrame's own kernel frame (which is how a
         # resample re-emission and a same-subject replay stay consistent).
         source = e.raw_ref
-        group_col = e.const_.group_col
-        subject_col = e.const_.subject_col
         raw = _sb_df_column(df, source)
         if raw isa AbstractVector{<:AbstractVector}
             new_data[key] = raw   # already per-subject ragged: pass through
         else
-            subject_values = _sb_kernel_subject_values(
-                _sb_df_column(df, subject_col), subject_col)
-            group_values = collect(_sb_group_values(_sb_df_column(df, group_col)))
-            length(group_values) == length(raw) || error(
+            (; rows, nrows) = _sb_replay_group_rows(df, key, e.const_)
+            nrows == length(raw) || error(
                 "sbimpl: reprocess: ragged source `$source` has $(length(raw)) " *
-                "rows but grouping column `$group_col` has " *
-                "$(length(group_values)); they must describe the same " *
-                "observation axis.")
-            rows = _sb_ragged_group_rows(key, group_col, group_values,
-                                         subject_values)
+                "rows but grouping column `$(e.const_.group_col)` has " *
+                "$nrows; they must describe the same observation axis.")
             new_data[key] = [raw[r] for r in rows]
         end
+        new_preproc[key] = e
+    elseif e.kind === :ragged_rows
+        # An omitted join's row partition, regrouped from the new frame.
+        new_data[key] = _sb_replay_group_rows(df, key, e.const_).rows
         new_preproc[key] = e
     elseif e.kind === :rw
         # `rw(time)`: the grid may gain new steps; each row reads its own point.
@@ -5278,7 +5318,10 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
                     "the new DataFrame instead.")
             end
         elseif v isa Number || v isa AbstractString || v isa Bool
-            new_data[k] = v   # frozen structural scalar / formula literal (e.g. me `sd_<x>`)
+            # A scalar keeps its fitted value (a structural scalar, a formula
+            # literal such as me `sd_<x>`, or a scalar field of the data);
+            # fresh-fit replay takes a scalar field the new data supplies.
+            new_data[k] = !freeze_constants && has_column ? _sb_df_column(new_df, k) : v
         else
             if has_column
                 # Externally derived non-vector data (StanBlocks' ragged
@@ -5408,20 +5451,17 @@ fall through to the default linear-predictor path. The default method
 `using`) when adding methods from a downstream module so the binding is
 extended rather than shadowed.
 
-**Reserved data keys — BRM owns raw grouping-column names.** Any raw
-column used as a ranef grouping factor (the `g` in `(… | g)`,
-`(… | ID | g)`, or `gr(g, by=…)`) is reclaimed by BRM's ranef pre-pass:
-the raw labels are DELETED from `data` and replaced by a dense integer
-index (`g_idx`) and level count (`n_g`), because Stan cannot consume raw
-(possibly string) labels. So a hook must NOT stash its own vector under a
-raw column name that the same model also uses as a grouping factor, nor
-emit a reference to it — the reclaim will delete it out from under the
-emitted statement, and the failure surfaces only much later, in
-StanBlocks tracing, as an unresolvable-symbol error. Key consumer-owned
-`data` PER TARGET instead, e.g. `Symbol(col_key, :_, target)`, which is
-self-owned and order-independent. (`_sb_reclaim_group_col!` now turns a
-collision into an immediate, correctly-attributed error at the delete
-site rather than a late one in a third package.)
+**Data keys and grouping columns.** A hook may store and read data under
+any column's own name, including a column the same model uses as a ranef
+grouping factor (the `g` in `(… | g)`, `(… | ID | g)`, or `gr(g, by=…)`),
+in any formula order. BRM itself reads a grouping column only through the
+dense integer index it derives (`g_idx`, level count `n_g`; `g__by__b_*`
+for `gr(g, by=b)`), and drops the raw `g` from the Stan data only when no
+emitted statement reads it (`_sb_settle_group_columns!`). A statement
+that reads `g` while `data[g]` holds string labels is refused at build:
+store an integer coding under `g`, or read `g_idx`. The derived index
+names belong to BRM: if one already holds a different value when BRM
+writes it, the build is refused (`_sb_set_group_index_datum!`).
 """
 _sb_submodel_rhs!(stmts, data, target, f, rhs) = nothing
 
@@ -7030,6 +7070,16 @@ function _sb_ragged_group_rows(key::Symbol, group::Symbol,
     rows
 end
 
+# The same partition of a replay frame's rows, and its row count.
+function _sb_replay_group_rows(df, key::Symbol, grouping)
+    (; group_col, subject_col) = grouping
+    subject_values = _sb_kernel_subject_values(
+        _sb_df_column(df, subject_col), subject_col)
+    group_values = collect(_sb_group_values(_sb_df_column(df, group_col)))
+    (; rows=_sb_ragged_group_rows(key, group_col, group_values, subject_values),
+       nrows=length(group_values))
+end
+
 _sb_ragged_response_values(_key, _group, ::MissingColumn) = nothing
 function _sb_ragged_response_values(key, group, response::DataColumn)
     raw = _brm_data_vec(key, parent(response))
@@ -7146,25 +7196,52 @@ function _sb_ragged_argument(data, key, argument::ExprColumn, layout)
         getargs(argument))...; getkwargs(argument)...)
 end
 
-function _sb_ragged_likelihood_rhs(data, key::Symbol, rhs::ExprColumn, layout)
+function _sb_ragged_likelihood_rhs(stmts, data, key::Symbol, rhs::ExprColumn, layout)
     f = getf(rhs)
     if f === truncated || f === censored
         lower, upper = _sb_wrapper_bounds(f, getargs(rhs), getkwargs(rhs))
         lower = _sb_ragged_bound(data, key, :lower, lower, layout)
         upper = _sb_ragged_bound(data, key, :upper, upper, layout)
-        base = _sb_ragged_likelihood_rhs(data, key, first(getargs(rhs)), layout)
+        base = _sb_ragged_likelihood_rhs(stmts, data, key, first(getargs(rhs)), layout)
         return ExprColumn(f, base; lower, upper)
     elseif f === interval_censored && length(getargs(rhs)) == 1 &&
            keys(getkwargs(rhs)) == (:upper,)
         upper = _sb_ragged_bound(
             data, key, :upper, getkwargs(rhs).upper, layout)
-        base = _sb_ragged_likelihood_rhs(data, key, first(getargs(rhs)), layout)
+        base = _sb_ragged_likelihood_rhs(stmts, data, key, first(getargs(rhs)), layout)
         return ExprColumn(f, base; upper)
     end
-    ExprColumn(f, map(a -> _sb_ragged_argument(data, key, a, layout),
-        getargs(rhs))...; getkwargs(rhs)...)
+    ExprColumn(f, map(enumerate(getargs(rhs))) do (index, argument)
+        grouped = _sb_ragged_argument(data, key, argument, layout)
+        # A bound response groups its computed arguments when it is observed
+        # (`_sb_grouped_argument!`). An omitted one has no values, so its
+        # arguments are grouped here over the join's row partition, under the
+        # same names: the observation reads them as it does when bound.
+        isnothing(layout.values) || return grouped
+        ports = _sb_grouped_ports(grouped, length.(layout.rows))
+        isnothing(ports) ? grouped : _sb_grouped_argument_plate!(stmts, data, key,
+            _sb_ragged_rows!(data, key, layout), grouped, index, ports)
+    end...; getkwargs(rhs)...)
 end
-_sb_ragged_likelihood_rhs(_data, _key, rhs, _layout) = rhs
+_sb_ragged_likelihood_rhs(_stmts, _data, _key, rhs, _layout) = rhs
+
+# An omitted join's row partition, one array of flat row numbers per kernel
+# subject, bound under the name RKBRMI gives the same port.
+function _sb_ragged_rows!(data, key::Symbol, layout)
+    rows_key = Symbol(key, :_rows)
+    if haskey(data, rows_key)
+        data[rows_key] == layout.rows || error(
+            "sbimpl: derived ragged-row data key `$rows_key` collides with " *
+            "different observed data")
+    else
+        data[rows_key] = layout.rows
+        _sb_record_preproc!(data, rows_key, PreprocEntry(
+            :ragged_rows,
+            (; group_col=layout.group_col, subject_col=layout.subject_col),
+            layout.group_col, true))
+    end
+    rows_key
+end
 
 # Formula-boundary grouping for a flat observed frame. The emitted likelihood
 # keeps the logical response name (`key`), so StanBlocks' existing top-level
@@ -7184,7 +7261,7 @@ function _sb_sampling!(stmts, data, key,
             (; group_col=layout.group_col, subject_col=layout.subject_col),
             key, true))
     end
-    grouped_rhs = _sb_ragged_likelihood_rhs(data, key, rhs, layout)
+    grouped_rhs = _sb_ragged_likelihood_rhs(stmts, data, key, rhs, layout)
     _sb_likelihood!(stmts, key, grouped_rhs, data)
 end
 
@@ -9360,8 +9437,8 @@ function _sb_emit_ranef_block!(stmts, data, target::Symbol, group::NamedColumn, 
     n_levels, g_idx = _sb_level_index(parent(g_backing))
     idx_name = Symbol(g, :_idx)
     n_name   = Symbol(:n_, g)
-    data[idx_name] = g_idx
-    data[n_name]   = n_levels
+    _sb_set_group_index_datum!(data, idx_name, g_idx, g)
+    _sb_set_group_index_datum!(data, n_name, n_levels, g)
     _sb_record_group_index!(data, idx_name, n_name, g, parent(g_backing))
     r_name = Symbol(:r_, target, :_, g)
     # The size expression the non-centered submodels are given. Bound to a named
@@ -11291,38 +11368,76 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name,
     info.idx_name
 end
 
-# Reclaim a raw grouping-column name for BRM's dense integer index. The generic
-# data prepass sees grouping columns too, but Stan consumes only their dense
-# integer code, never the raw labels (which may be strings and therefore are not
-# valid Stan data at all) — so the raw column is deleted from `data` here. BRM
-# OWNS the raw name of any column used as a ranef grouping factor and reclaims it
-# in this pre-pass; see the `_sb_submodel_rhs!` docstring for the reserved-name
-# contract this enforces.
-#
-# Guard against a silent clobber: a `_sb_submodel_rhs!` hook (or any other data-
-# writing extension) that stashes its OWN vector under a raw column name the same
-# model also uses as a grouping factor — and emits a reference to it — would have
-# that vector deleted out from under the emitted statement, surfacing only much
-# later as an unresolvable-symbol error deep in StanBlocks tracing that names
-# neither the delete nor BRM. When the key no longer holds the raw column the
-# data prepass wrote (i.e. something replaced it), fail loudly and attributed
-# HERE, pointing at the per-target keying that fixes it.
-function _sb_reclaim_group_col!(data, colname::Symbol, backing::DataColumn)
-    if haskey(data, colname) && !isequal(data[colname], parent(backing))
+# A ranef grouping column reaches Stan only through its dense integer index
+# (`<g>_idx` / `n_<g>`), so the raw labels the generic data prepass wrote under
+# `g` are normally dead data — and may be strings, which are not Stan data at
+# all. The FIRST visit removes `data[g]`, so every later emitter sees exactly
+# the data it always saw; re-entries (this helper backs every emitter that needs
+# the index) leave `data[g]` alone. The removed value is kept, because `data` is
+# shared with `_sb_submodel_rhs!` hooks: a hook may store and read its own
+# `data[g]`, before or after this pass. `_sb_settle_group_columns!` restores it
+# once emission is complete if a statement reads `g`.
+function _sb_note_group_column!(data, colname::Symbol)
+    noted = data[_SB_GROUP_COLUMNS_KEY]
+    haskey(noted, colname) && return nothing
+    noted[colname] = haskey(data, colname) ? Some(pop!(data, colname)) : nothing
+    nothing
+end
+
+# BRM owns the index names it derives from a grouping column (`<g>_idx`,
+# `n_<g>`, the `gr(g, by=b)` `__by__` names). Re-entry stores the same value. A
+# DIFFERENT value already stored there was written by someone else (a
+# `_sb_submodel_rhs!` hook), and overwriting it would silently change what that
+# writer's statement reads.
+function _sb_set_group_index_datum!(data, key::Symbol, value, gname::Symbol)
+    haskey(data, key) && !isequal(data[key], value) && error(
+        "sbimpl: `$key` is the index BRM derives from the ranef grouping column ",
+        "`$gname`, but `data[:$key]` already holds a different value written by ",
+        "another term (e.g. a `_sb_submodel_rhs!` hook). Overwriting it would ",
+        "change what that term's statement reads. Store that term's data under a ",
+        "name BRM does not derive — the raw column name `$gname` itself is fine.")
+    data[key] = value
+    nothing
+end
+
+# Symbols an emitted statement reads as values. A keyword argument's NAME is a
+# label, not a read (`subjects=subjects_eff` reads only `subjects_eff`), and a
+# plain `x = …` binds `x` rather than reading it. Non-expression payloads (a
+# nested `@slic` model, a function) are opaque: data reaches them only through
+# the call arguments walked here.
+_sb_read_symbols!(out, _) = out
+_sb_read_symbols!(out, x::Symbol) = push!(out, x)
+function _sb_read_symbols!(out, x::Expr)
+    args = x.head === :kw ? x.args[2:end] :
+           x.head === :(=) && x.args[1] isa Symbol ? x.args[2:end] : x.args
+    foreach(a -> _sb_read_symbols!(out, a), args)
+    out
+end
+
+# Settle the raw grouping columns noted by `_sb_note_group_column!` against the
+# finished statements. A column no statement reads stays out of the Stan data,
+# as it always did (a hook value written after the first visit and never read
+# is dropped too). A column a statement reads is that statement's data: keep
+# what is stored now, or restore the value the first visit removed. If that
+# value cannot be Stan data (raw string labels), the generic non-Stan drop
+# would delete it silently and the build would die later in StanBlocks naming
+# neither BRM nor the statement, so refuse here.
+function _sb_settle_group_columns!(stmts, data, noted)
+    reads = Set{Symbol}()
+    foreach(st -> _sb_read_symbols!(reads, st), stmts)
+    for (g, removed) in noted
+        g in reads || (delete!(data, g); continue)
+        haskey(data, g) || isnothing(removed) || (data[g] = something(removed))
+        haskey(data, g) || continue
+        _sb_is_stan_data_value(data[g]) && continue
+        reader = stmts[findfirst(st -> g in _sb_read_symbols!(Set{Symbol}(), st), stmts)]
         error(
-            "sbimpl: `$colname` is used as a ranef grouping factor, so BRM ",
-            "reclaims its raw column for a dense integer index (`$(colname)_idx` ",
-            "/ `n_$colname`) and deletes the raw labels here — but `data[:$colname]` ",
-            "currently holds a value the generic data prepass did NOT write. A ",
-            "`_sb_submodel_rhs!` hook (or other extension) stashed its own vector ",
-            "under this reserved name; it would be deleted out from under any ",
-            "statement referencing it and fail later in StanBlocks tracing with an ",
-            "unresolvable-symbol error naming a third package. BRM owns raw column ",
-            "names used as grouping factors — key consumer-written data PER TARGET ",
-            "instead, e.g. `_sb_kernel_key(col, target) = Symbol(col, :_, target)`, ",
-            "which is self-owned and order-independent.")
+            "sbimpl: the emitted statement `$reader` reads `$g`, which is also a ",
+            "ranef grouping column, but `data[:$g]` holds $(eltype(data[g])) ",
+            "labels, which are not valid Stan data. Store an integer coding under ",
+            "`$g` in the term that reads it, or read BRM's dense index `$(g)_idx` ",
+            "(levels `1:n_$g`) instead.")
     end
-    delete!(data, colname)
     nothing
 end
 
@@ -11336,9 +11451,9 @@ function _sb_ensure_group_data!(data, g::NamedColumn)
     idx_name = Symbol(gname, :_idx)
     n_name   = Symbol(:n_, gname)
     n_levels, g_idx = _sb_level_index(parent(g_backing))
-    _sb_reclaim_group_col!(data, gname, g_backing)
-    data[idx_name] = g_idx
-    data[n_name]   = n_levels
+    _sb_note_group_column!(data, gname)
+    _sb_set_group_index_datum!(data, idx_name, g_idx, gname)
+    _sb_set_group_index_datum!(data, n_name, n_levels, gname)
     _sb_record_group_index!(data, idx_name, n_name, gname, parent(g_backing))
     idx_name, n_name
 end
@@ -11355,18 +11470,18 @@ function _sb_ensure_group_data!(data, g::Tuple{NamedColumn,NamedColumn})
     gname, bname = name(gcol), name(bcol)
     n_groups, g_idx = _sb_level_index(parent(g_backing))
     n_strata, b_idx = _sb_level_index(parent(b_backing))
-    _sb_reclaim_group_col!(data, gname, g_backing)
-    _sb_reclaim_group_col!(data, bname, b_backing)
+    _sb_note_group_column!(data, gname)
+    _sb_note_group_column!(data, bname)
     stratum_idx = _sb_stratum_idx(g_idx, b_idx, gname, bname)
     suffix = Symbol(gname, :__by__, bname)
     idx_name       = Symbol(suffix, :_idx)
     n_name         = Symbol(:n_, suffix)
     s_idx_name     = Symbol(suffix, :_stratum_idx)
     n_strata_name  = Symbol(:n_strata_, suffix)
-    data[idx_name]      = g_idx
-    data[n_name]        = n_groups
-    data[s_idx_name]    = stratum_idx
-    data[n_strata_name] = n_strata
+    _sb_set_group_index_datum!(data, idx_name, g_idx, gname)
+    _sb_set_group_index_datum!(data, n_name, n_groups, gname)
+    _sb_set_group_index_datum!(data, s_idx_name, stratum_idx, gname)
+    _sb_set_group_index_datum!(data, n_strata_name, n_strata, gname)
     (; idx_name, n_name, s_idx_name, n_strata_name)
 end
 
@@ -12931,7 +13046,7 @@ _sb_is_side_channel_key(k::Symbol) =
     k === _SB_PREPROC_KEY || k === _SB_BINDINGS_KEY ||
     k === _SB_THRESHOLD_LOCATED_KEY || k === _SB_HYPER_PLANS_KEY ||
     k === _SB_TOTAL_PLANS_KEY || k === _SB_S2Z_PLANS_KEY ||
-    k === _SB_HS_PLANS_KEY
+    k === _SB_HS_PLANS_KEY || k === _SB_GROUP_COLUMNS_KEY
 
 # Return `k` if `v` is a flat (non-ragged) vector, else `nothing` — replaces
 # the old `_is_flat_vec` Bool predicate so the caller composes via the
@@ -12964,20 +13079,37 @@ function _sb_grouped_argument_ports!(ports, argument::NamedColumn, lengths)
     false
 end
 _sb_grouped_argument_ports!(_ports, _argument, _lengths) = false
+# A row-wise callable (`addprop`) gives one group's rows the values it gives
+# them over all rows, so it runs in the cell like arithmetic. Applied to the
+# whole flattened argument, it would run once per group, every group's rows
+# each time.
 function _sb_grouped_argument_ports!(ports, argument::ExprColumn, lengths)
     f = getf(argument)
     (haskey(_RK_DERIVED_BINOPS, f) || haskey(_RK_DERIVED_CMP, f) ||
-        haskey(_RK_DERIVED_MATH, f)) || return false
+        haskey(_RK_DERIVED_MATH, f) || _rk_rowwise_callable(f)) || return false
     foreach(a -> _sb_grouped_argument_ports!(ports, a, lengths), getargs(argument))
     !isempty(ports)
+end
+
+# The grouped ports of an observation argument evaluated per observed group,
+# or `nothing` when the argument is read in place.
+function _sb_grouped_ports(argument, lengths)
+    ports = Dict{Symbol,NamedColumn}()
+    _sb_grouped_argument_ports!(ports, argument, lengths) ? ports : nothing
 end
 
 function _sb_grouped_argument!(stmts, data, target, argument, index)
     response = get(data, target, nothing)
     response isa AbstractVector{<:AbstractVector} || return argument
-    ports = Dict{Symbol,NamedColumn}()
-    stage = _sb_grouped_argument_ports!(ports, argument, length.(response))
-    stage && !isempty(ports) || return argument
+    ports = _sb_grouped_ports(argument, length.(response))
+    isnothing(ports) ? argument :
+        _sb_grouped_argument_plate!(stmts, data, target, target, argument, index, ports)
+end
+
+# Evaluate a computed observation argument one group at a time, in a plate over
+# the observed `cells` (the bound response, or an omitted join's row partition)
+# and the argument's grouped ports.
+function _sb_grouped_argument_plate!(stmts, data, target, cells, argument, index, ports)
     expression = _sb_scalar_expr(argument, data)
     names = sort!(collect(keys(ports)))
     taken = Set{Symbol}(keys(data))
@@ -12993,7 +13125,7 @@ function _sb_grouped_argument!(stmts, data, target, argument, index)
             rep_vector($param[1], num_elements($observed)) : $param)
         expression = _sb_subst_sym(expression, name, rows)
     end
-    plate = Expr(:do, Expr(:call, :plate, target, names...),
+    plate = Expr(:do, Expr(:call, :plate, cells, names...),
         Expr(:->, Expr(:tuple, observed, params...), Expr(:block, expression)))
     push!(stmts, Expr(:call, :~, entry, plate))
     NamedColumn(entry, MissingColumn())

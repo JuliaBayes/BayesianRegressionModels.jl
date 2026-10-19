@@ -194,8 +194,20 @@ end
         @test occursin(line, shown_terms)
     end
 
+    # Assignments and constants print as written.
+    assigned = @brm FAMILY_DATA begin
+        x_loc = constant(mean(x) + 1)
+        sigma ~ Exponential(1)
+        mu ~ 1 + x
+        m = mu + x_loc
+        y ~ Normal(m, sigma)
+    end
+    shown_assigned = sprint(show, assigned)
+    @test occursin("\nm = mu + x_loc\n", shown_assigned)
+    @test startswith(shown_assigned, "x_loc = constant(mean(x) + 1)\n")
+
     # The printed source is the model: re-parsing it gives the same program.
-    for m in (model, terms)
+    for m in (model, terms, assigned)
         reparsed = Core.eval(@__MODULE__,
             BRM._brm(Meta.parse("begin\n" * sprint(show, m) * "\nend"); df=FAMILY_DATA))
         @test sb_code(reparsed) == sb_code(m)
@@ -240,6 +252,22 @@ end
         end
     end
     @test brm_columns(cases[1][2]) == (:x, :y)
+
+    # A constant's inputs are columns a fresh build needs, unless the builder's
+    # scope binds the name (`pi`, a captured local). The descriptor's replay
+    # schema omits them, because replay keeps the fitted constant.
+    calibrated = let k = 2.0
+        @brm begin
+            x_loc = constant(k * mean(y2) + pi)
+            sigma ~ Exponential(1)
+            mu ~ 1 + x
+            m = mu + x_loc
+            y ~ Normal(m, sigma)
+        end
+    end
+    @test brm_columns(calibrated) == (:x, :y, :y2)
+    @test :y2 ∉ brm_columns(brm_descriptor(calibrated, FAMILY_DATA; mod=@__MODULE__))
+    @test stanc_ok(sb_code(calibrated(FAMILY_DATA)))
 
     @test brm_columns(PLATE_BUILDER) == (:obs_subject, :obs_time, :subject, :weight, :y)
     # The descriptor also lists the cell's `log_CL` read and a plan-internal

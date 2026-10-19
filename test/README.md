@@ -87,6 +87,14 @@ non-response ragged input.
 an omitted censored response and a joint QT likelihood. It checks the
 predictive descriptor and a finite generated draw above the censoring floor.
 
+`ragged_rowwise_arguments.jl` checks that SBBRMI evaluates a row-wise helper
+(`addprop`) or elementwise arithmetic over a ragged plate or kernel result once
+per subject when it is observed outside the cell. The observation never reads
+the helper over the whole flattened result. It checks BridgeStan density and
+gradient parity with the in-cell spelling. For a `ragged(y, group)` join it
+also checks the omitted response: the same observation statement, the bound
+`y_rows` partition and its replay, and the predictive segments.
+
 `benchmark_emission_latency.jl` reports package loading, first model construction,
 first RK artifact emission and repeated calls separately, including compiler time,
 allocation and garbage collection. It uses independent synthetic regression and
@@ -268,7 +276,10 @@ observations use StanBlocks' `censored`, `truncated`, `weighted` and
 token-form family is a `:family` child over the token's arguments, which a
 family hook sees by its actual callable. Bounds are keyword-only, so a token's
 arguments never render as bounds. The in-cell censoring prose matches the
-formula wrapper's. It runs under the test project:
+formula wrapper's. A combinator token in `weighted`'s family position takes
+`weighted`'s bounds, so `weighted(censored, w, normal, m, s; lower=lo)`
+describes the same censoring as the call form
+`weighted(censored(Normal(m, s); lower=lo), w)`. It runs under the test project:
 
 ```sh
 julia --startup-file=no --project=test test/description_cell_combinators.jl
@@ -417,8 +428,10 @@ such as `independent` or `log-space` select focused blocks.
 native graph source. Unequal grouped responses, empty subjects, callable
 aliases, top-level assignments and in-cell calls retain normalized densities,
 all ordinary Reverse gradients, censoring and row order against independent
-oracles and compiled same-BRMI Stan. Complete printed source and artifact
-re-entry are included; a scalar native-location control is checked separately.
+oracles and compiled same-BRMI Stan. Per-location scales, in the cell and in a
+top-level ragged join (including a scale computed from parameters and per-row
+data), have the same checks. Complete printed source and artifact re-entry are
+included; a scalar native-location control is checked separately.
 
 `rk_r2d2_priors.jl` checks shared-margin R2D2M2 and joint population/contrast
 budgets through native RK execution. It compares absolute normalized densities,
@@ -583,15 +596,15 @@ same-BRMI Stan parity and printed source replay. The weight reader must read
 only data. A weighted censored Normal, in the call form
 `weighted(censored(Normal(m, s); lower=lo[i]), w[i])` and the token form
 `weighted(censored, w[i], normal, m, s; lower=lo[i])`, is checked against an
-independent weighted clamp density, Reverse gradients and pointwise rows;
-its SBBRMI transpile is `@test_broken` until StanBlocks' `weighted` takes a
-censoring combinator (StanBlocks snag `weighted-over-ce-a55869f3`). In-cell
-`interval_censored` remains `@test_broken` on RK.
+independent weighted clamp density, Reverse gradients, pointwise rows and
+strict same-BRMI Stan parity. In-cell `interval_censored` remains
+`@test_broken` on RK.
 `rk_incell_censored.jl` checks an in-cell `censored(Normal(...); lower=...)`
 over a ragged join against Stan, pointwise rows and NLME subject
 log-likelihoods, then the same cell under a row weight against the
 unweighted model: density, Reverse gradient, pointwise rows and NLME
-log-likelihoods all scale by the row weights.
+log-likelihoods all scale by the row weights, and its density and gradient
+match Stan.
 `rk_observed_graph_law.jl` checks the public inclusive threshold law's lower
 and upper branches and normalized interior in that built graph, against
 independent native values/gradients. The retained ordinary-constructor fixture

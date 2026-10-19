@@ -56,7 +56,13 @@ function _brmd_call_component(env, id, callable, args, kwargs)
     token=!isnothing(start) && length(args)>=start-1 &&
         first(args) isa Union{Function,StanBlocks.ValueFamily}
     token || return _brmd_component(env, id, :call, callable, args, kwargs)
-    family=_brmd_component(env, (id..., :family), :call, first(args), args[start:end])
+    # A combinator token in the family position takes the keywords: the bounds
+    # of `weighted(censored, w, normal, mu, sigma; lower=lo)` are those of
+    # `censored(normal, mu, sigma; lower=lo)`, as in the call form
+    # `weighted(censored(normal(mu, sigma); lower=lo), w)`.
+    family=isnothing(_brmd_family_arguments(first(args))) ?
+        _brmd_component(env, (id..., :family), :call, first(args), args[start:end]) :
+        _brmd_call_component(env, (id..., :family), first(args), args[start:end], kwargs)
     _brmd_component(env, id, :call, callable, args, kwargs; argument_nodes=(family, args[2:start-1]...))
 end
 
@@ -90,6 +96,12 @@ function _brmd_value(x::Symbol, env, _id)
 end
 _brmd_value(x::NamedColumn, env, _id) =
     BRMDescriptionReference(name(x), get(env.references, name(x), :observation))
+# `name = constant(expr)` is described by the Julia expression it was computed
+# from; the closure and the columns bound to evaluate it are not model notation.
+_brmd_snapshot(x::_BRMConstantSpec) = string(x.expression)
+_brmd_snapshot(x::_BRMConstantSource) = string(x)
+_brmd_value(x::ExprColumn{typeof(constant)}, env, id) =
+    _brmd_component(env, id, :call, constant, (_brmd_snapshot(first(getargs(x))),))
 _brmd_value(x, _env, _id) = _brmd_snapshot(x)
 function _brmd_value(x::MultiMembershipTerm,env,id)
     args=_brmd_value(x.groups,env,(id...,:memberships))
