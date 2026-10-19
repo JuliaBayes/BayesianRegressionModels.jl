@@ -133,7 +133,29 @@ end
 # A BRM-generated vector prior is a product of per-coordinate scalar priors.
 # Each coordinate is its own child, bound to its actual family callable, so a
 # custom family stays an explicit gap instead of being covered by its vector.
-_brmd_vector_prior_coordinates(_env,_f,_args,_id)=()
+#
+# So is a univariate builtin called with vector-literal arguments: Stan
+# vectorises it over its variate and hyperparameters, so
+# `x ~ exponential([1.5, 3.0]')` is `x[1] ~ exponential(1.5)` and
+# `x[2] ~ exponential(3.0)`. BRM emits that spelling for same-family vector
+# priors (`_sb_native_vector_prior`). A scalar argument applies to every
+# coordinate; multivariate laws take whole-vector arguments and stay one call,
+# as does a call whose shared argument is a component (one id, one owner).
+_brmd_vector_literal(x)=x isa BRMDescriptionComponent && x.kind===:syntax && x.callable===:vect
+_brmd_coordinatewise_law(law)=law in (:normal_sd,:standard_normal,:exponential_rate,
+    :lognormal_sd,:gamma_rate,:beta,:cauchy,:student_t_location_scale,:weibull,
+    :uniform,:inverse_gamma)
+function _brmd_vector_prior_coordinates(env,f,args,id)
+    f isa Function && _brmd_coordinatewise_law(_brmd_law(f)) || return ()
+    lengths=unique(length(a.arguments) for a in args if _brmd_vector_literal(a))
+    isempty(lengths) && return ()
+    any(a->a isa BRMDescriptionComponent && !_brmd_vector_literal(a),args) && return ()
+    length(lengths)==1 ||
+        error("description: vectorised $(nameof(f)) prior has vector arguments of lengths $(Tuple(lengths))")
+    Tuple(_brmd_component(env,(id...,:coordinate,i),:call,f,
+        Tuple(_brmd_vector_literal(a) ? a.arguments[i] : a for a in args))
+        for i in 1:only(lengths))
+end
 function _brmd_vector_prior_coordinates(env,f::StanBlocks.ValueFamily,args,id)
     records=_sb_vector_prior_coordinates(f)
     isnothing(records) && return ()

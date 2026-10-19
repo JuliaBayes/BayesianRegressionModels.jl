@@ -228,6 +228,18 @@ end
     @test occursin(r"cat_mu_patch_beta ~ brm_vector_prior_[0-9a-f]+", heavy_code)
     @test count("cauchy_lpdf(x[", heavy_code) == 1
     @test StanBlocks.stanc_check(heavy_code; warn_pedantic=false).ok
+
+    # One non-Normal family on every level is one native statement.
+    heavy_cells = @brm df begin
+        mu ~ 0 + factor(patch)
+        effect(mu, patch) ~ Cauchy(0, 1)
+        effect(mu, patch_lvl_2) ~ Cauchy(0, 2)
+        y ~ Normal(mu, 1.0)
+    end
+    heavy_cells_code = stan(heavy_cells)
+    @test occursin("cat_mu_patch_beta ~ cauchy(0.0, [1.0, 2.0, 1.0]');", heavy_cells_code)
+    @test !occursin("brm_vector_prior_", heavy_cells_code)
+    @test StanBlocks.stanc_check(heavy_cells_code; warn_pedantic=false).ok
 end
 
 @testset "level addresses exist only where cell means do" begin

@@ -52,7 +52,17 @@ effect (a typical value plus covariates) read as `x[i]`, beside a random-effect
 predictor and in a no-random-effects panel, against an independent density
 oracle with finite-difference RK gradients and matched BridgeStan coordinates.
 It also covers a panel whose cell slices only such predictors and the refusal of
-one declared on another row axis.
+one declared on another row axis. A predictor whose only covariate is a string
+categorical (`Vector{String}` or a string-leveled `CategoricalVector`) needs no
+zero `offset(...)` witness: its Stan and RK densities equal the witnessed
+twin's on both spellings.
+
+`plate_index_into.jl` checks `ragged(idx, group; into=target)`, an index column
+of row numbers on another flat axis: the gathered per-subject positions equal
+hand-rebased pre-grouped columns on BridgeStan and RK, `0` stays "no row",
+`reprocess` rebases new data again, and an index that leaves its subject or
+the target axis is refused, as are malformed declarations and `into=` on an
+observation.
 
 `plate_ragged_omitted_response.jl` checks a censored ragged observation inside
 `@plate` with its data column bound, omitted, and reprocessed. It requires the

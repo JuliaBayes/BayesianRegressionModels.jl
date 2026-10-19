@@ -362,9 +362,11 @@ end
         # The grouping column must cover the predictor's OWN frame.
         @test_throws "row axis" SBBRMI(ev_wrong_axis_model(df); mod = @__MODULE__)
         # Arity and keywords are rejected at @brm construction / lowering.
+        # `into=` is the one accepted keyword; any other (here the retired
+        # `by=`) is refused at construction.
         @test_throws "takes the thing to group, its grouping column" SBBRMI(
             ev_arity_model(df); mod = @__MODULE__)
-        @test_throws "ragged(...) takes no keywords" ev_kwarg_model(df)
+        @test_throws "ragged(...) takes only the `into=` keyword" ev_kwarg_model(df)
 
         # A label naming no subject the kernel walks.
         stray = ev_df(; dose_subject = ["s1", "s1", "s2", "s2", "s9", "s3", "s3"])
