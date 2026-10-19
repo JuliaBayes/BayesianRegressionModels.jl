@@ -43,10 +43,11 @@ _brm_zero_rho_lower(lower::AbstractArray) = zero.(lower)
 
 function _brm_hsgp_declared_rho_lower(term, target, context, default_lower)
     # An explicit length-scale prior replaces the whole declaration, including
-    # the approximation-validity floor supplied by the default HSGP prior.
-    isnothing(_brm_term_prior_spec(
-        term, target, context, :term_length_scale,
-    )) ? default_lower : _brm_zero_rho_lower(default_lower)
+    # the approximation-validity floor supplied by the default HSGP prior --
+    # unless it names that floor through `length_scale_floor` (decision 1fk9b29).
+    spec = _brm_term_prior_spec(term, target, context, :term_length_scale)
+    isnothing(spec) || _brm_has_floor_marker(spec.expression) ? default_lower :
+        _brm_zero_rho_lower(default_lower)
 end
 
 # `anchor` subtracts the basis row at the anchor from every row, so the term is

@@ -6622,6 +6622,8 @@ end
 # references refer to the common context's already-materialized inputs.
 _sb_prior_arg(x::Real) = x
 _sb_prior_arg(x::Symbol) = x
+# Inside an HSGP submodel the term's validity floor is its `rho_lower` input.
+_sb_prior_arg(::_BRMLengthScaleFloor) = :rho_lower
 _sb_prior_arg(x::NamedColumn) = _sb_prior_arg_named(x, parent(x))
 _sb_prior_arg_named(x, ::MissingColumn) = name(x)
 _sb_prior_arg_named(x, ::DataColumn) = name(x)
@@ -8008,6 +8010,9 @@ Base.@nospecializeinfer function _sb_collect_hyper_plans(@nospecialize(brmi::BRM
         isnothing(matched) && continue
         address, rhs = matched
         class, term_key = address[1], address[2]
+        isempty(last(_brm_split_term_key(term_key))) || error(
+            "$prefix: keyword-qualified term addresses (`$term_key`) are not " *
+            "supported in hyper-predictor statements; address the term by its axes")
         addr_lp = length(address) >= 3 ? address[3] : _EFFECT_COLON
         hyper = _sb_hyper_class(Val(class))
         spelling = _sb_hyper_spelling(hyper, addr_lp, term_key)
@@ -8274,11 +8279,19 @@ function _sb_term_prior_overrides(brmi::BRMI;
         lp => Dict{Symbol,Any}(
             key => Dict{Symbol,Any}(
                 slot => ((lp, key, slot) in intercepts ?
-                    _sb_gp_scale_prior(entry.spec, _sb_term_prior_spelling(entry);
-                        positive=false) : _sb_term_slot_config(Val(slot), entry))
+                    _sb_hyper_intercept_scale_prior(entry) :
+                    _sb_term_slot_config(Val(slot), entry))
                 for (slot, entry) in slots)
             for (key, slots) in terms)
         for (lp, terms) in resolved)
+end
+
+function _sb_hyper_intercept_scale_prior(entry)
+    _brm_has_floor_marker(entry.spec.expression) && error(
+        "sbimpl: `$(_sb_term_prior_spelling(entry))` uses `length_scale_floor`, " *
+        "but a hyper-predicted length scale's prior is its log-scale intercept; " *
+        "the floor already binds per group")
+    _sb_gp_scale_prior(entry.spec, _sb_term_prior_spelling(entry); positive=false)
 end
 
 # ---- readers for the resolved term dict -------------------------------------
@@ -8288,7 +8301,7 @@ end
 # exactly once instead of once per call site.
 
 _sb_term_cfg(term_overrides, t, slot) = begin
-    per_term = get(term_overrides, _sb_term_key(t), nothing)
+    per_term = _brm_term_override(term_overrides, t)
     isnothing(per_term) ? nothing : get(per_term, slot, nothing)
 end
 
@@ -8310,7 +8323,7 @@ end
 # explicit kwargs and distinct local names, including when an outer parameter
 # happens to have the same name as a term-owned parameter (for example rho).
 function _sb_term_model_call(submodel, overrides, term; kwargs...)
-    refs = _sb_prior_references(get(overrides, _sb_term_key(term), nothing))
+    refs = _sb_prior_references(_brm_term_override(overrides, term))
     args = Any[Expr(:kw, key, value) for (key, value) in pairs(kwargs)]
     append!(args, (Expr(:kw, _sb_term_prior_input(ref), ref) for ref in refs))
     Expr(:call, submodel, Expr(:parameters, args...))
@@ -8487,6 +8500,9 @@ function _sb_gp_scale_prior(spec, spelling::AbstractString; positive::Bool=true,
     length(stan_args) == 2 || error(
         "sbimpl: `$spelling ~ Uniform(...)` requires lower and upper bounds")
     lower, upper = stan_args
+    # A floor-marked lower end is the nonnegative validity floor itself, so the
+    # Uniform's own support is the whole declaration (decision 1fk9b29).
+    lower === :rho_lower && return (prior=spec.expression, lower=nothing, upper=nothing)
     (lower isa Real && upper isa Real) || return (
         prior=spec.expression, lower=positive ? 0.0 : nothing, upper=nothing)
     upper > lower && (!positive || lower >= 0) || error(
@@ -11995,6 +12011,7 @@ function _sb_hsgp_fit_for_emission(data, key, names, axes, K, c, iso,
     # re-emission even though `const_.fits` is what gets returned. (`f5a177d`
     # had this lazy; `2e929f7` regressed it while threading in `domain_fits`.)
     if isnothing(frozen)
+        _sb_hsgp_check_explicit_domain(domain_fits, fitted_axes)
         fits = isnothing(domain_fits) ?
             _brm_fit_hsgp(fitted_axes, K, c; anchor=options.anchor) : domain_fits
         return (; fits, support=_brm_hsgp_support(fitted_axes, fits), axes)
@@ -12141,7 +12158,6 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     all(v -> length(v) == n, axes) || error(
         "sbimpl: `hsgp(x...)` axes must have equal lengths (got $(length.(axes)))")
     mask = _sb_hsgp_mask(options, n)
-    _sb_hsgp_check_explicit_domain(domain_fits, _brm_hsgp_masked_axes(axes, mask))
 
     if haskey(kw, :by)
         partial && error(
