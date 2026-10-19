@@ -65,11 +65,22 @@ end
     end
     @test_throws ArgumentError SBBRMI(student(data); mod=@__MODULE__,
         s2z_groups=[:g], s2z_rho=0.5, total_groups=())
+    # One-margin `|ID|` buckets that only this block uses are independent
+    # scalar blocks: S2Z claims them (their density audit is in
+    # `s2z_mixed_terms.jl`). A bucket shared with another block stays refused.
     idmodel = @brm begin
         mu ~ 1 + x + (1 | a | g) + (0 + x | b | g)
         y ~ Normal(mu, 1)
     end
-    @test_throws ArgumentError SBBRMI(idmodel(data); mod=@__MODULE__,
+    idblock = only(s2z_effect_blocks(SBBRMI(idmodel(data); mod=@__MODULE__,
+        s2z_groups=[:g], s2z_rho=0.5, total_groups=())))
+    @test idblock.columns == (:Intercept, :x)
+    shared = @brm begin
+        mu ~ 1 + x + (1 | a | g)
+        log(sigma) ~ 1 + (1 | a | g)
+        y ~ Normal(mu, sigma)
+    end
+    @test_throws ArgumentError SBBRMI(shared(data); mod=@__MODULE__,
         s2z_groups=[:g], s2z_rho=0.5, total_groups=())
     unmatched = @brm begin
         mu ~ 1 + (1 + x || g)

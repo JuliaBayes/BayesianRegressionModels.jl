@@ -2958,7 +2958,9 @@ recovery quantities. `s2z_rho` is required whenever `s2z_groups` is nonempty
 (no public default yet): a scalar in [0,1] or one weight per coefficient
 (0 = noncentered contrasts, 1 = centered). First scope is scalar independent
 blocks with J >= 2, fully matched population design and Flat/Normal
-population priors; anything else errors loudly. Inspect
+population priors, one S2Z grouping per predictor; anything else errors
+loudly. The predictor's other groupings (crossed, nested or `|ID|`) and direct
+terms (`hsgp`, categorical blocks, ...) stay ordinary terms. Inspect
 [`s2z_effect_blocks`](@ref). S2Z groups are excluded from automatic totals
 and cannot overlap `centered_groups` or `cv_groups`.
 
@@ -3679,9 +3681,11 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
         s2z_groups=s2z_selected)
     data[_SB_TOTAL_PLANS_KEY] = total_plans
     s2z_plans = _sb_plan_s2zs(brmi,prepared,effect_overrides,s2z_selected,s2z_rho;
+                              buckets=id_buckets,sd_overrides=ranef_effect_overrides,
+                              ranef_r2d2_overrides,
                               cv_groups,centered_groups,coordinates=s2z_coordinates)
     data[_SB_S2Z_PLANS_KEY] = s2z_plans
-    for plan in values(total_plans), key in plan.claimed
+    for plan in Iterators.flatten((values(total_plans), values(s2z_plans))), key in plan.claimed
         delete!(id_buckets,key)
     end
     gb_terms = _sb_collect_group_block_terms(brmi)
@@ -7776,7 +7780,6 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
                                 effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2(),
                                 mod::Module=@__MODULE__)
     s2z = get(get(data,_SB_S2Z_PLANS_KEY,Dict()),brmi_key,nothing)
-    isnothing(s2z) || return _sb_emit_s2z!(stmts,data,target,s2z;mod)
     total = get(get(data,_SB_TOTAL_PLANS_KEY,Dict()),brmi_key,nothing)
     isnothing(total) || return _sb_emit_total!(stmts,data,target,total;mod)
     terms = _sb_terms(rhs)
@@ -7803,6 +7806,14 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
     # claim on THIS predictor's population columns and contrast blocks
     # (`_sb_ranef_r2d2_joint`); `nothing` for every unscoped predictor.
     joint_spec = get(r2d2.joint, brmi_key, nothing)
+
+    if !isnothing(s2z)
+        # The S2Z block owns the population design and its own grouping; the
+        # predictor's other groupings and direct terms stay ordinary summands.
+        push!(summands, _sb_emit_s2z!(stmts, data, target, s2z; mod))
+        empty!(pop_terms)
+        filter!(t -> !_s2z_owns_term(t, s2z.group), ran_terms)
+    end
 
     if !isempty(pop_terms)
         col_exprs = Any[]

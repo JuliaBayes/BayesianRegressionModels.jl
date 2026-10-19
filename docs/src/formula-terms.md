@@ -456,9 +456,9 @@ R2D2 blocks use the conventional representation. A request for totals on an
 unsupported group raises an error.
 
 Automatic selection retains the conventional representation if some ordinary
-group blocks require it. A single adaptive wrapper currently combines totals
-with S2Z contrasts, or ordinary random effects with HSGP weights, but not both
-pairs.
+group blocks require it. One adaptive wrapper combines totals and S2Z contrasts
+with ordinary and R2D2 random effects and HSGP weights; only `cdar` cells need
+a wrapper of their own.
 
 #### WarmupHMC and recovery
 
@@ -521,10 +521,20 @@ supported for them. Improper population priors have no prior-predictive distribu
 S2Z construction of brms PR #1919. Each coefficient's `J` group effects become
 `J - 1` free orthonormal (Helmert) contrasts plus a block mean. The mean is
 integrated into the population coefficients exactly, as for totals, and is
-recovered afterwards. The current scope is one independent Gaussian grouping
-structure per predictor with `J >= 2`, a population column for every group
-column, and Normal or `Flat()` population priors (Student-t priors are not yet
-supported).
+recovered afterwards. The current scope is one independent Gaussian block of
+the selected grouping per predictor with `J >= 2`, a population column for
+every group column, and Normal or `Flat()` population priors (Student-t priors
+are not yet supported). The predictor may carry further groupings, crossed or
+nested (`|ID|` buckets included), and direct terms such as `hsgp(...)` or
+categorical blocks: those stay ordinary terms of the same linear predictor, and
+only the selected block is reparameterised. Two S2Z groupings on one predictor
+are refused, because both block means would be integrated into the same
+population coefficients.
+
+```julia
+# brmi carries: mu ~ 1 + x + hsgp(xc, yc; k=10) + (1 | region) + (1 | district)
+sb = SBBRMI(brmi; s2z_groups=[:region], s2z_rho=1.0)
+```
 
 `s2z_rho` sets the compiled frame per group and coefficient: a scalar, one weight
 per coefficient, or a `J × K` matrix in `[0, 1]`. Intermediate values use Sean's
@@ -613,8 +623,10 @@ groups and a weakly identified scale, a contrast that mixes data-rich and
 data-poor groups can settle between their preferred centerings and leave
 divergent transitions that per-group coordinates avoid.
 
-S2Z and total cells can share one wrapper, with totals first. Neither can yet be
-combined with ordinary, HSGP or `cdar` cells.
+S2Z and total cells share one wrapper with each other and with ordinary, R2D2
+and HSGP cells. Pairs list ordinary, R2D2 and HSGP cells first, then totals,
+then S2Z contrasts, so a model without S2Z or total cells keeps its historical
+pair order. Neither can yet be combined with `cdar` cells.
 
 ### Response-level wrappers
 

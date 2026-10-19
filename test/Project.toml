@@ -41,8 +41,9 @@ julia = "1.10"
 [sources.StanBlocks]
 url = "https://github.com/nsiccha/StanBlocks.jl"
 # Non-finite literals render; `weighted` takes a censored/truncated/interval_censored family;
-# `maybecv(:y, y; held_out=mask)` holds out single elements of an observation.
-rev = "b5be2bed0e842f2dfedf06121755a823fd7dcc9b"
+# `maybecv(:y, y; held_out=mask)` holds out single elements of an observation,
+# never evaluating a held element's density.
+rev = "759ad64b76b51611ca905a161ca80bc855534eff"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"

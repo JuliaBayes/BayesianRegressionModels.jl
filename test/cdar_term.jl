@@ -127,6 +127,10 @@ end
             term=:cdar_mu_week, parameter=:ar).coordinates) == 1
         @test length(brm_term_coordinates(descriptor, :mu, constrained_names;
             term=:cdar_mu_week, parameter=:innovations).coordinates) == 4
+        # With the intercept at zero the predictor IS the term's value.
+        value = brm_term_coordinates(descriptor, :mu, constrained_names;
+            term=:cdar_mu_week, parameter=:value)
+        @test constrained[value.coordinates] ≈ mu
     else
         @info "Skipping BridgeStan cdar runtime gate (BRM_CDAR_RUNTIME=0)"
         @test true
