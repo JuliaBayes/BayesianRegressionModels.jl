@@ -166,6 +166,8 @@ sb_execute(sb, operation, problem, u) =
     # the masked fit is the fit on the kept rows, gradient included
     for (label, builder, data, mask, kept) in (
             ("single", single, flat, (; y=late), keep_rows(flat, .!late)),
+            # a held row outside LogNormal's support is never evaluated
+            ("bounded", bounded, flat, (; y=late), keep_rows(flat, .!late)),
             ("@plate cell", incell, cell, (; y=cell_mask), cell_kept),
             ("kernel cell", course, course_data, (; conc=course_mask), course_kept),
             ("ragged join", joined, joined_data, (; obs_y=joined_mask), joined_kept))
@@ -186,12 +188,15 @@ sb_execute(sb, operation, problem, u) =
         end
     end
 
-    # not built yet: a held row outside LogNormal's support still errors the
-    # target, because StanBlocks evaluates held elements' densities before
-    # skipping them (StanBlocks snag heldout-lpdf-eva-a8569726)
-    masked = stan_problem(SBBRMI(bounded(flat); mod=@__MODULE__, held_out=(; y=late)),
-        "bounded-masked")
-    @test_broken isfinite(LogDensityProblems.logdensity(masked, fill(0.1, 3)))
+    # y_likelihood scores a held row outside LogNormal's support as -Inf, and
+    # the draws still complete
+    masked_sb = SBBRMI(bounded(flat); mod=@__MODULE__, held_out=(; y=late))
+    masked = stan_problem(masked_sb, "bounded-masked")
+    for u in stan_points(masked)
+        rows = sb_execute(masked_sb, :pointwise_loglik, masked, u).y_likelihood
+        @test all(isfinite, rows[1:4]) && rows[5] == -Inf
+        @test length(sb_execute(masked_sb, :predict, masked, u).y_gen) == 5
+    end
 
     # a response bound per subject scores per subject, held rows included
     for (label, builder, data, mask, response) in (

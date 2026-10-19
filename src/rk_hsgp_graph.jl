@@ -126,6 +126,13 @@ function _rk_ast_hsgp_basis_graph!(definitions, term, taken)
             end))
         push!(body.args, :(basis_columns = $column))
         push!(body.args, :(PHI = stack(basis_columns; dims=2)))
+    elseif options.fixed_fits !== nothing && !options.latent
+        # Only an explicit domain admits an axis with no rows (decision
+        # 1fk9b29): its basis is then `0 x B`, which `stack` cannot size. The
+        # basis reads data and formula constants only, so both arms are
+        # inactive under AD.
+        push!(body.args, :(PHI = isempty(basis_rows) ? zeros(0, $B) :
+            stack(basis_rows; dims=1)))
     else
         push!(body.args, :(PHI = stack(basis_rows; dims=1)))
     end
