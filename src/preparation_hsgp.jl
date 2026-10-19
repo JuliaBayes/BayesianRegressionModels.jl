@@ -289,8 +289,8 @@ _brm_fit_hsgp(raw::AbstractVector{<:Real}, K::Integer, c::Real; anchor=nothing) 
     allequal(raw) && (isnothing(anchor) || anchor == first(raw)) && error(
         "hsgp: degenerate input (all x equal): a basis interval fitted from " *
         "the data needs two distinct axis values. Declare " *
-        "`hsgp(...; domain=(lower, upper))` to fix the interval, or replay a " *
-        "fitted model with `freeze_constants=true` to keep its interval")
+        "`hsgp(...; domain=(lower, upper))` to fix the interval; a " *
+        "`reprocess` with `freeze_constants=true` keeps the fitted model's")
     mu = sum(raw) / length(raw)
     deviation = maximum(abs, raw .- mu)
     isnothing(anchor) || (deviation = max(deviation, abs(anchor - mu)))
