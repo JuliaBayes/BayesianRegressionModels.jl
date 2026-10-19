@@ -249,7 +249,8 @@ _brmd_law_prose(::Val{L}) where L = "$(L) distribution with the declared argumen
 _brmd_coordinates(x::BRMDescriptionComponent) = Tuple(child for child in x.children
     if length(child.id)==length(x.id)+2 && child.id[1:length(x.id)]==x.id && child.id[end-1]===:coordinate)
 function _brmd_coordinate_math(c,x,coordinates)
-    support=x.callable isa StanBlocks.ValueFamily ? x.callable.support : NamedTuple()
+    support=x.callable isa StanBlocks.ValueFamily ? x.callable.support :
+        _brmd_shared_bounds(coordinate.keywords for coordinate in coordinates)
     parts=map(coordinates) do coordinate
         law=_brmd_distribution_math(c,coordinate)
         lower=get(coordinate.keywords,:lower,nothing); upper=get(coordinate.keywords,:upper,nothing)
@@ -373,6 +374,8 @@ end
 _brmd_builtin_call(::StanBlocks.SlicModel,c)=BRMDescriptionFragment(covers=(c.id,))
 # Only BRM-generated vector priors decompose; other value families stay gaps.
 _brmd_builtin_call(::StanBlocks.ValueFamily,c)=isempty(_brmd_coordinates(c)) ? nothing :
+    _brmd_coordinatewise_fragment(c)
+_brmd_builtin_call(::typeof(StanBlocks.stan.builtin.vcat),c)=isempty(_brmd_coordinates(c)) ? nothing :
     _brmd_coordinatewise_fragment(c)
 function _brmd_builtin_call(::typeof(mm),c)
     normalized=c.keywords.normalize

@@ -156,7 +156,8 @@ sd_pen_coordinates(p) = [x for x in brm_description_components(p.distribution)
                          if length(x.id) > 2 && x.id[end-1] === :coordinate]
 
 @testset "vector priors decompose into coordinate families" begin
-    # Mixed families take the generated family; every coordinate keeps its own.
+    # Mixed builtin families are native per-family `vcat` blocks; every
+    # coordinate keeps its own family.
     mixed = @brm TENSOR_DATA begin
         mu ~ 1 + t2(x, z)
         sd(:, t2(x, z), rr) ~ Exponential(3)
@@ -164,7 +165,9 @@ sd_pen_coordinates(p) = [x for x in brm_description_components(p.distribution)
         y ~ Normal(mu, 1.0)
     end
     sb = SBBRMI(mixed; mod=@__MODULE__, total_groups=())
-    @test occursin("brm_vector_prior_", BRM.stan_code(sb))
+    mixed_code = BRM.stan_code(sb)
+    @test occursin("t2_mu_x_z_sd_pen[2] ~ normal(0.0, 1.0);", mixed_code)
+    @test !occursin("brm_vector_prior_", mixed_code)
     r = brm_description(sb)
     @test r.complete
     coordinates = sd_pen_coordinates(totals_prior(r, (:parameter, :t2_mu_x_z, :sd_pen)))

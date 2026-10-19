@@ -12,7 +12,7 @@ const BRM = BayesianRegressionModels
 #
 # The snag was filed while lowering installed each generated
 # `brm_vector_prior_*` family (here: a nine-margin correlated block with
-# mixed-family scale priors) through `Core.eval`: a direct
+# a composed scale margin) through `Core.eval`: a direct
 # `StanBlocks.stan_data` in the constructing frame could not see the fresh
 # methods and died with "... is missing `lpxf_expr`". Generated families are
 # now `StanBlocks.ValueFamily` values and construction installs no methods
@@ -29,9 +29,9 @@ data = (; subject=[1, 1, 2, 2],
 builder = @brm begin
     sd(:, p) ~ Exponential(1 / 3)
     sd(loc8, p) ~ Exponential(0.5)
-    # One Normal margin keeps the scale vector mixed-family: an all-Exponential
-    # vector lowers to a native vectorised statement and generates no family.
-    sd(loc9, p) ~ Normal(0, 0.5)
+    # One composed margin keeps the generated family: builtin margins alone,
+    # even of differing families, lower to native statements.
+    sd(loc9, p) ~ truncated(TDist(3); lower=0.0)
     cor(:, p) ~ LKJCholesky(9, 2.0)
     loc1 ~ 1 + (1 | p | subject)
     loc2 ~ 1 + (1 | p | subject)

@@ -36,12 +36,14 @@ function build_radonlike()
     (; log_radon=Float64.(log_radon), floor=Float64.(floor), county=county)
 end
 
-# Two uncorrelated varying columns keep a mixed-family (LogNormal and
-# half-Normal) total-scale vector, so construction generates a vector-prior
-# family; a single shared family would lower to one native statement.
+# Two independent varying columns, one with a composed scale prior, keep a
+# total-scale vector that construction lowers through a generated vector-prior
+# family; builtin margins alone, even of differing families, lower to native
+# statements.
 builder = @brm begin
     sigma ~ Exponential(1)
-    mu ~ 1 + floor + (1 + floor || county)
+    mu ~ 1 + floor + (1 | a | county) + (0 + floor | b | county)
+    sd(:, b) ~ truncated(TDist(3); lower=0.0)
     log_radon ~ Normal(mu, sigma)
 end
 

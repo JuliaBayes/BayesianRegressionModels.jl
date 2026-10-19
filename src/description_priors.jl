@@ -34,6 +34,23 @@ for (name,support) in ((:exponential,(;lower=0.0)),(:gamma,(;lower=0.0)),(:inv_g
         @eval _brmd_support(::$(typeof(f))) = $support
     end
 end
+# The bounds every coordinate shares, per side. A side that coordinates bound
+# differently, or leave unbounded, is not part of the shared support.
+function _brmd_shared_bounds(bounds)
+    shared=Pair{Symbol,Any}[]
+    for side in (:lower,:upper)
+        values=Any[get(b,side,nothing) for b in bounds]
+        !isempty(values) && !isnothing(first(values)) && allequal(values) &&
+            push!(shared,side=>first(values))
+    end
+    (; shared...)
+end
+# A family's support given its emitted arguments. A `vcat` prior's is what its
+# blocks share: each block's explicit bounds over its family's own support.
+_brmd_support(f,_arguments,_mod) = _brmd_support(f)
+_brmd_support(::typeof(StanBlocks.stan.builtin.vcat),blocks,mod) = _brmd_shared_bounds(
+    merge(_brmd_support(_brmd_binding(first(b.args),mod)),last(_sb_plan_call_parts(b)))
+    for b in blocks)
 
 function _brmd_population_priors!(priors,d,anchors,notation)
     overrides = _sb_effect_prior_overrides(d.plan.parent; frozen_preproc=d.plan.preproc,provenance=true)
@@ -307,7 +324,7 @@ function _brmd_submodel_priors!(priors,d,model,values,path,anchors,notation,stac
             _brmd_submodel_priors!(priors,d,f,nested_values,logical,anchors,notation,(stack...,model))
         else
             raw = ExprColumn(f,args...;kwargs...)
-            support = merge(_brmd_support(f),map(x -> _brmd_substitute(x,values),p.constraints))
+            support = merge(_brmd_support(f,args,model.mod),map(x -> _brmd_substitute(x,values),p.constraints))
             push!(priors,_brmd_prior(d,logical,raw,support,
                 (; kind=:generated, family=f, dimension=_brmd_snapshot(map(a->_brmd_substitute(a,values),p.dimension)),binding_id),
                 anchors,notation;bindings))

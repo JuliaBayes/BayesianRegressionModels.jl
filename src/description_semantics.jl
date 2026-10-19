@@ -145,16 +145,41 @@ _brmd_vector_literal(x)=x isa BRMDescriptionComponent && x.kind===:syntax && x.c
 _brmd_coordinatewise_law(law)=law in (:normal_sd,:standard_normal,:exponential_rate,
     :lognormal_sd,:gamma_rate,:beta,:cauchy,:student_t_location_scale,:weibull,
     :uniform,:inverse_gamma)
-function _brmd_vector_prior_coordinates(env,f,args,id)
-    f isa Function && _brmd_coordinatewise_law(_brmd_law(f)) || return ()
+#
+# Several such blocks laid end to end with StanBlocks' `vcat` prior family
+# (BRM's spelling for margins of differing builtin families) are the
+# concatenation of their blocks' coordinates, each keeping its block's bounds.
+# A block's length is its vector arguments' length, else its `n`, else one.
+# Any block that does not decompose leaves the whole `vcat` an explicit gap.
+#
+# Per-coordinate argument tuples of `f(args...)`, or `nothing` when the call
+# does not decompose; `n` is the length when no argument is a vector literal.
+function _brmd_coordinate_arguments(f,args,n)
+    f isa Function && _brmd_coordinatewise_law(_brmd_law(f)) || return nothing
     lengths=unique(length(a.arguments) for a in args if _brmd_vector_literal(a))
-    isempty(lengths) && return ()
-    any(a->a isa BRMDescriptionComponent && !_brmd_vector_literal(a),args) && return ()
-    length(lengths)==1 ||
+    isempty(lengths) && !(n isa Integer) && return nothing
+    any(a->a isa BRMDescriptionComponent && !_brmd_vector_literal(a),args) && return nothing
+    length(lengths)<=1 ||
         error("description: vectorised $(nameof(f)) prior has vector arguments of lengths $(Tuple(lengths))")
-    Tuple(_brmd_component(env,(id...,:coordinate,i),:call,f,
-        Tuple(_brmd_vector_literal(a) ? a.arguments[i] : a for a in args))
-        for i in 1:only(lengths))
+    Tuple(Tuple(_brmd_vector_literal(a) ? a.arguments[i] : a for a in args)
+        for i in 1:(isempty(lengths) ? n : only(lengths)))
+end
+function _brmd_vector_prior_coordinates(env,f,args,id)
+    coordinates=_brmd_coordinate_arguments(f,args,nothing)
+    isnothing(coordinates) && return ()
+    Tuple(_brmd_component(env,(id...,:coordinate,i),:call,f,a) for (i,a) in enumerate(coordinates))
+end
+function _brmd_vector_prior_coordinates(env,::typeof(StanBlocks.stan.builtin.vcat),args,id)
+    blocks=map(args) do block
+        block isa BRMDescriptionComponent && block.kind===:call || return nothing
+        coordinates=_brmd_coordinate_arguments(block.callable,block.arguments,get(block.keywords,:n,1))
+        bounds=(; (k=>block.keywords[k] for k in (:lower,:upper) if haskey(block.keywords,k))...)
+        isnothing(coordinates) ? nothing : (;family=block.callable,coordinates,bounds)
+    end
+    any(isnothing,blocks) && return ()
+    Tuple(_brmd_component(env,(id...,:coordinate,i),:call,c.family,c.arguments,c.bounds)
+        for (i,c) in enumerate((;family=b.family,arguments=a,bounds=b.bounds)
+            for b in blocks for a in b.coordinates))
 end
 function _brmd_vector_prior_coordinates(env,f::StanBlocks.ValueFamily,args,id)
     records=_sb_vector_prior_coordinates(f)

@@ -130,7 +130,11 @@ end
     partial = SBBRMI(partial_brmi; mod=@__MODULE__, total_groups=())
     partial_code = BayesianRegressionModels.stan_code(partial)
     @test StanBlocks.stanc_check(partial_code; warn_pedantic=false).ok
-    @test occursin(r"b_p_subject_tau ~ brm_vector_prior_[0-9a-f]+", partial_code)
+    # Default half-Normal intercept margins beside an Exponential slope margin
+    # are native per-family statements over the one `tau` declaration.
+    @test occursin("b_p_subject_tau[1:2] ~ normal(0.0, 1.0);", partial_code)
+    @test occursin("b_p_subject_tau[3] ~ exponential(4.0);", partial_code)
+    @test !occursin(r"brm_vector_prior_[0-9a-f]+", partial_code)
     partial_decl = only(d for d in generative_plan(partial).declarations
                         if d.target === :b_p_subject)
     @test partial_decl.keywords.lkj_eta == 1.0
