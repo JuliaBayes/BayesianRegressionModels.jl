@@ -1966,6 +1966,16 @@ _brm_term_parameter_bindings(::typeof(cdar), _t) =
     (; ar=:rho, sd=:sigma, innovations=:eta)
 _brm_term_parameter_bindings(_f, _t) = NamedTuple()
 
+# Terms whose owner output is the summand the linear predictor adds as is, so
+# `parameter=:value` names the term's contribution. `mo(...)` is absent: its
+# output is a design column that the magnitude in `beta_pop` scales.
+_brm_term_has_value(_f) = false
+_brm_term_has_value(::typeof(hsgp)) = true
+_brm_term_has_value(::typeof(mo1)) = true
+_brm_term_has_value(::typeof(dar)) = true
+_brm_term_has_value(::typeof(rw)) = true
+_brm_term_has_value(::typeof(cdar)) = true
+
 # ---- hyper-predictor term roles ---------------------------------------------
 # A hyper-predictor statement replaces its hyper's shared sampled scalar with
 # a small linear predictor over the term's grouping levels (sbimpl B2), so the
@@ -2066,13 +2076,23 @@ not term labels. Supported parameter roles are:
 
 | term | `parameter` |
 | --- | --- |
-| `mo(...)` / `mo1(...)` | `:simplex` |
-| ungrouped `hsgp(...)` | `:length_scale`, `:sd`, `:basis_weights` |
-| grouped `hsgp(...; by=...)` | `:length_scale`, `:sd` |
-| `hsgp(...)` with hyper-predictor(s) | `:length_scale_intercept`, `:length_scale_ranef_sd`, `:length_scale_ranef_z`, `:sd_intercept`, `:sd_ranef_sd`, `:sd_ranef_z` — only the planned pieces |
-| `dar(...)` | `:ar`, `:sd`, `:innovations` |
-| `rw(...)` | `:sd`, `:innovations` |
-| `cdar(...)` | `:ar`, `:sd`, `:innovations` |
+| `mo(...)` | `:simplex` |
+| `mo1(...)` | `:simplex`, `:value` |
+| ungrouped `hsgp(...)` | `:length_scale`, `:sd`, `:basis_weights`, `:value` |
+| grouped `hsgp(...; by=...)` | `:length_scale`, `:sd`, `:value` |
+| `hsgp(...)` with hyper-predictor(s) | `:length_scale_intercept`, `:length_scale_ranef_sd`, `:length_scale_ranef_z`, `:sd_intercept`, `:sd_ranef_sd`, `:sd_ranef_z` — only the planned pieces — and `:value` |
+| `dar(...)` | `:ar`, `:sd`, `:innovations`, `:value` |
+| `rw(...)` | `:sd`, `:innovations`, `:value` |
+| `cdar(...)` | `:ar`, `:sd`, `:innovations`, `:value` |
+
+`:value` is the term's own collected contribution: the per-row vector this
+predictor's occurrence of the term adds to the linear predictor. It is a
+transformed parameter, so build `constrained_names` with `include_tp=true`.
+For a term repeated in several predictors it is the one selector that reaches
+each predictor's own value. `mo(...)` has no `:value`: its output is a design
+column that the magnitude coefficient in `beta_pop` scales, so its contribution
+combines `brm_population_effect_coordinates(...; coefficient=:mo_<c>)` with the
+`:simplex` role.
 
 The returned named tuple contains `logical`, `term`, `parameter`, the owning
 [`BRMOutput`](@ref), `coordinates`, and the formula LHS `link` / `inverse_link`.
@@ -2083,6 +2103,8 @@ brm_term_coordinates(d, :log_F, constrained_names;
                      term=:mo_op_diet, parameter=:simplex)
 brm_term_coordinates(d, :log_F, constrained_names;
                      term=:hsgp_op_log_dose, parameter=:basis_weights)
+brm_term_coordinates(d, :log_F, constrained_names;
+                     term=:hsgp_op_log_dose, parameter=:value)
 ```
 
 Resolution follows the formula term to its logical term output, then selects a
@@ -2183,6 +2205,11 @@ function _brm_term_parameter_output(d::BRMDescriptor, logical::Symbol, entry,
     hyper_plans = _brm_term_hyper_plans(d.plan, logical, entry.value)
     hyper_bindings = _brm_hyper_role_bindings(hyper_plans)
     bindings = merge(bindings, hyper_bindings)
+    roles = _brm_term_has_value(getf(entry.value)) ?
+        (keys(bindings)..., :value) : keys(bindings)
+    # The term's collected value is the owner output itself: the carrier this
+    # predictor's occurrence of the term emits, under the shared formula label.
+    parameter === :value && :value in roles && return only(owners)
     if parameter in (:length_scale, :sd) &&
        any(p -> p.hyper === parameter, hyper_plans)
         roles = Tuple(k for k in keys(hyper_bindings) if
@@ -2194,7 +2221,7 @@ function _brm_term_parameter_output(d::BRMDescriptor, logical::Symbol, entry,
     end
     haskey(bindings, parameter) || error(
         "brm_descriptor: term `$term` on logical predictor `$logical` exposes " *
-        "no parameter role `$parameter`; available roles are $(keys(bindings)).")
+        "no parameter role `$parameter`; available roles are $(roles).")
     binding = getproperty(bindings, parameter)
     expected = Symbol(_brm_stan_name(owner), :_, binding)
     idxs = _brm_carrier_indices(d.outputs,

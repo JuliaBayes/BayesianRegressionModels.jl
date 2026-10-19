@@ -6,7 +6,8 @@
 # `brm_outputs(d)` differ by declaration order. The PUBLIC term label does not:
 # `term=:hsgp_<axes>` is derived from the formula term alone, and the
 # `logical` predictor argument of `brm_term_coordinates` selects whose
-# length-scale, marginal sd and basis weights resolve — the `mo(c)` rule.
+# length-scale, marginal sd, basis weights and collected value (`:value`)
+# resolve — the `mo(c)` rule.
 # The predictor-scoped compiler name is not a term label and is refused.
 #
 # Run: julia --project=test test/hsgp_shared_term_label.jl
@@ -84,5 +85,49 @@ end
         # public term label (brm-use descriptor.md: never hardcode emitted names).
         @test_throws "available term labels are (:hsgp_x_d_y_d,)" brm_term_coordinates(
             d, :alpha_i, names; term=:hsgp_alpha_i_x_d_y_d, parameter=:sd)
+
+        # `:value` reaches each predictor's own collected term value under the
+        # shared label (design 0mc2uvo): with `1 + hsgp(...)` the predictor is
+        # its intercept plus that value at any point.
+        tnames = BS.param_names(prob.model; include_tp=true, include_gq=false)
+        q = collect(range(-0.5, 0.5; length=BS.param_unc_num(prob.model)))
+        C = BS.param_constrain(prob.model, q; include_tp=true, include_gq=false)
+        values = Dict{Symbol,Vector{Int}}()
+        for lp in (:alpha_r, :alpha_i)
+            v = brm_term_coordinates(d, lp, tnames; term=:hsgp_x_d_y_d, parameter=:value)
+            @test v.output.name === (lp === :alpha_r ? :hsgp_x_d_y_d : :hsgp_alpha_i_x_d_y_d)
+            @test length(v.coordinates) == length(hsgp_label_df.x_d)
+            intercept = brm_population_effect_coordinates(
+                d, lp, tnames; coefficient=:Intercept)
+            lp_coords = brm_output_coordinates(d, lp, tnames)
+            @test C[lp_coords] ≈ C[only(intercept.coordinates)] .+ C[v.coordinates]
+            values[lp] = v.coordinates
+        end
+        @test isempty(intersect(values[:alpha_r], values[:alpha_i]))
+        @test C[values[:alpha_r]] != C[values[:alpha_i]]
+    end
+end
+
+@testset "a grouped HSGP's :value is its per-row contribution" begin
+    if !HSGP_LABEL_RUNTIME
+        @info "Skipping grouped HSGP :value BridgeStan gate (BRM_HSGP_LABEL_RUNTIME=0)"
+    else
+        df = (; x=collect(range(-1.0, 1.0; length=8)),
+              g=repeat(["a", "b"]; inner=4), y=zeros(8))
+        builder = @brm begin
+            loc ~ 1 + hsgp(x; k=3, by=g)
+            y ~ Normal(loc, 1.0)
+        end
+        d = brm_descriptor(builder, df; mod=@__MODULE__, name=:hsgp_grouped_value)
+        prob = brm_execute(d, :fit)
+        tnames = BS.param_names(prob.model; include_tp=true, include_gq=false)
+        q = collect(range(-0.5, 0.5; length=BS.param_unc_num(prob.model)))
+        C = BS.param_constrain(prob.model, q; include_tp=true, include_gq=false)
+        v = brm_term_coordinates(d, :loc, tnames; term=:hsgp_x_by_g, parameter=:value)
+        @test length(v.coordinates) == length(df.x)
+        intercept = brm_population_effect_coordinates(
+            d, :loc, tnames; coefficient=:Intercept)
+        @test C[brm_output_coordinates(d, :loc, tnames)] ≈
+              C[only(intercept.coordinates)] .+ C[v.coordinates]
     end
 end

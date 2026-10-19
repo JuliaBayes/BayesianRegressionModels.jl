@@ -235,5 +235,20 @@ end
             d, :b, names; coefficient=:mo_g)
         @test length(ma.coordinates) == 1 == length(mb.coordinates)
         @test only(ma.coordinates) != only(mb.coordinates)
+        # An mo1 term is a direct summand: `:value` is each predictor's own
+        # contribution, so p = x * beta_x + value at any point.
+        tnames = BS.param_names(prob.model; include_tp=true, include_gq=false)
+        q = collect(range(-0.5, 0.5; length=BS.param_unc_num(prob.model)))
+        C = BS.param_constrain(prob.model, q; include_tp=true, include_gq=false)
+        for lp in (:p, :q)
+            v = brm_term_coordinates(d, lp, tnames; term=:mo1_g, parameter=:value)
+            @test length(v.coordinates) == length(mo_df.x)
+            slope = brm_population_effect_coordinates(d, lp, tnames; coefficient=:x)
+            lp_coords = brm_output_coordinates(d, lp, tnames)
+            @test C[lp_coords] ≈ mo_df.x .* C[only(slope.coordinates)] .+ C[v.coordinates]
+        end
+        @test isempty(intersect(
+            brm_term_coordinates(d, :p, tnames; term=:mo1_g, parameter=:value).coordinates,
+            brm_term_coordinates(d, :q, tnames; term=:mo1_g, parameter=:value).coordinates))
     end
 end
