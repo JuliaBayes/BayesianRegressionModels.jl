@@ -5576,10 +5576,11 @@ function _sb_kernel_lambda_parts(lam)
 end
 
 # The column a kernel positional binds to its cell formal: the column itself,
-# or the flat column of a `ragged(y, group)` positional; `nothing` otherwise.
+# or the flat column of a `ragged(y, group[, cells])` positional; `nothing`
+# otherwise.
 _sb_kernel_positional_column(c::NamedColumn) = c
 _sb_kernel_positional_column(c::ExprColumn{typeof(ragged)}) =
-    length(getargs(c)) == 2 ? first(getargs(c)) : nothing
+    length(getargs(c)) in (2, 3) ? first(getargs(c)) : nothing
 _sb_kernel_positional_column(_) = nothing
 
 # Indexes (1-based into `positionals`, i.e. `dcols[2:end]`) of omitted kernel
@@ -5696,13 +5697,11 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     dcol_names    = Symbol[]
     lp_cols       = Any[]
     ragged_specs  = Any[]
+    ragged_cols   = Any[]
     for (i, c) in enumerate(dcols[2:end])
         if c isa ExprColumn && getf(c) === ragged
-            length(getargs(c)) == 2 || error(
-                "sbimpl: kernel(...) `ragged(...)` takes exactly two positional args — ",
-                "the thing to group and its grouping column — got ",
-                "$(length(getargs(c))).")
-            arg_col, grp_arg = getargs(c)
+            arg_col, grp_arg = _brm_kernel_ragged_args(c; prefix="sbimpl")
+            push!(ragged_cols, c)
             arg_col isa NamedColumn || error(
                 "sbimpl: kernel(...) `ragged(...)`: the first argument must name a ",
                 "linear predictor declared in this @brm block, or a raw data column; ",
@@ -5771,12 +5770,31 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     # rides on the subject frame the others, or the pre-grouped columns, define.
     lp_buckets = _sb_kernel_lp_buckets(lp_cols)
     grouped = [b for b in lp_buckets if b !== nothing]
-    if isempty(grouped)
-        isempty(ragged_specs) || error(
-            "sbimpl: kernel(...) `ragged(...)` needs a subject grouping to join its ",
-            "event rows against, which a no-random-effects panel does not supply. ",
-            "Declare a per-subject linear predictor with a `(1 | ID | group)` term, ",
-            "or pass pre-grouped per-subject columns directly (one entry per subject).")
+    if isempty(grouped) && !isempty(ragged_specs)
+        # Label-anchored plate: no per-cell LP carries a ranef bucket, so the
+        # cells are the rows of the explicit cell label column every
+        # `ragged(x, group => cells)` names — districts beside their totals,
+        # with each facility row joining its district by label. Replayed on a
+        # new frame this is the ordinary subject-labelled plate below.
+        group_col = _brm_kernel_cell_label_column(ragged_cols; prefix="sbimpl")
+        g_vals = _sb_kernel_subject_values(
+            parent(parent(group_col)), name(group_col))
+        nsub = length(g_vals)
+        lp_names = Set(name(c) for c in lp_cols)
+        ragged_names = Set(spec[4] for spec in ragged_specs)
+        for k in kept_names
+            (k in lp_names || k in ragged_names || !haskey(data, k)) && continue
+            length(data[k]) == nsub || error(
+                "sbimpl: kernel(...) per-cell column `$k` has ",
+                "$(length(data[k])) entries for the $nsub cells of `",
+                "$(name(group_col))`; a per-cell data column belongs to the ",
+                "cell label column's frame, one entry per cell row.")
+        end
+        all(v -> v isa Real, g_vals) || pop!(data, name(group_col), nothing)
+        data[nsub_sym] = nsub
+        _sb_record_preproc!(data, nsub_sym,
+            PreprocEntry(:kernel_subject_count, nothing, name(group_col), false))
+    elseif isempty(grouped)
         # The subject count is the common length of the pre-grouped data
         # columns or, when the cell slices only LPs (beside omitted outcomes),
         # of the per-subject columns those LPs read.
@@ -5816,6 +5834,7 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
             "LPs may use distinct `|ID|` buckets, but every LP handed to one kernel ",
             "must describe the same subjects.")
         group_col = first(grouped)[3]
+        _brm_kernel_check_cell_labels(ragged_cols, name(group_col); prefix="sbimpl")
 
         # The labels identify groups to Julia callers but never enter the emitted
         # Stan program: only their count and row order do. Accept arbitrary unique
