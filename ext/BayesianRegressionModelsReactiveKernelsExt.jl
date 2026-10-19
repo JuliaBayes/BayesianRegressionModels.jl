@@ -111,6 +111,7 @@ end
 # Planning and building read the model as syntax; only wrapping the retained
 # original `brmi` constructs a model-specific `RKBRMI` type.
 Base.@nospecializeinfer function BRM.RKBRMI(@nospecialize(brmi::BRM.BRMI); held_out=())
+    brmi = BRM._brm_resolve_optional_priors(brmi)
     plan = BRM._brm_rk_plan(brmi; held_out)
     BRM.RKBRMI(brmi, plan, BRM._brm_rk_model(plan))
 end

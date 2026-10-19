@@ -18,19 +18,37 @@ _rk_hsgp_per_axis(stem, D) = D == 1 ? [Symbol(stem)] : [Symbol(stem, :_, j) for 
 _rk_hsgp_modes(options) = options.k isa Tuple ? options.k : (options.k,)
 _rk_hsgp_axis_inputs(term) = _rk_hsgp_per_axis(:axis, length(term.columns))
 
+# A `rows=` term also reads its bound 0/1 mask (decision 1fk9b29): the formal
+# follows the axes in every graph that fits or evaluates the basis.
+_rk_hsgp_mask(term) = get(term.options, :mask, nothing)
+_rk_hsgp_mask_formals(term) = _rk_hsgp_mask(term) === nothing ? () : (:mask,)
+_rk_hsgp_mask_actuals(term) = _rk_hsgp_mask(term) === nothing ? () : (_rk_hsgp_mask(term),)
+
 # Each axis's half-width, and its center when the basis reads it: formula
-# constants for a fixed domain, otherwise computed from the current axis.
+# constants for a fixed domain, otherwise computed from the current axis --
+# over the masked rows only, widened to contain an anchor -- the law of
+# `_brm_fit_hsgp`.
 function _rk_ast_hsgp_fits!(body, options, inputs; centered=true)
     D = length(inputs)
     C = options.c isa Tuple ? options.c : (options.c,)
     centers, widths = _rk_hsgp_per_axis(:center, D), _rk_hsgp_per_axis(:width, D)
     fits = options.fixed_fits
+    masked = get(options, :mask, nothing) !== nothing
+    anchor = get(options, :anchor, nothing)
     for j in 1:D
         x, center, width = inputs[j], centers[j], widths[j]
         (centered || fits === nothing) && push!(body.args, Expr(:(=), center,
-            fits === nothing ? :(sum($x) / length($x)) : fits[j][1]))
-        push!(body.args, Expr(:(=), width, fits === nothing ?
-            :($(C[j]) * maximum(abs.($x .- $center))) : fits[j][2]))
+            fits !== nothing ? fits[j][1] :
+            masked ? :(sum($x .* mask) / sum(mask)) : :(sum($x) / length($x))))
+        if fits === nothing
+            deviation = masked ? :(maximum(abs.($x .- $center) .* mask)) :
+                :(maximum(abs.($x .- $center)))
+            anchor === nothing ||
+                (deviation = :(max($deviation, abs($(anchor[j]) - $center))))
+            push!(body.args, Expr(:(=), width, :($(C[j]) * $deviation)))
+        else
+            push!(body.args, Expr(:(=), width, fits[j][2]))
+        end
     end
     centers, widths
 end
@@ -55,22 +73,40 @@ function _rk_ast_hsgp_basis_graph!(definitions, term, taken)
         push!(body.args, Expr(:(=), frequencies[j], frequency))
     end
     # Each row cell zips the axes; its mode cells close over the row's axis
-    # values and the graph's whole `omega2`, widths and centers.
+    # values and the graph's whole `omega2`, widths and centers. An anchored
+    # term subtracts the basis row at its anchor; a masked one zeroes the rows
+    # outside its mask (decision 1fk9b29).
+    anchor = get(options, :anchor, nothing)
+    masked = _rk_hsgp_mask(term) !== nothing
     if D == 1
         cell = :(sin(sqrt(omega2[b]) * (x - center + width)) / sqrt(width))
-        inner = _rk_ast_graph_plate([:(1:$B)], [:b], cell)
-        outer = _rk_ast_graph_plate([:axis], [:x], Expr(:block, :(values = $inner), :values))
+        row_values = [:x]
+        row_inputs = Any[:axis]
     else
         push!(body.args, :(widths = $(Expr(:tuple, widths...))))
         push!(body.args, :(centers = $(Expr(:tuple, centers...))))
         push!(body.args, :(omega2 = hcat($(frequencies...))))
         row_values = [Symbol(:x_, j) for j in 1:D]
-        factors = [:(sin(sqrt(omega2[b, $j]) *
-            ($(row_values[j]) - centers[$j] + widths[$j])) / sqrt(widths[$j])) for j in 1:D]
-        inner = _rk_ast_graph_plate([:(1:$B)], [:b], Expr(:call, :*, factors...))
-        outer = _rk_ast_graph_plate(inputs, row_values,
-            Expr(:block, :(values = $inner), :values))
+        cell = Expr(:call, :*, [:(sin(sqrt(omega2[b, $j]) *
+            ($(row_values[j]) - centers[$j] + widths[$j])) / sqrt(widths[$j]))
+            for j in 1:D]...)
+        row_inputs = Any[inputs...]
     end
+    inner = _rk_ast_graph_plate([:(1:$B)], [:b], cell)
+    row_value = :values
+    if anchor !== nothing
+        anchored = _rk_ast_hsgp_substitute(cell,
+            Dict(zip(row_values, collect(Any, anchor))))
+        push!(body.args, :(anchor_values = $(_rk_ast_graph_plate([:(1:$B)], [:b], anchored))))
+        row_value = :(values .- anchor_values)
+    end
+    if masked
+        push!(row_inputs, :mask)
+        push!(row_values, :m)
+        row_value = :(m .* $row_value)
+    end
+    outer = _rk_ast_graph_plate(row_inputs, row_values,
+        Expr(:block, :(values = $inner), row_value))
     push!(body.args, :(basis_rows = $outer))
     if get(options, :orthogonal, nothing) === :linear
         # `orthogonal_to=:linear` (one axis, by preparation): center every
@@ -94,8 +130,8 @@ function _rk_ast_hsgp_basis_graph!(definitions, term, taken)
         push!(body.args, :(PHI = stack(basis_rows; dims=1)))
     end
     push!(body.args, Expr(:return, Expr(:tuple, :PHI, :omega2)))
-    _rk_ast_shared_definition!(definitions, taken, "brm_hsgp_basis_graph", inputs, body;
-        kernel=true)
+    _rk_ast_shared_definition!(definitions, taken, "brm_hsgp_basis_graph",
+        [inputs; _rk_hsgp_mask_formals(term)...], body; kernel=true)
 end
 
 # The length-scale validity floor `(4L/pi) * sqrt(log(100) / (k^2 - 1))` per
@@ -118,8 +154,9 @@ function _rk_ast_hsgp_floor!(definitions, statements, term, taken)
     if options.fixed_fits === nothing
         push!(body.args, :(rho_floor = $value), :(return rho_floor))
         entry = _rk_ast_shared_definition!(definitions, taken, "brm_hsgp_rho_floor_graph",
-            inputs, body; kernel=true)
-        push!(statements, Expr(:(=), name, Expr(:call, entry, term.columns...)))
+            [inputs; _rk_hsgp_mask_formals(term)...], body; kernel=true)
+        push!(statements, Expr(:(=), name, Expr(:call, entry, term.columns...,
+            _rk_hsgp_mask_actuals(term)...)))
     else
         fits = Dict(widths[j] => options.fixed_fits[j][2] for j in 1:D)
         push!(statements, Expr(:(=), name, _rk_ast_hsgp_substitute(value, fits)))

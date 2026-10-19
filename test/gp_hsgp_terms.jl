@@ -285,7 +285,10 @@ end
         end
         refit_wide = reprocess(sb_hsgp, wide_df; freeze_constants=false)
         @test refit_wide.data[floor_key] ≈ 2 .* sb_hsgp.data[floor_key]
-        @test reprocess(sb_hsgp, wide_df).data[floor_key] == sb_hsgp.data[floor_key]
+        # refused: frozen replay of the doubled axes leaves the fitted basis
+        # interval, where the sines wrap around (decision 1fk9b29). The frozen
+        # floor itself is pinned on the in-interval `replay_df` above.
+        @test_throws "outside the fitted basis interval" reprocess(sb_hsgp, wide_df)
         @test StanBlocks.stan_code(refit_wide.model) == StanBlocks.stan_code(sb_hsgp.model)
     end
 

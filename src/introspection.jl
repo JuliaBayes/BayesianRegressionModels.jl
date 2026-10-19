@@ -384,7 +384,8 @@ applied to a term rather than to a coefficient or a grouping factor — in
 formula order. Each entry has
 
 ```julia
-(; class, term, predictor, component, family, arguments, keywords, expression)
+(; class, term, predictor, component, family, arguments, keywords, expression,
+   qualifiers)
 ```
 
 `class` is `:term_sd`, `:term_ar`, `:term_simplex`, `:term_latent` or
@@ -396,7 +397,10 @@ formula spells it, minus numeric and keyword arguments, so `me(x, 0.5)` and
 `Symbol("hsgp(x)")`. `predictor === nothing` means the statement is the default
 layer for every linear predictor carrying that term; a `Symbol` restricts it to
 one. `component` is `nothing` except for `sd(lp, t2(x, z), rr)`, where it names
-one of the tensor smooth's three penalty blocks.
+one of the tensor smooth's three penalty blocks. `qualifiers` holds the
+address's literal keyword values (`hsgp(x; cov=:periodic)` gives
+`(; cov=:periodic)`): the address reaches only terms whose keywords agree,
+which picks one of several same-axes terms on a predictor.
 
 Which parameter each class reaches:
 
@@ -441,9 +445,10 @@ Base.@nospecializeinfer function term_priors(@nospecialize(brmi::BRMI))
             "term_priors: term prior RHS is not a distribution expression")
         predictor = address[3] === _EFFECT_COLON ? nothing : address[3]
         component = length(address) == 4 ? address[4] : nothing
-        push!(out, (; class, term=address[2], predictor, component,
+        term, qualifiers = _brm_split_term_key(address[2])
+        push!(out, (; class, term, predictor, component,
                      family=getf(rhs_e), arguments=getargs(rhs_e),
-                     keywords=getkwargs(rhs_e), expression=rhs_e))
+                     keywords=getkwargs(rhs_e), expression=rhs_e, qualifiers))
     end
     out
 end
@@ -547,7 +552,8 @@ equivalent model. Scalar parameter declarations such as `sigma ~ Exponential(1)`
 are NOT priors here — they declare a parameter and stay in
 [`structure_of`](@ref) (brms prints them with the model too).
 
-The default `show(::BRMI)` is unchanged; this is an explicit, opt-in view.
+A `BRMI` prints as its source statements, so `string(structure_of(brmi))`
+and `string(priors_of(brmi))` are the model's structure and prior cards.
 
 ```jldoctest
 julia> using BayesianRegressionModels
@@ -559,8 +565,7 @@ julia> brmi = @brm (; x=[1.0, 2.0], y=[0.1, 0.2]) begin
        end;
 
 julia> priors_of(brmi)
-BRMI:
-  effect(mu, Intercept) ~ Normal(0, 1)
+effect(mu, Intercept) ~ Normal(0, 1)
 ```
 """
 priors_of(brmi::BRMI) = _select_ops(brmi, _is_effect_prior_op)
@@ -576,8 +581,7 @@ the model without the prior block that swamps it.
 
 Inverse partition to [`priors_of`](@ref):
 `Base.merge(structure_of(brmi), priors_of(brmi))` recomposes an equivalent
-model. The default `show(::BRMI)` is unchanged; this is an explicit, opt-in
-view.
+model.
 """
 structure_of(brmi::BRMI) = _select_ops(brmi, op_nc -> !_is_effect_prior_op(op_nc))
 

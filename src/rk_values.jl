@@ -71,6 +71,12 @@ function _rk_ast_truncated_prior(prepared, bindings, taken)
         _rk_value_expr!(bindings, upper, taken))
 end
 
+# A Uniform scale law whose lower end is nonnegative needs no restriction; the
+# HSGP validity floor (`length_scale_floor`) is one.
+_rk_nonnegative_lower(x::Real) = x >= 0
+_rk_nonnegative_lower(::_BRMLengthScaleFloor) = true
+_rk_nonnegative_lower(_x) = false
+
 # A known scale (`sd(...) = value`) is its constant value.
 _rk_ast_positive_prior(prior::_BRMKnownScale, _bindings, _taken; default=:HalfNormal) =
     prior.value
@@ -85,8 +91,8 @@ function _rk_ast_positive_prior(prior, bindings, taken; default=:HalfNormal)
     family = nameof(getf(prior))
     family in (:Exponential, :Gamma, :InverseGamma, :LogNormal, :Weibull,
         :HalfNormal, :HalfCauchy, :truncated) && return expression
-    family === :Uniform && first(prepared.args) isa Real &&
-        first(prepared.args) >= 0 && return expression
+    family === :Uniform && _rk_nonnegative_lower(first(prepared.args)) &&
+        return expression
     # A BRM scale declaration constrains support without renormalizing its
     # authored family. Explicit `truncated` above retains its own normalizer.
     Expr(:call, :restricted, expression, 0.0, Inf)
@@ -339,12 +345,25 @@ function _rk_ast_value_spline(definitions, term, taken)
     stmts
 end
 
+# `length_scale_floor` in a length-scale prior reads the term's validity floor,
+# the main-block value `floors`, or axis `j`'s entry of it (decision 1fk9b29).
+function _rk_ast_hsgp_rho_prior(options, floors, j, bindings, taken)
+    prior = _rk_ast_positive_prior(options.rho_prior, bindings, taken)
+    get(options, :rho_floor_named, false) || return prior
+    _rk_ast_replace_floor_marker(prior, j === nothing ? floors : Expr(:ref, floors, j))
+end
+
+_rk_ast_replace_floor_marker(::_BRMLengthScaleFloor, floor) = floor
+_rk_ast_replace_floor_marker(value::Expr, floor) =
+    Expr(value.head, (_rk_ast_replace_floor_marker(a, floor) for a in value.args)...)
+_rk_ast_replace_floor_marker(value, _floor) = value
+
 function _rk_ast_value_hsgp(definitions, term, taken, bindings)
     options = term.options
     periodic = get(options, :cov, :exp_quad) === :periodic
     grouped = haskey(options, :group_index) || !isempty(get(options, :hyper_plans, ()))
     # The length-scale floor exists only where a prior or hyper-predictor reads it.
-    floor_read = options.rho_truncated ||
+    floor_read = options.rho_truncated || get(options, :rho_floor_named, false) ||
         any(p -> p.hyper === :length_scale, get(options, :hyper_plans, ()))
     stmts = Expr[]
     floors = nothing
@@ -355,8 +374,13 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
         omega2 = _rk_ast_fresh_name(string(options.id, "_omega2"), taken)
         floor_read && (floors = _rk_ast_fresh_name(string(options.id, "_rho_floor"), taken))
         targets = floors === nothing ? (PHI, omega2) : (PHI, omega2, floors)
+        # An anchored or masked basis passes its anchor and bound mask
+        # (decision 1fk9b29).
+        anchor, mask = get(options, :anchor, nothing), _rk_hsgp_mask(term)
         push!(stmts, Expr(:(=), Expr(:tuple, targets...), Expr(:call,
-            :brm_hsgp_periodic_basis, only(term.columns), options.k, options.period)))
+            :brm_hsgp_periodic_basis, only(term.columns), options.k, options.period,
+            (anchor === nothing ? () : (only(anchor),))...,
+            (mask === nothing ? () : (mask,))...)))
         inputs = Pair{Symbol,Any}[:PHI => PHI, :omega2 => omega2]
         extent = :(axes(PHI, 2))
     else
@@ -365,6 +389,9 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
         floor_read && (floors = _rk_ast_hsgp_floor!(definitions, stmts, term, taken))
         inputs = Pair{Symbol,Any}[a => c for (a, c) in
             zip(_rk_hsgp_axis_inputs(term), term.columns)]
+        # A `rows=` mask follows the axes into the basis graph.
+        append!(inputs, (formal => actual for (formal, actual) in
+            zip(_rk_hsgp_mask_formals(term), _rk_hsgp_mask_actuals(term))))
         extent = :(1:$(prod(_rk_hsgp_modes(options))))
     end
     if grouped
@@ -373,7 +400,8 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
         return stmts
     end
     axes = periodic || options.iso ? 1 : length(term.columns)
-    rho_priors = [_rk_ast_positive_prior(options.rho_prior, bindings, taken) for _ in 1:axes]
+    rho_priors = [_rk_ast_hsgp_rho_prior(options, floors, axes == 1 ? nothing : j,
+        bindings, taken) for j in 1:axes]
     sigma_prior = _rk_ast_positive_prior(options.sigma_prior, bindings, taken)
     rho = axes == 1 ? :rho_iso : :rho
     value = periodic ?
@@ -656,8 +684,11 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
         push!(roots, route.name)
         union!(roots, route.globals)
     end
+    # Scalars read only by a random-effect block's scale priors or Student-t
+    # law are planned as on the formula route.
+    program = _rk_with_ranef_prior_dependencies(brmi, program, roots)
     referenced = _brm_reachable_operations(program, roots)
-    prepared = _BRMPreparedModel(prepared.program,
+    prepared = _BRMPreparedModel(program,
         Tuple(p for p in prepared.parameters if p.name in referenced),
         prepared.predictors, prepared.assignments, prepared.observations)
     ordinary_assignments = Tuple(a for a in prepared.assignments if a.name in referenced)

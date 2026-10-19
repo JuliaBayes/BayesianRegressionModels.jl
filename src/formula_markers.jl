@@ -173,6 +173,9 @@ one-row-per-subject frame is gathered into a per-group slice. A column or
 linear predictor living on a DIFFERENT frame — a dose-event table, say — is
 grouped by a model-scope [`ragged`](@ref) statement and still read as `x[i]`.
 A per-subject linear predictor is passed as that group's scalar value. One
+with random effects over several groupings — Kreise nested in Länder, `(1 |
+land | land) + (1 | kreis | kreis)` — is read on the grouping whose column lists
+one unique label per row; the others are ordinary terms of its value. One
 without a random effect defines no grouping of its own: it is read on the
 subject frame a random-effect predictor defines — or, in a panel with no random
 effects, the frame of the pre-grouped columns — so its data columns must have
@@ -267,8 +270,8 @@ silently. Every `ragged(...)` input of one plate names the same `cells`; their
 grouping, so `cells` may be named only as that same column.
 
 Why the grouping is an explicit argument rather than derived: an ordinary
-per-subject LP is grouped by the ranef bucket it already carries
-(`_sb_kernel_lp_bucket_or_nothing`), but a secondary-axis population LP like
+per-subject LP is grouped by the random-effect grouping that labels its rows
+(`_sb_kernel_lp_buckets`), but a secondary-axis population LP like
 the one above has no random-effect term at all, and a raw column carries no grouping
 whatsoever. The axis has to be declared, and `group` is that declaration.
 

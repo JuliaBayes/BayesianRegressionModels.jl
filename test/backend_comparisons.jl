@@ -39,7 +39,8 @@ Base.include(@__MODULE__, joinpath(@__DIR__, "..", "docs", "backend_comparisons.
               ["brm-comparison", "julia", "julia", "julia", "stan", "julia"]
         @test panes.content[2].code == strip(source, '\n')
         ir_source = panes.content[3].code
-        @test startswith(ir_source, "BRMI:")
+        # The IR pane prints the parsed statements, not the bound data columns.
+        @test !occursin("data (eltype", ir_source)
         @test occursin("~", ir_source)
         # Resolved call heads print as written, never module-qualified: the
         # docs build's `Main` does not import `Distributions`, and Julia
