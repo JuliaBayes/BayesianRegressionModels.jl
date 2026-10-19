@@ -52,7 +52,10 @@ effect (a typical value plus covariates) read as `x[i]`, beside a random-effect
 predictor and in a no-random-effects panel, against an independent density
 oracle with finite-difference RK gradients and matched BridgeStan coordinates.
 It also covers a panel whose cell slices only such predictors and the refusal of
-one declared on another row axis.
+one declared on another row axis. A predictor whose only covariate is a string
+categorical (`Vector{String}` or a string-leveled `CategoricalVector`) needs no
+zero `offset(...)` witness: its Stan and RK densities equal the witnessed
+twin's on both spellings.
 
 `plate_ragged_omitted_response.jl` checks a censored ragged observation inside
 `@plate` with its data column bound, omitted, and reprocessed. It requires the
