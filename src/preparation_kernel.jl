@@ -63,12 +63,14 @@ function _brm_kernel_subject_values(raw, group::Symbol; prefix="BRM kernel prepa
     values
 end
 
+# An empty `ev_vals` is a zero-row axis (a design with no rows on it, such as
+# no placebo observations): every cell gets an empty slice.
 function _brm_kernel_ragged_partition(a_name::Symbol, grp_name::Symbol,
                                      ev_vals::AbstractVector,
                                      subject_vals::AbstractVector; prefix="BRM kernel preparation")
-    (!isempty(ev_vals) && !any(ismissing, ev_vals)) || error(
+    any(ismissing, ev_vals) && error(
         "$prefix: kernel(...) `ragged($a_name, $grp_name)`: `$grp_name` must be a " *
-        "non-empty column with no missing labels.")
+        "column with no missing labels.")
     pos = Dict{Any,Int}()
     for (i, v) in enumerate(subject_vals); pos[v] = i; end
     rows = [Int[] for _ in eachindex(subject_vals)]

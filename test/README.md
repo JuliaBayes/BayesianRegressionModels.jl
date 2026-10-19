@@ -64,6 +64,13 @@ hand-rebased pre-grouped columns on BridgeStan and RK, `0` stays "no row",
 the target axis is refused, as are malformed declarations and `into=` on an
 observation.
 
+`plate_empty_axis.jl` checks `ragged(x, group)` over a zero-row `group`
+column: a formula LP, a raw data column and an observed response (in-cell and
+formula-LHS) each give every cell an empty slice. Each model's BridgeStan and
+RK density and gradient equal a twin that never reads the empty axis.
+`reprocess` moves the same Stan program onto data with rows and back, and a
+missing group label is still refused.
+
 `plate_ragged_omitted_response.jl` checks a censored ragged observation inside
 `@plate` with its data column bound, omitted, and reprocessed. It requires the
 StanBlocks revision pinned by `setup_env.jl` and checks the public flat

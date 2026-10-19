@@ -54,7 +54,7 @@ The last two are BRM's addition — the **schema link** back to the dataframe:
 - `transform` — the BRM preprocessing kind applied on the way (`:zscale`,
   `:center`, `:standardize`, `:factor`, `:mo`, `:spline`, `:gp`, `:hsgp`,
   `:static`, `:group_index`, `:ranef_factor_dummy`, `:multi_membership`, `:kernel_subject_count`,
-  `:kernel_ragged`, `:protect`),
+  `:kernel_ragged`, `:axis_extent`, `:protect`),
   or `nothing` when the column is passed through untransformed.
 
 `column`/`transform` are read from the plan's `preproc` record and the BRMI's

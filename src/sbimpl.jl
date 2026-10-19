@@ -3691,6 +3691,9 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
             declared_axis, extent = declared_extent
             extent_name = Symbol(:n_rows_, key, :_, declared_axis)
             data[extent_name] = extent
+            # A replay frame may have a different number of rows, or none.
+            _sb_record_preproc!(data, extent_name,
+                PreprocEntry(:axis_extent, nothing, declared_axis, false))
             extent_name
         end
         _sb_emit_prepared!(stmts, data, get(nodes, key, nothing), key, parent(nc); id_lookup, obs_n, cv_groups,
@@ -4797,6 +4800,13 @@ function _sb_reprocess_data_value(sb::SBBRMI, key::Symbol, value)
     raw
 end
 
+function _sb_reprocess_column_length(df, column, what)
+    col = _sb_df_column(df, column)
+    col isa AbstractVector || error(
+        "sbimpl: reprocess: $what `$column` must be a vector, got $(typeof(col))")
+    length(col)
+end
+
 # Recompute one transform-output data key against `df`. `freeze=true` applies
 # the stored training constant (prediction-replay); `freeze=false` re-derives
 # the constant from `df`, then applies (fresh-fit semantics). Writes the
@@ -4937,15 +4947,16 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         new_data[e.const_.n_key] = nobs
         push!(handled, e.const_.n_key)
         impute || (new_preproc[key] = e)
+    elseif e.kind === :axis_extent
+        # The row count of a model-scope `ragged(x, group)` axis that sizes `x`.
+        new_data[key] = _sb_reprocess_column_length(df, e.raw_ref, "declared row axis")
+        new_preproc[key] = e
     elseif e.kind === :kernel_subject_count
         if e.const_ isa NamedTuple && get(e.const_, :from_data_length, false)
             # No-random-effects panel: the subject count is the pre-grouped
             # per-subject column's length, not a unique-label count.
-            col = _sb_df_column(df, e.raw_ref)
-            col isa AbstractVector || error(
-                "sbimpl: reprocess: kernel per-subject column `$(e.raw_ref)` must be a " *
-                "vector, got $(typeof(col))")
-            new_data[key] = length(col)
+            new_data[key] = _sb_reprocess_column_length(df, e.raw_ref,
+                "kernel per-subject column")
         else
             subjects = _sb_kernel_subject_values(
                 _sb_df_column(df, e.raw_ref), e.raw_ref)
@@ -7057,8 +7068,9 @@ function _sb_ragged_lhs_layout(key::Symbol, lhs::ExprColumn, rhs)
         "sbimpl: `ragged($key, $(name(group)))` has $(length(raw)) response rows " *
         "but $(length(group_values)) grouping rows. The grouping column must name " *
         "the subject of every response row.")
-    (!isempty(group_values) && !any(ismissing, group_values)) || error(
-        "sbimpl: `ragged($key, $(name(group)))` needs a non-empty grouping column " *
+    # A zero-row axis observes nothing: every subject's slice is empty.
+    any(ismissing, group_values) && error(
+        "sbimpl: `ragged($key, $(name(group)))` needs a grouping column " *
         "with no missing labels.")
 
     producers = Tuple{Symbol,Any}[]
