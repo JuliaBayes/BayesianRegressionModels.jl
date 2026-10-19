@@ -5589,17 +5589,18 @@ _sb_submodel_rhs!(stmts, data, target, f, rhs) = nothing
 # `driver=` terms were ALL declined. So no cmt-keyed obs surface is being built; the
 # per-output-column do-block form above is the answer.
 #
-# Walk a per-subject linear predictor to the `(id, group)` ranef bucket that
-# defines its grouping — what lets `kernel(...)` DERIVE its plate grouping from
-# the LPs handed in instead of being told via `by=` (v2, GO `0dnesv9`). `by=`
-# only ever contributed the subject COUNT, restating a fact the ranef already
-# knows, and was checked against nothing.
+# Walk a per-subject linear predictor to the groupings of its random effects —
+# what lets `kernel(...)` DERIVE its plate grouping from the LPs handed in
+# instead of being told via `by=` (v2, GO `0dnesv9`). `by=` only ever
+# contributed the subject COUNT, restating a fact the ranef already knows, and
+# was checked against nothing.
 #
-# Returns `(id_sym, group_key, group_col)`, or `nothing` for a per-subject LP
-# without a random effect: it defines no grouping of its own and rides on the
-# subject frame a ranef LP, or a no-random-effects panel's pre-grouped
-# columns, define (`_sb_kernel_lp_buckets`).
-function _sb_kernel_lp_bucket_or_nothing(lp_col)
+# Returns `(; key, column)` per distinct grouping in formula order — several
+# `|ID|` blocks over one grouping are one grouping — or `nothing` for a
+# per-subject LP without a random effect: it defines no grouping of its own and
+# rides on the subject frame a ranef LP, or a no-random-effects panel's
+# pre-grouped columns, define.
+function _sb_kernel_lp_groupings(lp_col)
     decl = parent(lp_col)
     (decl isa ExprColumn && getf(decl) === ~) || error(
         "sbimpl: kernel(...) positional arg `$(name(lp_col))` is not a formula ",
@@ -5610,21 +5611,76 @@ function _sb_kernel_lp_bucket_or_nothing(lp_col)
         _sb_classify_term!(t, pop_terms, ran_terms, direct_terms)
     end
     isempty(ran_terms) && return nothing
-    parts = map(_sb_ranef_parts, ran_terms)
-    buckets = unique([(p[1], _sb_group_key(p[3])) for p in parts])
-    length(buckets) == 1 || error(
-        "sbimpl: kernel(...) per-subject linear predictor `$(name(lp_col))` spans ",
-        "several ranef buckets ($(buckets)); a kernel cell needs exactly one grouping.")
-    id_sym, gkey = only(buckets)
-    desc = parts[1][3]
-    (id_sym, gkey, desc isa NamedColumn ? desc : first(desc))
+    groupings = Any[]
+    for rt in ran_terms
+        desc = _sb_ranef_parts(rt)[3]
+        # A multi-membership row belongs to several groups, so it never labels
+        # a cell; it stays an ordinary term of the predictor.
+        desc isa MultiMembershipTerm && continue
+        key = _sb_group_key(desc)
+        any(g -> isequal(g.key, key), groupings) && continue
+        push!(groupings, (; key, column=desc isa NamedColumn ? desc : first(desc)))
+    end
+    isempty(groupings) && error(
+        "sbimpl: kernel(...) per-subject linear predictor `$(name(lp_col))` has ",
+        "only multi-membership random effects; a row of several groups cannot ",
+        "label a plate cell. Add the `(1 | ID | subject)` term that names each ",
+        "row's subject.")
+    groupings
 end
 
-# Buckets of a kernel's per-subject LP positionals, `nothing` for an LP without
-# a random effect. Those LPs are checked against the subject count by
-# `_brm_kernel_check_subject_frame_lp` once it is known; with no bucket at all
-# the kernel is a no-random-effects panel.
-_sb_kernel_lp_buckets(lp_cols) = map(_sb_kernel_lp_bucket_or_nothing, lp_cols)
+# The grouping of each of a kernel's per-subject LP positionals, `nothing` for
+# an LP without a random effect. Those LPs are checked against the subject
+# count by `_brm_kernel_check_subject_frame_lp` once it is known; with no
+# grouping at all the kernel is a no-random-effects panel.
+#
+# The plate's cells are the rows of the LPs' frame, one per subject. An LP
+# whose random effects span several groupings — Kreise nested in Länder, `(1 |
+# land | land_d) + (1 | kreis | ags_d)` — is labelled by the one whose column
+# lists one unique label per row; the others are ordinary terms that already
+# add to each row's predictor. Several such columns label the same rows in
+# the same order: a `ragged(x, group => cells)` input names one, otherwise
+# the first in the formula serves, except where `ragged(...)` rows or a
+# `label_join` (a flat response aligned to the kernel result) join cells by
+# label. LPs that share no grouping keep their own, and the callers refuse
+# the disagreement.
+function _sb_kernel_lp_buckets(lp_cols; ragged_cols=(),
+                               label_join=!isempty(ragged_cols))
+    per_lp = map(_sb_kernel_lp_groupings, lp_cols)
+    candidates = map(zip(lp_cols, per_lp)) do (lp_col, groupings)
+        (groupings === nothing || length(groupings) == 1) && return groupings
+        labelling = filter(g -> _brm_kernel_labels_rows(parent(parent(g.column))), groupings)
+        isempty(labelling) && error(
+            "sbimpl: kernel(...) needs pre-grouped per-subject data — one of the ",
+            "grouping columns ", join(("`$(name(g.column))`" for g in groupings), ", "),
+            " of per-subject linear predictor `$(name(lp_col))` must list one ",
+            "non-missing unique subject per row. Repeated levels indicate ",
+            "long-format data.")
+        labelling
+    end
+    grouped = filter(!isnothing, candidates)
+    isempty(grouped) && return candidates
+    shared = [g for g in first(grouped)
+              if all(c -> any(h -> isequal(h.key, g.key), c), grouped)]
+    if length(shared) > 1
+        cells = Set(name(getargs(c)[3]) for c in ragged_cols if length(getargs(c)) == 3)
+        named = filter(g -> name(g.column) in cells, shared)
+        if length(named) == 1
+            shared = named
+        elseif label_join
+            error(
+                "sbimpl: kernel(...) grouping columns ",
+                join(("`$(name(g.column))`" for g in shared), ", "), " each list ",
+                "one unique label per row, so each could label the plate's cells, ",
+                "and its rows are joined to cells by label. Name the cell label ",
+                "column at model scope: `ragged(x, group => cells)`.")
+        end
+    end
+    map(candidates) do c
+        c === nothing && return nothing
+        isempty(shared) ? first(c) : first(shared)
+    end
+end
 
 # Collect `(name, length)` for every RAW data column reachable from a formula
 # RHS. Used to check that a `ragged(x, group)` LP really is declared over the
@@ -5918,7 +5974,7 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     nsub_sym = Symbol("kernel_nsub_", target)
     # Only an LP with a random-effect term names the subjects. One without
     # rides on the subject frame the others, or the pre-grouped columns, define.
-    lp_buckets = _sb_kernel_lp_buckets(lp_cols)
+    lp_buckets = _sb_kernel_lp_buckets(lp_cols; ragged_cols)
     grouped = [b for b in lp_buckets if b !== nothing]
     if isempty(grouped) && !isempty(ragged_specs)
         # Label-anchored plate: no per-cell LP carries a ranef bucket, so the
@@ -5977,13 +6033,13 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         # would therefore MIS-align the LP against its own subjects whenever the
         # labels are not sorted. The only thing that must hold is the bijection
         # below: one level per row.
-        groups = unique([b[2] for b in grouped])
+        groups = unique([b.key for b in grouped])
         length(groups) == 1 || error(
             "sbimpl: kernel(...) per-subject linear predictors disagree on their ",
             "grouping — got groups $(groups) across $(Tuple(name(c) for c in lp_cols)). ",
             "LPs may use distinct `|ID|` buckets, but every LP handed to one kernel ",
             "must describe the same subjects.")
-        group_col = first(grouped)[3]
+        group_col = first(grouped).column
         _brm_kernel_check_cell_labels(ragged_cols, name(group_col); prefix="sbimpl")
 
         # The labels identify groups to Julia callers but never enter the emitted
@@ -7099,19 +7155,22 @@ function _sb_ragged_rhs_kernel_groups!(acc, x::NamedColumn)
     isnothing(producer_rhs) && return nothing
 
     lps = Any[]
+    ragged_cols = Any[]
     for arg in getargs(producer_rhs)
+        arg isa ExprColumn && getf(arg) === ragged && (push!(ragged_cols, arg); continue)
         arg isa NamedColumn || continue
         arg_decl = parent(arg)
         arg_decl isa ExprColumn && getf(arg_decl) === (~) || continue
         push!(lps, arg)
     end
-    buckets = [b for b in _sb_kernel_lp_buckets(lps) if b !== nothing]
+    buckets = [b for b in _sb_kernel_lp_buckets(lps; ragged_cols, label_join=true)
+               if b !== nothing]
     isempty(buckets) && return nothing
-    groups = unique(b[2] for b in buckets)
+    groups = unique(b.key for b in buckets)
     length(groups) == 1 || error(
         "sbimpl: kernel result `$(name(x))` has no single subject grouping; " *
         "its per-subject predictors name groups $(collect(groups)).")
-    push!(acc, (name(x), first(buckets)[3]))
+    push!(acc, (name(x), first(buckets).column))
     nothing
 end
 function _sb_ragged_rhs_kernel_groups!(acc, x::ExprColumn)
