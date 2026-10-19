@@ -6076,10 +6076,20 @@ function _rk_truncated_prior(prior::_BRMPreparedExpr, name::Symbol)
     (family, base_args, override)
 end
 
+# A scalar field of the data (including a resolved `name = constant(expr)`) is a
+# named numeric constant: a prior argument or bound may name it like a literal
+# assignment, and the graph holds its number.
+function _rk_data_constants!(consts::Dict{Symbol,Float64}, data::AbstractDict)
+    for (key, value) in data
+        value isa Real && !(value isa Bool) && (consts[key] = Float64(value))
+    end
+    consts
+end
+
 function _rk_fold_assignment_consts!(kept, data::AbstractDict,
         parameters::Set{Symbol})
     prefix = "RK backend"
-    consts = Dict{Symbol,Float64}()
+    consts = _rk_data_constants!(Dict{Symbol,Float64}(), data)
     aliases = Dict{Symbol,Symbol}()
     exprs = Dict{Symbol,Any}()
     for assignment in kept

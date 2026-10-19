@@ -2810,6 +2810,13 @@ function _sb_frozen_preproc_entry(data, key::Symbol, kind::Symbol, raw_ref)
     entry
 end
 
+# The fitted value of a `constant(...)` declaration during replay, or `nothing`
+# when this construction is not a replay of a fit that recorded it.
+function _sb_fitted_constant(data, key::Symbol, source)
+    entry = _sb_frozen_preproc_entry(data, key, :constant, source)
+    isnothing(entry) ? nothing : entry.const_.value
+end
+
 function _sb_record_group_index!(data, idx_key::Symbol, n_groups_key::Symbol,
                                  group::Symbol, raw::AbstractVector)
     levels = _sb_fit_levels(raw)
@@ -3518,6 +3525,15 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
         Dict{Symbol,PreprocEntry}() :
         _SBPreprocContext(Dict{Symbol,PreprocEntry}(), _frozen_preproc)
     data[_SB_BINDINGS_KEY] = Dict{Symbol,NamedTuple}()
+    # `name = constant(expr)` becomes an ordinary scalar data field before
+    # anything else reads the formula. Replay restores the fitted value from
+    # its `:constant` record instead of evaluating `expr` on the new data.
+    brmi, constants = _brm_resolve_constants(brmi; prefix="sbimpl",
+        fitted=(key, source) -> _sb_fitted_constant(data, key, source))
+    for c in constants
+        _sb_record_preproc!(data, c.name,
+            PreprocEntry(:constant, (; c.value, c.node), c.source, false))
+    end
     # Predictors whose intercept an ordinal response's thresholds supply: their
     # categorical terms stay treatment-coded (see `_brm_cellmeans_block`).
     data[_SB_THRESHOLD_LOCATED_KEY] = _brm_threshold_located_predictors(brmi)
@@ -3697,6 +3713,9 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     for k in collect(keys(data))
         _sb_is_stan_data_value(data[k]) || delete!(data, k)
     end
+    # A constant nothing reads never reaches the Stan data, so it has nothing
+    # to replay either.
+    filter!(((key, entry),) -> entry.kind !== :constant || haskey(data, key), preproc)
     # `keys(data)` is now exactly the set of Stan `data` identifiers this model
     # emits. Reject any that collide with a Stan reserved keyword here — with an
     # actionable BRM-level error — instead of returning invalid Stan that only
@@ -4567,14 +4586,16 @@ function generative_plan(builder::Function, df;
                          mod::Module=@__MODULE__, cv_groups=Set{Symbol}(),
                          centered_groups=Set{Symbol}(),
                          total_groups=:auto, s2z_groups=(), s2z_rho=nothing,
-                         s2z_coordinates=:contrasts, held_out=())
+                         s2z_coordinates=:contrasts, held_out=(),
+                         _frozen_preproc=nothing)
     brmi = Base.invokelatest(builder, df)
     brmi isa BRMI || error(
         "generative_plan: builder returned $(typeof(brmi)); expected a BRMI from `@brm begin ... end`")
     cv_groups = cv_groups isa Set ? cv_groups : Set{Symbol}(cv_groups)
     centered_groups = centered_groups isa Set ? centered_groups : Set{Symbol}(centered_groups)
     _generative_plan(SBBRMI(brmi; mod, cv_groups, centered_groups, total_groups,
-                            s2z_groups, s2z_rho, s2z_coordinates, held_out),
+                            s2z_groups, s2z_rho, s2z_coordinates, held_out,
+                            _frozen_preproc),
                       builder, cv_groups)
 end
 
@@ -4595,8 +4616,12 @@ function generative_plan(plan::GenerativePlan, new_df;
     # Preserve the fitted representation and population/random basis relation.
     # An empty selected set also preserves an explicit conventional opt-out.
     selected = unique(b.group for b in total_effect_blocks(plan))
+    # A rebuild for new groups keeps every `constant(...)` at its fitted value;
+    # the new data need not carry what it was computed from.
+    constants = filter(((_, entry),) -> entry.kind === :constant, plan.preproc)
     isempty(selected) && return generative_plan(plan.builder,new_df;
-        mod=plan.model.mod,cv_groups,centered_groups,held_out,total_groups=())
+        mod=plan.model.mod,cv_groups,centered_groups,held_out,total_groups=(),
+        _frozen_preproc=isempty(constants) ? nothing : constants)
     brmi = Base.invokelatest(plan.builder,new_df)
     sb = SBBRMI(brmi;mod=plan.model.mod,cv_groups,centered_groups,held_out,total_groups=selected,
                 _frozen_preproc=plan.preproc)
@@ -4788,6 +4813,16 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
     if e.kind === :static
         new_data[key] = deepcopy(e.const_)
         new_preproc[key] = e
+    elseif e.kind === :constant
+        if freeze
+            new_data[key] = e.const_.value
+            new_preproc[key] = e
+        else
+            node = _brm_rebind_value(e.const_.node, df)
+            value = _brm_evaluate_constant(key, node; prefix="sbimpl: reprocess")
+            new_data[key] = value
+            new_preproc[key] = PreprocEntry(:constant, (; value, node), e.raw_ref, false)
+        end
     elseif e.kind === :total_basis
         freeze || throw(ArgumentError("total-coefficient replay requires freeze_constants=true; rebuild the model to fit a different population/random design basis"))
         new_data[key] = copy(e.const_)
@@ -5244,7 +5279,10 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
                     "the new DataFrame instead.")
             end
         elseif v isa Number || v isa AbstractString || v isa Bool
-            new_data[k] = v   # frozen structural scalar / formula literal (e.g. me `sd_<x>`)
+            # A scalar keeps its fitted value (a structural scalar, a formula
+            # literal such as me `sd_<x>`, or a scalar field of the data);
+            # fresh-fit replay takes a scalar field the new data supplies.
+            new_data[k] = !freeze_constants && has_column ? _sb_df_column(new_df, k) : v
         else
             if has_column
                 # Externally derived non-vector data (StanBlocks' ragged
