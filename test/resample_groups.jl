@@ -199,8 +199,10 @@ end
     hsgp_train = (; subject = repeat([1, 2, 3], inner=2),
                     dose = collect(range(-1.0, 1.0; length=6)), y = zeros(6))
     # A single repeated dose value → the HSGP axis is degenerate on the slice.
+    # 1.25 lies past the training doses but inside the basis interval
+    # (-1.5, 1.5).
     hsgp_future = (; subject = repeat([101, 203, 307, 409], inner=2),
-                     dose = fill(2.0, 8), y = zeros(8))
+                     dose = fill(1.25, 8), y = zeros(8))
 
     fitted = SBBRMI(hsgp_resample_builder(hsgp_train); mod=@__MODULE__,
                      total_groups=())
@@ -223,4 +225,9 @@ end
     # `freeze_constants=false` genuinely has no domain to fit on this slice.
     @test_throws "hsgp: degenerate input" reprocess(
         fitted, hsgp_future; freeze_constants=false, resample_groups=[:subject])
+    # refused: a dose past the basis interval would wrap the sines around and
+    # evaluate a different point (decision 1fk9b29)
+    @test_throws "outside the fitted basis interval" reprocess(
+        fitted, merge(hsgp_future, (; dose=fill(2.0, 8))); freeze_constants=true,
+        resample_groups=[:subject])
 end

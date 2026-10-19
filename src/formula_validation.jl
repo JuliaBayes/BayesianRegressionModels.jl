@@ -61,12 +61,13 @@ end
 
 function _check_term_kwargs(::typeof(hsgp), kw)
     allowed = (:cov, :iso, :k, :c, :by, :domain, :orthogonal_to, :period,
-               :centeredness)
+               :centeredness, :extrapolate, :anchor, :rows)
     unknown = filter(k -> k ∉ allowed, keys(kw))
     isempty(unknown) || error(
         "hsgp: unsupported keyword(s): $(join(unknown, ", ")); " *
         "supported keywords are `cov`, `iso`, `k`, `c`, `by`, `domain`, " *
-        "`orthogonal_to`, `period`, and `centeredness`")
+        "`orthogonal_to`, `period`, `centeredness`, `extrapolate`, `anchor`, " *
+        "and `rows`")
     cov = _brm_gp_cov(kw, :hsgp)
     _brm_gp_period(kw, :hsgp, cov)
     _brm_gp_iso(kw, :hsgp)

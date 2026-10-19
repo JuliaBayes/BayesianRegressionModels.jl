@@ -8,15 +8,21 @@ _brm_term_prior_expressions(term::_BRMPreparedTerm{typeof(gp)}) =
 _brm_term_prior_expressions(term::_BRMPreparedTerm{typeof(hsgp)}) =
     (; rho=term.state.rho_prior, sigma=term.state.sigma_prior)
 
-function _brm_gp_axes(term, context, label)
+# `allow_empty` admits a zero-row axis for a basis that needs no data: an HSGP
+# with an explicit `domain=` or a periodic one (decision 1fk9b29).
+function _brm_gp_axes(term, context, label; allow_empty::Bool=false, mask=nothing)
     args = getargs(term)
     isempty(args) && error("BRM term preparation: `$label` needs at least one axis")
     sources = Symbol[]
     axes = Vector{Vector{Float64}}()
     for arg in args
         source, raw = _brm_term_data(label, arg, context)
-        values = collect(Float64, raw)
-        isempty(values) && error("BRM term preparation: `$label` axis cannot be empty")
+        values = _brm_axis_values(raw, mask,
+            "BRM term preparation: `$label` axis `$source`")
+        isempty(values) && !allow_empty && error(
+            "BRM term preparation: `$label` axis cannot be empty" *
+            (label === :hsgp ? "; an HSGP over an axis that can be empty needs " *
+             "an explicit `domain=(lower, upper)` (or `cov=:periodic`)" : ""))
         all(isfinite, values) || error("BRM term preparation: `$label` axes must be finite")
         push!(sources, source); push!(axes, values)
     end
@@ -38,16 +44,24 @@ _brm_zero_rho_lower(lower::AbstractArray) = zero.(lower)
 
 function _brm_hsgp_declared_rho_lower(term, target, context, default_lower)
     # An explicit length-scale prior replaces the whole declaration, including
-    # the approximation-validity floor supplied by the default HSGP prior.
-    isnothing(_brm_term_prior_spec(
-        term, target, context, :term_length_scale,
-    )) ? default_lower : _brm_zero_rho_lower(default_lower)
+    # the approximation-validity floor supplied by the default HSGP prior --
+    # unless it names that floor through `length_scale_floor` (decision 1fk9b29).
+    spec = _brm_term_prior_spec(term, target, context, :term_length_scale)
+    isnothing(spec) || _brm_has_floor_marker(spec.expression) ? default_lower :
+        _brm_zero_rho_lower(default_lower)
 end
 
+# `anchor` subtracts the basis row at the anchor from every row, so the term is
+# `f(x) - f(x0)` for the same weights; `mask` zeroes the rows that carry no
+# predictor value (decision 1fk9b29). Both are data-only transforms of `PHI`.
 function _brm_hsgp_basis_state(axes, K, cov, iso, period;
-                               fits=nothing, orthogonal=nothing)
+                               fits=nothing, orthogonal=nothing,
+                               anchor=nothing, mask=nothing)
     if cov === :periodic
         PHI = _brm_apply_hsgp_periodic(period, only(axes), only(K))
+        isnothing(anchor) || (PHI = PHI .- _brm_apply_hsgp_periodic(
+            period, [only(anchor)], only(K)))
+        isnothing(mask) || (PHI[.!mask, :] .= 0)
         return (; axes, PHI, harmonics=_brm_hsgp_periodic_harmonics(only(K)),
                 rho_lower=_brm_hsgp_periodic_rho_lower(only(K)), fits=nothing,
                 omega2=nothing)
@@ -56,8 +70,36 @@ function _brm_hsgp_basis_state(axes, K, cov, iso, period;
     PHI, omega2 = _brm_apply_hsgp(fits, axes, K)
     orthogonal === :linear &&
         (PHI = _brm_orthogonalize_hsgp_linear(PHI, only(axes)))
+    isnothing(anchor) || (PHI = PHI .- first(_brm_apply_hsgp(
+        fits, Tuple([value] for value in anchor), K)))
+    isnothing(mask) || (PHI[.!mask, :] .= 0)
     (; axes, PHI, harmonics=nothing,
        rho_lower=_brm_hsgp_rho_lower_data(fits, K, iso), fits, omega2)
+end
+
+# Parse the replay/anchor/mask options once and check their combinations; the
+# prepared-term path and the Stan emitter share this (decision 1fk9b29).
+function _brm_hsgp_extended_options(kw, n_axes::Int, cov::Symbol;
+                                    latent::Bool=false)
+    extrapolate = _brm_hsgp_extrapolate(kw, cov)
+    anchor = _brm_hsgp_anchor(kw, n_axes)
+    rows = _brm_hsgp_rows_column(kw)
+    if latent
+        for key in (:anchor, :rows, :extrapolate)
+            haskey(kw, key) && error(
+                "sbimpl: `hsgp(...; $key=...)` is not built for a model-derived " *
+                "axis; it is available on raw-data axes")
+        end
+    end
+    orthogonal = get(kw, :orthogonal_to, nothing)
+    orthogonal === :linear && !isnothing(anchor) && error(
+        "sbimpl: `hsgp(...; anchor=...)` cannot be combined with " *
+        "`orthogonal_to=:linear`: the projection centers every basis column, " *
+        "so the term would no longer vanish at the anchor")
+    orthogonal === :linear && !isnothing(rows) && error(
+        "sbimpl: `hsgp(...; rows=...)` with `orthogonal_to=:linear` is not " *
+        "built: the projection would have to be restricted to the masked rows")
+    (; extrapolate, anchor, rows)
 end
 
 function _brm_prepare_term(term::ExprColumn{typeof(gp)}, target::Symbol, context)
@@ -92,6 +134,7 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
         cov = _brm_gp_cov(kw, :hsgp)
         cov === :periodic && error(
             "BRM term preparation: model-derived periodic hsgp is unsupported")
+        _brm_hsgp_extended_options(kw, 1, cov; latent=true)
         K, c = _brm_hsgp_options(kw, 1)
         centeredness = _brm_hsgp_centeredness(kw, prod(K))
         any(!iszero, centeredness) && error(
@@ -114,11 +157,17 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
                  _brm_gp_priors(term, target, context)...)
         return _BRMPreparedTerm(hsgp, (source,), state, (source,))
     end
-    sources, axes = _brm_gp_axes(term, context, :hsgp)
     cov = _brm_gp_cov(kw, :hsgp)
+    options = _brm_hsgp_extended_options(kw, length(getargs(term)), cov)
+    (; extrapolate, anchor) = options
+    rows = _brm_hsgp_rows(kw, term, context)
+    mask = isnothing(rows) ? nothing : rows.mask
+    sources, axes = _brm_gp_axes(term, context, :hsgp;
+        allow_empty=cov === :periodic || haskey(kw, :domain), mask)
     iso = _brm_gp_iso(kw, :hsgp)
     K, c = _brm_hsgp_options(kw, length(axes))
     period = _brm_gp_period(kw, :hsgp, cov)
+    fitted_axes = _brm_hsgp_masked_axes(axes, mask)
     by = get(kw, :by, nothing)
     by_state = if isnothing(by)
         nothing
@@ -142,34 +191,46 @@ function _brm_prepare_term(term::ExprColumn{typeof(hsgp)}, target::Symbol, conte
             "BRM term preparation: periodic hsgp requires one isotropic axis")
         isnothing(by_state) || error(
             "BRM term preparation: periodic hsgp does not support by")
-        basis = _brm_hsgp_basis_state(axes, K, cov, iso, period)
+        basis = _brm_hsgp_basis_state(axes, K, cov, iso, period; anchor, mask)
         basis = merge(basis, (; rho_lower=_brm_hsgp_declared_rho_lower(
             term, target, context, basis.rho_lower,
         )))
         state = (; target, latent=false, explicit_domain=false, K, c, centeredness,
                  cov, iso, period, basis..., by=by_state,
+                 anchor, extrapolate, support=nothing, rows,
                  _brm_gp_priors(term, target, context)...)
     else
         domain_fits = _brm_hsgp_domain_fits(kw, length(axes))
-        fits = isnothing(domain_fits) ? _brm_fit_hsgp(axes, K, c) : domain_fits
+        fits = isnothing(domain_fits) ?
+            _brm_fit_hsgp(fitted_axes, K, c; anchor) : domain_fits
+        isnothing(domain_fits) ||
+            _brm_check_hsgp_domain(domain_fits, fitted_axes;
+                                   prefix="BRM term preparation")
+        _brm_check_hsgp_anchor(domain_fits, anchor; prefix="BRM term preparation")
         orthogonal = _brm_hsgp_orthogonal_to(kw, length(axes))
         basis = _brm_hsgp_basis_state(axes, K, cov, iso, period;
-                                      fits, orthogonal)
+                                      fits, orthogonal, anchor, mask)
         basis = merge(basis, (; rho_lower=_brm_hsgp_declared_rho_lower(
             term, target, context, basis.rho_lower,
         )))
         state = (; target, latent=false, explicit_domain=!isnothing(domain_fits),
                  K, c, centeredness, cov, iso, period, basis...,
-                 orthogonal, by=by_state,
+                 orthogonal, by=by_state, anchor, extrapolate,
+                 support=_brm_hsgp_support(fitted_axes, fits), rows,
                  _brm_gp_priors(term, target, context)...)
     end
-    deps = isnothing(by_state) ? sources : (sources..., by_state.source)
+    deps = (sources..., (isnothing(by_state) ? () : (by_state.source,))...,
+            (isnothing(rows) ? () : (rows.source,))...)
     _BRMPreparedTerm(hsgp, sources, state, deps)
 end
 
-function _brm_replay_gp_axes(training, context, label)
-    axes = Tuple(collect(Float64, context.data[source]) for source in training.source)
-    all(!isempty, axes) || error("BRM term replay: `$label` axes cannot be empty")
+function _brm_replay_gp_axes(training, context, label; allow_empty::Bool=false,
+                             mask=nothing)
+    axes = Tuple(_brm_axis_values(context.data[source], mask,
+                     "BRM term replay: `$label` axis `$source`")
+                 for source in training.source)
+    allow_empty || all(!isempty, axes) ||
+        error("BRM term replay: `$label` axes cannot be empty")
     all(axis -> all(isfinite, axis), axes) || error(
         "BRM term replay: `$label` axes must be finite")
     all(axis -> length(axis) == length(first(axes)), axes) || error(
@@ -188,21 +249,31 @@ function _brm_replay_term(::typeof(hsgp), training,
                           fresh::Union{ExprColumn,_BRMPreparedTerm}, context)
     get(training.state, :latent, false) && return _BRMPreparedTerm(
         hsgp, training.source, training.state, training.dependencies)
-    axes = _brm_replay_gp_axes(training, context, :hsgp)
-    get(training.state, :explicit_domain, false) &&
-        _brm_check_hsgp_domain(training.state.fits, axes; prefix="BRM term replay")
-    state = if training.state.cov === :periodic
-        merge(training.state, (; axes,
-            PHI=_brm_apply_hsgp_periodic(training.state.period, only(axes),
-                                         only(training.state.K))))
+    st = training.state
+    periodic = st.cov === :periodic
+    rows = get(st, :rows, nothing)
+    mask = isnothing(rows) ? nothing : _brm_hsgp_row_mask(
+        context.data[rows.source], length(context.data[first(training.source)]),
+        rows.source)
+    rows = isnothing(rows) ? nothing : merge(rows, (; mask))
+    axes = _brm_replay_gp_axes(training, context, :hsgp;
+        allow_empty=periodic || get(st, :explicit_domain, false), mask)
+    anchor = get(st, :anchor, nothing)
+    state = if periodic
+        basis = _brm_hsgp_basis_state(axes, st.K, :periodic, true, st.period;
+                                      anchor, mask)
+        merge(st, (; axes, PHI=basis.PHI, rows))
     else
-        PHI, omega2 = _brm_apply_hsgp(training.state.fits, axes, training.state.K)
-        get(training.state, :orthogonal, nothing) === :linear &&
-            (PHI = _brm_orthogonalize_hsgp_linear(PHI, only(axes)))
-        merge(training.state, (; axes, PHI, omega2))
+        evaluated = _brm_hsgp_replay_axes(axes, st.fits, st.support,
+            get(st, :extrapolate, :error), mask;
+            prefix="BRM term replay", names=training.source,
+            fixed_domain=get(st, :explicit_domain, false))
+        basis = _brm_hsgp_basis_state(evaluated, st.K, :exp_quad, st.iso, nothing;
+            fits=st.fits, orthogonal=get(st, :orthogonal, nothing), anchor, mask)
+        merge(st, (; axes, PHI=basis.PHI, omega2=basis.omega2, rows))
     end
-    if !isnothing(training.state.by)
-        by = training.state.by
+    if !isnothing(st.by)
+        by = st.by
         idx = _brm_apply_levels(by.levels, context.data[by.source])
         state = merge(state, (; by=merge(by, (; idx))))
     end
