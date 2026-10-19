@@ -132,7 +132,7 @@ include("conditional_effects.jl")
 # Public surface. The macros and value types everything downstream
 # (web-macro, downstream extensions, tests) reaches for.
 export @brm, @n, @x, @getproperty
-export assign, effect, r2d2, doublepipe, gr, mm, gp, offset, zscale, center, standardize, protect, factor
+export assign, effect, r2d2, doublepipe, gr, mm, gp, offset, zscale, center, standardize, constant, protect, factor
 export LKJCovarianceFactor, MvNormalCholesky
 export Flat, TotalEffectBlock, total_effect_blocks, recover_population_draws, select_total_centeredness
 export S2ZEffectBlock, s2z_effect_blocks, recover_s2z_draws, select_s2z_rho,

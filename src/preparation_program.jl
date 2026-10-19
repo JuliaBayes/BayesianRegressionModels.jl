@@ -61,6 +61,9 @@ function _brm_operation_references!(refs, @nospecialize(values::AbstractArray))
     foreach(value -> _brm_operation_references!(refs, value), values)
     refs
 end
+# A constant reads fields of the data, never a model value, so it depends on no
+# declaration: `V = constant(var(y))` reads the column `y`, not the observation.
+_brm_operation_references!(refs, @nospecialize(_node::ExprColumn{typeof(constant)})) = refs
 # A sampled Student-t degrees-of-freedom name is a prior-value dependency of
 # its random-effect block, exactly like a name inside a prior expression.
 _brm_operation_references!(refs, node::_BRMRanefStudentT) =
