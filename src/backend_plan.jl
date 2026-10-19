@@ -1489,8 +1489,10 @@ end
 Base.@nospecializeinfer function _brm_simple_random_effect_plans(
         @nospecialize(brmi::BRMI), target::Symbol, context::_BRMBackendContext;
         required::Bool=false,
-        random_effect_columns=_brm_random_effect_columns)
-    grouped = filter(declaration -> declaration.predictor === target,
+        random_effect_columns=_brm_random_effect_columns,
+        select=Returns(true))
+    grouped = filter(declaration -> declaration.predictor === target &&
+                                    select(declaration),
                      context.group_declarations)
     plans = ()
     seen = Set{Any}()
