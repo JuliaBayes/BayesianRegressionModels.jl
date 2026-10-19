@@ -311,17 +311,16 @@ _sb_vector_prior_coordinates(family::StanBlocks.ValueFamily) =
 
 function _sb_vector_priors(base::StanBlocks.SlicModel, target::Symbol, priors;
                             mod::Module=base.mod)
-    family, args = _sb_vector_prior_family(priors; positive=false, mod)
-    rhs = Expr(:call, family,
-               Expr(:parameters, Expr(:kw, :n, length(priors))), args...)
-    Base.merge(base, Expr(:call, :~, target, rhs))
+    prior = _sb_vector_prior_statement(target, target, priors, length(priors);
+                                       positive=false, mod, scope=base.mod)
+    Base.merge(base, prior.statement)
 end
 
-function _sb_direct_vector_positive_prior(target::Symbol, prior, nvalue)
+function _sb_direct_vector_prior(target::Symbol, prior, nvalue; positive::Bool)
     emitted = Any[]
     _sb_emit_prior!(emitted, target, getf(prior), prior) || return nothing
     stmt = only(emitted)
-    _sb_apply_positive_prior_bounds!(stmt, prior)
+    _sb_apply_prior_bounds!(stmt, prior; lower=positive ? 0.0 : nothing)
     rhs = stmt.args[3]
     parameters = findfirst(a -> a isa Expr && a.head === :parameters, rhs.args)
     n_kw = Expr(:kw, :n, nvalue)
@@ -333,7 +332,7 @@ function _sb_direct_vector_positive_prior(target::Symbol, prior, nvalue)
                 "sbimpl: direct vector prior unexpectedly supplied its own `n`")
         insert!(rhs.args[parameters].args, 1, n_kw)
     end
-    _, actuals, _, _ = _sb_vector_prior_parts((prior,))
+    _, actuals, _, _ = _sb_vector_prior_parts((prior,); positive)
     dependencies = Set{Symbol}()
     foreach(arg -> _sb_vector_prior_dependencies!(dependencies, arg), actuals)
     (; statement=stmt, dependencies=sort!(collect(dependencies)))
@@ -373,12 +372,13 @@ function _sb_native_vector_prior(target::Symbol, priors, nvalue; positive::Bool)
        dependencies=sort!(collect(dependencies)))
 end
 
-# The one `lhs ~ <positive vector prior>` statement for per-margin `priors`, and
-# the model names its arguments read. `scope` is the module the statement is
-# traced in: a direct native family must resolve there.
-function _sb_vector_positive_prior_statement(lhs, target::Symbol, priors, nvalue;
-                                             direct_native::Bool=false,
-                                             mod::Module, scope::Module)
+# The one `lhs ~ <vector prior>` statement for per-margin `priors` (`nothing`
+# is the default `Normal()` margin), and the model names its arguments read.
+# `positive` adds `lower=0` to every margin. `scope` is the module the
+# statement is traced in: a direct native family must resolve there.
+function _sb_vector_prior_statement(lhs, target::Symbol, priors, nvalue;
+                                    positive::Bool, mod::Module, scope::Module)
+    priors = Any[isnothing(prior) ? ExprColumn(Normal) : prior for prior in priors]
     # Stan's native univariate families vectorise over their variate. When every
     # margin has the exact same mapped distribution, retain that natural Stan
     # spelling instead of synthesising a coordinate-by-coordinate UDF. Custom,
@@ -387,23 +387,20 @@ function _sb_vector_positive_prior_statement(lhs, target::Symbol, priors, nvalue
     # BRM-owned base for a merged submodel): a consumer-registered distribution
     # type (`_sb_stan_dist_name(::Type{<:MyPrior})`) whose StanBlocks family
     # lives in `mod` must take the generated-family path, which traces in `mod`.
-    if direct_native && !isempty(priors) &&
-       all(prior -> isequal(prior, first(priors)), priors)
+    if !isempty(priors) && all(prior -> isequal(prior, first(priors)), priors)
         T = _as_distribution_type(getf(first(priors)))
         family = isnothing(T) ? nothing : _sb_stan_dist_name(T)
         if family isa Symbol &&
            _brm_distribution_shape(first(priors)) ==
                (Distributions.Univariate, Distributions.Continuous) &&
            (isdefined(StanBlocks, family) || isdefined(scope, family))
-            direct = _sb_direct_vector_positive_prior(target, first(priors), nvalue)
+            direct = _sb_direct_vector_prior(target, first(priors), nvalue; positive)
             isnothing(direct) || return direct
         end
     end
-    if direct_native
-        native = _sb_native_vector_prior(target, priors, nvalue; positive=true)
-        isnothing(native) || return native
-    end
-    family, args = _sb_vector_prior_family(priors; mod)
+    native = _sb_native_vector_prior(target, priors, nvalue; positive)
+    isnothing(native) || return native
+    family, args = _sb_vector_prior_family(priors; positive, mod)
     # Intrinsic bounds belong to the value family, including when this
     # parameter is redrawn in generated quantities.
     rhs = Expr(:call, family, Expr(:parameters, Expr(:kw, :n, nvalue)), args...)
@@ -414,7 +411,6 @@ end
 
 function _sb_vector_positive_priors(base::StanBlocks.SlicModel,
                                     target::Symbol, priors;
-                                    direct_native::Bool=false,
                                     mod::Module=base.mod)
     source = only(node for node in base.model.args if node isa Expr &&
         ((node.head === :(::) && node.args[1] === target) ||
@@ -429,8 +425,8 @@ function _sb_vector_positive_priors(base::StanBlocks.SlicModel,
             isnothing(nkw) || (nvalue = source.args[3].args[params].args[nkw].args[2])
         end
     end
-    prior = _sb_vector_positive_prior_statement(lhs, target, priors, nvalue;
-                                                direct_native, mod, scope=base.mod)
+    prior = _sb_vector_prior_statement(lhs, target, priors, nvalue;
+                                       positive=true, mod, scope=base.mod)
     (; model=Base.merge(base, prior.statement), prior.dependencies)
 end
 
@@ -6298,7 +6294,7 @@ function _sb_generic_ranef_submodel(priors, base::StanBlocks.SlicModel;
     resolved = map(priors) do prior
         isnothing(prior) ? ExprColumn(Normal) : prior
     end
-    _sb_vector_positive_priors(base, :tau, resolved; direct_native=true, mod)
+    _sb_vector_positive_priors(base, :tau, resolved; mod)
 end
 
 """
@@ -11057,8 +11053,8 @@ function _sb_emit_known_ranef_tau!(stmts, data, bucket_name, n_terms_name, prior
     free_priors = Any[isnothing(prior) ? ExprColumn(Normal) : prior
                       for prior in priors[free]]
     free_name = isempty(known) ? tau_name : Symbol(bucket_name, :_tau_free)
-    statement = _sb_vector_positive_prior_statement(free_name, free_name,
-        free_priors, length(free); direct_native=true, mod, scope=mod).statement
+    statement = _sb_vector_prior_statement(free_name, free_name,
+        free_priors, length(free); positive=true, mod, scope=mod).statement
     push!(stmts, statement)
     isempty(known) && return tau_name
     known_name = Symbol(bucket_name, :_tau_known)
