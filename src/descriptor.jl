@@ -2198,6 +2198,13 @@ scale from `brm_ranef_sd_rng` into generated quantities under the same
 with `include_gq=true` (and, as for the R2D2 derived-scale family,
 `include_tp=true`) and it resolves the GQ `tau` carrier exactly as it resolves
 the sampled one in a fit.
+
+Exact totals: an `|ID|` that an exact total-coefficient block absorbed (see
+[`total_effect_blocks`](@ref); the default `total_groups=:auto` does this for
+independent margins) keeps this address. Its margin's SD is that block's total
+scale, the SD of each group's total around the population value `A β`, and the
+returned coordinate is that scale's element. A block emitted in generated
+quantities needs `constrained_names` that include them.
 """
 function brm_ranef_sd_coordinates(d::BRMDescriptor, logical::Symbol,
                                   constrained_names;
@@ -2208,7 +2215,22 @@ function brm_ranef_sd_coordinates(d::BRMDescriptor, logical::Symbol,
     all_blocks = ranef_blocks(d.plan)
     blocks = [b for b in all_blocks if b.id === id]
     if isempty(blocks)
+        scales = _brm_total_id_scales(d, id)
+        if !isempty(scales)
+            matches = [s for s in scales if s.margin == (logical, coefficient)]
+            length(matches) == 1 || error(
+                "brm_descriptor: margin `(predictor=$logical, coefficient=$coefficient)` " *
+                "occurs $(length(matches)) times in block `|$id|`; its ordered margins " *
+                "are $(Tuple(s.margin for s in scales)).")
+            s = only(matches)
+            return _brm_ranef_sd_result(brmi, logical, id, coefficient, s.output,
+                _brm_total_scale_coordinate(s, constrained_names, "brm_descriptor"))
+        end
         available = unique!(Symbol[b.id for b in all_blocks if !isnothing(b.id)])
+        for block in total_effect_blocks(d.plan),
+                cid in d.plan.bindings[block.binding].column_ids
+            isnothing(cid) || cid in available || push!(available, cid)
+        end
         error("brm_descriptor: no shared random-effect `|ID|` block `$id`. This " *
               "model's shared blocks are: " *
               (isempty(available) ? "(none)" : join(string.(available), ", ")) *
@@ -2278,15 +2300,55 @@ function brm_ranef_sd_coordinates(d::BRMDescriptor, logical::Symbol,
         "constrained coordinates. Re-reflect the model that produced the " *
         "posterior draws.")
 
+    _brm_ranef_sd_result(brmi, logical, id, coefficient, output,
+        coordinates[margin_index])
+end
+
+function _brm_ranef_sd_result(brmi, logical, id, coefficient, output, coordinate)
     predictors = [lp for lp in linear_predictors(brmi) if lp.name === logical]
     length(predictors) == 1 || error(
         "brm_descriptor: margin predictor `$logical` resolves to " *
         "$(length(predictors)) linear predictors; expected exactly one.")
     link = only(predictors).link_lhs_fn
 
-    (; logical, id, coefficient, output,
-       coordinates=[coordinates[margin_index]],
+    (; logical, id, coefficient, output, coordinates=[coordinate],
        link, inverse_link=InverseFunctions.inverse(link))
+end
+
+# The exact total-coefficient columns that absorbed `|id|`, one per margin:
+# the block, its column `k`, the margin `(predictor, coefficient)` and the
+# descriptor output of the block's total scale vector, whose element `k` is
+# the margin's between-group SD. Empty when no total block absorbed `|id|`.
+function _brm_total_id_scales(d::BRMDescriptor, id::Symbol)
+    out = NamedTuple[]
+    for block in total_effect_blocks(d.plan)
+        ids = d.plan.bindings[block.binding].column_ids
+        columns = findall(isequal(id), collect(ids))
+        isempty(columns) && continue
+        outputs = [o for o in d.outputs if o.name === block.scales]
+        length(outputs) == 1 || error(
+            "brm_descriptor: exact-total scale `$(block.scales)` of `|$id|` owns " *
+            "$(length(outputs)) descriptor outputs; expected exactly one. " *
+            "Re-reflect the model that produced the posterior draws.")
+        for k in columns
+            push!(out, (; block, column=k, margin=(block.predictor, block.columns[k]),
+                output=only(outputs)))
+        end
+    end
+    out
+end
+
+# The index into `names` of one absorbed margin's total scale.
+function _brm_total_scale_coordinate(s, names, caller)
+    coordinates = _brm_element_coordinates(s.output, names)
+    K = length(s.block.columns)
+    length(coordinates) == K || error(
+        "$caller: exact-total scale `$(s.block.scales)` owns $K between-group " *
+        "SDs but resolves to $(length(coordinates)) of the given names" *
+        (s.output.kind === :generated_quantity ? "; it is drawn in generated " *
+            "quantities, so pass names that include them" :
+            ". Re-reflect the model that produced the posterior draws") * ".")
+    coordinates[s.column]
 end
 
 """
