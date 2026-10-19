@@ -552,7 +552,8 @@ equivalent model. Scalar parameter declarations such as `sigma ~ Exponential(1)`
 are NOT priors here — they declare a parameter and stay in
 [`structure_of`](@ref) (brms prints them with the model too).
 
-The default `show(::BRMI)` is unchanged; this is an explicit, opt-in view.
+A `BRMI` prints as its source statements, so `string(structure_of(brmi))`
+and `string(priors_of(brmi))` are the model's structure and prior cards.
 
 ```jldoctest
 julia> using BayesianRegressionModels
@@ -564,8 +565,7 @@ julia> brmi = @brm (; x=[1.0, 2.0], y=[0.1, 0.2]) begin
        end;
 
 julia> priors_of(brmi)
-BRMI:
-  effect(mu, Intercept) ~ Normal(0, 1)
+effect(mu, Intercept) ~ Normal(0, 1)
 ```
 """
 priors_of(brmi::BRMI) = _select_ops(brmi, _is_effect_prior_op)
@@ -581,8 +581,7 @@ the model without the prior block that swamps it.
 
 Inverse partition to [`priors_of`](@ref):
 `Base.merge(structure_of(brmi), priors_of(brmi))` recomposes an equivalent
-model. The default `show(::BRMI)` is unchanged; this is an explicit, opt-in
-view.
+model.
 """
 structure_of(brmi::BRMI) = _select_ops(brmi, op_nc -> !_is_effect_prior_op(op_nc))
 
