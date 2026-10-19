@@ -129,6 +129,28 @@ function build(data, form)
                 pred[i] = x[i]
             end
         end
+    elseif form === :censored_call
+        @brm data begin
+            s ~ Normal(0, 1)
+            sigma ~ Exponential(1)
+            tau ~ Exponential(1)
+            @plate for i in eachindex(x)
+                m = s .* x[i]
+                y[i] ~ weighted(censored(Normal(m, addprop(m, sigma, tau)); lower=lo[i]), w[i])
+                pred[i] = x[i]
+            end
+        end
+    elseif form === :censored_token
+        @brm data begin
+            s ~ Normal(0, 1)
+            sigma ~ Exponential(1)
+            tau ~ Exponential(1)
+            @plate for i in eachindex(x)
+                m = s .* x[i]
+                y[i] ~ weighted(censored, w[i], normal, m, addprop(m, sigma, tau); lower=lo[i])
+                pred[i] = x[i]
+            end
+        end
     elseif form === :unprovided
         @brm data begin
             s ~ Normal(0, 1)
@@ -250,6 +272,62 @@ end
         @test isdisjoint(nested_weight_reads(emitted.main), (:s, :sigma, :delta))
         @test any(definition -> occursin("weighted_density = weight * density",
             sprint(Base.show_unquoted, definition)), emitted.defs)
+    end
+    @test isequal(data, saved)
+end
+
+# Rows 1 and 4 sit at their limit (censored); the empty subject has no rows.
+const WEIGHTED_CENSORED_DATA = merge(WEIGHTED_DATA, (;
+    y=[[0.1, 0.2], Float64[], [0.3, 0.5, -0.1]],
+    lo=[[0.1, 0.0], Float64[], [-0.5, 0.5, -0.2]]))
+
+@stestset "in-cell weighted censored Normal scales each row's clamp log density" begin
+    data = WEIGHTED_CENSORED_DATA
+    saved = deepcopy(data)
+    rowwise(f, u, names) = begin
+        s, sigma, tau = (u[findfirst(==(name), names)] for name in (:s, :sigma, :tau))
+        sigma, tau = exp(sigma), exp(tau)
+        law(x) = Normal(s * x, sqrt(sigma^2 + (s * x * tau)^2))
+        clamp_logdensity(x, y, lo) = y == lo ? logcdf(law(x), lo) : logpdf(law(x), y)
+        map(zip(data.x, data.y, data.lo, data.w)) do (xs, ys, los, weights)
+            Float64[f(weight, clamp_logdensity(x, y, lo))
+                for (x, y, lo, weight) in zip(xs, ys, los, weights)]
+        end
+    end
+    for form in (:censored_call, :censored_token)
+        brmi = KernelWeightedObservations.build(data, form)
+        backend, problem = consumer_problem(brmi)
+        names = coordinate_names(backend.model.layout)
+        @test sort(names) == [:s, :sigma, :tau]
+        oracle(u) = begin
+            s, logsigma, logtau = (u[findfirst(==(name), names)] for name in (:s, :sigma, :tau))
+            logpdf(Normal(), s) + logpdf(Exponential(), exp(logsigma)) + logsigma +
+                logpdf(Exponential(), exp(logtau)) + logtau +
+                sum(Iterators.flatten(rowwise(*, u, names)); init=0.0)
+        end
+        points = ([0.0, 0.0, 0.0], [0.3, -0.2, 0.1], [-0.4, 0.25, -0.3])
+        for u in points
+            check_consumer_point(problem, u, oracle)
+        end
+        main = BRM._rk_emit_ast(backend.plan).main
+        @test occursin("y[i] .~ weighted.(censored.(Normal.(", sprint(Base.show_unquoted, main))
+        @test isdisjoint(nested_weight_reads(main), (:s, :sigma, :tau))
+        # Pointwise: one weighted clamp log density per row, grouped by subject.
+        translated = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt).
+            _rk_translated_plan(backend.plan)
+        pointwise = prepare_query(backend.model, translated, :pointwise)
+        for u in points
+            actual = Base.invokelatest(pointwise, u)
+            expected = rowwise(*, u, names)
+            @test length.(actual.y) == length.(expected)
+            @test all(isapprox(actual.y[i], expected[i]; atol=2e-11, rtol=2e-11)
+                for i in eachindex(expected))
+        end
+        # Capability gap, not a wrong shape: StanBlocks' `weighted` does not yet
+        # take a censoring combinator as its family (StanBlocks snag
+        # `weighted-over-ce-a55869f3`), so SBBRMI cannot transpile this cell.
+        @test_broken (BRM.stan_code(SBBRMI(brmi; mod=KernelWeightedObservations,
+            total_groups=())); true)
     end
     @test isequal(data, saved)
 end
