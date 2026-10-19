@@ -126,7 +126,7 @@ function _scalar_problem()
 end
 
 const _CASES = ("ordinary" => _ordinary_problem, "joint" => _joint_problem,
-                "joint+scalar" => () -> _joint_problem(; scalar=true),
+                "joint_scalar" => () -> _joint_problem(; scalar=true),
                 "s2z" => _s2z_problem, "hsgp" => _hsgp_problem,
                 "cdar" => _cdar_problem, "scalar" => _scalar_problem)
 

@@ -37,6 +37,9 @@ function ordinary_blocks(block, oblocks, lp, ids)
         isnothing(m) ? String(g) : only(m.captures)
     end
     id = get(ids, lp, nothing)
+    # One `|ID|` per coefficient when the block's columns come from separate
+    # one-margin buckets.
+    id isa AbstractVector && return [only(b for b in oblocks if b.ranef.id === i) for i in id]
     own = filter(oblocks) do b
         base(b.ranef.group) == String(block.group) || return false
         isnothing(id) ? occursin("_$(lp)_", "_$(b.ranef.binding)_") : b.ranef.id === id
@@ -50,7 +53,7 @@ end
 # placed `offset` away from its conditional mean, minus that conditional: the
 # S2Z density whatever the offset.
 function ordinary_equivalent(sb, model, names, ordinary_sb, ordinary, onames, x;
-                             offset=0.3, ids=Dict{Symbol,Symbol}())
+                             offset=0.3, ids=Dict{Symbol,Any}())
     opos = Dict(n => i for (i, n) in enumerate(onames))
     xo = fill(NaN, length(onames))
     claimed = Set{Int}()
@@ -97,7 +100,7 @@ function ordinary_equivalent(sb, model, names, ordinary_sb, ordinary, onames, x;
     BridgeStan.log_density(ordinary, xo; propto=false) + adjust
 end
 
-function audit(sb, ordinary_sb, tag; trials=3, ids=Dict{Symbol,Symbol}())
+function audit(sb, ordinary_sb, tag; trials=3, ids=Dict{Symbol,Any}())
     model, ordinary = instantiate(sb, "s2z_$tag"), instantiate(ordinary_sb, "ordinary_$tag")
     names, onames = BridgeStan.param_unc_names(model), BridgeStan.param_unc_names(ordinary)
     # S2Z drops one coordinate per coefficient (J-1 contrasts + theta + tau
@@ -145,6 +148,13 @@ two_groupings = @brm begin
     y ~ Poisson(exp(mu))
 end
 
+# Intercept and slope as two one-margin `|ID|` buckets on the S2Z grouping.
+id_two_groupings = @brm begin
+    mu ~ 1 + x + (1 | a | region_g) + (0 + x | b | region_g) + (1 | district_g)
+    sd(:, b) ~ Exponential(2)
+    y ~ Poisson(exp(mu))
+end
+
 # Uncorrelated intercept and slope (`||` splits them into `region_g__nocor__k`
 # margins) beside a second grouping.
 nocor_two_groupings = @brm begin
@@ -189,6 +199,11 @@ end
     @test isempty(pop_labels(sbn, :mu))
     @test !any(r -> startswith(String(r.group), "region_g"), ranef_blocks(sbn))
     audit(sbn, SBBRMI(nocor; mod=@__MODULE__), "nocor_two_groupings")
+    idb = id_two_groupings(FLAT)
+    sbi = SBBRMI(idb; mod=@__MODULE__, s2z_groups=[:region_g], s2z_rho=1.0)
+    @test only(s2z_effect_blocks(sbi)).columns == (:Intercept, :x)
+    @test !any(r -> r.id in (:a, :b), ranef_blocks(sbi))
+    audit(sbi, SBBRMI(idb; mod=@__MODULE__), "id_two_groupings"; ids=Dict(:mu => [:a, :b]))
     recovered = recover_s2z_draws(sb, 0.1 .* randn(Xoshiro(2), 5, length(names)), names;
         rng=Xoshiro(5))[:mu]
     @test size(recovered.effects) == (5, NR, 1)
