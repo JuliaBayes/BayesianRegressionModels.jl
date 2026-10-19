@@ -3757,7 +3757,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
         "offending column(s) before building the model — e.g. `lower`/`upper` -> ",
         "`y_lower`/`y_upper` for interval-censored endpoints.")
     body = Expr(:block, stmts...)
-    model = StanBlocks.SlicModel(body, data, mod, _sb_declared_observations(body, data, brmi))
+    model = StanBlocks.SlicModel(body, data, mod, _sb_declared_observations(body, data, brmi, mod))
     sb = SBBRMI(source_parent, model, data, preproc, Set{Symbol}(), bindings)
     triage = _sb_observation_triage(sb)
     # The activity probe's own build: no warnings, no held-out marks.
@@ -3796,7 +3796,7 @@ end
 # resolve with the same role logic the plan itself uses; synthesized latents
 # (`total`, `tau`, LKJ factors) never match and stay priors.
 Base.@nospecializeinfer function _sb_observation_triage(@nospecialize(sb::SBBRMI))
-    declarations = _sb_plan_declarations(sb.model.model, sb.data, sb.parent)
+    declarations = _sb_plan_declarations(sb.model.model, sb.data, sb.parent, sb.model.mod)
     missing_sources = Set{Symbol}()
     fresh_sources = _sb_existing_covariates(sb.preproc)
     for e in values(sb.preproc)
@@ -3846,8 +3846,9 @@ end
 # need that source identity. Whole-LHS unbound observations use their target.
 # An omitted kernel cell observation uses the plate's hygienic stem, because
 # StanBlocks renames fresh cell bindings before tracing their `~`.
-Base.@nospecializeinfer function _sb_declared_observations(body, data, @nospecialize(brmi))
-    declarations = _sb_plan_declarations(body, data, brmi)
+Base.@nospecializeinfer function _sb_declared_observations(body, data, @nospecialize(brmi),
+                                                          mod::Module)
+    declarations = _sb_plan_declarations(body, data, brmi, mod)
     unbound_cell = _sb_unbound_cell_observations(brmi)
     names = Symbol[]
     for d in declarations
@@ -4380,7 +4381,9 @@ _sb_plan_obs_shaped(rhs::Expr) =
 #   A leaf nothing reads (`y ~ normal(mu0, sigma)`) stays an observation —
 #   that is the omitted-response spelling — and so does a statement reading
 #   non-scalar data or anything computed from it (`m ~ normal(m_mu, s)`).
-function _sb_plan_observation_keys(body, data, formula_keys)
+# A predictor term emitted as a SLIC submodel call is never an observation,
+# whatever it reads (`_sb_plan_submodel_term`).
+function _sb_plan_observation_keys(body, data, @nospecialize(brmi), mod::Module)
     constants = Set{Symbol}(k for (k, v) in pairs(data) if v isa Real)
     varying = setdiff(Set{Symbol}(keys(data)), constants)
     statements = _sb_plan_statements(body)
@@ -4389,13 +4392,17 @@ function _sb_plan_observation_keys(body, data, formula_keys)
         rhs = _sb_plan_statement_rhs(stmt)
         isnothing(rhs) || _sb_plan_value_refs!(read, rhs)
     end
-    observable = Set{Symbol}(formula_keys)
+    observable = Set{Symbol}(keys(brmi.operations))
     # Emission order is definition order, so one forward pass propagates
     # row variation through assignments and sampled statements.
     for stmt in statements
         rhs = _sb_plan_statement_rhs(stmt)
         isnothing(rhs) && continue
         refs = _sb_plan_value_refs(rhs)
+        if stmt.head === :call
+            target = _sb_plan_lhs_name(stmt.args[2])
+            _sb_plan_submodel_term(brmi, target, rhs, mod) && delete!(observable, target)
+        end
         if any(in(varying), refs)
             union!(varying, _sb_plan_param_names(stmt.args[end - 1]))
         elseif stmt.head === :call && !isempty(refs)
@@ -4405,6 +4412,34 @@ function _sb_plan_observation_keys(body, data, formula_keys)
         end
     end
     observable
+end
+# A formula predictor term that an extension emitted as a SLIC submodel call,
+# such as `effect ~ saturating(dose)` lowered by a `_sb_submodel_rhs!` hook to
+# `effect ~ _sb_saturating(; dose=dose)`. A submodel embedded on a non-data
+# LHS binds that LHS to its `return` value (stanblocks-use §3), so the target
+# is a latent: there is no response to omit. BRM's own response completions
+# (`mi(y) ~ …`, imputed joint responses) also emit submodel calls, but their
+# formula statement is an observation rather than a predictor, and an omitted
+# response under a custom family emits a family call rather than a submodel.
+# A submodel without `return` binds nothing; it may carry its own likelihood
+# over a keyword-bound column, which this classification cannot see, so it
+# keeps its previous role. So does an observation-model submodel (stanblocks-use
+# §3 Form A: `return obs` naming the LHS of its own `obs ~ …`): its target is
+# the response, omitted.
+function _sb_plan_submodel_term(@nospecialize(brmi), target, rhs, mod::Module)
+    target isa Symbol && Meta.isexpr(rhs, :call) && !isempty(rhs.args) || return false
+    _brm_has_operation(brmi, target) || return false
+    raw = _brm_operation(brmi, target)
+    _brm_operation_role(something(_named_op(raw), raw)) === :predictor || return false
+    head = _brmd_binding(first(rhs.args), mod)
+    head isa StanBlocks.SlicModel || return false
+    statements = _sb_plan_statements(head.model)
+    i = findfirst(s -> Meta.isexpr(s, :return), statements)
+    isnothing(i) && return false
+    value = first(statements[i].args)
+    !(value isa Symbol && any(statements) do s
+        Meta.isexpr(s, :call, 3) && s.args[1] === :~ && _sb_plan_lhs_name(s.args[2]) === value
+    end)
 end
 _sb_plan_statements(x::Expr) = x.head === :block ? x.args : (x,)
 _sb_plan_statements(x) = (x,)
@@ -4416,11 +4451,12 @@ _sb_plan_statement_rhs(_) = nothing
 
 # The declaration inventory of an emitted top-level body, shared by the
 # construction triage, the SLIC observation declaration and `generative_plan`.
-function _sb_plan_declarations(body, data, @nospecialize(brmi))
+# `mod` is the namespace the emitted body resolves its callees in.
+function _sb_plan_declarations(body, data, @nospecialize(brmi), mod::Module)
     declarations = GenerativeDeclaration[]
     data_scope = Dict{Symbol,Union{Nothing,Symbol}}(k => k for k in keys(data))
     _sb_plan_collect!(declarations, body, data_scope, (),
-                      _sb_plan_observation_keys(body, data, keys(brmi.operations)),
+                      _sb_plan_observation_keys(body, data, brmi, mod),
                       Set{Symbol}(), _sb_unbound_cell_observations(brmi))
     declarations
 end
@@ -4499,7 +4535,7 @@ function _generative_plan(sb::SBBRMI, builder, cv_groups)
     preproc = deepcopy(sb.preproc)
     body = _sb_plan_copy(sb.model.model)
     model = StanBlocks.SlicModel(body, data, sb.model.mod, sb.model.observations)
-    declarations = _sb_plan_declarations(body, data, parent)
+    declarations = _sb_plan_declarations(body, data, parent, sb.model.mod)
     GenerativePlan(parent, model, data, preproc, Tuple(declarations), builder,
                    copy(cv_groups), copy(sb.held_out), deepcopy(sb.bindings))
 end
