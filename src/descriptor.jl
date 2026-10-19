@@ -54,7 +54,7 @@ The last two are BRM's addition — the **schema link** back to the dataframe:
 - `transform` — the BRM preprocessing kind applied on the way (`:zscale`,
   `:center`, `:standardize`, `:factor`, `:mo`, `:spline`, `:gp`, `:hsgp`,
   `:static`, `:group_index`, `:ranef_factor_dummy`, `:multi_membership`, `:kernel_subject_count`,
-  `:kernel_ragged`, `:protect`, `:constant`),
+  `:kernel_ragged`, `:axis_extent`, `:protect`, `:constant`),
   or `nothing` when the column is passed through untransformed. A
   `name = constant(expr)` input has `transform = :constant` and no `column`:
   replay keeps its fitted value, so a column only `expr` reads is not part of
