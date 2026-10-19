@@ -966,13 +966,21 @@ function brm_nlme_loglikelihood_and_gradient(m::BRMNLMEModel, i::Integer, θ, σ
         for j in eta_positions]
 end
 
-function _brm_nlme_flat_point(unit, theta_indices, sigma_indices,
+# Subject `i`'s η: column `i` of a flat model's matrix, or entry `i` of a
+# nested model's vector of compact subject vectors.
+_brm_nlme_subject_eta(H::AbstractMatrix, i) = view(H, :, i)
+_brm_nlme_subject_eta(H::AbstractVector{<:AbstractVector}, i) = H[i]
+_brm_nlme_eta_eltype(H::AbstractMatrix) = eltype(H)
+_brm_nlme_eta_eltype(H::AbstractVector{<:AbstractVector}) = eltype(eltype(H))
+
+function _brm_nlme_pack_point(unit, theta_indices, sigma_indices,
         subject_coordinates, θ, σ, H)
-    u = Vector{promote_type(Float64, eltype(θ), eltype(σ), eltype(H))}(unit)
+    u = Vector{promote_type(Float64, eltype(θ), eltype(σ),
+        _brm_nlme_eta_eltype(H))}(unit)
     u[theta_indices] .= θ
     u[sigma_indices] .= σ
     for (i, block) in enumerate(subject_coordinates)
-        u[block] .= view(H, :, i)
+        u[block] .= _brm_nlme_subject_eta(H, i)
     end
     u
 end
@@ -987,7 +995,7 @@ function _brm_nlme_point(m::BRMNLMEModel, θ, σ, H::AbstractMatrix)
         "σ has length $(length(σ)), the model has $(length(m.sigma)) scalar coordinates"))
     size(H) == (sum(m.eta_blocks), n) || throw(DimensionMismatch(
         "η matrix has size $(size(H)), the model needs ($(sum(m.eta_blocks)), $n)"))
-    _brm_nlme_flat_point(m.unit, m.theta, m.sigma,
+    _brm_nlme_pack_point(m.unit, m.theta, m.sigma,
         m.view.subject_coordinates, θ, σ, H)
 end
 
@@ -1000,15 +1008,12 @@ function _brm_nlme_point(m::BRMNLMEModel, θ, σ,
         "σ has length $(length(σ)), expected $(length(m.sigma))"))
     length(H) == n || throw(DimensionMismatch(
         "η has $(length(H)) subject vectors, expected $n"))
-    u = copy(m.unit)
-    u[m.theta] = θ
-    u[m.sigma] = σ
     for (i, block) in enumerate(m.view.subject_coordinates)
         length(H[i]) == length(block) || throw(DimensionMismatch(
             "subject $i η has length $(length(H[i])), expected $(length(block))"))
-        u[block] = H[i]
     end
-    u
+    _brm_nlme_pack_point(m.unit, m.theta, m.sigma,
+        m.view.subject_coordinates, θ, σ, H)
 end
 
 @inline function _brm_nlme_sum_fields!(out, attribution,
@@ -1023,14 +1028,17 @@ end
     _brm_nlme_sum_fields!(out, attribution, fields, Val(K + 1))
 end
 
-function _brm_nlme_sum_by_subject(m::BRMNLMEModel, fields::NamedTuple)
-    length(m.attribution) == length(fields) || error(
+function _brm_nlme_sum_by_subject(attribution, nsubjects, fields::NamedTuple)
+    length(attribution) == length(fields) || error(
         "NLME pointwise field count differs from its attribution")
-    out = zeros(Float64, length(m.view.levels))
+    out = zeros(Float64, nsubjects)
     # The attribution is built in pointwise NamedTuple order. A static field
     # index keeps each field's (possibly nested) value type concrete for Enzyme.
-    _brm_nlme_sum_fields!(out, m.attribution, fields, Val(1))
+    _brm_nlme_sum_fields!(out, attribution, fields, Val(1))
 end
+
+_brm_nlme_sum_by_subject(m::BRMNLMEModel, fields::NamedTuple) =
+    _brm_nlme_sum_by_subject(m.attribution, length(m.view.levels), fields)
 
 """
     brm_nlme_loglikelihoods(m::BRMNLMEModel, θ, σ, H) -> Vector{Float64}
