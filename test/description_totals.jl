@@ -150,7 +150,55 @@ end
     @test any(p -> occursin("improper flat prior and is integrated against constant density", p), r.prose)
 end
 
-@testset "generated vector priors decompose into coordinate families" begin
+const TENSOR_DATA = (; x=[cos(i) for i in 1:40], z=[cos(2i) for i in 1:40],
+    y=[sin(i) for i in 1:40])
+sd_pen_coordinates(p) = [x for x in brm_description_components(p.distribution)
+                         if length(x.id) > 2 && x.id[end-1] === :coordinate]
+
+@testset "vector priors decompose into coordinate families" begin
+    # Mixed families take the generated family; every coordinate keeps its own.
+    mixed = @brm TENSOR_DATA begin
+        mu ~ 1 + t2(x, z)
+        sd(:, t2(x, z), rr) ~ Exponential(3)
+        sd(:, t2(x, z), nr) ~ Exponential(0.5)
+        y ~ Normal(mu, 1.0)
+    end
+    sb = SBBRMI(mixed; mod=@__MODULE__, total_groups=())
+    @test occursin("brm_vector_prior_", BRM.stan_code(sb))
+    r = brm_description(sb)
+    @test r.complete
+    coordinates = sd_pen_coordinates(totals_prior(r, (:parameter, :t2_mu_x_z, :sd_pen)))
+    @test [c.callable for c in coordinates] == [StanBlocks.stan.builtin.exponential,
+        StanBlocks.stan.builtin.normal, StanBlocks.stan.builtin.exponential]
+    md = brm_description_markdown(r)
+    @test occursin("coordinatewise `exponential`, `normal`", md)
+    @test !occursin("\\mathrm{brm\\_vector\\_prior", md)
+
+    # One family with coordinate-specific rates is one native statement, and
+    # the same coordinatewise product: one coordinate per vector element.
+    same = @brm TENSOR_DATA begin
+        mu ~ 1 + t2(x, z)
+        sd(:, t2(x, z), rr) ~ Exponential(3)
+        sd(:, t2(x, z), rn) ~ Exponential(1)
+        sd(:, t2(x, z), nr) ~ Exponential(0.5)
+        y ~ Normal(mu, 1.0)
+    end
+    sb = SBBRMI(same; mod=@__MODULE__, total_groups=())
+    @test occursin("t2_mu_x_z_sd_pen ~ exponential([0.3333333333333333, 1.0, 2.0]');",
+                   BRM.stan_code(sb))
+    r = brm_description(sb)
+    @test r.complete
+    coordinates = sd_pen_coordinates(totals_prior(r, (:parameter, :t2_mu_x_z, :sd_pen)))
+    @test all(c -> c.callable === StanBlocks.stan.builtin.exponential, coordinates)
+    @test [c.arguments for c in coordinates] == [(0.3333333333333333,), (1.0,), (2.0,)]
+    md = brm_description_markdown(r)
+    @test occursin("coordinatewise `exponential`", md)
+    @test occursin("This vector prior is a product of independent per-coordinate priors.", md)
+    @test occursin("\\left[\\operatorname{Exponential}_{\\mathrm{rate}}(0.3333333333333333);\\ " *
+                   "\\operatorname{Exponential}_{\\mathrm{rate}}(1.0);\\ " *
+                   "\\operatorname{Exponential}_{\\mathrm{rate}}(2.0)\\right]", md)
+
+    # One shared prior is the plain family, like an unconfigured scale.
     m = @brm TOTALS_DATA begin
         mu ~ 1 + s(x)
         sd(:, s(x)) ~ Exponential(2)
@@ -160,14 +208,11 @@ end
     r = brm_description(SBBRMI(m; mod=@__MODULE__, total_groups=()))
     @test r.complete
     p = totals_prior(r, (:parameter, :s_x, :sd_pen))
-    coordinates = [x for x in brm_description_components(p.distribution)
-                   if length(x.id) > 2 && x.id[end-1] === :coordinate]
-    @test only(coordinates).callable === StanBlocks.stan.builtin.exponential
-    @test only(coordinates).arguments == (0.5,)
+    @test p.distribution.callable === StanBlocks.stan.builtin.exponential
+    @test isempty(sd_pen_coordinates(p))
     md = brm_description_markdown(r)
-    @test occursin("coordinatewise `exponential`", md)
-    @test occursin("\\operatorname{Exponential}_{\\mathrm{rate}}(0.5)", md)
-    @test !occursin("\\mathrm{brm\\_vector\\_prior", md)
+    @test !occursin("coordinatewise", md)
+    @test occursin("\\operatorname{Exponential}_{\\mathrm{rate}}(\\frac{1.0}{2})", md)
 
     # A consumer family remains an explicit gap with its actual callable.
     custom = @brm TOTALS_DATA begin

@@ -186,3 +186,67 @@ function _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals;
 
     (; rows, is_lp, is_unbound, group_name=grp_name, group_values=ev_vals)
 end
+
+# The `into=` target of a `ragged(...)` kernel positional, or `nothing`.
+function _brm_kernel_ragged_into(c; prefix="BRM kernel preparation")
+    kwargs = getkwargs(c)
+    all(==(:into), keys(kwargs)) || error(
+        "$prefix: kernel(...) `ragged(...)` accepts only the `into=` keyword; got ",
+        join(("`$k`" for k in keys(kwargs) if k !== :into), ", "), ".")
+    get(kwargs, :into, nothing)
+end
+
+# `ragged(idx, group; into=target)`: `idx` holds 1-based row numbers on the flat
+# axis whose subjects `target` labels, with `0` meaning "no row". Each becomes
+# its position among that subject's rows of `target`, in flat order — the order
+# a `ragged(x, target)` gather builds — so a cell indexes its own subject's
+# slice of the target axis. Flat in, flat out: the result is then gathered by
+# `group` exactly like any other data column. An index into another subject's
+# rows would read the wrong subject silently, so it is refused.
+function _brm_kernel_ragged_index_values(arg_col, grp_arg, into_col;
+                                         prefix="BRM kernel preparation")
+    idx_name, grp_name = name(arg_col), name(grp_arg)
+    parent(arg_col) isa DataColumn || error(
+        "$prefix: kernel(...) `ragged($idx_name, $grp_name; into=…)`: `into=` ",
+        "rebases a data column of row numbers; `$idx_name` is not a raw data column.")
+    (into_col isa NamedColumn && parent(into_col) isa DataColumn) || error(
+        "$prefix: kernel(...) `ragged($idx_name, $grp_name; into=…)`: `into=` must ",
+        "name a raw data column labelling the subject of every row of the indexed ",
+        "axis; got $(typeof(into_col)).")
+    _brm_kernel_rebase_index(idx_name, parent(parent(arg_col)),
+        grp_name, parent(parent(grp_arg)), name(into_col), parent(parent(into_col));
+        prefix)
+end
+
+function _brm_kernel_rebase_index(idx_name::Symbol, idx, grp_name::Symbol, raw_groups,
+                                  into_name::Symbol, raw_targets;
+                                  prefix="BRM kernel preparation")
+    decl = "`ragged($idx_name, $grp_name; into=$into_name)`"
+    idx isa AbstractVector{<:Integer} && !(eltype(idx) <: Bool) || error(
+        "$prefix: kernel(...) $decl: `$idx_name` must be a flat integer column of ",
+        "row numbers; got $(typeof(idx)).")
+    raw_targets isa AbstractVector || error(
+        "$prefix: kernel(...) $decl: `$into_name` must be a vector; got ",
+        "$(typeof(raw_targets)).")
+    groups = collect(_brm_group_values(raw_groups))
+    targets = collect(_brm_group_values(raw_targets))
+    length(idx) == length(groups) || error(
+        "$prefix: kernel(...) $decl: `$idx_name` has $(length(idx)) rows but ",
+        "`$grp_name` has $(length(groups)).")
+    any(ismissing, targets) && error(
+        "$prefix: kernel(...) $decl: `$into_name` has missing labels.")
+    seen = Dict{Any,Int}()
+    position = [seen[label] = get(seen, label, 0) + 1 for label in targets]
+    map(eachindex(idx)) do k
+        r = idx[k]
+        r == 0 && return 0
+        1 <= r <= length(targets) || error(
+            "$prefix: kernel(...) $decl: row $k of `$idx_name` is $r, outside the ",
+            "$(length(targets)) rows of `$into_name`.")
+        isequal(targets[r], groups[k]) || error(
+            "$prefix: kernel(...) $decl: row $k of `$idx_name` belongs to subject ",
+            "$(repr(groups[k])) but points at row $r of `$into_name`, which belongs ",
+            "to subject $(repr(targets[r])). An index must stay inside its own subject.")
+        position[r]
+    end
+end
