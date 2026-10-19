@@ -2056,8 +2056,13 @@ end
 
 Resolve one formula term's internal sampled parameter to its exact constrained
 posterior coordinates. `logical` names the linear predictor and `term` is the
-public term-output label BRM derives from the formula (for example
-`:mo_op_diet` or `:hsgp_op_log_dose`). Supported parameter roles are:
+public term label BRM derives from the formula term alone (for example
+`:mo_op_diet` or `:hsgp_op_log_dose`; `hsgp(x, y)` is `:hsgp_x_y`). A term
+repeated in several predictors — one `mo(c)` column, or `hsgp(...)` over the
+same axes — keeps that one label in each, and `logical` selects whose carriers
+resolve. The predictor-scoped `logical` names a repeat's outputs carry in
+`brm_outputs(d)` (`:hsgp_alpha_i_x_y`) depend on declaration order and are
+not term labels. Supported parameter roles are:
 
 | term | `parameter` |
 | --- | --- |
