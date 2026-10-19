@@ -3160,7 +3160,10 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing, provenan
     interaction_map_of(lp::Symbol) = get!(resolved_interactions, lp) do
         _sb_is_prior_declaration(brmi, lp) && return Dict{Symbol,Vector{Symbol}}()
         try
-            _sb_interaction_address_map(brmi, lp)
+            # A design-coded string column's block address fans out over its
+            # level columns exactly like an interaction term over its columns.
+            merge(_sb_interaction_address_map(brmi, lp),
+                  _sb_design_block_address_map(brmi, lp))
         catch err
             haskey(unresolved, lp) || (unresolved[lp] = sprint(showerror, err))
             Dict{Symbol,Vector{Symbol}}()
@@ -3239,7 +3242,12 @@ function _sb_effect_prior_overrides(brmi::BRMI; frozen_preproc=nothing, provenan
 
             if all_coefficients
                 # The default layer for this predictor: every `beta_pop` column
-                # and every categorical contrast block it owns.
+                # and every categorical contrast block it owns. A predictor name
+                # the model does not bind is a typo, not an empty layer.
+                all_predictors || target in lp_names || error(
+                    "sbimpl: `$(_spelling(spec))` names no linear predictor. " *
+                    "Available predictors: " *
+                    "$(join(_sb_effect_available_predictors(lp_names, labels_of), ", ")).")
                 if !isnothing(labels) && !isempty(labels)
                     cells = get!(pop_overrides, target) do
                         Any[nothing for _ in labels]
@@ -3387,10 +3395,10 @@ end
 # offers. Operands print in key (sorted) order; either surface order addresses
 # the same term.
 function _sb_effect_interaction_note(interaction_map)
-    isempty(interaction_map) && return ""
+    keys_ = filter(_is_interaction_key, collect(keys(interaction_map)))
+    isempty(keys_) && return ""
     spells = sort!(["$(ops[1]) & $(ops[2])"
-                    for ops in (_interaction_key_operands(k)
-                                for k in keys(interaction_map))])
+                    for ops in (_interaction_key_operands(k) for k in keys_)])
     " Interaction term(s) on this data: " *
     join(("`$s`" for s in spells), ", ") *
     " — address one as `effect(<lp>, a & b)` (either operand order) to set " *
@@ -3530,6 +3538,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
        centered_groups=Set{Symbol}(), total_groups=:auto,
        s2z_groups=(), s2z_rho=nothing, s2z_coordinates=:contrasts, held_out=(),
        resample_covariates=(), _frozen_preproc=nothing, _marginal_id_targets=nothing)
+    brmi = _brm_resolve_optional_priors(brmi)
     source_parent = brmi
     fresh_covariates = _sb_covariate_selection(brmi,resample_covariates)
     isempty(fresh_covariates) || (brmi = _sb_covariate_brmi(brmi,fresh_covariates))
@@ -5591,17 +5600,18 @@ _sb_submodel_rhs!(stmts, data, target, f, rhs) = nothing
 # `driver=` terms were ALL declined. So no cmt-keyed obs surface is being built; the
 # per-output-column do-block form above is the answer.
 #
-# Walk a per-subject linear predictor to the `(id, group)` ranef bucket that
-# defines its grouping — what lets `kernel(...)` DERIVE its plate grouping from
-# the LPs handed in instead of being told via `by=` (v2, GO `0dnesv9`). `by=`
-# only ever contributed the subject COUNT, restating a fact the ranef already
-# knows, and was checked against nothing.
+# Walk a per-subject linear predictor to the groupings of its random effects —
+# what lets `kernel(...)` DERIVE its plate grouping from the LPs handed in
+# instead of being told via `by=` (v2, GO `0dnesv9`). `by=` only ever
+# contributed the subject COUNT, restating a fact the ranef already knows, and
+# was checked against nothing.
 #
-# Returns `(id_sym, group_key, group_col)`, or `nothing` for a per-subject LP
-# without a random effect: it defines no grouping of its own and rides on the
-# subject frame a ranef LP, or a no-random-effects panel's pre-grouped
-# columns, define (`_sb_kernel_lp_buckets`).
-function _sb_kernel_lp_bucket_or_nothing(lp_col)
+# Returns `(; key, column)` per distinct grouping in formula order — several
+# `|ID|` blocks over one grouping are one grouping — or `nothing` for a
+# per-subject LP without a random effect: it defines no grouping of its own and
+# rides on the subject frame a ranef LP, or a no-random-effects panel's
+# pre-grouped columns, define.
+function _sb_kernel_lp_groupings(lp_col)
     decl = parent(lp_col)
     (decl isa ExprColumn && getf(decl) === ~) || error(
         "sbimpl: kernel(...) positional arg `$(name(lp_col))` is not a formula ",
@@ -5612,21 +5622,76 @@ function _sb_kernel_lp_bucket_or_nothing(lp_col)
         _sb_classify_term!(t, pop_terms, ran_terms, direct_terms)
     end
     isempty(ran_terms) && return nothing
-    parts = map(_sb_ranef_parts, ran_terms)
-    buckets = unique([(p[1], _sb_group_key(p[3])) for p in parts])
-    length(buckets) == 1 || error(
-        "sbimpl: kernel(...) per-subject linear predictor `$(name(lp_col))` spans ",
-        "several ranef buckets ($(buckets)); a kernel cell needs exactly one grouping.")
-    id_sym, gkey = only(buckets)
-    desc = parts[1][3]
-    (id_sym, gkey, desc isa NamedColumn ? desc : first(desc))
+    groupings = Any[]
+    for rt in ran_terms
+        desc = _sb_ranef_parts(rt)[3]
+        # A multi-membership row belongs to several groups, so it never labels
+        # a cell; it stays an ordinary term of the predictor.
+        desc isa MultiMembershipTerm && continue
+        key = _sb_group_key(desc)
+        any(g -> isequal(g.key, key), groupings) && continue
+        push!(groupings, (; key, column=desc isa NamedColumn ? desc : first(desc)))
+    end
+    isempty(groupings) && error(
+        "sbimpl: kernel(...) per-subject linear predictor `$(name(lp_col))` has ",
+        "only multi-membership random effects; a row of several groups cannot ",
+        "label a plate cell. Add the `(1 | ID | subject)` term that names each ",
+        "row's subject.")
+    groupings
 end
 
-# Buckets of a kernel's per-subject LP positionals, `nothing` for an LP without
-# a random effect. Those LPs are checked against the subject count by
-# `_brm_kernel_check_subject_frame_lp` once it is known; with no bucket at all
-# the kernel is a no-random-effects panel.
-_sb_kernel_lp_buckets(lp_cols) = map(_sb_kernel_lp_bucket_or_nothing, lp_cols)
+# The grouping of each of a kernel's per-subject LP positionals, `nothing` for
+# an LP without a random effect. Those LPs are checked against the subject
+# count by `_brm_kernel_check_subject_frame_lp` once it is known; with no
+# grouping at all the kernel is a no-random-effects panel.
+#
+# The plate's cells are the rows of the LPs' frame, one per subject. An LP
+# whose random effects span several groupings — Kreise nested in Länder, `(1 |
+# land | land_d) + (1 | kreis | ags_d)` — is labelled by the one whose column
+# lists one unique label per row; the others are ordinary terms that already
+# add to each row's predictor. Several such columns label the same rows in
+# the same order: a `ragged(x, group => cells)` input names one, otherwise
+# the first in the formula serves, except where `ragged(...)` rows or a
+# `label_join` (a flat response aligned to the kernel result) join cells by
+# label. LPs that share no grouping keep their own, and the callers refuse
+# the disagreement.
+function _sb_kernel_lp_buckets(lp_cols; ragged_cols=(),
+                               label_join=!isempty(ragged_cols))
+    per_lp = map(_sb_kernel_lp_groupings, lp_cols)
+    candidates = map(zip(lp_cols, per_lp)) do (lp_col, groupings)
+        (groupings === nothing || length(groupings) == 1) && return groupings
+        labelling = filter(g -> _brm_kernel_labels_rows(parent(parent(g.column))), groupings)
+        isempty(labelling) && error(
+            "sbimpl: kernel(...) needs pre-grouped per-subject data — one of the ",
+            "grouping columns ", join(("`$(name(g.column))`" for g in groupings), ", "),
+            " of per-subject linear predictor `$(name(lp_col))` must list one ",
+            "non-missing unique subject per row. Repeated levels indicate ",
+            "long-format data.")
+        labelling
+    end
+    grouped = filter(!isnothing, candidates)
+    isempty(grouped) && return candidates
+    shared = [g for g in first(grouped)
+              if all(c -> any(h -> isequal(h.key, g.key), c), grouped)]
+    if length(shared) > 1
+        cells = Set(name(getargs(c)[3]) for c in ragged_cols if length(getargs(c)) == 3)
+        named = filter(g -> name(g.column) in cells, shared)
+        if length(named) == 1
+            shared = named
+        elseif label_join
+            error(
+                "sbimpl: kernel(...) grouping columns ",
+                join(("`$(name(g.column))`" for g in shared), ", "), " each list ",
+                "one unique label per row, so each could label the plate's cells, ",
+                "and its rows are joined to cells by label. Name the cell label ",
+                "column at model scope: `ragged(x, group => cells)`.")
+        end
+    end
+    map(candidates) do c
+        c === nothing && return nothing
+        isempty(shared) ? first(c) : first(shared)
+    end
+end
 
 # Collect `(name, length)` for every RAW data column reachable from a formula
 # RHS. Used to check that a `ragged(x, group)` LP really is declared over the
@@ -5920,7 +5985,7 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     nsub_sym = Symbol("kernel_nsub_", target)
     # Only an LP with a random-effect term names the subjects. One without
     # rides on the subject frame the others, or the pre-grouped columns, define.
-    lp_buckets = _sb_kernel_lp_buckets(lp_cols)
+    lp_buckets = _sb_kernel_lp_buckets(lp_cols; ragged_cols)
     grouped = [b for b in lp_buckets if b !== nothing]
     if isempty(grouped) && !isempty(ragged_specs)
         # Label-anchored plate: no per-cell LP carries a ranef bucket, so the
@@ -5979,13 +6044,13 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         # would therefore MIS-align the LP against its own subjects whenever the
         # labels are not sorted. The only thing that must hold is the bijection
         # below: one level per row.
-        groups = unique([b[2] for b in grouped])
+        groups = unique([b.key for b in grouped])
         length(groups) == 1 || error(
             "sbimpl: kernel(...) per-subject linear predictors disagree on their ",
             "grouping — got groups $(groups) across $(Tuple(name(c) for c in lp_cols)). ",
             "LPs may use distinct `|ID|` buckets, but every LP handed to one kernel ",
             "must describe the same subjects.")
-        group_col = first(grouped)[3]
+        group_col = first(grouped).column
         _brm_kernel_check_cell_labels(ragged_cols, name(group_col); prefix="sbimpl")
 
         # The labels identify groups to Julia callers but never enter the emitted
@@ -7101,19 +7166,22 @@ function _sb_ragged_rhs_kernel_groups!(acc, x::NamedColumn)
     isnothing(producer_rhs) && return nothing
 
     lps = Any[]
+    ragged_cols = Any[]
     for arg in getargs(producer_rhs)
+        arg isa ExprColumn && getf(arg) === ragged && (push!(ragged_cols, arg); continue)
         arg isa NamedColumn || continue
         arg_decl = parent(arg)
         arg_decl isa ExprColumn && getf(arg_decl) === (~) || continue
         push!(lps, arg)
     end
-    buckets = [b for b in _sb_kernel_lp_buckets(lps) if b !== nothing]
+    buckets = [b for b in _sb_kernel_lp_buckets(lps; ragged_cols, label_join=true)
+               if b !== nothing]
     isempty(buckets) && return nothing
-    groups = unique(b[2] for b in buckets)
+    groups = unique(b.key for b in buckets)
     length(groups) == 1 || error(
         "sbimpl: kernel result `$(name(x))` has no single subject grouping; " *
         "its per-subject predictors name groups $(collect(groups)).")
-    push!(acc, (name(x), first(buckets)[3]))
+    push!(acc, (name(x), first(buckets).column))
     nothing
 end
 function _sb_ragged_rhs_kernel_groups!(acc, x::ExprColumn)
@@ -7998,11 +8066,16 @@ function popcoefnames(brmi::BRMI, lhs::Symbol)
     # Scratch data/stmts: `_sb_pop_cols!` materialises columns into these as a
     # side effect; we only read back the pushed column reference(s) as labels.
     scratch = Dict{Symbol,Any}(); scratch_stmts = Any[]
-    for t in pop_terms
+    design_columns = _sb_design_coded_columns(pop_terms)
+    for (t, coded) in zip(pop_terms, design_columns)
         # The intercept is always exactly one all-ones column; skip the
         # emitter's length probe (irrelevant to naming) and label it directly.
         if t isa Integer
             push!(labels, :Intercept)
+            continue
+        end
+        if !isnothing(coded)
+            append!(labels, (c.label for c in coded))
             continue
         end
         cols = Any[]
@@ -8108,12 +8181,13 @@ function _sb_cat_coefnames(brmi::BRMI, lhs::Symbol)
 end
 
 # `factor(c; ref=k)` is re-encoded at term-collection time into a synthetic
-# `c__ref_k` NamedColumn (see `_sb_collect_terms_expr!(::typeof(factor), ...)`),
-# and that synthetic name is what reaches the emitted `cat_<lp>_c__ref_k_beta`.
+# `c__ref_k` NamedColumn (`c__ref_<level>` for a string level; see
+# `_sb_collect_terms_expr!(::typeof(factor), ...)`), and that synthetic name is
+# what reaches the emitted `cat_<lp>_c__ref_k_beta`.
 # Requiring the user to spell the internal suffix would leak an implementation
 # detail into a public prior address, so BOTH the emitted name and the column
 # the formula names resolve onto the same block.
-const _SB_REF_SUFFIX = r"__ref_[0-9]+$"
+const _SB_REF_SUFFIX = r"__ref_.+$"
 function _sb_cat_addresses(emitted::Symbol)
     s = String(emitted)
     m = match(_SB_REF_SUFFIX, s)
@@ -8895,6 +8969,41 @@ function _sb_interaction_address_map(brmi::BRMI, lhs::Symbol)
         labels = Symbol[c isa Symbol ? c : :Intercept for c in cols]
         key = _brm_interaction_key(name(args[1]), name(args[2]))
         append!(get!(out, key, Symbol[]), labels)
+    end
+    out
+end
+
+# The population columns of the terms only the shared design codes (a bare
+# string column: its level indicators, `<c>_lvl_<k>`), aligned with
+# `pop_terms`, `nothing` elsewhere. SBBRMI emits such a predictor through
+# `_brm_population_design`, so its labels and block addresses come from the
+# same columns, with the design's own cell-means choice.
+function _sb_design_coded_columns(pop_terms)
+    flags = _brm_cellmeans_term_flags(Tuple(pop_terms))
+    map(pop_terms, flags) do t, cellmeans
+        t isa NamedColumn && parent(t) isa DataColumn &&
+            _brm_is_string_categorical_data(parent(parent(t))) || return nothing
+        _brm_population_columns(t; cellmeans)
+    end
+end
+
+# block address -> the ordered `beta_pop` labels of a design-coded categorical
+# term, for one linear predictor: `effect(lp, c)` claims every level column of
+# a bare string column `c`, and `effect(lp, c_lvl_<k>)` refines one of them.
+function _sb_design_block_address_map(brmi::BRMI, lhs::Symbol)
+    out = Dict{Symbol,Vector{Symbol}}()
+    op = linear_predictor_op(brmi, lhs)
+    isnothing(op) && return out
+    _, rhs = getargs(op, 2)
+    pop_terms = Any[]; ran_terms = Any[]; direct_terms = Any[]
+    for t in _sb_terms(rhs)
+        _sb_classify_term!(t, pop_terms, ran_terms, direct_terms)
+    end
+    for coded in _sb_design_coded_columns(pop_terms)
+        isnothing(coded) && continue
+        for c in coded, address in c.effect_addresses
+            address === c.label || push!(get!(out, address, Symbol[]), c.label)
+        end
     end
     out
 end
@@ -11591,7 +11700,9 @@ _sb_collect_terms_expr!(acc, ::typeof(*), x) = push!(acc, x)
 # column. Re-encode at term-collection time (swap level k <-> level 1)
 # and inject a synthetic NamedColumn with the recoded data, so the
 # downstream categorical pipeline (treatment-coded dummies relative to
-# level 1) reuses unchanged.
+# level 1) reuses unchanged. An integer-leveled `CategoricalVector` codes its
+# unwrapped values the same way; a string-leveled one or a plain string column
+# goes through `_sb_string_factor_column` (level VALUES, `ref="level"`).
 _sb_collect_terms_expr!(acc, ::typeof(factor), x::ExprColumn) = begin
     args = getargs(x); kw = getkwargs(x)
     length(args) == 1 || error("sbimpl: `factor(...)` expects 1 positional arg, got $(length(args))")
@@ -11600,8 +11711,16 @@ _sb_collect_terms_expr!(acc, ::typeof(factor), x::ExprColumn) = begin
     isnothing(inner) && error("sbimpl: `factor(...)` expects a NamedColumn, got $(typeof(inner_raw))")
     backing = _as_data_column(parent(inner))
     isnothing(backing) && error("sbimpl: `factor($(name(inner)))` expects a raw data column")
-    raw = _as_int_vec(parent(backing))
-    isnothing(raw) && error("sbimpl: `factor($(name(inner)))` expects integer-coded categorical data, got $(typeof(parent(backing)))")
+    data = parent(backing)
+    if data isa CA.CategoricalVector && CA.leveltype(data) <: Integer
+        backing = DataColumn(Int.(CA.unwrap.(data)))
+        data = parent(backing)
+    end
+    _brm_is_string_categorical_data(data) &&
+        return push!(acc, _sb_string_factor_column(x, inner, data))
+    raw = _as_int_vec(data)
+    isnothing(raw) && error("sbimpl: `factor($(name(inner)))` expects integer, string or " *
+        "`CategoricalVector` data, got $(typeof(data))")
     ref_raw = get(kw, :ref, 1)
     ref = _as_integer(ref_raw)
     isnothing(ref) && error("sbimpl: `factor(...; ref=k)` expects an integer level, got $(typeof(ref_raw))")
@@ -11611,6 +11730,36 @@ _sb_collect_terms_expr!(acc, ::typeof(factor), x::ExprColumn) = begin
         DataColumn(Int[r == ref ? 1 : r == 1 ? ref : r for r in raw])
     push!(acc, NamedColumn(new_name, new_backing))
 end
+# A string `factor(...)` term as the categorical column `_sb_emit_cat!` codes:
+# the backend-neutral string design's `sort(unique)` level order with the
+# reference swapped into first place (`_brm_string_factor_population_columns`),
+# carried as a `CategoricalVector` so emitted labels keep the level values. Its
+# name is the term's block name (`c`, or `c__ref_<level>` for a non-default
+# reference), which the cell-means choice and prior addresses resolve against.
+function _sb_string_factor_column(term, inner, data::AbstractVector)
+    values = _brm_factor_values(data)
+    any(ismissing, values) && error(
+        "sbimpl: `factor($(name(inner)))` has missing values; a categorical " *
+        "predictor needs a level on every row")
+    fit = collect(_brm_fit_levels(values))
+    isempty(fit) && error("sbimpl: `factor($(name(inner)))` observes no level")
+    ref = get(getkwargs(term), :ref, first(fit))
+    ref isa AbstractString || error(
+        "sbimpl: `factor($(name(inner)); ref=...)` on string data names the " *
+        "reference by its level value, got $(repr(ref))")
+    k = findfirst(isequal(ref), fit)
+    isnothing(k) && error(
+        "sbimpl: `factor($(name(inner)); ref=$(repr(ref)))` ref is not an " *
+        "observed level (levels $(repr(fit)))")
+    block = _brm_categorical_term_block(term)
+    Base.isidentifier(block) || error(
+        "sbimpl: `factor($(name(inner)); ref=$(repr(ref)))` names its emitted " *
+        "block `$block`, which is not a valid identifier; choose a reference " *
+        "level whose value is identifier-safe")
+    fit[1], fit[k] = fit[k], fit[1]
+    NamedColumn(block, DataColumn(CA.categorical(values; levels=fit)))
+end
+
 # `(t1 + t2 + ... || g)` zerocorr ranefs: independent variances per term,
 # no shared correlation. Expand into N separate `(t_i | g_nocor_i)` ran
 # terms with synthetic group names so the ran-term coalescer in

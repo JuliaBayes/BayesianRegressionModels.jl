@@ -47,6 +47,19 @@ known values, `sd(lp, ID) = value` and `cor(:, ID) = R`. It covers:
 
 Set `BRM_FIXED_RANEF_RUNTIME=0` to skip the compiled-model sets.
 
+`model_family_composition.jl` checks composing a family of related models
+without string templating:
+
+- `optional(<address>)` priors: every address class is dropped when the model
+  lacks it, and the result is byte-identical to the plain twin on SBBRMI and RK;
+- the typed builder: `brm_columns(builder)` equals the descriptor's columns, and
+  `merge(builders...)`, `Expr` composition and `show(builder)` work;
+- source views: `show(::BRMI)` prints the authored statements, and the printed
+  source re-parses to the same Stan program;
+- `String` categorical columns on both backends, with stanc acceptance and a
+  BridgeStan density matching the integer-coded twin;
+- order-free structural `merge`, and the refused `effect(<unknown predictor>, :)`.
+
 `kernel_population_lp.jl` checks per-subject linear predictors without a random
 effect (a typical value plus covariates) read as `x[i]`, beside a random-effect
 predictor and in a no-random-effects panel, against an independent density

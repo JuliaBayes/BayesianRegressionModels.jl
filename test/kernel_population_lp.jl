@@ -63,10 +63,9 @@ end
 # from a zero `offset(...)` witness.
 const POP_CATEGORICAL = merge(POP_PANEL, (; ind=["BLCL", "AITL", "BLCL"]))
 
-# Default population priors: an `effect(rate, ...)` prior address on a plain
-# String categorical predictor is a separate, still-open gap (`popcoefnames`;
-# todo `0dok037`). Its descriptor coordinates resolve
-# (`test/string_categorical_coordinates.jl`).
+# Default population priors. An `effect(rate, ...)` prior address on a plain
+# String categorical predictor is covered in `test/model_family_composition.jl`,
+# and its descriptor coordinates in `test/string_categorical_coordinates.jl`.
 pop_categorical(data) = @brm data begin
     theta ~ 1 + (1 | p | subject)
     rate ~ 1 + ind
@@ -224,14 +223,6 @@ const POP_CATEGORICAL_SPELLINGS = (
     ("CategoricalVector", merge(POP_CATEGORICAL,
         (; ind=CategoricalArrays.categorical(POP_CATEGORICAL.ind)))),
 )
-
-function stan_density_points(brmi, name)
-    stan = consumer_stan(brmi, name)
-    n = BridgeStan.param_unc_num(stan.model)
-    names = BridgeStan.param_unc_names(stan.model)
-    points = (zeros(n), fill(0.1, n), collect(range(-0.4, 0.4; length=n)))
-    names, [BridgeStan.log_density(stan.model, u; propto=false) for u in points]
-end
 
 with_witness(data) = merge(data, (; zero_axis=zeros(length(data.subject))))
 

@@ -24,6 +24,17 @@ function consumer_stan(brmi, name; mod=@__MODULE__)
     problem
 end
 
+# The compiled Stan model's full log density at three fixed unconstrained
+# points, with its coordinate names: equal results for two models mean the
+# same density under the same parameterisation.
+function stan_density_points(brmi, name)
+    stan = consumer_stan(brmi, name)
+    n = BridgeStan.param_unc_num(stan.model)
+    names = BridgeStan.param_unc_names(stan.model)
+    points = (zeros(n), fill(0.1, n), collect(range(-0.4, 0.4; length=n)))
+    names, [BridgeStan.log_density(stan.model, u; propto=false) for u in points]
+end
+
 function check_consumer_point(problem, u, oracle)
     before = copy(u)
     value, gradient = LogDensityProblems.logdensity_and_gradient(problem, u)

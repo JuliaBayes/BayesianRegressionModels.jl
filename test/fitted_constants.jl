@@ -259,6 +259,49 @@ end
     @test RKBRMI(builder(OFFSET)(panel)) isa RKBRMI
 end
 
+# A body built from a runtime string and `Core.eval`'d inside a function: the
+# eval defines each constant's closure in a world newer than the function's,
+# and the backends built in that same function evaluate it there (snag
+# `declared-a-data-8e5f1f07`).
+calibrate(conc) = (mean(log.(conc)), std(log.(conc)))
+const RUNTIME_BODY = """
+    ec50_loc = constant(calibrate(conc)[1])
+    ec50_scale = constant(calibrate(conc)[2])
+    V = constant(var(y))
+    log_ec50 ~ Normal(ec50_loc, ec50_scale)
+    mu ~ 1 + x + (1 | p | subject)
+    r2 ~ Beta(1.0, 1.0)
+    sigma = sqrt((1 - r2) * V)
+    m = mu + log_ec50
+    y ~ Normal(m, sigma)
+"""
+function build_from_runtime_body(body, data, replay)
+    brmi = Core.eval(@__MODULE__, _brm(body; df=data))
+    sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
+    builder = Core.eval(@__MODULE__, _brm(body))
+    built = SBBRMI(Base.invokelatest(builder, data); mod=@__MODULE__, total_groups=())
+    fresh = reprocess(sb, replay; freeze_constants=false)
+    (; sb, built, fresh, rk=RKBRMI(brmi))
+end
+
+@stestset "constants of a body eval'd inside a function evaluate on both backends" begin
+    conc = PANEL.conc[1:6] .* 10
+    result = build_from_runtime_body(RUNTIME_BODY, PANEL, merge(NO_CONC, (; conc)))
+    reference = SBBRMI(SUPPLIED(supplied(PANEL)); mod=@__MODULE__, total_groups=())
+    for sb in (result.sb, result.built)
+        @test constants(sb) == FITTED
+        @test stan_code(sb) == stan_code(reference)
+    end
+    @test constants(result.fresh) == Dict(:ec50_loc => mean(log.(conc)),
+        :ec50_scale => std(log.(conc)), :V => var(NO_CONC.y))
+    ad_backend = AutoEnzyme(; mode=Enzyme.Reverse)
+    rk = rk_logdensity_problem(result.rk; ad_backend)
+    rk_supplied = rk_logdensity_problem(RKBRMI(SUPPLIED(supplied(PANEL))); ad_backend)
+    for u in (zeros(LogDensityProblems.dimension(rk)), fill(0.3, LogDensityProblems.dimension(rk)))
+        @test LogDensityProblems.logdensity(rk, u) == LogDensityProblems.logdensity(rk_supplied, u)
+    end
+end
+
 refusal(f) = try
     f(); nothing
 catch err
