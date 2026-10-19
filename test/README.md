@@ -563,12 +563,12 @@ oracles and compiled Stan, and replays the complete emitted source and artifact.
 mask validation, RKBRMI's fitted density as the full one minus the held rows'
 pointwise densities with unchanged coordinates (a held row outside LogNormal's
 support included), and SBBRMI's masked fit as the fit on the kept rows
-(density offset and gradient) for flat, `@plate`-cell, `kernel(...)`-cell and
-ragged-join responses, with `y_likelihood` unchanged. Masks combine with
+(density offset and gradient) for flat, bounded LogNormal, `@plate`-cell,
+`kernel(...)`-cell and ragged-join responses, with `y_likelihood` unchanged (a
+held row outside LogNormal's support scores `-Inf`). Masks combine with
 whole-response Symbols and survive `reprocess`, `generative_plan` and the
-descriptor. Two cases are `@test_broken`: SBBRMI with a held row outside
-LogNormal's support (StanBlocks snag `heldout-lpdf-eva-a8569726`) and RKBRMI
-masks on per-subject arrays (RKPPL nested `missing`).
+descriptor. RKBRMI masks on per-subject arrays are `@test_broken` (RKPPL nested
+`missing`).
 
 `rk_callable_terms.jl` checks positional/keyword formula broadcasting, including
 singleton input axes, against independent and compiled Stan targets.
