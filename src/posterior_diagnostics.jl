@@ -70,7 +70,8 @@ _brm_diagnostic_vector(x::AbstractArray) = x
 Read one ungrouped squared-exponential HSGP from its descriptor, returning
 draws × basis matrices `coordinates`, `sampled_coordinates`, `unit_weights`,
 `physical_weights`, and `log_scales`, plus physical `length_scales` (draws ×
-axes), `marginal_sd`, and sampled/display `centeredness` vectors. Input rows are
+axes, or one column for an isotropic term, whose length scale every axis
+reads), `marginal_sd`, and sampled/display `centeredness` vectors. Input rows are
 draws. `centeredness=nothing` preserves the fitted coordinates; a scalar or
 per-basis vector transforms the SAME draws to `u = s^c z`. No new fit is run.
 
@@ -108,17 +109,15 @@ function hsgp_coordinate_draws(d::BRMDescriptor, draws::AbstractMatrix, names;
         all(x -> isfinite(x) && x > 0, sigmas) || error(
         "HSGP coordinate diagnostics need finite positive constrained hyperparameters")
     all(isfinite, sampled) || error("HSGP sampled coordinates must be finite")
-    omega_key = get(owner.keywords, :omega2, nothing)
-    omega_key isa Symbol || error("HSGP declaration has no spectral-frequency binding")
-    omega2 = d.plan.data[omega_key]
-    size(omega2) == (size(sampled, 2), size(rhos, 2)) || throw(DimensionMismatch(
-        "HSGP spectral metadata does not match its descriptor coordinates"))
+    omega2 = _brm_hsgp_omega2(d.plan, owner,
+        "HSGP coordinate diagnostics: HSGP `$term`", size(sampled, 2), size(rhos, 2))
+    iso = size(rhos, 2) == 1
     source = _brm_hsgp_centeredness(kw, size(sampled, 2))
     target = isnothing(centeredness) ? copy(source) :
         _brm_hsgp_centeredness((; centeredness), size(sampled, 2))
     logs = [log(sigmas[i]) + sum(
-                0.5 * (log(rhos[i, a]) + 0.9189385332046727) -
-                0.25 * rhos[i, a]^2 * omega2[b, a] for a in axes(rhos, 2))
+                0.5 * (log(rhos[i, iso ? 1 : a]) + 0.9189385332046727) -
+                0.25 * rhos[i, iso ? 1 : a]^2 * omega2[b, a] for a in axes(omega2, 2))
             for i in axes(sampled, 1), b in axes(sampled, 2)]
     transformed = hsgp_transform_draws(sampled, logs; from=source, to=target,
                                        gradients=basis_gradients)

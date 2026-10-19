@@ -71,7 +71,7 @@ function _rk_drop_unfitted_records!(records::AbstractVector, outputs, kept)
     nothing
 end
 
-_rk_coordinate_records(plan::Union{_RKStructuralPlan,_RKValuePlan,_RKHeldOutPlan}) =
+_rk_coordinate_records(plan::Union{_RKStructuralPlan,_RKValuePlan,_RKHeldOutPlan,_RKHeldOutRowsPlan}) =
     let records = Any[]
         _rk_emit_ast(plan; coordinates=records)
         records

@@ -112,6 +112,14 @@ gradient parity with the in-cell spelling. For a `ragged(y, group)` join it
 also checks the omitted response: the same observation statement, the bound
 `y_rows` partition and its replay, and the predictive segments.
 
+`adaptive_multiaxis_hsgp_centering.jl` checks online adaptive centering of
+two-axis squared-exponential HSGPs: isotropic (one length scale every axis
+reads) and `iso=false`, ungrouped and grouped, beside a shared random-effect
+block. Each cell's spectral scale is pinned against BridgeStan's constrained
+hyperparameters, and the wrapped non-centered model at `c = 1` reproduces the
+density and gradient of the compiled `centeredness=1.0` twin.
+`hsgp_coordinate_draws` returns the same log scales on those draws.
+
 `benchmark_emission_latency.jl` reports package loading, first model construction,
 first RK artifact emission and repeated calls separately, including compiler time,
 allocation and garbage collection. It uses independent synthetic regression and
@@ -544,6 +552,17 @@ Stan and complete public printed-source replay.
 separate parameter branches. It preserves every fitted prior and coordinate,
 compares normalized native densities and reverse gradients against independent
 oracles and compiled Stan, and replays the complete emitted source and artifact.
+
+`held_out_rows.jl` checks per-row `held_out=(; y = mask)` on both backends:
+mask validation, RKBRMI's fitted density as the full one minus the held rows'
+pointwise densities with unchanged coordinates (a held row outside LogNormal's
+support included), and SBBRMI's masked fit as the fit on the kept rows
+(density offset and gradient) for flat, `@plate`-cell, `kernel(...)`-cell and
+ragged-join responses, with `y_likelihood` unchanged. Masks combine with
+whole-response Symbols and survive `reprocess`, `generative_plan` and the
+descriptor. Two cases are `@test_broken`: SBBRMI with a held row outside
+LogNormal's support (StanBlocks snag `heldout-lpdf-eva-a8569726`) and RKBRMI
+masks on per-subject arrays (RKPPL nested `missing`).
 
 `rk_callable_terms.jl` checks positional/keyword formula broadcasting, including
 singleton input axes, against independent and compiled Stan targets.

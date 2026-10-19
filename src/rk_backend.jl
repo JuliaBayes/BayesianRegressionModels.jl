@@ -6310,6 +6310,12 @@ function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
     values
 end
 
+# The response rows a likelihood reads. Recoded levels are in range by
+# construction, and their gate checks coverage of every level, so it sees all.
+_rk_gated_rows(family, values, held) = values
+_rk_gated_rows(family, values, held::Vector{Bool}) =
+    family in (:categorical_logit, :ordinal, :categorical) ? values : values[.!held]
+
 # Binomial trials validation once columns cross: integer trials, no
 # missing (covered by the crossed-columns gate for columns; literals
 # are validated at classification), and y <= n every row.
@@ -7604,7 +7610,10 @@ arrays on their own row axes. Regression geometry and priors use the same
 preparation on both regression routes. The extension emits and binds the
 current RKPPL surface; unsupported formula terms fail with RK attribution.
 """
-Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRMI))
+# `held_rows` are the validated per-row `held_out` masks (`_rk_held_out_selection`):
+# a held row enters no likelihood, so its value is not gated.
+Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRMI);
+                                                         held_rows=Dict{Symbol,Any}())
     prefix = "RK backend"
     unconditioned = _rk_unconditioned_plan(brmi)
     unconditioned === nothing || return unconditioned
@@ -7966,9 +7975,10 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
             gate_family = family === :mixture ?
                 only(unique!(map(c -> c.family, mixture_components))) :
                 family
-            gated = _rk_gate_response_values!(gate_family,
-                leveled.response_values, entry.key, interval)
-            columns[entry.key] = gated
+            _rk_gate_response_values!(gate_family, _rk_gated_rows(gate_family,
+                leveled.response_values, get(held_rows, entry.key, nothing)),
+                entry.key, interval)
+            columns[entry.key] = leveled.response_values
         end
         push!(response_specs, _RKLikelihoodSpec(family, link, entry.key,
             leveled.predictor, scale, scale_predictor, weights, evidence,

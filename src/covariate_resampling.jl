@@ -216,7 +216,8 @@ function _sb_record_covariate_groups(sb,groups)
         preproc[key] = PreprocEntry(entry.kind,
             merge(entry.const_,(; groups=Tuple(sort!(collect(groups))))),entry.raw_ref,entry.dim_coupled)
     end
-    SBBRMI(sb.parent,sb.model,sb.data,preproc,copy(sb.held_out),sb.bindings)
+    SBBRMI(sb.parent,sb.model,sb.data,preproc,copy(sb.held_out),sb.bindings,
+           copy(sb.held_out_rows))
 end
 
 function _sb_reprocess_covariates(sb,new_df,selected,groups,freeze)
@@ -228,7 +229,7 @@ function _sb_reprocess_covariates(sb,new_df,selected,groups,freeze)
         "BRM covariate resampling does not support S2Z coordinate transport"))
     previous = _sb_existing_covariates(sb.preproc)
     old_groups = _sb_covariate_resample_groups(sb.preproc)
-    baseline = SBBRMI(sb.parent;mod=sb.model.mod,total_groups=(),held_out=sb.held_out,
+    baseline = SBBRMI(sb.parent;mod=sb.model.mod,total_groups=(),held_out=_sb_held_out_spec(sb),
         cv_groups=old_groups,resample_covariates=previous,_frozen_preproc=sb.preproc)
     isempty(old_groups) || (baseline=_sb_mark_resample_groups(baseline,old_groups))
     stan_code(baseline) == stan_code(sb) || throw(ArgumentError(
@@ -236,11 +237,11 @@ function _sb_reprocess_covariates(sb,new_df,selected,groups,freeze)
     # Complete observed covariates acquire runtime transforms only in this
     # prediction mode. Fit those transforms on the original training values.
     training = SBBRMI(_sb_covariate_brmi(sb.parent,selected);
-        mod=sb.model.mod,total_groups=(),held_out=sb.held_out,_frozen_preproc=sb.preproc)
+        mod=sb.model.mod,total_groups=(),held_out=_sb_held_out_spec(sb),_frozen_preproc=sb.preproc)
     frozen = merge(Dict(sb.preproc),training.preproc)
     rebound = _sb_rebind_brmi(sb.parent,new_df)
     target = SBBRMI(rebound;mod=sb.model.mod,total_groups=(),cv_groups=groups,
-        held_out=sb.held_out,resample_covariates=selected,_frozen_preproc=frozen)
+        held_out=_sb_held_out_spec(sb),resample_covariates=selected,_frozen_preproc=frozen)
     for (key,entry) in sb.preproc
         entry.kind in (:missing_response,:joint_missing_response) || continue
         sources = entry.raw_ref isa Symbol ? (entry.raw_ref,) : Tuple(entry.raw_ref)
