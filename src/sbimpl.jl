@@ -7395,6 +7395,13 @@ function _sb_shared_population_column!(data, column)
     column.label
 end
 
+# What a population binding records of one emitted design column: its label,
+# fitted transform and prior addresses, without the values (those are Stan
+# data). The descriptor reads labels and categorical level metadata from it.
+_sb_design_column_record(c) =
+    (; label=c.label, source=c.source, effect_addresses=c.effect_addresses,
+       effect_block=c.effect_block, preprocess=c.preprocess)
+
 # The intercept column's row extent. The design's row source names its axis, but
 # a raw categorical/string source never reaches Stan data — its emitted columns
 # are the derived level indicators — so `num_elements(<raw>)` would not resolve
@@ -7522,10 +7529,8 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
             # Preserve the producer's already prepared design semantics for
             # reporting. Values stay in Stan data; metadata retains the fitted
             # transforms and column identities without rebuilding the design.
-            design_columns=isnothing(shared_design) ? Tuple(description_columns) : Tuple(
-                (;label=c.label,source=c.source,effect_addresses=c.effect_addresses,
-                   effect_block=c.effect_block,preprocess=c.preprocess)
-                for c in shared_design.columns)
+            design_columns=isnothing(shared_design) ? Tuple(description_columns) :
+                map(_sb_design_column_record, Tuple(shared_design.columns))
             # StanBlocks `hcat` promotes a lone vector to matrix[n,1] and folds to
             # append_col for two-or-more columns, so we can always just emit hcat.
             push!(stmts, :($X_name = $(Expr(:call, :hcat, col_exprs...))))
