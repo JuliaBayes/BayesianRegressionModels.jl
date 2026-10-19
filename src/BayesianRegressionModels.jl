@@ -240,7 +240,7 @@ export parse!, _brm, stan_code, stan_data, stan_model, stan_instantiate,
 # ("recov") modes, plus the random-effect block description both stand on.
 export RanefBlock, ranef_blocks, ranef_coordinates,
        population_draws, population_model, prune_responses, transport_draws, term_draws,
-       hsgp_population_curve
+       parameter_draws, hsgp_population_curve
 export AbstractAdaptiveCenteringBlock, AdaptiveCenteringBlock,
        R2D2AdaptiveCenteringBlock, adaptive_centering_blocks,
        adaptive_centering_problem, select_hsgp_centeredness,
