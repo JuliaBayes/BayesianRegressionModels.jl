@@ -233,10 +233,11 @@ end
 
 @stestset "missing grouping labels are still refused" begin
     # refused: a missing label names no subject, so its row would be dropped
-    # from every cell without notice.
+    # from every cell without notice. The generic data-column check refuses it
+    # before the gather's own missing-label check is reached.
     unlabelled = merge(PLACEBO_ROWS, (; p_subject=["a", missing, "a"]))
-    @test_throws "`p_subject` must be a column with no missing labels" SBBRMI(
+    @test_throws "data column `p_subject` contains `missing` values" SBBRMI(
         lp_gather(unlabelled); mod=@__MODULE__, total_groups=())
-    @test_throws "`p_subject` must be a column with no missing labels" RKBRMI(
+    @test_throws "data column `p_subject` contains `missing` values" RKBRMI(
         lp_gather(unlabelled))
 end
