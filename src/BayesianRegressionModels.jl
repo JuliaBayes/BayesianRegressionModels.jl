@@ -110,6 +110,9 @@ export modeled_covariates
 include("description.jl")
 include("adaptive_centering.jl")
 include("posterior_diagnostics.jl")
+# Per-draw random-effect SDs, correlations and per-level effects, read from
+# the emitted carriers through the descriptor and the description metadata.
+include("ranef_draws.jl")
 
 # Prior/likelihood power-scaling sensitivity — PSIS weights, CJS distance, the
 # per-variable summary, and the SBBRMI input assembly. After the descriptor
@@ -206,7 +209,7 @@ export brm_description_record
 export brm_description_prior_anchor, brm_description_prior_references
 export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
        brm_population_effect_coordinates, brm_term_coordinates,
-       brm_ranef_sd_coordinates,
+       brm_ranef_sd_coordinates, brm_ranef_draws,
        BRMCoordinatePair, BRMCoordinateTransport, BRMCoordinateTransportError,
        brm_coordinate_transport,
        brm_rk_to_stan, brm_stan_to_rk, brm_check_coordinate_transport,
