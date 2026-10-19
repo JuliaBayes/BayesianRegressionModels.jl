@@ -245,7 +245,10 @@ observations use StanBlocks' `censored`, `truncated`, `weighted` and
 token-form family is a `:family` child over the token's arguments, which a
 family hook sees by its actual callable. Bounds are keyword-only, so a token's
 arguments never render as bounds. The in-cell censoring prose matches the
-formula wrapper's. It runs under the test project:
+formula wrapper's. A combinator token in `weighted`'s family position takes
+`weighted`'s bounds, so `weighted(censored, w, normal, m, s; lower=lo)`
+describes the same censoring as the call form
+`weighted(censored(Normal(m, s); lower=lo), w)`. It runs under the test project:
 
 ```sh
 julia --startup-file=no --project=test test/description_cell_combinators.jl
