@@ -251,7 +251,7 @@ end
     df = merge(options_df(), (; p=Float64[]))
     empty_domain = options_model(@brm(begin
         mu ~ 1 + hsgp(t; k=5)
-        placebo ~ 0 + hsgp(p; k=4, domain=(-1.5, 1.5))
+        drift ~ 0 + hsgp(p; k=4, domain=(-1.5, 1.5))
         sigma ~ Exponential(1)
         y ~ Normal(mu, sigma)
     end), df)
@@ -259,7 +259,7 @@ end
     @test !isempty(stan_lines(empty_domain, "hsgp_p_rho_iso"))
     empty_periodic = options_model(@brm(begin
         mu ~ 1 + hsgp(t; k=5)
-        placebo ~ 0 + hsgp(p; k=3, cov=:periodic, period=24.0)
+        drift ~ 0 + hsgp(p; k=3, cov=:periodic, period=24.0)
         sigma ~ Exponential(1)
         y ~ Normal(mu, sigma)
     end), df)
@@ -270,7 +270,7 @@ end
     # A data-derived interval has nothing to fit on an empty axis.
     @test_throws "explicit `domain=" options_model(@brm(begin
         mu ~ 1 + hsgp(t; k=5)
-        placebo ~ 0 + hsgp(p; k=4)
+        drift ~ 0 + hsgp(p; k=4)
         y ~ Normal(mu, 1)
     end), df)
     if HSGP_OPTIONS_RUNTIME

@@ -79,7 +79,7 @@ end
     end
     empty_domain_model = @brm begin
         location ~ 0 + hsgp(t; k=3)
-        placebo ~ 0 + hsgp(p; k=2, domain=(-1.5, 1.5))
+        drift ~ 0 + hsgp(p; k=2, domain=(-1.5, 1.5))
         y ~ Normal(location, 1.0)
     end
     with_u = merge(data, (; u=data.t .^ 2))
