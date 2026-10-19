@@ -57,6 +57,15 @@ categorical (`Vector{String}` or a string-leveled `CategoricalVector`) needs no
 zero `offset(...)` witness: its Stan and RK densities equal the witnessed
 twin's on both spellings.
 
+`string_categorical_coordinates.jl` checks `brm_population_effect_coordinates`
+for a predictor whose categorical column is a plain `Vector{String}`, in a flat
+and an `@plate` model. `Intercept` and the column address resolve to the same
+result shape as a `CategoricalVector` column. A `CategoricalVector` point
+carried to the String model through the resolved coordinates gives the same
+pointwise log likelihood, and the same point with two levels swapped does not.
+It also covers exact totals, cell-mean coding, and `brm_start` against the RK
+start.
+
 `plate_index_into.jl` checks `ragged(idx, group; into=target)`, an index column
 of row numbers on another flat axis: the gathered per-subject positions equal
 hand-rebased pre-grouped columns on BridgeStan and RK, `0` stays "no row",

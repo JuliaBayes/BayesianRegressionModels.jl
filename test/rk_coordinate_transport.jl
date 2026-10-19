@@ -32,6 +32,34 @@ function student_t(data)
     end
 end
 
+# The same declared df, plus a declared scale hyperparameter, on the value
+# routes: an assignment location and an indexed `@plate for` cell. Only the
+# block law reads `nu`, and only the sd prior reads `sd_rate`.
+function student_t_value(data)
+    @brm data begin
+        nu ~ Gamma(2, 10; lower=1.0)
+        sd_rate ~ Gamma(2, 2)
+        sigma ~ Exponential(0.7)
+        log(rate) ~ 1 + x + (1 + x | effect | subject)
+        sd(:, effect) ~ Exponential(sd_rate)
+        ranef(:, effect) ~ TDist(nu)
+        m = rate * t
+        y ~ Normal(m, sigma)
+    end
+end
+
+function student_t_plate(data)
+    @brm data begin
+        nu ~ Gamma(2, 10; lower=1.0)
+        sigma ~ Exponential(0.7)
+        mu ~ 1 + x + (1 | effect | subject)
+        ranef(:, effect) ~ TDist(nu)
+        @plate for i in eachindex(mu)
+            y[i] ~ normal(mu[i], sigma)
+        end
+    end
+end
+
 function linked(data)
     @brm data begin
         log(rate) ~ 1 + x + g + (1 + x | subject)
@@ -547,6 +575,36 @@ end
     @test all(p -> p.relation === :identity, weights)
     check_coordinate_transport(fixture)
     @test isequal(data, saved)
+end
+
+@stestset "coordinate transport Student-t blocks with a declared df on value routes" begin
+    # A declared df read only by the block law, and a scale hyperparameter read
+    # only by the sd prior, are planned like the formula route's
+    # (snag rk-student-t-ran-1fcee8f7: the value routes pruned them, so binding
+    # failed with "prior arg1 references unknown name nu").
+    value_data = (; subject=[1,1,2,2,3,3,4,4],
+        x=[0.1,0.4,-0.2,0.3,0.7,0.5,0.2,-0.1],
+        t=[0.5,1.0,0.5,1.5,0.5,2.0,1.0,2.5],
+        y=[1.4,0.9,1.6,0.7,1.2,0.5,1.1,0.4])
+    plate_data = (; subject=["a","b","c","d"], x=[0.2,-0.1,0.4,0.0],
+        y=[[0.1,0.3],[-0.2],[0.5,0.6,0.2],[0.0,-0.4]])
+    for (build, data, name, n, declared) in (
+            (PublicCoordinateTransport.student_t_value, value_data,
+                "student_t_value", 4, (:nu, :sd_rate)),
+            (PublicCoordinateTransport.student_t_plate, plate_data,
+                "student_t_plate", 4, (:nu,)))
+        saved = deepcopy(data)
+        fixture = coordinate_transport_fixture(build(data), name)
+        weights = [p for p in fixture.transport.pairs
+            if p.address.kind === :ranef_mixing]
+        @test length(weights) == n
+        @test all(p -> p.relation === :identity, weights)
+        for parameter in declared
+            @test count(p -> p.rk === parameter, fixture.transport.pairs) == 1
+        end
+        check_coordinate_transport(fixture)
+        @test isequal(data, saved)
+    end
 end
 
 @stestset "coordinate transport linked shared-design factor and plain slope" begin

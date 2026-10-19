@@ -656,8 +656,11 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
         push!(roots, route.name)
         union!(roots, route.globals)
     end
+    # Scalars read only by a random-effect block's scale priors or Student-t
+    # law are planned as on the formula route.
+    program = _rk_with_ranef_prior_dependencies(brmi, program, roots)
     referenced = _brm_reachable_operations(program, roots)
-    prepared = _BRMPreparedModel(prepared.program,
+    prepared = _BRMPreparedModel(program,
         Tuple(p for p in prepared.parameters if p.name in referenced),
         prepared.predictors, prepared.assignments, prepared.observations)
     ordinary_assignments = Tuple(a for a in prepared.assignments if a.name in referenced)
