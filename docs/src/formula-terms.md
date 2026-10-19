@@ -532,10 +532,7 @@ are refused, because both block means would be integrated into the same
 population coefficients.
 
 ```julia
-brmi = @brm data begin
-    mu ~ 1 + x + hsgp(xc, yc; k=10) + (1 | region) + (1 | district)
-    y ~ Poisson(exp(mu))
-end
+# brmi carries: mu ~ 1 + x + hsgp(xc, yc; k=10) + (1 | region) + (1 | district)
 sb = SBBRMI(brmi; s2z_groups=[:region], s2z_rho=1.0)
 ```
 
