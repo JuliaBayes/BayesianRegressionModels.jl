@@ -172,11 +172,16 @@ _brm_constant_argument(key, input, ::MissingColumn) = error(
     "BRM: `$key = constant(...)` reads `$(name(input))`, which the data " *
     "does not supply and the builder's scope does not define")
 
+# `spec.evaluate` is the closure the `@brm` expansion defined. A body built
+# from a runtime string and `Core.eval`'d inside a function defines it in a
+# world newer than that function's, and the backend is built in the same
+# function, so the closure is called in the newest world (snag
+# `declared-a-data-8e5f1f07`).
 function _brm_evaluate_constant(key::Symbol, node::ExprColumn{typeof(constant)}; prefix)
     spec = first(getargs(node))
     arguments = map(input -> _brm_constant_argument(key, input), Base.tail(getargs(node)))
     value = try
-        spec.evaluate(arguments...)
+        Base.invokelatest(spec.evaluate, arguments...)
     catch err
         error("$prefix: evaluating `$key = constant($(spec.expression))` failed: ",
               sprint(showerror, err))
