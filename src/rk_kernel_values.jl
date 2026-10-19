@@ -259,8 +259,15 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             rows = Symbol(name, :_rows_, i)
             columns[rows] = partition.rows
             column = _rk_kernel_column_name(value)
-            source = column in observed ? Symbol(name, :_input_, column) : column
-            if parent(value) isa DataColumn
+            into = _brm_kernel_ragged_into(argument; prefix="RK backend")
+            source = !isnothing(into) ? Symbol(name, :_index_, column) :
+                column in observed ? Symbol(name, :_input_, column) : column
+            if !isnothing(into)
+                # Rebased positions under their own port: the raw row numbers
+                # stay available to any other reader of the column.
+                columns[source] = _brm_kernel_ragged_index_values(
+                    value, group, into; prefix="RK backend")
+            elseif parent(value) isa DataColumn
                 columns[source] = parent(parent(value))
             end
             push!(inputs, (; source, kind=:gather, rows,

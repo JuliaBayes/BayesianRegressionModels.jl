@@ -192,6 +192,7 @@ function kernel end
 """
     ragged(x, group)
     ragged(x, group => cells)
+    ragged(idx, group; into=target)
 
 Group a FLAT secondary row axis by a raw data column that names the subject of
 every row. The marker has two formula positions:
@@ -281,6 +282,17 @@ per-subject inner lengths across positionals; once each positional supplies one
 outer cell per subject, relationships among the values inside a cell belong to
 the cell body.
 
+INDEX COLUMNS INTO ANOTHER AXIS. `ragged(idx, group; into=target)` declares a
+data column of 1-based row numbers on the flat axis whose subjects `target`
+labels — an event schedule's global read number per observation, say. Each
+value becomes its position among its own subject's rows of `target`, in flat
+order (the order `ragged(x, target)` gathers), so the cell indexes its own
+subject's slice of that axis: `conc[obs_read[i]]` with `conc` computed per
+local read. `0` stays `0` ("no row"). An index outside `target`'s rows, or
+into another subject's rows, is refused; it would otherwise read the wrong
+subject silently. `into=` is model-scope only and data-only: an observation
+LHS takes no keywords.
+
 Dispatch tag only — the model-scope statement is consumed by the `@plate for`
 rewrite (`_brm_plate_kernel`, macro.jl), kernel-argument lowering lives in
 `_sb_kernel_doblock!` (sbimpl), and observation-LHS lowering lives in
@@ -288,10 +300,12 @@ rewrite (`_brm_plate_kernel`, macro.jl), kernel-argument lowering lives in
 """
 ragged
 
-_check_term_kwargs(::typeof(ragged), kwargs) = isempty(kwargs) || error(
-    "@brm: ragged(...) takes no keywords, got $(keys(kwargs)). The spelling is ",
-    "`ragged(<linear predictor or flat column>, <grouping column>)`, or ",
-    "`ragged(x, group => cells)` with a cell label column `cells`.")
+_check_term_kwargs(::typeof(ragged), kwargs) = all(==(:into), keys(kwargs)) || error(
+    "@brm: ragged(...) takes only the `into=` keyword, got $(keys(kwargs)). The ",
+    "spelling is `ragged(<linear predictor or flat column>, <grouping column>)`, ",
+    "`ragged(x, group => cells)` with a cell label column `cells`, or ",
+    "`ragged(<index column>, <grouping column>; into=<grouping column of the ",
+    "indexed axis>)`.")
 
 # Reject the retired keyword surface at CONSTRUCTION — i.e. at the `@brm` /
 # `kernel(...)` call the consumer actually wrote — not merely when the model is
