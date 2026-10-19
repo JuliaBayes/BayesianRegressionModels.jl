@@ -298,6 +298,21 @@ end
     @test e.result.modes == empirical_bayes(m, r.theta, r.sigma, r.omega;
         subjects=[3, 1], η0=r.eta[:, [2, 1]], tuned...).modes
     @test_throws ArgumentError brm_nlme_fit(m, empirical_bayes; start=r)
+    # `ebes` keywords tune saem's own follow-up pass in the same call.
+    t = brm_nlme_fit(m, saem; subjects=[1, 3], rng=Xoshiro(4), options, ebes=one_step)
+    @test t.result.theta == r.theta && t.result.eta == r.eta
+    @test t.ebes.modes == empirical_bayes(m, r.theta, r.sigma, r.omega;
+        subjects=r.subjects, η0=r.eta, one_step...).modes
+    @test t.ebes.modes != fit.ebes.modes
+    @test t.estimates.eta.values == t.ebes.modes
+    # refused: the SAEM result fixes the pass's subjects and warm start.
+    @test_throws ArgumentError brm_nlme_fit(m, saem; ebes=(; subjects=[1]))
+    @test_throws ArgumentError brm_nlme_fit(m, saem; ebes=(; η0=r.eta))
+    @test_throws ArgumentError brm_nlme_fit(m, saem; ebes=:defaults)
+    # refused: focei and empirical_bayes take EBE settings as their own keywords,
+    # and silently ignoring them here would drop the caller's settings (dev §1).
+    @test_throws ArgumentError brm_nlme_fit(m, focei; ebes=one_step)
+    @test_throws ArgumentError brm_nlme_fit(m, empirical_bayes; ebes=one_step)
     # SAEM continues from an SAEM result.
     g = brm_nlme_fit(m, saem; start=r, subjects=r.subjects, ebes=false,
         rng=Xoshiro(5), options)

@@ -192,7 +192,12 @@ Requires NLMEEstimation and Enzyme to be loaded.
   start. Give either `start` or `inits`.
 - `ebes` — after `saem`, run `empirical_bayes` at the fitted population point
   (warm-started from SAEM's final subject states) so the result reports EBEs.
-  SAEM's own `eta` are chain states, not EBEs. `focei` always returns its EBEs.
+  SAEM's own `eta` are chain states, not EBEs. `true` uses `empirical_bayes`'s
+  defaults, `false` skips the pass, and a NamedTuple of `empirical_bayes`
+  keywords tunes it (`ebes=(; options=EBEOptions(maxiter=20),
+  require_convergence=false)`); `subjects` and `η0` come from the SAEM result
+  and are refused there. `focei` always returns its EBEs and `empirical_bayes`
+  is the pass itself, so for them `ebes` is ignored and keywords are refused.
 
 Returns `(; estimates, result, ebes, start, model)`: `estimates` as
 [`brm_nlme_estimates`](@ref) returns them, NLMEEstimation's raw `result`, the

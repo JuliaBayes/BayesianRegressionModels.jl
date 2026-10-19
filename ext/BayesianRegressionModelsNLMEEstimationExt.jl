@@ -554,11 +554,32 @@ _with_eta(m, start, kwargs) = haskey(kwargs, :η0) || !haskey(start, :eta) ?
     values(kwargs) :
     merge((; η0=_start_eta(m, start, get(kwargs, :subjects, nothing))), values(kwargs))
 
-function _fit_run(::typeof(NE.saem), m, start, ebes; kwargs...)
+# `ebes` sets saem's follow-up EBE pass: `true` (empirical_bayes defaults),
+# `false` (none) or a NamedTuple of empirical_bayes keywords. The SAEM result
+# fixes that pass's subjects and warm start. Other estimators take their EBE
+# settings directly, so only `true`/`false` (ignored) pass through for them.
+_ebe_keywords(::typeof(NE.saem), ebes::Bool) = ebes ? (;) : nothing
+function _ebe_keywords(::typeof(NE.saem), ebes::NamedTuple)
+    fixed = [k for k in (:subjects, :η0) if haskey(ebes, k)]
+    isempty(fixed) || throw(ArgumentError(
+        "brm_nlme_fit: `ebes` may not set $(join(fixed, " or ")): saem's result " *
+        "fixes the EBE pass's subjects and warm start"))
+    ebes
+end
+_ebe_keywords(::typeof(NE.saem), ebes) = throw(ArgumentError(
+    "brm_nlme_fit: `ebes` is true, false or a NamedTuple of empirical_bayes " *
+    "keywords; got $(typeof(ebes))"))
+_ebe_keywords(estimator, ::Bool) = nothing
+_ebe_keywords(estimator, ebes) = throw(ArgumentError(
+    "brm_nlme_fit: `ebes` keywords set saem's follow-up EBE pass; `$estimator` " *
+    "takes its EBE settings as its own keywords (empirical_bayes's `options`, " *
+    "focei's `FOCEOptions(ebe_options=…)`)"))
+
+function _fit_run(::typeof(NE.saem), m, start, ebe_kwargs; kwargs...)
     result = NE.saem(m, start.theta, start.sigma, start.omega; _with_eta(m, start, kwargs)...)
     # SAEM's `eta` are its final chain states; EBEs need a posthoc pass.
-    ebe = ebes ? NE.empirical_bayes(m, result.theta, result.sigma, result.omega;
-        subjects=result.subjects, η0=result.eta) : nothing
+    ebe = ebe_kwargs === nothing ? nothing : NE.empirical_bayes(m, result.theta,
+        result.sigma, result.omega; subjects=result.subjects, η0=result.eta, ebe_kwargs...)
     result, ebe, BRM.brm_nlme_estimates(m, result, ebe)
 end
 function _fit_run(::typeof(NE.focei), m, start, _ebes; kwargs...)
@@ -571,16 +592,17 @@ function _fit_run(::typeof(NE.empirical_bayes), m, start, _ebes; kwargs...)
     result, result, BRM.brm_nlme_estimates(m, start.theta, start.sigma,
         start.omega_matrix, result)
 end
-_fit_run(estimator, m, start, ebes; kwargs...) = throw(ArgumentError(
+_fit_run(estimator, m, start, _ebes; kwargs...) = throw(ArgumentError(
     "brm_nlme_fit: `$estimator` is not one of NLMEEstimation's estimators saem, " *
     "focei or empirical_bayes (posthoc)"))
 
-function BRM.brm_nlme_fit(x, estimator; start=nothing, inits=nothing, ebes::Bool=true,
+function BRM.brm_nlme_fit(x, estimator; start=nothing, inits=nothing, ebes=true,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
         nested_groups=NamedTuple(), kwargs...)
+    ebe_kwargs = _ebe_keywords(estimator, ebes) # refuse a bad `ebes` before fitting
     model = _fit_model(x; ad_backend, shared_point, subject_group, nested_groups)
     s = _fit_start(model, start, inits)
-    result, ebe, estimates = _fit_run(estimator, model, s, ebes; kwargs...)
+    result, ebe, estimates = _fit_run(estimator, model, s, ebe_kwargs; kwargs...)
     (; estimates, result, ebes=ebe, start=s, model)
 end
 
