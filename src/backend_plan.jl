@@ -525,13 +525,15 @@ _brm_observation_weight_kind(f) =
     f === pweights || f === ProbabilityWeights ? :probability :
     f === uweights || f === UnitWeights ? :unit : nothing
 
+# `nobs === nothing` is an omitted response: there are no response values to
+# match, and the weights still describe the rows the response would have.
 function _brm_prepare_observation_weight_values(
-        kind::Symbol, raw, nobs::Integer, target::Symbol, source::Symbol;
+        kind::Symbol, raw, nobs::Union{Integer,Nothing}, target::Symbol, source::Symbol;
         prefix="BRM backend lowering")
     raw isa AbstractVector{<:Real} || error(
         "$prefix: weight column `$source` for response `$target` must be a real " *
         "vector, got $(typeof(raw))")
-    length(raw) == nobs || error(
+    isnothing(nobs) || length(raw) == nobs || error(
         "$prefix: weight column `$source` has length $(length(raw)) but response " *
         "`$target` has length $nobs")
     values = collect(Float64, raw)
@@ -556,10 +558,11 @@ function _brm_prepare_observation_weight_values(
     values
 end
 
+# `response === nothing` plans the weights of an omitted response.
 function _brm_observation_weight_plan(rhs, target::Symbol, response;
                                       prefix="BRM backend lowering")
     rhs isa ExprColumn && getf(rhs) === weighted || return nothing
-    response isa AbstractVector || error(
+    isnothing(response) || response isa AbstractVector || error(
         "$prefix: weighted response `$target` must be a one-dimensional " *
         "observation vector; got $(typeof(response))")
     isempty(getkwargs(rhs)) || error(
@@ -599,8 +602,62 @@ function _brm_observation_weight_plan(rhs, target::Symbol, response;
     source = name(source_column)
     raw = parent(parent(source_column))
     values = _brm_prepare_observation_weight_values(
-        kind, raw, length(response), target, source; prefix)
+        kind, raw, isnothing(response) ? nothing : length(response), target, source;
+        prefix)
     _BRMObservationWeightPlan(kind, distribution, source, values)
+end
+
+# A cell observation whose weight is a StatsBase constructor keeps that
+# constructor's formula-level meaning, in the call form
+# `weighted(Family(args...), constructor(v))` and in the token form
+# `weighted(family, constructor(v), args...)` alike: `weights(w)` and
+# `fweights(n)` scale each row's log density exactly as the bare weight `v`
+# does, and `aweights(k)` is the precision weight of a Normal,
+# `Normal(m, s ./ sqrt.(k))`. Each backend rewrites the authored law with this
+# before its own translation. `callable(head)` resolves a call head or family
+# token in the cell's scope (`nothing` when unbound); `normal(c)` says whether
+# `c` is a Normal family. A bare weight leaves `law` unchanged.
+function _brm_cell_typed_weight(callable, law, prefix; normal=(c -> c === Normal))
+    keyword(arg) = Meta.isexpr(arg, (:parameters, :kw))
+    positions = [i for i in 2:length(law.args) if !keyword(law.args[i])]
+    length(positions) >= 2 || return law
+    family, weight = law.args[positions[1]], law.args[positions[2]]
+    Meta.isexpr(weight, :call) || return law
+    constructor = callable(first(weight.args))
+    kind = _brm_observation_weight_kind(constructor)
+    kind === nothing && return law
+    label = nameof(constructor)
+    kind === :probability && error(
+        "$prefix: `$label(...)` sampling-weight semantics are not implemented; " *
+        "they are not interchangeable with likelihood weights")
+    kind === :unit && error(
+        "$prefix: omit `weighted(...)` for unit weights; write the base " *
+        "distribution directly")
+    arguments = weight.args[2:end]
+    length(arguments) == 1 && !keyword(only(arguments)) || error(
+        "$prefix: `$label(...)` in a cell takes exactly one weight value")
+    value = only(arguments)
+    if kind !== :analytic
+        args = copy(law.args)
+        args[positions[2]] = value
+        return Expr(:call, args...)
+    end
+    head, args = if Meta.isexpr(family, :call)
+        length(law.args) == 3 || error(
+            "$prefix: `weighted(Family(args...), $label(...))` takes no further " *
+            "arguments; the family's arguments belong on its call")
+        first(family.args), family.args[2:end]
+    else
+        family, Any[law.args[i] for i in 2:length(law.args) if i ∉ positions[1:2]]
+    end
+    normal(callable(head)) || error(
+        "$prefix: analytic weights `$label(...)` support only Normal " *
+        "observations; this cell observes `$head`")
+    !any(keyword, args) && length(args) <= 2 || error(
+        "$prefix: `$head` takes at most a location and a scale under `$label(...)`")
+    location = length(args) >= 1 ? args[1] : 0.0
+    scale = length(args) == 2 ? args[2] : 1.0
+    Expr(:call, head, location, :($scale ./ sqrt.($value)))
 end
 
 _brm_normalize_response_bound(::Nothing) = nothing

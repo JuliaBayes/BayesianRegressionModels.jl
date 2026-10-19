@@ -4,7 +4,7 @@
 
 using Test
 using BayesianRegressionModels
-using Distributions: Exponential, Normal
+using Distributions: Cauchy, Exponential, Normal, Uniform
 using LogDensityProblems
 using Statistics
 using StanBlocks
@@ -222,15 +222,18 @@ end
         theta::vector[2]
         y ~ normal(theta, 1.0)
     end
+    # (margins, positive): positive scales and unrestricted coefficients.
     cases = (
-        exponential=[BRM.ExprColumn(Exponential, 2.0), BRM.ExprColumn(Exponential, 0.5)],
-        normal=[BRM.ExprColumn(Normal, 0.1, 1.0), BRM.ExprColumn(Normal, 0.1, 0.5)],
+        exponential=([BRM.ExprColumn(Exponential, 2.0), BRM.ExprColumn(Exponential, 0.5)], true),
+        normal=([BRM.ExprColumn(Normal, 0.1, 1.0), BRM.ExprColumn(Normal, 0.1, 0.5)], true),
+        cauchy=([BRM.ExprColumn(Cauchy, 0.0, 1.0), BRM.ExprColumn(Cauchy, 0.0, 2.0)], false),
+        uniform=([BRM.ExprColumn(Uniform, 0.2, 0.8), BRM.ExprColumn(Uniform, 0.2, 0.8)], false),
     )
     mkpath(NATURAL_EMISSION_CACHE)
-    for (label, priors) in pairs(cases)
-        native = BRM._sb_native_vector_prior(:theta, priors, 2; positive=true)
+    for (label, (priors, positive)) in pairs(cases)
+        native = BRM._sb_native_vector_prior(:theta, priors, 2; positive)
         @test !isnothing(native)
-        family, args = BRM._sb_vector_prior_family(priors; mod=@__MODULE__)
+        family, args = BRM._sb_vector_prior_family(priors; positive, mod=@__MODULE__)
         generated = Expr(:call, :~, :theta,
             Expr(:call, family, Expr(:parameters, Expr(:kw, :n, 2)), args...))
         native_problem = StanBlocks.stan_instantiate(Base.merge(base, native.statement);
@@ -277,4 +280,32 @@ end
     normal_draws = natural_prior_tau_draws(normal_sb, "prior-normal")
     @test all(normal_draws .>= 0.0)
     @test vec(mean(normal_draws; dims=1)) ≈ sqrt(2 / pi) .* [1.0, 0.5] atol=0.15
+end
+
+@testset "same-family coefficient margins redraw coordinatewise" begin
+    prior = @brm (; x=natural_df.x, z=reverse(natural_df.x)) begin
+        mu ~ 1 + x + z
+        effect(mu, :) ~ Cauchy(0, 1)
+        effect(mu, x) ~ Cauchy(0, 2)
+        y ~ Normal(mu, 1)
+    end
+    sb = SBBRMI(prior; mod=@__MODULE__, total_groups=())
+    code = BRM.stan_code(sb)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    @test !occursin(r"brm_vector_prior_[0-9a-f]+", code)
+    problem = StanBlocks.stan_instantiate(
+        sb.model; path=joinpath(NATURAL_EMISSION_CACHE, "prior-cauchy.stan"))
+    @test LogDensityProblems.dimension(problem) == 0
+    names = BS.param_names(problem.model; include_tp=true, include_gq=true)
+    beta = Int[findfirst(==("pop_mu_beta_pop.$i"), names) for i in 1:3]
+    draws = Matrix{Float64}(undef, 512, 3)
+    for draw_index in axes(draws, 1)
+        values = BS.param_constrain(
+            problem.model, Float64[];
+            include_tp=true, include_gq=true,
+            rng=BS.StanRNG(problem.model, 40_000 + draw_index))
+        draws[draw_index, :] = values[beta]
+    end
+    # The median absolute Cauchy(0, s) draw is s: (Intercept, x, z).
+    @test vec(median(abs.(draws); dims=1)) ≈ [1.0, 2.0, 1.0] rtol=0.25
 end

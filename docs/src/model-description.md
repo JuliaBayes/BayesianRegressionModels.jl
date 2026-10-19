@@ -240,11 +240,14 @@ locations m and precisions q, the integrated density and the exact conditional
 recovery of β. Coordinates that only the conventional program samples, such
 as standardized deviations, are not inventoried.
 
-A BRM-generated vector prior, such as a configured smoothing SD, is a product
-of per-coordinate priors. Each coordinate is a separate component bound to its
-actual scalar family, so a consumer-defined family remains an explicit gap
-until a hook covers that callable. Sum-to-zero blocks still retain an explicit
-`brm_s2z_contrast` gap.
+A vector prior whose coordinates carry different priors, such as tensor
+smoothing SDs configured per block, is a product of per-coordinate priors.
+That holds whether BRM emits one native vectorised statement (every coordinate
+in one family) or a generated family (mixed families). Each coordinate is a
+separate component bound to its actual scalar family, so a consumer-defined
+family remains an explicit gap until a hook covers that callable. One prior
+shared by every coordinate is described as that family. Sum-to-zero blocks
+still retain an explicit `brm_s2z_contrast` gap.
 
 ## R2D2 allocation conventions
 

@@ -305,9 +305,13 @@ const WEIGHTED_CENSORED_DATA = merge(WEIGHTED_DATA, (;
                 logpdf(Exponential(), exp(logtau)) + logtau +
                 sum(Iterators.flatten(rowwise(*, u, names)); init=0.0)
         end
+        stan = consumer_stan(brmi, "kernel-weighted-$form";
+            mod=KernelWeightedObservations)
         points = ([0.0, 0.0, 0.0], [0.3, -0.2, 0.1], [-0.4, 0.25, -0.3])
         for u in points
             check_consumer_point(problem, u, oracle)
+            check_consumer_stan(problem, stan,
+                [:s => "s", :sigma => "sigma", :tau => "tau"], backend, u)
         end
         main = BRM._rk_emit_ast(backend.plan).main
         @test occursin("y[i] .~ weighted.(censored.(Normal.(", sprint(Base.show_unquoted, main))
@@ -323,11 +327,6 @@ const WEIGHTED_CENSORED_DATA = merge(WEIGHTED_DATA, (;
             @test all(isapprox(actual.y[i], expected[i]; atol=2e-11, rtol=2e-11)
                 for i in eachindex(expected))
         end
-        # Capability gap, not a wrong shape: StanBlocks' `weighted` does not yet
-        # take a censoring combinator as its family (StanBlocks snag
-        # `weighted-over-ce-a55869f3`), so SBBRMI cannot transpile this cell.
-        @test_broken (BRM.stan_code(SBBRMI(brmi; mod=KernelWeightedObservations,
-            total_groups=())); true)
     end
     @test isequal(data, saved)
 end

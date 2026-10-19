@@ -112,7 +112,9 @@ end
 
     code = code_of(m)
     # Distributions.Exponential is scale-parameterized, Stan's is rate: 1/2.
-    @test occursin(r"s_x_sd_pen ~ brm_vector_prior_[0-9a-f]+", code)
+    # One configured scale is one native statement, not a generated family.
+    @test occursin("s_x_sd_pen ~ exponential((1.0 ./ 2));", code)
+    @test !occursin("brm_vector_prior_", code)
     # The penalized coefficients stay standardized (decision `145tp0o`).
     @test occursin("s_x_b_pen_raw ~ std_normal();", code)
     @test occursin("vector<lower=0.0>[1] s_x_sd_pen;", code)
@@ -126,7 +128,7 @@ end
         sd(:, s(x)) ~ Cauchy(0, 2)
     end
     code = code_of(m)
-    @test occursin("cauchy_lpdf(x[1] | arg_1, arg_2)", code)
+    @test occursin("s_x_sd_pen ~ cauchy(0, 2);", code)
     @test occursin("vector<lower=0.0>[1] s_x_sd_pen;", code)
     @test transpiles_and_stanc(m)
 end
@@ -148,6 +150,22 @@ end
     # (rr, rn, nr) is the sampled order; the unmentioned `rn` keeps family 0.
     @test occursin(r"t2_mu_x_z_sd_pen ~ brm_vector_prior_[0-9a-f]+", code)
     @test occursin("vector<lower=0.0>[3] t2_mu_x_z_sd_pen;", code)
+    @test transpiles_and_stanc(m)
+end
+
+@testset "same-family tensor penalties are one native statement" begin
+    m = @brm term_df() begin
+        y ~ Normal(mu, 1.)
+        mu ~ 1 + t2(x, z)
+        sd(mu, t2(x, z), rr) ~ Exponential(3)
+        sd(:, t2(x, z), rn) ~ Exponential(1)
+        sd(:, t2(x, z), nr) ~ Exponential(0.5)
+    end
+    code = code_of(m)
+    # Rates in (rr, rn, nr) order; one family needs no generated UDF.
+    @test occursin("t2_mu_x_z_sd_pen ~ exponential([0.3333333333333333, 1.0, 2.0]');", code)
+    @test occursin("vector<lower=0.0>[3] t2_mu_x_z_sd_pen;", code)
+    @test !occursin("brm_vector_prior_", code)
     @test transpiles_and_stanc(m)
 end
 
@@ -269,7 +287,7 @@ end
         latent(mu, me(xo)) ~ Normal(0, 10)
     end
     code = code_of(m)
-    @test occursin(r"s_x_sd_pen ~ brm_vector_prior_[0-9a-f]+", code)
+    @test occursin("s_x_sd_pen ~ exponential((1.0 ./ 4));", code)
     @test occursin("me_xo_x_true ~ normal(0, 10);", code)
     # Unaddressed, so untouched.
     @test occursin("mo_c_simplex_incr ~ dirichlet(rep_vector(1.0, 3));", code)
