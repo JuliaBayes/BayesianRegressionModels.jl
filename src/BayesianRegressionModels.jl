@@ -195,7 +195,8 @@ export BRMI, VBRMI, SBBRMI, TuringBRMI, RKBRMI, GenerativeDeclaration, Generativ
        turing_pointwise_loglikelihoods, turing_predictive_model,
        turing_generated_quantities, turing_posterior_predictive,
        rk_logdensity_problem, rk_restore_draws
-export BRMDescriptor, BRMInput, BRMOutput, BRMOperation, BRMHighlight
+export BRMDescriptor, BRMInput, BRMOutput, BRMOperation, BRMHighlight,
+       BRMHighlightSpec, BRMSubmodel, brm_highlight
 export BRMDescription, BRMDescriptionComponent, BRMDescriptionContext,
        BRMDescriptionFragment, BRMDescriptionReference, BRMPriorDescription,
        BRMDescriptionCoverage, brm_description, brm_describe_component,
