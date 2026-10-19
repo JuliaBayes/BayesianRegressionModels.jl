@@ -4582,11 +4582,14 @@ _sb_held_out_request(held_out) = _brm_held_out_request(held_out; prefix="sbimpl"
 Base.@nospecializeinfer function _sb_apply_held_out(@nospecialize(sb::SBBRMI), held_out;
                                                     cover_all::Bool=false)
     request = _sb_held_out_request(held_out)
-    isempty(request.names) && return sb
+    isempty(request.names) && isempty(request.rows) && return sb
+    isempty(request.rows) || error(
+        "sbimpl: a per-row `held_out` mask is not built on SBBRMI yet; it needs " *
+        "StanBlocks to hold out single elements of an observation")
     inventory = _sb_held_out_inventory(sb)
-    selected = _brm_resolve_held_out(request, inventory.aliases, inventory.sources,
-                                     inventory.unbound; prefix="sbimpl", cover_all)
-    _sb_mark_held_out(sb, selected)
+    selection = _brm_resolve_held_out(request, inventory.aliases, inventory.sources,
+                                      inventory.unbound; prefix="sbimpl", cover_all)
+    _sb_mark_held_out(sb, selection.whole)
 end
 
 # Every observation's response data source, under each name that addresses it.
