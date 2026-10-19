@@ -5055,13 +5055,15 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         new_preproc[key] = e
     elseif e.kind === :observation_weight
         raw = _sb_df_column(df, e.raw_ref)
-        response = _sb_df_column(df, e.const_.response)
-        response isa AbstractVector || error(
+        # An omitted response has no values to match the weights against.
+        response = _sb_df_has_column(df, e.const_.response) ?
+            _sb_df_column(df, e.const_.response) : nothing
+        isnothing(response) || response isa AbstractVector || error(
             "sbimpl: reprocess: weighted response `$(e.const_.response)` must " *
             "be a vector, got $(typeof(response))")
         new_data[key] = _brm_prepare_observation_weight_values(
-            e.const_.kind, raw, length(response), e.const_.response, e.raw_ref;
-            prefix="sbimpl: reprocess")
+            e.const_.kind, raw, isnothing(response) ? nothing : length(response),
+            e.const_.response, e.raw_ref; prefix="sbimpl: reprocess")
         new_preproc[key] = e
     elseif e.kind === :interval_censored_predictor
         x_name, upper_name = e.raw_ref
@@ -5337,11 +5339,18 @@ _sb_emit_prepared!(stmts, data, _node, key, source; kwargs...) =
     _sb_emit!(stmts, data, key, source; kwargs...)
 function _sb_emit_prepared!(stmts, data, node::_BRMPreparedParameter, key, source; kwargs...)
     _, rhs = getargs(source, 2)
-    callable = getf(rhs)
+    _sb_emit_sampled_declaration!(stmts, data, key, getf(rhs), rhs)
+end
+function _sb_emit_sampled_declaration!(stmts, data, key, callable, rhs)
     _sb_emit_vector_prior!(stmts, data, key, callable, rhs) && return
     _sb_emit_prior!(stmts, key, callable, rhs) && return
     error("sbimpl: sampled declaration `$key` has no Stan prior translation for `$callable`")
 end
+# `weighted` wraps only observations, so a sampled `weighted` declaration is an
+# observation with its response omitted: it emits the weighted likelihood
+# statement, which StanBlocks forward-simulates from the fitted predictive law.
+_sb_emit_sampled_declaration!(stmts, data, key, ::typeof(weighted), rhs) =
+    _sb_likelihood!(stmts, key, rhs, data)
 function _sb_emit_prepared!(stmts, data, node::_BRMPreparedAssignment, key, source; kwargs...)
     _, rhs = getargs(source, 2)
     push!(stmts, :($key = $(_sb_scalar_expr(rhs, data))))
@@ -12972,10 +12981,12 @@ function _sb_objective_weighted_likelihood!(stmts, target::Symbol,
     append!(stmts, translated)
 end
 
+# An omitted response (no `target` data) emits the same statement: StanBlocks
+# then forward-simulates it from the law the fitted predictive draw uses.
 function _sb_likelihood!(stmts, target::Symbol,
                          rhs::ExprColumn{typeof(weighted)}, data)
     response = get(data, target, nothing)
-    response isa AbstractVector || error(
+    isnothing(response) || response isa AbstractVector || error(
         "sbimpl: weighted response `$target` must be an observed vector, got " *
         "$(typeof(response))")
     plan = _brm_observation_weight_plan(

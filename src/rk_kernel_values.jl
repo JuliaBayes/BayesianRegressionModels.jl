@@ -331,6 +331,14 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
                 (argument isa ExprColumn && getf(argument) === ragged ?
                     _rk_kernel_column_name(first(getargs(argument))) : nothing)
             source === nothing && error("RK backend: kernel `$name` observed cell needs a named response")
+            if _rk_kernel_weighted(_rk_kernel_observation_callee(scope, distribution, name))
+                # A weight may call a cell-local helper that `scope` does not bind.
+                binding(head) = head isa Symbol && !isdefined(scope, head) &&
+                    !isdefined(StanBlocks.stan, head) ? nothing : _rk_kernel_binding(scope, head)
+                distribution = _brm_cell_typed_weight(binding,
+                    distribution, "RK backend: kernel `$name`";
+                    normal=c -> c === Normal || c === StanBlocks.normal)
+            end
             distribution, weight = _rk_kernel_observation_weight(scope, distribution, name)
             distribution, modifier = _rk_kernel_observation_law(scope, distribution, name)
             callable = _rk_kernel_observation_family(scope, distribution, name)

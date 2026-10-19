@@ -207,6 +207,9 @@ BayesianRegressionModels.BRMInput
 BayesianRegressionModels.BRMOutput
 BayesianRegressionModels.BRMOperation
 BayesianRegressionModels.BRMHighlight
+BayesianRegressionModels.BRMHighlightSpec
+BayesianRegressionModels.brm_highlight
+BayesianRegressionModels.BRMSubmodel
 BayesianRegressionModels.brm_descriptor
 BayesianRegressionModels.brm_columns
 BayesianRegressionModels.brm_output
