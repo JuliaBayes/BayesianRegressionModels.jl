@@ -226,10 +226,10 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
     scope = _brm_inline_scope(first(getargs(rhs)))
     direct_lps = [argument for argument in arguments
         if argument isa NamedColumn && parent(argument) isa ExprColumn]
-    buckets = _sb_kernel_lp_buckets(direct_lps)
-    groups = [bucket for bucket in buckets if bucket !== nothing]
     ragged_cols = [argument for argument in arguments
         if argument isa ExprColumn && getf(argument) === ragged]
+    buckets = _sb_kernel_lp_buckets(direct_lps; ragged_cols)
+    groups = [bucket for bucket in buckets if bucket !== nothing]
     group_values = if isempty(groups)
         # Without a subject predictor, `ragged(x, group => cells)` inputs label
         # the cells by their explicit cell label column (district totals over
@@ -241,9 +241,9 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             _brm_kernel_subject_values(parent(parent(column)), _rk_kernel_column_name(column); prefix="RK backend")
         end
     else
-        length(unique(group[2] for group in groups)) == 1 || error(
+        length(unique(group.key for group in groups)) == 1 || error(
             "RK backend: kernel `$name` predictor inputs disagree on subject grouping")
-        column = first(groups)[3]
+        column = first(groups).column
         _brm_kernel_check_cell_labels(ragged_cols, _rk_kernel_column_name(column); prefix="RK backend")
         _brm_kernel_subject_values(parent(parent(column)), _rk_kernel_column_name(column); prefix="RK backend")
     end

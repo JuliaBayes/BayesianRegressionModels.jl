@@ -97,12 +97,17 @@ function _rk_ast_hsgp_grouped(definitions, term, inputs, floors, extent, taken, 
     options = term.options
     G = get(options, :n_groups, 1)
     rho_prior = _rk_ast_hsgp_hyper_prior(options, :length_scale, bindings, taken)
+    # A floor named in the length-scale prior is read there (decision 1fk9b29);
+    # only a truncation or a hyper-predictor reads it as a block argument.
+    floor_named = get(options, :rho_floor_named, false)
+    floor_named && (rho_prior = _rk_ast_replace_floor_marker(rho_prior, floors))
     sigma_prior = _rk_ast_hsgp_hyper_prior(options, :sd, bindings, taken)
     grouped = haskey(options, :group_index)
     block = _rk_block_body(rho_prior, sigma_prior)
     arguments = Pair{Symbol,Any}[formal => _rk_block_argument!(block, formal, value)
         for (formal, value) in inputs]
-    floor = floors === nothing ? nothing : _rk_block_argument!(block, :floor, floors)
+    floor = floors === nothing || floor_named ? nothing :
+        _rk_block_argument!(block, :floor, floors)
     group_index = grouped ? _rk_block_argument!(block, :group_index, options.group_index) :
         nothing
     rho = _rk_ast_hsgp_hyper!(block, options, :length_scale, rho_prior, floor, G)

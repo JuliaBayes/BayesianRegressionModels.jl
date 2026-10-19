@@ -177,13 +177,27 @@ Requires NLMEEstimation and Enzyme to be loaded.
   without interaction is `focei` with `FOCEOptions(interaction=false)`.
 - `start` — `nothing` for the prior-median start of
   [`brm_nlme_start`](@ref)`(m)`, a full RK packed point `u` for
-  `brm_nlme_start(m, u)`, or a start returned by `brm_nlme_start`.
+  `brm_nlme_start(m, u)`, a start returned by `brm_nlme_start`, or
+  NLMEEstimation's own start: a NamedTuple `(; theta, sigma, omega)` with
+  optional `eta` (one column, or compact vector, per subject) and the
+  `subjects` that `eta` belongs to, as grouping levels the way
+  `brm_nlme_start` reports them (all of the model's without it), or an
+  NLMEEstimation `saem` or `focei` result, which starts from its population
+  point and warm-starts from its subjects' final SAEM states or FOCE(I)
+  EBEs. Ω is derived from `omega`. The start's subject effects are matched to
+  the estimator's `subjects` by subject; a caller's `η0` replaces them, and a
+  subject the start has none for needs one.
 - `inits` — initial values keyed by prior address, as [`brm_start`](@ref)
   takes them; every coordinate they do not address keeps its prior-median
   start. Give either `start` or `inits`.
 - `ebes` — after `saem`, run `empirical_bayes` at the fitted population point
   (warm-started from SAEM's final subject states) so the result reports EBEs.
-  SAEM's own `eta` are chain states, not EBEs. `focei` always returns its EBEs.
+  SAEM's own `eta` are chain states, not EBEs. `true` uses `empirical_bayes`'s
+  defaults, `false` skips the pass, and a NamedTuple of `empirical_bayes`
+  keywords tunes it (`ebes=(; options=EBEOptions(maxiter=20),
+  require_convergence=false)`); `subjects` and `η0` come from the SAEM result
+  and are refused there. `focei` always returns its EBEs and `empirical_bayes`
+  is the pass itself, so for them `ebes` is ignored and keywords are refused.
 
 Returns `(; estimates, result, ebes, start, model)`: `estimates` as
 [`brm_nlme_estimates`](@ref) returns them, NLMEEstimation's raw `result`, the
