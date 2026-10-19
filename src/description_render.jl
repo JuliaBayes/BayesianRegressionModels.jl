@@ -89,6 +89,16 @@ end
 _brmd_builtin_call(::typeof(range),c)=BRMDescriptionFragment(
     prose=("The range is the declared arithmetic grid: start plus successive multiples of its step. Without an explicit step or length its step is one; a supplied length determines the number of elements. A stop is reached only when it lies on that grid.",),
     equations=("r_k=a+(k-1)d,\\quad k=1,\\ldots,n",),covers=(c.id,))
+_brmd_call_math(::typeof(constant),args,_kwargs,_c) =
+    "\\operatorname{constant}\\left("*only(args)*"\\right)"
+# A constant the emitted model never reads has no fitted record to report.
+function _brmd_builtin_call(::typeof(constant),c)
+    owner=c.provenance.owner
+    fitted=[k.value.value for k in c.fitted_constants if k.kind===:constant && k.input===owner]
+    value=isempty(fitted) ? "" : " Its fitted value is $(only(fitted)); replay keeps it."
+    BRMDescriptionFragment(prose=("`$owner` is computed once from whole data columns when the model is built, as `$(only(c.arguments))`.$value",),
+        covers=(c.id,))
+end
 _brmd_call_math(::Colon,args,_kwargs,_c)="\\operatorname{range}\\left("*join(args,",")*"\\right)"
 _brmd_builtin_call(::Colon,c)=BRMDescriptionFragment(
     prose=("The colon range uses the declared start and stop with unit step, or the explicit middle step in its three-argument form; it includes the stop only when reached.",),covers=(c.id,))

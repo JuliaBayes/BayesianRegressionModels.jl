@@ -3126,9 +3126,18 @@ function _rk_design_addressee_groups(design, target::Symbol;
     groups, order
 end
 
+# A population-effect prior argument is a number: a numeric literal, or a
+# scalar field of the data (including a resolved `name = constant(expr)`),
+# whose value the graph holds. A model value stays refused.
+function _rk_effect_number(x)
+    x isa NamedColumn && parent(x) isa DataColumn || return _brm_numeric_constant(x)
+    value = parent(parent(x))
+    value isa Real && !(value isa Bool) ? Float64(value) : nothing
+end
+
 # Per-addressee population-effect families (prior-vocab v1, peer contract):
 # real-line Normal/Cauchy/Laplace/Logistic/StudentT + Flat, every arg a
-# numeric literal. StudentT unwraps from `LocationScale(mu, s, TDist(nu))`
+# number (`_rk_effect_number`). StudentT unwraps from `LocationScale(mu, s, TDist(nu))`
 # into Stan `(nu, mu, sigma)` order (a bare `TDist` stays rejected);
 # `Flat()` takes no args. `Normal`/`Cauchy` keep the historical (0, 1)
 # defaulting (SB mirrors it); Laplace/Logistic need both args (SB has no
@@ -3170,14 +3179,14 @@ function _rk_materialize_effect_prior(expression, target::Symbol, label::Symbol;
         "$prefix: predictor `$target` population-effect prior for " *
         "`$label` needs scalar location and scale; index or reduce an " *
         "array-valued argument explicitly")
-    location = _brm_numeric_constant(raw[1])
-    scale = _brm_numeric_constant(raw[2])
+    location = _rk_effect_number(raw[1])
+    scale = _rk_effect_number(raw[2])
     isnothing(location) && error(
         "$prefix: predictor `$target` population-effect `$head` " *
-        "location for `$label` must be a numeric constant")
+        "location for `$label` must be a numeric constant or a scalar data field")
     isnothing(scale) && error(
         "$prefix: predictor `$target` population-effect `$head` scale " *
-        "for `$label` must be a numeric constant")
+        "for `$label` must be a numeric constant or a scalar data field")
     isfinite(location) || error(
         "$prefix: predictor `$target` population-effect `$head` " *
         "location for `$label` must be finite")
@@ -3208,12 +3217,12 @@ function _rk_effect_studentt_args(expression::ExprColumn, target::Symbol,
     length(bargs) == 1 || error(
         "$prefix: predictor `$target` population-effect prior for " *
         "`$label` `TDist` base needs one argument; write `TDist(nu)`")
-    nu = _brm_numeric_constant(only(bargs))
-    mu = _brm_numeric_constant(mu_raw)
-    s = _brm_numeric_constant(s_raw)
+    nu = _rk_effect_number(only(bargs))
+    mu = _rk_effect_number(mu_raw)
+    s = _rk_effect_number(s_raw)
     (isnothing(nu) || isnothing(mu) || isnothing(s)) && error(
         "$prefix: predictor `$target` population-effect StudentT " *
-        "arguments for `$label` must be numeric constants")
+        "arguments for `$label` must be numeric constants or scalar data fields")
     isfinite(nu) && nu > 0 || error(
         "$prefix: predictor `$target` population-effect StudentT " *
         "degrees of freedom for `$label` must be finite and positive")
@@ -6076,10 +6085,20 @@ function _rk_truncated_prior(prior::_BRMPreparedExpr, name::Symbol)
     (family, base_args, override)
 end
 
+# A scalar field of the data (including a resolved `name = constant(expr)`) is a
+# named numeric constant: a prior argument or bound may name it like a literal
+# assignment, and the graph holds its number.
+function _rk_data_constants!(consts::Dict{Symbol,Float64}, data::AbstractDict)
+    for (key, value) in data
+        value isa Real && !(value isa Bool) && (consts[key] = Float64(value))
+    end
+    consts
+end
+
 function _rk_fold_assignment_consts!(kept, data::AbstractDict,
         parameters::Set{Symbol})
     prefix = "RK backend"
-    consts = Dict{Symbol,Float64}()
+    consts = _rk_data_constants!(Dict{Symbol,Float64}(), data)
     aliases = Dict{Symbol,Symbol}()
     exprs = Dict{Symbol,Any}()
     for assignment in kept
