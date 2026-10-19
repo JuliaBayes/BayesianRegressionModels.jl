@@ -96,6 +96,12 @@ function _brmd_value(x::Symbol, env, _id)
 end
 _brmd_value(x::NamedColumn, env, _id) =
     BRMDescriptionReference(name(x), get(env.references, name(x), :observation))
+# `name = constant(expr)` is described by the Julia expression it was computed
+# from; the closure and the columns bound to evaluate it are not model notation.
+_brmd_snapshot(x::_BRMConstantSpec) = string(x.expression)
+_brmd_snapshot(x::_BRMConstantSource) = string(x)
+_brmd_value(x::ExprColumn{typeof(constant)}, env, id) =
+    _brmd_component(env, id, :call, constant, (_brmd_snapshot(first(getargs(x))),))
 _brmd_value(x, _env, _id) = _brmd_snapshot(x)
 function _brmd_value(x::MultiMembershipTerm,env,id)
     args=_brmd_value(x.groups,env,(id...,:memberships))

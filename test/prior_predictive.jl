@@ -247,6 +247,104 @@ end
     @test missing_m.model.observations == (:m, :y)
 end
 
+# A consumer `@slic` submodel term routed by a `_sb_submodel_rhs!` hook binds a
+# latent to the submodel's `return` value. It reads row-varying data, but there
+# is no response to omit: misclassified, it warned "binds no data column", was
+# declared to SLIC as an observation stem and carried a phantom `effect_gen`
+# draw (snag build-sbbrmi-gen-c3622a81).
+module SubmodelTermFixture
+using BayesianRegressionModels, StanBlocks
+import BayesianRegressionModels: _sb_submodel_rhs!
+using BayesianRegressionModels: getargs, name
+
+StanBlocks.@deffun toy_shape(x::vector[n], loc::real, slope::real)::vector[n] =
+    inv_logit((x .- loc) .* slope)
+
+function saturating end
+const _sb_saturating = StanBlocks.@slic begin
+    loc ~ normal(0.0, 1.0)
+    slope ~ normal(0.0, 2.0; lower=0.0)
+    return toy_shape(dose, loc, slope)
+end
+_sb_submodel_rhs!(stmts, data, target::Symbol, ::typeof(saturating), rhs) = begin
+    (dose_term,) = getargs(rhs)
+    push!(stmts, :($target ~ _sb_saturating(; dose=$(name(dose_term)))))
+    :done
+end
+
+# An observation-model submodel (stanblocks-use §3 Form A): `return` names the
+# LHS of its own `~`, so its target is a response.
+function stream end
+const _sb_stream = StanBlocks.@slic begin
+    s ~ exponential(1.0)
+    obs ~ normal(mu, s)
+    return obs
+end
+_sb_submodel_rhs!(stmts, data, target::Symbol, ::typeof(stream), rhs) = begin
+    (mu_term,) = getargs(rhs)
+    push!(stmts, :($target ~ _sb_stream(; mu=$(name(mu_term)))))
+    :done
+end
+end
+using .SubmodelTermFixture: saturating, stream
+
+@testset "submodel predictor terms classify as priors" begin
+    declaration(sb, target) =
+        only(d for d in generative_plan(sb).declarations if d.target === target)
+    term = @brm begin
+        sigma ~ Exponential(1)
+        effect ~ saturating(dose)
+        y ~ Normal(effect, sigma)
+    end
+    dose = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5]
+    y = [0.1, 0.3, 0.5, 0.7, 0.8, 0.9]
+
+    sb = @test_logs min_level=Warn SBBRMI(term((; dose, y)); mod=SubmodelTermFixture)
+    effect = declaration(sb, :effect)
+    @test effect.role === :prior && isnothing(effect.draw)
+    @test effect.family === :_sb_saturating
+    @test sb.model.observations == (:y,)
+    code = BayesianRegressionModels.stan_code(sb)
+    @test !occursin("effect_gen", code)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    d = brm_descriptor(sb)
+    @test brm_output(d, :effect).role === :parameter
+    @test Set(brm_operation(d, :predict).outputs) == Set((:y_gen,))
+
+    # Prior program: only the omitted response warns and twins.
+    prior = @test_logs (:warn, r"^sbimpl: `y` bind\(s\) no data column") SBBRMI(
+        term((; dose)); mod=SubmodelTermFixture)
+    @test declaration(prior, :effect).role === :prior
+    @test declaration(prior, :y).role === :observation
+    @test prior.model.observations == (:y,)
+    prior_code = BayesianRegressionModels.stan_code(prior)
+    @test occursin("y_gen", prior_code) && !occursin("effect_gen", prior_code)
+    @test StanBlocks.stanc_check(prior_code; warn_pedantic=false).ok
+
+    # Control: BRM's own response completion also emits a submodel call
+    # (`y ~ <mi submodel>(; y_obs, ...)`), but its statement is the response.
+    completed = @brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x
+        mi(y) ~ Normal(mu, sigma)
+    end
+    mi_sb = @test_logs min_level=Warn SBBRMI(completed((;
+        x=[-1.0, 0.5, 2.0, 0.25], y=Union{Missing,Float64}[0.2, missing, -0.4, missing],
+    )); mod=@__MODULE__)
+    @test declaration(mi_sb, :y).role === :observation
+
+    # Control: an omitted response routed through an observation-model
+    # submodel stays the observation.
+    streamed = @brm begin
+        mu ~ 1 + x
+        y ~ stream(mu)
+    end
+    stream_sb = @test_logs (:warn, r"^sbimpl: `y` bind\(s\) no data column") SBBRMI(
+        streamed((; x=[-1.0, 0.0, 0.5, 1.0, 2.0])); mod=SubmodelTermFixture)
+    @test declaration(stream_sb, :y).role === :observation
+    @test stream_sb.model.observations == (:y,)
+end
+
 @testset "kernel-nested response hold-out" begin
     brmi = kernel_builder(kernel_df)
     ordinary = SBBRMI(brmi; mod=@__MODULE__)

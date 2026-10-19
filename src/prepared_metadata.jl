@@ -7,11 +7,14 @@
 #   kind         -- which transform (:zscale/:standardize/:center/:factor/:mo/
 #                   :spline/:tensor_spline/:gp/:hsgp/:protect/:interaction/
 #                   :categorical_outcome/:ordinal_outcome/
-#                   :ordinal_threshold_predictor/:interval_censored_predictor)
+#                   :ordinal_threshold_predictor/:interval_censored_predictor/
+#                   :constant)
 #   const_       -- the fitted constant: (μ,σ) / μ / level-vector / TPS basis /
 #                   tensor-spline margins/centers / exact-GP axis metadata /
 #                   HSGP (μ,L,K,c) / categorical
-#                   outcome levels / nothing (protect)
+#                   outcome levels / nothing (protect) / (; value, node) for
+#                   `name = constant(expr)`, whose raw_ref is its
+#                   `_BRMConstantSource`
 #   raw_ref      -- the source: a column-node tree (zscale/center/standardize/
 #                   protect, re-materialised by shared expression replay) or a
 #                   column NAME Symbol (factor/mo/spline) or axis-name Tuple

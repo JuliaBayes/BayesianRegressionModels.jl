@@ -665,8 +665,8 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
     assignments = Tuple(operations[name] for name in program.order if haskey(operations, name))
     parameter_names = Set{Symbol}(p.name for p in prepared.parameters)
     assignment_names = Set{Symbol}(a.name for a in assignments)
-    consts = Dict{Symbol,Float64}(a.name => Float64(a.expression)
-        for a in ordinary_assignments if a.expression isa Number)
+    consts = _rk_data_constants!(Dict{Symbol,Float64}(a.name => Float64(a.expression)
+        for a in ordinary_assignments if a.expression isa Number), context.data)
     parameters = _rk_plan_parameters!(prepared, context.data, consts,
         Dict{Symbol,Symbol}(), parameter_names, assignment_names)
     vectors = [_rk_plan_vector_parameters!(prepared, consts); threshold_vectors]

@@ -92,7 +92,10 @@ end
         @test brm_output(brm_descriptor(target),:x;role=:covariate_draw).kind===:generated_quantity
     end
     observed=(;x=Union{Missing,Float64}[.2,.5,.8,.9,1.1],y=FRESH_SCALAR_DATA.y)
-    @test_throws "found no missing values" SBBRMI(scalar_builder(observed);mod=@__MODULE__,total_groups=())
+    # A complete column keeps the authored observed law with no missing coordinates (17b0ad2).
+    complete=SBBRMI(scalar_builder(observed);mod=@__MODULE__,total_groups=())
+    @test only(modeled_covariates(complete)).missing==(0,)
+    @test StanBlocks.stanc_check(BRM.stan_code(complete);warn_pedantic=false).ok
     before=deepcopy(FRESH_SCALAR_DATA)
     fitted=SBBRMI(FRESH_SCALAR_BUILDER(FRESH_SCALAR_DATA);mod=@__MODULE__,total_groups=())
     @test BRM.stan_code(reprocess(fitted,FRESH_SCALAR_DATA))==BRM.stan_code(fitted)
