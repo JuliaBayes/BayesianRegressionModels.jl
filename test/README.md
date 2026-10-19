@@ -57,6 +57,13 @@ categorical (`Vector{String}` or a string-leveled `CategoricalVector`) needs no
 zero `offset(...)` witness: its Stan and RK densities equal the witnessed
 twin's on both spellings.
 
+`plate_index_into.jl` checks `ragged(idx, group; into=target)`, an index column
+of row numbers on another flat axis: the gathered per-subject positions equal
+hand-rebased pre-grouped columns on BridgeStan and RK, `0` stays "no row",
+`reprocess` rebases new data again, and an index that leaves its subject or
+the target axis is refused, as are malformed declarations and `into=` on an
+observation.
+
 `plate_ragged_omitted_response.jl` checks a censored ragged observation inside
 `@plate` with its data column bound, omitted, and reprocessed. It requires the
 StanBlocks revision pinned by `setup_env.jl` and checks the public flat

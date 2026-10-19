@@ -4970,6 +4970,10 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
                 "sbimpl: reprocess: kernel ragged source `$arg_name` has " *
                 "$(length(flat)) rows but grouping column `$event_group` has " *
                 "$(length(event_groups)); they must describe the same event axis.")
+            into = get(e.const_, :into, nothing)
+            isnothing(into) || (flat = _brm_kernel_rebase_index(
+                arg_name, flat, event_group, event_groups,
+                into, _sb_df_column(df, into); prefix="sbimpl: reprocess"))
             new_data[key] = [flat[r] for r in rows]
         end
         new_preproc[key] = e
@@ -5731,7 +5735,8 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
                 "got a bare $(typeof(arg_col)).",
                 _sb_kernel_link_advice(arg_col))
             gath_sym = Symbol("kernel_", target, "_", name(arg_col), "_ragged")
-            push!(ragged_specs, (i, arg_col, grp_arg, gath_sym))
+            into = _brm_kernel_ragged_into(c; prefix="sbimpl")
+            push!(ragged_specs, (i, arg_col, grp_arg, gath_sym, into))
             push!(dcol_names, gath_sym)
             continue
         end
@@ -5892,9 +5897,15 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     # rather than its own. Wrapping it for the cell must not claim the flat
     # column: something else may name it on its own axis — `hsgp(log_dose)` over
     # the event frame, say — and that term registers it through its own path.
-    for (i, arg_col, grp_arg, gath_sym) in ragged_specs
+    for (i, arg_col, grp_arg, gath_sym, into) in ragged_specs
         rows, is_lp, is_unbound = _sb_kernel_ragged_rows(data, arg_col, grp_arg, g_vals;
             allow_unbound_observation=i in unbound_idx)
+        # An `into=` index column gathers its rebased positions, not its raw
+        # row numbers; the target's labels only join rows here.
+        flat = isnothing(into) ? nothing :
+            _brm_kernel_ragged_index_values(arg_col, grp_arg, into; prefix="sbimpl")
+        isnothing(into) || all(v -> v isa Real, parent(parent(into))) ||
+            pop!(data, name(into), nothing)
         # The grouping column fixes the omitted response's per-cell row axis,
         # but it supplies no observed values. Keep the response out of data and
         # out of the plate's sliced positionals so the in-cell `~` simulates it.
@@ -5906,12 +5917,12 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
             sliced = :($(name(arg_col))[$rows_param])
             body_stmts = Any[_sb_subst_sym(s, params[i], sliced) for s in body_stmts]
         else
-            flat = parent(parent(arg_col))
+            isnothing(flat) && (flat = parent(parent(arg_col)))
             gathered = [flat[r] for r in rows]
             data[gath_sym] = gathered
         end
         _sb_record_preproc!(data, gath_sym, PreprocEntry(
-            :kernel_ragged, (; is_lp),
+            :kernel_ragged, isnothing(into) ? (; is_lp) : (; is_lp, into=name(into)),
             (name(arg_col), name(grp_arg), name(group_col)), false))
     end
 
