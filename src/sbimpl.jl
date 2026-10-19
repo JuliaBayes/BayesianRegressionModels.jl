@@ -197,6 +197,19 @@ function _sb_anchor_slic_macrocalls!(ex::Expr)
     ex
 end
 
+# One side of a generated vector prior's declaration bound. A side no
+# coordinate bounds has none; a bound every coordinate shares stays the scalar
+# Stan spelling; otherwise the bound is coordinate-specific, and a coordinate
+# without one takes the infinite value Stan's constraining transforms treat as
+# absent (the identity on that coordinate). StanBlocks keeps a numeric vector
+# bound on the one native declaration (`vector<lower=[...]'>`), so the sampler
+# never leaves any column's support, inits included.
+function _sb_vector_prior_bound(bounds, unbounded::Float64)
+    all(isnothing, bounds) && return nothing
+    all(!isnothing, bounds) && allequal(bounds) && return first(bounds)
+    Float64[isnothing(b) ? unbounded : b for b in bounds]
+end
+
 function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
     calls, actuals, shape, argkinds = _sb_vector_prior_parts(priors; positive)
     selectors = [_sb_vector_prior_selector(c.dist, mod) for c in calls]
@@ -237,22 +250,19 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
         lpdf, lpdfs, rng = Symbol(stem, :_lpdf), Symbol(stem, :_lpdfs), Symbol(stem, :_rng)
         typed = [argkinds[i] === :selector ? Symbol(:arg_, i) :
                  Expr(:(::), Symbol(:arg_, i), :real) for i in eachindex(actuals)]
-        # The family's support becomes the parameter declaration's bounds:
-        # positive blocks are always `lower=0`, others carry a bound only when
-        # every coordinate shares it.
-        lowers = [c.lower for c in calls]
-        uppers = [c.upper for c in calls]
-        declared_lower = positive ? 0.0 :
-            all(!isnothing, lowers) && allequal(lowers) ? first(lowers) : nothing
-        declared_upper = !positive && all(!isnothing, uppers) && allequal(uppers) ?
-            first(uppers) : nothing
-        densities = Any[]; draws = Any[]; guards = Any[]
+        # The family's support becomes the parameter declaration's bounds, and
+        # it carries every coordinate's bound (`_sb_vector_prior_bound`;
+        # positive blocks always bound below), so Stan's constraining transform
+        # enforces each one and the density needs no guard for any of them.
+        declared_lower = _sb_vector_prior_bound([c.lower for c in calls], -Inf)
+        declared_upper = _sb_vector_prior_bound([c.upper for c in calls], Inf)
+        densities = Any[]; draws = Any[]
         for (i, c) in enumerate(calls)
             distname = c.dist isa Symbol ? c.dist : nameof(c.dist)
             # StanBlocks' flat token is a parameter declaration with no density
             # contribution, so it has no Stan flat_lpdf builtin to call from a
-            # generated whole-vector prior. Retain the coefficient and any
-            # coordinate guards while contributing the exact constant zero.
+            # generated whole-vector prior. Retain the coefficient (its bounds
+            # live on the declaration) while contributing the exact constant zero.
             push!(densities, distname === :flat ? 0.0 :
                 Expr(:call, Symbol(distname, :_lpdf), Expr(:ref, :x, i), c.names...))
             selector = selectors[i]
@@ -263,13 +273,6 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
                 isnothing(c.upper) ?
                     Expr(:call, :_sb_lower_conditioning_rng, selector, c.lower, c.names...) :
                     Expr(:call, :_sb_conditioning_rng, selector, c.lower, c.upper, c.names...))
-            # Stan's constraining transform already enforces a declared bound,
-            # so a guard for it can never fire. Only a coordinate-specific bound
-            # that the declaration cannot carry keeps an explicit guard.
-            !isnothing(c.lower) && !isequal(c.lower, declared_lower) && push!(guards,
-                :(if x[$i] < $(c.lower); return negative_infinity(); end))
-            !isnothing(c.upper) && !isequal(c.upper, declared_upper) && push!(guards,
-                :(if x[$i] > $(c.upper); return negative_infinity(); end))
         end
         total = foldl((a,b)->Expr(:call, :+, a, b), densities)
         point = Any[:(@stan_assert n == $(length(calls))), :(out::vector[n])]
@@ -279,7 +282,6 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
         append!(drawbody, [:(out[$i] = $(draws[i])) for i in eachindex(calls)])
         push!(drawbody, :out)
         density_def = :($lpdf(x::vector[n], $(typed...))::real = begin
-            $(guards...)
             $total
         end)
         pointwise_def = :($lpdfs(x::vector[n], $(typed...))::vector[n] =
