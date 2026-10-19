@@ -8,31 +8,29 @@ const BRM = BayesianRegressionModels
 # Two SBBRMI fits in one session, same likelihood, different priors: fit B is
 # all Normal/Exponential, fit A mixes a LocationScale-T Intercept and a
 # truncated-T sigma with Normal commons. Fit A's population prior is not
-# all-Normal, so lowering registers a composed `brm_vector_prior_*` family
-# (`@deffun` triad + `lpxf_expr` hook) via `Core.eval` DURING `SBBRMI`
-# construction, while fit B takes the direct `_popefs_normal` path and
-# registers nothing.
+# all-Normal, so lowering generates a composed `brm_vector_prior_*` family
+# during `SBBRMI` construction, while fit B takes the direct `_popefs_normal`
+# path and generates none.
 #
-# The reported "cross-fit collision" is refuted: the failure is world age,
-# not shared state. Tracing fit A via direct StanBlocks entries
+# The reported "cross-fit collision" was refuted: the failure was world age,
+# not shared state. Lowering then installed the generated family through
+# `Core.eval`, so a direct StanBlocks trace of fit A
 # (`StanBlocks.stan_code(sb.model)` / `StanBlocks.transpiles(sb.model)`) in
-# the SAME compiled frame as its build resolves methods at that frame's
-# world age, so the fresh hooks are invisible and tracing dies with
-# "`brm_vector_prior_*` is missing `lpxf_expr`" — with or without fit B
-# first, and an identical top-level trace succeeds. Fit B merely happened to
-# need no new family, which is why it always passed and fit A always failed.
+# the SAME compiled frame as its build could not see the fresh methods and
+# died with "`brm_vector_prior_*` is missing `lpxf_expr`". Fit B needed no new
+# family, which is why it always passed.
 #
-# The BRM trace entries (`stan_code`, `stan_model`, `stan_instantiate`, and
-# the `transpiles`/`compiles` predicates) re-enter the compiler in the
-# current world via `Base.invokelatest` and are call-site independent. This
-# file pins the two-fit shape through them. Direct `StanBlocks.*(sb.model)`
-# from inside such a frame remains a world-age error by Julia semantics (see
-# test/totals_call_site.jl); it is documented, not asserted here.
+# Generated families are now `StanBlocks.ValueFamily` values and construction
+# installs no methods (d10effe), so direct StanBlocks entries and BRM's
+# entries (`stan_code`, `stan_data`, `stan_model`, `stan_instantiate`, and the
+# `transpiles`/`compiles` predicates) both work in the constructing frame, as
+# test/totals_call_site.jl also pins. This file pins the two-fit shape through
+# the BRM entries and asserts that the direct entries agree with them.
 #
 # Order is load-bearing: the in-function fits below MUST run before any
 # top-level trace of these shapes in this process. A prior top-level trace
-# populates `_SB_VECTOR_PRIOR_CACHE`, so no new family is registered and the
-# staleness the wrapped entries guard against never manifests.
+# populates `_SB_VECTOR_PRIOR_CACHE` and would miss a cold-construction
+# regression.
 
 df = (; x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
         y=[-2.4, -2.2, -2.0, -1.8, -1.7, -1.5])
@@ -63,6 +61,8 @@ function build_and_trace_two_fits(builderB, builderA, data)
     sbA = SBBRMI(builderA(data); mod=@__MODULE__)
     @test BRM.transpiles(sbA)
     srcA = BRM.stan_code(sbA)
+    # The reporter's failing call: a direct trace in the constructing frame.
+    @test StanBlocks.stan_code(sbA.model) == srcA
     (; sbB, srcB, sbA, srcA)
 end
 
@@ -135,21 +135,15 @@ end
 function build_and_materialize_data(builder, data)
     sb = SBBRMI(builder(data); mod=@__MODULE__)
     src = BRM.stan_code(sb)
-    direct_error = try
-        StanBlocks.stan_data(sb.model)
-        nothing
-    catch e
-        sprint(showerror, e)
-    end
+    direct_data = StanBlocks.stan_data(sb.model)
     prepared = BRM.stan_data(sb)
-    (; sb, src, direct_error, prepared)
+    (; sb, src, direct_data, prepared)
 end
 
 @testset "heterogeneous correlated-block data is call-site independent" begin
     infunc = build_and_materialize_data(heterogeneous_builder, heterogeneous_data)
     @test occursin("brm_vector_prior_", infunc.src)
-    @test !isnothing(infunc.direct_error)
-    @test occursin("is missing `lpxf_expr`", infunc.direct_error)
+    @test infunc.direct_data == infunc.prepared
     @test infunc.prepared == StanBlocks.stan_data(infunc.sb.model)
     @test infunc.prepared == BRM.stan_data(infunc.sb)
 end
