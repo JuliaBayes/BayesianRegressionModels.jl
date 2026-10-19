@@ -284,6 +284,7 @@ end
     # A joined scale computed from parameters and per-row data is grouped by
     # RK (above); StanBlocks has no arithmetic on a whole RaggedVector, so
     # SBBRMI needs the scale written in the cell (the `:cell` cases above).
+    # Capability gap: StanBlocks snag `raggedvector-ari-19d214fa`.
     joined = PublicPerLocationScale.build(:join, "a1 + (a2 - a1) * obs_assay", "b1")
     @test_broken try
         StanBlocks.stanc_check(BRM.stan_code(SBBRMI(joined;
