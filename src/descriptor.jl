@@ -2305,14 +2305,19 @@ function brm_ranef_sd_coordinates(d::BRMDescriptor, logical::Symbol,
 end
 
 function _brm_ranef_sd_result(brmi, logical, id, coefficient, output, coordinate)
+    link = _brm_margin_link(brmi, logical)
+    (; logical, id, coefficient, output, coordinates=[coordinate],
+       link, inverse_link=InverseFunctions.inverse(link))
+end
+
+# The LHS link of a random-effect margin's linear predictor: the scale its
+# population location, between-group SD and per-level effects all live on.
+function _brm_margin_link(brmi, logical::Symbol)
     predictors = [lp for lp in linear_predictors(brmi) if lp.name === logical]
     length(predictors) == 1 || error(
         "brm_descriptor: margin predictor `$logical` resolves to " *
         "$(length(predictors)) linear predictors; expected exactly one.")
-    link = only(predictors).link_lhs_fn
-
-    (; logical, id, coefficient, output, coordinates=[coordinate],
-       link, inverse_link=InverseFunctions.inverse(link))
+    only(predictors).link_lhs_fn
 end
 
 # The exact total-coefficient columns that absorbed `|id|`, one per margin:

@@ -197,6 +197,19 @@ function _sb_anchor_slic_macrocalls!(ex::Expr)
     ex
 end
 
+# One side of a generated vector prior's declaration bound. A side no
+# coordinate bounds has none; a bound every coordinate shares stays the scalar
+# Stan spelling; otherwise the bound is coordinate-specific, and a coordinate
+# without one takes the infinite value Stan's constraining transforms treat as
+# absent (the identity on that coordinate). StanBlocks keeps a numeric vector
+# bound on the one native declaration (`vector<lower=[...]'>`), so the sampler
+# never leaves any column's support, inits included.
+function _sb_vector_prior_bound(bounds, unbounded::Float64)
+    all(isnothing, bounds) && return nothing
+    all(!isnothing, bounds) && allequal(bounds) && return first(bounds)
+    Float64[isnothing(b) ? unbounded : b for b in bounds]
+end
+
 function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
     calls, actuals, shape, argkinds = _sb_vector_prior_parts(priors; positive)
     selectors = [_sb_vector_prior_selector(c.dist, mod) for c in calls]
@@ -237,22 +250,19 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
         lpdf, lpdfs, rng = Symbol(stem, :_lpdf), Symbol(stem, :_lpdfs), Symbol(stem, :_rng)
         typed = [argkinds[i] === :selector ? Symbol(:arg_, i) :
                  Expr(:(::), Symbol(:arg_, i), :real) for i in eachindex(actuals)]
-        # The family's support becomes the parameter declaration's bounds:
-        # positive blocks are always `lower=0`, others carry a bound only when
-        # every coordinate shares it.
-        lowers = [c.lower for c in calls]
-        uppers = [c.upper for c in calls]
-        declared_lower = positive ? 0.0 :
-            all(!isnothing, lowers) && allequal(lowers) ? first(lowers) : nothing
-        declared_upper = !positive && all(!isnothing, uppers) && allequal(uppers) ?
-            first(uppers) : nothing
-        densities = Any[]; draws = Any[]; guards = Any[]
+        # The family's support becomes the parameter declaration's bounds, and
+        # it carries every coordinate's bound (`_sb_vector_prior_bound`;
+        # positive blocks always bound below), so Stan's constraining transform
+        # enforces each one and the density needs no guard for any of them.
+        declared_lower = _sb_vector_prior_bound([c.lower for c in calls], -Inf)
+        declared_upper = _sb_vector_prior_bound([c.upper for c in calls], Inf)
+        densities = Any[]; draws = Any[]
         for (i, c) in enumerate(calls)
             distname = c.dist isa Symbol ? c.dist : nameof(c.dist)
             # StanBlocks' flat token is a parameter declaration with no density
             # contribution, so it has no Stan flat_lpdf builtin to call from a
-            # generated whole-vector prior. Retain the coefficient and any
-            # coordinate guards while contributing the exact constant zero.
+            # generated whole-vector prior. Retain the coefficient (its bounds
+            # live on the declaration) while contributing the exact constant zero.
             push!(densities, distname === :flat ? 0.0 :
                 Expr(:call, Symbol(distname, :_lpdf), Expr(:ref, :x, i), c.names...))
             selector = selectors[i]
@@ -263,13 +273,6 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
                 isnothing(c.upper) ?
                     Expr(:call, :_sb_lower_conditioning_rng, selector, c.lower, c.names...) :
                     Expr(:call, :_sb_conditioning_rng, selector, c.lower, c.upper, c.names...))
-            # Stan's constraining transform already enforces a declared bound,
-            # so a guard for it can never fire. Only a coordinate-specific bound
-            # that the declaration cannot carry keeps an explicit guard.
-            !isnothing(c.lower) && !isequal(c.lower, declared_lower) && push!(guards,
-                :(if x[$i] < $(c.lower); return negative_infinity(); end))
-            !isnothing(c.upper) && !isequal(c.upper, declared_upper) && push!(guards,
-                :(if x[$i] > $(c.upper); return negative_infinity(); end))
         end
         total = foldl((a,b)->Expr(:call, :+, a, b), densities)
         point = Any[:(@stan_assert n == $(length(calls))), :(out::vector[n])]
@@ -279,7 +282,6 @@ function _sb_vector_prior_family(priors; positive::Bool=true, mod::Module=Main)
         append!(drawbody, [:(out[$i] = $(draws[i])) for i in eachindex(calls)])
         push!(drawbody, :out)
         density_def = :($lpdf(x::vector[n], $(typed...))::real = begin
-            $(guards...)
             $total
         end)
         pointwise_def = :($lpdfs(x::vector[n], $(typed...))::vector[n] =
@@ -1803,16 +1805,37 @@ end
 
 function addprop end
 
-# One variance law serves the typed Stan declaration and the native graph.
-# Stan's vector sqrt is intrinsic; native Julia spells it as a broadcast.
-const _BRM_ADDPROP_VARIANCE = :(add^2 .+ (loc .* prop).^2)
+# One variance law serves the typed Stan declarations and the native graph;
+# only the spelling of the additive square varies. Stan's vector sqrt is
+# intrinsic; native Julia spells it as a broadcast.
+_brm_addprop_variance(add_square) = :($add_square .+ (loc .* prop).^2)
+# The native definition serves scalar and per-location scales alike.
+const _BRM_ADDPROP_VARIANCE = _brm_addprop_variance(:(add .^ 2))
+
+# Each scale is one value for every location, or one value per location. A
+# per-location `add` is squared elementwise; a shared `add` keeps `add^2`, so
+# the shared-scale helper's Stan source, and every descriptor id hashed from
+# it, is unchanged.
+const _BRM_ADDPROP_ADD_SCALES = ((:real, :(add^2)), (:(vector[n]), :(add .^ 2)))
+const _BRM_ADDPROP_PROP_SCALES = (:real, :(vector[n]))
 
 @eval StanBlocks.@deffun begin
-    addprop(loc::vector[n], add::real, prop::real)::vector[n] = begin
-        sqrt($(_BRM_ADDPROP_VARIANCE))
-    end
+    $((:(addprop(loc::vector[n], add::$add, prop::$prop)::vector[n] = begin
+        sqrt($(_brm_addprop_variance(add_square)))
+    end) for (add, add_square) in _BRM_ADDPROP_ADD_SCALES
+        for prop in _BRM_ADDPROP_PROP_SCALES)...)
+    # A grouped location takes per-location scales grouped the same way.
     @inline addprop(loc::RaggedVector, add::real, prop::real) = begin
         RaggedVector(addprop(loc.mem, add, prop), loc.ends)
+    end
+    @inline addprop(loc::RaggedVector, add::RaggedVector, prop::real) = begin
+        RaggedVector(addprop(loc.mem, add.mem, prop), loc.ends)
+    end
+    @inline addprop(loc::RaggedVector, add::real, prop::RaggedVector) = begin
+        RaggedVector(addprop(loc.mem, add, prop.mem), loc.ends)
+    end
+    @inline addprop(loc::RaggedVector, add::RaggedVector, prop::RaggedVector) = begin
+        RaggedVector(addprop(loc.mem, add.mem, prop.mem), loc.ends)
     end
 end
 
@@ -7088,10 +7111,12 @@ function _sb_ragged_argument(data, key, argument::NamedColumn, layout)
     raw isa AbstractVector && length(raw) == 1 && return argument
     _sb_ragged_bound(data, key, :argument, argument, layout)
 end
+# A row-local callable (`addprop`) keeps its rows aligned, so its per-row data
+# arguments are grouped like the law's own.
 function _sb_ragged_argument(data, key, argument::ExprColumn, layout)
     f = getf(argument)
     (haskey(_RK_DERIVED_BINOPS, f) || haskey(_RK_DERIVED_CMP, f) ||
-        haskey(_RK_DERIVED_MATH, f)) || return argument
+        haskey(_RK_DERIVED_MATH, f) || _rk_rowwise_callable(f)) || return argument
     ExprColumn(f, map(a -> _sb_ragged_argument(data, key, a, layout),
         getargs(argument))...; getkwargs(argument)...)
 end
