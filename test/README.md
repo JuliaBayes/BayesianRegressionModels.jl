@@ -94,6 +94,12 @@ RK density and gradient equal a twin that never reads the empty axis.
 recomputing the row count of a declared axis that sizes an intercept-only
 predictor, and a missing group label is still refused.
 
+`hsgp_empty_axis_gather.jl` checks an HSGP with an explicit `domain=` (and a
+periodic one) over an axis with no rows, gathered per subject through
+`ragged(drift, d_subject)` over an empty group: each model's BridgeStan and RK
+density and gradient equal a twin that declares the same term but never reads
+it, and `reprocess` moves the Stan program onto data with rows.
+
 `plate_ragged_omitted_response.jl` checks a censored ragged observation inside
 `@plate` with its data column bound, omitted, and reprocessed. It requires the
 StanBlocks revision pinned by `setup_env.jl` and checks the public flat
