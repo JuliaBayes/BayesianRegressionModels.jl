@@ -88,7 +88,8 @@ end
 # each of its row log densities, everywhere, by that row's weight.
 @stestset "weighted censored Normal inside a ragged cell scales every row density" begin
     data = WEIGHTED_CENSORED_CELL_DATA
-    backend, problem = consumer_problem(WEIGHTED_CENSORED_CELL(data))
+    brmi = WEIGHTED_CENSORED_CELL(data)
+    backend, problem = consumer_problem(brmi)
     base, base_problem = consumer_problem(CENSORED_CELL(CENSORED_CELL_DATA))
     @test coordinate_names(backend.model.layout) == coordinate_names(base.model.layout)
     extension = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
@@ -115,9 +116,21 @@ end
         for level in model.view.levels]
     @test brm_nlme_loglikelihoods(model, u[model.theta], u[model.sigma], eta) ≈
         expected_by_level atol=2e-11 rtol=2e-11
-    # Capability gap, not a wrong shape: StanBlocks' `weighted` does not yet
-    # take a censoring combinator as its family (StanBlocks snag
-    # `weighted-over-ce-a55869f3`), so SBBRMI cannot transpile this cell.
-    @test_broken (BRM.stan_code(SBBRMI(WEIGHTED_CENSORED_CELL(data);
-        mod=@__MODULE__, total_groups=())); true)
+
+    sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
+    @test StanBlocks.stanc_check(BRM.stan_code(sb); warn_pedantic=false).ok
+    stan = BRM.stan_instantiate(sb;
+        path=joinpath(mktempdir(), "incell_weighted_censored.stan"))
+    transport = brm_coordinate_transport(backend, sb,
+        BridgeStan.param_unc_names(stan.model))
+    for u in (zeros(length(transport.rk_names)),
+              [0.15 * sin(i) for i in eachindex(transport.rk_names)])
+        value, gradient = LogDensityProblems.logdensity_and_gradient(problem, u)
+        stan_u = brm_rk_point_to_stan(transport, u)
+        stan_gradient = similar(stan_u)
+        stan_value, _ = BridgeStan.log_density_gradient!(stan.model, stan_u,
+            stan_gradient; propto=false, jacobian=true)
+        @test value ≈ stan_value + transport.logdensity_offset atol=2e-10 rtol=2e-10
+        @test gradient ≈ brm_stan_gradient_to_rk(transport, u, stan_gradient) atol=2e-8 rtol=2e-8
+    end
 end
