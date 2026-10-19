@@ -1,27 +1,25 @@
-# test/sb_hook_scalar_keywords.jl — scalar keyword columns of a custom term
+# test/submodel_scalar_keywords.jl — scalar keyword columns of a custom term
 # broadcast; they do not define the term's row axis.
 #
-# A `_sb_submodel_rhs!` term reads one row-wise positional column on a flat
-# event axis and two scalar keyword columns, and `ragged(target, group)` joins
-# its per-event value to the subject plate. A scalar is broadcast data: the
-# target lives on the frame of its row-wise columns, whether the scalar is a
-# `name = constant(expr)` declaration or a scalar field of the data container.
-# Before, the ragged row check counted a scalar as a one-row column and refused
-# the join ("declared over a 1-row axis (data column `shift_loc`)").
+# A custom term (`_sb_submodel_rhs!` / `_rk_submodel_rhs!`) reads one row-wise
+# positional column on a flat event axis and two scalar keyword columns, and
+# `ragged(target, group)` joins its per-event value to the subject plate. A
+# scalar is broadcast data: the target lives on the frame of its row-wise
+# columns, whether the scalar is a `name = constant(expr)` declaration or a
+# scalar field of the data container. Before, the ragged row check counted a
+# scalar as a one-row column and refused the join on both backends ("declared
+# over a 1-row axis (data column `shift_loc`)"; snag submodel-keyword-f4a3876e).
 #
-# Run: julia --project=test test/sb_hook_scalar_keywords.jl
-# Set BRM_SCALAR_KEYWORDS_RUNTIME=0 to skip the compiled-model set.
+# Run: julia --project=test test/submodel_scalar_keywords.jl [<testset substring>...]
+# Set BRM_SCALAR_KEYWORDS_RUNTIME=0 to skip the compiled-model sets.
 
-using Test
-using BayesianRegressionModels
-using StanBlocks
-using LogDensityProblems
+include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 
 const RUNTIME = get(ENV, "BRM_SCALAR_KEYWORDS_RUNTIME", "1") != "0"
 
 module ScalarKeywords
 using BayesianRegressionModels, StanBlocks, Statistics
-import BayesianRegressionModels: _sb_submodel_rhs!
+import BayesianRegressionModels: _sb_submodel_rhs!, _rk_submodel_rhs!
 using BayesianRegressionModels: getargs, getkwargs, name
 
 # A per-event shift with a location prior calibrated on the event table:
@@ -53,6 +51,29 @@ function _sb_submodel_rhs!(stmts, data, target::Symbol, ::typeof(shifted_inline)
     data[scale] = std(values)
     push!(stmts, :($target ~ $shift_cell(; x=$(name(x)), loc=$loc, scale=$scale)))
     :done
+end
+
+# The native RK source of the same two terms.
+function native_shift!(definitions, statements, data, target, rhs, loc, scale)
+    key, helper = Symbol(target, :_source_x), Symbol(target, :_shift)
+    data[key] = copy(parent(parent(only(getargs(rhs)))))
+    push!(definitions, :($helper(x, loc, scale) = begin
+        location ~ Normal(loc, scale)
+        return x .- location
+    end))
+    push!(statements, :($target ~ $helper($key, $loc, $scale)))
+    :done
+end
+_rk_submodel_rhs!(definitions, statements, data, bindings, target::Symbol,
+        ::typeof(shifted), rhs) =
+    native_shift!(definitions, statements, data, target, rhs,
+        name(getkwargs(rhs)[:loc]), name(getkwargs(rhs)[:scale]))
+function _rk_submodel_rhs!(definitions, statements, data, bindings, target::Symbol,
+        ::typeof(shifted_inline), rhs)
+    values = parent(parent(only(getargs(rhs))))
+    loc, scale = Symbol(target, :_loc), Symbol(target, :_scale)
+    data[loc], data[scale] = mean(values), std(values)
+    native_shift!(definitions, statements, data, target, rhs, loc, scale)
 end
 
 # Keywords from `constant(...)` declarations.
@@ -136,7 +157,7 @@ const SK = ScalarKeywords
 build(builder, data) = SBBRMI(builder(data); mod=SK, total_groups=())
 stanc_ok(sb) = StanBlocks.stanc_check(StanBlocks.stan_code(sb.model); warn_pedantic=false)
 
-@testset "scalar keyword columns do not set the term's row axis" begin
+@stestset "SBBRMI: scalar keyword columns do not set the term's row axis" begin
     for (label, builder, data) in (
             ("constant(...)", SK.constant_builder, SK.train),
             ("data field", SK.field_builder, SK.with_fields(SK.train)))
@@ -153,7 +174,7 @@ stanc_ok(sb) = StanBlocks.stanc_check(StanBlocks.stan_code(sb.model); warn_pedan
           StanBlocks.stan_code(build(SK.field_builder, SK.with_fields(SK.train)).model)
 end
 
-@testset "the term's value sits on the event axis" begin
+@stestset "SBBRMI: the term's value sits on the event axis" begin
     if RUNTIME
         points(n) = ([0.1 * ((i % 5) - 2) for i in 1:n], [0.3 * sin(i) for i in 1:n])
         inline = StanBlocks.stan_instantiate(build(SK.inline_builder, SK.train).model)
@@ -180,7 +201,7 @@ end
     end
 end
 
-@testset "replay keeps the constants and re-joins the new event table" begin
+@stestset "SBBRMI: replay keeps the constants and re-joins the new event table" begin
     sb = build(SK.constant_builder, SK.train)
     # One dose level on replay: re-evaluating `std` would give 0.
     for (replay, nevents) in ((reprocess(sb, SK.refit), 5),
@@ -189,5 +210,30 @@ end
         @test replay.data[:shift_scale] == sb.data[:shift_scale]
         @test length(replay.data[:log_dose]) == nevents
         @test stanc_ok(replay).ok
+    end
+end
+
+@stestset "RKBRMI: the term joins the subject plate with the Stan density" begin
+    for (label, builder, data) in (
+            ("constant", SK.constant_builder, SK.train),
+            ("field", SK.field_builder, SK.with_fields(SK.train)),
+            ("inline", SK.inline_builder, SK.train))
+        brmi = builder(data)
+        rk, problem = consumer_problem(brmi)
+        RUNTIME || continue
+        stan = consumer_stan(brmi, "scalar-keywords-$label"; mod=SK)
+        transport = brm_coordinate_transport(rk, SBBRMI(brmi; mod=SK, total_groups=()),
+            BridgeStan.param_unc_names(stan.model))
+        n = length(transport)
+        @test n == length(coordinate_names(rk.model.layout))
+        for u in (zeros(n), collect(range(-0.43, 0.51; length=n)), [0.37sin(i) for i in 1:n])
+            value, gradient = LogDensityProblems.logdensity_and_gradient(problem, u)
+            stan_u = brm_rk_point_to_stan(transport, u)
+            stan_gradient = similar(stan_u)
+            stan_value, _ = BridgeStan.log_density_gradient!(stan.model, stan_u,
+                stan_gradient; propto=false, jacobian=true)
+            @test value ≈ stan_value + transport.logdensity_offset atol=2e-11 rtol=2e-11
+            @test gradient ≈ brm_stan_gradient_to_rk(transport, u, stan_gradient) atol=2e-10 rtol=2e-10
+        end
     end
 end
