@@ -661,3 +661,32 @@ end
             1.5minimum(x.gradient_bytes for x in measured)
     end
 end
+
+@stestset "a Student-t subject block with a declared df lists its mixing weights" begin
+    # The df is read only by the block law. The plate route used to prune it,
+    # so RKBRMI failed to bind (snag rk-student-t-ran-1fcee8f7).
+    brmi = @brm NLME_PLATE_DATA begin
+        nu ~ Gamma(2, 10; lower=1.0)
+        sigma ~ Exponential(1)
+        log_CL ~ 1 + weight + (1 | pk | subject)
+        log_V ~ 1 + (1 | pk | subject)
+        ranef(:, pk) ~ TDist(nu)
+        @plate for i in eachindex(log_CL)
+            CL = exp(log_CL[i])
+            Vc = exp(log_V[i])
+            pred[i] = dose[i] / Vc .* exp.(-(CL / Vc) .* t[i])
+            dv[i] ~ normal(pred[i], sigma)
+        end
+    end
+    view = brm_nlme_view(RKBRMI(brmi))
+    n = length(view.levels)
+    @test n == 3
+    @test all(!=(:unclaimed), view.role)
+    @test count(==(:subject_mixing), view.role) == n
+    @test count(==(:subject_effect), view.role) == 2n
+    @test view.role[only(findall(==(:nu), view.coordinates))] === :scalar
+    for (i, block) in enumerate(view.subject_coordinates)
+        @test count(c -> view.role[c] === :subject_mixing, block) == 1
+        @test all(c -> view.subject[c] == i, block)
+    end
+end

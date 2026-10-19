@@ -3126,9 +3126,18 @@ function _rk_design_addressee_groups(design, target::Symbol;
     groups, order
 end
 
+# A population-effect prior argument is a number: a numeric literal, or a
+# scalar field of the data (including a resolved `name = constant(expr)`),
+# whose value the graph holds. A model value stays refused.
+function _rk_effect_number(x)
+    x isa NamedColumn && parent(x) isa DataColumn || return _brm_numeric_constant(x)
+    value = parent(parent(x))
+    value isa Real && !(value isa Bool) ? Float64(value) : nothing
+end
+
 # Per-addressee population-effect families (prior-vocab v1, peer contract):
 # real-line Normal/Cauchy/Laplace/Logistic/StudentT + Flat, every arg a
-# numeric literal. StudentT unwraps from `LocationScale(mu, s, TDist(nu))`
+# number (`_rk_effect_number`). StudentT unwraps from `LocationScale(mu, s, TDist(nu))`
 # into Stan `(nu, mu, sigma)` order (a bare `TDist` stays rejected);
 # `Flat()` takes no args. `Normal`/`Cauchy` keep the historical (0, 1)
 # defaulting (SB mirrors it); Laplace/Logistic need both args (SB has no
@@ -3170,14 +3179,14 @@ function _rk_materialize_effect_prior(expression, target::Symbol, label::Symbol;
         "$prefix: predictor `$target` population-effect prior for " *
         "`$label` needs scalar location and scale; index or reduce an " *
         "array-valued argument explicitly")
-    location = _brm_numeric_constant(raw[1])
-    scale = _brm_numeric_constant(raw[2])
+    location = _rk_effect_number(raw[1])
+    scale = _rk_effect_number(raw[2])
     isnothing(location) && error(
         "$prefix: predictor `$target` population-effect `$head` " *
-        "location for `$label` must be a numeric constant")
+        "location for `$label` must be a numeric constant or a scalar data field")
     isnothing(scale) && error(
         "$prefix: predictor `$target` population-effect `$head` scale " *
-        "for `$label` must be a numeric constant")
+        "for `$label` must be a numeric constant or a scalar data field")
     isfinite(location) || error(
         "$prefix: predictor `$target` population-effect `$head` " *
         "location for `$label` must be finite")
@@ -3208,12 +3217,12 @@ function _rk_effect_studentt_args(expression::ExprColumn, target::Symbol,
     length(bargs) == 1 || error(
         "$prefix: predictor `$target` population-effect prior for " *
         "`$label` `TDist` base needs one argument; write `TDist(nu)`")
-    nu = _brm_numeric_constant(only(bargs))
-    mu = _brm_numeric_constant(mu_raw)
-    s = _brm_numeric_constant(s_raw)
+    nu = _rk_effect_number(only(bargs))
+    mu = _rk_effect_number(mu_raw)
+    s = _rk_effect_number(s_raw)
     (isnothing(nu) || isnothing(mu) || isnothing(s)) && error(
         "$prefix: predictor `$target` population-effect StudentT " *
-        "arguments for `$label` must be numeric constants")
+        "arguments for `$label` must be numeric constants or scalar data fields")
     isfinite(nu) && nu > 0 || error(
         "$prefix: predictor `$target` population-effect StudentT " *
         "degrees of freedom for `$label` must be finite and positive")
@@ -4363,7 +4372,7 @@ Base.@nospecializeinfer function _rk_gate_spline_term_priors!(@nospecialize(brmi
     per_target = get(_brm_resolve_term_priors(brmi), target, Dict())
     for t in spline_raw
         key = _brm_prepared_term_key(t)
-        isempty(get(per_target, key, Dict())) || error(
+        isempty(something(_brm_term_override(per_target, t), Dict())) || error(
             "$prefix: predictor `$target` smoothing-scale priors on " *
             "`$key` are out of slice 1 (the thin-layer spline surface " *
             "takes default half-normal scales; `sd(...)` overrides are " *
@@ -4594,8 +4603,26 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
     end
     base = "hsgp_" * join(string.(axes), "_")
     id = _rk_mint_smooth_id!(taken, columns, base)
+    # `length_scale_floor` in the length-scale prior reads the floor as a prior
+    # argument, so the declaration needs no separate truncation (decision 1fk9b29).
+    rho_floor_named = _brm_has_floor_marker(state.rho_prior)
+    rho_floor_named && any(p -> p.hyper === :length_scale, hyper_plans) && error(
+        "$prefix: predictor `$target` uses `length_scale_floor` in a " *
+        "hyper-predicted length scale's prior, which is its log-scale " *
+        "intercept; the floor already binds per group")
+    # A `rows=` mask is bound data, like a grouped term's level index.
+    rows = get(state, :rows, nothing)
+    mask = if isnothing(rows)
+        nothing
+    else
+        name = _rk_mint_generated!(taken, columns, string(id, "_rows"))
+        columns[name] = Float64.(rows.mask)
+        name
+    end
     common = (; rho_prior=state.rho_prior, sigma_prior=state.sigma_prior,
-        rho_truncated=any(>(0), state.rho_lower isa Real ? (state.rho_lower,) : state.rho_lower),
+        rho_truncated=!rho_floor_named &&
+            any(>(0), state.rho_lower isa Real ? (state.rho_lower,) : state.rho_lower),
+        rho_floor_named, anchor=get(state, :anchor, nothing), mask,
         hyper_plans, rho_stated, sigma_stated)
     if state.cov === :periodic
         return _RKTermSpec(:hsgp, collect(axes),
@@ -6076,10 +6103,20 @@ function _rk_truncated_prior(prior::_BRMPreparedExpr, name::Symbol)
     (family, base_args, override)
 end
 
+# A scalar field of the data (including a resolved `name = constant(expr)`) is a
+# named numeric constant: a prior argument or bound may name it like a literal
+# assignment, and the graph holds its number.
+function _rk_data_constants!(consts::Dict{Symbol,Float64}, data::AbstractDict)
+    for (key, value) in data
+        value isa Real && !(value isa Bool) && (consts[key] = Float64(value))
+    end
+    consts
+end
+
 function _rk_fold_assignment_consts!(kept, data::AbstractDict,
         parameters::Set{Symbol})
     prefix = "RK backend"
-    consts = Dict{Symbol,Float64}()
+    consts = _rk_data_constants!(Dict{Symbol,Float64}(), data)
     aliases = Dict{Symbol,Symbol}()
     exprs = Dict{Symbol,Any}()
     for assignment in kept

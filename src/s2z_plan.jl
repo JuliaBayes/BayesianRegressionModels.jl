@@ -406,7 +406,9 @@ function _sb_emit_s2z!(stmts, data, target, plan; mod::Module=@__MODULE__)
         push!(stmts, Expr(:call, :~, pop, Expr(:call, prior.model, kwargs)))
         data[_SB_BINDINGS_KEY][pop] = (; role=:population_effect, logical=plan.target,
             family=nothing,
-            population_columns=Tuple(plan.design.columns[c].label for c in plan.remaining))
+            population_columns=Tuple(plan.design.columns[c].label for c in plan.remaining),
+            design_columns=Tuple(_sb_design_column_record(plan.design.columns[c])
+                                 for c in plan.remaining))
         s2z_lp = :($s2z_lp + $pop)
     end
     push!(stmts, :($target = $s2z_lp))

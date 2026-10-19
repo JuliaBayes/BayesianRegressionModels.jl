@@ -32,6 +32,8 @@ Each block is one named tuple:
 
 - `binding`, `family`, `group`, `id` — the emitted block, its grouping factor
   and its `|ID|` (or `nothing`).
+- `by`, `stratum` — a stratified `gr(g, by=b)` block's stratifying column and
+  the label of the stratum this entry reports, `nothing` for any other block.
 - `margins` — the ordered `(predictor, coefficient)` addresses of its terms:
   [`ranefcoefnames`](@ref) order for an `|ID|` block, the design columns of
   a plain one.
@@ -56,8 +58,11 @@ An exact total-coefficient block reports one entry per absorbed column, each
 with one margin, as the conventional `(… || g)` emission reports one block
 per independent margin.
 
-A stratified `gr(g, by=b)` block is refused: it has one `tau` and `L` per
-stratum, so its SDs and correlations do not fit these per-block arrays.
+A stratified `gr(g, by=b)` block has one `tau` and `L` per stratum (per level
+of `b`), and every group belongs to one stratum. It reports one entry per
+stratum, in the order of the stratum labels: that stratum's `sd` and `cor`,
+and the `levels` and `effects` of its groups, in block order. `group = :g`
+selects every stratum.
 
 ```julia
 sm = stan_instantiate(sb).model
@@ -85,44 +90,104 @@ function brm_ranef_draws(d::BRMDescriptor, draws::AbstractMatrix, constrained_na
               (isempty(available) ? "(none)" : available) * ".")
     end
     brmi = d.plan.parent
-    map(selected) do m
-        values = haskey(m, :total) ?
-            _brm_ranef_total_draws(d, m, draws, constrained_names) :
-            _brm_ranef_block_draws(d, m.block, draws, constrained_names)
+    result = NamedTuple[]
+    for m in selected
         links = [_brm_margin_link(brmi, margin.predictor) for margin in m.margins]
-        (; binding=m.block.binding, family=m.block.family, group=m.block.group,
-           id=m.block.id, margins=collect(m.margins), levels=collect(m.block.levels),
-           link=links, inverse_link=InverseFunctions.inverse.(links), values...)
+        for entry in _brm_ranef_entries(d, m, draws, constrained_names)
+            push!(result, (; binding=m.block.binding, family=m.block.family,
+                group=m.block.group, id=m.block.id, by=m.block.by,
+                stratum=entry.stratum, margins=collect(m.margins),
+                levels=entry.levels, link=links,
+                inverse_link=InverseFunctions.inverse.(links), sd=entry.sd,
+                cor=entry.cor, effects=entry.effects))
+        end
     end
+    result
 end
 
 _brm_ranef_draws_selects(block, id, group) =
     (isnothing(id) || block.id === id) &&
     (isnothing(group) || group in _ranef_group_symbols(block.group))
 
+# The entries of one block: one, or one per stratum of a stratified
+# `gr(g, by=b)` block, holding that stratum's `tau`, `L`, levels and effects.
+function _brm_ranef_entries(d, m, draws, names)
+    haskey(m, :total) && return [(; stratum=nothing, levels=collect(m.block.levels),
+        _brm_ranef_total_draws(d, m, draws, names)...)]
+    isnothing(m.block.by) && return [(; stratum=nothing,
+        levels=collect(m.block.levels), _brm_ranef_block_draws(d, m.block, draws, names)...)]
+    x = _brm_ranef_stratified_draws(d, m.block, draws, names)
+    map(eachindex(x.strata)) do s
+        members = findall(==(s), x.stratum)
+        (; stratum=x.strata[s], levels=m.block.levels[members], sd=x.sd[:, s, :],
+           cor=x.cor[:, s, :, :], effects=x.effects[:, members, :])
+    end
+end
+
 # One conventional block: the effect matrix, `tau` and `L` it emitted.
 function _brm_ranef_block_draws(d, block::RanefBlock, draws, names)
-    isnothing(block.by) || error(
-        "brm_ranef_draws: block `$(block.binding)` is stratified by `$(block.by)` " *
-        "(`gr($(block.group), by=$(block.by))`); it has one `tau` and `L` per " *
-        "stratum, so its SDs and correlations do not fit one per-block array.")
     spec = _RANEF_FAMILIES[block.family]
-    keywords = only(x for x in d.plan.declarations
-                    if x.role === :prior && x.target === block.binding).keywords
-    n, K, G = size(draws, 1), block.n_terms, block.n_groups
+    keywords = _brm_ranef_keywords(d, block)
+    n, K = size(draws, 1), block.n_terms
     sd = _brm_ranef_scale_draws(d, block, spec, keywords, draws, names)
-    cor = ones(n, 1, 1)
-    if K > 1
-        L_name = get(keywords, :L, Symbol(block.binding, :_L))
-        L = reshape(_brm_ranef_carrier_draws(d, block, L_name, K * K, draws, names),
-                    n, K, K)
-        cor = similar(L)
-        for i in 1:n
-            Li = view(L, i, :, :)
-            cor[i, :, :] = Li * Li'
-        end
+    cor = K == 1 ? ones(n, 1, 1) : _brm_ranef_cor_draws(reshape(
+        _brm_ranef_carrier_draws(d, block, get(keywords, :L, Symbol(block.binding, :_L)),
+                                 K * K, draws, names), n, K, K))
+    (; sd, cor, effects=_brm_ranef_effect_draws(d, block, spec, sd, draws, names))
+end
+
+# One stratified `gr(g, by=b)` block: the `tau` and `L` it emitted for each
+# stratum `s` (`sd[:, s, :]`, `cor[:, s, :, :]`), the stratum labels in index
+# order, the stratum index of each level, and the block's effect matrix.
+function _brm_ranef_stratified_draws(d, block::RanefBlock, draws, names)
+    spec = _RANEF_FAMILIES[block.family]
+    keywords = _brm_ranef_keywords(d, block)
+    n, K, G = size(draws, 1), block.n_terms, block.n_groups
+    S = _ranef_data_int(d.plan.data, keywords.n_strata, block.binding, block.family)
+    stratum = _ranef_data_vec(d.plan.data, keywords.stratum_idx, block.binding,
+                              block.family)
+    (stratum isa AbstractVector{<:Integer} && length(stratum) == G &&
+     all(in(1:S), stratum)) || error(
+        "brm_ranef_draws: stratum index `$(keywords.stratum_idx)` of block ",
+        "`$(block.binding)` is not one stratum in 1:$S for each of its $G levels.")
+    # The emitter's own coding of the `by` column (`_sb_ensure_group_data!`).
+    strata = collect(_sb_fit_levels(column_data(d.plan.parent, block.by)))
+    length(strata) == S || error(
+        "brm_ranef_draws: `by` column `$(block.by)` of block `$(block.binding)` ",
+        "has $(length(strata)) training levels but the block was emitted with ",
+        "$S strata.")
+    tau = reshape(_brm_ranef_carrier_draws(d, block,
+        Symbol(block.binding, :_, spec.stratum_tau), K * S, draws, names), n, K, S)
+    L = reshape(_brm_ranef_carrier_draws(d, block,
+        Symbol(block.binding, :_, spec.stratum_L), S * K * K, draws, names), n, S, K, K)
+    cor = similar(L)
+    for s in 1:S
+        cor[:, s, :, :] = _brm_ranef_cor_draws(L[:, s, :, :])
     end
-    effects = if isnothing(spec.effects)
+    (; strata, stratum=collect(Int, stratum), sd=permutedims(tau, (1, 3, 2)), cor,
+       effects=_brm_ranef_effect_draws(d, block, spec, nothing, draws, names))
+end
+
+_brm_ranef_keywords(d, block) =
+    only(x for x in d.plan.declarations
+         if x.role === :prior && x.target === block.binding).keywords
+
+# Draws × margins × margins correlations `L L'` of draws × margins × margins
+# Cholesky factors.
+function _brm_ranef_cor_draws(L)
+    cor = similar(L)
+    for i in axes(L, 1)
+        Li = view(L, i, :, :)
+        cor[i, :, :] = Li * Li'
+    end
+    cor
+end
+
+# Draws × levels × margins: the block's emitted effect matrix, or, for a
+# one-term family that emits none, its scale `sd` times its standardised draw.
+function _brm_ranef_effect_draws(d, block, spec, sd, draws, names)
+    n, K, G = size(draws, 1), block.n_terms, block.n_groups
+    if isnothing(spec.effects)
         K == 1 || error(
             "brm_ranef_draws: `$(block.family)` emits no effect carrier and has " *
             "$K terms; only a one-term block is its scale times its standardised draw.")
@@ -135,7 +200,6 @@ function _brm_ranef_block_draws(d, block::RanefBlock, draws, names)
         reshape(_brm_ranef_carrier_draws(d, block, carrier, G * K, draws, names),
                 n, G, K)
     end
-    (; sd, cor, effects)
 end
 
 # Draws × margins of a block's between-group SDs: its per-margin `tau` vector,

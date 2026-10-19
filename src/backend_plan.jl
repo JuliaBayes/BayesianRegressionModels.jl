@@ -107,6 +107,111 @@ function _brm_rebind_brmi(brmi::BRMI, df)
         map(value -> _brm_rebind_value(value, df), values(operations))))
 end
 
+# ---- `name = constant(expr)`: data-calibrated scalars ---------------------
+#
+# A backend resolves every constant declaration before lowering: the declared
+# name becomes an ordinary scalar data field (`NamedColumn(name,
+# DataColumn(value))`), exactly what a data container carrying that field
+# produces, so every downstream rule for named scalar constants applies
+# unchanged. The value is the fitted one when replay supplies it and is
+# otherwise evaluated from the bound inputs. `SBBRMI` records it as a
+# `:constant` preprocessing entry whose `raw_ref` is the `_BRMConstantSource`.
+
+# Identity of a constant across builder runs: what it computes, not the
+# closure or data it computed it from.
+struct _BRMConstantSource
+    expression::Any
+    inputs::Tuple{Vararg{Symbol}}
+end
+Base.:(==)(a::_BRMConstantSource, b::_BRMConstantSource) =
+    a.expression == b.expression && a.inputs == b.inputs
+Base.isequal(a::_BRMConstantSource, b::_BRMConstantSource) = a == b
+Base.hash(a::_BRMConstantSource, h::UInt) =
+    hash(a.inputs, hash(a.expression, hash(:_BRMConstantSource, h)))
+Base.show(io::IO, a::_BRMConstantSource) = print(io, "constant(", a.expression, ")")
+
+_brm_constant_source(node::ExprColumn{typeof(constant)}) =
+    (spec = first(getargs(node)); _BRMConstantSource(spec.expression, spec.inputs))
+
+_brm_is_constant_declaration(@nospecialize(_x)) = false
+_brm_is_constant_declaration(@nospecialize(x::ExprColumn{typeof(assign)})) =
+    last(getargs(x, 2)) isa ExprColumn{typeof(constant)}
+
+# The constant itself is the declaration's whole definition, so only the
+# NamedColumn that carries it changes; every other node is rebuilt unchanged
+# by the shared rebind map.
+struct _BRMConstantSubstitution
+    values::Dict{Symbol,Any}
+end
+function _brm_rebind_value(x::NamedColumn, s::_BRMConstantSubstitution)
+    payload = parent(x)
+    haskey(s.values, name(x)) && _brm_is_constant_declaration(payload) &&
+        return NamedColumn(name(x), DataColumn(s.values[name(x)]))
+    payload isa Union{DataColumn,MissingColumn} && return x
+    NamedColumn(name(x), _brm_rebind_value(payload, s))
+end
+
+# Rebinding a constant to a replay frame keeps it evaluable there when the
+# frame carries its inputs, and leaves an absent input unbound instead of
+# refusing: frozen replay restores the fitted value without reading them.
+function _brm_rebind_value(x::ExprColumn{typeof(constant)}, df)
+    inputs = map(input -> _brm_rebind_constant_input(input, df), Base.tail(getargs(x)))
+    ExprColumn(constant, first(getargs(x)), inputs...)
+end
+_brm_rebind_constant_input(input, _df) = input
+_brm_rebind_constant_input(input::NamedColumn, df) =
+    _brm_df_has_column(df, name(input)) ?
+        NamedColumn(name(input), DataColumn(_brm_df_column(df, name(input)))) :
+        NamedColumn(name(input), MissingColumn())
+
+_brm_constant_argument(_key, input::_BRMConstantScopeValue) = input.value
+_brm_constant_argument(key, input::NamedColumn) =
+    _brm_constant_argument(key, input, parent(input))
+_brm_constant_argument(_key, _input, payload::DataColumn) = parent(payload)
+_brm_constant_argument(key, input, ::MissingColumn) = error(
+    "BRM: `$key = constant(...)` reads `$(name(input))`, which the data " *
+    "does not supply and the builder's scope does not define")
+
+function _brm_evaluate_constant(key::Symbol, node::ExprColumn{typeof(constant)}; prefix)
+    spec = first(getargs(node))
+    arguments = map(input -> _brm_constant_argument(key, input), Base.tail(getargs(node)))
+    value = try
+        spec.evaluate(arguments...)
+    catch err
+        error("$prefix: evaluating `$key = constant($(spec.expression))` failed: ",
+              sprint(showerror, err))
+    end
+    (value isa Real && !(value isa Bool) && isfinite(value)) || error(
+        "$prefix: `$key = constant($(spec.expression))` evaluated to " *
+        "$(repr(value)) (::$(typeof(value))); a constant is one finite real number")
+    value
+end
+
+"""
+    _brm_resolve_constants(brmi; fitted, prefix) -> (resolved, constants)
+
+Replace every `name = constant(expr)` declaration of `brmi` by a scalar data
+field holding its value. `fitted(name, source)` returns a value restored from a
+fitted model, or `nothing` to evaluate `expr` from its bound inputs. Returns
+the resolved `BRMI` and one `(; name, value, source, node)` per constant, in
+formula order. A model without constants is returned unchanged.
+"""
+Base.@nospecializeinfer function _brm_resolve_constants(@nospecialize(brmi::BRMI);
+        fitted=(_name, _source) -> nothing, prefix::AbstractString="BRM")
+    resolved = Any[]
+    for (key, op) in pairs(brmi.operations)
+        op isa NamedColumn && _brm_is_constant_declaration(parent(op)) || continue
+        node = last(getargs(parent(op), 2))
+        source = _brm_constant_source(node)
+        value = fitted(key, source)
+        isnothing(value) && (value = _brm_evaluate_constant(key, node; prefix))
+        push!(resolved, (; name=key, value, source, node))
+    end
+    isempty(resolved) && return brmi, ()
+    values = Dict{Symbol,Any}(c.name => c.value for c in resolved)
+    _brm_rebind_brmi(brmi, _BRMConstantSubstitution(values)), Tuple(resolved)
+end
+
 # Materialise a user data vector without silently deleting missing rows. A
 # likelihood decorator may deliberately keep its response out of this generic
 # data dict and model the missing values itself; that decision is made by the
@@ -178,20 +283,85 @@ function _brm_collect_non_mm_sources!(out, @nospecialize(x::JointResponseColumn)
     foreach(a -> _brm_collect_non_mm_sources!(out, a), joint_response_columns(x))
 end
 
-_brm_collect_data!(_data, @nospecialize(_x); skip=Set{Symbol}()) = nothing
-function _brm_collect_data!(data, @nospecialize(x::NamedColumn); skip=Set{Symbol}())
+# HSGP `rows=` axes (decision 1fk9b29). A data column read only as the axis of
+# `rows=`-masked HSGP terms may hold `missing` in the rows no mask carries: those
+# rows contribute nothing, so they read as an inert 0.0. Any other read of the
+# column keeps the never-drop-a-row refusal above. `refs.masked` maps each axis
+# to its NamedColumn and its terms' mask columns; `refs.other` collects every
+# other data-column read.
+_brm_classify_data_refs!(_refs, @nospecialize(_x)) = nothing
+function _brm_classify_data_refs!(refs, @nospecialize(x::NamedColumn))
+    parent(x) isa DataColumn && push!(refs.other, name(x))
+    _brm_classify_data_refs!(refs, parent(x))
+end
+function _brm_classify_data_refs!(refs, @nospecialize(x::ExprColumn))
+    rows = getf(x) === hsgp ? get(getkwargs(x), :rows, nothing) : nothing
+    rows isa NamedColumn && parent(rows) isa DataColumn || return _brm_foreach_child(
+        (@nospecialize(a)) -> _brm_classify_data_refs!(refs, a), x)
+    for axis in getargs(x)
+        if axis isa NamedColumn && parent(axis) isa DataColumn
+            push!(last(get!(refs.masked, name(axis), (axis, NamedColumn[]))), rows)
+        else
+            _brm_classify_data_refs!(refs, axis)
+        end
+    end
+    _brm_foreach_item((@nospecialize(a)) -> _brm_classify_data_refs!(refs, a), getkwargs(x))
+end
+function _brm_classify_data_refs!(refs, @nospecialize(x::MultiMembershipTerm))
+    foreach(a -> _brm_classify_data_refs!(refs, a), getargs(x))
+    weights = getfield(x, :weights)
+    isnothing(weights) || foreach(a -> _brm_classify_data_refs!(refs, a), weights)
+end
+_brm_classify_data_refs!(refs, @nospecialize(x::JointResponseColumn)) =
+    foreach(a -> _brm_classify_data_refs!(refs, a), joint_response_columns(x))
+
+# Each masked-only HSGP axis, with the mask columns of the terms reading it.
+# A top-level data binding (`t = <column>`) declares the column; it is not a read.
+Base.@nospecializeinfer function _brm_masked_axis_refs(@nospecialize(brmi::BRMI))
+    refs = (; masked=Dict{Symbol,Tuple{NamedColumn,Vector{NamedColumn}}}(),
+            other=Set{Symbol}())
+    for op in _brm_operation_values(brmi)
+        op isa NamedColumn && parent(op) isa DataColumn && continue
+        _brm_classify_data_refs!(refs, op)
+    end
+    filter(entry -> !(first(entry) in refs.other), refs.masked)
+end
+
+# The rows any of an axis's masks carries; `masks` pairs each mask's column
+# name with its values.
+_brm_masked_axis_union(n::Int, masks) =
+    reduce((a, b) -> a .| b, (_brm_hsgp_row_mask(raw, n, source) for (source, raw) in masks);
+           init=falses(n))
+
+Base.@nospecializeinfer function _brm_masked_axis_rows(@nospecialize(brmi::BRMI))
+    Dict{Symbol,BitVector}(axis => _brm_masked_axis_union(
+            length(parent(parent(column))), [(name(m), parent(parent(m))) for m in masks])
+        for (axis, (column, masks)) in _brm_masked_axis_refs(brmi))
+end
+
+const _BRM_NO_MASKED_AXES = Dict{Symbol,BitVector}()
+
+_brm_collect_data!(_data, @nospecialize(_x); skip=Set{Symbol}(),
+                   masked=_BRM_NO_MASKED_AXES) = nothing
+function _brm_collect_data!(data, @nospecialize(x::NamedColumn); skip=Set{Symbol}(),
+                            masked=_BRM_NO_MASKED_AXES)
     backing = parent(x)
     if backing isa DataColumn && !(name(x) in skip)
-        data[name(x)] = _brm_data_vec(name(x), parent(backing))
+        data[name(x)] = haskey(masked, name(x)) ?
+            _brm_axis_values(parent(backing), masked[name(x)],
+                             "BRM backend lowering: data column `$(name(x))`") :
+            _brm_data_vec(name(x), parent(backing))
     end
-    _brm_collect_data!(data, backing; skip)
+    _brm_collect_data!(data, backing; skip, masked)
 end
-_brm_collect_data!(data, @nospecialize(x::ExprColumn); skip=Set{Symbol}()) =
-    _brm_foreach_child((@nospecialize(a)) -> _brm_collect_data!(data, a; skip), x)
-function _brm_collect_data!(data, @nospecialize(x::MultiMembershipTerm); skip=Set{Symbol}())
-    foreach(a -> _brm_collect_data!(data, a; skip), getargs(x))
+_brm_collect_data!(data, @nospecialize(x::ExprColumn); skip=Set{Symbol}(),
+                   masked=_BRM_NO_MASKED_AXES) =
+    _brm_foreach_child((@nospecialize(a)) -> _brm_collect_data!(data, a; skip, masked), x)
+function _brm_collect_data!(data, @nospecialize(x::MultiMembershipTerm); skip=Set{Symbol}(),
+                            masked=_BRM_NO_MASKED_AXES)
+    foreach(a -> _brm_collect_data!(data, a; skip, masked), getargs(x))
     weights = getfield(x, :weights)
-    isnothing(weights) || foreach(a -> _brm_collect_data!(data, a; skip), weights)
+    isnothing(weights) || foreach(a -> _brm_collect_data!(data, a; skip, masked), weights)
 end
 function _brm_joint_response_values(x::JointResponseColumn;
                                     prefix="BRM backend lowering", allow_imputation=false)
@@ -254,7 +424,8 @@ end
 # The target-to-observation map sizes intercept-only mean predictors from the
 # explicit scalar row count, while StanBlocks sees a top-level RaggedVector and
 # therefore emits one joint density / predictive vector per row.
-function _brm_collect_data!(data, @nospecialize(x::JointResponseColumn); skip=Set{Symbol}())
+function _brm_collect_data!(data, @nospecialize(x::JointResponseColumn); skip=Set{Symbol}(),
+                            masked=_BRM_NO_MASKED_AXES)
     values = _brm_joint_response_values(x; allow_imputation=x.impute)
     data[_joint_response_data_key(x)] = values
     data[_joint_response_n_key(x)] = length(values)
@@ -753,8 +924,9 @@ Base.@nospecializeinfer function _brm_backend_context(@nospecialize(brmi::BRMI);
     retain_mm_sources || union!(skip_data, setdiff(mm_sources, non_mm_sources))
     prepass[:skip_data] = skip_data
 
+    masked = _brm_masked_axis_rows(brmi)
     for op in _brm_operation_values(brmi)
-        _brm_collect_data!(data, op; skip=skip_data)
+        _brm_collect_data!(data, op; skip=skip_data, masked)
     end
 
     _BRMBackendContext(brmi, data, prepass, _brm_collect_target_obs(brmi),

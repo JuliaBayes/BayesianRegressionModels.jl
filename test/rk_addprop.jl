@@ -188,18 +188,17 @@ end
     assay_prop(s, j) = s.b1 + (s.b2 - s.b1) * data.obs_assay[j]
     cases = (
         # The cell route: both scales, either one, chosen per observation.
-        (:cell, P.by_assay_add, P.by_assay_prop, assay_add, assay_prop, true),
-        (:cell, P.by_assay_add, "b1", assay_add, (s, j) -> s.b1, true),
-        (:cell, "a1", P.by_assay_prop, (s, j) -> s.a1, assay_prop, true),
-        # A ragged join groups a per-row data scale with its rows.
-        (:join, "obs_sd", "b1", (s, j) -> data.obs_sd[j], (s, j) -> s.b1, true),
-        # RK also groups a joined scale computed from parameters and per-row
-        # data; SBBRMI's twin is the `@test_broken` below.
-        (:join, "a1 + (a2 - a1) * obs_assay", "b1", assay_add, (s, j) -> s.b1, false),
+        (:cell, P.by_assay_add, P.by_assay_prop, assay_add, assay_prop),
+        (:cell, P.by_assay_add, "b1", assay_add, (s, j) -> s.b1),
+        (:cell, "a1", P.by_assay_prop, (s, j) -> s.a1, assay_prop),
+        # A ragged join groups a per-row data scale with its rows, and so a
+        # scale computed from parameters and per-row data.
+        (:join, "obs_sd", "b1", (s, j) -> data.obs_sd[j], (s, j) -> s.b1),
+        (:join, "a1 + (a2 - a1) * obs_assay", "b1", assay_add, (s, j) -> s.b1),
     )
     rows = [findall(==(s), data.obs_subject) for s in data.subject]
     order = [findfirst(==(s), sort(unique(data.subject))) for s in data.subject]
-    for (route, add, prop, add_of, prop_of, stan_twin) in cases
+    for (route, add, prop, add_of, prop_of) in cases
         saved = deepcopy(data)
         brmi = P.build(route, add, prop)
         backend, problem = consumer_problem(brmi)
@@ -230,28 +229,24 @@ end
         oracle(u) = logpdf(Normal(), u[im]) + sum(logpdf.(Normal(), u[iz])) +
             sum(logpdf.(Exponential(), exp.(u[positive]))) + sum(u[positive]) +
             sum(sum, expected(u))
-        if stan_twin
-            sb = SBBRMI(brmi; mod=P, total_groups=())
-            stan = BRM.stan_instantiate(sb;
-                path=joinpath(mktempdir(), "addprop_per_location.stan"))
-            transport = brm_coordinate_transport(backend, sb,
-                BridgeStan.param_unc_names(stan.model))
-            description = brm_description(sb)
-            @test description.complete && isempty(description.diagnostics)
-        end
+        sb = SBBRMI(brmi; mod=P, total_groups=())
+        stan = BRM.stan_instantiate(sb;
+            path=joinpath(mktempdir(), "addprop_per_location.stan"))
+        transport = brm_coordinate_transport(backend, sb,
+            BridgeStan.param_unc_names(stan.model))
+        description = brm_description(sb)
+        @test description.complete && isempty(description.diagnostics)
         translated = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt).
             _rk_translated_plan(backend.plan)
         pointwise = prepare_query(backend.model, translated, :pointwise)
         for u in (zeros(N), collect(range(-0.3, 0.4; length=N)), fill(-0.2, N))
             value, gradient = check_consumer_point(problem, u, oracle)
-            if stan_twin
-                stan_u = brm_rk_point_to_stan(transport, u)
-                stan_gradient = similar(stan_u)
-                stan_value, _ = BridgeStan.log_density_gradient!(stan.model, stan_u,
-                    stan_gradient; propto=false, jacobian=true)
-                @test value ≈ stan_value + transport.logdensity_offset atol=2e-10 rtol=2e-10
-                @test gradient ≈ brm_stan_gradient_to_rk(transport, u, stan_gradient) atol=2e-8 rtol=2e-8
-            end
+            stan_u = brm_rk_point_to_stan(transport, u)
+            stan_gradient = similar(stan_u)
+            stan_value, _ = BridgeStan.log_density_gradient!(stan.model, stan_u,
+                stan_gradient; propto=false, jacobian=true)
+            @test value ≈ stan_value + transport.logdensity_offset atol=2e-10 rtol=2e-10
+            @test gradient ≈ brm_stan_gradient_to_rk(transport, u, stan_gradient) atol=2e-8 rtol=2e-8
             actual = Base.invokelatest(pointwise, u)
             @test length.(actual.y) == length.(rows)
             @test all(isapprox.(actual.y, expected(u); atol=2e-11, rtol=2e-11))
@@ -281,15 +276,4 @@ end
     code = BRM.stan_code(SBBRMI(plain; mod=@__MODULE__))
     @test occursin("addprop(mu, (a .* w), (b .* w))", code)
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
-    # A joined scale computed from parameters and per-row data is grouped by
-    # RK (above); StanBlocks has no arithmetic on a whole RaggedVector, so
-    # SBBRMI needs the scale written in the cell (the `:cell` cases above).
-    # Capability gap: StanBlocks snag `raggedvector-ari-19d214fa`.
-    joined = PublicPerLocationScale.build(:join, "a1 + (a2 - a1) * obs_assay", "b1")
-    @test_broken try
-        StanBlocks.stanc_check(BRM.stan_code(SBBRMI(joined;
-            mod=PublicPerLocationScale)); warn_pedantic=false).ok
-    catch
-        false
-    end
 end

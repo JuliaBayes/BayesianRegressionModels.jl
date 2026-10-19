@@ -57,6 +57,15 @@ categorical (`Vector{String}` or a string-leveled `CategoricalVector`) needs no
 zero `offset(...)` witness: its Stan and RK densities equal the witnessed
 twin's on both spellings.
 
+`string_categorical_coordinates.jl` checks `brm_population_effect_coordinates`
+for a predictor whose categorical column is a plain `Vector{String}`, in a flat
+and an `@plate` model. `Intercept` and the column address resolve to the same
+result shape as a `CategoricalVector` column. A `CategoricalVector` point
+carried to the String model through the resolved coordinates gives the same
+pointwise log likelihood, and the same point with two levels swapped does not.
+It also covers exact totals, cell-mean coding, and `brm_start` against the RK
+start.
+
 `plate_index_into.jl` checks `ragged(idx, group; into=target)`, an index column
 of row numbers on another flat axis: the gathered per-subject positions equal
 hand-rebased pre-grouped columns on BridgeStan and RK, `0` stays "no row",
@@ -81,6 +90,14 @@ non-response ragged input.
 `omitted_plate_observations.jl` checks the grouped `pk_conc[i]` spelling with
 an omitted censored response and a joint QT likelihood. It checks the
 predictive descriptor and a finite generated draw above the censoring floor.
+
+`ragged_rowwise_arguments.jl` checks that SBBRMI evaluates a row-wise helper
+(`addprop`) or elementwise arithmetic over a ragged plate or kernel result once
+per subject when it is observed outside the cell. The observation never reads
+the helper over the whole flattened result. It checks BridgeStan density and
+gradient parity with the in-cell spelling. For a `ragged(y, group)` join it
+also checks the omitted response: the same observation statement, the bound
+`y_rows` partition and its replay, and the predictive segments.
 
 `benchmark_emission_latency.jl` reports package loading, first model construction,
 first RK artifact emission and repeated calls separately, including compiler time,
@@ -415,8 +432,10 @@ such as `independent` or `log-space` select focused blocks.
 native graph source. Unequal grouped responses, empty subjects, callable
 aliases, top-level assignments and in-cell calls retain normalized densities,
 all ordinary Reverse gradients, censoring and row order against independent
-oracles and compiled same-BRMI Stan. Complete printed source and artifact
-re-entry are included; a scalar native-location control is checked separately.
+oracles and compiled same-BRMI Stan. Per-location scales, in the cell and in a
+top-level ragged join (including a scale computed from parameters and per-row
+data), have the same checks. Complete printed source and artifact re-entry are
+included; a scalar native-location control is checked separately.
 
 `rk_r2d2_priors.jl` checks shared-margin R2D2M2 and joint population/contrast
 budgets through native RK execution. It compares absolute normalized densities,
