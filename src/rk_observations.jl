@@ -74,7 +74,7 @@ Base.@nospecializeinfer function _brm_rk_plan(@nospecialize(brmi::BRMI); held_ou
     # holds as a number. RK has no replay, so it is always evaluated here.
     brmi, _ = _brm_resolve_constants(brmi; prefix="RK backend")
     selection = _rk_held_out_selection(brmi, held_out)
-    plan = _brm_rk_unselected_plan(brmi)
+    plan = _brm_rk_unselected_plan(brmi; held_rows=selection.rows)
     isempty(selection.whole) || (plan = _RKHeldOutPlan(plan, selection.whole))
     isempty(selection.rows) ? plan : _RKHeldOutRowsPlan(plan, selection.rows)
 end
