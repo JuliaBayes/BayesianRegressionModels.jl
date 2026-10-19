@@ -90,9 +90,10 @@ end
 # The reporter's custom-family shape: one nine-margin correlated random-
 # effect block, with a common Exponential(1/3) scale prior and two public
 # margin overrides. The reporter's overrides were both Exponential(0.5), which
-# now lowers to one native vectorised statement; one Normal override keeps
-# the scale vector mixed-family, so it still creates a fresh
-# `brm_vector_prior_*` family while this compiled caller is already running.
+# now lowers to one native vectorised statement, and builtin families that
+# differ lower to native per-family statements; one composed override keeps
+# a generated margin, so it still creates a fresh `brm_vector_prior_*` family
+# while this compiled caller is already running.
 heterogeneous_data = (;
     subject = [1, 1, 2, 2],
     y1 = [-0.3, -0.1, 0.2, 0.4],
@@ -109,9 +110,9 @@ heterogeneous_data = (;
 heterogeneous_builder = @brm begin
     sd(:, p) ~ Exponential(1 / 3)
     sd(loc8, p) ~ Exponential(0.5)
-    # One Normal margin keeps the scale vector mixed-family: an all-Exponential
-    # vector lowers to a native vectorised statement and generates no family.
-    sd(loc9, p) ~ Normal(0, 0.5)
+    # One composed margin keeps the generated family: builtin margins alone,
+    # even of differing families, lower to native statements.
+    sd(loc9, p) ~ truncated(TDist(3); lower=0.0)
     cor(:, p) ~ LKJCholesky(9, 2.0)
     loc1 ~ 1 + (1 | p | subject)
     loc2 ~ 1 + (1 | p | subject)

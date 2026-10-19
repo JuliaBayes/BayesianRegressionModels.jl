@@ -311,7 +311,11 @@ end
     end
     generic_sb = SBBRMI(generic; mod=@__MODULE__, total_groups=())
     generic_code = BayesianRegressionModels.stan_code(generic_sb)
-    @test occursin("cauchy_lpdf(x[2] | arg_3, arg_4)", generic_code)
+    # The default-Normal intercept beside a Cauchy slope: native per-family
+    # statements, not a generated family.
+    @test occursin("pop_mu_beta_pop[1] ~ normal(0.0, 1.0);", generic_code)
+    @test occursin("pop_mu_beta_pop[2] ~ cauchy(0.0, 1.0);", generic_code)
+    @test !occursin("brm_vector_prior_", generic_code)
     @test StanBlocks.stanc_check(generic_code; warn_pedantic=false).ok
     generic_output = only(o for o in brm_descriptor(generic_sb).outputs
                           if o.name === :pop_mu_beta_pop)
