@@ -1803,16 +1803,37 @@ end
 
 function addprop end
 
-# One variance law serves the typed Stan declaration and the native graph.
-# Stan's vector sqrt is intrinsic; native Julia spells it as a broadcast.
-const _BRM_ADDPROP_VARIANCE = :(add^2 .+ (loc .* prop).^2)
+# One variance law serves the typed Stan declarations and the native graph;
+# only the spelling of the additive square varies. Stan's vector sqrt is
+# intrinsic; native Julia spells it as a broadcast.
+_brm_addprop_variance(add_square) = :($add_square .+ (loc .* prop).^2)
+# The native definition serves scalar and per-location scales alike.
+const _BRM_ADDPROP_VARIANCE = _brm_addprop_variance(:(add .^ 2))
+
+# Each scale is one value for every location, or one value per location. A
+# per-location `add` is squared elementwise; a shared `add` keeps `add^2`, so
+# the shared-scale helper's Stan source, and every descriptor id hashed from
+# it, is unchanged.
+const _BRM_ADDPROP_ADD_SCALES = ((:real, :(add^2)), (:(vector[n]), :(add .^ 2)))
+const _BRM_ADDPROP_PROP_SCALES = (:real, :(vector[n]))
 
 @eval StanBlocks.@deffun begin
-    addprop(loc::vector[n], add::real, prop::real)::vector[n] = begin
-        sqrt($(_BRM_ADDPROP_VARIANCE))
-    end
+    $((:(addprop(loc::vector[n], add::$add, prop::$prop)::vector[n] = begin
+        sqrt($(_brm_addprop_variance(add_square)))
+    end) for (add, add_square) in _BRM_ADDPROP_ADD_SCALES
+        for prop in _BRM_ADDPROP_PROP_SCALES)...)
+    # A grouped location takes per-location scales grouped the same way.
     @inline addprop(loc::RaggedVector, add::real, prop::real) = begin
         RaggedVector(addprop(loc.mem, add, prop), loc.ends)
+    end
+    @inline addprop(loc::RaggedVector, add::RaggedVector, prop::real) = begin
+        RaggedVector(addprop(loc.mem, add.mem, prop), loc.ends)
+    end
+    @inline addprop(loc::RaggedVector, add::real, prop::RaggedVector) = begin
+        RaggedVector(addprop(loc.mem, add, prop.mem), loc.ends)
+    end
+    @inline addprop(loc::RaggedVector, add::RaggedVector, prop::RaggedVector) = begin
+        RaggedVector(addprop(loc.mem, add.mem, prop.mem), loc.ends)
     end
 end
 
@@ -7104,10 +7125,12 @@ function _sb_ragged_argument(data, key, argument::NamedColumn, layout)
     raw isa AbstractVector && length(raw) == 1 && return argument
     _sb_ragged_bound(data, key, :argument, argument, layout)
 end
+# A row-local callable (`addprop`) keeps its rows aligned, so its per-row data
+# arguments are grouped like the law's own.
 function _sb_ragged_argument(data, key, argument::ExprColumn, layout)
     f = getf(argument)
     (haskey(_RK_DERIVED_BINOPS, f) || haskey(_RK_DERIVED_CMP, f) ||
-        haskey(_RK_DERIVED_MATH, f)) || return argument
+        haskey(_RK_DERIVED_MATH, f) || _rk_rowwise_callable(f)) || return argument
     ExprColumn(f, map(a -> _sb_ragged_argument(data, key, a, layout),
         getargs(argument))...; getkwargs(argument)...)
 end
