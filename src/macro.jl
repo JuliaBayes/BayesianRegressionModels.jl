@@ -435,6 +435,33 @@ function center end
 function standardize end
 
 """
+    name = constant(expr)
+
+A scalar computed from the data when the model is built, such as a prior
+hyperparameter calibrated on the observations:
+
+```julia
+@brm begin
+    ec50_loc = constant(mean(log.(conc)))
+    log_ec50 ~ Normal(ec50_loc, 1)
+    ...
+end
+```
+
+`expr` is ordinary Julia, evaluated once on whole columns of the data. A bare
+name in it that is not a field of the data resolves in the builder's scope.
+The result must be one finite real number. The constant is Stan data on
+`SBBRMI` and a constant on `RKBRMI`, usable wherever a scalar data field is.
+
+Replay keeps the fitted value, like `standardize`'s mean and SD: `reprocess`,
+`reprocess(...; resample_groups)` and `generative_plan(plan, new_df)` reuse it
+without the new data supplying it, and `reprocess(...; freeze_constants=false)`
+evaluates `expr` again on the new data. Dispatch tag — see
+`_brm_resolve_constants`.
+"""
+function constant end
+
+"""
     protect(x)
 
 brms `I(...)` analogue: literal-escape wrapper around an expression so
@@ -640,6 +667,8 @@ elseif _is_brm_plate_grouping(x)
 elseif x.head == :(=) && _is_effect_lhs(x.args[1])
     lhs, rhs = x.args
     _parse_effect!(lhs, rhs; info, known=true)
+elseif x.head == :(=) && isxcall(x.args[2], :constant)
+    _parse_constant!(x.args...; info)
 elseif x.head == :(=)
     lhs, rhs = x.args
     parselocals!(rhs; info, val=:nonlocal)
@@ -1637,6 +1666,112 @@ Base.show(io::IO, x::_BRMInlineBody) = show(io, x.expression)
 Base.deepcopy_internal(x::_BRMInlineBody, stack::IdDict) =
     _BRMInlineBody(Base.deepcopy_internal(x.expression, stack), x.scope)
 
+# `name = constant(expr)` keeps `expr` unevaluated. The builder binds each name
+# the expression reads, either to a field of the data or to a value in the
+# builder's scope, and a backend evaluates it once or restores the fitted value
+# on replay (`_brm_resolve_constants`). `evaluate` takes those inputs in order.
+struct _BRMConstantSpec{F}
+    expression::Any
+    inputs::Tuple{Vararg{Symbol}}
+    evaluate::F
+end
+
+# A constant input that is not a field of the data: a value of that name in
+# the builder's scope (a Julia constant such as `pi`, or a captured local).
+struct _BRMConstantScopeValue{T}
+    value::T
+end
+
+# Which names does `constant(expr)` read? Every symbol in a value position,
+# except the names an anonymous function or a generator binds. Call and
+# broadcast heads are functions resolved in the builder's scope, and keyword
+# names, comparison operators and `end` inside indexing are syntax.
+function _brm_constant_inputs(expr)
+    found = Symbol[]
+    _brm_constant_inputs!(found, expr, ())
+    unique!(found)
+end
+_brm_constant_inputs!(found, _x, _bound) = found
+_brm_constant_inputs!(found, x::Symbol, bound) =
+    (x in bound || x === :end || x === :begin || push!(found, x); found)
+function _brm_constant_inputs!(found, x::Expr, bound)
+    walk(args, bound=bound) = foreach(a -> _brm_constant_inputs!(found, a, bound), args)
+    if x.head === :call
+        walk(x.args[2:end])
+    elseif x.head === :. && length(x.args) == 2 && Meta.isexpr(x.args[2], :tuple)
+        walk(x.args[2].args)                       # `f.(args...)`
+    elseif x.head === :.
+        walk(x.args[1:1])                          # `a.b` reads `a`
+    elseif x.head === :kw
+        walk(x.args[2:2])
+    elseif x.head === :comparison
+        walk(x.args[1:2:end])
+    elseif x.head === :macrocall
+        walk(x.args[3:end])
+    elseif x.head === :->
+        params = Meta.isexpr(x.args[1], :tuple) ? x.args[1].args : (x.args[1],)
+        walk(x.args[2:2], (bound..., (p for p in params if p isa Symbol)...))
+    elseif x.head === :generator
+        inner = bound
+        for spec in x.args[2:end]
+            cond = nothing
+            if Meta.isexpr(spec, :filter)
+                cond, spec = spec.args[1], spec.args[2:end]
+            else
+                spec = (spec,)
+            end
+            for s in spec
+                Meta.isexpr(s, :(=)) || continue
+                walk(s.args[2:2], inner)
+                s.args[1] isa Symbol && (inner = (inner..., s.args[1]))
+            end
+            isnothing(cond) || walk((cond,), inner)
+        end
+        walk(x.args[1:1], inner)
+    else
+        walk(x.args)
+    end
+    found
+end
+
+# Bind one input of a constant when the builder runs: the data's field of that
+# name, or else the builder's own binding of it. A data field missing from
+# this frame stays unbound; only evaluating the constant needs it, and replay
+# restores the fitted value instead.
+function _brm_constant_input(df, key::Symbol, input::Symbol, scope)
+    hasproperty(df, input) && return NamedColumn(input, DataColumn(getproperty(df, input)))
+    value = try
+        scope()
+    catch err
+        err isa UndefVarError && err.var === input || rethrow()
+        return NamedColumn(input, MissingColumn())
+    end
+    value isa NamedColumn || return _BRMConstantScopeValue(value)
+    parent(value) isa Union{DataColumn,MissingColumn} && return NamedColumn(input, parent(value))
+    error("@brm: `$key = constant(...)` reads `$input`, a model value. A " *
+          "constant reads only fields of the data and Julia values; it is " *
+          "computed once, before anything is sampled.")
+end
+
+function _parse_constant!(lhs, rhs; info)
+    lhs isa Symbol || error(
+        "@brm: a constant is declared as `name = constant(expr)`; got " *
+        "`$(lhs) = $(rhs)`")
+    args = rhs.args[2:end]
+    (length(args) == 1 && !Meta.isexpr(args[1], (:parameters, :kw))) || error(
+        "@brm: `constant` takes one expression, as in " *
+        "`$lhs = constant(mean(x))`; got `$rhs`")
+    expr = only(args)
+    inputs = _brm_constant_inputs(expr)
+    lhs in inputs && error("@brm: `$lhs = constant(...)` reads `$lhs` itself")
+    parselocals!(lhs; info, val=:local)
+    evaluate = Expr(:->, Expr(:tuple, inputs...), expr)
+    bound = [:($_brm_constant_input(__df__, $(QuoteNode(lhs)), $(QuoteNode(s)), () -> $s))
+             for s in inputs]
+    spec = :($_BRMConstantSpec($(QuoteNode(expr)), ($(map(QuoteNode, inputs)...),), $evaluate))
+    :(@n $lhs = $ExprColumn($assign, $(QuoteNode(lhs)), $ExprColumn($constant, $spec, $(bound...))))
+end
+
 _x(x) = x
 _x(x::Symbol) = x
 _x(x::Expr) = if x.head == :call
@@ -2336,6 +2471,18 @@ nonemptyjoin(io::IO, iterator, args...; first) = if length(iterator) > 0
     print(io, first)
     join(io, iterator, args...)
 end
+# A dot call in a formula, `f.(x)`, runs while the builder binds the data and
+# would broadcast over the formula column itself, which has no elements.
+Base.Broadcast.broadcastable(x::Union{NamedColumn,ExprColumn}) = error(
+    "@brm: `.` broadcasting over the formula column `", x isa NamedColumn ? name(x) : x,
+    "` while the model is built. A formula call already applies per row: write ",
+    "`log(x)`, not `log.(x)`. A value computed once from whole columns, such as ",
+    "a mean, is declared `name = constant(mean(log.(x)))`.")
+
+# A constant prints as it was written; its bound inputs are an implementation
+# detail of `constant(expr)`.
+Base.show(io::IO, x::ExprColumn{typeof(constant)}) =
+    print(io, "constant(", first(getargs(x)).expression, ")")
 Base.show(io::IO, x::ExprColumn) = begin
     _show_call_head(io, getf(x))
     print(io, "(", )
