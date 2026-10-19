@@ -175,6 +175,12 @@ function _brm_replay_preprocess(::Val{:hsgp}, entry, input::NamedTuple,
     iso = entry.const_.iso
     basis = _brm_hsgp_basis_state(evaluated, K, :exp_quad, iso, nothing;
         fits, orthogonal=orthogonal_to, anchor, mask)
+    # A re-derived floor must stay below a floor-marked prior's upper bound.
+    floor_upper = get(entry.const_, :floor_upper, nothing)
+    isnothing(floor_upper) || _brm_check_hsgp_floor_below(
+        basis.rho_lower, floor_upper.upper, floor_upper.statement,
+        _brm_hsgp_floor_geometry(K, entry.const_.c, fits, !isnothing(domain_fits)),
+        _brm_hsgp_floor_remedy(!isnothing(domain_fits)); prefix)
     # Only a clamping record keeps its support; others stay as they were fitted.
     updated = haskey(entry.const_, :support) ?
         merge(entry.const_, (; fits, support)) : merge(entry.const_, (; fits))
