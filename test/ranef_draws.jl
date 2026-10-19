@@ -9,7 +9,9 @@
 # and orientation are all pinned), SDs and correlations against the standardised
 # draw `z` (`effects = diag(sd) chol(cor) z`), exact totals against
 # `total - A * population`, and known values against the constants written in
-# the formula.
+# the formula. A stratified `gr(g, by=b)` block reports one entry per stratum
+# (decision `0zvkadt`); each row's level lies in exactly one entry, and the
+# stratum's own SDs and correlation reproduce its groups' effects.
 #
 # Run: julia --project=test test/ranef_draws.jl
 # (set BRM_RANEF_DRAWS_RUNTIME=0 to run only the declaration-level half.)
@@ -39,6 +41,9 @@ data = (;
     w1 = rand(rng, N),
     w2 = rand(rng, N),
 )
+# Strata: site `c` alone in stratum `u`; subjects s1-s3 in arm `t`, s4-s6 in `c`.
+strata = merge(data, (; group_of_site = [s == "c" ? "u" : "v" for s in data.site],
+                        arm = [s in ("s1", "s2", "s3") ? "t" : "c" for s in data.subject]))
 
 shared_builder = @brm begin
     sigma ~ Exponential(1)
@@ -119,6 +124,14 @@ stratified_builder = @brm begin
     mu ~ 1 + x + (1 + x | gr(site, by = group_of_site))
     y ~ Normal(mu, sigma)
 end
+stratified_id_builder = @brm begin
+    sigma ~ Exponential(1)
+    tau_z ~ Exponential(1)
+    mu ~ 1 + x + (1 + x | p | gr(subject, by = arm))
+    nu ~ 1 + (1 | p | gr(subject, by = arm))
+    y ~ Normal(mu, sigma)
+    z ~ Normal(nu, tau_z)
+end
 
 build(builder, d = data; kw...) = SBBRMI(builder(d); mod = @__MODULE__, kw...)
 no_z = Base.structdiff(data, NamedTuple{(:z,)})
@@ -135,16 +148,6 @@ no_z = Base.structdiff(data, NamedTuple{(:z,)})
     # refused: the carriers are absent from these names, which is drift
     # between the draws and the model, never an empty result.
     @test_throws "brm_ranef_draws" brm_ranef_draws(d, draws, names; id = :p)
-end
-
-@testset "stratified gr(g, by=b) blocks: per-stratum SDs not reported yet" begin
-    strata = merge(data, (; group_of_site = [s == "c" ? "u" : "v" for s in data.site]))
-    sb = build(stratified_builder, strata; total_groups = ())
-    d = brm_descriptor(sb)
-    # Capability gap (one `tau` and `L` per stratum), tracked by BRM todo
-    # `2026-10-19T11-25-17-619-0chtsoi`; a valid shape, so `@test_broken`, not
-    # a pinned refusal.
-    @test_broken (brm_ranef_draws(d, zeros(1, 1), ["x"]; group = :site); true)
 end
 
 if !RUNTIME
@@ -167,29 +170,37 @@ function constrained_draws(sb; n_draws = 3, seed = 1)
     (; sm, names, draws, col, d = brm_descriptor(sb))
 end
 value(c, i, name) = c.draws[i, c.col[name]]
-level_of(block, labels) = [findfirst(==(l), block.levels) for l in labels]
+level_of(levels, labels) = [findfirst(==(l), levels) for l in labels]
 selected(blocks, binding) = only(b for b in blocks if b.binding === binding)
 
-# `rowcarrier[r] == Z(r) ⋅ effects[g(r), margins]` for every draw and row.
-function check_rows(c, block, rowcarrier, margins, Z, labels)
-    g = level_of(block, labels)
+# `rowcarrier[r] == Z(r) ⋅ effects[g(r), margins]` for every draw and row, the
+# level `g(r)` read from the one entry (of a block's per-stratum entries) whose
+# levels hold row `r`'s label.
+function check_rows(c, entries::AbstractVector, rowcarrier, margins, Z, labels)
     ok = true
-    for i in axes(c.draws, 1), r in eachindex(labels)
-        expected = dot(Z(r), block.effects[i, g[r], margins])
-        ok &= isapprox(value(c, i, "$rowcarrier.$r"), expected; atol = 1e-10)
+    for r in eachindex(labels)
+        block = only(b for b in entries if labels[r] in b.levels)
+        g = findfirst(==(labels[r]), block.levels)
+        for i in axes(c.draws, 1)
+            expected = dot(Z(r), block.effects[i, g, margins])
+            ok &= isapprox(value(c, i, "$rowcarrier.$r"), expected; atol = 1e-10)
+        end
     end
     ok
 end
+check_rows(c, block::NamedTuple, args...) = check_rows(c, [block], args...)
 
-# `effects[g, :] == diag(sd) chol(cor) z[:, g]` (times the Student-t weight).
-function check_noncentered(c, block, zname; mixing = nothing)
-    K, G = length(block.margins), length(block.levels)
+# `effects[g, :] == diag(sd) chol(cor) z[:, zlevels[g]]` (times the Student-t
+# weight); `zlevels` places the entry's levels on the block's `z` level axis.
+function check_noncentered(c, block, zname; mixing = nothing,
+                           zlevels = eachindex(block.levels))
+    K = length(block.margins)
     ok = true
     for i in axes(c.draws, 1)
         L = K == 1 ? ones(1, 1) : Matrix(cholesky(Symmetric(block.cor[i, :, :])).L)
-        for g in 1:G
-            zg = [value(c, i, "$zname.$k.$g") for k in 1:K]
-            w = isnothing(mixing) ? 1.0 : sqrt(value(c, i, "$mixing.$g"))
+        for (g, zg_index) in enumerate(zlevels)
+            zg = [value(c, i, "$zname.$k.$zg_index") for k in 1:K]
+            w = isnothing(mixing) ? 1.0 : sqrt(value(c, i, "$mixing.$zg_index"))
             ok &= isapprox(block.effects[i, g, :], w .* (block.sd[i, :] .* (L * zg));
                            atol = 1e-10)
         end
@@ -206,6 +217,7 @@ Zboth(r) = [1.0, data.x[r]]
     blocks = brm_ranef_draws(c.d, c.draws, c.names)
     p = only(brm_ranef_draws(c.d, c.draws, c.names; id = :p))
     @test p.binding === :b_p_subject && p.id === :p && p.group === :subject
+    @test p.by === nothing && p.stratum === nothing
     @test p.margins == [(predictor = :mu, coefficient = :Intercept),
                         (predictor = :mu, coefficient = :x),
                         (predictor = :nu, coefficient = :Intercept)]
@@ -373,6 +385,54 @@ end
     tp_names = BS.param_names(c.sm; include_tp = true, include_gq = false)
     tp_draws = c.draws[:, [c.col[n] for n in tp_names]]
     @test_throws "include_gq=true" brm_ranef_draws(c.d, tp_draws, tp_names; id = :p)
+end
+
+@testset "stratified gr(g, by=b): one entry per stratum" begin
+    sb = build(stratified_builder, strata; total_groups = ())
+    c = constrained_draws(sb)
+    blocks = brm_ranef_draws(c.d, c.draws, c.names; group = :site)
+    @test [(b.by, b.stratum) for b in blocks] == [(:group_of_site, "u"), (:group_of_site, "v")]
+    @test [b.levels for b in blocks] == [["c"], ["a", "b"]]
+    @test all(b.binding === blocks[1].binding && b.family === :ranef_correlated_by &&
+              b.group === :site && b.id === nothing for b in blocks)
+    @test all(b.margins == [(predictor = :mu, coefficient = :Intercept),
+                            (predictor = :mu, coefficient = :x)] for b in blocks)
+    @test [size(b.sd) for b in blocks] == [(3, 2), (3, 2)]
+    @test [size(b.cor) for b in blocks] == [(3, 2, 2), (3, 2, 2)]
+    @test [size(b.effects) for b in blocks] == [(3, 1, 2), (3, 2, 2)]
+    @test check_rows(c, blocks, "$(blocks[1].binding)", 1:2, Zboth, data.site)
+    all_levels = only(b for b in ranef_blocks(sb) if b.binding === blocks[1].binding).levels
+    z = "$(blocks[1].binding)_b_T_z_g"
+    for b in blocks
+        @test check_noncentered(c, b, z; zlevels = level_of(all_levels, b.levels))
+        @test all(isapprox(b.cor[i, k, k], 1.0; atol = 1e-12) for i in 1:3, k in 1:2)
+    end
+    # Each stratum reports its own scales: Stan's per-group gather of its
+    # stratum's `tau` (`b_T_tau_g`, through the stratum index) equals the SDs
+    # of the entry that holds the group.
+    @test blocks[1].sd != blocks[2].sd
+    for b in blocks, g in level_of(all_levels, b.levels), i in 1:3, k in 1:2
+        @test b.sd[i, k] == value(c, i, "$(b.binding)_b_T_tau_g.$k.$g")
+    end
+
+    sb = build(stratified_id_builder, strata; total_groups = ())
+    c = constrained_draws(sb)
+    blocks = brm_ranef_draws(c.d, c.draws, c.names; id = :p)
+    @test [(b.by, b.stratum) for b in blocks] == [(:arm, "c"), (:arm, "t")]
+    @test [b.levels for b in blocks] == [["s4", "s5", "s6"], ["s1", "s2", "s3"]]
+    @test all(b.family === :ranef_correlated_by_draws for b in blocks)
+    @test all(b.margins == [(predictor = :mu, coefficient = :Intercept),
+                            (predictor = :mu, coefficient = :x),
+                            (predictor = :nu, coefficient = :Intercept)] for b in blocks)
+    @test length(brm_ranef_draws(c.d, c.draws, c.names; group = :subject)) == 2
+    binding = String(blocks[1].binding)
+    all_levels = only(b for b in ranef_blocks(sb) if b.binding === blocks[1].binding).levels
+    @test check_rows(c, blocks, replace(binding, r"^b_" => "r_mu_"), 1:2, Zboth, data.subject)
+    @test check_rows(c, blocks, replace(binding, r"^b_" => "r_nu_"), 3:3, Zint, data.subject)
+    for b in blocks
+        @test check_noncentered(c, b, "$(binding)_b_T_z_g";
+                                zlevels = level_of(all_levels, b.levels))
+    end
 end
 
 @testset "transformed parameters are required" begin
