@@ -19,6 +19,16 @@
 # (`C * z`, `scale * xi`, a Student-t level's `sqrt(w) * C * z`, or the centered
 # effect itself). So on a block both can address, the population program and
 # `population_draws` agree.
+#
+# An exact total-coefficient block has no zero to return: its population mean is
+# `A * beta`, with `beta` the population coefficient that the program recovers
+# conditionally in generated quantities. Its predictor reads `Z * (A * beta)`
+# instead of `rows_dot_product(total[idx, :], Z)`, which makes the predictor a
+# generated quantity, so no likelihood may read it. The program therefore holds
+# out every observed response: StanBlocks drops a held-out likelihood from the
+# model block, keeps its predictive and pointwise twins in generated quantities,
+# and decides parameter activity on the unconditioned program, so every
+# coordinate still stays where the fitted program put it.
 # ==============================================================================
 
 # The population variant of a random-effect submodel: the same statements under
@@ -49,6 +59,25 @@ _sb_population_submodel(head, _mod, block) = error(
     "population_model: block `$(block.binding)` is emitted by an unrecognized ",
     "callee `$(repr(head))`")
 
+# Rewrite the one read of an exact total block's totals by its predictor to the
+# block's population mean.
+function _sb_population_total!(body::Expr, block::TotalEffectBlock)
+    zn = _sb_total_design_name(block.predictor)
+    fitted = _sb_total_location(block.binding, block.group_index, zn)
+    population = _sb_total_population_location(zn, _sb_total_basis_name(block.predictor),
+                                                block.population)
+    hits = Ref(0)
+    rewrite(x) = x == fitted ? (hits[] += 1; population) :
+        x isa Expr ? Expr(x.head, map(rewrite, x.args)...) : x
+    for i in eachindex(body.args)
+        body.args[i] = rewrite(body.args[i])
+    end
+    hits[] == 1 || error(
+        "population_model: exact total block `$(block.binding)` is read by its ",
+        "predictor $(hits[]) times in the emitted body; expected exactly once (`$fitted`)")
+    nothing
+end
+
 """
     population_model(sb::SBBRMI; groups) -> SBBRMI
 
@@ -73,33 +102,48 @@ BridgeStan.param_constrain(model, draw; include_tp = true, include_gq = true,
 [`brm_descriptor`](@ref)`(pop)` mounts it like any other model, so
 `brm_execute(d, :predict; draws, seed)` reads the same draws.
 
+# Exact total-coefficient blocks
+
+A selected factor may carry exact total-coefficient blocks
+([`total_effect_blocks`](@ref), the default `total_groups = :auto` for an
+independent Gaussian block). Each such predictor reads its block's population
+mean `Z * (A * beta)` instead of the group totals, where `beta` is the
+population coefficient the program recovers conditionally in generated
+quantities (`TotalEffectBlock.population`): one exact draw per evaluation, so
+the location agrees in law with `population_draws(...; rng)`. The totals,
+scales and deviations still report the fitted values.
+
+That location is a generated quantity, so no likelihood can read it: a
+population program with a selected total block holds out every observed
+response (recorded in its `held_out`). Each response's likelihood leaves the
+model block, while its predictive draw and pointwise log-likelihood stay in
+generated quantities at the population location; the coordinates are still the
+fitted program's. Its descriptor offers `:predict` and `:pointwise_loglik`, not
+`:fit`.
+
 # Compared with `population_draws`
 
 [`population_draws`](@ref) zeroes the selected factors' coordinates in a draw
 matrix. On a block the fitted program samples, the two agree: each family
 returns an effect linear in its standardized draws (or, centered, the effect
-itself), so zero draws and a zero return are the same evaluation. They differ
-on a block the program draws in GENERATED QUANTITIES (an unobserved or held-out
-response's block, or every block of a prior program). That block has no
-coordinate for `population_draws` to zero, so its quantities keep their
-re-drawn between-group variation; here they read zero too. A factor whose
-every block is generated, which `population_draws` refuses, is supported.
+itself), so zero draws and a zero return are the same evaluation; an exact total
+block's location has the same law under both. They differ on a block the
+program draws in GENERATED QUANTITIES (an unobserved or held-out response's
+block, or every block of a prior program). That block has no coordinate for
+`population_draws` to zero, so its quantities keep their re-drawn between-group
+variation; here they read the population mean too. A factor whose every block
+is generated, which `population_draws` refuses, is supported.
 
 # What it reports
 
 [`ranef_blocks`](@ref)`(pop)` reports each selected block with its fitted
 family, coordinates and placement and `population = true`; `transport_draws`
 and `reprocess` carry the population program like any other. Its Stan source
-differs from the fitted program's (`0.0 * …` on the selected effects), so its
-descriptor id does too.
+differs from the fitted program's (`0.0 * …` on the selected effects, the
+population mean on selected totals), so its descriptor id does too.
 
 # Refused
 
-- A selected factor with an exact total-coefficient block
-  ([`total_effect_blocks`](@ref), the default `total_groups = :auto` for an
-  independent Gaussian block). Its population mean is the conditionally
-  recovered population coefficient, which the program draws only in generated
-  quantities. Use `population_draws`, or fit with `total_groups = ()`.
 - A selected factor with a sum-to-zero block (`s2z_groups`).
 - A factor that names no random-effect block.
 """
@@ -112,15 +156,12 @@ function population_model(sb::SBBRMI; groups)
         "population_model: S2Z block(s) of $(join(sort!(collect(Set(b.group for b in s2z))), ", ")) ",
         "need recovery-aware population projection, which is not implemented yet"))
     totals = filter(b -> b.group in selected, total_effect_blocks(sb))
-    isempty(totals) || throw(ArgumentError(
-        "population_model: grouping factor(s) " *
-        "$(join(sort!(collect(Set(b.group for b in totals))), ", ")) carry exact " *
-        "total-coefficient block(s) $(join([b.binding for b in totals], ", ")). Their " *
-        "population mean is the conditionally recovered population coefficient, " *
-        "which the program draws only in generated quantities, so there is no " *
-        "coordinate-identical population program for them yet. Use " *
-        "`population_draws` on the fitted program, or fit with `total_groups=()`."))
-    blocks = _ranef_select(ranef_blocks(sb), selected)
+    # A factor with a total block need not have an ordinary block as well.
+    total_factors = Set(b.group for b in totals)
+    all_blocks = ranef_blocks(sb)
+    blocks = vcat(_ranef_select(all_blocks, setdiff(selected, total_factors)),
+                  filter(b -> any(g -> _ranef_group_matches(b, g), total_factors), all_blocks))
+    unique!(b -> b.binding, blocks)
     targets = Dict(b.binding => b for b in blocks if !b.population)
 
     body = _sb_plan_copy(sb.model.model)
@@ -155,6 +196,13 @@ function population_model(sb::SBBRMI; groups)
             (; role=:random_effect, logical=b.group, family=b.family, population=true) :
             merge(old, (; family=b.family, population=true))
     end
+    rewritten_totals = filter(b -> get(sb.bindings[b.binding], :population, false) !== true, totals)
+    for b in rewritten_totals
+        _sb_population_total!(body, b)
+        bindings[b.binding] = merge(bindings[b.binding], (; population=true))
+    end
     model = StanBlocks.SlicModel(body, sb.data, sb.model.mod, sb.model.observations)
-    SBBRMI(sb.parent, model, sb.data, sb.preproc, copy(sb.held_out), bindings)
+    pop = SBBRMI(sb.parent, model, sb.data, sb.preproc, copy(sb.held_out), bindings)
+    isempty(rewritten_totals) && return pop
+    _sb_mark_held_out(pop, _sb_held_out_inventory(pop).sources)
 end

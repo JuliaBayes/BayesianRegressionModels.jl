@@ -309,6 +309,20 @@ function _rk_lone_intercept(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol}
         get(coefs, index, nothing) === affine, eachindex(predictor.terms))
 end
 
+# A predictor whose every summand is row-less: its lone intercept and offsets
+# of scalar model values (`mu ~ 0 + offset(theta)`, `mu ~ 1 + offset(theta)`).
+# Like a lone intercept, it keeps its row source's rows.
+function _rk_rowless_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol}, affine)
+    _rk_lone_intercept(predictor, coefs, affine) && return true
+    predictor.row_source !== nothing &&
+        any(_rk_scalar_model_offset, predictor.terms) || return false
+    all(eachindex(predictor.terms)) do index
+        term = predictor.terms[index]
+        _rk_scalar_model_offset(term) || _rk_zero_width_factor(term) ||
+            term.kind === :intercept && haskey(coefs, index)
+    end
+end
+
 # Whether every occurrence of `name` in `value` is only broadcast: an operand
 # of dotted calls and operators, never indexed (`getindex.`/`view.`) or passed
 # whole to an ordinary call.
@@ -362,7 +376,7 @@ end
 # vector (rkppl-use §1). Readers are resolved on the finished program, after
 # authored values and kernels are emitted. `lone` maps each row-aligned
 # predictor value to its coefficient.
-function _rk_scalar_lone_intercepts(emitted::_RKEmittedProgram, lone::Dict{Symbol,Symbol})
+function _rk_scalar_lone_intercepts(emitted::_RKEmittedProgram, lone::Dict{Symbol,Any})
     isempty(lone) && return emitted
     statements = emitted.main.args
     block_reads = reduce(union!, values(_rk_block_free_reads(emitted.defs));
@@ -1245,7 +1259,7 @@ end
 # otherwise unchanged; an unrecorded declaration is refused by the transport.
 function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         values::Bool=false, reserved=(), coordinates=nothing,
-        lone_intercepts=Dict{Symbol,Symbol}())
+        lone_intercepts=Dict{Symbol,Any}())
     taken = union(Set(keys(plan.columns)),
         Set(p.name for p in plan.parameters),
         Set(a.name for a in plan.assignments),
@@ -1390,16 +1404,19 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             coef = _rk_ast_coef_name(
                 string(predictor.name, "_", term.addressee), taken)
             coefs[index] = coef
+            prior = Expr(:call, override[1], override[2]...)
             r2d2 === nothing &&
                 !haskey(joint_priors, (predictor.name, term.addressee)) &&
                 _rk_coordinate_record!(coordinates, (; kind=:population,
                     declaration=coef, predictor=predictor.name,
-                    coefficient=term.addressee))
-            Expr(:call, :~, coef, Expr(:call, override[1], override[2]...))
+                    coefficient=term.addressee, prior))
+            Expr(:call, :~, coef, prior)
         end
         for (index, term) in enumerate(predictor.terms)
             kind = term.kind
-            if kind in (:continuous, :factor, :monotonic, :monotonic_summand, :offset, :ar, :me)
+            if _rk_model_offset(term)
+                colactual[index] = term.options.expression
+            elseif kind in (:continuous, :factor, :monotonic, :monotonic_summand, :offset, :ar, :me)
                 colactual[index] = only(term.columns)
             end
             if kind === :monotonic_summand
@@ -1472,7 +1489,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                         declaration=coef, predictor=predictor.name,
                         coefficient=term.addressee, labels=term.options.labels,
                         level_values=term.options.level_values,
-                        coding=term.options.coding))
+                        coding=term.options.coding,
+                        prior=Expr(:call, override[1], override[2]...)))
             elseif kind === :monotonic && hs_spec === nothing && override !== nothing
                 # The monotonic component owns its simplex and coefficient.
                 # Its coefficient pairs like a population coefficient only
@@ -1572,7 +1590,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             foreach(entry -> replacements[first(entry)] = nothing, population[2:end])
         end
         affine = _rk_ast_affine(predictor, coefs, colactual, refactual; values, replacements)
-        if _rk_lone_intercept(predictor, coefs, affine)
+        if _rk_rowless_affine(predictor, coefs, affine)
             lone_intercepts[lhs] = affine
             affine = Expr(:call, :fill, affine, Expr(:call, :length, predictor.row_source))
         end
@@ -1594,9 +1612,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             push!(stmts, Expr(:call, :~, L, Expr(:call, :LKJCholesky, K, eta)))
             push!(stmts, Expr(:(=), parameter.name, Expr(:call, :.*, scales, L)))
         else
-            push!(stmts, _rk_ast_sampled(parameter))
+            sampled = _rk_ast_sampled(parameter)
+            push!(stmts, sampled)
             _rk_coordinate_record!(coordinates,
-                (; kind=:scalar, declaration=parameter.name))
+                (; kind=:scalar, declaration=parameter.name, prior=sampled.args[3]))
         end
     end
     # Monotonic increment simplexes belong to their monotonic blocks.

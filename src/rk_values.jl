@@ -71,6 +71,9 @@ function _rk_ast_truncated_prior(prepared, bindings, taken)
         _rk_value_expr!(bindings, upper, taken))
 end
 
+# A known scale (`sd(...) = value`) is its constant value.
+_rk_ast_positive_prior(prior::_BRMKnownScale, _bindings, _taken; default=:HalfNormal) =
+    prior.value
 function _rk_ast_positive_prior(prior, bindings, taken; default=:HalfNormal)
     prior === nothing && return default === :LogNormal ?
         Expr(:call, :LogNormal, 0, 1) :
@@ -205,22 +208,46 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
         else
             [_rk_ast_positive_prior(prior, bindings, taken) for prior in bucket.sd_priors]
         end
+        # Known values (`sd(...) = value`, `cor(:, ID) = R`) are constants: a
+        # known scale is its number in `tau`, a known correlation a constant
+        # Cholesky factor in place of the LKJ draw.
+        known = any(_brm_is_known_scale, bucket.sd_priors)
+        L_value = nothing
+        if bucket.known_cor !== nothing
+            L_value = _rk_ast_fresh_name(string(draws, "_L"), taken)
+            factor = Matrix{Float64}(cholesky(Symmetric(bucket.known_cor)).L)
+            # RKPPL takes pure calls only, so the constant is `hcat` of its
+            # columns rather than a matrix literal.
+            push!(stmts, Expr(:(=), L_value, Expr(:call, :hcat,
+                (Expr(:vect, factor[:, j]...) for j in axes(factor, 2))...)))
+        end
         _rk_ast_group_component!(definitions, stmts, taken, draws, group, K,
             bucket.lkj_eta, priors;
-            nu=_rk_ast_student_t_nu(bucket.dist, bindings, taken))
+            nu=_rk_ast_student_t_nu(bucket.dist, bindings, taken), L_value)
         # Plain groups retain semantic transport metadata at their actual
         # component-owned declarations; other grouping forms remain unpaired.
         # A Student-t block also records its per-level mixing weights; Gaussian
-        # records keep their established fields.
+        # records keep their established fields. A known-value block names only
+        # its sampled scales (`nothing` at a known margin) and records which
+        # values are known. `scale_priors` are the laws emitted for the
+        # margins' scales, in margin order (a known scale's is its number).
         grouping.form === :plain &&
             _rk_coordinate_record!(coordinates, merge((; kind=:ranef,
                 group=bucket.group, id=bucket.id, bucket_kind=bucket.kind,
                 margins=Tuple((m.predictor, m.coefficient) for m in bucket.margins),
                 scale=Symbol(draws, ".tau"),
-                scales=all(isequal(first(priors)), priors) ? nothing :
+                scales=known ?
+                    Tuple(p isa Real ? nothing : Symbol(draws, ".tau_", k)
+                          for (k, p) in enumerate(priors)) :
+                    all(isequal(first(priors)), priors) ? nothing :
                     Tuple(Symbol(draws, ".tau_", k) for k in 1:K),
-                z=Symbol(draws, ".z"), L=K == 1 ? nothing : Symbol(draws, ".L")),
-                bucket.dist === nothing ? (;) : (; mixing=Symbol(draws, ".w"))))
+                z=Symbol(draws, ".z"),
+                L=K == 1 || L_value !== nothing ? nothing : Symbol(draws, ".L"),
+                scale_priors=Tuple(priors)),
+                bucket.dist === nothing ? (;) : (; mixing=Symbol(draws, ".w")),
+                known || L_value !== nothing ?
+                    (; known_scales=Tuple(p isa Real ? p : nothing for p in priors),
+                       known_cor=bucket.known_cor) : (;)))
     end
     # One level position per row of a grouping, named for that grouping and
     # read by every bucket over it. A multi-membership column's positions are
@@ -781,7 +808,7 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
     kernel_cells = Set{Symbol}(a.cells for a in plan.assignments
         if a isa _RKPreparedKernelAssignment)
     union!(reserved, kernel_cells)
-    lone_intercepts = Dict{Symbol,Symbol}()
+    lone_intercepts = Dict{Symbol,Any}()
     regression = _rk_emit_ast(plan.regression, false; values=true, reserved,
         coordinates, lone_intercepts)
     stmts = copy(regression.main.args)

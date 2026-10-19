@@ -681,6 +681,13 @@ function _adaptive_block(ranef::RanefBlock, unc_names, pos; r2d2=nothing)
         "Cholesky/scale frame per stratum and must not be treated as an ",
         "ordinary single-frame block.",
     )
+    get(get(_RANEF_FAMILIES, ranef.family, (;)), :known, false) && error(
+        "BRM adaptive centering: block `$(ranef.binding)` (group ",
+        "`$(ranef.group)`) holds a known scale or correlation (`sd(...) = ",
+        "value` / `cor(:, ID) = R`). Adaptive centering of a known-value block ",
+        "is not implemented yet; adapt a model without it, or keep the ",
+        "default non-centered emission.",
+    )
     if ranef.family in _ADAPTIVE_R2D2_FAMILIES
         isnothing(r2d2) && error(
             "BRM adaptive centering: R2D2 block `$(ranef.binding)` derives its ",

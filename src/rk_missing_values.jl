@@ -123,6 +123,10 @@ end
 _rk_observed_anchor_source(value, _observations) = value
 
 function _rk_model_population_columns(term; cellmeans=false, context=nothing)
+    # An offset of a model value is a coefficient-free graph summand
+    # (`_rk_model_offset_spec`): it adds no design column.
+    term isa ExprColumn && getf(term) === offset && length(getargs(term)) == 1 &&
+        _brm_reads_model_value(only(getargs(term))) && return ()
     column = _rk_model_population_column(term, context)
     column === nothing ? _brm_population_columns(term; cellmeans) : (column,)
 end

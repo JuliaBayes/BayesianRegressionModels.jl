@@ -27,7 +27,8 @@ function _brm_held_out_request(held_out; prefix="BRM")
     (; names)
 end
 
-function _brm_resolve_held_out(request, aliases, sources, unbound; prefix="BRM")
+function _brm_resolve_held_out(request, aliases, sources, unbound; prefix="BRM",
+                               cover_all::Bool=false)
     isempty(request.names) && return Set{Symbol}()
     if isempty(sources)
         isempty(unbound) && error(
@@ -50,7 +51,7 @@ function _brm_resolve_held_out(request, aliases, sources, unbound; prefix="BRM")
         "$prefix: `held_out` alias(es) $(ambiguous) each resolve to several " *
         "response data sources. Name the dataframe response column instead.")
     selected = reduce(union, (aliases[name] for name in request.names); init=Set{Symbol}())
-    selected == sources && error(
+    selected == sources && !cover_all && error(
         "$prefix: holding out $(join(sort!(collect(selected)), ", ")) covers every " *
         "observation." * _brm_held_out_all_redirect())
     selected
