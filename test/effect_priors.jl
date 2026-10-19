@@ -96,8 +96,10 @@ end
 end
 
 # A support-limited per-column family bounds its own coordinate of the one
-# generated-family declaration, so the sampler never leaves any column's
-# support, inits included (snag per-column-unifo-6a3aa727).
+# declaration, so the sampler never leaves any column's support, inits
+# included (snag per-column-unifo-6a3aa727). Differing families are native
+# per-family statements (StanBlocks `vcat`), which keep literal per-coordinate
+# bounds on the declaration.
 @testset "per-column supports bound the coefficient declaration coordinatewise" begin
     declaration(code, name) = strip(only(l for l in split(code, '\n')
         if endswith(strip(l), " $name;") && occursin("<", l)))
@@ -112,6 +114,8 @@ end
     bounded_code = BayesianRegressionModels.stan_code(bounded_sb)
     @test declaration(bounded_code, "pop_mu_beta_pop") ==
         "vector<lower=[0.2, 0.3]', upper=[0.8, 0.9]'>[pop_mu_n_covariates] pop_mu_beta_pop;"
+    @test occursin("pop_mu_beta_pop[1] ~ uniform(0.2, 0.8);", bounded_code)
+    @test !occursin("brm_vector_prior_", bounded_code)
     @test StanBlocks.stanc_check(bounded_code; warn_pedantic=false).ok
 
     # Ranef SD margins share the seam: positive margins keep their common

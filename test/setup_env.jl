@@ -41,7 +41,7 @@ const TESTENV = @__DIR__
 # name => (github url, pinned commit)   — comment records the branch the commit
 # is on, for humans; the pin itself is the full SHA and needs no branch.
 const PINS = [
-    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "6151dabb5167446e0b2fd178e205beceb7a43539"),  # devibe: non-finite literals render as Stan infinity builtins; `weighted` over censored/truncated/interval_censored
+    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "34345fa3078a486d5f8c3bc3cb777be624605a6d"),  # devibe: `vcat` priors keep literal per-coordinate bounds on a data-length declaration; non-finite literals render as Stan infinity builtins; `weighted` over censored/truncated/interval_censored
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "c02aa16ab1b08e4f5283597fe678a88e69555cd1"),  # dev
     # 0194dce (2026-09-27, dev): WindowSelectionPlan (WarmupHMC-held evidence)
     # and the controls interface for custom reparametrizers,

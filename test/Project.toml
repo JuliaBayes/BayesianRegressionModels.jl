@@ -40,8 +40,8 @@ julia = "1.10"
 
 [sources.StanBlocks]
 url = "https://github.com/nsiccha/StanBlocks.jl"
-# Non-finite literals render; `weighted` takes a censored/truncated/interval_censored family.
-rev = "6151dabb5167446e0b2fd178e205beceb7a43539"
+# `vcat` priors keep literal per-coordinate bounds; non-finite literals render; `weighted` takes a censored/truncated/interval_censored family.
+rev = "34345fa3078a486d5f8c3bc3cb777be624605a6d"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
