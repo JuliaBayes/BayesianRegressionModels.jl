@@ -228,12 +228,23 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
         if argument isa NamedColumn && parent(argument) isa ExprColumn]
     buckets = _sb_kernel_lp_buckets(direct_lps)
     groups = [bucket for bucket in buckets if bucket !== nothing]
+    ragged_cols = [argument for argument in arguments
+        if argument isa ExprColumn && getf(argument) === ragged]
     group_values = if isempty(groups)
-        nothing
+        # Without a subject predictor, `ragged(x, group => cells)` inputs label
+        # the cells by their explicit cell label column (district totals over
+        # facility predictors are the shape).
+        if isempty(ragged_cols)
+            nothing
+        else
+            column = _brm_kernel_cell_label_column(ragged_cols; prefix="RK backend")
+            _brm_kernel_subject_values(parent(parent(column)), _rk_kernel_column_name(column); prefix="RK backend")
+        end
     else
         length(unique(group[2] for group in groups)) == 1 || error(
             "RK backend: kernel `$name` predictor inputs disagree on subject grouping")
         column = first(groups)[3]
+        _brm_kernel_check_cell_labels(ragged_cols, _rk_kernel_column_name(column); prefix="RK backend")
         _brm_kernel_subject_values(parent(parent(column)), _rk_kernel_column_name(column); prefix="RK backend")
     end
     columns = Dict{Symbol,Any}()
@@ -242,10 +253,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
     observed = _rk_kernel_observed_columns(brmi, params, arguments, raw_body)
     for (i, argument) in enumerate(arguments)
         if argument isa ExprColumn && getf(argument) === ragged
-            group_values === nothing && error(
-                "RK backend: kernel `$name` ragged inputs require a subject predictor")
-            length(getargs(argument)) == 2 || error("RK backend: ragged input needs value and group")
-            value, group = getargs(argument)
+            value, group = _brm_kernel_ragged_args(argument; prefix="RK backend")
             value isa NamedColumn || error("RK backend: ragged input must name a column or predictor")
             partition = _brm_kernel_ragged_rows(value, group, group_values; prefix="RK backend")
             rows = Symbol(name, :_rows_, i)

@@ -313,8 +313,8 @@ function _brm_collect_target_axes!(axes, @nospecialize(node::NamedColumn))
 end
 function _brm_collect_target_axes!(axes, @nospecialize(node::ExprColumn))
     args = getargs(node)
-    if getf(node) === ragged && length(args) == 2
-        value, group = args
+    if getf(node) === ragged && length(args) in (2, 3)
+        value, group = args[1], args[2]
         if value isa NamedColumn && group isa NamedColumn && parent(group) isa DataColumn
             sources = get!(axes, name(value), Symbol[])
             name(group) in sources || push!(sources, name(group))
