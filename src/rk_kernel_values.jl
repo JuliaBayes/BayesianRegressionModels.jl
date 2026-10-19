@@ -205,33 +205,23 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
         if argument isa NamedColumn && parent(argument) isa ExprColumn]
     buckets = _sb_kernel_lp_buckets(direct_lps)
     groups = [bucket for bucket in buckets if bucket !== nothing]
+    ragged_cols = [argument for argument in arguments
+        if argument isa ExprColumn && getf(argument) === ragged]
     group_values = if isempty(groups)
-        # Ragged-anchored plate: with no subject predictor, the shared
-        # grouping column of the `ragged(...)` inputs anchors the cells —
-        # its distinct labels, in first-appearance order, are the outer axis
-        # (district totals over facility predictors are the shape).
-        ragged_groups = [getargs(argument)[2] for argument in arguments
-            if argument isa ExprColumn && getf(argument) === ragged &&
-                length(getargs(argument)) == 2]
-        if isempty(ragged_groups)
+        # Without a subject predictor, `ragged(x, group => cells)` inputs label
+        # the cells by their explicit cell label column (district totals over
+        # facility predictors are the shape).
+        if isempty(ragged_cols)
             nothing
         else
-            grp_names = unique([g isa NamedColumn ? _rk_kernel_column_name(g) : nothing
-                for g in ragged_groups])
-            length(grp_names) == 1 && first(grp_names) !== nothing || error(
-                "RK backend: kernel `$name` ragged inputs disagree on their grouping column")
-            grp = first(ragged_groups)
-            (grp isa NamedColumn && parent(grp) isa DataColumn) || error(
-                "RK backend: kernel `$name` ragged grouping must be a raw data column")
-            vals = unique(collect(_brm_group_values(parent(parent(grp)))))
-            (!isempty(vals) && !any(ismissing, vals)) || error(
-                "RK backend: kernel `$name` ragged grouping column must be non-empty with no missing labels")
-            vals
+            column = _brm_kernel_cell_label_column(ragged_cols; prefix="RK backend")
+            _brm_kernel_subject_values(parent(parent(column)), _rk_kernel_column_name(column); prefix="RK backend")
         end
     else
         length(unique(group[2] for group in groups)) == 1 || error(
             "RK backend: kernel `$name` predictor inputs disagree on subject grouping")
         column = first(groups)[3]
+        _brm_kernel_check_cell_labels(ragged_cols, _rk_kernel_column_name(column); prefix="RK backend")
         _brm_kernel_subject_values(parent(parent(column)), _rk_kernel_column_name(column); prefix="RK backend")
     end
     columns = Dict{Symbol,Any}()
@@ -240,10 +230,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
     observed = _rk_kernel_observed_columns(brmi, params, arguments, raw_body)
     for (i, argument) in enumerate(arguments)
         if argument isa ExprColumn && getf(argument) === ragged
-            group_values === nothing && error(
-                "RK backend: kernel `$name` ragged inputs require a subject predictor")
-            length(getargs(argument)) == 2 || error("RK backend: ragged input needs value and group")
-            value, group = getargs(argument)
+            value, group = _brm_kernel_ragged_args(argument; prefix="RK backend")
             value isa NamedColumn || error("RK backend: ragged input must name a column or predictor")
             partition = _brm_kernel_ragged_rows(value, group, group_values; prefix="RK backend")
             rows = Symbol(name, :_rows_, i)

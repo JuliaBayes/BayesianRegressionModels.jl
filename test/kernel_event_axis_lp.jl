@@ -351,8 +351,10 @@ end
     end
 
     @testset "the contract fails loudly, not silently" begin
-        # `ragged(...)` does not supply the kernel's subject axis.
-        @test_throws "needs a subject grouping to join its event rows" SBBRMI(
+        # `ragged(...)` does not supply the kernel's subject axis: without a
+        # random-effect LP or a named cell label column (`group => cells`)
+        # its rows could join the cells only by position.
+        @test_throws "no cell labels to join against" SBBRMI(
             ev_only_model(df); mod = @__MODULE__)
         # An ALREADY-ragged per-subject column has nothing left to group.
         @test_throws "ALREADY a ragged per-subject column" SBBRMI(
@@ -360,7 +362,7 @@ end
         # The grouping column must cover the predictor's OWN frame.
         @test_throws "row axis" SBBRMI(ev_wrong_axis_model(df); mod = @__MODULE__)
         # Arity and keywords are rejected at @brm construction / lowering.
-        @test_throws "exactly two positional args" SBBRMI(
+        @test_throws "takes the thing to group, its grouping column" SBBRMI(
             ev_arity_model(df); mod = @__MODULE__)
         @test_throws "ragged(...) takes no keywords" ev_kwarg_model(df)
 
