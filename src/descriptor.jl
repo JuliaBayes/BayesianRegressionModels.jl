@@ -209,6 +209,13 @@ BRM adds:
       o.declaration.target, brm_output_coordinates(o, constrained_names)
   end
   ```
+- `dims` — the resolved length of each axis of `size` (`()` for a scalar), or
+  `nothing` when BRM cannot resolve one. A literal size and a size naming a
+  data input resolve from the bound data; a categorical predictor's contrast
+  (or cell-mean) vector resolves from its frozen level set. A `0` marks a
+  carrier with no elements — a one-level treatment factor's contrasts, a
+  one-level ordinal outcome's thresholds — which BridgeStan lists under no
+  name, so [`brm_output_coordinates`](@ref) returns `Int[]` for it.
 
 `role` is derived from the declaration, never from the output's name — a user
 variable may legitimately be called `beta_pop` or end in `_gen`.
@@ -227,13 +234,18 @@ struct BRMOutput
     labels::Union{Nothing,Vector{Symbol}}
     segments::Union{Nothing,Vector{Int}}
     component::Union{Nothing,Symbol}
+    dims::Union{Nothing,Tuple{Vararg{Int}}}
 end
 
 # Preserve the earlier positional constructors for downstream code that creates
-# display-only BRMOutput values. `segments`, `logical` and `component` are
-# appended rather than inserted precisely so those calls keep compiling;
-# `brm_descriptor` assigns `component` in its last pass
-# (`_brm_ranef_components`).
+# display-only BRMOutput values. `segments`, `logical`, `component` and `dims`
+# are appended rather than inserted precisely so those calls keep compiling;
+# `brm_descriptor` assigns `component` (`_brm_ranef_components`) and then
+# `dims` (`_brm_output_dims`) in its last passes.
+BRMOutput(name, kind, type, size, constraints, generative, source, role,
+          declaration, logical, labels, segments, component) =
+    BRMOutput(name, kind, type, size, constraints, generative, source, role,
+              declaration, logical, labels, segments, component, nothing)
 BRMOutput(name, kind, type, size, constraints, generative, source, role,
           declaration, logical, labels, segments) =
     BRMOutput(name, kind, type, size, constraints, generative, source, role,
@@ -1460,6 +1472,7 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
             o.source,role,o.declaration,block.predictor,labels,o.segments)
     end
     outputs = _brm_ranef_components(outputs, plan, stan)
+    outputs = _brm_output_dims(outputs, plan, stan)
 
     # --- schema -------------------------------------------------------------
     columns = Tuple(sort!(collect(df_columns)))
@@ -1539,6 +1552,47 @@ function _brm_ranef_components(outputs, plan, stan)
                         o.segments, get(components, o.name, nothing))
               for o in outputs]
 end
+
+# Each output's resolved axis lengths, `BRMOutput.dims`. StanBlocks publishes
+# `size` as the declared expressions: a literal or a data input's name resolves
+# against the bound data block, but a composite expression has no public
+# resolver (snag `StanBlocks/snags/stan-descriptor-aa56f7f3`). The composite
+# BRM emits for a categorical predictor's contrast or cell-mean vector
+# (`n_levels - 1` / `n_levels`) resolves from the frozen level set that drove
+# that emission, the count `brm_population_effect_coordinates` checks. Any
+# other unresolved axis leaves `dims === nothing`, so `brm_output_coordinates`
+# keeps reporting a carrier absent from the names as drift.
+function _brm_output_dims(outputs, plan, stan)
+    values = Dict{Symbol,Any}(i.name => i.value for i in stan.inputs)
+    categorical = nothing
+    resolved = BRMOutput[]
+    for o in outputs
+        dims = _brm_resolved_dims(values, o.size)
+        if isnothing(dims) && any(x -> !(x isa Union{Integer,Symbol}), o.size)
+            isnothing(categorical) && (categorical = _brm_categorical_carrier_dims(plan))
+            dims = get(categorical, o.name, nothing)
+        end
+        push!(resolved, BRMOutput(o.name, o.kind, o.type, o.size, o.constraints,
+                                  o.generative, o.source, o.role, o.declaration,
+                                  o.logical, o.labels, o.segments, o.component, dims))
+    end
+    resolved
+end
+
+function _brm_categorical_carrier_dims(plan)
+    dims = Dict{Symbol,Tuple{Int}}()
+    for entry in _brm_population_effect_entries(plan.parent),
+            categorical in _brm_categorical_effect_entries(plan, entry.logical, entry.link)
+        dims[_brm_categorical_carrier(categorical.emitted)] =
+            (length(categorical.nonreference_levels),)
+    end
+    dims
+end
+
+# A carrier with no elements: BridgeStan lists it under no name, so an empty
+# coordinate vector is its complete answer rather than evidence of drift.
+_brm_empty_carrier(output::BRMOutput) =
+    !isnothing(output.dims) && any(iszero, output.dims)
 
 # Every operation StanBlocks derived, delegated verbatim, plus the two BRM-level
 # replay operations. Nothing is listed: `stan.operations` is itself derived from
@@ -2149,18 +2203,23 @@ function _brm_term_coordinate_entries(brmi, logical::Symbol)
     entries
 end
 
-_brm_resolved_dimension(plan, x::Integer) = Int(x)
-_brm_resolved_dimension(plan, x::Symbol) = begin
-    value = get(plan.data, x, nothing)
+# `values` maps data names to their bound values: the plan's data, or the
+# descriptor's StanBlocks inputs.
+_brm_resolved_dimension(values, x::Integer) = Int(x)
+_brm_resolved_dimension(values, x::Symbol) = begin
+    value = get(values, x, nothing)
     value isa Integer ? Int(value) : nothing
 end
-_brm_resolved_dimension(_plan, _x) = nothing
+_brm_resolved_dimension(_values, _x) = nothing
+
+function _brm_resolved_dims(values, size::Tuple)
+    dims = map(x -> _brm_resolved_dimension(values, x), size)
+    any(isnothing, dims) ? nothing : dims
+end
 
 function _brm_output_coordinate_count(plan, output::BRMOutput)
-    isempty(output.size) && return 1
-    dims = [_brm_resolved_dimension(plan, x) for x in output.size]
-    any(isnothing, dims) && return nothing
-    prod(dims)
+    dims = _brm_resolved_dims(plan.data, output.size)
+    isnothing(dims) ? nothing : prod(dims)
 end
 
 _brm_term_coordinate_count(_f, _t, _parameter, plan, output) =
@@ -2473,25 +2532,37 @@ function _brm_categorical_effect_entry(plan, emitted_lp::Symbol,
        nonreference_levels=cellmeans ? decoded : decoded[2:end])
 end
 
-function _brm_categorical_effect_entries(d::BRMDescriptor, logical::Symbol,
+_brm_categorical_effect_entries(d::BRMDescriptor, logical::Symbol, link) =
+    _brm_categorical_effect_entries(d.plan, logical, link)
+
+function _brm_categorical_effect_entries(plan::GenerativePlan, logical::Symbol,
                                          link)
-    op = linear_predictor_op(d.plan.parent, logical)
+    op = linear_predictor_op(plan.parent, logical)
     isnothing(op) && return NamedTuple[]
     _, rhs = getargs(op, 2)
     emitted_lp = _sb_lp_emitted_name(logical, link)
     # The same first-match rule the emitter applies (`_sb_linear_predictor!`).
-    cellmeans_block = _brm_predictor_cellmeans_block(d.plan.parent, logical)
+    cellmeans_block = _brm_predictor_cellmeans_block(plan.parent, logical)
     entries = NamedTuple[]
     for term in _brm_additive_terms(rhs)
         cellmeans = !isnothing(cellmeans_block) &&
             _brm_categorical_term_block(term) === cellmeans_block &&
             !_brm_requests_treatment_coding(term)
         cellmeans && (cellmeans_block = nothing)
-        entry = _brm_categorical_effect_entry(d.plan, emitted_lp, term; cellmeans)
+        entry = _brm_categorical_effect_entry(plan, emitted_lp, term; cellmeans)
         isnothing(entry) || push!(entries, entry)
     end
     entries
 end
+
+# `_sb_cat` and `_sb_cat_normal` both bind the contrast vector as `beta`.
+# Compose that BRM-owned binding with the formula-derived block name, just as
+# `brm_term_coordinates` composes a term's declared parameter binding with its
+# owner. Selecting every declaration internal is too broad: an R2D2
+# categorical declaration also owns its derived scale, and future lowering may
+# add further internals without changing the contrast carrier. This is a
+# forward emitter rule, not parsing of a posterior name.
+_brm_categorical_carrier(block::Symbol) = Symbol(block, :_beta)
 
 function _brm_categorical_effect_coordinates(d::BRMDescriptor,
                                              logical::Symbol,
@@ -2506,14 +2577,7 @@ function _brm_categorical_effect_coordinates(d::BRMDescriptor,
         "terms; expected exactly one.")
     categorical = only(entries)
 
-    # `_sb_cat` and `_sb_cat_normal` both bind the contrast vector as `beta`.
-    # Compose that BRM-owned binding with the formula-derived block name, just
-    # as `brm_term_coordinates` composes a term's declared parameter binding
-    # with its owner. Selecting every declaration internal is too broad: an
-    # R2D2 categorical declaration also owns its derived scale, and future
-    # lowering may add further internals without changing the contrast carrier.
-    # This is a forward emitter rule, not parsing of a posterior name.
-    expected = Symbol(block, :_beta)
+    expected = _brm_categorical_carrier(block)
     idxs = _brm_carrier_indices(d.outputs,
                o -> !isnothing(o.declaration) && o.declaration.target === block &&
                     o.name === expected)
@@ -3119,13 +3183,16 @@ label-indexed resolvers ([`brm_population_effect_coordinates`](@ref),
 return carrier element order under any axis permutation.
 
 A missing carrier is an error, which catches descriptor/artifact drift instead
-of returning an empty posterior slice.
+of returning an empty posterior slice. The one exception is a carrier with no
+elements (a `0` in its [`BRMOutput`](@ref) `dims`, such as a one-level
+treatment factor's contrast vector): BridgeStan lists it under no name, so its
+coordinates are `Int[]`.
 """
 function brm_output_coordinates(d::BRMDescriptor, logical::Symbol,
                                 constrained_names; role=nothing, submodel=nothing)
     output = brm_output(d, logical; role, submodel)
     coordinates = _brm_emitted_coordinates(output, constrained_names)
-    isempty(coordinates) || return coordinates
+    (isempty(coordinates) && !_brm_empty_carrier(output)) || return coordinates
     scope = isnothing(submodel) ? "" :
         " of `submodel=$(_brm_submodel_spelling(d, _brm_submodel_entry(d, submodel)))`"
     error("brm_descriptor: logical output `$logical`$scope resolves to emitted " *
@@ -3144,11 +3211,14 @@ never parsed.
 
 This overload is for internal carriers that have no public logical target, such
 as the Cholesky factor inside a correlated random-effect block. A missing
-carrier remains an error rather than an empty posterior slice.
+carrier remains an error rather than an empty posterior slice, except a carrier
+with no elements (a `0` in `output.dims`): a one-level treatment factor's
+contrast vector or a one-level ordinal outcome's thresholds resolve to `Int[]`,
+so mapping every sampled output of a descriptor needs no special case.
 """
 function brm_output_coordinates(output::BRMOutput, constrained_names)
     coordinates = _brm_emitted_coordinates(output, constrained_names)
-    isempty(coordinates) && error(
+    isempty(coordinates) && !_brm_empty_carrier(output) && error(
         "brm_descriptor: emitted output `$(output.name)` is absent from the " *
         "supplied constrained names. Re-reflect the model that produced the " *
         "posterior draws.")
