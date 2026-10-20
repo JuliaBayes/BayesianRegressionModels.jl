@@ -488,7 +488,12 @@ _ranef_plan(plan::GenerativePlan) = plan
     ranef_blocks(model) -> Vector{RanefBlock}
 
 Every random-effect block `model` emitted, in declaration order. `model` is an
-[`SBBRMI`](@ref) or a [`GenerativePlan`](@ref).
+[`SBBRMI`](@ref), a [`GenerativePlan`](@ref) or a [`BRMDescriptor`](@ref).
+
+Each block's carrier placement (`generated`) is read from the traced program.
+A descriptor already holds that trace, so `ranef_blocks(d)` is a lookup; an
+`SBBRMI` or `GenerativePlan` traces its program again on every call. Use the
+descriptor when resolving blocks repeatedly.
 
 This is the authoritative answer to "which parameters carry grouping factor
 `g`'s effects, and is the emission non-centered?" — read off the emitted
@@ -519,8 +524,13 @@ for b in ranef_blocks(sb)
 end
 ```
 """
-function ranef_blocks(model)
-    plan = _ranef_plan(model)
+ranef_blocks(model) = _ranef_blocks(_ranef_plan(model), nothing)
+ranef_blocks(d::BRMDescriptor{<:Any,<:StanBlocks.ModelDescriptor}) =
+    _ranef_blocks(d.plan, d.stan)
+
+# `stan` is `plan`'s traced program (StanBlocks' descriptor), or `nothing` to
+# trace it when the first block needs its carrier placement.
+function _ranef_blocks(plan, stan)
     brmi = plan.parent
     data = plan.data
     out = RanefBlock[]
@@ -632,7 +642,7 @@ function ranef_blocks(model)
         end
         z = Symbol(d.target, :_, spec.z)
         if isnothing(output_kinds)
-            output_kinds = _traced_output_kinds(plan)
+            output_kinds = _ranef_output_kinds(plan, stan)
         end
         kind = get(output_kinds, z, nothing)
         kind in (:parameter, :generated_quantity) || error(
@@ -652,10 +662,14 @@ function ranef_blocks(model)
 end
 
 # Descriptor kind (`:parameter`, `:generated_quantity`, …) of every output of
-# the traced program of an `SBBRMI` or `GenerativePlan`. Placement is the
-# traced program's answer, never inferred from which names a caller supplies.
-_traced_output_kinds(model) = Dict(o.name => o.kind for o in
-    Base.invokelatest(StanBlocks.stan_descriptor, model.model).outputs)
+# a traced program (StanBlocks' descriptor), or of the program of an `SBBRMI`
+# or `GenerativePlan`, which is traced here. Placement is the traced program's
+# answer, never inferred from which names a caller supplies.
+_output_kinds(stan) = Dict(o.name => o.kind for o in stan.outputs)
+_traced_output_kinds(model) =
+    _output_kinds(Base.invokelatest(StanBlocks.stan_descriptor, model.model))
+_ranef_output_kinds(plan, ::Nothing) = _traced_output_kinds(plan)
+_ranef_output_kinds(plan, stan) = _output_kinds(stan)
 
 # Whether each exact total-coefficient block's totals carrier is emitted in
 # generated quantities (for example, no observed likelihood reaches it). Such
