@@ -5806,9 +5806,10 @@ function _sb_kernel_lp_buckets(lp_cols; ragged_cols=(),
     end
 end
 
-# Collect `(name, length)` for every RAW data column reachable from a formula
-# RHS. Used to check that a `ragged(x, group)` LP really is declared over the
-# same row axis its grouping column describes. Descent stops at a nested `~`
+# Collect `(name, length)` for every row-wise RAW data column reachable from a
+# formula RHS; a scalar column broadcasts and names no row axis. Used to check
+# that a `ragged(x, group)` LP really is declared over the same row axis its
+# grouping column describes. Descent stops at a nested `~`
 # ExprColumn: that is a REFERENCE to another formula's value, not part of this
 # one's design, so its data belongs to the other row axis.
 const _sb_collect_data_lengths! = _brm_collect_data_lengths!
