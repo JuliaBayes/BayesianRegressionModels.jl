@@ -444,15 +444,19 @@ prior. Marginalization preserves the supported population prior specified in
 the formula.
 
 `total_effect_blocks(sb)` reports the selected blocks. `total_groups=()` opts out;
-`total_groups=[:subject]` requires that group to be eligible. Explicit
-`centered_groups=[:subject]` selects conventional centered deviations.
+`total_groups=[:subject]` requires every block of that group to be eligible;
+otherwise it raises an error naming the predictors whose blocks would stay
+conventional. Explicit `centered_groups=[:subject]` selects conventional
+centered deviations.
 
 Automatic selection currently requires one grouping structure per predictor,
 independent margins, supported population priors, and a known relation between
 the population and random-effect columns. Raw numeric columns, pure data
 expressions, and centered/scaled population columns with matching raw random
-columns are supported. Correlated, crossed, stratified, multi-membership and
-R2D2 blocks use the conventional representation. A request for totals on an
+columns are supported. `offset(...)` terms, of data or of model values, stay
+ordinary summands of the predictor beside the totals: they share no coefficient
+with them, so the marginalization stays exact. Correlated, crossed, stratified,
+multi-membership and R2D2 blocks use the conventional representation. A request for totals on an
 unsupported group raises an error.
 
 Automatic selection retains the conventional representation if some ordinary
