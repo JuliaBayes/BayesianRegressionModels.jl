@@ -68,27 +68,33 @@ rk_margins(bucket) = [(m.predictor, m.coefficient) for m in bucket.margins]
 end
 
 @stestset "RK and Stan sample the same reduced block" begin
-    for (name, builder) in (("plain", RKM.plain), ("configured", RKM.configured))
+    for (name, builder) in (("plain", RKM.plain), ("configured", RKM.configured)),
+            centered_groups in ((), [:subject])
         brmi = builder(RKM.OMIT_B)
         rk, problem = consumer_problem(brmi)
-        sb = SBBRMI(brmi; mod=RKM, total_groups=())
-        path = joinpath(tempdir(), "brm-rk-marginal-ranef", name * ".stan")
+        sb = SBBRMI(brmi; mod=RKM, total_groups=(), centered_groups)
+        path = joinpath(tempdir(), "brm-rk-marginal-ranef",
+            name * (isempty(centered_groups) ? "" : "_centered") * ".stan")
         mkpath(dirname(path))
         stan = BRM.stan_instantiate(sb; path)
         names = BridgeStan.param_unc_names(stan.model)
-        @test any(startswith("b_p_subject_active_z_flat."), names)
+        @test any(startswith(isempty(centered_groups) ? "b_p_subject_active_z_flat." :
+            "b_p_subject_active_b_cols_bc."), names)
         transport = brm_coordinate_transport(rk, sb, names)
         @test length(transport) == length(names) ==
               length(coordinate_names(rk.model.layout))
+        @test length(transport.centered) == length(centered_groups)
         for u in (zeros(length(transport)),
                   collect(range(-0.43, 0.51; length=length(transport))),
                   [0.37sin(i) for i in 1:length(transport)])
             stan_u = brm_rk_point_to_stan(transport, u)
+            @test brm_check_coordinate_transport(transport, rk, stan.model, u).max_error <=
+                1e-12
             value, gradient = LogDensityProblems.logdensity_and_gradient(problem, u)
             stan_gradient = similar(stan_u)
             stan_value, _ = BridgeStan.log_density_gradient!(stan.model, stan_u,
                 stan_gradient; propto=false, jacobian=true)
-            @test value ≈ stan_value + transport.logdensity_offset atol=2e-11 rtol=2e-11
+            @test value ≈ brm_stan_logdensity_to_rk(transport, u, stan_value) atol=2e-11 rtol=2e-11
             @test gradient ≈ brm_stan_gradient_to_rk(transport, u, stan_gradient) atol=2e-10 rtol=2e-10
         end
     end

@@ -47,6 +47,13 @@ function brm_nlme_joint_map(rk::RKBRMI, sb::SBBRMI; path,
     problem = stan_instantiate(sb; path, kwargs...)
     stan_model = problem.model
     transport = brm_coordinate_transport(rk, sb, BridgeStan.param_unc_names(stan_model))
+    # The start and the conditional problems treat the Stan subject coordinates
+    # as standardized draws; a centered block samples the effects instead.
+    isempty(transport.centered) || _brm_nlme_error(
+        "brm_nlme_joint_map: centered Stan random-effect blocks " *
+        "$(Tuple(b.binding for b in transport.centered)) sample the effects, not " *
+        "the standardized subject draws this map fills; build the SBBRMI " *
+        "without `centered_groups`")
     blocks = NamedTuple[]
     for (; family, record, indices) in _brm_nlme_families(rk, view)
         key = _brm_nlme_block_identity(record)
