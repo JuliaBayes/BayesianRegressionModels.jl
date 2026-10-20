@@ -3681,7 +3681,8 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     ranef_r2d2_overrides = _sb_ranef_r2d2_overrides(brmi, id_buckets,
                                                     effect_overrides;
                                                     frozen_preproc=_frozen_preproc)
-    r2d2_overrides = _sb_r2d2_overrides(brmi, id_buckets, effect_overrides)
+    r2d2_overrides = _sb_r2d2_overrides(brmi, id_buckets, effect_overrides;
+                                        frozen_preproc=_frozen_preproc)
     hs_overrides = _sb_horseshoe_overrides(brmi, effect_overrides, r2d2_overrides)
     data[_SB_HS_PLANS_KEY] = hs_overrides
     total_plans = _sb_plan_totals(brmi,prepared,effect_overrides,id_buckets,
@@ -10682,7 +10683,8 @@ end
 # the shared-bucket all-or-nothing rule. Returns a Dict keyed by predictor; an
 # empty Dict when the formula contains no r2d2 statement, which keeps every
 # other model's emission byte for byte unchanged.
-Base.@nospecializeinfer function _sb_r2d2_overrides(@nospecialize(brmi::BRMI), id_buckets, effect_overrides)
+Base.@nospecializeinfer function _sb_r2d2_overrides(@nospecialize(brmi::BRMI), id_buckets, effect_overrides;
+                                                    frozen_preproc=nothing)
     specs = r2d2_priors(brmi)
     isempty(specs) && return Dict{Symbol,NamedTuple}()
 
