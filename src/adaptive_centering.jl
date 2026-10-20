@@ -1282,6 +1282,25 @@ function _brm_hsgp_omega2(plan, owner, what, n_weights, n_scales)
     omega2
 end
 
+# The log-scale an HSGP cell reads is its exact spectral weight while that is
+# above `exp(-110)`, and a smooth floor at `exp(-150)` below. A long length
+# scale drives a basis weight's exact log-scale towards `-rho^2 * omega2 / 4`
+# (measured -473 on a 2-D field at `rho = 11`, snag adaptive-hsgp-ce-024ae486).
+# A cell partially centred on such a scale has a source coordinate `s^c * z`
+# whose spread underflows to zero, and its candidate frames underflow and
+# overflow to NaN losses. Floored, every frame of such a weight is a fixed
+# rescaling of `z` (the non-centred geometry), and `exp(±2c * log_scale)` stays
+# a normal Float64 for every control `c`. The transform is exact for any
+# function of coordinates it does not rewrite, so the floor moves coordinates,
+# never the posterior. Between the two bounds the softplus differs from the
+# exact value by less than `exp(-40)`; above `exp(-110)` they are identical.
+const _ADAPTIVE_HSGP_LOG_SCALE_FLOOR = -150.0
+const _ADAPTIVE_HSGP_LOG_SCALE_EXACT = _ADAPTIVE_HSGP_LOG_SCALE_FLOOR + 40.0
+
+_adaptive_hsgp_floor(value) = value > _ADAPTIVE_HSGP_LOG_SCALE_EXACT ? value :
+    _ADAPTIVE_HSGP_LOG_SCALE_FLOOR +
+    _adaptive_softplus(value - _ADAPTIVE_HSGP_LOG_SCALE_FLOOR)
+
 function _adaptive_hsgp_log_scale(x::AbstractVector,
                                   block::_HSGPAdaptiveCenteringBlock,
                                   basis::Int)
@@ -1295,7 +1314,8 @@ function _adaptive_hsgp_log_scale(x::AbstractVector,
         sigma = _adaptive_constrain(x[block.sd], block.sd_lower, block.sd_upper)
         rho = _adaptive_constrain(x[block.length_scales[1]],
             block.length_scale_lower[1], block.length_scale_upper[1])
-        return _brm_hsgp_periodic_log_scale(block.harmonics[basis], sigma, rho)
+        return _adaptive_hsgp_floor(
+            _brm_hsgp_periodic_log_scale(block.harmonics[basis], sigma, rho))
     end
     sigma = _adaptive_constrain(x[block.sd], block.sd_lower, block.sd_upper)
     value = log(sigma)
@@ -1307,7 +1327,7 @@ function _adaptive_hsgp_log_scale(x::AbstractVector,
         value += 0.5 * log(rho * 2.5066282746310002)
         value -= 0.25 * rho * rho * block.omega2[basis, axis]
     end
-    value
+    _adaptive_hsgp_floor(value)
 end
 
 # The cdar path has its own metadata type for the same reason the HSGP path
