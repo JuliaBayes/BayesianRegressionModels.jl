@@ -118,6 +118,12 @@ completed(d) = @brm d begin
     mu ~ 1 + standardize(xm)
     y ~ Normal(mu, sigma)
 end
+shrunk(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + gs + (1 | g)
+    effect(mu, :) ~ r2d2(R2=Beta(1, 1), tau_bsv=0.5, alpha=1)
+    y ~ Normal(mu, sigma)
+end
 zscaled_interaction(d) = @brm d begin
     sigma ~ Exponential(1)
     mu ~ 1 + zscale(x) & z
@@ -237,6 +243,17 @@ end
     # Dropping a missing row drops a completion coordinate: refused.
     @test_throws "changes the fitted coordinates" reprocess(
         RKBRMI(RM.completed(TRAIN)), rows_of(TRAIN, 1:6))
+end
+
+@stestset "an R2D2 budget keeps the training column variances" begin
+    rk = RKBRMI(RM.shrunk(TRAIN))
+    u = point(rk)
+    # Rows 2:5 have other variances; the prior must be the fitted one.
+    replay = check_frozen(RM.shrunk, 2:5)
+    prior(rk) = Base.invokelatest(ReactiveKernels.prepare(rk.model.spec;
+        have=(:unconstrained, keys(rk_bound_data(rk))...), want=(:prior,),
+        bound=rk_bound_data(rk)), u)
+    @test only(prior(replay)) == only(prior(rk))
 end
 
 @stestset "a same-group replay keeps the fitted group effects" begin

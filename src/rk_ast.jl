@@ -148,13 +148,30 @@ end
 # A named indicator column of a shared factor's `position`-th coefficient
 # level. Only variance-based shrinkage allocations read it; the effect itself
 # gathers coefficients by level (`_rk_ast_affine`).
-function _rk_ast_factor_indicator!(definitions, statements, taken, stem, term, position)
+function _rk_ast_factor_indicator!(definitions, statements, taken, stem, term, position;
+        column=only(term.columns))
     indicator = _rk_ast_fresh_name(string(stem, "_indicator"), taken)
     push!(statements, Expr(:(=), indicator,
-        _rk_ast_statistical_call!(definitions, taken, :brm_factor_dummy, only(term.columns),
+        _rk_ast_statistical_call!(definitions, taken, :brm_factor_dummy, column,
             _rk_ast_level_value(term.options.level_values[position]); kernel=true)))
     indicator
 end
+
+# The fit-role twins a plan registered (`_rk_fit_twin!`), by twinned value.
+function _rk_fit_sources(derived)
+    sources = Dict{Symbol,Symbol}()
+    for spec in derived
+        twinned = _rk_fit_twinned(spec.label)
+        twinned === nothing || (sources[twinned] = spec.name)
+    end
+    sources
+end
+function _rk_fit_twinned(label::Symbol)
+    text = string(label)
+    endswith(text, "#fit") ? Symbol(chop(text; tail=4)) : nothing
+end
+_rk_fit_of(fit_sources, value::Symbol) = get(fit_sources, value, value)
+_rk_fit_of(_fit_sources, value) = value
 
 # A horseshoe coefficient, as StanBlocks' `_sb_horseshoe`: the local scale
 # and standardized draw, scaled by the predictor's shared global scale `tau`.
@@ -1275,6 +1292,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     union!(taken, (t.options.id for p in plan.predictors for t in p.terms
         if t.kind === :structured))
     union!(taken, reserved)
+    # Fitted values (group levels, R2D2 variances) read these fit-role twins.
+    fit_sources = _rk_fit_sources(plan.derived)
     # A predictor sharing its name with a data column cannot keep it:
     # the program has one namespace, so the affine (definition and
     # response uses) is alpha-renamed. Unreachable via `@brm`
@@ -1345,8 +1364,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     # consumers. All derived scales remain ordinary graph values.
     joint_priors = Dict{Tuple{Symbol,Symbol},Tuple{Symbol,Tuple}}()
     level_indices = Dict{Tuple{Symbol,Symbol},Symbol}()
-    level_sources = Dict{Symbol,Symbol}(d.label => d.name for d in plan.derived
-        if d.expression.head === :_rk_fit_input)
+    level_sources = fit_sources
     for (bi, bucket) in enumerate(plan.ranef_buckets)
         bucket.decomposition === nothing && continue
         append!(stmts, _rk_ast_value_bucket(defs, bucket, ranef_draws[bi],
@@ -1467,15 +1485,18 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 # (planner gate); normalize to the family shape here. The
                 # budget allocates no share to a zero-width factor block.
                 r2 = get(r2d2.overrides, term.addressee, nothing)
+                # The variances read the columns' fit-role twins.
                 r2 === nothing ? (kind === :intercept ||
                         _rk_zero_width_factor(term) ? (:Normal, (0.0, 1.0)) :
                     (:Normal, (0.0, _rk_ast_r2d2_scale(r2d2, term.addressee;
                         scalar=kind !== :factor,
                         variance_values=kind === :factor ?
                             [Expr(:call, :var, _rk_ast_factor_indicator!(defs, stmts, taken,
-                                string(predictor.name, "_", label), term, j))
+                                string(predictor.name, "_", label), term, j;
+                                column=_rk_fit_of(fit_sources, only(term.columns))))
                                 for (j, label) in enumerate(term.options.labels)] :
-                            [Expr(:call, :var, colactual[index])])))) : (:Normal, r2)
+                            [Expr(:call, :var, _rk_fit_of(fit_sources, colactual[index]))])))) :
+                    (:Normal, r2)
             end
             if kind === :factor
                 col = only(term.columns)

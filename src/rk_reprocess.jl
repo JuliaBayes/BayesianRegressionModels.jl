@@ -91,6 +91,9 @@ _rk_replay_buckets(_plan) = ()
 # so a replay of their groups is refused unless they are resampled.
 function _rk_check_replay_groupings(plan, groups::Set{Symbol}; prefix)
     for bucket in _rk_replay_buckets(plan)
+        bucket.decomposition === nothing || error(
+            "$prefix: a random-effect R2D2M2 budget (`sd(...) ~ r2d2(...)`) does " *
+            "not freeze its column variances yet; rebuild with `freeze_constants=false`")
         grouping = bucket.grouping
         grouping.form === :plain && continue
         columns = Symbol[grouping.columns...]

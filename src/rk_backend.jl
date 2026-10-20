@@ -5107,8 +5107,16 @@ end
 # agree. Returns `(; prior, scalars, phi)`.
 Base.@nospecializeinfer function _rk_plan_r2d2_prior(@nospecialize(brmi::BRMI), design, r2plan::_BRMR2D2Plan,
         target::Symbol, available::Tuple, terms::Vector{_RKTermSpec},
-        taken::Set{Symbol}, columns::Dict{Symbol,AbstractVector})
+        taken::Set{Symbol}, columns::Dict{Symbol,AbstractVector};
+        data::AbstractDict, derived::Vector{_RKDerivedSpec})
     prefix = "RK backend"
+    # The budget's column variances read fit-role copies of the columns, so a
+    # frozen `reprocess` keeps the training variances (`_rk_fit_twin!`).
+    for term in terms, column in term.columns
+        term.kind in (:continuous, :factor) && column isa Symbol &&
+            (haskey(data, column) || any(d -> d.name === column, derived)) &&
+            _rk_fit_twin!(derived, columns, taken, data, column)
+    end
     for term in terms
         # The mo contrast is parameter-derived, so no data variance
         # exists (the thin layer rejects it too); gp latents have no
@@ -5721,7 +5729,7 @@ Base.@nospecializeinfer function _rk_plan_predictor(@nospecialize(brmi::BRMI), c
         tolerant_default)
     r2d2 = isnothing(r2plan) ? nothing :
         _rk_plan_r2d2_prior(brmi, design, r2plan, target, available,
-            terms, taken, columns)
+            terms, taken, columns; data=context.data, derived)
     _rk_check_model_offset_rows(terms, size(design.matrix, 1), target)
     row_source = design.row_source
     if !haskey(columns, row_source)

@@ -191,8 +191,7 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
     group = first(grouping.columns)
     # A plain block reads its levels from the grouping column's fit-role copy
     # (`_rk_fit_twin!`), and positions each row's group among them.
-    levels_of = grouping.form === :plain ?
-        get(level_sources, _rk_fit_label(group), group) : group
+    levels_of = grouping.form === :plain ? get(level_sources, group, group) : group
     stmts = Expr[]
     if grouping.form === :mm
         group = _rk_ast_fresh_name(string(draws, "_groups"), taken)
