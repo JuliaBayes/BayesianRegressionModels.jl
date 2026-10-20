@@ -129,6 +129,13 @@ StanBlocks revision pinned by `setup_env.jl` and checks the public flat
 predictive segments, bound pointwise likelihood, and refusal of a missing
 non-response ragged input.
 
+`s2z_omitted_response.jl` checks `s2z_groups` when a response is omitted. A
+predictor that no observed likelihood reaches keeps its block conventional, in
+generated quantities. It covers an intercept-only predictor, a grouping that a
+reached predictor shares, and an omitted `@plate` response. Each program
+matches its conventional or renamed-grouping twin, and the sampled BridgeStan
+density equals that of `prune_responses` of the same model.
+
 `omitted_plate_observations.jl` checks the grouped `pk_conc[i]` spelling with
 an omitted censored response and a joint QT likelihood. It checks the
 predictive descriptor and a finite generated draw above the censoring floor.
