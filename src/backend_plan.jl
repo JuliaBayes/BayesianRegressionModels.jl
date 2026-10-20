@@ -1561,8 +1561,11 @@ Base.@nospecializeinfer function _brm_simple_random_effect_plans(
             raw isa AbstractVector || error(
                 "BRM backend lowering: grouping column `$group` must be a " *
                 "vector")
-            levels = collect(_brm_fit_levels(raw))
-            n_levels, indices = _brm_level_index(raw)
+            # A frozen replay keeps the training groups (`_brm_fit_source`).
+            training = _brm_fit_source(group, raw)
+            levels = collect(_brm_fit_levels(training))
+            n_levels, indices = training === raw ? _brm_level_index(raw) :
+                (length(levels), _brm_apply_fitted_levels(levels, raw))
             length(levels) == n_levels || error(
                 "BRM backend lowering: inconsistent fitted levels for " *
                 "group `$group`")

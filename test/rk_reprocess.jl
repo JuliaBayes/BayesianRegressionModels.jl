@@ -55,6 +55,28 @@ zscaled_log(d) = @brm d begin
     mu ~ 1 + zscale(log(x))
     y ~ Normal(mu, sigma)
 end
+grouped(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + zscale(x) + (1 | g)
+    y ~ Normal(mu, sigma)
+end
+membership(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + (1 | mm(gs, other))
+    y ~ Normal(mu, sigma)
+end
+# A per-subject linear predictor with a standardized subject covariate, read
+# by an authored cell over each subject's read times.
+pk(d) = @brm d begin
+    sigma ~ Exponential(1)
+    log_CL ~ 1 + zscale(weight) + (1 | p | subject)
+    effect(log_CL, Intercept) ~ Normal(0, 1)
+    sd(:, p) ~ Exponential(1)
+    @plate for i in eachindex(log_CL)
+        conc[i] = dose[i] .* exp.(-exp(log_CL[i]) .* t[i])
+        y[i] ~ normal(conc[i], sigma)
+    end
+end
 zscaled_interaction(d) = @brm d begin
     sigma ~ Exponential(1)
     mu ~ 1 + zscale(x) & z
@@ -69,8 +91,18 @@ const TRAIN = (; x=collect(range(0.3, 4.1; length=N)) .^ 1.3,
     gs=["a", "b", "c"][mod1.(1:N, 3)],
     r=[1, 2, 3, 4][mod1.(1:N, 4)],
     z=cos.(1:N),
+    other=["b", "c", "a"][mod1.(1:N, 3)],
     y=sin.(1:N) .+ 0.1 .* (1:N))
 rows_of(data, rows) = map(v -> v isa AbstractVector ? v[rows] : v, data)
+
+const PK = (; subject=["s1", "s2", "s3", "s4", "s5"],
+    weight=[60.0, 72.0, 81.0, 55.0, 90.0], dose=[100.0, 120.0, 80.0, 100.0, 150.0],
+    t=[[0.5, 1.0, 2.0], [0.25, 1.5], [0.5, 1.0, 2.0, 4.0], [1.0], [0.5, 2.0]],
+    y=[[1.0, 0.8, 0.5], [1.2, 0.7], [0.9, 0.7, 0.4, 0.2], [0.6], [1.3, 0.5]])
+# Subject j's reads in the flattened `conc` of the training data.
+const PK_ENDS = cumsum([0; length.(PK.t)])
+pk_reads(conc, subjects) =
+    reduce(vcat, [conc[(PK_ENDS[j] + 1):PK_ENDS[j + 1]] for j in subjects])
 
 # An authored value of `rk`'s graph on its own bound data.
 function graph_value(rk, want, u)
@@ -128,13 +160,53 @@ end
     @test occursin("brm_covariate_sd(x_fit)", source)
 end
 
+@stestset "a same-group replay keeps the fitted group effects" begin
+    # Rows 3 and 6 hold only group `c`, a single subject or two in another order.
+    check_frozen(RM.grouped, [3, 6])
+    rk = RKBRMI(RM.pk(PK))
+    u = point(rk)
+    conc = graph_value(rk, :conc, u)
+    for subjects in ([2], [4, 1])
+        replay = reprocess(rk, rows_of(PK, subjects))
+        @test graph_value(replay, :conc, u) ≈ pk_reads(conc, subjects) atol=1e-12 rtol=1e-12
+        @test isfinite(density(replay, u))
+    end
+    @test_throws "not a training level" reprocess(rk,
+        merge(rows_of(PK, [2]), (; subject=["zzz"])))
+end
+
+@stestset "resample_groups: new subjects take caller-supplied effects" begin
+    rk = RKBRMI(RM.pk(PK))
+    u = point(rk)
+    conc = graph_value(rk, :conc, u)
+    b = graph_value(rk, :b_p_subject, u)       # one row per training subject
+    # Subject s2's covariates and reads under a new label, with s2's effect.
+    replay = reprocess(rk, merge(rows_of(PK, [2]), (; subject=["new"]));
+        resample_groups=[:subject])
+    bound = rk_bound_data(replay)
+    query = ReactiveKernels.prepare(replay.model.spec;
+        have=(:unconstrained, :b_p_subject, keys(bound)...), want=(:conc,), bound)
+    s2 = findfirst(==("s2"), sort(PK.subject))
+    value = Base.invokelatest(query, u, b[s2:s2, :])
+    value = value isa Tuple ? only(value) : value
+    @test value ≈ pk_reads(conc, [2]) atol=1e-12 rtol=1e-12
+end
+
+@stestset "a grouping whose levels are not frozen is refused" begin
+    rk = RKBRMI(RM.membership(TRAIN))
+    @test_throws "do not freeze their group levels" reprocess(rk, rows_of(TRAIN, 2:5))
+end
+
 @stestset "replaying the training data is the fit" begin
     for build in (RM.string_factor, RM.monotonic, RM.fitted_constant, RM.zscaled,
-            RM.zscaled_log)
+            RM.zscaled_log, RM.grouped)
         rk = RKBRMI(build(TRAIN))
         u = point(rk)
         @test density(reprocess(rk, TRAIN), u) == density(rk, u)
     end
+    rk = RKBRMI(RM.pk(PK))
+    u = point(rk)
+    @test density(reprocess(rk, PK), u) == density(rk, u)
 end
 
 @stestset "an unseen level is refused" begin

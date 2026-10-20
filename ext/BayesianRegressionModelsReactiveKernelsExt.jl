@@ -173,6 +173,8 @@ function BRM._rk_layout_coordinate_transforms(backend::BRM.RKBRMI)
         "without an entry")
     transforms
 end
+BRM._rk_plan_coordinate_names(plan::_RK_PLAN_TYPES) =
+    coordinate_names(assign_layout(_rk_translated_plan(plan)))
 BRM._rk_constrained_values(backend::BRM.RKBRMI, u::AbstractVector) =
     constrain(backend.model.layout, u)
 BRM._rk_unconstrained_point(backend::BRM.RKBRMI, values::NamedTuple) =

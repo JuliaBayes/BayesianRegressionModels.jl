@@ -62,7 +62,45 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
             fitted_constants=(name, _source) -> get(constants, name, nothing))
     end
     _rk_check_replay_program(rk.plan, plan; prefix)
+    _rk_check_replay_groupings(plan, groups; prefix)
+    # Same coordinates, so the fit's draws mean the same thing on the replay.
+    # Resampled groups size their effects by the new data's levels.
+    if isempty(groups)
+        fitted_names = _rk_layout_coordinate_names(rk)
+        replay_names = _rk_plan_coordinate_names(plan)
+        fitted_names == replay_names || error(
+            "$prefix: the new data changes the fitted coordinates " *
+            "($(length(fitted_names)) fitted, $(length(replay_names)) on the " *
+            "replay), so the fit's draws do not apply to it. A grouping whose " *
+            "levels the replay does not freeze must be named in " *
+            "`resample_groups`.")
+    end
     RKBRMI(parent(rk), plan, rk.model)
+end
+
+# The coordinate names `plan` binds (ReactiveKernels package extension).
+function _rk_plan_coordinate_names end
+
+_rk_replay_buckets(plan::_RKStructuralPlan) = plan.ranef_buckets
+_rk_replay_buckets(plan::_RKValuePlan) = plan.regression.ranef_buckets
+_rk_replay_buckets(plan::_RKHeldOutPlan) = _rk_replay_buckets(plan.parent)
+_rk_replay_buckets(_plan) = ()
+
+# Plain blocks read their levels from a fit-role copy of the grouping column;
+# `mm(...)` and `gr(...; by=...)` blocks still read the bound columns' levels,
+# so a replay of their groups is refused unless they are resampled.
+function _rk_check_replay_groupings(plan, groups::Set{Symbol}; prefix)
+    for bucket in _rk_replay_buckets(plan)
+        grouping = bucket.grouping
+        grouping.form === :plain && continue
+        columns = Symbol[grouping.columns...]
+        grouping.by === nothing || push!(columns, grouping.by)
+        all(in(groups), columns) && continue
+        error("$prefix: `$(grouping.form)(...)` random-effect blocks do not " *
+            "freeze their group levels yet; name $(columns) in " *
+            "`resample_groups` and supply their effects, or rebuild with " *
+            "`freeze_constants=false`")
+    end
 end
 
 _rk_held_out_names(plan) = ()

@@ -184,10 +184,15 @@ _rk_ast_student_t_nu(dist::_BRMRanefStudentT, bindings, taken) =
         _rk_value_expr!(bindings, _brm_prepare_expr(dist.nu), taken)
 
 function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindings;
-        level_indices, predictors=(), population_priors=Dict(), coordinates=nothing)
+        level_indices, level_sources=Dict{Symbol,Symbol}(), predictors=(),
+        population_priors=Dict(), coordinates=nothing)
     grouping = bucket.grouping
     K = length(bucket.margins)
     group = first(grouping.columns)
+    # A plain block reads its levels from the grouping column's fit-role copy
+    # (`_rk_fit_twin!`), and positions each row's group among them.
+    levels_of = grouping.form === :plain ?
+        get(level_sources, _rk_fit_label(group), group) : group
     stmts = Expr[]
     if grouping.form === :mm
         group = _rk_ast_fresh_name(string(draws, "_groups"), taken)
@@ -202,7 +207,7 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
         tau = _rk_ast_fresh_name(string(draws, "_tau"), taken)
         _rk_ast_ranef_r2d2!(definitions, stmts, bucket, tau, bindings, taken,
             predictors, population_priors; stem_base=draws)
-        _rk_ast_group_component!(definitions, stmts, taken, draws, group, K,
+        _rk_ast_group_component!(definitions, stmts, taken, draws, levels_of, K,
             bucket.lkj_eta, (); scale_value=tau)
     else
         # Stan's ordinary unnamed intercept and multi-membership intercept
@@ -227,7 +232,7 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
             push!(stmts, Expr(:(=), L_value, Expr(:call, :hcat,
                 (Expr(:vect, factor[:, j]...) for j in axes(factor, 2))...)))
         end
-        _rk_ast_group_component!(definitions, stmts, taken, draws, group, K,
+        _rk_ast_group_component!(definitions, stmts, taken, draws, levels_of, K,
             bucket.lkj_eta, priors;
             nu=_rk_ast_student_t_nu(bucket.dist, bindings, taken), L_value)
         # Plain groups retain semantic transport metadata at their actual
@@ -264,7 +269,8 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
             indices[col] = get!(level_indices, (col, group)) do
                 idx = _rk_ast_fresh_name(grouping.form === :mm ?
                     string(group, "_", col, "_level") : string(col, "_level"), taken)
-                push!(stmts, Expr(:(=), idx, Expr(:call, :brm_level_indices, col, group)))
+                push!(stmts, Expr(:(=), idx, Expr(:call, :brm_level_indices, col,
+                    grouping.form === :plain ? levels_of : group)))
                 idx
             end
         end

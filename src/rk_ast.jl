@@ -1345,16 +1345,18 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     # consumers. All derived scales remain ordinary graph values.
     joint_priors = Dict{Tuple{Symbol,Symbol},Tuple{Symbol,Tuple}}()
     level_indices = Dict{Tuple{Symbol,Symbol},Symbol}()
+    level_sources = Dict{Symbol,Symbol}(d.label => d.name for d in plan.derived
+        if d.expression.head === :_rk_fit_input)
     for (bi, bucket) in enumerate(plan.ranef_buckets)
         bucket.decomposition === nothing && continue
         append!(stmts, _rk_ast_value_bucket(defs, bucket, ranef_draws[bi],
-            ranef_effects, taken, bindings; level_indices, predictors=plan.predictors,
-            population_priors=joint_priors, coordinates))
+            ranef_effects, taken, bindings; level_indices, level_sources,
+            predictors=plan.predictors, population_priors=joint_priors, coordinates))
     end
     for (bi, bucket) in enumerate(plan.ranef_buckets)
         bucket.decomposition === nothing || continue
         append!(stmts, _rk_ast_value_bucket(defs, bucket, ranef_draws[bi],
-            ranef_effects, taken, bindings; level_indices, coordinates))
+            ranef_effects, taken, bindings; level_indices, level_sources, coordinates))
     end
     vector_priors = Dict(v.name => v for v in plan.vector_parameters)
     owned_vectors = Set{Symbol}()

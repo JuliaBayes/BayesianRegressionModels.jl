@@ -3964,6 +3964,11 @@ function _rk_lower_ranef_bucket(context, id::Union{Nothing,Symbol},
     bound = _rk_ranef_group_column!(columns, taken, gname, raw,
         id === nothing ? "predictor `$(first(targets)[1])` random effect" :
             "`|$id|` random-effect block")
+    # The block's levels are read from a fit-role copy of the grouping
+    # column: the training groups on a frozen `reprocess`, so a replay keeps
+    # the fitted effects of the groups it holds (the column itself under
+    # `resample_groups`).
+    _rk_fit_twin!(derived, columns, taken, data, bound)
     margins = _RKRanefMargin[]
     slices = Tuple{Symbol,UnitRange{Int}}[]
     _rk_bucket_margins!(margins, slices, context, targets, id, columns,
