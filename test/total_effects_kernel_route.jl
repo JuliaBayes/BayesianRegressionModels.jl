@@ -88,10 +88,14 @@ if get(ENV, "BRM_TOTALS_KERNEL_RUNTIME", "1") == "1"
     end
     # Each new group is drawn around the ONE shared recovered population draw
     # (with independent deviation noise per group — means match, values differ).
+    # `weight` is one value per subject, a group-level predictor the totals
+    # integrate, so each group's mean is its own A * (W[g,:] .* beta).
+    @test bt.group_columns == (:weight,)
+    population_mean = BRM._total_location(bt, conditional.mean)
     @test length(newcols) == 2
     for g in newcols
         @test vec(mean(moved[:, c_to.totals[g, :]]; dims = 1)) ≈
-            bf.A * conditional.mean atol = 0.15
+            population_mean[g, :] atol = 0.15
     end
     @test all(i -> isfinite(BS.log_density(new_p.model, moved[i, :])),
               1:size(moved, 1))
@@ -102,7 +106,7 @@ if get(ENV, "BRM_TOTALS_KERNEL_RUNTIME", "1") == "1"
                           resample = :subject, rng = Xoshiro(23))
     for g in 1:length(lt)
         @test vec(mean(loo[:, c_to.totals[g, :]]; dims = 1)) ≈
-            bf.A * conditional.mean atol = 0.15
+            population_mean[g, :] atol = 0.15
     end
     # ...so the retained groups no longer carry their fitted values.
     oldcols = [g for (g, lvl) in enumerate(lt) if lvl in lf]

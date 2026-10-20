@@ -65,7 +65,8 @@ function _sb_population_total!(body::Expr, block::TotalEffectBlock)
     zn = _sb_total_design_name(block.predictor)
     fitted = _sb_total_location(block.binding, block.group_index, zn)
     population = _sb_total_population_location(zn, _sb_total_basis_name(block.predictor),
-                                                block.population)
+                                                _sb_total_group_design_name(block.predictor),
+                                                block.population, block.group_index)
     hits = Ref(0)
     rewrite(x) = x == fitted ? (hits[] += 1; population) :
         x isa Expr ? Expr(x.head, map(rewrite, x.args)...) : x
@@ -107,7 +108,9 @@ BridgeStan.param_constrain(model, draw; include_tp = true, include_gq = true,
 A selected factor may carry exact total-coefficient blocks
 ([`total_effect_blocks`](@ref), the default `total_groups = :auto` for an
 independent Gaussian block). Each such predictor reads its block's population
-mean `Z * (A * beta)` instead of the group totals, where `beta` is the
+mean `Z * (A * beta)` instead of the group totals — with group-level predictors
+in the block (`TotalEffectBlock.group_columns`), each group's own mean
+`Z * (A * (W[g,:] .* beta))` — where `beta` is the
 population coefficient the program recovers conditionally in generated
 quantities (`TotalEffectBlock.population`): one exact draw per evaluation, so
 the location agrees in law with `population_draws(...; rng)`. The totals,

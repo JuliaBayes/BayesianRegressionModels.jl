@@ -178,15 +178,18 @@ end
     for (lp, sd) in (:log_CL => 0.3, :log_V => 0.2)
         @test θ[BRM._total_coordinates(sb, blocks[lp], names).scales] ≈ [sd] rtol=1e-12
     end
-    # Absorbed intercepts place every total at the population value; the
-    # retained `weight` slope is sampled.
-    for (lp, β) in (:log_CL => log(2.7), :log_V => log(31.5))
-        @test blocks[lp].population_columns == (:Intercept,)
+    # Absorbed coefficients place every total at its subject's population
+    # value; `weight` is one value per subject, so it is absorbed too.
+    @test blocks[:log_CL].population_columns == (:Intercept, :weight)
+    @test blocks[:log_CL].group_columns == (:weight,)
+    @test blocks[:log_V].population_columns == (:Intercept,)
+    for (lp, β) in (:log_CL => log(2.7) .+ 0.75 .* NLME_PLATE_DATA.weight,
+                    :log_V => fill(log(31.5), 3))
         totals = BRM._total_coordinates(sb, blocks[lp], names).totals
-        @test θ[totals] ≈ fill(β, size(totals)) rtol=1e-12
+        @test vec(θ[totals]) ≈ β rtol=1e-12
     end
-    @test θ[only(brm_population_effect_coordinates(d, :log_CL, names;
-        coefficient=:weight).coordinates)] ≈ 0.75 rtol=1e-12
+    gq = String.(BridgeStan.param_names(model; include_tp=true, include_gq=true))
+    @test brm_population_effect_coordinates(d, :log_CL, gq; coefficient=:weight).recovered
     @test θ[only(brm_output_coordinates(d, :sigma, names))] ≈ 0.7 rtol=1e-12
     # Unaddressed coordinates keep a random base: here everything but one scale.
     unc = String.(BridgeStan.param_unc_names(model))
