@@ -179,13 +179,14 @@ BRM adds:
   output's own coordinates* — so it composes directly with the vector
   [`brm_output_coordinates`](@ref) returns, and a consumer never re-derives
   per-subject boundaries from a length column.
-- `component` — which part of a random-effect block this output is, or
-  `nothing` for an output that belongs to no block. Every `:random_effect`
-  output of a StanBlocks (`SBBRMI`) descriptor has one, and so does a block's
-  scale when it is its own statement (a known-value block's sampled scales, an
-  exact total block's scale). A Turing descriptor's random-effect site is a
-  whole block and carries `nothing`, as does a sum-to-zero block
-  (`s2z_groups`, role `:s2z_effect`):
+- `component` — which part of a random-effect block, or of a population,
+  categorical or structured-term block (second table), this output is, or
+  `nothing` for an output that belongs to no such block. Every
+  `:random_effect` output of a StanBlocks (`SBBRMI`) descriptor has one, and
+  so does a block's scale when it is its own statement (a known-value block's
+  sampled scales, an exact total block's scale). A Turing descriptor's
+  random-effect site is a whole block and carries `nothing`, as does a
+  sum-to-zero block (`s2z_groups`, role `:s2z_effect`):
 
   | component | what it is |
   | --- | --- |
@@ -209,6 +210,23 @@ BRM adds:
       o.declaration.target, brm_output_coordinates(o, constrained_names)
   end
   ```
+
+  The parts of a population, categorical or structured-term block. A term
+  part's name is the `parameter=` [`brm_term_coordinates`](@ref) takes for
+  it:
+
+  | component | what it is |
+  | --- | --- |
+  | `:coefficients` | the population coefficient vector (`labels` names its elements) |
+  | `:contrasts` / `:cell_means` | a categorical predictor's K-1 treatment contrasts, or the cell means of an intercept-free predictor's first factor |
+  | `:contribution` | the per-row value a population or categorical block adds to its linear predictor |
+  | `:length_scale`, `:sd`, `:basis_weights`, `:simplex`, `:ar`, `:innovations`, the hyper-predictor roles | the term parameter of that name (`hsgp`; `mo`/`mo1`; `dar`/`rw`/`cdar`). A grouped `hsgp(...; by=g)`'s per-group weights are `:basis_weights` too, though `brm_term_coordinates` does not address them |
+  | `:value` | the term's own per-row value (`hsgp`, `mo1`, `dar`, `rw`, `cdar`) |
+  | `:auxiliary` | any other internal of these blocks: an `mo` design column, a horseshoe's scales, an `hsgp` spectral density |
+
+  `s`, `t2`, `gp`, `me`, `ar` and `interval_censored` terms have no public
+  parameter roles, and neither do an R2D2 prior's `R²` and simplex: their
+  outputs carry `predictors` (and `term`) but no component.
 - `dims` — the resolved length of each axis of `size` (`()` for a scalar), or
   `nothing` when BRM cannot resolve one. A literal size and a size naming a
   data input resolve from the bound data; a categorical predictor's contrast
@@ -216,6 +234,41 @@ BRM adds:
   carrier with no elements — a one-level treatment factor's contrasts, a
   one-level ordinal outcome's thresholds — which BridgeStan lists under no
   name, so [`brm_output_coordinates`](@ref) returns `Int[]` for it.
+- `predictors` — the formula linear predictors whose terms own this output,
+  by their public names (`:Vc` for `log(Vc) ~ …`), in formula order, or `()`
+  for an output no formula term owns (an ordinary prior such as `sigma`, an
+  observation's twins, a plate cell's values, a `:stan_derived`
+  intermediate). It covers the population block and its prior (R2D2,
+  horseshoe), every categorical and structured term, every random-effect
+  block, exact-total and S2Z blocks, and the predictor's own value. A block
+  that terms of several predictors own lists every one of them: a shared
+  `(… | p | g)` block and a joint `sd(:, p) ~ r2d2(...)` budget, split per
+  margin through [`brm_ranef_draws`](@ref)' `margins`. A `reference_scale=`
+  the author declared stays the author's.
+- `term` — the formula term this output belongs to, in the address the
+  per-term queries take, or `nothing`. A categorical block's is its column as
+  written (`:g` for `factor(g; ref=3)`, the `coefficient=` of
+  [`brm_population_effect_coordinates`](@ref)); a structured term's is its
+  term label (`:hsgp_t`, `:mo_dose`, `:rw_mu_t`, `Symbol("s(x)")`, the `term=`
+  of [`brm_term_coordinates`](@ref)). The population coefficient vector and
+  random-effect blocks carry `nothing`: their elements are addressed by
+  `labels`, and by block and component.
+
+  So every posterior coordinate groups by predictor and labels by term and
+  part without reading an emitted name, and the address resolves back to the
+  output:
+
+  ```julia
+  for o in brm_outputs(d; predictor=:mu, kind=:parameter)
+      if o.component in (:contrasts, :cell_means)
+          brm_population_effect_coordinates(d, :mu, constrained_names;
+                                            coefficient=o.term)  # .output === o
+      elseif !isnothing(o.term) && o.component !== :auxiliary
+          brm_term_coordinates(d, :mu, constrained_names;
+                               term=o.term, parameter=o.component)
+      end
+  end
+  ```
 
 `role` is derived from the declaration, never from the output's name — a user
 variable may legitimately be called `beta_pop` or end in `_gen`.
@@ -235,13 +288,21 @@ struct BRMOutput
     segments::Union{Nothing,Vector{Int}}
     component::Union{Nothing,Symbol}
     dims::Union{Nothing,Tuple{Vararg{Int}}}
+    predictors::Tuple{Vararg{Symbol}}
+    term::Union{Nothing,Symbol}
 end
 
 # Preserve the earlier positional constructors for downstream code that creates
-# display-only BRMOutput values. `segments`, `logical`, `component` and `dims`
-# are appended rather than inserted precisely so those calls keep compiling;
-# `brm_descriptor` assigns `component` (`_brm_ranef_components`) and then
-# `dims` (`_brm_output_dims`) in its last passes.
+# display-only BRMOutput values. `segments`, `logical`, `component`, `dims`,
+# `predictors` and `term` are appended rather than inserted precisely so those
+# calls keep compiling; `brm_descriptor` assigns `component`
+# (`_brm_ranef_components`), then `dims` (`_brm_output_dims`), then the
+# address fields and the population-level `component`s
+# (`_brm_output_addresses`) in its last passes.
+BRMOutput(name, kind, type, size, constraints, generative, source, role,
+          declaration, logical, labels, segments, component, dims) =
+    BRMOutput(name, kind, type, size, constraints, generative, source, role,
+              declaration, logical, labels, segments, component, dims, (), nothing)
 BRMOutput(name, kind, type, size, constraints, generative, source, role,
           declaration, logical, labels, segments, component) =
     BRMOutput(name, kind, type, size, constraints, generative, source, role,
@@ -1473,6 +1534,7 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
     end
     outputs = _brm_ranef_components(outputs, plan, stan)
     outputs = _brm_output_dims(outputs, plan, stan)
+    outputs = _brm_output_addresses(outputs, plan)
 
     # --- schema -------------------------------------------------------------
     columns = Tuple(sort!(collect(df_columns)))
@@ -1594,6 +1656,219 @@ end
 _brm_empty_carrier(output::BRMOutput) =
     !isnothing(output.dims) && any(iszero, output.dims)
 
+# The linear-predictor address of every output a formula term owns
+# (`BRMOutput.predictors` / `term`, and `component` for the parts of
+# population, categorical and structured-term blocks; design decision `0yh0jw3`).
+# Nothing is read off an output name: ownership comes forwards from the formula
+# through the resolvers the public coordinate queries use
+# (`_brm_population_effect_entries`, `_brm_categorical_effect_entries`,
+# `_brm_term_coordinate_entries` -> `_brm_term_owner_output`), the emission
+# bindings of random-effect, exact-total and S2Z blocks, and the margins
+# `ranefcoefnames` reports for a shared `|ID|` block. So a categorical block's
+# address resolves back through `brm_population_effect_coordinates(...;
+# coefficient=term)`, and a term part's through `brm_term_coordinates(...;
+# term, parameter=component)` for every parameter role that query exposes. A
+# block shared by several predictors lists every one of them. Ownership is
+# keyed by declaration target, or by output name for outputs a block names
+# without declaring.
+function _brm_output_addresses(outputs, plan)
+    brmi = plan.parent
+    view = (; plan, outputs)
+    owners = Dict{Symbol,Vector{Symbol}}()
+    terms = Dict{Symbol,Symbol}()
+    parts = Dict{Symbol,Symbol}()
+    own! = (key, lp) -> begin
+        found = get!(owners, key, Symbol[])
+        lp in found || push!(found, lp)
+    end
+    term! = (key, term) -> get!(terms, key, term) === term || error(
+        "brm_descriptor: block `$key` is owned by formula terms `$(terms[key])` ",
+        "and `$term`; the traced model is ambiguous.")
+    # The parts of one owned block: the carriers `parts` names keep their
+    # component, every other output of the block is `:auxiliary`.
+    block_parts! = (block, named) -> for o in outputs
+        !isnothing(o.declaration) && o.declaration.target === block || continue
+        parts[o.name] = get(named, o.name, :auxiliary)
+    end
+
+    for e in _brm_population_effect_entries(brmi)
+        own!(e.block, e.logical)
+        block_parts!(e.block, Dict(Symbol(e.block, :_beta_pop) => :coefficients,
+                                   e.block => :contribution))
+        # A whole-predictor R2D2 prior's own hyperparameters.
+        scheme = get(get(plan.bindings, e.block, (;)), :prior_scheme, (; kind=:ordinary))
+        if scheme.kind === :r2d2
+            for key in (scheme.names.r2_name, scheme.names.phi_name, scheme.names.tau_name)
+                isnothing(key) || own!(key, e.logical)
+            end
+        end
+
+        addresses = _sb_cat_address_map(brmi, e.logical)
+        for cat in _brm_categorical_effect_entries(plan, e.logical, e.link)
+            # The column as written (`coefficient=:g` for `factor(g; ref=3)`)
+            # unless another block of this predictor holds that spelling.
+            term = get(addresses, cat.predictor, nothing) === cat.emitted ?
+                cat.predictor : cat.address
+            get(addresses, term, nothing) === cat.emitted || error(
+                "brm_descriptor: categorical block `$(cat.emitted)` of `$(e.logical)` ",
+                "has no public `coefficient=` address.")
+            own!(cat.emitted, e.logical)
+            term!(cat.emitted, term)
+            block_parts!(cat.emitted, Dict(
+                _brm_categorical_carrier(cat.emitted) =>
+                    cat.coding === :cellmeans ? :cell_means : :contrasts,
+                cat.emitted => :contribution))
+        end
+
+        for entry in _brm_term_coordinate_entries(brmi, e.logical)
+            f = getf(entry.value)
+            # A term that emitted nothing owns nothing.
+            isempty(_brm_term_owners(view, e.logical, entry)) && continue
+            owner = _brm_term_owner_output(view, e.logical, entry)
+            block = owner.declaration.target
+            own!(block, e.logical)
+            term!(block, entry.term)
+            roles = merge(_brm_term_parameter_bindings(f, entry.value),
+                          _brm_hyper_role_bindings(
+                              _brm_term_hyper_plans(plan, e.logical, entry.value)))
+            # A term with no public parameter vocabulary (`s`, `t2`, `gp`,
+            # `me`) names no parts.
+            isempty(roles) && !_brm_term_has_value(f) && continue
+            named = Dict{Symbol,Symbol}()
+            _brm_term_has_value(f) && (named[owner.name] = :value)
+            for (role, binding) in pairs(roles)
+                expected = Symbol(_brm_stan_name(owner.declaration), :_, binding)
+                # The carrier `brm_term_coordinates(...; parameter=role)` returns.
+                idxs = _brm_carrier_indices(outputs,
+                           o -> !isnothing(o.declaration) &&
+                                o.declaration.target === block && o.name === expected)
+                length(idxs) == 1 && (named[outputs[only(idxs)].name] = role)
+            end
+            block_parts!(block, named)
+        end
+    end
+
+    # A grouped term's per-group latent block (`hsgp(...; by=g)`'s basis
+    # weights) is allocated beside the term from the same formula walk the
+    # emitter runs (`_sb_collect_group_block_terms`), as a `zflat_<field>_<g>`
+    # draw reshaped into `b_<field>_<g>` (`_sb_emit_group_blocks!`).
+    lp_names = Set{Symbol}(e.logical for e in _brm_population_effect_entries(brmi))
+    for gb in _sb_collect_group_block_terms(brmi), field in gb.fields
+        gb.key in lp_names || continue
+        suffix = Symbol(field.name, :_, _sb_group_name(field.group, gb.rhs_e))
+        term = _brm_term_label(gb.f, gb.rhs_e)
+        for key in (Symbol(:b_, suffix), Symbol(:zflat_, suffix))
+            own!(key, gb.key)
+            term!(key, term)
+            parts[key] = _brm_group_block_part(gb.f)
+        end
+    end
+
+    for o in outputs
+        o.role === :linear_predictor && !isnothing(o.logical) && own!(o.name, o.logical)
+    end
+
+    # Random-effect blocks: a plain block's binding records its predictor, an
+    # `|ID|` block spans its margins' predictors (`ranefcoefnames` order; the
+    # bucket is matched on its grouping too, since one `|ID|` may name blocks
+    # of several grouping factors).
+    buckets = _sb_collect_id_buckets(brmi)
+    for block in ranef_blocks(plan)
+        binding = get(plan.bindings, block.binding, (;))
+        if !isnothing(block.id)
+            found = [b for (k, b) in pairs(buckets) if first(k) === block.id]
+            length(found) > 1 && (found = [b for (k, b) in pairs(buckets)
+                                           if first(k) === block.id && last(k) == block.group])
+            length(found) == 1 || error(
+                "brm_descriptor: random-effect block `$(block.binding)` matches ",
+                "$(length(found)) `|$(block.id)|` buckets.")
+            for margin in _sb_id_bucket_margins(only(found))
+                own!(block.binding, margin.predictor)
+            end
+        elseif hasproperty(binding, :predictor)
+            own!(block.binding, binding.predictor)
+        end
+    end
+    # The sampled hyperparameters and carrier of a marginalized `|ID|` block are
+    # their own statements, bound to the bucket they complete.
+    for (key, binding) in plan.bindings
+        hasproperty(binding, :marginal_of) || continue
+        foreach(lp -> own!(key, lp), get(owners, binding.marginal_of, ()))
+    end
+    # A joint R2D2M2 budget over a shared block (`sd(:, p) ~ r2d2(...)`): its
+    # R² and simplex span the margins it allocates, and a margin reference
+    # scale BRM samples for it belongs to that margin (one the author declared,
+    # `reference_scale=sigma_y`, stays the author's).
+    for (_, binding) in plan.bindings
+        a = get(binding, :allocation_scheme, nothing)
+        isnothing(a) && continue
+        _, id, group = a.block
+        found = [b for (k, b) in pairs(buckets) if first(k) === id && last(k) == group]
+        length(found) == 1 || error(
+            "brm_descriptor: R2D2 budget `$(a.r2_name)` matches $(length(found)) ",
+            "`|$id|` buckets.")
+        margins = _sb_id_bucket_margins(only(found))
+        for (i, index) in enumerate(a.indices)
+            lp = margins[index].predictor
+            own!(a.r2_name, lp)
+            own!(a.phi_name, lp)
+            ref = a.references[i]
+            ref isa Symbol && !haskey(brmi.operations, ref) && own!(ref, lp)
+        end
+    end
+    # Exact-total and S2Z statements record the predictor they decompose as
+    # their binding's `logical` (a random-effect binding's `logical` is its
+    # grouping factor instead).
+    for (key, binding) in plan.bindings
+        binding.role in (:population_effect, :parameter, :s2z_effect, :total_effect) &&
+            binding.logical in lp_names && own!(key, binding.logical)
+    end
+    for block in Iterators.flatten((total_effect_blocks(plan), s2z_effect_blocks(plan)))
+        keys = (block.binding, block.scales, block.population, block.deviations,
+                (block isa S2ZEffectBlock ?
+                     (block.recovered, block.effects, block.coordinates) : ())...)
+        foreach(key -> own!(key, block.predictor), keys)
+        # The statements these carriers belong to (a scale's sampled `tau`).
+        for o in outputs
+            o.name in keys && !isnothing(o.declaration) &&
+                own!(o.declaration.target, block.predictor)
+        end
+    end
+
+    order = Dict(l.name => i for (i, l) in enumerate(linear_predictors(brmi)))
+    owner_keys(o) = isnothing(o.declaration) ? (o.name,) : (o.declaration.target, o.name)
+    function predictors(o)
+        found = Symbol[]
+        for key in owner_keys(o), lp in get(owners, key, ())
+            lp in found || push!(found, lp)
+        end
+        Tuple(sort!(found; by=lp -> get(order, lp, typemax(Int))))
+    end
+    function term_of(o)
+        for key in owner_keys(o)
+            haskey(terms, key) && return terms[key]
+        end
+        nothing
+    end
+    unowned = [o for o in outputs
+               if o.role === :random_effect && isempty(predictors(o))]
+    isempty(unowned) || error(
+        "brm_descriptor: random-effect output(s) ",
+        join(("`$(o.name)`" for o in unowned), ", "),
+        " belong to no linear predictor. Record the block's predictor on its ",
+        "emission binding (`_sb_record_binding!`, src/sbimpl.jl).")
+    BRMOutput[BRMOutput(o.name, o.kind, o.type, o.size, o.constraints, o.generative,
+                        o.source, o.role, o.declaration, o.logical, o.labels,
+                        o.segments,
+                        isnothing(o.component) ? get(parts, o.name, nothing) : o.component,
+                        o.dims, predictors(o), term_of(o))
+              for o in outputs]
+end
+
+# The component of a grouped term's per-group latent block.
+_brm_group_block_part(_f) = :auxiliary
+_brm_group_block_part(::typeof(hsgp)) = :basis_weights
+
 # Every operation StanBlocks derived, delegated verbatim, plus the two BRM-level
 # replay operations. Nothing is listed: `stan.operations` is itself derived from
 # what the traced model supports, and the two BRM ones are gated on the
@@ -1710,7 +1985,8 @@ brm_columns(d::BRMDescriptor) = d.columns
 
 """
     brm_outputs(d::BRMDescriptor; logical=nothing, role=nothing, kind=nothing,
-                component=nothing, submodel=nothing) -> Vector{BRMOutput}
+                component=nothing, predictor=nothing, term=nothing,
+                submodel=nothing) -> Vector{BRMOutput}
 
 Every emitted output matching the given semantic filters, in descriptor order.
 Each filter accepts a `Symbol` or any collection of them, and an omitted filter
@@ -1722,12 +1998,19 @@ brm_outputs(d; role=:posterior_predictive)          # every predictive carrier
 brm_outputs(d; logical=:pk_conc)                    # every carrier of one target
 brm_outputs(d; role=(:parameter, :random_effect))   # either role
 brm_outputs(d; component=:correlation_cholesky)     # every random-effect block's `L`
+brm_outputs(d; predictor=:mu)                       # everything that feeds `mu`
+brm_outputs(d; predictor=:mu, term=:treatment)      # one categorical block of `mu`
 brm_outputs(d; submodel=:effect)                    # every output one submodel call owns
 ```
 
 `component=` selects parts of random-effect blocks — scales, correlation
-factors, standardized draws, effects — by the `component` field of
-[`BRMOutput`](@ref), which lists them.
+factors, standardized draws, effects — and of population, categorical and
+structured-term blocks — coefficients, contrasts, length scales, simplexes —
+by the `component` field of [`BRMOutput`](@ref), which lists them.
+
+`predictor=` selects the outputs whose `predictors` include it, so a block
+shared by several predictors is returned for each of them; `term=` selects by
+the `term` field (a categorical column or a term label).
 
 `submodel=` scopes the query to one consumer `@slic` submodel call (see
 [`BRMSubmodel`](@ref)): the outputs that call owns, its `outputs` field. It
@@ -1738,23 +2021,30 @@ own `~` declarations and `=` assignments (`logical=:slope` for
 `slope ~ normal(…)` in the body called for `effect`).
 
 Filtering here is on BRM meaning (`logical` / `role` / `component` /
-`submodel`) or Stan representation (`kind`) — never on the emitted NAME, which
-the compiler owns.
+`predictor` / `term` / `submodel`) or Stan representation (`kind`) — never on
+the emitted NAME, which the compiler owns.
 """
 function brm_outputs(d::BRMDescriptor; logical=nothing, role=nothing, kind=nothing,
-                     component=nothing, submodel=nothing)
+                     component=nothing, predictor=nothing, term=nothing,
+                     submodel=nothing)
     isnothing(submodel) || return _brm_submodel_query(
-        d, _brm_submodel_entry(d, submodel), logical, role, kind, component)
+        d, _brm_submodel_entry(d, submodel), logical, role, kind, component,
+        predictor, term)
     BRMOutput[o for o in d.outputs
               if _brm_matches(o.logical, logical) &&
                  _brm_matches(o.role, role) &&
                  _brm_matches(o.kind, kind) &&
-                 _brm_matches(o.component, component)]
+                 _brm_matches(o.component, component) &&
+                 _brm_matches_any(o.predictors, predictor) &&
+                 _brm_matches(o.term, term)]
 end
 
 _brm_matches(_value, ::Nothing) = true
 _brm_matches(value, wanted::Symbol) = value === wanted
 _brm_matches(value, wanted) = any(w -> value === w, wanted)
+# A multi-valued field (`predictors`) matches when any of its values does.
+_brm_matches_any(_values, ::Nothing) = true
+_brm_matches_any(values, wanted) = any(v -> _brm_matches(v, wanted), values)
 
 # ---- consumer submodel scope ------------------------------------------------
 #
@@ -1836,14 +2126,16 @@ _brm_symbols(name::Symbol) = (name,)
 _brm_symbols(names) = names
 
 function _brm_submodel_query(d::BRMDescriptor, s::BRMSubmodel, logical, role, kind,
-                             component)
+                             component, predictor=nothing, term=nothing)
     wanted = isnothing(logical) ? nothing :
         Set{Symbol}(o.name for name in _brm_symbols(logical)
                     for o in _brm_submodel_carriers(d, s, name))
     BRMOutput[o for o in s.outputs
               if (isnothing(wanted) || o.name in wanted) &&
                  _brm_matches(o.role, role) && _brm_matches(o.kind, kind) &&
-                 _brm_matches(o.component, component)]
+                 _brm_matches(o.component, component) &&
+                 _brm_matches_any(o.predictors, predictor) &&
+                 _brm_matches(o.term, term)]
 end
 
 function _brm_submodel_output(d::BRMDescriptor, s::BRMSubmodel, name::Symbol, role)
@@ -2100,6 +2392,29 @@ function _brm_term_owner_labels(::typeof(hsgp), t, target)
     scoped = Symbol(:hsgp_, target, :_, join(string.(axes), "_"))
     scoped === base ? (base,) : (scoped, base)
 end
+# The other structured terms are labelled by their formula spelling
+# (`_sb_term_key`), while their carriers follow the emitter's own naming:
+# `s`/`gp` disambiguate like `mo`/`hsgp` (`_sb_unique_structured_term_names`),
+# `t2` is always scoped to its predictor, and `me`/`interval_censored` are
+# named by their columns alone.
+function _brm_structured_owner_labels(family::Symbol, t, target)
+    axes = join((string(name(_sb_named_inner(family, a))) for a in getargs(t)), "_")
+    (Symbol(family, :_, target, :_, axes), Symbol(family, :_, axes))
+end
+_brm_term_owner_labels(::typeof(s), t, target) =
+    _brm_structured_owner_labels(:s, t, target)
+_brm_term_owner_labels(::typeof(gp), t, target) =
+    _brm_structured_owner_labels(:gp, t, target)
+_brm_term_owner_labels(::typeof(t2), t, target) =
+    _brm_structured_owner_labels(:t2, t, target)
+_brm_term_owner_labels(::typeof(ar), t, target) =
+    _brm_structured_owner_labels(:ar, t, target)
+_brm_term_owner_labels(::typeof(me), t, _target) =
+    (Symbol(:me_, name(_sb_named_inner(:me, first(getargs(t))))),)
+_brm_term_owner_labels(::typeof(interval_censored), t, _target) =
+    (Symbol(:interval_censored_,
+            name(_sb_named_inner(:interval_censored, only(getargs(t)))), :_,
+            name(_sb_named_inner(:interval_censored, getkwargs(t).upper))),)
 
 _brm_term_owner_matches(_plan, _f, _t, _output) = true
 function _brm_term_owner_matches(plan, ::typeof(hsgp), t, output)
@@ -2199,6 +2514,12 @@ function _brm_term_coordinate_entries(brmi, logical::Symbol)
     entries = NamedTuple[]
     for terms in values(_sb_term_address_map(brmi, logical)), t in terms
         push!(entries, (; term=_brm_term_label(getf(t), t, target), value=t, link))
+    end
+    # `ar` has no configurable prior, so the prior address map omits it; its
+    # carriers are the predictor's all the same.
+    for t in _brm_additive_terms(last(getargs(linear_predictor_op(brmi, logical), 2)))
+        t isa ExprColumn && getf(t) === ar || continue
+        push!(entries, (; term=_brm_term_label(ar, t, target), value=t, link))
     end
     entries
 end
@@ -2397,13 +2718,22 @@ end
 # The logical output that owns one formula term on `logical`: the term's
 # collected value, whose declaration carries the term's sampled parameters and
 # fitted inputs. Resolved without parsing an emitted name.
-function _brm_term_owner_output(d::BRMDescriptor, logical::Symbol, entry)
-    term = entry.term
+function _brm_term_owner_output(d, logical::Symbol, entry)
+    owners = _brm_term_owners(d, logical, entry)
+    length(owners) == 1 || error(
+        "brm_descriptor: term `$(entry.term)` on logical predictor `$logical` has " *
+        "$(length(owners)) logical output owners across emitted candidates " *
+        "$(_brm_term_owner_labels(getf(entry.value), entry.value, _sb_lp_emitted_name(logical, entry.link))); " *
+        "expected exactly one.")
+    only(owners)
+end
+
+# Every output that can own the term: none when the term emitted nothing (a
+# single-level `mo1(c)`), several only for an ambiguous trace.
+function _brm_term_owners(d, logical::Symbol, entry)
     emitted_lp = _sb_lp_emitted_name(logical, entry.link)
-    owner_labels = _brm_term_owner_labels(
-        getf(entry.value), entry.value, emitted_lp)
     owners = BRMOutput[]
-    for label in owner_labels
+    for label in _brm_term_owner_labels(getf(entry.value), entry.value, emitted_lp)
         append!(owners, BRMOutput[
             o for o in d.outputs
             if o.logical === label && !isnothing(o.declaration) &&
@@ -2412,11 +2742,7 @@ function _brm_term_owner_output(d::BRMDescriptor, logical::Symbol, entry)
         ])
         isempty(owners) || break
     end
-    length(owners) == 1 || error(
-        "brm_descriptor: term `$term` on logical predictor `$logical` has " *
-        "$(length(owners)) logical output owners across emitted candidates " *
-        "$(owner_labels); expected exactly one.")
-    only(owners)
+    owners
 end
 
 # The declaration-owned output that carries one parameter role of a formula

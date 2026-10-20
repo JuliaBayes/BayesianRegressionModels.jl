@@ -187,9 +187,10 @@ block_components(d) = Dict(
     re = brm_outputs(d; role = :random_effect)
     @test !isempty(re)
     @test all(o -> !isnothing(o.component), re)
-    # Outputs outside every block carry none.
-    @test all(o -> isnothing(o.component) || o.role === :random_effect ||
-                   o.role === :parameter, d.outputs)
+    # Outputs outside every block carry none. Population blocks name their
+    # parts too (`:coefficients`, `:contribution`; design decision `0yh0jw3`).
+    @test all(o -> isnothing(o.component) ||
+                   o.role in (:random_effect, :parameter, :population_effect), d.outputs)
 end
 
 @testset "components per block shape" begin
