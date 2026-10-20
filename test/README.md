@@ -139,7 +139,19 @@ per subject when it is observed outside the cell. The observation never reads
 the helper over the whole flattened result. It checks BridgeStan density and
 gradient parity with the in-cell spelling. For a `ragged(y, group)` join it
 also checks the omitted response: the same observation statement, the bound
-`y_rows` partition and its replay, and the predictive segments.
+`y_rows` partition and its replay, and the predictive segments. For the
+model-scope form over pre-grouped data (`y ~ censored(Normal(loc, addprop(loc,
+…)); lower=lloq)` with `y` omitted, and its uncensored twin) it checks the same
+observation statement, an argument plate over the plate result's own cells,
+predictive segments before and after `reprocess`, a finite BridgeStan draw
+above the censoring floor, and that a bound `qt` beside the omitted `y` has
+exactly the `qt`-only model's coordinates and density.
+
+`omitted_censored_response.jl` checks a flat `y ~ censored(Normal(mu, sigma);
+lower=lloq)` with `y` omitted: the warning, the observation role, the
+`y_gen`-only output, the bound twin's predictive law, BridgeStan draws clamped
+at `lloq`, and a fitted response beside it whose density equals the
+uncensored twin's.
 
 `adaptive_multiaxis_hsgp_centering.jl` checks online adaptive centering of
 two-axis squared-exponential HSGPs: isotropic (one length scale every axis

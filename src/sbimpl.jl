@@ -5536,14 +5536,23 @@ function _sb_emit_prepared!(stmts, data, node::_BRMPreparedParameter, key, sourc
     _sb_emit_sampled_declaration!(stmts, data, key, getf(rhs), rhs)
 end
 function _sb_emit_sampled_declaration!(stmts, data, key, callable, rhs)
+    # A law over a value read per subject (a `@plate` or kernel result, or data
+    # grouped per subject) declares no parameter: no parameter has a ragged
+    # shape. It observes a model-scope response with its column omitted, so it
+    # emits the bound response's likelihood statement, per-subject argument
+    # plates included (`_sb_grouped_argument!`).
+    _sb_reads_grouped_value(rhs) && return _sb_likelihood!(stmts, key, rhs, data)
     _sb_emit_vector_prior!(stmts, data, key, callable, rhs) && return
     _sb_emit_prior!(stmts, key, callable, rhs) && return
     error("sbimpl: sampled declaration `$key` has no Stan prior translation for `$callable`")
 end
-# `weighted` wraps only observations, so a sampled `weighted` declaration is an
-# observation with its response omitted: it emits the weighted likelihood
-# statement, which StanBlocks forward-simulates from the fitted predictive law.
-_sb_emit_sampled_declaration!(stmts, data, key, ::typeof(weighted), rhs) =
+# `weighted` and `censored` wrap only observations (a censored law puts mass on
+# its bounds, which no parameter can be sampled from), so a sampled declaration
+# of either is an observation with its response omitted: it emits the
+# likelihood statement, which StanBlocks forward-simulates from the fitted
+# predictive law.
+_sb_emit_sampled_declaration!(stmts, data, key,
+                              ::Union{typeof(weighted),typeof(censored)}, rhs) =
     _sb_likelihood!(stmts, key, rhs, data)
 function _sb_emit_prepared!(stmts, data, node::_BRMPreparedAssignment, key, source; kwargs...)
     _, rhs = getargs(source, 2)
@@ -13395,14 +13404,8 @@ function _sb_grouped_argument_ports!(ports, argument::NamedColumn, lengths)
     if backing isa DataColumn
         raw = parent(backing)
         raw isa AbstractVector{<:AbstractVector} || return false
-        actual = length.(raw)
-        length(actual) == length(lengths) &&
-            all(pair -> first(pair) == last(pair) || first(pair) == 1,
-                zip(actual, lengths)) || error(
-            "sbimpl: observation argument `$(name(argument))` has group lengths " *
-            "$actual; expected $lengths")
         ports[name(argument)] = argument
-        return actual != lengths
+        return _sb_grouped_port_broadcasts(argument, length.(raw), lengths)
     end
     # A kernel result is one cell per subject, so it slices per observed group
     # exactly like ragged data. Its subject grouping is irrelevant here: a
@@ -13411,6 +13414,18 @@ function _sb_grouped_argument_ports!(ports, argument::NamedColumn, lengths)
     false
 end
 _sb_grouped_argument_ports!(_ports, _argument, _lengths) = false
+# Whether a grouped data argument has singleton groups to broadcast over the
+# observed groups' `lengths`. An omitted response has no observed lengths: its
+# data arguments are read as they are grouped.
+function _sb_grouped_port_broadcasts(argument, actual, lengths)
+    length(actual) == length(lengths) &&
+        all(pair -> first(pair) == last(pair) || first(pair) == 1,
+            zip(actual, lengths)) || error(
+        "sbimpl: observation argument `$(name(argument))` has group lengths " *
+        "$actual; expected $lengths")
+    actual != lengths
+end
+_sb_grouped_port_broadcasts(_argument, _actual, ::Nothing) = false
 # A row-wise callable (`addprop`) gives one group's rows the values it gives
 # them over all rows, so it runs in the cell like arithmetic. Applied to the
 # whole flattened argument, it would run once per group, every group's rows
@@ -13430,17 +13445,46 @@ function _sb_grouped_ports(argument, lengths)
     _sb_grouped_argument_ports!(ports, argument, lengths) ? ports : nothing
 end
 
-function _sb_grouped_argument!(stmts, data, target, argument, index)
-    response = get(data, target, nothing)
-    response isa AbstractVector{<:AbstractVector} || return argument
+# Whether a law reads a value grouped per subject — a kernel (`@plate`) result
+# or pre-grouped data — in any argument or keyword: the values the argument
+# plates above slice per group.
+_sb_reads_grouped_value(_x) = false
+_sb_reads_grouped_value(x::NamedColumn) =
+    !isnothing(_sb_kernel_producer(x)) ||
+    (parent(x) isa DataColumn && parent(parent(x)) isa AbstractVector{<:AbstractVector})
+_sb_reads_grouped_value(x::ExprColumn) =
+    any(_sb_reads_grouped_value, getargs(x)) ||
+    any(_sb_reads_grouped_value, values(getkwargs(x)))
+
+_sb_grouped_argument!(stmts, data, target, argument, index) =
+    _sb_grouped_argument!(stmts, data, target, get(data, target, nothing),
+                          argument, index)
+_sb_grouped_argument!(_stmts, _data, _target, _response, argument, _index) = argument
+function _sb_grouped_argument!(stmts, data, target,
+                               response::AbstractVector{<:AbstractVector},
+                               argument, index)
     ports = _sb_grouped_ports(argument, length.(response))
     isnothing(ports) ? argument :
         _sb_grouped_argument_plate!(stmts, data, target, target, argument, index, ports)
 end
+# An omitted model-scope response has no groups of its own. Its computed
+# argument runs over the cells of a value it reads: a kernel result's, which
+# are the cells that value was computed on, else grouped data's.
+# An omitted `ragged(y, group)` join grouped its arguments over its row
+# partition already (`_sb_ragged_likelihood_rhs`); they are read in place here.
+function _sb_grouped_argument!(stmts, data, target, ::Nothing, argument, index)
+    ports = _sb_grouped_ports(argument, nothing)
+    isnothing(ports) && return argument
+    names = sort!(collect(keys(ports)))
+    kernel = findfirst(n -> !isnothing(_sb_kernel_producer(ports[n])), names)
+    _sb_grouped_argument_plate!(stmts, data, target,
+        names[something(kernel, 1)], argument, index, ports)
+end
 
 # Evaluate a computed observation argument one group at a time, in a plate over
 # the observed `cells` (the bound response, or an omitted join's row partition)
-# and the argument's grouped ports.
+# and the argument's grouped ports. When `cells` names one of those ports (an
+# omitted model-scope response), that port's cell is the observed cell.
 function _sb_grouped_argument_plate!(stmts, data, target, cells, argument, index, ports)
     expression = _sb_scalar_expr(argument, data)
     names = sort!(collect(keys(ports)))
@@ -13449,16 +13493,20 @@ function _sb_grouped_argument_plate!(stmts, data, target, cells, argument, index
     _brm_cell_value_refs!(taken, expression)
     entry = _rk_ast_fresh_name("$(target)_argument_$index", taken)
     params = [_rk_ast_fresh_name("$(entry)_cell_$i", taken) for i in eachindex(names)]
-    observed = _rk_ast_fresh_name("$(entry)_observed", taken)
+    own = findfirst(==(cells), names)
+    observed = isnothing(own) ? _rk_ast_fresh_name("$(entry)_observed", taken) :
+        params[own]
     for (name, param) in zip(names, params)
         # Materialize singleton cells on the observed cell's row axis before
         # applying elementwise arithmetic or calling an exact vector law.
-        rows = :(num_elements($param) == 1 ?
+        rows = param === observed ? param : :(num_elements($param) == 1 ?
             rep_vector($param[1], num_elements($observed)) : $param)
         expression = _sb_subst_sym(expression, name, rows)
     end
-    plate = Expr(:do, Expr(:call, :plate, cells, names...),
-        Expr(:->, Expr(:tuple, observed, params...), Expr(:block, expression)))
+    iterables, formals = isnothing(own) ? ((cells, names...), (observed, params...)) :
+        (names, params)
+    plate = Expr(:do, Expr(:call, :plate, iterables...),
+        Expr(:->, Expr(:tuple, formals...), Expr(:block, expression)))
     push!(stmts, Expr(:call, :~, entry, plate))
     NamedColumn(entry, MissingColumn())
 end
