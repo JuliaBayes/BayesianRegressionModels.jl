@@ -138,6 +138,11 @@ end
 
 _sb_cell_statement(x, scope) = _sb_cell_value(x, scope)
 function _sb_cell_statement(x::Expr, scope)
+    # A cell's `@scan` block and its step loop hold statements of their own.
+    _is_brm_scan(x) &&
+        return Expr(:macrocall, x.args[1:end-1]..., _sb_cell_block(x.args[end], scope))
+    Meta.isexpr(x, :for) &&
+        return Expr(:for, _sb_cell_value(x.args[1], scope), _sb_cell_block(x.args[2], scope))
     Meta.isexpr(x, :call, 3) && x.args[1] === :~ || return _sb_cell_value(x, scope)
     law = x.args[3]
     if Meta.isexpr(law, :call) && first(law.args) === :weighted
@@ -149,3 +154,5 @@ end
 
 _sb_cell_statements(statements, scope) =
     Any[_sb_cell_statement(statement, scope) for statement in statements]
+_sb_cell_block(x, scope) = Meta.isexpr(x, :block) ?
+    Expr(:block, _sb_cell_statements(x.args, scope)...) : _sb_cell_statement(x, scope)

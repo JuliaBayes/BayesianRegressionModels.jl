@@ -4084,9 +4084,10 @@ Base.@nospecializeinfer function _sb_observation_triage(@nospecialize(sb::SBBRMI
     bound = count(d -> d.role === :observation &&
                   (!isnothing(d.data_source) || d.target in missing_sources),
                   declarations)
-    unbound = sort!(Symbol[d.target for d in declarations
+    # A scan's seed and steps observe one response through several statements.
+    unbound = sort!(unique!(Symbol[d.target for d in declarations
                            if d.role === :observation && isnothing(d.data_source) &&
-                              !(d.target in missing_sources) && !(d.target in fresh_sources)])
+                              !(d.target in missing_sources) && !(d.target in fresh_sources)]))
     (; bound, unbound, fresh_sources)
 end
 
@@ -4746,6 +4747,11 @@ function _sb_plan_collect!(declarations, x, data_scope, context, obs_keys, plate
         foreach(stmt -> _sb_plan_collect!(declarations, stmt, data_scope, context,
                                           obs_keys, plate_params, unbound_cell), x.args)
         return nothing
+    end
+    # A cell's `@scan` seeds and its step loop are statements of the same cell.
+    if _is_brm_scan(x) || x.head === :for
+        return _sb_plan_collect!(declarations, x.args[end], data_scope, context,
+                                 obs_keys, plate_params, unbound_cell)
     end
     if x.head === :call && length(x.args) >= 3 && x.args[1] === :~
         target = _sb_plan_lhs_name(x.args[2])
@@ -6033,11 +6039,12 @@ end
 # Is a kernel cell parameter OBSERVED by the cell body — the LHS of a top-level
 # in-cell `~` statement? The do-block body is captured verbatim (macro.jl `_x`),
 # so observation statements keep their surface `yy ~ family(...)` call form.
-# Only top-level statements count: the shipped contract observes responses with
-# ordinary statements in the inline body, and a nested observation is outside
-# the omission surface (it keeps the loud missing-column error below).
+# Top-level statements and the seeds and steps of the cell's `@scan` blocks
+# count (`y[t] ~ …` observes an entry of the cell's `y`); any other nested
+# observation is outside the omission surface (it keeps the loud missing-column
+# error below).
 function _sb_cell_param_observed(body_stmts, param::Symbol)
-    for s in body_stmts
+    for s in _brm_plate_flat_statements(body_stmts)
         s isa Expr || continue
         s.head === :call && length(s.args) >= 3 && s.args[1] === :~ || continue
         lhs = s.args[2]

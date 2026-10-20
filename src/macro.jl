@@ -630,6 +630,30 @@ function _brm_cell_bound_names!(acc, lambda::Expr)
     for stmt in (Meta.isexpr(body, :block) ? body.args : Any[body])
         Meta.isexpr(stmt, :(=), 2) && _brm_bound_symbols!(acc, stmt.args[1])
     end
+    _brm_scan_bound_names!(acc, body)
+    acc
+end
+
+# The names a cell's `@scan` blocks bind: each loop variable, and every array or
+# local a seed or step writes (`h[1] = …`, `h[t] ~ …`, `z ~ …`). They are scan
+# locals, never data columns, even when a column happens to share the name.
+function _brm_scan_bound_names!(acc, body)
+    for stmt in (Meta.isexpr(body, :block) ? body.args : Any[body])
+        _is_brm_scan(stmt) && _brm_scan_block_bound!(acc, stmt.args[end])
+    end
+    acc
+end
+function _brm_scan_block_bound!(acc, block)
+    for stmt in (Meta.isexpr(block, :block) ? block.args : Any[block])
+        if Meta.isexpr(stmt, :for)
+            Meta.isexpr(stmt.args[1], :(=)) && _brm_bound_symbols!(acc, stmt.args[1].args[1])
+            _brm_scan_block_bound!(acc, stmt.args[2])
+        elseif Meta.isexpr(stmt, :(=), 2) || isxcall(stmt, :~)
+            lhs = Meta.isexpr(stmt, :(=)) ? stmt.args[1] : stmt.args[2]
+            Meta.isexpr(lhs, :ref) ? _brm_bound_symbols!(acc, lhs.args[1]) :
+                _brm_bound_symbols!(acc, lhs)
+        end
+    end
     acc
 end
 _brm_bound_symbols!(acc, x::Symbol) = push!(acc, x)
@@ -912,6 +936,33 @@ end
 _is_brm_plate(x) = Meta.isexpr(x, :macrocall) && !isempty(x.args) &&
                    x.args[1] === Symbol("@plate")
 
+# A `@scan begin … end` statement inside an `@plate for` cell is one recurrence
+# per cell, exactly as in StanBlocks and RKPPL: the seeds fill the first
+# entries, the trailing `for` steps the rest. Its reads of sliced inputs
+# (`y[i][t]`, `mu[i][t - 1]`) become reads of the cell's slice like any other
+# cell read; the block itself is passed to the backend unchanged.
+_is_brm_scan(x) = Meta.isexpr(x, :macrocall) && !isempty(x.args) &&
+                  x.args[1] === Symbol("@scan")
+
+# The cell's statements with every `@scan` block's seeds and step statements
+# spliced in, for the checks that look at every observation of the cell.
+function _brm_plate_flat_statements(stmts)
+    flat = Any[]
+    function visit(stmt)
+        if _is_brm_scan(stmt)
+            visit(stmt.args[end])
+        elseif Meta.isexpr(stmt, :block)
+            foreach(visit, stmt.args)
+        elseif Meta.isexpr(stmt, :for)
+            visit(stmt.args[2])
+        elseif !(stmt isa LineNumberNode)
+            push!(flat, stmt)
+        end
+    end
+    foreach(visit, stmts)
+    flat
+end
+
 _is_brm_plate_grouping(x) = isxcall(x, :ragged)
 
 # Model-scope `ragged(x, group)` statements of one `@brm` block, keyed by `x`.
@@ -1096,7 +1147,7 @@ function _brm_plate_outputs(body, i)
             push!(outputs, lhs)
         end
     end
-    isempty(outputs) && !any(stmt -> isxcall(stmt, :~), stmts) && error(
+    isempty(outputs) && !any(stmt -> isxcall(stmt, :~), _brm_plate_flat_statements(stmts)) && error(
         "@brm: a kernel `@plate` cell needs an indexed output (`loc[$i] = ...`) " *
         "or an observation (`y[$i] ~ ...`); this one has neither")
     stmts, outputs
@@ -1106,9 +1157,14 @@ end
 # response plus `_cell` (`y[i] ~ …` and `ragged(y, g)[i] ~ …` both give `y_cell`).
 # Backends derive the cell's emitted names from it, as they do from an output's.
 function _brm_plate_effect_name(stmts, i)
-    for stmt in stmts
-        isxcall(stmt, :~) && _brm_plate_indexed(stmt.args[2], i) || continue
-        source = stmt.args[2].args[1]
+    for stmt in _brm_plate_flat_statements(stmts)
+        isxcall(stmt, :~) || continue
+        observed = stmt.args[2]
+        # A scan step observes one entry of the cell's slice: `y[i][t] ~ …`.
+        Meta.isexpr(observed, :ref) && _brm_plate_indexed(observed.args[1], i) &&
+            (observed = observed.args[1])
+        _brm_plate_indexed(observed, i) || continue
+        source = observed.args[1]
         base = source isa Symbol ? source :
                isxcall(source, :ragged) && source.args[2] isa Symbol ? source.args[2] :
                nothing
@@ -1212,6 +1268,34 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
 
     rewritten = Any[]
     bare_bindings = Dict{Symbol,Any}() # cell local => authored right-hand side
+
+    # A `@scan` block keeps its shape: seeds, then one `for` loop of steps. Its
+    # slice reads are rewritten like every other cell read; its `=`/`~` targets
+    # are the scan's carried arrays and step locals, or (`y[i][t] ~ …`) entries
+    # of an observed slice.
+    function rewrite_scan(block)
+        Meta.isexpr(block, :block) || error(
+            "@brm: a kernel `@plate` cell's `@scan` takes `@scan begin … end`")
+        Expr(:block, map(rewrite_scan_statement, block.args)...)
+    end
+    function rewrite_scan_statement(stmt)
+        stmt isa LineNumberNode && return stmt
+        if Meta.isexpr(stmt, :for) && Meta.isexpr(stmt.args[1], :(=), 2) &&
+                stmt.args[1].args[1] isa Symbol
+            loop = stmt.args[1]
+            return Expr(:for, Expr(:(=), loop.args[1], rewrite(loop.args[2])),
+                rewrite_scan(stmt.args[2]))
+        elseif Meta.isexpr(stmt, :(=), 2)
+            return Expr(:(=), rewrite(stmt.args[1]), rewrite(stmt.args[2]))
+        elseif isxcall(stmt, :~)
+            _brm_plate_check_observed(stmt.args[2], i, bare_bindings, output_set)
+            return Expr(:call, :~, rewrite(stmt.args[2]), rewrite(stmt.args[3]))
+        end
+        error(
+            "@brm: a `@scan` block in a kernel `@plate` cell holds `=`/`~` seeds " *
+            "and one `for t in …` loop of `=`/`~` steps; got `$(repr(stmt))`")
+    end
+
     for stmt in stmts
         stmt isa LineNumberNode && (push!(rewritten, stmt); continue)
         if Meta.isexpr(stmt, :(=), 2)
@@ -1229,10 +1313,12 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
         elseif isxcall(stmt, :~)
             _brm_plate_check_observed(stmt.args[2], i, bare_bindings, output_set)
             push!(rewritten, Expr(:call, :~, rewrite(stmt.args[2]), rewrite(stmt.args[3])))
+        elseif _is_brm_scan(stmt)
+            push!(rewritten, Expr(:macrocall, stmt.args[1:end-1]..., rewrite_scan(stmt.args[end])))
         else
             error(
-                "@brm: kernel `@plate` cells contain `=` assignments and `~` " *
-                "statements; got `$(repr(stmt))`")
+                "@brm: kernel `@plate` cells contain `=` assignments, `~` " *
+                "statements and `@scan begin … end` blocks; got `$(repr(stmt))`")
         end
     end
     collision = findfirst(p -> haskey(bare_bindings, p), params)
@@ -1279,13 +1365,31 @@ function _brm_print_plate(io::IO, i, range, stmts)
     print(io, "@plate for ", i, " in ")
     _brm_print_source(io, range)
     println(io)
+    _brm_print_cell_statements(io, stmts, "    ")
+    print(io, "end")
+end
+# One line per statement; a `@scan` block and its `for` loop nest one level.
+function _brm_print_cell_statements(io::IO, stmts, indent)
     for stmt in stmts
         stmt isa LineNumberNode && continue
-        print(io, "    ")
-        _brm_print_source(io, stmt)
+        print(io, indent)
+        if _is_brm_scan(stmt) || Meta.isexpr(stmt, :for)
+            body = stmt.args[end]
+            if _is_brm_scan(stmt)
+                println(io, "@scan begin")
+            else
+                print(io, "for ", stmt.args[1].args[1], " in ")
+                _brm_print_source(io, stmt.args[1].args[2])
+                println(io)
+            end
+            _brm_print_cell_statements(io,
+                Meta.isexpr(body, :block) ? body.args : Any[body], indent * "    ")
+            print(io, indent, "end")
+        else
+            _brm_print_source(io, stmt)
+        end
         println(io)
     end
-    print(io, "end")
 end
 
 # Formula source as written. Julia's own `Expr` printer renders a left-nested
@@ -1304,7 +1408,8 @@ function _brm_print_source(io::IO, x::Expr, outer::Int=0; left::Bool=false)
         parens = precedence < outer || (precedence == outer && !left)
         parens && print(io, "(")
         for (i, arg) in enumerate(operands)
-            i == 1 || print(io, " ", op, " ")
+            # A range is written `2:T`, as Julia prints it.
+            i == 1 || print(io, op === :(:) ? ":" : " $op ")
             _brm_print_source(io, arg, precedence; left=i == 1)
         end
         parens && print(io, ")")
@@ -1921,7 +2026,9 @@ parselocals!(x::Expr; info, val) = if Meta.isexpr(x, :->)
     # registers them as shared data so the emitted plate cell resolves them the
     # way a `plate` captures a `@slic` data kwarg. Cell params/locals and typos
     # that are not columns fall away in `_brm`.
-    hasproperty(info, :captures) && _brm_cell_value_refs!(info.captures, x.args[2])
+    hasproperty(info, :captures) && union!(info.captures, setdiff(
+        _brm_cell_value_refs!(Set{Symbol}(), x.args[2]),
+        _brm_scan_bound_names!(Set{Symbol}(), x.args[2])))
     hasproperty(info, :inventory) && _brm_cell_bound_names!(info.inventory.cell_bound, x)
     x
 elseif _is_nested_brm(x)
