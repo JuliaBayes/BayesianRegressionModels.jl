@@ -189,14 +189,15 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
     grouping = bucket.grouping
     K = length(bucket.margins)
     group = first(grouping.columns)
-    # A plain block reads its levels from the grouping column's fit-role copy
-    # (`_rk_fit_twin!`), and positions each row's group among them.
-    levels_of = grouping.form === :plain ? get(level_sources, group, group) : group
     stmts = Expr[]
     if grouping.form === :mm
         group = _rk_ast_fresh_name(string(draws, "_groups"), taken)
         push!(stmts, Expr(:(=), group, Expr(:call, :vcat, grouping.columns...)))
     end
+    # A plain block reads its levels from the grouping column's fit-role copy
+    # (`_rk_fit_twin!`), and positions each row's group among them. An mm
+    # block's levels are its members' joint levels.
+    levels_of = grouping.form === :plain ? get(level_sources, group, group) : group
     if grouping.form === :gr
         _rk_ast_stratified_group_component!(definitions, stmts, taken, draws,
             group, grouping.by, K, bucket.lkj_eta)
@@ -268,8 +269,7 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
             indices[col] = get!(level_indices, (col, group)) do
                 idx = _rk_ast_fresh_name(grouping.form === :mm ?
                     string(group, "_", col, "_level") : string(col, "_level"), taken)
-                push!(stmts, Expr(:(=), idx, Expr(:call, :brm_level_indices, col,
-                    grouping.form === :plain ? levels_of : group)))
+                push!(stmts, Expr(:(=), idx, Expr(:call, :brm_level_indices, col, levels_of)))
                 idx
             end
         end
