@@ -2702,6 +2702,170 @@ _sb_level_index(raw::AbstractVector) = _brm_level_index(raw)
 _sb_fit_levels(raw::AbstractVector) = _brm_fit_levels(raw)
 _sb_apply_levels(levels, raw::AbstractVector) = _brm_apply_levels(levels, raw)
 
+# ---- releveled `factor(x; ref=...)` terms -----------------------------------
+#
+# A releveled factor lowers to its own block (`x__ref_k`, or `x__ref_<level>`
+# for a string level), which names no data column. Its `:factor` and
+# `:ranef_factor_dummy` records therefore carry an `_SBFactorSource` as
+# `raw_ref`: the block, the data column it codes and its reference, so replay
+# re-codes the new frame's column exactly as lowering coded the training one
+# (the `:population_factor_dummy` rule, whose record carries the same source
+# and reference). A factor whose block is its column keeps that column name.
+struct _SBFactorSource
+    block::Symbol
+    source::Symbol
+    ref::Union{Int,String}
+end
+
+# Values with an explicit level order, which the categorical pipeline reads
+# through `_brm_fit_levels` like a `CategoricalVector`'s declared levels.
+abstract type _SBLeveledVector{T} <: AbstractVector{T} end
+Base.size(x::_SBLeveledVector) = size(x.values)
+Base.getindex(x::_SBLeveledVector, i::Int) = x.values[i]
+Base.IndexStyle(::Type{<:_SBLeveledVector}) = IndexLinear()
+_brm_fit_levels(x::_SBLeveledVector) = x.levels
+
+# The column a releveled factor term lowers to: integer levels with the
+# reference swapped into level 1, or string values whose level order puts the
+# reference first, together with the source its records replay from.
+struct _SBReleveledFactor{T,V<:AbstractVector{T},L<:AbstractVector} <: _SBLeveledVector{T}
+    values::V
+    levels::L
+    source::_SBFactorSource
+end
+
+# A frozen re-emission's view of a releveled factor's data column: the replay
+# rows over the FITTED level set, so lowering validates the reference and names
+# the block against the fit, not against the levels the replay rows happen to
+# carry (one new subject carries one level). See `_sb_fit_factor_levels`.
+struct _SBFittedLevels{T,V<:AbstractVector{T},L<:AbstractVector} <: _SBLeveledVector{T}
+    values::V
+    levels::L
+end
+
+# `factor(x; ref=k)` on integer levels swaps level `k` with level 1, so the
+# treatment coding's level-1 reference is `k`. An integer-leveled
+# `CategoricalVector` codes its unwrapped values.
+_sb_integer_factor_values(raw::CA.CategoricalVector) = Int.(CA.unwrap.(raw))
+_sb_integer_factor_values(raw) = raw
+_sb_relevel_codes(raw::AbstractVector{<:Integer}, ref::Integer) =
+    ref == 1 ? raw : Int[r == ref ? 1 : r == 1 ? ref : r for r in raw]
+
+# The sorted string levels with `ref` swapped into first place, the order a
+# string `factor(...)` codes; `source` names the column in the errors.
+function _sb_string_factor_levels(fit::AbstractVector, ref, source::Symbol)
+    ref isa AbstractString || error(
+        "sbimpl: `factor($source; ref=...)` on string data names the " *
+        "reference by its level value, got $(repr(ref))")
+    levels = collect(fit)
+    k = findfirst(isequal(ref), levels)
+    isnothing(k) && error(
+        "sbimpl: `factor($source; ref=$(repr(ref)))` ref is not an " *
+        "observed level (levels $(repr(levels)))")
+    levels[1], levels[k] = levels[k], levels[1]
+    levels
+end
+
+# The `raw_ref` of a categorical block's record, from its lowered values.
+_sb_factor_replay_ref(raw::_SBReleveledFactor, _block::Symbol) = raw.source
+_sb_factor_replay_ref(_raw, block::Symbol) = block
+
+# The block a categorical record codes, and a replay frame's values for it in
+# the coding the record's levels use.
+_sb_factor_block(raw_ref::Symbol) = raw_ref
+_sb_factor_block(raw_ref::_SBFactorSource) = raw_ref.block
+_sb_factor_replay_values(raw_ref::Symbol, df) = _sb_df_column(df, raw_ref)
+_sb_factor_replay_values(raw_ref::_SBFactorSource, df) =
+    _sb_factor_replay_values(raw_ref, raw_ref.ref, _sb_df_column(df, raw_ref.source))
+function _sb_factor_replay_values(raw_ref::_SBFactorSource, ref::Int, raw)
+    values = _sb_integer_factor_values(raw)
+    values isa AbstractVector{<:Integer} || error(
+        "sbimpl: reprocess: `factor($(raw_ref.source); ref=$ref)` requires " *
+        "integer-coded categorical data, got $(typeof(raw))")
+    _sb_relevel_codes(values, ref)
+end
+_sb_factor_replay_values(_raw_ref::_SBFactorSource, ::String, raw) =
+    _brm_factor_values(raw)
+
+# A fresh replay (`freeze_constants=false`) re-derives the level set in the
+# coding the record's levels use: sorted codes, or sorted strings with the
+# reference first.
+_sb_factor_refit_levels(_raw_ref::Symbol, values) = _sb_fit_levels(values)
+_sb_factor_refit_levels(raw_ref::_SBFactorSource, values) =
+    _sb_factor_refit_levels(raw_ref, raw_ref.ref, values)
+_sb_factor_refit_levels(_raw_ref::_SBFactorSource, ::Int, values) =
+    _sb_fit_levels(values)
+_sb_factor_refit_levels(raw_ref::_SBFactorSource, ref::String, values) =
+    _sb_string_factor_levels(_sb_fit_levels(values), ref, raw_ref.source)
+
+# A frozen re-emission lowers every `factor(x; ref=...)` term over the level set
+# the fit coded `x` with, read off its categorical records: lowering checks the
+# reference against that set and names a string block from it. Every other node
+# is rebuilt unchanged by the shared rebind map (the `_BRMConstantSubstitution`
+# pattern). `levels` maps a data column to its sorted fitted levels;
+# `conflicts` names a column whose records disagree, refused only where a
+# releveled factor would read it.
+struct _SBFittedFactorLevels
+    levels::Dict{Symbol,AbstractVector}
+    conflicts::Dict{Symbol,String}
+end
+
+_sb_factor_source_column(raw_ref::Symbol) = raw_ref
+_sb_factor_source_column(raw_ref::_SBFactorSource) = raw_ref.source
+_sb_factor_record_levels(e::PreprocEntry) =
+    e.kind === :factor ? e.const_ : e.const_.levels
+# A record's levels in the source column's own values, sorted: an integer
+# relevel's codes swap back (the swap is its own inverse). A bare
+# `CategoricalVector` column records its `CategoricalValue` levels.
+_sb_level_value(x::CA.CategoricalValue) = CA.unwrap(x)
+_sb_level_value(x) = x
+_sb_fitted_source_levels(_raw_ref::Symbol, levels) = sort(map(_sb_level_value, levels))
+_sb_fitted_source_levels(raw_ref::_SBFactorSource, levels) =
+    _sb_fitted_source_levels(raw_ref, raw_ref.ref, levels)
+_sb_fitted_source_levels(_raw_ref::_SBFactorSource, ref::Int, levels) =
+    sort(_sb_relevel_codes(collect(levels), ref))
+_sb_fitted_source_levels(_raw_ref::_SBFactorSource, ::String, levels) =
+    sort(collect(levels))
+
+function _sb_fit_factor_levels(brmi::BRMI, frozen)
+    levels = Dict{Symbol,AbstractVector}()
+    conflicts = Dict{Symbol,String}()
+    for (key, e) in frozen
+        e.kind in (:factor, :ranef_factor_dummy) || continue
+        source = _sb_factor_source_column(e.raw_ref)
+        fitted = _sb_fitted_source_levels(e.raw_ref, _sb_factor_record_levels(e))
+        known = get!(levels, source, fitted)
+        isequal(known, fitted) || (conflicts[source] =
+            "sbimpl: frozen replay: categorical records of column `$source` " *
+            "disagree on its fitted levels ($(repr(known)) and, at `$key`, " *
+            "$(repr(fitted))), so `factor($source; ref=...)` has no single " *
+            "fitted level set to replay over")
+    end
+    isempty(levels) && return brmi
+    _brm_rebind_brmi(brmi, _SBFittedFactorLevels(levels, conflicts))
+end
+
+function _brm_rebind_value(x::NamedColumn, s::_SBFittedFactorLevels)
+    payload = parent(x)
+    payload isa Union{DataColumn,MissingColumn} && return x
+    NamedColumn(name(x), _brm_rebind_value(payload, s))
+end
+function _brm_rebind_value(x::ExprColumn{typeof(factor)}, s::_SBFittedFactorLevels)
+    args, kwargs = getargs(x), getkwargs(x)
+    inner = length(args) == 1 && haskey(kwargs, :ref) ? _as_named_column(only(args)) : nothing
+    backing = isnothing(inner) ? nothing : _as_data_column(parent(inner))
+    levels = isnothing(backing) || !(parent(backing) isa AbstractVector) ? nothing :
+        get(s.levels, name(inner), nothing)
+    isnothing(levels) && return invoke(_brm_rebind_value, Tuple{ExprColumn,Any}, x, s)
+    haskey(s.conflicts, name(inner)) && error(s.conflicts[name(inner)])
+    fitted = _SBFittedLevels(_sb_fitted_values(parent(backing)), levels)
+    ExprColumn(factor, NamedColumn(name(inner), DataColumn(fitted)); kwargs...)
+end
+# Constants are resolved from their own records; their inputs are not factors.
+_brm_rebind_value(x::ExprColumn{typeof(constant)}, ::_SBFittedFactorLevels) = x
+_sb_fitted_values(raw::_SBFittedLevels) = raw.values
+_sb_fitted_values(raw) = _brm_factor_values(raw)
+
 # Random-effect group coding has the same frozen-level geometry as `factor`,
 # but deserves its own diagnostic: the missing coordinate is a fitted group
 # effect, not a treatment contrast.  Keep this separate from `_sb_apply_levels`
@@ -3583,6 +3747,8 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
        s2z_groups=(), s2z_rho=nothing, s2z_coordinates=:contrasts, held_out=(),
        resample_covariates=(), _frozen_preproc=nothing, _marginal_id_targets=nothing)
     brmi = _brm_resolve_optional_priors(brmi)
+    # A frozen re-emission codes releveled factors over their fitted levels.
+    isnothing(_frozen_preproc) || (brmi = _sb_fit_factor_levels(brmi, _frozen_preproc))
     source_parent = brmi
     fresh_covariates = _sb_covariate_selection(brmi,resample_covariates)
     isempty(fresh_covariates) || (brmi = _sb_covariate_brmi(brmi,fresh_covariates))
@@ -5053,13 +5219,14 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             :group_index, (; levels, n_groups_key=e.const_.n_groups_key),
             e.raw_ref, true)
     elseif e.kind === :ranef_factor_dummy
-        raw = _sb_df_column(df, e.raw_ref)
+        source = _sb_factor_source_column(e.raw_ref)
+        raw = _sb_factor_replay_values(e.raw_ref, df)
         raw isa AbstractVector || error(
-            "sbimpl: reprocess: categorical random-effect predictor `$(e.raw_ref)` " *
+            "sbimpl: reprocess: categorical random-effect predictor `$source` " *
             "must be a vector, got $(typeof(raw))")
-        levels = freeze ? e.const_.levels : _sb_fit_levels(raw)
+        levels = freeze ? e.const_.levels : _sb_factor_refit_levels(e.raw_ref, raw)
         length(levels) == e.const_.n_levels || error(
-            "sbimpl: reprocess: categorical random-effect predictor `$(e.raw_ref)` " *
+            "sbimpl: reprocess: categorical random-effect predictor `$source` " *
             "has $(length(levels)) levels, but the fitted design has " *
             "$(e.const_.n_levels). Preserve the fitted level count or rebuild " *
             "the model.")
@@ -5259,14 +5426,14 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         end
         new_preproc[key] = e
     elseif e.kind === :factor || e.kind === :mo
-        v = _sb_df_column(df, e.raw_ref)
-        levels = freeze ? e.const_ : _sb_fit_levels(v)
+        v = _sb_factor_replay_values(e.raw_ref, df)
+        levels = freeze ? e.const_ : _sb_factor_refit_levels(e.raw_ref, v)
         new_data[key] = _sb_apply_levels(levels, v)   # errors loudly on an unseen level
         new_preproc[key] = PreprocEntry(e.kind, levels, e.raw_ref, true)
         if e.kind === :factor
             # The `<x>_n_levels` count key co-emitted by `_sb_emit_cat!`: frozen
             # training count under freeze=true, re-counted under freeze=false.
-            n_name = Symbol(e.raw_ref, :_n_levels)
+            n_name = Symbol(_sb_factor_block(e.raw_ref), :_n_levels)
             new_data[n_name] = length(levels)
             push!(handled, n_name)
         end
@@ -9133,6 +9300,7 @@ _sb_cat_levels_data(_d) = nothing
 
 _sb_cat_levels_vec(v::AbstractVector{<:Integer}) = v
 _sb_cat_levels_vec(v::CA.CategoricalVector) = v
+_sb_cat_levels_vec(v::_SBReleveledFactor{<:AbstractString}) = v
 _sb_cat_levels_vec(_v) = nothing
 
 # A bare integer-typed column in a population formula is treatment-coded
@@ -9328,7 +9496,8 @@ function _sb_emit_cat!(stmts, data, target::Symbol, t::NamedColumn, summands;
     # and with it the per-level prior vector of a cell-mean block, whose
     # `<c>_lvl_<k>` addresses are positions in that fitted order -- instead of
     # re-deriving both from the new rows. Mirrors `_sb_mo_levels_for_emission`.
-    levels = _sb_cat_levels_for_emission(data, idx_name, name(t), parent(backing))
+    raw_ref = _sb_factor_replay_ref(parent(backing), name(t))
+    levels = _sb_cat_levels_for_emission(data, idx_name, raw_ref, parent(backing))
     n_levels, idx = length(levels), _sb_apply_levels(levels, parent(backing))
     data[idx_name] = idx
     data[n_name]   = n_levels
@@ -9336,7 +9505,7 @@ function _sb_emit_cat!(stmts, data, target::Symbol, t::NamedColumn, summands;
     # re-codes a new df against it and updates the `<x>_n_levels` count key
     # (derived from raw_ref). Dimension-coupled (unseen level / changed count).
     _sb_record_preproc!(data, idx_name,
-        PreprocEntry(:factor, levels, name(t), true))
+        PreprocEntry(:factor, levels, raw_ref, true))
     if cellmeans
         _sb_emit_cat_cells!(stmts, col_name, idx_name, n_name, n_levels, prior,
                             r2d2; mod)
@@ -9378,8 +9547,8 @@ function _sb_emit_cat!(stmts, data, target::Symbol, t::NamedColumn, summands;
     push!(summands, col_name)
 end
 
-function _sb_cat_levels_for_emission(data, idx_name::Symbol, source::Symbol, raw)
-    frozen = _sb_frozen_preproc_entry(data, idx_name, :factor, source)
+function _sb_cat_levels_for_emission(data, idx_name::Symbol, raw_ref, raw)
+    frozen = _sb_frozen_preproc_entry(data, idx_name, :factor, raw_ref)
     isnothing(frozen) ? _sb_fit_levels(raw) : frozen.const_
 end
 
@@ -9503,8 +9672,9 @@ function _sb_ranef_factor_dummies!(cols, data, t::NamedColumn, levels, first_lev
     # A frozen re-emission (`resample_groups`) keeps the FITTED level set, read
     # off the recorded first dummy, so a frame carrying only some levels still
     # emits every fitted column -- the `_sb_cat_levels_for_emission` rule.
+    raw_ref = _sb_factor_replay_ref(levels, name(t))
     frozen = _sb_frozen_preproc_entry(
-        data, Symbol(name(t), :_dummy_, first_level), :ranef_factor_dummy, name(t))
+        data, Symbol(name(t), :_dummy_, first_level), :ranef_factor_dummy, raw_ref)
     fitted_levels = isnothing(frozen) ? _sb_fit_levels(levels) : frozen.const_.levels
     n_levels, idx = length(fitted_levels), _sb_apply_levels(fitted_levels, levels)
     for lvl in first_level:n_levels
@@ -9513,7 +9683,7 @@ function _sb_ranef_factor_dummies!(cols, data, t::NamedColumn, levels, first_lev
         _sb_record_preproc!(data, col_name, PreprocEntry(
             :ranef_factor_dummy,
             (; levels=fitted_levels, level=lvl, n_levels),
-            name(t), true))
+            raw_ref, true))
         push!(cols, col_name)
     end
 end
@@ -11814,7 +11984,10 @@ _sb_collect_terms_expr!(acc, ::typeof(*), x) = push!(acc, x)
 # downstream categorical pipeline (treatment-coded dummies relative to
 # level 1) reuses unchanged. An integer-leveled `CategoricalVector` codes its
 # unwrapped values the same way; a string-leveled one or a plain string column
-# goes through `_sb_string_factor_column` (level VALUES, `ref="level"`).
+# goes through `_sb_string_factor_column` (level VALUES, `ref="level"`). The
+# recoded column is an `_SBReleveledFactor`, which remembers the source its
+# records replay from. The reference is checked against the column's level set,
+# which a replay re-emission supplies from the fit (`_SBFittedLevels`).
 _sb_collect_terms_expr!(acc, ::typeof(factor), x::ExprColumn) = begin
     args = getargs(x); kw = getkwargs(x)
     length(args) == 1 || error("sbimpl: `factor(...)` expects 1 positional arg, got $(length(args))")
@@ -11825,7 +11998,7 @@ _sb_collect_terms_expr!(acc, ::typeof(factor), x::ExprColumn) = begin
     isnothing(backing) && error("sbimpl: `factor($(name(inner)))` expects a raw data column")
     data = parent(backing)
     if data isa CA.CategoricalVector && CA.leveltype(data) <: Integer
-        backing = DataColumn(Int.(CA.unwrap.(data)))
+        backing = DataColumn(_sb_integer_factor_values(data))
         data = parent(backing)
     end
     _brm_is_string_categorical_data(data) &&
@@ -11836,16 +12009,18 @@ _sb_collect_terms_expr!(acc, ::typeof(factor), x::ExprColumn) = begin
     ref_raw = get(kw, :ref, 1)
     ref = _as_integer(ref_raw)
     isnothing(ref) && error("sbimpl: `factor(...; ref=k)` expects an integer level, got $(typeof(ref_raw))")
-    1 <= ref <= maximum(raw) || error("sbimpl: `factor($(name(inner)); ref=$ref)` ref out of range (max level $(maximum(raw)))")
-    new_name = ref == 1 ? name(inner) : Symbol(name(inner), :__ref_, ref)
-    new_backing = ref == 1 ? backing :
-        DataColumn(Int[r == ref ? 1 : r == 1 ? ref : r for r in raw])
-    push!(acc, NamedColumn(new_name, new_backing))
+    max_level = maximum(_brm_fit_levels(raw))
+    1 <= ref <= max_level || error("sbimpl: `factor($(name(inner)); ref=$ref)` ref out of range (max level $max_level)")
+    ref == 1 && return push!(acc, NamedColumn(name(inner), backing))
+    block = Symbol(name(inner), :__ref_, ref)
+    codes = _sb_relevel_codes(raw, ref)
+    push!(acc, NamedColumn(block, DataColumn(_SBReleveledFactor(
+        codes, _sb_fit_levels(codes), _SBFactorSource(block, name(inner), Int(ref))))))
 end
 # A string `factor(...)` term as the categorical column `_sb_emit_cat!` codes:
 # the backend-neutral string design's `sort(unique)` level order with the
 # reference swapped into first place (`_brm_string_factor_population_columns`),
-# carried as a `CategoricalVector` so emitted labels keep the level values. Its
+# carried with that level order so emitted labels keep the level values. Its
 # name is the term's block name (`c`, or `c__ref_<level>` for a non-default
 # reference), which the cell-means choice and prior addresses resolve against.
 function _sb_string_factor_column(term, inner, data::AbstractVector)
@@ -11853,23 +12028,23 @@ function _sb_string_factor_column(term, inner, data::AbstractVector)
     any(ismissing, values) && error(
         "sbimpl: `factor($(name(inner)))` has missing values; a categorical " *
         "predictor needs a level on every row")
-    fit = collect(_brm_fit_levels(values))
+    fit = _brm_fit_levels(values)
     isempty(fit) && error("sbimpl: `factor($(name(inner)))` observes no level")
     ref = get(getkwargs(term), :ref, first(fit))
-    ref isa AbstractString || error(
-        "sbimpl: `factor($(name(inner)); ref=...)` on string data names the " *
-        "reference by its level value, got $(repr(ref))")
-    k = findfirst(isequal(ref), fit)
-    isnothing(k) && error(
-        "sbimpl: `factor($(name(inner)); ref=$(repr(ref)))` ref is not an " *
-        "observed level (levels $(repr(fit)))")
+    levels = _sb_string_factor_levels(fit, ref, name(inner))
     block = _brm_categorical_term_block(term)
     Base.isidentifier(block) || error(
         "sbimpl: `factor($(name(inner)); ref=$(repr(ref)))` names its emitted " *
         "block `$block`, which is not a valid identifier; choose a reference " *
         "level whose value is identifier-safe")
-    fit[1], fit[k] = fit[k], fit[1]
-    NamedColumn(block, DataColumn(CA.categorical(values; levels=fit)))
+    if block === name(inner)
+        # A replay re-emission's levels are the fitted ones: report an unseen
+        # replay level as every other categorical replay does.
+        _brm_apply_fitted_levels(levels, values; prefix="sbimpl")
+        return NamedColumn(block, DataColumn(CA.categorical(values; levels)))
+    end
+    NamedColumn(block, DataColumn(_SBReleveledFactor(
+        collect(values), levels, _SBFactorSource(block, name(inner), String(ref)))))
 end
 
 # `(t1 + t2 + ... || g)` zerocorr ranefs: independent variances per term,

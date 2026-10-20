@@ -131,17 +131,110 @@ end
     end
 end
 
-@testset "a releveled integer factor on a frame without its reference" begin
-    builder = @brm begin
+# `factor(x; ref=k)` lowers to its own block `x__ref_k`, which names no data
+# column; its record replays from `x` (todo `197s4y8`).
+@testset "releveled factors replay from their source column" begin
+    integer = @brm begin
         mu ~ 1 + factor(sex; ref=2) + (1 | p | subject)
         y ~ Normal(mu, 1.0)
     end
-    fit = SBBRMI(builder(merge(subject_train, (; sex=[1, 2, 1, 2])));
+    string_ref = @brm begin
+        mu ~ 1 + factor(sex; ref="m") + (1 | p | subject)
+        y ~ Normal(mu, 1.0)
+    end
+    three = @brm begin
+        mu ~ 1 + factor(sex; ref=3) + (1 | p | subject)
+        y ~ Normal(mu, 1.0)
+    end
+    cellmeans = @brm begin
+        mu ~ 0 + factor(sex; ref=2) + (1 | p | subject)
+        y ~ Normal(mu, 1.0)
+    end
+    interaction = @brm begin
+        mu ~ 1 + factor(sex; ref=2) + factor(sex; ref=2) & zscale(age) + (1 | p | subject)
+        y ~ Normal(mu, 1.0)
+    end
+    first_ref = @brm begin
+        mu ~ 1 + factor(sex; ref="f") + (1 | p | subject)
+        y ~ Normal(mu, 1.0)
+    end
+    # (builder, training levels, the one new subject's level, its index in the
+    # fitted level order, an unseen level)
+    for (builder, sex, one_sex, one_code, unseen) in (
+            (integer, [1, 2, 1, 2], [1], 2, [3]),
+            (string_ref, ["f", "m", "f", "m"], ["f"], 2, ["x"]),
+            (three, [1, 2, 3, 2], [1], 3, [4]),
+            (cellmeans, [1, 2, 1, 2], [2], 1, [3]),
+            (interaction, [1, 2, 1, 2], [1], 2, [3]),
+            # The reference is the first sorted level, so the block is `sex`
+            # and a one-subject frame may lack the reference.
+            (first_ref, ["f", "m", "f", "m"], ["m"], 2, ["x"]))
+        train = merge(subject_train, (; sex))
+        fit = SBBRMI(builder(train); mod=@__MODULE__, total_groups=())
+        # Plain frozen replay of the training frame reproduces the fit.
+        replay = reprocess(fit, train)
+        @test BRM.stan_code(replay) == BRM.stan_code(fit)
+        @test StanBlocks.stan_data(replay.model) == StanBlocks.stan_data(fit.model)
+        @test restan_data(fit, train) == StanBlocks.stan_data(fit.model)
+        # A frozen replay of fitted subjects carrying one level.
+        fitted_rows = merge((; subject=[1, 3], age=[30.0, 60.0], wt=[60.0, 82.0],
+                               ht=[160.0, 180.0], y=zeros(2)), (; sex=sex[[1, 3]]))
+        @test restan_data(fit, fitted_rows) isa AbstractDict
+        # Resample replays: every level, then one subject with one level.
+        reference = reprocess(fit, merge(two_subjects, (; sex=sex[1:2]));
+                              resample_groups=[:subject])
+        @test stanc_ok(reference)
+        one = merge(one_subject, (; sex=one_sex))
+        replay = reprocess(fit, one; resample_groups=[:subject])
+        @test BRM.stan_code(replay) == BRM.stan_code(reference)
+        @test stanc_ok(replay)
+        @test restan_data(fit, one; resample_groups=[:subject]) ==
+            StanBlocks.stan_data(replay.model)
+        plan = reprocess(generative_plan(fit), one; resample_groups=[:subject])
+        @test StanBlocks.stan_data(plan.model) == StanBlocks.stan_data(replay.model)
+        for (key, entry) in fit.preproc
+            entry.kind === :factor || continue
+            @test replay.preproc[key].const_ == entry.const_
+            @test replay.data[key] == [one_code]
+        end
+        # refused: a frozen replay has no fitted parameter for an unseen level.
+        @test_throws "is not a training level" reprocess(
+            fit, merge(one_subject, (; sex=unseen)); resample_groups=[:subject])
+        @test_throws "is not a training level" restan_data(
+            fit, merge(fitted_rows, (; sex=fill(only(unseen), 2))))
+    end
+end
+
+@testset "a fresh replay refits a releveled string factor's level order" begin
+    builder = @brm begin
+        mu ~ 1 + factor(sex; ref="m") + (1 | p | subject)
+        y ~ Normal(mu, 1.0)
+    end
+    fit = SBBRMI(builder(merge(subject_train, (; sex=["f", "m", "f", "m"])));
                  mod=@__MODULE__, total_groups=())
-    # Capability gap, not a refusal: `factor(...; ref)` validates its
-    # reference against the replay frame during term lowering, before the
-    # frozen level set applies, and its replay record names the recoded
-    # column (todo `197s4y8`).
-    @test_broken stanc_ok(reprocess(fit, merge(one_subject, (; sex=[1]));
+    frame = merge(subject_train, (; sex=["m", "f", "z", "m"]))
+    replay = reprocess(fit, frame; freeze_constants=false)
+    @test replay.preproc[:sex__ref_m_idx].const_ == ["m", "f", "z"]
+    @test replay.data[:sex__ref_m_idx] == [1, 2, 3, 1]
+    @test replay.data[:sex__ref_m_n_levels] == 3
+    # refused: a fresh fit needs its reference among the observed levels.
+    @test_throws "ref is not an observed level" reprocess(
+        fit, merge(subject_train, (; sex=["f", "z", "f", "z"])); freeze_constants=false)
+end
+
+@testset "a releveled random-effect slope replays from its source column" begin
+    builder = @brm begin
+        mu ~ 1 + (1 + factor(sex; ref=2) | p | grp) + (1 | q | subject)
+        y ~ Normal(mu, 1.0)
+    end
+    train = merge(subject_train, (; sex=[1, 2, 1, 2], grp=fill(1, 4)))
+    fit = SBBRMI(builder(train); mod=@__MODULE__, total_groups=())
+    @test BRM.stan_code(reprocess(fit, train)) == BRM.stan_code(fit)
+    @test restan_data(fit, train) == StanBlocks.stan_data(fit.model)
+    two = merge(two_subjects, (; sex=[1, 2], grp=[1, 1]))
+    @test stanc_ok(reprocess(fit, two; resample_groups=[:subject]))
+    # Capability gap, not a refusal: the `|ID|` bucket reserves its columns
+    # from the replay rows' levels (todo `05x61gq`).
+    @test_broken stanc_ok(reprocess(fit, merge(one_subject, (; sex=[1], grp=[1]));
                                     resample_groups=[:subject]))
 end
