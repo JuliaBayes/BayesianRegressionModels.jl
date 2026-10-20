@@ -109,6 +109,13 @@
 #              how its one scale is emitted. `:log_scale` is
 #              `exp(<binding>_log_scale)`; `:keyword` is the carrier the
 #              declaration passes as `scale=` (a derived R2D2 scale).
+#   `internals` — the block component (`BRMOutput.component`) of every other
+#              carrier the submodel emits, by submodel-internal name: those no
+#              reader above needs by name (`L`, the reshaped `z`, a stratified
+#              block's plate cells). `_ranef_component_carriers` combines them
+#              with the columns above, and `brm_descriptor` refuses a
+#              `:random_effect` output that neither names, so an internal
+#              added to a `@slic` body must be listed here.
 #
 # Every layout below was measured against BridgeStan's `param_unc_names`, not
 # inferred from the Stan type. Keep this table in lockstep with the `@slic`
@@ -126,24 +133,39 @@
 # additionally asserts each block's `z` against the EMITTED STAN SOURCE, which
 # needs no BridgeStan and catches this drift at declaration level.
 const _RANEF_FAMILIES = Dict{Symbol,NamedTuple}(
-    :ranef_intercept           => (; z = :xi,     layout = :group,           noncentered = true,  tau = nothing, effects = nothing, scale = :log_scale),
-    :ranef_intercept_draws     => (; z = :xi,     layout = :group,           noncentered = true,  tau = nothing, effects = :self, scale = :log_scale),
-    :ranef_slope               => (; z = :xi,     layout = :group,           noncentered = true,  tau = :tau, effects = nothing),
-    :ranef_correlated          => (; z = :z_flat, layout = :flat_term_group, noncentered = true,  tau = :tau, effects = :b),
-    :ranef_correlated_draws    => (; z = :z_flat, layout = :flat_term_group, noncentered = true,  tau = :tau, effects = :self),
-    :ranef_correlated_draws_generic => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :tau, effects = :self),
-    :ranef_correlated_draws_centered_generic => (; z = :b_cols_bc, layout = :group_term, noncentered = false, tau = :tau, effects = :self),
+    :ranef_intercept           => (; z = :xi,     layout = :group,           noncentered = true,  tau = nothing, effects = nothing, scale = :log_scale,
+        internals = (;)),
+    :ranef_intercept_draws     => (; z = :xi,     layout = :group,           noncentered = true,  tau = nothing, effects = :self, scale = :log_scale,
+        internals = (;)),
+    :ranef_slope               => (; z = :xi,     layout = :group,           noncentered = true,  tau = :tau, effects = nothing,
+        internals = (;)),
+    :ranef_correlated          => (; z = :z_flat, layout = :flat_term_group, noncentered = true,  tau = :tau, effects = :b,
+        internals = (; L = :correlation_cholesky, z = :standardized)),
+    :ranef_correlated_draws    => (; z = :z_flat, layout = :flat_term_group, noncentered = true,  tau = :tau, effects = :self,
+        internals = (; L = :correlation_cholesky, z = :standardized)),
+    :ranef_correlated_draws_generic => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :tau, effects = :self,
+        internals = (; L = :correlation_cholesky, z = :standardized)),
+    :ranef_correlated_draws_centered_generic => (; z = :b_cols_bc, layout = :group_term, noncentered = false, tau = :tau, effects = :self,
+        internals = (; L = :correlation_cholesky, b_cols = :effects)),
     # A shared `|ID|` block whose omitted responses leave some margins outside
     # every likelihood (src/sb_marginal_ranef.jl): the sampled active margins
     # (`<bucket>_active`, whose `L`/`tau` are top-level `<bucket>_active_L` /
     # `<bucket>_active_tau`) and the generated completion under the bucket's
     # own name, whose `z_flat`/`tau` are full-width generated quantities.
-    :ranef_correlated_draws_marginal => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :tau, effects = :self),
-    :ranef_correlated_draws_centered_marginal => (; z = :b_cols_bc, layout = :group_term, noncentered = false, tau = :tau, effects = :self),
-    :ranef_correlated_draws_completion => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :tau, effects = :self),
-    :ranef_intercept_r2d2      => (; z = :xi,     layout = :group,           noncentered = true,  tau = nothing, effects = nothing, scale = :keyword),
-    :ranef_correlated_r2d2     => (; z = :z_flat, layout = :flat_term_group, noncentered = true,  tau = :r2d2_tau, effects = :b),
-    :ranef_correlated_draws_r2d2 => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :r2d2_tau, effects = :self),
+    :ranef_correlated_draws_marginal => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :tau, effects = :self,
+        internals = (; L = :correlation_cholesky, z = :standardized)),
+    :ranef_correlated_draws_centered_marginal => (; z = :b_cols_bc, layout = :group_term, noncentered = false, tau = :tau, effects = :self,
+        internals = (; L = :correlation_cholesky, b_cols = :effects)),
+    :ranef_correlated_draws_completion => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :tau, effects = :self,
+        internals = (; L = :correlation_cholesky, z = :standardized,
+            tau_inactive = :scale, z_inactive = :standardized, L_permuted = :auxiliary,
+            onion_y = :auxiliary, onion_u = :auxiliary)),
+    :ranef_intercept_r2d2      => (; z = :xi,     layout = :group,           noncentered = true,  tau = nothing, effects = nothing, scale = :keyword,
+        internals = (;)),
+    :ranef_correlated_r2d2     => (; z = :z_flat, layout = :flat_term_group, noncentered = true,  tau = :r2d2_tau, effects = :b,
+        internals = (; L = :correlation_cholesky, z = :standardized)),
+    :ranef_correlated_draws_r2d2 => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :r2d2_tau, effects = :self,
+        internals = (; L = :correlation_cholesky, z = :standardized)),
     # Known-value blocks (`sd(...) = value`, `cor(:, ID) = R`;
     # `_sb_emit_known_id_bucket!` in src/sbimpl.jl): the non-centred
     # `ranef_correlated_draws` layout, with `tau` the caller-level
@@ -152,8 +174,10 @@ const _RANEF_FAMILIES = Dict{Symbol,NamedTuple}(
     # data `L`. `known = true` marks them for the readers of scale and
     # correlation coordinates; the binding record carries `known_scales` /
     # `known_cor`.
-    :ranef_correlated_draws_known_scale => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :tau, known = true, effects = :self),
-    :ranef_correlated_draws_known_cor => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :tau, known = true, effects = :self),
+    :ranef_correlated_draws_known_scale => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :tau, known = true, effects = :self,
+        internals = (; L = :correlation_cholesky, z = :standardized, tau_free = :scale)),
+    :ranef_correlated_draws_known_cor => (; z = :z_flat, layout = :flat_term_group, noncentered = true, tau = :tau, known = true, effects = :self,
+        internals = (; L = :correlation_cholesky, z = :standardized, tau_free = :scale)),
     # Native constrained-matrix plate emission (StanBlocks 0421b28). The
     # per-group standardised cell is namespaced under the group plate result
     # `b_T`; the collected storage is term-major (`matrix[K, G]`), so the
@@ -163,8 +187,12 @@ const _RANEF_FAMILIES = Dict{Symbol,NamedTuple}(
     # stratum has its own, the columns of `stratum_tau` (`matrix[K, n_strata]`),
     # and its own correlation factor `stratum_L` (`array[n_strata]
     # cholesky_factor_corr[K]`).
-    :ranef_correlated_by       => (; z = :b_T_z_g, layout = :term_group,     noncentered = true,  tau = nothing, effects = :b,    stratum_tau = :tau_s, stratum_L = :L_s),
-    :ranef_correlated_by_draws => (; z = :b_T_z_g, layout = :term_group,     noncentered = true,  tau = nothing, effects = :self, stratum_tau = :tau_s, stratum_L = :L_s),
+    :ranef_correlated_by       => (; z = :b_T_z_g, layout = :term_group,     noncentered = true,  tau = nothing, effects = :b,    stratum_tau = :tau_s, stratum_L = :L_s,
+        internals = (; L_s_L = :correlation_cholesky, tau_s_tau = :scale, b_T = :effects,
+            b_T_tau_g = :level_scale, b_T_L_g = :level_correlation_cholesky)),
+    :ranef_correlated_by_draws => (; z = :b_T_z_g, layout = :term_group,     noncentered = true,  tau = nothing, effects = :self, stratum_tau = :tau_s, stratum_L = :L_s,
+        internals = (; L_s_L = :correlation_cholesky, tau_s_tau = :scale, b_T = :effects,
+            b_T_tau_g = :level_scale, b_T_L_g = :level_correlation_cholesky)),
     # Centered emissions — the opt-in `SBBRMI(...; centered_groups = [:g])` path,
     # which SHIPS. The coordinate is the effect ITSELF (unconstrained, so the
     # unconstrained value IS the effect): `population_draws` zeroes it, which is
@@ -181,9 +209,12 @@ const _RANEF_FAMILIES = Dict{Symbol,NamedTuple}(
     # directly readable under centering (the b's are centered, the scale is
     # still sampled), so `brm_ranef_sd_coordinates` resolves it regardless of
     # the `noncentered` flag.
-    :ranef_intercept_centered        => (; z = :xi, layout = :group,      noncentered = false, tau = nothing, effects = :xi, scale = :log_scale),
-    :ranef_correlated_centered       => (; z = :b,  layout = :group_term, noncentered = false, tau = :tau, effects = :bm),
-    :ranef_correlated_draws_centered => (; z = :b,  layout = :group_term, noncentered = false, tau = :tau, effects = :self),
+    :ranef_intercept_centered        => (; z = :xi, layout = :group,      noncentered = false, tau = nothing, effects = :xi, scale = :log_scale,
+        internals = (;)),
+    :ranef_correlated_centered       => (; z = :b,  layout = :group_term, noncentered = false, tau = :tau, effects = :bm,
+        internals = (; L = :correlation_cholesky)),
+    :ranef_correlated_draws_centered => (; z = :b,  layout = :group_term, noncentered = false, tau = :tau, effects = :self,
+        internals = (; L = :correlation_cholesky)),
 )
 
 # Student-t blocks (`_sb_student_t_ranef`, src/sbimpl.jl) keep their Gaussian
@@ -198,6 +229,43 @@ end
 # The per-level mixing-weight carrier of a block's family, or `nothing` for a
 # Gaussian block.
 _ranef_mixing(family::Symbol) = get(_RANEF_FAMILIES[family], :mixing, nothing)
+
+# The `ranef_*` family a `:prior` declaration emitted: its binding record's
+# family where it names one (a population-model block splices the fitted
+# submodel in as a value), otherwise the declaration's own.
+function _ranef_declared_family(d::GenerativeDeclaration, bindings)
+    binding = get(bindings, d.target, nothing)
+    isnothing(binding) || isnothing(binding.family) ? d.family : binding.family
+end
+
+# Every carrier the block bound to `binding` emits, paired with the block
+# component it holds (`BRMOutput.component`): the carriers the table's columns
+# name, then the family's `internals`. A carrier the declaration passes in by
+# keyword (`tau=`, `L=`, `scale=`) is named by that keyword, exactly as
+# `brm_ranef_draws` reads it; a keyword holding data names no output.
+function _ranef_component_carriers(binding::Symbol, spec::NamedTuple, keywords)
+    carrier(s::Symbol) = (k = get(keywords, s, nothing); k isa Symbol ? k : Symbol(binding, :_, s))
+    out = Pair{Symbol,Symbol}[carrier(spec.z) => (spec.noncentered ? :standardized : :effects)]
+    if spec.effects === :self
+        push!(out, binding => :effects)
+    else
+        push!(out, binding => :contribution)
+        isnothing(spec.effects) || push!(out, carrier(spec.effects) => :effects)
+    end
+    isnothing(spec.tau) || push!(out, carrier(spec.tau) => :scale)
+    scale = get(spec, :scale, nothing)
+    scale === :log_scale && push!(out, carrier(:log_scale) => :log_scale)
+    scale === :keyword && push!(out, carrier(:scale) => :scale)
+    for (column, component) in ((:mixing, :mixing_weight), (:stratum_tau, :scale),
+                                (:stratum_L, :correlation_cholesky))
+        s = get(spec, column, nothing)
+        isnothing(s) || push!(out, carrier(s) => component)
+    end
+    for (s, component) in pairs(spec.internals)
+        push!(out, carrier(s) => component)
+    end
+    out
+end
 
 """
     RanefBlock
@@ -460,8 +528,7 @@ function ranef_blocks(model)
     output_kinds = nothing
     for d in plan.declarations
         d.role === :prior || continue
-        binding = get(plan.bindings, d.target, nothing)
-        fam = isnothing(binding) || isnothing(binding.family) ? d.family : binding.family
+        fam = _ranef_declared_family(d, plan.bindings)
         fam isa Symbol || continue
         spec = get(_RANEF_FAMILIES, fam, nothing)
         if isnothing(spec)
@@ -573,6 +640,7 @@ function ranef_blocks(model)
             "descriptor kind `$kind`; expected a sampled parameter or generated ",
             "quantity. The random-effect emission table and traced model disagree.")
         push!(seen, d.target)
+        binding = get(plan.bindings, d.target, nothing)
         population = !isnothing(binding) && get(binding, :population, false) === true
         push!(out, RanefBlock(d.target, fam, raw_group,
                               _ranef_id_of_binding(d.target, raw_group, by), by,

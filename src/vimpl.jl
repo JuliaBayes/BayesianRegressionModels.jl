@@ -815,22 +815,11 @@ function hsgp end
     _hsgp_basis(raw, K, c) -> (PHI, lambda)
 
 Precompute the Riutort-Mayol eigen-basis from raw x values. `PHI` is (n, K),
-`lambda` is length-K. Center-then-scale-by-boundary-factor-c is standard.
+`lambda` is length-K. Center-then-scale-by-boundary-factor-c is standard; the
+fit and the basis are the shared `_brm_fit_hsgp` / `_brm_apply_hsgp` law.
 """
-_hsgp_basis(raw::AbstractVector{<:Real}, K::Integer, c::Real) = begin
-    K >= 1 || error("gp: k must be >= 1 (got $K)")
-    c > 1  || error("gp: c must be > 1 (got $c)")
-    x_c = raw .- (sum(raw) / length(raw))
-    L = c * maximum(abs, x_c)
-    L > 0 || error("gp: degenerate input (all x equal)")
-    lambda = [(k * pi / (2 * L))^2 for k in 1:K]
-    PHI = zeros(length(raw), K)
-    inv_sqrt_L = 1 / sqrt(L)
-    for k in 1:K, i in eachindex(x_c)
-        PHI[i, k] = inv_sqrt_L * sin(sqrt(lambda[k]) * (x_c[i] + L))
-    end
-    PHI, lambda
-end
+_hsgp_basis(raw::AbstractVector{<:Real}, K::Integer, c::Real) =
+    _brm_apply_hsgp(_brm_fit_hsgp(raw, K, c), raw, K)
 
 """
     vmeta_sampling_rhs(meta, x::ExprColumn{typeof(gp)}; group) -> (meta, broadcasted)

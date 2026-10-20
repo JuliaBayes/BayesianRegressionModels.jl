@@ -220,7 +220,7 @@ function _sb_record_covariate_groups(sb,groups)
            copy(sb.held_out_rows))
 end
 
-function _sb_reprocess_covariates(sb,new_df,selected,groups,freeze)
+function _sb_reprocess_covariates(sb,new_df,selected,groups,freeze,held_out)
     freeze || throw(ArgumentError(
         "BRM covariate population prediction requires frozen observed training anchors"))
     isempty(total_effect_blocks(sb)) || throw(ArgumentError(
@@ -239,9 +239,13 @@ function _sb_reprocess_covariates(sb,new_df,selected,groups,freeze)
     training = SBBRMI(_sb_covariate_brmi(sb.parent,selected);
         mod=sb.model.mod,total_groups=(),held_out=_sb_held_out_spec(sb),_frozen_preproc=sb.preproc)
     frozen = merge(Dict(sb.preproc),training.preproc)
+    # The replay's own `held_out` binds to the replay data; a fit's row mask
+    # names the fit's rows.
     rebound = _sb_rebind_brmi(sb.parent,new_df)
-    target = SBBRMI(rebound;mod=sb.model.mod,total_groups=(),cv_groups=groups,
-        held_out=_sb_held_out_spec(sb),resample_covariates=selected,_frozen_preproc=frozen)
+    target = _sb_apply_held_out(
+        SBBRMI(rebound;mod=sb.model.mod,total_groups=(),cv_groups=groups,
+               held_out=(),resample_covariates=selected,_frozen_preproc=frozen),
+        held_out;cover_all=true,prefix="sbimpl: reprocess",replay=true)
     for (key,entry) in sb.preproc
         entry.kind in (:missing_response,:joint_missing_response) || continue
         sources = entry.raw_ref isa Symbol ? (entry.raw_ref,) : Tuple(entry.raw_ref)
