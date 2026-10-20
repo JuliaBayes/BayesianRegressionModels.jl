@@ -79,6 +79,13 @@ pointwise log likelihood, and the same point with two levels swapped does not.
 It also covers exact totals, cell-mean coding, and `brm_start` against the RK
 start.
 
+`zero_element_coordinates.jl` checks `brm_output_coordinates` on carriers with
+no elements: a one-level treatment factor's contrast vector and a one-level
+ordinal outcome's thresholds return `Int[]` and carry `dims == (0,)`, every
+unconstrained BridgeStan name has exactly one sampled owner, and a carrier
+that owns elements but is absent from the names, or whose `dims` are
+unresolved, still fails closed.
+
 `plate_index_into.jl` checks `ragged(idx, group; into=target)`, an index column
 of row numbers on another flat axis: the gathered per-subject positions equal
 hand-rebased pre-grouped columns on BridgeStan and RK, `0` stays "no row",
