@@ -283,11 +283,18 @@ _brm_fit_hsgp(raw::AbstractVector{<:Real}, K::Integer, c::Real; anchor=nothing) 
     isempty(raw) && error(
         "hsgp: no rows to fit the basis interval from; an axis that can be " *
         "empty needs an explicit `domain=(lower, upper)`")
+    # Degeneracy is a property of the values, not of the computed half-width:
+    # the mean of n equal values can round an ulp away from them, which leaves
+    # a half-width of pure rounding noise and a basis scaled by 1/sqrt(L).
+    allequal(raw) && (isnothing(anchor) || anchor == first(raw)) && error(
+        "hsgp: degenerate input (all x equal): a basis interval fitted from " *
+        "the data needs two distinct axis values. Declare " *
+        "`hsgp(...; domain=(lower, upper))` to fix the interval; a " *
+        "`reprocess` with `freeze_constants=true` keeps the fitted model's")
     mu = sum(raw) / length(raw)
     deviation = maximum(abs, raw .- mu)
     isnothing(anchor) || (deviation = max(deviation, abs(anchor - mu)))
     L = c * deviation
-    L > 0 || error("hsgp: degenerate input (all x equal)")
     (mu, L)
 end
 _brm_apply_hsgp(c::Tuple, raw::AbstractVector{<:Real}, K::Integer) = begin

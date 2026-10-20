@@ -3028,8 +3028,9 @@ per subject. `true` holds that row out: its likelihood leaves `model`, while
 `y_likelihood` entry is its log predictive density at the fitted parameters.
 No parameter changes role. An all-true mask is the whole-response hold-out and
 an all-false one holds nothing out. `reprocess` keeps each mask position by
-position and refuses a replay whose response has another shape; rebuild with
-the new mask instead.
+position by default and refuses a replay whose response has another shape; pass
+that replay's own masks with `reprocess(sb, new_df; held_out=...)`, or
+`held_out=()` to hold nothing out.
 
 Formula statements `sd(:, ID) ~ Exponential(scale)` and
 `cor(:, ID) ~ LKJCholesky(K, eta)` configure a shared `|ID|` block.
@@ -4638,14 +4639,16 @@ _sb_held_out_all_redirect() = _brm_held_out_all_redirect()
 # `data_source=:qt_y`, while StanBlocks must receive the mark on the latter.
 #
 # `cover_all` re-applies a set the artifact already recorded, which may cover
-# every observation: `population_model` holds them all out.
+# every observation: `population_model` holds them all out. `replay` marks a
+# replay's hold-out (`reprocess`), whose shape errors name its `held_out=`.
 Base.@nospecializeinfer function _sb_apply_held_out(@nospecialize(sb::SBBRMI), held_out;
-                                                    cover_all::Bool=false, prefix="sbimpl")
+                                                    cover_all::Bool=false, prefix="sbimpl",
+                                                    replay::Bool=false)
     request = _brm_held_out_request(held_out; prefix)
     isempty(request.names) && isempty(request.rows) && return sb
     inventory = _sb_held_out_inventory(sb)
     selection = _brm_resolve_held_out(request, inventory.aliases, inventory.sources,
-        inventory.unbound; prefix, cover_all,
+        inventory.unbound; prefix, cover_all, replay,
         response=source -> _sb_held_out_response(sb, source).values)
     _sb_mark_held_out(sb, selection.whole, selection.rows)
 end
@@ -4750,7 +4753,7 @@ end
 """
     generative_plan(sb::SBBRMI) -> GenerativePlan
     generative_plan(builder::Function, df; mod=@__MODULE__, cv_groups=Set(), centered_groups=Set(), held_out=()) -> GenerativePlan
-    generative_plan(plan::GenerativePlan, new_df; cv_groups=Set(), centered_groups=nothing, held_out=()) -> GenerativePlan
+    generative_plan(plan::GenerativePlan, new_df; cv_groups=plan.cv_groups, centered_groups=nothing, held_out=<plan's hold-outs>) -> GenerativePlan
 
 Snapshot the declarations BRM actually emitted. The inventory is derived from
 `sb.model.model`, so auto-introduced population coefficients, random-effect
@@ -4780,6 +4783,11 @@ form defaults to `nothing`, which infers the source plan's own centered groups
 — read off its emitted declarations, so a centered fit rebuilds centered
 unless explicitly overridden. A group named in both `cv_groups` and
 `centered_groups` is refused by the `SBBRMI` constructor, as at fit time.
+
+`held_out` takes the [`SBBRMI`](@ref) form. The plan form defaults to the
+source plan's hold-outs, each row mask re-applied position by position, so new
+data whose response has another shape passes its own masks, or `held_out=()`
+to hold nothing out.
 """
 generative_plan(sb::SBBRMI) = _generative_plan(sb, nothing, Set{Symbol}())
 
@@ -4959,7 +4967,7 @@ function _sb_mark_resample_groups(sb::SBBRMI, groups)
            copy(sb.held_out_rows))
 end
 
-function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool)
+function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool, held_out)
     isempty(total_effect_blocks(sb)) || throw(ArgumentError(
         "total-coefficient prediction uses generative_plan(plan,new_df) and transport_draws(...;resample=groups) to share one recovered population draw across new groups; resample_groups does not perform this recovery"))
     isempty(s2z_effect_blocks(sb)) || throw(ArgumentError(
@@ -4984,17 +4992,18 @@ function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool)
         "`cv_groups`) that cannot be inferred from SBBRMI. Rebuild the ordinary " *
         "fit artifact, then request `resample_groups` from it.")
 
+    # The replay's own `held_out` is applied to the replay data by the final
+    # `reprocess`, not by the template: a fit's row mask names the fit's rows.
     rebound = _sb_rebind_brmi(sb.parent, new_df)
     cv_template = SBBRMI(
         rebound; mod=sb.model.mod, cv_groups=groups,
-        held_out=_sb_held_out_spec(sb), total_groups=(), s2z_groups=(),
+        held_out=(), total_groups=(), s2z_groups=(),
         _frozen_preproc=freeze ? sb.preproc : nothing)
     _sb_assert_cv_reemission(cv_template, groups)
     preproc = _sb_resample_preproc(sb.preproc, cv_template.preproc, groups)
-    hybrid = SBBRMI(cv_template.parent, cv_template.model,
-                    cv_template.data, preproc, copy(cv_template.held_out), cv_template.bindings,
-                    copy(cv_template.held_out_rows))
-    prepared = reprocess(hybrid, new_df; freeze_constants=freeze)
+    hybrid = SBBRMI(cv_template.parent, cv_template.model, cv_template.data, preproc,
+                    Set{Symbol}(), cv_template.bindings)
+    prepared = reprocess(hybrid, new_df; freeze_constants=freeze, held_out)
     _sb_mark_resample_groups(prepared, groups)
 end
 
@@ -5396,7 +5405,8 @@ end
 
 """
     reprocess(sb::SBBRMI, new_df; freeze_constants=true,
-              resample_groups=(), resample_covariates=()) -> SBBRMI
+              resample_groups=(), resample_covariates=(),
+              held_out=<the fit's hold-outs>) -> SBBRMI
 
 Re-materialise the SBBRMI's Stan data dict against `new_df`, **re-running** the
 Julia-side preprocessing (decision nr3v8n A) — so the silent-stale-constant bug
@@ -5428,6 +5438,19 @@ of a naive per-column `sb.model(; col=…)` rebind is avoided. Returns a NEW
   coordinates. Discover members and consumed output roles with
   [`modeled_covariates`](@ref), then use [`transport_draws`](@ref) with the
   actual compiled coordinate names.
+- `held_out` (default: what `sb` holds out): the response hold-outs of the
+  replay, in the [`SBBRMI`](@ref) `held_out` form — whole responses and per-row
+  masks `(; y = mask)`. The default re-applies each of `sb`'s row masks
+  position by position, so it fits only a replay whose response has `sb`'s
+  shape. A replay onto data of another shape (a denser time grid, more rows
+  per subject) passes that data's own masks, or `held_out=()` to hold nothing
+  out; the value replaces `sb`'s hold-outs, whole-response ones included. Every
+  parameter keeps its role and coordinates, so the fit's draws replay as
+  before. It composes with `resample_groups` and `resample_covariates`, with
+  one boundary: a response that reads a re-drawn group is generated, not
+  fitted, in that replay, and StanBlocks refuses a row mask on it, so such a
+  replay passes `held_out=()` (or masks only responses the group does not
+  reach). The masks change no generated quantity.
 
 Covered: the Julia-side transforms (`zscale`/`standardize`/`center`/`factor`/
 `mo`/`s`/`t2`/`gp`/`hsgp`), interval-censored predictor splits,
@@ -5447,15 +5470,16 @@ Stratified `gr(g, by=b)` group-index replay remains correct-or-loud unsupported
 rather than silently copying stale structure.
 """
 function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
-                   resample_groups=(),resample_covariates=())
+                   resample_groups=(),resample_covariates=(),
+                   held_out=_sb_held_out_spec(sb))
     groups = _sb_resample_group_set(resample_groups)
     covariates = union(_sb_existing_covariates(sb.preproc),
         _sb_covariate_selection(sb.parent,resample_covariates))
     isempty(covariates) || union!(groups,_sb_covariate_resample_groups(sb.preproc))
     isempty(covariates) || return _sb_reprocess_covariates(
-        sb,new_df,covariates,groups,freeze_constants)
+        sb,new_df,covariates,groups,freeze_constants,held_out)
     isempty(groups) || return _sb_reprocess_resample(
-        sb, new_df, groups, freeze_constants)
+        sb, new_df, groups, freeze_constants, held_out)
     # Current kernel(...) emitters record each gathered/index ragged input, but
     # an SBBRMI serialized by the short-lived fail-closed implementation may
     # still lack that provenance. Diagnose such a legacy artifact up front;
@@ -5539,36 +5563,41 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
     new_model = StanBlocks.SlicModel(sb.model.model, new_data, sb.model.mod, sb.model.observations)
     _sb_apply_held_out(
         SBBRMI(sb.parent, new_model, new_data, new_preproc, Set{Symbol}(), sb.bindings),
-        _sb_held_out_spec(sb); cover_all=true, prefix="sbimpl: reprocess")
+        held_out; cover_all=true, prefix="sbimpl: reprocess", replay=true)
 end
 
 function reprocess(plan::GenerativePlan, new_df; freeze_constants::Bool=true,
-                   resample_groups=(),resample_covariates=())
+                   resample_groups=(),resample_covariates=(),
+                   held_out=_sb_held_out_spec(plan))
     sb = SBBRMI(plan.parent, plan.model, plan.data, plan.preproc,
                 copy(plan.held_out), plan.bindings, copy(plan.held_out_rows))
     groups = _sb_resample_group_set(resample_groups)
     replayed = reprocess(sb, new_df; freeze_constants,
-                         resample_groups=groups,resample_covariates)
+                         resample_groups=groups,resample_covariates,held_out)
     _generative_plan(replayed, plan.builder,
                      isempty(groups) ? plan.cv_groups : groups)
 end
 
 """
     restan_data(sb::SBBRMI, new_df; freeze_constants=true,
-                resample_groups=(), resample_covariates=()) -> Dict
+                resample_groups=(), resample_covariates=(),
+                held_out=<the fit's hold-outs>) -> Dict
 
 Thin convenience over [`reprocess`](@ref): the prepared Stan **data dict** for
 `new_df`, ready for a `param_constrain!` replay. Equivalent to
-`stan_data(reprocess(sb, new_df; freeze_constants, resample_groups))`. Same
-`freeze_constants` semantics (default `true` = training constants applied to new
-data), and accepts the same `resample_groups` keyword. A non-empty
-`resample_groups` also changes the Stan program; call `reprocess` when you need
-the corresponding `SBBRMI`/source as well as this data-only convenience result.
+`stan_data(reprocess(sb, new_df; freeze_constants, resample_groups, held_out))`.
+Same `freeze_constants` semantics (default `true` = training constants applied
+to new data), and accepts the same `resample_groups` and `held_out` keywords.
+A non-empty `resample_groups` also changes the Stan program; call `reprocess`
+when you need the corresponding `SBBRMI`/source as well as this data-only
+convenience result.
 See [`reprocess`](@ref) for the covered-terms list and error cases.
 """
 restan_data(sb::SBBRMI, new_df; freeze_constants::Bool=true,
-            resample_groups=(),resample_covariates=()) =
-    stan_data(reprocess(sb, new_df; freeze_constants, resample_groups,resample_covariates))
+            resample_groups=(),resample_covariates=(),
+            held_out=_sb_held_out_spec(sb)) =
+    stan_data(reprocess(sb, new_df; freeze_constants, resample_groups,resample_covariates,
+                        held_out))
 
 # ---- top-level op dispatch ---------------------------------------------------
 
@@ -8645,7 +8674,7 @@ const _SB_T2_BLOCKS = (:rr, :rn, :nr)
 # Shared preparation resolves addresses, term geometry, slots, ambiguity, and
 # precedence.  sbimpl only converts each winning prior to its Stan emission
 # configuration.  Val dispatch keeps newly introduced slots fail-closed.
-_sb_term_prior_spelling(entry) = string(entry.spec.expression)
+_sb_term_prior_spelling(entry) = _brm_term_prior_spelling(entry.spec)
 _sb_term_slot_config(::Val{:sd}, entry) = (; prior=entry.spec.expression)
 _sb_term_slot_config(::Val{:sd_rr}, entry) = (; prior=entry.spec.expression)
 _sb_term_slot_config(::Val{:sd_rn}, entry) = (; prior=entry.spec.expression)
@@ -8657,8 +8686,11 @@ _sb_term_slot_config(::Val{:sigma}, entry) =
             "`LogNormal(0, 1)` truncated to be positive")
 _sb_term_slot_config(::Val{:ar}, entry) =
     _sb_dar_ar_prior(entry.spec, _sb_term_prior_spelling(entry))
-_sb_term_slot_config(::Val{:length_scale}, entry) =
-    _sb_gp_scale_prior(entry.spec, _sb_term_prior_spelling(entry))
+# The address spelling travels with the length-scale configuration so the
+# emitter can name it when the fitted floor rules out a floor-marked prior.
+_sb_term_slot_config(::Val{:length_scale}, entry) = merge(
+    _sb_gp_scale_prior(entry.spec, _sb_term_prior_spelling(entry)),
+    (; spelling=_sb_term_prior_spelling(entry)))
 _sb_term_slot_config(::Val{:simplex}, entry) =
     (; spec=entry.spec, prior=entry.spec.expression)
 _sb_term_slot_config(::Val{:latent}, entry) = (; prior=entry.spec.expression)
@@ -12569,6 +12601,21 @@ function _sb_hsgp_option_const(options, support)
     out
 end
 
+# A floor-marked explicit length-scale prior must leave the fitted floor below
+# its upper bound (decision 0ddmtf8). Returns what a fresh `reprocess` needs to
+# re-check a re-derived floor; every other prior records nothing new, so its
+# preprocessing record is unchanged.
+function _sb_hsgp_floor_check(term_overrides, t, floor, geometry, remedy)
+    cfg = _sb_term_cfg(term_overrides, t, :length_scale)
+    isnothing(cfg) && return (;)
+    upper = _brm_floor_prior_upper(cfg.prior)
+    isnothing(upper) && return (;)
+    statement = "$(cfg.spelling) ~ $(cfg.prior)"
+    _brm_check_hsgp_floor_below(floor, upper, statement, geometry, remedy;
+                                prefix="sbimpl")
+    (; floor_upper=(; upper, statement))
+end
+
 # A raw HSGP axis as Float64; rows outside a `rows=` mask may be `missing`.
 _sb_hsgp_axis_values(name, raw, ::Nothing) =
     collect(Float64, _sb_real_vec(:hsgp, name, raw))
@@ -12661,6 +12708,9 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         data[omega2_name] = omega2
         _sb_record_static!(data, omega2_name)
         rho_lower = basis.rho_lower
+        _sb_hsgp_floor_check(term_overrides, t, rho_lower,
+            _brm_hsgp_floor_geometry(K, c, domain_fits, true),
+            _brm_hsgp_floor_remedy(true))
         submodel_name = orthogonal_to === :linear ?
             :_sb_hsgp_latent_orthogonal : :_sb_hsgp_latent
         submodel = _sb_gp_submodel_expr(submodel_name, term_overrides, t)
@@ -12709,10 +12759,13 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         data[PHI_name] = PHI
         data[omega2_name] = omega2
         data[rho_lower_name] = basis.rho_lower
+        floor_const = _sb_hsgp_floor_check(term_overrides, t, basis.rho_lower,
+            _brm_hsgp_floor_geometry(K, c, fits, !isnothing(domain_fits)),
+            _brm_hsgp_floor_remedy(!isnothing(domain_fits)))
         _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp,
             (; fits, K, c, iso, domain_fits, orthogonal_to,
              omega2_key=omega2_name, rho_lower_key=rho_lower_name,
-             _sb_hsgp_option_const(options, fitted.support)...),
+             _sb_hsgp_option_const(options, fitted.support)..., floor_const...),
             names, false))
         col_name = Symbol(:hsgp_, suffix, :_by_, gname)
         rho_plan = _sb_hyper_plan_for(hyper_plans, :length_scale)
@@ -12758,9 +12811,13 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     data[omega2_name] = omega2
     data[rho_lower_name] = basis.rho_lower
     partial && (data[centeredness_name] = centeredness)
+    floor_const = _sb_hsgp_floor_check(term_overrides, t, basis.rho_lower,
+        _brm_hsgp_floor_geometry(K, c, fits, !isnothing(domain_fits)),
+        _brm_hsgp_floor_remedy(!isnothing(domain_fits)))
     preproc_const = (; fits, K, c, iso, domain_fits, orthogonal_to,
                      omega2_key=omega2_name, rho_lower_key=rho_lower_name,
-                     _sb_hsgp_option_const(options, fitted.support)...)
+                     _sb_hsgp_option_const(options, fitted.support)...,
+                     floor_const...)
     partial && (preproc_const = merge(preproc_const, (; centeredness)))
     _sb_record_preproc!(data, PHI_name, PreprocEntry(
         :hsgp, preproc_const, names, false))
@@ -12835,6 +12892,10 @@ function _sb_hsgp_periodic_term!(stmts, data, t, names, raw, is_raw, K, kw,
     data[PHI_name] = basis.PHI
     data[harmonics_name] = basis.harmonics
     data[rho_lower_name] = basis.rho_lower
+    # The periodic floor depends on `k` alone, so replay never moves it.
+    _sb_hsgp_floor_check(term_overrides, t, basis.rho_lower,
+        _brm_hsgp_periodic_floor_geometry(K1, period),
+        _BRM_HSGP_PERIODIC_FLOOR_REMEDY)
     _sb_record_preproc!(data, PHI_name, PreprocEntry(:hsgp,
         (; cov=:periodic, period, K=K1, iso=true,
          harmonics_key=harmonics_name, rho_lower_key=rho_lower_name,
