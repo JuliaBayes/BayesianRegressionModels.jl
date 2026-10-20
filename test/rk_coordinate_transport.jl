@@ -225,6 +225,21 @@ function authored_simplex(data)
     end
 end
 
+# Under `centered_groups=[:subject, :cohort, :site]`: a centered scalar
+# intercept, correlated block, single slope and shared `|p|` block, beside a
+# monotonic simplex block.
+function centered_blocks(data)
+    @brm data begin
+        eta ~ 1 + (1 | subject)
+        mu ~ 1 + x + mo(r) + (1 + x | subject) + (0 + w | cohort) + (1 | p | site)
+        nu ~ 1 + (1 + x | p | site)
+        sigma ~ Exponential(0.7)
+        y ~ Normal(mu, sigma)
+        y2 ~ Normal(eta, sigma)
+        y3 ~ Normal(nu, sigma)
+    end
+end
+
 # `c` reaches only `z`, an in-cell response that binds no data column.
 function generated_cell_prior(data)
     @brm data begin
@@ -325,9 +340,10 @@ build_renamed(data) = @brm data begin
 end
 end
 
-function coordinate_transport_fixture(brmi, name; mod=PublicCoordinateTransport)
+function coordinate_transport_fixture(brmi, name; mod=PublicCoordinateTransport,
+        centered_groups=())
     rk, problem = consumer_problem(brmi)
-    sb = SBBRMI(brmi; mod, total_groups=())
+    sb = SBBRMI(brmi; mod, total_groups=(), centered_groups)
     path = joinpath(tempdir(), "brm-coordinate-transport", name * ".stan")
     mkpath(dirname(path))
     stan = BRM.stan_instantiate(sb; path)
@@ -353,7 +369,7 @@ function check_coordinate_transport(fixture)
         saved = copy(u)
         stan_u = brm_rk_point_to_stan(transport, u)
         back = brm_stan_point_to_rk(transport, stan_u)
-        if isempty(transport.simplexes)
+        if isempty(transport.simplexes) && isempty(transport.centered)
             @test transport.logdensity_offset == 0
             @test isequal(brm_rk_to_stan(transport, u), stan_u)
             @test isequal(brm_stan_to_rk(transport, stan_u), u)
@@ -362,23 +378,28 @@ function check_coordinate_transport(fixture)
         else
             @test back ≈ u atol=1e-12 rtol=1e-12
             @test brm_rk_point_to_stan(transport, back) ≈ stan_u atol=1e-12 rtol=1e-12
-            # refused: a simplex block's free coordinates are a nonlinear map,
-            # so the point permutation would silently mis-map a gradient.
-            @test_throws "simplex block" brm_rk_to_stan(transport, u)
-            @test_throws "simplex block" brm_stan_to_rk(transport, stan_u)
+            # refused: simplex and centered blocks move by nonlinear maps, so
+            # the point permutation would silently mis-map a gradient.
+            @test_throws "do not move by one permutation" brm_rk_to_stan(transport, u)
+            @test_throws "do not move by one permutation" brm_stan_to_rk(transport, stan_u)
         end
         @test isequal(u, saved)
         checked = brm_check_coordinate_transport(transport, rk, stan.model, u)
-        @test keys(checked) == (:pairs, :factors, :simplexes, :max_error)
-        @test checked.pairs == count(p -> p.relation ∉ (:cholesky, :simplex), transport.pairs)
+        @test keys(checked) == (:pairs, :factors, :simplexes, :centered, :max_error)
+        @test checked.pairs == count(p -> p.relation ∉ (:cholesky, :simplex, :centered),
+            transport.pairs)
         @test checked.factors == length(transport.correlations)
         @test checked.simplexes == length(transport.simplexes)
+        @test checked.centered == length(transport.centered)
         @test checked.max_error <= 1e-12
         value, gradient = LogDensityProblems.logdensity_and_gradient(problem, u)
         stan_gradient = similar(stan_u)
         stan_value, _ = BridgeStan.log_density_gradient!(stan.model, stan_u,
             stan_gradient; propto=false, jacobian=true)
-        @test value ≈ stan_value + transport.logdensity_offset atol=2e-11 rtol=2e-11
+        rk_value = brm_stan_logdensity_to_rk(transport, u, stan_value)
+        isempty(transport.centered) &&
+            @test rk_value == stan_value + transport.logdensity_offset
+        @test value ≈ rk_value atol=2e-11 rtol=2e-11
         @test gradient ≈ brm_stan_gradient_to_rk(transport, u, stan_gradient) atol=2e-10 rtol=2e-10
         @test isequal(u, saved)
     end
@@ -800,6 +821,72 @@ end
             @test isequal(u, saved)
         end
     end
+end
+
+@stestset "correlation-factor pullback matches central differences" begin
+    for K in (2, 3, 4)
+        M = K * (K - 1) ÷ 2
+        raw = [0.9sin(2.3m) for m in 1:M]
+        GL = [0.4cos(i + 2.1j) for i in 1:K, j in 1:K]
+        saved = (copy(raw), copy(GL))
+        step = 1e-6
+        expected = map(1:M) do m
+            plus, minus = copy(raw), copy(raw)
+            plus[m] += step; minus[m] -= step
+            sum(GL .* (BRM._adaptive_cholesky_corr(plus, K) .-
+                       BRM._adaptive_cholesky_corr(minus, K))) / (2step)
+        end
+        @test BRM._brm_cholesky_corr_pullback(raw, K, GL) ≈ expected atol=1e-8
+        @test isequal((raw, GL), saved)
+    end
+end
+
+@stestset "coordinate transport centered random-effect blocks" begin
+    data = (; subject=[1,1,2,2,3,3,4,4,1,2,3,4],
+        site=["a","b","c","a","b","c","a","b","c","a","b","c"],
+        cohort=[1,2,1,2,1,2,1,2,1,2,1,2],
+        x=[0.1,0.4,-0.2,0.3,0.7,0.5,0.2,-0.1,0.6,-0.4,0.8,0.0],
+        w=[1.0,0.5,0.2,0.3,0.1,0.9,0.4,0.6,0.7,0.2,0.5,0.8],
+        r=[1,2,3,1,2,3,2,3,1,1,2,3],
+        y=[0.4,1.1,-0.3,0.6,1.7,1.2,0.2,-0.5,0.9,-0.2,1.4,0.3],
+        y2=[0.3,0.2,0.1,-0.4,0.6,0.8,0.1,0.0,0.5,-0.1,0.4,0.2],
+        y3=[-0.2,0.5,0.3,0.1,0.9,0.6,-0.4,0.2,0.7,0.0,1.0,0.4])
+    saved = deepcopy(data)
+    brmi = PublicCoordinateTransport.centered_blocks(data)
+    fixture = coordinate_transport_fixture(brmi, "centered_blocks";
+        centered_groups=[:subject, :cohort, :site])
+    (; sb, transport) = fixture
+    @test Set(b.family for b in ranef_blocks(sb)) == Set([:ranef_intercept_centered,
+        :ranef_correlated_centered, :ranef_correlated_draws_centered])
+    @test all(b -> !b.noncentered, ranef_blocks(sb))
+    @test length(transport.centered) == length(ranef_blocks(sb)) == 4
+    @test Set((b.group, b.K, b.G) for b in transport.centered) ==
+        Set([(:subject, 1, 4), (:subject, 2, 4), (:cohort, 1, 2), (:site, 3, 3)])
+    @test count(p -> p.relation === :centered, transport.pairs) ==
+        sum(b.K * b.G for b in transport.centered)
+    @test length(transport.simplexes) == 1
+    @test occursin("4 centered blocks", sprint(show, transport))
+    # refused: the density offset depends on the point here, so the constant
+    # field would silently mis-state it.
+    @test_throws "brm_stan_logdensity_to_rk" transport.logdensity_offset
+    check_coordinate_transport(fixture)
+    @test isequal(data, saved)
+end
+
+@stestset "coordinate transport centered blocks with configured scale priors" begin
+    data = (; subject=[1,1,2,2,3,3,4,4], g=categorical(["a","b","c","a","b","c","a","b"]),
+        x=[0.1,0.4,-0.2,0.3,0.7,0.5,0.2,-0.1],
+        w=[1.0,0.5,0.2,0.3,0.1,0.9,0.4,0.6],
+        y=[0.1,0.4,-0.2,0.3,0.7,0.5,0.0,1.0],
+        y2=[0.3,0.2,0.1,-0.4,0.6,0.8,0.1,0.0])
+    saved = deepcopy(data)
+    fixture = coordinate_transport_fixture(PublicCoordinateTransport.correlated(data),
+        "correlated_centered"; centered_groups=[:subject])
+    @test Set(b.family for b in ranef_blocks(fixture.sb)) == Set([
+        :ranef_intercept_centered, :ranef_correlated_draws_centered_generic])
+    @test sort([b.K for b in fixture.transport.centered]) == [1, 3]
+    check_coordinate_transport(fixture)
+    @test isequal(data, saved)
 end
 
 @stestset "coordinate transport response threshold vectors" begin
