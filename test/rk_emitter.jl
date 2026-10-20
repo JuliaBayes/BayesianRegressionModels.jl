@@ -337,34 +337,37 @@ end
     end)
 end
 
-@stestset "center/zscale lower to inline reductions" begin
+@stestset "center/zscale anchors read the column's fit-role input" begin
     brmi = @brm df begin
         mu ~ 1 + center(x)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end
     plan = BRM._brm_rk_plan(brmi)
-    @test [d.name for d in plan.derived] == [:center_x]
-    @test only(plan.derived).expression ==
-        Expr(:call, :.-, :x, Expr(:call, :mean, :x))
+    # `x_fit` is bound data holding `x` (the training column on a frozen
+    # `reprocess`); the anchor reads it, the per-row transform reads `x`.
+    @test [d.name for d in plan.derived] == [:x_fit, :center_x]
+    @test plan.derived[1].expression.head === :_rk_fit_input
+    @test only(plan.derived[1].expression.args) == df.x
+    @test plan.derived[2].expression == Expr(:call, :.-, :x,
+        Expr(:_rk_data_preparation, :brm_covariate_mean, :x_fit))
     @test only(plan.predictors).terms[2].addressee === :center_x
     scaled = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + zscale(x)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    @test [d.name for d in scaled.derived] == [:zscale_x]
-    @test only(scaled.derived).expression == Expr(:call, :./,
-        Expr(:call, :.-, :x, Expr(:call, :mean, :x)),
-        Expr(:call, :std, :x))
+    @test [d.name for d in scaled.derived] == [:x_fit, :zscale_x]
+    @test scaled.derived[2].expression == Expr(:call, :./,
+        Expr(:call, :.-, :x, Expr(:_rk_data_preparation, :brm_covariate_mean, :x_fit)),
+        Expr(:_rk_data_preparation, :brm_covariate_sd, :x_fit))
     standardized = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + standardize(x)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    @test [d.name for d in standardized.derived] == [:standardize_x]
-    @test only(standardized.derived).expression ==
-        only(scaled.derived).expression
+    @test [d.name for d in standardized.derived] == [:x_fit, :standardize_x]
+    @test standardized.derived[2].expression == scaled.derived[2].expression
 end
 
 @stestset "numeric data expressions lower to dotted forms" begin
