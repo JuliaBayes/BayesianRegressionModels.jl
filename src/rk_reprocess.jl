@@ -6,7 +6,7 @@
 # data's (user principle 077lr1b: preprocessing in-graph, frozen by partial
 # evaluation):
 #
-# - every in-graph anchor reads a fit-role input (`_rk_fit_port!`): the same
+# - every in-graph anchor reads a fit-role input (`_rk_fit_twin!`): the same
 #   array at fit time, the training column at replay, so RKPPL's bind-time
 #   evaluation computes the training anchors while the per-row transform reads
 #   the new rows;

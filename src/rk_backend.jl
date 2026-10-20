@@ -3593,6 +3593,10 @@ function _rk_gate_norm_inner(node, data::AbstractDict,
     end
     node isa Expr || error(
         "$prefix: internal: cannot normalize `$(repr(node))`")
+    # A fitted anchor (`_rk_transform_defexpr`) is one scalar per fit.
+    node.head === :_rk_data_preparation &&
+        first(node.args) in (:brm_covariate_mean, :brm_covariate_sd) &&
+        return _RK_GATE_CONST
     if node.head === :.
         # Dotted math `log.(x)`: all-scalar stays scalar, else keep.
         length(node.args) == 2 && node.args[1] isa Symbol ||
