@@ -5455,11 +5455,10 @@ of a naive per-column `sb.model(; col=…)` rebind is avoided. Returns a NEW
   per subject) passes that data's own masks, or `held_out=()` to hold nothing
   out; the value replaces `sb`'s hold-outs, whole-response ones included. Every
   parameter keeps its role and coordinates, so the fit's draws replay as
-  before. It composes with `resample_groups` and `resample_covariates`, with
-  one boundary: a response that reads a re-drawn group is generated, not
-  fitted, in that replay, and StanBlocks refuses a row mask on it, so such a
-  replay passes `held_out=()` (or masks only responses the group does not
-  reach). The masks change no generated quantity.
+  before. It composes with `resample_groups` and `resample_covariates`: a
+  response that reads a re-drawn group is generated, not fitted, in that
+  replay, so a row mask on it is subsumed (StanBlocks `c26669b` or later). The
+  masks change no generated quantity.
 
 Covered: the Julia-side transforms (`zscale`/`standardize`/`center`/`factor`/
 `mo`/`s`/`t2`/`gp`/`hsgp`), interval-censored predictor splits,

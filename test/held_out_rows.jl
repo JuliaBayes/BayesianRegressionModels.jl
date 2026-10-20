@@ -348,14 +348,22 @@ const decay_future = (; subject=[:a, :d], wt=[60.0, 120.0],
     scaled = only(k for (k, e) in fit.preproc if e.kind === :zscale)
     @test BRM.stan_data(plain_future)[scaled] !=
           BRM.stan_data(SBBRMI(decay(decay_future); mod=@__MODULE__, total_groups=()))[scaled]
-    # not built yet: the re-drawn subjects reach `y`, so cv contagion moves its
-    # whole observation to generated quantities and StanBlocks refuses the
-    # subsumed row mask as unobserved (StanBlocks snag element-hold-out-0f7241b8)
+    # the re-drawn subjects reach `y`, so cv contagion moves its whole
+    # observation to generated quantities, which subsumes a row mask: the
+    # replay is the unmasked fit's replay (StanBlocks snag element-hold-out-0f7241b8)
     future_mask = after_cutoff(decay_future.t)
     future = reprocess(fit, decay_future; resample_groups=[:subject],
         held_out=(; y=future_mask))
     @test future.held_out_rows == Dict(:y => future_mask)
-    @test_broken (BRM.stan_code(future); true)
+    @test BRM.stan_code(future) == BRM.stan_code(unmasked_future)
+    @test BRM.stan_data(future) == BRM.stan_data(reprocess(full, decay_future;
+        resample_groups=[:subject], held_out=(; y=future_mask)))
+    @test StanBlocks.stanc_check(BRM.stan_code(future); warn_pedantic=false).ok
+    # so does the default replay of the window fit onto its own rows
+    same = reprocess(fit, decay_data; resample_groups=[:subject])
+    @test same.held_out_rows == Dict(:y => mask)
+    @test BRM.stan_code(same) ==
+          BRM.stan_code(reprocess(full, decay_data; resample_groups=[:subject]))
 end
 
 @testset "per-row hold-outs not built yet" begin
